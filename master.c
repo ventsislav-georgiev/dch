@@ -53,6 +53,34 @@ static struct client *clients;
 /* The pseudo-terminal created for the child process. */
 static struct pty the_pty;
 
+/* Enhanced-keyboard mode state. TUIs (Claude Code, nvim, ...) turn on keyboard
+** protocols the terminal must stay in for their keys to work:
+**   ESC[>...u  kitty keyboard protocol (push; ESC[<...u pops)
+**   ESC[>...m  xterm modifyOtherKeys / XTMODKEYS
+** A detaching client resets the terminal to a sane default (otherwise the bare
+** shell it returns to emits CSI-u / `;N~` garbage for shifted keys), so we
+** remember the last sequence of each kind the child emitted and replay it to
+** every client that attaches afterwards — the child only sets these once, at
+** startup, and this fork keeps no scrollback to re-send them. Bounded buffers:
+** real sequences are a handful of bytes. */
+static unsigned char kbd_u[32];   /* last ESC[>...u (kitty), empty after a pop */
+static size_t kbd_u_len;
+static unsigned char kbd_m[32];   /* last ESC[>...m (modifyOtherKeys) */
+static size_t kbd_m_len;
+
+/* DEC private modes (CSI ? Pm h/l) the child may enable that leave the outer
+** terminal emitting stdin garbage if not torn down on detach, and that the
+** child only sets once at startup. We remember each mode's current on/off so a
+** freshly attaching client can be re-armed. Mouse tracking + ext-coords, focus
+** events (1004), and bracketed paste (2004) — the same input-reporting modes
+** restore_term resets and Claude Code's App.tsx toggles. Alt-screen (1049) is
+** intentionally excluded: the attach client manages it itself. */
+static const int dec_modes[] = {
+	1000, 1002, 1003, 1004, 1006, 1015, 2004,
+};
+#define N_DEC_MODES ((int)(sizeof(dec_modes) / sizeof(dec_modes[0])))
+static unsigned char dec_on[N_DEC_MODES];
+
 #ifndef HAVE_FORKPTY
 pid_t forkpty(int *amaster, char *name, struct termios *termp,
 	      struct winsize *winp);
@@ -245,6 +273,133 @@ update_socket_modes(int exec)
 		chmod(sockname, newmode);
 }
 
+/* Scan a chunk of child output for enhanced-keyboard mode sequences and update
+** the remembered enable strings:
+**   ESC[>...u  kitty push   -> remember verbatim in kbd_u
+**   ESC[<...u  kitty pop     -> clear kbd_u
+**   ESC[>...m  modifyOtherKeys-> remember verbatim in kbd_m
+** Only digits/';'/':' are allowed between the marker and the terminator, so
+** this never matches ordinary SGR (ESC[...m without the '>'). Sequences split
+** across two reads are not stitched — they are emitted atomically in practice. */
+static void
+track_keymode(const unsigned char *buf, size_t len)
+{
+	size_t i;
+
+	for (i = 0; i + 2 < len; i++)
+	{
+		size_t j;
+		int is_gt;
+
+		if (buf[i] != '\033' || buf[i + 1] != '[')
+			continue;
+		if (buf[i + 2] != '>' && buf[i + 2] != '<')
+			continue;
+		is_gt = (buf[i + 2] == '>');
+
+		for (j = i + 3; j < len; j++)
+		{
+			unsigned char b = buf[j];
+			size_t n = j - i + 1;
+
+			if (b == 'u')
+			{
+				if (!is_gt)            /* ESC[<...u : kitty pop */
+					kbd_u_len = 0;
+				else if (n <= sizeof(kbd_u))
+				{
+					memcpy(kbd_u, buf + i, n);
+					kbd_u_len = n;
+				}
+				break;
+			}
+			if (is_gt && b == 'm')         /* ESC[>...m : modifyOtherKeys */
+			{
+				if (n <= sizeof(kbd_m))
+				{
+					memcpy(kbd_m, buf + i, n);
+					kbd_m_len = n;
+				}
+				break;
+			}
+			if (!((b >= '0' && b <= '9') || b == ';' || b == ':'))
+				break;
+		}
+	}
+}
+
+/* Scan a chunk of child output for DEC private mode set/reset (CSI ? Pm... h/l)
+** and update dec_on[] for any tracked mode. Handles grouped params
+** (e.g. ESC[?1000;1006h sets both). The terminator h/l applies to every param
+** in that one sequence. Sequences split across reads are not stitched. */
+static void
+track_decmode(const unsigned char *buf, size_t len)
+{
+	size_t i;
+
+	for (i = 0; i + 2 < len; i++)
+	{
+		size_t j;
+		int params[16], np = 0, val = 0, have = 0;
+
+		if (buf[i] != '\033' || buf[i + 1] != '[' || buf[i + 2] != '?')
+			continue;
+
+		for (j = i + 3; j < len; j++)
+		{
+			unsigned char b = buf[j];
+
+			if (b >= '0' && b <= '9')
+			{
+				val = val * 10 + (b - '0');
+				have = 1;
+				continue;
+			}
+			if (b == ';')
+			{
+				if (have && np < 16)
+					params[np++] = val;
+				val = 0;
+				have = 0;
+				continue;
+			}
+			if (b == 'h' || b == 'l')
+			{
+				int on = (b == 'h'), p, k;
+
+				if (have && np < 16)
+					params[np++] = val;
+				for (p = 0; p < np; p++)
+					for (k = 0; k < N_DEC_MODES; k++)
+						if (dec_modes[k] == params[p])
+							dec_on[k] = (unsigned char)on;
+			}
+			break; /* h/l handled above; any other byte ends this CSI */
+		}
+	}
+}
+
+/* Best-effort short write to a (nonblocking) client fd. Used for the tiny
+** kitty re-arm string; a partial/failed write just means that client misses
+** the re-arm, which the next redraw or keypress will not corrupt. */
+static void
+write_client_seq(struct client *p, const unsigned char *buf, size_t len)
+{
+	size_t off = 0;
+
+	while (off < len)
+	{
+		ssize_t n = write(p->fd, buf + off, len - off);
+
+		if (n > 0)
+			off += (size_t)n;
+		else if (n < 0 && errno == EINTR)
+			continue;
+		else
+			break;
+	}
+}
+
 /* Process activity on the pty - Input and terminal changes are sent out to
 ** the attached clients. If the pty goes away, we die. */
 static void
@@ -281,6 +436,11 @@ pty_activity(int s)
 	if (tcgetattr(the_pty.fd, &the_pty.term) < 0)
 		exit(1);
 #endif
+
+	/* Remember any enhanced-keyboard mode toggles so we can re-arm a
+	** client that attaches later (see kbd_u / kbd_m). */
+	track_keymode(buf, (size_t)len);
+	track_decmode(buf, (size_t)len);
 
 top:
 	/*
@@ -355,8 +515,13 @@ control_activity(int s)
 		return;
 	}
 
-	/* Link it in. */
+	/* Link it in. malloc fail → drop client; existing sessions stay live. */
 	p = malloc(sizeof(struct client));
+	if (!p)
+	{
+		close(fd);
+		return;
+	}
 	p->fd = fd;
 	p->attached = 0;
 	p->pprev = &clients;
@@ -398,7 +563,28 @@ client_activity(struct client *p)
 
 	/* Attach or detach from the program. */
 	else if (pkt.type == MSG_ATTACH)
+	{
 		p->attached = 1;
+		/* Re-arm the terminal modes the child enabled for this client; a
+		** previous detach reset them, and the child only sets them once at
+		** startup. No-op for anything the child never enabled. */
+		if (kbd_u_len)
+			write_client_seq(p, kbd_u, kbd_u_len);
+		if (kbd_m_len)
+			write_client_seq(p, kbd_m, kbd_m_len);
+		{
+			int k;
+			for (k = 0; k < N_DEC_MODES; k++)
+				if (dec_on[k])
+				{
+					unsigned char s[16];
+					int sl = snprintf((char *)s, sizeof s,
+					    "\033[?%dh", dec_modes[k]);
+					if (sl > 0 && (size_t)sl <= sizeof(s))
+						write_client_seq(p, s, (size_t)sl);
+				}
+		}
+	}
 	else if (pkt.type == MSG_DETACH)
 		p->attached = 0;
 

@@ -32,15 +32,41 @@
 static struct termios cur_term;
 /* 1 if the window size changed */
 static int win_changed;
+/* SIGUSR1 → clean detach. Set by handler, checked in main loop. */
+static volatile sig_atomic_t want_detach;
 
-/* Restores the original terminal settings. */
+/*
+** Restore terminal + reset modes inner program may have left on (mouse
+** tracking, bracketed paste, alt-screen, cursor hide, no-wrap). dtach itself
+** never touches these, but vim/fzf/less inside the session do — without this
+** the parent shell ends up with mouse codes printing on movement and stdin
+** still in raw mode. Pop alt-screen LAST so the user's pre-attach view is
+** what stays on screen.
+*/
 static void
 restore_term(void)
 {
 	tcsetattr(0, TCSADRAIN, &orig_term);
 
-	/* Make cursor visible. Assumes VT100. */
-	printf("\033[?25h");
+	/* \e[?25h cursor on; \e[?100[0236]l + \e[?101[56]l mouse tracking off;
+	** \e[?1004l focus-event reporting off; \e[?2004l bracketed paste off;
+	** \e[?7h auto-wrap on; \e[<u pop the kitty keyboard protocol; \e[>4;0m
+	** turn off xterm modifyOtherKeys. TUIs (Claude Code etc.) enable these
+	** and only reset them on a clean exit — on a detach the child keeps
+	** running, so without this the bare shell the user returns to emits
+	** CSI-u / `;N~` garbage for shifted keys (modifyOtherKeys) and `[I`/`[O`
+	** on focus changes (1004). This mirrors Claude Code's own teardown
+	** (App.tsx: DISABLE_MODIFY_OTHER_KEYS, DISABLE_KITTY_KEYBOARD, focus
+	** off, bracketed-paste off). \e[?1049l leave alt-screen and restore
+	** primary. The master replays whatever the child set to the next client
+	** that attaches, so reattach keeps the inner app's modes. */
+	printf("\033[?25h"
+	       "\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?1015l"
+	       "\033[?1004l"
+	       "\033[?2004l\033[?7h"
+	       "\033[<u"
+	       "\033[>4;0m"
+	       "\033[?1049l");
 	fflush(stdout);
 }
 
@@ -82,16 +108,22 @@ connect_socket(char *name)
 	return s;
 }
 
-/* Signal */
+/* Signal — silent exit; restore_term handles cleanup. Upstream printed
+** "[detached]"/"[got signal N - dying]" banners; we suppress them so the
+** parent shell prompt reappears clean. */
 static RETSIGTYPE
-die(int sig)
+die(ATTRIBUTE_UNUSED int sig)
 {
-	/* Print a nice pretty message for some things. */
-	if (sig == SIGHUP || sig == SIGINT)
-		printf(EOS "\r\n[detached]\r\n");
-	else
-		printf(EOS "\r\n[got signal %d - dying]\r\n", sig);
-	exit(1);
+	exit(0);
+}
+
+/* SIGUSR1 → request clean detach. Used when Ctrl-\ is unreachable (some
+** terminal hosts bind it). Send via `dch -d <name>` or `kill -USR1 <pid>`. */
+static RETSIGTYPE
+on_sigusr1(ATTRIBUTE_UNUSED int sig)
+{
+	signal(SIGUSR1, on_sigusr1);
+	want_detach = 1;
 }
 
 /* Window size change. */
@@ -102,12 +134,31 @@ win_change(ATTRIBUTE_UNUSED int sig)
 	win_changed = 1;
 }
 
-/* Handles input from the keyboard. */
+/* Handles input from the keyboard. Scans the WHOLE buffer for the detach
+** char (upstream only checked buf[0], which loses the keypress if it
+** arrives bundled with other bytes — common when the terminal sends a
+** burst, or when the user types fast after pasted input). */
 static void
 process_kbd(int s, struct packet *pkt)
 {
-	/* Suspend? */
-	if (!no_suspend && (pkt->u.buf[0] == cur_term.c_cc[VSUSP]))
+	int i;
+
+	/* Suspend? Scan whole buffer — VMIN=1 usually delivers VSUSP as buf[0],
+	** but bracketed/pasted input or fast typing can bundle it with other
+	** bytes. Same class of bug as the detach_char scan below. */
+	int suspend_hit = 0;
+	if (!no_suspend && cur_term.c_cc[VSUSP] != VDISABLE)
+	{
+		for (i = 0; i < pkt->len; i++)
+		{
+			if (pkt->u.buf[i] == cur_term.c_cc[VSUSP])
+			{
+				suspend_hit = 1;
+				break;
+			}
+		}
+	}
+	if (suspend_hit)
 	{
 		/* Tell the master that we are suspending. */
 		pkt->type = MSG_DETACH;
@@ -115,7 +166,6 @@ process_kbd(int s, struct packet *pkt)
 
 		/* And suspend... */
 		tcsetattr(0, TCSADRAIN, &orig_term);
-		printf(EOS "\r\n");
 		kill(getpid(), SIGTSTP);
 		tcsetattr(0, TCSADRAIN, &cur_term);
 
@@ -130,15 +180,63 @@ process_kbd(int s, struct packet *pkt)
 		write_packet_or_fail(s, pkt);
 		return;
 	}
-	/* Detach char? */
-	else if (pkt->u.buf[0] == detach_char)
+	/* Detach char anywhere in the buffer? */
+	if (detach_char != -1)
 	{
-		printf(EOS "\r\n[detached]\r\n");
-		exit(0);
+		for (i = 0; i < pkt->len; i++)
+		{
+			if (pkt->u.buf[i] == detach_char)
+				exit(0);
+		}
 	}
-	/* Just in case something pukes out. */
-	else if (pkt->u.buf[0] == '\f')
-		win_changed = 1;
+	/* Kitty keyboard protocol: when the inner program turns on progressive
+	** keyboard enhancement (it emits ESC[>...u — Claude Code, recent nvim,
+	** etc. do this), the terminal stops sending the detach char as a raw
+	** control byte and instead reports it as a CSI escape:
+	**     CSI <codepoint> ; <modifiers> u
+	** where <codepoint> is the BASE key, not the control code (Ctrl-\ is
+	** reported as '\' = 0x5c, NOT 0x1c). Without matching this form the raw
+	** scan above never fires and detach silently stops working inside such
+	** apps. Recover the base codepoint by undoing the control mask
+	** (Ctrl+X == X & 0x1f, so base == detach_char | 0x40) and look for that
+	** CSI ... u sequence anywhere in the buffer. */
+	if (detach_char >= 0 && detach_char < 0x20)
+	{
+		char want[8];
+		int wlen = snprintf(want, sizeof want, "\033[%d;",
+			detach_char | 0x40);
+
+		for (i = 0; i + wlen <= pkt->len; i++)
+		{
+			int j;
+
+			if (memcmp(pkt->u.buf + i, want, wlen) != 0)
+				continue;
+			/* Matched "ESC [ <cp> ;" — consume the modifier/event-type
+			** field ([0-9;:] run) and require a terminating 'u'. */
+			for (j = i + wlen; j < pkt->len; j++)
+			{
+				unsigned char b = pkt->u.buf[j];
+
+				if (b == 'u')
+					exit(0);
+				if (!((b >= '0' && b <= '9') || b == ';' || b == ':'))
+					break;
+			}
+		}
+	}
+	/* Force-redraw bookkeeping: if user pressed Ctrl-L, master will echo
+	** it back and the pty will redraw — but mark the window as changed so
+	** our next iteration also nudges WINSZ in case the terminal resized
+	** silently. */
+	for (i = 0; i < pkt->len; i++)
+	{
+		if (pkt->u.buf[i] == '\f')
+		{
+			win_changed = 1;
+			break;
+		}
+	}
 
 	/* Push it out */
 	write_packet_or_fail(s, pkt);
@@ -204,6 +302,7 @@ attach_main(int noerror)
 	signal(SIGINT, die);
 	signal(SIGQUIT, die);
 	signal(SIGWINCH, win_change);
+	signal(SIGUSR1, on_sigusr1);
 
 	/* Set raw mode. */
 	cur_term.c_iflag &= ~(IGNBRK|BRKINT|PARMRK|ISTRIP|INLCR|IGNCR|ICRNL);
@@ -217,8 +316,9 @@ attach_main(int noerror)
 	cur_term.c_cc[VTIME] = 0;
 	tcsetattr(0, TCSADRAIN, &cur_term);
 
-	/* Clear the screen. This assumes VT100. */
-	write_buf_or_fail(1, "\33[H\33[J", 6);
+	/* Enter alt-screen + home cursor. On detach, restore_term pops back
+	** to primary screen so the user's pre-attach scrollback is intact. */
+	write_buf_or_fail(1, "\033[?1049h\033[H\033[J", 11);
 
 	/* Tell the master that we want to attach. */
 	memset(&pkt, 0, sizeof(struct packet));
@@ -236,15 +336,17 @@ attach_main(int noerror)
 	{
 		int n;
 
+		/* SIGUSR1 detach — main-loop check avoids exit() inside the
+		** signal handler. */
+		if (want_detach)
+			exit(0);
+
 		FD_ZERO(&readfds);
 		FD_SET(0, &readfds);
 		FD_SET(s, &readfds);
 		n = select(s + 1, &readfds, NULL, NULL, NULL);
 		if (n < 0 && errno != EINTR && errno != EAGAIN)
-		{
-			printf(EOS "\r\n[select failed]\r\n");
 			exit(1);
-		}
 
 		/* Pty activity */
 		if (n > 0 && FD_ISSET(s, &readfds))
@@ -252,16 +354,9 @@ attach_main(int noerror)
 			ssize_t len = read(s, buf, sizeof(buf));
 
 			if (len == 0)
-			{
-				printf(EOS "\r\n[EOF - dtach terminating]"
-				       "\r\n");
-				exit(0);
-			}
+				exit(0); /* server gone — silent */
 			else if (len < 0)
-			{
-				printf(EOS "\r\n[read returned an error]\r\n");
 				exit(1);
-			}
 			/* Send the data to the terminal. */
 			write_buf_or_fail(1, buf, len);
 			n--;

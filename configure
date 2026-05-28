@@ -585,7 +585,7 @@ PACKAGE_STRING='dtach 0.9'
 PACKAGE_BUGREPORT='crigler@gmail.com'
 PACKAGE_URL=''
 
-ac_unique_file="main.c"
+ac_unique_file="dch.c"
 # Factoring default headers for most tests.
 ac_includes_default="\
 #include <stdio.h>

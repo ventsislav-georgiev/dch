@@ -128,13 +128,13 @@ struct packet
 };
 
 /*
-** The master sends a simple stream of text to the attaching clients, without
-** any protocol. This might change back to the packet based protocol in the
-** future. In the meantime, however, we minimize the amount of data sent back
-** and forth between the client and the master. BUFSIZE is the size of the
-** buffer used for the text stream.
+** Stream buffer size for master->client redraw. Bumped from upstream 4 KB
+** so reattach replays more recent terminal output (vim/fzf full redraw is
+** unaffected; pagers like `less`/`cat` benefit). 16 KB is a sane sweet spot:
+** big enough for two 200x80 screens of dense ANSI, small enough to never
+** matter for memory.
 */
-#define BUFSIZE 4096
+#define BUFSIZE 16384
 
 /* This hopefully moves to the bottom of the screen */
 #define EOS "\033[999H"

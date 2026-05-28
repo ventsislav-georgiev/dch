@@ -1,0 +1,1194 @@
+/*
+    dch — detachable terminal session manager. Built on dtach core
+    (attach_main/master_main/push_main from upstream) with the bash-wrapper
+    features merged in: auto-named sessions, static-TUI picker for -l/-k/-d,
+    nesting refuse, orphan reap, server/client split so closing the VSCode
+    terminal kills only the client and the session survives.
+
+    Originally GPLv2 from dtach by Ned T. Crigler. This file is the dch
+    entry point that replaces upstream main.c.
+*/
+#include "dtach.h"
+
+#include <ctype.h>
+#include <dirent.h>
+#include <pwd.h>
+#include <sys/types.h>
+#include <sys/un.h>
+
+/* Shared globals (declared in dtach.h, used by attach.c/master.c). */
+const char copyright[] = "dch - based on dtach " PACKAGE_VERSION
+                         " (C)Copyright 2004-2016 Ned T. Crigler";
+char *progname;
+char *sockname;
+int detach_char = '\\' - 64;
+int no_suspend;
+int redraw_method = REDRAW_UNSPEC;
+struct termios orig_term;
+int dont_have_tty;
+
+/* dch-local state. */
+static char sock_dir[1024];
+static char sock_path[1100];
+static char session_name[512];
+static char client_pidfile[1200];
+
+/* Write a buffer or exit — used by attach.c and master.c (declared in
+** dtach.h). Lives here to keep main.c-equivalent self-contained. */
+void
+write_buf_or_fail(int fd, const void *buf, size_t count)
+{
+	while (count != 0)
+	{
+		ssize_t ret = write(fd, buf, count);
+
+		if (ret >= 0)
+		{
+			buf = (const char *)buf + ret;
+			count -= ret;
+		}
+		else if (ret < 0 && errno == EINTR)
+			continue;
+		else
+			exit(1);
+	}
+}
+
+void
+write_packet_or_fail(int fd, const struct packet *pkt)
+{
+	while (1)
+	{
+		ssize_t ret = write(fd, pkt, sizeof(struct packet));
+
+		if (ret == sizeof(struct packet))
+			return;
+		else if (ret < 0 && errno == EINTR)
+			continue;
+		else
+			exit(1);
+	}
+}
+
+/* ---- helpers --------------------------------------------------------- */
+
+static void
+chomp(char *s)
+{
+	size_t n = strlen(s);
+	while (n > 0 && (s[n - 1] == '\n' || s[n - 1] == '\r' ||
+	                 s[n - 1] == ' '  || s[n - 1] == '\t'))
+		s[--n] = '\0';
+}
+
+/* In-place sanitize: '/' and ' ' → '_'; keep [A-Za-z0-9._-]. */
+static void
+sanitize(char *s)
+{
+	char *r = s, *w = s;
+	while (*r)
+	{
+		char c = *r++;
+		if (c == '/' || c == ' ')
+			c = '_';
+		if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+		    (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-')
+			*w++ = c;
+	}
+	*w = '\0';
+}
+
+/* popen `cmd`, capture first line of stdout (trimmed) into out. Returns 0
+** on success and non-empty output, -1 otherwise. */
+static int
+run_capture(const char *cmd, char *out, size_t outsz)
+{
+	FILE *fp = popen(cmd, "r");
+	if (!fp)
+		return -1;
+	if (!fgets(out, (int)outsz, fp))
+	{
+		out[0] = '\0';
+		pclose(fp);
+		return -1;
+	}
+	chomp(out);
+	pclose(fp);
+	return out[0] ? 0 : -1;
+}
+
+/* SOCK_DIR = $XDG_RUNTIME_DIR/dch-$UID, fallback /tmp/dch-$UID. mkdir 0700. */
+static int
+compute_sock_dir(void)
+{
+	const char *xdg = getenv("XDG_RUNTIME_DIR");
+	uid_t uid = getuid();
+	if (xdg && *xdg)
+		snprintf(sock_dir, sizeof(sock_dir), "%s/dch-%u",
+		         xdg, (unsigned)uid);
+	else
+		snprintf(sock_dir, sizeof(sock_dir), "/tmp/dch-%u",
+		         (unsigned)uid);
+	if (mkdir(sock_dir, 0700) < 0 && errno != EEXIST)
+	{
+		fprintf(stderr, "dch: mkdir %s: %s\n", sock_dir,
+		        strerror(errno));
+		return -1;
+	}
+	return 0;
+}
+
+/* Build sock_path; fail loudly if it would overflow AF_UNIX sun_path. */
+static int
+make_sock_path(const char *name)
+{
+	int n = snprintf(sock_path, sizeof(sock_path),
+	                 "%s/%s.sock", sock_dir, name);
+	if (n < 0 || (size_t)n >= sizeof(sock_path))
+	{
+		fprintf(stderr, "dch: socket path too long\n");
+		return -1;
+	}
+	struct sockaddr_un sa;
+	if ((size_t)n >= sizeof(sa.sun_path))
+	{
+		fprintf(stderr,
+		    "dch: socket path %d > sun_path %zu (rename or shorter cwd)\n",
+		    n, sizeof(sa.sun_path));
+		return -1;
+	}
+	sockname = sock_path;
+	return 0;
+}
+
+/* Read first line of `path` (NUL-terminated, newline stripped) into out.
+** Returns 0 on success and non-empty content. */
+static int
+read_first_line(const char *path, char *out, size_t outsz)
+{
+	int fd = open(path, O_RDONLY);
+	if (fd < 0)
+		return -1;
+	ssize_t r;
+	do {
+		r = read(fd, out, outsz - 1);
+	} while (r < 0 && errno == EINTR);
+	close(fd);
+	if (r <= 0)
+		return -1;
+	out[r] = '\0';
+	char *nl = strchr(out, '\n');
+	if (nl)
+		*nl = '\0';
+	chomp(out);
+	return out[0] ? 0 : -1;
+}
+
+/* Walk parents from cwd looking for a .git directory or file (worktree).
+** On hit, fills `root` with the repo toplevel (parent of .git) and `gitdir`
+** with the actual git dir (resolves "gitdir: <path>" indirection). */
+static int
+find_git(char *root, size_t rootsz, char *gitdir, size_t gitdirsz)
+{
+	char cur[2048];
+	if (!getcwd(cur, sizeof(cur)))
+		return -1;
+
+	while (1)
+	{
+		char dot[2200];
+		int n = snprintf(dot, sizeof(dot), "%s/.git", cur);
+		if (n < 0 || (size_t)n >= sizeof(dot))
+			return -1;
+		struct stat st;
+		if (stat(dot, &st) == 0)
+		{
+			snprintf(root, rootsz, "%s", cur);
+			if (S_ISDIR(st.st_mode))
+			{
+				snprintf(gitdir, gitdirsz, "%s", dot);
+				return 0;
+			}
+			/* .git file → "gitdir: <path>" (worktree/submodule). */
+			char line[2048];
+			if (read_first_line(dot, line, sizeof(line)) == 0 &&
+			    strncmp(line, "gitdir: ", 8) == 0)
+			{
+				const char *p = line + 8;
+				if (p[0] == '/')
+					snprintf(gitdir, gitdirsz, "%s", p);
+				else
+					snprintf(gitdir, gitdirsz,
+					         "%s/%s", cur, p);
+				return 0;
+			}
+			return -1;
+		}
+		char *slash = strrchr(cur, '/');
+		if (!slash || slash == cur)
+			return -1;
+		*slash = '\0';
+	}
+}
+
+/* Auto-name: <repo>-<branch> if cwd is a git repo, else cwd basename.
+** Native: stat + open on .git/HEAD — no fork/popen. */
+static void
+auto_name(char *out, size_t outsz)
+{
+	char root[2048], gitdir[2048], head[512], base[512], branch[512];
+
+	if (find_git(root, sizeof(root), gitdir, sizeof(gitdir)) == 0)
+	{
+		const char *slash = strrchr(root, '/');
+		const char *bn = slash ? slash + 1 : root;
+		snprintf(base, sizeof(base), "%s", bn);
+		sanitize(base);
+
+		char headpath[2200];
+		snprintf(headpath, sizeof(headpath), "%s/HEAD", gitdir);
+		if (read_first_line(headpath, head, sizeof(head)) == 0)
+		{
+			if (strncmp(head, "ref: refs/heads/", 16) == 0)
+				snprintf(branch, sizeof(branch),
+				         "%s", head + 16);
+			else if (strncmp(head, "ref: ", 5) == 0)
+			{
+				/* Non-branch ref (tag, packed-ref, …). */
+				const char *r = head + 5;
+				const char *s = strrchr(r, '/');
+				snprintf(branch, sizeof(branch),
+				         "%s", s ? s + 1 : r);
+			}
+			else
+			{
+				/* Detached HEAD: bare hash, use 7-char short. */
+				snprintf(branch, sizeof(branch), "%.7s", head);
+			}
+		}
+		else
+			snprintf(branch, sizeof(branch), "detached");
+
+		sanitize(branch);
+		snprintf(out, outsz, "%s-%s", base, branch);
+		return;
+	}
+
+	char cwd[2048];
+	if (!getcwd(cwd, sizeof(cwd)))
+		snprintf(cwd, sizeof(cwd), "session");
+	const char *slash = strrchr(cwd, '/');
+	const char *bn = slash ? slash + 1 : cwd;
+	snprintf(out, outsz, "%s", bn);
+	sanitize(out);
+}
+
+/* ---- client tracking (PID files) ------------------------------------ */
+/*
+** Bash dch used `pgrep -f 'dtach -a +<sock>'` to find live clients. We've
+** merged dtach and dch into one binary, so pgrep can't distinguish client
+** from server. Instead each client touches <sockdir>/<base>.client.<pid>
+** at attach time and unlinks at exit. Liveness = file exists + kill(pid,0)
+** + not orphaned (PPID=1 with no TTY = VSCode-helper-closed).
+*/
+
+static void
+client_pidfile_unlink(void)
+{
+	if (client_pidfile[0])
+		unlink(client_pidfile);
+}
+
+static void
+client_pidfile_create(const char *sockp)
+{
+	const char *slash = strrchr(sockp, '/');
+	const char *bn = slash ? slash + 1 : sockp;
+	snprintf(client_pidfile, sizeof(client_pidfile),
+	         "%s/%s.client.%d", sock_dir, bn, (int)getpid());
+	int fd = open(client_pidfile, O_CREAT | O_WRONLY | O_TRUNC, 0600);
+	if (fd >= 0)
+		close(fd);
+	atexit(client_pidfile_unlink);
+}
+
+/* Return 1 if pid has PPID=1 and no controlling TTY (VSCode-helper-orphan
+** signature). Cross-platform via ps. */
+static int
+pid_is_orphan(int pid)
+{
+	char pscmd[128], psout[256];
+	snprintf(pscmd, sizeof(pscmd),
+	         "ps -o ppid=,tty= -p %d 2>/dev/null", pid);
+	if (run_capture(pscmd, psout, sizeof(psout)) != 0)
+		return 0;
+	char *p = psout;
+	while (*p == ' ')
+		p++;
+	long ppid = strtol(p, &p, 10);
+	while (*p == ' ' || *p == '\t')
+		p++;
+	chomp(p);
+	int no_tty = (*p == '\0' || strcmp(p, "??") == 0 ||
+	              strcmp(p, "?") == 0 || strcmp(p, "-") == 0);
+	return ppid == 1 && no_tty;
+}
+
+/* Live (non-orphan) client count for `<base>.sock`. Reaps stale entries. */
+static int
+live_clients_on(const char *sockp)
+{
+	DIR *d = opendir(sock_dir);
+	if (!d)
+		return 0;
+
+	const char *slash = strrchr(sockp, '/');
+	const char *bn = slash ? slash + 1 : sockp;
+	char prefix[600];
+	snprintf(prefix, sizeof(prefix), "%s.client.", bn);
+	size_t plen = strlen(prefix);
+
+	int count = 0;
+	struct dirent *de;
+	while ((de = readdir(d)))
+	{
+		if (strncmp(de->d_name, prefix, plen) != 0)
+			continue;
+		int pid = atoi(de->d_name + plen);
+		char path[2200];
+		snprintf(path, sizeof(path), "%s/%s", sock_dir, de->d_name);
+
+		if (pid <= 0 || kill(pid, 0) != 0)
+		{
+			unlink(path); /* dead */
+			continue;
+		}
+		if (pid_is_orphan(pid))
+		{
+			kill(pid, SIGTERM);
+			unlink(path);
+			continue;
+		}
+		count++;
+	}
+	closedir(d);
+	return count;
+}
+
+/* Send SIGUSR1 to all live clients of `<base>.sock` (clean detach). */
+static int
+detach_all_clients_on(const char *sockp)
+{
+	DIR *d = opendir(sock_dir);
+	if (!d)
+		return 0;
+	const char *slash = strrchr(sockp, '/');
+	const char *bn = slash ? slash + 1 : sockp;
+	char prefix[600];
+	snprintf(prefix, sizeof(prefix), "%s.client.", bn);
+	size_t plen = strlen(prefix);
+
+	int n = 0;
+	struct dirent *de;
+	while ((de = readdir(d)))
+	{
+		if (strncmp(de->d_name, prefix, plen) != 0)
+			continue;
+		int pid = atoi(de->d_name + plen);
+		if (pid <= 0)
+			continue;
+		/* Liveness check first so we don't SIGUSR1 a recycled PID. */
+		if (kill(pid, 0) != 0)
+		{
+			char path[2200];
+			snprintf(path, sizeof(path), "%s/%s",
+			         sock_dir, de->d_name);
+			unlink(path);
+			continue;
+		}
+		if (kill(pid, SIGUSR1) == 0)
+			n++;
+	}
+	closedir(d);
+	return n;
+}
+
+/* ---- session listing / picker --------------------------------------- */
+
+struct slist
+{
+	char **v;
+	int n, cap;
+};
+
+static void
+slist_push(struct slist *l, const char *s)
+{
+	if (l->n == l->cap)
+	{
+		l->cap = l->cap ? l->cap * 2 : 8;
+		l->v = realloc(l->v, l->cap * sizeof(char *));
+	}
+	l->v[l->n++] = strdup(s);
+}
+
+static void
+slist_free(struct slist *l)
+{
+	int i;
+	for (i = 0; i < l->n; i++)
+		free(l->v[i]);
+	free(l->v);
+	l->v = NULL;
+	l->n = l->cap = 0;
+}
+
+/* List active session names (sockets in sock_dir). */
+static int
+list_sessions(struct slist *out)
+{
+	DIR *d = opendir(sock_dir);
+	if (!d)
+		return -1;
+	struct dirent *de;
+	while ((de = readdir(d)))
+	{
+		size_t n = strlen(de->d_name);
+		if (n <= 5 || strcmp(de->d_name + n - 5, ".sock") != 0)
+			continue;
+		char nm[600];
+		snprintf(nm, sizeof(nm), "%.*s", (int)(n - 5), de->d_name);
+		slist_push(out, nm);
+	}
+	closedir(d);
+	return 0;
+}
+
+/* ---- static TUI picker --------------------------------------------- */
+/*
+** Self-contained arrow-key picker over /dev/tty. No external deps. Keys:
+**   up/down or k/j        move
+**   enter                 select
+**   q / esc / Ctrl-C      cancel
+*/
+
+static struct termios picker_saved_term;
+static int picker_tty_fd = -1;
+static int picker_term_saved;
+
+static void
+picker_restore(void)
+{
+	if (picker_tty_fd >= 0)
+	{
+		if (picker_term_saved)
+			tcsetattr(picker_tty_fd, TCSANOW, &picker_saved_term);
+		/* Cursor on + disable mouse/bracketed-paste/alt-screen we may
+		** have inherited. dch itself never enables them but a previous
+		** in-shell app could've. Safe to send unconditionally. */
+		(void)!write(picker_tty_fd,
+		    "\033[?25h"
+		    "\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?1015l"
+		    "\033[?2004l",
+		    6 + 5 * 8 + 8);
+		close(picker_tty_fd);
+		picker_tty_fd = -1;
+	}
+}
+
+static void
+picker_sigint(int sig)
+{
+	(void)sig;
+	picker_restore();
+	_exit(130);
+}
+
+/* Write fixed string; no errno fuss. */
+static void
+tw(int fd, const char *s)
+{
+	(void)!write(fd, s, strlen(s));
+}
+
+/* Erase the (header + N entries) block we drew at the bottom of the screen.
+** Caller has previously written exactly `lines` lines ending with \r\n; cursor
+** is on the line *after* the last entry. */
+static void
+picker_erase(int fd, int lines)
+{
+	char up[32];
+	int n = snprintf(up, sizeof(up), "\033[%dA\r", lines);
+	(void)!write(fd, up, n);
+	for (int i = 0; i < lines; i++)
+		tw(fd, "\033[2K\n");
+	n = snprintf(up, sizeof(up), "\033[%dA\r", lines);
+	(void)!write(fd, up, n);
+}
+
+/* Visible window: [top, top+win). Caller maintains top so sel stays in view. */
+static void
+picker_draw(int fd, const char *header, struct slist *sl, int sel,
+            int top, int win)
+{
+	dprintf(fd, "\033[2K\033[1m%s\033[0m\r\n", header);
+	int end = top + win;
+	if (end > sl->n)
+		end = sl->n;
+	for (int i = top; i < end; i++)
+	{
+		if (i == sel)
+			dprintf(fd, "\033[2K\033[7m> %s\033[0m\r\n", sl->v[i]);
+		else
+			dprintf(fd, "\033[2K  %s\r\n", sl->v[i]);
+	}
+}
+
+static int
+tty_rows(int fd)
+{
+	struct winsize ws;
+	if (ioctl(fd, TIOCGWINSZ, &ws) == 0 && ws.ws_row > 0)
+		return ws.ws_row;
+	return 24;
+}
+
+/* Interactive picker. Returns 0 on success (out filled), 1 if no sessions,
+** no TTY, or user canceled. */
+static int
+pick_session(const char *header, char *out, size_t outsz)
+{
+	struct slist sl = {0};
+	int rc = 1;
+
+	if (list_sessions(&sl) < 0 || sl.n == 0)
+	{
+		fprintf(stderr, "no sessions\n");
+		slist_free(&sl);
+		return 1;
+	}
+
+	int fd = open("/dev/tty", O_RDWR);
+	if (fd < 0)
+	{
+		/* Headless: list names so the caller can still see them. */
+		for (int i = 0; i < sl.n; i++)
+			puts(sl.v[i]);
+		slist_free(&sl);
+		return 1;
+	}
+
+	struct termios raw;
+	if (tcgetattr(fd, &picker_saved_term) < 0)
+	{
+		close(fd);
+		slist_free(&sl);
+		return 1;
+	}
+	raw = picker_saved_term;
+	raw.c_lflag &= ~(ICANON | ECHO | ISIG | IEXTEN);
+	raw.c_iflag &= ~(IXON | ICRNL | INLCR | IGNCR);
+	raw.c_cc[VMIN] = 1;
+	raw.c_cc[VTIME] = 0;
+	if (tcsetattr(fd, TCSANOW, &raw) < 0)
+	{
+		close(fd);
+		slist_free(&sl);
+		return 1;
+	}
+	picker_tty_fd = fd;
+	picker_term_saved = 1;
+	signal(SIGINT, picker_sigint);
+	signal(SIGTERM, picker_sigint);
+	signal(SIGHUP, picker_sigint);
+
+	/* Hide cursor + force mouse tracking off so stray mouse motion can't
+	** inject CSI bytes into our keypress read. */
+	tw(fd, "\033[?25l"
+	       "\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?1015l"
+	       "\033[?2004l");
+
+	int sel = 0, top = 0, drawn = 0;
+	int rows = tty_rows(fd);
+	/* Reserve 2 rows: 1 for header, 1 to keep prompt below picker. */
+	int win = rows - 2;
+	if (win < 1)
+		win = 1;
+	if (win > sl.n)
+		win = sl.n;
+	int lines = 1 + win; /* header + visible entries */
+
+	for (;;)
+	{
+		/* Keep sel inside [top, top+win). */
+		if (sel < top)
+			top = sel;
+		else if (sel >= top + win)
+			top = sel - win + 1;
+
+		if (drawn)
+			picker_erase(fd, lines);
+		picker_draw(fd, header, &sl, sel, top, win);
+		drawn = 1;
+
+		unsigned char c;
+		ssize_t r;
+		do {
+			r = read(fd, &c, 1);
+		} while (r < 0 && errno == EINTR);
+		if (r <= 0)
+			break; /* cancel */
+
+		if (c == '\r' || c == '\n')
+		{
+			snprintf(out, outsz, "%s", sl.v[sel]);
+			rc = 0;
+			break;
+		}
+		if (c == 'q' || c == 3 /*Ctrl-C*/ || c == 4 /*Ctrl-D*/)
+			break;
+		if (c == 'j')
+		{
+			if (sel < sl.n - 1)
+				sel++;
+			continue;
+		}
+		if (c == 'k')
+		{
+			if (sel > 0)
+				sel--;
+			continue;
+		}
+		if (c == 27) /* ESC or CSI sequence */
+		{
+			fd_set rs;
+			struct timeval tv = {0, 50 * 1000};
+			FD_ZERO(&rs);
+			FD_SET(fd, &rs);
+			if (select(fd + 1, &rs, NULL, NULL, &tv) <= 0)
+				break; /* bare ESC = cancel */
+			unsigned char b1, b2;
+			if (read(fd, &b1, 1) != 1 || b1 != '[')
+				break;
+			if (read(fd, &b2, 1) != 1)
+				break;
+			if (b2 == 'A' && sel > 0)
+				sel--;
+			else if (b2 == 'B' && sel < sl.n - 1)
+				sel++;
+			continue;
+		}
+	}
+
+	/* Erase our drawing so the parent shell prompt isn't shoved down. */
+	if (drawn)
+		picker_erase(fd, lines);
+	picker_restore();
+	signal(SIGINT, SIG_DFL);
+	signal(SIGTERM, SIG_DFL);
+	signal(SIGHUP, SIG_DFL);
+	slist_free(&sl);
+	return rc;
+}
+
+/* ---- session kill --------------------------------------------------- */
+
+/*
+** Kill = SIGTERM master process(es) for socket + unlink socket file. The
+** master daemonizes via re-exec as `dch --master-of <sock> -- <cmd...>` so
+** its argv contains the sock path; we pkill -f on that sentinel.
+*/
+
+static int
+pkill_pattern(const char *pat)
+{
+	char cmd[2048];
+	snprintf(cmd, sizeof(cmd),
+	         "pkill -TERM -f '%s' 2>/dev/null; exit 0", pat);
+	return system(cmd);
+}
+
+static int
+kill_session(const char *name)
+{
+	char sp[1100];
+	snprintf(sp, sizeof(sp), "%s/%s.sock", sock_dir, name);
+	struct stat st;
+	if (stat(sp, &st) < 0 || !S_ISSOCK(st.st_mode))
+	{
+		fprintf(stderr, "no session: %s\n", name);
+		return 1;
+	}
+
+	/* Term master (its sentinel argv contains the sock path). */
+	char pat[1200];
+	snprintf(pat, sizeof(pat), "dch --master-of %s", sp);
+	pkill_pattern(pat);
+
+	/* Term any clients still attached. */
+	DIR *d = opendir(sock_dir);
+	if (d)
+	{
+		char prefix[600];
+		snprintf(prefix, sizeof(prefix), "%s.sock.client.", name);
+		size_t plen = strlen(prefix);
+		struct dirent *de;
+		while ((de = readdir(d)))
+		{
+			if (strncmp(de->d_name, prefix, plen) != 0)
+				continue;
+			int pid = atoi(de->d_name + plen);
+			if (pid > 0)
+				kill(pid, SIGTERM);
+			char path[2200];
+			snprintf(path, sizeof(path), "%s/%s",
+			         sock_dir, de->d_name);
+			unlink(path);
+		}
+		closedir(d);
+	}
+
+	unlink(sp);
+	printf("killed: %s\n", name);
+	return 0;
+}
+
+static int
+kill_all(void)
+{
+	struct slist sl = {0};
+	int i;
+	if (list_sessions(&sl) < 0 || sl.n == 0)
+	{
+		printf("no sessions\n");
+		slist_free(&sl);
+		return 0;
+	}
+	for (i = 0; i < sl.n; i++)
+	{
+		/* Skip entries that vanished between list and kill so we
+		** don't spam "no session: X" on a race. */
+		char sp[1100];
+		snprintf(sp, sizeof(sp), "%s/%s.sock", sock_dir, sl.v[i]);
+		struct stat st;
+		if (stat(sp, &st) < 0 || !S_ISSOCK(st.st_mode))
+			continue;
+		kill_session(sl.v[i]);
+	}
+	slist_free(&sl);
+	return 0;
+}
+
+/* ---- usage ---------------------------------------------------------- */
+
+static void
+usage(void)
+{
+	printf(
+	    "dch — detachable terminal session\n"
+	    "Usage:\n"
+	    "  dch              attach free session, else spawn new\n"
+	    "  dch <cmd...>     attach-or-create, run cmd\n"
+	    "  dch -l           pick a session and attach (mirror)\n"
+	    "  dch -k [name]    kill session; without name, pick interactively\n"
+	    "  dch -kl          kill ALL sessions\n"
+	    "  dch -ls          list sessions (one per line)\n"
+	    "  dch -d [name]    detach all clients of session (sends SIGUSR1)\n"
+	    "  dch -n <name>    override auto-name\n"
+	    "  dch -f           force attach even if busy (mirror)\n"
+	    "  dch -E           disable detach escape (Ctrl-\\); use -d instead\n"
+	    "  dch -e <c>       set detach character (default ^\\)\n"
+	    "  dch -h           this help\n"
+	    "Detach: Ctrl-\\  (or `dch -d` if the host swallows it).\n"
+	    "Nesting refused inside an existing dch session.\n");
+}
+
+/* ---- subcommand: server-only sentinel ------------------------------- */
+/*
+** When we daemonize the master, we re-exec dch with `--master-of <sock>
+** -- <cmd...>` so the running process's argv is grep-able by kill_session.
+*/
+
+static int
+run_master_of(int argc, char **argv)
+{
+	if (argc < 1)
+		return 1;
+	sockname = argv[0];
+	argc--; argv++;
+	/* Optional "--" separator from caller's argv. */
+	if (argc >= 1 && strcmp(argv[0], "--") == 0)
+	{
+		argc--; argv++;
+	}
+	if (argc < 1)
+		return 1;
+	if (tcgetattr(0, &orig_term) < 0)
+	{
+		memset(&orig_term, 0, sizeof(struct termios));
+		dont_have_tty = 1;
+	}
+	/* Disable the default detach char; clients set their own. */
+	return master_main(argv, 1, 1); /* waitattach=1, dontfork=1 */
+}
+
+/* ---- attach action -------------------------------------------------- */
+
+/* Build a daemon-launching command vector. We fork+setsid here so the
+** master survives the originating terminal closing. Returns 0 on parent
+** success. */
+static int
+spawn_master(char *exe, const char *sockp, char **inner_argv)
+{
+	pid_t pid = fork();
+	if (pid < 0)
+	{
+		fprintf(stderr, "dch: fork: %s\n", strerror(errno));
+		return -1;
+	}
+	if (pid == 0)
+	{
+		/* Child: become session leader, drop tty, exec sentinel. */
+		setsid();
+		int nullfd = open("/dev/null", O_RDWR);
+		if (nullfd >= 0)
+		{
+			dup2(nullfd, 0);
+			dup2(nullfd, 1);
+			dup2(nullfd, 2);
+			if (nullfd > 2)
+				close(nullfd);
+		}
+		/* Build argv: exe --master-of <sock> -- inner_argv... */
+		int ic = 0;
+		while (inner_argv[ic])
+			ic++;
+		char **av = malloc(sizeof(char *) * (ic + 5));
+		int j = 0;
+		av[j++] = exe;
+		av[j++] = (char *)"--master-of";
+		av[j++] = (char *)sockp;
+		av[j++] = (char *)"--";
+		int k;
+		for (k = 0; k < ic; k++)
+			av[j++] = inner_argv[k];
+		av[j] = NULL;
+		/* execvp handles both absolute paths (when exe = realpath
+		** result) and bare names (when realpath failed and exe is
+		** the original argv[0] = "dch" found via PATH). */
+		execvp(av[0], av);
+		_exit(127);
+	}
+	/* Parent: wait briefly so child can fail loudly before we attach. */
+	int status = 0;
+	for (int i = 0; i < 50; i++)
+	{
+		struct stat st;
+		if (stat(sockp, &st) == 0 && S_ISSOCK(st.st_mode))
+			return 0;
+		struct timespec ts = {0, 20 * 1000 * 1000}; /* 20ms */
+		nanosleep(&ts, NULL);
+		pid_t r = waitpid(pid, &status, WNOHANG);
+		if (r == pid)
+			return -1;
+	}
+	return 0;
+}
+
+static int
+do_attach(char *exe, int forced_name, int force, char **inner_argv,
+          int inner_argc)
+{
+	/* Nesting refuse. */
+	const char *nested = getenv("DCH_SESSION");
+	if (nested && *nested)
+	{
+		fprintf(stderr,
+		    "dch: already inside session '%s'; nesting disabled\n",
+		    nested);
+		return 1;
+	}
+
+	/* If auto-attaching and base is busy, advance to next free slot. */
+	if (!forced_name && !force)
+	{
+		char base[512];
+		snprintf(base, sizeof(base), "%s", session_name);
+		int i;
+		for (i = 1; i <= 999; i++)
+		{
+			char cand[600];
+			if (i == 1)
+				snprintf(cand, sizeof(cand), "%s", base);
+			else
+				snprintf(cand, sizeof(cand), "%s-%d",
+				         base, i);
+			char sp[1100];
+			snprintf(sp, sizeof(sp), "%s/%s.sock",
+			         sock_dir, cand);
+			struct stat st;
+			if (stat(sp, &st) != 0 || !S_ISSOCK(st.st_mode) ||
+			    live_clients_on(sp) == 0)
+			{
+				snprintf(session_name,
+				         sizeof(session_name), "%s", cand);
+				break;
+			}
+		}
+		if (i > 999)
+		{
+			fprintf(stderr,
+			    "dch: 999 attached sessions for base '%s' — refusing\n",
+			    base);
+			return 1;
+		}
+	}
+
+	if (make_sock_path(session_name) < 0)
+		return 1;
+
+	struct stat st;
+	int exists = stat(sock_path, &st) == 0 && S_ISSOCK(st.st_mode);
+	if (!exists)
+	{
+		/* Create server. Pass DCH_SESSION to child so nested dch
+		** detects. */
+		setenv("DCH_SESSION", session_name, 1);
+		char *default_argv[] = { NULL, NULL };
+		if (inner_argc == 0)
+		{
+			const char *sh = getenv("SHELL");
+			default_argv[0] = (char *)(sh && *sh ? sh : "/bin/sh");
+			inner_argv = default_argv;
+		}
+		if (spawn_master(exe, sock_path, inner_argv) < 0)
+		{
+			fprintf(stderr, "dch: failed to spawn session\n");
+			return 1;
+		}
+	}
+
+	/* Attach as client. Track in pidfile so future invocations know we
+	** are live (and not VSCode-orphaned). */
+	if (tcgetattr(0, &orig_term) < 0)
+	{
+		fprintf(stderr, "dch: attaching requires a terminal\n");
+		return 1;
+	}
+	client_pidfile_create(sock_path);
+	return attach_main(0);
+}
+
+/* ---- main ----------------------------------------------------------- */
+
+int
+main(int argc, char **argv)
+{
+	int forced_name = 0;
+	int force = 0;
+	int kill_explicit = 0;
+	enum { A_ATTACH, A_LIST, A_KILL, A_KILLALL, A_DETACH, A_LISTRAW }
+	    action = A_ATTACH;
+
+	progname = argv[0];
+	char *exe = realpath(argv[0], NULL);
+	if (!exe)
+		exe = argv[0];
+
+	/* Internal sentinel: master-of <sock> -- <cmd...> */
+	if (argc >= 3 && strcmp(argv[1], "--master-of") == 0)
+		return run_master_of(argc - 2, argv + 2);
+
+	if (compute_sock_dir() < 0)
+		return 1;
+
+	int i = 1;
+	while (i < argc)
+	{
+		const char *a = argv[i];
+		if (strcmp(a, "--") == 0)
+		{
+			i++;
+			break;
+		}
+		else if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0)
+		{
+			usage();
+			return 0;
+		}
+		else if (strcmp(a, "-l") == 0)
+		{
+			action = A_LIST;
+			i++;
+		}
+		else if (strcmp(a, "-ls") == 0)
+		{
+			action = A_LISTRAW;
+			i++;
+		}
+		else if (strcmp(a, "-kl") == 0 || strcmp(a, "-lk") == 0)
+		{
+			action = A_KILLALL;
+			i++;
+		}
+		else if (strcmp(a, "-k") == 0)
+		{
+			action = A_KILL;
+			i++;
+			if (i < argc && argv[i][0] != '-')
+			{
+				snprintf(session_name, sizeof(session_name),
+				         "%s", argv[i]);
+				kill_explicit = 1;
+				i++;
+			}
+		}
+		else if (strcmp(a, "-d") == 0)
+		{
+			action = A_DETACH;
+			i++;
+			if (i < argc && argv[i][0] != '-')
+			{
+				snprintf(session_name, sizeof(session_name),
+				         "%s", argv[i]);
+				kill_explicit = 1;
+				i++;
+			}
+		}
+		else if (strcmp(a, "-n") == 0)
+		{
+			i++;
+			if (i >= argc)
+			{
+				fprintf(stderr, "dch: -n needs a name\n");
+				return 1;
+			}
+			snprintf(session_name, sizeof(session_name),
+			         "%s", argv[i]);
+			forced_name = 1;
+			i++;
+		}
+		else if (strcmp(a, "-f") == 0)
+		{
+			force = 1;
+			i++;
+		}
+		else if (strcmp(a, "-E") == 0)
+		{
+			detach_char = -1;
+			i++;
+		}
+		else if (strcmp(a, "-e") == 0)
+		{
+			i++;
+			if (i >= argc)
+			{
+				fprintf(stderr, "dch: -e needs a char\n");
+				return 1;
+			}
+			const char *c = argv[i];
+			if (c[0] == '^' && c[1])
+				detach_char = (c[1] == '?') ? 0177
+				                            : (c[1] & 037);
+			else
+				detach_char = c[0];
+			i++;
+		}
+		else if (a[0] == '-' && a[1] != '\0')
+		{
+			fprintf(stderr, "dch: unknown flag %s\n", a);
+			return 1;
+		}
+		else
+			break;
+	}
+
+	/* Inner command after flags. argv is already NULL-terminated by libc. */
+	int inner_argc = argc - i;
+	char **inner_argv = argv + i;
+
+	/* Auto-name only where the action needs a specific session and the
+	** caller didn't already supply one. */
+	if (session_name[0] == '\0')
+	{
+		if (action == A_ATTACH ||
+		    (action == A_KILL && kill_explicit) ||
+		    (action == A_DETACH && kill_explicit))
+		{
+			auto_name(session_name, sizeof(session_name));
+		}
+	}
+
+	switch (action)
+	{
+	case A_LISTRAW:
+	{
+		struct slist sl = {0};
+		list_sessions(&sl);
+		int k;
+		for (k = 0; k < sl.n; k++)
+			puts(sl.v[k]);
+		slist_free(&sl);
+		return 0;
+	}
+	case A_LIST:
+	{
+		char chosen[600];
+		int rc = pick_session("attach session (mirror):",
+		                      chosen, sizeof(chosen));
+		if (rc == 0)
+		{
+			snprintf(session_name, sizeof(session_name),
+			         "%s", chosen);
+			return do_attach(exe, 1, 1, inner_argv, inner_argc);
+		}
+		return 0;
+	}
+	case A_KILL:
+	{
+		if (!kill_explicit && !forced_name)
+		{
+			char chosen[600];
+			int rc = pick_session("kill session:", chosen,
+			                      sizeof(chosen));
+			if (rc != 0)
+				return 0;
+			snprintf(session_name, sizeof(session_name),
+			         "%s", chosen);
+		}
+		return kill_session(session_name);
+	}
+	case A_KILLALL:
+		return kill_all();
+	case A_DETACH:
+	{
+		if (!kill_explicit && !forced_name)
+		{
+			char chosen[600];
+			int rc = pick_session("detach session:", chosen,
+			                      sizeof(chosen));
+			if (rc != 0)
+				return 0;
+			snprintf(session_name, sizeof(session_name),
+			         "%s", chosen);
+		}
+		char sp[1100];
+		snprintf(sp, sizeof(sp), "%s/%s.sock",
+		         sock_dir, session_name);
+		struct stat st;
+		if (stat(sp, &st) < 0 || !S_ISSOCK(st.st_mode))
+		{
+			fprintf(stderr, "no session: %s\n", session_name);
+			return 1;
+		}
+		int n = detach_all_clients_on(sp);
+		printf("detached %d client%s of: %s\n",
+		       n, n == 1 ? "" : "s", session_name);
+		return 0;
+	}
+	case A_ATTACH:
+		return do_attach(exe, forced_name, force,
+		                 inner_argv, inner_argc);
+	}
+	return 0;
+}
