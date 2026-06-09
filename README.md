@@ -64,6 +64,15 @@ shown with priority in `-l`/`-rl` as `alias (real-name)`. The underlying
 session name is untouched, so attach/kill/detach by real name keep working.
 An empty input clears the alias; killing a session removes its alias too.
 
+## Install with Homebrew
+
+```sh
+brew install ventsislav-georgiev/tap/dch
+```
+
+The formula is auto-published to the tap by dch's release workflow on every
+`v*` tag.
+
 ## Quick install
 
 ```sh
