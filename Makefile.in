@@ -17,6 +17,9 @@ TARFILES = $(srcdir)/README $(srcdir)/COPYING $(srcdir)/Makefile.in \
 dch: $(OBJ)
 	$(CC) -o $@ $(LDFLAGS) $(OBJ) $(LIBS)
 
+test: dch
+	sh $(srcdir)/tests/run.sh
+
 clean:
 	rm -f dch $(OBJ) dch-$(VERSION).tar.gz
 

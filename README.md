@@ -48,6 +48,7 @@ dch                            # → session "scratch", starts default shell
 dch -n release zsh             # → override auto-name; session "release"
 dch -ls                        # → list every running session
 dch -l                         # → pick one (TUI, arrow keys) and attach
+dch -rl                        # → pick one, type a new display name, repeat
 dch -k                         # → pick one and kill it
 dch -kl                        # → kill ALL sessions
 ```
@@ -55,6 +56,13 @@ dch -kl                        # → kill ALL sessions
 The auto-name uses cwd basename when you're not in a git repo, and
 `<repo-toplevel>-<branch>` when you are — slashes in branch names get
 replaced with `_` so they're safe.
+
+`dch -rl` renames a session interactively: pick one, type a new display
+name, and you're dropped back on the list to rename the next. The new name
+is a display **alias** only — stored in a sidecar file next to the socket,
+shown with priority in `-l`/`-rl` as `alias (real-name)`. The underlying
+session name is untouched, so attach/kill/detach by real name keep working.
+An empty input clears the alias; killing a session removes its alias too.
 
 ## Quick install
 
@@ -89,6 +97,7 @@ dch              # attach the auto-named session, or create it
 dch <cmd...>     # same, but if new, run <cmd> in it
 dch -ls          # list sessions
 dch -l           # pick a session (arrow keys) and attach
+dch -rl          # rename: pick a session, type a display alias, repeat
 dch -k [name]    # kill a session (interactive picker if no name)
 dch -kl          # kill ALL sessions
 dch -d [name]    # detach all clients of a session (sends SIGUSR1)

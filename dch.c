@@ -417,7 +417,8 @@ detach_all_clients_on(const char *sockp)
 
 struct slist
 {
-	char **v;
+	char **v;     /* real session names (socket basenames) */
+	char **alias; /* display alias or NULL; parallel to v */
 	int n, cap;
 };
 
@@ -428,7 +429,9 @@ slist_push(struct slist *l, const char *s)
 	{
 		l->cap = l->cap ? l->cap * 2 : 8;
 		l->v = realloc(l->v, l->cap * sizeof(char *));
+		l->alias = realloc(l->alias, l->cap * sizeof(char *));
 	}
+	l->alias[l->n] = NULL;
 	l->v[l->n++] = strdup(s);
 }
 
@@ -437,9 +440,14 @@ slist_free(struct slist *l)
 {
 	int i;
 	for (i = 0; i < l->n; i++)
+	{
 		free(l->v[i]);
+		free(l->alias[i]);
+	}
 	free(l->v);
+	free(l->alias);
 	l->v = NULL;
+	l->alias = NULL;
 	l->n = l->cap = 0;
 }
 
@@ -461,6 +469,52 @@ list_sessions(struct slist *out)
 		slist_push(out, nm);
 	}
 	closedir(d);
+	return 0;
+}
+
+/* Build the alias-sidecar path: <sock_dir>/<name>.sock.alias */
+static int
+alias_path(const char *name, char *out, size_t outsz)
+{
+	int n = snprintf(out, outsz, "%s/%s.sock.alias", sock_dir, name);
+	return (n < 0 || (size_t)n >= outsz) ? -1 : 0;
+}
+
+/* Fill sl->alias[i] from each session's sidecar file (NULL if none). */
+static void
+load_aliases(struct slist *sl)
+{
+	int i;
+	for (i = 0; i < sl->n; i++)
+	{
+		char ap[1200], line[600];
+		if (alias_path(sl->v[i], ap, sizeof(ap)) == 0 &&
+		    read_first_line(ap, line, sizeof(line)) == 0)
+		{
+			free(sl->alias[i]);
+			sl->alias[i] = strdup(line);
+		}
+	}
+}
+
+/* Write (or clear, when alias is empty) the sidecar for `name`. */
+static int
+write_alias(const char *name, const char *alias)
+{
+	char ap[1200];
+	if (alias_path(name, ap, sizeof(ap)) < 0)
+		return -1;
+	if (!alias || !alias[0])
+	{
+		unlink(ap);
+		return 0;
+	}
+	int fd = open(ap, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+	if (fd < 0)
+		return -1;
+	(void)!write(fd, alias, strlen(alias));
+	(void)!write(fd, "\n", 1);
+	close(fd);
 	return 0;
 }
 
@@ -537,10 +591,16 @@ picker_draw(int fd, const char *header, struct slist *sl, int sel,
 		end = sl->n;
 	for (int i = top; i < end; i++)
 	{
-		if (i == sel)
-			dprintf(fd, "\033[2K\033[7m> %s\033[0m\r\n", sl->v[i]);
+		char row[1300];
+		if (sl->alias && sl->alias[i])
+			snprintf(row, sizeof(row), "%s (%s)",
+			         sl->alias[i], sl->v[i]);
 		else
-			dprintf(fd, "\033[2K  %s\r\n", sl->v[i]);
+			snprintf(row, sizeof(row), "%s", sl->v[i]);
+		if (i == sel)
+			dprintf(fd, "\033[2K\033[7m> %s\033[0m\r\n", row);
+		else
+			dprintf(fd, "\033[2K  %s\r\n", row);
 	}
 }
 
@@ -567,6 +627,7 @@ pick_session(const char *header, char *out, size_t outsz)
 		slist_free(&sl);
 		return 1;
 	}
+	load_aliases(&sl);
 
 	int fd = open("/dev/tty", O_RDWR);
 	if (fd < 0)
@@ -691,6 +752,177 @@ pick_session(const char *header, char *out, size_t outsz)
 	return rc;
 }
 
+/* ---- interactive rename (alias sidecar) ---------------------------- */
+
+/* Put the tty into the same raw mode the picker uses + hide cursor. */
+static void
+picker_raw_on(int fd)
+{
+	struct termios raw = picker_saved_term;
+	raw.c_lflag &= ~(ICANON | ECHO | ISIG | IEXTEN);
+	raw.c_iflag &= ~(IXON | ICRNL | INLCR | IGNCR);
+	raw.c_cc[VMIN] = 1;
+	raw.c_cc[VTIME] = 0;
+	tcsetattr(fd, TCSANOW, &raw);
+	tw(fd, "\033[?25l"
+	       "\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?1015l"
+	       "\033[?2004l");
+}
+
+/* Read one cooked line from the tty (echo on). Returns 0 with the trimmed
+** line in `out` (possibly empty), -1 on EOF/error. Caller is responsible
+** for re-entering raw mode afterwards. */
+static int
+prompt_line(int fd, const char *prompt, char *out, size_t outsz)
+{
+	tcsetattr(fd, TCSANOW, &picker_saved_term); /* cooked + echo */
+	tw(fd, "\033[?25h\033[2K\r");
+	tw(fd, prompt);
+	ssize_t r;
+	do {
+		r = read(fd, out, outsz - 1);
+	} while (r < 0 && errno == EINTR);
+	if (r <= 0)
+	{
+		out[0] = '\0';
+		return -1;
+	}
+	out[r] = '\0';
+	chomp(out);
+	return 0;
+}
+
+/* Interactive rename: pick a session, type a new alias, repeat until quit.
+** Empty input clears the alias (reverts to the real name). */
+static int
+rename_sessions_interactive(void)
+{
+	struct slist sl = {0};
+	if (list_sessions(&sl) < 0 || sl.n == 0)
+	{
+		fprintf(stderr, "no sessions\n");
+		slist_free(&sl);
+		return 0;
+	}
+	load_aliases(&sl);
+
+	int fd = open("/dev/tty", O_RDWR);
+	if (fd < 0)
+	{
+		fprintf(stderr, "dch: rename needs a terminal\n");
+		slist_free(&sl);
+		return 1;
+	}
+	if (tcgetattr(fd, &picker_saved_term) < 0)
+	{
+		close(fd);
+		slist_free(&sl);
+		return 1;
+	}
+	picker_tty_fd = fd;
+	picker_term_saved = 1;
+	signal(SIGINT, picker_sigint);
+	signal(SIGTERM, picker_sigint);
+	signal(SIGHUP, picker_sigint);
+	picker_raw_on(fd);
+
+	const char *header = "rename session (enter=edit, q=quit):";
+	int sel = 0, top = 0, drawn = 0, prev_lines = 0;
+
+	for (;;)
+	{
+		int rows = tty_rows(fd);
+		int win = rows - 2;
+		if (win < 1)
+			win = 1;
+		if (win > sl.n)
+			win = sl.n;
+		int lines = 1 + win;
+
+		if (sel >= sl.n)
+			sel = sl.n - 1;
+		if (sel < top)
+			top = sel;
+		else if (sel >= top + win)
+			top = sel - win + 1;
+
+		if (drawn)
+			picker_erase(fd, prev_lines);
+		picker_draw(fd, header, &sl, sel, top, win);
+		drawn = 1;
+		prev_lines = lines;
+
+		unsigned char c;
+		ssize_t r;
+		do {
+			r = read(fd, &c, 1);
+		} while (r < 0 && errno == EINTR);
+		if (r <= 0)
+			break;
+
+		if (c == 'q' || c == 3 /*^C*/ || c == 4 /*^D*/)
+			break;
+		if (c == 'j')
+		{
+			if (sel < sl.n - 1)
+				sel++;
+			continue;
+		}
+		if (c == 'k')
+		{
+			if (sel > 0)
+				sel--;
+			continue;
+		}
+		if (c == 27) /* ESC / arrows */
+		{
+			fd_set rs;
+			struct timeval tv = {0, 50 * 1000};
+			FD_ZERO(&rs);
+			FD_SET(fd, &rs);
+			if (select(fd + 1, &rs, NULL, NULL, &tv) <= 0)
+				break;
+			unsigned char b1, b2;
+			if (read(fd, &b1, 1) != 1 || b1 != '[')
+				break;
+			if (read(fd, &b2, 1) != 1)
+				break;
+			if (b2 == 'A' && sel > 0)
+				sel--;
+			else if (b2 == 'B' && sel < sl.n - 1)
+				sel++;
+			continue;
+		}
+		if (c == '\r' || c == '\n')
+		{
+			char prompt[700], in[600];
+			picker_erase(fd, prev_lines);
+			snprintf(prompt, sizeof(prompt),
+			         "new name for '%s' (empty=clear): ", sl.v[sel]);
+			if (prompt_line(fd, prompt, in, sizeof(in)) == 0)
+			{
+				sanitize(in);
+				write_alias(sl.v[sel], in);
+				free(sl.alias[sel]);
+				sl.alias[sel] = in[0] ? strdup(in) : NULL;
+			}
+			picker_raw_on(fd);
+			tw(fd, "\033[2K\r");
+			drawn = 0; /* redraw fresh, nothing to erase */
+			continue;
+		}
+	}
+
+	if (drawn)
+		picker_erase(fd, prev_lines);
+	picker_restore();
+	signal(SIGINT, SIG_DFL);
+	signal(SIGTERM, SIG_DFL);
+	signal(SIGHUP, SIG_DFL);
+	slist_free(&sl);
+	return 0;
+}
+
 /* ---- session kill --------------------------------------------------- */
 
 /*
@@ -749,6 +981,9 @@ kill_session(const char *name)
 	}
 
 	unlink(sp);
+	char ap[1200];
+	if (alias_path(name, ap, sizeof(ap)) == 0)
+		unlink(ap);
 	printf("killed: %s\n", name);
 	return 0;
 }
@@ -793,6 +1028,7 @@ usage(void)
 	    "  dch -k [name]    kill session; without name, pick interactively\n"
 	    "  dch -kl          kill ALL sessions\n"
 	    "  dch -ls          list sessions (one per line)\n"
+	    "  dch -rl          interactively rename (alias) sessions\n"
 	    "  dch -d [name]    detach all clients of session (sends SIGUSR1)\n"
 	    "  dch -n <name>    override auto-name\n"
 	    "  dch -f           force attach even if busy (mirror)\n"
@@ -987,7 +1223,8 @@ main(int argc, char **argv)
 	int forced_name = 0;
 	int force = 0;
 	int kill_explicit = 0;
-	enum { A_ATTACH, A_LIST, A_KILL, A_KILLALL, A_DETACH, A_LISTRAW }
+	enum { A_ATTACH, A_LIST, A_KILL, A_KILLALL, A_DETACH, A_LISTRAW,
+	       A_RENAME }
 	    action = A_ATTACH;
 
 	progname = argv[0];
@@ -1024,6 +1261,11 @@ main(int argc, char **argv)
 		else if (strcmp(a, "-ls") == 0)
 		{
 			action = A_LISTRAW;
+			i++;
+		}
+		else if (strcmp(a, "-rl") == 0)
+		{
+			action = A_RENAME;
 			i++;
 		}
 		else if (strcmp(a, "-kl") == 0 || strcmp(a, "-lk") == 0)
@@ -1158,6 +1400,8 @@ main(int argc, char **argv)
 		}
 		return kill_session(session_name);
 	}
+	case A_RENAME:
+		return rename_sessions_interactive();
 	case A_KILLALL:
 		return kill_all();
 	case A_DETACH:
