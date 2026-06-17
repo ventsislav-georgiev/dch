@@ -138,23 +138,33 @@ compute_sock_dir(void)
 	return 0;
 }
 
-/* Build sock_path; fail loudly if it would overflow AF_UNIX sun_path. */
+/* Build sock_path. If <name> would overflow AF_UNIX sun_path, deterministically
+** shorten it (keep a prefix + append a hash of the full name) so create and
+** attach agree and it "just works" regardless of cwd/branch length. */
 static int
 make_sock_path(const char *name)
 {
+	struct sockaddr_un sa;
+	/* Chars available for the name itself: "<sock_dir>/" + name + ".sock\0". */
+	size_t budget = sizeof(sa.sun_path) - strlen(sock_dir) - 1 - 5 - 1;
+	char shortened[256];
+	if (strlen(name) > budget && budget > 8)
+	{
+		/* djb2 hash of the full name -> 6 hex chars for uniqueness. */
+		unsigned long h = 5381;
+		for (const char *p = name; *p; p++)
+			h = ((h << 5) + h) + (unsigned char)*p;
+		int keep = (int)budget - 7; /* '-' + 6 hex */
+		snprintf(shortened, sizeof(shortened), "%.*s-%06lx",
+		         keep, name, h & 0xffffff);
+		name = shortened;
+	}
 	int n = snprintf(sock_path, sizeof(sock_path),
 	                 "%s/%s.sock", sock_dir, name);
-	if (n < 0 || (size_t)n >= sizeof(sock_path))
+	if (n < 0 || (size_t)n >= sizeof(sock_path) ||
+	    (size_t)n >= sizeof(sa.sun_path))
 	{
 		fprintf(stderr, "dch: socket path too long\n");
-		return -1;
-	}
-	struct sockaddr_un sa;
-	if ((size_t)n >= sizeof(sa.sun_path))
-	{
-		fprintf(stderr,
-		    "dch: socket path %d > sun_path %zu (rename or shorter cwd)\n",
-		    n, sizeof(sa.sun_path));
 		return -1;
 	}
 	sockname = sock_path;

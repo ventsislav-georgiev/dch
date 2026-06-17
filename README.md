@@ -5,6 +5,8 @@ panes, no tabs, no config file. One session per project, auto-named, attached
 on demand. Close the laptop, drop the SSH, quit the terminal — your shell
 keeps running.
 
+The name is short for **ditch** — ditch your terminal, keep the session.
+
 ![dch --help](docs/dch-help.png)
 
 [dtach]: https://github.com/crigler/dtach
