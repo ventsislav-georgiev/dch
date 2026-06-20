@@ -59,5 +59,21 @@ check "-ls ignores alias" "$ls_out" "alpha,beta,"
 # --- -rl needs a tty when sessions exist (headless = graceful error) -------
 "$DCH" -rl </dev/null >/dev/null 2>&1; check "-rl headless exits 1" "$?" "1"
 
+# --- DCH_SOCKET_DIR override: used verbatim, and wins over XDG_RUNTIME_DIR ---
+DCHDIR="$TMP/custom-dch"
+mkdir -p "$DCHDIR"
+mksock "$DCHDIR/gamma.sock"
+# XDG dir still has beta.sock; the override must list gamma, NOT beta.
+ovr_out=$(DCH_SOCKET_DIR="$DCHDIR" "$DCH" -ls 2>/dev/null | sort | tr '\n' ',')
+check "DCH_SOCKET_DIR overrides XDG" "$ovr_out" "gamma,"
+# Override creates the leaf dir if missing (mkdir 0700), then lists empty.
+NEWDIR="$TMP/made-by-dch"
+empty_out=$(DCH_SOCKET_DIR="$NEWDIR" "$DCH" -ls 2>/dev/null)
+check "DCH_SOCKET_DIR empty -ls" "$empty_out" ""
+[ -d "$NEWDIR" ] && ok "DCH_SOCKET_DIR creates leaf dir" || bad "DCH_SOCKET_DIR creates leaf dir"
+# Unset → unchanged behavior: still sees the XDG sessions (beta).
+unset_out=$("$DCH" -ls 2>/dev/null | sort | tr '\n' ',')
+check "unset DCH_SOCKET_DIR = XDG default" "$unset_out" "beta,"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

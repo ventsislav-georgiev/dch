@@ -117,13 +117,21 @@ run_capture(const char *cmd, char *out, size_t outsz)
 	return out[0] ? 0 : -1;
 }
 
-/* SOCK_DIR = $XDG_RUNTIME_DIR/dch-$UID, fallback /tmp/dch-$UID. mkdir 0700. */
+/* SOCK_DIR = $DCH_SOCKET_DIR, else $XDG_RUNTIME_DIR/dch-$UID, fallback
+** /tmp/dch-$UID. mkdir 0700. DCH_SOCKET_DIR (when set) is used verbatim — a host
+** process (e.g. a GUI app spawning sessions) can pin one deterministic dir so it
+** and a shell-launched dch agree, regardless of the GUI-vs-shell environment
+** split that otherwise leaves XDG_RUNTIME_DIR set in one but not the other. Only
+** the leaf is created, same as the XDG path; the caller owns the parent. */
 static int
 compute_sock_dir(void)
 {
+	const char *dir = getenv("DCH_SOCKET_DIR");
 	const char *xdg = getenv("XDG_RUNTIME_DIR");
 	uid_t uid = getuid();
-	if (xdg && *xdg)
+	if (dir && *dir)
+		snprintf(sock_dir, sizeof(sock_dir), "%s", dir);
+	else if (xdg && *xdg)
 		snprintf(sock_dir, sizeof(sock_dir), "%s/dch-%u",
 		         xdg, (unsigned)uid);
 	else
