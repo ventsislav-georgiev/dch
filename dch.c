@@ -1046,7 +1046,9 @@ usage(void)
 	    "  dch -k [name]    kill session; without name, pick interactively\n"
 	    "  dch -kl          kill ALL sessions\n"
 	    "  dch -ls          list sessions (one per line)\n"
+	    "  dch -lj          list sessions as name<TAB>alias per line\n"
 	    "  dch -rl          interactively rename (alias) sessions\n"
+	    "  dch -m <name> [alias]  set alias non-interactively (empty clears)\n"
 	    "  dch -d [name]    detach all clients of session (sends SIGUSR1)\n"
 	    "  dch -n <name>    override auto-name\n"
 	    "  dch -f           force attach even if busy (mirror)\n"
@@ -1242,8 +1244,9 @@ main(int argc, char **argv)
 	int force = 0;
 	int kill_explicit = 0;
 	enum { A_ATTACH, A_LIST, A_KILL, A_KILLALL, A_DETACH, A_LISTRAW,
-	       A_RENAME }
+	       A_RENAME, A_LISTJSON, A_SETALIAS }
 	    action = A_ATTACH;
+	char alias_arg[600] = "";
 
 	progname = argv[0];
 	char *exe = realpath(argv[0], NULL);
@@ -1281,10 +1284,33 @@ main(int argc, char **argv)
 			action = A_LISTRAW;
 			i++;
 		}
+		else if (strcmp(a, "-lj") == 0)
+		{
+			action = A_LISTJSON;
+			i++;
+		}
 		else if (strcmp(a, "-rl") == 0)
 		{
 			action = A_RENAME;
 			i++;
+		}
+		else if (strcmp(a, "-m") == 0)
+		{
+			/* Non-interactive set/clear alias: -m <name> [alias]. */
+			action = A_SETALIAS;
+			i++;
+			if (i < argc)
+			{
+				snprintf(session_name, sizeof(session_name),
+				         "%s", argv[i]);
+				i++;
+			}
+			if (i < argc)
+			{
+				snprintf(alias_arg, sizeof(alias_arg), "%s",
+				         argv[i]);
+				i++;
+			}
 		}
 		else if (strcmp(a, "-kl") == 0 || strcmp(a, "-lk") == 0)
 		{
@@ -1390,6 +1416,34 @@ main(int argc, char **argv)
 			puts(sl.v[k]);
 		slist_free(&sl);
 		return 0;
+	}
+	case A_LISTJSON:
+	{
+		/* Machine list: one "name\talias" per line (alias empty when
+		** none). Tab-separated, not JSON — no escaping needed since
+		** names can't contain tabs and set-alias strips them. */
+		struct slist sl = {0};
+		list_sessions(&sl);
+		load_aliases(&sl);
+		int k;
+		for (k = 0; k < sl.n; k++)
+			printf("%s\t%s\n", sl.v[k],
+			       sl.alias[k] ? sl.alias[k] : "");
+		slist_free(&sl);
+		return 0;
+	}
+	case A_SETALIAS:
+	{
+		if (session_name[0] == '\0')
+		{
+			fprintf(stderr, "dch: -m needs a session name\n");
+			return 1;
+		}
+		/* Keep aliases single-line and tab-free so -lj stays parseable. */
+		for (char *p = alias_arg; *p; p++)
+			if (*p == '\t' || *p == '\n' || *p == '\r')
+				*p = ' ';
+		return write_alias(session_name, alias_arg) == 0 ? 0 : 1;
 	}
 	case A_LIST:
 	{
