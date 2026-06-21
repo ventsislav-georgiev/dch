@@ -75,5 +75,15 @@ check "DCH_SOCKET_DIR empty -ls" "$empty_out" ""
 unset_out=$("$DCH" -ls 2>/dev/null | sort | tr '\n' ',')
 check "unset DCH_SOCKET_DIR = XDG default" "$unset_out" "beta,"
 
+# --- on-demand redraw (SIGUSR2 → MSG_REDRAW(REDRAW_WINCH)) ------------------
+# Real forkpty spawn, so it needs an executable dch + python3. Skip gracefully.
+if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
+    if DCH="$DCH" python3 "$(dirname "$0")/redraw_test.py" >/dev/null 2>&1; then
+        ok "SIGUSR2 redraw reaches inner program"
+    else
+        bad "SIGUSR2 redraw reaches inner program"
+    fi
+fi
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
