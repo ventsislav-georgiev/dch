@@ -1,7 +1,7 @@
 # Process this file with autoconf to produce a configure script.
 # dch is a fork of dtach (C)Copyright 2004-2016 Ned T. Crigler, GPL-2.0-or-later.
 # Original attribution preserved in source headers, README, and COPYING.
-AC_INIT(dch, 0.13, https://github.com/ventsislav-georgiev/dch/issues)
+AC_INIT(dch, 0.14, https://github.com/ventsislav-georgiev/dch/issues)
 AC_PREREQ(2.60)
 AC_CONFIG_SRCDIR(main.c)
 AC_CONFIG_HEADER(config.h)

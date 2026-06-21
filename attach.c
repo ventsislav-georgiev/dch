@@ -34,6 +34,8 @@ static struct termios cur_term;
 static int win_changed;
 /* SIGUSR1 → clean detach. Set by handler, checked in main loop. */
 static volatile sig_atomic_t want_detach;
+/* SIGUSR2 → force a redraw (MSG_REDRAW). Set by handler, checked in main loop. */
+static volatile sig_atomic_t want_redraw;
 
 /*
 ** Restore terminal + reset modes inner program may have left on (mouse
@@ -132,6 +134,18 @@ win_change(ATTRIBUTE_UNUSED int sig)
 {
 	signal(SIGWINCH, win_change);
 	win_changed = 1;
+}
+
+/* SIGUSR2 → force a full redraw of the inner program without reattaching.
+** Sends MSG_REDRAW(REDRAW_WINCH) so the master raises SIGWINCH at the program
+** unconditionally (even when the size is unchanged), making it repaint. Used by
+** hosts (DchTerm) to recover after a local relayout — e.g. the soft keyboard
+** showing/hiding — where no byte stream change would otherwise repaint. */
+static RETSIGTYPE
+on_sigusr2(ATTRIBUTE_UNUSED int sig)
+{
+	signal(SIGUSR2, on_sigusr2);
+	want_redraw = 1;
 }
 
 /* Handles input from the keyboard. Scans the WHOLE buffer for the detach
@@ -303,6 +317,7 @@ attach_main(int noerror)
 	signal(SIGQUIT, die);
 	signal(SIGWINCH, win_change);
 	signal(SIGUSR1, on_sigusr1);
+	signal(SIGUSR2, on_sigusr2);
 
 	/* Set raw mode. */
 	cur_term.c_iflag &= ~(IGNBRK|BRKINT|PARMRK|ISTRIP|INLCR|IGNCR|ICRNL);
@@ -384,6 +399,18 @@ attach_main(int noerror)
 			win_changed = 0;
 
 			pkt.type = MSG_WINCH;
+			ioctl(0, TIOCGWINSZ, &pkt.u.ws);
+			write_packet_or_fail(s, &pkt);
+		}
+
+		/* Redraw requested (SIGUSR2)? Force the program to repaint via an
+		** unconditional WINCH at the master, regardless of size change. */
+		if (want_redraw)
+		{
+			want_redraw = 0;
+
+			pkt.type = MSG_REDRAW;
+			pkt.len = REDRAW_WINCH;
 			ioctl(0, TIOCGWINSZ, &pkt.u.ws);
 			write_packet_or_fail(s, &pkt);
 		}
