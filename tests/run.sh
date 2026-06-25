@@ -50,10 +50,19 @@ printf 'My Alpha\n' > "$SOCKDIR/alpha.sock.alias"
 ls_out=$("$DCH" -ls 2>/dev/null | sort | tr '\n' ',')
 check "-ls ignores alias" "$ls_out" "alpha,beta,"
 
-# --- kill removes both socket and its alias sidecar ------------------------
+# --- -lj exposes name<TAB>alias<TAB>activity_epoch -------------------------
+# alpha (with alias) gets a fresh activity stamp; beta has none → epoch 0.
+: > "$SOCKDIR/alpha.sock.act"
+lj_alpha=$("$DCH" -lj 2>/dev/null | awk -F'\t' '$1=="alpha"{print NF":"($3>0)}')
+check "-lj alpha: 3 fields, recent epoch" "$lj_alpha" "3:1"
+lj_beta=$("$DCH" -lj 2>/dev/null | awk -F'\t' '$1=="beta"{print NF":"$3}')
+check "-lj beta: 3 fields, epoch 0" "$lj_beta" "3:0"
+
+# --- kill removes socket, alias, and activity sidecars ---------------------
 "$DCH" -k alpha >/dev/null 2>&1
 [ ! -e "$SOCKDIR/alpha.sock" ]       && ok "kill removes socket"        || bad "kill removes socket"
 [ ! -e "$SOCKDIR/alpha.sock.alias" ] && ok "kill removes alias sidecar" || bad "kill removes alias sidecar"
+[ ! -e "$SOCKDIR/alpha.sock.act" ]   && ok "kill removes act sidecar"   || bad "kill removes act sidecar"
 [ -e "$SOCKDIR/beta.sock" ]          && ok "kill leaves other session"  || bad "kill leaves other session"
 
 # --- -rl needs a tty when sessions exist (headless = graceful error) -------

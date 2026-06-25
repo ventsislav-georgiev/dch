@@ -86,11 +86,43 @@ pid_t forkpty(int *amaster, char *name, struct termios *termp,
 	      struct winsize *winp);
 #endif
 
-/* Unlink the socket */
+/* Unlink the socket (and its activity sidecar). */
 static void
 unlink_socket(void)
 {
+	char act[1100];
+	int n = snprintf(act, sizeof act, "%s.act", sockname);
+
 	unlink(sockname);
+	if (n > 0 && (size_t)n < sizeof act)
+		unlink(act);
+}
+
+/* Stamp the per-session activity sidecar `<sockname>.act` with the current time
+** so a watcher (Prosper's keep-awake) can tell a detached session is still doing
+** work and must not sleep. Throttled to once a second — pty output is bursty and
+** we only need second-granularity freshness. The file's mtime IS the signal; the
+** body stays empty. Best-effort: a failed stamp just means one missed second. */
+static void
+touch_activity(void)
+{
+	static time_t last;
+	time_t now = time(NULL);
+	char path[1100];
+	int n, fd;
+
+	if (now == last)
+		return;			/* ponytail: 1s throttle, plenty for a sleep guard */
+	last = now;
+
+	n = snprintf(path, sizeof path, "%s.act", sockname);
+	if (n < 0 || (size_t)n >= sizeof path)
+		return;
+	fd = open(path, O_WRONLY | O_CREAT, 0600);
+	if (fd < 0)
+		return;
+	futimens(fd, NULL);		/* NULL => set atime+mtime to now */
+	close(fd);
 }
 
 /* Signal */
@@ -426,6 +458,9 @@ pty_activity(int s)
 		}
 		exit(1);
 	}
+
+	/* Real output happened — refresh the activity stamp (throttled). */
+	touch_activity();
 
 #ifdef BROKEN_MASTER
 	/* Get the current terminal settings. */

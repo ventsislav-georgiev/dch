@@ -498,6 +498,21 @@ alias_path(const char *name, char *out, size_t outsz)
 	return (n < 0 || (size_t)n >= outsz) ? -1 : 0;
 }
 
+/* Last-activity epoch (mtime of <sock_dir>/<name>.sock.act, written by the
+** master on pty output). 0 when the session has produced no output yet / no
+** sidecar. Lets a watcher tell a detached-but-working session from an idle one. */
+static long
+activity_epoch(const char *name)
+{
+	char ap[1300];
+	struct stat st;
+	int n = snprintf(ap, sizeof ap, "%s/%s.sock.act", sock_dir, name);
+
+	if (n < 0 || (size_t)n >= sizeof ap || stat(ap, &st) != 0)
+		return 0;
+	return (long)st.st_mtime;
+}
+
 /* Fill sl->alias[i] from each session's sidecar file (NULL if none). */
 static void
 load_aliases(struct slist *sl)
@@ -1002,6 +1017,11 @@ kill_session(const char *name)
 	char ap[1200];
 	if (alias_path(name, ap, sizeof(ap)) == 0)
 		unlink(ap);
+	/* Drop the activity sidecar too (the master unlinks it on a clean exit,
+	** but a SIGKILLed master never runs atexit). */
+	char act[1200];
+	if (snprintf(act, sizeof act, "%s/%s.sock.act", sock_dir, name) > 0)
+		unlink(act);
 	printf("killed: %s\n", name);
 	return 0;
 }
@@ -1046,7 +1066,7 @@ usage(void)
 	    "  dch -k [name]    kill session; without name, pick interactively\n"
 	    "  dch -kl          kill ALL sessions\n"
 	    "  dch -ls          list sessions (one per line)\n"
-	    "  dch -lj          list sessions as name<TAB>alias per line\n"
+	    "  dch -lj          list sessions as name<TAB>alias<TAB>activity_epoch per line\n"
 	    "  dch -rl          interactively rename (alias) sessions\n"
 	    "  dch -m <name> [alias]  set alias non-interactively (empty clears)\n"
 	    "  dch -d [name]    detach all clients of session (sends SIGUSR1)\n"
@@ -1419,16 +1439,18 @@ main(int argc, char **argv)
 	}
 	case A_LISTJSON:
 	{
-		/* Machine list: one "name\talias" per line (alias empty when
-		** none). Tab-separated, not JSON — no escaping needed since
-		** names can't contain tabs and set-alias strips them. */
+		/* Machine list: one "name\talias\tactivity_epoch" per line (alias
+		** empty when none, epoch 0 when no output yet). Tab-separated, not
+		** JSON — no escaping needed since names can't contain tabs and
+		** set-alias strips them. */
 		struct slist sl = {0};
 		list_sessions(&sl);
 		load_aliases(&sl);
 		int k;
 		for (k = 0; k < sl.n; k++)
-			printf("%s\t%s\n", sl.v[k],
-			       sl.alias[k] ? sl.alias[k] : "");
+			printf("%s\t%s\t%ld\n", sl.v[k],
+			       sl.alias[k] ? sl.alias[k] : "",
+			       activity_epoch(sl.v[k]));
 		slist_free(&sl);
 		return 0;
 	}
