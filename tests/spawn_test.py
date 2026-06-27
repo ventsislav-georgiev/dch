@@ -144,6 +144,36 @@ def main():
                 ok("hot path attaches to live master (inner ran once)")
             else:
                 bad("hot path respawned inner (ran %d times, want 1)" % runs)
+
+        # 4. cwd trap: invoked as a bare PATH name from a directory that
+        #    contains a "dch" subdir. realpath(argv[0]) used to resolve the
+        #    bare name relative to cwd -> the ./dch DIRECTORY, so the master
+        #    execvp'd a directory and the spawn failed ("failed to spawn").
+        bindir = tempfile.mkdtemp()
+        os.symlink(os.path.abspath(DCH), os.path.join(bindir, "dch"))
+        trap = tempfile.mkdtemp()
+        os.makedirs(os.path.join(trap, "dch"))  # the ./dch directory trap
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.chdir(trap)
+            os.environ.pop("DCH_SESSION", None)
+            os.environ["PATH"] = bindir + ":" + os.environ.get("PATH", "")
+            os.execvp("dch", ["dch", "-n", "cwdtrap",
+                              "sh", "-c", "printf TRAP_OK; exit 0"])
+            os._exit(127)
+        out = drain(fd, 2.0)
+        for _ in range(20):
+            wpid, _ = os.waitpid(pid, os.WNOHANG)
+            if wpid == pid:
+                break
+            time.sleep(0.05)
+        os.close(fd)
+        shutil.rmtree(bindir, ignore_errors=True)
+        shutil.rmtree(trap, ignore_errors=True)
+        if "TRAP_OK" in out and "failed to spawn" not in out:
+            ok("spawn as bare name from a dir containing ./dch")
+        else:
+            bad("cwd ./dch trap (out=%r)" % out)
     finally:
         os.system("'%s' -kl >/dev/null 2>&1" % DCH)
         shutil.rmtree(tmp, ignore_errors=True)

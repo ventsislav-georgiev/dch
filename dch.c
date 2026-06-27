@@ -19,7 +19,7 @@
 #include <sys/un.h>
 
 /* dch's own version, independent of the dtach base (PACKAGE_VERSION). */
-#define DCH_VERSION "1.0"
+#define DCH_VERSION "1.0.1"
 
 /* Shared globals (declared in dtach.h, used by attach.c/master.c). */
 const char copyright[] = "dch - based on dtach " PACKAGE_VERSION
@@ -1376,9 +1376,19 @@ main(int argc, char **argv)
 	char alias_arg[600] = "";
 
 	progname = argv[0];
-	char *exe = realpath(argv[0], NULL);
-	if (!exe)
-		exe = argv[0];
+	/* Resolve exe for the master re-exec. Only realpath() when argv[0] is a
+	** path (has a '/'): a bare name like "dch" came from a PATH lookup by the
+	** shell, and realpath()ing it resolves RELATIVE TO CWD — which silently
+	** picks up an unrelated "./dch" (e.g. a `dch/` source dir) and makes the
+	** master execvp() a directory ("failed to spawn"). Leaving a bare name as
+	** is lets the child's execvp() re-search PATH, which is what we want. */
+	char *exe = argv[0];
+	if (strchr(argv[0], '/'))
+	{
+		char *rp = realpath(argv[0], NULL);
+		if (rp)
+			exe = rp;
+	}
 
 	/* Internal sentinel: master-of <sock> -- <cmd...> */
 	if (argc >= 3 && strcmp(argv[1], "--master-of") == 0)
