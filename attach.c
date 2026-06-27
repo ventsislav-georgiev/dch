@@ -345,6 +345,7 @@ attach_main(int noerror)
 	pkt.len = redraw_method;
 	ioctl(0, TIOCGWINSZ, &pkt.u.ws);
 	write_packet_or_fail(s, &pkt);
+	dch_trace("client attached fd=%d sock=%s", s, sockname);
 
 	/* Wait for things to happen */
 	while (1)
@@ -369,9 +370,15 @@ attach_main(int noerror)
 			ssize_t len = read(s, buf, sizeof(buf));
 
 			if (len == 0)
-				exit(0); /* server gone — silent */
+			{
+				dch_trace("client exit: master closed socket");
+				exit(0);
+			}
 			else if (len < 0)
+			{
+				dch_trace("client exit: read(s) errno=%d", errno);
 				exit(1);
+			}
 			/* Send the data to the terminal. */
 			write_buf_or_fail(1, buf, len);
 			n--;
@@ -382,7 +389,6 @@ attach_main(int noerror)
 			ssize_t len;
 
 			pkt.type = MSG_PUSH;
-			memset(pkt.u.buf, 0, sizeof(pkt.u.buf));
 			len = read(0, pkt.u.buf, sizeof(pkt.u.buf));
 
 			if (len <= 0)
@@ -467,7 +473,6 @@ push_main()
 	{
 		ssize_t len;
 
-		memset(pkt.u.buf, 0, sizeof(pkt.u.buf));
 		len = read(0, pkt.u.buf, sizeof(pkt.u.buf));
 
 		if (len == 0)
@@ -480,15 +485,6 @@ push_main()
 		}
 
 		pkt.len = len;
-		len = write(s, &pkt, sizeof(struct packet));
-		if (len != sizeof(struct packet))
-		{
-			if (len >= 0)
-				errno = EPIPE;
-
-			printf("%s: %s: %s\n", progname, sockname,
-			       strerror(errno));
-			return 1;
-		}
+		write_packet_or_fail(s, &pkt);
 	}
 }

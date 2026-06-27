@@ -115,14 +115,35 @@ enum
 	REDRAW_WINCH	= 3,
 };
 
-/* The client to master protocol. */
+/*
+** The client to master protocol.
+**
+** Wire frame is variable length: [type:1][len:2 host-order][payload:len].
+** Keystrokes stay tiny on the wire (good for slow links); paste/bulk input
+** fills up to PKT_MAX per frame, so a big paste costs ~len/PKT_MAX frames
+** instead of one frame per 8 bytes (the old fixed-frame cap).
+**
+** `len` is overloaded by type, exactly as before: PUSH = payload byte count,
+** REDRAW = redraw method. WINCH/REDRAW carry a struct winsize payload (sized
+** from the type, not len); ATTACH/DETACH carry no payload.
+**
+** NOTE: this framing is NOT wire-compatible with the old fixed-size packet.
+** A new client cannot attach to a master built before this change — kill old
+** sessions and start fresh.
+*/
+#define PKT_HDR 3
+/* ponytail: 4 KB paste chunk — fewer frames per paste, tiny typing frames.
+** Bump if huge pastes over fast links ever dominate; costs PKT_HDR+PKT_MAX
+** per-client reassembly buffer in the master. */
+#define PKT_MAX 4096
+
 struct packet
 {
 	unsigned char type;
-	unsigned char len;
+	unsigned short len;
 	union
 	{
-		unsigned char buf[sizeof(struct winsize)];
+		unsigned char buf[PKT_MAX];
 		struct winsize ws;
 	} u;
 };
@@ -139,8 +160,24 @@ struct packet
 /* This hopefully moves to the bottom of the screen */
 #define EOS "\033[999H"
 
+/*
+** Opt-in debug tracing. No-op unless the DCH_DEBUG env var is set:
+**   DCH_DEBUG=<path>  append trace lines to <path>
+**   DCH_DEBUG=1       append to /tmp/dch.<uid>.trace
+** The env is inherited across the master re-exec, so client and master both
+** trace to the same sink. The master daemonizes with stderr -> /dev/null, so a
+** file sink is the only thing that survives there. Cheap when disabled (one
+** cached flag check); see dch_trace() in dch.c.
+*/
+void dch_trace(const char *fmt, ...)
+#if defined(__GNUC__) || defined(__clang__)
+	__attribute__((format(printf, 1, 2)))
+#endif
+	;
+
 void write_buf_or_fail(int fd, const void *buf, size_t count);
 void write_packet_or_fail(int fd, const struct packet *pkt);
+size_t packet_payload_len(const struct packet *pkt);
 
 int attach_main(int noerror);
 int master_main(char **argv, int waitattach, int dontfork);

@@ -84,6 +84,25 @@ check "DCH_SOCKET_DIR empty -ls" "$empty_out" ""
 unset_out=$("$DCH" -ls 2>/dev/null | sort | tr '\n' ',')
 check "unset DCH_SOCKET_DIR = XDG default" "$unset_out" "beta,"
 
+# --- spawn-vs-attach: leftover sockets + hot-path attach -------------------
+# Real forkpty spawn, so it needs an executable dch + python3. Skip gracefully.
+if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
+    if DCH="$DCH" python3 "$(dirname "$0")/spawn_test.py" >/dev/null 2>&1; then
+        ok "spawn over leftover socket + hot-path attach"
+    else
+        bad "spawn over leftover socket + hot-path attach"
+    fi
+fi
+
+# --- hot-path performance budget (spawn-vs-attach decision) ----------------
+if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
+    if DCH="$DCH" python3 "$(dirname "$0")/perf_test.py" >/dev/null 2>&1; then
+        ok "hot-path perf budget"
+    else
+        bad "hot-path perf budget"
+    fi
+fi
+
 # --- on-demand redraw (SIGUSR2 → MSG_REDRAW(REDRAW_WINCH)) ------------------
 # Real forkpty spawn, so it needs an executable dch + python3. Skip gracefully.
 if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then

@@ -46,7 +46,25 @@ struct client
 	int fd;
 	/* Whether or not the client is attached. */
 	int attached;
+
+	/* Input reassembly (client->master). The socket is nonblocking and
+	** frames are variable length, so a read may split one frame or carry
+	** several; buffer raw bytes and parse complete frames out. */
+	unsigned char inbuf[PKT_HDR + PKT_MAX];
+	size_t inlen;
+
+	/* Output queue (master->client). The master never blocks on a slow
+	** client: pty output is queued here and flushed when the socket is
+	** writable. A client that backs up past OUT_CAP is dropped instead of
+	** stalling everyone (head-of-line). */
+	unsigned char *out;
+	size_t outlen, outcap, outoff;
 };
+
+/* ponytail: 4 MB per-client output backlog before we give up on a slow
+** client and drop it. Bump if a legitimately bursty-but-slow link needs
+** more slack; the cost is up to OUT_CAP heap per stalled client. */
+#define OUT_CAP (4u * 1024u * 1024u)
 
 /* The list of connected clients. */
 static struct client *clients;
@@ -138,6 +156,11 @@ die(int sig)
 #endif
 		return;
 	}
+	/* Trace is opt-in and the sink fd is resolved at master startup, so this
+	** only does fprintf() here, not fopen() — good enough for a debug build to
+	** catch "who killed the master" (the bug this whole trace facility exists
+	** to diagnose). Not strictly async-signal-safe; debug-only. */
+	dch_trace("master die sig=%d", sig);
 	exit(1);
 }
 
@@ -432,24 +455,101 @@ write_client_seq(struct client *p, const unsigned char *buf, size_t len)
 	}
 }
 
-/* Process activity on the pty - Input and terminal changes are sent out to
-** the attached clients. If the pty goes away, we die. */
+/* Unlink a client from the list and free it (socket + output queue). */
 static void
-pty_activity(int s)
+remove_client(struct client *p)
+{
+	dch_trace("remove client fd=%d attached=%d outlen=%zu", p->fd,
+	          p->attached, p->outlen);
+	close(p->fd);
+	if (p->next)
+		p->next->pprev = p->pprev;
+	*(p->pprev) = p->next;
+	free(p->out);
+	free(p);
+}
+
+/* Append output for a client's send queue. Returns -1 if the client has
+** backed up past OUT_CAP (or allocation fails) and should be dropped. */
+static int
+queue_to_client(struct client *p, const unsigned char *buf, size_t len)
+{
+	/* Reclaim the already-sent prefix before measuring/growing. */
+	if (p->outoff)
+	{
+		memmove(p->out, p->out + p->outoff, p->outlen - p->outoff);
+		p->outlen -= p->outoff;
+		p->outoff = 0;
+	}
+	if (p->outlen + len > OUT_CAP)
+		return -1;
+	if (p->outlen + len > p->outcap)
+	{
+		size_t ncap = p->outcap ? p->outcap : BUFSIZE;
+		unsigned char *nb;
+
+		/* Doubling can't wrap: outlen+len <= OUT_CAP (4 MB) is enforced
+		** above, so ncap tops out near 4 MB. If OUT_CAP is ever bumped
+		** anywhere near SIZE_MAX/2, this needs an overflow guard. */
+		while (ncap < p->outlen + len)
+			ncap *= 2;
+		nb = realloc(p->out, ncap);
+		if (!nb)
+			return -1;
+		p->out = nb;
+		p->outcap = ncap;
+	}
+	memcpy(p->out + p->outlen, buf, len);
+	p->outlen += len;
+	return 0;
+}
+
+/* Flush as much queued output as the socket accepts (nonblocking). Returns
+** -1 on a hard write error (drop the client), 0 otherwise (EAGAIN just means
+** try again when writable). */
+static int
+flush_client(struct client *p)
+{
+	while (p->outoff < p->outlen)
+	{
+		ssize_t n = write(p->fd, p->out + p->outoff,
+		                  p->outlen - p->outoff);
+
+		if (n > 0)
+		{
+			p->outoff += (size_t)n;
+			continue;
+		}
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n < 0 && errno == EAGAIN)
+			return 0;
+		return -1;
+	}
+	p->outoff = p->outlen = 0;
+	return 0;
+}
+
+/* Process activity on the pty - Input and terminal changes are queued out to
+** the attached clients (flushed by the main loop). If the pty goes away, we
+** die. */
+static void
+pty_activity(void)
 {
 	unsigned char buf[BUFSIZE];
 	ssize_t len;
-	struct client *p;
-	fd_set readfds, writefds;
-	int highest_fd, nclients;
+	struct client *p, *next;
 
 	/* Read the pty activity */
 	len = read(the_pty.fd, buf, sizeof(buf));
+	dch_trace("pty read len=%zd", len);
 
 	/* Error -> die */
 	if (len <= 0)
 	{
 		int status;
+
+		dch_trace("pty eof len=%zd errno=%d -> master exit", len, errno);
 
 		if (wait(&status) >= 0)
 		{
@@ -477,60 +577,22 @@ pty_activity(int s)
 	track_keymode(buf, (size_t)len);
 	track_decmode(buf, (size_t)len);
 
-top:
-	/*
-	** Wait until at least one client is writable. Also wait on the control
-	** socket in case a new client tries to connect.
-	*/
-	FD_ZERO(&readfds);
-	FD_ZERO(&writefds);
-	FD_SET(s, &readfds);
-	highest_fd = s;
-	for (p = clients, nclients = 0; p; p = p->next)
+	/* Queue to every attached client. A slow client that overflows its
+	** queue is dropped rather than stalling the pty and the other clients. */
+	for (p = clients; p; p = next)
 	{
+		next = p->next;
 		if (!p->attached)
 			continue;
-		FD_SET(p->fd, &writefds);
-		if (p->fd > highest_fd)
-			highest_fd = p->fd;
-		nclients++;
+		/* Drain any existing backlog FIRST: a client momentarily at OUT_CAP
+		** but recovering would otherwise be dropped by queue_to_client before
+		** it got a chance to flush. flush on an empty queue is a no-op; the
+		** trailing flush pushes what we just queued out the same iteration. */
+		if (flush_client(p) < 0 ||
+		    queue_to_client(p, buf, (size_t)len) < 0 ||
+		    flush_client(p) < 0)
+			remove_client(p);
 	}
-	if (nclients == 0)
-		return;
-	if (select(highest_fd + 1, &readfds, &writefds, NULL, NULL) < 0)
-		return;
-
-	/* Send the data out to the clients. */
-	for (p = clients, nclients = 0; p; p = p->next)
-	{
-		ssize_t written;
-
-		if (!FD_ISSET(p->fd, &writefds))
-			continue;
-
-		written = 0;
-		while (written < len)
-		{
-			ssize_t n = write(p->fd, buf + written, len - written);
-
-			if (n > 0)
-			{
-				written += n;
-				continue;
-			}
-			else if (n < 0 && errno == EINTR)
-				continue;
-			else if (n < 0 && errno != EAGAIN)
-				nclients = -1;
-			break;
-		}
-		if (nclients != -1 && written == len)
-			nclients++;
-	}
-
-	/* Try again if nothing happened. */
-	if (!FD_ISSET(s, &readfds) && nclients == 0)
-		goto top;
 }
 
 /* Process activity on the control socket */
@@ -550,8 +612,9 @@ control_activity(int s)
 		return;
 	}
 
-	/* Link it in. malloc fail → drop client; existing sessions stay live. */
-	p = malloc(sizeof(struct client));
+	/* Link it in. calloc fail → drop client; existing sessions stay live.
+	** calloc zeroes the reassembly + output-queue state (inlen/out/...). */
+	p = calloc(1, sizeof(struct client));
 	if (!p)
 	{
 		close(fd);
@@ -566,40 +629,24 @@ control_activity(int s)
 	*(p->pprev) = p;
 }
 
-/* Process activity from a client. */
+/* Act on one fully-reassembled frame. `len` is the header length field
+** (PUSH = payload bytes, REDRAW = method); `payload` points at the frame's
+** payload bytes (len for PUSH, a struct winsize for WINCH/REDRAW). */
 static void
-client_activity(struct client *p)
+handle_packet(struct client *p, unsigned int type, unsigned int len,
+              const unsigned char *payload)
 {
-	ssize_t len;
-	struct packet pkt;
-
-	/* Read the activity. */
-	len = read(p->fd, &pkt, sizeof(struct packet));
-	if (len < 0 && (errno == EAGAIN || errno == EINTR))
-		return;
-
-	/* Close the client on an error. */
-	if (len != sizeof(struct packet))
-	{
-		close(p->fd);
-		if (p->next)
-			p->next->pprev = p->pprev;
-		*(p->pprev) = p->next;
-		free(p);
-		return;
-	}
-
 	/* Push out data to the program. */
-	if (pkt.type == MSG_PUSH)
+	if (type == MSG_PUSH)
 	{
-		if (pkt.len <= sizeof(pkt.u.buf))
-			write_buf_or_fail(the_pty.fd, pkt.u.buf, pkt.len);
+		write_buf_or_fail(the_pty.fd, payload, len);
 	}
 
 	/* Attach or detach from the program. */
-	else if (pkt.type == MSG_ATTACH)
+	else if (type == MSG_ATTACH)
 	{
 		p->attached = 1;
+		dch_trace("attach client fd=%d", p->fd);
 		/* Re-arm the terminal modes the child enabled for this client; a
 		** previous detach reset them, and the child only sets them once at
 		** startup. No-op for anything the child never enabled. */
@@ -620,20 +667,20 @@ client_activity(struct client *p)
 				}
 		}
 	}
-	else if (pkt.type == MSG_DETACH)
+	else if (type == MSG_DETACH)
 		p->attached = 0;
 
 	/* Window size change request, without a forced redraw. */
-	else if (pkt.type == MSG_WINCH)
+	else if (type == MSG_WINCH)
 	{
-		the_pty.ws = pkt.u.ws;
+		memcpy(&the_pty.ws, payload, sizeof(struct winsize));
 		ioctl(the_pty.fd, TIOCSWINSZ, &the_pty.ws);
 	}
 
 	/* Force a redraw using a particular method. */
-	else if (pkt.type == MSG_REDRAW)
+	else if (type == MSG_REDRAW)
 	{
-		int method = pkt.len;
+		int method = len;
 
 		/* If the client didn't specify a particular method, use
 		** whatever we had on startup. */
@@ -643,7 +690,7 @@ client_activity(struct client *p)
 			return;
 
 		/* Set the window size. */
-		the_pty.ws = pkt.u.ws;
+		memcpy(&the_pty.ws, payload, sizeof(struct winsize));
 		ioctl(the_pty.fd, TIOCSWINSZ, &the_pty.ws);
 
 		/* Send a ^L character if the terminal is in no-echo and
@@ -666,13 +713,68 @@ client_activity(struct client *p)
 	}
 }
 
+/* Process activity from a client. Reassembles variable-length frames from
+** the (nonblocking) socket: a read may split one frame or carry several. */
+static void
+client_activity(struct client *p)
+{
+	ssize_t n;
+	size_t off;
+
+	n = read(p->fd, p->inbuf + p->inlen, sizeof(p->inbuf) - p->inlen);
+	if (n < 0 && (errno == EAGAIN || errno == EINTR))
+		return;
+	if (n <= 0) /* EOF or hard error -> drop the client */
+	{
+		remove_client(p);
+		return;
+	}
+	p->inlen += (size_t)n;
+
+	/* Parse out every complete frame currently buffered. */
+	off = 0;
+	while (p->inlen - off >= PKT_HDR)
+	{
+		unsigned char *f = p->inbuf + off;
+		unsigned int type = f[0];
+		unsigned int len  = (unsigned int)f[1] |
+		                    ((unsigned int)f[2] << 8);
+		size_t plen = (type == MSG_PUSH) ? len
+		    : (type == MSG_WINCH || type == MSG_REDRAW)
+		        ? sizeof(struct winsize)
+		    : 0;
+
+		/* A PUSH length past PKT_MAX is not one of ours -> corrupt. */
+		if (plen > PKT_MAX)
+		{
+			dch_trace("bad frame type=%u len=%u plen=%zu -> drop fd=%d",
+			          type, len, plen, p->fd);
+			remove_client(p);
+			return;
+		}
+		if (p->inlen - off < PKT_HDR + plen)
+			break; /* rest of this frame hasn't arrived yet */
+
+		handle_packet(p, type, len, f + PKT_HDR);
+		off += PKT_HDR + plen;
+	}
+
+	/* Shift any partial trailing frame back to the front. */
+	if (off)
+	{
+		memmove(p->inbuf, p->inbuf + off, p->inlen - off);
+		p->inlen -= off;
+	}
+}
+
+
 /* The master process - It watches over the pty process and the attached */
 /* clients. */
 static void
 master_process(int s, char **argv, int waitattach, int statusfd)
 {
 	struct client *p, *next;
-	fd_set readfds;
+	fd_set readfds, writefds;
 	int highest_fd;
 	int nullfd;
 
@@ -681,6 +783,10 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 	/* Okay, disassociate ourselves from the original terminal, as we
 	** don't care what happens to it. */
 	setsid();
+
+	/* Resolve the trace sink now (before any signal handler can call
+	** dch_trace), so die() only ever fprintf()s, never fopen()s. */
+	dch_trace("master start pid=%d waitattach=%d", (int)getpid(), waitattach);
 
 	/* Set a trap to unlink the socket when we die. */
 	atexit(unlink_socket);
@@ -714,19 +820,24 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 	/* Make sure stdin/stdout/stderr point to /dev/null. We are now a
 	** daemon. */
 	nullfd = open("/dev/null", O_RDWR);
-	dup2(nullfd, 0);
-	dup2(nullfd, 1);
-	dup2(nullfd, 2);
-	if (nullfd > 2)
-		close(nullfd);
+	if (nullfd >= 0)
+	{
+		dup2(nullfd, 0);
+		dup2(nullfd, 1);
+		dup2(nullfd, 2);
+		if (nullfd > 2)
+			close(nullfd);
+	}
 
 	/* Loop forever. */
 	while (1)
 	{
 		int new_has_attached_client = 0;
+		int have_writes = 0;
 
 		/* Re-initialize the file descriptor set for select. */
 		FD_ZERO(&readfds);
+		FD_ZERO(&writefds);
 		FD_SET(s, &readfds);
 		highest_fd = s;
 
@@ -734,12 +845,16 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 		** When waitattach is set, wait until the client attaches
 		** before trying to read from the pty.
 		*/
-		if (waitattach)
-		{
-			if (clients && clients->attached)
-				waitattach = 0;
-		}
-		else
+		/*
+		** When waitattach is set, don't read the pty until a client has
+		** attached. Flip the gate AND arm the pty in the same iteration:
+		** the pty may already hold output (inner printed before attach), so
+		** waiting another loop to arm it would block in select() with no
+		** follow-up wake (our reassembly drains ATTACH+REDRAW in one read).
+		*/
+		if (waitattach && clients && clients->attached)
+			waitattach = 0;
+		if (!waitattach)
 		{
 			FD_SET(the_pty.fd, &readfds);
 			if (the_pty.fd > highest_fd)
@@ -751,6 +866,14 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 			FD_SET(p->fd, &readfds);
 			if (p->fd > highest_fd)
 				highest_fd = p->fd;
+
+			/* Watch for writability only while output is queued, so a
+			** backed-up client wakes us when it can take more. */
+			if (p->outoff < p->outlen)
+			{
+				FD_SET(p->fd, &writefds);
+				have_writes = 1;
+			}
 
 			if (p->attached)
 				new_has_attached_client = 1;
@@ -764,13 +887,16 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 		}
 
 		/* Wait for something to happen. */
-		if (select(highest_fd + 1, &readfds, NULL, NULL, NULL) < 0)
+		if (select(highest_fd + 1, &readfds,
+		           have_writes ? &writefds : NULL, NULL, NULL) < 0)
 		{
 			if (errno == EINTR || errno == EAGAIN)
 				continue;
 			exit(1);
 		}
 
+		dch_trace("mloop wake wa=%d ctl=%d pty=%d", waitattach,
+		          FD_ISSET(s, &readfds), FD_ISSET(the_pty.fd, &readfds));
 		/* New client? */
 		if (FD_ISSET(s, &readfds))
 			control_activity(s);
@@ -781,9 +907,18 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 			if (FD_ISSET(p->fd, &readfds))
 				client_activity(p);
 		}
-		/* pty activity? */
+		/* pty activity? Read it and queue to attached clients. */
 		if (FD_ISSET(the_pty.fd, &readfds))
-			pty_activity(s);
+			pty_activity();
+		/* Flush queued output. Attempt every client with a backlog (the
+		** write() just EAGAINs if its socket isn't ready); drop on a hard
+		** error so one dead client can't wedge the master. */
+		for (p = clients; p; p = next)
+		{
+			next = p->next;
+			if (p->outoff < p->outlen && flush_client(p) < 0)
+				remove_client(p);
+		}
 	}
 }
 

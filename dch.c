@@ -12,9 +12,14 @@
 
 #include <ctype.h>
 #include <dirent.h>
+#include <stdarg.h>
+#include <sys/time.h>
 #include <pwd.h>
 #include <sys/types.h>
 #include <sys/un.h>
+
+/* dch's own version, independent of the dtach base (PACKAGE_VERSION). */
+#define DCH_VERSION "1.0"
 
 /* Shared globals (declared in dtach.h, used by attach.c/master.c). */
 const char copyright[] = "dch - based on dtach " PACKAGE_VERSION
@@ -54,19 +59,35 @@ write_buf_or_fail(int fd, const void *buf, size_t count)
 	}
 }
 
+/* Payload byte count carried on the wire for a packet, derived from type.
+** PUSH = pkt->len bytes; WINCH/REDRAW = a winsize; ATTACH/DETACH = none. */
+size_t
+packet_payload_len(const struct packet *pkt)
+{
+	if (pkt->type == MSG_PUSH)
+		return pkt->len;
+	if (pkt->type == MSG_WINCH || pkt->type == MSG_REDRAW)
+		return sizeof(struct winsize);
+	return 0;
+}
+
 void
 write_packet_or_fail(int fd, const struct packet *pkt)
 {
-	while (1)
-	{
-		ssize_t ret = write(fd, pkt, sizeof(struct packet));
+	/* Serialize [type:1][len:2 host-order][payload]. Single writer per
+	** socket, so two write_buf_or_fail calls can't interleave a frame. */
+	unsigned char hdr[PKT_HDR];
 
-		if (ret == sizeof(struct packet))
-			return;
-		else if (ret < 0 && errno == EINTR)
-			continue;
-		else
-			exit(1);
+	hdr[0] = pkt->type;
+	hdr[1] = (unsigned char)(pkt->len & 0xff);
+	hdr[2] = (unsigned char)((pkt->len >> 8) & 0xff);
+	write_buf_or_fail(fd, hdr, PKT_HDR);
+
+	{
+		size_t plen = packet_payload_len(pkt);
+
+		if (plen)
+			write_buf_or_fail(fd, pkt->u.buf, plen);
 	}
 }
 
@@ -146,6 +167,58 @@ compute_sock_dir(void)
 	return 0;
 }
 
+/* ---- debug tracing -------------------------------------------------- */
+
+/* Opt-in trace sink, resolved once from DCH_DEBUG (see dtach.h). Off by
+** default: when DCH_DEBUG is unset, the first call caches trace_fp = NULL and
+** every call is a cheap early return. Each line is prefixed with a wall-clock
+** timestamp and the pid so client/master interleaving is readable. */
+void
+dch_trace(const char *fmt, ...)
+{
+	static FILE *trace_fp;
+	static int resolved;
+	va_list ap;
+	struct timeval tv;
+
+	if (!resolved)
+	{
+		const char *e = getenv("DCH_DEBUG");
+		char path[64];
+
+		resolved = 1;
+		if (e && *e)
+		{
+			if (strcmp(e, "1") == 0)
+			{
+				snprintf(path, sizeof(path),
+				         "/tmp/dch.%u.trace",
+				         (unsigned)getuid());
+				e = path;
+			}
+			trace_fp = fopen(e, "a");
+			if (trace_fp)
+			{
+				/* Don't leak the sink across the master re-exec
+				** into the inner program. ("e"/O_CLOEXEC fopen
+				** mode is a GNU extension, unreliable on macOS.) */
+				fcntl(fileno(trace_fp), F_SETFD, FD_CLOEXEC);
+				setvbuf(trace_fp, NULL, _IOLBF, 0);
+			}
+		}
+	}
+	if (!trace_fp)
+		return;
+
+	gettimeofday(&tv, NULL);
+	fprintf(trace_fp, "%ld.%06ld pid=%d ", (long)tv.tv_sec,
+	        (long)tv.tv_usec, (int)getpid());
+	va_start(ap, fmt);
+	vfprintf(trace_fp, fmt, ap);
+	va_end(ap);
+	fputc('\n', trace_fp);
+}
+
 /* Build sock_path. If <name> would overflow AF_UNIX sun_path, deterministically
 ** shorten it (keep a prefix + append a hash of the full name) so create and
 ** attach agree and it "just works" regardless of cwd/branch length. */
@@ -153,6 +226,15 @@ static int
 make_sock_path(const char *name)
 {
 	struct sockaddr_un sa;
+	/* Fixed overhead in sun_path: "/" + ".sock" + NUL = 7 bytes plus sock_dir.
+	** Guard before the subtraction below underflows (size_t) on a pathological
+	** sock_dir — the final snprintf check would still catch it, but this is
+	** clearer and fails fast. */
+	if (strlen(sock_dir) + 7 >= sizeof(sa.sun_path))
+	{
+		fprintf(stderr, "dch: socket directory path too long\n");
+		return -1;
+	}
 	/* Chars available for the name itself: "<sock_dir>/" + name + ".sock\0". */
 	size_t budget = sizeof(sa.sun_path) - strlen(sock_dir) - 1 - 5 - 1;
 	char shortened[256];
@@ -1058,7 +1140,7 @@ static void
 usage(void)
 {
 	printf(
-	    "dch — detachable terminal session\n"
+	    "dch " DCH_VERSION " — detachable terminal session\n"
 	    "Usage:\n"
 	    "  dch              attach free session, else spawn new\n"
 	    "  dch <cmd...>     attach-or-create, run cmd\n"
@@ -1075,6 +1157,7 @@ usage(void)
 	    "  dch -E           disable detach escape (Ctrl-\\); use -d instead\n"
 	    "  dch -e <c>       set detach character (default ^\\)\n"
 	    "  dch -h           this help\n"
+	    "  dch -V           print version\n"
 	    "Detach: Ctrl-\\  (or `dch -d` if the host swallows it).\n"
 	    "Nesting refused inside an existing dch session.\n");
 }
@@ -1155,18 +1238,26 @@ spawn_master(char *exe, const char *sockp, char **inner_argv)
 		execvp(av[0], av);
 		_exit(127);
 	}
-	/* Parent: wait briefly so child can fail loudly before we attach. */
+	dch_trace("spawn_master child=%d sock=%s", (int)pid, sockp);
+	/* Parent: wait briefly so child can fail loudly before we attach. Poll on
+	** a fine 5ms quantum (200 * 5ms = 1s cap): the master binds in a few ms,
+	** so a coarse quantum just adds dead time to every cold start. Cost is a
+	** cheap stat()/waitpid() spin that exits the instant the socket appears. */
 	int status = 0;
-	for (int i = 0; i < 50; i++)
+	for (int i = 0; i < 200; i++)
 	{
 		struct stat st;
 		if (stat(sockp, &st) == 0 && S_ISSOCK(st.st_mode))
 			return 0;
-		struct timespec ts = {0, 20 * 1000 * 1000}; /* 20ms */
+		struct timespec ts = {0, 5 * 1000 * 1000}; /* 5ms */
 		nanosleep(&ts, NULL);
 		pid_t r = waitpid(pid, &status, WNOHANG);
 		if (r == pid)
+		{
+			dch_trace("spawn_master child=%d died early status=%d",
+			          (int)pid, status);
 			return -1;
+		}
 	}
 	return 0;
 }
@@ -1223,33 +1314,49 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 	if (make_sock_path(session_name) < 0)
 		return 1;
 
-	struct stat st;
-	int exists = stat(sock_path, &st) == 0 && S_ISSOCK(st.st_mode);
-	if (!exists)
-	{
-		/* Create server. Pass DCH_SESSION to child so nested dch
-		** detects. */
-		setenv("DCH_SESSION", session_name, 1);
-		char *default_argv[] = { NULL, NULL };
-		if (inner_argc == 0)
-		{
-			const char *sh = getenv("SHELL");
-			default_argv[0] = (char *)(sh && *sh ? sh : "/bin/sh");
-			inner_argv = default_argv;
-		}
-		if (spawn_master(exe, sock_path, inner_argv) < 0)
-		{
-			fprintf(stderr, "dch: failed to spawn session\n");
-			return 1;
-		}
-	}
-
-	/* Attach as client. Track in pidfile so future invocations know we
-	** are live (and not VSCode-orphaned). */
 	if (tcgetattr(0, &orig_term) < 0)
 	{
 		fprintf(stderr, "dch: attaching requires a terminal\n");
 		return 1;
+	}
+
+	/* Hot path: if a socket node is present, attach to it directly — a single
+	** connect(), no probe. attach_main() only RETURNS when connect() fails; a
+	** live master never returns (it runs the session and exit()s). So a return
+	** here means the node is a dead socket left by a crashed master whose
+	** atexit unlink never ran — fall through and respawn. A stray non-socket
+	** file (S_ISSOCK false) skips straight to the spawn path. This decides
+	** spawn-vs-attach by LIVENESS (does connect() succeed?), which stat() alone
+	** cannot — without it a dead socket looks attachable and a stray file makes
+	** the master's bind() hit EADDRINUSE ("failed to spawn"). */
+	{
+	struct stat st;
+	if (stat(sock_path, &st) == 0 && S_ISSOCK(st.st_mode))
+	{
+		dch_trace("attach hot-path sock=%s", sock_path);
+		client_pidfile_create(sock_path);
+		attach_main(1);		/* returns only if connect() failed */
+		dch_trace("hot-path connect failed; dead socket, respawning");
+	}
+	}
+
+	/* No node, a stray non-socket file, or a dead socket: clear whatever is
+	** there so bind() succeeds, then spawn a fresh master and attach. */
+	unlink(sock_path);
+	setenv("DCH_SESSION", session_name, 1);
+	{
+	char *default_argv[] = { NULL, NULL };
+	if (inner_argc == 0)
+	{
+		const char *sh = getenv("SHELL");
+		default_argv[0] = (char *)(sh && *sh ? sh : "/bin/sh");
+		inner_argv = default_argv;
+	}
+	if (spawn_master(exe, sock_path, inner_argv) < 0)
+	{
+		fprintf(stderr, "dch: failed to spawn session\n");
+		return 1;
+	}
 	}
 	client_pidfile_create(sock_path);
 	return attach_main(0);
@@ -1292,6 +1399,11 @@ main(int argc, char **argv)
 		else if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0)
 		{
 			usage();
+			return 0;
+		}
+		else if (strcmp(a, "-V") == 0 || strcmp(a, "--version") == 0)
+		{
+			printf("dch %s\n", DCH_VERSION);
 			return 0;
 		}
 		else if (strcmp(a, "-l") == 0)
