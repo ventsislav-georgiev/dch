@@ -929,9 +929,12 @@ master_main(char **argv, int waitattach, int dontfork)
 	int s;
 	pid_t pid;
 
-	/* Use a default redraw method if one hasn't been specified yet. */
+	/* Use a default redraw method if one hasn't been specified yet.
+	** WINCH, not CTRL_L: modern TUIs bind ^L to actions (Claude Code
+	** >=2.1.94 maps it to clear-input — a stray ^L on every attach showed
+	** "press ctrl+l again to clear" and could wipe the session). */
 	if (redraw_method == REDRAW_UNSPEC)
-		redraw_method = REDRAW_CTRL_L;
+		redraw_method = REDRAW_WINCH;
 
 	/* Create the unix domain socket. */
 	s = create_socket(sockname);

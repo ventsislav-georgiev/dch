@@ -187,9 +187,11 @@ process_kbd(int s, struct packet *pkt)
 		pkt->type = MSG_ATTACH;
 		write_packet_or_fail(s, pkt);
 
-		/* We would like a redraw, too. */
+		/* We would like a redraw, too. Ask for WINCH explicitly so even
+		** an older master (whose UNSPEC default was CTRL_L) never types
+		** a stray ^L into the program. */
 		pkt->type = MSG_REDRAW;
-		pkt->len = redraw_method;
+		pkt->len = redraw_method == REDRAW_UNSPEC ? REDRAW_WINCH : redraw_method;
 		ioctl(0, TIOCGWINSZ, &pkt->u.ws);
 		write_packet_or_fail(s, pkt);
 		return;
@@ -340,9 +342,10 @@ attach_main(int noerror)
 	pkt.type = MSG_ATTACH;
 	write_packet_or_fail(s, &pkt);
 
-	/* We would like a redraw, too. */
+	/* We would like a redraw, too. WINCH when unspecified — see the
+	** resume path above; a ^L redraw double-types into modern TUIs. */
 	pkt.type = MSG_REDRAW;
-	pkt.len = redraw_method;
+	pkt.len = redraw_method == REDRAW_UNSPEC ? REDRAW_WINCH : redraw_method;
 	ioctl(0, TIOCGWINSZ, &pkt.u.ws);
 	write_packet_or_fail(s, &pkt);
 	dch_trace("client attached fd=%d sock=%s", s, sockname);

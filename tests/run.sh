@@ -113,5 +113,14 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     fi
 fi
 
+# --- attach: WINCH repaint, and NEVER a typed ^L ----------------------------
+if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
+    if DCH="$DCH" python3 "$(dirname "$0")/attach_test.py" >/dev/null 2>&1; then
+        ok "attach repaints via WINCH, types no ^L"
+    else
+        bad "attach repaints via WINCH, types no ^L"
+    fi
+fi
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
