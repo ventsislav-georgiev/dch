@@ -276,6 +276,7 @@ encode_token(GhosttyKeyEvent ev, const char *tok, size_t toklen,
 {
 	GhosttyMods mods = 0;
 	char utf8 = 0;
+	char text; /* set_utf8 stores the POINTER; must outlive encode below */
 	GhosttyKey key = GHOSTTY_KEY_UNIDENTIFIED;
 	size_t i, n;
 
@@ -343,7 +344,7 @@ encode_token(GhosttyKeyEvent ev, const char *tok, size_t toklen,
 	if (utf8 && !(mods & (GHOSTTY_MODS_CTRL | GHOSTTY_MODS_ALT))) {
 		/* SHIFT resolves to the glyph the app actually receives;
 		** the unshifted codepoint below stays the base char. */
-		char text = utf8;
+		text = utf8;
 		if (mods & GHOSTTY_MODS_SHIFT) {
 			if (utf8 >= 'a' && utf8 <= 'z')
 				text = utf8 - 'a' + 'A';
