@@ -10,6 +10,13 @@ pass=0
 ok()   { pass=$((pass + 1)); printf '  ok   %s\n' "$1"; }
 bad()  { fail=$((fail + 1)); printf '  FAIL %s\n' "$1"; }
 check(){ if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (want [$3] got [$2])"; fi; }
+# Run a python test script; on failure print its output so CI logs show
+# which sub-check died instead of a bare FAIL line.
+pyrun(){
+    pyout=$(DCH="$DCH" python3 "$(dirname "$0")/$2" 2>&1) \
+        && ok "$1" \
+        || { bad "$1"; printf '%s\n' "$pyout" | sed 's/^/       /'; }
+}
 
 # Isolate session dir: dch uses $XDG_RUNTIME_DIR/dch-$UID.
 TMP=$(mktemp -d)
@@ -87,39 +94,23 @@ check "unset DCH_SOCKET_DIR = XDG default" "$unset_out" "beta,"
 # --- spawn-vs-attach: leftover sockets + hot-path attach -------------------
 # Real forkpty spawn, so it needs an executable dch + python3. Skip gracefully.
 if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
-    if DCH="$DCH" python3 "$(dirname "$0")/spawn_test.py" >/dev/null 2>&1; then
-        ok "spawn over leftover socket + hot-path attach"
-    else
-        bad "spawn over leftover socket + hot-path attach"
-    fi
+    pyrun "spawn over leftover socket + hot-path attach" spawn_test.py
 fi
 
 # --- hot-path performance budget (spawn-vs-attach decision) ----------------
 if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
-    if DCH="$DCH" python3 "$(dirname "$0")/perf_test.py" >/dev/null 2>&1; then
-        ok "hot-path perf budget"
-    else
-        bad "hot-path perf budget"
-    fi
+    pyrun "hot-path perf budget" perf_test.py
 fi
 
 # --- on-demand redraw (SIGUSR2 → MSG_REDRAW(REDRAW_WINCH)) ------------------
 # Real forkpty spawn, so it needs an executable dch + python3. Skip gracefully.
 if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
-    if DCH="$DCH" python3 "$(dirname "$0")/redraw_test.py" >/dev/null 2>&1; then
-        ok "SIGUSR2 redraw reaches inner program"
-    else
-        bad "SIGUSR2 redraw reaches inner program"
-    fi
+    pyrun "SIGUSR2 redraw reaches inner program" redraw_test.py
 fi
 
 # --- attach: WINCH repaint, and NEVER a typed ^L ----------------------------
 if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
-    if DCH="$DCH" python3 "$(dirname "$0")/attach_test.py" >/dev/null 2>&1; then
-        ok "attach repaints via WINCH, types no ^L"
-    else
-        bad "attach repaints via WINCH, types no ^L"
-    fi
+    pyrun "attach repaints via WINCH, types no ^L" attach_test.py
 fi
 
 # --- control verbs: --spawn --run --read --wait --keys ---------------------
@@ -233,23 +224,30 @@ assert any(s["name"] == sys.argv[1] for s in d), d
     if [ "$mirror" -eq 0 ] && command -v vim >/dev/null 2>&1; then
         VOUT="$TMP/vim_out"
         "$DCH" --spawn "vim$$" --size 80x24 vim -u NONE >/dev/null 2>&1
-        "$DCH" --wait "vim$$" --match "IMproved" --timeout 10000 >/dev/null 2>&1
+        "$DCH" --wait "vim$$" --match "IMproved" --timeout 15000 >/dev/null 2>&1
         "$DCH" --keys "vim$$" i >/dev/null 2>&1
         "$DCH" --send "vim$$" "tui marker line" >/dev/null 2>&1
         "$DCH" --keys "vim$$" esc >/dev/null 2>&1
-        "$DCH" --read "vim$$" 2>/dev/null | grep -q "tui marker line" \
-            && ok "vim e2e: typed text renders" \
-            || bad "vim e2e: typed text renders"
+        if "$DCH" --wait "vim$$" --match "tui marker line" --timeout 10000 \
+               >/dev/null 2>&1; then
+            ok "vim e2e: typed text renders"
+        else
+            bad "vim e2e: typed text renders"
+            "$DCH" --read "vim$$" 2>&1 | sed 's/^/       | /'
+        fi
         "$DCH" --keys "vim$$" : >/dev/null 2>&1
         "$DCH" --send "vim$$" "wq! $VOUT" >/dev/null 2>&1
         "$DCH" --keys "vim$$" enter >/dev/null 2>&1
         n=0
-        while [ ! -f "$VOUT" ] && [ "$n" -lt 50 ]; do
+        while [ ! -f "$VOUT" ] && [ "$n" -lt 100 ]; do
             sleep 0.1; n=$((n + 1))
         done
-        grep -q "tui marker line" "$VOUT" 2>/dev/null \
-            && ok "vim e2e: ':' keys reach command mode, file saved" \
-            || bad "vim e2e: ':' keys reach command mode, file saved"
+        if grep -q "tui marker line" "$VOUT" 2>/dev/null; then
+            ok "vim e2e: ':' keys reach command mode, file saved"
+        else
+            bad "vim e2e: ':' keys reach command mode, file saved"
+            "$DCH" --read "vim$$" 2>&1 | sed 's/^/       | /'
+        fi
         "$DCH" -k "vim$$" >/dev/null 2>&1
     fi
 

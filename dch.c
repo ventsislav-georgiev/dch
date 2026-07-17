@@ -1853,6 +1853,15 @@ do_spawn_verb(char *exe, const char *name, int cols, int rows,
 		inner_argv = default_argv;
 	}
 	setenv("DCH_SESSION", name, 1);
+	/* Headless spawns often run where TERM is unset or "dumb" (cron, CI,
+	** daemons); the mirror is xterm-compatible, so give TUIs a terminal
+	** they will actually draw on. */
+	{
+		const char *term = getenv("TERM");
+
+		if (!term || !*term || strcmp(term, "dumb") == 0)
+			setenv("TERM", "xterm-256color", 1);
+	}
 	if (spawn_master(exe, sock_path, inner_argv) < 0)
 	{
 		fprintf(stderr, "dch: failed to spawn session\n");

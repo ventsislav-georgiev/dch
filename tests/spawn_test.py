@@ -19,10 +19,14 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.environ.get("DCH", os.path.join(HERE, "..", "dch"))
 
 
-def drain(fd, seconds):
+def drain(fd, seconds, until=None):
+    # Return early once `until` appears: big deadlines stay cheap locally
+    # and absorb slow CI runners.
     out = b""
     end = time.time() + seconds
     while time.time() < end:
+        if until and until in out:
+            break
         r, _, _ = select.select([fd], [], [], 0.1)
         if fd in r:
             try:
@@ -37,16 +41,16 @@ def drain(fd, seconds):
     return out.decode("utf-8", "replace")
 
 
-def run_client(name, argv_tail, drain_s=2.0):
+def run_client(name, argv_tail, drain_s=10.0, until=None):
     """forkpty a dch client; return (exit_status, output)."""
     pid, fd = pty.fork()
     if pid == 0:
         os.environ.pop("DCH_SESSION", None)  # bypass nesting guard
         os.execv(DCH, [DCH, "-E", "-n", name] + argv_tail)
         os._exit(127)
-    out = drain(fd, drain_s)
+    out = drain(fd, drain_s, until)
     # Reap; client should have exited when its inner cmd finished.
-    for _ in range(20):
+    for _ in range(100):
         wpid, status = os.waitpid(pid, os.WNOHANG)
         if wpid == pid:
             break
@@ -90,7 +94,8 @@ def main():
         # 1. stray regular file at the socket path -> must still spawn.
         name = "stray"
         open(os.path.join(sockdir, name + ".sock"), "w").close()
-        st, out = run_client(name, ["sh", "-c", "printf STRAY_OK; exit 0"])
+        st, out = run_client(name, ["sh", "-c", "printf STRAY_OK; exit 0"],
+                             until=b"STRAY_OK")
         if "STRAY_OK" in out and "failed to spawn" not in out:
             ok("spawn over stray regular file")
         else:
@@ -99,7 +104,8 @@ def main():
         # 2. dead socket node at the path -> must still spawn.
         name = "deadsock"
         make_dead_socket(os.path.join(sockdir, name + ".sock"))
-        st, out = run_client(name, ["sh", "-c", "printf DEAD_OK; exit 0"])
+        st, out = run_client(name, ["sh", "-c", "printf DEAD_OK; exit 0"],
+                             until=b"DEAD_OK")
         if "DEAD_OK" in out and "Connection refused" not in out \
            and "failed to spawn" not in out:
             ok("spawn over dead socket node")
@@ -111,7 +117,7 @@ def main():
         #    yield exactly one start.
         name = "hot"
         marker = os.path.join(tmp, "starts.txt")
-        inner = ["sh", "-c", "echo RUN >> '%s'; sleep 10" % marker]
+        inner = ["sh", "-c", "echo RUN >> '%s'; sleep 60" % marker]
 
         # Client A: spawns the master, then we detach it (master stays alive).
         pidA, fdA = pty.fork()
@@ -119,9 +125,12 @@ def main():
             os.environ.pop("DCH_SESSION", None)
             os.execv(DCH, [DCH, "-E", "-n", name] + inner)
             os._exit(127)
-        drain(fdA, 1.0)  # let inner start
+        for _ in range(100):  # inner started once its marker file exists
+            if os.path.exists(marker):
+                break
+            drain(fdA, 0.1)
         os.kill(pidA, signal.SIGUSR1)  # clean detach -> client A exits, master lives
-        for _ in range(20):
+        for _ in range(100):
             wpid, _ = os.waitpid(pidA, os.WNOHANG)
             if wpid == pidA:
                 break
@@ -134,7 +143,7 @@ def main():
             bad("hot path: master not alive after detach (listed=%r)" % listed)
         else:
             # Client B: must attach to the SAME live master (hot path).
-            st, out = run_client(name, inner, drain_s=1.0)
+            st, out = run_client(name, inner, drain_s=2.0)
             try:
                 with open(marker) as f:
                     runs = f.read().count("RUN")
@@ -161,8 +170,8 @@ def main():
             os.execvp("dch", ["dch", "-n", "cwdtrap",
                               "sh", "-c", "printf TRAP_OK; exit 0"])
             os._exit(127)
-        out = drain(fd, 2.0)
-        for _ in range(20):
+        out = drain(fd, 10.0, b"TRAP_OK")
+        for _ in range(100):
             wpid, _ = os.waitpid(pid, os.WNOHANG)
             if wpid == pid:
                 break

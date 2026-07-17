@@ -21,10 +21,14 @@ SESS = "attachtest-%d" % os.getpid()
 TUI = os.path.join(HERE, "attach_tui.py")
 
 
-def drain(fd, seconds):
+def drain(fd, seconds, until=None):
+    # Return early once `until` appears: big deadlines stay cheap locally
+    # and absorb slow CI runners.
     out = b""
     end = time.time() + seconds
     while time.time() < end:
+        if until and until in out:
+            break
         r, _, _ = select.select([fd], [], [], 0.1)
         if fd in r:
             try:
@@ -57,13 +61,14 @@ def main():
     pid_a, fd_a = spawn_client(["-n", SESS, sys.executable, TUI])
     pid_b = None
     try:
-        first = drain(fd_a, 2.0)
+        first = drain(fd_a, 15.0, b"HELLO")
         if "HELLO" not in first:
             print("FAIL: no HELLO from inner program. Got:", repr(first)); return 1
 
         # Client B attaches (mirror). This is the phone reconnect path.
         pid_b, fd_b = spawn_client(["-f", "-n", SESS])
-        out_b = drain(fd_b, 2.0)
+        out_b = drain(fd_b, 10.0, b"WINCH")
+        out_b += drain(fd_b, 0.5)  # settle: catch any stray KEY after WINCH
         out_a = drain(fd_a, 0.5)
         combined = out_a + out_b
 

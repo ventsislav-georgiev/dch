@@ -4,10 +4,10 @@ build:          zig build -Demit-lib-vt=true -Doptimize=ReleaseSafe
 license:        MIT (see LICENSE, upstream https://github.com/ghostty-org/ghostty)
 
 artifacts (sha256):
-3defc407a409dd16b4b0f288699140e3b8444b6842d4c4fa22eb084da1dbbf75  lib/darwin-arm64/libghostty-vt.a
-e69b23e05f227d81d5d6f640cd334eb3a94451ede4b823e2277e99c8c1cc6299  lib/darwin-x86_64/libghostty-vt.a
-b921be435403b858dada9765e6b38005fd778d7803bca65437d6001f20c3e81e  lib/linux-aarch64/libghostty-vt.a
-df1a013047d45aa3856fc40cc590e2b5c3596a7e680b2339266f39b27d24ca95  lib/linux-x86_64/libghostty-vt.a
+18c4079a2ab6951a1bf49aeb40c29fb6f6bf863eb93c95b1a23835750eb6dd0e  lib/linux-aarch64/libghostty-vt.a
+a2647a25e74caf2681486d9aa4a5a5ffe8114893f709ccd64b19fd5f73838332  lib/linux-x86_64/libghostty-vt.a
+8c999f437abce9ac22f9e1e2d02f0e42d360c060e7d03a695901448121108c8b  lib/darwin-x86_64/libghostty-vt.a
+e2f1b165e7a14769a917aa9e3f56ab21e3ac0c1dc881743777866b86348de9f1  lib/darwin-arm64/libghostty-vt.a
 
 Regenerate with scripts/build-libghostty.sh (Zig needed only for regeneration;
 normal `make` links the committed archive with plain cc).

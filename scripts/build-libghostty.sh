@@ -12,7 +12,10 @@ set -eu
 repo=$(cd "$(dirname "$0")/.." && pwd)
 vendor="$repo/vendor/libghostty-vt"
 pin=$(sed -n 's/^ghostty commit: //p' "$vendor/COMMIT")
-work="${TMPDIR:-/tmp}/dch-libghostty-build"
+# Fixed path, NOT $TMPDIR: ReleaseSafe blobs embed absolute source paths
+# (panic/debug info), so byte-reproducibility across machines requires
+# everyone to build from the same directory.
+work="/tmp/dch-libghostty-build"
 
 # platform dir -> zig -Dtarget (empty = host build)
 host_platform="$(uname -s | tr 'A-Z' 'a-z')-$(uname -m)"
@@ -55,7 +58,11 @@ status=0
 for platform in $platforms; do
   target=$(zig_target_for "$platform")
   echo "building libghostty-vt @ $pin for $platform ($target)"
-  (cd "$work" && "$zig" build -Demit-lib-vt=true -Doptimize=ReleaseSafe \
+  # Fixed cache dirs for the same reason as $work: ~/.cache/zig paths end
+  # up embedded in the archive and differ per machine.
+  (cd "$work" && ZIG_GLOBAL_CACHE_DIR=/tmp/dch-libghostty-zig-cache \
+    ZIG_LOCAL_CACHE_DIR="$work/.zig-cache" \
+    "$zig" build -Demit-lib-vt=true -Doptimize=ReleaseSafe \
     -Dtarget="$target")
 
   mkdir -p "$vendor/lib/$platform"
