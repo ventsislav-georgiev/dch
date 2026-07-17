@@ -50,6 +50,15 @@ rm -rf "$work"
 git clone --quiet https://github.com/ghostty-org/ghostty "$work"
 git -C "$work" checkout --quiet "$pin"
 
+# zig 0.15's self-hosted x86_64 backend miscompiles the key encoder (letter
+# keys encode as NUL on linux-x86_64). Upstream forces LLVM only for darwin
+# targets; force it for every target. Drop this when the pin moves past an
+# upstream fix.
+awk '{ print } /lib.root_module.pic = true;/ {
+  print "    lib.use_llvm = true; // dch: self-hosted x86_64 backend miscompiles"
+}' "$work/src/build/GhosttyLibVt.zig" > "$work/src/build/GhosttyLibVt.zig.tmp"
+mv "$work/src/build/GhosttyLibVt.zig.tmp" "$work/src/build/GhosttyLibVt.zig"
+
 cp -R "$work/include" "$vendor/include.new"
 rm -rf "$vendor/include"
 mv "$vendor/include.new" "$vendor/include"
