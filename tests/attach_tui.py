@@ -15,9 +15,11 @@ termios.tcsetattr(fd, termios.TCSANOW, attrs)
 
 signal.signal(signal.SIGWINCH, lambda *_: (sys.stdout.write("WINCH\r\n"), sys.stdout.flush()))
 
-sys.stdout.write("HELLO\r\n")
-sys.stdout.flush()
+# HELLO repeats: output emitted before a slow client finishes attaching is
+# lost (attach redraw is WINCH-based, no replay), so a one-shot marker races.
 while True:
+    sys.stdout.write("HELLO\r\n")
+    sys.stdout.flush()
     r, _, _ = select.select([fd], [], [], 0.2)
     if fd in r:
         data = os.read(fd, 256)

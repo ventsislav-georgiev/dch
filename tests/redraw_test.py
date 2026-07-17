@@ -17,11 +17,13 @@ SESS = "redrawtest-%d" % os.getpid()
 TUI = os.path.join(HERE, "redraw_tui.py")
 
 
-def drain(fd, seconds):
-    """Read everything available from fd for `seconds`, return decoded text."""
+def drain(fd, seconds, until=None):
+    """Read from fd for `seconds` (early exit once `until` appears)."""
     out = b""
     end = time.time() + seconds
     while time.time() < end:
+        if until and until in out:
+            break
         r, _, _ = select.select([fd], [], [], 0.1)
         if fd in r:
             try:
@@ -55,8 +57,9 @@ def main():
         os._exit(127)
 
     try:
-        # 1. Initial paint: expect HELLO from the inner TUI.
-        first = drain(fd, 2.0)
+        # 1. Initial paint: expect HELLO from the inner TUI (it repeats, so a
+        #    slow attach still sees one; big deadline for loaded CI runners).
+        first = drain(fd, 15.0, b"HELLO")
         if "HELLO" not in first:
             print("FAIL: no initial HELLO from inner program. Got:", repr(first))
             return 1
@@ -66,7 +69,7 @@ def main():
         os.kill(pid, signal.SIGUSR2)
 
         # 3. The inner program must repaint (receive SIGWINCH → emit REPAINT).
-        after = drain(fd, 2.0)
+        after = drain(fd, 10.0, b"REPAINT")
         if after.count("REPAINT") < 1:
             print("FAIL: no REPAINT after SIGUSR2 — redraw did NOT reach the inner program.")
             print("  initial:", repr(first))
@@ -76,7 +79,7 @@ def main():
         # 4. Idempotent: a second trigger repaints again (proves it's repeatable,
         #    not a one-shot attach artifact).
         os.kill(pid, signal.SIGUSR2)
-        after2 = drain(fd, 2.0)
+        after2 = drain(fd, 10.0, b"REPAINT")
         if after2.count("REPAINT") < 1:
             print("FAIL: second SIGUSR2 produced no REPAINT (not repeatable).")
             return 1
