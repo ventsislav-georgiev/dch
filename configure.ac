@@ -3,8 +3,35 @@
 # Original attribution preserved in source headers, README, and COPYING.
 AC_INIT(dch, 0.14, https://github.com/ventsislav-georgiev/dch/issues)
 AC_PREREQ(2.60)
-AC_CONFIG_SRCDIR(main.c)
+AC_CONFIG_SRCDIR(dch.c)
 AC_CONFIG_HEADER(config.h)
+
+# libghostty-vt terminal mirror (default on; --without-libghostty = dch-lite)
+AC_ARG_WITH([libghostty],
+	[AS_HELP_STRING([--without-libghostty],
+		[build dch-lite: no terminal mirror, no --read/--wait (~100KB binary)])],
+	[], [with_libghostty=yes])
+
+VT_OBJS=vt_stub.o
+VT_LIBS=
+VT_CPPFLAGS=
+if test "x$with_libghostty" != xno; then
+	vt_platform=`uname -s | tr 'A-Z' 'a-z'`-`uname -m`
+	vt_lib="$srcdir/vendor/libghostty-vt/lib/$vt_platform/libghostty-vt.a"
+	if test -f "$vt_lib"; then
+		AC_DEFINE([HAVE_LIBGHOSTTY_VT], [1],
+			[Define if the libghostty-vt terminal mirror is built in])
+		VT_OBJS=vt.o
+		VT_LIBS=$vt_lib
+		VT_CPPFLAGS="-I\$(srcdir)/vendor/libghostty-vt/include"
+	else
+		AC_MSG_ERROR([no vendored libghostty-vt.a for $vt_platform.
+Run scripts/build-libghostty.sh (needs zig 0.15.x), or configure --without-libghostty for dch-lite.])
+	fi
+fi
+AC_SUBST([VT_OBJS])
+AC_SUBST([VT_LIBS])
+AC_SUBST([VT_CPPFLAGS])
 
 # Checks for programs.
 AC_PROG_CC

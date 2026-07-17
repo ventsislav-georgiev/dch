@@ -16,6 +16,8 @@
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 #include "dtach.h"
+#include "vt.h"
+#include <poll.h>
 
 /* The pty struct - The pty information is stored here. */
 struct pty
@@ -47,6 +49,20 @@ struct client
 	/* Whether or not the client is attached. */
 	int attached;
 
+	/* Connection role latch. A control connection (MSG_KEYS/READ/WAIT)
+	** receives framed responses on the same socket attached clients
+	** receive raw pty bytes on — one connection must never be both, or
+	** a response frame would interleave with terminal output. First
+	** role-defining message wins; a frame from the other class drops
+	** the client. */
+#define ROLE_NONE     0
+#define ROLE_ATTACHED 1
+#define ROLE_CONTROL  2
+	int role;
+
+	/* Pending --wait pattern (empty = no waiter). NUL-terminated. */
+	char wait_pat[DCH_WAIT_MAX + 1];
+
 	/* Input reassembly (client->master). The socket is nonblocking and
 	** frames are variable length, so a read may split one frame or carry
 	** several; buffer raw bytes and parse complete frames out. */
@@ -70,6 +86,18 @@ struct client
 static struct client *clients;
 /* The pseudo-terminal created for the child process. */
 static struct pty the_pty;
+
+/* While set, the select loop leaves the pty out of readfds (the session
+** was started with -w/--spawn and nothing has attached yet). File-scope so
+** handle_packet can open the gate when a control client shows up; see
+** drain_pty() for why opening it late needs an explicit drain. */
+static int pty_gated;
+/* Number of clients with a pending wait_pat; skips the post-batch
+** snapshot entirely in the common no-waiter case. */
+static int n_waiters;
+/* Set once the mirror hits a runtime error and is freed; distinguishes
+** "never had a mirror" (DCH_ST_NOVT) from "mirror died" (DCH_ST_ERR). */
+static int vt_latched_off;
 
 /* Enhanced-keyboard mode state. TUIs (Claude Code, nvim, ...) turn on keyboard
 ** protocols the terminal must stay in for their keys to work:
@@ -190,16 +218,20 @@ setnonblocking(int fd)
 static int
 init_pty(char **argv, int statusfd)
 {
-	/* Use the original terminal's settings. We don't have to set the
-	** window size here, because the attacher will send it in a packet. */
+	/* Use the original terminal's settings. Start at a sane 80x24
+	** instead of 0x0 so headless-spawned programs (and the terminal
+	** mirror) see a real grid; the attacher's WINCH corrects it. */
 	the_pty.term = orig_term;
 	memset(&the_pty.ws, 0, sizeof(struct winsize));
+	the_pty.ws.ws_row = 24;
+	the_pty.ws.ws_col = 80;
 
 	/* Create the pty process */
 	if (!dont_have_tty)
-		the_pty.pid = forkpty(&the_pty.fd, NULL, &the_pty.term, NULL);
+		the_pty.pid = forkpty(&the_pty.fd, NULL, &the_pty.term,
+		    &the_pty.ws);
 	else
-		the_pty.pid = forkpty(&the_pty.fd, NULL, NULL, NULL);
+		the_pty.pid = forkpty(&the_pty.fd, NULL, NULL, &the_pty.ws);
 	if (the_pty.pid < 0)
 		return -1;
 	else if (the_pty.pid == 0)
@@ -461,6 +493,8 @@ remove_client(struct client *p)
 {
 	dch_trace("remove client fd=%d attached=%d outlen=%zu", p->fd,
 	          p->attached, p->outlen);
+	if (p->wait_pat[0])
+		n_waiters--;
 	close(p->fd);
 	if (p->next)
 		p->next->pprev = p->pprev;
@@ -530,6 +564,354 @@ flush_client(struct client *p)
 	return 0;
 }
 
+/* One pty output buffer: track modes, queue to attached clients, feed the
+** mirror. Shared by pty_activity (select wake) and drain_pty (gate-open /
+** pre-read sync). */
+static void
+process_pty_buf(const unsigned char *buf, size_t len)
+{
+	struct client *p, *next;
+
+	/* Real output happened — refresh the activity stamp (throttled). */
+	touch_activity();
+
+#ifdef BROKEN_MASTER
+	/* Get the current terminal settings. */
+	if (tcgetattr(the_pty.slave, &the_pty.term) < 0)
+		exit(1);
+#else
+	/* Get the current terminal settings. */
+	if (tcgetattr(the_pty.fd, &the_pty.term) < 0)
+		exit(1);
+#endif
+
+	/* Remember any enhanced-keyboard mode toggles so we can re-arm a
+	** client that attaches later (see kbd_u / kbd_m). */
+	track_keymode(buf, len);
+	track_decmode(buf, len);
+
+	/* Queue to every attached client. A slow client that overflows its
+	** queue is dropped rather than stalling the pty and the other clients. */
+	for (p = clients; p; p = next)
+	{
+		next = p->next;
+		if (!p->attached)
+			continue;
+		/* Drain any existing backlog FIRST: a client momentarily at OUT_CAP
+		** but recovering would otherwise be dropped by queue_to_client before
+		** it got a chance to flush. flush on an empty queue is a no-op; the
+		** trailing flush pushes what we just queued out the same iteration. */
+		if (flush_client(p) < 0 ||
+		    queue_to_client(p, buf, len) < 0 ||
+		    flush_client(p) < 0)
+			remove_client(p);
+	}
+
+	/* Feed the terminal mirror AFTER the flush loop: attached clients
+	** keep first claim on the wake's time budget. */
+	dch_vt_feed(buf, len);
+}
+
+/* Pull any pty output that is pending RIGHT NOW into the mirror (and to
+** attached clients). Needed before servicing MSG_READ/MSG_WAIT: the pty may
+** have been gated out of this iteration's readfds (--spawn, nothing attached
+** yet), or simply have bytes queued behind this control frame's wake.
+**
+** the_pty.fd is BLOCKING (and must stay so: pty writes go through
+** write_buf_or_fail, which exits on EAGAIN), so each read is gated by a
+** zero-timeout poll instead of looping until EAGAIN. */
+static void
+drain_pty(void)
+{
+	unsigned char buf[BUFSIZE];
+	struct pollfd pfd;
+	ssize_t len;
+
+	pfd.fd = the_pty.fd;
+	pfd.events = POLLIN;
+	for (;;)
+	{
+		if (poll(&pfd, 1, 0) <= 0 || !(pfd.revents & POLLIN))
+			return;
+		len = read(the_pty.fd, buf, sizeof(buf));
+		if (len <= 0)
+			return; /* child died; the main loop's wake handles it */
+		process_pty_buf(buf, (size_t)len);
+	}
+}
+
+/* Queue one hand-built [type][len:2 LE][payload] response frame on a control
+** client. NEVER write_packet_or_fail here — that exits the whole master on a
+** transient write error. Returns -1 if the client was dropped. */
+static int
+queue_frame(struct client *p, unsigned char type, unsigned int len,
+            const unsigned char *payload, size_t plen)
+{
+	unsigned char hdr[PKT_HDR];
+
+	hdr[0] = type;
+	hdr[1] = len & 0xff;
+	hdr[2] = (len >> 8) & 0xff;
+	if (queue_to_client(p, hdr, sizeof(hdr)) < 0 ||
+	    (plen && queue_to_client(p, payload, plen) < 0))
+	{
+		remove_client(p);
+		return -1;
+	}
+	return 0;
+}
+
+/* Response frame with no payload; the length field carries the status. */
+static int
+queue_status(struct client *p, unsigned char type, unsigned int status)
+{
+	return queue_frame(p, type, status, NULL, 0);
+}
+
+/* The mirror returned a runtime error: free it and answer DCH_ST_ERR from
+** now on (degradation for returned errors; a Zig panic still aborts). */
+static void
+vt_latch_off(void)
+{
+	dch_trace("vt mirror error -> latched off");
+	dch_vt_free();
+	vt_latched_off = 1;
+}
+
+static unsigned int
+vt_missing_status(void)
+{
+	return vt_latched_off ? DCH_ST_ERR : DCH_ST_NOVT;
+}
+
+/* Serve MSG_READ. payload: {u8 format; u8 source; u16 lines LE}.
+** Returns -1 if the client was dropped. */
+#define READ_RESP_CAP (2u * 1024u * 1024u)
+#define READ_HEADROOM (64u * 1024u)
+static int
+do_read(struct client *p, const unsigned char *payload)
+{
+	unsigned int format = payload[0];
+	unsigned int source = payload[1];
+	unsigned int lines = (unsigned int)payload[2] |
+	                     ((unsigned int)payload[3] << 8);
+	unsigned int status = DCH_ST_OK;
+	char *snap, *body;
+	size_t snaplen, off;
+
+	if (!dch_vt_enabled())
+		return queue_status(p, MSG_READ_END, vt_missing_status());
+
+	/* One outstanding response per control connection: bytes still
+	** queued means the previous response hasn't drained — protocol
+	** abuse, not a wait state. */
+	if (p->outlen - p->outoff > 0)
+	{
+		dch_trace("read while response pending -> drop fd=%d", p->fd);
+		remove_client(p);
+		return -1;
+	}
+
+	if (format > DCH_READ_ANSI || source > DCH_READ_RECENT)
+		return queue_status(p, MSG_READ_END, DCH_ST_ERR);
+	if (source == DCH_READ_RECENT && lines == 0)
+		lines = 100;
+
+	if (dch_vt_snapshot(format == DCH_READ_ANSI ? DCH_VT_FMT_ANSI
+	    : DCH_VT_FMT_PLAIN,
+	    source == DCH_READ_RECENT ? (int)lines : 0,
+	    &snap, &snaplen) < 0)
+	{
+		vt_latch_off();
+		return queue_status(p, MSG_READ_END, DCH_ST_ERR);
+	}
+
+	/* Bound the response: keep the TAIL (most recent output is what a
+	** controlling agent needs), report the cut. */
+	body = snap;
+	if (snaplen > READ_RESP_CAP)
+	{
+		body += snaplen - READ_RESP_CAP;
+		snaplen = READ_RESP_CAP;
+		status = DCH_ST_TRUNC;
+	}
+
+	/* Admission check: never let a response ride into the OUT_CAP
+	** overflow drop (that kills the client without an END frame). */
+	if (p->outlen - p->outoff + snaplen + READ_HEADROOM > OUT_CAP)
+	{
+		dch_vt_buf_free(snap);
+		return queue_status(p, MSG_READ_END, DCH_ST_BUSY);
+	}
+
+	for (off = 0; off < snaplen; off += PKT_MAX)
+	{
+		size_t chunk = snaplen - off > PKT_MAX ? PKT_MAX
+		    : snaplen - off;
+
+		if (queue_frame(p, MSG_READ_DATA, (unsigned int)chunk,
+		    (const unsigned char *)body + off, chunk) < 0)
+		{
+			dch_vt_buf_free(snap);
+			return -1;
+		}
+	}
+	dch_vt_buf_free(snap);
+	return queue_status(p, MSG_READ_END, status);
+}
+
+/* Find the line containing the first occurrence of pat in hay; out gets the
+** line's bounds. Returns 1 on hit. */
+static int
+find_match_line(const char *hay, const char *pat, const char **line,
+                size_t *linelen)
+{
+	const char *hit = strstr(hay, pat);
+	const char *start, *end;
+
+	if (!hit)
+		return 0;
+	for (start = hit; start > hay && start[-1] != '\n'; start--)
+		;
+	for (end = hit; *end && *end != '\n'; end++)
+		;
+	*line = start;
+	*linelen = (size_t)(end - start);
+	return 1;
+}
+
+/* Rows of recent scrollback a wait pattern is matched against. One 16 KB
+** pty burst can scroll a line clean past the visible grid before we get to
+** look, so match deeper than the screen. */
+#define WAIT_SCAN_ROWS 256
+
+/* Check every pending waiter against the current mirror state. `exclude`
+** guards the caller's own client pointer (handle_packet still holds it).
+** Runs after each pty batch; skipped entirely while no waiter exists. */
+static void
+check_waiters(struct client *exclude)
+{
+	struct client *p, *next;
+	char *snap;
+	size_t snaplen;
+
+	if (n_waiters <= 0 || !dch_vt_enabled())
+		return;
+
+	if (dch_vt_snapshot(DCH_VT_FMT_PLAIN, WAIT_SCAN_ROWS, &snap,
+	    &snaplen) < 0)
+	{
+		vt_latch_off();
+		/* Tell every waiter the mirror is gone rather than hanging
+		** them until their timeout. */
+		for (p = clients; p; p = next)
+		{
+			next = p->next;
+			if (!p->wait_pat[0] || p == exclude)
+				continue;
+			p->wait_pat[0] = '\0';
+			n_waiters--;
+			queue_status(p, MSG_READ_END, DCH_ST_ERR);
+		}
+		return;
+	}
+
+	for (p = clients; p; p = next)
+	{
+		const char *line;
+		size_t linelen;
+
+		next = p->next;
+		if (!p->wait_pat[0] || p == exclude)
+			continue;
+		if (!find_match_line(snap, p->wait_pat, &line, &linelen))
+			continue;
+		p->wait_pat[0] = '\0';
+		n_waiters--;
+		if (linelen > PKT_MAX)
+			linelen = PKT_MAX;
+		queue_frame(p, MSG_WAIT_HIT, (unsigned int)linelen,
+		    (const unsigned char *)line, linelen);
+	}
+	dch_vt_buf_free(snap);
+}
+
+/* Serve MSG_WAIT: answer immediately when the pattern is already on screen,
+** otherwise park it on the client. Returns -1 if the client was dropped. */
+static int
+do_wait(struct client *p, const unsigned char *payload, unsigned int len)
+{
+	char *snap;
+	size_t snaplen;
+	const char *line;
+	size_t linelen;
+
+	if (!dch_vt_enabled())
+		return queue_status(p, MSG_READ_END, vt_missing_status());
+	if (len == 0 || len > DCH_WAIT_MAX)
+	{
+		dch_trace("bad wait pattern len=%u -> drop fd=%d", len, p->fd);
+		remove_client(p);
+		return -1;
+	}
+
+	if (p->wait_pat[0])
+		n_waiters--; /* replacing an existing pattern */
+	memcpy(p->wait_pat, payload, len);
+	p->wait_pat[len] = '\0';
+
+	if (dch_vt_snapshot(DCH_VT_FMT_PLAIN, WAIT_SCAN_ROWS, &snap,
+	    &snaplen) < 0)
+	{
+		p->wait_pat[0] = '\0';
+		vt_latch_off();
+		return queue_status(p, MSG_READ_END, DCH_ST_ERR);
+	}
+	if (find_match_line(snap, p->wait_pat, &line, &linelen))
+	{
+		p->wait_pat[0] = '\0';
+		if (linelen > PKT_MAX)
+			linelen = PKT_MAX;
+		if (queue_frame(p, MSG_WAIT_HIT, (unsigned int)linelen,
+		    (const unsigned char *)line, linelen) < 0)
+		{
+			dch_vt_buf_free(snap);
+			return -1;
+		}
+	}
+	else
+		n_waiters++;
+	dch_vt_buf_free(snap);
+	return 0;
+}
+
+/* Serve MSG_KEYS: encode the combos against the mirror's LIVE keyboard modes
+** and write to the pty. Returns -1 if the client was dropped. */
+static int
+do_keys(struct client *p, const unsigned char *payload, unsigned int len)
+{
+	char spec[PKT_MAX + 1];
+	char *bytes;
+	size_t nbytes, i;
+
+	if (!dch_vt_enabled())
+		return queue_status(p, MSG_ACK, vt_missing_status());
+
+	/* Wire format is NUL-separated; the shim takes whitespace-separated. */
+	memcpy(spec, payload, len);
+	spec[len] = '\0';
+	for (i = 0; i < len; i++)
+		if (spec[i] == '\0')
+			spec[i] = ' ';
+
+	if (dch_vt_encode_keys(spec, &bytes, &nbytes) < 0)
+		return queue_status(p, MSG_ACK, DCH_ST_ERR);
+
+	write_buf_or_fail(the_pty.fd, bytes, nbytes);
+	dch_vt_buf_free(bytes);
+	return queue_status(p, MSG_ACK, DCH_ST_OK);
+}
+
 /* Process activity on the pty - Input and terminal changes are queued out to
 ** the attached clients (flushed by the main loop). If the pty goes away, we
 ** die. */
@@ -538,7 +920,6 @@ pty_activity(void)
 {
 	unsigned char buf[BUFSIZE];
 	ssize_t len;
-	struct client *p, *next;
 
 	/* Read the pty activity */
 	len = read(the_pty.fd, buf, sizeof(buf));
@@ -559,40 +940,8 @@ pty_activity(void)
 		exit(1);
 	}
 
-	/* Real output happened — refresh the activity stamp (throttled). */
-	touch_activity();
-
-#ifdef BROKEN_MASTER
-	/* Get the current terminal settings. */
-	if (tcgetattr(the_pty.slave, &the_pty.term) < 0)
-		exit(1);
-#else
-	/* Get the current terminal settings. */
-	if (tcgetattr(the_pty.fd, &the_pty.term) < 0)
-		exit(1);
-#endif
-
-	/* Remember any enhanced-keyboard mode toggles so we can re-arm a
-	** client that attaches later (see kbd_u / kbd_m). */
-	track_keymode(buf, (size_t)len);
-	track_decmode(buf, (size_t)len);
-
-	/* Queue to every attached client. A slow client that overflows its
-	** queue is dropped rather than stalling the pty and the other clients. */
-	for (p = clients; p; p = next)
-	{
-		next = p->next;
-		if (!p->attached)
-			continue;
-		/* Drain any existing backlog FIRST: a client momentarily at OUT_CAP
-		** but recovering would otherwise be dropped by queue_to_client before
-		** it got a chance to flush. flush on an empty queue is a no-op; the
-		** trailing flush pushes what we just queued out the same iteration. */
-		if (flush_client(p) < 0 ||
-		    queue_to_client(p, buf, (size_t)len) < 0 ||
-		    flush_client(p) < 0)
-			remove_client(p);
-	}
+	process_pty_buf(buf, (size_t)len);
+	check_waiters(NULL);
 }
 
 /* Process activity on the control socket */
@@ -631,16 +980,61 @@ control_activity(int s)
 
 /* Act on one fully-reassembled frame. `len` is the header length field
 ** (PUSH = payload bytes, REDRAW = method); `payload` points at the frame's
-** payload bytes (len for PUSH, a struct winsize for WINCH/REDRAW). */
-static void
+** payload bytes (len for PUSH, a struct winsize for WINCH/REDRAW).
+** Returns -1 when the client was removed (caller must stop touching p). */
+static int
 handle_packet(struct client *p, unsigned int type, unsigned int len,
               const unsigned char *payload)
 {
+	/* Enforce the connection role latch (see struct client). PUSH, WINCH
+	** and DETACH stay role-neutral. */
+	if (type == MSG_ATTACH)
+	{
+		if (p->role == ROLE_CONTROL)
+		{
+			dch_trace("attach on control conn -> drop fd=%d", p->fd);
+			remove_client(p);
+			return -1;
+		}
+		p->role = ROLE_ATTACHED;
+	}
+	else if (type == MSG_KEYS || type == MSG_READ || type == MSG_WAIT)
+	{
+		if (p->role == ROLE_ATTACHED)
+		{
+			dch_trace("control verb on attached conn -> drop fd=%d",
+			          p->fd);
+			remove_client(p);
+			return -1;
+		}
+		p->role = ROLE_CONTROL;
+
+		/* A control client counts as "someone showed up": open the
+		** --spawn pty gate, then pull pending pty output into the
+		** mirror so READ/WAIT see current state (and KEYS encodes
+		** against current keyboard modes) instead of last wake's. */
+		pty_gated = 0;
+		drain_pty();
+		check_waiters(p);
+	}
+
+	/* A redraw from a control client would repaint every attached
+	** human's screen — reading must never perturb the session. */
+	if (type == MSG_REDRAW && p->role == ROLE_CONTROL)
+		return 0;
+
 	/* Push out data to the program. */
 	if (type == MSG_PUSH)
 	{
 		write_buf_or_fail(the_pty.fd, payload, len);
 	}
+
+	else if (type == MSG_KEYS)
+		return do_keys(p, payload, len);
+	else if (type == MSG_READ)
+		return do_read(p, payload);
+	else if (type == MSG_WAIT)
+		return do_wait(p, payload, len);
 
 	/* Attach or detach from the program. */
 	else if (type == MSG_ATTACH)
@@ -675,6 +1069,7 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 	{
 		memcpy(&the_pty.ws, payload, sizeof(struct winsize));
 		ioctl(the_pty.fd, TIOCSWINSZ, &the_pty.ws);
+		dch_vt_resize(the_pty.ws.ws_col, the_pty.ws.ws_row);
 	}
 
 	/* Force a redraw using a particular method. */
@@ -687,11 +1082,12 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 		if (method == REDRAW_UNSPEC)
 			method = redraw_method;
 		if (method == REDRAW_NONE)
-			return;
+			return 0;
 
 		/* Set the window size. */
 		memcpy(&the_pty.ws, payload, sizeof(struct winsize));
 		ioctl(the_pty.fd, TIOCSWINSZ, &the_pty.ws);
+		dch_vt_resize(the_pty.ws.ws_col, the_pty.ws.ws_row);
 
 		/* Send a ^L character if the terminal is in no-echo and
 		** character-at-a-time mode. */
@@ -711,6 +1107,7 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 			killpty(&the_pty, SIGWINCH);
 		}
 	}
+	return 0;
 }
 
 /* Process activity from a client. Reassembles variable-length frames from
@@ -739,7 +1136,8 @@ client_activity(struct client *p)
 		unsigned int type = f[0];
 		unsigned int len  = (unsigned int)f[1] |
 		                    ((unsigned int)f[2] << 8);
-		size_t plen = (type == MSG_PUSH) ? len
+		size_t plen = (type == MSG_PUSH || type == MSG_KEYS ||
+		               type == MSG_READ || type == MSG_WAIT) ? len
 		    : (type == MSG_WINCH || type == MSG_REDRAW)
 		        ? sizeof(struct winsize)
 		    : 0;
@@ -755,7 +1153,8 @@ client_activity(struct client *p)
 		if (p->inlen - off < PKT_HDR + plen)
 			break; /* rest of this frame hasn't arrived yet */
 
-		handle_packet(p, type, len, f + PKT_HDR);
+		if (handle_packet(p, type, len, f + PKT_HDR) < 0)
+			return; /* client removed; p is gone */
 		off += PKT_HDR + plen;
 	}
 
@@ -787,6 +1186,7 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 	/* Resolve the trace sink now (before any signal handler can call
 	** dch_trace), so die() only ever fprintf()s, never fopen()s. */
 	dch_trace("master start pid=%d waitattach=%d", (int)getpid(), waitattach);
+	pty_gated = waitattach;
 
 	/* Set a trap to unlink the socket when we die. */
 	atexit(unlink_socket);
@@ -802,6 +1202,22 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 		else
 			printf("%s: init_pty: %s\n", progname, strerror(errno));
 		exit(1);
+	}
+
+	/* Start the terminal mirror at the pty's initial 80x24; MSG_WINCH /
+	** MSG_REDRAW keep it in sync. Failure (or DCH_NO_VT) just leaves
+	** --read/--wait/--keys unavailable; the session is unaffected. */
+	if (!getenv("DCH_NO_VT"))
+	{
+		char *sb = getenv("DCH_SCROLLBACK");
+		int scrollback = sb ? atoi(sb) : 2000;
+
+		if (scrollback < 0)
+			scrollback = 0;
+		if (scrollback > 100000)
+			scrollback = 100000;
+		if (dch_vt_init(80, 24, scrollback) < 0)
+			dch_trace("vt mirror unavailable");
 	}
 
 	/* Set up some signals. */
@@ -852,9 +1268,20 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 		** waiting another loop to arm it would block in select() with no
 		** follow-up wake (our reassembly drains ATTACH+REDRAW in one read).
 		*/
-		if (waitattach && clients && clients->attached)
-			waitattach = 0;
-		if (!waitattach)
+		if (pty_gated)
+		{
+			/* Scan the FULL list: a control client connecting first
+			** would otherwise hide an attached one behind it (clients
+			** are head-inserted). handle_packet also clears the gate
+			** directly on any control verb. */
+			for (p = clients; p; p = p->next)
+				if (p->attached)
+				{
+					pty_gated = 0;
+					break;
+				}
+		}
+		if (!pty_gated)
 		{
 			FD_SET(the_pty.fd, &readfds);
 			if (the_pty.fd > highest_fd)
@@ -895,7 +1322,7 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 			exit(1);
 		}
 
-		dch_trace("mloop wake wa=%d ctl=%d pty=%d", waitattach,
+		dch_trace("mloop wake wa=%d ctl=%d pty=%d", pty_gated,
 		          FD_ISSET(s, &readfds), FD_ISSET(the_pty.fd, &readfds));
 		/* New client? */
 		if (FD_ISSET(s, &readfds))

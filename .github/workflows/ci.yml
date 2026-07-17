@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+        variant: [full, lite]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Configure
+        run: |
+          if [ "${{ matrix.variant }}" = "lite" ]; then
+            ./configure --without-libghostty
+          else
+            ./configure
+          fi
+
+      - name: Build
+        run: make
+
+      - name: Binary size
+        run: ls -la dch
+
+      - name: Test
+        run: make test
+
+  # The committed libghostty-vt.a blobs must match what the pinned upstream
+  # commit reproducibly builds. Zig is only needed here, never for `make`.
+  vendor-verify:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Install zig 0.15
+        run: brew install zig@0.15
+
+      - name: Rebuild all platforms and compare sha256
+        run: ZIG=/opt/homebrew/opt/zig@0.15/bin/zig scripts/build-libghostty.sh --all
+
+      - name: Ensure vendor tree unchanged
+        run: git diff --exit-code vendor/

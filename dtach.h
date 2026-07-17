@@ -105,7 +105,37 @@ enum
 	MSG_DETACH	= 2,
 	MSG_WINCH	= 3,
 	MSG_REDRAW	= 4,
+	/* Control verbs (client->master). A connection that sends one of
+	** these takes the CONTROL role and can never attach (see the role
+	** latch in master.c) — responses are framed, attached output is raw,
+	** and one socket must never carry both. */
+	MSG_KEYS	= 5,	/* payload: NUL-separated key combos */
+	MSG_READ	= 6,	/* payload: {u8 format; u8 source; u16 lines LE} */
+	MSG_WAIT	= 7,	/* payload: literal substring (<= 512 bytes) */
+	/* Responses (master->control-client), same [type][len:2 LE] framing. */
+	MSG_READ_DATA	= 8,	/* len bytes of screen snapshot */
+	MSG_READ_END	= 9,	/* len = status, no payload */
+	MSG_WAIT_HIT	= 10,	/* payload: the matching line */
+	MSG_ACK		= 11,	/* len = status; reply to MSG_KEYS */
 };
+
+/* MSG_READ_END / MSG_ACK statuses */
+enum
+{
+	DCH_ST_OK	= 0,
+	DCH_ST_ERR	= 1,	/* internal error (mirror latched off) */
+	DCH_ST_NOVT	= 2,	/* master has no terminal mirror (lite/DCH_NO_VT) */
+	DCH_ST_TRUNC	= 3,	/* response truncated (head dropped, tail kept) */
+	DCH_ST_BUSY	= 4,	/* out-queue too full; retry */
+};
+
+/* MSG_READ payload fields */
+#define DCH_READ_PLAIN   0
+#define DCH_READ_ANSI    1
+#define DCH_READ_VISIBLE 0
+#define DCH_READ_RECENT  1
+
+#define DCH_WAIT_MAX 512	/* MSG_WAIT pattern cap */
 
 enum
 {

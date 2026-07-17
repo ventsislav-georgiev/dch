@@ -60,11 +60,13 @@ write_buf_or_fail(int fd, const void *buf, size_t count)
 }
 
 /* Payload byte count carried on the wire for a packet, derived from type.
-** PUSH = pkt->len bytes; WINCH/REDRAW = a winsize; ATTACH/DETACH = none. */
+** PUSH/KEYS/READ/WAIT = pkt->len bytes; WINCH/REDRAW = a winsize;
+** ATTACH/DETACH = none. */
 size_t
 packet_payload_len(const struct packet *pkt)
 {
-	if (pkt->type == MSG_PUSH)
+	if (pkt->type == MSG_PUSH || pkt->type == MSG_KEYS ||
+	    pkt->type == MSG_READ || pkt->type == MSG_WAIT)
 		return pkt->len;
 	if (pkt->type == MSG_WINCH || pkt->type == MSG_REDRAW)
 		return sizeof(struct winsize);
@@ -1158,6 +1160,14 @@ usage(void)
 	    "  dch -e <c>       set detach character (default ^\\)\n"
 	    "  dch -h           this help\n"
 	    "  dch -V           print version\n"
+	    "Agent/control verbs (no attach; safe to script):\n"
+	    "  dch --spawn <name> [--size CxR] [cmd...]   start headless session\n"
+	    "  dch --send <name> <text...>                type text into session\n"
+	    "  dch --run <name> <text...>                 type text, press enter\n"
+	    "  dch --keys <name> <key...>                 send keys (ctrl+c, up, f2, ...)\n"
+	    "  dch --read <name> [--ansi] [--recent [N]]  print session screen\n"
+	    "  dch --wait <name> --match <str> [--timeout ms]  wait for output\n"
+	    "  dch --ls-json    same as -lj\n"
 	    "Detach: Ctrl-\\  (or `dch -d` if the host swallows it).\n"
 	    "Nesting refused inside an existing dch session.\n");
 }
@@ -1362,6 +1372,526 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 	return attach_main(0);
 }
 
+/* ---- control verbs: --read --wait --keys --send --run --spawn ------- */
+/*
+** These open a CONTROL connection to the session master: request frames go
+** out with the normal packet writer, responses come back framed as
+** [type][len:2 LE][payload] (MSG_READ_DATA/READ_END/WAIT_HIT/ACK). A control
+** connection never attaches, so reading a session can't perturb it.
+*/
+
+#include <poll.h>
+
+/* Inactivity deadline for --read/--keys responses. Generous: the master
+** answers in microseconds; this only bounds a dead/ancient master. */
+#define CTL_IDLE_MS 2000
+
+static const char no_vt_msg[] =
+    "dch: this session has no terminal mirror (dch-lite build or DCH_NO_VT)\n"
+    "     — install full dch and restart the session to use this command\n";
+static const char old_master_msg[] =
+    "dch: no reply — session master predates terminal-mirror support;\n"
+    "     restart the session with current dch\n";
+
+static int
+control_connect(const char *name, int quiet)
+{
+	struct sockaddr_un sa;
+	int s;
+
+	if (make_sock_path(name) < 0)
+		return -1;
+	s = socket(PF_UNIX, SOCK_STREAM, 0);
+	if (s < 0)
+		return -1;
+	if (strlen(sock_path) > sizeof(sa.sun_path) - 1)
+	{
+		close(s);
+		return -1;
+	}
+	memset(&sa, 0, sizeof(sa));
+	sa.sun_family = AF_UNIX;
+	strcpy(sa.sun_path, sock_path);
+	if (connect(s, (struct sockaddr *)&sa, sizeof(sa)) < 0)
+	{
+		close(s);
+		if (!quiet)
+			fprintf(stderr, "dch: no session: %s\n", name);
+		return -1;
+	}
+	return s;
+}
+
+static void
+send_ctl(int s, unsigned char type, const void *payload, size_t len)
+{
+	struct packet pkt;
+
+	memset(&pkt, 0, sizeof(pkt));
+	pkt.type = type;
+	pkt.len = (unsigned short)len;
+	if (len)
+		memcpy(pkt.u.buf, payload, len);
+	write_packet_or_fail(s, &pkt);
+}
+
+/* Reassembly state for master->client response frames. */
+struct ctl_reader
+{
+	unsigned char buf[PKT_HDR + PKT_MAX];
+	size_t fill;
+	int got_any; /* any bytes ever (old-master detection) */
+};
+
+/* Next response frame. Returns 1 (frame), 0 (idle_ms of silence), -1 (EOF /
+** error). The deadline is INACTIVITY-based: every received byte resets it,
+** so a large response streaming slowly never false-trips. */
+static int
+ctl_next_frame(int s, struct ctl_reader *r, int idle_ms,
+               unsigned char *type, unsigned char *payload, unsigned int *len)
+{
+	for (;;)
+	{
+		if (r->fill >= PKT_HDR)
+		{
+			unsigned int flen = (unsigned int)r->buf[1] |
+			                    ((unsigned int)r->buf[2] << 8);
+			unsigned int plen =
+			    (r->buf[0] == MSG_READ_DATA ||
+			     r->buf[0] == MSG_WAIT_HIT) ? flen : 0;
+
+			if (plen > PKT_MAX)
+				return -1; /* corrupt */
+			if (r->fill >= PKT_HDR + plen)
+			{
+				*type = r->buf[0];
+				*len = flen;
+				if (plen)
+					memcpy(payload, r->buf + PKT_HDR, plen);
+				memmove(r->buf, r->buf + PKT_HDR + plen,
+				        r->fill - PKT_HDR - plen);
+				r->fill -= PKT_HDR + plen;
+				return 1;
+			}
+		}
+
+		struct pollfd pfd = { s, POLLIN, 0 };
+		int rc = poll(&pfd, 1, idle_ms);
+		if (rc == 0)
+			return 0;
+		if (rc < 0)
+		{
+			if (errno == EINTR)
+				continue;
+			return -1;
+		}
+		ssize_t n = read(s, r->buf + r->fill,
+		                 sizeof(r->buf) - r->fill);
+		if (n <= 0)
+			return -1;
+		r->fill += (size_t)n;
+		r->got_any = 1;
+	}
+}
+
+/* Map a READ_END/ACK status to an exit code + message. */
+static int
+ctl_status_exit(unsigned int status)
+{
+	switch (status)
+	{
+	case DCH_ST_OK:
+		return 0;
+	case DCH_ST_NOVT:
+		fputs(no_vt_msg, stderr);
+		return 3;
+	case DCH_ST_TRUNC:
+		fprintf(stderr, "dch: response truncated (over 2MB), "
+		        "tail kept\n");
+		return 0;
+	case DCH_ST_BUSY:
+		fprintf(stderr, "dch: session output queue busy, retry\n");
+		return 1;
+	default:
+		fprintf(stderr, "dch: session terminal mirror error\n");
+		return 1;
+	}
+}
+
+static int
+ctl_dead_exit(struct ctl_reader *r, const char *verb)
+{
+	if (!r->got_any)
+		fputs(old_master_msg, stderr);
+	else
+		fprintf(stderr, "dch: truncated %s response\n", verb);
+	return 1;
+}
+
+static int
+do_read_verb(const char *name, int ansi, int recent_lines)
+{
+	unsigned char req[4], payload[PKT_MAX], type;
+	struct ctl_reader r = {0};
+	unsigned int len;
+	int s, rc;
+
+	s = control_connect(name, 0);
+	if (s < 0)
+		return 1;
+
+	req[0] = ansi ? DCH_READ_ANSI : DCH_READ_PLAIN;
+	req[1] = recent_lines >= 0 ? DCH_READ_RECENT : DCH_READ_VISIBLE;
+	req[2] = recent_lines >= 0 ? (recent_lines & 0xff) : 0;
+	req[3] = recent_lines >= 0 ? ((recent_lines >> 8) & 0xff) : 0;
+	send_ctl(s, MSG_READ, req, sizeof(req));
+
+	for (;;)
+	{
+		rc = ctl_next_frame(s, &r, CTL_IDLE_MS, &type, payload, &len);
+		if (rc <= 0)
+		{
+			close(s);
+			return ctl_dead_exit(&r, "read");
+		}
+		if (type == MSG_READ_DATA)
+			fwrite(payload, 1, len, stdout);
+		else if (type == MSG_READ_END)
+		{
+			close(s);
+			/* end the screen dump on a newline for shells/agents */
+			if (r.got_any)
+				fputc('\n', stdout);
+			return ctl_status_exit(len);
+		}
+		else
+		{
+			close(s);
+			return 1; /* protocol violation */
+		}
+	}
+}
+
+static int
+do_wait_verb(const char *name, const char *pattern, int timeout_ms)
+{
+	unsigned char payload[PKT_MAX], type;
+	struct ctl_reader r = {0};
+	unsigned int len;
+	size_t plen = strlen(pattern);
+	int s, rc;
+	struct timeval start, now;
+
+	if (plen == 0 || plen > DCH_WAIT_MAX)
+	{
+		fprintf(stderr, "dch: --match must be 1..%d bytes\n",
+		        DCH_WAIT_MAX);
+		return 1;
+	}
+	s = control_connect(name, 0);
+	if (s < 0)
+		return 1;
+	send_ctl(s, MSG_WAIT, pattern, plen);
+
+	gettimeofday(&start, NULL);
+	for (;;)
+	{
+		int elapsed, left;
+
+		gettimeofday(&now, NULL);
+		elapsed = (int)((now.tv_sec - start.tv_sec) * 1000 +
+		                (now.tv_usec - start.tv_usec) / 1000);
+		left = timeout_ms - elapsed;
+		if (left <= 0)
+		{
+			close(s);
+			fprintf(stderr, "dch: wait timed out after %dms\n",
+			        timeout_ms);
+			return 2;
+		}
+		rc = ctl_next_frame(s, &r, left, &type, payload, &len);
+		if (rc == 0)
+			continue; /* loop re-checks the wall clock */
+		if (rc < 0)
+		{
+			close(s);
+			return ctl_dead_exit(&r, "wait");
+		}
+		if (type == MSG_WAIT_HIT)
+		{
+			fwrite(payload, 1, len, stdout);
+			fputc('\n', stdout);
+			close(s);
+			return 0;
+		}
+		if (type == MSG_READ_END)
+		{
+			int e = ctl_status_exit(len);
+
+			close(s);
+			return e ? e : 1; /* a status frame here is never a hit */
+		}
+	}
+}
+
+/* Legacy fallback encoding for --keys against a mirror-less session: a
+** fixed xterm-default table, blind to kitty/application modes. */
+static int
+legacy_keys(const char *combo, char *out, size_t outsz)
+{
+	static const struct { const char *name; const char *seq; } tab[] = {
+		{"enter", "\r"}, {"esc", "\x1b"}, {"escape", "\x1b"},
+		{"tab", "\t"}, {"space", " "}, {"backspace", "\x7f"},
+		{"up", "\x1b[A"}, {"down", "\x1b[B"}, {"right", "\x1b[C"},
+		{"left", "\x1b[D"}, {"home", "\x1b[H"}, {"end", "\x1b[F"},
+		{"pgup", "\x1b[5~"}, {"pgdn", "\x1b[6~"},
+		{"delete", "\x1b[3~"}, {"insert", "\x1b[2~"},
+		{"f1", "\x1bOP"}, {"f2", "\x1bOQ"}, {"f3", "\x1bOR"},
+		{"f4", "\x1bOS"}, {"f5", "\x1b[15~"}, {"f6", "\x1b[17~"},
+		{"f7", "\x1b[18~"}, {"f8", "\x1b[19~"}, {"f9", "\x1b[20~"},
+		{"f10", "\x1b[21~"}, {"f11", "\x1b[23~"}, {"f12", "\x1b[24~"},
+	};
+	size_t k;
+	int alt = 0, ctrl = 0;
+	char pos = 0;
+
+	for (;;)
+	{
+		if (strncasecmp(combo, "ctrl+", 5) == 0)
+		{
+			ctrl = 1;
+			combo += 5;
+		}
+		else if (strncasecmp(combo, "alt+", 4) == 0)
+		{
+			alt = 1;
+			combo += 4;
+		}
+		else if (strncasecmp(combo, "shift+", 6) == 0)
+			combo += 6; /* legacy table can't encode shift chords */
+		else
+			break;
+	}
+	if (ctrl && combo[0] && !combo[1])
+	{
+		char c = combo[0];
+		if (c >= 'A' && c <= 'Z')
+			c += 32;
+		if (c >= 'a' && c <= 'z')
+			pos = c & 037;
+		else if (c == '[')
+			pos = 0x1b;
+		else
+			return -1;
+		snprintf(out, outsz, "%s%c", alt ? "\x1b" : "", pos);
+		return 0;
+	}
+	if (combo[0] && !combo[1])
+	{
+		snprintf(out, outsz, "%s%c", alt ? "\x1b" : "", combo[0]);
+		return 0;
+	}
+	for (k = 0; k < sizeof(tab) / sizeof(tab[0]); k++)
+		if (strcasecmp(tab[k].name, combo) == 0)
+		{
+			snprintf(out, outsz, "%s%s", alt ? "\x1b" : "",
+			         tab[k].seq);
+			return 0;
+		}
+	return -1;
+}
+
+static int
+do_keys_verb(const char *name, char **combos, int ncombos)
+{
+	unsigned char spec[PKT_MAX], payload[PKT_MAX], type;
+	struct ctl_reader r = {0};
+	unsigned int len;
+	size_t fill = 0;
+	int s, rc, k;
+
+	if (ncombos == 0)
+	{
+		fprintf(stderr, "dch: --keys needs at least one key\n");
+		return 1;
+	}
+	for (k = 0; k < ncombos; k++)
+	{
+		size_t l = strlen(combos[k]);
+		if (fill + l + 1 > sizeof(spec))
+		{
+			fprintf(stderr, "dch: too many keys in one call\n");
+			return 1;
+		}
+		memcpy(spec + fill, combos[k], l);
+		fill += l;
+		spec[fill++] = '\0'; /* NUL-separated wire format */
+	}
+
+	s = control_connect(name, 0);
+	if (s < 0)
+		return 1;
+	send_ctl(s, MSG_KEYS, spec, fill - 1); /* drop trailing NUL */
+
+	rc = ctl_next_frame(s, &r, CTL_IDLE_MS, &type, payload, &len);
+	if (rc <= 0)
+	{
+		close(s);
+		return ctl_dead_exit(&r, "keys");
+	}
+	if (type != MSG_ACK)
+	{
+		close(s);
+		return 1;
+	}
+	if (len == DCH_ST_NOVT || len == DCH_ST_ERR)
+	{
+		/* Mirror-less session: fall back to a fixed legacy table so
+		** the common chords still land; warn that mode-aware apps
+		** (kitty protocol, application cursor keys) may see the
+		** wrong encoding. */
+		char one[16];
+		char bytes[PKT_MAX];
+		size_t bfill = 0;
+
+		for (k = 0; k < ncombos; k++)
+		{
+			if (legacy_keys(combos[k], one, sizeof(one)) < 0)
+			{
+				fprintf(stderr, "dch: unknown key: %s\n",
+				        combos[k]);
+				close(s);
+				return 1;
+			}
+			size_t l = strlen(one);
+			if (bfill + l > sizeof(bytes))
+				break;
+			memcpy(bytes + bfill, one, l);
+			bfill += l;
+		}
+		send_ctl(s, MSG_PUSH, bytes, bfill);
+		fprintf(stderr, "dch: session has no terminal mirror; sent "
+		        "legacy key encoding (mode-aware apps may "
+		        "misread modified keys)\n");
+		close(s);
+		return 0;
+	}
+	close(s);
+	if (len != DCH_ST_OK)
+		fprintf(stderr, "dch: unknown key in: %s...\n", combos[0]);
+	return len == DCH_ST_OK ? 0 : 1;
+}
+
+static int
+do_send_verb(const char *name, char **words, int nwords, int press_enter)
+{
+	int s, k;
+
+	if (nwords == 0 && !press_enter)
+	{
+		fprintf(stderr, "dch: --send needs text\n");
+		return 1;
+	}
+	s = control_connect(name, 0);
+	if (s < 0)
+		return 1;
+	for (k = 0; k < nwords; k++)
+	{
+		const char *w = words[k];
+		size_t l = strlen(w), off;
+
+		for (off = 0; off < l; off += PKT_MAX)
+		{
+			size_t chunk = l - off > PKT_MAX ? PKT_MAX : l - off;
+			send_ctl(s, MSG_PUSH, w + off, chunk);
+		}
+		if (k + 1 < nwords)
+			send_ctl(s, MSG_PUSH, " ", 1);
+	}
+	if (press_enter)
+		send_ctl(s, MSG_PUSH, "\r", 1);
+	close(s);
+	return 0;
+}
+
+static int
+do_spawn_verb(char *exe, const char *name, int cols, int rows,
+              char **inner_argv, int inner_argc)
+{
+	unsigned char payload[PKT_MAX], type;
+	struct ctl_reader r = {0};
+	struct winsize ws;
+	unsigned char req[4] = { DCH_READ_PLAIN, DCH_READ_VISIBLE, 0, 0 };
+	unsigned int len;
+	struct packet pkt;
+	char *default_argv[] = { NULL, NULL };
+	struct stat st;
+	int s, rc;
+
+	if (make_sock_path(name) < 0)
+		return 1;
+	if (stat(sock_path, &st) == 0 && S_ISSOCK(st.st_mode))
+	{
+		/* Live master answers a connect; refuse to clobber it. A
+		** stale socket (dead master) just gets unlinked below. */
+		int probe = control_connect(name, 1);
+		if (probe >= 0)
+		{
+			close(probe);
+			fprintf(stderr, "dch: session already exists: %s\n",
+			        name);
+			return 1;
+		}
+	}
+	unlink(sock_path);
+
+	if (inner_argc == 0)
+	{
+		const char *sh = getenv("SHELL");
+
+		default_argv[0] = (char *)(sh && *sh ? sh : "/bin/sh");
+		inner_argv = default_argv;
+	}
+	setenv("DCH_SESSION", name, 1);
+	if (spawn_master(exe, sock_path, inner_argv) < 0)
+	{
+		fprintf(stderr, "dch: failed to spawn session\n");
+		return 1;
+	}
+
+	s = control_connect(name, 0);
+	if (s < 0)
+		return 1;
+
+	/* Give the child a real grid immediately (headless: no attacher will
+	** send a WINCH later). */
+	memset(&ws, 0, sizeof(ws));
+	ws.ws_col = cols;
+	ws.ws_row = rows;
+	memset(&pkt, 0, sizeof(pkt));
+	pkt.type = MSG_WINCH;
+	memcpy(&pkt.u.ws, &ws, sizeof(ws));
+	write_packet_or_fail(s, &pkt);
+
+	/* Throwaway read: a control verb opens the -w pty gate, so the
+	** child's startup output flows into the mirror instead of blocking
+	** on a full kernel pty buffer. The response doubles as "master is
+	** alive and answering". */
+	send_ctl(s, MSG_READ, req, sizeof(req));
+	do
+		rc = ctl_next_frame(s, &r, CTL_IDLE_MS, &type, payload, &len);
+	while (rc == 1 && type == MSG_READ_DATA);
+	close(s);
+
+	if (rc != 1 || type != MSG_READ_END)
+	{
+		fprintf(stderr, "dch: spawned but no master reply\n");
+		return 1;
+	}
+	printf("%s\n", name);
+	return 0;
+}
+
 /* ---- main ----------------------------------------------------------- */
 
 int
@@ -1371,9 +1901,13 @@ main(int argc, char **argv)
 	int force = 0;
 	int kill_explicit = 0;
 	enum { A_ATTACH, A_LIST, A_KILL, A_KILLALL, A_DETACH, A_LISTRAW,
-	       A_RENAME, A_LISTJSON, A_SETALIAS }
+	       A_RENAME, A_LISTJSON, A_SETALIAS,
+	       A_SPAWN, A_SEND, A_RUN, A_KEYS, A_READ, A_WAIT }
 	    action = A_ATTACH;
 	char alias_arg[600] = "";
+	int opt_ansi = 0, opt_recent = -1, opt_timeout = 10000;
+	int opt_cols = 0, opt_rows = 0;
+	char opt_match[DCH_WAIT_MAX + 1] = "";
 
 	progname = argv[0];
 	/* Resolve exe for the master re-exec. Only realpath() when argv[0] is a
@@ -1522,6 +2056,101 @@ main(int argc, char **argv)
 				detach_char = c[0];
 			i++;
 		}
+		else if (strcmp(a, "--ls-json") == 0)
+		{
+			action = A_LISTJSON;
+			i++;
+		}
+		else if (strcmp(a, "--spawn") == 0 ||
+		         strcmp(a, "--send") == 0 ||
+		         strcmp(a, "--run") == 0 ||
+		         strcmp(a, "--keys") == 0 ||
+		         strcmp(a, "--read") == 0 ||
+		         strcmp(a, "--wait") == 0)
+		{
+			/* Control verbs: all take a session name next. */
+			action = strcmp(a, "--spawn") == 0 ? A_SPAWN
+			       : strcmp(a, "--send") == 0  ? A_SEND
+			       : strcmp(a, "--run") == 0   ? A_RUN
+			       : strcmp(a, "--keys") == 0  ? A_KEYS
+			       : strcmp(a, "--read") == 0  ? A_READ
+			                                   : A_WAIT;
+			i++;
+			if (i >= argc || argv[i][0] == '\0')
+			{
+				fprintf(stderr,
+				        "dch: %s needs a session name\n", a);
+				return 1;
+			}
+			snprintf(session_name, sizeof(session_name),
+			         "%s", argv[i]);
+			i++;
+		}
+		else if (strcmp(a, "--ansi") == 0)
+		{
+			opt_ansi = 1;
+			i++;
+		}
+		else if (strcmp(a, "--recent") == 0)
+		{
+			/* Optional line count; bare --recent = master default. */
+			opt_recent = 0;
+			i++;
+			if (i < argc && argv[i][0] >= '0' && argv[i][0] <= '9')
+			{
+				opt_recent = atoi(argv[i]);
+				if (opt_recent < 1 || opt_recent > 65535)
+				{
+					fprintf(stderr, "dch: --recent wants "
+					        "1..65535 lines\n");
+					return 1;
+				}
+				i++;
+			}
+		}
+		else if (strcmp(a, "--match") == 0)
+		{
+			i++;
+			if (i >= argc)
+			{
+				fprintf(stderr,
+				        "dch: --match needs a string\n");
+				return 1;
+			}
+			snprintf(opt_match, sizeof(opt_match), "%s", argv[i]);
+			i++;
+		}
+		else if (strcmp(a, "--timeout") == 0)
+		{
+			i++;
+			if (i >= argc || atoi(argv[i]) < 1)
+			{
+				fprintf(stderr,
+				        "dch: --timeout needs milliseconds\n");
+				return 1;
+			}
+			opt_timeout = atoi(argv[i]);
+			i++;
+		}
+		else if (strcmp(a, "--size") == 0)
+		{
+			i++;
+			if (i >= argc || sscanf(argv[i], "%dx%d",
+			    &opt_cols, &opt_rows) != 2 ||
+			    opt_cols < 1 || opt_cols > 4096 ||
+			    opt_rows < 1 || opt_rows > 4096)
+			{
+				fprintf(stderr,
+				        "dch: --size wants COLSxROWS\n");
+				return 1;
+			}
+			i++;
+		}
+		else if (strcmp(a, "--") == 0)
+		{
+			i++;
+			break;
+		}
 		else if (a[0] == '-' && a[1] != '\0')
 		{
 			fprintf(stderr, "dch: unknown flag %s\n", a);
@@ -1645,6 +2274,40 @@ main(int argc, char **argv)
 		printf("detached %d client%s of: %s\n",
 		       n, n == 1 ? "" : "s", session_name);
 		return 0;
+	}
+	case A_READ:
+		return do_read_verb(session_name, opt_ansi, opt_recent);
+	case A_WAIT:
+		if (opt_match[0] == '\0')
+		{
+			fprintf(stderr, "dch: --wait needs --match <string>\n");
+			return 1;
+		}
+		return do_wait_verb(session_name, opt_match, opt_timeout);
+	case A_KEYS:
+		return do_keys_verb(session_name, inner_argv, inner_argc);
+	case A_SEND:
+		return do_send_verb(session_name, inner_argv, inner_argc, 0);
+	case A_RUN:
+		return do_send_verb(session_name, inner_argv, inner_argc, 1);
+	case A_SPAWN:
+	{
+		if (opt_cols == 0)
+		{
+			/* Headless spawn: caller's env is the best size hint. */
+			const char *c = getenv("COLUMNS"), *l = getenv("LINES");
+
+			opt_cols = c ? atoi(c) : 0;
+			opt_rows = l ? atoi(l) : 0;
+			if (opt_cols < 1 || opt_cols > 4096 ||
+			    opt_rows < 1 || opt_rows > 4096)
+			{
+				opt_cols = 80;
+				opt_rows = 24;
+			}
+		}
+		return do_spawn_verb(exe, session_name, opt_cols, opt_rows,
+		                     inner_argv, inner_argc);
 	}
 	case A_ATTACH:
 		return do_attach(exe, forced_name, force,

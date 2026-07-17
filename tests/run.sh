@@ -122,5 +122,82 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     fi
 fi
 
+# --- control verbs: --spawn --run --read --wait --keys ---------------------
+# Headless by design, so plain shell drives them. `sh` as the inner command
+# keeps prompts boring; markers make matching deterministic.
+if [ -x "$DCH" ]; then
+    SN="ctl$$"
+
+    out=$("$DCH" --spawn "$SN" --size 80x24 sh 2>/dev/null)
+    check "--spawn prints session name" "$out" "$SN"
+    [ -S "$SOCKDIR/$SN.sock" ] && ok "--spawn creates socket" \
+                               || bad "--spawn creates socket"
+
+    "$DCH" --spawn "$SN" sh >/dev/null 2>&1
+    check "--spawn refuses live duplicate" "$?" "1"
+
+    # Full build has the terminal mirror; dch-lite refuses --read/--wait with
+    # exit 3 by design. Probe once and branch the expectations.
+    "$DCH" --read "$SN" >/dev/null 2>&1
+    mirror=$?
+
+    if [ "$mirror" -eq 0 ]; then
+        "$DCH" --run "$SN" "echo dch_marker_one" >/dev/null 2>&1
+        hit=$("$DCH" --wait "$SN" --match dch_marker_one --timeout 5000)
+        st=$?
+        check "--wait finds marker (exit 0)" "$st" "0"
+        case "$hit" in
+        *dch_marker_one*) ok "--wait prints matching line" ;;
+        *) bad "--wait prints matching line (got [$hit])" ;;
+        esac
+
+        "$DCH" --read "$SN" 2>/dev/null | grep -q dch_marker_one \
+            && ok "--read shows session screen" \
+            || bad "--read shows session screen"
+
+        "$DCH" --read "$SN" --recent 200 2>/dev/null | grep -q dch_marker_one \
+            && ok "--read --recent shows history" \
+            || bad "--read --recent shows history"
+
+        "$DCH" --wait "$SN" --match never_printed_zz --timeout 200 >/dev/null 2>&1
+        check "--wait timeout exits 2" "$?" "2"
+
+        # ctrl+c must interrupt a foreground sleep; the next prompt marker
+        # proves the shell is answering again.
+        "$DCH" --run "$SN" "sleep 30" >/dev/null 2>&1
+        "$DCH" --keys "$SN" ctrl+c >/dev/null 2>&1
+        check "--keys ctrl+c accepted" "$?" "0"
+        "$DCH" --run "$SN" "echo dch_marker_two" >/dev/null 2>&1
+        "$DCH" --wait "$SN" --match dch_marker_two --timeout 5000 >/dev/null 2>&1
+        check "--keys ctrl+c interrupts sleep" "$?" "0"
+    else
+        check "lite --read exits 3" "$mirror" "3"
+        "$DCH" --wait "$SN" --match x --timeout 200 >/dev/null 2>&1
+        check "lite --wait exits 3" "$?" "3"
+        "$DCH" --keys "$SN" enter >/dev/null 2>&1
+        check "lite --keys legacy fallback exits 0" "$?" "0"
+        # --send/--run are mirror-independent: plain pty writes.
+        "$DCH" --run "$SN" "echo lite_marker" >/dev/null 2>&1
+        check "lite --run accepted" "$?" "0"
+    fi
+
+    "$DCH" --read no_such_session_zz >/dev/null 2>&1
+    check "--read missing session exits 1" "$?" "1"
+
+    "$DCH" -k "$SN" >/dev/null 2>&1
+
+    # Mirror-less master (DCH_NO_VT parity with dch-lite): read/wait refuse
+    # with exit 3, keys fall back to legacy encoding.
+    LN="lite$$"
+    DCH_NO_VT=1 "$DCH" --spawn "$LN" sh >/dev/null 2>&1
+    "$DCH" --read "$LN" >/dev/null 2>&1
+    check "no-mirror --read exits 3" "$?" "3"
+    "$DCH" --wait "$LN" --match x --timeout 200 >/dev/null 2>&1
+    check "no-mirror --wait exits 3" "$?" "3"
+    "$DCH" --keys "$LN" enter >/dev/null 2>&1
+    check "no-mirror --keys legacy fallback exits 0" "$?" "0"
+    "$DCH" -k "$LN" >/dev/null 2>&1
+fi
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

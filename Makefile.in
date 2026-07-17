@@ -1,13 +1,16 @@
 srcdir = @srcdir@
 CC = @CC@
-CFLAGS = @CFLAGS@ -I.
+CFLAGS = @CFLAGS@ -I. @VT_CPPFLAGS@
 LDFLAGS = @LDFLAGS@
 LIBS = @LIBS@
+VT_OBJS = @VT_OBJS@
+VT_LIBS = @VT_LIBS@
 VERSION = @PACKAGE_VERSION@
 VPATH = $(srcdir)
 
-OBJ = attach.o master.o dch.o
-SRC = $(srcdir)/attach.c $(srcdir)/master.c $(srcdir)/dch.c
+OBJ = attach.o master.o dch.o $(VT_OBJS)
+SRC = $(srcdir)/attach.c $(srcdir)/master.c $(srcdir)/dch.c \
+      $(srcdir)/vt.c $(srcdir)/vt_stub.c
 
 TARFILES = $(srcdir)/README $(srcdir)/COPYING $(srcdir)/Makefile.in \
 	   $(srcdir)/config.h.in $(SRC) \
@@ -15,7 +18,7 @@ TARFILES = $(srcdir)/README $(srcdir)/COPYING $(srcdir)/Makefile.in \
 	   $(srcdir)/configure.ac $(srcdir)/dtach.1
 
 dch: $(OBJ)
-	$(CC) -o $@ $(LDFLAGS) $(OBJ) $(LIBS)
+	$(CC) -o $@ $(LDFLAGS) $(OBJ) $(VT_LIBS) $(LIBS)
 
 test: dch
 	sh $(srcdir)/tests/run.sh
@@ -34,5 +37,7 @@ tar:
 	rm -rf dch-$(VERSION)
 
 attach.o: @srcdir@/attach.c @srcdir@/dtach.h config.h
-master.o: @srcdir@/master.c @srcdir@/dtach.h config.h
+master.o: @srcdir@/master.c @srcdir@/dtach.h @srcdir@/vt.h config.h
 dch.o: @srcdir@/dch.c @srcdir@/dtach.h config.h
+vt.o: @srcdir@/vt.c @srcdir@/vt.h @srcdir@/dtach.h config.h
+vt_stub.o: @srcdir@/vt_stub.c @srcdir@/vt.h config.h
