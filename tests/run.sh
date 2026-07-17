@@ -184,6 +184,13 @@ if [ -x "$DCH" ]; then
     "$DCH" --read no_such_session_zz >/dev/null 2>&1
     check "--read missing session exits 1" "$?" "1"
 
+    "$DCH" --ls-json 2>/dev/null | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert any(s["name"] == sys.argv[1] for s in d), d
+' "$SN" && ok "--ls-json valid JSON with session" \
+       || bad "--ls-json valid JSON with session"
+
     "$DCH" -k "$SN" >/dev/null 2>&1
 
     # Mirror-less master (DCH_NO_VT parity with dch-lite): read/wait refuse

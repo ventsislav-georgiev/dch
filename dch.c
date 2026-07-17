@@ -1901,7 +1901,7 @@ main(int argc, char **argv)
 	int force = 0;
 	int kill_explicit = 0;
 	enum { A_ATTACH, A_LIST, A_KILL, A_KILLALL, A_DETACH, A_LISTRAW,
-	       A_RENAME, A_LISTJSON, A_SETALIAS,
+	       A_RENAME, A_LISTJSON, A_LISTJSON2, A_SETALIAS,
 	       A_SPAWN, A_SEND, A_RUN, A_KEYS, A_READ, A_WAIT }
 	    action = A_ATTACH;
 	char alias_arg[600] = "";
@@ -2058,7 +2058,7 @@ main(int argc, char **argv)
 		}
 		else if (strcmp(a, "--ls-json") == 0)
 		{
-			action = A_LISTJSON;
+			action = A_LISTJSON2;
 			i++;
 		}
 		else if (strcmp(a, "--spawn") == 0 ||
@@ -2185,6 +2185,32 @@ main(int argc, char **argv)
 		int k;
 		for (k = 0; k < sl.n; k++)
 			puts(sl.v[k]);
+		slist_free(&sl);
+		return 0;
+	}
+	case A_LISTJSON2:
+	{
+		/* Real JSON for agents. Names/aliases are tab- and
+		** newline-free (enforced at creation), so escaping only has
+		** to cover quotes and backslashes. */
+		struct slist sl = {0};
+		list_sessions(&sl);
+		load_aliases(&sl);
+		int k;
+		putchar('[');
+		for (k = 0; k < sl.n; k++)
+		{
+			const char *f;
+			printf("%s{\"name\":\"", k ? "," : "");
+			for (f = sl.v[k]; *f; f++)
+				printf(*f == '"' || *f == '\\' ? "\\%c" : "%c", *f);
+			printf("\",\"alias\":\"");
+			for (f = sl.alias[k] ? sl.alias[k] : ""; *f; f++)
+				printf(*f == '"' || *f == '\\' ? "\\%c" : "%c", *f);
+			printf("\",\"activity_epoch\":%ld}",
+			       activity_epoch(sl.v[k]));
+		}
+		puts("]");
 		slist_free(&sl);
 		return 0;
 	}

@@ -15,7 +15,7 @@ SRC = $(srcdir)/attach.c $(srcdir)/master.c $(srcdir)/dch.c \
 TARFILES = $(srcdir)/README $(srcdir)/COPYING $(srcdir)/Makefile.in \
 	   $(srcdir)/config.h.in $(SRC) \
 	   $(srcdir)/dtach.h $(srcdir)/dtach.spec $(srcdir)/configure \
-	   $(srcdir)/configure.ac $(srcdir)/dtach.1
+	   $(srcdir)/configure.ac $(srcdir)/dch.1
 
 dch: $(OBJ)
 	$(CC) -o $@ $(LDFLAGS) $(OBJ) $(VT_LIBS) $(LIBS)

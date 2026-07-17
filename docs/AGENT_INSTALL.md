@@ -119,5 +119,10 @@ Tell the user:
 - List/kill: `dch -ls`, `dch -k`, `dch -kl`.
 - Full help: `dch -h`.
 
+Then read the **Agent API** section of the README (`--spawn`, `--send`,
+`--run`, `--keys`, `--read`, `--wait`, `--ls-json`) — those verbs let you
+drive TUI sessions headlessly, which is the main reason you were asked to
+install dch. `docs/SKILL.md` is a ready-made skill file describing the loop.
+
 You're done. Do not also configure shells, prompts, or aliases unless the
 user asks.

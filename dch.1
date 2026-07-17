@@ -1,0 +1,166 @@
+.TH DCH 1 "July 2026" "dch 1.0.2" "User Commands"
+.SH NAME
+dch \- detachable terminal sessions with a headless agent API
+.SH SYNOPSIS
+.B dch
+.RI [ cmd... ]
+.br
+.B dch
+.RB [ \-l | \-ls | \-lj | \-rl | \-k
+.RI [ name ]
+.RB | \-kl | \-d
+.RI [ name ]]
+.br
+.B dch \-\-spawn
+.I name
+.RB [ \-\-size
+.IR CxR ]
+.RI [ cmd... ]
+.br
+.B dch \-\-send\fR|\fB\-\-run\fR|\fB\-\-keys
+.I name args...
+.br
+.B dch \-\-read
+.I name
+.RB [ \-\-ansi ]
+.RB [ \-\-recent
+.RI [ N ]]
+.br
+.B dch \-\-wait
+.I name
+.B \-\-match
+.I str
+.RB [ \-\-timeout
+.IR ms ]
+.SH DESCRIPTION
+.B dch
+keeps a program running in a detachable session (a fork of dtach). Run bare,
+it attaches to the auto-named session for the current directory
+(\fI<repo>\-<branch>\fR or the cwd basename), creating it if needed. The
+session master survives terminal crashes, GUI quits, and SSH drops; a new
+.B dch
+in the same directory reattaches. Detach with
+.BR Ctrl\-\(rs .
+.PP
+Each session also keeps an in-memory terminal mirror (embedded
+libghostty\-vt), which powers the control verbs below: scripts and coding
+agents can type into, read, and wait on a session without attaching and
+without disturbing an attached human.
+.SH OPTIONS
+.TP
+.B \-l
+Pick a session interactively and attach. A live mirror preview of each
+session is shown while picking.
+.TP
+.B \-ls
+List session names, one per line.
+.TP
+.B \-lj
+List sessions as \fIname\fP<TAB>\fIalias\fP<TAB>\fIactivity_epoch\fP lines.
+.TP
+.B \-\-ls\-json
+List sessions as a JSON array of
+.BR {name,alias,activity_epoch} .
+.TP
+.B \-rl
+Rename (alias) sessions interactively. Aliases are display-only.
+.TP
+.BI \-m " name " [ alias ]
+Set or clear an alias non-interactively.
+.TP
+.BR \-k " [\fIname\fP]"
+Kill a session (interactive picker without a name).
+.TP
+.B \-kl
+Kill all sessions.
+.TP
+.BR \-d " [\fIname\fP]"
+Detach all clients of a session.
+.TP
+.BI \-n " name"
+Override the auto-name.
+.TP
+.B \-f
+Force-attach even if another client is connected.
+.TP
+.BI \-e " char"
+Set the detach character (default
+.BR ^\(rs ).
+.TP
+.B \-E
+Disable the detach character.
+.SH CONTROL VERBS
+All verbs take the session
+.I name
+first, never attach, and are safe to run while a human is attached.
+.TP
+.BI \-\-spawn " name" " " [ \-\-size " CxR" ] " " [ cmd... ]
+Start a headless session running
+.I cmd
+(default:
+.BR $SHELL ).
+Size defaults to
+.BR $COLUMNS x $LINES ,
+then 80x24. Prints the session name. Exits 1 if the session exists.
+.TP
+.BI \-\-send " name text..."
+Type
+.I text
+(arguments joined with spaces) into the session, no enter.
+.TP
+.BI \-\-run " name text..."
+Same as
+.B \-\-send
+plus a carriage return.
+.TP
+.BI \-\-keys " name key..."
+Encode and send keys mode-aware (kitty keyboard protocol, application cursor
+keys) using the mirror's live terminal state. Key names:
+.BR enter ", " esc ", " tab ", " space ", " backspace ", " delete ,
+.BR up / down / left / right ", " home ", " end ", " pgup ", " pgdn ,
+.BR f1 \(en f12 ,
+single characters, with
+.BR ctrl+ ", " alt+ ", " shift+
+prefixes (e.g.
+.BR ctrl+c ", " shift+tab ).
+.TP
+.BI \-\-read " name" " " [ \-\-ansi ] " " [ \-\-recent " [\fIN\fP]]"
+Print the session's rendered screen to stdout.
+.B \-\-ansi
+keeps colors/attributes.
+.B \-\-recent
+prints the last
+.I N
+lines including scrollback (default 100). Exit 0 on success, 3 if the
+session has no mirror.
+.TP
+.BI \-\-wait " name " \-\-match " str" " " [ \-\-timeout " ms" ]
+Block until the rendered screen or recent scrollback contains the literal
+substring
+.I str
+(at most 512 bytes); print the matching line. Default timeout 10000 ms.
+Exit 0 on match, 2 on timeout, 3 if no mirror.
+.SH EXIT STATUS
+0 on success. Control verbs: 1 generic error, 2
+.B \-\-wait
+timeout, 3 mirror unavailable (dch-lite build or
+.BR DCH_NO_VT ).
+.SH ENVIRONMENT
+.TP
+.B DCH_SOCKET_DIR
+Session socket directory (default
+.IR $XDG_RUNTIME_DIR/dch\-$UID ).
+.TP
+.B DCH_NO_VT
+If set when a session is spawned, disable its terminal mirror.
+.TP
+.B DCH_SCROLLBACK
+Mirror scrollback lines (default 2000, max 100000).
+.TP
+.B DCH_DEBUG
+Trace to a file (path, or 1 for
+.IR /tmp/dch.<uid>.trace ).
+.SH SEE ALSO
+.BR dtach (1),
+.BR screen (1),
+.BR tmux (1)
