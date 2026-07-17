@@ -37,6 +37,28 @@ jobs:
       - name: Test
         run: make test
 
+  # Lite client binary driving a session spawned by a full master: the verb
+  # client side is protocol-only, so every verb must work cross-build.
+  mixed-binary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Build both variants
+        run: |
+          ./configure --without-libghostty && make && cp dch /tmp/dch-lite
+          make clean && ./configure && make
+      - name: Lite client vs full master
+        run: |
+          set -ex
+          ./dch --spawn mixed sh
+          sleep 0.5
+          /tmp/dch-lite --run mixed "echo mixed_marker"
+          /tmp/dch-lite --wait mixed --match mixed_marker --timeout 10000
+          /tmp/dch-lite --read mixed | grep mixed_marker
+          /tmp/dch-lite --keys mixed ctrl+c
+          /tmp/dch-lite --ls-json | grep '"name":"mixed"'
+          ./dch -k mixed
+
   # The committed libghostty-vt.a blobs must match what the pinned upstream
   # commit reproducibly builds. Zig is only needed here, never for `make`.
   vendor-verify:
