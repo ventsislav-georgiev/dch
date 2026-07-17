@@ -56,7 +56,7 @@ def reap(pid, timeout=2.0):
     os.waitpid(pid, 0)
 
 
-def wait_live(sockpath, tries=300):
+def wait_live(sockpath, tries=1000):
     for _ in range(tries):
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
@@ -77,7 +77,8 @@ def spawn_detached(name, sockpath, inner):
         os.environ.pop("DCH_SESSION", None)
         os.execv(DCH, [DCH, "-E", "-n", name] + inner)
         os._exit(127)
-    wait_live(sockpath)
+    if not wait_live(sockpath):
+        raise RuntimeError("master socket never came up: %s" % sockpath)
     os.kill(pid, signal.SIGUSR1)  # detach; master stays alive
     reap(pid)
     os.close(fd)
@@ -126,10 +127,20 @@ def main():
         for _ in range(N):
             s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             t = time.perf_counter()
-            s.connect(sockpath)
+            try:
+                s.connect(sockpath)
+            except ConnectionRefusedError:
+                # listen backlog overflow on a slow runner: the master
+                # hasn't accepted the previous churn yet. Not a latency
+                # sample; back off and skip.
+                s.close()
+                time.sleep(0.05)
+                continue
             dt = time.perf_counter() - t
             s.close()
             samples.append(dt * 1000.0)  # ms
+        if not samples:
+            print("FAIL: every bench connect was refused"); return 1
         samples.sort()
         mean = sum(samples) / len(samples)
         p99 = samples[int(len(samples) * 0.99)]

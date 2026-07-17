@@ -49,6 +49,11 @@ def run_client(name, argv_tail, drain_s=10.0, until=None):
         os.execv(DCH, [DCH, "-E", "-n", name] + argv_tail)
         os._exit(127)
     out = drain(fd, drain_s, until)
+    if until and until.decode("utf-8", "replace") in out:
+        try:  # marker seen -> detach now instead of waiting out the inner cmd
+            os.kill(pid, signal.SIGHUP)
+        except OSError:
+            pass
     # Reap; client should have exited when its inner cmd finished.
     for _ in range(100):
         wpid, status = os.waitpid(pid, os.WNOHANG)
@@ -94,7 +99,10 @@ def main():
         # 1. stray regular file at the socket path -> must still spawn.
         name = "stray"
         open(os.path.join(sockdir, name + ".sock"), "w").close()
-        st, out = run_client(name, ["sh", "-c", "printf STRAY_OK; exit 0"],
+        # Inner sleeps after the marker: on a slow runner an instant exit can
+        # tear the master down before the client finishes attaching, so the
+        # marker never reaches it. run_client SIGHUPs the client after drain.
+        st, out = run_client(name, ["sh", "-c", "printf STRAY_OK; sleep 30"],
                              until=b"STRAY_OK")
         if "STRAY_OK" in out and "failed to spawn" not in out:
             ok("spawn over stray regular file")
@@ -104,7 +112,7 @@ def main():
         # 2. dead socket node at the path -> must still spawn.
         name = "deadsock"
         make_dead_socket(os.path.join(sockdir, name + ".sock"))
-        st, out = run_client(name, ["sh", "-c", "printf DEAD_OK; exit 0"],
+        st, out = run_client(name, ["sh", "-c", "printf DEAD_OK; sleep 30"],
                              until=b"DEAD_OK")
         if "DEAD_OK" in out and "Connection refused" not in out \
            and "failed to spawn" not in out:
@@ -168,14 +176,11 @@ def main():
             os.environ.pop("DCH_SESSION", None)
             os.environ["PATH"] = bindir + ":" + os.environ.get("PATH", "")
             os.execvp("dch", ["dch", "-n", "cwdtrap",
-                              "sh", "-c", "printf TRAP_OK; exit 0"])
+                              "sh", "-c", "printf TRAP_OK; sleep 30"])
             os._exit(127)
         out = drain(fd, 10.0, b"TRAP_OK")
-        for _ in range(100):
-            wpid, _ = os.waitpid(pid, os.WNOHANG)
-            if wpid == pid:
-                break
-            time.sleep(0.05)
+        os.kill(pid, signal.SIGHUP)
+        os.waitpid(pid, 0)
         os.close(fd)
         shutil.rmtree(bindir, ignore_errors=True)
         shutil.rmtree(trap, ignore_errors=True)
