@@ -79,9 +79,8 @@ attaches to:
 ```sh
 dch --spawn infra --size 120x40 k9s   # headless session running k9s
 dch --wait infra --match "Pods" --timeout 15000   # block until it's up
-dch --keys infra shift+; enter        # ":" command mode, confirm
-dch --send infra deployments
-dch --keys infra enter
+dch --keys infra :                    # k9s command mode
+dch --run infra deployments           # type the view name, press enter
 dch --read infra                      # print the rendered screen, no attach
 dch --read infra --ansi > snap.txt    # same, with colors
 ```

@@ -34,7 +34,7 @@ Interact like a careful human: act, wait for the UI to settle, read, decide.
 dch --spawn infra --size 120x40 k9s
 dch --wait infra --match "Pods" --timeout 15000 || exit 1  # k9s is up
 
-dch --keys infra shift+; && dch --send infra deployments && dch --keys infra enter
+dch --keys infra : && dch --run infra deployments
 dch --wait infra --match "Deployments" --timeout 5000
 
 dch --read infra            # inspect the screen, pick a row

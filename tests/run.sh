@@ -184,6 +184,21 @@ if [ -x "$DCH" ]; then
     "$DCH" --read no_such_session_zz >/dev/null 2>&1
     check "--read missing session exits 1" "$?" "1"
 
+    # Control-verb latency budget: 20 --read round trips must finish inside
+    # 2 s wall (100 ms each — generous CI headroom over the ~3 ms local
+    # reality; catches accidental sleeps or timeout-driven reads).
+    if [ "$mirror" -eq 0 ]; then
+        t0=$(python3 -c 'import time; print(time.time())')
+        n=0
+        while [ "$n" -lt 20 ]; do
+            "$DCH" --read "$SN" >/dev/null 2>&1
+            n=$((n + 1))
+        done
+        python3 -c "import time,sys; sys.exit(0 if time.time()-$t0 < 2.0 else 1)" \
+            && ok "--read latency budget (20 reads < 2s)" \
+            || bad "--read latency budget (20 reads < 2s)"
+    fi
+
     "$DCH" --ls-json 2>/dev/null | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
@@ -192,6 +207,31 @@ assert any(s["name"] == sys.argv[1] for s in d), d
        || bad "--ls-json valid JSON with session"
 
     "$DCH" -k "$SN" >/dev/null 2>&1
+
+    # Real alt-screen TUI end-to-end: drive vim without attaching. Covers
+    # mode-aware --keys (esc, ":" as shift+; chord) and screen rendering.
+    if [ "$mirror" -eq 0 ] && command -v vim >/dev/null 2>&1; then
+        VOUT="$TMP/vim_out"
+        "$DCH" --spawn "vim$$" --size 80x24 vim -u NONE >/dev/null 2>&1
+        "$DCH" --wait "vim$$" --match "IMproved" --timeout 10000 >/dev/null 2>&1
+        "$DCH" --keys "vim$$" i >/dev/null 2>&1
+        "$DCH" --send "vim$$" "tui marker line" >/dev/null 2>&1
+        "$DCH" --keys "vim$$" esc >/dev/null 2>&1
+        "$DCH" --read "vim$$" 2>/dev/null | grep -q "tui marker line" \
+            && ok "vim e2e: typed text renders" \
+            || bad "vim e2e: typed text renders"
+        "$DCH" --keys "vim$$" : >/dev/null 2>&1
+        "$DCH" --send "vim$$" "wq! $VOUT" >/dev/null 2>&1
+        "$DCH" --keys "vim$$" enter >/dev/null 2>&1
+        n=0
+        while [ ! -f "$VOUT" ] && [ "$n" -lt 50 ]; do
+            sleep 0.1; n=$((n + 1))
+        done
+        grep -q "tui marker line" "$VOUT" 2>/dev/null \
+            && ok "vim e2e: ':' keys reach command mode, file saved" \
+            || bad "vim e2e: ':' keys reach command mode, file saved"
+        "$DCH" -k "vim$$" >/dev/null 2>&1
+    fi
 
     # Mirror-less master (DCH_NO_VT parity with dch-lite): read/wait refuse
     # with exit 3, keys fall back to legacy encoding.

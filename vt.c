@@ -236,6 +236,27 @@ static const struct keyname punct[] = {
 	{"`",  GHOSTTY_KEY_BACKQUOTE,     '`'},
 };
 
+/* US-layout shift pairs: glyph <-> physical key + base char. Lets both
+** `--keys :` and `--keys shift+;` produce ":". ponytail: US layout only —
+** the mirror has no idea what layout the human's keyboard uses anyway. */
+static const struct shiftpair {
+	char glyph, base;
+	GhosttyKey key;
+} shifted[] = {
+	{'!', '1', GHOSTTY_KEY_DIGIT_1}, {'@', '2', GHOSTTY_KEY_DIGIT_2},
+	{'#', '3', GHOSTTY_KEY_DIGIT_3}, {'$', '4', GHOSTTY_KEY_DIGIT_4},
+	{'%', '5', GHOSTTY_KEY_DIGIT_5}, {'^', '6', GHOSTTY_KEY_DIGIT_6},
+	{'&', '7', GHOSTTY_KEY_DIGIT_7}, {'*', '8', GHOSTTY_KEY_DIGIT_8},
+	{'(', '9', GHOSTTY_KEY_DIGIT_9}, {')', '0', GHOSTTY_KEY_DIGIT_0},
+	{'_', '-', GHOSTTY_KEY_MINUS},   {'+', '=', GHOSTTY_KEY_EQUAL},
+	{'{', '[', GHOSTTY_KEY_BRACKET_LEFT},
+	{'}', ']', GHOSTTY_KEY_BRACKET_RIGHT},
+	{'|', '\\', GHOSTTY_KEY_BACKSLASH},
+	{':', ';', GHOSTTY_KEY_SEMICOLON}, {'"', '\'', GHOSTTY_KEY_QUOTE},
+	{'<', ',', GHOSTTY_KEY_COMMA},     {'>', '.', GHOSTTY_KEY_PERIOD},
+	{'?', '/', GHOSTTY_KEY_SLASH},     {'~', '`', GHOSTTY_KEY_BACKQUOTE},
+};
+
 /*
  * Encode one token ("ctrl+shift+f5", "q", "enter") into ev + encoder
  * output appended at dst (capacity cap, current fill *fill).
@@ -281,6 +302,16 @@ encode_token(GhosttyKeyEvent ev, const char *tok, size_t toklen,
 					utf8 = punct[i].utf8;
 					break;
 				}
+			/* shifted glyph typed directly (":", "?", "{"...) */
+			if (key == GHOSTTY_KEY_UNIDENTIFIED)
+				for (i = 0; i < sizeof(shifted) /
+				     sizeof(shifted[0]); i++)
+					if (shifted[i].glyph == c) {
+						key = shifted[i].key;
+						utf8 = shifted[i].base;
+						mods |= GHOSTTY_MODS_SHIFT;
+						break;
+					}
 		}
 	}
 	if (key == GHOSTTY_KEY_UNIDENTIFIED) {
@@ -302,8 +333,20 @@ encode_token(GhosttyKeyEvent ev, const char *tok, size_t toklen,
 	ghostty_key_event_set_consumed_mods(ev,
 	    mods & GHOSTTY_MODS_SHIFT);
 	if (utf8 && !(mods & (GHOSTTY_MODS_CTRL | GHOSTTY_MODS_ALT))) {
-		char text = (mods & GHOSTTY_MODS_SHIFT) && utf8 >= 'a' &&
-		    utf8 <= 'z' ? utf8 - 'a' + 'A' : utf8;
+		/* SHIFT resolves to the glyph the app actually receives;
+		** the unshifted codepoint below stays the base char. */
+		char text = utf8;
+		if (mods & GHOSTTY_MODS_SHIFT) {
+			if (utf8 >= 'a' && utf8 <= 'z')
+				text = utf8 - 'a' + 'A';
+			else
+				for (i = 0; i < sizeof(shifted) /
+				     sizeof(shifted[0]); i++)
+					if (shifted[i].base == utf8) {
+						text = shifted[i].glyph;
+						break;
+					}
+		}
 		ghostty_key_event_set_utf8(ev, &text, 1);
 	} else
 		ghostty_key_event_set_utf8(ev, NULL, 0);
