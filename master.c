@@ -619,17 +619,25 @@ process_pty_buf(const unsigned char *buf, size_t len)
 **
 ** the_pty.fd is BLOCKING (and must stay so: pty writes go through
 ** write_buf_or_fail, which exits on EAGAIN), so each read is gated by a
-** zero-timeout poll instead of looping until EAGAIN. */
+** zero-timeout poll instead of looping until EAGAIN.
+**
+** BOUNDED: a child producing output nonstop (yes, tail -f, chatty build)
+** keeps the pty readable forever; an unbounded loop here would wedge the
+** whole single-threaded master. 256 buffers (4 MB) swallows any startup
+** screen; whatever is still pending drains through the normal select-loop
+** pty_activity wakes. */
+#define DRAIN_MAX_BUFS 256
 static void
 drain_pty(void)
 {
 	unsigned char buf[BUFSIZE];
 	struct pollfd pfd;
 	ssize_t len;
+	int i;
 
 	pfd.fd = the_pty.fd;
 	pfd.events = POLLIN;
-	for (;;)
+	for (i = 0; i < DRAIN_MAX_BUFS; i++)
 	{
 		if (poll(&pfd, 1, 0) <= 0 || !(pfd.revents & POLLIN))
 			return;
@@ -907,6 +915,15 @@ do_keys(struct client *p, const unsigned char *payload, unsigned int len)
 	if (dch_vt_encode_keys(spec, &bytes, &nbytes) < 0)
 		return queue_status(p, MSG_ACK, DCH_ST_ERR);
 
+	/* The pty fd is blocking and write_buf_or_fail loops until done: a
+	** batch bigger than one kernel pty buffer could stall the whole
+	** select loop if the child isn't draining. Real key batches are tiny
+	** (a few hundred bytes); refuse anything that could block. */
+	if (nbytes > BUFSIZE)
+	{
+		dch_vt_buf_free(bytes);
+		return queue_status(p, MSG_ACK, DCH_ST_ERR);
+	}
 	write_buf_or_fail(the_pty.fd, bytes, nbytes);
 	dch_vt_buf_free(bytes);
 	return queue_status(p, MSG_ACK, DCH_ST_OK);
@@ -1032,7 +1049,16 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 	else if (type == MSG_KEYS)
 		return do_keys(p, payload, len);
 	else if (type == MSG_READ)
+	{
+		/* Fixed 4-byte payload {format,source,lines LE}; shorter is
+		** a malformed client — same treatment as a bad WAIT. */
+		if (len < 4)
+		{
+			remove_client(p);
+			return -1;
+		}
 		return do_read(p, payload);
+	}
 	else if (type == MSG_WAIT)
 		return do_wait(p, payload, len);
 

@@ -184,6 +184,26 @@ if [ -x "$DCH" ]; then
     "$DCH" --read no_such_session_zz >/dev/null 2>&1
     check "--read missing session exits 1" "$?" "1"
 
+    # A child producing output nonstop must not wedge the master: the drain
+    # before each control verb is bounded (DRAIN_MAX_BUFS), so --read and
+    # --keys stay responsive against a flooding pty.
+    if [ "$mirror" -eq 0 ]; then
+        "$DCH" --run "$SN" "yes flooding" >/dev/null 2>&1
+        sleep 0.5
+        t0=$(python3 -c 'import time; print(time.time())')
+        "$DCH" --read "$SN" >/dev/null 2>&1
+        rc=$?
+        fast=$(python3 -c "import time; print(0 if time.time()-$t0 < 5.0 else 1)")
+        [ "$rc" -eq 0 ] && [ "$fast" -eq 0 ] \
+            && ok "--read responsive under flooding child" \
+            || bad "--read responsive under flooding child (rc=$rc fast=$fast)"
+        "$DCH" --keys "$SN" ctrl+c >/dev/null 2>&1
+        "$DCH" --run "$SN" "echo flood_over" >/dev/null 2>&1
+        "$DCH" --wait "$SN" --match flood_over --timeout 5000 >/dev/null 2>&1 \
+            && ok "--keys ctrl+c stops flooding child" \
+            || bad "--keys ctrl+c stops flooding child"
+    fi
+
     # Control-verb latency budget: 20 --read round trips must finish inside
     # 2 s wall (100 ms each — generous CI headroom over the ~3 ms local
     # reality; catches accidental sleeps or timeout-driven reads).

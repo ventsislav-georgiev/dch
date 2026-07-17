@@ -68,6 +68,14 @@ dch_vt_resize(int cols, int rows)
 {
 	if (!the_term || cols <= 0 || rows <= 0)
 		return;
+	/* The grid allocation scales with cols*rows: a crafted 65535x65535
+	** WINCH measured 14.5 GB RSS. Real terminals top out around
+	** 700x400 on a 4K display; clamp the MIRROR only (the real pty
+	** winsize is untouched, apps still see what the client sent). */
+	if (cols > 1024)
+		cols = 1024;
+	if (rows > 1024)
+		rows = 1024;
 	if (ghostty_terminal_resize(the_term, cols, rows, CELL_W,
 	    CELL_H) == GHOSTTY_SUCCESS) {
 		cur_cols = cols;
