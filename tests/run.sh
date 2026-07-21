@@ -214,8 +214,20 @@ if [ -x "$DCH" ]; then
 import json, sys
 d = json.load(sys.stdin)
 assert any(s["name"] == sys.argv[1] for s in d), d
-' "$SN" && ok "--ls-json valid JSON with session" \
-       || bad "--ls-json valid JSON with session"
+assert all(s["state"] in ("active", "idle") for s in d), d
+' "$SN" && ok "--ls-json valid JSON with session + state" \
+       || bad "--ls-json valid JSON with session + state"
+
+    # --status: fresh output = active; stale .act sidecar = idle.
+    "$DCH" --run "$SN" "echo status_ping" >/dev/null 2>&1
+    sleep 1
+    check "--status recent output is active" \
+          "$("$DCH" --status "$SN" 2>/dev/null)" "active"
+    touch -t 200001010000 "$SOCKDIR/$SN.sock.act"
+    check "--status stale output is idle" \
+          "$("$DCH" --status "$SN" 2>/dev/null)" "idle"
+    "$DCH" --status no_such_session_zz >/dev/null 2>&1
+    check "--status missing session exits 1" "$?" "1"
 
     "$DCH" -k "$SN" >/dev/null 2>&1
 

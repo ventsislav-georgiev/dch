@@ -19,7 +19,7 @@
 #include <sys/un.h>
 
 /* dch's own version, independent of the dtach base (PACKAGE_VERSION). */
-#define DCH_VERSION "1.1.1"
+#define DCH_VERSION "1.2.0"
 
 /* Shared globals (declared in dtach.h, used by attach.c/master.c). */
 const char copyright[] = "dch - based on dtach " PACKAGE_VERSION
@@ -597,6 +597,24 @@ activity_epoch(const char *name)
 	return (long)st.st_mtime;
 }
 
+/* A session is "active" when the master stamped pty output within this
+** window, "idle" otherwise. The master throttles stamps to 1/s, so 5s
+** gives headroom without hiding real activity. */
+#define DCH_ACTIVE_SECS 5
+
+static const char *
+state_of(long ep)
+{
+	return (ep && time(NULL) - ep <= DCH_ACTIVE_SECS) ? "active"
+	                                                  : "idle";
+}
+
+static const char *
+session_state(const char *name)
+{
+	return state_of(activity_epoch(name));
+}
+
 /* Fill sl->alias[i] from each session's sidecar file (NULL if none). */
 static void
 load_aliases(struct slist *sl)
@@ -1167,7 +1185,8 @@ usage(void)
 	    "  dch --keys <name> <key...>                 send keys (ctrl+c, up, f2, ...)\n"
 	    "  dch --read <name> [--ansi] [--recent [N]]  print session screen\n"
 	    "  dch --wait <name> --match <str> [--timeout ms]  wait for output\n"
-	    "  dch --ls-json    same as -lj\n"
+	    "  dch --status <name>                        print active|idle\n"
+	    "  dch --ls-json    like -lj but JSON, adds \"state\"\n"
 	    "Detach: Ctrl-\\  (or `dch -d` if the host swallows it).\n"
 	    "Nesting refused inside an existing dch session.\n");
 }
@@ -1911,7 +1930,7 @@ main(int argc, char **argv)
 	int kill_explicit = 0;
 	enum { A_ATTACH, A_LIST, A_KILL, A_KILLALL, A_DETACH, A_LISTRAW,
 	       A_RENAME, A_LISTJSON, A_LISTJSON2, A_SETALIAS,
-	       A_SPAWN, A_SEND, A_RUN, A_KEYS, A_READ, A_WAIT }
+	       A_SPAWN, A_SEND, A_RUN, A_KEYS, A_READ, A_WAIT, A_STATUS }
 	    action = A_ATTACH;
 	char alias_arg[600] = "";
 	int opt_ansi = 0, opt_recent = -1, opt_timeout = 10000;
@@ -2075,7 +2094,8 @@ main(int argc, char **argv)
 		         strcmp(a, "--run") == 0 ||
 		         strcmp(a, "--keys") == 0 ||
 		         strcmp(a, "--read") == 0 ||
-		         strcmp(a, "--wait") == 0)
+		         strcmp(a, "--wait") == 0 ||
+		         strcmp(a, "--status") == 0)
 		{
 			/* Control verbs: all take a session name next. */
 			action = strcmp(a, "--spawn") == 0 ? A_SPAWN
@@ -2083,7 +2103,8 @@ main(int argc, char **argv)
 			       : strcmp(a, "--run") == 0   ? A_RUN
 			       : strcmp(a, "--keys") == 0  ? A_KEYS
 			       : strcmp(a, "--read") == 0  ? A_READ
-			                                   : A_WAIT;
+			       : strcmp(a, "--wait") == 0  ? A_WAIT
+			                                   : A_STATUS;
 			i++;
 			if (i >= argc || argv[i][0] == '\0')
 			{
@@ -2216,8 +2237,9 @@ main(int argc, char **argv)
 			printf("\",\"alias\":\"");
 			for (f = sl.alias[k] ? sl.alias[k] : ""; *f; f++)
 				printf(*f == '"' || *f == '\\' ? "\\%c" : "%c", *f);
-			printf("\",\"activity_epoch\":%ld}",
-			       activity_epoch(sl.v[k]));
+			long ep = activity_epoch(sl.v[k]);
+			printf("\",\"activity_epoch\":%ld,\"state\":\"%s\"}",
+			       ep, state_of(ep));
 		}
 		puts("]");
 		slist_free(&sl);
@@ -2312,6 +2334,20 @@ main(int argc, char **argv)
 	}
 	case A_READ:
 		return do_read_verb(session_name, opt_ansi, opt_recent);
+	case A_STATUS:
+	{
+		char sp[1100];
+		struct stat st;
+		snprintf(sp, sizeof(sp), "%s/%s.sock",
+		         sock_dir, session_name);
+		if (stat(sp, &st) < 0 || !S_ISSOCK(st.st_mode))
+		{
+			fprintf(stderr, "no session: %s\n", session_name);
+			return 1;
+		}
+		puts(session_state(session_name));
+		return 0;
+	}
 	case A_WAIT:
 		if (opt_match[0] == '\0')
 		{

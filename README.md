@@ -150,6 +150,7 @@ dch --run <name> <text...>                      # type text, press enter
 dch --keys <name> <key...>                      # send keys: ctrl+c up f2 ...
 dch --read <name> [--ansi] [--recent [N]]       # print the rendered screen
 dch --wait <name> --match <str> [--timeout ms]  # block until output matches
+dch --status <name>                             # print active|idle
 dch --ls-json                                   # sessions as a JSON array
 ```
 
@@ -179,7 +180,8 @@ someone is watching is invisible to them.
 | `--keys <n> <key...>` | Encode+send keys mode-aware: `ctrl+c`, `alt+x`, `shift+tab`, `up`, `f5`, `enter`, `esc`, single chars. | 0 ok, 1 unknown key |
 | `--read <n> [--ansi] [--recent [N]]` | Print rendered screen. `--ansi` keeps colors; `--recent [N]` = last N lines incl. scrollback (default 100). | 0 ok, 1 error, 3 no mirror |
 | `--wait <n> --match <str> [--timeout ms]` | Block until screen/scrollback contains `<str>` (literal substring, ≤512 bytes); prints the matching line. Default timeout 10 s. | 0 hit, 2 timeout, 3 no mirror |
-| `--ls-json` | All sessions as JSON: `[{"name","alias","activity_epoch"}]`. | 0 |
+| `--status <n>` | Print `active` (pty output within the last 5 s) or `idle`. | 0 ok, 1 no session |
+| `--ls-json` | All sessions as JSON: `[{"name","alias","activity_epoch","state"}]`. `state` is `active`/`idle` per the same 5 s rule. | 0 |
 
 A typical agent loop:
 
@@ -210,7 +212,7 @@ environment disables it at spawn.
 
 | Verb | Without mirror |
 | --- | --- |
-| `--spawn`, `--send`, `--run`, `--ls-json` | Work unchanged (plain pty writes). |
+| `--spawn`, `--send`, `--run`, `--status`, `--ls-json` | Work unchanged (plain pty writes / sidecar reads). |
 | `--read`, `--wait` | Exit 3 with a message pointing at the full build. |
 | `--keys` | Falls back to a fixed legacy xterm table client-side (exit 0 + stderr note). Mode-aware apps may misread modified keys. |
 
