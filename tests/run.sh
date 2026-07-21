@@ -229,7 +229,48 @@ assert all(s["state"] in ("active", "idle") for s in d), d
     "$DCH" --status no_such_session_zz >/dev/null 2>&1
     check "--status missing session exits 1" "$?" "1"
 
+    # --report: pushed semantic states override the output heuristic.
+    "$DCH" --report "$SN" blocked >/dev/null 2>&1
+    check "--report state overrides heuristic" \
+          "$("$DCH" --status "$SN" 2>/dev/null)" "blocked"
+    "$DCH" --ls-json 2>/dev/null | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+s = next(s for s in d if s["name"] == sys.argv[1])
+assert s["state"] == "blocked", s
+' "$SN" && ok "--ls-json surfaces reported state" \
+       || bad "--ls-json surfaces reported state"
+    check "--wait --state comma list matches" \
+          "$("$DCH" --wait "$SN" --state idle,blocked,done --timeout 2000 2>/dev/null)" \
+          "blocked"
+    "$DCH" --wait "$SN" --state done --timeout 300 >/dev/null 2>&1
+    check "--wait --state times out with exit 2" "$?" "2"
+    "$DCH" --report "$SN" nonsense >/dev/null 2>&1
+    check "--report rejects unknown state" "$?" "1"
+    "$DCH" --report no_such_session_zz working >/dev/null 2>&1
+    check "--report missing session exits 1" "$?" "1"
+    "$DCH" --report "$SN" clear >/dev/null 2>&1
+    touch -t 200001010000 "$SOCKDIR/$SN.sock.act"
+    check "--report clear reverts to heuristic" \
+          "$("$DCH" --status "$SN" 2>/dev/null)" "idle"
+    printf 'gar"bage' > "$SOCKDIR/$SN.sock.state"
+    check "--status ignores corrupt state sidecar" \
+          "$("$DCH" --status "$SN" 2>/dev/null)" "idle"
+    "$DCH" --ls-json 2>/dev/null | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+s = next(s for s in d if s["name"] == sys.argv[1])
+assert s["state"] in ("active", "idle", "working", "blocked", "done"), s
+' "$SN" && ok "--ls-json valid despite corrupt sidecar" \
+       || bad "--ls-json valid despite corrupt sidecar"
+    "$DCH" --wait no_such_session_zz --state idle --timeout 500 >/dev/null 2>&1
+    check "--wait --state missing session exits 1" "$?" "1"
+    "$DCH" --report "$SN" working >/dev/null 2>&1  # left for -k to clean
+
     "$DCH" -k "$SN" >/dev/null 2>&1
+    [ ! -e "$SOCKDIR/$SN.sock.state" ] \
+        && ok "kill removes state sidecar" \
+        || bad "kill removes state sidecar"
 
     # Real alt-screen TUI end-to-end: drive vim without attaching. Covers
     # mode-aware --keys (esc, ":" as shift+; chord) and screen rendering.

@@ -19,7 +19,7 @@
 #include <sys/un.h>
 
 /* dch's own version, independent of the dtach base (PACKAGE_VERSION). */
-#define DCH_VERSION "1.2.0"
+#define DCH_VERSION "1.3.0"
 
 /* Shared globals (declared in dtach.h, used by attach.c/master.c). */
 const char copyright[] = "dch - based on dtach " PACKAGE_VERSION
@@ -609,9 +609,51 @@ state_of(long ep)
 	                                                  : "idle";
 }
 
+/* Path of the reported-state sidecar (written by --report, e.g. from a
+** harness hook). Returns 0 on success, -1 on truncation. */
+static int
+state_file_path(const char *name, char *buf, size_t bufsz)
+{
+	int n = snprintf(buf, bufsz, "%s/%s.sock.state", sock_dir, name);
+	return (n < 0 || (size_t)n >= bufsz) ? -1 : 0;
+}
+
+/* The closed set of reportable states (herdr's, plus done). A closed set
+** keeps --status output a stable contract and --ls-json trivially valid. */
+static int
+valid_state_token(const char *tok)
+{
+	static const char *known[] = { "working", "idle", "blocked", "done" };
+	size_t k;
+	for (k = 0; k < sizeof(known) / sizeof(known[0]); k++)
+		if (strcmp(tok, known[k]) == 0)
+			return 1;
+	return 0;
+}
+
+/* Reported state wins (a harness knows "blocked" vs "working"; output
+** can't); no report — or a corrupt sidecar — falls back to the output
+** heuristic. Content is re-validated on read so a hand-mangled file can
+** never leak into --status/--ls-json output. */
 static const char *
 session_state(const char *name)
 {
+	static char st[40];
+	char p[1300];
+	if (state_file_path(name, p, sizeof(p)) == 0)
+	{
+		int fd = open(p, O_RDONLY);
+		if (fd >= 0)
+		{
+			int r = (int)read(fd, st, sizeof(st) - 1);
+			close(fd);
+			while (r > 0 && (st[r - 1] == '\n' || st[r - 1] == '\r'))
+				r--;
+			st[r > 0 ? r : 0] = '\0';
+			if (r > 0 && valid_state_token(st))
+				return st;
+		}
+	}
 	return state_of(activity_epoch(name));
 }
 
@@ -1119,11 +1161,13 @@ kill_session(const char *name)
 	char ap[1200];
 	if (alias_path(name, ap, sizeof(ap)) == 0)
 		unlink(ap);
-	/* Drop the activity sidecar too (the master unlinks it on a clean exit,
-	** but a SIGKILLed master never runs atexit). */
-	char act[1200];
-	if (snprintf(act, sizeof act, "%s/%s.sock.act", sock_dir, name) > 0)
-		unlink(act);
+	/* Drop the activity + reported-state sidecars too (the master unlinks
+	** them on a clean exit, but a SIGKILLed master never runs atexit). */
+	char side[1300];
+	if (snprintf(side, sizeof side, "%s/%s.sock.act", sock_dir, name) > 0)
+		unlink(side);
+	if (state_file_path(name, side, sizeof(side)) == 0)
+		unlink(side);
 	printf("killed: %s\n", name);
 	return 0;
 }
@@ -1185,7 +1229,10 @@ usage(void)
 	    "  dch --keys <name> <key...>                 send keys (ctrl+c, up, f2, ...)\n"
 	    "  dch --read <name> [--ansi] [--recent [N]]  print session screen\n"
 	    "  dch --wait <name> --match <str> [--timeout ms]  wait for output\n"
-	    "  dch --status <name>                        print active|idle\n"
+	    "  dch --wait <name> --state <s> [--timeout ms]    wait for state\n"
+	    "  dch --status <name>                        print session state\n"
+	    "  dch --report <name> <state>                set state (harness hooks;\n"
+	    "                                             `clear` reverts to auto)\n"
 	    "  dch --ls-json    like -lj but JSON, adds \"state\"\n"
 	    "Detach: Ctrl-\\  (or `dch -d` if the host swallows it).\n"
 	    "Nesting refused inside an existing dch session.\n");
@@ -1930,12 +1977,14 @@ main(int argc, char **argv)
 	int kill_explicit = 0;
 	enum { A_ATTACH, A_LIST, A_KILL, A_KILLALL, A_DETACH, A_LISTRAW,
 	       A_RENAME, A_LISTJSON, A_LISTJSON2, A_SETALIAS,
-	       A_SPAWN, A_SEND, A_RUN, A_KEYS, A_READ, A_WAIT, A_STATUS }
+	       A_SPAWN, A_SEND, A_RUN, A_KEYS, A_READ, A_WAIT, A_STATUS,
+	       A_REPORT }
 	    action = A_ATTACH;
 	char alias_arg[600] = "";
 	int opt_ansi = 0, opt_recent = -1, opt_timeout = 10000;
 	int opt_cols = 0, opt_rows = 0;
 	char opt_match[DCH_WAIT_MAX + 1] = "";
+	char opt_state[40] = "";
 
 	progname = argv[0];
 	/* Resolve exe for the master re-exec. Only realpath() when argv[0] is a
@@ -2095,7 +2144,8 @@ main(int argc, char **argv)
 		         strcmp(a, "--keys") == 0 ||
 		         strcmp(a, "--read") == 0 ||
 		         strcmp(a, "--wait") == 0 ||
-		         strcmp(a, "--status") == 0)
+		         strcmp(a, "--status") == 0 ||
+		         strcmp(a, "--report") == 0)
 		{
 			/* Control verbs: all take a session name next. */
 			action = strcmp(a, "--spawn") == 0 ? A_SPAWN
@@ -2104,7 +2154,8 @@ main(int argc, char **argv)
 			       : strcmp(a, "--keys") == 0  ? A_KEYS
 			       : strcmp(a, "--read") == 0  ? A_READ
 			       : strcmp(a, "--wait") == 0  ? A_WAIT
-			                                   : A_STATUS;
+			       : strcmp(a, "--status") == 0 ? A_STATUS
+			                                    : A_REPORT;
 			i++;
 			if (i >= argc || argv[i][0] == '\0')
 			{
@@ -2148,6 +2199,18 @@ main(int argc, char **argv)
 				return 1;
 			}
 			snprintf(opt_match, sizeof(opt_match), "%s", argv[i]);
+			i++;
+		}
+		else if (strcmp(a, "--state") == 0)
+		{
+			i++;
+			if (i >= argc || argv[i][0] == '\0')
+			{
+				fprintf(stderr,
+				        "dch: --state needs a state name\n");
+				return 1;
+			}
+			snprintf(opt_state, sizeof(opt_state), "%s", argv[i]);
 			i++;
 		}
 		else if (strcmp(a, "--timeout") == 0)
@@ -2237,9 +2300,9 @@ main(int argc, char **argv)
 			printf("\",\"alias\":\"");
 			for (f = sl.alias[k] ? sl.alias[k] : ""; *f; f++)
 				printf(*f == '"' || *f == '\\' ? "\\%c" : "%c", *f);
-			long ep = activity_epoch(sl.v[k]);
 			printf("\",\"activity_epoch\":%ld,\"state\":\"%s\"}",
-			       ep, state_of(ep));
+			       activity_epoch(sl.v[k]),
+			       session_state(sl.v[k]));
 		}
 		puts("]");
 		slist_free(&sl);
@@ -2348,10 +2411,119 @@ main(int argc, char **argv)
 		puts(session_state(session_name));
 		return 0;
 	}
+	case A_REPORT:
+	{
+		char sp[1100], pp[1300];
+		struct stat st;
+		const char *tok = inner_argc == 1 ? inner_argv[0] : "";
+		/* Closed set, rejected at the boundary (herdr-style): an
+		** unknown token writes nothing and fails loudly here, so
+		** consumers of --status never see a surprise state. */
+		if (!valid_state_token(tok) && strcmp(tok, "clear") != 0)
+		{
+			fprintf(stderr, "dch: --report needs one state: "
+			        "working|idle|blocked|done, or `clear`\n");
+			return 1;
+		}
+		snprintf(sp, sizeof(sp), "%s/%s.sock",
+		         sock_dir, session_name);
+		if (stat(sp, &st) < 0 || !S_ISSOCK(st.st_mode))
+		{
+			fprintf(stderr, "no session: %s\n", session_name);
+			return 1;
+		}
+		if (state_file_path(session_name, pp, sizeof(pp)) != 0)
+		{
+			fprintf(stderr, "no session: %s\n", session_name);
+			return 1;
+		}
+		if (strcmp(tok, "clear") == 0)
+		{
+			unlink(pp); /* back to the output heuristic */
+			return 0;
+		}
+		/* Atomic replace (write temp + rename): a concurrent --status
+		** never reads a torn file; last writer wins, which is the
+		** right semantic for ordered harness hooks. */
+		char tp[1320];
+		size_t tl = strlen(tok);
+		snprintf(tp, sizeof(tp), "%s.%d.tmp", pp, (int)getpid());
+		int fd = open(tp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+		int wrote = fd >= 0 && write(fd, tok, tl) == (ssize_t)tl;
+		if (fd >= 0 && close(fd) != 0)
+			wrote = 0;
+		if (!wrote || rename(tp, pp) != 0)
+		{
+			if (fd >= 0)
+				unlink(tp);
+			fprintf(stderr, "dch: cannot write state for %s\n",
+			        session_name);
+			return 1;
+		}
+		return 0;
+	}
 	case A_WAIT:
+		if (opt_state[0] != '\0')
+		{
+			/* State wait: poll the sidecar-backed state every 100ms
+			** (herdr's cadence). --state takes a comma list and
+			** matches any of it, e.g. --state idle,blocked,done =
+			** "the turn is over". Works in both variants (no mirror
+			** needed). The session must exist on every poll — a
+			** killed session ends the wait with "no session"
+			** instead of burning the timeout. */
+			char sp[1100];
+			struct stat st;
+			int waited = 0, ntok = 0, t;
+			char *want[8], *tok, *rest;
+			for (tok = strtok_r(opt_state, ",", &rest);
+			     tok && ntok < 8;
+			     tok = strtok_r(NULL, ",", &rest))
+			{
+				if (!valid_state_token(tok) &&
+				    strcmp(tok, "active") != 0)
+				{
+					fprintf(stderr, "dch: --state wants "
+					        "active|working|idle|blocked|"
+					        "done (comma list ok)\n");
+					return 1;
+				}
+				want[ntok++] = tok;
+			}
+			if (ntok == 0)
+			{
+				fprintf(stderr,
+				        "dch: --state needs a state name\n");
+				return 1;
+			}
+			for (;;)
+			{
+				snprintf(sp, sizeof(sp), "%s/%s.sock",
+				         sock_dir, session_name);
+				if (stat(sp, &st) < 0 || !S_ISSOCK(st.st_mode))
+				{
+					fprintf(stderr, "no session: %s\n",
+					        session_name);
+					return 1;
+				}
+				const char *cur =
+				    session_state(session_name);
+				for (t = 0; t < ntok; t++)
+					if (strcmp(cur, want[t]) == 0)
+					{
+						puts(cur);
+						return 0;
+					}
+				if (waited >= opt_timeout)
+					return 2;
+				poll(NULL, 0, 100);
+				waited += 100;
+			}
+		}
 		if (opt_match[0] == '\0')
 		{
-			fprintf(stderr, "dch: --wait needs --match <string>\n");
+			fprintf(stderr,
+			        "dch: --wait needs --match or --state\n");
 			return 1;
 		}
 		return do_wait_verb(session_name, opt_match, opt_timeout);

@@ -132,16 +132,19 @@ pid_t forkpty(int *amaster, char *name, struct termios *termp,
 	      struct winsize *winp);
 #endif
 
-/* Unlink the socket (and its activity sidecar). */
+/* Unlink the socket (and its activity + reported-state sidecars). */
 static void
 unlink_socket(void)
 {
-	char act[1100];
-	int n = snprintf(act, sizeof act, "%s.act", sockname);
+	char side[1100];
+	int n = snprintf(side, sizeof side, "%s.act", sockname);
 
 	unlink(sockname);
-	if (n > 0 && (size_t)n < sizeof act)
-		unlink(act);
+	if (n > 0 && (size_t)n < sizeof side)
+		unlink(side);
+	n = snprintf(side, sizeof side, "%s.state", sockname);
+	if (n > 0 && (size_t)n < sizeof side)
+		unlink(side);
 }
 
 /* Stamp the per-session activity sidecar `<sockname>.act` with the current time

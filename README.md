@@ -150,7 +150,9 @@ dch --run <name> <text...>                      # type text, press enter
 dch --keys <name> <key...>                      # send keys: ctrl+c up f2 ...
 dch --read <name> [--ansi] [--recent [N]]       # print the rendered screen
 dch --wait <name> --match <str> [--timeout ms]  # block until output matches
-dch --status <name>                             # print active|idle
+dch --wait <name> --state <s[,s]> [--timeout ms]  # block until state matches
+dch --status <name>                             # print session state
+dch --report <name> <state>                     # push state (harness hooks)
 dch --ls-json                                   # sessions as a JSON array
 ```
 
@@ -180,8 +182,10 @@ someone is watching is invisible to them.
 | `--keys <n> <key...>` | Encode+send keys mode-aware: `ctrl+c`, `alt+x`, `shift+tab`, `up`, `f5`, `enter`, `esc`, single chars. | 0 ok, 1 unknown key |
 | `--read <n> [--ansi] [--recent [N]]` | Print rendered screen. `--ansi` keeps colors; `--recent [N]` = last N lines incl. scrollback (default 100). | 0 ok, 1 error, 3 no mirror |
 | `--wait <n> --match <str> [--timeout ms]` | Block until screen/scrollback contains `<str>` (literal substring, ≤512 bytes); prints the matching line. Default timeout 10 s. | 0 hit, 2 timeout, 3 no mirror |
-| `--status <n>` | Print `active` (pty output within the last 5 s) or `idle`. | 0 ok, 1 no session |
-| `--ls-json` | All sessions as JSON: `[{"name","alias","activity_epoch","state"}]`. `state` is `active`/`idle` per the same 5 s rule. | 0 |
+| `--status <n>` | Print the session state: the reported state if a harness pushed one (see `--report`), else `active` (pty output within the last 5 s) or `idle`. | 0 ok, 1 no session |
+| `--report <n> <state>` | Push a semantic state: `working`, `idle`, `blocked`, or `done` (closed set, unknown tokens rejected); `clear` reverts to the output heuristic. Last write wins; cleared automatically when the session ends. | 0 ok, 1 no session / bad state |
+| `--wait <n> --state <s[,s...]> [--timeout ms]` | Block until the state matches any of the comma list (e.g. `idle,blocked,done` = "turn over"); prints the matched state. Polls every 100 ms. | 0 hit, 2 timeout, 1 no session |
+| `--ls-json` | All sessions as JSON: `[{"name","alias","activity_epoch","state"}]`. `state` follows the same reported-else-heuristic rule. | 0 |
 
 A typical agent loop:
 
@@ -191,6 +195,52 @@ dch --run build "make -j8 2>&1 | tee build.log"
 if dch --wait build --match "error:" --timeout 300000; then
     dch --read build --recent 40      # grab context around the failure
 fi
+```
+
+### Harness-reported states
+
+`--status` infers `active`/`idle` from pty output. A harness running inside
+the session knows better — "blocked on a permission prompt" and "thinking"
+look identical from outside. `--report` lets it push a semantic state
+(herdr-style): `working`, `idle`, `blocked`, `done`. A reported state
+overrides the heuristic until the next report, `--report <name> clear`, or
+session end (the sidecar is removed with the socket).
+
+Every process inside a dch session has `DCH_SESSION` set to the session
+name, so hooks need zero configuration. Reports must never break the
+harness: silence stderr and swallow the exit code, as below.
+
+**Claude Code** (`~/.claude/settings.json`) — each entry is
+`{"hooks": [{"type": "command", "command": "<cmd>"}]}` with:
+
+| Hook event | Command |
+| --- | --- |
+| `UserPromptSubmit`, `PreToolUse` | `dch --report "$DCH_SESSION" working 2>/dev/null; true` |
+| `Notification` | `dch --report "$DCH_SESSION" blocked 2>/dev/null; true` |
+| `Stop` | `dch --report "$DCH_SESSION" idle 2>/dev/null; true` |
+| `SessionEnd` | `dch --report "$DCH_SESSION" clear 2>/dev/null; true` |
+
+`PreToolUse` flips `blocked` back to `working` once a permission prompt is
+approved; `SessionEnd` clears the report so a closed harness can't leave a
+stale `working` behind (a hard-killed one can, until the next report or
+session end — same trade-off herdr makes, which uses process-exit rather
+than a timeout to expire state).
+
+**OpenAI Codex** (`~/.codex/config.toml`) — Codex only signals
+turn-complete:
+
+```toml
+notify = ["sh", "-c", "dch --report \"$DCH_SESSION\" idle 2>/dev/null; true"]
+```
+
+**Anything else**: call `dch --report "$DCH_SESSION" <state>` from the
+harness's hook/notify mechanism. Outside a dch session `DCH_SESSION` is
+empty and the report fails silently.
+
+Then a watcher blocks on the state instead of polling screens:
+
+```sh
+dch --wait agent1 --state idle,blocked,done --timeout 600000  # turn over?
 ```
 
 ### Honest caveats
@@ -212,8 +262,8 @@ environment disables it at spawn.
 
 | Verb | Without mirror |
 | --- | --- |
-| `--spawn`, `--send`, `--run`, `--status`, `--ls-json` | Work unchanged (plain pty writes / sidecar reads). |
-| `--read`, `--wait` | Exit 3 with a message pointing at the full build. |
+| `--spawn`, `--send`, `--run`, `--status`, `--report`, `--wait --state`, `--ls-json` | Work unchanged (plain pty writes / sidecar reads). |
+| `--read`, `--wait --match` | Exit 3 with a message pointing at the full build. |
 | `--keys` | Falls back to a fixed legacy xterm table client-side (exit 0 + stderr note). Mode-aware apps may misread modified keys. |
 
 The client side is protocol-only in both builds: a lite `dch` binary can
