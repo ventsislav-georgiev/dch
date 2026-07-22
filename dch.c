@@ -1267,7 +1267,8 @@ usage(void)
 	    "  dch -h           this help\n"
 	    "  dch -V           print version\n"
 	    "Agent/control verbs (no attach; safe to script):\n"
-	    "  dch --spawn <name> [--size CxR] [cmd...]   start headless session\n"
+	    "  dch --spawn <name> [--size CxR] [--env K=V]... [cmd...]\n"
+	    "                                             start headless session\n"
 	    "  dch --send <name> <text...>                type text into session\n"
 	    "  dch --run <name> <text...>                 type text, press enter\n"
 	    "  dch --keys <name> <key...>                 send keys (ctrl+c, up, f2, ...)\n"
@@ -2198,6 +2199,11 @@ do_send_verb(const char *name, char **words, int nwords, int press_enter)
 	return 0;
 }
 
+/* --spawn --env KEY=VAL collected from argv (strings persist for putenv). */
+#define SPAWN_ENV_MAX 32
+static char *spawn_env[SPAWN_ENV_MAX];
+static int spawn_env_n;
+
 static int
 do_spawn_verb(char *exe, const char *name, int cols, int rows,
               char **inner_argv, int inner_argc)
@@ -2236,6 +2242,10 @@ do_spawn_verb(char *exe, const char *name, int cols, int rows,
 		default_argv[0] = (char *)(sh && *sh ? sh : "/bin/sh");
 		inner_argv = default_argv;
 	}
+	/* Caller env first; DCH_SESSION/TERM are set after, so reserved keys
+	** always win — --env DCH_SESSION=x cannot spoof session identity. */
+	for (rc = 0; rc < spawn_env_n; rc++)
+		putenv(spawn_env[rc]);
 	setenv("DCH_SESSION", name, 1);
 	/* Headless spawns often run where TERM is unset or "dumb" (cron, CI,
 	** daemons); the mirror is xterm-compatible, so give TUIs a terminal
@@ -2555,6 +2565,28 @@ main(int argc, char **argv)
 				        "dch: --size wants COLSxROWS\n");
 				return 1;
 			}
+			i++;
+		}
+		else if (strcmp(a, "--env") == 0)
+		{
+			const char *eq;
+
+			i++;
+			if (i >= argc || !(eq = strchr(argv[i], '=')) ||
+			    eq == argv[i])
+			{
+				fprintf(stderr,
+				        "dch: --env wants KEY=VAL\n");
+				return 1;
+			}
+			if (spawn_env_n >= SPAWN_ENV_MAX)
+			{
+				fprintf(stderr,
+				        "dch: --env: too many (max %d)\n",
+				        SPAWN_ENV_MAX);
+				return 1;
+			}
+			spawn_env[spawn_env_n++] = argv[i];
 			i++;
 		}
 		else if (strcmp(a, "--") == 0)

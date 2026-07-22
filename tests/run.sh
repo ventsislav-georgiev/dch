@@ -398,6 +398,32 @@ assert s["state"] == "blocked", s
         "$DCH" -k "$DN" >/dev/null 2>&1
     fi
 
+    # --- --spawn --env: caller variables, reserved keys win ------------------
+    EN="env$$"
+    if [ "$mirror" -eq 0 ]; then
+        "$DCH" --spawn "$EN" --env CREW_ROLE=x --env V=a=b \
+               --env DCH_SESSION=fake sh >/dev/null 2>&1
+        check "--spawn --env accepted" "$?" "0"
+        # Matching the expanded output (not the typed line: that shows the
+        # unexpanded $names) proves the values reached the child env.
+        "$DCH" --run "$EN" 'echo env_out $CREW_ROLE $V' >/dev/null 2>&1
+        "$DCH" --wait "$EN" --match "env_out x a=b" --timeout 5000 >/dev/null 2>&1
+        check "--env values reach child (first = splits)" "$?" "0"
+        "$DCH" --run "$EN" 'echo sess_out $DCH_SESSION' >/dev/null 2>&1
+        "$DCH" --wait "$EN" --match "sess_out $EN" --timeout 5000 >/dev/null 2>&1
+        check "--env cannot spoof DCH_SESSION" "$?" "0"
+        "$DCH" -k "$EN" >/dev/null 2>&1
+    fi
+    "$DCH" --spawn "${EN}b" --env FOO sh >/dev/null 2>&1
+    check "--env without = exits 1" "$?" "1"
+    "$DCH" --spawn "${EN}b" --env =VAL sh >/dev/null 2>&1
+    check "--env empty key exits 1" "$?" "1"
+    set --
+    n=0
+    while [ "$n" -lt 33 ]; do set -- "$@" --env "K$n=v"; n=$((n + 1)); done
+    "$DCH" --spawn "${EN}b" "$@" sh >/dev/null 2>&1
+    check "--env 33rd is a hard error" "$?" "1"
+
     # Real alt-screen TUI end-to-end: drive vim without attaching. Covers
     # mode-aware --keys (esc, ":" as shift+; chord) and screen rendering.
     if [ "$mirror" -eq 0 ] && command -v vim >/dev/null 2>&1; then

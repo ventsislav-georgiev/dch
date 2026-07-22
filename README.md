@@ -144,7 +144,7 @@ dch -n <name>    # override the auto-name
 dch -f           # force-attach even if another client is connected
 
 # agent / scripting verbs (never attach; see Agent API)
-dch --spawn <name> [--size CxR] [cmd...]        # start a headless session
+dch --spawn <name> [--size CxR] [--env K=V]... [cmd...]  # headless session
 dch --send <name> <text...>                     # type text into the session
 dch --run <name> <text...>                      # type text, press enter
 dch --keys <name> <key...>                      # send keys: ctrl+c up f2 ...
@@ -176,7 +176,7 @@ someone is watching is invisible to them.
 
 | Verb | Does | Exit codes |
 | --- | --- | --- |
-| `--spawn <n> [--size CxR] [cmd...]` | Start headless session (default: `$SHELL`, 80x24 or `$COLUMNS`/`$LINES`). Prints the name. | 0 ok, 1 exists/failed |
+| `--spawn <n> [--size CxR] [--env K=V]... [cmd...]` | Start headless session (default: `$SHELL`, 80x24 or `$COLUMNS`/`$LINES`). `--env` (max 32, first `=` splits) adds variables to the child; reserved keys (`DCH_SESSION`, `TERM` fixup) always win. Prints the name. | 0 ok, 1 exists/failed/bad --env |
 | `--send <n> <text...>` | Type text (joined with spaces), no enter. | 0 ok |
 | `--run <n> <text...>` | `--send` + enter. | 0 ok |
 | `--keys <n> <key...>` | Encode+send keys mode-aware: `ctrl+c`, `alt+x`, `shift+tab`, `up`, `f5`, `enter`, `esc`, single chars. | 0 ok, 1 unknown key |
