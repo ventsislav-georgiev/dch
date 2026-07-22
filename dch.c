@@ -221,36 +221,48 @@ dch_trace(const char *fmt, ...)
 	fputc('\n', trace_fp);
 }
 
-/* Build sock_path. If <name> would overflow AF_UNIX sun_path, deterministically
-** shorten it (keep a prefix + append a hash of the full name) so create and
-** attach agree and it "just works" regardless of cwd/branch length. */
+/* Normalize a session name to the on-disk basename. Long names that would
+** overflow AF_UNIX sun_path are deterministically shortened (prefix + djb2
+** hash) so create and attach agree. Every sidecar path (.act/.state/.alias)
+** must derive from this same normalization or long-named sessions read the
+** wrong sidecars (the master writes them under the hashed name). Returns
+** `name` unchanged when it fits, else `buf`. */
+static const char *
+canon_name(const char *name, char *buf, size_t bufsz)
+{
+	struct sockaddr_un sa;
+
+	if (strlen(sock_dir) + 7 >= sizeof(sa.sun_path))
+		return name; /* pathological sock_dir; make_sock_path errors */
+	/* Chars available for the name itself: "<sock_dir>/" + name + ".sock\0". */
+	size_t budget = sizeof(sa.sun_path) - strlen(sock_dir) - 1 - 5 - 1;
+	if (strlen(name) <= budget || budget <= 8)
+		return name;
+	/* djb2 hash of the full name -> 6 hex chars for uniqueness. */
+	unsigned long h = 5381;
+	for (const char *p = name; *p; p++)
+		h = ((h << 5) + h) + (unsigned char)*p;
+	int keep = (int)budget - 7; /* '-' + 6 hex */
+	snprintf(buf, bufsz, "%.*s-%06lx", keep, name, h & 0xffffff);
+	return buf;
+}
+
+/* Build sock_path. Long names are shortened via canon_name so it "just
+** works" regardless of cwd/branch length. */
 static int
 make_sock_path(const char *name)
 {
 	struct sockaddr_un sa;
-	/* Fixed overhead in sun_path: "/" + ".sock" + NUL = 7 bytes plus sock_dir.
-	** Guard before the subtraction below underflows (size_t) on a pathological
-	** sock_dir — the final snprintf check would still catch it, but this is
-	** clearer and fails fast. */
+	char shortened[256];
+	/* Guard before canon_name's subtraction underflows (size_t) on a
+	** pathological sock_dir — the final snprintf check would still catch
+	** it, but this is clearer and fails fast. */
 	if (strlen(sock_dir) + 7 >= sizeof(sa.sun_path))
 	{
 		fprintf(stderr, "dch: socket directory path too long\n");
 		return -1;
 	}
-	/* Chars available for the name itself: "<sock_dir>/" + name + ".sock\0". */
-	size_t budget = sizeof(sa.sun_path) - strlen(sock_dir) - 1 - 5 - 1;
-	char shortened[256];
-	if (strlen(name) > budget && budget > 8)
-	{
-		/* djb2 hash of the full name -> 6 hex chars for uniqueness. */
-		unsigned long h = 5381;
-		for (const char *p = name; *p; p++)
-			h = ((h << 5) + h) + (unsigned char)*p;
-		int keep = (int)budget - 7; /* '-' + 6 hex */
-		snprintf(shortened, sizeof(shortened), "%.*s-%06lx",
-		         keep, name, h & 0xffffff);
-		name = shortened;
-	}
+	name = canon_name(name, shortened, sizeof(shortened));
 	int n = snprintf(sock_path, sizeof(sock_path),
 	                 "%s/%s.sock", sock_dir, name);
 	if (n < 0 || (size_t)n >= sizeof(sock_path) ||
@@ -261,6 +273,16 @@ make_sock_path(const char *name)
 	}
 	sockname = sock_path;
 	return 0;
+}
+
+/* Build <sock_dir>/<canon(name)>.sock into buf (for existence checks that
+** don't want to touch the global sock_path). */
+static void
+session_sock_path(const char *name, char *buf, size_t bufsz)
+{
+	char cb[256];
+	snprintf(buf, bufsz, "%s/%s.sock", sock_dir,
+	         canon_name(name, cb, sizeof(cb)));
 }
 
 /* Read first line of `path` (NUL-terminated, newline stripped) into out.
@@ -578,7 +600,9 @@ list_sessions(struct slist *out)
 static int
 alias_path(const char *name, char *out, size_t outsz)
 {
-	int n = snprintf(out, outsz, "%s/%s.sock.alias", sock_dir, name);
+	char cb[256];
+	int n = snprintf(out, outsz, "%s/%s.sock.alias", sock_dir,
+	                 canon_name(name, cb, sizeof(cb)));
 	return (n < 0 || (size_t)n >= outsz) ? -1 : 0;
 }
 
@@ -588,9 +612,10 @@ alias_path(const char *name, char *out, size_t outsz)
 static long
 activity_epoch(const char *name)
 {
-	char ap[1300];
+	char ap[1300], cb[256];
 	struct stat st;
-	int n = snprintf(ap, sizeof ap, "%s/%s.sock.act", sock_dir, name);
+	int n = snprintf(ap, sizeof ap, "%s/%s.sock.act", sock_dir,
+	                 canon_name(name, cb, sizeof(cb)));
 
 	if (n < 0 || (size_t)n >= sizeof ap || stat(ap, &st) != 0)
 		return 0;
@@ -614,7 +639,9 @@ state_of(long ep)
 static int
 state_file_path(const char *name, char *buf, size_t bufsz)
 {
-	int n = snprintf(buf, bufsz, "%s/%s.sock.state", sock_dir, name);
+	char cb[256];
+	int n = snprintf(buf, bufsz, "%s/%s.sock.state", sock_dir,
+	                 canon_name(name, cb, sizeof(cb)));
 	return (n < 0 || (size_t)n >= bufsz) ? -1 : 0;
 }
 
@@ -1121,7 +1148,7 @@ static int
 kill_session(const char *name)
 {
 	char sp[1100];
-	snprintf(sp, sizeof(sp), "%s/%s.sock", sock_dir, name);
+	session_sock_path(name, sp, sizeof(sp));
 	struct stat st;
 	if (stat(sp, &st) < 0 || !S_ISSOCK(st.st_mode))
 	{
@@ -2382,8 +2409,7 @@ main(int argc, char **argv)
 			         "%s", chosen);
 		}
 		char sp[1100];
-		snprintf(sp, sizeof(sp), "%s/%s.sock",
-		         sock_dir, session_name);
+		session_sock_path(session_name, sp, sizeof(sp));
 		struct stat st;
 		if (stat(sp, &st) < 0 || !S_ISSOCK(st.st_mode))
 		{
@@ -2401,8 +2427,7 @@ main(int argc, char **argv)
 	{
 		char sp[1100];
 		struct stat st;
-		snprintf(sp, sizeof(sp), "%s/%s.sock",
-		         sock_dir, session_name);
+		session_sock_path(session_name, sp, sizeof(sp));
 		if (stat(sp, &st) < 0 || !S_ISSOCK(st.st_mode))
 		{
 			fprintf(stderr, "no session: %s\n", session_name);
@@ -2425,8 +2450,7 @@ main(int argc, char **argv)
 			        "working|idle|blocked|done, or `clear`\n");
 			return 1;
 		}
-		snprintf(sp, sizeof(sp), "%s/%s.sock",
-		         sock_dir, session_name);
+		session_sock_path(session_name, sp, sizeof(sp));
 		if (stat(sp, &st) < 0 || !S_ISSOCK(st.st_mode))
 		{
 			fprintf(stderr, "no session: %s\n", session_name);
@@ -2498,8 +2522,8 @@ main(int argc, char **argv)
 			}
 			for (;;)
 			{
-				snprintf(sp, sizeof(sp), "%s/%s.sock",
-				         sock_dir, session_name);
+				session_sock_path(session_name, sp,
+				                  sizeof(sp));
 				if (stat(sp, &st) < 0 || !S_ISSOCK(st.st_mode))
 				{
 					fprintf(stderr, "no session: %s\n",

@@ -272,6 +272,31 @@ assert s["state"] in ("active", "idle", "working", "blocked", "done"), s
         && ok "kill removes state sidecar" \
         || bad "kill removes state sidecar"
 
+    # Long names get hashed socket filenames; sidecars must derive from
+    # the same normalization or --status/--ls-json read the wrong files.
+    LN="$(printf 'l%.0s' $(seq 1 200))$$"
+    "$DCH" --spawn "$LN" sh >/dev/null 2>&1
+    n=0
+    while [ "$("$DCH" --status "$LN" 2>/dev/null)" != "active" ] \
+          && [ "$n" -lt 100 ]; do
+        "$DCH" --run "$LN" "echo long_ping" >/dev/null 2>&1
+        sleep 0.1; n=$((n + 1))
+    done
+    check "long-name --status sees activity" \
+          "$("$DCH" --status "$LN" 2>/dev/null)" "active"
+    "$DCH" --report "$LN" blocked >/dev/null 2>&1
+    check "long-name --report round-trips" \
+          "$("$DCH" --status "$LN" 2>/dev/null)" "blocked"
+    "$DCH" --ls-json 2>/dev/null | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert any(s["state"] == "blocked" for s in d), d
+' && ok "long-name --ls-json surfaces reported state" \
+   || bad "long-name --ls-json surfaces reported state"
+    "$DCH" -k "$LN" >/dev/null 2>&1
+    n=$(find "$SOCKDIR" -name '*.sock.state' 2>/dev/null | wc -l)
+    check "long-name kill removes hashed sidecars" "$((n + 0))" "0"
+
     # Real alt-screen TUI end-to-end: drive vim without attaching. Covers
     # mode-aware --keys (esc, ":" as shift+; chord) and screen rendering.
     if [ "$mirror" -eq 0 ] && command -v vim >/dev/null 2>&1; then
