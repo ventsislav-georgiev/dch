@@ -182,10 +182,10 @@ someone is watching is invisible to them.
 | `--keys <n> <key...>` | Encode+send keys mode-aware: `ctrl+c`, `alt+x`, `shift+tab`, `up`, `f5`, `enter`, `esc`, single chars. | 0 ok, 1 unknown key |
 | `--read <n> [--ansi] [--recent [N]]` | Print rendered screen. `--ansi` keeps colors; `--recent [N]` = last N lines incl. scrollback (default 100). | 0 ok, 1 error, 3 no mirror |
 | `--wait <n> --match <str> [--timeout ms]` | Block until screen/scrollback contains `<str>` (literal substring, ≤512 bytes); prints the matching line. Default timeout 10 s. | 0 hit, 2 timeout, 3 no mirror |
-| `--status <n>` | Print the session state: the reported state if a harness pushed one (see `--report`), else `active` (pty output within the last 5 s) or `idle`. | 0 ok, 1 no session |
-| `--report <n> <state>` | Push a semantic state: `working`, `idle`, `blocked`, or `done` (closed set, unknown tokens rejected); `clear` reverts to the output heuristic. Last write wins; cleared automatically when the session ends. | 0 ok, 1 no session / bad state |
-| `--wait <n> --state <s[,s...]> [--timeout ms]` | Block until the state matches any of the comma list (e.g. `idle,blocked,done` = "turn over"); prints the matched state. Polls every 100 ms. | 0 hit, 2 timeout, 1 no session |
-| `--ls-json` | All sessions as JSON: `[{"name","alias","activity_epoch","state"}]`. `state` follows the same reported-else-heuristic rule. | 0 |
+| `--status <n>` | Print the session state: `working`, `idle`, `blocked`, or `done` — resolved from the reported state, the screen-content detection, and the output heuristic (see [Agent state detection](#agent-state-detection)). | 0 ok, 1 no session |
+| `--report <n> <state>` | Push a semantic state: `working`, `idle`, `blocked`, or `done` (closed set, unknown tokens rejected); `clear` reverts to auto (detection + heuristic). Last write wins; cleared automatically when the session ends. | 0 ok, 1 no session / bad state |
+| `--wait <n> --state <s[,s...]> [--timeout ms]` | Block until the state matches any of the comma list (e.g. `idle,blocked,done` = "turn over"); prints the matched state. `active` is accepted as an alias for `working`. Polls every 100 ms. | 0 hit, 2 timeout, 1 no session |
+| `--ls-json` | All sessions as JSON: `[{"name","alias","activity_epoch","state"}]`. `state` follows the same resolution rule as `--status`. | 0 |
 
 A typical agent loop:
 
@@ -197,14 +197,52 @@ if dch --wait build --match "error:" --timeout 300000; then
 fi
 ```
 
-### Harness-reported states
+### Agent state detection
 
-`--status` infers `active`/`idle` from pty output. A harness running inside
-the session knows better — "blocked on a permission prompt" and "thinking"
-look identical from outside. `--report` lets it push a semantic state
-(herdr-style): `working`, `idle`, `blocked`, `done`. A reported state
-overrides the heuristic until the next report, `--report <name> clear`, or
-session end (the sidecar is removed with the socket).
+`--status` and `--ls-json` answer "what is this agent doing?" with zero
+setup: dch reads the session's rendered screen (the same mirror `--read`
+prints) and looks for the strings coding-agent TUIs paint when they are
+busy or waiting on a human.
+
+| State | Signal |
+| --- | --- |
+| `blocked` | Permission/confirmation prompts: "Do you want to proceed?", "Allow command?", "Press enter to confirm or esc to cancel", "permission required", "waiting for approval", … (Claude Code, Codex, Gemini, opencode, Cursor) |
+| `working` | Busy footers ("esc to interrupt", "ctrl+c to interrupt") or an animated braille spinner at the start of a line — only honored if the session also produced output in the last 30 s, so a frozen frame can't read as busy |
+| `idle` / `working` | Fallback output heuristic: pty output within the last 5 s = `working`, else `idle` |
+
+Resolution order, per query:
+
+1. A **reported** `done` (see below) always wins — no screen can prove completion.
+2. A **detected** `blocked` beats any reported state except `done`: a live permission prompt on screen is ground truth, and this also rescues sessions whose harness hook died mid-turn and left a stale `working` behind.
+3. Otherwise: reported state, else detected state, else the output heuristic.
+
+Honest limits: detection reads the terminal body text, not window titles,
+so a harness that shows its busy indicator only in the title falls back to
+the output heuristic (still a correct busy/quiet answer, just without
+screen confirmation). The rules are English-only and can lag a harness UI
+redesign — updating dch updates the rules for every session, nothing else
+to install. Transcript/pager views that replay old prompts are recognized
+and suppressed, but a program that happens to print a matching string can
+still false-positive. `DCH_NO_DETECT=1` in the client's environment
+disables detection entirely (reported state + heuristic only).
+
+Detection needs the session master's VT mirror: against a lite or
+`DCH_NO_VT=1` master it falls back to the reported state + heuristic. A
+lite *client* against a full master detects normally.
+
+For multi-agent runs, name sessions `<run>.<role>` (e.g. `crew1.planner`,
+`crew1.coder`) and filter `--ls-json` by prefix — dch keeps a flat
+namespace on purpose.
+
+### Optional: explicit state reporting
+
+Detection can't see everything — `done` in particular is a semantic fact
+only the harness knows. A harness running inside the session can push its
+state with `--report` (herdr-style): `working`, `idle`, `blocked`, `done`.
+A reported state overrides the heuristic (and, except for a live on-screen
+permission prompt, the detection) until the next report,
+`--report <name> clear`, or session end (the sidecar is removed with the
+socket).
 
 Every process inside a dch session has `DCH_SESSION` set to the session
 name, so hooks need zero configuration. Reports must never break the
@@ -262,7 +300,7 @@ environment disables it at spawn.
 
 | Verb | Without mirror |
 | --- | --- |
-| `--spawn`, `--send`, `--run`, `--status`, `--report`, `--wait --state`, `--ls-json` | Work unchanged (plain pty writes / sidecar reads). |
+| `--spawn`, `--send`, `--run`, `--status`, `--report`, `--wait --state`, `--ls-json` | Work unchanged (plain pty writes / sidecar reads). State detection needs the master's mirror, so against a lite/`DCH_NO_VT` master `--status` falls back to reported state + output heuristic. |
 | `--read`, `--wait --match` | Exit 3 with a message pointing at the full build. |
 | `--keys` | Falls back to a fixed legacy xterm table client-side (exit 0 + stderr note). Mode-aware apps may misread modified keys. |
 

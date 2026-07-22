@@ -214,15 +214,15 @@ if [ -x "$DCH" ]; then
 import json, sys
 d = json.load(sys.stdin)
 assert any(s["name"] == sys.argv[1] for s in d), d
-assert all(s["state"] in ("active", "idle") for s in d), d
+assert all(s["state"] in ("working", "idle", "blocked", "done") for s in d), d
 ' "$SN" && ok "--ls-json valid JSON with session + state" \
        || bad "--ls-json valid JSON with session + state"
 
-    # --status: fresh output = active; stale .act sidecar = idle.
+    # --status: fresh output = working; stale .act sidecar = idle.
     "$DCH" --run "$SN" "echo status_ping" >/dev/null 2>&1
     sleep 1
-    check "--status recent output is active" \
-          "$("$DCH" --status "$SN" 2>/dev/null)" "active"
+    check "--status recent output is working" \
+          "$("$DCH" --status "$SN" 2>/dev/null)" "working"
     touch -t 200001010000 "$SOCKDIR/$SN.sock.act"
     check "--status stale output is idle" \
           "$("$DCH" --status "$SN" 2>/dev/null)" "idle"
@@ -260,7 +260,7 @@ assert s["state"] == "blocked", s
 import json, sys
 d = json.load(sys.stdin)
 s = next(s for s in d if s["name"] == sys.argv[1])
-assert s["state"] in ("active", "idle", "working", "blocked", "done"), s
+assert s["state"] in ("idle", "working", "blocked", "done"), s
 ' "$SN" && ok "--ls-json valid despite corrupt sidecar" \
        || bad "--ls-json valid despite corrupt sidecar"
     "$DCH" --wait no_such_session_zz --state idle --timeout 500 >/dev/null 2>&1
@@ -277,13 +277,13 @@ assert s["state"] in ("active", "idle", "working", "blocked", "done"), s
     LN="$(printf 'l%.0s' $(seq 1 200))$$"
     "$DCH" --spawn "$LN" sh >/dev/null 2>&1
     n=0
-    while [ "$("$DCH" --status "$LN" 2>/dev/null)" != "active" ] \
+    while [ "$("$DCH" --status "$LN" 2>/dev/null)" != "working" ] \
           && [ "$n" -lt 100 ]; do
         "$DCH" --run "$LN" "echo long_ping" >/dev/null 2>&1
         sleep 0.1; n=$((n + 1))
     done
     check "long-name --status sees activity" \
-          "$("$DCH" --status "$LN" 2>/dev/null)" "active"
+          "$("$DCH" --status "$LN" 2>/dev/null)" "working"
     "$DCH" --report "$LN" blocked >/dev/null 2>&1
     check "long-name --report round-trips" \
           "$("$DCH" --status "$LN" 2>/dev/null)" "blocked"
@@ -296,6 +296,107 @@ assert any(s["state"] == "blocked" for s in d), d
     "$DCH" -k "$LN" >/dev/null 2>&1
     n=$(find "$SOCKDIR" -name '*.sock.state' 2>/dev/null | wc -l)
     check "long-name kill removes hashed sidecars" "$((n + 0))" "0"
+
+    # --- built-in state detection: screen-content rules ---------------------
+    # Fake harness: paint agent-UI footer/prompt strings into a quiet shell
+    # (echo off so the painted commands themselves never reach the grid),
+    # then assert what --status infers. Every assertion follows a --wait
+    # --match barrier on a per-paint sentinel, so the grid is provably
+    # repainted before we look. Needs the mirror; the lite master path is
+    # covered by the heuristic tests above (detection falls back silently).
+    if [ "$mirror" -eq 0 ]; then
+        DN="det$$"
+        "$DCH" --spawn "$DN" --size 80x24 sh >/dev/null 2>&1
+        "$DCH" --run "$DN" "stty -echo" >/dev/null 2>&1
+        paint() { # paint $2 (printf %b, so \n splits lines) + sentinel $1
+            "$DCH" --run "$DN" "clear; printf '%b\n' \"$2\" 'sent_$1'" >/dev/null 2>&1
+            "$DCH" --wait "$DN" --match "sent_$1" --timeout 5000 >/dev/null 2>&1
+            # The master throttles .act touches to 1/s; consecutive paints
+            # inside one second would keep a backdated stamp. Re-stamp so
+            # "fresh output" is deterministic regardless of test pacing.
+            touch "$SOCKDIR/$DN.sock.act"
+        }
+        stale() { touch -t 200001010000 "$SOCKDIR/$DN.sock.act"; }
+
+        paint w1 'Esc to interrupt'
+        check "detect working from footer" \
+              "$("$DCH" --status "$DN" 2>/dev/null)" "working"
+        stale
+        check "detect working needs fresh output" \
+              "$("$DCH" --status "$DN" 2>/dev/null)" "idle"
+
+        paint w2 '\342\240\213 Thinking...'
+        check "detect working from spinner" \
+              "$("$DCH" --status "$DN" 2>/dev/null)" "working"
+
+        # blocked needs no fresh output: a prompt can sit for hours.
+        paint b1 'Do you want to proceed?'
+        stale
+        check "detect blocked overrides idle heuristic" \
+              "$("$DCH" --status "$DN" 2>/dev/null)" "blocked"
+
+        paint b2 'esc to interrupt\nDo you want to proceed?'
+        check "blocked beats working on the same screen" \
+              "$("$DCH" --status "$DN" 2>/dev/null)" "blocked"
+
+        # blocker-override chain: detected blocked beats a stale report,
+        # reported done beats everything, clear re-exposes the screen.
+        "$DCH" --report "$DN" working >/dev/null 2>&1
+        check "detected blocked overrides reported working" \
+              "$("$DCH" --status "$DN" 2>/dev/null)" "blocked"
+        "$DCH" --report "$DN" done >/dev/null 2>&1
+        check "reported done beats detected blocked" \
+              "$("$DCH" --status "$DN" 2>/dev/null)" "done"
+        "$DCH" --report "$DN" clear >/dev/null 2>&1
+        check "report clear re-exposes detected blocked" \
+              "$("$DCH" --status "$DN" 2>/dev/null)" "blocked"
+
+        paint r1 'esc to interrupt'
+        "$DCH" --report "$DN" idle >/dev/null 2>&1
+        check "reported idle beats detected working" \
+              "$("$DCH" --status "$DN" 2>/dev/null)" "idle"
+        "$DCH" --report "$DN" clear >/dev/null 2>&1
+
+        # transcript viewers replay old prompts; suppression must win.
+        paint s1 'Showing detailed transcript\nDo you want to proceed?'
+        check "transcript view suppresses blocked" \
+              "$("$DCH" --status "$DN" 2>/dev/null)" "working"
+
+        # two-string rules need both halves on screen.
+        paint f1 'esc to cancel'
+        check "half of a paired rule does not block" \
+              "$("$DCH" --status "$DN" 2>/dev/null)" "working"
+
+        paint q1 'nothing to see here'
+        stale
+        check "no signals, stale output is idle" \
+              "$("$DCH" --status "$DN" 2>/dev/null)" "idle"
+
+        paint n1 'Allow command?'
+        check "detection on: blocked" \
+              "$("$DCH" --status "$DN" 2>/dev/null)" "blocked"
+        check "DCH_NO_DETECT=1 disables detection" \
+              "$(DCH_NO_DETECT=1 "$DCH" --status "$DN" 2>/dev/null)" "working"
+
+        paint ww 'esc to interrupt'
+        check "--wait --state sees detected working" \
+              "$("$DCH" --wait "$DN" --state working --timeout 3000 2>/dev/null)" \
+              "working"
+        check "--wait --state active is an alias for working" \
+              "$("$DCH" --wait "$DN" --state active --timeout 3000 2>/dev/null)" \
+              "working"
+
+        paint lj 'Allow command?'
+        "$DCH" --ls-json 2>/dev/null | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+s = next(s for s in d if s["name"] == sys.argv[1])
+assert s["state"] == "blocked", s
+' "$DN" && ok "--ls-json carries detected state" \
+       || bad "--ls-json carries detected state"
+
+        "$DCH" -k "$DN" >/dev/null 2>&1
+    fi
 
     # Real alt-screen TUI end-to-end: drive vim without attaching. Covers
     # mode-aware --keys (esc, ":" as shift+; chord) and screen rendering.

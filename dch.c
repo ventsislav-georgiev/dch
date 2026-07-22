@@ -19,7 +19,7 @@
 #include <sys/un.h>
 
 /* dch's own version, independent of the dtach base (PACKAGE_VERSION). */
-#define DCH_VERSION "1.3.0"
+#define DCH_VERSION "1.4.0"
 
 /* Shared globals (declared in dtach.h, used by attach.c/master.c). */
 const char copyright[] = "dch - based on dtach " PACKAGE_VERSION
@@ -622,15 +622,17 @@ activity_epoch(const char *name)
 	return (long)st.st_mtime;
 }
 
-/* A session is "active" when the master stamped pty output within this
+/* A session is "working" when the master stamped pty output within this
 ** window, "idle" otherwise. The master throttles stamps to 1/s, so 5s
-** gives headroom without hiding real activity. */
+** gives headroom without hiding real activity. (v1.3 printed "active"
+** here; collapsed into "working" so the busy concept has one name across
+** heuristic, detection and reports. --wait keeps "active" as an alias.) */
 #define DCH_ACTIVE_SECS 5
 
 static const char *
 state_of(long ep)
 {
-	return (ep && time(NULL) - ep <= DCH_ACTIVE_SECS) ? "active"
+	return (ep && time(NULL) - ep <= DCH_ACTIVE_SECS) ? "working"
 	                                                  : "idle";
 }
 
@@ -658,15 +660,21 @@ valid_state_token(const char *tok)
 	return 0;
 }
 
-/* Reported state wins (a harness knows "blocked" vs "working"; output
-** can't); no report — or a corrupt sidecar — falls back to the output
-** heuristic. Content is re-validated on read so a hand-mangled file can
-** never leak into --status/--ls-json output. */
+static const char *detect_state(const char *name);
+
+/* Resolve a session's state. An explicit "done" report always wins; a
+** detected on-screen blocker beats any other report (herdr's blocker-
+** override — a stale "working" from a crashed harness hook must not
+** stick until session death); then the reported state; then screen
+** detection; then the output heuristic. Sidecar content is re-validated
+** on read so a hand-mangled file never leaks into --status/--ls-json. */
 static const char *
 session_state(const char *name)
 {
 	static char st[40];
 	char p[1300];
+	const char *rep = NULL, *det;
+
 	if (state_file_path(name, p, sizeof(p)) == 0)
 	{
 		int fd = open(p, O_RDONLY);
@@ -678,9 +686,18 @@ session_state(const char *name)
 				r--;
 			st[r > 0 ? r : 0] = '\0';
 			if (r > 0 && valid_state_token(st))
-				return st;
+				rep = st;
 		}
 	}
+	if (rep && strcmp(rep, "done") == 0)
+		return rep;
+	det = detect_state(name);
+	if (det && strcmp(det, "blocked") == 0)
+		return det;
+	if (rep)
+		return rep;
+	if (det)
+		return det;
 	return state_of(activity_epoch(name));
 }
 
@@ -1257,10 +1274,15 @@ usage(void)
 	    "  dch --read <name> [--ansi] [--recent [N]]  print session screen\n"
 	    "  dch --wait <name> --match <str> [--timeout ms]  wait for output\n"
 	    "  dch --wait <name> --state <s> [--timeout ms]    wait for state\n"
-	    "  dch --status <name>                        print session state\n"
-	    "  dch --report <name> <state>                set state (harness hooks;\n"
+	    "  dch --status <name>                        print session state:\n"
+	    "                                             working|idle|blocked|done\n"
+	    "                                             (reported, else detected\n"
+	    "                                             from screen, else output\n"
+	    "                                             heuristic)\n"
+	    "  dch --report <name> <state>                set state (optional hooks;\n"
 	    "                                             `clear` reverts to auto)\n"
 	    "  dch --ls-json    like -lj but JSON, adds \"state\"\n"
+	    "Env: DCH_NO_DETECT=1 disables screen-content state detection.\n"
 	    "Detach: Ctrl-\\  (or `dch -d` if the host swallows it).\n"
 	    "Nesting refused inside an existing dch session.\n");
 }
@@ -1619,6 +1641,275 @@ ctl_dead_exit(struct ctl_reader *r, const char *verb)
 	else
 		fprintf(stderr, "dch: truncated %s response\n", verb);
 	return 1;
+}
+
+/* ---- Built-in agent-state detection (--status/--wait/--ls-json) ----
+**
+** Classifies the session's visible screen against a small table of UI
+** strings the popular agent harnesses paint (permission prompts, "esc to
+** interrupt" footers, spinner glyphs). Runs client-side over the existing
+** MSG_READ protocol: zero master changes, so running sessions gain
+** detection on a plain binary update. Any failure — lite/no-mirror
+** master, busy, timeout, truncation, old master — silently falls back to
+** the activity heuristic. DCH_NO_DETECT=1 disables detection. */
+
+#define DET_CAP           (128 * 1024) /* tail-kept screen buffer */
+#define DET_LINES         20           /* bottom non-empty lines scanned */
+#define DET_DEADLINE_MS   500          /* wall-clock cap per fetch */
+#define DET_WORK_ACT_SECS 30           /* "working" needs output this new */
+
+/* Fetch the plain visible screen into buf (cap bytes + NUL). Keeps the
+** TAIL when the stream exceeds cap — detection reads bottom lines (the
+** master itself tail-caps at 2MB). The deadline is wall-clock:
+** ctl_next_frame's timeout is inactivity-based, and a master trickling
+** bytes must not stall --ls-json. Returns content length, -1 on any
+** failure. */
+static int
+fetch_screen(const char *name, char *buf, size_t cap, int deadline_ms)
+{
+	unsigned char req[4], payload[PKT_MAX], type;
+	struct ctl_reader r = {0};
+	struct timeval t0, now;
+	unsigned int len;
+	size_t used = 0;
+	int s, rc;
+
+	s = control_connect(name, 1);
+	if (s < 0)
+		return -1;
+	req[0] = DCH_READ_PLAIN;
+	req[1] = DCH_READ_VISIBLE;
+	req[2] = req[3] = 0;
+	send_ctl(s, MSG_READ, req, sizeof(req));
+	gettimeofday(&t0, NULL);
+	for (;;)
+	{
+		int left;
+
+		gettimeofday(&now, NULL);
+		left = deadline_ms -
+		       (int)((now.tv_sec - t0.tv_sec) * 1000 +
+		             (now.tv_usec - t0.tv_usec) / 1000);
+		if (left <= 0)
+			break;
+		rc = ctl_next_frame(s, &r, left, &type, payload, &len);
+		if (rc <= 0)
+			break;
+		if (type == MSG_READ_DATA)
+		{
+			if (len >= cap)
+			{
+				memcpy(buf, payload + len - cap, cap);
+				used = cap;
+			}
+			else
+			{
+				if (used + len > cap)
+				{
+					size_t drop = used + len - cap;
+					memmove(buf, buf + drop, used - drop);
+					used -= drop;
+				}
+				memcpy(buf + used, payload, len);
+				used += len;
+			}
+		}
+		else if (type == MSG_READ_END)
+		{
+			close(s);
+			if (len != DCH_ST_OK && len != DCH_ST_TRUNC)
+				return -1;
+			buf[used] = '\0';
+			return (int)used;
+		}
+		else
+			break; /* protocol violation */
+	}
+	close(s);
+	return -1;
+}
+
+/* One rule: ANDed lowercase substrings (s2 optional). OR variants are
+** separate rows. Strings are facts about the harnesses' own UIs (herdr
+** is prior art for the approach; nothing is ported from it — AGPL). */
+struct det_rule
+{
+	const char *s1, *s2;
+};
+
+/* Screen shows history, not live state — abort detection entirely. */
+static const struct det_rule det_suppress[] = {
+	{ "showing detailed transcript", 0 },              /* claude ctrl-o */
+	{ "pgup/pgdn to", "q to quit" },                   /* codex pager   */
+};
+/* Waiting on a human. Checked before working: a stale spinner must not
+** mask a live permission prompt. */
+static const struct det_rule det_blocked[] = {
+	{ "do you want to proceed?", 0 },                  /* claude,gemini */
+	{ "enter to select", "esc to cancel" },            /* claude forms  */
+	{ "press enter to confirm or esc to cancel", 0 },  /* codex         */
+	{ "enter to submit answer", 0 },                   /* codex forms   */
+	{ "allow command?", 0 },                           /* codex exec    */
+	{ "permission required", 0 },                      /* opencode      */
+	{ "waiting for approval", 0 },                     /* cursor        */
+	{ "waiting for user confirmation", 0 },            /* gemini        */
+	{ "allow execution", 0 },                          /* gemini        */
+	{ "run this command?", 0 },                        /* cursor        */
+	{ "proceed (y)", 0 },                              /* cursor        */
+};
+/* Busy right now (footer hints; spinner handled separately). */
+static const struct det_rule det_working[] = {
+	{ "esc to interrupt", 0 },                 /* claude,codex,opencode */
+	{ "ctrl+c to interrupt", 0 },                      /* opencode      */
+};
+
+static int
+det_match(const struct det_rule *t, size_t n, const char *hay)
+{
+	size_t i;
+	for (i = 0; i < n; i++)
+		if (strstr(hay, t[i].s1) &&
+		    (!t[i].s2 || strstr(hay, t[i].s2)))
+			return 1;
+	return 0;
+}
+
+/* TUI spinner glyphs (the 10-frame braille set harnesses animate; the
+** whole U+2800 block would false-positive on progress bars/sparklines).
+** Counts only at the start of a line — after whitespace/box-drawing —
+** and followed by space or line end. Scans raw bytes; the ASCII fold
+** never touches multibyte sequences. */
+static int
+det_spinner(const char *scr)
+{
+	/* U+280B U+2819 U+2839 U+2838 U+283C U+2834 U+2826 U+2827 U+2807
+	** U+280F -> UTF-8 E2 A0 <third byte>: */
+	static const unsigned char third[] = {
+		0x8B, 0x99, 0xB9, 0xB8, 0xBC, 0xB4, 0xA6, 0xA7, 0x87, 0x8F
+	};
+	const unsigned char *p = (const unsigned char *)scr;
+	int at_start = 1;
+
+	while (*p)
+	{
+		if (*p == '\n')
+		{
+			at_start = 1;
+			p++;
+			continue;
+		}
+		if (at_start)
+		{
+			if (*p == ' ' || *p == '\t')
+			{
+				p++;
+				continue;
+			}
+			/* skip box-drawing U+2500-U+257F (e.g. table edges) */
+			if (p[0] == 0xE2 && (p[1] == 0x94 || p[1] == 0x95) &&
+			    p[2])
+			{
+				p += 3;
+				continue;
+			}
+			if (p[0] == 0xE2 && p[1] == 0xA0 && p[2])
+			{
+				size_t k;
+				for (k = 0; k < sizeof(third); k++)
+					if (p[2] == third[k] &&
+					    (p[3] == ' ' || p[3] == '\n' ||
+					     p[3] == '\0'))
+						return 1;
+			}
+			at_start = 0;
+		}
+		p++;
+	}
+	return 0;
+}
+
+/* Classify the visible screen: "blocked", "working", or NULL (no signal
+** or no screen — caller falls back). Detected "working" additionally
+** requires recent pty output: the covered harnesses animate their
+** spinner/status line while working (continuous repaint = fresh .act),
+** so a frozen frame with a stale footer must read idle, not working. */
+static const char *
+detect_state(const char *name)
+{
+	char *raw, *fold, *end, *p;
+	const char *res = NULL;
+	size_t rl, k;
+	int n, lines;
+
+	if (getenv("DCH_NO_DETECT"))
+		return NULL;
+	raw = malloc(DET_CAP + 1);
+	if (!raw)
+		return NULL;
+	n = fetch_screen(name, raw, DET_CAP, DET_DEADLINE_MS);
+	if (n <= 0)
+	{
+		free(raw);
+		return NULL;
+	}
+	/* isolate the last DET_LINES non-empty lines */
+	end = raw + n;
+	p = end;
+	lines = 0;
+	while (p > raw && lines < DET_LINES)
+	{
+		char *ls = p, *q;
+		int nonblank = 0;
+
+		while (ls > raw && ls[-1] != '\n')
+			ls--;
+		for (q = ls; q < p; q++)
+			if (*q != ' ' && *q != '\t' && *q != '\n')
+			{
+				nonblank = 1;
+				break;
+			}
+		if (nonblank)
+			lines++;
+		p = ls > raw ? ls - 1 : raw;
+	}
+	rl = (size_t)(end - p);
+	fold = malloc(rl + 1);
+	if (!fold)
+	{
+		free(raw);
+		return NULL;
+	}
+	for (k = 0; k < rl; k++)
+	{
+		char c = p[k];
+		if (c == '\0')
+			c = ' ';
+		/* explicit ASCII fold: tolower() is locale-dependent and UB
+		** on negative char; this leaves UTF-8 bytes untouched */
+		fold[k] = (c >= 'A' && c <= 'Z') ? c + 32 : c;
+	}
+	fold[rl] = '\0';
+
+	if (det_match(det_suppress,
+	              sizeof(det_suppress) / sizeof(det_suppress[0]), fold))
+		res = NULL;
+	else if (det_match(det_blocked,
+	                   sizeof(det_blocked) / sizeof(det_blocked[0]),
+	                   fold))
+		res = "blocked";
+	else if (det_match(det_working,
+	                   sizeof(det_working) / sizeof(det_working[0]),
+	                   fold) ||
+	         det_spinner(p))
+	{
+		long ep = activity_epoch(name);
+		if (ep && time(NULL) - ep <= DET_WORK_ACT_SECS)
+			res = "working";
+	}
+	free(fold);
+	free(raw);
+	return res;
 }
 
 static int
@@ -2498,14 +2789,19 @@ main(int argc, char **argv)
 			** instead of burning the timeout. */
 			char sp[1100];
 			struct stat st;
-			int waited = 0, ntok = 0, t;
+			struct timeval w0, wn;
+			int ntok = 0, t;
 			char *want[8], *tok, *rest;
 			for (tok = strtok_r(opt_state, ",", &rest);
 			     tok && ntok < 8;
 			     tok = strtok_r(NULL, ",", &rest))
 			{
-				if (!valid_state_token(tok) &&
-				    strcmp(tok, "active") != 0)
+				/* "active" is the v1.3 name for the busy
+				** state; map it in the compare, not just the
+				** validator, or waiters on it never fire. */
+				if (strcmp(tok, "active") == 0)
+					tok = (char *)"working";
+				else if (!valid_state_token(tok))
 				{
 					fprintf(stderr, "dch: --state wants "
 					        "active|working|idle|blocked|"
@@ -2520,6 +2816,7 @@ main(int argc, char **argv)
 				        "dch: --state needs a state name\n");
 				return 1;
 			}
+			gettimeofday(&w0, NULL);
 			for (;;)
 			{
 				session_sock_path(session_name, sp,
@@ -2538,10 +2835,15 @@ main(int argc, char **argv)
 						puts(cur);
 						return 0;
 					}
-				if (waited >= opt_timeout)
+				/* wall-clock, not loop-count: detection
+				** adds up to DET_DEADLINE_MS per poll and a
+				** fixed increment would blow the budget */
+				gettimeofday(&wn, NULL);
+				if ((wn.tv_sec - w0.tv_sec) * 1000 +
+				    (wn.tv_usec - w0.tv_usec) / 1000 >=
+				    opt_timeout)
 					return 2;
 				poll(NULL, 0, 100);
-				waited += 100;
 			}
 		}
 		if (opt_match[0] == '\0')
