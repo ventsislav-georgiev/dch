@@ -2242,8 +2242,9 @@ do_spawn_verb(char *exe, const char *name, int cols, int rows,
 		default_argv[0] = (char *)(sh && *sh ? sh : "/bin/sh");
 		inner_argv = default_argv;
 	}
-	/* Caller env first; DCH_SESSION/TERM are set after, so reserved keys
-	** always win — --env DCH_SESSION=x cannot spoof session identity. */
+	/* Caller env first; DCH_SESSION is force-set after, so --env cannot
+	** spoof session identity. (TERM below is only defaulted when absent
+	** or dumb — a caller-supplied TERM legitimately wins.) */
 	for (rc = 0; rc < spawn_env_n; rc++)
 		putenv(spawn_env[rc]);
 	setenv("DCH_SESSION", name, 1);

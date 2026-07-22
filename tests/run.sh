@@ -309,7 +309,9 @@ assert any(s["state"] == "blocked" for s in d), d
         "$DCH" --spawn "$DN" --size 80x24 sh >/dev/null 2>&1
         "$DCH" --run "$DN" "stty -echo" >/dev/null 2>&1
         paint() { # paint $2 (printf %b, so \n splits lines) + sentinel $1
-            "$DCH" --run "$DN" "clear; printf '%b\n' \"$2\" 'sent_$1'" >/dev/null 2>&1
+            # \033c (RIS) resets the screen without the external `clear`
+            # binary, which stripped containers may lack.
+            "$DCH" --run "$DN" "printf '\033c'; printf '%b\n' \"$2\" 'sent_$1'" >/dev/null 2>&1
             "$DCH" --wait "$DN" --match "sent_$1" --timeout 5000 >/dev/null 2>&1
             # The master throttles .act touches to 1/s; consecutive paints
             # inside one second would keep a backdated stamp. Re-stamp so

@@ -57,6 +57,12 @@ jobs:
           /tmp/dch-lite --read mixed | grep mixed_marker
           /tmp/dch-lite --keys mixed ctrl+c
           /tmp/dch-lite --ls-json | grep '"name":"mixed"'
+          # State detection is client-side over the read protocol: a lite
+          # client must detect against a full master's mirror (closest CI
+          # proxy for "old master, new client" after an update).
+          /tmp/dch-lite --run mixed "printf 'esc to interrupt\n'"
+          /tmp/dch-lite --wait mixed --match "esc to interrupt" --timeout 10000
+          test "$(/tmp/dch-lite --status mixed)" = working
           ./dch -k mixed
 
   # The committed libghostty-vt blobs must be honestly derived from the
