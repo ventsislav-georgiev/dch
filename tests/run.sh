@@ -395,6 +395,30 @@ assert s["state"] == "blocked", s
 ' "$DN" && ok "--ls-json carries detected state" \
        || bad "--ls-json carries detected state"
 
+        # Hot-path budget: every --status runs detection (a control connect
+        # + full screen fetch), and --ls-json runs it per session. 20 calls
+        # each must finish inside 2 s wall (100 ms per call — generous CI
+        # headroom over the ~4 ms local reality; catches accidental sleeps
+        # or deadline-driven reads sneaking into the resolve path).
+        t0=$(python3 -c 'import time; print(time.time())')
+        n=0
+        while [ "$n" -lt 20 ]; do
+            "$DCH" --status "$DN" >/dev/null 2>&1
+            n=$((n + 1))
+        done
+        python3 -c "import time,sys; sys.exit(0 if time.time()-$t0 < 2.0 else 1)" \
+            && ok "--status latency budget (20 calls < 2s)" \
+            || bad "--status latency budget (20 calls < 2s)"
+        t0=$(python3 -c 'import time; print(time.time())')
+        n=0
+        while [ "$n" -lt 20 ]; do
+            "$DCH" --ls-json >/dev/null 2>&1
+            n=$((n + 1))
+        done
+        python3 -c "import time,sys; sys.exit(0 if time.time()-$t0 < 2.0 else 1)" \
+            && ok "--ls-json latency budget (20 calls < 2s)" \
+            || bad "--ls-json latency budget (20 calls < 2s)"
+
         "$DCH" -k "$DN" >/dev/null 2>&1
     fi
 
