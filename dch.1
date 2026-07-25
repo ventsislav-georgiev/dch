@@ -23,6 +23,7 @@ dch \- detachable terminal sessions with a headless agent API
 .B dch \-\-read
 .I name
 .RB [ \-\-ansi ]
+.RB [ \-\-cursor ]
 .RB [ \-\-recent
 .RI [ N ]]
 .br
@@ -124,15 +125,53 @@ single characters, with
 prefixes (e.g.
 .BR ctrl+c ", " shift+tab ).
 .TP
-.BI \-\-read " name" " " [ \-\-ansi ] " " [ \-\-recent " [\fIN\fP]]"
+.BI \-\-read " name" " " [ \-\-ansi ] " " [ \-\-cursor ] " " [ \-\-recent " [\fIN\fP]]"
 Print the session's rendered screen to stdout.
 .B \-\-ansi
 keeps colors/attributes.
 .B \-\-recent
 prints the last
 .I N
-lines including scrollback (default 100). Exit 0 on success, 3 if the
-session has no mirror.
+lines including scrollback (default 100).
+.B \-\-cursor
+additionally prints
+.RI \(lqcursor " row col visible wrap" \(rq
+to
+.IR stderr ,
+taken from the same snapshot as the screen on stdout, so a caller painting
+that screen knows where the caret is instead of inferring it.
+.I row
+and
+.I col
+are 1\-based like
+.BR CUP ,
+with the row counted from the top of the visible screen;
+.I visible
+is DEC mode 25 (0 = hidden);
+.I wrap
+is 1 when
+.I col
+is the last column and the
+.I next
+printed character soft\-wraps to the next row \(em the caret is still on
+.IR col ,
+not past it.
+.I row
+counts screen rows while the screen dump has its trailing blank lines
+trimmed, so a caret parked below the last line of content reports a
+.I row
+past the end of the dump; leading and interior blank rows are kept, so row
+.I N
+is line
+.I N
+of the dump whenever the dump reaches that far. Not valid with
+.BR \-\-recent
+(the caret belongs to the visible screen, not the scrollback tail). Exit 0 on
+success, 3 if the session has no mirror, 1 if
+.B \-\-cursor
+was asked of a session master that predates it (restart the session) or of a
+screen so large the response was truncated (the caret would land on the wrong
+row of the kept tail, so it is withheld).
 .TP
 .BI \-\-wait " name " \-\-match " str" " " [ \-\-timeout " ms" ]
 Block until the rendered screen or recent scrollback contains the literal

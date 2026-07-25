@@ -150,6 +150,66 @@ if [ -x "$DCH" ]; then
             && ok "--read --recent shows history" \
             || bad "--read --recent shows history"
 
+        # The caret must be REPORTED, not inferred from the byte stream:
+        # typing 5 characters moves the column by exactly 5 and leaves the
+        # row alone. Fails loudly if the row/col offset convention drifts.
+        # Every failure mode (no mirror, old master, BUSY) puts PROSE on
+        # stderr, so pick the cursor line out and refuse to do arithmetic on
+        # anything else — `$(( ))` on a word aborts the whole suite.
+        curline() {
+            "$DCH" --read "$1" --cursor 2>&1 >/dev/null \
+                | grep '^cursor ' | head -1
+        }
+        cur0=$(curline "$SN")
+        "$DCH" --send "$SN" "abcde" >/dev/null 2>&1
+        "$DCH" --wait "$SN" --match abcde --timeout 5000 >/dev/null 2>&1
+        cur1=$(curline "$SN")
+        r0=$(echo "$cur0" | cut -d' ' -f2); c0=$(echo "$cur0" | cut -d' ' -f3)
+        r1=$(echo "$cur1" | cut -d' ' -f2); c1=$(echo "$cur1" | cut -d' ' -f3)
+        case "$r0$c0$r1$c1" in
+        '' | *[!0-9]*)
+            bad "--read --cursor tracks typed columns ([$cur0] -> [$cur1])" ;;
+        *)
+            [ "$r0" = "$r1" ] && [ "$((c1 - c0))" -eq 5 ] \
+                && ok "--read --cursor tracks typed columns" \
+                || bad "--read --cursor tracks typed columns ([$cur0] -> [$cur1])" ;;
+        esac
+        # --cursor must not silently pollute the screen dump.
+        "$DCH" --read "$SN" --cursor 2>/dev/null | grep -q '^cursor ' \
+            && bad "--read --cursor keeps stdout clean" \
+            || ok "--read --cursor keeps stdout clean"
+        # Caret is a visible-screen property; refuse the scrollback tail.
+        "$DCH" --read "$SN" --cursor --recent 5 >/dev/null 2>&1
+        check "--read --cursor rejects --recent" "$?" "1"
+        # Drop the half-typed line so later markers start from a clean prompt.
+        "$DCH" --keys "$SN" ctrl+c >/dev/null 2>&1
+
+        # Absolute-addressed caret: CUP to row 5 col 3, print 4 chars, so the
+        # answer is pinned to "5 7" with no prompt-width guessing. Also pins
+        # row N of the report to line N of the screen dump.
+        CN="cur$$"
+        "$DCH" --spawn "$CN" --size 40x10 \
+            sh -c 'printf "\033[2J\033[5;3Hmark"; sleep 60' >/dev/null 2>&1
+        "$DCH" --wait "$CN" --match mark --timeout 5000 >/dev/null 2>&1
+        check "--read --cursor reports absolute position" \
+              "$(curline "$CN")" "cursor 5 7 1 0"
+        "$DCH" --read "$CN" 2>/dev/null | sed -n '5p' | grep -q '^  mark' \
+            && ok "--read --cursor row N is dump line N" \
+            || bad "--read --cursor row N is dump line N"
+        "$DCH" -k "$CN" >/dev/null 2>&1
+
+        # Pending soft-wrap: exactly $cols characters leaves the caret ON the
+        # last column with wrap=1, NOT on column cols+1 or the next row.
+        WN="wrap$$"
+        "$DCH" --spawn "$WN" --size 20x8 \
+            sh -c 'printf "\033[2J\033[1;1Hwwwwwwwwwwwwwwwwwwww"; sleep 60' \
+            >/dev/null 2>&1
+        "$DCH" --wait "$WN" --match wwwwwwwwwwwwwwwwwwww --timeout 5000 \
+            >/dev/null 2>&1
+        check "--read --cursor reports pending soft-wrap" \
+              "$(curline "$WN")" "cursor 1 20 1 1"
+        "$DCH" -k "$WN" >/dev/null 2>&1
+
         "$DCH" --wait "$SN" --match never_printed_zz --timeout 200 >/dev/null 2>&1
         check "--wait timeout exits 2" "$?" "2"
 

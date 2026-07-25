@@ -50,6 +50,16 @@ dch_vt_snapshot(int format, int lines, char **out, size_t *outlen)
 }
 
 int
+dch_vt_cursor(int *row, int *col, int *visible, int *wrap)
+{
+	(void)row;
+	(void)col;
+	(void)visible;
+	(void)wrap;
+	return -1;
+}
+
+int
 dch_vt_encode_keys(const char *spec, char **out, size_t *outlen)
 {
 	(void)spec;

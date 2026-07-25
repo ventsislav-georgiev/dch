@@ -19,7 +19,7 @@
 #include <sys/un.h>
 
 /* dch's own version, independent of the dtach base (PACKAGE_VERSION). */
-#define DCH_VERSION "1.4.0"
+#define DCH_VERSION "1.5.0"
 
 /* Shared globals (declared in dtach.h, used by attach.c/master.c). */
 const char copyright[] = "dch - based on dtach " PACKAGE_VERSION
@@ -1273,6 +1273,10 @@ usage(void)
 	    "  dch --run <name> <text...>                 type text, press enter\n"
 	    "  dch --keys <name> <key...>                 send keys (ctrl+c, up, f2, ...)\n"
 	    "  dch --read <name> [--ansi] [--recent [N]]  print session screen\n"
+	    "  dch --read <name> --cursor                 screen on stdout, plus\n"
+	    "                                             `cursor <row> <col>\n"
+	    "                                             <visible> <wrap>` (1-based)\n"
+	    "                                             on stderr\n"
 	    "  dch --wait <name> --match <str> [--timeout ms]  wait for output\n"
 	    "  dch --wait <name> --state <s> [--timeout ms]    wait for state\n"
 	    "  dch --status <name>                        print session state:\n"
@@ -1574,7 +1578,8 @@ ctl_next_frame(int s, struct ctl_reader *r, int idle_ms,
 			                    ((unsigned int)r->buf[2] << 8);
 			unsigned int plen =
 			    (r->buf[0] == MSG_READ_DATA ||
-			     r->buf[0] == MSG_WAIT_HIT) ? flen : 0;
+			     r->buf[0] == MSG_WAIT_HIT ||
+			     r->buf[0] == MSG_READ_CURSOR) ? flen : 0;
 
 			if (plen > PKT_MAX)
 				return -1; /* corrupt */
@@ -1914,12 +1919,12 @@ detect_state(const char *name)
 }
 
 static int
-do_read_verb(const char *name, int ansi, int recent_lines)
+do_read_verb(const char *name, int ansi, int recent_lines, int want_cursor)
 {
-	unsigned char req[4], payload[PKT_MAX], type;
+	unsigned char req[5], payload[PKT_MAX], type;
 	struct ctl_reader r = {0};
 	unsigned int len;
-	int s, rc;
+	int s, rc, got_cursor = 0;
 
 	s = control_connect(name, 0);
 	if (s < 0)
@@ -1929,7 +1934,10 @@ do_read_verb(const char *name, int ansi, int recent_lines)
 	req[1] = recent_lines >= 0 ? DCH_READ_RECENT : DCH_READ_VISIBLE;
 	req[2] = recent_lines >= 0 ? (recent_lines & 0xff) : 0;
 	req[3] = recent_lines >= 0 ? ((recent_lines >> 8) & 0xff) : 0;
-	send_ctl(s, MSG_READ, req, sizeof(req));
+	req[4] = want_cursor ? DCH_READ_F_CURSOR : 0;
+	/* Stay on the 4-byte request unless a flag is actually set: a master
+	** built before flags existed then sees the exact bytes it always did. */
+	send_ctl(s, MSG_READ, req, want_cursor ? sizeof(req) : 4);
 
 	for (;;)
 	{
@@ -1941,13 +1949,42 @@ do_read_verb(const char *name, int ansi, int recent_lines)
 		}
 		if (type == MSG_READ_DATA)
 			fwrite(payload, 1, len, stdout);
+		else if (type == MSG_READ_CURSOR && len == DCH_READ_CURSOR_LEN)
+		{
+			/* stderr keeps the stdout screen dump byte-exact; 1-based
+			** to match CUP (\e[row;colH) so callers can paste it in. */
+			unsigned int row = (unsigned int)payload[0] |
+			                   ((unsigned int)payload[1] << 8);
+			unsigned int col = (unsigned int)payload[2] |
+			                   ((unsigned int)payload[3] << 8);
+
+			fprintf(stderr, "cursor %u %u %u %u\n", row + 1,
+			        col + 1, payload[4], payload[5]);
+			got_cursor = 1;
+		}
 		else if (type == MSG_READ_END)
 		{
 			close(s);
 			/* end the screen dump on a newline for shells/agents */
 			if (r.got_any)
 				fputc('\n', stdout);
-			return ctl_status_exit(len);
+			rc = ctl_status_exit(len);
+			/* No cursor frame despite asking: either the screen was
+			** tail-cut (the row would point at the wrong line, so
+			** the master withholds it) or the master predates the
+			** flag and ignored it. Never let a caller that asked for
+			** the caret mistake either case for "row 1, column 1". */
+			if (rc == 0 && want_cursor && !got_cursor)
+			{
+				fputs(len == DCH_ST_TRUNC
+				    ? "dch: screen too big to place the cursor "
+				      "in the kept tail; caret not reported\n"
+				    : "dch: session master predates --cursor; "
+				      "restart the session to enable it\n",
+				    stderr);
+				return 1;
+			}
+			return rc;
 		}
 		else
 		{
@@ -2310,7 +2347,7 @@ main(int argc, char **argv)
 	       A_REPORT }
 	    action = A_ATTACH;
 	char alias_arg[600] = "";
-	int opt_ansi = 0, opt_recent = -1, opt_timeout = 10000;
+	int opt_ansi = 0, opt_recent = -1, opt_timeout = 10000, opt_cursor = 0;
 	int opt_cols = 0, opt_rows = 0;
 	char opt_match[DCH_WAIT_MAX + 1] = "";
 	char opt_state[40] = "";
@@ -2499,6 +2536,11 @@ main(int argc, char **argv)
 		else if (strcmp(a, "--ansi") == 0)
 		{
 			opt_ansi = 1;
+			i++;
+		}
+		else if (strcmp(a, "--cursor") == 0)
+		{
+			opt_cursor = 1;
 			i++;
 		}
 		else if (strcmp(a, "--recent") == 0)
@@ -2746,7 +2788,14 @@ main(int argc, char **argv)
 		return 0;
 	}
 	case A_READ:
-		return do_read_verb(session_name, opt_ansi, opt_recent);
+		if (opt_cursor && opt_recent >= 0)
+		{
+			fprintf(stderr, "dch: --cursor needs the visible screen; "
+			        "not valid with --recent\n");
+			return 1;
+		}
+		return do_read_verb(session_name, opt_ansi, opt_recent,
+		                    opt_cursor);
 	case A_STATUS:
 	{
 		char sp[1100];

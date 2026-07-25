@@ -83,6 +83,7 @@ dch --keys infra :                    # k9s command mode
 dch --run infra deployments           # type the view name, press enter
 dch --read infra                      # print the rendered screen, no attach
 dch --read infra --ansi > snap.txt    # same, with colors
+dch --read infra --cursor             # + "cursor <row> <col> ..." on stderr
 ```
 
 ## Install with Homebrew
@@ -149,6 +150,7 @@ dch --send <name> <text...>                     # type text into the session
 dch --run <name> <text...>                      # type text, press enter
 dch --keys <name> <key...>                      # send keys: ctrl+c up f2 ...
 dch --read <name> [--ansi] [--recent [N]]       # print the rendered screen
+dch --read <name> --cursor                      # ... + caret row/col on stderr
 dch --wait <name> --match <str> [--timeout ms]  # block until output matches
 dch --wait <name> --state <s[,s]> [--timeout ms]  # block until state matches
 dch --status <name>                             # print session state
@@ -180,7 +182,7 @@ someone is watching is invisible to them.
 | `--send <n> <text...>` | Type text (joined with spaces), no enter. | 0 ok |
 | `--run <n> <text...>` | `--send` + enter. | 0 ok |
 | `--keys <n> <key...>` | Encode+send keys mode-aware: `ctrl+c`, `alt+x`, `shift+tab`, `up`, `f5`, `enter`, `esc`, single chars. | 0 ok, 1 unknown key |
-| `--read <n> [--ansi] [--recent [N]]` | Print rendered screen. `--ansi` keeps colors; `--recent [N]` = last N lines incl. scrollback (default 100). | 0 ok, 1 error, 3 no mirror |
+| `--read <n> [--ansi] [--cursor] [--recent [N]]` | Print rendered screen. `--ansi` keeps colors; `--recent [N]` = last N lines incl. scrollback (default 100); `--cursor` also prints `cursor <row> <col> <visible> <wrap>` on **stderr** (see below). | 0 ok, 1 error, 3 no mirror |
 | `--wait <n> --match <str> [--timeout ms]` | Block until screen/scrollback contains `<str>` (literal substring, ≤512 bytes); prints the matching line. Default timeout 10 s. | 0 hit, 2 timeout, 3 no mirror |
 | `--status <n>` | Print the session state: `working`, `idle`, `blocked`, or `done` — resolved from the reported state, the screen-content detection, and the output heuristic (see [Agent state detection](#agent-state-detection)). | 0 ok, 1 no session |
 | `--report <n> <state>` | Push a semantic state: `working`, `idle`, `blocked`, or `done` (closed set, unknown tokens rejected); `clear` reverts to auto (detection + heuristic). Last write wins; cleared automatically when the session ends. | 0 ok, 1 no session / bad state |
@@ -196,6 +198,47 @@ if dch --wait build --match "error:" --timeout 300000; then
     dch --read build --recent 40      # grab context around the failure
 fi
 ```
+
+### Cursor position (`--read --cursor`)
+
+A tool that paints the screen dump somewhere else — its own mirror pane, a
+web view — also has to place the caret. Inferring it from the byte stream
+gets it wrong the moment the app moves the cursor with anything but plain
+printing. `--cursor` asks the mirror instead:
+
+One call, two streams — the screen on stdout, the caret on stderr:
+
+```sh
+cur=$(dch --read ui --cursor 2>&1 >screen.txt)   # "cursor 7 12 1 0"
+```
+
+Keep it to a single invocation: two reads would put the screen at one instant
+and the caret at another, which is the misplacement this flag exists to
+remove. (Capturing both in variables needs a third descriptor:
+`exec 3>&1; cur=$(dch --read ui --cursor 2>&1 1>&3); exec 3>&-`.)
+
+Fields are `row col visible wrap`: 1-based like `CUP` (`\e[row;colH`), `row`
+counted from the top of the visible screen, `visible` = DEC mode 25, and
+`wrap` = 1 when `col` is the last column and the *next* printed character
+soft-wraps to the next row — the caret still sits on `col`, not past it.
+
+It comes from the *same* snapshot as the screen on stdout — one round trip,
+nothing can move in between — and stdout stays byte-identical, so existing
+consumers are unaffected. Not valid with `--recent` (the caret belongs to the
+visible screen, not a scrollback tail). Exit 1, with the caret withheld, if
+the master predates the flag or the screen was big enough to truncate the
+response (over 2 MB: the kept tail no longer starts at screen row 1, so the
+row would be a lie).
+
+`row` counts *screen* rows and `--read` trims trailing blank lines, so a
+caret parked below the last line of content reports a `row` larger than the
+number of lines printed — pad the pane out to it instead of clamping to the
+line count. Leading and interior blank rows are preserved, so row `N` of the
+report is line `N` of the dump whenever the dump is that long.
+
+Still a snapshot, though: bytes the app emits *after* the read move the real
+caret, so a client that reads, paints, then types needs another read rather
+than trusting the old coordinate.
 
 ### Agent state detection
 

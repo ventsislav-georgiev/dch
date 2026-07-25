@@ -199,6 +199,31 @@ dch_vt_snapshot(int format, int lines, char **out, size_t *outlen)
 	return 0;
 }
 
+int
+dch_vt_cursor(int *row, int *col, int *visible, int *wrap)
+{
+	uint16_t x, y;
+	bool vis, pw;
+
+	if (!the_term)
+		return -1;
+	if (ghostty_terminal_get(the_term, GHOSTTY_TERMINAL_DATA_CURSOR_X,
+	    &x) != GHOSTTY_SUCCESS ||
+	    ghostty_terminal_get(the_term, GHOSTTY_TERMINAL_DATA_CURSOR_Y,
+	    &y) != GHOSTTY_SUCCESS ||
+	    ghostty_terminal_get(the_term, GHOSTTY_TERMINAL_DATA_CURSOR_VISIBLE,
+	    &vis) != GHOSTTY_SUCCESS ||
+	    ghostty_terminal_get(the_term,
+	    GHOSTTY_TERMINAL_DATA_CURSOR_PENDING_WRAP,
+	    &pw) != GHOSTTY_SUCCESS)
+		return -1;
+	*row = (int)y;
+	*col = (int)x;
+	*visible = vis ? 1 : 0;
+	*wrap = pw ? 1 : 0;
+	return 0;
+}
+
 /* --keys token table: name, physical key, utf8 byte (0 = none) */
 static const struct keyname {
 	const char *name;

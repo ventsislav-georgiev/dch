@@ -50,6 +50,16 @@ void dch_vt_resize(int cols, int rows);
 int dch_vt_snapshot(int format, int lines, char **out, size_t *outlen);
 
 /*
+ * Cursor position in the mirror, as of right now. row/col are 0-based
+ * and relative to the ACTIVE AREA (the visible screen a dch_vt_snapshot()
+ * with lines == 0 renders), visible is DEC mode 25, wrap is the pending
+ * soft-wrap flag: col is still the LAST column, and the next printed cell
+ * lands on the next row. Returns 0 on success, -1 on failure or when
+ * disabled; on failure the outputs are untouched.
+ */
+int dch_vt_cursor(int *row, int *col, int *visible, int *wrap);
+
+/*
  * Encode a key chord specification into the byte sequence the
  * foreground program expects (respects the mirror's current keyboard
  * modes: kitty, application cursor keys, ...).

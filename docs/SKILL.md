@@ -17,6 +17,7 @@ dch --send  <name> <text...>                    # type text, no enter
 dch --run   <name> <text...>                    # type text + enter
 dch --keys  <name> <key...>                     # ctrl+c, alt+x, shift+tab, up, f5, enter, esc...
 dch --read  <name> [--ansi] [--recent [N]]      # print rendered screen (stdout)
+dch --read  <name> --cursor                     # + "cursor row col visible wrap" (stderr)
 dch --wait  <name> --match <str> [--timeout ms] # block until screen shows <str>
 dch --ls-json                                   # sessions as JSON
 dch -k <name>                                   # kill session when done
@@ -54,4 +55,8 @@ dch -k infra
   application cursor keys) — prefer it over `--send` for control characters.
 - Long output: `--read --recent N` pulls the last N lines including
   scrollback (default mirror keeps 2000 lines).
+- Repainting the screen elsewhere: `--read --cursor` reports the caret as
+  `cursor <row> <col> <visible> <wrap>` on stderr (1-based, from the same
+  snapshot as stdout) instead of leaving you to guess it. Not valid with
+  `--recent`.
 - Sessions persist until killed — reuse them across steps, `dch -k` when done.

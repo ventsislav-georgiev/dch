@@ -110,13 +110,19 @@ enum
 	** latch in master.c) — responses are framed, attached output is raw,
 	** and one socket must never carry both. */
 	MSG_KEYS	= 5,	/* payload: NUL-separated key combos */
-	MSG_READ	= 6,	/* payload: {u8 format; u8 source; u16 lines LE} */
+	MSG_READ	= 6,	/* payload: {u8 format; u8 source; u16 lines LE;
+				** u8 flags (optional 5th byte)} */
 	MSG_WAIT	= 7,	/* payload: literal substring (<= 512 bytes) */
 	/* Responses (master->control-client), same [type][len:2 LE] framing. */
 	MSG_READ_DATA	= 8,	/* len bytes of screen snapshot */
 	MSG_READ_END	= 9,	/* len = status, no payload */
 	MSG_WAIT_HIT	= 10,	/* payload: the matching line */
 	MSG_ACK		= 11,	/* len = status; reply to MSG_KEYS */
+	MSG_READ_CURSOR	= 12,	/* payload: {u16 row LE; u16 col LE; u8 visible;
+				** u8 wrap} — 0-based, active-area relative.
+				** ONLY sent when the request set
+				** DCH_READ_F_CURSOR, so a client built before
+				** this frame existed never has to know it. */
 };
 
 /* MSG_READ_END / MSG_ACK statuses */
@@ -134,6 +140,10 @@ enum
 #define DCH_READ_ANSI    1
 #define DCH_READ_VISIBLE 0
 #define DCH_READ_RECENT  1
+/* flags byte (payload[4], absent in a 4-byte request = no flags) */
+#define DCH_READ_F_CURSOR 0x01	/* also send MSG_READ_CURSOR */
+#define DCH_READ_F_ALL    (DCH_READ_F_CURSOR)	/* every flag we understand */
+#define DCH_READ_CURSOR_LEN 6	/* MSG_READ_CURSOR payload size */
 
 #define DCH_WAIT_MAX 512	/* MSG_WAIT pattern cap */
 

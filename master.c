@@ -695,18 +695,21 @@ vt_missing_status(void)
 	return vt_latched_off ? DCH_ST_ERR : DCH_ST_NOVT;
 }
 
-/* Serve MSG_READ. payload: {u8 format; u8 source; u16 lines LE}.
+/* Serve MSG_READ. payload: {u8 format; u8 source; u16 lines LE} plus an
+** optional 5th flags byte (`flags`; 0 when the client sent only 4).
 ** Returns -1 if the client was dropped. */
 #define READ_RESP_CAP (2u * 1024u * 1024u)
 #define READ_HEADROOM (64u * 1024u)
 static int
-do_read(struct client *p, const unsigned char *payload)
+do_read(struct client *p, const unsigned char *payload, unsigned int flags)
 {
 	unsigned int format = payload[0];
 	unsigned int source = payload[1];
 	unsigned int lines = (unsigned int)payload[2] |
 	                     ((unsigned int)payload[3] << 8);
 	unsigned int status = DCH_ST_OK;
+	unsigned char cur[DCH_READ_CURSOR_LEN];
+	int crow, ccol, cvis, cwrap, send_cursor = 0;
 	char *snap, *body;
 	size_t snaplen, off;
 
@@ -723,7 +726,13 @@ do_read(struct client *p, const unsigned char *payload)
 		return -1;
 	}
 
-	if (format > DCH_READ_ANSI || source > DCH_READ_RECENT)
+	if (format > DCH_READ_ANSI || source > DCH_READ_RECENT ||
+	    (flags & ~(unsigned int)DCH_READ_F_ALL))
+		return queue_status(p, MSG_READ_END, DCH_ST_ERR);
+	/* Recent-N is a scrollback tail; the live cursor sits on the visible
+	** screen and means nothing against it. Refuse rather than answer with
+	** a coordinate the caller would misplace. */
+	if ((flags & DCH_READ_F_CURSOR) && source == DCH_READ_RECENT)
 		return queue_status(p, MSG_READ_END, DCH_ST_ERR);
 	if (source == DCH_READ_RECENT && lines == 0)
 		lines = 100;
@@ -747,12 +756,54 @@ do_read(struct client *p, const unsigned char *payload)
 		status = DCH_ST_TRUNC;
 	}
 
+	/* Cursor comes from the SAME servicing of this frame as the snapshot
+	** above — no pty read happens in between, so the caret the caller
+	** paints belongs to the screen it paints. Queried before anything is
+	** queued so a failure still answers with a clean status-only reply.
+	**
+	** NOT sent once the dump was tail-cut: the row is relative to the top
+	** of the active area, and the cut threw that top away (byte-wise, so
+	** even counting the dropped newlines wouldn't recover the alignment).
+	** The client turns the missing frame into an explicit error — better
+	** than a coordinate that points at the wrong row. */
+	if ((flags & DCH_READ_F_CURSOR) && status != DCH_ST_TRUNC)
+	{
+		if (dch_vt_cursor(&crow, &ccol, &cvis, &cwrap) < 0)
+		{
+			/* The snapshot above just worked, so the mirror is
+			** alive — answer this one request badly, don't latch
+			** the whole session off for every other reader. */
+			dch_vt_buf_free(snap);
+			return queue_status(p, MSG_READ_END, DCH_ST_ERR);
+		}
+		/* ponytail: u16 on the wire — the mirror grid is clamped to
+		** 1024x1024 in dch_vt_resize, and the source values are
+		** uint16_t, so neither coordinate can overflow the field. */
+		cur[0] = (unsigned char)(crow & 0xff);
+		cur[1] = (unsigned char)((crow >> 8) & 0xff);
+		cur[2] = (unsigned char)(ccol & 0xff);
+		cur[3] = (unsigned char)((ccol >> 8) & 0xff);
+		cur[4] = (unsigned char)(cvis ? 1 : 0);
+		cur[5] = (unsigned char)(cwrap ? 1 : 0);
+		send_cursor = 1;
+	}
+
 	/* Admission check: never let a response ride into the OUT_CAP
 	** overflow drop (that kills the client without an END frame). */
 	if (p->outlen - p->outoff + snaplen + READ_HEADROOM > OUT_CAP)
 	{
 		dch_vt_buf_free(snap);
 		return queue_status(p, MSG_READ_END, DCH_ST_BUSY);
+	}
+
+	/* Cursor first: the caller knows where the caret goes before it has
+	** finished reassembling the screen. */
+	if (send_cursor &&
+	    queue_frame(p, MSG_READ_CURSOR, DCH_READ_CURSOR_LEN, cur,
+	    sizeof(cur)) < 0)
+	{
+		dch_vt_buf_free(snap);
+		return -1;
 	}
 
 	for (off = 0; off < snaplen; off += PKT_MAX)
@@ -1053,14 +1104,15 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 		return do_keys(p, payload, len);
 	else if (type == MSG_READ)
 	{
-		/* Fixed 4-byte payload {format,source,lines LE}; shorter is
-		** a malformed client — same treatment as a bad WAIT. */
+		/* 4-byte payload {format,source,lines LE}; shorter is a
+		** malformed client — same treatment as a bad WAIT. A 5th byte
+		** carries request flags; older clients send none. */
 		if (len < 4)
 		{
 			remove_client(p);
 			return -1;
 		}
-		return do_read(p, payload);
+		return do_read(p, payload, len >= 5 ? payload[4] : 0u);
 	}
 	else if (type == MSG_WAIT)
 		return do_wait(p, payload, len);
