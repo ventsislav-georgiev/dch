@@ -2353,6 +2353,21 @@ main(int argc, char **argv)
 	char opt_state[40] = "";
 
 	progname = argv[0];
+
+	/* Start with nothing blocked. A signal mask survives fork AND exec, so a
+	** parent that blocks a signal hands us one we can never receive: the
+	** handler installs fine and simply never runs. Prosper spawns the attach
+	** client with forkpty()+execve() from a Swift runtime thread that has
+	** SIGWINCH blocked, which silently disabled every window-size change —
+	** rotating the phone into landscape left the session at the portrait
+	** width, and the resize was pending, undeliverable, forever. Runs before
+	** the --master-of dispatch so the session daemon is covered too. */
+	{
+		sigset_t none;
+		sigemptyset(&none);
+		sigprocmask(SIG_SETMASK, &none, NULL);
+	}
+
 	/* Resolve exe for the master re-exec. Only realpath() when argv[0] is a
 	** path (has a '/'): a bare name like "dch" came from a PATH lookup by the
 	** shell, and realpath()ing it resolves RELATIVE TO CWD — which silently

@@ -113,6 +113,11 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "attach repaints via WINCH, types no ^L" attach_test.py
 fi
 
+# --- resize reaches an idle session, even with SIGWINCH blocked at spawn ----
+if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
+    pyrun "idle resize reaches the session" resize_idle_test.py
+fi
+
 # --- control verbs: --spawn --run --read --wait --keys ---------------------
 # Headless by design, so plain shell drives them. `sh` as the inner command
 # keeps prompts boring; markers make matching deterministic.
