@@ -341,7 +341,7 @@ attach_main(int noerror)
 
 	/* Enter alt-screen + home cursor. On detach, restore_term pops back
 	** to primary screen so the user's pre-attach scrollback is intact. */
-	write_buf_or_fail(1, "\033[?1049h\033[H\033[J", 11);
+	write_buf_or_fail(1, "\033[?1049h\033[H", 11);
 
 	/* Tell the master that we want to attach. */
 	memset(&pkt, 0, sizeof(struct packet));
