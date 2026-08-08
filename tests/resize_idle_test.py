@@ -14,7 +14,7 @@ below is that regression.
 Run:  python3 tests/resize_idle_test.py          (uses ./dch)
       DCH=/path/to/dch python3 tests/resize_idle_test.py
 """
-import os, sys, re, fcntl, termios, struct, subprocess, threading, time, signal
+import os, sys, fcntl, termios, struct, subprocess, threading, time, signal
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.environ.get("DCH", os.path.join(HERE, "..", "dch"))
@@ -46,10 +46,19 @@ def session_tty(sess):
 
 
 def session_size(tty):
-    out = subprocess.run(["stty", "-a", "-f", tty], capture_output=True, text=True).stdout
-    rows = re.search(r"(\d+) rows", out)
-    cols = re.search(r"(\d+) columns", out)
-    return (int(cols.group(1)) if cols else 0, int(rows.group(1)) if rows else 0)
+    # ponytail: ioctl, not `stty -a` — its file flag is -f on BSD, -F on Linux.
+    try:
+        fd = os.open(tty, os.O_RDONLY | os.O_NOCTTY | os.O_NONBLOCK)
+    except OSError:
+        return (0, 0)
+    try:
+        rows, cols, _, _ = struct.unpack(
+            "HHHH", fcntl.ioctl(fd, termios.TIOCGWINSZ, b"\0" * 8))
+        return (cols, rows)
+    except OSError:
+        return (0, 0)
+    finally:
+        os.close(fd)
 
 
 def check(block_winch):
