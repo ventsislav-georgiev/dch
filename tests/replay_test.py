@@ -93,6 +93,11 @@ def dump_trace():
             sys.stdout.write(f.read())
     except OSError as e:
         print("no trace:", e)
+    # Whether the inner shell ever reached exec is the whole question, and
+    # only the process table answers it.
+    print("--- processes ---")
+    os.system("ps -A -o pid,ppid,stat,command | grep -E 'dch|REPLAY-MARK'"
+              " | grep -v grep")
 
 def main():
     if not os.access(DCH, os.X_OK):
