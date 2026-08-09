@@ -7,7 +7,8 @@ keeps running.
 
 The name is short for **ditch** — ditch your terminal, keep the session.
 
-![dch --help](docs/dch-help.png)
+<img width="641" height="914" alt="image" src="https://github.com/user-attachments/assets/dbd94f7a-ecc6-42c3-a8dd-f348fffd8ebc" />
+
 
 [dtach]: https://github.com/crigler/dtach
 
