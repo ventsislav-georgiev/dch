@@ -19,7 +19,7 @@
 #include <sys/un.h>
 
 /* dch's own version, independent of the dtach base (PACKAGE_VERSION). */
-#define DCH_VERSION "1.5.0"
+#define DCH_VERSION "1.6.0"
 
 /* Shared globals (declared in dtach.h, used by attach.c/master.c). */
 const char copyright[] = "dch - based on dtach " PACKAGE_VERSION
