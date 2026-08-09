@@ -297,15 +297,8 @@ init_pty(char **argv, int statusfd)
 		the_pty.pid = forkpty(&the_pty.fd, NULL, NULL, &the_pty.ws);
 	if (the_pty.pid < 0)
 		return -1;
-	dch_trace("init_pty pid=%d fd=%d notty=%d ispeed=%lu ospeed=%lu "
-		"iflag=%lx oflag=%lx cflag=%lx lflag=%lx",
-		(int)the_pty.pid, the_pty.fd, dont_have_tty,
-		(unsigned long)cfgetispeed(&the_pty.term),
-		(unsigned long)cfgetospeed(&the_pty.term),
-		(unsigned long)the_pty.term.c_iflag,
-		(unsigned long)the_pty.term.c_oflag,
-		(unsigned long)the_pty.term.c_cflag,
-		(unsigned long)the_pty.term.c_lflag);
+	dch_trace("init_pty child=%d fd=%d notty=%d", (int)the_pty.pid,
+		the_pty.fd, dont_have_tty);
 	if (the_pty.pid == 0)
 	{
 		/* Child.. Execute the program. */
@@ -1749,6 +1742,18 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 	else if (type == MSG_ATTACH)
 	{
 		int k, bad;
+
+		/* Someone showed up: open the --spawn pty gate and pull what the
+		** child already printed into the mirror, exactly as a control
+		** client does. Leaving it for the next select() wake to notice
+		** is a race we lose on macOS, where arming the fd after the write
+		** has landed does not make it readable — the output then sits in
+		** the pty until the child writes again, and a session that prints
+		** once and waits replays blank. Drain before p->attached, so the
+		** bytes reach this client as part of the replay below rather than
+		** raw and out of order. */
+		pty_gated = 0;
+		drain_pty();
 
 		p->attached = 1;
 		dch_trace("attach client fd=%d", p->fd);
