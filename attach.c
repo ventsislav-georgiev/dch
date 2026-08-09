@@ -148,14 +148,156 @@ on_sigusr2(ATTRIBUTE_UNUSED int sig)
 	want_redraw = 1;
 }
 
-/* Handles input from the keyboard. Scans the WHOLE buffer for the detach
-** char (upstream only checked buf[0], which loses the keypress if it
-** arrives bundled with other bytes — common when the terminal sends a
-** burst, or when the user types fast after pasted input). */
+/* Counts detach-key presses in a keyboard buffer. Scans the WHOLE buffer
+** (upstream only checked buf[0], which loses the keypress if it arrives
+** bundled with other bytes — common when the terminal sends a burst, or when
+** the user types fast after pasted input).
+**
+** Two forms are counted:
+**   - the raw control byte (Ctrl-\ == 0x1c);
+**   - the Kitty keyboard protocol report. When the inner program turns on
+**     progressive keyboard enhancement (it emits ESC[>...u — Claude Code,
+**     recent nvim, etc. do this), the terminal stops sending the detach char
+**     as a control byte and reports it as
+**         CSI <codepoint> ; <modifiers>[:<event>] [; <text>] u
+**     where <codepoint> is the BASE key, not the control code (Ctrl-\ is
+**     reported as '\' == 0x5c, NOT 0x1c). Recover the base codepoint by
+**     undoing the control mask (Ctrl+X == X & 0x1f, so base ==
+**     detach_char | 0x40). Only event type 1 (press) counts: once the inner
+**     app asks for repeat (2) and release (3) events, counting those would
+**     turn a single keypress into two hits. */
+static int
+detach_hits(struct packet *pkt)
+{
+	const unsigned char *p, *end = pkt->u.buf + pkt->len;
+	int hits = 0;
+
+	if (detach_char == -1)
+		return 0;
+
+	/* Two hits is all the caller can act on, and every scan below runs on
+	** each keystroke — including multi-kilobyte pastes — so stop at two and
+	** let memchr do the walking. */
+	p = pkt->u.buf;
+	while (hits < 2 && (p = memchr(p, detach_char, end - p)) != NULL)
+	{
+		hits++;
+		p++;
+	}
+	if (hits < 2 && detach_char < 0x20)
+	{
+		char want[8];
+		int wlen = snprintf(want, sizeof want, "\033[%d;",
+			detach_char | 0x40);
+
+		p = pkt->u.buf;
+		while (hits < 2 && (p = memchr(p, '\033', end - p)) != NULL)
+		{
+			const unsigned char *q;
+			int ev = 1, field = 0, closed = 0;
+
+			if (end - p < wlen || memcmp(p, want, wlen) != 0)
+			{
+				p++;
+				continue;
+			}
+			/* Sitting on the <modifiers> field now. */
+			for (q = p + wlen; q < end; q++)
+			{
+				unsigned char b = *q;
+
+				if (b == 'u')
+				{
+					closed = 1;
+					break;
+				}
+				if (b == ':')
+				{
+					if (field == 0)
+					{
+						field = 1;	/* <event> */
+						ev = 0;
+					}
+					continue;
+				}
+				if (b == ';')
+				{
+					field = 2;	/* trailing params */
+					continue;
+				}
+				if (b < '0' || b > '9')
+					break;
+				if (field == 1)
+					ev = ev * 10 + (b - '0');
+			}
+			if (closed && ev == 1)
+				hits++;
+			p++;
+		}
+	}
+	return hits;
+}
+
+/* How long a single detach press waits for a second one before it commits to
+** detaching. Long enough for a comfortable double-tap, short enough that a
+** plain detach still feels instant — but "comfortable" is a property of the
+** person typing, so DCH_DOUBLE_TAP_MS overrides it. 0 disables the switch
+** shortcut entirely and makes detach instant again. */
+#define DETACH_DOUBLE_MS	300
+
+/* Monotonic "now", so an NTP step mid-window can neither fire the detach early
+** nor strand it. Falls back to the wall clock only where CLOCK_MONOTONIC is
+** absent. */
 static void
+now_us(struct timeval *tv)
+{
+#ifdef CLOCK_MONOTONIC
+	struct timespec ts;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
+	{
+		tv->tv_sec = ts.tv_sec;
+		tv->tv_usec = ts.tv_nsec / 1000;
+		return;
+	}
+#endif
+	gettimeofday(tv, NULL);
+}
+
+static long
+detach_double_us(void)
+{
+	static long us = -1;
+
+	if (us < 0)
+	{
+		const char *e = getenv("DCH_DOUBLE_TAP_MS");
+		char *tail;
+		long ms = DETACH_DOUBLE_MS;
+
+		if (e && *e)
+		{
+			long v = strtol(e, &tail, 10);
+
+			if (*tail == '\0' && v >= 0 && v <= 5000)
+				ms = v;
+		}
+		us = ms * 1000L;
+	}
+	return us;
+}
+
+/* process_kbd return values. */
+#define KBD_OK		0
+#define KBD_DETACH	1	/* one detach-key press */
+#define KBD_SWITCH	2	/* two presses — open the session picker */
+
+/* Handles input from the keyboard. Returns one of KBD_*; on anything but
+** KBD_OK the buffer is swallowed rather than forwarded. */
+static int
 process_kbd(int s, struct packet *pkt)
 {
-	int i;
+	int i, hits;
 
 	/* Suspend? Scan whole buffer — VMIN=1 usually delivers VSUSP as buf[0],
 	** but bracketed/pasted input or fast typing can bundle it with other
@@ -200,53 +342,16 @@ process_kbd(int s, struct packet *pkt)
 		pkt->len = redraw_method == REDRAW_UNSPEC ? REDRAW_WINCH : redraw_method;
 		ioctl(0, TIOCGWINSZ, &pkt->u.ws);
 		write_packet_or_fail(s, pkt);
-		return;
+		return KBD_OK;
 	}
-	/* Detach char anywhere in the buffer? */
-	if (detach_char != -1)
-	{
-		for (i = 0; i < pkt->len; i++)
-		{
-			if (pkt->u.buf[i] == detach_char)
-				exit(0);
-		}
-	}
-	/* Kitty keyboard protocol: when the inner program turns on progressive
-	** keyboard enhancement (it emits ESC[>...u — Claude Code, recent nvim,
-	** etc. do this), the terminal stops sending the detach char as a raw
-	** control byte and instead reports it as a CSI escape:
-	**     CSI <codepoint> ; <modifiers> u
-	** where <codepoint> is the BASE key, not the control code (Ctrl-\ is
-	** reported as '\' = 0x5c, NOT 0x1c). Without matching this form the raw
-	** scan above never fires and detach silently stops working inside such
-	** apps. Recover the base codepoint by undoing the control mask
-	** (Ctrl+X == X & 0x1f, so base == detach_char | 0x40) and look for that
-	** CSI ... u sequence anywhere in the buffer. */
-	if (detach_char >= 0 && detach_char < 0x20)
-	{
-		char want[8];
-		int wlen = snprintf(want, sizeof want, "\033[%d;",
-			detach_char | 0x40);
+	/* Detach key. Two presses in one burst (key repeat, or a fast
+	** double-tap that arrives in a single read) mean "switch session". */
+	hits = detach_hits(pkt);
+	if (hits >= 2)
+		return KBD_SWITCH;
+	if (hits == 1)
+		return KBD_DETACH;
 
-		for (i = 0; i + wlen <= pkt->len; i++)
-		{
-			int j;
-
-			if (memcmp(pkt->u.buf + i, want, wlen) != 0)
-				continue;
-			/* Matched "ESC [ <cp> ;" — consume the modifier/event-type
-			** field ([0-9;:] run) and require a terminating 'u'. */
-			for (j = i + wlen; j < pkt->len; j++)
-			{
-				unsigned char b = pkt->u.buf[j];
-
-				if (b == 'u')
-					exit(0);
-				if (!((b >= '0' && b <= '9') || b == ';' || b == ':'))
-					break;
-			}
-		}
-	}
 	/* Force-redraw bookkeeping: if user pressed Ctrl-L, master will echo
 	** it back and the pty will redraw — but mark the window as changed so
 	** our next iteration also nudges WINSZ in case the terminal resized
@@ -262,6 +367,7 @@ process_kbd(int s, struct packet *pkt)
 
 	/* Push it out */
 	write_packet_or_fail(s, pkt);
+	return KBD_OK;
 }
 
 int
@@ -271,6 +377,8 @@ attach_main(int noerror)
 	unsigned char buf[BUFSIZE];
 	fd_set readfds;
 	int s;
+	int detach_pending = 0;
+	struct timeval detach_at = {0, 0};
 
 	/* Attempt to open the socket. Don't display an error if noerror is
 	** set. */
@@ -313,8 +421,18 @@ attach_main(int noerror)
 	** settings at this point. */
 	cur_term = orig_term;
 
-	/* Set a trap to restore the terminal when we die. */
-	atexit(restore_term);
+	/* Set a trap to restore the terminal when we die. Once only: a session
+	** switch re-enters attach_main in the same process, and atexit slots
+	** are a finite resource. */
+	{
+		static int trapped;
+
+		if (!trapped)
+		{
+			trapped = 1;
+			atexit(restore_term);
+		}
+	}
 
 	/* Set some signals. */
 	signal(SIGPIPE, SIG_IGN);
@@ -360,16 +478,36 @@ attach_main(int noerror)
 	while (1)
 	{
 		int n;
+		struct timeval tv, *tvp = NULL;
 
 		/* SIGUSR1 detach — main-loop check avoids exit() inside the
 		** signal handler. */
 		if (want_detach)
 			exit(0);
 
+		/* One detach press seen: hold it for a beat so a second press
+		** can turn it into a session switch instead. A real deadline,
+		** not a select timeout — a chatty session would otherwise keep
+		** waking us and the press would never land. */
+		if (detach_pending)
+		{
+			struct timeval now;
+			long us;
+
+			now_us(&now);
+			us = (detach_at.tv_sec - now.tv_sec) * 1000000L
+			   + (detach_at.tv_usec - now.tv_usec);
+			if (us <= 0)
+				exit(0);	/* window expired — plain detach */
+			tv.tv_sec = us / 1000000;
+			tv.tv_usec = us % 1000000;
+			tvp = &tv;
+		}
+
 		FD_ZERO(&readfds);
 		FD_SET(0, &readfds);
 		FD_SET(s, &readfds);
-		n = select(s + 1, &readfds, NULL, NULL, NULL);
+		n = select(s + 1, &readfds, NULL, NULL, tvp);
 		if (n < 0 && errno != EINTR && errno != EAGAIN)
 			exit(1);
 
@@ -404,7 +542,33 @@ attach_main(int noerror)
 				exit(1);
 
 			pkt.len = len;
-			process_kbd(s, &pkt);
+			int k = process_kbd(s, &pkt);
+			long w = detach_double_us();
+
+			/* Two presses — one burst, or one inside the window the
+			** first press opened — mean "switch session". */
+			if (k == KBD_SWITCH || (k == KBD_DETACH && detach_pending))
+			{
+				dch_trace("client switch requested");
+				restore_term();
+				close(s);
+				return ATTACH_SWITCH;
+			}
+			if (k == KBD_DETACH)
+			{
+				if (w == 0)
+					exit(0);	/* switching disabled */
+				detach_pending = 1;
+				now_us(&detach_at);
+				detach_at.tv_usec += w;
+				detach_at.tv_sec += detach_at.tv_usec / 1000000;
+				detach_at.tv_usec %= 1000000;
+			}
+			/* Anything else ends the window: the first press stands
+			** on its own and means detach. */
+			else if (detach_pending)
+				exit(0);
+
 			n--;
 		}
 

@@ -162,6 +162,13 @@ dch --restart <name>|--all [-f]                 # upgrade a live session in plac
 Inside a session: `Ctrl-\` to detach. Works in vim, fzf, less, Claude Code,
 etc. — terminals that swallow most control keys still pass `Ctrl-\` through.
 
+Press `Ctrl-\` **twice quickly** to switch sessions: dch detaches and shows the
+same picker as `dch -l`, so you can hop straight into another session. Quitting
+the picker (`q` / `Esc`) just leaves you detached. A single press still detaches
+— it waits out the double-press window first. `DCH_DOUBLE_TAP_MS` sets that
+window in milliseconds (default `300`); `DCH_DOUBLE_TAP_MS=0` turns switching
+off and makes detach instant again.
+
 ## Agent API
 
 Every dch session keeps an in-memory **terminal mirror**: the master feeds

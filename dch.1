@@ -90,6 +90,20 @@ Set the detach character (default
 .TP
 .B \-E
 Disable the detach character.
+.SH SWITCHING SESSIONS
+Pressing the detach character
+.B twice
+within the double\-press window detaches and opens the same interactive picker as
+.BR "dch \-l" ,
+so you can move straight into another session. Quitting the picker leaves you
+detached. A single press still detaches; it simply waits out the window first.
+.PP
+.B DCH_DOUBLE_TAP_MS
+sets that window in milliseconds (default
+.BR 300 ).
+Setting it to
+.B 0
+disables switching and makes detach instant again.
 .SH CONTROL VERBS
 All verbs take the session
 .I name

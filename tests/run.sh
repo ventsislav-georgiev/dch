@@ -113,6 +113,10 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "attach repaints via WINCH, types no ^L" attach_test.py
 fi
 
+if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
+    pyrun "double-tap detach opens the session picker" switch_test.py
+fi
+
 # --- attach replays the mirrored screen (blank-attach regression) -----------
 if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "attach replays the screen" replay_test.py

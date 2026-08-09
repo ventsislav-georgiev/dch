@@ -451,12 +451,25 @@ client_pidfile_create(const char *sockp)
 {
 	const char *slash = strrchr(sockp, '/');
 	const char *bn = slash ? slash + 1 : sockp;
+	/* A session switch calls this again in the same process: drop the
+	** previous session's marker, or live_clients_on() counts us as still
+	** attached there forever. */
+	if (client_pidfile[0])
+		unlink(client_pidfile);
 	snprintf(client_pidfile, sizeof(client_pidfile),
 	         "%s/%s.client.%d", sock_dir, bn, (int)getpid());
 	int fd = open(client_pidfile, O_CREAT | O_WRONLY | O_TRUNC, 0600);
 	if (fd >= 0)
 		close(fd);
-	atexit(client_pidfile_unlink);
+	{
+		static int trapped;
+
+		if (!trapped)
+		{
+			trapped = 1;
+			atexit(client_pidfile_unlink);
+		}
+	}
 }
 
 /* Return 1 if pid has PPID=1 and no controlling TTY (VSCode-helper-orphan
@@ -1372,7 +1385,10 @@ usage(void)
 	    "                                             `clear` reverts to auto)\n"
 	    "  dch --ls-json    like -lj but JSON, adds \"state\"\n"
 	    "Env: DCH_NO_DETECT=1 disables screen-content state detection.\n"
+	    "     DCH_DOUBLE_TAP_MS sets the switch double-press window\n"
+	    "     (default 300; 0 disables switching, detach becomes instant).\n"
 	    "Detach: Ctrl-\\  (or `dch -d` if the host swallows it).\n"
+	    "Switch: Ctrl-\\ twice quickly — detach and pick another session.\n"
 	    "Nesting refused inside an existing dch session.\n");
 }
 
@@ -1549,7 +1565,11 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 	{
 		dch_trace("attach hot-path sock=%s", sock_path);
 		client_pidfile_create(sock_path);
-		attach_main(1);		/* returns only if connect() failed */
+		/* Returns only if connect() failed, or the user asked to
+		** switch sessions — the latter is a live session, not a dead
+		** socket, so it must not fall through to the respawn. */
+		if (attach_main(1) == ATTACH_SWITCH)
+			return ATTACH_SWITCH;
 		dch_trace("hot-path connect failed; dead socket, respawning");
 	}
 	}
@@ -1574,6 +1594,31 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 	}
 	client_pidfile_create(sock_path);
 	return attach_main(0);
+}
+
+/* do_attach(), plus the double-tap-detach session switcher: when the attached
+** client returns ATTACH_SWITCH, show the same picker as `dch -l` and attach to
+** whatever the user selects. Quitting the picker just ends the loop, leaving
+** the previous session detached and running. */
+static int
+attach_with_switch(char *exe, int forced_name, int force, char **inner_argv,
+                   int inner_argc)
+{
+	for (;;)
+	{
+		char chosen[600];
+		int rc = do_attach(exe, forced_name, force, inner_argv,
+		                   inner_argc);
+
+		if (rc != ATTACH_SWITCH)
+			return rc;
+		if (pick_session("switch to session:", chosen,
+		                 sizeof(chosen)) != 0)
+			return 0;
+		snprintf(session_name, sizeof(session_name), "%s", chosen);
+		forced_name = 1;
+		force = 1;
+	}
 }
 
 /* ---- control verbs: --read --wait --keys --send --run --spawn ------- */
@@ -3014,7 +3059,8 @@ main(int argc, char **argv)
 		{
 			snprintf(session_name, sizeof(session_name),
 			         "%s", chosen);
-			return do_attach(exe, 1, 1, inner_argv, inner_argc);
+			return attach_with_switch(exe, 1, 1, inner_argv,
+			                          inner_argc);
 		}
 		return 0;
 	}
@@ -3235,8 +3281,8 @@ main(int argc, char **argv)
 		                     inner_argv, inner_argc);
 	}
 	case A_ATTACH:
-		return do_attach(exe, forced_name, force,
-		                 inner_argv, inner_argc);
+		return attach_with_switch(exe, forced_name, force,
+		                          inner_argv, inner_argc);
 	}
 	return 0;
 }

@@ -106,7 +106,7 @@ extern char **dch_argv;
 /* dch's own version, independent of the dtach base (PACKAGE_VERSION). Lives
 ** here, not in dch.c, because the master stamps it into the `<sock>.ver`
 ** sidecar so a client can tell which binary a running session is serving. */
-#define DCH_VERSION "1.7.0"
+#define DCH_VERSION "1.8.0"
 
 enum
 {
@@ -243,6 +243,11 @@ void dch_trace(const char *fmt, ...)
 void write_buf_or_fail(int fd, const void *buf, size_t count);
 void write_packet_or_fail(int fd, const struct packet *pkt);
 size_t packet_payload_len(const struct packet *pkt);
+
+/* attach_main() normally never returns while a master is live: it exits on
+** detach. It returns 1 when the connect failed, and ATTACH_SWITCH when the
+** user double-tapped the detach key to ask for the session picker. */
+#define ATTACH_SWITCH 2
 
 int attach_main(int noerror);
 int master_main(char **argv, int waitattach, int dontfork);
