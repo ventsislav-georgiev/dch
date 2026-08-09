@@ -15,7 +15,7 @@ attaching client sees had to come from the master's mirror.
 Run:  python3 tests/replay_test.py            (uses ./dch)
       DCH=/path/to/dch python3 tests/replay_test.py
 """
-import os, sys, pty, signal, select, time, errno
+import os, sys, pty, signal, select, time, errno, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.environ.get("DCH", os.path.join(HERE, "..", "dch"))
@@ -53,9 +53,12 @@ def spawn_client(extra, env=None):
     return pid, fd
 
 
+TRACE = os.path.join(tempfile.gettempdir(), "replaytest.%d.trace" % os.getpid())
+
 def attach_sees_marker(sess, env):
     """Start a quiet session, attach a second client, return what it saw."""
     os.system("'%s' -k %s >/dev/null 2>&1" % (DCH, sess))
+    env = dict(env or {}, DCH_DEBUG=TRACE)
     pid_a, fd_a = spawn_client(
         ["-n", sess, "sh", "-c", "printf '%s\\n'; sleep 60" % MARK], env)
     pid_b = None
@@ -81,6 +84,16 @@ def attach_sees_marker(sess, env):
         os.system("'%s' -k %s >/dev/null 2>&1" % (DCH, sess))
 
 
+def dump_trace():
+    """Client and master both trace here; the master daemonizes, so a file is
+    the only place its side of the story survives."""
+    try:
+        with open(TRACE) as f:
+            print("--- dch trace ---")
+            sys.stdout.write(f.read())
+    except OSError as e:
+        print("no trace:", e)
+
 def main():
     if not os.access(DCH, os.X_OK):
         print("FAIL: dch not executable at", DCH)
@@ -90,6 +103,7 @@ def main():
     if isinstance(got, tuple):
         print("FAIL: inner program never printed the marker. Client A saw:",
               repr(got[1]))
+        dump_trace()
         return 1
     if MARK not in got:
         print("FAIL: attach did not replay the screen. Client B saw:",
@@ -104,6 +118,7 @@ def main():
     if isinstance(off, tuple):
         print("FAIL: inner program never printed the marker (no-replay run)."
               " Client A saw:", repr(off[1]))
+        dump_trace()
         return 1
     if MARK in off:
         print("FAIL: DCH_NO_REPLAY=1 still replayed. Client B saw:", repr(off))
