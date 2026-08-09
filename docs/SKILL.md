@@ -59,4 +59,9 @@ dch -k infra
   `cursor <row> <col> <visible> <wrap>` on stderr (1-based, from the same
   snapshot as stdout) instead of leaving you to guess it. Not valid with
   `--recent`.
+- **Plain `--read` cannot tell a TUI's ghost text from typed input.**
+  Placeholders and argument hints sit in the input box and read back as if
+  someone typed them. Only the styling and the caret separate the two, and
+  plain output keeps neither — decide with `--read --ansi --cursor`. See
+  `docs/ghost-text.md`.
 - Sessions persist until killed — reuse them across steps, `dch -k` when done.
