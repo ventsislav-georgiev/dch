@@ -68,7 +68,13 @@ def attach_sees_marker(sess, env):
             # Carry what A did emit: a bare "never printed the marker" says
             # nothing about whether dch failed to spawn, to attach, or the
             # shell died. CI is the only place this has ever fired.
-            return ("A:", seen_a)
+            # Snapshot the process table BEFORE the finally clause tears
+            # the session down: whether the inner shell ever reached exec is
+            # the whole question, and only a live process table answers it.
+            ps = os.popen("ps -A -o pid,ppid,stat,command"
+                          " | grep -E 'dch|REPLAY-MARK' | grep -v grep"
+                          ).read()
+            return ("A:", seen_a + "\n--- processes ---\n" + ps)
         # Quiet period: make sure the program really has stopped writing, so
         # the attaching client can only get the marker from the mirror.
         drain(fd_a, 1.0)
@@ -95,9 +101,7 @@ def dump_trace():
         print("no trace:", e)
     # Whether the inner shell ever reached exec is the whole question, and
     # only the process table answers it.
-    print("--- processes ---")
-    os.system("ps -A -o pid,ppid,stat,command | grep -E 'dch|REPLAY-MARK'"
-              " | grep -v grep")
+
 
 def main():
     if not os.access(DCH, os.X_OK):
