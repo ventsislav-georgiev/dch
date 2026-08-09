@@ -297,7 +297,16 @@ init_pty(char **argv, int statusfd)
 		the_pty.pid = forkpty(&the_pty.fd, NULL, NULL, &the_pty.ws);
 	if (the_pty.pid < 0)
 		return -1;
-	else if (the_pty.pid == 0)
+	dch_trace("init_pty pid=%d fd=%d notty=%d ispeed=%lu ospeed=%lu "
+		"iflag=%lx oflag=%lx cflag=%lx lflag=%lx",
+		(int)the_pty.pid, the_pty.fd, dont_have_tty,
+		(unsigned long)cfgetispeed(&the_pty.term),
+		(unsigned long)cfgetospeed(&the_pty.term),
+		(unsigned long)the_pty.term.c_iflag,
+		(unsigned long)the_pty.term.c_oflag,
+		(unsigned long)the_pty.term.c_cflag,
+		(unsigned long)the_pty.term.c_lflag);
+	if (the_pty.pid == 0)
 	{
 		/* Child.. Execute the program. */
 		execvp(*argv, argv);
