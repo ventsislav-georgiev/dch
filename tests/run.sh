@@ -155,6 +155,32 @@ if [ -x "$DCH" ]; then
             && ok "--read --recent shows history" \
             || bad "--read --recent shows history"
 
+        # Ghost text (a TUI's own placeholder/argument hint) is only
+        # distinguishable from typed input by its styling, so --ansi must
+        # round-trip the faint attribute and the exact fg color, and must
+        # leave default-fg text unstyled. See docs/ghost-text.md.
+        AN="ansi$$"
+        "$DCH" --spawn "$AN" --size 40x6 sh -c 'printf "\033[2J\033[1;1Hreal\033[2m ghost\033[0m\033[3;1H\033[38;2;153;153;153mhint\033[0m"; sleep 60' \
+            >/dev/null 2>&1
+        "$DCH" --wait "$AN" --match ghost --timeout 5000 >/dev/null 2>&1
+        ansi=$("$DCH" --read "$AN" --ansi 2>/dev/null | tr -d '\r')
+        case $ansi in
+        *"$(printf '\033')[2m ghost"*) ok "--read --ansi keeps faint (SGR 2)" ;;
+        *) bad "--read --ansi keeps faint (SGR 2)" ;;
+        esac
+        case $ansi in
+        *"$(printf '\033')[38;2;153;153;153mhint"*)
+            ok "--read --ansi keeps the exact fg color" ;;
+        *) bad "--read --ansi keeps the exact fg color" ;;
+        esac
+        # "real" is default-fg: it must arrive with no SGR run of its own,
+        # which is what lets a watcher treat "styled" as "not typed".
+        case $ansi in
+        real*) ok "--read --ansi leaves default-fg text unstyled" ;;
+        *) bad "--read --ansi leaves default-fg text unstyled" ;;
+        esac
+        "$DCH" -k "$AN" >/dev/null 2>&1
+
         # The caret must be REPORTED, not inferred from the byte stream:
         # typing 5 characters moves the column by exactly 5 and leaves the
         # row alone. Fails loudly if the row/col offset convention drifts.

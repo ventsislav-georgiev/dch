@@ -128,7 +128,16 @@ prefixes (e.g.
 .BI \-\-read " name" " " [ \-\-ansi ] " " [ \-\-cursor ] " " [ \-\-recent " [\fIN\fP]]"
 Print the session's rendered screen to stdout.
 .B \-\-ansi
-keeps colors/attributes.
+keeps colors/attributes \(em including the faint attribute and the exact
+foreground color, which is the only thing that separates a TUI's own ghost
+text (placeholders, argument hints) from characters the human typed. The plain
+dump drops that, so a watcher deciding whether the prompt box holds an unsent
+message must read with
+.B \-\-ansi
+.RB and " \-\-cursor" ;
+see
+.I docs/ghost\-text.md
+in the source tree.
 .B \-\-recent
 prints the last
 .I N
