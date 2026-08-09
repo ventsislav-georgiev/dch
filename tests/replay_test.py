@@ -55,6 +55,21 @@ def spawn_client(extra, env=None):
 
 TRACE = os.path.join(tempfile.gettempdir(), "replaytest.%d.trace" % os.getpid())
 
+def session_has_marker(sess, seconds=15.0):
+    """Wait for the mirror to show the marker.
+
+    Deliberately not "wait for client A to print it": with DCH_NO_REPLAY the
+    output the child produced before A attached reaches the mirror and nothing
+    else, which is the documented contract of that escape hatch. The mirror is
+    the one place both modes agree the marker must be.
+    """
+    end = time.time() + seconds
+    while time.time() < end:
+        if MARK in os.popen("'%s' --read %s 2>/dev/null" % (DCH, sess)).read():
+            return True
+        time.sleep(0.2)
+    return False
+
 def attach_sees_marker(sess, env):
     """Start a quiet session, attach a second client, return what it saw."""
     os.system("'%s' -k %s >/dev/null 2>&1" % (DCH, sess))
@@ -63,18 +78,11 @@ def attach_sees_marker(sess, env):
         ["-n", sess, "sh", "-c", "printf '%s\\n'; sleep 60" % MARK], env)
     pid_b = None
     try:
-        seen_a = drain(fd_a, 15.0, MARK.encode())
-        if MARK not in seen_a:
-            # Carry what A did emit: a bare "never printed the marker" says
-            # nothing about whether dch failed to spawn, to attach, or the
-            # shell died. CI is the only place this has ever fired.
-            # Snapshot the process table BEFORE the finally clause tears
-            # the session down: whether the inner shell ever reached exec is
-            # the whole question, and only a live process table answers it.
+        if not session_has_marker(sess):
             ps = os.popen("ps -A -o pid,ppid,stat,command"
                           " | grep -E 'dch|REPLAY-MARK' | grep -v grep"
                           ).read()
-            return ("A:", seen_a + "\n--- processes ---\n" + ps)
+            return ("A:", drain(fd_a, 0.5) + "\n--- processes ---\n" + ps)
         # Quiet period: make sure the program really has stopped writing, so
         # the attaching client can only get the marker from the mirror.
         drain(fd_a, 1.0)
@@ -88,7 +96,6 @@ def attach_sees_marker(sess, env):
                 except OSError:
                     pass
         os.system("'%s' -k %s >/dev/null 2>&1" % (DCH, sess))
-
 
 def dump_trace():
     """Client and master both trace here; the master daemonizes, so a file is
@@ -110,7 +117,7 @@ def main():
 
     got = attach_sees_marker("replaytest-%d" % os.getpid(), None)
     if isinstance(got, tuple):
-        print("FAIL: inner program never printed the marker. Client A saw:",
+        print("FAIL: the session never showed the marker. Client A saw:",
               repr(got[1]))
         dump_trace()
         return 1
@@ -125,7 +132,7 @@ def main():
     off = attach_sees_marker("replayoff-%d" % os.getpid(),
                              {"DCH_NO_REPLAY": "1"})
     if isinstance(off, tuple):
-        print("FAIL: inner program never printed the marker (no-replay run)."
+        print("FAIL: the session never showed the marker (no-replay run)."
               " Client A saw:", repr(off[1]))
         dump_trace()
         return 1
