@@ -91,6 +91,18 @@ check "DCH_SOCKET_DIR empty -ls" "$empty_out" ""
 unset_out=$("$DCH" -ls 2>/dev/null | sort | tr '\n' ',')
 check "unset DCH_SOCKET_DIR = XDG default" "$unset_out" "beta,"
 
+# --- does this build have the terminal mirror? -----------------------------
+# A lite build (configure --without-libghostty) answers exit 3 to --read, so
+# every check that needs --read/--wait is gated on this instead of failing.
+MIRROR=0
+if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
+    "$DCH" --spawn mirrorprobe --size 80x24 sh >/dev/null 2>&1
+    "$DCH" --read mirrorprobe >/dev/null 2>&1
+    [ "$?" = "3" ] || MIRROR=1
+    "$DCH" -k mirrorprobe >/dev/null 2>&1
+fi
+skipmirror(){ printf '  skip %s (build has no terminal mirror)\n' "$1"; }
+
 # --- spawn-vs-attach: leftover sockets + hot-path attach -------------------
 # Real forkpty spawn, so it needs an executable dch + python3. Skip gracefully.
 if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
@@ -113,19 +125,26 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "attach repaints via WINCH, types no ^L" attach_test.py
 fi
 
-if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
+if [ "$MIRROR" = "1" ]; then
     pyrun "double-tap detach opens the session picker" switch_test.py
+else
+    skipmirror "double-tap detach opens the session picker"
 fi
 
 # --- attach replays the mirrored screen (blank-attach regression) -----------
-if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
+if [ "$MIRROR" = "1" ]; then
     pyrun "attach replays the screen" replay_test.py
+else
+    skipmirror "attach replays the screen"
 fi
 
 # --- an attached client survives a live restart -----------------------------
-if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
+if [ "$MIRROR" = "1" ]; then
     pyrun "attached client survives --restart" restart_attach_test.py
     pyrun "half-written packet survives --restart" restart_partial_test.py
+else
+    skipmirror "attached client survives --restart"
+    skipmirror "half-written packet survives --restart"
 fi
 
 # --- resize reaches an idle session, even with SIGWINCH blocked at spawn ----
@@ -617,19 +636,25 @@ assert s["state"] == "blocked", s
     check "--restart exits 0" "$?" "0"
 
     # The screen the old master rendered is still there: proof the mirror was
-    # carried across the exec rather than rebuilt empty.
-    if "$DCH" --read "$RN" 2>/dev/null | grep -q "pre-mark"; then
-        ok "--restart preserves the mirrored screen"
-    else
-        bad "--restart preserves the mirrored screen"
-        "$DCH" --read "$RN" 2>&1 | sed 's/^/       | /'
-    fi
+    # carried across the exec rather than rebuilt empty. Both this and the
+    # input check below read through the mirror, so a lite build skips them.
+    if [ "$MIRROR" = "1" ]; then
+        if "$DCH" --read "$RN" 2>/dev/null | grep -q "pre-mark"; then
+            ok "--restart preserves the mirrored screen"
+        else
+            bad "--restart preserves the mirrored screen"
+            "$DCH" --read "$RN" 2>&1 | sed 's/^/       | /'
+        fi
 
-    # ...and the shell is the same live process, still reading its pty.
-    "$DCH" --send "$RN" "echo post-mark" >/dev/null 2>&1
-    "$DCH" --wait "$RN" --match "post-mark" --timeout 10000 \
-        >/dev/null 2>&1
-    check "session still takes input after --restart" "$?" "0"
+        # ...and the shell is the same live process, still reading its pty.
+        "$DCH" --send "$RN" "echo post-mark" >/dev/null 2>&1
+        "$DCH" --wait "$RN" --match "post-mark" --timeout 10000 \
+            >/dev/null 2>&1
+        check "session still takes input after --restart" "$?" "0"
+    else
+        skipmirror "--restart preserves the mirrored screen"
+        skipmirror "session still takes input after --restart"
+    fi
 
     "$DCH" --restart --all >/dev/null 2>&1
     check "--restart --all exits 0" "$?" "0"

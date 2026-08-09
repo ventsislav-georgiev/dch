@@ -1,17 +1,12 @@
-#!/usr/bin/env python3
-# Tiny inner "TUI" for the redraw harness: prints HELLO periodically, plus a
-# REPAINT marker every time it receives SIGWINCH. Stands in for Claude Code's
-# "repaint on SIGWINCH" behavior so the harness can assert the signal arrives.
-# HELLO repeats because output emitted before a slow client finishes attaching
-# is lost (attach redraw is WINCH-based, no replay) — a one-shot marker races.
-import signal, sys, time
+import os, signal, time
 
+# os.write, not sys.stdout: a buffered write re-entered from a signal handler
+# is a hard RuntimeError on newer CPython ("reentrant call inside
+# BufferedWriter"), which is exactly what a WINCH mid-print does.
 def on_winch(*_):
-    sys.stdout.write("REPAINT\r\n")
-    sys.stdout.flush()
+    os.write(1, b"REPAINT\r\n")
 
 signal.signal(signal.SIGWINCH, on_winch)
 while True:
-    sys.stdout.write("HELLO\r\n")
-    sys.stdout.flush()
+    os.write(1, b"HELLO\r\n")
     time.sleep(0.2)

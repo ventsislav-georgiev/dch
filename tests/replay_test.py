@@ -60,8 +60,12 @@ def attach_sees_marker(sess, env):
         ["-n", sess, "sh", "-c", "printf '%s\\n'; sleep 60" % MARK], env)
     pid_b = None
     try:
-        if MARK not in drain(fd_a, 15.0, MARK.encode()):
-            return None
+        seen_a = drain(fd_a, 15.0, MARK.encode())
+        if MARK not in seen_a:
+            # Carry what A did emit: a bare "never printed the marker" says
+            # nothing about whether dch failed to spawn, to attach, or the
+            # shell died. CI is the only place this has ever fired.
+            return ("A:", seen_a)
         # Quiet period: make sure the program really has stopped writing, so
         # the attaching client can only get the marker from the mirror.
         drain(fd_a, 1.0)
@@ -83,8 +87,9 @@ def main():
         return 1
 
     got = attach_sees_marker("replaytest-%d" % os.getpid(), None)
-    if got is None:
-        print("FAIL: inner program never printed the marker")
+    if isinstance(got, tuple):
+        print("FAIL: inner program never printed the marker. Client A saw:",
+              repr(got[1]))
         return 1
     if MARK not in got:
         print("FAIL: attach did not replay the screen. Client B saw:",
@@ -96,8 +101,9 @@ def main():
     # some incidental repaint.
     off = attach_sees_marker("replayoff-%d" % os.getpid(),
                              {"DCH_NO_REPLAY": "1"})
-    if off is None:
-        print("FAIL: inner program never printed the marker (no-replay run)")
+    if isinstance(off, tuple):
+        print("FAIL: inner program never printed the marker (no-replay run)."
+              " Client A saw:", repr(off[1]))
         return 1
     if MARK in off:
         print("FAIL: DCH_NO_REPLAY=1 still replayed. Client B saw:", repr(off))
