@@ -98,6 +98,16 @@ extern int detach_char, no_suspend, redraw_method;
 extern struct termios orig_term;
 extern int dont_have_tty;
 
+/* argv[0] as resolved at startup, and the master's own argv. The master needs
+** both to re-exec itself in place on MSG_RESTART. */
+extern char *dch_exe;
+extern char **dch_argv;
+
+/* dch's own version, independent of the dtach base (PACKAGE_VERSION). Lives
+** here, not in dch.c, because the master stamps it into the `<sock>.ver`
+** sidecar so a client can tell which binary a running session is serving. */
+#define DCH_VERSION "1.7.0"
+
 enum
 {
 	MSG_PUSH	= 0,
@@ -123,6 +133,17 @@ enum
 				** ONLY sent when the request set
 				** DCH_READ_F_CURSOR, so a client built before
 				** this frame existed never has to know it. */
+	MSG_RESTART	= 13,	/* payload: absolute path of the binary to
+				** re-exec (the client's own, so the session
+				** lands on the dch that asked, not on the one
+				** it was started from — a versioned Homebrew
+				** or Nix prefix makes those different paths).
+				** Empty payload means "whatever you started
+				** from". The ACK comes from the
+				** NEW master over this same connection (the fd
+				** is carried across the exec), so an ACK is
+				** proof the new image is serving; a rolled-back
+				** exec answers DCH_ST_ERR from the old one. */
 };
 
 /* MSG_READ_END / MSG_ACK statuses */
@@ -133,6 +154,10 @@ enum
 	DCH_ST_NOVT	= 2,	/* master has no terminal mirror (lite/DCH_NO_VT) */
 	DCH_ST_TRUNC	= 3,	/* response truncated (head dropped, tail kept) */
 	DCH_ST_BUSY	= 4,	/* out-queue too full; retry */
+	DCH_ST_UNSUP	= 5,	/* master does not know this verb (it is older
+				** than the client). Masters built before this
+				** status existed answer silence instead — the
+				** client's inactivity deadline covers both. */
 };
 
 /* MSG_READ payload fields */

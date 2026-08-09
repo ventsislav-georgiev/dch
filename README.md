@@ -156,6 +156,7 @@ dch --wait <name> --state <s[,s]> [--timeout ms]  # block until state matches
 dch --status <name>                             # print session state
 dch --report <name> <state>                     # push state (harness hooks)
 dch --ls-json                                   # sessions as a JSON array
+dch --restart <name>|--all [-f]                 # upgrade a live session in place
 ```
 
 Inside a session: `Ctrl-\` to detach. Works in vim, fzf, less, Claude Code,
@@ -187,7 +188,8 @@ someone is watching is invisible to them.
 | `--status <n>` | Print the session state: `working`, `idle`, `blocked`, or `done` — resolved from the reported state, the screen-content detection, and the output heuristic (see [Agent state detection](#agent-state-detection)). | 0 ok, 1 no session |
 | `--report <n> <state>` | Push a semantic state: `working`, `idle`, `blocked`, or `done` (closed set, unknown tokens rejected); `clear` reverts to auto (detection + heuristic). Last write wins; cleared automatically when the session ends. | 0 ok, 1 no session / bad state |
 | `--wait <n> --state <s[,s...]> [--timeout ms]` | Block until the state matches any of the comma list (e.g. `idle,blocked,done` = "turn over"); prints the matched state. `active` is accepted as an alias for `working`. Polls every 100 ms. | 0 hit, 2 timeout, 1 no session |
-| `--ls-json` | All sessions as JSON: `[{"name","alias","activity_epoch","state"}]`. `state` follows the same resolution rule as `--status`. | 0 |
+| `--ls-json` | All sessions as JSON: `[{"name","alias","activity_epoch","state","version"}]`. `state` follows the same resolution rule as `--status`. `version` is the dch version of the master serving that session, or `""` for a master old enough not to report one. | 0 |
+| `--restart <n>` \| `--restart --all [-f]` | Re-exec the session's master onto the current `dch` binary, in place — the program inside keeps running (see [Upgrading a live session](#upgrading-a-live-session)). `--all` restarts only sessions whose `version` differs from this binary's; `-f` restarts all of them. | 0 ok, 1 failed / master too old |
 
 A typical agent loop:
 
@@ -334,6 +336,51 @@ dch --wait agent1 --state idle,blocked,done --timeout 600000  # turn over?
   redraws in place produces one line, not hundreds.
 - **Timing is yours to handle.** `--send` types instantly; TUIs that debounce
   input may need a `--wait` between verbs, exactly like a human pausing.
+
+## Upgrading a live session
+
+A session is served by a master process that was started by whichever `dch`
+binary spawned it. Upgrade `dch` and the sessions you already have keep running
+the old code — new features simply aren't there until the session is recreated,
+which is exactly what you don't want to do to a long-running agent.
+
+`dch --restart <name>` fixes that without killing anything:
+
+```sh
+brew upgrade dch
+dch --restart --all      # every session not already on this version
+```
+
+The master serialises its state, then replaces its own image with
+`execv(2)` — no fork. Its pid, its pty, the program running inside it, the
+listening socket and every attached client's connection all survive, because
+file descriptors and process identity are preserved across `exec`. The image it
+execs is the `dch` that ran the command, not the path the session was started
+from: on a versioned prefix (Homebrew's Cellar, the Nix store) those differ
+after an upgrade, and re-execing the old path would report success and change
+nothing. The `--all` form reads the `version` field of `--ls-json` and skips
+sessions already current; `-f` restarts them anyway.
+
+If the re-exec fails (binary missing mid-upgrade, say), `execv` simply
+returns and the old master carries on serving — the rollback is free. `dch
+--restart` reports which of the two happened, and the acknowledgement it waits
+for comes from the *new* image, so exit 0 means the new binary is serving.
+
+Two things do not survive: scrollback held only in the master's mirror (the
+visible screen does), and a master too old to know the verb at all — those
+sessions have to be recreated once, and only once. `--restart --all` reports
+those separately and does not count them as failures, since on the first
+upgrade to a `dch` that has live restart, that is every session you have.
+
+### Attaching replays the screen
+
+Attaching sends you the session's current screen from the master's mirror
+before anything else. dtach's original contract was to clear your screen and
+ask the program to repaint; diff-based renderers — Ink, and so Claude Code —
+don't repaint, because they compare against their own model of a screen dch
+just invalidated behind their back. The result was a blank attach that only
+filled in when you resized the window. Set `DCH_NO_REPLAY=1` in the master's
+environment at spawn to get the old behavior back.
 
 ### dch-lite and `DCH_NO_VT`
 

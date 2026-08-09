@@ -19,7 +19,9 @@ dch --keys  <name> <key...>                     # ctrl+c, alt+x, shift+tab, up, 
 dch --read  <name> [--ansi] [--recent [N]]      # print rendered screen (stdout)
 dch --read  <name> --cursor                     # + "cursor row col visible wrap" (stderr)
 dch --wait  <name> --match <str> [--timeout ms] # block until screen shows <str>
-dch --ls-json                                   # sessions as JSON
+dch --ls-json                                   # sessions as JSON (incl. version)
+dch --restart <name>|--all [-f]                 # re-exec the master onto this
+                                                # dch binary; session keeps running
 dch -k <name>                                   # kill session when done
 ```
 

@@ -113,6 +113,17 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "attach repaints via WINCH, types no ^L" attach_test.py
 fi
 
+# --- attach replays the mirrored screen (blank-attach regression) -----------
+if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
+    pyrun "attach replays the screen" replay_test.py
+fi
+
+# --- an attached client survives a live restart -----------------------------
+if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
+    pyrun "attached client survives --restart" restart_attach_test.py
+    pyrun "half-written packet survives --restart" restart_partial_test.py
+fi
+
 # --- resize reaches an idle session, even with SIGWINCH blocked at spawn ----
 if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "idle resize reaches the session" resize_idle_test.py
@@ -584,6 +595,44 @@ assert s["state"] == "blocked", s
     "$DCH" --keys "$LN" enter >/dev/null 2>&1
     check "no-mirror --keys legacy fallback exits 0" "$?" "0"
     "$DCH" -k "$LN" >/dev/null 2>&1
+
+    # Live restart: the master re-execs itself in place. The session's child,
+    # its pid, its screen and its scrollback all have to survive, and the
+    # session must still take input afterwards.
+    RN="restart$$"
+    "$DCH" --spawn "$RN" --size 80x24 sh >/dev/null 2>&1
+    "$DCH" --send "$RN" "echo pre-mark" >/dev/null 2>&1
+    "$DCH" --wait "$RN" --match "pre-mark" --timeout 10000 \
+        >/dev/null 2>&1
+    RPID_BEFORE=$("$DCH" --ls-json 2>/dev/null | tr ',' '\n' |
+        grep -c "\"version\":\"[0-9]" || true)
+    check "--ls-json carries a version field" \
+        "$([ "$RPID_BEFORE" -ge 1 ] && echo yes || echo no)" "yes"
+
+    "$DCH" --restart "$RN" >/dev/null 2>&1
+    check "--restart exits 0" "$?" "0"
+
+    # The screen the old master rendered is still there: proof the mirror was
+    # carried across the exec rather than rebuilt empty.
+    if "$DCH" --read "$RN" 2>/dev/null | grep -q "pre-mark"; then
+        ok "--restart preserves the mirrored screen"
+    else
+        bad "--restart preserves the mirrored screen"
+        "$DCH" --read "$RN" 2>&1 | sed 's/^/       | /'
+    fi
+
+    # ...and the shell is the same live process, still reading its pty.
+    "$DCH" --send "$RN" "echo post-mark" >/dev/null 2>&1
+    "$DCH" --wait "$RN" --match "post-mark" --timeout 10000 \
+        >/dev/null 2>&1
+    check "session still takes input after --restart" "$?" "0"
+
+    "$DCH" --restart --all >/dev/null 2>&1
+    check "--restart --all exits 0" "$?" "0"
+
+    "$DCH" -k "$RN" >/dev/null 2>&1
+    "$DCH" --restart "no-such-session-$$" >/dev/null 2>&1
+    check "--restart on a missing session exits 1" "$?" "1"
 fi
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

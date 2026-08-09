@@ -18,8 +18,7 @@
 #include <sys/types.h>
 #include <sys/un.h>
 
-/* dch's own version, independent of the dtach base (PACKAGE_VERSION). */
-#define DCH_VERSION "1.6.0"
+/* DCH_VERSION lives in dtach.h — the master needs it for the .ver sidecar. */
 
 /* Shared globals (declared in dtach.h, used by attach.c/master.c). */
 const char copyright[] = "dch - based on dtach " PACKAGE_VERSION
@@ -31,6 +30,8 @@ int no_suspend;
 int redraw_method = REDRAW_UNSPEC;
 struct termios orig_term;
 int dont_have_tty;
+char *dch_exe;
+char **dch_argv;
 
 /* dch-local state. */
 static char sock_dir[1024];
@@ -66,7 +67,8 @@ size_t
 packet_payload_len(const struct packet *pkt)
 {
 	if (pkt->type == MSG_PUSH || pkt->type == MSG_KEYS ||
-	    pkt->type == MSG_READ || pkt->type == MSG_WAIT)
+	    pkt->type == MSG_READ || pkt->type == MSG_WAIT ||
+	    pkt->type == MSG_RESTART)
 		return pkt->len;
 	if (pkt->type == MSG_WINCH || pkt->type == MSG_REDRAW)
 		return sizeof(struct winsize);
@@ -165,6 +167,27 @@ compute_sock_dir(void)
 		fprintf(stderr, "dch: mkdir %s: %s\n", sock_dir,
 		        strerror(errno));
 		return -1;
+	}
+	/* EEXIST is the common case, so the directory we just accepted may be
+	** one somebody else created. Owning it means owning the names in it:
+	** the socket, and now the resume blob a live restart hands to the next
+	** image. Sockets and blobs are 0600 and validated, but a name an
+	** attacker can unlink between save and exec still kills the session. */
+	{
+		struct stat st;
+
+		/* Write access is the whole threat: the files in here are 0600
+		** and validated on read, so being able to list the directory
+		** costs nothing. Being able to create or unlink names in it is
+		** what turns a restart into a lost session. */
+		if (lstat(sock_dir, &st) < 0 || !S_ISDIR(st.st_mode) ||
+		    st.st_uid != uid || (st.st_mode & (S_IWGRP | S_IWOTH)))
+		{
+			fprintf(stderr, "dch: %s must be a directory owned by "
+			        "uid %u and not writable by group or other\n",
+			        sock_dir, (unsigned)uid);
+			return -1;
+		}
 	}
 	return 0;
 }
@@ -645,6 +668,60 @@ state_file_path(const char *name, char *buf, size_t bufsz)
 	int n = snprintf(buf, bufsz, "%s/%s.sock.state", sock_dir,
 	                 canon_name(name, cb, sizeof(cb)));
 	return (n < 0 || (size_t)n >= bufsz) ? -1 : 0;
+}
+
+/* dch version of the master serving this session, from the `<sock>.ver`
+** sidecar it stamps at startup. Returns NULL when the file is missing or
+** unreadable — i.e. the master predates the sidecar, so "older than us" is the
+** only safe reading. Static buffer; valid until the next call. */
+static const char *
+session_version(const char *name)
+{
+	static char ver[64];
+	char p[1300], cb[256];
+	int fd, r, n;
+
+	n = snprintf(p, sizeof(p), "%s/%s.sock.ver", sock_dir,
+	             canon_name(name, cb, sizeof(cb)));
+	if (n < 0 || (size_t)n >= sizeof(p))
+		return NULL;
+	/* NOFOLLOW+NONBLOCK+S_ISREG: the runtime dir is shared, and a symlink
+	** or a FIFO planted at this name would otherwise redirect the read or
+	** hang it forever. */
+	fd = open(p, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+	if (fd < 0)
+		return NULL;
+	{
+		struct stat st;
+
+		if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode) ||
+		    st.st_uid != getuid())
+		{
+			close(fd);
+			return NULL;
+		}
+	}
+	r = (int)read(fd, ver, sizeof(ver) - 1);
+	close(fd);
+	if (r <= 0)
+		return NULL;
+	ver[r] = '\0';
+	r = (int)strcspn(ver, "\r\n");
+	ver[r] = '\0';
+	/* Reject anything that isn't a plain version token: this string ends up
+	** in --ls-json, and the sidecar lives in a world-listable runtime dir. */
+	if (r == 0 || (size_t)r != strspn(ver, "0123456789.-abcdefghijklmnop"
+	                                       "qrstuvwxyz"))
+		return NULL;
+	return ver;
+}
+
+static const char *
+version_or_empty(const char *name)
+{
+	const char *v = session_version(name);
+
+	return v ? v : "";
 }
 
 /* The closed set of reportable states (herdr's, plus done). A closed set
@@ -1277,6 +1354,13 @@ usage(void)
 	    "                                             `cursor <row> <col>\n"
 	    "                                             <visible> <wrap>` (1-based)\n"
 	    "                                             on stderr\n"
+	    "  dch --restart <name>|--all [-f]            re-exec the session's\n"
+	    "                                             master onto this dch\n"
+	    "                                             binary, in place; the\n"
+	    "                                             program keeps running.\n"
+	    "                                             --all skips sessions\n"
+	    "                                             already current (-f\n"
+	    "                                             restarts them anyway)\n"
 	    "  dch --wait <name> --match <str> [--timeout ms]  wait for output\n"
 	    "  dch --wait <name> --state <s> [--timeout ms]    wait for state\n"
 	    "  dch --status <name>                        print session state:\n"
@@ -1509,9 +1593,13 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 static const char no_vt_msg[] =
     "dch: this session has no terminal mirror (dch-lite build or DCH_NO_VT)\n"
     "     — install full dch and restart the session to use this command\n";
+/* Covers both ways an old master answers a verb it doesn't know: DCH_ST_UNSUP
+** (it is new enough to say so) and dead silence (it is not). Same fix either
+** way, so one message. */
 static const char old_master_msg[] =
-    "dch: no reply — session master predates terminal-mirror support;\n"
-    "     restart the session with current dch\n";
+    "dch: session master is older than this dch and does not support that\n"
+    "     command — try `dch --restart <session>`; if that fails too, the\n"
+    "     master predates live restart and the session must be recreated\n";
 
 static int
 control_connect(const char *name, int quiet)
@@ -1632,6 +1720,9 @@ ctl_status_exit(unsigned int status)
 		return 0;
 	case DCH_ST_BUSY:
 		fprintf(stderr, "dch: session output queue busy, retry\n");
+		return 1;
+	case DCH_ST_UNSUP:
+		fputs(old_master_msg, stderr);
 		return 1;
 	default:
 		fprintf(stderr, "dch: session terminal mirror error\n");
@@ -2123,6 +2214,88 @@ legacy_keys(const char *combo, char *out, size_t outsz)
 	return -1;
 }
 
+/* Ask the master to re-exec itself onto the current binary, in place. The ACK
+** arrives on this very socket from the NEW image (the fd survives execvp), so
+** an OK here means the new binary is serving; DCH_ST_ERR means the exec failed
+** and the OLD one rolled back and is still serving. Either way the session,
+** its child process and its scrollback are untouched. */
+static int
+do_restart_verb(const char *name, int no_version, int quiet)
+{
+	unsigned char payload[PKT_MAX], type;
+	struct ctl_reader r = {0};
+	unsigned int len;
+	int s, rc;
+
+	/* Returns 0 restarted, 1 tried and failed, 2 nothing answering (a dead
+	** socket), 3 the master is too old to restart. --all treats 2 and 3 as
+	** "not this command's problem" — 3 in particular is the state of every
+	** session on the first upgrade to a dch that has live restart. */
+	s = control_connect(name, quiet);
+	if (s < 0)
+		return 2;
+	/* Something is serving but wrote no version sidecar, so it is older
+	** than live restart and will never answer MSG_RESTART. Say so now
+	** instead of waiting out the idle timeout for silence. */
+	if (no_version)
+	{
+		close(s);
+		fprintf(stderr, "dch: %s: session master predates live restart;"
+		        " recreate the session to upgrade it\n", name);
+		return 3;
+	}
+	/* Tell the master which binary to land on: its own dch_exe was
+	** resolved when the session started, and on a versioned prefix
+	** (Homebrew Cellar, Nix store) that path still points at the old
+	** build after an upgrade — re-execing it would report success and
+	** change nothing. dch_exe here is this process's own, i.e. the new
+	** one. Over PKT_MAX it is dropped; the master falls back to its own. */
+	{
+		size_t elen = dch_exe ? strlen(dch_exe) : 0;
+
+		if (elen > PKT_MAX)
+			elen = 0;
+		send_ctl(s, MSG_RESTART, (const unsigned char *)dch_exe,
+		         (unsigned int)elen);
+	}
+
+	/* CTL_IDLE_MS is generous for this: the master answers after it has
+	** re-execed and re-read its whole state, which is still microseconds. */
+	rc = ctl_next_frame(s, &r, CTL_IDLE_MS, &type, payload, &len);
+	if (rc <= 0)
+	{
+		close(s);
+		return ctl_dead_exit(&r, "restart");
+	}
+	close(s);
+	if (type != MSG_ACK)
+		return 1;
+	if (len == DCH_ST_OK)
+	{
+		/* The ACK proves a new image is serving, not that it is THIS
+		** version — the master may have fallen back to its own path.
+		** The sidecar is written by whoever is serving now, so it is
+		** the only honest answer. */
+		const char *v = session_version(name);
+
+		if (v && strcmp(v, DCH_VERSION) != 0)
+		{
+			fprintf(stderr, "dch: %s: restarted, but still on dch "
+			        "%s (expected %s)\n", name, v, DCH_VERSION);
+			return 1;
+		}
+		printf("%s: restarted on dch %s\n", name, v ? v : DCH_VERSION);
+		return 0;
+	}
+	if (len == DCH_ST_ERR)
+	{
+		fprintf(stderr, "dch: %s: re-exec failed; the session is still "
+		        "running on its old master\n", name);
+		return 1;
+	}
+	return ctl_status_exit(len);
+}
+
 static int
 do_keys_verb(const char *name, char **combos, int ncombos)
 {
@@ -2344,10 +2517,11 @@ main(int argc, char **argv)
 	enum { A_ATTACH, A_LIST, A_KILL, A_KILLALL, A_DETACH, A_LISTRAW,
 	       A_RENAME, A_LISTJSON, A_LISTJSON2, A_SETALIAS,
 	       A_SPAWN, A_SEND, A_RUN, A_KEYS, A_READ, A_WAIT, A_STATUS,
-	       A_REPORT }
+	       A_REPORT, A_RESTART }
 	    action = A_ATTACH;
 	char alias_arg[600] = "";
 	int opt_ansi = 0, opt_recent = -1, opt_timeout = 10000, opt_cursor = 0;
+	int opt_all = 0;
 	int opt_cols = 0, opt_rows = 0;
 	char opt_match[DCH_WAIT_MAX + 1] = "";
 	char opt_state[40] = "";
@@ -2381,6 +2555,11 @@ main(int argc, char **argv)
 		if (rp)
 			exe = rp;
 	}
+
+	/* Publish them for the master: MSG_RESTART re-execs this same image in
+	** place, and after execvp() there is no second chance to look them up. */
+	dch_exe = exe;
+	dch_argv = argv;
 
 	/* Internal sentinel: master-of <sock> -- <cmd...> */
 	if (argc >= 3 && strcmp(argv[1], "--master-of") == 0)
@@ -2548,6 +2727,32 @@ main(int argc, char **argv)
 			         "%s", argv[i]);
 			i++;
 		}
+		else if (strcmp(a, "--restart") == 0)
+		{
+			/* Not folded into the control-verb block above: that
+			** block always eats the next arg as a session name, and
+			** `--restart --all` has none. */
+			action = A_RESTART;
+			i++;
+			if (i < argc && strcmp(argv[i], "--all") == 0)
+			{
+				opt_all = 1;
+				i++;
+			}
+			else if (i < argc && argv[i][0] != '\0' &&
+			         argv[i][0] != '-')
+			{
+				snprintf(session_name, sizeof(session_name),
+				         "%s", argv[i]);
+				i++;
+			}
+			else
+			{
+				fprintf(stderr, "dch: --restart needs a session "
+				        "name or --all\n");
+				return 1;
+			}
+		}
 		else if (strcmp(a, "--ansi") == 0)
 		{
 			opt_ansi = 1;
@@ -2679,6 +2884,55 @@ main(int argc, char **argv)
 
 	switch (action)
 	{
+	case A_RESTART:
+	{
+		struct slist sl = {0};
+		int k, rc, bad = 0, did = 0, old = 0;
+
+		if (!opt_all)
+		{
+			rc = do_restart_verb(session_name,
+			                     session_version(session_name)
+			                         == NULL, 0);
+			return rc == 0 ? 0 : 1;
+		}
+
+		/* --all restarts only what is actually stale: a restart is
+		** cheap but not free (the app repaints, scrollback in the
+		** mirror is dropped), so don't spend it on sessions already
+		** serving this binary. -f overrides. */
+		list_sessions(&sl);
+		for (k = 0; k < sl.n; k++)
+		{
+			const char *v = session_version(sl.v[k]);
+
+			if (!force && v && strcmp(v, DCH_VERSION) == 0)
+				continue;
+			/* No sidecar at all: the master predates live restart,
+			** so MSG_RESTART would go unanswered and cost the full
+			** idle timeout before saying nothing. Skip the wait,
+			** but only once we know something is actually there —
+			** a stale socket file has no sidecar either. */
+			rc = do_restart_verb(sl.v[k], v == NULL, 1);
+			if (rc == 2)
+				continue;	/* dead socket; nothing to do */
+			if (rc == 3)
+			{
+				old++;	/* already explained on stderr */
+				continue;
+			}
+			did++;
+			if (rc != 0)
+				bad++;
+		}
+		slist_free(&sl);
+		if (!did && !old)
+			printf("all sessions already on dch %s\n", DCH_VERSION);
+		else if (!did)
+			printf("nothing to restart: %d session%s too old\n",
+			       old, old == 1 ? " is" : "s are");
+		return bad ? 1 : 0;
+	}
 	case A_LISTRAW:
 	{
 		struct slist sl = {0};
@@ -2708,9 +2962,14 @@ main(int argc, char **argv)
 			printf("\",\"alias\":\"");
 			for (f = sl.alias[k] ? sl.alias[k] : ""; *f; f++)
 				printf(*f == '"' || *f == '\\' ? "\\%c" : "%c", *f);
-			printf("\",\"activity_epoch\":%ld,\"state\":\"%s\"}",
+			/* version is "" when the master predates the sidecar —
+			** i.e. definitely older than us, which is exactly what
+			** a caller deciding whether to --restart needs. */
+			printf("\",\"activity_epoch\":%ld,\"state\":\"%s\""
+			       ",\"version\":\"%s\"}",
 			       activity_epoch(sl.v[k]),
-			       session_state(sl.v[k]));
+			       session_state(sl.v[k]),
+			       version_or_empty(sl.v[k]));
 		}
 		puts("]");
 		slist_free(&sl);

@@ -188,6 +188,28 @@ substring
 .I str
 (at most 512 bytes); print the matching line. Default timeout 10000 ms.
 Exit 0 on match, 2 on timeout, 3 if no mirror.
+.TP
+.BI \-\-restart " name" "\fR|\fP" \-\-all " " [ \-f ]
+Re\-execute the session's master process onto the current
+.B dch
+binary, in place. The program inside the session keeps running: its process,
+its pty, its screen and every attached client survive, because the master
+replaces its own image with
+.BR execv (2)
+without forking, carrying its file descriptors across. The target is the
+.B dch
+binary that ran this command, so a session started from a versioned install
+prefix still lands on the newly installed build. Use this after upgrading
+.B dch
+so long\-lived sessions gain new features without being recreated.
+.B \-\-all
+restarts every session whose reported version differs from this binary's;
+.B \-f
+restarts them all regardless. Exit 0 when the new image is serving, 1 if the
+re\-exec failed (the old master rolls back and keeps serving) or if the master
+is too old to know the verb, in which case the session must be recreated.
+Scrollback held only in the mirror is not carried across a restart; the
+visible screen is.
 .SH EXIT STATUS
 0 on success. Control verbs: 1 generic error, 2
 .B \-\-wait
@@ -204,6 +226,12 @@ If set when a session is spawned, disable its terminal mirror.
 .TP
 .B DCH_SCROLLBACK
 Mirror scrollback lines (default 2000, max 100000).
+.TP
+.B DCH_NO_REPLAY
+If set when a session is spawned, do not replay the mirrored screen to
+attaching clients. Attach then behaves as it did before: the client's screen
+is cleared and the program is asked to repaint itself, which diff\-based
+renderers do not do. Escape hatch only.
 .TP
 .B DCH_DEBUG
 Trace to a file (path, or 1 for

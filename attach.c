@@ -174,8 +174,13 @@ process_kbd(int s, struct packet *pkt)
 	}
 	if (suspend_hit)
 	{
-		/* Tell the master that we are suspending. */
+		/* Tell the master that we are suspending. pkt is the PUSH
+		** buffer and its len still holds the last keystroke count.
+		** Neither DETACH nor ATTACH carries a payload, and masters now
+		** read len as the payload size for types they do not know, so
+		** leave nothing behind for one to misread. */
 		pkt->type = MSG_DETACH;
+		pkt->len = 0;
 		write_packet_or_fail(s, pkt);
 
 		/* And suspend... */
@@ -185,6 +190,7 @@ process_kbd(int s, struct packet *pkt)
 
 		/* Tell the master that we are returning. */
 		pkt->type = MSG_ATTACH;
+		pkt->len = 0;
 		write_packet_or_fail(s, pkt);
 
 		/* We would like a redraw, too. Ask for WINCH explicitly so even
