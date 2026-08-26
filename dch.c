@@ -17,6 +17,9 @@
 #include <pwd.h>
 #include <sys/types.h>
 #include <sys/un.h>
+#ifdef __APPLE__
+#include <sys/sysctl.h>
+#endif
 
 /* DCH_VERSION lives in dtach.h — the master needs it for the .ver sidecar. */
 
@@ -577,8 +580,9 @@ detach_all_clients_on(const char *sockp)
 
 struct slist
 {
-	char **v;     /* real session names (socket basenames) */
-	char **alias; /* display alias or NULL; parallel to v */
+	char **v;       /* real session names (socket basenames) */
+	char **alias;   /* display alias or NULL; parallel to v */
+	char **harness; /* live harness (Claude Code) session name or NULL */
 	int n, cap;
 };
 
@@ -590,8 +594,10 @@ slist_push(struct slist *l, const char *s)
 		l->cap = l->cap ? l->cap * 2 : 8;
 		l->v = realloc(l->v, l->cap * sizeof(char *));
 		l->alias = realloc(l->alias, l->cap * sizeof(char *));
+		l->harness = realloc(l->harness, l->cap * sizeof(char *));
 	}
 	l->alias[l->n] = NULL;
+	l->harness[l->n] = NULL;
 	l->v[l->n++] = strdup(s);
 }
 
@@ -603,11 +609,14 @@ slist_free(struct slist *l)
 	{
 		free(l->v[i]);
 		free(l->alias[i]);
+		free(l->harness[i]);
 	}
 	free(l->v);
 	free(l->alias);
+	free(l->harness);
 	l->v = NULL;
 	l->alias = NULL;
+	l->harness = NULL;
 	l->n = l->cap = 0;
 }
 
@@ -808,6 +817,149 @@ load_aliases(struct slist *sl)
 	}
 }
 
+/* ---- harness session names ------------------------------------------ */
+
+/* Fetch the value of DCH_SESSION from another same-uid process's
+** environment. macOS: KERN_PROCARGS2 (a sysctl, no fork, ~30us);
+** elsewhere: /proc/<pid>/environ. A dead, recycled or foreign pid just
+** fails the read and the caller skips it. Returns 0 with `out` filled. */
+static int
+proc_dch_session(long pid, char *out, size_t outsz)
+{
+#ifdef __APPLE__
+	static char *buf;
+	static size_t bufsz;
+	int mib[3] = { CTL_KERN, KERN_PROCARGS2, (int)pid };
+	size_t len, i;
+
+	if (!buf)
+	{
+		int am[2] = { CTL_KERN, KERN_ARGMAX };
+		int argmax = 0;
+		len = sizeof(argmax);
+		if (sysctl(am, 2, &argmax, &len, NULL, 0) != 0 || argmax <= 0)
+			argmax = 256 * 1024;
+		bufsz = (size_t)argmax;
+		buf = malloc(bufsz);
+		if (!buf)
+			return -1;
+	}
+	len = bufsz;
+	if (sysctl(mib, 3, buf, &len, NULL, 0) != 0 || len == 0)
+		return -1;
+	buf[len - 1] = '\0';
+	/* Layout: argc int, exec path, NULs, argv[], env[]. Entries are
+	** NUL-separated; scan each entry start for our prefix. */
+	for (i = sizeof(int); i < len; )
+	{
+		if (len - i > 12 && memcmp(buf + i, "DCH_SESSION=", 12) == 0)
+		{
+			snprintf(out, outsz, "%s", buf + i + 12);
+			return 0;
+		}
+		while (i < len && buf[i] != '\0')
+			i++;
+		while (i < len && buf[i] == '\0')
+			i++;
+	}
+	return -1;
+#else
+	char p[64], buf[65536];
+	int fd, r;
+	size_t off = 0, i;
+
+	snprintf(p, sizeof(p), "/proc/%ld/environ", pid);
+	fd = open(p, O_RDONLY);
+	if (fd < 0)
+		return -1;
+	while (off < sizeof(buf) - 1 &&
+	       (r = (int)read(fd, buf + off, sizeof(buf) - 1 - off)) > 0)
+		off += (size_t)r;
+	close(fd);
+	buf[off] = '\0';
+	for (i = 0; i < off; i += strlen(buf + i) + 1)
+	{
+		if (strncmp(buf + i, "DCH_SESSION=", 12) == 0)
+		{
+			snprintf(out, outsz, "%s", buf + i + 12);
+			return 0;
+		}
+	}
+	return -1;
+#endif
+}
+
+/* Best-effort overlay of the Claude Code session name running inside each
+** dch session. The harness writes ~/.claude/sessions/<pid>.json for every
+** live claude process; that process's DCH_SESSION env names the dch session
+** exactly, so the join needs no cwd heuristics. Auto-titled harness names
+** ("nameSource":"derived") are skipped — "dch-28" beats no one. Explicit
+** dch aliases still win in the picker. */
+static void
+load_harness_names(struct slist *sl)
+{
+	const char *home = getenv("HOME");
+	char dir[1100];
+	DIR *d;
+	struct dirent *de;
+
+	if (sl->n == 0 || !home || !home[0])
+		return;
+	snprintf(dir, sizeof(dir), "%s/.claude/sessions", home);
+	d = opendir(dir);
+	if (!d)
+		return;
+	while ((de = readdir(d)))
+	{
+		char path[1400], jb[4096], sess[600], cb[256];
+		char *nm, *q, *endp;
+		const char *cn;
+		long pid;
+		size_t n = strlen(de->d_name);
+		int fd, r, i;
+
+		if (n < 6 || strcmp(de->d_name + n - 5, ".json") != 0)
+			continue;
+		pid = strtol(de->d_name, &endp, 10);
+		if (pid <= 0 || endp != de->d_name + n - 5)
+			continue;
+		snprintf(path, sizeof(path), "%s/%s", dir, de->d_name);
+		fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+		if (fd < 0)
+			continue;
+		r = (int)read(fd, jb, sizeof(jb) - 1);
+		close(fd);
+		if (r <= 0)
+			continue;
+		jb[r] = '\0';
+		if (strstr(jb, "\"nameSource\":\"derived\""))
+			continue;
+		nm = strstr(jb, "\"name\":\"");
+		if (!nm)
+			continue;
+		nm += 8;
+		q = strchr(nm, '"');
+		if (!q || q == nm)
+			continue;
+		*q = '\0';
+		/* Keep the name single-line so --ls-json stays valid. */
+		for (char *c = nm; *c; c++)
+			if (*c == '\t' || *c == '\n' || *c == '\r')
+				*c = ' ';
+		if (proc_dch_session(pid, sess, sizeof(sess)) != 0)
+			continue;
+		/* Sockets store canonical (possibly shortened) names. */
+		cn = canon_name(sess, cb, sizeof(cb));
+		for (i = 0; i < sl->n; i++)
+			if (!sl->harness[i] && strcmp(sl->v[i], cn) == 0)
+			{
+				sl->harness[i] = strdup(nm);
+				break;
+			}
+	}
+	closedir(d);
+}
+
 /* Write (or clear, when alias is empty) the sidecar for `name`. */
 static int
 write_alias(const char *name, const char *alias)
@@ -903,9 +1055,11 @@ picker_draw(int fd, const char *header, struct slist *sl, int sel,
 	for (int i = top; i < end; i++)
 	{
 		char row[1300];
-		if (sl->alias && sl->alias[i])
-			snprintf(row, sizeof(row), "%s (%s)",
-			         sl->alias[i], sl->v[i]);
+		const char *dn = sl->alias && sl->alias[i]
+		                     ? sl->alias[i]
+		                     : (sl->harness ? sl->harness[i] : NULL);
+		if (dn)
+			snprintf(row, sizeof(row), "%s (%s)", dn, sl->v[i]);
 		else
 			snprintf(row, sizeof(row), "%s", sl->v[i]);
 		if (i == sel)
@@ -939,6 +1093,7 @@ pick_session(const char *header, char *out, size_t outsz)
 		return 1;
 	}
 	load_aliases(&sl);
+	load_harness_names(&sl);
 
 	int fd = open("/dev/tty", O_RDWR);
 	if (fd < 0)
@@ -2996,6 +3151,7 @@ main(int argc, char **argv)
 		struct slist sl = {0};
 		list_sessions(&sl);
 		load_aliases(&sl);
+		load_harness_names(&sl);
 		int k;
 		putchar('[');
 		for (k = 0; k < sl.n; k++)
@@ -3006,6 +3162,9 @@ main(int argc, char **argv)
 				printf(*f == '"' || *f == '\\' ? "\\%c" : "%c", *f);
 			printf("\",\"alias\":\"");
 			for (f = sl.alias[k] ? sl.alias[k] : ""; *f; f++)
+				printf(*f == '"' || *f == '\\' ? "\\%c" : "%c", *f);
+			printf("\",\"harness\":\"");
+			for (f = sl.harness[k] ? sl.harness[k] : ""; *f; f++)
 				printf(*f == '"' || *f == '\\' ? "\\%c" : "%c", *f);
 			/* version is "" when the master predates the sidecar —
 			** i.e. definitely older than us, which is exactly what

@@ -52,6 +52,10 @@ without disturbing an attached human.
 .B \-l
 Pick a session interactively and attach. A live mirror preview of each
 session is shown while picking.
+When a session runs a named Claude Code session, that name is shown in
+place of the session name (read from
+.IR ~/.claude/sessions ;
+explicit aliases win).
 .TP
 .B \-ls
 List session names, one per line.
@@ -61,7 +65,11 @@ List sessions as \fIname\fP<TAB>\fIalias\fP<TAB>\fIactivity_epoch\fP lines.
 .TP
 .B \-\-ls\-json
 List sessions as a JSON array of
-.BR {name,alias,activity_epoch} .
+.BR {name,alias,harness,activity_epoch,state,version} .
+The
+.I harness
+field carries the name of the Claude Code session running inside, when one
+is.
 .TP
 .B \-rl
 Rename (alias) sessions interactively. Aliases are display-only.

@@ -112,6 +112,7 @@ fi
 # --- hot-path performance budget (spawn-vs-attach decision) ----------------
 if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "hot-path perf budget" perf_test.py
+    pyrun "picker resolves harness session names" harness_names_test.py
 fi
 
 # --- on-demand redraw (SIGUSR2 → MSG_REDRAW(REDRAW_WINCH)) ------------------

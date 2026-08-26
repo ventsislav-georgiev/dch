@@ -74,6 +74,14 @@ shown with priority in `-l`/`-rl` as `alias (real-name)`. The underlying
 session name is untouched, so attach/kill/detach by real name keep working.
 An empty input clears the alias; killing a session removes its alias too.
 
+When a session is running a **named Claude Code session**, the picker shows
+that name instead: `postman (solution.postman-fix_hop-asset-cache-host-var)`.
+The join is exact — claude writes `~/.claude/sessions/<pid>.json` (pid, name)
+for every live process, and that process's inherited `DCH_SESSION` env var
+names the dch session it runs inside. Auto-titled claude names are skipped,
+explicit aliases win. Resolution costs well under a millisecond, so it's
+always on; `--ls-json` carries it as the `harness` field.
+
 An agent (or plain shell script) can drive a TUI in a session it never
 attaches to:
 
@@ -196,7 +204,7 @@ someone is watching is invisible to them.
 | `--status <n>` | Print the session state: `working`, `idle`, `blocked`, or `done` — resolved from the reported state, the screen-content detection, and the output heuristic (see [Agent state detection](#agent-state-detection)). | 0 ok, 1 no session |
 | `--report <n> <state>` | Push a semantic state: `working`, `idle`, `blocked`, or `done` (closed set, unknown tokens rejected); `clear` reverts to auto (detection + heuristic). Last write wins; cleared automatically when the session ends. | 0 ok, 1 no session / bad state |
 | `--wait <n> --state <s[,s...]> [--timeout ms]` | Block until the state matches any of the comma list (e.g. `idle,blocked,done` = "turn over"); prints the matched state. `active` is accepted as an alias for `working`. Polls every 100 ms. | 0 hit, 2 timeout, 1 no session |
-| `--ls-json` | All sessions as JSON: `[{"name","alias","activity_epoch","state","version"}]`. `state` follows the same resolution rule as `--status`. `version` is the dch version of the master serving that session, or `""` for a master old enough not to report one. | 0 |
+| `--ls-json` | All sessions as JSON: `[{"name","alias","harness","activity_epoch","state","version"}]`. `harness` is the name of the Claude Code session running inside, or `""`. `state` follows the same resolution rule as `--status`. `version` is the dch version of the master serving that session, or `""` for a master old enough not to report one. | 0 |
 | `--restart <n>` \| `--restart --all [-f]` | Re-exec the session's master onto the current `dch` binary, in place — the program inside keeps running (see [Upgrading a live session](#upgrading-a-live-session)). `--all` restarts only sessions whose `version` differs from this binary's; `-f` restarts all of them. | 0 ok, 1 failed / master too old |
 
 A typical agent loop:
