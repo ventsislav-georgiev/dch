@@ -1793,13 +1793,22 @@ attach_with_switch(char *exe, int forced_name, int force, char **inner_argv,
 static const char no_vt_msg[] =
     "dch: this session has no terminal mirror (dch-lite build or DCH_NO_VT)\n"
     "     — install full dch and restart the session to use this command\n";
-/* Covers both ways an old master answers a verb it doesn't know: DCH_ST_UNSUP
-** (it is new enough to say so) and dead silence (it is not). Same fix either
-** way, so one message. */
+/* A master that explicitly answers DCH_ST_UNSUP is provably old — it spoke
+** the control protocol well enough to say "I don't know that verb". */
 static const char old_master_msg[] =
     "dch: session master is older than this dch and does not support that\n"
     "     command — try `dch --restart <session>`; if that fails too, the\n"
     "     master predates live restart and the session must be recreated\n";
+/* ctl_dead_exit's got_any==false case: total silence within CTL_IDLE_MS.
+** That does NOT prove an old master — connect() succeeds via the kernel
+** listen backlog even when the master never accept()s, so a wedged or
+** stopped (SIGSTOP/App Nap) master looks identical on the wire. Name both
+** causes instead of guessing. */
+static const char no_reply_msg[] =
+    "dch: session master is not answering — it may be wedged or stopped\n"
+    "     (SIGSTOP, App Nap), or too old to speak this dch's control\n"
+    "     protocol. Check whether its process is alive or stuck (e.g. ps)\n"
+    "     before recreating anything; try `dch --restart <session>` first\n";
 
 static int
 control_connect(const char *name, int quiet)
@@ -1934,7 +1943,7 @@ static int
 ctl_dead_exit(struct ctl_reader *r, const char *verb)
 {
 	if (!r->got_any)
-		fputs(old_master_msg, stderr);
+		fputs(no_reply_msg, stderr);
 	else
 		fprintf(stderr, "dch: truncated %s response\n", verb);
 	return 1;
@@ -2428,20 +2437,27 @@ do_restart_verb(const char *name, int no_version, int quiet)
 	int s, rc;
 
 	/* Returns 0 restarted, 1 tried and failed, 2 nothing answering (a dead
-	** socket), 3 the master is too old to restart. --all treats 2 and 3 as
-	** "not this command's problem" — 3 in particular is the state of every
-	** session on the first upgrade to a dch that has live restart. */
+	** socket), 3 sidecar missing (age unknown, treated as not restartable
+	** this run). --all treats 2 and 3 as "not this command's problem" — 3 is
+	** the state of every session on the first upgrade to a dch that has
+	** live restart, or any session whose sidecar tmp_cleaner has removed. */
 	s = control_connect(name, quiet);
 	if (s < 0)
 		return 2;
-	/* Something is serving but wrote no version sidecar, so it is older
-	** than live restart and will never answer MSG_RESTART. Say so now
-	** instead of waiting out the idle timeout for silence. */
+	/* No version sidecar is UNKNOWN age, not proven old: macOS's
+	** tmp_cleaner deletes idle sidecars from /tmp after 3 days (plain
+	** files, unlike the socket node) even off a live, current master,
+	** and the master's self-heal tick (default hourly, DCH_HEAL_MS
+	** override) re-stamps a missing .ver on its own. Say so instead of
+	** waiting out the idle timeout for silence. */
 	if (no_version)
 	{
 		close(s);
-		fprintf(stderr, "dch: %s: session master predates live restart;"
-		        " recreate the session to upgrade it\n", name);
+		fprintf(stderr, "dch: %s: version sidecar missing — age unknown,"
+		        " not\n     proven old (idle sidecars get cleaned from"
+		        " /tmp; the master\n     re-stamps its own within a heal"
+		        " tick). Retry shortly; if\n     restart keeps failing,"
+		        " recreate the session\n", name);
 		return 3;
 	}
 	/* Tell the master which binary to land on: its own dch_exe was
@@ -3108,10 +3124,11 @@ main(int argc, char **argv)
 
 			if (!force && v && strcmp(v, DCH_VERSION) == 0)
 				continue;
-			/* No sidecar at all: the master predates live restart,
-			** so MSG_RESTART would go unanswered and cost the full
-			** idle timeout before saying nothing. Skip the wait,
-			** but only once we know something is actually there —
+			/* No sidecar at all: age unknown — a master that predates
+			** live restart looks identical to a current one whose
+			** sidecar tmp_cleaner removed. Either way MSG_RESTART risks
+			** the full idle timeout before saying nothing, so skip the
+			** wait — but only once we know something is actually there;
 			** a stale socket file has no sidecar either. */
 			rc = do_restart_verb(sl.v[k], v == NULL, 1);
 			if (rc == 2)
