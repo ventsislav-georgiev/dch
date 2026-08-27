@@ -43,6 +43,25 @@ session master survives terminal crashes, GUI quits, and SSH drops; a new
 in the same directory reattaches. Detach with
 .BR Ctrl\-\(rs .
 .PP
+If the socket node itself is deleted while the master is alive \(em some
+external cleanup, not
+.BR dch 's
+own doing \(em the master notices on its next idle tick (hourly by default;
+.B DCH_HEAL_MS
+overrides it) and re\-binds the socket under the same name, re\-stamping the
+version sidecar and refreshing the activity/state sidecars. Left alone, a
+missing socket node is invisible to
+.B \-\-status
+and
+.BR \-\-ls\-json ,
+and the next attach starts a
+.I second
+master under the same name instead of finding the first. The heal never
+touches a socket node that is present, so it cannot recover a
+name a second master has already taken; see
+.B DCH_SOCKET_DIR
+below for avoiding the underlying cause.
+.PP
 Each session also keeps an in-memory terminal mirror (embedded
 libghostty\-vt), which powers the control verbs below: scripts and coding
 agents can type into, read, and wait on a session without attaching and
@@ -241,7 +260,22 @@ timeout, 3 mirror unavailable (dch-lite build or
 .TP
 .B DCH_SOCKET_DIR
 Session socket directory (default
-.IR $XDG_RUNTIME_DIR/dch\-$UID ).
+.IR $XDG_RUNTIME_DIR/dch\-$UID ,
+falling back to
+.I /tmp/dch\-$UID
+when
+.B XDG_RUNTIME_DIR
+is unset \(em the common case on macOS). For a session meant to sit idle for
+days, point this somewhere other than
+.I /tmp
+so a periodic cleaner never has a reason to touch it;
+.B XDG_RUNTIME_DIR
+itself is honored the same way when set.
+.TP
+.B DCH_HEAL_MS
+Self\-heal tick interval in milliseconds (default 3600000, i.e. hourly); see
+.B DESCRIPTION
+above. Mainly a test knob for shortening the interval.
 .TP
 .B DCH_NO_VT
 If set when a session is spawned, disable its terminal mirror.

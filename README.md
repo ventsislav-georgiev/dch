@@ -413,6 +413,34 @@ environment disables it at spawn.
 The client side is protocol-only in both builds: a lite `dch` binary can
 drive every verb against a session spawned by a full `dch` master.
 
+## Socket loss and self-heal
+
+A session's socket lives under `$DCH_SOCKET_DIR` (default
+`$XDG_RUNTIME_DIR/dch-$UID`, falling back to `/tmp/dch-$UID` when
+`XDG_RUNTIME_DIR` isn't set — the common case on macOS). On macOS,
+`/usr/libexec/tmp_cleaner` sweeps `/tmp` daily and deletes any plain file
+whose atime, mtime, *and* ctime are all older than 3 days. That never
+matches the socket node itself, but it does match the sidecar files next
+to it (`.ver`, `.act`, `.state`, `.alias`) once a session sits idle for
+3+ days, and — if that empties the directory — the `dch-$UID` directory too.
+
+A master whose socket node is gone keeps running and keeps serving whoever
+is already attached, but it's unreachable: `--status`/`--ls-json` report no
+session, and the next attach starts a *second* master under the same name
+instead of finding the first. To close that gap, each master's idle loop
+runs a self-heal pass roughly once an hour (`DCH_HEAL_MS` overrides the
+interval in milliseconds — mainly a test knob): a missing or replaced
+socket node is re-bound (recreating the directory too, if it was swept),
+a missing `.ver` sidecar is re-stamped, and the surviving sidecars get
+their access time refreshed so the cleaner's 3-day clock keeps resetting
+on a session that's actually alive. A socket node that's present is left strictly alone — the heal can't rescue a session whose
+name a second master already took over, and it never risks stealing a
+healthy one.
+
+For a session meant to run for days, point `DCH_SOCKET_DIR` somewhere
+other than `/tmp` (see `dch.1`'s ENVIRONMENT section) so the cleaner never
+has a reason to touch it in the first place.
+
 ## How it differs from upstream dtach
 
 This fork (the `dch.c` entry point + small `attach.c` / `master.c` patches)
