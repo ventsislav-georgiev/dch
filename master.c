@@ -95,6 +95,12 @@ static struct pty the_pty;
 ** image (it is the one descriptor we mark close-on-exec). -1 until bound. */
 static int listen_fd = -1;
 
+/* How long the master's select() waits before running a self-heal pass, in
+** milliseconds. Hourly is plenty for what it repairs: macOS's daily
+** /usr/libexec/tmp_cleaner sweep. DCH_HEAL_MS overrides it (resolved once at
+** master start) so the test suite doesn't have to sleep an hour. */
+static long heal_ms = 3600L * 1000L;
+
 /* While set, the select loop leaves the pty out of readfds (the session
 ** was started with -w/--spawn and nothing has attached yet). File-scope so
 ** handle_packet can open the gate when a control client shows up; see
@@ -406,6 +412,43 @@ create_socket(char *name)
 	return s;
 }
 
+/* Bind sockname, shortening the path via chdir when the full one overflows
+** sun_path (104-108 bytes, far below PATH_MAX). Both callers depend on the
+** invariant this restores before returning: sockname is a full path and the
+** cwd is the one we came in with — only bind() ever sees the short name. */
+static int
+bind_socket(void)
+{
+	int s = create_socket(sockname);
+	char *slash;
+	int dirfd;
+
+	if (s >= 0 || errno != ENAMETOOLONG)
+		return s;
+
+	slash = strrchr(sockname, '/');
+	if (!slash)
+		return -1;
+	dirfd = open(".", O_RDONLY);
+	if (dirfd < 0)
+		return -1;
+	*slash = '\0';
+	if (chdir(sockname) >= 0)
+	{
+		s = create_socket(slash + 1);
+		/* Bound but stuck in the wrong cwd is worse than not bound:
+		** every other path we use is relative to nothing. */
+		if (s >= 0 && fchdir(dirfd) < 0)
+		{
+			close(s);
+			s = -1;
+		}
+	}
+	*slash = '/';
+	close(dirfd);
+	return s;
+}
+
 /* Update the modes on the socket. */
 static void
 update_socket_modes(int exec)
@@ -423,6 +466,130 @@ update_socket_modes(int exec)
 
 	if (st.st_mode != newmode)
 		chmod(sockname, newmode);
+}
+
+/* Recreate the directory holding sockname, if a cleaner took it. macOS's
+** /tmp sweep deletes emptied directories too, so losing the last session in
+** /tmp/dch-<uid> can lose the directory a moment later. */
+static void
+ensure_sock_dir(void)
+{
+	char dir[1100];
+	char *slash;
+	struct stat st;
+
+	if (strlen(sockname) >= sizeof dir)
+		return;
+	strcpy(dir, sockname);
+	slash = strrchr(dir, '/');
+	if (!slash || slash == dir)
+		return;			/* no directory part, or "/" itself */
+	*slash = '\0';
+	if (stat(dir, &st) == 0)
+		return;
+	if (mkdir(dir, 0700) < 0)
+		dch_trace("heal mkdir %s: %s", dir, strerror(errno));
+}
+
+/* Refresh atime (and, unavoidably, ctime) on the sidecars that are still
+** there. mtime is deliberately left alone: <sockname>.act's mtime IS the
+** last-activity signal --ls-json reports as activity_epoch, and bumping it
+** would claim work that never happened. A cleaner needs atime AND mtime AND
+** ctime all older than its threshold, so refreshing two of the three is
+** enough to keep an idle session's files alive. Best-effort throughout: a
+** sidecar that isn't there simply isn't touched. */
+static void
+touch_sidecars(void)
+{
+	static const char *suffix[] = { ".act", ".state", ".alias" };
+	struct timespec times[2];
+	char path[1100];
+	size_t i;
+
+	times[0].tv_sec = times[1].tv_sec = 0;
+	times[0].tv_nsec = UTIME_NOW;	/* atime := now */
+	times[1].tv_nsec = UTIME_OMIT;	/* mtime := unchanged */
+
+	for (i = 0; i < sizeof suffix / sizeof suffix[0]; i++)
+		if (sidecar_path(suffix[i], path, sizeof path) == 0)
+			utimensat(AT_FDCWD, path, times, 0);
+}
+
+/* One self-heal pass, run whenever the master's select() times out.
+**
+** A master whose socket node was unlinked keeps running and keeps serving
+** whoever is already connected, but is invisible: --status says "no session"
+** and an attach falls through the dead-socket path and starts a SECOND master
+** on the same name, orphaning this one forever. So we re-bind.
+**
+** Everything here is best-effort and traced, never fatal — a session with a
+** broken socket is still a session, and exiting would lose the work inside it.
+** Returns a new listening fd (already stored in listen_fd) when the socket had
+** to be re-bound, or -1 when the caller's fd still stands. */
+static int
+heal_tick(int s, int has_attached_client)
+{
+	struct stat st;
+	char ver[1100];
+	int ns = -1, rebind = 0;
+
+	if (stat(sockname, &st) < 0)
+	{
+		if (errno != ENOENT)
+			dch_trace("heal stat %s: %s", sockname,
+			          strerror(errno));
+		else
+		{
+			dch_trace("heal: %s vanished, re-binding", sockname);
+			ensure_sock_dir();
+			rebind = 1;
+		}
+	}
+	else if (!S_ISSOCK(st.st_mode))
+	{
+		/* Something that is not a socket took the name. It cannot be
+		** a session, so it is ours to clear out of the way. */
+		dch_trace("heal: %s is not a socket, replacing", sockname);
+		if (unlink(sockname) == 0)
+			rebind = 1;
+		else
+			dch_trace("heal unlink: %s", strerror(errno));
+	}
+	/* A live socket node is left strictly alone — no stat-and-rebind, no
+	** unlink. By the time we notice, that node may belong to a replacement
+	** master, and taking it would strand a session that is doing fine. */
+
+	if (rebind)
+	{
+		ns = bind_socket();
+		if (ns < 0)
+			dch_trace("heal bind %s: %s", sockname,
+			          strerror(errno));
+		else
+		{
+#if defined(F_SETFD) && defined(FD_CLOEXEC)
+			/* Same deal as the cold start: the session's own
+			** children must not inherit the listen socket. */
+			fcntl(ns, F_SETFD, FD_CLOEXEC);
+#endif
+			close(s);
+			listen_fd = ns;
+			/* The fresh node comes back 0600; an attached session
+			** advertises itself with S_IXUSR, so put that back. */
+			update_socket_modes(has_attached_client);
+			dch_trace("heal: re-bound %s fd=%d", sockname, ns);
+		}
+	}
+
+	/* The sidecars are plain files, which is exactly what a /tmp cleaner
+	** deletes. Re-stamp the one carrying real information (a missing .ver
+	** makes --restart claim this master predates live restart) and keep
+	** the survivors young. */
+	if (sidecar_path(".ver", ver, sizeof ver) == 0 && access(ver, F_OK) != 0)
+		write_version_sidecar();
+	touch_sidecars();
+
+	return ns;
 }
 
 /* Scan a chunk of child output for enhanced-keyboard mode sequences and update
@@ -2095,7 +2262,8 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 {
 	struct client *p, *next;
 	fd_set readfds, writefds;
-	int highest_fd;
+	struct timeval tv;
+	int highest_fd, nready;
 	int nullfd;
 
 	int has_attached_client = 0;
@@ -2110,6 +2278,13 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 
 	listen_fd = s;
 	no_replay = getenv("DCH_NO_REPLAY") != NULL;
+	{
+		const char *e = getenv("DCH_HEAL_MS");
+		long v = e ? atol(e) : 0;
+
+		if (v > 0)
+			heal_ms = v;
+	}
 
 	/* Set a trap to unlink the socket when we die. */
 	atexit(unlink_socket);
@@ -2251,13 +2426,28 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 			has_attached_client = new_has_attached_client;
 		}
 
-		/* Wait for something to happen. */
-		if (select(highest_fd + 1, &readfds,
-		           have_writes ? &writefds : NULL, NULL, NULL) < 0)
+		/* Wait for something to happen. The timeout is the self-heal
+		** tick; Linux writes back the remaining time, so tv is set
+		** fresh on every pass. */
+		tv.tv_sec = heal_ms / 1000;
+		tv.tv_usec = (heal_ms % 1000) * 1000;
+		nready = select(highest_fd + 1, &readfds,
+		                have_writes ? &writefds : NULL, NULL, &tv);
+		if (nready < 0)
 		{
 			if (errno == EINTR || errno == EAGAIN)
 				continue;
 			exit(1);
+		}
+		if (nready == 0)
+		{
+			/* Nothing to serve: heal instead. The fd sets are
+			** empty now, so there is nothing else to do this pass. */
+			int ns = heal_tick(s, has_attached_client);
+
+			if (ns >= 0)
+				s = ns;
+			continue;
 		}
 
 		dch_trace("mloop wake wa=%d ctl=%d pty=%d", pty_gated,
@@ -2341,33 +2531,7 @@ master_main(char **argv, int waitattach, int dontfork)
 	}
 
 	/* Create the unix domain socket. */
-	s = create_socket(sockname);
-	if (s < 0 && errno == ENAMETOOLONG)
-	{
-		char *slash = strrchr(sockname, '/');
-
-		/* Try to shorten the socket's path name by using chdir. */
-		if (slash)
-		{
-			int dirfd = open(".", O_RDONLY);
-
-			if (dirfd >= 0)
-			{
-				*slash = '\0';
-				if (chdir(sockname) >= 0)
-				{
-					s = create_socket(slash + 1);
-					if (s >= 0 && fchdir(dirfd) < 0)
-					{
-						close(s);
-						s = -1;
-					}
-				}
-				*slash = '/';
-				close(dirfd);
-			}
-		}
-	}
+	s = bind_socket();
 	if (s < 0)
 	{
 		printf("%s: %s: %s\n", progname, sockname, strerror(errno));
