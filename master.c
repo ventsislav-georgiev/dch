@@ -172,16 +172,74 @@ resume_is_ours(const char *path)
 	       strcmp(path, mine) == 0;
 }
 
+/* Device+inode of the socket node THIS master bound, so unlink_socket() can
+** tell "still mine" from "a replacement master took the name" before
+** deleting anything. Recorded by record_sock_identity() at every point this
+** master (re)binds sockname: the cold-start and heal re-binds inside
+** bind_socket(), and the live-restart resume path in master_process (the fd
+** rode across the exec, so the node on disk is still the one we bound
+** before). Stays 0 only when we die() before ever binding -- unlink_socket()
+** then falls back to the unconditional pre-#005 behavior, so an early-exit
+** path still cleans up after itself. */
+static dev_t sock_dev;
+static ino_t sock_ino;
+static int sock_ino_valid;
+
+/* Stat sockname and remember it as ours. Best-effort: if the stat fails
+** right after we just bound/adopted the node, we simply don't get to verify
+** ownership later -- unlink_socket() treats that the same as "never
+** recorded" (see above), which is the same behavior this file shipped with
+** before #005. */
+static void
+record_sock_identity(void)
+{
+	struct stat st;
+
+	if (stat(sockname, &st) < 0)
+		return;
+	sock_dev = st.st_dev;
+	sock_ino = st.st_ino;
+	sock_ino_valid = 1;
+}
+
 /* Unlink the socket and every sidecar. NOT called across a restart: the
-** re-exec keeps the socket (and the .resume blob the new image reads). */
+** re-exec keeps the socket (and the .resume blob the new image reads).
+**
+** Runs at exit (atexit) and from die(), by which point the node on disk may
+** no longer be the one this master bound: if this master went invisible
+** (its node vanished) and a replacement took the name before either of us
+** could heal, deleting that node -- and the sidecars, which live at the same
+** path -- would strand the winner until ITS OWN next heal tick. So verify
+** ownership by device+inode first and only clean up what is provably ours. */
 static void
 unlink_socket(void)
 {
 	static const char *suffix[] = { ".act", ".state", ".ver", ".resume" };
+	struct stat st;
 	char side[1100];
 	size_t i;
+	int unlink_sock = 1;	/* no identity recorded: keep the old, unconditional behavior */
 
-	unlink(sockname);
+	if (sock_ino_valid)
+	{
+		if (stat(sockname, &st) == 0)
+		{
+			/* A node is there. Ours -> clean up below, same as
+			** always. Someone else's -> a replacement master owns
+			** the name (and, at this same path, its sidecars too):
+			** touch nothing. */
+			if (st.st_dev != sock_dev || st.st_ino != sock_ino)
+				return;
+		}
+		else
+			/* Gone (ENOENT), or an unexpected stat error: no
+			** confirmed replacement, but nothing to unlink()
+			** either way. The sidecars are still ours. */
+			unlink_sock = 0;
+	}
+
+	if (unlink_sock)
+		unlink(sockname);
 	for (i = 0; i < sizeof suffix / sizeof suffix[0]; i++)
 		if (sidecar_path(suffix[i], side, sizeof side) == 0)
 			unlink(side);
@@ -424,7 +482,12 @@ bind_socket(void)
 	int dirfd;
 
 	if (s >= 0 || errno != ENAMETOOLONG)
+	{
+		/* sockname is untouched on this path -- still a full path. */
+		if (s >= 0)
+			record_sock_identity();
 		return s;
+	}
 
 	slash = strrchr(sockname, '/');
 	if (!slash)
@@ -446,6 +509,11 @@ bind_socket(void)
 	}
 	*slash = '/';
 	close(dirfd);
+	/* sockname is a full path again (restored above) and fchdir already
+	** put the cwd back, so record_sock_identity()'s stat() sees exactly
+	** what a caller would. */
+	if (s >= 0)
+		record_sock_identity();
 	return s;
 }
 
@@ -2292,7 +2360,14 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 	signal(SIGCHLD, die);
 
 	if (resume.valid)
+	{
 		master_adopt();
+		/* The fd rode across the exec; bind_socket() never ran in
+		** this image, so nothing has recorded the node as ours yet.
+		** It is still the one the previous image bound (a restart
+		** never rebinds), so a plain stat() here is exactly right. */
+		record_sock_identity();
+	}
 	else
 	{
 		pty_gated = waitattach;
