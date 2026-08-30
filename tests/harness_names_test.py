@@ -1,13 +1,13 @@
-"""Harness (Claude Code) session-name resolution for the picker / --ls-json.
+"""Harness (Claude Code and Codex) name resolution for picker / --ls-json.
 
 Claude Code writes ~/.claude/sessions/<pid>.json for every live process; the
 process's DCH_SESSION env names the dch session it runs inside. dch joins the
 two and shows the harness name in the picker and as "harness" in --ls-json.
 
 Cases:
-  - named harness session      -> harness name resolved
+  - named Claude/Codex session -> harness name resolved
   - "nameSource":"derived"     -> skipped (auto-titles beat no one)
-  - dead pid in the json       -> skipped
+  - dead, malformed, empty and wrong-session records -> skipped
   - resolution overhead        -> budget (mean over N runs vs empty HOME)
 
 Run:  python3 tests/harness_names_test.py        (uses ./dch)
@@ -21,8 +21,8 @@ OVERHEAD_BUDGET_MS = 25.0  # generous for loaded CI; locally well under 1 ms
 N = 30
 
 
-def spawn_env_proc(session, watch):
-    """Long-lived stand-in for a claude process carrying DCH_SESSION.
+def spawn_env_proc(session, watch, **extra_env):
+    """Long-lived stand-in for a harness process carrying DCH_SESSION.
 
     Must be a NON-platform binary: macOS redacts the env of platform
     binaries (/bin/sleep etc.) from other processes' KERN_PROCARGS2, which
@@ -30,6 +30,7 @@ def spawn_env_proc(session, watch):
     is guaranteed present and readable."""
     env = dict(os.environ)
     env["DCH_SESSION"] = session
+    env.update(extra_env)
     return subprocess.Popen(
         [DCH, "--wait", watch, "--state", "done", "--timeout", "60000"],
         env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -41,6 +42,15 @@ def write_session_json(sessdir, pid, name, derived=False):
         j["nameSource"] = "derived"
     with open(os.path.join(sessdir, "%d.json" % pid), "w") as f:
         json.dump(j, f, separators=(",", ":"))
+
+
+def write_codex_index(home, records):
+    path = os.path.join(home, ".codex", "session_index.jsonl")
+    os.makedirs(os.path.dirname(path))
+    with open(path, "w") as f:
+        for record in records:
+            f.write(json.dumps(record, separators=(",", ":")) + "\n")
+        f.write('{"id":"codex-malformed","thread_name":\n')
 
 
 def ls_json(home):
@@ -74,7 +84,9 @@ def main():
 
     try:
         # dch sessions to resolve against.
-        for name in ("hn-named", "hn-derived"):
+        for name in ("hn-named", "hn-derived", "hn-codex",
+                     "hn-codex-empty", "hn-codex-wrong", "hn-codex-stale",
+                     "hn-codex-malformed"):
             subprocess.run([DCH, "--spawn", name, "sleep", "60"], check=True)
 
         p1 = spawn_env_proc("hn-named", "hn-named")
@@ -91,11 +103,37 @@ def main():
         # dead pid json pointing at the same session; must not crash or match
         write_session_json(sessdir, 99999999, "ghost")
 
+        p4 = spawn_env_proc("hn-codex", "hn-codex",
+                            CODEX_THREAD_ID="codex-live")
+        p5 = spawn_env_proc("hn-codex-empty", "hn-codex-empty",
+                            CODEX_THREAD_ID="codex-empty")
+        p6 = spawn_env_proc("not-a-session", "hn-codex-wrong",
+                            CODEX_THREAD_ID="codex-wrong")
+        p7 = spawn_env_proc("hn-codex-malformed", "hn-codex-malformed",
+                            CODEX_THREAD_ID="codex-malformed")
+        procs.extend((p4, p5, p6, p7))
+        write_codex_index(home, [
+            {"id": "codex-live", "thread_name": "my-codex"},
+            {"id": "codex-empty", "thread_name": ""},
+            {"id": "codex-wrong", "thread_name": "wrong-session"},
+            {"id": "codex-stale", "thread_name": "ghost-codex"},
+        ])
+
         sl = ls_json(home)
         check("named harness session resolved",
               sl.get("hn-named", {}).get("harness") == "my-claude")
         check("derived harness name skipped",
               sl.get("hn-derived", {}).get("harness") == "")
+        check("named Codex session resolved",
+              sl.get("hn-codex", {}).get("harness") == "my-codex")
+        check("empty Codex title skipped",
+              sl.get("hn-codex-empty", {}).get("harness") == "")
+        check("wrong-session Codex record skipped",
+              sl.get("hn-codex-wrong", {}).get("harness") == "")
+        check("stale Codex record skipped",
+              sl.get("hn-codex-stale", {}).get("harness") == "")
+        check("malformed Codex record skipped",
+              sl.get("hn-codex-malformed", {}).get("harness") == "")
         check("alias field untouched",
               sl.get("hn-named", {}).get("alias") == "")
 

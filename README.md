@@ -74,13 +74,15 @@ shown with priority in `-l`/`-rl` as `alias (real-name)`. The underlying
 session name is untouched, so attach/kill/detach by real name keep working.
 An empty input clears the alias; killing a session removes its alias too.
 
-When a session is running a **named Claude Code session**, the picker shows
-that name instead: `postman (solution.postman-fix_hop-asset-cache-host-var)`.
-The join is exact — claude writes `~/.claude/sessions/<pid>.json` (pid, name)
-for every live process, and that process's inherited `DCH_SESSION` env var
-names the dch session it runs inside. Auto-titled claude names are skipped,
-explicit aliases win. Resolution costs well under a millisecond, so it's
-always on; `--ls-json` carries it as the `harness` field.
+When a session is running a **named Claude Code or Codex session**, the picker
+shows that name instead: `postman (solution.postman-fix_hop-asset-cache-host-var)`.
+The join is exact and live: Claude supplies `~/.claude/sessions/<pid>.json`;
+Codex supplies its thread title in `~/.codex/session_index.jsonl`. In both
+cases dch also requires the live harness process's `DCH_SESSION` (and Codex
+thread/session ID), so old records and a title for another dch session do not
+overlay. Claude auto-titles and empty Codex titles are skipped; Codex does not
+mark derived titles separately. Explicit aliases win. `--ls-json` carries the
+result as the `harness` field.
 
 An agent (or plain shell script) can drive a TUI in a session it never
 attaches to:

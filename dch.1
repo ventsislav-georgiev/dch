@@ -71,10 +71,15 @@ without disturbing an attached human.
 .B \-l
 Pick a session interactively and attach. A live mirror preview of each
 session is shown while picking.
-When a session runs a named Claude Code session, that name is shown in
-place of the session name (read from
+When a session runs a named Claude Code or Codex session, that name is shown
+in place of the session name. Claude names are read from
 .IR ~/.claude/sessions ;
-explicit aliases win).
+Codex titles from
+.IR ~/.codex/session_index.jsonl .
+Both are joined only through a live harness process's
+.B DCH_SESSION
+(and Codex thread/session ID), so stale records do not overlay; explicit
+aliases win.
 .TP
 .B \-ls
 List session names, one per line.
@@ -87,8 +92,8 @@ List sessions as a JSON array of
 .BR {name,alias,harness,activity_epoch,state,version} .
 The
 .I harness
-field carries the name of the Claude Code session running inside, when one
-is.
+field carries the name of the Claude Code or Codex session running inside,
+when one is.
 .TP
 .B \-rl
 Rename (alias) sessions interactively. Aliases are display-only.

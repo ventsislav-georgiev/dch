@@ -18,6 +18,7 @@
 #include <sys/types.h>
 #include <sys/un.h>
 #ifdef __APPLE__
+#include <libproc.h>
 #include <sys/sysctl.h>
 #endif
 
@@ -819,13 +820,12 @@ load_aliases(struct slist *sl)
 
 /* ---- harness session names ------------------------------------------ */
 
-/* Fetch the value of DCH_SESSION from another same-uid process's
-** environment. macOS: KERN_PROCARGS2 (a sysctl, no fork, ~30us);
-** elsewhere: /proc/<pid>/environ. A dead, recycled or foreign pid just
-** fails the read and the caller skips it. Returns 0 with `out` filled. */
+/* Fetch one environment value from another same-uid process. macOS uses
+** KERN_PROCARGS2; elsewhere /proc/<pid>/environ. */
 static int
-proc_dch_session(long pid, char *out, size_t outsz)
+proc_env_value(long pid, const char *key, char *out, size_t outsz)
 {
+	size_t keylen = strlen(key);
 #ifdef __APPLE__
 	static char *buf;
 	static size_t bufsz;
@@ -852,9 +852,10 @@ proc_dch_session(long pid, char *out, size_t outsz)
 	** NUL-separated; scan each entry start for our prefix. */
 	for (i = sizeof(int); i < len; )
 	{
-		if (len - i > 12 && memcmp(buf + i, "DCH_SESSION=", 12) == 0)
+		if (len - i > keylen + 1 && memcmp(buf + i, key, keylen) == 0 &&
+		    buf[i + keylen] == '=')
 		{
-			snprintf(out, outsz, "%s", buf + i + 12);
+			snprintf(out, outsz, "%s", buf + i + keylen + 1);
 			return 0;
 		}
 		while (i < len && buf[i] != '\0')
@@ -879,14 +880,20 @@ proc_dch_session(long pid, char *out, size_t outsz)
 	buf[off] = '\0';
 	for (i = 0; i < off; i += strlen(buf + i) + 1)
 	{
-		if (strncmp(buf + i, "DCH_SESSION=", 12) == 0)
+		if (strncmp(buf + i, key, keylen) == 0 && buf[i + keylen] == '=')
 		{
-			snprintf(out, outsz, "%s", buf + i + 12);
+			snprintf(out, outsz, "%s", buf + i + keylen + 1);
 			return 0;
 		}
 	}
 	return -1;
 #endif
+}
+
+static int
+proc_dch_session(long pid, char *out, size_t outsz)
+{
+	return proc_env_value(pid, "DCH_SESSION", out, outsz);
 }
 
 /* Best-effort overlay of the Claude Code session name running inside each
@@ -958,6 +965,122 @@ load_harness_names(struct slist *sl)
 			}
 	}
 	closedir(d);
+}
+
+/* Look up a Codex thread's current user-visible name. session_index.jsonl
+** has no PID, so callers must establish liveness separately from the
+** Codex process's CODEX_THREAD_ID and DCH_SESSION environment. Codex does
+** not record whether a title was auto-derived; only empty/malformed titles
+** can be safely skipped. */
+static int
+codex_thread_name(const char *home, const char *id, char *out, size_t outsz)
+{
+	char path[1200], buf[65536], *line, *next;
+	struct stat st;
+	int fd, r, tail = 0;
+
+	snprintf(path, sizeof(path), "%s/.codex/session_index.jsonl", home);
+	fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+	if (fd < 0)
+		return -1;
+	if (fstat(fd, &st) == 0 && st.st_size >= (off_t)sizeof(buf) - 1)
+	{
+		(void)lseek(fd, -((off_t)sizeof(buf) - 1), SEEK_END);
+		tail = 1;
+	}
+	r = (int)read(fd, buf, sizeof(buf) - 1);
+	close(fd);
+	if (r <= 0)
+		return -1;
+	buf[r] = '\0';
+	out[0] = '\0';
+	line = tail ? strchr(buf, '\n') : buf;
+	if (tail && !line)
+		return -1;
+	if (tail)
+		line++;
+	for (; line && *line; line = next)
+	{
+		char *p, *q, *nm, *end;
+		next = strchr(line, '\n');
+		if (next)
+			*next++ = '\0';
+		p = strstr(line, "\"id\":\"");
+		if (!p)
+			continue;
+		p += 6;
+		q = strchr(p, '"');
+		if (!q || (size_t)(q - p) != strlen(id) || strncmp(p, id, q - p))
+			continue;
+		nm = strstr(q, "\"thread_name\":\"");
+		if (!nm)
+			continue;
+		nm += 15;
+		end = strchr(nm, '"');
+		if (!end || end == nm || strchr(nm, '\\') ||
+		    (size_t)(end - nm) >= outsz)
+			continue;
+		memcpy(out, nm, (size_t)(end - nm));
+		out[end - nm] = '\0';
+	}
+	return out[0] ? 0 : -1;
+}
+
+static void
+load_codex_pid(struct slist *sl, const char *home, long pid)
+{
+	char id[128], sess[600], title[600], cb[256];
+	const char *cn;
+	int i;
+
+	if ((proc_env_value(pid, "CODEX_THREAD_ID", id, sizeof(id)) != 0 &&
+	     proc_env_value(pid, "CODEX_SESSION_ID", id, sizeof(id)) != 0) ||
+	    proc_dch_session(pid, sess, sizeof(sess)) != 0 ||
+	    codex_thread_name(home, id, title, sizeof(title)) != 0)
+		return;
+	for (char *c = title; *c; c++)
+		if (*c == '\t' || *c == '\n' || *c == '\r')
+			*c = ' ';
+	cn = canon_name(sess, cb, sizeof(cb));
+	for (i = 0; i < sl->n; i++)
+		if (!sl->harness[i] && strcmp(sl->v[i], cn) == 0)
+		{
+			sl->harness[i] = strdup(title);
+			break;
+		}
+}
+
+/* Codex exposes its live thread ID only in its process environment; its
+** on-disk index is deliberately history, not a liveness signal. */
+static void
+load_codex_names(struct slist *sl)
+{
+	const char *home = getenv("HOME");
+
+	if (sl->n == 0 || !home || !home[0])
+		return;
+#ifdef __APPLE__
+	int pids[4096], n, i;
+	n = proc_listpids(PROC_ALL_PIDS, 0, pids, sizeof(pids));
+	if (n <= 0)
+		return;
+	for (i = 0; i < n / (int)sizeof(pids[0]); i++)
+		if (pids[i] > 0)
+			load_codex_pid(sl, home, pids[i]);
+#else
+	DIR *d = opendir("/proc");
+	struct dirent *de;
+	if (!d)
+		return;
+	while ((de = readdir(d)))
+	{
+		char *end;
+		long pid = strtol(de->d_name, &end, 10);
+		if (pid > 0 && *end == '\0')
+			load_codex_pid(sl, home, pid);
+	}
+	closedir(d);
+#endif
 }
 
 /* Write (or clear, when alias is empty) the sidecar for `name`. */
@@ -1094,6 +1217,7 @@ pick_session(const char *header, char *out, size_t outsz)
 	}
 	load_aliases(&sl);
 	load_harness_names(&sl);
+	load_codex_names(&sl);
 
 	int fd = open("/dev/tty", O_RDWR);
 	if (fd < 0)
@@ -3169,6 +3293,7 @@ main(int argc, char **argv)
 		list_sessions(&sl);
 		load_aliases(&sl);
 		load_harness_names(&sl);
+		load_codex_names(&sl);
 		int k;
 		putchar('[');
 		for (k = 0; k < sl.n; k++)
