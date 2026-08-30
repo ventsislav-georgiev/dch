@@ -56,7 +56,7 @@ cd /tmp/scratch                # not a git repo
 dch                            # → session "scratch", starts default shell
 
 dch -n release zsh             # → override auto-name; session "release"
-dch -ls                        # → list every running session
+dch -ls                        # → list every session as display-name (real-name)
 dch -l                         # → pick one (TUI, arrow keys) and attach
 dch -rl                        # → pick one, type a new display name, repeat
 dch -k                         # → pick one and kill it
@@ -75,14 +75,16 @@ session name is untouched, so attach/kill/detach by real name keep working.
 An empty input clears the alias; killing a session removes its alias too.
 
 When a session is running a **named Claude Code or Codex session**, the picker
-shows that name instead: `postman (solution.postman-fix_hop-asset-cache-host-var)`.
+and `-ls` show that name instead: `postman (solution.postman-fix_hop-asset-cache-host-var)`.
 The join is exact and live: Claude supplies `~/.claude/sessions/<pid>.json`;
-Codex supplies its thread title in `~/.codex/session_index.jsonl`. In both
-cases dch also requires the live harness process's `DCH_SESSION` (and Codex
-thread/session ID), so old records and a title for another dch session do not
-overlay. Claude auto-titles and empty Codex titles are skipped; Codex does not
-mark derived titles separately. Explicit aliases win. `--ls-json` carries the
-result as the `harness` field.
+Codex supplies titles in `~/.codex/session_index.jsonl` and current releases
+supply the thread ID through the matching shell-snapshot filename (older
+releases' process environment IDs remain supported). In both cases dch also
+requires a live harness process with the matching `DCH_SESSION`, so old records
+and a title for another dch session do not overlay. Claude auto-titles and empty
+Codex titles are skipped; Codex does not mark derived titles separately.
+Explicit aliases win. `--ls-json` keeps the real `name`, `alias`, and resolved
+`harness` as separate fields.
 
 An agent (or plain shell script) can drive a TUI in a session it never
 attaches to:
@@ -146,7 +148,7 @@ it's the whole point of giving them dch.
 ```sh
 dch              # attach the auto-named session, or create it
 dch <cmd...>     # same, but if new, run <cmd> in it
-dch -ls          # list sessions
+dch -ls          # list sessions as alias/harness (real-name), or real-name
 dch -l           # pick a session (arrow keys) and attach
 dch -rl          # rename: pick a session, type a display alias, repeat
 dch -k [name]    # kill a session (interactive picker if no name)
@@ -206,7 +208,7 @@ someone is watching is invisible to them.
 | `--status <n>` | Print the session state: `working`, `idle`, `blocked`, or `done` — resolved from the reported state, the screen-content detection, and the output heuristic (see [Agent state detection](#agent-state-detection)). | 0 ok, 1 no session |
 | `--report <n> <state>` | Push a semantic state: `working`, `idle`, `blocked`, or `done` (closed set, unknown tokens rejected); `clear` reverts to auto (detection + heuristic). Last write wins; cleared automatically when the session ends. | 0 ok, 1 no session / bad state |
 | `--wait <n> --state <s[,s...]> [--timeout ms]` | Block until the state matches any of the comma list (e.g. `idle,blocked,done` = "turn over"); prints the matched state. `active` is accepted as an alias for `working`. Polls every 100 ms. | 0 hit, 2 timeout, 1 no session |
-| `--ls-json` | All sessions as JSON: `[{"name","alias","harness","activity_epoch","state","version"}]`. `harness` is the name of the Claude Code session running inside, or `""`. `state` follows the same resolution rule as `--status`. `version` is the dch version of the master serving that session, or `""` for a master old enough not to report one. | 0 |
+| `--ls-json` | All sessions as JSON: `[{"name","alias","harness","activity_epoch","state","version"}]`. `harness` is the name of the Claude Code or Codex session running inside, or `""`; the real `name` remains separate. `state` follows the same resolution rule as `--status`. `version` is the dch version of the master serving that session, or `""` for a master old enough not to report one. | 0 |
 | `--restart <n>` \| `--restart --all [-f]` | Re-exec the session's master onto the current `dch` binary, in place — the program inside keeps running (see [Upgrading a live session](#upgrading-a-live-session)). `--all` restarts only sessions whose `version` differs from this binary's; `-f` restarts all of them. | 0 ok, 1 failed / master too old |
 
 A typical agent loop:

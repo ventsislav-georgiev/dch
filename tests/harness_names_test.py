@@ -30,6 +30,8 @@ def spawn_env_proc(session, watch, **extra_env):
     is guaranteed present and readable."""
     env = dict(os.environ)
     env["DCH_SESSION"] = session
+    env.pop("CODEX_THREAD_ID", None)
+    env.pop("CODEX_SESSION_ID", None)
     env.update(extra_env)
     return subprocess.Popen(
         [DCH, "--wait", watch, "--state", "done", "--timeout", "60000"],
@@ -46,11 +48,26 @@ def write_session_json(sessdir, pid, name, derived=False):
 
 def write_codex_index(home, records):
     path = os.path.join(home, ".codex", "session_index.jsonl")
-    os.makedirs(os.path.dirname(path))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
         for record in records:
             f.write(json.dumps(record, separators=(",", ":")) + "\n")
         f.write('{"id":"codex-malformed","thread_name":\n')
+
+
+def write_codex_snapshot(home, thread_id, session):
+    path = os.path.join(home, ".codex", "shell_snapshots",
+                        thread_id + ".123.sh")
+    os.makedirs(os.path.dirname(path))
+    with open(path, "w") as f:
+        f.write("# snapshot\nexport DCH_SESSION=%s\n" % session)
+
+
+def picker_output(home):
+    env = dict(os.environ)
+    env["HOME"] = home
+    return subprocess.run([DCH, "-l"], env=env, capture_output=True,
+                          text=True, preexec_fn=os.setsid).stdout
 
 
 def ls_json(home):
@@ -103,8 +120,9 @@ def main():
         # dead pid json pointing at the same session; must not crash or match
         write_session_json(sessdir, 99999999, "ghost")
 
-        p4 = spawn_env_proc("hn-codex", "hn-codex",
-                            CODEX_THREAD_ID="codex-live")
+        # Current Codex processes carry DCH_SESSION but no thread ID. The
+        # shell snapshot filename supplies the live thread's ID.
+        p4 = spawn_env_proc("hn-codex", "hn-codex")
         p5 = spawn_env_proc("hn-codex-empty", "hn-codex-empty",
                             CODEX_THREAD_ID="codex-empty")
         p6 = spawn_env_proc("not-a-session", "hn-codex-wrong",
@@ -112,6 +130,7 @@ def main():
         p7 = spawn_env_proc("hn-codex-malformed", "hn-codex-malformed",
                             CODEX_THREAD_ID="codex-malformed")
         procs.extend((p4, p5, p6, p7))
+        write_codex_snapshot(home, "codex-live", "hn-codex")
         write_codex_index(home, [
             {"id": "codex-live", "thread_name": "my-codex"},
             {"id": "codex-empty", "thread_name": ""},
@@ -126,6 +145,13 @@ def main():
               sl.get("hn-derived", {}).get("harness") == "")
         check("named Codex session resolved",
               sl.get("hn-codex", {}).get("harness") == "my-codex")
+        plain = subprocess.run([DCH, "-ls"], env=dict(os.environ, HOME=home),
+                               capture_output=True, text=True).stdout
+        check("plain list shows Codex title and real name",
+              "my-codex (hn-codex)" in plain)
+        picker = picker_output(home)
+        check("picker shows Codex title and real name",
+              "my-codex" in picker and "hn-codex" in picker)
         check("empty Codex title skipped",
               sl.get("hn-codex-empty", {}).get("harness") == "")
         check("wrong-session Codex record skipped",
@@ -136,6 +162,13 @@ def main():
               sl.get("hn-codex-malformed", {}).get("harness") == "")
         check("alias field untouched",
               sl.get("hn-named", {}).get("alias") == "")
+        subprocess.run([DCH, "-m", "hn-codex", "my-alias"],
+                       check=True, capture_output=True)
+        plain = subprocess.run([DCH, "-ls"], env=dict(os.environ, HOME=home),
+                               capture_output=True, text=True).stdout
+        check("alias stays above harness title",
+              "my-alias (hn-codex)" in plain and
+              "my-codex (hn-codex)" not in plain)
 
         # --- resolution overhead: --ls-json with jsons vs without ---
         empty_home = os.path.join(tmp, "home-empty")

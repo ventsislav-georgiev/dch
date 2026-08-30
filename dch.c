@@ -583,7 +583,7 @@ struct slist
 {
 	char **v;       /* real session names (socket basenames) */
 	char **alias;   /* display alias or NULL; parallel to v */
-	char **harness; /* live harness (Claude Code) session name or NULL */
+	char **harness; /* live Claude Code or Codex session name, or NULL */
 	int n, cap;
 };
 
@@ -968,10 +968,10 @@ load_harness_names(struct slist *sl)
 }
 
 /* Look up a Codex thread's current user-visible name. session_index.jsonl
-** has no PID, so callers must establish liveness separately from the
-** Codex process's CODEX_THREAD_ID and DCH_SESSION environment. Codex does
-** not record whether a title was auto-derived; only empty/malformed titles
-** can be safely skipped. */
+** has no PID, so callers establish liveness separately and obtain the ID
+** from the process environment or its shell snapshot. Codex does not record
+** whether a title was auto-derived; only empty/malformed titles can be
+** safely skipped. */
 static int
 codex_thread_name(const char *home, const char *id, char *out, size_t outsz)
 {
@@ -1026,32 +1026,87 @@ codex_thread_name(const char *home, const char *id, char *out, size_t outsz)
 	return out[0] ? 0 : -1;
 }
 
+/* Current Codex releases no longer export the thread ID to the long-lived
+** process. Its shell snapshot still joins that ID (the filename prefix) to
+** the inherited DCH_SESSION. Prefer the newest exact match. */
+static int
+codex_snapshot_id(const char *home, const char *sess, char *out, size_t outsz)
+{
+	char dir[1200], want[700];
+	struct dirent *de;
+	struct stat best = {0};
+	DIR *d;
+
+	snprintf(dir, sizeof(dir), "%s/.codex/shell_snapshots", home);
+	snprintf(want, sizeof(want), "\nexport DCH_SESSION=%s\n", sess);
+	d = opendir(dir);
+	if (!d)
+		return -1;
+	while ((de = readdir(d)))
+	{
+		char path[1500], buf[262144], *dot;
+		struct stat st;
+		int fd, r;
+		size_t n = strlen(de->d_name);
+
+		dot = strchr(de->d_name, '.');
+		if (n < 4 || !dot || (size_t)(dot - de->d_name) >= outsz ||
+		    strcmp(de->d_name + n - 3, ".sh") != 0)
+			continue;
+		snprintf(path, sizeof(path), "%s/%s", dir, de->d_name);
+		fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+		if (fd < 0 || fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
+		    st.st_uid != getuid() || st.st_size >= (off_t)sizeof(buf))
+		{
+			if (fd >= 0) close(fd);
+			continue;
+		}
+		r = (int)read(fd, buf, sizeof(buf) - 1);
+		close(fd);
+		if (r <= 0)
+			continue;
+		buf[r] = '\0';
+		if (!strstr(buf, want) || (best.st_mtime && st.st_mtime < best.st_mtime))
+			continue;
+		memcpy(out, de->d_name, (size_t)(dot - de->d_name));
+		out[dot - de->d_name] = '\0';
+		best = st;
+	}
+	closedir(d);
+	return best.st_mtime ? 0 : -1;
+}
+
 static void
 load_codex_pid(struct slist *sl, const char *home, long pid)
 {
 	char id[128], sess[600], title[600], cb[256];
 	const char *cn;
-	int i;
+	int i, target = -1;
 
-	if ((proc_env_value(pid, "CODEX_THREAD_ID", id, sizeof(id)) != 0 &&
-	     proc_env_value(pid, "CODEX_SESSION_ID", id, sizeof(id)) != 0) ||
-	    proc_dch_session(pid, sess, sizeof(sess)) != 0 ||
+	if (proc_dch_session(pid, sess, sizeof(sess)) != 0)
+		return;
+	cn = canon_name(sess, cb, sizeof(cb));
+	for (i = 0; i < sl->n; i++)
+		if (!sl->harness[i] && strcmp(sl->v[i], cn) == 0)
+		{
+			target = i;
+			break;
+		}
+	if (target < 0 ||
+	    (proc_env_value(pid, "CODEX_THREAD_ID", id, sizeof(id)) != 0 &&
+	     proc_env_value(pid, "CODEX_SESSION_ID", id, sizeof(id)) != 0 &&
+	     codex_snapshot_id(home, sess, id, sizeof(id)) != 0) ||
 	    codex_thread_name(home, id, title, sizeof(title)) != 0)
 		return;
 	for (char *c = title; *c; c++)
 		if (*c == '\t' || *c == '\n' || *c == '\r')
 			*c = ' ';
-	cn = canon_name(sess, cb, sizeof(cb));
-	for (i = 0; i < sl->n; i++)
-		if (!sl->harness[i] && strcmp(sl->v[i], cn) == 0)
-		{
-			sl->harness[i] = strdup(title);
-			break;
-		}
+	sl->harness[target] = strdup(title);
 }
 
-/* Codex exposes its live thread ID only in its process environment; its
-** on-disk index is deliberately history, not a liveness signal. */
+/* A live process supplies DCH_SESSION; its environment or matching shell
+** snapshot supplies the thread ID. The title index alone is never a
+** liveness signal. */
 static void
 load_codex_names(struct slist *sl)
 {
@@ -1166,6 +1221,17 @@ picker_erase(int fd, int lines)
 	(void)!write(fd, up, n);
 }
 
+static void
+session_display_name(struct slist *sl, int i, char *out, size_t outsz)
+{
+	const char *dn = sl->alias[i] ? sl->alias[i] : sl->harness[i];
+
+	if (dn)
+		snprintf(out, outsz, "%s (%s)", dn, sl->v[i]);
+	else
+		snprintf(out, outsz, "%s", sl->v[i]);
+}
+
 /* Visible window: [top, top+win). Caller maintains top so sel stays in view. */
 static void
 picker_draw(int fd, const char *header, struct slist *sl, int sel,
@@ -1178,13 +1244,7 @@ picker_draw(int fd, const char *header, struct slist *sl, int sel,
 	for (int i = top; i < end; i++)
 	{
 		char row[1300];
-		const char *dn = sl->alias && sl->alias[i]
-		                     ? sl->alias[i]
-		                     : (sl->harness ? sl->harness[i] : NULL);
-		if (dn)
-			snprintf(row, sizeof(row), "%s (%s)", dn, sl->v[i]);
-		else
-			snprintf(row, sizeof(row), "%s", sl->v[i]);
+		session_display_name(sl, i, row, sizeof(row));
 		if (i == sel)
 			dprintf(fd, "\033[2K\033[7m> %s\033[0m\r\n", row);
 		else
@@ -1224,7 +1284,11 @@ pick_session(const char *header, char *out, size_t outsz)
 	{
 		/* Headless: list names so the caller can still see them. */
 		for (int i = 0; i < sl.n; i++)
-			puts(sl.v[i]);
+		{
+			char row[1300];
+			session_display_name(&sl, i, row, sizeof(row));
+			puts(row);
+		}
 		slist_free(&sl);
 		return 1;
 	}
@@ -3278,9 +3342,16 @@ main(int argc, char **argv)
 	{
 		struct slist sl = {0};
 		list_sessions(&sl);
+		load_aliases(&sl);
+		load_harness_names(&sl);
+		load_codex_names(&sl);
 		int k;
 		for (k = 0; k < sl.n; k++)
-			puts(sl.v[k]);
+		{
+			char row[1300];
+			session_display_name(&sl, k, row, sizeof(row));
+			puts(row);
+		}
 		slist_free(&sl);
 		return 0;
 	}

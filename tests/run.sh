@@ -55,7 +55,7 @@ check "-ls lists sessions" "$ls_out" "alpha,beta,"
 # --- alias sidecar is display-only: -ls still shows real name --------------
 printf 'My Alpha\n' > "$SOCKDIR/alpha.sock.alias"
 ls_out=$("$DCH" -ls 2>/dev/null | sort | tr '\n' ',')
-check "-ls ignores alias" "$ls_out" "alpha,beta,"
+check "-ls shows alias and real name" "$ls_out" "My Alpha (alpha),beta,"
 
 # --- -lj exposes name<TAB>alias<TAB>activity_epoch -------------------------
 # alpha (with alias) gets a fresh activity stamp; beta has none → epoch 0.
