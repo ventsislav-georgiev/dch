@@ -21,7 +21,7 @@ OVERHEAD_BUDGET_MS = 25.0  # generous for loaded CI; locally well under 1 ms
 N = 30
 
 
-def spawn_env_proc(session, watch, **extra_env):
+def spawn_env_proc(session, watch, executable=None, **extra_env):
     """Long-lived stand-in for a harness process carrying DCH_SESSION.
 
     Must be a NON-platform binary: macOS redacts the env of platform
@@ -34,7 +34,7 @@ def spawn_env_proc(session, watch, **extra_env):
     env.pop("CODEX_SESSION_ID", None)
     env.update(extra_env)
     return subprocess.Popen(
-        [DCH, "--wait", watch, "--state", "done", "--timeout", "60000"],
+        [executable or DCH, "--wait", watch, "--state", "done", "--timeout", "60000"],
         env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
@@ -100,10 +100,15 @@ def main():
             print("  FAIL %s" % msg)
 
     try:
+        codex = os.path.join(tmp, "codex")
+        codex_host = os.path.join(tmp, "codex-code-mode-host")
+        shutil.copy2(os.path.abspath(DCH), codex)
+        shutil.copy2(os.path.abspath(DCH), codex_host)
+
         # dch sessions to resolve against.
-        for name in ("hn-named", "hn-derived", "hn-codex",
+        for name in ("hn-named", "hn-derived", "hn-codex", "hn-codex-old",
                      "hn-codex-empty", "hn-codex-wrong", "hn-codex-stale",
-                     "hn-codex-malformed"):
+                     "hn-codex-malformed", "hn-inherited"):
             subprocess.run([DCH, "--spawn", name, "sleep", "60"], check=True)
 
         p1 = spawn_env_proc("hn-named", "hn-named")
@@ -122,17 +127,24 @@ def main():
 
         # Current Codex processes carry DCH_SESSION but no thread ID. The
         # shell snapshot filename supplies the live thread's ID.
-        p4 = spawn_env_proc("hn-codex", "hn-codex")
+        p4 = spawn_env_proc("hn-codex", "hn-codex", executable=codex_host)
         p5 = spawn_env_proc("hn-codex-empty", "hn-codex-empty",
+                            executable=codex,
                             CODEX_THREAD_ID="codex-empty")
         p6 = spawn_env_proc("not-a-session", "hn-codex-wrong",
                             CODEX_THREAD_ID="codex-wrong")
         p7 = spawn_env_proc("hn-codex-malformed", "hn-codex-malformed",
                             CODEX_THREAD_ID="codex-malformed")
-        procs.extend((p4, p5, p6, p7))
+        p8 = spawn_env_proc("hn-codex-old", "hn-codex-old",
+                            executable=codex, CODEX_THREAD_ID="codex-old")
+        p9 = spawn_env_proc("hn-inherited", "hn-inherited",
+                            CODEX_THREAD_ID="codex-inherited")
+        procs.extend((p4, p5, p6, p7, p8, p9))
         write_codex_snapshot(home, "codex-live", "hn-codex")
         write_codex_index(home, [
             {"id": "codex-live", "thread_name": "my-codex"},
+            {"id": "codex-old", "thread_name": "old-codex"},
+            {"id": "codex-inherited", "thread_name": "not-codex"},
             {"id": "codex-empty", "thread_name": ""},
             {"id": "codex-wrong", "thread_name": "wrong-session"},
             {"id": "codex-stale", "thread_name": "ghost-codex"},
@@ -145,6 +157,10 @@ def main():
               sl.get("hn-derived", {}).get("harness") == "")
         check("named Codex session resolved",
               sl.get("hn-codex", {}).get("harness") == "my-codex")
+        check("older Codex env ID resolved",
+              sl.get("hn-codex-old", {}).get("harness") == "old-codex")
+        check("inherited Codex ID on non-Codex process skipped",
+              sl.get("hn-inherited", {}).get("harness") == "")
         plain = subprocess.run([DCH, "-ls"], env=dict(os.environ, HOME=home),
                                capture_output=True, text=True).stdout
         check("plain list shows Codex title and real name",

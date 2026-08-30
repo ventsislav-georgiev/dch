@@ -13,7 +13,7 @@ Covers the leftover-socket bug and the attach-first hot path:
 Run:  python3 tests/spawn_test.py            (uses ./dch)
       DCH=/path/to/dch python3 tests/spawn_test.py
 """
-import os, sys, pty, signal, select, time, errno, socket, tempfile, shutil
+import json, os, sys, pty, signal, select, time, errno, socket, tempfile, shutil
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.environ.get("DCH", os.path.join(HERE, "..", "dch"))
@@ -85,6 +85,12 @@ def main():
 
     tmp = tempfile.mkdtemp()
     os.environ["XDG_RUNTIME_DIR"] = tmp
+    os.environ["HOME"] = os.path.join(tmp, "home")
+    os.environ["CODEX_THREAD_ID"] = "inherited-codex-id"
+    os.makedirs(os.path.join(os.environ["HOME"], ".codex"))
+    with open(os.path.join(os.environ["HOME"], ".codex", "session_index.jsonl"), "w") as f:
+        f.write(json.dumps({"id": "inherited-codex-id",
+                            "thread_name": "inherited-child"}) + "\n")
     sockdir = os.path.join(tmp, "dch-%d" % os.getuid())
     os.makedirs(sockdir, mode=0o700, exist_ok=True)
     fails = 0
@@ -149,6 +155,8 @@ def main():
 
         # Master should still be listed.
         listed = os.popen("'%s' -ls 2>/dev/null" % DCH).read().split()
+        if "inherited-child" in listed:
+            bad("non-Codex child inherited Codex ID and overlaid session")
         if name not in listed:
             bad("hot path: master not alive after detach (listed=%r)" % listed)
         else:

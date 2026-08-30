@@ -896,6 +896,30 @@ proc_dch_session(long pid, char *out, size_t outsz)
 	return proc_env_value(pid, "DCH_SESSION", out, outsz);
 }
 
+static int
+proc_is_codex(long pid)
+{
+	char path[4096];
+	const char *base;
+#ifdef __APPLE__
+	if (proc_pidpath((int)pid, path, sizeof(path)) <= 0)
+		return 0;
+#else
+	char proc[64];
+	ssize_t n;
+
+	snprintf(proc, sizeof(proc), "/proc/%ld/exe", pid);
+	n = readlink(proc, path, sizeof(path) - 1);
+	if (n <= 0)
+		return 0;
+	path[n] = '\0';
+#endif
+	base = strrchr(path, '/');
+	base = base ? base + 1 : path;
+	return strcmp(base, "codex") == 0 ||
+	       strcmp(base, "codex-code-mode-host") == 0;
+}
+
 /* Best-effort overlay of the Claude Code session name running inside each
 ** dch session. The harness writes ~/.claude/sessions/<pid>.json for every
 ** live claude process; that process's DCH_SESSION env names the dch session
@@ -1083,7 +1107,8 @@ load_codex_pid(struct slist *sl, const char *home, long pid)
 	const char *cn;
 	int i, target = -1;
 
-	if (proc_dch_session(pid, sess, sizeof(sess)) != 0)
+	if (!proc_is_codex(pid) ||
+	    proc_dch_session(pid, sess, sizeof(sess)) != 0)
 		return;
 	cn = canon_name(sess, cb, sizeof(cb));
 	for (i = 0; i < sl->n; i++)
@@ -1104,9 +1129,9 @@ load_codex_pid(struct slist *sl, const char *home, long pid)
 	sl->harness[target] = strdup(title);
 }
 
-/* A live process supplies DCH_SESSION; its environment or matching shell
-** snapshot supplies the thread ID. The title index alone is never a
-** liveness signal. */
+/* A genuine live Codex process supplies DCH_SESSION; its environment or
+** matching shell snapshot supplies the thread ID. The title index alone is
+** never a liveness signal. */
 static void
 load_codex_names(struct slist *sl)
 {

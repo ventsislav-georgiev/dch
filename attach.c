@@ -42,8 +42,8 @@ static volatile sig_atomic_t want_redraw;
 ** tracking, bracketed paste, alt-screen, cursor hide, no-wrap). dtach itself
 ** never touches these, but vim/fzf/less inside the session do — without this
 ** the parent shell ends up with mouse codes printing on movement and stdin
-** still in raw mode. Pop alt-screen LAST so the user's pre-attach view is
-** what stays on screen.
+** still in raw mode. Pop alt-screen LAST in case the child enabled it; inline
+** programs remain on the primary screen so native terminal scrollback works.
 */
 static void
 restore_term(void)
@@ -456,10 +456,6 @@ attach_main(int noerror)
 	cur_term.c_cc[VMIN] = 1;
 	cur_term.c_cc[VTIME] = 0;
 	tcsetattr(0, TCSADRAIN, &cur_term);
-
-	/* Enter alt-screen + home cursor. On detach, restore_term pops back
-	** to primary screen so the user's pre-attach scrollback is intact. */
-	write_buf_or_fail(1, "\033[?1049h\033[H", 11);
 
 	/* Tell the master that we want to attach. */
 	memset(&pkt, 0, sizeof(struct packet));

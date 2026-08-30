@@ -106,7 +106,8 @@ skipmirror(){ printf '  skip %s (build has no terminal mirror)\n' "$1"; }
 # --- spawn-vs-attach: leftover sockets + hot-path attach -------------------
 # Real forkpty spawn, so it needs an executable dch + python3. Skip gracefully.
 if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
-    pyrun "spawn over leftover socket + hot-path attach" spawn_test.py
+	pyrun "child owns alternate-screen mode" alt_screen_test.py
+	pyrun "spawn over leftover socket + hot-path attach" spawn_test.py
 fi
 
 # --- hot-path performance budget (spawn-vs-attach decision) ----------------

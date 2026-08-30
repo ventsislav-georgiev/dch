@@ -138,9 +138,10 @@ static size_t kbd_m_len;
 ** freshly attaching client can be re-armed. Mouse tracking + ext-coords, focus
 ** events (1004), and bracketed paste (2004) — the same input-reporting modes
 ** restore_term resets and Claude Code's App.tsx toggles. Alt-screen (1049) is
-** intentionally excluded: the attach client manages it itself. */
+** child-owned too: forcing it for every session turns terminal wheel events
+** into cursor keys for inline apps such as Codex. */
 static const int dec_modes[] = {
-	1000, 1002, 1003, 1004, 1006, 1015, 2004,
+	1000, 1002, 1003, 1004, 1006, 1015, 1049, 2004,
 };
 #define N_DEC_MODES ((int)(sizeof(dec_modes) / sizeof(dec_modes[0])))
 static unsigned char dec_on[N_DEC_MODES];
@@ -1379,10 +1380,8 @@ do_keys(struct client *p, const unsigned char *payload, unsigned int len)
 ** What does NOT survive: control connections other than the requester (they
 ** are one-shot RPCs; the client sees EOF and can retry) and the mirror's
 ** scrollback — only the visible screen is carried over, re-fed as ANSI.
-** The re-fed screen also lands on the mirror's PRIMARY buffer even when the
-** child is on the alt screen (1049 is not in dec_modes, so it is not carried):
-** the pixels are right, but a later \033[?1049l restores a primary buffer
-** holding what the alt screen showed, until the child repaints.
+** The re-fed screen also lands on the mirror's PRIMARY buffer; tracked DEC
+** mode 1049 restores the child's active buffer for attached terminals.
 ** ponytail: visible screen only. Carrying scrollback means replaying N
 ** screens of ANSI through a fresh grid; add it if --read --recent right after
 ** a restart ever matters more than the complexity.
