@@ -106,7 +106,7 @@ extern char **dch_argv;
 /* dch's own version, independent of the dtach base (PACKAGE_VERSION). Lives
 ** here, not in dch.c, because the master stamps it into the `<sock>.ver`
 ** sidecar so a client can tell which binary a running session is serving. */
-#define DCH_VERSION "1.11.0"
+#define DCH_VERSION "1.12.0"
 
 enum
 {
