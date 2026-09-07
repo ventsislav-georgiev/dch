@@ -1999,12 +1999,13 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 
 		/* Re-arm the terminal modes the child enabled for this client; a
 		** previous detach reset them, and the child only sets them once at
-		** startup. No-op for anything the child never enabled. */
+		** startup. No-op for anything the child never enabled. DEC modes
+		** first, keyboard protocol after: Ghostty/kitty keep the kitty flag
+		** stack per screen, so the push has to follow 1049h to land on the
+		** alt screen the child actually reads keys from — pushed before it,
+		** the flags sit on the primary screen, the child gets legacy keys
+		** and the detaching client's pop misses them. */
 		bad = flush_client(p) < 0;
-		if (!bad && kbd_u_len)
-			bad = queue_to_client(p, kbd_u, kbd_u_len) < 0;
-		if (!bad && kbd_m_len)
-			bad = queue_to_client(p, kbd_m, kbd_m_len) < 0;
 		for (k = 0; !bad && k < N_DEC_MODES; k++)
 			if (dec_on[k])
 			{
@@ -2015,6 +2016,10 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 					bad = queue_to_client(p, s,
 					    (size_t)sl) < 0;
 			}
+		if (!bad && kbd_u_len)
+			bad = queue_to_client(p, kbd_u, kbd_u_len) < 0;
+		if (!bad && kbd_m_len)
+			bad = queue_to_client(p, kbd_m, kbd_m_len) < 0;
 
 		/* The screen repaint does NOT happen here: MSG_ATTACH carries no
 		** winsize, so the mirror is still at the previous client's

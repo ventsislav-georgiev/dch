@@ -61,14 +61,24 @@ restore_term(void)
 	** (App.tsx: DISABLE_MODIFY_OTHER_KEYS, DISABLE_KITTY_KEYBOARD, focus
 	** off, bracketed-paste off). \e[?1049l leave alt-screen and restore
 	** primary. The master replays whatever the child set to the next client
-	** that attaches, so reattach keeps the inner app's modes. */
+	** that attaches, so reattach keeps the inner app's modes.
+	**
+	** The kitty pop runs twice, once on each side of the alt-screen exit:
+	** Ghostty (and kitty) keep one flag stack PER SCREEN and do not copy it
+	** on 1049h/l. A push that landed on the primary screen (the master's
+	** re-arm, an inline app) is invisible to a pop issued from the alt
+	** screen, and vice versa — with a single pop the bare shell came back
+	** with ctrl-d typing `0;5u`. \e[<8u rather than \e[<u: Ghostty's stack
+	** is 8 deep and a pop of >= 8 empties it outright, so nested pushes
+	** (a TUI launched from inside the session) can't leave a level behind. */
 	printf("\033[?25h"
 	       "\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?1015l"
 	       "\033[?1004l"
 	       "\033[?2004l\033[?7h"
-	       "\033[<u"
+	       "\033[<8u"
 	       "\033[>4;0m"
-	       "\033[?1049l");
+	       "\033[?1049l"
+	       "\033[<8u");
 	fflush(stdout);
 }
 
