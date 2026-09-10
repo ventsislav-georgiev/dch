@@ -33,6 +33,12 @@ dch \- detachable terminal sessions with a headless agent API
 .I str
 .RB [ \-\-timeout
 .IR ms ]
+.br
+.B dch \-\-agent\-list
+.RB [ \-\-json ]
+.br
+.B dch \-\-agent\-send
+.I peer message...
 .SH DESCRIPTION
 .B dch
 keeps a program running in a detachable session (a fork of dtach). Run bare,
@@ -263,11 +269,47 @@ re\-exec failed (the old master rolls back and keeps serving) or if the master
 is too old to know the verb, in which case the session must be recreated.
 Scrollback held only in the mirror is not carried across a restart; the
 visible screen is.
+.TP
+.BR \-\-agent\-list " [" \-\-json "]"
+List live authenticated Claude native peers. The default writes exact names,
+one per line. With
+.BR \-\-json ,
+it writes an array of objects containing
+.I name
+and
+.IR session_id .
+.TP
+.BI \-\-agent\-send " peer message..."
+Send a message from the current bridged Codex session to one exact peer name.
+Arguments after the name are joined with spaces. The command exits 0 only for
+an authenticated
+.B delivered
+receipt. Refused, dropped, held, denied, expired, ambiguous, and timed-out
+sends exit 1. The source sidecar remains available after this command exits,
+so the peer can reply later. Agent commands run inside Codex authenticate to
+that sidecar; it performs process-identity checks and peer lookup without
+requiring the Codex sandbox to execute
+.BR ps .
+.PP
+Full dch builds register a directly launched Codex command as a Claude native
+peer named after its stable
+.BR DCH_SESSION .
+Registration starts after Codex writes the first shell snapshot and only when
+the launch marker identifies one UUID. Multiple matching UUIDs are ambiguous;
+start a fresh dch Codex session instead of risking delivery to the wrong
+thread. Sessions started by older dch versions have no marker and do not
+register. Native messages use
+.B codex queue
+and can take about five seconds to appear in the TUI. A delivery receipt means
+the queue accepted the message. It does not mean the model processed it. The
+first turn can be refused because no rollout exists yet; retry after that turn.
+Messages are limited to 16384 bytes and wire frames to 65536 bytes. The bridge
+handles one request at a time and rejects attachments.
 .SH EXIT STATUS
 0 on success. Control verbs: 1 generic error, 2
 .B \-\-wait
-timeout, 3 mirror unavailable (dch-lite build or
-.BR DCH_NO_VT ).
+timeout, 3 unavailable in this build. A dch-lite build has no terminal mirror
+and no native agent bridge.
 .SH ENVIRONMENT
 .TP
 .B DCH_SOCKET_DIR

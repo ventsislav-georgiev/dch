@@ -33,6 +33,9 @@
 /* Define to 1 if you have the 'memset' function. */
 #undef HAVE_MEMSET
 
+/* Define if the native Claude/Codex bridge is built in */
+#undef HAVE_NATIVE_AGENT_BRIDGE
+
 /* Define to 1 if you have the 'openpty' function. */
 #undef HAVE_OPENPTY
 

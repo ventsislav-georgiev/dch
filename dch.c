@@ -920,75 +920,106 @@ proc_is_codex(long pid)
 	       strcmp(base, "codex-code-mode-host") == 0;
 }
 
+int
+dch_visit_claude_records(dch_claude_record_fn visit, void *arg)
+{
+	const char *base = getenv("CLAUDE_CONFIG_DIR"), *home = getenv("HOME");
+	char dir[1100];
+	DIR *d;
+	struct dirent *de;
+
+	if ((!base || !*base) && (!home || !*home))
+		return 0;
+	if (snprintf(dir, sizeof dir, "%s%s/sessions", base && *base ? base : home,
+	             base && *base ? "" : "/.claude") >= (int)sizeof dir ||
+	    !(d = opendir(dir)))
+		return 0;
+	while ((de = readdir(d)))
+	{
+		char path[1400], body[8192], extra;
+		struct stat before, after;
+		size_t len = 0, n = strlen(de->d_name);
+		int fd;
+		if (n < 6 || strcmp(de->d_name + n - 5, ".json") ||
+		    snprintf(path, sizeof path, "%s/%s", dir, de->d_name) >=
+		        (int)sizeof path)
+			continue;
+		fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+		if (fd < 0 || fstat(fd, &before) < 0 || !S_ISREG(before.st_mode) ||
+		    before.st_uid != getuid() || (before.st_mode & 022) ||
+		    before.st_size <= 0 || before.st_size >= (off_t)sizeof body)
+		{
+			if (fd >= 0) close(fd);
+			continue;
+		}
+		while (len < (size_t)before.st_size)
+		{
+			ssize_t r = read(fd, body + len, (size_t)before.st_size - len);
+			if (r > 0) len += (size_t)r;
+			else if (r < 0 && errno == EINTR) continue;
+			else break;
+		}
+		if (len != (size_t)before.st_size || read(fd, &extra, 1) != 0 ||
+		    fstat(fd, &after) < 0 || after.st_size != before.st_size ||
+		    after.st_dev != before.st_dev || after.st_ino != before.st_ino ||
+		    memchr(body, '\0', len))
+		{
+			close(fd);
+			continue;
+		}
+		close(fd);
+		body[len] = '\0';
+		if (visit(path, body, len, arg) < 0)
+		{
+			closedir(d);
+			return -1;
+		}
+	}
+	closedir(d);
+	return 0;
+}
+
 /* Best-effort overlay of the Claude Code session name running inside each
 ** dch session. The harness writes ~/.claude/sessions/<pid>.json for every
 ** live claude process; that process's DCH_SESSION env names the dch session
 ** exactly, so the join needs no cwd heuristics. Auto-titled harness names
 ** ("nameSource":"derived") are skipped — "dch-28" beats no one. Explicit
 ** dch aliases still win in the picker. */
+static int
+load_harness_record(const char *path, const char *body, size_t body_len,
+                    void *arg)
+{
+	struct slist *sl = arg;
+	char jb[8192], sess[600], cb[256], *nm, *q, *endp;
+	const char *base = strrchr(path, '/'), *cn;
+	long pid;
+	int i;
+	if (body_len >= sizeof jb) return 0;
+	memcpy(jb, body, body_len + 1);
+	base = base ? base + 1 : path;
+	pid = strtol(base, &endp, 10);
+	if (pid <= 0 || strcmp(endp, ".json") ||
+	    strstr(jb, "\"nameSource\":\"derived\"")) return 0;
+	nm = strstr(jb, "\"name\":\"");
+	if (!nm || !(q = strchr(nm += 8, '"')) || q == nm) return 0;
+	*q = '\0';
+	for (char *c = nm; *c; c++)
+		if (*c == '\t' || *c == '\n' || *c == '\r') *c = ' ';
+	if (proc_dch_session(pid, sess, sizeof sess) != 0) return 0;
+	cn = canon_name(sess, cb, sizeof cb);
+	for (i = 0; i < sl->n; i++)
+		if (!sl->harness[i] && strcmp(sl->v[i], cn) == 0)
+		{
+			sl->harness[i] = strdup(nm);
+			break;
+		}
+	return 0;
+}
+
 static void
 load_harness_names(struct slist *sl)
 {
-	const char *home = getenv("HOME");
-	char dir[1100];
-	DIR *d;
-	struct dirent *de;
-
-	if (sl->n == 0 || !home || !home[0])
-		return;
-	snprintf(dir, sizeof(dir), "%s/.claude/sessions", home);
-	d = opendir(dir);
-	if (!d)
-		return;
-	while ((de = readdir(d)))
-	{
-		char path[1400], jb[4096], sess[600], cb[256];
-		char *nm, *q, *endp;
-		const char *cn;
-		long pid;
-		size_t n = strlen(de->d_name);
-		int fd, r, i;
-
-		if (n < 6 || strcmp(de->d_name + n - 5, ".json") != 0)
-			continue;
-		pid = strtol(de->d_name, &endp, 10);
-		if (pid <= 0 || endp != de->d_name + n - 5)
-			continue;
-		snprintf(path, sizeof(path), "%s/%s", dir, de->d_name);
-		fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
-		if (fd < 0)
-			continue;
-		r = (int)read(fd, jb, sizeof(jb) - 1);
-		close(fd);
-		if (r <= 0)
-			continue;
-		jb[r] = '\0';
-		if (strstr(jb, "\"nameSource\":\"derived\""))
-			continue;
-		nm = strstr(jb, "\"name\":\"");
-		if (!nm)
-			continue;
-		nm += 8;
-		q = strchr(nm, '"');
-		if (!q || q == nm)
-			continue;
-		*q = '\0';
-		/* Keep the name single-line so --ls-json stays valid. */
-		for (char *c = nm; *c; c++)
-			if (*c == '\t' || *c == '\n' || *c == '\r')
-				*c = ' ';
-		if (proc_dch_session(pid, sess, sizeof(sess)) != 0)
-			continue;
-		/* Sockets store canonical (possibly shortened) names. */
-		cn = canon_name(sess, cb, sizeof(cb));
-		for (i = 0; i < sl->n; i++)
-			if (!sl->harness[i] && strcmp(sl->v[i], cn) == 0)
-			{
-				sl->harness[i] = strdup(nm);
-				break;
-			}
-	}
-	closedir(d);
+	if (sl->n) (void)dch_visit_claude_records(load_harness_record, sl);
 }
 
 /* Look up a Codex thread's current user-visible name. session_index.jsonl
@@ -1003,7 +1034,7 @@ codex_thread_name(const char *home, const char *id, char *out, size_t outsz)
 	struct stat st;
 	int fd, r, tail = 0;
 
-	snprintf(path, sizeof(path), "%s/.codex/session_index.jsonl", home);
+	snprintf(path, sizeof(path), "%s/session_index.jsonl", home);
 	fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
 	if (fd < 0)
 		return -1;
@@ -1053,16 +1084,24 @@ codex_thread_name(const char *home, const char *id, char *out, size_t outsz)
 /* Current Codex releases no longer export the thread ID to the long-lived
 ** process. Its shell snapshot still joins that ID (the filename prefix) to
 ** the inherited DCH_SESSION. Prefer the newest exact match. */
-static int
-codex_snapshot_id(const char *home, const char *sess, char *out, size_t outsz)
+int
+dch_codex_snapshot_id(const char *home, const char *sess, const char *marker,
+                      char *out, size_t outsz, int strict)
 {
-	char dir[1200], want[700];
+	char dir[1200], want[700], mark[700];
 	struct dirent *de;
 	struct stat best = {0};
 	DIR *d;
+	int ambiguous = 0;
+	char strict_id[128] = "";
 
-	snprintf(dir, sizeof(dir), "%s/.codex/shell_snapshots", home);
+	if (snprintf(dir, sizeof(dir), "%s/shell_snapshots", home) >=
+	    (int)sizeof(dir))
+		return -1;
 	snprintf(want, sizeof(want), "\nexport DCH_SESSION=%s\n", sess);
+	if (marker)
+		snprintf(mark, sizeof(mark), "\nexport %s=%s\n",
+		         "DCH_NATIVE_BRIDGE_ID", marker);
 	d = opendir(dir);
 	if (!d)
 		return -1;
@@ -1077,33 +1116,99 @@ codex_snapshot_id(const char *home, const char *sess, char *out, size_t outsz)
 		if (n < 4 || !dot || (size_t)(dot - de->d_name) >= outsz ||
 		    strcmp(de->d_name + n - 3, ".sh") != 0)
 			continue;
+		if (strict)
+		{
+			int valid = (size_t)(dot - de->d_name) == 36;
+			for (int j = 0; valid && j < 36; j++)
+				if (j == 8 || j == 13 || j == 18 || j == 23)
+					valid = de->d_name[j] == '-';
+				else
+					valid = isxdigit((unsigned char)de->d_name[j]);
+			if (!valid)
+				continue;
+		}
 		snprintf(path, sizeof(path), "%s/%s", dir, de->d_name);
 		fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
 		if (fd < 0 || fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
-		    st.st_uid != getuid() || st.st_size >= (off_t)sizeof(buf))
+		    st.st_uid != getuid() || (strict && (st.st_mode & 022)) ||
+		    st.st_size <= 0 || st.st_size >= (off_t)sizeof(buf))
 		{
 			if (fd >= 0) close(fd);
 			continue;
 		}
-		r = (int)read(fd, buf, sizeof(buf) - 1);
+		if (strict)
+		{
+			struct stat after;
+			char extra;
+			size_t off = 0;
+			while (off < (size_t)st.st_size)
+			{
+				ssize_t got = read(fd, buf + off, (size_t)st.st_size - off);
+				if (got > 0) off += (size_t)got;
+				else if (got < 0 && errno == EINTR) continue;
+				else break;
+			}
+			r = (int)off;
+			if (off != (size_t)st.st_size || read(fd, &extra, 1) != 0 ||
+			    fstat(fd, &after) < 0 || after.st_size != st.st_size ||
+			    after.st_dev != st.st_dev || after.st_ino != st.st_ino ||
+			    memchr(buf, '\0', off)) r = -1;
+		}
+		else
+			r = (int)read(fd, buf, sizeof(buf) - 1);
 		close(fd);
 		if (r <= 0)
 			continue;
 		buf[r] = '\0';
-		if (!strstr(buf, want) || (best.st_mtime && st.st_mtime < best.st_mtime))
+		if (!strstr(buf, want) || (marker && !strstr(buf, mark)))
 			continue;
+		if (strict)
+		{
+			size_t idlen = (size_t)(dot - de->d_name);
+			if (!strict_id[0])
+			{
+				memcpy(strict_id, de->d_name, idlen);
+				strict_id[idlen] = '\0';
+				memcpy(out, strict_id, idlen + 1);
+				best = st;
+			}
+			else if (strlen(strict_id) != idlen ||
+			         strncmp(strict_id, de->d_name, idlen) != 0)
+				ambiguous = 1;
+			continue;
+		}
+		if (best.st_mtime)
+		{
+#ifdef __APPLE__
+			if (st.st_mtimespec.tv_sec < best.st_mtimespec.tv_sec ||
+			    (st.st_mtimespec.tv_sec == best.st_mtimespec.tv_sec &&
+			     st.st_mtimespec.tv_nsec < best.st_mtimespec.tv_nsec))
+				continue;
+			ambiguous = st.st_mtimespec.tv_sec == best.st_mtimespec.tv_sec &&
+			            st.st_mtimespec.tv_nsec == best.st_mtimespec.tv_nsec;
+#else
+			if (st.st_mtim.tv_sec < best.st_mtim.tv_sec ||
+			    (st.st_mtim.tv_sec == best.st_mtim.tv_sec &&
+			     st.st_mtim.tv_nsec < best.st_mtim.tv_nsec))
+				continue;
+			ambiguous = st.st_mtim.tv_sec == best.st_mtim.tv_sec &&
+			            st.st_mtim.tv_nsec == best.st_mtim.tv_nsec;
+#endif
+		}
+		else
+			ambiguous = 0;
 		memcpy(out, de->d_name, (size_t)(dot - de->d_name));
 		out[dot - de->d_name] = '\0';
 		best = st;
 	}
 	closedir(d);
-	return best.st_mtime ? 0 : -1;
+	return best.st_mtime && !(strict && ambiguous) ? 0 : -1;
 }
 
 static void
 load_codex_pid(struct slist *sl, const char *home, long pid)
 {
-	char id[128], sess[600], title[600], cb[256];
+	char id[128], sess[600], title[600], cb[256], codexdir[1200];
 	const char *cn;
 	int i, target = -1;
 
@@ -1117,11 +1222,15 @@ load_codex_pid(struct slist *sl, const char *home, long pid)
 			target = i;
 			break;
 		}
+	if (getenv("CODEX_HOME") && getenv("CODEX_HOME")[0])
+		snprintf(codexdir, sizeof codexdir, "%s", getenv("CODEX_HOME"));
+	else
+		snprintf(codexdir, sizeof codexdir, "%s/.codex", home);
 	if (target < 0 ||
 	    (proc_env_value(pid, "CODEX_THREAD_ID", id, sizeof(id)) != 0 &&
 	     proc_env_value(pid, "CODEX_SESSION_ID", id, sizeof(id)) != 0 &&
-	     codex_snapshot_id(home, sess, id, sizeof(id)) != 0) ||
-	    codex_thread_name(home, id, title, sizeof(title)) != 0)
+	     dch_codex_snapshot_id(codexdir, sess, NULL, id, sizeof(id), 0) != 0) ||
+	    codex_thread_name(codexdir, id, title, sizeof(title)) != 0)
 		return;
 	for (char *c = title; *c; c++)
 		if (*c == '\t' || *c == '\n' || *c == '\r')
@@ -1752,6 +1861,8 @@ usage(void)
 	    "  dch --report <name> <state>                set state (optional hooks;\n"
 	    "                                             `clear` reverts to auto)\n"
 	    "  dch --ls-json    like -lj but JSON, adds \"state\"\n"
+	    "  dch --agent-list [--json]                  list native Claude peers\n"
+	    "  dch --agent-send <name> <message...>       message one native peer\n"
 	    "Env: DCH_NO_DETECT=1 disables screen-content state detection.\n"
 	    "     DCH_DOUBLE_TAP_MS sets the switch double-press window\n"
 	    "     (default 300; 0 disables switching, detach becomes instant).\n"
@@ -2946,11 +3057,12 @@ main(int argc, char **argv)
 	enum { A_ATTACH, A_LIST, A_KILL, A_KILLALL, A_DETACH, A_LISTRAW,
 	       A_RENAME, A_LISTJSON, A_LISTJSON2, A_SETALIAS,
 	       A_SPAWN, A_SEND, A_RUN, A_KEYS, A_READ, A_WAIT, A_STATUS,
-	       A_REPORT, A_RESTART }
+	       A_REPORT, A_RESTART, A_AGENT_LIST, A_AGENT_SEND }
 	    action = A_ATTACH;
 	char alias_arg[600] = "";
 	int opt_ansi = 0, opt_recent = -1, opt_timeout = 10000, opt_cursor = 0;
 	int opt_all = 0;
+	int opt_agent_json = 0;
 	int opt_cols = 0, opt_rows = 0;
 	char opt_match[DCH_WAIT_MAX + 1] = "";
 	char opt_state[40] = "";
@@ -3126,6 +3238,33 @@ main(int argc, char **argv)
 		{
 			action = A_LISTJSON2;
 			i++;
+		}
+		else if (strcmp(a, "--agent-list") == 0)
+		{
+			action = A_AGENT_LIST;
+			i++;
+			if (i < argc && strcmp(argv[i], "--json") == 0)
+			{
+				opt_agent_json = 1;
+				i++;
+			}
+		}
+		else if (strcmp(a, "--agent-send") == 0)
+		{
+			action = A_AGENT_SEND;
+			i++;
+			if (i >= argc || !argv[i][0])
+			{
+				fprintf(stderr, "dch: --agent-send needs a peer name and message\n");
+				return 1;
+			}
+			if (strlen(argv[i]) >= sizeof session_name)
+			{
+				fprintf(stderr, "dch: peer name is too long\n");
+				return 1;
+			}
+			snprintf(session_name, sizeof session_name, "%s", argv[i++]);
+			break;
 		}
 		else if (strcmp(a, "--spawn") == 0 ||
 		         strcmp(a, "--send") == 0 ||
@@ -3313,6 +3452,20 @@ main(int argc, char **argv)
 
 	switch (action)
 	{
+	case A_AGENT_LIST:
+		if (inner_argc)
+		{
+			fprintf(stderr, "dch: --agent-list takes only optional --json\n");
+			return 1;
+		}
+		return dch_bridge_agent_list(opt_agent_json);
+	case A_AGENT_SEND:
+		if (!inner_argc)
+		{
+			fprintf(stderr, "dch: --agent-send needs a non-empty message\n");
+			return 1;
+		}
+		return dch_bridge_agent_send(session_name, inner_argc, inner_argv);
 	case A_RESTART:
 	{
 		struct slist sl = {0};

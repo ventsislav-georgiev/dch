@@ -15,6 +15,7 @@ AC_ARG_WITH([libghostty],
 VT_OBJS=vt_stub.o
 VT_LIBS=
 VT_CPPFLAGS=
+BRIDGE_OBJS=bridge_stub.o
 if test "x$with_libghostty" != xno; then
 	vt_platform=`uname -s | tr 'A-Z' 'a-z'`-`uname -m`
 	vt_lib="$srcdir/vendor/libghostty-vt/lib/$vt_platform/libghostty-vt.a"
@@ -24,6 +25,9 @@ if test "x$with_libghostty" != xno; then
 		VT_OBJS=vt.o
 		VT_LIBS=$vt_lib
 		VT_CPPFLAGS="-I\$(srcdir)/vendor/libghostty-vt/include"
+		AC_DEFINE([HAVE_NATIVE_AGENT_BRIDGE], [1],
+			[Define if the native Claude/Codex bridge is built in])
+		BRIDGE_OBJS=bridge.o
 	else
 		AC_MSG_ERROR([no vendored libghostty-vt.a for $vt_platform.
 Run scripts/build-libghostty.sh (needs zig 0.15.x), or configure --without-libghostty for dch-lite.])
@@ -32,6 +36,7 @@ fi
 AC_SUBST([VT_OBJS])
 AC_SUBST([VT_LIBS])
 AC_SUBST([VT_CPPFLAGS])
+AC_SUBST([BRIDGE_OBJS])
 
 # Checks for programs.
 AC_PROG_CC

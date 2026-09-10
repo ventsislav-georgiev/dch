@@ -1834,10 +1834,14 @@ pty_activity(void)
 	if (len <= 0)
 	{
 		int status;
+		pid_t waited;
 
 		dch_trace("pty eof len=%zd errno=%d -> master exit", len, errno);
 
-		if (wait(&status) >= 0)
+		do
+			waited = waitpid(the_pty.pid, &status, 0);
+		while (waited < 0 && errno == EINTR);
+		if (waited >= 0)
 		{
 			if (WIFEXITED(status))
 				exit(WEXITSTATUS(status));
@@ -2365,6 +2369,7 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 	atexit(unlink_socket);
 
 	signal(SIGCHLD, die);
+	dch_bridge_prepare(argv, resume.valid);
 
 	if (resume.valid)
 	{
@@ -2409,6 +2414,7 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 				dch_trace("vt mirror unavailable");
 		}
 	}
+	dch_bridge_start(argv, resume.valid, the_pty.fd, s, statusfd);
 
 	/* Stamp the version LAST, once this image is actually serving: a client
 	** that reads the sidecar is asking "what is running", not "what was
@@ -2445,6 +2451,7 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 	{
 		int new_has_attached_client = 0;
 		int have_writes = 0;
+		dch_bridge_reap();
 
 		/* Re-initialize the file descriptor set for select. */
 		FD_ZERO(&readfds);

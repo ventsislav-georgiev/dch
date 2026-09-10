@@ -445,43 +445,44 @@ For a session meant to run for days, point `DCH_SOCKET_DIR` somewhere
 other than `/tmp` (see `dch.1`'s ENVIRONMENT section) so the cleaner never
 has a reason to touch it in the first place.
 
-## Claude to Codex queue proof
+## Native Claude and Codex messages
 
-`claude_codex_queue.py` is a standalone proof for Claude Code's native peer
-messaging. It does not use dch input verbs or poll an inbox. It registers one
-temporary Claude peer, accepts an authenticated `SendMessage`, then runs
-`codex queue` for one explicit Codex thread. It removes its Claude record,
-key, and socket when it exits.
+A Codex command started by a full dch build registers as a Claude native peer.
+Its peer name is the stable `DCH_SESSION` name. Claude can find it with native
+`ListAgents` and send with native `SendMessage`. No helper, app-server, remote
+mode, or terminal injection is involved.
 
-Start the shared Codex app-server daemon, then run the target TUI through that
-daemon. The target thread must already be loaded in that TUI.
+Codex can use the peer network from its shell tools:
 
 ```sh
-codex app-server daemon start
-codex --remote unix://
+dch --agent-list
+dch --agent-list --json
+dch --agent-send '<exact peer name>' 'message text'
 ```
 
-In another terminal, start the foreground peer. Pass the target's UUID or its
-exact session name. The script prints its Claude `session_id`; Claude's native
-`ListAgents`/`SendMessage` uses that registered peer. Do not stop the script
-until Claude has sent the message.
+Inside Codex, these commands authenticate to the session's persistent sidecar.
+The sidecar performs the process-identity checks and peer lookup, so Codex's
+sandbox does not need permission to run `ps`.
 
-```sh
-python3 claude_codex_queue.py \
-  --thread '<Codex UUID or exact session name>' \
-  --remote unix://
-```
+An inbound message identifies its authenticated sender and includes the reply
+command before the untrusted content. `--agent-send` exits 0 only after the
+peer returns a `delivered` receipt. Refused, dropped, held, denied, expired,
+ambiguous, and timed-out sends exit 1.
 
-The listener requires Claude's auth frame, accepts one bounded user-message
-shape, and sends `peer_message_status: delivered` to the frame's reply socket
-only after `codex queue` exits successfully. It has no retry or cold-thread
-wakeup path.
+Codex creates its shell snapshot after the first turn starts. The peer stays
+absent until dch can bind the current session to exactly one snapshot UUID.
+If `/new`, a nested Codex command, or inherited state produces more than one
+matching UUID, dch refuses to guess. Start a fresh dch Codex session. Sessions
+started by older dch versions lack the launch marker and cannot register.
 
-Run the isolated proof without a real Codex daemon:
-
-```sh
-python3 tests/claude_codex_queue_test.py
-```
+`codex queue` normally accepts a message quickly, but the TUI currently checks
+its queue about every five seconds. Delivery receipts mean the queue accepted
+the message, not that the model has processed it. Before Codex completes its
+first turn, `codex queue` can refuse because no rollout exists yet; retry after
+that turn. Messages are limited to 16,384 bytes and wire frames to 65,536
+bytes. The bridge handles one bounded request at a time and does not support
+attachments or broadcast. The native bridge is excluded from dch-lite; both
+agent verbs exit 3 there.
 
 ## How it differs from upstream dtach
 
