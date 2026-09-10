@@ -445,6 +445,44 @@ For a session meant to run for days, point `DCH_SOCKET_DIR` somewhere
 other than `/tmp` (see `dch.1`'s ENVIRONMENT section) so the cleaner never
 has a reason to touch it in the first place.
 
+## Claude to Codex queue proof
+
+`claude_codex_queue.py` is a standalone proof for Claude Code's native peer
+messaging. It does not use dch input verbs or poll an inbox. It registers one
+temporary Claude peer, accepts an authenticated `SendMessage`, then runs
+`codex queue` for one explicit Codex thread. It removes its Claude record,
+key, and socket when it exits.
+
+Start the shared Codex app-server daemon, then run the target TUI through that
+daemon. The target thread must already be loaded in that TUI.
+
+```sh
+codex app-server daemon start
+codex --remote unix://
+```
+
+In another terminal, start the foreground peer. Pass the target's UUID or its
+exact session name. The script prints its Claude `session_id`; Claude's native
+`ListAgents`/`SendMessage` uses that registered peer. Do not stop the script
+until Claude has sent the message.
+
+```sh
+python3 claude_codex_queue.py \
+  --thread '<Codex UUID or exact session name>' \
+  --remote unix://
+```
+
+The listener requires Claude's auth frame, accepts one bounded user-message
+shape, and sends `peer_message_status: delivered` to the frame's reply socket
+only after `codex queue` exits successfully. It has no retry or cold-thread
+wakeup path.
+
+Run the isolated proof without a real Codex daemon:
+
+```sh
+python3 tests/claude_codex_queue_test.py
+```
+
 ## How it differs from upstream dtach
 
 This fork (the `dch.c` entry point + small `attach.c` / `master.c` patches)
