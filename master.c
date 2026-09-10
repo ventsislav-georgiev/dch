@@ -1976,6 +1976,7 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 	else if (type == MSG_ATTACH)
 	{
 		int k, bad;
+		int rearm = dch_vt_enabled() || !pty_gated;
 
 		/* Someone showed up: open the --spawn pty gate and pull what the
 		** child already printed into the mirror, exactly as a control
@@ -1984,10 +1985,11 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 		** has landed does not make it readable — the output then sits in
 		** the pty until the child writes again, and a session that prints
 		** once and waits replays blank. With a mirror, drain before
-		** p->attached so replay keeps its mode-before-screen ordering. Lite
-		** has no replay, so attach first and forward startup output live. */
+		** p->attached so replay keeps its mode-before-screen ordering. The
+		** first gated lite attach forwards startup output live, including its
+		** modes, so it must not re-arm those same modes below. */
 		pty_gated = 0;
-		if (!dch_vt_enabled())
+		if (!rearm)
 			p->attached = 1;
 		drain_pty();
 
@@ -2008,19 +2010,18 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 		** the flags sit on the primary screen, the child gets legacy keys
 		** and the detaching client's pop misses them. */
 		bad = flush_client(p) < 0;
-		for (k = 0; !bad && k < N_DEC_MODES; k++)
+		for (k = 0; rearm && !bad && k < N_DEC_MODES; k++)
 			if (dec_on[k])
-			{
-				unsigned char s[16];
-				int sl = snprintf((char *)s, sizeof s,
-				    "\033[?%dh", dec_modes[k]);
-				if (sl > 0 && (size_t)sl <= sizeof(s))
-					bad = queue_to_client(p, s,
-					    (size_t)sl) < 0;
-			}
-		if (!bad && kbd_u_len)
+		{
+			unsigned char s[16];
+			int sl = snprintf((char *)s, sizeof s,
+			    "\033[?%dh", dec_modes[k]);
+			if (sl > 0 && (size_t)sl <= sizeof(s))
+				bad = queue_to_client(p, s, (size_t)sl) < 0;
+		}
+		if (rearm && !bad && kbd_u_len)
 			bad = queue_to_client(p, kbd_u, kbd_u_len) < 0;
-		if (!bad && kbd_m_len)
+		if (rearm && !bad && kbd_m_len)
 			bad = queue_to_client(p, kbd_m, kbd_m_len) < 0;
 
 		/* The screen repaint does NOT happen here: MSG_ATTACH carries no

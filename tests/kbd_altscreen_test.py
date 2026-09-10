@@ -120,6 +120,8 @@ def main():
         first = drain(fd_a, 15.0, b"READY")
         if b"READY" not in first:
             print("FAIL: inner program never started:", repr(first)); return 1
+        if first.count(ALT_ON) != 1 or first.count(PUSH) != 1:
+            print("FAIL: first attach duplicated child modes:", repr(first)); return 1
         if check_detach("first", detach(pid_a, fd_a)):
             return 1
         pid_a = None
@@ -127,7 +129,8 @@ def main():
         pid_b, fd_b = spawn(["-f", "-n", SESS])
         replay = drain(fd_b, 10.0, PUSH)
         alt, push = replay.find(ALT_ON), replay.find(PUSH)
-        if alt < 0 or push < 0:
+        if alt < 0 or push < 0 or replay.count(ALT_ON) != 1 \
+           or replay.count(PUSH) != 1:
             print("FAIL: reattach did not re-arm alt screen + kitty push:", repr(replay))
             return 1
         if push < alt:
