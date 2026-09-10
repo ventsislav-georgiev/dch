@@ -13,7 +13,7 @@ copy it across 1049h/l. Two consequences dch has to respect:
 
 Run:  python3 tests/kbd_altscreen_test.py            (uses ./dch)
 """
-import errno, os, pty, re, select, signal, sys, time
+import errno, os, pty, re, select, signal, shutil, subprocess, sys, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.environ.get("DCH", os.path.join(HERE, "..", "dch"))
@@ -83,10 +83,38 @@ def main():
         print("FAIL: dch not executable at", DCH); return 1
     os.system("'%s' -k %s >/dev/null 2>&1" % (DCH, SESS))
 
-    # Alt-screen TUI that turns on the kitty protocol, like Claude Code.
+    # Make the child write before its first client attaches. A no-mirror
+    # master cannot replay this startup output, so first attach must forward it.
+    tmp = tempfile.mkdtemp(prefix="dch-kbd-pending-")
+    pending = os.path.join(tmp, "ready")
+    os.environ["DCH_SOCKET_DIR"] = tmp
+    sock = os.path.join(tmp, SESS + ".sock")
     child = ("import sys,time;sys.stdout.write('\\x1b[?1049h\\x1b[>1uREADY\\n');"
-             "sys.stdout.flush();time.sleep(60)")
-    pid_a, fd_a = spawn(["-n", SESS, sys.executable, "-c", child])
+             "sys.stdout.flush();open(%r,'w').close();time.sleep(60)" % pending)
+    env = dict(os.environ, DCH_NO_VT="1")
+    master = subprocess.Popen([DCH, "--master-of", sock, "--",
+                               sys.executable, "-c", child], env=env,
+                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, start_new_session=True)
+    for _ in range(100):
+        if os.path.exists(sock):
+            break
+        time.sleep(0.05)
+    if not os.path.exists(sock):
+        master.terminate()
+        master.wait()
+        shutil.rmtree(tmp, ignore_errors=True)
+        print("FAIL: no master socket"); return 1
+    for _ in range(100):
+        if os.path.exists(pending):
+            break
+        time.sleep(0.05)
+    if not os.path.exists(pending):
+        os.system("'%s' -k %s >/dev/null 2>&1" % (DCH, SESS))
+        master.terminate()
+        shutil.rmtree(tmp, ignore_errors=True)
+        print("FAIL: inner program did not queue startup output"); return 1
+    pid_a, fd_a = spawn(["-f", "-n", SESS])
     pid_b = None
     try:
         first = drain(fd_a, 15.0, b"READY")
@@ -119,6 +147,10 @@ def main():
                 except OSError:
                     pass
         os.system("'%s' -k %s >/dev/null 2>&1" % (DCH, SESS))
+        if master.poll() is None:
+            master.terminate()
+            master.wait()
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":

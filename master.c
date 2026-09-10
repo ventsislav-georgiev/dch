@@ -1983,10 +1983,12 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 		** is a race we lose on macOS, where arming the fd after the write
 		** has landed does not make it readable — the output then sits in
 		** the pty until the child writes again, and a session that prints
-		** once and waits replays blank. Drain before p->attached, so the
-		** bytes reach this client as part of the replay below rather than
-		** raw and out of order. */
+		** once and waits replays blank. With a mirror, drain before
+		** p->attached so replay keeps its mode-before-screen ordering. Lite
+		** has no replay, so attach first and forward startup output live. */
 		pty_gated = 0;
+		if (!dch_vt_enabled())
+			p->attached = 1;
 		drain_pty();
 
 		p->attached = 1;
