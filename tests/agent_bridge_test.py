@@ -93,6 +93,15 @@ def wait_until(predicate, timeout=5):
     return None
 
 
+def published_name(record_path):
+    # The sidecar unlinks and recreates its record on a rename, so a read can
+    # land in the gap between the two.
+    try:
+        return json.loads(record_path.read_text()).get("name")
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
 def proc_start(pid):
     try:
         result = subprocess.run(
@@ -501,20 +510,12 @@ signal.pause()
             )
             check(
                 "peer name follows the Codex thread title",
-                wait_until(
-                    lambda: json.loads(record_path.read_text()).get("name")
-                    == "Titled Thread",
-                    timeout=12,
-                ),
+                wait_until(lambda: published_name(record_path) == "Titled Thread", timeout=12),
             )
             index.unlink()
             check(
                 "peer name falls back to DCH_SESSION without a title",
-                wait_until(
-                    lambda: json.loads(record_path.read_text()).get("name")
-                    == session,
-                    timeout=12,
-                ),
+                wait_until(lambda: published_name(record_path) == session, timeout=12),
             )
             reply = ClaudePeer(sessions, root, "reply", os.getpid(), own_start)
             reply.publish("reply-peer", name_source="derived")
