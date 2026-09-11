@@ -727,7 +727,8 @@ signal.pause()
             pinned_held = receipt_for(reply, "pinned-old", bridge_path)
             switched_thread = "123e4567-e89b-12d3-a456-426614174003"
             switched_snapshot = snapshot.with_name(switched_thread + ".101.sh")
-            switched_snapshot.write_text(snapshot.read_text())
+            snapshot_body = snapshot.read_text()
+            switched_snapshot.write_text(snapshot_body)
             snapshot.unlink()
             pinned_refused = receipt_for(reply, "pinned-old", bridge_path, 8)
             native_send(
@@ -760,8 +761,10 @@ signal.pause()
                 )
                 == switched_thread,
             )
-            snapshot = switched_snapshot
+            switched_snapshot.unlink()
+            snapshot.write_text(snapshot_body)
 
+            baseline_contents = queued_contents(log)
             invalid = {
                 "BAD_JSON": b'{"type":"user","message":{"role":"user","content":"BAD_JSON"},"msg_id":"bad-json","from":"uds:'
                 + str(reply.path).encode()
@@ -851,7 +854,7 @@ signal.pause()
                 "every invalid frame is absent after a delivered barrier",
                 barrier
                 and barrier[1].get("status") == "delivered"
-                and contents == ["native nonce", "VALID_BARRIER"]
+                and contents == baseline_contents + ["VALID_BARRIER"]
                 and all(marker not in contents for marker in invalid),
             )
 
