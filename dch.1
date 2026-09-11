@@ -278,20 +278,20 @@ it writes an array of objects containing
 .I name
 and
 .IR session_id .
+Inside a bridged Codex session the sandbox blocks
+.B ps
+and signals to other processes, so liveness there means only that the
+recorded pid still exists.
 .TP
 .BI \-\-agent\-send " peer message..."
 Send a message from the current bridged Codex session to one exact peer name.
-Arguments after the name are joined with spaces. The command exits 0 for an
-authenticated
-.B delivered
-receipt or accepted pending work reported as
-.BR held .
-Refused, dropped, denied, expired, ambiguous, and timed-out sends exit 1. The
+Arguments after the name are joined with spaces. The command prints
+.B sent
+and exits 0 once the authenticated frame has been written to the peer's
+socket; it does not wait for a receipt, because Claude sends none for
+messages it accepts. Ambiguous, unknown, or unreachable peers exit 1. The
 source sidecar remains available after this command exits,
-so the peer can reply later. Agent commands run inside Codex authenticate to
-that sidecar; it performs process-identity checks and peer lookup without
-requiring the Codex sandbox to execute
-.BR ps .
+so the peer can reply later.
 .PP
 dch registers a directly launched Codex command as a Claude native peer named
 after its stable

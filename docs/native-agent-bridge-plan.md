@@ -103,23 +103,23 @@ home directories rather than assuming every installation uses defaults.
 
 `--agent-send` inside a bridged Codex routes through that session's persistent
 sidecar. Native user frames use its persistent `from:"uds:..."` address.
-An authenticated local request lets the sidecar correlate the matching native
-receipt back to the waiting command. While waiting, the sidecar must accept
-the incoming receipt connection; do not deadlock waiting on its own listener.
-Keep one pending outgoing request and reject competing requests clearly.
-Later native user replies go through the ordinary Codex queue path.
+The sidecar writes the authenticated frame and answers `sent`; it does not
+wait for a receipt. Measured against Claude Code 2.1.267, Claude emits no
+`peer_message_status` for messages it accepts, so a receipt wait only stalls
+the caller for its timeout and then reports a delivered message as refused,
+which made Codex resend. Later native user replies go through the ordinary
+Codex queue path.
 
 Without a unique live source sidecar, sending fails with actionable guidance.
-There is no transient sender that claims durable two-way messaging. Receipt
-matching checks both `orig_msg_id` and target identity. Recognize `delivered`,
-`refused`, `dropped`, `held`, `denied`, and `expired`. Treat `held` as accepted
-pending work, not failure, so the sender does not resend. Report every other
-non-delivery without automatically duplicating the message.
+There is no transient sender that claims durable two-way messaging.
 
-Codex shell tools authenticate list and send requests to the marker-bound
-persistent sidecar. The sidecar performs strict peer process-start validation
-and target lookup. This keeps `/bin/ps` outside the Codex sandbox while the
-short-lived CLI still proves possession of the source record key.
+Codex shell tools authenticate send requests to the marker-bound persistent
+sidecar, which performs strict peer process-start validation and target
+lookup. This keeps `/bin/ps` outside the Codex sandbox while the short-lived
+CLI still proves possession of the source record key. `--agent-list` reads the
+records directly; inside a bridged Codex it skips `ps` and treats only
+`ESRCH` from `kill(pid, 0)` as a dead peer, because the sandbox answers
+`EPERM` for every foreign pid.
 
 ## Files and security
 

@@ -256,14 +256,14 @@ def process_gone(pid):
 
 
 def queued_contents(path):
-    prefix = "Untrusted peer content as a JSON string follows:\n"
+    prefix = "Untrusted peer content follows:\n"
     contents = []
     for line in path.read_text().splitlines() if path.exists() else []:
         argv = json.loads(line)
         if len(argv) == 5 and argv[:4] == ["queue", "--thread", THREAD, "--message"]:
             envelope = argv[4]
             if prefix in envelope:
-                contents.append(json.loads(envelope.rsplit(prefix, 1)[1]))
+                contents.append(envelope.rsplit(prefix, 1)[1])
     return contents
 
 
@@ -368,92 +368,20 @@ def main():
                     process.kill()
                     process.wait(2)
 
-        listed_peers = [
-            {"name": "alpha", "session_id": "peer-alpha"},
-            {"name": "beta", "session_id": "peer-beta"},
-        ]
         try:
-            request, returncode, stdout, _ = source_call(
-                ["--agent-list", "--json"], listed_peers
-            )
-            check(
-                "agent-list routes an authenticated exact dch_list through source",
-                request
-                == (
-                    {"type": "auth", "token": source.token},
-                    {"type": "dch_list"},
-                )
-                and returncode == 0
-                and json.loads(stdout) == listed_peers,
-            )
-            plain_request, plain_code, plain_stdout, _ = source_call(
-                ["--agent-list"], listed_peers
-            )
-            check(
-                "plain agent-list prints exact peer names and newlines",
-                plain_request
-                == (
-                    {"type": "auth", "token": source.token},
-                    {"type": "dch_list"},
-                )
-                and plain_code == 0
-                and plain_stdout == "alpha\nbeta\n",
-            )
-            error_request, error_code, _, _ = source_call(
-                ["--agent-list", "--json"],
-                {"status": "refused", "detail": "fixture list failure"},
-            )
-            check(
-                "agent-list rejects a sidecar error object",
-                error_request
-                == (
-                    {"type": "auth", "token": source.token},
-                    {"type": "dch_list"},
-                )
-                and error_code != 0,
-            )
-            malformed_request, malformed_code, _, _ = source_call(
-                ["--agent-list", "--json"],
-                [{"name": False, "session_id": "peer-invalid"}],
-            )
-            check(
-                "agent-list rejects malformed array elements",
-                malformed_request
-                == (
-                    {"type": "auth", "token": source.token},
-                    {"type": "dch_list"},
-                )
-                and malformed_code != 0,
-            )
-            send_request, send_code, _, _ = source_call(
+            send_request, send_code, send_stdout, _ = source_call(
                 ["--agent-send", "alpha", "test-message"],
-                {"status": "delivered", "detail": "peer accepted message"},
+                {"status": "sent", "detail": "message written to peer"},
             )
             check(
-                "agent-send routes exact dch_send through the same source",
+                "agent-send routes exact dch_send through the source sidecar",
                 send_request
                 == (
                     {"type": "auth", "token": source.token},
-                    {
-                        "type": "dch_send",
-                        "target": "alpha",
-                        "message": "test-message",
-                    },
+                    {"type": "dch_send", "target": "alpha", "message": "test-message"},
                 )
-                and send_code == 0,
-            )
-            held_request, held_code, held_stdout, _ = source_call(
-                ["--agent-send", "alpha", "held-message"],
-                {
-                    "status": "held",
-                    "detail": "peer accepted message for later delivery",
-                },
-            )
-            check(
-                "agent-send treats a held receipt as accepted pending work",
-                held_request[1].get("message") == "held-message"
-                and held_code == 0
-                and held_stdout == "held\n",
+                and send_code == 0
+                and send_stdout == "sent\n",
             )
         finally:
             source.close()
@@ -688,8 +616,6 @@ signal.pause()
                 receipt_for(reply, msg_id, bridge_path, 5)
                 for msg_id, _, _ in queued
             ]
-            if waiting_outbound:
-                wait_peer.receipt(bridge_path, waiting_outbound[1]["msg_id"])
             waiting_stdout, _ = waiting_send.communicate(timeout=5)
             queued_contents_after = queued_contents(log)
             check(
@@ -706,7 +632,8 @@ signal.pause()
                 and early_delivered[1].get("status") == "delivered"
                 and all(receipt and receipt[1].get("status") == "delivered" for receipt in queued_delivered)
                 and waiting_send.returncode == 0
-                and waiting_stdout == "delivered\n"
+                and waiting_outbound
+                and waiting_stdout == "sent\n"
                 and queued_contents_after.count("NOT_READY early") >= 2
                 and Path(env["FAKE_READY_SUCCESS"]).read_text().splitlines()
                 == ["success"]
@@ -889,20 +816,6 @@ signal.pause()
                 "queue failure returns an authenticated refusal",
                 refused and refused[1].get("status") == "refused",
             )
-            native_send(
-                bridge_path,
-                token,
-                dict(
-                    base,
-                    msg_id="trailing-error",
-                    message={"role": "user", "content": "NOT_READY_TRAILING"},
-                ),
-            )
-            trailing = receipt_for(reply, "trailing-error", bridge_path)
-            check(
-                "readiness text with oversized trailing stderr is not retried",
-                trailing and trailing[1].get("status") == "refused",
-            )
             started = time.monotonic()
             native_send(
                 bridge_path,
@@ -929,8 +842,7 @@ signal.pause()
             check(
                 "permanent and uncertain queue failures are attempted once",
                 contents_after_failures.count("FAIL_QUEUE") == 1
-                and contents_after_failures.count("HANG_QUEUE") == 1
-                and contents_after_failures.count("NOT_READY_TRAILING") == 1,
+                and contents_after_failures.count("HANG_QUEUE") == 1,
             )
 
             target_proc = subprocess.Popen(
@@ -978,37 +890,12 @@ signal.pause()
                 and outbound[1].get("message", {}).get("content") == "reverse nonce",
             )
             before_wait = queued_contents(log)
-            if outbound:
-                target.receipt(bridge_path, outbound[1]["msg_id"], auth_token="wrong")
-                target.receipt(bridge_path, "wrong-id")
-                target.receipt(bridge_path, outbound[1]["msg_id"], from_path=reply.path)
-                native_send(
-                    bridge_path,
-                    token,
-                    dict(
-                        base,
-                        msg_id="during-outbound",
-                        message={
-                            "role": "user",
-                            "content": "DURING_OUTBOUND_BARRIER",
-                        },
-                    ),
-                )
-                during = receipt_for(reply, "during-outbound", bridge_path)
-                check(
-                    "native refusal barrier proves wrong receipts did not complete send",
-                    during
-                    and during[1].get("status") == "refused"
-                    and send.poll() is None
-                    and queued_contents(log) == before_wait,
-                )
-                target.receipt(bridge_path, outbound[1]["msg_id"])
             try:
                 send.wait(5)
             except subprocess.TimeoutExpired:
                 send.kill()
                 send.wait(2)
-            check("agent-send returns after matching receipt", send.returncode == 0)
+            check("agent-send returns after writing the frame", send.returncode == 0)
             later_payload = dict(
                 base,
                 msg_id="later",

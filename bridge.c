@@ -662,8 +662,6 @@ struct pending_queue {
   long long child_deadline, retry_at;
   char error[QUEUE_ERROR_MAX + 1];
   size_t error_len;
-  int error_overflow;
-  int error_invalid;
 };
 
 static int private_dir(const char *path, int create) {
@@ -783,8 +781,9 @@ static int load_peer_record(const char *path, const char *record_body,
   if (json_long(b, "pid", &record_pid) < 0 || record_pid != p->pid ||
       json_long(b, "peerProtocol", &protocol) < 0 || protocol != 1 ||
       json_string(b, "name", p->name, sizeof p->name, 1) < 0 || !p->name[0] ||
-      json_string(b, "nameSource", source, sizeof source, 1) < 0 ||
-      (strcmp(source, "user") && strcmp(source, "derived")) ||
+      (json_has(b, "nameSource") &&
+       (json_string(b, "nameSource", source, sizeof source, 1) < 0 ||
+        (strcmp(source, "user") && strcmp(source, "derived")))) ||
       json_string(b, "messagingSocketPath", p->socket, sizeof p->socket, 1) <
           0 ||
       !p->socket[0] ||
@@ -1068,26 +1067,35 @@ static int process_start(long pid, char *out, size_t cap) {
   return off ? 0 : -1;
 }
 
+/* Peek, then consume exactly up to and including the newline, so the next
+   frame on the same connection is never swallowed and no carry buffer exists. */
 static int recv_line_before(int fd, char *out, size_t cap, long long end) {
   size_t n = 0;
   long long now;
   while (n + 1 < cap) {
+    ssize_t z;
+    char *nl;
     if (monotonic_ms(&now) < 0 || now >= end || cancelled() ||
         wait_ready(fd, POLLIN, end) < 0)
       return -1;
-    char c;
-    ssize_t z = read(fd, &c, 1);
-    if (z != 1)
+    z = recv(fd, out + n, cap - 1 - n, MSG_PEEK);
+    if (z < 0 && (errno == EINTR || errno == EAGAIN))
+      continue;
+    if (z <= 0)
       return -1;
-    if (c == '\n') {
-      if (!n)
+    nl = memchr(out + n, '\n', (size_t)z);
+    if (nl)
+      z = nl - (out + n) + 1;
+    z = read(fd, out + n, (size_t)z);
+    if (z <= 0 || memchr(out + n, '\0', (size_t)z))
+      return -1;
+    n += (size_t)z;
+    if (out[n - 1] == '\n') {
+      if (--n == 0)
         return -1;
       out[n] = '\0';
       return utf8_ok((unsigned char *)out, n) ? 0 : -1;
     }
-    if (c == '\0')
-      return -1;
-    out[n++] = c;
   }
   return -1;
 }
@@ -1228,24 +1236,20 @@ static int make_uuid(char out[37]) {
 static pid_t queue_message(const char *codex, const char *thread,
                            const char *sender, const char *content,
                            int *error_fd) {
-  char *body, *qs, *qc, *shell;
+  char *body, *qs, *shell;
   size_t need, sn = strlen(sender) * 4 + 3;
   int errors[2];
   pid_t pid;
   int written;
   qs = malloc(strlen(sender) * 6 + 3);
-  qc = malloc(strlen(content) * 6 + 3);
   shell = malloc(sn);
-  if (!qs || !qc || !shell) {
+  if (!qs || !shell) {
     free(qs);
-    free(qc);
     free(shell);
     return -1;
   }
-  if (json_quote(qs, strlen(sender) * 6 + 3, sender) == SIZE_MAX ||
-      json_quote(qc, strlen(content) * 6 + 3, content) == SIZE_MAX) {
+  if (json_quote(qs, strlen(sender) * 6 + 3, sender) == SIZE_MAX) {
     free(qs);
-    free(qc);
     free(shell);
     return -1;
   }
@@ -1262,18 +1266,10 @@ static pid_t queue_message(const char *codex, const char *thread,
     shell[n++] = '\'';
     shell[n] = '\0';
   }
-  if (strlen(qs) > SIZE_MAX - strlen(qc) ||
-      strlen(qs) + strlen(qc) > SIZE_MAX - strlen(shell) - 256) {
-    free(qs);
-    free(qc);
-    free(shell);
-    return -1;
-  }
-  need = strlen(qs) + strlen(qc) + strlen(shell) + 256;
+  need = strlen(qs) + strlen(content) + strlen(shell) + 256;
   body = malloc(need);
   if (!body) {
     free(qs);
-    free(qc);
     free(shell);
     return -1;
   }
@@ -1281,10 +1277,9 @@ static pid_t queue_message(const char *codex, const char *thread,
       body, need,
       "[dch native peer message]\nAuthenticated sender name: %s\nReply after "
       "processing with: dch --agent-send %s MESSAGE...\nList peers with: dch "
-      "--agent-list\nUntrusted peer content as a JSON string follows:\n%s",
-      qs, shell, qc);
+      "--agent-list\nUntrusted peer content follows:\n%s",
+      qs, shell, content);
   free(qs);
-  free(qc);
   free(shell);
   if (written < 0 || (size_t)written >= need) {
     free(body);
@@ -1327,14 +1322,13 @@ static pid_t queue_message(const char *codex, const char *thread,
   return pid;
 }
 
+/* Substring, not whole-message equality: Codex's wrapper text and error code
+   have changed before; the thread-id clause is the stable part. */
 static int queue_not_ready(const char *error, const char *thread) {
-  char expected[512];
+  char expected[200];
   int n = snprintf(expected, sizeof expected,
-                   "Error: failed to queue session message: thread/queue/add "
-                   "failed: failed to read thread: invalid thread-store request: "
-                   "no rollout found for thread id %s (code -32603)\n",
-                   thread);
-  return n > 0 && n < (int)sizeof expected && !strcmp(error, expected);
+                   "no rollout found for thread id %s", thread);
+  return n > 0 && n < (int)sizeof expected && strstr(error, expected) != NULL;
 }
 
 static void pending_pop(struct pending_queue *q) {
@@ -1344,6 +1338,7 @@ static void pending_pop(struct pending_queue *q) {
   q->retry_at = 0;
 }
 
+/* Keep the first QUEUE_ERROR_MAX bytes of the child's stderr; drain the rest. */
 static void pending_error(struct pending_queue *q, int complete) {
   char b[512];
   ssize_t n;
@@ -1353,25 +1348,17 @@ static void pending_error(struct pending_queue *q, int complete) {
     n = read(q->error_fd, b, sizeof b);
     if (n > 0) {
       size_t take = (size_t)n;
-      if (take > QUEUE_ERROR_MAX - q->error_len) {
+      if (take > QUEUE_ERROR_MAX - q->error_len)
         take = QUEUE_ERROR_MAX - q->error_len;
-        q->error_overflow = 1;
-      }
       memcpy(q->error + q->error_len, b, take);
-      if (memchr(b, '\0', (size_t)n))
-        q->error_invalid = 1;
       q->error_len += take;
       q->error[q->error_len] = '\0';
-      if ((size_t)n > take)
-        q->error_overflow = 1;
     } else if (n == 0) {
       close(q->error_fd);
       q->error_fd = -1;
       return;
     }
-  } while (complete && n > 0 && !q->error_overflow);
-  if (complete && q->error_fd >= 0)
-    q->error_invalid = 1;
+  } while (complete && n > 0);
 }
 
 static void pending_tick(struct pending_queue *q, const char *codex,
@@ -1412,7 +1399,6 @@ static void pending_tick(struct pending_queue *q, const char *codex,
       return;
     }
     if (done > 0 && WIFEXITED(status) && WEXITSTATUS(status) != 0 &&
-        !q->error_overflow && !q->error_invalid &&
         queue_not_ready(q->error, m->thread)) {
       if (!m->held) {
         send_receipt(&m->sender, own_socket, m->id, "held");
@@ -1437,8 +1423,6 @@ static void pending_tick(struct pending_queue *q, const char *codex,
     return;
   }
   q->error_len = 0;
-  q->error_overflow = 0;
-  q->error_invalid = 0;
   q->error[0] = '\0';
   q->child =
       queue_message(codex, m->thread, m->name, m->content, &q->error_fd);
@@ -1515,16 +1499,25 @@ static int send_receipt(const struct peer *target, const char *own_socket,
   return rc;
 }
 
+/* ps is forked only for records that already match; a full verified scan
+   would fork once per live Claude session on every inbound frame. */
+static int peer_live(const struct peer *p) {
+  char actual[128];
+  return kill((pid_t)p->pid, 0) == 0 &&
+         process_start(p->pid, actual, sizeof actual) == 0 &&
+         !strcmp(actual, p->proc_start);
+}
+
 static int peer_by_socket(const char *address, struct peer *out) {
   struct peer p[128];
   int n, hits = 0;
   if (strncmp(address, "uds:", 4) || socket_safe(address + 4) < 0)
     return -1;
-  n = scan_peers(p, 128, 1);
+  n = scan_peers(p, 128, 0);
   if (n < 0)
     return -1;
   for (int i = 0; i < n; i++)
-    if (!strcmp(p[i].socket, address + 4)) {
+    if (!strcmp(p[i].socket, address + 4) && peer_live(&p[i])) {
       *out = p[i];
       hits++;
     }
@@ -1734,11 +1727,11 @@ static int server_socket(const char *path, dev_t *dev, ino_t *ino) {
 
 static int find_named(const char *name, struct peer *out) {
   struct peer p[128];
-  int n = scan_peers(p, 128, 1), hits = 0;
+  int n = scan_peers(p, 128, 0), hits = 0;
   if (n < 0)
     return -1;
   for (int i = 0; i < n; i++)
-    if (!strcmp(name, p[i].name)) {
+    if (!strcmp(name, p[i].name) && peer_live(&p[i])) {
       *out = p[i];
       hits++;
     }
@@ -1758,9 +1751,18 @@ static int find_source(const char *name, const char *marker, struct peer *out) {
   return hits == 1 ? 0 : -1;
 }
 
-static int peer_list_json(char *out, size_t cap) {
+/* Liveness without ps: only ESRCH proves the process is gone. EPERM means
+   it exists but is off limits, which is what the Codex sandbox returns for
+   every foreign pid. */
+static int pid_gone(long pid) {
+  return kill((pid_t)pid, 0) < 0 && errno == ESRCH;
+}
+
+/* verify_ps=0 is for the CLI inside the Codex sandbox, where /bin/ps and
+   signals to other processes are blocked. */
+static int peer_list_json(char *out, size_t cap, int verify_ps) {
   struct peer peers[128];
-  int count = scan_peers(peers, 128, 1);
+  int count = scan_peers(peers, 128, verify_ps);
   size_t used = 0;
   if (count < 0 || cap < 3)
     return -1;
@@ -1768,11 +1770,13 @@ static int peer_list_json(char *out, size_t cap) {
   for (int i = 0; i < count; i++) {
     char name[3100], session[800];
     int n;
+    if (!verify_ps && pid_gone(peers[i].pid))
+      continue;
     if (json_quote(name, sizeof name, peers[i].name) == SIZE_MAX ||
         json_quote(session, sizeof session, peers[i].session_id) == SIZE_MAX)
       return -1;
     n = snprintf(out + used, cap - used, "%s{\"name\":%s,\"session_id\":%s}",
-                 i ? "," : "", name, session);
+                 used > 1 ? "," : "", name, session);
     if (n < 0 || (size_t)n >= cap - used)
       return -1;
     used += (size_t)n;
@@ -1802,38 +1806,15 @@ static int receipt_status(const char *status) {
          !strcmp(status, "denied") || !strcmp(status, "expired");
 }
 
-static void refuse_competing(int fd, const char *payload,
-                             const char *own_socket) {
-  char type[40], id[257], from[300];
-  struct peer sender;
-  if (json_string(payload, "type", type, sizeof type, 1) < 0)
-    return;
-  if (!strcmp(type, "dch_send")) {
-    local_result(fd, "refused", "another send is pending");
-    return;
-  }
-  if (!strcmp(type, "user") &&
-      json_string(payload, "msg_id", id, sizeof id, 1) == 0 &&
-      json_string(payload, "from", from, sizeof from, 1) == 0 &&
-      peer_by_socket(from, &sender) == 0)
-    send_receipt(&sender, own_socket, id, "refused");
-}
-
-static int outgoing(int local, const char *payload, int server,
-                    const char *token, const char *own_socket,
-                    const char *session, struct pending_queue *queue,
-                    const char *codex, const char *home, const char *sess,
-                    const char *marker) {
+/* Fire and forget: Claude 2.1.x emits no peer_message_status for messages it
+   accepts, so a receipt wait only stalls the caller and invites resends. The
+   frame is written, "sent" is reported, and the main loop continues. */
+static int outgoing(int local, const char *payload, const char *own_socket) {
   char target[512], message[MESSAGE_MAX + 1], msgid[37], address[108],
       qmsg[MESSAGE_MAX * 6 + 3], qid[80], qfrom[700], qsess[800],
       frame[FRAME_MAX + 1];
   struct peer peer;
   int fd, n;
-  long long now, end;
-  request_deadline = deadline_after(30000);
-  if (request_deadline < 0)
-    return -1;
-  end = request_deadline;
   if (json_string(payload, "target", target, sizeof target, 1) < 0 ||
       json_string(payload, "message", message, sizeof message, 1) < 0 ||
       !message[0]) {
@@ -1875,105 +1856,22 @@ static int outgoing(int local, const char *payload, int server,
     return -1;
   }
   close(fd);
-  for (;;) {
-    struct pollfd ps[4] = {{server, POLLIN, 0},
-                           {local, POLLIN | POLLHUP, 0},
-                           {sidecar_life_fd, POLLIN | POLLHUP, 0},
-                           {queue->error_fd, POLLIN | POLLHUP, 0}};
-    int count;
-    int r, remain;
-    long long queue_next = 0;
-    pending_tick(queue, codex, home, sess, marker, own_socket);
-    count = queue->error_fd >= 0 ? 4 : sidecar_life_fd >= 0 ? 3 : 2;
-    if (monotonic_ms(&now) < 0 || now >= end || cancelled())
-      break;
-    remain = end - now > INT_MAX ? INT_MAX : (int)(end - now);
-    if (queue->count) {
-      queue_next = queue->child > 0
-                       ? (queue->error_fd < 0 && now + 50 < queue->child_deadline
-                              ? now + 50
-                              : queue->child_deadline)
-                       : queue->retry_at;
-      if (!queue_next || queue_next <= now)
-        remain = 0;
-      else if (queue_next - now < remain)
-        remain = (int)(queue_next - now);
-    }
-    ps[3].fd = queue->error_fd;
-    r = poll(ps, count, remain);
-    if (r < 0 && errno == EINTR)
-      continue;
-    if (r < 0 || (sidecar_life_fd >= 0 && ps[2].revents) || ps[1].revents)
-      return -1;
-    if (r == 0) {
-      pending_tick(queue, codex, home, sess, marker, own_socket);
-      continue;
-    }
-    if (ps[0].revents & POLLIN) {
-      int c = accept(server, NULL, NULL);
-      char got[FRAME_MAX + 1], type[40], action[80], status[40], orig[128],
-          from[300], want[300];
-      if (c < 0)
-        continue;
-      if (nonblocking(c) < 0 ||
-          auth_conn_before(c, token, got, sizeof got, end) < 0) {
-        close(c);
-        continue;
-      }
-      if (json_string(got, "type", type, sizeof type, 1) == 0 &&
-          !strcmp(type, "control") &&
-          json_string(got, "action", action, sizeof action, 1) == 0 &&
-          !strcmp(action, "peer_message_status") &&
-          json_string(got, "status", status, sizeof status, 1) == 0 &&
-          json_string(got, "orig_msg_id", orig, sizeof orig, 1) == 0 &&
-          json_string(got, "from", from, sizeof from, 1) == 0 &&
-          snprintf(want, sizeof want, "uds:%s", peer.socket) <
-              (int)sizeof want &&
-          !strcmp(orig, msgid) && !strcmp(from, want) &&
-          receipt_status(status) && monotonic_ms(&now) == 0 && now < end) {
-        local_result(local, status,
-                     !strcmp(status, "delivered")
-                         ? "peer accepted message"
-                         : !strcmp(status, "held")
-                         ? "peer accepted message for later delivery"
-                         : "peer reported non-delivery");
-        close(c);
-        return !strcmp(status, "delivered") || !strcmp(status, "held") ? 0
-                                                                         : -1;
-      }
-      refuse_competing(c, got, own_socket);
-      close(c);
-    }
-    pending_tick(queue, codex, home, sess, marker, own_socket);
-  }
-  (void)session;
-  local_result(local, "refused", "timed out waiting for peer receipt");
-  return -1;
+  local_result(local, "sent", "message written to peer");
+  return 0;
 }
 
-static void handle_connection(int fd, int server, const char *token,
+static void handle_connection(int fd, const char *token,
                               const char *own_socket, const char *session,
-                              const char *codex, const char *home,
-                              const char *sess, const char *marker,
-                              struct pending_queue *queue) {
+                              const char *home, const char *sess,
+                              const char *marker, struct pending_queue *queue) {
   char p[FRAME_MAX + 1], type[40], role[20], content[MESSAGE_MAX + 1], id[257],
       from[300], sid[128], fresh[128];
   struct peer sender;
   if (auth_conn(fd, token, p, sizeof p) < 0 ||
       json_string(p, "type", type, sizeof type, 1) < 0)
     return;
-  if (!strcmp(type, "dch_list")) {
-    char response[FRAME_MAX + 1];
-    request_deadline = deadline_after(30000);
-    if (request_deadline > 0 && peer_list_json(response, sizeof response) == 0)
-      write_deadline(fd, response, strlen(response), request_deadline);
-    request_deadline = 0;
-    return;
-  }
   if (!strcmp(type, "dch_send")) {
-    outgoing(fd, p, server, token, own_socket, session, queue, codex, home,
-             sess, marker);
-    request_deadline = 0;
+    outgoing(fd, p, own_socket);
     return;
   }
   if (strcmp(type, "user") ||
@@ -2006,7 +1904,7 @@ static void bridge_sidecar(int life_fd, const char *codex) {
   char qtoken[400], qproc[800], quuid[230], qsocket[700], qname[3100],
       qmarker[800];
   const char *sess = getenv("DCH_SESSION"), *marker = getenv(BRIDGE_MARKER);
-  unsigned char raw[32];
+  unsigned char raw[16]; /* Claude's key schema: peerToken is exactly 32 hex */
   int server = -1;
   struct pending_queue queue = {.error_fd = -1, .child = -1};
   dev_t sockdev = 0, keydev = 0, recdev = 0;
@@ -2142,8 +2040,8 @@ static void bridge_sidecar(int life_fd, const char *codex) {
       int c = accept(server, NULL, NULL);
       if (c >= 0) {
         if (nonblocking(c) == 0)
-          handle_connection(c, server, token, socket_path, uuid, codex, home,
-                            sess, marker, &queue);
+          handle_connection(c, token, socket_path, uuid, home, sess, marker,
+                            &queue);
         close(c);
       }
     }
@@ -2173,23 +2071,10 @@ static void bridge_sidecar(int life_fd, const char *codex) {
 }
 
 int dch_bridge_agent_list(int json) {
-  const char *sess = getenv("DCH_SESSION"), *marker = getenv(BRIDGE_MARKER);
+  const char *marker = getenv(BRIDGE_MARKER);
   char output[FRAME_MAX + 1];
   struct json_parser parser;
-  if (sess && *sess && marker && *marker) {
-    struct peer source;
-    int fd = -1;
-    if (find_source(sess, marker, &source) < 0 ||
-        (fd = connect_unix(source.socket, 10000)) < 0 ||
-        send_frames(fd, source.token, "{\"type\":\"dch_list\"}") < 0 ||
-        recv_line(fd, output, sizeof output, 30000) < 0) {
-      if (fd >= 0)
-        close(fd);
-      fprintf(stderr, "dch: native peer list failed through source sidecar\n");
-      return 1;
-    }
-    close(fd);
-  } else if (peer_list_json(output, sizeof output) < 0) {
+  if (peer_list_json(output, sizeof output, !(marker && *marker)) < 0) {
     fprintf(stderr, "dch: native peer registry is ambiguous or too large\n");
     return 1;
   }
@@ -2285,10 +2170,10 @@ int dch_bridge_agent_send(const char *name, int argc, char **argv) {
   }
   if ((fd = connect_unix(source.socket, 10000)) < 0 ||
       send_frames(fd, source.token, frame) < 0 ||
-      recv_line(fd, line, sizeof line, 31000) < 0) {
+      recv_line(fd, line, sizeof line, 15000) < 0) {
     if (fd >= 0)
       close(fd);
-    fprintf(stderr, "dch: native send failed before a receipt arrived\n");
+    fprintf(stderr, "dch: native send failed\n");
     return 1;
   }
   close(fd);
@@ -2297,7 +2182,7 @@ int dch_bridge_agent_send(const char *name, int argc, char **argv) {
     fprintf(stderr, "dch: invalid source-sidecar response\n");
     return 1;
   }
-  if (strcmp(status, "delivered") && strcmp(status, "held")) {
+  if (strcmp(status, "sent")) {
     fprintf(stderr, "dch: message %s: %s\n", status, detail);
     return 1;
   }
@@ -2350,10 +2235,11 @@ int main(void) {
            "found for thread id %s (code -32603)\n",
            thread);
   if (!queue_not_ready(ready, thread) ||
-      queue_not_ready("no rollout found for thread id "
-                      "123e4567-e89b-12d3-a456-426614174000\n",
-                      thread) ||
-      (strcat(ready, "trailing"), queue_not_ready(ready, thread)) ||
+      !queue_not_ready("no rollout found for thread id "
+                       "123e4567-e89b-12d3-a456-426614174000\n",
+                       thread) ||
+      (strcat(ready, "trailing"), !queue_not_ready(ready, thread)) ||
+      queue_not_ready("Error: something else entirely\n", thread) ||
       queue_not_ready(
           "Error: failed to queue session message: thread/queue/add failed: "
           "failed to read thread: invalid thread-store request: no rollout "
