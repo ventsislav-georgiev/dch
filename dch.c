@@ -1027,8 +1027,8 @@ load_harness_names(struct slist *sl)
 ** from the process environment or its shell snapshot. Codex does not record
 ** whether a title was auto-derived; only empty/malformed titles can be
 ** safely skipped. */
-static int
-codex_thread_name(const char *home, const char *id, char *out, size_t outsz)
+int
+dch_codex_thread_name(const char *home, const char *id, char *out, size_t outsz)
 {
 	char path[1200], buf[65536], *line, *next;
 	struct stat st;
@@ -1230,7 +1230,7 @@ load_codex_pid(struct slist *sl, const char *home, long pid)
 	    (proc_env_value(pid, "CODEX_THREAD_ID", id, sizeof(id)) != 0 &&
 	     proc_env_value(pid, "CODEX_SESSION_ID", id, sizeof(id)) != 0 &&
 	     dch_codex_snapshot_id(codexdir, sess, NULL, id, sizeof(id), 0) != 0) ||
-	    codex_thread_name(codexdir, id, title, sizeof(title)) != 0)
+	    dch_codex_thread_name(codexdir, id, title, sizeof(title)) != 0)
 		return;
 	for (char *c = title; *c; c++)
 		if (*c == '\t' || *c == '\n' || *c == '\r')

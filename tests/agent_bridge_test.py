@@ -494,6 +494,28 @@ signal.pause()
                 and bridge_path.is_socket()
                 and mode(bridge_key) == mode(bridge_path) == 0o600,
             )
+            index = Path(env["CODEX_HOME"]) / "session_index.jsonl"
+            index.write_text(
+                json.dumps({"id": THREAD, "thread_name": "Titled Thread"}, separators=(",", ":"))
+                + "\n"
+            )
+            check(
+                "peer name follows the Codex thread title",
+                wait_until(
+                    lambda: json.loads(record_path.read_text()).get("name")
+                    == "Titled Thread",
+                    timeout=12,
+                ),
+            )
+            index.unlink()
+            check(
+                "peer name falls back to DCH_SESSION without a title",
+                wait_until(
+                    lambda: json.loads(record_path.read_text()).get("name")
+                    == session,
+                    timeout=12,
+                ),
+            )
             reply = ClaudePeer(sessions, root, "reply", os.getpid(), own_start)
             reply.publish("reply-peer", name_source="derived")
             peers.append(reply)

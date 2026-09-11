@@ -1900,19 +1900,51 @@ static void handle_connection(int fd, const char *token,
     send_receipt(&sender, own_socket, id, "refused");
 }
 
+/* The Codex thread title is what the user sees in the TUI, so it is the
+   peer name when present; DCH_SESSION otherwise. */
+static void peer_name(const char *home, const char *thread, const char *sess,
+                      char *out, size_t cap) {
+  if (dch_codex_thread_name(home, thread, out, cap) < 0)
+    snprintf(out, cap, "%s", sess);
+}
+
+static int record_json(char *out, size_t cap, const char *quuid,
+                       long long started, const char *qproc,
+                       const char *qsocket, const char *qname,
+                       const char *qmarker, long long name_since) {
+  long long now = (long long)time(NULL) * 1000;
+  return snprintf(out, cap,
+                  "{\"pid\":%ld,\"sessionId\":%s,\"cwd\":\"\",\"startedAt\":%lld,"
+                  "\"procStart\":%s,\"version\":\"dch-%s\",\"peerProtocol\":1,"
+                  "\"peerFeatures\":[\"reply_across_default_dirs\"],\"kind\":"
+                  "\"interactive\",\"entrypoint\":\"cli\",\"pidDomain\":\"%s\","
+                  "\"messagingSocketPath\":%s,\"name\":%s,\"nameSource\":\"user\","
+                  "\"dchBridgeMarker\":%s,\"nameSince\":%lld,\"status\":\"idle\","
+                  "\"updatedAt\":%lld,\"statusUpdatedAt\":%lld}\n",
+                  (long)getpid(), quuid, started, qproc, DCH_VERSION,
+#ifdef __APPLE__
+                  "darwin",
+#else
+                  "linux",
+#endif
+                  qsocket, qname, qmarker, name_since, now, now) < (int)cap
+             ? 0
+             : -1;
+}
+
 static void bridge_sidecar(int life_fd, const char *codex) {
   char home[1200], sessions[1200], socket_dir[80], socket_path[104],
       record[1400], key[1400], hash[65], proc[128], thread[128], uuid[37],
       token[65], key_body[2400], record_body[7000];
   char qtoken[400], qproc[800], quuid[230], qsocket[700], qname[3100],
-      qmarker[800];
+      qmarker[800], name[700];
   const char *sess = getenv("DCH_SESSION"), *marker = getenv(BRIDGE_MARKER);
   unsigned char raw[16]; /* Claude's key schema: peerToken is exactly 32 hex */
   int server = -1;
   struct pending_queue queue = {.error_fd = -1, .child = -1};
   dev_t sockdev = 0, keydev = 0, recdev = 0;
   ino_t sockino = 0, keyino = 0, recino = 0;
-  long long now;
+  long long now, name_check_at = 0;
   sidecar_life_fd = life_fd;
   if (!sess || !*sess || !marker || !*marker || sha_selftest() < 0 ||
       codex_home(home, sizeof home) < 0 ||
@@ -1944,7 +1976,6 @@ static void bridge_sidecar(int life_fd, const char *codex) {
       json_quote(qproc, sizeof qproc, proc) == SIZE_MAX ||
       json_quote(quuid, sizeof quuid, uuid) == SIZE_MAX ||
       json_quote(qsocket, sizeof qsocket, socket_path) == SIZE_MAX ||
-      json_quote(qname, sizeof qname, sess) == SIZE_MAX ||
       json_quote(qmarker, sizeof qmarker, marker) == SIZE_MAX) {
     close(server);
     unlink_same(socket_path, sockdev, sockino);
@@ -1985,22 +2016,10 @@ static void bridge_sidecar(int life_fd, const char *codex) {
     return;
   }
   now = (long long)time(NULL) * 1000;
-  if (snprintf(record_body, sizeof record_body,
-               "{\"pid\":%ld,\"sessionId\":%s,\"cwd\":\"\",\"startedAt\":%lld,"
-               "\"procStart\":%s,\"version\":\"dch-%s\",\"peerProtocol\":1,"
-               "\"peerFeatures\":[\"reply_across_default_dirs\"],\"kind\":"
-               "\"interactive\",\"entrypoint\":\"cli\",\"pidDomain\":\"%s\","
-               "\"messagingSocketPath\":%s,\"name\":%s,\"nameSource\":\"user\","
-               "\"dchBridgeMarker\":%s,\"nameSince\":%lld,\"status\":\"idle\","
-               "\"updatedAt\":%lld,\"statusUpdatedAt\":%lld}\n",
-               (long)getpid(), quuid, now, qproc, DCH_VERSION,
-#ifdef __APPLE__
-               "darwin",
-#else
-               "linux",
-#endif
-               qsocket, qname, qmarker, now, now,
-               now) >= (int)sizeof record_body) {
+  peer_name(home, thread, sess, name, sizeof name);
+  if (json_quote(qname, sizeof qname, name) == SIZE_MAX ||
+      record_json(record_body, sizeof record_body, quuid, now, qproc, qsocket,
+                  qname, qmarker, now) < 0) {
     close(server);
     unlink_same(socket_path, sockdev, sockino);
     return;
@@ -2034,11 +2053,30 @@ static void bridge_sidecar(int life_fd, const char *codex) {
       else
         timeout = next - tick_now > INT_MAX ? INT_MAX : (int)(next - tick_now);
     }
+    if (timeout < 0 || timeout > 5000)
+      timeout = 5000;
     int r = poll(p, count, timeout);
     if (r < 0 && errno == EINTR)
       continue;
     if (r < 0 || p[0].revents)
       break;
+    if (monotonic_ms(&tick_now) == 0 && tick_now >= name_check_at) {
+      char fresh[700];
+      name_check_at = tick_now + 5000;
+      peer_name(home, thread, sess, fresh, sizeof fresh);
+      if (strcmp(fresh, name) &&
+          json_quote(qname, sizeof qname, fresh) != SIZE_MAX &&
+          record_json(record_body, sizeof record_body, quuid, now, qproc,
+                      qsocket, qname, qmarker,
+                      (long long)time(NULL) * 1000) == 0) {
+        /* atomic_file is create-only, so drop our own record first. */
+        unlink_same(record, recdev, recino);
+        if (atomic_file(record, record_body, 0644, &recdev, &recino) == 0)
+          snprintf(name, sizeof name, "%s", fresh);
+        else
+          break;
+      }
+    }
     if (p[1].revents & POLLIN) {
       int c = accept(server, NULL, NULL);
       if (c >= 0) {
@@ -2194,6 +2232,14 @@ int dch_bridge_agent_send(const char *name, int argc, char **argv) {
 }
 
 #ifdef DCH_BRIDGE_SELFTEST
+int dch_codex_thread_name(const char *home, const char *id, char *out,
+                          size_t outsz) {
+  (void)home;
+  (void)id;
+  (void)out;
+  (void)outsz;
+  return -1;
+}
 int dch_visit_claude_records(dch_claude_record_fn visit, void *arg) {
   (void)visit;
   (void)arg;

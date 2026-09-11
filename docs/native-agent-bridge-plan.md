@@ -38,8 +38,9 @@ Before orderly replacement or shutdown, the old sidecar attempts `dropped`
 receipts for accepted messages within one shared 1.2-second cleanup deadline.
 Unexpected process death is not durable and there is no disk spool.
 
-The peer PID is the sidecar PID. Its stable peer name is `DCH_SESSION`, not
-the changing Codex title. Obtain `procStart` with the exact command Claude
+The peer PID is the sidecar PID. Its peer name is the Codex thread title when
+one exists, otherwise `DCH_SESSION`; the sidecar re-reads the title every five
+seconds and republishes the record on change. Obtain `procStart` with the exact command Claude
 uses: `LC_ALL=C TZ=UTC ps -o lstart= -p PID`, using fork/exec, never a shell.
 
 Reuse dch's existing Codex snapshot traversal. A fresh dch Codex launch

@@ -297,8 +297,10 @@ dch registers a session whose command runs
 .B codex
 (directly or through a wrapper such as
 .BR "headroom wrap codex" )
-as a Claude native peer named after its stable
-.BR DCH_SESSION .
+as a Claude native peer. The peer name is the Codex thread title when the
+thread has one, otherwise the
+.B DCH_SESSION
+name; the title is re-read every five seconds.
 Registration starts after Codex writes the first shell snapshot and only when
 the launch marker identifies one UUID. Multiple matching UUIDs are ambiguous;
 start a fresh dch Codex session instead of risking delivery to the wrong

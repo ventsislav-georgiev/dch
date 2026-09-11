@@ -15,5 +15,7 @@ int dch_bridge_agent_send(const char *name, int argc, char **argv);
 int dch_codex_snapshot_id(const char *home, const char *sess,
                           const char *marker, char *out, size_t outsz,
                           int strict);
+int dch_codex_thread_name(const char *home, const char *id, char *out,
+                          size_t outsz);
 
 #endif
