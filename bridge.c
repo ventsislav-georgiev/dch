@@ -2018,7 +2018,7 @@ int dch_bridge_agent_send(const char *name, int argc, char **argv) {
     free(message);
     fprintf(stderr,
             "dch: no unique live source sidecar for DCH_SESSION=%s; start a "
-            "fresh full-dch Codex session\n",
+            "fresh dch Codex session\n",
             sess);
     return 1;
   }

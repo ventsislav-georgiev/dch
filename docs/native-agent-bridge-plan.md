@@ -5,15 +5,16 @@ of Codex's queue pickup delay. Target release: dch 1.16.0.
 
 ## Outcome and limits
 
-Normal full-dch Codex sessions become discoverable through Claude's native
+Normal dch Codex sessions become discoverable through Claude's native
 `ListAgents`. Claude uses native `SendMessage`. Codex uses
 `dch --agent-list [--json]` and `dch --agent-send NAME MESSAGE...` from its
 shell tool. Both directions use authenticated Claude peer sockets, never PTY
 input. A Claude reply remains routable after Codex's send command exits.
 
 No new dependencies. C/POSIX product code lives in the installed dch binary.
-The installed Codex CLI owns queue delivery. The bridge is excluded from lite,
-as requested by the user. Python remains existing test tooling only.
+The installed Codex CLI owns queue delivery. Both build variants include the
+same bridge; lite excludes only the terminal mirror. Python remains existing
+test tooling only.
 
 Fable verified ordinary Codex 0.154.0 delivery in 75 ms, TUI pickup in 5.3 s,
 and a visible reply in 11 s. These are observations, not latency guarantees.
@@ -38,7 +39,7 @@ The peer PID is the sidecar PID. Its stable peer name is `DCH_SESSION`, not
 the changing Codex title. Obtain `procStart` with the exact command Claude
 uses: `LC_ALL=C TZ=UTC ps -o lstart= -p PID`, using fork/exec, never a shell.
 
-Reuse dch's existing Codex snapshot traversal. A fresh full-dch Codex launch
+Reuse dch's existing Codex snapshot traversal. A fresh dch Codex launch
 gets a reserved random session-incarnation environment marker before forkpty.
 Match both DCH_SESSION and this marker in its shell snapshot; use the filename
 UUID. The marker survives master re-exec and distinguishes reused names and
@@ -120,10 +121,9 @@ Do not expose tokens or message text in diagnostics.
 
 Expected product seams are `master.c` for lifecycle, `dch.c` for CLI/shared
 lookup, a bridge C/header pair for protocol, and configure/Makefile selection.
-The bridge gets its own full-build define/object selection, without a new
-user-facing configuration matrix. Lite returns feature-unavailable exit 3 for
-agent verbs and contains no bridge implementation. Existing package formulas
-continue to install one binary and a man page with no dependency changes.
+Both variants link the same bridge with no new user-facing configuration
+matrix. Existing package formulas continue to install one binary and a man
+page with no dependency changes.
 
 Replace the old Python proof and its tests once the C integration covers the
 same contract. Update README and man page for actual normal-launch behavior,
@@ -136,7 +136,8 @@ on sessions started before this version.
   current/stale UUIDs, both directions, persistent replies, refusal receipts,
   auth and malformed frames, harmless future fields, real record modes,
   ambiguity, timeouts, cleanup/replacement safety, restart and child reaping.
-- Full and lite builds and existing suites pass. Lite exclusion is verified.
+- Full and lite builds and existing suites pass. The bridge runs in both;
+  lite's terminal-mirror exclusion is verified.
   Existing hot-path performance gates remain unchanged. No invented list/send
   percentile budgets. Record one live latency measurement.
 - A fresh ordinary Codex session under the candidate executable completes its

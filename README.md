@@ -102,15 +102,15 @@ dch --read infra --cursor             # + "cursor <row> <col> ..." on stderr
 ## Install with Homebrew
 
 ```sh
-brew install ventsislav-georgiev/tap/dch        # full: agent API included
-brew install ventsislav-georgiev/tap/dch-lite   # ~100 KB, no terminal mirror
+brew install ventsislav-georgiev/tap/dch        # terminal mirror included
+brew install ventsislav-georgiev/tap/dch-lite   # no terminal mirror
 ```
 
 Two formulas, `conflicts_with` each other — pick one. **dch** embeds
-libghostty-vt (~2 MB binary) and supports every verb in the
-[Agent API](#agent-api). **dch-lite** is the classic ~100 KB
-attach/detach tool: `--send`/`--run`/`--keys` still work (keys via a
-legacy encoding), but `--read`/`--wait` need the mirror and exit 3.
+libghostty-vt (~2 MB binary). Both builds support the [Agent API](#agent-api).
+**dch-lite** omits only the terminal mirror: `--send`/`--run`/`--keys` still
+work (keys via a legacy encoding), but `--read` and `--wait --match` need the
+mirror and exit 3.
 The formulas are auto-published to the tap by dch's release workflow on
 every `v*` tag.
 
@@ -447,7 +447,7 @@ has a reason to touch it in the first place.
 
 ## Native Claude and Codex messages
 
-A Codex command started by a full dch build registers as a Claude native peer.
+A Codex command started by dch registers as a Claude native peer.
 Its peer name is the stable `DCH_SESSION` name. Claude can find it with native
 `ListAgents` and send with native `SendMessage`. No helper, app-server, remote
 mode, or terminal injection is involved.
@@ -481,8 +481,7 @@ the message, not that the model has processed it. Before Codex completes its
 first turn, `codex queue` can refuse because no rollout exists yet; retry after
 that turn. Messages are limited to 16,384 bytes and wire frames to 65,536
 bytes. The bridge handles one bounded request at a time and does not support
-attachments or broadcast. The native bridge is excluded from dch-lite; both
-agent verbs exit 3 there.
+attachments or broadcast. The native bridge is available in both builds.
 
 ## How it differs from upstream dtach
 

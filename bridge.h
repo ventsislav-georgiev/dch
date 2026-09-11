@@ -5,8 +5,7 @@
 typedef int (*dch_claude_record_fn)(const char *, const char *, size_t, void *);
 int dch_visit_claude_records(dch_claude_record_fn visit, void *arg);
 
-/* Full builds replace these lifecycle and CLI entry points with bridge.c.
-** Lite links bridge_stub.c, which reports the feature as unavailable. */
+/* Both build variants link bridge.c; only the terminal mirror is optional. */
 void dch_bridge_prepare(char **argv, int resumed);
 void dch_bridge_start(char **argv, int resumed, int ptyfd, int listenfd,
                       int statusfd);

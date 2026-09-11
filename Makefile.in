@@ -5,14 +5,12 @@ LDFLAGS = @LDFLAGS@
 LIBS = @LIBS@
 VT_OBJS = @VT_OBJS@
 VT_LIBS = @VT_LIBS@
-BRIDGE_OBJS = @BRIDGE_OBJS@
 VERSION = @PACKAGE_VERSION@
 VPATH = $(srcdir)
 
-OBJ = attach.o master.o dch.o $(VT_OBJS) $(BRIDGE_OBJS)
+OBJ = attach.o master.o dch.o $(VT_OBJS) bridge.o
 SRC = $(srcdir)/attach.c $(srcdir)/master.c $(srcdir)/dch.c \
-      $(srcdir)/vt.c $(srcdir)/vt_stub.c $(srcdir)/bridge.c \
-      $(srcdir)/bridge_stub.c
+      $(srcdir)/vt.c $(srcdir)/vt_stub.c $(srcdir)/bridge.c
 
 TARFILES = $(srcdir)/README $(srcdir)/COPYING $(srcdir)/Makefile.in \
 	   $(srcdir)/config.h.in $(srcdir)/bridge.h $(SRC) \
@@ -44,4 +42,3 @@ dch.o: @srcdir@/dch.c @srcdir@/dtach.h @srcdir@/bridge.h config.h
 vt.o: @srcdir@/vt.c @srcdir@/vt.h @srcdir@/dtach.h config.h
 vt_stub.o: @srcdir@/vt_stub.c @srcdir@/vt.h config.h
 bridge.o: @srcdir@/bridge.c @srcdir@/bridge.h @srcdir@/dtach.h config.h
-bridge_stub.o: @srcdir@/bridge_stub.c @srcdir@/bridge.h config.h

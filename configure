@@ -634,7 +634,6 @@ CPPFLAGS
 LDFLAGS
 CFLAGS
 CC
-BRIDGE_OBJS
 VT_CPPFLAGS
 VT_LIBS
 VT_OBJS
@@ -1307,8 +1306,8 @@ if test -n "$ac_init_help"; then
 Optional Packages:
   --with-PACKAGE[=ARG]    use PACKAGE [ARG=yes]
   --without-PACKAGE       do not use PACKAGE (same as --with-PACKAGE=no)
-  --without-libghostty    build dch-lite: no terminal mirror, no --read/--wait
-                          (~100KB binary)
+  --without-libghostty    build dch-lite: no terminal mirror, no --read or
+                          --wait --match
 
 Some influential environment variables:
   CC          C compiler command
@@ -2499,7 +2498,6 @@ fi
 VT_OBJS=vt_stub.o
 VT_LIBS=
 VT_CPPFLAGS=
-BRIDGE_OBJS=bridge_stub.o
 if test "x$with_libghostty" != xno; then
 	vt_platform=`uname -s | tr 'A-Z' 'a-z'`-`uname -m`
 	vt_lib="$srcdir/vendor/libghostty-vt/lib/$vt_platform/libghostty-vt.a"
@@ -2509,17 +2507,12 @@ printf '%s\n' "#define HAVE_LIBGHOSTTY_VT 1" >>confdefs.h
 
 		VT_OBJS=vt.o
 		VT_LIBS=$vt_lib
-	VT_CPPFLAGS="-I\$(srcdir)/vendor/libghostty-vt/include"
-
-printf '%s\n' "#define HAVE_NATIVE_AGENT_BRIDGE 1" >>confdefs.h
-
-	BRIDGE_OBJS=bridge.o
+		VT_CPPFLAGS="-I\$(srcdir)/vendor/libghostty-vt/include"
 	else
 		as_fn_error $? "no vendored libghostty-vt.a for $vt_platform.
 Run scripts/build-libghostty.sh (needs zig 0.15.x), or configure --without-libghostty for dch-lite." "$LINENO" 5
 	fi
 fi
-
 
 
 

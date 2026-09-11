@@ -291,8 +291,8 @@ that sidecar; it performs process-identity checks and peer lookup without
 requiring the Codex sandbox to execute
 .BR ps .
 .PP
-Full dch builds register a directly launched Codex command as a Claude native
-peer named after its stable
+dch registers a directly launched Codex command as a Claude native peer named
+after its stable
 .BR DCH_SESSION .
 Registration starts after Codex writes the first shell snapshot and only when
 the launch marker identifies one UUID. Multiple matching UUIDs are ambiguous;
@@ -308,8 +308,8 @@ handles one request at a time and rejects attachments.
 .SH EXIT STATUS
 0 on success. Control verbs: 1 generic error, 2
 .B \-\-wait
-timeout, 3 unavailable in this build. A dch-lite build has no terminal mirror
-and no native agent bridge.
+timeout, 3 unavailable in this build. A dch-lite build has no terminal mirror;
+native agent commands are available in both builds.
 .SH ENVIRONMENT
 .TP
 .B DCH_SOCKET_DIR

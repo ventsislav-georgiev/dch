@@ -332,24 +332,12 @@ def main():
             "DCH_BRIDGE_SIDECAR_PID",
         ):
             env.pop(inherited_identity, None)
-        if (
-            subprocess.run(
-                [DCH, "--agent-list"], env=env, capture_output=True, timeout=3
-            ).returncode
-            == 3
-        ):
-            check(
-                "lite agent verbs return feature-unavailable exit 3",
-                subprocess.run(
-                    [DCH, "--agent-send", "nobody", "message"],
-                    env=env,
-                    capture_output=True,
-                    timeout=3,
-                ).returncode
-                == 3,
-            )
-            check("lite leaves no bridge artifacts", not any(sessions.iterdir()))
-            return 1 if failures else 0
+        bridge_list = subprocess.run(
+            [DCH, "--agent-list"], env=env, capture_output=True, timeout=3
+        )
+        check("native agent bridge is available", bridge_list.returncode == 0)
+        if bridge_list.returncode != 0:
+            return 1
 
         source_session = "fixture-source"
         source_marker = "%d.%s" % (os.getpid(), "a" * 32)
