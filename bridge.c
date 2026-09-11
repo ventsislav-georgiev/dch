@@ -1524,15 +1524,18 @@ static int peer_by_socket(const char *address, struct peer *out) {
   return hits == 1 ? 0 : hits > 1 ? -2 : -1;
 }
 
+/* Any argument whose basename is codex counts, so launchers such as
+   `headroom wrap codex` or `env X=1 codex` still get a sidecar. A false
+   match (a file named codex) only leaves an idle sidecar that never finds a
+   snapshot and never publishes. */
 static int is_codex(char **argv) {
-  const char *p, *base;
-
-  if (!argv || !argv[0] || !argv[0][0])
-    return 0;
-  p = argv[0];
-  base = strrchr(p, '/');
-  base = base ? base + 1 : p;
-  return strcmp(base, "codex") == 0;
+  for (int i = 0; argv && argv[i]; i++) {
+    const char *base = strrchr(argv[i], '/');
+    base = base ? base + 1 : argv[i];
+    if (!strcmp(base, "codex"))
+      return 1;
+  }
+  return 0;
 }
 
 static int random_bytes(unsigned char *out, size_t len) {
@@ -2213,6 +2216,12 @@ int main(void) {
   char out[32], tiny[4], ready[512];
   int life[2], status;
   pid_t child;
+  {
+    char *wrapped[] = {"headroom", "wrap", "/opt/homebrew/bin/codex", NULL};
+    char *plain[] = {"vim", "notes.txt", NULL};
+    if (!is_codex(wrapped) || is_codex(plain))
+      return 20;
+  }
   if (sha_selftest() < 0)
     return 1;
   if (json_string("{\"type\":\"auth\",\"unknown\":{\"type\":\"x\"}}", "type",

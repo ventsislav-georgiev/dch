@@ -447,7 +447,7 @@ has a reason to touch it in the first place.
 
 ## Native Claude and Codex messages
 
-A Codex command started by dch registers as a Claude native peer.
+A dch session that runs `codex`, directly or through a wrapper such as `headroom wrap codex`, registers as a Claude native peer.
 Its peer name is the stable `DCH_SESSION` name. Claude can find it with native
 `ListAgents` and send with native `SendMessage`. No helper, app-server, remote
 mode, or terminal injection is involved.

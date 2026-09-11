@@ -293,8 +293,11 @@ messages it accepts. Ambiguous, unknown, or unreachable peers exit 1. The
 source sidecar remains available after this command exits,
 so the peer can reply later.
 .PP
-dch registers a directly launched Codex command as a Claude native peer named
-after its stable
+dch registers a session whose command runs
+.B codex
+(directly or through a wrapper such as
+.BR "headroom wrap codex" )
+as a Claude native peer named after its stable
 .BR DCH_SESSION .
 Registration starts after Codex writes the first shell snapshot and only when
 the launch marker identifies one UUID. Multiple matching UUIDs are ambiguous;
