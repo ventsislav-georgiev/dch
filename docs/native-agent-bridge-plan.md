@@ -1,7 +1,7 @@
 # Native Claude and Codex bridge plan
 
-Revision 3, 2026-09-10. Incorporates Fable's review and the user's acceptance
-of Codex's queue pickup delay. Target release: dch 1.16.0.
+Revision 4, 2026-09-11. Adds bounded startup holding for the interval between
+snapshot discovery and Codex rollout readiness. Target release: dch 1.16.0.
 
 ## Outcome and limits
 
@@ -34,6 +34,9 @@ restart closes the old writer and creates a replacement sidecar; a failed
 restart leaves the old sidecar intact. Close inherited PTY, listener and
 client descriptors in the child. Reap sidecar exits without mistaking them
 for Codex termination. Sidecar failure must not kill or block the PTY session.
+Before orderly replacement or shutdown, the old sidecar attempts `dropped`
+receipts for accepted messages within one shared 1.2-second cleanup deadline.
+Unexpected process death is not durable and there is no disk spool.
 
 The peer PID is the sidecar PID. Its stable peer name is `DCH_SESSION`, not
 the changing Codex title. Obtain `procStart` with the exact command Claude
@@ -54,9 +57,11 @@ snapshot. A later /new or /resume that leaves conflicting snapshots refuses
 delivery; use a fresh dch session. Do not publish a legacy session if current
 ownership cannot be proved.
 
-Publish once a current UUID is known. Before a thread finishes its first
-turn, `codex queue` can return "no rollout found". Return `refused` in that
-case. Never fall back to terminal injection or another thread.
+Publish once a current UUID is known. The snapshot can exist before the first
+turn materializes its rollout. If `codex queue` returns the exact
+missing-rollout error for the bound UUID, hold the message and retry that UUID
+every five seconds. This does not start the first turn. Never fall back to
+terminal injection or another thread.
 
 ## Native transport
 
@@ -75,11 +80,16 @@ size limits, sender/reply identity, and optional target session ID. Reject
 attachments. Ignore harmless unknown fields and unrecognized priority values.
 Do not exact-match feature arrays or reject future optional metadata.
 
-Serve serially with bounded socket and subprocess deadlines. Invoke
+Serve serially with bounded socket and subprocess deadlines. Keep at most 16
+accepted inbound messages in FIFO order and one queue subprocess active. Invoke
 `codex queue --thread UUID --message TEXT` with argv. Receipt `delivered` means
 the queue accepted the message, not that the model processed it. Queue failure
-or timeout produces an authenticated `refused` receipt when a valid reply
-address is available. No message log, queue database writes, or worker pool.
+produces an authenticated `refused` receipt. A timeout or signaled subprocess
+has an uncertain result and produces `dropped`, with no retry. Receipt `held`
+means this sidecar retained the message after a confirmed missing-rollout
+failure; it later sends a terminal receipt. Messages behind a held item are
+held immediately. The listener remains responsive while the FIFO waits. No
+message log, queue database writes, or worker pool.
 Mark the serial throughput limit with a `ponytail:` comment.
 
 ## Codex sends and replies
@@ -102,8 +112,9 @@ Later native user replies go through the ordinary Codex queue path.
 Without a unique live source sidecar, sending fails with actionable guidance.
 There is no transient sender that claims durable two-way messaging. Receipt
 matching checks both `orig_msg_id` and target identity. Recognize `delivered`,
-`refused`, `dropped`, `held`, `denied`, and `expired`; report non-delivery without
-claiming success or automatically duplicating the message.
+`refused`, `dropped`, `held`, `denied`, and `expired`. Treat `held` as accepted
+pending work, not failure, so the sender does not resend. Report every other
+non-delivery without automatically duplicating the message.
 
 Codex shell tools authenticate list and send requests to the marker-bound
 persistent sidecar. The sidecar performs strict peer process-start validation
@@ -127,8 +138,8 @@ page with no dependency changes.
 
 Replace the old Python proof and its tests once the C integration covers the
 same contract. Update README and man page for actual normal-launch behavior,
-the first-turn limitation, stable names, accepted queue delay and any limits
-on sessions started before this version.
+startup holding, stable names, accepted queue delay and any limits on sessions
+started before this version.
 
 ## Acceptance before release
 
@@ -145,8 +156,10 @@ on sessions started before this version.
   sends a unique nonce with native `SendMessage`, and receives Codex's reply
   through `dch --agent-send`. Claude then replies to the persistent sender
   after that command has exited, and Codex receives it without terminal input.
-- Verify first-turn refusal separately. Kill only the proof's own sessions and
-  confirm artifact cleanup. Complete CI and installed-binary proof before
+- Verify that a native message sent after discovery but before rollout
+  readiness receives `held`, then `delivered` automatically after the user
+  starts the first turn, without a resend. Kill only the proof's own sessions
+  and confirm artifact cleanup. Complete CI and installed-binary proof before
   publishing v1.16.0. Release tracking lives in ledger #016.
 
 ## Self-review
@@ -163,5 +176,6 @@ Codex runs; therefore distinct matching UUIDs refuse delivery. Rollout source
 metadata distinguishes some subagents but does not prove active terminal
 ownership, so automatic retargeting is not supported. These are acceptance
 requirements, not future extensibility. Cross-host delivery, attachments,
-broadcasting, custom remote Codex transports and automatic retries are out
-of scope.
+broadcasting, custom remote Codex transports and general automatic retries are
+out of scope. The only retry is the exact missing-rollout diagnostic for the
+UUID already pinned to the accepted item.

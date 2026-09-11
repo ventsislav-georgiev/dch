@@ -281,11 +281,13 @@ and
 .TP
 .BI \-\-agent\-send " peer message..."
 Send a message from the current bridged Codex session to one exact peer name.
-Arguments after the name are joined with spaces. The command exits 0 only for
-an authenticated
+Arguments after the name are joined with spaces. The command exits 0 for an
+authenticated
 .B delivered
-receipt. Refused, dropped, held, denied, expired, ambiguous, and timed-out
-sends exit 1. The source sidecar remains available after this command exits,
+receipt or accepted pending work reported as
+.BR held .
+Refused, dropped, denied, expired, ambiguous, and timed-out sends exit 1. The
+source sidecar remains available after this command exits,
 so the peer can reply later. Agent commands run inside Codex authenticate to
 that sidecar; it performs process-identity checks and peer lookup without
 requiring the Codex sandbox to execute
@@ -301,10 +303,13 @@ thread. Sessions started by older dch versions have no marker and do not
 register. Native messages use
 .B codex queue
 and can take about five seconds to appear in the TUI. A delivery receipt means
-the queue accepted the message. It does not mean the model processed it. The
-first turn can be refused because no rollout exists yet; retry after that turn.
+the queue accepted the message. It does not mean the model processed it. If
+the bound thread has no rollout yet, dch retains up to 16 messages in FIFO
+order, reports them as held, and retries every five seconds. This does not
+start the first turn in an unused TUI. An orderly restart or shutdown attempts
+dropped receipts for held messages; a crash or SIGKILL is not durable.
 Messages are limited to 16384 bytes and wire frames to 65536 bytes. The bridge
-handles one request at a time and rejects attachments.
+handles one queue subprocess at a time and rejects attachments.
 .SH EXIT STATUS
 0 on success. Control verbs: 1 generic error, 2
 .B \-\-wait

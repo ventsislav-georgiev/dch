@@ -11,6 +11,10 @@
 #define BRIDGE_MARKER "DCH_NATIVE_BRIDGE_ID"
 #define FRAME_MAX 65536
 #define MESSAGE_MAX 16384
+#define PENDING_MAX 16
+#define QUEUE_RETRY_MS 5000
+#define QUEUE_TIMEOUT_MS 30000
+#define QUEUE_ERROR_MAX 2048
 
 static int owner_fd = -1;
 static pid_t sidecar_pid = -1;
@@ -21,6 +25,9 @@ static int random_bytes(unsigned char *out, size_t len);
 static int process_start(long pid, char *out, size_t cap);
 static int receipt_status(const char *status);
 static int monotonic_ms(long long *out);
+struct peer;
+static int send_receipt(const struct peer *target, const char *own_socket,
+                        const char *id, const char *status);
 
 static void stop_sidecar(int sig) {
   (void)sig;
@@ -639,6 +646,26 @@ struct peer {
   char pid_domain[32], session_id[128], marker[128];
 };
 
+struct pending_message {
+  struct peer sender;
+  char id[257];
+  char name[512];
+  char content[MESSAGE_MAX + 1];
+  char thread[128];
+  int held;
+};
+
+struct pending_queue {
+  struct pending_message items[PENDING_MAX];
+  int head, count, error_fd;
+  pid_t child;
+  long long child_deadline, retry_at;
+  char error[QUEUE_ERROR_MAX + 1];
+  size_t error_len;
+  int error_overflow;
+  int error_invalid;
+};
+
 static int private_dir(const char *path, int create) {
   struct stat st;
   if (create && mkdir(path, 0700) < 0 && errno != EEXIST)
@@ -939,28 +966,6 @@ static void terminate_child(pid_t pid) {
   }
 }
 
-static int wait_child(pid_t pid, int ms) {
-  int status;
-  long long now, end;
-  if (monotonic_ms(&now) < 0) {
-    terminate_child(pid);
-    return -1;
-  }
-  end = now + ms;
-  for (;;) {
-    pid_t r = waitpid(pid, &status, WNOHANG);
-    if (r == pid)
-      return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -1;
-    if (r < 0 && errno != EINTR)
-      return -1;
-    if (cancelled() || monotonic_ms(&now) < 0 || now >= end) {
-      terminate_child(pid);
-      return -1;
-    }
-    poll(NULL, 0, end - now > 50 ? 50 : (int)(end - now));
-  }
-}
-
 static int process_start(long pid, char *out, size_t cap) {
   int p[2], status, flags;
   pid_t child;
@@ -1220,10 +1225,12 @@ static int make_uuid(char out[37]) {
   return 0;
 }
 
-static int queue_message(const char *codex, const char *thread,
-                         const char *sender, const char *content) {
+static pid_t queue_message(const char *codex, const char *thread,
+                           const char *sender, const char *content,
+                           int *error_fd) {
   char *body, *qs, *qc, *shell;
   size_t need, sn = strlen(sender) * 4 + 3;
+  int errors[2];
   pid_t pid;
   int written;
   qs = malloc(strlen(sender) * 6 + 3);
@@ -1283,11 +1290,26 @@ static int queue_message(const char *codex, const char *thread,
     free(body);
     return -1;
   }
+  if (pipe(errors) < 0) {
+    free(body);
+    return -1;
+  }
+  if (nonblocking(errors[0]) < 0) {
+    close(errors[0]);
+    close(errors[1]);
+    free(body);
+    return -1;
+  }
   pid = fork();
   if (pid == 0) {
     char *av[] = {(char *)codex, "queue", "--thread", (char *)thread,
                   "--message",   body,    NULL};
     long maxfd = sysconf(_SC_OPEN_MAX);
+    close(errors[0]);
+    if (dup2(errors[1], 2) < 0)
+      _exit(127);
+    if (errors[1] != 2)
+      close(errors[1]);
     if (maxfd < 0)
       maxfd = 1024;
     for (int fd = 3; fd < maxfd; fd++)
@@ -1296,15 +1318,182 @@ static int queue_message(const char *codex, const char *thread,
     _exit(127);
   }
   free(body);
-  return pid < 0 ? -1 : wait_child(pid, 30000);
+  close(errors[1]);
+  if (pid < 0) {
+    close(errors[0]);
+    return -1;
+  }
+  *error_fd = errors[0];
+  return pid;
+}
+
+static int queue_not_ready(const char *error, const char *thread) {
+  char expected[512];
+  int n = snprintf(expected, sizeof expected,
+                   "Error: failed to queue session message: thread/queue/add "
+                   "failed: failed to read thread: invalid thread-store request: "
+                   "no rollout found for thread id %s (code -32603)\n",
+                   thread);
+  return n > 0 && n < (int)sizeof expected && !strcmp(error, expected);
+}
+
+static void pending_pop(struct pending_queue *q) {
+  memset(&q->items[q->head], 0, sizeof q->items[q->head]);
+  q->head = (q->head + 1) % PENDING_MAX;
+  q->count--;
+  q->retry_at = 0;
+}
+
+static void pending_error(struct pending_queue *q, int complete) {
+  char b[512];
+  ssize_t n;
+  do {
+    if (q->error_fd < 0)
+      return;
+    n = read(q->error_fd, b, sizeof b);
+    if (n > 0) {
+      size_t take = (size_t)n;
+      if (take > QUEUE_ERROR_MAX - q->error_len) {
+        take = QUEUE_ERROR_MAX - q->error_len;
+        q->error_overflow = 1;
+      }
+      memcpy(q->error + q->error_len, b, take);
+      if (memchr(b, '\0', (size_t)n))
+        q->error_invalid = 1;
+      q->error_len += take;
+      q->error[q->error_len] = '\0';
+      if ((size_t)n > take)
+        q->error_overflow = 1;
+    } else if (n == 0) {
+      close(q->error_fd);
+      q->error_fd = -1;
+      return;
+    }
+  } while (complete && n > 0 && !q->error_overflow);
+  if (complete && q->error_fd >= 0)
+    q->error_invalid = 1;
+}
+
+static void pending_tick(struct pending_queue *q, const char *codex,
+                         const char *home, const char *sess, const char *marker,
+                         const char *own_socket) {
+  struct pending_message *m;
+  long long now;
+  int status;
+  pid_t done;
+  char fresh[128];
+  if (monotonic_ms(&now) < 0 || !q->count)
+    return;
+  m = &q->items[q->head];
+  if (q->child > 0) {
+    pending_error(q, 0);
+    done = waitpid(q->child, &status, WNOHANG);
+    if (done == 0 && now < q->child_deadline)
+      return;
+    if (done == 0) {
+      terminate_child(q->child);
+      close(q->error_fd);
+      q->error_fd = -1;
+      q->child = -1;
+      send_receipt(&m->sender, own_socket, m->id, "dropped");
+      pending_pop(q);
+      return;
+    }
+    if (done < 0 && errno == EINTR)
+      return;
+    pending_error(q, 1);
+    if (q->error_fd >= 0)
+      close(q->error_fd);
+    q->error_fd = -1;
+    q->child = -1;
+    if (done > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+      send_receipt(&m->sender, own_socket, m->id, "delivered");
+      pending_pop(q);
+      return;
+    }
+    if (done > 0 && WIFEXITED(status) && WEXITSTATUS(status) != 0 &&
+        !q->error_overflow && !q->error_invalid &&
+        queue_not_ready(q->error, m->thread)) {
+      if (!m->held) {
+        send_receipt(&m->sender, own_socket, m->id, "held");
+        m->held = 1;
+      }
+      q->retry_at = now + QUEUE_RETRY_MS;
+      return;
+    }
+    send_receipt(&m->sender, own_socket, m->id,
+                 done > 0 && WIFEXITED(status) ? "refused" : "dropped");
+    pending_pop(q);
+    return;
+  }
+  if (q->retry_at && now < q->retry_at)
+    return;
+  if (cancelled())
+    return;
+  if (dch_codex_snapshot_id(home, sess, marker, fresh, sizeof fresh, 1) < 0 ||
+      strcmp(fresh, m->thread)) {
+    send_receipt(&m->sender, own_socket, m->id, "refused");
+    pending_pop(q);
+    return;
+  }
+  q->error_len = 0;
+  q->error_overflow = 0;
+  q->error_invalid = 0;
+  q->error[0] = '\0';
+  q->child =
+      queue_message(codex, m->thread, m->name, m->content, &q->error_fd);
+  if (q->child < 0) {
+    send_receipt(&m->sender, own_socket, m->id, "refused");
+    pending_pop(q);
+    return;
+  }
+  q->child_deadline = now + QUEUE_TIMEOUT_MS;
+}
+
+static int pending_add(struct pending_queue *q, const struct peer *sender,
+                       const char *id, const char *content, const char *thread,
+                       const char *own_socket) {
+  int slot;
+  for (int i = 0; i < q->count; i++) {
+    struct pending_message *m = &q->items[(q->head + i) % PENDING_MAX];
+    if (!strcmp(m->sender.socket, sender->socket) &&
+        !strcmp(m->sender.session_id, sender->session_id) &&
+        !strcmp(m->sender.proc_start, sender->proc_start) && !strcmp(m->id, id)) {
+      if (strcmp(m->content, content))
+        return -2;
+      if (m->held)
+        send_receipt(sender, own_socket, id, "held");
+      return 0;
+    }
+  }
+  if (q->count == PENDING_MAX)
+    return -1;
+  slot = (q->head + q->count) % PENDING_MAX;
+  q->items[slot].sender = *sender;
+  snprintf(q->items[slot].id, sizeof q->items[slot].id, "%s", id);
+  snprintf(q->items[slot].name, sizeof q->items[slot].name, "%s", sender->name);
+  snprintf(q->items[slot].content, sizeof q->items[slot].content, "%s", content);
+  snprintf(q->items[slot].thread, sizeof q->items[slot].thread, "%s", thread);
+  q->items[slot].held = q->count > 0;
+  q->count++;
+  if (q->items[slot].held)
+    send_receipt(sender, own_socket, id, "held");
+  return 0;
 }
 
 static int send_receipt(const struct peer *target, const char *own_socket,
                         const char *id, const char *status) {
   char p[2400], qid[1600], address[108], qfrom[700];
-  int fd, n;
+  int fd, n, timeout = 10000;
+  long long now;
+  if (request_deadline > 0 && monotonic_ms(&now) == 0) {
+    if (now >= request_deadline)
+      return -1;
+    if (request_deadline - now < timeout)
+      timeout = (int)(request_deadline - now);
+  }
   if (!receipt_status(status) || socket_safe(target->socket) < 0 ||
-      (fd = connect_unix(target->socket, 10000)) < 0)
+      (fd = connect_unix(target->socket, timeout)) < 0)
     return -1;
   if (snprintf(address, sizeof address, "uds:%s", own_socket) >=
           (int)sizeof address ||
@@ -1632,7 +1821,9 @@ static void refuse_competing(int fd, const char *payload,
 
 static int outgoing(int local, const char *payload, int server,
                     const char *token, const char *own_socket,
-                    const char *session) {
+                    const char *session, struct pending_queue *queue,
+                    const char *codex, const char *home, const char *sess,
+                    const char *marker) {
   char target[512], message[MESSAGE_MAX + 1], msgid[37], address[108],
       qmsg[MESSAGE_MAX * 6 + 3], qid[80], qfrom[700], qsess[800],
       frame[FRAME_MAX + 1];
@@ -1685,18 +1876,39 @@ static int outgoing(int local, const char *payload, int server,
   }
   close(fd);
   for (;;) {
-    struct pollfd ps[3] = {{server, POLLIN, 0},
+    struct pollfd ps[4] = {{server, POLLIN, 0},
                            {local, POLLIN | POLLHUP, 0},
-                           {sidecar_life_fd, POLLIN | POLLHUP, 0}};
-    int count = sidecar_life_fd >= 0 ? 3 : 2, r, remain;
+                           {sidecar_life_fd, POLLIN | POLLHUP, 0},
+                           {queue->error_fd, POLLIN | POLLHUP, 0}};
+    int count;
+    int r, remain;
+    long long queue_next = 0;
+    pending_tick(queue, codex, home, sess, marker, own_socket);
+    count = queue->error_fd >= 0 ? 4 : sidecar_life_fd >= 0 ? 3 : 2;
     if (monotonic_ms(&now) < 0 || now >= end || cancelled())
       break;
     remain = end - now > INT_MAX ? INT_MAX : (int)(end - now);
+    if (queue->count) {
+      queue_next = queue->child > 0
+                       ? (queue->error_fd < 0 && now + 50 < queue->child_deadline
+                              ? now + 50
+                              : queue->child_deadline)
+                       : queue->retry_at;
+      if (!queue_next || queue_next <= now)
+        remain = 0;
+      else if (queue_next - now < remain)
+        remain = (int)(queue_next - now);
+    }
+    ps[3].fd = queue->error_fd;
     r = poll(ps, count, remain);
     if (r < 0 && errno == EINTR)
       continue;
-    if (r <= 0 || (count == 3 && ps[2].revents) || ps[1].revents)
+    if (r < 0 || (sidecar_life_fd >= 0 && ps[2].revents) || ps[1].revents)
       return -1;
+    if (r == 0) {
+      pending_tick(queue, codex, home, sess, marker, own_socket);
+      continue;
+    }
     if (ps[0].revents & POLLIN) {
       int c = accept(server, NULL, NULL);
       char got[FRAME_MAX + 1], type[40], action[80], status[40], orig[128],
@@ -1722,13 +1934,17 @@ static int outgoing(int local, const char *payload, int server,
         local_result(local, status,
                      !strcmp(status, "delivered")
                          ? "peer accepted message"
+                         : !strcmp(status, "held")
+                         ? "peer accepted message for later delivery"
                          : "peer reported non-delivery");
         close(c);
-        return !strcmp(status, "delivered") ? 0 : -1;
+        return !strcmp(status, "delivered") || !strcmp(status, "held") ? 0
+                                                                         : -1;
       }
       refuse_competing(c, got, own_socket);
       close(c);
     }
+    pending_tick(queue, codex, home, sess, marker, own_socket);
   }
   (void)session;
   local_result(local, "refused", "timed out waiting for peer receipt");
@@ -1739,7 +1955,7 @@ static void handle_connection(int fd, int server, const char *token,
                               const char *own_socket, const char *session,
                               const char *codex, const char *home,
                               const char *sess, const char *marker,
-                              char *thread, size_t thread_cap) {
+                              struct pending_queue *queue) {
   char p[FRAME_MAX + 1], type[40], role[20], content[MESSAGE_MAX + 1], id[257],
       from[300], sid[128], fresh[128];
   struct peer sender;
@@ -1755,7 +1971,8 @@ static void handle_connection(int fd, int server, const char *token,
     return;
   }
   if (!strcmp(type, "dch_send")) {
-    outgoing(fd, p, server, token, own_socket, session);
+    outgoing(fd, p, server, token, own_socket, session, queue, codex, home,
+             sess, marker);
     request_deadline = 0;
     return;
   }
@@ -1778,13 +1995,7 @@ static void handle_connection(int fd, int server, const char *token,
     send_receipt(&sender, own_socket, id, "refused");
     return;
   }
-  if (snprintf(thread, thread_cap, "%s", fresh) >= (int)thread_cap) {
-    send_receipt(&sender, own_socket, id, "refused");
-    return;
-  }
-  if (queue_message(codex, thread, sender.name, content) == 0)
-    send_receipt(&sender, own_socket, id, "delivered");
-  else
+  if (pending_add(queue, &sender, id, content, fresh, own_socket) == -1)
     send_receipt(&sender, own_socket, id, "refused");
 }
 
@@ -1797,6 +2008,7 @@ static void bridge_sidecar(int life_fd, const char *codex) {
   const char *sess = getenv("DCH_SESSION"), *marker = getenv(BRIDGE_MARKER);
   unsigned char raw[32];
   int server = -1;
+  struct pending_queue queue = {.error_fd = -1, .child = -1};
   dev_t sockdev = 0, keydev = 0, recdev = 0;
   ino_t sockino = 0, keyino = 0, recino = 0;
   long long now;
@@ -1902,8 +2114,26 @@ static void bridge_sidecar(int life_fd, const char *codex) {
   /* ponytail: one serial listener bounds subprocesses and memory. Add a
   ** worker pool only if measured native-message throughput requires it. */
   for (; !sidecar_stop;) {
-    struct pollfd p[2] = {{life_fd, POLLIN | POLLHUP, 0}, {server, POLLIN, 0}};
-    int r = poll(p, 2, -1);
+    struct pollfd p[3] = {{life_fd, POLLIN | POLLHUP, 0},
+                          {server, POLLIN, 0},
+                          {queue.error_fd, POLLIN | POLLHUP, 0}};
+    long long tick_now, next = 0;
+    int timeout = -1, count;
+    pending_tick(&queue, codex, home, sess, marker, socket_path);
+    p[2].fd = queue.error_fd;
+    count = queue.error_fd >= 0 ? 3 : 2;
+    if (monotonic_ms(&tick_now) == 0 && queue.count) {
+      next = queue.child > 0
+                 ? (queue.error_fd < 0 && tick_now + 50 < queue.child_deadline
+                        ? tick_now + 50
+                        : queue.child_deadline)
+                 : queue.retry_at;
+      if (!next || next <= tick_now)
+        timeout = 0;
+      else
+        timeout = next - tick_now > INT_MAX ? INT_MAX : (int)(next - tick_now);
+    }
+    int r = poll(p, count, timeout);
     if (r < 0 && errno == EINTR)
       continue;
     if (r < 0 || p[0].revents)
@@ -1913,9 +2143,27 @@ static void bridge_sidecar(int life_fd, const char *codex) {
       if (c >= 0) {
         if (nonblocking(c) == 0)
           handle_connection(c, server, token, socket_path, uuid, codex, home,
-                            sess, marker, thread, sizeof thread);
+                            sess, marker, &queue);
         close(c);
       }
+    }
+    pending_tick(&queue, codex, home, sess, marker, socket_path);
+  }
+  if (queue.child > 0) {
+    terminate_child(queue.child);
+    if (queue.error_fd >= 0)
+      close(queue.error_fd);
+    queue.child = -1;
+    queue.error_fd = -1;
+  }
+  if (queue.count && monotonic_ms(&now) == 0) {
+    request_deadline = now + 1200;
+    sidecar_life_fd = -1;
+    sidecar_stop = 0;
+    while (queue.count) {
+      struct pending_message *m = &queue.items[queue.head];
+      send_receipt(&m->sender, socket_path, m->id, "dropped");
+      pending_pop(&queue);
     }
   }
   unlink_same(record, recdev, recino);
@@ -2049,11 +2297,11 @@ int dch_bridge_agent_send(const char *name, int argc, char **argv) {
     fprintf(stderr, "dch: invalid source-sidecar response\n");
     return 1;
   }
-  if (strcmp(status, "delivered")) {
+  if (strcmp(status, "delivered") && strcmp(status, "held")) {
     fprintf(stderr, "dch: message %s: %s\n", status, detail);
     return 1;
   }
-  puts("delivered");
+  puts(status);
   return 0;
 }
 
@@ -2076,7 +2324,8 @@ int dch_codex_snapshot_id(const char *home, const char *sess,
 }
 
 int main(void) {
-  char out[32], tiny[4];
+  static const char thread[] = "123e4567-e89b-12d3-a456-426614174000";
+  char out[32], tiny[4], ready[512];
   int life[2], status;
   pid_t child;
   if (sha_selftest() < 0)
@@ -2095,8 +2344,25 @@ int main(void) {
     return 5;
   if (json_quote(tiny, sizeof tiny, "abcd") != SIZE_MAX)
     return 6;
-  if (pipe(life) < 0 || (child = fork()) < 0)
+  snprintf(ready, sizeof ready,
+           "Error: failed to queue session message: thread/queue/add failed: "
+           "failed to read thread: invalid thread-store request: no rollout "
+           "found for thread id %s (code -32603)\n",
+           thread);
+  if (!queue_not_ready(ready, thread) ||
+      queue_not_ready("no rollout found for thread id "
+                      "123e4567-e89b-12d3-a456-426614174000\n",
+                      thread) ||
+      (strcat(ready, "trailing"), queue_not_ready(ready, thread)) ||
+      queue_not_ready(
+          "Error: failed to queue session message: thread/queue/add failed: "
+          "failed to read thread: invalid thread-store request: no rollout "
+          "found for thread id 123e4567-e89b-12d3-a456-426614174001 "
+          "(code -32603)\n",
+          thread))
     return 7;
+  if (pipe(life) < 0 || (child = fork()) < 0)
+    return 8;
   if (child == 0) {
     close(life[0]);
     close(life[1]);
@@ -2104,11 +2370,8 @@ int main(void) {
       pause();
   }
   close(life[1]);
-  sidecar_life_fd = life[0];
-  if (wait_child(child, 5000) == 0)
-    return 8;
+  terminate_child(child);
   close(life[0]);
-  sidecar_life_fd = -1;
   errno = 0;
   if (waitpid(child, &status, WNOHANG) != -1 || errno != ECHILD)
     return 9;

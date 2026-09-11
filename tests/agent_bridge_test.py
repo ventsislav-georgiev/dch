@@ -442,6 +442,19 @@ def main():
                 )
                 and send_code == 0,
             )
+            held_request, held_code, held_stdout, _ = source_call(
+                ["--agent-send", "alpha", "held-message"],
+                {
+                    "status": "held",
+                    "detail": "peer accepted message for later delivery",
+                },
+            )
+            check(
+                "agent-send treats a held receipt as accepted pending work",
+                held_request[1].get("message") == "held-message"
+                and held_code == 0
+                and held_stdout == "held\n",
+            )
         finally:
             source.close()
 
@@ -461,6 +474,15 @@ root=pathlib.Path(os.environ['CODEX_HOME'])/'shell_snapshots'
 root.mkdir(parents=True,exist_ok=True)
 if len(sys.argv)>1 and sys.argv[1]=='queue':
  open(os.environ['FAKE_CODEX_LOG'],'a').write(json.dumps(sys.argv[1:])+'\\n')
+ if 'NOT_READY_TRAILING' in sys.argv[-1]:
+  sys.stderr.write('Error: failed to queue session message: thread/queue/add failed: failed to read thread: invalid thread-store request: no rollout found for thread id '+sys.argv[3]+' (code -32603)\\n'+'x'*2500)
+  raise SystemExit(1)
+ if 'NOT_READY' in sys.argv[-1]:
+  ready=pathlib.Path(os.environ['FAKE_READY_GATE'])
+  if 'ALWAYS_NOT_READY' in sys.argv[-1] or not ready.exists():
+   sys.stderr.write('Error: failed to queue session message: thread/queue/add failed: failed to read thread: invalid thread-store request: no rollout found for thread id '+sys.argv[3]+' (code -32603)\\n')
+   raise SystemExit(1)
+  open(os.environ['FAKE_READY_SUCCESS'],'a').write('success\\n')
  if 'HANG_QUEUE' in sys.argv[-1]:
   open(os.environ['FAKE_HANG_LOG'],'w').write(str(os.getpid()))
   signal.pause()
@@ -477,6 +499,8 @@ signal.pause()
             FAKE_CODEX_LOG=str(log),
             FAKE_CHILD_LOG=str(child_log),
             FAKE_HANG_LOG=str(hang_log),
+            FAKE_READY_GATE=str(root / "ready-gate"),
+            FAKE_READY_SUCCESS=str(root / "ready-success"),
         )
         session, peers = "bridge-%d" % os.getpid(), []
         try:
@@ -586,6 +610,157 @@ signal.pause()
                 and queued_contents(log) == ["native nonce"]
                 and "--remote" not in args,
             )
+
+            marker = (
+                snapshot.read_text()
+                .split("DCH_NATIVE_BRIDGE_ID=", 1)[1]
+                .split("\n", 1)[0]
+            )
+            source_env = dict(env, DCH_SESSION=session, DCH_NATIVE_BRIDGE_ID=marker)
+            wait_proc = subprocess.Popen(
+                [sys.executable, "-c", "import signal\nsignal.pause()"]
+            )
+            wait_peer = ClaudePeer(
+                sessions, root, "wait-target", wait_proc.pid, proc_start(wait_proc.pid)
+            )
+            wait_peer.publish("wait-target")
+            peers.append(wait_peer)
+
+            early = dict(
+                base,
+                msg_id="early",
+                message={"role": "user", "content": "NOT_READY early"},
+            )
+            native_send(bridge_path, token, early)
+            early_held = receipt_for(reply, "early", bridge_path)
+            native_send(
+                bridge_path,
+                token,
+                dict(
+                    early,
+                    message={"role": "user", "content": "changed duplicate"},
+                ),
+            )
+            native_send(bridge_path, token, early)
+            duplicate_held = receipt_for(reply, "early", bridge_path)
+            queued = []
+            for index in range(15):
+                msg_id = "behind-%02d" % index
+                content = "queued behind %02d" % index
+                native_send(
+                    bridge_path,
+                    token,
+                    dict(
+                        base,
+                        msg_id=msg_id,
+                        message={"role": "user", "content": content},
+                    ),
+                )
+                queued.append((msg_id, content, receipt_for(reply, msg_id, bridge_path)))
+            native_send(
+                bridge_path,
+                token,
+                dict(
+                    base,
+                    msg_id="overflow",
+                    message={"role": "user", "content": "queue overflow"},
+                ),
+            )
+            overflow = receipt_for(reply, "overflow", bridge_path)
+            responsive = subprocess.run(
+                [DCH, "--agent-list", "--json"],
+                env=source_env,
+                text=True,
+                capture_output=True,
+                timeout=2,
+            )
+            waiting_send = subprocess.Popen(
+                [DCH, "--agent-send", "wait-target", "wait while queue retries"],
+                env=source_env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            waiting_outbound = wait_peer.accept()
+            Path(env["FAKE_READY_GATE"]).touch()
+            early_delivered = receipt_for(reply, "early", bridge_path, 8)
+            queued_delivered = [
+                receipt_for(reply, msg_id, bridge_path, 5)
+                for msg_id, _, _ in queued
+            ]
+            if waiting_outbound:
+                wait_peer.receipt(bridge_path, waiting_outbound[1]["msg_id"])
+            waiting_stdout, _ = waiting_send.communicate(timeout=5)
+            queued_contents_after = queued_contents(log)
+            check(
+                "bounded early queue coalesces duplicates and drains while local send waits",
+                early_held
+                and early_held[1].get("status") == "held"
+                and duplicate_held
+                and duplicate_held[1].get("status") == "held"
+                and all(receipt and receipt[1].get("status") == "held" for _, _, receipt in queued)
+                and overflow
+                and overflow[1].get("status") == "refused"
+                and responsive.returncode == 0
+                and early_delivered
+                and early_delivered[1].get("status") == "delivered"
+                and all(receipt and receipt[1].get("status") == "delivered" for receipt in queued_delivered)
+                and waiting_send.returncode == 0
+                and waiting_stdout == "delivered\n"
+                and queued_contents_after.count("NOT_READY early") >= 2
+                and Path(env["FAKE_READY_SUCCESS"]).read_text().splitlines()
+                == ["success"]
+                and queued_contents_after[-15:] == [content for _, content, _ in queued]
+                and "changed duplicate" not in queued_contents_after
+                and "queue overflow" not in queued_contents_after,
+            )
+
+            native_send(
+                bridge_path,
+                token,
+                dict(
+                    base,
+                    msg_id="pinned-old",
+                    message={"role": "user", "content": "ALWAYS_NOT_READY pinned"},
+                ),
+            )
+            pinned_held = receipt_for(reply, "pinned-old", bridge_path)
+            switched_thread = "123e4567-e89b-12d3-a456-426614174003"
+            switched_snapshot = snapshot.with_name(switched_thread + ".101.sh")
+            switched_snapshot.write_text(snapshot.read_text())
+            snapshot.unlink()
+            pinned_refused = receipt_for(reply, "pinned-old", bridge_path, 8)
+            native_send(
+                bridge_path,
+                token,
+                dict(
+                    base,
+                    msg_id="new-thread",
+                    message={"role": "user", "content": "new unique thread"},
+                ),
+            )
+            new_thread_delivered = receipt_for(reply, "new-thread", bridge_path)
+            queue_calls = [json.loads(line) for line in log.read_text().splitlines()]
+            check(
+                "pending UUID stays pinned when a different UUID becomes unique",
+                pinned_held
+                and pinned_held[1].get("status") == "held"
+                and pinned_refused
+                and pinned_refused[1].get("status") == "refused"
+                and new_thread_delivered
+                and new_thread_delivered[1].get("status") == "delivered"
+                and sum("ALWAYS_NOT_READY pinned" in call[-1] for call in queue_calls)
+                == 1
+                and next(
+                    call[2] for call in queue_calls if "ALWAYS_NOT_READY pinned" in call[-1]
+                )
+                == THREAD
+                and next(
+                    call[2] for call in queue_calls if "new unique thread" in call[-1]
+                )
+                == switched_thread,
+            )
+            snapshot = switched_snapshot
 
             invalid = {
                 "BAD_JSON": b'{"type":"user","message":{"role":"user","content":"BAD_JSON"},"msg_id":"bad-json","from":"uds:'
@@ -711,6 +886,20 @@ signal.pause()
                 "queue failure returns an authenticated refusal",
                 refused and refused[1].get("status") == "refused",
             )
+            native_send(
+                bridge_path,
+                token,
+                dict(
+                    base,
+                    msg_id="trailing-error",
+                    message={"role": "user", "content": "NOT_READY_TRAILING"},
+                ),
+            )
+            trailing = receipt_for(reply, "trailing-error", bridge_path)
+            check(
+                "readiness text with oversized trailing stderr is not retried",
+                trailing and trailing[1].get("status") == "refused",
+            )
             started = time.monotonic()
             native_send(
                 bridge_path,
@@ -724,14 +913,21 @@ signal.pause()
             hung = receipt_for(reply, "hang", bridge_path, QUEUE_DEADLINE + 5)
             hang_pid = int(hang_log.read_text()) if hang_log.exists() else 0
             check(
-                "hung queue is killed and refused at the documented deadline",
+                "hung queue is killed and dropped at the documented deadline",
                 hung
-                and hung[1].get("status") == "refused"
+                and hung[1].get("status") == "dropped"
                 and QUEUE_DEADLINE - 1
                 <= time.monotonic() - started
                 <= QUEUE_DEADLINE + 5
                 and hang_pid
                 and wait_until(lambda: process_gone(hang_pid), 3),
+            )
+            contents_after_failures = queued_contents(log)
+            check(
+                "permanent and uncertain queue failures are attempted once",
+                contents_after_failures.count("FAIL_QUEUE") == 1
+                and contents_after_failures.count("HANG_QUEUE") == 1
+                and contents_after_failures.count("NOT_READY_TRAILING") == 1,
             )
 
             target_proc = subprocess.Popen(
@@ -902,6 +1098,16 @@ signal.pause()
 
             child_before = child_log.read_text()
             old_pid = record["pid"]
+            native_send(
+                bridge_path,
+                token,
+                dict(
+                    base,
+                    msg_id="restart-held",
+                    message={"role": "user", "content": "ALWAYS_NOT_READY"},
+                ),
+            )
+            restart_held = receipt_for(reply, "restart-held", bridge_path)
             incomplete = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             incomplete.settimeout(2)
             incomplete.connect(str(bridge_path))
@@ -924,9 +1130,14 @@ signal.pause()
                         else None
                     )
                 )
+                restart_dropped = receipt_for(reply, "restart-held", bridge_path)
                 check(
-                    "owner EOF interrupts an incomplete frame and restart replaces sidecar",
+                    "restart drops held work, interrupts a frame, and replaces sidecar",
                     restarted.returncode == 0
+                    and restart_held
+                    and restart_held[1].get("status") == "held"
+                    and restart_dropped
+                    and restart_dropped[1].get("status") == "dropped"
                     and replacement
                     and replacement[1]["pid"] != old_pid
                     and not record_path.exists()
@@ -967,6 +1178,13 @@ signal.pause()
                 replacement and current_path.read_text() == "replacement\n",
             )
         finally:
+            waiting = locals().get("waiting_send")
+            if waiting and waiting.poll() is None:
+                waiting.kill()
+                try:
+                    waiting.wait(2)
+                except subprocess.TimeoutExpired:
+                    pass
             pending = locals().get("send")
             if pending and pending.poll() is None:
                 pending.kill()
@@ -985,7 +1203,11 @@ signal.pause()
                     peer.close()
                 except OSError:
                     pass
-            for proc in (locals().get("target_proc"), locals().get("duplicate_proc")):
+            for proc in (
+                locals().get("wait_proc"),
+                locals().get("target_proc"),
+                locals().get("duplicate_proc"),
+            ):
                 if proc and proc.poll() is None:
                     proc.terminate()
                     try:

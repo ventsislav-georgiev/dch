@@ -465,23 +465,32 @@ The sidecar performs the process-identity checks and peer lookup, so Codex's
 sandbox does not need permission to run `ps`.
 
 An inbound message identifies its authenticated sender and includes the reply
-command before the untrusted content. `--agent-send` exits 0 only after the
-peer returns a `delivered` receipt. Refused, dropped, held, denied, expired,
-ambiguous, and timed-out sends exit 1.
+command before the untrusted content. `--agent-send` exits 0 after the peer
+returns `delivered` or accepts pending work with `held`. Refused, dropped,
+denied, expired, ambiguous, and timed-out sends exit 1. A held peer can send a
+later terminal receipt for the same message ID.
 
-Codex creates its shell snapshot after the first turn starts. The peer stays
-absent until dch can bind the current session to exactly one snapshot UUID.
+The peer stays absent until Codex writes its shell snapshot and dch can bind
+the current session to exactly one snapshot UUID.
 If `/new`, a nested Codex command, or inherited state produces more than one
 matching UUID, dch refuses to guess. Start a fresh dch Codex session. Sessions
 started by older dch versions lack the launch marker and cannot register.
 
 `codex queue` normally accepts a message quickly, but the TUI currently checks
 its queue about every five seconds. Delivery receipts mean the queue accepted
-the message, not that the model has processed it. Before Codex completes its
-first turn, `codex queue` can refuse because no rollout exists yet; retry after
-that turn. Messages are limited to 16,384 bytes and wire frames to 65,536
-bytes. The bridge handles one bounded request at a time and does not support
-attachments or broadcast. The native bridge is available in both builds.
+the message, not that the model has processed it. If the bound thread has no
+rollout yet, the bridge retains up to 16 messages in FIFO order and retries
+every five seconds. It reports `held` once a message is waiting. This does not
+start a first turn in an unused TUI. The bridge stays responsive to list and
+send requests while messages wait. It never retries other queue failures or an
+uncertain subprocess result.
+
+Held messages live in the sidecar's bounded memory. On an orderly restart or
+shutdown, the old sidecar attempts `dropped` receipts within one shared cleanup
+deadline before removing its socket. A crash, `SIGKILL`, or power loss is not
+durable; there is no disk spool. Messages are limited to 16,384 bytes and wire
+frames to 65,536 bytes. The bridge does not support attachments or broadcast
+and is available in both builds.
 
 ## How it differs from upstream dtach
 
