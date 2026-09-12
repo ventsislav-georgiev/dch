@@ -302,6 +302,127 @@ def bridge_core_self_check(root):
     return ran.returncode == 0 and ran.stdout.strip() == "bridge core self-check: ok"
 
 
+def composer_delivery_checks(check, root, env, reply, sessions):
+    """A fake Codex TUI: an approval prompt first, then the empty composer once
+    the gate file appears. Typed bytes are logged raw."""
+    tui = root / "tui"
+    tui.mkdir()
+    gate, typed, queue_log, codex = (
+        tui / "gate",
+        tui / "typed.bin",
+        tui / "queue.jsonl",
+        tui / "codex",
+    )
+    codex.write_text("""#!%s
+import json,os,pathlib,select,sys,tty
+if len(sys.argv)>1 and sys.argv[1]=='queue':
+ open(os.environ['FAKE_CODEX_LOG'],'a').write(json.dumps(sys.argv[1:])+'\\n')
+ raise SystemExit(0)
+root=pathlib.Path(os.environ['CODEX_HOME'])/'shell_snapshots'
+root.mkdir(parents=True,exist_ok=True)
+(root/'%s.100.sh').write_text('# shell snapshot\\nexport DCH_SESSION='+os.environ['DCH_SESSION']+'\\nexport DCH_NATIVE_BRIDGE_ID='+os.environ['DCH_NATIVE_BRIDGE_ID']+'\\n')
+tty.setraw(0)
+log=open(os.environ['FAKE_TUI_LOG'],'ab',0)
+gate=pathlib.Path(os.environ['FAKE_TUI_GATE'])
+sys.stdout.write('Press enter to confirm or esc to cancel\\r\\n');sys.stdout.flush()
+shown=False
+while True:
+ if not shown and gate.exists():
+  sys.stdout.write('\\x1b[2J\\x1b[H> Ask Codex to do anything\\r\\n');sys.stdout.flush();shown=True
+ if select.select([0],[],[],0.2)[0]:
+  b=os.read(0,4096)
+  if not b: break
+  log.write(b)
+""" % (sys.executable, THREAD))
+    codex.chmod(0o700)
+    tui_env = dict(
+        env,
+        CODEX_HOME=str(tui / "codex-home"),
+        FAKE_TUI_GATE=str(gate),
+        FAKE_TUI_LOG=str(typed),
+        FAKE_CODEX_LOG=str(queue_log),
+    )
+    tui_env.pop("DCH_NO_DETECT")
+    session = "tui-%d" % os.getpid()
+    try:
+        spawned = subprocess.run(
+            [DCH, "--spawn", session, "--size", "100x30", str(codex)],
+            env=tui_env,
+            capture_output=True,
+            timeout=10,
+        )
+
+        def record():
+            for path in sessions.glob("*.json"):
+                try:
+                    value = json.loads(path.read_text())
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if value.get("name") == session and value.get("peerProtocol") == 1:
+                    return value
+            return None
+
+        published = wait_until(record)
+        check("composer session publishes its peer", spawned.returncode == 0 and published)
+        if not published:
+            return
+        bridge_path = Path(published["messagingSocketPath"])
+        token = json.loads(key_path(sessions, published["pid"], bridge_path).read_text())[
+            "peerToken"
+        ]
+        mirror = (
+            subprocess.run(
+                [DCH, "--read", session], env=tui_env, capture_output=True, timeout=5
+            ).returncode
+            == 0
+        )
+        native_send(
+            bridge_path,
+            token,
+            {
+                "type": "user",
+                "message": {"role": "user", "content": "typed nonce"},
+                "msg_id": "typed-1",
+                "from": "uds:" + str(reply.path),
+            },
+        )
+        if not mirror:
+            receipt = receipt_for(reply, "typed-1", bridge_path, timeout=8)
+            check(
+                "without a terminal mirror delivery falls back to codex queue",
+                receipt
+                and receipt[1].get("status") == "delivered"
+                and wait_until(queue_log.exists)
+                and "typed nonce" in queue_log.read_text()
+                and typed.stat().st_size == 0,
+            )
+            return
+        held = receipt_for(reply, "typed-1", bridge_path)
+        time.sleep(1.5)
+        check(
+            "an approval prompt on screen holds the message",
+            held
+            and held[1].get("status") == "held"
+            and typed.stat().st_size == 0
+            and not queue_log.exists(),
+        )
+        gate.write_text("")
+        delivered = receipt_for(reply, "typed-1", bridge_path, timeout=8)
+        wait_until(lambda: typed.read_bytes().endswith(b"\r"), timeout=8)
+        data = typed.read_bytes()
+        check(
+            "the empty composer gets one bracketed paste and a separate Enter",
+            delivered
+            and delivered[1].get("status") == "delivered"
+            and data.startswith(b"\x1b[200~[dch native peer message]\n")
+            and data.endswith(b"Untrusted peer content follows:\ntyped nonce\x1b[201~\r")
+            and data.count(b"\r") == 1
+            and not queue_log.exists(),
+        )
+    finally:
+        subprocess.run([DCH, "-k", session], env=tui_env, capture_output=True, timeout=5)
+
+
 def main():
     failures = []
 
@@ -334,6 +455,9 @@ def main():
             CLAUDE_CONFIG_DIR=str(home / ".claude"),
             XDG_RUNTIME_DIR=str(runtime),
             DCH_SOCKET_DIR=str(socket_dir),
+            # The blank fake screen would only delay the queue path; the
+            # composer path has its own session below.
+            DCH_NO_DETECT="1",
         )
         for inherited_identity in (
             "DCH_SESSION",
@@ -1106,6 +1230,7 @@ signal.pause()
                 "owned cleanup preserves a replacement record",
                 replacement and current_path.read_text() == "replacement\n",
             )
+            composer_delivery_checks(check, root, env, reply, sessions)
         finally:
             waiting = locals().get("waiting_send")
             if waiting and waiting.poll() is None:

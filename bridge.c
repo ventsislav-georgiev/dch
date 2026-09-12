@@ -15,6 +15,14 @@
 #define QUEUE_RETRY_MS 5000
 #define QUEUE_TIMEOUT_MS 30000
 #define QUEUE_ERROR_MAX 2048
+/* Typing into the Codex composer: Enter follows the paste after this delay,
+   a busy screen is re-read at this interval, and a message waits this long
+   for an approval prompt or for a draft/unknown screen before it falls back
+   to `codex queue`. */
+#define PUSH_ENTER_MS 300
+#define PUSH_RETRY_MS 1000
+#define PUSH_BLOCKED_MS 600000
+#define PUSH_UNKNOWN_MS 10000
 
 static int owner_fd = -1;
 static pid_t sidecar_pid = -1;
@@ -652,7 +660,8 @@ struct pending_message {
   char name[512];
   char content[MESSAGE_MAX + 1];
   char thread[128];
-  int held;
+  int held, pasted;
+  long long wait_since;
 };
 
 struct pending_queue {
@@ -1233,25 +1242,22 @@ static int make_uuid(char out[37]) {
   return 0;
 }
 
-static pid_t queue_message(const char *codex, const char *thread,
-                           const char *sender, const char *content,
-                           int *error_fd) {
+/* The text Codex sees for one native peer message. Caller frees. */
+static char *peer_body(const char *sender, const char *content) {
   char *body, *qs, *shell;
   size_t need, sn = strlen(sender) * 4 + 3;
-  int errors[2];
-  pid_t pid;
   int written;
   qs = malloc(strlen(sender) * 6 + 3);
   shell = malloc(sn);
   if (!qs || !shell) {
     free(qs);
     free(shell);
-    return -1;
+    return NULL;
   }
   if (json_quote(qs, strlen(sender) * 6 + 3, sender) == SIZE_MAX) {
     free(qs);
     free(shell);
-    return -1;
+    return NULL;
   }
   {
     size_t n = 0;
@@ -1271,7 +1277,7 @@ static pid_t queue_message(const char *codex, const char *thread,
   if (!body) {
     free(qs);
     free(shell);
-    return -1;
+    return NULL;
   }
   written = snprintf(
       body, need,
@@ -1283,8 +1289,19 @@ static pid_t queue_message(const char *codex, const char *thread,
   free(shell);
   if (written < 0 || (size_t)written >= need) {
     free(body);
-    return -1;
+    return NULL;
   }
+  return body;
+}
+
+static pid_t queue_message(const char *codex, const char *thread,
+                           const char *sender, const char *content,
+                           int *error_fd) {
+  char *body = peer_body(sender, content);
+  int errors[2];
+  pid_t pid;
+  if (!body)
+    return -1;
   if (pipe(errors) < 0) {
     free(body);
     return -1;
@@ -1416,6 +1433,45 @@ static void pending_tick(struct pending_queue *q, const char *codex,
     return;
   if (cancelled())
     return;
+  /* Preferred path: type the message into the Codex composer through the
+     master, where Codex steers it into a running turn after the current tool
+     call. `codex queue` only submits at the end of the turn. */
+  if (m->pasted) {
+    if (dch_pty_push(sockname, NULL) < 0) {
+      send_receipt(&m->sender, own_socket, m->id, "dropped");
+      pending_pop(q);
+      return;
+    }
+    send_receipt(&m->sender, own_socket, m->id, "delivered");
+    pending_pop(q);
+    return;
+  }
+  {
+    int gate = sockname ? dch_pty_gate(sockname) : -1;
+    if (gate == 1) {
+      char *body = peer_body(m->name, m->content);
+      int pushed = body && dch_pty_push(sockname, body) == 0;
+      free(body);
+      if (pushed) {
+        m->pasted = 1;
+        q->retry_at = now + PUSH_ENTER_MS;
+        return;
+      }
+    } else if (gate >= 0) {
+      /* ponytail: screen strings gate the typing; a draft or an unknown
+         Codex screen waits briefly, then the message takes the queue path. */
+      if (!m->wait_since)
+        m->wait_since = now;
+      if (now - m->wait_since < (gate == 0 ? PUSH_BLOCKED_MS : PUSH_UNKNOWN_MS)) {
+        if (!m->held) {
+          send_receipt(&m->sender, own_socket, m->id, "held");
+          m->held = 1;
+        }
+        q->retry_at = now + PUSH_RETRY_MS;
+        return;
+      }
+    }
+  }
   if (dch_codex_snapshot_id(home, sess, marker, fresh, sizeof fresh, 1) < 0 ||
       strcmp(fresh, m->thread)) {
     send_receipt(&m->sender, own_socket, m->id, "refused");
@@ -2267,6 +2323,16 @@ int dch_bridge_agent_send(const char *name, int argc, char **argv) {
 }
 
 #ifdef DCH_BRIDGE_SELFTEST
+char *sockname;
+int dch_pty_gate(const char *path) {
+  (void)path;
+  return -1;
+}
+int dch_pty_push(const char *path, const char *text) {
+  (void)path;
+  (void)text;
+  return -1;
+}
 int dch_codex_thread_name(const char *home, const char *id, char *out,
                           size_t outsz) {
   (void)home;

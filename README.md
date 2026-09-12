@@ -476,10 +476,17 @@ If `/new`, a nested Codex command, or inherited state produces more than one
 matching UUID, dch refuses to guess. Start a fresh dch Codex session. Sessions
 started by older dch versions lack the launch marker and cannot register.
 
-`codex queue` normally accepts a message quickly, but the TUI currently checks
-its queue about every five seconds. Delivery receipts mean the queue accepted
-the message, not that the model has processed it. If the bound thread has no
-rollout yet, the bridge retains up to 16 messages in FIFO order and retries
+A native message is typed into the Codex composer through the session
+master, as one bracketed paste followed by Enter, so a running turn steers it
+in after the current tool call instead of waiting for the end of the turn.
+dch types only while the screen shows the empty composer placeholder. While an
+approval prompt, form, or pager is on screen the message waits (up to ten
+minutes) and is reported `held`; a draft in the composer or an unknown screen
+waits ten seconds. After that, and always in a build without the terminal
+mirror, delivery falls back to `codex queue`, which the TUI submits at the end
+of the current turn. Delivery receipts mean the text reached the composer or
+the queue, not that the model has processed it. If the bound thread has no
+rollout yet, the queue path retains up to 16 messages in FIFO order and retries
 every five seconds. It reports `held` once a message is waiting. This does not
 start a first turn in an unused TUI. The bridge stays responsive to list and
 send requests while messages wait. It never retries other queue failures or an

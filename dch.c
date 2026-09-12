@@ -2135,31 +2135,37 @@ static const char no_reply_msg[] =
     "     before recreating anything; try `dch --restart <session>` first\n";
 
 static int
-control_connect(const char *name, int quiet)
+control_connect_path(const char *path)
 {
 	struct sockaddr_un sa;
 	int s;
 
-	if (make_sock_path(name) < 0)
+	if (strlen(path) > sizeof(sa.sun_path) - 1)
 		return -1;
 	s = socket(PF_UNIX, SOCK_STREAM, 0);
 	if (s < 0)
 		return -1;
-	if (strlen(sock_path) > sizeof(sa.sun_path) - 1)
-	{
-		close(s);
-		return -1;
-	}
 	memset(&sa, 0, sizeof(sa));
 	sa.sun_family = AF_UNIX;
-	strcpy(sa.sun_path, sock_path);
+	strcpy(sa.sun_path, path);
 	if (connect(s, (struct sockaddr *)&sa, sizeof(sa)) < 0)
 	{
 		close(s);
-		if (!quiet)
-			fprintf(stderr, "dch: no session: %s\n", name);
 		return -1;
 	}
+	return s;
+}
+
+static int
+control_connect(const char *name, int quiet)
+{
+	int s;
+
+	if (make_sock_path(name) < 0)
+		return -1;
+	s = control_connect_path(sock_path);
+	if (s < 0 && !quiet)
+		fprintf(stderr, "dch: no session: %s\n", name);
 	return s;
 }
 
@@ -2295,7 +2301,7 @@ ctl_dead_exit(struct ctl_reader *r, const char *verb)
 ** bytes must not stall --ls-json. Returns content length, -1 on any
 ** failure. */
 static int
-fetch_screen(const char *name, char *buf, size_t cap, int deadline_ms)
+fetch_screen(const char *path, char *buf, size_t cap, int deadline_ms)
 {
 	unsigned char req[4], payload[PKT_MAX], type;
 	struct ctl_reader r = {0};
@@ -2304,7 +2310,7 @@ fetch_screen(const char *name, char *buf, size_t cap, int deadline_ms)
 	size_t used = 0;
 	int s, rc;
 
-	s = control_connect(name, 1);
+	s = control_connect_path(path);
 	if (s < 0)
 		return -1;
 	req[0] = DCH_READ_PLAIN;
@@ -2347,6 +2353,8 @@ fetch_screen(const char *name, char *buf, size_t cap, int deadline_ms)
 		else if (type == MSG_READ_END)
 		{
 			close(s);
+			if (len == DCH_ST_NOVT)
+				return -2;
 			if (len != DCH_ST_OK && len != DCH_ST_TRUNC)
 				return -1;
 			buf[used] = '\0';
@@ -2458,27 +2466,24 @@ det_spinner(const char *scr)
 	return 0;
 }
 
-/* Classify the visible screen: "blocked", "working", or NULL (no signal
-** or no screen — caller falls back). Detected "working" additionally
-** requires recent pty output: the covered harnesses animate their
-** spinner/status line while working (continuous repaint = fresh .act),
-** so a frozen frame with a stale footer must read idle, not working. */
-static const char *
-detect_state(const char *name)
+/* The last DET_LINES non-empty visible lines, folded to lowercase ASCII
+** (UTF-8 bytes untouched), or NULL when there is no screen. *novt is set
+** when the master has no terminal mirror. Caller frees. */
+static char *
+screen_tail(const char *path, int *novt)
 {
 	char *raw, *fold, *end, *p;
-	const char *res = NULL;
 	size_t rl, k;
 	int n, lines;
 
-	if (getenv("DCH_NO_DETECT"))
-		return NULL;
+	*novt = 0;
 	raw = malloc(DET_CAP + 1);
 	if (!raw)
 		return NULL;
-	n = fetch_screen(name, raw, DET_CAP, DET_DEADLINE_MS);
+	n = fetch_screen(path, raw, DET_CAP, DET_DEADLINE_MS);
 	if (n <= 0)
 	{
+		*novt = n == -2;
 		free(raw);
 		return NULL;
 	}
@@ -2520,6 +2525,27 @@ detect_state(const char *name)
 		fold[k] = (c >= 'A' && c <= 'Z') ? c + 32 : c;
 	}
 	fold[rl] = '\0';
+	free(raw);
+	return fold;
+}
+
+/* Classify the visible screen: "blocked", "working", or NULL (no signal
+** or no screen — caller falls back). Detected "working" additionally
+** requires recent pty output: the covered harnesses animate their
+** spinner/status line while working (continuous repaint = fresh .act),
+** so a frozen frame with a stale footer must read idle, not working. */
+static const char *
+detect_state(const char *name)
+{
+	const char *res = NULL;
+	char *fold;
+	int novt;
+
+	if (getenv("DCH_NO_DETECT") || make_sock_path(name) < 0)
+		return NULL;
+	fold = screen_tail(sock_path, &novt);
+	if (!fold)
+		return NULL;
 
 	if (det_match(det_suppress,
 	              sizeof(det_suppress) / sizeof(det_suppress[0]), fold))
@@ -2531,15 +2557,67 @@ detect_state(const char *name)
 	else if (det_match(det_working,
 	                   sizeof(det_working) / sizeof(det_working[0]),
 	                   fold) ||
-	         det_spinner(p))
+	         det_spinner(fold))
 	{
 		long ep = activity_epoch(name);
 		if (ep && time(NULL) - ep <= DET_WORK_ACT_SECS)
 			res = "working";
 	}
 	free(fold);
-	free(raw);
 	return res;
+}
+
+/* Bridge sidecar gate for typing into the Codex TUI at socket `path`:
+** 1 = the composer shows its empty placeholder, safe to type; 0 = an
+** approval prompt, form or pager owns the keyboard; 2 = anything else (a
+** draft in the composer, an unknown screen, a failed read); -1 = no
+** terminal mirror or DCH_NO_DETECT, so there is no view at all. */
+int
+dch_pty_gate(const char *path)
+{
+	char *fold;
+	int novt, res;
+
+	if (getenv("DCH_NO_DETECT"))
+		return -1;
+	fold = screen_tail(path, &novt);
+	if (!fold)
+		return novt ? -1 : 2;
+	if (det_match(det_suppress,
+	              sizeof(det_suppress) / sizeof(det_suppress[0]), fold) ||
+	    det_match(det_blocked,
+	              sizeof(det_blocked) / sizeof(det_blocked[0]), fold))
+		res = 0;
+	else
+		res = strstr(fold, "ask codex to do anything") ||
+		      strstr(fold, "ask a follow-up question") ? 1 : 2;
+	free(fold);
+	return res;
+}
+
+/* Type `text` into the session at socket `path` as one bracketed paste, or
+** press Enter when text is NULL. Codex folds a CR that arrives in the same
+** burst as pasted text into the paste, so Enter is a separate, later call. */
+int
+dch_pty_push(const char *path, const char *text)
+{
+	int s = control_connect_path(path);
+	size_t l, off;
+
+	if (s < 0)
+		return -1;
+	if (!text)
+		send_ctl(s, MSG_PUSH, "\r", 1);
+	else
+	{
+		send_ctl(s, MSG_PUSH, "\033[200~", 6);
+		for (l = strlen(text), off = 0; off < l; off += PKT_MAX)
+			send_ctl(s, MSG_PUSH, text + off,
+			         l - off > PKT_MAX ? PKT_MAX : l - off);
+		send_ctl(s, MSG_PUSH, "\033[201~", 6);
+	}
+	close(s);
+	return 0;
 }
 
 static int

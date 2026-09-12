@@ -1,25 +1,32 @@
 # Native Claude and Codex bridge plan
 
-Revision 4, 2026-09-11. Adds bounded startup holding for the interval between
-snapshot discovery and Codex rollout readiness. Target release: dch 1.16.0.
+Revision 5, 2026-09-12. Native messages are now typed into the Codex
+composer through the session master (see "Composer delivery"); `codex queue`
+remains the fallback. Target release: dch 1.18.0. Revision 4 (2026-09-11)
+added bounded startup holding for the interval between snapshot discovery and
+Codex rollout readiness, released as dch 1.16.0.
 
 ## Outcome and limits
 
 Normal dch Codex sessions become discoverable through Claude's native
 `ListAgents`. Claude uses native `SendMessage`. Codex uses
 `dch --agent-list [--json]` and `dch --agent-send NAME MESSAGE...` from its
-shell tool. Both directions use authenticated Claude peer sockets, never PTY
-input. A Claude reply remains routable after Codex's send command exits.
+shell tool. Both directions use authenticated Claude peer sockets. Inbound
+messages reach Codex through its composer (revision 5); PTY input is never
+used for anything else. A Claude reply remains routable after Codex's send
+command exits.
 
 No new dependencies. C/POSIX product code lives in the installed dch binary.
 The installed Codex CLI owns queue delivery. Both build variants include the
 same bridge; lite excludes only the terminal mirror. Python remains existing
 test tooling only.
 
-Fable verified ordinary Codex 0.154.0 delivery in 75 ms, TUI pickup in 5.3 s,
-and a visible reply in 11 s. These are observations, not latency guarantees.
-The user accepts this delay. We will not start an app-server, rewrite Codex
-arguments, use `--remote`, or wrap the PTY child.
+Fable verified ordinary Codex 0.154.0 queue delivery in 75 ms, TUI pickup in
+5.3 s, and a visible reply in 11 s. Those numbers hold only for an idle TUI:
+`codex queue` submits at the end of the current turn, so a message to a busy
+Codex waited for the whole turn, which the user rejected. Revision 5 replaces
+that with composer delivery. We still do not start an app-server, rewrite
+Codex arguments, use `--remote`, or wrap the PTY child.
 
 ## Ownership and identity
 
@@ -92,6 +99,35 @@ failure; it later sends a terminal receipt. Messages behind a held item are
 held immediately. The listener remains responsive while the FIFO waits. No
 message log, queue database writes, or worker pool.
 Mark the serial throughput limit with a `ponytail:` comment.
+
+## Composer delivery
+
+Codex 0.154.0 treats a message submitted from the composer while a turn runs
+as steering: the TUI shows "Messages to be submitted after next tool call"
+and the model sees it at its next sampling step. `codex queue` shows
+"Messages to be submitted at end of turn" instead. Measured live: a native
+message reached the running turn in about three seconds.
+
+The sidecar therefore types the peer body into the composer through the
+master's control socket, which dch already owns: one bracketed paste
+(`ESC [ 200 ~ ... ESC [ 201 ~`) and, 300 ms later, a bare CR. The delay is
+required; Codex folds a CR that arrives in the same burst as the text into the
+paste and leaves the message unsent in the composer.
+
+Typing is gated on the rendered screen, using the same rules as `--status`.
+The gate passes only when the bottom of the screen shows the empty composer
+placeholder ("Ask Codex to do anything" or "Ask a follow-up question") and no
+approval prompt, form, or pager rule matches. An approval prompt holds the
+message for up to ten minutes, a draft or an unknown screen for ten seconds;
+held messages get a `held` receipt once. After the hold, and always in a build
+without the terminal mirror (or with `DCH_NO_DETECT`), the message takes the
+original `codex queue` path. A pending Codex question (`request_user_input`)
+leaves the composer usable, so it does not hold.
+
+Known ceiling: the gate is a set of Codex UI strings. If Codex renames the
+placeholder, every message waits ten seconds and then queues; if it renames an
+approval prompt, dch could type into it. Both degrade to the previous release's
+behaviour or a visible misfire, never to silent loss.
 
 ## Codex sends and replies
 
@@ -175,7 +211,9 @@ started before this version.
 Revision 2's premise that standalone Codex could not consume `codex queue`
 was false. That error introduced the daemon, PTY wrapper, signal forwarding,
 remote preservation, title tracking and worker pool. All are removed.
-Immediate pickup is explicitly no longer required.
+Immediate pickup was explicitly not required in revision 4; revision 5
+restores it through the composer because end-of-turn delivery to a busy Codex
+proved unacceptable in use.
 
 Two details remain necessary beyond the lean one-way sketch: a launch marker
 rejects stale incarnations with the same dch name, and the persistent sender

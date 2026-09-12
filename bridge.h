@@ -17,5 +17,7 @@ int dch_codex_snapshot_id(const char *home, const char *sess,
                           int strict);
 int dch_codex_thread_name(const char *home, const char *id, char *out,
                           size_t outsz);
+int dch_pty_gate(const char *path);
+int dch_pty_push(const char *path, const char *text);
 
 #endif
