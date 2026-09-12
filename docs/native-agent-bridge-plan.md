@@ -103,7 +103,14 @@ exact peer names and fail on ambiguity. Respect applicable Claude/Codex
 home directories rather than assuming every installation uses defaults.
 
 `--agent-send` inside a bridged Codex routes through that session's persistent
-sidecar. Native user frames use its persistent `from:"uds:..."` address.
+sidecar. Native user frames use its persistent `from:"uds:..."` address, and
+the body is wrapped in the same `<cross-session-message from="uds:..."
+from-name="...">` envelope Claude uses between its own sessions. Claude Code
+2.1.247 and later render a wrapped message as the one-line `@ sender` preview;
+an unwrapped body gets the verbose "Another Claude session sent a message"
+framing instead. The from-name is the peer name, dropped when Claude could not
+reproduce it byte for byte (quotes, angle brackets, control bytes, or more
+than 64 characters).
 The sidecar writes the authenticated frame and answers `sent`; it does not
 wait for a receipt. Measured against Claude Code 2.1.267, Claude emits no
 `peer_message_status` for messages it accepts, so a receipt wait only stalls

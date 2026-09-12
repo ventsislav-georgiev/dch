@@ -924,7 +924,9 @@ signal.pause()
                 outbound
                 and outbound[0] == {"type": "auth", "token": target.token}
                 and outbound[1].get("from") == "uds:" + str(bridge_path)
-                and outbound[1].get("message", {}).get("content") == "reverse nonce",
+                and outbound[1].get("message", {}).get("content")
+                == '<cross-session-message from="uds:%s" from-name="%s">\n'
+                "reverse nonce\n</cross-session-message>" % (bridge_path, session),
             )
             before_wait = queued_contents(log)
             try:

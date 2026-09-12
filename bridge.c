@@ -1814,10 +1814,36 @@ static int receipt_status(const char *status) {
 /* Fire and forget: Claude 2.1.x emits no peer_message_status for messages it
    accepts, so a receipt wait only stalls the caller and invites resends. The
    frame is written, "sent" is reported, and the main loop continues. */
-static int outgoing(int local, const char *payload, const char *own_socket) {
+/* Claude only accepts a from-name it can reproduce byte for byte: no quotes
+   or angle brackets, no control bytes, trimmed, at most 64 characters. A
+   name that cannot meet that is left out and Claude falls back to the
+   socket name. */
+static void wrapper_name(const char *name, char *out, size_t cap) {
+  size_t used = 0, chars = 0;
+  for (; *name && used + 1 < cap; name++) {
+    unsigned char c = (unsigned char)*name;
+    if (c < 0x20 || c == 0x7f || c == '"' || c == '<' || c == '>')
+      continue;
+    if (used == 0 && c == ' ')
+      continue;
+    out[used++] = (char)c;
+    chars += (c & 0xC0) != 0x80;
+  }
+  while (used && out[used - 1] == ' ')
+    used--;
+  out[used] = '\0';
+  if (chars > 64 || *name)
+    out[0] = '\0';
+}
+
+/* The body is wrapped the way Claude wraps its own peer messages, so the
+   receiving session renders it as a one-line "@ sender" preview instead of
+   the verbose unwrapped-peer framing. */
+static int outgoing(int local, const char *payload, const char *own_socket,
+                    const char *own_name) {
   char target[512], message[MESSAGE_MAX + 1], msgid[37], address[108],
       qmsg[MESSAGE_MAX * 6 + 3], qid[80], qfrom[700], qsess[800],
-      frame[FRAME_MAX + 1];
+      frame[FRAME_MAX + 1], wrapped[MESSAGE_MAX + 900], safe[700];
   struct peer peer;
   int fd, n;
   if (json_string(payload, "target", target, sizeof target, 1) < 0 ||
@@ -1833,10 +1859,16 @@ static int outgoing(int local, const char *payload, const char *own_socket) {
                          : "target must name one live peer");
     return -1;
   }
+  wrapper_name(own_name, safe, sizeof safe);
   if (snprintf(address, sizeof address, "uds:%s", own_socket) >=
           (int)sizeof address ||
+      snprintf(wrapped, sizeof wrapped,
+               "<cross-session-message from=\"%s\"%s%s%s>\n%s\n"
+               "</cross-session-message>",
+               address, safe[0] ? " from-name=\"" : "", safe,
+               safe[0] ? "\"" : "", message) >= (int)sizeof wrapped ||
       make_uuid(msgid) < 0 ||
-      json_quote(qmsg, sizeof qmsg, message) == SIZE_MAX ||
+      json_quote(qmsg, sizeof qmsg, wrapped) == SIZE_MAX ||
       json_quote(qid, sizeof qid, msgid) == SIZE_MAX ||
       json_quote(qfrom, sizeof qfrom, address) == SIZE_MAX ||
       json_quote(qsess, sizeof qsess, peer.session_id) == SIZE_MAX) {
@@ -1868,7 +1900,8 @@ static int outgoing(int local, const char *payload, const char *own_socket) {
 static void handle_connection(int fd, const char *token,
                               const char *own_socket, const char *session,
                               const char *home, const char *sess,
-                              const char *marker, struct pending_queue *queue) {
+                              const char *marker, const char *own_name,
+                              struct pending_queue *queue) {
   char p[FRAME_MAX + 1], type[40], role[20], content[MESSAGE_MAX + 1], id[257],
       from[300], sid[128], fresh[128];
   struct peer sender;
@@ -1876,7 +1909,7 @@ static void handle_connection(int fd, const char *token,
       json_string(p, "type", type, sizeof type, 1) < 0)
     return;
   if (!strcmp(type, "dch_send")) {
-    outgoing(fd, p, own_socket);
+    outgoing(fd, p, own_socket, own_name);
     return;
   }
   if (strcmp(type, "user") ||
@@ -2084,7 +2117,7 @@ static void bridge_sidecar(int life_fd, const char *codex) {
       if (c >= 0) {
         if (nonblocking(c) == 0)
           handle_connection(c, token, socket_path, uuid, home, sess, marker,
-                            &queue);
+                            name, &queue);
         close(c);
       }
     }
@@ -2269,6 +2302,20 @@ int main(void) {
     char *plain[] = {"vim", "notes.txt", NULL};
     if (!is_codex(wrapped) || is_codex(plain))
       return 20;
+    char safe[200], accented[131];
+    wrapper_name("  <us\"er>\x01 3 ", safe, sizeof safe);
+    if (strcmp(safe, "user 3"))
+      return 21;
+    for (int i = 0; i < 65; i++)
+      memcpy(accented + 2 * i, "\xC3\xA9", 2);
+    accented[128] = '\0';
+    wrapper_name(accented, safe, sizeof safe);
+    if (strcmp(safe, accented))
+      return 22;
+    memcpy(accented + 128, "\xC3\xA9", 3);
+    wrapper_name(accented, safe, sizeof safe);
+    if (safe[0])
+      return 23;
   }
   if (sha_selftest() < 0)
     return 1;
