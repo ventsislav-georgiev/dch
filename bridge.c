@@ -1741,13 +1741,15 @@ static int find_named(const char *name, struct peer *out) {
   return hits == 1 ? 0 : hits > 1 ? -2 : -1;
 }
 
-static int find_source(const char *name, const char *marker, struct peer *out) {
+/* The marker alone identifies the sidecar: the record name follows the
+   Codex thread title, not DCH_SESSION. */
+static int find_source(const char *marker, struct peer *out) {
   struct peer p[128];
   int n = scan_peers(p, 128, 0), hits = 0;
   if (n < 0)
     return -1;
   for (int i = 0; i < n; i++)
-    if (!strcmp(name, p[i].name) && !strcmp(marker, p[i].marker)) {
+    if (!strcmp(marker, p[i].marker)) {
       *out = p[i];
       hits++;
     }
@@ -2188,7 +2190,7 @@ int dch_bridge_agent_send(const char *name, int argc, char **argv) {
     p += strlen(argv[i]);
   }
   *p = '\0';
-  if (find_source(sess, marker, &source) < 0) {
+  if (find_source(marker, &source) < 0) {
     free(message);
     fprintf(stderr,
             "dch: no unique live source sidecar for DCH_SESSION=%s; start a "

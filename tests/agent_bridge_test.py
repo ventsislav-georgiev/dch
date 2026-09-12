@@ -512,6 +512,20 @@ signal.pause()
                 "peer name follows the Codex thread title",
                 wait_until(lambda: published_name(record_path) == "Titled Thread", timeout=12),
             )
+            titled_marker = (
+                snapshot.read_text().split("DCH_NATIVE_BRIDGE_ID=", 1)[1].split("\n", 1)[0]
+            )
+            titled_send = subprocess.run(
+                [DCH, "--agent-send", "no-such-peer", "hello"],
+                env=dict(env, DCH_SESSION=session, DCH_NATIVE_BRIDGE_ID=titled_marker),
+                text=True,
+                capture_output=True,
+                timeout=10,
+            )
+            check(
+                "agent-send finds its sidecar while the peer carries the thread title",
+                "no unique live source sidecar" not in titled_send.stderr,
+            )
             index.unlink()
             check(
                 "peer name falls back to DCH_SESSION without a title",
