@@ -21,3 +21,5 @@
 .omc/
 **/.omc/
 .claude/
+.serena/
+__pycache__/

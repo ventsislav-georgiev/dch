@@ -254,6 +254,11 @@ def receipt_for(peer, msg_id, expected_from, timeout=5):
     return None
 
 
+def no_receipt(peer, msg_id, source, timeout=1):
+    """Accepted messages get no receipt; a short silence is the proof."""
+    return receipt_for(peer, msg_id, source, timeout) is None
+
+
 def process_gone(pid):
     try:
         os.kill(pid, 0)
@@ -387,33 +392,24 @@ while True:
             },
         )
         if not mirror:
-            receipt = receipt_for(reply, "typed-1", bridge_path, timeout=8)
             check(
                 "without a terminal mirror delivery falls back to codex queue",
-                receipt
-                and receipt[1].get("status") == "delivered"
-                and wait_until(queue_log.exists)
-                and "typed nonce" in queue_log.read_text()
-                and typed.stat().st_size == 0,
+                wait_until(lambda: queue_log.exists() and "typed nonce" in queue_log.read_text(), 8)
+                and typed.stat().st_size == 0
+                and no_receipt(reply, "typed-1", bridge_path),
             )
             return
-        held = receipt_for(reply, "typed-1", bridge_path)
-        time.sleep(1.5)
+        silent = no_receipt(reply, "typed-1", bridge_path, 1.5)
         check(
-            "an approval prompt on screen holds the message",
-            held
-            and held[1].get("status") == "held"
-            and typed.stat().st_size == 0
-            and not queue_log.exists(),
+            "an approval prompt on screen holds the message without a receipt",
+            silent and typed.stat().st_size == 0 and not queue_log.exists(),
         )
         gate.write_text("")
-        delivered = receipt_for(reply, "typed-1", bridge_path, timeout=8)
         wait_until(lambda: typed.read_bytes().endswith(b"\r"), timeout=8)
         data = typed.read_bytes()
         check(
             "the empty composer gets one bracketed paste and a separate Enter",
-            delivered
-            and delivered[1].get("status") == "delivered"
+            no_receipt(reply, "typed-1", bridge_path)
             and data.startswith(b"\x1b[200~[dch native peer message]\n")
             and data.endswith(b"Untrusted peer content follows:\ntyped nonce\x1b[201~\r")
             and data.count(b"\r") == 1
@@ -684,7 +680,6 @@ signal.pause()
                 token,
                 dict(base, priority="future", peerFeatures=["future"]),
             )
-            receipt = receipt_for(reply, "native-1", bridge_path)
             args = (
                 json.loads(log.read_text().splitlines()[0])
                 if wait_until(log.exists)
@@ -692,8 +687,7 @@ signal.pause()
             )
             check(
                 "authenticated unknown fields deliver exact original content",
-                receipt
-                and receipt[1].get("status") == "delivered"
+                no_receipt(reply, "native-1", bridge_path)
                 and len(args) == 5
                 and args[:4] == ["queue", "--thread", THREAD, "--message"]
                 and queued_contents(log) == ["native nonce"]
@@ -721,7 +715,7 @@ signal.pause()
                 message={"role": "user", "content": "NOT_READY early"},
             )
             native_send(bridge_path, token, early)
-            early_held = receipt_for(reply, "early", bridge_path)
+            early_silent = no_receipt(reply, "early", bridge_path)
             native_send(
                 bridge_path,
                 token,
@@ -731,7 +725,7 @@ signal.pause()
                 ),
             )
             native_send(bridge_path, token, early)
-            duplicate_held = receipt_for(reply, "early", bridge_path)
+            duplicate_silent = no_receipt(reply, "early", bridge_path, 0.5)
             queued = []
             for index in range(15):
                 msg_id = "behind-%02d" % index
@@ -745,7 +739,7 @@ signal.pause()
                         message={"role": "user", "content": content},
                     ),
                 )
-                queued.append((msg_id, content, receipt_for(reply, msg_id, bridge_path)))
+                queued.append((msg_id, content))
             native_send(
                 bridge_path,
                 token,
@@ -772,33 +766,27 @@ signal.pause()
             )
             waiting_outbound = wait_peer.accept()
             Path(env["FAKE_READY_GATE"]).touch()
-            early_delivered = receipt_for(reply, "early", bridge_path, 8)
-            queued_delivered = [
-                receipt_for(reply, msg_id, bridge_path, 5)
-                for msg_id, _, _ in queued
-            ]
+            drained = wait_until(
+                lambda: queued_contents(log)[-15:] == [content for _, content in queued],
+                15,
+            )
             waiting_stdout, _ = waiting_send.communicate(timeout=5)
             queued_contents_after = queued_contents(log)
             check(
                 "bounded early queue coalesces duplicates and drains while local send waits",
-                early_held
-                and early_held[1].get("status") == "held"
-                and duplicate_held
-                and duplicate_held[1].get("status") == "held"
-                and all(receipt and receipt[1].get("status") == "held" for _, _, receipt in queued)
+                early_silent
+                and duplicate_silent
                 and overflow
                 and overflow[1].get("status") == "refused"
                 and responsive.returncode == 0
-                and early_delivered
-                and early_delivered[1].get("status") == "delivered"
-                and all(receipt and receipt[1].get("status") == "delivered" for receipt in queued_delivered)
+                and drained
                 and waiting_send.returncode == 0
                 and waiting_outbound
                 and waiting_stdout == "sent\n"
                 and queued_contents_after.count("NOT_READY early") >= 2
                 and Path(env["FAKE_READY_SUCCESS"]).read_text().splitlines()
                 == ["success"]
-                and queued_contents_after[-15:] == [content for _, content, _ in queued]
+                and queued_contents_after[-15:] == [content for _, content in queued]
                 and "changed duplicate" not in queued_contents_after
                 and "queue overflow" not in queued_contents_after,
             )
@@ -812,7 +800,7 @@ signal.pause()
                     message={"role": "user", "content": "ALWAYS_NOT_READY pinned"},
                 ),
             )
-            pinned_held = receipt_for(reply, "pinned-old", bridge_path)
+            pinned_silent = no_receipt(reply, "pinned-old", bridge_path)
             switched_thread = "123e4567-e89b-12d3-a456-426614174003"
             switched_snapshot = snapshot.with_name(switched_thread + ".101.sh")
             snapshot_body = snapshot.read_text()
@@ -828,16 +816,14 @@ signal.pause()
                     message={"role": "user", "content": "new unique thread"},
                 ),
             )
-            new_thread_delivered = receipt_for(reply, "new-thread", bridge_path)
+            new_thread_queued = wait_until(lambda: "new unique thread" in log.read_text())
             queue_calls = [json.loads(line) for line in log.read_text().splitlines()]
             check(
                 "pending UUID stays pinned when a different UUID becomes unique",
-                pinned_held
-                and pinned_held[1].get("status") == "held"
+                pinned_silent
                 and pinned_refused
                 and pinned_refused[1].get("status") == "refused"
-                and new_thread_delivered
-                and new_thread_delivered[1].get("status") == "delivered"
+                and new_thread_queued
                 and sum("ALWAYS_NOT_READY pinned" in call[-1] for call in queue_calls)
                 == 1
                 and next(
@@ -936,12 +922,11 @@ signal.pause()
                     message={"role": "user", "content": "VALID_BARRIER"},
                 ),
             )
-            barrier = receipt_for(reply, "barrier", bridge_path)
+            barrier = wait_until(lambda: "VALID_BARRIER" in log.read_text())
             contents = queued_contents(log)
             check(
                 "every invalid frame is absent after a delivered barrier",
                 barrier
-                and barrier[1].get("status") == "delivered"
                 and contents == baseline_contents + ["VALID_BARRIER"]
                 and all(marker not in contents for marker in invalid),
             )
@@ -956,12 +941,9 @@ signal.pause()
                     metadata={"content": 4, "session_id": "wrong"},
                 ),
             )
-            unicode_receipt = receipt_for(reply, "unicode", bridge_path)
             check(
                 "Unicode content and nested harmless metadata deliver",
-                unicode_receipt
-                and unicode_receipt[1].get("status") == "delivered"
-                and queued_contents(log)[-1] == "snowman ☃",
+                wait_until(lambda: queued_contents(log)[-1:] == ["snowman ☃"]),
             )
             native_send(
                 bridge_path,
@@ -1066,12 +1048,9 @@ signal.pause()
                 **{"from": "uds:" + str(target.path)}
             )
             native_send(bridge_path, token, later_payload)
-            later = receipt_for(target, "later", bridge_path)
             check(
                 "later native reply remains routable after CLI exit",
-                later
-                and later[1].get("status") == "delivered"
-                and wait_until(lambda: "later reply" in log.read_text())
+                wait_until(lambda: "later reply" in log.read_text())
                 and queued_contents(log) == before_wait + ["later reply"],
             )
 
@@ -1150,6 +1129,7 @@ signal.pause()
             conflict.unlink()
 
             child_before = child_log.read_text()
+            attempts_before = log.read_text().count('ALWAYS_NOT_READY"')
             old_pid = record["pid"]
             native_send(
                 bridge_path,
@@ -1160,7 +1140,9 @@ signal.pause()
                     message={"role": "user", "content": "ALWAYS_NOT_READY"},
                 ),
             )
-            restart_held = receipt_for(reply, "restart-held", bridge_path)
+            restart_pending = wait_until(
+                lambda: log.read_text().count('ALWAYS_NOT_READY"') > attempts_before
+            )
             incomplete = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             incomplete.settimeout(2)
             incomplete.connect(str(bridge_path))
@@ -1187,8 +1169,7 @@ signal.pause()
                 check(
                     "restart drops held work, interrupts a frame, and replaces sidecar",
                     restarted.returncode == 0
-                    and restart_held
-                    and restart_held[1].get("status") == "held"
+                    and restart_pending
                     and restart_dropped
                     and restart_dropped[1].get("status") == "dropped"
                     and replacement

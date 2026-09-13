@@ -309,18 +309,18 @@ register. A native message is typed into the Codex composer through the
 session master as one bracketed paste followed by Enter, so a running turn
 steers it in after the current tool call. dch types only while the screen
 shows the empty composer placeholder; an approval prompt, form, or pager holds
-the message (reported as held) for up to ten minutes, a draft or an unknown
-screen for ten seconds. After that, and always without the terminal mirror,
-delivery falls back to
+the message for up to ten minutes, a draft or an unknown screen for ten
+seconds. After that, and always without the terminal mirror, delivery falls
+back to
 .B codex queue,
-which the TUI submits at the end of the current turn. A delivery receipt means
-the text reached the composer or the queue. It does not mean the model
-processed it. If the bound thread has no rollout yet, the queue path retains up
-to 16 messages in FIFO order, reports them as held, and retries every five
-seconds. This does not start the first turn in an unused TUI. An orderly
-restart or shutdown attempts dropped receipts for held messages; a crash or
-SIGKILL is not durable. Messages are limited to 16384 bytes and wire frames to
-65536 bytes. The bridge handles one message at a time and rejects attachments.
+which the TUI submits at the end of the current turn. If the bound thread has
+no rollout yet, the queue path retains up to 16 messages in FIFO order and
+retries every five seconds. This does not start the first turn in an unused
+TUI. Accepted and waiting messages produce no receipt, matching Claude's own
+behaviour; only a lost message does (refused, or dropped). An orderly restart
+or shutdown attempts dropped receipts for pending messages; a crash or SIGKILL
+is not durable. Messages are limited to 16384 bytes and wire frames to 65536
+bytes. The bridge handles one message at a time and rejects attachments.
 .SH EXIT STATUS
 0 on success. Control verbs: 1 generic error, 2
 .B \-\-wait

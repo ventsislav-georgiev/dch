@@ -1,8 +1,10 @@
 # Native Claude and Codex bridge plan
 
-Revision 5, 2026-09-12. Native messages are now typed into the Codex
-composer through the session master (see "Composer delivery"); `codex queue`
-remains the fallback. Target release: dch 1.18.0. Revision 4 (2026-09-11)
+Revision 6, 2026-09-13. Accepted and waiting messages no longer produce
+`held` or `delivered` receipts (see "Receipts"). Target release: dch 1.18.1.
+Revision 5 (2026-09-12) typed native messages into the Codex composer through
+the session master (see "Composer delivery"), with `codex queue` as the
+fallback, released as dch 1.18.0. Revision 4 (2026-09-11)
 added bounded startup holding for the interval between snapshot discovery and
 Codex rollout readiness, released as dch 1.16.0.
 
@@ -90,14 +92,26 @@ Do not exact-match feature arrays or reject future optional metadata.
 
 Serve serially with bounded socket and subprocess deadlines. Keep at most 16
 accepted inbound messages in FIFO order and one queue subprocess active. Invoke
-`codex queue --thread UUID --message TEXT` with argv. Receipt `delivered` means
-the queue accepted the message, not that the model processed it. Queue failure
-produces an authenticated `refused` receipt. A timeout or signaled subprocess
-has an uncertain result and produces `dropped`, with no retry. Receipt `held`
-means this sidecar retained the message after a confirmed missing-rollout
-failure; it later sends a terminal receipt. Messages behind a held item are
-held immediately. The listener remains responsive while the FIFO waits. No
-message log, queue database writes, or worker pool.
+`codex queue --thread UUID --message TEXT` with argv. Queue failure produces
+an authenticated `refused` receipt. A timeout or signaled subprocess has an
+uncertain result and produces `dropped`, with no retry. After a confirmed
+missing-rollout failure the sidecar retains the message and retries; see
+"Receipts" for why that produces no receipt. The listener remains responsive
+while the FIFO waits. No message log, queue database writes, or worker pool.
+
+## Receipts
+
+Claude Code renders `peer_message_status` with fixed wording from its own
+permission-mode approval flow: `held` becomes "held for approval ... the
+recipient's session has different permission-mode settings, so their user must
+approve it", and `delivered`, even without a prior `held`, becomes "released
+after approval". Claude itself sends no receipt for a message it accepts. The
+bridge used those statuses for its FIFO and composer holds (revisions 4 and 5),
+so every wait or success showed the user a false permissions notice and could
+stall the sending Claude. Since revision 6 the bridge sends only `refused` and
+`dropped`; an accepted or waiting message is silent, exactly as between two
+Claude sessions. The trade-off is that a sender gets no hint while Codex sits
+on an approval prompt; Claude-to-Claude has no such hint either.
 Mark the serial throughput limit with a `ponytail:` comment.
 
 ## Composer delivery
@@ -118,8 +132,8 @@ Typing is gated on the rendered screen, using the same rules as `--status`.
 The gate passes only when the bottom of the screen shows the empty composer
 placeholder ("Ask Codex to do anything" or "Ask a follow-up question") and no
 approval prompt, form, or pager rule matches. An approval prompt holds the
-message for up to ten minutes, a draft or an unknown screen for ten seconds;
-held messages get a `held` receipt once. After the hold, and always in a build
+message for up to ten minutes, a draft or an unknown screen for ten seconds,
+without a receipt (see "Receipts"). After the hold, and always in a build
 without the terminal mirror (or with `DCH_NO_DETECT`), the message takes the
 original `codex queue` path. A pending Codex question (`request_user_input`)
 leaves the composer usable, so it does not hold.
@@ -201,7 +215,7 @@ started before this version.
   through `dch --agent-send`. Claude then replies to the persistent sender
   after that command has exited, and Codex receives it without terminal input.
 - Verify that a native message sent after discovery but before rollout
-  readiness receives `held`, then `delivered` automatically after the user
+  readiness is retained silently and queued automatically after the user
   starts the first turn, without a resend. Kill only the proof's own sessions
   and confirm artifact cleanup. Complete CI and installed-binary proof before
   publishing v1.16.0. Release tracking lives in ledger #016.

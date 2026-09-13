@@ -465,10 +465,9 @@ The sidecar performs the process-identity checks and peer lookup, so Codex's
 sandbox does not need permission to run `ps`.
 
 An inbound message identifies its authenticated sender and includes the reply
-command before the untrusted content. `--agent-send` exits 0 after the peer
-returns `delivered` or accepts pending work with `held`. Refused, dropped,
-denied, expired, ambiguous, and timed-out sends exit 1. A held peer can send a
-later terminal receipt for the same message ID.
+command before the untrusted content. `--agent-send` exits 0 once the frame is
+written to the peer; Claude sends no receipt for a message it accepts. Refused,
+ambiguous, and timed-out sends exit 1.
 
 The peer stays absent until Codex writes its shell snapshot and dch can bind
 the current session to exactly one snapshot UUID.
@@ -480,17 +479,21 @@ A native message is typed into the Codex composer through the session
 master, as one bracketed paste followed by Enter, so a running turn steers it
 in after the current tool call instead of waiting for the end of the turn.
 dch types only while the screen shows the empty composer placeholder. While an
-approval prompt, form, or pager is on screen the message waits (up to ten
-minutes) and is reported `held`; a draft in the composer or an unknown screen
-waits ten seconds. After that, and always in a build without the terminal
-mirror, delivery falls back to `codex queue`, which the TUI submits at the end
-of the current turn. Delivery receipts mean the text reached the composer or
-the queue, not that the model has processed it. If the bound thread has no
-rollout yet, the queue path retains up to 16 messages in FIFO order and retries
-every five seconds. It reports `held` once a message is waiting. This does not
-start a first turn in an unused TUI. The bridge stays responsive to list and
-send requests while messages wait. It never retries other queue failures or an
-uncertain subprocess result.
+approval prompt, form, or pager is on screen the message waits up to ten
+minutes; a draft in the composer or an unknown screen waits ten seconds. After
+that, and always in a build without the terminal mirror, delivery falls back to
+`codex queue`, which the TUI submits at the end of the current turn. If the
+bound thread has no rollout yet, the queue path retains up to 16 messages in
+FIFO order and retries every five seconds. This does not start a first turn in
+an unused TUI. The bridge stays responsive to list and send requests while
+messages wait. It never retries other queue failures or an uncertain subprocess
+result.
+
+Like Claude itself, the bridge sends no receipt for a message it accepts or
+holds; Claude would render one as its own permission-mode approval notice. A
+sender hears back only when a message is lost: `refused` (rejected outright)
+or `dropped` (uncertain subprocess result, or pending work discarded by a
+restart).
 
 Held messages live in the sidecar's bounded memory. On an orderly restart or
 shutdown, the old sidecar attempts `dropped` receipts within one shared cleanup

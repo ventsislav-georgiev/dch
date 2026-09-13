@@ -660,7 +660,7 @@ struct pending_message {
   char name[512];
   char content[MESSAGE_MAX + 1];
   char thread[128];
-  int held, pasted;
+  int pasted;
   long long wait_since;
 };
 
@@ -1411,16 +1411,11 @@ static void pending_tick(struct pending_queue *q, const char *codex,
     q->error_fd = -1;
     q->child = -1;
     if (done > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0) {
-      send_receipt(&m->sender, own_socket, m->id, "delivered");
       pending_pop(q);
       return;
     }
     if (done > 0 && WIFEXITED(status) && WEXITSTATUS(status) != 0 &&
         queue_not_ready(q->error, m->thread)) {
-      if (!m->held) {
-        send_receipt(&m->sender, own_socket, m->id, "held");
-        m->held = 1;
-      }
       q->retry_at = now + QUEUE_RETRY_MS;
       return;
     }
@@ -1442,7 +1437,6 @@ static void pending_tick(struct pending_queue *q, const char *codex,
       pending_pop(q);
       return;
     }
-    send_receipt(&m->sender, own_socket, m->id, "delivered");
     pending_pop(q);
     return;
   }
@@ -1463,10 +1457,6 @@ static void pending_tick(struct pending_queue *q, const char *codex,
       if (!m->wait_since)
         m->wait_since = now;
       if (now - m->wait_since < (gate == 0 ? PUSH_BLOCKED_MS : PUSH_UNKNOWN_MS)) {
-        if (!m->held) {
-          send_receipt(&m->sender, own_socket, m->id, "held");
-          m->held = 1;
-        }
         q->retry_at = now + PUSH_RETRY_MS;
         return;
       }
@@ -1491,8 +1481,7 @@ static void pending_tick(struct pending_queue *q, const char *codex,
 }
 
 static int pending_add(struct pending_queue *q, const struct peer *sender,
-                       const char *id, const char *content, const char *thread,
-                       const char *own_socket) {
+                       const char *id, const char *content, const char *thread) {
   int slot;
   for (int i = 0; i < q->count; i++) {
     struct pending_message *m = &q->items[(q->head + i) % PENDING_MAX];
@@ -1501,8 +1490,6 @@ static int pending_add(struct pending_queue *q, const struct peer *sender,
         !strcmp(m->sender.proc_start, sender->proc_start) && !strcmp(m->id, id)) {
       if (strcmp(m->content, content))
         return -2;
-      if (m->held)
-        send_receipt(sender, own_socket, id, "held");
       return 0;
     }
   }
@@ -1514,10 +1501,7 @@ static int pending_add(struct pending_queue *q, const struct peer *sender,
   snprintf(q->items[slot].name, sizeof q->items[slot].name, "%s", sender->name);
   snprintf(q->items[slot].content, sizeof q->items[slot].content, "%s", content);
   snprintf(q->items[slot].thread, sizeof q->items[slot].thread, "%s", thread);
-  q->items[slot].held = q->count > 0;
   q->count++;
-  if (q->items[slot].held)
-    send_receipt(sender, own_socket, id, "held");
   return 0;
 }
 
@@ -1776,7 +1760,7 @@ static int server_socket(const char *path, dev_t *dev, ino_t *ino) {
   }
   *dev = st.st_dev;
   *ino = st.st_ino;
-  if (chmod(path, 0600) < 0 || listen(fd, 8) < 0 || nonblocking(fd) < 0) {
+  if (chmod(path, 0600) < 0 || listen(fd, 128) < 0 || nonblocking(fd) < 0) {
     close(fd);
     unlink_same(path, *dev, *ino);
     return -1;
@@ -1861,10 +1845,12 @@ static void local_result(int fd, const char *status, const char *detail) {
   write_all(fd, b, (size_t)n);
 }
 
+/* Claude renders every receipt status with wording from its own
+   permission-mode approval flow ("held for approval", "released after
+   approval"), and it sends none for messages it simply accepts. Match that:
+   only a lost message gets a receipt. */
 static int receipt_status(const char *status) {
-  return !strcmp(status, "delivered") || !strcmp(status, "refused") ||
-         !strcmp(status, "dropped") || !strcmp(status, "held") ||
-         !strcmp(status, "denied") || !strcmp(status, "expired");
+  return !strcmp(status, "refused") || !strcmp(status, "dropped");
 }
 
 /* Fire and forget: Claude 2.1.x emits no peer_message_status for messages it
@@ -1987,7 +1973,7 @@ static void handle_connection(int fd, const char *token,
     send_receipt(&sender, own_socket, id, "refused");
     return;
   }
-  if (pending_add(queue, &sender, id, content, fresh, own_socket) == -1)
+  if (pending_add(queue, &sender, id, content, fresh) == -1)
     send_receipt(&sender, own_socket, id, "refused");
 }
 
