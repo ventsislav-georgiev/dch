@@ -527,6 +527,23 @@ assert s["state"] == "blocked", s
 ' "$DN" && ok "--ls-json carries detected state" \
        || bad "--ls-json carries detected state"
 
+        # Claude Code's agent panel: "⏺ main" then one row per subagent.
+        agents() {
+            "$DCH" --ls-json 2>/dev/null | python3 -c '
+import json, sys
+print(next(s for s in json.load(sys.stdin) if s["name"] == sys.argv[1])["agents"])
+' "$DN"
+        }
+        check "no agent panel reads 0 agents" "$(agents)" "0"
+        paint a1 'footer\n\n  \342\217\272 main\n  \342\227\257 worker-opus-high  Running… 5m\n  \342\227\257 worker-opus-medium  Drafting… 1m'
+        check "--ls-json counts agent panel rows" "$(agents)" "2"
+        check "DCH_NO_DETECT=1 reads 0 agents" \
+              "$(export DCH_NO_DETECT=1; agents)" "0"
+        paint a2 '\342\217\272 main\n\342\227\257 worker-opus-high  Running…\nsome prose\n\342\227\257 not a row'
+        check "agent rows stop at the first non-row line" "$(agents)" "1"
+        paint a3 '\342\217\272 main is great\n\342\227\257 worker-opus-high  Running…'
+        check "a line merely starting with main is no panel" "$(agents)" "0"
+
         # Hot-path budget: every --status runs detection (a control connect
         # + full screen fetch), and --ls-json runs it per session. 20 calls
         # each must finish inside 2 s wall (100 ms per call — generous CI

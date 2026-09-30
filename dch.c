@@ -2567,6 +2567,66 @@ detect_state(const char *name)
 	return res;
 }
 
+/* Byte length of a leading non-ASCII UTF-8 char at p (a status glyph), 0
+** for ASCII or a sequence cut short by the NUL. */
+static size_t
+det_glyph(const char *p)
+{
+	unsigned char c = (unsigned char)p[0];
+	size_t g = c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : c >= 0xC0 ? 2 : 0, k;
+
+	for (k = 1; k < g; k++)
+		if (!p[k])
+			return 0;
+	return g;
+}
+
+/* Live subagents, counted off Claude Code's agent panel: a "<glyph> main"
+** row, then one "<glyph> <agent-type> ..." row per running subagent, at
+** the bottom of the screen. The panel exists only while subagents do, so
+** no panel reads 0 — as does no screen or DCH_NO_DETECT.
+** ponytail: screen-scraped, so the count is what the panel shows — a
+** prompt covering it reads 0 until answered. Exact counts need
+** SubagentStart/SubagentStop hooks reporting into a sidecar. */
+static int
+detect_agents(const char *name)
+{
+	char *fold, *line, *next;
+	int novt, in = 0, n = 0;
+
+	if (getenv("DCH_NO_DETECT") || make_sock_path(name) < 0)
+		return 0;
+	fold = screen_tail(sock_path, &novt);
+	if (!fold)
+		return 0;
+	for (line = fold; line; line = next)
+	{
+		char *p = line, *q;
+		size_t g;
+
+		next = strchr(line, '\n');
+		if (next)
+			*next++ = '\0';
+		while (*p == ' ')
+			p++;
+		g = det_glyph(p);
+		if (!g || p[g] != ' ')
+		{
+			in = 0; /* prose or footer: not a panel row */
+			continue;
+		}
+		p += g + 1;
+		for (q = p + strlen(p); q > p && q[-1] == ' '; q--)
+			;
+		if (q - p == 4 && strncmp(p, "main", 4) == 0)
+			in = 1, n = 0; /* the last panel on screen wins */
+		else if (in)
+			n++;
+	}
+	free(fold);
+	return n;
+}
+
 /* Bridge sidecar gate for typing into the Codex TUI at socket `path`:
 ** 1 = the composer shows its empty placeholder, safe to type; 0 = an
 ** approval prompt, form or pager owns the keyboard; 2 = anything else (a
@@ -3639,10 +3699,11 @@ main(int argc, char **argv)
 			** i.e. definitely older than us, which is exactly what
 			** a caller deciding whether to --restart needs. */
 			printf("\",\"activity_epoch\":%ld,\"state\":\"%s\""
-			       ",\"version\":\"%s\"}",
+			       ",\"version\":\"%s\",\"agents\":%d}",
 			       activity_epoch(sl.v[k]),
 			       session_state(sl.v[k]),
-			       version_or_empty(sl.v[k]));
+			       version_or_empty(sl.v[k]),
+			       detect_agents(sl.v[k]));
 		}
 		puts("]");
 		slist_free(&sl);
