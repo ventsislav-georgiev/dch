@@ -25,7 +25,7 @@
 /* DCH_VERSION lives in dtach.h — the master needs it for the .ver sidecar. */
 
 /* Shared globals (declared in dtach.h, used by attach.c/master.c). */
-const char copyright[] = "dch - based on dtach " PACKAGE_VERSION
+const char copyright[] = "dch " DCH_VERSION " - based on dtach"
                          " (C)Copyright 2004-2016 Ned T. Crigler";
 char *progname;
 char *sockname;

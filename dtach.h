@@ -104,10 +104,10 @@ extern int dont_have_tty;
 extern char *dch_exe;
 extern char **dch_argv;
 
-/* dch's own version, independent of the dtach base (PACKAGE_VERSION). Lives
+/* dch's version, from AC_INIT in configure.ac (the one version source). Lives
 ** here, not in dch.c, because the master stamps it into the `<sock>.ver`
 ** sidecar so a client can tell which binary a running session is serving. */
-#define DCH_VERSION "1.19.0"
+#define DCH_VERSION PACKAGE_VERSION
 
 enum
 {

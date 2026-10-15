@@ -8,4 +8,8 @@ if [ "v$ac" != "$tag" ]; then
   echo "version mismatch: tag '$tag' vs configure.ac AC_INIT '$ac'" >&2
   exit 1
 fi
+if ! grep -q '^#define DCH_VERSION PACKAGE_VERSION$' dtach.h; then
+  echo "dtach.h: DCH_VERSION must be defined as PACKAGE_VERSION" >&2
+  exit 1
+fi
 echo "ok: tag $tag matches AC_INIT $ac"
