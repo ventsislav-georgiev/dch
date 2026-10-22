@@ -2304,14 +2304,15 @@ ctl_dead_exit(struct ctl_reader *r, const char *verb)
 #define DET_DEADLINE_MS   500          /* wall-clock cap per fetch */
 #define DET_WORK_ACT_SECS 30           /* "working" needs output this new */
 
-/* Fetch the plain visible screen into buf (cap bytes + NUL). Keeps the
-** TAIL when the stream exceeds cap — detection reads bottom lines (the
-** master itself tail-caps at 2MB). The deadline is wall-clock:
+/* Fetch the visible screen (plain, or with SGR when ansi) into buf (cap
+** bytes + NUL). Keeps the TAIL when the stream exceeds cap — detection
+** reads bottom lines (the master itself tail-caps at 2MB). The deadline is wall-clock:
 ** ctl_next_frame's timeout is inactivity-based, and a master trickling
 ** bytes must not stall --ls-json. Returns content length, -1 on any
 ** failure. */
 static int
-fetch_screen(const char *path, char *buf, size_t cap, int deadline_ms)
+fetch_screen(const char *path, char *buf, size_t cap, int deadline_ms,
+             int ansi)
 {
 	unsigned char req[4], payload[PKT_MAX], type;
 	struct ctl_reader r = {0};
@@ -2323,7 +2324,7 @@ fetch_screen(const char *path, char *buf, size_t cap, int deadline_ms)
 	s = control_connect_path(path);
 	if (s < 0)
 		return -1;
-	req[0] = DCH_READ_PLAIN;
+	req[0] = ansi ? DCH_READ_ANSI : DCH_READ_PLAIN;
 	req[1] = DCH_READ_VISIBLE;
 	req[2] = req[3] = 0;
 	send_ctl(s, MSG_READ, req, sizeof(req));
@@ -2476,34 +2477,22 @@ det_spinner(const char *scr)
 	return 0;
 }
 
-/* The last DET_LINES non-empty visible lines, folded to lowercase ASCII
-** (UTF-8 bytes untouched), or NULL when there is no screen. *novt is set
-** when the master has no terminal mirror. Caller frees. */
+/* The last DET_LINES non-empty lines of screen text raw[0..n), folded to
+** lowercase ASCII (UTF-8 bytes untouched), or NULL. Caller frees. */
 static char *
-screen_tail(const char *path, int *novt)
+tail_fold(const char *raw, size_t n)
 {
-	char *raw, *fold, *end, *p;
+	const char *end, *p;
+	char *fold;
 	size_t rl, k;
-	int n, lines;
+	int lines;
 
-	*novt = 0;
-	raw = malloc(DET_CAP + 1);
-	if (!raw)
-		return NULL;
-	n = fetch_screen(path, raw, DET_CAP, DET_DEADLINE_MS);
-	if (n <= 0)
-	{
-		*novt = n == -2;
-		free(raw);
-		return NULL;
-	}
-	/* isolate the last DET_LINES non-empty lines */
 	end = raw + n;
 	p = end;
 	lines = 0;
 	while (p > raw && lines < DET_LINES)
 	{
-		char *ls = p, *q;
+		const char *ls = p, *q;
 		int nonblank = 0;
 
 		while (ls > raw && ls[-1] != '\n')
@@ -2521,10 +2510,7 @@ screen_tail(const char *path, int *novt)
 	rl = (size_t)(end - p);
 	fold = malloc(rl + 1);
 	if (!fold)
-	{
-		free(raw);
 		return NULL;
-	}
 	for (k = 0; k < rl; k++)
 	{
 		char c = p[k];
@@ -2535,6 +2521,30 @@ screen_tail(const char *path, int *novt)
 		fold[k] = (c >= 'A' && c <= 'Z') ? c + 32 : c;
 	}
 	fold[rl] = '\0';
+	return fold;
+}
+
+/* The last DET_LINES non-empty visible lines, folded (tail_fold), or NULL
+** when there is no screen. *novt is set when the master has no terminal
+** mirror. Caller frees. */
+static char *
+screen_tail(const char *path, int *novt)
+{
+	char *raw, *fold;
+	int n;
+
+	*novt = 0;
+	raw = malloc(DET_CAP + 1);
+	if (!raw)
+		return NULL;
+	n = fetch_screen(path, raw, DET_CAP, DET_DEADLINE_MS, 0);
+	if (n <= 0)
+	{
+		*novt = n == -2;
+		free(raw);
+		return NULL;
+	}
+	fold = tail_fold(raw, (size_t)n);
 	free(raw);
 	return fold;
 }
@@ -2992,11 +3002,13 @@ do_restart_verb(const char *name, int no_version, int quiet)
 	return ctl_status_exit(len);
 }
 
-/* Arm a respawn (or, on a held session, perform it now); no command = hold,
-** cancel = drop the arm (and end a held session). The master answers MSG_ACK;
-** an old master answers DCH_ST_UNSUP. */
+/* MSG_RESPAWN to the master at `path`: op 'a' with cmd, 'h' (hold) or 'c'
+** (cancel). The MSG_ACK status (an old master answers DCH_ST_UNSUP), -3 when
+** the argv does not fit one frame, -4 when nothing listens, else -1/-2 for a
+** master that went quiet mid-answer / never answered (ctl_dead_exit's two
+** cases). */
 static int
-do_respawn_verb(const char *name, char **cmd, int ncmd, int cancel)
+respawn_req(const char *path, int op, char **cmd, int ncmd)
 {
 	unsigned char req[PKT_MAX], payload[PKT_MAX], type;
 	struct ctl_reader r = {0};
@@ -3004,21 +3016,12 @@ do_respawn_verb(const char *name, char **cmd, int ncmd, int cancel)
 	size_t fill = 1, need = 1;
 	int s, rc, k;
 
-	req[0] = cancel ? 'c' : ncmd ? 'a' : 'h';
-	if (ncmd && !cmd[0][0])
-	{
-		fprintf(stderr, "dch: --respawn: empty command\n");
-		return 1;
-	}
+	req[0] = (unsigned char)op;
 	for (k = 0; k < ncmd; k++)
 		need += strlen(cmd[k]) + 1;
 	/* One frame carries the whole argv; nothing reassembles more. */
 	if (need > sizeof req)
-	{
-		fprintf(stderr, "dch: --respawn: command is %zu bytes, the "
-		        "limit is %d\n", need - 1, PKT_MAX - 1);
-		return 1;
-	}
+		return -3;
 	for (k = 0; k < ncmd; k++)
 	{
 		size_t l = strlen(cmd[k]) + 1;
@@ -3026,23 +3029,58 @@ do_respawn_verb(const char *name, char **cmd, int ncmd, int cancel)
 		memcpy(req + fill, cmd[k], l);
 		fill += l;
 	}
-
-	s = control_connect(name, 0);
+	s = control_connect_path(path);
 	if (s < 0)
-		return 1;
+		return -4;
 	send_ctl(s, MSG_RESPAWN, req, fill);
 	rc = ctl_next_frame(s, &r, CTL_IDLE_MS, &type, payload, &len);
 	close(s);
 	if (rc <= 0)
-		return ctl_dead_exit(&r, "respawn");
-	if (type != MSG_ACK)
+		return r.got_any ? -1 : -2;
+	return type == MSG_ACK ? (int)len : DCH_ST_ERR;
+}
+
+/* Arm a respawn (or, on a held session, perform it now); no command = hold,
+** cancel = drop the arm (and end a held session). */
+static int
+do_respawn_verb(const char *name, char **cmd, int ncmd, int cancel)
+{
+	struct ctl_reader dead = {0};
+	size_t need = 1;
+	int k, st;
+
+	if (ncmd && !cmd[0][0])
+	{
+		fprintf(stderr, "dch: --respawn: empty command\n");
 		return 1;
-	if (len == DCH_ST_ERR)
+	}
+	if (make_sock_path(name) < 0)
+		return 1;
+	st = respawn_req(sock_path, cancel ? 'c' : ncmd ? 'a' : 'h', cmd, ncmd);
+	if (st == -3)
+	{
+		for (k = 0; k < ncmd; k++)
+			need += strlen(cmd[k]) + 1;
+		fprintf(stderr, "dch: --respawn: command is %zu bytes, the "
+		        "limit is %d\n", need - 1, PKT_MAX - 1);
+		return 1;
+	}
+	if (st == -4)
+	{
+		fprintf(stderr, "dch: no session: %s\n", name);
+		return 1;
+	}
+	if (st < 0)
+	{
+		dead.got_any = st == -1;
+		return ctl_dead_exit(&dead, "respawn");
+	}
+	if (st == DCH_ST_ERR)
 	{
 		fprintf(stderr, "dch: %s: respawn request rejected\n", name);
 		return 1;
 	}
-	return ctl_status_exit(len);
+	return ctl_status_exit((unsigned int)st);
 }
 
 /* Print s[0..n) as a JSON string. Invalid UTF-8 becomes U+FFFD so the output
@@ -3100,23 +3138,45 @@ cmd_field(const unsigned char **p, const unsigned char *end)
 	return (const char *)f;
 }
 
-/* `dch --cmd`: what the session is running right now, as one JSON object:
-** {"pid","state","argv","exit_code","exit_signal","tail"}. pid is null while
-** held; exit_* are null until a child is reaped under an arm. */
+/* A parsed MSG_CMD reply. buf owns the strings; argv is malloc'd. */
+struct cmd_info
+{
+	unsigned char *buf;
+	long pid;			/* 0 while held */
+	const char *state;		/* running | armed | held */
+	int code, sig;			/* -1 / 0 until a child is reaped under an arm */
+	int argc;
+	char **argv;			/* argc entries + NULL */
+	const unsigned char *tail;	/* raw output since the arm */
+	size_t tail_len;
+};
+
+static void
+cmd_info_free(struct cmd_info *ci)
+{
+	free(ci->buf);
+	free(ci->argv);
+	memset(ci, 0, sizeof *ci);
+}
+
+/* MSG_CMD to the master at `path`. 0 = *ci filled; a positive master status
+** (DCH_ST_UNSUP from an old one); -4 nothing listens; -1/-2 the master went
+** quiet mid-answer / never answered; -3 a malformed reply. */
 static int
-do_cmd_verb(const char *name)
+cmd_query(const char *path, struct cmd_info *ci)
 {
 	unsigned char payload[PKT_MAX], type, *buf = NULL;
 	const unsigned char *q, *end;
-	const char *pid, *state, *code, *sig, *ac;
+	const char *pid, *code, *sig, *ac;
 	struct ctl_reader r = {0};
 	unsigned int len;
 	size_t fill = 0;
-	int s, rc, k, argc;
+	int s, rc, k;
 
-	s = control_connect(name, 0);
+	memset(ci, 0, sizeof *ci);
+	s = control_connect_path(path);
 	if (s < 0)
-		return 1;
+		return -4;
 	send_ctl(s, MSG_CMD, NULL, 0);
 	for (;;)
 	{
@@ -3125,7 +3185,7 @@ do_cmd_verb(const char *name)
 		{
 			close(s);
 			free(buf);
-			return ctl_dead_exit(&r, "cmd");
+			return r.got_any ? -1 : -2;
 		}
 		if (type != MSG_READ_DATA)
 			break;
@@ -3136,7 +3196,7 @@ do_cmd_verb(const char *name)
 			{
 				close(s);
 				free(buf);
-				return 1;
+				return -3;
 			}
 			buf = nb;
 			memcpy(buf + fill, payload, len);
@@ -3147,42 +3207,96 @@ do_cmd_verb(const char *name)
 	if (type != MSG_READ_END || len != DCH_ST_OK)
 	{
 		free(buf);
-		return ctl_status_exit(type == MSG_READ_END || type == MSG_ACK
-		                       ? len : DCH_ST_ERR);
+		return type == MSG_READ_END || type == MSG_ACK ? (int)len
+		                                               : DCH_ST_ERR;
 	}
 
 	q = buf;
 	end = buf + fill;
 	pid = buf ? cmd_field(&q, end) : NULL;
-	state = pid ? cmd_field(&q, end) : NULL;
-	code = state ? cmd_field(&q, end) : NULL;
+	ci->state = pid ? cmd_field(&q, end) : NULL;
+	code = ci->state ? cmd_field(&q, end) : NULL;
 	sig = code ? cmd_field(&q, end) : NULL;
 	ac = sig ? cmd_field(&q, end) : NULL;
-	if (!ac)
+	ci->buf = buf;
+	if (!ac || atoi(ac) < 0 ||
+	    !(ci->argv = calloc((size_t)atoi(ac) + 1, sizeof(char *))))
 	{
-		fprintf(stderr, "dch: malformed cmd response\n");
-		free(buf);
+		cmd_info_free(ci);
+		return -3;
+	}
+	ci->pid = atol(pid);
+	ci->code = atoi(code);
+	ci->sig = atoi(sig);
+	for (k = 0; k < atoi(ac); k++)
+		if (!(ci->argv[k] = (char *)cmd_field(&q, end)))
+		{
+			cmd_info_free(ci);
+			return -3;
+		}
+	ci->argc = k;
+	ci->tail = q;
+	ci->tail_len = (size_t)(end - q);
+	return 0;
+}
+
+/* `dch --cmd`: what the session is running right now, as one JSON object:
+** {"pid","state","argv","exit_code","exit_signal","tail"}. pid is null while
+** held; exit_* are null until a child is reaped under an arm. */
+static int
+do_cmd_verb(const char *name)
+{
+	struct cmd_info ci;
+	struct ctl_reader dead = {0};
+	int k, st;
+
+	if (make_sock_path(name) < 0)
+		return 1;
+	st = cmd_query(sock_path, &ci);
+	if (st == -4)
+	{
+		fprintf(stderr, "dch: no session: %s\n", name);
 		return 1;
 	}
-	argc = atoi(ac);
-	printf("{\"pid\":%s,\"state\":", atol(pid) > 0 ? pid : "null");
-	json_bytes((const unsigned char *)state, strlen(state));
-	fputs(",\"argv\":[", stdout);
-	for (k = 0; k < argc; k++)
+	if (st == -1 || st == -2)
 	{
-		const char *a = cmd_field(&q, end);
-
-		if (!a)
-			break;
+		dead.got_any = st == -1;
+		return ctl_dead_exit(&dead, "cmd");
+	}
+	if (st == -3)
+	{
+		fprintf(stderr, "dch: malformed cmd response\n");
+		return 1;
+	}
+	if (st > 0)
+		return ctl_status_exit((unsigned int)st);
+	if (ci.pid > 0)
+		printf("{\"pid\":%ld,\"state\":", ci.pid);
+	else
+		fputs("{\"pid\":null,\"state\":", stdout);
+	json_bytes((const unsigned char *)ci.state, strlen(ci.state));
+	fputs(",\"argv\":[", stdout);
+	for (k = 0; k < ci.argc; k++)
+	{
 		if (k)
 			putchar(',');
-		json_bytes((const unsigned char *)a, strlen(a));
+		json_bytes((const unsigned char *)ci.argv[k],
+		           strlen(ci.argv[k]));
 	}
-	printf("],\"exit_code\":%s,\"exit_signal\":%s,\"tail\":",
-	       atoi(code) >= 0 ? code : "null", atoi(sig) > 0 ? sig : "null");
-	json_bytes(q, (size_t)(end - q));
+	fputs("],\"exit_code\":", stdout);
+	if (ci.code >= 0)
+		printf("%d", ci.code);
+	else
+		fputs("null", stdout);
+	fputs(",\"exit_signal\":", stdout);
+	if (ci.sig > 0)
+		printf("%d", ci.sig);
+	else
+		fputs("null", stdout);
+	fputs(",\"tail\":", stdout);
+	json_bytes(ci.tail, ci.tail_len);
 	puts("}");
-	free(buf);
+	cmd_info_free(&ci);
 	return 0;
 }
 
@@ -3395,6 +3509,1000 @@ do_spawn_verb(char *exe, const char *name, int cols, int rows,
 	printf("%s\n", name);
 	return 0;
 }
+
+/* ---- agent-aware --restart --all (Claude Code) ----------------------
+**
+** After the master pass, `--restart --all` restarts the Claude Code agents
+** that run AS a session's command once the installed CLI is newer than the
+** running one (-f: all of them). Per agent: type a pause message, wait until
+** it is provably idle, arm a #021 hold and type /exit, read the session id
+** from the `claude --resume <id>` line in the exit tail, respawn the same
+** argv with --resume <id>, wait for the new composer, type a resume message.
+** Every keystroke goes through a composer gate that wants the empty composer
+** on screen — Enter on a permission prompt would approve a tool call — so
+** the whole step needs the terminal mirror and dch-lite skips it. */
+
+#ifdef HAVE_LIBGHOSTTY_VT
+
+#define AG_POLL_MS  250
+/* Paste, then Enter: Enter in the same burst can fold into the paste. */
+#define AG_ENTER_MS 300
+
+static const char ag_pause_msg[] =
+    "pause all work, i need to restart you. Paused means: stop every "
+    "background shell and monitor (TaskStop), stop or finish your "
+    "subagents, cancel any /loop, ScheduleWakeup and session crons, and "
+    "note what you stopped so it can be re-armed after the restart. Then "
+    "say that all work is paused and you are ready to be restarted.";
+static const char ag_resume_msg[] =
+    "resume all work. You were restarted: re-arm the shells, monitors, "
+    "subagents, loops, wakeups and crons you stopped before the restart, "
+    "then carry on where you left off.";
+
+/* What the screen lets us type into (claude_gate). */
+enum { CG_NOVT = -1, CG_EMPTY, CG_DIALOG, CG_DRAFT, CG_QUEUED, CG_UNKNOWN };
+static const char *const cg_why[] = {
+	"the composer is empty", "a prompt or dialog is waiting for you",
+	"the composer holds an unsent draft", "a queued message is pending",
+	"the composer is not on screen",
+};
+
+/* One Claude session record (~/.claude/sessions/<pid>.json). */
+struct crec
+{
+	long pid, upd;		/* upd = statusUpdatedAt, epoch ms */
+	int depth;		/* generations below the scan root */
+	char sid[64], ver[64], status[32], cwd[1024];
+};
+
+struct crec_scan
+{
+	long root;
+	int verify, n;		/* n = live records under root */
+	struct crec best;	/* the shallowest of them */
+};
+
+struct agent
+{
+	char name[600], path[1100];
+	char **argv;		/* the session's argv (owned by ci) */
+	struct cmd_info ci;
+	int tok, argc, saw_busy;
+	long cpid;
+	char ver[64], want[64], sid[64], id[64], note[200], why[120];
+	enum { AG_WAIT, AG_EXIT, AG_START, AG_DONE } step;
+	long long t_sent, ok_since, deadline;
+};
+
+static long long
+wall_ms(void)
+{
+	struct timeval tv;
+
+	gettimeofday(&tv, NULL);
+	return (long long)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+}
+
+static long
+env_ms(const char *key, long dflt)
+{
+	const char *e = getenv(key);
+	long v = e ? atol(e) : 0;
+
+	return v > 0 ? v : dflt;
+}
+
+/* Parent pid from the kernel's process table — never the env, which macOS
+** redacts for platform binaries. -1 when the process is gone. */
+static long
+proc_ppid(long pid)
+{
+#ifdef __APPLE__
+	struct kinfo_proc kp;
+	size_t len = sizeof kp;
+	int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, (int)pid };
+
+	if (sysctl(mib, 4, &kp, &len, NULL, 0) != 0 || len == 0)
+		return -1;
+	return kp.kp_eproc.e_ppid;
+#else
+	char p[64], buf[512], *rp;
+	FILE *f;
+	long pp = -1;
+
+	snprintf(p, sizeof p, "/proc/%ld/stat", pid);
+	if (!(f = fopen(p, "r")))
+		return -1;
+	/* the comm field may hold spaces and parens: parse after the last ')' */
+	if (fgets(buf, sizeof buf, f) && (rp = strrchr(buf, ')')))
+		sscanf(rp + 1, " %*c %ld", &pp);
+	fclose(f);
+	return pp;
+#endif
+}
+
+/* Generations from `anc` down to `pid` (0 = the same process), -1 when pid
+** does not descend from it. */
+static int
+proc_depth(long pid, long anc)
+{
+	int d;
+
+	for (d = 0; d < 64 && pid > 1; d++)
+	{
+		if (pid == anc)
+			return d;
+		pid = proc_ppid(pid);
+	}
+	return -1;
+}
+
+static int
+proc_cwd(long pid, char *out, size_t outsz)
+{
+#ifdef __APPLE__
+	struct proc_vnodepathinfo vi;
+
+	if (proc_pidinfo((int)pid, PROC_PIDVNODEPATHINFO, 0, &vi, sizeof vi)
+	    != (int)sizeof vi)
+		return -1;
+	snprintf(out, outsz, "%s", vi.pvi_cdir.vip_path);
+#else
+	char p[64];
+	ssize_t n;
+
+	snprintf(p, sizeof p, "/proc/%ld/cwd", pid);
+	n = readlink(p, out, outsz - 1);
+	if (n <= 0)
+		return -1;
+	out[n] = '\0';
+#endif
+	return 0;
+}
+
+/* dch_visit_claude_records callback: count the live interactive records
+** whose pid descends from cs->root, keep the shallowest. With verify, the
+** record's procStart must match the process's start time, so a record left
+** by a dead Claude whose pid was recycled never joins. */
+static int
+crec_visit(const char *path, const char *body, size_t len, void *arg)
+{
+	struct crec_scan *cs = arg;
+	struct crec c;
+	const char *base = strrchr(path, '/');
+	char kind[32], start[128], actual[128], *endp;
+	long jpid;
+
+	(void)len;
+	memset(&c, 0, sizeof c);
+	base = base ? base + 1 : path;
+	c.pid = strtol(base, &endp, 10);
+	if (c.pid <= 0 || strcmp(endp, ".json") ||
+	    dch_json_long(body, "pid", &jpid) < 0 || jpid != c.pid ||
+	    dch_json_string(body, "kind", kind, sizeof kind) < 0 ||
+	    strcmp(kind, "interactive") || kill((pid_t)c.pid, 0) < 0 ||
+	    (c.depth = proc_depth(c.pid, cs->root)) < 0 ||
+	    dch_json_string(body, "sessionId", c.sid, sizeof c.sid) < 0 ||
+	    dch_json_string(body, "version", c.ver, sizeof c.ver) < 0 ||
+	    dch_json_string(body, "status", c.status, sizeof c.status) < 0)
+		return 0;
+	if (dch_json_string(body, "cwd", c.cwd, sizeof c.cwd) < 0)
+		c.cwd[0] = '\0';
+	if (dch_json_long(body, "statusUpdatedAt", &c.upd) < 0)
+		c.upd = 0;
+	if (cs->verify &&
+	    (dch_json_string(body, "procStart", start, sizeof start) < 0 ||
+	     dch_process_start(c.pid, actual, sizeof actual) < 0 ||
+	     strcmp(start, actual)))
+		return 0;
+	if (cs->n++ == 0 || c.depth < cs->best.depth)
+		cs->best = c;
+	return 0;
+}
+
+/* Live Claude records at or below `root`; *best = the shallowest. */
+static int
+claude_find(long root, int verify, struct crec *best)
+{
+	struct crec_scan cs;
+
+	memset(&cs, 0, sizeof cs);
+	cs.root = root;
+	cs.verify = verify;
+	(void)dch_visit_claude_records(crec_visit, &cs);
+	*best = cs.best;
+	return cs.n;
+}
+
+/* Length of the escape sequence at p (p[0] == ESC): CSI up to its final
+** byte, OSC up to BEL or ST, else ESC + intermediates + one final byte. */
+static size_t
+esc_len(const unsigned char *p, size_t n)
+{
+	size_t i = 2;
+
+	if (n < 2)
+		return n;
+	if (p[1] == '[')
+	{
+		while (i < n && (p[i] < 0x40 || p[i] > 0x7e))
+			i++;
+		return i < n ? i + 1 : n;
+	}
+	if (p[1] == ']')
+	{
+		for (; i < n; i++)
+			if (p[i] == '\a')
+				return i + 1;
+			else if (p[i] == 0x1b && i + 1 < n && p[i + 1] == '\\')
+				return i + 2;
+		return n;
+	}
+	for (i = 1; i < n && p[i] >= 0x20 && p[i] <= 0x2f; i++)
+		;
+	return i < n ? i + 1 : n;
+}
+
+/* Faint (SGR 2) after the SGR parameters p[0..n), starting from `dim`. The
+** extended colour forms are skipped whole: the 2 in 38;2;r;g;b is not dim. */
+static int
+sgr_dim(const unsigned char *p, size_t n, int dim)
+{
+	size_t i = 0;
+	int skip = 0;
+
+	if (n == 0)
+		return 0;
+	while (i <= n)
+	{
+		long v = 0;
+		size_t j = i;
+
+		while (j < n && p[j] != ';')
+		{
+			if (p[j] == ':')	/* 38:2:r:g:b is one parameter */
+				v = -1;
+			else if (v >= 0 && p[j] >= '0' && p[j] <= '9')
+				v = v * 10 + (p[j] - '0');
+			j++;
+		}
+		if (skip > 0)
+			skip--;
+		else if (v == 38 || v == 48 || v == 58)
+			skip = j + 1 < n && p[j + 1] == '5' ? 2 : 4;
+		else if (v == 0 || v == 22)
+			dim = 0;
+		else if (v == 2)
+			dim = 1;
+		i = j + 1;
+	}
+	return dim;
+}
+
+/* Is the Claude Code screen at `path` safe to type into? Positive evidence
+** only: the composer — a "❯ " row between two "─" rules, the bottom-most
+** one — must be on screen and empty (nothing after the glyph, or only
+** Claude's dim placeholder: a typed draft is not dim), with no prompt or
+** form up and no queued message. Anything else is reported, never typed
+** over: a trust dialog or release notes before the composer read UNKNOWN. */
+static int
+claude_gate(const char *path)
+{
+	char *raw, *txt, *fold, *dim, *ls, *prev = NULL, *comp = NULL;
+	size_t i, k = 0;
+	int n, d = 0, res = CG_UNKNOWN;
+
+	if (getenv("DCH_NO_DETECT"))
+		return CG_NOVT;
+	raw = malloc(DET_CAP + 1);
+	if (!raw)
+		return CG_UNKNOWN;
+	n = fetch_screen(path, raw, DET_CAP, DET_DEADLINE_MS, 1);
+	if (n <= 0)
+	{
+		free(raw);
+		return n == -2 ? CG_NOVT : CG_UNKNOWN;
+	}
+	/* Plain text plus a per-byte faint flag. */
+	txt = malloc((size_t)n + 1);
+	dim = malloc((size_t)n + 1);
+	if (!txt || !dim)
+	{
+		free(raw);
+		free(txt);
+		free(dim);
+		return CG_UNKNOWN;
+	}
+	for (i = 0; i < (size_t)n; )
+	{
+		const unsigned char *u = (const unsigned char *)raw + i;
+
+		if (*u == 0x1b)
+		{
+			size_t l = esc_len(u, (size_t)n - i);
+
+			if (l > 2 && u[1] == '[' && u[l - 1] == 'm')
+				d = sgr_dim(u + 2, l - 3, d);
+			i += l;
+			continue;
+		}
+		if (*u != '\r')
+		{
+			txt[k] = (char)*u;
+			dim[k++] = (char)d;
+		}
+		i++;
+	}
+	txt[k] = '\0';
+	free(raw);
+
+	fold = tail_fold(txt, k);
+	if (fold && (det_match(det_suppress, sizeof(det_suppress) /
+	                       sizeof(det_suppress[0]), fold) ||
+	             det_match(det_blocked, sizeof(det_blocked) /
+	                       sizeof(det_blocked[0]), fold)))
+		res = CG_DIALOG;
+	else if (fold && (strstr(fold, "press up to edit queued messages") ||
+	                  strstr(fold, "ctrl+enter to send now")))
+		res = CG_QUEUED;
+	free(fold);
+	if (res != CG_UNKNOWN)
+	{
+		free(txt);
+		free(dim);
+		return res;
+	}
+
+	/* Bottom-most "❯ " row with a rule right above and below it. */
+	for (ls = txt; ls; )
+	{
+		char *nl = strchr(ls, '\n'), *nx = nl ? nl + 1 : NULL;
+		const char *r = nx;
+
+		while (r && *r == ' ')
+			r++;
+		if (prev && strncmp(ls, "\xe2\x9d\xaf", 3) == 0 &&
+		    (ls[3] == ' ' || ls[3] == '\n' || ls[3] == '\0' ||
+		     strncmp(ls + 3, "\xc2\xa0", 2) == 0) &&
+		    r && strncmp(r, "\xe2\x94\x80", 3) == 0)
+			comp = ls;
+		/* prev = this line, when it is a rule */
+		for (r = ls; *r == ' '; r++)
+			;
+		prev = strncmp(r, "\xe2\x94\x80", 3) == 0 ? ls : NULL;
+		ls = nx;
+	}
+	if (comp)
+	{
+		char *c = comp + 3;
+
+		for (;;)
+			if (*c == ' ')
+				c++;
+			else if (strncmp(c, "\xc2\xa0", 2) == 0)
+				c += 2;
+			else
+				break;
+		res = *c == '\n' || *c == '\0' || dim[c - txt] ? CG_EMPTY
+		                                              : CG_DRAFT;
+	}
+	free(txt);
+	free(dim);
+	return res;
+}
+
+/* Type text and press Enter (paste = bracketed paste for messages; raw
+** keystrokes for a slash command, which Claude's menu must see typed). */
+static int
+ag_type(const char *path, const char *text, int paste)
+{
+	int s;
+
+	if (paste)
+	{
+		if (dch_pty_push(path, text) < 0)
+			return -1;
+	}
+	else
+	{
+		if ((s = control_connect_path(path)) < 0)
+			return -1;
+		send_ctl(s, MSG_PUSH, text, strlen(text));
+		close(s);
+	}
+	poll(NULL, 0, AG_ENTER_MS);
+	return dch_pty_push(path, NULL);
+}
+
+static int
+is_uuid(const char *u)
+{
+	int i;
+
+	for (i = 0; i < 36; i++)
+		if (i == 8 || i == 13 || i == 18 || i == 23 ? u[i] != '-'
+		                                            : !isxdigit((unsigned char)u[i]))
+			return 0;
+	return 1;
+}
+
+/* The id from the LAST `--resume <uuid>` in the exit tail. The tail is raw
+** pty bytes: Ink dims the line and may style the id apart from the command,
+** and a narrow pane hard-wraps it, so escapes and control bytes (CR/LF) go
+** first and a split or wrapped id reads whole. */
+static int
+resume_id(const unsigned char *t, size_t n, char *out, size_t outsz)
+{
+	char *p = malloc(n + 1), *q, *hit = NULL;
+	size_t i = 0, k = 0;
+
+	if (!p)
+		return -1;
+	while (i < n)
+		if (t[i] == 0x1b)
+			i += esc_len(t + i, n - i);
+		else if (t[i] < 0x20 || t[i] == 0x7f)
+			i++;
+		else
+			p[k++] = (char)t[i++];
+	p[k] = '\0';
+	for (q = p; (q = strstr(q, "--resume")); q += 8)
+	{
+		char *u = q + 8;
+
+		while (*u == ' ')
+			u++;
+		if (is_uuid(u))
+			hit = u;
+	}
+	if (hit)
+		snprintf(out, outsz, "%.36s", hit);
+	free(p);
+	return hit ? 0 : -1;
+}
+
+/* argv for the relaunch: up to the claude token, then --resume <id>, then
+** the rest minus any earlier session choice (--resume/-r [id], --resume=,
+** --session-id, --continue/-c, --fork-session). Inserted after the token,
+** not appended: a trailing `-- <prompt>` would swallow it. --resume/-r take
+** an OPTIONAL value, so only a non-flag next token is theirs. */
+static char **
+resume_argv(char **v, int argc, int tok, char *id, int *outc)
+{
+	char **o = calloc((size_t)argc + 3, sizeof(char *));
+	int k, n = 0, opts = 1;
+
+	if (!o)
+		return NULL;
+	for (k = 0; k <= tok; k++)
+		o[n++] = v[k];
+	o[n++] = "--resume";
+	o[n++] = id;
+	for (k = tok + 1; k < argc; k++)
+	{
+		const char *a = v[k];
+
+		if (opts && strcmp(a, "--") == 0)
+			opts = 0;
+		else if (opts && (strcmp(a, "--resume") == 0 ||
+		                  strcmp(a, "-r") == 0))
+		{
+			if (k + 1 < argc && v[k + 1][0] != '-')
+				k++;
+			continue;
+		}
+		else if (opts && strcmp(a, "--session-id") == 0)
+		{
+			if (k + 1 < argc)
+				k++;
+			continue;
+		}
+		else if (opts && (strncmp(a, "--resume=", 9) == 0 ||
+		                  strncmp(a, "--session-id=", 13) == 0 ||
+		                  strcmp(a, "--continue") == 0 ||
+		                  strcmp(a, "-c") == 0 ||
+		                  strcmp(a, "--fork-session") == 0))
+			continue;
+		o[n++] = v[k];
+	}
+	*outc = n;
+	return o;
+}
+
+/* `claude --version` of the binary the relaunch will run: the token itself
+** when it has a '/' (relative to the session's cwd), else the first match on
+** the MASTER's PATH, which is the env the respawned argv gets. */
+static int
+claude_installed(const char *tok, const char *mpath, const char *mcwd,
+                 char *out, size_t outsz)
+{
+	char exe[2048], buf[256], *sp;
+	const char *dir = mpath, *e;
+	struct stat st;
+	struct pollfd pfd;
+	long long end;
+	size_t got = 0;
+	int fd[2], status;
+	pid_t pid;
+
+	exe[0] = '\0';
+	if (strchr(tok, '/'))
+		snprintf(exe, sizeof exe, "%s%s%s", tok[0] == '/' ? "" : mcwd,
+		         tok[0] == '/' ? "" : "/", tok);
+	else
+		for (; dir; dir = e ? e + 1 : NULL)
+		{
+			int l;
+
+			e = strchr(dir, ':');
+			l = e ? (int)(e - dir) : (int)strlen(dir);
+			snprintf(exe, sizeof exe, "%.*s/%s", l ? l : (int)strlen(mcwd),
+			         l ? dir : mcwd, tok);
+			if (stat(exe, &st) == 0 && S_ISREG(st.st_mode) &&
+			    access(exe, X_OK) == 0)
+				break;
+			exe[0] = '\0';
+		}
+	if (!exe[0] || pipe(fd) < 0)
+		return -1;
+	pid = fork();
+	if (pid < 0)
+	{
+		close(fd[0]);
+		close(fd[1]);
+		return -1;
+	}
+	if (pid == 0)
+	{
+		char *av[] = { exe, "--version", NULL };
+		int nul = open("/dev/null", O_RDWR);
+
+		dup2(fd[1], 1);
+		if (nul >= 0)
+		{
+			dup2(nul, 0);
+			dup2(nul, 2);
+		}
+		close(fd[0]);
+		close(fd[1]);
+		setenv("PATH", mpath, 1);
+		if (chdir(mcwd) < 0)
+			_exit(127);
+		execv(exe, av);
+		_exit(127);
+	}
+	close(fd[1]);
+	/* ponytail: a 10 s cap; a --version that hangs is not one to trust */
+	end = wall_ms() + 10000;
+	pfd.fd = fd[0];
+	pfd.events = POLLIN;
+	while (got < sizeof buf - 1 && wall_ms() < end &&
+	       poll(&pfd, 1, 200) >= 0)
+	{
+		ssize_t r;
+
+		if (!(pfd.revents & (POLLIN | POLLHUP)))
+			continue;
+		r = read(fd[0], buf + got, sizeof buf - 1 - got);
+		if (r <= 0)
+			break;
+		got += (size_t)r;
+	}
+	close(fd[0]);
+	while (waitpid(pid, &status, WNOHANG) == 0)
+	{
+		if (wall_ms() >= end)
+		{
+			kill(pid, SIGKILL);
+			waitpid(pid, &status, 0);
+			return -1;
+		}
+		poll(NULL, 0, 20);
+	}
+	buf[got] = '\0';
+	/* "2.1.299 (Claude Code)" */
+	sp = buf + strspn(buf, " \t\r\n");
+	sp[strcspn(sp, " \t\r\n")] = '\0';
+	if (!WIFEXITED(status) || WEXITSTATUS(status) != 0 ||
+	    !isdigit((unsigned char)sp[0]))
+		return -1;
+	snprintf(out, outsz, "%s", sp);
+	return 0;
+}
+
+/* One report line per agent; done = it reached a terminal state. */
+static void
+ag_say(struct agent *a, int failed, const char *fmt, ...)
+{
+	va_list ap;
+
+	printf("%s: %s", a->name, failed ? "NOT restarted — " : "");
+	va_start(ap, fmt);
+	vprintf(fmt, ap);
+	va_end(ap);
+	putchar('\n');
+	fflush(stdout);
+	a->step = AG_DONE;
+}
+
+/* The hold is armed and /exit typed: wait for the exit, then relaunch. */
+static int
+ag_exited(struct agent *a, const char *step_s)
+{
+	struct cmd_info ci;
+	char tid[64], **nv;
+	int nc, st, fail = 0;
+
+	st = cmd_query(a->path, &ci);
+	if (st != 0)
+	{
+		ag_say(a, 1, "the session went away during /exit");
+		return 1;
+	}
+	if (strcmp(ci.state, "held") != 0)
+	{
+		if (strcmp(ci.state, "running") == 0)
+			ag_say(a, 1, "the hold was dropped (expired or cancelled) "
+			       "before claude exited");
+		else if (wall_ms() >= a->deadline)
+		{
+			respawn_req(a->path, 'c', NULL, 0);
+			ag_say(a, 1, "/exit did not end claude within %s; hold "
+			       "cancelled, claude left running", step_s);
+		}
+		cmd_info_free(&ci);
+		return a->step == AG_DONE;
+	}
+	/* Crashed instead of a clean /exit: nothing to resume into. The
+	** cancel ends the session, as the exit would have unarmed. */
+	if (ci.sig > 0 || ci.code != 0)
+	{
+		respawn_req(a->path, 'c', NULL, 0);
+		if (ci.sig > 0)
+			ag_say(a, 1, "claude died on signal %d instead of exiting;"
+			       " not relaunched, session ended", ci.sig);
+		else
+			ag_say(a, 1, "claude exited with status %d instead of 0;"
+			       " not relaunched, session ended", ci.code);
+		cmd_info_free(&ci);
+		return 1;
+	}
+	/* The exit line is primary; the record's id (read right before /exit,
+	** as /clear rotates it) is the fallback and the cross-check. */
+	if (resume_id(ci.tail, ci.tail_len, tid, sizeof tid) < 0)
+	{
+		snprintf(a->id, sizeof a->id, "%s", a->sid);
+		snprintf(a->note, sizeof a->note, " (no resume line in the "
+		         "exit output; used the session record's id)");
+	}
+	else
+	{
+		snprintf(a->id, sizeof a->id, "%s", tid);
+		if (strcmp(tid, a->sid) != 0)
+			snprintf(a->note, sizeof a->note, " (exit line said %s, "
+			         "session record said %s; used the exit line)",
+			         tid, a->sid);
+	}
+	cmd_info_free(&ci);
+	nv = resume_argv(a->argv, a->argc, a->tok, a->id, &nc);
+	st = nv ? respawn_req(a->path, 'a', nv, nc) : -3;
+	free(nv);
+	if (st != DCH_ST_OK)
+	{
+		respawn_req(a->path, 'c', NULL, 0);
+		ag_say(a, 1, "relaunch with --resume %s was refused (%d); "
+		       "session ended", a->id, st);
+		fail = 1;
+	}
+	else
+	{
+		a->step = AG_START;
+		a->deadline = wall_ms() + env_ms("DCH_AGENT_STEP_MS", 60000);
+	}
+	return fail;
+}
+
+/* One poll of one agent. Returns 1 when it ended in failure. */
+static int
+ag_tick(struct agent *a, long tmo, long settle, const char *resume)
+{
+	long step = env_ms("DCH_AGENT_STEP_MS", 60000);
+	long long now = wall_ms();
+	char step_s[32];
+	struct crec r;
+	int g, ready;
+
+	snprintf(step_s, sizeof step_s, "%lds", step / 1000);
+	if (a->step == AG_EXIT)
+		return ag_exited(a, step_s);
+	if (a->step == AG_START)
+	{
+		struct cmd_info ci;
+
+		if (cmd_query(a->path, &ci) != 0)
+		{
+			ag_say(a, 1, "relaunched with --resume %s, but it exited "
+			       "and the session ended", a->id);
+			return 1;
+		}
+		g = CG_UNKNOWN;
+		if (ci.pid > 0 && claude_find(ci.pid, 1, &r) > 0 &&
+		    strcmp(r.status, "idle") == 0 &&
+		    (g = claude_gate(a->path)) == CG_EMPTY)
+		{
+			int old = strcmp(r.ver, a->want) != 0;
+
+			cmd_info_free(&ci);
+			ag_type(a->path, resume, 1);
+			if (strcmp(r.sid, a->id) != 0)
+				snprintf(a->note + strlen(a->note),
+				         sizeof a->note - strlen(a->note),
+				         " (the new record says session %s)", r.sid);
+			if (old)
+				ag_say(a, 1, "relaunched with --resume %s, but still "
+				       "on claude %s (expected %s)%s", a->id, r.ver,
+				       a->want, a->note);
+			else
+				ag_say(a, 0, "claude %s -> %s, resumed %s%s", a->ver,
+				       r.ver, a->id, a->note);
+			return old;
+		}
+		cmd_info_free(&ci);
+		if (now < a->deadline)
+			return 0;
+		ag_say(a, 1, "relaunched with --resume %s, but no empty composer "
+		       "within %s (%s); resume message not typed", a->id, step_s,
+		       g == CG_NOVT ? "no mirror" : cg_why[g]);
+		return 1;
+	}
+
+	/* AG_WAIT: is the pause consumed and the agent idle, for a while? */
+	if (claude_find(a->cpid, 0, &r) == 0 || r.pid != a->cpid)
+	{
+		ag_say(a, 1, "claude exited while pausing");
+		return 1;
+	}
+	if (strcmp(r.status, "busy") == 0 && r.upd >= a->t_sent)
+		a->saw_busy = 1;
+	g = claude_gate(a->path);
+	/* Busy after the push proves the message was taken; an idle stamp
+	** newer than the push does too, unless the message sits queued —
+	** a turn that ends with one queued is idle for a moment first. */
+	ready = (a->saw_busy || (r.upd > a->t_sent && g != CG_QUEUED)) &&
+	        strcmp(r.status, "idle") == 0 && g == CG_EMPTY;
+	if (!ready && g == CG_EMPTY)
+		snprintf(a->why, sizeof a->why, "status %s", r.status);
+	else if (!ready)
+		snprintf(a->why, sizeof a->why, "status %s, %s", r.status,
+		         g == CG_NOVT ? "no mirror" : cg_why[g]);
+	else if ((g = detect_agents(a->name)) > 0)
+	{
+		ready = 0;
+		snprintf(a->why, sizeof a->why, "%d subagent%s running", g,
+		         g == 1 ? "" : "s");
+	}
+	if (!ready)
+		a->ok_since = 0;
+	else if (!a->ok_since)
+		a->ok_since = now;
+	if (ready && now - a->ok_since >= settle)
+	{
+		int st;
+
+		/* Taken now, not at pause time: /clear rotates it. */
+		snprintf(a->sid, sizeof a->sid, "%s", r.sid);
+		st = respawn_req(a->path, 'h', NULL, 0);
+		if (st != DCH_ST_OK)
+		{
+			ag_type(a->path, resume, 1);
+			ag_say(a, 1, "could not arm the hold (%d); resume message "
+			       "typed", st);
+			return 1;
+		}
+		if (ag_type(a->path, "/exit", 0) < 0)
+		{
+			respawn_req(a->path, 'c', NULL, 0);
+			ag_say(a, 1, "could not type /exit; hold cancelled");
+			return 1;
+		}
+		a->step = AG_EXIT;
+		a->deadline = now + step;
+		return 0;
+	}
+	if (now < a->deadline)
+		return 0;
+	g = claude_gate(a->path);
+	if (g == CG_EMPTY)
+		ag_type(a->path, resume, 1);
+	ag_say(a, 1, "not ready within %lds (%s); resume message %s", tmo / 1000,
+	       a->why, g == CG_EMPTY ? "typed" : "NOT typed");
+	return 1;
+}
+
+/* The agent step of `--restart --all`. Returns the number of agents that
+** were attempted and failed. */
+static int
+restart_agents(int force)
+{
+	struct slist sl = {0}, cur = {0};
+	struct agent *ag;
+	const char *pmsg = getenv("DCH_PAUSE_MSG"), *rmsg = getenv("DCH_RESUME_MSG");
+	const char *self = getenv("DCH_SESSION");
+	long tmo = env_ms("DCH_AGENT_TIMEOUT_MS", 600000);
+	long settle = env_ms("DCH_AGENT_SETTLE_MS", 3000);
+	char selfb[256], want[64] = "";
+	int na = 0, k, fails = 0, said = 0, live;
+
+	if (!pmsg || !*pmsg)
+		pmsg = ag_pause_msg;
+	if (!rmsg || !*rmsg)
+		rmsg = ag_resume_msg;
+	if (self && *self)
+		self = canon_name(self, selfb, sizeof selfb);
+	list_sessions(&sl);
+	ag = calloc((size_t)sl.n + 1, sizeof *ag);
+	if (!ag)
+	{
+		slist_free(&sl);
+		return 1;
+	}
+	for (k = 0; k < sl.n; k++)
+	{
+		struct agent *a = &ag[na];
+		char mpath[8192], mcwd[PATH_MAX], jcwd[PATH_MAX], rc[PATH_MAX];
+		const char *skip = NULL;
+		struct crec r;
+		long mpid;
+		int st, n;
+
+		snprintf(a->name, sizeof a->name, "%s", sl.v[k]);
+		session_sock_path(sl.v[k], a->path, sizeof a->path);
+		st = cmd_query(a->path, &a->ci);
+		if (st == DCH_ST_UNSUP)
+		{
+			printf("%s: skipped — its master predates agent restart "
+			       "(--respawn/--cmd)\n", a->name);
+			said++;
+			continue;
+		}
+		if (st != 0)
+			continue;	/* dead socket: nothing to restart */
+		a->argv = a->ci.argv;
+		a->argc = a->ci.argc;
+		for (a->tok = 0; a->tok < a->argc; a->tok++)
+		{
+			const char *b = strrchr(a->argv[a->tok], '/');
+
+			if (strcmp(b ? b + 1 : a->argv[a->tok], "claude") == 0)
+				break;
+		}
+		n = a->ci.pid > 0 && strcmp(a->ci.state, "running") == 0
+		    ? claude_find(a->ci.pid, 1, &r) : 0;
+		mpid = a->ci.pid > 0 ? proc_ppid(a->ci.pid) : -1;
+		if (n == 0 && a->tok == a->argc)
+		{
+			cmd_info_free(&a->ci);
+			continue;	/* no Claude in this session */
+		}
+		said++;
+		mpath[0] = mcwd[0] = '\0';
+		if (mpid > 1 && proc_env_value(mpid, "PATH", mpath,
+		                               sizeof mpath) < 0)
+			snprintf(mpath, sizeof mpath, "%s",
+			         getenv("PATH") ? getenv("PATH") : "");
+		if (mpid > 1 && proc_cwd(mpid, rc, sizeof rc) == 0 &&
+		    !realpath(rc, mcwd))
+			mcwd[0] = '\0';
+		if (n == 0)
+			skip = "claude is its command, but no live claude "
+			       "session record joins it";
+		else if (a->tok == a->argc)
+			skip = "claude was started inside the session's shell, "
+			       "not as its command";
+		else if (proc_depth((long)getpid(), r.pid) >= 0 ||
+		         (self && strcmp(self, a->name) == 0))
+			skip = "run from outside dch to restart this one";
+		else if (!mcwd[0] || !realpath(r.cwd, jcwd) ||
+		         strcmp(mcwd, jcwd) != 0)
+			skip = "claude's cwd is not the session's launch cwd";
+		else if (claude_installed(a->argv[a->tok], mpath, mcwd, a->want,
+		                          sizeof a->want) < 0)
+			skip = "cannot run `claude --version` as the session "
+			       "would (its PATH and cwd)";
+		if (skip)
+		{
+			printf("%s: skipped — %s\n", a->name, skip);
+			cmd_info_free(&a->ci);
+			continue;
+		}
+		a->cpid = r.pid;
+		snprintf(a->ver, sizeof a->ver, "%s", r.ver);
+		if (n > 1)
+			printf("%s: %d claude processes in the session; "
+			       "restarting the outermost (pid %ld)\n", a->name, n,
+			       a->cpid);
+		if (force || strcmp(a->ver, a->want) != 0)
+		{
+			na++;
+			continue;
+		}
+		snprintf(rc, sizeof rc, "%s: already on claude %s", a->name,
+		         a->want);
+		slist_push(&cur, rc);
+		snprintf(want, sizeof want, "%s", a->want);
+		said -= n == 1;
+		cmd_info_free(&a->ci);
+	}
+	slist_free(&sl);
+	if (cur.n && !na && !said)
+		printf("all claude agents already on claude %s\n", want);
+	else
+		for (k = 0; k < cur.n; k++)
+			puts(cur.v[k]);
+	slist_free(&cur);
+	fflush(stdout);
+
+	/* Pause every stale agent first, then wait on them all at once: one
+	** slow agent must not hold up the rest. */
+	for (k = 0; k < na; k++)
+	{
+		struct agent *a = &ag[k];
+		int g = claude_gate(a->path);
+
+		if (g != CG_EMPTY)
+		{
+			ag_say(a, g != CG_NOVT, g == CG_NOVT ? "skipped — the session "
+			       "has no terminal mirror" : "%s; nothing typed",
+			       g == CG_NOVT ? "" : cg_why[g]);
+			fails += g != CG_NOVT;
+			continue;
+		}
+		/* Stamped before the push: a status written after it proves
+		** the agent has seen the message. */
+		a->t_sent = wall_ms();
+		a->deadline = a->t_sent + tmo;
+		a->step = AG_WAIT;
+		snprintf(a->why, sizeof a->why, "no status yet");
+		if (ag_type(a->path, pmsg, 1) < 0)
+		{
+			ag_say(a, 1, "could not type the pause message");
+			fails++;
+			continue;
+		}
+		printf("%s: pause message sent; waiting for claude %s to go "
+		       "idle\n", a->name, a->ver);
+		fflush(stdout);
+	}
+	do
+	{
+		live = 0;
+		for (k = 0; k < na; k++)
+			if (ag[k].step != AG_DONE)
+			{
+				fails += ag_tick(&ag[k], tmo, settle, rmsg);
+				live += ag[k].step != AG_DONE;
+			}
+		if (live)
+			poll(NULL, 0, AG_POLL_MS);
+	} while (live);
+	for (k = 0; k < na; k++)
+		cmd_info_free(&ag[k].ci);
+	free(ag);
+	return fails;
+}
+
+#else /* !HAVE_LIBGHOSTTY_VT */
+
+static int
+restart_agents(int force)
+{
+	(void)force;
+	puts("agents: not restarted — dch-lite has no terminal mirror to watch "
+	     "them with");
+	return 0;
+}
+
+#endif
 
 /* ---- main ----------------------------------------------------------- */
 
@@ -3874,6 +4982,10 @@ main(int argc, char **argv)
 		else if (!did)
 			printf("nothing to restart: %d session%s too old\n",
 			       old, old == 1 ? " is" : "s are");
+		fflush(stdout);
+		/* Then the agents, on masters that now speak --respawn. */
+		if (restart_agents(force))
+			bad++;
 		return bad ? 1 : 0;
 	}
 	case A_LISTRAW:

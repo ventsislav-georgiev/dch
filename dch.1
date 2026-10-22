@@ -269,6 +269,88 @@ re\-exec failed (the old master rolls back and keeps serving) or if the master
 is too old to know the verb, in which case the session must be recreated.
 Scrollback held only in the mirror is not carried across a restart; the
 visible screen is.
+.IP
+After the master pass,
+.B \-\-all
+also restarts Claude Code agents. A session qualifies when its command has a
+.B claude
+token (directly or behind a wrapper such as
+.BR "headroom wrap claude" )
+and a live interactive Claude session record (under
+.IR ~/.claude/sessions ,
+or
+.BR CLAUDE_CONFIG_DIR )
+belongs to a descendant of the session's child, with a matching process start
+time and working directory. An agent is restarted when its record's version
+differs from what that
+.B claude
+reports for
+.B \-\-version
+on the master's
+.BR PATH ,
+or always with
+.BR \-f .
+Each such agent is sent the pause message, typed only while its composer is
+on screen and empty. All agents are paused first and then waited on
+together. An agent is ready when its record reads idle, it has visibly taken
+the pause message, no subagents show on its agent panel, and that holds for a
+settle window. dch then holds the session, types
+.BR /exit ,
+takes the session id from the last
+.B claude \-\-resume
+.I id
+line Claude prints, and relaunches the original command with
+.B \-\-resume
+.I id
+inserted after the
+.B claude
+token. Any
+.BR \-\-resume ,
+.BR \-r ,
+.BR \-\-continue ,
+.BR \-c ,
+.B \-\-session\-id
+and
+.B \-\-fork\-session
+in the original are dropped. Once the new Claude is idle, dch types the
+resume message and checks the new version. Each agent gets one result line,
+and the exit status is 1 if any of them failed. A failed agent is left
+running; one that crashed on
+.B /exit
+is not relaunched. Skipped: Codex sessions, a
+.B claude
+started by hand inside a session's shell, and the session running the
+command. A positional prompt argument is sent again on resume. A dch\-lite
+client skips this step.
+.TP
+.BI \-\-respawn " name " [ \-\- " cmd..." ]
+Arm a one\-shot respawn. When the session's program next exits, the master
+keeps the session (socket, pty, attached clients) and starts
+.I cmd
+in its place. With no
+.I cmd
+the session is held childless until a second
+.B \-\-respawn
+brings one, or until
+.B DCH_HOLD_MS
+ends it. An unconsumed arm expires after
+.BR DCH_RESPAWN_TTL_MS .
+.B \-\-restart
+refuses while a respawn is armed or held.
+.TP
+.BI \-\-respawn " name " \-\-cancel
+Drop a pending respawn. A held session ends.
+.TP
+.BI \-\-cmd " name"
+Print one JSON object:
+.IR pid " (null while held), " state " (" running ", " armed " or " held ),
+.IR argv ,
+.I exit_code
+and
+.I exit_signal
+of a child reaped under an arm (otherwise null), and
+.IR tail ,
+the last 8 KB the child wrote since the arm.
 .TP
 .BR \-\-agent\-list " [" \-\-json "]"
 List live authenticated Claude native peers. The default writes exact names,
@@ -358,6 +440,37 @@ If set when a session is spawned, do not replay the mirrored screen to
 attaching clients. Attach then behaves as it did before: the client's screen
 is cleared and the program is asked to repaint itself, which diff\-based
 renderers do not do. Escape hatch only.
+.TP
+.B DCH_HOLD_MS
+Read by the master: how long a held (childless) session waits for its
+next command before ending (default 120000).
+.TP
+.B DCH_RESPAWN_TTL_MS
+Read by the master: how long an unconsumed respawn arm lives (default 300000).
+.TP
+.B DCH_PAUSE_MSG
+Text
+.B "\-\-restart \-\-all"
+types to pause a Claude agent (default begins
+.IR "pause all work, i need to restart you" ).
+.TP
+.B DCH_RESUME_MSG
+Text typed into a relaunched Claude agent (default begins
+.IR "resume all work" ).
+.TP
+.B DCH_AGENT_TIMEOUT_MS
+How long an agent may take to pause (default 600000).
+.TP
+.B DCH_AGENT_SETTLE_MS
+How long an agent must stay ready before
+.B /exit
+(default 3000).
+.TP
+.B DCH_AGENT_STEP_MS
+How long
+.B /exit
+may take to end Claude, and the relaunch to show its composer (default
+60000).
 .TP
 .B DCH_DEBUG
 Trace to a file (path, or 1 for

@@ -156,6 +156,7 @@ fi
 if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "idle resize reaches the session" resize_idle_test.py
     pyrun "respawn keeps the session across a child exit" respawn_test.py
+    pyrun "--restart --all restarts stale Claude agents" agent_restart_test.py
 fi
 
 # --- control verbs: --spawn --run --read --wait --keys ---------------------

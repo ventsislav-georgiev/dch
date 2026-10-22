@@ -2308,6 +2308,20 @@ int dch_bridge_agent_send(const char *name, int argc, char **argv) {
   return 0;
 }
 
+/* Record readers for the agent-aware restart in dch.c, which joins Claude
+   session records to dch sessions the same way the peer scan does. */
+int dch_json_string(const char *json, const char *key, char *out, size_t cap) {
+  return json_string(json, key, out, cap, 1);
+}
+
+int dch_json_long(const char *json, const char *key, long *out) {
+  return json_long(json, key, out);
+}
+
+int dch_process_start(long pid, char *out, size_t cap) {
+  return process_start(pid, out, cap);
+}
+
 #ifdef DCH_BRIDGE_SELFTEST
 char *sockname;
 int dch_pty_gate(const char *path) {

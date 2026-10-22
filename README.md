@@ -170,6 +170,9 @@ dch --status <name>                             # print session state
 dch --report <name> <state>                     # push state (harness hooks)
 dch --ls-json                                   # sessions as a JSON array
 dch --restart <name>|--all [-f]                 # upgrade a live session in place
+dch --respawn <name> [-- cmd...]                # on child exit, start cmd in its place
+dch --respawn <name> --cancel                   # drop a pending respawn
+dch --cmd <name>                                # child pid, state, argv, exit status (JSON)
 ```
 
 Inside a session: `Ctrl-\` to detach. Works in vim, fzf, less, Claude Code,
@@ -209,7 +212,10 @@ someone is watching is invisible to them.
 | `--report <n> <state>` | Push a semantic state: `working`, `idle`, `blocked`, or `done` (closed set, unknown tokens rejected); `clear` reverts to auto (detection + heuristic). Last write wins; cleared automatically when the session ends. | 0 ok, 1 no session / bad state |
 | `--wait <n> --state <s[,s...]> [--timeout ms]` | Block until the state matches any of the comma list (e.g. `idle,blocked,done` = "turn over"); prints the matched state. `active` is accepted as an alias for `working`. Polls every 100 ms. | 0 hit, 2 timeout, 1 no session |
 | `--ls-json` | All sessions as JSON: `[{"name","alias","harness","activity_epoch","state","version","agents"}]`. `harness` is the name of the Claude Code or Codex session running inside, or `""`; the real `name` remains separate. `state` follows the same resolution rule as `--status`. `version` is the dch version of the master serving that session, or `""` for a master old enough not to report one. `agents` is the number of live subagents on Claude Code's agent panel (the `⏺ main` block under the prompt), `0` when no panel is on screen — including while a prompt covers it — or `DCH_NO_DETECT=1` is set. | 0 |
-| `--restart <n>` \| `--restart --all [-f]` | Re-exec the session's master onto the current `dch` binary, in place — the program inside keeps running (see [Upgrading a live session](#upgrading-a-live-session)). `--all` restarts only sessions whose `version` differs from this binary's; `-f` restarts all of them. | 0 ok, 1 failed / master too old |
+| `--restart <n>` \| `--restart --all [-f]` | Re-exec the session's master onto the current `dch` binary, in place — the program inside keeps running (see [Upgrading a live session](#upgrading-a-live-session)). `--all` restarts only sessions whose `version` differs from this binary's; `-f` restarts all of them. `--all` then restarts stale Claude Code agents (see [Restarting Claude Code agents](#restarting-claude-code-agents)). | 0 ok, 1 failed / master too old / an agent restart failed |
+| `--respawn <n> [-- cmd...]` | Arm a one-shot respawn: when the session's program next exits, the master keeps the session (same socket, pty size, attached clients) and starts `cmd` in its place. No `cmd` arms a *hold*: the session stays up childless until a second `--respawn <n> -- cmd` starts one, or until `DCH_HOLD_MS` (default 120000) ends it. An arm that nothing consumes expires after `DCH_RESPAWN_TTL_MS` (default 300000); both are read from the master's environment. `--restart` refuses while a respawn is armed or held. | 0 ok, 1 no session / refused / master too old |
+| `--respawn <n> --cancel` | Drop a pending arm. On a held (childless) session it ends the session. | 0 ok, 1 no session |
+| `--cmd <n>` | Print `{"pid","state","argv","exit_code","exit_signal","tail"}`: the child's pid (`null` while held), `state` `running`, `armed` or `held`, the argv it was started with, the exit status of a child reaped under an arm (`null` otherwise), and `tail`, the last 8 KB the child wrote since the arm, raw. | 0 ok, 1 no session / master too old |
 
 A typical agent loop:
 
@@ -392,6 +398,65 @@ sessions have to be recreated once, and only once. `--restart --all` reports
 those separately and does not count them as failures, since on the first
 upgrade to a `dch` that has live restart, that is every session you have.
 
+### Restarting Claude Code agents
+
+Upgrading Claude Code leaves every running `claude` on the old version until it
+is restarted. After its master pass, `dch --restart --all` does that for each
+session whose program is Claude Code, without losing the conversation:
+
+1. **Find.** A session qualifies when its command (`dch --cmd`) has a `claude`
+   token — directly or behind a wrapper such as `headroom wrap claude --chrome`
+   — and a live Claude session record (`~/.claude/sessions/<pid>.json`, or
+   under `$CLAUDE_CONFIG_DIR`) belongs to a descendant of the session's child.
+   The record must be interactive, its pid alive with a matching start time,
+   and its working directory the session's. The agent is *stale* when the
+   record's version differs from what that `claude` (resolved on the master's
+   `PATH`) reports for `--version`; `-f` restarts current agents too.
+2. **Pause.** Each stale agent gets the pause message, typed only when its
+   composer is on screen and empty — never over a draft, a queued message, a
+   permission prompt or a dialog. All agents are paused first, then waited on
+   together.
+3. **Wait.** An agent is ready when its record says `idle`, it has visibly
+   taken the pause message (it went busy, or its record changed after the
+   message with nothing left queued), no subagents show on the agent panel,
+   and all of that holds for a settle window. A background shell or monitor
+   keeps the record off `idle`.
+4. **Restart.** dch arms a hold on the session, types `/exit`, and reads the
+   session id from the last `claude --resume <id>` line Claude prints on exit.
+   It then starts the original command again, with `--resume <id>` inserted
+   right after the `claude` token. Any `--resume`, `-r`, `--continue`, `-c`,
+   `--session-id` and `--fork-session` from the original command are dropped.
+   The session keeps its name, socket and attached clients.
+5. **Resume.** Once the new Claude is idle with an empty composer, it gets the
+   resume message, and dch checks that it now reports the installed version.
+
+Each agent gets one result line. The command exits 1 if any agent it tried to
+restart failed. A failed agent is left running, never killed: that covers a
+gate that refused to type, a timeout (the resume message is typed if
+possible), or an `/exit` that did not end Claude (the hold is cancelled). If
+Claude crashed on `/exit` (a signal or a non-zero exit), it is not relaunched
+and the session ends.
+
+| Env (client side) | Default | Meaning |
+| --- | --- | --- |
+| `DCH_PAUSE_MSG` | `pause all work, i need to restart you. …` | Text typed to pause an agent. |
+| `DCH_RESUME_MSG` | `resume all work. …` | Text typed after the relaunch. |
+| `DCH_AGENT_TIMEOUT_MS` | `600000` | How long an agent may take to pause. |
+| `DCH_AGENT_SETTLE_MS` | `3000` | How long it must stay ready before `/exit`. |
+| `DCH_AGENT_STEP_MS` | `60000` | Limit for `/exit` to end Claude and for the relaunch to show a composer. |
+
+Limitations:
+
+- **Claude Code only.** Codex sessions are left alone.
+- **Started by hand.** A `claude` started by hand from a shell inside a
+  session is skipped with a note: there is no command to relaunch.
+- **Positional prompt.** A positional prompt argument (`claude "fix the
+  tests"`) is kept and sent again on resume. dch cannot tell it apart from an
+  option value cheaply.
+- **Own session.** The session running `dch --restart --all` itself is
+  skipped. Run it from outside dch to restart that one.
+- **dch-lite.** dch-lite (no mirror) skips this step with a note.
+
 ### Attaching replays the screen
 
 Attaching sends you the session's current screen from the master's mirror
@@ -411,6 +476,7 @@ environment disables it at spawn.
 | Verb | Without mirror |
 | --- | --- |
 | `--spawn`, `--send`, `--run`, `--status`, `--report`, `--wait --state`, `--ls-json` | Work unchanged (plain pty writes / sidecar reads). State detection needs the master's mirror, so against a lite/`DCH_NO_VT` master `--status` falls back to reported state + output heuristic. |
+| `--restart --all` agent step | Skipped with a note by a lite client: it needs the mirror to see the composer. |
 | `--read`, `--wait --match` | Exit 3 with a message pointing at the full build. |
 | `--keys` | Falls back to a fixed legacy xterm table client-side (exit 0 + stderr note). Mode-aware apps may misread modified keys. |
 
