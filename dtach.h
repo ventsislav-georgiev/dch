@@ -145,6 +145,21 @@ enum
 				** is carried across the exec), so an ACK is
 				** proof the new image is serving; a rolled-back
 				** exec answers DCH_ST_ERR from the old one. */
+	MSG_RESPAWN	= 14,	/* payload: op byte, then for 'a' the argv as
+				** NUL-terminated strings (whole payload <=
+				** PKT_MAX). 'a' = when the child exits, start
+				** this argv in its place (or now, if held);
+				** 'h' = hold: keep the session childless after
+				** the exit until an 'a' arrives; 'c' = cancel
+				** an arm (ends a held session). MSG_ACK status
+				** reply. One-shot: the next child exit eats
+				** the arm. */
+	MSG_CMD		= 15,	/* no payload. Reply: MSG_READ_DATA chunks
+				** of "<pid>\0<state>\0<exit code>\0<exit
+				** signal>\0<argc>\0" + argc NUL-terminated
+				** args + the raw exit tail (to the end), then
+				** MSG_READ_END. pid 0 = no child (held); code
+				** -1 / signal 0 = not reaped or not that. */
 };
 
 /* MSG_READ_END / MSG_ACK statuses */

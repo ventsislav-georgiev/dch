@@ -146,6 +146,33 @@ static const int dec_modes[] = {
 #define N_DEC_MODES ((int)(sizeof(dec_modes) / sizeof(dec_modes[0])))
 static unsigned char dec_on[N_DEC_MODES];
 
+/* Respawn (MSG_RESPAWN) state; see the respawn section below. A master with
+** no child ("held") is the_pty.fd < 0. */
+static int respawn_armed;		/* consumed by the next child exit */
+static char **respawn_argv;		/* argv to start then; NULL = hold */
+static struct timespec respawn_at;	/* when armed (TTL) / when held */
+/* ponytail: 5 min arm TTL, 2 min hold. Long enough for an orchestrator to
+** make the child exit / read the exit tail; short enough that a crashed one
+** leaves no trap and no childless zombie session. Env-overridable. */
+static long respawn_ttl_ms = 300L * 1000L;	/* DCH_RESPAWN_TTL_MS */
+static long hold_ms = 120L * 1000L;		/* DCH_HOLD_MS */
+/* Raw bytes the child wrote from the arm until it was reaped: #022 reads the
+** `claude --resume <id>` line from here, never from the mirror, which is full
+** of older look-alikes. Last EXIT_TAIL_MAX bytes only. */
+#define EXIT_TAIL_MAX 8192
+static unsigned char exit_tail[EXIT_TAIL_MAX];
+static size_t exit_tail_len;
+static int exit_code = -1, exit_signal;	/* how the last reaped child ended */
+/* argv of the current (or, while held, the last) child, for MSG_CMD. Starts
+** as the master's own argv; after a respawn it is a malloc'd block. */
+static char **cur_argv;
+static int cur_argv_owned, dch_argv_owned;
+/* dch_argv[0..argv_prefix) is "<exe> --master-of <sock> --": the part a
+** respawn keeps when it rewrites the inner command for the next live
+** restart. 0 = could not tell, so a restart reverts to the launch argv. */
+static int argv_prefix;
+static int respawn_live(void);
+
 #ifndef HAVE_FORKPTY
 pid_t forkpty(int *amaster, char *name, struct termios *termp,
 	      struct winsize *winp);
@@ -346,13 +373,9 @@ setnonblocking(int fd)
 static int
 init_pty(char **argv, int statusfd)
 {
-	/* Use the original terminal's settings. Start at a sane 80x24
-	** instead of 0x0 so headless-spawned programs (and the terminal
-	** mirror) see a real grid; the attacher's WINCH corrects it. */
+	/* Use the original terminal's settings, and the_pty.ws as it stands:
+	** the cold start seeds it, a respawn inherits the live size. */
 	the_pty.term = orig_term;
-	memset(&the_pty.ws, 0, sizeof(struct winsize));
-	the_pty.ws.ws_row = 24;
-	the_pty.ws.ws_col = 80;
 
 	/* Create the pty process */
 	if (!dont_have_tty)
@@ -366,7 +389,13 @@ init_pty(char **argv, int statusfd)
 		the_pty.fd, dont_have_tty);
 	if (the_pty.pid == 0)
 	{
-		/* Child.. Execute the program. */
+		struct client *p;
+
+		/* Child.. Execute the program. A respawned child is forked
+		** while clients are connected; their sockets are not
+		** close-on-exec and must not leak into it. */
+		for (p = clients; p; p = p->next)
+			close(p->fd);
 		execvp(*argv, argv);
 
 		/* Report the error to statusfd if we can, or stdout if we
@@ -500,9 +529,12 @@ bind_socket(void)
 	if (chdir(sockname) >= 0)
 	{
 		s = create_socket(slash + 1);
-		/* Bound but stuck in the wrong cwd is worse than not bound:
-		** every other path we use is relative to nothing. */
-		if (s >= 0 && fchdir(dirfd) < 0)
+		/* Restore the cwd whether or not the bind worked: a failed
+		** heal re-bind must not leave the master in the socket dir, or
+		** a respawned child would start there instead of the launch
+		** cwd. Bound but stuck in the wrong cwd is worse than not
+		** bound: every other path we use is relative to nothing. */
+		if (fchdir(dirfd) < 0 && s >= 0)
 		{
 			close(s);
 			s = -1;
@@ -870,6 +902,29 @@ process_pty_buf(const unsigned char *buf, size_t len)
 	track_keymode(buf, len);
 	track_decmode(buf, len);
 
+	/* Armed: keep the raw tail of what the child says on its way out. */
+	if (respawn_armed)
+	{
+		if (len >= EXIT_TAIL_MAX)
+		{
+			memcpy(exit_tail, buf + len - EXIT_TAIL_MAX, EXIT_TAIL_MAX);
+			exit_tail_len = EXIT_TAIL_MAX;
+		}
+		else
+		{
+			if (exit_tail_len + len > EXIT_TAIL_MAX)
+			{
+				size_t drop = exit_tail_len + len - EXIT_TAIL_MAX;
+
+				memmove(exit_tail, exit_tail + drop,
+				        exit_tail_len - drop);
+				exit_tail_len -= drop;
+			}
+			memcpy(exit_tail + exit_tail_len, buf, len);
+			exit_tail_len += len;
+		}
+	}
+
 	/* Queue to every attached client. A slow client that overflows its
 	** queue is dropped rather than stalling the pty and the other clients. */
 	for (p = clients; p; p = next)
@@ -915,6 +970,8 @@ drain_pty(void)
 	ssize_t len;
 	int i;
 
+	if (the_pty.fd < 0)
+		return;		/* held: no child, nothing pending */
 	pfd.fd = the_pty.fd;
 	pfd.events = POLLIN;
 	for (i = 0; i < DRAIN_MAX_BUFS; i++)
@@ -1348,7 +1405,9 @@ do_keys(struct client *p, const unsigned char *payload, unsigned int len)
 		dch_vt_buf_free(bytes);
 		return queue_status(p, MSG_ACK, DCH_ST_ERR);
 	}
-	write_buf_or_fail(the_pty.fd, bytes, nbytes);
+	/* Held (no child): dropped, like any other input. */
+	if (the_pty.fd >= 0)
+		write_buf_or_fail(the_pty.fd, bytes, nbytes);
 	dch_vt_buf_free(bytes);
 	return queue_status(p, MSG_ACK, DCH_ST_OK);
 }
@@ -1741,6 +1800,12 @@ do_restart(struct client *p, const unsigned char *req, unsigned int reqlen)
 	struct client *q, *next;
 	int lfd = listen_fd;
 
+	/* A pending arm or a hold is not in the resume blob: the new image
+	** would silently drop the orchestrator's respawn (or, held, have no
+	** pty to adopt). Refuse; the caller retries once the respawn is done. */
+	if (the_pty.fd < 0 || respawn_live())
+		return queue_status(p, MSG_ACK, DCH_ST_BUSY);
+
 	/* The requester names the binary to land on (its own). Anyone who can
 	** reach this socket can already drive the session's keyboard, so this
 	** is not a new trust boundary — but exec is, so take the path only if
@@ -1817,9 +1882,272 @@ do_restart(struct client *p, const unsigned char *req, unsigned int reqlen)
 	return queue_status(p, MSG_ACK, DCH_ST_ERR);
 }
 
+/* Turn "arg0\0arg1\0...\0" into a NULL-terminated vector in ONE malloc block
+** (pointers first, then the strings), so a single free() releases it. NULL on
+** an empty argv[0], a payload not ending in NUL, or no memory. */
+static char **
+argv_from_wire(const unsigned char *buf, size_t len)
+{
+	size_t i, n = 0;
+	char **v, *s;
+
+	if (len == 0 || buf[0] == '\0' || buf[len - 1] != '\0')
+		return NULL;
+	for (i = 0; i < len; i++)
+		if (buf[i] == '\0')
+			n++;
+	v = malloc((n + 1) * sizeof(char *) + len);
+	if (!v)
+		return NULL;
+	s = (char *)(v + n + 1);
+	memcpy(s, buf, len);
+	for (i = 0; i < n; i++)
+	{
+		v[i] = s;
+		s += strlen(s) + 1;
+	}
+	v[n] = NULL;
+	return v;
+}
+
+static long
+ms_since(const struct timespec *t)
+{
+	struct timespec now;
+
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	return (long)(now.tv_sec - t->tv_sec) * 1000L +
+	       (now.tv_nsec - t->tv_nsec) / 1000000L;
+}
+
+/* Drop an arm (cancel, TTL expiry): no respawn, and nothing captured for it. */
+static void
+respawn_disarm(void)
+{
+	free(respawn_argv);
+	respawn_argv = NULL;
+	respawn_armed = 0;
+	exit_tail_len = 0;
+}
+
+/* Is an arm in force? Expires it first when it has outlived its TTL: an
+** orchestrator that armed and then could not make the child exit must not
+** leave a trap that a manual quit springs hours later. */
+static int
+respawn_live(void)
+{
+	if (respawn_armed && ms_since(&respawn_at) > respawn_ttl_ms)
+	{
+		dch_trace("respawn arm expired");
+		respawn_disarm();
+	}
+	return respawn_armed;
+}
+
+/* Clear the dead child's terminal modes before the new one prints anything,
+** on the mirror (so --read and attach replay describe the new child) and on
+** attached terminals alike: kitty keyboard flags (popped on the alt screen
+** and again on the primary), the alt screen itself (only if it is on —
+** 1049l when off would still restore a saved cursor), every tracked
+** input-reporting mode, DECCKM/keypad (the mirror encodes --keys arrows from
+** them), cursor visibility and SGR. The screen contents stay: the old
+** child's exit output (its resume line) remains readable above the new
+** child's first frame. Routed through process_pty_buf, so dec_on/kbd_u are
+** cleared by the same trackers that set them. */
+static void
+reset_child_modes(void)
+{
+	char seq[256];
+	int n, k;
+
+	n = snprintf(seq, sizeof seq, "\033[<99u");
+	for (k = 0; k < N_DEC_MODES; k++)
+		if (dec_modes[k] == 1049 && dec_on[k])
+			n += snprintf(seq + n, sizeof seq - (size_t)n,
+			              "\033[?1049l\033[<99u");
+	for (k = 0; k < N_DEC_MODES; k++)
+		if (dec_modes[k] != 1049)
+			n += snprintf(seq + n, sizeof seq - (size_t)n,
+			              "\033[?%dl", dec_modes[k]);
+	n += snprintf(seq + n, sizeof seq - (size_t)n,
+	              "\033[?1l\033>\033[?25h\033[0m%s",
+	              kbd_m_len ? "\033[>4m" : "");
+	process_pty_buf((const unsigned char *)seq, (size_t)n);
+	kbd_m_len = 0;	/* the ESC[>4m reset was just "remembered" as a set */
+}
+
+/* Start v on a fresh pty in place of the child that went away. It gets the
+** live window size (the_pty.ws, kept current while held), the master's
+** environment and the master's cwd, which is the launch cwd (bind_socket
+** always restores it). Takes ownership of v. A pty we cannot even create
+** ends the session like an unarmed exit; an argv that fails to exec dies in
+** the child and ends it the same way, since the arm that started it is
+** already consumed — no respawn loop. */
+static void
+respawn_start(char **v)
+{
+	int n;
+
+	if (init_pty(v, -1) < 0)
+	{
+		dch_trace("respawn: init_pty: %s", strerror(errno));
+		exit(1);
+	}
+	dch_trace("respawn child=%d fd=%d", (int)the_pty.pid, the_pty.fd);
+	reset_child_modes();
+
+	if (cur_argv_owned)
+		free(cur_argv);
+	cur_argv = v;
+	cur_argv_owned = 1;
+
+	/* MSG_RESTART re-execs dch_argv and the new image takes its inner
+	** command from there, so rewriting it is what carries the respawned
+	** argv across a live restart (and into `ps`). */
+	for (n = 0; v[n]; n++)
+		;
+	if (argv_prefix > 0)
+	{
+		char **nd = malloc((size_t)(argv_prefix + n + 1) *
+		                   sizeof(char *));
+
+		if (!nd)
+			dch_trace("respawn: no memory to rewrite dch_argv");
+		else
+		{
+			memcpy(nd, dch_argv, (size_t)argv_prefix * sizeof(char *));
+			memcpy(nd + argv_prefix, v,
+			       (size_t)(n + 1) * sizeof(char *));
+			if (dch_argv_owned)
+				free(dch_argv);
+			dch_argv = nd;
+			dch_argv_owned = 1;
+		}
+	}
+}
+
+/* The child was reaped while an arm was in force: keep the session. Close
+** the old pty first — anything still holding its slave (a grandchild) gets
+** EIO/hangup instead of holding up the respawn — then start the armed argv,
+** or hold childless until one arrives (or hold_ms runs out). */
+static void
+respawn_consume(int status)
+{
+	char **v = respawn_argv;
+
+	exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+	exit_signal = WIFSIGNALED(status) ? WTERMSIG(status) : 0;
+	respawn_argv = NULL;
+	respawn_armed = 0;
+	close(the_pty.fd);
+#ifdef BROKEN_MASTER
+	close(the_pty.slave);
+	the_pty.slave = -1;
+#endif
+	the_pty.fd = -1;
+	the_pty.pid = 0;
+	dch_trace("respawn: child reaped code=%d sig=%d -> %s", exit_code,
+	          exit_signal, v ? "respawn" : "hold");
+	if (v)
+		respawn_start(v);
+	else
+		clock_gettime(CLOCK_MONOTONIC, &respawn_at);
+}
+
+/* Serve MSG_RESPAWN: op 'a' + argv, 'h' (hold) or 'c' (cancel). */
+static int
+do_respawn(struct client *p, const unsigned char *req, unsigned int len)
+{
+	char **v = NULL;
+	int op = len ? req[0] : 0;
+
+	if (op == 'a')
+	{
+		v = argv_from_wire(req + 1, len - 1);
+		if (!v)
+			return queue_status(p, MSG_ACK, DCH_ST_ERR);
+	}
+	else if ((op != 'h' && op != 'c') || len != 1)
+		return queue_status(p, MSG_ACK, DCH_ST_ERR);
+
+	if (op == 'c')
+	{
+		respawn_disarm();
+		if (the_pty.fd >= 0)
+			return queue_status(p, MSG_ACK, DCH_ST_OK);
+		/* Held: the child is already gone, so cancelling ends the
+		** session the way the unarmed exit would have. Answer first. */
+		dch_trace("respawn cancelled while held -> master exit");
+		if (queue_status(p, MSG_ACK, DCH_ST_OK) == 0)
+			flush_client(p);
+		exit(exit_code >= 0 ? exit_code : 1);
+	}
+
+	if (the_pty.fd < 0)
+	{
+		/* Held: nothing left to wait for. 'h' again is a no-op. */
+		if (v)
+			respawn_start(v);
+		return queue_status(p, MSG_ACK, DCH_ST_OK);
+	}
+
+	/* A new arm replaces an earlier one and starts afresh: TTL, exit
+	** tail and exit status all describe THIS arm's child exit. */
+	free(respawn_argv);
+	respawn_argv = v;
+	respawn_armed = 1;
+	exit_tail_len = 0;
+	exit_code = -1;
+	exit_signal = 0;
+	clock_gettime(CLOCK_MONOTONIC, &respawn_at);
+	return queue_status(p, MSG_ACK, DCH_ST_OK);
+}
+
+/* Serve MSG_CMD: pid, state, last exit status, current argv, exit tail. */
+static int
+do_cmd(struct client *p)
+{
+	const char *state = the_pty.fd < 0 ? "held"
+	                  : respawn_live() ? "armed" : "running";
+	char head[128];
+	unsigned char *buf;
+	size_t total, off, l;
+	int argc = 0, hl, rc = 0;
+
+	for (total = 0; cur_argv && cur_argv[argc]; argc++)
+		total += strlen(cur_argv[argc]) + 1;
+	hl = snprintf(head, sizeof head, "%ld%c%s%c%d%c%d%c%d%c",
+	              (long)the_pty.pid, 0, state, 0, exit_code, 0,
+	              exit_signal, 0, argc, 0);
+	if (hl < 0 || (size_t)hl >= sizeof head)
+		return queue_status(p, MSG_READ_END, DCH_ST_ERR);
+	total += (size_t)hl + exit_tail_len;
+	buf = malloc(total);
+	if (!buf)
+		return queue_status(p, MSG_READ_END, DCH_ST_ERR);
+	memcpy(buf, head, (size_t)hl);
+	off = (size_t)hl;
+	for (argc = 0; cur_argv && cur_argv[argc]; argc++)
+	{
+		l = strlen(cur_argv[argc]) + 1;
+		memcpy(buf + off, cur_argv[argc], l);
+		off += l;
+	}
+	memcpy(buf + off, exit_tail, exit_tail_len);
+	for (off = 0; off < total && rc == 0; off += PKT_MAX)
+	{
+		l = total - off > PKT_MAX ? PKT_MAX : total - off;
+		rc = queue_frame(p, MSG_READ_DATA, (unsigned int)l, buf + off, l);
+	}
+	free(buf);
+	if (rc < 0)
+		return -1;
+	return queue_status(p, MSG_READ_END, DCH_ST_OK);
+}
+
 /* Process activity on the pty - Input and terminal changes are queued out to
 ** the attached clients (flushed by the main loop). If the pty goes away, we
-** die. */
+** die — unless a respawn is armed. */
 static void
 pty_activity(void)
 {
@@ -1841,6 +2169,11 @@ pty_activity(void)
 		do
 			waited = waitpid(the_pty.pid, &status, 0);
 		while (waited < 0 && errno == EINTR);
+		if (waited >= 0 && respawn_live())
+		{
+			respawn_consume(status);
+			return;
+		}
 		if (waited >= 0)
 		{
 			if (WIFEXITED(status))
@@ -1928,7 +2261,8 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 		p->role = ROLE_CONTROL;
 		return do_restart(p, payload, len);
 	}
-	else if (type == MSG_KEYS || type == MSG_READ || type == MSG_WAIT)
+	else if (type == MSG_KEYS || type == MSG_READ || type == MSG_WAIT ||
+	         type == MSG_RESPAWN || type == MSG_CMD)
 	{
 		if (p->role == ROLE_ATTACHED)
 		{
@@ -1942,7 +2276,9 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 		/* A control client counts as "someone showed up": open the
 		** --spawn pty gate, then pull pending pty output into the
 		** mirror so READ/WAIT see current state (and KEYS encodes
-		** against current keyboard modes) instead of last wake's. */
+		** against current keyboard modes) instead of last wake's. An
+		** armed RESPAWN needs the gate open too: the child's exit is
+		** only seen by reading the pty / reaping it. */
 		pty_gated = 0;
 		drain_pty();
 		check_waiters(p);
@@ -1956,11 +2292,17 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 	/* Push out data to the program. */
 	if (type == MSG_PUSH)
 	{
-		write_buf_or_fail(the_pty.fd, payload, len);
+		/* Held (no child): input has nowhere to go; drop it. */
+		if (the_pty.fd >= 0)
+			write_buf_or_fail(the_pty.fd, payload, len);
 	}
 
 	else if (type == MSG_KEYS)
 		return do_keys(p, payload, len);
+	else if (type == MSG_RESPAWN)
+		return do_respawn(p, payload, len);
+	else if (type == MSG_CMD)
+		return do_cmd(p);
 	else if (type == MSG_READ)
 	{
 		/* 4-byte payload {format,source,lines LE}; shorter is a
@@ -2053,8 +2395,10 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 	/* Window size change request, without a forced redraw. */
 	else if (type == MSG_WINCH)
 	{
+		/* Held: the size is still recorded; the respawn applies it. */
 		memcpy(&the_pty.ws, payload, sizeof(struct winsize));
-		ioctl(the_pty.fd, TIOCSWINSZ, &the_pty.ws);
+		if (the_pty.fd >= 0)
+			ioctl(the_pty.fd, TIOCSWINSZ, &the_pty.ws);
 		dch_vt_resize(the_pty.ws.ws_col, the_pty.ws.ws_row);
 		if (p->want_replay && (queue_replay(p) < 0 ||
 		                       flush_client(p) < 0))
@@ -2081,8 +2425,10 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 		}
 
 		/* Set the window size. */
+		/* Held: the size is still recorded; the respawn applies it. */
 		memcpy(&the_pty.ws, payload, sizeof(struct winsize));
-		ioctl(the_pty.fd, TIOCSWINSZ, &the_pty.ws);
+		if (the_pty.fd >= 0)
+			ioctl(the_pty.fd, TIOCSWINSZ, &the_pty.ws);
 		dch_vt_resize(the_pty.ws.ws_col, the_pty.ws.ws_row);
 
 		/* Now that the mirror is at this client's size, hand it the
@@ -2093,6 +2439,11 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 			remove_client(p);
 			return -1;
 		}
+
+		/* Held: no child to poke (killpty's kill(-pid) fallback
+		** would hit pid 0 = our own process group). */
+		if (the_pty.fd < 0)
+			return 0;
 
 		/* Send a ^L character if the terminal is in no-echo and
 		** character-at-a-time mode. */
@@ -2346,6 +2697,8 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 	int nullfd;
 
 	int has_attached_client = 0;
+	int pfd;
+	long wait_ms;
 
 	/* Okay, disassociate ourselves from the original terminal, as we
 	** don't care what happens to it. */
@@ -2363,7 +2716,20 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 
 		if (v > 0)
 			heal_ms = v;
+		e = getenv("DCH_HOLD_MS");
+		v = e ? atol(e) : 0;
+		if (v > 0)
+			hold_ms = v;
+		e = getenv("DCH_RESPAWN_TTL_MS");
+		v = e ? atol(e) : 0;
+		if (v > 0)
+			respawn_ttl_ms = v;
 	}
+	/* The inner argv is a tail of dch_argv (run_master_of hands us a
+	** pointer into it, on a cold start and after a live restart alike). */
+	cur_argv = argv;
+	if (dch_argv && argv > dch_argv && argv - dch_argv < 8)
+		argv_prefix = (int)(argv - dch_argv);
 
 	/* Set a trap to unlink the socket when we die. */
 	atexit(unlink_socket);
@@ -2383,6 +2749,13 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 	else
 	{
 		pty_gated = waitattach;
+
+		/* Start at a sane 80x24 instead of 0x0 so headless-spawned
+		** programs (and the terminal mirror) see a real grid; the
+		** attacher's WINCH corrects it. */
+		memset(&the_pty.ws, 0, sizeof(struct winsize));
+		the_pty.ws.ws_row = 24;
+		the_pty.ws.ws_col = 80;
 
 		/* Create a pty in which the process is running. */
 		if (init_pty(argv, statusfd) < 0)
@@ -2453,6 +2826,40 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 		int have_writes = 0;
 		dch_bridge_reap();
 
+		/* Armed: watch the child itself, not only pty EOF — a grandchild
+		** still holding the slave would otherwise keep EOF (and so the
+		** respawn) from ever coming. Held: the hold is bounded. */
+		wait_ms = heal_ms;
+		if (the_pty.fd >= 0 && respawn_live())
+		{
+			int st;
+
+			if (waitpid(the_pty.pid, &st, WNOHANG) == the_pty.pid)
+			{
+				drain_pty();	/* its last words, into tail+mirror */
+				check_waiters(NULL);
+				respawn_consume(st);
+			}
+			/* ponytail: 200 ms poll while armed covers a SIGCHLD that
+			** lands between this check and select(); a self-pipe
+			** would make it exact. */
+			else if (wait_ms > 200)
+				wait_ms = 200;
+		}
+		if (the_pty.fd < 0)
+		{
+			long left = hold_ms - ms_since(&respawn_at);
+
+			if (left <= 0)
+			{
+				dch_trace("hold expired -> master exit");
+				exit(exit_code >= 0 ? exit_code : 1);
+			}
+			if (left < wait_ms)
+				wait_ms = left;
+		}
+		pfd = the_pty.fd;
+
 		/* Re-initialize the file descriptor set for select. */
 		FD_ZERO(&readfds);
 		FD_ZERO(&writefds);
@@ -2483,7 +2890,7 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 					break;
 				}
 		}
-		if (!pty_gated)
+		if (!pty_gated && pfd >= 0)
 		{
 			FD_SET(the_pty.fd, &readfds);
 			if (the_pty.fd > highest_fd)
@@ -2516,10 +2923,10 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 		}
 
 		/* Wait for something to happen. The timeout is the self-heal
-		** tick; Linux writes back the remaining time, so tv is set
-		** fresh on every pass. */
-		tv.tv_sec = heal_ms / 1000;
-		tv.tv_usec = (heal_ms % 1000) * 1000;
+		** tick (shortened while armed/held, see above); Linux writes
+		** back the remaining time, so tv is set fresh on every pass. */
+		tv.tv_sec = wait_ms / 1000;
+		tv.tv_usec = (wait_ms % 1000) * 1000;
 		nready = select(highest_fd + 1, &readfds,
 		                have_writes ? &writefds : NULL, NULL, &tv);
 		if (nready < 0)
@@ -2531,8 +2938,10 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 		if (nready == 0)
 		{
 			/* Nothing to serve: heal instead. The fd sets are
-			** empty now, so there is nothing else to do this pass. */
-			int ns = heal_tick(s, has_attached_client);
+			** empty now, so there is nothing else to do this pass.
+			** A shortened (armed/held) timeout is not a heal tick. */
+			int ns = wait_ms == heal_ms
+			    ? heal_tick(s, has_attached_client) : -1;
 
 			if (ns >= 0)
 				s = ns;
@@ -2540,7 +2949,8 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 		}
 
 		dch_trace("mloop wake wa=%d ctl=%d pty=%d", pty_gated,
-		          FD_ISSET(s, &readfds), FD_ISSET(the_pty.fd, &readfds));
+		          FD_ISSET(s, &readfds),
+		          pfd >= 0 && FD_ISSET(pfd, &readfds));
 		/* New client? */
 		if (FD_ISSET(s, &readfds))
 			control_activity(s);
@@ -2552,7 +2962,9 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 				client_activity(p);
 		}
 		/* pty activity? Read it and queue to attached clients. */
-		if (FD_ISSET(the_pty.fd, &readfds))
+		/* Only the pty we selected on: a client's MSG_RESPAWN may have
+		** replaced it this pass, and the new fd was never in the set. */
+		if (pfd >= 0 && the_pty.fd == pfd && FD_ISSET(pfd, &readfds))
 			pty_activity();
 		/* Flush queued output. Attempt every client with a backlog (the
 		** write() just EAGAINs if its socket isn't ready); drop on a hard

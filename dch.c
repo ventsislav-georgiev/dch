@@ -65,14 +65,14 @@ write_buf_or_fail(int fd, const void *buf, size_t count)
 }
 
 /* Payload byte count carried on the wire for a packet, derived from type.
-** PUSH/KEYS/READ/WAIT = pkt->len bytes; WINCH/REDRAW = a winsize;
-** ATTACH/DETACH = none. */
+** PUSH/KEYS/READ/WAIT/RESTART/RESPAWN = pkt->len bytes; WINCH/REDRAW = a
+** winsize; ATTACH/DETACH/CMD = none. */
 size_t
 packet_payload_len(const struct packet *pkt)
 {
 	if (pkt->type == MSG_PUSH || pkt->type == MSG_KEYS ||
 	    pkt->type == MSG_READ || pkt->type == MSG_WAIT ||
-	    pkt->type == MSG_RESTART)
+	    pkt->type == MSG_RESTART || pkt->type == MSG_RESPAWN)
 		return pkt->len;
 	if (pkt->type == MSG_WINCH || pkt->type == MSG_REDRAW)
 		return sizeof(struct winsize);
@@ -1851,6 +1851,16 @@ usage(void)
 	    "                                             --all skips sessions\n"
 	    "                                             already current (-f\n"
 	    "                                             restarts them anyway)\n"
+	    "  dch --respawn <name> [-- cmd...]           when the program exits,\n"
+	    "                                             keep the session and\n"
+	    "                                             start cmd in its place;\n"
+	    "                                             no cmd = hold childless\n"
+	    "                                             until a second --respawn\n"
+	    "                                             brings one (one-shot)\n"
+	    "  dch --respawn <name> --cancel              drop a pending respawn\n"
+	    "  dch --cmd <name>                           JSON: child pid, state,\n"
+	    "                                             argv, last exit status,\n"
+	    "                                             output since the arm\n"
 	    "  dch --wait <name> --match <str> [--timeout ms]  wait for output\n"
 	    "  dch --wait <name> --state <s> [--timeout ms]    wait for state\n"
 	    "  dch --status <name>                        print session state:\n"
@@ -2971,7 +2981,209 @@ do_restart_verb(const char *name, int no_version, int quiet)
 		        "running on its old master\n", name);
 		return 1;
 	}
+	if (len == DCH_ST_BUSY)
+	{
+		/* The resume blob does not carry an arm or a hold. */
+		fprintf(stderr, "dch: %s: a respawn is pending (armed or held);"
+		        " retry once it is done, or `dch --respawn %s --cancel`"
+		        "\n", name, name);
+		return 1;
+	}
 	return ctl_status_exit(len);
+}
+
+/* Arm a respawn (or, on a held session, perform it now); no command = hold,
+** cancel = drop the arm (and end a held session). The master answers MSG_ACK;
+** an old master answers DCH_ST_UNSUP. */
+static int
+do_respawn_verb(const char *name, char **cmd, int ncmd, int cancel)
+{
+	unsigned char req[PKT_MAX], payload[PKT_MAX], type;
+	struct ctl_reader r = {0};
+	unsigned int len;
+	size_t fill = 1, need = 1;
+	int s, rc, k;
+
+	req[0] = cancel ? 'c' : ncmd ? 'a' : 'h';
+	if (ncmd && !cmd[0][0])
+	{
+		fprintf(stderr, "dch: --respawn: empty command\n");
+		return 1;
+	}
+	for (k = 0; k < ncmd; k++)
+		need += strlen(cmd[k]) + 1;
+	/* One frame carries the whole argv; nothing reassembles more. */
+	if (need > sizeof req)
+	{
+		fprintf(stderr, "dch: --respawn: command is %zu bytes, the "
+		        "limit is %d\n", need - 1, PKT_MAX - 1);
+		return 1;
+	}
+	for (k = 0; k < ncmd; k++)
+	{
+		size_t l = strlen(cmd[k]) + 1;
+
+		memcpy(req + fill, cmd[k], l);
+		fill += l;
+	}
+
+	s = control_connect(name, 0);
+	if (s < 0)
+		return 1;
+	send_ctl(s, MSG_RESPAWN, req, fill);
+	rc = ctl_next_frame(s, &r, CTL_IDLE_MS, &type, payload, &len);
+	close(s);
+	if (rc <= 0)
+		return ctl_dead_exit(&r, "respawn");
+	if (type != MSG_ACK)
+		return 1;
+	if (len == DCH_ST_ERR)
+	{
+		fprintf(stderr, "dch: %s: respawn request rejected\n", name);
+		return 1;
+	}
+	return ctl_status_exit(len);
+}
+
+/* Print s[0..n) as a JSON string. Invalid UTF-8 becomes U+FFFD so the output
+** always parses: the exit tail is raw pty bytes, maybe cut mid-character.
+** ponytail: lead/continuation check only; overlongs past C0/C1 and encoded
+** surrogates pass through. */
+static void
+json_bytes(const unsigned char *s, size_t n)
+{
+	size_t i = 0, k, l;
+
+	putchar('"');
+	while (i < n)
+	{
+		unsigned char c = s[i];
+
+		if (c == '"' || c == '\\')
+		{
+			printf("\\%c", c);
+			i++;
+			continue;
+		}
+		if (c < 0x20 || c == 0x7f)
+		{
+			printf("\\u%04x", c);
+			i++;
+			continue;
+		}
+		l = c < 0x80 ? 1 : (c >= 0xc2 && c <= 0xdf) ? 2
+		  : (c & 0xf0) == 0xe0 ? 3 : (c >= 0xf0 && c <= 0xf4) ? 4 : 0;
+		for (k = 1; l && k < l; k++)
+			if (i + k >= n || (s[i + k] & 0xc0) != 0x80)
+				l = 0;
+		if (!l)
+		{
+			fputs("\\ufffd", stdout);
+			i++;
+			continue;
+		}
+		fwrite(s + i, 1, l, stdout);
+		i += l;
+	}
+	putchar('"');
+}
+
+/* Next NUL-terminated field of a MSG_CMD reply, or NULL when it runs out. */
+static const char *
+cmd_field(const unsigned char **p, const unsigned char *end)
+{
+	const unsigned char *f = *p, *z = memchr(f, '\0', (size_t)(end - f));
+
+	if (!z)
+		return NULL;
+	*p = z + 1;
+	return (const char *)f;
+}
+
+/* `dch --cmd`: what the session is running right now, as one JSON object:
+** {"pid","state","argv","exit_code","exit_signal","tail"}. pid is null while
+** held; exit_* are null until a child is reaped under an arm. */
+static int
+do_cmd_verb(const char *name)
+{
+	unsigned char payload[PKT_MAX], type, *buf = NULL;
+	const unsigned char *q, *end;
+	const char *pid, *state, *code, *sig, *ac;
+	struct ctl_reader r = {0};
+	unsigned int len;
+	size_t fill = 0;
+	int s, rc, k, argc;
+
+	s = control_connect(name, 0);
+	if (s < 0)
+		return 1;
+	send_ctl(s, MSG_CMD, NULL, 0);
+	for (;;)
+	{
+		rc = ctl_next_frame(s, &r, CTL_IDLE_MS, &type, payload, &len);
+		if (rc <= 0)
+		{
+			close(s);
+			free(buf);
+			return ctl_dead_exit(&r, "cmd");
+		}
+		if (type != MSG_READ_DATA)
+			break;
+		{
+			unsigned char *nb = realloc(buf, fill + len);
+
+			if (!nb)
+			{
+				close(s);
+				free(buf);
+				return 1;
+			}
+			buf = nb;
+			memcpy(buf + fill, payload, len);
+			fill += len;
+		}
+	}
+	close(s);
+	if (type != MSG_READ_END || len != DCH_ST_OK)
+	{
+		free(buf);
+		return ctl_status_exit(type == MSG_READ_END || type == MSG_ACK
+		                       ? len : DCH_ST_ERR);
+	}
+
+	q = buf;
+	end = buf + fill;
+	pid = buf ? cmd_field(&q, end) : NULL;
+	state = pid ? cmd_field(&q, end) : NULL;
+	code = state ? cmd_field(&q, end) : NULL;
+	sig = code ? cmd_field(&q, end) : NULL;
+	ac = sig ? cmd_field(&q, end) : NULL;
+	if (!ac)
+	{
+		fprintf(stderr, "dch: malformed cmd response\n");
+		free(buf);
+		return 1;
+	}
+	argc = atoi(ac);
+	printf("{\"pid\":%s,\"state\":", atol(pid) > 0 ? pid : "null");
+	json_bytes((const unsigned char *)state, strlen(state));
+	fputs(",\"argv\":[", stdout);
+	for (k = 0; k < argc; k++)
+	{
+		const char *a = cmd_field(&q, end);
+
+		if (!a)
+			break;
+		if (k)
+			putchar(',');
+		json_bytes((const unsigned char *)a, strlen(a));
+	}
+	printf("],\"exit_code\":%s,\"exit_signal\":%s,\"tail\":",
+	       atoi(code) >= 0 ? code : "null", atoi(sig) > 0 ? sig : "null");
+	json_bytes(q, (size_t)(end - q));
+	puts("}");
+	free(buf);
+	return 0;
 }
 
 static int
@@ -3195,11 +3407,12 @@ main(int argc, char **argv)
 	enum { A_ATTACH, A_LIST, A_KILL, A_KILLALL, A_DETACH, A_LISTRAW,
 	       A_RENAME, A_LISTJSON, A_LISTJSON2, A_SETALIAS,
 	       A_SPAWN, A_SEND, A_RUN, A_KEYS, A_READ, A_WAIT, A_STATUS,
-	       A_REPORT, A_RESTART, A_AGENT_LIST, A_AGENT_SEND }
+	       A_REPORT, A_RESTART, A_AGENT_LIST, A_AGENT_SEND,
+	       A_RESPAWN, A_CMD }
 	    action = A_ATTACH;
 	char alias_arg[600] = "";
 	int opt_ansi = 0, opt_recent = -1, opt_timeout = 10000, opt_cursor = 0;
-	int opt_all = 0;
+	int opt_all = 0, opt_cancel = 0;
 	int opt_agent_json = 0;
 	int opt_cols = 0, opt_rows = 0;
 	char opt_match[DCH_WAIT_MAX + 1] = "";
@@ -3411,7 +3624,9 @@ main(int argc, char **argv)
 		         strcmp(a, "--read") == 0 ||
 		         strcmp(a, "--wait") == 0 ||
 		         strcmp(a, "--status") == 0 ||
-		         strcmp(a, "--report") == 0)
+		         strcmp(a, "--report") == 0 ||
+		         strcmp(a, "--respawn") == 0 ||
+		         strcmp(a, "--cmd") == 0)
 		{
 			/* Control verbs: all take a session name next. */
 			action = strcmp(a, "--spawn") == 0 ? A_SPAWN
@@ -3421,6 +3636,8 @@ main(int argc, char **argv)
 			       : strcmp(a, "--read") == 0  ? A_READ
 			       : strcmp(a, "--wait") == 0  ? A_WAIT
 			       : strcmp(a, "--status") == 0 ? A_STATUS
+			       : strcmp(a, "--respawn") == 0 ? A_RESPAWN
+			       : strcmp(a, "--cmd") == 0   ? A_CMD
 			                                    : A_REPORT;
 			i++;
 			if (i >= argc || argv[i][0] == '\0')
@@ -3458,6 +3675,11 @@ main(int argc, char **argv)
 				        "name or --all\n");
 				return 1;
 			}
+		}
+		else if (strcmp(a, "--cancel") == 0)
+		{
+			opt_cancel = 1;
+			i++;
 		}
 		else if (strcmp(a, "--ansi") == 0)
 		{
@@ -3946,6 +4168,17 @@ main(int argc, char **argv)
 		return do_wait_verb(session_name, opt_match, opt_timeout);
 	case A_KEYS:
 		return do_keys_verb(session_name, inner_argv, inner_argc);
+	case A_RESPAWN:
+		if (opt_cancel && inner_argc)
+		{
+			fprintf(stderr, "dch: --respawn --cancel takes no "
+			        "command\n");
+			return 1;
+		}
+		return do_respawn_verb(session_name, inner_argv, inner_argc,
+		                       opt_cancel);
+	case A_CMD:
+		return do_cmd_verb(session_name);
 	case A_SEND:
 		return do_send_verb(session_name, inner_argv, inner_argc, 0);
 	case A_RUN:
