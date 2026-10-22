@@ -271,7 +271,7 @@ def main():
 
         # --- failure paths: each reported, exit 1 ------------------------
         # Pauses go out one after another and a paste that never lands
-        # takes AG_LAND_MS, so this batch gets a pause timeout with real
+        # takes DCH_AGENT_LAND_MS, so this batch gets a pause timeout with real
         # headroom; the timeout case runs on its own below.
         g = sess("agg", "claude", dialog=True)
         h = sess("agh", "sh", "-c", "claude; sleep 60")

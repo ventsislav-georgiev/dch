@@ -223,10 +223,12 @@ def main():
         ugo = os.path.join(tmp, "unarmed.go")
         spawn(u, "sh", "-c", "while [ ! -e '%s' ]; do sleep 0.05; done" % ugo)
         run("--read", u)        # open the --spawn gate like any control verb
+        r = run("--cmd", u, "--cancel")     # u is still alive here
+        check("--cancel with another verb exits 1",
+              r.returncode == 1 and
+              "--cancel only works with --respawn" in r.stderr)
         open(ugo, "w").close()
         check("unarmed exit ends the session", gone(usock, 5.0))
-        check("--cancel with another verb exits 1",
-              run("--cmd", u, "--cancel").returncode == 1)
 
         # --- exec failure on respawn ends the session (no loop) -----------
         e, esock = sess("rse")

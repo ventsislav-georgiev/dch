@@ -443,8 +443,11 @@ agents paused. An agent still waiting to pause gets the resume message and is
 reported as interrupted. An agent already past `/exit` finishes its restart,
 within `DCH_AGENT_STEP_MS`. A second signal exits at once. SIGKILL cannot be
 caught: it leaves a waiting agent paused, and you must type the resume
-message yourself. A hold that is already armed expires on its own after
-`DCH_RESPAWN_TTL_MS` / `DCH_HOLD_MS`. A failed agent is left running, never killed: that covers a
+message yourself. If a second signal lands after Claude has already exited
+into the hold, nothing is relaunched and the session ends when `DCH_HOLD_MS`
+runs out (default 120 s). To recover, run `claude --resume <id>` by hand; the id
+is in the `tail` field of `dch --cmd <session>` until the hold ends. A failed
+agent is left running, never killed: that covers a
 gate that refused to type, a timeout (the resume message is typed if
 possible), or an `/exit` that did not end Claude (the hold is cancelled). If
 Claude crashed on `/exit` (a signal or a non-zero exit), it is not relaunched
@@ -456,6 +459,7 @@ and the session ends.
 | `DCH_RESUME_MSG` | `resume all work. …` | Text typed after the relaunch. |
 | `DCH_AGENT_TIMEOUT_MS` | `600000` | How long an agent may take to pause. |
 | `DCH_AGENT_SETTLE_MS` | `3000` | How long it must stay ready before `/exit`. |
+| `DCH_AGENT_LAND_MS` | `3000` | How long dch waits for typed text to show in the composer before giving up without pressing Enter. |
 | `DCH_AGENT_STEP_MS` | `60000` | Limit for `/exit` to end Claude and for the relaunch to show a composer. |
 
 Limitations:

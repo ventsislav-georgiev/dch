@@ -334,6 +334,18 @@ types the resume message into agents still waiting to pause and lets
 restarts past
 .B /exit
 finish; a second signal exits at once. SIGKILL leaves a waiting agent paused.
+If a second signal lands after Claude has already exited into the hold,
+nothing is relaunched and the session ends when
+.B DCH_HOLD_MS
+runs out (default 120 s). To recover, run
+.B claude \-\-resume
+.I id
+by hand; the id is in the
+.B tail
+field of
+.B dch \-\-cmd
+.I session
+until the hold ends.
 A turn that starts between the last idle check and
 .B /exit
 can queue the
@@ -487,6 +499,10 @@ How long an agent may take to pause (default 600000).
 How long an agent must stay ready before
 .B /exit
 (default 3000).
+.TP
+.B DCH_AGENT_LAND_MS
+How long dch waits for typed text to show in the composer before giving up
+without pressing Enter (default 3000).
 .TP
 .B DCH_AGENT_STEP_MS
 How long

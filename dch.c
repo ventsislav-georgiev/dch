@@ -3543,9 +3543,6 @@ claude_tok(char **v, int argc)
 #define AG_POLL_MS  250
 /* Paste, then Enter: Enter in the same burst can fold into the paste. */
 #define AG_ENTER_MS 300
-/* How long typed text may take to show in the composer: a Claude that has
-** just resumed a long conversation took over a second to paint a paste. */
-#define AG_LAND_MS  3000
 
 static const char ag_pause_msg[] =
     "pause all work, i need to restart you. Paused means: stop every "
@@ -4005,6 +4002,10 @@ composer_holds(const char *path, const char *text)
 static int
 ag_type(const char *path, const char *text, int paste)
 {
+	/* How long typed text may take to show in the composer: a Claude that
+	** has just resumed a long conversation took over a second to paint a
+	** paste. */
+	long land = env_ms("DCH_AGENT_LAND_MS", 3000);
 	int s, t;
 
 	if (paste)
@@ -4024,7 +4025,7 @@ ag_type(const char *path, const char *text, int paste)
 		poll(NULL, 0, t == AG_ENTER_MS ? AG_ENTER_MS : AG_POLL_MS / 2);
 		if (composer_holds(path, text))
 			return dch_pty_push(path, NULL);
-		if (t >= AG_LAND_MS)
+		if (t >= land)
 			return -2;
 	}
 }
@@ -4418,9 +4419,18 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 		    (g = claude_gate(a->path)) == CG_EMPTY)
 		{
 			int old = strcmp(r.ver, a->want) != 0;
+			int t;
 
 			cmd_info_free(&ci);
-			if (ag_type(a->path, resume, 1) != 0)
+			t = ag_type(a->path, resume, 1);
+			if (t == -1)
+			{
+				ag_say(a, 1, "relaunched with --resume %s on claude %s, "
+				       "but could not type the resume message",
+				       a->id, r.ver);
+				return 1;
+			}
+			if (t != 0)
 			{
 				ag_say(a, 1, "relaunched with --resume %s on claude %s, "
 				       "but the resume message did not land in the "
