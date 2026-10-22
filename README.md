@@ -414,8 +414,11 @@ session whose program is Claude Code, without losing the conversation:
    `PATH`) reports for `--version`; `-f` restarts current agents too.
 2. **Pause.** Each stale agent gets the pause message, typed only when its
    composer is on screen and empty — never over a draft, a queued message, a
-   permission prompt or a dialog. All agents are paused first, then waited on
-   together.
+   permission prompt or a dialog. Enter is pressed only once the text shows
+   in the composer row (or Claude's `[Pasted text #N]` placeholder does); a
+   prompt that comes up in between gets no Enter, and the agent is reported
+   as failed. The same check guards `/exit` and the resume message. All
+   agents are paused first, then waited on together.
 3. **Wait.** An agent is ready when its record says `idle`, it has visibly
    taken the pause message (it went busy, or its record changed after the
    message with nothing left queued), no subagents show on the agent panel,
@@ -431,7 +434,17 @@ session whose program is Claude Code, without losing the conversation:
    resume message, and dch checks that it now reports the installed version.
 
 Each agent gets one result line. The command exits 1 if any agent it tried to
-restart failed. A failed agent is left running, never killed: that covers a
+restart failed.
+
+The step waits up to `DCH_AGENT_TIMEOUT_MS` (10 minutes by default) for an agent
+to pause. Run it from a Claude Code session with `run_in_background`, because
+the Bash tool times out after 2 minutes. Ctrl-C, SIGTERM or SIGHUP do not leave
+agents paused. An agent still waiting to pause gets the resume message and is
+reported as interrupted. An agent already past `/exit` finishes its restart,
+within `DCH_AGENT_STEP_MS`. A second signal exits at once. SIGKILL cannot be
+caught: it leaves a waiting agent paused, and you must type the resume
+message yourself. A hold that is already armed expires on its own after
+`DCH_RESPAWN_TTL_MS` / `DCH_HOLD_MS`. A failed agent is left running, never killed: that covers a
 gate that refused to type, a timeout (the resume message is typed if
 possible), or an `/exit` that did not end Claude (the hold is cancelled). If
 Claude crashed on `/exit` (a signal or a non-zero exit), it is not relaunched
@@ -455,7 +468,18 @@ Limitations:
   option value cheaply.
 - **Own session.** The session running `dch --restart --all` itself is
   skipped. Run it from outside dch to restart that one.
-- **dch-lite.** dch-lite (no mirror) skips this step with a note.
+- **dch-lite.** dch-lite (no mirror) skips this step. It prints a note
+  when some session runs claude.
+- **Respawn pending.** A session with a pending `--respawn` (armed or held)
+  is skipped.
+- **Turn-start race.** A turn can start between the last idle check and
+  `/exit`, for example when a background task finishes at that moment. Claude
+  may then queue `/exit` behind that turn. If the turn ends within
+  `DCH_AGENT_STEP_MS`, the restart goes through as usual. If not, dch cancels
+  the hold and reports the agent as not restarted. When the queued `/exit`
+  runs later, Claude quits and the session ends with it. The composer check
+  narrows this window but cannot close it: typing and the agent's next turn
+  are not atomic.
 
 ### Attaching replays the screen
 

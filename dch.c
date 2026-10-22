@@ -3522,11 +3522,30 @@ do_spawn_verb(char *exe, const char *name, int cols, int rows,
 ** on screen — Enter on a permission prompt would approve a tool call — so
 ** the whole step needs the terminal mirror and dch-lite skips it. */
 
+/* Index of the argv entry whose basename is `claude`, argc when none. */
+static int
+claude_tok(char **v, int argc)
+{
+	int k;
+
+	for (k = 0; k < argc; k++)
+	{
+		const char *b = strrchr(v[k], '/');
+
+		if (strcmp(b ? b + 1 : v[k], "claude") == 0)
+			break;
+	}
+	return k;
+}
+
 #ifdef HAVE_LIBGHOSTTY_VT
 
 #define AG_POLL_MS  250
 /* Paste, then Enter: Enter in the same burst can fold into the paste. */
 #define AG_ENTER_MS 300
+/* How long typed text may take to show in the composer: a Claude that has
+** just resumed a long conversation took over a second to paint a paste. */
+#define AG_LAND_MS  3000
 
 static const char ag_pause_msg[] =
     "pause all work, i need to restart you. Paused means: stop every "
@@ -3779,31 +3798,33 @@ sgr_dim(const unsigned char *p, size_t n, int dim)
 	return dim;
 }
 
-/* Is the Claude Code screen at `path` safe to type into? Positive evidence
-** only: the composer — a "❯ " row between two "─" rules, the bottom-most
-** one — must be on screen and empty (nothing after the glyph, or only
-** Claude's dim placeholder: a typed draft is not dim), with no prompt or
-** form up and no queued message. Anything else is reported, never typed
-** over: a trust dialog or release notes before the composer read UNKNOWN. */
-static int
-claude_gate(const char *path)
+/* The screen at `path` as plain text plus a per-byte faint flag in *dimp
+** (both malloc'd), CRs dropped. NULL on failure, *err = CG_NOVT when the
+** session has no mirror, else CG_UNKNOWN. */
+static char *
+screen_faint(const char *path, char **dimp, int *err)
 {
-	char *raw, *txt, *fold, *dim, *ls, *prev = NULL, *comp = NULL;
+	char *raw, *txt, *dim;
 	size_t i, k = 0;
-	int n, d = 0, res = CG_UNKNOWN;
+	int n, d = 0;
 
+	*err = CG_UNKNOWN;
 	if (getenv("DCH_NO_DETECT"))
-		return CG_NOVT;
+	{
+		*err = CG_NOVT;
+		return NULL;
+	}
 	raw = malloc(DET_CAP + 1);
 	if (!raw)
-		return CG_UNKNOWN;
+		return NULL;
 	n = fetch_screen(path, raw, DET_CAP, DET_DEADLINE_MS, 1);
 	if (n <= 0)
 	{
 		free(raw);
-		return n == -2 ? CG_NOVT : CG_UNKNOWN;
+		if (n == -2)
+			*err = CG_NOVT;
+		return NULL;
 	}
-	/* Plain text plus a per-byte faint flag. */
 	txt = malloc((size_t)n + 1);
 	dim = malloc((size_t)n + 1);
 	if (!txt || !dim)
@@ -3811,7 +3832,7 @@ claude_gate(const char *path)
 		free(raw);
 		free(txt);
 		free(dim);
-		return CG_UNKNOWN;
+		return NULL;
 	}
 	for (i = 0; i < (size_t)n; )
 	{
@@ -3835,8 +3856,18 @@ claude_gate(const char *path)
 	}
 	txt[k] = '\0';
 	free(raw);
+	*dimp = dim;
+	return txt;
+}
 
-	fold = tail_fold(txt, k);
+/* A prompt or form (CG_DIALOG) or a queued message (CG_QUEUED) on the
+** bottom lines of txt, else CG_UNKNOWN. */
+static int
+screen_modal(const char *txt)
+{
+	char *fold = tail_fold(txt, strlen(txt));
+	int res = CG_UNKNOWN;
+
 	if (fold && (det_match(det_suppress, sizeof(det_suppress) /
 	                       sizeof(det_suppress[0]), fold) ||
 	             det_match(det_blocked, sizeof(det_blocked) /
@@ -3846,57 +3877,135 @@ claude_gate(const char *path)
 	                  strstr(fold, "ctrl+enter to send now")))
 		res = CG_QUEUED;
 	free(fold);
-	if (res != CG_UNKNOWN)
-	{
-		free(txt);
-		free(dim);
-		return res;
-	}
+	return res;
+}
 
-	/* Bottom-most "❯ " row with a rule right above and below it. */
-	for (ls = txt; ls; )
-	{
-		char *nl = strchr(ls, '\n'), *nx = nl ? nl + 1 : NULL;
-		const char *r = nx;
+static int
+is_rule(const char *l)
+{
+	while (*l == ' ')
+		l++;
+	return strncmp(l, "\xe2\x94\x80", 3) == 0;
+}
 
-		while (r && *r == ' ')
-			r++;
-		if (prev && strncmp(ls, "\xe2\x9d\xaf", 3) == 0 &&
-		    (ls[3] == ' ' || ls[3] == '\n' || ls[3] == '\0' ||
-		     strncmp(ls + 3, "\xc2\xa0", 2) == 0) &&
-		    r && strncmp(r, "\xe2\x94\x80", 3) == 0)
+/* The composer: the bottom-most row that starts with "❯" (then a space, an
+** NBSP or the end of the row) right under a "─" rule and running down to
+** the next rule, its wrapped rows indented. Returns that row, *end = the
+** closing rule; NULL when there is none. A permission prompt's "❯ 1. Yes"
+** is indented and has no closing rule, so it never reads as one. */
+static char *
+composer_find(char *txt, char **end)
+{
+	char *ls, *nx, *comp = NULL, *prev = NULL;
+
+	for (ls = txt; ls; prev = ls, ls = nx)
+	{
+		char *l;
+
+		nx = strchr(ls, '\n');
+		nx = nx ? nx + 1 : NULL;
+		if (!prev || !is_rule(prev) || strncmp(ls, "\xe2\x9d\xaf", 3) ||
+		    !(ls[3] == ' ' || ls[3] == '\n' || ls[3] == '\0' ||
+		      strncmp(ls + 3, "\xc2\xa0", 2) == 0))
+			continue;
+		for (l = nx; l && !is_rule(l) && (*l == ' ' || *l == '\n'); )
+		{
+			l = strchr(l, '\n');
+			l = l ? l + 1 : NULL;
+		}
+		if (l && is_rule(l))
+		{
 			comp = ls;
-		/* prev = this line, when it is a rule */
-		for (r = ls; *r == ' '; r++)
-			;
-		prev = strncmp(r, "\xe2\x94\x80", 3) == 0 ? ls : NULL;
-		ls = nx;
+			*end = l;
+		}
 	}
-	if (comp)
-	{
-		char *c = comp + 3;
+	return comp;
+}
 
-		for (;;)
+/* Is the Claude Code screen at `path` safe to type into? Positive evidence
+** only: the composer must be on screen and empty (nothing after the glyph,
+** or only Claude's dim placeholder: a typed draft is not dim), with no
+** prompt or form up and no queued message. Anything else is reported, never
+** typed over: a trust dialog or release notes before the composer read
+** UNKNOWN. */
+static int
+claude_gate(const char *path)
+{
+	char *txt, *dim, *comp, *end, *c;
+	int res;
+
+	if (!(txt = screen_faint(path, &dim, &res)))
+		return res;
+	if ((res = screen_modal(txt)) == CG_UNKNOWN &&
+	    (comp = composer_find(txt, &end)))
+	{
+		for (c = comp + 3; ; )
 			if (*c == ' ')
 				c++;
 			else if (strncmp(c, "\xc2\xa0", 2) == 0)
 				c += 2;
 			else
 				break;
-		res = *c == '\n' || *c == '\0' || dim[c - txt] ? CG_EMPTY
-		                                              : CG_DRAFT;
+		res = (*c == '\n' || *c == '\0' || dim[c - txt]) &&
+		      end == strchr(comp, '\n') + 1 ? CG_EMPTY : CG_DRAFT;
 	}
 	free(txt);
 	free(dim);
 	return res;
 }
 
-/* Type text and press Enter (paste = bracketed paste for messages; raw
-** keystrokes for a slash command, which Claude's menu must see typed). */
+/* s without spaces, NBSPs and line breaks (wrapping moves them), at most
+** cap bytes. */
+static char *
+squeeze(const char *s, size_t n, size_t cap)
+{
+	char *o = malloc(n + 1);
+	size_t i, k = 0;
+
+	if (!o)
+		return NULL;
+	for (i = 0; i < n && k < cap; i++)
+		if (strncmp(s + i, "\xc2\xa0", 2) == 0)
+			i++;
+		else if (s[i] != ' ' && s[i] != '\n' && s[i] != '\t')
+			o[k++] = s[i];
+	o[k] = '\0';
+	return o;
+}
+
+/* Did `text` land in the composer? Evidence counts only inside the composer
+** rows — the transcript above routinely shows "[Pasted text #1 +3 lines]"
+** and earlier messages: the start of our text, or the placeholder Claude
+** Code collapses a long paste into. */
+static int
+composer_holds(const char *path, const char *text)
+{
+	char *txt, *dim, *comp, *end, *have = NULL, *want = NULL;
+	int err, ok = 0;
+
+	if (!(txt = screen_faint(path, &dim, &err)))
+		return 0;
+	if (screen_modal(txt) != CG_DIALOG && (comp = composer_find(txt, &end)) &&
+	    (have = squeeze(comp + 3, (size_t)(end - comp - 3), (size_t)-1)) &&
+	    (want = squeeze(text, strlen(text), 32)))
+		ok = *want && (strstr(have, want) ||
+		               strstr(have, "[Pastedtext#"));
+	free(have);
+	free(want);
+	free(txt);
+	free(dim);
+	return ok;
+}
+
+/* Type text (paste = bracketed paste for messages; raw keystrokes for a
+** slash command, which Claude's menu must see typed), then press Enter —
+** only once the composer shows it. A prompt raised in between would take
+** the Enter as an answer. Returns 0, -1 when nothing could be typed, -2
+** when the text did not land (no Enter pressed). */
 static int
 ag_type(const char *path, const char *text, int paste)
 {
-	int s;
+	int s, t;
 
 	if (paste)
 	{
@@ -3910,8 +4019,14 @@ ag_type(const char *path, const char *text, int paste)
 		send_ctl(s, MSG_PUSH, text, strlen(text));
 		close(s);
 	}
-	poll(NULL, 0, AG_ENTER_MS);
-	return dch_pty_push(path, NULL);
+	for (t = AG_ENTER_MS; ; t += AG_POLL_MS / 2)
+	{
+		poll(NULL, 0, t == AG_ENTER_MS ? AG_ENTER_MS : AG_POLL_MS / 2);
+		if (composer_holds(path, text))
+			return dch_pty_push(path, NULL);
+		if (t >= AG_LAND_MS)
+			return -2;
+	}
 }
 
 static int
@@ -4125,6 +4240,69 @@ ag_say(struct agent *a, int failed, const char *fmt, ...)
 	a->step = AG_DONE;
 }
 
+/* Type the resume message into an agent we give up on, if the composer
+** lets us. Returns how it went, for the report line. */
+static const char *
+ag_resume(struct agent *a, const char *resume)
+{
+	if (claude_gate(a->path) != CG_EMPTY)
+		return "NOT typed";
+	switch (ag_type(a->path, resume, 1))
+	{
+	case 0:
+		return "typed";
+	case -2:
+		return "typed but NOT sent (it did not land in the composer)";
+	default:
+		return "NOT typed";
+	}
+}
+
+/* The last `want` non-blank lines of raw pty output, escapes dropped,
+** joined with " / " into out: what a crashed claude said last. */
+static void
+tail_lines(const unsigned char *t, size_t n, int want, char *out,
+           size_t outsz)
+{
+	char *p = malloc(n + 1), *l, *keep[8];
+	size_t i = 0, k = 0;
+	int c = 0, j;
+
+	out[0] = '\0';
+	if (!p || want > 8)
+	{
+		free(p);
+		return;
+	}
+	while (i < n)
+		if (t[i] == 0x1b)
+		{
+			size_t l = esc_len(t + i, n - i);
+
+			/* cursor moves and clears end a line; SGR does not */
+			if (t[i + l - 1] != 'm')
+				p[k++] = '\n';
+			i += l;
+		}
+		else if (t[i] == '\r' || t[i] == '\n')
+			p[k++] = '\n', i++;
+		else if (t[i] < 0x20 || t[i] == 0x7f)
+			i++;
+		else
+			p[k++] = (char)t[i++];
+	p[k] = '\0';
+	for (l = strtok(p, "\n"); l; l = strtok(NULL, "\n"))
+	{
+		l += strspn(l, " ");
+		if (*l)
+			keep[c++ % want] = l;
+	}
+	for (j = c > want ? c - want : 0; j < c; j++)
+		snprintf(out + strlen(out), outsz - strlen(out), "%s%s",
+		         out[0] ? " / " : "", keep[j % want]);
+	free(p);
+}
+
 /* The hold is armed and /exit typed: wait for the exit, then relaunch. */
 static int
 ag_exited(struct agent *a, const char *step_s)
@@ -4157,13 +4335,22 @@ ag_exited(struct agent *a, const char *step_s)
 	** cancel ends the session, as the exit would have unarmed. */
 	if (ci.sig > 0 || ci.code != 0)
 	{
+		char last[300];
+
+		/* The session, and its screen, go with the cancel: keep what
+		** claude said last in the report. */
+		tail_lines(ci.tail, ci.tail_len, 3, last, sizeof last);
 		respawn_req(a->path, 'c', NULL, 0);
 		if (ci.sig > 0)
 			ag_say(a, 1, "claude died on signal %d instead of exiting;"
-			       " not relaunched, session ended", ci.sig);
+			       " not relaunched, session ended%s%s%s", ci.sig,
+			       last[0] ? " (last output: " : "", last,
+			       last[0] ? ")" : "");
 		else
 			ag_say(a, 1, "claude exited with status %d instead of 0;"
-			       " not relaunched, session ended", ci.code);
+			       " not relaunched, session ended%s%s%s", ci.code,
+			       last[0] ? " (last output: " : "", last,
+			       last[0] ? ")" : "");
 		cmd_info_free(&ci);
 		return 1;
 	}
@@ -4233,7 +4420,13 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 			int old = strcmp(r.ver, a->want) != 0;
 
 			cmd_info_free(&ci);
-			ag_type(a->path, resume, 1);
+			if (ag_type(a->path, resume, 1) != 0)
+			{
+				ag_say(a, 1, "relaunched with --resume %s on claude %s, "
+				       "but the resume message did not land in the "
+				       "composer; Enter not pressed", a->id, r.ver);
+				return 1;
+			}
 			if (strcmp(r.sid, a->id) != 0)
 				snprintf(a->note + strlen(a->note),
 				         sizeof a->note - strlen(a->note),
@@ -4281,6 +4474,8 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 		snprintf(a->why, sizeof a->why, "%d subagent%s running", g,
 		         g == 1 ? "" : "s");
 	}
+	else
+		snprintf(a->why, sizeof a->why, "idle, settling");
 	if (!ready)
 		a->ok_since = 0;
 	else if (!a->ok_since)
@@ -4294,15 +4489,16 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 		st = respawn_req(a->path, 'h', NULL, 0);
 		if (st != DCH_ST_OK)
 		{
-			ag_type(a->path, resume, 1);
 			ag_say(a, 1, "could not arm the hold (%d); resume message "
-			       "typed", st);
+			       "%s", st, ag_resume(a, resume));
 			return 1;
 		}
-		if (ag_type(a->path, "/exit", 0) < 0)
+		if ((st = ag_type(a->path, "/exit", 0)) != 0)
 		{
 			respawn_req(a->path, 'c', NULL, 0);
-			ag_say(a, 1, "could not type /exit; hold cancelled");
+			ag_say(a, 1, "%s; hold cancelled", st == -2
+			       ? "/exit did not land in the composer, Enter not "
+			         "pressed" : "could not type /exit");
 			return 1;
 		}
 		a->step = AG_EXIT;
@@ -4311,12 +4507,22 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 	}
 	if (now < a->deadline)
 		return 0;
-	g = claude_gate(a->path);
-	if (g == CG_EMPTY)
-		ag_type(a->path, resume, 1);
 	ag_say(a, 1, "not ready within %lds (%s); resume message %s", tmo / 1000,
-	       a->why, g == CG_EMPTY ? "typed" : "NOT typed");
+	       a->why, ag_resume(a, resume));
 	return 1;
+}
+
+/* SIGINT/SIGTERM/SIGHUP during the agent step: the first one is noted, so
+** agents still waiting to pause get the resume message instead of staying
+** paused; a second one exits at once. */
+static volatile sig_atomic_t ag_sig;
+
+static void
+ag_on_sig(int sig)
+{
+	if (ag_sig)
+		_exit(128 + sig);
+	ag_sig = sig;
 }
 
 /* The agent step of `--restart --all`. Returns the number of agents that
@@ -4332,6 +4538,8 @@ restart_agents(int force)
 	long settle = env_ms("DCH_AGENT_SETTLE_MS", 3000);
 	char selfb[256], want[64] = "";
 	int na = 0, k, fails = 0, said = 0, live;
+	static const int sigs[] = { SIGINT, SIGTERM, SIGHUP };
+	struct sigaction sa, old[3], oldpipe;
 
 	if (!pmsg || !*pmsg)
 		pmsg = ag_pause_msg;
@@ -4369,12 +4577,15 @@ restart_agents(int force)
 			continue;	/* dead socket: nothing to restart */
 		a->argv = a->ci.argv;
 		a->argc = a->ci.argc;
-		for (a->tok = 0; a->tok < a->argc; a->tok++)
+		a->tok = claude_tok(a->argv, a->argc);
+		if (a->tok < a->argc && strcmp(a->ci.state, "running") != 0)
 		{
-			const char *b = strrchr(a->argv[a->tok], '/');
-
-			if (strcmp(b ? b + 1 : a->argv[a->tok], "claude") == 0)
-				break;
+			/* Ours to arm: someone else's respawn owns the exit. */
+			printf("%s: skipped — a respawn is pending (%s)\n", a->name,
+			       a->ci.state);
+			said++;
+			cmd_info_free(&a->ci);
+			continue;
 		}
 		n = a->ci.pid > 0 && strcmp(a->ci.state, "running") == 0
 		    ? claude_find(a->ci.pid, 1, &r) : 0;
@@ -4442,13 +4653,33 @@ restart_agents(int force)
 	slist_free(&cur);
 	fflush(stdout);
 
+	/* From the first pause on, a signal must not leave agents paused. */
+	memset(&sa, 0, sizeof sa);
+	sa.sa_handler = ag_on_sig;
+	sa.sa_flags = SA_RESTART;
+	sigemptyset(&sa.sa_mask);
+	ag_sig = 0;
+	for (k = 0; k < 3; k++)
+		sigaction(sigs[k], &sa, &old[k]);
+	/* A caller that stopped reading (a timed-out Bash tool, `| head`)
+	** must not kill us mid-report, leaving the next agents paused. */
+	sa.sa_handler = SIG_IGN;
+	sigaction(SIGPIPE, &sa, &oldpipe);
+
 	/* Pause every stale agent first, then wait on them all at once: one
 	** slow agent must not hold up the rest. */
 	for (k = 0; k < na; k++)
 	{
 		struct agent *a = &ag[k];
-		int g = claude_gate(a->path);
+		int g = ag_sig ? CG_UNKNOWN : claude_gate(a->path);
 
+		if (ag_sig)
+		{
+			ag_say(a, 1, "interrupted (signal %d) before its pause; "
+			       "nothing typed", (int)ag_sig);
+			fails++;
+			continue;
+		}
 		if (g != CG_EMPTY)
 		{
 			ag_say(a, g != CG_NOVT, g == CG_NOVT ? "skipped — the session "
@@ -4463,9 +4694,11 @@ restart_agents(int force)
 		a->deadline = a->t_sent + tmo;
 		a->step = AG_WAIT;
 		snprintf(a->why, sizeof a->why, "no status yet");
-		if (ag_type(a->path, pmsg, 1) < 0)
+		if ((g = ag_type(a->path, pmsg, 1)) != 0)
 		{
-			ag_say(a, 1, "could not type the pause message");
+			ag_say(a, 1, g == -2 ? "the pause message did not land in the "
+			       "composer; Enter not pressed" : "could not type the "
+			       "pause message");
 			fails++;
 			continue;
 		}
@@ -4477,7 +4710,16 @@ restart_agents(int force)
 	{
 		live = 0;
 		for (k = 0; k < na; k++)
-			if (ag[k].step != AG_DONE)
+			if (ag[k].step == AG_WAIT && ag_sig)
+			{
+				/* Past AG_WAIT the hold is armed: those finish, bounded
+				** by DCH_AGENT_STEP_MS. */
+				ag_say(&ag[k], 1, "interrupted (signal %d) while waiting "
+				       "for it to pause; resume message %s", (int)ag_sig,
+				       ag_resume(&ag[k], rmsg));
+				fails++;
+			}
+			else if (ag[k].step != AG_DONE)
 			{
 				fails += ag_tick(&ag[k], tmo, settle, rmsg);
 				live += ag[k].step != AG_DONE;
@@ -4485,6 +4727,9 @@ restart_agents(int force)
 		if (live)
 			poll(NULL, 0, AG_POLL_MS);
 	} while (live);
+	for (k = 0; k < 3; k++)
+		sigaction(sigs[k], &old[k], NULL);
+	sigaction(SIGPIPE, &oldpipe, NULL);
 	for (k = 0; k < na; k++)
 		cmd_info_free(&ag[k].ci);
 	free(ag);
@@ -4496,9 +4741,27 @@ restart_agents(int force)
 static int
 restart_agents(int force)
 {
+	struct slist sl = {0};
+	struct cmd_info ci;
+	char path[1100];
+	int k, hit = 0;
+
 	(void)force;
-	puts("agents: not restarted — dch-lite has no terminal mirror to watch "
-	     "them with");
+	/* Only worth a word when some session runs claude. */
+	list_sessions(&sl);
+	for (k = 0; k < sl.n && !hit; k++)
+	{
+		session_sock_path(sl.v[k], path, sizeof path);
+		if (cmd_query(path, &ci) == 0)
+		{
+			hit = claude_tok(ci.argv, ci.argc) < ci.argc;
+			cmd_info_free(&ci);
+		}
+	}
+	slist_free(&sl);
+	if (hit)
+		puts("agents: not restarted — dch-lite has no terminal mirror to "
+		     "watch them with");
 	return 0;
 }
 

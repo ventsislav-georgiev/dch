@@ -7,8 +7,11 @@ argv rewriting, concurrency (a slow agent does not hold up the rest), the
 holds (shell status, subagent panel, a pause queued while busy), the gate
 (dialog, draft: nothing typed), timeout, /exit that never comes, a crash,
 self-restart, shell-launched Claude, an old master, -f, a decoy resume line
-and a mangled (SGR-split, hard-wrapped) exit line. On dch-lite it checks the
-step is skipped with a note.
+and a mangled (SGR-split, hard-wrapped) exit line. Also: Enter only once the
+text shows in the composer (a prompt raised by the paste gets no Enter, a
+"[Pasted text #1]" placeholder counts), SIGTERM while waiting (resume typed),
+a pending respawn, a crash's last output in the report. On dch-lite it checks
+the step is skipped with a note, and only when a session runs claude.
 
 Run:  python3 tests/agent_restart_test.py        (uses ./dch)
 """
@@ -143,6 +146,12 @@ def main():
         names.remove(probe)
 
         if lite:
+            sh = sess("litesh", "sh")
+            r = restart_all()
+            check("lite: no note when no session runs claude",
+                  "agents:" not in r.stdout)
+            run("-k", sh)
+            names.remove(sh)
             n = sess("lite", "claude")
             up(n)
             with open(os.path.join(fc, "version"), "w") as f:
@@ -243,10 +252,13 @@ def main():
         for n in (b, c, d):
             run("-k", n)
             names.remove(n)
-        r = restart_all("-f")
-        check("-f restarts a current agent",
-              r.returncode == 0 and up(a, 3) and
-              "%s: claude 2.0.0 -> 2.0.0" % a in r.stdout)
+        # a long pause text: the composer shows Claude's paste placeholder
+        longp = PAUSE + ". " + "please " * 150
+        r = restart_all("-f", env=dict(os.environ, DCH_PAUSE_MSG=longp))
+        check("-f restarts a current agent; a collapsed paste counts as "
+              "landed", r.returncode == 0 and up(a, 3) and
+              "%s: claude 2.0.0 -> 2.0.0" % a in r.stdout and
+              longp.strip() in [t.strip() for t in typed(a)])
 
         # --- dch -k after an agent restart leaves no claude alive ---------
         a3 = up(a, 3) or {"pid": 0}
@@ -258,14 +270,19 @@ def main():
                     not (wrapper and alive(wrapper)), 5.0))
 
         # --- failure paths: each reported, exit 1 ------------------------
+        # Pauses go out one after another and a paste that never lands
+        # takes AG_LAND_MS, so this batch gets a pause timeout with real
+        # headroom; the timeout case runs on its own below.
         g = sess("agg", "claude", dialog=True)
         h = sess("agh", "sh", "-c", "claude; sleep 60")
         dr = sess("agr", "claude", draft="half typed")
-        t = sess("agt", "claude", shell=True)
         x = sess("agx", "claude", noexit=True)
         k = sess("agk", "claude", crash=True)
-        for n in (g, h, dr, t, x, k):
+        pp = sess("agp", "claude", dialog_on_paste=True, pasted_decoy=True)
+        q = sess("agq", "claude")
+        for n in (g, h, dr, x, k, pp, q):
             up(n)
+        run("--respawn", q, "--", "true")
         with open(os.path.join(fc, "version"), "w") as f:
             f.write("3.0.0")
         old = os.path.join(sockdir, "old%s.sock" % TAG)
@@ -289,7 +306,7 @@ def main():
                 conn.close()
         threading.Thread(target=oldmaster, daemon=True).start()
         xsock = os.path.join(sockdir, x + ".sock")
-        r = restart_all(env=dict(os.environ, DCH_AGENT_TIMEOUT_MS="3000",
+        r = restart_all(env=dict(os.environ, DCH_AGENT_TIMEOUT_MS="60000",
                                  DCH_AGENT_STEP_MS="3000"))
         srv.close()
         print("     | " + r.stdout.rstrip().replace("\n", "\n     | "))
@@ -303,28 +320,105 @@ def main():
         check("claude started in a shell: skipped",
               "%s: skipped — claude was started inside the session's shell"
               % h in r.stdout and typed(h) == [])
-        check("timeout: reported, resume message typed, no /exit",
-              "%s: NOT restarted — not ready within 3s (status shell" % t
-              in r.stdout and typed(t)[0].startswith(PAUSE) and
-              typed(t)[-1].startswith(RESUME) and "/exit" not in typed(t))
         cx = cmd(x)
         check("/exit never happens: hold cancelled, claude still running",
               "%s: NOT restarted — /exit did not end claude" % x in r.stdout
               and cx and cx["state"] == "running" and len(starts(x)) == 1)
-        check("crash on /exit: reported, not relaunched, session ended",
+        check("crash on /exit: reported with its last output, not "
+              "relaunched, session ended",
               "%s: NOT restarted — claude exited with status 3" % k
-              in r.stdout and len(starts(k)) == 1 and
+              in r.stdout and "Error: fake claude crashed / at teardown "
+              "(fake.js:42))" in r.stdout and len(starts(k)) == 1 and
               until(lambda: not os.path.exists(
                   os.path.join(sockdir, k + ".sock"))))
+        check("prompt raised by the paste: no Enter reaches it, reported",
+              "%s: NOT restarted — the pause message did not land in the "
+              "composer; Enter not pressed" % pp in r.stdout and
+              not any(e["ev"] in ("enter_dialog", "line")
+                      for e in events(pp)))
+        check("pending respawn: skipped as such",
+              "%s: skipped — a respawn is pending (armed)" % q in r.stdout
+              and typed(q) == [])
+        run("--respawn", q, "--cancel")
         check("old master: skipped with a note",
               "old%s: skipped — its master predates agent restart" % TAG
               in r.stdout)
         if os.path.exists(old):
             os.unlink(old)
-        for n in (g, h, dr, t, x, k):
+        for n in (g, h, dr, x, k, pp, q):
             if n in names:
                 run("-k", n)
                 names.remove(n)
+
+        # --- pause timeout, alone so nothing else eats its clock ----------
+        t = sess("agt", "claude", shell=True)
+        up(t)
+        with open(os.path.join(fc, "version"), "w") as f:
+            f.write("3.5.0")
+        r = restart_all(env=dict(os.environ, DCH_AGENT_TIMEOUT_MS="3000"))
+        print("     | " + r.stdout.rstrip().replace("\n", "\n     | "))
+        check("timeout: reported, resume message typed, no /exit",
+              r.returncode == 1 and
+              "%s: NOT restarted — not ready within 3s (status shell" % t
+              in r.stdout and typed(t)[0].startswith(PAUSE) and
+              typed(t)[-1].startswith(RESUME) and "/exit" not in typed(t))
+        run("-k", t)
+        names.remove(t)
+
+        # --- SIGTERM while waiting: the paused agent is resumed -----------
+        i = sess("agi", "claude", shell=True)
+        up(i)
+        proc = subprocess.Popen([DCH, "--restart", "--all", "-f"],
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True)
+        first = ""
+        while "pause message sent" not in first:
+            first = proc.stdout.readline()
+            if not first:
+                break
+        until(lambda: typed(i))
+        time.sleep(0.5)
+        proc.send_signal(15)
+        out = first + proc.communicate(timeout=30)[0]
+        print("     | " + out.rstrip().replace("\n", "\n     | "))
+        ci = cmd(i)
+        check("SIGTERM while waiting: resume typed, exit non-zero, session "
+              "still running",
+              proc.returncode not in (0, None) and
+              "%s: NOT restarted — interrupted (signal 15) while waiting for "
+              "it to pause; resume message typed" % i in out and
+              typed(i)[-1].startswith(RESUME) and "/exit" not in typed(i) and
+              ci and ci["state"] == "running" and len(starts(i)) == 1)
+        run("-k", i)
+        names.remove(i)
+
+        # --- SIGTERM with nobody reading stdout: no SIGPIPE death --------
+        i1 = sess("agu", "claude", shell=True)
+        i2 = sess("agv", "claude", shell=True)
+        up(i1)
+        up(i2)
+        proc = subprocess.Popen([DCH, "--restart", "--all", "-f"],
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, text=True)
+        seen = 0
+        while seen < 2:
+            line = proc.stdout.readline()
+            if not line:
+                break
+            seen += "pause message sent" in line
+        until(lambda: typed(i1) and typed(i2))
+        time.sleep(0.5)
+        proc.stdout.close()         # the reader goes away (`| head`)
+        proc.send_signal(15)
+        proc.wait(timeout=30)
+        check("SIGTERM with stdout closed: both waiting agents resumed",
+              proc.returncode != 0 and
+              until(lambda: all(typed(n)[-1].startswith(RESUME)
+                                for n in (i1, i2)), 5.0) and
+              all("/exit" not in typed(n) for n in (i1, i2)))
+        for n in (i1, i2):
+            run("-k", n)
+            names.remove(n)
 
         # --- self-restart: the orchestrator runs under the agent ---------
         s = sess("ags", "claude")

@@ -11,12 +11,16 @@ State lives in $FAKE_CLAUDE_DIR:
   version           installed version (read at start and by --version)
   <session>.ctl     JSON knobs the test flips while the fake runs:
                     shell, subagents, busy, dialog, draft, noexit, crash,
-                    mangle, decoy, turn_ms
+                    mangle, decoy, turn_ms, dialog_on_paste (a prompt comes
+                    up as a paste ends), pasted_decoy (a "[Pasted text #1
+                    +3 lines]" transcript line)
   <session>.log     JSON lines: start (argv, cwd, sid), line (typed), turn
-                    (a message taken), exit
+                    (a message taken), enter_dialog (Enter while a prompt
+                    is up: it would have answered it), exit
 <session> is DCH_SESSION, which the master sets for its child.
 """
-import json, os, select, signal, subprocess, sys, termios, time, tty, uuid
+import json, os, select, signal, subprocess, sys, termios, textwrap, time
+import tty, uuid
 
 D = os.environ["FAKE_CLAUDE_DIR"]
 SESS = os.environ.get("DCH_SESSION", "nosession")
@@ -100,24 +104,38 @@ saved = termios.tcgetattr(0)
 tty.setraw(0)
 out = sys.stdout.buffer
 transcript, queue, draft = [], [], ""
+collapsed, prompt_up, pstart = False, False, 0
 turn_end = 0.0
 idle_gap = 0.0       # a turn ended with a message queued: idle this long
 
 
 def paint(c):
     rows = ["  Claude Code v%s (fake)" % VERSION, ""] + transcript[-8:]
+    if c.get("pasted_decoy"):
+        rows.append("❯ [Pasted text #1 +3 lines]")
     if status == "busy":
         rows.append("✻ Working…")
     for q in queue:
         rows += ["❯ " + q, "  ctrl+enter to send now"]
     rule = "─" * 60
-    if c.get("dialog"):
+    if prompt_up:
+        # a prompt dch's detection does not know (like the trust dialog):
+        # only the composer check stands between it and our Enter
+        rows += [rule, " A new kind of prompt", "", " \u276f 1. Yes",
+                 "   2. No", "", " Enter to confirm \u00b7 Esc to cancel"]
+    elif c.get("dialog"):
         rows += [rule, " Bash command", "", " Do you want to proceed?",
                  " ❯ 1. Yes", "   2. No", "", " Esc to cancel"]
     else:
         d = draft or c.get("draft", "")
         if d:
-            comp = "❯ " + d
+            # like Ink: a long paste collapses, a long draft word-wraps
+            # under a two-space indent
+            if collapsed:
+                d = "[Pasted text #1]"
+            w = textwrap.wrap(d, 70) or [d]
+            comp = "\r\n".join(["❯ " + w[0]] +
+                                 ["  " + l for l in w[1:]])
         elif queue:
             comp = "❯ \033[2mPress up to edit queued messages\033[0m"
         else:
@@ -150,6 +168,9 @@ def submit(text, c):
             return
         termios.tcsetattr(0, termios.TCSADRAIN, saved)
         if c.get("crash"):
+            out.write(b"\033[2J\033[HError: fake claude crashed\r\n"
+                      b"  at teardown (fake.js:42)\r\n\r\n")
+            out.flush()
             bye(3)
         line = "claude --resume " + SID
         if c.get("mangle"):
@@ -187,18 +208,26 @@ while True:
             bye(0)
         if not chunk:
             bye(0)
-        buf += chunk.replace(b"\033[200~", b"").replace(b"\033[201~", b"")
+        buf += chunk
         while buf:
-            if buf.startswith(b"\033["):          # stray key sequence
+            if buf.startswith(b"\033["):          # paste marker / key
                 end = 2
                 while end < len(buf) and not 0x40 <= buf[end] <= 0x7e:
                     end += 1
                 if end >= len(buf):
                     break
-                buf = buf[end + 1:]
+                seq, buf = buf[:end + 1], buf[end + 1:]
+                if seq == b"\033[200~":
+                    pstart = len(draft)
+                elif seq == b"\033[201~":
+                    collapsed = len(draft) - pstart > 800
+                    prompt_up = bool(c.get("dialog_on_paste"))
                 continue
             ch, buf = buf[:1], buf[1:]
-            if ch == b"\r":
+            if ch == b"\r" and (prompt_up or c.get("dialog")):
+                log(ev="enter_dialog", text=draft)
+            elif ch == b"\r":
+                collapsed = False
                 text, draft = draft, ""
                 submit(text, c)
             elif ch == b"\x7f":
@@ -225,7 +254,8 @@ while True:
         want = "shell" if c.get("shell") else "idle"
         if want != status:
             set_status(want)
-    view = (status, len(transcript), len(queue), draft, json.dumps(c))
+    view = (status, len(transcript), len(queue), draft, json.dumps(c),
+            prompt_up, collapsed)
     if view != last:
         paint(c)
         last = view

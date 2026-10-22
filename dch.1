@@ -291,7 +291,11 @@ on the master's
 or always with
 .BR \-f .
 Each such agent is sent the pause message, typed only while its composer is
-on screen and empty. All agents are paused first and then waited on
+on screen and empty; Enter follows only once the text (or Claude's
+.B [Pasted text #N]
+placeholder) shows in the composer row, and the same holds for
+.B /exit
+and the resume message. All agents are paused first and then waited on
 together. An agent is ready when its record reads idle, it has visibly taken
 the pause message, no subagents show on its agent panel, and that holds for a
 settle window. dch then holds the session, types
@@ -317,11 +321,29 @@ resume message and checks the new version. Each agent gets one result line,
 and the exit status is 1 if any of them failed. A failed agent is left
 running; one that crashed on
 .B /exit
-is not relaunched. Skipped: Codex sessions, a
+is not relaunched; its last output lines go into the report. Skipped: Codex
+sessions, a
 .B claude
-started by hand inside a session's shell, and the session running the
-command. A positional prompt argument is sent again on resume. A dch\-lite
-client skips this step.
+started by hand inside a session's shell, a session with a pending respawn,
+and the session running the command. A positional prompt argument is sent
+again on resume. A dch\-lite client skips this step, with a note when a
+session runs claude. The step can take up to
+.BR DCH_AGENT_TIMEOUT_MS ;
+from inside Claude Code run it in the background. SIGINT, SIGTERM or SIGHUP
+types the resume message into agents still waiting to pause and lets
+restarts past
+.B /exit
+finish; a second signal exits at once. SIGKILL leaves a waiting agent paused.
+A turn that starts between the last idle check and
+.B /exit
+can queue the
+.BR /exit ;
+if that turn outlasts
+.BR DCH_AGENT_STEP_MS ,
+the hold is cancelled, the agent is reported as not restarted, and the
+session ends when the queued
+.B /exit
+runs.
 .TP
 .BI \-\-respawn " name " [ \-\- " cmd..." ]
 Arm a one\-shot respawn. When the session's program next exits, the master
