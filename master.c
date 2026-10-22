@@ -390,12 +390,25 @@ init_pty(char **argv, int statusfd)
 	if (the_pty.pid == 0)
 	{
 		struct client *p;
+		sigset_t none;
 
 		/* Child.. Execute the program. A respawned child is forked
-		** while clients are connected; their sockets are not
-		** close-on-exec and must not leak into it. */
+		** while clients are connected; their sockets are left open
+		** across exec on purpose (a live restart hands them to the
+		** next image), so they must be closed here. */
 		for (p = clients; p; p = p->next)
 			close(p->fd);
+		/* execve keeps SIG_IGN and the signal mask. A respawn forks
+		** after master_process ignored these, and a child ignoring
+		** SIGHUP would outlive `dch -k`. Reset them so every child,
+		** cold or respawned, starts from the defaults. */
+		signal(SIGPIPE, SIG_DFL);
+		signal(SIGXFSZ, SIG_DFL);
+		signal(SIGHUP, SIG_DFL);
+		signal(SIGTTIN, SIG_DFL);
+		signal(SIGTTOU, SIG_DFL);
+		sigemptyset(&none);
+		sigprocmask(SIG_SETMASK, &none, NULL);
 		execvp(*argv, argv);
 
 		/* Report the error to statusfd if we can, or stdout if we
@@ -2699,6 +2712,7 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 	int has_attached_client = 0;
 	int pfd;
 	long wait_ms;
+	struct timespec heal_at;	/* last heal pass (or master start) */
 
 	/* Okay, disassociate ourselves from the original terminal, as we
 	** don't care what happens to it. */
@@ -2820,6 +2834,7 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 	}
 
 	/* Loop forever. */
+	clock_gettime(CLOCK_MONOTONIC, &heal_at);
 	while (1)
 	{
 		int new_has_attached_client = 0;
@@ -2939,10 +2954,16 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 		{
 			/* Nothing to serve: heal instead. The fd sets are
 			** empty now, so there is nothing else to do this pass.
-			** A shortened (armed/held) timeout is not a heal tick. */
-			int ns = wait_ms == heal_ms
-			    ? heal_tick(s, has_attached_client) : -1;
+			** A shortened (armed/held) timeout is not a heal tick
+			** by itself, but one that finds a heal overdue runs it:
+			** while armed is when an orchestrator needs the socket. */
+			int ns = -1;
 
+			if (wait_ms == heal_ms || ms_since(&heal_at) >= heal_ms)
+			{
+				ns = heal_tick(s, has_attached_client);
+				clock_gettime(CLOCK_MONOTONIC, &heal_at);
+			}
 			if (ns >= 0)
 				s = ns;
 			continue;

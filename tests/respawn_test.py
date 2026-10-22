@@ -358,6 +358,64 @@ def main():
               b"att_second_mark" in buf)
         check("attached client still connected after the respawn",
               os.waitpid(att_pid, os.WNOHANG) == (0, 0))
+
+        # --- a respawned child starts with default signal dispositions ----
+        # The master ignores these five after the cold child is forked, and
+        # execve keeps SIG_IGN; a respawned child ignoring SIGHUP outlives
+        # `dch -k`. perl reports an ignored-on-entry signal as IGNORE (on
+        # Linux and macOS alike); python cannot (it ignores PIPE/XFSZ itself).
+        sigs = "PIPE XFSZ HUP TTIN TTOU"
+        dump = ("print join(q( ), map { qq($_=) . ($SIG{$_} // q(DFL)) } "
+                "qw(%s)), qq(\\n)" % sigs)
+        sig_cold = os.path.join(tmp, "sig.cold")
+        sig_resp = os.path.join(tmp, "sig.resp")
+        sd, sdsock = sess("rsd")
+        spawn(sd, "sh", "-c", "perl -e '%s' > '%s'; sleep 1; exit 0"
+              % (dump, sig_cold))
+        run("--respawn", sd, "--", "sh", "-c",
+            "perl -e '%s' > '%s'; exec sleep 3%s" % (dump, sig_resp, TAG))
+        rd = until(lambda: os.path.exists(sig_resp) and
+                   os.path.getsize(sig_resp) and open(sig_resp).read())
+        cold = open(sig_cold).read() if os.path.exists(sig_cold) else ""
+        check("respawned child's ignored signals equal a cold child's "
+              "(cold=%r respawned=%r)" % (cold.strip(), (rd or "").strip()),
+              cold and rd == cold and "IGNORE" not in cold)
+
+        # --- `dch -k` on a respawned session leaves no child alive ---------
+        ck = until(lambda: (lambda c: c if c and c["pid"] and
+                            c["argv"][-1].endswith("sleep 3%s" % TAG)
+                            else None)(cmd(sd)))
+        check("--cmd reports the respawned child before -k", bool(ck))
+        if ck:
+            run("-k", sd)
+
+            def dead(pid):
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    return True
+                return False
+            check("dch -k on a respawned session kills its child",
+                  until(lambda: dead(ck["pid"]), 5.0))
+            if not dead(ck["pid"]):
+                os.kill(ck["pid"], signal.SIGKILL)  # our orphaned sleep
+
+        # --- self-heal still runs while armed -----------------------------
+        # Armed, the loop polls every 200 ms; that must not starve the heal
+        # tick (here 1 s) for the whole arm TTL.
+        hl, hlsock = sess("rsl")
+        spawn(hl, "sleep", "30", env=dict(os.environ, DCH_HEAL_MS="1000"))
+        run("--respawn", hl, "--", "sh")
+        hlm = masters(hlsock)
+        os.unlink(hlsock)
+        healed = until(lambda: os.path.exists(hlsock), 3.0)
+        check("armed: a deleted socket is re-bound within a heal period",
+              healed)
+        if not healed:
+            for mp in hlm:      # unreachable for -k: stop it directly
+                os.kill(mp, signal.SIGTERM)
+        check("armed: the re-bound socket serves the same session",
+              (cmd(hl) or {}).get("state") == "armed")
     finally:
         for n in names:
             subprocess.run([DCH, "-k", n], capture_output=True)
