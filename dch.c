@@ -3513,7 +3513,7 @@ do_spawn_verb(char *exe, const char *name, int cols, int rows,
 /* ---- agent-aware --restart --all (Claude Code) ----------------------
 **
 ** After the master pass, `--restart --all` restarts the Claude Code agents
-** that run AS a session's command once the installed CLI is newer than the
+** that run AS a session's command once the installed CLI differs from the
 ** running one (-f: all of them). Per agent: type a pause message, wait until
 ** it is provably idle, arm a #021 hold and type /exit, read the session id
 ** from the `claude --resume <id>` line in the exit tail, respawn the same
