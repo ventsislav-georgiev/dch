@@ -5169,6 +5169,14 @@ main(int argc, char **argv)
 	int inner_argc = argc - i;
 	char **inner_argv = argv + i;
 
+	/* --cancel only means something to --respawn; elsewhere it would be
+	** silently ignored, so refuse it. */
+	if (opt_cancel && action != A_RESPAWN)
+	{
+		fprintf(stderr, "dch: --cancel only works with --respawn\n");
+		return 1;
+	}
+
 	/* Auto-name only where the action needs a specific session and the
 	** caller didn't already supply one. */
 	if (session_name[0] == '\0')

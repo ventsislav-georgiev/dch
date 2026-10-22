@@ -218,9 +218,15 @@ def main():
 
         # --- unarmed exit still ends the session --------------------------
         u, usock = sess("rsu")
-        spawn(u, "sh", "-c", "sleep 0.3; exit 0")
+        # The child exits on a trigger, not a timer: a fast exit could beat
+        # the --spawn handshake and fail the spawn itself.
+        ugo = os.path.join(tmp, "unarmed.go")
+        spawn(u, "sh", "-c", "while [ ! -e '%s' ]; do sleep 0.05; done" % ugo)
         run("--read", u)        # open the --spawn gate like any control verb
+        open(ugo, "w").close()
         check("unarmed exit ends the session", gone(usock, 5.0))
+        check("--cancel with another verb exits 1",
+              run("--cmd", u, "--cancel").returncode == 1)
 
         # --- exec failure on respawn ends the session (no loop) -----------
         e, esock = sess("rse")
@@ -230,18 +236,23 @@ def main():
 
         # --- cancel: armed, cancelled, child exit ends the session --------
         k, ksock = sess("rsk")
-        spawn(k, "sh", "-c", "sleep 1; exit 0")
+        kgo = os.path.join(tmp, "cancel.go")
+        spawn(k, "sh", "-c", "while [ ! -e '%s' ]; do sleep 0.05; done" % kgo)
         run("--respawn", k, "--", "sh")
         check("--respawn --cancel exits 0",
               run("--respawn", k, "--cancel").returncode == 0)
         check("cancelled arm reads running",
               (cmd(k) or {}).get("state") == "running")
+        open(kgo, "w").close()
         check("cancelled arm: child exit ends the session", gone(ksock, 5.0))
 
         # --- cancel while held ends the session ---------------------------
         kh, khsock = sess("rsq")
-        spawn(kh, "sh", "-c", "sleep 0.3; exit 0")
+        khgo = os.path.join(tmp, "held.go")
+        spawn(kh, "sh", "-c", "while [ ! -e '%s' ]; do sleep 0.05; done" % khgo)
         run("--respawn", kh)
+        run("--read", kh)
+        open(khgo, "w").close()
         until(lambda: (cmd(kh) or {}).get("state") == "held")
         check("--cancel on a held session answers 0",
               run("--respawn", kh, "--cancel").returncode == 0)
@@ -249,12 +260,14 @@ def main():
 
         # --- arm TTL: an expired arm is no arm ----------------------------
         x, xsock = sess("rsx")
-        spawn(x, "sh", "-c", "sleep 1.2; exit 0",
+        xgo = os.path.join(tmp, "ttl.go")
+        spawn(x, "sh", "-c", "while [ ! -e '%s' ]; do sleep 0.05; done" % xgo,
               env=dict(os.environ, DCH_RESPAWN_TTL_MS="300"))
         run("--respawn", x, "--", "sh")
-        time.sleep(0.6)
+        time.sleep(0.6)         # past the TTL; the child exits only after
         check("expired arm reads running",
               (cmd(x) or {}).get("state") == "running")
+        open(xgo, "w").close()
         check("expired arm: child exit ends the session", gone(xsock, 5.0))
 
         # --- grandchild holding the slave does not stall the respawn ------
