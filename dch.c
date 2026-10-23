@@ -1920,6 +1920,8 @@ run_master_of(int argc, char **argv)
 /* Build a daemon-launching command vector. We fork+setsid here so the
 ** master survives the originating terminal closing. Returns 0 on parent
 ** success. */
+static int control_connect_path(const char *path);
+
 static int
 spawn_master(char *exe, const char *sockp, char **inner_argv)
 {
@@ -1963,16 +1965,21 @@ spawn_master(char *exe, const char *sockp, char **inner_argv)
 		_exit(127);
 	}
 	dch_trace("spawn_master child=%d sock=%s", (int)pid, sockp);
-	/* Parent: wait briefly so child can fail loudly before we attach. Poll on
-	** a fine 5ms quantum (200 * 5ms = 1s cap): the master binds in a few ms,
-	** so a coarse quantum just adds dead time to every cold start. Cost is a
-	** cheap stat()/waitpid() spin that exits the instant the socket appears. */
+	/* Parent: wait until the master accepts, so the caller's own connect
+	** cannot land before bind() or between bind() and listen(). Poll on a
+	** fine 5ms quantum (2000 * 5ms = 10s cap while the child lives): the
+	** master binds in a few ms, so a coarse quantum just adds dead time to
+	** every cold start, while a slow runner may need seconds to exec. The
+	** probe is a connect+close the master drops as a plain EOF. */
 	int status = 0;
-	for (int i = 0; i < 200; i++)
+	for (int i = 0; i < 2000; i++)
 	{
-		struct stat st;
-		if (stat(sockp, &st) == 0 && S_ISSOCK(st.st_mode))
+		int probe = control_connect_path(sockp);
+		if (probe >= 0)
+		{
+			close(probe);
 			return 0;
+		}
 		struct timespec ts = {0, 5 * 1000 * 1000}; /* 5ms */
 		nanosleep(&ts, NULL);
 		pid_t r = waitpid(pid, &status, WNOHANG);

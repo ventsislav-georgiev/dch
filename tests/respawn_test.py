@@ -309,6 +309,9 @@ def main():
         # pty (this child prints once and waits: it would be forever). A
         # stop right after a held session's respawn lines both up: the new
         # child prints while verbs queue, as for an agent relaunch.
+        # Timing-dependent smoke test for master.c's pty_activity poll
+        # guard, not a deterministic pin: SIGCONT finds only the pty ready, so
+        # the verb drain and the pty wake rarely share a pass.
         w, wsock = sess("rsw")
         spawn(w, "sh", "-c", "sleep 1")
         run("--respawn", w)

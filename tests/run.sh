@@ -705,5 +705,21 @@ print(next(s for s in json.load(sys.stdin) if s["name"] == sys.argv[1])["agents"
     check "--restart on a missing session exits 1" "$?" "1"
 fi
 
+# --- --spawn waits until the master accepts (#035) --------------------------
+if [ -x "$DCH" ]; then
+    # Slow master start: a bare-name `dch` re-execs itself via PATH, so a
+    # wrapper there delays only the master by 2s (past the old 1s cap).
+    if [ -x /bin/bash ]; then
+        real="$(cd "$(dirname "$DCH")" && pwd)/$(basename "$DCH")"
+        mkdir -p "$TMP/slow"
+        printf '#!/bin/bash\n[ "$1" = --master-of ] && sleep 2\nexec -a dch "%s" "$@"\n' \
+            "$real" >"$TMP/slow/dch"
+        chmod +x "$TMP/slow/dch"
+        PATH="$TMP/slow:$PATH" dch --spawn "slow$$" sleep 60 >/dev/null 2>&1
+        check "--spawn waits for a slow-starting master" "$?" "0"
+        "$DCH" -k "slow$$" >/dev/null 2>&1
+    fi
+fi
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
