@@ -2407,7 +2407,10 @@ fetch_screen(const char *path, char *buf, size_t cap, int deadline_ms,
 
 /* One rule: ANDed lowercase substrings (s2 optional). OR variants are
 ** separate rows. Strings are facts about the harnesses' own UIs (herdr
-** is prior art for the approach; nothing is ported from it — AGPL). */
+** is prior art for the approach; nothing is ported from it — AGPL).
+** A leading '^' on s1 makes a line rule: only a short line that starts
+** with s1 (after leading blanks) and contains s2 matches — the footer
+** itself, not prose that quotes it. */
 struct det_rule
 {
 	const char *s1, *s2;
@@ -2423,7 +2426,7 @@ static const struct det_rule det_suppress[] = {
 static const struct det_rule det_blocked[] = {
 	{ "do you want to proceed?", 0 },                  /* claude,gemini */
 	{ "enter to select", "esc to cancel" },            /* claude forms  */
-	{ "esc to cancel", "tab to amend" },               /* claude perms  */
+	{ "^esc to cancel", "tab to amend" },              /* claude perms  */
 	{ "press enter to confirm or esc to cancel", 0 },  /* codex         */
 	{ "enter to submit answer", 0 },                   /* codex forms   */
 	{ "allow command?", 0 },                           /* codex exec    */
@@ -2440,12 +2443,44 @@ static const struct det_rule det_working[] = {
 	{ "ctrl+c to interrupt", 0 },                      /* opencode      */
 };
 
+/* Longest footer line a line rule accepts, blanks trimmed (bytes;
+** the real one with its optional extra hints is ~50). */
+#define DET_LINE_MAX 64
+
+/* Line rule r ('^' s1) against the lines of hay. */
+static int
+det_line(const struct det_rule *r, const char *hay)
+{
+	const char *p = hay, *e, *q, *s1 = r->s1 + 1;
+
+	while (*p)
+	{
+		e = strchr(p, '\n');
+		if (!e)
+			e = p + strlen(p);
+		q = e;
+		while (p < e && (*p == ' ' || *p == '\t'))
+			p++;
+		while (q > p && (q[-1] == ' ' || q[-1] == '\t' ||
+		                 q[-1] == '\r'))
+			q--;
+		if (q - p <= DET_LINE_MAX &&
+		    !strncmp(p, s1, strlen(s1)))
+			for (q = p; q < e; q++)
+				if (!strncmp(q, r->s2, strlen(r->s2)))
+					return 1;
+		p = *e ? e + 1 : e;
+	}
+	return 0;
+}
+
 static int
 det_match(const struct det_rule *t, size_t n, const char *hay)
 {
 	size_t i;
 	for (i = 0; i < n; i++)
-		if (strstr(hay, t[i].s1) &&
+		if (t[i].s1[0] == '^' ? det_line(&t[i], hay) :
+		    strstr(hay, t[i].s1) &&
 		    (!t[i].s2 || strstr(hay, t[i].s2)))
 			return 1;
 	return 0;

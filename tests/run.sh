@@ -513,6 +513,18 @@ assert any(s["state"] == "blocked" for s in d), d
         check "detect claude edit prompt as blocked" \
               "$("$DCH" --status "$DN" 2>/dev/null)" "blocked"
 
+        # the footer rule is anchored to the footer line: prose quoting
+        # both phrases (split, or mid-sentence) is not a dialog.
+        paint c4 'The dialog footer says Esc to cancel\nand then Tab to amend.'
+        stale
+        check "footer phrases on separate lines do not block" \
+              "$("$DCH" --status "$DN" 2>/dev/null)" "idle"
+
+        paint c5 'commit: the Write and Edit dialogs share the footer Esc to cancel \302\267 Tab to amend so match on it'
+        stale
+        check "footer quoted mid-sentence does not block" \
+              "$("$DCH" --status "$DN" 2>/dev/null)" "idle"
+
         paint c3 'Do you want to create a file?'
         stale
         check "prose 'do you want to create' does not block" \
