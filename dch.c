@@ -1967,9 +1967,9 @@ spawn_master(char *exe, const char *sockp, char **inner_argv)
 		for (k = 0; k < ic; k++)
 			av[j++] = inner_argv[k];
 		av[j] = NULL;
-		/* execvp handles both absolute paths (when exe = realpath
-		** result) and bare names (when realpath failed and exe is
-		** the original argv[0] = "dch" found via PATH). */
+		/* exe is absolute after main() resolved argv[0]; execvp only
+		** matters for the bare-name fallback, when nothing on PATH
+		** matched and exe is still the original argv[0]. */
 		execvp(av[0], av);
 		_exit(127);
 	}
@@ -3601,6 +3601,32 @@ claude_tok(char **v, int argc)
 	return k;
 }
 
+/* First regular, executable <dir>/<name> along path, the way execvp()
+** searches it: an empty component means cwd. Leaves the hit in out and
+** returns 0, or returns -1 with out empty. */
+static int
+path_lookup(const char *name, const char *path, const char *cwd,
+            char *out, size_t outsz)
+{
+	const char *dir = path, *e;
+	struct stat st;
+
+	for (; dir; dir = e ? e + 1 : NULL)
+	{
+		int l;
+
+		e = strchr(dir, ':');
+		l = e ? (int)(e - dir) : (int)strlen(dir);
+		snprintf(out, outsz, "%.*s/%s", l ? l : (int)strlen(cwd),
+		         l ? dir : cwd, name);
+		if (stat(out, &st) == 0 && S_ISREG(st.st_mode) &&
+		    access(out, X_OK) == 0)
+			return 0;
+	}
+	out[0] = '\0';
+	return -1;
+}
+
 #ifdef HAVE_LIBGHOSTTY_VT
 
 #define AG_POLL_MS  250
@@ -4187,8 +4213,6 @@ claude_installed(const char *tok, const char *mpath, const char *mcwd,
                  char *out, size_t outsz)
 {
 	char exe[2048], buf[256], *sp;
-	const char *dir = mpath, *e;
-	struct stat st;
 	struct pollfd pfd;
 	long long end;
 	size_t got = 0;
@@ -4200,19 +4224,7 @@ claude_installed(const char *tok, const char *mpath, const char *mcwd,
 		snprintf(exe, sizeof exe, "%s%s%s", tok[0] == '/' ? "" : mcwd,
 		         tok[0] == '/' ? "" : "/", tok);
 	else
-		for (; dir; dir = e ? e + 1 : NULL)
-		{
-			int l;
-
-			e = strchr(dir, ':');
-			l = e ? (int)(e - dir) : (int)strlen(dir);
-			snprintf(exe, sizeof exe, "%.*s/%s", l ? l : (int)strlen(mcwd),
-			         l ? dir : mcwd, tok);
-			if (stat(exe, &st) == 0 && S_ISREG(st.st_mode) &&
-			    access(exe, X_OK) == 0)
-				break;
-			exe[0] = '\0';
-		}
+		path_lookup(tok, mpath, mcwd, exe, sizeof exe);
 	if (!exe[0] || pipe(fd) < 0)
 		return -1;
 	pid = fork();
@@ -4945,18 +4957,35 @@ main(int argc, char **argv)
 		sigprocmask(SIG_SETMASK, &none, NULL);
 	}
 
-	/* Resolve exe for the master re-exec. Only realpath() when argv[0] is a
-	** path (has a '/'): a bare name like "dch" came from a PATH lookup by the
-	** shell, and realpath()ing it resolves RELATIVE TO CWD — which silently
-	** picks up an unrelated "./dch" (e.g. a `dch/` source dir) and makes the
-	** master execvp() a directory ("failed to spawn"). Leaving a bare name as
-	** is lets the child's execvp() re-search PATH, which is what we want. */
+	/* Resolve exe for the master re-exec. It must end up absolute: --restart
+	** sends it to the master as the binary to land on, the master accepts
+	** only an absolute path, and its own fallback re-execs with execv(),
+	** which does no PATH search — a bare "dch" there resolves against the
+	** master's cwd and fails (or runs whatever ./dch sits there).
+	** A path (has a '/') is realpath()ed. A bare name like "dch" came from a
+	** PATH lookup by the shell, so repeat that lookup the way execvp() does.
+	** Never realpath() the bare name itself: that resolves RELATIVE TO CWD
+	** and silently picks up an unrelated "./dch" (e.g. a `dch/` source dir),
+	** making the master exec a directory ("failed to spawn"). An absolute
+	** PATH hit is kept as is, so /opt/homebrew/bin/dch stays the symlink and
+	** follows upgrades; a relative hit (empty or relative PATH entry) is
+	** realpath()ed. No hit keeps the bare name for execvp() to search. */
 	char *exe = argv[0];
 	if (strchr(argv[0], '/'))
 	{
 		char *rp = realpath(argv[0], NULL);
 		if (rp)
 			exe = rp;
+	}
+	else
+	{
+		char hit[PATH_MAX];
+		const char *path = getenv("PATH");
+
+		if (path && path_lookup(argv[0], path, ".", hit, sizeof hit) == 0)
+			exe = hit[0] == '/' ? strdup(hit) : realpath(hit, NULL);
+		if (!exe)
+			exe = argv[0];
 	}
 
 	/* Publish them for the master: MSG_RESTART re-execs this same image in

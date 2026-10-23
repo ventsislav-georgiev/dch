@@ -715,6 +715,23 @@ print(next(s for s in json.load(sys.stdin) if s["name"] == sys.argv[1])["agents"
     "$DCH" -k "$RN" >/dev/null 2>&1
     "$DCH" --restart "no-such-session-$$" >/dev/null 2>&1
     check "--restart on a missing session exits 1" "$?" "1"
+
+    # Bare-name dch (#038): run as "dch" off PATH from a cwd with no ./dch.
+    # The client must send an absolute binary; a bare "dch" made the master
+    # execv() "dch" against its cwd and answer "re-exec failed".
+    real="$(cd "$(dirname "$DCH")" && pwd)/$(basename "$DCH")"
+    mkdir -p "$TMP/bare/bin" "$TMP/bare/cwd"
+    ln -sf "$real" "$TMP/bare/bin/dch"
+    BN="bare$$"
+    out=$(cd "$TMP/bare/cwd" && export PATH="$TMP/bare/bin:$PATH" &&
+        dch --spawn "$BN" sleep 60 >/dev/null 2>&1 &&
+        dch --restart "$BN" 2>&1)
+    case "$out" in
+        *"re-exec failed"*) bad "bare-name --restart re-execs ($out)" ;;
+        *"restarted on dch"*) ok "bare-name --restart re-execs" ;;
+        *) bad "bare-name --restart re-execs ($out)" ;;
+    esac
+    "$DCH" -k "$BN" >/dev/null 2>&1
 fi
 
 # --- --spawn waits until the master accepts (#035) --------------------------
