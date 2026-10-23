@@ -1922,6 +1922,15 @@ run_master_of(int argc, char **argv)
 ** success. */
 static int control_connect_path(const char *path);
 
+static long long
+wall_ms(void)
+{
+	struct timeval tv;
+
+	gettimeofday(&tv, NULL);
+	return (long long)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+}
+
 static int
 spawn_master(char *exe, const char *sockp, char **inner_argv)
 {
@@ -1967,12 +1976,15 @@ spawn_master(char *exe, const char *sockp, char **inner_argv)
 	dch_trace("spawn_master child=%d sock=%s", (int)pid, sockp);
 	/* Parent: wait until the master accepts, so the caller's own connect
 	** cannot land before bind() or between bind() and listen(). Poll on a
-	** fine 5ms quantum (2000 * 5ms = 10s cap while the child lives): the
-	** master binds in a few ms, so a coarse quantum just adds dead time to
-	** every cold start, while a slow runner may need seconds to exec. The
-	** probe is a connect+close the master drops as a plain EOF. */
+	** fine 5ms quantum against a 10s wall-clock cap (an iteration count
+	** overran it under load): the master binds in a few ms, so a coarse
+	** quantum just adds dead time to every cold start, while a slow runner
+	** may need seconds to exec. The probe is a connect+close the master
+	** drops as a plain EOF. Out of time is a failure (-1) with its own
+	** message; the still-starting master is left alone. */
 	int status = 0;
-	for (int i = 0; i < 2000; i++)
+	long long end = wall_ms() + 10000;
+	for (;;)
 	{
 		int probe = control_connect_path(sockp);
 		if (probe >= 0)
@@ -1980,6 +1992,8 @@ spawn_master(char *exe, const char *sockp, char **inner_argv)
 			close(probe);
 			return 0;
 		}
+		if (wall_ms() >= end)
+			break;
 		struct timespec ts = {0, 5 * 1000 * 1000}; /* 5ms */
 		nanosleep(&ts, NULL);
 		pid_t r = waitpid(pid, &status, WNOHANG);
@@ -1990,7 +2004,8 @@ spawn_master(char *exe, const char *sockp, char **inner_argv)
 			return -1;
 		}
 	}
-	return 0;
+	fprintf(stderr, "dch: master did not accept within 10s\n");
+	return -1;
 }
 
 static int
@@ -3603,15 +3618,6 @@ struct agent
 	long long t_sent, ok_since, deadline;
 };
 
-static long long
-wall_ms(void)
-{
-	struct timeval tv;
-
-	gettimeofday(&tv, NULL);
-	return (long long)tv.tv_sec * 1000 + tv.tv_usec / 1000;
-}
-
 static long
 env_ms(const char *key, long dflt)
 {
@@ -4486,6 +4492,13 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 			       "DCH_HOLD_MS", a->id, step_s);
 			return 1;
 		}
+		/* dch never arms the relaunched claude, so "armed" here is a late
+		** duplicate 'a': a relaunch that timed out, was re-sent above while
+		** the session read held, then applied after all. Disarm it once,
+		** or claude's next exit would relaunch it again. Not held, so 'c'
+		** only disarms (a held session would end on it). */
+		if (strcmp(ci.state, "armed") == 0)
+			respawn_req(a->path, 'c', NULL, 0);
 		g = CG_UNKNOWN;
 		if (ci.pid > 0 && claude_find(ci.pid, 1, &r) > 0 &&
 		    strcmp(r.status, "idle") == 0 &&
