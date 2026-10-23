@@ -170,6 +170,7 @@ dch --status <name>                             # print session state
 dch --report <name> <state>                     # push state (harness hooks)
 dch --ls-json                                   # sessions as a JSON array
 dch --restart <name>|--all [-f]                 # upgrade a live session in place
+dch --restart <name>|--all --include-agents [-f]  # ...then restart its stale Claude agents
 dch --respawn <name> [-- cmd...]                # on child exit, start cmd in its place
 dch --respawn <name> --cancel                   # drop a pending respawn
 dch --cmd <name>                                # child pid, state, argv, exit status (JSON)
@@ -212,7 +213,7 @@ someone is watching is invisible to them.
 | `--report <n> <state>` | Push a semantic state: `working`, `idle`, `blocked`, or `done` (closed set, unknown tokens rejected); `clear` reverts to auto (detection + heuristic). Last write wins; cleared automatically when the session ends. | 0 ok, 1 no session / bad state |
 | `--wait <n> --state <s[,s...]> [--timeout ms]` | Block until the state matches any of the comma list (e.g. `idle,blocked,done` = "turn over"); prints the matched state. `active` is accepted as an alias for `working`. Polls every 100 ms. | 0 hit, 2 timeout, 1 no session |
 | `--ls-json` | All sessions as JSON: `[{"name","alias","harness","activity_epoch","state","version","agents"}]`. `harness` is the name of the Claude Code or Codex session running inside, or `""`; the real `name` remains separate. `state` follows the same resolution rule as `--status`. `version` is the dch version of the master serving that session, or `""` for a master old enough not to report one. `agents` is the number of live subagents on Claude Code's agent panel (the `⏺ main` block under the prompt), `0` when no panel is on screen — including while a prompt covers it — or `DCH_NO_DETECT=1` is set. | 0 |
-| `--restart <n>` \| `--restart --all [-f]` | Re-exec the session's master onto the current `dch` binary, in place — the program inside keeps running (see [Upgrading a live session](#upgrading-a-live-session)). `--all` restarts only sessions whose `version` differs from this binary's; `-f` restarts all of them. `--all` then restarts stale Claude Code agents (see [Restarting Claude Code agents](#restarting-claude-code-agents)). | 0 ok, 1 failed / master too old / an agent restart failed |
+| `--restart <n>` \| `--restart --all` `[--include-agents] [-f]` | Re-exec the session's master onto the current `dch` binary, in place — the program inside keeps running (see [Upgrading a live session](#upgrading-a-live-session)). `--all` restarts only sessions whose `version` differs from this binary's; `-f` restarts all of them. With `--include-agents`, it then restarts the stale Claude Code agents of those sessions — every session with `--all`, only `<n>` otherwise; `-f` forces current agents too (see [Restarting Claude Code agents](#restarting-claude-code-agents)). Without the flag no agent is touched, `--all` included. `--include-agents` without `--restart` is a usage error. | 0 ok, 1 failed / master too old / an agent restart failed |
 | `--respawn <n> [-- cmd...]` | Arm a one-shot respawn: when the session's program next exits, the master keeps the session (same socket, pty size, attached clients) and starts `cmd` in its place. No `cmd` arms a *hold*: the session stays up childless until a second `--respawn <n> -- cmd` starts one, or until `DCH_HOLD_MS` (default 120000) ends it. An arm that nothing consumes expires after `DCH_RESPAWN_TTL_MS` (default 300000); both are read from the master's environment. `--restart` refuses while a respawn is armed or held. | 0 ok, 1 no session / refused / master too old |
 | `--respawn <n> --cancel` | Drop a pending arm. On a held (childless) session it ends the session. | 0 ok, 1 no session |
 | `--cmd <n>` | Print `{"pid","state","argv","exit_code","exit_signal","tail"}`: the child's pid (`null` while held), `state` `running`, `armed` or `held`, the argv it was started with, the exit status of a child reaped under an arm (`null` otherwise), and `tail`, the last 8 KB the child wrote since the arm, raw. | 0 ok, 1 no session / master too old |
@@ -375,6 +376,7 @@ which is exactly what you don't want to do to a long-running agent.
 ```sh
 brew upgrade dch
 dch --restart --all      # every session not already on this version
+dch --restart --all --include-agents   # ...and their stale Claude agents
 ```
 
 The master serialises its state, then replaces its own image with
@@ -401,8 +403,11 @@ upgrade to a `dch` that has live restart, that is every session you have.
 ### Restarting Claude Code agents
 
 Upgrading Claude Code leaves every running `claude` on the old version until it
-is restarted. After its master pass, `dch --restart --all` does that for each
-session whose program is Claude Code, without losing the conversation:
+is restarted. After its master pass, `dch --restart --all --include-agents`
+does that for each session whose program is Claude Code, without losing the
+conversation; `dch --restart <name> --include-agents` does it for that one
+session only. The step is opt-in: without `--include-agents`, `--restart`
+(`--all` included) restarts masters only and leaves every agent alone.
 
 1. **Find.** A session qualifies when its command (`dch --cmd`) has a `claude`
    token — directly or behind a wrapper such as `headroom wrap claude --chrome`
@@ -470,10 +475,10 @@ Limitations:
 - **Positional prompt.** A positional prompt argument (`claude "fix the
   tests"`) is kept and sent again on resume. dch cannot tell it apart from an
   option value cheaply.
-- **Own session.** The session running `dch --restart --all` itself is
-  skipped. Run it from outside dch to restart that one.
-- **dch-lite.** dch-lite (no mirror) skips this step. It prints a note
-  when some session runs claude.
+- **Own session.** The session running `dch --restart --include-agents` itself
+  is skipped. Run it from outside dch to restart that one.
+- **dch-lite.** dch-lite (no mirror) skips this step. Given
+  `--include-agents`, it prints a note when some session runs claude.
 - **Respawn pending.** A session with a pending `--respawn` (armed or held)
   is skipped.
 - **Turn-start race.** A turn can start between the last idle check and
@@ -504,7 +509,7 @@ environment disables it at spawn.
 | Verb | Without mirror |
 | --- | --- |
 | `--spawn`, `--send`, `--run`, `--status`, `--report`, `--wait --state`, `--ls-json` | Work unchanged (plain pty writes / sidecar reads). State detection needs the master's mirror, so against a lite/`DCH_NO_VT` master `--status` falls back to reported state + output heuristic. |
-| `--restart --all` agent step | Skipped with a note by a lite client: it needs the mirror to see the composer. |
+| `--restart --include-agents` agent step | Skipped with a note by a lite client: it needs the mirror to see the composer. |
 | `--read`, `--wait --match` | Exit 3 with a message pointing at the full build. |
 | `--keys` | Falls back to a fixed legacy xterm table client-side (exit 0 + stderr note). Mode-aware apps may misread modified keys. |
 

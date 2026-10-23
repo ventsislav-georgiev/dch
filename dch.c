@@ -1851,6 +1851,11 @@ usage(void)
 	    "                                             --all skips sessions\n"
 	    "                                             already current (-f\n"
 	    "                                             restarts them anyway)\n"
+	    "  dch --restart <name>|--all --include-agents [-f]\n"
+	    "                                             then also restart stale\n"
+	    "                                             Claude Code agents (-f:\n"
+	    "                                             current ones too); off\n"
+	    "                                             by default, --all too\n"
 	    "  dch --respawn <name> [-- cmd...]           when the program exits,\n"
 	    "                                             keep the session and\n"
 	    "                                             start cmd in its place;\n"
@@ -4535,10 +4540,11 @@ ag_on_sig(int sig)
 	ag_sig = sig;
 }
 
-/* The agent step of `--restart --all`. Returns the number of agents that
-** were attempted and failed. */
+/* The agent step of `--restart --include-agents`: every session, or only
+** `only` when non-NULL. Returns the number of agents that were attempted
+** and failed. */
 static int
-restart_agents(int force)
+restart_agents(int force, const char *only)
 {
 	struct slist sl = {0}, cur = {0};
 	struct agent *ag;
@@ -4546,7 +4552,7 @@ restart_agents(int force)
 	const char *self = getenv("DCH_SESSION");
 	long tmo = env_ms("DCH_AGENT_TIMEOUT_MS", 600000);
 	long settle = env_ms("DCH_AGENT_SETTLE_MS", 3000);
-	char selfb[256], want[64] = "";
+	char selfb[256], onlyb[256], want[64] = "";
 	int na = 0, k, fails = 0, said = 0, live;
 	static const int sigs[] = { SIGINT, SIGTERM, SIGHUP };
 	struct sigaction sa, old[3], oldpipe;
@@ -4557,6 +4563,8 @@ restart_agents(int force)
 		rmsg = ag_resume_msg;
 	if (self && *self)
 		self = canon_name(self, selfb, sizeof selfb);
+	if (only)
+		only = canon_name(only, onlyb, sizeof onlyb);
 	list_sessions(&sl);
 	ag = calloc((size_t)sl.n + 1, sizeof *ag);
 	if (!ag)
@@ -4573,6 +4581,8 @@ restart_agents(int force)
 		long mpid;
 		int st, n;
 
+		if (only && strcmp(sl.v[k], only) != 0)
+			continue;
 		snprintf(a->name, sizeof a->name, "%s", sl.v[k]);
 		session_sock_path(sl.v[k], a->path, sizeof a->path);
 		st = cmd_query(a->path, &a->ci);
@@ -4655,7 +4665,7 @@ restart_agents(int force)
 		cmd_info_free(&a->ci);
 	}
 	slist_free(&sl);
-	if (cur.n && !na && !said)
+	if (cur.n && !na && !said && !only)
 		printf("all claude agents already on claude %s\n", want);
 	else
 		for (k = 0; k < cur.n; k++)
@@ -4749,18 +4759,22 @@ restart_agents(int force)
 #else /* !HAVE_LIBGHOSTTY_VT */
 
 static int
-restart_agents(int force)
+restart_agents(int force, const char *only)
 {
 	struct slist sl = {0};
 	struct cmd_info ci;
-	char path[1100];
+	char path[1100], onlyb[256];
 	int k, hit = 0;
 
 	(void)force;
+	if (only)
+		only = canon_name(only, onlyb, sizeof onlyb);
 	/* Only worth a word when some session runs claude. */
 	list_sessions(&sl);
 	for (k = 0; k < sl.n && !hit; k++)
 	{
+		if (only && strcmp(sl.v[k], only) != 0)
+			continue;
 		session_sock_path(sl.v[k], path, sizeof path);
 		if (cmd_query(path, &ci) == 0)
 		{
@@ -4793,7 +4807,7 @@ main(int argc, char **argv)
 	    action = A_ATTACH;
 	char alias_arg[600] = "";
 	int opt_ansi = 0, opt_recent = -1, opt_timeout = 10000, opt_cursor = 0;
-	int opt_all = 0, opt_cancel = 0;
+	int opt_all = 0, opt_cancel = 0, opt_agents = 0;
 	int opt_agent_json = 0;
 	int opt_cols = 0, opt_rows = 0;
 	char opt_match[DCH_WAIT_MAX + 1] = "";
@@ -5062,6 +5076,11 @@ main(int argc, char **argv)
 			opt_cancel = 1;
 			i++;
 		}
+		else if (strcmp(a, "--include-agents") == 0)
+		{
+			opt_agents = 1;
+			i++;
+		}
 		else if (strcmp(a, "--ansi") == 0)
 		{
 			opt_ansi = 1;
@@ -5186,6 +5205,12 @@ main(int argc, char **argv)
 		fprintf(stderr, "dch: --cancel only works with --respawn\n");
 		return 1;
 	}
+	if (opt_agents && action != A_RESTART)
+	{
+		fprintf(stderr, "dch: --include-agents only works with "
+		        "--restart\n");
+		return 1;
+	}
 
 	/* Auto-name only where the action needs a specific session and the
 	** caller didn't already supply one. */
@@ -5225,7 +5250,11 @@ main(int argc, char **argv)
 			rc = do_restart_verb(session_name,
 			                     session_version(session_name)
 			                         == NULL, 0);
-			return rc == 0 ? 0 : 1;
+			if (rc != 0)
+				return 1;
+			fflush(stdout);
+			return opt_agents && restart_agents(force, session_name)
+			       ? 1 : 0;
 		}
 
 		/* --all restarts only what is actually stale: a restart is
@@ -5265,7 +5294,7 @@ main(int argc, char **argv)
 			       old, old == 1 ? " is" : "s are");
 		fflush(stdout);
 		/* Then the agents, on masters that now speak --respawn. */
-		if (restart_agents(force))
+		if (opt_agents && restart_agents(force, NULL))
 			bad++;
 		return bad ? 1 : 0;
 	}

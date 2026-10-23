@@ -248,7 +248,7 @@ substring
 (at most 512 bytes); print the matching line. Default timeout 10000 ms.
 Exit 0 on match, 2 on timeout, 3 if no mirror.
 .TP
-.BI \-\-restart " name" "\fR|\fP" \-\-all " " [ \-f ]
+.BI \-\-restart " name" "\fR|\fP" \-\-all " " [ \-\-include\-agents ] " " [ \-f ]
 Re\-execute the session's master process onto the current
 .B dch
 binary, in place. The program inside the session keeps running: its process,
@@ -270,9 +270,18 @@ is too old to know the verb, in which case the session must be recreated.
 Scrollback held only in the mirror is not carried across a restart; the
 visible screen is.
 .IP
-After the master pass,
+With
+.BR \-\-include\-agents ,
+the master pass is followed by restarting Claude Code agents: in every session
+with
+.BR \-\-all ,
+in the named session only otherwise. Without it no agent is touched,
 .B \-\-all
-also restarts Claude Code agents. A session qualifies when its command has a
+included.
+.B \-\-include\-agents
+without
+.B \-\-restart
+is a usage error. A session qualifies when its command has a
 .B claude
 token (directly or behind a wrapper such as
 .BR "headroom wrap claude" )
@@ -327,7 +336,9 @@ sessions, a
 started by hand inside a session's shell, a session with a pending respawn,
 and the session running the command. A positional prompt argument is sent
 again on resume. A dch\-lite client skips this step, with a note when a
-session runs claude. The step can take up to
+session runs claude and
+.B \-\-include\-agents
+was given. The step can take up to
 .BR DCH_AGENT_TIMEOUT_MS ;
 from inside Claude Code run it in the background. SIGINT, SIGTERM or SIGHUP
 types the resume message into agents still waiting to pause and lets
@@ -484,7 +495,7 @@ Read by the master: how long an unconsumed respawn arm lives (default 300000).
 .TP
 .B DCH_PAUSE_MSG
 Text
-.B "\-\-restart \-\-all"
+.B "\-\-restart \-\-include\-agents"
 types to pause a Claude agent (default begins
 .IR "pause all work, i need to restart you" ).
 .TP

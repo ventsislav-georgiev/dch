@@ -1,4 +1,5 @@
-"""Agent-aware `dch --restart --all`: pause Claude, wait, relaunch with --resume.
+"""Agent-aware `dch --restart --include-agents`: pause Claude, wait, relaunch
+with --resume.
 
 Drives tests/fake_claude.py installed as `claude` first on PATH, with HOME
 pointing at a temp dir so its session records never touch a real ~/.claude.
@@ -10,8 +11,10 @@ self-restart, shell-launched Claude, an old master, -f, a decoy resume line
 and a mangled (SGR-split, hard-wrapped) exit line. Also: Enter only once the
 text shows in the composer (a prompt raised by the paste gets no Enter, a
 "[Pasted text #1]" placeholder counts), SIGTERM while waiting (resume typed),
-a pending respawn, a crash's last output in the report. On dch-lite it checks
-the step is skipped with a note, and only when a session runs claude.
+a pending respawn, a crash's last output in the report. The agent step is
+opt-in: without --include-agents nothing is typed, and `--restart <name>`
+touches only that session's agent. On dch-lite it checks the step is skipped
+with a note, only when a session runs claude and the flag is given.
 
 Run:  python3 tests/agent_restart_test.py        (uses ./dch)
 """
@@ -117,9 +120,9 @@ def main():
         return [e["text"] for e in events(n)
                 if e["ev"] == "line" and (pid is None or e["pid"] == pid)]
 
-    def up(n, count=1):
+    def up(n, count=1, t=10.0):
         """The fake's count-th start, once it has painted its screen."""
-        s = until(lambda: len(starts(n)) >= count and starts(n)[count - 1])
+        s = until(lambda: len(starts(n)) >= count and starts(n)[count - 1], t)
         if s:
             pids.add(s["pid"])
             until(lambda: lite or "auto mode on" in run("--read", n).stdout)
@@ -136,7 +139,8 @@ def main():
                 if "--master-of" in l and sock in l]
 
     def restart_all(*extra, env=None):
-        return run("--restart", "--all", *extra, env=env, timeout=120)
+        return run("--restart", "--all", "--include-agents", *extra, env=env,
+                   timeout=120)
 
     lite = False
     try:
@@ -144,6 +148,10 @@ def main():
         lite = run("--read", probe).returncode == 3
         run("-k", probe)
         names.remove(probe)
+        r = run("-ls", "--include-agents")
+        check("--include-agents without --restart: usage error",
+              r.returncode == 1 and
+              "--include-agents only works with --restart" in r.stderr)
 
         if lite:
             sh = sess("litesh", "sh")
@@ -159,6 +167,9 @@ def main():
             r = restart_all()
             check("lite: agent step skipped with a one-line note",
                   "dch-lite has no terminal mirror" in r.stdout)
+            r = run("--restart", "--all")
+            check("lite: no note without --include-agents",
+                  "agents:" not in r.stdout)
             check("lite: nothing typed into the agent", typed(n) == [])
             return finish(fails, tmp, names, pids)
 
@@ -181,10 +192,11 @@ def main():
         with open(os.path.join(fc, "version"), "w") as f:
             f.write("2.0.0")
 
-        proc = subprocess.Popen([DCH, "--restart", "--all"],
+        proc = subprocess.Popen([DCH, "--restart", "--all", "--include-agents"],
                                 stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, text=True)
-        a2 = up(a, 2)
+        # four pauses go out one by one first; seen to take ~14s on a busy host
+        a2 = up(a, 2, 45.0)
         check("a relaunched while b (shell), c (subagent), d (busy) wait",
               a2 and not any(t == "/exit" for n in (b, c, d)
                              for t in typed(n)))
@@ -249,7 +261,46 @@ def main():
               "all claude agents already on claude 2.0.0" in r.stdout and
               all(len(typed(n)) == counts[n] for n in (a, b, c, d)) and
               r.returncode == 0)
-        for n in (b, c, d):
+
+        # --- opt-in, and one session at a time ---------------------------
+        def snap():
+            return {n: (len(starts(n)), len(typed(n))) for n in (a, b, c, d)}
+        with open(os.path.join(fc, "version"), "w") as f:
+            f.write("2.5.0")
+        z = sess("agz", "sh")
+        s0 = snap()
+        r = run("--restart", "--all", timeout=120)
+        check("--restart --all without --include-agents: masters only, no "
+              "agent lines, nothing typed",
+              r.returncode == 0 and "claude" not in r.stdout and
+              snap() == s0)
+        r = run("--restart", c, timeout=120)
+        check("--restart <name> without the flag: agent untouched",
+              r.returncode == 0 and "claude" not in r.stdout and
+              snap() == s0)
+        r = run("--restart", c, "--include-agents", timeout=120)
+        s1 = snap()
+        check("--restart <name> --include-agents: only that stale agent",
+              r.returncode == 0 and up(c, 3) and
+              "%s: claude 2.0.0 -> 2.5.0" % c in r.stdout and
+              all(s1[n] == s0[n] for n in (a, b, d)))
+        r = run("--restart", c, "--include-agents", timeout=120)
+        check("--restart <name> --include-agents, current: one line for it",
+              r.returncode == 0 and snap() == s1 and
+              "%s: already on claude 2.5.0" % c in r.stdout and
+              "all claude agents" not in r.stdout)
+        r = run("-f", "--restart", c, "--include-agents", timeout=120)
+        check("-f --restart <name> --include-agents restarts a current agent",
+              r.returncode == 0 and up(c, 4) and
+              "%s: claude 2.5.0 -> 2.5.0" % c in r.stdout and
+              all(snap()[n] == s0[n] for n in (a, b, d)))
+        r = run("--restart", z, "--include-agents", timeout=120)
+        check("--restart <sh session> --include-agents: no agent line",
+              r.returncode == 0 and len(r.stdout.splitlines()) == 1 and
+              r.stdout.startswith("%s: restarted on dch" % z))
+        with open(os.path.join(fc, "version"), "w") as f:
+            f.write("2.0.0")
+        for n in (b, c, d, z):
             run("-k", n)
             names.remove(n)
         # a long pause text: the composer shows Claude's paste placeholder
@@ -368,7 +419,8 @@ def main():
         # --- SIGTERM while waiting: the paused agent is resumed -----------
         i = sess("agi", "claude", shell=True)
         up(i)
-        proc = subprocess.Popen([DCH, "--restart", "--all", "-f"],
+        proc = subprocess.Popen([DCH, "--restart", "--all", "--include-agents",
+                                 "-f"],
                                 stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, text=True)
         first = ""
@@ -397,7 +449,8 @@ def main():
         i2 = sess("agv", "claude", shell=True)
         up(i1)
         up(i2)
-        proc = subprocess.Popen([DCH, "--restart", "--all", "-f"],
+        proc = subprocess.Popen([DCH, "--restart", "--all", "--include-agents",
+                                 "-f"],
                                 stdout=subprocess.PIPE,
                                 stderr=subprocess.DEVNULL, text=True)
         seen = 0
@@ -425,7 +478,7 @@ def main():
         up(s)
         with open(os.path.join(fc, "version"), "w") as f:
             f.write("4.0.0")
-        run("--send", s, "!run '%s' --restart --all" % DCH)
+        run("--send", s, "!run '%s' --restart --all --include-agents" % DCH)
         run("--keys", s, "enter")
         so = os.path.join(fc, s + ".run.out")
         check("run under the agent: its own session skipped",
@@ -433,7 +486,7 @@ def main():
                     "run from outside dch to restart this one" in
                     open(so).read(), 15.0))
         check("run under the agent: nothing typed into it",
-              typed(s) == ["!run '%s' --restart --all" % DCH])
+              typed(s) == ["!run '%s' --restart --all --include-agents" % DCH])
     except Exception:
         traceback.print_exc()
         fails += 1
