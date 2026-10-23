@@ -501,6 +501,23 @@ assert any(s["state"] == "blocked" for s in d), d
         check "half of a paired rule does not block" \
               "$("$DCH" --status "$DN" 2>/dev/null)" "working"
 
+        # Claude Write/Edit permission dialogs: matched on the shared
+        # footer, not the question (\302\267 is the middle dot).
+        paint c1 ' Create file\n notes.txt\n  1 hello\n Do you want to create notes.txt?\n \342\235\257 1. Yes\n   3. No\n Esc to cancel \302\267 Tab to amend'
+        stale
+        check "detect claude write prompt as blocked" \
+              "$("$DCH" --status "$DN" 2>/dev/null)" "blocked"
+
+        paint c2 ' Edit file\n Do you want to make this edit to foo.py?\n \342\235\257 1. Yes\n   3. No\n Esc to cancel \302\267 Tab to amend'
+        stale
+        check "detect claude edit prompt as blocked" \
+              "$("$DCH" --status "$DN" 2>/dev/null)" "blocked"
+
+        paint c3 'Do you want to create a file?'
+        stale
+        check "prose 'do you want to create' does not block" \
+              "$("$DCH" --status "$DN" 2>/dev/null)" "idle"
+
         paint q1 'nothing to see here'
         stale
         check "no signals, stale output is idle" \

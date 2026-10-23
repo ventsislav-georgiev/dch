@@ -2401,6 +2401,7 @@ static const struct det_rule det_suppress[] = {
 static const struct det_rule det_blocked[] = {
 	{ "do you want to proceed?", 0 },                  /* claude,gemini */
 	{ "enter to select", "esc to cancel" },            /* claude forms  */
+	{ "esc to cancel", "tab to amend" },               /* claude perms  */
 	{ "press enter to confirm or esc to cancel", 0 },  /* codex         */
 	{ "enter to submit answer", 0 },                   /* codex forms   */
 	{ "allow command?", 0 },                           /* codex exec    */

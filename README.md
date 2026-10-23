@@ -278,7 +278,7 @@ busy or waiting on a human.
 
 | State | Signal |
 | --- | --- |
-| `blocked` | Permission/confirmation prompts: "Do you want to proceed?", "Allow command?", "Press enter to confirm or esc to cancel", "permission required", "waiting for approval", … (Claude Code, Codex, Gemini, opencode, Cursor) |
+| `blocked` | Permission/confirmation prompts: "Do you want to proceed?", "Esc to cancel · Tab to amend" (Write/Edit), "Allow command?", "Press enter to confirm or esc to cancel", "permission required", "waiting for approval", … (Claude Code, Codex, Gemini, opencode, Cursor) |
 | `working` | Busy footers ("esc to interrupt", "ctrl+c to interrupt") or an animated braille spinner at the start of a line — only honored if the session also produced output in the last 30 s, so a frozen frame can't read as busy |
 | `idle` / `working` | Fallback output heuristic: pty output within the last 5 s = `working`, else `idle` |
 
