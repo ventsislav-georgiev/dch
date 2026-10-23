@@ -11,15 +11,17 @@ self-restart, shell-launched Claude, an old master, -f, a decoy resume line
 and a mangled (SGR-split, hard-wrapped) exit line. Also: Enter only once the
 text shows in the composer (a prompt raised by the paste gets no Enter, a
 "[Pasted text #1]" placeholder counts), SIGTERM while waiting (resume typed),
-a pending respawn, a crash's last output in the report. The agent step is
-opt-in: without --include-agents nothing is typed, and `--restart <name>`
-touches only that session's agent. On dch-lite it checks the step is skipped
-with a note, only when a session runs claude and the flag is given.
+a pending respawn, a crash's last output in the report, a master stalled
+(SIGSTOP, 3 s) right after /exit or right after the relaunch: waited out, not
+taken for a gone session, relaunched once. The agent step is opt-in: without
+--include-agents nothing is typed, and `--restart <name>` touches only that
+session's agent. On dch-lite it checks the step is skipped with a note, only
+when a session runs claude and the flag is given.
 
 Run:  python3 tests/agent_restart_test.py        (uses ./dch)
 """
-import json, os, shutil, socket, stat, subprocess, sys, tempfile, threading
-import time, traceback
+import json, os, shutil, signal, socket, stat, subprocess, sys, tempfile
+import threading, time, traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
@@ -400,6 +402,61 @@ def main():
             if n in names:
                 run("-k", n)
                 names.remove(n)
+
+        # --- a stalled master is not a gone session ----------------------
+        # SIGSTOP this session's master for 3 s (> CTL_IDLE_MS) right after
+        # /exit lands, or right after the relaunched claude starts: the
+        # step must wait it out, relaunch once and type the resume message.
+        def stall(base, ver, phase, hit):
+            n = sess(base, "claude")
+            s1 = up(n)
+            with open(os.path.join(fc, "version")) as f:
+                was = f.read().strip()
+            with open(os.path.join(fc, "version"), "w") as f:
+                f.write(ver)
+            # only this test's master: the sock path is in our tmp; the pid
+            # holds across --restart (exec in place), so look it up first
+            m = masters(os.path.join(sockdir, n + ".sock"))
+            proc = subprocess.Popen([DCH, "--restart", n, "--include-agents"],
+                                    stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, text=True)
+            stopped, at = False, 0
+            try:
+                end = time.time() + 45.0
+                while len(m) == 1 and time.time() < end and not hit(n):
+                    time.sleep(0.005)
+                if len(m) == 1 and hit(n):
+                    os.kill(m[0], signal.SIGSTOP)
+                    stopped = True
+                    at = len(starts(n))
+                    time.sleep(3.0)
+            finally:
+                if stopped:
+                    os.kill(m[0], signal.SIGCONT)
+            out = proc.communicate(timeout=120)[0]
+            print("     | " + out.rstrip().replace("\n", "\n     | "))
+            s2 = up(n, 2)
+            ci = cmd(n) or {}
+            check("%s: the master was stalled %s" % (base, phase),
+                  stopped and at == (1 if phase == "before the relaunch"
+                                     else 2))
+            check("%s: exits 0, resumed the same session" % base,
+                  proc.returncode == 0 and s1 and
+                  "%s: claude %s -> %s, resumed %s" % (n, was, ver, s1["sid"])
+                  in out)
+            check("%s: resume message typed into the relaunched claude"
+                  % base, s2 and until(lambda: any(
+                      t.startswith(RESUME) for t in typed(n, s2["pid"]))))
+            check("%s: running as --resume <id>, relaunched once" % base,
+                  ci.get("state") == "running" and s1 and
+                  ci.get("argv") == ["claude", "--resume", s1["sid"]] and
+                  len(starts(n)) == 2)
+            run("-k", n)
+            names.remove(n)
+        stall("agse", "3.1.0", "before the relaunch",
+              lambda n: "/exit" in typed(n))
+        stall("agss", "3.2.0", "after the relaunch",
+              lambda n: len(starts(n)) >= 2)
 
         # --- pause timeout, alone so nothing else eats its clock ----------
         t = sess("agt", "claude", shell=True)

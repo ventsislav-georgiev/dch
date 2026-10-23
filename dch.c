@@ -4309,30 +4309,79 @@ tail_lines(const unsigned char *t, size_t n, int want, char *out,
 	free(p);
 }
 
+/* A master that does not answer is not a gone session: -1/-2 it went
+** quiet, -4 with the socket still there is a refused connect (a full
+** listen backlog). Only a missing socket means the session ended. */
+static int
+ag_quiet(const struct agent *a, int st)
+{
+	struct stat sb;
+
+	return st == -1 || st == -2 ||
+	       (st == -4 && (stat(a->path, &sb) == 0 || errno != ENOENT));
+}
+
+/* Respawn the held session as claude --resume <id>. A master that did not
+** answer may or may not have taken it: AG_START sends it again while the
+** session still reads held. Only a refusal cancels, which ends the
+** session. Returns 1 when it failed. */
+static int
+ag_relaunch(struct agent *a)
+{
+	char **nv;
+	int nc, st;
+
+	nv = resume_argv(a->argv, a->argc, a->tok, a->id, &nc);
+	st = nv ? respawn_req(a->path, 'a', nv, nc) : -3;
+	free(nv);
+	if (st == DCH_ST_OK || ag_quiet(a, st))
+	{
+		a->step = AG_START;
+		return 0;
+	}
+	respawn_req(a->path, 'c', NULL, 0);
+	ag_say(a, 1, "relaunch with --resume %s was refused (%d); "
+	       "session ended", a->id, st);
+	return 1;
+}
+
 /* The hold is armed and /exit typed: wait for the exit, then relaunch. */
 static int
 ag_exited(struct agent *a, const char *step_s)
 {
 	struct cmd_info ci;
-	char tid[64], **nv;
-	int nc, st, fail = 0;
+	char tid[64];
+	int st;
 
 	st = cmd_query(a->path, &ci);
+	if (ag_quiet(a, st))
+	{
+		if (wall_ms() < a->deadline)
+			return 0;
+		/* No cancel: to a held master it would end the session. */
+		ag_say(a, 1, "the master stopped answering after /exit (silent "
+		       "at the %s limit); hold left as is, it ends after "
+		       "DCH_HOLD_MS; resume by hand: claude --resume %s",
+		       step_s, a->sid);
+		return 1;
+	}
 	if (st != 0)
 	{
-		ag_say(a, 1, "the session went away during /exit");
+		ag_say(a, 1, "the session went away during /exit; resume by "
+		       "hand: claude --resume %s", a->sid);
 		return 1;
 	}
 	if (strcmp(ci.state, "held") != 0)
 	{
 		if (strcmp(ci.state, "running") == 0)
 			ag_say(a, 1, "the hold was dropped (expired or cancelled) "
-			       "before claude exited");
+			       "before claude exited (session %s)", a->sid);
 		else if (wall_ms() >= a->deadline)
 		{
 			respawn_req(a->path, 'c', NULL, 0);
 			ag_say(a, 1, "/exit did not end claude within %s; hold "
-			       "cancelled, claude left running", step_s);
+			       "cancelled, claude left running (session %s)",
+			       step_s, a->sid);
 		}
 		cmd_info_free(&ci);
 		return a->step == AG_DONE;
@@ -4349,14 +4398,16 @@ ag_exited(struct agent *a, const char *step_s)
 		respawn_req(a->path, 'c', NULL, 0);
 		if (ci.sig > 0)
 			ag_say(a, 1, "claude died on signal %d instead of exiting;"
-			       " not relaunched, session ended%s%s%s", ci.sig,
+			       " not relaunched, session ended%s%s%s; resume by "
+			       "hand: claude --resume %s", ci.sig,
 			       last[0] ? " (last output: " : "", last,
-			       last[0] ? ")" : "");
+			       last[0] ? ")" : "", a->sid);
 		else
 			ag_say(a, 1, "claude exited with status %d instead of 0;"
-			       " not relaunched, session ended%s%s%s", ci.code,
+			       " not relaunched, session ended%s%s%s; resume by "
+			       "hand: claude --resume %s", ci.code,
 			       last[0] ? " (last output: " : "", last,
-			       last[0] ? ")" : "");
+			       last[0] ? ")" : "", a->sid);
 		cmd_info_free(&ci);
 		return 1;
 	}
@@ -4377,22 +4428,8 @@ ag_exited(struct agent *a, const char *step_s)
 			         tid, a->sid);
 	}
 	cmd_info_free(&ci);
-	nv = resume_argv(a->argv, a->argc, a->tok, a->id, &nc);
-	st = nv ? respawn_req(a->path, 'a', nv, nc) : -3;
-	free(nv);
-	if (st != DCH_ST_OK)
-	{
-		respawn_req(a->path, 'c', NULL, 0);
-		ag_say(a, 1, "relaunch with --resume %s was refused (%d); "
-		       "session ended", a->id, st);
-		fail = 1;
-	}
-	else
-	{
-		a->step = AG_START;
-		a->deadline = wall_ms() + env_ms("DCH_AGENT_STEP_MS", 60000);
-	}
-	return fail;
+	a->deadline = wall_ms() + env_ms("DCH_AGENT_STEP_MS", 60000);
+	return ag_relaunch(a);
 }
 
 /* One poll of one agent. Returns 1 when it ended in failure. */
@@ -4411,11 +4448,34 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 	if (a->step == AG_START)
 	{
 		struct cmd_info ci;
+		int st = cmd_query(a->path, &ci);
 
-		if (cmd_query(a->path, &ci) != 0)
+		if (ag_quiet(a, st))
+		{
+			if (now < a->deadline)
+				return 0;
+			ag_say(a, 1, "relaunched with --resume %s, but the master "
+			       "stopped answering (silent at the %s limit); resume "
+			       "message not typed", a->id, step_s);
+			return 1;
+		}
+		if (st != 0)
 		{
 			ag_say(a, 1, "relaunched with --resume %s, but it exited "
 			       "and the session ended", a->id);
+			return 1;
+		}
+		/* Still held: the relaunch went to a stalled master and never
+		** applied (the relaunched claude is not armed, so it never reads
+		** held). Send it again, within the same step limit. */
+		if (strcmp(ci.state, "held") == 0)
+		{
+			cmd_info_free(&ci);
+			if (now < a->deadline)
+				return ag_relaunch(a);
+			ag_say(a, 1, "relaunched with --resume %s, but claude did not "
+			       "start within %s; hold left as is, it ends after "
+			       "DCH_HOLD_MS", a->id, step_s);
 			return 1;
 		}
 		g = CG_UNKNOWN;

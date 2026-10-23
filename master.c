@@ -2165,7 +2165,14 @@ static void
 pty_activity(void)
 {
 	unsigned char buf[BUFSIZE];
+	struct pollfd pfd = { the_pty.fd, POLLIN, 0 };
 	ssize_t len;
+
+	/* A control verb this pass may have drain_pty()'d what select() saw:
+	** read() on the blocking pty would then wedge the master until the
+	** child writes again. */
+	if (poll(&pfd, 1, 0) == 0)
+		return;
 
 	/* Read the pty activity */
 	len = read(the_pty.fd, buf, sizeof(buf));

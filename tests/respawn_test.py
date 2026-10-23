@@ -303,6 +303,37 @@ def main():
         check("exit by signal reported (9, code null)",
               cs and cs["exit_signal"] == 9 and cs["exit_code"] is None)
 
+        # --- a verb's pty drain and a pty wake in one pass ----------------
+        # A control client's first packet drains the pty. If select() saw
+        # that same output, the master must not then block reading an empty
+        # pty (this child prints once and waits: it would be forever). A
+        # stop right after a held session's respawn lines both up: the new
+        # child prints while verbs queue, as for an agent relaunch.
+        w, wsock = sess("rsw")
+        spawn(w, "sh", "-c", "sleep 1")
+        run("--respawn", w)
+        until(lambda: (cmd(w) or {}).get("state") == "held")
+        mw = masters(wsock)
+        run("--respawn", w, "--", "sh", "-c", "echo late_mark; sleep 30")
+        stopped, pend = False, []
+        try:
+            if len(mw) == 1:        # only the master this test spawned
+                os.kill(mw[0], signal.SIGSTOP)
+                stopped = True
+                for _ in range(6):
+                    pend.append(subprocess.Popen(
+                        [DCH, "--cmd", w], stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL))
+                    time.sleep(0.5)
+        finally:
+            if stopped:
+                os.kill(mw[0], signal.SIGCONT)
+        for p in pend:
+            p.wait(timeout=10)
+        check("verb + pty output in one wake: the master still answers",
+              stopped and until(lambda: cmd(w), 8.0) and
+              (not MIRROR or seen(w, "late_mark")))
+
         # --- client-side bounds -------------------------------------------
         r = run("--respawn", sg, "--", "x" * 5000)
         check("over-PKT_MAX argv rejected with a clear error",
