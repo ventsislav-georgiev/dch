@@ -721,10 +721,11 @@ meta_bytes_ok(const char *s, size_t n)
 }
 
 /* Stored metadata, or NULL; *epoch gets the sidecar mtime (when the content
-** last changed: --meta skips identical pushes) or 0. --meta validated it
-** fully on the way in; this cheap re-check only keeps a hand-planted file
-** from breaking the JSON. NOFOLLOW + NONBLOCK + S_ISREG + uid, as for .ver:
-** the runtime dir is shared. Static buffer; valid until the next call. */
+** last changed: --meta skips identical pushes) or 0. The file is validated
+** in full again on read: a truncated, hand-edited or third-party-written
+** sidecar printed verbatim would break the whole --ls-json array, not just
+** this row. NOFOLLOW + NONBLOCK + S_ISREG + uid, as for .ver: the runtime dir
+** is shared. Static buffer; valid until the next call. */
 static const char *
 session_meta(const char *name, long *epoch)
 {
@@ -745,6 +746,8 @@ session_meta(const char *name, long *epoch)
 	if (r <= 0 || !meta_bytes_ok(buf, (size_t)r))
 		return NULL;
 	buf[r] = '\0';
+	if (!dch_json_is_object(buf))
+		return NULL;
 	*epoch = (long)st.st_mtime;
 	return buf;
 }

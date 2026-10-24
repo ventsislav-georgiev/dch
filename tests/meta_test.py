@@ -120,6 +120,11 @@ def main():
             f.write('{"a":1}\n{"b":2}')
         check("a hand-mangled sidecar reads as null / 0",
               meta("m-none"), (None, 0))
+        # Truncated / third-party write: invalid JSON must not leak out.
+        with open(os.path.join(sockdir, "m-none.sock.meta"), "w") as f:
+            f.write('{"a":')
+        check("an invalid-JSON sidecar reads as null / 0",
+              meta("m-none"), (None, 0))
 
         # --- child exit before a --respawn relaunch clears it ------------
         flag = flagged("m-resp")
