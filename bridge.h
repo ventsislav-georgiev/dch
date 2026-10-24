@@ -21,6 +21,7 @@ int dch_pty_gate(const char *path);
 int dch_pty_push(const char *path, const char *text);
 int dch_json_string(const char *json, const char *key, char *out, size_t cap);
 int dch_json_long(const char *json, const char *key, long *out);
+int dch_json_is_object(const char *json);
 int dch_process_start(long pid, char *out, size_t cap);
 
 #endif

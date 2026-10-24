@@ -2314,6 +2314,11 @@ int dch_json_string(const char *json, const char *key, char *out, size_t cap) {
   return json_string(json, key, out, cap, 1);
 }
 
+int dch_json_is_object(const char *json) {
+  struct json_parser p;
+  return json_parse(&p, json) == 0 && p.tok[0].kind == JSON_OBJECT;
+}
+
 int dch_json_long(const char *json, const char *key, long *out) {
   return json_long(json, key, out);
 }

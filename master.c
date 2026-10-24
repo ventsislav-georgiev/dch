@@ -242,7 +242,8 @@ record_sock_identity(void)
 static void
 unlink_socket(void)
 {
-	static const char *suffix[] = { ".act", ".state", ".ver", ".resume" };
+	static const char *suffix[] = { ".act", ".state", ".ver", ".resume",
+	                                ".meta" };
 	struct stat st;
 	char side[1100];
 	size_t i;
@@ -615,7 +616,7 @@ ensure_sock_dir(void)
 static void
 touch_sidecars(void)
 {
-	static const char *suffix[] = { ".act", ".state", ".alias" };
+	static const char *suffix[] = { ".act", ".state", ".alias", ".meta" };
 	struct timespec times[2];
 	char path[1100];
 	size_t i;
@@ -2047,7 +2048,11 @@ static void
 respawn_consume(int status)
 {
 	char **v = respawn_argv;
+	char meta[1100];
 
+	/* Metadata describes the program that just went away. */
+	if (sidecar_path(".meta", meta, sizeof meta) == 0)
+		unlink(meta);
 	exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 	exit_signal = WIFSIGNALED(status) ? WTERMSIG(status) : 0;
 	respawn_argv = NULL;

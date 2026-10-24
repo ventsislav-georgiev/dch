@@ -168,6 +168,7 @@ dch --wait <name> --match <str> [--timeout ms]  # block until output matches
 dch --wait <name> --state <s[,s]> [--timeout ms]  # block until state matches
 dch --status <name>                             # print session state
 dch --report <name> <state>                     # push state (harness hooks)
+dch --meta <name> '<json object>'|clear         # attach metadata (tasks, PRs, ...)
 dch --ls-json                                   # sessions as a JSON array
 dch --restart <name>|--all [-f]                 # upgrade a live session in place
 dch --restart <name>|--all --include-agents [-f]  # ...then restart its stale Claude agents
@@ -211,8 +212,9 @@ someone is watching is invisible to them.
 | `--wait <n> --match <str> [--timeout ms]` | Block until screen/scrollback contains `<str>` (literal substring, ≤512 bytes); prints the matching line. Default timeout 10 s. | 0 hit, 2 timeout, 3 no mirror |
 | `--status <n>` | Print the session state: `working`, `idle`, `blocked`, or `done` — resolved from the reported state, the screen-content detection, and the output heuristic (see [Agent state detection](#agent-state-detection)). | 0 ok, 1 no session |
 | `--report <n> <state>` | Push a semantic state: `working`, `idle`, `blocked`, or `done` (closed set, unknown tokens rejected); `clear` reverts to auto (detection + heuristic). Last write wins; cleared automatically when the session ends. | 0 ok, 1 no session / bad state |
+| `--meta <n> '<json>'` | Attach one JSON object of metadata to the session (see [Optional: session metadata](#optional-session-metadata)); `clear` removes it. Replaced atomically, last write wins, never interpreted; a byte-identical push is a no-op; rejected input leaves the stored object unchanged. Removed automatically when the session's program exits. | 0 ok, 1 no session / not a single-line JSON object ≤ 16 KB |
 | `--wait <n> --state <s[,s...]> [--timeout ms]` | Block until the state matches any of the comma list (e.g. `idle,blocked,done` = "turn over"); prints the matched state. `active` is accepted as an alias for `working`. Polls every 100 ms. | 0 hit, 2 timeout, 1 no session |
-| `--ls-json` | All sessions as JSON: `[{"name","alias","harness","activity_epoch","state","version","agents"}]`. `harness` is the name of the Claude Code or Codex session running inside, or `""`; the real `name` remains separate. `state` follows the same resolution rule as `--status`. `version` is the dch version of the master serving that session, or `""` for a master old enough not to report one. `agents` is the number of live subagents on Claude Code's agent panel (the `⏺ main` block under the prompt), `0` when no panel is on screen — including while a prompt covers it — or `DCH_NO_DETECT=1` is set. | 0 |
+| `--ls-json` | All sessions as JSON: `[{"name","alias","harness","activity_epoch","state","version","agents","meta","meta_epoch"}]`. `harness` is the name of the Claude Code or Codex session running inside, or `""`; the real `name` remains separate. `state` follows the same resolution rule as `--status`. `version` is the dch version of the master serving that session, or `""` for a master old enough not to report one. `agents` is the number of live subagents on Claude Code's agent panel (the `⏺ main` block under the prompt), `0` when no panel is on screen — including while a prompt covers it — or `DCH_NO_DETECT=1` is set. `meta` is the object last pushed with `--meta`, verbatim, or `null`; `meta_epoch` is when that content last changed (epoch seconds, like `activity_epoch`), `0` with no meta. | 0 |
 | `--restart <n>` \| `--restart --all` `[--include-agents] [-f]` | Re-exec the session's master onto the current `dch` binary, in place — the program inside keeps running (see [Upgrading a live session](#upgrading-a-live-session)). `--all` restarts only sessions whose `version` differs from this binary's; `-f` restarts all of them. With `--include-agents`, it then restarts the stale Claude Code agents of those sessions — every session with `--all`, only `<n>` otherwise; `-f` forces current agents too (see [Restarting Claude Code agents](#restarting-claude-code-agents)). Without the flag no agent is touched, `--all` included. `--include-agents` without `--restart` is a usage error. | 0 ok, 1 failed / master too old / an agent restart failed |
 | `--respawn <n> [-- cmd...]` | Arm a one-shot respawn: when the session's program next exits, the master keeps the session (same socket, pty size, attached clients) and starts `cmd` in its place. No `cmd` arms a *hold*: the session stays up childless until a second `--respawn <n> -- cmd` starts one, or until `DCH_HOLD_MS` (default 120000) ends it. An arm that nothing consumes expires after `DCH_RESPAWN_TTL_MS` (default 300000); both are read from the master's environment. `--restart` refuses while a respawn is armed or held. | 0 ok, 1 no session / refused / master too old |
 | `--respawn <n> --cancel` | Drop a pending arm. On a held (childless) session it ends the session. | 0 ok, 1 no session |
@@ -352,6 +354,63 @@ Then a watcher blocks on the state instead of polling screens:
 ```sh
 dch --wait agent1 --state idle,blocked,done --timeout 600000  # turn over?
 ```
+
+### Optional: session metadata
+
+A program inside a session can publish a small JSON object about itself —
+a status line's task counts, the PRs an agent has open — and every
+`--ls-json` consumer sees it as `meta`, next to `state`. dch stores and
+passes it through; it never interprets the keys.
+
+Push it from a status line, a hook, or any script running in the session.
+`DCH_SESSION` is set in every dch session:
+
+```sh
+dch --meta "$DCH_SESSION" '{"tasks":{"done":3,"total":5,"in_progress":1,"queued":1}}' 2>/dev/null; true
+```
+
+Re-push periodically or on every render rather than relying on a single
+push: dch may have missed one, and a respawned program starts with none (dch
+clears it on exit). Pushing unchanged content is cheap and safe. dch ignores
+a byte-identical push and keeps `meta_epoch` at the time the content last
+changed, which it stamps itself. Like reports, a push must never break its
+caller: silence stderr and swallow the exit code.
+
+**Rules dch enforces** (anything else exits 1 and keeps the stored object):
+
+- one JSON object (`{...}`), strictly valid, UTF-8;
+- at most 16384 bytes;
+- at most 1024 JSON tokens. Every object, array, key, string, number and
+  `true`/`false`/`null` counts as one, so `{"a":[1,2]}` is 5. That is room
+  for about 1000 values; a list of 50 four-field PR objects is about 450;
+- a single line: no byte below 0x20 (no raw newline or tab), which keeps
+  `--ls-json` one line. Compact `JSON.stringify` / `json.dumps` output
+  qualifies.
+
+**Standard keys.** All are optional, and consumers must tolerate any of them
+being absent. Other top-level keys pass through unchanged, so give your own
+distinctive names.
+
+| Key | Shape | Meaning |
+| --- | --- | --- |
+| `tasks` | `{"done":int,"total":int,"in_progress":int,"queued":int}`, non-negative integers | `done` finished items out of `total`; `in_progress` items being worked now; `queued` open items not in progress, blocked or parked included. |
+| `prs` | `{"open":[{"url","repo","num","title"}],"merged":int}` | `open` lists the not-yet-merged PRs, at most 50, e.g. `{"url":"https://github.com/o/r/pull/12","repo":"o/r","num":12,"title":"..."}`, with `url` an absolute `https` link. `merged` is a count. |
+
+**Clearing.** The metadata describes the program running in the session, so
+dch removes it when that program exits (including the exit before a
+`--respawn` relaunch), when the session is killed, and when its master
+exits. An agent started by hand inside a shell session outlives none of
+those, so clear from its exit hook — for Claude Code, a `SessionEnd` hook:
+
+| Hook event | Command |
+| --- | --- |
+| `SessionEnd` | `dch --meta "$DCH_SESSION" clear 2>/dev/null; true` |
+
+**Freshness.** `meta_epoch` is the time the content last changed, not a
+liveness signal: a status line typically redraws only on activity, and
+identical re-pushes leave it alone, so an idle agent's metadata can be hours
+old and still current. Pair it with `state` and
+`activity_epoch` for liveness.
 
 ### Honest caveats
 
@@ -508,7 +567,7 @@ environment disables it at spawn.
 
 | Verb | Without mirror |
 | --- | --- |
-| `--spawn`, `--send`, `--run`, `--status`, `--report`, `--wait --state`, `--ls-json` | Work unchanged (plain pty writes / sidecar reads). State detection needs the master's mirror, so against a lite/`DCH_NO_VT` master `--status` falls back to reported state + output heuristic. |
+| `--spawn`, `--send`, `--run`, `--status`, `--report`, `--meta`, `--wait --state`, `--ls-json` | Work unchanged (plain pty writes / sidecar reads). State detection needs the master's mirror, so against a lite/`DCH_NO_VT` master `--status` falls back to reported state + output heuristic. |
 | `--restart --include-agents` agent step | Skipped with a note by a lite client: it needs the mirror to see the composer. |
 | `--read`, `--wait --match` | Exit 3 with a message pointing at the full build. |
 | `--keys` | Falls back to a fixed legacy xterm table client-side (exit 0 + stderr note). Mode-aware apps may misread modified keys. |

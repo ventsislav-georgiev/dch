@@ -693,6 +693,62 @@ state_file_path(const char *name, char *buf, size_t bufsz)
 	return (n < 0 || (size_t)n >= bufsz) ? -1 : 0;
 }
 
+/* Path of the metadata sidecar (written by --meta, e.g. from a status line).
+** Returns 0 on success, -1 on truncation. */
+static int
+meta_file_path(const char *name, char *buf, size_t bufsz)
+{
+	char cb[256];
+	int n = snprintf(buf, bufsz, "%s/%s.sock.meta", sock_dir,
+	                 canon_name(name, cb, sizeof(cb)));
+	return (n < 0 || (size_t)n >= bufsz) ? -1 : 0;
+}
+
+/* Session metadata is one JSON object, at most this many bytes, no byte
+** below 0x20 (keeps --ls-json one line per call). */
+#define DCH_META_MAX 16384
+
+static int
+meta_bytes_ok(const char *s, size_t n)
+{
+	size_t i;
+	if (n == 0 || n > DCH_META_MAX || s[0] != '{')
+		return 0;
+	for (i = 0; i < n; i++)
+		if ((unsigned char)s[i] < 0x20)
+			return 0;
+	return 1;
+}
+
+/* Stored metadata, or NULL; *epoch gets the sidecar mtime (when the content
+** last changed: --meta skips identical pushes) or 0. --meta validated it
+** fully on the way in; this cheap re-check only keeps a hand-planted file
+** from breaking the JSON. NOFOLLOW + NONBLOCK + S_ISREG + uid, as for .ver:
+** the runtime dir is shared. Static buffer; valid until the next call. */
+static const char *
+session_meta(const char *name, long *epoch)
+{
+	static char buf[DCH_META_MAX + 1];
+	char p[1300];
+	struct stat st;
+	ssize_t r = -1;
+	int fd;
+
+	*epoch = 0;
+	if (meta_file_path(name, p, sizeof(p)) != 0 ||
+	    (fd = open(p, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)) < 0)
+		return NULL;
+	if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
+	    st.st_uid == getuid() && st.st_size <= DCH_META_MAX)
+		r = read(fd, buf, DCH_META_MAX + 1);
+	close(fd);
+	if (r <= 0 || !meta_bytes_ok(buf, (size_t)r))
+		return NULL;
+	buf[r] = '\0';
+	*epoch = (long)st.st_mtime;
+	return buf;
+}
+
 /* dch version of the master serving this session, from the `<sock>.ver`
 ** sidecar it stamps at startup. Returns NULL when the file is missing or
 ** unreadable — i.e. the master predates the sidecar, so "older than us" is the
@@ -1779,6 +1835,8 @@ kill_session(const char *name)
 		unlink(side);
 	if (state_file_path(name, side, sizeof(side)) == 0)
 		unlink(side);
+	if (meta_file_path(name, side, sizeof(side)) == 0)
+		unlink(side);
 	printf("killed: %s\n", name);
 	return 0;
 }
@@ -1875,6 +1933,10 @@ usage(void)
 	    "                                             heuristic)\n"
 	    "  dch --report <name> <state>                set state (optional hooks;\n"
 	    "                                             `clear` reverts to auto)\n"
+	    "  dch --meta <name> '<json object>'          attach metadata (status\n"
+	    "                                             lines, hooks); `clear`\n"
+	    "                                             drops it; shown by\n"
+	    "                                             --ls-json as \"meta\"\n"
 	    "  dch --ls-json    like -lj but JSON, adds \"state\"\n"
 	    "  dch --agent-list [--json]                  list native Claude peers\n"
 	    "  dch --agent-send <name> <message...>       message one native peer\n"
@@ -4930,7 +4992,7 @@ main(int argc, char **argv)
 	enum { A_ATTACH, A_LIST, A_KILL, A_KILLALL, A_DETACH, A_LISTRAW,
 	       A_RENAME, A_LISTJSON, A_LISTJSON2, A_SETALIAS,
 	       A_SPAWN, A_SEND, A_RUN, A_KEYS, A_READ, A_WAIT, A_STATUS,
-	       A_REPORT, A_RESTART, A_AGENT_LIST, A_AGENT_SEND,
+	       A_REPORT, A_META, A_RESTART, A_AGENT_LIST, A_AGENT_SEND,
 	       A_RESPAWN, A_CMD }
 	    action = A_ATTACH;
 	char alias_arg[600] = "";
@@ -5165,6 +5227,7 @@ main(int argc, char **argv)
 		         strcmp(a, "--wait") == 0 ||
 		         strcmp(a, "--status") == 0 ||
 		         strcmp(a, "--report") == 0 ||
+		         strcmp(a, "--meta") == 0 ||
 		         strcmp(a, "--respawn") == 0 ||
 		         strcmp(a, "--cmd") == 0)
 		{
@@ -5178,6 +5241,7 @@ main(int argc, char **argv)
 			       : strcmp(a, "--status") == 0 ? A_STATUS
 			       : strcmp(a, "--respawn") == 0 ? A_RESPAWN
 			       : strcmp(a, "--cmd") == 0   ? A_CMD
+			       : strcmp(a, "--meta") == 0  ? A_META
 			                                    : A_REPORT;
 			i++;
 			if (i >= argc || argv[i][0] == '\0')
@@ -5487,12 +5551,16 @@ main(int argc, char **argv)
 			/* version is "" when the master predates the sidecar —
 			** i.e. definitely older than us, which is exactly what
 			** a caller deciding whether to --restart needs. */
+			long mep;
+			const char *meta = session_meta(sl.v[k], &mep);
 			printf("\",\"activity_epoch\":%ld,\"state\":\"%s\""
-			       ",\"version\":\"%s\",\"agents\":%d}",
+			       ",\"version\":\"%s\",\"agents\":%d"
+			       ",\"meta\":%s,\"meta_epoch\":%ld}",
 			       activity_epoch(sl.v[k]),
 			       session_state(sl.v[k]),
 			       version_or_empty(sl.v[k]),
-			       detect_agents(sl.v[k]));
+			       detect_agents(sl.v[k]),
+			       meta ? meta : "null", mep);
 		}
 		puts("]");
 		slist_free(&sl);
@@ -5652,6 +5720,65 @@ main(int argc, char **argv)
 			if (fd >= 0)
 				unlink(tp);
 			fprintf(stderr, "dch: cannot write state for %s\n",
+			        session_name);
+			return 1;
+		}
+		return 0;
+	}
+	case A_META:
+	{
+		/* Free-form JSON object a program in the session publishes about
+		** itself (tasks, open PRs, ...); --ls-json passes it through. */
+		char sp[1100], mp[1300], tp[1320];
+		struct stat st;
+		const char *js = inner_argc == 1 ? inner_argv[0] : "";
+		size_t n;
+		while (*js == ' ')
+			js++;
+		n = strlen(js);
+		while (n && js[n - 1] == ' ')
+			n--;
+		if (strcmp(js, "clear") != 0 &&
+		    (!meta_bytes_ok(js, n) || !dch_json_is_object(js)))
+		{
+			fprintf(stderr, "dch: --meta needs one single-line JSON "
+			        "object (at most %d bytes, 1024 tokens), or "
+			        "`clear`\n", DCH_META_MAX);
+			return 1;
+		}
+		session_sock_path(session_name, sp, sizeof(sp));
+		if (stat(sp, &st) < 0 || !S_ISSOCK(st.st_mode) ||
+		    meta_file_path(session_name, mp, sizeof(mp)) != 0)
+		{
+			fprintf(stderr, "no session: %s\n", session_name);
+			return 1;
+		}
+		if (strcmp(js, "clear") == 0)
+		{
+			unlink(mp);
+			return 0;
+		}
+		/* Unchanged content is a no-op, so meta_epoch (the mtime) stays
+		** the time the content last changed and writers may re-push
+		** freely. */
+		{
+			long ep;
+			const char *cur = session_meta(session_name, &ep);
+			if (cur && strlen(cur) == n && memcmp(cur, js, n) == 0)
+				return 0;
+		}
+		/* Atomic replace, as for --report: readers never see a torn
+		** object; last writer wins. */
+		snprintf(tp, sizeof(tp), "%s.%d.tmp", mp, (int)getpid());
+		int fd = open(tp, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
+		int wrote = fd >= 0 && write(fd, js, n) == (ssize_t)n;
+		if (fd >= 0 && close(fd) != 0)
+			wrote = 0;
+		if (!wrote || rename(tp, mp) != 0)
+		{
+			if (fd >= 0)
+				unlink(tp);
+			fprintf(stderr, "dch: cannot write meta for %s\n",
 			        session_name);
 			return 1;
 		}
