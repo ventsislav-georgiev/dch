@@ -22,6 +22,8 @@ pyrun(){
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 export XDG_RUNTIME_DIR="$TMP"
+# Session records go to $XDG_STATE_HOME/dch/sessions: keep them out of ~.
+export XDG_STATE_HOME="$TMP/state"
 SOCKDIR="$TMP/dch-$(id -u)"
 mkdir -p "$SOCKDIR"
 
@@ -158,6 +160,7 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "idle resize reaches the session" resize_idle_test.py
     pyrun "respawn keeps the session across a child exit" respawn_test.py
     pyrun "--restart --include-agents restarts stale Claude agents" agent_restart_test.py
+    pyrun "--history/--revive bring dead sessions back" revive_test.py
 fi
 
 # --- control verbs: --spawn --run --read --wait --keys ---------------------

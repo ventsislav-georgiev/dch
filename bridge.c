@@ -2323,6 +2323,53 @@ int dch_json_long(const char *json, const char *key, long *out) {
   return json_long(json, key, out);
 }
 
+int dch_json_nested_string(const char *json, const char *object,
+                           const char *key, char *out, size_t cap) {
+  return json_nested_string(json, object, key, out, cap);
+}
+
+size_t dch_json_quote(char *out, size_t cap, const char *s) {
+  return json_quote(out, cap, s);
+}
+
+/* The array of strings at `key` (inside `object` when non-NULL) as one
+** malloc'd block, NULL-terminated like argv; NULL when absent, empty or not
+** all strings. *argc gets the count. */
+char **dch_json_strv(const char *json, const char *object, const char *key,
+                     int *argc) {
+  struct json_parser p;
+  int parent = 0, field, i, n = 0;
+  size_t room = 0;
+  char **v, *s;
+  if (json_parse(&p, json) < 0 ||
+      (object && ((parent = json_field(&p, 0, object)) < 0 ||
+                  p.tok[parent].kind != JSON_OBJECT)) ||
+      (field = json_field(&p, parent, key)) < 0 ||
+      p.tok[field].kind != JSON_ARRAY)
+    return NULL;
+  for (i = field + 1; i < p.tok[field].next; i = p.tok[i].next, n++) {
+    if (p.tok[i].kind != JSON_STRING)
+      return NULL;
+    room += (size_t)(p.tok[i].end - p.tok[i].start) + 1;
+  }
+  if (!n || !(v = malloc((size_t)(n + 1) * sizeof *v + room)))
+    return NULL;
+  s = (char *)(v + n + 1);
+  for (i = field + 1, n = 0; i < p.tok[field].next; i = p.tok[i].next) {
+    size_t cap = (size_t)(p.tok[i].end - p.tok[i].start) + 1;
+    /* decoding never grows a string, so its raw length is room enough */
+    if (json_decode(&p, i, s, cap) < 0) {
+      free(v);
+      return NULL;
+    }
+    v[n++] = s;
+    s += strlen(s) + 1;
+  }
+  v[n] = NULL;
+  *argc = n;
+  return v;
+}
+
 int dch_process_start(long pid, char *out, size_t cap) {
   return process_start(pid, out, cap);
 }

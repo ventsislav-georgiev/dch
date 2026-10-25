@@ -265,6 +265,20 @@ size_t packet_payload_len(const struct packet *pkt);
 ** user double-tapped the detach key to ask for the session picker. */
 #define ATTACH_SWITCH 2
 
+/* Session history (#042): each master keeps a JSON record of its session in
+** dch_history_dir(); `--history` lists the dead ones, `--revive` restarts
+** them. dch_agent_probe() finds the Claude Code agent under the child. */
+struct dch_agent
+{
+	long pid;		/* claude's pid */
+	char sid[64], name[256], cwd[1024];
+	char **launch;		/* malloc'd block, NULL-terminated; may be NULL */
+};
+int dch_history_dir(char *out, size_t outsz, const char *sockdir,
+                    int create);
+int dch_agent_probe(long child, struct dch_agent *a);
+int dch_claude_gone(long pid);
+
 int attach_main(int noerror);
 int master_main(char **argv, int waitattach, int dontfork);
 int push_main(void);

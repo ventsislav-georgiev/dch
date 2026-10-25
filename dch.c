@@ -879,17 +879,16 @@ load_aliases(struct slist *sl)
 
 /* ---- harness session names ------------------------------------------ */
 
-/* Fetch one environment value from another same-uid process. macOS uses
-** KERN_PROCARGS2; elsewhere /proc/<pid>/environ. */
-static int
-proc_env_value(long pid, const char *key, char *out, size_t outsz)
-{
-	size_t keylen = strlen(key);
 #ifdef __APPLE__
+/* KERN_PROCARGS2 of a same-uid process: argc int, exec path, NULs, argv[],
+** env[]. Static buffer, NUL-terminated; NULL on failure. */
+static char *
+procargs(long pid, size_t *lenp)
+{
 	static char *buf;
 	static size_t bufsz;
 	int mib[3] = { CTL_KERN, KERN_PROCARGS2, (int)pid };
-	size_t len, i;
+	size_t len;
 
 	if (!buf)
 	{
@@ -901,12 +900,29 @@ proc_env_value(long pid, const char *key, char *out, size_t outsz)
 		bufsz = (size_t)argmax;
 		buf = malloc(bufsz);
 		if (!buf)
-			return -1;
+			return NULL;
 	}
 	len = bufsz;
-	if (sysctl(mib, 3, buf, &len, NULL, 0) != 0 || len == 0)
-		return -1;
+	if (sysctl(mib, 3, buf, &len, NULL, 0) != 0 || len <= sizeof(int))
+		return NULL;
 	buf[len - 1] = '\0';
+	*lenp = len;
+	return buf;
+}
+#endif
+
+/* Fetch one environment value from another same-uid process. macOS uses
+** KERN_PROCARGS2; elsewhere /proc/<pid>/environ. */
+static int
+proc_env_value(long pid, const char *key, char *out, size_t outsz)
+{
+	size_t keylen = strlen(key);
+#ifdef __APPLE__
+	size_t len, i;
+	char *buf = procargs(pid, &len);
+
+	if (!buf)
+		return -1;
 	/* Layout: argc int, exec path, NULs, argv[], env[]. Entries are
 	** NUL-separated; scan each entry start for our prefix. */
 	for (i = sizeof(int); i < len; )
@@ -955,6 +971,66 @@ proc_dch_session(long pid, char *out, size_t outsz)
 	return proc_env_value(pid, "DCH_SESSION", out, outsz);
 }
 
+/* argv of a same-uid process as one malloc'd NULL-terminated block, or NULL.
+** A script runs as `<interpreter> <script> args`: when argv[1] is an
+** executable "#!" file the interpreter is dropped, so a shell-launched
+** `headroom wrap claude` reads back as `/…/headroom wrap claude`, which
+** retypes the same, not as `python3 /…/headroom wrap claude`. */
+static char **
+proc_argv(long pid)
+{
+	char **v, *s, hb[2];
+	size_t len, i, start;
+	int argc, k, fd;
+#ifdef __APPLE__
+	char *buf = procargs(pid, &len);
+
+	if (!buf)
+		return NULL;
+	memcpy(&argc, buf, sizeof argc);
+	for (i = sizeof(int); i < len && buf[i]; i++)
+		;	/* the exec path */
+	while (i < len && !buf[i])
+		i++;
+#else
+	static char buf[65536];
+	char p[64];
+	ssize_t r;
+
+	snprintf(p, sizeof p, "/proc/%ld/cmdline", pid);
+	if ((fd = open(p, O_RDONLY)) < 0)
+		return NULL;
+	for (len = 0; len < sizeof buf - 1 &&
+	     (r = read(fd, buf + len, sizeof buf - 1 - len)) > 0; )
+		len += (size_t)r;
+	close(fd);
+	buf[len] = '\0';
+	for (argc = 0, i = 0; i < len; i++)
+		argc += buf[i] == '\0';
+	i = 0;
+#endif
+	start = i;
+	for (k = 0; k < argc && i < len; k++)
+		i += strlen(buf + i) + 1;
+	if (argc < 1 || k < argc ||
+	    !(v = malloc((size_t)(argc + 1) * sizeof *v + (i - start))))
+		return NULL;
+	s = memcpy(v + argc + 1, buf + start, i - start);
+	for (k = 0; k < argc; k++, s += strlen(s) + 1)
+		v[k] = s;
+	v[argc] = NULL;
+	if (argc > 1 && v[1][0] == '/' && access(v[1], X_OK) == 0 &&
+	    (fd = open(v[1], O_RDONLY | O_NONBLOCK)) >= 0)
+	{
+		int bang = read(fd, hb, 2) == 2 && hb[0] == '#' && hb[1] == '!';
+
+		close(fd);
+		if (bang)
+			memmove(v, v + 1, (size_t)argc * sizeof *v);
+	}
+	return v;
+}
+
 static int
 proc_is_codex(long pid)
 {
@@ -979,19 +1055,39 @@ proc_is_codex(long pid)
 	       strcmp(base, "codex-code-mode-host") == 0;
 }
 
+/* Claude Code's live-session records: $CLAUDE_CONFIG_DIR/sessions, else
+** ~/.claude/sessions. */
+static int
+claude_sessions_dir(char *dir, size_t dirsz)
+{
+	const char *base = getenv("CLAUDE_CONFIG_DIR"), *home = getenv("HOME");
+
+	if ((!base || !*base) && (!home || !*home))
+		return -1;
+	return snprintf(dir, dirsz, "%s%s/sessions", base && *base ? base : home,
+	                base && *base ? "" : "/.claude") >= (int)dirsz ? -1 : 0;
+}
+
+/* Did claude `pid` end cleanly? Claude Code removes its sessions/<pid>.json
+** on a clean exit; a SIGKILLed one (out of memory) leaves it behind. */
+int
+dch_claude_gone(long pid)
+{
+	char dir[1100], p[1200];
+
+	return claude_sessions_dir(dir, sizeof dir) < 0 ||
+	       snprintf(p, sizeof p, "%s/%ld.json", dir, pid) >= (int)sizeof p ||
+	       access(p, F_OK) != 0;
+}
+
 int
 dch_visit_claude_records(dch_claude_record_fn visit, void *arg)
 {
-	const char *base = getenv("CLAUDE_CONFIG_DIR"), *home = getenv("HOME");
 	char dir[1100];
 	DIR *d;
 	struct dirent *de;
 
-	if ((!base || !*base) && (!home || !*home))
-		return 0;
-	if (snprintf(dir, sizeof dir, "%s%s/sessions", base && *base ? base : home,
-	             base && *base ? "" : "/.claude") >= (int)sizeof dir ||
-	    !(d = opendir(dir)))
+	if (claude_sessions_dir(dir, sizeof dir) < 0 || !(d = opendir(dir)))
 		return 0;
 	while ((de = readdir(d)))
 	{
@@ -1799,8 +1895,15 @@ kill_session(const char *name)
 		return 1;
 	}
 
-	/* Term master (its sentinel argv contains the sock path). */
+	/* Mark the kill as deliberate before the master hears of it: its
+	** history record then ends "killed", which --revive --all skips. */
 	char pat[1200];
+	int kfd;
+	snprintf(pat, sizeof(pat), "%s.killed", sp);
+	if ((kfd = open(pat, O_WRONLY | O_CREAT | O_NOFOLLOW, 0600)) >= 0)
+		close(kfd);
+
+	/* Term master (its sentinel argv contains the sock path). */
 	snprintf(pat, sizeof(pat), "dch --master-of %s", sp);
 	pkill_pattern(pat);
 
@@ -1940,6 +2043,18 @@ usage(void)
 	    "                                             lines, hooks); `clear`\n"
 	    "                                             drops it; shown by\n"
 	    "                                             --ls-json as \"meta\"\n"
+	    "  dch --history [--json]                     sessions that ended:\n"
+	    "                                             name, when, how, cwd,\n"
+	    "                                             command, claude session\n"
+	    "  dch --revive <name> [--as <new>]           start an ended session\n"
+	    "                                             again: its cwd, its\n"
+	    "                                             command, claude resumed\n"
+	    "                                             and told to carry on\n"
+	    "  dch --revive --all                         every session that died\n"
+	    "                                             (not exit 0, not -k)\n"
+	    "                                             in the last 3 days\n"
+	    "                                             after 5+ minutes;\n"
+	    "                                             others by name\n"
 	    "  dch --ls-json    like -lj but JSON, adds \"state\"\n"
 	    "  dch --agent-list [--json]                  list native Claude peers\n"
 	    "  dch --agent-send <name> <message...>       message one native peer\n"
@@ -3548,7 +3663,7 @@ static int spawn_env_n;
 
 static int
 do_spawn_verb(char *exe, const char *name, int cols, int rows,
-              char **inner_argv, int inner_argc)
+              char **inner_argv, int inner_argc, int quiet)
 {
 	unsigned char payload[PKT_MAX], type;
 	struct ctl_reader r = {0};
@@ -3634,7 +3749,8 @@ do_spawn_verb(char *exe, const char *name, int cols, int rows,
 		fprintf(stderr, "dch: spawned but no master reply\n");
 		return 1;
 	}
-	printf("%s\n", name);
+	if (!quiet)
+		printf("%s\n", name);
 	return 0;
 }
 
@@ -3692,37 +3808,12 @@ path_lookup(const char *name, const char *path, const char *cwd,
 	return -1;
 }
 
-#ifdef HAVE_LIBGHOSTTY_VT
-
-#define AG_POLL_MS  250
-/* Paste, then Enter: Enter in the same burst can fold into the paste. */
-#define AG_ENTER_MS 300
-
-static const char ag_pause_msg[] =
-    "pause all work, i need to restart you. Paused means: stop every "
-    "background shell and monitor (TaskStop), stop or finish your "
-    "subagents, cancel any /loop, ScheduleWakeup and session crons, and "
-    "note what you stopped so it can be re-armed after the restart. Then "
-    "say that all work is paused and you are ready to be restarted.";
-static const char ag_resume_msg[] =
-    "resume all work. You were restarted: re-arm the shells, monitors, "
-    "subagents, loops, wakeups and crons you stopped before the restart, "
-    "then carry on where you left off.";
-
-/* What the screen lets us type into (claude_gate). */
-enum { CG_NOVT = -1, CG_EMPTY, CG_DIALOG, CG_DRAFT, CG_QUEUED, CG_UNKNOWN };
-static const char *const cg_why[] = {
-	"the composer is empty", "a prompt or dialog is waiting for you",
-	"the composer holds an unsent draft", "a queued message is pending",
-	"the composer is not on screen",
-};
-
 /* One Claude session record (~/.claude/sessions/<pid>.json). */
 struct crec
 {
 	long pid, upd;		/* upd = statusUpdatedAt, epoch ms */
 	int depth;		/* generations below the scan root */
-	char sid[64], ver[64], status[32], cwd[1024];
+	char sid[64], ver[64], status[32], cwd[1024], name[256];
 };
 
 struct crec_scan
@@ -3730,18 +3821,6 @@ struct crec_scan
 	long root;
 	int verify, n;		/* n = live records under root */
 	struct crec best;	/* the shallowest of them */
-};
-
-struct agent
-{
-	char name[600], path[1100];
-	char **argv;		/* the session's argv (owned by ci) */
-	struct cmd_info ci;
-	int tok, argc, saw_busy;
-	long cpid;
-	char ver[64], want[64], sid[64], id[64], note[200], why[120];
-	enum { AG_WAIT, AG_EXIT, AG_START, AG_DONE } step;
-	long long t_sent, ok_since, deadline;
 };
 
 static long
@@ -3798,29 +3877,6 @@ proc_depth(long pid, long anc)
 	return -1;
 }
 
-static int
-proc_cwd(long pid, char *out, size_t outsz)
-{
-#ifdef __APPLE__
-	struct proc_vnodepathinfo vi;
-
-	if (proc_pidinfo((int)pid, PROC_PIDVNODEPATHINFO, 0, &vi, sizeof vi)
-	    != (int)sizeof vi)
-		return -1;
-	snprintf(out, outsz, "%s", vi.pvi_cdir.vip_path);
-#else
-	char p[64];
-	ssize_t n;
-
-	snprintf(p, sizeof p, "/proc/%ld/cwd", pid);
-	n = readlink(p, out, outsz - 1);
-	if (n <= 0)
-		return -1;
-	out[n] = '\0';
-#endif
-	return 0;
-}
-
 /* dch_visit_claude_records callback: count the live interactive records
 ** whose pid descends from cs->root, keep the shallowest. With verify, the
 ** record's procStart must match the process's start time, so a record left
@@ -3849,6 +3905,8 @@ crec_visit(const char *path, const char *body, size_t len, void *arg)
 		return 0;
 	if (dch_json_string(body, "cwd", c.cwd, sizeof c.cwd) < 0)
 		c.cwd[0] = '\0';
+	if (dch_json_string(body, "name", c.name, sizeof c.name) < 0)
+		c.name[0] = '\0';
 	if (dch_json_long(body, "statusUpdatedAt", &c.upd) < 0)
 		c.upd = 0;
 	if (cs->verify &&
@@ -3873,6 +3931,191 @@ claude_find(long root, int verify, struct crec *best)
 	(void)dch_visit_claude_records(crec_visit, &cs);
 	*best = cs.best;
 	return cs.n;
+}
+
+/* argv for the relaunch: up to the claude token, then --resume <id>, then
+** the rest minus any earlier session choice (--resume/-r [id], --resume=,
+** --session-id, --continue/-c, --fork-session). Inserted after the token,
+** not appended: a trailing `-- <prompt>` would swallow it. --resume/-r take
+** an OPTIONAL value, so only a non-flag next token is theirs. */
+static char **
+resume_argv(char **v, int argc, int tok, char *id, int *outc)
+{
+	char **o = calloc((size_t)argc + 3, sizeof(char *));
+	int k, n = 0, opts = 1;
+
+	if (!o)
+		return NULL;
+	for (k = 0; k <= tok; k++)
+		o[n++] = v[k];
+	o[n++] = "--resume";
+	o[n++] = id;
+	for (k = tok + 1; k < argc; k++)
+	{
+		const char *a = v[k];
+
+		if (opts && strcmp(a, "--") == 0)
+			opts = 0;
+		else if (opts && (strcmp(a, "--resume") == 0 ||
+		                  strcmp(a, "-r") == 0))
+		{
+			if (k + 1 < argc && v[k + 1][0] != '-')
+				k++;
+			continue;
+		}
+		else if (opts && strcmp(a, "--session-id") == 0)
+		{
+			if (k + 1 < argc)
+				k++;
+			continue;
+		}
+		else if (opts && (strncmp(a, "--resume=", 9) == 0 ||
+		                  strncmp(a, "--session-id=", 13) == 0 ||
+		                  strcmp(a, "--continue") == 0 ||
+		                  strcmp(a, "-c") == 0 ||
+		                  strcmp(a, "--fork-session") == 0))
+			continue;
+		o[n++] = v[k];
+	}
+	*outc = n;
+	return o;
+}
+
+/* ---- session history (#042) ----------------------------------------- */
+
+/* Where the masters keep one record per session:
+** $XDG_STATE_HOME/dch/sessions/<slug>, else ~/.local/state/dch/sessions/<slug>
+** — not the socket dir, the records must outlive a reboot. <slug> is the
+** socket dir with '/' as '-' (/tmp/dch-502 -> -tmp-dch-502): a test run
+** with its own runtime dir must never write, or revive, the real dir's
+** sessions. sockdir NULL = the sessions/ root; a relative sockdir keeps no
+** records (the slug would depend on the cwd). create = make what is
+** missing, 0700. Like the socket dir it must be ours and closed to others:
+** a planted record would be revived as a command. 0 ok, -1 not usable. */
+int
+dch_history_dir(char *out, size_t outsz, const char *sockdir, int create)
+{
+	const char *x = getenv("XDG_STATE_HOME"), *h = getenv("HOME");
+	struct stat st;
+	char *p;
+	int n;
+
+	if (sockdir && *sockdir != '/')
+		return -1;
+	if (x && *x == '/')
+		n = snprintf(out, outsz, "%s/dch/sessions/", x);
+	else if (h && *h)
+		n = snprintf(out, outsz, "%s/.local/state/dch/sessions/", h);
+	else
+		return -1;
+	if (n < 0 || (size_t)n >= outsz ||
+	    snprintf(out + n, outsz - (size_t)n, "%s", sockdir ? sockdir : "") >=
+	        (int)(outsz - (size_t)n))
+		return -1;
+	for (p = out + n; *p; p++)
+		if (*p == '/')
+			*p = '-';
+	if (!sockdir)
+		out[n - 1] = '\0';
+	for (p = out; create && p; )
+	{
+		p = strchr(p + 1, '/');
+		if (p)
+			*p = '\0';
+		if (mkdir(out, 0700) < 0 && errno != EEXIST &&
+		    (stat(out, &st) < 0 || !S_ISDIR(st.st_mode)))
+			create = 0;
+		if (p)
+			*p = '/';
+	}
+	return lstat(out, &st) == 0 && S_ISDIR(st.st_mode) &&
+	       st.st_uid == getuid() && !(st.st_mode & 022) ? 0 : -1;
+}
+
+/* The Claude Code agent under a session's child, for the master's record:
+** the shallowest live claude below `child`, and its launch argv — the
+** outermost process on the way down to it, below the child: what was typed
+** into a shell (`headroom wrap claude --chrome`), else claude itself. 0 and
+** a filled *a (a->launch malloc'd), or -1 when there is none. */
+int
+dch_agent_probe(long child, struct dch_agent *a)
+{
+	struct crec r;
+	long p, pp;
+
+	memset(a, 0, sizeof *a);
+	if (child <= 0 || claude_find(child, 1, &r) == 0)
+		return -1;
+	for (p = r.pid; p != child && (pp = proc_ppid(p)) > 1 && pp != child;
+	     p = pp)
+		;
+	a->pid = r.pid;
+	snprintf(a->sid, sizeof a->sid, "%s", r.sid);
+	snprintf(a->name, sizeof a->name, "%s", r.name);
+	snprintf(a->cwd, sizeof a->cwd, "%s", r.cwd);
+	a->launch = proc_argv(p);
+	return 0;
+}
+
+#ifdef HAVE_LIBGHOSTTY_VT
+
+#define AG_POLL_MS  250
+/* Paste, then Enter: Enter in the same burst can fold into the paste. */
+#define AG_ENTER_MS 300
+#define AG_REENTER  5	/* Enters after the first one that did not take */
+
+static const char ag_pause_msg[] =
+    "pause all work, i need to restart you. Paused means: stop every "
+    "background shell and monitor (TaskStop), stop or finish your "
+    "subagents, cancel any /loop, ScheduleWakeup and session crons, and "
+    "note what you stopped so it can be re-armed after the restart. Then "
+    "say that all work is paused and you are ready to be restarted.";
+static const char ag_resume_msg[] =
+    "resume all work. You were restarted: re-arm the shells, monitors, "
+    "subagents, loops, wakeups and crons you stopped before the restart, "
+    "then carry on where you left off.";
+
+/* What the screen lets us type into (claude_gate). */
+enum { CG_NOVT = -1, CG_EMPTY, CG_DIALOG, CG_DRAFT, CG_QUEUED, CG_UNKNOWN };
+static const char *const cg_why[] = {
+	"the composer is empty", "a prompt or dialog is waiting for you",
+	"the composer holds an unsent draft", "a queued message is pending",
+	"the composer is not on screen",
+};
+
+struct agent
+{
+	char name[600], path[1100];
+	char **argv;		/* the session's argv (owned by ci) */
+	struct cmd_info ci;
+	int tok, argc, saw_busy;
+	long cpid;
+	char ver[64], want[64], sid[64], id[64], note[200], why[120];
+	enum { AG_WAIT, AG_EXIT, AG_START, AG_DONE } step;
+	long long t_sent, ok_since, deadline;
+};
+
+static int
+proc_cwd(long pid, char *out, size_t outsz)
+{
+#ifdef __APPLE__
+	struct proc_vnodepathinfo vi;
+
+	if (proc_pidinfo((int)pid, PROC_PIDVNODEPATHINFO, 0, &vi, sizeof vi)
+	    != (int)sizeof vi)
+		return -1;
+	snprintf(out, outsz, "%s", vi.pvi_cdir.vip_path);
+#else
+	char p[64];
+	ssize_t n;
+
+	snprintf(p, sizeof p, "/proc/%ld/cwd", pid);
+	n = readlink(p, out, outsz - 1);
+	if (n <= 0)
+		return -1;
+	out[n] = '\0';
+#endif
+	return 0;
 }
 
 /* Length of the escape sequence at p (p[0] == ESC): CSI up to its final
@@ -4143,7 +4386,8 @@ composer_holds(const char *path, const char *text)
 ** slash command, which Claude's menu must see typed), then press Enter —
 ** only once the composer shows it. A prompt raised in between would take
 ** the Enter as an answer. Returns 0, -1 when nothing could be typed, -2
-** when the text did not land (no Enter pressed). */
+** when the text did not land (no Enter pressed), -3 when it landed but
+** stayed in the composer through every Enter. */
 static int
 ag_type(const char *path, const char *text, int paste)
 {
@@ -4151,7 +4395,14 @@ ag_type(const char *path, const char *text, int paste)
 	** has just resumed a long conversation took over a second to paint a
 	** paste. */
 	long land = env_ms("DCH_AGENT_LAND_MS", 3000);
-	int s, t;
+	/* An Enter may not take: right after --resume, Claude Code 2.1.309
+	** showed the paste but ignored an Enter and another ~6 s later; one
+	** ~20 s after the spawn submitted. So Enter again while the text still
+	** sits in the composer, AG_REENTER times at most, this far apart. A
+	** dialog never gets one: composer_holds() reads it as not holding. */
+	long gap = env_ms("DCH_AGENT_REENTER_MS", 5000);
+	long long next;
+	int s, t, n;
 
 	if (paste)
 	{
@@ -4169,9 +4420,22 @@ ag_type(const char *path, const char *text, int paste)
 	{
 		poll(NULL, 0, t == AG_ENTER_MS ? AG_ENTER_MS : AG_POLL_MS / 2);
 		if (composer_holds(path, text))
-			return dch_pty_push(path, NULL);
+			break;
 		if (t >= land)
 			return -2;
+	}
+	for (n = 0; ; n++)
+	{
+		if (dch_pty_push(path, NULL) < 0)
+			return -1;
+		for (next = wall_ms() + gap; wall_ms() < next; )
+		{
+			poll(NULL, 0, AG_POLL_MS);
+			if (!composer_holds(path, text))
+				return 0;
+		}
+		if (n == AG_REENTER)
+			return -3;
 	}
 }
 
@@ -4220,54 +4484,6 @@ resume_id(const unsigned char *t, size_t n, char *out, size_t outsz)
 		snprintf(out, outsz, "%.36s", hit);
 	free(p);
 	return hit ? 0 : -1;
-}
-
-/* argv for the relaunch: up to the claude token, then --resume <id>, then
-** the rest minus any earlier session choice (--resume/-r [id], --resume=,
-** --session-id, --continue/-c, --fork-session). Inserted after the token,
-** not appended: a trailing `-- <prompt>` would swallow it. --resume/-r take
-** an OPTIONAL value, so only a non-flag next token is theirs. */
-static char **
-resume_argv(char **v, int argc, int tok, char *id, int *outc)
-{
-	char **o = calloc((size_t)argc + 3, sizeof(char *));
-	int k, n = 0, opts = 1;
-
-	if (!o)
-		return NULL;
-	for (k = 0; k <= tok; k++)
-		o[n++] = v[k];
-	o[n++] = "--resume";
-	o[n++] = id;
-	for (k = tok + 1; k < argc; k++)
-	{
-		const char *a = v[k];
-
-		if (opts && strcmp(a, "--") == 0)
-			opts = 0;
-		else if (opts && (strcmp(a, "--resume") == 0 ||
-		                  strcmp(a, "-r") == 0))
-		{
-			if (k + 1 < argc && v[k + 1][0] != '-')
-				k++;
-			continue;
-		}
-		else if (opts && strcmp(a, "--session-id") == 0)
-		{
-			if (k + 1 < argc)
-				k++;
-			continue;
-		}
-		else if (opts && (strncmp(a, "--resume=", 9) == 0 ||
-		                  strncmp(a, "--session-id=", 13) == 0 ||
-		                  strcmp(a, "--continue") == 0 ||
-		                  strcmp(a, "-c") == 0 ||
-		                  strcmp(a, "--fork-session") == 0))
-			continue;
-		o[n++] = v[k];
-	}
-	*outc = n;
-	return o;
 }
 
 /* `claude --version` of the binary the relaunch will run: the token itself
@@ -4385,6 +4601,9 @@ ag_resume(struct agent *a, const char *resume)
 		return "typed";
 	case -2:
 		return "typed but NOT sent (it did not land in the composer)";
+	case -3:
+		return "typed but NOT sent (it stayed in the composer through "
+		       "every Enter)";
 	default:
 		return "NOT typed";
 	}
@@ -4631,8 +4850,10 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 			if (t != 0)
 			{
 				ag_say(a, 1, "relaunched with --resume %s on claude %s, "
-				       "but the resume message did not land in the "
-				       "composer; Enter not pressed", a->id, r.ver);
+				       "but the resume message %s", a->id, r.ver,
+				       t == -3 ? "stayed in the composer through every "
+				       "Enter" : "did not land in the composer; Enter "
+				       "not pressed");
 				return 1;
 			}
 			if (strcmp(r.sid, a->id) != 0)
@@ -4701,7 +4922,10 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 			       "%s", st, ag_resume(a, resume));
 			return 1;
 		}
-		if ((st = ag_type(a->path, "/exit", 0)) != 0)
+		/* -3 (still in the composer) goes on to AG_EXIT: claude may be
+		** gone already, and a cancel would end a held session; AG_EXIT
+		** cancels safely if it never exits. */
+		if ((st = ag_type(a->path, "/exit", 0)) != 0 && st != -3)
 		{
 			respawn_req(a->path, 'c', NULL, 0);
 			ag_say(a, 1, "%s; hold cancelled", st == -2
@@ -4910,8 +5134,9 @@ restart_agents(int force, const char *only)
 		if ((g = ag_type(a->path, pmsg, 1)) != 0)
 		{
 			ag_say(a, 1, g == -2 ? "the pause message did not land in the "
-			       "composer; Enter not pressed" : "could not type the "
-			       "pause message");
+			       "composer; Enter not pressed" : g == -3 ? "the pause "
+			       "message stayed in the composer through every Enter"
+			       : "could not type the pause message");
 			fails++;
 			continue;
 		}
@@ -4984,6 +5209,546 @@ restart_agents(int force, const char *only)
 
 #endif
 
+/* ---- session history: --history, --revive (#042) -------------------- */
+
+/* One record from dch_history_dir() (written by master.c's rec_*). */
+struct hrec
+{
+	char file[300];		/* record basename without .json */
+	char *body;		/* as stored, one line */
+	char name[512], alias[600], cwd[PATH_MAX], end[32];
+	char sid[64], aname[256], acwd[PATH_MAX];
+	long started, updated, ended;
+	char **argv, **launch;	/* malloc'd blocks */
+	int argc, launchc, live;
+	/* --revive */
+	char as[512];
+	int mode;		/* RV_* */
+	long long deadline;
+};
+
+enum { RV_SKIP, RV_PLAIN, RV_ARGV, RV_SHELL };
+
+static void
+hrec_free(struct hrec *r, int n)
+{
+	int k;
+
+	for (k = 0; k < n; k++)
+	{
+		free(r[k].body);
+		free(r[k].argv);
+		free(r[k].launch);
+	}
+	free(r);
+}
+
+/* Does a master answer on `name`? */
+static int
+name_live(const char *name)
+{
+	char sp[1100];
+	int s;
+
+	session_sock_path(name, sp, sizeof sp);
+	if ((s = control_connect_path(sp)) < 0)
+		return 0;
+	close(s);
+	return 1;
+}
+
+static int
+hrec_load(int dfd, const char *fn, struct hrec *r)
+{
+	struct stat st;
+	size_t n = strlen(fn);
+	ssize_t got;
+	char sd[sizeof sock_dir];
+	int fd;
+
+	memset(r, 0, sizeof *r);
+	if (n < 6 || n - 5 >= sizeof r->file || strcmp(fn + n - 5, ".json"))
+		return -1;
+	snprintf(r->file, sizeof r->file, "%.*s", (int)(n - 5), fn);
+	fd = openat(dfd, fn, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+	if (fd < 0)
+		return -1;
+	/* ours and nobody else's: a record is a command we would run */
+	if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode) ||
+	    st.st_uid != getuid() || (st.st_mode & 022) ||
+	    st.st_size <= 0 || st.st_size > 1024 * 1024 ||
+	    !(r->body = malloc((size_t)st.st_size + 1)))
+	{
+		close(fd);
+		return -1;
+	}
+	got = read(fd, r->body, (size_t)st.st_size);
+	close(fd);
+	r->body[got > 0 ? got : 0] = '\0';
+	chomp(r->body);
+	/* the slug folds '/' and '-' together: only this socket dir's own */
+	if (!dch_json_is_object(r->body) ||
+	    dch_json_string(r->body, "sock_dir", sd, sizeof sd) < 0 ||
+	    strcmp(sd, sock_dir) != 0 ||
+	    dch_json_string(r->body, "name", r->name, sizeof r->name) < 0 ||
+	    !r->name[0] ||
+	    dch_json_string(r->body, "cwd", r->cwd, sizeof r->cwd) < 0 ||
+	    dch_json_string(r->body, "end", r->end, sizeof r->end) < 0 ||
+	    !(r->argv = dch_json_strv(r->body, NULL, "argv", &r->argc)))
+	{
+		free(r->body);
+		r->body = NULL;
+		return -1;
+	}
+	(void)dch_json_string(r->body, "alias", r->alias, sizeof r->alias);
+	(void)dch_json_long(r->body, "started", &r->started);
+	(void)dch_json_long(r->body, "updated", &r->updated);
+	(void)dch_json_long(r->body, "ended", &r->ended);
+	if (dch_json_nested_string(r->body, "agent", "session_id", r->sid,
+	                           sizeof r->sid) == 0 && r->sid[0])
+	{
+		(void)dch_json_nested_string(r->body, "agent", "name", r->aname,
+		                             sizeof r->aname);
+		(void)dch_json_nested_string(r->body, "agent", "cwd", r->acwd,
+		                             sizeof r->acwd);
+		r->launch = dch_json_strv(r->body, "agent", "launch",
+		                          &r->launchc);
+	}
+	else
+		r->sid[0] = '\0';
+	/* A record with an end is over even if a new session took its name. */
+	r->live = !r->end[0] && name_live(r->name);
+	if (!r->end[0] && !r->live)
+		snprintf(r->end, sizeof r->end, "vanished");
+	return 0;
+}
+
+static long
+hrec_when(const struct hrec *r)
+{
+	return r->ended ? r->ended : r->updated;
+}
+
+static int
+hrec_cmp(const void *a, const void *b)
+{
+	long x = hrec_when(a), y = hrec_when(b);
+
+	return x < y ? 1 : x > y ? -1 : 0;
+}
+
+/* Every readable record, newest end first. */
+static int
+history_load(struct hrec **out)
+{
+	char dir[1024];
+	struct dirent *de;
+	struct hrec *v = NULL, *nv;
+	int n = 0, cap = 0;
+	DIR *d;
+
+	*out = NULL;
+	if (dch_history_dir(dir, sizeof dir, sock_dir, 0) < 0 ||
+	    !(d = opendir(dir)))
+		return 0;
+	while ((de = readdir(d)))
+	{
+		if (n == cap)
+		{
+			cap = cap ? cap * 2 : 16;
+			if (!(nv = realloc(v, (size_t)cap * sizeof *v)))
+				break;
+			v = nv;
+		}
+		if (hrec_load(dirfd(d), de->d_name, &v[n]) == 0)
+			n++;
+	}
+	closedir(d);
+	if (n)
+		qsort(v, (size_t)n, sizeof *v, hrec_cmp);
+	*out = v;
+	return n;
+}
+
+static void
+put_argv(char **v)
+{
+	int k;
+
+	for (k = 0; v && v[k]; k++)
+		printf("%s%s", k ? " " : "", v[k]);
+}
+
+static int
+do_history_verb(int json)
+{
+	struct hrec *r;
+	int n = history_load(&r), k, first = 1;
+
+	if (json)
+		putchar('[');
+	for (k = 0; k < n; k++)
+	{
+		char when[32] = "-";
+		time_t t = (time_t)hrec_when(&r[k]);
+		const char *v;
+
+		if (r[k].live)
+			continue;
+		if (json)
+		{
+			/* As stored, one line each; a dead end "" reads vanished. */
+			v = strstr(r[k].body, "\"end\":\"\"");
+			if (v)
+				printf("%s%.*s\"end\":\"vanished\"%s", first ? "" : ",",
+				       (int)(v - r[k].body), r[k].body, v + 8);
+			else
+				printf("%s%s", first ? "" : ",", r[k].body);
+			first = 0;
+			continue;
+		}
+		if (t)
+			strftime(when, sizeof when, "%Y-%m-%d %H:%M", localtime(&t));
+		printf("%s%s%s%s  %s  %s  %s  $ ", r[k].name,
+		       r[k].alias[0] ? " (" : "", r[k].alias,
+		       r[k].alias[0] ? ")" : "", when, r[k].end, r[k].cwd);
+		put_argv(r[k].argv);
+		if (r[k].sid[0])
+			printf("  [claude %s%s%s]", r[k].aname,
+			       r[k].aname[0] ? " " : "", r[k].sid);
+		putchar('\n');
+	}
+	if (json)
+		puts("]");
+	hrec_free(r, n);
+	return 0;
+}
+
+/* What --revive --all takes: a session that died (not exit 0, not dch -k),
+** recently, after a real run. A test session that ends on a signal on
+** purpose lives seconds; one from last week is history, not work in
+** flight. Both stay in --history and revive by name. */
+#define RV_ALL_MAX_AGE	(3L * 86400L)
+#define RV_ALL_MIN_LIFE	(5L * 60L)
+
+static int
+rv_all_takes(const struct hrec *h)
+{
+	long seen = hrec_when(h);
+
+	return !h->live && strcmp(h->end, "killed") != 0 &&
+	       strcmp(h->end, "exit 0") != 0 &&
+	       seen >= (long)time(NULL) - RV_ALL_MAX_AGE &&
+	       seen - h->started >= RV_ALL_MIN_LIFE;
+}
+
+/* v[0..n) as one shell command line, each word quoted when it needs it. */
+static char *
+shell_line(const char *cd, char **v, int n)
+{
+	size_t cap = cd ? strlen(cd) * 4 + 16 : 1;
+	char *o, *p;
+	int k;
+
+	for (k = 0; k < n; k++)
+		cap += strlen(v[k]) * 4 + 3;
+	if (!(o = p = malloc(cap)))
+		return NULL;
+	for (k = cd ? -1 : 0; k < n; k++)
+	{
+		const char *w = k < 0 ? cd : v[k], *c;
+
+		if (p > o)
+			*p++ = ' ';
+		if (k < 0)
+			p += sprintf(p, "cd ");
+		if (*w && strspn(w, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+		                 "0123456789_./:=@%+,-") == strlen(w))
+			p += sprintf(p, "%s", w);
+		else
+		{
+			*p++ = '\'';
+			for (c = w; *c; c++)
+				if (*c == '\'')
+					p += sprintf(p, "'\\''");
+				else
+					*p++ = *c;
+			*p++ = '\'';
+		}
+		if (k < 0)
+			p += sprintf(p, " &&");
+	}
+	*p = '\0';
+	return o;
+}
+
+/* The calling Claude Code session's identity, never handed to a revived
+** one: --revive is often run from inside another agent. */
+static const char *const rv_strip[] = {
+	"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_EXECPATH",
+	"CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN",
+	"CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION",
+	"CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_PID", "CLAUDE_EFFORT",
+};
+
+static int do_spawn_verb(char *exe, const char *name, int cols, int rows,
+                         char **inner_argv, int inner_argc, int quiet);
+
+/* Spawn one record's session in its cwd, as its argv — with --resume <id>
+** when claude is its command (RV_ARGV); a shell that had claude typed into
+** it comes back as the shell (RV_SHELL, the command is typed later). 0, or
+** -1 with the reason printed. */
+static int
+revive_spawn(char *exe, struct hrec *r, int cols, int rows)
+{
+	char **nv = NULL, **v = r->argv;
+	int tok = claude_tok(r->argv, r->argc), nc = r->argc, rc;
+
+	if (chdir(r->cwd) < 0)
+	{
+		printf("%s: NOT revived — its directory %s is gone (%s)\n",
+		       r->name, r->cwd, strerror(errno));
+		return -1;
+	}
+	r->mode = RV_PLAIN;
+	if (r->sid[0] && tok < r->argc)
+	{
+		if (!(nv = resume_argv(r->argv, r->argc, tok, r->sid, &nc)))
+			return -1;
+		v = nv;
+		r->mode = RV_ARGV;
+	}
+	else if (r->sid[0] && r->launch)
+		r->mode = RV_SHELL;
+	{
+		/* do_spawn_verb wants a NULL-terminated argv */
+		char **av = calloc((size_t)nc + 1, sizeof *av);
+
+		rc = -1;
+		if (av)
+		{
+			memcpy(av, v, (size_t)nc * sizeof *av);
+			rc = do_spawn_verb(exe, r->as, cols, rows, av, nc, 1);
+			free(av);
+		}
+	}
+	free(nv);
+	if (rc != 0)
+	{
+		printf("%s: NOT revived — the session did not start\n", r->name);
+		return -1;
+	}
+	if (r->alias[0])
+		write_alias(r->as, r->alias);
+	return 0;
+}
+
+/* Type the agent's launch command, with --resume <id>, into the revived
+** shell once it has printed something (its prompt): no mirror needed. */
+static int
+revive_type_launch(struct hrec *r)
+{
+	char **nv, *line, *cmd[1];
+	int tok = claude_tok(r->launch, r->launchc), nc, rc;
+
+	if (tok == r->launchc)
+		tok = r->launchc - 1;	/* no claude token: --resume goes last */
+	while (activity_epoch(r->as) == 0 && wall_ms() < r->deadline)
+		poll(NULL, 0, 100);
+	poll(NULL, 0, 300);
+	if (!(nv = resume_argv(r->launch, r->launchc, tok, r->sid, &nc)))
+		return -1;
+	line = shell_line(r->acwd[0] && strcmp(r->acwd, r->cwd) ? r->acwd : NULL,
+	                  nv, nc);
+	free(nv);
+	if (!line)
+		return -1;
+	cmd[0] = line;
+	rc = do_send_verb(r->as, cmd, 1, 1);
+	free(line);
+	return rc;
+}
+
+#ifdef HAVE_LIBGHOSTTY_VT
+/* Wait for the resumed claude's empty composer, then type the revive
+** message. Returns NULL when it was sent, else why not. */
+static const char *
+revive_message(struct hrec *r, const char *msg)
+{
+	static char why[160];
+	char path[1100];
+	struct cmd_info ci;
+	struct crec c;
+	int g = CG_UNKNOWN, t;
+
+	session_sock_path(r->as, path, sizeof path);
+	for (;;)
+	{
+		int ok = cmd_query(path, &ci) == 0;
+
+		if (ok && ci.pid > 0 && claude_find(ci.pid, 1, &c) > 0 &&
+		    strcmp(c.status, "idle") == 0 &&
+		    (g = claude_gate(path)) == CG_EMPTY)
+		{
+			cmd_info_free(&ci);
+			break;
+		}
+		if (ok)
+			cmd_info_free(&ci);
+		if (g == CG_NOVT)
+			return "the session has no terminal mirror";
+		if (wall_ms() >= r->deadline)
+		{
+			snprintf(why, sizeof why, "no empty composer within %lds (%s)",
+			         env_ms("DCH_AGENT_STEP_MS", 60000) / 1000, cg_why[g]);
+			return why;
+		}
+		poll(NULL, 0, AG_POLL_MS);
+	}
+	t = ag_type(path, msg, 1);
+	return t == 0 ? NULL : t == -2 ? "it did not land in the composer"
+	       : t == -3 ? "it stayed in the composer through every Enter"
+	       : "it could not be typed";
+}
+#endif
+
+/* `--revive <name> [--as <new>]` / `--revive --all`. */
+static int
+do_revive_verb(char *exe, const char *name, const char *as, int all,
+               int cols, int rows)
+{
+	struct hrec *r;
+	int n = history_load(&r), k, picked = 0, bad = 0;
+	long step = env_ms("DCH_AGENT_STEP_MS", 60000);
+	char dir[1024], cb[256];
+
+	for (k = 0; k < (int)(sizeof rv_strip / sizeof rv_strip[0]); k++)
+		unsetenv(rv_strip[k]);
+	(void)dch_history_dir(dir, sizeof dir, sock_dir, 0);
+	for (k = 0; k < n; k++)
+	{
+		struct hrec *h = &r[k];
+		int i;
+
+		h->mode = RV_SKIP;
+		if (all ? !rv_all_takes(h)
+		        : strcmp(h->name, name) != 0 &&
+		          strcmp(h->file, canon_name(name, cb, sizeof cb)) != 0)
+			continue;
+		if (!all && picked)
+			continue;	/* two records claim it: the newest wins */
+		picked++;
+		snprintf(h->as, sizeof h->as, "%s", as ? as : h->name);
+		if (!all && name_live(h->as))
+		{
+			fprintf(stderr, "dch: session %s is live; revive it under "
+			        "another name with --revive %s --as <new>\n", h->as,
+			        name);
+			bad++;
+			continue;
+		}
+		/* --all: the next free <name>-N, one that no record claims
+		** either — its master would overwrite that record. */
+		if (all && name_live(h->as))
+			for (i = 2; i <= 999; i++)
+			{
+				char rp[1400];
+
+				snprintf(h->as, sizeof h->as, "%s-%d", h->name, i);
+				snprintf(rp, sizeof rp, "%s/%s.json", dir,
+				         canon_name(h->as, cb, sizeof cb));
+				if (!name_live(h->as) && access(rp, F_OK) != 0)
+					break;
+			}
+		if (revive_spawn(exe, h, cols, rows) < 0)
+		{
+			h->mode = RV_SKIP;
+			bad++;
+			continue;
+		}
+		h->deadline = wall_ms() + step;
+		/* revived under a new name: the old record is now history the
+		** new one carries; left alone, --all would revive it again */
+		if (strcmp(h->as, h->name) != 0 && !h->live)
+		{
+			char rp[1400];
+
+			snprintf(rp, sizeof rp, "%s/%s.json", dir, h->file);
+			unlink(rp);
+		}
+		if (h->mode == RV_PLAIN)
+		{
+			printf("%s: revived as %s in %s", h->name, h->as, h->cwd);
+			if (h->sid[0])
+				printf("; claude %s NOT resumed (its launch command is "
+				       "unknown): claude --resume %s", h->aname, h->sid);
+			putchar('\n');
+			fflush(stdout);
+			bad += h->sid[0] != 0;
+		}
+	}
+	if (!picked)
+	{
+		if (all)
+			puts("nothing to revive (sessions that ended over 3 days "
+			     "ago or ran under 5 minutes are in dch --history; "
+			     "revive one by name)");
+		else
+			fprintf(stderr, "dch: no history for session %s\n", name);
+		hrec_free(r, n);
+		return all ? 0 : 1;
+	}
+	/* Then the agents: every session is already starting, so waiting on
+	** them one by one costs about the slowest one. Shells get their claude
+	** command first; its clock starts when it is typed. */
+	for (k = 0; k < n; k++)
+		if (r[k].mode == RV_SHELL)
+		{
+			if (revive_type_launch(&r[k]) == 0)
+			{
+				r[k].deadline = wall_ms() + step;
+				continue;
+			}
+			printf("%s: revived as %s in %s, but claude %s could not be "
+			       "started; resume by hand: claude --resume %s\n",
+			       r[k].name, r[k].as, r[k].cwd, r[k].aname, r[k].sid);
+			r[k].mode = RV_PLAIN;
+			bad++;
+		}
+	for (k = 0; k < n; k++)
+	{
+		struct hrec *h = &r[k];
+		const char *why = NULL, *msg = getenv("DCH_REVIVE_MSG");
+		char text[1200], when[32] = "an unknown time";
+		time_t t = (time_t)hrec_when(h);
+
+		if (h->mode != RV_ARGV && h->mode != RV_SHELL)
+			continue;
+		if (t)
+			strftime(when, sizeof when, "%Y-%m-%d %H:%M", localtime(&t));
+		snprintf(text, sizeof text, "resume all work. This session ended "
+		         "(%s, last seen %s) and dch revived it with claude "
+		         "--resume. Re-read your ledger and task list, re-arm the "
+		         "monitors, background shells, loops, wakeups and crons "
+		         "that died with it, re-dispatch any unfinished workers, "
+		         "then carry on where you left off.", h->end, when);
+#ifdef HAVE_LIBGHOSTTY_VT
+		why = revive_message(h, msg && *msg ? msg : text);
+		bad += why != NULL;
+#else
+		(void)msg;
+		why = "dch-lite has no terminal mirror to see the composer";
+#endif
+		printf("%s: revived as %s in %s, claude %s%sresumed %s; resume "
+		       "message %s%s%s\n", h->name, h->as, h->cwd, h->aname,
+		       h->aname[0] ? " " : "", h->sid, why ? "NOT sent (" : "sent",
+		       why ? why : "", why ? ")" : "");
+		fflush(stdout);
+	}
+	hrec_free(r, n);
+	return bad ? 1 : 0;
+}
+
 /* ---- main ----------------------------------------------------------- */
 
 int
@@ -4996,12 +5761,13 @@ main(int argc, char **argv)
 	       A_RENAME, A_LISTJSON, A_LISTJSON2, A_SETALIAS,
 	       A_SPAWN, A_SEND, A_RUN, A_KEYS, A_READ, A_WAIT, A_STATUS,
 	       A_REPORT, A_META, A_RESTART, A_AGENT_LIST, A_AGENT_SEND,
-	       A_RESPAWN, A_CMD }
+	       A_RESPAWN, A_CMD, A_HISTORY, A_REVIVE }
 	    action = A_ATTACH;
 	char alias_arg[600] = "";
 	int opt_ansi = 0, opt_recent = -1, opt_timeout = 10000, opt_cursor = 0;
 	int opt_all = 0, opt_cancel = 0, opt_agents = 0;
-	int opt_agent_json = 0;
+	int opt_agent_json = 0, opt_hist_json = 0;
+	char opt_as[512] = "";
 	int opt_cols = 0, opt_rows = 0;
 	char opt_match[DCH_WAIT_MAX + 1] = "";
 	char opt_state[40] = "";
@@ -5283,6 +6049,51 @@ main(int argc, char **argv)
 				return 1;
 			}
 		}
+		else if (strcmp(a, "--history") == 0)
+		{
+			action = A_HISTORY;
+			i++;
+			if (i < argc && strcmp(argv[i], "--json") == 0)
+			{
+				opt_hist_json = 1;
+				i++;
+			}
+		}
+		else if (strcmp(a, "--revive") == 0)
+		{
+			/* <name> or --all, like --restart */
+			action = A_REVIVE;
+			i++;
+			if (i < argc && strcmp(argv[i], "--all") == 0)
+			{
+				opt_all = 1;
+				i++;
+			}
+			else if (i < argc && argv[i][0] != '\0' &&
+			         argv[i][0] != '-')
+			{
+				snprintf(session_name, sizeof(session_name),
+				         "%s", argv[i]);
+				i++;
+			}
+			else
+			{
+				fprintf(stderr, "dch: --revive needs a session "
+				        "name or --all\n");
+				return 1;
+			}
+		}
+		else if (strcmp(a, "--as") == 0)
+		{
+			i++;
+			if (i >= argc || argv[i][0] == '\0' || argv[i][0] == '-')
+			{
+				fprintf(stderr, "dch: --as needs a session name\n");
+				return 1;
+			}
+			snprintf(opt_as, sizeof(opt_as), "%s", argv[i]);
+			i++;
+		}
 		else if (strcmp(a, "--cancel") == 0)
 		{
 			opt_cancel = 1;
@@ -5415,6 +6226,11 @@ main(int argc, char **argv)
 	if (opt_cancel && action != A_RESPAWN)
 	{
 		fprintf(stderr, "dch: --cancel only works with --respawn\n");
+		return 1;
+	}
+	if (opt_as[0] && (action != A_REVIVE || opt_all))
+	{
+		fprintf(stderr, "dch: --as only works with --revive <name>\n");
 		return 1;
 	}
 	if (opt_agents && action != A_RESTART)
@@ -5880,6 +6696,9 @@ main(int argc, char **argv)
 		return do_send_verb(session_name, inner_argv, inner_argc, 0);
 	case A_RUN:
 		return do_send_verb(session_name, inner_argv, inner_argc, 1);
+	case A_HISTORY:
+		return do_history_verb(opt_hist_json);
+	case A_REVIVE:
 	case A_SPAWN:
 	{
 		if (opt_cols == 0)
@@ -5896,8 +6715,12 @@ main(int argc, char **argv)
 				opt_rows = 24;
 			}
 		}
+		if (action == A_REVIVE)
+			return do_revive_verb(exe, session_name,
+			                      opt_as[0] ? opt_as : NULL, opt_all,
+			                      opt_cols, opt_rows);
 		return do_spawn_verb(exe, session_name, opt_cols, opt_rows,
-		                     inner_argv, inner_argc);
+		                     inner_argv, inner_argc, 0);
 	}
 	case A_ATTACH:
 		return attach_with_switch(exe, forced_name, force,

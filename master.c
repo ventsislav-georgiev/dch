@@ -17,6 +17,8 @@
 */
 #include "dtach.h"
 #include "vt.h"
+#include <dirent.h>
+#include <limits.h>
 #include <poll.h>
 
 /* The pty struct - The pty information is stored here. */
@@ -243,7 +245,7 @@ static void
 unlink_socket(void)
 {
 	static const char *suffix[] = { ".act", ".state", ".ver", ".resume",
-	                                ".meta" };
+	                                ".meta", ".killed" };
 	struct stat st;
 	char side[1100];
 	size_t i;
@@ -327,6 +329,284 @@ touch_activity(void)
 	close(fd);
 }
 
+/* ---- session history record (#042) ----------------------------------
+**
+** One JSON line per session in dch_history_dir()/<name>.json, replaced
+** (tmp + rename) at start, every rec_ms and at exit, so a session that dies
+** (out of memory, a full disk, a reboot) leaves what `dch --revive` needs:
+** where it ran, what it ran, and the Claude Code session inside. Never the
+** environment. The exit write runs from atexit, also out of die()'s signal
+** handler, so it only write()s the buffers the last refresh built. */
+static char rec_path[1200], rec_name[512], rec_cwd[PATH_MAX];
+static char rec_dir[1024], rec_sdir[1024];	/* record dir, socket dir */
+static char *rec_head;		/* {"name":…,"started":N, */
+static char *rec_agent;		/* the agent object, or null */
+static struct dch_agent rec_ag;	/* last agent seen; pid 0 = none */
+static long rec_started;
+static char rec_end[32];	/* how the master ended, set before exit */
+static struct timespec rec_at;	/* last refresh */
+static long rec_ms = 60L * 1000L;	/* DCH_RECORD_MS */
+
+static void
+rec_str(FILE *f, const char *s)
+{
+	size_t cap = strlen(s) * 6 + 3;
+	char *q = malloc(cap);
+
+	fputs(q && dch_json_quote(q, cap, s) != (size_t)-1 ? q : "\"\"", f);
+	free(q);
+}
+
+static void
+rec_strv(FILE *f, char **v)
+{
+	int k;
+
+	fputc('[', f);
+	for (k = 0; v && v[k]; k++)
+	{
+		if (k)
+			fputc(',', f);
+		rec_str(f, v[k]);
+	}
+	fputc(']', f);
+}
+
+static int
+rec_put(int fd, const char *s)
+{
+	size_t n = strlen(s);
+
+	return write(fd, s, n) == (ssize_t)n;
+}
+
+/* Replace the record with the last refresh plus updated/ended/end. */
+static void
+rec_write(const char *end)
+{
+	char tmp[1300], mid[200];
+	time_t now = time(NULL);
+	int fd, ok;
+
+	if (!rec_head || !rec_agent ||
+	    snprintf(tmp, sizeof tmp, "%s.%d.tmp", rec_path, (int)getpid()) >=
+	        (int)sizeof tmp)
+		return;
+	snprintf(mid, sizeof mid, "\"updated\":%ld,\"ended\":%ld,\"end\":\"%s\","
+	         "\"agent\":", (long)now, end[0] ? (long)now : 0L, end);
+	fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
+	/* another socket dir's master pruned our dir while it was empty */
+	if (fd < 0 && errno == ENOENT && mkdir(rec_dir, 0700) == 0)
+		fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
+	if (fd < 0)
+		return;
+	ok = rec_put(fd, rec_head) && rec_put(fd, mid) &&
+	     rec_put(fd, rec_agent) && rec_put(fd, "}\n");
+	if (close(fd) != 0 || !ok || rename(tmp, rec_path) != 0)
+		unlink(tmp);
+}
+
+/* Rebuild the record from the live session and write it. The agent sticks
+** while its claude's session file is still there: a claude killed under a
+** shell (out of memory) leaves it, so a revive still brings it back; one
+** that quit cleanly removed it. */
+static void
+rec_refresh(void)
+{
+	struct dch_agent a;
+	char alias[600] = "", ap[1100], *hb = NULL, *ab = NULL, *old;
+	size_t hl, al;
+	FILE *f;
+	int fd;
+
+	if (!rec_path[0])
+		return;
+	if (the_pty.fd >= 0 && dch_agent_probe(the_pty.pid, &a) == 0)
+	{
+		free(rec_ag.launch);
+		rec_ag = a;
+	}
+	else if (rec_ag.pid && dch_claude_gone(rec_ag.pid))
+	{
+		free(rec_ag.launch);
+		memset(&rec_ag, 0, sizeof rec_ag);
+	}
+	if (sidecar_path(".alias", ap, sizeof ap) == 0 &&
+	    (fd = open(ap, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)) >= 0)
+	{
+		ssize_t r = read(fd, alias, sizeof alias - 1);
+
+		close(fd);
+		alias[r > 0 ? r : 0] = '\0';
+		alias[strcspn(alias, "\r\n")] = '\0';
+	}
+	if (!(f = open_memstream(&hb, &hl)))
+		return;
+	fputs("{\"name\":", f);
+	rec_str(f, rec_name);
+	fputs(",\"sock_dir\":", f);
+	rec_str(f, rec_sdir);
+	fputs(",\"alias\":", f);
+	rec_str(f, alias);
+	fputs(",\"cwd\":", f);
+	rec_str(f, rec_cwd);
+	fputs(",\"argv\":", f);
+	rec_strv(f, cur_argv);
+	fprintf(f, ",\"started\":%ld,", rec_started);
+	if (fclose(f) != 0 || !(f = open_memstream(&ab, &al)))
+	{
+		free(hb);
+		return;
+	}
+	if (!rec_ag.pid)
+		fputs("null", f);
+	else
+	{
+		fputs("{\"kind\":\"claude\",\"session_id\":", f);
+		rec_str(f, rec_ag.sid);
+		fputs(",\"name\":", f);
+		rec_str(f, rec_ag.name);
+		fputs(",\"cwd\":", f);
+		rec_str(f, rec_ag.cwd);
+		fputs(",\"launch\":", f);
+		rec_strv(f, rec_ag.launch);
+		fputc('}', f);
+	}
+	if (fclose(f) != 0)
+	{
+		free(hb);
+		free(ab);
+		return;
+	}
+	/* Swap in whole buffers: a signal landing mid-refresh must find the
+	** previous pair intact for its exit write. */
+	old = rec_head;
+	rec_head = hb;
+	free(old);
+	old = rec_agent;
+	rec_agent = ab;
+	free(old);
+	rec_write("");
+}
+
+/* At exit: how the session ended. `dch -k` leaves <sock>.killed before it
+** signals us; else die() named the signal, else the child's exit status. */
+static void
+rec_exit(void)
+{
+	char kp[1100];
+
+	if (!rec_path[0])
+		return;
+	if (sidecar_path(".killed", kp, sizeof kp) == 0 && access(kp, F_OK) == 0)
+		snprintf(rec_end, sizeof rec_end, "killed");
+	else if (!rec_end[0] && exit_signal > 0)
+		snprintf(rec_end, sizeof rec_end, "signal %d", exit_signal);
+	else if (!rec_end[0])
+		snprintf(rec_end, sizeof rec_end, "exit %d",
+		         exit_code >= 0 ? exit_code : 1);
+	rec_write(rec_end);
+}
+
+/* Drop *.json idle for 30 days from one record dir. */
+static void
+rec_prune(int dfd)
+{
+	DIR *d = fdopendir(dfd);
+	struct dirent *de;
+	struct stat st;
+
+	if (!d)
+	{
+		close(dfd);
+		return;
+	}
+	while ((de = readdir(d)))
+	{
+		size_t n = strlen(de->d_name);
+
+		if (n > 5 && strcmp(de->d_name + n - 5, ".json") == 0 &&
+		    fstatat(dirfd(d), de->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0 &&
+		    S_ISREG(st.st_mode) && st.st_mtime < time(NULL) - 30L * 86400L)
+			unlinkat(dirfd(d), de->d_name, 0);
+	}
+	closedir(d);
+}
+
+/* Start the record: a cold start prunes records idle for 30 days, from
+** every socket dir's subdir, and the subdirs that leaves empty, then drops
+** a .killed marker a SIGKILLed master left behind; a live restart keeps
+** the started time. */
+static void
+rec_init(int resumed)
+{
+	char root[1024], kp[1100], body[256];
+	const char *base = strrchr(sockname, '/'), *e = getenv("DCH_SESSION");
+	size_t bl;
+	long v;
+	int fd;
+
+	if (!base)
+		return;		/* a relative socket path keeps no record */
+	snprintf(rec_sdir, sizeof rec_sdir, "%.*s", (int)(base - sockname),
+	         sockname);
+	base++;
+	bl = strlen(base);
+	if (bl > 5 && strcmp(base + bl - 5, ".sock") == 0)
+		bl -= 5;
+	if (!resumed && dch_history_dir(root, sizeof root, NULL, 0) == 0 &&
+	    (fd = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)) >= 0)
+	{
+		DIR *d = fdopendir(fd);
+		struct dirent *de;
+		int sub;
+
+		while (d && (de = readdir(d)))
+			if (de->d_name[0] != '.' &&
+			    (sub = openat(dirfd(d), de->d_name,
+			                  O_RDONLY | O_DIRECTORY | O_NOFOLLOW)) >= 0)
+			{
+				rec_prune(sub);
+				unlinkat(dirfd(d), de->d_name, AT_REMOVEDIR);
+			}
+		if (d)
+			closedir(d);
+		else
+			close(fd);
+	}
+	if (dch_history_dir(rec_dir, sizeof rec_dir, rec_sdir, 1) < 0 ||
+	    !getcwd(rec_cwd, sizeof rec_cwd) ||
+	    snprintf(rec_path, sizeof rec_path, "%s/%.*s.json", rec_dir, (int)bl,
+	             base) >= (int)sizeof rec_path)
+	{
+		rec_path[0] = '\0';
+		return;
+	}
+	snprintf(rec_name, sizeof rec_name, "%s", e && *e ? e : "");
+	if (!rec_name[0])
+		snprintf(rec_name, sizeof rec_name, "%.*s", (int)bl, base);
+	e = getenv("DCH_RECORD_MS");
+	if (e && atol(e) > 0)
+		rec_ms = atol(e);
+	rec_started = (long)time(NULL);
+	if (resumed && (fd = open(rec_path, O_RDONLY | O_NOFOLLOW)) >= 0)
+	{
+		/* "started" sits in the head, well inside the first bytes */
+		ssize_t r = read(fd, body, sizeof body - 1);
+		char *p;
+
+		close(fd);
+		body[r > 0 ? r : 0] = '\0';
+		if ((p = strstr(body, "\"started\":")) && (v = atol(p + 10)) > 0)
+			rec_started = v;
+	}
+	else if (!resumed && sidecar_path(".killed", kp, sizeof kp) == 0)
+		unlink(kp);
+	rec_refresh();
+	clock_gettime(CLOCK_MONOTONIC, &rec_at);
+	atexit(rec_exit);
+}
+
 /* Signal */
 static RETSIGTYPE
 die(int sig)
@@ -345,6 +625,7 @@ die(int sig)
 	** catch "who killed the master" (the bug this whole trace facility exists
 	** to diagnose). Not strictly async-signal-safe; debug-only. */
 	dch_trace("master die sig=%d", sig);
+	snprintf(rec_end, sizeof rec_end, "signal %d", sig);
 	exit(1);
 }
 
@@ -2199,6 +2480,11 @@ pty_activity(void)
 			respawn_consume(status);
 			return;
 		}
+		/* for the history record's end (rec_exit) */
+		exit_code = waited >= 0 && WIFEXITED(status) ? WEXITSTATUS(status)
+		                                              : -1;
+		exit_signal = waited >= 0 && WIFSIGNALED(status) ? WTERMSIG(status)
+		                                                  : 0;
 		if (waited >= 0)
 		{
 			if (WIFEXITED(status))
@@ -2814,6 +3100,7 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 		}
 	}
 	dch_bridge_start(argv, resume.valid, the_pty.fd, s, statusfd);
+	rec_init(resume.valid);
 
 	/* Stamp the version LAST, once this image is actually serving: a client
 	** that reads the sidecar is asking "what is running", not "what was
@@ -2857,6 +3144,14 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 		** still holding the slave would otherwise keep EOF (and so the
 		** respawn) from ever coming. Held: the hold is bounded. */
 		wait_ms = heal_ms;
+		/* The history record's refresh tick, due even while busy. */
+		if (ms_since(&rec_at) >= rec_ms)
+		{
+			rec_refresh();
+			clock_gettime(CLOCK_MONOTONIC, &rec_at);
+		}
+		if (rec_ms - ms_since(&rec_at) < wait_ms)
+			wait_ms = rec_ms - ms_since(&rec_at);
 		if (the_pty.fd >= 0 && respawn_live())
 		{
 			int st;

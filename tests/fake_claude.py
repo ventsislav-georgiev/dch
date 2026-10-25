@@ -13,10 +13,12 @@ State lives in $FAKE_CLAUDE_DIR:
                     shell, subagents, busy, dialog, draft, noexit, crash,
                     mangle, decoy, turn_ms, dialog_on_paste (a prompt comes
                     up as a paste ends), pasted_decoy (a "[Pasted text #1
-                    +3 lines]" transcript line)
-  <session>.log     JSON lines: start (argv, cwd, sid), line (typed), turn
-                    (a message taken), enter_dialog (Enter while a prompt
-                    is up: it would have answered it), exit
+                    +3 lines]" transcript line), eat_enters (ignore that
+                    many Enters on a draft, as a just-resumed Claude did)
+  <session>.log     JSON lines: start (argv, cwd, sid, the CLAUDE* env
+                    keys), line (typed), turn (a message taken),
+                    enter_dialog (Enter while a prompt is up: it would have
+                    answered it), enter_eaten, exit
 <session> is DCH_SESSION, which the master sets for its child.
 """
 import json, os, select, signal, subprocess, sys, termios, textwrap, time
@@ -99,12 +101,13 @@ def bye(code=0, *_):
 signal.signal(signal.SIGTERM, lambda *a: bye(0))
 signal.signal(signal.SIGHUP, lambda *a: bye(0))
 
-log(ev="start", argv=sys.argv[1:], cwd=os.getcwd(), sid=SID)
+log(ev="start", argv=sys.argv[1:], cwd=os.getcwd(), sid=SID,
+    env=sorted(k for k in os.environ if k.startswith("CLAUDE")))
 saved = termios.tcgetattr(0)
 tty.setraw(0)
 out = sys.stdout.buffer
 transcript, queue, draft = [], [], ""
-collapsed, prompt_up, pstart = False, False, 0
+collapsed, prompt_up, pstart, eaten = False, False, 0, 0
 turn_end = 0.0
 idle_gap = 0.0       # a turn ended with a message queued: idle this long
 
@@ -226,6 +229,9 @@ while True:
             ch, buf = buf[:1], buf[1:]
             if ch == b"\r" and (prompt_up or c.get("dialog")):
                 log(ev="enter_dialog", text=draft)
+            elif ch == b"\r" and draft and eaten < c.get("eat_enters", 0):
+                eaten += 1
+                log(ev="enter_eaten", text=draft)
             elif ch == b"\r":
                 collapsed = False
                 text, draft = draft, ""

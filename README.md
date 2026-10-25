@@ -175,6 +175,8 @@ dch --restart <name>|--all --include-agents [-f]  # ...then restart its stale Cl
 dch --respawn <name> [-- cmd...]                # on child exit, start cmd in its place
 dch --respawn <name> --cancel                   # drop a pending respawn
 dch --cmd <name>                                # child pid, state, argv, exit status (JSON)
+dch --history [--json]                          # sessions that ended, and how
+dch --revive <name> [--as <new>]|--all          # bring ended sessions back, claude resumed
 ```
 
 Inside a session: `Ctrl-\` to detach. Works in vim, fzf, less, Claude Code,
@@ -219,6 +221,8 @@ someone is watching is invisible to them.
 | `--respawn <n> [-- cmd...]` | Arm a one-shot respawn: when the session's program next exits, the master keeps the session (same socket, pty size, attached clients) and starts `cmd` in its place. No `cmd` arms a *hold*: the session stays up childless until a second `--respawn <n> -- cmd` starts one, or until `DCH_HOLD_MS` (default 120000) ends it. An arm that nothing consumes expires after `DCH_RESPAWN_TTL_MS` (default 300000); both are read from the master's environment. `--restart` refuses while a respawn is armed or held. | 0 ok, 1 no session / refused / master too old |
 | `--respawn <n> --cancel` | Drop a pending arm. On a held (childless) session it ends the session. | 0 ok, 1 no session |
 | `--cmd <n>` | Print `{"pid","state","argv","exit_code","exit_signal","tail"}`: the child's pid (`null` while held), `state` `running`, `armed` or `held`, the argv it was started with, the exit status of a child reaped under an arm (`null` otherwise), and `tail`, the last 8 KB the child wrote since the arm, raw. | 0 ok, 1 no session / master too old |
+| `--history [--json]` | List the sessions that ended, newest first, one line each: `name (alias)  when  end  cwd  $ argv  [claude <name> <session id>]`. `end` is `exit N`, `signal N`, `killed` (`dch -k`) or `vanished` (the master died without a word: SIGKILL, power loss). Only the records of the current socket dir are listed. `--json` prints the stored records as an array (see [Bringing sessions back](#bringing-sessions-back)). | 0 |
+| `--revive <n> [--as <new>]` \| `--revive --all` | Start ended sessions again: in their cwd, with their argv, with the Claude Code agent in them resumed via `--resume <id>` and told to carry on (see [Bringing sessions back](#bringing-sessions-back)). `<n>` revives that one, whatever its end; a live `<n>` is refused unless `--as <new>` names another session. `--all` revives every session that died — anything but `exit 0` and `killed` — within the last 3 days after running at least 5 minutes, and gives one whose name is now taken the first free `<n>-2`, `<n>-3`, …. Older or shorter-lived sessions stay in `--history` and revive by name. One line per session. | 0 ok, 1 no history / name live / a revive or resume failed |
 
 A typical agent loop:
 
@@ -525,6 +529,7 @@ and the session ends.
 | `DCH_AGENT_SETTLE_MS` | `3000` | How long it must stay ready before `/exit`. |
 | `DCH_AGENT_LAND_MS` | `3000` | How long dch waits for typed text to show in the composer before giving up without pressing Enter. |
 | `DCH_AGENT_STEP_MS` | `60000` | Limit for `/exit` to end Claude and for the relaunch to show a composer. |
+| `DCH_AGENT_REENTER_MS` | `5000` | After Enter, how long a message may stay in the composer before Enter is pressed again (at most 5 more times, never on a dialog). A just-resumed Claude can drop the first Enter. |
 
 Limitations:
 
@@ -549,6 +554,74 @@ Limitations:
   narrows this window but cannot close it: typing and the agent's next turn
   are not atomic.
 
+### Bringing sessions back
+
+Every master keeps a record of its session in
+`$XDG_STATE_HOME/dch/sessions/<slug>/<name>.json` (`~/.local/state/dch/sessions`
+when `XDG_STATE_HOME` is unset or relative): where it ran, what it ran, and
+the Claude Code agent inside it. `<slug>` is the socket dir with each `/` as
+`-` (`/tmp/dch-502` → `-tmp-dch-502`), so sessions in a test's own
+`XDG_RUNTIME_DIR` or `DCH_SOCKET_DIR` never mix with, overwrite or get revived
+as the real ones; `--history` and `--revive` read only the current socket
+dir's records. A relative socket dir keeps no records. It is written at start, refreshed every
+`DCH_RECORD_MS` (60000) while the session runs, and closed with how it
+ended. A reboot, a crash or a SIGKILL ends sessions without a word; the
+record outlives them.
+
+```sh
+dch --history                # what ended, when, how, where
+dch --revive work            # bring one back
+dch --revive work --as work2 # ...under another name
+dch --revive --all           # every session that died lately, see below
+```
+
+`--all` takes a session only when all three hold: it ended abnormally
+(anything but `exit 0` and `killed`, `vanished` included), it was last seen
+within the last 3 days, and it ran at least 5 minutes (last seen − started;
+last seen is `ended`, else `updated`). That leaves out short test sessions
+that end on a signal on purpose, and last week's sessions. They are still in
+`--history`; `dch --revive <name>` takes any record.
+
+A revived session starts in its recorded cwd with its recorded argv. If the
+argv runs `claude` (directly or through a wrapper such as `headroom wrap
+claude`), `--resume <id>` goes in after the `claude` word and any old
+`--resume`/`--continue` comes out. If claude was typed into a shell inside the
+session, the shell comes back and dch types the launch command again: `cd
+<claude's cwd> && <the command> --resume <id>`. Then, on the full build, dch
+waits for the composer and types a message telling the agent the session
+ended and to re-read its ledger, re-arm its monitors and carry on
+(`DCH_REVIVE_MSG` replaces it). dch-lite revives and resumes but cannot see the
+composer, so it says the message was not sent. The caller's own Claude
+identity (`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_PID`, …) is
+removed from the revived session's environment, so `--revive` works from
+inside an agent.
+
+A session whose directory is gone is reported and skipped; the others still
+come back. A revive under a new name retires the old record. Records older
+than 30 days are pruned, in every socket dir's subdir, when a master starts,
+and subdirs left empty are removed.
+
+The record is one line of JSON, mode 0600 in a 0700 directory:
+
+```json
+{"name":"work","sock_dir":"/tmp/dch-502","alias":"My work","cwd":"/src/app","argv":["headroom","wrap","claude"],
+ "started":1761400000,"updated":1761403600,"ended":1761403612,"end":"signal 9",
+ "agent":{"kind":"claude","session_id":"…","name":"fix-tests","cwd":"/src/app",
+          "launch":["/usr/local/bin/headroom","wrap","claude"]}}
+```
+
+`sock_dir` is the socket dir the session lived in; a record whose `sock_dir`
+is not the current one is ignored. `ended` is `0` and `end` `""` while the
+session runs (and after a master that
+died without writing them; `--history` shows that as `vanished`). `agent` is
+`null` without a Claude Code agent; `launch` is the argv of the process the
+master's child started it from — the child itself for a command session, the
+typed command for a shell session.
+
+The argv is stored as given, so a secret passed on a command line lands in
+the record the way it lands in shell history. The environment is never
+stored.
+
 ### Attaching replays the screen
 
 Attaching sends you the session's current screen from the master's mirror
@@ -569,6 +642,7 @@ environment disables it at spawn.
 | --- | --- |
 | `--spawn`, `--send`, `--run`, `--status`, `--report`, `--meta`, `--wait --state`, `--ls-json` | Work unchanged (plain pty writes / sidecar reads). State detection needs the master's mirror, so against a lite/`DCH_NO_VT` master `--status` falls back to reported state + output heuristic. |
 | `--restart --include-agents` agent step | Skipped with a note by a lite client: it needs the mirror to see the composer. |
+| `--revive` resume message | Not typed; the line says so. The session and its `claude --resume` still come back. |
 | `--read`, `--wait --match` | Exit 3 with a message pointing at the full build. |
 | `--keys` | Falls back to a fixed legacy xterm table client-side (exit 0 + stderr note). Mode-aware apps may misread modified keys. |
 
