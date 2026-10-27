@@ -357,8 +357,9 @@ rec_str(FILE *f, const char *s)
 	free(q);
 }
 
+/* v as a JSON array, v[0] written as v0 when that is given. */
 static void
-rec_strv(FILE *f, char **v)
+rec_strv(FILE *f, char **v, const char *v0)
 {
 	int k;
 
@@ -367,7 +368,7 @@ rec_strv(FILE *f, char **v)
 	{
 		if (k)
 			fputc(',', f);
-		rec_str(f, v[k]);
+		rec_str(f, k == 0 && v0 ? v0 : v[k]);
 	}
 	fputc(']', f);
 }
@@ -415,6 +416,8 @@ rec_refresh(void)
 {
 	struct dch_agent a;
 	char alias[600] = "", ap[1100], *hb = NULL, *ab = NULL, *old;
+	char exe[PATH_MAX];
+	const char *path = getenv("PATH");
 	size_t hl, al;
 	FILE *f;
 	int fd;
@@ -450,8 +453,14 @@ rec_refresh(void)
 	rec_str(f, alias);
 	fputs(",\"cwd\":", f);
 	rec_str(f, rec_cwd);
+	/* A bare argv[0] as the path execvp() found it on (our PATH and
+	** cwd are the child's), so a revive under a thinner PATH (launchd)
+	** still finds it. Not realpath()ed: a symlink keeps its basename. */
+	if (!cur_argv || !cur_argv[0] || strchr(cur_argv[0], '/') || !path ||
+	    path_lookup(cur_argv[0], path, rec_cwd, exe, sizeof exe) < 0)
+		exe[0] = '\0';
 	fputs(",\"argv\":", f);
-	rec_strv(f, cur_argv);
+	rec_strv(f, cur_argv, exe[0] ? exe : NULL);
 	fprintf(f, ",\"started\":%ld,", rec_started);
 	if (fclose(f) != 0 || !(f = open_memstream(&ab, &al)))
 	{
@@ -469,7 +478,7 @@ rec_refresh(void)
 		fputs(",\"cwd\":", f);
 		rec_str(f, rec_ag.cwd);
 		fputs(",\"launch\":", f);
-		rec_strv(f, rec_ag.launch);
+		rec_strv(f, rec_ag.launch, NULL);
 		fputc('}', f);
 	}
 	if (fclose(f) != 0)
@@ -671,7 +680,18 @@ init_pty(char **argv, int statusfd)
 {
 	/* Use the original terminal's settings, and the_pty.ws as it stands:
 	** the cold start seeds it, a respawn inherits the live size. */
+	int ep[2] = {-1, -1}, err = 0;
+	ssize_t r;
+
 	the_pty.term = orig_term;
+
+	/* A spawning client waits on statusfd: give the child a close-on-exec
+	** pipe, so a failed exec comes back as its errno and a good one as
+	** EOF, whatever the timing. */
+	if (statusfd != -1 &&
+	    (pipe(ep) < 0 || fcntl(ep[0], F_SETFD, FD_CLOEXEC) < 0 ||
+	     fcntl(ep[1], F_SETFD, FD_CLOEXEC) < 0))
+		return -1;
 
 	/* Create the pty process */
 	if (!dont_have_tty)
@@ -707,19 +727,33 @@ init_pty(char **argv, int statusfd)
 		sigprocmask(SIG_SETMASK, &none, NULL);
 		execvp(*argv, argv);
 
-		/* Report the error to statusfd if we can, or stdout if we
-		** can't. */
-		if (statusfd != -1)
-			dup2(statusfd, 1);
-		else
-			printf(EOS "\r\n");
-
-		printf("%s: could not execute %s: %s\r\n", progname,
-		       *argv, strerror(errno));
+		/* Hand the errno to the master, or (a respawn: nobody waits)
+		** say it on the pty. */
+		err = errno;
+		if (ep[1] != -1)
+		{
+			r = write(ep[1], &err, sizeof err);
+			_exit(1);
+		}
+		printf(EOS "\r\n%s: could not execute %s: %s\r\n", progname,
+		       *argv, strerror(err));
 		fflush(stdout);
 		_exit(1);
 	}
 	/* Parent.. Finish up and return */
+	if (ep[0] != -1)
+	{
+		close(ep[1]);
+		while ((r = read(ep[0], &err, sizeof err)) < 0 && errno == EINTR)
+			;
+		close(ep[0]);
+		if (r == sizeof err)
+		{
+			/* the client prints "<session>: " before this */
+			dprintf(statusfd, "%s: %s\n", *argv, strerror(err));
+			exit(1);
+		}
+	}
 #ifdef BROKEN_MASTER
 	{
 		char *buf;
@@ -3388,7 +3422,8 @@ master_main(char **argv, int waitattach, int dontfork)
 	** that occur while trying to execute the program. */
 	if (dontfork)
 	{
-		fd[1] = dup(2);
+		/* stdout: spawn_master's status pipe, read to EOF */
+		fd[1] = dup(1);
 		if (fcntl(fd[1], F_SETFD, FD_CLOEXEC) < 0)
 		{
 			close(fd[1]);

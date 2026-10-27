@@ -76,6 +76,8 @@ def main():
                       FAKE_CLAUDE_DIR=fc, DCH_RECORD_MS="300",
                       PATH=bindir + os.pathsep + os.environ["PATH"],
                       DCH_AGENT_STEP_MS="20000", DCH_AGENT_REENTER_MS="700")
+    # a bare argv[0] is recorded as the path the child exec'd
+    sh_, sleep_ = shutil.which("sh"), shutil.which("sleep")
     sockdir = os.path.join(tmp, "dch-%d" % os.getuid())
     # records are per socket dir: sessions/<socket dir, '/' as '-'>
     recroot = os.path.join(state, "dch", "sessions")
@@ -235,7 +237,7 @@ def main():
                            .st_mode) == 0o600)
         check("record fields: name, cwd, argv, live end, no agent",
               r0 and r0["name"] == sh and r0["cwd"] == proj and
-              r0["argv"][:2] == ["sh", "-c"] and r0["end"] == "" and
+              r0["argv"][:2] == [sh_, "-c"] and r0["end"] == "" and
               r0["ended"] == 0 and r0["agent"] is None and
               r0["started"] > 0)
         run("-m", sh, "My Alias")
@@ -286,7 +288,7 @@ def main():
         out = run("--history").stdout.splitlines()
         check("--history: newest first, one line each with end and cwd",
               out and out[0].startswith("rvan  ") and " vanished  " in out[0]
-              and "  %s  $ sleep 60" % proj in out[0] and
+              and "  %s  $ %s 60" % (proj, sleep_) in out[0] and
               any(l.startswith("rkill  ") and " killed " in l for l in out))
 
         # --- two runtime dirs, one state dir: records stay apart --------
@@ -414,7 +416,7 @@ def main():
               r.returncode == 0 and
               r.stdout == "twin: revived as twin in %s\n" % proj and
               json.loads(run("--cmd", "twin", env=env2()).stdout)
-              ["argv"][:2] == ["sh", "-c"])
+              ["argv"][:2] == [sh_, "-c"])
         names.append("twin")
         if not lite:
             setctl(cl, dialog=True, eat_enters=2)
@@ -447,12 +449,13 @@ def main():
         check("--all: a taken name goes to the next free -N, printed",
               "rcol: revived as rcol-2 in %s" % proj in lines and
               json.loads(run("--cmd", "rcol-2").stdout)["argv"] ==
-              ["sleep", "60"])
+              [sleep_, "60"])
 
         c2 = until(lambda: len(starts(cl)) > 1 and starts(cl)[1], 20)
         check("command agent: relaunched with --resume <id> after the token",
               json.loads(run("--cmd", cl).stdout)["argv"] ==
-              ["fakewrap", "wrap", "claude", "--resume", s1["sid"],
+              [os.path.join(bindir, "fakewrap"), "wrap", "claude",
+               "--resume", s1["sid"],
                "--chrome"] and c2 and c2["sid"] == s1["sid"] and
               c2["cwd"] == proj)
         check("the caller's Claude identity is stripped from the revived env",
@@ -461,7 +464,7 @@ def main():
         check("shell agent: shell revived, launch + --resume typed, with cd",
               t2 and t2["argv"] == ["--resume", s2["sid"], "--chrome"] and
               t2["cwd"] == os.path.join(proj, "sub") and
-              json.loads(run("--cmd", shc).stdout)["argv"] == ["sh"])
+              json.loads(run("--cmd", shc).stdout)["argv"] == [sh_])
         if lite:
             check("lite: agents resumed, the message skipped and said so",
                   all(any(l.startswith(n + ": revived as") and
@@ -575,6 +578,57 @@ def main():
             z = until(lambda: starts("rzsh") and starts("rzsh")[0], 15)
             check("zsh shell revive: '=x' quoted, claude got it verbatim",
                   z and z["argv"] == ["--resume", zid, "=x"])
+
+        # --- a bare argv[0] under launchd's PATH (#044) --------------------
+        # --env PATH decides what the record resolves: dup is on both PATHs.
+        alt, lbin = os.path.join(tmp, "alt"), os.path.join(tmp, "lbin")
+        for d, b in ((alt, "dup"), (bindir, "dup"), (lbin, "lprog")):
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, b), "w") as f:
+                f.write('#!/bin/sh\nexec sleep "$@"\n')
+            os.chmod(os.path.join(d, b), 0o755)
+        spawn("rpath", "--env", "PATH=%s:/usr/bin:/bin" % alt, "dup", "60")
+        check("--env PATH=<dir>: the record's argv[0] follows that PATH",
+              until(lambda: ((rec("rpath") or {}).get("argv") or [""])[0]
+                    == os.path.join(alt, "dup")))
+        # own runtime dir: --all here sees only these records
+        rt3 = os.path.join(tmp, "rt3")
+        sockdir3 = os.path.join(rt3, "dch-%d" % os.getuid())
+        recdir3 = os.path.join(recroot, sockdir3.replace("/", "-"))
+        os.makedirs(rt3)
+        os.makedirs(recdir3, 0o700)
+        launchd = "/usr/bin:/bin:/usr/sbin:/sbin"
+        lenv = dict(os.environ, XDG_RUNTIME_DIR=rt3, PATH=launchd)
+        for n, av in (("lone", ["lprog", "60"]), ("lbad", ["lprog", "60"]),
+                      ("lgood", ["sleep", "60"])):
+            os.rename(plant(n, sock_dir=sockdir3, argv=av),
+                      os.path.join(recdir3, n + ".json"))
+        r = run("--revive", "lone", env=lenv)
+        check("--revive of a bare argv[0] not on PATH: exit 1, the exec "
+              "error, no 'revived as', the record left as it was",
+              r.returncode == 1 and
+              "lone: lprog: No such file or directory" in r.stderr and
+              "revived as" not in r.stdout and
+              "lone: NOT revived" in r.stdout and
+              rec("lone", recdir3)["argv"][0] == "lprog" and
+              rec("lone", recdir3)["end"] == "exit 3")
+        r = run("--revive", "lone", env=dict(lenv, PATH=lbin + ":" + launchd))
+        names.append(("lone", lenv))
+        check("...with its dir on PATH it revives, recorded resolved",
+              r.returncode == 0 and
+              "lone: revived as lone in %s" % proj in r.stdout and
+              until(lambda: ((rec("lone", recdir3) or {}).get("argv") or
+                             [""])[0] == os.path.join(lbin, "lprog")))
+        r = run("--revive", "--all", env=lenv, timeout=120)
+        names.append(("lgood", lenv))
+        lines = r.stdout.splitlines()
+        check("--all: the bad record fails alone, the good one revives, "
+              "exit 1",
+              r.returncode == 1 and
+              "lbad: lprog: No such file or directory" in r.stderr and
+              any(l.startswith("lbad: NOT revived") for l in lines) and
+              "lgood: revived as lgood in %s" % proj in lines and
+              run("--cmd", "lgood", env=lenv).returncode == 0)
     except Exception:
         traceback.print_exc()
         fails[0] += 1

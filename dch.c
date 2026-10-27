@@ -12,6 +12,7 @@
 
 #include <ctype.h>
 #include <dirent.h>
+#include <poll.h>
 #include <stdarg.h>
 #include <sys/time.h>
 #include <pwd.h>
@@ -2113,23 +2114,42 @@ wall_ms(void)
 }
 
 static int
-spawn_master(char *exe, const char *sockp, char **inner_argv)
+spawn_master(char *exe, const char *name, const char *sockp,
+             char **inner_argv)
 {
-	pid_t pid = fork();
+	char msg[1024];
+	size_t n = 0;
+	ssize_t got;
+	int fd[2];
+	pid_t pid;
+
+	if (pipe(fd) < 0)
+	{
+		fprintf(stderr, "dch: pipe: %s\n", strerror(errno));
+		return -1;
+	}
+	pid = fork();
 	if (pid < 0)
 	{
 		fprintf(stderr, "dch: fork: %s\n", strerror(errno));
+		close(fd[0]);
+		close(fd[1]);
 		return -1;
 	}
 	if (pid == 0)
 	{
-		/* Child: become session leader, drop tty, exec sentinel. */
+		/* Child: become session leader, drop tty, exec sentinel. Its
+		** stdout is the status pipe: the master holds it until the
+		** program is exec'd, and prints there whatever stops it. */
 		setsid();
+		close(fd[0]);
+		dup2(fd[1], 1);
+		if (fd[1] > 2)
+			close(fd[1]);
 		int nullfd = open("/dev/null", O_RDWR);
 		if (nullfd >= 0)
 		{
 			dup2(nullfd, 0);
-			dup2(nullfd, 1);
 			dup2(nullfd, 2);
 			if (nullfd > 2)
 				close(nullfd);
@@ -2152,9 +2172,43 @@ spawn_master(char *exe, const char *sockp, char **inner_argv)
 		** matters for the bare-name fallback, when nothing on PATH
 		** matched and exe is still the original argv[0]. */
 		execvp(av[0], av);
+		dprintf(1, "%s: %s\n", exe, strerror(errno));
 		_exit(127);
 	}
 	dch_trace("spawn_master child=%d sock=%s", (int)pid, sockp);
+	/* EOF on the status pipe: the program exec'd (or the master died,
+	** which the probe below sees). Any text is why it did not start. */
+	close(fd[1]);
+	{
+		long long left, end = wall_ms() + 10000;
+		struct pollfd pf = { fd[0], POLLIN, 0 };
+
+		for (;;)
+		{
+			if ((left = end - wall_ms()) <= 0)
+			{
+				fprintf(stderr, "dch: master did not accept "
+				        "within 10s\n");
+				close(fd[0]);
+				return -1;
+			}
+			if (poll(&pf, 1, (int)left) <= 0)
+				continue;
+			got = read(fd[0], msg + n, sizeof msg - 1 - n);
+			if (got < 0 && errno == EINTR)
+				continue;
+			if (got <= 0 || (n += (size_t)got) == sizeof msg - 1)
+				break;
+		}
+	}
+	close(fd[0]);
+	if (n)
+	{
+		msg[n] = '\0';
+		chomp(msg);
+		fprintf(stderr, "dch: %s: %s\n", name, msg);
+		return -1;
+	}
 	/* Parent: wait until the master accepts, so the caller's own connect
 	** cannot land before bind() or between bind() and listen(). Poll on a
 	** fine 5ms quantum against a 10s wall-clock cap (an iteration count
@@ -2283,7 +2337,7 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 		default_argv[0] = (char *)(sh && *sh ? sh : "/bin/sh");
 		inner_argv = default_argv;
 	}
-	if (spawn_master(exe, sock_path, inner_argv) < 0)
+	if (spawn_master(exe, session_name, sock_path, inner_argv) < 0)
 	{
 		fprintf(stderr, "dch: failed to spawn session\n");
 		return 1;
@@ -2325,8 +2379,6 @@ attach_with_switch(char *exe, int forced_name, int force, char **inner_argv,
 ** [type][len:2 LE][payload] (MSG_READ_DATA/READ_END/WAIT_HIT/ACK). A control
 ** connection never attaches, so reading a session can't perturb it.
 */
-
-#include <poll.h>
 
 /* Inactivity deadline for --read/--keys responses. Generous: the master
 ** answers in microseconds; this only bounds a dead/ancient master. */
@@ -3715,7 +3767,7 @@ do_spawn_verb(char *exe, const char *name, int cols, int rows,
 		if (!term || !*term || strcmp(term, "dumb") == 0)
 			setenv("TERM", "xterm-256color", 1);
 	}
-	if (spawn_master(exe, sock_path, inner_argv) < 0)
+	if (spawn_master(exe, name, sock_path, inner_argv) < 0)
 	{
 		fprintf(stderr, "dch: failed to spawn session\n");
 		return 1;
@@ -3745,11 +3797,9 @@ do_spawn_verb(char *exe, const char *name, int cols, int rows,
 	while (rc == 1 && type == MSG_READ_DATA);
 	close(s);
 
-	if (rc != 1 || type != MSG_READ_END)
-	{
-		fprintf(stderr, "dch: spawned but no master reply\n");
-		return 1;
-	}
+	/* No READ_END is not a failure: spawn_master saw the program exec,
+	** and a master gone before it answered means it already exited
+	** (`--spawn s true`). Its end is in the history record. */
 	if (!quiet)
 		printf("%s\n", name);
 	return 0;
@@ -3785,8 +3835,8 @@ claude_tok(char **v, int argc)
 
 /* First regular, executable <dir>/<name> along path, the way execvp()
 ** searches it: an empty component means cwd. Leaves the hit in out and
-** returns 0, or returns -1 with out empty. */
-static int
+** returns 0, or returns -1 with out empty. Shared with the master's record. */
+int
 path_lookup(const char *name, const char *path, const char *cwd,
             char *out, size_t outsz)
 {

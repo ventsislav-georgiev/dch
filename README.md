@@ -206,7 +206,7 @@ someone is watching is invisible to them.
 
 | Verb | Does | Exit codes |
 | --- | --- | --- |
-| `--spawn <n> [--size CxR] [--env K=V]... [cmd...]` | Start headless session (default: `$SHELL`, 80x24 or `$COLUMNS`/`$LINES`). `--env` (max 32, first `=` splits) adds variables to the child; reserved keys (`DCH_SESSION`, `TERM` fixup) always win. Prints the name. | 0 ok, 1 exists/failed/bad --env |
+| `--spawn <n> [--size CxR] [--env K=V]... [cmd...]` | Start headless session (default: `$SHELL`, 80x24 or `$COLUMNS`/`$LINES`). `--env` (max 32, first `=` splits) adds variables to the child; reserved keys (`DCH_SESSION`, `TERM` fixup) always win. Prints the name. A program that cannot be executed is an error (`dch: <n>: <cmd>: <reason>`); one that runs and exits at once is not. | 0 ok, 1 exists/failed/not executable/bad --env |
 | `--send <n> <text...>` | Type text (joined with spaces), no enter. | 0 ok |
 | `--run <n> <text...>` | `--send` + enter. | 0 ok |
 | `--keys <n> <key...>` | Encode+send keys mode-aware: `ctrl+c`, `alt+x`, `shift+tab`, `up`, `f5`, `enter`, `esc`, single chars. | 0 ok, 1 unknown key |
@@ -596,15 +596,15 @@ identity (`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_PID`, …) is
 removed from the revived session's environment, so `--revive` works from
 inside an agent.
 
-A session whose directory is gone is reported and skipped; the others still
-come back. A revive under a new name retires the old record. Records older
+A session whose directory is gone, or whose program cannot be executed, is
+reported and skipped; the others still come back. A revive under a new name retires the old record. Records older
 than 30 days are pruned, in every socket dir's subdir, when a master starts,
 and subdirs left empty are removed.
 
 The record is one line of JSON, mode 0600 in a 0700 directory:
 
 ```json
-{"name":"work","sock_dir":"/tmp/dch-502","alias":"My work","cwd":"/src/app","argv":["headroom","wrap","claude"],
+{"name":"work","sock_dir":"/tmp/dch-502","alias":"My work","cwd":"/src/app","argv":["/opt/homebrew/bin/headroom","wrap","claude"],
  "started":1761400000,"updated":1761403600,"ended":1761403612,"end":"signal 9",
  "agent":{"kind":"claude","session_id":"…","name":"fix-tests","cwd":"/src/app",
           "launch":["/usr/local/bin/headroom","wrap","claude"]}}
@@ -618,7 +618,10 @@ died without writing them; `--history` shows that as `vanished`). `agent` is
 master's child started it from — the child itself for a command session, the
 typed command for a shell session.
 
-The argv is stored as given, so a secret passed on a command line lands in
+A bare `argv[0]` is stored as the path the session's PATH found it on (a
+symlink is kept, not resolved), so a revive from a thinner PATH, such as a
+launchd-started app's, still finds it; one not found stays bare. The argv is
+otherwise stored as given, so a secret passed on a command line lands in
 the record the way it lands in shell history. The environment is never
 stored. `DCH_NO_HISTORY=1` (any value but empty or `0`) in the environment a
 session is started from (`dch`, `dch --spawn`, `dch --revive`) keeps no

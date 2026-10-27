@@ -177,6 +177,27 @@ if [ -x "$DCH" ]; then
     "$DCH" --spawn "$SN" sh >/dev/null 2>&1
     check "--spawn refuses live duplicate" "$?" "1"
 
+    # --- exec failure is an error, an instant exit is not (#044, #026) ----
+    err=$("$DCH" --spawn "nx$$" dch-no-such-prog-$$ 2>&1 >/dev/null)
+    check "--spawn of a missing program exits 1" "$?" "1"
+    case "$err" in
+    *"nx$$: dch-no-such-prog-$$: No such file or directory"*)
+        ok "--spawn of a missing program names it and the error" ;;
+    *) bad "--spawn of a missing program names it and the error ($err)" ;;
+    esac
+    [ ! -e "$SOCKDIR/nx$$.sock" ] && ok "a failed exec leaves no session" \
+                                  || bad "a failed exec leaves no session"
+    out=$("$DCH" --spawn "nx$$" sleep 60 2>/dev/null)
+    check "a later --spawn of a real program works" "$out" "nx$$"
+    "$DCH" -k "nx$$" >/dev/null 2>&1
+    n=0 f=0
+    while [ "$n" -lt 20 ]; do
+        "$DCH" --spawn "tr$$-$n" true >/dev/null 2>&1 || f=$((f + 1))
+        "$DCH" --spawn "tx$$-$n" sh -c 'exit 3' >/dev/null 2>&1 || f=$((f + 1))
+        n=$((n + 1))
+    done
+    check "--spawn of a program that exits at once: exit 0 (40 runs)" "$f" "0"
+
     # Full build has the terminal mirror; dch-lite refuses --read/--wait with
     # exit 3 by design. Probe once and branch the expectations.
     "$DCH" --read "$SN" >/dev/null 2>&1

@@ -161,7 +161,11 @@ Start a headless session running
 .BR $SHELL ).
 Size defaults to
 .BR $COLUMNS x $LINES ,
-then 80x24. Prints the session name. Exits 1 if the session exists.
+then 80x24. Prints the session name. Exits 1 if the session exists or
+.I cmd
+cannot be executed (the error is printed); a
+.I cmd
+that runs and exits at once is still a successful spawn.
 .TP
 .BI \-\-send " name text..."
 Type
