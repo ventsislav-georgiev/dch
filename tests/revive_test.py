@@ -16,7 +16,9 @@ composer is up and re-Entered when an Enter does not take, the lite path,
 pruning, two runtime dirs sharing one state dir (records apart, same names
 not clobbered, --history/--all blind to the other dir), and what --all
 takes (abnormal, seen in the last 3 days, ran 5+ minutes; the rest by
-name). Drives tests/fake_claude.py as `claude` with HOME, the runtime
+name), DCH_NO_HISTORY (no record, nothing under the state dir), records
+the loader must refuse (0664, a symlink, a g+w records dir), a typed launch
+word starting with '=' quoted for zsh, and stale *.tmp pruned. Drives tests/fake_claude.py as `claude` with HOME, the runtime
 dir and the state dir all temporary.
 
 Run:  python3 tests/revive_test.py        (uses ./dch)
@@ -66,7 +68,8 @@ def main():
         f.write("1.0.0")
     for k in list(os.environ):
         if k.startswith("CLAUDE") or k in ("DCH_SESSION", "DCH_SOCKET_DIR",
-                                           "DCH_NO_DETECT", "DCH_REVIVE_MSG"):
+                                           "DCH_NO_DETECT", "DCH_REVIVE_MSG",
+                                           "DCH_NO_HISTORY"):
             del os.environ[k]
     os.environ.update(CALLER_ENV)
     os.environ.update(HOME=home, XDG_RUNTIME_DIR=tmp, XDG_STATE_HOME=state,
@@ -165,6 +168,20 @@ def main():
     def gone(n):
         return until(lambda: (rec(n) or {}).get("ended", 0) > 0)
 
+    def plant(n, mode=0o600, **fields):
+        """A record of a dead session --all would take (exit 3, ran 10
+        minutes, ended a minute ago), written as the master would."""
+        now = int(time.time())
+        r = dict(name=n, sock_dir=sockdir, alias="", cwd=proj,
+                 argv=["sleep", "60"], started=now - 660, updated=now - 60,
+                 ended=now - 60, end="exit 3", agent=None)
+        r.update(fields)
+        p = os.path.join(tmp, n + ".plant")
+        with open(p, "w") as f:
+            f.write(json.dumps(r, separators=(",", ":")) + "\n")
+        os.chmod(p, mode)
+        return p
+
     def history(env=None):
         r = run("--history", "--json", env=env)
         try:
@@ -189,7 +206,22 @@ def main():
         check("--history with nothing ended: empty",
               run("--history").stdout == "" and history() == {})
 
+        # --- DCH_NO_HISTORY in the master's env: nothing kept ------------
+        spawn("rnoh", "sleep", "60",
+              env=dict(os.environ, DCH_NO_HISTORY="1"))
+        until(lambda: child("rnoh"))
+        time.sleep(1.0)         # past a few DCH_RECORD_MS refreshes
+        sdch = os.path.join(state, "dch")
+        check("DCH_NO_HISTORY=1: no record, no records dir while it runs",
+              not os.path.exists(sdch))
+        run("-k", "rnoh")
+        until(lambda: not master("rnoh"))
+        check("DCH_NO_HISTORY=1: still nothing after it ends",
+              not os.path.exists(sdch))
+
         probe = spawn("probe", "sh")
+        check("a later spawn without DCH_NO_HISTORY writes its record",
+              until(lambda: rec(probe)))
         lite = run("--read", probe).returncode == 3
         run("-k", probe)
 
@@ -482,12 +514,67 @@ def main():
             with open(old, "w") as f:
                 f.write(json.dumps({"name": "ancient"}))
             os.utime(old, (t, t))
+        # a master killed between write and rename leaves <rec>.<pid>.tmp
+        tmps = [os.path.join(recdir, "x.json.%d.tmp" % i) for i in (1, 2)]
+        for p, age in zip(tmps, (2 * 86400, 3600)):
+            open(p, "w").close()
+            os.utime(p, (time.time() - age, time.time() - age))
         spawn("rprune", "sleep", "60")
         check("a cold start prunes records older than 30 days, in every "
               "socket dir's subdir, and drops the subdirs left empty",
               until(lambda: not any(map(os.path.exists, olds))) and
               until(lambda: not os.path.exists(lone)) and
               rec("rok") is not None and rec("twin", recdir2) is not None)
+        check("...and *.tmp older than a day, a fresh one kept",
+              until(lambda: not os.path.exists(tmps[0])) and
+              os.path.exists(tmps[1]))
+
+        # --- records the loader refuses -----------------------------------
+        os.rename(plant("rgood"), os.path.join(recdir, "rgood.json"))
+        os.rename(plant("rmode", 0o664), os.path.join(recdir, "rmode.json"))
+        os.symlink(plant("rlink"), os.path.join(recdir, "rlink.json"))
+        h = history() or {}
+        check("--history skips a 0664 record and a symlinked one "
+              "(a valid twin is listed)",
+              "rgood" in h and "rmode" not in h and "rlink" not in h)
+        r = run("--revive", "--all", timeout=120)
+        names.append("rgood")
+        check("--all revives neither (the valid twin, yes), no crash",
+              r.returncode in (0, 1) and
+              "rgood: revived as rgood in %s" % proj in r.stdout.splitlines()
+              and "rmode" not in r.stdout and "rlink" not in r.stdout and
+              not child("rmode") and not child("rlink"))
+        os.rename(plant("rgw"), os.path.join(recdir, "rgw.json"))
+        os.chmod(recdir, 0o770)
+        try:
+            h = history()
+            r = run("--revive", "--all", timeout=120)
+            check("a g+w records dir: --history lists nothing from it",
+                  "rgw" not in (h or {}))
+            check("a g+w records dir: --all revives nothing, no crash",
+                  r.returncode in (0, 1) and "rgw" not in r.stdout and
+                  not child("rgw"))
+        finally:
+            os.chmod(recdir, 0o700)
+        check("...the same dir back at 0700 lists it (control)",
+              "rgw" in (history() or {}))
+        os.unlink(os.path.join(recdir, "rgw.json"))
+
+        # --- a typed launch word starting with '=' (zsh's =cmd) -----------
+        zsh = shutil.which("zsh")
+        if zsh:
+            zid = "11111111-2222-3333-4444-555555555555"
+            os.rename(plant("rzsh", argv=[zsh, "-f"], end="signal 9",
+                            agent=dict(kind="claude", session_id=zid,
+                                       name="", cwd=proj,
+                                       launch=[os.path.join(bindir, "claude"),
+                                               "=x"])),
+                      os.path.join(recdir, "rzsh.json"))
+            names.append("rzsh")
+            run("--revive", "rzsh", timeout=120)
+            z = until(lambda: starts("rzsh") and starts("rzsh")[0], 15)
+            check("zsh shell revive: '=x' quoted, claude got it verbatim",
+                  z and z["argv"] == ["--resume", zid, "=x"])
     except Exception:
         traceback.print_exc()
         fails[0] += 1

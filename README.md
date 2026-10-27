@@ -620,7 +620,11 @@ typed command for a shell session.
 
 The argv is stored as given, so a secret passed on a command line lands in
 the record the way it lands in shell history. The environment is never
-stored.
+stored. `DCH_NO_HISTORY=1` (any value but empty or `0`) in the environment a
+session is started from (`dch`, `dch --spawn`, `dch --revive`) keeps no
+record of it at all: the master writes nothing and prunes nothing under the
+state dir, so the session never shows in `--history` and cannot be revived.
+`--env` does not set it; that reaches only the session's program.
 
 ### Attaching replays the screen
 

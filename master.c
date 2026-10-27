@@ -508,7 +508,8 @@ rec_exit(void)
 	rec_write(rec_end);
 }
 
-/* Drop *.json idle for 30 days from one record dir. */
+/* Drop *.json idle for 30 days, and *.tmp a master killed mid-write left
+** for a day, from one record dir. */
 static void
 rec_prune(int dfd)
 {
@@ -524,10 +525,14 @@ rec_prune(int dfd)
 	while ((de = readdir(d)))
 	{
 		size_t n = strlen(de->d_name);
+		long age = n > 5 && strcmp(de->d_name + n - 5, ".json") == 0 ?
+		           30L * 86400L :
+		           n > 4 && strcmp(de->d_name + n - 4, ".tmp") == 0 ?
+		           86400L : 0;
 
-		if (n > 5 && strcmp(de->d_name + n - 5, ".json") == 0 &&
+		if (age &&
 		    fstatat(dirfd(d), de->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0 &&
-		    S_ISREG(st.st_mode) && st.st_mtime < time(NULL) - 30L * 86400L)
+		    S_ISREG(st.st_mode) && st.st_mtime < time(NULL) - age)
 			unlinkat(dirfd(d), de->d_name, 0);
 	}
 	closedir(d);
@@ -542,6 +547,7 @@ rec_init(int resumed)
 {
 	char root[1024], kp[1100], body[256];
 	const char *base = strrchr(sockname, '/'), *e = getenv("DCH_SESSION");
+	const char *off;
 	size_t bl;
 	long v;
 	int fd;
@@ -554,6 +560,14 @@ rec_init(int resumed)
 	bl = strlen(base);
 	if (bl > 5 && strcmp(base + bl - 5, ".sock") == 0)
 		bl -= 5;
+	/* DCH_NO_HISTORY: no record, no prune, nothing under the state dir */
+	off = getenv("DCH_NO_HISTORY");
+	if (off && *off && strcmp(off, "0") != 0)
+	{
+		if (!resumed && sidecar_path(".killed", kp, sizeof kp) == 0)
+			unlink(kp);
+		return;
+	}
 	if (!resumed && dch_history_dir(root, sizeof root, NULL, 0) == 0 &&
 	    (fd = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)) >= 0)
 	{

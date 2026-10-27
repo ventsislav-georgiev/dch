@@ -2059,6 +2059,7 @@ usage(void)
 	    "  dch --agent-list [--json]                  list native Claude peers\n"
 	    "  dch --agent-send <name> <message...>       message one native peer\n"
 	    "Env: DCH_NO_DETECT=1 disables screen-content state detection.\n"
+	    "     DCH_NO_HISTORY=1 at session start keeps no history record.\n"
 	    "     DCH_DOUBLE_TAP_MS sets the switch double-press window\n"
 	    "     (default 300; 0 disables switching, detach becomes instant).\n"
 	    "Detach: Ctrl-\\  (or `dch -d` if the host swallows it).\n"
@@ -5462,7 +5463,8 @@ shell_line(const char *cd, char **v, int n)
 			*p++ = ' ';
 		if (k < 0)
 			p += sprintf(p, "cd ");
-		if (*w && strspn(w, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+		/* a leading '=' is zsh's =cmd expansion: quote it */
+		if (*w && *w != '=' && strspn(w, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 		                 "0123456789_./:=@%+,-") == strlen(w))
 			p += sprintf(p, "%s", w);
 		else
