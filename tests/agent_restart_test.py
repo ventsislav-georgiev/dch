@@ -7,7 +7,7 @@ Covers the end-to-end restart under a wrapper (`fakewrap wrap claude ...`),
 argv rewriting, concurrency (a slow agent does not hold up the rest), the
 holds (shell status, subagent panel, a pause queued while busy), the gate
 (dialog, draft: nothing typed), timeout, /exit that never comes, a crash,
-self-restart, shell-launched Claude, an old master, -f, a decoy resume line
+self-restart, an old master, -f, a decoy resume line
 and a mangled (SGR-split, hard-wrapped) exit line. Also: Enter only once the
 text shows in the composer (a prompt raised by the paste gets no Enter, a
 "[Pasted text #1]" placeholder counts), SIGTERM while waiting (resume typed),
@@ -15,8 +15,11 @@ a pending respawn, a crash's last output in the report, a master stalled
 (SIGSTOP, 3 s) right after /exit or right after the relaunch: waited out, not
 taken for a gone session, relaunched once. The agent step is opt-in: without
 --include-agents nothing is typed, and `--restart <name>` touches only that
-session's agent. On dch-lite it checks the step is skipped with a note, only
-when a session runs claude and the flag is given.
+session's agent. A Claude typed into the session's shell (#047) is paused,
+/exit'ed and its launch typed back into the shell with --resume <id>; -f and
+staleness both apply to it. --json: stdout is NDJSON, the master pass
+included. On dch-lite it checks the step is skipped with a note, only when a
+session runs claude and the flag is given.
 
 Run:  python3 tests/agent_restart_test.py        (uses ./dch)
 """
@@ -43,6 +46,21 @@ def until(fn, timeout=10.0):
             return v
         time.sleep(0.05)
     return fn()
+
+
+def ndjson(out):
+    """Every stdout line parsed, or None when one is not a JSON object."""
+    try:
+        objs = [json.loads(l) for l in out.splitlines()]
+    except ValueError:
+        return None
+    return objs if all(isinstance(o, dict) for o in objs) else None
+
+
+def agent_finals(objs):
+    """The agent pass's result objects by name (not the master pass's)."""
+    return {o["name"]: o for o in objs or []
+            if "result" in o and "phase" not in o}
 
 
 def alive(pid):
@@ -154,6 +172,9 @@ def main():
         check("--include-agents without --restart: usage error",
               r.returncode == 1 and
               "--include-agents only works with --restart" in r.stderr)
+        r = run("-ls", "--json")
+        check("--json elsewhere: usage error",
+              r.returncode == 1 and "--json only works with" in r.stderr)
 
         if lite:
             sh = sess("litesh", "sh")
@@ -169,6 +190,14 @@ def main():
             r = restart_all()
             check("lite: agent step skipped with a one-line note",
                   "dch-lite has no terminal mirror" in r.stdout)
+            r = restart_all("--json")
+            objs = ndjson(r.stdout)
+            check("lite: --json pure NDJSON, the agent skipped no_screen",
+                  objs is not None and r.returncode == 0 and
+                  (agent_finals(objs).get(n) or {}).get("reason") ==
+                  "no_screen" and
+                  all(o.get("phase") == "master" for o in objs
+                      if o["name"] != n))
             r = run("--restart", "--all")
             check("lite: no note without --include-agents",
                   "agents:" not in r.stdout)
@@ -327,13 +356,12 @@ def main():
         # takes DCH_AGENT_LAND_MS, so this batch gets a pause timeout with real
         # headroom; the timeout case runs on its own below.
         g = sess("agg", "claude", dialog=True)
-        h = sess("agh", "sh", "-c", "claude; sleep 60")
         dr = sess("agr", "claude", draft="half typed")
         x = sess("agx", "claude", noexit=True)
         k = sess("agk", "claude", crash=True)
         pp = sess("agp", "claude", dialog_on_paste=True, pasted_decoy=True)
         q = sess("agq", "claude")
-        for n in (g, h, dr, x, k, pp, q):
+        for n in (g, dr, x, k, pp, q):
             up(n)
         run("--respawn", q, "--", "true")
         with open(os.path.join(fc, "version"), "w") as f:
@@ -370,9 +398,6 @@ def main():
         check("draft in the composer: reported, nothing typed",
               "%s: NOT restarted — the composer holds an unsent draft" % dr
               in r.stdout and typed(dr) == [])
-        check("claude started in a shell: skipped",
-              "%s: skipped — claude was started inside the session's shell"
-              % h in r.stdout and typed(h) == [])
         cx = cmd(x)
         check("/exit never happens: hold cancelled, claude still running",
               "%s: NOT restarted — /exit did not end claude" % x in r.stdout
@@ -398,10 +423,98 @@ def main():
               in r.stdout)
         if os.path.exists(old):
             os.unlink(old)
-        for n in (g, h, dr, x, k, pp, q):
+        for n in (g, dr, x, k, pp, q):
             if n in names:
                 run("-k", n)
                 names.remove(n)
+
+        # --- claude typed into the session's shell (#047) -----------------
+        os.makedirs(os.path.join(proj, "sub"), exist_ok=True)
+        y = sess("agy", "sh")
+        time.sleep(0.3)
+        run("--run", y, "cd sub && fakewrap wrap claude --chrome")
+        y1 = up(y)
+        sh0 = cmd(y) or {}
+        with open(os.path.join(fc, "version")) as f:
+            ver = f.read().strip()
+        r = run("--restart", y, "--include-agents", timeout=120)
+        check("shell claude, current, no -f: left alone",
+              r.returncode == 0 and y1 and typed(y) == [] and
+              "%s: already on claude %s" % (y, ver) in r.stdout)
+        r = run("-f", "--restart", y, "--include-agents", timeout=120)
+        print("     | " + r.stdout.rstrip().replace("\n", "\n     | "))
+        y2 = up(y, 2, 30.0)
+        ty = typed(y, y1 and y1["pid"])
+        check("shell claude -f: restarted, the same conversation resumed",
+              r.returncode == 0 and y2 and y2["sid"] == y1["sid"] and
+              "%s: claude %s -> %s, resumed %s" % (y, ver, ver, y1["sid"])
+              in r.stdout and "no resume line" not in r.stdout)
+        check("shell claude: paused, /exit, then the launch typed back into "
+              "the shell with --resume <id>, in claude's cwd",
+              len(ty) >= 2 and ty[-2].startswith(PAUSE) and ty[-1] == "/exit"
+              and y2 and y2["argv"] == ["--resume", y1["sid"], "--chrome"] and
+              os.path.realpath(y2["cwd"]) ==
+              os.path.realpath(os.path.join(proj, "sub")))
+        check("shell claude: resume message typed into the new claude",
+              y2 and until(lambda: any(t.startswith(RESUME)
+                                       for t in typed(y, y2["pid"]))))
+        ci = cmd(y) or {}
+        check("shell claude: the shell is still the session's child",
+              sh0.get("pid") and ci.get("pid") == sh0["pid"] and
+              ci.get("argv") == sh0.get("argv") and
+              ci.get("state") == "running")
+        # stale without -f, and --json: the master pass is NDJSON too
+        ver2 = ver + ".1"
+        with open(os.path.join(fc, "version"), "w") as f:
+            f.write(ver2)
+        r = run("--restart", y, "--include-agents", "--json", timeout=120)
+        print("     | " + r.stdout.rstrip().replace("\n", "\n     | "))
+        objs = ndjson(r.stdout) or []
+        y3 = up(y, 3, 30.0)
+        check("--json, stale shell claude, no -f: master, pausing, exiting, "
+              "relaunching, resuming, then one final ok with the id",
+              r.returncode == 0 and ndjson(r.stdout) is not None and
+              [(o.get("phase"), o.get("result")) for o in objs] ==
+              [("master", "ok"), ("pausing", None), ("exiting", None),
+               ("relaunching", None), ("resuming", None), (None, "ok")] and
+              objs[0]["detail"].startswith("restarted on dch ") and
+              sorted(objs[0]) == ["detail", "name", "phase", "reason",
+                                  "result", "session_id"] and
+              all(sorted(o) == ["name", "phase"] for o in objs[1:5]) and
+              objs[-1] == {"name": y, "result": "ok", "reason": "",
+                           "detail": "claude %s -> %s, resumed %s" %
+                           (ver, ver2, y1["sid"]),
+                           "session_id": y1["sid"]} and
+              y3 and y3["sid"] == y1["sid"])
+        # --all --json over a mix: one master object and one agent result
+        # per session, nothing typed
+        w = sess("agw", "sh")
+        time.sleep(0.3)
+        n0 = len(typed(y))
+        r = restart_all("--json")
+        objs = ndjson(r.stdout)
+        fin = agent_finals(objs)
+        mo = {o["name"]: o for o in objs or [] if o.get("phase") == "master"}
+        check("--all --include-agents --json, all current: pure NDJSON, "
+              "master skipped/current, agents current / not_claude",
+              objs is not None and r.returncode == 0 and len(objs) == 4 and
+              all(mo.get(n, {}).get("reason") == "current" and
+                  mo[n]["result"] == "skipped" for n in (y, w)) and
+              fin.get(y, {}).get("reason") == "current" and
+              fin[y]["detail"] == "already on claude %s" % ver2 and
+              fin.get(w, {}).get("reason") == "not_claude" and
+              len(typed(y)) == n0)
+        r = run("-f", "--restart", "--all", "--json", timeout=120)
+        objs = ndjson(r.stdout)
+        check("-f --restart --all --json without --include-agents: master "
+              "objects only, each ok",
+              objs is not None and r.returncode == 0 and
+              sorted(o["name"] for o in objs) == sorted([y, w]) and
+              all(o["phase"] == "master" and o["result"] == "ok"
+                  for o in objs))
+        for n in (y, w):
+            run("-k", n)
+            names.remove(n)
 
         # --- a stalled master is not a gone session ----------------------
         # SIGSTOP this session's master for 3 s (> CTL_IDLE_MS) right after

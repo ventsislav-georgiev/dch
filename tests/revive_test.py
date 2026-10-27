@@ -18,7 +18,8 @@ not clobbered, --history/--all blind to the other dir), and what --all
 takes (abnormal, seen in the last 3 days, ran 5+ minutes; the rest by
 name), DCH_NO_HISTORY (no record, nothing under the state dir), records
 the loader must refuse (0664, a symlink, a g+w records dir), a typed launch
-word starting with '=' quoted for zsh, and stale *.tmp pruned. Drives tests/fake_claude.py as `claude` with HOME, the runtime
+word starting with '=' quoted for zsh, stale *.tmp pruned, and --json
+(NDJSON phases and one final per record with "as"). Drives tests/fake_claude.py as `claude` with HOME, the runtime
 dir and the state dir all temporary.
 
 Run:  python3 tests/revive_test.py        (uses ./dch)
@@ -46,6 +47,15 @@ def until(fn, timeout=10.0):
             return v
         time.sleep(0.05)
     return fn()
+
+
+def ndjson(out):
+    """Every stdout line parsed, or None when one is not a JSON object."""
+    try:
+        objs = [json.loads(l) for l in out.splitlines()]
+    except ValueError:
+        return None
+    return objs if all(isinstance(o, dict) for o in objs) else None
 
 
 def main():
@@ -629,6 +639,65 @@ def main():
               any(l.startswith("lbad: NOT revived") for l in lines) and
               "lgood: revived as lgood in %s" % proj in lines and
               run("--cmd", "lgood", env=lenv).returncode == 0)
+
+        # --- --json (#047): phases, then one final per record with "as" ----
+        rt4 = os.path.join(tmp, "rt4")
+        sockdir4 = os.path.join(rt4, "dch-%d" % os.getuid())
+        recdir4 = os.path.join(recroot, sockdir4.replace("/", "-"))
+        os.makedirs(rt4)
+        os.makedirs(recdir4, 0o700)
+        jenv = dict(os.environ, XDG_RUNTIME_DIR=rt4)
+        jid = "22222222-3333-4444-5555-666666666666"
+        for n, kw in (("jplain", {}), ("jbad", dict(argv=["lprog", "60"])),
+                      ("jcl", dict(argv=[os.path.join(bindir, "claude")],
+                                   agent=dict(kind="claude", session_id=jid,
+                                              name="", cwd=proj,
+                                              launch=[os.path.join(
+                                                  bindir, "claude")])))):
+            os.rename(plant(n, sock_dir=sockdir4, **kw),
+                      os.path.join(recdir4, n + ".json"))
+        r = run("--revive", "nosuch", "--json", env=jenv)
+        check("--revive <unknown> --json: one failed no_history object",
+              r.returncode == 1 and ndjson(r.stdout) == [
+                  {"name": "nosuch", "as": "nosuch", "result": "failed",
+                   "reason": "no_history", "detail":
+                   "no history for this session", "session_id": ""}])
+        r = run("--revive", "jplain", "--as", "jnew", "--json", env=jenv)
+        names.append(("jnew", jenv))
+        check("--revive <n> --as <new> --json: starting, then ok with \"as\"",
+              r.returncode == 0 and ndjson(r.stdout) == [
+                  {"name": "jplain", "phase": "starting"},
+                  {"name": "jplain", "as": "jnew", "result": "ok",
+                   "reason": "", "detail": "revived as jnew in %s" % proj,
+                   "session_id": ""}])
+        r = run("--revive", "--all", "--json", env=jenv, timeout=120)
+        names.extend([("jbad", jenv), ("jcl", jenv)])
+        print("     | " + r.stdout.rstrip().replace("\n", "\n     | "))
+        objs = ndjson(r.stdout) or []
+        fin = {o["name"]: o for o in objs if "result" in o}
+        ph = [(o["name"], o["phase"]) for o in objs if "phase" in o]
+        check("--revive --all --json: pure NDJSON, exit 1 (jbad), one final "
+              "each with \"as\"",
+              ndjson(r.stdout) is not None and r.returncode == 1 and
+              sorted(fin) == ["jbad", "jcl"] and
+              all(fin[n]["as"] == n for n in fin) and
+              len(objs) == len(fin) + len(ph))
+        check("...a program that cannot start: failed not_started",
+              fin.get("jbad", {}).get("result") == "failed" and
+              fin["jbad"]["reason"] == "not_started" and
+              "No such file" in r.stderr)
+        check("...the agent: starting%s, ok with its session id" %
+              ("" if lite else ", resuming"),
+              ("jcl", "starting") in ph and
+              (("jcl", "resuming") in ph) != lite and
+              fin.get("jcl", {}).get("session_id") == jid and
+              fin["jcl"]["result"] == "ok" and
+              fin["jcl"]["reason"] == ("no_screen" if lite else "") and
+              ("resume message sent" in fin["jcl"]["detail"]) != lite)
+        os.unlink(os.path.join(recdir4, "jbad.json"))
+        r = run("--revive", "--all", "--json", env=jenv)
+        check("--revive --all --json, nothing to revive: empty stdout",
+              r.returncode == 0 and r.stdout == "")
     except Exception:
         traceback.print_exc()
         fails[0] += 1

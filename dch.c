@@ -2026,11 +2026,14 @@ usage(void)
 	    "                                             --all skips sessions\n"
 	    "                                             already current (-f\n"
 	    "                                             restarts them anyway)\n"
-	    "  dch --restart <name>|--all --include-agents [-f]\n"
+	    "  dch --restart <name>|--all --include-agents [-f] [--json]\n"
 	    "                                             then also restart stale\n"
 	    "                                             Claude Code agents (-f:\n"
-	    "                                             current ones too); off\n"
-	    "                                             by default, --all too\n"
+	    "                                             current ones too), as\n"
+	    "                                             the command or typed\n"
+	    "                                             into the shell; off by\n"
+	    "                                             default, --all too;\n"
+	    "                                             --json: NDJSON\n"
 	    "  dch --respawn <name> [-- cmd...]           when the program exits,\n"
 	    "                                             keep the session and\n"
 	    "                                             start cmd in its place;\n"
@@ -2057,11 +2060,11 @@ usage(void)
 	    "  dch --history [--json]                     sessions that ended:\n"
 	    "                                             name, when, how, cwd,\n"
 	    "                                             command, claude session\n"
-	    "  dch --revive <name> [--as <new>]           start an ended session\n"
+	    "  dch --revive <name> [--as <new>] [--json]  start an ended session\n"
 	    "                                             again: its cwd, its\n"
 	    "                                             command, claude resumed\n"
 	    "                                             and told to carry on\n"
-	    "  dch --revive --all                         every session that died\n"
+	    "  dch --revive --all [--json]                every session that died\n"
 	    "                                             (not exit 0, -k or\n"
 	    "                                             --stop)\n"
 	    "                                             in the last 3 days\n"
@@ -3304,8 +3307,7 @@ do_restart_verb(const char *name, int no_version, int quiet)
 			        "%s (expected %s)\n", name, v, DCH_VERSION);
 			return 1;
 		}
-		printf("%s: restarted on dch %s\n", name, v ? v : DCH_VERSION);
-		return 0;
+		return 0;	/* master_print() says so */
 	}
 	if (len == DCH_ST_ERR)
 	{
@@ -4154,9 +4156,10 @@ put_json_str(const char *s)
 	free(q);
 }
 
-/* --json: {"name","phase"} as a session reaches pausing|exiting|ending. */
+/* --json (--stop, --restart, --revive): {"name","phase"} as a session
+** reaches each step. */
 static void
-stop_phase(const char *name, const char *phase, int json)
+json_phase(const char *name, const char *phase, int json)
 {
 	if (!json)
 		return;
@@ -4166,28 +4169,42 @@ stop_phase(const char *name, const char *phase, int json)
 	fflush(stdout);
 }
 
-/* The one result line per session; res ok|skipped|failed|interrupted. */
+/* --json's result object; xk/xv (when xk) one more string field after
+** "name": --revive's "as", the master pass's "phase":"master". */
+static void
+json_final(const char *name, const char *xk, const char *xv,
+           const char *res, const char *code, const char *detail,
+           const char *sid)
+{
+	fputs("{\"name\":", stdout);
+	put_json_str(name);
+	if (xk)
+	{
+		printf(",\"%s\":", xk);
+		put_json_str(xv);
+	}
+	printf(",\"result\":\"%s\",\"reason\":\"%s\",\"detail\":", res, code);
+	put_json_str(detail);
+	fputs(",\"session_id\":", stdout);
+	put_json_str(sid);
+	fputs("}\n", stdout);
+	fflush(stdout);
+}
+
+/* The one result line per session; res ok|skipped|failed|interrupted.
+** Other than ok the text is `<name>: <res> — <detail>`, --restart's too. */
 static void
 stop_print(const char *name, const char *res, const char *code,
            const char *detail, const char *aname, const char *sid, int json)
 {
-	if (!json && strcmp(res, "ok") != 0)
+	if (json)
+		json_final(name, NULL, NULL, res, code, detail, sid);
+	else if (strcmp(res, "ok") != 0)
 		printf("%s: %s — %s\n", name, res, detail);
-	else if (!json)
+	else
 		printf("%s: stopped (%s%s%s%s%srevive with dch --revive %s)%s%s\n",
 		       name, *sid ? "claude " : "", aname, *sid && *aname ? " " : "",
 		       sid, *sid ? "; " : "", name, *detail ? " " : "", detail);
-	else
-	{
-		fputs("{\"name\":", stdout);
-		put_json_str(name);
-		printf(",\"result\":\"%s\",\"reason\":\"%s\",\"detail\":", res,
-		       code);
-		put_json_str(detail);
-		fputs(",\"session_id\":", stdout);
-		put_json_str(sid);
-		fputs("}\n", stdout);
-	}
 	fflush(stdout);
 }
 
@@ -4301,6 +4318,9 @@ struct agent
 	long long t_sent, ok_since, deadline;
 	/* --stop: no relaunch; the session ends instead */
 	int stop, json;
+	/* --restart, claude typed into the shell: the relaunch is typed
+	** into the shell (#047) */
+	int shell;
 	long mpid;		/* the master, to wait out its exit */
 	struct dch_agent ag;	/* probed right before /exit */
 	const char *res, *code;	/* the result, when not by failed/step */
@@ -4790,24 +4810,21 @@ ag_say(struct agent *a, int failed, const char *fmt, ...)
 {
 	va_list ap;
 	char d[2048];
+	const char *res = a->res ? a->res : failed ? "failed" : "ok";
 
 	va_start(ap, fmt);
-	if (a->stop)
-	{
-		vsnprintf(d, sizeof d, fmt, ap);
-		stop_print(a->name, a->res ? a->res : failed ? "failed" : "ok",
-		           a->code ? a->code : a->step == AG_WAIT ? "not_idle"
+	vsnprintf(d, sizeof d, fmt, ap);
+	va_end(ap);
+	if (a->stop || a->json)
+		stop_print(a->name, res, strcmp(res, "ok") == 0 ? ""
+		           : a->code ? a->code : a->step == AG_WAIT ? "not_idle"
 		                                                  : "exit_failed",
-		           d, a->ag.name, failed ? "" : a->id, a->json);
-	}
+		           d, a->ag.name, a->stop && failed ? "" : a->id, a->json);
 	else
 	{
-		printf("%s: %s", a->name, failed ? "NOT restarted — " : "");
-		vprintf(fmt, ap);
-		putchar('\n');
+		printf("%s: %s%s\n", a->name, failed ? "NOT restarted — " : "", d);
 		fflush(stdout);
 	}
-	va_end(ap);
 	a->step = AG_DONE;
 }
 
@@ -5005,13 +5022,38 @@ ag_exited(struct agent *a, const char *step_s)
 	ag_read_id(a, &ci);
 	cmd_info_free(&ci);
 	a->deadline = wall_ms() + env_ms("DCH_AGENT_STEP_MS", 60000);
+	json_phase(a->name, "relaunching", a->json);
+	a->code = "relaunch_failed";
 	return ag_relaunch(a);
+}
+
+static int shell_type_launch(const char *name, char **launch, char *id,
+                             const char *cd);
+
+/* --restart, claude typed into the shell: claude is gone and the shell is
+** back. Type the launch read before /exit, with --resume <id>, after a cd
+** to claude's cwd, as --revive retypes one. 1 when that failed. */
+static int
+ag_type_launch(struct agent *a)
+{
+	json_phase(a->name, "relaunching", a->json);
+	a->code = "relaunch_failed";
+	a->step = AG_START;
+	a->deadline = wall_ms() + env_ms("DCH_AGENT_STEP_MS", 60000);
+	if (shell_type_launch(a->name, a->ag.launch, a->id,
+	                      a->ag.cwd[0] ? a->ag.cwd : NULL) == 0)
+		return 0;
+	ag_say(a, 1, "claude quit, but its relaunch could not be typed into "
+	       "the shell; resume by hand: claude --resume %s", a->id);
+	return 1;
 }
 
 /* --stop: the hold is armed and /exit typed. Once claude is gone — the
 ** session held when claude was its command, the shell left when it was
 ** typed into one — the exit line's id goes into the marker and the session
-** ends. Not gone in time: disarmed, claude told to carry on. */
+** ends. Not gone in time: disarmed, claude told to carry on. --restart's
+** shell case (no marker) waits the same way, disarms, then retypes the
+** launch. */
 static int
 stop_exited(struct agent *a, const char *step_s, const char *resume)
 {
@@ -5030,7 +5072,8 @@ stop_exited(struct agent *a, const char *step_s, const char *resume)
 	{
 		if (wall_ms() < a->deadline)
 			return 0;
-		stop_mark(a->path, NULL, 1);
+		if (a->stop)
+			stop_mark(a->path, NULL, 1);
 		if (st == 0)	/* not held: this only disarms */
 			respawn_req(a->path, 'c', NULL, 0);
 		ag_say(a, 1, "%s within %s; resume message %s", st == 0
@@ -5040,7 +5083,8 @@ stop_exited(struct agent *a, const char *step_s, const char *resume)
 	}
 	if (st != 0)
 	{
-		stop_mark(a->path, NULL, 1);
+		if (a->stop)
+			stop_mark(a->path, NULL, 1);
 		ag_say(a, 1, "the session went away during /exit");
 		return 1;
 	}
@@ -5054,8 +5098,20 @@ stop_exited(struct agent *a, const char *step_s, const char *resume)
 	}
 	ag_read_id(a, &ci);
 	cmd_info_free(&ci);
+	if (!a->stop)
+	{
+		/* --restart: the hold only kept the exit tail. Held = the shell
+		** went with claude: the cancel ends the session, as its exit
+		** would have. */
+		respawn_req(a->path, 'c', NULL, 0);
+		if (!held)
+			return ag_type_launch(a);
+		ag_say(a, 1, "the shell exited with claude; session ended; "
+		       "resume by hand: claude --resume %s", a->id);
+		return 1;
+	}
 	snprintf(a->ag.sid, sizeof a->ag.sid, "%s", a->id);
-	stop_phase(a->name, "ending", a->json);
+	json_phase(a->name, "ending", a->json);
 	if ((why = stop_end(a->name, a->path, a->mpid, &a->ag)))
 	{
 		a->code = "end_failed";
@@ -5081,8 +5137,8 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 
 	snprintf(step_s, sizeof step_s, "%lds", step / 1000);
 	if (a->step == AG_EXIT)
-		return a->stop ? stop_exited(a, step_s, resume)
-		               : ag_exited(a, step_s);
+		return a->stop || a->shell ? stop_exited(a, step_s, resume)
+		                           : ag_exited(a, step_s);
 	if (a->step == AG_START)
 	{
 		struct cmd_info ci;
@@ -5106,7 +5162,7 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 		/* Still held: the relaunch went to a stalled master and never
 		** applied (the relaunched claude is not armed, so it never reads
 		** held). Send it again, within the same step limit. */
-		if (strcmp(ci.state, "held") == 0)
+		if (strcmp(ci.state, "held") == 0 && !a->shell)
 		{
 			cmd_info_free(&ci);
 			if (now < a->deadline)
@@ -5132,7 +5188,9 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 			int t;
 
 			cmd_info_free(&ci);
+			json_phase(a->name, "resuming", a->json);
 			t = ag_type(a->path, resume, 1);
+			a->code = t == -3 ? "not_submitted" : "not_typed";
 			if (t == -1)
 			{
 				ag_say(a, 1, "relaunched with --resume %s on claude %s, "
@@ -5153,6 +5211,7 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 				snprintf(a->note + strlen(a->note),
 				         sizeof a->note - strlen(a->note),
 				         " (the new record says session %s)", r.sid);
+			a->code = "not_updated";
 			if (old)
 				ag_say(a, 1, "relaunched with --resume %s, but still "
 				       "on claude %s (expected %s)%s", a->id, r.ver,
@@ -5208,15 +5267,17 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 		int st;
 
 		a->code = "exit_failed";
-		/* --stop keeps the agent for --revive: its launch command can
-		** only be read while claude runs. */
-		if (a->stop && dch_agent_probe(a->ci.pid, &a->ag) < 0)
+		/* --stop keeps the agent for --revive, the shell case retypes
+		** it: its launch command can only be read while claude runs. */
+		if ((a->stop || a->shell) &&
+		    (dch_agent_probe(a->ci.pid, &a->ag) < 0 ||
+		     (a->shell && !a->ag.launch)))
 		{
 			ag_say(a, 1, "could not read claude's launch command; "
 			       "resume message %s", ag_resume(a, resume));
 			return 1;
 		}
-		stop_phase(a->name, "exiting", a->json);
+		json_phase(a->name, "exiting", a->json);
 		/* Taken now, not at pause time: /clear rotates it. */
 		snprintf(a->sid, sizeof a->sid, "%s", r.sid);
 		st = respawn_req(a->path, 'h', NULL, 0);
@@ -5246,8 +5307,8 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 			ag_say(a, 1, "%s; hold cancelled%s%s", st == -2
 			       ? "/exit did not land in the composer, Enter not "
 			         "pressed" : "could not type /exit",
-			       a->stop ? "; resume message " : "",
-			       a->stop ? ag_resume(a, resume) : "");
+			       a->stop || a->shell ? "; resume message " : "",
+			       a->stop || a->shell ? ag_resume(a, resume) : "");
 			return 1;
 		}
 		a->step = AG_EXIT;
@@ -5276,13 +5337,13 @@ ag_on_sig(int sig)
 }
 
 /* The agent step of `--restart --include-agents`: every session, or only
-** `only` when non-NULL. Returns the number of agents that were attempted
-** and failed. */
+** `only` when non-NULL; json = --json's NDJSON. Returns the number of
+** agents that were attempted and failed. */
 static int ag_run(struct agent *ag, int na, const char *pmsg,
                   const char *rmsg);
 
 static int
-restart_agents(int force, const char *only)
+restart_agents(int force, const char *only, int json)
 {
 	struct slist sl = {0}, cur = {0};
 	struct agent *ag;
@@ -5310,20 +5371,23 @@ restart_agents(int force, const char *only)
 	{
 		struct agent *a = &ag[na];
 		char mpath[8192], mcwd[PATH_MAX], jcwd[PATH_MAX], rc[PATH_MAX];
-		const char *skip = NULL;
+		const char *skip = NULL, *code = NULL, *word;
+		struct dch_agent pa;
 		struct crec r;
 		long mpid;
-		int st, n;
+		int st, n, lc;
 
 		if (only && strcmp(sl.v[k], only) != 0)
 			continue;
 		snprintf(a->name, sizeof a->name, "%s", sl.v[k]);
 		session_sock_path(sl.v[k], a->path, sizeof a->path);
+		a->json = json;
 		st = cmd_query(a->path, &a->ci);
 		if (st == DCH_ST_UNSUP)
 		{
-			printf("%s: skipped — its master predates agent restart "
-			       "(--respawn/--cmd)\n", a->name);
+			stop_print(a->name, "skipped", "old_master", "its master "
+			           "predates agent restart (--respawn/--cmd)", "", "",
+			           json);
 			said++;
 			continue;
 		}
@@ -5332,22 +5396,28 @@ restart_agents(int force, const char *only)
 		a->argv = a->ci.argv;
 		a->argc = a->ci.argc;
 		a->tok = claude_tok(a->argv, a->argc);
-		if (a->tok < a->argc && strcmp(a->ci.state, "running") != 0)
+		a->shell = a->tok == a->argc;	/* claude typed into the shell */
+		n = a->ci.pid > 0 && strcmp(a->ci.state, "held") != 0
+		    ? claude_find(a->ci.pid, 1, &r) : 0;
+		mpid = a->ci.pid > 0 ? proc_ppid(a->ci.pid) : -1;
+		if (n == 0 && a->shell)
 		{
-			/* Ours to arm: someone else's respawn owns the exit. */
-			printf("%s: skipped — a respawn is pending (%s)\n", a->name,
-			       a->ci.state);
+			if (json)
+				stop_print(a->name, "skipped", "not_claude", "no claude "
+				           "runs in the session", "", "", 1);
+			cmd_info_free(&a->ci);
+			continue;	/* no Claude in this session */
+		}
+		if (strcmp(a->ci.state, "running") != 0)
+		{
+			/* Someone else's respawn owns the session's next exit. */
+			snprintf(a->why, sizeof a->why, "a respawn is pending (%s)",
+			         a->ci.state);
+			stop_print(a->name, "skipped", "respawn_pending", a->why, "",
+			           "", json);
 			said++;
 			cmd_info_free(&a->ci);
 			continue;
-		}
-		n = a->ci.pid > 0 && strcmp(a->ci.state, "running") == 0
-		    ? claude_find(a->ci.pid, 1, &r) : 0;
-		mpid = a->ci.pid > 0 ? proc_ppid(a->ci.pid) : -1;
-		if (n == 0 && a->tok == a->argc)
-		{
-			cmd_info_free(&a->ci);
-			continue;	/* no Claude in this session */
 		}
 		said++;
 		mpath[0] = mcwd[0] = '\0';
@@ -5358,31 +5428,45 @@ restart_agents(int force, const char *only)
 		if (mpid > 1 && proc_cwd(mpid, rc, sizeof rc) == 0 &&
 		    !realpath(rc, mcwd))
 			mcwd[0] = '\0';
+		/* Typed into the shell, the relaunch is typed there too: the
+		** claude word of what was typed, in claude's cwd (the relaunch
+		** cd's there), on the PATH claude got from the shell — a shell's
+		** own env reads back redacted on macOS. */
+		pa.launch = NULL;
+		if (a->shell && n && dch_agent_probe(a->ci.pid, &pa) == 0)
+		{
+			(void)proc_env_value(r.pid, "PATH", mpath, sizeof mpath);
+			snprintf(mcwd, sizeof mcwd, "%s", r.cwd);
+		}
+		for (lc = 0; pa.launch && pa.launch[lc]; lc++)
+			;
+		word = !a->shell ? a->argv[a->tok]
+		       : pa.launch ? pa.launch[claude_tok(pa.launch, lc)] : NULL;
 		if (n == 0)
 			skip = "claude is its command, but no live claude "
-			       "session record joins it";
-		else if (a->tok == a->argc)
-			skip = "claude was started inside the session's shell, "
-			       "not as its command";
+			       "session record joins it", code = "no_record";
 		else if (proc_depth((long)getpid(), r.pid) >= 0 ||
 		         (self && strcmp(self, a->name) == 0))
-			skip = "run from outside dch to restart this one";
-		else if (!mcwd[0] || !realpath(r.cwd, jcwd) ||
-		         strcmp(mcwd, jcwd) != 0)
-			skip = "claude's cwd is not the session's launch cwd";
-		else if (claude_installed(a->argv[a->tok], mpath, mcwd, a->want,
-		                          sizeof a->want) < 0)
+			skip = "run from outside dch to restart this one",
+			code = "self";
+		else if (!a->shell && (!mcwd[0] || !realpath(r.cwd, jcwd) ||
+		                       strcmp(mcwd, jcwd) != 0))
+			skip = "claude's cwd is not the session's launch cwd",
+			code = "cwd_mismatch";
+		else if (!word || claude_installed(word, mpath, mcwd, a->want,
+		                                   sizeof a->want) < 0)
 			skip = "cannot run `claude --version` as the session "
-			       "would (its PATH and cwd)";
+			       "would (its PATH and cwd)", code = "version_unknown";
+		free(pa.launch);
 		if (skip)
 		{
-			printf("%s: skipped — %s\n", a->name, skip);
+			stop_print(a->name, "skipped", code, skip, "", "", json);
 			cmd_info_free(&a->ci);
 			continue;
 		}
 		a->cpid = r.pid;
 		snprintf(a->ver, sizeof a->ver, "%s", r.ver);
-		if (n > 1)
+		if (n > 1 && !json)
 			printf("%s: %d claude processes in the session; "
 			       "restarting the outermost (pid %ld)\n", a->name, n,
 			       a->cpid);
@@ -5391,9 +5475,12 @@ restart_agents(int force, const char *only)
 			na++;
 			continue;
 		}
-		snprintf(rc, sizeof rc, "%s: already on claude %s", a->name,
-		         a->want);
-		slist_push(&cur, rc);
+		snprintf(rc, sizeof rc, "%s%salready on claude %s",
+		         json ? "" : a->name, json ? "" : ": ", a->want);
+		if (json)	/* no summary line: cur stays empty */
+			stop_print(a->name, "skipped", "current", rc, "", "", 1);
+		else
+			slist_push(&cur, rc);
 		snprintf(want, sizeof want, "%s", a->want);
 		said -= n == 1;
 		cmd_info_free(&a->ci);
@@ -5408,7 +5495,10 @@ restart_agents(int force, const char *only)
 	fflush(stdout);
 	fails = ag_run(ag, na, pmsg, rmsg);
 	for (k = 0; k < na; k++)
+	{
 		cmd_info_free(&ag[k].ci);
+		free(ag[k].ag.launch);
+	}
 	free(ag);
 	return fails;
 }
@@ -5467,7 +5557,7 @@ ag_run(struct agent *ag, int na, const char *pmsg, const char *rmsg)
 		a->deadline = a->t_sent + tmo;
 		a->step = AG_WAIT;
 		snprintf(a->why, sizeof a->why, "no status yet");
-		stop_phase(a->name, "pausing", a->json);
+		json_phase(a->name, "pausing", a->json);
 		if ((g = ag_type(a->path, pmsg, 1)) != 0)
 		{
 			a->code = "not_typed";
@@ -5478,7 +5568,7 @@ ag_run(struct agent *ag, int na, const char *pmsg, const char *rmsg)
 			fails++;
 			continue;
 		}
-		if (a->stop)
+		if (a->stop || a->json)
 			continue;
 		printf("%s: pause message sent; waiting for claude %s to go "
 		       "idle\n", a->name, a->ver);
@@ -5516,31 +5606,37 @@ ag_run(struct agent *ag, int na, const char *pmsg, const char *rmsg)
 #else /* !HAVE_LIBGHOSTTY_VT */
 
 static int
-restart_agents(int force, const char *only)
+restart_agents(int force, const char *only, int json)
 {
 	struct slist sl = {0};
 	struct cmd_info ci;
 	char path[1100], onlyb[256];
-	int k, hit = 0;
+	int k, hit = 0, h;
 
 	(void)force;
 	if (only)
 		only = canon_name(only, onlyb, sizeof onlyb);
-	/* Only worth a word when some session runs claude. */
+	/* Only worth a word when some session runs claude; --json: a line
+	** for each one that does. */
 	list_sessions(&sl);
-	for (k = 0; k < sl.n && !hit; k++)
+	for (k = 0; k < sl.n && (json || !hit); k++)
 	{
 		if (only && strcmp(sl.v[k], only) != 0)
 			continue;
 		session_sock_path(sl.v[k], path, sizeof path);
 		if (cmd_query(path, &ci) == 0)
 		{
-			hit = claude_tok(ci.argv, ci.argc) < ci.argc;
+			h = claude_tok(ci.argv, ci.argc) < ci.argc;
 			cmd_info_free(&ci);
+			if (h && json)
+				stop_print(sl.v[k], "skipped", "no_screen", "dch-lite "
+				           "has no terminal mirror to watch it with", "",
+				           "", 1);
+			hit |= h;
 		}
 	}
 	slist_free(&sl);
-	if (hit)
+	if (hit && !json)
 		puts("agents: not restarted — dch-lite has no terminal mirror to "
 		     "watch them with");
 	return 0;
@@ -5797,7 +5893,7 @@ do_stop_verb(char **names, int nnames, int json)
 		if (claude_find(ci.pid, 1, &r) == 0)
 		{
 			cmd_info_free(&ci);
-			stop_phase(names[k], "ending", json);
+			json_phase(names[k], "ending", json);
 			why = stop_end(names[k], path, mpid, NULL);
 			stop_print(names[k], why ? "failed" : "ok",
 			           why ? "end_failed" : "", why ? why : "", "", "",
@@ -6132,20 +6228,39 @@ static const char *const rv_strip[] = {
 static int do_spawn_verb(char *exe, const char *name, int cols, int rows,
                          char **inner_argv, int inner_argc, int quiet);
 
+/* --revive's line for one record: `<name>: <detail>`, or under --json
+** {"name","as","result","reason","detail","session_id"}. */
+static void
+rv_say(const struct hrec *r, int json, const char *res, const char *code,
+       const char *fmt, ...)
+{
+	va_list ap;
+	char d[2048];
+
+	va_start(ap, fmt);
+	vsnprintf(d, sizeof d, fmt, ap);
+	va_end(ap);
+	if (json)
+		json_final(r->name, "as", r->as, res, code, d, r->sid);
+	else
+		printf("%s: %s\n", r->name, d);
+	fflush(stdout);
+}
+
 /* Spawn one record's session in its cwd, as its argv — with --resume <id>
 ** when claude is its command (RV_ARGV); a shell that had claude typed into
 ** it comes back as the shell (RV_SHELL, the command is typed later). 0, or
 ** -1 with the reason printed. */
 static int
-revive_spawn(char *exe, struct hrec *r, int cols, int rows)
+revive_spawn(char *exe, struct hrec *r, int cols, int rows, int json)
 {
 	char **nv = NULL, **v = r->argv;
 	int tok = claude_tok(r->argv, r->argc), nc = r->argc, rc;
 
 	if (chdir(r->cwd) < 0)
 	{
-		printf("%s: NOT revived — its directory %s is gone (%s)\n",
-		       r->name, r->cwd, strerror(errno));
+		rv_say(r, json, "failed", "cwd_gone", "NOT revived — its directory "
+		       "%s is gone (%s)", r->cwd, strerror(errno));
 		return -1;
 	}
 	r->mode = RV_PLAIN;
@@ -6173,7 +6288,8 @@ revive_spawn(char *exe, struct hrec *r, int cols, int rows)
 	free(nv);
 	if (rc != 0)
 	{
-		printf("%s: NOT revived — the session did not start\n", r->name);
+		rv_say(r, json, "failed", "not_started", "NOT revived — the "
+		       "session did not start");
 		return -1;
 	}
 	if (r->alias[0])
@@ -6181,37 +6297,50 @@ revive_spawn(char *exe, struct hrec *r, int cols, int rows)
 	return 0;
 }
 
+/* Type launch (NULL-terminated), with --resume <id>, into the shell of
+** session `name`, after `cd <cd> &&` when cd is non-NULL. 0, or -1. */
+static int
+shell_type_launch(const char *name, char **launch, char *id, const char *cd)
+{
+	char **nv, *line, *cmd[1];
+	int n, tok, nc, rc;
+
+	for (n = 0; launch && launch[n]; n++)
+		;
+	tok = claude_tok(launch, n);
+	if (tok == n)
+		tok = n - 1;	/* no claude token: --resume goes last */
+	if (!(nv = resume_argv(launch, n, tok, id, &nc)))
+		return -1;
+	line = shell_line(cd, nv, nc);
+	free(nv);
+	if (!line)
+		return -1;
+	cmd[0] = line;
+	rc = do_send_verb(name, cmd, 1, 1);
+	free(line);
+	return rc;
+}
+
 /* Type the agent's launch command, with --resume <id>, into the revived
 ** shell once it has printed something (its prompt): no mirror needed. */
 static int
 revive_type_launch(struct hrec *r)
 {
-	char **nv, *line, *cmd[1];
-	int tok = claude_tok(r->launch, r->launchc), nc, rc;
-
-	if (tok == r->launchc)
-		tok = r->launchc - 1;	/* no claude token: --resume goes last */
 	while (activity_epoch(r->as) == 0 && wall_ms() < r->deadline)
 		poll(NULL, 0, 100);
 	poll(NULL, 0, 300);
-	if (!(nv = resume_argv(r->launch, r->launchc, tok, r->sid, &nc)))
-		return -1;
-	line = shell_line(r->acwd[0] && strcmp(r->acwd, r->cwd) ? r->acwd : NULL,
-	                  nv, nc);
-	free(nv);
-	if (!line)
-		return -1;
-	cmd[0] = line;
-	rc = do_send_verb(r->as, cmd, 1, 1);
-	free(line);
-	return rc;
+	return shell_type_launch(r->as, r->launch, r->sid,
+	                         r->acwd[0] && strcmp(r->acwd, r->cwd)
+	                         ? r->acwd : NULL);
 }
 
 #ifdef HAVE_LIBGHOSTTY_VT
 /* Wait for the resumed claude's empty composer, then type the revive
-** message. Returns NULL when it was sent, else why not. */
+** message. Returns NULL when it was sent, else why not (*code: its
+** --json reason). */
 static const char *
-revive_message(struct hrec *r, const char *msg)
+revive_message(struct hrec *r, const char *msg, const char **code)
 {
 	static char why[160];
 	char path[1100];
@@ -6233,17 +6362,20 @@ revive_message(struct hrec *r, const char *msg)
 		}
 		if (ok)
 			cmd_info_free(&ci);
+		*code = cg_code[CG_UNKNOWN];
 		if (g == CG_NOVT)
 			return "the session has no terminal mirror";
 		if (wall_ms() >= r->deadline)
 		{
 			snprintf(why, sizeof why, "no empty composer within %lds (%s)",
 			         env_ms("DCH_AGENT_STEP_MS", 60000) / 1000, cg_why[g]);
+			*code = g == CG_EMPTY ? "not_idle" : cg_code[g];
 			return why;
 		}
 		poll(NULL, 0, AG_POLL_MS);
 	}
 	t = ag_type(path, msg, 1);
+	*code = t == 0 ? "" : t == -3 ? "not_submitted" : "not_typed";
 	return t == 0 ? NULL : t == -2 ? "it did not land in the composer"
 	       : t == -3 ? "it stayed in the composer through every Enter"
 	       : "it could not be typed";
@@ -6253,7 +6385,7 @@ revive_message(struct hrec *r, const char *msg)
 /* `--revive <name> [--as <new>]` / `--revive --all`. */
 static int
 do_revive_verb(char *exe, const char *name, const char *as, int all,
-               int cols, int rows)
+               int cols, int rows, int json)
 {
 	struct hrec *r;
 	int n = history_load(&r), k, picked = 0, bad = 0;
@@ -6282,6 +6414,9 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 			fprintf(stderr, "dch: session %s is live; revive it under "
 			        "another name with --revive %s --as <new>\n", h->as,
 			        name);
+			if (json)
+				rv_say(h, 1, "failed", "live", "session %s is live",
+				       h->as);
 			bad++;
 			continue;
 		}
@@ -6298,7 +6433,8 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 				if (!name_live(h->as) && access(rp, F_OK) != 0)
 					break;
 			}
-		if (revive_spawn(exe, h, cols, rows) < 0)
+		json_phase(h->name, "starting", json);
+		if (revive_spawn(exe, h, cols, rows, json) < 0)
 		{
 			h->mode = RV_SKIP;
 			bad++;
@@ -6316,23 +6452,26 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 		}
 		if (h->mode == RV_PLAIN)
 		{
-			printf("%s: revived as %s in %s", h->name, h->as, h->cwd);
-			if (h->sid[0])
-				printf("; claude %s NOT resumed (its launch command is "
-				       "unknown): claude --resume %s", h->aname, h->sid);
-			putchar('\n');
-			fflush(stdout);
+			rv_say(h, json, h->sid[0] ? "failed" : "ok",
+			       h->sid[0] ? "launch_unknown" : "", "revived as %s in "
+			       "%s%s%s%s%s", h->as, h->cwd, h->sid[0] ? "; claude "
+			       : "", h->sid[0] ? h->aname : "", h->sid[0]
+			       ? " NOT resumed (its launch "
+			       "command is unknown): claude --resume " : "", h->sid);
 			bad += h->sid[0] != 0;
 		}
 	}
 	if (!picked)
 	{
-		if (all)
+		if (all && !json)
 			puts("nothing to revive (sessions that ended over 3 days "
 			     "ago or ran under 5 minutes are in dch --history; "
 			     "revive one by name)");
-		else
+		else if (!all)
 			fprintf(stderr, "dch: no history for session %s\n", name);
+		if (!all && json)
+			json_final(name, "as", as ? as : name, "failed",
+			           "no_history", "no history for this session", "");
 		hrec_free(r, n);
 		return all ? 0 : 1;
 	}
@@ -6347,9 +6486,10 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 				r[k].deadline = wall_ms() + step;
 				continue;
 			}
-			printf("%s: revived as %s in %s, but claude %s could not be "
-			       "started; resume by hand: claude --resume %s\n",
-			       r[k].name, r[k].as, r[k].cwd, r[k].aname, r[k].sid);
+			rv_say(&r[k], json, "failed", "relaunch_failed", "revived as "
+			       "%s in %s, but claude %s could not be started; resume "
+			       "by hand: claude --resume %s", r[k].as, r[k].cwd,
+			       r[k].aname, r[k].sid);
 			r[k].mode = RV_PLAIN;
 			bad++;
 		}
@@ -6357,6 +6497,7 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 	{
 		struct hrec *h = &r[k];
 		const char *why = NULL, *msg = getenv("DCH_REVIVE_MSG");
+		const char *code = "", *res = "ok";
 		char text[1200], when[32] = "an unknown time";
 		time_t t = (time_t)hrec_when(h);
 
@@ -6380,20 +6521,50 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 			         "any unfinished workers, then carry on where you "
 			         "left off.", h->end, when);
 #ifdef HAVE_LIBGHOSTTY_VT
-		why = revive_message(h, msg && *msg ? msg : text);
+		json_phase(h->name, "resuming", json);
+		why = revive_message(h, msg && *msg ? msg : text, &code);
 		bad += why != NULL;
+		res = why ? "failed" : "ok";
 #else
 		(void)msg;
 		why = "dch-lite has no terminal mirror to see the composer";
+		code = "no_screen";	/* revived and resumed: still ok */
 #endif
-		printf("%s: revived as %s in %s, claude %s%sresumed %s; resume "
-		       "message %s%s%s\n", h->name, h->as, h->cwd, h->aname,
+		rv_say(h, json, res, code,
+		       "revived as %s in %s, claude %s%sresumed %s; resume "
+		       "message %s%s%s", h->as, h->cwd, h->aname,
 		       h->aname[0] ? " " : "", h->sid, why ? "NOT sent (" : "sent",
 		       why ? why : "", why ? ")" : "");
-		fflush(stdout);
 	}
 	hrec_free(r, n);
 	return bad ? 1 : 0;
+}
+
+/* The master pass's word on one session: rc is do_restart_verb's, or -1
+** for one --all leaves alone (already current). Text says only a restart,
+** as it always has (the failures are on stderr); --json says every one,
+** as {"name","phase":"master","result","reason","detail","session_id":""}.
+** all: --all, where a missing sidecar is skipped, not failed. */
+static void
+master_print(const char *name, int rc, int all, int json)
+{
+	char d[128];
+
+	if (!json)
+	{
+		if (rc == 0)
+			printf("%s: restarted on dch %s\n", name, DCH_VERSION);
+		return;
+	}
+	snprintf(d, sizeof d, "%s dch %s", rc == 0 ? "restarted on"
+	         : "already on", DCH_VERSION);
+	json_final(name, "phase", "master", rc == 0 ? "ok"
+	           : rc < 0 || (rc == 3 && all) ? "skipped" : "failed",
+	           rc == 0 ? "" : rc < 0 ? "current" : rc == 2 ? "no_session"
+	           : rc == 3 ? "no_sidecar" : "restart_failed",
+	           rc <= 0 ? d : rc == 2 ? "no such session" : rc == 3
+	           ? "version sidecar missing, age unknown (see stderr)"
+	           : "not restarted (see stderr)", "");
 }
 
 /* ---- main ----------------------------------------------------------- */
@@ -6413,7 +6584,7 @@ main(int argc, char **argv)
 	char alias_arg[600] = "";
 	int opt_ansi = 0, opt_recent = -1, opt_timeout = 10000, opt_cursor = 0;
 	int opt_all = 0, opt_cancel = 0, opt_agents = 0;
-	int opt_agent_json = 0, opt_hist_json = 0, opt_say_json = 0;
+	int opt_agent_json = 0, opt_hist_json = 0, opt_json = 0;
 	int say_at = 0, say_n = 0;
 	char opt_as[512] = "";
 	int opt_cols = 0, opt_rows = 0;
@@ -6707,7 +6878,7 @@ main(int argc, char **argv)
 				if (strcmp(argv[i], "--all") == 0)
 					opt_all = 1;
 				else if (strcmp(argv[i], "--json") == 0)
-					opt_say_json = 1;
+					opt_json = 1;
 				else if (argv[i][0] == '-' || argv[i][0] == '\0')
 				{
 					fprintf(stderr, "dch: --say: unexpected "
@@ -6734,7 +6905,7 @@ main(int argc, char **argv)
 				if (strcmp(argv[i], "--all") == 0)
 					opt_all = 1;
 				else if (strcmp(argv[i], "--json") == 0)
-					opt_say_json = 1;
+					opt_json = 1;
 				else if (argv[i][0] == '-' || argv[i][0] == '\0')
 				{
 					fprintf(stderr, "dch: --stop: unexpected "
@@ -6804,6 +6975,12 @@ main(int argc, char **argv)
 		else if (strcmp(a, "--include-agents") == 0)
 		{
 			opt_agents = 1;
+			i++;
+		}
+		else if (strcmp(a, "--json") == 0)
+		{
+			/* --restart, --revive (#047); --say/--stop take it inline */
+			opt_json = 1;
 			i++;
 		}
 		else if (strcmp(a, "--ansi") == 0)
@@ -6941,6 +7118,13 @@ main(int argc, char **argv)
 		        "--restart\n");
 		return 1;
 	}
+	if (opt_json && action != A_RESTART && action != A_REVIVE &&
+	    action != A_SAY && action != A_STOP)
+	{
+		fprintf(stderr, "dch: --json only works with --restart, --revive, "
+		        "--say, --stop\n");
+		return 1;
+	}
 
 	/* Auto-name only where the action needs a specific session and the
 	** caller didn't already supply one. */
@@ -6980,11 +7164,12 @@ main(int argc, char **argv)
 			rc = do_restart_verb(session_name,
 			                     session_version(session_name)
 			                         == NULL, 0);
+			master_print(session_name, rc, 0, opt_json);
 			if (rc != 0)
 				return 1;
 			fflush(stdout);
-			return opt_agents && restart_agents(force, session_name)
-			       ? 1 : 0;
+			return opt_agents && restart_agents(force, session_name,
+			                                    opt_json) ? 1 : 0;
 		}
 
 		/* --all restarts only what is actually stale: a restart is
@@ -6997,7 +7182,10 @@ main(int argc, char **argv)
 			const char *v = session_version(sl.v[k]);
 
 			if (!force && v && strcmp(v, DCH_VERSION) == 0)
+			{
+				master_print(sl.v[k], -1, 1, opt_json);
 				continue;
+			}
 			/* No sidecar at all: age unknown — a master that predates
 			** live restart looks identical to a current one whose
 			** sidecar tmp_cleaner removed. Either way MSG_RESTART risks
@@ -7007,6 +7195,7 @@ main(int argc, char **argv)
 			rc = do_restart_verb(sl.v[k], v == NULL, 1);
 			if (rc == 2)
 				continue;	/* dead socket; nothing to do */
+			master_print(sl.v[k], rc, 1, opt_json);
 			if (rc == 3)
 			{
 				old++;	/* already explained on stderr */
@@ -7017,14 +7206,14 @@ main(int argc, char **argv)
 				bad++;
 		}
 		slist_free(&sl);
-		if (!did && !old)
+		if (!did && !old && !opt_json)
 			printf("all sessions already on dch %s\n", DCH_VERSION);
-		else if (!did)
+		else if (!did && !opt_json)
 			printf("nothing to restart: %d session%s too old\n",
 			       old, old == 1 ? " is" : "s are");
 		fflush(stdout);
 		/* Then the agents, on masters that now speak --respawn. */
-		if (opt_agents && restart_agents(force, NULL))
+		if (opt_agents && restart_agents(force, NULL, opt_json))
 			bad++;
 		return bad ? 1 : 0;
 	}
@@ -7402,10 +7591,10 @@ main(int argc, char **argv)
 		return do_history_verb(opt_hist_json);
 	case A_SAY:
 		return do_say_verb(opt_all ? NULL : argv + say_at, say_n,
-		                   inner_argv, inner_argc, opt_say_json);
+		                   inner_argv, inner_argc, opt_json);
 	case A_STOP:
 		return do_stop_verb(opt_all ? NULL : argv + say_at, say_n,
-		                    opt_say_json);
+		                    opt_json);
 	case A_REVIVE:
 	case A_SPAWN:
 	{
@@ -7426,7 +7615,7 @@ main(int argc, char **argv)
 		if (action == A_REVIVE)
 			return do_revive_verb(exe, session_name,
 			                      opt_as[0] ? opt_as : NULL, opt_all,
-			                      opt_cols, opt_rows);
+			                      opt_cols, opt_rows, opt_json);
 		return do_spawn_verb(exe, session_name, opt_cols, opt_rows,
 		                     inner_argv, inner_argc, 0);
 	}

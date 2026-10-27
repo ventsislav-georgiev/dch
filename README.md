@@ -171,12 +171,12 @@ dch --report <name> <state>                     # push state (harness hooks)
 dch --meta <name> '<json object>'|clear         # attach metadata (tasks, PRs, ...)
 dch --ls-json                                   # sessions as a JSON array
 dch --restart <name>|--all [-f]                 # upgrade a live session in place
-dch --restart <name>|--all --include-agents [-f]  # ...then restart its stale Claude agents
+dch --restart <name>|--all --include-agents [-f] [--json]  # ...then restart its stale Claude agents
 dch --respawn <name> [-- cmd...]                # on child exit, start cmd in its place
 dch --respawn <name> --cancel                   # drop a pending respawn
 dch --cmd <name>                                # child pid, state, argv, exit status (JSON)
 dch --history [--json]                          # sessions that ended, and how
-dch --revive <name> [--as <new>]|--all          # bring ended sessions back, claude resumed
+dch --revive <name> [--as <new>]|--all [--json]  # bring ended sessions back, claude resumed
 dch --say <name>...|--all [--json] -- <text...>  # message each idle Claude Code, never over a prompt
 dch --stop <name>...|--all [--json]             # pause Claude, /exit, end the session; --revive wakes it
 ```
@@ -219,14 +219,73 @@ someone is watching is invisible to them.
 | `--meta <n> '<json>'` | Attach one JSON object of metadata to the session (see [Optional: session metadata](#optional-session-metadata)); `clear` removes it. Replaced atomically, last write wins, never interpreted; a byte-identical push is a no-op; rejected input leaves the stored object unchanged. Removed automatically when the session's program exits. | 0 ok, 1 no session / not a single-line JSON object ≤ 16 KB |
 | `--wait <n> --state <s[,s...]> [--timeout ms]` | Block until the state matches any of the comma list (e.g. `idle,blocked,done` = "turn over"); prints the matched state. `active` is accepted as an alias for `working`. Polls every 100 ms. | 0 hit, 2 timeout, 1 no session |
 | `--ls-json` | All sessions as JSON: `[{"name","alias","harness","activity_epoch","state","version","agents","meta","meta_epoch"}]`. `harness` is the name of the Claude Code or Codex session running inside, or `""`; the real `name` remains separate. `state` follows the same resolution rule as `--status`. `version` is the dch version of the master serving that session, or `""` for a master old enough not to report one. `agents` is the number of live subagents on Claude Code's agent panel (the `⏺ main` block under the prompt), `0` when no panel is on screen — including while a prompt covers it — or `DCH_NO_DETECT=1` is set. `meta` is the object last pushed with `--meta`, verbatim, or `null`; `meta_epoch` is when that content last changed (epoch seconds, like `activity_epoch`), `0` with no meta. | 0 |
-| `--restart <n>` \| `--restart --all` `[--include-agents] [-f]` | Re-exec the session's master onto the current `dch` binary, in place — the program inside keeps running (see [Upgrading a live session](#upgrading-a-live-session)). `--all` restarts only sessions whose `version` differs from this binary's; `-f` restarts all of them. With `--include-agents`, it then restarts the stale Claude Code agents of those sessions — every session with `--all`, only `<n>` otherwise; `-f` forces current agents too (see [Restarting Claude Code agents](#restarting-claude-code-agents)). Without the flag no agent is touched, `--all` included. `--include-agents` without `--restart` is a usage error. | 0 ok, 1 failed / master too old / an agent restart failed |
+| `--restart <n>` \| `--restart --all` `[--include-agents] [-f] [--json]` | Re-exec the session's master onto the current `dch` binary, in place — the program inside keeps running (see [Upgrading a live session](#upgrading-a-live-session)). `--all` restarts only sessions whose `version` differs from this binary's; `-f` restarts all of them. With `--include-agents`, it then restarts the stale Claude Code agents of those sessions — Claude as the session's command or typed into its shell; every session with `--all`, only `<n>` otherwise; `-f` forces current agents too (see [Restarting Claude Code agents](#restarting-claude-code-agents)). Without the flag no agent is touched, `--all` included. `--include-agents` without `--restart` is a usage error. `--json`: stdout is NDJSON, the master pass included, with or without `--include-agents` (see [Machine-readable output](#machine-readable-output)). | 0 ok, 1 failed / master too old / an agent restart failed |
 | `--respawn <n> [-- cmd...]` | Arm a one-shot respawn: when the session's program next exits, the master keeps the session (same socket, pty size, attached clients) and starts `cmd` in its place. No `cmd` arms a *hold*: the session stays up childless until a second `--respawn <n> -- cmd` starts one, or until `DCH_HOLD_MS` (default 120000) ends it. An arm that nothing consumes expires after `DCH_RESPAWN_TTL_MS` (default 300000); both are read from the master's environment. `--restart` refuses while a respawn is armed or held. | 0 ok, 1 no session / refused / master too old |
 | `--respawn <n> --cancel` | Drop a pending arm. On a held (childless) session it ends the session. | 0 ok, 1 no session |
 | `--cmd <n>` | Print `{"pid","state","argv","exit_code","exit_signal","tail"}`: the child's pid (`null` while held), `state` `running`, `armed` or `held`, the argv it was started with, the exit status of a child reaped under an arm (`null` otherwise), and `tail`, the last 8 KB the child wrote since the arm, raw. | 0 ok, 1 no session / master too old |
 | `--history [--json]` | List the sessions that ended, newest first, one line each: `name (alias)  when  end  cwd  $ argv  [claude <name> <session id>]`. `end` is `exit N`, `signal N`, `killed` (`dch -k`), `stopped` (`dch --stop`) or `vanished` (the master died without a word: SIGKILL, power loss). Only the records of the current socket dir are listed. `--json` prints the stored records as an array (see [Bringing sessions back](#bringing-sessions-back)). | 0 |
-| `--revive <n> [--as <new>]` \| `--revive --all` | Start ended sessions again: in their cwd, with their argv, with the Claude Code agent in them resumed via `--resume <id>` and told to carry on (see [Bringing sessions back](#bringing-sessions-back)). `<n>` revives that one, whatever its end; a live `<n>` is refused unless `--as <new>` names another session. `--all` revives every session that died — anything but `exit 0`, `killed` and `stopped` — within the last 3 days after running at least 5 minutes, and gives one whose name is now taken the first free `<n>-2`, `<n>-3`, …. Older or shorter-lived sessions stay in `--history` and revive by name. One line per session. | 0 ok, 1 no history / name live / a revive or resume failed |
+| `--revive <n> [--as <new>]` \| `--revive --all` | Start ended sessions again: in their cwd, with their argv, with the Claude Code agent in them resumed via `--resume <id>` and told to carry on (see [Bringing sessions back](#bringing-sessions-back)). `<n>` revives that one, whatever its end; a live `<n>` is refused unless `--as <new>` names another session. `--all` revives every session that died — anything but `exit 0`, `killed` and `stopped` — within the last 3 days after running at least 5 minutes, and gives one whose name is now taken the first free `<n>-2`, `<n>-3`, …. Older or shorter-lived sessions stay in `--history` and revive by name. One line per session. `--json`: stdout is NDJSON, each result carrying `"as"`, the name it came back under (see [Machine-readable output](#machine-readable-output)). | 0 ok, 1 no history / name live / a revive or resume failed |
 | `--say <n>... [--json] -- <text...>` \| `--say --all [--json] -- <text...>` | Type one message into the Claude Code running in each session — as its command or typed into its shell — and submit it, under the same gate as `--include-agents`: only when Claude Code's session record says `idle` and the screen shows its empty composer, never over a prompt, a draft or a queued message, and never waiting for a busy Claude. Text is the words after the required `--` joined with spaces. Sessions are typed into concurrently; Enter is pressed again while the text still sits in the composer. One result per session as it finishes: `<n>: sent`, `<n>: skipped — <why>` (`not_claude` under `--all`, `self` = `$DCH_SESSION`, `busy`, `prompt`, `draft`, `queued`, `no_screen` — always on dch-lite) or `<n>: failed — <why>` (`no_session`, `not_submitted`, `not_typed`, `old_master`). `--json` prints one `{"name","result":"ok\|skipped\|failed","reason","detail"}` object per line instead. | 0 nothing failed (skips included), 1 usage error / a session failed |
 | `--stop <n>... [--json]` \| `--stop --all [--json]` | End sessions so `--revive` can bring them back. A session whose Claude Code is live — its command, or typed into its shell — is paused first, the way `--include-agents` pauses it: a pause message (`DCH_PAUSE_MSG` replaces it), a wait until Claude is provably idle (`DCH_AGENT_TIMEOUT_MS`, 600000), `/exit` through the same composer gate, the resume id read from Claude's exit line (else from its session record); then the session ends. A session without a live Claude ends at once. The record ends `stopped` and keeps the agent with that id (see [Bringing sessions back](#bringing-sessions-back)). Sessions are handled concurrently; one line per session as it finishes: `<n>: stopped (claude <name> <id>; revive with dch --revive <n>)`, `<n>: skipped — <why>` (`self` = `$DCH_SESSION`, `respawn_pending`, `no_screen` — a Claude session on dch-lite), `<n>: failed — <why>` (`no_session`, `old_master`, `prompt`, `draft`, `queued`, `not_typed`, `not_idle`, `exit_failed`, `claude_exited`, `end_failed`) or `<n>: interrupted — <why>`. A failure leaves the session running and types a resume message into its Claude (`DCH_RESUME_MSG` replaces it); so does a first SIGINT/SIGTERM for every Claude not yet past `/exit` (a second one exits at once). `--json`: stdout is NDJSON — `{"name","phase":"pausing\|exiting\|ending"}` as a session reaches each, then one `{"name","result":"ok\|skipped\|failed\|interrupted","reason","detail","session_id"}` per session (`session_id` `""` when none). | 0 nothing failed (skips included), 1 usage error / a session failed or was interrupted |
+
+### Machine-readable output
+
+`--say`, `--stop`, `--restart` and `--revive` take `--json`: stdout is then
+NDJSON, one object per line, flushed as it happens. stderr keeps its human
+text (usage errors, warnings, the reason behind a master-pass failure). Exit
+codes are the same as without `--json`. Anywhere else `--json` is a usage
+error (`--history` and `--agent-list` take their own).
+
+- **Phase** — `{"name","phase"}` as a session reaches each step:
+  `--stop` `pausing`, `exiting`, `ending`; `--restart --include-agents`
+  `pausing`, `exiting`, `relaunching`, `resuming`; `--revive` `starting`,
+  `resuming` (only with the mirror: dch-lite types no resume message).
+- **Result** — one per session, after its phases:
+  `{"name","result","reason","detail","session_id"}`. `result` is `ok`,
+  `skipped`, `failed` or `interrupted`; `reason` a code below, `""` on `ok`;
+  `detail` the text the line would carry without `--json`, `""` when none;
+  `session_id` the Claude conversation id when there is one (`--stop`: on
+  `ok` only), else `""`. `--say` prints `{"name","result","reason","detail"}`
+  (no `session_id`, never `interrupted`). `--revive` adds `"as"` after
+  `"name"`: the name the session came back under.
+- **Master pass** of `--restart` — one
+  `{"name","phase":"master","result","reason","detail","session_id":""}` per
+  session it looked at, before any agent line: `ok` (`detail`
+  `restarted on dch X`), `skipped` `current` (`--all` without `-f`, already
+  on this dch), `skipped` `no_sidecar` (`--all`; `failed` for one name),
+  `failed` `no_session` or `restart_failed`. It carries `result` too: tell it
+  from an agent result by its `phase`. With `--include-agents` every live
+  session then gets one agent result (`skipped` `not_claude` when no Claude
+  runs in it), and no summary line is printed.
+
+| Reason | Verbs | Meaning |
+| --- | --- | --- |
+| `not_claude` | say, restart | No Claude Code runs in the session. |
+| `self` | say, stop, restart | The session you run in (`$DCH_SESSION`, or dch runs under its Claude). |
+| `busy` | say | Claude is busy. |
+| `prompt`, `draft`, `queued` | say, stop, restart, revive | A prompt or dialog, an unsent draft, a queued message: nothing typed over it. |
+| `no_screen` | say, stop, restart, revive | The composer is not on screen, or the session has no mirror (dch-lite). `--revive` on dch-lite: `ok` with this reason — revived and resumed, resume message not typed. |
+| `no_session` | say, stop, restart | No such session. |
+| `old_master` | say, stop, restart | The session's master predates `--cmd`; `dch --restart` it. |
+| `not_typed`, `not_submitted` | say, stop, restart, revive | Text could not be typed or did not land / stayed in the composer through every Enter. |
+| `respawn_pending` | stop, restart | A `--respawn` is armed or held. |
+| `not_idle` | stop, restart, revive | Claude did not go idle in time. |
+| `claude_exited` | stop, restart | Claude exited while pausing. |
+| `exit_failed` | stop, restart | `/exit` could not be typed or did not end Claude, or Claude crashed on it. |
+| `end_failed` | stop | Claude quit, but the session did not end. |
+| `signal` | stop, restart | `interrupted` by SIGINT/SIGTERM/SIGHUP. |
+| `current` | restart | Agent: already on the installed claude. Master pass: already on this dch. |
+| `no_record` | restart | Claude is the command, but no live Claude session record joins it. |
+| `cwd_mismatch` | restart | Claude's cwd is not the session's launch cwd (Claude as the command). |
+| `version_unknown` | restart | `claude --version` could not be run as the relaunch would. |
+| `relaunch_failed` | restart, revive | The relaunch was refused, could not be typed, or Claude never showed its composer. |
+| `not_updated` | restart | Relaunched and resumed, but still on the old version. |
+| `no_sidecar`, `restart_failed` | restart | Master pass: version sidecar missing (age unknown); the re-exec failed. |
+| `no_history` | revive | No record for that name. |
+| `live` | revive | The name is a live session; use `--as`. |
+| `cwd_gone` | revive | The recorded cwd no longer exists. |
+| `not_started` | revive | The session did not start (the program cannot be executed: the reason is on stderr). |
+| `launch_unknown` | revive | Revived, but its Claude was not resumed: the launch command is unknown. |
 
 A typical agent loop:
 
@@ -476,14 +535,19 @@ conversation; `dch --restart <name> --include-agents` does it for that one
 session only. The step is opt-in: without `--include-agents`, `--restart`
 (`--all` included) restarts masters only and leaves every agent alone.
 
-1. **Find.** A session qualifies when its command (`dch --cmd`) has a `claude`
-   token — directly or behind a wrapper such as `headroom wrap claude --chrome`
-   — and a live Claude session record (`~/.claude/sessions/<pid>.json`, or
-   under `$CLAUDE_CONFIG_DIR`) belongs to a descendant of the session's child.
-   The record must be interactive, its pid alive with a matching start time,
-   and its working directory the session's. The agent is *stale* when the
-   record's version differs from what that `claude` (resolved on the master's
-   `PATH`) reports for `--version`; `-f` restarts current agents too.
+1. **Find.** A session qualifies when a live Claude session record
+   (`~/.claude/sessions/<pid>.json`, or under `$CLAUDE_CONFIG_DIR`) belongs to
+   a descendant of the session's child — interactive, its pid alive with a
+   matching start time — and Claude is either the session's command (`dch
+   --cmd` has a `claude` token, directly or behind a wrapper such as `headroom
+   wrap claude --chrome`; the record's working directory must then be the
+   session's) or was typed into the session's shell. The agent is *stale* when
+   the record's version differs from what that `claude` reports for
+   `--version`: as the command, the token resolved on the master's `PATH`; typed
+   into a shell, the `claude` word of what was typed, resolved in Claude's cwd
+   on the `PATH` Claude got from the shell (a shell's own environment reads
+   back redacted on macOS), and no `claude` word there means the agent is
+   skipped. `-f` restarts current agents too.
 2. **Pause.** Each stale agent gets the pause message, typed only when its
    composer is on screen and empty — never over a draft, a queued message, a
    permission prompt or a dialog. Enter is pressed only once the text shows
@@ -501,7 +565,12 @@ session only. The step is opt-in: without `--include-agents`, `--restart`
    It then starts the original command again, with `--resume <id>` inserted
    right after the `claude` token. Any `--resume`, `-r`, `--continue`, `-c`,
    `--session-id` and `--fork-session` from the original command are dropped.
-   The session keeps its name, socket and attached clients.
+   The session keeps its name, socket and attached clients. Typed into a
+   shell, Claude's exit leaves the shell running: dch drops the hold (it only
+   kept the exit line) and types `cd <claude's cwd> && <what was typed>
+   --resume <id>` into the shell, the way `--revive` does — what was typed is
+   read from the process table right before `/exit`. A shell that exited
+   along with Claude ends the session.
 5. **Resume.** Once the new Claude is idle with an empty composer, it gets the
    resume message, and dch checks that it now reports the installed version.
 
@@ -538,8 +607,9 @@ and the session ends.
 Limitations:
 
 - **Claude Code only.** Codex sessions are left alone.
-- **Started by hand.** A `claude` started by hand from a shell inside a
-  session is skipped with a note: there is no command to relaunch.
+- **Typed into a shell.** The relaunch is typed into whatever reads the
+  terminal once Claude has exited — the shell, or, for `sh -c 'claude;
+  next'`, the next program.
 - **Positional prompt.** A positional prompt argument (`claude "fix the
   tests"`) is kept and sent again on resume. dch cannot tell it apart from an
   option value cheaply.
@@ -548,7 +618,7 @@ Limitations:
 - **dch-lite.** dch-lite (no mirror) skips this step. Given
   `--include-agents`, it prints a note when some session runs claude.
 - **Respawn pending.** A session with a pending `--respawn` (armed or held)
-  is skipped.
+  is skipped, Claude as its command or typed into its shell.
 - **Turn-start race.** A turn can start between the last idle check and
   `/exit`, for example when a background task finishes at that moment. Claude
   may then queue `/exit` behind that turn. If the turn ends within
