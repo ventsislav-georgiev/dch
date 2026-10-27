@@ -5822,6 +5822,19 @@ do_say_verb(char **names, int nnames, char **words, int nwords, int json)
 	return bad ? 1 : 0;
 }
 
+/* --stop needs a 1.24.0 master: an older one (or one without a version
+** sidecar) does not know <sock>.stopped and records the end as a death,
+** which --revive --all would bring back. */
+static int
+stop_old_master(const char *name)
+{
+	const char *v = session_version(name);
+	int a, b;
+
+	return !v || sscanf(v, "%d.%d", &a, &b) != 2 ||
+	       a < 1 || (a == 1 && b < 24);
+}
+
 /* `--stop <name>...|--all [--json]` (names NULL = every session). Exit
 ** status 1 when any session failed or was interrupted. */
 static int
@@ -5870,6 +5883,14 @@ do_stop_verb(char **names, int nnames, int json)
 			c = SAY_OLD_MASTER;
 		else if (st != 0)
 			c = SAY_NO_SESSION;
+		else if (stop_old_master(names[k]))
+		{
+			stop_print(names[k], "failed", "old_master", "its master "
+			           "predates --stop (dch --restart it)", "", "", json);
+			cmd_info_free(&ci);
+			bad = 1;
+			continue;
+		}
 		else if (strcmp(ci.state, "running") != 0)
 		{
 			/* --stop arms its own hold: someone else's owns the exit */

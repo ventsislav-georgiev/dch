@@ -241,6 +241,20 @@ def main():
               r.returncode == 1 and
               (finals(ndjson(r.stdout)).get("old" + TAG) or {})
               .get("reason") == "old_master")
+        # a 1.23 master speaks --cmd but knows no .stopped: refused
+        v = sess("ov", "sh")
+        vf = os.path.join(sockdir, v + ".sock.ver")
+        until(lambda: os.path.exists(vf))
+        with open(vf + ".tmp", "w") as f:
+            f.write("1.23.0\n")
+        os.rename(vf + ".tmp", vf)
+        r = stop(v, "--json")
+        check("1.23 master: failed/old_master, exit 1, session still up",
+              r.returncode == 1 and
+              (finals(ndjson(r.stdout)).get(v) or {})
+              .get("reason") == "old_master" and cmd(v) is not None)
+        run("-k", v)
+        until(lambda: cmd(v) is None)
 
         if lite:
             c = sess("lc", "claude")

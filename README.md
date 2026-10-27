@@ -266,7 +266,7 @@ error (`--history` and `--agent-list` take their own).
 | `prompt`, `draft`, `queued` | say, stop, restart, revive | A prompt or dialog, an unsent draft, a queued message: nothing typed over it. |
 | `no_screen` | say, stop, restart, revive | The composer is not on screen, or the session has no mirror (dch-lite). `--revive` on dch-lite: `ok` with this reason — revived and resumed, resume message not typed. |
 | `no_session` | say, stop, restart | No such session. |
-| `old_master` | say, stop, restart | The session's master predates `--cmd`; `dch --restart` it. |
+| `old_master` | say, stop, restart | The session's master predates `--cmd` (`--stop`: predates dch 1.24.0, or has no version sidecar); `dch --restart` it. |
 | `not_typed`, `not_submitted` | say, stop, restart, revive | Text could not be typed or did not land / stayed in the composer through every Enter. |
 | `respawn_pending` | stop, restart | A `--respawn` is armed or held. |
 | `not_idle` | stop, restart, revive | Claude did not go idle in time. |
