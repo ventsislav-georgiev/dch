@@ -315,22 +315,18 @@ record (under
 or
 .BR CLAUDE_CONFIG_DIR )
 belongs to a descendant of the session's child, with a matching process start
-time, and Claude is either its command (a
+time, and Claude is its command (a
 .B claude
 token, directly or behind a wrapper such as
 .BR "headroom wrap claude" ,
-with the session's working directory) or was typed into its shell. An agent
+with the session's working directory). An agent
 is restarted when its record's version differs from what that
 .B claude
 reports for
 .B \-\-version
-\(em the command's token on the master's
-.BR PATH ;
-typed into a shell, the
-.B claude
-word of what was typed, in Claude's cwd, on the
-.B PATH
-Claude got from the shell \(em or always with
+on the master's
+.BR PATH ,
+or always with
 .BR \-f .
 Each such agent is sent the pause message, typed only while its composer is
 on screen and empty; Enter follows only once the text (or Claude's
@@ -358,20 +354,20 @@ token. Any
 .B \-\-session\-id
 and
 .B \-\-fork\-session
-in the original are dropped. Typed into a shell, Claude's exit leaves the
-shell: dch drops the hold and types
-.BI "cd " cwd " && " launch " \-\-resume " id
-into it, as
-.B \-\-revive
-does, with what was typed read right before
-.BR /exit .
-Once the new Claude is idle, dch types the
+in the original are dropped. Once the new Claude is idle, dch types the
 resume message and checks the new version. Each agent gets one result line,
 and the exit status is 1 if any of them failed. A failed agent is left
 running; one that crashed on
 .B /exit
 is not relaunched; its last output lines go into the report. Skipped: Codex
-sessions, a session with a pending respawn, and the session running the
+sessions, a
+.B claude
+typed into a session's shell
+.RB ( in_shell :
+.B /exit
+would hand the shell back to run whatever followed
+.B claude
+on its line), a session with a pending respawn, and the session running the
 command. A positional prompt argument is sent
 again on resume. A dch\-lite client skips this step, with a note when a
 session runs claude and
@@ -496,10 +492,17 @@ End sessions so that
 can bring them back. A session whose Claude Code is live, as its command or
 typed into its shell, is paused first as
 .B \-\-include\-agents
-pauses it: a pause message, a wait until it is provably idle,
+pauses it: a pause message and a wait until it is provably idle. Claude as
+the command then gets
 .B /exit
 through the same composer gate, its resume id read from Claude's exit line
-(else from its session record); then the session ends. A session without a
+(else from its session record). Claude typed into the shell never gets
+.BR /exit ,
+as the shell would run whatever followed
+.B claude
+on its line: its resume id is read from its session record and the
+session's end hangs up the shell and Claude together.
+Then the session ends. A session without a
 live Claude ends at once. Its history record ends
 .B stopped
 and keeps the agent with that id;
@@ -526,7 +529,10 @@ a second one exits at once.
 prints NDJSON instead:
 .RI { name ", " phase }
 lines
-.RB ( pausing ", " exiting ", " ending )
+.RB ( pausing ", " exiting ", " ending ;
+no
+.B exiting
+for Claude typed into the shell)
 as each session reaches them, then one
 .RI { name ", " result ", " reason ", " detail ", " session_id }
 per session, with

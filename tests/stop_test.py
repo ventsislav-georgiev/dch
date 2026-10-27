@@ -5,8 +5,10 @@ runtime dir and the state dir all temporary. Covers: a Claude that is the
 session's command stopped (pause typed, /exit, the record ends "stopped"
 with the exit line's id) and --revive'd back into that id with the
 stopped-wording message; the same round trip for a Claude typed into a
-shell, with a record refresh every 100 ms never losing the agent between
-/exit and the end; a session without Claude stopped at once; a Claude that
+shell, never /exit'ed (the record's id, the hangup ends shell and claude
+together: `claude; touch f`, `claude && touch f` never run the touch,
+`exec claude` too), with a record refresh every 100 ms never losing the
+agent; a session without Claude stopped at once; a Claude that
 never goes idle (failed after DCH_AGENT_TIMEOUT_MS, still running, resume
 message typed); one SIGTERM while pausing (interrupted, resume message);
 self (DCH_SESSION); a pending respawn; --all over a mix with --json (pure
@@ -341,23 +343,16 @@ def main():
         w.start()
         proc = subprocess.Popen([DCH, "--stop", shc, "--json"],
                                 stdout=subprocess.PIPE, text=True)
-        out, at = [], {}
-        for l in proc.stdout:
-            out.append(l)
-            try:
-                at[json.loads(l).get("phase")] = time.time()
-            except ValueError:
-                pass
+        out = list(proc.stdout)
         proc.wait(timeout=120)
         done.set()
         w.join()
         objs = ndjson("".join(out))
         print("     | " + "".join(out).rstrip().replace("\n", "\n     | "))
-        check("shell claude --json: pure NDJSON, phases pausing, exiting, "
-              "ending, then one final ok with the id, exit 0",
+        check("shell claude --json: pure NDJSON, phases pausing, ending, "
+              "then one final ok with the id, exit 0",
               objs is not None and proc.returncode == 0 and
-              [o.get("phase") for o in objs[:-1]] ==
-              ["pausing", "exiting", "ending"] and
+              [o.get("phase") for o in objs[:-1]] == ["pausing", "ending"] and
               all(sorted(o) == ["name", "phase"] for o in objs[:-1]) and
               objs[-1] == {"name": shc, "result": "ok", "reason": "",
                            "detail": "", "session_id": sid3})
@@ -368,14 +363,15 @@ def main():
               a["launch"] == [os.path.join(bindir, "fakewrap"), "wrap",
                               "claude", "--chrome"] and
               a["cwd"] == os.path.join(proj, "sub"))
-        mid = [r for t, r in seen
-               if at.get("exiting", 1e18) <= t <= at.get("ending", 0)]
-        check("record refreshes between /exit and the end (%d) all keep the "
-              "agent" % len(mid),
-              mid and all((r or {}).get("agent") and
-                          r["agent"]["session_id"] == sid3 for r in mid))
-        check("no record ever written without the agent during --stop",
-              all((r or {}).get("agent") for t, r in seen if r))
+        check("shell claude: pause typed, never /exit",
+              typed(shc)[:1] and typed(shc)[0].startswith(PAUSE) and
+              "/exit" not in typed(shc) and
+              not any(e["ev"] == "exit" for e in events(shc)))
+        check("no record ever written without the agent during --stop (%d)"
+              % len(seen),
+              seen and all((r or {}).get("agent") and
+                           r["agent"]["session_id"] == sid3
+                           for t, r in seen if r))
         names.remove(shc)
         r = run("--revive", shc)
         names.append(shc)
@@ -390,6 +386,60 @@ def main():
         for n in (c, shc):
             run("-k", n)
             names.remove(n)
+
+        # --- what followed claude on the shell's line never runs ----------
+        for base, op, js in (("stsa", ";", True), ("stsb", " &&", False)):
+            n = sess(base, "sh")
+            mark = os.path.join(tmp, n + ".ran")
+            time.sleep(0.3)
+            run("--run", n, "claude%s touch %s" % (op, mark))
+            s5 = up(n)
+            sid5 = s5 and s5["sid"]
+            agent_sid(n, sid5)
+            r = stop(n, *(["--json"] if js else []))
+            print("     | " + r.stdout.rstrip().replace("\n", "\n     | "))
+            objs = ndjson(r.stdout) if js else None
+            check("`claude%s touch`: --stop ok with the record's id, exit 0"
+                  % op, r.returncode == 0 and sid5 and
+                  (r.stdout == "%s: stopped (claude %s; revive with dch "
+                   "--revive %s)\n" % (n, sid5, n) if not js else
+                   objs is not None and
+                   [o.get("phase") for o in objs[:-1]] ==
+                   ["pausing", "ending"] and
+                   objs[-1] == {"name": n, "result": "ok", "reason": "",
+                                "detail": "", "session_id": sid5}))
+            time.sleep(2)
+            check("`claude%s touch`: never /exit'ed, record stopped with the "
+                  "id, session gone, the touch never ran" % op,
+                  "/exit" not in typed(n) and
+                  (rec(n) or {}).get("end") == "stopped" and
+                  ((rec(n) or {}).get("agent") or {}).get("session_id")
+                  == sid5 and cmd(n) is None and not marker(n) and
+                  not os.path.exists(mark))
+            names.remove(n)
+            r = run("--revive", n)
+            names.append(n)
+            s6 = up(n, 1)
+            check("`claude%s touch`: --revive resumes it with --resume <id>"
+                  % op, r.returncode == 0 and s6 and s6["sid"] == sid5 and
+                  s6["argv"][:2] == ["--resume", sid5] and
+                  not os.path.exists(mark))
+            run("-k", n)
+            names.remove(n)
+        n = sess("stse", "sh")
+        time.sleep(0.3)
+        run("--run", n, "exec claude")
+        s7 = up(n)
+        sid7 = s7 and s7["sid"]
+        agent_sid(n, sid7)
+        r = stop(n)
+        check("`exec claude`: --stop ok with the record's id, never /exit'ed,"
+              " record stopped with the id",
+              r.returncode == 0 and sid7 and
+              r.stdout == "%s: stopped (claude %s; revive with dch --revive "
+              "%s)\n" % (n, sid7, n) and "/exit" not in typed(n) and
+              gone(n) and rec(n)["end"] == "stopped" and
+              (rec(n)["agent"] or {}).get("session_id") == sid7)
 
         # --- never idle: failed, still running, resume message -----------
         t = sess("stt", "claude", shell=True)

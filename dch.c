@@ -2029,11 +2029,11 @@ usage(void)
 	    "  dch --restart <name>|--all --include-agents [-f] [--json]\n"
 	    "                                             then also restart stale\n"
 	    "                                             Claude Code agents (-f:\n"
-	    "                                             current ones too), as\n"
-	    "                                             the command or typed\n"
-	    "                                             into the shell; off by\n"
-	    "                                             default, --all too;\n"
-	    "                                             --json: NDJSON\n"
+	    "                                             current ones too) run\n"
+	    "                                             as the command, not\n"
+	    "                                             typed into the shell;\n"
+	    "                                             off by default, --all\n"
+	    "                                             too; --json: NDJSON\n"
 	    "  dch --respawn <name> [-- cmd...]           when the program exits,\n"
 	    "                                             keep the session and\n"
 	    "                                             start cmd in its place;\n"
@@ -2080,8 +2080,11 @@ usage(void)
 	    "                                             skipped (busy, prompt,\n"
 	    "                                             draft, ...) or failed\n"
 	    "  dch --stop <name>...|--all [--json]        pause each session's\n"
-	    "                                             Claude Code, /exit it,\n"
-	    "                                             keep its resume id and\n"
+	    "                                             Claude Code, /exit it\n"
+	    "                                             (as the command; typed\n"
+	    "                                             into the shell it goes\n"
+	    "                                             with the session), keep\n"
+	    "                                             its resume id and\n"
 	    "                                             end the session as\n"
 	    "                                             \"stopped\"; dch --revive\n"
 	    "                                             <name> wakes it resumed\n"
@@ -4139,12 +4142,13 @@ dch_agent_probe(long child, struct dch_agent *a)
 /* ---- --stop: pause, /exit, end the session (#046) --------------------
 **
 ** `--stop <name>...|--all` ends sessions for --revive to bring back: the
-** session's Claude Code (its command, or typed into its shell) is paused
-** and /exit'ed the way --restart --include-agents does it, its resume id
-** read from the exit line; then the session ends as `dch -k` ends one, but
-** marked <sock>.stopped, holding the agent: the history record ends
-** "stopped" with that agent even though claude quit cleanly first. A
-** session without a live Claude ends at once. */
+** session's Claude Code is paused the way --restart --include-agents does
+** it. As the session's command it is /exit'ed, its resume id read from the
+** exit line; typed into the shell it is never /exit'ed (the shell would run
+** what followed it on the line), its id read from its session record. Then
+** the session ends as `dch -k` ends one, but marked <sock>.stopped, holding
+** the agent: the history record ends "stopped" with that agent. A session
+** without a live Claude ends at once. */
 
 static void
 put_json_str(const char *s)
@@ -4318,9 +4322,6 @@ struct agent
 	long long t_sent, ok_since, deadline;
 	/* --stop: no relaunch; the session ends instead */
 	int stop, json;
-	/* --restart, claude typed into the shell: the relaunch is typed
-	** into the shell (#047) */
-	int shell;
 	long mpid;		/* the master, to wait out its exit */
 	struct dch_agent ag;	/* probed right before /exit */
 	const char *res, *code;	/* the result, when not by failed/step */
@@ -5027,33 +5028,10 @@ ag_exited(struct agent *a, const char *step_s)
 	return ag_relaunch(a);
 }
 
-static int shell_type_launch(const char *name, char **launch, char *id,
-                             const char *cd);
-
-/* --restart, claude typed into the shell: claude is gone and the shell is
-** back. Type the launch read before /exit, with --resume <id>, after a cd
-** to claude's cwd, as --revive retypes one. 1 when that failed. */
-static int
-ag_type_launch(struct agent *a)
-{
-	json_phase(a->name, "relaunching", a->json);
-	a->code = "relaunch_failed";
-	a->step = AG_START;
-	a->deadline = wall_ms() + env_ms("DCH_AGENT_STEP_MS", 60000);
-	if (shell_type_launch(a->name, a->ag.launch, a->id,
-	                      a->ag.cwd[0] ? a->ag.cwd : NULL) == 0)
-		return 0;
-	ag_say(a, 1, "claude quit, but its relaunch could not be typed into "
-	       "the shell; resume by hand: claude --resume %s", a->id);
-	return 1;
-}
-
-/* --stop: the hold is armed and /exit typed. Once claude is gone — the
-** session held when claude was its command, the shell left when it was
-** typed into one — the exit line's id goes into the marker and the session
-** ends. Not gone in time: disarmed, claude told to carry on. --restart's
-** shell case (no marker) waits the same way, disarms, then retypes the
-** launch. */
+/* --stop, claude the session's command: the hold is armed and /exit
+** typed. Once claude is gone — the session held, or claude gone under a
+** wrapper that still runs — the exit line's id goes into the marker and the
+** session ends. Not gone in time: disarmed, claude told to carry on. */
 static int
 stop_exited(struct agent *a, const char *step_s, const char *resume)
 {
@@ -5072,8 +5050,7 @@ stop_exited(struct agent *a, const char *step_s, const char *resume)
 	{
 		if (wall_ms() < a->deadline)
 			return 0;
-		if (a->stop)
-			stop_mark(a->path, NULL, 1);
+		stop_mark(a->path, NULL, 1);
 		if (st == 0)	/* not held: this only disarms */
 			respawn_req(a->path, 'c', NULL, 0);
 		ag_say(a, 1, "%s within %s; resume message %s", st == 0
@@ -5083,12 +5060,11 @@ stop_exited(struct agent *a, const char *step_s, const char *resume)
 	}
 	if (st != 0)
 	{
-		if (a->stop)
-			stop_mark(a->path, NULL, 1);
+		stop_mark(a->path, NULL, 1);
 		ag_say(a, 1, "the session went away during /exit");
 		return 1;
 	}
-	/* From a shell, the exit line may still sit in the pty: give the
+	/* Under a wrapper, the exit line may still sit in the pty: give the
 	** master a tick to read it into the tail. */
 	if (!held && !a->ok_since)
 	{
@@ -5098,18 +5074,6 @@ stop_exited(struct agent *a, const char *step_s, const char *resume)
 	}
 	ag_read_id(a, &ci);
 	cmd_info_free(&ci);
-	if (!a->stop)
-	{
-		/* --restart: the hold only kept the exit tail. Held = the shell
-		** went with claude: the cancel ends the session, as its exit
-		** would have. */
-		respawn_req(a->path, 'c', NULL, 0);
-		if (!held)
-			return ag_type_launch(a);
-		ag_say(a, 1, "the shell exited with claude; session ended; "
-		       "resume by hand: claude --resume %s", a->id);
-		return 1;
-	}
 	snprintf(a->ag.sid, sizeof a->ag.sid, "%s", a->id);
 	json_phase(a->name, "ending", a->json);
 	if ((why = stop_end(a->name, a->path, a->mpid, &a->ag)))
@@ -5137,8 +5101,8 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 
 	snprintf(step_s, sizeof step_s, "%lds", step / 1000);
 	if (a->step == AG_EXIT)
-		return a->stop || a->shell ? stop_exited(a, step_s, resume)
-		                           : ag_exited(a, step_s);
+		return a->stop ? stop_exited(a, step_s, resume)
+		               : ag_exited(a, step_s);
 	if (a->step == AG_START)
 	{
 		struct cmd_info ci;
@@ -5162,7 +5126,7 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 		/* Still held: the relaunch went to a stalled master and never
 		** applied (the relaunched claude is not armed, so it never reads
 		** held). Send it again, within the same step limit. */
-		if (strcmp(ci.state, "held") == 0 && !a->shell)
+		if (strcmp(ci.state, "held") == 0)
 		{
 			cmd_info_free(&ci);
 			if (now < a->deadline)
@@ -5264,22 +5228,41 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 		a->ok_since = now;
 	if (ready && now - a->ok_since >= settle)
 	{
+		const char *why;
 		int st;
 
 		a->code = "exit_failed";
-		/* --stop keeps the agent for --revive, the shell case retypes
-		** it: its launch command can only be read while claude runs. */
-		if ((a->stop || a->shell) &&
-		    (dch_agent_probe(a->ci.pid, &a->ag) < 0 ||
-		     (a->shell && !a->ag.launch)))
+		/* --stop keeps the agent for --revive: its launch command can
+		** only be read while claude runs. */
+		if (a->stop && dch_agent_probe(a->ci.pid, &a->ag) < 0)
 		{
 			ag_say(a, 1, "could not read claude's launch command; "
 			       "resume message %s", ag_resume(a, resume));
 			return 1;
 		}
-		json_phase(a->name, "exiting", a->json);
 		/* Taken now, not at pause time: /clear rotates it. */
 		snprintf(a->sid, sizeof a->sid, "%s", r.sid);
+		/* --stop, claude typed into the shell: no /exit, the shell would
+		** run whatever followed claude on its line. The record's id goes
+		** into the marker and the hangup ends shell and claude together. */
+		if (a->stop && a->tok == a->argc)
+		{
+			snprintf(a->id, sizeof a->id, "%s", r.sid);
+			snprintf(a->ag.sid, sizeof a->ag.sid, "%s", r.sid);
+			json_phase(a->name, "ending", a->json);
+			if ((why = stop_end(a->name, a->path, a->mpid, &a->ag)))
+			{
+				a->code = "end_failed";
+				ag_say(a, 1, "%s; resume message %s", why,
+				       ag_resume(a, resume));
+				return 1;
+			}
+			a->res = "ok";
+			a->code = "";
+			ag_say(a, 0, "%s", "");
+			return 0;
+		}
+		json_phase(a->name, "exiting", a->json);
 		st = respawn_req(a->path, 'h', NULL, 0);
 		if (st != DCH_ST_OK)
 		{
@@ -5307,8 +5290,8 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 			ag_say(a, 1, "%s; hold cancelled%s%s", st == -2
 			       ? "/exit did not land in the composer, Enter not "
 			         "pressed" : "could not type /exit",
-			       a->stop || a->shell ? "; resume message " : "",
-			       a->stop || a->shell ? ag_resume(a, resume) : "");
+			       a->stop ? "; resume message " : "",
+			       a->stop ? ag_resume(a, resume) : "");
 			return 1;
 		}
 		a->step = AG_EXIT;
@@ -5371,11 +5354,10 @@ restart_agents(int force, const char *only, int json)
 	{
 		struct agent *a = &ag[na];
 		char mpath[8192], mcwd[PATH_MAX], jcwd[PATH_MAX], rc[PATH_MAX];
-		const char *skip = NULL, *code = NULL, *word;
-		struct dch_agent pa;
+		const char *skip = NULL, *code = NULL;
 		struct crec r;
 		long mpid;
-		int st, n, lc;
+		int st, n;
 
 		if (only && strcmp(sl.v[k], only) != 0)
 			continue;
@@ -5396,11 +5378,10 @@ restart_agents(int force, const char *only, int json)
 		a->argv = a->ci.argv;
 		a->argc = a->ci.argc;
 		a->tok = claude_tok(a->argv, a->argc);
-		a->shell = a->tok == a->argc;	/* claude typed into the shell */
 		n = a->ci.pid > 0 && strcmp(a->ci.state, "held") != 0
 		    ? claude_find(a->ci.pid, 1, &r) : 0;
 		mpid = a->ci.pid > 0 ? proc_ppid(a->ci.pid) : -1;
-		if (n == 0 && a->shell)
+		if (n == 0 && a->tok == a->argc)
 		{
 			if (json)
 				stop_print(a->name, "skipped", "not_claude", "no claude "
@@ -5428,36 +5409,26 @@ restart_agents(int force, const char *only, int json)
 		if (mpid > 1 && proc_cwd(mpid, rc, sizeof rc) == 0 &&
 		    !realpath(rc, mcwd))
 			mcwd[0] = '\0';
-		/* Typed into the shell, the relaunch is typed there too: the
-		** claude word of what was typed, in claude's cwd (the relaunch
-		** cd's there), on the PATH claude got from the shell — a shell's
-		** own env reads back redacted on macOS. */
-		pa.launch = NULL;
-		if (a->shell && n && dch_agent_probe(a->ci.pid, &pa) == 0)
-		{
-			(void)proc_env_value(r.pid, "PATH", mpath, sizeof mpath);
-			snprintf(mcwd, sizeof mcwd, "%s", r.cwd);
-		}
-		for (lc = 0; pa.launch && pa.launch[lc]; lc++)
-			;
-		word = !a->shell ? a->argv[a->tok]
-		       : pa.launch ? pa.launch[claude_tok(pa.launch, lc)] : NULL;
 		if (n == 0)
 			skip = "claude is its command, but no live claude "
 			       "session record joins it", code = "no_record";
+		/* No /exit there: the shell would run whatever followed claude
+		** on its line (`claude && git push`, a loop). */
+		else if (a->tok == a->argc)
+			skip = "claude was started inside the session's shell, "
+			       "not as its command", code = "in_shell";
 		else if (proc_depth((long)getpid(), r.pid) >= 0 ||
 		         (self && strcmp(self, a->name) == 0))
 			skip = "run from outside dch to restart this one",
 			code = "self";
-		else if (!a->shell && (!mcwd[0] || !realpath(r.cwd, jcwd) ||
-		                       strcmp(mcwd, jcwd) != 0))
+		else if (!mcwd[0] || !realpath(r.cwd, jcwd) ||
+		         strcmp(mcwd, jcwd) != 0)
 			skip = "claude's cwd is not the session's launch cwd",
 			code = "cwd_mismatch";
-		else if (!word || claude_installed(word, mpath, mcwd, a->want,
-		                                   sizeof a->want) < 0)
+		else if (claude_installed(a->argv[a->tok], mpath, mcwd, a->want,
+		                          sizeof a->want) < 0)
 			skip = "cannot run `claude --version` as the session "
 			       "would (its PATH and cwd)", code = "version_unknown";
-		free(pa.launch);
 		if (skip)
 		{
 			stop_print(a->name, "skipped", code, skip, "", "", json);
@@ -5495,10 +5466,7 @@ restart_agents(int force, const char *only, int json)
 	fflush(stdout);
 	fails = ag_run(ag, na, pmsg, rmsg);
 	for (k = 0; k < na; k++)
-	{
 		cmd_info_free(&ag[k].ci);
-		free(ag[k].ag.launch);
-	}
 	free(ag);
 	return fails;
 }
