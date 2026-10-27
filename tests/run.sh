@@ -161,6 +161,7 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "respawn keeps the session across a child exit" respawn_test.py
     pyrun "--restart --include-agents restarts stale Claude agents" agent_restart_test.py
     pyrun "--history/--revive bring dead sessions back" revive_test.py
+    pyrun "--say messages idle Claude sessions, gated" say_test.py
 fi
 
 # --- control verbs: --spawn --run --read --wait --keys ---------------------

@@ -2056,6 +2056,15 @@ usage(void)
 	    "                                             in the last 3 days\n"
 	    "                                             after 5+ minutes;\n"
 	    "                                             others by name\n"
+	    "  dch --say <name>...|--all [--json] -- <text...>\n"
+	    "                                             type a message into\n"
+	    "                                             each session's Claude\n"
+	    "                                             Code, only when it is\n"
+	    "                                             idle at an empty\n"
+	    "                                             composer; one result\n"
+	    "                                             per session: sent,\n"
+	    "                                             skipped (busy, prompt,\n"
+	    "                                             draft, ...) or failed\n"
 	    "  dch --ls-json    like -lj but JSON, adds \"state\"\n"
 	    "  dch --agent-list [--json]                  list native Claude peers\n"
 	    "  dch --agent-send <name> <message...>       message one native peer\n"
@@ -5260,6 +5269,184 @@ restart_agents(int force, const char *only)
 
 #endif
 
+/* ---- --say: one message to the Claude sessions (#045) --------------
+**
+** `--say <name>...|--all -- <text>` types text into each session's Claude
+** Code under the --include-agents gate, at the moment of the call: never
+** into a busy Claude, a dialog, a draft or a queue — those are skipped and
+** the caller retries. Every session types in a child of its own, so --all
+** costs the slowest session, not the sum (ag_type alone may take ~25 s). */
+
+/* Outcomes; from SAY_NO_SESSION on they are failures. */
+enum { SAY_OK, SAY_NOT_CLAUDE, SAY_SELF, SAY_BUSY, SAY_PROMPT, SAY_DRAFT,
+       SAY_QUEUED, SAY_NO_SCREEN, SAY_NO_SESSION, SAY_NOT_SUBMITTED,
+       SAY_NOT_TYPED, SAY_OLD_MASTER, SAY_N };
+static const char *const say_code[] = {
+	"", "not_claude", "self", "busy", "prompt", "draft", "queued",
+	"no_screen", "no_session", "not_submitted", "not_typed", "old_master",
+};
+static const char *const say_why[] = {
+	"", "no claude runs in the session", "the session you are in",
+	"claude is busy", "a prompt or dialog is waiting for you",
+	"the composer holds an unsent draft", "a queued message is pending",
+	"the composer is not on screen", "no such session",
+	"the message stayed in the composer through every Enter",
+	"the message could not be typed",
+	"its master predates --cmd (dch --restart it)",
+};
+/* A child's exit status carries its outcome past exit(1) and the like. */
+#define SAY_EXIT 100
+
+static void
+say_print(const char *name, int c, int json)
+{
+	const char *res = c == SAY_OK ? "sent" : c < SAY_NO_SESSION ? "skipped"
+	                                                           : "failed";
+	size_t cap = strlen(name) * 6 + 3;
+	char *q;
+
+	if (!json)
+		printf(c == SAY_OK ? "%s: %s\n" : "%s: %s — %s\n", name, res,
+		       say_why[c]);
+	else if ((q = malloc(cap)))
+	{
+		if (dch_json_quote(q, cap, name) == (size_t)-1)
+			snprintf(q, cap, "\"\"");
+		printf("{\"name\":%s,\"result\":\"%s\",\"reason\":\"%s\","
+		       "\"detail\":\"%s\"}\n", q, c == SAY_OK ? "ok" : res,
+		       say_code[c], say_why[c]);
+		free(q);
+	}
+	fflush(stdout);
+}
+
+#ifdef HAVE_LIBGHOSTTY_VT
+/* The gate and the typing, in the child. */
+static int
+say_type(const char *path, const char *text)
+{
+	switch (claude_gate(path))
+	{
+	case CG_EMPTY:
+		break;
+	case CG_DIALOG:
+		return SAY_PROMPT;
+	case CG_DRAFT:
+		return SAY_DRAFT;
+	case CG_QUEUED:
+		return SAY_QUEUED;
+	default:
+		return SAY_NO_SCREEN;
+	}
+	switch (ag_type(path, text, 1))
+	{
+	case 0:
+		return SAY_OK;
+	case -3:
+		return SAY_NOT_SUBMITTED;
+	default:
+		return SAY_NOT_TYPED;
+	}
+}
+#endif
+
+/* names NULL = every session. Exit status: 1 when any session failed. */
+static int
+do_say_verb(char **names, int nnames, char **words, int nwords, int json)
+{
+	struct slist sl = {0};
+	const char *self = getenv("DCH_SESSION");
+	char selfb[256], cb[256], path[1100], *text;
+	pid_t *kids;
+	size_t len = 1;
+	int k, c, st, live = 0, bad = 0, ws;
+
+	for (k = 0; k < nwords; k++)
+		len += strlen(words[k]) + 1;
+	if (!(text = malloc(len)))
+		return 1;
+	for (text[0] = '\0', k = 0; k < nwords; k++)
+		strcat(strcat(text, k ? " " : ""), words[k]);
+	if (!text[strspn(text, " \t\r\n")])
+	{
+		fprintf(stderr, "dch: --say needs text after --\n");
+		free(text);
+		return 1;
+	}
+	if (self && *self)
+		self = canon_name(self, selfb, sizeof selfb);
+	if (!names)
+	{
+		list_sessions(&sl);
+		names = sl.v;
+		nnames = sl.n;
+	}
+	kids = calloc((size_t)nnames + 1, sizeof *kids);
+	for (k = 0; kids && k < nnames; k++)
+	{
+		struct cmd_info ci;
+		struct crec r;
+
+		session_sock_path(names[k], path, sizeof path);
+		if (self && *self &&
+		    strcmp(self, canon_name(names[k], cb, sizeof cb)) == 0)
+			c = SAY_SELF;
+		else if ((st = cmd_query(path, &ci)) == -4 && sl.v)
+			continue;	/* --all: a stale socket, no session */
+		else if (st == DCH_ST_UNSUP)
+			c = SAY_OLD_MASTER;
+		else if (st != 0)
+			c = SAY_NO_SESSION;
+		else
+		{
+			c = ci.pid <= 0 || claude_find(ci.pid, 1, &r) == 0
+			    ? SAY_NOT_CLAUDE
+			    : strcmp(r.status, "idle") != 0 ? SAY_BUSY : -1;
+			cmd_info_free(&ci);
+		}
+#ifdef HAVE_LIBGHOSTTY_VT
+		if (c < 0 && (kids[k] = fork()) == 0)
+			_exit(SAY_EXIT + say_type(path, text));
+		if (c < 0 && kids[k] > 0)
+		{
+			live++;
+			continue;
+		}
+		if (c < 0)
+			c = SAY_NOT_TYPED;
+#else
+		if (c < 0)
+			c = SAY_NO_SCREEN;	/* dch-lite: no mirror to gate on */
+#endif
+		say_print(names[k], c, json);
+		bad |= c >= SAY_NO_SESSION;
+	}
+	for (; live > 0; live--)
+	{
+		pid_t p = wait(&ws);
+
+		if (p < 0)
+			break;
+		for (k = 0; k < nnames && kids[k] != p; k++)
+			;
+		if (k == nnames)
+		{
+			live++;		/* not one of ours */
+			continue;
+		}
+		c = WIFEXITED(ws) && WEXITSTATUS(ws) >= SAY_EXIT &&
+		    WEXITSTATUS(ws) < SAY_EXIT + SAY_N
+		    ? WEXITSTATUS(ws) - SAY_EXIT : SAY_NOT_TYPED;
+		say_print(names[k], c, json);
+		bad |= c >= SAY_NO_SESSION;
+	}
+	bad |= !kids;
+	free(kids);
+	free(text);
+	slist_free(&sl);
+	return bad ? 1 : 0;
+}
+
 /* ---- session history: --history, --revive (#042) -------------------- */
 
 /* One record from dch_history_dir() (written by master.c's rec_*). */
@@ -5813,12 +6000,13 @@ main(int argc, char **argv)
 	       A_RENAME, A_LISTJSON, A_LISTJSON2, A_SETALIAS,
 	       A_SPAWN, A_SEND, A_RUN, A_KEYS, A_READ, A_WAIT, A_STATUS,
 	       A_REPORT, A_META, A_RESTART, A_AGENT_LIST, A_AGENT_SEND,
-	       A_RESPAWN, A_CMD, A_HISTORY, A_REVIVE }
+	       A_RESPAWN, A_CMD, A_HISTORY, A_REVIVE, A_SAY }
 	    action = A_ATTACH;
 	char alias_arg[600] = "";
 	int opt_ansi = 0, opt_recent = -1, opt_timeout = 10000, opt_cursor = 0;
 	int opt_all = 0, opt_cancel = 0, opt_agents = 0;
-	int opt_agent_json = 0, opt_hist_json = 0;
+	int opt_agent_json = 0, opt_hist_json = 0, opt_say_json = 0;
+	int say_at = 0, say_n = 0;
 	char opt_as[512] = "";
 	int opt_cols = 0, opt_rows = 0;
 	char opt_match[DCH_WAIT_MAX + 1] = "";
@@ -6100,6 +6288,34 @@ main(int argc, char **argv)
 				        "name or --all\n");
 				return 1;
 			}
+		}
+		else if (strcmp(a, "--say") == 0)
+		{
+			/* <name>... or --all, maybe --json, then a required
+			** `--` and the text; the names are packed into
+			** argv[say_at...] in place. */
+			action = A_SAY;
+			for (say_at = ++i; i < argc && strcmp(argv[i], "--") != 0; i++)
+				if (strcmp(argv[i], "--all") == 0)
+					opt_all = 1;
+				else if (strcmp(argv[i], "--json") == 0)
+					opt_say_json = 1;
+				else if (argv[i][0] == '-' || argv[i][0] == '\0')
+				{
+					fprintf(stderr, "dch: --say: unexpected "
+					        "%s\n", argv[i][0] ? argv[i] : "''");
+					return 1;
+				}
+				else
+					argv[say_at + say_n++] = argv[i];
+			if (i == argc || opt_all == !!say_n)
+			{
+				fprintf(stderr, "dch: usage: dch --say <name>... "
+				        "| --all [--json] -- <text...>\n");
+				return 1;
+			}
+			i++;
+			break;
 		}
 		else if (strcmp(a, "--history") == 0)
 		{
@@ -6750,6 +6966,9 @@ main(int argc, char **argv)
 		return do_send_verb(session_name, inner_argv, inner_argc, 1);
 	case A_HISTORY:
 		return do_history_verb(opt_hist_json);
+	case A_SAY:
+		return do_say_verb(opt_all ? NULL : argv + say_at, say_n,
+		                   inner_argv, inner_argc, opt_say_json);
 	case A_REVIVE:
 	case A_SPAWN:
 	{

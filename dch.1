@@ -34,6 +34,13 @@ dch \- detachable terminal sessions with a headless agent API
 .RB [ \-\-timeout
 .IR ms ]
 .br
+.B dch \-\-say
+.RI [ name... ]
+.RB [ \-\-all ]
+.RB [ \-\-json ]
+.B \-\-
+.I text...
+.br
 .B dch \-\-agent\-list
 .RB [ \-\-json ]
 .br
@@ -400,6 +407,43 @@ and
 of a child reaped under an arm (otherwise null), and
 .IR tail ,
 the last 8 KB the child wrote since the arm.
+.TP
+.BI \-\-say " name..." " " [ \-\-json ] " \-\- text..."
+.TQ
+.BR "\-\-say \-\-all " [ \-\-json ] " \-\- \fItext...\fP"
+Type
+.I text
+(the words after the required
+.BR \-\- ,
+joined with spaces) into the Claude Code running in each named session, or
+every session with
+.BR \-\-all ,
+and press Enter. Claude may be the session's command or typed into its
+shell. Only an idle Claude (its session record says so) whose screen shows
+the empty composer is typed into; a busy Claude, a prompt or dialog, an unsent
+draft or a queued message is skipped, never waited for. Enter is pressed again
+while the text stays in the composer. Sessions are typed into concurrently.
+One line per session as it finishes:
+.IB name ": sent" ,
+.IB name ": skipped \(em " why
+or
+.IB name ": failed \(em " why .
+.B \-\-json
+prints one object per line instead:
+.IR name ,
+.IR result " (" ok ", " skipped " or " failed ),
+.I reason
+.RB ( not_claude ", " self ", " busy ", " prompt ", " draft ", " queued ,
+.BR no_screen ", " no_session ", " not_submitted ", " not_typed ,
+.BR old_master ,
+or empty) and
+.IR detail .
+The caller's own session
+.RB ( DCH_SESSION )
+is skipped. A dch-lite build has no mirror to check the composer with and
+skips every Claude session
+.RB ( no_screen ).
+Exits 0 when nothing failed, 1 on a usage error or when any session failed.
 .TP
 .BR \-\-agent\-list " [" \-\-json "]"
 List live authenticated Claude native peers. The default writes exact names,
