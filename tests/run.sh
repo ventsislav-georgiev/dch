@@ -162,6 +162,7 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "--restart --include-agents restarts stale Claude agents" agent_restart_test.py
     pyrun "--history/--revive bring dead sessions back" revive_test.py
     pyrun "--say messages idle Claude sessions, gated" say_test.py
+    pyrun "--stop pauses Claude, ends the session as stopped" stop_test.py
 fi
 
 # --- control verbs: --spawn --run --read --wait --keys ---------------------

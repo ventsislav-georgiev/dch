@@ -1884,8 +1884,9 @@ pkill_pattern(const char *pat)
 	return system(cmd);
 }
 
+/* mark: ".killed" (-k) or ".stopped" (--stop, which wrote it already). */
 static int
-kill_session(const char *name)
+end_session(const char *name, const char *mark)
 {
 	char sp[1100];
 	session_sock_path(name, sp, sizeof(sp));
@@ -1896,11 +1897,12 @@ kill_session(const char *name)
 		return 1;
 	}
 
-	/* Mark the kill as deliberate before the master hears of it: its
-	** history record then ends "killed", which --revive --all skips. */
+	/* Mark the end as deliberate before the master hears of it: its
+	** history record then ends "killed" or "stopped", which --revive
+	** --all skips. */
 	char pat[1200];
 	int kfd;
-	snprintf(pat, sizeof(pat), "%s.killed", sp);
+	snprintf(pat, sizeof(pat), "%s%s", sp, mark);
 	if ((kfd = open(pat, O_WRONLY | O_CREAT | O_NOFOLLOW, 0600)) >= 0)
 		close(kfd);
 
@@ -1944,6 +1946,14 @@ kill_session(const char *name)
 		unlink(side);
 	if (meta_file_path(name, side, sizeof(side)) == 0)
 		unlink(side);
+	return 0;
+}
+
+static int
+kill_session(const char *name)
+{
+	if (end_session(name, ".killed") != 0)
+		return 1;
 	printf("killed: %s\n", name);
 	return 0;
 }
@@ -2052,7 +2062,8 @@ usage(void)
 	    "                                             command, claude resumed\n"
 	    "                                             and told to carry on\n"
 	    "  dch --revive --all                         every session that died\n"
-	    "                                             (not exit 0, not -k)\n"
+	    "                                             (not exit 0, -k or\n"
+	    "                                             --stop)\n"
 	    "                                             in the last 3 days\n"
 	    "                                             after 5+ minutes;\n"
 	    "                                             others by name\n"
@@ -2065,6 +2076,12 @@ usage(void)
 	    "                                             per session: sent,\n"
 	    "                                             skipped (busy, prompt,\n"
 	    "                                             draft, ...) or failed\n"
+	    "  dch --stop <name>...|--all [--json]        pause each session's\n"
+	    "                                             Claude Code, /exit it,\n"
+	    "                                             keep its resume id and\n"
+	    "                                             end the session as\n"
+	    "                                             \"stopped\"; dch --revive\n"
+	    "                                             <name> wakes it resumed\n"
 	    "  dch --ls-json    like -lj but JSON, adds \"state\"\n"
 	    "  dch --agent-list [--json]                  list native Claude peers\n"
 	    "  dch --agent-send <name> <message...>       message one native peer\n"
@@ -4117,6 +4134,120 @@ dch_agent_probe(long child, struct dch_agent *a)
 	return 0;
 }
 
+/* ---- --stop: pause, /exit, end the session (#046) --------------------
+**
+** `--stop <name>...|--all` ends sessions for --revive to bring back: the
+** session's Claude Code (its command, or typed into its shell) is paused
+** and /exit'ed the way --restart --include-agents does it, its resume id
+** read from the exit line; then the session ends as `dch -k` ends one, but
+** marked <sock>.stopped, holding the agent: the history record ends
+** "stopped" with that agent even though claude quit cleanly first. A
+** session without a live Claude ends at once. */
+
+static void
+put_json_str(const char *s)
+{
+	size_t cap = strlen(s) * 6 + 3;
+	char *q = malloc(cap);
+
+	fputs(q && dch_json_quote(q, cap, s) != (size_t)-1 ? q : "\"\"", stdout);
+	free(q);
+}
+
+/* --json: {"name","phase"} as a session reaches pausing|exiting|ending. */
+static void
+stop_phase(const char *name, const char *phase, int json)
+{
+	if (!json)
+		return;
+	fputs("{\"name\":", stdout);
+	put_json_str(name);
+	printf(",\"phase\":\"%s\"}\n", phase);
+	fflush(stdout);
+}
+
+/* The one result line per session; res ok|skipped|failed|interrupted. */
+static void
+stop_print(const char *name, const char *res, const char *code,
+           const char *detail, const char *aname, const char *sid, int json)
+{
+	if (!json && strcmp(res, "ok") != 0)
+		printf("%s: %s — %s\n", name, res, detail);
+	else if (!json)
+		printf("%s: stopped (%s%s%s%s%srevive with dch --revive %s)%s%s\n",
+		       name, *sid ? "claude " : "", aname, *sid && *aname ? " " : "",
+		       sid, *sid ? "; " : "", name, *detail ? " " : "", detail);
+	else
+	{
+		fputs("{\"name\":", stdout);
+		put_json_str(name);
+		printf(",\"result\":\"%s\",\"reason\":\"%s\",\"detail\":", res,
+		       code);
+		put_json_str(detail);
+		fputs(",\"session_id\":", stdout);
+		put_json_str(sid);
+		fputs("}\n", stdout);
+	}
+	fflush(stdout);
+}
+
+/* <path>.stopped: the agent object (ag), or empty; ag NULL and drop =
+** remove it. From the moment it is there the master's record keeps that
+** agent. 0, or -1. */
+static int
+stop_mark(const char *path, const struct dch_agent *ag, int drop)
+{
+	char mk[1200], tmp[1300];
+	FILE *f = NULL;
+	int fd, ok;
+
+	snprintf(mk, sizeof mk, "%s.stopped", path);
+	if (drop)
+		return unlink(mk);
+	snprintf(tmp, sizeof tmp, "%s.%d", mk, (int)getpid());
+	fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
+	if (fd >= 0 && !(f = fdopen(fd, "w")))
+		close(fd);
+	ok = f != NULL;
+	if (f && ag)
+		dch_agent_json(f, ag);
+	if (f && fclose(f) != 0)
+		ok = 0;
+	if (!ok || rename(tmp, mk) != 0)
+	{
+		unlink(tmp);
+		return -1;
+	}
+	return 0;
+}
+
+/* Mark the session stopped (stop_mark), end it and wait for its master
+** (mpid) to write the record. NULL, or why it did not end. */
+static const char *
+stop_end(const char *name, const char *path, long mpid,
+         const struct dch_agent *ag)
+{
+	long long end;
+
+	if (stop_mark(path, ag, 0) < 0)
+	{
+		stop_mark(path, NULL, 1);
+		return "could not write its .stopped marker";
+	}
+	if (end_session(name, ".stopped") != 0)
+	{
+		stop_mark(path, NULL, 1);
+		return "the session went away";
+	}
+	/* ponytail: 10 s for the master's exit, so the record is final when
+	** we say stopped; a --revive right after reads "stopped". */
+	for (end = wall_ms() + 10000; mpid > 1 && kill((pid_t)mpid, 0) == 0;
+	     poll(NULL, 0, 50))
+		if (wall_ms() >= end)
+			return "its master did not exit within 10s";
+	return NULL;
+}
+
 #ifdef HAVE_LIBGHOSTTY_VT
 
 #define AG_POLL_MS  250
@@ -4134,6 +4265,18 @@ static const char ag_resume_msg[] =
     "resume all work. You were restarted: re-arm the shells, monitors, "
     "subagents, loops, wakeups and crons you stopped before the restart, "
     "then carry on where you left off.";
+/* --stop's (#046); the resume one goes to an agent it gives up on. */
+static const char stop_pause_msg[] =
+    "pause all work, this session is being stopped by dch --stop and will "
+    "be resumed later with --resume. Paused means: stop every background "
+    "shell and monitor (TaskStop), stop or finish your subagents, cancel "
+    "any /loop, ScheduleWakeup and session crons, and note what you "
+    "stopped so it can be re-armed after the resume. Then say that all "
+    "work is paused and you are ready to be stopped.";
+static const char stop_resume_msg[] =
+    "resume all work. dch --stop gave up and left this session running: "
+    "re-arm the shells, monitors, subagents, loops, wakeups and crons you "
+    "stopped for the pause, then carry on where you left off.";
 
 /* What the screen lets us type into (claude_gate). */
 enum { CG_NOVT = -1, CG_EMPTY, CG_DIALOG, CG_DRAFT, CG_QUEUED, CG_UNKNOWN };
@@ -4141,6 +4284,9 @@ static const char *const cg_why[] = {
 	"the composer is empty", "a prompt or dialog is waiting for you",
 	"the composer holds an unsent draft", "a queued message is pending",
 	"the composer is not on screen",
+};
+static const char *const cg_code[] = {	/* --stop's reasons, as --say's */
+	"", "prompt", "draft", "queued", "no_screen",
 };
 
 struct agent
@@ -4153,6 +4299,11 @@ struct agent
 	char ver[64], want[64], sid[64], id[64], note[200], why[120];
 	enum { AG_WAIT, AG_EXIT, AG_START, AG_DONE } step;
 	long long t_sent, ok_since, deadline;
+	/* --stop: no relaunch; the session ends instead */
+	int stop, json;
+	long mpid;		/* the master, to wait out its exit */
+	struct dch_agent ag;	/* probed right before /exit */
+	const char *res, *code;	/* the result, when not by failed/step */
 };
 
 static int
@@ -4638,13 +4789,25 @@ static void
 ag_say(struct agent *a, int failed, const char *fmt, ...)
 {
 	va_list ap;
+	char d[2048];
 
-	printf("%s: %s", a->name, failed ? "NOT restarted — " : "");
 	va_start(ap, fmt);
-	vprintf(fmt, ap);
+	if (a->stop)
+	{
+		vsnprintf(d, sizeof d, fmt, ap);
+		stop_print(a->name, a->res ? a->res : failed ? "failed" : "ok",
+		           a->code ? a->code : a->step == AG_WAIT ? "not_idle"
+		                                                  : "exit_failed",
+		           d, a->ag.name, failed ? "" : a->id, a->json);
+	}
+	else
+	{
+		printf("%s: %s", a->name, failed ? "NOT restarted — " : "");
+		vprintf(fmt, ap);
+		putchar('\n');
+		fflush(stdout);
+	}
 	va_end(ap);
-	putchar('\n');
-	fflush(stdout);
 	a->step = AG_DONE;
 }
 
@@ -4750,12 +4913,35 @@ ag_relaunch(struct agent *a)
 	return 1;
 }
 
+/* The id to resume into: the exit line's is primary; the record's (read
+** right before /exit, as /clear rotates it) is the fallback and the
+** cross-check. */
+static void
+ag_read_id(struct agent *a, const struct cmd_info *ci)
+{
+	char tid[64];
+
+	if (resume_id(ci->tail, ci->tail_len, tid, sizeof tid) < 0)
+	{
+		snprintf(a->id, sizeof a->id, "%s", a->sid);
+		snprintf(a->note, sizeof a->note, " (no resume line in the "
+		         "exit output; used the session record's id)");
+	}
+	else
+	{
+		snprintf(a->id, sizeof a->id, "%s", tid);
+		if (strcmp(tid, a->sid) != 0)
+			snprintf(a->note, sizeof a->note, " (exit line said %s, "
+			         "session record said %s; used the exit line)",
+			         tid, a->sid);
+	}
+}
+
 /* The hold is armed and /exit typed: wait for the exit, then relaunch. */
 static int
 ag_exited(struct agent *a, const char *step_s)
 {
 	struct cmd_info ci;
-	char tid[64];
 	int st;
 
 	st = cmd_query(a->path, &ci);
@@ -4816,25 +5002,71 @@ ag_exited(struct agent *a, const char *step_s)
 		cmd_info_free(&ci);
 		return 1;
 	}
-	/* The exit line is primary; the record's id (read right before /exit,
-	** as /clear rotates it) is the fallback and the cross-check. */
-	if (resume_id(ci.tail, ci.tail_len, tid, sizeof tid) < 0)
-	{
-		snprintf(a->id, sizeof a->id, "%s", a->sid);
-		snprintf(a->note, sizeof a->note, " (no resume line in the "
-		         "exit output; used the session record's id)");
-	}
-	else
-	{
-		snprintf(a->id, sizeof a->id, "%s", tid);
-		if (strcmp(tid, a->sid) != 0)
-			snprintf(a->note, sizeof a->note, " (exit line said %s, "
-			         "session record said %s; used the exit line)",
-			         tid, a->sid);
-	}
+	ag_read_id(a, &ci);
 	cmd_info_free(&ci);
 	a->deadline = wall_ms() + env_ms("DCH_AGENT_STEP_MS", 60000);
 	return ag_relaunch(a);
+}
+
+/* --stop: the hold is armed and /exit typed. Once claude is gone — the
+** session held when claude was its command, the shell left when it was
+** typed into one — the exit line's id goes into the marker and the session
+** ends. Not gone in time: disarmed, claude told to carry on. */
+static int
+stop_exited(struct agent *a, const char *step_s, const char *resume)
+{
+	struct cmd_info ci;
+	const char *why;
+	int st = cmd_query(a->path, &ci), held = 0, gone = 0;
+
+	if (st == 0)
+	{
+		held = strcmp(ci.state, "held") == 0;
+		gone = held || kill((pid_t)a->cpid, 0) < 0;
+		if (!gone)
+			cmd_info_free(&ci);
+	}
+	if (!gone && (st == 0 || ag_quiet(a, st)))
+	{
+		if (wall_ms() < a->deadline)
+			return 0;
+		stop_mark(a->path, NULL, 1);
+		if (st == 0)	/* not held: this only disarms */
+			respawn_req(a->path, 'c', NULL, 0);
+		ag_say(a, 1, "%s within %s; resume message %s", st == 0
+		       ? "/exit did not end claude" : "the master stopped "
+		       "answering after /exit", step_s, ag_resume(a, resume));
+		return 1;
+	}
+	if (st != 0)
+	{
+		stop_mark(a->path, NULL, 1);
+		ag_say(a, 1, "the session went away during /exit");
+		return 1;
+	}
+	/* From a shell, the exit line may still sit in the pty: give the
+	** master a tick to read it into the tail. */
+	if (!held && !a->ok_since)
+	{
+		cmd_info_free(&ci);
+		a->ok_since = wall_ms();
+		return 0;
+	}
+	ag_read_id(a, &ci);
+	cmd_info_free(&ci);
+	snprintf(a->ag.sid, sizeof a->ag.sid, "%s", a->id);
+	stop_phase(a->name, "ending", a->json);
+	if ((why = stop_end(a->name, a->path, a->mpid, &a->ag)))
+	{
+		a->code = "end_failed";
+		ag_say(a, 1, "claude quit (claude --resume %s), but %s", a->id,
+		       why);
+		return 1;
+	}
+	a->res = "ok";
+	a->code = "";
+	ag_say(a, 0, "%s", a->note[0] ? a->note + 1 : "");
+	return 0;
 }
 
 /* One poll of one agent. Returns 1 when it ended in failure. */
@@ -4849,7 +5081,8 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 
 	snprintf(step_s, sizeof step_s, "%lds", step / 1000);
 	if (a->step == AG_EXIT)
-		return ag_exited(a, step_s);
+		return a->stop ? stop_exited(a, step_s, resume)
+		               : ag_exited(a, step_s);
 	if (a->step == AG_START)
 	{
 		struct cmd_info ci;
@@ -4941,6 +5174,7 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 	/* AG_WAIT: is the pause consumed and the agent idle, for a while? */
 	if (claude_find(a->cpid, 0, &r) == 0 || r.pid != a->cpid)
 	{
+		a->code = "claude_exited";
 		ag_say(a, 1, "claude exited while pausing");
 		return 1;
 	}
@@ -4973,6 +5207,16 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 	{
 		int st;
 
+		a->code = "exit_failed";
+		/* --stop keeps the agent for --revive: its launch command can
+		** only be read while claude runs. */
+		if (a->stop && dch_agent_probe(a->ci.pid, &a->ag) < 0)
+		{
+			ag_say(a, 1, "could not read claude's launch command; "
+			       "resume message %s", ag_resume(a, resume));
+			return 1;
+		}
+		stop_phase(a->name, "exiting", a->json);
 		/* Taken now, not at pause time: /clear rotates it. */
 		snprintf(a->sid, sizeof a->sid, "%s", r.sid);
 		st = respawn_req(a->path, 'h', NULL, 0);
@@ -4982,19 +5226,33 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 			       "%s", st, ag_resume(a, resume));
 			return 1;
 		}
+		/* --stop: a record refresh after /exit must keep the agent */
+		if (a->stop && stop_mark(a->path, &a->ag, 0) < 0)
+		{
+			stop_mark(a->path, NULL, 1);
+			respawn_req(a->path, 'c', NULL, 0);
+			ag_say(a, 1, "could not write its .stopped marker; resume "
+			       "message %s", ag_resume(a, resume));
+			return 1;
+		}
 		/* -3 (still in the composer) goes on to AG_EXIT: claude may be
 		** gone already, and a cancel would end a held session; AG_EXIT
 		** cancels safely if it never exits. */
 		if ((st = ag_type(a->path, "/exit", 0)) != 0 && st != -3)
 		{
+			if (a->stop)
+				stop_mark(a->path, NULL, 1);
 			respawn_req(a->path, 'c', NULL, 0);
-			ag_say(a, 1, "%s; hold cancelled", st == -2
+			ag_say(a, 1, "%s; hold cancelled%s%s", st == -2
 			       ? "/exit did not land in the composer, Enter not "
-			         "pressed" : "could not type /exit");
+			         "pressed" : "could not type /exit",
+			       a->stop ? "; resume message " : "",
+			       a->stop ? ag_resume(a, resume) : "");
 			return 1;
 		}
 		a->step = AG_EXIT;
 		a->deadline = now + step;
+		a->ok_since = 0;
 		return 0;
 	}
 	if (now < a->deadline)
@@ -5020,6 +5278,9 @@ ag_on_sig(int sig)
 /* The agent step of `--restart --include-agents`: every session, or only
 ** `only` when non-NULL. Returns the number of agents that were attempted
 ** and failed. */
+static int ag_run(struct agent *ag, int na, const char *pmsg,
+                  const char *rmsg);
+
 static int
 restart_agents(int force, const char *only)
 {
@@ -5027,12 +5288,8 @@ restart_agents(int force, const char *only)
 	struct agent *ag;
 	const char *pmsg = getenv("DCH_PAUSE_MSG"), *rmsg = getenv("DCH_RESUME_MSG");
 	const char *self = getenv("DCH_SESSION");
-	long tmo = env_ms("DCH_AGENT_TIMEOUT_MS", 600000);
-	long settle = env_ms("DCH_AGENT_SETTLE_MS", 3000);
 	char selfb[256], onlyb[256], want[64] = "";
-	int na = 0, k, fails = 0, said = 0, live;
-	static const int sigs[] = { SIGINT, SIGTERM, SIGHUP };
-	struct sigaction sa, old[3], oldpipe;
+	int na = 0, k, fails, said = 0;
 
 	if (!pmsg || !*pmsg)
 		pmsg = ag_pause_msg;
@@ -5149,6 +5406,23 @@ restart_agents(int force, const char *only)
 			puts(cur.v[k]);
 	slist_free(&cur);
 	fflush(stdout);
+	fails = ag_run(ag, na, pmsg, rmsg);
+	for (k = 0; k < na; k++)
+		cmd_info_free(&ag[k].ci);
+	free(ag);
+	return fails;
+}
+
+/* Pause every agent in ag[0..na), then wait on them all at once: one slow
+** agent must not hold up the rest. Returns how many failed. */
+static int
+ag_run(struct agent *ag, int na, const char *pmsg, const char *rmsg)
+{
+	long tmo = env_ms("DCH_AGENT_TIMEOUT_MS", 600000);
+	long settle = env_ms("DCH_AGENT_SETTLE_MS", 3000);
+	int k, fails = 0, live;
+	static const int sigs[] = { SIGINT, SIGTERM, SIGHUP };
+	struct sigaction sa, old[3], oldpipe;
 
 	/* From the first pause on, a signal must not leave agents paused. */
 	memset(&sa, 0, sizeof sa);
@@ -5163,8 +5437,6 @@ restart_agents(int force, const char *only)
 	sa.sa_handler = SIG_IGN;
 	sigaction(SIGPIPE, &sa, &oldpipe);
 
-	/* Pause every stale agent first, then wait on them all at once: one
-	** slow agent must not hold up the rest. */
 	for (k = 0; k < na; k++)
 	{
 		struct agent *a = &ag[k];
@@ -5172,6 +5444,8 @@ restart_agents(int force, const char *only)
 
 		if (ag_sig)
 		{
+			a->res = "interrupted";
+			a->code = "signal";
 			ag_say(a, 1, "interrupted (signal %d) before its pause; "
 			       "nothing typed", (int)ag_sig);
 			fails++;
@@ -5179,6 +5453,8 @@ restart_agents(int force, const char *only)
 		}
 		if (g != CG_EMPTY)
 		{
+			a->res = g == CG_NOVT ? "skipped" : NULL;
+			a->code = cg_code[g == CG_NOVT ? CG_UNKNOWN : g];
 			ag_say(a, g != CG_NOVT, g == CG_NOVT ? "skipped — the session "
 			       "has no terminal mirror" : "%s; nothing typed",
 			       g == CG_NOVT ? "" : cg_why[g]);
@@ -5191,8 +5467,10 @@ restart_agents(int force, const char *only)
 		a->deadline = a->t_sent + tmo;
 		a->step = AG_WAIT;
 		snprintf(a->why, sizeof a->why, "no status yet");
+		stop_phase(a->name, "pausing", a->json);
 		if ((g = ag_type(a->path, pmsg, 1)) != 0)
 		{
+			a->code = "not_typed";
 			ag_say(a, 1, g == -2 ? "the pause message did not land in the "
 			       "composer; Enter not pressed" : g == -3 ? "the pause "
 			       "message stayed in the composer through every Enter"
@@ -5200,6 +5478,8 @@ restart_agents(int force, const char *only)
 			fails++;
 			continue;
 		}
+		if (a->stop)
+			continue;
 		printf("%s: pause message sent; waiting for claude %s to go "
 		       "idle\n", a->name, a->ver);
 		fflush(stdout);
@@ -5212,6 +5492,8 @@ restart_agents(int force, const char *only)
 			{
 				/* Past AG_WAIT the hold is armed: those finish, bounded
 				** by DCH_AGENT_STEP_MS. */
+				ag[k].res = "interrupted";
+				ag[k].code = "signal";
 				ag_say(&ag[k], 1, "interrupted (signal %d) while waiting "
 				       "for it to pause; resume message %s", (int)ag_sig,
 				       ag_resume(&ag[k], rmsg));
@@ -5228,9 +5510,6 @@ restart_agents(int force, const char *only)
 	for (k = 0; k < 3; k++)
 		sigaction(sigs[k], &old[k], NULL);
 	sigaction(SIGPIPE, &oldpipe, NULL);
-	for (k = 0; k < na; k++)
-		cmd_info_free(&ag[k].ci);
-	free(ag);
 	return fails;
 }
 
@@ -5443,6 +5722,124 @@ do_say_verb(char **names, int nnames, char **words, int nwords, int json)
 	bad |= !kids;
 	free(kids);
 	free(text);
+	slist_free(&sl);
+	return bad ? 1 : 0;
+}
+
+/* `--stop <name>...|--all [--json]` (names NULL = every session). Exit
+** status 1 when any session failed or was interrupted. */
+static int
+do_stop_verb(char **names, int nnames, int json)
+{
+	struct slist sl = {0};
+	const char *self = getenv("DCH_SESSION");
+	char selfb[256], cb[256], path[1100];
+	int k, bad = 0;
+#ifdef HAVE_LIBGHOSTTY_VT
+	const char *pmsg = getenv("DCH_PAUSE_MSG"), *rmsg = getenv("DCH_RESUME_MSG");
+	struct agent *ag;
+	int na = 0;
+#endif
+
+	if (self && *self)
+		self = canon_name(self, selfb, sizeof selfb);
+	if (!names)
+	{
+		list_sessions(&sl);
+		names = sl.v;
+		nnames = sl.n;
+	}
+#ifdef HAVE_LIBGHOSTTY_VT
+	if (!(ag = calloc((size_t)nnames + 1, sizeof *ag)))
+	{
+		slist_free(&sl);
+		return 1;
+	}
+#endif
+	for (k = 0; k < nnames; k++)
+	{
+		struct cmd_info ci;
+		struct crec r;
+		const char *why;
+		long mpid;
+		int c = -1, st = -1;
+
+		session_sock_path(names[k], path, sizeof path);
+		if (self && *self &&
+		    strcmp(self, canon_name(names[k], cb, sizeof cb)) == 0)
+			c = SAY_SELF;
+		else if ((st = cmd_query(path, &ci)) == -4 && sl.v)
+			continue;	/* --all: a stale socket, no session */
+		else if (st == DCH_ST_UNSUP)
+			c = SAY_OLD_MASTER;
+		else if (st != 0)
+			c = SAY_NO_SESSION;
+		else if (strcmp(ci.state, "running") != 0)
+		{
+			/* --stop arms its own hold: someone else's owns the exit */
+			stop_print(names[k], "skipped", "respawn_pending",
+			           "a respawn is pending", "", "", json);
+			cmd_info_free(&ci);
+			continue;
+		}
+		else if (proc_depth((long)getpid(), ci.pid) >= 0)
+			c = SAY_SELF;
+		if (c == SAY_SELF && st == 0)
+			cmd_info_free(&ci);
+		if (c >= 0)
+		{
+			stop_print(names[k], c < SAY_NO_SESSION ? "skipped" : "failed",
+			           say_code[c], say_why[c], "", "", json);
+			bad |= c >= SAY_NO_SESSION;
+			continue;
+		}
+		mpid = proc_ppid(ci.pid);
+		if (claude_find(ci.pid, 1, &r) == 0)
+		{
+			cmd_info_free(&ci);
+			stop_phase(names[k], "ending", json);
+			why = stop_end(names[k], path, mpid, NULL);
+			stop_print(names[k], why ? "failed" : "ok",
+			           why ? "end_failed" : "", why ? why : "", "", "",
+			           json);
+			bad |= why != NULL;
+			continue;
+		}
+#ifdef HAVE_LIBGHOSTTY_VT
+		if (claude_gate(path) != CG_NOVT)
+		{
+			struct agent *a = &ag[na++];
+
+			snprintf(a->name, sizeof a->name, "%s", names[k]);
+			snprintf(a->path, sizeof a->path, "%s", path);
+			a->ci = ci;
+			a->argv = ci.argv;
+			a->argc = ci.argc;
+			a->tok = claude_tok(a->argv, a->argc);
+			a->cpid = r.pid;
+			snprintf(a->ver, sizeof a->ver, "%s", r.ver);
+			a->mpid = mpid;
+			a->stop = 1;
+			a->json = json;
+			continue;
+		}
+#endif
+		/* nothing is typed without the mirror to gate on */
+		cmd_info_free(&ci);
+		stop_print(names[k], "skipped", say_code[SAY_NO_SCREEN],
+		           say_why[SAY_NO_SCREEN], "", "", json);
+	}
+#ifdef HAVE_LIBGHOSTTY_VT
+	if (na)
+		bad |= ag_run(ag, na, pmsg && *pmsg ? pmsg : stop_pause_msg,
+		              rmsg && *rmsg ? rmsg : stop_resume_msg) > 0;
+	for (k = 0; k < na; k++)
+	{
+		cmd_info_free(&ag[k].ci);
+		free(ag[k].ag.launch);
+	}
+	free(ag);
+#endif
 	slist_free(&sl);
 	return bad ? 1 : 0;
 }
@@ -5662,7 +6059,8 @@ do_history_verb(int json)
 	return 0;
 }
 
-/* What --revive --all takes: a session that died (not exit 0, not dch -k),
+/* What --revive --all takes: a session that died (not exit 0, not dch -k
+** or --stop),
 ** recently, after a real run. A test session that ends on a signal on
 ** purpose lives seconds; one from last week is history, not work in
 ** flight. Both stay in --history and revive by name. */
@@ -5675,6 +6073,7 @@ rv_all_takes(const struct hrec *h)
 	long seen = hrec_when(h);
 
 	return !h->live && strcmp(h->end, "killed") != 0 &&
+	       strcmp(h->end, "stopped") != 0 &&
 	       strcmp(h->end, "exit 0") != 0 &&
 	       seen >= (long)time(NULL) - RV_ALL_MAX_AGE &&
 	       seen - h->started >= RV_ALL_MIN_LIFE;
@@ -5965,12 +6364,21 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 			continue;
 		if (t)
 			strftime(when, sizeof when, "%Y-%m-%d %H:%M", localtime(&t));
-		snprintf(text, sizeof text, "resume all work. This session ended "
-		         "(%s, last seen %s) and dch revived it with claude "
-		         "--resume. Re-read your ledger and task list, re-arm the "
-		         "monitors, background shells, loops, wakeups and crons "
-		         "that died with it, re-dispatch any unfinished workers, "
-		         "then carry on where you left off.", h->end, when);
+		if (strcmp(h->end, "stopped") == 0)
+			snprintf(text, sizeof text, "resume all work. This session "
+			         "was stopped by dch --stop (%s) and dch revived it "
+			         "with claude --resume. Re-arm the monitors, "
+			         "background shells, subagents, loops, wakeups and "
+			         "crons you stopped before the pause, then carry on "
+			         "where you left off.", when);
+		else
+			snprintf(text, sizeof text, "resume all work. This session "
+			         "ended (%s, last seen %s) and dch revived it with "
+			         "claude --resume. Re-read your ledger and task list, "
+			         "re-arm the monitors, background shells, loops, "
+			         "wakeups and crons that died with it, re-dispatch "
+			         "any unfinished workers, then carry on where you "
+			         "left off.", h->end, when);
 #ifdef HAVE_LIBGHOSTTY_VT
 		why = revive_message(h, msg && *msg ? msg : text);
 		bad += why != NULL;
@@ -6000,7 +6408,7 @@ main(int argc, char **argv)
 	       A_RENAME, A_LISTJSON, A_LISTJSON2, A_SETALIAS,
 	       A_SPAWN, A_SEND, A_RUN, A_KEYS, A_READ, A_WAIT, A_STATUS,
 	       A_REPORT, A_META, A_RESTART, A_AGENT_LIST, A_AGENT_SEND,
-	       A_RESPAWN, A_CMD, A_HISTORY, A_REVIVE, A_SAY }
+	       A_RESPAWN, A_CMD, A_HISTORY, A_REVIVE, A_SAY, A_STOP }
 	    action = A_ATTACH;
 	char alias_arg[600] = "";
 	int opt_ansi = 0, opt_recent = -1, opt_timeout = 10000, opt_cursor = 0;
@@ -6315,6 +6723,32 @@ main(int argc, char **argv)
 				return 1;
 			}
 			i++;
+			break;
+		}
+		else if (strcmp(a, "--stop") == 0)
+		{
+			/* <name>... or --all, maybe --json: the rest of the
+			** line, names packed as --say packs them */
+			action = A_STOP;
+			for (say_at = ++i; i < argc; i++)
+				if (strcmp(argv[i], "--all") == 0)
+					opt_all = 1;
+				else if (strcmp(argv[i], "--json") == 0)
+					opt_say_json = 1;
+				else if (argv[i][0] == '-' || argv[i][0] == '\0')
+				{
+					fprintf(stderr, "dch: --stop: unexpected "
+					        "%s\n", argv[i][0] ? argv[i] : "''");
+					return 1;
+				}
+				else
+					argv[say_at + say_n++] = argv[i];
+			if (opt_all == !!say_n)
+			{
+				fprintf(stderr, "dch: usage: dch --stop <name>... "
+				        "| --all [--json]\n");
+				return 1;
+			}
 			break;
 		}
 		else if (strcmp(a, "--history") == 0)
@@ -6969,6 +7403,9 @@ main(int argc, char **argv)
 	case A_SAY:
 		return do_say_verb(opt_all ? NULL : argv + say_at, say_n,
 		                   inner_argv, inner_argc, opt_say_json);
+	case A_STOP:
+		return do_stop_verb(opt_all ? NULL : argv + say_at, say_n,
+		                    opt_say_json);
 	case A_REVIVE:
 	case A_SPAWN:
 	{

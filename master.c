@@ -245,7 +245,7 @@ static void
 unlink_socket(void)
 {
 	static const char *suffix[] = { ".act", ".state", ".ver", ".resume",
-	                                ".meta", ".killed" };
+	                                ".meta", ".killed", ".stopped" };
 	struct stat st;
 	char side[1100];
 	size_t i;
@@ -346,6 +346,7 @@ static long rec_started;
 static char rec_end[32];	/* how the master ended, set before exit */
 static struct timespec rec_at;	/* last refresh */
 static long rec_ms = 60L * 1000L;	/* DCH_RECORD_MS */
+static char rec_stop[65536];	/* <sock>.stopped, as rec_stopped() read it */
 
 static void
 rec_str(FILE *f, const char *s)
@@ -407,10 +408,49 @@ rec_write(const char *end)
 		unlink(tmp);
 }
 
+/* The record's agent object; `dch --stop` writes one into <sock>.stopped. */
+void
+dch_agent_json(FILE *f, const struct dch_agent *a)
+{
+	fputs("{\"kind\":\"claude\",\"session_id\":", f);
+	rec_str(f, a->sid);
+	fputs(",\"name\":", f);
+	rec_str(f, a->name);
+	fputs(",\"cwd\":", f);
+	rec_str(f, a->cwd);
+	fputs(",\"launch\":", f);
+	rec_strv(f, a->launch, NULL);
+	fputc('}', f);
+}
+
+/* `dch --stop` leaves <sock>.stopped right before it ends us: empty, or the
+** agent object with the id from claude's exit line — claude has quit by
+** then, so the probe would null it. Read into rec_stop with open/read only:
+** rec_exit may run from die(). Its length (0 = no usable object), or -1
+** when there is no marker. */
+static ssize_t
+rec_stopped(void)
+{
+	char sp[1100];
+	ssize_t n;
+	int fd;
+
+	if (sidecar_path(".stopped", sp, sizeof sp) < 0 ||
+	    (fd = open(sp, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)) < 0)
+		return -1;
+	n = read(fd, rec_stop, sizeof rec_stop - 1);
+	close(fd);
+	if (n < 2 || rec_stop[0] != '{' || rec_stop[n - 1] != '}')
+		n = 0;
+	rec_stop[n] = '\0';
+	return n;
+}
+
 /* Rebuild the record from the live session and write it. The agent sticks
 ** while its claude's session file is still there: a claude killed under a
 ** shell (out of memory) leaves it, so a revive still brings it back; one
-** that quit cleanly removed it. */
+** that quit cleanly removed it. Once dch --stop left its agent, that one
+** stands. */
 static void
 rec_refresh(void)
 {
@@ -420,16 +460,18 @@ rec_refresh(void)
 	const char *path = getenv("PATH");
 	size_t hl, al;
 	FILE *f;
-	int fd;
+	int fd, stopped;
 
 	if (!rec_path[0])
 		return;
-	if (the_pty.fd >= 0 && dch_agent_probe(the_pty.pid, &a) == 0)
+	stopped = rec_stopped() > 0;
+	if (!stopped && the_pty.fd >= 0 &&
+	    dch_agent_probe(the_pty.pid, &a) == 0)
 	{
 		free(rec_ag.launch);
 		rec_ag = a;
 	}
-	else if (rec_ag.pid && dch_claude_gone(rec_ag.pid))
+	else if (!stopped && rec_ag.pid && dch_claude_gone(rec_ag.pid))
 	{
 		free(rec_ag.launch);
 		memset(&rec_ag, 0, sizeof rec_ag);
@@ -467,20 +509,12 @@ rec_refresh(void)
 		free(hb);
 		return;
 	}
-	if (!rec_ag.pid)
+	if (stopped)
+		fputs(rec_stop, f);
+	else if (!rec_ag.pid)
 		fputs("null", f);
 	else
-	{
-		fputs("{\"kind\":\"claude\",\"session_id\":", f);
-		rec_str(f, rec_ag.sid);
-		fputs(",\"name\":", f);
-		rec_str(f, rec_ag.name);
-		fputs(",\"cwd\":", f);
-		rec_str(f, rec_ag.cwd);
-		fputs(",\"launch\":", f);
-		rec_strv(f, rec_ag.launch, NULL);
-		fputc('}', f);
-	}
+		dch_agent_json(f, &rec_ag);
 	if (fclose(f) != 0)
 	{
 		free(hb);
@@ -499,16 +533,24 @@ rec_refresh(void)
 }
 
 /* At exit: how the session ended. `dch -k` leaves <sock>.killed before it
-** signals us; else die() named the signal, else the child's exit status. */
+** signals us, `dch --stop` <sock>.stopped (with the agent to keep); else
+** die() named the signal, else the child's exit status. */
 static void
 rec_exit(void)
 {
 	char kp[1100];
+	ssize_t n;
 
 	if (!rec_path[0])
 		return;
 	if (sidecar_path(".killed", kp, sizeof kp) == 0 && access(kp, F_OK) == 0)
 		snprintf(rec_end, sizeof rec_end, "killed");
+	else if ((n = rec_stopped()) >= 0)
+	{
+		snprintf(rec_end, sizeof rec_end, "stopped");
+		if (n > 0)
+			rec_agent = rec_stop;
+	}
 	else if (!rec_end[0] && exit_signal > 0)
 		snprintf(rec_end, sizeof rec_end, "signal %d", exit_signal);
 	else if (!rec_end[0])
@@ -547,14 +589,26 @@ rec_prune(int dfd)
 	closedir(d);
 }
 
+/* The end markers (-k, --stop) a SIGKILLed master left behind. */
+static void
+rec_unmark(void)
+{
+	char kp[1100];
+
+	if (sidecar_path(".killed", kp, sizeof kp) == 0)
+		unlink(kp);
+	if (sidecar_path(".stopped", kp, sizeof kp) == 0)
+		unlink(kp);
+}
+
 /* Start the record: a cold start prunes records idle for 30 days, from
 ** every socket dir's subdir, and the subdirs that leaves empty, then drops
-** a .killed marker a SIGKILLed master left behind; a live restart keeps
+** the end markers a SIGKILLed master left behind; a live restart keeps
 ** the started time. */
 static void
 rec_init(int resumed)
 {
-	char root[1024], kp[1100], body[256];
+	char root[1024], body[256];
 	const char *base = strrchr(sockname, '/'), *e = getenv("DCH_SESSION");
 	const char *off;
 	size_t bl;
@@ -573,8 +627,8 @@ rec_init(int resumed)
 	off = getenv("DCH_NO_HISTORY");
 	if (off && *off && strcmp(off, "0") != 0)
 	{
-		if (!resumed && sidecar_path(".killed", kp, sizeof kp) == 0)
-			unlink(kp);
+		if (!resumed)
+			rec_unmark();
 		return;
 	}
 	if (!resumed && dch_history_dir(root, sizeof root, NULL, 0) == 0 &&
@@ -623,8 +677,8 @@ rec_init(int resumed)
 		if ((p = strstr(body, "\"started\":")) && (v = atol(p + 10)) > 0)
 			rec_started = v;
 	}
-	else if (!resumed && sidecar_path(".killed", kp, sizeof kp) == 0)
-		unlink(kp);
+	else if (!resumed)
+		rec_unmark();
 	rec_refresh();
 	clock_gettime(CLOCK_MONOTONIC, &rec_at);
 	atexit(rec_exit);

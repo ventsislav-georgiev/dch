@@ -277,6 +277,7 @@ struct dch_agent
 int dch_history_dir(char *out, size_t outsz, const char *sockdir,
                     int create);
 int dch_agent_probe(long child, struct dch_agent *a);
+void dch_agent_json(FILE *f, const struct dch_agent *a);
 int dch_claude_gone(long pid);
 int path_lookup(const char *name, const char *path, const char *cwd,
                 char *out, size_t outsz);
