@@ -93,6 +93,20 @@ check "DCH_SOCKET_DIR empty -ls" "$empty_out" ""
 unset_out=$("$DCH" -ls 2>/dev/null | sort | tr '\n' ',')
 check "unset DCH_SOCKET_DIR = XDG default" "$unset_out" "beta,"
 
+# --- -ls and the headless -l picker sort by shown label, case-insensitive ---
+SORTDIR="$TMP/sort-dch"
+mkdir -p "$SORTDIR"
+for s in zeta Alpha mid zz; do mksock "$SORTDIR/$s.sock"; done
+printf 'aardvark\n' > "$SORTDIR/zz.sock.alias"
+want="aardvark (zz),Alpha,mid,zeta,"
+srt_out=$(DCH_SOCKET_DIR="$SORTDIR" "$DCH" -ls 2>/dev/null | tr '\n' ',')
+check "-ls sorted by label" "$srt_out" "$want"
+# setsid drops the controlling tty so pick_session takes its headless path.
+srt_out=$(DCH_SOCKET_DIR="$SORTDIR" python3 -c \
+	'import os,sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' \
+	"$DCH" -l </dev/null 2>/dev/null | tr '\n' ',')
+check "headless -l sorted by label" "$srt_out" "$want"
+
 # --- does this build have the terminal mirror? -----------------------------
 # A lite build (configure --without-libghostty) answers exit 3 to --read, so
 # every check that needs --read/--wait is gated on this instead of failing.

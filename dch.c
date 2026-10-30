@@ -622,6 +622,30 @@ slist_free(struct slist *l)
 	l->n = l->cap = 0;
 }
 
+/* Order a list for a person to read: by the shown label (alias, else
+** harness name, else session name), case-insensitive, ties by name. */
+static const char *
+slist_label(struct slist *l, int i)
+{
+	return l->alias[i] ? l->alias[i] : l->harness[i] ? l->harness[i] : l->v[i];
+}
+
+static void
+slist_sort(struct slist *l)
+{
+	/* ponytail: insertion sort, O(n^2); fine for a screenful of sessions */
+	for (int i = 1; i < l->n; i++)
+		for (int j = i; j > 0; j--)
+		{
+			int c = strcasecmp(slist_label(l, j - 1), slist_label(l, j));
+			if (c < 0 || (c == 0 && strcmp(l->v[j - 1], l->v[j]) <= 0))
+				break;
+			char *t = l->v[j]; l->v[j] = l->v[j - 1]; l->v[j - 1] = t;
+			t = l->alias[j]; l->alias[j] = l->alias[j - 1]; l->alias[j - 1] = t;
+			t = l->harness[j]; l->harness[j] = l->harness[j - 1]; l->harness[j - 1] = t;
+		}
+}
+
 /* List active session names (sockets in sock_dir). */
 static int
 list_sessions(struct slist *out)
@@ -1568,6 +1592,7 @@ pick_session(const char *header, char *out, size_t outsz)
 	load_aliases(&sl);
 	load_harness_names(&sl);
 	load_codex_names(&sl);
+	slist_sort(&sl);
 
 	int fd = open("/dev/tty", O_RDWR);
 	if (fd < 0)
@@ -1749,6 +1774,7 @@ rename_sessions_interactive(void)
 		return 0;
 	}
 	load_aliases(&sl);
+	slist_sort(&sl);
 
 	int fd = open("/dev/tty", O_RDWR);
 	if (fd < 0)
@@ -7213,6 +7239,7 @@ main(int argc, char **argv)
 		load_aliases(&sl);
 		load_harness_names(&sl);
 		load_codex_names(&sl);
+		slist_sort(&sl);
 		int k;
 		for (k = 0; k < sl.n; k++)
 		{
