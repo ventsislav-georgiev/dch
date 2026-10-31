@@ -2085,7 +2085,18 @@ usage(void)
 	    "                                             --ls-json as \"meta\"\n"
 	    "  dch --history [--json]                     sessions that ended:\n"
 	    "                                             name, when, how, cwd,\n"
-	    "                                             command, claude session\n"
+	    "                                             command, claude session,\n"
+	    "                                             pinned\n"
+	    "  dch --pin|--unpin <name>... [--json]       keep a session's record\n"
+	    "                                             past the 30-day prune\n"
+	    "                                             (the pin follows the\n"
+	    "                                             name), or stop keeping it\n"
+	    "  dch --forget <name>... [-f] [--json]       delete ended sessions'\n"
+	    "                                             records; never a live\n"
+	    "                                             one, a pinned one only\n"
+	    "                                             with -f\n"
+	    "  dch --forget --all [--json]                delete every record\n"
+	    "                                             neither live nor pinned\n"
 	    "  dch --revive <name> [--as <new>] [--json]  start an ended session\n"
 	    "                                             again: its cwd, its\n"
 	    "                                             command, claude resumed\n"
@@ -5967,6 +5978,7 @@ struct hrec
 	long started, updated, ended;
 	char **argv, **launch;	/* malloc'd blocks */
 	int argc, launchc, live;
+	int pinned;		/* <file>.pin beside it (dch --pin) */
 	/* --revive */
 	char as[512];
 	int mode;		/* RV_* */
@@ -6009,7 +6021,7 @@ hrec_load(int dfd, const char *fn, struct hrec *r)
 	struct stat st;
 	size_t n = strlen(fn);
 	ssize_t got;
-	char sd[sizeof sock_dir];
+	char sd[sizeof sock_dir], pin[sizeof r->file + 4];
 	int fd;
 
 	memset(r, 0, sizeof *r);
@@ -6066,6 +6078,9 @@ hrec_load(int dfd, const char *fn, struct hrec *r)
 	r->live = !r->end[0] && name_live(r->name);
 	if (!r->end[0] && !r->live)
 		snprintf(r->end, sizeof r->end, "vanished");
+	snprintf(pin, sizeof pin, "%s.pin", r->file);
+	r->pinned = fstatat(dfd, pin, &st, AT_SYMLINK_NOFOLLOW) == 0 &&
+	            S_ISREG(st.st_mode);
 	return 0;
 }
 
@@ -6143,13 +6158,21 @@ do_history_verb(int json)
 			continue;
 		if (json)
 		{
-			/* As stored, one line each; a dead end "" reads vanished. */
+			/* As stored, one line each; a dead end "" reads vanished,
+			** a pinned one gains "pinned":true before its '}'. */
+			size_t bl;
+
 			v = strstr(r[k].body, "\"end\":\"\"");
+			fputs(first ? "" : ",", stdout);
 			if (v)
-				printf("%s%.*s\"end\":\"vanished\"%s", first ? "" : ",",
-				       (int)(v - r[k].body), r[k].body, v + 8);
+				printf("%.*s\"end\":\"vanished\"",
+				       (int)(v - r[k].body), r[k].body);
+			v = v ? v + 8 : r[k].body;
+			bl = strlen(v);
+			if (r[k].pinned && bl && v[bl - 1] == '}')
+				printf("%.*s,\"pinned\":true}", (int)(bl - 1), v);
 			else
-				printf("%s%s", first ? "" : ",", r[k].body);
+				fputs(v, stdout);
 			first = 0;
 			continue;
 		}
@@ -6162,6 +6185,8 @@ do_history_verb(int json)
 		if (r[k].sid[0])
 			printf("  [claude %s%s%s]", r[k].aname,
 			       r[k].aname[0] ? " " : "", r[k].sid);
+		if (r[k].pinned)
+			fputs("  [pinned]", stdout);
 		putchar('\n');
 	}
 	if (json)
@@ -6460,10 +6485,16 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 		** new one carries; left alone, --all would revive it again */
 		if (strcmp(h->as, h->name) != 0 && !h->live)
 		{
-			char rp[1400];
+			char rp[1400], np[1400];
 
 			snprintf(rp, sizeof rp, "%s/%s.json", dir, h->file);
 			unlink(rp);
+			/* and its pin moves with it */
+			snprintf(rp, sizeof rp, "%s/%s.pin", dir, h->file);
+			snprintf(np, sizeof np, "%s/%s.pin", dir,
+			         canon_name(h->as, cb, sizeof cb));
+			if (h->pinned)
+				(void)rename(rp, np);
 		}
 		if (h->mode == RV_PLAIN)
 		{
@@ -6555,6 +6586,132 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 	return bad ? 1 : 0;
 }
 
+/* ---- --pin, --unpin, --forget (#052) ------------------------------- */
+
+enum { HV_PIN, HV_UNPIN, HV_FORGET };
+
+/* One result line; c counts ok, skipped, failed for the --json summary.
+** Text: `<name>: <detail>` on ok, `<name>: failed — <detail>`; a skip
+** (--forget --all) says nothing, its count goes in the closing line. */
+static void
+hv_say(const char *name, const char *res, const char *code,
+       const char *detail, const char *sid, int json, int *c)
+{
+	c[*res == 'o' ? 0 : *res == 's' ? 1 : 2]++;
+	if (json)
+		json_final(name, NULL, NULL, res, code, detail, sid);
+	else if (*res == 'o')
+		printf("%s: %s\n", name, detail);
+	else if (*res == 'f')
+		printf("%s: failed — %s\n", name, detail);
+}
+
+/* Remove one record and its pin. 0, or -1 with errno. */
+static int
+hv_forget(const char *dir, const struct hrec *r)
+{
+	char p[1400];
+
+	snprintf(p, sizeof p, "%s/%s.pin", dir, r->file);
+	if (unlink(p) < 0 && errno != ENOENT)
+		return -1;
+	snprintf(p, sizeof p, "%s/%s.json", dir, r->file);
+	return unlink(p) < 0 && errno != ENOENT ? -1 : 0;
+}
+
+/* `--pin|--unpin <name>...`, `--forget <name>... [-f]`, `--forget --all`
+** (names NULL). A pin is an empty <file>.pin beside the record, keyed by
+** the name, never touched by the master: it outlives every rewrite, a
+** record that has one is never pruned, and --forget refuses it without
+** -f. A live session's record is never forgotten: its master would write
+** it back. Matching is --revive's: name, or the canonical file. */
+static int
+do_pin_verb(char **names, int nn, int mode, int force, int json)
+{
+	struct hrec *r;
+	int n = history_load(&r), j, k, hit, c[3] = {0, 0, 0}, kp = 0, kl = 0;
+	char dir[1024], cb[256], p[1400];
+	const char *cn;
+
+	if (dch_history_dir(dir, sizeof dir, sock_dir, 0) < 0)
+		dir[0] = '\0';	/* no records: history_load found none */
+	for (k = 0; !names && k < n; k++)
+		if (name_live(r[k].name))
+		{
+			kl++;
+			hv_say(r[k].name, "skipped", "live", "session is live",
+			       r[k].sid, json, c);
+		}
+		else if (r[k].pinned)
+		{
+			kp++;
+			hv_say(r[k].name, "skipped", "pinned", "pinned", r[k].sid,
+			       json, c);
+		}
+		else if (hv_forget(dir, &r[k]) < 0)
+			hv_say(r[k].name, "failed", "io_error", strerror(errno),
+			       r[k].sid, json, c);
+		else
+			hv_say(r[k].name, "ok", "", "forgotten", r[k].sid, json, c);
+	for (j = 0; names && j < nn; j++)
+	{
+		cn = canon_name(names[j], cb, sizeof cb);
+		for (hit = 0, k = 0; k < n; k++)
+		{
+			if (strcmp(r[k].name, names[j]) != 0 &&
+			    strcmp(r[k].file, cn) != 0)
+				continue;
+			hit++;
+			if (mode != HV_FORGET)
+				break;	/* the newest record: its sid */
+			if (name_live(r[k].name))
+				hv_say(r[k].name, "failed", "live", "session is live",
+				       r[k].sid, json, c);
+			else if (r[k].pinned && !force)
+				hv_say(r[k].name, "failed", "pinned", "pinned (-f "
+				       "forgets it anyway)", r[k].sid, json, c);
+			else if (hv_forget(dir, &r[k]) < 0)
+				hv_say(r[k].name, "failed", "io_error",
+				       strerror(errno), r[k].sid, json, c);
+			else
+				hv_say(r[k].name, "ok", "", "forgotten", r[k].sid,
+				       json, c);
+		}
+		snprintf(p, sizeof p, "%s/%s.pin", dir, cn);
+		if (mode == HV_UNPIN)
+		{
+			if (dir[0] && unlink(p) < 0 && errno != ENOENT)
+				hv_say(names[j], "failed", "io_error", strerror(errno),
+				       hit ? r[k].sid : "", json, c);
+			else
+				hv_say(names[j], "ok", "", "unpinned",
+				       hit ? r[k].sid : "", json, c);
+		}
+		else if (!hit)
+			hv_say(names[j], "failed", "not_found", "no history for "
+			       "this session", "", json, c);
+		else if (mode == HV_PIN)
+		{
+			int fd = open(p, O_WRONLY | O_CREAT | O_NOFOLLOW, 0600);
+
+			if (fd < 0)
+				hv_say(names[j], "failed", "io_error", strerror(errno),
+				       r[k].sid, json, c);
+			else
+				hv_say(names[j], "ok", "", "pinned", r[k].sid, json, c);
+			if (fd >= 0)
+				close(fd);
+		}
+	}
+	if (json)
+		printf("{\"ok\":%d,\"skipped\":%d,\"failed\":%d}\n", c[0], c[1],
+		       c[2]);
+	else if (!names)
+		printf("forgot %d (%d pinned, %d live kept)\n", c[0], kp, kl);
+	hrec_free(r, n);
+	return c[2] ? 1 : 0;
+}
+
 /* The master pass's word on one session: rc is do_restart_verb's, or -1
 ** for one --all leaves alone (already current). Text says only a restart,
 ** as it always has (the failures are on stderr); --json says every one,
@@ -6594,7 +6751,8 @@ main(int argc, char **argv)
 	       A_RENAME, A_LISTJSON, A_LISTJSON2, A_SETALIAS,
 	       A_SPAWN, A_SEND, A_RUN, A_KEYS, A_READ, A_WAIT, A_STATUS,
 	       A_REPORT, A_META, A_RESTART, A_AGENT_LIST, A_AGENT_SEND,
-	       A_RESPAWN, A_CMD, A_HISTORY, A_REVIVE, A_SAY, A_STOP }
+	       A_RESPAWN, A_CMD, A_HISTORY, A_REVIVE, A_SAY, A_STOP,
+	       A_PIN, A_UNPIN, A_FORGET }
 	    action = A_ATTACH;
 	char alias_arg[600] = "";
 	int opt_ansi = 0, opt_recent = -1, opt_timeout = 10000, opt_cursor = 0;
@@ -6937,6 +7095,40 @@ main(int argc, char **argv)
 			}
 			break;
 		}
+		else if (strcmp(a, "--pin") == 0 || strcmp(a, "--unpin") == 0 ||
+		         strcmp(a, "--forget") == 0)
+		{
+			/* <name>... (--forget: or --all), maybe --json, -f:
+			** the rest of the line, names packed as --stop packs
+			** them; -f is gated below */
+			action = a[2] == 'p' ? A_PIN : a[2] == 'u' ? A_UNPIN
+			         : A_FORGET;
+			for (say_at = ++i; i < argc; i++)
+				if (strcmp(argv[i], "--all") == 0 &&
+				    action == A_FORGET)
+					opt_all = 1;
+				else if (strcmp(argv[i], "--json") == 0)
+					opt_json = 1;
+				else if (strcmp(argv[i], "-f") == 0)
+					force = 1;
+				else if (argv[i][0] == '-' || argv[i][0] == '\0')
+				{
+					fprintf(stderr, "dch: %s: unexpected %s\n", a,
+					        argv[i][0] ? argv[i] : "''");
+					return 1;
+				}
+				else
+					argv[say_at + say_n++] = argv[i];
+			if (opt_all == !!say_n)
+			{
+				fprintf(stderr, "dch: usage: dch %s\n",
+				        action == A_FORGET ? "--forget <name>... [-f] "
+				        "[--json] | --forget --all [--json]"
+				        : "--pin|--unpin <name>... [--json]");
+				return 1;
+			}
+			break;
+		}
 		else if (strcmp(a, "--history") == 0)
 		{
 			action = A_HISTORY;
@@ -7134,10 +7326,19 @@ main(int argc, char **argv)
 		return 1;
 	}
 	if (opt_json && action != A_RESTART && action != A_REVIVE &&
-	    action != A_SAY && action != A_STOP)
+	    action != A_SAY && action != A_STOP && action != A_PIN &&
+	    action != A_UNPIN && action != A_FORGET)
 	{
 		fprintf(stderr, "dch: --json only works with --restart, --revive, "
-		        "--say, --stop\n");
+		        "--say, --stop, --pin, --unpin, --forget\n");
+		return 1;
+	}
+	/* clean (--forget --all) never removes a pin; a pin has no force */
+	if (force && (action == A_PIN || action == A_UNPIN ||
+	              (action == A_FORGET && opt_all)))
+	{
+		fprintf(stderr, "dch: -f does not work with --pin, --unpin or "
+		        "--forget --all\n");
 		return 1;
 	}
 
@@ -7611,6 +7812,12 @@ main(int argc, char **argv)
 	case A_STOP:
 		return do_stop_verb(opt_all ? NULL : argv + say_at, say_n,
 		                    opt_json);
+	case A_PIN:
+	case A_UNPIN:
+	case A_FORGET:
+		return do_pin_verb(opt_all ? NULL : argv + say_at, say_n,
+		                   action == A_PIN ? HV_PIN : action == A_UNPIN
+		                   ? HV_UNPIN : HV_FORGET, force, opt_json);
 	case A_REVIVE:
 	case A_SPAWN:
 	{

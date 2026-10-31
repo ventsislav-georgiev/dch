@@ -58,6 +58,14 @@ dch \- detachable terminal sessions with a headless agent API
 .IR new ]
 .RB [ \-\-json ]
 .br
+.BR "dch \-\-pin" | \-\-unpin
+.I name...
+.RB [ \-\-json ]
+.br
+.B dch \-\-forget
+.IR name... " [" \fB\-f\fP "]|" \fB\-\-all\fP
+.RB [ \-\-json ]
+.br
 .B dch \-\-agent\-list
 .RB [ \-\-json ]
 .br
@@ -562,6 +570,41 @@ and one
 per session, where
 .I as
 is the name it came back under. Exits 0 when nothing failed, 1 otherwise.
+.TP
+.BI \-\-pin " name..." "\fR|\fP" \-\-unpin " name..." " " [ \-\-json ]
+Keep a session's history record past the 30-day prune, or stop keeping it.
+A pin is an empty
+.IB file .pin
+beside the record, keyed by the name: a new session under a pinned name is
+pinned too, and a revive under another name moves the pin.
+.B \-\-pin
+needs a record, live or ended
+.RB ( not_found );
+.B \-\-unpin
+always succeeds.
+.TP
+.BI \-\-forget " name..." " " [ \-f "] [" \-\-json ]
+.TQ
+.BR "\-\-forget \-\-all " [ \-\-json ]
+Delete history records: never a live session's
+.RB ( live ),
+a pinned one only with
+.BR \-f ,
+which removes the pin too (else
+.BR pinned ).
+.B \-\-all
+deletes every record neither live nor pinned and ends with
+.BI "forgot " N " (" K " pinned, " L " live kept)" .
+.B \-\-json
+for
+.BR \-\-pin ", " \-\-unpin " and " \-\-forget
+prints one
+.RI { name ", " result ", " reason ", " detail ", " session_id }
+per name (per record for
+.BR \-\-all ),
+then
+.RI { ok ", " skipped ", " failed }
+counts. Exits 0 when nothing failed, 1 otherwise.
 .TP
 .BR \-\-agent\-list " [" \-\-json "]"
 List live authenticated Claude native peers. The default writes exact names,

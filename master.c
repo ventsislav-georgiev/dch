@@ -560,7 +560,8 @@ rec_exit(void)
 }
 
 /* Drop *.json idle for 30 days, and *.tmp a master killed mid-write left
-** for a day, from one record dir. */
+** for a day, from one record dir. A record with a <base>.pin beside it
+** (dch --pin) is kept whatever its age. */
 static void
 rec_prune(int dfd)
 {
@@ -576,11 +577,17 @@ rec_prune(int dfd)
 	while ((de = readdir(d)))
 	{
 		size_t n = strlen(de->d_name);
-		long age = n > 5 && strcmp(de->d_name + n - 5, ".json") == 0 ?
-		           30L * 86400L :
+		int js = n > 5 && strcmp(de->d_name + n - 5, ".json") == 0;
+		long age = js ? 30L * 86400L :
 		           n > 4 && strcmp(de->d_name + n - 4, ".tmp") == 0 ?
 		           86400L : 0;
+		char pin[300];
 
+		if (js && snprintf(pin, sizeof pin, "%.*s.pin", (int)(n - 5),
+		                   de->d_name) < (int)sizeof pin &&
+		    fstatat(dirfd(d), pin, &st, AT_SYMLINK_NOFOLLOW) == 0 &&
+		    S_ISREG(st.st_mode))
+			continue;
 		if (age &&
 		    fstatat(dirfd(d), de->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0 &&
 		    S_ISREG(st.st_mode) && st.st_mtime < time(NULL) - age)
