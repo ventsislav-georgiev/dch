@@ -43,15 +43,22 @@ clamp_grid(int *cols, int *rows)
 int
 dch_vt_init(int cols, int rows, int scrollback)
 {
-	GhosttyTerminalOptions opts;
+	size_t max_bytes;
 
 	clamp_grid(&cols, &rows);
-	memset(&opts, 0, sizeof(opts));
-	opts.cols = cols;
-	opts.rows = rows;
-	opts.max_scrollback = scrollback > 0 ? (size_t)scrollback * cols : 0;
+	/* Scrollback is a byte budget (0 = none); set explicitly, the
+	** library's default differs. */
+	max_bytes = scrollback > 0 ? (size_t)scrollback * cols : 0;
 
-	if (ghostty_terminal_new(NULL, &the_term, opts) != GHOSTTY_SUCCESS) {
+	if (ghostty_terminal_new(NULL, &the_term, cols,
+	    rows) != GHOSTTY_SUCCESS) {
+		the_term = NULL;
+		return -1;
+	}
+	if (ghostty_terminal_set(the_term,
+	    GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES,
+	    &max_bytes) != GHOSTTY_SUCCESS) {
+		ghostty_terminal_free(the_term);
 		the_term = NULL;
 		return -1;
 	}

@@ -26,7 +26,7 @@ if test "x$with_libghostty" != xno; then
 		VT_CPPFLAGS="-I\$(srcdir)/vendor/libghostty-vt/include"
 	else
 		AC_MSG_ERROR([no vendored libghostty-vt.a for $vt_platform.
-Run scripts/build-libghostty.sh (needs zig 0.15.x), or configure --without-libghostty for dch-lite.])
+Run scripts/build-libghostty.sh (needs zig 0.17.x), or configure --without-libghostty for dch-lite.])
 	fi
 fi
 AC_SUBST([VT_OBJS])

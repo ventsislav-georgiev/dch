@@ -2510,7 +2510,7 @@ printf '%s\n' "#define HAVE_LIBGHOSTTY_VT 1" >>confdefs.h
 		VT_CPPFLAGS="-I\$(srcdir)/vendor/libghostty-vt/include"
 	else
 		as_fn_error $? "no vendored libghostty-vt.a for $vt_platform.
-Run scripts/build-libghostty.sh (needs zig 0.15.x), or configure --without-libghostty for dch-lite." "$LINENO" 5
+Run scripts/build-libghostty.sh (needs zig 0.17.x), or configure --without-libghostty for dch-lite." "$LINENO" 5
 	fi
 fi
 

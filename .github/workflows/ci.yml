@@ -18,7 +18,7 @@ jobs:
         variant: [full, lite]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Configure
         run: |
@@ -42,7 +42,7 @@ jobs:
   mixed-binary:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build both variants
         run: |
           ./configure --without-libghostty && make && cp dch /tmp/dch-lite
@@ -74,13 +74,15 @@ jobs:
   vendor-verify:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install zig 0.15
-        run: brew install zig@0.15
+      # No versioned zig@0.17 formula exists; the script's version gate
+      # fails loudly if the zig formula moves past 0.17.x.
+      - name: Install zig 0.17
+        run: brew install zig
 
       - name: Rebuild host blob from the pinned commit
-        run: ZIG=/opt/homebrew/opt/zig@0.15/bin/zig scripts/build-libghostty.sh --refresh-sha
+        run: ZIG=/opt/homebrew/opt/zig/bin/zig scripts/build-libghostty.sh --refresh-sha
 
       - name: Vendored headers must match the pin
         run: git diff --exit-code vendor/libghostty-vt/include

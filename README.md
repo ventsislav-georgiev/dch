@@ -107,7 +107,7 @@ brew install ventsislav-georgiev/tap/dch-lite   # no terminal mirror
 ```
 
 Two formulas, `conflicts_with` each other — pick one. **dch** embeds
-libghostty-vt (~2 MB binary). Both builds support the [Agent API](#agent-api).
+libghostty-vt (~3 MB binary). Both builds support the [Agent API](#agent-api).
 **dch-lite** omits only the terminal mirror: `--send`/`--run`/`--keys` still
 work (keys via a legacy encoding), but `--read` and `--wait --match` need the
 mirror and exit 3.

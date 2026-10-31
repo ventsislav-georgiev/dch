@@ -1,6 +1,6 @@
 #!/bin/sh
 # Rebuild the vendored libghostty-vt.a from the pinned upstream commit.
-# Requires: git, zig 0.15.x (e.g. `brew install zig@0.15`).
+# Requires: git, zig 0.17.x (e.g. `brew install zig`).
 #
 # Usage: scripts/build-libghostty.sh [--refresh-sha] [--all]
 #   --refresh-sha  rewrite the sha256 lines in vendor/libghostty-vt/COMMIT
@@ -40,9 +40,9 @@ for arg in "$@"; do
 done
 
 zig=${ZIG:-zig}
-command -v "$zig" >/dev/null || zig=/opt/homebrew/opt/zig@0.15/bin/zig
-"$zig" version | grep -q '^0\.15\.' || {
-  echo "error: need zig 0.15.x, got $("$zig" version) (set ZIG=/path/to/zig)" >&2
+command -v "$zig" >/dev/null || zig=/opt/homebrew/opt/zig/bin/zig
+"$zig" version | grep -q '^0\.17\.' || {
+  echo "error: need zig 0.17.x, got $("$zig" version) (set ZIG=/path/to/zig)" >&2
   exit 1
 }
 
@@ -53,10 +53,16 @@ git -C "$work" checkout --quiet "$pin"
 # zig 0.15's self-hosted x86_64 backend miscompiles the key encoder (letter
 # keys encode as NUL on linux-x86_64). Upstream forces LLVM only for darwin
 # targets; force it for every target. Drop this when the pin moves past an
-# upstream fix.
-awk '{ print } /lib.root_module.pic = true;/ {
-  print "    lib.use_llvm = true; // dch: self-hosted x86_64 backend miscompiles"
-}' "$work/src/build/GhosttyLibVt.zig" > "$work/src/build/GhosttyLibVt.zig.tmp"
+# upstream fix. Fails loudly if the anchor line moved (silently inserting
+# nothing would ship the miscompile).
+awk '{ print } /lib\.root_module\.pic = / {
+  print "        lib.use_llvm = true; // dch: self-hosted x86_64 backend miscompiles"
+  n++
+} END { exit n == 1 ? 0 : 1 }' "$work/src/build/GhosttyLibVt.zig" \
+  > "$work/src/build/GhosttyLibVt.zig.tmp" || {
+  echo "error: use_llvm anchor 'lib.root_module.pic = ' not found exactly once in GhosttyLibVt.zig" >&2
+  exit 1
+}
 mv "$work/src/build/GhosttyLibVt.zig.tmp" "$work/src/build/GhosttyLibVt.zig"
 
 cp -R "$work/include" "$vendor/include.new"
@@ -68,11 +74,13 @@ for platform in $platforms; do
   target=$(zig_target_for "$platform")
   echo "building libghostty-vt @ $pin for $platform ($target)"
   # Fixed cache dirs for the same reason as $work: ~/.cache/zig paths end
-  # up embedded in the archive and differ per machine.
+  # up embedded in the archive and differ per machine. No xcframework: on a
+  # Mac with Xcode it defaults on and builds iOS slices, which zig 0.17's
+  # std fails to compile; dch links only the plain archive.
   (cd "$work" && ZIG_GLOBAL_CACHE_DIR=/tmp/dch-libghostty-zig-cache \
     ZIG_LOCAL_CACHE_DIR="$work/.zig-cache" \
     "$zig" build -Demit-lib-vt=true -Doptimize=ReleaseSafe \
-    -Dtarget="$target")
+    -Demit-xcframework=false -Dtarget="$target")
 
   mkdir -p "$vendor/lib/$platform"
   cp "$work/zig-out/lib/libghostty-vt.a" "$vendor/lib/$platform/"
