@@ -43,21 +43,25 @@ clamp_grid(int *cols, int *rows)
 int
 dch_vt_init(int cols, int rows, int scrollback)
 {
-	size_t max_bytes;
+	size_t lines = scrollback > 0 ? (size_t)scrollback : 0;
+	size_t zero = 0;
 
 	clamp_grid(&cols, &rows);
-	/* Scrollback is a byte budget (0 = none); set explicitly, the
-	** library's default differs. */
-	max_bytes = scrollback > 0 ? (size_t)scrollback * cols : 0;
-
 	if (ghostty_terminal_new(NULL, &the_term, cols,
 	    rows) != GHOSTTY_SUCCESS) {
 		the_term = NULL;
 		return -1;
 	}
+	/* Scrollback is a line count, pruned a page at a time (within a page).
+	** The library's 10 KB default byte limit would undercut it at one
+	** page, so drop the byte limit and let lines govern. 0 = none: only
+	** a zero byte limit disables it, a line limit keeps one page. */
 	if (ghostty_terminal_set(the_term,
 	    GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES,
-	    &max_bytes) != GHOSTTY_SUCCESS) {
+	    lines ? NULL : &zero) != GHOSTTY_SUCCESS ||
+	    (lines && ghostty_terminal_set(the_term,
+	    GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES,
+	    &lines) != GHOSTTY_SUCCESS)) {
 		ghostty_terminal_free(the_term);
 		the_term = NULL;
 		return -1;

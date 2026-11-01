@@ -22,6 +22,9 @@ pyrun(){
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 export XDG_RUNTIME_DIR="$TMP"
+# DCH_SOCKET_DIR wins over XDG_RUNTIME_DIR: an inherited one would point the
+# suite at the caller's live sessions.
+unset DCH_SOCKET_DIR DCH_SESSION
 # Session records go to $XDG_STATE_HOME/dch/sessions: keep them out of ~.
 export XDG_STATE_HOME="$TMP/state"
 SOCKDIR="$TMP/dch-$(id -u)"
@@ -237,6 +240,20 @@ if [ -x "$DCH" ]; then
         "$DCH" --read "$SN" --recent 200 2>/dev/null | grep -q dch_marker_one \
             && ok "--read --recent shows history" \
             || bad "--read --recent shows history"
+
+        # DCH_SCROLLBACK is a line count (page-granular, so within a page of
+        # it). Before 1.26.1 it was a byte budget under one ghostty page: ~290
+        # lines at 200 cols whatever the setting.
+        SBN="sb$$"
+        DCH_SCROLLBACK=3000 "$DCH" --spawn "$SBN" --size 200x50 -- \
+            sh -c 'seq 1 6000; echo SBDONE; sleep 30' >/dev/null 2>&1
+        "$DCH" --wait "$SBN" --match SBDONE --timeout 20000 >/dev/null 2>&1
+        sbl=$("$DCH" --read "$SBN" --recent 65535 2>/dev/null | grep -E '^[0-9]+$')
+        sbc=$(printf '%s\n' "$sbl" | grep -c .)
+        [ "$sbc" -ge 2500 ] && [ "$(printf '%s\n' "$sbl" | head -1)" != 1 ] \
+            && ok "DCH_SCROLLBACK=3000 keeps ~3000 lines, prunes older" \
+            || bad "DCH_SCROLLBACK=3000 keeps ~3000 lines, prunes older (got $sbc)"
+        "$DCH" -k "$SBN" >/dev/null 2>&1
 
         # Ghost text (a TUI's own placeholder/argument hint) is only
         # distinguishable from typed input by its styling, so --ansi must

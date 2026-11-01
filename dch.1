@@ -687,7 +687,11 @@ above. Mainly a test knob for shortening the interval.
 If set when a session is spawned, disable its terminal mirror.
 .TP
 .B DCH_SCROLLBACK
-Mirror scrollback lines (default 2000, max 100000).
+Mirror scrollback lines (default 2000, max 100000), read when the session is
+spawned. Approximate: history is dropped a whole page at a time, so the kept
+depth lands within one page of the setting, at most a few hundred lines
+(more at narrow widths), usually somewhat below it. 0 keeps no scrollback, only
+the visible screen.
 .TP
 .B DCH_NO_REPLAY
 If set when a session is spawned, do not replay the mirrored screen to
