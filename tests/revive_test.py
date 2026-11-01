@@ -731,6 +731,85 @@ def main():
         r = run("--revive", "--all", "--json", env=jenv)
         check("--revive --all --json, nothing to revive: empty stdout",
               r.returncode == 0 and r.stdout == "")
+
+        # --- --no-message (#055): claude resumed, nothing typed into it.
+        # The argv orders are Prosper's, verbatim. -------------------------
+        r = run("--no-message", "-ls")
+        check("--no-message without --revive: refused, exit 1",
+              r.returncode == 1 and
+              "--no-message only works with --revive" in r.stderr)
+        rt5 = os.path.join(tmp, "rt5")
+        sockdir5 = os.path.join(rt5, "dch-%d" % os.getuid())
+        recdir5 = os.path.join(recroot, sockdir5.replace("/", "-"))
+        os.makedirs(rt5)
+        os.makedirs(recdir5, 0o700)
+        nenv = dict(os.environ, XDG_RUNTIME_DIR=rt5)
+        nslow = {k: v for k, v in nenv.items() if k != "DCH_RECORD_MS"}
+        nids = {}
+
+        def nplant(n, shell):
+            nids[n] = "33333333-4444-5555-6666-%012d" % len(nids)
+            os.rename(plant(n, sock_dir=sockdir5,
+                            argv=[sh_] if shell else
+                            [os.path.join(bindir, "claude")],
+                            agent=dict(kind="claude", session_id=nids[n],
+                                       name="", cwd=proj,
+                                       launch=[os.path.join(bindir,
+                                                            "claude")])),
+                      os.path.join(recdir5, n + ".json"))
+
+        def quiet(n, sid):
+            """Resumed with --resume <sid>, then nothing typed into it."""
+            s = until(lambda: starts(n) and starts(n)[-1], 20)
+            time.sleep(1.5)
+            return (s and s["argv"][:2] == ["--resume", sid] and
+                    not ev(n, "line", s["pid"]) and
+                    not ev(n, "turn", s["pid"]))
+
+        def nm_detail(as_, sid):
+            return ("revived as %s in %s, claude resumed %s; resume message "
+                    "not sent (--no-message)" % (as_, proj, sid))
+
+        nplant("nmcl", False)
+        r = run("--revive", "nmcl", "--as", "nmcl2", "--no-message", "--json",
+                env=nslow, timeout=120)
+        names.append(("nmcl2", nenv))
+        check("--revive <n> --as <new> --no-message --json: starting, then "
+              "ok with the not-sent detail, no resuming phase",
+              r.returncode == 0 and ndjson(r.stdout) == [
+                  {"name": "nmcl", "phase": "starting"},
+                  {"name": "nmcl", "as": "nmcl2", "result": "ok",
+                   "reason": "", "detail": nm_detail("nmcl2", nids["nmcl"]),
+                   "session_id": nids["nmcl"]}])
+        check("...its record has the agent at once (#056)",
+              ((rec("nmcl2", recdir5) or {}).get("agent") or {})
+              .get("session_id") == nids["nmcl"])
+        check("...argv claude relaunched with --resume, nothing typed",
+              quiet("nmcl2", nids["nmcl"]))
+        nplant("nmsh", True)
+        nplant("nmcl3", False)
+        r = run("--revive", "--all", "--no-message", "--json", env=nenv,
+                timeout=120)
+        names.extend([("nmsh", nenv), ("nmcl3", nenv)])
+        objs = ndjson(r.stdout) or []
+        fin = {o["name"]: o for o in objs if "result" in o}
+        check("--revive --all --no-message --json: starting then ok each, "
+              "no resuming phase",
+              r.returncode == 0 and sorted(fin) == ["nmcl3", "nmsh"] and
+              all(fin[n]["result"] == "ok" and fin[n]["reason"] == "" and
+                  fin[n]["detail"] == nm_detail(n, nids[n]) for n in fin) and
+              [o.get("phase") for o in objs if "phase" in o] ==
+              ["starting", "starting"])
+        check("...shell claude: --resume typed into the shell, nothing typed "
+              "into claude; argv claude likewise",
+              quiet("nmsh", nids["nmsh"]) and quiet("nmcl3", nids["nmcl3"]))
+        nplant("nmtx", True)
+        r = run("--revive", "nmtx", "--no-message", env=nenv, timeout=120)
+        names.append(("nmtx", nenv))
+        check("--revive <n> --no-message (text): the not-sent line, exit 0",
+              r.returncode == 0 and
+              r.stdout == "nmtx: %s\n" % nm_detail("nmtx", nids["nmtx"]) and
+              quiet("nmtx", nids["nmtx"]))
     except Exception:
         traceback.print_exc()
         fails[0] += 1

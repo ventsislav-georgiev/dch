@@ -388,10 +388,15 @@ def main():
                 conn.close()
         threading.Thread(target=oldmaster, daemon=True).start()
         xsock = os.path.join(sockdir, x + ".sock")
+        t0 = time.time()
+        # DCH_AGENT_LAND_MS stays: agp's prompt is one dch cannot detect,
+        # so only the land window ends its wait (the known one: below)
         r = restart_all(env=dict(os.environ, DCH_AGENT_TIMEOUT_MS="60000",
                                  DCH_AGENT_STEP_MS="3000",
                                  DCH_AGENT_LAND_MS="3000"))
+        took = time.time() - t0
         srv.close()
+        print("     | failure batch took %.1fs" % took)
         print("     | " + r.stdout.rstrip().replace("\n", "\n     | "))
         check("failures exit 1", r.returncode == 1)
         check("dialog up: reported, nothing typed",
@@ -432,6 +437,24 @@ def main():
             if n in names:
                 run("-k", n)
                 names.remove(n)
+
+        # --- a known prompt raised by the paste: reported at once (#055),
+        # not after the 30 s land window; still no Enter on it ------------
+        pk = sess("agpk", "claude", dialog_on_paste="known")
+        up(pk)
+        t0 = time.time()
+        r = run("-f", "--restart", pk, "--include-agents", timeout=120)
+        took = time.time() - t0
+        print("     | known dialog on paste: %.1fs" % took)
+        check("known prompt raised by the paste: reported within seconds, "
+              "no Enter reaches it",
+              r.returncode == 1 and took < 15 and
+              "%s: NOT restarted — the pause message did not land in the "
+              "composer; Enter not pressed" % pk in r.stdout and
+              not any(e["ev"] in ("enter_dialog", "line")
+                      for e in events(pk)))
+        run("-k", pk)
+        names.remove(pk)
 
         # --- claude typed into the session's shell: skipped (#049) ---------
         y = sess("agy", "sh")

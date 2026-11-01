@@ -56,6 +56,7 @@ dch \- detachable terminal sessions with a headless agent API
 .IR name \fR|\fP \fB\-\-all\fP
 .RB [ \-\-as
 .IR new ]
+.RB [ \-\-no\-message ]
 .RB [ \-\-json ]
 .br
 .BR "dch \-\-pin" | \-\-unpin
@@ -550,13 +551,16 @@ A dch-lite build skips sessions with a live Claude
 the rest still stop. Exits 0 when nothing failed, 1 on a usage error or
 when any session failed or was interrupted.
 .TP
-.BI \-\-revive " name" "\fR|\fP" \-\-all " " [ \-\-as " new" ] " " [ \-\-json ]
+.BI \-\-revive " name" "\fR|\fP" \-\-all " " [ \-\-as " new" ] " " [ \-\-no\-message ] " " [ \-\-json ]
 Start ended sessions again from their history records: in their cwd, with
 their argv, with their Claude Code resumed via
 .B \-\-resume
 .I id
 (relaunched as the command, or typed into the revived shell) and told to
 carry on.
+.B \-\-no\-message
+resumes it without typing that message: the result is ok and says the
+resume message was not sent.
 .B \-\-all
 takes the sessions that died in the last 3 days after running 5 minutes or
 more. One line per session.
@@ -564,7 +568,11 @@ more. One line per session.
 prints NDJSON instead:
 .RI { name ", " phase }
 lines
-.RB ( starting ", " resuming )
+.RB ( starting ", " resuming ;
+no
+.B resuming
+with
+.BR \-\-no\-message )
 and one
 .RI { name ", " as ", " result ", " reason ", " detail ", " session_id }
 per session, where

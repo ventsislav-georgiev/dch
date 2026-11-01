@@ -12,7 +12,8 @@ State lives in $FAKE_CLAUDE_DIR:
   <session>.ctl     JSON knobs the test flips while the fake runs:
                     shell, subagents, busy, dialog, draft, noexit, crash,
                     mangle, decoy, turn_ms, dialog_on_paste (a prompt comes
-                    up as a paste ends), pasted_decoy (a "[Pasted text #1
+                    up as a paste ends; "known": one dch detects),
+                    pasted_decoy (a "[Pasted text #1
                     +3 lines]" transcript line), eat_enters (ignore that
                     many Enters on a draft, as a just-resumed Claude did),
                     lag_ms (a paste shows in the composer that late)
@@ -123,7 +124,11 @@ def paint(c):
     for q in queue:
         rows += ["❯ " + q, "  ctrl+enter to send now"]
     rule = "─" * 60
-    if prompt_up:
+    if prompt_up and c.get("dialog_on_paste") == "known":
+        # a permission prompt dch knows (screen_modal: CG_DIALOG)
+        rows += [rule, " Bash command", "", " Do you want to proceed?",
+                 " ❯ 1. Yes", "   2. No", "", " Esc to cancel"]
+    elif prompt_up:
         # a prompt dch's detection does not know (like the trust dialog):
         # only the composer check stands between it and our Enter
         rows += [rule, " A new kind of prompt", "", " \u276f 1. Yes",

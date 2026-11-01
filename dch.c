@@ -2101,6 +2101,8 @@ usage(void)
 	    "                                             again: its cwd, its\n"
 	    "                                             command, claude resumed\n"
 	    "                                             and told to carry on\n"
+	    "                                             (--no-message: resumed\n"
+	    "                                             only, nothing typed)\n"
 	    "  dch --revive --all [--json]                every session that died\n"
 	    "                                             (not exit 0, -k or\n"
 	    "                                             --stop)\n"
@@ -4693,7 +4695,9 @@ ag_type(const char *path, const char *text, int paste)
 		poll(NULL, 0, t == AG_ENTER_MS ? AG_ENTER_MS : AG_POLL_MS / 2);
 		if (composer_holds(path, text))
 			break;
-		if (t >= land)
+		/* a prompt the paste raised: nothing lands until a human
+		** answers it, so stop waiting */
+		if (t >= land || claude_gate(path) == CG_DIALOG)
 			return -2;
 	}
 	for (n = 0; ; n++)
@@ -6449,10 +6453,11 @@ revive_message(struct hrec *r, const char *msg, const char **code)
 }
 #endif
 
-/* `--revive <name> [--as <new>]` / `--revive --all`. */
+/* `--revive <name> [--as <new>]` / `--revive --all`; nomsg: --no-message,
+** claude is resumed and nothing is typed into it. */
 static int
 do_revive_verb(char *exe, const char *name, const char *as, int all,
-               int cols, int rows, int json)
+               int cols, int rows, int json, int nomsg)
 {
 	struct hrec *r;
 	int n = history_load(&r), k, picked = 0, bad = 0;
@@ -6576,6 +6581,14 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 
 		if (h->mode != RV_ARGV && h->mode != RV_SHELL)
 			continue;
+		if (nomsg)
+		{
+			rv_say(h, json, "ok", "", "revived as %s in %s, claude %s%s"
+			       "resumed %s; resume message not sent (--no-message)",
+			       h->as, h->cwd, h->aname, h->aname[0] ? " " : "",
+			       h->sid);
+			continue;
+		}
 		if (t)
 			strftime(when, sizeof when, "%Y-%m-%d %H:%M", localtime(&t));
 		if (strcmp(h->end, "stopped") == 0)
@@ -6783,7 +6796,7 @@ main(int argc, char **argv)
 	    action = A_ATTACH;
 	char alias_arg[600] = "";
 	int opt_ansi = 0, opt_recent = -1, opt_timeout = 10000, opt_cursor = 0;
-	int opt_all = 0, opt_cancel = 0, opt_agents = 0;
+	int opt_all = 0, opt_cancel = 0, opt_agents = 0, opt_nomsg = 0;
 	int opt_agent_json = 0, opt_hist_json = 0, opt_json = 0;
 	int say_at = 0, say_n = 0;
 	char opt_as[512] = "";
@@ -7206,6 +7219,11 @@ main(int argc, char **argv)
 			opt_cancel = 1;
 			i++;
 		}
+		else if (strcmp(a, "--no-message") == 0)
+		{
+			opt_nomsg = 1;
+			i++;
+		}
 		else if (strcmp(a, "--include-agents") == 0)
 		{
 			opt_agents = 1;
@@ -7344,6 +7362,11 @@ main(int argc, char **argv)
 	if (opt_as[0] && (action != A_REVIVE || opt_all))
 	{
 		fprintf(stderr, "dch: --as only works with --revive <name>\n");
+		return 1;
+	}
+	if (opt_nomsg && action != A_REVIVE)
+	{
+		fprintf(stderr, "dch: --no-message only works with --revive\n");
 		return 1;
 	}
 	if (opt_agents && action != A_RESTART)
@@ -7865,7 +7888,7 @@ main(int argc, char **argv)
 		if (action == A_REVIVE)
 			return do_revive_verb(exe, session_name,
 			                      opt_as[0] ? opt_as : NULL, opt_all,
-			                      opt_cols, opt_rows, opt_json);
+			                      opt_cols, opt_rows, opt_json, opt_nomsg);
 		return do_spawn_verb(exe, session_name, opt_cols, opt_rows,
 		                     inner_argv, inner_argc, 0);
 	}
