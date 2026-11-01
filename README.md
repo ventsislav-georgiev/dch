@@ -603,7 +603,7 @@ and the session ends.
 | `DCH_RESUME_MSG` | `resume all work. …` | Text typed after the relaunch. |
 | `DCH_AGENT_TIMEOUT_MS` | `600000` | How long an agent may take to pause. |
 | `DCH_AGENT_SETTLE_MS` | `3000` | How long it must stay ready before `/exit`. |
-| `DCH_AGENT_LAND_MS` | `3000` | How long dch waits for typed text to show in the composer before giving up without pressing Enter. |
+| `DCH_AGENT_LAND_MS` | `30000` | How long dch waits for typed text to show in the composer before giving up without pressing Enter. The wait ends as soon as it shows; a just-resumed Claude under load can take seconds. |
 | `DCH_AGENT_STEP_MS` | `60000` | Limit for `/exit` to end Claude and for the relaunch to show a composer. |
 | `DCH_AGENT_REENTER_MS` | `5000` | After Enter, how long a message may stay in the composer before Enter is pressed again (at most 5 more times, never on a dialog). A just-resumed Claude can drop the first Enter. |
 
@@ -645,7 +645,9 @@ the Claude Code agent inside it. `<slug>` is the socket dir with each `/` as
 as the real ones; `--history` and `--revive` read only the current socket
 dir's records. A relative socket dir keeps no records. It is written at start, refreshed every
 `DCH_RECORD_MS` (60000) while the session runs, and closed with how it
-ended. A reboot, a crash or a SIGKILL ends sessions without a word; the
+ended. A revived session's record carries the agent it resumed from the
+first write, so it keeps the resume id even if it ends within that minute.
+A reboot, a crash or a SIGKILL ends sessions without a word; the
 record outlives them.
 
 ```sh

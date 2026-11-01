@@ -14,9 +14,10 @@ State lives in $FAKE_CLAUDE_DIR:
                     mangle, decoy, turn_ms, dialog_on_paste (a prompt comes
                     up as a paste ends), pasted_decoy (a "[Pasted text #1
                     +3 lines]" transcript line), eat_enters (ignore that
-                    many Enters on a draft, as a just-resumed Claude did)
-  <session>.log     JSON lines: start (argv, cwd, sid, the CLAUDE* env
-                    keys), line (typed), turn (a message taken),
+                    many Enters on a draft, as a just-resumed Claude did),
+                    lag_ms (a paste shows in the composer that late)
+  <session>.log     JSON lines: start (argv, cwd, sid, the CLAUDE* and
+                    DCH_REVIVE* env keys), line (typed), turn (a message taken),
                     enter_dialog (Enter while a prompt is up: it would have
                     answered it), enter_eaten, exit
 <session> is DCH_SESSION, which the master sets for its child.
@@ -102,7 +103,8 @@ signal.signal(signal.SIGTERM, lambda *a: bye(0))
 signal.signal(signal.SIGHUP, lambda *a: bye(0))
 
 log(ev="start", argv=sys.argv[1:], cwd=os.getcwd(), sid=SID,
-    env=sorted(k for k in os.environ if k.startswith("CLAUDE")))
+    env=sorted(k for k in os.environ
+               if k.startswith(("CLAUDE", "DCH_REVIVE"))))
 saved = termios.tcgetattr(0)
 tty.setraw(0)
 out = sys.stdout.buffer
@@ -222,6 +224,8 @@ while True:
                 seq, buf = buf[:end + 1], buf[end + 1:]
                 if seq == b"\033[200~":
                     pstart = len(draft)
+                    # busy right after --resume: a paste shows this late
+                    time.sleep(c.get("lag_ms", 0) / 1000.0)
                 elif seq == b"\033[201~":
                     collapsed = len(draft) - pstart > 800
                     prompt_up = bool(c.get("dialog_on_paste"))

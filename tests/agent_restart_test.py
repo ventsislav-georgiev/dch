@@ -389,7 +389,8 @@ def main():
         threading.Thread(target=oldmaster, daemon=True).start()
         xsock = os.path.join(sockdir, x + ".sock")
         r = restart_all(env=dict(os.environ, DCH_AGENT_TIMEOUT_MS="60000",
-                                 DCH_AGENT_STEP_MS="3000"))
+                                 DCH_AGENT_STEP_MS="3000",
+                                 DCH_AGENT_LAND_MS="3000"))
         srv.close()
         print("     | " + r.stdout.rstrip().replace("\n", "\n     | "))
         check("failures exit 1", r.returncode == 1)

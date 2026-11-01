@@ -4629,8 +4629,9 @@ squeeze(const char *s, size_t n, size_t cap)
 
 /* Did `text` land in the composer? Evidence counts only inside the composer
 ** rows — the transcript above routinely shows "[Pasted text #1 +3 lines]"
-** and earlier messages: the start of our text, or the placeholder Claude
-** Code collapses a long paste into. */
+** and earlier messages: our text, or the placeholder Claude Code collapses
+** a long paste into, leading the composer. Anything typed ahead of it is
+** not ours, and an Enter would send it. */
 static int
 composer_holds(const char *path, const char *text)
 {
@@ -4642,8 +4643,8 @@ composer_holds(const char *path, const char *text)
 	if (screen_modal(txt) != CG_DIALOG && (comp = composer_find(txt, &end)) &&
 	    (have = squeeze(comp + 3, (size_t)(end - comp - 3), (size_t)-1)) &&
 	    (want = squeeze(text, strlen(text), 32)))
-		ok = *want && (strstr(have, want) ||
-		               strstr(have, "[Pastedtext#"));
+		ok = *want && (strncmp(have, want, strlen(want)) == 0 ||
+		               strncmp(have, "[Pastedtext#", 12) == 0);
 	free(have);
 	free(want);
 	free(txt);
@@ -4662,8 +4663,10 @@ ag_type(const char *path, const char *text, int paste)
 {
 	/* How long typed text may take to show in the composer: a Claude that
 	** has just resumed a long conversation took over a second to paint a
-	** paste. */
-	long land = env_ms("DCH_AGENT_LAND_MS", 3000);
+	** paste, one resumed at 230k context under load well over 3 s. Text
+	** that shows after we gave up sits in the composer unsent for good, so
+	** the wait is long: it ends the moment the text shows. */
+	long land = env_ms("DCH_AGENT_LAND_MS", 30000);
 	/* An Enter may not take: right after --resume, Claude Code 2.1.309
 	** showed the paste but ignored an Enter and another ~6 s later; one
 	** ~20 s after the spawn submitted. So Enter again while the text still
@@ -6313,6 +6316,29 @@ revive_spawn(char *exe, struct hrec *r, int cols, int rows, int json)
 	}
 	else if (r->sid[0] && r->launch)
 		r->mode = RV_SHELL;
+	/* The new master's record starts with this one's agent and keeps it
+	** until a probe finds the resumed claude: a session that ends sooner
+	** must not lose the id. Its env only — never the child's. */
+	if (r->sid[0])
+	{
+		struct dch_agent a;
+		char *aj = NULL;
+		size_t al;
+		FILE *f;
+
+		memset(&a, 0, sizeof a);
+		snprintf(a.sid, sizeof a.sid, "%s", r->sid);
+		snprintf(a.name, sizeof a.name, "%s", r->aname);
+		snprintf(a.cwd, sizeof a.cwd, "%s", r->acwd);
+		a.launch = r->launch;
+		if ((f = open_memstream(&aj, &al)))
+		{
+			dch_agent_json(f, &a);
+			if (fclose(f) == 0)
+				setenv("DCH_REVIVE_AGENT", aj, 1);
+		}
+		free(aj);
+	}
 	{
 		/* do_spawn_verb wants a NULL-terminated argv */
 		char **av = calloc((size_t)nc + 1, sizeof *av);
@@ -6325,6 +6351,7 @@ revive_spawn(char *exe, struct hrec *r, int cols, int rows, int json)
 			free(av);
 		}
 	}
+	unsetenv("DCH_REVIVE_AGENT");
 	free(nv);
 	if (rc != 0)
 	{

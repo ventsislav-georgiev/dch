@@ -342,6 +342,7 @@ static char rec_dir[1024], rec_sdir[1024];	/* record dir, socket dir */
 static char *rec_head;		/* {"name":…,"started":N, */
 static char *rec_agent;		/* the agent object, or null */
 static struct dch_agent rec_ag;	/* last agent seen; pid 0 = none */
+static char *rec_seed;		/* --revive's agent object until one is seen */
 static long rec_started;
 static char rec_end[32];	/* how the master ended, set before exit */
 static struct timespec rec_at;	/* last refresh */
@@ -450,7 +451,7 @@ rec_stopped(void)
 ** while its claude's session file is still there: a claude killed under a
 ** shell (out of memory) leaves it, so a revive still brings it back; one
 ** that quit cleanly removed it. Once dch --stop left its agent, that one
-** stands. */
+** stands. Until the first agent is seen, --revive's (rec_seed) stands in. */
 static void
 rec_refresh(void)
 {
@@ -470,6 +471,8 @@ rec_refresh(void)
 	{
 		free(rec_ag.launch);
 		rec_ag = a;
+		free(rec_seed);
+		rec_seed = NULL;
 	}
 	else if (!stopped && rec_ag.pid && dch_claude_gone(rec_ag.pid))
 	{
@@ -512,7 +515,7 @@ rec_refresh(void)
 	if (stopped)
 		fputs(rec_stop, f);
 	else if (!rec_ag.pid)
-		fputs("null", f);
+		fputs(rec_seed ? rec_seed : "null", f);
 	else
 		dch_agent_json(f, &rec_ag);
 	if (fclose(f) != 0)
@@ -3177,6 +3180,16 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 		memset(&the_pty.ws, 0, sizeof(struct winsize));
 		the_pty.ws.ws_row = 24;
 		the_pty.ws.ws_col = 80;
+
+		/* --revive hands over the agent it resumes, for the record
+		** only: out of the env before the child inherits it. */
+		{
+			const char *ra = getenv("DCH_REVIVE_AGENT");
+
+			if (ra && dch_json_is_object(ra))
+				rec_seed = strdup(ra);
+			unsetenv("DCH_REVIVE_AGENT");
+		}
 
 		/* Create a pty in which the process is running. */
 		if (init_pty(argv, statusfd) < 0)

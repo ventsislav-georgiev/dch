@@ -514,6 +514,39 @@ def main():
                   and s4 and len(ev(nx, "enter_eaten", s4["pid"])) == 6 and
                   not ev(nx, "turn", s4["pid"]) and time.time() - t0 < 30)
 
+        # --- #056: a paste that shows late is still sent; the revived
+        # record has the agent from its first write, at the default
+        # DCH_RECORD_MS (its first refresh a minute away) ------------------
+        ln = spawn("rlate", "claude")
+        s5 = until(lambda: starts(ln) and starts(ln)[0])
+        until(lambda: ((rec(ln) or {}).get("agent") or {})
+              .get("session_id") == s5["sid"])
+        vanish(ln)
+        setctl(ln, lag_ms=4000)     # past the old 3 s land window
+        slow = {k: v for k, v in os.environ.items() if k != "DCH_RECORD_MS"}
+        r = run("--revive", ln, env=slow, timeout=120)
+        a = (rec(ln) or {}).get("agent") or {}
+        check("revived record carries the resumed agent at once: kind, id, "
+              "cwd, launch",
+              a.get("kind") == "claude" and a.get("session_id") == s5["sid"]
+              and a.get("cwd") == proj and
+              os.path.basename((a.get("launch") or [""])[0]) == "claude")
+        s6 = until(lambda: len(starts(ln)) > 1 and starts(ln)[1])
+        check("...handed to the master only, not to the session's child",
+              s6 and not any(k.startswith("DCH_REVIVE") for k in s6["env"]))
+        if not lite:
+            check("a paste that shows 4 s late is still sent",
+                  r.returncode == 0 and "resume message sent" in r.stdout and
+                  any(e["text"].startswith(RESUME)
+                      for e in ev(ln, "turn", s6["pid"])))
+        run("-k", ln)
+        until(lambda: not master(ln))
+        spawn(ln, "sleep", "60", env=slow)
+        check("a new session under that name starts with no agent",
+              until(lambda: (rec(ln) or {}).get("end") == "" and
+                    rec(ln)["argv"][0] == sleep_) and
+              rec(ln)["agent"] is None)
+
         check("a revived session writes its own record again",
               until(lambda: ((rec(cl) or {}).get("argv") or [])[3:5] ==
                     ["--resume", s1["sid"]]))
