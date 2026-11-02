@@ -12,7 +12,8 @@ Covers: pin/unpin round trip and idempotence, --history's "pinned":true
 (also on a vanished record) and [pinned], forget of an ended, a live and a
 pinned record, -f, not_found, --forget --all (text and --json, summary
 line), the prune exemption, the pin surviving live refreshes, revive --as
-moving the pin, and the usage errors and exit codes. HOME, the runtime dir
+moving the pin, <file>.json naming exactly one record (#063), and the
+usage errors and exit codes. HOME, the runtime dir
 and the state dir are all temporary.
 
 Run:  python3 tests/history_pin_test.py        (uses ./dch)
@@ -376,6 +377,55 @@ def main():
               r.returncode == 1 and rec("hp") is not None and
               asides("hp") == [] and
               sorted(x.get("reason") for x in o[:-1]) == ["", "live"])
+
+        # --- #063: <file>.json names exactly one record ------------------
+        fa = "fw.%d" % (now - 300)
+        plant("fw")
+        plant(fa, name="fw", ended=now - 300)
+        e = [x for x in json.loads(run("--history", "--json").stdout or "[]")
+             if x["name"] == "fw"]
+        check("--history --json: \"file\" on every record, the primary too",
+              sorted(x.get("file", "") for x in e) == sorted(["fw", fa]))
+        r = run("--pin", "fw.json")
+        check("--pin fw.json pins the primary only",
+              r.returncode == 0 and r.stdout == "fw.json: pinned\n" and
+              pinned("fw") and not pinned(fa))
+        r = run("--unpin", "fw.json")
+        check("--unpin fw.json unpins it", r.returncode == 0 and
+              not pinned("fw"))
+        run("--pin", fa + ".json")
+        check("--pin fw.<ended>.json pins the moved record only",
+              pinned(fa) and not pinned("fw"))
+        run("--unpin", fa + ".json")
+        r = run("--forget", fa + ".json", "--json")
+        o = ndjson(r.stdout) or []
+        check("--forget fw.<ended>.json forgets that one only",
+              r.returncode == 0 and rec(fa) is None and
+              rec("fw") is not None and
+              o[-1:] == [dict(ok=1, skipped=0, failed=0)])
+        plant(fa, name="fw", ended=now - 300)
+        r = run("--pin", "fw")
+        check("bare --pin fw still pins every record of the name",
+              r.returncode == 0 and pinned("fw") and pinned(fa))
+        r = run("--forget", "fw", "-f")
+        check("bare --forget fw -f still forgets every record of the name",
+              r.returncode == 0 and rec("fw") is None and rec(fa) is None)
+        r = run("--forget", "nosuch.json", "--json")
+        o = ndjson(r.stdout) or []
+        check("--forget nosuch.json: not_found, exit 1",
+              r.returncode == 1 and len(o) == 2 and
+              o[0]["reason"] == "not_found" and
+              o[0]["name"] == "nosuch.json")
+        r = run("--forget", live + ".json", "--json")
+        o = ndjson(r.stdout) or []
+        check("--forget <live>.json: failed live, record kept",
+              r.returncode == 1 and o and o[0]["reason"] == "live" and
+              rec(live) is not None)
+        evil = os.path.join(os.path.dirname(recdir), "evil.pin")
+        open(evil, "w").close()
+        r = run("--unpin", "../evil.json")
+        check("--unpin ../evil.json: not_found, nothing outside the dir "
+              "touched", r.returncode == 1 and os.path.exists(evil))
 
         # --- #059 M1: --revive X --as Y keeps Y's own dead record ----------
         plant("mk", end="stopped", agent=agent("sid-mk"), ended=now - 120)

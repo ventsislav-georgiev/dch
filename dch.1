@@ -629,7 +629,20 @@ under another name moves the pin.
 .B \-\-pin
 and
 .B \-\-unpin
-act on every record of the name.
+act on every record of the name;
+.IB file .json
+(also for
+.BR \-\-forget )
+acts on that one record file only, the primary
+.IB name .json
+or a moved
+.IB name . ended .json ,
+never matched by name.
+.B \-\-history \-\-json
+gives every record its
+.I file
+(the record file name, without
+.BR .json ).
 .B \-\-pin
 needs a record, live or ended
 .RB ( not_found );

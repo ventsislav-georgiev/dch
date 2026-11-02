@@ -6458,18 +6458,18 @@ do_history_verb(int json)
 		char when[32] = "-", cb[256], fq[2048];
 		time_t t = (time_t)hrec_when(&r[k]);
 		const char *v;
-		/* moved aside by a cold start under its name: revive, pin or
-		** forget this one by its file */
+		/* moved aside by a cold start under its name: the text output
+		** names its file (--json names every record's file) */
 		int aside = strcmp(r[k].file, canon_name(r[k].name, cb,
-		                                         sizeof cb)) != 0;
+		                                         sizeof cb)) != 0, hasf;
 
 		if (r[k].live)
 			continue;
 		if (json)
 		{
 			/* As stored, one line each; a dead end "" reads vanished,
-			** a pinned one gains "pinned":true before its '}', an
-			** aside one "file". */
+			** a pinned one gains "pinned":true before its '}', every
+			** one "file". */
 			size_t bl;
 
 			v = strstr(r[k].body, "\"end\":\"\"");
@@ -6479,13 +6479,12 @@ do_history_verb(int json)
 				       (int)(v - r[k].body), r[k].body);
 			v = v ? v + 8 : r[k].body;
 			bl = strlen(v);
-			if (aside &&
-			    dch_json_quote(fq, sizeof fq, r[k].file) == (size_t)-1)
-				aside = 0;
-			if ((r[k].pinned || aside) && bl && v[bl - 1] == '}')
+			hasf = dch_json_quote(fq, sizeof fq, r[k].file)
+			       != (size_t)-1;
+			if ((r[k].pinned || hasf) && bl && v[bl - 1] == '}')
 				printf("%.*s%s%s%s}", (int)(bl - 1), v, r[k].pinned
-				       ? ",\"pinned\":true" : "", aside ? ",\"file\":"
-				       : "", aside ? fq : "");
+				       ? ",\"pinned\":true" : "", hasf ? ",\"file\":"
+				       : "", hasf ? fq : "");
 			else
 				fputs(v, stdout);
 			first = 0;
@@ -7090,7 +7089,8 @@ hv_forget(const char *dir, const struct hrec *r)
 ** the name, never touched by the master: it outlives every rewrite, a
 ** record that has one is never pruned, and --forget refuses it without
 ** -f. A live session's record is never forgotten: its master would write
-** it back. Matching is --revive's: name, or the canonical file. */
+** it back. Matching is --revive's: name, or the canonical file; an
+** argument ending in .json matches only the record file of that stem. */
 static int
 do_pin_verb(char **names, int nn, int mode, int force, int json)
 {
@@ -7122,11 +7122,30 @@ do_pin_verb(char **names, int nn, int mode, int force, int json)
 			hv_say(r[k].name, "ok", "", "forgotten", r[k].sid, json, c);
 	for (j = 0; names && j < nn; j++)
 	{
-		cn = canon_name(names[j], cb, sizeof cb);
+		/* <file>.json names exactly one record file, never a name:
+		** the primary <name>.json or one a cold start moved aside */
+		size_t al = strlen(names[j]);
+		int byfile = al > 5 && strcmp(names[j] + al - 5, ".json") == 0;
+
+		if (byfile)
+		{
+			snprintf(cb, sizeof cb, "%.*s", (int)(al - 5), names[j]);
+			cn = cb;
+		}
+		else
+			cn = canon_name(names[j], cb, sizeof cb);
+		/* no path separator: a stem never leaves the history dir */
+		if (strchr(cn, '/'))
+		{
+			hv_say(names[j], "failed", "not_found", "no history for "
+			       "this session", "", json, c);
+			continue;
+		}
 		for (hit = perr = 0, f = -1, k = 0; k < n; k++)
 		{
-			if (strcmp(r[k].name, names[j]) != 0 &&
-			    strcmp(r[k].file, cn) != 0)
+			if (byfile ? strcmp(r[k].file, cn) != 0
+			    : strcmp(r[k].name, names[j]) != 0 &&
+			      strcmp(r[k].file, cn) != 0)
 				continue;
 			hit++;
 			if (f < 0)
