@@ -7240,7 +7240,17 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 		int i;
 
 		h->mode = RV_SKIP;
-		if (all ? !rv_all_takes(h) : !rec_hit(h, name, stem, byfile))
+		if (all && !rv_all_takes(h))
+		{
+			/* the newest record of an id ended on purpose: an older
+			** crash record of that id stays down too (newest first) */
+			if (!h->live && (!strcmp(h->end, "stopped") ||
+			                 !strcmp(h->end, "killed") ||
+			                 !strcmp(h->end, "exit 0")))
+				sid_add(&held, h->sid, 2, "%s", h->end);
+			continue;
+		}
+		if (!all && !rec_hit(h, name, stem, byfile))
 			continue;
 		if (!all && (picked || h->live))
 		{
@@ -7268,7 +7278,8 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 		{
 			rv_say(h, json, "skipped", sh->run ? "dup_sid" : "live_sid",
 			       "skipped — claude %s %s%s (record %s)", h->sid,
-			       sh->run ? "is revived from a newer record as "
+			       sh->run == 2 ? "ended in a newer record: "
+			       : sh->run ? "is revived from a newer record as "
 			       : "already runs in ", sh->who, h->file);
 			continue;
 		}

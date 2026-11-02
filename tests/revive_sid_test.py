@@ -16,7 +16,7 @@ state dir all temporary.
 Run:  python3 tests/revive_sid_test.py        (uses ./dch)
 """
 import json, os, pty, shutil, signal, stat, subprocess, sys, tempfile, time
-import traceback
+import traceback, uuid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
@@ -91,13 +91,14 @@ def main():
         except (OSError, ValueError):
             return None
 
-    def plant(f, name, sid, seen, **cfg):
+    def plant(f, name, sid, seen, end="", **cfg):
         """A vanished record (a SIGKILLed master) --all takes, Claude as
-        its command: what p13's two crashes leave behind."""
+        its command: what p13's two crashes leave behind. end: how it
+        ended instead."""
         now = int(time.time())
         r = dict(name=name, sock_dir=sockdir, alias="", cwd=proj,
                  argv=[claude], started=now - 900, updated=now - seen,
-                 end="", agent=dict(kind="claude", session_id=sid, name="",
+                 end=end, agent=dict(kind="claude", session_id=sid, name="",
                                     cwd=proj, launch=[claude], **cfg))
         os.makedirs(recdir, mode=0o700, exist_ok=True)
         p = os.path.join(recdir, f + ".json")
@@ -210,6 +211,23 @@ def main():
               r.returncode == 1 and "claude pid %d" % pid in r.stderr and
               W in r.stderr and
               not os.path.exists(os.path.join(sockdir, "orphc.sock")))
+
+        # --- the newest record ended on purpose: an older crash stays down
+        for end in ("stopped", "killed", "exit 0"):
+            E = str(uuid.uuid4())
+            nm = "e" + end.replace(" ", "")
+            plant(nm, nm, E, 30, end=end)
+            plant(nm + ".1793635000", nm, E, 120)
+            r = run("--revive", "--all", "--no-message", "--json")
+            sk = [o for o in finals(r.stdout) if o.get("session_id") == E]
+            check("--revive --all, newest record of an id ended %r, an "
+                  "older crash of it: skipped dup_sid, nothing revived "
+                  "(MED-A) [rc=%d %r]" % (end, r.returncode, r.stdout),
+                  r.returncode == 0 and len(sk) == 1 and
+                  sk[0]["result"] == "skipped" and
+                  sk[0]["reason"] == "dup_sid" and
+                  not os.path.exists(os.path.join(sockdir, nm + ".sock"))
+                  and not claudes(E))
 
         # --- control: an id nobody runs still revives ---------------------
         plant("free", "free", Z, 30)
