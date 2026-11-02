@@ -11,6 +11,7 @@ self-restart, shell-launched Claude, an old master, -f, a decoy resume line
 and a mangled (SGR-split, hard-wrapped) exit line. Also: Enter only once the
 text shows in the composer (a prompt raised by the paste gets no Enter, a
 "[Pasted text #1]" placeholder counts), SIGTERM while waiting (resume typed),
+a second Ctrl-C once claude is relaunched (no "resume by hand", #067),
 a pending respawn, a crash's last output in the report, a master stalled
 (SIGSTOP, 3 s) right after /exit or right after the relaunch: waited out, not
 taken for a gone session, relaunched once. The agent step is opt-in: without
@@ -644,6 +645,41 @@ def main():
               ci and ci["state"] == "running" and len(starts(i)) == 1)
         run("-k", i)
         names.remove(i)
+
+        # --- #067: a second Ctrl-C once claude is relaunched (AG_START) ---
+        # It already runs as --resume <id>: no "resume by hand" (a second
+        # claude on the conversation), just that the message was not typed.
+        g = sess("ag2c", "claude", dialog=False)
+        sg = up(g)
+        with open(os.path.join(fc, "version"), "w") as f:
+            f.write("3.6.0")
+        proc = subprocess.Popen([DCH, "--restart", g, "--include-agents",
+                                 "--json"], stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, text=True)
+        # the relaunched claude comes up behind a prompt: no empty composer,
+        # so the step sits in AG_START
+        until(lambda: "/exit" in typed(g), 30)
+        setctl(g, dialog=True)
+        s2 = up(g, 2, 30)
+        proc.send_signal(signal.SIGINT)
+        time.sleep(0.01)
+        proc.send_signal(signal.SIGINT)
+        out = proc.communicate(timeout=60)[0]
+        print("     | " + out.rstrip().replace("\n", "\n     | "))
+        f = agent_finals(ndjson(out)).get(g, {})
+        check("second Ctrl-C after the relaunch: interrupted with the id, "
+              "says it runs, no 'resume by hand'",
+              proc.returncode == 1 and sg and s2 and
+              f.get("result") == "interrupted" and
+              f.get("session_id") == sg["sid"] and
+              "claude --resume %s is started in the session" % sg["sid"]
+              in f.get("detail", "") and
+              "resume by hand" not in f.get("detail", "") and
+              len(starts(g)) == 2 and (cmd(g) or {}).get("state") ==
+              "running")
+        setctl(g)
+        run("-k", g)
+        names.remove(g)
 
         # --- SIGTERM with nobody reading stdout: no SIGPIPE death --------
         i1 = sess("agu", "claude", shell=True)

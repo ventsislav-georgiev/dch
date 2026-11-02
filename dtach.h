@@ -273,6 +273,7 @@ struct dch_agent
 	long pid;		/* claude's pid */
 	char sid[64], name[256], cwd[1024];
 	char rec[1400];		/* its Claude session record's path */
+	char cfg[1400];		/* its config dir, "" = our ~/.claude (#065) */
 	char **launch;		/* malloc'd block, NULL-terminated; may be NULL */
 };
 int dch_history_dir(char *out, size_t outsz, const char *sockdir,

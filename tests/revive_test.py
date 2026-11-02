@@ -31,7 +31,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
 RESUME = "resume all work. This session ended"
 CALLER_ENV = {"CLAUDECODE": "1", "CLAUDE_CODE_SESSION_ID": "caller-sid",
-              "CLAUDE_PID": "1", "CLAUDE_CODE_MESSAGING_TOKEN": "x"}
+              "CLAUDE_PID": "1", "CLAUDE_CODE_MESSAGING_TOKEN": "x",
+              # E1 (#067): the caller's IDE link, hook files, and what
+              # Claude Code sets for its own tool commands
+              "CLAUDE_CODE_SSE_PORT": "1", "CLAUDE_ENV_FILE": "/nonexistent",
+              "CLAUDE_PROJECT_DIR": "/nonexistent", "GIT_EDITOR": "true",
+              "AI_AGENT": "claude-code_test", "COREPACK_ENABLE_AUTO_PIN": "0",
+              "NoDefaultCurrentDirectoryInExePath": "1"}
 
 
 def run(*args, timeout=90, env=None):
@@ -473,13 +479,16 @@ def main():
                "--resume", s1["sid"],
                "--chrome"] and c2 and c2["sid"] == s1["sid"] and
               c2["cwd"] == proj)
-        check("the caller's Claude identity is stripped from the revived env",
+        check("the caller's Claude identity and harness env (E1) are "
+              "stripped from the revived env",
               c2 and not any(k in c2["env"] for k in CALLER_ENV))
         t2 = until(lambda: len(starts(shc)) > 1 and starts(shc)[1], 20)
         check("shell agent: shell revived, launch + --resume typed, with cd",
               t2 and t2["argv"] == ["--resume", s2["sid"], "--chrome"] and
               t2["cwd"] == os.path.join(proj, "sub") and
               json.loads(run("--cmd", shc).stdout)["argv"] == [sh_])
+        check("...and the claude typed into it has none of the caller's "
+              "env either", t2 and not any(k in t2["env"] for k in CALLER_ENV))
         if lite:
             check("lite: agents resumed, the message skipped and said so",
                   all(any(l.startswith(n + ": revived as") and
@@ -870,6 +879,87 @@ def main():
               r.returncode == 0 and
               r.stdout == "nmtx: %s\n" % nm_detail("nmtx", nids["nmtx"]) and
               quiet("nmtx", nids["nmtx"]))
+
+        # --- #065: the agent's config_dir comes back with it --------------
+        # A claude started under its own CLAUDE_CONFIG_DIR (or HOME) keeps
+        # its conversation there: --revive resumes it under that dir, as
+        # the child's env (argv claude) or `env CLAUDE_CONFIG_DIR=…` typed
+        # (shell claude). One --all, so the caller's env must come back
+        # between spawns; a record without the field is resumed as before.
+        rt7 = os.path.join(tmp, "rt7")
+        sockdir7 = os.path.join(rt7, "dch-%d" % os.getuid())
+        recdir7 = os.path.join(recroot, sockdir7.replace("/", "-"))
+        os.makedirs(rt7)
+        os.makedirs(recdir7, 0o700)
+        cenv = dict(os.environ, XDG_RUNTIME_DIR=rt7)
+        alt = os.path.join(tmp, "alt cfg")    # a space: quoted when typed
+        cl = os.path.join(bindir, "claude")
+        cids = {}
+
+        def tsh(n):
+            """A shell that keeps the line typed into it, then runs it."""
+            return [sh_, "-c", "printf '$ '; read -r l; printf '%%s\\n' "
+                    "\"$l\" > %s; eval \"$l\"" % os.path.join(fc, n + ".typed")]
+
+        def typed1(n):
+            p = os.path.join(fc, n + ".typed")
+            return until(lambda: os.path.exists(p) and open(p).read(), 20)
+
+        def cplant(n, argv, launch, age, **cfg):
+            cids[n] = "65656565-0000-4000-8000-%012d" % len(cids)
+            now = int(time.time())
+            os.rename(plant(n, sock_dir=sockdir7, argv=argv,
+                            updated=now - age, ended=now - age,
+                            agent=dict(kind="claude", session_id=cids[n],
+                                       name="", cwd=proj, launch=launch,
+                                       **cfg)),
+                      os.path.join(recdir7, n + ".json"))
+
+        cplant("cfcl", [cl], [cl], 60, config_dir=alt)
+        cplant("cfsh", tsh("cfsh"), [cl], 70, config_dir=alt)
+        cplant("cfenv", tsh("cfenv"), ["/usr/bin/env",
+                                       "CLAUDE_CONFIG_DIR=" + alt, cl], 80,
+               config_dir=alt)
+        cplant("cfdef", [cl], [cl], 90, config_dir="")
+        cplant("cfold", [sh_], [cl], 100)
+        r = run("--revive", "--all", "--no-message", env=cenv, timeout=180)
+        names.extend((n, cenv) for n in cids)
+
+        def cstart(n):
+            s = until(lambda: starts(n) and starts(n)[-1], 20)
+            return s and s["argv"][:2] == ["--resume", cids[n]] and s["cfg"]
+
+        check("--revive --all of five records: exit 0 [rc=%d %r %r]"
+              % (r.returncode, r.stdout, r.stderr), r.returncode == 0)
+        check("argv claude with config_dir: resumed with "
+              "CLAUDE_CONFIG_DIR=<it> in its env, the argv untouched",
+              cstart("cfcl") == alt and
+              json.loads(run("--cmd", "cfcl", env=cenv).stdout)["argv"] ==
+              [cl, "--resume", cids["cfcl"]])
+        line = typed1("cfsh")
+        check("shell claude with config_dir: `env 'CLAUDE_CONFIG_DIR=<it>' "
+              "claude --resume <id>` typed, quoted, and resumed under it "
+              "[%r]" % line,
+              line == "env 'CLAUDE_CONFIG_DIR=%s' %s --resume %s\n"
+              % (alt, cl, cids["cfsh"]) and cstart("cfsh") == alt)
+        check("...the revived record keeps config_dir (#065)",
+              until(lambda: ((rec("cfsh", recdir7) or {}).get("agent") or {})
+                    .get("config_dir") == alt, 15))
+        line = typed1("cfenv")
+        check("shell claude whose launch sets CLAUDE_CONFIG_DIR itself: "
+              "not set twice, resumed under it [%r]" % line,
+              line and line.count("CLAUDE_CONFIG_DIR=") == 1 and
+              cstart("cfenv") == alt)
+        check("config_dir \"\" (the default): no CLAUDE_CONFIG_DIR, even "
+              "right after a config_dir revive in the same --all",
+              until(lambda: starts("cfdef"), 20) and
+              cstart("cfdef") is None and
+              starts("cfdef")[-1]["argv"][:2] == ["--resume", cids["cfdef"]])
+        check("old record without config_dir: resumed as before, no "
+              "CLAUDE_CONFIG_DIR",
+              until(lambda: starts("cfold"), 20) and
+              cstart("cfold") is None and
+              starts("cfold")[-1]["argv"][:2] == ["--resume", cids["cfold"]])
     except Exception:
         traceback.print_exc()
         fails[0] += 1

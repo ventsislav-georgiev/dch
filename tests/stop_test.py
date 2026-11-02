@@ -20,9 +20,15 @@ record stopped (ok, #050), a second Ctrl-C at "exiting" (interrupted with
 the id, the record still ends stopped). #062: a Claude under its own
 CLAUDE_CONFIG_DIR, as the command and typed into the shell, while --stop and
 the master run without it (found by its own env: paused, /exit'ed, the
-record ends stopped with its id, --revive brings it back under that dir); a
+record ends stopped with its id, --revive brings it back under that dir);
+#065: the record's agent keeps that dir as config_dir ("" for ~/.claude),
+and --revive resumes under it whether it was typed (`CLAUDE_CONFIG_DIR=…
+claude`, `HOME=… claude`) or came from the session's env; a
 Claude whose session record cannot be read (failed/claude_unreadable,
-nothing typed, the session left running). On
+nothing typed, the session left running). #067: a `claude -p` / `claude
+mcp serve` stops like a plain session, /exit ignored (exit_failed, still
+running, the id kept), a crash on /exit (ok, the record's id),
+DCH_NO_HISTORY (no --revive promised). On
 dch-lite: Claude sessions skipped/no_screen with nothing typed, the rest
 still stop.
 
@@ -320,7 +326,8 @@ def main():
               "(claude quit cleanly first)",
               rec(c)["end"] == "stopped" and a.get("session_id") == sid and
               os.path.basename(a["launch"][0]) == "claude" and
-              a["launch"][1:] == ["--chrome"] and a["cwd"] == proj)
+              a["launch"][1:] == ["--chrome"] and a["cwd"] == proj and
+              a.get("config_dir") == "")
         check("command claude: session gone, no marker left",
               cmd(c) is None and not marker(c))
         names.remove(c)
@@ -478,14 +485,15 @@ def main():
               typed(g)[:1] and typed(g)[0].startswith(PAUSE) and
               typed(g)[-1] == "/exit" and gone(g) and
               rec(g)["end"] == "stopped" and
-              (rec(g)["agent"] or {}).get("session_id") == sid8)
+              (rec(g)["agent"] or {}).get("session_id") == sid8 and
+              rec(g)["agent"].get("config_dir") == alt)
         r = run("--revive", g)
         names.append(g)
         s9 = up(g, 1)
         check("other CLAUDE_CONFIG_DIR (command): --revive resumes the id "
               "under that dir",
               r.returncode == 0 and s9 and s9["sid"] == sid8 and
-              "CLAUDE_CONFIG_DIR" in s9["env"])
+              s9["cfg"] == alt)
         run("-k", g)
         names.remove(g)
         until(lambda: cmd(g) is None)
@@ -511,6 +519,57 @@ def main():
               (rec(g) or {}).get("end") == "stopped" and
               (rec(g)["agent"] or {}).get("session_id") == sid8)
 
+        # --- #065: --revive brings it back under that dir ------------------
+        # The typed `CLAUDE_CONFIG_DIR=… claude` (and `HOME=… claude`) is in
+        # no argv: the record's config_dir carries it, the revive types
+        # `env CLAUDE_CONFIG_DIR=… claude --resume <id>`. A claude that got
+        # it from the session's env (argv claude) gets it in the env again.
+        def cfg_round(g, sid, want, what):
+            a = (rec(g) or {}).get("agent") or {}
+            check("%s: the stopped record keeps config_dir [%r]"
+                  % (what, a.get("config_dir")),
+                  a.get("session_id") == sid and a.get("config_dir") == want)
+            r = run("--revive", g, "--no-message")
+            names.append(g)
+            s = up(g, 1)
+            check("%s: --revive resumes the id under it [%r]"
+                  % (what, s and (s["argv"], s["cfg"])),
+                  r.returncode == 0 and s and
+                  s["argv"] == ["--resume", sid] and s["cfg"] == want)
+            run("-k", g)
+            names.remove(g)
+            until(lambda: cmd(g) is None)
+
+        cfg_round(g, sid8, alt, "CLAUDE_CONFIG_DIR typed into the shell")
+        h2 = os.path.join(tmp, "home2")
+        g = sess("stcfgh", "sh")
+        time.sleep(0.3)
+        run("--run", g, "HOME=%s claude" % h2)
+        s8 = up(g)
+        sid8 = s8 and s8["sid"]
+        agent_sid(g, sid8)
+        r = stop(g)
+        gone(g)
+        check("HOME typed into the shell: stopped with the id",
+              r.returncode == 0 and sid8 and sid8 in r.stdout)
+        cfg_round(g, sid8, os.path.join(h2, ".claude"),
+                  "HOME typed into the shell")
+        g = "stcfge" + TAG
+        names.append(g)
+        setctl(g)
+        subprocess.run([DCH, "--spawn", g, "--size", "100x30", "claude"],
+                       capture_output=True, check=True,
+                       env=dict(os.environ, CLAUDE_CONFIG_DIR=alt))
+        s8 = up(g)
+        sid8 = s8 and s8["sid"]
+        agent_sid(g, sid8)
+        r = stop(g)
+        gone(g)
+        check("CLAUDE_CONFIG_DIR in the session's env (argv claude): "
+              "stopped with the id", r.returncode == 0 and sid8 and
+              sid8 in r.stdout)
+        cfg_round(g, sid8, alt, "CLAUDE_CONFIG_DIR in the session's env")
+
         # --- #062: a claude whose record cannot be read is left alone -----
         u = sess("stunr", "claude")
         s10 = up(u)
@@ -535,6 +594,95 @@ def main():
               (rec(u) or {}).get("end") == "")
         run("-k", u)
         names.remove(u)
+
+        # --- #067: a non-interactive claude (-p, a subcommand) has no
+        # composer to pause and no record to read: the session stops like
+        # a plain one, not claude_unreadable --------------------------------
+        batch = os.path.join(tmp, "batch")
+        os.makedirs(batch)
+        bcl = os.path.join(batch, "claude")
+        with open(bcl, "w") as f:
+            # up-<session> once it runs: no record, nothing on screen
+            f.write("#!/usr/bin/env python3\nimport os, time\n"
+                    "open(os.path.join(os.path.dirname(__file__), 'up-' + "
+                    "os.environ['DCH_SESSION']), 'w').close()\n"
+                    "time.sleep(120)\n")
+        os.chmod(bcl, 0o755)
+
+        def batch_up(n):
+            return os.path.exists(os.path.join(batch, "up-" + n))
+
+        for k, (what, cl) in enumerate((
+                ("claude -p", [bcl, "-p", "hi"]),
+                ("claude mcp serve, typed into a shell",
+                 ["sh", "-c", "'%s' mcp serve; sleep 120" % bcl]))):
+            b = sess("stb%d" % k, *cl)
+            until(lambda: cmd(b) and batch_up(b))
+            r = stop(b, "--json")
+            f = finals(ndjson(r.stdout)).get(b, {})
+            print("     | " + r.stdout.rstrip().replace("\n", "\n     | "))
+            check("%s in the session: stopped like a plain session, exit 0, "
+                  "record ends stopped" % what,
+                  r.returncode == 0 and f.get("result") == "ok" and
+                  gone(b) and rec(b)["end"] == "stopped")
+
+        # --- #067 (QA 1.28.0 missing tests): /exit ignored, a crash on it -
+        x = sess("stn", "claude", noexit=True)
+        sx = up(x)
+        sidx = sx and sx["sid"]
+        agent_sid(x, sidx)
+        r = stop(x, "--json", env=dict(os.environ, DCH_AGENT_STEP_MS="3000"))
+        f = finals(ndjson(r.stdout)).get(x, {})
+        print("     | " + r.stdout.rstrip().replace("\n", "\n     | "))
+        check("/exit ignored: failed exit_failed with the id, resume message "
+              "typed, exit 1",
+              r.returncode == 1 and f.get("result") == "failed" and
+              f.get("reason") == "exit_failed" and
+              f.get("session_id") == sidx and
+              "resume message typed" in f.get("detail", "") and
+              typed(x)[-1].startswith(GAVE_UP))
+        ci = cmd(x)
+        check("/exit ignored: still running, disarmed, the marker dropped, "
+              "the record still tracks the id",
+              ci and ci["state"] == "running" and not marker(x) and
+              (rec(x) or {}).get("end") == "" and
+              ((rec(x) or {}).get("agent") or {}).get("session_id") == sidx)
+        run("-k", x)
+        names.remove(x)
+        y = sess("stk", "claude", crash=True)
+        sy = up(y)
+        sidy = sy and sy["sid"]
+        agent_sid(y, sidy)
+        r = stop(y, "--json")
+        f = finals(ndjson(r.stdout)).get(y, {})
+        print("     | " + r.stdout.rstrip().replace("\n", "\n     | "))
+        check("crash on /exit: ok with the record's id, exit 0",
+              r.returncode == 0 and f.get("result") == "ok" and
+              f.get("session_id") == sidy and
+              "used the session record's id" in f.get("detail", ""))
+        check("crash on /exit: the record ends stopped with the id",
+              gone(y) and rec(y)["end"] == "stopped" and
+              (rec(y)["agent"] or {}).get("session_id") == sidy)
+
+        # --- #067 L1: no record kept (DCH_NO_HISTORY): no revive promised -
+        for what, cl in (("sh", ["sh"]), ("claude", ["claude"])):
+            n = "stl%s%s" % (what, TAG)
+            names.append(n)
+            subprocess.run([DCH, "--spawn", n, "--size", "100x30"] + cl,
+                           capture_output=True, check=True,
+                           env=dict(os.environ, DCH_NO_HISTORY="1"))
+            sl = up(n) if what == "claude" else None
+            until(lambda: cmd(n))
+            r = stop(n)
+            print("     | " + r.stdout.rstrip())
+            check("no record kept (%s): stopped, exit 0, no --revive "
+                  "promised%s" % (what, ", the id to resume by hand"
+                                  if sl else ""),
+                  r.returncode == 0 and r.stdout.startswith(n + ": stopped (")
+                  and "revive with" not in r.stdout and
+                  "no session record kept" in r.stdout and rec(n) is None and
+                  (not sl or ("claude --resume %s" % sl["sid"]) in r.stdout))
+            names.remove(n)
 
         # --- never idle: failed, still running, resume message -----------
         t = sess("stt", "claude", shell=True)

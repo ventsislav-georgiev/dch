@@ -5,7 +5,8 @@ never by a `pkill -f` regex over the command line. Covers: -k/--stop `app`
 leaves `app-sock-server` running; names with ERE metacharacters and a `'`
 stop and are gone; a dch copy under another name spawns and -k's its master;
 a master whose socket no longer answers (a dead node in its place) is still
-found by its argv, and only it.
+found by its argv, and only it; a socket dir spelled two ways (a symlink)
+between spawn and -k (#067).
 
 Run:  python3 tests/kill_test.py        (uses ./dch)
 """
@@ -96,6 +97,31 @@ def main():
               ok and r.returncode == 0 and gone("fb+1"))
         check("dead socket: -k fb+1 leaves fbb1 running",
               ok and masters("fbb1"))
+
+        # #067: spawned under one spelling of the dir (a symlink), -k'd
+        # under another: the same socket, so the same master
+        ln = tmp + "-ln"
+        os.symlink(tmp, ln)
+        lsp = os.path.join(ln, "dch-%d" % os.getuid(), "sym.sock")
+
+        def lmasters():
+            out = subprocess.run(["ps", "-axo", "pid=,args="], text=True,
+                                 capture_output=True).stdout
+            return [int(l.split(None, 1)[0]) for l in out.splitlines()
+                    if " --master-of %s -- " % lsp in l]
+        subprocess.run([DCH, "--spawn", "sym", "sh"], capture_output=True,
+                       timeout=30, env=dict(os.environ, XDG_RUNTIME_DIR=ln))
+        ok = bool(lmasters())
+        r = end("-k", "sym")
+        end_t = time.time() + 5
+        while lmasters() and time.time() < end_t:
+            time.sleep(0.05)
+        left = lmasters()
+        check("socket dir spelled two ways: -k finds the master, gone",
+              ok and r.returncode == 0 and not left)
+        for p in left:
+            os.kill(p, 15)
+        os.unlink(ln)
     finally:
         for p in masters("", ""):
             os.kill(p, 15)

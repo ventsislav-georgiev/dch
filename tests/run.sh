@@ -180,6 +180,7 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "respawn keeps the session across a child exit" respawn_test.py
     pyrun "--restart --include-agents restarts stale Claude agents" agent_restart_test.py
     pyrun "--history/--revive bring dead sessions back" revive_test.py
+    pyrun "--revive never starts two claudes on one id" revive_sid_test.py
     pyrun "--pin/--unpin/--forget keep and clean history" history_pin_test.py
     pyrun "--say messages idle Claude sessions, gated" say_test.py
     pyrun "--stop pauses Claude, ends the session as stopped" stop_test.py
@@ -245,19 +246,32 @@ if [ -x "$DCH" ]; then
             && ok "--read --recent shows history" \
             || bad "--read --recent shows history"
 
-        # DCH_SCROLLBACK is a line count (page-granular, so within a page of
-        # it). Before 1.26.1 it was a byte budget under one ghostty page: ~290
-        # lines at 200 cols whatever the setting.
-        SBN="sb$$"
-        DCH_SCROLLBACK=3000 "$DCH" --spawn "$SBN" --size 200x50 -- \
-            sh -c 'seq 1 6000; echo SBDONE; sleep 30' >/dev/null 2>&1
-        "$DCH" --wait "$SBN" --match SBDONE --timeout 20000 >/dev/null 2>&1
-        sbl=$("$DCH" --read "$SBN" --recent 65535 2>/dev/null | grep -E '^[0-9]+$')
-        sbc=$(printf '%s\n' "$sbl" | grep -c .)
-        [ "$sbc" -ge 2500 ] && [ "$(printf '%s\n' "$sbl" | head -1)" != 1 ] \
-            && ok "DCH_SCROLLBACK=3000 keeps ~3000 lines, prunes older" \
-            || bad "DCH_SCROLLBACK=3000 keeps ~3000 lines, prunes older (got $sbc)"
-        "$DCH" -k "$SBN" >/dev/null 2>&1
+        # DCH_SCROLLBACK=N keeps at least N lines of history above the
+        # screen, and at most one ghostty page more (pages are pruned whole:
+        # 591 rows at 80 cols, 238 at 200; vt.c asks for N + 606 / N + 244).
+        # 0 keeps none. Before 1.28.2 N was the line limit itself, so history
+        # fell up to a page below N (2000 kept ~1600); before 1.26.1 it was
+        # a byte budget (~290 lines at 200 cols whatever the setting).
+        # N + 2928 lines: several prunes deep, and for N=100 it lands just
+        # after a limit-of-N build pruned to ~50 lines, so that build fails.
+        for sbcase in 0:80x24:0 100:80x24:606 2000:80x24:606 2000:200x50:244; do
+            sbn=${sbcase%%:*}; sbsz=${sbcase#*:}; sbpg=${sbsz#*:}; sbsz=${sbsz%:*}
+            SBN="sb$$-$sbn-$sbpg"; sbt=$((sbn + 2928))
+            DCH_SCROLLBACK=$sbn "$DCH" --spawn "$SBN" --size "$sbsz" -- \
+                sh -c "seq 1 $sbt; echo SBDONE; sleep 30" >/dev/null 2>&1
+            "$DCH" --wait "$SBN" --match SBDONE --timeout 20000 >/dev/null 2>&1
+            sbl=$("$DCH" --read "$SBN" --recent 65535 2>/dev/null | grep -E '^[0-9]+$')
+            sbs=$("$DCH" --read "$SBN" 2>/dev/null | grep -cE '^[0-9]+$')
+            sbold=$(printf '%s\n' "$sbl" | head -1)
+            # History = numbered lines kept above the screen's numbered lines.
+            sbh=$(( $(printf '%s\n' "$sbl" | grep -c .) - sbs ))
+            [ "$(printf '%s\n' "$sbl" | tail -1)" = "$sbt" ] \
+                && [ "$sbold" -eq $((sbt - sbh - sbs + 1)) ] \
+                && [ "$sbh" -ge "$sbn" ] && [ "$sbh" -le $((sbn + sbpg)) ] \
+                && ok "DCH_SCROLLBACK=$sbn at $sbsz keeps $sbn..$((sbn + sbpg)) lines" \
+                || bad "DCH_SCROLLBACK=$sbn at $sbsz keeps $sbn..$((sbn + sbpg)) lines (got $sbh, oldest $sbold of $sbt)"
+            "$DCH" -k "$SBN" >/dev/null 2>&1
+        done
 
         # Ghost text (a TUI's own placeholder/argument hint) is only
         # distinguishable from typed input by its styling, so --ansi must

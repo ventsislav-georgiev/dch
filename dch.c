@@ -1920,7 +1920,9 @@ rename_sessions_interactive(void)
 ** Kill = SIGTERM the session's master + unlink socket file. The master runs
 ** as `<exe> --master-of <sock> -- <cmd...>`; a pid is signalled only when
 ** its argv[1..2] are exactly that, whatever the binary is called (#027) and
-** whatever characters the name holds (#060).
+** whatever characters the name holds (#060) — or that socket by another
+** spelling of its dir (/tmp vs /private/tmp, a symlink: #067), compared by
+** realpath when argv[2] is absolute.
 */
 
 static int control_connect_path(const char *path);
@@ -1928,9 +1930,12 @@ static int control_connect_path(const char *path);
 static int
 is_master_of(long pid, const char *sp)
 {
-	char **v = pid > 1 ? proc_argv(pid) : NULL;
+	char **v = pid > 1 ? proc_argv(pid) : NULL, ra[PATH_MAX], rb[PATH_MAX];
 	int ok = v && v[0] && v[1] && v[2] &&
-	         strcmp(v[1], "--master-of") == 0 && strcmp(v[2], sp) == 0;
+	         strcmp(v[1], "--master-of") == 0 &&
+	         (strcmp(v[2], sp) == 0 ||
+	          (v[2][0] == '/' && realpath(v[2], ra) && realpath(sp, rb) &&
+	           strcmp(ra, rb) == 0));
 
 	free(v);
 	return ok;
@@ -4192,9 +4197,33 @@ claude_find(long root, int verify, struct crec *best)
 	return cs.n;
 }
 
-/* A process at or below `root` that is plainly Claude Code — argv[0]'s
-** basename is `claude` (a #! script's interpreter dropped) — whether or not
-** its record can be found. Its pid, or 0. */
+/* claude's arguments (after argv[0]) say it never opens a composer:
+** -p/--print before any `--`, or a subcommand first (`claude mcp serve`,
+** `claude update`). By argv, not by a record kind: crec_visit takes only
+** "interactive" records, so a batch run never has one to find, and a
+** record that cannot be read is the very case this decides (#067). */
+static int
+claude_batch(char **v)
+{
+	static const char *const sub[] = {
+		"mcp", "plugin", "plugins", "update", "upgrade", "doctor",
+		"install", "setup-token", "migrate-installer", "config", "auth",
+	};
+	int k;
+
+	for (k = 0; v[k] && strcmp(v[k], "--") != 0; k++)
+		if (strcmp(v[k], "-p") == 0 || strcmp(v[k], "--print") == 0)
+			return 1;
+	for (k = 0; v[0] && k < (int)(sizeof sub / sizeof sub[0]); k++)
+		if (strcmp(v[0], sub[k]) == 0)
+			return 1;
+	return 0;
+}
+
+/* A process at or below `root` that is plainly an interactive Claude Code
+** — argv[0]'s basename is `claude` (a #! script's interpreter dropped),
+** not a batch run (claude_batch) — whether or not its record can be found.
+** Its pid, or 0. */
 static long
 claude_proc(long root)
 {
@@ -4205,7 +4234,7 @@ claude_proc(long root)
 	{
 		char **v = proc_argv(tree[i]);
 
-		hit = v && claude_tok(v, 1) == 0;
+		hit = v && claude_tok(v, 1) == 0 && !claude_batch(v + 1);
 		free(v);
 		if (hit)
 			return tree[i];
@@ -4322,6 +4351,9 @@ dch_agent_probe(long child, struct dch_agent *a)
 {
 	struct crec r;
 	long p, pp;
+	const char *h = getenv("HOME");
+	char def[1100], *s;
+	int k;
 
 	memset(a, 0, sizeof *a);
 	if (child <= 0 || claude_find(child, 1, &r) == 0)
@@ -4334,6 +4366,15 @@ dch_agent_probe(long child, struct dch_agent *a)
 	snprintf(a->name, sizeof a->name, "%s", r.name);
 	snprintf(a->cwd, sizeof a->cwd, "%s", r.cwd);
 	snprintf(a->rec, sizeof a->rec, "%s", r.rec);
+	/* Its config dir is the record's <dir>/sessions/<pid>.json less two
+	** components, kept when it is not our ~/.claude: its own
+	** CLAUDE_CONFIG_DIR or HOME, for --revive to resume under (#065). */
+	snprintf(a->cfg, sizeof a->cfg, "%s", r.rec);
+	for (k = 0; k < 2 && (s = strrchr(a->cfg, '/')); k++)
+		*s = '\0';
+	if (h && *h && snprintf(def, sizeof def, "%s/.claude", h) <
+	    (int)sizeof def && strcmp(def, a->cfg) == 0)
+		a->cfg[0] = '\0';
 	a->launch = proc_argv(p);
 	return 0;
 }
@@ -4392,6 +4433,31 @@ json_final(const char *name, const char *xk, const char *xv,
 	put_json_str(sid);
 	fputs("}\n", stdout);
 	fflush(stdout);
+}
+
+/* A --stop that ended `name` and found no record of it (DCH_NO_HISTORY,
+** a failed write) promises no --revive: its ok line says so instead (L1,
+** #067). 1 when it printed that line. */
+static int
+stop_ok_norec(const char *name, const char *sid, int json)
+{
+	char dir[1024], p[1400], cb[256], d[600];
+	struct stat st;
+
+	if (dch_history_dir(dir, sizeof dir, sock_dir, 0) == 0 &&
+	    snprintf(p, sizeof p, "%s/%s.json", dir,
+	             canon_name(name, cb, sizeof cb)) < (int)sizeof p &&
+	    lstat(p, &st) == 0)
+		return 0;
+	snprintf(d, sizeof d, "no session record kept, so dch --revive cannot "
+	         "bring it back%s%s", *sid ? "; resume by hand: claude --resume "
+	         : "", sid);
+	if (json)
+		json_final(name, NULL, NULL, "ok", "", d, sid);
+	else
+		printf("%s: stopped (%s)\n", name, d);
+	fflush(stdout);
+	return 1;
 }
 
 /* The one result line per session; res ok|skipped|failed|interrupted.
@@ -5055,7 +5121,10 @@ ag_say(struct agent *a, int failed, const char *fmt, ...)
 	va_start(ap, fmt);
 	vsnprintf(d, sizeof d, fmt, ap);
 	va_end(ap);
-	if (a->stop || a->json)
+	if (a->stop && strcmp(res, "ok") == 0 &&
+	    stop_ok_norec(a->name, a->id[0] ? a->id : a->sid, a->json))
+		;
+	else if (a->stop || a->json)
 		stop_print(a->name, res, strcmp(res, "ok") == 0 ? ""
 		           : a->code ? a->code : a->step == AG_WAIT ? "not_idle"
 		                                                  : "exit_failed",
@@ -5314,7 +5383,8 @@ stop_exited(struct agent *a, const char *step_s, const char *resume)
 		ag_say(a, 1, "the master stopped answering after /exit within %s;"
 		       " its .stopped marker stays, so the record ends stopped "
 		       "with the id; resume message %s; resume by hand: claude "
-		       "--resume %s", step_s, ag_resume(a, resume), a->sid);
+		       "--resume %s; if claude is still running, run dch --stop "
+		       "%s again", step_s, ag_resume(a, resume), a->sid, a->name);
 		return 1;
 	}
 	if (st != 0)
@@ -5835,16 +5905,30 @@ ag_run(struct agent *ag, int na, const char *pmsg, const char *rmsg)
 			}
 			else if (ag[k].step != AG_DONE && ag_sig2)
 			{
-				/* /exit is typed: a --stop's marker stays, so a claude
-				** that quits ends the record "stopped" with the id. */
 				ag[k].res = "interrupted";
 				ag[k].code = "signal";
-				ag_say(&ag[k], 1, "interrupted (signal %d) after /exit; %s"
-				       "resume by hand: claude --resume %s", (int)ag_sig2,
-				       ag[k].stop ? "hold and .stopped marker left as they "
-				       "are, the record ends stopped with the id once claude "
-				       "has quit; " : "", ag[k].id[0] ? ag[k].id
-				                                      : ag[k].sid);
+				/* restart only: claude already runs again on the id */
+				if (ag[k].step == AG_START)
+					ag_say(&ag[k], 1, "interrupted (signal %d) after the "
+					       "relaunch: claude --resume %s is started in the "
+					       "session; resume message not typed", (int)ag_sig2,
+					       ag[k].id);
+				/* /exit is typed: a --stop's marker stays, so a claude
+				** that quits ends the record "stopped" with the id; a
+				** restart's armed hold runs out instead. */
+				else
+					ag_say(&ag[k], 1, "interrupted (signal %d) after /exit;"
+					       " %s; resume by hand: claude --resume %s; if "
+					       "claude is still running, %s %s%s", (int)ag_sig2,
+					       ag[k].stop ? "hold and .stopped marker left as "
+					       "they are, the record ends stopped with the id "
+					       "once claude has quit" : "hold left armed, once "
+					       "claude has quit the session stays held until "
+					       "DCH_HOLD_MS runs out, then ends",
+					       ag[k].id[0] ? ag[k].id : ag[k].sid, ag[k].stop
+					       ? "run dch --stop" : "dch --respawn", ag[k].name,
+					       ag[k].stop ? " again" : " --cancel disarms the "
+					       "hold");
 				fails++;
 			}
 			else if (ag[k].step != AG_DONE)
@@ -6186,6 +6270,8 @@ do_stop_verb(char **names, int nnames, int json)
 			}
 			json_phase(names[k], "ending", json);
 			why = stop_end(names[k], path, mpid, NULL);
+			if (!why && stop_ok_norec(names[k], "", json))
+				continue;
 			stop_print(names[k], why ? "failed" : "ok",
 			           why ? "end_failed" : "", why ? why : "", "", "",
 			           json);
@@ -6240,6 +6326,7 @@ struct hrec
 	char *body;		/* as stored, one line */
 	char name[512], alias[600], cwd[PATH_MAX], end[32];
 	char sid[64], aname[256], acwd[PATH_MAX];
+	char acfg[1400];	/* agent's config_dir, "" = the default (#065) */
 	long started, updated, ended;
 	char **argv, **launch;	/* malloc'd blocks */
 	int argc, launchc, live;
@@ -6340,6 +6427,9 @@ hrec_load(int dfd, const char *fn, struct hrec *r)
 		                             sizeof r->aname);
 		(void)dch_json_nested_string(r->body, "agent", "cwd", r->acwd,
 		                             sizeof r->acwd);
+		if (dch_json_nested_string(r->body, "agent", "config_dir",
+		                           r->acfg, sizeof r->acfg) < 0)
+			r->acfg[0] = '\0';
 		r->launch = dch_json_strv(r->body, "agent", "launch",
 		                          &r->launchc);
 	}
@@ -6579,6 +6669,18 @@ static const char *const rv_strip[] = {
 	"CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN",
 	"CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION",
 	"CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_PID", "CLAUDE_EFFORT",
+	/* the caller's IDE link and its hook files (E1, #067) */
+	"CLAUDE_CODE_SSE_PORT", "CLAUDE_ENV_FILE", "CLAUDE_PROJECT_DIR",
+};
+
+/* What Claude Code sets for its own tool commands, never for a session of
+** the user's (E1, #067): dropped when the caller is Claude Code
+** (CLAUDECODE), and the login shell (login_env) puts back any the user's
+** rc really sets. GIT_EDITOR=true would make a later `git commit` with no
+** -m abort. */
+static const char *const rv_harness[] = {
+	"GIT_EDITOR", "AI_AGENT", "COREPACK_ENABLE_AUTO_PIN",
+	"NoDefaultCurrentDirectoryInExePath",
 };
 
 /* Take the environment the user's login shell builds (~/.zshrc and the
@@ -6682,7 +6784,7 @@ hrec_lossy(const struct hrec *r)
 	static const char rep[] = "\xef\xbf\xbd";
 	int k;
 
-	if (strstr(r->cwd, rep) || strstr(r->acwd, rep))
+	if (strstr(r->cwd, rep) || strstr(r->acwd, rep) || strstr(r->acfg, rep))
 		return "directory";
 	for (k = 0; k < r->argc; k++)
 		if (strstr(r->argv[k], rep))
@@ -6691,6 +6793,20 @@ hrec_lossy(const struct hrec *r)
 		if (strstr(r->launch[k], rep))
 			return "claude command";
 	return NULL;
+}
+
+/* The config dir a revived claude resumes under (#065): its record's,
+** unless the command up to the claude token, v[0..tok), sets one itself
+** (`env CLAUDE_CONFIG_DIR=… claude`). NULL = leave the env alone. */
+static const char *
+rv_cfg(const char *cfg, char **v, int tok)
+{
+	int k;
+
+	for (k = 0; *cfg && k < tok; k++)
+		if (strncmp(v[k], "CLAUDE_CONFIG_DIR=", 18) == 0)
+			return NULL;
+	return *cfg ? cfg : NULL;
 }
 
 /* Spawn one record's session in its cwd, as its argv — with --resume <id>
@@ -6702,7 +6818,8 @@ revive_spawn(char *exe, struct hrec *r, int cols, int rows, int json)
 {
 	char **nv = NULL, **v = r->argv;
 	int tok = claude_tok(r->argv, r->argc), nc = r->argc, rc;
-	const char *lossy = hrec_lossy(r);
+	const char *lossy = hrec_lossy(r), *cfg = NULL, *o;
+	char *was = NULL;
 
 	if (lossy)
 	{
@@ -6725,6 +6842,13 @@ revive_spawn(char *exe, struct hrec *r, int cols, int rows, int json)
 			return -1;
 		v = nv;
 		r->mode = RV_ARGV;
+		/* claude is the child: its config dir goes in the env the new
+		** master hands it, ours put back after (--all spawns more) */
+		if ((cfg = rv_cfg(r->acfg, r->argv, tok)))
+		{
+			was = (o = getenv("CLAUDE_CONFIG_DIR")) ? strdup(o) : NULL;
+			setenv("CLAUDE_CONFIG_DIR", cfg, 1);
+		}
 	}
 	else if (r->sid[0] && r->launch)
 		r->mode = RV_SHELL;
@@ -6742,6 +6866,7 @@ revive_spawn(char *exe, struct hrec *r, int cols, int rows, int json)
 		snprintf(a.sid, sizeof a.sid, "%s", r->sid);
 		snprintf(a.name, sizeof a.name, "%s", r->aname);
 		snprintf(a.cwd, sizeof a.cwd, "%s", r->acwd);
+		snprintf(a.cfg, sizeof a.cfg, "%s", r->acfg);
 		a.launch = r->launch;
 		if ((f = open_memstream(&aj, &al)))
 		{
@@ -6764,6 +6889,11 @@ revive_spawn(char *exe, struct hrec *r, int cols, int rows, int json)
 		}
 	}
 	unsetenv("DCH_REVIVE_AGENT");
+	if (cfg && was)
+		setenv("CLAUDE_CONFIG_DIR", was, 1);
+	else if (cfg)
+		unsetenv("CLAUDE_CONFIG_DIR");
+	free(was);
 	free(nv);
 	if (rc != 0)
 	{
@@ -6777,11 +6907,15 @@ revive_spawn(char *exe, struct hrec *r, int cols, int rows, int json)
 }
 
 /* Type launch (NULL-terminated), with --resume <id>, into the shell of
-** session `name`, after `cd <cd> &&` when cd is non-NULL. 0, or -1. */
+** session `name`, after `cd <cd> &&` when cd is non-NULL, as `env
+** CLAUDE_CONFIG_DIR=<cfg> …` when rv_cfg() says so: env, not an assignment
+** word, so every shell takes it and shell_line() quotes it (#065). 0, or
+** -1. */
 static int
-shell_type_launch(const char *name, char **launch, char *id, const char *cd)
+shell_type_launch(const char *name, char **launch, char *id, const char *cd,
+                  const char *cfg)
 {
-	char **nv, *line, *cmd[1];
+	char **nv, *line, *cmd[1], *ev = NULL;
 	int n, tok, nc, rc;
 
 	for (n = 0; launch && launch[n]; n++)
@@ -6791,8 +6925,29 @@ shell_type_launch(const char *name, char **launch, char *id, const char *cd)
 		tok = n - 1;	/* no claude token: --resume goes last */
 	if (!(nv = resume_argv(launch, n, tok, id, &nc)))
 		return -1;
+	if ((cfg = rv_cfg(cfg, launch, tok)))
+	{
+		/* two slots ahead of the relaunch for `env <ev>` */
+		size_t el = strlen(cfg) + 19;
+		char **pv = calloc((size_t)nc + 2, sizeof *pv);
+
+		if (!pv || !(ev = malloc(el)))
+		{
+			free(pv);
+			free(nv);
+			return -1;
+		}
+		snprintf(ev, el, "CLAUDE_CONFIG_DIR=%s", cfg);
+		pv[0] = "env";
+		pv[1] = ev;
+		memcpy(pv + 2, nv, (size_t)nc * sizeof *nv);
+		free(nv);
+		nv = pv;
+		nc += 2;
+	}
 	line = shell_line(cd, nv, nc);
 	free(nv);
+	free(ev);
 	if (!line)
 		return -1;
 	cmd[0] = line;
@@ -6811,7 +6966,7 @@ revive_type_launch(struct hrec *r)
 	poll(NULL, 0, 300);
 	return shell_type_launch(r->as, r->launch, r->sid,
 	                         r->acwd[0] && strcmp(r->acwd, r->cwd)
-	                         ? r->acwd : NULL);
+	                         ? r->acwd : NULL, r->acfg);
 }
 
 #ifdef HAVE_LIBGHOSTTY_VT
@@ -6861,6 +7016,183 @@ revive_message(struct hrec *r, const char *msg, const char **code)
 }
 #endif
 
+/* --revive's guard against two Claudes on one conversation (#064): the
+** Claude ids running now, and where. A live session is probed the way
+** --say probes it (its child, then the live Claude records below it, each
+** read through that process's own config dir), not read from its history
+** record: the record is up to DCH_RECORD_MS behind (it misses a Claude
+** resumed by hand a moment ago) and keeps a killed Claude's id on purpose.
+** Then our Claude sessions dir, for a Claude no session probe found: one
+** that outlived its master, or runs in a plain terminal. A revive adds the
+** id it brings back (run). */
+struct sidhold
+{
+	char sid[64], who[700];
+	int run;
+};
+
+struct sidset
+{
+	struct sidhold *v;
+	int n, cap;
+};
+
+static const struct sidhold *
+sid_held(const struct sidset *s, const char *sid)
+{
+	int k;
+
+	for (k = 0; k < s->n; k++)
+		if (strcmp(s->v[k].sid, sid) == 0)
+			return &s->v[k];
+	return NULL;
+}
+
+static void
+sid_add(struct sidset *s, const char *sid, int run, const char *fmt, ...)
+{
+	struct sidhold *nv;
+	va_list ap;
+
+	if (!*sid || sid_held(s, sid))
+		return;
+	if (s->n == s->cap)
+	{
+		if (!(nv = realloc(s->v, (size_t)(s->cap * 2 + 8) * sizeof *nv)))
+			return;
+		s->v = nv;
+		s->cap = s->cap * 2 + 8;
+	}
+	snprintf(s->v[s->n].sid, sizeof s->v[s->n].sid, "%s", sid);
+	va_start(ap, fmt);
+	vsnprintf(s->v[s->n].who, sizeof s->v[s->n].who, fmt, ap);
+	va_end(ap);
+	s->v[s->n++].run = run;
+}
+
+/* dch_visit_claude_records callback: every live interactive Claude, its
+** record's procStart matching the process (a recycled pid never joins). */
+static int
+sid_visit(const char *path, const char *body, size_t len, void *arg)
+{
+	struct sidset *s = arg;
+	char kind[32], sid[64], start[128], actual[128], sn[600];
+	long pid;
+
+	(void)path;
+	(void)len;
+	if (dch_json_long(body, "pid", &pid) < 0 || pid <= 0 ||
+	    dch_json_string(body, "kind", kind, sizeof kind) < 0 ||
+	    strcmp(kind, "interactive") ||
+	    dch_json_string(body, "sessionId", sid, sizeof sid) < 0 ||
+	    !*sid || sid_held(s, sid) || kill((pid_t)pid, 0) < 0 ||
+	    dch_json_string(body, "procStart", start, sizeof start) < 0 ||
+	    dch_process_start(pid, actual, sizeof actual) < 0 ||
+	    strcmp(start, actual))
+		return 0;
+	if (proc_dch_session(pid, sn, sizeof sn) == 0 && *sn && name_live(sn))
+		sid_add(s, sid, 0, "live session %s (claude pid %ld)", sn, pid);
+	else
+		sid_add(s, sid, 0, "claude pid %ld, outside any live session",
+		        pid);
+	return 0;
+}
+
+static void
+sid_live(struct sidset *s, const struct hrec *r, int n)
+{
+	struct slist sl;
+	char sp[1100];
+	int k, j;
+
+	memset(&sl, 0, sizeof sl);
+	(void)list_sessions(&sl);
+	for (k = 0; k < sl.n; k++)
+	{
+		struct cmd_info ci;
+		struct crec c;
+
+		session_sock_path(sl.v[k], sp, sizeof sp);
+		if (cmd_query(sp, &ci) != 0)
+			continue;
+		if (ci.pid > 0 && claude_find(ci.pid, 1, &c) > 0)
+			sid_add(s, c.sid, 0, "live session %s", sl.v[k]);
+		cmd_info_free(&ci);
+	}
+	slist_free(&sl);
+	(void)dch_visit_claude_records(sid_visit, s);
+	/* and each record's own config dir (#065): a Claude outside any
+	** session runs a conversation only from the dir that holds it */
+	for (k = 0; k < n; k++)
+	{
+		for (j = 0; j < k && strcmp(r[j].acfg, r[k].acfg); j++)
+			;
+		if (r[k].acfg[0] && j == k &&
+		    snprintf(sp, sizeof sp, "%s/sessions", r[k].acfg) <
+		    (int)sizeof sp)
+			(void)visit_records_in(sp, sid_visit, s);
+	}
+}
+
+/* Which records an argument names, for --revive and --pin/--unpin/--forget
+** (#067): `<file>.json` exactly that one record file (the primary
+** <name>.json or one a cold start moved aside); else every record of that
+** session name, its canonical file, or the file as given (--history's
+** [record <file>], which canon_name would hash again when long). Sets
+** *stem and *byfile; NULL, or the reason a refusal reports: not_found for
+** a stem with a '/' (it never leaves the history dir), ambiguous for a
+** .json argument that is also a session's name. */
+static const char *
+rec_arg(const char *arg, const struct hrec *r, int n, char *cb, size_t cbsz,
+        const char **stem, int *byfile)
+{
+	size_t al = strlen(arg);
+	int k, j;
+
+	*byfile = al > 5 && strcmp(arg + al - 5, ".json") == 0;
+	if (*byfile)
+	{
+		snprintf(cb, cbsz, "%.*s", (int)(al - 5), arg);
+		*stem = cb;
+	}
+	else
+		*stem = canon_name(arg, cb, cbsz);
+	if (strchr(*stem, '/'))
+		return "not_found";
+	if (*byfile)
+	{
+		for (k = 0; k < n; k++)
+			if (strcmp(r[k].name, arg) == 0)
+				return "ambiguous";
+		return NULL;
+	}
+	/* a long argument as given that is one record's file (moved aside
+	** from a long name) while it is another's name or hashes to its file:
+	** which one is meant is anyone's guess */
+	for (k = 0; k < n; k++)
+		if (strcmp(r[k].file, arg) == 0 && strcmp(r[k].file, *stem) &&
+		    strcmp(r[k].name, arg))
+			break;
+	for (j = 0; k < n && j < n; j++)
+		if (strcmp(r[j].name, arg) == 0 || strcmp(r[j].file, *stem) == 0)
+			return "ambiguous";
+	return NULL;
+}
+
+static int
+rec_hit(const struct hrec *h, const char *arg, const char *stem, int byfile)
+{
+	if (byfile)
+		return strcmp(h->file, stem) == 0;
+	return strcmp(h->name, arg) == 0 || strcmp(h->file, stem) == 0 ||
+	       strcmp(h->file, arg) == 0;
+}
+
+#define AMBIGUOUS_FMT "ambiguous: %s matches more than one session's " \
+                      "records; pass the one meant as <file>.json, its " \
+                      "\"file\" in dch --history --json (session a.json: " \
+                      "a.json.json)"
+
 /* `--revive <name> [--as <new>]` / `--revive --all`; nomsg: --no-message,
 ** claude is resumed and nothing is typed into it. */
 static int
@@ -6870,22 +7202,45 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 	struct hrec *r;
 	int n = history_load(&r), k, picked = 0, bad = 0, seenlive = 0;
 	long step = env_ms("DCH_AGENT_STEP_MS", 60000);
-	char dir[1024], cb[256];
-	const char *nohist = getenv("DCH_NO_HISTORY");
+	char dir[1024], cb[256], ab[256];
+	const char *nohist = getenv("DCH_NO_HISTORY"), *stem = NULL, *why;
+	const struct sidhold *sh;
+	struct sidset held;
+	int byfile = 0;
 
+	memset(&held, 0, sizeof held);
+	if (!all && (why = rec_arg(name, r, n, ab, sizeof ab, &stem, &byfile)))
+	{
+		char d[1200];
+
+		if (*why == 'a')
+			snprintf(d, sizeof d, AMBIGUOUS_FMT, name);
+		else
+			snprintf(d, sizeof d, "no history for session %s", name);
+		fprintf(stderr, "dch: %s\n", d);
+		if (json)
+			json_final(name, "as", as ? as : name, "failed", *why == 'a'
+			           ? "ambiguous" : "no_history", d, "");
+		hrec_free(r, n);
+		return 1;
+	}
+	if (getenv("CLAUDECODE"))
+		for (k = 0; k < (int)(sizeof rv_harness / sizeof rv_harness[0]);
+		     k++)
+			unsetenv(rv_harness[k]);
 	for (k = 0; k < (int)(sizeof rv_strip / sizeof rv_strip[0]); k++)
 		unsetenv(rv_strip[k]);
 	login_env();
 	(void)dch_history_dir(dir, sizeof dir, sock_dir, 0);
+	if (n)
+		sid_live(&held, r, n);
 	for (k = 0; k < n; k++)
 	{
 		struct hrec *h = &r[k];
 		int i;
 
 		h->mode = RV_SKIP;
-		if (all ? !rv_all_takes(h)
-		        : strcmp(h->name, name) != 0 &&
-		          strcmp(h->file, canon_name(name, cb, sizeof cb)) != 0)
+		if (all ? !rv_all_takes(h) : !rec_hit(h, name, stem, byfile))
 			continue;
 		if (!all && (picked || h->live))
 		{
@@ -6902,6 +7257,29 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 			if (json)
 				rv_say(h, 1, "failed", "live", "session %s is live",
 				       h->as);
+			bad++;
+			continue;
+		}
+		/* never a second Claude on a conversation: not one a live
+		** session runs, not one this run already brought back from a
+		** newer record of it (the newest end comes first) */
+		sh = h->sid[0] ? sid_held(&held, h->sid) : NULL;
+		if (sh && all)
+		{
+			rv_say(h, json, "skipped", sh->run ? "dup_sid" : "live_sid",
+			       "skipped — claude %s %s%s (record %s)", h->sid,
+			       sh->run ? "is revived from a newer record as "
+			       : "already runs in ", sh->who, h->file);
+			continue;
+		}
+		if (sh)
+		{
+			fprintf(stderr, "dch: claude %s already runs in %s; not "
+			        "reviving %s: two claudes would write one "
+			        "conversation\n", h->sid, sh->who, name);
+			if (json)
+				rv_say(h, 1, "failed", "live_sid", "claude %s already "
+				       "runs in %s", h->sid, sh->who);
 			bad++;
 			continue;
 		}
@@ -6925,6 +7303,7 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 			bad++;
 			continue;
 		}
+		sid_add(&held, h->sid, 1, "%s", h->as);
 		h->deadline = wall_ms() + step;
 		/* revived into another file (a new name, or a record moved
 		** aside): the old record is now history the new one carries;
@@ -6976,6 +7355,7 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 			           ? "session is live" : "no history for this session",
 			           "");
 		hrec_free(r, n);
+		free(held.v);
 		return all ? 0 : 1;
 	}
 	/* Then the agents: every session is already starting, so waiting on
@@ -7048,6 +7428,7 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 		       why ? why : "", why ? ")" : "");
 	}
 	hrec_free(r, n);
+	free(held.v);
 	return bad ? 1 : 0;
 }
 
@@ -7089,8 +7470,8 @@ hv_forget(const char *dir, const struct hrec *r)
 ** the name, never touched by the master: it outlives every rewrite, a
 ** record that has one is never pruned, and --forget refuses it without
 ** -f. A live session's record is never forgotten: its master would write
-** it back. Matching is --revive's: name, or the canonical file; an
-** argument ending in .json matches only the record file of that stem. */
+** it back. Matching is --revive's (rec_arg): an ambiguous argument
+** touches nothing, one that matches nothing is never ok. */
 static int
 do_pin_verb(char **names, int nn, int mode, int force, int json)
 {
@@ -7122,30 +7503,21 @@ do_pin_verb(char **names, int nn, int mode, int force, int json)
 			hv_say(r[k].name, "ok", "", "forgotten", r[k].sid, json, c);
 	for (j = 0; names && j < nn; j++)
 	{
-		/* <file>.json names exactly one record file, never a name:
-		** the primary <name>.json or one a cold start moved aside */
-		size_t al = strlen(names[j]);
-		int byfile = al > 5 && strcmp(names[j] + al - 5, ".json") == 0;
+		int byfile;
+		const char *why = rec_arg(names[j], r, n, cb, sizeof cb, &cn,
+		                          &byfile);
 
-		if (byfile)
+		/* ambiguous: nothing touched, not even a stray pin */
+		if (why)
 		{
-			snprintf(cb, sizeof cb, "%.*s", (int)(al - 5), names[j]);
-			cn = cb;
-		}
-		else
-			cn = canon_name(names[j], cb, sizeof cb);
-		/* no path separator: a stem never leaves the history dir */
-		if (strchr(cn, '/'))
-		{
-			hv_say(names[j], "failed", "not_found", "no history for "
-			       "this session", "", json, c);
+			snprintf(p, sizeof p, AMBIGUOUS_FMT, names[j]);
+			hv_say(names[j], "failed", why, *why == 'a' ? p : "no "
+			       "history for this session", "", json, c);
 			continue;
 		}
 		for (hit = perr = 0, f = -1, k = 0; k < n; k++)
 		{
-			if (byfile ? strcmp(r[k].file, cn) != 0
-			    : strcmp(r[k].name, names[j]) != 0 &&
-			      strcmp(r[k].file, cn) != 0)
+			if (!rec_hit(&r[k], names[j], cn, byfile))
 				continue;
 			hit++;
 			if (f < 0)
@@ -7175,18 +7547,20 @@ do_pin_verb(char **names, int nn, int mode, int force, int json)
 				hv_say(r[k].name, "ok", "", "forgotten", r[k].sid,
 				       json, c);
 		}
-		/* a pin left without its record */
+		/* a pin left without its record: unpinning it is a hit */
 		snprintf(p, sizeof p, "%s/%s.pin", dir, cn);
-		if (mode == HV_UNPIN && dir[0] && unlink(p) < 0 && errno != ENOENT)
+		if (mode == HV_UNPIN && dir[0] && unlink(p) == 0)
+			hit += !hit;
+		else if (mode == HV_UNPIN && dir[0] && errno != ENOENT)
 			perr = errno;
-		if (mode == HV_UNPIN || (mode == HV_PIN && hit))
+		if ((mode == HV_UNPIN && (hit || perr)) || (mode == HV_PIN && hit))
 		{
 			if (perr)
 				hv_say(names[j], "failed", "io_error", strerror(perr),
-				       hit ? r[f].sid : "", json, c);
+				       f >= 0 ? r[f].sid : "", json, c);
 			else
 				hv_say(names[j], "ok", "", mode == HV_PIN ? "pinned"
-				       : "unpinned", hit ? r[f].sid : "", json, c);
+				       : "unpinned", f >= 0 ? r[f].sid : "", json, c);
 		}
 		else if (!hit)
 			hv_say(names[j], "failed", "not_found", "no history for "

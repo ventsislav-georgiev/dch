@@ -13,7 +13,14 @@ Covers: pin/unpin round trip and idempotence, --history's "pinned":true
 pinned record, -f, not_found, --forget --all (text and --json, summary
 line), the prune exemption, the pin surviving live refreshes, revive --as
 moving the pin, <file>.json naming exactly one record (#063), and the
-usage errors and exit codes. HOME, the runtime dir
+usage errors and exit codes. #067: a .json argument that is also a
+session's name (a / a.json) refused as ambiguous by --forget, --pin, --unpin
+and --revive; --unpin of nothing not_found; the [record <file>] --history
+prints for a long name's moved record (and a hashed name's) taken by --pin,
+--unpin and --revive, with and without .json, and refused as ambiguous when
+it is also another record's name; a master whose link() fails (an
+LD_PRELOAD/DYLD interposer, as on a filesystem without hard links) still
+moves the record aside, never over a taken name. HOME, the runtime dir
 and the state dir are all temporary.
 
 Run:  python3 tests/history_pin_test.py        (uses ./dch)
@@ -44,6 +51,33 @@ def ndjson(out):
         return [json.loads(l) for l in out.splitlines()]
     except ValueError:
         return None
+
+
+# link() fails as on a filesystem without hard links: the master's
+# rec_aside must fall back to an exclusive rename (#067 LOW-2). NOLINK_MARK
+# proves the shim was hit.
+NOLINK_C = r'''
+#include <errno.h>
+#include <fcntl.h>
+#include <stdlib.h>
+#include <unistd.h>
+static int nolink(const char *a, const char *b)
+{
+    const char *p = getenv("NOLINK_MARK");
+    int fd = p ? open(p, O_WRONLY | O_CREAT | O_APPEND, 0600) : -1;
+    (void)a; (void)b;
+    if (fd >= 0) { (void)write(fd, "x", 1); close(fd); }
+    errno = EPERM;
+    return -1;
+}
+#ifdef __APPLE__
+__attribute__((used, section("__DATA,__interpose")))
+static struct { const void *n, *o; } ip[] = {
+    { (const void *)nolink, (const void *)link } };
+#else
+int link(const char *a, const char *b) { return nolink(a, b); }
+#endif
+'''
 
 
 def main():
@@ -150,9 +184,10 @@ def main():
         check("...and --history no longer says pinned",
               "pinned" not in (history() or {}).get("ea", {"pinned": 1}))
         r = run("--unpin", "ea", "nobody")
-        check("--unpin with no pin, or no record: ok either way",
-              r.returncode == 0 and
-              r.stdout == "ea: unpinned\nnobody: unpinned\n")
+        check("--unpin with no pin is ok; with no record at all it is "
+              "not_found, exit 1 (QA #530: never ok on no match)",
+              r.returncode == 1 and r.stdout ==
+              "ea: unpinned\nnobody: failed — no history for this session\n")
         r = run("--pin", "nobody", "--json")
         o = ndjson(r.stdout) or []
         check("--pin with no record: failed not_found, exit 1, no pin",
@@ -426,6 +461,146 @@ def main():
         r = run("--unpin", "../evil.json")
         check("--unpin ../evil.json: not_found, nothing outside the dir "
               "touched", r.returncode == 1 and os.path.exists(evil))
+
+        # --- #067: a .json argument that is also a session's name ---------
+        plant("aj")
+        plant("aj.json")
+        for verb in ("--forget", "--pin", "--unpin"):
+            r = run(verb, "aj.json", "--json")
+            o = ndjson(r.stdout) or []
+            check("%s aj.json with sessions aj and aj.json: failed "
+                  "ambiguous, exit 1, nothing touched" % verb,
+                  r.returncode == 1 and len(o) == 2 and
+                  o[0]["reason"] == "ambiguous" and
+                  "<file>.json" in o[0]["detail"] and
+                  rec("aj") is not None and rec("aj.json") is not None and
+                  not pinned("aj") and not pinned("aj.json"))
+        r = run("--revive", "aj.json", "--json")
+        o = ndjson(r.stdout) or []
+        check("--revive aj.json: failed ambiguous, exit 1, nothing started",
+              r.returncode == 1 and o and o[-1]["reason"] == "ambiguous" and
+              run("--cmd", "aj").returncode != 0 and
+              run("--cmd", "aj.json").returncode != 0)
+        r = run("--forget", "aj.json.json")
+        check("--forget aj.json.json forgets session aj.json's record only",
+              r.returncode == 0 and rec("aj.json") is None and
+              rec("aj") is not None)
+        run("--forget", "aj")
+
+        # --- #067 / QA #530: the file --history prints for a moved-aside
+        # record of a long name, which canon_name would hash -------------
+        sun = 104 if sys.platform == "darwin" else 108
+        budget = sun - len(sockdir) - 1 - 5 - 1
+
+        def canon(n):
+            if len(n) <= budget:
+                return n
+            h = 5381
+            for c in n.encode():
+                h = (h * 33 + c) & 0xffffffffffffffff
+            return "%s-%06x" % (n[:budget - 7], h & 0xffffff)
+
+        ln = ("L%d" % os.getpid()).ljust(budget - 3, "l")
+        la = "%s.%d" % (ln, now - 400)
+        check("the test's long name fits, its aside file does not",
+              canon(ln) == ln and canon(la) != la)
+        plant(la, name=ln, ended=now - 400)
+        hint = [l for l in run("--history").stdout.splitlines()
+                if l.startswith(ln + " ")]
+        check("text --history prints [record <name>.<ended>]",
+              len(hint) == 1 and hint[0].endswith("[record %s]" % la))
+        r = run("--pin", la)
+        check("--pin <that file>: pinned, exit 0",
+              r.returncode == 0 and pinned(la))
+        r = run("--unpin", la)
+        check("--unpin <that file>: unpinned", r.returncode == 0 and
+              not pinned(la))
+        names.append(ln)
+        r = run("--revive", la)
+        check("--revive <that file>: revived as the long name, the moved "
+              "record retired",
+              r.returncode == 0 and ("revived as %s" % ln) in r.stdout and
+              until(lambda: rec(ln)) and rec(la) is None)
+        run("-k", ln)
+        until(lambda: (rec(ln) or {}).get("end"))
+        run("--forget", ln)
+        plant(la, name=ln, ended=now - 400)
+        r = run("--revive", la + ".json")
+        check("--revive <that file>.json: revived the same way",
+              r.returncode == 0 and ("revived as %s" % ln) in r.stdout and
+              until(lambda: rec(ln)) and rec(la) is None)
+        run("-k", ln)
+        until(lambda: (rec(ln) or {}).get("end"))
+        run("--forget", ln)
+
+        hn = ("H%d" % os.getpid()).ljust(budget + 20, "h")
+        ha = "%s.%d" % (canon(hn), now - 500)
+        plant(canon(hn), name=hn)
+        plant(ha, name=hn, ended=now - 500)
+        r = run("--pin", ha)
+        check("a hashed name's moved record: --pin <file --history prints> "
+              "pins that one only", r.returncode == 0 and pinned(ha) and
+              not pinned(canon(hn)))
+        run("--unpin", ha)
+        plant(ha, name=hn[:budget + 10])
+        plant(canon(ha), name=ha)
+        r = run("--pin", ha, "--json")
+        o = ndjson(r.stdout) or []
+        check("an argument that is one record's file and another's hashed "
+              "name: ambiguous, nothing pinned",
+              r.returncode == 1 and o and o[0]["reason"] == "ambiguous" and
+              not pinned(ha) and not pinned(canon(ha)))
+        for f in (canon(hn), ha, canon(ha)):
+            run("--forget", f + ".json")
+
+        # --- #067 LOW-2: rec_aside where link() fails (no hard links) ------
+        cc = shutil.which("cc")
+        if not cc:
+            print("  skip no-hard-link aside (no cc)")
+        else:
+            src, mark = os.path.join(tmp, "nolink.c"), os.path.join(tmp, "nl")
+            lib = os.path.join(tmp, "nolink.so")
+            with open(src, "w") as f:
+                f.write(NOLINK_C)
+            ok = subprocess.run([cc, "-shared", "-fPIC", "-o", lib, src] +
+                                (["-dynamiclib"] if sys.platform == "darwin"
+                                 else []), capture_output=True).returncode == 0
+            var = ("DYLD_INSERT_LIBRARIES" if sys.platform == "darwin"
+                   else "LD_PRELOAD")
+            plant("nl", end="stopped", agent=agent("sid-nl"), ended=now - 90)
+            names.append("nl")
+            subprocess.run([DCH, "--spawn", "nl", "sleep", "60"],
+                           capture_output=True, timeout=60,
+                           env=dict(os.environ, **{var: lib,
+                                                   "NOLINK_MARK": mark}))
+            until(lambda: (rec("nl") or {}).get("end") == "" and
+                  asides("nl"))
+            check("link() failing EPERM (shim hit: %s): the stopped record "
+                  "still moves to nl.<ended>.json, id kept" %
+                  os.path.exists(mark),
+                  ok and os.path.exists(mark) and
+                  asides("nl") == ["nl.%d" % (now - 90)] and
+                  asid("nl.%d" % (now - 90)) == "sid-nl" and
+                  asid("nl") is None)
+            run("-k", "nl")
+            until(lambda: (rec("nl") or {}).get("end") == "killed")
+            plant("nl.%d" % (now - 89), name="nl", end="stopped",
+                  agent=agent("sid-other"), ended=now - 89)
+            plant("nl", end="stopped", agent=agent("sid-nl2"), ended=now - 90)
+            subprocess.run([DCH, "--spawn", "nl", "sleep", "60"],
+                           capture_output=True, timeout=60,
+                           env=dict(os.environ, **{var: lib,
+                                                   "NOLINK_MARK": mark}))
+            until(lambda: (rec("nl") or {}).get("end") == "" and
+                  len(asides("nl")) == 3)
+            check("...and never over a taken name: the next second, "
+                  "nl.<ended+2>, every id kept",
+                  asides("nl") == ["nl.%d" % (now - t) for t in
+                                   (90, 89, 88)] and
+                  asid("nl.%d" % (now - 88)) == "sid-nl2" and
+                  asid("nl.%d" % (now - 89)) == "sid-other" and
+                  asid("nl.%d" % (now - 90)) == "sid-nl")
+            run("-k", "nl")
 
         # --- #059 M1: --revive X --as Y keeps Y's own dead record ----------
         plant("mk", end="stopped", agent=agent("sid-mk"), ended=now - 120)

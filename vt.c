@@ -11,6 +11,7 @@
 static GhosttyTerminal the_term; /* NULL when disabled/failed */
 static GhosttyKeyEncoder the_encoder;
 static int cur_cols, cur_rows;
+static size_t sb_lines; /* DCH_SCROLLBACK; 0 = no scrollback */
 
 /* Arbitrary cell pixel size; only image protocols and size reports care. */
 #define CELL_W 8
@@ -40,10 +41,28 @@ clamp_grid(int *cols, int *rows)
 		*rows = 1024;
 }
 
+/* libghostty drops history a whole page at a time, and only once the line
+** limit is exceeded: with a limit of N, history falls to N minus a page right
+** after a prune (at N=100 and 80 cols, down to one line). Ask for N plus one
+** page so at least N lines are always kept, and at most a page more. A
+** standard page holds a fixed ~383 KB grid (ghostty page.zig std_capacity),
+** 8 bytes per cell plus an 8-byte row header, so ~47900/(cols+1) rows: 591 at
+** 80 cols, 238 at 200. 49152 = 384 KB / 8 rounds that up a little.
+** ponytail: the page size is ghostty-internal, not in the C API; the depth
+** check in tests/run.sh fails if an upgrade changes it. */
+static int
+set_scrollback_lines(void)
+{
+	size_t n = sb_lines + 49152 / ((size_t)cur_cols + 1);
+
+	return ghostty_terminal_set(the_term,
+	    GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, &n) == GHOSTTY_SUCCESS
+	    ? 0 : -1;
+}
+
 int
 dch_vt_init(int cols, int rows, int scrollback)
 {
-	size_t lines = scrollback > 0 ? (size_t)scrollback : 0;
 	size_t zero = 0;
 
 	clamp_grid(&cols, &rows);
@@ -52,16 +71,16 @@ dch_vt_init(int cols, int rows, int scrollback)
 		the_term = NULL;
 		return -1;
 	}
-	/* Scrollback is a line count, pruned a page at a time (within a page).
-	** The library's 10 KB default byte limit would undercut it at one
-	** page, so drop the byte limit and let lines govern. 0 = none: only
-	** a zero byte limit disables it, a line limit keeps one page. */
+	cur_cols = cols;
+	cur_rows = rows;
+	sb_lines = scrollback > 0 ? (size_t)scrollback : 0;
+	/* Lines govern, so drop the byte limit (the library's 10 KB default
+	** would undercut them). 0 = none: only a zero byte limit disables
+	** scrollback, a line limit always keeps one page. */
 	if (ghostty_terminal_set(the_term,
 	    GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES,
-	    lines ? NULL : &zero) != GHOSTTY_SUCCESS ||
-	    (lines && ghostty_terminal_set(the_term,
-	    GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES,
-	    &lines) != GHOSTTY_SUCCESS)) {
+	    sb_lines ? NULL : &zero) != GHOSTTY_SUCCESS ||
+	    (sb_lines && set_scrollback_lines() < 0)) {
 		ghostty_terminal_free(the_term);
 		the_term = NULL;
 		return -1;
@@ -71,8 +90,6 @@ dch_vt_init(int cols, int rows, int scrollback)
 		the_term = NULL;
 		return -1;
 	}
-	cur_cols = cols;
-	cur_rows = rows;
 	return 0;
 }
 
@@ -103,6 +120,9 @@ dch_vt_resize(int cols, int rows)
 	    CELL_H) == GHOSTTY_SUCCESS) {
 		cur_cols = cols;
 		cur_rows = rows;
+		/* A page holds more rows when narrower: re-size the slack. */
+		if (sb_lines)
+			set_scrollback_lines();
 	}
 }
 

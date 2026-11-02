@@ -18,6 +18,9 @@
 #include "dtach.h"
 #include "vt.h"
 #include <dirent.h>
+#ifdef __linux__
+#include <sys/syscall.h>
+#endif
 #include <limits.h>
 #include <poll.h>
 
@@ -421,6 +424,8 @@ dch_agent_json(FILE *f, const struct dch_agent *a)
 	rec_str(f, a->cwd);
 	fputs(",\"launch\":", f);
 	rec_strv(f, a->launch, NULL);
+	fputs(",\"config_dir\":", f);
+	rec_str(f, a->cfg);
 	fputc('}', f);
 }
 
@@ -613,6 +618,46 @@ rec_unmark(void)
 		unlink(kp);
 }
 
+/* Move the record to np, never over a file there (errno EEXIST): link
+** then unlink; where the filesystem has no hard links (FAT, exFAT, some
+** FUSE, network and overlay mounts: EPERM, ENOTSUP, EXDEV...), a rename
+** that refuses an existing target. 0, or -1 with errno. */
+static int
+rec_move(const char *np)
+{
+	struct stat st;
+
+	if (link(rec_path, np) == 0)
+		return unlink(rec_path);
+	if (errno == EEXIST)
+		return -1;
+#if defined(__APPLE__) && defined(RENAME_EXCL)
+	if (renamex_np(rec_path, np, RENAME_EXCL) == 0)
+		return 0;
+	if (errno == EEXIST)
+		return -1;
+#elif defined(SYS_renameat2)
+	/* renameat2 by number: its glibc wrapper needs _GNU_SOURCE; 1 is
+	** RENAME_NOREPLACE. ENOSYS/EINVAL (old kernel, filesystem without
+	** it) fall through. */
+	if (syscall(SYS_renameat2, AT_FDCWD, rec_path, AT_FDCWD, np, 1) == 0)
+		return 0;
+	if (errno == EEXIST)
+		return -1;
+#endif
+	/* ponytail: check-then-rename, racing only another master that moves
+	** a record of this name aside in this same second; the exclusive
+	** rename above closes it where the platform and filesystem have one */
+	if (lstat(np, &st) == 0)
+	{
+		errno = EEXIST;
+		return -1;
+	}
+	if (errno != ENOENT)
+		return -1;
+	return rename(rec_path, np);
+}
+
 /* A cold start under a name whose record still holds a Claude id (a
 ** session --stop, -k or a crash ended) moves that record aside to
 ** <name>.<ended>.json before the first write replaces it: --history and
@@ -658,18 +703,18 @@ rec_aside(void)
 	if (dch_json_long(b, "ended", &when) < 0 || when <= 0)
 		(void)dch_json_long(b, "updated", &when);
 	free(b);
-	/* link, not rename: never over another record of that second */
+	/* never over another record of that second */
 	for (k = 0; k < 100; k++)
 	{
 		snprintf(stem, sizeof stem, "%.*s.%ld", (int)sl, rec_path,
 		         when + k);
 		snprintf(np, sizeof np, "%s.json", stem);
-		if (link(rec_path, np) == 0)
+		if (rec_move(np) == 0)
 			break;
 		if (errno != EEXIST)
 			return;
 	}
-	if (k == 100 || unlink(rec_path) < 0)
+	if (k == 100)
 		return;
 	snprintf(np, sizeof np, "%.*s.pin", (int)sl, rec_path);
 	if (lstat(np, &st) == 0 && S_ISREG(st.st_mode))

@@ -390,7 +390,16 @@ restarts past
 .B /exit
 finish; a second signal stops that wait and reports each agent past
 .B /exit
-as interrupted, with its id; a third exits at once.
+as interrupted, with its id (one already relaunched says
+.B claude \-\-resume
+.I id
+is started in the session and the resume message was not typed: type it
+there, never start a second Claude on that id; one still exiting says its
+hold is left armed, which
+.B dch \-\-respawn
+.I name
+.B \-\-cancel
+disarms if Claude is still running); a third exits at once.
 SIGKILL leaves a waiting agent paused.
 If a second signal lands after Claude has already exited into the hold,
 nothing is relaunched and the session ends when
@@ -521,11 +530,18 @@ sees it, under its own
 (else its
 .BR HOME ),
 read from the process. A session without a
-live Claude ends at once; one where a process is plainly Claude
+live Claude ends at once; one where a process is plainly an interactive
+Claude
 .RB ( claude
 as its argv[0]) but no record of it can be read is left running, nothing
 typed:
 .BR claude_unreadable .
+A non\-interactive run
+.RB ( "claude \-p" ,
+.BR \-\-print ,
+or a subcommand such as
+.BR "claude mcp serve" )
+has no composer to pause and counts as no Claude.
 Its history record ends
 .B stopped
 and keeps the agent with that id;
@@ -535,7 +551,13 @@ skips such records and
 wakes one, Claude resumed and told it was stopped and to re\-arm what it
 stopped. Sessions are handled concurrently. One line per session as it
 finishes:
-.IB name ": stopped (claude " "name id" "; revive with dch \-\-revive " name ) ,
+.IB name ": stopped (claude " "name id" "; revive with dch \-\-revive " name )
+(when the session kept no record, as under
+.BR DCH_NO_HISTORY ,
+.IB name ": stopped (no session record kept, so dch \-\-revive cannot bring it back; resume by hand: claude \-\-resume " id ) ,
+the same text as
+.B \-\-json
+detail),
 .IB name ": skipped \(em " why
 .RB ( self ", " respawn_pending ", " no_screen ),
 .IB name ": failed \(em " why
@@ -551,6 +573,12 @@ a second one reports those past
 .B /exit
 as interrupted with their id and leaves their marker, so the record still
 ends stopped; a third exits at once.
+That line, and the one for a master that stops answering after
+.BR /exit ,
+ends: if claude is still running, run
+.B dch \-\-stop
+.I name
+again.
 Once Claude's id is read, a line that is not ok carries it.
 .B \-\-json
 prints NDJSON instead:
@@ -576,11 +604,38 @@ their argv, with their Claude Code resumed via
 .I id
 (relaunched as the command, or typed into the revived shell) and told to
 carry on.
+A Claude that ran under a config dir of its own (its
+.BR CLAUDE_CONFIG_DIR ,
+typed or in the session's environment, or another
+.BR HOME )
+is resumed under it: the record's agent keeps it as
+.I config_dir
+(empty for the default
+.IR ~/.claude ),
+and the relaunch gets
+.BI CLAUDE_CONFIG_DIR= config_dir
+in its environment, or, typed into the shell, as
+.B env
+.BI CLAUDE_CONFIG_DIR= config_dir
+before the command, unless the command already sets it.
+A Claude whose
+.B HOME
+alone differed comes back with
+.IB HOME /.claude
+as its
+.BR CLAUDE_CONFIG_DIR .
+A record without
+.I config_dir
+(written before 1.28.2) is resumed as before.
 .B \-\-no\-message
 resumes it without typing that message: the result is ok and says the
 resume message was not sent.
 .I name
-takes the newest ended record of that name, never a live session's.
+takes the newest ended record of that name, never a live session's;
+.IB file .json
+exactly that record file, as for
+.BR \-\-pin ,
+and a bare argument also matches a record file exactly as given.
 A new session under a dead session's name moves that record aside to
 .IB name . ended .json
 first when it still holds a Claude id, so
@@ -593,10 +648,27 @@ and, while the new session runs,
 .B \-\-as
 .I new
 brings the old one back; it is also revived, pinned and forgotten as
-.IB name . ended .
+.IB name . ended ,
+as printed, also for a long name whose moved record's file would not
+survive the name shortening.
 .B \-\-all
 takes the sessions that died in the last 3 days after running 5 minutes or
-more. One line per session.
+more.
+Never two Claudes on one conversation: a record whose Claude id a live
+Claude already runs (probed in each live session, else found in Claude's
+sessions dir or the record's
+.IR config_dir )
+is skipped by
+.B \-\-all
+and refused by name, with or without
+.B \-\-as
+.RB ( live_sid ,
+naming the live session, or the Claude's pid outside any, and the id);
+of two records with one id
+.B \-\-all
+revives only the newest and skips the rest
+.RB ( dup_sid ).
+One line per session.
 .B \-\-json
 prints NDJSON instead:
 .RI { name ", " phase }
@@ -617,15 +689,18 @@ cwd or Claude launch holds U+FFFD is not revived
 with the id to
 .B claude \-\-resume
 by hand), since it would run something else.
-Exits 0 when nothing failed, 1 otherwise.
+Exits 0 when nothing failed (skips included), 1 otherwise.
 .TP
 .BI \-\-pin " name..." "\fR|\fP" \-\-unpin " name..." " " [ \-\-json ]
 Keep a session's history record past the 30-day prune, or stop keeping it.
 A pin is an empty
 .IB file .pin
 beside the record, keyed by the name: a new session under a pinned name is
-pinned too, a record it moves aside keeps a pin of its own, and a revive
-under another name moves the pin.
+pinned too, a record it moves aside keeps a pin of its own (so a pinned
+name gathers pinned records until
+.B \-\-unpin
+.I name
+releases them all), and a revive under another name moves the pin.
 .B \-\-pin
 and
 .B \-\-unpin
@@ -638,6 +713,18 @@ acts on that one record file only, the primary
 or a moved
 .IB name . ended .json ,
 never matched by name.
+One that is also a session's name (sessions
+.B a
+and
+.BR a.json )
+is refused,
+.BR ambiguous ,
+nothing touched:
+.B a.json.json
+names session
+.BR a.json 's
+record; so is a bare argument that is one record's file and another's
+name.
 .B \-\-history \-\-json
 gives every record its
 .I file
@@ -647,12 +734,16 @@ gives every record its
 needs a record, live or ended
 .RB ( not_found );
 .B \-\-unpin
-always succeeds.
+succeeds with or without a pin, but not without a record or a stray pin
+.RB ( not_found ).
 .TP
 .BI \-\-forget " name..." " " [ \-f "] [" \-\-json ]
 .TQ
 .BR "\-\-forget \-\-all " [ \-\-json ]
-Delete history records: never a live session's
+Delete history records: every record of the name, the ones a new session
+moved aside too
+.RI ( name . ended .json
+forgets one alone); never a live session's
 .RB ( live ),
 a pinned one only with
 .BR \-f ,
@@ -754,10 +845,14 @@ If set when a session is spawned, disable its terminal mirror.
 .TP
 .B DCH_SCROLLBACK
 Mirror scrollback lines (default 2000, max 100000), read when the session is
-spawned. Approximate: history is dropped a whole page at a time, so the kept
-depth lands within one page of the setting, at most a few hundred lines
-(more at narrow widths), usually somewhat below it. 0 keeps no scrollback, only
-the visible screen.
+spawned. At least that many lines of history are kept above the screen, and
+at most about one page more (606 lines at 80 columns, 244 at 200): history is
+dropped a whole page at a time, and a page holds about 48000/(columns+1)
+lines. 0 keeps no scrollback, only the visible screen. Memory grows with
+depth and width: 100000 lines take about 70 MB at 80 columns and 170 MB
+at 200.
+.B \-\-read \-\-recent
+reads at most 65535 lines of it.
 .TP
 .B DCH_NO_REPLAY
 If set when a session is spawned, do not replay the mirrored screen to

@@ -18,8 +18,9 @@ State lives in $FAKE_CLAUDE_DIR:
                     many Enters on a draft, as a just-resumed Claude did),
                     lag_ms (a paste shows in the composer that late),
                     exit_ms (/exit takes that long to quit)
-  <session>.log     JSON lines: start (argv, cwd, sid, the CLAUDE* and
-                    DCH_REVIVE* env keys), line (typed), turn (a message taken),
+  <session>.log     JSON lines: start (argv, cwd, sid, the CLAUDE*,
+                    DCH_REVIVE* and Claude Code tool env keys, CLAUDE_CONFIG_DIR's value as
+                    cfg), line (typed), turn (a message taken),
                     enter_dialog (Enter while a prompt is up: it would have
                     answered it), enter_eaten, exit
 <session> is DCH_SESSION, which the master sets for its child.
@@ -106,7 +107,10 @@ signal.signal(signal.SIGHUP, lambda *a: bye(0))
 
 log(ev="start", argv=sys.argv[1:], cwd=os.getcwd(), sid=SID,
     env=sorted(k for k in os.environ
-               if k.startswith(("CLAUDE", "DCH_REVIVE"))))
+               if k.startswith(("CLAUDE", "DCH_REVIVE")) or k in (
+                   "GIT_EDITOR", "AI_AGENT", "COREPACK_ENABLE_AUTO_PIN",
+                   "NoDefaultCurrentDirectoryInExePath")),
+    cfg=os.environ.get("CLAUDE_CONFIG_DIR"))
 saved = termios.tcgetattr(0)
 tty.setraw(0)
 out = sys.stdout.buffer
