@@ -1081,38 +1081,45 @@ proc_is_codex(long pid)
 }
 
 /* Claude Code's live-session records: $CLAUDE_CONFIG_DIR/sessions, else
-** ~/.claude/sessions. */
+** ~/.claude/sessions — as process `pid` sees them when its env can be read
+** (a Claude under its own config dir or HOME, #062), else as we do. pid 0
+** = ours. */
 static int
-claude_sessions_dir(char *dir, size_t dirsz)
+claude_sessions_dir(long pid, char *dir, size_t dirsz)
 {
+	static char eb[1024], hb[1024];
 	const char *base = getenv("CLAUDE_CONFIG_DIR"), *home = getenv("HOME");
 
+	if (pid > 0 && proc_env_value(pid, "CLAUDE_CONFIG_DIR", eb,
+	                              sizeof eb) == 0 && *eb)
+		base = eb;
+	else if (pid > 0 && proc_env_value(pid, "HOME", hb, sizeof hb) == 0 &&
+	         *hb)
+		base = NULL, home = hb;
 	if ((!base || !*base) && (!home || !*home))
 		return -1;
 	return snprintf(dir, dirsz, "%s%s/sessions", base && *base ? base : home,
 	                base && *base ? "" : "/.claude") >= (int)dirsz ? -1 : 0;
 }
 
-/* Did claude `pid` end cleanly? Claude Code removes its sessions/<pid>.json
-** on a clean exit; a SIGKILLed one (out of memory) leaves it behind. */
+/* Did the claude whose record the probe found at `rec` end cleanly? Claude
+** Code removes its sessions/<pid>.json on a clean exit; a SIGKILLed one (out
+** of memory) leaves it behind. The path, not the pid: the dir came from that
+** claude's env (#062), gone with it. */
 int
-dch_claude_gone(long pid)
+dch_claude_gone(const char *rec)
 {
-	char dir[1100], p[1200];
-
-	return claude_sessions_dir(dir, sizeof dir) < 0 ||
-	       snprintf(p, sizeof p, "%s/%ld.json", dir, pid) >= (int)sizeof p ||
-	       access(p, F_OK) != 0;
+	return !*rec || access(rec, F_OK) != 0;
 }
 
-int
-dch_visit_claude_records(dch_claude_record_fn visit, void *arg)
+/* Every regular record in one sessions dir, to visit(). */
+static int
+visit_records_in(const char *dir, dch_claude_record_fn visit, void *arg)
 {
-	char dir[1100];
 	DIR *d;
 	struct dirent *de;
 
-	if (claude_sessions_dir(dir, sizeof dir) < 0 || !(d = opendir(dir)))
+	if (!(d = opendir(dir)))
 		return 0;
 	while ((de = readdir(d)))
 	{
@@ -1157,6 +1164,15 @@ dch_visit_claude_records(dch_claude_record_fn visit, void *arg)
 	}
 	closedir(d);
 	return 0;
+}
+
+int
+dch_visit_claude_records(dch_claude_record_fn visit, void *arg)
+{
+	char dir[1100];
+
+	return claude_sessions_dir(0, dir, sizeof dir) < 0 ? 0
+	       : visit_records_in(dir, visit, arg);
 }
 
 /* Best-effort overlay of the Claude Code session name running inside each
@@ -1452,14 +1468,19 @@ load_codex_names(struct slist *sl)
 #endif
 }
 
-/* Write (or clear, when alias is empty) the sidecar for `name`. */
+/* Write (or clear, when alias is empty) the sidecar for `name`. At most
+** the 599 bytes the master reads into its record, cut on a character
+** boundary (callers cut by bytes). */
 static int
 write_alias(const char *name, const char *alias)
 {
 	char ap[1200];
+	size_t n = alias ? strlen(alias) : 0;
+
+	n = dch_utf8_trim(alias, n > 599 ? 599 : n);
 	if (alias_path(name, ap, sizeof(ap)) < 0)
 		return -1;
-	if (!alias || !alias[0])
+	if (!n)
 	{
 		unlink(ap);
 		return 0;
@@ -1467,7 +1488,7 @@ write_alias(const char *name, const char *alias)
 	int fd = open(ap, O_WRONLY | O_CREAT | O_TRUNC, 0600);
 	if (fd < 0)
 		return -1;
-	(void)!write(fd, alias, strlen(alias));
+	(void)!write(fd, alias, n);
 	(void)!write(fd, "\n", 1);
 	close(fd);
 	return 0;
@@ -1896,18 +1917,82 @@ rename_sessions_interactive(void)
 /* ---- session kill --------------------------------------------------- */
 
 /*
-** Kill = SIGTERM master process(es) for socket + unlink socket file. The
-** master daemonizes via re-exec as `dch --master-of <sock> -- <cmd...>` so
-** its argv contains the sock path; we pkill -f on that sentinel.
+** Kill = SIGTERM the session's master + unlink socket file. The master runs
+** as `<exe> --master-of <sock> -- <cmd...>`; a pid is signalled only when
+** its argv[1..2] are exactly that, whatever the binary is called (#027) and
+** whatever characters the name holds (#060).
 */
 
+static int control_connect_path(const char *path);
+
 static int
-pkill_pattern(const char *pat)
+is_master_of(long pid, const char *sp)
 {
-	char cmd[2048];
-	snprintf(cmd, sizeof(cmd),
-	         "pkill -TERM -f '%s' 2>/dev/null; exit 0", pat);
-	return system(cmd);
+	char **v = pid > 1 ? proc_argv(pid) : NULL;
+	int ok = v && v[0] && v[1] && v[2] &&
+	         strcmp(v[1], "--master-of") == 0 && strcmp(v[2], sp) == 0;
+
+	free(v);
+	return ok;
+}
+
+/* The pid listening on sp, as the kernel recorded it, or -1. */
+static long
+sock_peer_pid(const char *sp)
+{
+	int s = control_connect_path(sp);
+	long pid = -1;
+#if defined(LOCAL_PEERPID)
+	pid_t p;
+	socklen_t l = sizeof p;
+
+	if (s >= 0 && getsockopt(s, SOL_LOCAL, LOCAL_PEERPID, &p, &l) == 0)
+		pid = p;
+#elif defined(SO_PEERCRED)
+	/* struct ucred needs _GNU_SOURCE; its ABI is { pid, uid, gid }. */
+	unsigned int cr[3];
+	socklen_t l = sizeof cr;
+
+	if (s >= 0 && getsockopt(s, SOL_SOCKET, SO_PEERCRED, cr, &l) == 0)
+		pid = (long)cr[0];
+#endif
+	if (s >= 0)
+		close(s);
+	return pid;
+}
+
+/* SIGTERM the master of sp: the socket's listener, or, when that is not one
+** (dead socket, unreachable path, a stranger on it), every process whose
+** argv says it is. */
+static void
+term_master(const char *sp)
+{
+	long pid = sock_peer_pid(sp);
+
+	if (is_master_of(pid, sp))
+	{
+		kill((pid_t)pid, SIGTERM);
+		return;
+	}
+#ifdef __APPLE__
+	int pids[4096], n, i;
+
+	n = proc_listpids(PROC_ALL_PIDS, 0, pids, sizeof(pids));
+	for (i = 0; i < n / (int)sizeof(pids[0]); i++)
+		if (is_master_of(pids[i], sp))
+			kill(pids[i], SIGTERM);
+#else
+	DIR *d = opendir("/proc");
+	struct dirent *de;
+	char *end;
+
+	while (d && (de = readdir(d)))
+		if ((pid = strtol(de->d_name, &end, 10)) > 0 && !*end &&
+		    is_master_of(pid, sp))
+			kill((pid_t)pid, SIGTERM);
+	if (d)
+		closedir(d);
+#endif
 }
 
 /* mark: ".killed" (-k) or ".stopped" (--stop, which wrote it already). */
@@ -1932,9 +2017,7 @@ end_session(const char *name, const char *mark)
 	if ((kfd = open(pat, O_WRONLY | O_CREAT | O_NOFOLLOW, 0600)) >= 0)
 		close(kfd);
 
-	/* Term master (its sentinel argv contains the sock path). */
-	snprintf(pat, sizeof(pat), "dch --master-of %s", sp);
-	pkill_pattern(pat);
+	term_master(sp);
 
 	/* Term any clients still attached. */
 	DIR *d = opendir(sock_dir);
@@ -2142,7 +2225,7 @@ usage(void)
 /* ---- subcommand: server-only sentinel ------------------------------- */
 /*
 ** When we daemonize the master, we re-exec dch with `--master-of <sock>
-** -- <cmd...>` so the running process's argv is grep-able by kill_session.
+** -- <cmd...>` so end_session can tell the master by its argv.
 */
 
 static int
@@ -3935,6 +4018,7 @@ struct crec
 	long pid, upd;		/* upd = statusUpdatedAt, epoch ms */
 	int depth;		/* generations below the scan root */
 	char sid[64], ver[64], status[32], cwd[1024], name[256];
+	char rec[1400];		/* the record's path */
 };
 
 struct crec_scan
@@ -4035,23 +4119,98 @@ crec_visit(const char *path, const char *body, size_t len, void *arg)
 	     dch_process_start(c.pid, actual, sizeof actual) < 0 ||
 	     strcmp(start, actual)))
 		return 0;
+	snprintf(c.rec, sizeof c.rec, "%s", path);
 	if (cs->n++ == 0 || c.depth < cs->best.depth)
 		cs->best = c;
 	return 0;
 }
 
-/* Live Claude records at or below `root`; *best = the shallowest. */
+/* `root` and its descendants, breadth first, at most max: the pids. */
+static int
+proc_tree(long root, long *out, int max)
+{
+	int n = 1, i;
+#ifdef __APPLE__
+	int kids[512], c, k;
+
+	out[0] = root;
+	for (i = 0; i < n && n < max; i++)
+	{
+		c = proc_listpids(PROC_PPID_ONLY, (uint32_t)out[i], kids,
+		                  sizeof kids) / (int)sizeof *kids;
+		for (k = 0; k < c && n < max; k++)
+			if (kids[k] > 0)
+				out[n++] = kids[k];
+	}
+#else
+	static long pid[4096], pp[4096];
+	int np = 0, k;
+	DIR *d = opendir("/proc");
+	struct dirent *de;
+	char *end;
+
+	out[0] = root;
+	while (d && np < 4096 && (de = readdir(d)))
+		if ((pid[np] = strtol(de->d_name, &end, 10)) > 0 && !*end)
+			pp[np] = proc_ppid(pid[np]), np++;
+	if (d)
+		closedir(d);
+	for (i = 0; i < n && n < max; i++)
+		for (k = 0; k < np && n < max; k++)
+			if (pp[k] == out[i])
+				out[n++] = pid[k];
+#endif
+	return n;
+}
+
+/* Live Claude records at or below `root`; *best = the shallowest. Each
+** process in the tree may run under its own CLAUDE_CONFIG_DIR or HOME
+** (`CLAUDE_CONFIG_DIR=~/.claude-work claude`), so the sessions dir of every
+** one is searched, ours first (#062). */
 static int
 claude_find(long root, int verify, struct crec *best)
 {
 	struct crec_scan cs;
+	char dirs[8][1100];
+	long tree[64];
+	int n = proc_tree(root, tree, 64), nd = 0, i, j;
 
 	memset(&cs, 0, sizeof cs);
 	cs.root = root;
 	cs.verify = verify;
-	(void)dch_visit_claude_records(crec_visit, &cs);
+	for (i = -1; i < n && nd < 8; i++)
+	{
+		if (claude_sessions_dir(i < 0 ? 0 : tree[i], dirs[nd],
+		                        sizeof dirs[nd]) < 0)
+			continue;
+		for (j = 0; j < nd && strcmp(dirs[j], dirs[nd]); j++)
+			;
+		if (j == nd)
+			(void)visit_records_in(dirs[nd++], crec_visit, &cs);
+	}
 	*best = cs.best;
 	return cs.n;
+}
+
+/* A process at or below `root` that is plainly Claude Code — argv[0]'s
+** basename is `claude` (a #! script's interpreter dropped) — whether or not
+** its record can be found. Its pid, or 0. */
+static long
+claude_proc(long root)
+{
+	long tree[64];
+	int n = proc_tree(root, tree, 64), i, hit;
+
+	for (i = 0; i < n; i++)
+	{
+		char **v = proc_argv(tree[i]);
+
+		hit = v && claude_tok(v, 1) == 0;
+		free(v);
+		if (hit)
+			return tree[i];
+	}
+	return 0;
 }
 
 /* argv for the relaunch: up to the claude token, then --resume <id>, then
@@ -4174,6 +4333,7 @@ dch_agent_probe(long child, struct dch_agent *a)
 	snprintf(a->sid, sizeof a->sid, "%s", r.sid);
 	snprintf(a->name, sizeof a->name, "%s", r.name);
 	snprintf(a->cwd, sizeof a->cwd, "%s", r.cwd);
+	snprintf(a->rec, sizeof a->rec, "%s", r.rec);
 	a->launch = proc_argv(p);
 	return 0;
 }
@@ -4243,7 +4403,11 @@ stop_print(const char *name, const char *res, const char *code,
 	if (json)
 		json_final(name, NULL, NULL, res, code, detail, sid);
 	else if (strcmp(res, "ok") != 0)
-		printf("%s: %s — %s\n", name, res, detail);
+		/* the id, once known, on every line: it may be all that is left */
+		printf("%s: %s — %s%s%s%s\n", name, res, detail,
+		       *sid && !strstr(detail, sid) ? " (claude " : "",
+		       *sid && !strstr(detail, sid) ? sid : "",
+		       *sid && !strstr(detail, sid) ? ")" : "");
 	else
 		printf("%s: stopped (%s%s%s%s%srevive with dch --revive %s)%s%s\n",
 		       name, *sid ? "claude " : "", aname, *sid && *aname ? " " : "",
@@ -4895,7 +5059,8 @@ ag_say(struct agent *a, int failed, const char *fmt, ...)
 		stop_print(a->name, res, strcmp(res, "ok") == 0 ? ""
 		           : a->code ? a->code : a->step == AG_WAIT ? "not_idle"
 		                                                  : "exit_failed",
-		           d, a->ag.name, a->stop && failed ? "" : a->id, a->json);
+		           d, a->ag.name, a->id[0] || !a->stop ? a->id : a->sid,
+		           a->json);
 	else
 	{
 		printf("%s: %s%s\n", a->name, failed ? "NOT restarted — " : "", d);
@@ -5103,6 +5268,9 @@ ag_exited(struct agent *a, const char *step_s)
 	return ag_relaunch(a);
 }
 
+static int stop_recorded(const char *path, long since, char *sid,
+                         size_t sidsz);
+
 /* --stop, claude the session's command: the hold is armed and /exit
 ** typed. Once claude is gone — the session held, or claude gone under a
 ** wrapper that still runs — the exit line's id goes into the marker and the
@@ -5121,22 +5289,50 @@ stop_exited(struct agent *a, const char *step_s, const char *resume)
 		if (!gone)
 			cmd_info_free(&ci);
 	}
-	if (!gone && (st == 0 || ag_quiet(a, st)))
+	if (!gone && st == 0)
 	{
 		if (wall_ms() < a->deadline)
 			return 0;
-		stop_mark(a->path, NULL, 1);
-		if (st == 0)	/* not held: this only disarms */
-			respawn_req(a->path, 'c', NULL, 0);
-		ag_say(a, 1, "%s within %s; resume message %s", st == 0
-		       ? "/exit did not end claude" : "the master stopped "
-		       "answering after /exit", step_s, ag_resume(a, resume));
+		/* Not held: this only disarms. Then the marker goes, but only
+		** while claude provably runs: its session file stays, so the
+		** record keeps tracking it (a /clear's new id too). One that quit
+		** right after the check keeps the marker, and with it the id. */
+		respawn_req(a->path, 'c', NULL, 0);
+		if (kill((pid_t)a->cpid, 0) == 0)
+			stop_mark(a->path, NULL, 1);
+		ag_say(a, 1, "/exit did not end claude within %s; resume message "
+		       "%s", step_s, ag_resume(a, resume));
+		return 1;
+	}
+	if (!gone && ag_quiet(a, st))
+	{
+		if (wall_ms() < a->deadline)
+			return 0;
+		/* Claude may be gone already: the marker is all that keeps its
+		** id, so it stays and the held master's end records "stopped"
+		** with it. A claude still running gets a later --stop. */
+		ag_say(a, 1, "the master stopped answering after /exit within %s;"
+		       " its .stopped marker stays, so the record ends stopped "
+		       "with the id; resume message %s; resume by hand: claude "
+		       "--resume %s", step_s, ag_resume(a, resume), a->sid);
 		return 1;
 	}
 	if (st != 0)
 	{
-		stop_mark(a->path, NULL, 1);
-		ag_say(a, 1, "the session went away during /exit");
+		/* The master read the marker on its way out (it went first in
+		** its atexit order): a record that ended stopped with an id is
+		** a stop, whatever took the session down. */
+		if (stop_recorded(a->path, (long)(a->t_sent / 1000), a->id,
+		                  sizeof a->id) == 0)
+		{
+			a->res = "ok";
+			a->code = "";
+			ag_say(a, 0, "(the session ended on its own during /exit; "
+			       "its record kept the id)");
+			return 0;
+		}
+		ag_say(a, 1, "the session went away during /exit; resume by "
+		       "hand: claude --resume %s", a->sid);
 		return 1;
 	}
 	/* Under a wrapper, the exit line may still sit in the pty: give the
@@ -5383,15 +5579,20 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 
 /* SIGINT/SIGTERM/SIGHUP during the agent step: the first one is noted, so
 ** agents still waiting to pause get the resume message instead of staying
-** paused; a second one exits at once. */
-static volatile sig_atomic_t ag_sig;
+** paused; a second one stops the wait for the rest once the step in hand
+** is through (an armed hold gets its /exit, a marker stays), each reported
+** with its id; a third exits at once. */
+static volatile sig_atomic_t ag_sig, ag_sig2;
 
 static void
 ag_on_sig(int sig)
 {
-	if (ag_sig)
+	if (ag_sig2)
 		_exit(128 + sig);
-	ag_sig = sig;
+	if (ag_sig)
+		ag_sig2 = sig;
+	else
+		ag_sig = sig;
 }
 
 /* The agent step of `--restart --include-agents`: every session, or only
@@ -5562,7 +5763,7 @@ ag_run(struct agent *ag, int na, const char *pmsg, const char *rmsg)
 	sa.sa_handler = ag_on_sig;
 	sa.sa_flags = SA_RESTART;
 	sigemptyset(&sa.sa_mask);
-	ag_sig = 0;
+	ag_sig = ag_sig2 = 0;
 	for (k = 0; k < 3; k++)
 		sigaction(sigs[k], &sa, &old[k]);
 	/* A caller that stopped reading (a timed-out Bash tool, `| head`)
@@ -5630,6 +5831,20 @@ ag_run(struct agent *ag, int na, const char *pmsg, const char *rmsg)
 				ag_say(&ag[k], 1, "interrupted (signal %d) while waiting "
 				       "for it to pause; resume message %s", (int)ag_sig,
 				       ag_resume(&ag[k], rmsg));
+				fails++;
+			}
+			else if (ag[k].step != AG_DONE && ag_sig2)
+			{
+				/* /exit is typed: a --stop's marker stays, so a claude
+				** that quits ends the record "stopped" with the id. */
+				ag[k].res = "interrupted";
+				ag[k].code = "signal";
+				ag_say(&ag[k], 1, "interrupted (signal %d) after /exit; %s"
+				       "resume by hand: claude --resume %s", (int)ag_sig2,
+				       ag[k].stop ? "hold and .stopped marker left as they "
+				       "are, the record ends stopped with the id once claude "
+				       "has quit; " : "", ag[k].id[0] ? ag[k].id
+				                                      : ag[k].sid);
 				fails++;
 			}
 			else if (ag[k].step != AG_DONE)
@@ -5956,7 +6171,19 @@ do_stop_verb(char **names, int nnames, int json)
 		mpid = proc_ppid(ci.pid);
 		if (claude_find(ci.pid, 1, &r) == 0)
 		{
+			int cp = claude_proc(ci.pid) > 0;
+
 			cmd_info_free(&ci);
+			if (cp)
+			{
+				/* ending it would hang up a Claude unpaused, its id
+				** unknown: leave it */
+				stop_print(names[k], "failed", "claude_unreadable", "a "
+				           "claude runs in it, but no session record of "
+				           "it can be read; left running", "", "", json);
+				bad = 1;
+				continue;
+			}
 			json_phase(names[k], "ending", json);
 			why = stop_end(names[k], path, mpid, NULL);
 			stop_print(names[k], why ? "failed" : "ok",
@@ -6059,7 +6286,7 @@ hrec_load(int dfd, const char *fn, struct hrec *r)
 	struct stat st;
 	size_t n = strlen(fn);
 	ssize_t got;
-	char sd[sizeof sock_dir], pin[sizeof r->file + 4];
+	char sd[sizeof sock_dir], pin[sizeof r->file + 4], *fx;
 	int fd;
 
 	memset(r, 0, sizeof *r);
@@ -6082,6 +6309,12 @@ hrec_load(int dfd, const char *fn, struct hrec *r)
 	close(fd);
 	r->body[got > 0 ? got : 0] = '\0';
 	chomp(r->body);
+	/* an older master wrote bytes that are not UTF-8 as they came */
+	if ((fx = dch_utf8_fix(r->body)))
+	{
+		free(r->body);
+		r->body = fx;
+	}
 	/* the slug folds '/' and '-' together: only this socket dir's own */
 	if (!dch_json_is_object(r->body) ||
 	    dch_json_string(r->body, "sock_dir", sd, sizeof sd) < 0 ||
@@ -6112,8 +6345,10 @@ hrec_load(int dfd, const char *fn, struct hrec *r)
 	}
 	else
 		r->sid[0] = '\0';
-	/* A record with an end is over even if a new session took its name. */
-	r->live = !r->end[0] && name_live(r->name);
+	/* A record with an end is over even if a new session took its name;
+	** live means its own socket answers, so a record a cold start moved
+	** aside (<name>.<ended>.json) is history beside the name's live one. */
+	r->live = !r->end[0] && name_live(r->file);
 	if (!r->end[0] && !r->live)
 		snprintf(r->end, sizeof r->end, "vanished");
 	snprintf(pin, sizeof pin, "%s.pin", r->file);
@@ -6121,6 +6356,38 @@ hrec_load(int dfd, const char *fn, struct hrec *r)
 	            S_ISREG(st.st_mode);
 	return 0;
 }
+
+#ifdef HAVE_LIBGHOSTTY_VT
+/* --stop: did the session at `path` (its socket) leave a record that ended
+** "stopped", at `since` or later, with an agent id? Into sid: 0, or -1. */
+static int
+stop_recorded(const char *path, long since, char *sid, size_t sidsz)
+{
+	const char *b = strrchr(path, '/');
+	char dir[1024], fn[300];
+	struct hrec h;
+	size_t n;
+	int dfd, ok;
+
+	b = b ? b + 1 : path;
+	n = strlen(b);
+	if (n < 6 || strcmp(b + n - 5, ".sock") != 0 ||
+	    snprintf(fn, sizeof fn, "%.*s.json", (int)(n - 5), b)
+	    >= (int)sizeof fn ||
+	    dch_history_dir(dir, sizeof dir, sock_dir, 0) < 0 ||
+	    (dfd = open(dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)) < 0)
+		return -1;
+	ok = hrec_load(dfd, fn, &h) == 0 && strcmp(h.end, "stopped") == 0 &&
+	     h.sid[0] && h.ended >= since;
+	close(dfd);
+	if (ok)
+		snprintf(sid, sidsz, "%s", h.sid);
+	free(h.body);
+	free(h.argv);
+	free(h.launch);
+	return ok ? 0 : -1;
+}
+#endif
 
 static long
 hrec_when(const struct hrec *r)
@@ -6188,16 +6455,21 @@ do_history_verb(int json)
 		putchar('[');
 	for (k = 0; k < n; k++)
 	{
-		char when[32] = "-";
+		char when[32] = "-", cb[256], fq[2048];
 		time_t t = (time_t)hrec_when(&r[k]);
 		const char *v;
+		/* moved aside by a cold start under its name: revive, pin or
+		** forget this one by its file */
+		int aside = strcmp(r[k].file, canon_name(r[k].name, cb,
+		                                         sizeof cb)) != 0;
 
 		if (r[k].live)
 			continue;
 		if (json)
 		{
 			/* As stored, one line each; a dead end "" reads vanished,
-			** a pinned one gains "pinned":true before its '}'. */
+			** a pinned one gains "pinned":true before its '}', an
+			** aside one "file". */
 			size_t bl;
 
 			v = strstr(r[k].body, "\"end\":\"\"");
@@ -6207,8 +6479,13 @@ do_history_verb(int json)
 				       (int)(v - r[k].body), r[k].body);
 			v = v ? v + 8 : r[k].body;
 			bl = strlen(v);
-			if (r[k].pinned && bl && v[bl - 1] == '}')
-				printf("%.*s,\"pinned\":true}", (int)(bl - 1), v);
+			if (aside &&
+			    dch_json_quote(fq, sizeof fq, r[k].file) == (size_t)-1)
+				aside = 0;
+			if ((r[k].pinned || aside) && bl && v[bl - 1] == '}')
+				printf("%.*s%s%s%s}", (int)(bl - 1), v, r[k].pinned
+				       ? ",\"pinned\":true" : "", aside ? ",\"file\":"
+				       : "", aside ? fq : "");
 			else
 				fputs(v, stdout);
 			first = 0;
@@ -6225,6 +6502,8 @@ do_history_verb(int json)
 			       r[k].aname[0] ? " " : "", r[k].sid);
 		if (r[k].pinned)
 			fputs("  [pinned]", stdout);
+		if (aside)
+			printf("  [record %s]", r[k].file);
 		putchar('\n');
 	}
 	if (json)
@@ -6396,6 +6675,25 @@ rv_say(const struct hrec *r, int json, const char *res, const char *code,
 	fflush(stdout);
 }
 
+/* What a revive would run that holds U+FFFD, NULL for none: json_quote's
+** stand-in for bytes that were not UTF-8, so not what ran. */
+static const char *
+hrec_lossy(const struct hrec *r)
+{
+	static const char rep[] = "\xef\xbf\xbd";
+	int k;
+
+	if (strstr(r->cwd, rep) || strstr(r->acwd, rep))
+		return "directory";
+	for (k = 0; k < r->argc; k++)
+		if (strstr(r->argv[k], rep))
+			return "command";
+	for (k = 0; r->launch && r->launch[k]; k++)
+		if (strstr(r->launch[k], rep))
+			return "claude command";
+	return NULL;
+}
+
 /* Spawn one record's session in its cwd, as its argv — with --resume <id>
 ** when claude is its command (RV_ARGV); a shell that had claude typed into
 ** it comes back as the shell (RV_SHELL, the command is typed later). 0, or
@@ -6405,7 +6703,16 @@ revive_spawn(char *exe, struct hrec *r, int cols, int rows, int json)
 {
 	char **nv = NULL, **v = r->argv;
 	int tok = claude_tok(r->argv, r->argc), nc = r->argc, rc;
+	const char *lossy = hrec_lossy(r);
 
+	if (lossy)
+	{
+		rv_say(r, json, "failed", "not_utf8", "NOT revived — its %s had "
+		       "bytes that are not UTF-8, recorded as U+FFFD: it would run "
+		       "something else%s%s", lossy, r->sid[0] ? "; resume by "
+		       "hand: claude --resume " : "", r->sid);
+		return -1;
+	}
 	if (chdir(r->cwd) < 0)
 	{
 		rv_say(r, json, "failed", "cwd_gone", "NOT revived — its directory "
@@ -6562,9 +6869,10 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
                int cols, int rows, int json, int nomsg)
 {
 	struct hrec *r;
-	int n = history_load(&r), k, picked = 0, bad = 0;
+	int n = history_load(&r), k, picked = 0, bad = 0, seenlive = 0;
 	long step = env_ms("DCH_AGENT_STEP_MS", 60000);
 	char dir[1024], cb[256];
+	const char *nohist = getenv("DCH_NO_HISTORY");
 
 	for (k = 0; k < (int)(sizeof rv_strip / sizeof rv_strip[0]); k++)
 		unsetenv(rv_strip[k]);
@@ -6580,8 +6888,11 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 		        : strcmp(h->name, name) != 0 &&
 		          strcmp(h->file, canon_name(name, cb, sizeof cb)) != 0)
 			continue;
-		if (!all && picked)
-			continue;	/* two records claim it: the newest wins */
+		if (!all && (picked || h->live))
+		{
+			seenlive |= h->live;
+			continue;	/* the newest ended record wins */
+		}
 		picked++;
 		snprintf(h->as, sizeof h->as, "%s", as ? as : h->name);
 		if (!all && name_live(h->as))
@@ -6616,20 +6927,27 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 			continue;
 		}
 		h->deadline = wall_ms() + step;
-		/* revived under a new name: the old record is now history the
-		** new one carries; left alone, --all would revive it again */
-		if (strcmp(h->as, h->name) != 0 && !h->live)
+		/* revived into another file (a new name, or a record moved
+		** aside): the old record is now history the new one carries;
+		** left alone, --all would revive it again */
+		if (strcmp(h->file, canon_name(h->as, cb, sizeof cb)) != 0 &&
+		    !h->live)
 		{
 			char rp[1400], np[1400];
 
+			/* not when the new master keeps no record: it has our env
+			** (login_env never takes DCH_*), so master.c's own test */
 			snprintf(rp, sizeof rp, "%s/%s.json", dir, h->file);
-			unlink(rp);
-			/* and its pin moves with it */
-			snprintf(rp, sizeof rp, "%s/%s.pin", dir, h->file);
-			snprintf(np, sizeof np, "%s/%s.pin", dir,
-			         canon_name(h->as, cb, sizeof cb));
-			if (h->pinned)
-				(void)rename(rp, np);
+			if (!(nohist && *nohist && strcmp(nohist, "0") != 0) &&
+			    unlink(rp) == 0)
+			{
+				/* and its pin moves with it */
+				snprintf(rp, sizeof rp, "%s/%s.pin", dir, h->file);
+				snprintf(np, sizeof np, "%s/%s.pin", dir,
+				         canon_name(h->as, cb, sizeof cb));
+				if (h->pinned)
+					(void)rename(rp, np);
+			}
 		}
 		if (h->mode == RV_PLAIN)
 		{
@@ -6648,11 +6966,16 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 			puts("nothing to revive (sessions that ended over 3 days "
 			     "ago or ran under 5 minutes are in dch --history; "
 			     "revive one by name)");
+		else if (!all && seenlive)
+			fprintf(stderr, "dch: session %s is live and no ended record "
+			        "of it is left to revive\n", name);
 		else if (!all)
 			fprintf(stderr, "dch: no history for session %s\n", name);
 		if (!all && json)
 			json_final(name, "as", as ? as : name, "failed",
-			           "no_history", "no history for this session", "");
+			           seenlive ? "live" : "no_history", seenlive
+			           ? "session is live" : "no history for this session",
+			           "");
 		hrec_free(r, n);
 		return all ? 0 : 1;
 	}
@@ -6772,14 +7095,15 @@ static int
 do_pin_verb(char **names, int nn, int mode, int force, int json)
 {
 	struct hrec *r;
-	int n = history_load(&r), j, k, hit, c[3] = {0, 0, 0}, kp = 0, kl = 0;
+	int n = history_load(&r), j, k, f, fd, perr, hit, c[3] = {0, 0, 0};
+	int kp = 0, kl = 0;
 	char dir[1024], cb[256], p[1400];
 	const char *cn;
 
 	if (dch_history_dir(dir, sizeof dir, sock_dir, 0) < 0)
 		dir[0] = '\0';	/* no records: history_load found none */
 	for (k = 0; !names && k < n; k++)
-		if (name_live(r[k].name))
+		if (name_live(r[k].file))
 		{
 			kl++;
 			hv_say(r[k].name, "skipped", "live", "session is live",
@@ -6799,15 +7123,27 @@ do_pin_verb(char **names, int nn, int mode, int force, int json)
 	for (j = 0; names && j < nn; j++)
 	{
 		cn = canon_name(names[j], cb, sizeof cb);
-		for (hit = 0, k = 0; k < n; k++)
+		for (hit = perr = 0, f = -1, k = 0; k < n; k++)
 		{
 			if (strcmp(r[k].name, names[j]) != 0 &&
 			    strcmp(r[k].file, cn) != 0)
 				continue;
 			hit++;
+			if (f < 0)
+				f = k;	/* the newest record: its sid */
+			/* every record of the name, the ones a cold start moved
+			** aside too: the pin goes beside each */
+			snprintf(p, sizeof p, "%s/%s.pin", dir, r[k].file);
+			if (mode == HV_PIN && (fd = open(p, O_WRONLY | O_CREAT |
+			                                 O_NOFOLLOW, 0600)) >= 0)
+				close(fd);
+			else if (mode == HV_PIN)
+				perr = errno;
+			else if (mode == HV_UNPIN && unlink(p) < 0 && errno != ENOENT)
+				perr = errno;
 			if (mode != HV_FORGET)
-				break;	/* the newest record: its sid */
-			if (name_live(r[k].name))
+				continue;
+			if (name_live(r[k].file))
 				hv_say(r[k].name, "failed", "live", "session is live",
 				       r[k].sid, json, c);
 			else if (r[k].pinned && !force)
@@ -6820,31 +7156,22 @@ do_pin_verb(char **names, int nn, int mode, int force, int json)
 				hv_say(r[k].name, "ok", "", "forgotten", r[k].sid,
 				       json, c);
 		}
+		/* a pin left without its record */
 		snprintf(p, sizeof p, "%s/%s.pin", dir, cn);
-		if (mode == HV_UNPIN)
+		if (mode == HV_UNPIN && dir[0] && unlink(p) < 0 && errno != ENOENT)
+			perr = errno;
+		if (mode == HV_UNPIN || (mode == HV_PIN && hit))
 		{
-			if (dir[0] && unlink(p) < 0 && errno != ENOENT)
-				hv_say(names[j], "failed", "io_error", strerror(errno),
-				       hit ? r[k].sid : "", json, c);
+			if (perr)
+				hv_say(names[j], "failed", "io_error", strerror(perr),
+				       hit ? r[f].sid : "", json, c);
 			else
-				hv_say(names[j], "ok", "", "unpinned",
-				       hit ? r[k].sid : "", json, c);
+				hv_say(names[j], "ok", "", mode == HV_PIN ? "pinned"
+				       : "unpinned", hit ? r[f].sid : "", json, c);
 		}
 		else if (!hit)
 			hv_say(names[j], "failed", "not_found", "no history for "
 			       "this session", "", json, c);
-		else if (mode == HV_PIN)
-		{
-			int fd = open(p, O_WRONLY | O_CREAT | O_NOFOLLOW, 0600);
-
-			if (fd < 0)
-				hv_say(names[j], "failed", "io_error", strerror(errno),
-				       r[k].sid, json, c);
-			else
-				hv_say(names[j], "ok", "", "pinned", r[k].sid, json, c);
-			if (fd >= 0)
-				close(fd);
-		}
 	}
 	if (json)
 		printf("{\"ok\":%d,\"skipped\":%d,\"failed\":%d}\n", c[0], c[1],
@@ -7606,9 +7933,9 @@ main(int argc, char **argv)
 	}
 	case A_LISTJSON2:
 	{
-		/* Real JSON for agents. Names/aliases are tab- and
-		** newline-free (enforced at creation), so escaping only has
-		** to cover quotes and backslashes. */
+		/* Real JSON for agents: names, aliases and harness names
+		** quoted by json_quote, so bytes that are not UTF-8 read as
+		** U+FFFD instead of breaking the parse. */
 		struct slist sl = {0};
 		list_sessions(&sl);
 		load_aliases(&sl);
@@ -7618,22 +7945,18 @@ main(int argc, char **argv)
 		putchar('[');
 		for (k = 0; k < sl.n; k++)
 		{
-			const char *f;
-			printf("%s{\"name\":\"", k ? "," : "");
-			for (f = sl.v[k]; *f; f++)
-				printf(*f == '"' || *f == '\\' ? "\\%c" : "%c", *f);
-			printf("\",\"alias\":\"");
-			for (f = sl.alias[k] ? sl.alias[k] : ""; *f; f++)
-				printf(*f == '"' || *f == '\\' ? "\\%c" : "%c", *f);
-			printf("\",\"harness\":\"");
-			for (f = sl.harness[k] ? sl.harness[k] : ""; *f; f++)
-				printf(*f == '"' || *f == '\\' ? "\\%c" : "%c", *f);
+			printf("%s{\"name\":", k ? "," : "");
+			put_json_str(sl.v[k]);
+			fputs(",\"alias\":", stdout);
+			put_json_str(sl.alias[k] ? sl.alias[k] : "");
+			fputs(",\"harness\":", stdout);
+			put_json_str(sl.harness[k] ? sl.harness[k] : "");
 			/* version is "" when the master predates the sidecar —
 			** i.e. definitely older than us, which is exactly what
 			** a caller deciding whether to --restart needs. */
 			long mep;
 			const char *meta = session_meta(sl.v[k], &mep);
-			printf("\",\"activity_epoch\":%ld,\"state\":\"%s\""
+			printf(",\"activity_epoch\":%ld,\"state\":\"%s\""
 			       ",\"version\":\"%s\",\"agents\":%d"
 			       ",\"meta\":%s,\"meta_epoch\":%ld}",
 			       activity_epoch(sl.v[k]),

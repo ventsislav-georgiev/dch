@@ -272,13 +272,14 @@ struct dch_agent
 {
 	long pid;		/* claude's pid */
 	char sid[64], name[256], cwd[1024];
+	char rec[1400];		/* its Claude session record's path */
 	char **launch;		/* malloc'd block, NULL-terminated; may be NULL */
 };
 int dch_history_dir(char *out, size_t outsz, const char *sockdir,
                     int create);
 int dch_agent_probe(long child, struct dch_agent *a);
 void dch_agent_json(FILE *f, const struct dch_agent *a);
-int dch_claude_gone(long pid);
+int dch_claude_gone(const char *rec);
 int path_lookup(const char *name, const char *path, const char *cwd,
                 char *out, size_t outsz);
 

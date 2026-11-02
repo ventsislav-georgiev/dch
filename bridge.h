@@ -25,6 +25,8 @@ int dch_json_is_object(const char *json);
 int dch_json_nested_string(const char *json, const char *object,
                            const char *key, char *out, size_t cap);
 size_t dch_json_quote(char *out, size_t cap, const char *s);
+size_t dch_utf8_trim(const char *s, size_t n);
+char *dch_utf8_fix(const char *s);
 char **dch_json_strv(const char *json, const char *object, const char *key,
                      int *argc);
 int dch_process_start(long pid, char *out, size_t cap);

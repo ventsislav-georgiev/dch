@@ -322,7 +322,8 @@ is a usage error. A session qualifies when a live interactive Claude session
 record (under
 .IR ~/.claude/sessions ,
 or
-.BR CLAUDE_CONFIG_DIR )
+.BR CLAUDE_CONFIG_DIR ,
+as each process in the session's tree has them in its own environment)
 belongs to a descendant of the session's child, with a matching process start
 time, and Claude is its command (a
 .B claude
@@ -387,7 +388,10 @@ from inside Claude Code run it in the background. SIGINT, SIGTERM or SIGHUP
 types the resume message into agents still waiting to pause and lets
 restarts past
 .B /exit
-finish; a second signal exits at once. SIGKILL leaves a waiting agent paused.
+finish; a second signal stops that wait and reports each agent past
+.B /exit
+as interrupted, with its id; a third exits at once.
+SIGKILL leaves a waiting agent paused.
 If a second signal lands after Claude has already exited into the hold,
 nothing is relaunched and the session ends when
 .B DCH_HOLD_MS
@@ -511,8 +515,18 @@ as the shell would run whatever followed
 .B claude
 on its line: its resume id is read from its session record and the
 session's end hangs up the shell and Claude together.
-Then the session ends. A session without a
-live Claude ends at once. Its history record ends
+Then the session ends. Claude's session record is looked up as Claude
+sees it, under its own
+.B CLAUDE_CONFIG_DIR
+(else its
+.BR HOME ),
+read from the process. A session without a
+live Claude ends at once; one where a process is plainly Claude
+.RB ( claude
+as its argv[0]) but no record of it can be read is left running, nothing
+typed:
+.BR claude_unreadable .
+Its history record ends
 .B stopped
 and keeps the agent with that id;
 .B \-\-revive \-\-all
@@ -525,15 +539,19 @@ finishes:
 .IB name ": skipped \(em " why
 .RB ( self ", " respawn_pending ", " no_screen ),
 .IB name ": failed \(em " why
-.RB ( no_session ", " old_master ", " prompt ", " draft ", " queued ,
-.BR not_typed ", " not_idle ", " exit_failed ", " claude_exited ,
+.RB ( no_session ", " old_master ", " claude_unreadable ", " prompt ,
+.BR draft ", " queued ", " not_typed ", " not_idle ", " exit_failed ", " claude_exited ,
 .BR end_failed )
 or
 .IB name ": interrupted \(em " why .
 A failure leaves the session running and types a resume message into its
 Claude; so does a first SIGINT or SIGTERM for every Claude not yet past
 .BR /exit ;
-a second one exits at once.
+a second one reports those past
+.B /exit
+as interrupted with their id and leaves their marker, so the record still
+ends stopped; a third exits at once.
+Once Claude's id is read, a line that is not ok carries it.
 .B \-\-json
 prints NDJSON instead:
 .RI { name ", " phase }
@@ -561,6 +579,21 @@ carry on.
 .B \-\-no\-message
 resumes it without typing that message: the result is ok and says the
 resume message was not sent.
+.I name
+takes the newest ended record of that name, never a live session's.
+A new session under a dead session's name moves that record aside to
+.IB name . ended .json
+first when it still holds a Claude id, so
+.B \-\-history
+lists it with
+.RI [record " name" . ended ]
+and, while the new session runs,
+.B \-\-revive
+.I name
+.B \-\-as
+.I new
+brings the old one back; it is also revived, pinned and forgotten as
+.IB name . ended .
 .B \-\-all
 takes the sessions that died in the last 3 days after running 5 minutes or
 more. One line per session.
@@ -577,14 +610,26 @@ and one
 .RI { name ", " as ", " result ", " reason ", " detail ", " session_id }
 per session, where
 .I as
-is the name it came back under. Exits 0 when nothing failed, 1 otherwise.
+is the name it came back under.
+A record stores a byte that is not UTF\-8 as U+FFFD; one whose command,
+cwd or Claude launch holds U+FFFD is not revived
+.RB ( not_utf8 ,
+with the id to
+.B claude \-\-resume
+by hand), since it would run something else.
+Exits 0 when nothing failed, 1 otherwise.
 .TP
 .BI \-\-pin " name..." "\fR|\fP" \-\-unpin " name..." " " [ \-\-json ]
 Keep a session's history record past the 30-day prune, or stop keeping it.
 A pin is an empty
 .IB file .pin
 beside the record, keyed by the name: a new session under a pinned name is
-pinned too, and a revive under another name moves the pin.
+pinned too, a record it moves aside keeps a pin of its own, and a revive
+under another name moves the pin.
+.B \-\-pin
+and
+.B \-\-unpin
+act on every record of the name.
 .B \-\-pin
 needs a record, live or ended
 .RB ( not_found );

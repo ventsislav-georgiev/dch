@@ -13,7 +13,16 @@ never goes idle (failed after DCH_AGENT_TIMEOUT_MS, still running, resume
 message typed); one SIGTERM while pausing (interrupted, resume message);
 self (DCH_SESSION); a pending respawn; --all over a mix with --json (pure
 NDJSON: phases, then one final object per session); --revive --all
-skipping a stopped record; unknown names, an old master, usage errors. On
+skipping a stopped record; unknown names, an old master, usage errors;
+#058: a master SIGSTOPped after /exit (failed with the id, the marker kept,
+the record ends stopped with it), a session that ended during /exit with its
+record stopped (ok, #050), a second Ctrl-C at "exiting" (interrupted with
+the id, the record still ends stopped). #062: a Claude under its own
+CLAUDE_CONFIG_DIR, as the command and typed into the shell, while --stop and
+the master run without it (found by its own env: paused, /exit'ed, the
+record ends stopped with its id, --revive brings it back under that dir); a
+Claude whose session record cannot be read (failed/claude_unreadable,
+nothing typed, the session left running). On
 dch-lite: Claude sessions skipped/no_screen with nothing typed, the rest
 still stop.
 
@@ -166,6 +175,13 @@ def main():
 
     def stop(*args, env=None):
         return run("--stop", *args, env=env)
+
+    def alive(pid):
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
 
     def gone(n):
         names.remove(n)
@@ -443,6 +459,83 @@ def main():
               gone(n) and rec(n)["end"] == "stopped" and
               (rec(n)["agent"] or {}).get("session_id") == sid7)
 
+        # --- #062: claude under its own CLAUDE_CONFIG_DIR -----------------
+        # --stop and the master run without it: the record is found by the
+        # claude process's own env
+        alt = os.path.join(tmp, "alt-claude")
+        g = sess("stcfg", "/usr/bin/env", "CLAUDE_CONFIG_DIR=" + alt, "claude")
+        s8 = up(g)
+        sid8 = s8 and s8["sid"]
+        check("other CLAUDE_CONFIG_DIR (command): the master's record has "
+              "the agent", sid8 and agent_sid(g, sid8))
+        r = stop(g)
+        print("     | " + r.stdout.rstrip())
+        check("other CLAUDE_CONFIG_DIR (command): stopped with the id, "
+              "pause then /exit typed, record ends stopped with the id",
+              r.returncode == 0 and sid8 and
+              r.stdout == "%s: stopped (claude %s; revive with dch --revive "
+              "%s)\n" % (g, sid8, g) and
+              typed(g)[:1] and typed(g)[0].startswith(PAUSE) and
+              typed(g)[-1] == "/exit" and gone(g) and
+              rec(g)["end"] == "stopped" and
+              (rec(g)["agent"] or {}).get("session_id") == sid8)
+        r = run("--revive", g)
+        names.append(g)
+        s9 = up(g, 1)
+        check("other CLAUDE_CONFIG_DIR (command): --revive resumes the id "
+              "under that dir",
+              r.returncode == 0 and s9 and s9["sid"] == sid8 and
+              "CLAUDE_CONFIG_DIR" in s9["env"])
+        run("-k", g)
+        names.remove(g)
+        until(lambda: cmd(g) is None)
+        g = sess("stcfgs", "sh")
+        time.sleep(0.3)
+        run("--run", g, "CLAUDE_CONFIG_DIR=%s claude" % alt)
+        s8 = up(g)
+        sid8 = s8 and s8["sid"]
+        check("other CLAUDE_CONFIG_DIR (typed into the shell): the master's "
+              "record has the agent", sid8 and agent_sid(g, sid8))
+        r = stop(g)
+        print("     | " + r.stdout.rstrip())
+        gone(g)
+        print("     | typed %r; record end %r agent %r" % (
+            [t[:20] for t in typed(g)], (rec(g) or {}).get("end"),
+            ((rec(g) or {}).get("agent") or {}).get("session_id")))
+        check("other CLAUDE_CONFIG_DIR (typed into the shell): stopped with "
+              "the id, pause typed, record ends stopped with the id",
+              r.returncode == 0 and sid8 and
+              r.stdout == "%s: stopped (claude %s; revive with dch --revive "
+              "%s)\n" % (g, sid8, g) and
+              typed(g)[:1] and typed(g)[0].startswith(PAUSE) and
+              (rec(g) or {}).get("end") == "stopped" and
+              (rec(g)["agent"] or {}).get("session_id") == sid8)
+
+        # --- #062: a claude whose record cannot be read is left alone -----
+        u = sess("stunr", "claude")
+        s10 = up(u)
+        until(lambda: (rec(u) or {}).get("agent"))
+        if s10:
+            os.unlink(os.path.join(home, ".claude", "sessions",
+                                   "%d.json" % s10["pid"]))
+        r = stop(u, "--json")
+        f = finals(ndjson(r.stdout)).get(u, {})
+        print("     | " + r.stdout.rstrip().replace("\n", "\n     | "))
+        check("record unreadable: failed/claude_unreadable, exit 1, nothing "
+              "typed",
+              s10 and r.returncode == 1 and f.get("result") == "failed" and
+              f.get("reason") == "claude_unreadable" and
+              f.get("session_id") == "" and typed(u) == [])
+        ci = cmd(u)
+        check("record unreadable: session and claude still running, no "
+              "marker, record not ended",
+              ci and ci["state"] == "running" and
+              not any(e["ev"] == "exit" for e in events(u)) and
+              s10 and alive(s10["pid"]) and not marker(u) and
+              (rec(u) or {}).get("end") == "")
+        run("-k", u)
+        names.remove(u)
+
         # --- never idle: failed, still running, resume message -----------
         t = sess("stt", "claude", shell=True)
         up(t)
@@ -548,6 +641,96 @@ def main():
               not any(l.startswith((mc + ":", ms + ":", p + ":"))
                       for l in r.stdout.splitlines()) and
               cmd(mc) is None and cmd(ms) is None)
+
+        # --- #058 H1/M6: the master goes quiet (SIGSTOP) after /exit ------
+        def spawn_held(base, hold, **ctl):
+            n = "%s%s" % (base, TAG)
+            names.append(n)
+            setctl(n, **ctl)
+            subprocess.run([DCH, "--spawn", n, "--size", "100x30", "claude"],
+                           capture_output=True, check=True,
+                           env=dict(os.environ, DCH_HOLD_MS=str(hold)))
+            s = up(n)
+            agent_sid(n, s and s["sid"])
+            return n, s and s["sid"]
+
+        def master_pid(n):
+            out = subprocess.run(["/bin/ps", "-o", "ppid=", "-p",
+                                  str(cmd(n)["pid"])], capture_output=True,
+                                 text=True).stdout.strip()
+            return int(out)
+
+        q, sidq = spawn_held("stq", 3000, exit_ms=1500)
+        mq = master_pid(q)
+        proc = subprocess.Popen([DCH, "--stop", q], stdout=subprocess.PIPE,
+                                text=True, env=dict(os.environ,
+                                                    DCH_AGENT_STEP_MS="3000"))
+        try:
+            until(lambda: "/exit" in typed(q), 60)
+            os.kill(mq, signal.SIGSTOP)     # before claude quits
+            out = proc.communicate(timeout=60)[0]
+            mk = marker(q)
+        finally:
+            os.kill(mq, signal.SIGCONT)
+        print("     | " + out.rstrip())
+        check("quiet master after /exit: failed, the text line carries the "
+              "id, exit 1",
+              proc.returncode == 1 and out.startswith(q + ": failed — ") and
+              "the master stopped answering after /exit" in out and
+              ("claude --resume %s" % sidq) in out)
+        check("quiet master after /exit: the .stopped marker survives", mk)
+        check("quiet master after /exit: once it runs again and the hold "
+              "ends, the record ends stopped with claude's id",
+              gone(q) and rec(q)["end"] == "stopped" and
+              (rec(q)["agent"] or {}).get("session_id") == sidq)
+
+        # --- #050: the session ended during /exit, record stopped: ok ------
+        g, sidg = spawn_held("stg", 300, exit_ms=500)
+        proc = subprocess.Popen([DCH, "--stop", g, "--json"],
+                                stdout=subprocess.PIPE, text=True)
+        try:
+            until(lambda: "/exit" in typed(g), 60)
+            # claude quits, the hold runs out unseen by --stop
+            proc.send_signal(signal.SIGSTOP)
+            ended = until(lambda: (rec(g) or {}).get("end"), 20)
+        finally:
+            proc.send_signal(signal.SIGCONT)
+        out = proc.communicate(timeout=60)[0]
+        f = finals(ndjson(out)).get(g, {})
+        print("     | " + out.rstrip().replace("\n", "\n     | "))
+        check("ended during /exit, record stopped with the id: ok with the "
+              "id, exit 0",
+              ended == "stopped" and proc.returncode == 0 and
+              f.get("result") == "ok" and f.get("session_id") == sidg and
+              (rec(g)["agent"] or {}).get("session_id") == sidg)
+        names.remove(g)
+
+        # --- #058 M5/M6: Ctrl-C twice as --stop reaches "exiting" ----------
+        d, sidd = spawn_held("std", 2000)
+        proc = subprocess.Popen([DCH, "--stop", d, "--json"],
+                                stdout=subprocess.PIPE, text=True)
+        head = []
+        while True:
+            l = proc.stdout.readline()
+            head.append(l)
+            if '"exiting"' in l or not l:
+                break
+        proc.send_signal(signal.SIGINT)
+        time.sleep(0.01)
+        proc.send_signal(signal.SIGINT)
+        out = "".join(head) + proc.communicate(timeout=60)[0]
+        f = finals(ndjson(out)).get(d, {})
+        print("     | " + out.rstrip().replace("\n", "\n     | "))
+        check("second Ctrl-C at exiting: a final interrupted line with the "
+              "id, exit 1",
+              proc.returncode == 1 and f.get("result") == "interrupted" and
+              f.get("reason") == "signal" and f.get("session_id") == sidd and
+              ("claude --resume %s" % sidd) in f.get("detail", ""))
+        check("second Ctrl-C at exiting: /exit typed, the record ends stopped "
+              "with the id",
+              until(lambda: "/exit" in typed(d)) and gone(d) and
+              rec(d)["end"] == "stopped" and
+              (rec(d)["agent"] or {}).get("session_id") == sidd)
         return finish(fails[0], tmp, names, pids)
     except Exception:
         traceback.print_exc()

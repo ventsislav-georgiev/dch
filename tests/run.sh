@@ -183,6 +183,8 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "--pin/--unpin/--forget keep and clean history" history_pin_test.py
     pyrun "--say messages idle Claude sessions, gated" say_test.py
     pyrun "--stop pauses Claude, ends the session as stopped" stop_test.py
+    pyrun "-k/--stop signal exactly the session's master" kill_test.py
+    pyrun "records with odd bytes, long aliases and long argv read back" record_utf8_test.py
 fi
 
 # --- control verbs: --spawn --run --read --wait --keys ---------------------

@@ -16,7 +16,8 @@ State lives in $FAKE_CLAUDE_DIR:
                     pasted_decoy (a "[Pasted text #1
                     +3 lines]" transcript line), eat_enters (ignore that
                     many Enters on a draft, as a just-resumed Claude did),
-                    lag_ms (a paste shows in the composer that late)
+                    lag_ms (a paste shows in the composer that late),
+                    exit_ms (/exit takes that long to quit)
   <session>.log     JSON lines: start (argv, cwd, sid, the CLAUDE* and
                     DCH_REVIVE* env keys), line (typed), turn (a message taken),
                     enter_dialog (Enter while a prompt is up: it would have
@@ -179,6 +180,7 @@ def submit(text, c):
     if text.strip() == "/exit":
         if c.get("noexit"):
             return
+        time.sleep(c.get("exit_ms", 0) / 1000.0)
         termios.tcsetattr(0, termios.TCSADRAIN, saved)
         if c.get("crash"):
             out.write(b"\033[2J\033[HError: fake claude crashed\r\n"

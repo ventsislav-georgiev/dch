@@ -166,39 +166,42 @@ static void sha_hex(const void *data, size_t n, char out[65]) {
   }
 }
 
-static int utf8_ok(const unsigned char *s, size_t n) {
-  for (size_t i = 0; i < n;) {
-    unsigned c = s[i++];
-    int more;
-    uint32_t cp;
-    if (c < 0x80) {
-      if (!c)
-        return 0;
-      continue;
-    }
-    if (c >= 0xc2 && c <= 0xdf) {
-      more = 1;
-      cp = c & 31;
-    } else if (c >= 0xe0 && c <= 0xef) {
-      more = 2;
-      cp = c & 15;
-    } else if (c >= 0xf0 && c <= 0xf4) {
-      more = 3;
-      cp = c & 7;
-    } else
+/* Length of the valid UTF-8 sequence at s (n bytes left), 0 when it is not
+   one: no overlongs, surrogates or code points past U+10FFFF. */
+static size_t utf8_len(const unsigned char *s, size_t n) {
+  unsigned c = s[0];
+  size_t more;
+  uint32_t cp;
+  if (c < 0x80)
+    return 1;
+  if (c >= 0xc2 && c <= 0xdf) {
+    more = 1;
+    cp = c & 31;
+  } else if (c >= 0xe0 && c <= 0xef) {
+    more = 2;
+    cp = c & 15;
+  } else if (c >= 0xf0 && c <= 0xf4) {
+    more = 3;
+    cp = c & 7;
+  } else
+    return 0;
+  if (more >= n)
+    return 0;
+  for (size_t j = 1; j <= more; j++) {
+    if ((s[j] & 0xc0) != 0x80)
       return 0;
-    if (i + (size_t)more > n)
-      return 0;
-    for (int j = 0; j < more; j++) {
-      unsigned q = s[i++];
-      if ((q & 0xc0) != 0x80)
-        return 0;
-      cp = (cp << 6) | (q & 63);
-    }
-    if ((more == 2 && cp < 0x800) || (more == 3 && cp < 0x10000) ||
-        cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff))
-      return 0;
+    cp = (cp << 6) | (s[j] & 63);
   }
+  if ((more == 2 && cp < 0x800) || (more == 3 && cp < 0x10000) ||
+      cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff))
+    return 0;
+  return more + 1;
+}
+
+static int utf8_ok(const unsigned char *s, size_t n) {
+  for (size_t i = 0, l; i < n; i += l)
+    if (!s[i] || !(l = utf8_len(s + i, n - i)))
+      return 0;
   return 1;
 }
 
@@ -207,12 +210,22 @@ struct json_token {
   enum json_kind kind;
   int start, end, parent, next;
 };
+/* Tokens grow with the text (a record is up to 1 MiB: a 1100-word argv is
+   past any fixed cap); json_free() after every json_parse(), even a failed
+   one. Nesting stays bounded so the recursion does. */
+#define JSON_MAX_DEPTH 1024
 struct json_parser {
   const char *text;
   size_t len, pos;
-  struct json_token tok[1024];
-  int ntok;
+  struct json_token *tok;
+  int ntok, cap, depth;
 };
+
+static void json_free(struct json_parser *p) {
+  free(p->tok);
+  p->tok = NULL;
+  p->ntok = p->cap = 0;
+}
 
 static void json_space(struct json_parser *p) {
   while (p->pos < p->len && strchr(" \t\r\n", p->text[p->pos]))
@@ -222,8 +235,14 @@ static void json_space(struct json_parser *p) {
 static int json_new(struct json_parser *p, enum json_kind kind, int start,
                     int parent) {
   int n;
-  if (p->ntok == (int)(sizeof p->tok / sizeof p->tok[0]))
-    return -1;
+  if (p->ntok == p->cap) {
+    struct json_token *t;
+    if (p->cap > INT_MAX / 2 ||
+        !(t = realloc(p->tok, (size_t)(p->cap ? p->cap * 2 : 64) * sizeof *t)))
+      return -1;
+    p->tok = t;
+    p->cap = p->cap ? p->cap * 2 : 64;
+  }
   n = p->ntok++;
   p->tok[n].kind = kind;
   p->tok[n].start = start;
@@ -399,12 +418,18 @@ static int json_parse_primitive(struct json_parser *p, int parent) {
 }
 
 static int json_parse_value(struct json_parser *p, int parent) {
+  int r;
   if (p->pos >= p->len)
     return -1;
-  if (p->text[p->pos] == '{')
-    return json_parse_object(p, parent);
-  if (p->text[p->pos] == '[')
-    return json_parse_array(p, parent);
+  if (p->text[p->pos] == '{' || p->text[p->pos] == '[') {
+    if (p->depth == JSON_MAX_DEPTH)
+      return -1;
+    p->depth++;
+    r = p->text[p->pos] == '{' ? json_parse_object(p, parent)
+                               : json_parse_array(p, parent);
+    p->depth--;
+    return r;
+  }
   if (p->text[p->pos] == '"')
     return json_parse_string(p, parent);
   return json_parse_primitive(p, parent);
@@ -526,23 +551,25 @@ static int json_field(const struct json_parser *p, int object,
 static int json_string(const char *json, const char *key, char *out, size_t cap,
                        int unique) {
   struct json_parser p;
-  int field;
+  int field, rc = -1;
   (void)unique;
-  if (json_parse(&p, json) < 0 || p.tok[0].kind != JSON_OBJECT ||
-      (field = json_field(&p, 0, key)) < 0)
-    return -1;
-  return json_decode(&p, field, out, cap);
+  if (json_parse(&p, json) == 0 && p.tok[0].kind == JSON_OBJECT &&
+      (field = json_field(&p, 0, key)) >= 0)
+    rc = json_decode(&p, field, out, cap);
+  json_free(&p);
+  return rc;
 }
 
 static int json_nested_string(const char *json, const char *object,
                               const char *key, char *out, size_t cap) {
   struct json_parser p;
-  int parent, field;
-  if (json_parse(&p, json) < 0 || (parent = json_field(&p, 0, object)) < 0 ||
-      p.tok[parent].kind != JSON_OBJECT ||
-      (field = json_field(&p, parent, key)) < 0)
-    return -1;
-  return json_decode(&p, field, out, cap);
+  int parent, field, rc = -1;
+  if (json_parse(&p, json) == 0 && (parent = json_field(&p, 0, object)) >= 0 &&
+      p.tok[parent].kind == JSON_OBJECT &&
+      (field = json_field(&p, parent, key)) >= 0)
+    rc = json_decode(&p, field, out, cap);
+  json_free(&p);
+  return rc;
 }
 
 static int json_long(const char *json, const char *key, long *out) {
@@ -550,12 +577,14 @@ static int json_long(const char *json, const char *key, long *out) {
   char number[64], *end;
   int field, n;
   if (json_parse(&p, json) < 0 || (field = json_field(&p, 0, key)) < 0 ||
-      p.tok[field].kind != JSON_PRIMITIVE)
+      p.tok[field].kind != JSON_PRIMITIVE ||
+      (n = p.tok[field].end - p.tok[field].start) <= 0 ||
+      n >= (int)sizeof number) {
+    json_free(&p);
     return -1;
-  n = p.tok[field].end - p.tok[field].start;
-  if (n <= 0 || n >= (int)sizeof number)
-    return -1;
+  }
   memcpy(number, p.text + p.tok[field].start, (size_t)n);
+  json_free(&p);
   number[n] = '\0';
   errno = 0;
   *out = strtol(number, &end, 10);
@@ -564,28 +593,35 @@ static int json_long(const char *json, const char *key, long *out) {
 
 static int json_has(const char *json, const char *key) {
   struct json_parser p;
-  return json_parse(&p, json) == 0 && json_field(&p, 0, key) != -1;
+  int r = json_parse(&p, json) == 0 && json_field(&p, 0, key) != -1;
+  json_free(&p);
+  return r;
 }
 
 static int json_attachments_present(const char *json) {
   struct json_parser p;
-  int field;
+  int field, r;
   if (json_parse(&p, json) < 0)
-    return 1;
-  field = json_field(&p, 0, "file_attachments");
-  if (field == -1)
-    return 0;
-  if (field < 0)
-    return 1;
-  if (p.tok[field].kind == JSON_ARRAY)
-    return p.tok[field].next != field + 1;
-  if (p.tok[field].kind == JSON_PRIMITIVE &&
-      p.tok[field].end - p.tok[field].start == 4 &&
-      memcmp(p.text + p.tok[field].start, "null", 4) == 0)
-    return 0;
-  return 1;
+    r = 1;
+  else if ((field = json_field(&p, 0, "file_attachments")) == -1)
+    r = 0;
+  else if (field < 0)
+    r = 1;
+  else if (p.tok[field].kind == JSON_ARRAY)
+    r = p.tok[field].next != field + 1;
+  else
+    r = !(p.tok[field].kind == JSON_PRIMITIVE &&
+          p.tok[field].end - p.tok[field].start == 4 &&
+          memcmp(p.text + p.tok[field].start, "null", 4) == 0);
+  json_free(&p);
+  return r;
 }
 
+/* Bytes that are not UTF-8 (a Linux path, an argv word, a name cut
+   mid-character) are written as U+FFFD, as dch's other JSON output does: the
+   result always parses, and a replaced byte reads as replaced. A \u00XX
+   escape would decode to a different, valid character (0xff -> "\u00ff",
+   y-diaeresis) that nothing tells apart from the real one. */
 static size_t json_quote(char *out, size_t cap, const char *s) {
   size_t n = 0;
   if (cap)
@@ -608,6 +644,18 @@ static size_t json_quote(char *out, size_t cap, const char *s) {
     else if (c < 32) {
       snprintf(small, sizeof small, "\\u%04x", c);
       esc = small;
+    } else if (c >= 0x80) {
+      /* NUL-terminated, so utf8_len stops at the end on its own */
+      size_t l = utf8_len((const unsigned char *)s, SIZE_MAX);
+      if (!l)
+        esc = "\\ufffd";
+      else {
+        for (size_t k = 0; k < l; k++, n++)
+          if (n < cap)
+            out[n] = s[k];
+        s += l - 1;
+        continue;
+      }
     }
     if (esc) {
       for (const char *q = esc; *q; q++) {
@@ -2188,41 +2236,49 @@ static void bridge_sidecar(int life_fd, const char *codex) {
   unlink_same(socket_path, sockdev, sockino);
 }
 
-int dch_bridge_agent_list(int json) {
-  const char *marker = getenv(BRIDGE_MARKER);
-  char output[FRAME_MAX + 1];
-  struct json_parser parser;
-  if (peer_list_json(output, sizeof output, !(marker && *marker)) < 0) {
-    fprintf(stderr, "dch: native peer registry is ambiguous or too large\n");
-    return 1;
-  }
-  if (json_parse(&parser, output) < 0 || parser.tok[0].kind != JSON_ARRAY)
-    return 1;
-  for (int i = 1; i < parser.tok[0].next;) {
+static int agent_list(const char *output, const struct json_parser *p,
+                      int json) {
+  for (int i = 1; i < p->tok[0].next;) {
     char name[512], session[128];
     int name_field, session_field;
-    if (parser.tok[i].parent != 0 || parser.tok[i].kind != JSON_OBJECT ||
-        (name_field = json_field(&parser, i, "name")) < 0 ||
-        (session_field = json_field(&parser, i, "session_id")) < 0 ||
-        json_decode(&parser, name_field, name, sizeof name) < 0 || !name[0] ||
-        json_decode(&parser, session_field, session, sizeof session) < 0 ||
+    if (p->tok[i].parent != 0 || p->tok[i].kind != JSON_OBJECT ||
+        (name_field = json_field(p, i, "name")) < 0 ||
+        (session_field = json_field(p, i, "session_id")) < 0 ||
+        json_decode(p, name_field, name, sizeof name) < 0 || !name[0] ||
+        json_decode(p, session_field, session, sizeof session) < 0 ||
         !session[0])
       return 1;
-    i = parser.tok[i].next;
+    i = p->tok[i].next;
   }
   if (json) {
     puts(output);
     return 0;
   }
-  for (int i = 1; i < parser.tok[0].next;) {
+  for (int i = 1; i < p->tok[0].next;) {
     char name[512];
-    int field = json_field(&parser, i, "name");
-    if (field < 0 || json_decode(&parser, field, name, sizeof name) < 0)
+    int field = json_field(p, i, "name");
+    if (field < 0 || json_decode(p, field, name, sizeof name) < 0)
       return 1;
     puts(name);
-    i = parser.tok[i].next;
+    i = p->tok[i].next;
   }
   return 0;
+}
+
+int dch_bridge_agent_list(int json) {
+  const char *marker = getenv(BRIDGE_MARKER);
+  char output[FRAME_MAX + 1];
+  struct json_parser parser;
+  int rc;
+  if (peer_list_json(output, sizeof output, !(marker && *marker)) < 0) {
+    fprintf(stderr, "dch: native peer registry is ambiguous or too large\n");
+    return 1;
+  }
+  rc = json_parse(&parser, output) < 0 || parser.tok[0].kind != JSON_ARRAY
+           ? 1
+           : agent_list(output, &parser, json);
+  json_free(&parser);
+  return rc;
 }
 
 int dch_bridge_agent_send(const char *name, int argc, char **argv) {
@@ -2316,7 +2372,9 @@ int dch_json_string(const char *json, const char *key, char *out, size_t cap) {
 
 int dch_json_is_object(const char *json) {
   struct json_parser p;
-  return json_parse(&p, json) == 0 && p.tok[0].kind == JSON_OBJECT;
+  int r = json_parse(&p, json) == 0 && p.tok[0].kind == JSON_OBJECT;
+  json_free(&p);
+  return r;
 }
 
 int dch_json_long(const char *json, const char *key, long *out) {
@@ -2332,6 +2390,40 @@ size_t dch_json_quote(char *out, size_t cap, const char *s) {
   return json_quote(out, cap, s);
 }
 
+/* s[0..n) less a character cut short at its end, for a prefix taken by
+** bytes: what is left ends on a character boundary. */
+size_t dch_utf8_trim(const char *s, size_t n) {
+  size_t k = n, want;
+  unsigned char c;
+  while (k > 0 && n - k < 3 && ((unsigned char)s[k - 1] & 0xc0) == 0x80)
+    k--;
+  if (!k || (c = (unsigned char)s[k - 1]) < 0xc0)
+    return n;
+  want = c >= 0xf0 ? 4 : c >= 0xe0 ? 3 : 2;
+  return n - (k - 1) < want ? k - 1 : n;
+}
+
+/* s with every byte that is not UTF-8 as U+FFFD, malloc'd; NULL when s is
+** already UTF-8 (or out of memory). */
+char *dch_utf8_fix(const char *s) {
+  size_t n = strlen(s), i, o = 0, l;
+  char *r;
+  if (utf8_ok((const unsigned char *)s, n) || !(r = malloc(n * 3 + 1)))
+    return NULL;
+  for (i = 0; i < n; i += l) {
+    if ((l = utf8_len((const unsigned char *)s + i, n - i))) {
+      memcpy(r + o, s + i, l);
+      o += l;
+    } else {
+      memcpy(r + o, "\xef\xbf\xbd", 3);
+      o += 3;
+      l = 1;
+    }
+  }
+  r[o] = '\0';
+  return r;
+}
+
 /* The array of strings at `key` (inside `object` when non-NULL) as one
 ** malloc'd block, NULL-terminated like argv; NULL when absent, empty or not
 ** all strings. *argc gets the count. */
@@ -2340,33 +2432,36 @@ char **dch_json_strv(const char *json, const char *object, const char *key,
   struct json_parser p;
   int parent = 0, field, i, n = 0;
   size_t room = 0;
-  char **v, *s;
+  char **v = NULL, *s;
   if (json_parse(&p, json) < 0 ||
       (object && ((parent = json_field(&p, 0, object)) < 0 ||
                   p.tok[parent].kind != JSON_OBJECT)) ||
       (field = json_field(&p, parent, key)) < 0 ||
       p.tok[field].kind != JSON_ARRAY)
-    return NULL;
+    goto out;
   for (i = field + 1; i < p.tok[field].next; i = p.tok[i].next, n++) {
     if (p.tok[i].kind != JSON_STRING)
-      return NULL;
+      goto out;
     room += (size_t)(p.tok[i].end - p.tok[i].start) + 1;
   }
   if (!n || !(v = malloc((size_t)(n + 1) * sizeof *v + room)))
-    return NULL;
+    goto out;
   s = (char *)(v + n + 1);
   for (i = field + 1, n = 0; i < p.tok[field].next; i = p.tok[i].next) {
     size_t cap = (size_t)(p.tok[i].end - p.tok[i].start) + 1;
     /* decoding never grows a string, so its raw length is room enough */
     if (json_decode(&p, i, s, cap) < 0) {
       free(v);
-      return NULL;
+      v = NULL;
+      goto out;
     }
     v[n++] = s;
     s += strlen(s) + 1;
   }
   v[n] = NULL;
   *argc = n;
+out:
+  json_free(&p);
   return v;
 }
 
@@ -2451,6 +2546,44 @@ int main(void) {
     return 5;
   if (json_quote(tiny, sizeof tiny, "abcd") != SIZE_MAX)
     return 6;
+  {
+    /* #061: bytes not UTF-8 quote as U+FFFD; valid ones pass whole */
+    char q[64], *fx, *big;
+    if (json_quote(q, sizeof q, "a\xff\xc3\xa9\xe0\x80\x80\xc3") ==
+            SIZE_MAX ||
+        strcmp(q, "\"a\\ufffd\xc3\xa9\\ufffd\\ufffd\\ufffd\\ufffd\""))
+      return 24;
+    if (dch_utf8_trim("a\xc3\xa9\xc3", 4) != 3 ||
+        dch_utf8_trim("a\xc3\xa9", 3) != 3 ||
+        dch_utf8_trim("\xf0\x9f\x98", 3) != 0 ||
+        dch_utf8_trim("\xf0\x9f\x98\x80", 4) != 4)
+      return 25;
+    if (!(fx = dch_utf8_fix("a\xff" "b")) || strcmp(fx, "a\xef\xbf\xbd" "b") ||
+        dch_utf8_fix("ok \xc3\xa9"))
+      return 26;
+    free(fx);
+    /* tokens grow past the old 1024 cap; nesting stays bounded */
+    if (!(big = malloc(20000)))
+      return 27;
+    char *e = big + sprintf(big, "{\"v\":[\"x\"");
+    for (int i = 1; i < 3000; i++)
+      e += sprintf(e, ",\"x\"");
+    strcpy(e, "]}");
+    int n = 0;
+    char **v = dch_json_strv(big, NULL, "v", &n);
+    if (!v || n != 3000)
+      return 27;
+    free(v);
+    for (int depth = 1000; depth <= 1100; depth += 100) {
+      e = big + sprintf(big, "{\"x\":");
+      memset(e, '[', (size_t)depth);
+      memset(e + depth, ']', (size_t)depth);
+      strcpy(e + 2 * depth, "}");
+      if (dch_json_is_object(big) != (depth == 1000))
+        return 28;
+    }
+    free(big);
+  }
   snprintf(ready, sizeof ready,
            "Error: failed to queue session message: thread/queue/add failed: "
            "failed to read thread: invalid thread-store request: no rollout "

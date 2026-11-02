@@ -223,12 +223,12 @@ someone is watching is invisible to them.
 | `--respawn <n> [-- cmd...]` | Arm a one-shot respawn: when the session's program next exits, the master keeps the session (same socket, pty size, attached clients) and starts `cmd` in its place. No `cmd` arms a *hold*: the session stays up childless until a second `--respawn <n> -- cmd` starts one, or until `DCH_HOLD_MS` (default 120000) ends it. An arm that nothing consumes expires after `DCH_RESPAWN_TTL_MS` (default 300000); both are read from the master's environment. `--restart` refuses while a respawn is armed or held. | 0 ok, 1 no session / refused / master too old |
 | `--respawn <n> --cancel` | Drop a pending arm. On a held (childless) session it ends the session. | 0 ok, 1 no session |
 | `--cmd <n>` | Print `{"pid","state","argv","exit_code","exit_signal","tail"}`: the child's pid (`null` while held), `state` `running`, `armed` or `held`, the argv it was started with, the exit status of a child reaped under an arm (`null` otherwise), and `tail`, the last 8 KB the child wrote since the arm, raw. | 0 ok, 1 no session / master too old |
-| `--history [--json]` | List the sessions that ended, newest first, one line each: `name (alias)  when  end  cwd  $ argv  [claude <name> <session id>]`. `end` is `exit N`, `signal N`, `killed` (`dch -k`), `stopped` (`dch --stop`) or `vanished` (the master died without a word: SIGKILL, power loss). Only the records of the current socket dir are listed. A pinned record (`--pin`) ends its line with `  [pinned]`. `--json` prints the stored records as an array, a pinned one with `"pinned":true` added (absent otherwise; see [Bringing sessions back](#bringing-sessions-back)). | 0 |
-| `--revive <n> [--as <new>] [--no-message]` \| `--revive --all [--no-message]` | Start ended sessions again: in their cwd, with their argv, with the Claude Code agent in them resumed via `--resume <id>` and told to carry on (see [Bringing sessions back](#bringing-sessions-back)). `--no-message`: resumed only, no message typed (`ok`, the line says it was not sent). `<n>` revives that one, whatever its end; a live `<n>` is refused unless `--as <new>` names another session. `--all` revives every session that died — anything but `exit 0`, `killed` and `stopped` — within the last 3 days after running at least 5 minutes, and gives one whose name is now taken the first free `<n>-2`, `<n>-3`, …. Older or shorter-lived sessions stay in `--history` and revive by name. One line per session. `--json`: stdout is NDJSON, each result carrying `"as"`, the name it came back under (see [Machine-readable output](#machine-readable-output)). | 0 ok, 1 no history / name live / a revive or resume failed |
-| `--pin <n>... [--json]` \| `--unpin <n>... [--json]` | Pin a session's history record so the 30-day prune never takes it, or unpin it (see [Bringing sessions back](#bringing-sessions-back)). `--pin` needs a record for the name, live or ended (`<n>: failed — …`, `not_found`, otherwise); pinning a pinned one is `ok`. `--unpin` is `ok` with or without a pin or a record. One line per name: `<n>: pinned`, `<n>: unpinned` or `<n>: failed — <why>`. `-f` is a usage error. | 0 nothing failed, 1 usage error / a name failed |
+| `--history [--json]` | List the sessions that ended, newest first, one line each: `name (alias)  when  end  cwd  $ argv  [claude <name> <session id>]`. `end` is `exit N`, `signal N`, `killed` (`dch -k`), `stopped` (`dch --stop`) or `vanished` (the master died without a word: SIGKILL, power loss). Only the records of the current socket dir are listed. A pinned record (`--pin`) ends its line with `  [pinned]`, one a new session under its name moved aside with `  [record <name>.<ended>]`. `--json` prints the stored records as an array, a pinned one with `"pinned":true` added (absent otherwise), a moved one with `"file"` (see [Bringing sessions back](#bringing-sessions-back)). | 0 |
+| `--revive <n> [--as <new>] [--no-message]` \| `--revive --all [--no-message]` | Start ended sessions again: in their cwd, with their argv, with the Claude Code agent in them resumed via `--resume <id>` and told to carry on (see [Bringing sessions back](#bringing-sessions-back)). `--no-message`: resumed only, no message typed (`ok`, the line says it was not sent). `<n>` revives its newest ended record, whatever its end — never a live session's; a live `<n>` is refused unless `--as <new>` names another session. `--all` revives every session that died — anything but `exit 0`, `killed` and `stopped` — within the last 3 days after running at least 5 minutes, and gives one whose name is now taken the first free `<n>-2`, `<n>-3`, …. Older or shorter-lived sessions stay in `--history` and revive by name. One line per session. `--json`: stdout is NDJSON, each result carrying `"as"`, the name it came back under (see [Machine-readable output](#machine-readable-output)). | 0 ok, 1 no history / name live / a revive or resume failed |
+| `--pin <n>... [--json]` \| `--unpin <n>... [--json]` | Pin a session's history record so the 30-day prune never takes it, or unpin it (see [Bringing sessions back](#bringing-sessions-back)). `--pin` needs a record for the name, live or ended (`<n>: failed — …`, `not_found`, otherwise), and pins every record of the name; pinning a pinned one is `ok`. `--unpin` unpins every record of the name and is `ok` with or without a pin or a record. One line per name: `<n>: pinned`, `<n>: unpinned` or `<n>: failed — <why>`. `-f` is a usage error. | 0 nothing failed, 1 usage error / a name failed |
 | `--forget <n>... [-f] [--json]` \| `--forget --all [--json]` | Delete history records of the current socket dir, matched by name as `--revive` matches them (every record that matches). Never a live session's (`live`: its master would write it back; `-f` does not change that); a pinned one only with `-f`, which removes its pin too (`pinned` otherwise); `not_found` when no record matches. One line per record: `<n>: forgotten` or `<n>: failed — <why>`. `--all` deletes every record that is neither live nor pinned and skips the rest: one `<n>: forgotten` per record deleted, then `forgot N (K pinned, L live kept)`; `-f` with `--all` is a usage error (it never removes a pin). | 0 nothing failed (skips included), 1 usage error / a name failed |
 | `--say <n>... [--json] -- <text...>` \| `--say --all [--json] -- <text...>` | Type one message into the Claude Code running in each session — as its command or typed into its shell — and submit it, under the same gate as `--include-agents`: only when Claude Code's session record says `idle` and the screen shows its empty composer, never over a prompt, a draft or a queued message, and never waiting for a busy Claude. Text is the words after the required `--` joined with spaces. Sessions are typed into concurrently; Enter is pressed again while the text still sits in the composer. One result per session as it finishes: `<n>: sent`, `<n>: skipped — <why>` (`not_claude` under `--all`, `self` = `$DCH_SESSION`, `busy`, `prompt`, `draft`, `queued`, `no_screen` — always on dch-lite) or `<n>: failed — <why>` (`no_session`, `not_submitted`, `not_typed`, `old_master`). `--json` prints one `{"name","result":"ok\|skipped\|failed","reason","detail"}` object per line instead. | 0 nothing failed (skips included), 1 usage error / a session failed |
-| `--stop <n>... [--json]` \| `--stop --all [--json]` | End sessions so `--revive` can bring them back. A session whose Claude Code is live — its command, or typed into its shell — is paused first, the way `--include-agents` pauses it: a pause message (`DCH_PAUSE_MSG` replaces it) and a wait until Claude is provably idle (`DCH_AGENT_TIMEOUT_MS`, 600000). Claude as the session's command then gets `/exit` through the same composer gate, its resume id read from the exit line (else from its session record). Claude typed into the shell never gets `/exit` — the shell would run whatever followed `claude` on its line (`claude && git push`, a loop): its resume id is read from its session record, and the session's end hangs up the shell and Claude together. Then the session ends. A session without a live Claude ends at once. The record ends `stopped` and keeps the agent with that id (see [Bringing sessions back](#bringing-sessions-back)). Sessions are handled concurrently; one line per session as it finishes: `<n>: stopped (claude <name> <id>; revive with dch --revive <n>)`, `<n>: skipped — <why>` (`self` = `$DCH_SESSION`, `respawn_pending`, `no_screen` — a Claude session on dch-lite), `<n>: failed — <why>` (`no_session`, `old_master`, `prompt`, `draft`, `queued`, `not_typed`, `not_idle`, `exit_failed`, `claude_exited`, `end_failed`) or `<n>: interrupted — <why>`. A failure leaves the session running and types a resume message into its Claude (`DCH_RESUME_MSG` replaces it); so does a first SIGINT/SIGTERM for every Claude not yet past `/exit` (a second one exits at once). `--json`: stdout is NDJSON — `{"name","phase":"pausing\|exiting\|ending"}` as a session reaches each (no `exiting` for Claude typed into the shell), then one `{"name","result":"ok\|skipped\|failed\|interrupted","reason","detail","session_id"}` per session (`session_id` `""` when none). | 0 nothing failed (skips included), 1 usage error / a session failed or was interrupted |
+| `--stop <n>... [--json]` \| `--stop --all [--json]` | End sessions so `--revive` can bring them back. A session whose Claude Code is live — its command, or typed into its shell — is paused first, the way `--include-agents` pauses it: a pause message (`DCH_PAUSE_MSG` replaces it) and a wait until Claude is provably idle (`DCH_AGENT_TIMEOUT_MS`, 600000). Claude as the session's command then gets `/exit` through the same composer gate, its resume id read from the exit line (else from its session record). Claude typed into the shell never gets `/exit` — the shell would run whatever followed `claude` on its line (`claude && git push`, a loop): its resume id is read from its session record, and the session's end hangs up the shell and Claude together. Then the session ends. Claude's session record is looked up in the sessions dir of Claude's own `CLAUDE_CONFIG_DIR` (else its `HOME`), read from the process, so a Claude run as `CLAUDE_CONFIG_DIR=~/.claude-work claude` is found from any env; the history record, `--say` and `--include-agents` look it up the same way. A session without a live Claude ends at once; one where a process plainly is Claude (`claude` as its argv[0]) but no record of it can be read is left running, `failed` `claude_unreadable` — ending it would hang Claude up unpaused, its id unknown. The record ends `stopped` and keeps the agent with that id (see [Bringing sessions back](#bringing-sessions-back)). Sessions are handled concurrently; one line per session as it finishes: `<n>: stopped (claude <name> <id>; revive with dch --revive <n>)`, `<n>: skipped — <why>` (`self` = `$DCH_SESSION`, `respawn_pending`, `no_screen` — a Claude session on dch-lite), `<n>: failed — <why>` (`no_session`, `old_master`, `claude_unreadable`, `prompt`, `draft`, `queued`, `not_typed`, `not_idle`, `exit_failed`, `claude_exited`, `end_failed`) or `<n>: interrupted — <why>`; once dch has read Claude's id, a line that is not `ok` carries it too. A failure leaves the session running and types a resume message into its Claude (`DCH_RESUME_MSG` replaces it); so does a first SIGINT/SIGTERM for every Claude not yet past `/exit` (a second one reports those past `/exit` as `interrupted` with their id and leaves their `.stopped` marker, so the record still ends `stopped`; a third exits at once). A master that stops answering after `/exit` keeps its marker too: `failed`, with the id, and the record ends `stopped` once the master runs again. `--json`: stdout is NDJSON — `{"name","phase":"pausing\|exiting\|ending"}` as a session reaches each (no `exiting` for Claude typed into the shell), then one `{"name","result":"ok\|skipped\|failed\|interrupted","reason","detail","session_id"}` per session (`session_id` `""` when none). | 0 nothing failed (skips included), 1 usage error / a session failed or was interrupted |
 
 ### Machine-readable output
 
@@ -248,8 +248,8 @@ error (`--history` and `--agent-list` take their own).
   `{"name","result","reason","detail","session_id"}`. `result` is `ok`,
   `skipped`, `failed` or `interrupted`; `reason` a code below, `""` on `ok`;
   `detail` the text the line would carry without `--json`, `""` when none;
-  `session_id` the Claude conversation id when there is one (`--stop`: on
-  `ok` only), else `""`. `--say` prints `{"name","result","reason","detail"}`
+  `session_id` the Claude conversation id when there is one (`--stop`: once
+  read, right before `/exit`), else `""`. `--say` prints `{"name","result","reason","detail"}`
   (no `session_id`, never `interrupted`). `--revive` adds `"as"` after
   `"name"`: the name the session came back under. `--pin`, `--unpin` and
   `--forget` print one per name (`--forget --all`: per record, `skipped`
@@ -282,6 +282,7 @@ error (`--history` and `--agent-list` take their own).
 | `not_idle` | stop, restart, revive | Claude did not go idle in time. |
 | `claude_exited` | stop, restart | Claude exited while pausing. |
 | `exit_failed` | stop, restart | `/exit` could not be typed or did not end Claude, or Claude crashed on it. |
+| `claude_unreadable` | stop | A Claude runs in the session (`claude` as a process's argv[0]), but no session record of it can be read: the session is left running, nothing typed. |
 | `end_failed` | stop | Claude quit (or, typed into the shell, was paused), but the session did not end. |
 | `signal` | stop, restart | `interrupted` by SIGINT/SIGTERM/SIGHUP. |
 | `current` | restart | Agent: already on the installed claude. Master pass: already on this dch. |
@@ -298,6 +299,7 @@ error (`--history` and `--agent-list` take their own).
 | `pinned` | forget | The record is pinned: `--forget <n> -f` deletes it with its pin; `--forget --all` keeps it (`skipped`). |
 | `io_error` | forget, pin, unpin | The record or pin file could not be written or removed (`detail` says why). |
 | `cwd_gone` | revive | The recorded cwd no longer exists. |
+| `not_utf8` | revive | The recorded command, cwd or Claude launch had bytes that are not UTF-8, stored as U+FFFD: it would run something else. `--history` still lists it; the detail gives `claude --resume <id>`. |
 | `not_started` | revive | The session did not start (the program cannot be executed: the reason is on stderr). |
 | `launch_unknown` | revive | Revived, but its Claude was not resumed: the launch command is unknown. |
 
@@ -586,7 +588,8 @@ to pause. Run it from a Claude Code session with `run_in_background`, because
 the Bash tool times out after 2 minutes. Ctrl-C, SIGTERM or SIGHUP do not leave
 agents paused. An agent still waiting to pause gets the resume message and is
 reported as interrupted. An agent already past `/exit` finishes its restart,
-within `DCH_AGENT_STEP_MS`. A second signal exits at once. SIGKILL cannot be
+within `DCH_AGENT_STEP_MS`. A second signal stops that wait: each agent past
+`/exit` is reported interrupted with its id. A third exits at once. SIGKILL cannot be
 caught: it leaves a waiting agent paused, and you must type the resume
 message yourself. If a second signal lands after Claude has already exited
 into the hold, nothing is relaunched and the session ends when `DCH_HOLD_MS`
@@ -651,6 +654,19 @@ first write, so it keeps the resume id even if it ends within that minute.
 A reboot, a crash or a SIGKILL ends sessions without a word; the
 record outlives them.
 
+A new session under a dead session's name — `dch` in the same repo after
+`dch --stop`, `dch work` again, `--revive other --as work` — would replace
+`work.json`. When that record still holds a Claude id (it ended `stopped`,
+`killed`, on a signal or `vanished` with Claude alive), the new master first
+moves it aside to `work.<ended>.json` (`<ended>` the epoch it ended, else
+last seen), so the id is kept as history: `--history` lists it with `[record
+work.<ended>]` (`"file"` in `--json`), and `--revive work` takes the newest
+ended record of the name, never the live one — so with the new `work` still
+running, `--revive work --as work2` brings the stopped one back. `--revive
+work.<ended>`, `--pin`, `--forget` take it by that name too. A record with no
+Claude id is simply replaced, and so is the one a `--revive` under the same
+name carries on.
+
 ```sh
 dch --history                # what ended, when, how, where
 dch --revive work            # bring one back
@@ -707,7 +723,7 @@ returns once the master has written its record, so a `--revive` right after
 finds it `stopped`.
 
 A session whose directory is gone, or whose program cannot be executed, is
-reported and skipped; the others still come back. A revive under a new name retires the old record. Records older
+reported and skipped; the others still come back. A revive under a new name retires the old record — once the new session has written its own (not under `DCH_NO_HISTORY`). Records older
 than 30 days are pruned, in every socket dir's subdir, when a master starts,
 and subdirs left empty are removed.
 
@@ -724,7 +740,9 @@ A pin is an empty `<name>.pin` beside `<name>.json`. The master never touches
 it, so it holds through every refresh and through a revive under the same
 name, and the cold-start prune skips any record that has one, whatever its
 age. The pin belongs to the name, not to one run: a new session started
-under a pinned name writes the same record, and that record is pinned too.
+under a pinned name writes the same record, and that record is pinned too;
+a record it moves aside gets its own `<name>.<ended>.pin`, so it stays
+pinned as well. `--pin` and `--unpin` act on every record of the name.
 A revive under another name (`--as`, or `--all`'s `<name>-N`) moves the pin
 to the new name along with the record. The exemption holds for masters from
 dch 1.25.0 on: a master of an older dch still prunes by age alone when it
@@ -753,7 +771,10 @@ symlink is kept, not resolved), so a revive from a thinner PATH, such as a
 launchd-started app's, still finds it; one not found stays bare. The argv is
 otherwise stored as given, so a secret passed on a command line lands in
 the record the way it lands in shell history. The environment is never
-stored. `DCH_NO_HISTORY=1` (any value but empty or `0`) in the environment a
+stored. A byte that is not UTF-8 (a Linux file name, say) is stored as
+U+FFFD, in every field, so the record always parses; `--revive` refuses one
+whose command, cwd or Claude launch holds U+FFFD (`not_utf8`, with the
+Claude id to resume by hand) rather than run something else. `DCH_NO_HISTORY=1` (any value but empty or `0`) in the environment a
 session is started from (`dch`, `dch --spawn`, `dch --revive`) keeps no
 record of it at all: the master writes nothing and prunes nothing under the
 state dir, so the session never shows in `--history` and cannot be revived.

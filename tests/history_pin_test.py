@@ -260,6 +260,151 @@ def main():
         check("revive --as: the old record and pin go, the pin moves",
               r.returncode == 0 and until(lambda: rec("rnew")) and
               rec("rold") is None and not pinned("rold") and pinned("rnew"))
+
+        # --- #059: a cold start moves a dead record with a claude id aside -
+        def agent(sid):
+            # no launch: --revive cannot relaunch it, so it is quick
+            return dict(kind="claude", session_id=sid, name="", cwd=tmp,
+                        launch=[])
+
+        def asides(n):
+            return sorted(f[:-5] for f in os.listdir(recdir)
+                          if f.startswith(n + ".") and f.endswith(".json")
+                          and f != n + ".json")
+
+        def arec(n):
+            a = asides(n)
+            return rec(a[0]) if len(a) == 1 else None
+
+        def asid(n):
+            return ((rec(n) or {}).get("agent") or {}).get("session_id")
+
+        now = int(time.time())
+        plant("hw", end="stopped", agent=agent("sid-hw"), ended=now - 60)
+        run("--pin", "hw")
+        spawn("hw", "sleep", "60")
+        until(lambda: (rec("hw") or {}).get("end") == "" and asides("hw"))
+        check("new session under a stopped name: the stopped record moves "
+              "to hw.<ended>.json, id kept; hw.json is the new one",
+              asides("hw") == ["hw.%d" % (now - 60)] and
+              asid("hw.%d" % (now - 60)) == "sid-hw" and
+              rec("hw.%d" % (now - 60))["end"] == "stopped" and
+              rec("hw")["agent"] is None)
+        check("...its pin is copied, the name keeps its own",
+              pinned("hw.%d" % (now - 60)) and pinned("hw"))
+        e = [x for x in json.loads(run("--history", "--json").stdout or "[]")
+             if x["name"] == "hw"]
+        check("--history --json: the moved record, not live, with \"file\" "
+              "and pinned", len(e) == 1 and e[0]["end"] == "stopped" and
+              e[0]["agent"]["session_id"] == "sid-hw" and
+              e[0]["file"] == "hw.%d" % (now - 60) and e[0]["pinned"] is True)
+        check("text --history: [record hw.<ended>]",
+              any(l.startswith("hw ") and
+                  l.endswith("[pinned]  [record hw.%d]" % (now - 60))
+                  for l in run("--history").stdout.splitlines()))
+        r = run("--revive", "hw")
+        check("--revive hw while the new hw is live: refused, nothing moved",
+              r.returncode == 1 and "is live" in r.stderr and
+              "--as <new>" in r.stderr and asides("hw"))
+        names.append("hw2")
+        r = run("--revive", "hw", "--as", "hw2")
+        check("--revive hw --as hw2 takes the stopped record, not the live "
+              "one: hw2 carries sid-hw, the moved record and pin retire",
+              "hw: revived as hw2" in r.stdout and
+              until(lambda: asid("hw2") == "sid-hw") and
+              asides("hw") == [] and pinned("hw2") and
+              (rec("hw") or {}).get("end") == "")
+        r = run("--revive", "hw", "--as", "hw3")
+        check("--revive <live name> --as with no ended record left: refused "
+              "as live, not revived", r.returncode == 1 and
+              "is live" in r.stderr and not os.path.exists(path("hw3")))
+
+        plant("hr", end="stopped", agent=agent("sid-hr"), ended=now - 120)
+        spawn("hr", "sleep", "60")
+        until(lambda: asides("hr"))
+        run("-k", "hr")
+        until(lambda: (rec("hr") or {}).get("end") == "killed")
+        r = run("--revive", "hr.%d" % (now - 120))
+        check("--revive <name>.<ended> under its own name: hr carries "
+              "sid-hr, the moved record retires",
+              "hr: revived as hr" in r.stdout and
+              until(lambda: asid("hr") == "sid-hr") and asides("hr") == [])
+
+        plant("hs", end="stopped", agent=agent("sid-hs"))
+        names.append("hs")
+        run("--revive", "hs")
+        check("--revive hs under its own name: no copy moved aside (the new "
+              "record carries the id on)",
+              until(lambda: (rec("hs") or {}).get("end") == "") and
+              asid("hs") == "sid-hs" and asides("hs") == [])
+        plant("hn")
+        spawn("hn", "sleep", "60")
+        check("a dead record with no claude id is just replaced",
+              until(lambda: (rec("hn") or {}).get("end") == "") and
+              asides("hn") == [])
+        plant("hv", end="", ended=0, agent=agent("sid-hv"))
+        spawn("hv", "sleep", "60")
+        until(lambda: (rec("hv") or {}).get("updated", 0) > now and
+              asides("hv"))
+        e = [x for x in json.loads(run("--history", "--json").stdout or "[]")
+             if x["name"] == "hv"]
+        check("a vanished record with an id moves aside too and reads "
+              "vanished beside the live hv",
+              len(e) == 1 and e[0]["end"] == "vanished" and
+              e[0]["agent"]["session_id"] == "sid-hv")
+
+        plant("hp", end="killed", agent=agent("sid-hp"))
+        spawn("hp", "sleep", "60")
+        until(lambda: asides("hp"))
+        ap = asides("hp")[:1] or ["hp.x"]
+        r = run("--pin", "hp")
+        check("--pin pins every record of the name, the moved one too",
+              r.returncode == 0 and pinned("hp") and pinned(ap[0]))
+        t = time.time() - 31 * 86400
+        if os.path.exists(path(ap[0])):
+            os.utime(path(ap[0]), (t, t))
+        spawn("hpc", "sleep", "60")
+        time.sleep(0.5)
+        check("...a cold start's prune keeps the old moved pinned record",
+              rec(ap[0]) is not None)
+        r = run("--unpin", "hp")
+        check("--unpin unpins every record of the name",
+              r.returncode == 0 and not pinned("hp") and not pinned(ap[0]))
+        r = run("--forget", "hp", "--json")
+        o = ndjson(r.stdout) or []
+        check("--forget hp: the live record refused, the moved one forgotten",
+              r.returncode == 1 and rec("hp") is not None and
+              asides("hp") == [] and
+              sorted(x.get("reason") for x in o[:-1]) == ["", "live"])
+
+        # --- #059 M1: --revive X --as Y keeps Y's own dead record ----------
+        plant("mk", end="stopped", agent=agent("sid-mk"), ended=now - 120)
+        plant("mo", end="stopped", agent=agent("sid-mo"), ended=now - 60)
+        names.append("mk")
+        run("--revive", "mo", "--as", "mk")
+        check("--revive mo --as mk: mk carries sid-mo, mk's own sid-mk "
+              "record is moved aside, mo's retired",
+              until(lambda: asid("mk") == "sid-mo") and
+              asides("mk") == ["mk.%d" % (now - 120)] and
+              asid("mk.%d" % (now - 120)) == "sid-mk" and rec("mo") is None)
+
+        # --- L2: --revive --as under DCH_NO_HISTORY keeps the old record ---
+        plant("lo", end="stopped", agent=agent("sid-lo"))
+        names.append("ln")
+        subprocess.run([DCH, "--revive", "lo", "--as", "ln"],
+                       capture_output=True, timeout=60,
+                       env=dict(os.environ, DCH_NO_HISTORY="1"))
+        check("--revive lo --as ln with no record kept for ln: lo's stays",
+              asid("lo") == "sid-lo" and rec("ln") is None)
+        # The retire is decided by the env, not by whether the new master
+        # has written its record yet: checked at once, with no wait.
+        plant("lz", end="stopped", agent=agent("sid-lz"))
+        names.append("lz2")
+        subprocess.run([DCH, "--revive", "lz", "--as", "lz2"],
+                       capture_output=True, timeout=60,
+                       env=dict(os.environ, DCH_NO_HISTORY="0"))
+        check("--revive lz --as lz2 under DCH_NO_HISTORY=0: lz's record is "
+              "gone the moment --revive returns", rec("lz") is None)
     except Exception:
         traceback.print_exc()
         fails[0] += 1

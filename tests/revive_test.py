@@ -347,8 +347,11 @@ def main():
               rec("rsig")["argv"])
         r = run("--revive", "rsig")
         check("named revive of a live name: refused with a clear message",
-              r.returncode == 1 and "is live" in r.stderr and
-              "--as <new>" in r.stderr)
+              r.returncode == 1 and "is live" in r.stderr)
+        r = run("--revive", "rsig", "--as", "rsig2")
+        check("...--as does not clone the live session (#059): nothing "
+              "ended to revive", r.returncode == 1 and "is live" in r.stderr
+              and rec("rsig2") is None)
         r = run("--revive", "rkill", "--as", "rkill2")
         names.append("rkill2")
         check("--revive <name> --as <new>: started under the new name, "

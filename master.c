@@ -474,7 +474,7 @@ rec_refresh(void)
 		free(rec_seed);
 		rec_seed = NULL;
 	}
-	else if (!stopped && rec_ag.pid && dch_claude_gone(rec_ag.pid))
+	else if (!stopped && rec_ag.pid && dch_claude_gone(rec_ag.rec))
 	{
 		free(rec_ag.launch);
 		memset(&rec_ag, 0, sizeof rec_ag);
@@ -487,6 +487,8 @@ rec_refresh(void)
 		close(fd);
 		alias[r > 0 ? r : 0] = '\0';
 		alias[strcspn(alias, "\r\n")] = '\0';
+		/* a longer one (an older dch -m) cut on a character */
+		alias[dch_utf8_trim(alias, strlen(alias))] = '\0';
 	}
 	if (!(f = open_memstream(&hb, &hl)))
 		return;
@@ -611,6 +613,73 @@ rec_unmark(void)
 		unlink(kp);
 }
 
+/* A cold start under a name whose record still holds a Claude id (a
+** session --stop, -k or a crash ended) moves that record aside to
+** <name>.<ended>.json before the first write replaces it: --history and
+** --revive read it there. Its pin is copied, the name keeps its own. Not
+** when --revive is bringing that same id back (rec_seed): this record
+** carries it on. */
+static void
+rec_aside(void)
+{
+	char *b, *fx, sid[64], seed[64], stem[1240], np[1250];
+	size_t sl = strlen(rec_path) - 5;	/* without ".json" */
+	struct stat st;
+	ssize_t got;
+	long when = 0;
+	int fd, k;
+
+	if ((fd = open(rec_path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)) < 0)
+		return;
+	if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode) || st.st_size <= 0 ||
+	    st.st_size > 1024 * 1024 || !(b = malloc((size_t)st.st_size + 1)))
+	{
+		close(fd);
+		return;
+	}
+	got = read(fd, b, (size_t)st.st_size);
+	close(fd);
+	b[got > 0 ? got : 0] = '\0';
+	/* read as --history does: an older master's bytes not UTF-8 */
+	if ((fx = dch_utf8_fix(b)))
+	{
+		free(b);
+		b = fx;
+	}
+	if (dch_json_nested_string(b, "agent", "session_id", sid, sizeof sid)
+	    < 0 || !sid[0] ||
+	    (rec_seed && dch_json_string(rec_seed, "session_id", seed,
+	                                 sizeof seed) == 0 &&
+	     strcmp(seed, sid) == 0))
+	{
+		free(b);
+		return;
+	}
+	if (dch_json_long(b, "ended", &when) < 0 || when <= 0)
+		(void)dch_json_long(b, "updated", &when);
+	free(b);
+	/* link, not rename: never over another record of that second */
+	for (k = 0; k < 100; k++)
+	{
+		snprintf(stem, sizeof stem, "%.*s.%ld", (int)sl, rec_path,
+		         when + k);
+		snprintf(np, sizeof np, "%s.json", stem);
+		if (link(rec_path, np) == 0)
+			break;
+		if (errno != EEXIST)
+			return;
+	}
+	if (k == 100 || unlink(rec_path) < 0)
+		return;
+	snprintf(np, sizeof np, "%.*s.pin", (int)sl, rec_path);
+	if (lstat(np, &st) == 0 && S_ISREG(st.st_mode))
+	{
+		snprintf(np, sizeof np, "%s.pin", stem);
+		if ((fd = open(np, O_WRONLY | O_CREAT | O_NOFOLLOW, 0600)) >= 0)
+			close(fd);
+	}
+}
+
 /* Start the record: a cold start prunes records idle for 30 days, from
 ** every socket dir's subdir, and the subdirs that leaves empty, then drops
 ** the end markers a SIGKILLed master left behind; a live restart keeps
@@ -688,7 +757,10 @@ rec_init(int resumed)
 			rec_started = v;
 	}
 	else if (!resumed)
+	{
 		rec_unmark();
+		rec_aside();
+	}
 	rec_refresh();
 	clock_gettime(CLOCK_MONOTONIC, &rec_at);
 	atexit(rec_exit);
