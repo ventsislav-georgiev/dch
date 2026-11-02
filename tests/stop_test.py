@@ -83,7 +83,9 @@ def main():
                       PATH=bindir + os.pathsep + os.environ["PATH"],
                       DCH_AGENT_SETTLE_MS="500", DCH_AGENT_STEP_MS="20000",
                       DCH_AGENT_REENTER_MS="700",
-                      DCH_AGENT_TIMEOUT_MS="60000")
+                      DCH_AGENT_TIMEOUT_MS="60000",
+                      # never the developer's login shell (#057)
+                      DCH_LOGIN_ENV="0")
     sockdir = os.path.join(tmp, "dch-%d" % os.getuid())
     recdir = os.path.join(state, "dch", "sessions",
                           sockdir.replace("/", "-"))

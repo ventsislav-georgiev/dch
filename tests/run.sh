@@ -25,6 +25,8 @@ export XDG_RUNTIME_DIR="$TMP"
 # DCH_SOCKET_DIR wins over XDG_RUNTIME_DIR: an inherited one would point the
 # suite at the caller's live sessions.
 unset DCH_SOCKET_DIR DCH_SESSION
+# --revive would run the developer's login shell (#057): revive_test.py covers it
+export DCH_LOGIN_ENV=0
 # Session records go to $XDG_STATE_HOME/dch/sessions: keep them out of ~.
 export XDG_STATE_HOME="$TMP/state"
 SOCKDIR="$TMP/dch-$(id -u)"

@@ -682,7 +682,12 @@ nothing is typed into it, and the result is `ok` with `resume message not sent
 composer, so it says the message was not sent. The caller's own Claude
 identity (`CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_PID`, …) is
 removed from the revived session's environment, so `--revive` works from
-inside an agent. A session ended by `dch --stop` comes back the same way;
+inside an agent. The environment is the one your login shell builds:
+`--revive` runs `$SHELL -l -i` once and takes its variables (all but
+`DCH_*`), so a revive started from a GUI app or a daemon still gets the
+`PATH` your rc files set up. A shell that fails or takes longer than
+`DCH_LOGIN_ENV_MS` (default 10000) leaves the caller's environment as it
+is; `DCH_LOGIN_ENV=0` skips the step. A session ended by `dch --stop` comes back the same way;
 its message says it was stopped by `dch --stop` and to re-arm what it
 stopped for the pause.
 

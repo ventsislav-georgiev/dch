@@ -4454,6 +4454,55 @@ sgr_dim(const unsigned char *p, size_t n, int dim)
 	return dim;
 }
 
+/* raw[0..n) as plain text into txt with a per-byte faint flag in dim (both
+** NULL: just count), CRs dropped. Cursor-forward (CSI n C) becomes n spaces:
+** ghostty 1.4's formatter writes a run of blank cells that way, and Claude
+** Code's composer is mostly blank cells — its wrapped rows start with one. */
+static size_t
+faint_text(const char *raw, size_t n, char *txt, char *dim)
+{
+	size_t i, k = 0;
+	int d = 0;
+
+	for (i = 0; i < n; )
+	{
+		const unsigned char *u = (const unsigned char *)raw + i;
+
+		if (*u == 0x1b)
+		{
+			size_t l = esc_len(u, n - i), c = 0, j;
+
+			if (l > 2 && u[1] == '[' && u[l - 1] == 'm')
+				d = sgr_dim(u + 2, l - 3, d);
+			else if (l > 2 && u[1] == '[' && u[l - 1] == 'C')
+			{
+				for (j = 2; j < l - 1 && isdigit(u[j]); j++)
+					c = c * 10 + (u[j] - '0');
+				c = j == l - 1 ? (c ? c : 1) : 0;
+			}
+			for (; c > 0; c--, k++)
+				if (txt)
+				{
+					txt[k] = ' ';
+					dim[k] = (char)d;
+				}
+			i += l;
+			continue;
+		}
+		if (*u != '\r')
+		{
+			if (txt)
+			{
+				txt[k] = (char)*u;
+				dim[k] = (char)d;
+			}
+			k++;
+		}
+		i++;
+	}
+	return k;
+}
+
 /* The screen at `path` as plain text plus a per-byte faint flag in *dimp
 ** (both malloc'd), CRs dropped. NULL on failure, *err = CG_NOVT when the
 ** session has no mirror, else CG_UNKNOWN. */
@@ -4461,8 +4510,8 @@ static char *
 screen_faint(const char *path, char **dimp, int *err)
 {
 	char *raw, *txt, *dim;
-	size_t i, k = 0;
-	int n, d = 0;
+	size_t k;
+	int n;
 
 	*err = CG_UNKNOWN;
 	if (getenv("DCH_NO_DETECT"))
@@ -4481,8 +4530,9 @@ screen_faint(const char *path, char **dimp, int *err)
 			*err = CG_NOVT;
 		return NULL;
 	}
-	txt = malloc((size_t)n + 1);
-	dim = malloc((size_t)n + 1);
+	k = faint_text(raw, (size_t)n, NULL, NULL);
+	txt = malloc(k + 1);
+	dim = malloc(k + 1);
 	if (!txt || !dim)
 	{
 		free(raw);
@@ -4490,26 +4540,7 @@ screen_faint(const char *path, char **dimp, int *err)
 		free(dim);
 		return NULL;
 	}
-	for (i = 0; i < (size_t)n; )
-	{
-		const unsigned char *u = (const unsigned char *)raw + i;
-
-		if (*u == 0x1b)
-		{
-			size_t l = esc_len(u, (size_t)n - i);
-
-			if (l > 2 && u[1] == '[' && u[l - 1] == 'm')
-				d = sgr_dim(u + 2, l - 3, d);
-			i += l;
-			continue;
-		}
-		if (*u != '\r')
-		{
-			txt[k] = (char)*u;
-			dim[k++] = (char)d;
-		}
-		i++;
-	}
+	faint_text(raw, (size_t)n, txt, dim);
 	txt[k] = '\0';
 	free(raw);
 	*dimp = dim;
@@ -6272,6 +6303,77 @@ static const char *const rv_strip[] = {
 	"CLAUDE_CODE_SESSION_ATTENDED", "CLAUDE_PID", "CLAUDE_EFFORT",
 };
 
+/* Take the environment the user's login shell builds (~/.zshrc and the
+** rest) on top of ours: a revive run by a GUI app or a daemon would hand its
+** sessions that app's PATH, without what the rc files add (gcloud, kubectl
+** wrappers). DCH_* and the shell's own bookkeeping stay ours. Best effort:
+** a shell that fails or hangs (DCH_LOGIN_ENV_MS) changes nothing;
+** DCH_LOGIN_ENV=0 skips it. */
+static void
+login_env(void)
+{
+	const char *sh = getenv("SHELL"), *off = getenv("DCH_LOGIN_ENV");
+	const char *td = getenv("TMPDIR");
+	long long until = wall_ms() + env_ms("DCH_LOGIN_ENV_MS", 10000);
+	char tmp[1024], *buf = NULL, *e;
+	struct stat sb;
+	int fd, st = -1;
+	pid_t pid, w = 0;
+
+	if (!sh || *sh != '/' || (off && strcmp(off, "0") == 0))
+		return;
+	snprintf(tmp, sizeof tmp, "%s/dch-env.XXXXXX", td && *td ? td : "/tmp");
+	if ((fd = mkstemp(tmp)) < 0)
+		return;
+	/* The shell writes the file and exits; waiting on the exit, not on
+	** EOF, so a daemon the rc files start cannot hold us. */
+	if ((pid = fork()) == 0)
+	{
+		int nul = open("/dev/null", O_RDWR);
+
+		/* no controlling terminal: an interactive shell must not take
+		** over the caller's job control */
+		setsid();
+		dup2(nul, 0);
+		dup2(nul, 1);
+		dup2(nul, 2);
+		execl(sh, sh, "-l", "-i", "-c", "env -0 >| \"$1\"", sh, tmp,
+		      (char *)NULL);
+		_exit(127);
+	}
+	while (pid > 0 && (w = waitpid(pid, &st, WNOHANG)) == 0 &&
+	       wall_ms() < until)
+		poll(NULL, 0, 20);
+	if (pid > 0 && w == 0)
+	{
+		kill(-pid, SIGKILL);
+		kill(pid, SIGKILL);
+		waitpid(pid, &st, 0);
+		st = -1;
+	}
+	if (w > 0 && WIFEXITED(st) && WEXITSTATUS(st) == 0 &&
+	    fstat(fd, &sb) == 0 && sb.st_size > 0 &&
+	    (buf = malloc((size_t)sb.st_size + 1)) &&
+	    pread(fd, buf, (size_t)sb.st_size, 0) == sb.st_size)
+	{
+		buf[sb.st_size] = '\0';
+		for (e = buf; e < buf + sb.st_size; e += strlen(e) + 1)
+		{
+			char *eq = strchr(e, '=');
+
+			if (!eq || eq == e || strncmp(e, "DCH_", 4) == 0)
+				continue;
+			*eq = '\0';
+			if (strcmp(e, "PWD") && strcmp(e, "OLDPWD") &&
+			    strcmp(e, "SHLVL") && strcmp(e, "_"))
+				setenv(e, eq + 1, 1);
+		}
+	}
+	free(buf);
+	close(fd);
+	unlink(tmp);
+}
+
 static int do_spawn_verb(char *exe, const char *name, int cols, int rows,
                          char **inner_argv, int inner_argc, int quiet);
 
@@ -6466,6 +6568,7 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 
 	for (k = 0; k < (int)(sizeof rv_strip / sizeof rv_strip[0]); k++)
 		unsetenv(rv_strip[k]);
+	login_env();
 	(void)dch_history_dir(dir, sizeof dir, sock_dir, 0);
 	for (k = 0; k < n; k++)
 	{

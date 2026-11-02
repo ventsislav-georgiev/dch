@@ -745,6 +745,22 @@ How long an agent must stay ready before
 How long dch waits for typed text to show in the composer before giving up
 without pressing Enter (default 30000); the wait ends as soon as it shows.
 .TP
+.B DCH_LOGIN_ENV
+.B 0
+stops
+.B \-\-revive
+from taking the environment of the login shell
+.RB ( "$SHELL \-l \-i" ,
+all variables except
+.BR DCH_* ),
+which it otherwise does so that a revive started from a GUI app gets the
+.B PATH
+the rc files set up.
+.TP
+.B DCH_LOGIN_ENV_MS
+How long that login shell may take before dch keeps its own environment
+(default 10000).
+.TP
 .B DCH_AGENT_STEP_MS
 How long
 .B /exit

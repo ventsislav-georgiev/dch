@@ -146,6 +146,9 @@ def paint(c):
             w = textwrap.wrap(d, 70) or [d]
             comp = "\r\n".join(["❯ " + w[0]] +
                                  ["  " + l for l in w[1:]])
+            # Ink moves the cursor over blanks instead of writing spaces,
+            # so ghostty 1.4's dump has CSI C where the spaces were
+            comp = comp.replace(" ", "\033[C")
         elif queue:
             comp = "❯ \033[2mPress up to edit queued messages\033[0m"
         else:

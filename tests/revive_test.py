@@ -85,7 +85,9 @@ def main():
     os.environ.update(HOME=home, XDG_RUNTIME_DIR=tmp, XDG_STATE_HOME=state,
                       FAKE_CLAUDE_DIR=fc, DCH_RECORD_MS="300",
                       PATH=bindir + os.pathsep + os.environ["PATH"],
-                      DCH_AGENT_STEP_MS="20000", DCH_AGENT_REENTER_MS="700")
+                      DCH_AGENT_STEP_MS="20000", DCH_AGENT_REENTER_MS="700",
+                      # the login shell's env is tested on its own below
+                      DCH_LOGIN_ENV="0")
     # a bare argv[0] is recorded as the path the child exec'd
     sh_, sleep_ = shutil.which("sh"), shutil.which("sleep")
     sockdir = os.path.join(tmp, "dch-%d" % os.getuid())
@@ -672,6 +674,61 @@ def main():
               any(l.startswith("lbad: NOT revived") for l in lines) and
               "lgood: revived as lgood in %s" % proj in lines and
               run("--cmd", "lgood", env=lenv).returncode == 0)
+
+        # --- the login shell's environment (#057) ------------------------
+        # A revive run by a GUI app (Prosper) got that app's PATH: no gcloud,
+        # no prodguard. It now takes what `$SHELL -l -i` builds, but keeps
+        # DCH_* (where sessions live) its own.
+        rt6 = os.path.join(tmp, "rt6")
+        sockdir6 = os.path.join(rt6, "dch-%d" % os.getuid())
+        recdir6 = os.path.join(recroot, sockdir6.replace("/", "-"))
+        os.makedirs(rt6)
+        os.makedirs(recdir6, 0o700)
+        lsh = os.path.join(tmp, "loginsh")
+        with open(lsh, "w") as f:
+            f.write('#!/bin/sh\n'
+                    '[ "$1 $2 $3" = "-l -i -c" ] || exit 2\n'
+                    'echo rc noise; echo rc noise >&2\n'
+                    'export LOGIN_RC=1 PATH="/login-rc/bin:$PATH" '
+                    'DCH_SOCKET_DIR=/nonexistent\n'
+                    '[ -n "$LOGIN_HANG" ] && sleep 30\n'
+                    'exec /bin/sh -c "$4" "$5" "$6"\n')
+        os.chmod(lsh, 0o755)
+        genv = {k: v for k, v in os.environ.items() if k != "DCH_LOGIN_ENV"}
+        genv.update(XDG_RUNTIME_DIR=rt6, SHELL=lsh)
+
+        def envof(n, **extra):
+            out = os.path.join(tmp, n + ".env")
+            os.rename(plant(n, sock_dir=sockdir6, argv=[
+                sh_, "-c", "env > %s; exec sleep 60" % out]),
+                os.path.join(recdir6, n + ".json"))
+            t0 = time.time()
+            r = run("--revive", n, env=dict(genv, **extra))
+            names.append((n, genv))
+            took = time.time() - t0
+            until(lambda: os.path.exists(out) and os.path.getsize(out))
+            try:
+                with open(out) as f:
+                    e = dict(l.split("=", 1) for l in f.read().splitlines()
+                             if "=" in l)
+            except OSError:
+                e = {}
+            return r, e, took
+
+        r, e, _ = envof("lgin")
+        check("--revive takes the login shell's env: its PATH and vars "
+              "reach the session, DCH_SOCKET_DIR stays dch's",
+              r.returncode == 0 and e.get("LOGIN_RC") == "1" and
+              e.get("PATH", "").startswith("/login-rc/bin:") and
+              e.get("DCH_SOCKET_DIR") != "/nonexistent" and
+              os.path.exists(os.path.join(sockdir6, "lgin.sock")))
+        r, e, took = envof("lhang", LOGIN_HANG="1", DCH_LOGIN_ENV_MS="500")
+        check("...a login shell that hangs is cut off: revived, own env",
+              r.returncode == 0 and took < 10 and "LOGIN_RC" not in e and
+              e.get("PATH", "").split(":")[0] == bindir)
+        r, e, _ = envof("loff", DCH_LOGIN_ENV="0")
+        check("...DCH_LOGIN_ENV=0 skips it",
+              r.returncode == 0 and "LOGIN_RC" not in e)
 
         # --- --json (#047): phases, then one final per record with "as" ----
         rt4 = os.path.join(tmp, "rt4")
