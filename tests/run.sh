@@ -161,8 +161,10 @@ fi
 # --- attach replays the mirrored screen (blank-attach regression) -----------
 if [ "$MIRROR" = "1" ]; then
     pyrun "attach replays the screen" replay_test.py
+    pyrun "OSC 8 links survive --read and the redraw" osc8_test.py
 else
     skipmirror "attach replays the screen"
+    skipmirror "OSC 8 links survive --read and the redraw"
 fi
 
 # --- an attached client survives a live restart -----------------------------

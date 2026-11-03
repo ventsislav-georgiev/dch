@@ -126,6 +126,83 @@ dch_vt_resize(int cols, int rows)
 	}
 }
 
+/* Length of the escape sequence at s (n bytes left): OSC up to BEL/ST, CSI
+** up to its final byte, anything else two bytes. */
+static size_t
+esc_len(const char *s, size_t n)
+{
+	size_t i = 2;
+
+	if (n < 2)
+		return n;
+	if (s[1] == ']') {
+		for (; i < n; i++)
+			if (s[i] == '\a')
+				return i + 1;
+			else if (s[i] == '\033' && i + 1 < n && s[i + 1] == '\\')
+				return i + 2;
+		return n;
+	}
+	if (s[1] == '[') {
+		while (i < n && ((unsigned char)s[i] < 0x40 ||
+		    (unsigned char)s[i] > 0x7e))
+			i++;
+		return i < n ? i + 1 : n;
+	}
+	return 2;
+}
+
+/* The VT formatter emits per-cell OSC 8 links but carries an open one across
+** row breaks, so a line taken on its own (the recent-N tail-cut below, a
+** reader showing the last rows) loses the open or keeps a stray close. Close
+** the link before each line break and reopen it before the next printed byte,
+** dropping the formatter's own close when it lands there. Writes to o (NULL:
+** count only), returns the length. */
+#define OSC8_CLOSE "\033]8;;\033\\"
+static size_t
+osc8_per_line(const char *s, size_t n, char *o)
+{
+	const char *open = NULL;
+	size_t i = 0, k = 0, l, olen = 0;
+	int pending = 0;
+
+#define PUT(p, len) do { if (o) memcpy(o + k, (p), (len)); k += (len); } while (0)
+	while (i < n) {
+		if (s[i] == '\033') {
+			l = esc_len(s + i, n - i);
+			if (l > 5 && memcmp(s + i, "\033]8;", 4) == 0) {
+				const char *semi = memchr(s + i + 4, ';', l - 4);
+				size_t term = s[i + l - 1] == '\a' ? 1 : 2;
+				int close = !semi || semi + 1 == s + i + l - term;
+
+				if (!(close && pending))
+					PUT(s + i, l);
+				open = close ? NULL : s + i;
+				olen = l;
+				pending = 0;
+			} else
+				PUT(s + i, l);
+			i += l;
+			continue;
+		}
+		if (open && (s[i] == '\n' ||
+		    (s[i] == '\r' && i + 1 < n && s[i + 1] == '\n'))) {
+			if (!pending)
+				PUT(OSC8_CLOSE, sizeof OSC8_CLOSE - 1);
+			pending = 1;
+		} else if (pending) {
+			PUT(open, olen);
+			pending = 0;
+		}
+		PUT(s + i, 1);
+		i++;
+	}
+	if (open && !pending)
+		PUT(OSC8_CLOSE, sizeof OSC8_CLOSE - 1);
+#undef PUT
+	return k;
+}
+
 int
 dch_vt_snapshot(int format, int lines, char **out, size_t *outlen)
 {
@@ -215,6 +292,22 @@ dch_vt_snapshot(int format, int lines, char **out, size_t *outlen)
 	}
 	ghostty_formatter_free(fmt);
 	buf[written] = '\0';
+
+	/* Fast path: no link anywhere costs one scan. */
+	if (format == DCH_VT_FMT_ANSI && strstr(buf, "\033]8;")) {
+		size_t n = osc8_per_line(buf, written, NULL);
+		char *nb = malloc(n + 1);
+
+		if (!nb) {
+			free(buf);
+			return -1;
+		}
+		osc8_per_line(buf, written, nb);
+		nb[n] = '\0';
+		free(buf);
+		buf = nb;
+		written = n;
+	}
 
 	if (lines > 0 && written > 0) {
 		/* Keep only the last `lines` text lines. ANSI note: SGR state
