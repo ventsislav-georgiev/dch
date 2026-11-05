@@ -2,9 +2,11 @@
 
 Drives tests/fake_claude.py as `claude` first on PATH, with HOME and the
 runtime dir temporary so no real ~/.claude or session is touched. Covers:
-sent (typed and submitted), busy, a dialog (nothing typed, no Enter), a
-draft (left as it was), not_claude (a plain sh session), self
-(DCH_SESSION), a Claude typed into a shell, explicit names vs --all,
+sent (typed and submitted), busy and shell (sent: Claude Code queues it,
+and takes it once the turn ends; another message joins the queue), a dialog
+and a draft, busy or not (nothing typed, no Enter on the dialog; the draft
+left as it was, also under queued messages), not_claude (a plain sh
+session), self (DCH_SESSION), a Claude typed into a shell, explicit names vs --all,
 no_session, an old master, the --json shape (pure NDJSON), the re-pressed
 Enter when one is eaten, not_submitted when every Enter is eaten, exit
 codes, usage errors, and concurrency: several slow sessions cost about the
@@ -165,13 +167,16 @@ def main():
         a = sess("sa", "claude")
         b = sess("sb", "claude")
         busy = sess("sbusy", "claude", busy=True)
+        shl = sess("sshl", "claude", shell=True)
         dlg = sess("sdlg", "claude", dialog=True)
+        bdlg = sess("sbdlg", "claude", busy=True, dialog=True)
         drf = sess("sdrf", "claude", draft="half typed")
+        bdrf = sess("sbdrf", "claude", busy=True, draft="half typed")
         me = sess("sme", "claude")
         sh = sess("ssh", "sh")
         shc = sess("sshc", "sh")
         run("--run", shc, "claude")
-        for n in (a, b, busy, dlg, drf, me, shc):
+        for n in (a, b, busy, shl, dlg, bdlg, drf, bdrf, me, shc):
             up(n)
         r = say("--all", "--", "resume", "work,", "limits are back",
                 env=dict(os.environ, DCH_SESSION=me))
@@ -179,29 +184,56 @@ def main():
         got, n = lines(r.stdout)
         msg = "resume work, limits are back"
         check("--all: exit 0 (skips are not failures)", r.returncode == 0)
-        check("--all: exactly one line per session", n == 8 and
-              set(got) == {a, b, busy, dlg, drf, me, sh, shc})
+        check("--all: exactly one line per session", n == 11 and
+              set(got) == {a, b, busy, shl, dlg, bdlg, drf, bdrf, me, sh,
+                           shc})
         check("sent: text arrives and is submitted",
               got.get(a) == "sent" and got.get(b) == "sent" and
               typed(a) == [msg] and typed(b) == [msg] and
               until(lambda: any(e["ev"] == "turn" and e["text"] == msg
                                 for e in events(a))))
-        check("busy: skipped, nothing typed",
-              got.get(busy) == "skipped — claude is busy" and
-              typed(busy) == [])
-        check("dialog: skipped, nothing typed, no Enter on it",
-              got.get(dlg) == "skipped — a prompt or dialog is waiting "
-              "for you" and not any(e["ev"] in ("line", "enter_dialog")
-                                    for e in events(dlg)))
+        check("busy: sent, submitted, queued (not started) while busy",
+              got.get(busy) == "sent" and typed(busy) == [msg] and
+              not any(e["ev"] == "turn" for e in events(busy)) and
+              "ctrl+enter to send now" in run("--read", busy).stdout and
+              "❯ " + msg in run("--read", busy).stdout)
+        check("shell (a background shell): sent and taken",
+              got.get(shl) == "sent" and typed(shl) == [msg] and
+              until(lambda: any(e["ev"] == "turn" and e["text"] == msg
+                                for e in events(shl))))
+        for n, d in ((dlg, "dialog"), (bdlg, "busy + dialog")):
+            check("%s: skipped/prompt, nothing typed, no Enter on it" % d,
+                  got.get(n) == "skipped — a prompt or dialog is waiting "
+                  "for you" and not any(e["ev"] in ("line", "enter_dialog")
+                                        for e in events(n)))
         setctl(dlg)
         check("dialog: no text left behind in the composer",
               until(lambda: "Try" in run("--read", dlg).stdout) and
               "resume" not in run("--read", dlg).stdout)
-        check("draft: skipped, draft untouched",
-              got.get(drf) == "skipped — the composer holds an unsent "
-              "draft" and typed(drf) == [] and
-              "half typed" in run("--read", drf).stdout and
-              "resume" not in run("--read", drf).stdout)
+        for n, d in ((drf, "draft"), (bdrf, "busy + draft")):
+            check("%s: skipped, draft untouched" % d,
+                  got.get(n) == "skipped — the composer holds an unsent "
+                  "draft" and typed(n) == [] and
+                  "half typed" in run("--read", n).stdout and
+                  "resume" not in run("--read", n).stdout)
+
+        # --- busy with a message queued: another joins the queue --------
+        r = say(busy, "--json", "--", "second")
+        check("queued: a second message into the busy one is sent",
+              r.returncode == 0 and json.loads(r.stdout or "{}") ==
+              {"name": busy, "result": "ok", "reason": "", "detail": ""} and
+              typed(busy) == [msg, "second"] and
+              sum(e["ev"] == "line" for e in events(busy)) == 2)
+        setctl(busy, busy=True, draft="mine")
+        until(lambda: "mine" in run("--read", busy).stdout)
+        r = say(busy, "--json", "--", "third")
+        check("queued + draft: skipped/draft, nothing typed",
+              json.loads(r.stdout or "{}").get("reason") == "draft" and
+              typed(busy) == [msg, "second"])
+        setctl(busy)
+        check("busy over: both queued messages taken as turns, in order",
+              until(lambda: [e["text"] for e in events(busy)
+                             if e["ev"] == "turn"] == [msg, "second"], 15))
         check("self (DCH_SESSION): skipped, nothing typed",
               got.get(me) == "skipped — the session you are in" and
               typed(me) == [])
@@ -231,14 +263,13 @@ def main():
         check("--json: results and reasons",
               by.get(a) == {"name": a, "result": "ok", "reason": "",
                             "detail": ""} and
-              by.get(busy, {}).get("result") == "skipped" and
-              by[busy]["reason"] == "busy" and by[busy]["detail"] and
+              by.get(busy, {}).get("result") == "ok" and
               by.get(sh, {}).get("reason") == "not_claude" and
               by.get("nosuch" + TAG, {}).get("result") == "failed" and
               by["nosuch" + TAG]["reason"] == "no_session")
         check("--json: a failure exits 1", r.returncode == 1)
         check("--json: the sent one got it", typed(a)[-1:] == ["json msg"])
-        for n in (busy, dlg, drf, me, sh, shc):
+        for n in (busy, shl, dlg, bdlg, drf, bdrf, me, sh, shc):
             run("-k", n)
             names.remove(n)
 

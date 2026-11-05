@@ -481,10 +481,12 @@ joined with spaces) into the Claude Code running in each named session, or
 every session with
 .BR \-\-all ,
 and press Enter. Claude may be the session's command or typed into its
-shell. Only an idle Claude (its session record says so) whose screen shows
-the empty composer is typed into; a busy Claude, a prompt or dialog, an unsent
-draft or a queued message is skipped, never waited for. Enter is pressed again
-while the text stays in the composer. Sessions are typed into concurrently.
+shell. Idle or busy: a busy Claude, or one running a background shell, queues
+the message (after any already queued) and takes it once its turn ends.
+Only a screen showing the empty composer is typed into; a prompt or dialog
+(the Enter would answer it) or an unsent draft is skipped, never waited for.
+Enter is pressed again while the text stays in the composer, never into a
+dialog; text that left the composer, submitted or shown queued, is sent. Sessions are typed into concurrently.
 One line per session as it finishes:
 .IB name ": sent" ,
 .IB name ": skipped \(em " why
@@ -495,7 +497,7 @@ prints one object per line instead:
 .IR name ,
 .IR result " (" ok ", " skipped " or " failed ),
 .I reason
-.RB ( not_claude ", " self ", " busy ", " prompt ", " draft ", " queued ,
+.RB ( not_claude ", " self ", " prompt ", " draft ,
 .BR no_screen ", " no_session ", " not_submitted ", " not_typed ,
 .BR old_master ,
 or empty) and

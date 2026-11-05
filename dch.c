@@ -2200,11 +2200,11 @@ usage(void)
 	    "  dch --say <name>...|--all [--json] -- <text...>\n"
 	    "                                             type a message into\n"
 	    "                                             each session's Claude\n"
-	    "                                             Code, only when it is\n"
-	    "                                             idle at an empty\n"
-	    "                                             composer; one result\n"
+	    "                                             Code at an empty\n"
+	    "                                             composer (busy: it is\n"
+	    "                                             queued); one result\n"
 	    "                                             per session: sent,\n"
-	    "                                             skipped (busy, prompt,\n"
+	    "                                             skipped (prompt,\n"
 	    "                                             draft, ...) or failed\n"
 	    "  dch --stop <name>...|--all [--json]        pause each session's\n"
 	    "                                             Claude Code, /exit it\n"
@@ -4842,19 +4842,22 @@ composer_find(char *txt, char **end)
 /* Is the Claude Code screen at `path` safe to type into? Positive evidence
 ** only: the composer must be on screen and empty (nothing after the glyph,
 ** or only Claude's dim placeholder: a typed draft is not dim), with no
-** prompt or form up and no queued message. Anything else is reported, never
-** typed over: a trust dialog or release notes before the composer read
-** UNKNOWN. */
+** prompt or form up and — unless queue_ok — no queued message. Anything
+** else is reported, never typed over: a trust dialog or release notes
+** before the composer read UNKNOWN. queue_ok (--say): a message typed while
+** others wait in Claude Code's queue joins them, so only the composer
+** under them counts. */
 static int
-claude_gate(const char *path)
+claude_gate_q(const char *path, int queue_ok)
 {
 	char *txt, *dim, *comp, *end, *c;
 	int res;
 
 	if (!(txt = screen_faint(path, &dim, &res)))
 		return res;
-	if ((res = screen_modal(txt)) == CG_UNKNOWN &&
-	    (comp = composer_find(txt, &end)))
+	if ((res = screen_modal(txt)) == CG_QUEUED && queue_ok)
+		res = CG_UNKNOWN;
+	if (res == CG_UNKNOWN && (comp = composer_find(txt, &end)))
 	{
 		for (c = comp + 3; ; )
 			if (*c == ' ')
@@ -4869,6 +4872,12 @@ claude_gate(const char *path)
 	free(txt);
 	free(dim);
 	return res;
+}
+
+static int
+claude_gate(const char *path)
+{
+	return claude_gate_q(path, 0);
 }
 
 /* s without spaces, NBSPs and line breaks (wrapping moves them), at most
@@ -5989,24 +5998,26 @@ restart_agents(int force, const char *only, int json)
 /* ---- --say: one message to the Claude sessions (#045) --------------
 **
 ** `--say <name>...|--all -- <text>` types text into each session's Claude
-** Code under the --include-agents gate, at the moment of the call: never
-** into a busy Claude, a dialog, a draft or a queue — those are skipped and
-** the caller retries. Every session types in a child of its own, so --all
-** costs the slowest session, not the sum (ag_type alone may take ~25 s). */
+** Code at the moment of the call, busy or not: Enter in a busy Claude
+** queues the message, it does not interrupt the turn. Never over a dialog
+** (Enter would answer it) or a draft (ours would join it) — those are
+** skipped and the caller retries. Every session types in a child of its
+** own, so --all costs the slowest session, not the sum (ag_type alone may
+** take ~25 s). */
 
 /* Outcomes; from SAY_NO_SESSION on they are failures. */
-enum { SAY_OK, SAY_NOT_CLAUDE, SAY_SELF, SAY_BUSY, SAY_PROMPT, SAY_DRAFT,
-       SAY_QUEUED, SAY_NO_SCREEN, SAY_NO_SESSION, SAY_NOT_SUBMITTED,
+enum { SAY_OK, SAY_NOT_CLAUDE, SAY_SELF, SAY_PROMPT, SAY_DRAFT,
+       SAY_NO_SCREEN, SAY_NO_SESSION, SAY_NOT_SUBMITTED,
        SAY_NOT_TYPED, SAY_OLD_MASTER, SAY_N };
 static const char *const say_code[] = {
-	"", "not_claude", "self", "busy", "prompt", "draft", "queued",
-	"no_screen", "no_session", "not_submitted", "not_typed", "old_master",
+	"", "not_claude", "self", "prompt", "draft", "no_screen", "no_session",
+	"not_submitted", "not_typed", "old_master",
 };
 static const char *const say_why[] = {
 	"", "no claude runs in the session", "the session you are in",
-	"claude is busy", "a prompt or dialog is waiting for you",
-	"the composer holds an unsent draft", "a queued message is pending",
-	"the composer is not on screen", "no such session",
+	"a prompt or dialog is waiting for you",
+	"the composer holds an unsent draft", "the composer is not on screen",
+	"no such session",
 	"the message stayed in the composer through every Enter",
 	"the message could not be typed",
 	"its master predates --cmd (dch --restart it)",
@@ -6038,11 +6049,13 @@ say_print(const char *name, int c, int json)
 }
 
 #ifdef HAVE_LIBGHOSTTY_VT
-/* The gate and the typing, in the child. */
+/* The gate and the typing, in the child. Busy or with messages queued,
+** Claude Code queues ours: ag_type counts the text leaving the composer as
+** sent, whether it started a turn or joined the queue above it. */
 static int
 say_type(const char *path, const char *text)
 {
-	switch (claude_gate(path))
+	switch (claude_gate_q(path, 1))
 	{
 	case CG_EMPTY:
 		break;
@@ -6050,8 +6063,6 @@ say_type(const char *path, const char *text)
 		return SAY_PROMPT;
 	case CG_DRAFT:
 		return SAY_DRAFT;
-	case CG_QUEUED:
-		return SAY_QUEUED;
 	default:
 		return SAY_NO_SCREEN;
 	}
@@ -6116,9 +6127,9 @@ do_say_verb(char **names, int nnames, char **words, int nwords, int json)
 			c = SAY_NO_SESSION;
 		else
 		{
+			/* any status: a busy Claude queues the message */
 			c = ci.pid <= 0 || claude_find(ci.pid, 1, &r) == 0
-			    ? SAY_NOT_CLAUDE
-			    : strcmp(r.status, "idle") != 0 ? SAY_BUSY : -1;
+			    ? SAY_NOT_CLAUDE : -1;
 			cmd_info_free(&ci);
 		}
 #ifdef HAVE_LIBGHOSTTY_VT

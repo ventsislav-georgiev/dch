@@ -184,7 +184,7 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "--history/--revive bring dead sessions back" revive_test.py
     pyrun "--revive never starts two claudes on one id" revive_sid_test.py
     pyrun "--pin/--unpin/--forget keep and clean history" history_pin_test.py
-    pyrun "--say messages idle Claude sessions, gated" say_test.py
+    pyrun "--say messages Claude sessions (busy too), gated" say_test.py
     pyrun "--stop pauses Claude, ends the session as stopped" stop_test.py
     pyrun "-k/--stop signal exactly the session's master" kill_test.py
     pyrun "records with odd bytes, long aliases and long argv read back" record_utf8_test.py
