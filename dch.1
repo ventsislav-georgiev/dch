@@ -958,7 +958,10 @@ bare "Yes", at most one "Yes, and don't ask again ..." row (a curly apostrophe
 counts; never picked, never a mode change), and a last "No...", the dialog the last thing on the screen
 and the screen reading
 .BR blocked .
-Everything else is left to the human. Checked after 300 ms of quiet output and
+Everything else is left to the human, and hook- or ask-rule-raised
+prompts ("Hook ... requires confirmation for this command", "Permission rule
+... requires confirmation for this ...", "Ask rule ... overrides auto mode for
+this ...") always are. Checked after 300 ms of quiet output and
 2 s after an answer, only when a Claude Code runs under the session's program;
 a prompt it answered is never answered again while it stays up, nor within
 30 s once gone and back (its ticking "will automatically block this request in

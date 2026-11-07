@@ -3207,7 +3207,11 @@ det_blocker(char *fold)
 ** and one "Esc to cancel" footer, then Claude Code's session-title rule).
 ** As in Prosper, a head off the screen top and hidden characters do not
 ** stop it: they guard what a human reads, and this approves any plain
-** permission prompt. Prosper's preview forms are not parsed: never one. */
+** permission prompt. Prosper's preview forms are not parsed: never one.
+** Never hook- or ask-rule-raised prompts either (Prosper #790, ap_hook:
+** "Hook … requires confirmation for this", "Permission rule … requires
+** confirmation for this", "Ask rule … overrides auto mode for this" and
+** their footers); those wait for the human. */
 
 #define AP_GAP 4	/* non-option lines allowed between two options */
 #define AP_SLACK 2	/* a frame rule may end this many cells short */
@@ -3528,8 +3532,64 @@ ap_countdown(char *s)
 	}
 }
 
+/* A prompt raised by a hook or an ask rule (Prosper #790): rows lo..hi-1,
+** frames aside, joined with every blank removed (a wrap anywhere still
+** matches), hold one of ap_marks: a literal (b NULL), or a, then b
+** starting 1..n characters after a ends (every a tried). Claude Code
+** 2.1.318 draws "Hook PreToolUse:Bash requires confirmation for this
+** command:" over "settings.json to update hooks", "Permission rule <rule>
+** requires confirmation for this <t>." (over "/permissions to update
+** rules", missing for managed policy) and, in auto mode, "Ask rule <rule>
+** overrides auto mode for this <t>." over "/permissions to let auto mode
+** decide". "/permissions to update rules" alone is no marker: it is drawn
+** under a working-directory reason too. Classifier asks are answered. */
+static const struct { const char *a, *b; int n; } ap_marks[] = {
+	{ "toupdatehooks", NULL, 0 },
+	{ "/permissionstoletautomodedecide", NULL, 0 },
+	{ "Hook", "requiresconfirmationforthis", 200 },
+	{ "Permissionrule", "requiresconfirmationforthis", 300 },
+	{ "Askrule", "overridesautomodeforthis", 300 },
+};
+
+static int
+ap_hook(const struct ap_screen *s, int lo, int hi)
+{
+	char *b = NULL, *p, *q;
+	const char *t;
+	size_t n, al, m;
+	int k, w, hit = 0;
+	FILE *f;
+
+	if (!(f = open_memstream(&b, &n)))
+		return 1;	/* unsure: leave it to the human */
+	for (k = lo; k < hi; k++)
+		if (!ap_frame(s, k))
+			for (t = s->ln[k]; *t; t += w ? w : 1)
+				if (!(w = ap_ws(t)))
+					fputc(*t, f);
+	if (fclose(f) != 0)
+		return free(b), 1;
+	for (m = 0; !hit && m < sizeof ap_marks / sizeof ap_marks[0]; m++)
+	{
+		al = strlen(ap_marks[m].a);
+		for (p = b; !hit && (p = strstr(p, ap_marks[m].a)); p++)
+			if (!ap_marks[m].b)
+				hit = 1;
+			else if (p[al] && (q = strstr(p + al + 1, ap_marks[m].b)))
+			{
+				/* characters, as Prosper's regex */
+				for (n = 0, t = p + al; t < q; t++)
+					n += ((unsigned char)*t & 0xc0) != 0x80;
+				hit = n <= (size_t)ap_marks[m].n;
+			}
+	}
+	free(b);
+	return hit;
+}
+
 /* Is the screen (plain text, rows by '\n') showing a Claude Code
-** permission prompt the auto-allow rule may answer with "1"? 1 with
+** permission prompt the auto-allow rule may answer with "1"? Never a
+** hook- or ask-rule-raised one (ap_hook): those wait for the human. 1 with
 ** *ident (the whole dialog: question, context, options and their detail,
 ** the caret aside, a countdown masked (ap_countdown): the loop guard
 ** compares it) and *title (its first line,
@@ -3665,6 +3725,8 @@ dch_allow_prompt(const char *screen, char **ident, char **title)
 	for (k = j + 1; k < i; k++)
 		if (!ap_frame(&s, k) && ap_chip(s.ln[k]))
 			goto out;
+	if (ap_hook(&s, j + 1, i))
+		goto out;
 	/* allowYes: 2 or 3 options; option 1 a bare "Yes"; the last a "No…";
 	** neither with detail rows; a middle one only "Yes, and don't ask
 	** again …" (never picked), and never a mode change. lab[0] is the
