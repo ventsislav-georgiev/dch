@@ -436,13 +436,21 @@ def main():
             # Poll, not a fixed sleep: under ASan on a CI runner the
             # teardown can take longer. Once the shell is gone the touch
             # can no longer run, so checking the mark after is sound.
+            def parts():
+                r6 = rec(n) or {}
+                return {"no_exit": "/exit" not in typed(n),
+                        "end": r6.get("end"),
+                        "sid": (r6.get("agent") or {}).get("session_id")
+                        == sid5,
+                        "gone": cmd(n) is None, "no_marker": not marker(n),
+                        "no_touch": not os.path.exists(mark)}
+            want = {"no_exit": True, "end": "stopped", "sid": True,
+                    "gone": True, "no_marker": True, "no_touch": True}
+            got = want if until(lambda: parts() == want) else parts()
             check("`claude%s touch`: never /exit'ed, record stopped with the "
-                  "id, session gone, the touch never ran" % op,
-                  until(lambda: "/exit" not in typed(n) and
-                        (rec(n) or {}).get("end") == "stopped" and
-                        ((rec(n) or {}).get("agent") or {}).get("session_id")
-                        == sid5 and cmd(n) is None and not marker(n)) and
-                  not os.path.exists(mark))
+                  "id, session gone, the touch never ran" % op, got == want)
+            if got != want:
+                print("     | " + json.dumps(got))
             names.remove(n)
             r = run("--revive", n)
             names.append(n)
