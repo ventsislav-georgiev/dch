@@ -4934,6 +4934,10 @@ crec_visit(const char *path, const char *body, size_t len, void *arg)
 	return 0;
 }
 
+/* 1 opens a batch of proc_tree calls that share one process snapshot (the
+** first call takes it, 2 then reuses it); 0 closes the batch. */
+static int proc_tree_keep;
+
 /* `root` and its descendants, breadth first, at most max: the pids. */
 static int
 proc_tree(long root, long *out, int max)
@@ -4952,18 +4956,30 @@ proc_tree(long root, long *out, int max)
 				out[n++] = kids[k];
 	}
 #else
+	/* A pass reads every process's stat; in a batch (one --ls-json, a tree
+	** per row) the first pass serves the rest. */
 	static long pid[4096], pp[4096];
-	int np = 0, k;
-	DIR *d = opendir("/proc");
+	static int np;
+	int k;
+	DIR *d;
 	struct dirent *de;
 	char *end;
 
 	out[0] = root;
-	while (d && np < 4096 && (de = readdir(d)))
-		if ((pid[np] = strtol(de->d_name, &end, 10)) > 0 && !*end)
-			pp[np] = proc_ppid(pid[np]), np++;
-	if (d)
-		closedir(d);
+	if (proc_tree_keep != 2)
+	{
+		np = 0;
+		if ((d = opendir("/proc")))
+		{
+			while (np < 4096 && (de = readdir(d)))
+				if ((pid[np] = strtol(de->d_name, &end, 10)) > 0 &&
+				    !*end)
+					pp[np] = proc_ppid(pid[np]), np++;
+			closedir(d);
+		}
+		if (proc_tree_keep)
+			proc_tree_keep = 2;
+	}
 	for (i = 0; i < n && n < max; i++)
 		for (k = 0; k < np && n < max; k++)
 			if (pp[k] == out[i])
@@ -10563,14 +10579,14 @@ main(int argc, char **argv)
 		int k;
 		/* The Claude under each session's child (the root --stop
 		** joins from, by MSG_CMD), read live: every sessions dir once
-		** for all rows, procStart verified (#079).
-		** ponytail: claude_dirs walks each row's process tree; on Linux
-		** that is a /proc scan per row — one shared scan if it shows. */
+		** for all rows, procStart verified (#079). On Linux the rows
+		** share one /proc scan (proc_tree_keep). */
 		struct crec_rows cr = { calloc((size_t)sl.n + 1, sizeof *cr.v),
 		                        sl.n };
 		char cdirs[16][1100], sp[1100];
 		int nd = 0;
 
+		proc_tree_keep = 1;
 		for (k = 0; cr.v && k < sl.n; k++)
 		{
 			struct cmd_info ci;
@@ -10586,6 +10602,7 @@ main(int argc, char **argv)
 			}
 			cmd_info_free(&ci);
 		}
+		proc_tree_keep = 0;
 		for (k = 0; cr.v && k < nd; k++)
 			(void)visit_records_in(cdirs[k], crec_visit_rows, &cr);
 		putchar('[');

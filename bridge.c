@@ -1134,7 +1134,9 @@ static int process_start(long pid, char *out, size_t cap) {
       terminate_child(child);
       return -1;
     }
-    poll(NULL, 0, end - now > 20 ? 20 : (int)(end - now));
+    /* ps has closed its stdout, so its exit is a moment away. A 20 ms nap
+       here cost --ls-json 20 ms per verified record (#079). */
+    poll(NULL, 0, 1);
   }
   if (!WIFEXITED(status) || WEXITSTATUS(status) || !off)
     return -1;
