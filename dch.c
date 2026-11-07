@@ -2190,6 +2190,7 @@ usage(void)
 	    "  dch -e <c>       set detach character (default ^\\)\n"
 	    "  dch -h           this help\n"
 	    "  dch -V           print version\n"
+	    "  dch --build      print the build: full, or lite (no terminal mirror)\n"
 	    "Agent/control verbs (no attach; safe to script):\n"
 	    "  dch --spawn <name> [--size CxR] [--env K=V]... [cmd...]\n"
 	    "                                             start headless session\n"
@@ -7799,6 +7800,18 @@ main(int argc, char **argv)
 		else if (strcmp(a, "-V") == 0 || strcmp(a, "--version") == 0)
 		{
 			printf("dch %s\n", DCH_VERSION);
+			return 0;
+		}
+		else if (strcmp(a, "--build") == 0)
+		{
+			/* --version stays exactly "dch X.Y.Z" (Prosper parses it);
+			** lite = no terminal mirror: no --read, detection or
+			** auto-allow */
+#ifdef HAVE_LIBGHOSTTY_VT
+			puts("full");
+#else
+			puts("lite");
+#endif
 			return 0;
 		}
 		else if (strcmp(a, "-l") == 0)
