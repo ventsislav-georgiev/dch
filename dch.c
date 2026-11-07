@@ -2999,7 +2999,47 @@ screen_tail(const char *path, int *novt)
 	return fold;
 }
 
-static char *composer_find(char *txt, char **end);
+static int
+is_rule(const char *l)
+{
+	while (*l == ' ')
+		l++;
+	return strncmp(l, "\xe2\x94\x80", 3) == 0;
+}
+
+/* The composer: the bottom-most row that starts with "❯" (then a space, an
+** NBSP or the end of the row) right under a "─" rule and running down to
+** the next rule, its wrapped rows indented. Returns that row, *end = the
+** closing rule; NULL when there is none. A permission prompt's "❯ 1. Yes"
+** is indented and has no closing rule, so it never reads as one. */
+static char *
+composer_find(char *txt, char **end)
+{
+	char *ls, *nx, *comp = NULL, *prev = NULL;
+
+	for (ls = txt; ls; prev = ls, ls = nx)
+	{
+		char *l;
+
+		nx = strchr(ls, '\n');
+		nx = nx ? nx + 1 : NULL;
+		if (!prev || !is_rule(prev) || strncmp(ls, "\xe2\x9d\xaf", 3) ||
+		    !(ls[3] == ' ' || ls[3] == '\n' || ls[3] == '\0' ||
+		      strncmp(ls + 3, "\xc2\xa0", 2) == 0))
+			continue;
+		for (l = nx; l && !is_rule(l) && (*l == ' ' || *l == '\n'); )
+		{
+			l = strchr(l, '\n');
+			l = l ? l + 1 : NULL;
+		}
+		if (l && is_rule(l))
+		{
+			comp = ls;
+			*end = l;
+		}
+	}
+	return comp;
+}
 
 /* A blocker phrase on folded screen text. Claude Code's composer gives
 ** way to a live prompt or form, so with a composer on screen only the
@@ -4802,48 +4842,6 @@ screen_modal(const char *txt)
 		res = CG_QUEUED;
 	free(fold);
 	return res;
-}
-
-static int
-is_rule(const char *l)
-{
-	while (*l == ' ')
-		l++;
-	return strncmp(l, "\xe2\x94\x80", 3) == 0;
-}
-
-/* The composer: the bottom-most row that starts with "❯" (then a space, an
-** NBSP or the end of the row) right under a "─" rule and running down to
-** the next rule, its wrapped rows indented. Returns that row, *end = the
-** closing rule; NULL when there is none. A permission prompt's "❯ 1. Yes"
-** is indented and has no closing rule, so it never reads as one. */
-static char *
-composer_find(char *txt, char **end)
-{
-	char *ls, *nx, *comp = NULL, *prev = NULL;
-
-	for (ls = txt; ls; prev = ls, ls = nx)
-	{
-		char *l;
-
-		nx = strchr(ls, '\n');
-		nx = nx ? nx + 1 : NULL;
-		if (!prev || !is_rule(prev) || strncmp(ls, "\xe2\x9d\xaf", 3) ||
-		    !(ls[3] == ' ' || ls[3] == '\n' || ls[3] == '\0' ||
-		      strncmp(ls + 3, "\xc2\xa0", 2) == 0))
-			continue;
-		for (l = nx; l && !is_rule(l) && (*l == ' ' || *l == '\n'); )
-		{
-			l = strchr(l, '\n');
-			l = l ? l + 1 : NULL;
-		}
-		if (l && is_rule(l))
-		{
-			comp = ls;
-			*end = l;
-		}
-	}
-	return comp;
 }
 
 /* Is the Claude Code screen at `path` safe to type into? Positive evidence
