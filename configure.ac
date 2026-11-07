@@ -41,6 +41,50 @@ if test "$GCC" = yes; then
 	CFLAGS="$CFLAGS -W -Wall";
 fi
 
+# Hardened build flags, each probed so a toolchain that lacks one skips it.
+# --disable-hardening is for sanitizer and fuzz builds (FORTIFY's checked
+# memcpy hides accesses from ASan).
+AC_ARG_ENABLE([hardening],
+	[AS_HELP_STRING([--disable-hardening],
+		[skip FORTIFY, stack protector, PIE and RELRO flags])],
+	[], [enable_hardening=yes])
+
+# DCH_TRY_FLAG(VAR, FLAG): append FLAG to VAR (CFLAGS or LDFLAGS) when a
+# test program links with it under -Werror: clang only warns about a flag
+# it ignores, and an ignored flag hardens nothing.
+AC_DEFUN([DCH_TRY_FLAG], [
+	AC_MSG_CHECKING([whether $CC accepts $2])
+	dch_try_old=$$1
+	$1="$$1 $2"
+	dch_try_cflags=$CFLAGS
+	CFLAGS="$CFLAGS -Werror"
+	AC_LINK_IFELSE([AC_LANG_PROGRAM([], [])], [dch_try=yes], [dch_try=no])
+	CFLAGS=$dch_try_cflags
+	if test $dch_try = no; then
+		$1=$dch_try_old
+	fi
+	AC_MSG_RESULT([$dch_try])
+])
+
+if test "x$enable_hardening" != xno; then
+	# FORTIFY needs optimization; a toolchain that already sets it (Ubuntu
+	# gcc defaults to 3) keeps its own level.
+	AC_MSG_CHECKING([whether to define _FORTIFY_SOURCE=2])
+	AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[
+#if !defined(__OPTIMIZE__) || defined(_FORTIFY_SOURCE)
+#error not optimized, or already set
+#endif
+]], [])], [CFLAGS="$CFLAGS -D_FORTIFY_SOURCE=2"; AC_MSG_RESULT([yes])],
+	[AC_MSG_RESULT([no])])
+	DCH_TRY_FLAG([CFLAGS], [-fstack-protector-strong])
+	DCH_TRY_FLAG([CFLAGS], [-fstack-clash-protection])
+	DCH_TRY_FLAG([CFLAGS], [-fPIE])
+	DCH_TRY_FLAG([LDFLAGS], [-pie])
+	# ELF only: Mach-O's ld rejects -z, so the probe skips these on macOS.
+	DCH_TRY_FLAG([LDFLAGS], [-Wl,-z,relro])
+	DCH_TRY_FLAG([LDFLAGS], [-Wl,-z,now])
+fi
+
 # Checks for libraries.
 AC_CHECK_LIB(util, openpty)
 AC_CHECK_LIB(socket, socket)

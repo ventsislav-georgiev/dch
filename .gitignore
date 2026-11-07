@@ -23,3 +23,6 @@
 .claude/
 .serena/
 __pycache__/
+
+# scripts/fuzz.sh crash inputs
+/fuzz-artifacts/

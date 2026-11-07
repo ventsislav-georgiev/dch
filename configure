@@ -680,6 +680,7 @@ ac_subst_files=''
 ac_user_opts='
 enable_option_checking
 with_libghostty
+enable_hardening
 '
       ac_precious_vars='build_alias
 host_alias
@@ -1302,6 +1303,12 @@ if test -n "$ac_init_help"; then
      short | recursive ) echo "Configuration of dch 1.29.0:";;
    esac
   cat <<\_ACEOF
+
+Optional Features:
+  --disable-option-checking  ignore unrecognized --enable/--with options
+  --disable-FEATURE       do not include FEATURE (same as --enable-FEATURE=no)
+  --enable-FEATURE[=ARG]  include FEATURE [ARG=yes]
+  --disable-hardening     skip FORTIFY, stack protector, PIE and RELRO flags
 
 Optional Packages:
   --with-PACKAGE[=ARG]    use PACKAGE [ARG=yes]
@@ -3601,8 +3608,263 @@ if test "$GCC" = yes; then
 	CFLAGS="$CFLAGS -W -Wall";
 fi
 
-# Checks for libraries.
+# Hardened build flags, each probed so a toolchain that lacks one skips it.
+# --disable-hardening is for sanitizer and fuzz builds (FORTIFY's checked
+# memcpy hides accesses from ASan).
+# Check whether --enable-hardening was given.
+if test ${enable_hardening+y}
+then :
+  enableval=$enable_hardening;
+else case e in #(
+  e) enable_hardening=yes ;;
+esac
+fi
 
+
+# DCH_TRY_FLAG(VAR, FLAG): append FLAG to VAR (CFLAGS or LDFLAGS) when a
+# test program links with it under -Werror: clang only warns about a flag
+# it ignores, and an ignored flag hardens nothing.
+
+
+if test "x$enable_hardening" != xno; then
+	# FORTIFY needs optimization; a toolchain that already sets it (Ubuntu
+	# gcc defaults to 3) keeps its own level.
+	{ printf '%s\n' "$as_me:${as_lineno-$LINENO}: checking whether to define _FORTIFY_SOURCE=2" >&5
+printf %s "checking whether to define _FORTIFY_SOURCE=2... " >&6; }
+
+cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+
+#if !defined(__OPTIMIZE__) || defined(_FORTIFY_SOURCE)
+#error not optimized, or already set
+#endif
+
+int
+main (void)
+{
+
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_compile "$LINENO"
+then :
+  CFLAGS="$CFLAGS -D_FORTIFY_SOURCE=2"; { printf '%s\n' "$as_me:${as_lineno-$LINENO}: result: yes" >&5
+printf '%s\n' "yes" >&6; }
+else case e in #(
+  e) { printf '%s\n' "$as_me:${as_lineno-$LINENO}: result: no" >&5
+printf '%s\n' "no" >&6; } ;;
+esac
+fi
+rm -f core conftest.err conftest.$ac_objext conftest.beam conftest.$ac_ext
+
+	{ printf '%s\n' "$as_me:${as_lineno-$LINENO}: checking whether $CC accepts -fstack-protector-strong" >&5
+printf %s "checking whether $CC accepts -fstack-protector-strong... " >&6; }
+	dch_try_old=$CFLAGS
+	CFLAGS="$CFLAGS -fstack-protector-strong"
+	dch_try_cflags=$CFLAGS
+	CFLAGS="$CFLAGS -Werror"
+	cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+
+int
+main (void)
+{
+
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_link "$LINENO"
+then :
+  dch_try=yes
+else case e in #(
+  e) dch_try=no ;;
+esac
+fi
+rm -f core conftest.err conftest.$ac_objext conftest.beam \
+    conftest$ac_exeext conftest.$ac_ext
+	CFLAGS=$dch_try_cflags
+	if test $dch_try = no; then
+		CFLAGS=$dch_try_old
+	fi
+	{ printf '%s\n' "$as_me:${as_lineno-$LINENO}: result: $dch_try" >&5
+printf '%s\n' "$dch_try" >&6; }
+
+
+	{ printf '%s\n' "$as_me:${as_lineno-$LINENO}: checking whether $CC accepts -fstack-clash-protection" >&5
+printf %s "checking whether $CC accepts -fstack-clash-protection... " >&6; }
+	dch_try_old=$CFLAGS
+	CFLAGS="$CFLAGS -fstack-clash-protection"
+	dch_try_cflags=$CFLAGS
+	CFLAGS="$CFLAGS -Werror"
+	cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+
+int
+main (void)
+{
+
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_link "$LINENO"
+then :
+  dch_try=yes
+else case e in #(
+  e) dch_try=no ;;
+esac
+fi
+rm -f core conftest.err conftest.$ac_objext conftest.beam \
+    conftest$ac_exeext conftest.$ac_ext
+	CFLAGS=$dch_try_cflags
+	if test $dch_try = no; then
+		CFLAGS=$dch_try_old
+	fi
+	{ printf '%s\n' "$as_me:${as_lineno-$LINENO}: result: $dch_try" >&5
+printf '%s\n' "$dch_try" >&6; }
+
+
+	{ printf '%s\n' "$as_me:${as_lineno-$LINENO}: checking whether $CC accepts -fPIE" >&5
+printf %s "checking whether $CC accepts -fPIE... " >&6; }
+	dch_try_old=$CFLAGS
+	CFLAGS="$CFLAGS -fPIE"
+	dch_try_cflags=$CFLAGS
+	CFLAGS="$CFLAGS -Werror"
+	cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+
+int
+main (void)
+{
+
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_link "$LINENO"
+then :
+  dch_try=yes
+else case e in #(
+  e) dch_try=no ;;
+esac
+fi
+rm -f core conftest.err conftest.$ac_objext conftest.beam \
+    conftest$ac_exeext conftest.$ac_ext
+	CFLAGS=$dch_try_cflags
+	if test $dch_try = no; then
+		CFLAGS=$dch_try_old
+	fi
+	{ printf '%s\n' "$as_me:${as_lineno-$LINENO}: result: $dch_try" >&5
+printf '%s\n' "$dch_try" >&6; }
+
+
+	{ printf '%s\n' "$as_me:${as_lineno-$LINENO}: checking whether $CC accepts -pie" >&5
+printf %s "checking whether $CC accepts -pie... " >&6; }
+	dch_try_old=$LDFLAGS
+	LDFLAGS="$LDFLAGS -pie"
+	dch_try_cflags=$CFLAGS
+	CFLAGS="$CFLAGS -Werror"
+	cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+
+int
+main (void)
+{
+
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_link "$LINENO"
+then :
+  dch_try=yes
+else case e in #(
+  e) dch_try=no ;;
+esac
+fi
+rm -f core conftest.err conftest.$ac_objext conftest.beam \
+    conftest$ac_exeext conftest.$ac_ext
+	CFLAGS=$dch_try_cflags
+	if test $dch_try = no; then
+		LDFLAGS=$dch_try_old
+	fi
+	{ printf '%s\n' "$as_me:${as_lineno-$LINENO}: result: $dch_try" >&5
+printf '%s\n' "$dch_try" >&6; }
+
+	# ELF only: Mach-O's ld rejects -z, so the probe skips these on macOS.
+
+	{ printf '%s\n' "$as_me:${as_lineno-$LINENO}: checking whether $CC accepts -Wl,-z,relro" >&5
+printf %s "checking whether $CC accepts -Wl,-z,relro... " >&6; }
+	dch_try_old=$LDFLAGS
+	LDFLAGS="$LDFLAGS -Wl,-z,relro"
+	dch_try_cflags=$CFLAGS
+	CFLAGS="$CFLAGS -Werror"
+	cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+
+int
+main (void)
+{
+
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_link "$LINENO"
+then :
+  dch_try=yes
+else case e in #(
+  e) dch_try=no ;;
+esac
+fi
+rm -f core conftest.err conftest.$ac_objext conftest.beam \
+    conftest$ac_exeext conftest.$ac_ext
+	CFLAGS=$dch_try_cflags
+	if test $dch_try = no; then
+		LDFLAGS=$dch_try_old
+	fi
+	{ printf '%s\n' "$as_me:${as_lineno-$LINENO}: result: $dch_try" >&5
+printf '%s\n' "$dch_try" >&6; }
+
+
+	{ printf '%s\n' "$as_me:${as_lineno-$LINENO}: checking whether $CC accepts -Wl,-z,now" >&5
+printf %s "checking whether $CC accepts -Wl,-z,now... " >&6; }
+	dch_try_old=$LDFLAGS
+	LDFLAGS="$LDFLAGS -Wl,-z,now"
+	dch_try_cflags=$CFLAGS
+	CFLAGS="$CFLAGS -Werror"
+	cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+/* end confdefs.h.  */
+
+int
+main (void)
+{
+
+  ;
+  return 0;
+}
+_ACEOF
+if ac_fn_c_try_link "$LINENO"
+then :
+  dch_try=yes
+else case e in #(
+  e) dch_try=no ;;
+esac
+fi
+rm -f core conftest.err conftest.$ac_objext conftest.beam \
+    conftest$ac_exeext conftest.$ac_ext
+	CFLAGS=$dch_try_cflags
+	if test $dch_try = no; then
+		LDFLAGS=$dch_try_old
+	fi
+	{ printf '%s\n' "$as_me:${as_lineno-$LINENO}: result: $dch_try" >&5
+printf '%s\n' "$dch_try" >&6; }
+
+fi
+
+# Checks for libraries.
 { printf '%s\n' "$as_me:${as_lineno-$LINENO}: checking for openpty in -lutil" >&5
 printf %s "checking for openpty in -lutil... " >&6; }
 if test ${ac_cv_lib_util_openpty+y}

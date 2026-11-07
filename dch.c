@@ -26,6 +26,9 @@
 
 /* DCH_VERSION lives in dtach.h — the master needs it for the .ver sidecar. */
 
+/* printf-style checking for our variadic formatters (fmt at f, args at a). */
+#define DCH_PRINTF(f, a) __attribute__((format(printf, f, a)))
+
 /* Shared globals (declared in dtach.h, used by attach.c/master.c). */
 const char copyright[] = "dch " DCH_VERSION " - based on dtach"
                          " (C)Copyright 2004-2016 Ned T. Crigler";
@@ -572,12 +575,12 @@ find_git(char *root, size_t rootsz, char *gitdir, size_t gitdirsz)
 		struct stat st;
 		if (stat(dot, &st) == 0)
 		{
-			snprintf(root, rootsz, "%s", cur);
+			/* A cut path names another directory: fail instead. */
+			if ((size_t)snprintf(root, rootsz, "%s", cur) >= rootsz)
+				return -1;
 			if (S_ISDIR(st.st_mode))
-			{
-				snprintf(gitdir, gitdirsz, "%s", dot);
-				return 0;
-			}
+				return (size_t)snprintf(gitdir, gitdirsz, "%s",
+				                        dot) < gitdirsz ? 0 : -1;
 			/* .git file → "gitdir: <path>" (worktree/submodule). */
 			char line[2048];
 			if (read_first_line(dot, line, sizeof(line)) == 0 &&
@@ -585,11 +588,11 @@ find_git(char *root, size_t rootsz, char *gitdir, size_t gitdirsz)
 			{
 				const char *p = line + 8;
 				if (p[0] == '/')
-					snprintf(gitdir, gitdirsz, "%s", p);
+					n = snprintf(gitdir, gitdirsz, "%s", p);
 				else
-					snprintf(gitdir, gitdirsz,
-					         "%s/%s", cur, p);
-				return 0;
+					n = snprintf(gitdir, gitdirsz,
+					             "%s/%s", cur, p);
+				return (size_t)n < gitdirsz ? 0 : -1;
 			}
 			return -1;
 		}
@@ -605,13 +608,14 @@ find_git(char *root, size_t rootsz, char *gitdir, size_t gitdirsz)
 static void
 auto_name(char *out, size_t outsz)
 {
-	char root[2048], gitdir[2048], head[512], base[512], branch[512];
+	/* base + "-" + branch fits a session name: a name, cut, is still a name */
+	char root[2048], gitdir[2048], head[512], base[256], branch[256];
 
 	if (find_git(root, sizeof(root), gitdir, sizeof(gitdir)) == 0)
 	{
 		const char *slash = strrchr(root, '/');
 		const char *bn = slash ? slash + 1 : root;
-		snprintf(base, sizeof(base), "%s", bn);
+		snprintf(base, sizeof(base), "%.*s", (int)sizeof base - 1, bn);
 		sanitize(base);
 
 		char headpath[2200];
@@ -619,15 +623,15 @@ auto_name(char *out, size_t outsz)
 		if (read_first_line(headpath, head, sizeof(head)) == 0)
 		{
 			if (strncmp(head, "ref: refs/heads/", 16) == 0)
-				snprintf(branch, sizeof(branch),
-				         "%s", head + 16);
+				snprintf(branch, sizeof(branch), "%.*s",
+				         (int)sizeof branch - 1, head + 16);
 			else if (strncmp(head, "ref: ", 5) == 0)
 			{
 				/* Non-branch ref (tag, packed-ref, …). */
 				const char *r = head + 5;
 				const char *s = strrchr(r, '/');
-				snprintf(branch, sizeof(branch),
-				         "%s", s ? s + 1 : r);
+				snprintf(branch, sizeof(branch), "%.*s",
+				         (int)sizeof branch - 1, s ? s + 1 : r);
 			}
 			else
 			{
@@ -648,7 +652,7 @@ auto_name(char *out, size_t outsz)
 		snprintf(cwd, sizeof(cwd), "session");
 	const char *slash = strrchr(cwd, '/');
 	const char *bn = slash ? slash + 1 : cwd;
-	snprintf(out, outsz, "%s", bn);
+	snprintf(out, outsz, "%.*s", (int)outsz - 1, bn);
 	sanitize(out);
 }
 
@@ -678,8 +682,13 @@ client_pidfile_create(const char *sockp)
 	** attached there forever. */
 	if (client_pidfile[0])
 		unlink(client_pidfile);
-	snprintf(client_pidfile, sizeof(client_pidfile),
-	         "%s/%s.client.%d", sock_dir, bn, (int)getpid());
+	if ((size_t)snprintf(client_pidfile, sizeof(client_pidfile),
+	                     "%s/%s.client.%d", sock_dir, bn, (int)getpid()) >=
+	    sizeof(client_pidfile))
+	{
+		client_pidfile[0] = '\0';	/* a cut name is another file */
+		return;
+	}
 	int fd = open(client_pidfile, O_CREAT | O_WRONLY | O_TRUNC, 0600);
 	if (fd >= 0)
 		close(fd);
@@ -720,15 +729,17 @@ pid_is_orphan(int pid)
 static int
 live_clients_on(const char *sockp)
 {
-	DIR *d = opendir(sock_dir);
-	if (!d)
-		return 0;
-
 	const char *slash = strrchr(sockp, '/');
 	const char *bn = slash ? slash + 1 : sockp;
 	char prefix[600];
-	snprintf(prefix, sizeof(prefix), "%s.client.", bn);
+	/* a cut prefix would match (and reap) another session's clients */
+	if ((size_t)snprintf(prefix, sizeof(prefix), "%s.client.", bn) >=
+	    sizeof(prefix))
+		return 0;
 	size_t plen = strlen(prefix);
+	DIR *d = opendir(sock_dir);
+	if (!d)
+		return 0;
 
 	int count = 0;
 	struct dirent *de;
@@ -761,14 +772,16 @@ live_clients_on(const char *sockp)
 static int
 detach_all_clients_on(const char *sockp)
 {
-	DIR *d = opendir(sock_dir);
-	if (!d)
-		return 0;
 	const char *slash = strrchr(sockp, '/');
 	const char *bn = slash ? slash + 1 : sockp;
 	char prefix[600];
-	snprintf(prefix, sizeof(prefix), "%s.client.", bn);
+	if ((size_t)snprintf(prefix, sizeof(prefix), "%s.client.", bn) >=
+	    sizeof(prefix))
+		return 0;
 	size_t plen = strlen(prefix);
+	DIR *d = opendir(sock_dir);
+	if (!d)
+		return 0;
 
 	int n = 0;
 	struct dirent *de;
@@ -1651,7 +1664,7 @@ static void
 load_codex_pid(struct slist *sl, const char *home, long pid)
 {
 	char id[128], sess[600], title[600], cb[256], codexdir[1200];
-	const char *cn;
+	const char *cn, *ch;
 	int i, target = -1;
 
 	if (!proc_is_codex(pid) ||
@@ -1664,8 +1677,8 @@ load_codex_pid(struct slist *sl, const char *home, long pid)
 			target = i;
 			break;
 		}
-	if (getenv("CODEX_HOME") && getenv("CODEX_HOME")[0])
-		snprintf(codexdir, sizeof codexdir, "%s", getenv("CODEX_HOME"));
+	if ((ch = getenv("CODEX_HOME")) && *ch)
+		snprintf(codexdir, sizeof codexdir, "%s", ch);
 	else
 		snprintf(codexdir, sizeof codexdir, "%s/.codex", home);
 	if (target < 0 ||
@@ -2396,7 +2409,7 @@ wall_ms(void)
 }
 
 static int
-spawn_master(char *exe, const char *name, const char *sockp,
+spawn_master(char *exe, const char *name, char *sockp,
              char **inner_argv)
 {
 	char msg[1024];
@@ -2443,9 +2456,9 @@ spawn_master(char *exe, const char *name, const char *sockp,
 		char **av = malloc(sizeof(char *) * (ic + 5));
 		int j = 0;
 		av[j++] = exe;
-		av[j++] = (char *)"--master-of";
-		av[j++] = (char *)sockp;
-		av[j++] = (char *)"--";
+		av[j++] = "--master-of";
+		av[j++] = sockp;
+		av[j++] = "--";
 		int k;
 		for (k = 0; k < ic; k++)
 			av[j++] = inner_argv[k];
@@ -2554,14 +2567,16 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 				snprintf(cand, sizeof(cand), "%s-%d",
 				         base, i);
 			char sp[1100];
-			snprintf(sp, sizeof(sp), "%s/%s.sock",
-			         sock_dir, cand);
+			/* a candidate that does not fit is not free */
+			if (strlen(cand) >= sizeof(session_name) ||
+			    (size_t)snprintf(sp, sizeof(sp), "%s/%s.sock",
+			                     sock_dir, cand) >= sizeof(sp))
+				continue;
 			struct stat st;
 			if (stat(sp, &st) != 0 || !S_ISSOCK(st.st_mode) ||
 			    live_clients_on(sp) == 0)
 			{
-				snprintf(session_name,
-				         sizeof(session_name), "%s", cand);
+				memcpy(session_name, cand, strlen(cand) + 1);
 				break;
 			}
 		}
@@ -2615,8 +2630,8 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 	char *default_argv[] = { NULL, NULL };
 	if (inner_argc == 0)
 	{
-		const char *sh = getenv("SHELL");
-		default_argv[0] = (char *)(sh && *sh ? sh : "/bin/sh");
+		char *sh = getenv("SHELL");
+		default_argv[0] = sh && *sh ? sh : "/bin/sh";
 		inner_argv = default_argv;
 	}
 	if (spawn_master(exe, session_name, sock_path, inner_argv) < 0)
@@ -2639,7 +2654,7 @@ attach_with_switch(char *exe, int forced_name, int force, char **inner_argv,
 {
 	for (;;)
 	{
-		char chosen[600];
+		char chosen[sizeof session_name];
 		int rc = do_attach(exe, forced_name, force, inner_argv,
 		                   inner_argc);
 
@@ -2863,6 +2878,8 @@ fetch_screen(const char *path, char *buf, size_t cap, int deadline_ms,
 	size_t used = 0;
 	int s, rc;
 
+	if (cap < PKT_MAX)
+		return -1;
 	s = control_connect_path(path);
 	if (s < 0)
 		return -1;
@@ -2886,22 +2903,15 @@ fetch_screen(const char *path, char *buf, size_t cap, int deadline_ms,
 			break;
 		if (type == MSG_READ_DATA)
 		{
-			if (len >= cap)
+			/* len <= PKT_MAX <= cap: one frame never overflows buf */
+			if (used + len > cap)
 			{
-				memcpy(buf, payload + len - cap, cap);
-				used = cap;
+				size_t drop = used + len - cap;
+				memmove(buf, buf + drop, used - drop);
+				used -= drop;
 			}
-			else
-			{
-				if (used + len > cap)
-				{
-					size_t drop = used + len - cap;
-					memmove(buf, buf + drop, used - drop);
-					used -= drop;
-				}
-				memcpy(buf + used, payload, len);
-				used += len;
-			}
+			memcpy(buf + used, payload, len);
+			used += len;
 		}
 		else if (type == MSG_READ_END)
 		{
@@ -2963,13 +2973,14 @@ static const struct det_rule det_working[] = {
 static int
 det_line(const struct det_rule *r, const char *hay)
 {
-	const char *p = hay, *e, *q, *s1 = r->s1 + 1;
+	const char *p = hay, *e, *nl, *q, *s1 = r->s1 + 1;
 
 	while (*p)
 	{
-		e = strchr(p, '\n');
-		if (!e)
-			e = p + strlen(p);
+		/* the loop ends on strchr's NULL, not on *e: the analyzer
+		** cannot see that p + strlen(p) points at a NUL */
+		nl = strchr(p, '\n');
+		e = nl ? nl : p + strlen(p);
 		q = e;
 		while (p < e && (*p == ' ' || *p == '\t'))
 			p++;
@@ -2980,7 +2991,9 @@ det_line(const struct det_rule *r, const char *hay)
 			for (q = p; q < e; q++)
 				if (!strncmp(q, r->s2, strlen(r->s2)))
 					return 1;
-		p = *e ? e + 1 : e;
+		if (!nl)
+			break;
+		p = nl + 1;
 	}
 	return 0;
 }
@@ -3333,8 +3346,9 @@ ap_footer(const char *l)
 	for (i = 0; i < n; i++)
 		low[i] = p[i] >= 'A' && p[i] <= 'Z' ? p[i] + 32 : p[i];
 	low[n] = '\0';
-	return !strncmp(low, "esc to cancel", 13) ||
-	       (ap_count(low, n) <= 64 && strstr(low, "esc to cancel"));
+	const char *f = strstr(low, "esc to cancel");
+
+	return f == low || (f && ap_count(low, n) <= 64);
 }
 
 /* An AskUserQuestion header-chip line at column 0 or 1. */
@@ -3362,17 +3376,17 @@ ap_chip(const char *l)
 static int
 ap_option(char *l, char **label, int *caret)
 {
-	char *p = (char *)ap_skip(l), *e;
+	char *p = l + (ap_skip(l) - l), *e;
 
 	*caret = 0;
 	if (!strncmp(p, "❯", 3))
 	{
 		*caret = 1;
-		p = (char *)ap_skip(p + 3);
+		p += ap_skip(p + 3) - p;
 	}
 	if (*p < '1' || *p > '9' || p[1] != '.' || !ap_ws(p + 2))
 		return 0;
-	*label = (char *)ap_skip(p + 2);
+	*label = p + (ap_skip(p + 2) - p);
 	e = *label + ap_rtrim(*label, strlen(*label));
 	if (e == *label)
 		return 0;
@@ -3507,15 +3521,16 @@ dch_allow_prompt(const char *screen, char **ident, char **title)
 	free(p);
 	if (!k || !(buf = strdup(screen)))
 		return 0;
-	for (p = buf; p; p = strchr(p, '\n'), p = p ? p + 1 : p)
-		s.nl++;
-	s.raw = calloc((size_t)s.nl, sizeof *s.raw);
-	s.ln = calloc((size_t)s.nl, sizeof *s.ln);
+	for (p = buf, i = 0; p; p = strchr(p, '\n'), p = p ? p + 1 : p)
+		i++;
+	s.raw = calloc((size_t)i, sizeof *s.raw);
+	s.ln = calloc((size_t)i, sizeof *s.ln);
 	if (!s.raw || !s.ln)
 		goto out;
-	for (p = buf, i = 0; p; i++)
+	/* s.nl counts the rows as they are filled (the same i rows) */
+	for (p = buf; p; s.nl++)
 	{
-		s.raw[i] = p;
+		s.raw[s.nl] = p;
 		if ((p = strchr(p, '\n')))
 			*p++ = '\0';
 	}
@@ -4261,15 +4276,15 @@ json_bytes(const unsigned char *s, size_t n)
 }
 
 /* Next NUL-terminated field of a MSG_CMD reply, or NULL when it runs out. */
-static const char *
-cmd_field(const unsigned char **p, const unsigned char *end)
+static char *
+cmd_field(unsigned char **p, const unsigned char *end)
 {
-	const unsigned char *f = *p, *z = memchr(f, '\0', (size_t)(end - f));
+	unsigned char *f = *p, *z = memchr(f, '\0', (size_t)(end - f));
 
 	if (!z)
 		return NULL;
 	*p = z + 1;
-	return (const char *)f;
+	return (char *)f;
 }
 
 /* A parsed MSG_CMD reply. buf owns the strings; argv is malloc'd. */
@@ -4299,8 +4314,8 @@ cmd_info_free(struct cmd_info *ci)
 static int
 cmd_query(const char *path, struct cmd_info *ci)
 {
-	unsigned char payload[PKT_MAX], type, *buf = NULL;
-	const unsigned char *q, *end;
+	unsigned char payload[PKT_MAX], type, *buf = NULL, *q;
+	const unsigned char *end;
 	const char *pid, *code, *sig, *ac;
 	struct ctl_reader r = {0};
 	unsigned int len;
@@ -4323,6 +4338,8 @@ cmd_query(const char *path, struct cmd_info *ci)
 		}
 		if (type != MSG_READ_DATA)
 			break;
+		if (!len)	/* realloc(buf, 0) may free buf and return NULL */
+			continue;
 		{
 			unsigned char *nb = realloc(buf, fill + len);
 
@@ -4363,7 +4380,7 @@ cmd_query(const char *path, struct cmd_info *ci)
 	ci->code = atoi(code);
 	ci->sig = atoi(sig);
 	for (k = 0; k < atoi(ac); k++)
-		if (!(ci->argv[k] = (char *)cmd_field(&q, end)))
+		if (!(ci->argv[k] = cmd_field(&q, end)))
 		{
 			cmd_info_free(ci);
 			return -3;
@@ -4585,9 +4602,9 @@ do_spawn_verb(char *exe, const char *name, int cols, int rows,
 
 	if (inner_argc == 0)
 	{
-		const char *sh = getenv("SHELL");
+		char *sh = getenv("SHELL");
 
-		default_argv[0] = (char *)(sh && *sh ? sh : "/bin/sh");
+		default_argv[0] = sh && *sh ? sh : "/bin/sh";
 		inner_argv = default_argv;
 	}
 	/* Caller env first; DCH_SESSION is force-set after, so --env cannot
@@ -5348,7 +5365,8 @@ sgr_dim(const unsigned char *p, size_t n, int dim)
 			if (p[j] == ':')	/* 38:2:r:g:b is one parameter */
 				v = -1;
 			else if (v >= 0 && p[j] >= '0' && p[j] <= '9')
-				v = v * 10 + (p[j] - '0');
+				/* capped: no SGR code is past 107 */
+				v = v < 1000 ? v * 10 + (p[j] - '0') : v;
 			j++;
 		}
 		if (skip > 0)
@@ -5386,8 +5404,10 @@ faint_text(const char *raw, size_t n, char *txt, char *dim)
 				d = sgr_dim(u + 2, l - 3, d);
 			else if (l > 2 && u[1] == '[' && u[l - 1] == 'C')
 			{
+				/* capped well past any row width: a huge
+				** count must not wrap k or the buffers */
 				for (j = 2; j < l - 1 && isdigit(u[j]); j++)
-					c = c * 10 + (u[j] - '0');
+					c = c < 10000 ? c * 10 + (u[j] - '0') : c;
 				c = j == l - 1 ? (c ? c : 1) : 0;
 			}
 			for (; c > 0; c--, k++)
@@ -5441,8 +5461,10 @@ screen_faint(const char *path, char **dimp, int *err)
 		return NULL;
 	}
 	k = faint_text(raw, (size_t)n, NULL, NULL);
-	txt = malloc(k + 1);
-	dim = malloc(k + 1);
+	/* calloc: the analyzer cannot pair the counting pass with the filling
+	** one, and zeroed bytes cost nothing here */
+	txt = calloc(k + 1, 1);
+	dim = calloc(k + 1, 1);
 	if (!txt || !dim)
 	{
 		free(raw);
@@ -5483,15 +5505,14 @@ screen_modal(const char *txt)
 ** else is reported, never typed over: a trust dialog or release notes
 ** before the composer read UNKNOWN. queue_ok (--say): a message typed while
 ** others wait in Claude Code's queue joins them, so only the composer
-** under them counts. */
+** under them counts. gate_screen is the verdict on a fetched screen (pure,
+** for the fuzzer); claude_gate_q fetches it. */
 static int
-claude_gate_q(const char *path, int queue_ok)
+gate_screen(char *txt, const char *dim, int queue_ok)
 {
-	char *txt, *dim, *comp, *end, *c;
+	char *comp, *end, *c;
 	int res;
 
-	if (!(txt = screen_faint(path, &dim, &res)))
-		return res;
 	if ((res = screen_modal(txt)) == CG_QUEUED && queue_ok)
 		res = CG_UNKNOWN;
 	if (res == CG_UNKNOWN && (comp = composer_find(txt, &end)))
@@ -5506,6 +5527,18 @@ claude_gate_q(const char *path, int queue_ok)
 		res = (*c == '\n' || *c == '\0' || dim[c - txt]) &&
 		      end == strchr(comp, '\n') + 1 ? CG_EMPTY : CG_DRAFT;
 	}
+	return res;
+}
+
+static int
+claude_gate_q(const char *path, int queue_ok)
+{
+	char *txt, *dim;
+	int res;
+
+	if (!(txt = screen_faint(path, &dim, &res)))
+		return res;
+	res = gate_screen(txt, dim, queue_ok);
 	free(txt);
 	free(dim);
 	return res;
@@ -5757,7 +5790,7 @@ claude_installed(const char *tok, const char *mpath, const char *mcwd,
 }
 
 /* One report line per agent; done = it reached a terminal state. */
-static void
+static DCH_PRINTF(3, 4) void
 ag_say(struct agent *a, int failed, const char *fmt, ...)
 {
 	va_list ap;
@@ -5824,12 +5857,12 @@ tail_lines(const unsigned char *t, size_t n, int want, char *out,
 	while (i < n)
 		if (t[i] == 0x1b)
 		{
-			size_t l = esc_len(t + i, n - i);
+			size_t el = esc_len(t + i, n - i);
 
 			/* cursor moves and clears end a line; SGR does not */
-			if (t[i + l - 1] != 'm')
+			if (t[i + el - 1] != 'm')
 				p[k++] = '\n';
-			i += l;
+			i += el;
 		}
 		else if (t[i] == '\r' || t[i] == '\n')
 			p[k++] = '\n', i++;
@@ -7605,11 +7638,9 @@ pk_sgr(const char *s)
 {
 	char b[48];
 
-	if (pk_color)
-	{
-		snprintf(b, sizeof b, "\033[%sm", s);
+	/* a cut escape would leave the terminal mid-sequence */
+	if (pk_color && (size_t)snprintf(b, sizeof b, "\033[%sm", s) < sizeof b)
 		pk_raw(b);
-	}
 }
 
 /* Characters (UTF-8 sequences), one column each, cut at the edge. A
@@ -8130,7 +8161,8 @@ pk_reap(struct pk *p)
 		snprintf(p->status, sizeof p->status, "%s: %s", p->run.target,
 		         det[0] ? det : res);
 	else if (last)
-		snprintf(p->status, sizeof p->status, "%s", last);
+		snprintf(p->status, sizeof p->status, "%.*s",
+		         (int)sizeof p->status - 1, last);	/* display: cut ok */
 	else
 		snprintf(p->status, sizeof p->status, "%s: %s", p->run.doing,
 		         WIFEXITED(st) && WEXITSTATUS(st) == 0 ? "done"
@@ -8138,10 +8170,14 @@ pk_reap(struct pk *p)
 	p->loaded = 0;
 }
 
-static void
-pk_ask(struct pk *p, const char *fmt, const char *title)
+static DCH_PRINTF(2, 3) void
+pk_ask(struct pk *p, const char *fmt, ...)
 {
-	snprintf(p->status, sizeof p->status, fmt, title);
+	va_list ap;
+
+	va_start(ap, fmt);
+	vsnprintf(p->status, sizeof p->status, fmt, ap);
+	va_end(ap);
 	p->asking = 1;
 }
 
@@ -8299,8 +8335,11 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 				p->loaded = 0;
 				return 0;
 			}
-			snprintf(out, outsz, "%s", w->name);
-			return 1;
+			/* a cut name is another session's */
+			if ((size_t)snprintf(out, outsz, "%s", w->name) < outsz)
+				return 1;
+			snprintf(p->status, sizeof p->status, "name too long");
+			return 0;
 		case 'r':
 			pk_rename(p, fd, w);
 			return 0;
@@ -8595,23 +8634,23 @@ shell_line(const char *cd, char **v, int n)
 		if (p > o)
 			*p++ = ' ';
 		if (k < 0)
-			p += sprintf(p, "cd ");
+			p += snprintf(p, cap - (size_t)(p - o), "cd ");
 		/* a leading '=' is zsh's =cmd expansion: quote it */
 		if (*w && *w != '=' && strspn(w, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 		                 "0123456789_./:=@%+,-") == strlen(w))
-			p += sprintf(p, "%s", w);
+			p += snprintf(p, cap - (size_t)(p - o), "%s", w);
 		else
 		{
 			*p++ = '\'';
 			for (c = w; *c; c++)
 				if (*c == '\'')
-					p += sprintf(p, "'\\''");
+					p += snprintf(p, cap - (size_t)(p - o), "'\\''");
 				else
 					*p++ = *c;
 			*p++ = '\'';
 		}
 		if (k < 0)
-			p += sprintf(p, " &&");
+			p += snprintf(p, cap - (size_t)(p - o), " &&");
 	}
 	*p = '\0';
 	return o;
@@ -8669,9 +8708,12 @@ login_env(void)
 		/* no controlling terminal: an interactive shell must not take
 		** over the caller's job control */
 		setsid();
-		dup2(nul, 0);
-		dup2(nul, 1);
-		dup2(nul, 2);
+		if (nul >= 0)
+		{
+			dup2(nul, 0);
+			dup2(nul, 1);
+			dup2(nul, 2);
+		}
 		execl(sh, sh, "-l", "-i", "-c", "env -0 >| \"$1\"", sh, tmp,
 		      (char *)NULL);
 		_exit(127);
@@ -8714,7 +8756,7 @@ static int do_spawn_verb(char *exe, const char *name, int cols, int rows,
 
 /* --revive's line for one record: `<name>: <detail>`, or under --json
 ** {"name","as","result","reason","detail","session_id"}. */
-static void
+static DCH_PRINTF(5, 6) void
 rv_say(const struct hrec *r, int json, const char *res, const char *code,
        const char *fmt, ...)
 {
@@ -9003,7 +9045,7 @@ sid_held(const struct sidset *s, const char *sid)
 	return NULL;
 }
 
-static void
+static DCH_PRINTF(4, 5) void
 sid_add(struct sidset *s, const char *sid, int run, const char *fmt, ...)
 {
 	struct sidhold *nv;
@@ -9256,9 +9298,13 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 			{
 				char rp[1400];
 
-				snprintf(h->as, sizeof h->as, "%s-%d", h->name, i);
-				snprintf(rp, sizeof rp, "%s/%s.json", dir,
-				         canon_name(h->as, cb, sizeof cb));
+				/* a cut <name>-N is not that name: no free one */
+				if ((size_t)snprintf(h->as, sizeof h->as, "%s-%d",
+				                     h->name, i) >= sizeof h->as ||
+				    (size_t)snprintf(rp, sizeof rp, "%s/%s.json", dir,
+				                     canon_name(h->as, cb, sizeof cb)) >=
+				        sizeof rp)
+					continue;
 				if (!name_live(h->as) && access(rp, F_OK) != 0)
 					break;
 			}
@@ -9345,11 +9391,12 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 	for (k = 0; k < n; k++)
 	{
 		struct hrec *h = &r[k];
-		const char *why = NULL, *msg = getenv("DCH_REVIVE_MSG");
-		const char *code = "", *res = "ok";
+		const char *msg = getenv("DCH_REVIVE_MSG");
+		const char *code, *res;
 		char text[1200], when[32] = "an unknown time";
 		time_t t = (time_t)hrec_when(h);
 
+		why = NULL;
 		if (h->mode != RV_ARGV && h->mode != RV_SHELL)
 			continue;
 		if (nomsg)
@@ -9379,6 +9426,7 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 			         "left off.", h->end, when);
 #ifdef HAVE_LIBGHOSTTY_VT
 		json_phase(h->name, "resuming", json);
+		code = "";
 		why = revive_message(h, msg && *msg ? msg : text, &code);
 		bad += why != NULL;
 		res = why ? "failed" : "ok";
@@ -9386,6 +9434,7 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 		(void)msg;
 		why = "dch-lite has no terminal mirror to see the composer";
 		code = "no_screen";	/* revived and resumed: still ok */
+		res = "ok";
 #endif
 		rv_say(h, json, res, code,
 		       "revived as %s in %s, claude %s%sresumed %s; resume "
@@ -10387,7 +10436,7 @@ main(int argc, char **argv)
 	}
 	case A_LIST:
 	{
-		char chosen[600];
+		char chosen[sizeof session_name];
 		int rc = pick_session("attach session (mirror):",
 		                      chosen, sizeof(chosen));
 		if (rc == 0)
@@ -10403,7 +10452,7 @@ main(int argc, char **argv)
 	{
 		if (!kill_explicit && !forced_name)
 		{
-			char chosen[600];
+			char chosen[sizeof session_name];
 			int rc = pick_session("kill session:", chosen,
 			                      sizeof(chosen));
 			if (rc != 0)
@@ -10421,7 +10470,7 @@ main(int argc, char **argv)
 	{
 		if (!kill_explicit && !forced_name)
 		{
-			char chosen[600];
+			char chosen[sizeof session_name];
 			int rc = pick_session("detach session:", chosen,
 			                      sizeof(chosen));
 			if (rc != 0)

@@ -193,6 +193,7 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "--stop pauses Claude, ends the session as stopped" stop_test.py
     pyrun "-k/--stop signal exactly the session's master" kill_test.py
     pyrun "records with odd bytes, long aliases and long argv read back" record_utf8_test.py
+    pyrun "--cmd survives empty reply frames" cmd_frames_test.py
 fi
 
 # --- control verbs: --spawn --run --read --wait --keys ---------------------
