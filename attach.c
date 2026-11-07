@@ -102,8 +102,10 @@ connect_socket(char *name)
 	strcpy(sockun.sun_path, name);
 	if (connect(s, (struct sockaddr *)&sockun, sizeof(sockun)) < 0)
 	{
-		close(s);
+		int e = errno;	/* connect's: close may overwrite it */
 
+		close(s);
+		errno = e;
 		/* ECONNREFUSED is also returned for regular files, so make
 		** sure we are trying to connect to a socket. */
 		if (errno == ECONNREFUSED)
@@ -238,7 +240,7 @@ detach_hits(struct packet *pkt)
 				if (b < '0' || b > '9')
 					break;
 				if (field == 1)
-					ev = ev * 10 + (b - '0');
+					ev = ev < 1000 ? ev * 10 + (b - '0') : ev;
 			}
 			if (closed && ev == 1)
 				hits++;
@@ -604,7 +606,7 @@ attach_main(int noerror)
 }
 
 int
-push_main()
+push_main(void)
 {
 	struct packet pkt;
 	int s;

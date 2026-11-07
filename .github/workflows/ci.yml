@@ -89,3 +89,85 @@ jobs:
 
       - name: Full suite against the rebuilt blob
         run: ./configure && make && make test
+
+  # ASan + UBSan over the whole suite (scripts/sanitize.sh says why each
+  # option is set). Any sanitizer report fails the job.
+  sanitizers:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+        variant: [full, lite]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build and test under ASan + UBSan
+        run: |
+          if [ "${{ matrix.variant }}" = "lite" ]; then
+            scripts/sanitize.sh --without-libghostty
+          else
+            scripts/sanitize.sh
+          fi
+
+  # Our code builds warning-free under a strict set, on gcc and clang. The
+  # default `make` stays lenient; XCFLAGS adds to configure's CFLAGS (and
+  # its hardening flags) rather than replacing them.
+  strict-warnings:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            cc: gcc
+          - os: ubuntu-latest
+            cc: clang
+          - os: macos-latest
+            cc: clang
+    runs-on: ${{ matrix.os }}
+    env:
+      STRICT: >-
+        -Wall -Wextra -Wformat=2 -Wshadow -Wpointer-arith -Wcast-qual
+        -Wstrict-prototypes -Wmissing-prototypes -Wundef -Wvla
+        -Wnull-dereference -Wimplicit-fallthrough -Werror
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Full
+        run: ./configure CC=${{ matrix.cc }} && make XCFLAGS="$STRICT"
+      - name: Lite
+        run: |
+          make clean
+          ./configure CC=${{ matrix.cc }} --without-libghostty
+          make XCFLAGS="$STRICT"
+
+  # clang's static analyzer over every source file, both variants: any
+  # finding is an error. A false positive is reshaped away or gets a
+  # narrow, commented annotation — never a blanket disable.
+  static-analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: clang --analyze
+        run: |
+          rc=0
+          for v in full lite; do
+            if [ $v = lite ]; then
+              ./configure --without-libghostty
+              srcs="attach.c master.c dch.c vt_stub.c bridge.c"
+            else
+              ./configure
+              srcs="attach.c master.c dch.c vt.c bridge.c"
+            fi
+            for f in $srcs; do
+              clang --analyze -Xanalyzer -analyzer-werror -I. \
+                -Ivendor/libghostty-vt/include -o /dev/null "$f" || rc=1
+            done
+          done
+          exit $rc
+
+  # libFuzzer targets (tests/fuzz/), 60 s each under ASan + UBSan.
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Fuzz
+        run: CC=clang FUZZ_ARTIFACTS=$PWD/fuzz-artifacts scripts/fuzz.sh 60

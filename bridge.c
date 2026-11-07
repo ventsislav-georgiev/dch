@@ -823,13 +823,14 @@ static int load_peer_record(const char *path, const char *record_body,
                             struct peer *p, int verify_ps) {
   char b[8192], num[32], key[1400], hash[65], actual[128], source[32];
   struct stat st;
-  char *base, *end;
+  const char *base;
+  char *end;
   long record_pid, protocol;
   if (strlen(record_body) >= sizeof b || lstat(path, &st) < 0)
     return -1;
   memcpy(b, record_body, strlen(record_body) + 1);
   base = strrchr(path, '/');
-  base = base ? base + 1 : (char *)path;
+  base = base ? base + 1 : path;
   errno = 0;
   p->pid = strtol(base, &end, 10);
   if (errno || p->pid <= 0 || (long)(pid_t)p->pid != p->pid ||
@@ -1362,8 +1363,10 @@ static pid_t queue_message(const char *codex, const char *thread,
   }
   pid = fork();
   if (pid == 0) {
-    char *av[] = {(char *)codex, "queue", "--thread", (char *)thread,
-                  "--message",   body,    NULL};
+    /* exec's argv is char *const[] only for old-C compatibility; POSIX
+       guarantees execvp never writes through it, so dropping const is safe. */
+    char *av[] = {(char *)(uintptr_t)codex, "queue", "--thread",
+                  (char *)(uintptr_t)thread, "--message", body, NULL};
     long maxfd = sysconf(_SC_OPEN_MAX);
     close(errors[0]);
     if (dup2(errors[1], 2) < 0)

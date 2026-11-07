@@ -34,6 +34,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -271,7 +272,7 @@ size_t packet_payload_len(const struct packet *pkt);
 struct dch_agent
 {
 	long pid;		/* claude's pid */
-	char sid[64], name[256], cwd[1024];
+	char sid[64], name[256], cwd[PATH_MAX];	/* = hrec.acwd: no cut */
 	char rec[1400];		/* its Claude session record's path */
 	char cfg[1400];		/* its config dir, "" = our ~/.claude (#065) */
 	char **launch;		/* malloc'd block, NULL-terminated; may be NULL */

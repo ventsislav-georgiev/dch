@@ -1,0 +1,1 @@
+{"name":"api","pid":4242,"argv":["claude","--resume"],"agent":{"session_id":"7f3a","launch":["claude","-c"]},"prs":[{"url":"https://github.com/o/r/pull/1","state":"MERGED","merged_at":1700000000}]}

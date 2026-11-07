@@ -1,0 +1,1 @@
+{"sock_dir":"/s","name":"api","alias":"web","cwd":"/tmp/p","end":"exit 0","argv":["sh","-c","make"],"started":1,"updated":2,"ended":3,"agent":{"session_id":"abc","name":"claude","cwd":"/tmp/p","config_dir":"/tmp/c","launch":["claude","--resume","abc"]}}

@@ -707,13 +707,13 @@ rec_prune(int dfd)
 
 		if (js && snprintf(pin, sizeof pin, "%.*s.pin", (int)(n - 5),
 		                   de->d_name) < (int)sizeof pin &&
-		    fstatat(dirfd(d), pin, &st, AT_SYMLINK_NOFOLLOW) == 0 &&
+		    fstatat(dfd, pin, &st, AT_SYMLINK_NOFOLLOW) == 0 &&
 		    S_ISREG(st.st_mode))
 			continue;
 		if (age &&
-		    fstatat(dirfd(d), de->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0 &&
+		    fstatat(dfd, de->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0 &&
 		    S_ISREG(st.st_mode) && st.st_mtime < time(NULL) - age)
-			unlinkat(dirfd(d), de->d_name, 0);
+			unlinkat(dfd, de->d_name, 0);
 	}
 	closedir(d);
 }
@@ -876,11 +876,11 @@ rec_init(int resumed)
 
 		while (d && (de = readdir(d)))
 			if (de->d_name[0] != '.' &&
-			    (sub = openat(dirfd(d), de->d_name,
+			    (sub = openat(fd, de->d_name,
 			                  O_RDONLY | O_DIRECTORY | O_NOFOLLOW)) >= 0)
 			{
 				rec_prune(sub);
-				unlinkat(dirfd(d), de->d_name, AT_REMOVEDIR);
+				unlinkat(fd, de->d_name, AT_REMOVEDIR);
 			}
 		if (d)
 			closedir(d);
@@ -1025,7 +1025,8 @@ init_pty(char **argv, int statusfd)
 		err = errno;
 		if (ep[1] != -1)
 		{
-			r = write(ep[1], &err, sizeof err);
+			/* best effort: a failed write leaves nothing to report to */
+			(void)!write(ep[1], &err, sizeof err);
 			_exit(1);
 		}
 		printf(EOS "\r\n%s: could not execute %s: %s\r\n", progname,
@@ -1113,27 +1114,21 @@ create_socket(char *name)
 	if (bind(s, (struct sockaddr *)&sockun, sizeof(sockun)) < 0)
 	{
 		umask(omask); /* umask always succeeds, errno is untouched. */
-		close(s);
-		return -1;
+		goto fail;
 	}
 	umask(omask); /* umask always succeeds, errno is untouched. */
-	if (listen(s, 128) < 0)
-	{
-		close(s);
-		return -1;
-	}
-	if (setnonblocking(s) < 0)
-	{
-		close(s);
-		return -1;
-	}
 	/* chmod it to prevent any surprises */
-	if (chmod(name, 0600) < 0)
-	{
-		close(s);
-		return -1;
-	}
+	if (listen(s, 128) < 0 || setnonblocking(s) < 0 || chmod(name, 0600) < 0)
+		goto fail;
 	return s;
+fail:
+	{
+		int e = errno;	/* bind_socket reads it: keep it past close */
+
+		close(s);
+		errno = e;
+	}
+	return -1;
 }
 
 /* Bind sockname, shortening the path via chdir when the full one overflows
@@ -1408,7 +1403,9 @@ track_decmode(const unsigned char *buf, size_t len)
 
 			if (b >= '0' && b <= '9')
 			{
-				val = val * 10 + (b - '0');
+				/* capped: a long digit run is no tracked mode,
+				** and must not overflow */
+				val = val < 100000 ? val * 10 + (b - '0') : val;
 				have = 1;
 				continue;
 			}
@@ -3136,6 +3133,35 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 	return 0;
 }
 
+/* The whole size of the client frame at f (avail bytes buffered): 0 while
+** it has not all arrived, -1 when it is corrupt. Pure, for the fuzzer. */
+static long
+frame_size(const unsigned char *f, size_t avail)
+{
+	unsigned int type, len;
+	size_t plen;
+
+	if (avail < PKT_HDR)
+		return 0;
+	type = f[0];
+	len = (unsigned int)f[1] | ((unsigned int)f[2] << 8);
+	/* Unknown types take `len` as their payload size so a verb added by a
+	** newer dch can be skipped whole and answered with DCH_ST_UNSUP
+	** instead of desyncing the stream. That is the contract for every
+	** future verb: if it carries a payload, the header length field must
+	** be its byte count. */
+	plen = (type == MSG_WINCH || type == MSG_REDRAW)
+	        ? sizeof(struct winsize)
+	    : (type == MSG_ATTACH || type == MSG_DETACH) ? 0
+	    : len;
+	/* A PUSH length past PKT_MAX is not one of ours -> corrupt. This also
+	** bounds the skip-unknown-verbs contract above: a future verb's
+	** payload must be <= PKT_MAX to be skippable. */
+	if (plen > PKT_MAX)
+		return -1;
+	return avail < PKT_HDR + plen ? 0 : (long)(PKT_HDR + plen);
+}
+
 /* Process activity from a client. Reassembles variable-length frames from
 ** the (nonblocking) socket: a read may split one frame or carry several. */
 static void
@@ -3143,6 +3169,7 @@ client_activity(struct client *p)
 {
 	ssize_t n;
 	size_t off;
+	long fs;
 
 	n = read(p->fd, p->inbuf + p->inlen, sizeof(p->inbuf) - p->inlen);
 	if (n < 0 && (errno == EAGAIN || errno == EINTR))
@@ -3156,38 +3183,21 @@ client_activity(struct client *p)
 
 	/* Parse out every complete frame currently buffered. */
 	off = 0;
-	while (p->inlen - off >= PKT_HDR)
+	while ((fs = frame_size(p->inbuf + off, p->inlen - off)) != 0)
 	{
 		unsigned char *f = p->inbuf + off;
-		unsigned int type = f[0];
-		unsigned int len  = (unsigned int)f[1] |
-		                    ((unsigned int)f[2] << 8);
-		/* Unknown types take `len` as their payload size so a verb
-		** added by a newer dch can be skipped whole and answered with
-		** DCH_ST_UNSUP instead of desyncing the stream. That is the
-		** contract for every future verb: if it carries a payload, the
-		** header length field must be its byte count. */
-		size_t plen = (type == MSG_WINCH || type == MSG_REDRAW)
-		        ? sizeof(struct winsize)
-		    : (type == MSG_ATTACH || type == MSG_DETACH) ? 0
-		    : len;
+		unsigned int len = (unsigned int)f[1] | ((unsigned int)f[2] << 8);
 
-		/* A PUSH length past PKT_MAX is not one of ours -> corrupt.
-		** This also bounds the skip-unknown-verbs contract above: a
-		** future verb's payload must be <= PKT_MAX to be skippable. */
-		if (plen > PKT_MAX)
+		if (fs < 0)
 		{
-			dch_trace("bad frame type=%u len=%u plen=%zu -> drop fd=%d",
-			          type, len, plen, p->fd);
+			dch_trace("bad frame type=%u len=%u -> drop fd=%d",
+			          (unsigned int)f[0], len, p->fd);
 			remove_client(p);
 			return;
 		}
-		if (p->inlen - off < PKT_HDR + plen)
-			break; /* rest of this frame hasn't arrived yet */
-
-		if (handle_packet(p, type, len, f + PKT_HDR) < 0)
+		if (handle_packet(p, f[0], len, f + PKT_HDR) < 0)
 			return; /* client removed; p is gone */
-		off += PKT_HDR + plen;
+		off += (size_t)fs;
 	}
 
 	/* Shift any partial trailing frame back to the front. */
@@ -3430,13 +3440,15 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 		/* Create a pty in which the process is running. */
 		if (init_pty(argv, statusfd) < 0)
 		{
+			int e = errno;	/* init_pty's: dup2 may overwrite it */
+
 			if (statusfd != -1)
 				dup2(statusfd, 1);
-			if (errno == ENOENT)
+			if (e == ENOENT)
 				printf("%s: Could not find a pty.\n", progname);
 			else
 				printf("%s: init_pty: %s\n", progname,
-				       strerror(errno));
+				       strerror(e));
 			exit(1);
 		}
 
