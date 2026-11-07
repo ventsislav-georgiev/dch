@@ -8328,10 +8328,38 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 				         "waiting for input", w->title);
 				return 0;
 			}
+			/* "1" only on a plain permission prompt, by the
+			** auto-allow rule: on a question form it would pick
+			** an answer the user never saw */
+			{
+				char *raw = malloc(DET_CAP + 1), *id = NULL,
+				     *pt = NULL;
+				int n = raw && make_sock_path(w->name) == 0 ?
+				        fetch_screen(sock_path, raw, DET_CAP,
+				                     DET_DEADLINE_MS, 0) : -1;
+				int ok = n > 0 &&
+				         (raw[n] = '\0', dch_allow_prompt(raw,
+				                                            &id,
+				                                            &pt));
+
+				if (ok)
+					snprintf(d, sizeof d, "%s", pt);
+				free(raw);
+				free(id);
+				free(pt);
+				if (!ok)
+				{
+					snprintf(p->status, sizeof p->status,
+					         "%s: not a plain Yes/No permission "
+					         "prompt; attach (Enter) to answer",
+					         w->title);
+					return 0;
+				}
+			}
+			pk_ask(p, "Allow %s (presses 1, Yes)?", d);
 			snprintf(d, sizeof d, "allowing %s", w->title);
 			pk_act(&p->ask, t, w->name, d, "--keys", w->name, "1",
 			       NULL);
-			pk_ask(p, "Allow %s's prompt (presses 1, Yes)?", w->title);
 			return 0;
 		}
 	if (t < 2)

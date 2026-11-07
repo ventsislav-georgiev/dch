@@ -112,7 +112,7 @@ once a second and keeps the selection on the same session.
 | `R` | restart the agent (`--restart <n> --include-agents -f`), asks first | |
 | `S` | stop (`--stop`), asks first | |
 | `x` | kill (`-k`), asks first | |
-| `a` | allow a blocked prompt (presses `1`, Yes), asks first | |
+| `a` | allow a plain Yes/No permission prompt (presses `1`, Yes), asks first; a question form or any other prompt is refused: attach to answer it | |
 | `b` / `B` | restart stale agents / restart all agents (force), asks first | |
 | `s` | sort by activity (blocked, working, done, idle, newest first) or by name (`a2` before `a10`) | |
 | `m` | | resume without the message (`--no-message`) |

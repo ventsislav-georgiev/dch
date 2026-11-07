@@ -29,6 +29,13 @@ for k in ("DCH_SESSION", "MallocStackLogging", "MallocStackLoggingNoCompact",
           "NO_COLOR"):
     ENV.pop(k, None)
 os.makedirs(ENV["HOME"])
+RULE = "\u2500" * 60
+PERM = [RULE, " Bash command", "", "   rm -rf build", "   Clean the build tree",
+        "", " Do you want to proceed?", " \u276f 1. Yes",
+        "   2. No, and tell Claude what to do differently (esc)", "",
+        " Esc to cancel \u00b7 Tab to amend"]
+FORM = [RULE, " \u2610 Proceed", "", "Do you want to proceed?", "",
+        "\u276f 1. Yes", "  2. No", "", "Enter to select \u00b7 Esc to cancel"]
 COLOR_RE = re.compile(r"\x1b\[(?:[0-9;]*;)?3[0-9][;m]")
 failures = []
 
@@ -197,6 +204,29 @@ def main():
     s = wait_screen("pk1", lambda s: "Resumed as s2" in s, 20)
     check("Enter resumes it: Resumed as s2", "Resumed as s2" in s, s)
     check("s2 is live again", wait_live("s2", True), live())
+
+    # 5b. a (allow) presses 1 only on a plain Yes/No permission prompt
+    for n, lines in (("perm", PERM), ("form", FORM)):
+        f = os.path.join(ROOT, n + ".txt")
+        with open(f, "w") as fh:
+            fh.write("\n".join(lines) + "\n")
+        dch("--spawn", n, "--size", "100x30", "sh", "-c",
+            "cat '%s'; sleep 600" % f)
+    to_tab("pk1", "Sessions")
+    s = wait_screen("pk1", lambda s: "perm" in rows(s) and
+                    "form" in rows(s) and s.count("Needs input") >= 2)
+    check("select form", select("pk1", "form"), screen("pk1"))
+    dch("--keys", "pk1", "a")
+    s = wait_screen("pk1", lambda s: "not a plain Yes/No" in s)
+    check("a on a question form refuses to press 1",
+          "form: not a plain Yes/No permission prompt" in s and
+          "[y/N]" not in s, s)
+    check("select perm", select("pk1", "perm"), screen("pk1"))
+    dch("--keys", "pk1", "a")
+    s = wait_screen("pk1", lambda s: "[y/N]" in s)
+    check("a on a permission prompt asks, naming it",
+          "Allow Bash command (presses 1, Yes)? [y/N]" in s, s)
+    dch("--keys", "pk1", "n")
 
     # 6. color: none under NO_COLOR or TERM=dumb, some otherwise
     a = screen("pk1", ansi=True)
