@@ -168,7 +168,7 @@ dch --wait <name> --match <str> [--timeout ms]  # block until output matches
 dch --wait <name> --state <s[,s]> [--timeout ms]  # block until state matches
 dch --status <name>                             # print session state
 dch --report <name> <state>                     # push state (harness hooks)
-dch --meta <name> '<json object>'|clear         # attach metadata (tasks, PRs, ...)
+dch --meta <name> '<json object>'|clear         # attach metadata (PRs, ...)
 dch --ls-json                                   # sessions as a JSON array
 dch --restart <name>|--all [-f]                 # upgrade a live session in place
 dch --restart <name>|--all --include-agents [-f] [--json]  # ...then restart its stale Claude agents
@@ -444,7 +444,7 @@ dch --wait agent1 --state idle,blocked,done --timeout 600000  # turn over?
 ### Optional: session metadata
 
 A program inside a session can publish a small JSON object about itself —
-a status line's task counts, the PRs an agent has open — and every
+the PRs an agent has open, say — and every
 `--ls-json` consumer sees it as `meta`, next to `state`. dch stores and
 passes it through; it never interprets the keys.
 
@@ -452,7 +452,7 @@ Push it from a status line, a hook, or any script running in the session.
 `DCH_SESSION` is set in every dch session:
 
 ```sh
-dch --meta "$DCH_SESSION" '{"tasks":{"done":3,"total":5,"in_progress":1,"queued":1}}' 2>/dev/null; true
+dch --meta "$DCH_SESSION" '{"prs":{"open":[],"merged":3}}' 2>/dev/null; true
 ```
 
 Re-push periodically or on every render rather than relying on a single
@@ -473,13 +473,12 @@ caller: silence stderr and swallow the exit code.
   `--ls-json` one line. Compact `JSON.stringify` / `json.dumps` output
   qualifies.
 
-**Standard keys.** All are optional, and consumers must tolerate any of them
-being absent. Other top-level keys pass through unchanged, so give your own
+**Standard keys.** Optional, and consumers must tolerate it being
+absent. Other top-level keys pass through unchanged, so give your own
 distinctive names.
 
 | Key | Shape | Meaning |
 | --- | --- | --- |
-| `tasks` | `{"done":int,"total":int,"in_progress":int,"queued":int}`, non-negative integers | `done` finished items out of `total`; `in_progress` items being worked now; `queued` open items not in progress, blocked or parked included. |
 | `prs` | `{"open":[{"url","repo","num","title"}],"merged":int}` | `open` lists the not-yet-merged PRs, at most 50, e.g. `{"url":"https://github.com/o/r/pull/12","repo":"o/r","num":12,"title":"..."}`, with `url` an absolute `https` link. `merged` is a count. |
 
 **Clearing.** The metadata describes the program running in the session, so

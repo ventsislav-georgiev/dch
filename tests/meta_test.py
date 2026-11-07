@@ -13,8 +13,7 @@ import json, os, shutil, subprocess, sys, tempfile, time
 HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
 
-META = {"tasks": {"done": 22, "total": 26, "in_progress": 2, "queued": 2},
-        "prs": {"open": [{"url": "https://github.com/o/r/pull/12",
+META = {"prs": {"open": [{"url": "https://github.com/o/r/pull/12",
                           "repo": "o/r", "num": 12,
                           "title": 'say "hi" {x} \\ é'}], "merged": 18},
         "x-custom": [1, 2.5, True, None]}

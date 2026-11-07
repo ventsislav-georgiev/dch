@@ -8552,7 +8552,7 @@ main(int argc, char **argv)
 	case A_META:
 	{
 		/* Free-form JSON object a program in the session publishes about
-		** itself (tasks, open PRs, ...); --ls-json passes it through. */
+		** itself (open PRs, ...); --ls-json passes it through. */
 		char sp[1100], mp[1300], tp[1320];
 		struct stat st;
 		const char *js = inner_argc == 1 ? inner_argv[0] : "";
