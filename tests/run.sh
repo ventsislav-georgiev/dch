@@ -192,7 +192,13 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "--pin/--unpin/--forget keep and clean history" history_pin_test.py
     pyrun "--say messages Claude sessions (busy too), gated" say_test.py
     pyrun "auto-allow answers plain permission prompts; --config" auto_allow_test.py
-    pyrun "--stop pauses Claude, ends the session as stopped" stop_test.py
+    # --stop's own 3 s deadlines expire on the ASan-slowed macOS CI runner
+    # (a different check each run, no sanitizer report); ASan on Linux and
+    # every plain build still run it.
+    if [ "$(uname)" = Darwin ] && nobudget "--stop pauses Claude, ends the session as stopped"; then :
+    else
+        pyrun "--stop pauses Claude, ends the session as stopped" stop_test.py
+    fi
     pyrun "-k/--stop signal exactly the session's master" kill_test.py
     pyrun "records with odd bytes, long aliases and long argv read back" record_utf8_test.py
     pyrun "--cmd survives empty reply frames" cmd_frames_test.py
