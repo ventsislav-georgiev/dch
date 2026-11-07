@@ -163,6 +163,32 @@ dch_config_path(char *out, size_t cap)
 	                  (int)cap;
 }
 
+/* The value of a config line that sets `key`, cut in place, else NULL. */
+static char *
+config_line(char *line, const char *key)
+{
+	char *p = line, *v, *e;
+	size_t kl = strlen(key);
+
+	while (*p == ' ' || *p == '\t')
+		p++;
+	if (strncmp(p, key, kl))
+		return NULL;
+	v = p + kl;
+	while (*v == ' ' || *v == '\t')
+		v++;
+	if (*v++ != '=')
+		return NULL;
+	while (*v == ' ' || *v == '\t')
+		v++;
+	e = v + strlen(v);
+	while (e > v && (e[-1] == '\n' || e[-1] == '\r' ||
+	                 e[-1] == ' ' || e[-1] == '\t'))
+		e--;
+	*e = '\0';
+	return v;
+}
+
 /* Value of `key` in the config ("key = value" lines, '#' comments, blanks
 ** around both trimmed, last one wins) into out[cap]. 1 when set, else 0.
 ** Read fresh on every call: the file is tiny, and an edit (by hand,
@@ -170,38 +196,160 @@ dch_config_path(char *out, size_t cap)
 int
 dch_config_get(const char *key, char *out, size_t cap)
 {
-	char path[1024], line[1024];
-	size_t kl = strlen(key);
+	char path[1024], line[1024], *v;
 	int found = 0;
 	FILE *f;
 
 	if (!dch_config_path(path, sizeof(path)) || !(f = fopen(path, "r")))
 		return 0;
 	while (fgets(line, sizeof(line), f))
-	{
-		char *p = line, *v, *e;
-
-		while (*p == ' ' || *p == '\t')
-			p++;
-		if (strncmp(p, key, kl))
-			continue;
-		v = p + kl;
-		while (*v == ' ' || *v == '\t')
-			v++;
-		if (*v++ != '=')
-			continue;
-		while (*v == ' ' || *v == '\t')
-			v++;
-		e = v + strlen(v);
-		while (e > v && (e[-1] == '\n' || e[-1] == '\r' ||
-		                 e[-1] == ' ' || e[-1] == '\t'))
-			e--;
-		*e = '\0';
-		snprintf(out, cap, "%s", v);
-		found = 1;
-	}
+		if ((v = config_line(line, key)))
+		{
+			snprintf(out, cap, "%s", v);
+			found = 1;
+		}
 	fclose(f);
 	return found;
+}
+
+/* The keys `dch --config` knows; bool ones take dch_config_bool's words. */
+static const struct
+{
+	const char *key;
+	int is_bool;
+} config_keys[] = {
+	{ "auto_allow", 1 },		/* the master answers permission prompts */
+	{ "sidekick_pattern", 0 },	/* the picker's sidekick sessions */
+};
+
+static int
+config_bool_word(const char *v)
+{
+	static const char *w[] = { "true", "false", "1", "0", "yes", "no",
+	                           "on", "off" };
+	size_t i;
+
+	for (i = 0; i < sizeof w / sizeof *w; i++)
+		if (!strcasecmp(v, w[i]))
+			return 1;
+	return 0;
+}
+
+/* dch --config [<key> [<value>|--unset]]: show the config, one key, or set
+** or remove one. A write keeps every other line (comments too), replaces the
+** key's first line and drops its later ones, and lands whole: a temp file
+** renamed over the old (the target of a symlinked one). */
+static int
+config_main(int argc, char **argv)
+{
+	char path[1024], tmp[1100], v[1024], *rp, *s;
+	const char *key = argc ? argv[0] : NULL;
+	size_t i, k;
+	int fd, done = 0, ok, mode = 0644;
+	struct stat st;
+	FILE *in, *out;
+
+	if (!dch_config_path(path, sizeof path))
+	{
+		fprintf(stderr, "dch: no config path (set HOME or DCH_CONFIG)\n");
+		return 1;
+	}
+	if (!key)
+	{
+		printf("%s\n", path);
+		for (i = 0; i < sizeof config_keys / sizeof *config_keys; i++)
+			if (config_keys[i].is_bool)
+				printf("%s = %s\n", config_keys[i].key,
+				       dch_config_bool(config_keys[i].key)
+				       ? "true" : "false");
+			else
+				printf("%s = %s\n", config_keys[i].key,
+				       dch_config_get(config_keys[i].key, v,
+				                      sizeof v) ? v : "");
+		return 0;
+	}
+	for (k = 0; k < sizeof config_keys / sizeof *config_keys; k++)
+		if (!strcmp(key, config_keys[k].key))
+			break;
+	if (k == sizeof config_keys / sizeof *config_keys || argc > 2)
+	{
+		fprintf(stderr, argc > 2 ? "usage: dch --config [<key> "
+		        "[<value>|--unset]]\n" : "dch: unknown config key: %s\n",
+		        key);
+		return 1;
+	}
+	if (argc == 1)
+	{
+		if (!dch_config_get(key, v, sizeof v))
+			return 1;
+		printf("%s\n", v);
+		return 0;
+	}
+	s = argv[1];
+	if (strcmp(s, "--unset") &&
+	    (strpbrk(s, "\r\n") || strlen(s) > 900 ||
+	     (config_keys[k].is_bool && !config_bool_word(s))))
+	{
+		fprintf(stderr, config_keys[k].is_bool
+		        ? "dch: %s takes true or false\n"
+		        : "dch: %s: one line, at most 900 bytes\n", key);
+		return 1;
+	}
+	if ((rp = realpath(path, NULL)))
+		snprintf(path, sizeof path, "%s", rp);
+	free(rp);
+	/* mkdir -p the parent */
+	for (rp = strchr(path + 1, '/'); rp; rp = strchr(rp + 1, '/'))
+	{
+		*rp = '\0';
+		if (mkdir(path, 0700) < 0 && errno != EEXIST)
+			fprintf(stderr, "dch: mkdir %s: %s\n", path,
+			        strerror(errno));
+		*rp = '/';
+	}
+	if (stat(path, &st) == 0)
+		mode = st.st_mode & 07777;
+	snprintf(tmp, sizeof tmp, "%s.%ld.tmp", path, (long)getpid());
+	if ((fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW,
+	               0600)) < 0 || !(out = fdopen(fd, "w")))
+	{
+		fprintf(stderr, "dch: %s: %s\n", tmp, strerror(errno));
+		if (fd >= 0)
+			close(fd);
+		return 1;
+	}
+	fchmod(fd, (mode_t)mode);
+	if ((in = fopen(path, "r")))
+	{
+		char *line = NULL, *cut;
+		size_t lcap = 0;
+		ssize_t ll;
+
+		while ((ll = getline(&line, &lcap, in)) > 0)
+		{
+			if (!(cut = strdup(line)) || !config_line(cut, key))
+			{
+				fputs(line, out);
+				if (line[ll - 1] != '\n')
+					fputc('\n', out);
+			}
+			else if (!done++ && strcmp(s, "--unset"))
+				fprintf(out, "%s = %s\n", key, s);
+			free(cut);
+		}
+		free(line);
+		fclose(in);
+	}
+	if (!done && strcmp(s, "--unset"))
+		fprintf(out, "%s = %s\n", key, s);
+	ok = fflush(out) == 0 && fsync(fd) == 0;
+	if (fclose(out) != 0 || !ok || rename(tmp, path) < 0)
+	{
+		fprintf(stderr, "dch: write %s: %s\n", path, strerror(errno));
+		unlink(tmp);
+		return 1;
+	}
+	return 0;
 }
 
 /* A boolean config key: "true"/"1"/"yes"/"on" is 1, anything else 0. */
@@ -841,6 +989,35 @@ session_meta(const char *name, long *epoch)
 	buf[r] = '\0';
 	if (!dch_json_is_object(buf))
 		return NULL;
+	*epoch = (long)st.st_mtime;
+	return buf;
+}
+
+/* The prompt the master auto-allowed last (#074): <sock>.allowed holds its
+** title, *epoch gets the mtime (when). NULL when there is none. Opened as
+** session_meta opens .meta. Static buffer; valid until the next call. */
+static const char *
+session_allowed(const char *name, long *epoch)
+{
+	static char buf[1100];
+	char p[1300], cb[256];
+	struct stat st;
+	ssize_t r = -1;
+	int fd;
+
+	*epoch = 0;
+	if (snprintf(p, sizeof p, "%s/%s.sock.allowed", sock_dir,
+	             canon_name(name, cb, sizeof cb)) >= (int)sizeof p ||
+	    (fd = open(p, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)) < 0)
+		return NULL;
+	if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
+	    st.st_uid == getuid())
+		r = read(fd, buf, sizeof buf - 1);
+	close(fd);
+	if (r <= 0)
+		return NULL;
+	buf[r] = '\0';
+	buf[strcspn(buf, "\r\n")] = '\0';
 	*epoch = (long)st.st_mtime;
 	return buf;
 }
@@ -2284,9 +2461,20 @@ usage(void)
 	    "                                             \"stopped\"; dch --revive\n"
 	    "                                             <name> wakes it resumed\n"
 	    "  dch --ls-json    like -lj but JSON, adds \"state\"\n"
+	    "  dch --config [<key> [<value>|--unset]]     show the config file\n"
+	    "                                             (path, then each key),\n"
+	    "                                             one key, or set/remove\n"
+	    "                                             it. Keys: auto_allow\n"
+	    "                                             (the master answers\n"
+	    "                                             Claude Code's plain\n"
+	    "                                             permission prompts\n"
+	    "                                             with Yes; not in lite),\n"
+	    "                                             sidekick_pattern\n"
 	    "  dch --agent-list [--json]                  list native Claude peers\n"
 	    "  dch --agent-send <name> <message...>       message one native peer\n"
 	    "Env: DCH_NO_DETECT=1 disables screen-content state detection.\n"
+	    "     DCH_CONFIG names the config file (else\n"
+	    "     $XDG_CONFIG_HOME/dch/config, else ~/.config/dch/config).\n"
 	    "     DCH_NO_HISTORY=1 at session start keeps no history record.\n"
 	    "     DCH_DOUBLE_TAP_MS sets the switch double-press window\n"
 	    "     (default 300; 0 disables switching, detach becomes instant).\n"
@@ -3122,6 +3310,514 @@ det_blocker(char *fold)
 
 	return det_match(det_blocked,
 	                 sizeof(det_blocked) / sizeof(det_blocked[0]), from);
+}
+
+/* ---- auto-allow: Claude Code's plain permission prompt (#074) ---------
+**
+** A port of Prosper's Always allow rule (AgentIslandPrompt.swift: parse,
+** allowYes, isDontAskAgain): the master answers "1" into a prompt that is
+** exactly Claude Code's "Do you want to proceed?" over "Yes", at most one
+** "Yes, and don't ask again …" (never picked: it writes the user's
+** settings) and a last "No…"; nothing else. The parse reads the plain
+** screen bottom-up: the bottom-most numbered option, walked up through 1
+** (at most AP_GAP other lines between two), exactly one "❯" caret, no
+** checkboxes, the dialog the last thing on the screen (below it only rules
+** and one "Esc to cancel" footer, then Claude Code's session-title rule).
+** As in Prosper, a head off the screen top and hidden characters do not
+** stop it: they guard what a human reads, and this approves any plain
+** permission prompt. Prosper's preview forms are not parsed: never one. */
+
+#define AP_GAP 4	/* non-option lines allowed between two options */
+#define AP_SLACK 2	/* a frame rule may end this many cells short */
+
+/* Byte length of a blank (space, tab, NBSP) at p, else 0. */
+static int
+ap_ws(const char *p)
+{
+	return *p == ' ' || *p == '\t' ? 1 : !strncmp(p, "\xc2\xa0", 2) ? 2 : 0;
+}
+
+static const char *
+ap_skip(const char *p)
+{
+	int w;
+
+	while ((w = ap_ws(p)))
+		p += w;
+	return p;
+}
+
+/* Length of s with trailing blanks off. */
+static size_t
+ap_rtrim(const char *s, size_t n)
+{
+	while (n && (s[n - 1] == ' ' || s[n - 1] == '\t' ||
+	             (n >= 2 && !strncmp(s + n - 2, "\xc2\xa0", 2))))
+		n -= s[n - 1] == '\xa0' ? 2 : 1;
+	return n;
+}
+
+/* Code point at p (UTF-8, lenient), its byte length in *len. */
+static unsigned
+ap_cp(const char *p, int *len)
+{
+	const unsigned char *u = (const unsigned char *)p;
+	int k, n = u[0] >= 0xF0 ? 4 : u[0] >= 0xE0 ? 3 : u[0] >= 0xC0 ? 2 : 1;
+	unsigned c = n == 1 ? u[0] : u[0] & (0x3F >> (n - 1));
+
+	for (k = 1; k < n; k++)
+	{
+		if ((u[k] & 0xC0) != 0x80)
+			break;
+		c = c << 6 | (u[k] & 0x3F);
+	}
+	*len = k;
+	return c;
+}
+
+/* Code points in s[0..n). */
+static int
+ap_count(const char *s, size_t n)
+{
+	int c = 0;
+	size_t i;
+
+	for (i = 0; i < n; i++)
+		c += ((unsigned char)s[i] & 0xC0) != 0x80;
+	return c;
+}
+
+/* Terminal cells of a code point: 2 for East Asian wide and emoji.
+** ponytail: a hand list, as Prosper's; a miss only fails the title rule. */
+static int
+ap_cells(unsigned u)
+{
+	return (u >= 0x1100 && u <= 0x115F) || (u >= 0x2E80 && u <= 0x303E) ||
+	       (u >= 0x3041 && u <= 0x33FF) || (u >= 0x3400 && u <= 0x4DBF) ||
+	       (u >= 0x4E00 && u <= 0x9FFF) || (u >= 0xA000 && u <= 0xA4CF) ||
+	       (u >= 0xA960 && u <= 0xA97F) || (u >= 0xAC00 && u <= 0xD7A3) ||
+	       (u >= 0xF900 && u <= 0xFAFF) || (u >= 0xFE30 && u <= 0xFE6F) ||
+	       (u >= 0xFF00 && u <= 0xFF60) || (u >= 0xFFE0 && u <= 0xFFE6) ||
+	       (u >= 0x1F200 && u <= 0x1FAFF) || (u >= 0x20000 && u <= 0x3FFFD)
+	       ? 2 : 1;
+}
+
+/* Is the code point at p one of the UTF-8 glyphs in set (concatenated)? */
+static int
+ap_in(const char *p, const char *set)
+{
+	int n, m;
+	unsigned c = ap_cp(p, &n);
+
+	for (; *set; set += m)
+		if (ap_cp(set, &m) == c)
+			return n;
+	return 0;
+}
+
+static int
+ap_blank(const char *l)
+{
+	return !*ap_skip(l);
+}
+
+/* Only rule glyphs, blanks around them: a frame or a rule. */
+static int
+ap_rule_of(const char *l, const char *glyphs)
+{
+	const char *p = ap_skip(l);
+	int n, any = 0;
+
+	while (*p && !ap_blank(p))
+	{
+		if (!(n = ap_in(p, glyphs)))
+			return 0;
+		p += n;
+		any = 1;
+	}
+	return any && ap_blank(p);
+}
+
+#define AP_RULES "─━═╌┄╭╮╰╯┌┐└┘"
+
+static int
+ap_rule(const char *l)
+{
+	return ap_rule_of(l, AP_RULES);
+}
+
+static int
+ap_blank_or_rule(const char *l)
+{
+	return ap_blank(l) || ap_rule(l);
+}
+
+/* "Esc to cancel · Tab to amend": one that starts with it at any length
+** (Claude Code appends hints and cuts at the width), else at most 64. */
+static int
+ap_footer(const char *l)
+{
+	const char *p = ap_skip(l);
+	size_t n = ap_rtrim(p, strlen(p)), i;
+	char low[512];
+
+	if (n >= sizeof low)
+		n = sizeof low - 1;
+	for (i = 0; i < n; i++)
+		low[i] = p[i] >= 'A' && p[i] <= 'Z' ? p[i] + 32 : p[i];
+	low[n] = '\0';
+	return !strncmp(low, "esc to cancel", 13) ||
+	       (ap_count(low, n) <= 64 && strstr(low, "esc to cancel"));
+}
+
+/* An AskUserQuestion header-chip line at column 0 or 1. */
+static int
+ap_chip(const char *l)
+{
+	const char *p = l;
+
+	while (*p == ' ')
+		p++;
+	if (p - l > 1 || !*p)
+		return 0;
+	if (ap_in(p, "☐☒✔"))
+		return 1;
+	if (!ap_in(p, "←"))
+		return 0;
+	for (; *p; p++)
+		if (ap_in(p, "☐☒✔"))
+			return 1;
+	return 0;
+}
+
+/* "  ❯ 2. Yes, and …" -> 2, *label (trimmed, NUL-cut in place), *caret;
+** 0 when not an option line. */
+static int
+ap_option(char *l, char **label, int *caret)
+{
+	char *p = (char *)ap_skip(l), *e;
+
+	*caret = 0;
+	if (!strncmp(p, "❯", 3))
+	{
+		*caret = 1;
+		p = (char *)ap_skip(p + 3);
+	}
+	if (*p < '1' || *p > '9' || p[1] != '.' || !ap_ws(p + 2))
+		return 0;
+	*label = (char *)ap_skip(p + 2);
+	e = *label + ap_rtrim(*label, strlen(*label));
+	if (e == *label)
+		return 0;
+	*e = '\0';
+	return *p - '0';
+}
+
+/* An option label's trailing key hint, "(esc)", "(shift+tab)": its open
+** paren, else NULL. Only esc, tab, enter or modifier+key, as Prosper. */
+static const char *
+ap_hint(const char *label)
+{
+	size_t n = strlen(label), k, kl;
+	const char *o = strrchr(label, '('), *plus, *key;
+	static const char *mods[] = { "ctrl", "shift", "alt", "cmd", "option" };
+	char in[32];
+
+	if (!n || label[n - 1] != ')' || !o || (size_t)(label + n - 1 - o - 1) >=
+	    sizeof in)
+		return NULL;
+	for (k = 0; o + 1 + k < label + n - 1; k++)
+		in[k] = o[1 + k] >= 'A' && o[1 + k] <= 'Z' ? o[1 + k] + 32
+		                                            : o[1 + k];
+	in[k] = '\0';
+	if (!(plus = strchr(in, '+')))
+		return !strcmp(in, "esc") || !strcmp(in, "tab") ||
+		       !strcmp(in, "enter") ? o : NULL;
+	key = plus + 1;
+	if (strchr(key, '+') || (kl = strlen(key)) < 1 || kl > 5)
+		return NULL;
+	for (k = 0; k < kl; k++)
+		if (!isascii((unsigned char)key[k]) ||
+		    !isalnum((unsigned char)key[k]))
+			return NULL;
+	for (k = 0; k < sizeof mods / sizeof *mods; k++)
+		if (strlen(mods[k]) == (size_t)(plus - in) &&
+		    !strncmp(in, mods[k], (size_t)(plus - in)))
+			return o;
+	return NULL;
+}
+
+/* Leading characters of a raw row that are blanks or "│". */
+static int
+ap_lead(const char *r)
+{
+	int n = 0, w;
+
+	for (;;)
+		if ((w = ap_ws(r)))
+			r += w, n++;
+		else if (!strncmp(r, "│", 3))
+			r += 3, n++;
+		else
+			return n;
+}
+
+/* The label without its key hint (ap_hint), into out[cap]; the hint's
+** open paren in *hint, or NULL. */
+static void
+ap_unhint(const char *label, char *out, size_t cap, const char **hint)
+{
+	*hint = ap_hint(label);
+	snprintf(out, cap, "%.*s", (int)(*hint ? ap_rtrim(label,
+	         (size_t)(*hint - label)) : strlen(label)), label);
+}
+
+struct ap_screen
+{
+	int nl, width;
+	char **raw;	/* the rows */
+	char **ln;	/* the rows unframed (a 1.x "│ … │" box row loses its
+			** bars), trailing blanks off */
+};
+
+/* Row r is a frame: a rule at column 0 or 1, as wide as the widest rule
+** on the screen (AP_SLACK cells short still counts). */
+static int
+ap_frame(const struct ap_screen *s, int r)
+{
+	return ap_rule(s->ln[r]) && ap_lead(s->raw[r]) <= 1 &&
+	       ap_count(s->raw[r], ap_rtrim(s->raw[r], strlen(s->raw[r]))) +
+	       AP_SLACK >= s->width;
+}
+
+/* Claude Code's session-title rule under a dialog: "─"s, " <title> ", "─",
+** from column 0 across the widest rule. */
+static int
+ap_title_rule(const char *t, int width)
+{
+	size_t len = strlen(t);
+	const char *lbl = t, *h, *e = t + len - 4;
+	int cells = 0, n;
+
+	if (strncmp(t, "─", 3) || len < 4 || strcmp(e, " ─"))
+		return 0;
+	while (!strncmp(lbl, "─", 3))
+		lbl += 3;
+	if (lbl >= e || *lbl != ' ')
+		return 0;
+	for (h = lbl; h < e && ap_ws(h); h += ap_ws(h))
+		;
+	if (h >= e)
+		return 0;	/* a blank label */
+	for (h = t; *h; h += n)
+		cells += ap_cells(ap_cp(h, &n));
+	return cells + AP_SLACK >= width;
+}
+
+/* Is the screen (plain text, rows by '\n') showing a Claude Code
+** permission prompt the auto-allow rule may answer with "1"? 1 with
+** *ident (the whole dialog: question, context, options and their detail,
+** the caret aside: the loop guard compares it) and *title (its first line,
+** e.g. "Bash command"), both malloc'd; else 0. The screen must also read
+** blocked as --status reads it (det_blocker: under a composer only). */
+int
+dch_allow_prompt(const char *screen, char **ident, char **title)
+{
+	struct ap_screen s = { 0, 0, NULL, NULL };
+	char *buf, *p, *lab[9], *lb, word[512], sq[1024];
+	const char *h;
+	int ro[9], hi[9], li[9], nf = 0, carets = 0, ok = 0;
+	int i, j, k, d, c, col, last = -1, tail, gap, seen, end, a1 = -1, a2 = -1;
+	int na = 0, edge[2] = { 0, 0 };
+	size_t len, tl;
+	FILE *f;
+
+	*ident = *title = NULL;
+	if (!(p = tail_fold(screen, strlen(screen))))
+		return 0;
+	k = !det_match(det_suppress, sizeof det_suppress /
+	               sizeof det_suppress[0], p) && det_blocker(p);
+	free(p);
+	if (!k || !(buf = strdup(screen)))
+		return 0;
+	for (p = buf; p; p = strchr(p, '\n'), p = p ? p + 1 : p)
+		s.nl++;
+	s.raw = calloc((size_t)s.nl, sizeof *s.raw);
+	s.ln = calloc((size_t)s.nl, sizeof *s.ln);
+	if (!s.raw || !s.ln)
+		goto out;
+	for (p = buf, i = 0; p; i++)
+	{
+		s.raw[i] = p;
+		if ((p = strchr(p, '\n')))
+			*p++ = '\0';
+	}
+	for (i = 0; i < s.nl; i++)
+	{
+		col = (int)strspn(s.raw[i], " ");
+		if (col <= 1 && ap_in(s.raw[i] + col, "╭╰┌└") &&
+		    ap_rule(s.raw[i]))
+			edge[col] = 1;
+	}
+	for (i = 0; i < s.nl; i++)
+	{
+		char *l;
+
+		if (!(l = s.ln[i] = strdup(s.raw[i])))
+			goto out;
+		l[ap_rtrim(l, strlen(l))] = '\0';
+		col = (int)strspn(l, " ");
+		len = strlen(l);
+		if (col <= 1 && edge[col] && !strncmp(l + col, "│", 3) &&
+		    len >= (size_t)col + 6 && !strcmp(l + len - 3, "│"))
+		{
+			l[len - 3] = '\0';
+			memmove(l, l + col + 3, len - (size_t)col - 5);
+			l[ap_rtrim(l, strlen(l))] = '\0';
+			if (l[0] == ' ')
+				memmove(l, l + 1, strlen(l));
+		}
+		if (ap_rule(l) && (k = ap_count(s.raw[i], ap_rtrim(s.raw[i],
+		                   strlen(s.raw[i])))) > s.width)
+			s.width = k;
+	}
+	for (i = s.nl - 1; i >= 0 && last < 0; i--)
+		if (ap_option(s.ln[i], &lb, &c))
+			last = i;
+	if (last < 0)
+		goto out;
+	/* Under the last option: its detail (up to a blank or a rule), then
+	** only rules and, last, a footer or a rule, then at most the
+	** session-title rule, right under the footer. */
+	for (tail = last + 1; tail < s.nl && !ap_blank_or_rule(s.ln[tail]);
+	     tail++)
+		;
+	for (i = tail; i < s.nl; i++)
+		if (!ap_blank(s.ln[i]))
+			a2 = a1, a1 = i, na++;
+	end = a1;
+	if (na >= 2 && ap_title_rule(s.ln[a1], s.width) && ap_footer(s.ln[a2]))
+		end = a2;
+	for (i = tail; i < end; i++)
+		if (!ap_blank(s.ln[i]) && !ap_rule(s.ln[i]))
+			goto out;
+	if (end >= 0 ? !ap_rule(s.ln[end]) && !ap_footer(s.ln[end])
+	             : tail > last + 1)
+		goto out;
+	/* Up through option 1: consecutive digits, at most AP_GAP other rows
+	** between two. An option's detail: its non-blank, non-rule rows down
+	** to the next option (the last one's: down to `tail`). */
+	for (i = last, gap = 0; i >= 0 && (!nf || li[nf - 1] != 1); i--)
+		if ((d = ap_option(s.ln[i], &lb, &c)))
+		{
+			if (nf && d != li[nf - 1] - 1)
+				goto out;
+			hi[nf] = nf ? ro[nf - 1] : tail;
+			ro[nf] = i;
+			li[nf] = d;
+			lab[nf++] = lb;
+			carets += c;
+			gap = 0;
+		}
+		else if (++gap > AP_GAP)
+			goto out;
+	if (!nf || li[nf - 1] != 1 || nf < 2 || carets != 1)
+		goto out;
+	for (k = 0; k < nf; k++)
+	{
+		int n;
+
+		ap_cp(lab[k] + 1, &n);
+		if (ap_in(lab[k], "☐☑☒") ||
+		    (lab[k][0] == '[' && lab[k][1] && lab[k][1 + n] == ']'))
+			goto out;	/* a checkbox: a digit toggles it */
+	}
+	/* Above option 1, past blanks and frames: the question. */
+	while (i >= 0 && (ap_blank(s.ln[i]) || ap_frame(&s, i)))
+		i--;
+	if (i < 0 || strcmp(ap_skip(s.ln[i]), "Do you want to proceed?"))
+		goto out;
+	/* Above it up to the dialog's top: the first solid frame with
+	** something under it (dashed inner frames are passed). The context is
+	** every non-frame row between; a header chip makes it a question
+	** form. j < 0: the top is off the screen, as Prosper allows. */
+	for (j = i - 1, seen = 0; j >= 0; j--)
+		if (!ap_frame(&s, j))
+			seen |= !ap_blank(s.ln[j]);
+		else if (!ap_rule_of(s.ln[j], "╌┄") && seen)
+			break;
+	for (k = j + 1; k < i; k++)
+		if (!ap_frame(&s, k) && ap_chip(s.ln[k]))
+			goto out;
+	/* allowYes: 2 or 3 options; option 1 a bare "Yes"; the last a "No…";
+	** neither with detail rows; a middle one only "Yes, and don't ask
+	** again …" (never picked), and never a mode change. lab[0] is the
+	** bottom option, lab[nf - 1] option 1. */
+	if (nf > 3 || strcmp(lab[nf - 1], "Yes"))
+		goto out;
+	for (k = 0; k < nf; k += nf - 1)
+		for (d = ro[k] + 1; d < hi[k]; d++)
+			if (!ap_blank_or_rule(s.ln[d]))
+				goto out;
+	ap_unhint(lab[0], word, sizeof word, &h);
+	if (strcmp(word, "No") && strncmp(word, "No,", 3) &&
+	    strncmp(word, "No ", 3))
+		goto out;
+	if (nf == 3)
+	{
+		size_t n = 0;
+
+		ap_unhint(lab[1], word, sizeof word, &h);
+		if (h && !strcmp(h, "(shift+tab)"))
+			goto out;
+		for (d = ro[1]; d < hi[1]; d++)
+		{
+			const char *t = d == ro[1] ? word : s.ln[d];
+
+			if (d > ro[1] && ap_blank_or_rule(t))
+				continue;
+			while (*t && n + 1 < sizeof sq)
+				if ((c = ap_ws(t)))
+					t += c;
+				else
+					sq[n++] = *t++;
+		}
+		sq[n] = '\0';
+		if (strncmp(sq, "Yes,anddon'taskagain", 20) ||
+		    strstr(sq, "(shift+tab)"))
+			goto out;
+	}
+	/* identity: question and context, then the options with detail */
+	if (!(f = open_memstream(ident, &tl)))
+		goto out;
+	for (k = j + 1; k <= i; k++)
+		if (!ap_frame(&s, k))
+			fprintf(f, "%s\n", s.ln[k]);
+	for (k = nf - 1; k >= 0; k--)
+	{
+		fprintf(f, "%d. %s\n", li[k], lab[k]);
+		for (d = ro[k] + 1; d < hi[k]; d++)
+			if (!ap_blank_or_rule(s.ln[d]))
+				fprintf(f, "\t%s\n", ap_skip(s.ln[d]));
+	}
+	if (fclose(f) != 0)
+		goto out;
+	/* the title: the context's first line, else the question */
+	for (k = j + 1; ap_frame(&s, k) || ap_blank(s.ln[k]); k++)
+		;
+	ok = (*title = strdup(ap_skip(s.ln[k]))) != NULL;
+out:
+	if (!ok)
+	{
+		free(*ident);
+		*ident = NULL;
+	}
+	for (i = 0; s.ln && i < s.nl; i++)
+		free(s.ln[i]);
+	free(s.ln);
+	free(s.raw);
+	free(buf);
+	return ok;
 }
 
 /* Classify the visible screen: "blocked", "working", or NULL (no signal
@@ -7779,6 +8475,10 @@ main(int argc, char **argv)
 	if (argc >= 3 && strcmp(argv[1], "--master-of") == 0)
 		return run_master_of(argc - 2, argv + 2);
 
+	/* The user config (#074): no session dir needed. */
+	if (argc >= 2 && strcmp(argv[1], "--config") == 0)
+		return config_main(argc - 2, argv + 2);
+
 	if (compute_sock_dir() < 0)
 		return 1;
 
@@ -8447,12 +9147,23 @@ main(int argc, char **argv)
 			const char *meta = session_meta(sl.v[k], &mep);
 			printf(",\"activity_epoch\":%ld,\"state\":\"%s\""
 			       ",\"version\":\"%s\",\"agents\":%d"
-			       ",\"meta\":%s,\"meta_epoch\":%ld}",
+			       ",\"meta\":%s,\"meta_epoch\":%ld",
 			       activity_epoch(sl.v[k]),
 			       session_state(sl.v[k]),
 			       version_or_empty(sl.v[k]),
 			       detect_agents(sl.v[k]),
 			       meta ? meta : "null", mep);
+			const char *aa = session_allowed(sl.v[k], &mep);
+			fputs(",\"auto_allowed\":", stdout);
+			if (aa)
+			{
+				printf("{\"at\":%ld,\"title\":", mep);
+				put_json_str(aa);
+				putchar('}');
+			}
+			else
+				fputs("null", stdout);
+			putchar('}');
 		}
 		puts("]");
 		slist_free(&sl);

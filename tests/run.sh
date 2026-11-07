@@ -29,6 +29,8 @@ unset DCH_SOCKET_DIR DCH_SESSION
 export DCH_LOGIN_ENV=0
 # Session records go to $XDG_STATE_HOME/dch/sessions: keep them out of ~.
 export XDG_STATE_HOME="$TMP/state"
+# The developer's config (auto_allow = true) must not answer the fakes' prompts.
+export DCH_CONFIG="$TMP/config"
 SOCKDIR="$TMP/dch-$(id -u)"
 mkdir -p "$SOCKDIR"
 
@@ -185,6 +187,7 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "--revive never starts two claudes on one id" revive_sid_test.py
     pyrun "--pin/--unpin/--forget keep and clean history" history_pin_test.py
     pyrun "--say messages Claude sessions (busy too), gated" say_test.py
+    pyrun "auto-allow answers plain permission prompts; --config" auto_allow_test.py
     pyrun "--stop pauses Claude, ends the session as stopped" stop_test.py
     pyrun "-k/--stop signal exactly the session's master" kill_test.py
     pyrun "records with odd bytes, long aliases and long argv read back" record_utf8_test.py

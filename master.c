@@ -177,6 +177,7 @@ static int cur_argv_owned, dch_argv_owned;
 ** restart. 0 = could not tell, so a restart reverts to the launch argv. */
 static int argv_prefix;
 static int respawn_live(void);
+static long ms_since(const struct timespec *t);
 
 #ifndef HAVE_FORKPTY
 pid_t forkpty(int *amaster, char *name, struct termios *termp,
@@ -248,7 +249,8 @@ static void
 unlink_socket(void)
 {
 	static const char *suffix[] = { ".act", ".state", ".ver", ".resume",
-	                                ".meta", ".killed", ".stopped" };
+	                                ".meta", ".killed", ".stopped",
+	                                ".allowed" };
 	struct stat st;
 	char side[1100];
 	size_t i;
@@ -330,6 +332,116 @@ touch_activity(void)
 		return;
 	futimens(fd, NULL);		/* NULL => set atime+mtime to now */
 	close(fd);
+}
+
+/* ---- auto-allow (#074) -----------------------------------------------
+**
+** With `auto_allow = true` in the user config (dch --config), the master
+** answers Claude Code's plain permission prompt itself: "1", the Yes the
+** caret already sits on, one keystroke and never Enter, as Prosper's Always
+** allow typed it; dch_allow_prompt() holds the rule. Read off the terminal
+** mirror, so never in dch-lite (no mirror). A check runs once the pty has
+** been quiet AA_QUIET_MS after output (AA_MAX_MS into output that never
+** pauses), and again AA_VERIFY_MS after an answer; it reads the config
+** fresh and, only for a prompt it would answer, looks for a Claude Code
+** under the child. The loop guard: the prompt answered last is never
+** answered again while it stays up, nor within AA_LOOP_MS once gone and
+** back; it is the human's. Each answer leaves <sock>.allowed (its title;
+** the mtime is when), shown by --ls-json as "auto_allowed". */
+#define AA_QUIET_MS 300
+#define AA_MAX_MS 2000
+#define AA_VERIFY_MS 2000
+#define AA_LOOP_MS (30L * 1000L)
+static int aa_pending;			/* pty output not checked yet */
+static struct timespec aa_first, aa_out;	/* its first and last bytes */
+static int aa_verify;			/* the re-read after an answer is due */
+static char *aa_ident;			/* the prompt answered last ... */
+static struct timespec aa_at;		/* ... when */
+static int aa_gone;			/* ... and it left the screen since */
+
+static void
+aa_output(void)
+{
+	clock_gettime(CLOCK_MONOTONIC, &aa_out);
+	if (!aa_pending)
+		aa_first = aa_out;
+	aa_pending = 1;
+}
+
+/* ms until the next check (<= 0: due now), LONG_MAX when none is. */
+static long
+aa_due(void)
+{
+	long v = LONG_MAX, w;
+
+	if (aa_pending)
+	{
+		v = AA_QUIET_MS - ms_since(&aa_out);
+		if ((w = AA_MAX_MS - ms_since(&aa_first)) < v)
+			v = w;
+	}
+	if (aa_verify && (w = AA_VERIFY_MS - ms_since(&aa_at)) < v)
+		v = w;
+	return v;
+}
+
+/* <sock>.allowed = the answered prompt's title, replaced whole. */
+static void
+aa_report(const char *title)
+{
+	char path[1100], tmp[1110];
+	size_t n = dch_utf8_trim(title, strlen(title) > 1000 ? 1000
+	                                                     : strlen(title));
+	int fd, ok;
+
+	if (sidecar_path(".allowed", path, sizeof path) < 0 ||
+	    snprintf(tmp, sizeof tmp, "%s.tmp", path) >= (int)sizeof tmp)
+		return;
+	unlink(tmp);
+	if ((fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW,
+	               0600)) < 0)
+		return;
+	ok = write(fd, title, n) == (ssize_t)n && write(fd, "\n", 1) == 1;
+	close(fd);
+	if (!ok || rename(tmp, path) < 0)
+		unlink(tmp);
+}
+
+static void
+auto_allow(void)
+{
+	char *scr = NULL, *id = NULL, *title = NULL;
+	struct dch_agent a;
+	size_t n;
+
+	aa_pending = aa_verify = 0;
+	if (the_pty.fd < 0 || !dch_vt_enabled() || getenv("DCH_NO_DETECT") ||
+	    !dch_config_bool("auto_allow") ||
+	    dch_vt_snapshot(DCH_VT_FMT_PLAIN, 0, &scr, &n) < 0)
+		return;
+	if (!dch_allow_prompt(scr, &id, &title))
+		aa_gone = 1;
+	else if (aa_ident && strcmp(id, aa_ident) == 0 &&
+	         (!aa_gone || ms_since(&aa_at) < AA_LOOP_MS))
+		dch_trace("auto-allow: same prompt again, left to the human");
+	else if (dch_agent_probe(the_pty.pid, &a) == 0)
+	{
+		free(a.launch);
+		if (write(the_pty.fd, "1", 1) == 1)
+		{
+			free(aa_ident);
+			aa_ident = id;
+			id = NULL;
+			clock_gettime(CLOCK_MONOTONIC, &aa_at);
+			aa_gone = 0;
+			aa_verify = 1;
+			aa_report(title);
+			dch_trace("auto-allow: answered %s", title);
+		}
+	}
+	free(id);
+	free(title);
+	dch_vt_buf_free(scr);
 }
 
 /* ---- session history record (#042) ----------------------------------
@@ -1126,7 +1238,8 @@ ensure_sock_dir(void)
 static void
 touch_sidecars(void)
 {
-	static const char *suffix[] = { ".act", ".state", ".alias", ".meta" };
+	static const char *suffix[] = { ".act", ".state", ".alias", ".meta",
+	                                ".allowed" };
 	struct timespec times[2];
 	char path[1100];
 	size_t i;
@@ -1410,6 +1523,7 @@ process_pty_buf(const unsigned char *buf, size_t len)
 
 	/* Real output happened — refresh the activity stamp (throttled). */
 	touch_activity();
+	aa_output();
 
 #ifdef BROKEN_MASTER
 	/* Get the current terminal settings. */
@@ -2560,9 +2674,14 @@ respawn_consume(int status)
 	char **v = respawn_argv;
 	char meta[1100];
 
-	/* Metadata describes the program that just went away. */
+	/* Metadata describes the program that just went away; so does the
+	** last auto-allow answer. */
 	if (sidecar_path(".meta", meta, sizeof meta) == 0)
 		unlink(meta);
+	if (sidecar_path(".allowed", meta, sizeof meta) == 0)
+		unlink(meta);
+	free(aa_ident);
+	aa_ident = NULL;
 	exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 	exit_signal = WIFSIGNALED(status) ? WTERMSIG(status) : 0;
 	respawn_argv = NULL;
@@ -3391,6 +3510,11 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 		}
 		if (rec_ms - ms_since(&rec_at) < wait_ms)
 			wait_ms = rec_ms - ms_since(&rec_at);
+		/* The auto-allow check (#074), due after quiet output. */
+		if (aa_due() <= 0)
+			auto_allow();
+		if (aa_due() < wait_ms)
+			wait_ms = aa_due() < 0 ? 0 : aa_due();
 		if (the_pty.fd >= 0 && respawn_live())
 		{
 			int st;

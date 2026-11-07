@@ -1,7 +1,7 @@
 # dch — detachable terminal sessions, the simple way
 
 A tiny terminal multiplexer built on top of [dtach][dtach]. No windows, no
-panes, no tabs, no config file. One session per project, auto-named, attached
+panes, no tabs, no config file needed. One session per project, auto-named, attached
 on demand. Close the laptop, drop the SSH, quit the terminal — your shell
 keeps running.
 
@@ -33,7 +33,8 @@ disconnect — and nothing else:
   agents can send keys, read the rendered screen, and wait for output —
   without attaching, without a pty, without disturbing a human who *is*
   attached. See [Agent API](#agent-api).
-- **No config file, no shell hooks.** One binary on `$PATH`.
+- **No config file needed, no shell hooks.** One binary on `$PATH`; the
+  optional [config file](#config-file) holds only opt-in features.
 
 [ghostty]: https://github.com/ghostty-org/ghostty
 
@@ -179,6 +180,7 @@ dch --history [--json]                          # sessions that ended, and how
 dch --revive <name> [--as <new>]|--all [--no-message] [--json]  # bring ended sessions back, claude resumed
 dch --say <name>...|--all [--json] -- <text...>  # message each Claude Code, busy too (queued), never over a prompt
 dch --stop <name>...|--all [--json]             # pause Claude, end the session; --revive wakes it
+dch --config [<key> [<value>|--unset]]          # show, read or set the config file
 ```
 
 Inside a session: `Ctrl-\` to detach. Works in vim, fzf, less, Claude Code,
@@ -218,7 +220,7 @@ someone is watching is invisible to them.
 | `--report <n> <state>` | Push a semantic state: `working`, `idle`, `blocked`, or `done` (closed set, unknown tokens rejected); `clear` reverts to auto (detection + heuristic). Last write wins; cleared automatically when the session ends. | 0 ok, 1 no session / bad state |
 | `--meta <n> '<json>'` | Attach one JSON object of metadata to the session (see [Optional: session metadata](#optional-session-metadata)); `clear` removes it. Replaced atomically, last write wins, never interpreted; a byte-identical push is a no-op; rejected input leaves the stored object unchanged. Removed automatically when the session's program exits. | 0 ok, 1 no session / not a single-line JSON object ≤ 16 KB |
 | `--wait <n> --state <s[,s...]> [--timeout ms]` | Block until the state matches any of the comma list (e.g. `idle,blocked,done` = "turn over"); prints the matched state. `active` is accepted as an alias for `working`. Polls every 100 ms. | 0 hit, 2 timeout, 1 no session |
-| `--ls-json` | All sessions as JSON: `[{"name","alias","harness","activity_epoch","state","version","agents","meta","meta_epoch"}]`. `harness` is the name of the Claude Code or Codex session running inside, or `""`; the real `name` remains separate. `state` follows the same resolution rule as `--status`. `version` is the dch version of the master serving that session, or `""` for a master old enough not to report one. `agents` is the number of live subagents on Claude Code's agent panel (the `⏺ main` block under the prompt), `0` when no panel is on screen — including while a prompt covers it — or `DCH_NO_DETECT=1` is set. `meta` is the object last pushed with `--meta`, verbatim, or `null`; `meta_epoch` is when that content last changed (epoch seconds, like `activity_epoch`), `0` with no meta. | 0 |
+| `--ls-json` | All sessions as JSON: `[{"name","alias","harness","activity_epoch","state","version","agents","meta","meta_epoch","auto_allowed"}]`. `harness` is the name of the Claude Code or Codex session running inside, or `""`; the real `name` remains separate. `state` follows the same resolution rule as `--status`. `version` is the dch version of the master serving that session, or `""` for a master old enough not to report one. `agents` is the number of live subagents on Claude Code's agent panel (the `⏺ main` block under the prompt), `0` when no panel is on screen — including while a prompt covers it — or `DCH_NO_DETECT=1` is set. `meta` is the object last pushed with `--meta`, verbatim, or `null`; `meta_epoch` is when that content last changed (epoch seconds, like `activity_epoch`), `0` with no meta. `auto_allowed` is the permission prompt the master answered last with [auto-allow](#auto-allow), `{"at":<epoch seconds>,"title":"<the dialog's first line, e.g. Bash command>"}`, or `null`; cleared when the session's program exits, like `meta`. | 0 |
 | `--restart <n>` \| `--restart --all` `[--include-agents] [-f] [--json]` | Re-exec the session's master onto the current `dch` binary, in place — the program inside keeps running (see [Upgrading a live session](#upgrading-a-live-session)). `--all` restarts only sessions whose `version` differs from this binary's; `-f` restarts all of them. With `--include-agents`, it then restarts the stale Claude Code agents of those sessions — Claude as the session's command; one typed into its shell is skipped (`in_shell`); every session with `--all`, only `<n>` otherwise; `-f` forces current agents too (see [Restarting Claude Code agents](#restarting-claude-code-agents)). Without the flag no agent is touched, `--all` included. `--include-agents` without `--restart` is a usage error. `--json`: stdout is NDJSON, the master pass included, with or without `--include-agents` (see [Machine-readable output](#machine-readable-output)). | 0 ok, 1 failed / master too old / an agent restart failed |
 | `--respawn <n> [-- cmd...]` | Arm a one-shot respawn: when the session's program next exits, the master keeps the session (same socket, pty size, attached clients) and starts `cmd` in its place. No `cmd` arms a *hold*: the session stays up childless until a second `--respawn <n> -- cmd` starts one, or until `DCH_HOLD_MS` (default 120000) ends it. An arm that nothing consumes expires after `DCH_RESPAWN_TTL_MS` (default 300000); both are read from the master's environment. `--restart` refuses while a respawn is armed or held. | 0 ok, 1 no session / refused / master too old |
 | `--respawn <n> --cancel` | Drop a pending arm. On a held (childless) session it ends the session. | 0 ok, 1 no session |
@@ -507,6 +509,67 @@ old and still current. Pair it with `state` and
   redraws in place produces one line, not hundreds.
 - **Timing is yours to handle.** `--send` types instantly; TUIs that debounce
   input may need a `--wait` between verbs, exactly like a human pausing.
+
+## Config file
+
+dch runs without one. The optional config holds opt-in features: `key = value`
+lines, `#` comments, the last line for a key wins. It lives at `$DCH_CONFIG`,
+else `$XDG_CONFIG_HOME/dch/config`, else `~/.config/dch/config`, and is read
+fresh every time it is needed, so an edit takes effect at once, also in
+running sessions.
+
+| Key | Value | Default |
+| --- | --- | --- |
+| `auto_allow` | `true`/`false` (also `1`/`0`, `yes`/`no`, `on`/`off`): the master answers Claude Code's plain permission prompts, see [Auto-allow](#auto-allow) | `false` |
+| `sidekick_pattern` | a string, read by the session picker | unset |
+
+```sh
+dch --config                         # the path, then every known key's effective value
+dch --config auto_allow              # one value; exit 1 when unset
+dch --config auto_allow true         # set it
+dch --config auto_allow --unset      # remove it
+```
+
+Setting rewrites the file whole (a temp file renamed over it, the target of a
+symlinked one), keeps every other line and comment, and creates the parent
+directory. An unknown key, or a bool key given anything else, is refused with
+exit 1.
+
+### Auto-allow
+
+With `auto_allow = true`, the session's master answers Claude Code's plain
+permission prompt itself: it types `1`, the "Yes" the caret already sits on,
+one keystroke and never Enter. It is the rule of Prosper's Agent Island
+"Always allow", now in dch, so it works on Linux and remote hosts without
+Prosper. Only exactly this shape is answered:
+
+```
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and don't ask again for …     (optional, never picked)
+   3. No, and tell Claude what to do differently (esc)
+```
+
+The question is exactly "Do you want to proceed?", option 1 a bare `Yes`, the
+last option a `No…`, neither with wrapped lines, and between them at most one
+"Yes, and don't ask again …" row — never one that changes the permission mode
+(`(shift+tab)`). The dialog must be the last thing on the screen (below it only
+rules, its "Esc to cancel" footer and Claude Code's session-title rule), and
+the screen must read `blocked` as `--status` reads it, so a dialog quoted in
+the transcript above the composer is never answered. Plan approvals, trust and
+edit dialogs, question forms, pickers, four options, a "don't ask again"-only
+Yes: all left to you. As in Prosper, a dialog whose head scrolled off the top
+(a long heredoc) and one with hidden characters are still answered: Always
+allow approves any plain permission prompt, whatever the command.
+
+The master checks once its program has been quiet for 300 ms after output
+(at most 2 s into output that never pauses) and again 2 s after an answer, and
+only answers when a Claude Code runs under the session's program. The loop
+guard: a prompt it answered is never answered again while it stays up, nor
+within 30 s once gone and back — that one is yours. Each answer is reported as
+`auto_allowed` in `--ls-json` (`<sock>.allowed` next to the socket). Needs the
+terminal mirror: not in dch-lite or under `DCH_NO_VT`; `DCH_NO_DETECT=1` in
+the master's environment turns it off too.
 
 ## Upgrading a live session
 
@@ -854,6 +917,7 @@ environment disables it at spawn.
 | `--revive` resume message | Not typed; the line says so. The session and its `claude --resume` still come back. |
 | `--stop` | Sessions with a live Claude are `skipped`/`no_screen`: nothing is typed without the mirror to gate on. Sessions without one still stop. |
 | `--read`, `--wait --match` | Exit 3 with a message pointing at the full build. |
+| [Auto-allow](#auto-allow) | Unavailable: the master reads the prompt off its mirror. Nothing is answered; `auto_allowed` stays `null`. |
 | `--keys` | Falls back to a fixed legacy xterm table client-side (exit 0 + stderr note). Mode-aware apps may misread modified keys. |
 
 The client side is protocol-only in both builds: a lite `dch` binary can
