@@ -141,6 +141,7 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "hot-path perf budget" perf_test.py
     pyrun "picker resolves harness session names" harness_names_test.py
     pyrun "--meta stores session metadata for --ls-json" meta_test.py
+    pyrun "--ls-json claude_session_id and transcript_path" transcript_test.py
     pyrun "master self-heals a deleted socket" socket_heal_test.py
     pyrun "native agent bridge public CLI and wire protocol" agent_bridge_test.py
 fi
