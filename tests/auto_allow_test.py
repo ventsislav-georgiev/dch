@@ -10,6 +10,9 @@ answers nothing; on answers "1" once, never the "don't ask again" row, and
 left alone (a "don't ask again" Yes only, four options, a mode-change row,
 another question, a question form, a quoted dialog above the composer);
 the loop guard (the prompt left up, and gone and back, is answered once);
+a curly apostrophe in "don’t ask again" (#783); Claude Code's ticking
+countdown line, one row or wrapped, answered once while a near-miss
+wording still compares literally (#784);
 the sidecar cleared when the program exits. Every "left alone" check also
 needs a plain prompt answered right after on the same session, so none
 passes on a dch without auto-allow. On dch-lite (no terminal mirror):
@@ -36,6 +39,19 @@ def dialog(opts, question="Do you want to proceed?", title="Bash command",
 
 
 BASH2 = dialog(["Yes", NO])
+CURLY = dialog(["Yes", DONT.replace("'", "\u2019"), NO])
+
+
+def ticking(t, tail="", wrap=False):
+    """BASH2 under Claude Code's countdown line (#784) at t seconds left."""
+    w = (" \u26a0 Claude Code will automatically block this request in "
+         "%d:%02d, to avoid holding up an unattended session%s"
+         % (t // 60, t % 60, tail))
+    if wrap:
+        w = w.replace(", to avoid ", ", to\n   avoid ")
+    rows = dialog(["Yes", NO])
+    q = rows.index(" Do you want to proceed?")
+    return rows[:q - 1] + w.split("\n") + rows[q:]
 BASH3 = dialog(["Yes", DONT, NO])
 OTHER = dialog(["Yes", NO], body=("   swift build", "   Build it"))
 
@@ -116,11 +132,11 @@ def main():
     def keys(n):
         return [e["text"] for e in events(n) if e["ev"] == "key"]
 
-    def sess(base, **ctl):
+    def sess(base, size="100x30", **ctl):
         n = "%s%s" % (base, TAG)
         names.append(n)
         setctl(n, **ctl)
-        subprocess.run([DCH, "--spawn", n, "--size", "100x30", "claude"],
+        subprocess.run([DCH, "--spawn", n, "--size", size, "claude"],
                        capture_output=True, check=True)
         s = until(lambda: [e for e in events(n) if e["ev"] == "start"], 15)
         if s:
@@ -220,6 +236,31 @@ def main():
               t0 - 1 <= aa.get("at", 0) <= time.time() + 1)
         check("--config auto_allow: true",
               run("--config", "auto_allow").stdout == "true\n")
+
+        # --- a curly apostrophe in "don't ask again" (#783) -------------
+        cu = sess("curly")
+        show(cu, CURLY)
+        check("a curly \u2019 in \"don\u2019t ask again\": answered with 1",
+              until(lambda: keys(cu) == ["1"], 5))
+
+        # --- the ticking countdown (#784): one prompt, not one a second --
+        # each left up (sticky) and redrawn with a new M:SS every ~1 s; a
+        # near-miss wording (trailing text) still compares literally
+        # (the line is 103 cells: one row at 120; at 100 Claude Code wraps it)
+        tk = {"plain": ({}, sess("tick", "120x30")), "wrapped": ({"wrap": True},
+              sess("tickw")), "near-miss": ({"tail": " soon"},
+              sess("tickn", "120x30"))}
+        for t in range(95, 89, -1):
+            for kw, n in tk.values():
+                setctl(n, screen=ticking(t, **kw), sticky=True)
+            time.sleep(1)
+        got = {k: keys(n) for k, (_, n) in tk.items()}
+        check("countdown ticking each second: answered once",
+              got["plain"] == ["1"])
+        check("countdown wrapped over two rows: answered once",
+              got["wrapped"] == ["1"])
+        check("countdown near-miss (trailing text): compared literally, "
+              "each new M:SS a new prompt", len(got["near-miss"]) >= 2)
 
         # --- left alone, each followed by a plain prompt that is answered -
         alone = {
