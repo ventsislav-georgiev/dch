@@ -110,7 +110,7 @@ Two formulas, `conflicts_with` each other — pick one. **dch** embeds
 libghostty-vt (~3 MB binary). Both builds support the [Agent API](#agent-api).
 **dch-lite** omits only the terminal mirror: `--send`/`--run`/`--keys` still
 work (keys via a legacy encoding), but `--read` and `--wait --match` need the
-mirror and exit 3.
+mirror and exit 3. `dch --build` prints `full` or `lite`.
 The formulas are auto-published to the tap by dch's release workflow on
 every `v*` tag.
 
