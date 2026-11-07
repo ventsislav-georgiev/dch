@@ -13,6 +13,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <poll.h>
+#include <regex.h>
 #include <stdarg.h>
 #include <sys/time.h>
 #include <pwd.h>
@@ -1573,6 +1574,7 @@ write_alias(const char *name, const char *alias)
 static struct termios picker_saved_term;
 static int picker_tty_fd = -1;
 static int picker_term_saved;
+static int picker_alt;	/* the picker (#075) is on the alternate screen */
 
 static void
 picker_restore(void)
@@ -1583,12 +1585,18 @@ picker_restore(void)
 			tcsetattr(picker_tty_fd, TCSANOW, &picker_saved_term);
 		/* Cursor on + disable mouse/bracketed-paste/alt-screen we may
 		** have inherited. dch itself never enables them but a previous
-		** in-shell app could've. Safe to send unconditionally. */
+		** in-shell app could've. Safe to send unconditionally. Autowrap
+		** back on (the picker turns it off); the alternate screen left
+		** only when the picker entered it: leaving restores the saved
+		** cursor, which would jump -rl's inline prompt. */
 		(void)!write(picker_tty_fd,
 		    "\033[?25h"
 		    "\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?1015l"
-		    "\033[?2004l",
-		    6 + 5 * 8 + 8);
+		    "\033[?2004l\033[?7h",
+		    6 + 5 * 8 + 8 + 5);
+		if (picker_alt)
+			(void)!write(picker_tty_fd, "\033[0m\033[?1049l", 12);
+		picker_alt = 0;
 		close(picker_tty_fd);
 		picker_tty_fd = -1;
 	}
@@ -1664,151 +1672,9 @@ tty_rows(int fd)
 	return 24;
 }
 
-/* Interactive picker. Returns 0 on success (out filled), 1 if no sessions,
-** no TTY, or user canceled. */
-static int
-pick_session(const char *header, char *out, size_t outsz)
-{
-	struct slist sl = {0};
-	int rc = 1;
-
-	if (list_sessions(&sl) < 0 || sl.n == 0)
-	{
-		fprintf(stderr, "no sessions\n");
-		slist_free(&sl);
-		return 1;
-	}
-	load_aliases(&sl);
-	load_harness_names(&sl);
-	load_codex_names(&sl);
-	slist_sort(&sl);
-
-	int fd = open("/dev/tty", O_RDWR);
-	if (fd < 0)
-	{
-		/* Headless: list names so the caller can still see them. */
-		for (int i = 0; i < sl.n; i++)
-		{
-			char row[1300];
-			session_display_name(&sl, i, row, sizeof(row));
-			puts(row);
-		}
-		slist_free(&sl);
-		return 1;
-	}
-
-	struct termios raw;
-	if (tcgetattr(fd, &picker_saved_term) < 0)
-	{
-		close(fd);
-		slist_free(&sl);
-		return 1;
-	}
-	raw = picker_saved_term;
-	raw.c_lflag &= ~(ICANON | ECHO | ISIG | IEXTEN);
-	raw.c_iflag &= ~(IXON | ICRNL | INLCR | IGNCR);
-	raw.c_cc[VMIN] = 1;
-	raw.c_cc[VTIME] = 0;
-	if (tcsetattr(fd, TCSANOW, &raw) < 0)
-	{
-		close(fd);
-		slist_free(&sl);
-		return 1;
-	}
-	picker_tty_fd = fd;
-	picker_term_saved = 1;
-	signal(SIGINT, picker_sigint);
-	signal(SIGTERM, picker_sigint);
-	signal(SIGHUP, picker_sigint);
-
-	/* Hide cursor + force mouse tracking off so stray mouse motion can't
-	** inject CSI bytes into our keypress read. */
-	tw(fd, "\033[?25l"
-	       "\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?1015l"
-	       "\033[?2004l");
-
-	int sel = 0, top = 0, drawn = 0;
-	int rows = tty_rows(fd);
-	/* Reserve 2 rows: 1 for header, 1 to keep prompt below picker. */
-	int win = rows - 2;
-	if (win < 1)
-		win = 1;
-	if (win > sl.n)
-		win = sl.n;
-	int lines = 1 + win; /* header + visible entries */
-
-	for (;;)
-	{
-		/* Keep sel inside [top, top+win). */
-		if (sel < top)
-			top = sel;
-		else if (sel >= top + win)
-			top = sel - win + 1;
-
-		if (drawn)
-			picker_erase(fd, lines);
-		picker_draw(fd, header, &sl, sel, top, win);
-		drawn = 1;
-
-		unsigned char c;
-		ssize_t r;
-		do {
-			r = read(fd, &c, 1);
-		} while (r < 0 && errno == EINTR);
-		if (r <= 0)
-			break; /* cancel */
-
-		if (c == '\r' || c == '\n')
-		{
-			snprintf(out, outsz, "%s", sl.v[sel]);
-			rc = 0;
-			break;
-		}
-		if (c == 'q' || c == 3 /*Ctrl-C*/ || c == 4 /*Ctrl-D*/)
-			break;
-		if (c == 'j')
-		{
-			if (sel < sl.n - 1)
-				sel++;
-			continue;
-		}
-		if (c == 'k')
-		{
-			if (sel > 0)
-				sel--;
-			continue;
-		}
-		if (c == 27) /* ESC or CSI sequence */
-		{
-			fd_set rs;
-			struct timeval tv = {0, 50 * 1000};
-			FD_ZERO(&rs);
-			FD_SET(fd, &rs);
-			if (select(fd + 1, &rs, NULL, NULL, &tv) <= 0)
-				break; /* bare ESC = cancel */
-			unsigned char b1, b2;
-			if (read(fd, &b1, 1) != 1 || b1 != '[')
-				break;
-			if (read(fd, &b2, 1) != 1)
-				break;
-			if (b2 == 'A' && sel > 0)
-				sel--;
-			else if (b2 == 'B' && sel < sl.n - 1)
-				sel++;
-			continue;
-		}
-	}
-
-	/* Erase our drawing so the parent shell prompt isn't shoved down. */
-	if (drawn)
-		picker_erase(fd, lines);
-	picker_restore();
-	signal(SIGINT, SIG_DFL);
-	signal(SIGTERM, SIG_DFL);
-	signal(SIGHUP, SIG_DFL);
-	slist_free(&sl);
-	return rc;
-}
+/* The interactive picker (#075), defined after the history code it reads.
+** 0 with the chosen session in out; 1 when none, no tty or cancelled. */
+static int pick_session(const char *header, char *out, size_t outsz);
 
 /* ---- interactive rename (alias sidecar) ---------------------------- */
 
@@ -6705,6 +6571,1285 @@ rv_all_takes(const struct hrec *h)
 	       strcmp(h->end, "exit 0") != 0 &&
 	       seen >= (long)time(NULL) - RV_ALL_MAX_AGE &&
 	       seen - h->started >= RV_ALL_MIN_LIFE;
+}
+
+/* ---- the session picker (#075): Agent Island in a terminal ---------- */
+/*
+** `dch -l`, `dch -k`/`-d` without a name, and the double-tap switch. Tabs:
+** Sessions; Sidekicks (n), the live sessions whose name or alias matches
+** the config's sidekick_pattern (default "-qa"), shown only when there are
+** some; History (n), the ended records, pinned first, at most 50. Rows carry
+** --ls-json's data (state, agents, meta.prs) and --history's, reloaded about
+** once a second. Enter hands the session back to the caller; every other
+** action forks this same dch with its CLI verb, the output into an unlinked
+** file (never over the screen, and no pipe to break when the picker quits
+** first), and its last line is the result. Drawn on the alternate screen
+** with autowrap off, each line overwritten in place and cleared to its end:
+** no frame clears the screen and no row wraps.
+*/
+
+#define PK_HIST_MAX 50
+
+struct pkrow
+{
+	char name[600];		/* the session; History: the record's file */
+	char sname[512];	/* History: the record's session name */
+	char title[600];	/* alias, else harness name, else name */
+	char state[32];		/* blocked|working|done|idle; History: its end */
+	char prs[400], cwd[300];
+	long when, merged;	/* last output; History: when it ended */
+	int agents, pinned;
+};
+
+struct pkact
+{
+	char *argv[12];		/* dch's argv, into buf */
+	char buf[1600];
+	char doing[700];	/* "killing alpha", while it runs */
+	char target[600];	/* the row it is about; "" = a bulk action */
+	int tab, revive, nomsg;
+};
+
+struct pk
+{
+	struct pkrow *r[3];	/* Sessions, Sidekicks, History */
+	int n[3], sel[3], top[3];
+	int tab, byname, color, interrupted, win, status_row, asking;
+	long loaded;		/* ms of the last load; 0 = load now */
+	struct pkact ask, run;	/* the action asked about, the one running */
+	pid_t pid;
+	FILE *out;		/* the running one's stdout and stderr */
+	char status[800];
+};
+
+enum { PK_UP = 256, PK_DOWN, PK_RIGHT, PK_LEFT, PK_BTAB, PK_PGUP, PK_PGDN,
+       PK_HOME, PK_END, PK_ESC };
+
+static volatile sig_atomic_t pk_winch;
+static int pk_sortname;
+
+static void
+pk_on_winch(int sig)
+{
+	(void)sig;
+	pk_winch = 1;
+}
+
+static long
+pk_ms(void)
+{
+	struct timespec t;
+
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return (long)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+}
+
+/* Case-insensitive, digit runs by value: "a2" before "a10". */
+static int
+pk_natcmp(const char *a, const char *b)
+{
+	while (*a && *b)
+	{
+		int x = tolower((unsigned char)*a), y = tolower((unsigned char)*b);
+
+		if (isdigit(x) && isdigit(y))
+		{
+			size_t la = 0, lb = 0;
+			int c;
+
+			while (a[0] == '0' && isdigit((unsigned char)a[1]))
+				a++;
+			while (b[0] == '0' && isdigit((unsigned char)b[1]))
+				b++;
+			while (isdigit((unsigned char)a[la]))
+				la++;
+			while (isdigit((unsigned char)b[lb]))
+				lb++;
+			if (la != lb)
+				return la < lb ? -1 : 1;
+			if ((c = strncmp(a, b, la)))
+				return c;
+			a += la;
+			b += lb;
+			continue;
+		}
+		if (x != y)
+			return x - y;
+		a++;
+		b++;
+	}
+	return (unsigned char)*a - (unsigned char)*b;
+}
+
+static int
+pk_rank(const char *s)
+{
+	return !strcmp(s, "blocked") ? 0 : !strcmp(s, "working") ? 1
+	       : !strcmp(s, "done") ? 2 : 3;
+}
+
+/* By activity: blocked, working, done, idle, newest output first; or by
+** the shown title, numeric-aware. Ties on the name. */
+static int
+pk_cmp(const void *x, const void *y)
+{
+	const struct pkrow *a = x, *b = y;
+	int c;
+
+	if (!pk_sortname)
+	{
+		if ((c = pk_rank(a->state) - pk_rank(b->state)))
+			return c;
+		if (a->when != b->when)
+			return a->when > b->when ? -1 : 1;
+	}
+	else if ((c = pk_natcmp(a->title, b->title)))
+		return c;
+	return strcmp(a->name, b->name);
+}
+
+static int
+pk_find(const struct pk *p, int t, const char *name)
+{
+	int k;
+
+	for (k = 0; k < p->n[t]; k++)
+		if (strcmp(p->r[t][k].name, name) == 0)
+			return k;
+	return -1;
+}
+
+/* Keep each tab's selection on the same row (by name) when rows come, go
+** or move; a row that went leaves the selection where it was. */
+static void
+pk_reselect(struct pk *p, char sel[3][600])
+{
+	int t, k;
+
+	for (t = 0; t < 3; t++)
+	{
+		if (sel[t][0] && (k = pk_find(p, t, sel[t])) >= 0)
+			p->sel[t] = k;
+		if (p->sel[t] >= p->n[t])
+			p->sel[t] = p->n[t] - 1;
+		if (p->sel[t] < 0)
+			p->sel[t] = 0;
+	}
+}
+
+static void
+pk_selnames(const struct pk *p, char sel[3][600])
+{
+	int t;
+
+	for (t = 0; t < 3; t++)
+		snprintf(sel[t], 600, "%s", p->sel[t] < p->n[t]
+		         ? p->r[t][p->sel[t]].name : "");
+}
+
+/* Sort, then select the rows named in sel (pk_selnames before the rows
+** changed). */
+static void
+pk_sort(struct pk *p, char sel[3][600])
+{
+	int t;
+
+	pk_sortname = p->byname;
+	for (t = 0; t < 2; t++)
+		if (p->n[t] > 1)
+			qsort(p->r[t], (size_t)p->n[t], sizeof *p->r[t], pk_cmp);
+	pk_reselect(p, sel);
+}
+
+/* Does s match the sidekick pattern: as the regex (mode 1), or as text,
+** ignoring case (mode 2)? */
+static int
+pk_sidekick(int mode, regex_t *re, const char *pat, const char *s)
+{
+	size_t n = strlen(pat), k;
+
+	if (!s || !mode)
+		return 0;
+	if (mode == 1)
+		return regexec(re, s, 0, NULL, 0) == 0;
+	for (; *s; s++)
+	{
+		for (k = 0; k < n && s[k] && tolower((unsigned char)s[k]) ==
+		     tolower((unsigned char)pat[k]); k++)
+			;
+		if (k == n)
+			return 1;
+	}
+	return 0;
+}
+
+/* Every tab's rows afresh: the live sessions as --ls-json reads them, the
+** ended records as --history does. */
+static void
+pk_load(struct pk *p)
+{
+	struct slist sl = {0};
+	struct hrec *h;
+	char pat[256] = "-qa", sel[3][600];
+	const char *home = getenv("HOME");
+	size_t hl = home ? strlen(home) : 0;
+	regex_t re;
+	int mode = 0, k, t, nh, pin;
+
+	pk_selnames(p, sel);
+	for (t = 0; t < 3; t++)
+	{
+		free(p->r[t]);
+		p->r[t] = NULL;
+		p->n[t] = 0;
+	}
+	/* set to nothing: no Sidekicks tab */
+	(void)dch_config_get("sidekick_pattern", pat, sizeof pat);
+	if (pat[0])
+	{
+		mode = regcomp(&re, pat, REG_EXTENDED | REG_ICASE | REG_NOSUB)
+		       == 0 ? 1 : 2;
+		/* a regex every name matches splits nothing: text, as an
+		** invalid one is */
+		if (mode == 1 && regexec(&re, "", 0, NULL, 0) == 0)
+		{
+			regfree(&re);
+			mode = 2;
+		}
+	}
+	list_sessions(&sl);
+	load_aliases(&sl);
+	load_harness_names(&sl);
+	load_codex_names(&sl);
+	p->r[0] = calloc((size_t)sl.n + 1, sizeof **p->r);
+	p->r[1] = calloc((size_t)sl.n + 1, sizeof **p->r);
+	for (k = 0; p->r[0] && p->r[1] && k < sl.n; k++)
+	{
+		int side = pk_sidekick(mode, &re, pat, sl.v[k]) ||
+		           pk_sidekick(mode, &re, pat, sl.alias[k]);
+		struct pkrow *w = &p->r[side][p->n[side]++];
+		const char *meta;
+		long mep;
+
+		snprintf(w->name, sizeof w->name, "%s", sl.v[k]);
+		snprintf(w->title, sizeof w->title, "%s", slist_label(&sl, k));
+		snprintf(w->state, sizeof w->state, "%s", session_state(sl.v[k]));
+		w->when = activity_epoch(sl.v[k]);
+		w->agents = detect_agents(sl.v[k]);
+		if ((meta = session_meta(sl.v[k], &mep)))
+			(void)dch_meta_prs(meta, w->prs, sizeof w->prs, &w->merged);
+	}
+	if (mode == 1)
+		regfree(&re);
+	slist_free(&sl);
+
+	nh = history_load(&h);
+	p->r[2] = calloc((size_t)nh + 1, sizeof **p->r);
+	p->interrupted = 0;
+	for (k = 0; k < nh; k++)
+		p->interrupted += rv_all_takes(&h[k]);
+	/* pinned first, then the newest of the rest up to the cap */
+	for (pin = 1; p->r[2] && pin >= 0; pin--)
+		for (k = 0; k < nh; k++)
+		{
+			struct pkrow *w;
+
+			if (h[k].live || h[k].pinned != pin ||
+			    (!pin && p->n[2] >= PK_HIST_MAX))
+				continue;
+			w = &p->r[2][p->n[2]++];
+			snprintf(w->name, sizeof w->name, "%s", h[k].file);
+			snprintf(w->sname, sizeof w->sname, "%s", h[k].name);
+			snprintf(w->title, sizeof w->title, "%s", h[k].alias[0]
+			         ? h[k].alias : h[k].name);
+			snprintf(w->state, sizeof w->state, "%s", h[k].end);
+			if (hl && strncmp(h[k].cwd, home, hl) == 0 &&
+			    (h[k].cwd[hl] == '/' || !h[k].cwd[hl]))
+				snprintf(w->cwd, sizeof w->cwd, "~%s", h[k].cwd + hl);
+			else
+				snprintf(w->cwd, sizeof w->cwd, "%s", h[k].cwd);
+			w->when = hrec_when(&h[k]);
+			w->pinned = h[k].pinned;
+		}
+	hrec_free(h, nh);
+	pk_sort(p, sel);
+}
+
+static int
+pk_shown(const struct pk *p, int t)
+{
+	return t == 0 || p->n[t] > 0;
+}
+
+/* ---- drawing: one frame into pk_fb, written when it changed ---- */
+
+static char pk_fb[1 << 18], pk_prev[1 << 18];
+static size_t pk_fn, pk_pn;
+static int pk_col, pk_w, pk_h, pk_y, pk_off, pk_color;
+
+static void
+pk_rawn(const char *s, size_t n)
+{
+	if (!pk_off && pk_fn + n < sizeof pk_fb)
+	{
+		memcpy(pk_fb + pk_fn, s, n);
+		pk_fn += n;
+	}
+}
+
+static void
+pk_raw(const char *s)
+{
+	pk_rawn(s, strlen(s));
+}
+
+/* SGR parameters ("1;33"; "" resets); nothing without color. */
+static void
+pk_sgr(const char *s)
+{
+	char b[48];
+
+	if (pk_color)
+	{
+		snprintf(b, sizeof b, "\033[%sm", s);
+		pk_raw(b);
+	}
+}
+
+/* Characters (UTF-8 sequences), one column each, cut at the edge. A
+** control byte or a stray continuation byte shows as '?'. */
+static void
+pk_txt(const char *s)
+{
+	while (*s && pk_col < pk_w)
+	{
+		unsigned char c = (unsigned char)*s;
+		size_t l = 1;
+
+		if (c >= 0xc0)
+			while (l < 4 && ((unsigned char)s[l] & 0xc0) == 0x80)
+				l++;
+		if (c < 0x20 || c == 0x7f || (c >= 0x80 && c < 0xc0))
+			pk_rawn("?", 1);
+		else
+			pk_rawn(s, l);
+		s += l;
+		pk_col++;
+	}
+}
+
+static int
+pk_cps(const char *s)
+{
+	int n = 0;
+
+	for (; *s; s++)
+		n += ((unsigned char)*s & 0xc0) != 0x80;
+	return n;
+}
+
+/* s in exactly w columns: cut with an ellipsis, or padded. */
+static void
+pk_fit(const char *s, int w)
+{
+	int end = pk_col + w;
+
+	if (pk_cps(s) > w)
+	{
+		char b[1400];
+		size_t i = 0;
+		int n = 0;
+
+		for (; s[i] && i < sizeof b - 1; i++)
+			if (((unsigned char)s[i] & 0xc0) != 0x80 && n++ == w - 1)
+				break;
+		memcpy(b, s, i);
+		b[i] = '\0';
+		pk_txt(b);
+		pk_txt(pk_color ? "\xe2\x80\xa6" : "~");
+	}
+	else
+		pk_txt(s);
+	while (pk_col < end && pk_col < pk_w)
+		pk_txt(" ");
+}
+
+/* The next screen line; lines past the bottom are dropped. */
+static void
+pk_line(void)
+{
+	char b[32];
+
+	pk_off = 0;
+	if (++pk_y > pk_h)
+	{
+		pk_off = 1;
+		return;
+	}
+	snprintf(b, sizeof b, "\033[%d;1H", pk_y);
+	pk_raw(b);
+	pk_col = 0;
+}
+
+static void
+pk_eol(void)
+{
+	pk_sgr("");
+	pk_raw("\033[K");
+}
+
+/* The key help: "key label" pairs packed into lines, at most 6 and at
+** least 3 rows short of the screen; 0 draws nothing and only counts. */
+static int
+pk_keys(const char **it, int n, int draw)
+{
+	int lines = 0, col = 0, k, cap = pk_h - 7;
+
+	if (cap > 6)
+		cap = 6;
+	if (cap < 1)
+		cap = 1;
+	for (k = 0; k + 1 < n; k += 2)
+	{
+		int w = pk_cps(it[k]) + 1 + pk_cps(it[k + 1]);
+
+		if (!lines || (col && col + 2 + w > pk_w))
+		{
+			/* past the cap a key waits for a bigger window */
+			if (lines == cap)
+				break;
+			if (draw && lines)
+				pk_eol();
+			if (draw)
+				pk_line();
+			lines++;
+			col = 0;
+		}
+		if (draw)
+		{
+			if (col)
+				pk_txt("  ");
+			pk_sgr("1");
+			pk_txt(it[k]);
+			pk_sgr("");
+			pk_txt(" ");
+			pk_txt(it[k + 1]);
+		}
+		col += (col ? 2 : 0) + w;
+	}
+	if (draw && lines)
+		pk_eol();
+	return lines;
+}
+
+static const char *
+pk_label(const char *s)
+{
+	return !strcmp(s, "blocked") ? "Needs input" : !strcmp(s, "working")
+	       ? "Working" : !strcmp(s, "done") ? "Done" : "Idle";
+}
+
+/* Agent Island's palette: amber, Claude orange, green, dim. */
+static const char *
+pk_hue(const char *s)
+{
+	return !strcmp(s, "blocked") ? "1;33" : !strcmp(s, "working")
+	       ? "38;5;173" : !strcmp(s, "done") ? "32" : "2";
+}
+
+static const char *
+pk_glyph(const char *s)
+{
+	if (!strcmp(s, "blocked"))
+		return "!";
+	if (!strcmp(s, "working"))
+		return pk_color ? "\xe2\x9c\xb3" : "*";
+	return pk_color ? "\xe2\x97\x8f" : !strcmp(s, "done") ? "+" : "-";
+}
+
+/* An end in the island's neutral words: nothing done on purpose reads as
+** a crash. */
+static const char *
+pk_end(const char *e, char *b, size_t n)
+{
+	if (!*e || !strcmp(e, "vanished"))
+		return "vanished";
+	if (!strcmp(e, "killed"))
+		return "closed";
+	if (!strcmp(e, "exit 0"))
+		return "exited";
+	if (!strcmp(e, "signal 15") || !strcmp(e, "signal 1") ||
+	    !strcmp(e, "signal 2"))
+		snprintf(b, n, "ended (%s)", e);
+	else if (!strncmp(e, "signal ", 7))
+		snprintf(b, n, "crashed (%s)", e);
+	else if (!strncmp(e, "exit ", 5))
+		snprintf(b, n, "exited (%s)", e + 5);
+	else
+		return e;
+	return b;
+}
+
+static void
+pk_age(long when, char *b, size_t n)
+{
+	long s = (long)time(NULL) - when;
+
+	if (s < 0)
+		s = 0;
+	if (when <= 0)
+		b[0] = '\0';
+	else if (s < 60)
+		snprintf(b, n, "%lds ago", s);
+	else if (s < 3600)
+		snprintf(b, n, "%ldm ago", s / 60);
+	else if (s < 86400)
+		snprintf(b, n, "%ldh ago", s / 3600);
+	else
+		snprintf(b, n, "%ldd ago", s / 86400);
+}
+
+/* One row. Columns go from the right as the window narrows: PRs and
+** merged first, then agents and age; the title shrinks last. */
+static void
+pk_row(const struct pk *p, const struct pkrow *w, int sel, int tcol)
+{
+	const char *base = sel ? "0;7" : "0";
+	char hue[48], b[1400], age[32];
+
+	snprintf(hue, sizeof hue, "%s;%s", base, p->tab < 2 ? pk_hue(w->state)
+	         : "33");
+	pk_sgr(base);
+	pk_txt(sel ? "> " : "  ");
+	if (p->tab < 2)
+	{
+		pk_sgr(hue);
+		pk_txt(pk_glyph(w->state));
+		pk_sgr(base);
+		pk_txt(" ");
+		pk_fit(w->title, tcol);
+		pk_txt("  ");
+		pk_sgr(hue);
+		pk_fit(pk_label(w->state), 11);
+		pk_sgr(base);
+		pk_age(w->when, age, sizeof age);
+		if (age[0])
+		{
+			pk_txt("  ");
+			pk_txt(age);
+		}
+		if (w->agents > 0)
+		{
+			snprintf(b, sizeof b, "  %d agent%s", w->agents,
+			         w->agents == 1 ? "" : "s");
+			pk_txt(b);
+		}
+		if (w->prs[0])
+		{
+			pk_txt("  ");
+			pk_txt(w->prs);
+		}
+		if (w->merged > 0)
+		{
+			snprintf(b, sizeof b, "  %ld merged", w->merged);
+			pk_txt(b);
+		}
+		return;
+	}
+	pk_sgr(hue);
+	pk_txt(w->pinned ? "*" : " ");
+	pk_sgr(base);
+	pk_txt(" ");
+	pk_fit(w->title, tcol);
+	pk_txt("  ");
+	pk_fit(pk_end(w->state, b, sizeof b), 19);
+	pk_age(w->when, age, sizeof age);
+	pk_txt("  ");
+	pk_fit(age, 8);
+	pk_txt("  ");
+	pk_txt(w->cwd);
+}
+
+static void
+pk_draw(struct pk *p, int fd, const char *header, int force)
+{
+	struct winsize ws;
+	const char *keys[40];
+	char b[64], sortl[32], intr[48];
+	int nk = 0, k, t, tcol = 4, cols = 80, rows = 24, n = p->n[p->tab];
+	int *sel = &p->sel[p->tab], *top = &p->top[p->tab];
+
+	if (ioctl(fd, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0 && ws.ws_row > 0)
+	{
+		cols = ws.ws_col;
+		rows = ws.ws_row;
+	}
+	pk_w = cols > 1000 ? 1000 : cols;
+	pk_h = rows;
+	pk_y = pk_fn = 0;
+	pk_off = 0;
+	pk_color = p->color;
+
+#define PK_K(k, l) (keys[nk++] = (k), keys[nk++] = (l))
+	PK_K("enter", p->tab < 2 ? "attach" : "resume");
+	if (p->tab < 2)
+	{
+		snprintf(sortl, sizeof sortl, "sort: %s", p->byname ? "name"
+		         : "activity");
+		PK_K("r", "rename");
+		PK_K("R", "restart agent");
+		PK_K("S", "stop");
+		PK_K("x", "kill");
+		PK_K("a", "allow");
+		PK_K("b", "restart stale agents");
+		PK_K("B", "restart all agents (force)");
+		PK_K("s", sortl);
+	}
+	else
+	{
+		PK_K("m", "resume without message");
+		if (p->interrupted)
+		{
+			snprintf(intr, sizeof intr, "resume interrupted (%d)",
+			         p->interrupted);
+			PK_K("I", intr);
+		}
+		PK_K("p", "pin/unpin");
+		PK_K("d", "remove");
+	}
+	PK_K("tab", "switch");
+	PK_K("q", "quit");
+#undef PK_K
+
+	p->win = rows - 3 - pk_keys(keys, nk, 0);
+	if (p->win < 1)
+		p->win = 1;
+	if (*sel >= n)
+		*sel = n - 1;
+	if (*sel < 0)
+		*sel = 0;
+	if (*top > *sel)
+		*top = *sel;
+	if (*sel >= *top + p->win)
+		*top = *sel - p->win + 1;
+	if (*top > 0 && *top + p->win > n)
+		*top = n - p->win > 0 ? n - p->win : 0;
+
+	pk_line();
+	pk_sgr("1");
+	pk_txt(header);
+	pk_eol();
+
+	pk_line();
+	for (t = 0; t < 3; t++)
+	{
+		if (!pk_shown(p, t))
+			continue;
+		if (t == 0)
+			snprintf(b, sizeof b, "Sessions");
+		else
+			snprintf(b, sizeof b, "%s (%d)", t == 1 ? "Sidekicks"
+			         : "History", p->n[t]);
+		if (t)
+			pk_txt(" ");
+		if (t == p->tab)
+			pk_sgr("1;7");
+		pk_txt(t == p->tab && !pk_color ? "[" : " ");
+		pk_txt(b);
+		pk_txt(t == p->tab && !pk_color ? "]" : " ");
+		pk_sgr("");
+	}
+	pk_eol();
+
+	/* the title column: the widest shown, within what the screen leaves
+	** for the marker, glyph and state */
+	for (k = *top; k < n && k < *top + p->win; k++)
+		if (pk_cps(p->r[p->tab][k].title) > tcol)
+			tcol = pk_cps(p->r[p->tab][k].title);
+	if (tcol > 40)
+		tcol = 40;
+	if (tcol > pk_w - 19)
+		tcol = pk_w - 19;
+	if (tcol < 4)
+		tcol = 4;
+	for (k = *top; k < *top + p->win; k++)
+	{
+		pk_line();
+		if (k < n)
+			pk_row(p, &p->r[p->tab][k], k == *sel, tcol);
+		else if (k == 0)
+		{
+			pk_sgr("2");
+			pk_txt(p->tab == 2 ? "  no history" : "  no sessions");
+		}
+		pk_eol();
+	}
+
+	pk_line();
+	p->status_row = pk_y;
+	if (p->asking)
+	{
+		pk_sgr("1;33");
+		pk_txt(p->status);
+		pk_txt(" [y/N]");
+	}
+	else
+	{
+		if (p->pid > 0)
+		{
+			pk_sgr("36");
+			pk_txt(p->run.doing);
+			pk_txt(pk_color ? "\xe2\x80\xa6" : "...");
+			pk_sgr("");
+			if (p->status[0])
+				pk_txt("  ");
+		}
+		pk_txt(p->status);
+	}
+	pk_eol();
+	pk_keys(keys, nk, 1);
+	pk_off = 0;
+	pk_raw("\033[J");
+
+	if (!force && pk_fn == pk_pn && memcmp(pk_fb, pk_prev, pk_fn) == 0)
+		return;
+	(void)!write(fd, pk_fb, pk_fn);
+	memcpy(pk_prev, pk_fb, pk_fn);
+	pk_pn = pk_fn;
+}
+
+/* ---- actions ---- */
+
+/* An action: the dch words after argv[0] (NULL-terminated), what the
+** status line says while it runs, the row it is about. */
+static void
+pk_act(struct pkact *a, int tab, const char *target, const char *doing, ...)
+{
+	va_list ap;
+	const char *w;
+	size_t off = 0;
+	int n = 0;
+
+	memset(a, 0, sizeof *a);
+	a->tab = tab;
+	snprintf(a->target, sizeof a->target, "%s", target);
+	snprintf(a->doing, sizeof a->doing, "%s", doing);
+	a->argv[n++] = dch_exe;
+	va_start(ap, doing);
+	while (n < 11 && (w = va_arg(ap, const char *)))
+	{
+		size_t l = strlen(w) + 1;
+
+		if (off + l > sizeof a->buf)
+			break;
+		memcpy(a->buf + off, w, l);
+		a->argv[n++] = a->buf + off;
+		off += l;
+	}
+	va_end(ap);
+	a->argv[n] = NULL;
+}
+
+static void
+pk_start(struct pk *p, struct pkact *a)
+{
+	FILE *f;
+	pid_t pid;
+
+	/* gone since it was asked about: say so, run nothing */
+	if (a->target[0] && pk_find(p, a->tab, a->target) < 0 &&
+	    (a->tab == 2 || pk_find(p, !a->tab, a->target) < 0))
+	{
+		snprintf(p->status, sizeof p->status, "%s: no longer there",
+		         a->target);
+		return;
+	}
+	if (!(f = tmpfile()) || (pid = fork()) < 0)
+	{
+		snprintf(p->status, sizeof p->status, "%s: %s", a->doing,
+		         strerror(errno));
+		if (f)
+			fclose(f);
+		return;
+	}
+	if (pid == 0)
+	{
+		int nul = open("/dev/null", O_RDWR);
+
+		if (nul >= 0)
+			dup2(nul, 0);
+		dup2(fileno(f), 1);
+		dup2(fileno(f), 2);
+		execvp(a->argv[0], a->argv);
+		dprintf(2, "cannot run %s: %s\n", a->argv[0], strerror(errno));
+		_exit(127);
+	}
+	p->run = *a;	/* its argv points into a; only exec needed it */
+	p->pid = pid;
+	p->out = f;
+	p->status[0] = '\0';
+}
+
+/* The running action ended? Its last line is the result; --revive's, from
+** its --json line, reads "Resumed as <name>". */
+static void
+pk_reap(struct pk *p)
+{
+	char buf[8192], res[32] = "", as[600] = "", det[700] = "", *line, *next;
+	const char *last = NULL;
+	struct stat sb;
+	off_t off = 0;
+	ssize_t n;
+	int st;
+
+	if (p->pid <= 0 || waitpid(p->pid, &st, WNOHANG) != p->pid)
+		return;
+	p->pid = -1;
+	if (fstat(fileno(p->out), &sb) == 0 &&
+	    sb.st_size > (off_t)sizeof buf - 1)
+		off = sb.st_size - (off_t)(sizeof buf - 1);
+	n = pread(fileno(p->out), buf, sizeof buf - 1, off);
+	fclose(p->out);
+	p->out = NULL;
+	buf[n > 0 ? n : 0] = '\0';
+	for (line = buf; line; line = next)
+	{
+		if ((next = strchr(line, '\n')))
+			*next++ = '\0';
+		chomp(line);
+		if (!*line)
+			continue;
+		last = line;
+		if (p->run.revive && *line == '{' &&
+		    dch_json_string(line, "result", res, sizeof res) == 0)
+		{
+			(void)dch_json_string(line, "as", as, sizeof as);
+			(void)dch_json_string(line, "detail", det, sizeof det);
+		}
+	}
+	if (res[0] && strcmp(res, "ok") == 0)
+		snprintf(p->status, sizeof p->status, "Resumed as %s%s", as,
+		         p->run.nomsg ? " without the message" : "");
+	else if (res[0])
+		snprintf(p->status, sizeof p->status, "%s: %s", p->run.target,
+		         det[0] ? det : res);
+	else if (last)
+		snprintf(p->status, sizeof p->status, "%s", last);
+	else
+		snprintf(p->status, sizeof p->status, "%s: %s", p->run.doing,
+		         WIFEXITED(st) && WEXITSTATUS(st) == 0 ? "done"
+		         : "failed");
+	p->loaded = 0;
+}
+
+static void
+pk_ask(struct pk *p, const char *fmt, const char *title)
+{
+	snprintf(p->status, sizeof p->status, fmt, title);
+	p->asking = 1;
+}
+
+/* Rename: one cooked line on the status row, then raw again. */
+static void
+pk_rename(struct pk *p, int fd, const struct pkrow *w)
+{
+	char q[700], in[600], pos[32], *c;
+
+	snprintf(pos, sizeof pos, "\033[%d;1H", p->status_row);
+	tw(fd, pos);
+	snprintf(q, sizeof q, "new name for %s (empty clears): ", w->title);
+	if (prompt_line(fd, q, in, sizeof in) == 0)
+	{
+		for (c = in; *c; c++)
+			if ((unsigned char)*c < 0x20 || *c == 0x7f)
+				*c = ' ';
+		if (write_alias(w->name, in) < 0)
+			snprintf(p->status, sizeof p->status, "%s: rename failed",
+			         w->name);
+		else
+			snprintf(p->status, sizeof p->status, in[0]
+			         ? "%s renamed" : "%s: alias cleared", w->name);
+	}
+	picker_raw_on(fd);
+	pk_pn = 0;	/* the prompt drew over the frame: all of it again */
+	p->loaded = 0;
+}
+
+/* The first free <name>-2, -3, ... when name is live; "" when it is not. */
+static void
+pk_free_name(const struct pk *p, const char *name, char *as, size_t asz)
+{
+	int k, j;
+
+	as[0] = '\0';
+	if (!name_live(name))
+		return;
+	for (k = 2; k < 1000; k++)
+	{
+		snprintf(as, asz, "%s-%d", name, k);
+		for (j = 0; j < p->n[2] && strcmp(p->r[2][j].sname, as); j++)
+			;
+		if (j == p->n[2] && !name_live(as))
+			return;
+	}
+}
+
+/* One key. 1: out holds the session to attach; -1: quit; 0: go on. */
+static int
+pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
+{
+	int t = p->tab, *sel = &p->sel[t], k;
+	const struct pkrow *w = *sel < p->n[t] ? &p->r[t][*sel] : NULL;
+	char d[800], f[620], as[600];
+	const char *nm;
+
+	if (p->asking)
+	{
+		p->asking = 0;
+		if (c == 'y' || c == 'Y')
+			pk_start(p, &p->ask);
+		else
+			snprintf(p->status, sizeof p->status, "cancelled");
+		return 0;
+	}
+	switch (c)
+	{
+	case 'q': case 3: case 4: case PK_ESC:
+		return -1;
+	case 'j': case PK_DOWN:
+		*sel += *sel < p->n[t] - 1;
+		return 0;
+	case 'k': case PK_UP:
+		*sel -= *sel > 0;
+		return 0;
+	case PK_PGDN:
+		*sel = *sel + p->win < p->n[t] ? *sel + p->win : p->n[t] - 1;
+		return 0;
+	case PK_PGUP:
+		*sel = *sel > p->win ? *sel - p->win : 0;
+		return 0;
+	case 'g': case PK_HOME:
+		*sel = 0;
+		return 0;
+	case 'G': case PK_END:
+		*sel = p->n[t] - 1;
+		return 0;
+	case '\t': case 'l': case PK_RIGHT:
+	case PK_BTAB: case 'h': case PK_LEFT:
+		k = c == '\t' || c == 'l' || c == PK_RIGHT ? 1 : 2;
+		do
+			t = (t + k) % 3;
+		while (!pk_shown(p, t));
+		p->tab = t;
+		return 0;
+	case 's':
+		if (t < 2)
+		{
+			char names[3][600];
+
+			pk_selnames(p, names);
+			p->byname = !p->byname;
+			pk_sort(p, names);
+		}
+		return 0;
+	}
+	if (c != '\r' && c != '\n' && c != 'r' && c > 0 && c < 256 &&
+	    strchr("RSxabBmIpd", c) && p->pid > 0)
+	{
+		snprintf(p->status, sizeof p->status, "busy, one at a time");
+		return 0;
+	}
+	if (t < 2 && (c == 'b' || c == 'B'))
+	{
+		pk_act(&p->ask, t, "", c == 'b' ? "restarting stale agents"
+		       : "restarting all agents", "--restart", "--all",
+		       "--include-agents", c == 'B' ? "-f" : NULL, NULL);
+		pk_ask(p, c == 'b' ? "Restart stale agents? Each pauses for up "
+		       "to minutes.%s" : "Restart all agents (force)? Each "
+		       "pauses for up to minutes.%s", "");
+		return 0;
+	}
+	if (t == 2 && c == 'I')
+	{
+		if (!p->interrupted)
+			snprintf(p->status, sizeof p->status, "nothing "
+			         "interrupted to resume");
+		else
+		{
+			snprintf(d, sizeof d, "%d", p->interrupted);
+			pk_act(&p->ask, 2, "", "resuming interrupted",
+			       "--revive", "--all", NULL);
+			pk_ask(p, "Resume interrupted (%s)?", d);
+		}
+		return 0;
+	}
+	if (!w || (c > 0 && c < 256 && !strchr("\r\nrRSxapmd", c)))
+		return 0;
+	/* dch would read a name that starts with '-' as a flag */
+	if (w->name[0] == '-')
+	{
+		snprintf(p->status, sizeof p->status, "%s: a name starting "
+		         "with '-' needs the command line", w->name);
+		return 0;
+	}
+	if (t < 2)
+		switch (c)
+		{
+		case '\r': case '\n':
+			if (!name_live(w->name))
+			{
+				snprintf(p->status, sizeof p->status,
+				         "%s: no longer there", w->title);
+				p->loaded = 0;
+				return 0;
+			}
+			snprintf(out, outsz, "%s", w->name);
+			return 1;
+		case 'r':
+			pk_rename(p, fd, w);
+			return 0;
+		case 'R':
+			snprintf(d, sizeof d, "restarting %s", w->title);
+			pk_act(&p->ask, t, w->name, d, "--restart", w->name,
+			       "--include-agents", "-f", NULL);
+			pk_ask(p, "Restart the agent in %s?", w->title);
+			return 0;
+		case 'S':
+			snprintf(d, sizeof d, "stopping %s", w->title);
+			pk_act(&p->ask, t, w->name, d, "--stop", w->name, NULL);
+			pk_ask(p, "Stop %s? Claude Code exits; resume it from "
+			       "History.", w->title);
+			return 0;
+		case 'x':
+			snprintf(d, sizeof d, "killing %s", w->title);
+			pk_act(&p->ask, t, w->name, d, "-k", w->name, NULL);
+			pk_ask(p, "Kill %s?", w->title);
+			return 0;
+		case 'a':
+			if (strcmp(w->state, "blocked") != 0)
+			{
+				snprintf(p->status, sizeof p->status, "%s is not "
+				         "waiting for input", w->title);
+				return 0;
+			}
+			snprintf(d, sizeof d, "allowing %s", w->title);
+			pk_act(&p->ask, t, w->name, d, "--keys", w->name, "1",
+			       NULL);
+			pk_ask(p, "Allow %s's prompt (presses 1, Yes)?", w->title);
+			return 0;
+		}
+	if (t < 2)
+		return 0;
+	snprintf(f, sizeof f, "%s.json", w->name);	/* this one record */
+	switch (c)
+	{
+	case '\r': case '\n': case 'm':
+		pk_free_name(p, w->sname, as, sizeof as);
+		nm = c == 'm' ? "--no-message" : NULL;
+		snprintf(d, sizeof d, "resuming %s", w->title);
+		if (as[0])
+			pk_act(&p->ask, 2, w->name, d, "--revive", f, "--as", as,
+			       "--json", nm, NULL);
+		else
+			pk_act(&p->ask, 2, w->name, d, "--revive", f, "--json", nm,
+			       NULL);
+		p->ask.revive = 1;
+		p->ask.nomsg = c == 'm';
+		pk_start(p, &p->ask);
+		return 0;
+	case 'p':
+		snprintf(d, sizeof d, "%s %s", w->pinned ? "unpinning"
+		         : "pinning", w->title);
+		pk_act(&p->ask, 2, w->name, d, w->pinned ? "--unpin" : "--pin",
+		       f, NULL);
+		pk_start(p, &p->ask);
+		return 0;
+	case 'd':
+		if (w->pinned)
+		{
+			snprintf(p->status, sizeof p->status, "%s is pinned; "
+			         "unpin it first", w->title);
+			return 0;
+		}
+		snprintf(d, sizeof d, "removing %s", w->title);
+		pk_act(&p->ask, 2, w->name, d, "--forget", f, NULL);
+		pk_ask(p, "Remove %s from History?", w->title);
+		return 0;
+	}
+	return 0;
+}
+
+/* Input on fd within ms? select, not poll: macOS poll() answers POLLNVAL
+** for a tty. -1 when a signal (a resize) cut it short. */
+static int
+pk_wait(int fd, long ms)
+{
+	struct timeval tv = { ms / 1000, (int)(ms % 1000) * 1000 };
+	fd_set rs;
+
+	FD_ZERO(&rs);
+	FD_SET(fd, &rs);
+	return select(fd + 1, &rs, NULL, NULL, &tv);
+}
+
+/* Is another byte of an escape sequence there within 50ms? */
+static int
+pk_more(int fd)
+{
+	return pk_wait(fd, 50) > 0;
+}
+
+static int
+pk_rd(int fd, unsigned char *c)
+{
+	ssize_t r;
+
+	do
+		r = read(fd, c, 1);
+	while (r < 0 && errno == EINTR);
+	return r == 1 ? 0 : -1;
+}
+
+/* The next key: a byte, PK_* for a sequence we know, 0 for one we do not,
+** -1 at the end of input. */
+static int
+pk_key(int fd)
+{
+	unsigned char c, s[16];
+	int n = 0;
+
+	if (pk_rd(fd, &c) < 0)
+		return -1;
+	if (c != 27)
+		return c;
+	if (!pk_more(fd) || pk_rd(fd, &c) < 0)
+		return PK_ESC;
+	if (c != '[' && c != 'O')
+		return 0;
+	while (n < (int)sizeof s && pk_more(fd) && pk_rd(fd, &s[n]) == 0)
+		if (s[n++] >= 0x40)	/* the final byte */
+			break;
+	if (!n)
+		return 0;
+	switch (s[n - 1])
+	{
+	case 'A': return PK_UP;
+	case 'B': return PK_DOWN;
+	case 'C': return PK_RIGHT;
+	case 'D': return PK_LEFT;
+	case 'Z': return PK_BTAB;
+	case 'H': return PK_HOME;
+	case 'F': return PK_END;
+	case '~':
+		return s[0] == '5' ? PK_PGUP : s[0] == '6' ? PK_PGDN
+		       : s[0] == '1' || s[0] == '7' ? PK_HOME
+		       : s[0] == '4' || s[0] == '8' ? PK_END : 0;
+	}
+	return 0;
+}
+
+static int
+pick_session(const char *header, char *out, size_t outsz)
+{
+	struct sigaction sa, owinch;
+	struct pk p;
+	const char *nc = getenv("NO_COLOR"), *term = getenv("TERM");
+	int fd = open("/dev/tty", O_RDWR | O_CLOEXEC), rc = 1, k;
+
+	if (fd < 0)
+	{
+		/* Headless: list names so the caller can still see them. */
+		struct slist sl = {0};
+
+		list_sessions(&sl);
+		if (!sl.n)
+			fprintf(stderr, "no sessions\n");
+		load_aliases(&sl);
+		load_harness_names(&sl);
+		load_codex_names(&sl);
+		slist_sort(&sl);
+		for (k = 0; k < sl.n; k++)
+		{
+			char row[1300];
+
+			session_display_name(&sl, k, row, sizeof(row));
+			puts(row);
+		}
+		slist_free(&sl);
+		return 1;
+	}
+	memset(&p, 0, sizeof p);
+	p.pid = -1;
+	p.color = !(nc && *nc) && term && *term && strcmp(term, "dumb") != 0;
+	pk_load(&p);
+	p.loaded = pk_ms();
+	if (!p.n[0] && !p.n[1] && !p.n[2])
+	{
+		fprintf(stderr, "no sessions\n");
+		close(fd);
+		goto done;
+	}
+	p.tab = p.n[0] ? 0 : p.n[1] ? 1 : 2;
+	if (tcgetattr(fd, &picker_saved_term) < 0)
+	{
+		close(fd);
+		goto done;
+	}
+	picker_tty_fd = fd;
+	picker_term_saved = 1;
+	signal(SIGINT, picker_sigint);
+	signal(SIGTERM, picker_sigint);
+	signal(SIGHUP, picker_sigint);
+	/* no SA_RESTART: a resize wakes the poll below at once */
+	memset(&sa, 0, sizeof sa);
+	sa.sa_handler = pk_on_winch;
+	sigemptyset(&sa.sa_mask);
+	sigaction(SIGWINCH, &sa, &owinch);
+	picker_raw_on(fd);
+	picker_alt = 1;
+	tw(fd, "\033[?1049h\033[?7l\033[H\033[2J");
+	pk_pn = 0;
+	for (;;)
+	{
+		long wait;
+		int c, force = pk_winch;
+
+		pk_winch = 0;
+		if (pk_ms() - p.loaded >= 1000)
+		{
+			pk_load(&p);
+			p.loaded = pk_ms();
+			if (!pk_shown(&p, p.tab))
+				p.tab = 0;
+		}
+		pk_draw(&p, fd, header, force);
+		wait = 1000 - (pk_ms() - p.loaded);
+		if (p.pid > 0 && wait > 100)
+			wait = 100;	/* the running action's end shows soon */
+		k = pk_wait(fd, wait < 10 ? 10 : wait);
+		pk_reap(&p);
+		if (k <= 0)
+			continue;	/* the tick, or a resize */
+		if ((c = pk_key(fd)) < 0)
+			break;
+		if ((k = pk_do(&p, fd, c, out, outsz)))
+		{
+			rc = k > 0 ? 0 : 1;
+			break;
+		}
+	}
+	picker_restore();
+	signal(SIGINT, SIG_DFL);
+	signal(SIGTERM, SIG_DFL);
+	signal(SIGHUP, SIG_DFL);
+	sigaction(SIGWINCH, &owinch, NULL);
+done:
+	/* an action still running carries on; only its result goes unread */
+	if (p.out)
+		fclose(p.out);
+	for (k = 0; k < 3; k++)
+		free(p.r[k]);
+	return rc;
 }
 
 /* v[0..n) as one shell command line, each word quoted when it needs it. */

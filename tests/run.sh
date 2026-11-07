@@ -154,8 +154,10 @@ fi
 
 if [ "$MIRROR" = "1" ]; then
     pyrun "double-tap detach opens the session picker" switch_test.py
+    pyrun "session picker: tabs, sort, actions, history, color, width" picker_test.py
 else
     skipmirror "double-tap detach opens the session picker"
+    skipmirror "session picker: tabs, sort, actions, history, color, width"
 fi
 
 # --- attach replays the mirrored screen (blank-attach regression) -----------

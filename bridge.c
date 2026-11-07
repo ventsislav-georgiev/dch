@@ -2469,6 +2469,57 @@ int dch_process_start(long pid, char *out, size_t cap) {
   return process_start(pid, out, cap);
 }
 
+/* A --meta object's "prs" (README) for the picker: the open PRs as
+   space-separated "owner/repo#N" labels into out[cap] (repo + num, else a
+   github pull url; a label that does not fit is left out), *merged the
+   merged count or 0. The number of open PRs, -1 when meta does not parse. */
+int dch_meta_prs(const char *json, char *out, size_t cap, long *merged) {
+  struct json_parser p;
+  int prs, f, i, n = 0;
+  size_t len = 0;
+  *merged = 0;
+  out[0] = '\0';
+  if (json_parse(&p, json) < 0) {
+    json_free(&p);
+    return -1;
+  }
+  if ((prs = json_field(&p, 0, "prs")) < 0 || p.tok[prs].kind != JSON_OBJECT)
+    goto out;
+  if ((f = json_field(&p, prs, "merged")) >= 0 &&
+      p.tok[f].kind == JSON_PRIMITIVE)
+    *merged = strtol(p.text + p.tok[f].start, NULL, 10);
+  if ((f = json_field(&p, prs, "open")) < 0 || p.tok[f].kind != JSON_ARRAY)
+    goto out;
+  for (i = f + 1; i < p.tok[f].next; i = p.tok[i].next) {
+    char repo[160] = "", url[300] = "", lab[480];
+    const char *pull;
+    long num = 0;
+    int t;
+    if (p.tok[i].kind != JSON_OBJECT)
+      continue;
+    n++;
+    (void)json_decode(&p, json_field(&p, i, "repo"), repo, sizeof repo);
+    (void)json_decode(&p, json_field(&p, i, "url"), url, sizeof url);
+    if ((t = json_field(&p, i, "num")) >= 0 && p.tok[t].kind == JSON_PRIMITIVE)
+      num = strtol(p.text + p.tok[t].start, NULL, 10);
+    pull = strstr(url, "/pull/");
+    if (repo[0] && num > 0)
+      snprintf(lab, sizeof lab, "%s#%ld", repo, num);
+    else if (!strncmp(url, "https://github.com/", 19) && pull &&
+             pull - url > 19)
+      snprintf(lab, sizeof lab, "%.*s#%s", (int)(pull - url - 19), url + 19,
+               pull + 6);
+    else
+      continue;
+    if (len + strlen(lab) + 2 > cap)
+      continue;
+    len += (size_t)snprintf(out + len, cap - len, "%s%s", len ? " " : "", lab);
+  }
+out:
+  json_free(&p);
+  return n;
+}
+
 #ifdef DCH_BRIDGE_SELFTEST
 char *sockname;
 int dch_pty_gate(const char *path) {
