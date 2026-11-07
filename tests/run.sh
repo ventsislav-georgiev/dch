@@ -604,6 +604,20 @@ assert any(s["state"] == "blocked" for s in d), d
         check "footer quoted mid-sentence does not block" \
               "$("$DCH" --status "$DN" 2>/dev/null)" "idle"
 
+        # Claude Code's footer runs to the screen width while background
+        # agents run; the permission footer still matches.
+        paint c6 ' Edit file\n Do you want to make this edit to foo.py?\n \342\235\257 1. Yes\n   3. No\n Esc to cancel \302\267 Tab to amend \302\267 ctrl+x ctrl+k twice to stop background agents'
+        stale
+        check "long permission footer is blocked" \
+              "$("$DCH" --status "$DN" 2>/dev/null)" "blocked"
+
+        # with the composer on screen, a prompt phrase above it is
+        # transcript (a reply quoting it), not a prompt (Prosper #757)
+        paint c7 '  The prompt reads \342\200\234Do you want to proceed?\342\200\235 with Yes / No.\n\n\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\n\342\235\257 \n\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\n  ctrl+x ctrl+k twice to stop background agents\n\342\217\272 main\n\342\227\257 worker  #1 task'
+        stale
+        check "prompt phrase above the composer does not block" \
+              "$("$DCH" --status "$DN" 2>/dev/null)" "idle"
+
         paint c3 'Do you want to create a file?'
         stale
         check "prose 'do you want to create' does not block" \

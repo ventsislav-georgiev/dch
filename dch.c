@@ -2835,10 +2835,6 @@ static const struct det_rule det_working[] = {
 	{ "ctrl+c to interrupt", 0 },                      /* opencode      */
 };
 
-/* Longest footer line a line rule accepts, blanks trimmed (bytes;
-** the real one with its optional extra hints is ~50). */
-#define DET_LINE_MAX 64
-
 /* Line rule r ('^' s1) against the lines of hay. */
 static int
 det_line(const struct det_rule *r, const char *hay)
@@ -2856,8 +2852,7 @@ det_line(const struct det_rule *r, const char *hay)
 		while (q > p && (q[-1] == ' ' || q[-1] == '\t' ||
 		                 q[-1] == '\r'))
 			q--;
-		if (q - p <= DET_LINE_MAX &&
-		    !strncmp(p, s1, strlen(s1)))
+		if (!strncmp(p, s1, strlen(s1)))
 			for (q = p; q < e; q++)
 				if (!strncmp(q, r->s2, strlen(r->s2)))
 					return 1;
@@ -3004,6 +2999,22 @@ screen_tail(const char *path, int *novt)
 	return fold;
 }
 
+static char *composer_find(char *txt, char **end);
+
+/* A blocker phrase on folded screen text. Claude Code's composer gives
+** way to a live prompt or form, so with a composer on screen only the
+** rows below it count: text above it is transcript, and a reply quoting
+** "Do you want to proceed?" is not a prompt. No composer (a dialog,
+** another harness): the whole text counts. */
+static int
+det_blocker(char *fold)
+{
+	char *end, *from = composer_find(fold, &end) ? end : fold;
+
+	return det_match(det_blocked,
+	                 sizeof(det_blocked) / sizeof(det_blocked[0]), from);
+}
+
 /* Classify the visible screen: "blocked", "working", or NULL (no signal
 ** or no screen — caller falls back). Detected "working" additionally
 ** requires recent pty output: the covered harnesses animate their
@@ -3025,9 +3036,7 @@ detect_state(const char *name)
 	if (det_match(det_suppress,
 	              sizeof(det_suppress) / sizeof(det_suppress[0]), fold))
 		res = NULL;
-	else if (det_match(det_blocked,
-	                   sizeof(det_blocked) / sizeof(det_blocked[0]),
-	                   fold))
+	else if (det_blocker(fold))
 		res = "blocked";
 	else if (det_match(det_working,
 	                   sizeof(det_working) / sizeof(det_working[0]),
@@ -3120,8 +3129,7 @@ dch_pty_gate(const char *path)
 		return novt ? -1 : 2;
 	if (det_match(det_suppress,
 	              sizeof(det_suppress) / sizeof(det_suppress[0]), fold) ||
-	    det_match(det_blocked,
-	              sizeof(det_blocked) / sizeof(det_blocked[0]), fold))
+	    det_blocker(fold))
 		res = 0;
 	else
 		res = strstr(fold, "ask codex to do anything") ||
@@ -4787,8 +4795,7 @@ screen_modal(const char *txt)
 
 	if (fold && (det_match(det_suppress, sizeof(det_suppress) /
 	                       sizeof(det_suppress[0]), fold) ||
-	             det_match(det_blocked, sizeof(det_blocked) /
-	                       sizeof(det_blocked[0]), fold)))
+	             det_blocker(fold)))
 		res = CG_DIALOG;
 	else if (fold && (strstr(fold, "press up to edit queued messages") ||
 	                  strstr(fold, "ctrl+enter to send now")))
