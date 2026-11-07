@@ -8,7 +8,11 @@ comments and other lines, --unset, unknown key, bad bool); auto_allow off
 answers nothing; on answers "1" once, never the "don't ask again" row, and
 --ls-json shows auto_allowed {at,title}; prompts outside Prosper's rule are
 left alone (a "don't ask again" Yes only, four options, a mode-change row,
-another question, a question form, a quoted dialog above the composer);
+another question, a question form, a quoted dialog above the composer,
+a hook's ask on single rows or wrapped mid-word, a hook's "to update hooks"
+footer, a permission rule with or without its "/permissions" line, an ask
+rule in auto mode, one wrapped mid-word, #790), while a working-directory
+reason over "/permissions to update rules" and a classifier ask are answered;
 the loop guard (the prompt left up, and gone and back, is answered once);
 a curly apostrophe in "don’t ask again" (#783); Claude Code's ticking
 countdown line, one row or wrapped, answered once while a near-miss
@@ -53,6 +57,12 @@ def ticking(t, tail="", wrap=False):
     q = rows.index(" Do you want to proceed?")
     return rows[:q - 1] + w.split("\n") + rows[q:]
 BASH3 = dialog(["Yes", DONT, NO])
+HOOK = ("   rm -rf build",
+        "   Hook PreToolUse:Bash requires confirmation for this command:",
+        "   rm needs a human", "   [~/.claude/hooks/guard.sh]")
+PRULE = ("   rm -rf build",
+         "   Permission rule Bash(rm:*) requires confirmation for this "
+         "command.", "   /permissions to update rules")
 OTHER = dialog(["Yes", NO], body=("   swift build", "   Build it"))
 
 
@@ -243,6 +253,23 @@ def main():
         check("a curly \u2019 in \"don\u2019t ask again\": answered with 1",
               until(lambda: keys(cu) == ["1"], 5))
 
+        # --- not ask rules (#790): a working-directory reason with
+        # "/permissions to update rules", a classifier ask: answered
+        for nm, body in (("a working-directory reason over \"/permissions "
+                          "to update rules\"", (
+                              "   rm -rf build", "   Path is outside the "
+                              "allowed working directories",
+                              "   /permissions to update rules")),
+                         ("a classifier ask", (
+                              "   rm -rf build", "   Classifier bash_safety "
+                              "requires confirmation for this command.",
+                              "   Auto mode needs your confirmation for "
+                              "this action"))):
+            n = sess("nothook%d" % len(names))
+            show(n, dialog(["Yes", NO], body=body))
+            check("%s: answered with 1" % nm,
+                  until(lambda: keys(n) == ["1"], 5))
+
         # --- the ticking countdown (#784): one prompt, not one a second --
         # each left up (sticky) and redrawn with a new M:SS every ~1 s; a
         # near-miss wording (trailing text) still compares literally
@@ -280,6 +307,28 @@ def main():
                                 "Do you want to proceed?", "",
                                 "❯ 1. Yes", "  2. No"],
             "Yes/No not the last thing on screen": BASH2 + ["$ "],
+            # a hook's ask (Prosper #790): the "Hook … requires
+            # confirmation for this" line alone, wrapped mid-word, and
+            # only the "… to update hooks" footer
+            "a hook ask": dialog(["Yes", NO], body=HOOK),
+            "a hook ask wrapped mid-word": dialog(["Yes", NO], body=(
+                HOOK[0], "   Hook PreToolUse:Bash requires confirma",
+                "   tion for this command:") + HOOK[2:]),
+            "a hook's update-hooks footer": dialog(["Yes", NO], body=(
+                "   rm -rf build", "   settings.json to update hooks")),
+            # an ask rule: a permission rule, with and without its
+            # "/permissions to update rules" line (managed policy draws
+            # none), auto mode's, and one wrapped mid-word
+            "a permission rule": dialog(["Yes", NO], body=PRULE),
+            "a permission rule, no /permissions line": dialog(
+                ["Yes", NO], body=PRULE[:2]),
+            "an ask rule in auto mode": dialog(["Yes", NO], body=(
+                "   rm -rf build", "   Ask rule Bash(rm:*) overrides auto "
+                "mode for this command.",
+                "   /permissions to let auto mode decide")),
+            "an ask rule wrapped mid-word": dialog(["Yes", NO], body=(
+                "   rm -rf build", "   Ask rule Bash(rm:*) overrides auto mo",
+                "   de for this command.")),
         }
         ss = {}
         for k, (name, rows) in enumerate(alone.items()):

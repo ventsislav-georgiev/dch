@@ -599,7 +599,9 @@ rules, its "Esc to cancel" footer and Claude Code's session-title rule), and
 the screen must read `blocked` as `--status` reads it, so a dialog quoted in
 the transcript above the composer is never answered. Plan approvals, trust and
 edit dialogs, question forms, pickers, four options, a "don't ask again"-only
-Yes: all left to you. As in Prosper, a dialog whose head scrolled off the top
+Yes: all left to you. Hook- or ask-rule-raised prompts ("Hook … requires
+confirmation for this command", "Permission rule … requires confirmation for
+this …", "Ask rule … overrides auto mode for this …") are always left to you. As in Prosper, a dialog whose head scrolled off the top
 (a long heredoc) and one with hidden characters are still answered: Always
 allow approves any plain permission prompt, whatever the command.
 
