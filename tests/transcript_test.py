@@ -59,6 +59,7 @@ def main():
                 os.path.join(bindir, "claude"))
     p = os.path.join(bindir, "claude")
     os.chmod(p, os.stat(p).st_mode | stat.S_IXUSR)
+    no_budget = os.environ.get("DCH_TEST_NO_BUDGET")  # before the scrub
     for k in list(os.environ):
         if k.startswith("CLAUDE") or k.startswith("DCH_"):
             del os.environ[k]
@@ -220,7 +221,7 @@ def main():
               and field(a, "transcript_path") is None)
 
         # --- budget: the scan stays cheap ---------------------------------
-        if not os.environ.get("DCH_TEST_NO_BUDGET"):
+        if not no_budget:
             t0 = time.time()
             for _ in range(20):
                 rows()
