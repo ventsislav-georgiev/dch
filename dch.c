@@ -147,6 +147,74 @@ run_capture(const char *cmd, char *out, size_t outsz)
 	return out[0] ? 0 : -1;
 }
 
+/* The user config: $DCH_CONFIG, else $XDG_CONFIG_HOME/dch/config, else
+** ~/.config/dch/config. Into out[cap]; 0 when no path can be formed. */
+int
+dch_config_path(char *out, size_t cap)
+{
+	const char *e = getenv("DCH_CONFIG"), *x = getenv("XDG_CONFIG_HOME"),
+	           *h = getenv("HOME");
+
+	if (e && *e)
+		return snprintf(out, cap, "%s", e) < (int)cap;
+	if (x && *x)
+		return snprintf(out, cap, "%s/dch/config", x) < (int)cap;
+	return h && *h && snprintf(out, cap, "%s/.config/dch/config", h) <
+	                  (int)cap;
+}
+
+/* Value of `key` in the config ("key = value" lines, '#' comments, blanks
+** around both trimmed, last one wins) into out[cap]. 1 when set, else 0.
+** Read fresh on every call: the file is tiny, and an edit (by hand,
+** `dch --config`, or Prosper) takes effect on the next read. */
+int
+dch_config_get(const char *key, char *out, size_t cap)
+{
+	char path[1024], line[1024];
+	size_t kl = strlen(key);
+	int found = 0;
+	FILE *f;
+
+	if (!dch_config_path(path, sizeof(path)) || !(f = fopen(path, "r")))
+		return 0;
+	while (fgets(line, sizeof(line), f))
+	{
+		char *p = line, *v, *e;
+
+		while (*p == ' ' || *p == '\t')
+			p++;
+		if (strncmp(p, key, kl))
+			continue;
+		v = p + kl;
+		while (*v == ' ' || *v == '\t')
+			v++;
+		if (*v++ != '=')
+			continue;
+		while (*v == ' ' || *v == '\t')
+			v++;
+		e = v + strlen(v);
+		while (e > v && (e[-1] == '\n' || e[-1] == '\r' ||
+		                 e[-1] == ' ' || e[-1] == '\t'))
+			e--;
+		*e = '\0';
+		snprintf(out, cap, "%s", v);
+		found = 1;
+	}
+	fclose(f);
+	return found;
+}
+
+/* A boolean config key: "true"/"1"/"yes"/"on" is 1, anything else 0. */
+int
+dch_config_bool(const char *key)
+{
+	char v[16];
+
+	return dch_config_get(key, v, sizeof(v)) &&
+	       (!strcasecmp(v, "true") || !strcmp(v, "1") ||
+	        !strcasecmp(v, "yes") || !strcasecmp(v, "on"));
+}
+
 /* SOCK_DIR = $DCH_SOCKET_DIR, else $XDG_RUNTIME_DIR/dch-$UID, fallback
 ** /tmp/dch-$UID. mkdir 0700. DCH_SOCKET_DIR (when set) is used verbatim — a host
 ** process (e.g. a GUI app spawning sessions) can pin one deterministic dir so it

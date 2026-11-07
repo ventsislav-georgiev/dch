@@ -284,6 +284,10 @@ int dch_claude_gone(const char *rec);
 int path_lookup(const char *name, const char *path, const char *cwd,
                 char *out, size_t outsz);
 
+int dch_config_path(char *out, size_t cap);
+int dch_config_get(const char *key, char *out, size_t cap);
+int dch_config_bool(const char *key);
+
 int attach_main(int noerror);
 int master_main(char **argv, int waitattach, int dontfork);
 int push_main(void);
