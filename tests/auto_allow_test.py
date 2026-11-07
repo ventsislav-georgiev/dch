@@ -145,7 +145,7 @@ def main():
         r = run("--config")
         check("--config with no file: the path, then the defaults",
               r.returncode == 0 and r.stdout.splitlines() ==
-              [cfg, "auto_allow = false", "sidekick_pattern = "])
+              [cfg, "auto_allow = false", "sidekick_pattern = -qa"])
         r = run("--config", "auto_allow")
         check("--config <key> unset: exit 1, nothing printed, no error",
               r.returncode == 1 and r.stdout == r.stderr == "")

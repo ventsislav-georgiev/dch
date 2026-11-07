@@ -221,9 +221,10 @@ static const struct
 {
 	const char *key;
 	int is_bool;
+	const char *def;		/* the value when the key is not set */
 } config_keys[] = {
-	{ "auto_allow", 1 },		/* the master answers permission prompts */
-	{ "sidekick_pattern", 0 },	/* the picker's sidekick sessions */
+	{ "auto_allow", 1, "false" },	/* the master answers permission prompts */
+	{ "sidekick_pattern", 0, "-qa" },	/* the picker's sidekick sessions */
 };
 
 static int
@@ -269,7 +270,7 @@ config_main(int argc, char **argv)
 			else
 				printf("%s = %s\n", config_keys[i].key,
 				       dch_config_get(config_keys[i].key, v,
-				                      sizeof v) ? v : "");
+				                      sizeof v) ? v : config_keys[i].def);
 		return 0;
 	}
 	for (k = 0; k < sizeof config_keys / sizeof *config_keys; k++)
