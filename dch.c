@@ -3199,7 +3199,8 @@ det_blocker(char *fold)
 ** allowYes, isDontAskAgain): the master answers "1" into a prompt that is
 ** exactly Claude Code's "Do you want to proceed?" over "Yes", at most one
 ** "Yes, and don't ask again …" (never picked: it writes the user's
-** settings) and a last "No…"; nothing else. The parse reads the plain
+** settings; a curly ‘ or ’ reads as "'", #783) and a last "No…"; nothing
+** else. The parse reads the plain
 ** screen bottom-up: the bottom-most numbered option, walked up through 1
 ** (at most AP_GAP other lines between two), exactly one "❯" caret, no
 ** checkboxes, the dialog the last thing on the screen (below it only rules
@@ -3496,17 +3497,49 @@ ap_title_rule(const char *t, int width)
 	return cells + AP_SLACK >= width;
 }
 
+/* Claude Code's ticking "⚠ Claude Code will automatically block this
+** request in 1:35, to avoid holding up an unattended session" over the
+** question (Prosper #784): its M:SS becomes "m:ss" in s, in place, only
+** where whole lines read exactly that (words split by spaces or wraps), so
+** the loop guard sees one prompt, not a new one each second. */
+static void
+ap_countdown(char *s)
+{
+	static regex_t re;
+	static int st;		/* 0 not compiled yet, 1 ok, -1 failed */
+	regmatch_t m[4];
+	int fl = 0;
+	char *d, *t;
+
+	if (!st)
+		st = regcomp(&re, "^( *\xe2\x9a\xa0(\xef\xb8\x8f)?[ \n]+Claude"
+		    "[ \n]+Code[ \n]+will[ \n]+automatically[ \n]+block[ \n]+this"
+		    "[ \n]+request[ \n]+in[ \n]+)[0-9]{1,2}:[0-9]{2}(,[ \n]+to"
+		    "[ \n]+avoid[ \n]+holding[ \n]+up[ \n]+an[ \n]+unattended"
+		    "[ \n]+session)$", REG_EXTENDED | REG_NEWLINE) ? -1 : 1;
+	while (st > 0 && regexec(&re, s, 4, m, fl) == 0)
+	{
+		d = s + m[1].rm_eo;
+		t = s + m[3].rm_so;
+		memcpy(d, "m:ss", 4);	/* "M:SS" or "MM:SS": never longer */
+		memmove(d + 4, t, strlen(t) + 1);
+		s = d + 4 + (m[3].rm_eo - m[3].rm_so);
+		fl = REG_NOTBOL;
+	}
+}
+
 /* Is the screen (plain text, rows by '\n') showing a Claude Code
 ** permission prompt the auto-allow rule may answer with "1"? 1 with
 ** *ident (the whole dialog: question, context, options and their detail,
-** the caret aside: the loop guard compares it) and *title (its first line,
+** the caret aside, a countdown masked (ap_countdown): the loop guard
+** compares it) and *title (its first line,
 ** e.g. "Bash command"), both malloc'd; else 0. The screen must also read
 ** blocked as --status reads it (det_blocker: under a composer only). */
 int
 dch_allow_prompt(const char *screen, char **ident, char **title)
 {
 	struct ap_screen s = { 0, 0, NULL, NULL };
-	char *buf, *p, *lab[9], *lb, word[512], sq[1024];
+	char *buf, *p, *lab[9], *lb, word[512], sq[1024], *ctx = NULL;
 	const char *h;
 	int ro[9], hi[9], li[9], nf = 0, carets = 0, ok = 0;
 	int i, j, k, d, c, col, last = -1, tail, gap, seen, end, a1 = -1, a2 = -1;
@@ -3662,6 +3695,9 @@ dch_allow_prompt(const char *screen, char **ident, char **title)
 			while (*t && n + 1 < sizeof sq)
 				if ((c = ap_ws(t)))
 					t += c;
+				else if (!strncmp(t, "\xe2\x80\x98", 3) ||
+				         !strncmp(t, "\xe2\x80\x99", 3))
+					sq[n++] = '\'', t += 3;	/* ‘ ’ */
 				else
 					sq[n++] = *t++;
 		}
@@ -3670,12 +3706,19 @@ dch_allow_prompt(const char *screen, char **ident, char **title)
 		    strstr(sq, "(shift+tab)"))
 			goto out;
 	}
-	/* identity: question and context, then the options with detail */
-	if (!(f = open_memstream(ident, &tl)))
+	/* identity: context and question (a countdown masked), then the
+	** options with detail */
+	if (!(f = open_memstream(&ctx, &tl)))
 		goto out;
 	for (k = j + 1; k <= i; k++)
 		if (!ap_frame(&s, k))
 			fprintf(f, "%s\n", s.ln[k]);
+	if (fclose(f) != 0)
+		goto out;
+	ap_countdown(ctx);
+	if (!(f = open_memstream(ident, &tl)))
+		goto out;
+	fputs(ctx, f);
 	for (k = nf - 1; k >= 0; k--)
 	{
 		fprintf(f, "%d. %s\n", li[k], lab[k]);
@@ -3700,6 +3743,7 @@ out:
 	free(s.ln);
 	free(s.raw);
 	free(buf);
+	free(ctx);
 	return ok;
 }
 

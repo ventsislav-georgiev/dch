@@ -593,8 +593,8 @@ Prosper. Only exactly this shape is answered:
 
 The question is exactly "Do you want to proceed?", option 1 a bare `Yes`, the
 last option a `No…`, neither with wrapped lines, and between them at most one
-"Yes, and don't ask again …" row — never one that changes the permission mode
-(`(shift+tab)`). The dialog must be the last thing on the screen (below it only
+"Yes, and don't ask again …" row (a curly `’` counts as `'`) — never one that
+changes the permission mode (`(shift+tab)`). The dialog must be the last thing on the screen (below it only
 rules, its "Esc to cancel" footer and Claude Code's session-title rule), and
 the screen must read `blocked` as `--status` reads it, so a dialog quoted in
 the transcript above the composer is never answered. Plan approvals, trust and
@@ -607,7 +607,8 @@ The master checks once its program has been quiet for 300 ms after output
 (at most 2 s into output that never pauses) and again 2 s after an answer, and
 only answers when a Claude Code runs under the session's program. The loop
 guard: a prompt it answered is never answered again while it stays up, nor
-within 30 s once gone and back — that one is yours. Each answer is reported as
+within 30 s once gone and back — that one is yours. Claude Code's ticking "⚠ Claude Code
+will automatically block this request in M:SS, …" line counts as the same prompt. Each answer is reported as
 `auto_allowed` in `--ls-json` (`<sock>.allowed` next to the socket). Needs the
 terminal mirror: not in dch-lite or under `DCH_NO_VT`; `DCH_NO_DETECT=1` in
 the master's environment turns it off too.
