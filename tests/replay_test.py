@@ -79,9 +79,16 @@ def attach_sees_marker(sess, env):
     pid_b = None
     try:
         if not session_has_marker(sess):
-            ps = os.popen("ps -A -o pid,ppid,stat,command"
+            ps = os.popen("ps -A -o pid,ppid,stat,wchan,command"
                           " | grep -E 'dch|REPLAY-MARK' | grep -v grep"
                           ).read()
+            # #081: where the program sits when it never writes
+            for line in ps.splitlines():
+                f = line.split(None, 4)
+                if len(f) == 5 and f[4].startswith("sh ") and \
+                        sys.platform == "darwin":
+                    ps += "\n--- sample %s ---\n" % f[0] + os.popen(
+                        "/usr/bin/sample %s 1 2>&1 | head -60" % f[0]).read()
             return ("A:", drain(fd_a, 0.5) + "\n--- processes ---\n" + ps)
         # Quiet period: make sure the program really has stopped writing, so
         # the attaching client can only get the marker from the mirror.
