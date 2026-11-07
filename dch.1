@@ -72,6 +72,10 @@ dch \- detachable terminal sessions with a headless agent API
 .br
 .B dch \-\-agent\-send
 .I peer message...
+.br
+.B dch \-\-config
+.RI [ key
+.RI [ value \fR|\fP\fB\-\-unset\fP]]
 .SH DESCRIPTION
 .B dch
 keeps a program running in a detachable session (a fork of dtach). Run bare,
@@ -132,7 +136,14 @@ List sessions as \fIname\fP<TAB>\fIalias\fP<TAB>\fIactivity_epoch\fP lines.
 .TP
 .B \-\-ls\-json
 List sessions as a JSON array of
-.BR {name,alias,harness,activity_epoch,state,version} .
+.BR {name,alias,harness,activity_epoch,state,version,agents,meta,meta_epoch,auto_allowed} .
+.I auto_allowed
+is the permission prompt the master answered last with auto\-allow (see
+.BR "CONFIG FILE" ),
+\fB{"at":\fP\fIepoch\fP\fB,"title":\fP\fItitle\fP\fB}\fP
+(the title is the dialog's first line, e.g. "Bash command"), or
+.BR null ;
+it is cleared when the session's program exits.
 The
 .I harness
 field carries the name of the Claude Code or Codex session running inside,
@@ -908,12 +919,64 @@ behaviour; only a lost message does (refused, or dropped). An orderly restart
 or shutdown attempts dropped receipts for pending messages; a crash or SIGKILL
 is not durable. Messages are limited to 16384 bytes and wire frames to 65536
 bytes. The bridge handles one message at a time and rejects attachments.
+.SH CONFIG FILE
+Optional: dch needs none. Read fresh on every use from
+.BR $DCH_CONFIG ,
+else
+.IR $XDG_CONFIG_HOME/dch/config ,
+else
+.IR ~/.config/dch/config :
+.I key
+=
+.I value
+lines,
+.B #
+comments, the last line for a key wins.
+.TP
+.B dch \-\-config
+Print the path, then every known key as
+.IR "key = value" ,
+its effective value.
+.TP
+.BI "dch \-\-config " key
+Print the key's value; exit 1 when it is unset.
+.TP
+.BI "dch \-\-config " "key value"
+Set it: the file is rewritten whole (a temp file renamed over it), every other
+line and comment kept, the parent directory created. An unknown key, or a
+boolean key given anything but true/false/1/0/yes/no/on/off, exits 1.
+.TP
+.BI "dch \-\-config " key " \-\-unset"
+Remove it.
+.TP
+.B auto_allow
+Boolean, default false. When true, the session's master answers Claude Code's
+plain permission prompt itself by typing
+.B 1
+(the preselected Yes; never Enter): exactly "Do you want to proceed?" over a
+bare "Yes", at most one "Yes, and don't ask again ..." row (never picked, never
+a mode change), and a last "No...", the dialog the last thing on the screen
+and the screen reading
+.BR blocked .
+Everything else is left to the human. Checked after 300 ms of quiet output and
+2 s after an answer, only when a Claude Code runs under the session's program;
+a prompt it answered is never answered again while it stays up, nor within
+30 s once gone and back. Needs the terminal mirror: unavailable in dch\-lite
+and under
+.BR DCH_NO_VT .
+.TP
+.B sidekick_pattern
+A string read by the session picker.
 .SH EXIT STATUS
 0 on success. Control verbs: 1 generic error, 2
 .B \-\-wait
 timeout, 3 unavailable in this build. A dch-lite build has no terminal mirror;
 native agent commands are available in both builds.
 .SH ENVIRONMENT
+.TP
+.B DCH_CONFIG
+Path of the config file (see
+.BR "CONFIG FILE" ).
 .TP
 .B DCH_SOCKET_DIR
 Session socket directory (default

@@ -17,12 +17,17 @@ State lives in $FAKE_CLAUDE_DIR:
                     +3 lines]" transcript line), eat_enters (ignore that
                     many Enters on a draft, as a just-resumed Claude did),
                     lag_ms (a paste shows in the composer that late),
-                    exit_ms (/exit takes that long to quit)
+                    exit_ms (/exit takes that long to quit),
+                    screen (rows painted in place of the composer and
+                    footer: a dialog; every key typed then is logged as
+                    key, and a digit dismisses it until the knob changes,
+                    unless sticky), above (rows painted above the composer)
   <session>.log     JSON lines: start (argv, cwd, sid, the CLAUDE*,
                     DCH_REVIVE* and Claude Code tool env keys, CLAUDE_CONFIG_DIR's value as
                     cfg), line (typed), turn (a message taken),
                     enter_dialog (Enter while a prompt is up: it would have
-                    answered it), enter_eaten, exit
+                    answered it), enter_eaten, key (typed while a screen
+                    knob is up), exit
 <session> is DCH_SESSION, which the master sets for its child.
 """
 import json, os, select, signal, subprocess, sys, termios, textwrap, time
@@ -117,11 +122,22 @@ out = sys.stdout.buffer
 transcript, queue, draft = [], [], ""
 collapsed, prompt_up, pstart, eaten = False, False, 0, 0
 turn_end = 0.0
+dismissed = None     # the screen knob a digit answered
+
+
+def screen_up(c):
+    return c.get("screen") and json.dumps(c) != dismissed
 idle_gap = 0.0       # a turn ended with a message queued: idle this long
 
 
 def paint(c):
     rows = ["  Claude Code v%s (fake)" % VERSION, ""] + transcript[-8:]
+    if screen_up(c):
+        out.write(("\033[H\033[2J" + "\r\n".join(rows + c["screen"]))
+                  .encode())
+        out.flush()
+        return
+    rows += c.get("above", [])
     if c.get("quote"):
         # a reply quoting a prompt above the composer (Prosper #757)
         rows.append("⏺ The prompt reads \u201cDo you want to proceed?\u201d")
@@ -248,7 +264,11 @@ while True:
                     prompt_up = bool(c.get("dialog_on_paste"))
                 continue
             ch, buf = buf[:1], buf[1:]
-            if ch == b"\r" and (prompt_up or c.get("dialog")):
+            if screen_up(c):
+                log(ev="key", text=ch.decode("latin-1"))
+                if ch.isdigit() and not c.get("sticky"):
+                    dismissed = json.dumps(c)
+            elif ch == b"\r" and (prompt_up or c.get("dialog")):
                 log(ev="enter_dialog", text=draft)
             elif ch == b"\r" and draft and eaten < c.get("eat_enters", 0):
                 eaten += 1
@@ -282,7 +302,7 @@ while True:
         if want != status:
             set_status(want)
     view = (status, len(transcript), len(queue), draft, json.dumps(c),
-            prompt_up, collapsed)
+            prompt_up, collapsed, dismissed)
     if view != last:
         paint(c)
         last = view
