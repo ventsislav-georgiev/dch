@@ -3535,7 +3535,10 @@ ap_countdown(char *s)
 /* A prompt raised by a hook or an ask rule (Prosper #790): rows lo..hi-1,
 ** frames aside, joined with every blank removed (a wrap anywhere still
 ** matches), hold one of ap_marks: a literal (b NULL), or a, then b
-** starting 1..n characters after a ends (every a tried). Claude Code
+** starting 1..n characters after a ends (every a tried; n 0: any
+** distance, as a managed-policy rule may be any length and draws no
+** "/permissions" line to back it, Prosper 6fe8094). A hook is always backed
+** by "to update hooks", so its bound stays. Claude Code
 ** 2.1.318 draws "Hook PreToolUse:Bash requires confirmation for this
 ** command:" over "settings.json to update hooks", "Permission rule <rule>
 ** requires confirmation for this <t>." (over "/permissions to update
@@ -3547,8 +3550,8 @@ static const struct { const char *a, *b; int n; } ap_marks[] = {
 	{ "toupdatehooks", NULL, 0 },
 	{ "/permissionstoletautomodedecide", NULL, 0 },
 	{ "Hook", "requiresconfirmationforthis", 200 },
-	{ "Permissionrule", "requiresconfirmationforthis", 300 },
-	{ "Askrule", "overridesautomodeforthis", 300 },
+	{ "Permissionrule", "requiresconfirmationforthis", 0 },
+	{ "Askrule", "overridesautomodeforthis", 0 },
 };
 
 static int
@@ -3580,7 +3583,7 @@ ap_hook(const struct ap_screen *s, int lo, int hi)
 				/* characters, as Prosper's regex */
 				for (n = 0, t = p + al; t < q; t++)
 					n += ((unsigned char)*t & 0xc0) != 0x80;
-				hit = n <= (size_t)ap_marks[m].n;
+				hit = !ap_marks[m].n || n <= (size_t)ap_marks[m].n;
 			}
 	}
 	free(b);

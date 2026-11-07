@@ -329,6 +329,16 @@ def main():
             "an ask rule wrapped mid-word": dialog(["Yes", NO], body=(
                 "   rm -rf build", "   Ask rule Bash(rm:*) overrides auto mo",
                 "   de for this command.")),
+            # a managed-policy rule over 300 characters, wrapped, with no
+            # "/permissions" line to back it (Prosper QA #613 INFO-1)
+            "a permission rule over 300 chars": dialog(["Yes", NO], body=(
+                "   rm -rf build", "   Permission rule Bash(rm:" ) + tuple(
+                "   " + "x" * 70 for _ in range(5)) + (
+                "   *) requires confirmation for this command.",)),
+            "an ask rule over 300 chars": dialog(["Yes", NO], body=(
+                "   rm -rf build", "   Ask rule Bash(rm:") + tuple(
+                "   " + "y" * 70 for _ in range(5)) + (
+                "   *) overrides auto mode for this command.",)),
         }
         ss = {}
         for k, (name, rows) in enumerate(alone.items()):
