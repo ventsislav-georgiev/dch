@@ -30,5 +30,6 @@ char *dch_utf8_fix(const char *s);
 char **dch_json_strv(const char *json, const char *object, const char *key,
                      int *argc);
 int dch_process_start(long pid, char *out, size_t cap);
+int dch_meta_prs(const char *json, char *out, size_t cap, long *merged);
 
 #endif

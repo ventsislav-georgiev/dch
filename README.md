@@ -86,6 +86,47 @@ Codex titles are skipped; Codex does not mark derived titles separately.
 Explicit aliases win. `--ls-json` keeps the real `name`, `alias`, and resolved
 `harness` as separate fields.
 
+### The session picker
+
+`dch -l`, `dch -k` / `dch -d` without a name, and the double-tap switch open
+the same full-screen picker, modelled on Prosper's Agent Island. It has up to
+three tabs: **Sessions**; **Sidekicks (n)**, the live sessions whose name or
+alias matches `sidekick_pattern` in the config file (a POSIX extended regex,
+case-insensitive, default `-qa`; an invalid one, or one that matches every
+name, is matched as plain text; set it empty for no tab), shown only when
+there are some; and **History (n)**, the ended sessions of `--history`, pinned
+first, at most 50. A session row shows its title (alias, else harness name,
+else name), its state in color (Needs input, Working, Done, Idle), how long ago
+it last printed, its agent count, open PRs as `owner/repo#N` and `N merged`
+(from `--meta`'s `prs`). A History row shows its pin (`*`), how it ended
+(closed, stopped, exited, crashed …) and its directory. The list reloads about
+once a second and keeps the selection on the same session.
+
+| Key | Sessions / Sidekicks | History |
+| --- | --- | --- |
+| `↑` `↓` / `j` `k`, `PgUp` `PgDn`, `g` `G` | move | move |
+| `Tab` `→` `l` / `Shift-Tab` `←` `h` | next / previous tab | next / previous tab |
+| `Enter` | attach (`-k`: kill, `-d`: detach) | resume (`--revive`, with the carry-on message) |
+| `r` | rename (set the alias; empty clears) | |
+| `R` | restart the agent (`--restart <n> --include-agents -f`), asks first | |
+| `S` | stop (`--stop`), asks first | |
+| `x` | kill (`-k`), asks first | |
+| `a` | allow a blocked prompt (presses `1`, Yes), asks first | |
+| `b` / `B` | restart stale agents / restart all agents (force), asks first | |
+| `s` | sort by activity (blocked, working, done, idle, newest first) or by name (`a2` before `a10`) | |
+| `m` | | resume without the message (`--no-message`) |
+| `I` | | resume interrupted (n) (`--revive --all`), asks first |
+| `p` | | pin / unpin |
+| `d` | | remove (`--forget`), asks first; a pinned record must be unpinned first |
+| `q` `Esc` `Ctrl-C` | quit | quit |
+
+A question waits for `y`; any other key cancels. Actions run the matching
+`dch` verb in the background: the status line shows `restarting …` while it
+runs, then its result (`Resumed as <name>`, `killed: <name>`, or the error).
+Resuming a record whose name is live again resumes it as `<name>-2`.
+`NO_COLOR` or `TERM=dumb` draws without color and with ASCII markers; without
+a terminal (`/dev/tty`), `-l` prints the session list instead.
+
 An agent (or plain shell script) can drive a TUI in a session it never
 attaches to:
 
@@ -149,7 +190,7 @@ it's the whole point of giving them dch.
 dch              # attach the auto-named session, or create it
 dch <cmd...>     # same, but if new, run <cmd> in it
 dch -ls          # list sessions as alias/harness (real-name), or real-name
-dch -l           # pick a session (arrow keys) and attach
+dch -l           # session picker: tabs, live states, actions; Enter attaches
 dch -rl          # rename: pick a session, type a display alias, repeat
 dch -k [name]    # kill a session (interactive picker if no name)
 dch -kl          # kill ALL sessions

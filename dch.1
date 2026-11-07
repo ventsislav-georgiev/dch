@@ -108,8 +108,9 @@ without disturbing an attached human.
 .SH OPTIONS
 .TP
 .B \-l
-Pick a session interactively and attach. A live mirror preview of each
-session is shown while picking.
+Pick a session interactively and attach; see
+.B SESSION PICKER
+for its tabs and keys.
 When a session runs a named Claude Code or Codex session, that name is shown
 as \fIdisplay-name (real-name)\fP. Claude names are read from
 .IR ~/.claude/sessions ;
@@ -168,6 +169,96 @@ Set the detach character (default
 .TP
 .B \-E
 Disable the detach character.
+.SH SESSION PICKER
+.BR "dch \-l" ,
+.B \-k
+and
+.B \-d
+without a name, and the double\-press switch open a full\-screen picker with
+up to three tabs:
+.BR Sessions ;
+.BI "Sidekicks (" n ) ,
+the live sessions whose name or alias matches
+.B sidekick_pattern
+in the config file (a POSIX extended regular expression, case\-insensitive,
+default
+.BR \-qa ;
+an invalid one, or one matching every name, is matched as plain text; empty
+turns the tab off), shown only when there are some; and
+.BI "History (" n ) ,
+the ended sessions of
+.BR \-\-history ,
+pinned first, at most 50.
+A session row shows its title, its state (Needs input, Working, Done, Idle),
+how long ago it last printed, its agent count, its open PRs as
+.I owner/repo#N
+and a merged count (from
+.BR \-\-meta 's
+.BR prs ).
+A History row shows a pin mark, how the session ended and its directory.
+The list reloads about once a second and keeps the selection on the same
+session.
+.PP
+Keys: arrows or
+.BR j / k ,
+.BR PgUp / PgDn ,
+.BR g / G
+move;
+.BR Tab ,
+.BR \(-> / \(<- ,
+.BR l / h
+and
+.B Shift\-Tab
+switch tabs;
+.BR q ,
+.B Esc
+or
+.B Ctrl\-C
+quit.
+On Sessions and Sidekicks:
+.B Enter
+attaches (or kills, detaches for
+.BR \-k ,
+.BR \-d ),
+.B r
+renames,
+.B R
+restarts the agent
+.RB ( "\-\-restart \-\-include\-agents \-f" ),
+.B S
+stops,
+.B x
+kills,
+.B a
+allows a blocked prompt (presses 1, Yes),
+.B b
+restarts stale agents,
+.B B
+restarts all agents (force),
+.B s
+toggles the sort between activity (blocked, working, done, idle, newest
+first) and name (numeric\-aware).
+On History:
+.B Enter
+resumes
+.RB ( \-\-revive ),
+.B m
+resumes without the message,
+.B I
+resumes every interrupted session
+.RB ( "\-\-revive \-\-all" ),
+.B p
+pins or unpins,
+.B d
+removes
+.RB ( \-\-forget ).
+Every action but attach, rename, resume and pin asks first and runs on
+.BR y .
+The status line shows the action while it runs, then its result.
+.B NO_COLOR
+or
+.B TERM=dumb
+draws without color; without a terminal the session list is printed instead.
 .SH SWITCHING SESSIONS
 Pressing the detach character
 .B twice

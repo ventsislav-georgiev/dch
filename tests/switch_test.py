@@ -94,7 +94,8 @@ def kill_client(pid, fd=None):
 def picker_rows(text):
     """Session names as drawn by the picker, top row first."""
     rows = []
-    for line in text.split("\n"):
+    # The picker positions each line with CUP rather than newlines.
+    for line in re.split(r"\n|\x1b\[\d+;1H", text):
         m = re.search(r"(%s[ab])" % TAG, line)
         if m and m.group(1) not in rows:
             rows.append(m.group(1))
