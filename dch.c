@@ -4910,33 +4910,121 @@ proc_tree(long root, long *out, int max)
 	return n;
 }
 
-/* Live Claude records at or below `root`; *best = the shallowest. Each
-** process in the tree may run under its own CLAUDE_CONFIG_DIR or HOME
-** (`CLAUDE_CONFIG_DIR=~/.claude-work claude`), so the sessions dir of every
-** one is searched, ours first (#062). */
+/* The sessions dirs to search for Claudes at or below `root`, added to
+** dirs[nd..max) once each: ours first, then each process's in the tree,
+** which may run under its own CLAUDE_CONFIG_DIR or HOME
+** (`CLAUDE_CONFIG_DIR=~/.claude-work claude`, #062). Once by inode, not by
+** string: `~/.claude/` and `~/.claude` read twice would count every record
+** twice. The new count. */
+static int
+claude_dirs(long root, char (*dirs)[1100], int nd, int max)
+{
+	struct stat st[16];
+	long tree[64];
+	int n = proc_tree(root, tree, 64), i, j;
+
+	for (j = 0; j < nd && j < 16; j++)
+		if (stat(dirs[j], &st[j]) < 0)
+			memset(&st[j], 0, sizeof st[j]);
+	for (i = -1; i < n && nd < max && nd < 16; i++)
+	{
+		if (claude_sessions_dir(i < 0 ? 0 : tree[i], dirs[nd],
+		                        sizeof dirs[nd]) < 0 ||
+		    stat(dirs[nd], &st[nd]) < 0 || !S_ISDIR(st[nd].st_mode))
+			continue;
+		for (j = 0; j < nd && (st[j].st_dev != st[nd].st_dev ||
+		                       st[j].st_ino != st[nd].st_ino); j++)
+			;
+		if (j == nd)
+			nd++;
+	}
+	return nd;
+}
+
+/* Live Claude records at or below `root`; *best = the shallowest. */
 static int
 claude_find(long root, int verify, struct crec *best)
 {
 	struct crec_scan cs;
 	char dirs[8][1100];
-	long tree[64];
-	int n = proc_tree(root, tree, 64), nd = 0, i, j;
+	int nd = claude_dirs(root, dirs, 0, 8), i;
 
 	memset(&cs, 0, sizeof cs);
 	cs.root = root;
 	cs.verify = verify;
-	for (i = -1; i < n && nd < 8; i++)
-	{
-		if (claude_sessions_dir(i < 0 ? 0 : tree[i], dirs[nd],
-		                        sizeof dirs[nd]) < 0)
-			continue;
-		for (j = 0; j < nd && strcmp(dirs[j], dirs[nd]); j++)
-			;
-		if (j == nd)
-			(void)visit_records_in(dirs[nd++], crec_visit, &cs);
-	}
+	for (i = 0; i < nd; i++)
+		(void)visit_records_in(dirs[i], crec_visit, &cs);
 	*best = cs.best;
 	return cs.n;
+}
+
+/* --ls-json's Claude join (#079): one crec_scan per row, each record read
+** once for all of them. */
+struct crec_rows
+{
+	struct crec_scan *v;
+	int n;
+};
+
+static int
+crec_visit_rows(const char *path, const char *body, size_t len, void *arg)
+{
+	struct crec_rows *m = arg;
+	int i;
+
+	for (i = 0; i < m->n; i++)
+		if (m->v[i].root > 0)
+			(void)crec_visit(path, body, len, &m->v[i]);
+	return 0;
+}
+
+/* A canonical UUID: 8-4-4-4-12 hex. A sessionId comes from a file and goes
+** into a path. */
+static int
+uuid_shaped(const char *s)
+{
+	int k;
+
+	for (k = 0; k < 36; k++)
+		if (k == 8 || k == 13 || k == 18 || k == 23 ? s[k] != '-'
+		                                            : !isxdigit((unsigned char)s[k]))
+			return 0;
+	return s[36] == '\0';
+}
+
+/* The transcript of the Claude whose record is c: the one regular
+** <config>/projects/<any>/<sid>.jsonl, <config> being the record's
+** <config>/sessions/<pid>.json less two components. 0 and out filled, -1
+** when there is none or more than one: no guessing between them. */
+static int
+claude_transcript(const struct crec *c, char *out, size_t outsz)
+{
+	char cfg[1400], dir[1500], p[2000];
+	struct dirent *de;
+	struct stat st;
+	DIR *d;
+	char *s;
+	int k, hits = 0;
+
+	snprintf(cfg, sizeof cfg, "%s", c->rec);
+	for (k = 0; k < 2 && (s = strrchr(cfg, '/')); k++)
+		*s = '\0';
+	if (k < 2 || cfg[0] != '/' || !uuid_shaped(c->sid) ||
+	    snprintf(dir, sizeof dir, "%s/projects", cfg) >= (int)sizeof dir ||
+	    !(d = opendir(dir)))
+		return -1;
+	while ((de = readdir(d)) && hits < 2)
+	{
+		if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..") ||
+		    snprintf(p, sizeof p, "%s/%s/%s.jsonl", dir, de->d_name,
+		             c->sid) >= (int)sizeof p ||
+		    stat(p, &st) < 0 || !S_ISREG(st.st_mode))
+			continue;
+		if (hits++ == 0 && snprintf(out, outsz, "%s", p) >= (int)outsz)
+			hits = 2;	/* cut short: no path beats a wrong one */
+	}
+	closedir(d);
+	return hits == 1 ? 0 : -1;
 }
 
 /* claude's arguments (after argv[0]) say it never opens a composer:
@@ -10411,6 +10499,33 @@ main(int argc, char **argv)
 		load_harness_names(&sl);
 		load_codex_names(&sl);
 		int k;
+		/* The Claude under each session's child (the root --stop
+		** joins from, by MSG_CMD), read live: every sessions dir once
+		** for all rows, procStart verified (#079).
+		** ponytail: claude_dirs walks each row's process tree; on Linux
+		** that is a /proc scan per row — one shared scan if it shows. */
+		struct crec_rows cr = { calloc((size_t)sl.n + 1, sizeof *cr.v),
+		                        sl.n };
+		char cdirs[16][1100], sp[1100];
+		int nd = 0;
+
+		for (k = 0; cr.v && k < sl.n; k++)
+		{
+			struct cmd_info ci;
+
+			cr.v[k].verify = 1;
+			session_sock_path(sl.v[k], sp, sizeof sp);
+			if (cmd_query(sp, &ci) != 0)
+				continue;
+			if (ci.pid > 0 && strcmp(ci.state, "held") != 0)
+			{
+				cr.v[k].root = ci.pid;
+				nd = claude_dirs(ci.pid, cdirs, nd, 16);
+			}
+			cmd_info_free(&ci);
+		}
+		for (k = 0; cr.v && k < nd; k++)
+			(void)visit_records_in(cdirs[k], crec_visit_rows, &cr);
 		putchar('[');
 		for (k = 0; k < sl.n; k++)
 		{
@@ -10443,9 +10558,26 @@ main(int argc, char **argv)
 			}
 			else
 				fputs("null", stdout);
+			/* Exactly one Claude, or no answer: a wrong transcript is
+			** worse than none. */
+			const struct crec *c = cr.v && cr.v[k].n == 1 &&
+			                       uuid_shaped(cr.v[k].best.sid)
+			                       ? &cr.v[k].best : NULL;
+			char tp[2000];
+			fputs(",\"claude_session_id\":", stdout);
+			if (c)
+				put_json_str(c->sid);
+			else
+				fputs("null", stdout);
+			fputs(",\"transcript_path\":", stdout);
+			if (c && claude_transcript(c, tp, sizeof tp) == 0)
+				put_json_str(tp);
+			else
+				fputs("null", stdout);
 			putchar('}');
 		}
 		puts("]");
+		free(cr.v);
 		slist_free(&sl);
 		return 0;
 	}

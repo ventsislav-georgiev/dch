@@ -7,6 +7,9 @@
 #include <sys/poll.h>
 #include <sys/random.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <sys/sysctl.h>
+#endif
 
 #define BRIDGE_MARKER "DCH_NATIVE_BRIDGE_ID"
 #define FRAME_MAX 65536
@@ -1023,7 +1026,32 @@ static void terminate_child(pid_t pid) {
   }
 }
 
+/* `ps -o lstart= -p <pid>` under LC_ALL=C TZ=UTC: what Claude Code's records
+   carry as procStart. On macOS read in-process from the same kernel field ps
+   formats (strftime %c in the C locale), sparing a fork of ps per record:
+   --ls-json verifies one per Claude-running session on every call (#079). */
 static int process_start(long pid, char *out, size_t cap) {
+#ifdef __APPLE__
+  static const char *const wd[] = {"Sun", "Mon", "Tue", "Wed",
+                                   "Thu", "Fri", "Sat"};
+  static const char *const mo[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                   "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+  struct kinfo_proc kp;
+  size_t kl = sizeof kp;
+  int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, (int)pid};
+  struct tm tm;
+  time_t t;
+  if (pid <= 0 || pid > INT_MAX || sysctl(mib, 4, &kp, &kl, NULL, 0) != 0 ||
+      kl == 0 || (t = kp.kp_proc.p_starttime.tv_sec) <= 0 ||
+      !gmtime_r(&t, &tm) || tm.tm_wday < 0 || tm.tm_wday > 6 ||
+      tm.tm_mon < 0 || tm.tm_mon > 11)
+    return -1;
+  return snprintf(out, cap, "%s %s %2d %02d:%02d:%02d %d", wd[tm.tm_wday],
+                  mo[tm.tm_mon], tm.tm_mday, tm.tm_hour, tm.tm_min,
+                  tm.tm_sec, tm.tm_year + 1900) < (int)cap
+             ? 0
+             : -1;
+#else
   int p[2], status, flags;
   pid_t child;
   size_t off = 0;
@@ -1123,6 +1151,7 @@ static int process_start(long pid, char *out, size_t cap) {
     }
   }
   return off ? 0 : -1;
+#endif
 }
 
 /* Peek, then consume exactly up to and including the newline, so the next
