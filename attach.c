@@ -45,6 +45,15 @@ static volatile sig_atomic_t want_redraw;
 ** still in raw mode. Pop alt-screen LAST in case the child enabled it; inline
 ** programs remain on the primary screen so native terminal scrollback works.
 */
+#define TERM_RESET "\033[?25h" \
+	"\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?1015l" \
+	"\033[?1004l" \
+	"\033[?2004l\033[?7h" \
+	"\033[<8u" \
+	"\033[>4;0m" \
+	"\033[?1049l" \
+	"\033[<8u"
+
 static void
 restore_term(void)
 {
@@ -71,14 +80,7 @@ restore_term(void)
 	** with ctrl-d typing `0;5u`. \e[<8u rather than \e[<u: Ghostty's stack
 	** is 8 deep and a pop of >= 8 empties it outright, so nested pushes
 	** (a TUI launched from inside the session) can't leave a level behind. */
-	printf("\033[?25h"
-	       "\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?1015l"
-	       "\033[?1004l"
-	       "\033[?2004l\033[?7h"
-	       "\033[<8u"
-	       "\033[>4;0m"
-	       "\033[?1049l"
-	       "\033[<8u");
+	fputs(TERM_RESET, stdout);
 	fflush(stdout);
 }
 
@@ -123,13 +125,21 @@ connect_socket(char *name)
 	return s;
 }
 
-/* Signal — silent exit; restore_term handles cleanup. Upstream printed
-** "[detached]"/"[got signal N - dying]" banners; we suppress them so the
-** parent shell prompt reappears clean. */
+/* Signal — silent exit. Upstream printed "[detached]"/"[got signal N -
+** dying]" banners; we suppress them so the parent shell prompt reappears
+** clean. Async-signal-safe, so no exit(): its atexit handlers (restore_term,
+** client_pidfile_unlink, done here by hand) ran restore_term's stdio
+** and a TCSADRAIN that blocks forever while nobody reads the terminal, as
+** after a hangup (#029). A hung-up terminal gets no reset sequence; a live
+** one gets it by write(), and its modes back at once (TCSANOW). */
 static RETSIGTYPE
-die(ATTRIBUTE_UNUSED int sig)
+die(int sig)
 {
-	exit(0);
+	if (sig != SIGHUP)
+		(void)!write(1, TERM_RESET, sizeof TERM_RESET - 1);
+	tcsetattr(0, TCSANOW, &orig_term);
+	client_pidfile_unlink();
+	_exit(0);
 }
 
 /* SIGUSR1 → request clean detach. Used when Ctrl-\ is unreachable (some

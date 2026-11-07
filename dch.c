@@ -666,7 +666,8 @@ auto_name(char *out, size_t outsz)
 ** + not orphaned (PPID=1 with no TTY = VSCode-helper-closed).
 */
 
-static void
+/* Also from attach.c's die(), in a signal handler: unlink only. */
+void
 client_pidfile_unlink(void)
 {
 	if (client_pidfile[0])

@@ -291,6 +291,7 @@ int dch_config_bool(const char *key);
 int dch_allow_prompt(const char *screen, char **ident, char **title);
 
 int attach_main(int noerror);
+void client_pidfile_unlink(void);
 int master_main(char **argv, int waitattach, int dontfork);
 int push_main(void);
 

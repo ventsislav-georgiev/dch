@@ -42,17 +42,25 @@ def drain(fd, seconds):
                 raise
 
 
-def reap(pid, timeout=2.0):
-    end = time.time() + timeout
-    while time.time() < end:
-        wpid, _ = os.waitpid(pid, os.WNOHANG)
-        if wpid == pid:
-            return
-        time.sleep(0.02)
-    try:
-        os.kill(pid, signal.SIGHUP)
-    except OSError:
-        pass
+def reap(pid, fd=None, timeout=2.0):
+    """Wait for pid, reading fd meanwhile so a client writing to the pty
+    never blocks on it (#029); SIGHUP, then SIGKILL, never an unbounded
+    wait."""
+    for sig in (None, signal.SIGHUP, signal.SIGKILL):
+        if sig:
+            try:
+                os.kill(pid, sig)
+            except OSError:
+                pass
+        end = time.time() + timeout
+        while time.time() < end:
+            wpid, _ = os.waitpid(pid, os.WNOHANG)
+            if wpid == pid:
+                return
+            if fd is None:
+                time.sleep(0.02)
+            else:
+                drain(fd, 0.02)
     os.waitpid(pid, 0)
 
 
@@ -80,7 +88,7 @@ def spawn_detached(name, sockpath, inner):
     if not wait_live(sockpath):
         raise RuntimeError("master socket never came up: %s" % sockpath)
     os.kill(pid, signal.SIGUSR1)  # detach; master stays alive
-    reap(pid)
+    reap(pid, fd)
     os.close(fd)
 
 
@@ -115,7 +123,7 @@ def main():
                            "sh", "-c", "printf X; exit 0"])
             os._exit(127)
         drain(fd, 2.0)
-        reap(pid)
+        reap(pid, fd)
         os.close(fd)
         check("end-to-end spawn new session", time.time() - t0, SPAWN_BUDGET_S, "s")
 
@@ -178,7 +186,7 @@ def main():
                     elapsed = time.time() - t0
                     break
         os.kill(pid, signal.SIGHUP)
-        reap(pid)
+        reap(pid, fd)
         os.close(fd)
         check("end-to-end attach round-trip (hot path)", elapsed, ATTACH_BUDGET_S, "s")
     finally:
