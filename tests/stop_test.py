@@ -433,13 +433,15 @@ def main():
                    ["pausing", "ending"] and
                    objs[-1] == {"name": n, "result": "ok", "reason": "",
                                 "detail": "", "session_id": sid5}))
-            time.sleep(2)
+            # Poll, not a fixed sleep: under ASan on a CI runner the
+            # teardown can take longer. Once the shell is gone the touch
+            # can no longer run, so checking the mark after is sound.
             check("`claude%s touch`: never /exit'ed, record stopped with the "
                   "id, session gone, the touch never ran" % op,
-                  "/exit" not in typed(n) and
-                  (rec(n) or {}).get("end") == "stopped" and
-                  ((rec(n) or {}).get("agent") or {}).get("session_id")
-                  == sid5 and cmd(n) is None and not marker(n) and
+                  until(lambda: "/exit" not in typed(n) and
+                        (rec(n) or {}).get("end") == "stopped" and
+                        ((rec(n) or {}).get("agent") or {}).get("session_id")
+                        == sid5 and cmd(n) is None and not marker(n)) and
                   not os.path.exists(mark))
             names.remove(n)
             r = run("--revive", n)

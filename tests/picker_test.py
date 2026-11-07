@@ -261,7 +261,8 @@ if __name__ == "__main__":
     try:
         rc = main()
     finally:
-        for n in ("pk1", "pk2", "pk3", "s2", "s10", "helper-qa"):
+        for n in ("pk1", "pk2", "pk3", "s2", "s10", "helper-qa", "perm",
+                  "form"):
             dch("-k", n)
         shutil.rmtree(ROOT, ignore_errors=True)
     print("PASS" if rc == 0 else "FAILED: %d" % len(failures))

@@ -108,14 +108,15 @@ connect_socket(char *name)
 		errno = e;
 		/* ECONNREFUSED is also returned for regular files, so make
 		** sure we are trying to connect to a socket. */
-		if (errno == ECONNREFUSED)
+		if (e == ECONNREFUSED)
 		{
 			struct stat st;
 
 			if (stat(name, &st) < 0)
 				return -1;
-			else if (!S_ISSOCK(st.st_mode) || S_ISREG(st.st_mode))
-				errno = ENOTSOCK;
+			/* a successful stat may still change errno */
+			errno = (!S_ISSOCK(st.st_mode) || S_ISREG(st.st_mode))
+				? ENOTSOCK : e;
 		}
 		return -1;
 	}

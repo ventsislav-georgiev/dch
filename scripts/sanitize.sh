@@ -29,6 +29,9 @@ export UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1:log_path=$logs/ubsan"
 # under ASan's allocator (and breaks gh); it carries no signal here.
 unset MallocStackLogging MallocStackLoggingNoCompact
 
+# ASan slows every verb several times over; skip the wall-clock budgets.
+export DCH_TEST_NO_BUDGET=1
+
 rc=0
 sh tests/run.sh || rc=1
 if [ -n "$(ls "$logs")" ]; then
