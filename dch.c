@@ -2800,9 +2800,10 @@ fetch_screen(const char *path, char *buf, size_t cap, int deadline_ms,
 /* One rule: ANDed lowercase substrings (s2 optional). OR variants are
 ** separate rows. Strings are facts about the harnesses' own UIs (herdr
 ** is prior art for the approach; nothing is ported from it — AGPL).
-** A leading '^' on s1 makes a line rule: only a short line that starts
-** with s1 (after leading blanks) and contains s2 matches — the footer
-** itself, not prose that quotes it. */
+** A leading '^' on s1 makes a line rule: only a line that starts with s1
+** (after leading blanks) and contains s2 matches — the footer itself, not
+** prose that quotes it. Any length: while background agents run, the
+** footer runs to the screen width. */
 struct det_rule
 {
 	const char *s1, *s2;

@@ -11,7 +11,7 @@ State lives in $FAKE_CLAUDE_DIR:
   version           installed version (read at start and by --version)
   <session>.ctl     JSON knobs the test flips while the fake runs:
                     shell, subagents, busy, dialog, draft, noexit, crash,
-                    mangle, decoy, turn_ms, dialog_on_paste (a prompt comes
+                    mangle, decoy, quote, turn_ms, dialog_on_paste (a prompt comes
                     up as a paste ends; "known": one dch detects),
                     pasted_decoy (a "[Pasted text #1
                     +3 lines]" transcript line), eat_enters (ignore that
@@ -122,6 +122,9 @@ idle_gap = 0.0       # a turn ended with a message queued: idle this long
 
 def paint(c):
     rows = ["  Claude Code v%s (fake)" % VERSION, ""] + transcript[-8:]
+    if c.get("quote"):
+        # a reply quoting a prompt above the composer (Prosper #757)
+        rows.append("⏺ The prompt reads \u201cDo you want to proceed?\u201d")
     if c.get("pasted_decoy"):
         rows.append("❯ [Pasted text #1 +3 lines]")
     if status == "busy":

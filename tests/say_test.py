@@ -210,6 +210,14 @@ def main():
         check("dialog: no text left behind in the composer",
               until(lambda: "Try" in run("--read", dlg).stdout) and
               "resume" not in run("--read", dlg).stdout)
+        # a reply quoting "Do you want to proceed?" above the composer,
+        # with a subagent running, is not a prompt (Prosper #757)
+        qt = sess("squote", "claude", quote=True, subagents=1)
+        up(qt)
+        r = say(qt, "--", "hi")
+        check("quoted prompt above the composer: sent",
+              r.returncode == 0 and lines(r.stdout)[0].get(qt) == "sent"
+              and typed(qt) == ["hi"])
         for n, d in ((drf, "draft"), (bdrf, "busy + draft")):
             check("%s: skipped, draft untouched" % d,
                   got.get(n) == "skipped — the composer holds an unsent "

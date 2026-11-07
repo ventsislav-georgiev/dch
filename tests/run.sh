@@ -618,6 +618,12 @@ assert any(s["state"] == "blocked" for s in d), d
         check "prompt phrase above the composer does not block" \
               "$("$DCH" --status "$DN" 2>/dev/null)" "idle"
 
+        # rows under the composer's closing rule still count
+        paint c8 '\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\n\342\235\257 \n\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\342\224\200\n Do you want to proceed?\n \342\235\257 1. Yes'
+        stale
+        check "prompt phrase below the composer blocks" \
+              "$("$DCH" --status "$DN" 2>/dev/null)" "blocked"
+
         paint c3 'Do you want to create a file?'
         stale
         check "prose 'do you want to create' does not block" \
