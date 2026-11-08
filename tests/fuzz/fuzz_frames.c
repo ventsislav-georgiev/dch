@@ -1,7 +1,8 @@
 /* libFuzzer target: the master's control-packet handling. The input is a
 ** client's byte stream: frame_size() splits it exactly as client_activity
 ** does, and each frame's payload goes through the pure parsers that
-** handle_packet hands it to (the RESPAWN argv, the WAIT pattern scan) plus
+** handle_packet hands it to (the RESPAWN argv, the WAIT pattern scan, the
+** READ request incl. --follow's meta/since flags) plus
 ** the resume blob's hex decoder; the same bytes as pty output go through
 ** track_decmode. Linked with the rest of dch minus master.o, and
 ** dch.c built with -Dmain=dch_main. */
@@ -33,7 +34,21 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		** buffered and fits the inbuf */
 		if ((size_t)fs > n - off || (size_t)fs > PKT_HDR + PKT_MAX)
 			abort();
-		if (type == MSG_RESPAWN && len && payload[0] == 'a' &&
+		if (type == MSG_READ)
+		{
+			struct read_req q;
+
+			/* a request it accepts never asks for more than the
+			** wire carried, nor a scrollback tail with the caret */
+			if (read_req_parse(payload, len, &q) == 0 &&
+			    (((q.flags & DCH_READ_F_SINCE) &&
+			      len < DCH_READ_REQ_MAX) ||
+			     (q.flags & ~(unsigned int)DCH_READ_F_ALL) ||
+			     ((q.flags & DCH_READ_F_CURSOR) &&
+			      q.source == DCH_READ_RECENT)))
+				abort();
+		}
+		else if (type == MSG_RESPAWN && len && payload[0] == 'a' &&
 		    (v = argv_from_wire(payload + 1, len - 1)))
 			free(v);
 		else if (type == MSG_WAIT && len && len <= DCH_WAIT_MAX)

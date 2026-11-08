@@ -201,6 +201,7 @@ dch --run infra deployments           # type the view name, press enter
 dch --read infra                      # print the rendered screen, no attach
 dch --read infra --ansi > snap.txt    # same, with colors
 dch --read infra --cursor             # + "cursor <row> <col> ..." on stderr
+dch --follow infra                    # stream the screen as it changes
 ```
 
 ## Install with Homebrew
@@ -274,6 +275,7 @@ dch --run <name> <text...>                      # type text, press enter
 dch --keys <name> <key...>                      # send keys: ctrl+c up f2 ...
 dch --read <name> [--ansi] [--recent [N]]       # print the rendered screen
 dch --read <name> --cursor                      # ... + caret row/col on stderr
+dch --follow <name>                             # stream screen frames on change
 dch --wait <name> --match <str> [--timeout ms]  # block until output matches
 dch --wait <name> --state <s[,s]> [--timeout ms]  # block until state matches
 dch --status <name>                             # print session state
@@ -333,6 +335,7 @@ someone is watching is invisible to them.
 | `--run <n> <text...>` | `--send` + enter. | 0 ok |
 | `--keys <n> <key...>` | Encode+send keys mode-aware: `ctrl+c`, `alt+x`, `shift+tab`, `up`, `f5`, `enter`, `esc`, single chars. | 0 ok, 1 unknown key |
 | `--read <n> [--ansi] [--cursor] [--recent [N]]` | Print rendered screen. `--ansi` keeps colors and OSC 8 hyperlinks (each line opens and closes its own, so a `--recent` cut never splits one); `--recent [N]` = last N lines incl. scrollback (default 100; the mirror keeps at least `DCH_SCROLLBACK` lines of history, default 2000, max 100000, set when the session is spawned; at most about one page more, ~600 lines at 80 cols, ~240 at 200; 0 keeps only the screen); `--cursor` also prints `cursor <row> <col> <visible> <wrap>` on **stderr** (see below). Plain output drops all styling — to tell a TUI's own ghost text (placeholders, argument hints) from what the human typed, read with `--ansi --cursor`; see [docs/ghost-text.md](docs/ghost-text.md). | 0 ok, 1 error, 3 no mirror |
+| `--follow <n>` | Stream the screen, read-only, as self-delimited frames: one at once, then one per change, at most one per 150 ms (`DCH_FOLLOW_MS`). Each frame is the full `--read --ansi` screen plus size and caret; see [Following a screen](#following-a-screen---follow). Runs until the session ends or the reader closes the pipe. | 0 session ended / reader closed, 1 no session / error / master predates `--follow`, 3 no mirror |
 | `--wait <n> --match <str> [--timeout ms]` | Block until screen/scrollback contains `<str>` (literal substring, ≤512 bytes); prints the matching line. Default timeout 10 s. | 0 hit, 2 timeout, 3 no mirror |
 | `--status <n>` | Print the session state: `working`, `idle`, `blocked`, or `done` — resolved from the reported state, the screen-content detection, and the output heuristic (see [Agent state detection](#agent-state-detection)). | 0 ok, 1 no session |
 | `--report <n> <state>` | Push a semantic state: `working`, `idle`, `blocked`, or `done` (closed set, unknown tokens rejected); `clear` reverts to auto (detection + heuristic). Last write wins; cleared automatically when the session ends. | 0 ok, 1 no session / bad state |
@@ -478,6 +481,46 @@ report is line `N` of the dump whenever the dump is that long.
 Still a snapshot, though: bytes the app emits *after* the read move the real
 caret, so a client that reads, paints, then types needs another read rather
 than trusting the old coordinate.
+
+### Following a screen (`--follow`)
+
+A tool that mirrors a session's screen live — a pane in another app — would
+otherwise poll `--read --ansi --cursor` on a timer and trail a busy session by
+a whole period. `dch --follow <name>` streams it instead: one frame at once,
+then one whenever the screen, its size or the caret changed, at most one per
+150 ms (`DCH_FOLLOW_MS`, 20–10000). Each frame on stdout is
+
+```
+dch-frame <len> <rows>x<cols> <crow> <ccol> <cvis>\n
+<exactly len bytes of payload>
+```
+
+- The header is one ASCII line, fields separated by single spaces, ending in
+  `\n`. `dch-frame` names this format; a future incompatible one gets a new
+  first token, so reject a header that does not start with `dch-frame `.
+- `len`: payload byte count (decimal). The payload is byte-for-byte what
+  `dch --read <name> --ansi` prints, its trailing newline included: read
+  exactly `len` bytes, then the next header starts.
+- `rows`x`cols`: the screen size (the mirror's grid, capped at 1024x1024).
+- `crow` `ccol`: the caret, 1-based like `--cursor` (row counted from the top
+  of the visible screen). `0 0` only when the screen rendered over 2 MB and
+  the dump was tail-cut, so the caret has no row in it.
+- `cvis`: `1` caret visible, `0` hidden (DEC mode 25).
+- Every frame is whole: a frame sent only because the caret moved or was
+  hidden still carries the size and the full payload. No short forms.
+
+A frame is sent only when it differs from the last one sent (payload, size
+or caret). An idle session costs a few syscalls per tick: the master tells
+`--follow` "unchanged" without rendering. Following is read-only like
+`--read`: it never attaches, writes nothing to the session, sends no size,
+and leaves the activity stamp, `--status` and attached clients alone. A
+`--restart` of the session is followed through (it reconnects).
+
+Exit 0 when the session ends or the reader closes the pipe (quietly: no
+`SIGPIPE`, nothing on stderr); 1 when there is no such session, the master
+stopped answering, or the session's master predates `--follow` ("restart
+the session"); 3 when the session has no mirror (dch-lite, `DCH_NO_VT`),
+like `--read`.
 
 ### Agent state detection
 
@@ -715,6 +758,7 @@ later does nothing to a running session.
 | `DCH_NO_VT` | master | unset | Anything but empty or `0`: no terminal mirror ([dch-lite and `DCH_NO_VT`](#dch-lite-and-dch_no_vt)). |
 | `DCH_NO_REPLAY` | master | unset | Anything but empty or `0`: attach clears and asks for a repaint instead of [replaying the screen](#attaching-replays-the-screen). |
 | `DCH_SCROLLBACK` | master | `2000` | Mirror scrollback lines, max `100000`, `0` none (`--read --recent`, [Verbs](#verbs)). |
+| `DCH_FOLLOW_MS` | `--follow` | `150` | Least time between two frames, `20`–`10000` ms ([Following a screen](#following-a-screen---follow)). |
 | `DCH_NO_HISTORY` | master | unset | Anything but empty or `0`: no history record ([Bringing sessions back](#bringing-sessions-back)). |
 | `DCH_NO_REMOTE` | `dch -l`, `-a`, `--remote` | unset | Anything but empty or `0`: no [remote hosts](#remote-hosts) in the picker, `-a` or `--remote` (`--hosts` still applies). |
 | `DCH_REMOTE_BOX_MS` | `--remote`, a picker opening empty | `300` | The time box for probing every remote host in the foreground, max `60000`, for a slow link. |

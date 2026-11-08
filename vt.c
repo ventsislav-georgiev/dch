@@ -12,6 +12,7 @@ static GhosttyTerminal the_term; /* NULL when disabled/failed */
 static GhosttyKeyEncoder the_encoder;
 static int cur_cols, cur_rows;
 static size_t sb_lines; /* DCH_SCROLLBACK; 0 = no scrollback */
+static unsigned long gen; /* bumped on every feed/resize: see dch_vt_size */
 
 /* Arbitrary cell pixel size; only image protocols and size reports care. */
 #define CELL_W 8
@@ -106,8 +107,21 @@ dch_vt_free(void)
 void
 dch_vt_feed(const unsigned char *buf, size_t len)
 {
-	if (the_term)
+	if (the_term) {
 		ghostty_terminal_vt_write(the_term, buf, len);
+		gen++;
+	}
+}
+
+int
+dch_vt_size(int *cols, int *rows, unsigned long *g)
+{
+	if (!the_term)
+		return -1;
+	*cols = cur_cols;
+	*rows = cur_rows;
+	*g = gen;
+	return 0;
 }
 
 void
@@ -120,6 +134,7 @@ dch_vt_resize(int cols, int rows)
 	    CELL_H) == GHOSTTY_SUCCESS) {
 		cur_cols = cols;
 		cur_rows = rows;
+		gen++;
 		/* A page holds more rows when narrower: re-size the slack. */
 		if (sb_lines)
 			set_scrollback_lines();

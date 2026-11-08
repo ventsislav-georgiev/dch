@@ -35,6 +35,9 @@ dch \- detachable terminal sessions with a headless agent API
 .RB [ \-\-recent
 .RI [ N ]]
 .br
+.B dch \-\-follow
+.I name
+.br
 .B dch \-\-wait
 .I name
 .B \-\-match
@@ -523,6 +526,55 @@ success, 3 if the session has no mirror, 1 if
 was asked of a session master that predates it (restart the session) or of a
 screen so large the response was truncated (the caret would land on the wrong
 row of the kept tail, so it is withheld).
+.TP
+.BI \-\-follow " name"
+Stream the session's screen to stdout, read\-only, as self\-delimited
+frames: one at once, then one whenever the screen, its size or the caret
+changed, at most one per
+.B DCH_FOLLOW_MS
+(default 150 ms), until the session ends or the reader closes the pipe. A
+frame is a one\-line ASCII header, then exactly
+.I len
+payload bytes:
+.RS
+.PP
+.RI "dch\-frame " "len rows" x "cols crow ccol cvis" \(rsn
+.PP
+Fields are separated by single spaces.
+.B dch\-frame
+names this format; a future incompatible one gets a new first token.
+.I len
+is the payload byte count; the payload is byte\-for\-byte what
+.B \-\-read
+.I name
+.B \-\-ansi
+prints, its trailing newline included.
+.IR rows x cols
+is the screen size (the mirror grid, at most 1024x1024).
+.I crow
+and
+.I ccol
+are the caret, 1\-based like
+.BR \-\-cursor ,
+or
+.B 0 0
+when a screen over 2 MB was tail\-cut and the caret has no row in it;
+.I cvis
+is 1 visible, 0 hidden. Every frame is whole: one sent only because the
+caret moved or was hidden still carries the size and the full payload.
+.RE
+.IP
+A frame is sent only when it differs from the last one sent. An idle
+session costs no rendering: the master answers \(lqunchanged\(rq. Like
+.BR \-\-read ,
+it never attaches, writes nothing to the session, sends no size, and leaves
+the activity stamp and attached clients alone; a
+.B \-\-restart
+is followed through. Exit 0 when the session ends or the reader closes the
+pipe (quietly), 1 if there is no such session, its master stops answering
+or predates
+.B \-\-follow
+(restart the session), 3 if the session has no mirror.
 .TP
 .BI \-\-wait " name " \-\-match " str" " " [ \-\-timeout " ms" ]
 Block until the rendered screen or recent scrollback contains the literal
@@ -1314,6 +1366,11 @@ days, point this somewhere other than
 so a periodic cleaner never has a reason to touch it;
 .B XDG_RUNTIME_DIR
 itself is honored the same way when set.
+.TP
+.B DCH_FOLLOW_MS
+Least time between two
+.B \-\-follow
+frames, in milliseconds (default 150, clamped to 20\(en10000).
 .TP
 .B DCH_HEAL_MS
 Self\-heal tick interval in milliseconds (default 3600000, i.e. hourly); see

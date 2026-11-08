@@ -1765,21 +1765,63 @@ queue_replay(struct client *p)
 	return rc;
 }
 
-/* Serve MSG_READ. payload: {u8 format; u8 source; u16 lines LE} plus an
-** optional 5th flags byte (`flags`; 0 when the client sent only 4).
-** Returns -1 if the client was dropped. */
+/* A parsed MSG_READ request. */
+struct read_req
+{
+	unsigned int format, source, lines, flags;
+	unsigned long since; /* DCH_READ_F_SINCE generation */
+};
+
+/* Parse and validate a MSG_READ payload: {u8 format; u8 source; u16 lines
+** LE}, an optional 5th flags byte (none = 0), and with DCH_READ_F_SINCE a
+** u32 LE generation in bytes 5..8. Pure (the fuzz target drives it).
+** Returns 0, or DCH_ST_ERR for a request this master must refuse. */
+static unsigned int
+read_req_parse(const unsigned char *payload, unsigned int len,
+               struct read_req *q)
+{
+	if (len < 4)
+		return DCH_ST_ERR;
+	q->format = payload[0];
+	q->source = payload[1];
+	q->lines = (unsigned int)payload[2] | ((unsigned int)payload[3] << 8);
+	q->flags = len >= 5 ? payload[4] : 0u;
+	q->since = 0;
+	if (q->format > DCH_READ_ANSI || q->source > DCH_READ_RECENT ||
+	    (q->flags & ~(unsigned int)DCH_READ_F_ALL))
+		return DCH_ST_ERR;
+	/* Recent-N is a scrollback tail; the live cursor and the grid size
+	** describe the visible screen and mean nothing against it. Refuse
+	** rather than answer with a coordinate the caller would misplace. */
+	if ((q->flags & (DCH_READ_F_CURSOR | DCH_READ_F_META |
+	    DCH_READ_F_SINCE)) && q->source == DCH_READ_RECENT)
+		return DCH_ST_ERR;
+	if (q->flags & DCH_READ_F_SINCE)
+	{
+		if (len < DCH_READ_REQ_MAX)
+			return DCH_ST_ERR;
+		q->since = (unsigned long)payload[5] |
+		           ((unsigned long)payload[6] << 8) |
+		           ((unsigned long)payload[7] << 16) |
+		           ((unsigned long)payload[8] << 24);
+	}
+	if (q->source == DCH_READ_RECENT && q->lines == 0)
+		q->lines = 100;
+	return 0;
+}
+
+/* Serve MSG_READ (see read_req_parse for the payload). Returns -1 if the
+** client was dropped. */
 #define READ_RESP_CAP (2u * 1024u * 1024u)
 #define READ_HEADROOM (64u * 1024u)
 static int
-do_read(struct client *p, const unsigned char *payload, unsigned int flags)
+do_read(struct client *p, const unsigned char *payload, unsigned int len)
 {
-	unsigned int format = payload[0];
-	unsigned int source = payload[1];
-	unsigned int lines = (unsigned int)payload[2] |
-	                     ((unsigned int)payload[3] << 8);
-	unsigned int status = DCH_ST_OK;
-	unsigned char cur[DCH_READ_CURSOR_LEN];
-	int crow, ccol, cvis, cwrap, send_cursor = 0;
+	struct read_req q;
+	unsigned int status = DCH_ST_OK, flags;
+	unsigned char cur[DCH_READ_CURSOR_LEN], meta[DCH_READ_META_LEN];
+	int crow, ccol, cvis, cwrap, send_cursor = 0, mcols = 0, mrows = 0;
+	unsigned long gen = 0;
 	char *snap, *body;
 	size_t snaplen, off;
 
@@ -1796,20 +1838,23 @@ do_read(struct client *p, const unsigned char *payload, unsigned int flags)
 		return -1;
 	}
 
-	if (format > DCH_READ_ANSI || source > DCH_READ_RECENT ||
-	    (flags & ~(unsigned int)DCH_READ_F_ALL))
+	if (read_req_parse(payload, len, &q) != 0)
 		return queue_status(p, MSG_READ_END, DCH_ST_ERR);
-	/* Recent-N is a scrollback tail; the live cursor sits on the visible
-	** screen and means nothing against it. Refuse rather than answer with
-	** a coordinate the caller would misplace. */
-	if ((flags & DCH_READ_F_CURSOR) && source == DCH_READ_RECENT)
-		return queue_status(p, MSG_READ_END, DCH_ST_ERR);
-	if (source == DCH_READ_RECENT && lines == 0)
-		lines = 100;
+	flags = q.flags;
 
-	if (dch_vt_snapshot(format == DCH_READ_ANSI ? DCH_VT_FMT_ANSI
+	/* --follow polls with the generation of the last screen it got: an
+	** idle session answers here, without rendering anything. The size and
+	** generation come from the same servicing as the snapshot below. */
+	if ((flags & (DCH_READ_F_META | DCH_READ_F_SINCE)) &&
+	    dch_vt_size(&mcols, &mrows, &gen) < 0)
+		return queue_status(p, MSG_READ_END, DCH_ST_ERR);
+	gen &= 0xffffffffUL; /* u32 on the wire */
+	if ((flags & DCH_READ_F_SINCE) && q.since == gen)
+		return queue_status(p, MSG_READ_END, DCH_ST_SAME);
+
+	if (dch_vt_snapshot(q.format == DCH_READ_ANSI ? DCH_VT_FMT_ANSI
 	    : DCH_VT_FMT_PLAIN,
-	    source == DCH_READ_RECENT ? (int)lines : 0,
+	    q.source == DCH_READ_RECENT ? (int)q.lines : 0,
 	    &snap, &snaplen) < 0)
 	{
 		vt_latch_off();
@@ -1866,8 +1911,26 @@ do_read(struct client *p, const unsigned char *payload, unsigned int flags)
 		return queue_status(p, MSG_READ_END, DCH_ST_BUSY);
 	}
 
-	/* Cursor first: the caller knows where the caret goes before it has
-	** finished reassembling the screen. */
+	/* Meta, then cursor, first: the caller knows the grid and where the
+	** caret goes before it has finished reassembling the screen. */
+	if (flags & DCH_READ_F_META)
+	{
+		/* grid is clamped to 1024x1024 (dch_vt_resize): fits u16 */
+		meta[0] = (unsigned char)(gen & 0xff);
+		meta[1] = (unsigned char)((gen >> 8) & 0xff);
+		meta[2] = (unsigned char)((gen >> 16) & 0xff);
+		meta[3] = (unsigned char)((gen >> 24) & 0xff);
+		meta[4] = (unsigned char)(mrows & 0xff);
+		meta[5] = (unsigned char)((mrows >> 8) & 0xff);
+		meta[6] = (unsigned char)(mcols & 0xff);
+		meta[7] = (unsigned char)((mcols >> 8) & 0xff);
+		if (queue_frame(p, MSG_READ_META, DCH_READ_META_LEN, meta,
+		    sizeof(meta)) < 0)
+		{
+			dch_vt_buf_free(snap);
+			return -1;
+		}
+	}
 	if (send_cursor &&
 	    queue_frame(p, MSG_READ_CURSOR, DCH_READ_CURSOR_LEN, cur,
 	    sizeof(cur)) < 0)
@@ -2977,7 +3040,7 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 			remove_client(p);
 			return -1;
 		}
-		return do_read(p, payload, len >= 5 ? payload[4] : 0u);
+		return do_read(p, payload, len);
 	}
 	else if (type == MSG_WAIT)
 		return do_wait(p, payload, len);

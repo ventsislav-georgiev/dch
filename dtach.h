@@ -123,7 +123,8 @@ enum
 	** and one socket must never carry both. */
 	MSG_KEYS	= 5,	/* payload: NUL-separated key combos */
 	MSG_READ	= 6,	/* payload: {u8 format; u8 source; u16 lines LE;
-				** u8 flags (optional 5th byte)} */
+				** u8 flags (optional 5th byte); u32 gen LE
+				** (bytes 5..8, only with DCH_READ_F_SINCE)} */
 	MSG_WAIT	= 7,	/* payload: literal substring (<= 512 bytes) */
 	/* Responses (master->control-client), same [type][len:2 LE] framing. */
 	MSG_READ_DATA	= 8,	/* len bytes of screen snapshot */
@@ -161,6 +162,10 @@ enum
 				** args + the raw exit tail (to the end), then
 				** MSG_READ_END. pid 0 = no child (held); code
 				** -1 / signal 0 = not reaped or not that. */
+	MSG_READ_META	= 16,	/* payload: {u32 gen LE; u16 rows LE; u16 cols
+				** LE} — the mirror's change generation and
+				** grid size. ONLY sent when the request set
+				** DCH_READ_F_META (dch --follow). */
 };
 
 /* MSG_READ_END / MSG_ACK statuses */
@@ -175,6 +180,8 @@ enum
 				** than the client). Masters built before this
 				** status existed answer silence instead — the
 				** client's inactivity deadline covers both. */
+	DCH_ST_SAME	= 6,	/* DCH_READ_F_SINCE: the mirror generation still
+				** equals the one asked about, nothing rendered */
 };
 
 /* MSG_READ payload fields */
@@ -184,8 +191,13 @@ enum
 #define DCH_READ_RECENT  1
 /* flags byte (payload[4], absent in a 4-byte request = no flags) */
 #define DCH_READ_F_CURSOR 0x01	/* also send MSG_READ_CURSOR */
-#define DCH_READ_F_ALL    (DCH_READ_F_CURSOR)	/* every flag we understand */
+#define DCH_READ_F_META   0x02	/* also send MSG_READ_META */
+#define DCH_READ_F_SINCE  0x04	/* bytes 5..8 = gen: DCH_ST_SAME if unchanged */
+#define DCH_READ_F_ALL    (DCH_READ_F_CURSOR | DCH_READ_F_META | \
+                           DCH_READ_F_SINCE)	/* every flag we understand */
 #define DCH_READ_CURSOR_LEN 6	/* MSG_READ_CURSOR payload size */
+#define DCH_READ_META_LEN   8	/* MSG_READ_META payload size */
+#define DCH_READ_REQ_MAX    9	/* longest MSG_READ payload (with F_SINCE) */
 
 #define DCH_WAIT_MAX 512	/* MSG_WAIT pattern cap */
 

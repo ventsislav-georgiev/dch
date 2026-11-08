@@ -2439,6 +2439,12 @@ usage(void)
 	    "                                             `cursor <row> <col>\n"
 	    "                                             <visible> <wrap>` (1-based)\n"
 	    "                                             on stderr\n"
+	    "  dch --follow <name>                        stream the screen on\n"
+	    "                                             change (read-only):\n"
+	    "                                             `dch-frame <len>\n"
+	    "                                             <rows>x<cols> <crow>\n"
+	    "                                             <ccol> <cvis>` + <len>\n"
+	    "                                             bytes of --read --ansi\n"
 	    "  dch --restart <name>|--all [-f]            re-exec the session's\n"
 	    "                                             master onto this dch\n"
 	    "                                             binary, in place; the\n"
@@ -3009,7 +3015,8 @@ ctl_next_frame(int s, struct ctl_reader *r, int idle_ms,
 			unsigned int plen =
 			    (r->buf[0] == MSG_READ_DATA ||
 			     r->buf[0] == MSG_WAIT_HIT ||
-			     r->buf[0] == MSG_READ_CURSOR) ? flen : 0;
+			     r->buf[0] == MSG_READ_CURSOR ||
+			     r->buf[0] == MSG_READ_META) ? flen : 0;
 
 			if (plen > PKT_MAX)
 				return -1; /* corrupt */
@@ -4241,6 +4248,259 @@ do_read_verb(const char *name, int ansi, int recent_lines, int want_cursor)
 			return 1; /* protocol violation */
 		}
 	}
+}
+
+/* ---- --follow: the screen as a stream of self-delimited frames ----
+**
+**   dch-frame <len> <rows>x<cols> <crow> <ccol> <cvis>\n<len payload bytes>
+**
+** The payload is byte-for-byte what `dch --read <name> --ansi` prints, its
+** trailing newline included. crow/ccol are 1-based like --cursor's (0 0 when
+** the screen rendered over 2 MB and was tail-cut, so the caret has no row);
+** cvis is 1/0. Every frame is whole: a caret-only change still carries the
+** size and the full screen. A future incompatible format changes the first
+** token. One MSG_READ per interval carries the generation of the last screen
+** received; an idle session answers DCH_ST_SAME without rendering, so
+** following costs a few syscalls per tick. A control connection never
+** attaches: nothing is written to the pty, no size is sent. */
+#define FOLLOW_MS_DEFAULT 150
+
+struct follow_frame
+{
+	char *buf;
+	size_t len, cap;
+	unsigned int rows, cols, crow, ccol, cvis;
+	unsigned long gen;
+};
+
+/* One round trip on control socket s. since = generation of the last screen
+** received, or -1 for "render regardless". Returns 1 (new screen in *f), 0
+** (unchanged or busy), -1 (connection lost or silent), 2 (refused, *status
+** set). */
+static int
+follow_fetch(int s, struct ctl_reader *r, long long since,
+             struct follow_frame *f, unsigned int *status)
+{
+	unsigned char req[PKT_HDR + DCH_READ_REQ_MAX], payload[PKT_MAX], type;
+	unsigned int len, plen = since < 0 ? 5 : DCH_READ_REQ_MAX;
+	int got_meta = 0;
+
+	req[0] = MSG_READ;
+	req[1] = (unsigned char)plen;
+	req[2] = 0;
+	req[3] = DCH_READ_ANSI;
+	req[4] = DCH_READ_VISIBLE;
+	req[5] = req[6] = 0;
+	req[7] = DCH_READ_F_CURSOR | DCH_READ_F_META;
+	if (since >= 0)
+	{
+		req[7] |= DCH_READ_F_SINCE;
+		req[8] = (unsigned char)(since & 0xff);
+		req[9] = (unsigned char)((since >> 8) & 0xff);
+		req[10] = (unsigned char)((since >> 16) & 0xff);
+		req[11] = (unsigned char)((since >> 24) & 0xff);
+	}
+	/* Not send_ctl: write_packet_or_fail exits 1 on a dead master, and a
+	** session ending under us is a clean exit 0. One small write on a
+	** stream socket is never split. */
+	if (write(s, req, PKT_HDR + plen) != (ssize_t)(PKT_HDR + plen))
+		return -1;
+	f->len = 0;
+	f->crow = f->ccol = f->cvis = 0;
+	for (;;)
+	{
+		if (ctl_next_frame(s, r, CTL_IDLE_MS, &type, payload, &len) <= 0)
+			return -1;
+		if (type == MSG_READ_META && len == DCH_READ_META_LEN)
+		{
+			f->gen = (unsigned long)payload[0] |
+			         ((unsigned long)payload[1] << 8) |
+			         ((unsigned long)payload[2] << 16) |
+			         ((unsigned long)payload[3] << 24);
+			f->rows = (unsigned int)payload[4] |
+			          ((unsigned int)payload[5] << 8);
+			f->cols = (unsigned int)payload[6] |
+			          ((unsigned int)payload[7] << 8);
+			got_meta = 1;
+		}
+		else if (type == MSG_READ_CURSOR && len == DCH_READ_CURSOR_LEN)
+		{
+			f->crow = ((unsigned int)payload[0] |
+			           ((unsigned int)payload[1] << 8)) + 1;
+			f->ccol = ((unsigned int)payload[2] |
+			           ((unsigned int)payload[3] << 8)) + 1;
+			f->cvis = payload[4] ? 1 : 0;
+		}
+		else if (type == MSG_READ_DATA)
+		{
+			/* +1: room for --read's closing newline */
+			if (f->len + len + 1 > f->cap)
+			{
+				size_t ncap = (f->len + len + 1) * 2;
+				char *nb = realloc(f->buf, ncap);
+
+				if (!nb)
+					return -1;
+				f->buf = nb;
+				f->cap = ncap;
+			}
+			memcpy(f->buf + f->len, payload, len);
+			f->len += len;
+		}
+		else if (type == MSG_READ_END)
+		{
+			/* busy: our own queue is drained, so this is the
+			** screen outgrowing it — try again next tick */
+			if ((len == DCH_ST_SAME && since >= 0) ||
+			    len == DCH_ST_BUSY)
+				return 0;
+			if (len != DCH_ST_OK && len != DCH_ST_TRUNC)
+			{
+				*status = len;
+				return 2;
+			}
+			if (!got_meta)
+			{
+				/* a master from before request flags ignores
+				** them and answers a plain read */
+				*status = DCH_ST_UNSUP;
+				return 2;
+			}
+			if (!f->buf && !(f->buf = malloc(f->cap = 64)))
+				return -1;
+			f->buf[f->len++] = '\n';
+			return 1;
+		}
+		else
+			return -1; /* protocol violation */
+	}
+}
+
+/* --follow's refusal: the --read statuses, except that a master which
+** rejects the new request flags (DCH_ST_ERR) or ignores them (no meta frame,
+** DCH_ST_UNSUP here) but still serves a plain read is simply too old. */
+static int
+follow_refused(unsigned int status)
+{
+	static char probe[PKT_MAX + 1];
+
+	if ((status == DCH_ST_ERR &&
+	     fetch_screen(sock_path, probe, PKT_MAX, CTL_IDLE_MS, 0) >= 0) ||
+	    status == DCH_ST_UNSUP)
+	{
+		fputs("dch: session master predates --follow; restart the "
+		      "session (dch --restart <name>)\n", stderr);
+		return 1;
+	}
+	return ctl_status_exit(status);
+}
+
+static int
+do_follow_verb(const char *name)
+{
+	struct follow_frame a = {0}, b = {0}, *last = &a, *cur = &b, *t;
+	struct ctl_reader r = {0};
+	const char *e = getenv("DCH_FOLLOW_MS");
+	long iv = e ? atol(e) : 0;
+	long long since = -1, next;
+	unsigned int status = 0;
+	int s, rc, sent = 0, fails = 0, ret = 0;
+	struct sigaction sa;
+
+	if (iv <= 0)
+		iv = FOLLOW_MS_DEFAULT;
+	if (iv < 20)
+		iv = 20;
+	if (iv > 10000)
+		iv = 10000;
+	/* A reader closing the pipe ends us with exit 0: EPIPE, not a signal. */
+	memset(&sa, 0, sizeof sa);
+	sa.sa_handler = SIG_IGN;
+	sigaction(SIGPIPE, &sa, NULL);
+
+	s = control_connect(name, 0);
+	if (s < 0)
+		return 1;
+	for (;;)
+	{
+		next = wall_ms() + iv;
+		rc = follow_fetch(s, &r, since, cur, &status);
+		if (rc < 0)
+		{
+			close(s);
+			s = -1;
+			/* Never answered at all, or keeps failing after
+			** reconnects: a dead or wedged master. */
+			if (!sent || ++fails > 3)
+			{
+				ret = ctl_dead_exit(&r, "follow");
+				break;
+			}
+			/* Lost mid-stream: the session ended (connect fails:
+			** exit 0) or `--restart` dropped control connections
+			** (reconnect and render afresh). */
+			memset(&r, 0, sizeof r);
+			s = control_connect(name, 1);
+			if (s < 0)
+				break;
+			since = -1;
+			continue;
+		}
+		if (rc == 2)
+		{
+			ret = follow_refused(status);
+			break;
+		}
+		fails = 0;
+		if (rc == 1)
+		{
+			since = (long long)cur->gen;
+			if (!sent || cur->len != last->len ||
+			    cur->rows != last->rows || cur->cols != last->cols ||
+			    cur->crow != last->crow || cur->ccol != last->ccol ||
+			    cur->cvis != last->cvis ||
+			    memcmp(cur->buf, last->buf, cur->len) != 0)
+			{
+				printf("dch-frame %zu %ux%u %u %u %u\n", cur->len,
+				       cur->rows, cur->cols, cur->crow, cur->ccol,
+				       cur->cvis);
+				fwrite(cur->buf, 1, cur->len, stdout);
+				if (fflush(stdout) != 0 || ferror(stdout))
+					break; /* reader went away: exit 0 */
+				sent = 1;
+				t = last;
+				last = cur;
+				cur = t;
+			}
+		}
+		/* Sleep out the tick, watching stdout: a reader that closes
+		** the pipe while the session is idle must still end us. Linux
+		** flags a reader-less pipe with POLLERR whatever was asked;
+		** macOS only answers POLLHUP to a POLLOUT poll, which would
+		** spin on a writable pipe, so that one is a per-tick probe. */
+		for (;;)
+		{
+			struct pollfd pfd = { 1, 0, 0 };
+			long long left = next - wall_ms();
+
+			if (left <= 0)
+			{
+				pfd.events = POLLOUT;
+				left = 0;
+			}
+			if (poll(&pfd, 1, (int)left) > 0 &&
+			    (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)))
+				goto out;
+			if (pfd.events)
+				break;
+		}
+	}
+out:
+	if (s >= 0)
+		close(s);
+	free(a.buf);
+	free(b.buf);
+	return ret;
 }
 
 static int
@@ -9473,7 +9733,7 @@ main(int argc, char **argv)
 	       A_SPAWN, A_SEND, A_RUN, A_KEYS, A_READ, A_WAIT, A_STATUS,
 	       A_REPORT, A_META, A_RESTART, A_AGENT_LIST, A_AGENT_SEND,
 	       A_RESPAWN, A_CMD, A_HISTORY, A_REVIVE, A_SAY, A_STOP,
-	       A_PIN, A_UNPIN, A_FORGET }
+	       A_PIN, A_UNPIN, A_FORGET, A_FOLLOW }
 	    action = A_ATTACH;
 	char alias_arg[600] = "";
 	int opt_ansi = 0, opt_recent = -1, opt_timeout = 10000, opt_cursor = 0;
@@ -9769,6 +10029,7 @@ main(int argc, char **argv)
 		         strcmp(a, "--run") == 0 ||
 		         strcmp(a, "--keys") == 0 ||
 		         strcmp(a, "--read") == 0 ||
+		         strcmp(a, "--follow") == 0 ||
 		         strcmp(a, "--wait") == 0 ||
 		         strcmp(a, "--status") == 0 ||
 		         strcmp(a, "--report") == 0 ||
@@ -9782,6 +10043,7 @@ main(int argc, char **argv)
 			       : strcmp(a, "--run") == 0   ? A_RUN
 			       : strcmp(a, "--keys") == 0  ? A_KEYS
 			       : strcmp(a, "--read") == 0  ? A_READ
+			       : strcmp(a, "--follow") == 0 ? A_FOLLOW
 			       : strcmp(a, "--wait") == 0  ? A_WAIT
 			       : strcmp(a, "--status") == 0 ? A_STATUS
 			       : strcmp(a, "--respawn") == 0 ? A_RESPAWN
@@ -10524,6 +10786,8 @@ main(int argc, char **argv)
 		}
 		return do_read_verb(session_name, opt_ansi, opt_recent,
 		                    opt_cursor);
+	case A_FOLLOW:
+		return do_follow_verb(session_name);
 	case A_STATUS:
 	{
 		char sp[1100];

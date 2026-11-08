@@ -40,6 +40,15 @@ dch_vt_resize(int cols, int rows)
 }
 
 int
+dch_vt_size(int *cols, int *rows, unsigned long *g)
+{
+	(void)cols;
+	(void)rows;
+	(void)g;
+	return -1;
+}
+
+int
 dch_vt_snapshot(int format, int lines, char **out, size_t *outlen)
 {
 	(void)format;

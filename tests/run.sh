@@ -200,6 +200,7 @@ fi
 # --- resize reaches an idle session, even with SIGWINCH blocked at spawn ----
 if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "idle resize reaches the session" resize_idle_test.py
+    pyrun "--follow streams whole frames on change, read-only" follow_test.py
     pyrun "respawn keeps the session across a child exit" respawn_test.py
     pyrun "--restart --include-agents restarts stale Claude agents" agent_restart_test.py
     pyrun "--history/--revive bring dead sessions back" revive_test.py

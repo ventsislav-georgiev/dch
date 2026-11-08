@@ -42,6 +42,13 @@ void dch_vt_feed(const unsigned char *buf, size_t len);
 void dch_vt_resize(int cols, int rows);
 
 /*
+ * Mirror grid size (after clamping) and a change generation that moves on
+ * every feed and resize, so an unchanged value means the screen cannot have
+ * changed. Returns 0, or -1 when disabled (outputs untouched).
+ */
+int dch_vt_size(int *cols, int *rows, unsigned long *gen);
+
+/*
  * Render the screen. lines == 0: visible screen only; lines > 0: the
  * last `lines` rows including scrollback. format is DCH_VT_FMT_*.
  * On success *out is a malloc'd NUL-terminated buffer (*outlen excludes
