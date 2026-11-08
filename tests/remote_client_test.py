@@ -23,8 +23,8 @@ the 0x13's reason; 0x12 ends the attach with 0.
 
 Run:  python3 tests/remote_client_test.py        (uses ./dch)
 """
-import errno, fcntl, json, os, pty, re, select, shutil, signal, socket
-import struct, subprocess, sys, tempfile, termios, threading, time
+import errno, json, os, re, select, shutil, signal, socket
+import struct, subprocess, sys, tempfile, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # the 300 ms box plus a process start; ASan (DCH_TEST_NO_BUDGET) is slower
@@ -141,6 +141,8 @@ class Fake:
 
 
 def main():
+    # POSIX only, so windows_client_test.py can import Fake and frame
+    import fcntl, pty, termios
     tmp = os.path.realpath(tempfile.mkdtemp(prefix="dchrc", dir="/tmp"))
     fake = os.path.join(tmp, "fake")
     os.makedirs(fake)

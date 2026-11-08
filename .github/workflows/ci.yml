@@ -152,10 +152,10 @@ jobs:
           for v in full lite; do
             if [ $v = lite ]; then
               ./configure --without-libghostty
-              srcs="attach.c master.c dch.c vt_stub.c bridge.c serve.c"
+              srcs="attach.c master.c dch.c vt_stub.c bridge.c serve.c rframe.c remote.c json.c"
             else
               ./configure
-              srcs="attach.c master.c dch.c vt.c bridge.c serve.c"
+              srcs="attach.c master.c dch.c vt.c bridge.c serve.c rframe.c remote.c json.c"
             fi
             for f in $srcs; do
               clang --analyze -Xanalyzer -analyzer-werror -I. \
@@ -163,6 +163,37 @@ jobs:
             done
           done
           exit $rc
+
+  # The Windows client (#077): dch.exe from MSYS2's mingw-w64 gcc under the
+  # strict set, then its checks against fake servers on 127.0.0.1. Native
+  # Windows python and gcc (UCRT64); no Cygwin runtime in the binary.
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      # LF stays LF: the build script runs under MSYS2's sh.
+      - run: git config --global core.autocrlf false
+        shell: pwsh
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+        with:
+          msystem: UCRT64
+          update: false
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-python
+      - name: Build dch.exe (strict)
+        run: |
+          CC=gcc scripts/build-windows.sh -Wextra -Wformat=2 -Wshadow \
+            -Wpointer-arith -Wcast-qual -Wstrict-prototypes \
+            -Wmissing-prototypes -Wundef -Wvla -Wnull-dereference \
+            -Wimplicit-fallthrough -Werror
+          ls -la dch.exe
+          ./dch.exe --version
+      - name: Test
+        run: DCH=./dch.exe python tests/windows_client_test.py
 
   # libFuzzer targets (tests/fuzz/), 60 s each under ASan + UBSan.
   fuzz:
