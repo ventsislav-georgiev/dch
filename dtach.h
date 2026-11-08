@@ -286,6 +286,11 @@ int dch_claude_gone(const char *rec);
 int path_lookup(const char *name, const char *path, const char *cwd,
                 char *out, size_t outsz);
 
+/* The session socket dir, once main() has computed it. */
+const char *dch_sock_dir(void);
+/* `dch serve` (#073): Prosper's remote frames 1.0, serve.c. */
+int serve_main(int argc, char **argv);
+
 int dch_config_path(char *out, size_t cap);
 int dch_config_get(const char *key, char *out, size_t cap);
 int dch_config_bool(const char *key);

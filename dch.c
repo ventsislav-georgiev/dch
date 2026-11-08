@@ -445,6 +445,13 @@ dch_config_bool(const char *key)
 	        !strcasecmp(v, "yes") || !strcasecmp(v, "on"));
 }
 
+/* The session socket dir, for serve.c (once main() has computed it). */
+const char *
+dch_sock_dir(void)
+{
+	return sock_dir;
+}
+
 /* SOCK_DIR = $DCH_SOCKET_DIR, else $XDG_RUNTIME_DIR/dch-$UID, fallback
 ** /tmp/dch-$UID. mkdir 0700. DCH_SOCKET_DIR (when set) is used verbatim — a host
 ** process (e.g. a GUI app spawning sessions) can pin one deterministic dir so it
@@ -2512,6 +2519,10 @@ usage(void)
 	    "                                             them too\n"
 	    "  dch --agent-list [--json]                  list native Claude peers\n"
 	    "  dch --agent-send <name> <message...>       message one native peer\n"
+	    "  dch serve [--allow-create] [--allow-user <u>]...  serve sessions to\n"
+	    "                                             the Prosper iPhone app\n"
+	    "                                             over Tailscale (port\n"
+	    "                                             8771; dch serve -h)\n"
 	    "Env: DCH_NO_DETECT=1 disables screen-content state detection.\n"
 	    "     DCH_CONFIG names the config file (else\n"
 	    "     $XDG_CONFIG_HOME/dch/config, else ~/.config/dch/config).\n"
@@ -10779,6 +10790,10 @@ main(int argc, char **argv)
 
 	if (compute_sock_dir() < 0)
 		return 1;
+
+	/* The Prosper remote-frames server (#073), serve.c. */
+	if (argc >= 2 && strcmp(argv[1], "serve") == 0)
+		return serve_main(argc - 2, argv + 2);
 
 	int i = 1;
 	while (i < argc)
