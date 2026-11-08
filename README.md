@@ -1104,6 +1104,126 @@ For a session meant to run for days, point `DCH_SOCKET_DIR` somewhere
 other than `/tmp` (see [Environment](#environment)) so the cleaner never
 has a reason to touch it in the first place.
 
+## dch serve (Prosper remote hosts)
+
+`dch serve` lets the Prosper iPhone app drive the dch sessions of a host
+that runs no Prosper, such as a Linux box on your tailnet. It speaks
+Prosper's "remote frames" protocol 1.0 on TCP port 8771, the port the phone
+dials. It runs in the foreground and logs to stderr with timestamps.
+SIGINT or SIGTERM stops it and leaves every session running.
+
+```sh
+dch serve                    # list, attach, kill, rename, watch
+dch serve --allow-create     # also let the phone start sessions
+dch serve --check-peer 100.101.102.103   # would this peer get in?
+```
+
+**Trust model.** Only your own devices on your tailnet get in. Every check
+runs right after the connection is accepted, before a byte is read, and a
+refused peer is closed without a reply.
+
+- **Address.** `dch serve` listens only on this host's Tailscale IPv4: the
+  first line of `tailscale ip -4`. When the CLI is not on `PATH`, it takes the
+  first 100.64.0.0/10 address on an interface. When the CLI is on `PATH` but
+  reports no address (tailscale stopped or logged out), it refuses to start;
+  it does not fall back to an interface scan, because an ISP's CGNAT address
+  sits in the same range. It never listens on 0.0.0.0.
+- **Peer range.** A peer must be an IPv4 address in 100.64.0.0/10.
+- **Owner.** `tailscale whois --json <peer>` must name the same numeric user
+  id as `Self.UserID` in `tailscale status --json`, which is read once at
+  startup. Login names are never compared for the owner.
+- **Tagged nodes.** A tagged peer is refused. No user owns a tagged host, so
+  on one `dch serve` refuses to start unless you name who may connect:
+  `--allow-user <id|login>`, repeatable. Prefer the numeric user id (the
+  `UserProfile.ID` that `tailscale whois --json` prints). A login is matched
+  against `UserProfile.LoginName` without regard to ASCII case.
+  `--allow-user` is only for tagged hosts; an untagged host serves its owner,
+  and `dch serve` refuses `--allow-user` there.
+- **Whois down.** When `tailscale whois` cannot answer, the peer is refused
+  and a line is logged. `--whois-optional` accepts it instead, with a
+  warning. It also lets `dch serve` start when `tailscale status` fails, and
+  then any tailnet peer gets in: use it only on a tailnet you alone use.
+
+**Flags.**
+
+| Flag | Effect |
+| --- | --- |
+| `--bind <ipv4>` | Listen there instead. Relaxes nothing: the peer checks above still apply, so an address that is not on your tailnet admits nobody (it warns). A wildcard or non-unicast address is refused. |
+| `--port <n>` | Another port, 0 for any (tests). The phone always dials 8771. |
+| `--allow-create` | Let the phone start a session with its own command (0x02). Off by default, and `create` is then missing from the ops the phone sees. Attach (0x01) still starts a shell session when the name is new, as `dch -n` does. |
+| `--allow-user <u>` | On a tagged host, accept this user's nodes (numeric id or login). Repeatable. |
+| `--whois-optional` | Accept tailnet peers when whois cannot answer (see above). |
+| `--check-peer <ip>` | Print whether that peer would get in, then exit 0 (accept) or 1. |
+
+**What the phone gets.** The session list (`dch --ls-json`, re-encoded: name,
+alias, state, agent count, and only GitHub pull-request links from `--meta`),
+a live list for its home screen (polled every 2 s), attach with resize and
+redraw, kill, rename, and a screen snapshot from the terminal mirror (empty in
+a dch-lite build). An attached connection runs a real `dch -E -f -n <name>`
+client in a pseudo-terminal, so the newest attach to a session retires the
+older connection. Commands run as argument vectors, never through a shell.
+
+**Port in use.** On a Mac where Prosper's Remote Terminal is on, Prosper
+already holds port 8771, and `dch serve` refuses to start with a message
+saying so (the same for a second `dch serve`). It never takes another port
+and never retries: restarting is the service manager's job.
+
+**systemd** (`~/.config/systemd/user/dch-serve.service`, then
+`systemctl --user enable --now dch-serve`; run `loginctl enable-linger $USER`
+so it starts without a login):
+
+```ini
+[Unit]
+Description=dch serve (Prosper remote host)
+After=tailscaled.service network-online.target
+Wants=tailscaled.service network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/dch serve
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+The `tailscale` CLI must be on the service's `PATH` (systemd's default
+includes `/usr/bin` and `/usr/local/bin`).
+
+**launchd** (`~/Library/LaunchAgents/dev.dch.serve.plist`, then
+`launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.dch.serve.plist`):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.dch.serve</string>
+  <key>ProgramArguments</key>
+  <array><string>/opt/homebrew/bin/dch</string><string>serve</string></array>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string></dict>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>5</integer>
+  <key>StandardErrorPath</key><string>/tmp/dch-serve.log</string>
+</dict>
+</plist>
+```
+
+**Test only.** `DCH_SERVE_TEST_LOOPBACK=1` together with a loopback `--bind`
+lets loopback peers past the address check, so the test suite can run the
+server on 127.0.0.1 with a fake `tailscale`. The owner check still runs. It
+logs a loud warning; never set it on a real host.
+
+**Limits.** At most 64 connections, 16 per peer, and 4 live-list streams per
+phone. A connection that is not attached or watching closes after 30 s
+without a whole frame, and any connection closes when its output goes untaken
+for 20 s. Control frames over 64 KiB, and any frame over the protocol's
+256 MiB guard, close the connection. Sent frames are at most 8 MiB.
+
+The golden fixtures in `tests/remote-frames/` are Prosper's conformance set;
+`tests/serve_test.py` runs them.
+
 ## Native Claude and Codex messages
 
 A dch session that runs `codex`, directly or through a wrapper such as `headroom wrap codex`, registers as a Claude native peer.

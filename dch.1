@@ -76,6 +76,18 @@ dch \- detachable terminal sessions with a headless agent API
 .B dch \-\-config
 .RI [ key
 .RI [ value \fR|\fP\fB\-\-unset\fP]]
+.br
+.B dch serve
+.RB [ \-\-bind
+.IR ipv4 ]
+.RB [ \-\-port
+.IR n ]
+.RB [ \-\-allow\-create ]
+.RB [ \-\-allow\-user
+.IR user ]...
+.RB [ \-\-whois\-optional ]
+.RB [ \-\-check\-peer
+.IR ipv4 ]
 .SH DESCRIPTION
 .B dch
 keeps a program running in a detachable session (a fork of dtach). Run bare,
@@ -986,6 +998,67 @@ behaviour; only a lost message does (refused, or dropped). An orderly restart
 or shutdown attempts dropped receipts for pending messages; a crash or SIGKILL
 is not durable. Messages are limited to 16384 bytes and wire frames to 65536
 bytes. The bridge handles one message at a time and rejects attachments.
+.SH REMOTE SERVER
+.B dch serve
+serves this host's sessions to the Prosper iPhone app over Prosper's remote
+frames protocol 1.0 on TCP port 8771, so a host with no Prosper (a Linux box,
+say) shows up on the phone. It runs in the foreground, logs to standard error,
+and exits 0 on SIGINT or SIGTERM, leaving every session running.
+.PP
+It listens only on this host's Tailscale IPv4, the first line of
+.BR "tailscale ip \-4" ,
+or, when the
+.B tailscale
+CLI is not on
+.BR PATH ,
+the first 100.64.0.0/10 address on an interface. When the CLI reports no
+address it refuses to start, and it never listens on a wildcard address. A
+peer is checked right after accept, before a byte is read, and a refused peer
+is closed with no reply: it must be an IPv4 address in 100.64.0.0/10, not a
+tagged node, and owned by this host's user (the numeric
+.B UserProfile.ID
+of
+.B tailscale whois \-\-json
+equals
+.B Self.UserID
+of
+.BR "tailscale status \-\-json" ).
+When whois cannot answer the peer is refused. A port already in use (Prosper's
+Remote Terminal on a Mac, or another
+.BR "dch serve" )
+makes it exit 1; it takes no other port and does not retry.
+.TP
+.BI \-\-bind " ipv4"
+Listen on this address instead. It relaxes no peer check, so an address off
+the tailnet admits nobody (a warning says so). Non-unicast addresses are
+refused.
+.TP
+.BI \-\-port " n"
+Another port, 0 for any. For tests: the phone dials 8771.
+.TP
+.B \-\-allow\-create
+Let the phone start sessions with its own command; without it,
+.B create
+is not offered and a create request is refused.
+.TP
+.BI \-\-allow\-user " user"
+Required on a tagged host, which no user owns: accept this user's nodes, given
+as a numeric Tailscale user id (exact) or a login (ASCII case-insensitive).
+Repeatable. Refused on an untagged host, which serves its owner.
+.TP
+.B \-\-whois\-optional
+Accept tailnet peers when whois cannot answer, with a warning; also lets the
+server start when
+.B tailscale status
+fails, and then any tailnet peer gets in.
+.TP
+.BI \-\-check\-peer " ipv4"
+Print whether that peer would get in and exit 0 (accept) or 1 (refuse).
+.PP
+.B DCH_SERVE_TEST_LOOPBACK=1
+with a loopback
+.B \-\-bind
+lets loopback peers past the address check. It exists for the test suite only.
 .SH CONFIG FILE
 Optional: dch needs none. Read fresh on every use from
 .BR $DCH_CONFIG ,
