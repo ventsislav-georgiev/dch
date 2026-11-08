@@ -255,6 +255,7 @@ dch <cmd...>     # same, but if new, run <cmd> in it
 dch -ls          # list sessions as alias/harness (real-name), or real-name
 dch -lj          # list as name<TAB>alias<TAB>activity_epoch
 dch -l           # session picker: tabs, live states, actions; Enter attaches
+dch -a host:name # attach to a session on another host (see Remote hosts)
 dch -rl          # rename: pick a session, type a display alias, repeat
 dch -m <name> [alias]  # set the alias without the picker (none: clear it)
 dch -k [name]    # kill a session (interactive picker if no name)
@@ -643,6 +644,7 @@ running sessions.
 | `sidekick_pattern` | a string, read by the session picker; empty: no Sidekicks tab | `-qa` |
 | `picker_sort` | `activity` or `name`: the session picker's sort, also set by its `s` key | `activity` |
 | `detach_key` | `detach` or `switch`: what one `Ctrl-\` press does; two presses do the other (see [Cheatsheet](#cheatsheet)) | `detach` |
+| `remote_hosts` | empty: your tailnet peers; `off`: none; else a `[label=]host[:port],...` list (see [Remote hosts](#remote-hosts)) | empty |
 
 ```sh
 dch --config                         # the path, then every known key's effective value
@@ -714,6 +716,7 @@ later does nothing to a running session.
 | `DCH_NO_REPLAY` | master | unset | Anything but empty or `0`: attach clears and asks for a repaint instead of [replaying the screen](#attaching-replays-the-screen). |
 | `DCH_SCROLLBACK` | master | `2000` | Mirror scrollback lines, max `100000`, `0` none (`--read --recent`, [Verbs](#verbs)). |
 | `DCH_NO_HISTORY` | master | unset | Anything but empty or `0`: no history record ([Bringing sessions back](#bringing-sessions-back)). |
+| `DCH_NO_REMOTE` | `dch -ls`, `-l`, `-a` | unset | Anything but empty or `0`: no [remote hosts](#remote-hosts) in `-ls` or the picker (`--hosts` still applies). |
 | `DCH_RECORD_MS` | master | `60000` | How often the history record is refreshed. |
 | `DCH_HEAL_MS` | master | `3600000` | The [self-heal](#socket-loss-and-self-heal) interval. |
 | `DCH_HOLD_MS`, `DCH_RESPAWN_TTL_MS` | master | `120000`, `300000` | How long a held session waits, and an unused `--respawn` arm lives ([Verbs](#verbs)). |
@@ -1247,6 +1250,58 @@ for 20 s. Control frames over 64 KiB, and any frame over the protocol's
 
 The golden fixtures in `tests/remote-frames/` are Prosper's conformance set;
 `tests/serve_test.py` runs them.
+
+## Remote hosts
+
+dch is also the client: it lists and attaches to the sessions of your other
+machines, the ones serving them over Prosper's remote frames 1.0 on port 8771
+(`dch serve` above, or Prosper's own server on a Mac).
+
+```sh
+dch --ls                          # local sessions, then host:name for remote ones
+dch -a mybox:api                  # attach to session api on mybox
+dch --host mybox -a api           # the same, for a name with a ':' in it
+dch -l                            # the picker lists remote rows too
+dch --ls-json --remote            # remote rows, each with a "host" field
+dch --hosts mini,pi=100.64.1.2:8771 --ls   # these hosts, not your tailnet
+```
+
+**Which hosts.** `--hosts` (a comma-separated `[label=]host[:port]` list), else
+the `remote_hosts` config key in the same form, else your tailnet: the peers
+in `tailscale status --json` that are online, owned by the same Tailscale user
+as this host (by numeric user id), and untagged, each at its 100.64.0.0/10
+address and named by the first label of its MagicDNS name. A tagged peer is
+only reached when you list it. dch never dials anything else. With no
+`tailscale` CLI and no peers, there are simply no remote rows.
+`remote_hosts = off` or `DCH_NO_REMOTE=1` turns remote hosts off (`--hosts`
+still works).
+
+**Listing.** `--ls` probes every host at once and waits at most 300 ms in all,
+so a host that is down or hanging never holds it up. A host that does not
+answer in time shows the rows it last answered, marked `[stale]`, for two
+minutes (a cache in dch's state dir). `--ls-json` and `-lj` stay local unless
+you add `--remote`. The picker shows remote rows in Sessions with their host
+faint, and re-probes in the background every 2 s; a stale row is faint and
+says Stale. A host speaking a newer protocol major is skipped, with a note on
+stderr.
+
+**Attaching.** `dch -a host:name`, or Enter on a remote row in the picker,
+attaches the way a local attach does: raw terminal, the detach key and its
+double tap (to the picker) handled locally, the window size following yours.
+Detaching closes the connection and nothing else; the remote session runs on.
+`-a` only attaches, never creates, and checks the name is in the host's list
+first. An exact local session name wins over `host:name`; `--host` is the
+unambiguous form. A lost connection restores the terminal, says so, and exits
+1.
+
+**Trust.** Every byte from a peer is untrusted: frames and JSON fields are
+bounded, and every name or message a peer sent is printed with its control
+characters escaped (`\xNN`), in `--ls`, `-lj` and the picker. Only the screen
+bytes of an attach go to the terminal as they are, as a local session's do.
+
+**Not yet.** No live list stream (the picker polls) and no remote kill,
+rename or create: those are mutating operations that will need the server's
+`ops` and the same confirmation the local ones have.
 
 ## Native Claude and Codex messages
 
