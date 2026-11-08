@@ -25,6 +25,7 @@
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <dirent.h>
+#include <ifaddrs.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <stdarg.h>
@@ -62,6 +63,9 @@
 #define WATCH_BEAT_MS 25000	/* spec heartbeat */
 #define MAX_CONN 64
 #define MAX_PER_PEER 16
+#define NEG_N 64		/* refused peers remembered by the parent */
+#define NEG_MS 30000		/* for this long, refused with no fork */
+#define MAX_SELF 16		/* `tailscale ip -4` lines kept */
 #define MAX_WATCH_PER_DEV 4	/* spec */
 #define NAME_CAP 255
 #define DEV_CAP 128
@@ -83,14 +87,79 @@ now_ms(void)
 	return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
+/* The UTF-8 sequence at s: its length with the code point in *cp, or 0 when
+** it is not one (a stray, overlong or surrogate byte run). */
+static int
+utf8_at(const unsigned char *s, unsigned *cp)
+{
+	static const unsigned min[] = { 0, 0, 0x80, 0x800, 0x10000 };
+	int n = *s < 0x80 ? 1 : *s >= 0xc2 && *s < 0xe0 ? 2
+	      : *s >= 0xe0 && *s < 0xf0 ? 3 : *s >= 0xf0 && *s < 0xf5 ? 4 : 0;
+	int i;
+
+	*cp = *s;
+	if (n < 2)
+		return n;
+	*cp = *s & (0x7f >> n);
+	for (i = 1; i < n; i++)
+	{
+		if ((s[i] & 0xc0) != 0x80)
+			return 0;
+		*cp = *cp << 6 | (s[i] & 0x3f);
+	}
+	return *cp < min[n] || *cp > 0x10ffff ||
+	       (*cp >= 0xd800 && *cp < 0xe000) ? 0 : n;
+}
+
+/* A code point a terminal acts on: C0, DEL, C1, and the bidi embeddings,
+** overrides and isolates (U+202A-U+202E, U+2066-U+2069). */
+static int
+cp_ctl(unsigned cp)
+{
+	return cp < 0x20 || (cp >= 0x7f && cp < 0xa0) ||
+	       (cp >= 0x202a && cp <= 0x202e) || (cp >= 0x2066 && cp <= 0x2069);
+}
+
+/* s into out[cap] with every control escaped, \xNN for a byte (also one
+** that is not UTF-8) and \u{NNNN} for a code point, so that nothing a peer
+** sends (a session name, a device id) can drive the operator's terminal. */
+static void
+logsafe(char *out, size_t cap, const char *s)
+{
+	const unsigned char *p = (const unsigned char *)s;
+	size_t o = 0;
+	unsigned cp;
+	int n;
+
+	while (*p && o + 10 < cap)
+	{
+		n = utf8_at(p, &cp);
+		if (n && !cp_ctl(cp))
+		{
+			memcpy(out + o, p, n);
+			o += n;
+		}
+		else if (n > 1)
+			o += snprintf(out + o, cap - o, "\\u{%04x}", cp);
+		else
+		{
+			o += snprintf(out + o, cap - o, "\\x%02x", *p);
+			n = 1;
+		}
+		p += n;
+	}
+	out[o] = '\0';
+}
+
 static void slog(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
 /* One line to stderr, "<UTC time> dch serve[pid]: <text>", as one write so
-** handlers' lines do not interleave. */
+** handlers' lines do not interleave. The text goes through logsafe: it
+** carries peer-supplied strings. */
 static void
 slog(const char *fmt, ...)
 {
-	char line[1024];
+	char line[2048], text[1024];
 	struct timespec ts;
 	struct tm tm;
 	va_list ap;
@@ -106,11 +175,12 @@ slog(const char *fmt, ...)
 		return;
 	n += (size_t)k;
 	va_start(ap, fmt);
-	k = vsnprintf(line + n, sizeof line - n - 1, fmt, ap);
+	k = vsnprintf(text, sizeof text, fmt, ap);
 	va_end(ap);
 	if (k < 0)
 		return;
-	n += (size_t)k < sizeof line - n - 1 ? (size_t)k : sizeof line - n - 2;
+	logsafe(line + n, sizeof line - n - 1, text);
+	n += strlen(line + n);
 	line[n++] = '\n';
 	(void)!write(2, line, n);
 }
@@ -384,17 +454,21 @@ rq_size(const struct json_parser *jp, int *cols, int *rows)
 		*rows = v > 1000 ? 1000 : (int)v;
 }
 
-/* A session name dch can be handed as one argv word. The leading '-' is
-** checked apart (it has its own spec message). */
+/* A session name dch can be handed as one argv word: UTF-8 with no '/' and
+** no control logsafe would escape. The leading '-' is checked apart (it has
+** its own spec message). */
 static int
 name_ok(const char *s)
 {
+	const unsigned char *p = (const unsigned char *)s;
 	size_t n = strlen(s);
+	unsigned cp;
+	int k;
 
 	if (!n || n > NAME_CAP || s[0] == '-')
 		return 0;
-	for (; *s; s++)
-		if ((unsigned char)*s < 0x20 || *s == 0x7f || *s == '/')
+	for (; *p; p += k)
+		if (!(k = utf8_at(p, &cp)) || cp_ctl(cp) || cp == '/')
 			return 0;
 	return 1;
 }
@@ -606,13 +680,16 @@ rows_wire(const char *ls, struct sb *b)
 struct gate
 {
 	long long self_uid;	/* the host's owner; -1 on a tagged host */
+	long long self_node;	/* the host's node id (Self.ID); -1 unknown */
 	const char *allow[MAX_ALLOW];	/* --allow-user: id or login */
 	int nallow;
 	int whois_optional;
 	int test_loopback;	/* test-only bypass, armed (see serve_main) */
 };
 
-enum { G_OK, G_OK_NOWHOIS, G_RANGE, G_NOWHOIS, G_TAGGED, G_OWNER };
+/* Verdicts: G_OK and G_OK_NOWHOIS accept, every other one refuses. */
+enum { G_OK, G_OK_NOWHOIS, G_RANGE, G_SELF, G_NOWHOIS, G_NOTNODE,
+       G_BADWHOIS, G_TAGGED, G_OWNER };
 
 static const char *
 gate_why(int v)
@@ -620,10 +697,15 @@ gate_why(int v)
 	switch (v)
 	{
 	case G_OK:		return "same owner";
-	case G_OK_NOWHOIS:	return "whois unavailable, accepted "
+	case G_OK_NOWHOIS:	return "tailscaled not answering, accepted "
 				       "(--whois-optional)";
 	case G_RANGE:		return "not an IPv4 address in 100.64.0.0/10";
-	case G_NOWHOIS:		return "whois unavailable (fail closed)";
+	case G_SELF:		return "this host itself (any local user could "
+				       "connect from it)";
+	case G_NOWHOIS:		return "tailscaled not answering (fail closed)";
+	case G_NOTNODE:		return "tailscale whois failed while tailscale "
+				       "status works (not a node it knows)";
+	case G_BADWHOIS:	return "tailscale whois answer unusable";
 	case G_TAGGED:		return "tagged node";
 	default:		return "another user's node";
 	}
@@ -661,55 +743,103 @@ all_digits(const char *s)
 	return *s && s[strspn(s, "0123456789")] == '\0';
 }
 
-/* `tailscale whois --json`: UserProfile.ID into *uid, LoginName into login,
-** *tagged when the node has tags or is the tagged-devices identity. 0, or
-** -1 when the document has no numeric UserProfile.ID. */
+/* Field `key` of `obj` as a node id: a JSON integer, or a string of digits
+** (status gives Self.ID as "963", whois gives Node.ID as 963). 1, 0 when
+** absent, -1 otherwise. */
 static int
-whois_user(const char *js, long long *uid, char *login, size_t lcap,
-           int *tagged)
+jid(const struct json_parser *jp, int obj, const char *key, long long *v)
+{
+	char s[24];
+	int r = jint(jp, obj, key, v);
+
+	if (r != -1)
+		return r;
+	if (jstr(jp, obj, key, s, sizeof s) != 1 || !all_digits(s) ||
+	    strlen(s) > 18)
+		return -1;
+	*v = strtoll(s, NULL, 10);
+	return 1;
+}
+
+/* Whether object `obj` carries tags: 0 for no Tags key, null or [], else
+** 1, and so for anything odd (a duplicate key, a string): fail closed. */
+static int
+has_tags(const struct json_parser *jp, int obj)
+{
+	int t = dch_json_field(jp, obj, "Tags");
+
+	if (t == -1)
+		return 0;
+	if (t >= 0 && jp->tok[t].kind == JSON_ARRAY)
+		return jp->tok[t].next > t + 1;
+	return !(t >= 0 && jp->tok[t].kind == JSON_PRIMITIVE &&
+	         jp->tok[t].end - jp->tok[t].start == 4 &&
+	         !memcmp(jp->text + jp->tok[t].start, "null", 4));
+}
+
+/* `tailscale whois --json`: UserProfile.ID into *uid, LoginName into login,
+** Node.ID into *node, *tagged when the node has tags (or an odd Tags) or is
+** the tagged-devices identity. 0, or -1 when the document is unusable: no
+** single UserProfile with an integer ID, no single Node with an id. */
+static int
+whois_user(const char *js, long long *uid, long long *node, char *login,
+           size_t lcap, int *tagged)
 {
 	struct json_parser jp;
-	int up, node, tags, rc = -1;
+	int up, nd, rc = -1;
 
 	*tagged = 0;
+	*node = -1;
 	login[0] = '\0';
 	if (dch_json_parse(&jp, js) == 0 && jp.tok[0].kind == JSON_OBJECT &&
 	    (up = jcont(&jp, 0, "UserProfile", JSON_OBJECT)) >= 0 &&
-	    jint(&jp, up, "ID", uid) == 1)
+	    jint(&jp, up, "ID", uid) == 1 &&
+	    (nd = jcont(&jp, 0, "Node", JSON_OBJECT)) >= 0 &&
+	    jid(&jp, nd, "ID", node) == 1)
 	{
 		if (jstr(&jp, up, "LoginName", login, lcap) != 1)
 			login[0] = '\0';
-		node = jcont(&jp, 0, "Node", JSON_OBJECT);
-		tags = jcont(&jp, node, "Tags", JSON_ARRAY);
-		*tagged = (tags >= 0 && jp.tok[tags].next > tags + 1) ||
-		          !strcmp(login, "tagged-devices");
+		*tagged = has_tags(&jp, nd) || !strcmp(login, "tagged-devices");
 		rc = 0;
 	}
 	dch_json_free(&jp);
 	return rc;
 }
 
-/* The decision for a peer, right after accept and before a byte is read:
-** its address, then its whois (NULL when whois could not run). A tagged
-** node is refused. Else the host's owner is accepted, compared by numeric
-** user id only, and on a tagged host (no owner) each --allow-user: a number
-** against UserProfile.ID exactly, a login against UserProfile.LoginName
-** case-insensitively (ASCII; logins are email-like). serve_main lets
-** --allow-user only onto a tagged host, so the two never mix. A whois that
-** cannot run or does not parse fails closed unless --whois-optional. */
+/* The decision for a peer, right after accept and before a byte is read.
+** ip: its address. self: it is one of this host's own addresses (a local
+** process can connect from those). whois: `tailscale whois --json`, NULL
+** when it did not exit cleanly. ts_up: when whois is NULL, whether
+** `tailscale status` still answers, so tailscaled is up and the peer is
+** simply not a node it knows.
+** A tagged node is refused, and so is this host's own node. Else the host's
+** owner is accepted, compared by numeric user id only, and on a tagged host
+** (no owner) each --allow-user: a number against UserProfile.ID exactly, a
+** login against UserProfile.LoginName case-insensitively (ASCII). serve_main
+** lets --allow-user only onto a tagged host, so the two never mix. Every
+** doubt refuses; --whois-optional accepts only when tailscaled itself is not
+** answering (whois and status both fail). */
 static int
-serve_gate(const struct gate *g, uint32_t ip, const char *whois)
+serve_gate(const struct gate *g, uint32_t ip, int self, const char *whois,
+           int ts_up)
 {
 	char login[256];
-	long long uid;
+	long long uid, node;
 	int tagged, i;
 
 	if (gate_addr(g, ip) != G_OK)
 		return G_RANGE;
-	if (!whois || whois_user(whois, &uid, login, sizeof login, &tagged) < 0)
-		return g->whois_optional ? G_OK_NOWHOIS : G_NOWHOIS;
+	if (self)
+		return G_SELF;
+	if (!whois)
+		return ts_up ? G_NOTNODE
+		             : g->whois_optional ? G_OK_NOWHOIS : G_NOWHOIS;
+	if (whois_user(whois, &uid, &node, login, sizeof login, &tagged) < 0)
+		return G_BADWHOIS;
 	if (tagged)
 		return G_TAGGED;
+	if (g->self_node >= 0 && node == g->self_node)
+		return G_SELF;
 	if (g->self_uid >= 0 && uid == g->self_uid)
 		return G_OK;
 	for (i = 0; i < g->nallow; i++)
@@ -720,22 +850,26 @@ serve_gate(const struct gate *g, uint32_t ip, const char *whois)
 	return G_OWNER;
 }
 
-/* `tailscale status --json`: Self.UserID into *uid, *tagged when Self has
-** tags or its user is the tagged-devices identity. 0, or -1. */
+/* `tailscale status --json`: Self.UserID into *uid, Self.ID into *node (-1
+** when absent), *tagged when Self has tags (or an odd Tags) or its user is
+** the tagged-devices identity. 0, or -1 (also for a duplicate Self). */
 static int
-status_self(const char *js, long long *uid, int *tagged)
+status_self(const char *js, long long *uid, long long *node, int *tagged)
 {
 	struct json_parser jp;
-	int self, tags, user, rc = -1;
+	int self, user, r, rc = -1;
 	char key[24], login[256];
 
 	*tagged = 0;
+	*node = -1;
 	if (dch_json_parse(&jp, js) == 0 && jp.tok[0].kind == JSON_OBJECT &&
 	    (self = jcont(&jp, 0, "Self", JSON_OBJECT)) >= 0 &&
-	    jint(&jp, self, "UserID", uid) == 1)
+	    jint(&jp, self, "UserID", uid) == 1 &&
+	    (r = jid(&jp, self, "ID", node)) >= 0)
 	{
-		tags = jcont(&jp, self, "Tags", JSON_ARRAY);
-		*tagged = tags >= 0 && jp.tok[tags].next > tags + 1;
+		if (r == 0)
+			*node = -1;
+		*tagged = has_tags(&jp, self);
 		snprintf(key, sizeof key, "%lld", *uid);
 		user = jcont(&jp, jcont(&jp, 0, "User", JSON_OBJECT), key,
 		             JSON_OBJECT);
@@ -942,7 +1076,9 @@ fail:
 
 /* ---- tailscale ------------------------------------------------------- */
 
-static char g_ts[PATH_MAX];	/* the tailscale CLI; "" when not on PATH */
+static char g_ts[PATH_MAX];	/* the tailscale CLI; "" when not found */
+static uint32_t g_self[MAX_SELF];	/* `tailscale ip -4`, and --bind */
+static int g_nself;
 
 /* `tailscale <a...>` exiting 0, stdout into *out (malloc'd): 0, or -1. */
 static int
@@ -962,6 +1098,84 @@ ts_run(char *a1, char *a2, char *a3, char *a4, char **out, size_t cap)
 		return -1;
 	}
 	return 0;
+}
+
+/* The tailscale CLI into g_ts: the first absolute PATH entry holding one,
+** else a fixed install location (on macOS the CLI is often only a shell
+** alias for the app's binary). An empty or relative PATH entry is skipped:
+** it names whatever directory dch serve was started from, and this binary
+** decides every peer. */
+static void
+ts_find(void)
+{
+	static const char app[] =
+		"/Applications/Tailscale.app/Contents/MacOS/Tailscale";
+	char path[4096];
+	const char *e = getenv("PATH"), *d, *c;
+	size_t o = 0, l;
+	struct stat st;
+
+	for (d = e; d && *d; d = c ? c + 1 : NULL)
+	{
+		c = strchr(d, ':');
+		l = c ? (size_t)(c - d) : strlen(d);
+		if (d[0] == '/' && o + l + 2 < sizeof path)
+		{
+			memcpy(path + o, d, l);
+			o += l;
+			path[o++] = ':';
+		}
+	}
+	copy_str(path + o, sizeof path - o,
+	         "/usr/bin:/usr/local/bin:/opt/homebrew/bin");
+	if (path_lookup("tailscale", path, "/", g_ts, sizeof g_ts) < 0 &&
+	    stat(app, &st) == 0 && S_ISREG(st.st_mode) && access(app, X_OK) == 0)
+		copy_str(g_ts, sizeof g_ts, app);
+}
+
+/* Whether tailscaled answers at all (`tailscale status` exits 0). */
+static int
+ts_up(void)
+{
+	char *out;
+	int r = ts_run("status", "--json", "--peers=false", NULL, &out,
+	               4u << 20);
+
+	free(out);
+	return r == 0;
+}
+
+/* Whether ip is in g_self (`tailscale ip -4`, and --bind once bound). */
+static int
+ip_tailnet(uint32_t ip)
+{
+	int k;
+
+	for (k = 0; k < g_nself; k++)
+		if (g_self[k] == ip)
+			return 1;
+	return 0;
+}
+
+/* Whether ip is one of this host's own addresses: its tailnet ones, the
+** bound one, local (the accepted socket's own address, 0 for none), or any
+** interface's. A process of any local user can connect from those, and
+** whois would name this node, so the owner. */
+static int
+ip_self(uint32_t ip, uint32_t local)
+{
+	struct ifaddrs *ifa, *i;
+	int hit = ip == local || ip_tailnet(ip);
+
+	if (!hit && getifaddrs(&ifa) == 0)
+	{
+		for (i = ifa; i && !hit; i = i->ifa_next)
+			hit = i->ifa_addr && i->ifa_addr->sa_family == AF_INET &&
+			      ntohl(((struct sockaddr_in *)(void *)i->ifa_addr)
+			            ->sin_addr.s_addr) == ip;
+		freeifaddrs(ifa);
+	}
+	return hit;
 }
 
 /* The peer's whois document, NULL when whois cannot answer. */
@@ -1794,7 +2008,10 @@ conn_end(struct conn *c, int graceful)
 	free(c->out.p);
 }
 
-static void
+/* One connection, in the forked handler. Returns the handler's exit
+** status: 3 when the gate refused the peer on tailscaled's own word (the
+** parent then refuses that address for NEG_MS without forking), else 0. */
+static int
 serve_conn(int fd, uint32_t ip)
 {
 	struct conn *c = &C;
@@ -1807,15 +2024,16 @@ serve_conn(int fd, uint32_t ip)
 	c->ip = ip;
 	a.s_addr = htonl(ip);
 	inet_ntop(AF_INET, &a, c->ipstr, sizeof c->ipstr);
-	/* The gate, before a byte is read. A refused peer gets no frame. */
+	/* The gate, before a byte is read. A refused peer gets no frame.
+	** The parent already refused this host's own addresses. */
 	whois = ts_whois(c->ipstr);
-	v = serve_gate(&g_gate, ip, whois);
+	v = serve_gate(&g_gate, ip, 0, whois, !whois && ts_up());
 	free(whois);
 	if (v >= G_RANGE)
 	{
 		slog("%s: refused: %s", c->ipstr, gate_why(v));
 		close(fd);
-		return;
+		return v == G_NOWHOIS ? 0 : 3;
 	}
 	if (v == G_OK_NOWHOIS)
 		slog("%s: warning: %s", c->ipstr, gate_why(v));
@@ -1945,6 +2163,7 @@ serve_conn(int fd, uint32_t ip)
 	if (c->eof && !c->closing)
 		slog("%s: closed by the client", c->ipstr);
 	conn_end(c, graceful);
+	return 0;
 }
 
 /* ---- the parent ------------------------------------------------------ */
@@ -1961,6 +2180,48 @@ struct kid
 static struct kid kids[MAX_CONN];
 static int nkids;
 static long long kid_seq;
+
+/* Peers a handler refused on tailscaled's word (exit status 3), refused
+** again before fork until `until`: no fork, no whois, no kid slot. Full,
+** the entry that expires first goes. An accepted peer never lands here,
+** so neither does the owner. */
+static struct neg
+{
+	uint32_t ip;
+	long long until;
+	int told;	/* its first cached refusal is logged, no more */
+} neg[NEG_N];
+
+static void
+neg_add(uint32_t ip)
+{
+	struct neg *n = &neg[0];
+	int i;
+
+	for (i = 0; i < NEG_N; i++)
+		if (neg[i].ip == ip)
+		{
+			n = &neg[i];
+			break;
+		}
+		else if (neg[i].until < n->until)
+			n = &neg[i];
+	n->ip = ip;
+	n->until = now_ms() + NEG_MS;
+	n->told = 0;
+}
+
+static struct neg *
+neg_hit(uint32_t ip)
+{
+	long long now = now_ms();
+	int i;
+
+	for (i = 0; i < NEG_N; i++)
+		if (neg[i].ip == ip && neg[i].until > now)
+			return &neg[i];
+	return NULL;
+}
 
 static void
 on_signal(int sig)
@@ -1979,6 +2240,8 @@ kids_reap(void)
 		for (i = 0; i < nkids; i++)
 			if (kids[i].pid == p)
 			{
+				if (WIFEXITED(st) && WEXITSTATUS(st) == 3)
+					neg_add(kids[i].ip);
 				kids[i] = kids[--nkids];
 				break;
 			}
@@ -2061,8 +2324,9 @@ accept_one(int lfd, int nr)
 	struct sockaddr_in sa;
 	socklen_t sl = sizeof sa;
 	char ipstr[INET_ADDRSTRLEN];
-	uint32_t ip;
+	uint32_t ip, local = 0;
 	int fd, i, same = 0;
+	struct neg *n;
 	pid_t pid;
 
 	fd = accept(lfd, (struct sockaddr *)&sa, &sl);
@@ -2084,6 +2348,27 @@ accept_one(int lfd, int nr)
 		close(fd);
 		return;
 	}
+	/* This host's own addresses: any local user's process. Loopback
+	** under the armed test bypass is its own path (it is never a
+	** tailnet peer). */
+	sl = sizeof sa;
+	if (getsockname(fd, (struct sockaddr *)&sa, &sl) == 0 &&
+	    sa.sin_family == AF_INET)
+		local = ntohl(sa.sin_addr.s_addr);
+	if (!(g_gate.test_loopback && ip_loop(ip)) && ip_self(ip, local))
+	{
+		slog("%s: refused: %s", ipstr, gate_why(G_SELF));
+		close(fd);
+		return;
+	}
+	if ((n = neg_hit(ip)))
+	{
+		if (!n->told++)
+			slog("%s: refused before fork for %d s: refused by the "
+			     "gate already", ipstr, NEG_MS / 1000);
+		close(fd);
+		return;
+	}
 	for (i = 0; i < nkids; i++)
 		same += kids[i].ip == ip;
 	if (nkids >= MAX_CONN || same >= MAX_PER_PEER)
@@ -2098,8 +2383,7 @@ accept_one(int lfd, int nr)
 	{
 		close(lfd);
 		close(nr);
-		serve_conn(fd, ip);
-		_exit(0);
+		_exit(serve_conn(fd, ip));
 	}
 	close(fd);
 	if (pid < 0)
@@ -2135,33 +2419,27 @@ serve_usage(FILE *f)
 	    "  --allow-user <u>    also accept this user's nodes: a numeric\n"
 	    "                      Tailscale user id or a login; required on a\n"
 	    "                      tagged host (repeatable)\n"
-	    "  --whois-optional    accept a tailnet peer whose tailscale whois\n"
-	    "                      cannot answer (default: refuse it); the\n"
-	    "                      owner must still be known at startup\n"
+	    "  --whois-optional    accept a tailnet peer while tailscaled is\n"
+	    "                      not answering (whois and status both fail;\n"
+	    "                      default: refuse it); the owner must still\n"
+	    "                      be known at startup\n"
 	    "  --check-peer <ip>   print whether a peer would get in, and exit\n");
 }
 
-/* addr when `tailscale ip -4` prints it; *first gets its first line. */
-static int
-tailnet_addr(struct in_addr addr, struct in_addr *first)
+/* This host's tailnet addresses, `tailscale ip -4`, into g_self. */
+static void
+ts_ips(void)
 {
 	char *out, *line, *save = NULL;
 	struct in_addr a;
-	int hit = 0, got = 0;
 
 	if (ts_run("ip", "-4", NULL, NULL, &out, 4096) < 0)
-		return 0;
-	for (line = strtok_r(out, "\r\n", &save); line;
+		return;
+	for (line = strtok_r(out, "\r\n", &save); line && g_nself < MAX_SELF;
 	     line = strtok_r(NULL, "\r\n", &save))
 		if (inet_pton(AF_INET, line, &a) == 1)
-		{
-			if (!got++ && first)
-				*first = a;
-			else if (!first)
-				hit |= a.s_addr == addr.s_addr;
-		}
+			g_self[g_nself++] = ntohl(a.s_addr);
 	free(out);
-	return first ? got > 0 : hit;
 }
 
 static int
@@ -2183,7 +2461,7 @@ serve_main(int argc, char **argv)
 	struct in_addr addr = { 0 };
 	char ipstr[INET_ADDRSTRLEN], *status;
 	long port = SV_PORT;
-	int i, lfd, one = 1, np[2], tagged = 0, fd;
+	int i, lfd, one = 1, np[2], tagged = 0, fd, test_lo;
 
 	memset(&g_gate, 0, sizeof g_gate);
 	for (i = 0; i < argc; i++)
@@ -2263,23 +2541,23 @@ serve_main(int argc, char **argv)
 		return 1;
 	}
 
+	/* The test-only loopback bypass, read once and gone from the
+	** environment, so no child (dch, a session's shell) inherits it. */
+	e = getenv("DCH_SERVE_TEST_LOOPBACK");
+	test_lo = e && !strcmp(e, "1");
+	unsetenv("DCH_SERVE_TEST_LOOPBACK");
+
 	/* The tailscale CLI, absolute, for execv. */
-	e = getenv("PATH");
-	if (!e || path_lookup("tailscale", e, ".", g_ts, sizeof g_ts) < 0)
-		g_ts[0] = '\0';
-	else if (g_ts[0] != '/')
-	{
-		char *rp = realpath(g_ts, NULL);
+	ts_find();
+	if (g_ts[0])
+		slog("tailscale CLI: %s", g_ts);
 
-		copy_str(g_ts, sizeof g_ts, rp ? rp : "");
-		free(rp);
-	}
-
-	/* The host's owner, cached for every peer. */
-	g_gate.self_uid = -1;
+	/* The host's owner and node, cached for every peer. */
+	g_gate.self_uid = g_gate.self_node = -1;
 	if (ts_run("status", "--json", "--peers=false", NULL, &status,
 	           4u << 20) == 0 &&
-	    status_self(status, &g_gate.self_uid, &tagged) == 0)
+	    status_self(status, &g_gate.self_uid, &g_gate.self_node,
+	                &tagged) == 0)
 	{
 		if (tagged)
 			g_gate.self_uid = -1;
@@ -2291,8 +2569,12 @@ serve_main(int argc, char **argv)
 		fprintf(stderr, "dch serve: %s, so this host's owner is unknown "
 		        "and no peer could be checked. Start tailscale and log "
 		        "in (or put its CLI on PATH).\n",
-		        g_ts[0] ? "tailscale status --json failed"
-		                : "the tailscale CLI is not on PATH");
+		        !g_ts[0] ? "the tailscale CLI is not on PATH (nor in "
+		                   "/usr/bin, /usr/local/bin, /opt/homebrew/bin "
+		                   "or /Applications/Tailscale.app)"
+		        : status ? "tailscale status --json is not a document "
+		                   "with one Self"
+		                 : "tailscale status --json failed");
 		free(status);
 		return 1;
 	}
@@ -2315,8 +2597,7 @@ serve_main(int argc, char **argv)
 
 	/* The test-only loopback bypass: the env var AND an explicit loopback
 	** --bind, for loopback peers only, never by accident. */
-	e = getenv("DCH_SERVE_TEST_LOOPBACK");
-	if (e && !strcmp(e, "1"))
+	if (test_lo)
 	{
 		if (bind_s && inet_pton(AF_INET, bind_s, &addr) == 1 &&
 		    ip_loop(ntohl(addr.s_addr)))
@@ -2331,40 +2612,21 @@ serve_main(int argc, char **argv)
 			     "needs a loopback --bind");
 	}
 
-	if (check)
-	{
-		char *w = NULL;
-		int v;
-
-		if (inet_pton(AF_INET, check, &addr) != 1)
-		{
-			fprintf(stderr, "dch serve: --check-peer %s is not an "
-			        "IPv4 address\n", check);
-			return 2;
-		}
-		v = gate_addr(&g_gate, ntohl(addr.s_addr));
-		if (v == G_OK)
-		{
-			w = ts_whois(check);
-			v = serve_gate(&g_gate, ntohl(addr.s_addr), w);
-			free(w);
-		}
-		printf("%s %s: %s\n", v < G_RANGE ? "accept" : "refuse", check,
-		       gate_why(v));
-		return v < G_RANGE ? 0 : 1;
-	}
-
-	/* The address: --bind, else tailscale ip -4, else the first
-	** 100.64.0.0/10 on an interface. Never a wildcard. */
+	/* The address: --bind, else the first of `tailscale ip -4`. Never a
+	** wildcard, and never an interface scan. */
+	ts_ips();
 	if (bind_s)
 	{
+		uint32_t b;
+
 		if (inet_pton(AF_INET, bind_s, &addr) != 1)
 		{
 			fprintf(stderr, "dch serve: --bind %s is not an IPv4 "
 			        "address\n", bind_s);
 			return 2;
 		}
-		if (!unicast(ntohl(addr.s_addr)))
+		b = ntohl(addr.s_addr);
+		if (!unicast(b))
 		{
 			fprintf(stderr, "dch serve: refusing --bind %s: not a "
 			        "unicast address. dch serve never listens on a "
@@ -2372,19 +2634,55 @@ serve_main(int argc, char **argv)
 			        bind_s);
 			return 2;
 		}
-		if (!tailnet_addr(addr, NULL) && !g_gate.test_loopback)
+		if (!ip_tailnet(b) && !g_gate.test_loopback)
 			slog("warning: --bind %s is not this host's tailnet "
 			     "address. --bind relaxes nothing: only your own "
 			     "tailnet nodes (100.64.0.0/10, owner-checked) get "
 			     "in, so this bind admits nobody.", bind_s);
+		if (g_nself < MAX_SELF)
+			g_self[g_nself++] = b;
 	}
-	else if (!tailnet_addr(addr, &addr))
+
+	if (check)
 	{
-		fprintf(stderr, "dch serve: tailscale reported no address "
-		        "(stopped or logged out: `tailscale ip -4` failed or "
-		        "printed nothing). Not falling back to any other address; "
-		        "pass --bind <ipv4> to choose one.\n");
-		return 1;
+		struct in_addr ca;
+		char *w = NULL;
+		uint32_t ip;
+		int v, self;
+
+		if (inet_pton(AF_INET, check, &ca) != 1)
+		{
+			fprintf(stderr, "dch serve: --check-peer %s is not an "
+			        "IPv4 address\n", check);
+			return 2;
+		}
+		ip = ntohl(ca.s_addr);
+		v = gate_addr(&g_gate, ip);
+		if (v == G_OK)
+		{
+			self = !(g_gate.test_loopback && ip_loop(ip)) &&
+			       ip_self(ip, 0);
+			w = self ? NULL : ts_whois(check);
+			v = serve_gate(&g_gate, ip, self, w,
+			               !self && !w && ts_up());
+			free(w);
+		}
+		printf("%s %s: %s\n", v < G_RANGE ? "accept" : "refuse", check,
+		       gate_why(v));
+		return v < G_RANGE ? 0 : 1;
+	}
+
+	if (!bind_s)
+	{
+		if (!g_nself)
+		{
+			fprintf(stderr, "dch serve: tailscale reported no address "
+			        "(stopped or logged out: `tailscale ip -4` failed "
+			        "or printed nothing). Not falling back to any other "
+			        "address; pass --bind <ipv4> to choose one.\n");
+			return 1;
+		}
+		addr.s_addr = htonl(g_self[0]);
 	}
 	inet_ntop(AF_INET, &addr, ipstr, sizeof ipstr);
 

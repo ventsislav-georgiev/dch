@@ -22,6 +22,7 @@ RUNPY = os.path.join(HERE, "remote-frames", "golden", "run.py")
 
 FAKE_TS = """#!/bin/sh
 d=$(dirname "$0")
+echo "$1 ${DCH_SERVE_TEST_LOOPBACK:-unset}" >> "$d/calls"
 case "$1" in
 status) [ -f "$d/status.json" ] && exec cat "$d/status.json"; exit 1 ;;
 whois) [ -f "$d/whois.json" ] && exec cat "$d/whois.json"; exit 1 ;;
@@ -30,15 +31,16 @@ esac
 exit 1
 """
 
-OWNER = {"Self": {"UserID": 42, "Tags": []},
+# Self.ID is a string in status, Node.ID a number in whois (as tailscale).
+OWNER = {"Self": {"ID": "1001", "UserID": 42, "Tags": []},
          "User": {"42": {"LoginName": "me@example.com"}}}
-TAGGED = {"Self": {"UserID": 9, "Tags": ["tag:server"]},
+TAGGED = {"Self": {"ID": "1001", "UserID": 9, "Tags": ["tag:server"]},
           "User": {"9": {"LoginName": "tagged-devices"}}}
 
 
-def whois(uid, login="me@example.com", tags=()):
+def whois(uid, login="me@example.com", tags=(), node=2002):
     return {"UserProfile": {"ID": uid, "LoginName": login},
-            "Node": {"Tags": list(tags)}}
+            "Node": {"ID": node, "Tags": list(tags)}}
 
 
 def main():
@@ -81,7 +83,7 @@ def main():
 
     log_n = [0]
 
-    def serve(*args, e=benv, bind=True):
+    def serve(*args, e=benv, bind=True, cwd=None):
         """Start dch serve: (proc, port, log path); port None when it exited."""
         log_n[0] += 1
         log = os.path.join(tmp, "serve%d.log" % log_n[0])
@@ -89,7 +91,8 @@ def main():
             ["--port", "0"] + list(args)
         with open(log, "w") as lf:
             p = subprocess.Popen(argv, env=e, stdin=subprocess.DEVNULL,
-                                 stdout=subprocess.DEVNULL, stderr=lf)
+                                 stdout=subprocess.DEVNULL, stderr=lf,
+                                 cwd=cwd)
         procs.append(p)
         end = time.time() + 10
         while time.time() < end:
@@ -110,6 +113,10 @@ def main():
                 p.kill()
                 p.wait()
         return p.returncode
+
+    def calls():
+        return text(os.path.join(fake, "calls")).splitlines() \
+            if os.path.exists(os.path.join(fake, "calls")) else []
 
     def run_fail(*args, bind=True, e=benv):
         """A start that must refuse: (exit code, its stderr)."""
@@ -356,23 +363,92 @@ def main():
               r.returncode == 0 and t == 0x10)
         s.close()
 
-        # --- the gate, per connection (whois runs per peer) --------------
-        ts(who=whois(7, "other@example.com"))
-        check("refused: another user's node", refused(port))
-        ts(who=whois(42, tags=["tag:ci"]))
-        check("refused: a tagged peer", refused(port))
-        ts(who=None)
-        check("refused: whois down (fail closed)", refused(port))
-        check("refusals are logged", "another user's node" in text(log)
-              and "tagged node" in text(log) and "fail closed" in text(log))
-        ts()
-        check("accepted: the owner's node", not refused(port))
         stop(p)
-        ts(who=None)
+
+        # --- the gate, per connection (whois runs per peer) --------------
+        # A refusal on tailscaled's word is remembered by the parent for
+        # 30 s, so each case runs against its own server.
+        def gate_case(msg, why, *args, **kw):
+            ts()
+            p, port, log = serve(*args)
+            ts(**kw)
+            got = refused(port)
+            time.sleep(0.1)
+            ok = got and re.search(r"refused: .*" + re.escape(why), text(log))
+            check("refused: %s" % msg, ok)
+            if not ok:
+                print(text(log)[-600:])
+            stop(p)
+
+        gate_case("another user's node", "another user's node",
+                  who=whois(7, "other@example.com"))
+        gate_case("a tagged peer", "tagged node", who=whois(42, tags=["tag:ci"]))
+        gate_case("whois and status down (fail closed)", "fail closed",
+                  status=None, who=None)
+        # F1: --whois-optional relaxes only a tailscaled that is not answering
+        gate_case("whois failing while status works, --whois-optional (F1)",
+                  "status works", "--whois-optional", who=None)
+        gate_case("a whois with a string UserProfile.ID, --whois-optional (F1)",
+                  "unusable", "--whois-optional",
+                  who='{"UserProfile":{"ID":"42"},"Node":{"ID":2002}}')
+        gate_case("a whois over the 256 KiB cap, --whois-optional (F1)",
+                  "status works", "--whois-optional",
+                  who=json.dumps(whois(42)) + " " * (300 << 10))
+        ts()
         p, port, log = serve("--whois-optional")
-        check("accepted: whois down with --whois-optional", not refused(port))
+        ts(status=None, who=None)
+        check("accepted: whois and status down with --whois-optional (F1)",
+              not refused(port))
         check("--whois-optional logs a warning",
-              "whois unavailable, accepted" in text(log))
+              "tailscaled not answering, accepted" in text(log))
+        stop(p)
+        ts()
+        p, port, log = serve()
+        check("accepted: the owner's node", not refused(port))
+        check("tailscale runs without the test env var (F7)",
+              calls() and all(c.endswith(" unset") for c in calls()))
+        stop(p)
+
+        # --- F8: a refused peer is refused again before fork --------------
+        ts()
+        p, port, log = serve()
+        ts(who=whois(7, "other@example.com"))
+        cached = False
+        for _ in range(40):
+            refused(port)
+            if "refused before fork" in text(log):
+                cached = True
+                break
+            time.sleep(0.1)
+        n0 = len([c for c in calls() if c.startswith("whois")])
+        rs = [refused(port) for _ in range(5)]
+        time.sleep(0.2)
+        n1 = len([c for c in calls() if c.startswith("whois")])
+        check("a refused peer is cached by the parent (F8)", cached)
+        check("its reconnects are refused with no fork and no whois (F8)",
+              all(rs) and n1 == n0 and text(log).count(
+                  "dch serve[%d]: 127.0.0.1: refused before fork" % p.pid)
+              == 1)
+        stop(p)
+
+        # --- F3: peer strings reach the log escaped ----------------------
+        ts()
+        p, port, log = serve()
+        s = conn(port)
+        send(s, 0x2e, {"device_id": "ph\u009bone\u202e\x1b]"})
+        t, _ = frame(s)
+        s.close()
+        s = conn(port)
+        send(s, 0x01, {"name": "bad\u009bname", "cols": 80, "rows": 24})
+        t2, _ = frame(s)
+        s.close()
+        time.sleep(0.2)
+        raw = open(log, "rb").read()
+        check("a device id is logged with C1, bidi and ESC escaped (F3)",
+              t == 0x11 and b"device ph\\u{009b}one\\u{202e}" in raw
+              and b"\xc2\x9b" not in raw and b"\xe2\x80\xae" not in raw
+              and b"\x1b" not in raw)
+        check("a session name with a C1 control is refused (F3)", t2 == 0x13)
         stop(p)
 
         # --- no bypass: a loopback bind admits nobody (Q13) --------------
@@ -397,6 +473,46 @@ def main():
               peer("192.168.1.5")[0] == 1)
         check("--check-peer accepts the owner's node",
               peer("100.100.2.2")[0] == 0)
+        # F2: this host itself, by address and by node id
+        rc, out = peer("100.100.1.1")
+        check("a peer on this host's tailnet address is refused (F2)",
+              rc == 1 and "this host itself" in out)
+        rc, out = peer("100.100.3.3", "--bind", "100.100.3.3")
+        check("a peer on the bound address is refused (F2)",
+              rc == 1 and "this host itself" in out)
+        ts(who=whois(42, node=1001))
+        rc, out = peer("100.100.2.2")
+        check("a whois whose Node.ID is this host's Self.ID is refused (F2)",
+              rc == 1 and "this host itself" in out)
+        # F5: odd but valid JSON fails closed
+        for who, why, msg in (
+                ('{"UserProfile":{"ID":42},"Node":{"ID":2002,"Tags":"tag:x"}}',
+                 "tagged node", "Tags that is not an array"),
+                ('{"UserProfile":{"ID":42},"Node":{"ID":2002,"Tags":[],'
+                 '"Tags":["tag:x"]}}', "tagged node", "a duplicated Tags"),
+                ('{"UserProfile":{"ID":42},"Node":{"ID":2002},'
+                 '"Node":{"ID":2002,"Tags":["tag:x"]}}', "unusable",
+                 "a duplicated Node"),
+                ('{"UserProfile":{"ID":42},"UserProfile":{"ID":7},'
+                 '"Node":{"ID":2002}}', "unusable", "a duplicated UserProfile"),
+                ('{"UserProfile":{"ID":42.0},"Node":{"ID":2002}}', "unusable",
+                 "a float UserProfile.ID"),
+                ('{"UserProfile":{"ID":42},"Node":{}}', "unusable",
+                 "a Node with no ID")):
+            ts(who=who)
+            rc, out = peer("100.100.2.2", "--whois-optional")
+            check("whois with %s is refused (F5)" % msg,
+                  rc == 1 and why in out)
+        ts(status='{"Self":{"ID":"1001","UserID":42},"Self":{"UserID":7}}')
+        rc, err = run_fail()
+        check("a status with a duplicated Self refuses to start (F5)",
+              rc == 1 and "one Self" in err)
+        ts(status={"Self": {"ID": "1001", "UserID": 42, "Tags": "tag:x"},
+                   "User": {}})
+        rc, err = run_fail()
+        check("a host whose Self.Tags is not an array counts as tagged (F5)",
+              rc == 1 and "--allow-user" in err)
+        ts()
         ts(status=TAGGED, who=whois(7, "Friend@Example.com"))
         rc, err = run_fail()
         check("a tagged host refuses to start without --allow-user",
@@ -424,11 +540,29 @@ def main():
         rc, err = run_fail("--whois-optional")
         check("--whois-optional with status failing refuses to start",
               rc == 1 and "owner is unknown" in err)
-        if not shutil.which("tailscale", path="/usr/bin:/bin"):
+        if not any(os.path.exists(x) for x in (
+                "/usr/bin/tailscale", "/usr/local/bin/tailscale",
+                "/opt/homebrew/bin/tailscale",
+                "/Applications/Tailscale.app/Contents/MacOS/Tailscale")):
             rc, err = run_fail("--whois-optional",
                                e=dict(benv, PATH="/usr/bin:/bin"))
             check("no tailscale CLI refuses to start, --whois-optional or "
                   "not", rc == 1 and "not on PATH" in err)
+        # F4: an empty or relative PATH entry is never searched
+        ts()
+        bad_ts = "#!/bin/sh\ntouch %s/planted-ran; exit 1\n" % tmp
+        os.makedirs(os.path.join(tmp, "rel"))
+        for d in (tmp, os.path.join(tmp, "rel")):
+            with open(os.path.join(d, "tailscale"), "w") as f:
+                f.write(bad_ts)
+            os.chmod(os.path.join(d, "tailscale"), 0o755)
+        p, port, log = serve(e=dict(benv, PATH="rel::%s:/usr/bin:/bin" % fake),
+                             cwd=tmp)
+        check("the tailscale CLI comes from an absolute PATH entry (F4)",
+              port is not None and "tailscale CLI: %s/tailscale" % fake
+              in text(log)
+              and not os.path.exists(os.path.join(tmp, "planted-ran")))
+        stop(p)
         ts(ip=None)
         rc, err = run_fail(bind=False)
         check("tailscale ip -4 failing refuses to start (Q11)",

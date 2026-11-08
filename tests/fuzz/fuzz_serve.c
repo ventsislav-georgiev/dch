@@ -119,7 +119,7 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 	struct json_parser jp;
 	struct gate g;
 	char *text, repo[128], login[64];
-	long long num, uid;
+	long long num, uid, node;
 	int tagged;
 
 	parse_whole(d, n, &a);
@@ -141,16 +141,36 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		dch_json_free(&jp);
 	}
 	free(rows.p);
-	(void)whois_user(text, &uid, login, sizeof login, &tagged);
-	(void)status_self(text, &uid, &tagged);
+	if (whois_user(text, &uid, &node, login, sizeof login, &tagged) == 0 &&
+	    node < 0)
+		abort();	/* a usable whois always names its node */
+	(void)status_self(text, &uid, &node, &tagged);
 	memset(&g, 0, sizeof g);
 	g.self_uid = n ? d[0] : -1;
+	g.self_node = n > 2 ? d[2] : -1;
 	g.allow[g.nallow++] = "7";
 	g.allow[g.nallow++] = "me@example.com";
 	g.whois_optional = n > 1 && d[1] & 1;
-	if (serve_gate(&g, 0x64400001u, text) == G_RANGE ||
-	    serve_gate(&g, 0x0a000001u, text) != G_RANGE)
+	if (serve_gate(&g, 0x64400001u, 0, text, 0) == G_RANGE ||
+	    serve_gate(&g, 0x0a000001u, 0, text, 0) != G_RANGE ||
+	    serve_gate(&g, 0x64400001u, 1, text, 0) != G_SELF ||
+	    serve_gate(&g, 0x64400001u, 0, NULL, 1) != G_NOTNODE)
 		abort();
+	{
+		/* logsafe leaves no byte a terminal acts on */
+		char out[512];
+		const unsigned char *q;
+		unsigned cp;
+		int k;
+
+		logsafe(out, sizeof out, text);
+		for (q = (const unsigned char *)out; *q; q += k)
+			if (!(k = utf8_at(q, &cp)) || cp_ctl(cp))
+				abort();
+		/* a name that passes name_ok is logged as it is */
+		if (name_ok(text) && strcmp(out, text))
+			abort();
+	}
 	if (gh_pull(text, repo, sizeof repo, &num) == 0 &&
 	    (num < 0 || num > 999999999 || strlen(repo) > 100))
 		abort();
