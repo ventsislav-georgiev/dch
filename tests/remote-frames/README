@@ -1,0 +1,6 @@
+Golden fixtures and runner for Prosper's remote frames protocol 1.0, copied
+verbatim from ventsislav-georgiev/prosper 96b65ad (docs/protocol/golden/).
+The spec is docs/protocol/remote-frames.md there. Do not edit these files:
+re-copy them from a newer Prosper commit and update the commit named here.
+
+tests/serve_test.py runs them against `dch serve` with --mutating.
