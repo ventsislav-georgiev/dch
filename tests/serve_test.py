@@ -10,6 +10,10 @@ tailscale ip -4 failing or empty, wildcard and non-unicast binds, the port in
 use); --allow-user by id and by login (case-insensitive); create off without
 --allow-create; the newest attach retiring the older; 0x09 from the mirror;
 a newer proto major; an oversize control frame; a client half-close; SIGTERM.
+Security review F1-F8: --whois-optional only while tailscaled is down; this
+host's own address and node refused; log escaping; the CLI from absolute
+PATH entries; odd whois/status JSON failing closed; the test variable unset
+for children; refused peers cached before fork.
 
 Run:  python3 tests/serve_test.py        (uses ./dch)
 """
