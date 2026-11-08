@@ -657,6 +657,18 @@ assert any(s["state"] == "blocked" for s in d), d
         check "prompt phrase below the composer blocks" \
               "$("$DCH" --status "$DN" 2>/dev/null)" "blocked"
 
+        # Claude Code's plan approval (#092) draws no esc footer: its
+        # question's start blocks, wrapped under ~90 columns too
+        paint p1 ' Claude has written up a plan and is ready to execute. Would you like to\n proceed?\n\n \342\235\257 1. Yes, and use auto mode\n   2. Yes, manually approve edits\n   3. Tell Claude what to change\n      shift+tab to approve with this feedback\n\n ctrl+g to edit in VS Code \302\267 ~/.claude/plans/example-plan.md'
+        stale
+        check "detect claude plan approval as blocked" \
+              "$("$DCH" --status "$DN" 2>/dev/null)" "blocked"
+
+        paint p2 'Claude Code said: Claude has written up a plan and is ready.'
+        stale
+        check "plan question quoted mid-line does not block" \
+              "$("$DCH" --status "$DN" 2>/dev/null)" "idle"
+
         paint c3 'Do you want to create a file?'
         stale
         check "prose 'do you want to create' does not block" \

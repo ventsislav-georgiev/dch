@@ -3170,8 +3170,8 @@ fetch_screen(const char *path, char *buf, size_t cap, int deadline_ms,
 ** separate rows. Strings are facts about the harnesses' own UIs (herdr
 ** is prior art for the approach; nothing is ported from it — AGPL).
 ** A leading '^' on s1 makes a line rule: only a line that starts with s1
-** (after leading blanks) and contains s2 matches — the footer itself, not
-** prose that quotes it. Any length: while background agents run, the
+** (after leading blanks) and contains s2 (if any) matches — the footer
+** itself, not prose that quotes it. Any length: while background agents run, the
 ** footer runs to the screen width. */
 struct det_rule
 {
@@ -3189,6 +3189,9 @@ static const struct det_rule det_blocked[] = {
 	{ "do you want to proceed?", 0 },                  /* claude,gemini */
 	{ "enter to select", "esc to cancel" },            /* claude forms  */
 	{ "^esc to cancel", "tab to amend" },              /* claude perms  */
+	/* plan approval ("Ready to code?"): no esc footer; the question's
+	** start, as it wraps at its end under ~90 columns */
+	{ "^claude has written up a plan", 0 },            /* claude plan   */
 	{ "press enter to confirm or esc to cancel", 0 },  /* codex         */
 	{ "enter to submit answer", 0 },                   /* codex forms   */
 	{ "allow command?", 0 },                           /* codex exec    */
@@ -3223,6 +3226,8 @@ det_line(const struct det_rule *r, const char *hay)
 		while (q > p && (q[-1] == ' ' || q[-1] == '\t' ||
 		                 q[-1] == '\r'))
 			q--;
+		if (!strncmp(p, s1, strlen(s1)) && !r->s2)
+			return 1;
 		if (!strncmp(p, s1, strlen(s1)))
 			for (q = p; q < e; q++)
 				if (!strncmp(q, r->s2, strlen(r->s2)))

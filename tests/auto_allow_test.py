@@ -14,6 +14,8 @@ a hook's ask on single rows or wrapped mid-word, a hook's "to update hooks"
 footer, a permission rule with or without its "/permissions" line, an ask
 rule in auto mode, one wrapped mid-word, #790), while a working-directory
 reason over "/permissions to update rules" and a classifier ask are answered;
+Claude Code's plan approval, three captured caret rows (#092: --status
+blocked, never answered; dismissed, not blocked);
 the loop guard (the prompt left up, and gone and back, is answered once);
 a curly apostrophe in "don’t ask again" (#783); Claude Code's ticking
 countdown line, one row or wrapped, answered once while a near-miss
@@ -58,6 +60,13 @@ def ticking(t, tail="", wrap=False):
     q = rows.index(" Do you want to proceed?")
     return rows[:q - 1] + w.split("\n") + rows[q:]
 BASH3 = dialog(["Yes", DONT, NO])
+
+
+def screen(name):
+    """A captured Claude Code screen under tests/screens/, as rows."""
+    with open(os.path.join(HERE, "screens", name), encoding="utf-8") as f:
+        return f.read().rstrip("\n").split("\n")
+
 HOOK = ("   rm -rf build",
         "   Hook PreToolUse:Bash requires confirmation for this command:",
         "   rm needs a human", "   [~/.claude/hooks/guard.sh]")
@@ -358,6 +367,19 @@ def main():
         for k, (name, rows) in enumerate(alone.items()):
             ss[name] = sess("alone%d" % k)
             show(ss[name], rows)
+        # Claude Code 2.1.318's plan approval (#092), captured: blocked for
+        # --status on every caret row, and never answered — a "1" there
+        # approves the plan and switches the session to auto mode
+        for c in (1, 2, 3):
+            name = "the plan approval, caret on %d" % c
+            n = ss[name] = sess("plan%d" % c, "100x44")
+            show(n, screen("plan-caret-%d.txt" % c))
+            check(name + ": --status blocked",
+                  until(lambda: run("--status", n).stdout == "blocked\n", 5))
+        esc = sess("planesc", "100x44")
+        show(esc, screen("plan-after-esc.txt"))
+        check("the plan approval dismissed: --status not blocked",
+              run("--status", esc).stdout.strip() in ("idle", "working"))
         # a quoted dialog in the transcript, above an empty composer
         quoted = sess("quoted")
         setctl(quoted, above=["⏺ Claude asked:"] + BASH2)
