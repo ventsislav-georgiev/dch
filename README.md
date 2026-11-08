@@ -717,6 +717,7 @@ later does nothing to a running session.
 | `DCH_SCROLLBACK` | master | `2000` | Mirror scrollback lines, max `100000`, `0` none (`--read --recent`, [Verbs](#verbs)). |
 | `DCH_NO_HISTORY` | master | unset | Anything but empty or `0`: no history record ([Bringing sessions back](#bringing-sessions-back)). |
 | `DCH_NO_REMOTE` | `dch -l`, `-a`, `--remote` | unset | Anything but empty or `0`: no [remote hosts](#remote-hosts) in the picker, `-a` or `--remote` (`--hosts` still applies). |
+| `DCH_REMOTE_BOX_MS` | `--remote`, a picker opening empty | `300` | The time box for probing every remote host in the foreground, max `60000`, for a slow link. |
 | `DCH_RECORD_MS` | master | `60000` | How often the history record is refreshed. |
 | `DCH_HEAL_MS` | master | `3600000` | The [self-heal](#socket-loss-and-self-heal) interval. |
 | `DCH_HOLD_MS`, `DCH_RESPAWN_TTL_MS` | master | `120000`, `300000` | How long a held session waits, and an unused `--respawn` arm lives ([Verbs](#verbs)). |

@@ -170,6 +170,9 @@ def main():
 
     senv = side("srv")
     cenv = side("cli", DCH_NO_REMOTE="1", DCH_DOUBLE_TAP_MS="0")
+    if os.environ.get("DCH_TEST_NO_BUDGET"):
+        # ASan: a loopback dch serve can miss the 300 ms box
+        cenv["DCH_REMOTE_BOX_MS"] = "5000"
     csock = os.path.join(tmp, "cli", "dch-%d" % os.getuid())
     procs, fakes, clients = [], [], []
     fails = []

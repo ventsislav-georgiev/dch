@@ -1059,7 +1059,14 @@ dch_remote_rows(struct dch_rrow **out, int now)
 	if (!remote_on())
 		return 0;
 	if (now)
-		rows_now(&l, RM_BOX_MS, 1, -1);
+	{
+		/* DCH_REMOTE_BOX_MS: a slower link (or a sanitizer build) */
+		const char *e = getenv("DCH_REMOTE_BOX_MS");
+		long box = e ? atol(e) : 0;
+
+		rows_now(&l, box > 0 && box <= 60000 ? (int)box : RM_BOX_MS, 1,
+		         -1);
+	}
 	else
 	{
 		/* the picker: the cache, re-probed behind it */
