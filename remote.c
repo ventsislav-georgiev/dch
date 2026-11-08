@@ -34,20 +34,49 @@
 ** printed. Only the 0x10 bytes of an attach reach the terminal raw, as a
 ** local session's screen does.
 **
+** Windows (#077): the same file builds the native client, win/ the rest.
+** Listing and the attach's checks are shared; the name lookups run in a
+** thread, not a child; the picker's background probe is not built (#090);
+** and an attach is one loop over the console and the socket (win_relay),
+** not attach.c and a relay child.
+**
 ** ponytail: no 0x2e watch stream (the picker re-probes every RM_EVERY_MS),
 ** and no remote kill, rename or create: those need ops-gated frames, and a
 ** confirmation in the picker the way the local ones have one.
 */
+#ifdef _WIN32
+#include "win/win.h"	/* Winsock, and the sock_* spellings below */
+#else
 #include "dtach.h"
+#endif
 #include "rframe.h"
 
+#ifndef _WIN32
 #include <arpa/inet.h>
+#endif
 #include <ctype.h>
+#ifndef _WIN32
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <strings.h>
+
+/* The socket calls Winsock spells otherwise (win/win.h has those). */
+#define sock_close close
+#define sock_read read
+#define sock_err() errno
+#define sock_seterr(e) (errno = (e))
+#define sock_str strerror
+#define SE_INTR EINTR
+#define SE_AGAIN EAGAIN
+#define SE_INPROGRESS EINPROGRESS
+#define SE_UNREACH EHOSTUNREACH
+/* the cache: this user's file, that nobody else can write */
+#define file_mine(st) ((st)->st_uid == getuid() && !((st)->st_mode & 022))
+#define rename_over rename
+#define O_BINARY 0
+#endif
 
 #ifndef MSG_NOSIGNAL
 #define MSG_NOSIGNAL 0	/* SIGPIPE is ignored */
@@ -56,7 +85,13 @@
 #define RM_PORT 8771
 #define RM_HOSTS 64		/* hosts probed, at most */
 #define RM_ROWS 1000		/* rows kept per host, at most */
+#ifdef _WIN32
+/* --ls on Windows lists only remote rows, and a process start (the
+** tailscale call) costs more there */
+#define RM_BOX_MS 1000
+#else
 #define RM_BOX_MS 300		/* --ls: every probe, in parallel, within */
+#endif
 #define RM_BG_MS 2000		/* the picker's background probe */
 #define RM_ATTACH_MS 5000	/* -a: connect, hello and list */
 #define RM_EVERY_MS 2000	/* the picker re-probes this often */
@@ -78,6 +113,7 @@ struct rhost
 static const char *g_hosts;	/* --hosts */
 static long long g_me = -1;	/* discovery: this host's Tailscale user */
 
+#ifndef _WIN32
 /* A forked child's signals: dch's handlers (attach.c's die, the picker's)
 ** act on the shared terminal and the parent's files, so none of them run
 ** here. SIGPIPE stays ignored: a peer that hangs up is an error return. */
@@ -95,6 +131,7 @@ child_signals(void)
 	sigemptyset(&none);
 	sigprocmask(SIG_SETMASK, &none, NULL);
 }
+#endif
 
 /* ---- hosts ----------------------------------------------------------- */
 
@@ -363,6 +400,7 @@ labels_set(const struct rhost *v, int n)
 	g_lab_ok = 1;
 }
 
+#ifndef _WIN32
 static int
 label_in(const char *host)
 {
@@ -371,6 +409,7 @@ label_in(const char *host)
 	snprintf(nd, sizeof nd, "\n%s\n", host);
 	return g_lab_ok && strstr(g_lab, nd) != NULL;
 }
+#endif
 
 int
 dch_remote_set_hosts(const char *list)
@@ -516,7 +555,9 @@ row_cmp(const void *x, const void *y)
 
 /* In <state>/dch/sessions, which dch_history_dir has checked is a
 ** directory of this user's that nobody else can write. A dot file: master.c
-** and the history loader skip it there. */
+** and the history loader skip it there. On Windows %LOCALAPPDATA%\dch
+** (win/plat.c), in the user's profile, whose ACL keeps every other user
+** out: that is the owner check there. */
 static int
 cache_path(char *out, size_t cap, const char *leaf)
 {
@@ -538,10 +579,9 @@ cache_load(struct rlist *l, long long now)
 	int fd;
 
 	if (cache_path(path, sizeof path, ".remote-cache") < 0 ||
-	    (fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)) < 0)
+	    (fd = open(path, O_RDONLY | O_BINARY | O_CLOEXEC | O_NOFOLLOW)) < 0)
 		return;
-	if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode) ||
-	    st.st_uid != getuid() || (st.st_mode & 022) ||
+	if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode) || !file_mine(&st) ||
 	    (size_t)st.st_size > RM_CACHE_MAX ||
 	    !(text = malloc((size_t)st.st_size + 1)))
 	{
@@ -560,14 +600,17 @@ cache_load(struct rlist *l, long long now)
 
 /* l as the cache: up to RM_CACHE_MAX less a row's worst case, so the
 ** loader never refuses the file (a host past that is left out). The write
-** is to a new mkstemp file renamed over the old, SIGTERM held meanwhile
-** (dch_remote_stop's), so no half-written file is ever left behind. */
+** is to a new mkstemp file (created exclusively, here and on Windows)
+** renamed over the old, SIGTERM held meanwhile (dch_remote_stop's), so no
+** half-written file is ever left behind. */
 static void
 cache_save(const struct rlist *l)
 {
 	char path[PATH_MAX + 32], tmp[PATH_MAX + 32];
 	struct sb b = {0};
+#ifndef _WIN32
 	sigset_t term, old;
+#endif
 	int i, fd;
 	ssize_t w;
 
@@ -593,16 +636,20 @@ cache_save(const struct rlist *l)
 		sb_s(&b, "}");
 	}
 	sb_s(&b, "]\n");
+#ifndef _WIN32
 	sigemptyset(&term);
 	sigaddset(&term, SIGTERM);
 	sigprocmask(SIG_BLOCK, &term, &old);
+#endif
 	if (!b.bad && (fd = mkstemp(tmp)) >= 0)
 	{
 		w = write(fd, b.p, b.n);
-		if (close(fd) < 0 || w != (ssize_t)b.n || rename(tmp, path) < 0)
+		if (close(fd) < 0 || w != (ssize_t)b.n || rename_over(tmp, path) < 0)
 			unlink(tmp);
 	}
+#ifndef _WIN32
 	sigprocmask(SIG_SETMASK, &old, NULL);
+#endif
 	free(b.p);
 }
 
@@ -623,18 +670,12 @@ struct probe
 	char why[300];		/* PR_FAIL, PR_NEWER: printable */
 };
 
-/* Every probe's address into its sa, by `end` (now_ms): an IPv4 literal at
-** once; the names (--hosts, remote_hosts; MagicDNS answers a tailnet one)
-** in one forked child, since getaddrinfo has no timeout of its own: a slow
-** resolver costs what is left of the time box, and a name not resolved by
-** then fails its probe. */
-static void
-resolve_all(struct probe *v, int n, long long end)
+/* Every probe's sa, its address when it is an IPv4 literal: how many are
+** names, not literals. */
+static int
+addr_literals(struct probe *v, int n)
 {
-	uint32_t got[RM_HOSTS];
-	size_t want = (size_t)n * sizeof *got, have = 0;
-	int i, names = 0, p[2];
-	pid_t pid;
+	int i, names = 0;
 
 	for (i = 0; i < n; i++)
 	{
@@ -645,7 +686,92 @@ resolve_all(struct probe *v, int n, long long end)
 		                      &v[i].sa.sin_addr) == 1;
 		names += !v[i].have;
 	}
-	if (!names || pipe_ce(p) < 0)
+	return names;
+}
+
+#ifdef _WIN32
+/* Windows: the lookups in a thread. One still running at `end` is left to
+** finish on its own; its job is freed by whichever side lets go last. */
+struct rjob
+{
+	volatile LONG refs;
+	int n, want[RM_HOSTS];
+	char addr[RM_HOSTS][256];
+	uint32_t got[RM_HOSTS];
+};
+
+static DWORD WINAPI
+rjob_run(void *arg)
+{
+	struct rjob *j = arg;
+	struct addrinfo hint, *res;
+	int i;
+
+	memset(&hint, 0, sizeof hint);
+	hint.ai_family = AF_INET;
+	hint.ai_socktype = SOCK_STREAM;
+	for (i = 0; i < j->n; i++)
+		if (j->want[i] && getaddrinfo(j->addr[i], NULL, &hint, &res) == 0)
+		{
+			j->got[i] = ((struct sockaddr_in *)(void *)
+			             res->ai_addr)->sin_addr.s_addr;
+			freeaddrinfo(res);
+		}
+	if (InterlockedDecrement(&j->refs) == 0)
+		free(j);
+	return 0;
+}
+
+static void
+resolve_all(struct probe *v, int n, long long end)
+{
+	struct rjob *j;
+	HANDLE th;
+	long long left;
+	int i;
+
+	if (!addr_literals(v, n) || !(j = calloc(1, sizeof *j)))
+		return;
+	j->refs = 2;
+	j->n = n;
+	for (i = 0; i < n; i++)
+	{
+		j->want[i] = !v[i].have;
+		copy_str(j->addr[i], sizeof j->addr[i], v[i].h.addr);
+	}
+	if (!(th = CreateThread(NULL, 0, rjob_run, j, 0, NULL)))
+	{
+		free(j);
+		return;
+	}
+	left = end - now_ms();
+	if (WaitForSingleObject(th, left > 0 ? (DWORD)left : 0) ==
+	    WAIT_OBJECT_0)
+		for (i = 0; i < n; i++)
+			if (!v[i].have && j->got[i])
+			{
+				v[i].sa.sin_addr.s_addr = j->got[i];
+				v[i].have = 1;
+			}
+	CloseHandle(th);
+	if (InterlockedDecrement(&j->refs) == 0)
+		free(j);
+}
+#else
+/* Every probe's address into its sa, by `end` (now_ms): an IPv4 literal at
+** once; the names (--hosts, remote_hosts; MagicDNS answers a tailnet one)
+** in one forked child, since getaddrinfo has no timeout of its own: a slow
+** resolver costs what is left of the time box, and a name not resolved by
+** then fails its probe. */
+static void
+resolve_all(struct probe *v, int n, long long end)
+{
+	uint32_t got[RM_HOSTS];
+	size_t want = (size_t)n * sizeof *got, have = 0;
+	int i, p[2];
+	pid_t pid;
+
+	if (!addr_literals(v, n) || pipe_ce(p) < 0)
 		return;
 	if ((pid = fork()) == 0)
 	{
@@ -706,19 +832,21 @@ resolve_all(struct probe *v, int n, long long end)
 			v[i].have = 1;
 		}
 }
+#endif
 
 static void
 pr_end(struct probe *p, int st, const char *why)
 {
 	if (p->fd >= 0)
-		close(p->fd);
+		sock_close(p->fd);
 	p->fd = -1;
 	p->st = st;
 	if (why)
 		logsafe(p->why, sizeof p->why, why);
 }
 
-/* A non-blocking connect to p's address: the socket, or -1 with errno. */
+/* A non-blocking connect to p's address: the socket, or -1 with
+** sock_err(). */
 static int
 tcp_dial(const struct probe *p)
 {
@@ -726,19 +854,20 @@ tcp_dial(const struct probe *p)
 
 	if (!p->have)
 	{
-		errno = EHOSTUNREACH;
+		sock_seterr(SE_UNREACH);
 		return -1;
 	}
-	if ((fd = socket(AF_INET, SOCK_STREAM, 0)) < 0)
+	/* a SOCKET in an int: Windows handle values fit 32 bits */
+	if ((fd = (int)socket(AF_INET, SOCK_STREAM, 0)) < 0)
 		return -1;
 	cloexec(fd);
 	nonblock(fd);
 	if (connect(fd, (const struct sockaddr *)&p->sa, sizeof p->sa) < 0 &&
-	    errno != EINPROGRESS)
+	    sock_err() != SE_INPROGRESS)
 	{
-		e = errno;
-		close(fd);
-		errno = e;
+		e = sock_err();
+		sock_close(fd);
+		sock_seterr(e);
 		return -1;
 	}
 	return fd;
@@ -845,12 +974,13 @@ static void
 pr_read(struct probe *p)
 {
 	unsigned char buf[RM_READ];
-	ssize_t k = read(p->fd, buf, sizeof buf);
+	ssize_t k = sock_read(p->fd, buf, sizeof buf);
+	int e = sock_err();
 
-	if (k < 0 && (errno == EINTR || errno == EAGAIN))
+	if (k < 0 && (e == SE_INTR || e == SE_AGAIN))
 		return;
 	if (k <= 0)
-		pr_end(p, PR_FAIL, k ? strerror(errno) : "closed the connection");
+		pr_end(p, PR_FAIL, k ? sock_str(e) : "closed the connection");
 	else
 		pr_feed(p, buf, (size_t)k);
 }
@@ -872,7 +1002,7 @@ probe_all(struct probe *v, int n, int ms)
 		v[i].rs.from_server = 1;
 		v[i].fd = -1;
 		if ((v[i].fd = tcp_dial(&v[i])) < 0)
-			pr_end(&v[i], PR_FAIL, strerror(errno));
+			pr_end(&v[i], PR_FAIL, sock_str(sock_err()));
 		else
 			v[i].st = PR_CONN;
 	}
@@ -893,7 +1023,7 @@ probe_all(struct probe *v, int n, int ms)
 			break;
 		if (poll(pf, (nfds_t)np, (int)left) < 0)
 		{
-			if (errno == EINTR)
+			if (sock_err() == SE_INTR)
 				continue;
 			break;
 		}
@@ -907,12 +1037,12 @@ probe_all(struct probe *v, int n, int ms)
 				continue;
 			if (p->st == PR_WAIT)
 				pr_read(p);
-			else if (getsockopt(p->fd, SOL_SOCKET, SO_ERROR, &e,
-			                    &l) < 0 || e)
-				pr_end(p, PR_FAIL, strerror(e ? e : errno));
-			else if (send(p->fd, rq, sizeof rq, MSG_NOSIGNAL) !=
-			         (ssize_t)sizeof rq)
-				pr_end(p, PR_FAIL, strerror(errno));
+			else if (getsockopt(p->fd, SOL_SOCKET, SO_ERROR,
+			                    (void *)&e, &l) < 0 || e)
+				pr_end(p, PR_FAIL, sock_str(e ? e : sock_err()));
+			else if (send(p->fd, (const void *)rq, sizeof rq,
+			              MSG_NOSIGNAL) != (ssize_t)sizeof rq)
+				pr_end(p, PR_FAIL, sock_str(sock_err()));
 			else
 				p->st = PR_WAIT;
 		}
@@ -942,7 +1072,7 @@ probes_free(struct probe *v, int n)
 	for (i = 0; i < n; i++)
 	{
 		if (v[i].fd >= 0)
-			close(v[i].fd);
+			sock_close(v[i].fd);
 		free(v[i].list);
 		free(v[i].in.p);
 	}
@@ -1008,6 +1138,7 @@ rows_now(struct rlist *l, int ms, int loud, int lfd)
 	cache_save(l);
 }
 
+#ifndef _WIN32	/* the picker's background probe: none on Windows yet (#090) */
 static pid_t bg_pid = -1;
 static long long bg_at = -RM_EVERY_MS;
 static int lab_fd = -1;		/* the bg child's labels, read end */
@@ -1047,13 +1178,18 @@ labels_poll(void)
 	lab_fd = -1;
 	lab_n = 0;
 }
+#endif
 
+/* The rows: now, probed in the foreground (--ls); else the picker's, from
+** the cache, re-probed behind it (on Windows none: the picker is #090). */
 int
 dch_remote_rows(struct dch_rrow **out, int now)
 {
 	struct rlist l = {0};
+#ifndef _WIN32
 	long long t = (long long)time(NULL);
 	int i, k, lp[2];
+#endif
 
 	*out = NULL;
 	if (!remote_on())
@@ -1067,6 +1203,7 @@ dch_remote_rows(struct dch_rrow **out, int now)
 		rows_now(&l, box > 0 && box <= 60000 ? (int)box : RM_BOX_MS, 1,
 		         -1);
 	}
+#ifndef _WIN32
 	else
 	{
 		/* the picker: the cache, re-probed behind it */
@@ -1121,12 +1258,14 @@ dch_remote_rows(struct dch_rrow **out, int now)
 			}
 		l.n = k;
 	}
+#endif
 	if (l.n > 1)
 		qsort(l.v, (size_t)l.n, sizeof *l.v, row_cmp);
 	*out = l.v;
 	return l.n;
 }
 
+#ifndef _WIN32
 /* The picker is done: its bg child goes (SIGTERM waits out a cache write)
 ** and is reaped, so none outlives it as a zombie. */
 void
@@ -1144,6 +1283,7 @@ dch_remote_stop(void)
 	lab_fd = -1;
 	lab_n = 0;
 }
+#endif
 
 void
 dch_remote_esc(char *out, size_t cap, const char *s)
@@ -1190,6 +1330,7 @@ put_size(struct sb *b, unsigned int type, const char *name,
 	free(j.p);
 }
 
+#ifndef _WIN32
 /* The next packet attach.c wrote in b[0..n) (type, u16 little-endian len,
 ** the payload packet_payload_len sizes): 1 with *pk and *used, 0 for more
 ** bytes first, -1 for one no attach client sends. Pure. */
@@ -1225,6 +1366,7 @@ pkt_frames(const struct packet *pk, int *redraws, struct sb *out)
 	if (pk->type == MSG_REDRAW && (*redraws)++)
 		put_frame(out, 0x07, "", 0);
 }
+#endif
 
 /* Forget the sent head of b, off bytes, when it is all of b or big. */
 static void
@@ -1283,6 +1425,7 @@ relay_in(struct rf_state *rs, struct sb *tin, struct sb *to_sp, int *exited,
 	return rc;
 }
 
+#ifndef _WIN32
 /* The relay child: the attach client's packets on sp as frames on tcp,
 ** 0x10 back raw; tin and rs hold what followed the list on tcp. 0 when the
 ** session ended (0x12) or the attach side closed (a detach: the TCP close
@@ -1447,6 +1590,7 @@ remote_lost(void)
 		msg[k] = '\0';
 	return msg;
 }
+#endif
 
 /* TCP keepalive, so a link that died silently ends the attach in about
 ** half a minute rather than never. */
@@ -1455,18 +1599,23 @@ keepalive(int fd)
 {
 	int on = 1, idle = 15, intvl = 5, cnt = 3;
 
-	setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof on);
-	setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof on);
+	/* (const void *): Winsock takes a const char * */
+	setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, (const void *)&on, sizeof on);
+	setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (const void *)&on, sizeof on);
 #ifdef TCP_KEEPIDLE
-	setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof idle);
+	setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, (const void *)&idle,
+	           sizeof idle);
 #elif defined(TCP_KEEPALIVE)
-	setsockopt(fd, IPPROTO_TCP, TCP_KEEPALIVE, &idle, sizeof idle);
+	setsockopt(fd, IPPROTO_TCP, TCP_KEEPALIVE, (const void *)&idle,
+	           sizeof idle);
 #endif
 #ifdef TCP_KEEPINTVL
-	setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof intvl);
+	setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, (const void *)&intvl,
+	           sizeof intvl);
 #endif
 #ifdef TCP_KEEPCNT
-	setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof cnt);
+	setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, (const void *)&cnt,
+	           sizeof cnt);
 #endif
 	(void)idle;
 	(void)intvl;
@@ -1529,15 +1678,164 @@ open_listed(const struct rhost *h, const char *name, const char *sh,
 	return fd;
 }
 
-int
-dch_remote_attach(const char *host, const char *name)
+#ifdef _WIN32
+/* The Windows attach (#077): no attach.c and no relay child, one loop. It
+** waits on the socket's event and the console's input: keys go out as
+** 0x10, a new window size as 0x05, the server's 0x10 to the console raw.
+** The detach key (Ctrl-\, 0x1c, whatever detach_key says: there is no
+** picker to switch to yet) ends it here: the TCP close is the detach, the
+** session lives on. 0 for a detach or a session that ended (0x12); 1 for a
+** lost link, said once the console is restored (win/plat.c restores it on
+** every other way out too). */
+static int
+win_relay(int fd, const char *label, const char *name, struct sb tin,
+          struct rf_state rs)
+{
+	struct sb to_tcp = {0}, to_con = {0};
+	struct winsize ws, now;
+	unsigned char buf[RM_READ], kb[4096];
+	size_t toff = 0;
+	int exited = 0, eof = 0, gone = 0, k, r;
+	char msg[400] = "", safe[500];
+	WSAEVENT ev = WSA_INVALID_EVENT;
+
+	if ((r = con_raw()) < 0)
+	{
+		fprintf(stderr, r == -2 ? "dch: this console has no VT mode "
+		        "(Windows 10 or later)\n" : "dch: attaching requires a "
+		        "terminal\n");
+		free(tin.p);
+		return 1;
+	}
+	con_size(&ws);
+	put_size(&to_tcp, 0x01, name, &ws);
+	if ((ev = WSACreateEvent()) == WSA_INVALID_EVENT ||
+	    WSAEventSelect((SOCKET)fd, ev, FD_READ | FD_WRITE | FD_CLOSE))
+	{
+		snprintf(msg, sizeof msg, "%s", sock_str(WSAGetLastError()));
+		eof = 1;
+	}
+	else if (relay_in(&rs, &tin, &to_con, &exited, msg, sizeof msg) < 0)
+		eof = 1;
+	while (!eof && !exited && !gone)
+	{
+		HANDLE hv[2];
+		WSANETWORKEVENTS ne;
+		DWORD nh = 1, w;
+
+		/* to the console, whole, before more is read */
+		if (to_con.n && con_write(to_con.p, to_con.n) < 0)
+			gone = 1;	/* the console went: nobody to tell */
+		to_con.n = 0;
+		/* to the server, as far as it takes it now */
+		while (!gone && toff < to_tcp.n)
+		{
+			k = send((SOCKET)fd, to_tcp.p + toff,
+			         (int)(to_tcp.n - toff), 0);
+			if (k > 0)
+			{
+				toff += (size_t)k;
+				continue;
+			}
+			if (WSAGetLastError() != WSAEWOULDBLOCK)
+			{
+				snprintf(msg, sizeof msg, "%s",
+				         sock_str(WSAGetLastError()));
+				eof = 1;
+			}
+			break;
+		}
+		sb_drop(&to_tcp, &toff);
+		if (!eof && (tin.bad || to_con.bad || to_tcp.bad))
+		{
+			snprintf(msg, sizeof msg, "out of memory");
+			eof = 1;
+		}
+		if (eof || gone)
+			break;
+		hv[0] = ev;
+		if (to_tcp.n - toff < RM_HIGH)
+			hv[nh++] = con_in();
+		/* a quarter second: a window resize is noticed by polling */
+		w = WaitForMultipleObjects(nh, hv, FALSE, 250);
+		if (w == WAIT_FAILED)
+		{
+			snprintf(msg, sizeof msg, "wait: error %lu",
+			         (unsigned long)GetLastError());
+			break;
+		}
+		con_size(&now);
+		if (now.ws_row != ws.ws_row || now.ws_col != ws.ws_col)
+		{
+			ws = now;
+			put_size(&to_tcp, 0x05, NULL, &ws);
+		}
+		if (nh == 2 && w == WAIT_OBJECT_0 + 1)
+		{
+			/* the detach key anywhere in the burst: none of it goes */
+			if ((k = con_keys(kb, sizeof kb)) < 0)
+				gone = 1;
+			else if (k && memchr(kb, 0x1c, (size_t)k))
+				gone = 1;
+			else if (k)
+				put_frame(&to_tcp, 0x10, kb, (size_t)k);
+		}
+		if (gone || WSAEnumNetworkEvents((SOCKET)fd, ev, &ne) ||
+		    !(ne.lNetworkEvents & (FD_READ | FD_CLOSE)))
+			continue;
+		/* from the server, until it would block or a console's worth:
+		** a recv that leaves bytes behind sets the event again */
+		while (!eof && to_con.n < RM_HIGH)
+		{
+			k = recv((SOCKET)fd, (char *)buf, (int)sizeof buf, 0);
+			if (k > 0)
+			{
+				sb_add(&tin, buf, (size_t)k);
+				if (relay_in(&rs, &tin, &to_con, &exited, msg,
+				             sizeof msg) < 0)
+					eof = 1;
+				continue;
+			}
+			/* a 0x13 then a reset: the 0x13 says why */
+			if (k < 0 && WSAGetLastError() == WSAEWOULDBLOCK)
+				break;
+			if (k < 0 && !msg[0])
+				snprintf(msg, sizeof msg, "%s",
+				         sock_str(WSAGetLastError()));
+			eof = 1;
+		}
+	}
+	/* what the server sent before the end */
+	if (to_con.n && !gone)
+		(void)con_write(to_con.p, to_con.n);
+	con_restore();
+	if (ev != WSA_INVALID_EVENT)
+	{
+		WSAEventSelect((SOCKET)fd, ev, 0);
+		WSACloseEvent(ev);
+	}
+	free(tin.p);
+	free(to_con.p);
+	free(to_tcp.p);
+	if (exited || gone)
+		return 0;
+	logsafe(safe, sizeof safe, msg);
+	fprintf(stderr, "dch: lost the connection to %s%s%s\n", label,
+	        safe[0] ? ": " : "", safe);
+	return 1;
+}
+#endif
+
+/* host:name as a connection that has listed name, for the 0x01 to follow
+** on it: its socket, the host in *h, and what followed the list in *rest,
+** the parser's state in *rs; or -1, why said on stderr. */
+static int
+attach_open(const char *host, const char *name, struct rhost *h,
+            struct sb *rest, struct rf_state *rs)
 {
 	struct rhost hv[RM_HOSTS];
-	struct winsize ws;
-	struct sb out = {0}, rest = {0};
-	struct rf_state rs;
 	char sh[300], sn[1100];
-	int n = candidates(hv, RM_HOSTS, RM_TS_MS), i, fd, sp[2], wp[2], rc;
+	int n = candidates(hv, RM_HOSTS, RM_TS_MS), i;
 
 	logsafe(sh, sizeof sh, host);
 	logsafe(sn, sizeof sn, name);
@@ -1550,17 +1848,49 @@ dch_remote_attach(const char *host, const char *name)
 		        ? "remote hosts are off: DCH_NO_REMOTE or remote_hosts"
 		          " = off" : "none: no --hosts, no remote_hosts, no "
 		          "online tailnet peers of yours");
-		return 1;
+		return -1;
 	}
 	/* before a byte goes to it: a discovered peer is the user's own */
 	if (hv[i].found && !peer_is_mine(&hv[i]))
 	{
 		fprintf(stderr, "dch: %s: tailscale whois does not show it as "
 		        "your own untagged machine; not connecting\n", sh);
-		return 1;
+		return -1;
 	}
-	if ((fd = open_listed(&hv[i], name, sh, sn, &rest, &rs)) < 0)
+	*h = hv[i];
+	return open_listed(&hv[i], name, sh, sn, rest, rs);
+}
+
+#ifdef _WIN32
+int
+dch_remote_attach(const char *host, const char *name)
+{
+	struct rhost h;
+	struct sb rest = {0};
+	struct rf_state rs;
+	int fd, rc;
+
+	if ((fd = attach_open(host, name, &h, &rest, &rs)) < 0)
 		return 1;
+	keepalive(fd);
+	rc = win_relay(fd, h.label, name, rest, rs);
+	sock_close(fd);
+	return rc;
+}
+#else
+int
+dch_remote_attach(const char *host, const char *name)
+{
+	struct rhost h;
+	struct winsize ws;
+	struct sb out = {0}, rest = {0};
+	struct rf_state rs;
+	char sh[300];
+	int i, fd, sp[2], wp[2], rc;
+
+	if ((fd = attach_open(host, name, &h, &rest, &rs)) < 0)
+		return 1;
+	logsafe(sh, sizeof sh, host);
 	if (!isatty(0) || tcgetattr(0, &orig_term) < 0)
 	{
 		fprintf(stderr, "dch: attaching requires a terminal\n");
@@ -1597,7 +1927,7 @@ dch_remote_attach(const char *host, const char *name)
 		child_signals();
 		close(sp[0]);
 		close(wp[0]);
-		_exit(relay(fd, sp[1], wp[1], hv[i].label, rest, rs));
+		_exit(relay(fd, sp[1], wp[1], h.label, rest, rs));
 	}
 	free(rest.p);
 	close(fd);
@@ -1607,7 +1937,7 @@ dch_remote_attach(const char *host, const char *name)
 	why_fd = wp[0];
 	attach_sock = sp[0];
 	attach_lost = remote_lost;
-	dch_trace("remote attach %s relay=%d", hv[i].label, (int)relay_pid);
+	dch_trace("remote attach %s relay=%d", h.label, (int)relay_pid);
 	rc = attach_main(0);	/* returns only to switch sessions */
 	attach_sock = -1;
 	attach_lost = NULL;
@@ -1619,3 +1949,4 @@ dch_remote_attach(const char *host, const char *name)
 	why_fd = -1;
 	return rc;
 }
+#endif

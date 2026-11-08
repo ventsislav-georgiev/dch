@@ -2,16 +2,26 @@
 ** Remote frames, the parts dch serve (serve.c) and the dch client for remote
 ** hosts (remote.c) share: the frame parser, growable buffers and JSON
 ** helpers, escaping a peer's text for a terminal, subprocesses with
-** timeouts, and the tailscale CLI. See rframe.h.
+** timeouts, and the tailscale CLI. See rframe.h. The Windows client (win/,
+** #077) builds it too: there win/plat.c has the subprocesses and the
+** tailscale lookup.
 */
+#ifdef _WIN32
+#include "win/win.h"
+#else
 #include "dtach.h"
+#endif
 #include "rframe.h"
 
 #include <ctype.h>
+#ifndef _WIN32
 #include <poll.h>
+#endif
 #include <stdint.h>
 #include <time.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 
 #define TS_MS 3000		/* each tailscale CLI call */
 
@@ -22,10 +32,14 @@ volatile sig_atomic_t g_stop;
 long long
 now_ms(void)
 {
+#ifdef _WIN32
+	return (long long)GetTickCount64();
+#else
 	struct timespec ts;
 
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+#endif
 }
 
 /* The UTF-8 sequence at s: its length with the code point in *cp, or 0 when
@@ -409,6 +423,7 @@ whois_user(const char *js, long long *uid, char *node, char *login,
 
 /* ---- subprocesses ---------------------------------------------------- */
 
+#ifndef _WIN32	/* win/plat.c: CreateProcess; cloexec/nonblock on sockets */
 int
 cloexec(int fd)
 {
@@ -597,6 +612,7 @@ fail:
 	}
 	return st;
 }
+#endif
 
 /* ---- tailscale ------------------------------------------------------- */
 
@@ -626,7 +642,8 @@ ts_run(char *a1, char *a2, char *a3, char *a4, char **out, size_t cap)
 ** else a fixed install location (on macOS the CLI is often only a shell
 ** alias for the app's binary). An empty or relative PATH entry is skipped:
 ** it names whatever directory dch serve was started from, and this binary
-** decides every peer. */
+** decides every peer. win/plat.c has the Windows one. */
+#ifndef _WIN32
 void
 ts_find(void)
 {
@@ -654,3 +671,4 @@ ts_find(void)
 	    stat(app, &st) == 0 && S_ISREG(st.st_mode) && access(app, X_OK) == 0)
 		copy_str(g_ts, sizeof g_ts, app);
 }
+#endif
