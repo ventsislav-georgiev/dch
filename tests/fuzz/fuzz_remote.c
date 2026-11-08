@@ -134,7 +134,7 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		size_t off = 0, used = 0;
 		int redraws = 0, r;
 
-		while ((r = pkt_next(d + 1 + off, n - 1 - off, &pk, &used)) > 0)
+		while (pkt_next(d + 1 + off, n - 1 - off, &pk, &used) > 0)
 		{
 			if (!used || used > n - 1 - off)
 				abort();
