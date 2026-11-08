@@ -22,6 +22,8 @@ import errno, fcntl, json, os, pty, re, select, shutil, signal, socket
 import struct, subprocess, sys, tempfile, termios, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# the 300 ms box plus a process start; ASan (DCH_TEST_NO_BUDGET) is slower
+BUDGET = 10.0 if os.environ.get("DCH_TEST_NO_BUDGET") else 1.5
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
 
 FAKE_TS = """#!/bin/sh
@@ -370,12 +372,12 @@ def main():
                 "%s,h=127.0.0.1:%d" % (hosts, hang.port))
         dt = time.time() - t0
         check("a hanging host does not stall --ls (%.2fs)" % dt,
-              dt < 1.5 and "srv:rs1" in r.stdout.splitlines(), r)
+              dt < BUDGET and "srv:rs1" in r.stdout.splitlines(), r)
         t0 = time.time()
         r = dch(cenv, "--ls", "--hosts", "srv=127.0.0.1:%d" % hang.port)
         dt = time.time() - t0
         check("then its cached rows show stale (%.2fs)" % dt,
-              dt < 1.5 and "srv:rs1 [stale]" in r.stdout.splitlines(),
+              dt < BUDGET and "srv:rs1 [stale]" in r.stdout.splitlines(),
               r.stdout)
         r = dch(cenv, "--ls-json", "--remote", "--hosts",
                 "srv=127.0.0.1:%d" % hang.port)
