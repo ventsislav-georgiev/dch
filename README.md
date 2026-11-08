@@ -1123,15 +1123,16 @@ runs right after the connection is accepted, before a byte is read, and a
 refused peer is closed without a reply.
 
 - **Address.** `dch serve` listens only on this host's Tailscale IPv4: the
-  first line of `tailscale ip -4`. When the CLI is not on `PATH`, it takes the
-  first 100.64.0.0/10 address on an interface. When the CLI is on `PATH` but
-  reports no address (tailscale stopped or logged out), it refuses to start;
-  it does not fall back to an interface scan, because an ISP's CGNAT address
-  sits in the same range. It never listens on 0.0.0.0.
+  first line of `tailscale ip -4`. When that reports no address (tailscale
+  stopped or logged out), it refuses to start; it does not scan interfaces
+  for a 100.64.0.0/10 address, because an ISP's CGNAT address sits in the
+  same range. It never listens on 0.0.0.0.
 - **Peer range.** A peer must be an IPv4 address in 100.64.0.0/10.
 - **Owner.** `tailscale whois --json <peer>` must name the same numeric user
   id as `Self.UserID` in `tailscale status --json`, which is read once at
-  startup. Login names are never compared for the owner.
+  startup. Login names are never compared for the owner. With no `tailscale`
+  CLI on `PATH`, or a `status` that fails, the owner is unknown and
+  `dch serve` refuses to start, whatever the flags.
 - **Tagged nodes.** A tagged peer is refused. No user owns a tagged host, so
   on one `dch serve` refuses to start unless you name who may connect:
   `--allow-user <id|login>`, repeatable. Prefer the numeric user id (the
@@ -1140,9 +1141,9 @@ refused peer is closed without a reply.
   `--allow-user` is only for tagged hosts; an untagged host serves its owner,
   and `dch serve` refuses `--allow-user` there.
 - **Whois down.** When `tailscale whois` cannot answer, the peer is refused
-  and a line is logged. `--whois-optional` accepts it instead, with a
-  warning. It also lets `dch serve` start when `tailscale status` fails, and
-  then any tailnet peer gets in: use it only on a tailnet you alone use.
+  and a line is logged. `--whois-optional` accepts that one peer instead,
+  with a warning. It relaxes only a whois that fails at connect time; the
+  owner must still be known at startup.
 
 **Flags.**
 
@@ -1150,9 +1151,9 @@ refused peer is closed without a reply.
 | --- | --- |
 | `--bind <ipv4>` | Listen there instead. Relaxes nothing: the peer checks above still apply, so an address that is not on your tailnet admits nobody (it warns). A wildcard or non-unicast address is refused. |
 | `--port <n>` | Another port, 0 for any (tests). The phone always dials 8771. |
-| `--allow-create` | Let the phone start a session with its own command (0x02). Off by default, and `create` is then missing from the ops the phone sees. Attach (0x01) still starts a shell session when the name is new, as `dch -n` does. |
+| `--allow-create` | Let the phone start a session with its own command (0x02). Off by default, and `create` is then missing from the ops the phone sees, and attach (0x01) only reaches a session already in the list (else 0x13 and a close). With it, attach to a new name starts a shell session, as `dch -n` does. |
 | `--allow-user <u>` | On a tagged host, accept this user's nodes (numeric id or login). Repeatable. |
-| `--whois-optional` | Accept tailnet peers when whois cannot answer (see above). |
+| `--whois-optional` | Accept a tailnet peer whose whois cannot answer, with a warning (see above). The owner must still be known at startup. |
 | `--check-peer <ip>` | Print whether that peer would get in, then exit 0 (accept) or 1. |
 
 **What the phone gets.** The session list (`dch --ls-json`, re-encoded: name,

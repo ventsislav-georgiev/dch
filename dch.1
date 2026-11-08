@@ -1006,13 +1006,15 @@ say) shows up on the phone. It runs in the foreground, logs to standard error,
 and exits 0 on SIGINT or SIGTERM, leaving every session running.
 .PP
 It listens only on this host's Tailscale IPv4, the first line of
-.BR "tailscale ip \-4" ,
-or, when the
+.BR "tailscale ip \-4" .
+When that reports no address it refuses to start, and it never listens on a
+wildcard address. Without the
 .B tailscale
-CLI is not on
+CLI on
 .BR PATH ,
-the first 100.64.0.0/10 address on an interface. When the CLI reports no
-address it refuses to start, and it never listens on a wildcard address. A
+or when
+.B "tailscale status \-\-json"
+fails, the owner is unknown and it refuses to start. A
 peer is checked right after accept, before a byte is read, and a refused peer
 is closed with no reply: it must be an IPv4 address in 100.64.0.0/10, not a
 tagged node, and owned by this host's user (the numeric
@@ -1039,7 +1041,8 @@ Another port, 0 for any. For tests: the phone dials 8771.
 .B \-\-allow\-create
 Let the phone start sessions with its own command; without it,
 .B create
-is not offered and a create request is refused.
+is not offered, a create request is refused, and an attach reaches only a
+session that is already listed.
 .TP
 .BI \-\-allow\-user " user"
 Required on a tagged host, which no user owns: accept this user's nodes, given
@@ -1047,10 +1050,8 @@ as a numeric Tailscale user id (exact) or a login (ASCII case-insensitive).
 Repeatable. Refused on an untagged host, which serves its owner.
 .TP
 .B \-\-whois\-optional
-Accept tailnet peers when whois cannot answer, with a warning; also lets the
-server start when
-.B tailscale status
-fails, and then any tailnet peer gets in.
+Accept a tailnet peer whose whois cannot answer, with a warning. It relaxes
+only that per-peer check: the owner must still be known at startup.
 .TP
 .BI \-\-check\-peer " ipv4"
 Print whether that peer would get in and exit 0 (accept) or 1 (refuse).
