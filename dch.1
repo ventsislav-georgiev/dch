@@ -1,4 +1,4 @@
-.TH DCH 1 "July 2026" "dch 1.0.2" "User Commands"
+.TH DCH 1 "November 2026" "dch" "User Commands"
 .SH NAME
 dch \- detachable terminal sessions with a headless agent API
 .SH SYNOPSIS
@@ -83,7 +83,15 @@ it attaches to the auto-named session for the current directory
 (\fI<repo>\-<branch>\fR or the cwd basename), creating it if needed. The
 session master survives terminal crashes, GUI quits, and SSH drops; a new
 .B dch
-in the same directory reattaches. Detach with
+in the same directory reattaches. While another client is attached, it
+starts the next free
+.IR <name>\-2 ,
+.IR <name>\-3 ,
+\&... instead;
+.B \-f
+or
+.B \-n
+attaches to the busy session. Detach with
 .BR Ctrl\-\(rs .
 .PP
 If the socket node itself is deleted while the master is alive \(em some

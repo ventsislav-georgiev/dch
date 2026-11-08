@@ -24,15 +24,34 @@ disconnect — and nothing else:
 - **One session per project.** Auto-named `<repo>-<branch>` when run from a
   git worktree, otherwise the directory basename.
 - **Attach is idempotent.** Run `dch` again from the same dir — it reattaches
-  the existing session instead of starting a duplicate.
+  the existing session instead of starting a duplicate. If another terminal
+  is attached to it, you get the next free `<name>-2`, `<name>-3`, …; `-f`
+  (or `-n <name>`) joins the busy one instead.
 - **Survives client death.** The master daemon is split from the client, so
   killing the terminal window (crash, GUI quit, SSH drop) leaves the shell
   alive. Open a new window and `dch` reattaches.
+- **A picker that acts.** `dch -l` shows every session's live state, agents
+  and PRs, ended sessions to resume, and the settings. See
+  [The session picker](#the-session-picker).
 - **Agents can drive sessions headlessly.** Each session keeps an in-memory
   terminal mirror (via [libghostty-vt][ghostty]), so scripts and coding
   agents can send keys, read the rendered screen, and wait for output —
   without attaching, without a pty, without disturbing a human who *is*
   attached. See [Agent API](#agent-api).
+- **Knows Claude Code.** Opt-in [auto-allow](#auto-allow) of plain permission
+  prompts, `--say` to message it, `--stop` to pause and end it, and
+  `--restart --include-agents` to restart it on a newly installed Claude
+  Code without losing the conversation ([details](#restarting-claude-code-agents)).
+- **Sessions come back.** Every session leaves a record; after a reboot or
+  crash `dch --revive --all` restarts them with Claude resumed. See
+  [Bringing sessions back](#bringing-sessions-back).
+- **Claude and Codex talk natively.** A Codex session is a peer Claude's own
+  `SendMessage` reaches, and Codex answers with `dch --agent-send`. See
+  [Native Claude and Codex messages](#native-claude-and-codex-messages).
+- **Upgrades and heals in place.** `dch --restart --all` moves live sessions
+  onto a new `dch` without stopping them ([details](#upgrading-a-live-session)),
+  and a master whose socket was swept from `/tmp` rebinds it
+  ([details](#socket-loss-and-self-heal)).
 - **No config file needed, no shell hooks.** One binary on `$PATH`; the
   optional [config file](#config-file) holds only opt-in features.
 
@@ -57,11 +76,16 @@ cd /tmp/scratch                # not a git repo
 dch                            # → session "scratch", starts default shell
 
 dch -n release zsh             # → override auto-name; session "release"
-dch -ls                        # → list every session as display-name (real-name)
-dch -l                         # → pick one (TUI, arrow keys) and attach
+dch -ls                        # → list sessions: display-name (real-name), or real-name
+dch -l                         # → the picker: states, actions, history, settings (,)
 dch -rl                        # → pick one, type a new display name, repeat
 dch -k                         # → pick one and kill it
 dch -kl                        # → kill ALL sessions
+
+dch --config auto_allow true   # → masters answer Claude's plain permission prompts
+dch --revive --all             # → after a reboot or crash: sessions back, Claude resumed
+dch --stop work                # → pause its Claude, end it; dch --revive work wakes it
+dch --restart --all --include-agents  # → after an upgrade: new dch, new Claude Code
 ```
 
 The auto-name uses cwd basename when you're not in a git repo, and
@@ -74,6 +98,7 @@ is a display **alias** only — stored in a sidecar file next to the socket,
 shown with priority in `-l`/`-rl` as `alias (real-name)`. The underlying
 session name is untouched, so attach/kill/detach by real name keep working.
 An empty input clears the alias; killing a session removes its alias too.
+`dch -m <name> [alias]` sets or clears one without the picker.
 
 When a session is running a **named Claude Code or Codex session**, the picker
 and `-ls` show that name instead: `postman (solution.postman-fix_hop-asset-cache-host-var)`.
@@ -84,8 +109,8 @@ releases' process environment IDs remain supported). In both cases dch also
 requires a live harness process with the matching `DCH_SESSION`, so old records
 and a title for another dch session do not overlay. A Codex snapshot names a
 session only while no Codex outside that session's master, such as Codex's
-shared app-server daemon, carries its `DCH_SESSION` (see Native Claude and Codex
-messages). Claude auto-titles and empty
+shared app-server daemon, carries its `DCH_SESSION` (see
+[Native Claude and Codex messages](#native-claude-and-codex-messages)). Claude auto-titles and empty
 Codex titles are skipped; Codex does not mark derived titles separately.
 Explicit aliases win. `--ls-json` keeps the real `name`, `alias`, and resolved
 `harness` as separate fields.
@@ -123,14 +148,14 @@ once a second and keeps the selection on the same session.
 | `p` | | pin / unpin |
 | `d` | | remove (`--forget`), asks first; a pinned record must be unpinned first |
 | `,` | settings | settings |
-| `q` `Esc` `Ctrl-C` | quit | quit |
+| `q` `Esc` `Ctrl-C` `Ctrl-D` | quit | quit |
 
 `,` opens **Settings**: every [config file](#config-file) key with its value,
 `(default)` when the file has none. `Enter` changes the selected one — a bool
 toggles (turning `auto_allow` on asks first), a choice (`picker_sort`,
 `detach_key`) steps to the next, a string (`sidekick_pattern`; empty: no
 Sidekicks tab) is typed on the status line, `Ctrl-D` keeping it. `u` resets
-the key to its default, `Esc` or `q` goes back. Each change is written like
+the key to its default, `Esc`, `q` or `,` goes back. Each change is written like
 `dch --config` does and applies at once (the sort, the Sidekicks split).
 
 A question waits for `y`; any other key cancels. Actions run the matching
@@ -162,9 +187,9 @@ brew install ventsislav-georgiev/tap/dch-lite   # no terminal mirror
 
 Two formulas, `conflicts_with` each other — pick one. **dch** embeds
 libghostty-vt (~3 MB binary). Both builds support the [Agent API](#agent-api).
-**dch-lite** omits only the terminal mirror: `--send`/`--run`/`--keys` still
-work (keys via a legacy encoding), but `--read` and `--wait --match` need the
-mirror and exit 3. `dch --build` prints `full` or `lite`.
+**dch-lite** omits only the terminal mirror; what that costs is in
+[dch-lite and `DCH_NO_VT`](#dch-lite-and-dch_no_vt). `dch --build` prints
+`full` or `lite`.
 The formulas are auto-published to the tap by dch's release workflow on
 every `v*` tag.
 
@@ -203,13 +228,18 @@ it's the whole point of giving them dch.
 dch              # attach the auto-named session, or create it
 dch <cmd...>     # same, but if new, run <cmd> in it
 dch -ls          # list sessions as alias/harness (real-name), or real-name
+dch -lj          # list as name<TAB>alias<TAB>activity_epoch
 dch -l           # session picker: tabs, live states, actions; Enter attaches
 dch -rl          # rename: pick a session, type a display alias, repeat
+dch -m <name> [alias]  # set the alias without the picker (none: clear it)
 dch -k [name]    # kill a session (interactive picker if no name)
 dch -kl          # kill ALL sessions
 dch -d [name]    # detach all clients of a session (sends SIGUSR1)
 dch -n <name>    # override the auto-name
 dch -f           # force-attach even if another client is connected
+dch -e <c>       # detach key: a char, or ^X for Ctrl-X (default ^\)
+dch -E           # no detach key; use dch -d
+dch -V           # version; dch --build prints full or lite
 
 # agent / scripting verbs (never attach; see Agent API)
 dch --spawn <name> [--size CxR] [--env K=V]... [cmd...]  # headless session
@@ -231,9 +261,13 @@ dch --respawn <name> --cancel                   # drop a pending respawn
 dch --cmd <name>                                # child pid, state, argv, exit status (JSON)
 dch --history [--json]                          # sessions that ended, and how
 dch --revive <name> [--as <new>]|--all [--no-message] [--json]  # bring ended sessions back, claude resumed
+dch --pin|--unpin <name>... [--json]            # keep a record past the 30-day prune, or stop
+dch --forget <name>... [-f]|--all [--json]      # delete ended sessions' records
 dch --say <name>...|--all [--json] -- <text...>  # message each Claude Code, busy too (queued), never over a prompt
 dch --stop <name>...|--all [--json]             # pause Claude, end the session; --revive wakes it
 dch --config [<key> [<value>|--unset]]          # show, read or set the config file
+dch --agent-list [--json]                       # native Claude peers
+dch --agent-send <peer> <message...>            # message one (from a Codex session)
 ```
 
 Inside a session: `Ctrl-\` to detach. Works in vim, fzf, less, Claude Code,
@@ -289,6 +323,8 @@ someone is watching is invisible to them.
 | `--forget <n>... [-f] [--json]` \| `--forget --all [--json]` | Delete history records of the current socket dir, matched by name as `--revive` matches them (every record that matches); `<file>.json` (`work.json`, `work.<ended>.json`) deletes exactly that one record file; one that is also a session's name is refused, `ambiguous`, as for `--pin`. Never a live session's (`live`: its master would write it back; `-f` does not change that); a pinned one only with `-f`, which removes its pin too (`pinned` otherwise); `not_found` when no record matches. One line per record: `<n>: forgotten` or `<n>: failed — <why>`. `--all` deletes every record that is neither live nor pinned and skips the rest: one `<n>: forgotten` per record deleted, then `forgot N (K pinned, L live kept)`; `-f` with `--all` is a usage error (it never removes a pin). | 0 nothing failed (skips included), 1 usage error / a name failed |
 | `--say <n>... [--json] -- <text...>` \| `--say --all [--json] -- <text...>` | Type one message into the Claude Code running in each session — as its command or typed into its shell — and submit it, idle or busy: a busy Claude (or one running a background shell) queues the message, just as Enter does when you type it yourself, and takes it once its turn ends; one with messages already queued queues it after them. Typed only when the screen shows its empty composer (its placeholder, also the "Press up to edit queued messages" one), never over a prompt or dialog (the Enter would answer it) or an unsent draft, never waiting for either. Text is the words after the required `--` joined with spaces. Sessions are typed into concurrently; Enter is pressed again while the text still sits in the composer, never once a dialog is up; text that left the composer — submitted, or shown queued above it — is `sent`. One result per session as it finishes: `<n>: sent`, `<n>: skipped — <why>` (`not_claude` under `--all`, `self` = `$DCH_SESSION`, `prompt`, `draft`, `no_screen` — always on dch-lite) or `<n>: failed — <why>` (`no_session`, `not_submitted`, `not_typed`, `old_master`). `--json` prints one `{"name","result":"ok\|skipped\|failed","reason","detail"}` object per line instead. | 0 nothing failed (skips included), 1 usage error / a session failed |
 | `--stop <n>... [--json]` \| `--stop --all [--json]` | End sessions so `--revive` can bring them back. A session whose Claude Code is live — its command, or typed into its shell — is paused first, the way `--include-agents` pauses it: a pause message (`DCH_PAUSE_MSG` replaces it) and a wait until Claude is provably idle (`DCH_AGENT_TIMEOUT_MS`, 600000). Claude as the session's command then gets `/exit` through the same composer gate, its resume id read from the exit line (else from its session record). Claude typed into the shell never gets `/exit` — the shell would run whatever followed `claude` on its line (`claude && git push`, a loop): its resume id is read from its session record, and the session's end hangs up the shell and Claude together. Then the session ends. Claude's session record is looked up in the sessions dir of Claude's own `CLAUDE_CONFIG_DIR` (else its `HOME`), read from the process, so a Claude run as `CLAUDE_CONFIG_DIR=~/.claude-work claude` is found from any env; the history record, `--say` and `--include-agents` look it up the same way. A session without a live Claude ends at once; one where a process plainly is an interactive Claude (`claude` as its argv[0]) but no record of it can be read is left running, `failed` `claude_unreadable` — ending it would hang Claude up unpaused, its id unknown. A non-interactive run — `claude -p`/`--print`, or a subcommand such as `claude mcp serve` or `claude update` — has no composer to pause and counts as no Claude. The record ends `stopped` and keeps the agent with that id (see [Bringing sessions back](#bringing-sessions-back)). Sessions are handled concurrently; one line per session as it finishes: `<n>: stopped (claude <name> <id>; revive with dch --revive <n>)` — or, when the session kept no record (`DCH_NO_HISTORY`, a failed write), `<n>: stopped (no session record kept, so dch --revive cannot bring it back; resume by hand: claude --resume <id>)`, the same text in `--json`'s `detail`, `<n>: skipped — <why>` (`self` = `$DCH_SESSION`, `respawn_pending`, `no_screen` — a Claude session on dch-lite), `<n>: failed — <why>` (`no_session`, `old_master`, `claude_unreadable`, `prompt`, `draft`, `queued`, `not_typed`, `not_idle`, `exit_failed`, `claude_exited`, `end_failed`) or `<n>: interrupted — <why>`; once dch has read Claude's id, a line that is not `ok` carries it too. A failure leaves the session running and types a resume message into its Claude (`DCH_RESUME_MSG` replaces it); so does a first SIGINT/SIGTERM for every Claude not yet past `/exit` (a second one reports those past `/exit` as `interrupted` with their id and leaves their `.stopped` marker, so the record still ends `stopped`; a third exits at once). A master that stops answering after `/exit` keeps its marker too: `failed`, with the id, and the record ends `stopped` once the master runs again. Both lines end `if claude is still running, run dch --stop <n> again`: the marker stays until then. `--json`: stdout is NDJSON — `{"name","phase":"pausing\|exiting\|ending"}` as a session reaches each (no `exiting` for Claude typed into the shell), then one `{"name","result":"ok\|skipped\|failed\|interrupted","reason","detail","session_id"}` per session (`session_id` `""` when none). | 0 nothing failed (skips included), 1 usage error / a session failed or was interrupted |
+| `--agent-list [--json]` | List the native Claude peers, read from Claude Code's own session records, bridged Codex sessions included (see [Native Claude and Codex messages](#native-claude-and-codex-messages)). `--json`: `[{"name","session_id"}]`. | 0 ok, 1 registry ambiguous or too large |
+| `--agent-send <peer> <message...>` | Send one native message to the peer of that exact name, from inside a bridged Codex session only. | 0 written, 1 refused / ambiguous / timed out / not in a bridged Codex session |
 
 ### Machine-readable output
 
@@ -634,6 +670,35 @@ will automatically block this request in M:SS, …" line counts as the same prom
 `auto_allowed` in `--ls-json` (`<sock>.allowed` next to the socket). Needs the
 terminal mirror: not in dch-lite or under `DCH_NO_VT`; `DCH_NO_DETECT=1` in
 the master's environment turns it off too.
+
+
+## Environment
+
+Every variable dch reads, in one place; the linked section has the detail.
+"Master" means the environment the session was spawned from: changing it
+later does nothing to a running session.
+
+| Variable | Read by | Default | Does |
+| --- | --- | --- | --- |
+| `DCH_SESSION` | every `dch` | set by dch | The session name, set for everything inside a session; hooks use it ([reporting](#optional-explicit-state-reporting)). Attaching refuses while it is set: no nesting. |
+| `DCH_SOCKET_DIR` | every `dch` | `$XDG_RUNTIME_DIR/dch-$UID`, else `/tmp/dch-$UID` | Where sockets and sidecars live ([self-heal](#socket-loss-and-self-heal)). Records of one socket dir never mix with another's. |
+| `DCH_CONFIG` | every `dch` | `$XDG_CONFIG_HOME/dch/config`, else `~/.config/dch/config` | The [config file](#config-file). |
+| `DCH_DOUBLE_TAP_MS` | attaching client | `300` | The double-press window of `Ctrl-\`; `0`: one press acts at once ([Cheatsheet](#cheatsheet)). |
+| `DCH_NO_DETECT` | client and master | unset | Set: no screen-content [state detection](#agent-state-detection), `agents` reads `0`, the master does no [auto-allow](#auto-allow), and `--say`, `--stop` and the agent restart see no screen, as on dch-lite. |
+| `DCH_NO_VT` | master | unset | Set: no terminal mirror ([dch-lite and `DCH_NO_VT`](#dch-lite-and-dch_no_vt)). |
+| `DCH_NO_REPLAY` | master | unset | Set: attach clears and asks for a repaint instead of [replaying the screen](#attaching-replays-the-screen). |
+| `DCH_SCROLLBACK` | master | `2000` | Mirror scrollback lines, max `100000`, `0` none (`--read --recent`, [Verbs](#verbs)). |
+| `DCH_NO_HISTORY` | master | unset | Anything but empty or `0`: no history record ([Bringing sessions back](#bringing-sessions-back)). |
+| `DCH_RECORD_MS` | master | `60000` | How often the history record is refreshed. |
+| `DCH_HEAL_MS` | master | `3600000` | The [self-heal](#socket-loss-and-self-heal) interval. |
+| `DCH_HOLD_MS`, `DCH_RESPAWN_TTL_MS` | master | `120000`, `300000` | How long a held session waits, and an unused `--respawn` arm lives ([Verbs](#verbs)). |
+| `DCH_PAUSE_MSG`, `DCH_RESUME_MSG`, `DCH_AGENT_*_MS` | client | see the table | Agent pause/resume text and timeouts of `--include-agents` and `--stop` ([table](#restarting-claude-code-agents)). |
+| `DCH_REVIVE_MSG` | client | built in | The carry-on message `--revive` types ([Bringing sessions back](#bringing-sessions-back)). |
+| `DCH_LOGIN_ENV`, `DCH_LOGIN_ENV_MS` | client | on, `10000` | `--revive` takes your login shell's environment; `0` skips it. |
+| `DCH_DEBUG` | client and master | unset | A path: append a trace there; `1`: `/tmp/dch.<uid>.trace`. |
+| `XDG_STATE_HOME` | client and master | `~/.local/state` | Where [history records](#bringing-sessions-back) live. |
+| `CLAUDE_CONFIG_DIR`, `CODEX_HOME` | client | `~/.claude`, `~/.codex` | Where dch looks for Claude's and Codex's session records and titles. |
+| `NO_COLOR`, `TERM=dumb` | picker | unset | Draw the [picker](#the-session-picker) without color. |
 
 ## Upgrading a live session
 
@@ -1012,7 +1077,7 @@ name a second master already took over, and it never risks stealing a
 healthy one.
 
 For a session meant to run for days, point `DCH_SOCKET_DIR` somewhere
-other than `/tmp` (see `dch.1`'s ENVIRONMENT section) so the cleaner never
+other than `/tmp` (see [Environment](#environment)) so the cleaner never
 has a reason to touch it in the first place.
 
 ## Native Claude and Codex messages
@@ -1108,6 +1173,9 @@ adds:
 - An in-master terminal mirror (embedded libghostty-vt) plus an agent
   control protocol: `--spawn`, `--send`, `--run`, `--keys`, `--read`,
   `--wait`, `--ls-json` — drive and observe TUI sessions without attaching.
+- Everything else in this README: state detection, the action picker, live
+  `--restart`, history and `--revive`, Claude Code control (`--say`,
+  `--stop`, auto-allow), native Claude/Codex peers and socket self-heal.
 
 ## License
 
