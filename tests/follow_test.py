@@ -162,7 +162,15 @@ def old_master(name, ignore_flags):
         try:
             for _ in range(2):
                 c, _ = srv.accept()
-                req = c.recv(64)
+                # the whole packet: the client may send its header and
+                # payload in two writes, and closing on unread bytes
+                # resets the reply away (macOS)
+                req = b""
+                while len(req) < 3 or len(req) < 3 + req[1] + req[2] * 256:
+                    more = c.recv(64)
+                    if not more:
+                        break
+                    req += more
                 if len(req) > 7 and req[7] and not ignore_flags:
                     c.sendall(bytes([9, 1, 0]))         # READ_END ERR
                 else:
