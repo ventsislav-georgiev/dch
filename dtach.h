@@ -305,23 +305,7 @@ int attach_main(int noerror);
 extern int attach_sock;
 extern const char *(*attach_lost)(void);
 
-/* The dch client for remote hosts (#087), remote.c. A row is one session
-** on another host, every field as the peer sent it: print it only through
-** dch_remote_esc. */
-#define DCH_RHOST_MAX 64
-struct dch_rrow
-{
-	char host[DCH_RHOST_MAX];	/* its host's label */
-	char name[256], alias[256];
-	char state[16];		/* working|idle|blocked|done, or "" */
-	long at;		/* when the host answered, epoch seconds */
-	int stale;		/* the host did not answer this time */
-};
-int dch_remote_set_hosts(const char *list);
-int dch_remote_rows(struct dch_rrow **out, int now);
-void dch_remote_stop(void);
-int dch_remote_attach(const char *host, const char *name);
-void dch_remote_esc(char *out, size_t cap, const char *s);
+#include "remote.h"
 void client_pidfile_unlink(void);
 int master_main(char **argv, int waitattach, int dontfork);
 int push_main(void);
