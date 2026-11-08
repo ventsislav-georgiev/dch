@@ -74,6 +74,16 @@ check "-lj alpha: 3 fields, recent epoch" "$lj_alpha" "3:1"
 lj_beta=$("$DCH" -lj 2>/dev/null | awk -F'\t' '$1=="beta"{print NF":"$3}')
 check "-lj beta: 3 fields, epoch 0" "$lj_beta" "3:0"
 
+# --- -m: a live session takes the alias; a missing one is refused (#085) ---
+"$DCH" -m beta 'Bee' >/dev/null 2>&1; check "-m on a live session exits 0" "$?" "0"
+check "-m writes the alias sidecar" "$(cat "$SOCKDIR/beta.sock.alias" 2>/dev/null)" "Bee"
+"$DCH" -m beta >/dev/null 2>&1
+[ ! -s "$SOCKDIR/beta.sock.alias" ] && ok "-m with no alias clears it" || bad "-m with no alias clears it"
+m_err=$("$DCH" -m ghost 'Boo' 2>&1 >/dev/null); m_rc=$?
+check "-m on a missing session exits 1" "$m_rc" "1"
+check "-m on a missing session: -k's wording" "$m_err" "$("$DCH" -k ghost 2>&1 >/dev/null)"
+[ ! -e "$SOCKDIR/ghost.sock.alias" ] && ok "-m on a missing session writes nothing" || bad "-m on a missing session writes nothing"
+
 # --- kill removes socket, alias, and activity sidecars ---------------------
 "$DCH" -k alpha >/dev/null 2>&1
 [ ! -e "$SOCKDIR/alpha.sock" ]       && ok "kill removes socket"        || bad "kill removes socket"
@@ -657,6 +667,10 @@ assert any(s["state"] == "blocked" for s in d), d
               "$("$DCH" --status "$DN" 2>/dev/null)" "blocked"
         check "DCH_NO_DETECT=1 disables detection" \
               "$(DCH_NO_DETECT=1 "$DCH" --status "$DN" 2>/dev/null)" "working"
+        check "DCH_NO_DETECT=0 leaves detection on" \
+              "$(DCH_NO_DETECT=0 "$DCH" --status "$DN" 2>/dev/null)" "blocked"
+        check "DCH_NO_DETECT= (empty) leaves detection on" \
+              "$(DCH_NO_DETECT= "$DCH" --status "$DN" 2>/dev/null)" "blocked"
 
         paint ww 'esc to interrupt'
         check "--wait --state sees detected working" \
@@ -687,6 +701,8 @@ print(next(s for s in json.load(sys.stdin) if s["name"] == sys.argv[1])["agents"
         check "--ls-json counts agent panel rows" "$(agents)" "2"
         check "DCH_NO_DETECT=1 reads 0 agents" \
               "$(export DCH_NO_DETECT=1; agents)" "0"
+        check "DCH_NO_DETECT=0 still counts agents" \
+              "$(export DCH_NO_DETECT=0; agents)" "2"
         paint a2 '\342\217\272 main\n\342\227\257 worker-opus-high  Running…\nsome prose\n\342\227\257 not a row'
         check "agent rows stop at the first non-row line" "$(agents)" "1"
         paint a3 '\342\217\272 main is great\n\342\227\257 worker-opus-high  Running…'
@@ -792,6 +808,14 @@ print(next(s for s in json.load(sys.stdin) if s["name"] == sys.argv[1])["agents"
     "$DCH" --keys "$LN" enter >/dev/null 2>&1
     check "no-mirror --keys legacy fallback exits 0" "$?" "0"
     "$DCH" -k "$LN" >/dev/null 2>&1
+
+    # DCH_NO_VT=0 is off, like every DCH_NO_* (#085): the mirror stays.
+    if [ "$mirror" -eq 0 ]; then
+        DCH_NO_VT=0 "$DCH" --spawn "vt0$$" sh >/dev/null 2>&1
+        "$DCH" --read "vt0$$" >/dev/null 2>&1
+        check "DCH_NO_VT=0 keeps the mirror: --read exits 0" "$?" "0"
+        "$DCH" -k "vt0$$" >/dev/null 2>&1
+    fi
 
     # Live restart: the master re-execs itself in place. The session's child,
     # its pid, its screen and its scrollback all have to survive, and the

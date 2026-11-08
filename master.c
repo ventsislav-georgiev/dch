@@ -415,7 +415,7 @@ auto_allow(void)
 	size_t n;
 
 	aa_pending = aa_verify = 0;
-	if (the_pty.fd < 0 || !dch_vt_enabled() || getenv("DCH_NO_DETECT") ||
+	if (the_pty.fd < 0 || !dch_vt_enabled() || dch_env_on("DCH_NO_DETECT") ||
 	    !dch_config_bool("auto_allow") ||
 	    dch_vt_snapshot(DCH_VT_FMT_PLAIN, 0, &scr, &n) < 0)
 		return;
@@ -846,7 +846,6 @@ rec_init(int resumed)
 {
 	char root[1024], body[256];
 	const char *base = strrchr(sockname, '/'), *e = getenv("DCH_SESSION");
-	const char *off;
 	size_t bl;
 	long v;
 	int fd;
@@ -860,8 +859,7 @@ rec_init(int resumed)
 	if (bl > 5 && strcmp(base + bl - 5, ".sock") == 0)
 		bl -= 5;
 	/* DCH_NO_HISTORY: no record, no prune, nothing under the state dir */
-	off = getenv("DCH_NO_HISTORY");
-	if (off && *off && strcmp(off, "0") != 0)
+	if (dch_env_on("DCH_NO_HISTORY"))
 	{
 		if (!resumed)
 			rec_unmark();
@@ -3273,7 +3271,7 @@ master_adopt(void)
 
 	/* Re-seed the mirror at the size we left at, by feeding it the screen
 	** we rendered before the exec. Scrollback does not come across. */
-	if (!getenv("DCH_NO_VT"))
+	if (!dch_env_on("DCH_NO_VT"))
 	{
 		char *sb = getenv("DCH_SCROLLBACK");
 		int scrollback = sb ? atoi(sb) : 2000;
@@ -3387,7 +3385,7 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 	dch_trace("master start pid=%d waitattach=%d", (int)getpid(), waitattach);
 
 	listen_fd = s;
-	no_replay = getenv("DCH_NO_REPLAY") != NULL;
+	no_replay = dch_env_on("DCH_NO_REPLAY");
 	{
 		const char *e = getenv("DCH_HEAL_MS");
 		long v = e ? atol(e) : 0;
@@ -3464,7 +3462,7 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 		** MSG_WINCH / MSG_REDRAW keep it in sync. Failure (or
 		** DCH_NO_VT) just leaves --read/--wait/--keys unavailable;
 		** the session is unaffected. */
-		if (!getenv("DCH_NO_VT"))
+		if (!dch_env_on("DCH_NO_VT"))
 		{
 			char *sb = getenv("DCH_SCROLLBACK");
 			int scrollback = sb ? atoi(sb) : 2000;
