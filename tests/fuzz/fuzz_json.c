@@ -1,4 +1,4 @@
-/* libFuzzer target: bridge.c's JSON helpers (dch_json_*) over an arbitrary
+/* libFuzzer target: json.c's JSON helpers (dch_json_*) over an arbitrary
 ** document, plus a quote -> parse round trip that must give the input back. */
 #include "dtach.h"
 #include <stdint.h>

@@ -8,15 +8,17 @@ VT_LIBS = @VT_LIBS@
 VERSION = @PACKAGE_VERSION@
 VPATH = $(srcdir)
 
-OBJ = attach.o master.o dch.o serve.o rframe.o remote.o $(VT_OBJS) bridge.o
+OBJ = attach.o master.o dch.o serve.o rframe.o remote.o $(VT_OBJS) bridge.o \
+      json.o
 SRC = $(srcdir)/attach.c $(srcdir)/master.c $(srcdir)/dch.c \
       $(srcdir)/vt.c $(srcdir)/vt_stub.c $(srcdir)/bridge.c \
-      $(srcdir)/serve.c $(srcdir)/rframe.c $(srcdir)/remote.c
+      $(srcdir)/serve.c $(srcdir)/rframe.c $(srcdir)/remote.c \
+      $(srcdir)/json.c
 
 TARFILES = $(srcdir)/README $(srcdir)/COPYING $(srcdir)/Makefile.in \
 	   $(srcdir)/config.h.in $(srcdir)/bridge.h $(srcdir)/rframe.h $(SRC) \
-	   $(srcdir)/dtach.h $(srcdir)/dtach.spec $(srcdir)/configure \
-	   $(srcdir)/configure.ac $(srcdir)/dch.1
+	   $(srcdir)/remote.h $(srcdir)/dtach.h $(srcdir)/dtach.spec \
+	   $(srcdir)/configure $(srcdir)/configure.ac $(srcdir)/dch.1
 
 dch: $(OBJ)
 	$(CC) -o $@ $(LDFLAGS) $(OBJ) $(VT_LIBS) $(LIBS)
@@ -25,7 +27,19 @@ test: dch
 	sh $(srcdir)/tests/run.sh
 
 clean:
-	rm -f dch $(OBJ) dch-$(VERSION).tar.gz
+	rm -f dch $(OBJ) dch-$(VERSION).tar.gz dch-check.exe dch-check.pdb
+
+# The Windows client (#077) under the strict flags when WINCC is installed,
+# silently nothing otherwise. WINCC may carry its own flags.
+WINCC = x86_64-w64-mingw32-gcc
+WINFLAGS = -Wextra -Wformat=2 -Wshadow -Wpointer-arith -Wcast-qual \
+	   -Wstrict-prototypes -Wmissing-prototypes -Wundef -Wvla \
+	   -Wnull-dereference -Wimplicit-fallthrough -Werror
+windows-check:
+	@set -- $(WINCC); command -v "$$1" >/dev/null 2>&1 || exit 0; \
+	CC="$(WINCC)" sh $(srcdir)/scripts/build-windows.sh \
+	    -o "$$PWD/dch-check.exe" $(WINFLAGS) && \
+	rm -f dch-check.exe dch-check.pdb && echo "windows-check: ok ($(WINCC))"
 
 distclean: clean
 	rm -f config.h Makefile config.log config.status config.cache
@@ -37,12 +51,13 @@ tar:
 	gzip -9f dch-$(VERSION).tar
 	rm -rf dch-$(VERSION)
 
-attach.o: @srcdir@/attach.c @srcdir@/dtach.h @srcdir@/bridge.h config.h
-master.o: @srcdir@/master.c @srcdir@/dtach.h @srcdir@/bridge.h @srcdir@/vt.h config.h
-dch.o: @srcdir@/dch.c @srcdir@/dtach.h @srcdir@/bridge.h config.h
-serve.o: @srcdir@/serve.c @srcdir@/dtach.h @srcdir@/bridge.h @srcdir@/rframe.h config.h
-rframe.o: @srcdir@/rframe.c @srcdir@/dtach.h @srcdir@/bridge.h @srcdir@/rframe.h config.h
-remote.o: @srcdir@/remote.c @srcdir@/dtach.h @srcdir@/bridge.h @srcdir@/rframe.h config.h
-vt.o: @srcdir@/vt.c @srcdir@/vt.h @srcdir@/dtach.h config.h
+attach.o: @srcdir@/attach.c @srcdir@/dtach.h @srcdir@/remote.h @srcdir@/bridge.h config.h
+master.o: @srcdir@/master.c @srcdir@/dtach.h @srcdir@/remote.h @srcdir@/bridge.h @srcdir@/vt.h config.h
+dch.o: @srcdir@/dch.c @srcdir@/dtach.h @srcdir@/remote.h @srcdir@/bridge.h config.h
+serve.o: @srcdir@/serve.c @srcdir@/dtach.h @srcdir@/remote.h @srcdir@/bridge.h @srcdir@/rframe.h config.h
+rframe.o: @srcdir@/rframe.c @srcdir@/dtach.h @srcdir@/remote.h @srcdir@/bridge.h @srcdir@/rframe.h config.h
+remote.o: @srcdir@/remote.c @srcdir@/dtach.h @srcdir@/remote.h @srcdir@/bridge.h @srcdir@/rframe.h config.h
+vt.o: @srcdir@/vt.c @srcdir@/vt.h @srcdir@/dtach.h @srcdir@/remote.h config.h
 vt_stub.o: @srcdir@/vt_stub.c @srcdir@/vt.h config.h
-bridge.o: @srcdir@/bridge.c @srcdir@/bridge.h @srcdir@/dtach.h config.h
+bridge.o: @srcdir@/bridge.c @srcdir@/bridge.h @srcdir@/dtach.h @srcdir@/remote.h config.h
+json.o: @srcdir@/json.c @srcdir@/bridge.h

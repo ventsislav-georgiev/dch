@@ -220,6 +220,7 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "--cmd survives empty reply frames" cmd_frames_test.py
     pyrun "dch serve: remote frames goldens, peer gate, startup refusals" serve_test.py
     pyrun "remote hosts: -ls, --remote, -a host:name, hostile peers" remote_client_test.py
+    pyrun "the Windows client's checks, against this dch" windows_client_test.py
 fi
 
 # --- control verbs: --spawn --run --read --wait --keys ---------------------

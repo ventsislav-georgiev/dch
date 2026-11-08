@@ -1191,6 +1191,23 @@ escaped as \fI\\xNN\fP
 .RB ( \-\-ls\-json
 writes C1 and bidi controls as \fI\\uXXXX\fP);
 only an attach's screen bytes pass as they are.
+.PP
+.B dch.exe
+(built by
+.BR scripts/build\-windows.sh )
+is this client alone for Windows 10 or later: it hosts no sessions, so
+.B \-ls
+implies
+.BR \-\-remote ,
+.B \-a
+takes
+.IR host : name ,
+and there is no picker.
+Its config is
+.IR %APPDATA%\(rsdch\(rsconfig ,
+its cache is in
+.IR %LOCALAPPDATA%\(rsdch ,
+and its time box defaults to 1000 ms; Ctrl\-\(rs always detaches.
 .SH CONFIG FILE
 Optional: dch needs none. Read fresh on every use from
 .BR $DCH_CONFIG ,

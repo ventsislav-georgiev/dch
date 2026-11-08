@@ -1315,6 +1315,46 @@ terminal as they are, as a local session's do.
 rename or create: those are mutating operations that will need the server's
 `ops` and the same confirmation the local ones have.
 
+### Windows client
+
+`dch.exe` is the client half alone, for Windows 10 or later: it lists and
+attaches to the sessions of your other machines and hosts none (no pty, no
+master, no `dch serve`). It is a plain Win32 console program, built with
+mingw-w64 and linked statically, so it needs no Cygwin or MSYS2 runtime.
+
+```sh
+scripts/build-windows.sh            # x86_64-w64-mingw32-gcc; CC=gcc in MSYS2's UCRT64
+make windows-check                  # the same under -Werror, when that compiler is installed
+```
+
+```bat
+dch -ls                             :: remote rows: on Windows -ls implies --remote
+dch -lj
+dch --ls-json
+dch --hosts mini,pi=100.64.1.2:8771 -ls
+dch -a mybox:api                    :: host:name is required, there are no local sessions
+dch --host mybox -a api
+```
+
+The hosts, discovery and trust are the same as on macOS and Linux, including
+`tailscale whois` before an attach to a discovered host, failing closed.
+`tailscale.exe` is found on `PATH`, else in `C:\Program Files\Tailscale\`.
+The config is `%APPDATA%\dch\config` (or `DCH_CONFIG`); the stale-rows cache
+is in `%LOCALAPPDATA%\dch\`, which your profile's ACL already keeps private,
+so there is no owner check like the POSIX one. `DCH_NO_REMOTE` and
+`DCH_REMOTE_BOX_MS` work as documented; the box defaults to 1000 ms here,
+not 300, because starting `tailscale.exe` costs more on Windows.
+
+An attach puts the console in VT mode (Windows Terminal, or conhost on
+Windows 10 or later), passes keys through raw, follows the window size, and
+restores the console on every exit, Ctrl-C and Ctrl-Break included. Ctrl-\
+always detaches: with no picker there is nothing to switch to, so
+`detach_key` is not read. A lost
+connection restores the console, says why, and exits 1.
+
+Not yet on Windows: the picker and its background re-probe, switching
+sessions, and the kitty-keyboard form of the detach key.
+
 ## Native Claude and Codex messages
 
 A dch session that runs `codex`, directly or through a wrapper such as `headroom wrap codex`, registers as a Claude native peer.

@@ -27,13 +27,17 @@ int dch_json_is_object(const char *json);
 int dch_json_nested_string(const char *json, const char *object,
                            const char *key, char *out, size_t cap);
 size_t dch_json_quote(char *out, size_t cap, const char *s);
+/* json.c: the length of the valid UTF-8 sequence at s (n bytes left), 0 for
+** none; whether s[0..n) is all UTF-8 with no NUL. */
+size_t dch_utf8_len(const unsigned char *s, size_t n);
+int dch_utf8_ok(const unsigned char *s, size_t n);
 size_t dch_utf8_trim(const char *s, size_t n);
 char *dch_utf8_fix(const char *s);
 char **dch_json_strv(const char *json, const char *object, const char *key,
                      int *argc);
 int dch_process_start(long pid, char *out, size_t cap);
 
-/* bridge.c's JSON tokenizer, for callers that walk a document themselves.
+/* The JSON tokenizer (json.c), for callers that walk a document themselves.
 ** dch_json_parse() needs NUL-terminated UTF-8; dch_json_free() after every
 ** parse, even a failed one. Token 0 is the root; a container's children run
 ** from its index + 1 to its `next`, each child's `next` the one after it.
