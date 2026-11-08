@@ -1,0 +1,1 @@
+{"Self": {"ID": "1", "UserID": 42, "Tags": []}, "Peer": {"k": {"DNSName": "box.t.ts.net.", "UserID": 42, "Online": true, "TailscaleIPs": ["100.64.9.1", "fd7a::1"]}, "j": {"HostName": "X Y", "UserID": 42, "Online": true, "TailscaleIPs": ["100.100.2.2"]}}, "BackendState": "Running"}

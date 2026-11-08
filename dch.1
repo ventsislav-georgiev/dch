@@ -5,6 +5,14 @@ dch \- detachable terminal sessions with a headless agent API
 .B dch
 .RI [ cmd... ]
 .br
+.B dch \-a
+.IR name \fR|\fP host : name
+.br
+.B dch \-\-host
+.I host
+.B \-a
+.I name
+.br
 .B dch
 .RB [ \-l | \-ls | \-lj | \-rl | \-k
 .RI [ name ]
@@ -146,13 +154,52 @@ harness process's
 .B DCH_SESSION
 so stale records do not overlay; explicit aliases win.
 .TP
-.B \-ls
+.BR \-ls ", " \-\-ls
 List sessions one per line as \fIdisplay-name (real-name)\fP when an alias or
 harness title exists, otherwise as \fIreal-name\fP. Aliases win over harness
-titles.
+titles. Local only: no network, no
+.B tailscale
+call. With
+.BR \-\-remote ,
+then the remote hosts' sessions as \fIhost\fP:\fIname\fP (see
+.BR "REMOTE HOSTS" ),
+a row of a host that did not answer this time ending in
+.BR [stale] .
 .TP
 .B \-lj
 List sessions as \fIname\fP<TAB>\fIalias\fP<TAB>\fIactivity_epoch\fP lines.
+With
+.BR \-\-remote ,
+then the remote ones as \fIhost\fP:\fIname\fP<TAB>\fIalias\fP<TAB>0,
+escaped.
+.TP
+.BI \-a " name"
+Attach to a session; never create one. When no local session has exactly
+that name and it has the form \fIhost\fP:\fIname\fP, attach to
+.I name
+on that remote host (see
+.BR "REMOTE HOSTS" );
+an unknown host is an error that lists the known ones.
+.TP
+.BI \-\-host " host"
+With
+.BR \-a :
+the session is on that remote host; its name may hold a colon.
+.TP
+.BI \-\-hosts " list"
+The remote hosts, a comma-separated
+.RI [ label =] host [: port ]
+list (port 8771 when not given), instead of the
+.B remote_hosts
+key or tailnet discovery.
+.TP
+.B \-\-remote
+With
+.BR \-ls ,
+.B \-lj
+or
+.BR \-\-ls\-json :
+the remote rows too (the picker always shows them).
 .TP
 .B \-\-ls\-json
 List sessions as a JSON array of
@@ -183,6 +230,18 @@ when one is; the real
 and display
 .I alias
 remain separate fields.
+With
+.BR \-\-remote ,
+the remote hosts' sessions follow as
+.BR {name,alias,host,state,stale} :
+.I name
+and
+.I alias
+as the host sent them,
+.I host
+the host's label,
+.I stale
+true when the host did not answer this time and the row is its last answer.
 .TP
 .B \-rl
 Rename (alias) sessions interactively. Aliases are display-only.
@@ -1080,6 +1139,58 @@ with a loopback
 .B \-\-bind
 lets loopback peers past the address check. It exists for the test suite only,
 and is removed from the environment at startup.
+.SH REMOTE HOSTS
+dch lists and attaches to the sessions of other machines that serve them
+over Prosper's remote frames 1.0 on TCP port 8771
+.RB ( "dch serve" ,
+or Prosper on a Mac).
+The hosts are
+.BR \-\-hosts ,
+else the
+.B remote_hosts
+key, else discovery: the peers in
+.B tailscale status \-\-json
+that are online, owned by this host's Tailscale user (numeric user id) and
+untagged, each at its 100.64.0.0/10 address, named by the first label of its
+MagicDNS name, and only while tailscaled reports BackendState Running.
+Nothing else is ever dialled; no
+.B tailscale
+CLI or no peers means no remote rows, not an error.
+Before an attach to a discovered host,
+.B tailscale whois
+on its address must name this host's user and no tags, or dch does not
+connect; a host given in
+.B \-\-hosts
+or
+.B remote_hosts
+is taken as given.
+.PP
+.BR \-ls ,
+.B \-lj
+and
+.B \-\-ls\-json
+list remote rows only with
+.BR \-\-remote ,
+which probes every host in parallel within 300 ms in all, the
+.B tailscale
+call and name lookups included. A host that does
+not answer in time shows its last answer, stale, for 2 minutes (a cache in
+.IR $XDG_STATE_HOME/dch/sessions/.remote\-cache ).
+A host speaking a newer protocol major is skipped with a note.
+The picker lists remote rows in Sessions, the host faint, of the hosts that
+are candidates now, and re\-probes in the background; Enter attaches, on
+the connection that checked the name is listed, and no other action applies
+to them yet.
+.PP
+An attach is a local one over the network: the detach character and its
+double press stay local, the window size follows the terminal, and a detach
+closes the connection and leaves the remote session running. A lost
+connection restores the terminal, prints why and exits 1.
+Every name and message a peer sends is printed with control characters
+escaped as \fI\\xNN\fP
+.RB ( \-\-ls\-json
+writes C1 and bidi controls as \fI\\uXXXX\fP);
+only an attach's screen bytes pass as they are.
 .SH CONFIG FILE
 Optional: dch needs none. Read fresh on every use from
 .BR $DCH_CONFIG ,
@@ -1151,6 +1262,14 @@ key.
 .BR switch :
 what one press of the detach character does; two presses do the other (see
 .BR "SWITCHING SESSIONS" ).
+.TP
+.B remote_hosts
+Empty (default): the remote hosts are your tailnet peers;
+.BR off :
+none; else a
+.B \-\-hosts
+list (see
+.BR "REMOTE HOSTS" ).
 .SH EXIT STATUS
 0 on success. Control verbs: 1 generic error, 2
 .B \-\-wait
@@ -1209,6 +1328,15 @@ Empty or 0 is off; anything else turns off screen\-content state detection
 .B DCH_NO_HISTORY
 Empty or 0 is off; anything else, when a session is spawned, keeps no
 history record for it.
+.TP
+.B DCH_NO_REMOTE
+Empty or 0 is off; anything else lists and discovers no remote hosts in
+the picker,
+.B \-a
+or
+.B \-\-remote
+.RB ( \-\-hosts
+still applies).
 .TP
 .B DCH_HOLD_MS
 Read by the master: how long a held (childless) session waits for its

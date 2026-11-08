@@ -298,6 +298,30 @@ int dch_env_on(const char *key);
 int dch_allow_prompt(const char *screen, char **ident, char **title);
 
 int attach_main(int noerror);
+/* A remote attach (remote.c) hands attach_main an already connected
+** socket instead of sockname's, and a hook it asks, when that socket
+** closes, what to say: NULL for a session that ended, else the message to
+** print once the terminal is restored, exiting 1. */
+extern int attach_sock;
+extern const char *(*attach_lost)(void);
+
+/* The dch client for remote hosts (#087), remote.c. A row is one session
+** on another host, every field as the peer sent it: print it only through
+** dch_remote_esc. */
+#define DCH_RHOST_MAX 64
+struct dch_rrow
+{
+	char host[DCH_RHOST_MAX];	/* its host's label */
+	char name[256], alias[256];
+	char state[16];		/* working|idle|blocked|done, or "" */
+	long at;		/* when the host answered, epoch seconds */
+	int stale;		/* the host did not answer this time */
+};
+int dch_remote_set_hosts(const char *list);
+int dch_remote_rows(struct dch_rrow **out, int now);
+void dch_remote_stop(void);
+int dch_remote_attach(const char *host, const char *name);
+void dch_remote_esc(char *out, size_t cap, const char *s);
 void client_pidfile_unlink(void);
 int master_main(char **argv, int waitattach, int dontfork);
 int push_main(void);

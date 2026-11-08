@@ -84,6 +84,24 @@ restore_term(void)
 	fflush(stdout);
 }
 
+int attach_sock = -1;
+const char *(*attach_lost)(void);
+
+/* A remote attach's socket closed: when the link (not the session) ended,
+** say why on a restored terminal and exit 1. */
+static void
+lost(void)
+{
+	const char *why = attach_lost();
+
+	if (why)
+	{
+		restore_term();
+		fprintf(stderr, "%s\n", why);
+		exit(1);
+	}
+}
+
 /* Connects to a unix domain socket */
 static int
 connect_socket(char *name)
@@ -423,7 +441,7 @@ attach_main(int noerror)
 
 	/* Attempt to open the socket. Don't display an error if noerror is
 	** set. */
-	s = connect_socket(sockname);
+	s = attach_sock >= 0 ? attach_sock : connect_socket(sockname);
 	if (s < 0 && errno == ENAMETOOLONG)
 	{
 		char *slash = strrchr(sockname, '/');
@@ -515,7 +533,8 @@ attach_main(int noerror)
 	pkt.len = redraw_method == REDRAW_UNSPEC ? REDRAW_WINCH : redraw_method;
 	ioctl(0, TIOCGWINSZ, &pkt.u.ws);
 	write_packet_or_fail(s, &pkt);
-	dch_trace("client attached fd=%d sock=%s", s, sockname);
+	dch_trace("client attached fd=%d sock=%s", s,
+	          attach_sock >= 0 ? "(remote)" : sockname);
 
 	/* Wait for things to happen */
 	while (1)
@@ -559,6 +578,8 @@ attach_main(int noerror)
 		{
 			ssize_t len = read(s, buf, sizeof(buf));
 
+			if (len <= 0 && attach_lost)
+				lost();
 			if (len == 0)
 			{
 				dch_trace("client exit: master closed socket");
