@@ -224,15 +224,20 @@ static const struct
 	int is_bool;
 	const char *def;		/* the value when the key is not set */
 	const char *choices;	/* "a|b": all it takes; NULL: any one line */
+	const char *desc;	/* the picker's settings view says it (#086) */
 } config_keys[] = {
 	/* the master answers permission prompts */
-	{ "auto_allow", 1, "false", NULL },
+	{ "auto_allow", 1, "false", NULL,
+	  "Answer plain permission prompts with Yes" },
 	/* the picker's sidekick sessions; empty: no Sidekicks tab */
-	{ "sidekick_pattern", 0, "-qa", NULL },
+	{ "sidekick_pattern", 0, "-qa", NULL,
+	  "Sessions listed under Sidekicks (a regex)" },
 	/* the picker's sort, its s key */
-	{ "picker_sort", 0, "activity", "activity|name" },
+	{ "picker_sort", 0, "activity", "activity|name",
+	  "How the session list is ordered" },
 	/* what one Ctrl-\ press does; two do the other (#082) */
-	{ "detach_key", 0, "detach", "detach|switch" },
+	{ "detach_key", 0, "detach", "detach|switch",
+	  "What one Ctrl-\\ press does; two do the other" },
 };
 #define NCONF (sizeof config_keys / sizeof *config_keys)
 
@@ -7674,16 +7679,17 @@ rv_all_takes(const struct hrec *h)
 /* ---- the session picker (#075): Agent Island in a terminal ---------- */
 /*
 ** `dch -l`, `dch -k`/`-d` without a name, and the double-tap switch. Tabs:
-** Sessions; Sidekicks (n), the live sessions whose name or alias matches
-** the config's sidekick_pattern (default "-qa"), shown only when there are
+** Sessions; Sidekicks (n), the live sessions whose name, alias or harness
+** title matches the config's sidekick_pattern (default "-qa"), shown only when there are
 ** some; History (n), the ended records, pinned first, at most 50. Rows carry
 ** --ls-json's data (state, agents, meta.prs) and --history's, reloaded about
 ** once a second. Enter hands the session back to the caller; every other
 ** action forks this same dch with its CLI verb, the output into an unlinked
 ** file (never over the screen, and no pipe to break when the picker quits
 ** first), and its last line is the result. Drawn on the alternate screen
-** with autowrap off, each line overwritten in place and cleared to its end:
-** no frame clears the screen and no row wraps.
+** with autowrap off, each line overwritten in place and cleared to its end,
+** and only the lines that changed: no frame clears the screen and no row
+** wraps.
 */
 
 #define PK_HIST_MAX 50
@@ -7925,8 +7931,11 @@ pk_load(struct pk *p)
 	p->r[1] = calloc((size_t)sl.n + 1, sizeof **p->r);
 	for (k = 0; p->r[0] && p->r[1] && k < sl.n; k++)
 	{
+		/* the harness title too: a "-qa" is often only Claude's name
+		** for the session, the one the row shows (#086) */
 		int side = pk_sidekick(mode, &re, pat, sl.v[k]) ||
-		           pk_sidekick(mode, &re, pat, sl.alias[k]);
+		           pk_sidekick(mode, &re, pat, sl.alias[k]) ||
+		           pk_sidekick(mode, &re, pat, sl.harness[k]);
 		struct pkrow *w = &p->r[side][p->n[side]++];
 		const char *meta;
 		long mep;
@@ -7982,10 +7991,50 @@ pk_shown(const struct pk *p, int t)
 }
 
 /* ---- drawing: one frame into pk_fb, written when it changed ---- */
+/*
+** The look (#086), after Apple's Human Interface Guidelines, in a terminal:
+** hierarchy by weight rather than colour, the titles in the terminal's own
+** foreground and all that is secondary faint; one accent, Claude's clay
+** orange, for the active tab, the keys and the working state; red, green
+** and faint for the other states, and nothing else in colour. Every list has
+** its column headers, every column one alignment (ages and counts right,
+** words left), and nothing wraps. The selection is a quiet tinted bar the
+** width of the screen with an accent edge, every cell on it keeping its own
+** colour. Four color levels: none (NO_COLOR, TERM=dumb: the layout, a '>'
+** and brackets carry it), the basic eight (reverse for the bar, which would
+** turn a colour into a block, so the bar's cells drop theirs), the 256 cube
+** and truecolor (COLORTERM). The two backgrounds, the bar and the key chips,
+** have a pair for light terminals, picked by COLORFGBG.
+*/
 
-static char pk_fb[1 << 18], pk_prev[1 << 18];
+#define PK_LINES 1024
+static char pk_fb[1 << 18], pk_prev[1 << 18], pk_out[1 << 18];
 static size_t pk_fn, pk_pn;
-static int pk_col, pk_w, pk_h, pk_y, pk_off, pk_color;
+static size_t pk_lo[PK_LINES + 1], pk_plo[PK_LINES + 1];	/* line starts */
+static int pk_nl, pk_pnl;
+static int pk_col, pk_w, pk_h, pk_y, pk_off, pk_color, pk_utf, pk_light;
+static const char *pk_bg = "";	/* the background under what is drawn */
+static char pk_cur[112];	/* the SGR the frame last wrote */
+
+enum { PK_ACC, PK_ACCB, PK_RED, PK_GRN, PK_WARN, PK_SEL, PK_CHIP, PK_NPAL };
+
+/* [color level][light terminal][entry] */
+static const char *const pk_pal[4][2][PK_NPAL] = {
+	{ { "", "", "", "", "", "", "" }, { "", "", "", "", "", "", "" } },
+	{ { "33", "1;33", "1;31", "32", "1;33", "7", "7" },
+	  { "33", "1;33", "1;31", "32", "1;33", "7", "7" } },
+	{ { "38;5;173", "1;38;5;173", "1;38;5;203", "38;5;71", "1;38;5;179",
+	    "48;5;236", "48;5;238" },
+	  { "38;5;166", "1;38;5;166", "1;38;5;160", "38;5;28", "1;38;5;130",
+	    "48;5;254", "48;5;252" } },
+	{ { "38;2;217;119;87", "1;38;2;217;119;87", "1;38;2;240;96;96",
+	    "38;2;96;184;120", "1;38;2;229;181;103", "48;2;38;44;56",
+	    "48;2;58;64;78" },
+	  { "38;2;190;90;56", "1;38;2;190;90;56", "1;38;2;200;40;40",
+	    "38;2;30;130;60", "1;38;2;160;100;0", "48;2;226;232;242",
+	    "48;2;212;218;228" } },
+};
+#define PK_P(i) pk_pal[pk_color][pk_light][i]
 
 static void
 pk_rawn(const char *s, size_t n)
@@ -8003,47 +8052,105 @@ pk_raw(const char *s)
 	pk_rawn(s, strlen(s));
 }
 
-/* SGR parameters ("1;33"; "" resets); nothing without color. */
+/* SGR parameters ("0;1;33"); nothing without color, nor what the frame
+** already set. */
 static void
 pk_sgr(const char *s)
 {
-	char b[48];
+	char b[128];
 
+	if (!pk_color || pk_off || !strcmp(s, pk_cur))
+		return;
 	/* a cut escape would leave the terminal mid-sequence */
-	if (pk_color && (size_t)snprintf(b, sizeof b, "\033[%sm", s) < sizeof b)
+	if ((size_t)snprintf(b, sizeof b, "\033[%sm", s) < sizeof b)
+	{
 		pk_raw(b);
+		snprintf(pk_cur, sizeof pk_cur, "%s", s);
+	}
 }
 
-/* Characters (UTF-8 sequences), one column each, cut at the edge. A
-** control byte or a stray continuation byte shows as '?'. */
+/* Draw on in a ("2" faint, a palette entry, "" the plain foreground) over
+** pk_bg. On the basic bar, reverse video, a colour would read as a block:
+** there only bold stays. */
+static void
+pk_set(const char *a)
+{
+	char b[112];
+
+	if (pk_color == 1 && *pk_bg)
+		a = a[0] == '1' && (!a[1] || a[1] == ';') ? "1" : "";
+	snprintf(b, sizeof b, "0%s%s%s%s", *a ? ";" : "", a, *pk_bg ? ";" : "",
+	         pk_bg);
+	pk_sgr(b);
+}
+
+/* Cells of code point u: two for the wide (ap_cells), none for a combining
+** mark, a joiner or a variation selector. */
+static int
+pk_cw(unsigned u)
+{
+	return (u >= 0x300 && u <= 0x36F) || (u >= 0x200B && u <= 0x200F) ||
+	       (u >= 0xFE00 && u <= 0xFE0F) ? 0 : ap_cells(u);
+}
+
+/* Characters (UTF-8), each as wide as it draws, up to column lim and the
+** edge. A control (C0 or C1) or a broken sequence shows as '?'. */
+static void
+pk_txtto(const char *s, int lim)
+{
+	unsigned u;
+	int l, w;
+
+	if (lim > pk_w)
+		lim = pk_w;
+	for (; *s; s += l)
+	{
+		unsigned char c = (unsigned char)*s;
+
+		u = ap_cp(s, &l);
+		w = pk_cw(u);
+		if (pk_col + w > lim)
+			break;
+		if (u < 0x20 || (u >= 0x7f && u < 0xa0) || (c >= 0xc0 && l == 1))
+			pk_rawn("?", 1);
+		else
+			pk_rawn(s, (size_t)l);
+		pk_col += w;
+	}
+}
+
 static void
 pk_txt(const char *s)
 {
-	while (*s && pk_col < pk_w)
-	{
-		unsigned char c = (unsigned char)*s;
-		size_t l = 1;
+	pk_txtto(s, pk_w);
+}
 
-		if (c >= 0xc0)
-			while (l < 4 && ((unsigned char)s[l] & 0xc0) == 0x80)
-				l++;
-		if (c < 0x20 || c == 0x7f || (c >= 0x80 && c < 0xc0))
-			pk_rawn("?", 1);
-		else
-			pk_rawn(s, l);
-		s += l;
+/* Display width: the cells s takes. */
+static int
+pk_cps(const char *s)
+{
+	int n = 0, l;
+
+	for (; *s; s += l)
+		n += pk_cw(ap_cp(s, &l));
+	return n;
+}
+
+/* Blanks up to column end. */
+static void
+pk_pad(int end)
+{
+	while (pk_col < end && pk_col < pk_w)
+	{
+		pk_rawn(" ", 1);
 		pk_col++;
 	}
 }
 
-static int
-pk_cps(const char *s)
+static const char *
+pk_ell(void)
 {
-	int n = 0;
-
-	for (; *s; s++)
-		n += ((unsigned char)*s & 0xc0) != 0x80;
-	return n;
+	return pk_utf ? "\xe2\x80\xa6" : "~";
 }
 
 /* s in exactly w columns: cut with an ellipsis, or padded. */
@@ -8052,24 +8159,43 @@ pk_fit(const char *s, int w)
 {
 	int end = pk_col + w;
 
+	if (w <= 0)
+		return;
 	if (pk_cps(s) > w)
 	{
-		char b[1400];
-		size_t i = 0;
-		int n = 0;
-
-		for (; s[i] && i < sizeof b - 1; i++)
-			if (((unsigned char)s[i] & 0xc0) != 0x80 && n++ == w - 1)
-				break;
-		memcpy(b, s, i);
-		b[i] = '\0';
-		pk_txt(b);
-		pk_txt(pk_color ? "\xe2\x80\xa6" : "~");
+		pk_txtto(s, end - 1);
+		pk_txt(pk_ell());
 	}
 	else
 		pk_txt(s);
-	while (pk_col < end && pk_col < pk_w)
-		pk_txt(" ");
+	pk_pad(end);
+}
+
+/* s right-aligned in w columns. */
+static void
+pk_rfit(const char *s, int w)
+{
+	int n = pk_cps(s);
+
+	if (n < w)
+		pk_pad(pk_col + w - n);
+	pk_fit(s, n < w ? n : w);
+}
+
+/* s in w columns, cut from the left: a path's tail says the most. */
+static void
+pk_tail(const char *s, int w)
+{
+	int n = pk_cps(s), l;
+
+	if (n > w && w > 1)
+	{
+		for (; *s && n > w - 1; s += l)
+			n -= pk_cw(ap_cp(s, &l));
+		pk_txt(pk_ell());
+		w--;
+	}
+	pk_fit(s, w);
 }
 
 /* The next screen line; lines past the bottom are dropped. */
@@ -8079,6 +8205,9 @@ pk_line(void)
 	char b[32];
 
 	pk_off = 0;
+	if (pk_nl < PK_LINES)
+		pk_lo[pk_nl] = pk_fn;
+	pk_nl++;
 	if (++pk_y > pk_h)
 	{
 		pk_off = 1;
@@ -8089,51 +8218,118 @@ pk_line(void)
 	pk_col = 0;
 }
 
+/* The rest of the line cleared; not at the edge, where the cursor sits on
+** the last cell drawn and an erase would take it. */
 static void
 pk_eol(void)
 {
-	pk_sgr("");
-	pk_raw("\033[K");
+	pk_bg = "";
+	pk_set("");
+	if (pk_col < pk_w)
+		pk_raw("\033[K");
 }
 
-/* The key help: "key label" pairs packed into lines, at most 6 and at
-** least 3 rows short of the screen; 0 draws nothing and only counts. */
-static int
-pk_keys(const char **it, int n, int draw)
+/* A faint rule across the screen: the list above, the controls below. */
+static void
+pk_rule(void)
 {
-	int lines = 0, col = 0, k, cap = pk_h - 7;
+	pk_line();
+	pk_set("2");
+	while (pk_col < pk_w)
+		pk_txt(pk_utf ? "\xe2\x94\x80" : "-");
+	pk_eol();
+}
 
-	if (cap > 6)
-		cap = 6;
-	if (cap < 1)
-		cap = 1;
-	for (k = 0; k + 1 < n; k += 2)
+/* A key hint: the key, what it does, and a value in the accent ("sort
+** name"). group: 0 the actions, 1 the agents', 2 the view, 3 moving about;
+** warn: the key is a destructive one's. */
+struct pkkey
+{
+	const char *key, *label, *val;
+	int group, warn;
+};
+
+static int
+pk_kw(const struct pkkey *k)
+{
+	return pk_cps(k->key) + (pk_color ? 2 : 0) + 1 + pk_cps(k->label) +
+	       (k->val ? 1 + pk_cps(k->val) : 0);
+}
+
+/* The key as a chip, the accent (red for a destructive key) on a tint,
+** reverse on the basic eight; its label faint. */
+static void
+pk_chip(const struct pkkey *k)
+{
+	if (pk_color)
 	{
-		int w = pk_cps(it[k]) + 1 + pk_cps(it[k + 1]);
+		pk_bg = PK_P(PK_CHIP);
+		pk_set(PK_P(k->warn ? PK_RED : PK_ACC));
+		pk_txt(" ");
+		pk_txt(k->key);
+		pk_txt(" ");
+		pk_bg = "";
+	}
+	else
+		pk_txt(k->key);
+	pk_set("2");
+	pk_txt(" ");
+	pk_txt(k->label);
+	if (k->val)
+	{
+		pk_txt(" ");
+		pk_set(PK_P(PK_ACC));
+		pk_txt(k->val);
+	}
+}
 
-		if (!lines || (col && col + 2 + w > pk_w))
+/* The key hints in at most cap lines: a group whole on one line when it
+** fits, " │ " between two groups on a line, two spaces between hints; the
+** groups in drop (bits) left out. The lines used, or -1 when a hint did not
+** fit: it is never cut, only left for a wider window. draw 0 only counts. */
+static int
+pk_keys(const struct pkkey *it, int n, unsigned drop, int cap, int draw)
+{
+	int lines = 0, col = 0, g = -1, k, j;
+
+	for (k = 0; k < n; k++)
+	{
+		int w = pk_kw(&it[k]), need = w, sep;
+
+		if (drop >> it[k].group & 1)
+			continue;
+		if (it[k].group != g)
+			for (j = k + 1; j < n && it[j].group == it[k].group; j++)
+				need += 2 + pk_kw(&it[j]);
+		if (need > pk_w)
+			need = w;
+		sep = !col ? 0 : it[k].group != g ? 3 : 2;
+		if (!lines || col + sep + need > pk_w)
 		{
-			/* past the cap a key waits for a bigger window */
-			if (lines == cap)
-				break;
+			if (lines == cap || w > pk_w)
+			{
+				if (draw && lines)
+					pk_eol();
+				return -1;
+			}
 			if (draw && lines)
 				pk_eol();
 			if (draw)
 				pk_line();
 			lines++;
-			col = 0;
+			col = sep = 0;
 		}
-		if (draw)
+		if (draw && sep == 3)
 		{
-			if (col)
-				pk_txt("  ");
-			pk_sgr("1");
-			pk_txt(it[k]);
-			pk_sgr("");
-			pk_txt(" ");
-			pk_txt(it[k + 1]);
+			pk_set("2");
+			pk_txt(pk_utf ? " \xe2\x94\x82 " : " | ");
 		}
-		col += (col ? 2 : 0) + w;
+		else if (draw && sep)
+			pk_txt("  ");
+		if (draw)
+			pk_chip(&it[k]);
+		col += sep + w;
+		g = it[k].group;
 	}
 	if (draw && lines)
 		pk_eol();
@@ -8147,22 +8343,26 @@ pk_label(const char *s)
 	       ? "Working" : !strcmp(s, "done") ? "Done" : "Idle";
 }
 
-/* Agent Island's palette: amber, Claude orange, green, dim. */
+/* A state's colour: needs input the loudest, red and bold; working the
+** accent; done green; idle faint. */
 static const char *
 pk_hue(const char *s)
 {
-	return !strcmp(s, "blocked") ? "1;33" : !strcmp(s, "working")
-	       ? "38;5;173" : !strcmp(s, "done") ? "32" : "2";
+	return !strcmp(s, "blocked") ? PK_P(PK_RED) : !strcmp(s, "working")
+	       ? PK_P(PK_ACC) : !strcmp(s, "done") ? PK_P(PK_GRN) : "2";
 }
 
+/* A state's glyph: a shape apiece, so colour is never all it says. */
 static const char *
 pk_glyph(const char *s)
 {
-	if (!strcmp(s, "blocked"))
-		return "!";
-	if (!strcmp(s, "working"))
-		return pk_color ? "\xe2\x9c\xb3" : "*";
-	return pk_color ? "\xe2\x97\x8f" : !strcmp(s, "done") ? "+" : "-";
+	int b = !strcmp(s, "blocked"), w = !strcmp(s, "working");
+	int d = !strcmp(s, "done");
+
+	if (!pk_utf)
+		return b ? "!" : w ? "*" : d ? "+" : "-";
+	return b ? "\xe2\x97\x8f" : w ? "\xe2\x9c\xb3" : d ? "\xe2\x9c\x93"
+	       : "\xe2\x97\x8b";
 }
 
 /* An end in the island's neutral words: nothing done on purpose reads as
@@ -8188,6 +8388,7 @@ pk_end(const char *e, char *b, size_t n)
 	return b;
 }
 
+/* An age, short: now, 22m, 3h, 2d. */
 static void
 pk_age(long when, char *b, size_t n)
 {
@@ -8198,107 +8399,443 @@ pk_age(long when, char *b, size_t n)
 	if (when <= 0)
 		b[0] = '\0';
 	else if (s < 60)
-		snprintf(b, n, "%lds ago", s);
+		snprintf(b, n, "now");
 	else if (s < 3600)
-		snprintf(b, n, "%ldm ago", s / 60);
+		snprintf(b, n, "%ldm", s / 60);
 	else if (s < 86400)
-		snprintf(b, n, "%ldh ago", s / 3600);
+		snprintf(b, n, "%ldh", s / 3600);
 	else
-		snprintf(b, n, "%ldd ago", s / 86400);
+		snprintf(b, n, "%ldd", s / 86400);
 }
 
-/* One row. Columns go from the right as the window narrows: PRs and
-** merged first, then agents and age; the title shrinks last. */
-static void
-pk_row(const struct pk *p, const struct pkrow *w, int sel, int tcol)
+/* The columns of the rows on screen, their widths from those rows (0: not
+** shown); the settings view's values, read once a frame. */
+static struct
 {
-	const char *base = sel ? "0;7" : "0";
-	char hue[48], b[1400], age[32];
+	int name, state, age, agents, merged, last, gap;
+} pk_c;
+static char pk_cfv[NCONF][1024];
+static int pk_cfis[NCONF];
 
-	snprintf(hue, sizeof hue, "%s;%s", base, p->tab < 2 ? pk_hue(w->state)
-	         : "33");
-	pk_sgr(base);
-	pk_txt(sel ? "> " : "  ");
-	if (p->tab < 2)
+static void
+pk_mergedtxt(long m, char *b, size_t n)
+{
+	snprintf(b, n, "%s%ld", pk_utf ? "\xe2\x9c\x93 " : "", m);
+}
+
+/* Key k's value as the settings view shows it: a bool as ● on / ○ off, a
+** choice as all of them with the set one in the accent (in brackets
+** without colour), a line as itself; then (default) when the file has
+** none. Its width; draw 0 only measures. */
+static int
+pk_cfval(int k, int draw)
+{
+	const char *sv = pk_cfv[k], *c = config_keys[k].choices;
+	char one[128];
+	int n = 0, on = !strcmp(sv, "true"), cur;
+	size_t l;
+
+#define PK_V(a, s) (n += pk_cps(s), draw ? (pk_set(a), pk_txt(s)) : (void)0)
+	if (config_keys[k].is_bool)
 	{
-		pk_sgr(hue);
-		pk_txt(pk_glyph(w->state));
-		pk_sgr(base);
-		pk_txt(" ");
-		pk_fit(w->title, tcol);
-		pk_txt("  ");
-		pk_sgr(hue);
-		pk_fit(pk_label(w->state), 11);
-		pk_sgr(base);
-		pk_age(w->when, age, sizeof age);
-		if (age[0])
+		if (pk_utf)
+			PK_V(on ? PK_P(PK_ACC) : "2", on ? "\xe2\x97\x8f " :
+			     "\xe2\x97\x8b ");
+		PK_V("", on ? "on" : "off");
+	}
+	else if (c)
+		for (;;)
 		{
-			pk_txt("  ");
-			pk_txt(age);
+			l = strcspn(c, "|");
+			snprintf(one, sizeof one, "%.*s", (int)l, c);
+			cur = !strcmp(one, sv);
+			if (cur && !pk_color)
+				PK_V("", "[");
+			PK_V(cur ? PK_P(PK_ACCB) : "2", one);
+			if (cur && !pk_color)
+				PK_V("", "]");
+			if (!c[l])
+				break;
+			PK_V("2", pk_utf && pk_color ? " \xc2\xb7 " : " ");
+			c += l + 1;
 		}
-		if (w->agents > 0)
+	else
+		PK_V("", *sv ? sv : "\"\"");
+	if (!pk_cfis[k])
+		PK_V("2", "  (default)");
+#undef PK_V
+	return n;
+}
+
+/* Lay out the columns for rows top..end of the list on screen. The title
+** takes at most three tenths of a wide screen; as the screen narrows the
+** last column goes first, then merged, agents and the age, and the title
+** shrinks last. */
+static void
+pk_cols(const struct pk *p, int top, int end)
+{
+	char b[1400];
+	int k, used, cap, w, hist = !p->settings && p->tab == 2, last = 0;
+
+	memset(&pk_c, 0, sizeof pk_c);
+	pk_c.gap = pk_w >= 120 ? 3 : 2;
+	pk_c.name = p->settings ? 7 : 4;
+	pk_c.state = 5;
+	for (k = top; k < end; k++)
+	{
+		const struct pkrow *r;
+
+		if (p->settings)
 		{
-			snprintf(b, sizeof b, "  %d agent%s", w->agents,
-			         w->agents == 1 ? "" : "s");
-			pk_txt(b);
+			int set;
+
+			snprintf(pk_cfv[k], sizeof pk_cfv[k], "%s",
+			         config_show(k, b, sizeof b, &set));
+			pk_cfis[k] = set;
+			if ((w = pk_cps(config_keys[k].key)) > pk_c.name)
+				pk_c.name = w;
+			if ((w = pk_cfval(k, 0)) > pk_c.state)
+				pk_c.state = w;
+			last = 1;
+			continue;
 		}
-		if (w->prs[0])
+		r = &p->r[p->tab][k];
+		if ((w = pk_cps(r->title)) > pk_c.name)
+			pk_c.name = w;
+		w = pk_cps(hist ? pk_end(r->state, b, sizeof b) : pk_label(r->state));
+		if (w > pk_c.state)
+			pk_c.state = w;
+		pk_c.age |= r->when > 0;
+		if (hist)
 		{
-			pk_txt("  ");
-			pk_txt(w->prs);
+			last |= !!r->cwd[0];
+			continue;
 		}
-		if (w->merged > 0)
+		pk_c.agents |= r->agents > 0;
+		if (r->merged > 0)
 		{
-			snprintf(b, sizeof b, "  %ld merged", w->merged);
-			pk_txt(b);
+			pk_mergedtxt(r->merged, b, sizeof b);
+			if ((w = pk_cps(b)) > pk_c.merged)
+				pk_c.merged = w;
 		}
+		last |= !!r->prs[0];
+	}
+	cap = pk_w * 3 / 10;
+	if (cap < 16)
+		cap = 16;
+	if (cap > 40)
+		cap = 40;
+	if (!p->settings && pk_c.name > cap)
+		pk_c.name = cap;
+	used = 4 + pk_c.name + pk_c.gap + pk_c.state;
+	if (used > pk_w)
+	{
+		pk_c.name -= used - pk_w;
+		if (pk_c.name < 4)
+			pk_c.name = 4;
+		used = 4 + pk_c.name + pk_c.gap + pk_c.state;
+	}
+#define PK_COL(f, w) \
+	if (pk_c.f && used + pk_c.gap + (w) <= pk_w) \
+		used += pk_c.gap + (pk_c.f = (w)); \
+	else \
+		pk_c.f = 0;
+	PK_COL(age, hist ? 4 : 6)
+	PK_COL(agents, 6)
+	PK_COL(merged, pk_c.merged > 6 ? pk_c.merged : 6)
+#undef PK_COL
+	if (last && used + pk_c.gap + 8 <= pk_w)
+		pk_c.last = pk_w - used - pk_c.gap;
+}
+
+static void
+pk_gap(void)
+{
+	pk_pad(pk_col + pk_c.gap);
+}
+
+/* The column headers, faint: the same widths and alignments as the rows. */
+static void
+pk_heads(const struct pk *p)
+{
+	int hist = !p->settings && p->tab == 2;
+
+	pk_line();
+	pk_set("2");
+	pk_txt("    ");
+	pk_fit(p->settings ? "SETTING" : "NAME", pk_c.name);
+	pk_gap();
+	pk_fit(p->settings ? "VALUE" : hist ? "ENDED" : "STATE", pk_c.state);
+	if (pk_c.age)
+	{
+		pk_gap();
+		pk_rfit(hist ? "WHEN" : "ACTIVE", pk_c.age);
+	}
+	if (pk_c.agents)
+	{
+		pk_gap();
+		pk_rfit("AGENTS", pk_c.agents);
+	}
+	if (pk_c.merged)
+	{
+		pk_gap();
+		pk_rfit("MERGED", pk_c.merged);
+	}
+	if (pk_c.last)
+	{
+		pk_gap();
+		pk_fit(p->settings ? "ABOUT" : hist ? "DIRECTORY"
+		       : "PULL REQUESTS", pk_c.last);
+	}
+	pk_eol();
+}
+
+/* A row's first four columns: the selection's accent edge and its bar,
+** then the glyph. */
+static void
+pk_lead(int sel, const char *hue, const char *glyph)
+{
+	pk_bg = sel ? PK_P(PK_SEL) : "";
+	pk_set(PK_P(PK_ACC));
+	pk_txt(!sel ? " " : pk_utf ? "\xe2\x96\x8c" : ">");
+	pk_txt(" ");
+	pk_set(hue);
+	pk_txt(glyph);
+	pk_pad(4);
+	pk_set(sel ? "1" : "");
+}
+
+/* A row's open PRs (dch_meta_prs: "owner/repo#N ...") in w columns, the
+** repo faint and without its owner, said once when they all share it
+** ("solution #1 #2"), left out when not even the first fits with it; as
+** many as fit, then +N for the rest. */
+static void
+pk_prs(const char *s, int w)
+{
+	const char *t, *h, *r0 = NULL, *repo;
+	char b[480];
+	size_t l, rl = 0;
+	int n = 0, same = 1, bare, k, need, end = pk_col + w;
+
+	for (t = s; *t; t += l + (t[l] == ' '))
+	{
+		l = strcspn(t, " ");
+		if (!(h = memchr(t, '#', l)))
+			h = t + l;
+		if (!r0)
+			r0 = t, rl = (size_t)(h - t);
+		else if ((size_t)(h - t) != rl || strncmp(t, r0, rl))
+			same = 0;
+		n++;
+	}
+	if (!n)
+	{
+		pk_pad(end);
 		return;
 	}
-	pk_sgr(hue);
-	pk_txt(w->pinned ? "*" : " ");
-	pk_sgr(base);
-	pk_txt(" ");
-	pk_fit(w->title, tcol);
-	pk_txt("  ");
-	pk_fit(pk_end(w->state, b, sizeof b), 19);
-	pk_age(w->when, age, sizeof age);
-	pk_txt("  ");
-	pk_fit(age, 8);
-	pk_txt("  ");
-	pk_txt(w->cwd);
+	same = same && n > 1;
+	for (repo = r0 + rl; repo > r0 && repo[-1] != '/'; repo--)
+		;
+	/* the first: its repo, a blank when it is said once, #N, room for +N */
+	bare = (int)(r0 + rl - repo) + same + (int)(strcspn(r0, " ") - rl) +
+	       (n > 1 ? 4 : 0) > w;
+	for (k = 0, t = s; *t; k++, t += l + (t[l] == ' '))
+	{
+		l = strcspn(t, " ");
+		if (!(h = memchr(t, '#', l)))
+			h = t + l;
+		for (repo = h; repo > t && repo[-1] != '/'; repo--)
+			;
+		snprintf(b, sizeof b, "%.*s", bare || (same && k) ? 0
+		         : (int)(h - repo), repo);
+		need = (k ? 1 : 0) + pk_cps(b) + (!bare && same && !k) +
+		       (int)(t + l - h) + (k + 1 < n ? 4 : 0);
+		if (pk_col + need > end)
+		{
+			snprintf(b, sizeof b, "%s+%d", k ? " " : "", n - k);
+			pk_set("2");
+			pk_txtto(b, end);
+			break;
+		}
+		if (k)
+			pk_txt(" ");
+		pk_set("2");
+		pk_txt(b);
+		if (!bare && same && !k)
+			pk_txt(" ");
+		snprintf(b, sizeof b, "%.*s", (int)(t + l - h), h);
+		pk_set("");
+		pk_txt(b);
+	}
+	pk_pad(end);
 }
 
-/* A settings row: the key, its value, "(default)" when the file has none. */
+/* One row of Sessions, Sidekicks or History, in pk_c's columns. */
 static void
-pk_cfrow(int k, int sel, int kcol)
+pk_row(const struct pk *p, const struct pkrow *w, int sel)
 {
-	char v[1024];
-	const char *sv;
-	int set;
+	char b[1400], age[32];
+	int hist = p->tab == 2;
 
-	sv = config_show(k, v, sizeof v, &set);
-	pk_sgr(sel ? "0;7" : "0");
-	pk_txt(sel ? "> " : "  ");
-	pk_fit(config_keys[k].key, kcol);
-	pk_txt("  ");
-	pk_txt(*sv ? sv : "\"\"");
-	if (!set)
+	if (hist)
+		pk_lead(sel, PK_P(PK_ACC), !w->pinned ? " " : pk_utf
+		        ? "\xe2\x97\x86" : "*");
+	else
+		pk_lead(sel, pk_hue(w->state), pk_glyph(w->state));
+	pk_fit(w->title, pk_c.name);
+	pk_gap();
+	if (hist)
 	{
-		pk_sgr(sel ? "0;7;2" : "2");
-		pk_txt("  (default)");
+		const char *e = pk_end(w->state, b, sizeof b);
+
+		pk_set(!strncmp(e, "crashed", 7) ? PK_P(PK_RED) : "2");
+		pk_fit(e, pk_c.state);
 	}
+	else
+	{
+		pk_set(pk_hue(w->state));
+		pk_fit(pk_label(w->state), pk_c.state);
+	}
+	pk_age(w->when, age, sizeof age);
+	if (pk_c.age)
+	{
+		pk_gap();
+		pk_set("2");
+		pk_rfit(age, pk_c.age);
+	}
+	if (pk_c.agents)
+	{
+		pk_gap();
+		snprintf(b, sizeof b, "%d", w->agents);
+		pk_set("");
+		pk_rfit(w->agents > 0 ? b : "", pk_c.agents);
+	}
+	if (pk_c.merged)
+	{
+		pk_gap();
+		pk_mergedtxt(w->merged, b, sizeof b);
+		pk_set("2");
+		pk_rfit(w->merged > 0 ? b : "", pk_c.merged);
+	}
+	if (pk_c.last && hist)
+	{
+		pk_gap();
+		pk_set("2");
+		pk_tail(w->cwd, pk_c.last);
+	}
+	else if (pk_c.last)
+	{
+		pk_gap();
+		pk_prs(w->prs, pk_c.last);
+	}
+	if (sel)
+		pk_pad(pk_w);	/* the bar the whole width: one unit */
+}
+
+/* A settings row: the key, its value, what it is for. */
+static void
+pk_cfrow(int k, int sel)
+{
+	pk_lead(sel, "", " ");
+	pk_fit(config_keys[k].key, pk_c.name);
+	pk_gap();
+	pk_cfval(k, 1);
+	pk_pad(4 + pk_c.name + pk_c.gap + pk_c.state);
+	if (pk_c.last)
+	{
+		pk_gap();
+		pk_set("2");
+		pk_fit(config_keys[k].desc, pk_c.last);
+	}
+	if (sel)
+		pk_pad(pk_w);
+}
+
+/* A segment of the tab bar: the active one in the accent on a tint (in
+** brackets without colour), its count faint. */
+static void
+pk_tab(const char *name, int n, int on)
+{
+	char b[24];
+
+	if (pk_col)
+		pk_txt(" ");
+	pk_bg = on ? PK_P(PK_CHIP) : "";
+	pk_set(on ? PK_P(PK_ACCB) : "");
+	pk_txt(on && !pk_color ? "[" : " ");
+	pk_txt(name);
+	if (n >= 0)
+	{
+		snprintf(b, sizeof b, " %d", n);
+		pk_set("2");
+		pk_txt(b);
+	}
+	pk_set(on ? PK_P(PK_ACCB) : "");
+	pk_txt(on && !pk_color ? "]" : " ");
+	pk_bg = "";
+	pk_set("");
+}
+
+/* Write the frame: only the lines that changed since the last one, each
+** placing itself and ending in the plain attributes, in one write; all of
+** it when forced, after a prompt drew over it (pk_pn 0), or when the lines
+** moved. Nothing when nothing changed. */
+static void
+pk_flush(int fd, int force)
+{
+	size_t o, n = 0;
+	int k;
+
+	if (pk_nl > PK_LINES)
+		force = 1;
+	if (pk_nl <= PK_LINES)
+		pk_lo[pk_nl] = pk_fn;
+	if (force || !pk_pn || pk_nl != pk_pnl || pk_lo[0] != pk_plo[0] ||
+	    memcmp(pk_fb, pk_prev, pk_lo[0]))
+	{
+		(void)!write(fd, pk_fb, pk_fn);
+		n = 1;
+	}
+	else
+	{
+		for (k = 0; k < pk_nl; k++)
+		{
+			o = pk_lo[k + 1] - pk_lo[k];
+			if (o == pk_plo[k + 1] - pk_plo[k] &&
+			    !memcmp(pk_fb + pk_lo[k], pk_prev + pk_plo[k], o))
+				continue;
+			memcpy(pk_out + n, pk_fb + pk_lo[k], o);
+			n += o;
+		}
+		if (n)
+			(void)!write(fd, pk_out, n);
+	}
+	if (!n)
+		return;
+	memcpy(pk_prev, pk_fb, pk_fn);
+	memcpy(pk_plo, pk_lo, sizeof pk_lo[0] *
+	       (size_t)((pk_nl < PK_LINES ? pk_nl : PK_LINES) + 1));
+	pk_pn = pk_fn;
+	pk_pnl = pk_nl;
 }
 
 static void
 pk_draw(struct pk *p, int fd, const char *header, int force)
 {
+	static const char *const spin[2] = { "|/-\\",
+		"\xe2\xa0\x8b\xe2\xa0\x99\xe2\xa0\xb9\xe2\xa0\xb8\xe2\xa0\xbc"
+		"\xe2\xa0\xb4\xe2\xa0\xa6\xe2\xa0\xa7\xe2\xa0\x87\xe2\xa0\x8f" };
+	static const char *const tabn[3] = { "Sessions", "Sidekicks", "History" };
 	struct winsize ws;
-	const char *keys[40];
-	char b[64], sortl[32], intr[48];
-	int nk = 0, k, t, tcol = 4, cols = 80, rows = 24;
+	struct pkkey keys[24];
+	const struct pkrow *cur;
+	char b[96], intr[16];
+	const char *ret;
+	int nk = 0, k, t, cols = 80, rows = 24, kl, cap, tabs = 0;
 	int n = p->settings ? (int)NCONF : p->n[p->tab];
 	int *sel = p->settings ? &p->cfsel : &p->sel[p->tab];
 	int *top = p->settings ? &p->cftop : &p->top[p->tab];
+	unsigned drop;
 
 	if (ioctl(fd, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0 && ws.ws_row > 0)
 	{
@@ -8308,52 +8845,70 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 	pk_w = cols > 1000 ? 1000 : cols;
 	pk_h = rows;
 	pk_y = pk_fn = 0;
-	pk_off = 0;
+	pk_off = pk_nl = 0;
 	pk_color = p->color;
+	pk_bg = "";
+	snprintf(pk_cur, sizeof pk_cur, "0");
+	if (pk_color)
+		pk_raw("\033[0m");
+	cur = !p->settings && *sel < n ? &p->r[p->tab][*sel] : NULL;
+	ret = pk_utf ? "\xe2\x86\xb5" : "enter";
+	for (t = 0; t < 3; t++)
+		tabs += pk_shown(p, t);
 
-#define PK_K(k, l) (keys[nk++] = (k), keys[nk++] = (l))
+	/* the hints for this view and row: actions, the agents', the view,
+	** moving about */
+#define PK_K(g, k, l, v, x) \
+	(keys[nk++] = (struct pkkey){ (k), (l), (v), (g), (x) })
 	if (p->settings)
 	{
-		PK_K("enter", "change");
-		PK_K("u", "default");
-		PK_K("esc", "back");
+		PK_K(0, ret, "change", NULL, 0);
+		PK_K(0, "u", "default", NULL, 0);
+		PK_K(3, "esc", "back", NULL, 0);
 	}
 	else if (p->tab < 2)
 	{
-		PK_K("enter", "attach");
-		snprintf(sortl, sizeof sortl, "sort: %s", p->byname ? "name"
-		         : "activity");
-		PK_K("r", "rename");
-		PK_K("R", "restart agent");
-		PK_K("S", "stop");
-		PK_K("x", "kill");
-		PK_K("a", "allow");
-		PK_K("b", "restart stale agents");
-		PK_K("B", "restart all agents (force)");
-		PK_K("s", sortl);
+		PK_K(0, ret, "attach", NULL, 0);
+		PK_K(0, "r", "rename", NULL, 0);
+		PK_K(0, "x", "kill", NULL, 1);
+		PK_K(1, "R", "restart", NULL, 0);
+		PK_K(1, "S", "stop", NULL, 1);
+		if (cur && !strcmp(cur->state, "blocked"))
+			PK_K(1, "a", "allow", NULL, 0);
+		PK_K(1, "b", "stale", NULL, 0);
+		PK_K(1, "B", "force all", NULL, 1);
+		PK_K(2, "s", "sort", p->byname ? "name" : "activity", 0);
 	}
 	else
 	{
-		PK_K("enter", "resume");
-		PK_K("m", "resume without message");
+		PK_K(0, ret, "resume", NULL, 0);
+		PK_K(0, "m", "no message", NULL, 0);
 		if (p->interrupted)
 		{
-			snprintf(intr, sizeof intr, "resume interrupted (%d)",
-			         p->interrupted);
-			PK_K("I", intr);
+			snprintf(intr, sizeof intr, "%d", p->interrupted);
+			PK_K(0, "I", "interrupted", intr, 0);
 		}
-		PK_K("p", "pin/unpin");
-		PK_K("d", "remove");
+		PK_K(0, "p", cur && cur->pinned ? "unpin" : "pin", NULL, 0);
+		PK_K(0, "d", "remove", NULL, 1);
 	}
 	if (!p->settings)
 	{
-		PK_K(",", "settings");
-		PK_K("tab", "switch");
-		PK_K("q", "quit");
+		PK_K(2, ",", "settings", NULL, 0);
+		if (tabs > 1)
+			PK_K(3, pk_utf ? "\xe2\x87\xa5" : "tab", "tabs", NULL, 0);
+		PK_K(3, "q", "quit", NULL, 0);
 	}
 #undef PK_K
+	/* too wide: the agents' group goes, then the view's */
+	cap = rows >= 16 ? 2 : 1;
+	for (drop = 0; (kl = pk_keys(keys, nk, drop, cap, 0)) < 0 && drop < 6;
+	     drop = drop * 2 + 2)
+		;
+	if (kl < 0)
+		kl = cap;
 
-	p->win = rows - 3 - pk_keys(keys, nk, 0);
+	/* the title, tabs, column headers, rule and status around the list */
+	p->win = rows - 5 - kl;
 	if (p->win < 1)
 		p->win = 1;
 	if (*sel >= n)
@@ -8366,75 +8921,53 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 		*top = *sel - p->win + 1;
 	if (*top > 0 && *top + p->win > n)
 		*top = n - p->win > 0 ? n - p->win : 0;
+	pk_cols(p, *top, *top + p->win < n ? *top + p->win : n);
 
+	/* the title, quiet, and what there is on the right, faint */
 	pk_line();
-	pk_sgr("1");
+	pk_set("1");
 	pk_txt(header);
+	k = p->n[0] + p->n[1];
+	snprintf(b, sizeof b, "%d session%s %s dch %s", k, k == 1 ? "" : "s",
+	         pk_utf ? "\xc2\xb7" : "-", DCH_VERSION);
+	if (pk_w - pk_col >= pk_cps(b) + 4)
+	{
+		pk_pad(pk_w - pk_cps(b));
+		pk_set("2");
+		pk_txt(b);
+	}
 	pk_eol();
 
 	pk_line();
 	if (p->settings)
-	{
-		pk_sgr("1;7");
-		pk_txt(pk_color ? " Settings " : "[Settings]");
-		pk_sgr("");
-	}
+		pk_tab("Settings", -1, 1);
 	for (t = 0; t < 3 && !p->settings; t++)
-	{
-		if (!pk_shown(p, t))
-			continue;
-		if (t == 0)
-			snprintf(b, sizeof b, "Sessions");
-		else
-			snprintf(b, sizeof b, "%s (%d)", t == 1 ? "Sidekicks"
-			         : "History", p->n[t]);
-		if (t)
-			pk_txt(" ");
-		if (t == p->tab)
-			pk_sgr("1;7");
-		pk_txt(t == p->tab && !pk_color ? "[" : " ");
-		pk_txt(b);
-		pk_txt(t == p->tab && !pk_color ? "]" : " ");
-		pk_sgr("");
-	}
+		if (pk_shown(p, t))
+			pk_tab(tabn[t], p->n[t], t == p->tab);
 	pk_eol();
 
-	/* the title column: the widest shown, within what the screen leaves
-	** for the marker, glyph and state */
-	for (k = *top; k < n && k < *top + p->win; k++)
-	{
-		int w = pk_cps(p->settings ? config_keys[k].key
-		               : p->r[p->tab][k].title);
-
-		if (w > tcol)
-			tcol = w;
-	}
-	if (tcol > 40)
-		tcol = 40;
-	if (tcol > pk_w - 19)
-		tcol = pk_w - 19;
-	if (tcol < 4)
-		tcol = 4;
+	pk_heads(p);
 	for (k = *top; k < *top + p->win; k++)
 	{
 		pk_line();
 		if (k < n && p->settings)
-			pk_cfrow(k, k == *sel, tcol);
+			pk_cfrow(k, k == *sel);
 		else if (k < n)
-			pk_row(p, &p->r[p->tab][k], k == *sel, tcol);
+			pk_row(p, &p->r[p->tab][k], k == *sel);
 		else if (k == 0)
 		{
-			pk_sgr("2");
-			pk_txt(p->tab == 2 ? "  no history" : "  no sessions");
+			pk_set("2");
+			pk_txt(p->tab == 2 ? "    No history" : "    No sessions");
 		}
 		pk_eol();
 	}
 
+	pk_rule();
 	pk_line();
 	p->status_row = pk_y;
 	if (p->asking)
 	{
-		pk_sgr("1;33");
+		pk_set(PK_P(PK_WARN));
 		pk_txt(p->status);
 		pk_txt(" [y/N]");
 	}
@@ -8442,25 +8975,27 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 	{
 		if (p->pid > 0)
 		{
-			pk_sgr("36");
+			/* the busy spinner: a frame a tenth of a second */
+			int f = (int)(pk_ms() / 100 % (pk_utf ? 10 : 4));
+
+			snprintf(b, sizeof b, "%.*s ", pk_utf ? 3 : 1,
+			         spin[pk_utf] + f * (pk_utf ? 3 : 1));
+			pk_set(PK_P(PK_ACC));
+			pk_txt(b);
+			pk_set("2");
 			pk_txt(p->run.doing);
-			pk_txt(pk_color ? "\xe2\x80\xa6" : "...");
-			pk_sgr("");
+			pk_txt(pk_utf ? "\xe2\x80\xa6" : "...");
 			if (p->status[0])
 				pk_txt("  ");
 		}
+		pk_set("");
 		pk_txt(p->status);
 	}
 	pk_eol();
-	pk_keys(keys, nk, 1);
+	pk_keys(keys, nk, drop, cap, 1);
 	pk_off = 0;
 	pk_raw("\033[J");
-
-	if (!force && pk_fn == pk_pn && memcmp(pk_fb, pk_prev, pk_fn) == 0)
-		return;
-	(void)!write(fd, pk_fb, pk_fn);
-	memcpy(pk_prev, pk_fb, pk_fn);
-	pk_pn = pk_fn;
+	pk_flush(fd, force);
 }
 
 /* ---- actions ---- */
@@ -9048,6 +9583,7 @@ pick_session(const char *header, char *out, size_t outsz)
 	struct sigaction sa, owinch;
 	struct pk p;
 	const char *nc = getenv("NO_COLOR"), *term = getenv("TERM");
+	const char *ct = getenv("COLORTERM"), *fgbg = getenv("COLORFGBG");
 	int fd = open("/dev/tty", O_RDWR | O_CLOEXEC), rc = 1, k;
 
 	if (fd < 0)
@@ -9074,7 +9610,14 @@ pick_session(const char *header, char *out, size_t outsz)
 	}
 	memset(&p, 0, sizeof p);
 	p.pid = -1;
-	p.color = !(nc && *nc) && term && *term && strcmp(term, "dumb") != 0;
+	/* the color level: none, the basic eight, the 256 cube, truecolor;
+	** TERM=dumb draws ASCII too */
+	pk_utf = term && *term && strcmp(term, "dumb") != 0;
+	p.color = !pk_utf || (nc && *nc) ? 0 : ct && (!strcmp(ct, "truecolor") ||
+	          !strcmp(ct, "24bit")) ? 3 : strstr(term, "256color") ? 2 : 1;
+	/* COLORFGBG "fg;bg": a white or light grey background */
+	pk_light = fgbg && (fgbg = strrchr(fgbg, ';')) &&
+	           (atoi(fgbg + 1) == 7 || atoi(fgbg + 1) == 15);
 	p.byname = pk_cfbyname();
 	pk_load(&p);
 	p.loaded = pk_ms();

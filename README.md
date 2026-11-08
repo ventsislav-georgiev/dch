@@ -119,17 +119,35 @@ Explicit aliases win. `--ls-json` keeps the real `name`, `alias`, and resolved
 
 `dch -l`, `dch -k` / `dch -d` without a name, and the detach-key switch open
 the same full-screen picker, modelled on Prosper's Agent Island. It has up to
-three tabs: **Sessions**; **Sidekicks (n)**, the live sessions whose name or
-alias matches `sidekick_pattern` in the config file (a POSIX extended regex,
+three tabs, each with its count: **Sessions**; **Sidekicks**, the live
+sessions whose name, alias or harness title (the Claude or Codex name the row
+shows) matches `sidekick_pattern` in the config file (a POSIX extended regex,
 case-insensitive, default `-qa`; an invalid one, or one that matches every
 name, is matched as plain text; set it empty for no tab), shown only when
-there are some; and **History (n)**, the ended sessions of `--history`, pinned
-first, at most 50. A session row shows its title (alias, else harness name,
-else name), its state in color (Needs input, Working, Done, Idle), how long ago
-it last printed, its agent count, open PRs as `owner/repo#N` and `N merged`
-(from `--meta`'s `prs`). A History row shows its pin (`*`), how it ended
-(closed, stopped, exited, crashed …) and its directory. The list reloads about
-once a second and keeps the selection on the same session.
+there are some; and **History**, the ended sessions of `--history`, pinned
+first, at most 50. Every list has column headers and fixed, aligned columns,
+sized to the rows on screen. A session row shows NAME (alias, else harness
+name, else name), STATE as a glyph and a word (Needs input, red and the
+loudest; Working, in the accent; Done, green; Idle, faint), ACTIVE (how long
+ago it last printed: `now`, `22m`, `3h`, `2d`), AGENTS, MERGED (`✓ 251`) and
+PULL REQUESTS (from `--meta`'s `prs`: `solution#22330`, the repo said once
+when they share it, `+N` for those that do not fit). A History row shows its
+pin (`◆`), NAME, ENDED (closed, stopped, exited, crashed …), WHEN and the
+DIRECTORY, cut from the left. As the window narrows the last column goes
+first, then merged, agents and the age; the name shrinks last, cut with `…`,
+and nothing wraps. The list reloads about once a second and keeps the
+selection on the same session.
+
+The look follows Apple's Human Interface Guidelines in a terminal: one accent
+(Claude's clay orange) for the active tab, the keys and the working state,
+colour otherwise only for state, everything secondary faint, and the selection
+a quiet tinted bar the width of the screen with an accent `▌` edge, each cell
+keeping its own colour on it. The bottom lines, under a faint rule, are the
+status line and the key hints for the view and the selected row, grouped:
+the actions, the agents' (`R` `S` `a` `b` `B`, `a` only on a row that needs
+input), the view, moving about; destructive keys are red. A window too narrow
+for all of them drops the agents' group, then the view's, never cutting a
+hint.
 
 | Key | Sessions / Sidekicks | History |
 | --- | --- | --- |
@@ -150,20 +168,26 @@ once a second and keeps the selection on the same session.
 | `,` | settings | settings |
 | `q` `Esc` `Ctrl-C` `Ctrl-D` | quit | quit |
 
-`,` opens **Settings**: every [config file](#config-file) key with its value,
-`(default)` when the file has none. `Enter` changes the selected one — a bool
-toggles (turning `auto_allow` on asks first), a choice (`picker_sort`,
-`detach_key`) steps to the next, a string (`sidekick_pattern`; empty: no
-Sidekicks tab) is typed on the status line, `Ctrl-D` keeping it. `u` resets
-the key to its default, `Esc`, `q` or `,` goes back. Each change is written like
-`dch --config` does and applies at once (the sort, the Sidekicks split).
+`,` opens **Settings**: every [config file](#config-file) key with its value
+(a bool as `● on` / `○ off`, a choice as all of them with the set one in the
+accent), `(default)` when the file has none, and what it is for. `Enter`
+changes the selected one — a bool toggles (turning `auto_allow` on asks
+first), a choice (`picker_sort`, `detach_key`) steps to the next, a string
+(`sidekick_pattern`; empty: no Sidekicks tab) is typed on the status line,
+`Ctrl-D` keeping it. `u` resets the key to its default, `Esc`, `q` or `,` goes
+back. Each change is written like `dch --config` does and applies at once (the
+sort, the Sidekicks split).
 
 A question waits for `y`; any other key cancels. Actions run the matching
 `dch` verb in the background: the status line shows `restarting …` while it
 runs, then its result (`Resumed as <name>`, `killed: <name>`, or the error).
 Resuming a record whose name is live again resumes it as `<name>-2`.
-`NO_COLOR` or `TERM=dumb` draws without color and with ASCII markers; without
-a terminal (`/dev/tty`), `-l` prints the session list instead.
+Colour is truecolor when `COLORTERM` is `truecolor` or `24bit`, else the 256
+palette for a `*256color` `TERM`, else the basic eight (the selection in
+reverse video); a light background in `COLORFGBG` picks lighter tints.
+`NO_COLOR` draws no colour at all (the layout, the `▌` edge and the active
+tab's brackets carry it); `TERM=dumb` also draws ASCII markers. Without a
+terminal (`/dev/tty`), `-l` prints the session list instead.
 
 An agent (or plain shell script) can drive a TUI in a session it never
 attaches to:

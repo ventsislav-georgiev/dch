@@ -14,12 +14,18 @@ and --keys types into it. Covers:
   8. s persists the sort (picker_sort) and a fresh picker starts in it;
   9. the settings view (,): lists every key, Enter cycles picker_sort and
      prompts for sidekick_pattern (the Sidekicks split follows at once), u
-     resets to the default, auto_allow on asks y/N first and off does not.
+     resets to the default, auto_allow on asks y/N first and off does not;
+ 10. the layout (#086): column headers on every list, the STATE column at
+     one x on every row, the selected row's state keeping its own colour on
+     a tinted bar (no reverse block), the key hints grouped, all of them at
+     200 columns and whole groups dropped at 80;
+ 11. a session whose name lacks the pattern but whose harness (Claude)
+     title has it is a sidekick (#086).
 
 Run:  python3 tests/picker_test.py            (uses ./dch)
       DCH=/path/to/dch python3 tests/picker_test.py
 """
-import os, re, shutil, subprocess, sys, tempfile, time
+import json, os, re, shutil, subprocess, sys, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
@@ -28,11 +34,12 @@ SOCKDIR = os.path.join(ROOT, "s")
 ENV = dict(os.environ, DCH_SOCKET_DIR=SOCKDIR,
            XDG_STATE_HOME=os.path.join(ROOT, "state"),
            HOME=os.path.join(ROOT, "home"),
+           CLAUDE_CONFIG_DIR=os.path.join(ROOT, "home", ".claude"),
            DCH_CONFIG=os.path.join(ROOT, "config"), DCH_LOGIN_ENV="0")
 for k in ("DCH_SESSION", "MallocStackLogging", "MallocStackLoggingNoCompact",
-          "NO_COLOR"):
+          "NO_COLOR", "COLORTERM", "COLORFGBG"):
     ENV.pop(k, None)
-os.makedirs(ENV["HOME"])
+os.makedirs(os.path.join(ENV["CLAUDE_CONFIG_DIR"], "sessions"))
 RULE = "\u2500" * 60
 PERM = [RULE, " Bash command", "", "   rm -rf build", "   Clean the build tree",
         "", " Do you want to proceed?", " \u276f 1. Yes",
@@ -41,6 +48,12 @@ PERM = [RULE, " Bash command", "", "   rm -rf build", "   Clean the build tree",
 FORM = [RULE, " \u2610 Proceed", "", "Do you want to proceed?", "",
         "\u276f 1. Yes", "  2. No", "", "Enter to select \u00b7 Esc to cancel"]
 COLOR_RE = re.compile(r"\x1b\[(?:[0-9;]*;)?3[0-9][;m]")
+# any foreground or background colour, or reverse video
+ANYCOLOR_RE = re.compile(r"\x1b\[(?:[0-9;]*;)?(?:[34][0-9]|9[0-7]|10[0-7]|7)[;m]")
+SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
+ACCENT_TC, BAR_TC = "38;2;217;119;87", "48;2;38;44;56"
+STATES = ("Needs input", "Working", "Done", "Idle")
+procs = []
 failures = []
 
 
@@ -86,19 +99,67 @@ def wait_live(name, present, timeout=10.0):
     return False
 
 
-ROW_RE = re.compile(r"^([> ]) . (\S+)")   # marker, glyph or pin, title
+ROW_RE = re.compile("^([>\u258c ]) . (\\S+)")  # marker, glyph or pin, title
+RULE_RE = re.compile("^[\u2500-]{20,}$")
+
+
+def body(s):
+    """The list's lines: below the title, tabs and column headers, above
+    the rule."""
+    out = []
+    for l in s.split("\n")[3:]:
+        if RULE_RE.match(l):
+            break
+        out.append(l)
+    return out
+
+
+def footer(s):
+    """The key hint lines: below the rule and the status line."""
+    ls = s.split("\n")
+    for i, l in enumerate(ls):
+        if RULE_RE.match(l):
+            return [x for x in ls[i + 2:] if x.strip()]
+    return []
 
 
 def rows(s):
-    """Row titles in drawn order, below the header and tab lines."""
-    return [m.group(2) for m in map(ROW_RE.match, s.split("\n")[2:]) if m]
+    """Row titles in drawn order."""
+    return [m.group(2) for m in map(ROW_RE.match, body(s)) if m]
 
 
 def current(s):
-    for m in map(ROW_RE.match, s.split("\n")[2:]):
-        if m and m.group(1) == ">":
+    for m in map(ROW_RE.match, body(s)):
+        if m and m.group(1) != " ":
             return m.group(2)
     return None
+
+
+def sgr_before(line, text):
+    """The SGR parameters in force where text starts on an --ansi line."""
+    i = line.find(text)
+    if i < 0:
+        return None
+    on = []
+    for m in SGR_RE.finditer(line[:i]):
+        ps = m.group(1)
+        on = [] if ps in ("", "0") else on + [ps]
+    return ";".join(on)
+
+
+def harness(session, title):
+    """A stand-in Claude Code titled `title` inside `session`: a live
+    process carrying DCH_SESSION (our own dch: macOS hides a platform
+    binary's env) and its ~/.claude/sessions record."""
+    pr = subprocess.Popen([DCH, "--wait", session, "--state", "done",
+                           "--timeout", "120000"],
+                          env=dict(ENV, DCH_SESSION=session),
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    procs.append(pr)
+    with open(os.path.join(ENV["CLAUDE_CONFIG_DIR"], "sessions",
+                           "%d.json" % pr.pid), "w") as f:
+        json.dump({"pid": pr.pid, "sessionId": "x", "cwd": "/",
+                   "name": title}, f, separators=(",", ":"))
 
 
 def select(pk, name, timeout=10.0):
@@ -153,37 +214,57 @@ def main():
     picker("pk1", "100x30", "NO_COLOR=1", "TERM=xterm-256color")
     s = wait_screen("pk1", lambda s: "s10" in s and "s2" in s)
     check("picker opens with the caller's header and a Sessions tab",
-          "attach session (mirror):" in s and "[Sessions]" in s, s)
+          "attach session (mirror):" in s and
+          re.search(r"\[Sessions \d+\]", s), s)
     check("no Sidekicks tab without a matching session",
           "Sidekicks" not in s, s)
     dch("--spawn", "helper-qa", "--size", "80x24", "sh", "-c", "sleep 600")
-    s = wait_screen("pk1", lambda s: "Sidekicks (1)" in s)
-    check("Sidekicks (1) appears live", "Sidekicks (1)" in s, s)
+    s = wait_screen("pk1", lambda s: "Sidekicks 1" in s)
+    check("Sidekicks 1 appears live", "Sidekicks 1" in s, s)
     check("a sidekick is not in Sessions", "helper-qa" not in rows(s), s)
+    check("Sessions: column headers",
+          re.search(r"^ {4}NAME +STATE +ACTIVE\b", s, re.M), s)
     dch("--keys", "pk1", "tab")
-    s = wait_screen("pk1", lambda s: "[Sidekicks (1)]" in s)
+    s = wait_screen("pk1", lambda s: "[Sidekicks 1]" in s)
     check("tab switches to Sidekicks, listing the sidekick only",
           rows(s) == ["helper-qa"], s)
+    check("Sidekicks: column headers",
+          re.search(r"^ {4}NAME +STATE\b", s, re.M), s)
+
+    # 11. the pattern matches the harness title the row shows, too: a4k-2
+    # is "kodi-qa" only to Claude
+    dch("--spawn", "a4k-2", "--size", "80x24", "sh", "-c", "sleep 600")
+    harness("a4k-2", "kodi-qa")
+    s = wait_screen("pk1", lambda s: "[Sidekicks 2]" in s and
+                    "kodi-qa" in rows(s))
+    check("a harness title matching sidekick_pattern makes a sidekick",
+          sorted(rows(s)) == ["helper-qa", "kodi-qa"], s)
     dch("--keys", "pk1", "tab")
-    s = wait_screen("pk1", lambda s: "[Sessions]" in s)
+    s = wait_screen("pk1", lambda s: "[Sessions" in s)
+    check("... and keeps it out of Sessions",
+          "kodi-qa" not in rows(s) and "a4k-2" not in rows(s), s)
 
     # 2. sort: activity puts the working s10 first; name puts s2 before s10
-    s = wait_screen("pk1", lambda s: "sort: activity" in s and
+    s = wait_screen("pk1", lambda s: "s sort activity" in s and
                     "s10" in rows(s) and "s2" in rows(s) and
                     rows(s).index("s10") < rows(s).index("s2"))
     check("activity sort: working s10 above idle s2",
           rows(s).index("s10") < rows(s).index("s2"), s)
     check("states are labelled", "Working" in s and "Idle" in s, s)
+    xs = {l.find(w) for l in body(s) for w in STATES if w in l}
+    head = [l for l in s.split("\n") if l.startswith("    NAME")]
+    check("the STATE column starts at one x on every row, under its header",
+          len(xs) == 1 and head and head[0].find("STATE") in xs, s)
     dch("--keys", "pk1", "s")
-    s = wait_screen("pk1", lambda s: "sort: name" in s)
+    s = wait_screen("pk1", lambda s: "s sort name" in s)
     check("name sort is numeric-aware: s2 above s10",
-          "sort: name" in s and rows(s).index("s2") < rows(s).index("s10"),
+          "s sort name" in s and rows(s).index("s2") < rows(s).index("s10"),
           s)
     check("s persists the sort: picker_sort = name in the config",
           "picker_sort = name\n" in config(), config())
     picker("pk4", "100x30", "NO_COLOR=1", "TERM=xterm-256color")
-    s = wait_screen("pk4", lambda s: "s10" in s and "sort:" in s)
-    check("a fresh picker starts in the saved sort", "sort: name" in s, s)
+    s = wait_screen("pk4", lambda s: "s10" in s and "s sort" in s)
+    check("a fresh picker starts in the saved sort", "s sort name" in s, s)
     dch("-k", "pk4")
 
     # 3. rename
@@ -212,10 +293,14 @@ def main():
     check("the result line says so", "killed: s2" in s, s)
 
     # 5. History: the killed session, resumed by Enter
-    wait_screen("pk1", lambda s: "History (" in s)
-    s = to_tab("pk1", "History (")
+    wait_screen("pk1", lambda s: "History " in s)
+    s = to_tab("pk1", "History")
     check("History tab lists s2 as closed",
           "s2" in rows(s) and re.search(r"s2\s+closed", s) is not None, s)
+    check("History: column headers",
+          re.search(r"^ {4}NAME +ENDED +WHEN +DIRECTORY", s, re.M), s)
+    check("History: its own key hints only",
+          "resume" in s and "rename" not in s and "s sort" not in s, s)
     check("select s2 in History", select("pk1", "s2"), screen("pk1"))
     dch("--keys", "pk1", "enter")
     s = wait_screen("pk1", lambda s: "Resumed as s2" in s, 20)
@@ -247,11 +332,46 @@ def main():
 
     # 6. color: none under NO_COLOR or TERM=dumb, some otherwise
     a = screen("pk1", ansi=True)
-    check("NO_COLOR: no ESC[3x color codes", not COLOR_RE.search(a), a)
-    picker("pk2", "100x30", "TERM=xterm-256color")
+    check("NO_COLOR: no color codes, no reverse video",
+          not ANYCOLOR_RE.search(a), a)
+    picker("pk2", "100x30", "TERM=xterm-256color", "COLORTERM=truecolor")
     wait_screen("pk2", lambda s: "s10" in s)
     a = screen("pk2", ansi=True)
     check("color on by default: ESC[3x present", COLOR_RE.search(a), a)
+
+    # 10. the selected Working row: the tinted bar, the state in its own
+    # accent on it, never a reverse block
+    check("select nick (s10) in the color picker", select("pk2", "nick"),
+          screen("pk2"))
+    a = screen("pk2", ansi=True)
+    sl = [l for l in a.split("\n") if "\u258c" in l and "nick" in l]
+    on = sgr_before(sl[0], "Working") if sl else None
+    check("selected Working row: accent foreground on the bar's tint",
+          on is not None and ACCENT_TC in on and BAR_TC in on and
+          not re.search(r"(?:^|;)7(?:;|$)", on), sl, on)
+    on = sgr_before(sl[0], "nick") if sl else None
+    check("selected row: the title on the same bar",
+          on is not None and BAR_TC in on, sl, on)
+    check("key hints at 100 columns: whole groups, separated",
+          any("\u2502" in l for l in footer(screen("pk2"))),
+          footer(screen("pk2")))
+    dch("-k", "pk2")
+    picker("pk5", "200x30", "TERM=xterm-256color", "COLORTERM=truecolor")
+    s = wait_screen("pk5", lambda s: "nick" in s and "quit" in s)
+    f = footer(s)
+    check("200 columns: every hint group on one line",
+          len(f) == 1 and f[0].count("\u2502") == 3 and all(
+              w in f[0] for w in ("attach", "rename", "kill", "restart",
+                                  "stop", "stale", "force all", "sort",
+                                  "settings", "tabs", "quit")), f)
+    dch("-k", "pk5")
+    picker("pk6", "80x24", "TERM=xterm-256color", "COLORTERM=truecolor")
+    s = wait_screen("pk6", lambda s: "nick" in s and "quit" in s)
+    f = " ".join(footer(s))
+    check("80 columns: the agents' group dropped whole, actions and quit "
+          "kept", "attach" in f and "quit" in f and "restart" not in f and
+          "stale" not in f and re.search(r"\bstop\b", f) is None, footer(s))
+    dch("-k", "pk6")
 
     # 7. 40 columns, TERM=dumb: a long title is cut, nothing wraps
     dch("-m", "s10", "a-very-long-alias-that-cannot-fit-in-forty-cols")
@@ -276,17 +396,20 @@ def main():
           "[Settings]" in s and all(k in s for k in (
               "auto_allow", "sidekick_pattern", "picker_sort",
               "detach_key")), s)
-    check("settings: values, (default) when unset",
-          re.search(r"auto_allow\s+false\s+\(default\)", s) and
-          re.search(r"picker_sort\s+name\s*$", s, re.M) and
-          re.search(r"detach_key\s+detach\s+\(default\)", s), s)
+    check("settings: column headers",
+          re.search(r"^ {4}SETTING +VALUE +ABOUT", s, re.M), s)
+    check("settings: values, (default) when unset, a description each",
+          re.search("auto_allow +\u25cb off +\\(default\\) +Answer", s)
+          and re.search(r"picker_sort +activity \[name\] +How", s) and
+          re.search(r"detach_key +\[detach\] switch +\(default\)", s),
+          s)
     dch("--keys", "pk1", "down", "down", "enter")
     s = wait_screen("pk1", lambda s: "picker_sort = activity" in s)
     check("Enter cycles picker_sort: name -> activity, saved",
           "picker_sort = activity\n" in config(), s, config())
     dch("--keys", "pk1", "u")
     s = wait_screen("pk1", lambda s: re.search(
-        r"picker_sort\s+activity\s+\(default\)", s))
+        r"picker_sort +\[activity\] name +\(default\)", s))
     check("u resets to the default: the key leaves the file",
           "picker_sort" not in config() and "(default)" in s, s, config())
     dch("--keys", "pk1", "up", "enter")
@@ -313,11 +436,11 @@ def main():
     check("off needs no confirm", "[y/N]" not in s and
           "auto_allow = false\n" in config(), s, config())
     dch("--keys", "pk1", "esc")
-    s = wait_screen("pk1", lambda s: "[Sessions]" in s)
+    s = wait_screen("pk1", lambda s: "[Sessions" in s)
     check("esc goes back to the sessions; the new sidekick_pattern "
           "split them at once: no Sidekicks tab, helper-qa in Sessions",
-          "[Sessions]" in s and "Sidekicks" not in s and
-          "helper-qa" in rows(s), s)
+          "[Sessions" in s and "Sidekicks" not in s and
+          "helper-qa" in rows(s) and "kodi-qa" in rows(s), s)
 
     dch("--keys", "pk3", "q")
     check("q quits the picker", wait_live("pk3", False), live())
@@ -328,9 +451,11 @@ if __name__ == "__main__":
     try:
         rc = main()
     finally:
-        for n in ("pk1", "pk2", "pk3", "pk4", "s2", "s10", "helper-qa", "perm",
-                  "form"):
+        for n in ("pk1", "pk2", "pk3", "pk4", "pk5", "pk6", "s2", "s10",
+                  "helper-qa", "a4k-2", "perm", "form"):
             dch("-k", n)
+        for pr in procs:
+            pr.kill()
         shutil.rmtree(ROOT, ignore_errors=True)
     print("PASS" if rc == 0 else "FAILED: %d" % len(failures))
     sys.exit(rc)
