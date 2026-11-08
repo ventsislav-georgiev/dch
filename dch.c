@@ -243,7 +243,7 @@ static const struct
 	/* what one Ctrl-\ press does; two do the other (#082) */
 	{ "detach_key", 0, "detach", "detach|switch",
 	  "What one Ctrl-\\ press does; two do the other" },
-	/* the remote hosts -ls and the picker list (#087) */
+	/* the remote hosts the picker (and --remote) lists (#087) */
 	{ "remote_hosts", 0, "", NULL,
 	  "Remote hosts: [label=]host[:port],...; empty: your tailnet "
 	  "peers; off: none" },
@@ -2413,15 +2413,15 @@ usage(void)
 	    "  dch -l           pick a session and attach (mirror)\n"
 	    "  dch -k [name]    kill session; without name, pick interactively\n"
 	    "  dch -kl          kill ALL sessions\n"
-	    "  dch -ls, --ls    list sessions (one per line), then remote\n"
-	    "                   ones as host:name\n"
+	    "  dch -ls, --ls    list local sessions (one per line)\n"
 	    "  dch -lj          list sessions as name<TAB>alias<TAB>activity_epoch per line\n"
 	    "  dch -a <name>    attach to a session, never create one;\n"
 	    "                   host:name attaches to one on a remote host\n"
 	    "  dch --host <h> -a <name>  attach to <name> on host h\n"
 	    "  dch --hosts <h1,h2,...>   the remote hosts, [label=]host[:port],\n"
 	    "                   instead of your online tailnet peers\n"
-	    "  dch --remote     with -lj and --ls-json: remote rows too\n"
+	    "  dch --remote     with -ls, -lj, --ls-json: remote rows too, as\n"
+	    "                   host:name (the picker always shows them)\n"
 	    "  dch -rl          interactively rename (alias) sessions\n"
 	    "  dch -m <name> [alias]  set alias non-interactively (empty clears)\n"
 	    "  dch -d [name]    detach all clients of session (sends SIGUSR1)\n"
@@ -9820,6 +9820,8 @@ pick_session(const char *header, char *out, size_t outsz)
 	signal(SIGHUP, SIG_DFL);
 	sigaction(SIGWINCH, &owinch, NULL);
 done:
+	if (pk_remote)
+		dch_remote_stop();	/* its background probe, reaped */
 	/* an action still running carries on; only its result goes unread */
 	if (p.out)
 		fclose(p.out);
@@ -11476,9 +11478,11 @@ main(int argc, char **argv)
 		fprintf(stderr, "dch: -a attaches; it runs no command\n");
 		return 1;
 	}
-	if (opt_remote && action != A_LISTJSON && action != A_LISTJSON2)
+	if (opt_remote && action != A_LISTJSON && action != A_LISTJSON2 &&
+	    action != A_LISTRAW)
 	{
-		fprintf(stderr, "dch: --remote only works with -lj, --ls-json\n");
+		fprintf(stderr, "dch: --remote only works with -ls, -lj, "
+		        "--ls-json\n");
 		return 1;
 	}
 	/* --cancel only means something to --respawn; elsewhere it would be
@@ -11628,7 +11632,10 @@ main(int argc, char **argv)
 			puts(row);
 		}
 		slist_free(&sl);
-		/* then the other hosts' (#087), escaped: a peer wrote them */
+		/* with --remote, then the other hosts' (#087), escaped: a
+		** peer wrote them. Never without: -ls is a local check that
+		** scripts (openlid's keep-awake) run often, no network. */
+		if (opt_remote)
 		{
 			struct dch_rrow *rr;
 			int n = dch_remote_rows(&rr, 1);

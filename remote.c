@@ -5,19 +5,25 @@
 **
 ** Hosts. --hosts (or the config's remote_hosts), else discovery: the online
 ** peers of `tailscale status --json` owned by this host's own Tailscale
-** user (numeric UserID), untagged, at their 100.64.0.0/10 address. Nothing
-** else is ever dialled. No tailscale CLI, no peers, DCH_NO_REMOTE=1 or
-** remote_hosts = off: no remote rows, never an error.
+** user (numeric UserID), untagged, at their 100.64.0.0/10 address, and only
+** while tailscaled says BackendState "Running". Nothing else is ever
+** dialled. No tailscale CLI, no peers, DCH_NO_REMOTE=1 or remote_hosts =
+** off: no remote rows, never an error. Before an attach to a discovered
+** host, `tailscale whois` on its address must name the same user, untagged
+** (a host the user named in --hosts or remote_hosts is taken as given).
 **
 ** Listing. Every host is probed at once, non-blocking, within one time box:
 ** connect, 0x08 and 0x03 pipelined (both read-only; the spec lets them
 ** share a connection), then 0x18 (a newer major refuses the host) and 0x11.
 ** The rows go to a cache in dch's state dir; a host that did not answer in
-** time shows its cached rows, marked stale, for RM_TTL_S. `--ls` probes in
-** the foreground (RM_BOX_MS); the picker reads the cache and re-probes in a
-** forked child, so nothing stalls it.
+** time shows its cached rows, marked stale, for RM_TTL_S. `--ls --remote`
+** probes in the foreground, all of it (the tailscale call, name lookups,
+** every probe) within RM_BOX_MS; the picker reads the cache and re-probes in
+** a forked child, so nothing stalls it, and shows only the rows of hosts
+** that are candidates now.
 **
-** Attach. A relay child bridges attach.c's packets on a socketpair to the
+** Attach. The list check and the 0x01 share one connection (Prosper's 0x01
+** creates a session it does not have). A relay child bridges attach.c's packets on a socketpair to the
 ** frames: the attach client is the local one, so the detach key, the
 ** double tap and the redraw on resume all work the same. The TCP close is
 ** the detach; the remote session lives on.
@@ -66,9 +72,29 @@ struct rhost
 	char label[DCH_RHOST_MAX];	/* what host:name names */
 	char addr[256];		/* an IPv4 literal, or a name (--hosts) */
 	unsigned short port;
+	int found;		/* by discovery: whois it before an attach */
 };
 
 static const char *g_hosts;	/* --hosts */
+static long long g_me = -1;	/* discovery: this host's Tailscale user */
+
+/* A forked child's signals: dch's handlers (attach.c's die, the picker's)
+** act on the shared terminal and the parent's files, so none of them run
+** here. SIGPIPE stays ignored: a peer that hangs up is an error return. */
+static void
+child_signals(void)
+{
+	static const int sigs[] = { SIGHUP, SIGINT, SIGTERM, SIGQUIT, SIGUSR1,
+	                            SIGUSR2, SIGWINCH, SIGCHLD, SIGALRM };
+	sigset_t none;
+	size_t i;
+
+	for (i = 0; i < sizeof sigs / sizeof *sigs; i++)
+		signal(sigs[i], SIG_DFL);
+	signal(SIGPIPE, SIG_IGN);
+	sigemptyset(&none);
+	sigprocmask(SIG_SETMASK, &none, NULL);
+}
 
 /* ---- hosts ----------------------------------------------------------- */
 
@@ -94,6 +120,7 @@ host_entry(const char *s, size_t n, struct rhost *h)
 	size_t hn = (size_t)(s + n - hs), ln;
 	long port = RM_PORT;
 
+	memset(h, 0, sizeof *h);
 	if ((colon = memchr(hs, ':', hn)))
 	{
 		size_t pn = (size_t)(hs + hn - colon - 1), i;
@@ -201,19 +228,25 @@ peer_label(const struct json_parser *jp, int p, char *out)
 }
 
 /* `tailscale status --json` into v[cap]: the peers worth probing, online,
-** untagged and owned by Self's user (by numeric id), each at its first
-** IPv4 in 100.64.0.0/10. None on a tagged host: no user owns it. Pure. */
+** untagged and owned by Self's user (by numeric id, into *me), each at its
+** first IPv4 in 100.64.0.0/10. None on a tagged host (no user owns it), and
+** none unless BackendState is "Running": a stopped or logged-out tailscaled
+** still lists its peers, and 100.64.0.0/10 off the tailnet is any ISP's
+** carrier-grade NAT. Pure. */
 static int
-peers_from(const char *js, struct rhost *v, int cap)
+peers_from(const char *js, struct rhost *v, int cap, long long *me)
 {
 	struct json_parser jp;
-	char node[NODE_ID_MAX];
-	long long me, uid;
+	char node[NODE_ID_MAX], bs[32];
+	long long uid;
 	int tagged, peers, i, n = 0;
 
-	if (status_self(js, &me, node, &tagged) < 0 || tagged)
+	*me = -1;
+	if (status_self(js, me, node, &tagged) < 0 || tagged)
 		return 0;
-	if (dch_json_parse(&jp, js) < 0)
+	if (dch_json_parse(&jp, js) < 0 ||
+	    jstr(&jp, 0, "BackendState", bs, sizeof bs) != 1 ||
+	    strcmp(bs, "Running"))
 	{
 		dch_json_free(&jp);
 		return 0;
@@ -231,7 +264,7 @@ peers_from(const char *js, struct rhost *v, int cap)
 		if (on < 0 || jp.tok[on].kind != JSON_PRIMITIVE ||
 		    jp.tok[on].end - jp.tok[on].start != 4 ||
 		    memcmp(jp.text + jp.tok[on].start, "true", 4) ||
-		    jint(&jp, p, "UserID", &uid) != 1 || uid != me ||
+		    jint(&jp, p, "UserID", &uid) != 1 || uid != *me ||
 		    has_tags(&jp, p) || peer_label(&jp, p, h.label) < 0 ||
 		    host_find(v, n, h.label) >= 0 ||
 		    (ips = jcont(&jp, p, "TailscaleIPs", JSON_ARRAY)) < 0)
@@ -246,6 +279,7 @@ peers_from(const char *js, struct rhost *v, int cap)
 		if (!h.addr[0])
 			continue;
 		h.port = RM_PORT;
+		h.found = 1;
 		v[n++] = h;
 	}
 	dch_json_free(&jp);
@@ -266,34 +300,76 @@ remote_on(void)
 	         !strcmp(c, "off"));
 }
 
-/* The hosts to dial: --hosts, else remote_hosts, else discovery. */
+/* The hosts the user named: --hosts, else remote_hosts (a bad one said on
+** stderr when loud, and then none). How many, or -1 when neither is set. */
 static int
-candidates(struct rhost *v, int cap)
+named_hosts(struct rhost *v, int cap, int loud)
 {
-	char cfg[1024], bad[400], *out = NULL;
+	char cfg[1024], bad[400];
+	int n;
+
+	if (g_hosts)
+		return hosts_parse(g_hosts, v, cap, bad, sizeof bad);
+	if (!dch_config_get("remote_hosts", cfg, sizeof cfg) || !cfg[0])
+		return -1;
+	if ((n = hosts_parse(cfg, v, cap, bad, sizeof bad)) < 0 && loud)
+		fprintf(stderr, "dch: remote_hosts: bad entry %s\n", bad);
+	return n < 0 ? 0 : n;
+}
+
+/* The hosts to dial: --hosts, else remote_hosts, else discovery, its
+** `tailscale status` given ts_ms. How many, or -1 when discovery could not
+** tell (tailscale failed or ran out of time). */
+static int
+candidates(struct rhost *v, int cap, int ts_ms)
+{
+	char *out = NULL;
 	char *av[] = { NULL, "status", "--json", NULL };
-	int st, n = 0;
+	int st, n;
 
 	if (!remote_on())
 		return 0;
-	if (g_hosts)
-		return hosts_parse(g_hosts, v, cap, bad, sizeof bad);
-	if (dch_config_get("remote_hosts", cfg, sizeof cfg) && cfg[0])
-	{
-		if ((n = hosts_parse(cfg, v, cap, bad, sizeof bad)) < 0)
-			fprintf(stderr, "dch: remote_hosts: bad entry %s\n", bad);
-		return n < 0 ? 0 : n;
-	}
+	if ((n = named_hosts(v, cap, 1)) >= 0)
+		return n;
 	if (!g_ts[0])
 		ts_find();
 	if (!g_ts[0])
 		return 0;
 	av[0] = g_ts;
-	st = rf_run(av, &out, NULL, RM_CACHE_MAX, NULL, 0, RM_TS_MS);
-	if (st >= 0 && WIFEXITED(st) && WEXITSTATUS(st) == 0 && out)
-		n = peers_from(out, v, cap);
+	st = rf_run(av, &out, NULL, RM_CACHE_MAX, NULL, 0, ts_ms);
+	n = st >= 0 && WIFEXITED(st) && WEXITSTATUS(st) == 0 && out
+	    ? peers_from(out, v, cap, &g_me) : -1;
 	free(out);
 	return n;
+}
+
+/* The candidate labels the picker shows rows of, "\n"-separated with one
+** at each end: the last probe round's, this process's or the background
+** child's (sent on a pipe). A cache row of any other host is not shown. */
+static char g_lab[RM_HOSTS * DCH_RHOST_MAX + 2];
+static int g_lab_ok;
+
+static void
+labels_set(const struct rhost *v, int n)
+{
+	size_t o = 1;
+	int i;
+
+	g_lab[0] = '\n';
+	for (i = 0; i < n; i++)
+		o += (size_t)snprintf(g_lab + o, sizeof g_lab - o, "%s\n",
+		                      v[i].label);
+	g_lab[o] = '\0';
+	g_lab_ok = 1;
+}
+
+static int
+label_in(const char *host)
+{
+	char nd[DCH_RHOST_MAX + 3];
+
+	snprintf(nd, sizeof nd, "\n%s\n", host);
+	return g_lab_ok && strstr(g_lab, nd) != NULL;
 }
 
 int
@@ -339,10 +415,11 @@ rl_new(struct rlist *l)
 }
 
 /* The rows of array token arr: a listResp's (host given, every row
-** answered at `at`), or the cache's (host NULL: each row names its host
-** and when it answered). A row without a usable name is skipped; the
-** alias kept only when it fits, the state only when it is one of the
-** four. At most RM_ROWS. Pure. */
+** answered at `at`), or the cache's (host NULL: each row names its host, a
+** plain label, and when it answered, after 0 and at most a minute past
+** `at`, the time now). A row without a usable name is skipped; the alias
+** kept only when it fits, the state only when it is one of the four. At
+** most RM_ROWS. Pure. */
 static void
 rows_from(const struct json_parser *jp, int arr, const char *host,
           long long at, struct rlist *l)
@@ -363,7 +440,9 @@ rows_from(const struct json_parser *jp, int arr, const char *host,
 		if (host)
 			copy_str(r->host, sizeof r->host, host);
 		else if (jstr(jp, i, "host", r->host, sizeof r->host) != 1 ||
-		         !r->host[0] || jint(jp, i, "at", &a) != 1)
+		         !r->host[0] ||
+		         !plain(r->host, strlen(r->host), "-._") ||
+		         jint(jp, i, "at", &a) != 1 || a <= 0 || a > at + 60)
 			continue;
 		if (jstr(jp, i, "alias", r->alias, sizeof r->alias) != 1)
 			r->alias[0] = '\0';
@@ -435,32 +514,34 @@ row_cmp(const void *x, const void *y)
 
 /* ---- the cache ------------------------------------------------------- */
 
+/* In <state>/dch/sessions, which dch_history_dir has checked is a
+** directory of this user's that nobody else can write. A dot file: master.c
+** and the history loader skip it there. */
 static int
-cache_path(char *out, size_t cap)
+cache_path(char *out, size_t cap, const char *leaf)
 {
-	char dir[PATH_MAX], *sl;
+	char dir[PATH_MAX];
 
-	if (dch_history_dir(dir, sizeof dir, NULL, 1) < 0 ||
-	    !(sl = strrchr(dir, '/')))
+	if (dch_history_dir(dir, sizeof dir, NULL, 1) < 0)
 		return -1;
-	*sl = '\0';	/* <state>/dch/sessions: <state>/dch */
-	return (size_t)snprintf(out, cap, "%s/remote-cache.json", dir) < cap
-	       ? 0 : -1;
+	return (size_t)snprintf(out, cap, "%s/%s", dir, leaf) < cap ? 0 : -1;
 }
 
-/* The cached rows, each its host's and when that host answered. */
+/* The cached rows, each its host's and when that host answered (now: the
+** time, against which a row's is checked). */
 static void
-cache_load(struct rlist *l)
+cache_load(struct rlist *l, long long now)
 {
 	char path[PATH_MAX + 32], *text;
 	struct stat st;
 	ssize_t k;
 	int fd;
 
-	if (cache_path(path, sizeof path) < 0 ||
+	if (cache_path(path, sizeof path, ".remote-cache") < 0 ||
 	    (fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)) < 0)
 		return;
 	if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode) ||
+	    st.st_uid != getuid() || (st.st_mode & 022) ||
 	    (size_t)st.st_size > RM_CACHE_MAX ||
 	    !(text = malloc((size_t)st.st_size + 1)))
 	{
@@ -472,23 +553,30 @@ cache_load(struct rlist *l)
 	if (k == st.st_size && !memchr(text, 0, (size_t)k))
 	{
 		text[k] = '\0';
-		(void)rows_doc(text, NULL, 0, l);
+		(void)rows_doc(text, NULL, now, l);
 	}
 	free(text);
 }
 
+/* l as the cache: up to RM_CACHE_MAX less a row's worst case, so the
+** loader never refuses the file (a host past that is left out). The write
+** is to a new mkstemp file renamed over the old, SIGTERM held meanwhile
+** (dch_remote_stop's), so no half-written file is ever left behind. */
 static void
 cache_save(const struct rlist *l)
 {
-	char path[PATH_MAX + 32], tmp[PATH_MAX + 64];
+	char path[PATH_MAX + 32], tmp[PATH_MAX + 32];
 	struct sb b = {0};
+	sigset_t term, old;
 	int i, fd;
 	ssize_t w;
 
-	if (cache_path(path, sizeof path) < 0)
+	if (cache_path(path, sizeof path, ".remote-cache") < 0 ||
+	    cache_path(tmp, sizeof tmp, ".remote-cache.XXXXXX") < 0)
 		return;
 	sb_s(&b, "[");
-	for (i = 0; i < l->n; i++)
+	for (i = 0; i < l->n && b.n + 6 * (DCH_RHOST_MAX + 2 * 256 + 16) + 64 <
+	     RM_CACHE_MAX; i++)
 	{
 		const struct dch_rrow *r = &l->v[i];
 
@@ -505,14 +593,16 @@ cache_save(const struct rlist *l)
 		sb_s(&b, "}");
 	}
 	sb_s(&b, "]\n");
-	snprintf(tmp, sizeof tmp, "%s.%ld.tmp", path, (long)getpid());
-	if (!b.bad && (fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC |
-	                         O_CLOEXEC | O_NOFOLLOW, 0600)) >= 0)
+	sigemptyset(&term);
+	sigaddset(&term, SIGTERM);
+	sigprocmask(SIG_BLOCK, &term, &old);
+	if (!b.bad && (fd = mkstemp(tmp)) >= 0)
 	{
 		w = write(fd, b.p, b.n);
 		if (close(fd) < 0 || w != (ssize_t)b.n || rename(tmp, path) < 0)
 			unlink(tmp);
 	}
+	sigprocmask(SIG_SETMASK, &old, NULL);
 	free(b.p);
 }
 
@@ -523,34 +613,98 @@ enum { PR_CONN, PR_WAIT, PR_OK, PR_FAIL, PR_NEWER };
 struct probe
 {
 	struct rhost h;
+	struct sockaddr_in sa;
+	int have;		/* sa is h's address */
 	int fd, st, hello;
+	int keep;		/* PR_OK leaves fd open, in holding what followed */
 	struct rf_state rs;
 	struct sb in;
 	char *list;		/* the 0x11 payload, NUL-terminated */
 	char why[300];		/* PR_FAIL, PR_NEWER: printable */
 };
 
-/* h's address: an IPv4 literal, else the system resolver (a --hosts name;
-** MagicDNS answers a tailnet one). ponytail: getaddrinfo blocks outside
-** the time box; only a name the user typed gets here. */
-static int
-resolve(const struct rhost *h, struct sockaddr_in *sa)
+/* Every probe's address into its sa, by `end` (now_ms): an IPv4 literal at
+** once; the names (--hosts, remote_hosts; MagicDNS answers a tailnet one)
+** in one forked child, since getaddrinfo has no timeout of its own: a slow
+** resolver costs what is left of the time box, and a name not resolved by
+** then fails its probe. */
+static void
+resolve_all(struct probe *v, int n, long long end)
 {
-	struct addrinfo hint, *res;
+	uint32_t got[RM_HOSTS];
+	size_t want = (size_t)n * sizeof *got, have = 0;
+	int i, names = 0, p[2];
+	pid_t pid;
 
-	memset(sa, 0, sizeof *sa);
-	sa->sin_family = AF_INET;
-	sa->sin_port = htons(h->port);
-	if (inet_pton(AF_INET, h->addr, &sa->sin_addr) == 1)
-		return 0;
-	memset(&hint, 0, sizeof hint);
-	hint.ai_family = AF_INET;
-	hint.ai_socktype = SOCK_STREAM;
-	if (getaddrinfo(h->addr, NULL, &hint, &res) != 0)
-		return -1;
-	sa->sin_addr = ((struct sockaddr_in *)(void *)res->ai_addr)->sin_addr;
-	freeaddrinfo(res);
-	return 0;
+	for (i = 0; i < n; i++)
+	{
+		memset(&v[i].sa, 0, sizeof v[i].sa);
+		v[i].sa.sin_family = AF_INET;
+		v[i].sa.sin_port = htons(v[i].h.port);
+		v[i].have = inet_pton(AF_INET, v[i].h.addr,
+		                      &v[i].sa.sin_addr) == 1;
+		names += !v[i].have;
+	}
+	if (!names || pipe_ce(p) < 0)
+		return;
+	if ((pid = fork()) == 0)
+	{
+		struct addrinfo hint, *res;
+
+		child_signals();
+		memset(&hint, 0, sizeof hint);
+		hint.ai_family = AF_INET;
+		hint.ai_socktype = SOCK_STREAM;
+		for (i = 0; i < n; i++)
+		{
+			got[i] = 0;
+			if (!v[i].have &&
+			    getaddrinfo(v[i].h.addr, NULL, &hint, &res) == 0)
+			{
+				got[i] = ((struct sockaddr_in *)(void *)
+				          res->ai_addr)->sin_addr.s_addr;
+				freeaddrinfo(res);
+			}
+		}
+		/* at most 256 bytes: one atomic write */
+		(void)!write(p[1], got, want);
+		_exit(0);
+	}
+	close(p[1]);
+	while (pid > 0 && have < want)
+	{
+		struct pollfd pf;
+		long long left = end - now_ms();
+		ssize_t k;
+
+		pf.fd = p[0];
+		pf.events = POLLIN;
+		pf.revents = 0;
+		if (left <= 0 || (poll(&pf, 1, (int)left) < 0 && errno != EINTR))
+			break;
+		if (!pf.revents)
+			continue;
+		if ((k = read(p[0], (char *)got + have, want - have)) <= 0)
+		{
+			if (k < 0 && errno == EINTR)
+				continue;
+			break;
+		}
+		have += (size_t)k;
+	}
+	if (pid > 0)
+	{
+		kill(pid, SIGKILL);
+		while (waitpid(pid, NULL, 0) < 0 && errno == EINTR)
+			;
+	}
+	close(p[0]);
+	for (i = 0; have == want && i < n; i++)
+		if (!v[i].have && got[i])
+		{
+			v[i].sa.sin_addr.s_addr = got[i];
+			v[i].have = 1;
+		}
 }
 
 static void
@@ -564,14 +718,13 @@ pr_end(struct probe *p, int st, const char *why)
 		logsafe(p->why, sizeof p->why, why);
 }
 
-/* A non-blocking connect to h: the socket, or -1 with errno. */
+/* A non-blocking connect to p's address: the socket, or -1 with errno. */
 static int
-tcp_dial(const struct rhost *h)
+tcp_dial(const struct probe *p)
 {
-	struct sockaddr_in sa;
 	int fd, e;
 
-	if (resolve(h, &sa) < 0)
+	if (!p->have)
 	{
 		errno = EHOSTUNREACH;
 		return -1;
@@ -580,7 +733,7 @@ tcp_dial(const struct rhost *h)
 		return -1;
 	cloexec(fd);
 	nonblock(fd);
-	if (connect(fd, (struct sockaddr *)&sa, sizeof sa) < 0 &&
+	if (connect(fd, (const struct sockaddr *)&p->sa, sizeof p->sa) < 0 &&
 	    errno != EINPROGRESS)
 	{
 		e = errno;
@@ -649,26 +802,23 @@ pr_frame(struct probe *p, const struct rf_frame *f)
 		p->hello = 1;
 	free(t);
 	if (p->st == PR_WAIT && p->hello && p->list)
-		pr_end(p, PR_OK, NULL);
+	{
+		if (p->keep)
+			p->st = PR_OK;
+		else
+			pr_end(p, PR_OK, NULL);
+	}
 }
 
+/* k more bytes from p's server: its frames, as far as they have come. */
 static void
-pr_read(struct probe *p)
+pr_feed(struct probe *p, const unsigned char *buf, size_t k)
 {
-	unsigned char buf[RM_READ];
 	struct rf_frame f;
 	size_t off = 0, used;
-	ssize_t k = read(p->fd, buf, sizeof buf);
 	int r;
 
-	if (k < 0 && (errno == EINTR || errno == EAGAIN))
-		return;
-	if (k <= 0)
-	{
-		pr_end(p, PR_FAIL, k ? strerror(errno) : "closed the connection");
-		return;
-	}
-	sb_add(&p->in, buf, (size_t)k);
+	sb_add(&p->in, buf, k);
 	if (p->in.bad)
 	{
 		pr_end(p, PR_FAIL, "sent too much");
@@ -691,8 +841,23 @@ pr_read(struct probe *p)
 	}
 }
 
-/* Every probe at once, all done within ms. Each ends PR_OK (hello and
-** list), PR_NEWER or PR_FAIL, its socket closed. */
+static void
+pr_read(struct probe *p)
+{
+	unsigned char buf[RM_READ];
+	ssize_t k = read(p->fd, buf, sizeof buf);
+
+	if (k < 0 && (errno == EINTR || errno == EAGAIN))
+		return;
+	if (k <= 0)
+		pr_end(p, PR_FAIL, k ? strerror(errno) : "closed the connection");
+	else
+		pr_feed(p, buf, (size_t)k);
+}
+
+/* Every probe at once, all done within ms, name lookups included. Each
+** ends PR_OK (hello and list), PR_NEWER or PR_FAIL, its socket closed (but
+** a kept PR_OK's). */
 static void
 probe_all(struct probe *v, int n, int ms)
 {
@@ -701,11 +866,12 @@ probe_all(struct probe *v, int n, int ms)
 	struct pollfd pf[RM_HOSTS];
 	int map[RM_HOSTS], i, np;
 
+	resolve_all(v, n, end);
 	for (i = 0; i < n; i++)
 	{
 		v[i].rs.from_server = 1;
 		v[i].fd = -1;
-		if ((v[i].fd = tcp_dial(&v[i].h)) < 0)
+		if ((v[i].fd = tcp_dial(&v[i])) < 0)
 			pr_end(&v[i], PR_FAIL, strerror(errno));
 		else
 			v[i].st = PR_CONN;
@@ -760,8 +926,11 @@ probe_all(struct probe *v, int n, int ms)
 			snprintf(why, sizeof why, "no answer within %d ms", ms);
 			pr_end(&v[i], PR_FAIL, why);
 		}
-		free(v[i].in.p);
-		v[i].in.p = NULL;
+		if (v[i].st != PR_OK || !v[i].keep)
+		{
+			free(v[i].in.p);
+			memset(&v[i].in, 0, sizeof v[i].in);
+		}
 	}
 }
 
@@ -771,28 +940,44 @@ probes_free(struct probe *v, int n)
 	int i;
 
 	for (i = 0; i < n; i++)
+	{
+		if (v[i].fd >= 0)
+			close(v[i].fd);
 		free(v[i].list);
+		free(v[i].in.p);
+	}
 	free(v);
 }
 
-/* Probe every host within ms; the rows of those that answered, then the
-** cached rows (stale) of those that did not, for RM_TTL_S. Saves the
-** cache. loud: a host that speaks a newer protocol is said on stderr. */
+/* Probe every host within ms, the tailscale call and name lookups
+** included; the rows of those that answered, then the cached rows (stale)
+** of those that did not, for RM_TTL_S. Saves the cache, and sets the
+** candidate labels (written to lfd too, then closed, when lfd >= 0). loud:
+** a host that speaks a newer protocol is said on stderr. */
 static void
-rows_now(struct rlist *l, int ms, int loud)
+rows_now(struct rlist *l, int ms, int loud, int lfd)
 {
 	struct rhost hv[RM_HOSTS];
 	struct probe *pv;
 	struct rlist old = {0};
-	long long now = (long long)time(NULL);
-	int n = candidates(hv, RM_HOSTS), i, k;
+	long long now = (long long)time(NULL), end = now_ms() + ms, left;
+	int n = candidates(hv, RM_HOSTS, ms < RM_TS_MS ? ms : RM_TS_MS), i, k;
 
+	if (n >= 0)
+		labels_set(hv, n);
+	if (lfd >= 0)
+	{
+		if (n >= 0)
+			(void)!write(lfd, g_lab, strlen(g_lab));
+		close(lfd);
+	}
 	if (n <= 0 || !(pv = calloc((size_t)n, sizeof *pv)))
 		return;
 	for (i = 0; i < n; i++)
 		pv[i].h = hv[i];
-	probe_all(pv, n, ms);
-	cache_load(&old);
+	left = end - now_ms();
+	probe_all(pv, n, left > 0 ? (int)left : 0);
+	cache_load(&old, now);
 	for (i = 0; i < n; i++)
 	{
 		if (pv[i].st == PR_OK &&
@@ -809,8 +994,9 @@ rows_now(struct rlist *l, int ms, int loud)
 		{
 			struct dch_rrow *r;
 
+			/* 0 < at <= now + 60: no overflow */
 			if (strcmp(old.v[k].host, hv[i].label) ||
-			    now - old.v[k].at > RM_TTL_S || !(r = rl_new(l)))
+			    old.v[k].at < now - RM_TTL_S || !(r = rl_new(l)))
 				continue;
 			*r = old.v[k];
 			r->stale = 1;
@@ -824,25 +1010,64 @@ rows_now(struct rlist *l, int ms, int loud)
 
 static pid_t bg_pid = -1;
 static long long bg_at = -RM_EVERY_MS;
+static int lab_fd = -1;		/* the bg child's labels, read end */
+static char lab_in[sizeof g_lab];
+static size_t lab_n;
+
+/* The bg child's labels, as far as they have come; at EOF they are the
+** candidates (none sent: it could not tell, the old ones stand). */
+static void
+labels_poll(void)
+{
+	ssize_t k;
+
+	while (lab_fd >= 0 && lab_n < sizeof lab_in - 1)
+	{
+		if ((k = read(lab_fd, lab_in + lab_n, sizeof lab_in - 1 - lab_n))
+		    > 0)
+		{
+			lab_n += (size_t)k;
+			continue;
+		}
+		if (k < 0 && errno == EINTR)
+			continue;
+		if (k < 0 && errno == EAGAIN)
+			return;
+		break;
+	}
+	if (lab_fd < 0)
+		return;
+	if (lab_n && lab_in[0] == '\n' && lab_in[lab_n - 1] == '\n')
+	{
+		memcpy(g_lab, lab_in, lab_n);
+		g_lab[lab_n] = '\0';
+		g_lab_ok = 1;
+	}
+	close(lab_fd);
+	lab_fd = -1;
+	lab_n = 0;
+}
 
 int
 dch_remote_rows(struct dch_rrow **out, int now)
 {
 	struct rlist l = {0};
 	long long t = (long long)time(NULL);
-	int i, k;
+	int i, k, lp[2];
 
 	*out = NULL;
 	if (!remote_on())
 		return 0;
 	if (now)
-		rows_now(&l, RM_BOX_MS, 1);
+		rows_now(&l, RM_BOX_MS, 1, -1);
 	else
 	{
 		/* the picker: the cache, re-probed behind it */
 		if (bg_pid > 0 && waitpid(bg_pid, NULL, WNOHANG) != 0)
 			bg_pid = -1;
-		if (bg_pid < 0 && now_ms() - bg_at >= RM_EVERY_MS)
+		labels_poll();
+		if (bg_pid < 0 && lab_fd < 0 && now_ms() - bg_at >= RM_EVERY_MS &&
+		    pipe_ce(lp) == 0)
 		{
 			bg_at = now_ms();
 			if ((bg_pid = fork()) == 0)
@@ -850,26 +1075,42 @@ dch_remote_rows(struct dch_rrow **out, int now)
 				struct rlist bl = {0};
 				int nul = open("/dev/null", O_RDWR);
 
-				signal(SIGINT, SIG_DFL);
-				signal(SIGTERM, SIG_DFL);
-				signal(SIGHUP, SIG_DFL);
-				signal(SIGWINCH, SIG_DFL);
+				child_signals();
+				close(lp[0]);
 				if (nul >= 0)
 				{
 					dup2(nul, 0);
 					dup2(nul, 1);
 					dup2(nul, 2);
 				}
-				rows_now(&bl, RM_BG_MS, 0);
+				rows_now(&bl, RM_BG_MS, 0, lp[1]);
 				_exit(0);
 			}
+			close(lp[1]);
+			if (bg_pid < 0)
+				close(lp[0]);
+			else
+			{
+				lab_fd = lp[0];
+				nonblock(lab_fd);
+			}
 		}
-		cache_load(&l);
+		/* hosts the user named are known at once; discovery's come
+		** from the bg child */
+		if (!g_lab_ok)
+		{
+			struct rhost hv[RM_HOSTS];
+			int n = named_hosts(hv, RM_HOSTS, 0);
+
+			if (n >= 0)
+				labels_set(hv, n);
+		}
+		cache_load(&l, t);
 		for (i = k = 0; i < l.n; i++)
-			if (t - l.v[i].at <= RM_TTL_S)
+			if (label_in(l.v[i].host) && l.v[i].at >= t - RM_TTL_S)
 			{
 				l.v[k] = l.v[i];
-				l.v[k++].stale = t - l.v[i].at > RM_FRESH_S;
+				l.v[k++].stale = l.v[i].at < t - RM_FRESH_S;
 			}
 		l.n = k;
 	}
@@ -877,6 +1118,24 @@ dch_remote_rows(struct dch_rrow **out, int now)
 		qsort(l.v, (size_t)l.n, sizeof *l.v, row_cmp);
 	*out = l.v;
 	return l.n;
+}
+
+/* The picker is done: its bg child goes (SIGTERM waits out a cache write)
+** and is reaped, so none outlives it as a zombie. */
+void
+dch_remote_stop(void)
+{
+	if (bg_pid > 0)
+	{
+		kill(bg_pid, SIGTERM);
+		while (waitpid(bg_pid, NULL, 0) < 0 && errno == EINTR)
+			;
+	}
+	bg_pid = -1;
+	if (lab_fd >= 0)
+		close(lab_fd);
+	lab_fd = -1;
+	lab_n = 0;
 }
 
 void
@@ -974,24 +1233,72 @@ sb_drop(struct sb *b, size_t *off)
 	}
 }
 
-/* The relay child: the attach client's packets on sp as frames on tcp,
-** 0x10 back raw. 0 when the session ended (0x12) or the attach side
-** closed (a detach: the TCP close is all, nothing is killed); else 2, with
-** why the connection ended written to `why`. */
+/* The server's frames in tin as the relay takes them: 0x10 onto to_sp,
+** 0x12 sets *exited, the first 0x13's message into msg[cap] (escaped, kept
+** whatever ends the link after it). What it parsed leaves tin. -1 when the
+** link must end: a frame over the limit. Pure. */
 static int
-relay(int tcp, int sp, int why, const char *label)
+relay_in(struct rf_state *rs, struct sb *tin, struct sb *to_sp, int *exited,
+         char *msg, size_t cap)
 {
-	struct sb tin = {0}, to_tcp = {0}, to_sp = {0};
-	struct rf_state rs = { 0, 0, 1 };
+	struct rf_frame f;
+	size_t used = 0, off = 0;
+	int r, rc = 0;
+
+	while (tin->n && !tin->bad &&
+	       (r = rf_parse(rs, (const unsigned char *)tin->p + off,
+	                     tin->n - off, (size_t)-1, &f, &used)) != RF_NEED)
+	{
+		off += used;
+		if (r == RF_CLOSE)
+		{
+			snprintf(msg, cap, "it sent a frame over the size limit");
+			rc = -1;
+			break;
+		}
+		if (f.type == 0x10 && f.len)
+			sb_add(to_sp, f.data, f.len);
+		else if (f.type == 0x12 && r == RF_FRAME)
+			*exited = 1;
+		else if (f.type == 0x13 && r == RF_FRAME && !msg[0])
+		{
+			char m[300];
+
+			err_text(f.data, f.len, m, sizeof m);
+			snprintf(msg, cap, "it says: %s", m);
+		}
+	}
+	if (off)
+	{
+		memmove(tin->p, tin->p + off, tin->n - off);
+		tin->n -= off;
+	}
+	return rc;
+}
+
+/* The relay child: the attach client's packets on sp as frames on tcp,
+** 0x10 back raw; tin and rs hold what followed the list on tcp. 0 when the
+** session ended (0x12) or the attach side closed (a detach: the TCP close
+** is all, nothing is killed); else 2, with why the connection ended
+** written to `why`. */
+static int
+relay(int tcp, int sp, int why, const char *label, struct sb tin,
+      struct rf_state rs)
+{
+	struct sb to_tcp = {0}, to_sp = {0};
 	unsigned char pin[PKT_HDR + PKT_MAX], buf[RM_READ];
 	size_t pn = 0, toff = 0, soff = 0;
 	int redraws = 0, eof = 0, exited = 0;
 	long long drain = 0;
 	char msg[400] = "";
 
-	signal(SIGPIPE, SIG_IGN);
 	nonblock(tcp);
 	nonblock(sp);
+	if (relay_in(&rs, &tin, &to_sp, &exited, msg, sizeof msg) < 0)
+	{
+		eof = 1;
+		drain = now_ms() + 2000;
+	}
 	for (;;)
 	{
 		size_t qt = to_tcp.n - toff, qs = to_sp.n - soff;
@@ -1055,7 +1362,9 @@ relay(int tcp, int sp, int why, const char *label)
 				toff += (size_t)k;
 			else if (k < 0 && errno != EINTR && errno != EAGAIN)
 			{
-				snprintf(msg, sizeof msg, "%s", strerror(errno));
+				if (!msg[0])
+					snprintf(msg, sizeof msg, "%s",
+					         strerror(errno));
 				eof = 1;
 				drain = now_ms() + 2000;
 			}
@@ -1064,56 +1373,28 @@ relay(int tcp, int sp, int why, const char *label)
 		/* from the server */
 		if (!eof && pf[0].revents & (POLLIN | POLLHUP | POLLERR))
 		{
-			struct rf_frame f;
-			size_t used = 0, off = 0;
-			int r;
-
 			k = read(tcp, buf, sizeof buf);
 			if (k < 0 && (errno == EINTR || errno == EAGAIN))
 				continue;
 			if (k <= 0)
 			{
-				if (k < 0)
+				/* a 0x13 then a reset: the 0x13 says why */
+				if (k < 0 && !msg[0])
 					snprintf(msg, sizeof msg, "%s",
 					         strerror(errno));
 				eof = 1;
 			}
 			else
-				sb_add(&tin, buf, (size_t)k);
-			while (!eof && !tin.bad &&
-			       (r = rf_parse(&rs, (const unsigned char *)tin.p +
-			                     off, tin.n - off, (size_t)-1, &f,
-			                     &used)) != RF_NEED)
 			{
-				off += used;
-				if (r == RF_CLOSE)
-				{
-					snprintf(msg, sizeof msg, "it sent a frame "
-					         "over the size limit");
+				sb_add(&tin, buf, (size_t)k);
+				if (relay_in(&rs, &tin, &to_sp, &exited, msg,
+				             sizeof msg) < 0)
 					eof = 1;
-				}
-				else if (f.type == 0x10 && f.len)
-					sb_add(&to_sp, f.data, f.len);
-				else if (f.type == 0x12 && r == RF_FRAME)
-					exited = 1;
-				else if (f.type == 0x13 && r == RF_FRAME &&
-				         !msg[0])
-				{
-					char m[300];
-
-					err_text(f.data, f.len, m, sizeof m);
-					snprintf(msg, sizeof msg, "it says: %s", m);
-				}
 			}
 			if (tin.bad || to_sp.bad || to_tcp.bad)
 			{
 				snprintf(msg, sizeof msg, "out of memory");
 				eof = 1;
-			}
-			if (off)
-			{
-				memmove(tin.p, tin.p + off, tin.n - off);
-				tin.n -= off;
 			}
 			if (eof)
 				drain = now_ms() + 2000;
@@ -1160,34 +1441,6 @@ remote_lost(void)
 	return msg;
 }
 
-/* A connect with a deadline: the socket, or -1 with errno. */
-static int
-tcp_connect(const struct rhost *h, int ms)
-{
-	struct pollfd pf;
-	socklen_t l = sizeof(int);
-	int fd = tcp_dial(h), e = 0;
-
-	if (fd < 0)
-		return -1;
-	pf.fd = fd;
-	pf.events = POLLOUT;
-	pf.revents = 0;
-	while (poll(&pf, 1, ms) < 0 && errno == EINTR)
-		;
-	if (!pf.revents)
-		e = ETIMEDOUT;
-	else if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &e, &l) < 0)
-		e = errno;
-	if (e)
-	{
-		close(fd);
-		errno = e;
-		return -1;
-	}
-	return fd;
-}
-
 /* TCP keepalive, so a link that died silently ends the attach in about
 ** half a minute rather than never. */
 static void
@@ -1213,19 +1466,41 @@ keepalive(int fd)
 	(void)cnt;
 }
 
-/* Is name listed on h? 1, or 0 with why said on stderr. A 0x01 for a name
-** it does not have would start one there (Prosper's 0x01 creates). */
+/* For a host discovery found: does `tailscale whois` on its address name
+** this host's own Tailscale user, untagged? Fails closed. */
 static int
-listed(const struct rhost *h, const char *name, const char *sh,
-       const char *sn)
+peer_is_mine(const struct rhost *h)
+{
+	char ip[sizeof h->addr], node[NODE_ID_MAX], login[256], *out;
+	long long uid;
+	int tagged, ok;
+
+	copy_str(ip, sizeof ip, h->addr);
+	if (g_me < 0 || ts_run("whois", "--json", ip, NULL, &out, 256 << 10) < 0)
+		return 0;
+	ok = whois_user(out, &uid, node, login, sizeof login, &tagged) == 0 &&
+	     uid == g_me && !tagged;
+	free(out);
+	return ok;
+}
+
+/* A connection to h that has listed name: its socket, with what followed
+** the list in *rest and the parser's state in *rs, for the 0x01 to follow
+** on it; or -1, why said on stderr. Prosper's 0x01 creates a session it
+** does not have, so the check and the attach share the connection: no
+** session can end between them unseen. */
+static int
+open_listed(const struct rhost *h, const char *name, const char *sh,
+            const char *sn, struct sb *rest, struct rf_state *rs)
 {
 	struct probe *p = calloc(1, sizeof *p);
 	struct rlist rows = {0};
-	int k, found = 0;
+	int k, found = 0, fd = -1;
 
 	if (!p)
-		return 0;
+		return -1;
 	p->h = *h;
+	p->keep = 1;
 	probe_all(p, 1, RM_ATTACH_MS);
 	if (p->st == PR_OK && rows_doc(p->list, h->label, 0, &rows) == 0)
 		for (k = 0; k < rows.n && !found; k++)
@@ -1234,9 +1509,17 @@ listed(const struct rhost *h, const char *name, const char *sh,
 		fprintf(stderr, "dch: %s: %s\n", sh, p->why);
 	else if (!found)
 		fprintf(stderr, "dch: no session %s on %s\n", sn, sh);
+	else
+	{
+		fd = p->fd;
+		p->fd = -1;
+		*rest = p->in;
+		memset(&p->in, 0, sizeof p->in);
+		*rs = p->rs;
+	}
 	free(rows.v);
 	probes_free(p, 1);
-	return found;
+	return fd;
 }
 
 int
@@ -1244,9 +1527,10 @@ dch_remote_attach(const char *host, const char *name)
 {
 	struct rhost hv[RM_HOSTS];
 	struct winsize ws;
-	struct sb out = {0};
+	struct sb out = {0}, rest = {0};
+	struct rf_state rs;
 	char sh[300], sn[1100];
-	int n = candidates(hv, RM_HOSTS), i, fd, sp[2], wp[2], rc;
+	int n = candidates(hv, RM_HOSTS, RM_TS_MS), i, fd, sp[2], wp[2], rc;
 
 	logsafe(sh, sizeof sh, host);
 	logsafe(sn, sizeof sn, name);
@@ -1261,16 +1545,20 @@ dch_remote_attach(const char *host, const char *name)
 		          "online tailnet peers of yours");
 		return 1;
 	}
-	if (!listed(&hv[i], name, sh, sn))
+	/* before a byte goes to it: a discovered peer is the user's own */
+	if (hv[i].found && !peer_is_mine(&hv[i]))
+	{
+		fprintf(stderr, "dch: %s: tailscale whois does not show it as "
+		        "your own untagged machine; not connecting\n", sh);
+		return 1;
+	}
+	if ((fd = open_listed(&hv[i], name, sh, sn, &rest, &rs)) < 0)
 		return 1;
 	if (!isatty(0) || tcgetattr(0, &orig_term) < 0)
 	{
 		fprintf(stderr, "dch: attaching requires a terminal\n");
-		return 1;
-	}
-	if ((fd = tcp_connect(&hv[i], RM_ATTACH_MS)) < 0)
-	{
-		fprintf(stderr, "dch: %s: %s\n", sh, strerror(errno));
+		close(fd);
+		free(rest.p);
 		return 1;
 	}
 	keepalive(fd);
@@ -1278,12 +1566,14 @@ dch_remote_attach(const char *host, const char *name)
 	ioctl(0, TIOCGWINSZ, &ws);
 	put_size(&out, 0x01, name, &ws);
 	sp[0] = sp[1] = wp[0] = wp[1] = -1;
+	/* a few dozen bytes into an idle socket: sent whole */
 	if (out.bad || send(fd, out.p, out.n, MSG_NOSIGNAL) != (ssize_t)out.n ||
 	    socketpair(AF_UNIX, SOCK_STREAM, 0, sp) < 0 || pipe_ce(wp) < 0 ||
 	    (relay_pid = fork()) < 0)
 	{
 		fprintf(stderr, "dch: %s: %s\n", sh, strerror(errno));
 		free(out.p);
+		free(rest.p);
 		close(fd);
 		for (i = 0; i < 2; i++)
 		{
@@ -1297,10 +1587,12 @@ dch_remote_attach(const char *host, const char *name)
 	free(out.p);
 	if (relay_pid == 0)
 	{
+		child_signals();
 		close(sp[0]);
 		close(wp[0]);
-		_exit(relay(fd, sp[1], wp[1], hv[i].label));
+		_exit(relay(fd, sp[1], wp[1], hv[i].label, rest, rs));
 	}
+	free(rest.p);
 	close(fd);
 	close(sp[1]);
 	close(wp[1]);

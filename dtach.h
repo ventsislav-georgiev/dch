@@ -319,6 +319,7 @@ struct dch_rrow
 };
 int dch_remote_set_hosts(const char *list);
 int dch_remote_rows(struct dch_rrow **out, int now);
+void dch_remote_stop(void);
 int dch_remote_attach(const char *host, const char *name);
 void dch_remote_esc(char *out, size_t cap, const char *s);
 void client_pidfile_unlink(void);
