@@ -1332,6 +1332,7 @@ make windows-check                  # the same under -Werror, when that compiler
 ```
 
 ```bat
+dch                                 :: the picker: the remote rows, Enter attaches
 dch -ls                             :: remote rows: on Windows -ls implies --remote
 dch -lj
 dch --ls-json
@@ -1352,12 +1353,16 @@ not 300, because starting `tailscale.exe` costs more on Windows.
 An attach puts the console in VT mode (Windows Terminal, or conhost on
 Windows 10 or later), passes keys through raw, follows the window size, and
 restores the console on every exit, Ctrl-C and Ctrl-Break included. Ctrl-\
-always detaches: with no picker there is nothing to switch to, so
-`detach_key` is not read. A lost
+detaches, and twice quickly switches to the picker, as on macOS and Linux
+(`DCH_DOUBLE_TAP_MS`, `detach_key`). A lost
 connection restores the console, says why, and exits 1.
 
-Not yet on Windows: the picker and its background re-probe, switching
-sessions, and the kitty-keyboard form of the detach key.
+`dch` alone is the picker, `dch -l`'s, with the remote rows only: arrows or
+`j`/`k` move, Enter attaches, `q` or Esc quits; it redraws on a resize and
+re-probes the hosts in the background. No History or Sidekicks tab, no row
+actions, no settings view.
+
+Not yet on Windows: the kitty-keyboard form of the detach key.
 
 ## Native Claude and Codex messages
 

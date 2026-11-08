@@ -354,11 +354,11 @@ named_hosts(struct rhost *v, int cap, int loud)
 	return n < 0 ? 0 : n;
 }
 
-/* The hosts to dial: --hosts, else remote_hosts, else discovery, its
-** `tailscale status` given ts_ms. How many, or -1 when discovery could not
-** tell (tailscale failed or ran out of time). */
+/* The hosts to dial: --hosts, else remote_hosts (a bad entry said when
+** loud), else discovery, its `tailscale status` given ts_ms. How many, or
+** -1 when discovery could not tell (tailscale failed or ran out of time). */
 static int
-candidates(struct rhost *v, int cap, int ts_ms)
+candidates(struct rhost *v, int cap, int ts_ms, int loud)
 {
 	char *out = NULL;
 	char *av[] = { NULL, "status", "--json", NULL };
@@ -366,7 +366,7 @@ candidates(struct rhost *v, int cap, int ts_ms)
 
 	if (!remote_on())
 		return 0;
-	if ((n = named_hosts(v, cap, 1)) >= 0)
+	if ((n = named_hosts(v, cap, loud)) >= 0)
 		return n;
 	if (!g_ts[0])
 		ts_find();
@@ -1019,9 +1019,10 @@ probe_all(struct probe *v, int n, int ms)
 				pf[np].revents = 0;
 				map[np++] = i;
 			}
-		if (!np || left <= 0)
+		/* g_stop: the Windows picker's probe thread is cut short */
+		if (!np || left <= 0 || g_stop)
 			break;
-		if (poll(pf, (nfds_t)np, (int)left) < 0)
+		if (poll(pf, (nfds_t)np, left > 100 ? 100 : (int)left) < 0)
 		{
 			if (sock_err() == SE_INTR)
 				continue;
@@ -1091,7 +1092,8 @@ rows_now(struct rlist *l, int ms, int loud, int lfd)
 	struct probe *pv;
 	struct rlist old = {0};
 	long long now = (long long)time(NULL), end = now_ms() + ms, left;
-	int n = candidates(hv, RM_HOSTS, ms < RM_TS_MS ? ms : RM_TS_MS), i, k;
+	int n = candidates(hv, RM_HOSTS, ms < RM_TS_MS ? ms : RM_TS_MS, loud);
+	int i, k;
 
 	if (n >= 0)
 		labels_set(hv, n);
@@ -1138,7 +1140,84 @@ rows_now(struct rlist *l, int ms, int loud, int lfd)
 	cache_save(l);
 }
 
-#ifndef _WIN32	/* the picker's background probe: none on Windows yet (#090) */
+#ifdef _WIN32
+/* The picker's background probe on Windows (#090): a thread, where POSIX
+** forks a child. While it runs it owns what rows_now touches (g_lab, g_me,
+** g_ts, the cache's writes, bg_new); the picker's thread takes its rows
+** once it has ended, and touches none of that before: it shows no cached
+** rows by label, so never reads g_lab. */
+static HANDLE bg_th;
+static struct rlist bg_new, bg_last;
+static int bg_got;		/* bg_last is a probe's */
+static long long bg_at = -RM_EVERY_MS;
+
+static DWORD WINAPI
+bg_run(void *arg)
+{
+	(void)arg;
+	rows_now(&bg_new, RM_BG_MS, 0, -1);
+	return 0;
+}
+
+/* The probe thread, cut short (g_stop: rf_run and probe_all give up at
+** once) and joined; its rows dropped. */
+static void
+bg_stop(void)
+{
+	if (!bg_th)
+		return;
+	g_stop = 1;
+	WaitForSingleObject(bg_th, INFINITE);
+	CloseHandle(bg_th);
+	bg_th = NULL;
+	g_stop = 0;
+	free(bg_new.v);
+	memset(&bg_new, 0, sizeof bg_new);
+}
+
+/* The picker's rows into l: the last probe's (a silent host's stale), re-
+** probed behind it every RM_EVERY_MS; until one has ended, the cache's
+** within RM_TTL_S, stale past RM_FRESH_S, whatever host they are of.
+** ponytail: a name lookup (--hosts with names) is not cut short, so the
+** join can take up to RM_BG_MS; literal addresses (discovery) do not. */
+static void
+bg_rows(struct rlist *l, long long t)
+{
+	int i, k;
+
+	if (bg_th && WaitForSingleObject(bg_th, 0) == WAIT_OBJECT_0)
+	{
+		CloseHandle(bg_th);
+		bg_th = NULL;
+		free(bg_last.v);
+		bg_last = bg_new;
+		memset(&bg_new, 0, sizeof bg_new);
+		bg_got = 1;
+	}
+	if (!bg_th && now_ms() - bg_at >= RM_EVERY_MS)
+	{
+		bg_at = now_ms();
+		bg_th = CreateThread(NULL, 0, bg_run, NULL, 0, NULL);
+	}
+	if (bg_got)
+	{
+		if (bg_last.n && (l->v = malloc((size_t)bg_last.n * sizeof *l->v)))
+		{
+			memcpy(l->v, bg_last.v, (size_t)bg_last.n * sizeof *l->v);
+			l->n = l->cap = bg_last.n;
+		}
+		return;
+	}
+	cache_load(l, t);
+	for (i = k = 0; i < l->n; i++)
+		if (l->v[i].at >= t - RM_TTL_S)
+		{
+			l->v[k] = l->v[i];
+			l->v[k++].stale = l->v[i].at < t - RM_FRESH_S;
+		}
+	l->n = k;
+}
+#else
 static pid_t bg_pid = -1;
 static long long bg_at = -RM_EVERY_MS;
 static int lab_fd = -1;		/* the bg child's labels, read end */
@@ -1181,13 +1260,13 @@ labels_poll(void)
 #endif
 
 /* The rows: now, probed in the foreground (--ls); else the picker's, from
-** the cache, re-probed behind it (on Windows none: the picker is #090). */
+** the cache, re-probed behind it (on Windows bg_rows'). */
 int
 dch_remote_rows(struct dch_rrow **out, int now)
 {
 	struct rlist l = {0};
-#ifndef _WIN32
 	long long t = (long long)time(NULL);
+#ifndef _WIN32
 	int i, k, lp[2];
 #endif
 
@@ -1200,10 +1279,16 @@ dch_remote_rows(struct dch_rrow **out, int now)
 		const char *e = getenv("DCH_REMOTE_BOX_MS");
 		long box = e ? atol(e) : 0;
 
+#ifdef _WIN32
+		bg_stop();	/* one probe at a time: they share rows_now's state */
+#endif
 		rows_now(&l, box > 0 && box <= 60000 ? (int)box : RM_BOX_MS, 1,
 		         -1);
 	}
-#ifndef _WIN32
+#ifdef _WIN32
+	else
+		bg_rows(&l, t);
+#else
 	else
 	{
 		/* the picker: the cache, re-probed behind it */
@@ -1265,12 +1350,18 @@ dch_remote_rows(struct dch_rrow **out, int now)
 	return l.n;
 }
 
-#ifndef _WIN32
 /* The picker is done: its bg child goes (SIGTERM waits out a cache write)
-** and is reaped, so none outlives it as a zombie. */
+** and is reaped, so none outlives it as a zombie; on Windows its thread is
+** joined, before an attach runs rows_now's discovery itself. */
 void
 dch_remote_stop(void)
 {
+#ifdef _WIN32
+	bg_stop();
+	free(bg_last.v);
+	memset(&bg_last, 0, sizeof bg_last);
+	bg_got = 0;
+#else
 	if (bg_pid > 0)
 	{
 		kill(bg_pid, SIGTERM);
@@ -1282,8 +1373,8 @@ dch_remote_stop(void)
 		close(lab_fd);
 	lab_fd = -1;
 	lab_n = 0;
-}
 #endif
+}
 
 void
 dch_remote_esc(char *out, size_t cap, const char *s)
@@ -1679,14 +1770,30 @@ open_listed(const struct rhost *h, const char *name, const char *sh,
 }
 
 #ifdef _WIN32
+/* attach.c's double-press window, in ms: DCH_DOUBLE_TAP_MS (0 to 5000; 0:
+** none, one press acts at once), else 300. */
+static long
+tap_ms(void)
+{
+	const char *e = getenv("DCH_DOUBLE_TAP_MS");
+	char *tail;
+	long v;
+
+	if (e && *e && (v = strtol(e, &tail, 10), !*tail) && v >= 0 && v <= 5000)
+		return v;
+	return 300;
+}
+
 /* The Windows attach (#077): no attach.c and no relay child, one loop. It
 ** waits on the socket's event and the console's input: keys go out as
 ** 0x10, a new window size as 0x05, the server's 0x10 to the console raw.
-** The detach key (Ctrl-\, 0x1c, whatever detach_key says: there is no
-** picker to switch to yet) ends it here: the TCP close is the detach, the
-** session lives on. 0 for a detach or a session that ended (0x12); 1 for a
-** lost link, said once the console is restored (win/plat.c restores it on
-** every other way out too). */
+** The detach key (Ctrl-\, 0x1c) ends it here as attach.c's does: one
+** press detaches, two within tap_ms switch to the picker (#090), or the
+** other way round with detach_key = switch; none of a burst with a press
+** in it goes. The TCP close is the detach, the session lives on. 0 for a
+** detach or a session that ended (0x12); ATTACH_SWITCH for the picker; 1
+** for a lost link, said once the console is restored (win/plat.c restores
+** it on every other way out too). */
 static int
 win_relay(int fd, const char *label, const char *name, struct sb tin,
           struct rf_state rs)
@@ -1695,9 +1802,13 @@ win_relay(int fd, const char *label, const char *name, struct sb tin,
 	struct winsize ws, now;
 	unsigned char buf[RM_READ], kb[4096];
 	size_t toff = 0;
-	int exited = 0, eof = 0, gone = 0, k, r;
-	char msg[400] = "", safe[500];
+	int exited = 0, eof = 0, gone = 0, sw = 0, hits, k, r;
+	char msg[400] = "", safe[500], dk[16];
 	WSAEVENT ev = WSA_INVALID_EVENT;
+	long dbl = tap_ms();
+	long long tap = 0;	/* a lone press stands at this now_ms; 0 none */
+	int swap = dch_config_get("detach_key", dk, sizeof dk) &&
+	           !strcmp(dk, "switch");
 
 	if ((r = con_raw()) < 0)
 	{
@@ -1722,6 +1833,7 @@ win_relay(int fd, const char *label, const char *name, struct sb tin,
 		HANDLE hv[2];
 		WSANETWORKEVENTS ne;
 		DWORD nh = 1, w;
+		long long left;
 
 		/* to the console, whole, before more is read */
 		if (to_con.n && con_write(to_con.p, to_con.n) < 0)
@@ -1756,8 +1868,11 @@ win_relay(int fd, const char *label, const char *name, struct sb tin,
 		hv[0] = ev;
 		if (to_tcp.n - toff < RM_HIGH)
 			hv[nh++] = con_in();
-		/* a quarter second: a window resize is noticed by polling */
-		w = WaitForMultipleObjects(nh, hv, FALSE, 250);
+		/* a quarter second: a window resize is noticed by polling; a
+		** lone detach press, at its time */
+		left = tap ? tap - now_ms() : 250;
+		w = WaitForMultipleObjects(nh, hv, FALSE, left <= 0 ? 0 : left >
+		                           250 ? 250 : (DWORD)left);
 		if (w == WAIT_FAILED)
 		{
 			snprintf(msg, sizeof msg, "wait: error %lu",
@@ -1770,14 +1885,36 @@ win_relay(int fd, const char *label, const char *name, struct sb tin,
 			ws = now;
 			put_size(&to_tcp, 0x05, NULL, &ws);
 		}
-		if (nh == 2 && w == WAIT_OBJECT_0 + 1)
+		if (tap && now_ms() >= tap)
 		{
-			/* the detach key anywhere in the burst: none of it goes */
+			gone = 1;	/* one press, the window over */
+			sw = swap;
+		}
+		else if (nh == 2 && w == WAIT_OBJECT_0 + 1)
+		{
+			const unsigned char *c = kb;
+
 			if ((k = con_keys(kb, sizeof kb)) < 0)
+				gone = 1;	/* the console went */
+			for (hits = 0; k > 0 && hits < 2 &&
+			     (c = memchr(c, 0x1c, (size_t)(kb + k - c))); c++)
+				hits++;
+			/* two presses: in one burst, or in the first one's window.
+			** One with no window, or anything else in its window: that
+			** press stands alone. */
+			if (hits >= 2 || (hits && tap))
+			{
 				gone = 1;
-			else if (k && memchr(kb, 0x1c, (size_t)k))
+				sw = !swap;
+			}
+			else if ((hits && !dbl) || (k > 0 && tap))
+			{
 				gone = 1;
-			else if (k)
+				sw = swap;
+			}
+			else if (hits)
+				tap = now_ms() + dbl;
+			else if (k > 0)
 				put_frame(&to_tcp, 0x10, kb, (size_t)k);
 		}
 		if (gone || WSAEnumNetworkEvents((SOCKET)fd, ev, &ne) ||
@@ -1818,7 +1955,7 @@ win_relay(int fd, const char *label, const char *name, struct sb tin,
 	free(to_con.p);
 	free(to_tcp.p);
 	if (exited || gone)
-		return 0;
+		return sw && !exited ? ATTACH_SWITCH : 0;
 	logsafe(safe, sizeof safe, msg);
 	fprintf(stderr, "dch: lost the connection to %s%s%s\n", label,
 	        safe[0] ? ": " : "", safe);
@@ -1835,7 +1972,7 @@ attach_open(const char *host, const char *name, struct rhost *h,
 {
 	struct rhost hv[RM_HOSTS];
 	char sh[300], sn[1100];
-	int n = candidates(hv, RM_HOSTS, RM_TS_MS), i;
+	int n = candidates(hv, RM_HOSTS, RM_TS_MS, 1), i;
 
 	logsafe(sh, sizeof sh, host);
 	logsafe(sn, sizeof sn, name);

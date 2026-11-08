@@ -8,6 +8,7 @@
 ** config at %APPDATA%); DCH_CONFIG or a UTF-8 manifest if one ever matters.
 */
 #include "win/win.h"
+#include "picker.h"
 #include "rframe.h"
 
 #include <ctype.h>
@@ -398,14 +399,19 @@ on_ctrl(DWORD ev)
 int
 con_raw(void)
 {
+	static int hooked;
 	DWORD m;
 
 	c_in = GetStdHandle(STD_INPUT_HANDLE);
 	c_out = GetStdHandle(STD_OUTPUT_HANDLE);
 	if (!GetConsoleMode(c_in, &in_mode) || !GetConsoleMode(c_out, &out_mode))
 		return -1;
-	SetConsoleCtrlHandler(on_ctrl, TRUE);
-	atexit(con_restore);
+	/* once: the picker and each attach after it make it raw again */
+	if (!hooked++)
+	{
+		SetConsoleCtrlHandler(on_ctrl, TRUE);
+		atexit(con_restore);
+	}
 	InterlockedExchange(&c_raw, 1);
 	m = (in_mode & ~(DWORD)(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT |
 	                        ENABLE_PROCESSED_INPUT | ENABLE_QUICK_EDIT_MODE))
@@ -518,4 +524,72 @@ con_write(const void *p, size_t n)
 		n -= w;
 	}
 	return 0;
+}
+
+/* ---- the picker's terminal (picker.h; fd is unused here) ------------- */
+
+static unsigned char pk_kb[4096];	/* con_keys' bytes, not yet read */
+static int pk_kn, pk_ko, pk_gone;
+static struct winsize pk_ws;	/* the size last seen */
+
+/* Input within ms: con_keys' bytes are the picker's keys (VT input mode
+** sends every key it knows as a POSIX terminal would). A resize, seen by
+** polling (a window that resizes over a taller buffer sends no record),
+** cuts it short as SIGWINCH does on POSIX; so does a console gone, as
+** input, for pk_rd to end. */
+int
+pk_wait(int fd, long ms)
+{
+	long long end = now_ms() + ms, left;
+	struct winsize ws;
+
+	(void)fd;
+	for (;;)
+	{
+		if (pk_ko < pk_kn || pk_gone)
+			return 1;
+		con_size(&ws);
+		if (ws.ws_col != pk_ws.ws_col || ws.ws_row != pk_ws.ws_row)
+		{
+			pk_ws = ws;
+			pk_winch = 1;
+			return -1;
+		}
+		if ((left = end - now_ms()) <= 0)
+			return 0;
+		if (WaitForSingleObject(con_in(), left > 250 ? 250 : (DWORD)left)
+		    == WAIT_OBJECT_0)
+		{
+			pk_ko = 0;
+			if ((pk_kn = con_keys(pk_kb, sizeof pk_kb)) < 0)
+				pk_gone = 1;
+		}
+	}
+}
+
+int
+pk_rd(int fd, unsigned char *c)
+{
+	while (pk_ko >= pk_kn && !pk_gone)
+		(void)pk_wait(fd, 1000);
+	if (pk_ko >= pk_kn)
+		return -1;
+	*c = pk_kb[pk_ko++];
+	return 0;
+}
+
+void
+pk_size(int fd, int *cols, int *rows)
+{
+	(void)fd;
+	con_size(&pk_ws);
+	*cols = pk_ws.ws_col;
+	*rows = pk_ws.ws_row;
+}
+
+void
+pk_write(int fd, const void *b, size_t n)
+{
+	(void)fd;
+	(void)con_write(b, n);
 }

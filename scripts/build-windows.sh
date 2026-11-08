@@ -16,5 +16,5 @@ ver=$(sed -n 's/^AC_INIT(dch, *\([^,]*\),.*/\1/p' configure.ac)
 # shellcheck disable=SC2086 # CC may carry its own flags
 $CC -std=gnu11 -O2 -W -Wall -D__USE_MINGW_ANSI_STDIO=1 \
 	-DDCH_VERSION="\"$ver\"" -I. "$@" -o "$out" \
-	win/main.c win/plat.c remote.c rframe.c json.c \
+	win/main.c win/plat.c picker.c remote.c rframe.c json.c \
 	-lws2_32 -lshell32 -static

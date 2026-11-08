@@ -3,9 +3,10 @@
 ** sessions of the user's other machines and attaches to one; it hosts none,
 ** so every row and every attach is remote, and -ls implies --remote. The
 ** hosts, discovery, the probes and the attach's checks are remote.c's, as
-** on POSIX. The picker (dch -l, and dch alone) is #090.
+** on POSIX. dch alone is the picker (#090), picker.c's, on the console.
 */
 #include "win/win.h"
+#include "picker.h"
 #include "rframe.h"
 
 #include <shellapi.h>
@@ -17,6 +18,7 @@ usage(FILE *f)
 	    "dch " DCH_VERSION " - the Windows client: sessions on your other "
 	    "hosts\n"
 	    "Usage:\n"
+	    "  dch              the picker: the remote sessions; Enter attaches\n"
 	    "  dch -ls, --ls    list the remote sessions, host:name (--remote is\n"
 	    "                   implied: this machine hosts none)\n"
 	    "  dch -lj          host:name<TAB>alias<TAB>0 per line\n"
@@ -27,7 +29,8 @@ usage(FILE *f)
 	    "                   instead of your online tailnet peers\n"
 	    "  dch -h, --help   this help\n"
 	    "  dch -V, --version\n"
-	    "Ctrl-\\ detaches; the session lives on.\n"
+	    "Ctrl-\\ detaches; the session lives on. Twice, quickly: back to\n"
+	    "  the picker.\n"
 	    "Config: %%DCH_CONFIG%%, else %%APPDATA%%\\dch\\config: remote_hosts =\n"
 	    "  [label=]host[:port],... (empty: your tailnet peers; off: none).\n"
 	    "Env: DCH_NO_REMOTE=1 lists no remote hosts (but --hosts);\n"
@@ -86,6 +89,105 @@ list(int action)
 		puts("]");
 	free(rr);
 	return fflush(stdout) ? 1 : 0;
+}
+
+/* ---- the picker's host (picker.h): remote rows only, no actions ---- */
+
+void
+pk_load(struct pk *p)
+{
+	struct dch_rrow *rr;
+	char sel[3][600];
+	int n = dch_remote_rows(&rr, 0), k;
+
+	pk_selnames(p, sel);
+	free(p->r[0]);
+	p->n[0] = 0;
+	if ((p->r[0] = calloc((size_t)n + 1, sizeof **p->r)))
+		for (k = 0; k < n; k++)
+			pk_rrow(&p->r[0][p->n[0]++], &rr[k]);
+	free(rr);
+	pk_sort(p, sel);
+}
+
+int
+pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
+{
+	int k = pk_nav(p, c);
+
+	(void)fd;
+	if (k)
+		return k < 0 ? -1 : 0;
+	return (c == '\r' || c == '\n') && p->sel[0] < p->n[0] &&
+	       (size_t)snprintf(out, outsz, "%s", p->r[0][p->sel[0]].name)
+	       < outsz;
+}
+
+void
+pk_reap(struct pk *p)
+{
+	(void)p;
+}
+
+/* The picker on the console, as dch -l's: 0 and host:name in out, 1 when
+** quit or there is nothing to pick, -1 with no console. */
+static int
+pick(const char *header, char *out, size_t outsz)
+{
+	static const char on[] = "\033[?1049h\033[?7l\033[H\033[2J";
+	struct pk p;
+	int rc = 1, k;
+
+	if (pk_open(&p, 1, 1) == 0)
+	{
+		if (con_raw() < 0)
+		{
+			fprintf(stderr, "dch: the picker needs a console "
+			        "(dch -ls lists, dch -a host:name attaches)\n");
+			rc = -1;
+		}
+		else
+		{
+			pk_write(0, on, sizeof on - 1);
+			rc = pk_run(&p, 0, header, out, outsz);
+			pk_write(0, "\033[0m", 4);
+			con_restore();	/* the cursor, wrap, the main screen */
+		}
+	}
+	dch_remote_stop();
+	for (k = 0; k < 3; k++)
+		free(p.r[k]);
+	return rc;
+}
+
+/* Attach to host's name, or with none the picker's pick; when the detach
+** key's double tap (ATTACH_SWITCH) ends one, the picker again. Quitting it
+** leaves that session detached, as on POSIX. */
+static int
+pick_attach(const char *host, const char *name)
+{
+	char chosen[1100], *c;
+	const char *header = "attach session (mirror):";
+	int rc;
+
+	for (;;)
+	{
+		if (!host)
+		{
+			if ((rc = pick(header, chosen, sizeof chosen)))
+				return rc < 0;
+			/* pk_rrow's host:name; a host has no ':' */
+			if (!(c = strchr(chosen, ':')))
+				return 1;
+			*c = '\0';
+			host = chosen;
+			name = c + 1;
+		}
+		if ((rc = dch_remote_attach(host, name)) != ATTACH_SWITCH)
+			return rc;
+		host = NULL;
+		header = "switch to session:";
+	}
 }
 
 static UINT out_cp;
@@ -208,18 +310,13 @@ main(int argc, char **argv)
 		fprintf(stderr, "dch: --host only works with -a <name>\n");
 		return 1;
 	}
-	if (action == A_NONE)
-	{
-		fprintf(stderr, "dch: the session picker is not on Windows yet; "
-		        "dch -ls lists, dch -a host:name attaches\n\n");
-		usage(stderr);
-		return 1;
-	}
 	if (WSAStartup(MAKEWORD(2, 2), &wd))
 	{
 		fprintf(stderr, "dch: Winsock would not start\n");
 		return 1;
 	}
+	if (action == A_NONE)
+		return pick_attach(NULL, NULL);
 	if (action != A_ATTACH)
 		return list(action);
 	/* host:name, or --host h with a name; no local names here */
@@ -243,5 +340,5 @@ main(int argc, char **argv)
 		fprintf(stderr, "dch: name is too long\n");
 		return 1;
 	}
-	return dch_remote_attach(host, aname);
+	return pick_attach(host, aname);
 }

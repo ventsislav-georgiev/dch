@@ -39,7 +39,7 @@ CF="-g -O1 -fno-omit-frame-pointer $SAN -fsanitize=fuzzer-no-link"
 vt_objs=$(sed -n 's/^VT_OBJS = //p' Makefile)
 vt_libs=$(sed -n 's/^VT_LIBS = //p' Makefile)
 CF="$CF -I. -Ivendor/libghostty-vt/include"
-make attach.o master.o serve.o rframe.o remote.o bridge.o json.o $vt_objs >/dev/null
+make attach.o master.o serve.o rframe.o remote.o bridge.o json.o picker.o $vt_objs >/dev/null
 # dch.c has main(); the targets bring libFuzzer's.
 $CC $CF -Dmain=dch_main -c dch.c -o dch.o
 
@@ -55,7 +55,7 @@ for t in $targets; do
 	*)     objs="attach.o master.o serve.o remote.o" ;; # includes dch.c
 	esac
 	$CC $CF -Dmain=dch_main -fsanitize=fuzzer -o "fuzz_$t" \
-		"tests/fuzz/fuzz_$t.c" $objs rframe.o bridge.o json.o $vt_objs $vt_libs
+		"tests/fuzz/fuzz_$t.c" $objs rframe.o bridge.o json.o picker.o $vt_objs $vt_libs
 	mkdir -p "corpus/$t"
 	cp "$src/tests/fuzz/corpus/$t"/* "corpus/$t/" 2>/dev/null || :
 	echo "fuzz_$t: ${secs}s"

@@ -78,6 +78,7 @@ class Fake:
         self.port = self.sock.getsockname()[1]
         self.conns = []
         self.attached = threading.Event()
+        self.bodies = []  # each 0x01's payload: the name it attaches
         threading.Thread(target=self.loop, daemon=True).start()
 
     def loop(self):
@@ -103,13 +104,14 @@ class Fake:
                     t, n = struct.unpack(">BI", buf[:5])
                     if len(buf) < 5 + n:
                         break
-                    buf = buf[5 + n:]
+                    body, buf = buf[5:5 + n], buf[5 + n:]
                     if t == 0x08:
                         c.sendall(frame(0x18, {"proto": self.proto,
                                                "server": "fake"}))
                     elif t == 0x03:
                         c.sendall(frame(0x11, self.rows))
                     elif t == 0x01:
+                        self.bodies.append(body)
                         self.attached.set()
                         c.sendall(frame(0x10, b"FAKE-SCREEN\r\n"))
                         if self.mode == "drop":

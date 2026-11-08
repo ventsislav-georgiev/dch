@@ -13,7 +13,10 @@ host not stalling past the time box, then its cached rows stale; a hanging
 tailscale cut off at the box; a newer major skipped; an unknown host's
 error; -a host:missing; -a with no console (the attach's checks and the
 0x01's path up to the console); discovery's peer filter and whois refusal.
-On Windows also: -ls implies --remote, and -a wants host:name.
+On Windows also: -ls implies --remote, and -a wants host:name; dch alone
+with no console refused; and the picker (#090) in a console of its own
+(console_picker): the rows, j and Enter attach, the double tap back to the
+picker, Enter, one tap ends dch; Esc quits.
 
 It runs against the POSIX dch too (every list passes --remote), which is
 how it is checked off Windows; CI runs it against dch.exe.
@@ -87,6 +90,114 @@ def fake_tailscale(d):
     if r.returncode:
         print("       fake tailscale: " + r.stderr)
     return r.returncode == 0
+
+
+def console_picker(qh):
+    """--console-picker: dch.exe alone, the picker, in a console of its own
+    that this process attaches to: keys in by WriteConsoleInputW, the screen
+    out by ReadConsoleOutputCharacterW. What it saw as JSON on stdout. A
+    process of its own: it leaves its console (main's) for dch's."""
+    import ctypes
+    from ctypes import wintypes as W
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    class KEY(ctypes.Structure):
+        _fields_ = [("down", W.BOOL), ("rep", W.WORD), ("vk", W.WORD),
+                    ("sc", W.WORD), ("ch", W.WCHAR), ("st", W.DWORD)]
+
+    class REC(ctypes.Structure):
+        _fields_ = [("type", W.WORD), ("key", KEY)]
+
+    class SBI(ctypes.Structure):
+        _fields_ = [("size", W._COORD), ("cur", W._COORD), ("attr", W.WORD),
+                    ("win", W.SMALL_RECT), ("max", W._COORD)]
+
+    k32.CreateFileW.restype = W.HANDLE
+    k32.CreateFileW.argtypes = [W.LPCWSTR, W.DWORD, W.DWORD, W.LPVOID,
+                                W.DWORD, W.DWORD, W.HANDLE]
+    k32.CloseHandle.argtypes = [W.HANDLE]
+    k32.GetConsoleScreenBufferInfo.argtypes = [W.HANDLE, ctypes.POINTER(SBI)]
+    k32.ReadConsoleOutputCharacterW.argtypes = [
+        W.HANDLE, W.LPWSTR, W.DWORD, W._COORD, ctypes.POINTER(W.DWORD)]
+    k32.WriteConsoleInputW.argtypes = [W.HANDLE, ctypes.POINTER(REC),
+                                       W.DWORD, ctypes.POINTER(W.DWORD)]
+
+    def con(name):  # GENERIC_READ|WRITE, shared, OPEN_EXISTING
+        return k32.CreateFileW(name, 0xC0000000, 3, None, 3, 0, None)
+
+    def screen():
+        h, sbi, got = con("CONOUT$"), SBI(), W.DWORD()  # the active buffer
+        s = ""
+        if k32.GetConsoleScreenBufferInfo(h, ctypes.byref(sbi)):
+            w = sbi.size.X
+            n = w * (sbi.win.Bottom - sbi.win.Top + 1)
+            b = ctypes.create_unicode_buffer(n)
+            k32.ReadConsoleOutputCharacterW(h, b, n, W._COORD(0, sbi.win.Top),
+                                            ctypes.byref(got))
+            s = "\n".join(b[i:i + w].rstrip()
+                          for i in range(0, got.value, w))
+        k32.CloseHandle(h)
+        return s
+
+    def keys(*cs):  # each a press and a release
+        recs = (REC * (2 * len(cs)))()
+        for i, c in enumerate(cs):
+            for j in (0, 1):
+                r = recs[2 * i + j]
+                r.type, r.key.down, r.key.rep, r.key.ch = 1, 1 - j, 1, c
+        h = con("CONIN$")
+        k32.WriteConsoleInputW(h, recs, len(recs), ctypes.byref(W.DWORD()))
+        k32.CloseHandle(h)
+
+    def until(cond, t=15):
+        end = time.time() + t
+        while True:
+            s = screen()
+            if cond(s) or time.time() > end:
+                return cond(s), s
+            time.sleep(0.1)
+
+    def start():
+        p = subprocess.Popen([DCH, "--hosts", qh],
+                             creationflags=subprocess.CREATE_NEW_CONSOLE)
+        k32.FreeConsole()
+        for _ in range(100):
+            if k32.AttachConsole(p.pid):
+                break
+            time.sleep(0.05)
+        return p
+
+    out, p = {}, None
+    try:
+        p = start()
+        ok, s = until(lambda s: "q:q1" in s and "q:q2" in s)
+        out["picker"], out["screen"] = ok and "attach session" in s, s
+        # the second row, as drawn
+        out["second"] = "q1" if s.find("q:q1") > s.find("q:q2") else "q2"
+        out["first"] = "q2" if out["second"] == "q1" else "q1"
+        keys("j", "\r")
+        out["attached"], out["screen"] = until(lambda s: "FAKE-SCREEN" in s)
+        keys("\x1c", "\x1c")
+        out["switch"], out["screen"] = until(
+            lambda s: "switch to session:" in s and "q:q2" in s)
+        keys("\r")
+        ok, out["screen"] = until(lambda s: "switch to session:" not in s)
+        time.sleep(1)  # the attach under way: its relay reads the key
+        keys("\x1c")
+        p.wait(15)
+        out["tap_rc"] = p.returncode
+        p = start()
+        ok, out["screen"] = until(lambda s: "q:q1" in s)
+        keys("\x1b")
+        p.wait(15)
+        out["esc_rc"] = p.returncode
+    except Exception as e:  # what it got to, for the checks to say
+        out["error"] = repr(e)
+    finally:
+        if p and p.poll() is None:
+            p.kill()
+    print(json.dumps(out))
 
 
 def main():
@@ -268,6 +379,34 @@ def main():
             r = dch("--hosts", qh, "-a", "q1")
             check("Windows: -a wants host:name", r.returncode == 1
                   and "host:name" in r.err, r.err)
+            r = dch("--hosts", qh)
+            check("Windows: dch alone with no console: the picker says so",
+                  r.returncode == 1 and "needs a console" in r.err, r.err)
+
+        # --- the picker in a console (#090) ---------------------------
+        if WIN:
+            nb = len(q.bodies)
+            r = subprocess.run([sys.executable, os.path.abspath(__file__),
+                                "--console-picker", qh], env=env,
+                               capture_output=True, timeout=120)
+            try:
+                res = json.loads(r.stdout)
+            except ValueError:
+                res = {}
+            why = (res.get("error"), res.get("screen"), r.stderr)
+            check("picker: dch alone shows the remote rows", res.get("picker"),
+                  why)
+            got = q.bodies[nb:]
+            check("picker: j, Enter attaches the second row",
+                  res.get("attached") and got
+                  and res["second"].encode() in got[0], (got, why))
+            check("picker: Ctrl-\\ twice, back to the picker",
+                  res.get("switch"), why)
+            check("picker: Enter there attaches the first row, one Ctrl-\\ "
+                  "ends dch (exit 0)", len(got) == 2
+                  and res["first"].encode() in got[1]
+                  and res.get("tap_rc") == 0, (got, why))
+            check("picker: Esc quits (exit 0)", res.get("esc_rc") == 0, why)
 
         # --- discovery, against a fake tailscale ----------------------
         if not fake_tailscale(fake):
@@ -313,4 +452,6 @@ def main():
 
 
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["--console-picker"]:
+        sys.exit(console_picker(sys.argv[2]))
     sys.exit(main())

@@ -35,6 +35,10 @@
 #error "DCH_VERSION: scripts/build-windows.sh passes configure.ac's"
 #endif
 
+/* dtach.h's: dch_remote_attach's code for the detach key's switch to the
+** picker (#090) */
+#define ATTACH_SWITCH 2
+
 /* rf_run's status is the exit code, or -1 when it could not run */
 #define WIFEXITED(s) ((s) >= 0)
 #define WEXITSTATUS(s) (s)

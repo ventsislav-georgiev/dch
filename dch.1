@@ -1202,12 +1202,15 @@ implies
 .B \-a
 takes
 .IR host : name ,
-and there is no picker.
+and
+.B dch
+alone is the picker with the remote rows only (no History, Sidekicks,
+row actions or settings).
 Its config is
 .IR %APPDATA%\(rsdch\(rsconfig ,
 its cache is in
 .IR %LOCALAPPDATA%\(rsdch ,
-and its time box defaults to 1000 ms; Ctrl\-\(rs always detaches.
+and its time box defaults to 1000 ms.
 .SH CONFIG FILE
 Optional: dch needs none. Read fresh on every use from
 .BR $DCH_CONFIG ,
