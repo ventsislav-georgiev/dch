@@ -1743,6 +1743,8 @@ char **dch_codex_argv(char **argv) {
   if ((pid = fork()) == 0) {
     char *av[] = {path, "--help", NULL};
     int null = open("/dev/null", O_RDWR);
+    if (null < 0)
+      _exit(127);
     setsid(); /* off the session's pty: no terminal for it to query */
     dup2(null, 0);
     dup2(p[1], 1);
