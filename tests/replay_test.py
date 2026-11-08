@@ -15,7 +15,7 @@ attaching client sees had to come from the master's mirror.
 Run:  python3 tests/replay_test.py            (uses ./dch)
       DCH=/path/to/dch python3 tests/replay_test.py
 """
-import os, sys, pty, signal, select, time, errno, tempfile
+import os, sys, pty, signal, select, time, errno, tempfile, socket, struct, shutil, subprocess
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.environ.get("DCH", os.path.join(HERE, "..", "dch"))
@@ -117,9 +117,59 @@ def dump_trace():
     # only the process table answers it.
 
 
+def redraw_keeps_unread_output():
+    """#081: a WINCH redraw must not flush output the master hasn't read.
+
+    killpty() raised SIGWINCH with ioctl(TIOCSIG), which on macOS flushes
+    both pty queues. Every attach sends that redraw right after its drain, so
+    a child printing in between lost its output for good: the replay_test
+    flake. Made deterministic here: a bare master (what `-n` daemonizes)
+    keeps its pty unread until someone attaches or sends a control verb, and
+    a lone REDRAW frame is neither, so it signals while the marker sits
+    unread in the pty. --read then drains whatever survived.
+    Returns an error string, or None."""
+    tmp = tempfile.mkdtemp()
+    env = dict(os.environ, XDG_RUNTIME_DIR=tmp)
+    env.pop("DCH_SOCKET_DIR", None)
+    env.pop("DCH_SESSION", None)
+    sockdir = os.path.join(tmp, "dch-%d" % os.getuid())
+    sess, mark = "redrawflush", "FLUSH-MARK"
+    sock = os.path.join(sockdir, sess + ".sock")
+    os.makedirs(sockdir, mode=0o700, exist_ok=True)
+    master = subprocess.Popen(
+        [DCH, "--master-of", sock, "--", "sh", "-c",
+         "printf '%s\\n'; sleep 60" % mark], env=env,
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL)
+    try:
+        end = time.time() + 10
+        while not os.path.exists(sock) and time.time() < end:
+            time.sleep(0.05)
+        time.sleep(1.0)     # the marker is written, and sits unread
+        c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        c.connect(sock)
+        # [MSG_REDRAW][len = REDRAW_WINCH, LE][struct winsize 24x80]
+        c.sendall(bytes([4, 3, 0]) + struct.pack("=HHHH", 24, 80, 0, 0))
+        time.sleep(0.5)     # served before --read's own connection
+        c.close()
+        out = subprocess.run([DCH, "--read", sess], env=env, timeout=20,
+                             capture_output=True, text=True).stdout
+        return None if mark in out else (
+            "the redraw flushed the unread marker; --read: %r" % out)
+    finally:
+        master.terminate()
+        master.wait(10)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     if not os.access(DCH, os.X_OK):
         print("FAIL: dch not executable at", DCH)
+        return 1
+
+    err = redraw_keeps_unread_output()
+    if err:
+        print("FAIL:", err)
         return 1
 
     got = attach_sees_marker("replaytest-%d" % os.getpid(), None)
@@ -147,7 +197,7 @@ def main():
         print("FAIL: DCH_NO_REPLAY=1 still replayed. Client B saw:", repr(off))
         return 1
 
-    print("PASS: attach replays the screen; DCH_NO_REPLAY=1 disables it.")
+    print("PASS: attach replays the screen; DCH_NO_REPLAY=1 disables it; a redraw keeps unread output.")
     return 0
 
 

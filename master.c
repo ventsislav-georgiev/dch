@@ -1064,20 +1064,17 @@ init_pty(char **argv, int statusfd)
 	return 0;
 }
 
-/* Send a signal to the slave side of a pseudo-terminal. */
+/* Send a signal to the slave side of a pseudo-terminal.
+**
+** kill() the foreground group first. TIOCSIG is the last resort: on macOS
+** (and BSDs) it flushes both pty queues unless NOFLSH is set, so output the
+** child wrote that we have not read yet is gone — every attach's WINCH redraw
+** could lose a freshly printed screen that way (#081). */
 static void
 killpty(struct pty *pty, int sig)
 {
 	pid_t pgrp = -1;
 
-#ifdef TIOCSIGNAL
-	if (ioctl(pty->fd, TIOCSIGNAL, sig) >= 0)
-		return;
-#endif
-#ifdef TIOCSIG
-	if (ioctl(pty->fd, TIOCSIG, sig) >= 0)
-		return;
-#endif
 #ifdef TIOCGPGRP
 #ifdef BROKEN_MASTER
 	if (ioctl(pty->slave, TIOCGPGRP, &pgrp) >= 0 && pgrp != -1 &&
@@ -1090,7 +1087,15 @@ killpty(struct pty *pty, int sig)
 #endif
 
 	/* Fallback using the child's pid. */
-	kill(-pty->pid, sig);
+	if (kill(-pty->pid, sig) >= 0)
+		return;
+#ifdef TIOCSIGNAL
+	if (ioctl(pty->fd, TIOCSIGNAL, sig) >= 0)
+		return;
+#endif
+#ifdef TIOCSIG
+	(void)ioctl(pty->fd, TIOCSIG, sig);
+#endif
 }
 
 /* Creates a new unix domain socket. */
@@ -2987,13 +2992,11 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 
 		/* Someone showed up: open the --spawn pty gate and pull what the
 		** child already printed into the mirror, exactly as a control
-		** client does. Leaving it for the next select() wake to notice
-		** is a race we lose on macOS, where arming the fd after the write
-		** has landed does not make it readable — the output then sits in
-		** the pty until the child writes again, and a session that prints
-		** once and waits replays blank. With a mirror, drain before
-		** p->attached so replay keeps its mode-before-screen ordering. The
-		** first gated lite attach forwards startup output live, including its
+		** client does: this attach's replay is built from the mirror.
+		** (What once looked like "arming the fd on macOS is not enough"
+		** was killpty's TIOCSIG flushing the pty, #081.) With a mirror,
+		** drain before p->attached so replay keeps its mode-before-screen
+		** ordering. The first gated lite attach forwards startup output live, including its
 		** modes, so it must not re-arm those same modes below. */
 		pty_gated = 0;
 		if (!rearm)
