@@ -10,7 +10,11 @@ and --keys types into it. Covers:
   4. kill asks first: n keeps the session, y kills it;
   5. the History tab lists the killed session and Enter resumes it;
   6. NO_COLOR and TERM=dumb draw no ESC[3x color, a colored one does;
-  7. at 40 columns a long title is cut and no row wraps.
+  7. at 40 columns a long title is cut and no row wraps;
+  8. s persists the sort (picker_sort) and a fresh picker starts in it;
+  9. the settings view (,): lists every key, Enter cycles picker_sort and
+     prompts for sidekick_pattern (the Sidekicks split follows at once), u
+     resets to the default, auto_allow on asks y/N first and off does not.
 
 Run:  python3 tests/picker_test.py            (uses ./dch)
       DCH=/path/to/dch python3 tests/picker_test.py
@@ -122,6 +126,13 @@ def to_tab(pk, label):
     return wait_screen(pk, lambda s: "[%s" % label in s)
 
 
+def config():
+    try:
+        with open(ENV["DCH_CONFIG"]) as f:
+            return f.read()
+    except OSError:
+        return ""
+
 def picker(name, size, *env):
     r = dch("--spawn", name, "--size", size, "env", *env, DCH, "-l")
     return r.returncode == 0
@@ -168,6 +179,12 @@ def main():
     check("name sort is numeric-aware: s2 above s10",
           "sort: name" in s and rows(s).index("s2") < rows(s).index("s10"),
           s)
+    check("s persists the sort: picker_sort = name in the config",
+          "picker_sort = name\n" in config(), config())
+    picker("pk4", "100x30", "NO_COLOR=1", "TERM=xterm-256color")
+    s = wait_screen("pk4", lambda s: "s10" in s and "sort:" in s)
+    check("a fresh picker starts in the saved sort", "sort: name" in s, s)
+    dch("-k", "pk4")
 
     # 3. rename
     check("select s10", select("pk1", "s10"), screen("pk1"))
@@ -252,6 +269,56 @@ def main():
     check("TERM=dumb: no ESC[3x color codes", not COLOR_RE.search(a), a)
 
     # q quits and leaves the alternate screen (the session's command ends)
+    # 9. the settings view, on pk1 (100x30, NO_COLOR)
+    dch("--keys", "pk1", ",")
+    s = wait_screen("pk1", lambda s: "[Settings]" in s)
+    check(", opens the settings view, every key listed",
+          "[Settings]" in s and all(k in s for k in (
+              "auto_allow", "sidekick_pattern", "picker_sort",
+              "detach_key")), s)
+    check("settings: values, (default) when unset",
+          re.search(r"auto_allow\s+false\s+\(default\)", s) and
+          re.search(r"picker_sort\s+name\s*$", s, re.M) and
+          re.search(r"detach_key\s+detach\s+\(default\)", s), s)
+    dch("--keys", "pk1", "down", "down", "enter")
+    s = wait_screen("pk1", lambda s: "picker_sort = activity" in s)
+    check("Enter cycles picker_sort: name -> activity, saved",
+          "picker_sort = activity\n" in config(), s, config())
+    dch("--keys", "pk1", "u")
+    s = wait_screen("pk1", lambda s: re.search(
+        r"picker_sort\s+activity\s+\(default\)", s))
+    check("u resets to the default: the key leaves the file",
+          "picker_sort" not in config() and "(default)" in s, s, config())
+    dch("--keys", "pk1", "up", "enter")
+    wait_screen("pk1", lambda s: "new sidekick_pattern" in s)
+    dch("--send", "pk1", "^nomatch$")
+    dch("--keys", "pk1", "enter")
+    s = wait_screen("pk1", lambda s: "sidekick_pattern = ^nomatch$" in s)
+    check("Enter prompts for sidekick_pattern, saved",
+          "sidekick_pattern = ^nomatch$\n" in config(), s, config())
+    dch("--keys", "pk1", "up", "enter")
+    s = wait_screen("pk1", lambda s: "[y/N]" in s)
+    check("auto_allow on asks first", "Turn auto_allow on?" in s and
+          "[y/N]" in s and "auto_allow" not in config(), s)
+    dch("--keys", "pk1", "n")
+    s = wait_screen("pk1", lambda s: "cancelled" in s)
+    check("n keeps it off", "auto_allow" not in config(), s, config())
+    dch("--keys", "pk1", "enter")
+    wait_screen("pk1", lambda s: "[y/N]" in s)
+    dch("--keys", "pk1", "y")
+    s = wait_screen("pk1", lambda s: "auto_allow = true" in s)
+    check("y turns it on", "auto_allow = true\n" in config(), s, config())
+    dch("--keys", "pk1", "enter")
+    s = wait_screen("pk1", lambda s: "auto_allow = false" in s)
+    check("off needs no confirm", "[y/N]" not in s and
+          "auto_allow = false\n" in config(), s, config())
+    dch("--keys", "pk1", "esc")
+    s = wait_screen("pk1", lambda s: "[Sessions]" in s)
+    check("esc goes back to the sessions; the new sidekick_pattern "
+          "split them at once: no Sidekicks tab, helper-qa in Sessions",
+          "[Sessions]" in s and "Sidekicks" not in s and
+          "helper-qa" in rows(s), s)
+
     dch("--keys", "pk3", "q")
     check("q quits the picker", wait_live("pk3", False), live())
     return 1 if failures else 0
@@ -261,7 +328,7 @@ if __name__ == "__main__":
     try:
         rc = main()
     finally:
-        for n in ("pk1", "pk2", "pk3", "s2", "s10", "helper-qa", "perm",
+        for n in ("pk1", "pk2", "pk3", "pk4", "s2", "s10", "helper-qa", "perm",
                   "form"):
             dch("-k", n)
         shutil.rmtree(ROOT, ignore_errors=True)

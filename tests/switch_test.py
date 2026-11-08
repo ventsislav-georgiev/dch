@@ -9,7 +9,9 @@ Covers, in order:
      deadline, not an idle timeout, or a chatty program would hold it open
      forever and the press would never land;
   4. typing something else inside the window commits the detach;
-  5. DCH_DOUBLE_TAP_MS=0 turns the shortcut off and detach is instant.
+  5. DCH_DOUBLE_TAP_MS=0 turns the shortcut off and detach is instant;
+  6. detach_key = switch (#082) swaps them: one press opens the picker, two
+     detach; with DCH_DOUBLE_TAP_MS=0 one press opens the picker at once.
 
 Run:  python3 tests/switch_test.py            (uses ./dch)
       DCH=/path/to/dch python3 tests/switch_test.py
@@ -22,6 +24,9 @@ TAG = "sw%d" % os.getpid()
 A, B = TAG + "a", TAG + "b"
 DETACH = b"\x1c"
 SOCKDIR = os.path.join(tempfile.mkdtemp(prefix="dchswitch"), "sock")
+SWAPCFG = os.path.join(os.path.dirname(SOCKDIR), "config")
+with open(SWAPCFG, "w") as f:
+    f.write("detach_key = switch\n")
 
 
 def dch(*args, **kw):
@@ -192,7 +197,47 @@ def main():
             return fail("DCH_DOUBLE_TAP_MS=0 still waited out a window")
         pid = None
 
-        print("PASS: double tap switches sessions, single tap detaches.")
+        # 6. detach_key = switch: one press opens the picker; q there
+        # leaves the session running and the client exits.
+        swap = {"DCH_CONFIG": SWAPCFG}
+        pid, fd = spawn_client(["-f", "-n", B], env=swap)
+        drain(fd, 10.0, b"BBB_BRAVO")
+        os.write(fd, DETACH)
+        out = drain(fd, 5.0, b"switch to session:")
+        if "switch to session:" not in out:
+            return fail("detach_key=switch: one press did not open the "
+                        "picker", out)
+        os.write(fd, b"q")
+        if reap(pid, fd, 5.0) is None:
+            return fail("detach_key=switch: q in the picker did not leave")
+        pid = None
+        # two presses detach, no picker
+        pid, fd = spawn_client(["-f", "-n", B], env=swap)
+        drain(fd, 10.0, b"BBB_BRAVO")
+        os.write(fd, DETACH)
+        time.sleep(0.05)
+        os.write(fd, DETACH)
+        if reap(pid, fd, 5.0) is None:
+            return fail("detach_key=switch: two presses did not detach")
+        pid = None
+        # no double press: one opens the picker at once
+        pid, fd = spawn_client(["-f", "-n", B],
+                               env=dict(swap, DCH_DOUBLE_TAP_MS="0"))
+        drain(fd, 10.0, b"BBB_BRAVO")
+        os.write(fd, DETACH)
+        out = drain(fd, 5.0, b"switch to session:")
+        if "switch to session:" not in out:
+            return fail("detach_key=switch, DCH_DOUBLE_TAP_MS=0: one press "
+                        "did not open the picker", out)
+        os.write(fd, b"q")
+        if reap(pid, fd, 5.0) is None:
+            return fail("detach_key=switch: q in the picker did not leave")
+        pid = None
+        if dch("--read", B).returncode not in (0, 3):
+            return fail("the session did not survive the picker")
+
+        print("PASS: double tap switches sessions, single tap detaches; "
+              "detach_key = switch swaps them.")
         return 0
     finally:
         kill_client(pid, fd)

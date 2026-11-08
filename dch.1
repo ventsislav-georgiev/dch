@@ -196,7 +196,7 @@ Disable the detach character.
 .B \-k
 and
 .B \-d
-without a name, and the double\-press switch open a full\-screen picker with
+without a name, and the detach\-key switch open a full\-screen picker with
 up to three tabs:
 .BR Sessions ;
 .BI "Sidekicks (" n ) ,
@@ -232,6 +232,8 @@ move;
 and
 .B Shift\-Tab
 switch tabs;
+.B ,
+opens the settings view;
 .BR q ,
 .B Esc
 or
@@ -259,7 +261,9 @@ restarts stale agents,
 restarts all agents (force),
 .B s
 toggles the sort between activity (blocked, working, done, idle, newest
-first) and name (numeric\-aware).
+first) and name (numeric\-aware), saved as
+.B picker_sort
+for the next picker.
 On History:
 .B Enter
 resumes
@@ -281,6 +285,25 @@ The status line shows the action while it runs, then its result.
 or
 .B TERM=dumb
 draws without color; without a terminal the session list is printed instead.
+.PP
+The settings view lists every config file key (see
+.BR "CONFIG FILE" )
+with its value, marked (default) when unset.
+.B Enter
+toggles a boolean (turning
+.B auto_allow
+on asks first), steps a choice key to its next value, or reads a string on
+the status line
+.RB ( Ctrl\-D
+keeps it);
+.B u
+resets the key to its default;
+.B Esc
+or
+.B q
+goes back. A change is written as by
+.B dch \-\-config
+and applies at once.
 .SH SWITCHING SESSIONS
 Pressing the detach character
 .B twice
@@ -295,6 +318,15 @@ sets that window in milliseconds (default
 Setting it to
 .B 0
 disables switching and makes detach instant again.
+.PP
+With
+.B detach_key = switch
+in the config file, read at each attach, the two swap: one press opens the
+picker and two detach. With the window at
+.B 0
+one press opens the picker at once and the key never detaches; quit the
+picker or use
+.BR "dch \-d" .
 .SH CONTROL VERBS
 All verbs take the session
 .I name
@@ -954,8 +986,10 @@ Print the key's value; exit 1 when it is unset.
 .TP
 .BI "dch \-\-config " "key value"
 Set it: the file is rewritten whole (a temp file renamed over it), every other
-line and comment kept, the parent directory created. An unknown key, or a
-boolean key given anything but true/false/1/0/yes/no/on/off, exits 1.
+line and comment kept, the parent directory created. An unknown key, a
+boolean key given anything but true/false/1/0/yes/no/on/off, or a choice key
+given a value not its own, exits 1. The picker's settings view writes the same
+way.
 .TP
 .BI "dch \-\-config " key " \-\-unset"
 Remove it.
@@ -981,7 +1015,24 @@ and under
 .BR DCH_NO_VT .
 .TP
 .B sidekick_pattern
-A string read by the session picker.
+A string read by the session picker, default
+.BR \-qa ;
+empty: no Sidekicks tab.
+.TP
+.B picker_sort
+.B activity
+(default) or
+.BR name :
+the session picker's sort, also set by its
+.B s
+key.
+.TP
+.B detach_key
+.B detach
+(default) or
+.BR switch :
+what one press of the detach character does; two presses do the other (see
+.BR "SWITCHING SESSIONS" ).
 .SH EXIT STATUS
 0 on success. Control verbs: 1 generic error, 2
 .B \-\-wait

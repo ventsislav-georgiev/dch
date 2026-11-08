@@ -263,7 +263,8 @@ size_t packet_payload_len(const struct packet *pkt);
 
 /* attach_main() normally never returns while a master is live: it exits on
 ** detach. It returns 1 when the connect failed, and ATTACH_SWITCH when the
-** user double-tapped the detach key to ask for the session picker. */
+** user asked for the session picker with the detach key: two presses, or one
+** with detach_key = switch. */
 #define ATTACH_SWITCH 2
 
 /* Session history (#042): each master keeps a JSON record of its session in

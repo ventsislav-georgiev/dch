@@ -216,16 +216,25 @@ dch_config_get(const char *key, char *out, size_t cap)
 	return found;
 }
 
-/* The keys `dch --config` knows; bool ones take dch_config_bool's words. */
+/* The keys `dch --config` and the picker's settings view know; bool ones
+** take dch_config_bool's words, choice ones only their own. */
 static const struct
 {
 	const char *key;
 	int is_bool;
 	const char *def;		/* the value when the key is not set */
+	const char *choices;	/* "a|b": all it takes; NULL: any one line */
 } config_keys[] = {
-	{ "auto_allow", 1, "false" },	/* the master answers permission prompts */
-	{ "sidekick_pattern", 0, "-qa" },	/* the picker's sidekick sessions */
+	/* the master answers permission prompts */
+	{ "auto_allow", 1, "false", NULL },
+	/* the picker's sidekick sessions; empty: no Sidekicks tab */
+	{ "sidekick_pattern", 0, "-qa", NULL },
+	/* the picker's sort, its s key */
+	{ "picker_sort", 0, "activity", "activity|name" },
+	/* what one Ctrl-\ press does; two do the other (#082) */
+	{ "detach_key", 0, "detach", "detach|switch" },
 };
+#define NCONF (sizeof config_keys / sizeof *config_keys)
 
 static int
 config_bool_word(const char *v)
@@ -240,88 +249,96 @@ config_bool_word(const char *v)
 	return 0;
 }
 
-/* dch --config [<key> [<value>|--unset]]: show the config, one key, or set
-** or remove one. A write keeps every other line (comments too), replaces the
-** key's first line and drops its later ones, and lands whole: a temp file
-** renamed over the old (the target of a symlinked one). */
-static int
-config_main(int argc, char **argv)
+/* v's place in choices ("a|b|c"), or NULL when it is not one of them. */
+static const char *
+config_choice(const char *choices, const char *v)
 {
-	char path[1024], tmp[1100], v[1024], *rp, *s;
-	const char *key = argc ? argv[0] : NULL;
-	size_t i, k;
-	int fd, done = 0, ok, mode = 0644;
+	size_t n = strlen(v), l;
+
+	for (;;)
+	{
+		l = strcspn(choices, "|");
+		if (l == n && !strncmp(choices, v, n))
+			return choices;
+		if (!choices[l])
+			return NULL;
+		choices += l + 1;
+	}
+}
+
+/* The index of key in config_keys, or -1. */
+static int
+config_key(const char *key)
+{
+	size_t k;
+
+	for (k = 0; k < NCONF; k++)
+		if (!strcmp(key, config_keys[k].key))
+			return (int)k;
+	return -1;
+}
+
+/* Key k's value as `dch --config` shows it: a bool as true or false, the
+** default when unset. *set: whether the file has it. */
+static const char *
+config_show(int k, char *v, size_t cap, int *set)
+{
+	*set = dch_config_get(config_keys[k].key, v, cap);
+	if (config_keys[k].is_bool)
+		return dch_config_bool(config_keys[k].key) ? "true" : "false";
+	return *set ? v : config_keys[k].def;
+}
+
+/* Set key k to s, or remove it (s NULL): `dch --config` and the picker's
+** settings view both write here. Every other line stays (comments too), the
+** key's first line is replaced and its later ones dropped, and it lands
+** whole: a temp file renamed over the old (the target of a symlinked one).
+** 0, or -1 with errno; EINVAL for a value the key does not take. */
+static int
+config_set(int k, const char *s)
+{
+	char path[1024], tmp[1100], *rp;
+	const char *key = config_keys[k].key;
+	int fd, done = 0, ok, e, mode = 0644;
 	struct stat st;
 	FILE *in, *out;
 
+	if (s && (strpbrk(s, "\r\n") || strlen(s) > 900 ||
+	          (config_keys[k].is_bool && !config_bool_word(s)) ||
+	          (config_keys[k].choices &&
+	           !config_choice(config_keys[k].choices, s))))
+	{
+		errno = EINVAL;
+		return -1;
+	}
 	if (!dch_config_path(path, sizeof path))
 	{
-		fprintf(stderr, "dch: no config path (set HOME or DCH_CONFIG)\n");
-		return 1;
-	}
-	if (!key)
-	{
-		printf("%s\n", path);
-		for (i = 0; i < sizeof config_keys / sizeof *config_keys; i++)
-			if (config_keys[i].is_bool)
-				printf("%s = %s\n", config_keys[i].key,
-				       dch_config_bool(config_keys[i].key)
-				       ? "true" : "false");
-			else
-				printf("%s = %s\n", config_keys[i].key,
-				       dch_config_get(config_keys[i].key, v,
-				                      sizeof v) ? v : config_keys[i].def);
-		return 0;
-	}
-	for (k = 0; k < sizeof config_keys / sizeof *config_keys; k++)
-		if (!strcmp(key, config_keys[k].key))
-			break;
-	if (k == sizeof config_keys / sizeof *config_keys || argc > 2)
-	{
-		fprintf(stderr, argc > 2 ? "usage: dch --config [<key> "
-		        "[<value>|--unset]]\n" : "dch: unknown config key: %s\n",
-		        key);
-		return 1;
-	}
-	if (argc == 1)
-	{
-		if (!dch_config_get(key, v, sizeof v))
-			return 1;
-		printf("%s\n", v);
-		return 0;
-	}
-	s = argv[1];
-	if (strcmp(s, "--unset") &&
-	    (strpbrk(s, "\r\n") || strlen(s) > 900 ||
-	     (config_keys[k].is_bool && !config_bool_word(s))))
-	{
-		fprintf(stderr, config_keys[k].is_bool
-		        ? "dch: %s takes true or false\n"
-		        : "dch: %s: one line, at most 900 bytes\n", key);
-		return 1;
+		errno = ENOENT;
+		return -1;
 	}
 	if ((rp = realpath(path, NULL)))
 		snprintf(path, sizeof path, "%s", rp);
 	free(rp);
-	/* mkdir -p the parent */
+	/* mkdir -p the parent; a failure shows as the temp file's */
 	for (rp = strchr(path + 1, '/'); rp; rp = strchr(rp + 1, '/'))
 	{
 		*rp = '\0';
-		if (mkdir(path, 0700) < 0 && errno != EEXIST)
-			fprintf(stderr, "dch: mkdir %s: %s\n", path,
-			        strerror(errno));
+		(void)mkdir(path, 0700);
 		*rp = '/';
 	}
 	if (stat(path, &st) == 0)
 		mode = st.st_mode & 07777;
 	snprintf(tmp, sizeof tmp, "%s.%ld.tmp", path, (long)getpid());
 	if ((fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW,
-	               0600)) < 0 || !(out = fdopen(fd, "w")))
+	               0600)) < 0)
+		return -1;
+	if (!(out = fdopen(fd, "w")))
 	{
-		fprintf(stderr, "dch: %s: %s\n", tmp, strerror(errno));
-		if (fd >= 0)
-			close(fd);
-		return 1;
+		e = errno;
+		close(fd);
+		unlink(tmp);
+		errno = e;
+		return -1;
 	}
 	fchmod(fd, (mode_t)mode);
 	if ((in = fopen(path, "r")))
@@ -338,23 +355,78 @@ config_main(int argc, char **argv)
 				if (line[ll - 1] != '\n')
 					fputc('\n', out);
 			}
-			else if (!done++ && strcmp(s, "--unset"))
+			else if (!done++ && s)
 				fprintf(out, "%s = %s\n", key, s);
 			free(cut);
 		}
 		free(line);
 		fclose(in);
 	}
-	if (!done && strcmp(s, "--unset"))
+	if (!done && s)
 		fprintf(out, "%s = %s\n", key, s);
 	ok = fflush(out) == 0 && fsync(fd) == 0;
+	e = errno;
 	if (fclose(out) != 0 || !ok || rename(tmp, path) < 0)
 	{
-		fprintf(stderr, "dch: write %s: %s\n", path, strerror(errno));
+		if (ok)
+			e = errno;	/* fclose's or rename's */
 		unlink(tmp);
-		return 1;
+		errno = e;
+		return -1;
 	}
 	return 0;
+}
+
+/* dch --config [<key> [<value>|--unset]]: show the config, one key, or set
+** or remove one (config_set). */
+static int
+config_main(int argc, char **argv)
+{
+	char path[1024], v[1024];
+	const char *key = argc ? argv[0] : NULL, *sv;
+	int k, set;
+
+	if (!dch_config_path(path, sizeof path))
+	{
+		fprintf(stderr, "dch: no config path (set HOME or DCH_CONFIG)\n");
+		return 1;
+	}
+	if (!key)
+	{
+		printf("%s\n", path);
+		for (k = 0; k < (int)NCONF; k++)
+		{
+			sv = config_show(k, v, sizeof v, &set);
+			printf("%s = %s\n", config_keys[k].key, sv);
+		}
+		return 0;
+	}
+	if ((k = config_key(key)) < 0 || argc > 2)
+	{
+		fprintf(stderr, argc > 2 ? "usage: dch --config [<key> "
+		        "[<value>|--unset]]\n" : "dch: unknown config key: %s\n",
+		        key);
+		return 1;
+	}
+	if (argc == 1)
+	{
+		if (!dch_config_get(key, v, sizeof v))
+			return 1;
+		printf("%s\n", v);
+		return 0;
+	}
+	if (config_set(k, strcmp(argv[1], "--unset") ? argv[1] : NULL) == 0)
+		return 0;
+	if (errno == EINVAL && config_keys[k].is_bool)
+		fprintf(stderr, "dch: %s takes true or false\n", key);
+	else if (errno == EINVAL && config_keys[k].choices)
+		fprintf(stderr, "dch: %s takes %s\n", key,
+		        config_keys[k].choices);
+	else if (errno == EINVAL)
+		fprintf(stderr, "dch: %s: one line, at most 900 bytes\n", key);
+	else
+		fprintf(stderr, "dch: write %s: %s\n", path, strerror(errno));
+	return 1;
 }
 
 /* A boolean config key: "true"/"1"/"yes"/"on" is 1, anything else 0. */
@@ -2351,7 +2423,14 @@ usage(void)
 	    "                                             Claude Code's plain\n"
 	    "                                             permission prompts\n"
 	    "                                             with Yes; not in lite),\n"
-	    "                                             sidekick_pattern\n"
+	    "                                             sidekick_pattern,\n"
+	    "                                             picker_sort\n"
+	    "                                             (activity|name),\n"
+	    "                                             detach_key\n"
+	    "                                             (detach|switch: what\n"
+	    "                                             one Ctrl-\\ does); the\n"
+	    "                                             picker's , key edits\n"
+	    "                                             them too\n"
 	    "  dch --agent-list [--json]                  list native Claude peers\n"
 	    "  dch --agent-send <name> <message...>       message one native peer\n"
 	    "Env: DCH_NO_DETECT=1 disables screen-content state detection.\n"
@@ -2359,9 +2438,10 @@ usage(void)
 	    "     $XDG_CONFIG_HOME/dch/config, else ~/.config/dch/config).\n"
 	    "     DCH_NO_HISTORY=1 at session start keeps no history record.\n"
 	    "     DCH_DOUBLE_TAP_MS sets the switch double-press window\n"
-	    "     (default 300; 0 disables switching, detach becomes instant).\n"
+	    "     (default 300; 0 disables it, one press acts at once).\n"
 	    "Detach: Ctrl-\\  (or `dch -d` if the host swallows it).\n"
 	    "Switch: Ctrl-\\ twice quickly — detach and pick another session.\n"
+	    "        detach_key = switch swaps the two (one press: the picker).\n"
 	    "Nesting refused inside an existing dch session.\n");
 }
 
@@ -7559,6 +7639,8 @@ struct pk
 	struct pkrow *r[3];	/* Sessions, Sidekicks, History */
 	int n[3], sel[3], top[3];
 	int tab, byname, color, interrupted, win, status_row, asking;
+	int settings, cfsel, cftop;	/* the settings view (#082) */
+	int askcfg;		/* asking about config key askcfg - 1 */
 	long loaded;		/* ms of the last load; 0 = load now */
 	struct pkact ask, run;	/* the action asked about, the one running */
 	pid_t pid;
@@ -8112,14 +8194,37 @@ pk_row(const struct pk *p, const struct pkrow *w, int sel, int tcol)
 	pk_txt(w->cwd);
 }
 
+/* A settings row: the key, its value, "(default)" when the file has none. */
+static void
+pk_cfrow(int k, int sel, int kcol)
+{
+	char v[1024];
+	const char *sv;
+	int set;
+
+	sv = config_show(k, v, sizeof v, &set);
+	pk_sgr(sel ? "0;7" : "0");
+	pk_txt(sel ? "> " : "  ");
+	pk_fit(config_keys[k].key, kcol);
+	pk_txt("  ");
+	pk_txt(*sv ? sv : "\"\"");
+	if (!set)
+	{
+		pk_sgr(sel ? "0;7;2" : "2");
+		pk_txt("  (default)");
+	}
+}
+
 static void
 pk_draw(struct pk *p, int fd, const char *header, int force)
 {
 	struct winsize ws;
 	const char *keys[40];
 	char b[64], sortl[32], intr[48];
-	int nk = 0, k, t, tcol = 4, cols = 80, rows = 24, n = p->n[p->tab];
-	int *sel = &p->sel[p->tab], *top = &p->top[p->tab];
+	int nk = 0, k, t, tcol = 4, cols = 80, rows = 24;
+	int n = p->settings ? (int)NCONF : p->n[p->tab];
+	int *sel = p->settings ? &p->cfsel : &p->sel[p->tab];
+	int *top = p->settings ? &p->cftop : &p->top[p->tab];
 
 	if (ioctl(fd, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0 && ws.ws_row > 0)
 	{
@@ -8133,9 +8238,15 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 	pk_color = p->color;
 
 #define PK_K(k, l) (keys[nk++] = (k), keys[nk++] = (l))
-	PK_K("enter", p->tab < 2 ? "attach" : "resume");
-	if (p->tab < 2)
+	if (p->settings)
 	{
+		PK_K("enter", "change");
+		PK_K("u", "default");
+		PK_K("esc", "back");
+	}
+	else if (p->tab < 2)
+	{
+		PK_K("enter", "attach");
 		snprintf(sortl, sizeof sortl, "sort: %s", p->byname ? "name"
 		         : "activity");
 		PK_K("r", "rename");
@@ -8149,6 +8260,7 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 	}
 	else
 	{
+		PK_K("enter", "resume");
 		PK_K("m", "resume without message");
 		if (p->interrupted)
 		{
@@ -8159,8 +8271,12 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 		PK_K("p", "pin/unpin");
 		PK_K("d", "remove");
 	}
-	PK_K("tab", "switch");
-	PK_K("q", "quit");
+	if (!p->settings)
+	{
+		PK_K(",", "settings");
+		PK_K("tab", "switch");
+		PK_K("q", "quit");
+	}
 #undef PK_K
 
 	p->win = rows - 3 - pk_keys(keys, nk, 0);
@@ -8183,7 +8299,13 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 	pk_eol();
 
 	pk_line();
-	for (t = 0; t < 3; t++)
+	if (p->settings)
+	{
+		pk_sgr("1;7");
+		pk_txt(pk_color ? " Settings " : "[Settings]");
+		pk_sgr("");
+	}
+	for (t = 0; t < 3 && !p->settings; t++)
 	{
 		if (!pk_shown(p, t))
 			continue;
@@ -8206,8 +8328,13 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 	/* the title column: the widest shown, within what the screen leaves
 	** for the marker, glyph and state */
 	for (k = *top; k < n && k < *top + p->win; k++)
-		if (pk_cps(p->r[p->tab][k].title) > tcol)
-			tcol = pk_cps(p->r[p->tab][k].title);
+	{
+		int w = pk_cps(p->settings ? config_keys[k].key
+		               : p->r[p->tab][k].title);
+
+		if (w > tcol)
+			tcol = w;
+	}
 	if (tcol > 40)
 		tcol = 40;
 	if (tcol > pk_w - 19)
@@ -8217,7 +8344,9 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 	for (k = *top; k < *top + p->win; k++)
 	{
 		pk_line();
-		if (k < n)
+		if (k < n && p->settings)
+			pk_cfrow(k, k == *sel, tcol);
+		else if (k < n)
 			pk_row(p, &p->r[p->tab][k], k == *sel, tcol);
 		else if (k == 0)
 		{
@@ -8422,6 +8551,106 @@ pk_rename(struct pk *p, int fd, const struct pkrow *w)
 	p->loaded = 0;
 }
 
+/* The sort the config asks for. */
+static int
+pk_cfbyname(void)
+{
+	char v[16];
+
+	return dch_config_get("picker_sort", v, sizeof v) && !strcmp(v, "name");
+}
+
+/* Write config key k (s NULL: back to its default) and apply it at once:
+** the sort, and a reload for the sidekick split. */
+static void
+pk_cfset(struct pk *p, int k, const char *s)
+{
+	const char *key = config_keys[k].key;
+
+	if (config_set(k, s) < 0)
+		snprintf(p->status, sizeof p->status, "%s: %s", key,
+		         errno == EINVAL ? "one line, at most 900 bytes"
+		         : strerror(errno));
+	else if (s)
+		snprintf(p->status, sizeof p->status, "%s = %s", key, s);
+	else
+		snprintf(p->status, sizeof p->status, "%s: default", key);
+	p->byname = pk_cfbyname();
+	p->loaded = 0;
+}
+
+/* The settings view's keys (#082), driven by config_keys: Enter toggles a
+** bool (auto_allow on asks first), cycles a choice, or prompts for a line;
+** u goes back to the default. 0: go on; -1: quit. */
+static int
+pk_cfdo(struct pk *p, int fd, int c)
+{
+	int k = p->cfsel, set;
+	const char *ch = config_keys[k].choices, *sv, *m;
+	char v[1024], nv[1024], q[1100], pos[32];
+
+	switch (c)
+	{
+	case 3: case 4:
+		return -1;
+	case 'q': case ',': case PK_ESC:
+		p->settings = 0;
+		return 0;
+	case 'j': case PK_DOWN:
+		p->cfsel += p->cfsel < (int)NCONF - 1;
+		return 0;
+	case 'k': case PK_UP:
+		p->cfsel -= p->cfsel > 0;
+		return 0;
+	case 'g': case PK_HOME:
+		p->cfsel = 0;
+		return 0;
+	case 'G': case PK_END:
+		p->cfsel = (int)NCONF - 1;
+		return 0;
+	case 'u':
+		pk_cfset(p, k, NULL);
+		return 0;
+	case '\r': case '\n':
+		break;
+	default:
+		return 0;
+	}
+	sv = config_show(k, v, sizeof v, &set);
+	if (config_keys[k].is_bool && !strcmp(sv, "true"))
+		pk_cfset(p, k, "false");
+	else if (config_keys[k].is_bool && !strcmp(config_keys[k].key,
+	                                           "auto_allow"))
+	{
+		p->askcfg = k + 1;
+		pk_ask(p, "Turn auto_allow on? The master answers Claude Code's "
+		       "plain permission prompts with Yes.");
+	}
+	else if (config_keys[k].is_bool)
+		pk_cfset(p, k, "true");
+	else if (ch)
+	{
+		/* the next choice, round to the first */
+		m = config_choice(ch, sv);
+		m = m && m[strcspn(m, "|")] ? m + strcspn(m, "|") + 1 : ch;
+		snprintf(nv, sizeof nv, "%.*s", (int)strcspn(m, "|"), m);
+		pk_cfset(p, k, nv);
+	}
+	else
+	{
+		/* one cooked line on the status row, as rename */
+		snprintf(pos, sizeof pos, "\033[%d;1H", p->status_row);
+		tw(fd, pos);
+		snprintf(q, sizeof q, "new %s (^D keeps it): ",
+		         config_keys[k].key);
+		if (prompt_line(fd, q, nv, sizeof nv) == 0)
+			pk_cfset(p, k, nv);
+		picker_raw_on(fd);
+		pk_pn = 0;
+	}
+	return 0;
+}
+
 /* The first free <name>-2, -3, ... when name is live; "" when it is not. */
 static void
 pk_free_name(const struct pk *p, const char *name, char *as, size_t asz)
@@ -8453,16 +8682,25 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 	if (p->asking)
 	{
 		p->asking = 0;
-		if (c == 'y' || c == 'Y')
-			pk_start(p, &p->ask);
-		else
+		if (c != 'y' && c != 'Y')
 			snprintf(p->status, sizeof p->status, "cancelled");
+		else if (p->askcfg)
+			pk_cfset(p, p->askcfg - 1, "true");
+		else
+			pk_start(p, &p->ask);
+		p->askcfg = 0;
 		return 0;
 	}
+	if (p->settings)
+		return pk_cfdo(p, fd, c);
 	switch (c)
 	{
 	case 'q': case 3: case 4: case PK_ESC:
 		return -1;
+	case ',':
+		p->settings = 1;
+		p->status[0] = '\0';
+		return 0;
 	case 'j': case PK_DOWN:
 		*sel += *sel < p->n[t] - 1;
 		return 0;
@@ -8497,6 +8735,10 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 			pk_selnames(p, names);
 			p->byname = !p->byname;
 			pk_sort(p, names);
+			if (config_set(config_key("picker_sort"), p->byname
+			               ? "name" : "activity") < 0)
+				snprintf(p->status, sizeof p->status, "sort: not "
+				         "saved (%s)", strerror(errno));
 		}
 		return 0;
 	}
@@ -8759,6 +9001,7 @@ pick_session(const char *header, char *out, size_t outsz)
 	memset(&p, 0, sizeof p);
 	p.pid = -1;
 	p.color = !(nc && *nc) && term && *term && strcmp(term, "dumb") != 0;
+	p.byname = pk_cfbyname();
 	pk_load(&p);
 	p.loaded = pk_ms();
 	if (!p.n[0] && !p.n[1] && !p.n[2])

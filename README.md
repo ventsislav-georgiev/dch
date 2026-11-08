@@ -89,7 +89,7 @@ Explicit aliases win. `--ls-json` keeps the real `name`, `alias`, and resolved
 
 ### The session picker
 
-`dch -l`, `dch -k` / `dch -d` without a name, and the double-tap switch open
+`dch -l`, `dch -k` / `dch -d` without a name, and the detach-key switch open
 the same full-screen picker, modelled on Prosper's Agent Island. It has up to
 three tabs: **Sessions**; **Sidekicks (n)**, the live sessions whose name or
 alias matches `sidekick_pattern` in the config file (a POSIX extended regex,
@@ -114,12 +114,21 @@ once a second and keeps the selection on the same session.
 | `x` | kill (`-k`), asks first | |
 | `a` | allow a plain Yes/No permission prompt (presses `1`, Yes), asks first; a question form or any other prompt is refused: attach to answer it | |
 | `b` / `B` | restart stale agents / restart all agents (force), asks first | |
-| `s` | sort by activity (blocked, working, done, idle, newest first) or by name (`a2` before `a10`) | |
+| `s` | sort by activity (blocked, working, done, idle, newest first) or by name (`a2` before `a10`); saved as `picker_sort`, so the next picker starts in it | |
 | `m` | | resume without the message (`--no-message`) |
 | `I` | | resume interrupted (n) (`--revive --all`), asks first |
 | `p` | | pin / unpin |
 | `d` | | remove (`--forget`), asks first; a pinned record must be unpinned first |
+| `,` | settings | settings |
 | `q` `Esc` `Ctrl-C` | quit | quit |
+
+`,` opens **Settings**: every [config file](#config-file) key with its value,
+`(default)` when the file has none. `Enter` changes the selected one — a bool
+toggles (turning `auto_allow` on asks first), a choice (`picker_sort`,
+`detach_key`) steps to the next, a string (`sidekick_pattern`; empty: no
+Sidekicks tab) is typed on the status line, `Ctrl-D` keeping it. `u` resets
+the key to its default, `Esc` or `q` goes back. Each change is written like
+`dch --config` does and applies at once (the sort, the Sidekicks split).
 
 A question waits for `y`; any other key cancels. Actions run the matching
 `dch` verb in the background: the status line shows `restarting …` while it
@@ -233,6 +242,11 @@ the picker (`q` / `Esc`) just leaves you detached. A single press still detaches
 — it waits out the double-press window first. `DCH_DOUBLE_TAP_MS` sets that
 window in milliseconds (default `300`); `DCH_DOUBLE_TAP_MS=0` turns switching
 off and makes detach instant again.
+
+`detach_key = switch` in the [config file](#config-file) swaps the two: one
+press opens the picker, two detach. With `DCH_DOUBLE_TAP_MS=0` one press then
+opens the picker at once and the key never detaches; quit the picker (`q`) or
+use `dch -d`. Read at each attach.
 
 ## Agent API
 
@@ -562,7 +576,9 @@ running sessions.
 | Key | Value | Default |
 | --- | --- | --- |
 | `auto_allow` | `true`/`false` (also `1`/`0`, `yes`/`no`, `on`/`off`): the master answers Claude Code's plain permission prompts, see [Auto-allow](#auto-allow) | `false` |
-| `sidekick_pattern` | a string, read by the session picker | unset |
+| `sidekick_pattern` | a string, read by the session picker; empty: no Sidekicks tab | `-qa` |
+| `picker_sort` | `activity` or `name`: the session picker's sort, also set by its `s` key | `activity` |
+| `detach_key` | `detach` or `switch`: what one `Ctrl-\` press does; two presses do the other (see [Cheatsheet](#cheatsheet)) | `detach` |
 
 ```sh
 dch --config                         # the path, then every known key's effective value
@@ -573,8 +589,9 @@ dch --config auto_allow --unset      # remove it
 
 Setting rewrites the file whole (a temp file renamed over it, the target of a
 symlinked one), keeps every other line and comment, and creates the parent
-directory. An unknown key, or a bool key given anything else, is refused with
-exit 1.
+directory. An unknown key, a bool key given anything else, or a choice key
+given a value not its own, is refused with exit 1. The session picker's
+settings view (`,`) sets the same keys the same way.
 
 ### Auto-allow
 

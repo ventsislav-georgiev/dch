@@ -262,10 +262,11 @@ detach_hits(struct packet *pkt)
 }
 
 /* How long a single detach press waits for a second one before it commits to
-** detaching. Long enough for a comfortable double-tap, short enough that a
-** plain detach still feels instant — but "comfortable" is a property of the
-** person typing, so DCH_DOUBLE_TAP_MS overrides it. 0 disables the switch
-** shortcut entirely and makes detach instant again. */
+** its own action (detaching, unless detach_key = switch). Long enough for a
+** comfortable double-tap, short enough that a plain detach still feels
+** instant — but "comfortable" is a property of the person typing, so
+** DCH_DOUBLE_TAP_MS overrides it. 0 disables the double press entirely and
+** makes the single press act at once. */
 #define DETACH_DOUBLE_MS	300
 
 /* Monotonic "now", so an NTP step mid-window can neither fire the detach early
@@ -313,7 +314,24 @@ detach_double_us(void)
 /* process_kbd return values. */
 #define KBD_OK		0
 #define KBD_DETACH	1	/* one detach-key press */
-#define KBD_SWITCH	2	/* two presses — open the session picker */
+#define KBD_SWITCH	2	/* two presses (detach_key_done says what each does) */
+
+/* What the detach key's presses mean: one detaches and two open the picker,
+** or with detach_key = switch (#082), read once per attach, the other way
+** round. Detaching exits; the picker returns ATTACH_SWITCH to the caller,
+** the same way from either. */
+static int detach_swap;
+
+static int
+detach_key_done(int s, int twice)
+{
+	if (twice == detach_swap)
+		exit(0);
+	dch_trace("client switch requested");
+	restore_term();
+	close(s);
+	return ATTACH_SWITCH;
+}
 
 /* Handles input from the keyboard. Returns one of KBD_*; on anything but
 ** KBD_OK the buffer is swallowed rather than forwarded. */
@@ -443,6 +461,12 @@ attach_main(int noerror)
 	/* The current terminal settings are equal to the original terminal
 	** settings at this point. */
 	cur_term = orig_term;
+	{
+		char v[16];
+
+		detach_swap = dch_config_get("detach_key", v, sizeof v) &&
+		              !strcmp(v, "switch");
+	}
 
 	/* Set a trap to restore the terminal when we die. Once only: a session
 	** switch re-enters attach_main in the same process, and atexit slots
@@ -516,8 +540,8 @@ attach_main(int noerror)
 			now_us(&now);
 			us = (detach_at.tv_sec - now.tv_sec) * 1000000L
 			   + (detach_at.tv_usec - now.tv_usec);
-			if (us <= 0)
-				exit(0);	/* window expired — plain detach */
+			if (us <= 0)	/* window expired — one press */
+				return detach_key_done(s, 0);
 			tv.tv_sec = us / 1000000;
 			tv.tv_usec = us % 1000000;
 			tvp = &tv;
@@ -565,18 +589,13 @@ attach_main(int noerror)
 			long w = detach_double_us();
 
 			/* Two presses — one burst, or one inside the window the
-			** first press opened — mean "switch session". */
+			** first press opened. */
 			if (k == KBD_SWITCH || (k == KBD_DETACH && detach_pending))
-			{
-				dch_trace("client switch requested");
-				restore_term();
-				close(s);
-				return ATTACH_SWITCH;
-			}
+				return detach_key_done(s, 1);
 			if (k == KBD_DETACH)
 			{
-				if (w == 0)
-					exit(0);	/* switching disabled */
+				if (w == 0)	/* no double press: one, at once */
+					return detach_key_done(s, 0);
 				detach_pending = 1;
 				now_us(&detach_at);
 				detach_at.tv_usec += w;
@@ -584,9 +603,9 @@ attach_main(int noerror)
 				detach_at.tv_usec %= 1000000;
 			}
 			/* Anything else ends the window: the first press stands
-			** on its own and means detach. */
+			** on its own. */
 			else if (detach_pending)
-				exit(0);
+				return detach_key_done(s, 0);
 
 			n--;
 		}

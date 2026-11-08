@@ -4,7 +4,8 @@ prompt when the user config says `auto_allow = true`, and `dch --config`.
 Drives tests/fake_claude.py as `claude` first on PATH (its `screen` knob
 paints a dialog and logs every key typed into it), with HOME, the runtime
 dir and DCH_CONFIG temporary. Covers: --config (show, get, set keeping
-comments and other lines, --unset, unknown key, bad bool); auto_allow off
+comments and other lines, --unset, unknown key, bad bool, picker_sort and
+detach_key taking only their choices); auto_allow off
 answers nothing; on answers "1" once, never the "don't ask again" row, and
 --ls-json shows auto_allowed {at,title}; prompts outside Prosper's rule are
 left alone (a "don't ask again" Yes only, four options, a mode-change row,
@@ -171,7 +172,8 @@ def main():
         r = run("--config")
         check("--config with no file: the path, then the defaults",
               r.returncode == 0 and r.stdout.splitlines() ==
-              [cfg, "auto_allow = false", "sidekick_pattern = -qa"])
+              [cfg, "auto_allow = false", "sidekick_pattern = -qa",
+               "picker_sort = activity", "detach_key = detach"])
         r = run("--config", "auto_allow")
         check("--config <key> unset: exit 1, nothing printed, no error",
               r.returncode == 1 and r.stdout == r.stderr == "")
@@ -185,7 +187,18 @@ def main():
         check("--config auto_allow <not a bool>: exit 1",
               r.returncode == 1 and "true or false" in r.stderr and
               not os.path.exists(cfg))
+        for k, bad in (("picker_sort", "size"), ("detach_key", "Switch"),
+                       ("picker_sort", "")):
+            r = run("--config", k, bad)
+            check("--config %s %r: exit 1, names the choices" % (k, bad),
+                  r.returncode == 1 and " takes " in r.stderr and
+                  not os.path.exists(cfg))
         os.makedirs(os.path.dirname(cfg))
+        for k, good in (("picker_sort", "name"), ("detach_key", "switch")):
+            r = run("--config", k, good)
+            check("--config %s %s: set" % (k, good), r.returncode == 0 and
+                  run("--config", k).stdout == good + "\n")
+        os.unlink(cfg)
         with open(cfg, "w") as f:
             f.write("# mine\nsidekick_pattern = old\nother = 1\n"
                     "sidekick_pattern = older\nlast = x")
