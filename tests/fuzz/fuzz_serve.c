@@ -10,6 +10,9 @@
 
 int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n);
 
+#define NODE_OK "abcdefghijklmnopqrstuvwxyz" \
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_."
+
 /* Every event of a parse, as bytes: two parses of one stream must match. */
 static struct sb ev;
 
@@ -119,7 +122,8 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 	struct json_parser jp;
 	struct gate g;
 	char *text, repo[128], login[64];
-	long long num, uid, node;
+	char node[NODE_ID_MAX];
+	long long num, uid;
 	int tagged;
 
 	parse_whole(d, n, &a);
@@ -141,13 +145,18 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		dch_json_free(&jp);
 	}
 	free(rows.p);
-	if (whois_user(text, &uid, &node, login, sizeof login, &tagged) == 0 &&
-	    node < 0)
-		abort();	/* a usable whois always names its node */
-	(void)status_self(text, &uid, &node, &tagged);
+	/* a node id, when there is one, is plain (ASan checks it fits) */
+	if (whois_user(text, &uid, node, login, sizeof login, &tagged) == 0 &&
+	    node[strspn(node, NODE_OK)])
+		abort();
+	if (status_self(text, &uid, node, &tagged) == 0 &&
+	    node[strspn(node, NODE_OK)])
+		abort();
 	memset(&g, 0, sizeof g);
 	g.self_uid = n ? d[0] : -1;
-	g.self_node = n > 2 ? d[2] : -1;
+	if (n > 2 && d[2] & 1)
+		snprintf(g.self_node, sizeof g.self_node, "n%uCNTRL",
+		         (unsigned)d[2]);
 	g.allow[g.nallow++] = "7";
 	g.allow[g.nallow++] = "me@example.com";
 	g.whois_optional = n > 1 && d[1] & 1;
