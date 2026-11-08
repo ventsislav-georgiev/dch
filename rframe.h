@@ -70,6 +70,8 @@ int jcont(const struct json_parser *jp, int obj, const char *key,
 int jnode(const struct json_parser *jp, int obj, const char *key, char *out);
 int has_tags(const struct json_parser *jp, int obj);
 int status_self(const char *js, long long *uid, char *node, int *tagged);
+int whois_user(const char *js, long long *uid, char *node, char *login,
+               size_t lcap, int *tagged);
 
 extern volatile sig_atomic_t g_stop;	/* set: subprocesses are cut short */
 long long now_ms(void);

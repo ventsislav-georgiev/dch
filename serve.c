@@ -427,37 +427,6 @@ all_digits(const char *s)
 	return *s && s[strspn(s, "0123456789")] == '\0';
 }
 
-/* `tailscale whois --json`: UserProfile.ID into *uid, LoginName into login,
-** Node.StableID into node[NODE_ID_MAX] ("" when absent), *tagged when the
-** node has tags (or an odd Tags) or is the tagged-devices identity. 0, or
-** -1 when the document is unusable: no single UserProfile with an integer
-** ID, no single Node, a StableID that is not a node id. Node.ID (an int64
-** on both control planes) is not used. */
-static int
-whois_user(const char *js, long long *uid, char *node, char *login,
-           size_t lcap, int *tagged)
-{
-	struct json_parser jp;
-	int up, nd, rc = -1;
-
-	*tagged = 0;
-	*node = '\0';
-	login[0] = '\0';
-	if (dch_json_parse(&jp, js) == 0 && jp.tok[0].kind == JSON_OBJECT &&
-	    (up = jcont(&jp, 0, "UserProfile", JSON_OBJECT)) >= 0 &&
-	    jint(&jp, up, "ID", uid) == 1 &&
-	    (nd = jcont(&jp, 0, "Node", JSON_OBJECT)) >= 0 &&
-	    jnode(&jp, nd, "StableID", node) >= 0)
-	{
-		if (jstr(&jp, up, "LoginName", login, lcap) != 1)
-			login[0] = '\0';
-		*tagged = has_tags(&jp, nd) || !strcmp(login, "tagged-devices");
-		rc = 0;
-	}
-	dch_json_free(&jp);
-	return rc;
-}
-
 /* The decision for a peer, right after accept and before a byte is read.
 ** ip: its address. self: it is one of this host's own addresses (a local
 ** process can connect from those). whois: `tailscale whois --json`, NULL
