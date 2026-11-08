@@ -1,0 +1,1 @@
+[{"name": "a", "alias": "b", "state": "idle", "agents": 2, "meta_epoch": 5, "meta": {"prs": {"merged": 1, "open": [{"url": "https://github.com/o/r/pull/12", "title": "t"}]}}}, {"name": "c", "harness": "claude", "state": "weird"}]

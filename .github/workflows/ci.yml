@@ -152,10 +152,10 @@ jobs:
           for v in full lite; do
             if [ $v = lite ]; then
               ./configure --without-libghostty
-              srcs="attach.c master.c dch.c vt_stub.c bridge.c"
+              srcs="attach.c master.c dch.c vt_stub.c bridge.c serve.c"
             else
               ./configure
-              srcs="attach.c master.c dch.c vt.c bridge.c"
+              srcs="attach.c master.c dch.c vt.c bridge.c serve.c"
             fi
             for f in $srcs; do
               clang --analyze -Xanalyzer -analyzer-werror -I. \
