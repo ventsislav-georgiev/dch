@@ -47,6 +47,11 @@ static char sock_dir[1024];
 static char sock_path[1100];
 static char session_name[512];
 static char client_pidfile[1200];
+/* Remote hosts (#087), remote.c. remote_ok: an attach may name host:name
+** (-a, and a pick from the attach pickers); attach_only: -a, which never
+** creates; remote_host: --host; pk_remote: the picker lists remote rows. */
+static int remote_ok, attach_only, pk_remote;
+static const char *remote_host;
 
 /* Write a buffer or exit — used by attach.c and master.c (declared in
 ** dtach.h). Lives here to keep main.c-equivalent self-contained. */
@@ -238,6 +243,10 @@ static const struct
 	/* what one Ctrl-\ press does; two do the other (#082) */
 	{ "detach_key", 0, "detach", "detach|switch",
 	  "What one Ctrl-\\ press does; two do the other" },
+	/* the remote hosts -ls and the picker list (#087) */
+	{ "remote_hosts", 0, "", NULL,
+	  "Remote hosts: [label=]host[:port],...; empty: your tailnet "
+	  "peers; off: none" },
 };
 #define NCONF (sizeof config_keys / sizeof *config_keys)
 
@@ -2404,8 +2413,15 @@ usage(void)
 	    "  dch -l           pick a session and attach (mirror)\n"
 	    "  dch -k [name]    kill session; without name, pick interactively\n"
 	    "  dch -kl          kill ALL sessions\n"
-	    "  dch -ls          list sessions (one per line)\n"
+	    "  dch -ls, --ls    list sessions (one per line), then remote\n"
+	    "                   ones as host:name\n"
 	    "  dch -lj          list sessions as name<TAB>alias<TAB>activity_epoch per line\n"
+	    "  dch -a <name>    attach to a session, never create one;\n"
+	    "                   host:name attaches to one on a remote host\n"
+	    "  dch --host <h> -a <name>  attach to <name> on host h\n"
+	    "  dch --hosts <h1,h2,...>   the remote hosts, [label=]host[:port],\n"
+	    "                   instead of your online tailnet peers\n"
+	    "  dch --remote     with -lj and --ls-json: remote rows too\n"
 	    "  dch -rl          interactively rename (alias) sessions\n"
 	    "  dch -m <name> [alias]  set alias non-interactively (empty clears)\n"
 	    "  dch -d [name]    detach all clients of session (sends SIGUSR1)\n"
@@ -2509,7 +2525,8 @@ usage(void)
 	    "                                             end the session as\n"
 	    "                                             \"stopped\"; dch --revive\n"
 	    "                                             <name> wakes it resumed\n"
-	    "  dch --ls-json    like -lj but JSON, adds \"state\"\n"
+	    "  dch --ls-json    like -lj but JSON, adds \"state\"; --remote\n"
+	    "                   adds remote rows, each with a \"host\"\n"
 	    "  dch --config [<key> [<value>|--unset]]     show the config file\n"
 	    "                                             (path, then each key),\n"
 	    "                                             one key, or set/remove\n"
@@ -2523,7 +2540,9 @@ usage(void)
 	    "                                             (activity|name),\n"
 	    "                                             detach_key\n"
 	    "                                             (detach|switch: what\n"
-	    "                                             one Ctrl-\\ does); the\n"
+	    "                                             one Ctrl-\\ does),\n"
+	    "                                             remote_hosts (off,\n"
+	    "                                             or a --hosts list); the\n"
 	    "                                             picker's , key edits\n"
 	    "                                             them too\n"
 	    "  dch --agent-list [--json]                  list native Claude peers\n"
@@ -2536,6 +2555,7 @@ usage(void)
 	    "     DCH_CONFIG names the config file (else\n"
 	    "     $XDG_CONFIG_HOME/dch/config, else ~/.config/dch/config).\n"
 	    "     DCH_NO_HISTORY=1 at session start keeps no history record.\n"
+	    "     DCH_NO_REMOTE=1 lists no remote hosts (but --hosts).\n"
 	    "     DCH_NO_*: empty or 0 is off.\n"
 	    "     DCH_DOUBLE_TAP_MS sets the switch double-press window\n"
 	    "     (default 300; 0 disables it, one press acts at once).\n"
@@ -2734,6 +2754,25 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 		return 1;
 	}
 
+	/* Remote (#087): --host names the host; else an exact local name
+	** wins, and host:name is remote. */
+	if (remote_host)
+		return dch_remote_attach(remote_host, session_name);
+	if (remote_ok)
+	{
+		char sp[1100], host[512];
+		struct stat st;
+		char *colon = strchr(session_name, ':');
+
+		session_sock_path(session_name, sp, sizeof sp);
+		if ((stat(sp, &st) < 0 || !S_ISSOCK(st.st_mode)) && colon)
+		{
+			snprintf(host, sizeof host, "%.*s",
+			         (int)(colon - session_name), session_name);
+			return dch_remote_attach(host, colon + 1);
+		}
+	}
+
 	/* If auto-attaching and base is busy, advance to next free slot. */
 	if (!forced_name && !force)
 	{
@@ -2773,6 +2812,16 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 
 	if (make_sock_path(session_name) < 0)
 		return 1;
+	{
+		struct stat st;
+
+		if (attach_only && (stat(sock_path, &st) < 0 ||
+		                    !S_ISSOCK(st.st_mode)))
+		{
+			fprintf(stderr, "no session: %s\n", session_name);
+			return 1;
+		}
+	}
 
 	if (tcgetattr(0, &orig_term) < 0)
 	{
@@ -2802,6 +2851,11 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 			return ATTACH_SWITCH;
 		dch_trace("hot-path connect failed; dead socket, respawning");
 	}
+	}
+	if (attach_only)
+	{
+		fprintf(stderr, "no session: %s\n", session_name);
+		return 1;
 	}
 
 	/* No node, a stray non-socket file, or a dead socket: clear whatever is
@@ -2842,12 +2896,16 @@ attach_with_switch(char *exe, int forced_name, int force, char **inner_argv,
 
 		if (rc != ATTACH_SWITCH)
 			return rc;
+		pk_remote = 1;
 		if (pick_session("switch to session:", chosen,
 		                 sizeof(chosen)) != 0)
 			return 0;
 		snprintf(session_name, sizeof(session_name), "%s", chosen);
 		forced_name = 1;
 		force = 1;
+		remote_ok = 1;
+		attach_only = 0;
+		remote_host = NULL;
 	}
 }
 
@@ -7724,6 +7782,7 @@ struct pkrow
 	char prs[400], cwd[300];
 	long when, merged;	/* last output; History: when it ended */
 	int agents, pinned;
+	int remote;		/* host:name (#087): 1, 2 when stale */
 };
 
 struct pkact
@@ -7921,7 +7980,8 @@ pk_load(struct pk *p)
 	const char *home = getenv("HOME");
 	size_t hl = home ? strlen(home) : 0;
 	regex_t re;
-	int mode = 0, k, t, nh, pin;
+	struct dch_rrow *rr = NULL;
+	int mode = 0, k, t, nh, pin, nr;
 
 	pk_selnames(p, sel);
 	for (t = 0; t < 3; t++)
@@ -7948,7 +8008,8 @@ pk_load(struct pk *p)
 	load_aliases(&sl);
 	load_harness_names(&sl);
 	load_codex_names(&sl);
-	p->r[0] = calloc((size_t)sl.n + 1, sizeof **p->r);
+	nr = pk_remote ? dch_remote_rows(&rr, 0) : 0;
+	p->r[0] = calloc((size_t)(sl.n + nr) + 1, sizeof **p->r);
 	p->r[1] = calloc((size_t)sl.n + 1, sizeof **p->r);
 	for (k = 0; p->r[0] && p->r[1] && k < sl.n; k++)
 	{
@@ -7972,6 +8033,21 @@ pk_load(struct pk *p)
 	if (mode == 1)
 		regfree(&re);
 	slist_free(&sl);
+	/* the other hosts' sessions, by their host:name, as they last
+	** answered (remote.c re-probes them behind the picker) */
+	for (k = 0; p->r[0] && k < nr; k++)
+	{
+		struct pkrow *w = &p->r[0][p->n[0]++];
+		char e[sizeof w->title - DCH_RHOST_MAX];
+
+		snprintf(w->name, sizeof w->name, "%s:%s", rr[k].host,
+		         rr[k].name);
+		dch_remote_esc(e, sizeof e, rr[k].name);
+		snprintf(w->title, sizeof w->title, "%s:%s", rr[k].host, e);
+		snprintf(w->state, sizeof w->state, "%s", rr[k].state);
+		w->remote = rr[k].stale ? 2 : 1;
+	}
+	free(rr);
 
 	nh = history_load(&h);
 	p->r[2] = calloc((size_t)nh + 1, sizeof **p->r);
@@ -8702,10 +8778,31 @@ pk_row(const struct pk *p, const struct pkrow *w, int sel)
 		pk_lead(sel, PK_P(PK_ACC), !w->pinned ? " " : pk_utf
 		        ? "\xe2\x97\x86" : "*");
 	else
-		pk_lead(sel, pk_hue(w->state), pk_glyph(w->state));
-	pk_fit(w->title, pk_c.name);
+		pk_lead(sel, w->remote == 2 ? "2" : pk_hue(w->state),
+		        pk_glyph(w->state));
+	if (w->remote)
+	{
+		/* host: faint, the name as a local one; all faint when stale.
+		** The host is a plain label, so its ':' is the first. */
+		const char *c = strchr(w->title, ':');
+		int end = pk_col + pk_c.name;
+
+		snprintf(b, sizeof b, "%.*s", c ? (int)(c - w->title + 1) : 0,
+		         w->title);
+		pk_set("2");
+		pk_txtto(b, end);
+		pk_set(w->remote == 2 ? "2" : sel ? "1" : "");
+		pk_fit(c ? c + 1 : w->title, end - pk_col);
+	}
+	else
+		pk_fit(w->title, pk_c.name);
 	pk_gap();
-	if (hist)
+	if (w->remote == 2)
+	{
+		pk_set("2");
+		pk_fit("Stale", pk_c.state);
+	}
+	else if (hist)
 	{
 		const char *e = pk_end(w->state, b, sizeof b);
 
@@ -9411,6 +9508,17 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 		         "with '-' needs the command line", w->name);
 		return 0;
 	}
+	/* ponytail: a remote row only attaches; kill, rename, restart and
+	** the rest need ops-gated frames and the same confirmation (#087) */
+	if (w->remote)
+	{
+		if ((c == '\r' || c == '\n') &&
+		    (size_t)snprintf(out, outsz, "%s", w->name) < outsz)
+			return 1;
+		snprintf(p->status, sizeof p->status, "%s: a remote session; "
+		         "Enter attaches, nothing else here yet", w->title);
+		return 0;
+	}
 	if (t < 2)
 		switch (c)
 		{
@@ -9641,6 +9749,15 @@ pick_session(const char *header, char *out, size_t outsz)
 	           (atoi(fgbg + 1) == 7 || atoi(fgbg + 1) == 15);
 	p.byname = pk_cfbyname();
 	pk_load(&p);
+	if (pk_remote && !p.n[0] && !p.n[1] && !p.n[2])
+	{
+		/* nothing here and nothing cached: probe once, in the box */
+		struct dch_rrow *rr;
+
+		(void)dch_remote_rows(&rr, 1);
+		free(rr);
+		pk_load(&p);
+	}
 	p.loaded = pk_ms();
 	if (!p.n[0] && !p.n[1] && !p.n[2])
 	{
@@ -10732,6 +10849,7 @@ main(int argc, char **argv)
 	int opt_ansi = 0, opt_recent = -1, opt_timeout = 10000, opt_cursor = 0;
 	int opt_all = 0, opt_cancel = 0, opt_agents = 0, opt_nomsg = 0;
 	int opt_agent_json = 0, opt_hist_json = 0, opt_json = 0;
+	int opt_remote = 0;
 	int say_at = 0, say_n = 0;
 	char opt_as[512] = "";
 	int opt_cols = 0, opt_rows = 0;
@@ -10841,9 +10959,51 @@ main(int argc, char **argv)
 			action = A_LIST;
 			i++;
 		}
-		else if (strcmp(a, "-ls") == 0)
+		else if (strcmp(a, "-ls") == 0 || strcmp(a, "--ls") == 0)
 		{
 			action = A_LISTRAW;
+			i++;
+		}
+		else if (strcmp(a, "-a") == 0)
+		{
+			/* attach, never create; host:name may be remote */
+			if (++i >= argc || !argv[i][0])
+			{
+				fprintf(stderr, "dch: -a needs a name\n");
+				return 1;
+			}
+			if (strlen(argv[i]) >= sizeof session_name)
+			{
+				fprintf(stderr, "dch: name is too long\n");
+				return 1;
+			}
+			snprintf(session_name, sizeof(session_name), "%s",
+			         argv[i++]);
+			action = A_ATTACH;
+			forced_name = force = attach_only = remote_ok = 1;
+		}
+		else if (strcmp(a, "--host") == 0 || strcmp(a, "--hosts") == 0)
+		{
+			if (++i >= argc || !argv[i][0])
+			{
+				fprintf(stderr, "dch: %s needs a value\n", a);
+				return 1;
+			}
+			if (a[6] == 's' ? dch_remote_set_hosts(argv[i]) < 0
+			    : strchr(argv[i], ':') != NULL)
+			{
+				if (a[6] != 's')
+					fprintf(stderr, "dch: --host takes a "
+					        "host's label, no ':'\n");
+				return 1;
+			}
+			if (a[6] != 's')
+				remote_host = argv[i];
+			i++;
+		}
+		else if (strcmp(a, "--remote") == 0)
+		{
+			opt_remote = 1;
 			i++;
 		}
 		else if (strcmp(a, "-lj") == 0)
@@ -11306,6 +11466,21 @@ main(int argc, char **argv)
 	int inner_argc = argc - i;
 	char **inner_argv = argv + i;
 
+	if (remote_host && !attach_only)
+	{
+		fprintf(stderr, "dch: --host only works with -a <name>\n");
+		return 1;
+	}
+	if (attach_only && inner_argc > 0)
+	{
+		fprintf(stderr, "dch: -a attaches; it runs no command\n");
+		return 1;
+	}
+	if (opt_remote && action != A_LISTJSON && action != A_LISTJSON2)
+	{
+		fprintf(stderr, "dch: --remote only works with -lj, --ls-json\n");
+		return 1;
+	}
 	/* --cancel only means something to --respawn; elsewhere it would be
 	** silently ignored, so refuse it. */
 	if (opt_cancel && action != A_RESPAWN)
@@ -11453,6 +11628,25 @@ main(int argc, char **argv)
 			puts(row);
 		}
 		slist_free(&sl);
+		/* then the other hosts' (#087), escaped: a peer wrote them */
+		{
+			struct dch_rrow *rr;
+			int n = dch_remote_rows(&rr, 1);
+			char en[1100], ea[1100];
+
+			for (k = 0; k < n; k++)
+			{
+				dch_remote_esc(en, sizeof en, rr[k].name);
+				dch_remote_esc(ea, sizeof ea, rr[k].alias);
+				if (ea[0])
+					printf("%s (%s:%s)%s\n", ea, rr[k].host, en,
+					       rr[k].stale ? " [stale]" : "");
+				else
+					printf("%s:%s%s\n", rr[k].host, en,
+					       rr[k].stale ? " [stale]" : "");
+			}
+			free(rr);
+		}
 		return 0;
 	}
 	case A_LISTJSON2:
@@ -11544,6 +11738,26 @@ main(int argc, char **argv)
 				fputs("null", stdout);
 			putchar('}');
 		}
+		if (opt_remote)
+		{
+			/* the other hosts' (#087): name and alias as the peer
+			** sent them, JSON-quoted; "host" tells them apart */
+			struct dch_rrow *rr;
+			int n = dch_remote_rows(&rr, 1), r;
+
+			for (r = 0; r < n; r++)
+			{
+				printf("%s{\"name\":", k + r ? "," : "");
+				put_json_str(rr[r].name);
+				fputs(",\"alias\":", stdout);
+				put_json_str(rr[r].alias);
+				fputs(",\"host\":", stdout);
+				put_json_str(rr[r].host);
+				printf(",\"state\":\"%s\",\"stale\":%s}",
+				       rr[r].state, rr[r].stale ? "true" : "false");
+			}
+			free(rr);
+		}
 		puts("]");
 		free(cr.v);
 		slist_free(&sl);
@@ -11564,6 +11778,21 @@ main(int argc, char **argv)
 			       sl.alias[k] ? sl.alias[k] : "",
 			       activity_epoch(sl.v[k]));
 		slist_free(&sl);
+		if (opt_remote)
+		{
+			/* host:name, escaped: no tab or newline gets through */
+			struct dch_rrow *rr;
+			int n = dch_remote_rows(&rr, 1);
+			char en[1100], ea[1100];
+
+			for (k = 0; k < n; k++)
+			{
+				dch_remote_esc(en, sizeof en, rr[k].name);
+				dch_remote_esc(ea, sizeof ea, rr[k].alias);
+				printf("%s:%s\t%s\t0\n", rr[k].host, en, ea);
+			}
+			free(rr);
+		}
 		return 0;
 	}
 	case A_SETALIAS:
@@ -11593,10 +11822,14 @@ main(int argc, char **argv)
 	case A_LIST:
 	{
 		char chosen[sizeof session_name];
-		int rc = pick_session("attach session (mirror):",
-		                      chosen, sizeof(chosen));
+		int rc;
+
+		pk_remote = 1;
+		rc = pick_session("attach session (mirror):", chosen,
+		                  sizeof(chosen));
 		if (rc == 0)
 		{
+			remote_ok = 1;
 			snprintf(session_name, sizeof(session_name),
 			         "%s", chosen);
 			return attach_with_switch(exe, 1, 1, inner_argv,
