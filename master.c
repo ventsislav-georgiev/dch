@@ -1016,8 +1016,13 @@ init_pty(char **argv, int statusfd)
 		signal(SIGHUP, SIG_DFL);
 		signal(SIGTTIN, SIG_DFL);
 		signal(SIGTTOU, SIG_DFL);
+		/* the master's SIGCHLD handler must not see the probe exit */
+		signal(SIGCHLD, SIG_DFL);
 		sigemptyset(&none);
 		sigprocmask(SIG_SETMASK, &none, NULL);
+		/* An interactive Codex gets --no-daemon (#083), in the
+		** child only: the recorded argv stays as typed. */
+		argv = dch_codex_argv(argv);
 		execvp(*argv, argv);
 
 		/* Hand the errno to the master, or (a respawn: nobody waits)

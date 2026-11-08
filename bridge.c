@@ -1660,6 +1660,126 @@ static int is_codex(char **argv) {
   return 0;
 }
 
+static const char *base_name(const char *s) {
+  const char *b = strrchr(s, '/');
+  return b ? b + 1 : s;
+}
+
+/* Codex 0.167 subcommands that are not the interactive TUI. `resume`, `fork`
+   and a prompt are; an unknown future subcommand still parses, since Codex
+   takes its top-level --no-daemon before any subcommand. */
+static const char *const codex_not_tui[] = {
+    "agents",  "exec",       "e",           "review",
+    "login",   "logout",     "mcp",         "mcp-server",
+    "plugin",  "app-server", "remote-control", "app",
+    "completion", "update",  "doctor",      "sandbox",
+    "debug",   "apply",      "a",           "queue",
+    "archive", "delete",     "migrate-rollouts", "migrate-nfs-db",
+    "unarchive", "cloud",    "exec-server", "features",
+    "help",    NULL};
+
+/* The index of the codex word after which `--no-daemon` goes, -1 when argv
+   is not an interactive Codex launch dch can extend safely: `codex ...`, or
+   `headroom wrap codex ...` (which hands unknown options to codex). The
+   first word that is not an option must not name a non-TUI subcommand (an
+   option's value counts as that word: harmless either way); --remote, which
+   Codex refuses next to --no-daemon, and an explicit --no-daemon keep argv. */
+static int codex_tui_slot(char **argv) {
+  int at, first = 1;
+  if (!argv || !argv[0])
+    return -1;
+  if (!strcmp(base_name(argv[0]), "codex"))
+    at = 0;
+  else if (!strcmp(base_name(argv[0]), "headroom") && argv[1] &&
+           !strcmp(argv[1], "wrap") && argv[2] &&
+           !strcmp(base_name(argv[2]), "codex"))
+    at = 2;
+  else
+    return -1;
+  for (int i = at + 1; argv[i]; i++) {
+    if (!strcmp(argv[i], "--no-daemon") || !strcmp(argv[i], "--remote") ||
+        !strncmp(argv[i], "--remote=", 9))
+      return -1;
+    if (first && argv[i][0] != '-') {
+      first = 0;
+      for (int k = 0; codex_not_tui[k]; k++)
+        if (!strcmp(argv[i], codex_not_tui[k]))
+          return -1;
+    }
+  }
+  return at;
+}
+
+/* The child's argv with `--no-daemon` after the codex word, when that
+   Codex's own --help lists the flag; argv itself otherwise (older Codex
+   would reject it). Without it Codex runs threads in a shared app-server
+   daemon whose environment — DCH_SESSION, the bridge marker — is that of
+   whichever session started it, so no session could bind its own thread
+   (#083). Scripts are not probed (npm's codex.js launcher, test fakes): they
+   keep their argv and only the snapshot guard protects them. Runs in the
+   forked child just before exec; the probe costs one `codex --help`. */
+char **dch_codex_argv(char **argv) {
+  char path[PATH_MAX], out[65536], hb[2], **v;
+  const char *name, *search = getenv("PATH");
+  int at = codex_tui_slot(argv), p[2], fd, n, script;
+  size_t len = 0;
+  long long now, deadline;
+  pid_t pid;
+  if (at < 0)
+    return argv;
+  name = argv[at];
+  if (strchr(name, '/'))
+    snprintf(path, sizeof path, "%s", name);
+  else if (path_lookup(name, search ? search : "/usr/bin:/bin", ".", path,
+                       sizeof path) < 0)
+    return argv;
+  if ((fd = open(path, O_RDONLY | O_CLOEXEC)) < 0)
+    return argv;
+  script = read(fd, hb, 2) != 2 || (hb[0] == '#' && hb[1] == '!');
+  close(fd);
+  if (script || monotonic_ms(&now) < 0 || pipe(p) < 0)
+    return argv;
+  deadline = now + 3000;
+  if ((pid = fork()) == 0) {
+    char *av[] = {path, "--help", NULL};
+    int null = open("/dev/null", O_RDWR);
+    setsid(); /* off the session's pty: no terminal for it to query */
+    dup2(null, 0);
+    dup2(p[1], 1);
+    dup2(null, 2);
+    execv(path, av);
+    _exit(127);
+  }
+  close(p[1]);
+  while (pid > 0 && len < sizeof out - 1 && monotonic_ms(&now) == 0 &&
+         now < deadline) {
+    struct pollfd q = {p[0], POLLIN, 0};
+    ssize_t r;
+    if (poll(&q, 1, (int)(deadline - now)) <= 0)
+      break;
+    if ((r = read(p[0], out + len, sizeof out - 1 - len)) <= 0)
+      break;
+    len += (size_t)r;
+  }
+  close(p[0]);
+  if (pid < 0)
+    return argv;
+  kill(pid, SIGKILL); /* our unreaped child: a no-op once it has exited */
+  while (waitpid(pid, NULL, 0) < 0 && errno == EINTR)
+    ;
+  out[len] = '\0';
+  if (!strstr(out, "--no-daemon"))
+    return argv;
+  for (n = 0; argv[n]; n++)
+    ;
+  if (!(v = malloc((size_t)(n + 2) * sizeof *v)))
+    return argv;
+  memcpy(v, argv, (size_t)(at + 1) * sizeof *v);
+  v[at + 1] = "--no-daemon";
+  memcpy(v + at + 2, argv + at + 1, (size_t)(n - at) * sizeof *v);
+  return v;
+}
+
 static int random_bytes(unsigned char *out, size_t len) {
 #if defined(__APPLE__) || defined(__OpenBSD__) || defined(__FreeBSD__)
   if (getentropy(out, len) == 0)
@@ -2033,7 +2153,13 @@ static void handle_connection(int fd, const char *token,
       json_string(p, "type", type, sizeof type, 1) < 0)
     return;
   if (!strcmp(type, "dch_send")) {
-    outgoing(fd, p, own_socket, own_name);
+    /* a shell of a shared Codex daemon carries this marker for any thread */
+    if (dch_codex_shared(sess, marker))
+      local_result(fd, "refused",
+                   "a shared Codex daemon carries this session; start "
+                   "codex with --no-daemon");
+    else
+      outgoing(fd, p, own_socket, own_name);
     return;
   }
   if (strcmp(type, "user") ||
@@ -2578,6 +2704,20 @@ int dch_visit_claude_records(dch_claude_record_fn visit, void *arg) {
   (void)arg;
   return 0;
 }
+int dch_codex_shared(const char *sess, const char *marker) {
+  (void)sess;
+  (void)marker;
+  return 0;
+}
+int path_lookup(const char *name, const char *path, const char *cwd, char *out,
+                size_t outsz) {
+  (void)name;
+  (void)path;
+  (void)cwd;
+  (void)out;
+  (void)outsz;
+  return -1;
+}
 int dch_codex_snapshot_id(const char *home, const char *sess,
                           const char *marker, char *out, size_t outsz,
                           int strict) {
@@ -2600,6 +2740,25 @@ int main(void) {
     char *plain[] = {"vim", "notes.txt", NULL};
     if (!is_codex(wrapped) || is_codex(plain))
       return 20;
+    /* #083: where --no-daemon goes, and where it must not */
+    char *tui[] = {"/opt/homebrew/bin/codex", NULL};
+    char *res[] = {"codex", "-m", "o3", "resume", "--last", NULL};
+    char *prompt[] = {"codex", "fix the exec path", NULL};
+    char *exec[] = {"codex", "--full-auto", "exec", "hi", NULL};
+    char *first[] = {"codex", "review", "exec", NULL};
+    char *remote[] = {"codex", "--remote=ws://h:1", NULL};
+    char *remote2[] = {"codex", "resume", "--remote", "ws://h:1", NULL};
+    char *already[] = {"codex", "--no-daemon", NULL};
+    char *env[] = {"env", "X=1", "codex", NULL};
+    char *wrapcmd[] = {"x", "wrap", "codex", NULL};
+    if (codex_tui_slot(tui) != 0 || codex_tui_slot(res) != 0 ||
+        codex_tui_slot(prompt) != 0 || codex_tui_slot(wrapped) != 2 ||
+        codex_tui_slot(exec) != -1 || codex_tui_slot(first) != -1 ||
+        codex_tui_slot(remote) != -1 || codex_tui_slot(remote2) != -1 ||
+        codex_tui_slot(already) != -1 || codex_tui_slot(env) != -1 ||
+        codex_tui_slot(wrapcmd) != -1 || codex_tui_slot(plain) != -1 ||
+        dch_codex_argv(plain) != plain)
+      return 29;
     char safe[200], accented[131];
     wrapper_name("  <us\"er>\x01 3 ", safe, sizeof safe);
     if (strcmp(safe, "user 3"))

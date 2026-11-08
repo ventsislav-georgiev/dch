@@ -6,6 +6,8 @@ two and shows the harness name in the picker and as "harness" in --ls-json.
 
 Cases:
   - named Claude/Codex session -> harness name resolved
+  - a Codex outside the session's master (the shared app-server daemon)
+    carrying its DCH_SESSION      -> no snapshot title for that session (#083)
   - "nameSource":"derived"     -> skipped (auto-titles beat no one)
   - dead, malformed, empty and wrong-session records -> skipped
   - resolution overhead        -> budget (mean over N runs vs empty HOME)
@@ -58,7 +60,7 @@ def write_codex_index(home, records):
 def write_codex_snapshot(home, thread_id, session):
     path = os.path.join(home, ".codex", "shell_snapshots",
                         thread_id + ".123.sh")
-    os.makedirs(os.path.dirname(path))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
         f.write("# snapshot\nexport DCH_SESSION=%s\n" % session)
 
@@ -106,10 +108,16 @@ def main():
         shutil.copy2(os.path.abspath(DCH), codex_host)
 
         # dch sessions to resolve against.
-        for name in ("hn-named", "hn-derived", "hn-codex", "hn-codex-old",
+        for name in ("hn-named", "hn-derived", "hn-codex-old",
                      "hn-codex-empty", "hn-codex-wrong", "hn-codex-stale",
                      "hn-codex-malformed", "hn-inherited"):
             subprocess.run([DCH, "--spawn", name, "sleep", "60"], check=True)
+        # A Codex TUI runs under its session's master: that is what makes
+        # its snapshot its own (#083).
+        for name in ("hn-codex", "hn-codex-shared"):
+            subprocess.run([DCH, "--spawn", name, codex_host, "--wait", name,
+                            "--state", "done", "--timeout", "60000"],
+                           check=True)
 
         p1 = spawn_env_proc("hn-named", "hn-named")
         procs.append(p1)
@@ -126,8 +134,12 @@ def main():
         write_session_json(sessdir, 99999999, "ghost")
 
         # Current Codex processes carry DCH_SESSION but no thread ID. The
-        # shell snapshot filename supplies the live thread's ID.
-        p4 = spawn_env_proc("hn-codex", "hn-codex", executable=codex_host)
+        # shell snapshot filename supplies the live thread's ID. The TUI
+        # (codex_host) runs inside hn-codex; p4 is the shared app-server
+        # daemon some TUI of hn-codex-shared started: no master above it,
+        # its shells snapshot that session's env for any TUI's thread.
+        p4 = spawn_env_proc("hn-codex-shared", "hn-codex-shared",
+                            executable=codex)
         p5 = spawn_env_proc("hn-codex-empty", "hn-codex-empty",
                             executable=codex,
                             CODEX_THREAD_ID="codex-empty")
@@ -141,6 +153,7 @@ def main():
                             CODEX_THREAD_ID="codex-inherited")
         procs.extend((p4, p5, p6, p7, p8, p9))
         write_codex_snapshot(home, "codex-live", "hn-codex")
+        write_codex_snapshot(home, "codex-foreign", "hn-codex-shared")
         write_codex_index(home, [
             {"id": "codex-live", "thread_name": "my-codex"},
             {"id": "codex-old", "thread_name": "old-codex"},
@@ -148,6 +161,7 @@ def main():
             {"id": "codex-empty", "thread_name": ""},
             {"id": "codex-wrong", "thread_name": "wrong-session"},
             {"id": "codex-stale", "thread_name": "ghost-codex"},
+            {"id": "codex-foreign", "thread_name": "foreign-thread"},
         ])
 
         sl = ls_json(home)
@@ -157,6 +171,8 @@ def main():
               sl.get("hn-derived", {}).get("harness") == "")
         check("named Codex session resolved",
               sl.get("hn-codex", {}).get("harness") == "my-codex")
+        check("shared-daemon snapshot names no session",
+              sl.get("hn-codex-shared", {}).get("harness") == "")
         check("older Codex env ID resolved",
               sl.get("hn-codex-old", {}).get("harness") == "old-codex")
         check("inherited Codex ID on non-Codex process skipped",

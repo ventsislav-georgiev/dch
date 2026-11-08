@@ -144,6 +144,7 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "--ls-json claude_session_id and transcript_path" transcript_test.py
     pyrun "master self-heals a deleted socket" socket_heal_test.py
     pyrun "native agent bridge public CLI and wire protocol" agent_bridge_test.py
+    pyrun "shared Codex daemon never binds or names a session; --no-daemon" codex_daemon_test.py
 fi
 
 # --- on-demand redraw (SIGUSR2 → MSG_REDRAW(REDRAW_WINCH)) ------------------

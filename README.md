@@ -82,7 +82,10 @@ Codex supplies titles in `~/.codex/session_index.jsonl` and current releases
 supply the thread ID through the matching shell-snapshot filename (older
 releases' process environment IDs remain supported). In both cases dch also
 requires a live harness process with the matching `DCH_SESSION`, so old records
-and a title for another dch session do not overlay. Claude auto-titles and empty
+and a title for another dch session do not overlay. A Codex snapshot names a
+session only while no Codex outside that session's master, such as Codex's
+shared app-server daemon, carries its `DCH_SESSION` (see Native Claude and Codex
+messages). Claude auto-titles and empty
 Codex titles are skipped; Codex does not mark derived titles separately.
 Explicit aliases win. `--ls-json` keeps the real `name`, `alias`, and resolved
 `harness` as separate fields.
@@ -1041,6 +1044,23 @@ the current session to exactly one snapshot UUID.
 If `/new`, a nested Codex command, or inherited state produces more than one
 matching UUID, dch refuses to guess. Start a fresh dch Codex session. Sessions
 started by older dch versions lack the launch marker and cannot register.
+
+Codex 0.167 and later run threads in a shared background app-server daemon
+unless the TUI is started with `--no-daemon`. The daemon keeps the environment
+of the session that started it, so its shell snapshots carry that session's
+`DCH_SESSION` and launch marker for every TUI's threads. dch therefore starts
+`codex …` and `headroom wrap codex …` with `--no-daemon` added after the
+`codex` word, when that Codex's own `--help` lists the flag (a probe of about
+20 ms at launch; a script launcher such as npm's `codex.js` is not probed). It
+leaves the argv alone for a non-TUI subcommand (`exec`, `review`, `app-server`,
+…), with `--remote`, and when you already passed `--no-daemon`. The recorded
+argv keeps what you typed. Any other launch form gets no flag: if a Codex
+process that is not under the session's own dch master (the daemon, parent
+pid 1) carries the session's `DCH_SESSION` (and launch marker), the session
+refuses to bind a peer, the picker and `--ls-json` show no Codex title for it,
+inbound messages are refused, and `--agent-send` from it is refused. Once a
+sidecar has seen such a daemon it keeps refusing for its lifetime. Start the
+session again with `codex --no-daemon` to recover.
 
 A native message is typed into the Codex composer through the session
 master, as one bracketed paste followed by Enter, so a running turn steers it

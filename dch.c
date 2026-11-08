@@ -1610,9 +1610,97 @@ dch_codex_thread_name(const char *home, const char *id, char *out, size_t outsz)
 	return out[0] ? 0 : -1;
 }
 
+/* Every live pid, to fn until it returns nonzero; that value, else 0. */
+static int
+each_pid(int (*fn)(long, void *), void *arg)
+{
+	int r = 0;
+#ifdef __APPLE__
+	int pids[4096], n, i;
+	n = proc_listpids(PROC_ALL_PIDS, 0, pids, sizeof(pids));
+	for (i = 0; n > 0 && !r && i < n / (int)sizeof(pids[0]); i++)
+		if (pids[i] > 0)
+			r = fn(pids[i], arg);
+#else
+	DIR *d = opendir("/proc");
+	struct dirent *de;
+	if (!d)
+		return 0;
+	while (!r && (de = readdir(d)))
+	{
+		char *end;
+		long pid = strtol(de->d_name, &end, 10);
+		if (pid > 0 && *end == '\0')
+			r = fn(pid, arg);
+	}
+	closedir(d);
+#endif
+	return r;
+}
+
+static long proc_ppid(long pid);
+
+struct codex_carrier
+{
+	const char *sess, *marker;
+};
+
+/* A Codex binary that carries the session (and the marker, when given) but
+** whose nearest dch master above it is not that session's — or that has no
+** master above it at all, like the app-server daemon (ppid 1) a TUI without
+** --no-daemon starts. Its shells snapshot the session's env for threads of
+** whichever TUI asked, so their snapshots cannot be told from the TUI's. */
+static int
+codex_detached(long pid, void *arg)
+{
+	const struct codex_carrier *c = arg;
+	char v[700];
+	long up = pid;
+	int d;
+
+	if (!proc_is_codex(pid) || proc_dch_session(pid, v, sizeof v) != 0 ||
+	    strcmp(v, c->sess) != 0 ||
+	    (c->marker &&
+	     (proc_env_value(pid, "DCH_NATIVE_BRIDGE_ID", v, sizeof v) != 0 ||
+	      strcmp(v, c->marker) != 0)))
+		return 0;
+	for (d = 0; d < 64 && (up = proc_ppid(up)) > 1; d++)
+	{
+		char **a = proc_argv(up);
+		int master = a && a[0] && a[1] && strcmp(a[1], "--master-of") == 0;
+
+		free(a);
+		if (master)
+			return proc_dch_session(up, v, sizeof v) != 0 ||
+			       strcmp(v, c->sess) != 0;
+	}
+	return 1;
+}
+
+/* 1 when a detached Codex (above) carries sess/marker: its snapshots would
+** bind or name a thread this session's TUI may not be running, so callers
+** refuse instead (#083). Sticky per marker, since the snapshots it wrote
+** outlive it; one-shot callers (--ls) pass no marker or exit anyway. */
+int
+dch_codex_shared(const char *sess, const char *marker)
+{
+	static char seen[700];
+	struct codex_carrier c = { sess, marker };
+
+	if (marker && strcmp(seen, marker) == 0)
+		return 1;
+	if (!each_pid(codex_detached, &c))
+		return 0;
+	if (marker)
+		snprintf(seen, sizeof seen, "%s", marker);
+	return 1;
+}
+
 /* Current Codex releases no longer export the thread ID to the long-lived
 ** process. Its shell snapshot still joins that ID (the filename prefix) to
-** the inherited DCH_SESSION. Prefer the newest exact match. */
+** the inherited DCH_SESSION. Prefer the newest exact match. None at all
+** while a detached Codex (the shared app-server daemon) carries the same
+** session: then a match may be another TUI's thread. */
 int
 dch_codex_snapshot_id(const char *home, const char *sess, const char *marker,
                       char *out, size_t outsz, int strict)
@@ -1731,19 +1819,21 @@ dch_codex_snapshot_id(const char *home, const char *sess, const char *marker,
 		best = st;
 	}
 	closedir(d);
-	return best.st_mtime && !(strict && ambiguous) ? 0 : -1;
+	return best.st_mtime && !(strict && ambiguous) &&
+	       !dch_codex_shared(sess, marker) ? 0 : -1;
 }
 
-static void
-load_codex_pid(struct slist *sl, const char *home, long pid)
+static int
+load_codex_pid(long pid, void *arg)
 {
-	char id[128], sess[600], title[600], cb[256], codexdir[1200];
-	const char *cn, *ch;
+	struct slist *sl = arg;
+	char id[128], sess[600], title[600], cb[256], codexdir[1200], mk[700];
+	const char *cn, *ch, *home = getenv("HOME"), *marker = NULL;
 	int i, target = -1;
 
 	if (!proc_is_codex(pid) ||
 	    proc_dch_session(pid, sess, sizeof(sess)) != 0)
-		return;
+		return 0;
 	cn = canon_name(sess, cb, sizeof(cb));
 	for (i = 0; i < sl->n; i++)
 		if (!sl->harness[i] && strcmp(sl->v[i], cn) == 0)
@@ -1755,16 +1845,22 @@ load_codex_pid(struct slist *sl, const char *home, long pid)
 		snprintf(codexdir, sizeof codexdir, "%s", ch);
 	else
 		snprintf(codexdir, sizeof codexdir, "%s/.codex", home);
+	/* a bridged TUI's own snapshots also carry its bridge marker */
+	if (proc_env_value(pid, "DCH_NATIVE_BRIDGE_ID", mk, sizeof mk) == 0 &&
+	    mk[0])
+		marker = mk;
 	if (target < 0 ||
 	    (proc_env_value(pid, "CODEX_THREAD_ID", id, sizeof(id)) != 0 &&
 	     proc_env_value(pid, "CODEX_SESSION_ID", id, sizeof(id)) != 0 &&
-	     dch_codex_snapshot_id(codexdir, sess, NULL, id, sizeof(id), 0) != 0) ||
+	     dch_codex_snapshot_id(codexdir, sess, marker, id, sizeof(id), 0) !=
+	         0) ||
 	    dch_codex_thread_name(codexdir, id, title, sizeof(title)) != 0)
-		return;
+		return 0;
 	for (char *c = title; *c; c++)
 		if (*c == '\t' || *c == '\n' || *c == '\r')
 			*c = ' ';
 	sl->harness[target] = strdup(title);
+	return 0;
 }
 
 /* A genuine live Codex process supplies DCH_SESSION; its environment or
@@ -1775,30 +1871,8 @@ load_codex_names(struct slist *sl)
 {
 	const char *home = getenv("HOME");
 
-	if (sl->n == 0 || !home || !home[0])
-		return;
-#ifdef __APPLE__
-	int pids[4096], n, i;
-	n = proc_listpids(PROC_ALL_PIDS, 0, pids, sizeof(pids));
-	if (n <= 0)
-		return;
-	for (i = 0; i < n / (int)sizeof(pids[0]); i++)
-		if (pids[i] > 0)
-			load_codex_pid(sl, home, pids[i]);
-#else
-	DIR *d = opendir("/proc");
-	struct dirent *de;
-	if (!d)
-		return;
-	while ((de = readdir(d)))
-	{
-		char *end;
-		long pid = strtol(de->d_name, &end, 10);
-		if (pid > 0 && *end == '\0')
-			load_codex_pid(sl, home, pid);
-	}
-	closedir(d);
-#endif
+	if (sl->n && home && home[0])
+		(void)each_pid(load_codex_pid, sl);
 }
 
 /* Write (or clear, when alias is empty) the sidecar for `name`. At most
