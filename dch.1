@@ -188,7 +188,12 @@ remain separate fields.
 Rename (alias) sessions interactively. Aliases are display-only.
 .TP
 .BI \-m " name " [ alias ]
-Set or clear an alias non-interactively.
+Set or clear an alias non-interactively. A name with no live session is
+refused with
+.BI "no session: " name
+and exit 1, as
+.B \-k
+does.
 .TP
 .BR \-k " [\fIname\fP]"
 Kill a session (interactive picker without a name).
@@ -1195,6 +1200,14 @@ If set when a session is spawned, do not replay the mirrored screen to
 attaching clients. Attach then behaves as it did before: the client's screen
 is cleared and the program is asked to repaint itself, which diff\-based
 renderers do not do. Escape hatch only.
+.TP
+.B DCH_NO_DETECT
+Empty or 0 is off; anything else turns off screen\-content state detection
+(agents read 0) and the master's auto\-allow.
+.TP
+.B DCH_NO_HISTORY
+Empty or 0 is off; anything else, when a session is spawned, keeps no
+history record for it.
 .TP
 .B DCH_HOLD_MS
 Read by the master: how long a held (childless) session waits for its

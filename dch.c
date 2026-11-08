@@ -445,6 +445,15 @@ dch_config_bool(const char *key)
 	        !strcasecmp(v, "yes") || !strcasecmp(v, "on"));
 }
 
+/* A DCH_NO_* switch: unset, empty or "0" is off, anything else on. */
+int
+dch_env_on(const char *key)
+{
+	const char *e = getenv(key);
+
+	return e && *e && strcmp(e, "0") != 0;
+}
+
 /* The session socket dir, for serve.c (once main() has computed it). */
 const char *
 dch_sock_dir(void)
@@ -2527,6 +2536,7 @@ usage(void)
 	    "     DCH_CONFIG names the config file (else\n"
 	    "     $XDG_CONFIG_HOME/dch/config, else ~/.config/dch/config).\n"
 	    "     DCH_NO_HISTORY=1 at session start keeps no history record.\n"
+	    "     DCH_NO_DETECT, DCH_NO_HISTORY: empty or 0 is off.\n"
 	    "     DCH_DOUBLE_TAP_MS sets the switch double-press window\n"
 	    "     (default 300; 0 disables it, one press acts at once).\n"
 	    "Detach: Ctrl-\\  (or `dch -d` if the host swallows it).\n"
@@ -3995,7 +4005,7 @@ detect_state(const char *name)
 	char *fold;
 	int novt;
 
-	if (getenv("DCH_NO_DETECT") || make_sock_path(name) < 0)
+	if (dch_env_on("DCH_NO_DETECT") || make_sock_path(name) < 0)
 		return NULL;
 	fold = screen_tail(sock_path, &novt);
 	if (!fold)
@@ -4046,7 +4056,7 @@ detect_agents(const char *name)
 	char *fold, *line, *next;
 	int novt, in = 0, n = 0;
 
-	if (getenv("DCH_NO_DETECT") || make_sock_path(name) < 0)
+	if (dch_env_on("DCH_NO_DETECT") || make_sock_path(name) < 0)
 		return 0;
 	fold = screen_tail(sock_path, &novt);
 	if (!fold)
@@ -4090,7 +4100,7 @@ dch_pty_gate(const char *path)
 	char *fold;
 	int novt, res;
 
-	if (getenv("DCH_NO_DETECT"))
+	if (dch_env_on("DCH_NO_DETECT"))
 		return -1;
 	fold = screen_tail(path, &novt);
 	if (!fold)
@@ -5829,7 +5839,7 @@ screen_faint(const char *path, char **dimp, int *err)
 	int n;
 
 	*err = CG_UNKNOWN;
-	if (getenv("DCH_NO_DETECT"))
+	if (dch_env_on("DCH_NO_DETECT"))
 	{
 		*err = CG_NOVT;
 		return NULL;
@@ -10286,7 +10296,7 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 	int n = history_load(&r), k, picked = 0, bad = 0, seenlive = 0;
 	long step = env_ms("DCH_AGENT_STEP_MS", 60000);
 	char dir[1024], cb[256], ab[256];
-	const char *nohist = getenv("DCH_NO_HISTORY"), *stem = NULL, *why;
+	const char *stem = NULL, *why;
 	const struct sidhold *sh;
 	struct sidset held;
 	int byfile = 0;
@@ -10414,7 +10424,7 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 			/* not when the new master keeps no record: it has our env
 			** (login_env never takes DCH_*), so master.c's own test */
 			snprintf(rp, sizeof rp, "%s/%s.json", dir, h->file);
-			if (!(nohist && *nohist && strcmp(nohist, "0") != 0) &&
+			if (!dch_env_on("DCH_NO_HISTORY") &&
 			    unlink(rp) == 0)
 			{
 				/* and its pin moves with it */
@@ -11561,6 +11571,17 @@ main(int argc, char **argv)
 		if (session_name[0] == '\0')
 		{
 			fprintf(stderr, "dch: -m needs a session name\n");
+			return 1;
+		}
+		/* Only a live session: an alias written for a missing one
+		** would be inherited by a later session of that name. Same
+		** test and wording as -k. */
+		char sp[1100];
+		struct stat st;
+		session_sock_path(session_name, sp, sizeof(sp));
+		if (stat(sp, &st) < 0 || !S_ISSOCK(st.st_mode))
+		{
+			fprintf(stderr, "no session: %s\n", session_name);
 			return 1;
 		}
 		/* Keep aliases single-line and tab-free so -lj stays parseable. */

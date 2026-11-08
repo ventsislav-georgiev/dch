@@ -98,7 +98,8 @@ is a display **alias** only — stored in a sidecar file next to the socket,
 shown with priority in `-l`/`-rl` as `alias (real-name)`. The underlying
 session name is untouched, so attach/kill/detach by real name keep working.
 An empty input clears the alias; killing a session removes its alias too.
-`dch -m <name> [alias]` sets or clears one without the picker.
+`dch -m <name> [alias]` sets or clears one without the picker; a name with
+no live session is refused (`no session: <name>`, exit 1), as `dch -k` does.
 
 When a session is running a **named Claude Code or Codex session**, the picker
 and `-ls` show that name instead: `postman (solution.postman-fix_hop-asset-cache-host-var)`.
@@ -708,7 +709,7 @@ later does nothing to a running session.
 | `DCH_SOCKET_DIR` | every `dch` | `$XDG_RUNTIME_DIR/dch-$UID`, else `/tmp/dch-$UID` | Where sockets and sidecars live ([self-heal](#socket-loss-and-self-heal)). Records of one socket dir never mix with another's. |
 | `DCH_CONFIG` | every `dch` | `$XDG_CONFIG_HOME/dch/config`, else `~/.config/dch/config` | The [config file](#config-file). |
 | `DCH_DOUBLE_TAP_MS` | attaching client | `300` | The double-press window of `Ctrl-\`; `0`: one press acts at once ([Cheatsheet](#cheatsheet)). |
-| `DCH_NO_DETECT` | client and master | unset | Set: no screen-content [state detection](#agent-state-detection), `agents` reads `0`, the master does no [auto-allow](#auto-allow), and `--say`, `--stop` and the agent restart see no screen, as on dch-lite. |
+| `DCH_NO_DETECT` | client and master | unset | Anything but empty or `0`: no screen-content [state detection](#agent-state-detection), `agents` reads `0`, the master does no [auto-allow](#auto-allow), and `--say`, `--stop` and the agent restart see no screen, as on dch-lite. |
 | `DCH_NO_VT` | master | unset | Set: no terminal mirror ([dch-lite and `DCH_NO_VT`](#dch-lite-and-dch_no_vt)). |
 | `DCH_NO_REPLAY` | master | unset | Set: attach clears and asks for a repaint instead of [replaying the screen](#attaching-replays-the-screen). |
 | `DCH_SCROLLBACK` | master | `2000` | Mirror scrollback lines, max `100000`, `0` none (`--read --recent`, [Verbs](#verbs)). |

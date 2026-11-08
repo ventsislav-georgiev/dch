@@ -294,6 +294,7 @@ int serve_main(int argc, char **argv);
 int dch_config_path(char *out, size_t cap);
 int dch_config_get(const char *key, char *out, size_t cap);
 int dch_config_bool(const char *key);
+int dch_env_on(const char *key);
 int dch_allow_prompt(const char *screen, char **ident, char **title);
 
 int attach_main(int noerror);
