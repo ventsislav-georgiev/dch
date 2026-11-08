@@ -173,7 +173,8 @@ def main():
         check("--config with no file: the path, then the defaults",
               r.returncode == 0 and r.stdout.splitlines() ==
               [cfg, "auto_allow = false", "sidekick_pattern = -qa",
-               "picker_sort = activity", "detach_key = detach"])
+               "picker_sort = activity", "detach_key = detach",
+               "remote_hosts = "])
         r = run("--config", "auto_allow")
         check("--config <key> unset: exit 1, nothing printed, no error",
               r.returncode == 1 and r.stdout == r.stderr == "")

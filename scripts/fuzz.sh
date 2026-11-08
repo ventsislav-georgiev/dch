@@ -3,7 +3,8 @@
 # each one for SECONDS (default 60) over its seed corpus.
 #
 #   scripts/fuzz.sh [SECONDS] [TARGET...] [-- CONFIGURE-ARGS]
-#   TARGET: json meta history config detect frames keys serve (default: all)
+#   TARGET: json meta history config detect frames keys serve remote
+#           (default: all)
 #
 # Needs a clang with the libFuzzer runtime: CC=clang on Linux; on macOS
 # Apple's clang has none, use Homebrew's (CC=$(brew --prefix llvm)/bin/clang).
@@ -18,7 +19,7 @@ secs=${1:-60}
 targets=
 while [ $# -gt 0 ] && [ "$1" != -- ]; do targets="$targets $1"; shift; done
 [ $# -gt 0 ] && shift
-targets=${targets:-json meta history config detect frames keys serve}
+targets=${targets:-json meta history config detect frames keys serve remote}
 CC=${CC:-clang}
 art=${FUZZ_ARTIFACTS:-$PWD/fuzz-artifacts}
 
@@ -38,7 +39,7 @@ CF="-g -O1 -fno-omit-frame-pointer $SAN -fsanitize=fuzzer-no-link"
 vt_objs=$(sed -n 's/^VT_OBJS = //p' Makefile)
 vt_libs=$(sed -n 's/^VT_LIBS = //p' Makefile)
 CF="$CF -I. -Ivendor/libghostty-vt/include"
-make attach.o master.o serve.o rframe.o bridge.o $vt_objs >/dev/null
+make attach.o master.o serve.o rframe.o remote.o bridge.o $vt_objs >/dev/null
 # dch.c has main(); the targets bring libFuzzer's.
 $CC $CF -Dmain=dch_main -c dch.c -o dch.o
 
@@ -46,11 +47,12 @@ mkdir -p "$art"
 rc=0
 for t in $targets; do
 	case $t in
-	json)  objs="attach.o master.o dch.o serve.o" ;;  # the API
-	frames) objs="attach.o dch.o serve.o" ;;  # includes master.c
-	keys)  objs="master.o dch.o serve.o" ;;   # includes attach.c
-	serve) objs="attach.o master.o dch.o" ;;  # includes serve.c
-	*)     objs="attach.o master.o serve.o" ;; # includes dch.c
+	json)  objs="attach.o master.o dch.o serve.o remote.o" ;;  # the API
+	frames) objs="attach.o dch.o serve.o remote.o" ;;  # includes master.c
+	keys)  objs="master.o dch.o serve.o remote.o" ;;   # includes attach.c
+	serve) objs="attach.o master.o dch.o remote.o" ;;  # includes serve.c
+	remote) objs="attach.o master.o dch.o serve.o" ;;  # includes remote.c
+	*)     objs="attach.o master.o serve.o remote.o" ;; # includes dch.c
 	esac
 	$CC $CF -Dmain=dch_main -fsanitize=fuzzer -o "fuzz_$t" \
 		"tests/fuzz/fuzz_$t.c" $objs rframe.o bridge.o $vt_objs $vt_libs

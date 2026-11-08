@@ -31,6 +31,9 @@ export DCH_LOGIN_ENV=0
 export XDG_STATE_HOME="$TMP/state"
 # The developer's config (auto_allow = true) must not answer the fakes' prompts.
 export DCH_CONFIG="$TMP/config"
+# -ls and the picker would probe the developer's tailnet peers (#087):
+# remote_client_test.py points dch at a loopback dch serve with --hosts.
+export DCH_NO_REMOTE=1
 SOCKDIR="$TMP/dch-$(id -u)"
 mkdir -p "$SOCKDIR"
 
@@ -216,6 +219,7 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "records with odd bytes, long aliases and long argv read back" record_utf8_test.py
     pyrun "--cmd survives empty reply frames" cmd_frames_test.py
     pyrun "dch serve: remote frames goldens, peer gate, startup refusals" serve_test.py
+    pyrun "remote hosts: -ls, --remote, -a host:name, hostile peers" remote_client_test.py
 fi
 
 # --- control verbs: --spawn --run --read --wait --keys ---------------------
