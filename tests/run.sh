@@ -809,6 +809,14 @@ print(next(s for s in json.load(sys.stdin) if s["name"] == sys.argv[1])["agents"
     check "no-mirror --keys legacy fallback exits 0" "$?" "0"
     "$DCH" -k "$LN" >/dev/null 2>&1
 
+    # DCH_NO_VT=0 is off, like every DCH_NO_* (#085): the mirror stays.
+    if [ "$mirror" -eq 0 ]; then
+        DCH_NO_VT=0 "$DCH" --spawn "vt0$$" sh >/dev/null 2>&1
+        "$DCH" --read "vt0$$" >/dev/null 2>&1
+        check "DCH_NO_VT=0 keeps the mirror: --read exits 0" "$?" "0"
+        "$DCH" -k "vt0$$" >/dev/null 2>&1
+    fi
+
     # Live restart: the master re-execs itself in place. The session's child,
     # its pid, its screen and its scrollback all have to survive, and the
     # session must still take input afterwards.

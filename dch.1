@@ -1182,7 +1182,8 @@ Self\-heal tick interval in milliseconds (default 3600000, i.e. hourly); see
 above. Mainly a test knob for shortening the interval.
 .TP
 .B DCH_NO_VT
-If set when a session is spawned, disable its terminal mirror.
+Empty or 0 is off; anything else, when a session is spawned, disables
+its terminal mirror.
 .TP
 .B DCH_SCROLLBACK
 Mirror scrollback lines (default 2000, max 100000), read when the session is
@@ -1196,7 +1197,7 @@ at 200.
 reads at most 65535 lines of it.
 .TP
 .B DCH_NO_REPLAY
-If set when a session is spawned, do not replay the mirrored screen to
+Empty or 0 is off; anything else, when a session is spawned, does not replay the mirrored screen to
 attaching clients. Attach then behaves as it did before: the client's screen
 is cleared and the program is asked to repaint itself, which diff\-based
 renderers do not do. Escape hatch only.

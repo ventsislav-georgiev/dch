@@ -2536,7 +2536,7 @@ usage(void)
 	    "     DCH_CONFIG names the config file (else\n"
 	    "     $XDG_CONFIG_HOME/dch/config, else ~/.config/dch/config).\n"
 	    "     DCH_NO_HISTORY=1 at session start keeps no history record.\n"
-	    "     DCH_NO_DETECT, DCH_NO_HISTORY: empty or 0 is off.\n"
+	    "     DCH_NO_*: empty or 0 is off.\n"
 	    "     DCH_DOUBLE_TAP_MS sets the switch double-press window\n"
 	    "     (default 300; 0 disables it, one press acts at once).\n"
 	    "Detach: Ctrl-\\  (or `dch -d` if the host swallows it).\n"

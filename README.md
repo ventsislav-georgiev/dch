@@ -710,8 +710,8 @@ later does nothing to a running session.
 | `DCH_CONFIG` | every `dch` | `$XDG_CONFIG_HOME/dch/config`, else `~/.config/dch/config` | The [config file](#config-file). |
 | `DCH_DOUBLE_TAP_MS` | attaching client | `300` | The double-press window of `Ctrl-\`; `0`: one press acts at once ([Cheatsheet](#cheatsheet)). |
 | `DCH_NO_DETECT` | client and master | unset | Anything but empty or `0`: no screen-content [state detection](#agent-state-detection), `agents` reads `0`, the master does no [auto-allow](#auto-allow), and `--say`, `--stop` and the agent restart see no screen, as on dch-lite. |
-| `DCH_NO_VT` | master | unset | Set: no terminal mirror ([dch-lite and `DCH_NO_VT`](#dch-lite-and-dch_no_vt)). |
-| `DCH_NO_REPLAY` | master | unset | Set: attach clears and asks for a repaint instead of [replaying the screen](#attaching-replays-the-screen). |
+| `DCH_NO_VT` | master | unset | Anything but empty or `0`: no terminal mirror ([dch-lite and `DCH_NO_VT`](#dch-lite-and-dch_no_vt)). |
+| `DCH_NO_REPLAY` | master | unset | Anything but empty or `0`: attach clears and asks for a repaint instead of [replaying the screen](#attaching-replays-the-screen). |
 | `DCH_SCROLLBACK` | master | `2000` | Mirror scrollback lines, max `100000`, `0` none (`--read --recent`, [Verbs](#verbs)). |
 | `DCH_NO_HISTORY` | master | unset | Anything but empty or `0`: no history record ([Bringing sessions back](#bringing-sessions-back)). |
 | `DCH_RECORD_MS` | master | `60000` | How often the history record is refreshed. |
