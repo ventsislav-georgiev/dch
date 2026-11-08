@@ -157,7 +157,11 @@ so stale records do not overlay; explicit aliases win.
 .BR \-ls ", " \-\-ls
 List sessions one per line as \fIdisplay-name (real-name)\fP when an alias or
 harness title exists, otherwise as \fIreal-name\fP. Aliases win over harness
-titles. Then the remote hosts' sessions as \fIhost\fP:\fIname\fP (see
+titles. Local only: no network, no
+.B tailscale
+call. With
+.BR \-\-remote ,
+then the remote hosts' sessions as \fIhost\fP:\fIname\fP (see
 .BR "REMOTE HOSTS" ),
 a row of a host that did not answer this time ending in
 .BR [stale] .
@@ -191,10 +195,11 @@ key or tailnet discovery.
 .TP
 .B \-\-remote
 With
+.BR \-ls ,
 .B \-lj
 or
 .BR \-\-ls\-json :
-the remote rows too.
+the remote rows too (the picker always shows them).
 .TP
 .B \-\-ls\-json
 List sessions as a JSON array of
@@ -1147,23 +1152,45 @@ key, else discovery: the peers in
 .B tailscale status \-\-json
 that are online, owned by this host's Tailscale user (numeric user id) and
 untagged, each at its 100.64.0.0/10 address, named by the first label of its
-MagicDNS name. Nothing else is ever dialled; no
+MagicDNS name, and only while tailscaled reports BackendState Running.
+Nothing else is ever dialled; no
 .B tailscale
 CLI or no peers means no remote rows, not an error.
+Before an attach to a discovered host,
+.B tailscale whois
+on its address must name this host's user and no tags, or dch does not
+connect; a host given in
+.B \-\-hosts
+or
+.B remote_hosts
+is taken as given.
 .PP
-Listing probes every host in parallel within 300 ms in all. A host that does
+.BR \-ls ,
+.B \-lj
+and
+.B \-\-ls\-json
+list remote rows only with
+.BR \-\-remote ,
+which probes every host in parallel within 300 ms in all, the
+.B tailscale
+call and name lookups included. A host that does
 not answer in time shows its last answer, stale, for 2 minutes (a cache in
-.IR $XDG_STATE_HOME/dch/remote\-cache.json ).
+.IR $XDG_STATE_HOME/dch/sessions/.remote\-cache ).
 A host speaking a newer protocol major is skipped with a note.
-The picker lists remote rows in Sessions, the host faint, and re\-probes in
-the background; Enter attaches, and no other action applies to them yet.
+The picker lists remote rows in Sessions, the host faint, of the hosts that
+are candidates now, and re\-probes in the background; Enter attaches, on
+the connection that checked the name is listed, and no other action applies
+to them yet.
 .PP
 An attach is a local one over the network: the detach character and its
 double press stay local, the window size follows the terminal, and a detach
 closes the connection and leaves the remote session running. A lost
 connection restores the terminal, prints why and exits 1.
 Every name and message a peer sends is printed with control characters
-escaped as \fI\\xNN\fP; only an attach's screen bytes pass as they are.
+escaped as \fI\\xNN\fP
+.RB ( \-\-ls\-json
+writes C1 and bidi controls as \fI\\uXXXX\fP);
+only an attach's screen bytes pass as they are.
 .SH CONFIG FILE
 Optional: dch needs none. Read fresh on every use from
 .BR $DCH_CONFIG ,
@@ -1303,7 +1330,11 @@ Empty or 0 is off; anything else, when a session is spawned, keeps no
 history record for it.
 .TP
 .B DCH_NO_REMOTE
-Empty or 0 is off; anything else lists and discovers no remote hosts
+Empty or 0 is off; anything else lists and discovers no remote hosts in
+the picker,
+.B \-a
+or
+.B \-\-remote
 .RB ( \-\-hosts
 still applies).
 .TP
