@@ -1016,8 +1016,9 @@ or when
 .B "tailscale status \-\-json"
 fails, the owner is unknown and it refuses to start. A
 peer is checked right after accept, before a byte is read, and a refused peer
-is closed with no reply: it must be an IPv4 address in 100.64.0.0/10, not a
-tagged node, and owned by this host's user (the numeric
+is closed with no reply: it must be an IPv4 address in 100.64.0.0/10, not one
+of this host's own addresses or its own node (any local user could connect
+from those), not a tagged node, and owned by this host's user (the numeric
 .B UserProfile.ID
 of
 .B tailscale whois \-\-json
@@ -1025,7 +1026,17 @@ equals
 .B Self.UserID
 of
 .BR "tailscale status \-\-json" ).
-When whois cannot answer the peer is refused. A port already in use (Prosper's
+When whois cannot answer the peer is refused; a peer refused on tailscaled's
+word is refused again for 30 s without a process being started for it. The
+.B tailscale
+CLI is taken from an absolute
+.B PATH
+entry only (empty and relative ones are skipped), else from
+.BR /usr/bin ,
+.BR /usr/local/bin ,
+.B /opt/homebrew/bin
+or the Tailscale app, and logged. Log lines escape control characters
+(C0, DEL, C1, bidi) from peer-supplied strings. A port already in use (Prosper's
 Remote Terminal on a Mac, or another
 .BR "dch serve" )
 makes it exit 1; it takes no other port and does not retry.
@@ -1050,8 +1061,11 @@ as a numeric Tailscale user id (exact) or a login (ASCII case-insensitive).
 Repeatable. Refused on an untagged host, which serves its owner.
 .TP
 .B \-\-whois\-optional
-Accept a tailnet peer whose whois cannot answer, with a warning. It relaxes
-only that per-peer check: the owner must still be known at startup.
+Accept a tailnet peer, with a warning, while tailscaled is not answering
+(whois and
+.B tailscale status
+both fail). A whois that fails while status works, or answers anything that
+is not clean, is still refused. The owner must still be known at startup.
 .TP
 .BI \-\-check\-peer " ipv4"
 Print whether that peer would get in and exit 0 (accept) or 1 (refuse).
@@ -1059,7 +1073,8 @@ Print whether that peer would get in and exit 0 (accept) or 1 (refuse).
 .B DCH_SERVE_TEST_LOOPBACK=1
 with a loopback
 .B \-\-bind
-lets loopback peers past the address check. It exists for the test suite only.
+lets loopback peers past the address check. It exists for the test suite only,
+and is removed from the environment at startup.
 .SH CONFIG FILE
 Optional: dch needs none. Read fresh on every use from
 .BR $DCH_CONFIG ,

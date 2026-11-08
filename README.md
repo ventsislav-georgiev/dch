@@ -1128,22 +1128,38 @@ refused peer is closed without a reply.
   for a 100.64.0.0/10 address, because an ISP's CGNAT address sits in the
   same range. It never listens on 0.0.0.0.
 - **Peer range.** A peer must be an IPv4 address in 100.64.0.0/10.
+- **Not this host.** A peer on one of this host's own addresses (its tailnet
+  addresses, the bound one, any interface's) is refused, and so is one whose
+  whois names this host's own node. Any local user's process can connect
+  from there, and whois would call it the owner.
 - **Owner.** `tailscale whois --json <peer>` must name the same numeric user
   id as `Self.UserID` in `tailscale status --json`, which is read once at
   startup. Login names are never compared for the owner. With no `tailscale`
-  CLI on `PATH`, or a `status` that fails, the owner is unknown and
-  `dch serve` refuses to start, whatever the flags.
+  CLI, or a `status` that fails, the owner is unknown and `dch serve` refuses
+  to start, whatever the flags. The CLI is the first `tailscale` in an
+  absolute `PATH` entry (empty and relative entries are skipped), else
+  `/usr/bin`, `/usr/local/bin`, `/opt/homebrew/bin` or
+  `/Applications/Tailscale.app/Contents/MacOS/Tailscale`; its path is logged
+  at startup. Identity is the node, not the person on it: every local user
+  of any node you own (a shared Linux box, a CI runner) counts as you.
 - **Tagged nodes.** A tagged peer is refused. No user owns a tagged host, so
   on one `dch serve` refuses to start unless you name who may connect:
   `--allow-user <id|login>`, repeatable. Prefer the numeric user id (the
   `UserProfile.ID` that `tailscale whois --json` prints). A login is matched
-  against `UserProfile.LoginName` without regard to ASCII case.
+  against `UserProfile.LoginName` without regard to ASCII case, as Tailscale
+  treats login names; `--allow-user` grants the serving user's full shell.
   `--allow-user` is only for tagged hosts; an untagged host serves its owner,
   and `dch serve` refuses `--allow-user` there.
-- **Whois down.** When `tailscale whois` cannot answer, the peer is refused
-  and a line is logged. `--whois-optional` accepts that one peer instead,
-  with a warning. It relaxes only a whois that fails at connect time; the
-  owner must still be known at startup.
+- **Whois down.** When `tailscale whois` fails, the peer is refused and a
+  line is logged. `--whois-optional` accepts it instead, with a warning, only
+  when tailscaled itself is not answering (`tailscale status` fails too). A
+  whois that fails while `status` works (the peer is not a node tailscaled
+  knows), and any answer that is not clean (unparseable, a duplicate key,
+  an id that is not an integer, over 256 KiB, timed out), is refused with or
+  without the flag. The owner must still be known at startup.
+- **Repeat refusals.** A peer refused on tailscaled's word is refused again
+  for 30 s before any process is started for it (at most 64 addresses
+  remembered).
 
 **Flags.**
 
@@ -1153,7 +1169,7 @@ refused peer is closed without a reply.
 | `--port <n>` | Another port, 0 for any (tests). The phone always dials 8771. |
 | `--allow-create` | Let the phone start a session with its own command (0x02). Off by default, and `create` is then missing from the ops the phone sees, and attach (0x01) only reaches a session already in the list (else 0x13 and a close). With it, attach to a new name starts a shell session, as `dch -n` does. |
 | `--allow-user <u>` | On a tagged host, accept this user's nodes (numeric id or login). Repeatable. |
-| `--whois-optional` | Accept a tailnet peer whose whois cannot answer, with a warning (see above). The owner must still be known at startup. |
+| `--whois-optional` | Accept a tailnet peer while tailscaled is not answering (whois and status both fail), with a warning (see above). The owner must still be known at startup. |
 | `--check-peer <ip>` | Print whether that peer would get in, then exit 0 (accept) or 1. |
 
 **What the phone gets.** The session list (`dch --ls-json`, re-encoded: name,
@@ -1188,8 +1204,9 @@ RestartSec=5
 WantedBy=default.target
 ```
 
-The `tailscale` CLI must be on the service's `PATH` (systemd's default
-includes `/usr/bin` and `/usr/local/bin`).
+The `tailscale` CLI must be on the service's `PATH` or in one of the fixed
+locations above (systemd's default `PATH` includes `/usr/bin` and
+`/usr/local/bin`).
 
 **launchd** (`~/Library/LaunchAgents/dev.dch.serve.plist`, then
 `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.dch.serve.plist`):
@@ -1214,7 +1231,12 @@ includes `/usr/bin` and `/usr/local/bin`).
 **Test only.** `DCH_SERVE_TEST_LOOPBACK=1` together with a loopback `--bind`
 lets loopback peers past the address check, so the test suite can run the
 server on 127.0.0.1 with a fake `tailscale`. The owner check still runs. It
-logs a loud warning; never set it on a real host.
+logs a loud warning and is removed from the environment at startup, so
+nothing `dch serve` starts inherits it; never set it on a real host.
+
+**Log.** Session names and device ids come from the phone. Every log line
+escapes control characters (C0, DEL, C1, bidi overrides and isolates) as
+`\xNN` or `\u{NNNN}`, and a session name containing one is refused.
 
 **Limits.** At most 64 connections, 16 per peer, and 4 live-list streams per
 phone. A connection that is not attached or watching closes after 30 s
