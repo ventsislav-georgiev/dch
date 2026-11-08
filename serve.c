@@ -677,10 +677,15 @@ rows_wire(const char *ls, struct sb *b)
 
 /* ---- the peer gate (pure) -------------------------------------------- */
 
+/* A tailcfg.StableNodeID: "963" on Headscale, "nAbCdEf1CNTRL" on
+** tailscale.com. Short; anything longer is junk. */
+#define NODE_ID_MAX 64
+
 struct gate
 {
 	long long self_uid;	/* the host's owner; -1 on a tagged host */
-	long long self_node;	/* the host's node id (Self.ID); -1 unknown */
+	char self_node[NODE_ID_MAX];	/* the host's StableNodeID (Self.ID);
+					** "" unknown */
 	const char *allow[MAX_ALLOW];	/* --allow-user: id or login */
 	int nallow;
 	int whois_optional;
@@ -743,22 +748,22 @@ all_digits(const char *s)
 	return *s && s[strspn(s, "0123456789")] == '\0';
 }
 
-/* Field `key` of `obj` as a node id: a JSON integer, or a string of digits
-** (status gives Self.ID as "963", whois gives Node.ID as 963). 1, 0 when
-** absent, -1 otherwise. */
+/* Field `key` of `obj` as a StableNodeID (status Self.ID, whois
+** Node.StableID) into out[NODE_ID_MAX]: a non-empty string of ASCII
+** letters, digits, '-', '_' or '.'. 1, 0 when absent ("" in out), -1
+** otherwise (a number, junk, too long). */
 static int
-jid(const struct json_parser *jp, int obj, const char *key, long long *v)
+jnode(const struct json_parser *jp, int obj, const char *key, char *out)
 {
-	char s[24];
-	int r = jint(jp, obj, key, v);
+	int r = jstr(jp, obj, key, out, NODE_ID_MAX);
 
-	if (r != -1)
-		return r;
-	if (jstr(jp, obj, key, s, sizeof s) != 1 || !all_digits(s) ||
-	    strlen(s) > 18)
-		return -1;
-	*v = strtoll(s, NULL, 10);
-	return 1;
+	if (r == 1 && (!*out || out[strspn(out, "abcdefghijklmnopqrstuvwxyz"
+	                                   "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	                                   "0123456789-_.")]))
+		r = -1;
+	if (r != 1)
+		*out = '\0';
+	return r;
 }
 
 /* Whether object `obj` carries tags: 0 for no Tags key, null or [], else
@@ -778,24 +783,26 @@ has_tags(const struct json_parser *jp, int obj)
 }
 
 /* `tailscale whois --json`: UserProfile.ID into *uid, LoginName into login,
-** Node.ID into *node, *tagged when the node has tags (or an odd Tags) or is
-** the tagged-devices identity. 0, or -1 when the document is unusable: no
-** single UserProfile with an integer ID, no single Node with an id. */
+** Node.StableID into node[NODE_ID_MAX] ("" when absent), *tagged when the
+** node has tags (or an odd Tags) or is the tagged-devices identity. 0, or
+** -1 when the document is unusable: no single UserProfile with an integer
+** ID, no single Node, a StableID that is not a node id. Node.ID (an int64
+** on both control planes) is not used. */
 static int
-whois_user(const char *js, long long *uid, long long *node, char *login,
+whois_user(const char *js, long long *uid, char *node, char *login,
            size_t lcap, int *tagged)
 {
 	struct json_parser jp;
 	int up, nd, rc = -1;
 
 	*tagged = 0;
-	*node = -1;
+	*node = '\0';
 	login[0] = '\0';
 	if (dch_json_parse(&jp, js) == 0 && jp.tok[0].kind == JSON_OBJECT &&
 	    (up = jcont(&jp, 0, "UserProfile", JSON_OBJECT)) >= 0 &&
 	    jint(&jp, up, "ID", uid) == 1 &&
 	    (nd = jcont(&jp, 0, "Node", JSON_OBJECT)) >= 0 &&
-	    jid(&jp, nd, "ID", node) == 1)
+	    jnode(&jp, nd, "StableID", node) >= 0)
 	{
 		if (jstr(&jp, up, "LoginName", login, lcap) != 1)
 			login[0] = '\0';
@@ -812,7 +819,9 @@ whois_user(const char *js, long long *uid, long long *node, char *login,
 ** when it did not exit cleanly. ts_up: when whois is NULL, whether
 ** `tailscale status` still answers, so tailscaled is up and the peer is
 ** simply not a node it knows.
-** A tagged node is refused, and so is this host's own node. Else the host's
+** A tagged node is refused, and so is this host's own node (whois
+** Node.StableID equal to status Self.ID; when Self.ID is known, a whois
+** with no StableID is unusable). Else the host's
 ** owner is accepted, compared by numeric user id only, and on a tagged host
 ** (no owner) each --allow-user: a number against UserProfile.ID exactly, a
 ** login against UserProfile.LoginName case-insensitively (ASCII). serve_main
@@ -823,8 +832,8 @@ static int
 serve_gate(const struct gate *g, uint32_t ip, int self, const char *whois,
            int ts_up)
 {
-	char login[256];
-	long long uid, node;
+	char login[256], node[NODE_ID_MAX];
+	long long uid;
 	int tagged, i;
 
 	if (gate_addr(g, ip) != G_OK)
@@ -834,11 +843,13 @@ serve_gate(const struct gate *g, uint32_t ip, int self, const char *whois,
 	if (!whois)
 		return ts_up ? G_NOTNODE
 		             : g->whois_optional ? G_OK_NOWHOIS : G_NOWHOIS;
-	if (whois_user(whois, &uid, &node, login, sizeof login, &tagged) < 0)
+	if (whois_user(whois, &uid, node, login, sizeof login, &tagged) < 0)
 		return G_BADWHOIS;
 	if (tagged)
 		return G_TAGGED;
-	if (g->self_node >= 0 && node == g->self_node)
+	if (g->self_node[0] && !node[0])
+		return G_BADWHOIS;
+	if (g->self_node[0] && !strcmp(node, g->self_node))
 		return G_SELF;
 	if (g->self_uid >= 0 && uid == g->self_uid)
 		return G_OK;
@@ -850,25 +861,24 @@ serve_gate(const struct gate *g, uint32_t ip, int self, const char *whois,
 	return G_OWNER;
 }
 
-/* `tailscale status --json`: Self.UserID into *uid, Self.ID into *node (-1
-** when absent), *tagged when Self has tags (or an odd Tags) or its user is
-** the tagged-devices identity. 0, or -1 (also for a duplicate Self). */
+/* `tailscale status --json`: Self.UserID into *uid, Self.ID (the host's
+** StableNodeID) into node[NODE_ID_MAX] ("" when absent), *tagged when Self
+** has tags (or an odd Tags) or its user is the tagged-devices identity. 0,
+** or -1 (also for a duplicate Self or a Self.ID that is not a node id). */
 static int
-status_self(const char *js, long long *uid, long long *node, int *tagged)
+status_self(const char *js, long long *uid, char *node, int *tagged)
 {
 	struct json_parser jp;
-	int self, user, r, rc = -1;
+	int self, user, rc = -1;
 	char key[24], login[256];
 
 	*tagged = 0;
-	*node = -1;
+	*node = '\0';
 	if (dch_json_parse(&jp, js) == 0 && jp.tok[0].kind == JSON_OBJECT &&
 	    (self = jcont(&jp, 0, "Self", JSON_OBJECT)) >= 0 &&
 	    jint(&jp, self, "UserID", uid) == 1 &&
-	    (r = jid(&jp, self, "ID", node)) >= 0)
+	    jnode(&jp, self, "ID", node) >= 0)
 	{
-		if (r == 0)
-			*node = -1;
 		*tagged = has_tags(&jp, self);
 		snprintf(key, sizeof key, "%lld", *uid);
 		user = jcont(&jp, jcont(&jp, 0, "User", JSON_OBJECT), key,
@@ -2554,10 +2564,10 @@ serve_main(int argc, char **argv)
 		slog("tailscale CLI: %s", g_ts);
 
 	/* The host's owner and node, cached for every peer. */
-	g_gate.self_uid = g_gate.self_node = -1;
+	g_gate.self_uid = -1;
 	if (ts_run("status", "--json", "--peers=false", NULL, &status,
 	           4u << 20) == 0 &&
-	    status_self(status, &g_gate.self_uid, &g_gate.self_node,
+	    status_self(status, &g_gate.self_uid, g_gate.self_node,
 	                &tagged) == 0)
 	{
 		if (tagged)

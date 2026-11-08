@@ -35,16 +35,22 @@ esac
 exit 1
 """
 
-# Self.ID is a string in status, Node.ID a number in whois (as tailscale).
+# Headscale-shaped: status Self.ID is the host's StableNodeID, digits in a
+# string; whois Node.ID is an int64 and Node.StableID the StableNodeID string.
+# SAAS_* are tailscale.com-shaped: the StableNodeID is "n...CNTRL".
 OWNER = {"Self": {"ID": "1001", "UserID": 42, "Tags": []},
          "User": {"42": {"LoginName": "me@example.com"}}}
 TAGGED = {"Self": {"ID": "1001", "UserID": 9, "Tags": ["tag:server"]},
           "User": {"9": {"LoginName": "tagged-devices"}}}
 
 
-def whois(uid, login="me@example.com", tags=(), node=2002):
+SAAS_OWNER = {"Self": {"ID": "nXyZ123CNTRL", "UserID": 42, "Tags": []},
+              "User": {"42": {"LoginName": "me@example.com"}}}
+
+
+def whois(uid, login="me@example.com", tags=(), node="2002", nid=2002):
     return {"UserProfile": {"ID": uid, "LoginName": login},
-            "Node": {"ID": node, "Tags": list(tags)}}
+            "Node": {"ID": nid, "StableID": node, "Tags": list(tags)}}
 
 
 def main():
@@ -399,7 +405,8 @@ def main():
                   "status works", "--whois-optional", who=None)
         gate_case("a whois with a string UserProfile.ID, --whois-optional (F1)",
                   "unusable", "--whois-optional",
-                  who='{"UserProfile":{"ID":"42"},"Node":{"ID":2002}}')
+                  who='{"UserProfile":{"ID":"42"},'
+                      '"Node":{"ID":2002,"StableID":"2002"}}')
         gate_case("a whois over the 256 KiB cap, --whois-optional (F1)",
                   "status works", "--whois-optional",
                   who=json.dumps(whois(42)) + " " * (300 << 10))
@@ -489,29 +496,82 @@ def main():
         rc, out = peer("100.100.3.3", "--bind", "100.100.3.3")
         check("a peer on the bound address is refused (F2)",
               rc == 1 and "this host itself" in out)
-        ts(who=whois(42, node=1001))
+        ts(who=whois(42, node="1001", nid=1001))
         rc, out = peer("100.100.2.2")
-        check("a whois whose Node.ID is this host's Self.ID is refused (F2)",
+        check("a whois whose Node.StableID is this host's Self.ID is refused "
+              "(F2)",
               rc == 1 and "this host itself" in out)
         # F5: odd but valid JSON fails closed
+        nd = '"Node":{"ID":2002,"StableID":"2002"'
         for who, why, msg in (
-                ('{"UserProfile":{"ID":42},"Node":{"ID":2002,"Tags":"tag:x"}}',
+                ('{"UserProfile":{"ID":42},' + nd + ',"Tags":"tag:x"}}',
                  "tagged node", "Tags that is not an array"),
-                ('{"UserProfile":{"ID":42},"Node":{"ID":2002,"Tags":[],'
+                ('{"UserProfile":{"ID":42},' + nd + ',"Tags":[],'
                  '"Tags":["tag:x"]}}', "tagged node", "a duplicated Tags"),
-                ('{"UserProfile":{"ID":42},"Node":{"ID":2002},'
-                 '"Node":{"ID":2002,"Tags":["tag:x"]}}', "unusable",
-                 "a duplicated Node"),
-                ('{"UserProfile":{"ID":42},"UserProfile":{"ID":7},'
-                 '"Node":{"ID":2002}}', "unusable", "a duplicated UserProfile"),
-                ('{"UserProfile":{"ID":42.0},"Node":{"ID":2002}}', "unusable",
+                ('{"UserProfile":{"ID":42},' + nd + '},' + nd +
+                 ',"Tags":["tag:x"]}}', "unusable", "a duplicated Node"),
+                ('{"UserProfile":{"ID":42},"UserProfile":{"ID":7},' + nd +
+                 '}}', "unusable", "a duplicated UserProfile"),
+                ('{"UserProfile":{"ID":42.0},' + nd + '}}', "unusable",
                  "a float UserProfile.ID"),
-                ('{"UserProfile":{"ID":42},"Node":{}}', "unusable",
-                 "a Node with no ID")):
+                ('{"UserProfile":{"ID":42}}', "unusable", "no Node"),
+                ('{"UserProfile":{"ID":42},"Node":{"ID":2002}}', "unusable",
+                 "a Node with an ID but no StableID"),
+                ('{"UserProfile":{"ID":42},"Node":{"ID":2002,'
+                 '"StableID":2002}}', "unusable", "a numeric Node.StableID"),
+                ('{"UserProfile":{"ID":42},"Node":{"ID":2002,'
+                 '"StableID":"n\\u001bx"}}', "unusable",
+                 "a control character in Node.StableID"),
+                ('{"UserProfile":{"ID":42},"Node":{"ID":2002,'
+                 '"StableID":"%s"}}' % ("n" * 64), "unusable",
+                 "an over-long Node.StableID")):
             ts(who=who)
             rc, out = peer("100.100.2.2", "--whois-optional")
             check("whois with %s is refused (F5)" % msg,
                   rc == 1 and why in out)
+        # Self.ID unknown: no node check, but a Node is still required
+        ts(status={"Self": {"UserID": 42}},
+           who='{"UserProfile":{"ID":42},"Node":{"ID":2002}}')
+        check("with no Self.ID, a whois Node without StableID is accepted",
+              peer("100.100.2.2")[0] == 0)
+        ts(status={"Self": {"UserID": 42}}, who='{"UserProfile":{"ID":42}}')
+        rc, out = peer("100.100.2.2")
+        check("with no Self.ID, a whois with no Node is refused",
+              rc == 1 and "unusable" in out)
+        ts(status={"Self": {"ID": "n x", "UserID": 42}})
+        rc, err = run_fail()
+        check("a status with a junk Self.ID refuses to start",
+              rc == 1 and "one Self" in err)
+
+        # --- #088: tailscale.com-shaped ids ("n...CNTRL") -----------------
+        saas_peer = whois(42, node="nPeer456CNTRL", nid=123456789)
+        ts(status=SAAS_OWNER, who=saas_peer)
+        p, port, log = serve()
+        check("serve starts on a tailscale.com-shaped status (#088)",
+              port is not None)
+        check("accepted: the owner's other node, tailscale.com ids (#088)",
+              port is not None and not refused(port))
+        stop(p)
+        check("--check-peer accepts it too (#088)",
+              peer("100.100.2.2")[0] == 0)
+        ts(status=SAAS_OWNER,
+           who=whois(42, node="nXyZ123CNTRL", nid=123456789))
+        rc, out = peer("100.100.2.2")
+        check("a whois whose StableID is this host's Self.ID is refused as "
+              "self, tailscale.com ids (#088)",
+              rc == 1 and "this host itself" in out)
+        for who, msg in (
+                ('{"UserProfile":{"ID":42},"Node":{"ID":123456789}}',
+                 "no StableID"),
+                ('{"UserProfile":{"ID":42},"Node":{"ID":123456789,'
+                 '"StableID":123456789}}', "a numeric StableID"),
+                ('{"UserProfile":{"ID":42},"Node":{"ID":123456789,'
+                 '"StableID":["nPeer456CNTRL"]}}', "an array StableID")):
+            ts(status=SAAS_OWNER, who=who)
+            rc, out = peer("100.100.2.2")
+            check("a whois with %s is refused as unusable, tailscale.com "
+                  "ids (#088)" % msg, rc == 1 and "unusable" in out)
+
         ts(status='{"Self":{"ID":"1001","UserID":42},"Self":{"UserID":7}}')
         rc, err = run_fail()
         check("a status with a duplicated Self refuses to start (F5)",
