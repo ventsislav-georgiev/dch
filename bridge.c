@@ -640,9 +640,21 @@ static size_t json_quote(char *out, size_t cap, const char *s) {
     } else if (c >= 0x80) {
       /* NUL-terminated, so utf8_len stops at the end on its own */
       size_t l = utf8_len((const unsigned char *)s, SIZE_MAX);
+      const unsigned char *u = (const unsigned char *)s;
       if (!l)
         esc = "\\ufffd";
-      else {
+      else if ((l == 2 && c == 0xc2 && u[1] < 0xa0) ||
+               (l == 3 && c == 0xe2 &&
+                ((u[1] == 0x80 && u[2] >= 0xaa && u[2] <= 0xae) ||
+                 (u[1] == 0x81 && u[2] >= 0xa6 && u[2] <= 0xa9)))) {
+        /* C1 controls and the bidi embeddings, overrides and isolates
+           as \u: the same JSON value, and inert on a terminal */
+        snprintf(small, sizeof small, "\\u%04x",
+                 l == 2 ? u[1]
+                        : (c & 0x0f) << 12 | (u[1] & 0x3f) << 6 | (u[2] & 0x3f));
+        esc = small;
+        s += l - 1;
+      } else {
         for (size_t k = 0; k < l; k++, n++)
           if (n < cap)
             out[n] = s[k];
