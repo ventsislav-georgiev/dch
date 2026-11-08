@@ -301,7 +301,11 @@ def main():
 
         # --- attach ---------------------------------------------------
         pid, fd = attach(["--hosts", hosts, "-a", "srv:rs1"])
-        out = read(fd, b"$ ", 8)
+        out = read(fd, b"$ ", 3)
+        if b"$ " not in out:
+            # lite: no replay, and an idle sh repaints nothing; prompt it
+            os.write(fd, b"\r")
+            out += read(fd, b"$ ", 8)
         check("-a srv:rs1 shows the remote screen", b"$ " in out, out)
         os.write(fd, b"echo rt$((6*7))\r")
         out = read(fd, b"rt42", 5)
