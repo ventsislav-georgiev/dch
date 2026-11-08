@@ -229,6 +229,14 @@ def main():
         check("then the FIN", s.recv(1) == b"")
         s.close()
 
+        # --- with --allow-create, attach is attach-or-create --------------
+        s = conn(port)
+        send(s, 0x01, {"name": "svc-made", "cols": 80, "rows": 24})
+        t, _ = frame(s)
+        check("create on: attach to a new name starts it",
+              t == 0x10 and "svc-made" in sessions())
+        s.close()
+
         # --- create with a command, exit code ----------------------------
         s = conn(port)
         send(s, 0x02, {"name": "svc-create", "cols": 80, "rows": 24,
@@ -324,6 +332,29 @@ def main():
               t == 0x13 and "--allow-create" in json.loads(pl)["message"])
         s.close()
         check("no session created", "svc-nope" not in sessions())
+        # create off: attach only to a listed session, never start one
+        s = conn(port)
+        send(s, 0x01, {"name": "svc-new", "cols": 80, "rows": 24})
+        try:
+            t, pl = frame(s)
+            msg = json.loads(pl).get("message", "") if t == 0x13 else ""
+            check("create off: attach to an unknown name gets 0x13",
+                  "no session named svc-new" in msg
+                  and "does not allow create" in msg)
+            check("create off: then the FIN", s.recv(1) == b"")
+        except (EOFError, socket.timeout):
+            check("create off: attach to an unknown name gets 0x13", False)
+        s.close()
+        check("create off: no session started by attach",
+              "svc-new" not in sessions())
+        r = subprocess.run([DCH, "--spawn", "svc-have", "--size", "80x24",
+                            "sh"], env=env, capture_output=True, timeout=30)
+        s = conn(port)
+        send(s, 0x01, {"name": "svc-have", "cols": 80, "rows": 24})
+        t, _ = frame(s)
+        check("create off: attach to a listed session streams 0x10",
+              r.returncode == 0 and t == 0x10)
+        s.close()
 
         # --- the gate, per connection (whois runs per peer) --------------
         ts(who=whois(7, "other@example.com"))
@@ -350,6 +381,9 @@ def main():
         check("without the bypass a loopback peer is refused", refused(port))
         check("a non-tailnet --bind warns that it admits nobody",
               "admits nobody" in text(log))
+        check("an out-of-range peer is refused before fork (by the parent)",
+              "dch serve[%d]: 127.0.0.1: refused: not an IPv4" % p.pid
+              in text(log))
         stop(p)
 
         # --- --check-peer and --allow-user -------------------------------
@@ -387,6 +421,14 @@ def main():
         ts(status=None)
         rc, err = run_fail()
         check("tailscale status failing refuses to start", rc == 1)
+        rc, err = run_fail("--whois-optional")
+        check("--whois-optional with status failing refuses to start",
+              rc == 1 and "owner is unknown" in err)
+        if not shutil.which("tailscale", path="/usr/bin:/bin"):
+            rc, err = run_fail("--whois-optional",
+                               e=dict(benv, PATH="/usr/bin:/bin"))
+            check("no tailscale CLI refuses to start, --whois-optional or "
+                  "not", rc == 1 and "not on PATH" in err)
         ts(ip=None)
         rc, err = run_fail(bind=False)
         check("tailscale ip -4 failing refuses to start (Q11)",

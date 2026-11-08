@@ -25,7 +25,6 @@
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <dirent.h>
-#include <ifaddrs.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <stdarg.h>
@@ -1238,6 +1237,29 @@ list_payload(struct sb *b)
 	return rc;
 }
 
+/* Whether `name` is in the list 0x03 would answer: 1, 0, or -1 when the
+** list is unavailable. */
+static int
+session_listed(const char *name)
+{
+	struct json_parser jp;
+	struct sb b = {0};
+	char got[NAME_CAP + 2];
+	int i, hit = 0;
+
+	if (list_payload(&b) < 0 || dch_json_parse(&jp, b.p) < 0)
+	{
+		free(b.p);
+		return -1;
+	}
+	for (i = 1; i < jp.tok[0].next && !hit; i = jp.tok[i].next)
+		hit = jstr(&jp, i, "name", got, sizeof got) == 1 &&
+		      !strcmp(got, name);
+	dch_json_free(&jp);
+	free(b.p);
+	return hit;
+}
+
 /* The name dch picked for a nameless create: its client's pidfile in the
 ** socket dir is <name>.sock.client.<pid>. 0, or -1 while it is not there. */
 static int
@@ -1320,6 +1342,20 @@ on_attach(struct conn *c, int create, const unsigned char *p, size_t n)
 	{
 		dch_json_free(&jp);
 		out_err(c, name[0] == '-' ? DASH_MSG : "invalid session name");
+		return;
+	}
+	/* `dch -n` attaches or creates. With create off, a phone must not
+	** start a shell under a name of its choosing: attach only to a
+	** session that is listed. ponytail: a session ending between this
+	** check and the exec is started again as a shell; closing that needs
+	** an attach-only dch flag. */
+	if (!create && !g_allow_create && session_listed(name) != 1)
+	{
+		dch_json_free(&jp);
+		snprintf(msg, sizeof msg, "no session named %.80s (this host "
+		         "does not allow create)", name);
+		out_err(c, msg);
+		c->closing = 1;	/* the 0x13 is the last frame, as a failed spawn */
 		return;
 	}
 	rq_size(&jp, &c->cols, &c->rows);
@@ -2040,6 +2076,8 @@ accept_one(int lfd, int nr)
 	}
 	ip = ntohl(sa.sin_addr.s_addr);
 	inet_ntop(AF_INET, &sa.sin_addr, ipstr, sizeof ipstr);
+	/* The range check costs no fork and no kid slot; the handler runs
+	** the whole gate (whois) again before it reads a byte. */
 	if (gate_addr(&g_gate, ip) != G_OK)
 	{
 		slog("%s: refused: %s", ipstr, gate_why(G_RANGE));
@@ -2097,13 +2135,13 @@ serve_usage(FILE *f)
 	    "  --allow-user <u>    also accept this user's nodes: a numeric\n"
 	    "                      Tailscale user id or a login; required on a\n"
 	    "                      tagged host (repeatable)\n"
-	    "  --whois-optional    accept tailnet peers when tailscale whois\n"
-	    "                      cannot answer (default: refuse them)\n"
+	    "  --whois-optional    accept a tailnet peer whose tailscale whois\n"
+	    "                      cannot answer (default: refuse it); the\n"
+	    "                      owner must still be known at startup\n"
 	    "  --check-peer <ip>   print whether a peer would get in, and exit\n");
 }
 
-/* addr when `tailscale ip -4` prints it (or, with no CLI, when it is in
-** 100.64.0.0/10); *first gets its first line. */
+/* addr when `tailscale ip -4` prints it; *first gets its first line. */
 static int
 tailnet_addr(struct in_addr addr, struct in_addr *first)
 {
@@ -2111,8 +2149,6 @@ tailnet_addr(struct in_addr addr, struct in_addr *first)
 	struct in_addr a;
 	int hit = 0, got = 0;
 
-	if (!g_ts[0])
-		return ip_cgnat(ntohl(addr.s_addr));
 	if (ts_run("ip", "-4", NULL, NULL, &out, 4096) < 0)
 		return 0;
 	for (line = strtok_r(out, "\r\n", &save); line;
@@ -2126,31 +2162,6 @@ tailnet_addr(struct in_addr addr, struct in_addr *first)
 		}
 	free(out);
 	return first ? got > 0 : hit;
-}
-
-/* The first IPv4 in 100.64.0.0/10 on any interface (as Prosper finds it). */
-static int
-cgnat_iface(struct in_addr *out)
-{
-	struct ifaddrs *ifs, *i;
-	int got = 0;
-
-	if (getifaddrs(&ifs) < 0)
-		return 0;
-	for (i = ifs; i && !got; i = i->ifa_next)
-		if (i->ifa_addr && i->ifa_addr->sa_family == AF_INET)
-		{
-			struct sockaddr_in sin;
-
-			memcpy(&sin, i->ifa_addr, sizeof sin);
-			if (ip_cgnat(ntohl(sin.sin_addr.s_addr)))
-			{
-				*out = sin.sin_addr;
-				got = 1;
-			}
-		}
-	freeifaddrs(ifs);
-	return got;
 }
 
 static int
@@ -2273,18 +2284,16 @@ serve_main(int argc, char **argv)
 		if (tagged)
 			g_gate.self_uid = -1;
 	}
-	else if (g_gate.whois_optional)
-		slog("warning: %s: no owner to check peers against; "
-		     "--whois-optional accepts any tailnet peer",
-		     g_ts[0] ? "tailscale status --json failed"
-		             : "no tailscale CLI on PATH");
 	else
 	{
-		fprintf(stderr, "dch serve: %s, so no peer could be checked. "
-		        "Start tailscale (or put its CLI on PATH), or pass "
-		        "--whois-optional to accept any tailnet peer.\n",
+		/* No owner known, nobody to serve. --whois-optional only
+		** relaxes one peer's failed whois, never this. */
+		fprintf(stderr, "dch serve: %s, so this host's owner is unknown "
+		        "and no peer could be checked. Start tailscale and log "
+		        "in (or put its CLI on PATH).\n",
 		        g_ts[0] ? "tailscale status --json failed"
 		                : "the tailscale CLI is not on PATH");
+		free(status);
 		return 1;
 	}
 	if (g_gate.nallow && !tagged)
@@ -2294,7 +2303,7 @@ serve_main(int argc, char **argv)
 		free(status);
 		return 1;
 	}
-	if (status && tagged && !g_gate.nallow)
+	if (tagged && !g_gate.nallow)
 	{
 		fprintf(stderr, "dch serve: this host is a tagged node, so no "
 		        "user owns it. Name who may connect with --allow-user "
@@ -2369,15 +2378,12 @@ serve_main(int argc, char **argv)
 			     "tailnet nodes (100.64.0.0/10, owner-checked) get "
 			     "in, so this bind admits nobody.", bind_s);
 	}
-	else if (g_ts[0] ? !tailnet_addr(addr, &addr) : !cgnat_iface(&addr))
+	else if (!tailnet_addr(addr, &addr))
 	{
-		fprintf(stderr, "dch serve: %s. Not falling back to any other "
-		        "address; pass --bind <ipv4> to choose one.\n",
-		        g_ts[0] ? "tailscale reported no address (stopped or "
-		                  "logged out: `tailscale ip -4` failed or printed "
-		                  "nothing)"
-		                : "no IPv4 address in 100.64.0.0/10 on any "
-		                  "interface");
+		fprintf(stderr, "dch serve: tailscale reported no address "
+		        "(stopped or logged out: `tailscale ip -4` failed or "
+		        "printed nothing). Not falling back to any other address; "
+		        "pass --bind <ipv4> to choose one.\n");
 		return 1;
 	}
 	inet_ntop(AF_INET, &addr, ipstr, sizeof ipstr);
