@@ -366,6 +366,7 @@ def main():
                             "sh"], env=env, capture_output=True, timeout=30)
         s = conn(port)
         send(s, 0x01, {"name": "svc-have", "cols": 80, "rows": 24})
+        send(s, 0x10, b"\n")  # lite: no replay; make the idle sh print
         t, _ = frame(s)
         check("create off: attach to a listed session streams 0x10",
               r.returncode == 0 and t == 0x10)
