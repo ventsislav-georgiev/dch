@@ -32,6 +32,31 @@ char *dch_utf8_fix(const char *s);
 char **dch_json_strv(const char *json, const char *object, const char *key,
                      int *argc);
 int dch_process_start(long pid, char *out, size_t cap);
+
+/* bridge.c's JSON tokenizer, for callers that walk a document themselves.
+** dch_json_parse() needs NUL-terminated UTF-8; dch_json_free() after every
+** parse, even a failed one. Token 0 is the root; a container's children run
+** from its index + 1 to its `next`, each child's `next` the one after it.
+** dch_json_field(): the value token of `key` in an object, -1 absent, -2
+** duplicated. dch_json_decode(): a string token, unescaped, into out[cap]. */
+enum json_kind { JSON_STRING, JSON_OBJECT, JSON_ARRAY, JSON_PRIMITIVE };
+struct json_token {
+  enum json_kind kind;
+  int start, end, parent, next;
+};
+struct json_parser {
+  const char *text;
+  size_t len, pos;
+  struct json_token *tok;
+  int ntok, cap, depth;
+};
+int dch_json_parse(struct json_parser *p, const char *text);
+void dch_json_free(struct json_parser *p);
+int dch_json_field(const struct json_parser *p, int object, const char *key);
+int dch_json_decode(const struct json_parser *p, int token, char *out,
+                    size_t cap);
+void dch_sha256_hex(const void *data, size_t n, char out[65]);
+int dch_random_bytes(unsigned char *out, size_t len);
 int dch_meta_prs(const char *json, char *out, size_t cap, long *merged);
 
 #endif

@@ -208,21 +208,11 @@ static int utf8_ok(const unsigned char *s, size_t n) {
   return 1;
 }
 
-enum json_kind { JSON_STRING, JSON_OBJECT, JSON_ARRAY, JSON_PRIMITIVE };
-struct json_token {
-  enum json_kind kind;
-  int start, end, parent, next;
-};
-/* Tokens grow with the text (a record is up to 1 MiB: a 1100-word argv is
-   past any fixed cap); json_free() after every json_parse(), even a failed
-   one. Nesting stays bounded so the recursion does. */
+/* The token types live in bridge.h (serve.c walks documents too). Tokens
+   grow with the text (a record is up to 1 MiB: a 1100-word argv is past any
+   fixed cap); json_free() after every json_parse(), even a failed one.
+   Nesting stays bounded so the recursion does. */
 #define JSON_MAX_DEPTH 1024
-struct json_parser {
-  const char *text;
-  size_t len, pos;
-  struct json_token *tok;
-  int ntok, cap, depth;
-};
 
 static void json_free(struct json_parser *p) {
   free(p->tok);
@@ -2625,6 +2615,30 @@ char **dch_json_strv(const char *json, const char *object, const char *key,
 out:
   json_free(&p);
   return v;
+}
+
+/* The tokenizer itself, for callers that walk a document (serve.c). */
+int dch_json_parse(struct json_parser *p, const char *text) {
+  return json_parse(p, text);
+}
+
+void dch_json_free(struct json_parser *p) { json_free(p); }
+
+int dch_json_field(const struct json_parser *p, int object, const char *key) {
+  return json_field(p, object, key);
+}
+
+int dch_json_decode(const struct json_parser *p, int token, char *out,
+                    size_t cap) {
+  return json_decode(p, token, out, cap);
+}
+
+void dch_sha256_hex(const void *data, size_t n, char out[65]) {
+  sha_hex(data, n, out);
+}
+
+int dch_random_bytes(unsigned char *out, size_t len) {
+  return random_bytes(out, len);
 }
 
 int dch_process_start(long pid, char *out, size_t cap) {
