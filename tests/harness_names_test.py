@@ -217,8 +217,11 @@ def main():
         overhead = withres - base
         print("  info resolution overhead: %.3f ms/run "
               "(%.3f with, %.3f without)" % (overhead, withres, base))
-        check("resolution overhead <= %.1f ms" % OVERHEAD_BUDGET_MS,
-              overhead <= OVERHEAD_BUDGET_MS)
+        if os.environ.get("DCH_TEST_NO_BUDGET"):  # sanitizer build
+            print("  skip resolution overhead budget (sanitizer build)")
+        else:
+            check("resolution overhead <= %.1f ms" % OVERHEAD_BUDGET_MS,
+                  overhead <= OVERHEAD_BUDGET_MS)
     finally:
         for p in procs:
             try:
