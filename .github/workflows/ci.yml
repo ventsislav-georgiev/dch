@@ -194,6 +194,12 @@ jobs:
           ./dch.exe --version
       - name: Test
         run: DCH=./dch.exe python tests/windows_client_test.py
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dch-exe
+          path: dch.exe
+          if-no-files-found: error
+          retention-days: 14
 
   # libFuzzer targets (tests/fuzz/), 60 s each under ASan + UBSan.
   fuzz:

@@ -1321,6 +1321,10 @@ rename or create: those are mutating operations that will need the server's
 attaches to the sessions of your other machines and hosts none (no pty, no
 master, no `dch serve`). It is a plain Win32 console program, built with
 mingw-w64 and linked statically, so it needs no Cygwin or MSYS2 runtime.
+Each [release](https://github.com/ventsislav-georgiev/dch/releases) carries
+`dch.exe` and `dch.exe.sha256`; check the download with
+`certutil -hashfile dch.exe SHA256` or PowerShell `Get-FileHash dch.exe`.
+Or build it:
 
 ```sh
 scripts/build-windows.sh            # x86_64-w64-mingw32-gcc; CC=gcc in MSYS2's UCRT64
