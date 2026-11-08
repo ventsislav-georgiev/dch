@@ -8,10 +8,12 @@ VT_LIBS = @VT_LIBS@
 VERSION = @PACKAGE_VERSION@
 VPATH = $(srcdir)
 
-OBJ = attach.o master.o dch.o serve.o rframe.o remote.o $(VT_OBJS) bridge.o
+OBJ = attach.o master.o dch.o serve.o rframe.o remote.o $(VT_OBJS) bridge.o \
+      json.o
 SRC = $(srcdir)/attach.c $(srcdir)/master.c $(srcdir)/dch.c \
       $(srcdir)/vt.c $(srcdir)/vt_stub.c $(srcdir)/bridge.c \
-      $(srcdir)/serve.c $(srcdir)/rframe.c $(srcdir)/remote.c
+      $(srcdir)/serve.c $(srcdir)/rframe.c $(srcdir)/remote.c \
+      $(srcdir)/json.c
 
 TARFILES = $(srcdir)/README $(srcdir)/COPYING $(srcdir)/Makefile.in \
 	   $(srcdir)/config.h.in $(srcdir)/bridge.h $(srcdir)/rframe.h $(SRC) \
@@ -46,3 +48,4 @@ remote.o: @srcdir@/remote.c @srcdir@/dtach.h @srcdir@/bridge.h @srcdir@/rframe.h
 vt.o: @srcdir@/vt.c @srcdir@/vt.h @srcdir@/dtach.h config.h
 vt_stub.o: @srcdir@/vt_stub.c @srcdir@/vt.h config.h
 bridge.o: @srcdir@/bridge.c @srcdir@/bridge.h @srcdir@/dtach.h config.h
+json.o: @srcdir@/json.c @srcdir@/bridge.h

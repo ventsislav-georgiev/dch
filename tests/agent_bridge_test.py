@@ -293,6 +293,7 @@ def bridge_core_self_check(root):
             "-I.",
             "-DDCH_BRIDGE_SELFTEST",
             str(source),
+            str(source.parent / "json.c"),
             "-o",
             str(binary),
         ],
