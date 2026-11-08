@@ -8489,7 +8489,7 @@ pk_cols(const struct pk *p, int top, int end)
 		{
 			int set;
 
-			snprintf(pk_cfv[k], sizeof pk_cfv[k], "%s",
+			snprintf(pk_cfv[k], sizeof pk_cfv[k], "%.1023s",
 			         config_show(k, b, sizeof b, &set));
 			pk_cfis[k] = set;
 			if ((w = pk_cps(config_keys[k].key)) > pk_c.name)
