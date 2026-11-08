@@ -80,9 +80,12 @@ class Follower:
         with self.cv:
             self.cv.notify_all()
 
-    def wait(self, pred, secs):
-        """First frame from now on (index >= len at call) matching pred."""
-        start = len(self.frames)
+    def wait(self, pred, secs, start=None):
+        """First frame from index start on (default: from now) matching
+        pred. Take start = len(frames) BEFORE the action that should cause
+        the frame: a slow action (sanitizer builds) can return after it."""
+        if start is None:
+            start = len(self.frames)
         end = time.time() + secs
         with self.cv:
             while True:
@@ -233,21 +236,22 @@ def main():
                "following changed --status")
 
         # output -> one frame, soon
-        t1 = time.time()
+        t1, mark = time.time(), len(f.frames)
         dch("--run", name, "echo FOLLOW-MARK")
         fr = f.wait(lambda x: b"FOLLOW-MARK\r\n" in x["body"] or
-                    re.search(rb"\nFOLLOW-MARK", x["body"]), DUE)
+                    re.search(rb"\nFOLLOW-MARK", x["body"]), DUE, mark)
         expect(fr, "output frame within %.1fs" % DUE)
         if fr:
             print("latency: %.0f ms" % ((fr["t"] - t1) * 1000))
 
         # caret-only move, then caret hide: whole frames, size present
         time.sleep(0.6)
-        base = f.frames[-1]
+        base, mark = f.frames[-1], len(f.frames)
         dch("--run", name,
             "clear; sleep 1; printf '\\033[5;5H'; sleep 1; "
             "printf '\\033[?25l'; sleep 30")
-        mv = f.wait(lambda x: (x["crow"], x["ccol"]) == (5, 5), DUE + 2)
+        mv = f.wait(lambda x: (x["crow"], x["ccol"]) == (5, 5), DUE + 2,
+                    mark)
         if expect(mv, "caret-only move produced a frame"):
             expect((mv["rows"], mv["cols"]) == (10, 40) and mv["cvis"] == 1,
                    "caret frame carries 10x40, visible: %r" % mv)
@@ -255,7 +259,8 @@ def main():
             expect(prev["body"] == mv["body"] and
                    (prev["crow"], prev["ccol"]) != (5, 5),
                    "caret move frame differs only in the caret")
-            hid = f.wait(lambda x: x["cvis"] == 0, DUE + 2)
+            hid = f.wait(lambda x: x["cvis"] == 0, DUE + 2,
+                         f.frames.index(mv) + 1)
             expect(hid and (hid["rows"], hid["cols"]) == (10, 40) and
                    hid["body"] == mv["body"] and
                    (hid["crow"], hid["ccol"]) == (5, 5),
@@ -273,11 +278,11 @@ def main():
             os.execv(DCH, [DCH, "-E", "-a", name])
             os._exit(127)
         try:
+            mark = len(f.frames)
             set_size(fd, 60, 15)
             drain(fd, 1.0)
-            fr = f.wait(lambda x: (x["rows"], x["cols"]) == (15, 60), DUE)
-            if not fr and (f.frames[-1]["rows"], f.frames[-1]["cols"]) == (15, 60):
-                fr = f.frames[-1]   # it landed before wait() started
+            fr = f.wait(lambda x: (x["rows"], x["cols"]) == (15, 60), DUE,
+                        mark)
             expect(fr, "resize shows 15x60 in the header (last %dx%d)" % (
                 f.frames[-1]["rows"], f.frames[-1]["cols"]))
             dch("--run", name, "echo CLIENT-MARK")
@@ -293,11 +298,12 @@ def main():
                 pass
 
         # --restart drops control connections: follow reconnects
+        mark = len(f.frames)
         r = dch("--restart", name)
         expect(r.returncode == 0, "--restart: %r" % r.stderr)
         dch("--run", name, "echo AFTER-RESTART")
         expect(f.wait(lambda x: re.search(rb"\nAFTER-RESTART", x["body"]),
-                      DUE + 3) and f.p.poll() is None,
+                      DUE + 3, mark) and f.p.poll() is None,
                "follow survives --restart (rc %r)" % f.p.poll())
 
         # session end -> exit 0, quietly
