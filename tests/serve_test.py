@@ -267,12 +267,16 @@ def main():
         r = subprocess.run([DCH, "--spawn", "svc-ret", "--size", "80x24",
                             "sh"], env=env, capture_output=True, timeout=30)
         check("spawned a session to attach", r.returncode == 0)
+        # A lite build has no mirror to replay, and an idle sh (dash) does
+        # not repaint on its own: a newline makes it print a prompt.
         a = conn(port)
         send(a, 0x01, {"name": "svc-ret", "cols": 80, "rows": 24})
+        send(a, 0x10, b"\n")
         t, _ = frame(a)
         check("attach streams 0x10", t == 0x10)
         b = conn(port)
         send(b, 0x01, {"name": "svc-ret", "cols": 80, "rows": 24})
+        send(b, 0x10, b"\n")
         t, _ = frame(b)
         got12 = False
         try:
