@@ -170,6 +170,7 @@ fi
 # --- attach: WINCH repaint, and NEVER a typed ^L ----------------------------
 if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "attach repaints via WINCH, types no ^L" attach_test.py
+    pyrun "size follows focus (DEC 1004, #100)" focus_test.py
 fi
 
 if [ "$MIRROR" = "1" ]; then

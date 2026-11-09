@@ -700,6 +700,7 @@ running sessions.
 | `picker_sort` | `activity` or `name`: the session picker's sort, also set by its `s` key | `activity` |
 | `detach_key` | `detach` or `switch`: what one `Ctrl-\` press does; two presses do the other (see [Cheatsheet](#cheatsheet)) | `detach` |
 | `remote_hosts` | empty: your tailnet peers; `off`: none; else a `[label=]host[:port],...` list (see [Remote hosts](#remote-hosts)) | empty |
+| `focus_resize` | `true`/`false`: an attached client takes the session's size when its window gains focus (see [The focused client sets the size](#the-focused-client-sets-the-size)) | `true` |
 
 ```sh
 dch --config                         # the path, then every known key's effective value
@@ -766,6 +767,7 @@ later does nothing to a running session.
 | `DCH_SOCKET_DIR` | every `dch` | `$XDG_RUNTIME_DIR/dch-$UID`, else `/tmp/dch-$UID` | Where sockets and sidecars live ([self-heal](#socket-loss-and-self-heal)). Records of one socket dir never mix with another's. |
 | `DCH_CONFIG` | every `dch` | `$XDG_CONFIG_HOME/dch/config`, else `~/.config/dch/config` | The [config file](#config-file). |
 | `DCH_DOUBLE_TAP_MS` | attaching client | `300` | The double-press window of `Ctrl-\`; `0`: one press acts at once ([Cheatsheet](#cheatsheet)). |
+| `DCH_FOCUS_RESIZE` | attaching client | config `focus_resize`, else on | `0`: the client does not enable focus reporting and does not take the size on focus-in. Any other value turns it on ([The focused client sets the size](#the-focused-client-sets-the-size)). |
 | `DCH_NO_DETECT` | client and master | unset | Anything but empty or `0`: no screen-content [state detection](#agent-state-detection), `agents` reads `0`, the master does no [auto-allow](#auto-allow), and `--say`, `--stop` and the agent restart see no screen, as on dch-lite. |
 | `DCH_NO_VT` | master | unset | Anything but empty or `0`: no terminal mirror ([dch-lite and `DCH_NO_VT`](#dch-lite-and-dch_no_vt)). |
 | `DCH_NO_REPLAY` | master | unset | Anything but empty or `0`: attach clears and asks for a repaint instead of [replaying the screen](#attaching-replays-the-screen). |
@@ -1117,6 +1119,28 @@ don't repaint, because they compare against their own model of a screen dch
 just invalidated behind their back. The result was a blank attach that only
 filled in when you resized the window. Set `DCH_NO_REPLAY=1` in the master's
 environment at spawn to get the old behavior back.
+
+### The focused client sets the size
+
+One session can have several clients at once, for example a terminal tab and
+an app pane. The pty has only one size, and it belongs to the client the user
+is focused on. Each attaching client turns on focus reporting (DEC 1004) in
+its own terminal. When that terminal reports focus-in (`ESC [ I`), the client
+sends its window size to the master again, even when the size has not
+changed. Clicking back into a window gives the session that window's size.
+
+Focus reports reach the program in the session only while that program has
+focus reporting on itself, as Claude Code does. The client tracks
+`ESC[?1004h`/`l` in the session's output. On attach the master re-sends the
+program's modes, so the client knows the state from the first byte.
+Otherwise the client drops the reports, so no stray `[I`/`[O` is typed into a
+shell. All other input passes through unchanged. A read that ends in a bare
+`Esc` waits up to 50 ms for the rest of a report, which delays a lone Esc key
+by that much.
+
+`DCH_FOCUS_RESIZE=0` in the client's environment, or `focus_resize = false`
+in the [config file](#config-file), turns this off. The client then does not
+enable focus reporting and does not intercept any input.
 
 ### dch-lite and `DCH_NO_VT`
 

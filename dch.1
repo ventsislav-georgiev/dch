@@ -459,6 +459,25 @@ picker and two detach. With the window at
 one press opens the picker at once and the key never detaches; quit the
 picker or use
 .BR "dch \-d" .
+.SH FOCUS AND SIZE
+A session has one size, and several clients can be attached to it. The size
+belongs to the client whose window has focus. An attaching client turns on
+focus reporting (DEC mode 1004) in its terminal. On a focus\-in report
+.RB ( "ESC [ I" )
+it sends its window size to the master again, even when the size is
+unchanged, so the session takes that window's size back from another client.
+.PP
+The client passes focus reports to the program in the session only while that
+program has mode 1004 set itself; otherwise it drops them. The client tracks
+the mode in the session's output and gets it from the master's mode re\-arm
+on attach. All other input passes through unchanged. A read that ends in a bare
+ESC waits up to 50 ms for the rest of a report.
+.PP
+.B DCH_FOCUS_RESIZE=0
+or
+.B focus_resize = false
+in the config file turns this off: the client neither enables focus
+reporting nor intercepts any input.
 .SH CONTROL VERBS
 All verbs take the session
 .I name
@@ -1445,6 +1464,14 @@ none; else a
 .B \-\-hosts
 list (see
 .BR "REMOTE HOSTS" ).
+.TP
+.B focus_resize
+.B true
+(default) or
+.BR false :
+whether an attached client takes the session's size when its window gains
+focus (see
+.BR "FOCUS AND SIZE" ).
 .SH EXIT STATUS
 0 on success. Control verbs: 1 generic error, 2
 .B \-\-wait
@@ -1469,6 +1496,15 @@ days, point this somewhere other than
 so a periodic cleaner never has a reason to touch it;
 .B XDG_RUNTIME_DIR
 itself is honored the same way when set.
+.TP
+.B DCH_FOCUS_RESIZE
+Read by the attaching client.
+.B 0
+turns off focus reporting and size on focus\-in (see
+.BR "FOCUS AND SIZE" );
+any other value turns it on. Unset: the
+.B focus_resize
+config key decides, default on.
 .TP
 .B DCH_FOLLOW_MS
 Least time between two

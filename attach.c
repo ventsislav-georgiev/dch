@@ -16,6 +16,7 @@
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 #include "dtach.h"
+#include <strings.h>
 
 #ifndef VDISABLE
 #ifdef _POSIX_VDISABLE
@@ -329,6 +330,143 @@ detach_double_us(void)
 	return us;
 }
 
+/* Size follows focus (#100). Two clients can share one session (a terminal
+** and an app pane); the one the user focuses should own the pty size. So the
+** client turns on focus reporting (DEC 1004) on its own terminal, and a
+** focus-in (ESC [ I) re-sends this window's size as a MSG_WINCH. The master
+** sets it with TIOCSWINSZ, which compares against the pty's CURRENT size, so
+** a size the other client changed is taken back even though this window's
+** size never moved. The reports themselves reach the inner program only while
+** it has 1004 on (Claude Code does); otherwise they are swallowed.
+** DCH_FOCUS_RESIZE=0, or focus_resize = false in the config, turns all of it
+** off: no 1004 from the client, nothing intercepted. */
+static int focus_on;		/* this attach turned 1004 on */
+static int inner_focus;		/* the inner program has 1004 on */
+static int fo_st, fo_val, fo_hit;	/* focus_scan's parser state */
+static unsigned char fpend[2];	/* a trailing ESC / ESC [ held back */
+static int fpend_n;
+static struct timeval fpend_at;	/* when a held prefix goes out as typed */
+
+/* ponytail: a held ESC waits this long for the rest of a split report — the
+** lone Esc key pays it as latency (tmux's escape-time, same trade). Only a
+** read that ENDS in ESC or ESC [ waits; a kitty-keyboard Esc (CSI 27 u) never
+** does. */
+#define FOCUS_HOLD_MS	50
+
+static int
+focus_wanted(void)
+{
+	const char *e = getenv("DCH_FOCUS_RESIZE");
+	char v[16];
+
+	if (e && *e)
+		return strcmp(e, "0") != 0;
+	return !(dch_config_get("focus_resize", v, sizeof v) &&
+	         (!strcasecmp(v, "false") || !strcmp(v, "0") ||
+	          !strcasecmp(v, "no") || !strcasecmp(v, "off")));
+}
+
+/* Track the inner program's own 1004 in the session's output, a byte at a
+** time so a sequence split across reads still counts: CSI ? Pm h/l with 1004
+** anywhere in Pm, and RIS (ESC c), which resets it. 1 when the outer
+** terminal's 1004 was just turned off by it and has to be turned back on. */
+static int
+focus_scan(const unsigned char *b, ssize_t n)
+{
+	ssize_t i;
+	int rearm = 0;
+
+	for (i = 0; i < n; i++)
+	{
+		unsigned char c = b[i];
+
+		if (fo_st == 1)		/* ESC */
+		{
+			fo_st = c == '[' ? 2 : 0;
+			if (c == 'c')
+			{
+				inner_focus = 0;
+				rearm = 1;
+			}
+		}
+		else if (fo_st == 2)	/* ESC [ */
+		{
+			fo_st = c == '?' ? 3 : 0;
+			fo_val = fo_hit = 0;
+		}
+		else if (fo_st == 3)	/* ESC [ ? Pm */
+		{
+			if (c >= '0' && c <= '9')
+			{
+				fo_val = fo_val < 100000 ? fo_val * 10 + (c - '0')
+				                         : fo_val;
+				continue;
+			}
+			fo_hit |= fo_val == 1004;
+			fo_val = 0;
+			if (c == ';')
+				continue;
+			if ((c == 'h' || c == 'l') && fo_hit)
+			{
+				inner_focus = c == 'h';
+				rearm |= c == 'l';
+			}
+			fo_st = 0;
+		}
+		if (fo_st == 0 && c == '\033')
+			fo_st = 1;
+	}
+	return rearm;
+}
+
+/* Take the outer terminal's focus reports out of a keyboard read of len
+** bytes in b (room for 2 more): put back what the last read held, note a
+** focus-in in *in, keep a report only while the inner program wants them,
+** and hold a trailing ESC or ESC [ that may begin one (unless flush). Every
+** other byte stays, in order. The new length. */
+static int
+focus_filter(unsigned char *b, int len, int *in, int flush)
+{
+	int i, o = 0;
+
+	if (fpend_n)
+	{
+		memmove(b + fpend_n, b, len);
+		memcpy(b, fpend, fpend_n);
+		len += fpend_n;
+		fpend_n = 0;
+	}
+	for (i = 0; i < len; i++)
+	{
+		if (b[i] == '\033' && i + 2 < len && b[i + 1] == '[' &&
+		    (b[i + 2] == 'I' || b[i + 2] == 'O'))
+		{
+			*in |= b[i + 2] == 'I';
+			if (inner_focus)
+			{
+				b[o++] = b[i];
+				b[o++] = b[i + 1];
+				b[o++] = b[i + 2];
+			}
+			i += 2;
+			continue;
+		}
+		if (!flush && b[i] == '\033' &&
+		    (i + 1 == len || (i + 2 == len && b[i + 1] == '[')))
+		{
+			fpend_n = len - i;
+			memcpy(fpend, b + i, fpend_n);
+			now_us(&fpend_at);
+			fpend_at.tv_usec += FOCUS_HOLD_MS * 1000L;
+			fpend_at.tv_sec += fpend_at.tv_usec / 1000000;
+			fpend_at.tv_usec %= 1000000;
+			break;
+		}
+		b[o++] = b[i];
+	}
+	return o;
+}
+
 /* process_kbd return values. */
 #define KBD_OK		0
 #define KBD_DETACH	1	/* one detach-key press */
@@ -384,10 +522,15 @@ process_kbd(int s, struct packet *pkt)
 		pkt->len = 0;
 		write_packet_or_fail(s, pkt);
 
-		/* And suspend... */
+		/* And suspend... with our focus reporting off meanwhile, so
+		** the shell does not read [I/[O on focus changes. */
+		if (focus_on)
+			write_buf_or_fail(1, "\033[?1004l", 8);
 		tcsetattr(0, TCSADRAIN, &orig_term);
 		kill(getpid(), SIGTSTP);
 		tcsetattr(0, TCSADRAIN, &cur_term);
+		if (focus_on)
+			write_buf_or_fail(1, "\033[?1004h", 8);
 
 		/* Tell the master that we are returning. */
 		pkt->type = MSG_ATTACH;
@@ -522,6 +665,14 @@ attach_main(int noerror)
 	cur_term.c_cc[VTIME] = 0;
 	tcsetattr(0, TCSADRAIN, &cur_term);
 
+	/* Focus reporting on, before the attach: the master's mode re-arm
+	** (ESC[?1004h when the inner program has it) arrives in the replay
+	** and focus_scan picks it up from there, so it starts off. */
+	focus_on = focus_wanted();
+	inner_focus = fo_st = fpend_n = 0;
+	if (focus_on)
+		write_buf_or_fail(1, "\033[?1004h", 8);
+
 	/* Tell the master that we want to attach. */
 	memset(&pkt, 0, sizeof(struct packet));
 	pkt.type = MSG_ATTACH;
@@ -539,7 +690,8 @@ attach_main(int noerror)
 	/* Wait for things to happen */
 	while (1)
 	{
-		int n;
+		int n, in, flush = 0;
+		long wait_us = -1;
 		struct timeval tv, *tvp = NULL;
 
 		/* SIGUSR1 detach — main-loop check avoids exit() inside the
@@ -561,8 +713,27 @@ attach_main(int noerror)
 			   + (detach_at.tv_usec - now.tv_usec);
 			if (us <= 0)	/* window expired — one press */
 				return detach_key_done(s, 0);
-			tv.tv_sec = us / 1000000;
-			tv.tv_usec = us % 1000000;
+			wait_us = us;
+		}
+		/* A held ESC prefix: wake when it is due to go out as typed. */
+		if (fpend_n)
+		{
+			struct timeval now;
+			long us;
+
+			now_us(&now);
+			us = (fpend_at.tv_sec - now.tv_sec) * 1000000L
+			   + (fpend_at.tv_usec - now.tv_usec);
+			flush = us <= 0;
+			if (us < 0)
+				us = 0;
+			if (wait_us < 0 || us < wait_us)
+				wait_us = us;
+		}
+		if (wait_us >= 0)
+		{
+			tv.tv_sec = wait_us / 1000000;
+			tv.tv_usec = wait_us % 1000000;
 			tvp = &tv;
 		}
 
@@ -590,20 +761,40 @@ attach_main(int noerror)
 				dch_trace("client exit: read(s) errno=%d", errno);
 				exit(1);
 			}
-			/* Send the data to the terminal. */
+			/* Send the data to the terminal. The inner program
+			** turning its 1004 off turns ours off too: back on. */
 			write_buf_or_fail(1, buf, len);
+			if (focus_on && focus_scan(buf, len))
+				write_buf_or_fail(1, "\033[?1004h", 8);
 			n--;
 		}
-		/* stdin activity */
-		if (n > 0 && FD_ISSET(0, &readfds))
+		/* stdin activity, or a held ESC prefix that nothing completed
+		** (flush: it was due before this select, and no byte came). */
+		in = n > 0 && FD_ISSET(0, &readfds);
+		if (in || (flush && fpend_n))
 		{
-			ssize_t len;
+			ssize_t len = 0;
+			int focus_in = 0;
 
 			pkt.type = MSG_PUSH;
-			len = read(0, pkt.u.buf, sizeof(pkt.u.buf));
-
-			if (len <= 0)
-				exit(1);
+			if (in)
+			{
+				/* 2 short: room for a held prefix */
+				len = read(0, pkt.u.buf,
+				           sizeof(pkt.u.buf) - (focus_on ? 2 : 0));
+				if (len <= 0)
+					exit(1);
+				n--;
+			}
+			if (focus_on)
+			{
+				len = focus_filter(pkt.u.buf, len, &focus_in, !in);
+				win_changed |= focus_in;
+				/* all of it a report or held: no keystroke,
+				** so the detach window stays as it was */
+				if (len == 0)
+					goto keys_done;
+			}
 
 			pkt.len = len;
 			int k = process_kbd(s, &pkt);
@@ -627,9 +818,8 @@ attach_main(int noerror)
 			** on its own. */
 			else if (detach_pending)
 				return detach_key_done(s, 0);
-
-			n--;
 		}
+keys_done:
 
 		/* Window size changed? */
 		if (win_changed)

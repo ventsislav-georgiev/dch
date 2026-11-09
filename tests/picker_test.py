@@ -419,14 +419,14 @@ def main():
     check(", opens the settings view, every key listed",
           "[Settings]" in s and all(k in s for k in (
               "auto_allow", "sidekick_pattern", "picker_sort",
-              "detach_key")), s)
+              "detach_key", "focus_resize")), s)
     check("settings: column headers",
           re.search(r"^ {4}SETTING +VALUE +ABOUT", s, re.M), s)
     check("settings: values, (default) when unset, a description each",
           re.search("auto_allow +\u25cb off +\\(default\\) +Answer", s)
           and re.search(r"picker_sort +activity \[name\] +How", s) and
-          re.search(r"detach_key +\[detach\] switch +\(default\)", s),
-          s)
+          re.search(r"detach_key +\[detach\] switch +\(default\)", s)
+          and re.search("focus_resize +\u25cf on +\\(default\\)", s), s)
     dch("--keys", "pk1", "down", "down", "enter")
     s = wait_screen("pk1", lambda s: "picker_sort = activity" in s)
     check("Enter cycles picker_sort: name -> activity, saved",

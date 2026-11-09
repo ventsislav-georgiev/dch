@@ -243,6 +243,9 @@ const struct dch_conf config_keys[] = {
 	{ "remote_hosts", 0, "", NULL,
 	  "Remote hosts: [label=]host[:port],...; empty: your tailnet "
 	  "peers; off: none" },
+	/* the attach client takes the session's size on focus-in (#100) */
+	{ "focus_resize", 1, "true", NULL,
+	  "The focused client sets the session's size" },
 };
 _Static_assert(sizeof config_keys / sizeof *config_keys == NCONF,
                "picker.h's NCONF counts config_keys");
@@ -296,7 +299,9 @@ config_show(int k, char *v, size_t cap, int *set)
 {
 	*set = dch_config_get(config_keys[k].key, v, cap);
 	if (config_keys[k].is_bool)
-		return dch_config_bool(config_keys[k].key) ? "true" : "false";
+		return (*set ? dch_config_bool(config_keys[k].key)
+		             : !strcmp(config_keys[k].def, "true"))
+		       ? "true" : "false";
 	return *set ? v : config_keys[k].def;
 }
 
