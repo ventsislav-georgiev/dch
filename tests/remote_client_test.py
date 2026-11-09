@@ -20,12 +20,14 @@ stale; a tampered cache (an "at" out of range, a host that is not a label)
 shown nowhere, the picker included; a newer major skipped; a dropped link
 exits 1 with a message and the terminal restored; a 0x13 then a reset keeps
 the 0x13's reason; 0x12 ends the attach with 0; a host whose gate refuses us
-(a 0x13 with a code, #094): -a says why and exits 1, --ls/--ls-json --remote
+(a 0x13 with a code, #094): -a says why and exits 4 (#102), --ls/--ls-json --remote
 say why and show none of its cached rows, against a fake and dch serve; a
 busy host (#095) is transient: -a says its message and exits 1, --ls/--ls-json
 --remote keep its cached rows as stale. #101: --scrollback and
 DCH_REPLAY_SCROLLBACK put "scrollback" in the 0x01 (none for 0), and over a
-real dch serve the rows reach the terminal.
+real dch serve the rows reach the terminal. #102: a newer attach to the same
+session over a real dch serve ends the older with its "taken" message and
+exit 5 (and a fake's 0x13 "taken" the same).
 
 Run:  python3 tests/remote_client_test.py        (uses ./dch)
 """
@@ -67,6 +69,10 @@ PEERS = dict(OWNER, BackendState="Running", Peer={
            "TailscaleIPs": ["8.8.8.8"]}})
 
 
+# dch -a's exit codes (#102): 0 detached/ended, 1 lost/down/busy (retry ok)
+REFUSED_EXIT, TAKEN_EXIT = 4, 5
+TAKEN = {"code": "taken", "message": "another client attached to this "
+         "session"}
 REFUSAL = {"code": "not_owner",
            "message": "this host serves only its owner's devices"}
 # the one transient code (#095): try again later, not a refusal
@@ -145,6 +151,13 @@ class Fake:
                             time.sleep(0.3)
                             c.sendall(frame(0x12, {"code": 0}))
                             c.shutdown(socket.SHUT_WR)
+                            return
+                        if self.mode == "taken":
+                            time.sleep(0.3)
+                            c.sendall(frame(0x13, TAKEN))
+                            c.shutdown(socket.SHUT_WR)
+                            while c.recv(65536):
+                                pass
                             return
                         if self.mode == "errrst":
                             c.sendall(frame(0x13, {"message": "bye-why"}))
@@ -354,6 +367,30 @@ def main():
         r = dch(senv, "-ls")
         check("the remote session lives on", "rs1" in r.stdout.split(),
               r.stdout)
+
+        # --- #102: a newer attach takes the session -------------------
+        pid, fd = attach(["--hosts", hosts, "-a", "srv:rs1"])
+        out = read(fd, b"$ ", 3)
+        if b"$ " not in out:
+            os.write(fd, b"\r")
+            out += read(fd, b"$ ", 8)
+        pid2, fd2 = attach(["--hosts", hosts, "-a", "srv:rs1"])
+        read(fd2, b"$ ", 3)
+        st, out = reap(pid, fd, 8)
+        check("a newer attach takes the session: the older says so, exit "
+              "%d (#102)" % TAKEN_EXIT,
+              st is not None and os.WIFEXITED(st)
+              and os.WEXITSTATUS(st) == TAKEN_EXIT
+              and b"dch: srv: " + TAKEN["message"].encode() in out
+              and b"lost the connection" not in out, (st, out[-300:]))
+        check("the terminal restored before the message",
+              0 <= out.find(b"\x1b[?1049l") < out.find(b"dch: srv: another"),
+              out[-300:])
+        os.write(fd2, b"\x1c")
+        st, out = reap(pid2, fd2, 5)
+        check("the newer one stays attached, then detaches (exit 0)",
+              st is not None and os.WIFEXITED(st)
+              and os.WEXITSTATUS(st) == 0, (st, out))
 
         pid, fd = attach(["--hosts", hosts, "--host", "srv", "-a", "rs1"])
         out = read(fd, b"$ ", 8)
@@ -572,8 +609,8 @@ def main():
               and "srv refused: this host serves only" in r.stderr, r)
         r = dch(cenv, "--hosts", "srv=127.0.0.1:%d" % refuse.port,
                 "-a", "srv:keep")
-        check("-a to a refusing host: its reason, exit 1 (#094)",
-              r.returncode == 1 and r.stderr == "dch: srv refused: this host "
+        check("-a to a refusing host: its reason, exit %d (#094, #102)"
+              % REFUSED_EXIT, r.returncode == REFUSED_EXIT and r.stderr == "dch: srv refused: this host "
               "serves only its owner's devices\n", r)
 
         # --- a busy host (#095): transient, its cached rows stale -----
@@ -636,14 +673,23 @@ def main():
               st is not None and os.WIFEXITED(st) and os.WEXITSTATUS(st) == 1
               and b"lost the connection to rs: it says: bye-why" in out,
               (st, out))
+        tk = Fake("taken", rows=[{"name": "t1"}])
+        fakes.append(tk)
+        pid, fd = attach(["--hosts", "tk=127.0.0.1:%d" % tk.port,
+                          "-a", "tk:t1"])
+        st, out = reap(pid, fd, 8)
+        check("a 0x13 \"taken\": its message, exit %d (#102)" % TAKEN_EXIT,
+              st is not None and os.WIFEXITED(st)
+              and os.WEXITSTATUS(st) == TAKEN_EXIT
+              and b"dch: tk: " + TAKEN["message"].encode() in out, (st, out))
 
         # --- the real dch serve's gate refusing us (#094), last: it then
         # refuses 127.0.0.1 for 30 s
         put("whois.json", dict(WHOIS, UserProfile={
             "ID": 7, "LoginName": "other@example.com"}))
         r = dch(cenv, "--hosts", hosts, "-a", "srv:rs1")
-        check("dch serve refusing -a: its reason, exit 1 (#094)",
-              r.returncode == 1 and r.stderr == "dch: srv refused: this host "
+        check("dch serve refusing -a: its reason, exit %d (#094, #102)"
+              % REFUSED_EXIT, r.returncode == REFUSED_EXIT and r.stderr == "dch: srv refused: this host "
               "serves only its owner's devices\n", r)
         r = dch(cenv, "--ls", "--remote", "--hosts", hosts)
         check("and --ls --remote: no srv rows, its reason (the cached "

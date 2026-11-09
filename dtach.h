@@ -326,9 +326,9 @@ int attach_main(int noerror);
 /* A remote attach (remote.c) hands attach_main an already connected
 ** socket instead of sockname's, and a hook it asks, when that socket
 ** closes, what to say: NULL for a session that ended, else the message to
-** print once the terminal is restored, exiting 1. */
+** print once the terminal is restored, exiting with *code (remote.h). */
 extern int attach_sock;
-extern const char *(*attach_lost)(void);
+extern const char *(*attach_lost)(int *code);
 
 #include "remote.h"
 void client_pidfile_unlink(void);

@@ -1300,7 +1300,7 @@ code not in these tables may be added later; treat one you do not know as a
 refusal you cannot explain. A refusal never names the host's owner, a user,
 a node or the `--allow-user` list. A peer refused again within 30 s (the
 repeat-refusal cache) gets the same code. Other `0x13` frames (a failed
-attach, say) have no `code`.
+attach, say) have no `code`, but for `taken`, below.
 
 | `code` | When | `message` |
 | --- | --- | --- |
@@ -1322,6 +1322,14 @@ do not retry. One code is transient and means "try again later":
 once a slot frees is served as usual. Its message says nothing about other
 users or connections.
 
+One code is not a refusal at all but the end of an attach that was let in
+(#102): ended by another client, do not auto-retry (a retry would take the
+session back from that client):
+
+| `code` | When | `message` |
+| --- | --- | --- |
+| `taken` | A newer attach to the same session retired this one. It is the attach's last frame: no `0x12`, then the FIN. | `another client attached to this session` |
+
 The `0x13` goes out in one non-blocking write that is never retried, so a
 peer that does not read cannot hold the server up; the server then waits up
 to 1 s for the peer to close (reading off and dropping what it sent, unparsed)
@@ -1338,7 +1346,8 @@ a live list for its home screen (polled every 2 s), attach with resize and
 redraw, kill, rename, and a screen snapshot from the terminal mirror (empty in
 a dch-lite build). An attached connection runs a real `dch -E -f -n <name>`
 client in a pseudo-terminal, so the newest attach to a session retires the
-older connection.
+older connection, which gets a `0x13` `taken` (see [Refusals](#refusals))
+before the close.
 
 **Attach request keys.** `0x01` (and `0x02`) carry a JSON object: `name`,
 `cols` and `rows` as in remote frames 1.0, plus one optional key this server
@@ -1470,10 +1479,21 @@ and sends the attach on that same connection. `--scrollback N` (or
 `DCH_REPLAY_SCROLLBACK`) goes to the host as the `0x01`'s `"scrollback"` key
 (see [dch serve](#dch-serve-prosper-remote-hosts)); a host that does not know
 it attaches without scrollback. A host that refuses us
-prints `dch: <host> refused: <message>` and exits 1; a `busy` one prints
+prints `dch: <host> refused: <message>` and exits 4; a `busy` one prints
 `dch: <host>: says: <message>` and exits 1, like a host that is down. An exact local session name wins over `host:name`; `--host` is the
 unambiguous form. A lost connection restores the terminal, says so, and exits
-1.
+1. An attach another client took over (a newer attach to the same session,
+the `0x13` `taken`) restores the terminal, prints
+`dch: <host>: another client attached to this session` and exits 5.
+
+`dch -a host:name` exit codes (#102), the same for `dch.exe`:
+
+| Code | Means | Retry |
+| --- | --- | --- |
+| 0 | Detached, or the remote session ended. | - |
+| 1 | The connection was lost, the host is down or `busy`, or another error (unknown host, no such session, no terminal). | A lost link or `busy`: yes. |
+| 4 | Refused: the host's gate sent a coded `0x13` (see [Refusals](#refusals)). | No: it will refuse again. |
+| 5 | Taken: another client attached to the session. | No: it would take the session back. |
 
 **Trust.** Before an attach to a host that discovery found, dch asks
 `tailscale whois` about its address and goes on only when it is your own
@@ -1530,7 +1550,8 @@ Windows 10 or later), passes keys through raw, follows the window size, and
 restores the console on every exit, Ctrl-C and Ctrl-Break included. Ctrl-\
 detaches, and twice quickly switches to the picker, as on macOS and Linux
 (`DCH_DOUBLE_TAP_MS`, `detach_key`). A lost
-connection restores the console, says why, and exits 1.
+connection restores the console, says why, and exits 1; a refused or taken
+one exits 4 or 5, as on macOS and Linux.
 
 `dch` alone is the picker, `dch -l`'s, with the remote rows only: arrows or
 `j`/`k` move, Enter attaches, `q` or Esc quits; it redraws on a resize and

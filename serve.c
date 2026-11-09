@@ -12,7 +12,8 @@
 ** with one poll loop. A slow subprocess stalls only its own connection, and
 ** a crash costs one connection. Handlers report "attached to <name>" and
 ** "watching for <device>" up a pipe. The parent then retires the older
-** handlers (the newest attach wins; at most 4 streams per device).
+** handlers (the newest attach wins, the older told so with a 0x13 "taken";
+** at most 4 streams per device).
 **
 ** An attached connection runs a real `dch -E -f -n <name>` client in a pty,
 ** as Prosper does. The master repaints for a new client, so the first 0x10
@@ -45,6 +46,10 @@
 #endif
 
 #define SV_PORT 8771
+/* A retired attach's last frame (#102): its own class, not a refusal.
+** Ended by another client; do not auto-retry. */
+#define TAKEN_JSON "{\"code\":\"taken\",\"message\":\"another client " \
+                   "attached to this session\"}"
 #define PTY_CHUNK 32768		/* a pty 0x10 frame, as Prosper's */
 #define OUT_HIGH 65536		/* past this unsent, stop making more output */
 #define PIN_MAX 65536		/* client bytes waiting for the pty */
@@ -754,6 +759,8 @@ struct conn
 };
 
 static struct conn C;	/* one connection per handler process */
+/* SIGUSR1 from the parent: a newer attach took this handler's session */
+static volatile sig_atomic_t g_taken;
 static char rq_text[RF_CTRL_MAX + 3];
 
 static size_t
@@ -1487,6 +1494,7 @@ serve_conn(int fd, uint32_t ip)
 	char *whois = NULL;
 	int v, graceful = 0;
 
+	g_taken = 0;	/* only the parent's SIGUSR1 to this handler */
 	c->fd = fd;
 	c->pty = -1;
 	c->ip = ip;
@@ -1527,7 +1535,15 @@ serve_conn(int fd, uint32_t ip)
 		long long now = now_ms();
 
 		if (g_stop)
-			break;	/* retired, or the server stops: no frame */
+			break;	/* the server stops: no frame */
+		if (g_taken && c->attached && !c->closing)
+		{
+			/* retired (#102): say why, then the FIN. Nothing more
+			** from the pty: the 0x13 is the last frame. */
+			slog("%s: %s taken by a newer attach", c->ipstr, c->name);
+			out_frame(c, 0x13, TAKEN_JSON, sizeof TAKEN_JSON - 1);
+			c->closing = 1;
+		}
 		if (c->jiggle_at && now >= c->jiggle_at)
 		{
 			c->jiggle_at = 0;
@@ -1740,7 +1756,9 @@ refused_tick(const struct pollfd *pf)
 static void
 on_signal(int sig)
 {
-	if (sig != SIGCHLD)
+	if (sig == SIGUSR1)
+		g_taken = 1;
+	else if (sig != SIGCHLD)
 		g_stop = 1;
 }
 
@@ -1788,7 +1806,7 @@ kids_note(const char *line)
 			{
 				slog("retiring pid %ld on %s: a newer attach "
 				     "took it", (long)kids[i].pid, k->name);
-				kill(kids[i].pid, SIGTERM);
+				kill(kids[i].pid, SIGUSR1);
 				kids[i].name[0] = '\0';
 			}
 		return;
@@ -2054,6 +2072,7 @@ serve_main(int argc, char **argv)
 	sigaction(SIGTERM, &act, NULL);
 	sigaction(SIGHUP, &act, NULL);
 	sigaction(SIGCHLD, &act, NULL);
+	sigaction(SIGUSR1, &act, NULL);	/* the handler's retire */
 	/* Run from inside a dch session, the clients we spawn would refuse
 	** to nest. */
 	unsetenv("DCH_SESSION");

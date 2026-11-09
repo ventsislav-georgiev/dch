@@ -8,7 +8,8 @@ Covers: the golden fixtures (tests/remote-frames, --mutating); the peer gate
 refusals (tagged host without --allow-user, --allow-user on an untagged host,
 tailscale ip -4 failing or empty, wildcard and non-unicast binds, the port in
 use); --allow-user by id and by login (case-insensitive); create off without
---allow-create; the newest attach retiring the older; 0x09 from the mirror;
+--allow-create; the newest attach retiring the older, told so with a 0x13
+{"code":"taken"} before the FIN (#102); 0x09 from the mirror;
 a newer proto major; an oversize control frame; a client half-close; SIGTERM;
 0x01's optional "scrollback" reaching the spawned client (#101).
 Security review F1-F8: --whois-optional only while tailscaled is down; this
@@ -65,6 +66,11 @@ CODES = {
                     "failed)",
     "self": "this host does not serve connections from itself",
 }
+
+
+# the 0x13 a retired attach gets (#102), byte for byte
+TAKEN = json.dumps({"code": "taken", "message": "another client attached "
+                    "to this session"}, separators=(",", ":")).encode()
 
 
 def whois(uid, login="me@example.com", tags=(), node="2002", nid=2002):
@@ -322,16 +328,22 @@ def main():
         send(b, 0x01, {"name": "svc-ret", "cols": 80, "rows": 24})
         send(b, 0x10, b"\n")
         t, _ = frame(b)
-        got12 = False
+        got = []
         try:
             while True:
-                t, _ = frame(a)
-                got12 |= t == 0x12
+                t, pl = frame(a)
+                if t != 0x10:
+                    got.append((t, pl))
         except (EOFError, ConnectionResetError):
-            pass
+            got.append("eof")
         except socket.timeout:
-            got12 = True
-        check("a newer attach retires the older: EOF, no 0x12", not got12)
+            got.append("timeout")
+        # #102: the retired attach is told why, its own class: no retry
+        ok = got == [(0x13, TAKEN), "eof"]
+        check("a newer attach retires the older: one 0x13 \"taken\", then "
+              "EOF, no 0x12", ok)
+        if not ok:
+            print("       %r" % got)
 
         # --- list rows: meta allowlisted and re-encoded -------------------
         meta = {"prs": {"merged": 2, "open": [

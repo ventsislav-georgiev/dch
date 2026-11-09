@@ -875,15 +875,17 @@ tcp_dial(const struct probe *p)
 	return fd;
 }
 
-/* The "message" of a 0x13 payload, escaped, into out[cap]. Whether it
-** has a "code" (a dch serve refusal, #094) other than "busy": the one
-** transient code (#095), a failure like a host that is down. */
+/* The "message" of a 0x13 payload, escaped, into out[cap]. What its
+** "code" makes it, as dch -a's exit status: DCH_EXIT_TAKEN for "taken"
+** (#102), DCH_EXIT_REFUSED for any other (a dch serve refusal, #094), 1 for
+** none or "busy": the one transient code (#095), a failure like a host that
+** is down. */
 static int
 err_text(const unsigned char *d, size_t n, char *out, size_t cap)
 {
 	struct json_parser jp;
 	char t[1024], m[256] = "", code[64];
-	int coded = 0;
+	int coded = 1;
 
 	if (n < sizeof t && !memchr(d, 0, n))
 	{
@@ -893,8 +895,10 @@ err_text(const unsigned char *d, size_t n, char *out, size_t cap)
 		    jp.tok[0].kind == JSON_OBJECT)
 		{
 			(void)jstr(&jp, 0, "message", m, sizeof m);
-			coded = jstr(&jp, 0, "code", code, sizeof code) == 1 &&
-			        code[0] && strcmp(code, "busy");
+			if (jstr(&jp, 0, "code", code, sizeof code) == 1 &&
+			    code[0] && strcmp(code, "busy"))
+				coded = strcmp(code, "taken") ? DCH_EXIT_REFUSED
+				                               : DCH_EXIT_TAKEN;
 		}
 		dch_json_free(&jp);
 	}
@@ -910,7 +914,8 @@ pr_frame(struct probe *p, const struct rf_frame *f)
 
 	if (f->type == 0x13)
 	{
-		if (err_text(f->data, f->len, why + 6, sizeof why - 6))
+		if (err_text(f->data, f->len, why + 6, sizeof why - 6) ==
+		    DCH_EXIT_REFUSED)
 			pr_end(p, PR_REFUSED, why + 6);
 		else
 		{
@@ -1532,11 +1537,12 @@ sb_drop(struct sb *b, size_t *off)
 
 /* The server's frames in tin as the relay takes them: 0x10 onto to_sp,
 ** 0x12 sets *exited, the first 0x13's message into msg[cap] (escaped, kept
-** whatever ends the link after it). What it parsed leaves tin. -1 when the
-** link must end: a frame over the limit. Pure. */
+** whatever ends the link after it) and what its code makes the exit status
+** into *code (err_text). What it parsed leaves tin. -1 when the link must
+** end: a frame over the limit. Pure. */
 static int
 relay_in(struct rf_state *rs, struct sb *tin, struct sb *to_sp, int *exited,
-         char *msg, size_t cap)
+         int *code, char *msg, size_t cap)
 {
 	struct rf_frame f;
 	size_t used = 0, off = 0;
@@ -1561,8 +1567,9 @@ relay_in(struct rf_state *rs, struct sb *tin, struct sb *to_sp, int *exited,
 		{
 			char m[300];
 
-			(void)err_text(f.data, f.len, m, sizeof m);
-			snprintf(msg, cap, "it says: %s", m);
+			*code = err_text(f.data, f.len, m, sizeof m);
+			snprintf(msg, cap, "%s%s", *code == 1 ? "it says: " : "",
+			         m);
 		}
 	}
 	if (off)
@@ -1573,12 +1580,30 @@ relay_in(struct rf_state *rs, struct sb *tin, struct sb *to_sp, int *exited,
 	return rc;
 }
 
+/* The line that says why a remote attach to label ended without the
+** session ending, for exit status code (relay_in): taken, refused, or the
+** link lost. */
+static void
+end_line(char *line, size_t cap, int code, const char *label, const char *msg)
+{
+	char safe[500];
+
+	logsafe(safe, sizeof safe, msg);
+	if (code == DCH_EXIT_TAKEN)
+		snprintf(line, cap, "dch: %s: %s", label, safe);
+	else if (code == DCH_EXIT_REFUSED)
+		snprintf(line, cap, "dch: %s refused: %s", label, safe);
+	else
+		snprintf(line, cap, "dch: lost the connection to %s%s%s",
+		         label, safe[0] ? ": " : "", safe);
+}
+
 #ifndef _WIN32
 /* The relay child: the attach client's packets on sp as frames on tcp,
 ** 0x10 back raw; tin and rs hold what followed the list on tcp. 0 when the
 ** session ended (0x12) or the attach side closed (a detach: the TCP close
-** is all, nothing is killed); else 2, with why the connection ended
-** written to `why`. */
+** is all, nothing is killed); else dch -a's exit status (remote.h), with
+** why the connection ended written to `why`. */
 static int
 relay(int tcp, int sp, int why, const char *label, struct sb tin,
       struct rf_state rs)
@@ -1586,13 +1611,13 @@ relay(int tcp, int sp, int why, const char *label, struct sb tin,
 	struct sb to_tcp = {0}, to_sp = {0};
 	unsigned char pin[PKT_HDR + PKT_MAX], buf[RM_READ];
 	size_t pn = 0, toff = 0, soff = 0;
-	int redraws = 0, eof = 0, exited = 0;
+	int redraws = 0, eof = 0, exited = 0, code = 1;
 	long long drain = 0;
 	char msg[400] = "";
 
 	nonblock(tcp);
 	nonblock(sp);
-	if (relay_in(&rs, &tin, &to_sp, &exited, msg, sizeof msg) < 0)
+	if (relay_in(&rs, &tin, &to_sp, &exited, &code, msg, sizeof msg) < 0)
 	{
 		eof = 1;
 		drain = now_ms() + 2000;
@@ -1685,8 +1710,8 @@ relay(int tcp, int sp, int why, const char *label, struct sb tin,
 			else
 			{
 				sb_add(&tin, buf, (size_t)k);
-				if (relay_in(&rs, &tin, &to_sp, &exited, msg,
-				             sizeof msg) < 0)
+				if (relay_in(&rs, &tin, &to_sp, &exited, &code,
+				             msg, sizeof msg) < 0)
 					eof = 1;
 			}
 			if (tin.bad || to_sp.bad || to_tcp.bad)
@@ -1701,23 +1726,22 @@ relay(int tcp, int sp, int why, const char *label, struct sb tin,
 	if (exited)
 		return 0;	/* the session ended, whatever came after */
 	{
-		char line[800], safe[500];
+		char line[800];
 
-		logsafe(safe, sizeof safe, msg);
-		snprintf(line, sizeof line, "dch: lost the connection to %s%s%s",
-		         label, safe[0] ? ": " : "", safe);
+		end_line(line, sizeof line, code, label, msg);
 		(void)!write(why, line, strlen(line));
 	}
-	return 2;
+	return code;
 }
 
 static pid_t relay_pid = -1;
 static int why_fd = -1;
 
 /* attach.c's hook, when the relay closed the session socket: NULL for a
-** session that ended, else what to say once the terminal is back. */
+** session that ended, else what to say once the terminal is back, with the
+** exit status in *code (the relay's; 1 for one that died). */
 static const char *
-remote_lost(void)
+remote_lost(int *code)
 {
 	static char msg[900];
 	ssize_t k = -1;
@@ -1730,6 +1754,7 @@ remote_lost(void)
 	relay_pid = -1;
 	if (WIFEXITED(st) && WEXITSTATUS(st) == 0)
 		return NULL;
+	*code = WIFEXITED(st) ? WEXITSTATUS(st) : 1;
 	if (why_fd >= 0)
 		k = read(why_fd, msg, sizeof msg - 1);
 	if (k <= 0)
@@ -1790,7 +1815,7 @@ peer_is_mine(const struct rhost *h)
 
 /* A connection to h that has listed name: its socket, with what followed
 ** the list in *rest and the parser's state in *rs, for the 0x01 to follow
-** on it; or -1, why said on stderr. Prosper's 0x01 creates a session it
+** on it; or -1, why said on stderr (-2: the host's gate refused us). Prosper's 0x01 creates a session it
 ** does not have, so the check and the attach share the connection: no
 ** session can end between them unseen. */
 static int
@@ -1810,7 +1835,10 @@ open_listed(const struct rhost *h, const char *name, const char *sh,
 		for (k = 0; k < rows.n && !found; k++)
 			found = !strcmp(rows.v[k].name, name);
 	if (p->st == PR_REFUSED)
+	{
 		fprintf(stderr, "dch: %s refused: %s\n", sh, p->why);
+		fd = -2;
+	}
 	else if (p->st != PR_OK)
 		fprintf(stderr, "dch: %s: %s\n", sh, p->why);
 	else if (!found)
@@ -1850,9 +1878,10 @@ tap_ms(void)
 ** press detaches, two within tap_ms switch to the picker (#090), or the
 ** other way round with detach_key = switch; none of a burst with a press
 ** in it goes. The TCP close is the detach, the session lives on. 0 for a
-** detach or a session that ended (0x12); ATTACH_SWITCH for the picker; 1
-** for a lost link, said once the console is restored (win/plat.c restores
-** it on every other way out too). */
+** detach or a session that ended (0x12); ATTACH_SWITCH for the picker;
+** else dch -a's exit status (remote.h: 1 a lost link, or taken, refused),
+** said once the console is restored (win/plat.c restores it on every other
+** way out too). */
 static int
 win_relay(int fd, const char *label, const char *name, struct sb tin,
           struct rf_state rs)
@@ -1861,8 +1890,8 @@ win_relay(int fd, const char *label, const char *name, struct sb tin,
 	struct winsize ws, now;
 	unsigned char buf[RM_READ], kb[4096];
 	size_t toff = 0;
-	int exited = 0, eof = 0, gone = 0, sw = 0, hits, k, r;
-	char msg[400] = "", safe[500], dk[16];
+	int exited = 0, eof = 0, gone = 0, sw = 0, hits, k, r, code = 1;
+	char msg[400] = "", line[800], dk[16];
 	WSAEVENT ev = WSA_INVALID_EVENT;
 	long dbl = tap_ms();
 	long long tap = 0;	/* a lone press stands at this now_ms; 0 none */
@@ -1885,7 +1914,8 @@ win_relay(int fd, const char *label, const char *name, struct sb tin,
 		snprintf(msg, sizeof msg, "%s", sock_str(WSAGetLastError()));
 		eof = 1;
 	}
-	else if (relay_in(&rs, &tin, &to_con, &exited, msg, sizeof msg) < 0)
+	else if (relay_in(&rs, &tin, &to_con, &exited, &code, msg,
+	                  sizeof msg) < 0)
 		eof = 1;
 	while (!eof && !exited && !gone)
 	{
@@ -1987,8 +2017,8 @@ win_relay(int fd, const char *label, const char *name, struct sb tin,
 			if (k > 0)
 			{
 				sb_add(&tin, buf, (size_t)k);
-				if (relay_in(&rs, &tin, &to_con, &exited, msg,
-				             sizeof msg) < 0)
+				if (relay_in(&rs, &tin, &to_con, &exited, &code,
+				             msg, sizeof msg) < 0)
 					eof = 1;
 				continue;
 			}
@@ -2015,16 +2045,15 @@ win_relay(int fd, const char *label, const char *name, struct sb tin,
 	free(to_tcp.p);
 	if (exited || gone)
 		return sw && !exited ? ATTACH_SWITCH : 0;
-	logsafe(safe, sizeof safe, msg);
-	fprintf(stderr, "dch: lost the connection to %s%s%s\n", label,
-	        safe[0] ? ": " : "", safe);
-	return 1;
+	end_line(line, sizeof line, code, label, msg);
+	fprintf(stderr, "%s\n", line);
+	return code;
 }
 #endif
 
 /* host:name as a connection that has listed name, for the 0x01 to follow
 ** on it: its socket, the host in *h, and what followed the list in *rest,
-** the parser's state in *rs; or -1, why said on stderr. */
+** the parser's state in *rs; or -1, why said on stderr (-2: refused). */
 static int
 attach_open(const char *host, const char *name, struct rhost *h,
             struct sb *rest, struct rf_state *rs)
@@ -2067,7 +2096,7 @@ dch_remote_attach(const char *host, const char *name)
 	int fd, rc;
 
 	if ((fd = attach_open(host, name, &h, &rest, &rs)) < 0)
-		return 1;
+		return fd == -2 ? DCH_EXIT_REFUSED : 1;
 	keepalive(fd);
 	rc = win_relay(fd, h.label, name, rest, rs);
 	sock_close(fd);
@@ -2085,7 +2114,7 @@ dch_remote_attach(const char *host, const char *name)
 	int i, fd, sp[2], wp[2], rc;
 
 	if ((fd = attach_open(host, name, &h, &rest, &rs)) < 0)
-		return 1;
+		return fd == -2 ? DCH_EXIT_REFUSED : 1;
 	logsafe(sh, sizeof sh, host);
 	if (!isatty(0) || tcgetattr(0, &orig_term) < 0)
 	{

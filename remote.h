@@ -20,6 +20,11 @@ struct dch_rrow
 int dch_remote_set_hosts(const char *list);
 int dch_remote_rows(struct dch_rrow **out, int now);
 void dch_remote_stop(void);
+/* dch -a host:name's exit status (#102): 0 detached or the session ended,
+** 1 the link was lost or the host is down or busy (a retry may work), else
+** one of these, where a retry will not help: */
+#define DCH_EXIT_REFUSED 4	/* the host's gate refused us (a coded 0x13) */
+#define DCH_EXIT_TAKEN 5	/* another client attached ("taken") */
 int dch_remote_attach(const char *host, const char *name);
 void dch_remote_esc(char *out, size_t cap, const char *s);
 

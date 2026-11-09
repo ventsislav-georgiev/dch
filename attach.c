@@ -86,20 +86,21 @@ restore_term(void)
 }
 
 int attach_sock = -1;
-const char *(*attach_lost)(void);
+const char *(*attach_lost)(int *code);
 
 /* A remote attach's socket closed: when the link (not the session) ended,
-** say why on a restored terminal and exit 1. */
+** say why on a restored terminal and exit with the hook's code. */
 static void
 lost(void)
 {
-	const char *why = attach_lost();
+	int code = 1;
+	const char *why = attach_lost(&code);
 
 	if (why)
 	{
 		restore_term();
 		fprintf(stderr, "%s\n", why);
-		exit(1);
+		exit(code);
 	}
 }
 

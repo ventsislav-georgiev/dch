@@ -11,7 +11,8 @@ Covers: rows in -ls, -lj and --ls-json; --hosts with DCH_NO_REMOTE=1, the
 remote_hosts config, remote_hosts = off; hostile names escaped; a hanging
 host not stalling past the time box, then its cached rows stale; a hanging
 tailscale cut off at the box; a newer major skipped; a refusing host (a
-0x13 with a code, #094) said, its cached rows not shown; a busy host (#095)
+0x13 with a code, #094) said, its cached rows not shown, -a exiting 4
+(#102); a busy host (#095)
 said, its cached rows stale; an unknown host's
 error; -a host:missing; -a with no console (the attach's checks and the
 0x01's path up to the console); discovery's peer filter and whois refusal.
@@ -30,7 +31,8 @@ import json, os, shutil, subprocess, sys, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from remote_client_test import Fake, OWNER, PEERS, WHOIS  # noqa: E402
+from remote_client_test import (Fake, OWNER, PEERS, REFUSED_EXIT,  # noqa
+                                WHOIS)
 
 WIN = os.name == "nt"
 ROOT = os.path.join(HERE, "..")
@@ -388,7 +390,8 @@ def main():
               "q:" not in r.out and "dch: q refused: this host serves only "
               "its owner's devices" in r.err, (r.out, r.err))
         r = dch("--hosts", "rf=127.0.0.1:%d" % refuse.port, "-a", "rf:x")
-        check("-a to a refusing host: its reason, exit 1", r.returncode == 1
+        check("-a to a refusing host: its reason, exit 4 (#102)",
+              r.returncode == REFUSED_EXIT
               and "dch: rf refused: this host serves only" in r.err, r.err)
 
         # --- attach: the checks before the console --------------------

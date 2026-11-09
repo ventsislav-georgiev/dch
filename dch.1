@@ -1294,7 +1294,9 @@ is a stable contract;
 is for people and may be reworded. Codes may be added; an unknown one is a
 refusal that cannot be explained. A refusal never names the owner, a user, a
 node or the allow list, and a repeat refusal within 30 s carries the same
-code. Other 0x13 frames have no code. Each of these codes means refused,
+code. Other 0x13 frames have no code, but for
+.B taken
+below. Each of these codes means refused,
 do not retry:
 .TP
 .B not_owner
@@ -1338,6 +1340,14 @@ send
 The frame is one non-blocking write, never retried; the server then waits
 up to 1 s for the peer to close, dropping what it sent unread, so the close
 is a FIN. A peer outside 100.64.0.0/10 is closed with no frame.
+.PP
+One code ends an attach that was let in: ended by another client, do not
+retry (a retry would take the session back):
+.TP
+.B taken
+a newer attach to the same session retired this one; the attach's last
+frame, with no 0x12, then the FIN:
+.I another client attached to this session
 .PP
 An attach request
 .RB ( 0x01 ,
@@ -1403,7 +1413,7 @@ server refuses us (a 0x13 with a code) is said on standard error as
 .IR "dch: host refused: message" ,
 and none of its cached rows are shown;
 .B \-a
-to it prints the same and exits 1. A
+to it prints the same and exits 4. A
 .B busy
 host is not a refusal but a host that is down: its cached rows show stale,
 and
@@ -1419,7 +1429,12 @@ to them yet.
 An attach is a local one over the network: the detach character and its
 double press stay local, the window size follows the terminal, and a detach
 closes the connection and leaves the remote session running. A lost
-connection restores the terminal, prints why and exits 1.
+connection restores the terminal, prints why and exits 1. An attach a newer
+attach to the same session took over (the 0x13
+.BR taken )
+restores the terminal, prints
+.I "dch: host: another client attached to this session"
+and exits 5.
 Every name and message a peer sends is printed with control characters
 escaped as \fI\\xNN\fP
 .RB ( \-\-ls\-json
@@ -1537,6 +1552,17 @@ focus (see
 .B \-\-wait
 timeout, 3 unavailable in this build. A dch-lite build has no terminal mirror;
 native agent commands are available in both builds.
+.PP
+.B dch \-a
+.I host:name
+(and
+.BR dch.exe ):
+0 detached or the session ended; 1 the connection was lost, the host is
+down or
+.BR busy ,
+or another error (a lost link or busy may be retried); 4 refused by the
+host's gate (do not retry); 5 taken by another client's attach (do not
+retry).
 .SH ENVIRONMENT
 .TP
 .B DCH_CONFIG
