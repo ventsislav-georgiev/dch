@@ -170,17 +170,23 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		if (p->st == PR_REFUSED && (!p->why[0] || p->fd >= 0))
 			abort();	/* a refusal says why, and is closed */
 		{
-			/* #095: "busy" is transient, a failure, never a
-			** refusal; any other code is */
+			/* #095: "busy" is transient, a failure (1), never a
+			** refusal; "taken" its own class (#102); any other
+			** code a refusal */
 			static const char busy[] = "{\"code\":\"busy\","
 			    "\"message\":\"m\"}", other[] = "{\"code\":"
-			    "\"busyx\",\"message\":\"m\"}";
+			    "\"busyx\",\"message\":\"m\"}", taken[] =
+			    "{\"code\":\"taken\",\"message\":\"m\"}";
 			char m[64];
 
 			if (err_text((const unsigned char *)busy,
-			             sizeof busy - 1, m, sizeof m) ||
-			    !err_text((const unsigned char *)other,
-			              sizeof other - 1, m, sizeof m))
+			             sizeof busy - 1, m, sizeof m) != 1 ||
+			    err_text((const unsigned char *)other,
+			             sizeof other - 1, m, sizeof m) !=
+			    DCH_EXIT_REFUSED ||
+			    err_text((const unsigned char *)taken,
+			             sizeof taken - 1, m, sizeof m) !=
+			    DCH_EXIT_TAKEN)
 				abort();
 		}
 		if (p->in.n > n)
@@ -194,14 +200,17 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		struct sb tin = {0}, to_sp = {0};
 		size_t c = n > 1 ? (size_t)d[1] % 64 + 1 : 1, off;
 		char msg[400] = "";
-		int exited = 0, r = 0;
+		int exited = 0, r = 0, code = 1;
 
 		for (off = 2; off < n && r == 0; off += c)
 		{
 			sb_add(&tin, d + off, n - off < c ? n - off : c);
-			r = relay_in(&rs, &tin, &to_sp, &exited, msg, sizeof msg);
+			r = relay_in(&rs, &tin, &to_sp, &exited, &code, msg,
+			             sizeof msg);
 		}
 		inert(msg);
+		if (code != 1 && code != DCH_EXIT_REFUSED && code != DCH_EXIT_TAKEN)
+			abort();	/* only dch -a's documented codes (#102) */
 		if (tin.n >= RF_HDR + RF_LIST_MAX && r == 0)
 			abort();	/* a held frame past its cap closes */
 		free(tin.p);
