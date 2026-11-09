@@ -134,8 +134,9 @@ def nested(outer, inner, args, env_extra=None):
           [DCH, "-E", "-a", inner] + args
     r = dch("--spawn", outer, "--size", "40x10", "--", *cmd)
     expect(r.returncode == 0, "spawn %s" % outer, r.stderr)
+    # END is the replay's last row: once it shows, every row before it has
+    # landed in the outer's mirror (no settle sleep needed)
     got = wait_for(lambda: "END" in screen(outer), time.time() + DUE)
-    time.sleep(0.5)  # the replay is one write; let it all land
     lines = screen(outer, "--recent", "200").splitlines()
     dch("-k", outer)
     return lines if got else ["(no END on %s)" % outer] + lines
@@ -191,9 +192,11 @@ class OldMaster:
 def client(args, cols=40, rows=10, env=None):
     pid, fd = os.forkpty()
     if pid == 0:
+        # sized before exec: set from the parent, it races the client's
+        # first REDRAW (a 0x0 one, then a WINCH)
+        fcntl.ioctl(0, termios.TIOCSWINSZ, ws(cols, rows))
         os.execve(DCH, [DCH, "-E"] + args, env or ENV)
         os._exit(127)
-    fcntl.ioctl(fd, termios.TIOCSWINSZ, ws(cols, rows))
     return pid, fd
 
 
