@@ -115,6 +115,12 @@ def main():
         s = until(lambda: [e for e in events(n) if e["ev"] == "start"], 15)
         if s:
             pids.add(s[0]["pid"])
+            # the fake logs "start" before it writes its session record,
+            # and --say finds a Claude by that record: wait for it too, or
+            # under load lite reports not_claude instead of no_screen
+            rec = os.path.join(home, ".claude", "sessions",
+                               "%d.json" % s[0]["pid"])
+            until(lambda: os.path.exists(rec), 15)
             until(lambda: lite or "auto mode on" in run("--read", n).stdout)
         return s
 
