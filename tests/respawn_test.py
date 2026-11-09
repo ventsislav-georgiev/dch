@@ -353,6 +353,11 @@ def main():
               "\\033[>1u\\033[?1049h'; echo alt_mark; sleep 1; exit 0")
         seen(md, "alt_mark")
         run("--respawn", md, "--", "sh", "-c", "echo fresh_mark; sleep 30")
+        # A lite seen() only sleeps: wait on --cmd for the respawn itself, or
+        # the attach below can land while the first child is still alive and
+        # (rightly) get its modes re-armed (#105).
+        until(lambda: "fresh_mark" in
+              ((cmd(md) or {}).get("argv") or [""])[-1])
         seen(md, "fresh_mark")
         scr = screen(md)
         check("mode reset: mirror back on the primary screen",
