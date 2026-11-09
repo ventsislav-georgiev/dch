@@ -2872,13 +2872,19 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 	setenv("DCH_SESSION", session_name, 1);
 	{
 	char *default_argv[] = { NULL, NULL };
+	int rc;
+
 	if (inner_argc == 0)
 	{
 		char *sh = getenv("SHELL");
 		default_argv[0] = sh && *sh ? sh : "/bin/sh";
 		inner_argv = default_argv;
 	}
-	if (spawn_master(exe, session_name, sock_path, inner_argv) < 0)
+	rc = spawn_master(exe, session_name, sock_path, inner_argv);
+	/* The master took DCH_SESSION with it; this client is not inside the
+	** session, and a switch from it would hit the nesting refusal (#109). */
+	unsetenv("DCH_SESSION");
+	if (rc < 0)
 	{
 		fprintf(stderr, "dch: failed to spawn session\n");
 		return 1;

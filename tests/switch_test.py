@@ -11,7 +11,10 @@ Covers, in order:
   4. typing something else inside the window commits the detach;
   5. DCH_DOUBLE_TAP_MS=0 turns the shortcut off and detach is instant;
   6. detach_key = switch (#082) swaps them: one press opens the picker, two
-     detach; with DCH_DOUBLE_TAP_MS=0 one press opens the picker at once.
+     detach; with DCH_DOUBLE_TAP_MS=0 one press opens the picker at once;
+  7. a switch from a session this same client created (#109): the spawn
+     left DCH_SESSION set in the client, so the next attach hit the nesting
+     refusal and dch exited to the shell. The new session still gets it.
 
 Run:  python3 tests/switch_test.py            (uses ./dch)
       DCH=/path/to/dch python3 tests/switch_test.py
@@ -21,7 +24,7 @@ import os, sys, pty, signal, select, time, errno, re, subprocess, tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.environ.get("DCH", os.path.join(HERE, "..", "dch"))
 TAG = "sw%d" % os.getpid()
-A, B = TAG + "a", TAG + "b"
+A, B, C = TAG + "a", TAG + "b", TAG + "c"
 DETACH = b"\x1c"
 SOCKDIR = os.path.join(tempfile.mkdtemp(prefix="dchswitch"), "sock")
 SWAPCFG = os.path.join(os.path.dirname(SOCKDIR), "config")
@@ -101,7 +104,7 @@ def picker_rows(text):
     rows = []
     # The picker positions each line with CUP rather than newlines.
     for line in re.split(r"\n|\x1b\[\d+;1H", text):
-        m = re.search(r"(%s[ab])" % TAG, line)
+        m = re.search(r"(%s[abc])" % TAG, line)
         if m and m.group(1) not in rows:
             rows.append(m.group(1))
     return rows
@@ -238,12 +241,33 @@ def main():
         if dch("--read", B).returncode not in (0, 3):
             return fail("the session did not survive the picker")
 
+        # 7. Switch away from a session this client created (#109).
+        pid, fd = spawn_client(["-n", C, "sh", "-c",
+                                'echo "CCC_$DCH_SESSION"; sleep 600'])
+        if "CCC_" + C not in drain(fd, 10.0, ("CCC_" + C).encode()):
+            return fail("the created session did not get DCH_SESSION")
+        os.write(fd, DETACH)
+        time.sleep(0.05)
+        os.write(fd, DETACH)
+        out = drain(fd, 5.0, b"switch to session:") + drain(fd, 0.5)
+        rows = picker_rows(out)
+        if B not in rows:
+            return fail("#109: picker did not list B", rows, out)
+        d = rows.index(B) - (rows.index(C) if C in rows else 0)
+        os.write(fd, (b"j" * d if d > 0 else b"k" * -d) + b"\r")
+        landed = drain(fd, 10.0, b"BBB_BRAVO")
+        if "BBB_BRAVO" not in landed or "nesting disabled" in landed:
+            return fail("#109: a switch from a session this client created "
+                        "did not attach", landed)
+        kill_client(pid, fd)
+        pid = None
+
         print("PASS: double tap switches sessions, single tap detaches; "
               "detach_key = switch swaps them.")
         return 0
     finally:
         kill_client(pid, fd)
-        for s in (A, B):
+        for s in (A, B, C):
             dch("-k", s)
 
 
