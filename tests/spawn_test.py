@@ -198,6 +198,25 @@ def main():
             ok("spawn as bare name from a dir containing ./dch")
         else:
             bad("cwd ./dch trap (out=%r)" % out)
+
+        # 5. --spawn --size: the program starts at that size. It used to
+        #    start at 80x24 and get the size from a WINCH sent after the
+        #    spawn, so a fast program (an attach client) read 80x24.
+        szf = os.path.join(tmp, "size.out")
+        os.system("'%s' --spawn szs --size 40x10 -- sh -c "
+                  "'stty size </dev/tty >%s.t; mv %s.t %s; exec sleep 60' "
+                  ">/dev/null" % (DCH, szf, szf, szf))
+        seen = ""
+        for _ in range(100):
+            if os.path.exists(szf):
+                with open(szf) as f:
+                    seen = f.read()
+                break
+            time.sleep(0.05)
+        if seen.split() == ["10", "40"]:
+            ok("--spawn --size: the program starts at that size")
+        else:
+            bad("--spawn --size: program saw %r, want 10 40" % seen)
     finally:
         os.system("'%s' -kl >/dev/null 2>&1" % DCH)
         shutil.rmtree(tmp, ignore_errors=True)

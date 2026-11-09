@@ -3591,10 +3591,24 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 
 		/* Start at a sane 80x24 instead of 0x0 so headless-spawned
 		** programs (and the terminal mirror) see a real grid; the
-		** attacher's WINCH corrects it. */
+		** attacher's WINCH corrects it. --spawn --size hands its size
+		** over, so the program starts at it instead of racing the
+		** WINCH that follows. */
 		memset(&the_pty.ws, 0, sizeof(struct winsize));
 		the_pty.ws.ws_row = 24;
 		the_pty.ws.ws_col = 80;
+		{
+			const char *sz = getenv("DCH_SPAWN_SIZE");
+			int c, r;
+
+			if (sz && sscanf(sz, "%dx%d", &c, &r) == 2 &&
+			    c >= 1 && c <= 4096 && r >= 1 && r <= 4096)
+			{
+				the_pty.ws.ws_col = c;
+				the_pty.ws.ws_row = r;
+			}
+			unsetenv("DCH_SPAWN_SIZE");
+		}
 
 		/* --revive hands over the agent it resumes, for the record
 		** only: out of the env before the child inherits it. */

@@ -5242,7 +5242,15 @@ do_spawn_verb(char *exe, const char *name, int cols, int rows,
 		if (!term || !*term || strcmp(term, "dumb") == 0)
 			setenv("TERM", "xterm-256color", 1);
 	}
-	if (spawn_master(exe, name, sock_path, inner_argv) < 0)
+	{
+		char sz[32];
+
+		snprintf(sz, sizeof sz, "%dx%d", cols, rows);
+		setenv("DCH_SPAWN_SIZE", sz, 1);
+	}
+	rc = spawn_master(exe, name, sock_path, inner_argv);
+	unsetenv("DCH_SPAWN_SIZE");
+	if (rc < 0)
 	{
 		fprintf(stderr, "dch: failed to spawn session\n");
 		return 1;
