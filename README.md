@@ -176,10 +176,13 @@ directory contains it (case-insensitive; a remote row's `host:name` too). The
 tab counts show the filtered counts, the selection starts on the top match,
 and the filter stays across tab switches and reloads, with `No match` for an
 empty result. While typing, every printable key goes to the filter (no letter
-binding fires), `↑` `↓` and `Tab` move, `Backspace` edits (on an empty filter
-it closes the prompt), `Ctrl-U` clears the text, and `Enter` closes the prompt
-and acts on the selected row as it always does; the filter stays until `Esc`,
-which clears it, and a later `Esc` quits.
+binding fires; `j` `k` type too), `Tab` switches tabs, `Backspace` edits (on
+an empty filter it closes the prompt), `Ctrl-U` clears the text, `↑` `↓`
+close the prompt and move, keeping the filter, so the letter actions (`x`,
+`S`, `R`, ...) work on the filtered rows, and `Enter` closes the prompt and
+acts on the selected row as it always does. `/` reopens the prompt on the
+kept text; the filter stays until `Esc`, which clears it, and a later `Esc`
+quits.
 
 `,` opens **Settings**: every [config file](#config-file) key with its value
 (a bool as `● on` / `○ off`, a choice as all of them with the set one in the

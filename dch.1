@@ -349,16 +349,27 @@ prompt on the status line narrows every tab to the rows whose shown name,
 dch name or directory contains the text typed (case\-insensitive), the tab
 counts following, the selection on the top match, \(lqNo match\(rq when
 none does.
-While typing, printable keys go to the filter, arrows and
+While typing, printable keys go to the filter
+.RB ( j
+and
+.B k
+too),
 .B Tab
-move,
+switches tabs,
 .B Backspace
 edits (on an empty filter it closes the prompt),
 .B Ctrl\-U
-clears the text, and
+clears the text, the
+.B Up
+and
+.B Down
+arrows close the prompt and move, keeping the filter, so the letter actions
+work on the filtered rows, and
 .B Enter
-closes the prompt and acts on the selected row as it always does; the filter
-stays across tab switches and reloads until
+closes the prompt and acts on the selected row as it always does;
+.B /
+reopens the prompt on the kept text.
+The filter stays across tab switches and reloads until
 .BR Esc ,
 which clears it; a later
 .B Esc

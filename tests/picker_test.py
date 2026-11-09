@@ -28,7 +28,9 @@ and --keys types into it. Covers:
      survives a tab switch,
      Esc restores every row and a later Esc quits, Backspace on nothing
      leaves the prompt, Enter attaches the top match; Down moves among
-     the kept rows and a reload keeps the filter and the selection.
+     the kept rows, closing the prompt and keeping the filter so a letter
+     action (x) works on the filtered row, j/k type into the prompt, and a
+     reload keeps the filter and the selection (#108).
 
 Run:  python3 tests/picker_test.py            (uses ./dch)
       DCH=/path/to/dch python3 tests/picker_test.py
@@ -508,16 +510,35 @@ def main():
     s = wait_screen("pk7", lambda s: "/pk\u2588" in s and
                     len(rows(s)) >= 2)
     r = rows(s)
+    check("the prompt's hints say the arrows keep the filter",
+          "\u2191\u2193 keep" in s, s)
     dch("--keys", "pk7", "down")
     s = wait_screen("pk7", lambda s: current(s) == r[1])
-    check("Down moves within the filtered list",
-          current(s) == r[1] and all(x.startswith("pk") for x in rows(s)),
-          s)
+    check("Down moves within the filtered list, closes the prompt and keeps "
+          "the filter (#108)",
+          current(s) == r[1] and all(x.startswith("pk") for x in rows(s)) and
+          "/pk" in s and "/pk\u2588" not in s and "q quit" in s, s)
+    dch("--keys", "pk7", "x")
+    s = wait_screen("pk7", lambda s: "[y/N]" in s)
+    check("a letter action works on the filtered row: x asks about it",
+          "Kill %s? [y/N]" % r[1] in s, s)
+    dch("--keys", "pk7", "n")
+    wait_screen("pk7", lambda s: "[y/N]" not in s)
     time.sleep(2.5)  # two reloads
     s = screen("pk7")
     check("reloads keep the filter and the selection",
-          current(s) == r[1] and "/pk\u2588" in s and
+          current(s) == r[1] and "/pk" in s and
           all(x.startswith("pk") for x in rows(s)), s)
+    dch("--keys", "pk7", "/")
+    s = wait_screen("pk7", lambda s: "/pk\u2588" in s)
+    check("/ reopens the prompt on the kept text", "/pk\u2588" in s, s)
+    dch("--send", "pk7", "jk")
+    s = wait_screen("pk7", lambda s: "/pkjk\u2588" in s)
+    check("j and k type into the prompt, they do not move",
+          "/pkjk\u2588" in s and "No match" in s, s)
+    dch("--keys", "pk7", "backspace")
+    dch("--keys", "pk7", "backspace")
+    wait_screen("pk7", lambda s: "/pk\u2588" in s and len(rows(s)) >= 2)
     dch("--keys", "pk7", "tab")
     s = wait_screen("pk7", lambda s: "[History" in s)
     hr = rows(s)

@@ -1198,6 +1198,8 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 	if (p->filtering)
 	{
 		PK_K(0, ret, p->tab == 2 ? "resume" : "attach", NULL, 0);
+		PK_K(3, pk_utf ? "\xe2\x86\x91\xe2\x86\x93" : "up/down", "keep",
+		     NULL, 0);
 		PK_K(3, "esc", "clear", NULL, 0);
 	}
 	else if (p->settings)
@@ -1496,7 +1498,9 @@ pk_unfilt(struct pk *p)
 ** UTF-8 as typed, go to the text, Backspace takes a character back (on
 ** nothing it closes the prompt), Ctrl-U clears it and Esc clears it and
 ** closes; Enter closes the prompt and goes on to the host, which acts on
-** the selected row; the text stays until Esc. A changed text selects the
+** the selected row; Up and Down (the arrows, not j/k) close it too and go
+** on to the host, which moves among the kept rows, so the letter actions
+** work on a filtered row (#108); the text stays until Esc. A changed text selects the
 ** top match of every tab. 1: c was the filter's. */
 static int
 pk_filt(struct pk *p, int fd, int c)
@@ -1520,7 +1524,7 @@ pk_filt(struct pk *p, int fd, int c)
 	}
 	switch (c)
 	{
-	case '\r': case '\n':
+	case '\r': case '\n': case PK_UP: case PK_DOWN:
 		p->filtering = 0;
 		return 0;
 	case PK_ESC:
