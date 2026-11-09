@@ -308,7 +308,7 @@ def main():
     now = int(time.time())
     with os.fdopen(os.open(os.path.join(rec, "hx.json"),
                            os.O_WRONLY | os.O_CREAT, 0o600), "w") as f:
-        json.dump(dict(name="hx", sock_dir=SOCKDIR, alias="", cwd="/",
+        json.dump(dict(name="hx", sock_dir=SOCKDIR, alias="", cwd=os.getcwd(),
                        argv=["sleep", "60"], started=now - 660,
                        updated=now - 60, ended=now - 60, end="exit 3",
                        agent=dict(kind="claude", session_id="x",
