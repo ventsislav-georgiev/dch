@@ -30,10 +30,16 @@ SESS = "focustest-%d" % os.getpid()
 T = 30.0 if os.environ.get("DCH_TEST_NO_BUDGET") else 10.0
 
 # The inner program: raw no-echo; KEY:<hex> per read, WINCH:<cols>x<rows> per
-# SIGWINCH; the key E prints ESC[?1004h, D prints ESC[?1004l.
+# SIGWINCH; the key E prints ESC[?1004h, D prints ESC[?1004l. It waits in
+# select on stdin AND a set_wakeup_fd pipe: a SIGWINCH landing between one
+# os.read and the next would otherwise leave its handler pending until the
+# next key (a key plus a resize in one burst lost the WINCH line).
 TUI = r'''
-import os, sys, termios, signal, struct, fcntl
+import os, sys, termios, signal, struct, fcntl, select
 fd = 0
+wr, ww = os.pipe()
+os.set_blocking(ww, False)
+signal.set_wakeup_fd(ww)
 a = termios.tcgetattr(fd)
 a[3] &= ~(termios.ECHO | termios.ICANON | termios.ISIG)
 a[6][termios.VMIN] = 1
@@ -45,10 +51,12 @@ def winch(*_):
 signal.signal(signal.SIGWINCH, winch)
 os.write(1, b"READY\r\n")
 while True:
-    try:
-        d = os.read(fd, 256)
-    except InterruptedError:
+    r, _, _ = select.select([fd, wr], [], [])
+    if wr in r:
+        os.read(wr, 64)
+    if fd not in r:
         continue
+    d = os.read(fd, 256)
     if not d:
         break
     os.write(1, b"KEY:%s\r\n" % d.hex().encode())

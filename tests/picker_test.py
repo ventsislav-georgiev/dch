@@ -509,25 +509,34 @@ def main():
     dch("--send", "pk7", "pk")
     s = wait_screen("pk7", lambda s: "/pk\u2588" in s and
                     len(rows(s)) >= 2)
-    r = rows(s)
+    # The pk rows are all Working "now": activity sort reorders them between
+    # reloads, so compare with the selection, never a remembered order.
+    was = current(s)
     check("the prompt's hints say the arrows keep the filter",
           "\u2191\u2193 keep" in s, s)
     dch("--keys", "pk7", "down")
-    s = wait_screen("pk7", lambda s: current(s) == r[1])
+    s = wait_screen("pk7", lambda s: "/pk\u2588" not in s and
+                    current(s) not in (None, was), 3.0)
+    if current(s) == was:
+        # a reload had just sorted `was` last: Down had nowhere to go
+        dch("--keys", "pk7", "up")
+        s = wait_screen("pk7", lambda s: current(s) not in (None, was))
+    sel = current(s)
     check("Down moves within the filtered list, closes the prompt and keeps "
           "the filter (#108)",
-          current(s) == r[1] and all(x.startswith("pk") for x in rows(s)) and
+          sel not in (None, was) and sel.startswith("pk") and
+          all(x.startswith("pk") for x in rows(s)) and
           "/pk" in s and "/pk\u2588" not in s and "q quit" in s, s)
     dch("--keys", "pk7", "x")
     s = wait_screen("pk7", lambda s: "[y/N]" in s)
     check("a letter action works on the filtered row: x asks about it",
-          "Kill %s? [y/N]" % r[1] in s, s)
+          "Kill %s? [y/N]" % sel in s, s)
     dch("--keys", "pk7", "n")
     wait_screen("pk7", lambda s: "[y/N]" not in s)
     time.sleep(2.5)  # two reloads
     s = screen("pk7")
     check("reloads keep the filter and the selection",
-          current(s) == r[1] and "/pk" in s and
+          current(s) == sel and "/pk" in s and
           all(x.startswith("pk") for x in rows(s)), s)
     dch("--keys", "pk7", "/")
     s = wait_screen("pk7", lambda s: "/pk\u2588" in s)
