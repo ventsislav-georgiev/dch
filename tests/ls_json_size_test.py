@@ -172,11 +172,19 @@ def main():
 
     # polling is read-only: the activity stamp and the size stay put
     act = os.path.join(SOCKDIR, name + ".sock.act")
-    m0 = os.stat(act).st_mtime if os.path.exists(act) else None
+    mt = lambda: os.stat(act).st_mtime if os.path.exists(act) else None
+    # the shell's startup output stamps it too (twice, microseconds apart,
+    # seen in CI as #106): take m0 once the stamp has settled
+    m0, end = mt(), time.time() + DUE
+    while time.time() < end:
+        time.sleep(0.5)
+        m, m0 = m0, mt()
+        if m == m0:
+            break
     time.sleep(1.1)
     for _ in range(3):
         o = row(name)
-    m1 = os.stat(act).st_mtime if os.path.exists(act) else None
+    m1 = mt()
     expect(m0 == m1, "--ls-json moved the activity stamp: %r -> %r" % (m0, m1))
     expect(o and (o.get("cols"), o.get("rows")) == (100, 30),
            "--ls-json resized the session: %r" % (o,))
