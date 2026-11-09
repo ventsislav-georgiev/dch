@@ -5,7 +5,8 @@
 ** `dch -l`, `dch -k`/`-d` without a name, and the double-tap switch. Tabs:
 ** Sessions; Sidekicks (n), the live sessions whose name, alias or harness
 ** title matches the config's sidekick_pattern (default "-qa"), shown only when there are
-** some; History (n), the ended records, pinned first, at most 50. Rows carry
+** some; History (n), the ended records, pinned first, at most 50. "/"
+** filters every tab, as vim's search (#096). Rows carry
 ** --ls-json's data (state, agents, meta.prs) and --history's, reloaded about
 ** once a second. Enter hands the session back to the caller; every other
 ** action forks this same dch with its CLI verb, the output into an unlinked
@@ -137,8 +138,96 @@ pk_find(const struct pk *p, int t, const char *name)
 	return -1;
 }
 
+/* ---- the "/" filter (#096): a tab shows only the rows whose title, dch
+** name or directory holds the text, ASCII case folded. sel stays a row's
+** index (the hosts' pk_do read it) and moves only among the rows kept;
+** with none kept it is n (no row: the row actions do nothing). ---- */
+
+static int
+pk_lc(int c)
+{
+	return c >= 'A' && c <= 'Z' ? c + 32 : c;
+}
+
+/* f in s, ASCII case folded; any other byte (UTF-8) as it is. */
+static int
+pk_has(const char *s, const char *f)
+{
+	size_t k;
+
+	for (;; s++)
+	{
+		for (k = 0; f[k] && pk_lc((unsigned char)s[k]) ==
+		     pk_lc((unsigned char)f[k]); k++)
+			;
+		if (!f[k])
+			return 1;
+		if (!*s)
+			return 0;
+	}
+}
+
+/* Row k of tab t kept by the filter? History's dch name is its sname. */
+static int
+pk_vis(const struct pk *p, int t, int k)
+{
+	const struct pkrow *w = &p->r[t][k];
+
+	return !p->filt[0] || pk_has(w->title, p->filt) ||
+	       pk_has(t == 2 ? w->sname : w->name, p->filt) ||
+	       pk_has(w->cwd, p->filt);
+}
+
+/* The first kept row from k on; n[t] when none. */
+static int
+pk_next(const struct pk *p, int t, int k)
+{
+	while (k < p->n[t] && !pk_vis(p, t, k))
+		k++;
+	return k;
+}
+
+/* The kept rows before row k: its place in the list drawn. pk_pos(p, t,
+** p->n[t]) is the tab's count. */
+static int
+pk_pos(const struct pk *p, int t, int k)
+{
+	int j, n = 0;
+
+	for (j = 0; j < k && j < p->n[t]; j++)
+		n += pk_vis(p, t, j);
+	return n;
+}
+
+/* The kept row at place pos; n[t] when none. */
+static int
+pk_nth(const struct pk *p, int t, int pos)
+{
+	int k = pk_next(p, t, 0);
+
+	while (pos-- > 0 && k < p->n[t])
+		k = pk_next(p, t, k + 1);
+	return k;
+}
+
+/* The selection on a kept row: its own, else the next kept one, else the
+** one before; n[t] when none is kept. */
+static void
+pk_fix(struct pk *p, int t)
+{
+	int k = p->sel[t] < p->n[t] ? p->sel[t] : p->n[t] - 1, j;
+
+	if (k < 0)
+		k = 0;
+	if ((j = pk_next(p, t, k)) == p->n[t])
+		for (j = k - 1; j >= 0 && !pk_vis(p, t, j); j--)
+			;
+	p->sel[t] = j < 0 ? p->n[t] : j;
+}
+
 /* Keep each tab's selection on the same row (by name) when rows come, go
-** or move; a row that went leaves the selection where it was. */
+** or move; a row that went, or that the filter no longer keeps, leaves it
+** on the nearest kept one. */
 static void
 pk_reselect(struct pk *p, char sel[3][600])
 {
@@ -148,10 +237,7 @@ pk_reselect(struct pk *p, char sel[3][600])
 	{
 		if (sel[t][0] && (k = pk_find(p, t, sel[t])) >= 0)
 			p->sel[t] = k;
-		if (p->sel[t] >= p->n[t])
-			p->sel[t] = p->n[t] - 1;
-		if (p->sel[t] < 0)
-			p->sel[t] = 0;
+		pk_fix(p, t);
 	}
 }
 
@@ -675,21 +761,22 @@ pk_cfval(int k, int draw)
 }
 #endif
 
-/* Lay out the columns for rows top..end of the list on screen. The title
+/* Lay out the columns for the cnt rows on screen from row k. The title
 ** takes at most three tenths of a wide screen; as the screen narrows the
 ** last column goes first, then merged, agents and the age, and the title
 ** shrinks last. */
 static void
-pk_cols(const struct pk *p, int top, int end)
+pk_cols(const struct pk *p, int k, int cnt)
 {
 	char b[1400];
-	int k, used, cap, w, hist = !p->settings && p->tab == 2, last = 0;
+	int used, cap, w, hist = !p->settings && p->tab == 2, last = 0;
 
 	memset(&pk_c, 0, sizeof pk_c);
 	pk_c.gap = pk_w >= 120 ? 3 : 2;
 	pk_c.name = p->settings ? 7 : 4;
 	pk_c.state = 5;
-	for (k = top; k < end; k++)
+	for (; cnt > 0; cnt--, k = p->settings ? k + 1
+	     : pk_next(p, p->tab, k + 1))
 	{
 		const struct pkrow *r;
 
@@ -1062,11 +1149,12 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 	struct pkkey keys[24];
 	char b[96];
 	const char *ret;
-	int nk = 0, k, t, cols = 0, rows = 0, kl, cap, tabs = 0;
+	int nk = 0, k, t, cols = 0, rows = 0, kl, cap, tabs = 0, pos, ri;
+	/* the rows drawn: the kept ones (pk_pos), or the settings */
 #ifdef _WIN32
-	int n = p->n[p->tab];
+	int n = pk_pos(p, p->tab, p->n[p->tab]);
 #else
-	int n = p->settings ? (int)NCONF : p->n[p->tab];
+	int n = p->settings ? (int)NCONF : pk_pos(p, p->tab, p->n[p->tab]);
 	const struct pkrow *cur;
 	char intr[16];
 #endif
@@ -1089,8 +1177,10 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 	snprintf(pk_cur, sizeof pk_cur, "0");
 	if (pk_color)
 		pk_raw("\033[0m");
+	if (!p->settings)
+		pk_fix(p, p->tab);
 #ifndef _WIN32
-	cur = !p->settings && *sel < n ? &p->r[p->tab][*sel] : NULL;
+	cur = !p->settings && *sel < p->n[p->tab] ? &p->r[p->tab][*sel] : NULL;
 #endif
 	ret = pk_utf ? "\xe2\x86\xb5" : "enter";
 	for (t = 0; t < 3; t++)
@@ -1100,7 +1190,12 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 	** moving about */
 #define PK_K(g, k, l, v, x) \
 	(keys[nk++] = (struct pkkey){ (k), (l), (v), (g), (x) })
-	if (p->settings)
+	if (p->filtering)
+	{
+		PK_K(0, ret, p->tab == 2 ? "resume" : "attach", NULL, 0);
+		PK_K(3, "esc", "clear", NULL, 0);
+	}
+	else if (p->settings)
 	{
 		PK_K(0, ret, "change", NULL, 0);
 		PK_K(0, "u", "default", NULL, 0);
@@ -1135,14 +1230,17 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 		PK_K(0, "p", cur && cur->pinned ? "unpin" : "pin", NULL, 0);
 		PK_K(0, "d", "remove", NULL, 1);
 	}
-	if (!p->settings)
+	if (!p->settings && !p->filtering)
 		PK_K(2, ",", "settings", NULL, 0);
 #endif
 	if (!p->settings)
 	{
+		if (!p->filtering)
+			PK_K(3, "/", "filter", NULL, 0);
 		if (tabs > 1)
 			PK_K(3, pk_utf ? "\xe2\x87\xa5" : "tab", "tabs", NULL, 0);
-		PK_K(3, "q", "quit", NULL, 0);
+		if (!p->filtering)
+			PK_K(3, "q", "quit", NULL, 0);
 	}
 #undef PK_K
 	/* too wide: the agents' group goes, then the view's */
@@ -1157,17 +1255,20 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 	p->win = rows - 5 - kl;
 	if (p->win < 1)
 		p->win = 1;
-	if (*sel >= n)
+	if (p->settings && *sel >= n)
 		*sel = n - 1;
 	if (*sel < 0)
 		*sel = 0;
-	if (*top > *sel)
-		*top = *sel;
-	if (*sel >= *top + p->win)
-		*top = *sel - p->win + 1;
+	/* top and pos: places in the list drawn, not row indexes */
+	pos = p->settings ? *sel : pk_pos(p, p->tab, *sel);
+	if (*top > pos)
+		*top = pos;
+	if (pos >= *top + p->win)
+		*top = pos - p->win + 1;
 	if (*top > 0 && *top + p->win > n)
 		*top = n - p->win > 0 ? n - p->win : 0;
-	pk_cols(p, *top, *top + p->win < n ? *top + p->win : n);
+	ri = p->settings ? *top : pk_nth(p, p->tab, *top);
+	pk_cols(p, ri, (*top + p->win < n ? *top + p->win : n) - *top);
 
 	/* the title, quiet, and what there is on the right, faint */
 	pk_line();
@@ -1189,7 +1290,7 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 		pk_tab("Settings", -1, 1);
 	for (t = 0; t < 3 && !p->settings; t++)
 		if (pk_shown(p, t))
-			pk_tab(tabn[t], p->n[t], t == p->tab);
+			pk_tab(tabn[t], pk_pos(p, t, p->n[t]), t == p->tab);
 	pk_eol();
 
 	pk_heads(p);
@@ -1202,11 +1303,15 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 		else
 #endif
 		if (k < n)
-			pk_row(p, &p->r[p->tab][k], k == *sel);
+		{
+			pk_row(p, &p->r[p->tab][ri], ri == *sel);
+			ri = pk_next(p, p->tab, ri + 1);
+		}
 		else if (k == 0)
 		{
 			pk_set("2");
-			pk_txt(p->tab == 2 ? "    No history" : "    No sessions");
+			pk_txt(p->filt[0] ? "    No match" : p->tab == 2
+			       ? "    No history" : "    No sessions");
 		}
 		pk_eol();
 	}
@@ -1222,6 +1327,17 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 	}
 	else
 	{
+		if (!p->settings && (p->filtering || p->filt[0]))
+		{
+			/* the filter, a block for the caret while it is typed */
+			pk_set(PK_P(PK_ACC));
+			pk_txt("/");
+			pk_set("");
+			pk_txt(p->filt);
+			if (p->filtering)
+				pk_txt(pk_utf ? "\xe2\x96\x88" : "_");
+			pk_txt("  ");
+		}
 		if (p->pid > 0)
 		{
 			/* the busy spinner: a frame a tenth of a second */
@@ -1308,35 +1424,36 @@ pk_rrow(struct pkrow *w, const struct dch_rrow *r)
 	w->remote = r->stale ? 2 : 1;
 }
 
-/* The keys every picker has: quit, and moving about the rows and the tabs.
-** -1: quit; 1: c was one of them; 0: it is the host's. */
+/* The keys every picker has: quit, and moving about the rows (the kept
+** ones) and the tabs. -1: quit; 1: c was one of them; 0: it is the host's. */
 int
 pk_nav(struct pk *p, int c)
 {
-	int t = p->tab, *sel = &p->sel[t], k;
+	int t = p->tab, k, pos = pk_pos(p, t, p->sel[t]);
+	int cnt = pk_pos(p, t, p->n[t]);
 
 	switch (c)
 	{
 	case 'q': case 3: case 4: case PK_ESC:
 		return -1;
 	case 'j': case PK_DOWN:
-		*sel += *sel < p->n[t] - 1;
-		return 1;
+		pos++;
+		break;
 	case 'k': case PK_UP:
-		*sel -= *sel > 0;
-		return 1;
+		pos--;
+		break;
 	case PK_PGDN:
-		*sel = *sel + p->win < p->n[t] ? *sel + p->win : p->n[t] - 1;
-		return 1;
+		pos += p->win;
+		break;
 	case PK_PGUP:
-		*sel = *sel > p->win ? *sel - p->win : 0;
-		return 1;
+		pos -= p->win;
+		break;
 	case 'g': case PK_HOME:
-		*sel = 0;
-		return 1;
+		pos = 0;
+		break;
 	case 'G': case PK_END:
-		*sel = p->n[t] - 1;
-		return 1;
+		pos = cnt - 1;
+		break;
 	case '\t': case 'l': case PK_RIGHT:
 	case PK_BTAB: case 'h': case PK_LEFT:
 		k = c == '\t' || c == 'l' || c == PK_RIGHT ? 1 : 2;
@@ -1345,8 +1462,97 @@ pk_nav(struct pk *p, int c)
 		while (!pk_shown(p, t));
 		p->tab = t;
 		return 1;
+	default:
+		return 0;
 	}
-	return 0;
+	if (pos >= cnt)
+		pos = cnt - 1;
+	if (pos < 0)
+		pos = 0;
+	p->sel[t] = pk_nth(p, t, pos);
+	return 1;
+}
+
+/* The filter off: every row back, each selection where it was (the top on
+** a tab that had none kept). */
+static void
+pk_unfilt(struct pk *p)
+{
+	int t;
+
+	p->filt[0] = '\0';
+	p->filtering = 0;
+	for (t = 0; t < 3; t++)
+		if (p->sel[t] >= p->n[t])
+			p->sel[t] = 0;
+}
+
+/* The filter's keys (#096). "/" opens its prompt; there printable keys,
+** UTF-8 as typed, go to the text, Backspace takes a character back (on
+** nothing it closes the prompt), Ctrl-U clears it and Esc clears it and
+** closes; Enter closes the prompt and goes on to the host, which acts on
+** the selected row; the text stays until Esc. A changed text selects the
+** top match of every tab. 1: c was the filter's. */
+static int
+pk_filt(struct pk *p, int fd, int c)
+{
+	size_t l = strlen(p->filt);
+	unsigned char b;
+	int t, more;
+
+	if (!p->filtering)
+	{
+		if (c == '/')
+		{
+			p->filtering = 1;
+			p->status[0] = '\0';
+			return 1;
+		}
+		if (c != PK_ESC || !p->filt[0])
+			return 0;
+		pk_unfilt(p);
+		return 1;
+	}
+	switch (c)
+	{
+	case '\r': case '\n':
+		p->filtering = 0;
+		return 0;
+	case PK_ESC:
+		pk_unfilt(p);
+		return 1;
+	case 0x7f: case 8:
+		if (!l)
+		{
+			p->filtering = 0;
+			return 1;
+		}
+		while (l && ((unsigned char)p->filt[--l] & 0xC0) == 0x80)
+			;
+		p->filt[l] = '\0';
+		break;
+	case 0x15:	/* Ctrl-U */
+		p->filt[0] = '\0';
+		break;
+	default:
+		if (c < 0x20 || c > 0xff)
+			return 0;	/* Tab, the arrows, Ctrl-C: the host's */
+		/* a character's bytes together: no frame shows half of one */
+		more = c >= 0xf0 ? 3 : c >= 0xe0 ? 2 : c >= 0xc0;
+		b = (unsigned char)c;
+		do
+		{
+			if (l + 1 < sizeof p->filt)
+				p->filt[l++] = (char)b;
+		} while (more-- > 0 && pk_more(fd) && pk_rd(fd, &b) == 0);
+		p->filt[l] = '\0';
+	}
+	for (t = 0; t < 3; t++)
+	{
+		p->sel[t] = 0;
+		pk_fix(p, t);
+	}
+	return 1;
 }
 
 /* A new picker in p, its colours from the environment (vt: a VT console
@@ -1423,6 +1629,8 @@ pk_run(struct pk *p, int fd, const char *header, char *out, size_t outsz)
 			continue;	/* the tick, or a resize */
 		if ((c = pk_key(fd)) < 0)
 			return 1;
+		if (!p->asking && !p->settings && pk_filt(p, fd, c))
+			continue;
 		if ((k = pk_do(p, fd, c, out, outsz)))
 			return k > 0 ? 0 : 1;
 	}

@@ -47,6 +47,8 @@ struct pk
 	pid_t pid;
 	FILE *out;		/* the running one's stdout and stderr */
 	char status[800];
+	char filt[256];		/* the "/" filter (#096); "" = every row */
+	int filtering;		/* its prompt is open: keys type into it */
 };
 
 enum { PK_UP = 256, PK_DOWN, PK_RIGHT, PK_LEFT, PK_BTAB, PK_PGUP, PK_PGDN,

@@ -77,7 +77,7 @@ dch                            # → session "scratch", starts default shell
 
 dch -n release zsh             # → override auto-name; session "release"
 dch -ls                        # → list sessions: display-name (real-name), or real-name
-dch -l                         # → the picker: states, actions, history, settings (,)
+dch -l                         # → the picker: states, actions, history, filter (/), settings (,)
 dch -rl                        # → pick one, type a new display name, repeat
 dch -k                         # → pick one and kill it
 dch -kl                        # → kill ALL sessions
@@ -166,8 +166,20 @@ hint.
 | `I` | | resume interrupted (n) (`--revive --all`), asks first |
 | `p` | | pin / unpin |
 | `d` | | remove (`--forget`), asks first; a pinned record must be unpinned first |
+| `/` | filter (below) | filter (below) |
 | `,` | settings | settings |
-| `q` `Esc` `Ctrl-C` `Ctrl-D` | quit | quit |
+| `q` `Esc` `Ctrl-C` `Ctrl-D` | quit (`Esc` clears a filter first) | quit (`Esc` clears a filter first) |
+
+`/` filters, as in vim: a `/` prompt with a caret opens on the status line and
+what you type narrows every tab to the rows whose shown name, dch name or
+directory contains it (case-insensitive; a remote row's `host:name` too). The
+tab counts show the filtered counts, the selection starts on the top match,
+and the filter stays across tab switches and reloads, with `No match` for an
+empty result. While typing, every printable key goes to the filter (no letter
+binding fires), `↑` `↓` and `Tab` move, `Backspace` edits (on an empty filter
+it closes the prompt), `Ctrl-U` clears the text, and `Enter` closes the prompt
+and acts on the selected row as it always does; the filter stays until `Esc`,
+which clears it, and a later `Esc` quits.
 
 `,` opens **Settings**: every [config file](#config-file) key with its value
 (a bool as `● on` / `○ off`, a choice as all of them with the set one in the

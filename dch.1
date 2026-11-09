@@ -334,6 +334,27 @@ opens the settings view;
 or
 .B Ctrl\-C
 quit.
+.B /
+filters, as in vim: a
+.B /
+prompt on the status line narrows every tab to the rows whose shown name,
+dch name or directory contains the text typed (case\-insensitive), the tab
+counts following, the selection on the top match, \(lqNo match\(rq when
+none does.
+While typing, printable keys go to the filter, arrows and
+.B Tab
+move,
+.B Backspace
+edits (on an empty filter it closes the prompt),
+.B Ctrl\-U
+clears the text, and
+.B Enter
+closes the prompt and acts on the selected row as it always does; the filter
+stays across tab switches and reloads until
+.BR Esc ,
+which clears it; a later
+.B Esc
+quits.
 On Sessions and Sidekicks:
 .B Enter
 attaches (or kills, detaches for

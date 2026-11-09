@@ -21,7 +21,14 @@ and --keys types into it. Covers:
      a tinted bar (no reverse block), the key hints grouped, all of them at
      200 columns and whole groups dropped at 80;
  11. a session whose name lacks the pattern but whose harness (Claude)
-     title has it is a sidekick (#086).
+     title has it is a sidekick (#086);
+ 12. the "/" filter (#096): typing narrows the tab (title, dch name or
+     directory, case folded), the tab counts follow, Backspace and Ctrl-U
+     edit, no row says No match and its actions do nothing, the filter
+     survives a tab switch,
+     Esc restores every row and a later Esc quits, Backspace on nothing
+     leaves the prompt, Enter attaches the top match; Down moves among
+     the kept rows and a reload keeps the filter and the selection.
 
 Run:  python3 tests/picker_test.py            (uses ./dch)
       DCH=/path/to/dch python3 tests/picker_test.py
@@ -459,6 +466,115 @@ def main():
           "[Sessions" in s and "Sidekicks" not in s and
           "helper-qa" in rows(s) and "kodi-qa" in rows(s), s)
 
+    # 12. the "/" filter (#096), in fresh pickers. Sessions: helper-qa,
+    # kodi-qa (a4k-2), nick (s10), s2, perm, form and the pickers; History:
+    # the pickers killed above.
+    CARET = "/\u2588"
+    picker("pk7", "100x30", "NO_COLOR=1", "TERM=xterm-256color")
+    s = wait_screen("pk7", lambda s: "kodi-qa" in rows(s) and
+                    "History " in s)
+    full = sorted(rows(s))
+    check("select s2 before filtering", select("pk7", "s2"), screen("pk7"))
+    dch("--keys", "pk7", "/")
+    s = wait_screen("pk7", lambda s: CARET in s)
+    check("/ opens the filter prompt on the status line, its own hints",
+          CARET in s and "esc clear" in s and "q quit" not in s, s)
+    dch("--send", "pk7", "KOD")
+    s = wait_screen("pk7", lambda s: rows(s) == ["kodi-qa"])
+    check("typing narrows the list, case folded: /KOD keeps kodi-qa",
+          rows(s) == ["kodi-qa"] and "/KOD\u2588" in s, s)
+    check("the tab counts are the filtered ones",
+          "[Sessions 1]" in s and "History 0" in s, s)
+    check("the selection starts on the top match",
+          current(s) == "kodi-qa", s)
+    dch("--keys", "pk7", "ctrl+u")
+    s = wait_screen("pk7", lambda s: sorted(rows(s)) == full)
+    check("Ctrl-U clears the text: every row back, the prompt open",
+          sorted(rows(s)) == full and CARET in s, s)
+    dch("--send", "pk7", "a4k")
+    s = wait_screen("pk7", lambda s: rows(s) == ["kodi-qa"])
+    check("the dch name matches too: /a4k keeps a4k-2 (kodi-qa)",
+          rows(s) == ["kodi-qa"], s)
+    dch("--send", "pk7", "z")
+    s = wait_screen("pk7", lambda s: "No match" in s)
+    check("nothing kept: a quiet No match line, Sessions 0",
+          "    No match" in s and "[Sessions 0]" in s, s)
+    dch("--keys", "pk7", "backspace")
+    s = wait_screen("pk7", lambda s: rows(s) == ["kodi-qa"])
+    check("Backspace edits: /a4k again",
+          rows(s) == ["kodi-qa"] and "/a4k\u2588" in s, s)
+    dch("--keys", "pk7", "ctrl+u")
+    dch("--send", "pk7", "pk")
+    s = wait_screen("pk7", lambda s: "/pk\u2588" in s and
+                    len(rows(s)) >= 2)
+    r = rows(s)
+    dch("--keys", "pk7", "down")
+    s = wait_screen("pk7", lambda s: current(s) == r[1])
+    check("Down moves within the filtered list",
+          current(s) == r[1] and all(x.startswith("pk") for x in rows(s)),
+          s)
+    time.sleep(2.5)  # two reloads
+    s = screen("pk7")
+    check("reloads keep the filter and the selection",
+          current(s) == r[1] and "/pk\u2588" in s and
+          all(x.startswith("pk") for x in rows(s)), s)
+    dch("--keys", "pk7", "tab")
+    s = wait_screen("pk7", lambda s: "[History" in s)
+    hr = rows(s)
+    check("the filter survives a tab switch: History keeps the pk rows",
+          "/pk\u2588" in s and len(hr) >= 4 and
+          all(r.startswith("pk") for r in hr) and
+          "[History %d]" % len(hr) in s, s)
+    dch("--send", "pk7", "zzz")
+    wait_screen("pk7", lambda s: "No match" in s)
+    dch("--keys", "pk7", "enter")
+    s = wait_screen("pk7", lambda s: "/pkzzz" in s and
+                    "/pkzzz\u2588" not in s)
+    check("Enter on no row: nothing runs, the prompt closes, the filter "
+          "stays", "No match" in s and "/pkzzz" in s and "q quit" in s and
+          "Resum" not in s, s)
+    dch("--keys", "pk7", "d")
+    time.sleep(0.5)
+    s = screen("pk7")
+    check("d on no row asks nothing", "[y/N]" not in s, s)
+    dch("--keys", "pk7", "esc")
+    s = wait_screen("pk7", lambda s: "/pkzzz" not in s)
+    check("Esc clears the filter: every History row back",
+          "/pkzzz" not in s and "No match" not in s and
+          len(rows(s)) >= len(hr) and "[History %d]" % len(rows(s)) in s,
+          s)
+    nh = len(rows(s))
+    dch("--keys", "pk7", "/")
+    wait_screen("pk7", lambda s: CARET in s)
+    # the pickers ran in this directory: its name keeps every History row
+    base = os.path.basename(os.getcwd())
+    dch("--send", "pk7", base)
+    s = wait_screen("pk7", lambda s: "/%s\u2588" % base in s)
+    check("the directory matches too: /%s keeps every History row" % base,
+          len(rows(s)) == nh and "No match" not in s, s)
+    dch("--keys", "pk7", "ctrl+u")
+    wait_screen("pk7", lambda s: CARET in s)
+    dch("--keys", "pk7", "backspace")
+    s = wait_screen("pk7", lambda s: CARET not in s)
+    check("Backspace on an empty filter leaves the prompt",
+          CARET not in s and "q quit" in s, s)
+    dch("--keys", "pk7", "esc")
+    check("then Esc quits, as before", wait_live("pk7", False), live())
+
+    # attached from inside a session: DCH_SESSION would refuse the nesting
+    picker("pk8", "100x30", "-u", "DCH_SESSION", "NO_COLOR=1",
+           "TERM=xterm-256color")
+    wait_screen("pk8", lambda s: "perm" in rows(s))
+    check("select s2 in pk8", select("pk8", "s2"), screen("pk8"))
+    dch("--keys", "pk8", "/")
+    wait_screen("pk8", lambda s: CARET in s)
+    dch("--send", "pk8", "PERM")
+    wait_screen("pk8", lambda s: rows(s) == ["perm"])
+    dch("--keys", "pk8", "enter")
+    s = wait_screen("pk8", lambda s: "rm -rf build" in s)
+    check("Enter attaches the top match (perm), not the row selected "
+          "before", "rm -rf build" in s, s)
+
     dch("--keys", "pk3", "q")
     check("q quits the picker", wait_live("pk3", False), live())
     return 1 if failures else 0
@@ -468,7 +584,8 @@ if __name__ == "__main__":
     try:
         rc = main()
     finally:
-        for n in ("pk1", "pk2", "pk3", "pk4", "pk5", "pk6", "s2", "s10",
+        for n in ("pk1", "pk2", "pk3", "pk4", "pk5", "pk6", "pk7", "pk8",
+                  "s2", "s10",
                   "helper-qa", "a4k-2", "perm", "form"):
             dch("-k", n)
         for pr in procs:

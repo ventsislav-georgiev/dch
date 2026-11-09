@@ -18,7 +18,8 @@ error; -a host:missing; -a with no console (the attach's checks and the
 On Windows also: -ls implies --remote, and -a wants host:name; dch alone
 with no console refused; and the picker (#090) in a console of its own
 (console_picker): the rows, j and Enter attach, the double tap back to the
-picker, Enter, one tap ends dch; Esc quits.
+picker, Enter, one tap ends dch; "/q2" keeps q:q2 alone, Esc brings the
+rows back and a later Esc quits.
 
 It runs against the POSIX dch too (every list passes --remote), which is
 how it is checked off Windows; CI runs it against dch.exe.
@@ -191,6 +192,12 @@ def console_picker(qh):
         out["tap_rc"] = p.returncode
         p = start()
         ok, out["screen"] = until(lambda s: "q:q1" in s)
+        keys("/", "q", "2")  # the filter (#096): q:q2 alone
+        out["filter"], out["screen"] = until(
+            lambda s: "/q2" in s and "q:q2" in s and "q:q1" not in s)
+        keys("\x1b")
+        out["unfilter"], out["screen"] = until(
+            lambda s: "/q2" not in s and "q:q1" in s)
         keys("\x1b")
         p.wait(15)
         out["esc_rc"] = p.returncode
@@ -431,7 +438,11 @@ def main():
                   "ends dch (exit 0)", len(got) == 2
                   and res["first"].encode() in got[1]
                   and res.get("tap_rc") == 0, (got, why))
-            check("picker: Esc quits (exit 0)", res.get("esc_rc") == 0, why)
+            check("picker: / and text keep the matching row, Esc brings "
+                  "every row back", res.get("filter") and
+                  res.get("unfilter"), why)
+            check("picker: a later Esc quits (exit 0)",
+                  res.get("esc_rc") == 0, why)
 
         # --- discovery, against a fake tailscale ----------------------
         if not fake_tailscale(fake):
