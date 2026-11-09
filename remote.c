@@ -655,7 +655,9 @@ cache_save(const struct rlist *l)
 
 /* ---- probes ---------------------------------------------------------- */
 
-enum { PR_CONN, PR_WAIT, PR_OK, PR_FAIL, PR_NEWER };
+/* PR_REFUSED: the server's gate turned us away with a 0x13 that has a
+** "code" (#094), not a host that is down: why holds its message. */
+enum { PR_CONN, PR_WAIT, PR_OK, PR_FAIL, PR_NEWER, PR_REFUSED };
 
 struct probe
 {
@@ -667,7 +669,7 @@ struct probe
 	struct rf_state rs;
 	struct sb in;
 	char *list;		/* the 0x11 payload, NUL-terminated */
-	char why[300];		/* PR_FAIL, PR_NEWER: printable */
+	char why[300];		/* PR_FAIL, PR_NEWER, PR_REFUSED: printable */
 };
 
 /* Every probe's sa, its address when it is an IPv4 literal: how many are
@@ -873,12 +875,14 @@ tcp_dial(const struct probe *p)
 	return fd;
 }
 
-/* The "message" of a 0x13 payload, escaped, into out[cap]. */
-static void
+/* The "message" of a 0x13 payload, escaped, into out[cap]. Whether it
+** has a "code" (a dch serve refusal, #094). */
+static int
 err_text(const unsigned char *d, size_t n, char *out, size_t cap)
 {
 	struct json_parser jp;
-	char t[1024], m[256] = "";
+	char t[1024], m[256] = "", code[64];
+	int coded = 0;
 
 	if (n < sizeof t && !memchr(d, 0, n))
 	{
@@ -886,10 +890,15 @@ err_text(const unsigned char *d, size_t n, char *out, size_t cap)
 		t[n] = '\0';
 		if (dch_json_parse(&jp, t) == 0 && jp.ntok > 0 &&
 		    jp.tok[0].kind == JSON_OBJECT)
+		{
 			(void)jstr(&jp, 0, "message", m, sizeof m);
+			coded = jstr(&jp, 0, "code", code, sizeof code) == 1 &&
+			        code[0];
+		}
 		dch_json_free(&jp);
 	}
 	logsafe(out, cap, m[0] ? m : "error");
+	return coded;
 }
 
 static void
@@ -900,9 +909,13 @@ pr_frame(struct probe *p, const struct rf_frame *f)
 
 	if (f->type == 0x13)
 	{
-		err_text(f->data, f->len, why + 6, sizeof why - 6);
-		memcpy(why, "says: ", 6);
-		pr_end(p, PR_FAIL, why);
+		if (err_text(f->data, f->len, why + 6, sizeof why - 6))
+			pr_end(p, PR_REFUSED, why + 6);
+		else
+		{
+			memcpy(why, "says: ", 6);
+			pr_end(p, PR_FAIL, why);
+		}
 		return;
 	}
 	if ((f->type != 0x18 || p->hello) && (f->type != 0x11 || p->list))
@@ -1119,6 +1132,14 @@ rows_now(struct rlist *l, int ms, int loud, int lfd)
 		{
 			if (loud)
 				fprintf(stderr, "dch: %s %s; skipped\n",
+				        hv[i].label, pv[i].why);
+			continue;
+		}
+		if (pv[i].st == PR_REFUSED)
+		{
+			/* not down: its cached rows are no use to us */
+			if (loud)
+				fprintf(stderr, "dch: %s refused: %s\n",
 				        hv[i].label, pv[i].why);
 			continue;
 		}
@@ -1504,7 +1525,7 @@ relay_in(struct rf_state *rs, struct sb *tin, struct sb *to_sp, int *exited,
 		{
 			char m[300];
 
-			err_text(f.data, f.len, m, sizeof m);
+			(void)err_text(f.data, f.len, m, sizeof m);
 			snprintf(msg, cap, "it says: %s", m);
 		}
 	}
@@ -1752,7 +1773,9 @@ open_listed(const struct rhost *h, const char *name, const char *sh,
 	if (p->st == PR_OK && rows_doc(p->list, h->label, 0, &rows) == 0)
 		for (k = 0; k < rows.n && !found; k++)
 			found = !strcmp(rows.v[k].name, name);
-	if (p->st != PR_OK)
+	if (p->st == PR_REFUSED)
+		fprintf(stderr, "dch: %s refused: %s\n", sh, p->why);
+	else if (p->st != PR_OK)
 		fprintf(stderr, "dch: %s: %s\n", sh, p->why);
 	else if (!found)
 		fprintf(stderr, "dch: no session %s on %s\n", sn, sh);

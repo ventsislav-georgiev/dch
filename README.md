@@ -1168,8 +1168,10 @@ dch serve --check-peer 100.101.102.103   # would this peer get in?
 ```
 
 **Trust model.** Only your own devices on your tailnet get in. Every check
-runs right after the connection is accepted, before a byte is read, and a
-refused peer is closed without a reply.
+runs right after the connection is accepted, before a byte is read. A
+refused tailnet peer is told why in one frame and closed (see
+[Refusals](#refusals)); an address outside 100.64.0.0/10 is closed without
+a byte.
 
 - **Address.** `dch serve` listens only on this host's Tailscale IPv4: the
   first line of `tailscale ip -4`. When that reports no address (tailscale
@@ -1219,7 +1221,42 @@ refused peer is closed without a reply.
 | `--allow-create` | Let the phone start a session with its own command (0x02). Off by default, and `create` is then missing from the ops the phone sees, and attach (0x01) only reaches a session already in the list (else 0x13 and a close). With it, attach to a new name starts a shell session, as `dch -n` does. |
 | `--allow-user <u>` | On a tagged host, accept this user's nodes (numeric id or login). Repeatable. |
 | `--whois-optional` | Accept a tailnet peer while tailscaled is not answering (whois and status both fail), with a warning (see above). The owner must still be known at startup. |
-| `--check-peer <ip>` | Print whether that peer would get in, then exit 0 (accept) or 1. |
+| `--check-peer <ip>` | Print whether that peer would get in, and the refusal code in parentheses, then exit 0 (accept) or 1. |
+
+#### Refusals
+
+A tailnet peer the checks above refuse gets exactly one frame, then the
+connection's FIN. It is sent first thing, before the server reads a byte
+and before any `0x18`, whether or not the client already sent its hello:
+
+```
+0x13  {"code":"<code>","message":"<text>"}
+```
+
+`code` is a contract: these values are stable and keep their meaning, and a
+client should key on it. `message` is for people and may be reworded. A
+code not in this table may be added later; treat one you do not know as a
+refusal you cannot explain. A refusal never names the host's owner, a user,
+a node or the `--allow-user` list. A peer refused again within 30 s (the
+repeat-refusal cache) gets the same code. Other `0x13` frames (a failed
+attach, say) have no `code`.
+
+| `code` | When | `message` |
+| --- | --- | --- |
+| `not_owner` | An untagged host, and the peer is another user's node. | `this host serves only its owner's devices` |
+| `not_allowed` | A tagged host, and the peer's user is not on its `--allow-user`. | `this host is tagged and serves only the users it names: start dch serve there with --allow-user <your login or id>` |
+| `tagged_peer` | The peer is a tagged node. | `this host does not serve tagged nodes` |
+| `whois_unavailable` | tailscaled is not answering (whois and `status` both fail), and no `--whois-optional`. | `this host could not verify you: tailscaled is not answering` |
+| `whois_failed` | whois failed while `status` works (a node tailscaled does not know), or its answer was unusable. | `this host could not verify you (tailscale whois failed)` |
+| `self` | The peer is this host itself: one of its addresses, or its own node. | `this host does not serve connections from itself` |
+
+The `0x13` goes out in one non-blocking write that is never retried, so a
+peer that does not read cannot hold the server up; the server then waits up
+to 1 s for the peer to close (reading off and dropping what it sent, unparsed)
+so the close is a FIN and not a reset that could lose the frame. A peer
+outside 100.64.0.0/10 (or loopback without the test bypass) is closed with
+no frame: it is not a tailnet peer, so it is told nothing. Neither are the
+connection limits below: past them, the connection is closed without a frame.
 
 **What the phone gets.** The session list (`dch --ls-json`, re-encoded: name,
 alias, state, agent count, and only GitHub pull-request links from `--meta`),
@@ -1333,14 +1370,18 @@ marked `[stale]`, for two minutes (a cache in dch's state dir). The picker
 always shows remote rows, in Sessions with their host faint, only for hosts
 that are candidates now, and re-probes in the background every 2 s; a stale
 row is faint and says Stale. A host speaking a newer protocol major is
-skipped, with a note on stderr.
+skipped, with a note on stderr. A host whose `dch serve` refuses us (a
+`0x13` with a `code`, see [Refusals](#refusals)) is not down: `--ls` and
+`--ls-json` say `dch: <host> refused: <message>` on stderr and show none of
+its cached rows, and the picker drops them.
 
 **Attaching.** `dch -a host:name`, or Enter on a remote row in the picker,
 attaches the way a local attach does: raw terminal, the detach key and its
 double tap (to the picker) handled locally, the window size following yours.
 Detaching closes the connection and nothing else; the remote session runs on.
 `-a` only attaches, never creates: it checks the name is in the host's list
-and sends the attach on that same connection. An exact local session name wins over `host:name`; `--host` is the
+and sends the attach on that same connection. A host that refuses us
+prints `dch: <host> refused: <message>` and exits 1. An exact local session name wins over `host:name`; `--host` is the
 unambiguous form. A lost connection restores the terminal, says so, and exits
 1.
 

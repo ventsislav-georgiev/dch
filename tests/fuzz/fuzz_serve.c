@@ -166,6 +166,20 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 	    serve_gate(&g, 0x64400001u, 0, NULL, 1) != G_NOTNODE)
 		abort();
 	{
+		/* #094: every refusal of a tailnet peer has a code and a
+		** message, an accept none; the owner/allow-list split follows
+		** the host's taggedness */
+		const char *m = NULL, *code;
+		int v = serve_gate(&g, 0x64400001u, 0, text, 0);
+
+		code = gate_code(v, &m);
+		if ((v > G_RANGE) != (code != NULL) || (code && !m) ||
+		    gate_code(G_RANGE, &m) ||
+		    (v == G_OWNER && g.self_uid < 0) ||
+		    (v == G_NOTALLOWED && g.self_uid >= 0))
+			abort();
+	}
+	{
 		/* logsafe leaves no byte a terminal acts on */
 		char out[512];
 		const unsigned char *q;

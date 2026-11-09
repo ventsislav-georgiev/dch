@@ -4,9 +4,10 @@
 ** Spec: ventsislav-georgiev/prosper docs/protocol/remote-frames.md; its
 ** conformance set runs from tests/remote-frames/.
 **
-** Process model. The parent owns the listening socket and never reads a
-** byte from a peer. It drops a peer outside 100.64.0.0/10 at accept, then
-** forks one handler per connection. The handler runs the owner check
+** Process model. The parent owns the listening socket and never parses a
+** byte from a peer (one it refused and told why is read off and dropped,
+** so the close is a FIN). It drops a peer outside 100.64.0.0/10 at accept,
+** then forks one handler per connection. The handler runs the owner check
 ** (tailscale whois) before it reads anything, then serves the connection
 ** with one poll loop. A slow subprocess stalls only its own connection, and
 ** a crash costs one connection. Handlers report "attached to <name>" and
@@ -51,6 +52,9 @@
 #define IDLE_MS 30000		/* no whole frame this long, not attached or
 				** watching: closes (slowloris) */
 #define LINGER_MS 2000
+#define REFUSE_MS 1000		/* a refused peer, told why: closed when it is
+				** done, or after this long */
+#define REFUSE_N 16		/* refused peers the parent waits on so */
 #define WATCH_POLL_MS 2000
 #define WATCH_BEAT_MS 25000	/* spec heartbeat */
 #define MAX_CONN 64
@@ -371,9 +375,11 @@ struct gate
 	int test_loopback;	/* test-only bypass, armed (see serve_main) */
 };
 
-/* Verdicts: G_OK and G_OK_NOWHOIS accept, every other one refuses. */
+/* Verdicts: G_OK and G_OK_NOWHOIS accept, every other one refuses.
+** G_OWNER: another user's node on an untagged host; G_NOTALLOWED: a user
+** not on --allow-user, on a tagged host. */
 enum { G_OK, G_OK_NOWHOIS, G_RANGE, G_SELF, G_NOWHOIS, G_NOTNODE,
-       G_BADWHOIS, G_TAGGED, G_OWNER };
+       G_BADWHOIS, G_TAGGED, G_OWNER, G_NOTALLOWED, G_N };
 
 static const char *
 gate_why(int v)
@@ -391,8 +397,41 @@ gate_why(int v)
 				       "status works (not a node it knows)";
 	case G_BADWHOIS:	return "tailscale whois answer unusable";
 	case G_TAGGED:		return "tagged node";
+	case G_NOTALLOWED:	return "a user not on --allow-user (tagged host)";
 	default:		return "another user's node";
 	}
+}
+
+/* What a refused tailnet peer is told (#094): one 0x13 {"message","code"},
+** the code a stable contract (README, dch.1). NULL for an accept and for
+** G_RANGE: an address off the tailnet is told nothing. Never names the
+** owner, a user, a node or the allow-list. */
+static const char *
+gate_code(int v, const char **msg)
+{
+	static const char *const t[G_N][2] = {
+		[G_SELF] = { "self", "this host does not serve connections "
+		             "from itself" },
+		[G_NOWHOIS] = { "whois_unavailable", "this host could not "
+		                "verify you: tailscaled is not answering" },
+		[G_NOTNODE] = { "whois_failed", "this host could not verify "
+		                "you (tailscale whois failed)" },
+		[G_BADWHOIS] = { "whois_failed", "this host could not verify "
+		                 "you (tailscale whois failed)" },
+		[G_TAGGED] = { "tagged_peer", "this host does not serve tagged "
+		               "nodes" },
+		[G_OWNER] = { "not_owner", "this host serves only its owner's "
+		              "devices" },
+		[G_NOTALLOWED] = { "not_allowed", "this host is tagged and "
+		                   "serves only the users it names: start dch "
+		                   "serve there with --allow-user <your login "
+		                   "or id>" },
+	};
+
+	if (v < 0 || v >= G_N || !t[v][0])
+		return NULL;
+	*msg = t[v][1];
+	return t[v][0];
 }
 
 static int
@@ -472,7 +511,7 @@ serve_gate(const struct gate *g, uint32_t ip, int self, const char *whois,
 		        ? strtoll(g->allow[i], NULL, 10) == uid
 		        : login[0] && !strcasecmp(g->allow[i], login))
 			return G_OK;
-	return G_OWNER;
+	return g->self_uid >= 0 ? G_OWNER : G_NOTALLOWED;
 }
 
 /* ---- tailscale ------------------------------------------------------- */
@@ -1355,9 +1394,64 @@ conn_end(struct conn *c, int graceful)
 	free(c->out.p);
 }
 
+/* Tell fd's peer why the gate refused it (verdict v): the one 0x13 that
+** gate_code gives (none for G_RANGE), in one non-blocking send that is
+** never retried, so a peer that does not read costs nothing; then the FIN.
+** The caller closes fd once the peer is done (refuse_drain): closing with
+** the peer's hello unread would send a reset, and a reset can eat the 0x13
+** (macOS drops it). */
+static void
+refuse(int fd, int v)
+{
+	const char *msg, *code = gate_code(v, &msg);
+	struct sb b = {0};
+	unsigned char f[RF_HDR + 1024];
+
+	nonblock(fd);
+	if (!code)
+		return;
+	sb_s(&b, "{\"code\":");
+	sb_q(&b, code);
+	sb_s(&b, ",\"message\":");
+	sb_q(&b, msg);
+	sb_s(&b, "}");
+	if (!b.bad && b.n <= sizeof f - RF_HDR)
+	{
+		f[0] = 0x13;
+		f[1] = f[2] = 0;
+		f[3] = (unsigned char)(b.n >> 8);
+		f[4] = (unsigned char)b.n;
+		memcpy(f + RF_HDR, b.p, b.n);
+		(void)!send(fd, f, RF_HDR + b.n, MSG_NOSIGNAL);
+	}
+	free(b.p);
+	shutdown(fd, SHUT_WR);
+}
+
+/* Read off and drop (never parse) what a refused peer sent, without
+** waiting: 1 once it is done (EOF or an error), 0 while it may send more. */
+static int
+refuse_drain(int fd)
+{
+	char junk[4096];
+	ssize_t r;
+	int k;
+
+	for (k = 0; k < 16; k++)
+		if ((r = recv(fd, junk, sizeof junk, MSG_DONTWAIT)) <= 0)
+			return r == 0 || (errno != EAGAIN && errno != EWOULDBLOCK &&
+			                  errno != EINTR);
+	return 0;
+}
+
+/* The handler's exit status for a refusal the parent caches: NEG_EXIT plus
+** the verdict, so the cached refusal says the same (see kids_reap). */
+#define NEG_EXIT 16
+
 /* One connection, in the forked handler. Returns the handler's exit
-** status: 3 when the gate refused the peer on tailscaled's own word (the
-** parent then refuses that address for NEG_MS without forking), else 0. */
+** status: NEG_EXIT + the verdict when the gate refused the peer on
+** tailscaled's own word (the parent then refuses that address for NEG_MS
+** without forking, with the same 0x13), else 0. */
 static int
 serve_conn(int fd, uint32_t ip)
 {
@@ -1371,16 +1465,26 @@ serve_conn(int fd, uint32_t ip)
 	c->ip = ip;
 	a.s_addr = htonl(ip);
 	inet_ntop(AF_INET, &a, c->ipstr, sizeof c->ipstr);
-	/* The gate, before a byte is read. A refused peer gets no frame.
-	** The parent already refused this host's own addresses. */
+	/* The gate, before a byte is read. A refused peer gets one 0x13 that
+	** says why, and the close. The parent already refused this host's
+	** own addresses. */
 	whois = ts_whois(c->ipstr);
 	v = serve_gate(&g_gate, ip, 0, whois, !whois && ts_up());
 	free(whois);
 	if (v >= G_RANGE)
 	{
+		long long end = now_ms() + REFUSE_MS;
+		struct pollfd pf;
+
 		slog("%s: refused: %s", c->ipstr, gate_why(v));
+		refuse(fd, v);
+		pf.fd = fd;
+		pf.events = POLLIN;
+		while (!refuse_drain(fd) && now_ms() < end &&
+		       poll(&pf, 1, (int)(end - now_ms())) > 0)
+			;
 		close(fd);
-		return v == G_NOWHOIS ? 0 : 3;
+		return v == G_NOWHOIS ? 0 : NEG_EXIT + v;
 	}
 	if (v == G_OK_NOWHOIS)
 		slog("%s: warning: %s", c->ipstr, gate_why(v));
@@ -1528,19 +1632,20 @@ static struct kid kids[MAX_CONN];
 static int nkids;
 static long long kid_seq;
 
-/* Peers a handler refused on tailscaled's word (exit status 3), refused
-** again before fork until `until`: no fork, no whois, no kid slot. Full,
-** the entry that expires first goes. An accepted peer never lands here,
-** so neither does the owner. */
+/* Peers a handler refused on tailscaled's word (exit status NEG_EXIT + the
+** verdict), refused again before fork until `until`, with that verdict's
+** 0x13: no fork, no whois, no kid slot. Full, the entry that expires first
+** goes. An accepted peer never lands here, so neither does the owner. */
 static struct neg
 {
 	uint32_t ip;
 	long long until;
 	int told;	/* its first cached refusal is logged, no more */
+	int v;		/* the handler's verdict */
 } neg[NEG_N];
 
 static void
-neg_add(uint32_t ip)
+neg_add(uint32_t ip, int v)
 {
 	struct neg *n = &neg[0];
 	int i;
@@ -1556,6 +1661,7 @@ neg_add(uint32_t ip)
 	n->ip = ip;
 	n->until = now_ms() + NEG_MS;
 	n->told = 0;
+	n->v = v;
 }
 
 static struct neg *
@@ -1568,6 +1674,40 @@ neg_hit(uint32_t ip)
 		if (neg[i].ip == ip && neg[i].until > now)
 			return &neg[i];
 	return NULL;
+}
+
+/* Peers the parent refused and told why, waited on for REFUSE_MS until
+** they are done (refuse_drain) so the close is a FIN; never blocking. Full,
+** a refused peer is closed at once. */
+static struct { int fd; long long until; } rfd[REFUSE_N];
+static int nrfd;
+
+static void
+refused_wait(int fd)
+{
+	if (nrfd == REFUSE_N)
+	{
+		close(fd);	/* ponytail: a reset may eat its 0x13 */
+		return;
+	}
+	rfd[nrfd].fd = fd;
+	rfd[nrfd++].until = now_ms() + REFUSE_MS;
+}
+
+/* After a poll over pf (one per rfd, in order): close those done or due. */
+static void
+refused_tick(const struct pollfd *pf)
+{
+	long long now = now_ms();
+	int i;
+
+	for (i = nrfd - 1; i >= 0; i--)	/* the last moves to i: seen */
+		if ((pf[i].revents && refuse_drain(rfd[i].fd)) ||
+		    now >= rfd[i].until)
+		{
+			close(rfd[i].fd);
+			rfd[i] = rfd[--nrfd];
+		}
 }
 
 static void
@@ -1587,8 +1727,11 @@ kids_reap(void)
 		for (i = 0; i < nkids; i++)
 			if (kids[i].pid == p)
 			{
-				if (WIFEXITED(st) && WEXITSTATUS(st) == 3)
-					neg_add(kids[i].ip);
+				if (WIFEXITED(st) &&
+				    WEXITSTATUS(st) > NEG_EXIT + G_RANGE &&
+				    WEXITSTATUS(st) < NEG_EXIT + G_N)
+					neg_add(kids[i].ip,
+					        WEXITSTATUS(st) - NEG_EXIT);
 				kids[i] = kids[--nkids];
 				break;
 			}
@@ -1705,7 +1848,8 @@ accept_one(int lfd, int nr)
 	if (!(g_gate.test_loopback && ip_loop(ip)) && ip_self(ip, local))
 	{
 		slog("%s: refused: %s", ipstr, gate_why(G_SELF));
-		close(fd);
+		refuse(fd, G_SELF);
+		refused_wait(fd);
 		return;
 	}
 	if ((n = neg_hit(ip)))
@@ -1713,7 +1857,8 @@ accept_one(int lfd, int nr)
 		if (!n->told++)
 			slog("%s: refused before fork for %d s: refused by the "
 			     "gate already", ipstr, NEG_MS / 1000);
-		close(fd);
+		refuse(fd, n->v);
+		refused_wait(fd);
 		return;
 	}
 	for (i = 0; i < nkids; i++)
@@ -1730,6 +1875,8 @@ accept_one(int lfd, int nr)
 	{
 		close(lfd);
 		close(nr);
+		while (nrfd)
+			close(rfd[--nrfd].fd);
 		_exit(serve_conn(fd, ip));
 	}
 	close(fd);
@@ -2015,8 +2162,13 @@ serve_main(int argc, char **argv)
 			               !self && !w && ts_up());
 			free(w);
 		}
-		printf("%s %s: %s\n", v < G_RANGE ? "accept" : "refuse", check,
-		       gate_why(v));
+		{
+			const char *m, *code = gate_code(v, &m);
+
+			printf("%s %s: %s%s%s%s\n", v < G_RANGE ? "accept"
+			       : "refuse", check, gate_why(v), code ? " (" : "",
+			       code ? code : "", code ? ")" : "");
+		}
 		return v < G_RANGE ? 0 : 1;
 	}
 
@@ -2084,7 +2236,8 @@ serve_main(int argc, char **argv)
 
 	while (!g_stop)
 	{
-		struct pollfd pf[2];
+		struct pollfd pf[2 + REFUSE_N];
+		int tmo = 1000;
 
 		kids_reap();
 		pf[0].fd = lfd;
@@ -2092,18 +2245,31 @@ serve_main(int argc, char **argv)
 		pf[1].fd = np[0];
 		pf[1].events = POLLIN;
 		pf[0].revents = pf[1].revents = 0;
-		if (poll(pf, 2, 1000) < 0)
+		for (i = 0; i < nrfd; i++)
+		{
+			long long left = rfd[i].until - now_ms();
+
+			pf[2 + i].fd = rfd[i].fd;
+			pf[2 + i].events = POLLIN;
+			pf[2 + i].revents = 0;
+			if (left < tmo)
+				tmo = left > 0 ? (int)left : 0;
+		}
+		if (poll(pf, (nfds_t)(2 + nrfd), tmo) < 0)
 		{
 			if (errno == EINTR)
 				continue;
 			slog("poll: %s", strerror(errno));
 			break;
 		}
+		refused_tick(pf + 2);
 		if (pf[1].revents)
 			kids_read(np[0]);
 		if (pf[0].revents & POLLIN)
 			accept_one(lfd, np[0]);
 	}
+	while (nrfd)
+		close(rfd[--nrfd].fd);
 
 	/* Stop: every handler detaches its client (the sessions live on). */
 	slog("stopping; sessions keep running");

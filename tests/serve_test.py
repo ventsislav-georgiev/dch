@@ -13,7 +13,9 @@ a newer proto major; an oversize control frame; a client half-close; SIGTERM.
 Security review F1-F8: --whois-optional only while tailscaled is down; this
 host's own address and node refused; log escaping; the CLI from absolute
 PATH entries; odd whois/status JSON failing closed; the test variable unset
-for children; refused peers cached before fork.
+for children; refused peers cached before fork. #094: every refusal of a
+tailnet peer is one exact 0x13 {"code","message"} then the close (the
+cached one too); an address off the tailnet gets no byte.
 
 Run:  python3 tests/serve_test.py        (uses ./dch)
 """
@@ -46,6 +48,21 @@ TAGGED = {"Self": {"ID": "1001", "UserID": 9, "Tags": ["tag:server"]},
 
 SAAS_OWNER = {"Self": {"ID": "nXyZ123CNTRL", "UserID": 42, "Tags": []},
               "User": {"42": {"LoginName": "me@example.com"}}}
+
+
+# The refusal codes and messages (#094): a contract, README and dch.1.
+CODES = {
+    "not_owner": "this host serves only its owner's devices",
+    "not_allowed": "this host is tagged and serves only the users it names: "
+                   "start dch serve there with --allow-user <your login or "
+                   "id>",
+    "tagged_peer": "this host does not serve tagged nodes",
+    "whois_unavailable": "this host could not verify you: tailscaled is not "
+                         "answering",
+    "whois_failed": "this host could not verify you (tailscale whois "
+                    "failed)",
+    "self": "this host does not serve connections from itself",
+}
 
 
 def whois(uid, login="me@example.com", tags=(), node="2002", nid=2002):
@@ -169,18 +186,37 @@ def main():
             if t not in skip:
                 return t, p
 
-    def refused(port):
-        """Connected, sent a hello, got EOF with no byte at all."""
+    def reply(port, hello=True):
+        """What a peer gets, having sent a hello (or nothing): "accept"
+        (0x18), "closed" (EOF with no byte at all), "reset: ..." (no byte
+        either), the raw payload of a 0x13 followed by EOF (#094), else a
+        string saying what came."""
+        s = conn(port)
         try:
-            s = conn(port)
-            send(s, 0x08)
-            got = s.recv(1)
-            s.close()
-            return got == b""
-        except (ConnectionResetError, BrokenPipeError):
-            return True
+            if hello:
+                send(s, 0x08)
+            t, body = frame(s)
+            if t == 0x18:
+                return "accept"
+            if t != 0x13:
+                return "frame 0x%02x" % t
+            return body if s.recv(1) == b"" else "more after the 0x13"
+        except EOFError:
+            return "closed"
+        except (ConnectionResetError, BrokenPipeError) as e:
+            return "reset: %s" % e
         except socket.timeout:
-            return False
+            return "timeout"
+        finally:
+            s.close()
+
+    def refused(port):
+        return reply(port) != "accept"
+
+    def refusal(code):
+        """The exact 0x13 payload dch serve sends for code (#094)."""
+        return json.dumps({"code": code, "message": CODES[code]},
+                          separators=(",", ":")).encode()
 
     def sessions():
         r = subprocess.run([DCH, "-ls"], env=env, capture_output=True,
@@ -383,44 +419,57 @@ def main():
         # --- the gate, per connection (whois runs per peer) --------------
         # A refusal on tailscaled's word is remembered by the parent for
         # 30 s, so each case runs against its own server.
-        def gate_case(msg, why, *args, **kw):
-            ts()
+        # Each refused peer gets one 0x13 {"code","message"} and the close
+        # (#094), whether it sent its hello first or nothing at all.
+        def gate_case(msg, why, code, *args, start=OWNER, **kw):
+            ts(status=start)
             p, port, log = serve(*args)
             ts(**kw)
-            got = refused(port)
+            got = [reply(port, hello) for hello in (True, False)]
             time.sleep(0.1)
-            ok = got and re.search(r"refused: .*" + re.escape(why), text(log))
+            ok = re.search(r"refused: .*" + re.escape(why), text(log))
             check("refused: %s" % msg, ok)
-            if not ok:
-                print(text(log)[-600:])
+            check("  told %s, exactly, then the close (#094)" % code,
+                  got == [refusal(code)] * 2)
+            if not ok or got != [refusal(code)] * 2:
+                print(got, text(log)[-600:])
             stop(p)
 
-        gate_case("another user's node", "another user's node",
+        gate_case("another user's node", "another user's node", "not_owner",
                   who=whois(7, "other@example.com"))
-        gate_case("a tagged peer", "tagged node", who=whois(42, tags=["tag:ci"]))
+        gate_case("a tagged host, a user not on --allow-user",
+                  "not on --allow-user", "not_allowed", "--allow-user", "8",
+                  start=TAGGED, status=TAGGED,
+                  who=whois(7, "other@example.com"))
+        gate_case("a tagged peer", "tagged node", "tagged_peer",
+                  who=whois(42, tags=["tag:ci"]))
         gate_case("whois and status down (fail closed)", "fail closed",
-                  status=None, who=None)
+                  "whois_unavailable", status=None, who=None)
+        gate_case("this host's own node, by whois (F2)", "this host itself",
+                  "self", who=whois(42, node="1001", nid=1001))
         # F1: --whois-optional relaxes only a tailscaled that is not answering
         gate_case("whois failing while status works, --whois-optional (F1)",
-                  "status works", "--whois-optional", who=None)
+                  "status works", "whois_failed", "--whois-optional",
+                  who=None)
         gate_case("a whois with a string UserProfile.ID, --whois-optional (F1)",
-                  "unusable", "--whois-optional",
+                  "unusable", "whois_failed", "--whois-optional",
                   who='{"UserProfile":{"ID":"42"},'
                       '"Node":{"ID":2002,"StableID":"2002"}}')
         gate_case("a whois over the 256 KiB cap, --whois-optional (F1)",
-                  "status works", "--whois-optional",
+                  "status works", "whois_failed", "--whois-optional",
                   who=json.dumps(whois(42)) + " " * (300 << 10))
         ts()
         p, port, log = serve("--whois-optional")
         ts(status=None, who=None)
         check("accepted: whois and status down with --whois-optional (F1)",
-              not refused(port))
+              reply(port) == "accept")
         check("--whois-optional logs a warning",
               "tailscaled not answering, accepted" in text(log))
         stop(p)
         ts()
         p, port, log = serve()
-        check("accepted: the owner's node", not refused(port))
+        check("accepted: the owner's node, its hello answered as before",
+              reply(port) == "accept")
         check("tailscale runs without the test env var (F7)",
               calls() and all(c.endswith(" unset") for c in calls()))
         stop(p)
@@ -437,12 +486,14 @@ def main():
                 break
             time.sleep(0.1)
         n0 = len([c for c in calls() if c.startswith("whois")])
-        rs = [refused(port) for _ in range(5)]
+        rs = [reply(port, i % 2 == 0) for i in range(6)]
         time.sleep(0.2)
         n1 = len([c for c in calls() if c.startswith("whois")])
         check("a refused peer is cached by the parent (F8)", cached)
+        check("the cached refusal tells the same code, hello or not (#094)",
+              rs == [refusal("not_owner")] * 6)
         check("its reconnects are refused with no fork and no whois (F8)",
-              all(rs) and n1 == n0 and text(log).count(
+              n1 == n0 and text(log).count(
                   "dch serve[%d]: 127.0.0.1: refused before fork" % p.pid)
               == 1)
         stop(p)
@@ -470,7 +521,10 @@ def main():
         # --- no bypass: a loopback bind admits nobody (Q13) --------------
         ts()
         p, port, log = serve(e=env)
-        check("without the bypass a loopback peer is refused", refused(port))
+        check("without the bypass a loopback peer is refused, told nothing "
+              "(not a tailnet peer, #094)",
+              all(r == "closed" or r.startswith("reset")
+                  for r in (reply(port, h) for h in (True, False))))
         check("a non-tailnet --bind warns that it admits nobody",
               "admits nobody" in text(log))
         check("an out-of-range peer is refused before fork (by the parent)",
@@ -485,14 +539,15 @@ def main():
                                timeout=20)
             return r.returncode, r.stdout
 
-        check("--check-peer refuses a non-tailnet address",
-              peer("192.168.1.5")[0] == 1)
+        check("--check-peer refuses a non-tailnet address, no code",
+              peer("192.168.1.5") == (1, "refuse 192.168.1.5: not an IPv4 "
+                                         "address in 100.64.0.0/10\n"))
         check("--check-peer accepts the owner's node",
               peer("100.100.2.2")[0] == 0)
         # F2: this host itself, by address and by node id
         rc, out = peer("100.100.1.1")
         check("a peer on this host's tailnet address is refused (F2)",
-              rc == 1 and "this host itself" in out)
+              rc == 1 and "this host itself" in out and "(self)" in out)
         rc, out = peer("100.100.3.3", "--bind", "100.100.3.3")
         check("a peer on the bound address is refused (F2)",
               rc == 1 and "this host itself" in out)
@@ -588,8 +643,10 @@ def main():
               rc == 1 and "--allow-user" in err)
         check("--allow-user by id", peer("100.100.2.2", "--allow-user",
                                          "7")[0] == 0)
-        check("--allow-user by another id refuses",
-              peer("100.100.2.2", "--allow-user", "8")[0] == 1)
+        rc, out = peer("100.100.2.2", "--allow-user", "8")
+        check("--allow-user by another id refuses, the code printed (#094)",
+              rc == 1 and out == "refuse 100.100.2.2: a user not on "
+              "--allow-user (tagged host) (not_allowed)\n")
         check("--allow-user by login, case-insensitive (Q15)",
               peer("100.100.2.2", "--allow-user", "friend@example.COM")[0] == 0)
         check("--allow-user by another login refuses",

@@ -167,6 +167,8 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		inert(p->why);
 		if (p->st == PR_OK && !p->list)
 			abort();
+		if (p->st == PR_REFUSED && (!p->why[0] || p->fd >= 0))
+			abort();	/* a refusal says why, and is closed */
 		if (p->in.n > n)
 			abort();	/* what is held came from the input */
 		probes_free(p, 1);

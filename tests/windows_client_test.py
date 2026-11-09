@@ -10,7 +10,8 @@ a shell script elsewhere; without gcc on Windows those checks are skipped.
 Covers: rows in -ls, -lj and --ls-json; --hosts with DCH_NO_REMOTE=1, the
 remote_hosts config, remote_hosts = off; hostile names escaped; a hanging
 host not stalling past the time box, then its cached rows stale; a hanging
-tailscale cut off at the box; a newer major skipped; an unknown host's
+tailscale cut off at the box; a newer major skipped; a refusing host (a
+0x13 with a code, #094) said, its cached rows not shown; an unknown host's
 error; -a host:missing; -a with no console (the attach's checks and the
 0x01's path up to the console); discovery's peer filter and whois refusal.
 On Windows also: -ls implies --remote, and -a wants host:name; dch alone
@@ -355,6 +356,17 @@ def main():
         check("a newer major: skipped, said on stderr",
               "nw:n1" not in r.out and "speaks protocol 2.0" in r.err,
               (r.out, r.err))
+
+        # --- a host whose gate refuses us (#094) -----------------------
+        refuse = Fake("refuse")
+        fakes.append(refuse)
+        r = dch("-ls", "--remote", "--hosts", "q=127.0.0.1:%d" % refuse.port)
+        check("a refusing host: none of its cached rows, why on stderr",
+              "q:" not in r.out and "dch: q refused: this host serves only "
+              "its owner's devices" in r.err, (r.out, r.err))
+        r = dch("--hosts", "rf=127.0.0.1:%d" % refuse.port, "-a", "rf:x")
+        check("-a to a refusing host: its reason, exit 1", r.returncode == 1
+              and "dch: rf refused: this host serves only" in r.err, r.err)
 
         # --- attach: the checks before the console --------------------
         r = dch("--hosts", qh, "-a", "nope:x")

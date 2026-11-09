@@ -1132,7 +1132,8 @@ or when
 .B "tailscale status \-\-json"
 fails, the owner is unknown and it refuses to start. A
 peer is checked right after accept, before a byte is read, and a refused peer
-is closed with no reply: it must be an IPv4 address in 100.64.0.0/10, not one
+is told why and closed (see Refusals below): it must be an IPv4 address in
+100.64.0.0/10, not one
 of this host's own addresses or its own node (any local user could connect
 from those), not a tagged node, and owned by this host's user (the numeric
 .B UserProfile.ID
@@ -1184,7 +1185,55 @@ both fail). A whois that fails while status works, or answers anything that
 is not clean, is still refused. The owner must still be known at startup.
 .TP
 .BI \-\-check\-peer " ipv4"
-Print whether that peer would get in and exit 0 (accept) or 1 (refuse).
+Print whether that peer would get in, with the refusal code in parentheses,
+and exit 0 (accept) or 1 (refuse).
+.PP
+.B Refusals.
+A tailnet peer the checks refuse gets exactly one frame, sent before the
+server reads a byte and before any 0x18, then the FIN:
+.RS
+.EX
+0x13  {"code":"<code>","message":"<text>"}
+.EE
+.RE
+.B code
+is a stable contract;
+.B message
+is for people and may be reworded. Codes may be added; an unknown one is a
+refusal that cannot be explained. A refusal never names the owner, a user, a
+node or the allow list, and a repeat refusal within 30 s carries the same
+code. Other 0x13 frames have no code. The codes:
+.TP
+.B not_owner
+an untagged host, and the peer is another user's node:
+.I this host serves only its owner's devices
+.TP
+.B not_allowed
+a tagged host, and the peer's user is not on its
+.BR \-\-allow\-user :
+.I this host is tagged and serves only the users it names: start dch serve there with \-\-allow\-user <your login or id>
+.TP
+.B tagged_peer
+the peer is a tagged node:
+.I this host does not serve tagged nodes
+.TP
+.B whois_unavailable
+tailscaled is not answering, and no
+.BR \-\-whois\-optional :
+.I this host could not verify you: tailscaled is not answering
+.TP
+.B whois_failed
+whois failed while status works, or answered something unusable:
+.I this host could not verify you (tailscale whois failed)
+.TP
+.B self
+the peer is this host itself (one of its addresses, or its own node):
+.I this host does not serve connections from itself
+.PP
+The frame is one non-blocking write, never retried; the server then waits
+up to 1 s for the peer to close, dropping what it sent unread, so the close
+is a FIN. A peer outside 100.64.0.0/10, and one past the connection limits,
+is closed with no frame.
 .PP
 .B DCH_SERVE_TEST_LOOPBACK=1
 with a loopback
@@ -1228,7 +1277,12 @@ which probes every host in parallel within 300 ms in all, the
 call and name lookups included. A host that does
 not answer in time shows its last answer, stale, for 2 minutes (a cache in
 .IR $XDG_STATE_HOME/dch/sessions/.remote\-cache ).
-A host speaking a newer protocol major is skipped with a note.
+A host speaking a newer protocol major is skipped with a note. A host whose
+server refuses us (a 0x13 with a code) is said on standard error as
+.IR "dch: host refused: message" ,
+and none of its cached rows are shown;
+.B \-a
+to it prints the same and exits 1.
 The picker lists remote rows in Sessions, the host faint, of the hosts that
 are candidates now, and re\-probes in the background; Enter attaches, on
 the connection that checked the name is listed, and no other action applies

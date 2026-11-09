@@ -19,7 +19,9 @@ untagged; a hostile server's control bytes escaped (C1 and bidi too, in
 stale; a tampered cache (an "at" out of range, a host that is not a label)
 shown nowhere, the picker included; a newer major skipped; a dropped link
 exits 1 with a message and the terminal restored; a 0x13 then a reset keeps
-the 0x13's reason; 0x12 ends the attach with 0.
+the 0x13's reason; 0x12 ends the attach with 0; a host whose gate refuses us
+(a 0x13 with a code, #094): -a says why and exits 1, --ls/--ls-json --remote
+say why and show none of its cached rows, against a fake and dch serve.
 
 Run:  python3 tests/remote_client_test.py        (uses ./dch)
 """
@@ -61,6 +63,10 @@ PEERS = dict(OWNER, BackendState="Running", Peer={
            "TailscaleIPs": ["8.8.8.8"]}})
 
 
+REFUSAL = {"code": "not_owner",
+           "message": "this host serves only its owner's devices"}
+
+
 def frame(t, payload=b""):
     if isinstance(payload, (dict, list)):
         payload = json.dumps(payload).encode()
@@ -95,6 +101,14 @@ class Fake:
     def serve(self, c):
         buf = b""
         try:
+            if self.mode == "refuse":
+                # dch serve's gate (#094): one 0x13 with a code before a
+                # byte is read, the FIN, then read off what the client sent
+                c.sendall(frame(0x13, REFUSAL))
+                c.shutdown(socket.SHUT_WR)
+                while c.recv(65536):
+                    pass
+                return
             while True:
                 d = c.recv(65536)
                 if not d:
@@ -494,6 +508,29 @@ def main():
               and b"\xe2\x80\xae" not in out and b"future" not in out,
               (st, out))
 
+        # --- a host whose gate refuses us (#094) -----------------------
+        refuse = Fake("refuse")
+        fakes.append(refuse)
+        put_cache()
+        r = dch(cenv, "--ls", "--remote", "--hosts",
+                "srv=127.0.0.1:%d" % refuse.port)
+        check("a refusing host: no stale rows, its reason on stderr (#094)",
+              r.returncode == 0 and "srv:" not in r.stdout
+              and "dch: srv refused: this host serves only its owner's "
+                  "devices" in r.stderr, r)
+        put_cache()
+        r = dch(cenv, "--ls-json", "--remote", "--hosts",
+                "srv=127.0.0.1:%d" % refuse.port)
+        check("--ls-json: no rows of a refusing host, the reason on stderr",
+              r.returncode == 0 and not [x for x in json.loads(r.stdout)
+                                         if "host" in x]
+              and "srv refused: this host serves only" in r.stderr, r)
+        r = dch(cenv, "--hosts", "srv=127.0.0.1:%d" % refuse.port,
+                "-a", "srv:keep")
+        check("-a to a refusing host: its reason, exit 1 (#094)",
+              r.returncode == 1 and r.stderr == "dch: srv refused: this host "
+              "serves only its owner's devices\n", r)
+
         # --- a newer protocol -----------------------------------------
         newer = Fake("list", rows=[{"name": "n1"}], proto="2.0")
         fakes.append(newer)
@@ -533,6 +570,19 @@ def main():
               st is not None and os.WIFEXITED(st) and os.WEXITSTATUS(st) == 1
               and b"lost the connection to rs: it says: bye-why" in out,
               (st, out))
+
+        # --- the real dch serve's gate refusing us (#094), last: it then
+        # refuses 127.0.0.1 for 30 s
+        put("whois.json", dict(WHOIS, UserProfile={
+            "ID": 7, "LoginName": "other@example.com"}))
+        r = dch(cenv, "--hosts", hosts, "-a", "srv:rs1")
+        check("dch serve refusing -a: its reason, exit 1 (#094)",
+              r.returncode == 1 and r.stderr == "dch: srv refused: this host "
+              "serves only its owner's devices\n", r)
+        r = dch(cenv, "--ls", "--remote", "--hosts", hosts)
+        check("and --ls --remote: no srv rows, its reason (the cached "
+              "refusal)", r.returncode == 0 and "srv:" not in r.stdout
+              and "dch: srv refused: this host serves only" in r.stderr, r)
     finally:
         for pid in clients:
             try:
