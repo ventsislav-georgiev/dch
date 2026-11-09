@@ -1555,15 +1555,44 @@ pk_filt(struct pk *p, int fd, int c)
 	return 1;
 }
 
+/* The picker's place (#098), kept across the pickers of one process (the
+** switch reopens it): the last one's tab, sort, filter and selections, and
+** the session the host says was just left, selected in the next one. */
+static struct
+{
+	int set, tab, byname;
+	char filt[sizeof ((struct pk *)0)->filt], sel[3][600], focus[600];
+} pk_mem;
+
+void
+pk_focus(const char *name)
+{
+	snprintf(pk_mem.focus, sizeof pk_mem.focus, "%s", name ? name : "");
+}
+
+/* p's place, for the next picker; its filter's prompt closed. */
+static void
+pk_keep(const struct pk *p)
+{
+	pk_mem.set = 1;
+	pk_mem.tab = p->tab;
+	pk_mem.byname = p->byname;
+	snprintf(pk_mem.filt, sizeof pk_mem.filt, "%s", p->filt);
+	pk_selnames(p, pk_mem.sel);
+}
+
 /* A new picker in p, its colours from the environment (vt: a VT console
 ** whatever TERM says, Windows'), its rows loaded; with remote set and none
-** here nor cached, the remote hosts probed once, in the box. 0, or -1 when
-** there are no rows at all ("no sessions" said). */
+** here nor cached, the remote hosts probed once, in the box. In the last
+** picker's place, when there was one, on the row pk_focus named when it is
+** there: its tab, the nearest row the filter keeps. 0, or -1 when there
+** are no rows at all ("no sessions" said). */
 int
 pk_open(struct pk *p, int remote, int vt)
 {
 	const char *nc = getenv("NO_COLOR"), *term = getenv("TERM");
 	const char *ct = getenv("COLORTERM"), *fgbg = getenv("COLORFGBG");
+	int t, k, j;
 
 	memset(p, 0, sizeof *p);
 	p->pid = -1;
@@ -1577,7 +1606,8 @@ pk_open(struct pk *p, int remote, int vt)
 	/* COLORFGBG "fg;bg": a white or light grey background */
 	pk_light = fgbg && (fgbg = strrchr(fgbg, ';')) &&
 	           (atoi(fgbg + 1) == 7 || atoi(fgbg + 1) == 15);
-	p->byname = pk_cfbyname();
+	p->byname = pk_mem.set ? pk_mem.byname : pk_cfbyname();
+	snprintf(p->filt, sizeof p->filt, "%s", pk_mem.filt);
 	pk_load(p);
 	if (remote && !p->n[0] && !p->n[1] && !p->n[2])
 	{
@@ -1595,6 +1625,25 @@ pk_open(struct pk *p, int remote, int vt)
 		return -1;
 	}
 	p->tab = p->n[0] ? 0 : p->n[1] ? 1 : 2;
+	if (pk_mem.set)
+	{
+		pk_reselect(p, pk_mem.sel);
+		if (pk_shown(p, pk_mem.tab))
+			p->tab = pk_mem.tab;
+	}
+	/* the session left: on its tab, this one first */
+	for (j = 0; pk_mem.focus[0] && j < 3; j++)
+	{
+		t = (p->tab + j) % 3;
+		if (pk_shown(p, t) && (k = pk_find(p, t, pk_mem.focus)) >= 0)
+		{
+			p->tab = t;
+			p->sel[t] = k;
+			pk_fix(p, t);
+			break;
+		}
+	}
+	pk_mem.focus[0] = '\0';
 	return 0;
 }
 
@@ -1628,10 +1677,15 @@ pk_run(struct pk *p, int fd, const char *header, char *out, size_t outsz)
 		if (k <= 0)
 			continue;	/* the tick, or a resize */
 		if ((c = pk_key(fd)) < 0)
-			return 1;
-		if (!p->asking && !p->settings && pk_filt(p, fd, c))
+			k = -1;
+		else if (!p->asking && !p->settings && pk_filt(p, fd, c))
 			continue;
-		if ((k = pk_do(p, fd, c, out, outsz)))
+		else
+			k = pk_do(p, fd, c, out, outsz);
+		if (k)
+		{
+			pk_keep(p);
 			return k > 0 ? 0 : 1;
+		}
 	}
 }

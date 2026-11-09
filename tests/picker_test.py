@@ -543,15 +543,17 @@ def main():
           "/pkzzz" not in s and "No match" not in s and
           len(rows(s)) >= len(hr) and "[History %d]" % len(rows(s)) in s,
           s)
-    nh = len(rows(s))
+    # the records made in this directory: its name keeps those History rows
+    # and no others
+    base = os.path.basename(os.getcwd())
+    nh = sum(1 for l in body(s) if ROW_RE.match(l) and base in l)
     dch("--keys", "pk7", "/")
     wait_screen("pk7", lambda s: CARET in s)
-    # the pickers ran in this directory: its name keeps every History row
-    base = os.path.basename(os.getcwd())
     dch("--send", "pk7", base)
     s = wait_screen("pk7", lambda s: "/%s\u2588" % base in s)
-    check("the directory matches too: /%s keeps every History row" % base,
-          len(rows(s)) == nh and "No match" not in s, s)
+    check("the directory matches too: /%s keeps the History rows run there"
+          % base, nh >= 4 and len(rows(s)) == nh and "No match" not in s,
+          nh, s)
     dch("--keys", "pk7", "ctrl+u")
     wait_screen("pk7", lambda s: CARET in s)
     dch("--keys", "pk7", "backspace")

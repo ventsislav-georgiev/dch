@@ -166,7 +166,7 @@ pick(const char *header, char *out, size_t outsz)
 static int
 pick_attach(const char *host, const char *name)
 {
-	char chosen[1100], *c;
+	char chosen[1100], left[1200], *c;
 	const char *header = "attach session (mirror):";
 	int rc;
 
@@ -185,6 +185,10 @@ pick_attach(const char *host, const char *name)
 		}
 		if ((rc = dch_remote_attach(host, name)) != ATTACH_SWITCH)
 			return rc;
+		/* the picker opens on the session just left (#098) */
+		if ((size_t)snprintf(left, sizeof left, "%s:%s", host, name)
+		    < sizeof left)
+			pk_focus(left);
 		host = NULL;
 		header = "switch to session:";
 	}

@@ -2904,6 +2904,12 @@ attach_with_switch(char *exe, int forced_name, int force, char **inner_argv,
 
 		if (rc != ATTACH_SWITCH)
 			return rc;
+		/* the picker opens on the session just left (#098) */
+		if (!remote_host)
+			pk_focus(session_name);
+		else if ((size_t)snprintf(chosen, sizeof chosen, "%s:%s",
+		                          remote_host, session_name) < sizeof chosen)
+			pk_focus(chosen);
 		pk_remote = 1;
 		if (pick_session("switch to session:", chosen,
 		                 sizeof(chosen)) != 0)

@@ -18,8 +18,8 @@ error; -a host:missing; -a with no console (the attach's checks and the
 On Windows also: -ls implies --remote, and -a wants host:name; dch alone
 with no console refused; and the picker (#090) in a console of its own
 (console_picker): the rows, j and Enter attach, the double tap back to the
-picker, Enter, one tap ends dch; "/q2" keeps q:q2 alone, Esc brings the
-rows back and a later Esc quits.
+picker on the session just left, k and Enter, one tap ends dch; "/q2" keeps
+q:q2 alone, Esc brings the rows back and a later Esc quits.
 
 It runs against the POSIX dch too (every list passes --remote), which is
 how it is checked off Windows; CI runs it against dch.exe.
@@ -184,7 +184,10 @@ def console_picker(qh):
         keys("\x1c", "\x1c")
         out["switch"], out["screen"] = until(
             lambda s: "switch to session:" in s and "q:q2" in s)
-        keys("\r")
+        # the reopened picker selects the session just left (#098)
+        out["focus"] = any("\u258c" in l and "q:" + out["second"] in l
+                           for l in out["screen"].split("\n"))
+        keys("k", "\r")
         ok, out["screen"] = until(lambda s: "switch to session:" not in s)
         time.sleep(1)  # the attach under way: its relay reads the key
         keys("\x1c")
@@ -434,8 +437,10 @@ def main():
                   and res["second"].encode() in got[0], (got, why))
             check("picker: Ctrl-\\ twice, back to the picker",
                   res.get("switch"), why)
-            check("picker: Enter there attaches the first row, one Ctrl-\\ "
-                  "ends dch (exit 0)", len(got) == 2
+            check("picker: ... on the session just left", res.get("focus"),
+                  why)
+            check("picker: k, Enter there attaches the first row, one "
+                  "Ctrl-\\ ends dch (exit 0)", len(got) == 2
                   and res["first"].encode() in got[1]
                   and res.get("tap_rc") == 0, (got, why))
             check("picker: / and text keep the matching row, Esc brings "

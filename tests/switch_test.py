@@ -154,7 +154,9 @@ def main():
         rows = picker_rows(out)
         if B not in rows:
             return fail("picker did not list the other session", rows, out)
-        os.write(fd, b"j" * rows.index(B) + b"\r")
+        # the picker opens on the session just left (#098)
+        d = rows.index(B) - (rows.index(A) if A in rows else 0)
+        os.write(fd, (b"j" * d if d > 0 else b"k" * -d) + b"\r")
         landed = drain(fd, 10.0, b"BBB_BRAVO")
         if "BBB_BRAVO" not in landed:
             return fail("switch did not attach to the picked session", landed)

@@ -314,7 +314,10 @@ Inside a session: `Ctrl-\` to detach. Works in vim, fzf, less, Claude Code,
 etc. — terminals that swallow most control keys still pass `Ctrl-\` through.
 
 Press `Ctrl-\` **twice quickly** to switch sessions: dch detaches and shows the
-same picker as `dch -l`, so you can hop straight into another session. Quitting
+same picker as `dch -l`, so you can hop straight into another session. It opens
+where the last picker of that dch left off (its tab, sort and `/` filter) with
+the session you just left selected, on whichever tab holds it now; the first
+switch after a plain attach opens on that session too. Quitting
 the picker (`q` / `Esc`) just leaves you detached. A single press still detaches
 — it waits out the double-press window first. `DCH_DOUBLE_TAP_MS` sets that
 window in milliseconds (default `300`); `DCH_DOUBLE_TAP_MS=0` turns switching

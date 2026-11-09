@@ -65,6 +65,9 @@ void pk_sort(struct pk *p, char sel[3][600]);
 void pk_rrow(struct pkrow *w, const struct dch_rrow *r);
 int pk_cfbyname(void);
 int pk_nav(struct pk *p, int c);
+/* The session just left (host:name for a remote), selected on its tab by
+** the next pk_open, which also keeps the last picker's place (#098). */
+void pk_focus(const char *name);
 int pk_open(struct pk *p, int remote, int vt);
 int pk_run(struct pk *p, int fd, const char *header, char *out,
            size_t outsz);
