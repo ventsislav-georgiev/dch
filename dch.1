@@ -206,7 +206,15 @@ the remote rows too (the picker always shows them).
 .TP
 .B \-\-ls\-json
 List sessions as a JSON array of
-.BR {name,alias,harness,activity_epoch,state,version,agents,meta,meta_epoch,auto_allowed,claude_session_id,transcript_path} .
+.BR {name,alias,harness,activity_epoch,state,version,agents,meta,meta_epoch,auto_allowed,claude_session_id,transcript_path,cols,rows,clients} .
+.I cols
+and
+.I rows
+are the pty size the session's master holds and
+.I clients
+how many clients are attached, read over the control socket without
+attaching or resizing; all three are left out for a master too old to
+report them, and for remote rows.
 .I claude_session_id
 is the sessionId of the one live interactive Claude Code under the session's
 program, read fresh from its \fI<config>/sessions/<pid>.json\fP record (its

@@ -83,7 +83,8 @@ packet_payload_len(const struct packet *pkt)
 {
 	if (pkt->type == MSG_PUSH || pkt->type == MSG_KEYS ||
 	    pkt->type == MSG_READ || pkt->type == MSG_WAIT ||
-	    pkt->type == MSG_RESTART || pkt->type == MSG_RESPAWN)
+	    pkt->type == MSG_RESTART || pkt->type == MSG_RESPAWN ||
+	    pkt->type == MSG_CMD)
 		return pkt->len;
 	if (pkt->type == MSG_WINCH || pkt->type == MSG_REDRAW)
 		return sizeof(struct winsize);
@@ -3016,7 +3017,8 @@ ctl_next_frame(int s, struct ctl_reader *r, int idle_ms,
 			    (r->buf[0] == MSG_READ_DATA ||
 			     r->buf[0] == MSG_WAIT_HIT ||
 			     r->buf[0] == MSG_READ_CURSOR ||
-			     r->buf[0] == MSG_READ_META) ? flen : 0;
+			     r->buf[0] == MSG_READ_META ||
+			     r->buf[0] == MSG_CMD_STAT) ? flen : 0;
 
 			if (plen > PKT_MAX)
 				return -1; /* corrupt */
@@ -4875,6 +4877,8 @@ struct cmd_info
 	char **argv;			/* argc entries + NULL */
 	const unsigned char *tail;	/* raw output since the arm */
 	size_t tail_len;
+	int stat;			/* 1: the master sent MSG_CMD_STAT */
+	unsigned int rows, cols, clients;	/* pty winsize, attached */
 };
 
 static void
@@ -4887,9 +4891,11 @@ cmd_info_free(struct cmd_info *ci)
 
 /* MSG_CMD to the master at `path`. 0 = *ci filled; a positive master status
 ** (DCH_ST_UNSUP from an old one); -4 nothing listens; -1/-2 the master went
-** quiet mid-answer / never answered; -3 a malformed reply. */
+** quiet mid-answer / never answered; -3 a malformed reply. `flags` are
+** DCH_CMD_F_*: with DCH_CMD_F_STAT a master that knows it fills ci->stat and
+** the size fields; an older one ignores the byte. */
 static int
-cmd_query(const char *path, struct cmd_info *ci)
+cmd_query_f(const char *path, struct cmd_info *ci, unsigned char flags)
 {
 	unsigned char payload[PKT_MAX], type, *buf = NULL, *q;
 	const unsigned char *end;
@@ -4903,7 +4909,7 @@ cmd_query(const char *path, struct cmd_info *ci)
 	s = control_connect_path(path);
 	if (s < 0)
 		return -4;
-	send_ctl(s, MSG_CMD, NULL, 0);
+	send_ctl(s, MSG_CMD, &flags, flags ? 1 : 0);
 	for (;;)
 	{
 		rc = ctl_next_frame(s, &r, CTL_IDLE_MS, &type, payload, &len);
@@ -4912,6 +4918,18 @@ cmd_query(const char *path, struct cmd_info *ci)
 			close(s);
 			free(buf);
 			return r.got_any ? -1 : -2;
+		}
+		if (type == MSG_CMD_STAT)
+		{
+			if (len == DCH_CMD_STAT_LEN)
+			{
+				ci->stat = 1;
+				ci->rows = payload[0] | (unsigned int)payload[1] << 8;
+				ci->cols = payload[2] | (unsigned int)payload[3] << 8;
+				ci->clients = payload[4] |
+				              (unsigned int)payload[5] << 8;
+			}
+			continue;
 		}
 		if (type != MSG_READ_DATA)
 			break;
@@ -4966,6 +4984,12 @@ cmd_query(const char *path, struct cmd_info *ci)
 	ci->tail = q;
 	ci->tail_len = (size_t)(end - q);
 	return 0;
+}
+
+static int
+cmd_query(const char *path, struct cmd_info *ci)
+{
+	return cmd_query_f(path, ci, 0);
 }
 
 /* `dch --cmd`: what the session is running right now, as one JSON object:
@@ -10566,6 +10590,10 @@ main(int argc, char **argv)
 		** share one /proc scan (proc_tree_keep). */
 		struct crec_rows cr = { calloc((size_t)sl.n + 1, sizeof *cr.v),
 		                        sl.n };
+		/* pty size and attached clients (#099), from the same MSG_CMD
+		** round trip; rows/cols/clients, or -1: the master can't say */
+		long (*sz)[3] = cr.v ? calloc((size_t)sl.n + 1, sizeof *sz)
+		                     : NULL;
 		char cdirs[16][1100], sp[1100];
 		int nd = 0;
 
@@ -10575,9 +10603,17 @@ main(int argc, char **argv)
 			struct cmd_info ci;
 
 			cr.v[k].verify = 1;
+			if (sz)
+				sz[k][0] = -1;
 			session_sock_path(sl.v[k], sp, sizeof sp);
-			if (cmd_query(sp, &ci) != 0)
+			if (cmd_query_f(sp, &ci, DCH_CMD_F_STAT) != 0)
 				continue;
+			if (sz && ci.stat)
+			{
+				sz[k][0] = ci.rows;
+				sz[k][1] = ci.cols;
+				sz[k][2] = ci.clients;
+			}
 			if (ci.pid > 0 && strcmp(ci.state, "held") != 0)
 			{
 				cr.v[k].root = ci.pid;
@@ -10636,6 +10672,10 @@ main(int argc, char **argv)
 				put_json_str(tp);
 			else
 				fputs("null", stdout);
+			/* omitted, not 0, when the master can't answer */
+			if (sz && sz[k][0] >= 0)
+				printf(",\"cols\":%ld,\"rows\":%ld,\"clients\":%ld",
+				       sz[k][1], sz[k][0], sz[k][2]);
 			putchar('}');
 		}
 		if (opt_remote)
@@ -10660,6 +10700,7 @@ main(int argc, char **argv)
 		}
 		puts("]");
 		free(cr.v);
+		free(sz);
 		slist_free(&sl);
 		return 0;
 	}

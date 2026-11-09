@@ -156,7 +156,8 @@ enum
 				** an arm (ends a held session). MSG_ACK status
 				** reply. One-shot: the next child exit eats
 				** the arm. */
-	MSG_CMD		= 15,	/* no payload. Reply: MSG_READ_DATA chunks
+	MSG_CMD		= 15,	/* payload: optional u8 flags (DCH_CMD_F_*;
+				** none = 0). Reply: MSG_READ_DATA chunks
 				** of "<pid>\0<state>\0<exit code>\0<exit
 				** signal>\0<argc>\0" + argc NUL-terminated
 				** args + the raw exit tail (to the end), then
@@ -166,6 +167,11 @@ enum
 				** LE} — the mirror's change generation and
 				** grid size. ONLY sent when the request set
 				** DCH_READ_F_META (dch --follow). */
+	MSG_CMD_STAT	= 17,	/* payload: {u16 rows LE; u16 cols LE; u16
+				** attached clients LE} — the pty winsize the
+				** master holds. ONLY sent, ahead of the
+				** MSG_CMD reply, when the request set
+				** DCH_CMD_F_STAT (dch --ls-json). */
 };
 
 /* MSG_READ_END / MSG_ACK statuses */
@@ -198,6 +204,10 @@ enum
 #define DCH_READ_CURSOR_LEN 6	/* MSG_READ_CURSOR payload size */
 #define DCH_READ_META_LEN   8	/* MSG_READ_META payload size */
 #define DCH_READ_REQ_MAX    9	/* longest MSG_READ payload (with F_SINCE) */
+
+/* MSG_CMD flags byte (payload[0]; masters before it ignore the payload) */
+#define DCH_CMD_F_STAT    0x01	/* also send MSG_CMD_STAT first */
+#define DCH_CMD_STAT_LEN  6	/* MSG_CMD_STAT payload size */
 
 #define DCH_WAIT_MAX 512	/* MSG_WAIT pattern cap */
 

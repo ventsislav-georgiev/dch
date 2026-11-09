@@ -2818,9 +2818,11 @@ do_respawn(struct client *p, const unsigned char *req, unsigned int len)
 	return queue_status(p, MSG_ACK, DCH_ST_OK);
 }
 
-/* Serve MSG_CMD: pid, state, last exit status, current argv, exit tail. */
+/* Serve MSG_CMD: pid, state, last exit status, current argv, exit tail.
+** With DCH_CMD_F_STAT, first the pty winsize and the attached-client count
+** (MSG_CMD_STAT): read-only, so --ls-json gets them in the same round trip. */
 static int
-do_cmd(struct client *p)
+do_cmd(struct client *p, const unsigned char *payload, unsigned int plen)
 {
 	const char *state = the_pty.fd < 0 ? "held"
 	                  : respawn_live() ? "armed" : "running";
@@ -2829,6 +2831,24 @@ do_cmd(struct client *p)
 	size_t total, off, l;
 	int argc = 0, hl, rc = 0;
 
+	if (plen >= 1 && (payload[0] & DCH_CMD_F_STAT))
+	{
+		unsigned char st[DCH_CMD_STAT_LEN];
+		struct client *c;
+		unsigned int n = 0;
+
+		for (c = clients; c; c = c->next)
+			n += c->attached ? 1 : 0;
+		st[0] = (unsigned char)(the_pty.ws.ws_row & 0xff);
+		st[1] = (unsigned char)(the_pty.ws.ws_row >> 8);
+		st[2] = (unsigned char)(the_pty.ws.ws_col & 0xff);
+		st[3] = (unsigned char)(the_pty.ws.ws_col >> 8);
+		st[4] = (unsigned char)(n & 0xff);
+		st[5] = (unsigned char)((n >> 8) & 0xff);
+		if (queue_frame(p, MSG_CMD_STAT, DCH_CMD_STAT_LEN, st,
+		                DCH_CMD_STAT_LEN) < 0)
+			return -1;
+	}
 	for (total = 0; cur_argv && cur_argv[argc]; argc++)
 		total += strlen(cur_argv[argc]) + 1;
 	hl = snprintf(head, sizeof head, "%ld%c%s%c%d%c%d%c%d%c",
@@ -3029,7 +3049,7 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 	else if (type == MSG_RESPAWN)
 		return do_respawn(p, payload, len);
 	else if (type == MSG_CMD)
-		return do_cmd(p);
+		return do_cmd(p, payload, len);
 	else if (type == MSG_READ)
 	{
 		/* 4-byte payload {format,source,lines LE}; shorter is a
