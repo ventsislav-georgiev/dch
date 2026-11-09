@@ -704,12 +704,17 @@ pk_age(long when, char *b, size_t n)
 static struct
 {
 	int name, state, age, agents, merged, last, gap;
+	int mw;		/* the widest merged text: its ✓ marks line up */
 } pk_c;
 
+/* "✓ n", n right-aligned so the whole text is w columns wide (0: as is). */
 static void
-pk_mergedtxt(long m, char *b, size_t n)
+pk_mergedtxt(long m, int w, char *b, size_t n)
 {
-	snprintf(b, n, "%s%ld", pk_utf ? "\xe2\x9c\x93 " : "", m);
+	int pre = pk_utf ? 2 : 0;
+
+	snprintf(b, n, "%s%*ld", pk_utf ? "\xe2\x9c\x93 " : "",
+	         w > pre ? w - pre : 0, m);
 }
 
 #ifndef _WIN32	/* the settings view: dch.c's config, POSIX only */
@@ -811,9 +816,9 @@ pk_cols(const struct pk *p, int k, int cnt)
 		pk_c.agents |= r->agents > 0;
 		if (r->merged > 0)
 		{
-			pk_mergedtxt(r->merged, b, sizeof b);
+			pk_mergedtxt(r->merged, 0, b, sizeof b);
 			if ((w = pk_cps(b)) > pk_c.merged)
-				pk_c.merged = w;
+				pk_c.merged = pk_c.mw = w;
 		}
 		last |= !!r->prs[0];
 	}
@@ -1031,7 +1036,7 @@ pk_row(const struct pk *p, const struct pkrow *w, int sel)
 	if (pk_c.merged)
 	{
 		pk_gap();
-		pk_mergedtxt(w->merged, b, sizeof b);
+		pk_mergedtxt(w->merged, pk_c.mw, b, sizeof b);
 		pk_set("2");
 		pk_rfit(w->merged > 0 ? b : "", pk_c.merged);
 	}

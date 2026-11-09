@@ -177,6 +177,7 @@ if [ "$MIRROR" = "1" ]; then
     pyrun "double-tap detach opens the session picker" switch_test.py
     pyrun "session picker: tabs, sort, actions, history, color, width" picker_test.py
     pyrun "the picker keeps its place across a switch" picker_place_test.py
+    pyrun "the picker lines up its merged counts" picker_merged_test.py
 else
     skipmirror "double-tap detach opens the session picker"
     skipmirror "session picker: tabs, sort, actions, history, color, width"
