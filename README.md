@@ -775,7 +775,7 @@ later does nothing to a running session.
 | `DCH_CONFIG` | every `dch` | `$XDG_CONFIG_HOME/dch/config`, else `~/.config/dch/config` | The [config file](#config-file). |
 | `DCH_DOUBLE_TAP_MS` | attaching client | `300` | The double-press window of `Ctrl-\`; `0`: one press acts at once ([Cheatsheet](#cheatsheet)). |
 | `DCH_REPLAY_SCROLLBACK` | attaching client | `0` | Lines of the session's scrollback the attach replay prints above the screen, max `10000`; `--scrollback` wins ([Scrollback above the screen](#attaching-replays-the-screen)). Sent to a remote host too. |
-| `DCH_FOCUS_RESIZE` | attaching client | config `focus_resize`, else on | `0`: the client does not enable focus reporting and does not take the size on focus-in. Any other value turns it on ([The focused client sets the size](#the-focused-client-sets-the-size)). |
+| `DCH_FOCUS_RESIZE` | attaching client | config `focus_resize`, else on | `0`, `false`, `no` or `off` (as in the config): the client does not enable focus reporting and does not take the size on focus-in. Any other value turns it on ([The focused client sets the size](#the-focused-client-sets-the-size)). |
 | `DCH_NO_DETECT` | client and master | unset | Anything but empty or `0`: no screen-content [state detection](#agent-state-detection), `agents` reads `0`, the master does no [auto-allow](#auto-allow), and `--say`, `--stop` and the agent restart see no screen, as on dch-lite. |
 | `DCH_NO_VT` | master | unset | Anything but empty or `0`: no terminal mirror ([dch-lite and `DCH_NO_VT`](#dch-lite-and-dch_no_vt)). |
 | `DCH_NO_REPLAY` | master | unset | Anything but empty or `0`: attach clears and asks for a repaint instead of [replaying the screen](#attaching-replays-the-screen). |
@@ -1160,10 +1160,12 @@ focus reporting on itself, as Claude Code does. The client tracks
 program's modes, so the client knows the state from the first byte.
 Otherwise the client drops the reports, so no stray `[I`/`[O` is typed into a
 shell. All other input passes through unchanged. A read that ends in a bare
-`Esc` waits up to 50 ms for the rest of a report, which delays a lone Esc key
-by that much.
+`Esc` waits up to 5 ms for the rest of a report, which delays a lone Esc key
+by that much; a key typed after the Esc still reaches the program on its own,
+not as Alt-key.
 
-`DCH_FOCUS_RESIZE=0` in the client's environment, or `focus_resize = false`
+`DCH_FOCUS_RESIZE=0` (or `false`, `no`, `off`) in the client's environment,
+or `focus_resize = false`
 in the [config file](#config-file), turns this off. The client then does not
 enable focus reporting and does not intercept any input.
 

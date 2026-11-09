@@ -11,13 +11,14 @@ byte passes through exactly.
   2. focus-in on A takes the size back from B (a WINCH in the program);
   3. a program without 1004 never sees ESC[I / ESC[O;
   4. keys around a report pass byte-exact; a report split across two
-     writes still counts and leaks nothing;
+     writes still counts and leaks nothing; Esc then a key 20 ms later
+     reaches the program as two reads, not one Meta-key (#107);
   5. after the program prints ESC[?1004h it gets the reports, also on a
      client attaching later (the master's mode re-arm); its ESC[?1004l
      turns them off again and the client turns its own 1004 back on;
   6. DCH_FOCUS_RESIZE=0: no 1004 from the client, the bytes go through
-     untouched and nothing is resized; focus_resize = off in the config
-     (DCH_CONFIG) turns the 1004 off too.
+     untouched and nothing is resized; DCH_FOCUS_RESIZE=off and
+     focus_resize = off in the config (DCH_CONFIG) turn the 1004 off too.
 
 Run:  python3 tests/focus_test.py           (uses ./dch)
 """
@@ -128,6 +129,12 @@ class Client:
             pass
 
 
+def reads(out):
+    """The program's KEY reports in out, one byte string per read."""
+    return [bytes.fromhex(l[l.find(b"KEY:") + 4:].strip().decode())
+            for l in out.split(b"\r\n") if b"KEY:" in l]
+
+
 def keys(out):
     """The program's KEY reports in out, as one byte string."""
     got = b""
@@ -192,7 +199,7 @@ def main():
         a.wait(b"WINCH:80x24", m)
         m = a.mark()
         a.send(b"\033")
-        time.sleep(0.005)
+        time.sleep(0.001)	# inside the hold (FOCUS_HOLD_MS)
         a.send(b"[I")
         ok = a.wait(b"WINCH:100x30", m)
         a.send(b"z")
@@ -204,6 +211,28 @@ def main():
         a.send(b"\033")
         check("4. a lone Esc goes through", a.wait_keys(b"\033", m),
               a.since(m))
+        # Esc, then j a beat later (#107): the held Esc goes out on its own
+        # before j comes, as with DCH_FOCUS_RESIZE=0 — not glued to it as
+        # Meta-j. A terminal's own Alt-j (one write) stays one read.
+        m = a.mark()
+        a.send(b"\033")
+        time.sleep(0.02)
+        a.send(b"j")
+        ok = a.wait_keys(b"\033j", m)
+        m2 = a.mark()
+        a.send(b"\033j")
+        ok = a.wait_keys(b"\033j", m2) and ok
+        check("4. Esc then j 20 ms later: two reads; Alt-j: one",
+              ok and reads(a.since(m)) == [b"\033", b"j", b"\033j"],
+              a.since(m))
+        # j inside the hold: the Esc goes out as its own packet first;
+        # every byte still arrives, once, in order.
+        m = a.mark()
+        a.send(b"\033")
+        time.sleep(0.001)
+        a.send(b"j")
+        check("4. Esc then j inside the hold: both, in order",
+              a.wait_keys(b"\033j", m), a.since(m))
         check("3. the program without 1004 never saw a report",
               b"KEY:1b5b49" not in a.since(0) and
               b"KEY:1b5b4f" not in a.since(0) and
@@ -264,6 +293,15 @@ def main():
         check("6. DCH_FOCUS_RESIZE=0: bytes pass untouched, no resize",
               ok and b"WINCH" not in a.since(m), a.since(m))
         check("6. DCH_FOCUS_RESIZE=0: the client never enables 1004",
+              b"\033[?1004h" not in d.since(0), d.since(0))
+        d.kill()
+        cl.remove(d)
+        m = a.mark()
+        d = Client(["-f", "-a", SESS], 85, 20, {"DCH_FOCUS_RESIZE": "off"})
+        cl.append(d)
+        a.wait(b"WINCH:85x20", m)
+        time.sleep(0.2)
+        check("6. DCH_FOCUS_RESIZE=off: no 1004 either (the config's words)",
               b"\033[?1004h" not in d.since(0), d.since(0))
         cfg = os.environ.get("DCH_CONFIG")
         if cfg:

@@ -346,13 +346,16 @@ static int inner_focus;		/* the inner program has 1004 on */
 static int fo_st, fo_val, fo_hit;	/* focus_scan's parser state */
 static unsigned char fpend[2];	/* a trailing ESC / ESC [ held back */
 static int fpend_n;
+static int focus_cut;		/* bytes of the packet that go out alone first */
 static struct timeval fpend_at;	/* when a held prefix goes out as typed */
 
 /* ponytail: a held ESC waits this long for the rest of a split report — the
 ** lone Esc key pays it as latency (tmux's escape-time, same trade). Only a
 ** read that ENDS in ESC or ESC [ waits; a kitty-keyboard Esc (CSI 27 u) never
-** does. */
-#define FOCUS_HOLD_MS	50
+** does. Short (#107): a key typed inside the hold reaches the pty right
+** behind the Esc, and the program reads the two as one Meta-key; a terminal
+** writes its 3-byte report at once, so a split one is microseconds apart. */
+#define FOCUS_HOLD_MS	5
 
 static int
 focus_wanted(void)
@@ -360,11 +363,11 @@ focus_wanted(void)
 	const char *e = getenv("DCH_FOCUS_RESIZE");
 	char v[16];
 
-	if (e && *e)
-		return strcmp(e, "0") != 0;
-	return !(dch_config_get("focus_resize", v, sizeof v) &&
-	         (!strcasecmp(v, "false") || !strcmp(v, "0") ||
-	          !strcasecmp(v, "no") || !strcasecmp(v, "off")));
+	/* the env var takes the config's off words too (#107) */
+	if (!(e && *e) && dch_config_get("focus_resize", v, sizeof v))
+		e = v;
+	return !(e && (!strcasecmp(e, "false") || !strcmp(e, "0") ||
+	               !strcasecmp(e, "no") || !strcasecmp(e, "off")));
 }
 
 /* Track the inner program's own 1004 in the session's output, a byte at a
@@ -430,8 +433,13 @@ focus_filter(unsigned char *b, int len, int *in, int flush)
 {
 	int i, o = 0;
 
+	focus_cut = 0;
 	if (fpend_n)
 	{
+		/* A held lone ESC the read does not continue with '[' was the
+		** Esc key: it goes out as its own packet, ahead of the next
+		** key, not glued to it as Meta-<key> (#107). */
+		focus_cut = fpend_n == 1 && len && b[0] != '[';
 		memmove(b + fpend_n, b, len);
 		memcpy(b, fpend, fpend_n);
 		len += fpend_n;
@@ -465,6 +473,8 @@ focus_filter(unsigned char *b, int len, int *in, int flush)
 		}
 		b[o++] = b[i];
 	}
+	if (o <= focus_cut)
+		focus_cut = 0;
 	return o;
 }
 
@@ -568,7 +578,17 @@ process_kbd(int s, struct packet *pkt)
 		}
 	}
 
-	/* Push it out */
+	/* Push it out: a held Esc first, on its own (focus_filter) */
+	if (focus_cut)
+	{
+		int n = pkt->len;
+
+		pkt->len = focus_cut;
+		write_packet_or_fail(s, pkt);
+		memmove(pkt->u.buf, pkt->u.buf + focus_cut, n - focus_cut);
+		pkt->len = n - focus_cut;
+		focus_cut = 0;
+	}
 	write_packet_or_fail(s, pkt);
 	return KBD_OK;
 }

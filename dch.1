@@ -514,9 +514,11 @@ The client passes focus reports to the program in the session only while that
 program has mode 1004 set itself; otherwise it drops them. The client tracks
 the mode in the session's output and gets it from the master's mode re\-arm
 on attach. All other input passes through unchanged. A read that ends in a bare
-ESC waits up to 50 ms for the rest of a report.
+ESC waits up to 5 ms for the rest of a report.
 .PP
 .B DCH_FOCUS_RESIZE=0
+(or
+.BR false ", " no ", " off )
 or
 .B focus_resize = false
 in the config file turns this off: the client neither enables focus
@@ -1585,7 +1587,7 @@ itself is honored the same way when set.
 .TP
 .B DCH_FOCUS_RESIZE
 Read by the attaching client.
-.B 0
+.BR 0 ", " false ", " no " or " off
 turns off focus reporting and size on focus\-in (see
 .BR "FOCUS AND SIZE" );
 any other value turns it on. Unset: the
