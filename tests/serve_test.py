@@ -15,7 +15,8 @@ host's own address and node refused; log escaping; the CLI from absolute
 PATH entries; odd whois/status JSON failing closed; the test variable unset
 for children; refused peers cached before fork. #094: every refusal of a
 tailnet peer is one exact 0x13 {"code","message"} then the close (the
-cached one too); an address off the tailnet gets no byte.
+cached one too); an address off the tailnet gets no byte. #095: past the
+per-peer limit, the transient {"code":"busy"} then the close, never cached.
 
 Run:  python3 tests/serve_test.py        (uses ./dch)
 """
@@ -496,6 +497,41 @@ def main():
               n1 == n0 and text(log).count(
                   "dch serve[%d]: 127.0.0.1: refused before fork" % p.pid)
               == 1)
+        stop(p)
+
+        # --- #095: past 16 per peer, a transient busy, never cached ------
+        ts()
+        p, port, log = serve()
+        held = []
+        for _ in range(16):
+            s = conn(port)
+            send(s, 0x08)
+            if frame_not(s)[0] == 0x18:
+                held.append(s)
+            else:
+                s.close()
+        busy = json.dumps({"code": "busy", "message": "this host is at its "
+                           "connection limit: try again shortly"},
+                          separators=(",", ":")).encode()
+        got = [reply(port, hello) for hello in (True, False)]
+        check("16 connections from one peer are held", len(held) == 16)
+        check("the 17th is told busy, exactly, then the close (#095)",
+              got == [busy] * 2)
+        if got != [busy] * 2:
+            print(got, text(log)[-600:])
+        check("the per-peer limit keeps its log line",
+              "refused: too many connections from it" in text(log))
+        for s in held:
+            s.close()
+        back = False
+        for _ in range(50):
+            r = reply(port)
+            if r == "accept":
+                back = True
+                break
+            time.sleep(0.1)
+        check("busy is not cached: once they close, the peer is accepted "
+              "(#095)", back and "refused before fork" not in text(log))
         stop(p)
 
         # --- F3: peer strings reach the log escaped ----------------------

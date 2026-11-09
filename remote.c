@@ -876,7 +876,8 @@ tcp_dial(const struct probe *p)
 }
 
 /* The "message" of a 0x13 payload, escaped, into out[cap]. Whether it
-** has a "code" (a dch serve refusal, #094). */
+** has a "code" (a dch serve refusal, #094) other than "busy": the one
+** transient code (#095), a failure like a host that is down. */
 static int
 err_text(const unsigned char *d, size_t n, char *out, size_t cap)
 {
@@ -893,7 +894,7 @@ err_text(const unsigned char *d, size_t n, char *out, size_t cap)
 		{
 			(void)jstr(&jp, 0, "message", m, sizeof m);
 			coded = jstr(&jp, 0, "code", code, sizeof code) == 1 &&
-			        code[0];
+			        code[0] && strcmp(code, "busy");
 		}
 		dch_json_free(&jp);
 	}

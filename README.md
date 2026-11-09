@@ -1170,8 +1170,8 @@ dch serve --check-peer 100.101.102.103   # would this peer get in?
 **Trust model.** Only your own devices on your tailnet get in. Every check
 runs right after the connection is accepted, before a byte is read. A
 refused tailnet peer is told why in one frame and closed (see
-[Refusals](#refusals)); an address outside 100.64.0.0/10 is closed without
-a byte.
+[Refusals](#refusals)), and so is one past the connection limits (`busy`);
+an address outside 100.64.0.0/10 is closed without a byte.
 
 - **Address.** `dch serve` listens only on this host's Tailscale IPv4: the
   first line of `tailscale ip -4`. When that reports no address (tailscale
@@ -1225,8 +1225,8 @@ a byte.
 
 #### Refusals
 
-A tailnet peer the checks above refuse gets exactly one frame, then the
-connection's FIN. It is sent first thing, before the server reads a byte
+A tailnet peer the checks above refuse, or one past the connection limits
+(see Limits below), gets exactly one frame, then the connection's FIN. It is sent first thing, before the server reads a byte
 and before any `0x18`, whether or not the client already sent its hello:
 
 ```
@@ -1235,7 +1235,7 @@ and before any `0x18`, whether or not the client already sent its hello:
 
 `code` is a contract: these values are stable and keep their meaning, and a
 client should key on it. `message` is for people and may be reworded. A
-code not in this table may be added later; treat one you do not know as a
+code not in these tables may be added later; treat one you do not know as a
 refusal you cannot explain. A refusal never names the host's owner, a user,
 a node or the `--allow-user` list. A peer refused again within 30 s (the
 repeat-refusal cache) gets the same code. Other `0x13` frames (a failed
@@ -1250,13 +1250,26 @@ attach, say) have no `code`.
 | `whois_failed` | whois failed while `status` works (a node tailscaled does not know), or its answer was unusable. | `this host could not verify you (tailscale whois failed)` |
 | `self` | The peer is this host itself: one of its addresses, or its own node. | `this host does not serve connections from itself` |
 
+Every code above means "refused": the same peer will be refused again, so
+do not retry. One code is transient and means "try again later":
+
+| `code` | When | `message` |
+| --- | --- | --- |
+| `busy` | The host is at its connection limit: 64 connections in total, or 16 from this peer. Nothing is wrong with the peer; retry with your own backoff (there is no retry-after field). | `this host is at its connection limit: try again shortly` |
+
+`busy` is never remembered by the repeat-refusal cache: the next connection
+once a slot frees is served as usual. Its message says nothing about other
+users or connections.
+
 The `0x13` goes out in one non-blocking write that is never retried, so a
 peer that does not read cannot hold the server up; the server then waits up
 to 1 s for the peer to close (reading off and dropping what it sent, unparsed)
 so the close is a FIN and not a reset that could lose the frame. A peer
 outside 100.64.0.0/10 (or loopback without the test bypass) is closed with
-no frame: it is not a tailnet peer, so it is told nothing. Neither are the
-connection limits below: past them, the connection is closed without a frame.
+no frame: it is not a tailnet peer, so it is told nothing. A peer past the
+connection limits gets `busy` (it used to get a bare close). Up to 16
+refused or busy peers wait for their close at once; past that, one is closed
+at once, and a reset may then lose its frame.
 
 **What the phone gets.** The session list (`dch --ls-json`, re-encoded: name,
 alias, state, agent count, and only GitHub pull-request links from `--meta`),
@@ -1325,7 +1338,8 @@ escapes control characters (C0, DEL, C1, bidi overrides and isolates) as
 `\xNN` or `\u{NNNN}`, and a session name containing one is refused.
 
 **Limits.** At most 64 connections, 16 per peer, and 4 live-list streams per
-phone. A connection that is not attached or watching closes after 30 s
+phone. A connection past the first two gets `busy` (see
+[Refusals](#refusals)) and the close. A connection that is not attached or watching closes after 30 s
 without a whole frame, and any connection closes when its output goes untaken
 for 20 s. Control frames over 64 KiB, and any frame over the protocol's
 256 MiB guard, close the connection. Sent frames are at most 8 MiB.
@@ -1373,7 +1387,8 @@ row is faint and says Stale. A host speaking a newer protocol major is
 skipped, with a note on stderr. A host whose `dch serve` refuses us (a
 `0x13` with a `code`, see [Refusals](#refusals)) is not down: `--ls` and
 `--ls-json` say `dch: <host> refused: <message>` on stderr and show none of
-its cached rows, and the picker drops them.
+its cached rows, and the picker drops them. A `busy` host is not a refusal:
+it is treated like a host that is down, its cached rows shown `[stale]`.
 
 **Attaching.** `dch -a host:name`, or Enter on a remote row in the picker,
 attaches the way a local attach does: raw terminal, the detach key and its
@@ -1381,7 +1396,8 @@ double tap (to the picker) handled locally, the window size following yours.
 Detaching closes the connection and nothing else; the remote session runs on.
 `-a` only attaches, never creates: it checks the name is in the host's list
 and sends the attach on that same connection. A host that refuses us
-prints `dch: <host> refused: <message>` and exits 1. An exact local session name wins over `host:name`; `--host` is the
+prints `dch: <host> refused: <message>` and exits 1; a `busy` one prints
+`dch: <host>: says: <message>` and exits 1, like a host that is down. An exact local session name wins over `host:name`; `--host` is the
 unambiguous form. A lost connection restores the terminal, says so, and exits
 1.
 

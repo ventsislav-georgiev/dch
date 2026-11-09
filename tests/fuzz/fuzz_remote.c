@@ -169,6 +169,20 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 			abort();
 		if (p->st == PR_REFUSED && (!p->why[0] || p->fd >= 0))
 			abort();	/* a refusal says why, and is closed */
+		{
+			/* #095: "busy" is transient, a failure, never a
+			** refusal; any other code is */
+			static const char busy[] = "{\"code\":\"busy\","
+			    "\"message\":\"m\"}", other[] = "{\"code\":"
+			    "\"busyx\",\"message\":\"m\"}";
+			char m[64];
+
+			if (err_text((const unsigned char *)busy,
+			             sizeof busy - 1, m, sizeof m) ||
+			    !err_text((const unsigned char *)other,
+			              sizeof other - 1, m, sizeof m))
+				abort();
+		}
 		if (p->in.n > n)
 			abort();	/* what is held came from the input */
 		probes_free(p, 1);

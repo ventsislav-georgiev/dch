@@ -11,7 +11,8 @@ Covers: rows in -ls, -lj and --ls-json; --hosts with DCH_NO_REMOTE=1, the
 remote_hosts config, remote_hosts = off; hostile names escaped; a hanging
 host not stalling past the time box, then its cached rows stale; a hanging
 tailscale cut off at the box; a newer major skipped; a refusing host (a
-0x13 with a code, #094) said, its cached rows not shown; an unknown host's
+0x13 with a code, #094) said, its cached rows not shown; a busy host (#095)
+said, its cached rows stale; an unknown host's
 error; -a host:missing; -a with no console (the attach's checks and the
 0x01's path up to the console); discovery's peer filter and whois refusal.
 On Windows also: -ls implies --remote, and -a wants host:name; dch alone
@@ -348,6 +349,18 @@ def main():
                 "q=127.0.0.1:%d" % hang.port)
         check("--ls-json marks them stale",
               '"stale":true' in r.out and '"stale":false' not in r.out, r.out)
+
+        # --- a busy host (#095): transient, its cached rows stale -----
+        busy = Fake("busy")
+        fakes.append(busy)
+        r = dch("-ls", "--remote", "--hosts", "q=127.0.0.1:%d" % busy.port)
+        check("a busy host: its cached rows stay, stale",
+              "q:q2 [stale]" in r.out.splitlines() and "refused" not in r.err,
+              (r.out, r.err))
+        r = dch("--hosts", "bz=127.0.0.1:%d" % busy.port, "-a", "bz:x")
+        check("-a to a busy host: its message, not a refusal, exit 1",
+              r.returncode == 1 and "dch: bz: says: this host is at its "
+              "connection limit: try again shortly" in r.err, r.err)
 
         # --- a newer protocol -----------------------------------------
         newer = Fake("list", rows=[{"name": "n1"}], proto="2.0")

@@ -176,7 +176,10 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		if ((v > G_RANGE) != (code != NULL) || (code && !m) ||
 		    gate_code(G_RANGE, &m) ||
 		    (v == G_OWNER && g.self_uid < 0) ||
-		    (v == G_NOTALLOWED && g.self_uid >= 0))
+		    (v == G_NOTALLOWED && g.self_uid >= 0) ||
+		    /* #095: busy is the parent's limits, never a verdict */
+		    v == G_BUSY || !gate_code(G_BUSY, &m) ||
+		    strcmp(gate_code(G_BUSY, &m), "busy"))
 			abort();
 	}
 	{

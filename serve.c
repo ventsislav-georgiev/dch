@@ -377,9 +377,11 @@ struct gate
 
 /* Verdicts: G_OK and G_OK_NOWHOIS accept, every other one refuses.
 ** G_OWNER: another user's node on an untagged host; G_NOTALLOWED: a user
-** not on --allow-user, on a tagged host. */
+** not on --allow-user, on a tagged host. G_BUSY is no gate verdict: the
+** parent's connection limits (#095); serve_gate never returns it, no
+** handler exits with it, the neg cache never holds it. */
 enum { G_OK, G_OK_NOWHOIS, G_RANGE, G_SELF, G_NOWHOIS, G_NOTNODE,
-       G_BADWHOIS, G_TAGGED, G_OWNER, G_NOTALLOWED, G_N };
+       G_BADWHOIS, G_TAGGED, G_OWNER, G_NOTALLOWED, G_BUSY, G_N };
 
 static const char *
 gate_why(int v)
@@ -398,6 +400,7 @@ gate_why(int v)
 	case G_BADWHOIS:	return "tailscale whois answer unusable";
 	case G_TAGGED:		return "tagged node";
 	case G_NOTALLOWED:	return "a user not on --allow-user (tagged host)";
+	case G_BUSY:		return "too many connections";
 	default:		return "another user's node";
 	}
 }
@@ -426,6 +429,9 @@ gate_code(int v, const char **msg)
 		                   "serves only the users it names: start dch "
 		                   "serve there with --allow-user <your login "
 		                   "or id>" },
+		/* the one transient code: try again later */
+		[G_BUSY] = { "busy", "this host is at its connection limit: "
+		             "try again shortly" },
 	};
 
 	if (v < 0 || v >= G_N || !t[v][0])
@@ -1729,7 +1735,7 @@ kids_reap(void)
 			{
 				if (WIFEXITED(st) &&
 				    WEXITSTATUS(st) > NEG_EXIT + G_RANGE &&
-				    WEXITSTATUS(st) < NEG_EXIT + G_N)
+				    WEXITSTATUS(st) < NEG_EXIT + G_BUSY)
 					neg_add(kids[i].ip,
 					        WEXITSTATUS(st) - NEG_EXIT);
 				kids[i] = kids[--nkids];
@@ -1867,7 +1873,8 @@ accept_one(int lfd, int nr)
 	{
 		slog("%s: refused: %s", ipstr, nkids >= MAX_CONN
 		     ? "too many connections" : "too many connections from it");
-		close(fd);
+		refuse(fd, G_BUSY);	/* transient: never in the neg cache */
+		refused_wait(fd);
 		return;
 	}
 	pid = fork();

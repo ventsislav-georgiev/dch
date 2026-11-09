@@ -21,7 +21,9 @@ shown nowhere, the picker included; a newer major skipped; a dropped link
 exits 1 with a message and the terminal restored; a 0x13 then a reset keeps
 the 0x13's reason; 0x12 ends the attach with 0; a host whose gate refuses us
 (a 0x13 with a code, #094): -a says why and exits 1, --ls/--ls-json --remote
-say why and show none of its cached rows, against a fake and dch serve.
+say why and show none of its cached rows, against a fake and dch serve; a
+busy host (#095) is transient: -a says its message and exits 1, --ls/--ls-json
+--remote keep its cached rows as stale.
 
 Run:  python3 tests/remote_client_test.py        (uses ./dch)
 """
@@ -65,6 +67,9 @@ PEERS = dict(OWNER, BackendState="Running", Peer={
 
 REFUSAL = {"code": "not_owner",
            "message": "this host serves only its owner's devices"}
+# the one transient code (#095): try again later, not a refusal
+BUSY = {"code": "busy",
+        "message": "this host is at its connection limit: try again shortly"}
 
 
 def frame(t, payload=b""):
@@ -101,10 +106,12 @@ class Fake:
     def serve(self, c):
         buf = b""
         try:
-            if self.mode == "refuse":
-                # dch serve's gate (#094): one 0x13 with a code before a
-                # byte is read, the FIN, then read off what the client sent
-                c.sendall(frame(0x13, REFUSAL))
+            if self.mode in ("refuse", "busy"):
+                # dch serve's gate (#094) or its limits (#095): one 0x13
+                # with a code before a byte is read, the FIN, then read off
+                # what the client sent
+                c.sendall(frame(0x13, REFUSAL if self.mode == "refuse"
+                                else BUSY))
                 c.shutdown(socket.SHUT_WR)
                 while c.recv(65536):
                     pass
@@ -530,6 +537,27 @@ def main():
         check("-a to a refusing host: its reason, exit 1 (#094)",
               r.returncode == 1 and r.stderr == "dch: srv refused: this host "
               "serves only its owner's devices\n", r)
+
+        # --- a busy host (#095): transient, its cached rows stale -----
+        busy = Fake("busy")
+        fakes.append(busy)
+        put_cache()
+        r = dch(cenv, "--ls", "--remote", "--hosts",
+                "srv=127.0.0.1:%d" % busy.port)
+        check("a busy host: its cached rows stay, stale (#095)",
+              r.returncode == 0 and "srv:keep [stale]" in r.stdout.splitlines()
+              and "refused" not in r.stderr, r)
+        r = dch(cenv, "--ls-json", "--remote", "--hosts",
+                "srv=127.0.0.1:%d" % busy.port)
+        rem = [x for x in json.loads(r.stdout) if "host" in x]
+        check("--ls-json: a busy host's rows stay, stale (#095)",
+              r.returncode == 0 and rem and rem[0]["name"] == "keep"
+              and rem[0]["stale"] is True and "refused" not in r.stderr, r)
+        r = dch(cenv, "--hosts", "srv=127.0.0.1:%d" % busy.port,
+                "-a", "srv:keep")
+        check("-a to a busy host: its message, not a refusal, exit 1 (#095)",
+              r.returncode == 1 and r.stderr == "dch: srv: says: " +
+              BUSY["message"] + "\n", r)
 
         # --- a newer protocol -----------------------------------------
         newer = Fake("list", rows=[{"name": "n1"}], proto="2.0")

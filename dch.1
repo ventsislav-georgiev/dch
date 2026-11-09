@@ -1189,7 +1189,8 @@ Print whether that peer would get in, with the refusal code in parentheses,
 and exit 0 (accept) or 1 (refuse).
 .PP
 .B Refusals.
-A tailnet peer the checks refuse gets exactly one frame, sent before the
+A tailnet peer the checks refuse, or one past the connection limits (64 in
+all, 16 per peer), gets exactly one frame, sent before the
 server reads a byte and before any 0x18, then the FIN:
 .RS
 .EX
@@ -1202,7 +1203,8 @@ is a stable contract;
 is for people and may be reworded. Codes may be added; an unknown one is a
 refusal that cannot be explained. A refusal never names the owner, a user, a
 node or the allow list, and a repeat refusal within 30 s carries the same
-code. Other 0x13 frames have no code. The codes:
+code. Other 0x13 frames have no code. Each of these codes means refused,
+do not retry:
 .TP
 .B not_owner
 an untagged host, and the peer is another user's node:
@@ -1230,10 +1232,21 @@ whois failed while status works, or answered something unusable:
 the peer is this host itself (one of its addresses, or its own node):
 .I this host does not serve connections from itself
 .PP
+One code is transient, and means try again later (with the client's own
+backoff; there is no retry\-after field):
+.TP
+.B busy
+the host is at its connection limit (64 in all, or 16 from this peer):
+.I this host is at its connection limit: try again shortly
+.PP
+.B busy
+is never cached as a refusal, and says nothing about other users or
+connections. The connection limits used to close with no frame; they now
+send
+.BR busy .
 The frame is one non-blocking write, never retried; the server then waits
 up to 1 s for the peer to close, dropping what it sent unread, so the close
-is a FIN. A peer outside 100.64.0.0/10, and one past the connection limits,
-is closed with no frame.
+is a FIN. A peer outside 100.64.0.0/10 is closed with no frame.
 .PP
 .B DCH_SERVE_TEST_LOOPBACK=1
 with a loopback
@@ -1282,7 +1295,14 @@ server refuses us (a 0x13 with a code) is said on standard error as
 .IR "dch: host refused: message" ,
 and none of its cached rows are shown;
 .B \-a
-to it prints the same and exits 1.
+to it prints the same and exits 1. A
+.B busy
+host is not a refusal but a host that is down: its cached rows show stale,
+and
+.B \-a
+prints
+.I "dch: host: says: message"
+and exits 1.
 The picker lists remote rows in Sessions, the host faint, of the hosts that
 are candidates now, and re\-probes in the background; Enter attaches, on
 the connection that checked the name is listed, and no other action applies
