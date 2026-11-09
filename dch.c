@@ -8109,8 +8109,11 @@ pk_load(struct pk *p)
 			w = &p->r[2][p->n[2]++];
 			snprintf(w->name, sizeof w->name, "%s", h[k].file);
 			snprintf(w->sname, sizeof w->sname, "%s", h[k].name);
+			/* alias, else the agent's session name, else the dch
+			 * name: slist_label's order, and Prosper's (#097) */
 			snprintf(w->title, sizeof w->title, "%s", h[k].alias[0]
-			         ? h[k].alias : h[k].name);
+			         ? h[k].alias : h[k].aname[0] ? h[k].aname
+			         : h[k].name);
 			snprintf(w->state, sizeof w->state, "%s", h[k].end);
 			if (hl && strncmp(h[k].cwd, home, hl) == 0 &&
 			    (h[k].cwd[hl] == '/' || !h[k].cwd[hl]))

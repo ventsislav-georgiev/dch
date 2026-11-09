@@ -8,7 +8,8 @@ and --keys types into it. Covers:
   2. the sort toggle: activity (working first) vs name (s2 before s10);
   3. rename through the picker sets the alias;
   4. kill asks first: n keeps the session, y kills it;
-  5. the History tab lists the killed session and Enter resumes it;
+  5. the History tab lists the killed session and Enter resumes it, and
+     titles a record by its agent.name (#097);
   6. NO_COLOR and TERM=dumb draw no ESC[3x color, a colored one does;
   7. at 40 columns a long title is cut and no row wraps;
   8. s persists the sort (picker_sort) and a fresh picker starts in it;
@@ -293,12 +294,28 @@ def main():
     check("the result line says so", "killed: s2" in s, s)
 
     # 5. History: the killed session, resumed by Enter
+    # #097: an ended record with agent.name is titled by it, not its dch name
+    rec = os.path.join(ROOT, "state", "dch", "sessions",
+                       SOCKDIR.replace("/", "-"))
+    os.makedirs(rec, mode=0o700, exist_ok=True)
+    now = int(time.time())
+    with os.fdopen(os.open(os.path.join(rec, "hx.json"),
+                           os.O_WRONLY | os.O_CREAT, 0o600), "w") as f:
+        json.dump(dict(name="hx", sock_dir=SOCKDIR, alias="", cwd="/",
+                       argv=["sleep", "60"], started=now - 660,
+                       updated=now - 60, ended=now - 60, end="exit 3",
+                       agent=dict(kind="claude", session_id="x",
+                                  name="claude-title")), f,
+                  separators=(",", ":"))
     wait_screen("pk1", lambda s: "History " in s)
     s = to_tab("pk1", "History")
     check("History tab lists s2 as closed",
           "s2" in rows(s) and re.search(r"s2\s+closed", s) is not None, s)
     check("History: column headers",
           re.search(r"^ {4}NAME +ENDED +WHEN +DIRECTORY", s, re.M), s)
+    s = wait_screen("pk1", lambda s: "claude-title" in rows(s))
+    check("History: agent.name titles the record (#097)",
+          "claude-title" in rows(s) and "hx" not in rows(s), s)
     check("History: its own key hints only",
           "resume" in s and "rename" not in s and "s sort" not in s, s)
     check("select s2 in History", select("pk1", "s2"), screen("pk1"))
