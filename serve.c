@@ -141,6 +141,19 @@ rq_size(const struct json_parser *jp, int *cols, int *rows)
 		*rows = v > 1000 ? 1000 : (int)v;
 }
 
+/* An attach's optional "scrollback" (#101): rows of history the client's
+** replay sends first, clamped to 0..DCH_SCROLLBACK_MAX; 0 when missing or
+** not a number. */
+static int
+rq_scrollback(const struct json_parser *jp)
+{
+	long long v;
+
+	if (jint(jp, 0, "scrollback", &v) != 1 || v <= 0)
+		return 0;
+	return v > DCH_SCROLLBACK_MAX ? DCH_SCROLLBACK_MAX : (int)v;
+}
+
 /* A session name dch can be handed as one argv word: UTF-8 with no '/' and
 ** no control logsafe would escape. The leading '-' is checked apart (it has
 ** its own spec message). */
@@ -912,7 +925,8 @@ on_attach(struct conn *c, int create, const unsigned char *p, size_t n)
 {
 	struct json_parser jp;
 	char name[NAME_CAP + 2], msg[200], *av[8 + MAX_CMD + 1], **cmd = NULL;
-	int r, k = 0, ncmd = 0, t, m;
+	char sbn[16];
+	int r, k = 0, ncmd = 0, t, m, sb;
 	struct winsize ws;
 	pid_t pid;
 
@@ -965,6 +979,7 @@ on_attach(struct conn *c, int create, const unsigned char *p, size_t n)
 		return;
 	}
 	rq_size(&jp, &c->cols, &c->rows);
+	sb = rq_scrollback(&jp);
 	if (create && (t = dch_json_field(&jp, 0, "command")) != -1)
 	{
 		if (t < 0 || jp.tok[t].kind != JSON_ARRAY ||
@@ -984,6 +999,12 @@ on_attach(struct conn *c, int create, const unsigned char *p, size_t n)
 	av[k++] = "-E";
 	if (!create)
 		av[k++] = "-f";
+	if (sb > 0)
+	{
+		snprintf(sbn, sizeof sbn, "%d", sb);
+		av[k++] = "--scrollback";
+		av[k++] = sbn;
+	}
 	if (name[0])
 	{
 		av[k++] = "-n";

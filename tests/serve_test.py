@@ -9,7 +9,8 @@ refusals (tagged host without --allow-user, --allow-user on an untagged host,
 tailscale ip -4 failing or empty, wildcard and non-unicast binds, the port in
 use); --allow-user by id and by login (case-insensitive); create off without
 --allow-create; the newest attach retiring the older; 0x09 from the mirror;
-a newer proto major; an oversize control frame; a client half-close; SIGTERM.
+a newer proto major; an oversize control frame; a client half-close; SIGTERM;
+0x01's optional "scrollback" reaching the spawned client (#101).
 Security review F1-F8: --whois-optional only while tailscaled is down; this
 host's own address and node refused; log escaping; the CLI from absolute
 PATH entries; odd whois/status JSON failing closed; the test variable unset
@@ -368,6 +369,56 @@ def main():
             check("0x09 is empty with no mirror (lite)", t == 0x19 and pl == b"")
         b.close()
         a.close()
+
+        # --- #101: 0x01 "scrollback" reaches the spawned client ----------
+        r = subprocess.run([DCH, "--spawn", "svc-sb", "--size", "40x10", "--",
+                            "sh", "-c", "seq 1 39; echo END; exec sh"],
+                           env=env, capture_output=True, timeout=30)
+        check("spawned a session with history", r.returncode == 0)
+
+        end = time.time() + 10
+        while time.time() < end and "END" not in subprocess.run(
+                [DCH, "--read", "svc-sb"], env=env, capture_output=True,
+                text=True, timeout=10).stdout and mirror:
+            time.sleep(0.1)
+
+        def sb_attach(extra):
+            """The 0x10 bytes an attach with these extra keys gets."""
+            s = conn(port)
+            send(s, 0x01, dict({"name": "svc-sb", "cols": 40, "rows": 10},
+                               **extra))
+            send(s, 0x10, b"echo SB-$((6*7))\n")  # lite: no replay
+            out, end = b"", time.time() + 10
+            try:
+                while time.time() < end and b"SB-42\r\n" not in out:
+                    t, pl = frame(s)
+                    if t == 0x10:
+                        out += pl
+            except (EOFError, socket.timeout):
+                pass
+            s.close()
+            time.sleep(0.3)  # the retired client's exit, before the next
+            return out
+
+        with5 = sb_attach({"scrollback": 5})
+        plain = sb_attach({})
+        junk = sb_attach({"scrollback": "lots"})
+        if mirror:
+            m = re.search(rb"\x1b\[H\x1b\[J" + rb"(\d+)\r\n" * 4 +
+                          rb"(\d+)\x1b\[0m\x1b\[999H\n{5}\x1b\[H\x1b\[J", with5)
+            n = [int(x) for x in m.groups()] if m else []
+            check("0x01 scrollback 5: 5 history rows above the screen",
+                  n and n == list(range(n[0], n[0] + 5)) and n[0] > 20
+                  and b"END" in with5)
+            check("0x01 without scrollback: the screen alone",
+                  b"\x1b[999H" not in plain and b"END" in plain)
+            check("0x01 scrollback not a number: ignored",
+                  b"\x1b[999H" not in junk and b"END" in junk)
+        else:
+            check("0x01 scrollback on lite: attaches, input round-trips",
+                  b"SB-42" in with5 and b"SB-42" in plain)
+        subprocess.run([DCH, "-k", "svc-sb"], env=env, capture_output=True,
+                       timeout=15)
 
         # --- SIGTERM: exit 0, the session lives on -----------------------
         time.sleep(0.3)

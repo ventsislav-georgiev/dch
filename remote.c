@@ -1406,6 +1406,35 @@ dch_remote_esc(char *out, size_t cap, const char *s)
 
 /* ---- attach ---------------------------------------------------------- */
 
+int dch_replay_sb = -1;
+
+int
+dch_scrollback_num(const char *s)
+{
+	char *tail;
+	long v;
+
+	if (!s || *s < '0' || *s > '9')
+		return -1;
+	errno = 0;
+	v = strtol(s, &tail, 10);
+	if (*tail)
+		return -1;
+	return errno == ERANGE || v > DCH_SCROLLBACK_MAX ? DCH_SCROLLBACK_MAX
+	                                                 : (int)v;
+}
+
+int
+dch_replay_scrollback(void)
+{
+	int v;
+
+	if (dch_replay_sb >= 0)
+		return dch_replay_sb;
+	v = dch_scrollback_num(getenv("DCH_REPLAY_SCROLLBACK"));
+	return v < 0 ? 0 : v;
+}
+
 static void
 put_frame(struct sb *b, unsigned int type, const void *p, size_t n)
 {
@@ -1435,6 +1464,12 @@ put_size(struct sb *b, unsigned int type, const char *name,
 	}
 	sb_s(&j, ",\"rows\":");
 	sb_ll(&j, ws->ws_row ? ws->ws_row : 24);
+	/* #101: optional, an older server ignores it */
+	if (type == 0x01 && dch_replay_scrollback() > 0)
+	{
+		sb_s(&j, ",\"scrollback\":");
+		sb_ll(&j, dch_replay_scrollback());
+	}
 	sb_s(&j, "}");
 	if (j.bad)
 		b->bad = 1;

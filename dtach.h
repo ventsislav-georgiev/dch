@@ -113,7 +113,9 @@ extern char **dch_argv;
 enum
 {
 	MSG_PUSH	= 0,
-	MSG_ATTACH	= 1,
+	MSG_ATTACH	= 1,	/* no payload; len = rows of scrollback the
+				** replay sends above the screen (#101, 0 =
+				** none; masters before it ignore len) */
 	MSG_DETACH	= 2,
 	MSG_WINCH	= 3,
 	MSG_REDRAW	= 4,
@@ -228,8 +230,9 @@ enum
 ** instead of one frame per 8 bytes (the old fixed-frame cap).
 **
 ** `len` is overloaded by type, exactly as before: PUSH = payload byte count,
-** REDRAW = redraw method. WINCH/REDRAW carry a struct winsize payload (sized
-** from the type, not len); ATTACH/DETACH carry no payload.
+** REDRAW = redraw method, ATTACH = scrollback rows. WINCH/REDRAW carry a
+** struct winsize payload (sized from the type, not len); ATTACH/DETACH carry
+** no payload.
 **
 ** NOTE: this framing is NOT wire-compatible with the old fixed-size packet.
 ** A new client cannot attach to a master built before this change — kill old

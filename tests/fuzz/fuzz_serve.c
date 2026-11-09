@@ -4,8 +4,9 @@
 ** passes must see the same frames and the same streamed bytes, and a full
 ** buffer must never stall. The same bytes as text go through rows_wire
 ** (its output must parse as JSON), the whois/status readers and the peer
-** gate, the pull-url allowlist and the name check. Linked with the rest of
-** dch minus serve.o, and dch.c built with -Dmain=dch_main. */
+** gate, the pull-url allowlist, the name check and an attach request's
+** JSON (size and #101's scrollback). Linked with the rest of dch minus
+** serve.o, and dch.c built with -Dmain=dch_main. */
 #include "../../serve.c"
 
 int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n);
@@ -202,6 +203,18 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		abort();
 	if (name_ok(text) && (text[0] == '-' || strchr(text, '/')))
 		abort();
+	if (n <= RF_CTRL_MAX && rq_json(&jp, rq_text, d, n) == 0)
+	{
+		/* an attach request (0x01) as on_attach reads it: the size and
+		** #101's optional scrollback always land in range */
+		int cols, rows, sb = rq_scrollback(&jp);
+
+		rq_size(&jp, &cols, &rows);
+		dch_json_free(&jp);
+		if (cols < 1 || cols > 1000 || rows < 1 || rows > 1000 ||
+		    sb < 0 || sb > DCH_SCROLLBACK_MAX)
+			abort();
+	}
 	cut_scalars(text, 3);
 	free(text);
 	return 0;

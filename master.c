@@ -78,6 +78,8 @@ struct client
 	** it: the screen repaint waits until the mirror knows this client's
 	** window size. See the MSG_ATTACH branch in handle_packet(). */
 	int want_replay;
+	/* Rows of scrollback that repaint sends first: MSG_ATTACH's len (#101) */
+	unsigned int replay_sb;
 
 	/* Output queue (master->client). The master never blocks on a slow
 	** client: pty output is queued here and flushed when the socket is
@@ -1738,6 +1740,72 @@ vt_restore_blob(char **out, size_t *outlen)
 	return 0;
 }
 
+/* MSG_ATTACH's len as the rows of scrollback its replay sends. Pure. */
+static unsigned int
+attach_scrollback(unsigned int len)
+{
+	return len > DCH_SCROLLBACK_MAX ? DCH_SCROLLBACK_MAX : len;
+}
+
+/* The head of an attach replay that asked for scrollback (#101): up to
+** `lines` rows of the mirror's history printed from the top of the cleared
+** screen, then scrolled off it by line feeds on the bottom row, so they land
+** in the client terminal's own scrollback and the screen repaint that follows
+** starts on a blank screen. At most `cap` bytes: past that the oldest rows
+** go. NULL for none (no mirror, no history, the alternate screen). One
+** emitted line per mirror row, and the mirror is at the client's width by
+** now, so a row takes one terminal row and min(rows emitted, screen rows)
+** line feeds clear them all, with no blank rows pushed after them. */
+static char *
+replay_history(unsigned int lines, size_t cap, size_t *outlen)
+{
+	static const char mid[] = "\033[0m" EOS;
+	char *h, *buf;
+	size_t n, off = 0, k = 1, lf, over, i;
+	int cols, rows;
+	unsigned long gen;
+
+	if (dch_vt_size(&cols, &rows, &gen) < 0 ||
+	    dch_vt_history((int)lines, &h, &n) < 0)
+		return NULL;
+	while (n && (h[n - 1] == '\n' || h[n - 1] == '\r'))
+		n--;
+	lf = (size_t)rows;
+	over = sizeof HOME_ERASE - 1 + sizeof mid - 1 + lf;
+	if (n + over > cap)
+	{
+		/* keep the newest rows: cut at a line start */
+		off = cap > over ? n - (cap - over) : n;
+		while (off < n && h[off - 1] != '\n')
+			off++;
+		dch_trace("replay: scrollback cut to %zu bytes", n - off);
+	}
+	if (off >= n)
+	{
+		dch_vt_buf_free(h);
+		return NULL;
+	}
+	for (i = off; i < n; i++)
+		k += h[i] == '\n';
+	if (k < lf)
+		lf = k;
+	buf = malloc(sizeof HOME_ERASE - 1 + (n - off) + sizeof mid - 1 + lf);
+	if (buf)
+	{
+		*outlen = 0;
+		memcpy(buf, HOME_ERASE, sizeof HOME_ERASE - 1);
+		*outlen += sizeof HOME_ERASE - 1;
+		memcpy(buf + *outlen, h + off, n - off);
+		*outlen += n - off;
+		memcpy(buf + *outlen, mid, sizeof mid - 1);
+		*outlen += sizeof mid - 1;
+		memset(buf + *outlen, '\n', lf);
+		*outlen += lf;
+	}
+	dch_vt_buf_free(h);
+	return buf;
+}
+
 /* Queue a repaint of the mirrored screen onto p's out-queue. Returns -1 only
 ** when the queue actually rejected the bytes.
 **
@@ -1750,15 +1818,25 @@ vt_restore_blob(char **out, size_t *outlen)
 static int
 queue_replay(struct client *p)
 {
-	char *blob;
-	size_t bloblen;
+	char *blob, *hist = NULL;
+	size_t bloblen, hlen = 0;
+	unsigned int sb = p->replay_sb;
 	int rc = 0;
 
 	p->want_replay = 0;
+	p->replay_sb = 0;
 	if (vt_restore_blob(&blob, &bloblen) < 0)
 		return 0;
 	if (bloblen <= OUT_CAP / 2)
-		rc = queue_to_client(p, (unsigned char *)blob, bloblen);
+	{
+		if (sb)
+			hist = replay_history(sb, OUT_CAP / 2 - bloblen, &hlen);
+		if (hist)
+			rc = queue_to_client(p, (unsigned char *)hist, hlen);
+		if (rc == 0)
+			rc = queue_to_client(p, (unsigned char *)blob, bloblen);
+		free(hist);
+	}
 	else
 		dch_trace("replay: snapshot %zu over cap, skipping", bloblen);
 	free(blob);
@@ -3123,6 +3201,7 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 		** the mirror has been resized. (Adding a payload to MSG_ATTACH
 		** would desync every master built before it.) */
 		p->want_replay = !no_replay;
+		p->replay_sb = attach_scrollback(len);
 		if (bad || flush_client(p) < 0)
 		{
 			remove_client(p);
@@ -3135,6 +3214,7 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 		/* Detaching before the sizing frame arrived: the repaint has
 		** no one to land on any more. */
 		p->want_replay = 0;
+		p->replay_sb = 0;
 	}
 
 	/* Window size change request, without a forced redraw. */

@@ -7,6 +7,8 @@ dch \- detachable terminal sessions with a headless agent API
 .br
 .B dch \-a
 .IR name \fR|\fP host : name
+.RB [ \-\-scrollback
+.IR N ]
 .br
 .B dch \-\-host
 .I host
@@ -188,6 +190,31 @@ an unknown host is an error that lists the known ones.
 With
 .BR \-a :
 the session is on that remote host; its name may hold a colon.
+.TP
+.BI \-\-scrollback " N"
+With any attach
+.RB ( \-a ,
+.BR \-n ,
+the picker): the attach replay first prints the last
+.I N
+lines of the session's scrollback, then the screen. They are ordinary output
+scrolled off the top of the terminal's screen, so they land in the
+terminal's own scrollback. A line is a mirror row at the window's width.
+.I N
+is capped at 10000 and at what the mirror keeps
+.RB ( DCH_SCROLLBACK ),
+and the whole replay at 2 MiB, past which the oldest lines go. 0, the
+default, is the replay as before; this wins over
+.BR DCH_REPLAY_SCROLLBACK .
+The alternate screen has none to send. Ignored, silently, by a lite build,
+.B DCH_NO_VT
+or
+.B DCH_NO_REPLAY
+masters, and a master from before this option (the attach works as before).
+With a remote host it is sent as the attach request's
+.B scrollback
+key (see
+.BR "REMOTE SERVER" ).
 .TP
 .BI \-\-hosts " list"
 The remote hosts, a comma-separated
@@ -1312,6 +1339,23 @@ The frame is one non-blocking write, never retried; the server then waits
 up to 1 s for the peer to close, dropping what it sent unread, so the close
 is a FIN. A peer outside 100.64.0.0/10 is closed with no frame.
 .PP
+An attach request
+.RB ( 0x01 ,
+and
+.BR 0x02 )
+may carry one key beyond remote frames 1.0:
+.BR \(dqscrollback\(dq: \fIN\fP ,
+an integer, which reaches the
+.B dch \-E \-f \-n
+.I name
+client it starts as
+.B \-\-scrollback
+.I N
+(clamped to 0..10000; missing, 0, negative or not an integer is none). A
+server that does not know the key ignores it, and
+.B 0x18
+still says protocol 1.0.
+.PP
 .B DCH_SERVE_TEST_LOOPBACK=1
 with a loopback
 .B \-\-bind
@@ -1552,6 +1596,13 @@ Empty or 0 is off; anything else, when a session is spawned, does not replay the
 attaching clients. Attach then behaves as it did before: the client's screen
 is cleared and the program is asked to repaint itself, which diff\-based
 renderers do not do. Escape hatch only.
+.TP
+.B DCH_REPLAY_SCROLLBACK
+Read by the attaching client: the lines of scrollback the attach replay
+prints above the screen, as
+.B \-\-scrollback
+.I N
+(which wins), max 10000, default 0. Sent to a remote host too.
 .TP
 .B DCH_NO_DETECT
 Empty or 0 is off; anything else turns off screen\-content state detection

@@ -272,6 +272,7 @@ dch -ls          # list sessions as alias/harness (real-name), or real-name
 dch -lj          # list as name<TAB>alias<TAB>activity_epoch
 dch -l           # session picker: tabs, live states, actions; Enter attaches
 dch -a host:name # attach to a session on another host (see Remote hosts)
+dch -a <name> --scrollback 200  # attach with the last 200 lines of history above the screen
 dch -rl          # rename: pick a session, type a display alias, repeat
 dch -m <name> [alias]  # set the alias without the picker (none: clear it)
 dch -k [name]    # kill a session (interactive picker if no name)
@@ -773,6 +774,7 @@ later does nothing to a running session.
 | `DCH_SOCKET_DIR` | every `dch` | `$XDG_RUNTIME_DIR/dch-$UID`, else `/tmp/dch-$UID` | Where sockets and sidecars live ([self-heal](#socket-loss-and-self-heal)). Records of one socket dir never mix with another's. |
 | `DCH_CONFIG` | every `dch` | `$XDG_CONFIG_HOME/dch/config`, else `~/.config/dch/config` | The [config file](#config-file). |
 | `DCH_DOUBLE_TAP_MS` | attaching client | `300` | The double-press window of `Ctrl-\`; `0`: one press acts at once ([Cheatsheet](#cheatsheet)). |
+| `DCH_REPLAY_SCROLLBACK` | attaching client | `0` | Lines of the session's scrollback the attach replay prints above the screen, max `10000`; `--scrollback` wins ([Scrollback above the screen](#attaching-replays-the-screen)). Sent to a remote host too. |
 | `DCH_FOCUS_RESIZE` | attaching client | config `focus_resize`, else on | `0`: the client does not enable focus reporting and does not take the size on focus-in. Any other value turns it on ([The focused client sets the size](#the-focused-client-sets-the-size)). |
 | `DCH_NO_DETECT` | client and master | unset | Anything but empty or `0`: no screen-content [state detection](#agent-state-detection), `agents` reads `0`, the master does no [auto-allow](#auto-allow), and `--say`, `--stop` and the agent restart see no screen, as on dch-lite. |
 | `DCH_NO_VT` | master | unset | Anything but empty or `0`: no terminal mirror ([dch-lite and `DCH_NO_VT`](#dch-lite-and-dch_no_vt)). |
@@ -1126,6 +1128,23 @@ just invalidated behind their back. The result was a blank attach that only
 filled in when you resized the window. Set `DCH_NO_REPLAY=1` in the master's
 environment at spawn to get the old behavior back.
 
+**Scrollback above the screen.** `--scrollback N` on an attach (`dch -a
+<name> --scrollback N`, and any other attach: `-n`, the picker), or
+`DCH_REPLAY_SCROLLBACK=N` in the attaching client's environment, makes the
+replay first print the last N lines of the mirror's scrollback, then the
+screen as above. The lines go to your terminal as ordinary output and are
+scrolled off the top of its screen, so they land in its own scrollback: an
+embedded terminal (a SwiftTerm view, say) gets recent history to scroll back
+through. A line is a row of the mirror at your window's width, so a wrapped
+line counts once per row. `--scrollback` wins over the variable; `0`, the
+default, is the replay exactly as before. N is capped at 10000 and at what
+the mirror keeps (`DCH_SCROLLBACK`, default 2000), and the whole replay at
+2 MiB: past that the oldest lines are dropped. The alternate screen (vim,
+less, a full-screen TUI) has no scrollback, so it gets none. It is ignored,
+without a message, by a lite build, a `DCH_NO_VT` or `DCH_NO_REPLAY` master,
+and a master from a dch before this option (`--restart` the session to pick
+it up); the attach itself works the same. Remote: see [Remote hosts](#remote-hosts).
+
 ### The focused client sets the size
 
 One session can have several clients at once, for example a terminal tab and
@@ -1319,7 +1338,17 @@ a live list for its home screen (polled every 2 s), attach with resize and
 redraw, kill, rename, and a screen snapshot from the terminal mirror (empty in
 a dch-lite build). An attached connection runs a real `dch -E -f -n <name>`
 client in a pseudo-terminal, so the newest attach to a session retires the
-older connection. Commands run as argument vectors, never through a shell.
+older connection.
+
+**Attach request keys.** `0x01` (and `0x02`) carry a JSON object: `name`,
+`cols` and `rows` as in remote frames 1.0, plus one optional key this server
+reads (#101): `"scrollback": N`, an integer, the lines of the session's
+scrollback to print above the screen ([Scrollback above the
+screen](#attaching-replays-the-screen)). It reaches the client dch serve
+spawns as `--scrollback N`, clamped to 0..10000; missing, `0`, negative or
+not an integer means none. It is additive: a server that does not know it
+ignores it (an unknown key in a JSON object), and the protocol version in
+`0x18` stays `1.0`. Commands run as argument vectors, never through a shell.
 
 **Port in use.** On a Mac where Prosper's Remote Terminal is on, Prosper
 already holds port 8771, and `dch serve` refuses to start with a message
@@ -1437,7 +1466,10 @@ attaches the way a local attach does: raw terminal, the detach key and its
 double tap (to the picker) handled locally, the window size following yours.
 Detaching closes the connection and nothing else; the remote session runs on.
 `-a` only attaches, never creates: it checks the name is in the host's list
-and sends the attach on that same connection. A host that refuses us
+and sends the attach on that same connection. `--scrollback N` (or
+`DCH_REPLAY_SCROLLBACK`) goes to the host as the `0x01`'s `"scrollback"` key
+(see [dch serve](#dch-serve-prosper-remote-hosts)); a host that does not know
+it attaches without scrollback. A host that refuses us
 prints `dch: <host> refused: <message>` and exits 1; a `busy` one prints
 `dch: <host>: says: <message>` and exits 1, like a host that is down. An exact local session name wins over `host:name`; `--host` is the
 unambiguous form. A lost connection restores the terminal, says so, and exits

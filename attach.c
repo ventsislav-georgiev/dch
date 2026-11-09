@@ -673,9 +673,12 @@ attach_main(int noerror)
 	if (focus_on)
 		write_buf_or_fail(1, "\033[?1004h", 8);
 
-	/* Tell the master that we want to attach. */
+	/* Tell the master that we want to attach. len asks for that many
+	** rows of scrollback above the replayed screen (#101); the frame has
+	** no payload whatever len says, and a master before it ignores len. */
 	memset(&pkt, 0, sizeof(struct packet));
 	pkt.type = MSG_ATTACH;
+	pkt.len = (unsigned short)dch_replay_scrollback();
 	write_packet_or_fail(s, &pkt);
 
 	/* We would like a redraw, too. WINCH when unspecified — see the

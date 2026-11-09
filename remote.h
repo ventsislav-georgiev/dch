@@ -23,4 +23,13 @@ void dch_remote_stop(void);
 int dch_remote_attach(const char *host, const char *name);
 void dch_remote_esc(char *out, size_t cap, const char *s);
 
+/* Attach replay scrollback (#101): rows of the session's history sent above
+** the screen. --scrollback sets dch_replay_sb (-1: not given, then
+** DCH_REPLAY_SCROLLBACK); dch_scrollback_num reads one value, -1 if it is
+** not a count. Both clamp to 0..DCH_SCROLLBACK_MAX. */
+#define DCH_SCROLLBACK_MAX 10000
+extern int dch_replay_sb;
+int dch_scrollback_num(const char *s);
+int dch_replay_scrollback(void);
+
 #endif

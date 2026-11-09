@@ -23,7 +23,9 @@ the 0x13's reason; 0x12 ends the attach with 0; a host whose gate refuses us
 (a 0x13 with a code, #094): -a says why and exits 1, --ls/--ls-json --remote
 say why and show none of its cached rows, against a fake and dch serve; a
 busy host (#095) is transient: -a says its message and exits 1, --ls/--ls-json
---remote keep its cached rows as stale.
+--remote keep its cached rows as stale. #101: --scrollback and
+DCH_REPLAY_SCROLLBACK put "scrollback" in the 0x01 (none for 0), and over a
+real dch serve the rows reach the terminal.
 
 Run:  python3 tests/remote_client_test.py        (uses ./dch)
 """
@@ -361,6 +363,42 @@ def main():
         st, _ = reap(pid, fd, 5)
         check("--host srv -a rs1 attaches", b"h5" in out and st is not None
               and os.WEXITSTATUS(st) == 0, out)
+
+        # --- #101: --scrollback / DCH_REPLAY_SCROLLBACK in the 0x01 ------
+        sbf = Fake("exit", rows=[{"name": "sb1"}])
+        fakes.append(sbf)
+        sbh = "sb=127.0.0.1:%d" % sbf.port
+        for args, ev, want in ((["--scrollback", "7"], None, 7),
+                               ([], "4", 4), ([], None, None),
+                               (["--scrollback", "0"], "4", None)):
+            if ev:
+                cenv["DCH_REPLAY_SCROLLBACK"] = ev
+            pid, fd = attach(["--hosts", sbh, "-a", "sb:sb1"] + args)
+            reap(pid, fd, 8)
+            cenv.pop("DCH_REPLAY_SCROLLBACK", None)
+            body = json.loads(sbf.bodies[-1]) if sbf.bodies else {}
+            check("0x01 scrollback for %s %s: %s" % (args, ev, want),
+                  body.get("scrollback") == want and body.get("name") == "sb1"
+                  and list(body) == sorted(body), body)
+        mirror = dch(cenv, "--build").stdout.strip() == "full"
+        if mirror:
+            # end to end: the client's 0x01 key, dch serve's --scrollback for
+            # the client it spawns, MSG_ATTACH's len, the master's replay
+            r = dch(senv, "--spawn", "rsb", "--size", "40x10", "--", "sh",
+                    "-c", "seq 1 40; printf END; exec sleep 300")
+            end = time.time() + 10
+            while time.time() < end and "END" not in \
+                    dch(senv, "--read", "rsb").stdout:
+                time.sleep(0.1)
+            pid, fd = attach(["--hosts", hosts, "-a", "srv:rsb",
+                              "--scrollback", "5"], cols=40, rows=10)
+            out = read(fd, b"END", 8)
+            os.write(fd, b"\x1c")
+            reap(pid, fd, 5)
+            check("-a srv:rsb --scrollback 5: the rows reach the terminal",
+                  b"27\r\n28\r\n29\r\n30\r\n31\x1b[0m\x1b[999H" in out,
+                  out[-400:])
+            dch(senv, "-k", "rsb")
 
         # --- precedence -----------------------------------------------
         r = dch(cenv, "--spawn", "srv:rs1", "--size", "80x24", "--",

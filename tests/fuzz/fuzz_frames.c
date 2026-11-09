@@ -2,7 +2,7 @@
 ** client's byte stream: frame_size() splits it exactly as client_activity
 ** does, and each frame's payload goes through the pure parsers that
 ** handle_packet hands it to (the RESPAWN argv, the WAIT pattern scan, the
-** READ request incl. --follow's meta/since flags) plus
+** READ request incl. --follow's meta/since flags, ATTACH's scrollback) plus
 ** the resume blob's hex decoder; the same bytes as pty output go through
 ** track_decmode. Linked with the rest of dch minus master.o, and
 ** dch.c built with -Dmain=dch_main. */
@@ -46,6 +46,12 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 			     (q.flags & ~(unsigned int)DCH_READ_F_ALL) ||
 			     ((q.flags & DCH_READ_F_CURSOR) &&
 			      q.source == DCH_READ_RECENT)))
+				abort();
+		}
+		else if (type == MSG_ATTACH)
+		{
+			/* #101: len is the scrollback ask, never past the cap */
+			if (attach_scrollback(len) > DCH_SCROLLBACK_MAX)
 				abort();
 		}
 		else if (type == MSG_RESPAWN && len && payload[0] == 'a' &&

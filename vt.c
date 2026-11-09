@@ -218,21 +218,43 @@ osc8_per_line(const char *s, size_t n, char *o)
 	return k;
 }
 
-int
-dch_vt_snapshot(int format, int lines, char **out, size_t *outlen)
+/* Whole grid rows y0..y1 (screen coordinates, history included) as sel. */
+static int
+select_rows(size_t y0, size_t y1, GhosttySelection *sel)
+{
+	GhosttyPoint p_start, p_end;
+	GhosttyGridRef ref_start, ref_end;
+
+	memset(&p_start, 0, sizeof(p_start));
+	p_start.tag = GHOSTTY_POINT_TAG_SCREEN;
+	p_start.value.coordinate.x = 0;
+	p_start.value.coordinate.y = y0;
+	memset(&p_end, 0, sizeof(p_end));
+	p_end.tag = GHOSTTY_POINT_TAG_SCREEN;
+	p_end.value.coordinate.x = cur_cols > 0 ? cur_cols - 1 : 0;
+	p_end.value.coordinate.y = y1;
+	if (ghostty_terminal_grid_ref(the_term, p_start,
+	    &ref_start) != GHOSTTY_SUCCESS ||
+	    ghostty_terminal_grid_ref(the_term, p_end,
+	    &ref_end) != GHOSTTY_SUCCESS)
+		return -1;
+	memset(sel, 0, sizeof(*sel));
+	sel->size = sizeof(*sel);
+	sel->start = ref_start;
+	sel->end = ref_end;
+	return 0;
+}
+
+/* Format sel (NULL: the whole screen and its history) into a malloc'd,
+** NUL-terminated *out; *outlen excludes the NUL. */
+static int
+format_sel(int format, const GhosttySelection *sel, char **out,
+           size_t *outlen)
 {
 	GhosttyFormatterTerminalOptions opts;
 	GhosttyFormatter fmt;
-	GhosttySelection sel;
-	GhosttyPoint p_start, p_end;
-	GhosttyGridRef ref_start, ref_end;
-	size_t total, first, need, written, want;
+	size_t need, written;
 	char *buf;
-
-	*out = NULL;
-	*outlen = 0;
-	if (!the_term)
-		return -1;
 
 	memset(&opts, 0, sizeof(opts));
 	opts.size = sizeof(opts);
@@ -241,42 +263,7 @@ dch_vt_snapshot(int format, int lines, char **out, size_t *outlen)
 	opts.trim = 1;
 	opts.extra.size = sizeof(opts.extra);
 	opts.extra.screen.size = sizeof(opts.extra.screen);
-
-	if (lines > 0) {
-		/* Recent-N: the bottom of the grid is usually blank viewport
-		** rows, so selecting the last N grid rows yields nothing.
-		** Format the whole history (NULL selection trims trailing
-		** blanks) and tail-cut N text lines afterwards. */
-		opts.selection = NULL;
-	} else {
-		/* Visible screen: the bottom cur_rows grid rows. */
-		if (ghostty_terminal_get(the_term,
-		    GHOSTTY_TERMINAL_DATA_TOTAL_ROWS,
-		    &total) != GHOSTTY_SUCCESS || total == 0)
-			return -1;
-		want = (size_t)cur_rows;
-		first = total > want ? total - want : 0;
-
-		memset(&p_start, 0, sizeof(p_start));
-		p_start.tag = GHOSTTY_POINT_TAG_SCREEN;
-		p_start.value.coordinate.x = 0;
-		p_start.value.coordinate.y = first;
-		memset(&p_end, 0, sizeof(p_end));
-		p_end.tag = GHOSTTY_POINT_TAG_SCREEN;
-		p_end.value.coordinate.x = cur_cols > 0 ? cur_cols - 1 : 0;
-		p_end.value.coordinate.y = total - 1;
-		if (ghostty_terminal_grid_ref(the_term, p_start,
-		    &ref_start) != GHOSTTY_SUCCESS ||
-		    ghostty_terminal_grid_ref(the_term, p_end,
-		    &ref_end) != GHOSTTY_SUCCESS)
-			return -1;
-
-		memset(&sel, 0, sizeof(sel));
-		sel.size = sizeof(sel);
-		sel.start = ref_start;
-		sel.end = ref_end;
-		opts.selection = &sel;
-	}
+	opts.selection = sel;
 
 	if (ghostty_formatter_terminal_new(NULL, &fmt, the_term,
 	    opts) != GHOSTTY_SUCCESS)
@@ -291,6 +278,7 @@ dch_vt_snapshot(int format, int lines, char **out, size_t *outlen)
 		if (!*out)
 			return -1;
 		(*out)[0] = '\0';
+		*outlen = 0;
 		return 0;
 	}
 	buf = malloc(need + 1);
@@ -323,6 +311,41 @@ dch_vt_snapshot(int format, int lines, char **out, size_t *outlen)
 		buf = nb;
 		written = n;
 	}
+	*out = buf;
+	*outlen = written;
+	return 0;
+}
+
+int
+dch_vt_snapshot(int format, int lines, char **out, size_t *outlen)
+{
+	GhosttySelection sel;
+	size_t total, first, written;
+	char *buf;
+
+	*out = NULL;
+	*outlen = 0;
+	if (!the_term)
+		return -1;
+
+	if (lines > 0) {
+		/* Recent-N: the bottom of the grid is usually blank viewport
+		** rows, so selecting the last N grid rows yields nothing.
+		** Format the whole history (NULL selection trims trailing
+		** blanks) and tail-cut N text lines afterwards. */
+		if (format_sel(format, NULL, &buf, &written) < 0)
+			return -1;
+	} else {
+		/* Visible screen: the bottom cur_rows grid rows. */
+		if (ghostty_terminal_get(the_term,
+		    GHOSTTY_TERMINAL_DATA_TOTAL_ROWS,
+		    &total) != GHOSTTY_SUCCESS || total == 0)
+			return -1;
+		first = total > (size_t)cur_rows ? total - (size_t)cur_rows : 0;
+		if (select_rows(first, total - 1, &sel) < 0 ||
+		    format_sel(format, &sel, &buf, &written) < 0)
+			return -1;
+	}
 
 	if (lines > 0 && written > 0) {
 		/* Keep only the last `lines` text lines. ANSI note: SGR state
@@ -348,6 +371,31 @@ dch_vt_snapshot(int format, int lines, char **out, size_t *outlen)
 	*out = buf;
 	*outlen = written;
 	return 0;
+}
+
+/* The last `lines` grid rows above the visible screen, ANSI, one text line
+** per row (soft wraps stay breaks: the client re-wraps nothing). Empty when
+** there is no history, as on the alternate screen. */
+int
+dch_vt_history(int lines, char **out, size_t *outlen)
+{
+	GhosttySelection sel;
+	size_t total, first;
+
+	*out = NULL;
+	*outlen = 0;
+	if (!the_term || lines < 1 || ghostty_terminal_get(the_term,
+	    GHOSTTY_TERMINAL_DATA_TOTAL_ROWS, &total) != GHOSTTY_SUCCESS)
+		return -1;
+	first = total > (size_t)cur_rows ? total - (size_t)cur_rows : 0;
+	if (!first) {
+		*out = calloc(1, 1);
+		return *out ? 0 : -1;
+	}
+	if (select_rows(first > (size_t)lines ? first - (size_t)lines : 0,
+	    first - 1, &sel) < 0)
+		return -1;
+	return format_sel(DCH_VT_FMT_ANSI, &sel, out, outlen);
 }
 
 int

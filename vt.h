@@ -56,6 +56,10 @@ int dch_vt_size(int *cols, int *rows, unsigned long *gen);
  */
 int dch_vt_snapshot(int format, int lines, char **out, size_t *outlen);
 
+/* The last `lines` grid rows of scrollback above the visible screen, ANSI,
+** one line per row ("" when there are none). For the attach replay (#101). */
+int dch_vt_history(int lines, char **out, size_t *outlen);
+
 /*
  * Cursor position in the mirror, as of right now. row/col are 0-based
  * and relative to the ACTIVE AREA (the visible screen a dch_vt_snapshot()

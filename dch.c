@@ -2420,6 +2420,8 @@ usage(void)
 	    "  dch -a <name>    attach to a session, never create one;\n"
 	    "                   host:name attaches to one on a remote host\n"
 	    "  dch --host <h> -a <name>  attach to <name> on host h\n"
+	    "  dch --scrollback <n>  with an attach: the last n lines of the\n"
+	    "                   session's scrollback first (DCH_REPLAY_SCROLLBACK)\n"
 	    "  dch --hosts <h1,h2,...>   the remote hosts, [label=]host[:port],\n"
 	    "                   instead of your online tailnet peers\n"
 	    "  dch --remote     with -ls, -lj, --ls-json: remote rows too, as\n"
@@ -9933,6 +9935,18 @@ main(int argc, char **argv)
 			}
 			if (a[6] != 's')
 				remote_host = argv[i];
+			i++;
+		}
+		else if (strcmp(a, "--scrollback") == 0)
+		{
+			/* #101: rows of history the attach replay sends first */
+			if (++i >= argc ||
+			    (dch_replay_sb = dch_scrollback_num(argv[i])) < 0)
+			{
+				fprintf(stderr, "dch: --scrollback wants a line "
+				        "count, 0..%d\n", DCH_SCROLLBACK_MAX);
+				return 1;
+			}
 			i++;
 		}
 		else if (strcmp(a, "--remote") == 0)

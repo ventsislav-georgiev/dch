@@ -59,6 +59,15 @@ dch_vt_snapshot(int format, int lines, char **out, size_t *outlen)
 }
 
 int
+dch_vt_history(int lines, char **out, size_t *outlen)
+{
+	(void)lines;
+	*out = NULL;
+	*outlen = 0;
+	return -1;
+}
+
+int
 dch_vt_cursor(int *row, int *col, int *visible, int *wrap)
 {
 	(void)row;
