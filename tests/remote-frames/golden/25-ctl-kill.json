@@ -1,0 +1,29 @@
+{
+  "id": "25-ctl-kill",
+  "about": "0x30 -k <n>: dch's own line as 0x31, 0x33 exit 0, the FIN. Ends the session 18 started.",
+  "cleanup": [
+    "04 00000019 7b226e616d65223a22676f6c64656e2d3737362d63746c227d"
+  ],
+  "requires_op": "ctl",
+  "mutating": true,
+  "steps": [
+    {
+      "send": "30 00000020 7b2261726776223a5b222d6b222c22676f6c64656e2d3737362d63746c225d7d"
+    },
+    {
+      "expect": {
+        "type": "31",
+        "payload": "6b696c6c65643a20676f6c64656e2d3737362d63746c0a"
+      }
+    },
+    {
+      "expect": {
+        "type": "33",
+        "payload": "7b2265786974223a307d"
+      }
+    },
+    {
+      "expect_close": true
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "id": "38-ctl-timeout",
+  "about": "Past the timeout (lowered by DCH_CTL_TIMEOUT_MS for the test, which also covers --follow) the server ends the dch and sends 0x33 exit 2, why timeout.",
+  "mutating": true,
+  "cleanup": [
+    "04 00000018 7b226e616d65223a22676f6c64656e2d3737362d746f227d"
+  ],
+  "dch_mirror": true,
+  "requires_op": "dch-serve-config",
+  "dch_serve": {
+    "args": [
+      "--allow-create"
+    ],
+    "env": {
+      "DCH_CTL_TIMEOUT_MS": "800"
+    }
+  },
+  "steps": [
+    {
+      "send": "30 00000025 7b2261726776223a5b222d2d666f6c6c6f77222c22676f6c64656e2d3737362d746f225d7d"
+    },
+    {
+      "expect": {
+        "type": "31",
+        "nonempty": true
+      }
+    },
+    {
+      "expect": {
+        "type": "33",
+        "payload": "7b2265786974223a322c22776879223a2274696d656f7574227d"
+      }
+    },
+    {
+      "expect_close": true
+    }
+  ]
+}

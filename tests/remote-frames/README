@@ -3,4 +3,13 @@ verbatim from ventsislav-georgiev/prosper 96b65ad (docs/protocol/golden/).
 The spec is docs/protocol/remote-frames.md there. Do not edit these files:
 re-copy them from a newer Prosper commit and update the commit named here.
 
-tests/serve_test.py runs them against `dch serve` with --mutating.
+Fixtures 17 and up are dch's own (#114), in the same format: the "ctl" op of
+remote frames 1.1 (0x30 request; 0x31 stdout, 0x32 stderr, 0x33 exit). They
+need "ctl" in ops. Two keys are dch's: "dch_serve" ({"args", "env"}) names
+how the server must start (create off, a lowered cap, a lowered timeout);
+those fixtures require the op "dch-serve-config", which no server names, so
+a plain run.py run skips them. "dch_mirror" marks a fixture for the full
+build only (--read, --keys and --follow need the terminal mirror).
+
+tests/serve_test.py runs them against `dch serve` with --mutating, each
+"dch_serve" group against a dch serve of its own.

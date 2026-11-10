@@ -1,0 +1,19 @@
+{
+  "id": "31-ctl-bad-cwd",
+  "about": "A cwd that is no directory is refused before anything runs.",
+  "requires_op": "ctl",
+  "steps": [
+    {
+      "send": "30 00000055 7b2261726776223a5b222d2d737061776e222c22676f6c64656e2d3737362d637764222c222d2d222c222f62696e2f636174225d2c22637764223a222f6e6f6e6578697374656e742d676f6c64656e2d373736227d"
+    },
+    {
+      "expect": {
+        "type": "13",
+        "payload": "7b226d657373616765223a226e6f2073756368206469726563746f7279227d"
+      }
+    },
+    {
+      "expect_close": true
+    }
+  ]
+}

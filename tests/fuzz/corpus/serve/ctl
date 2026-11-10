@@ -1,0 +1,1 @@
+{"argv":["--spawn","s1","--size","20x2","--","/bin/sh","-c","echo hi"],"cwd":"/tmp"}

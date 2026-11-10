@@ -90,6 +90,14 @@ dch \- detachable terminal sessions with a headless agent API
 .RI [ key
 .RI [ value \fR|\fP\fB\-\-unset\fP]]
 .br
+.B dch
+.RB [ \-\-host
+.IR host ]
+.RB [ \-\-cwd
+.IR dir ]
+.I verb host\fR:\fPname
+.RI [ args ...]
+.br
 .B dch serve
 .RB [ \-\-bind
 .IR ipv4 ]
@@ -188,8 +196,16 @@ an unknown host is an error that lists the known ones.
 .TP
 .BI \-\-host " host"
 With
-.BR \-a :
+.B \-a
+or a remote control verb (see
+.BR "REMOTE HOSTS" ):
 the session is on that remote host; its name may hold a colon.
+.TP
+.BI \-\-cwd " dir"
+With
+.B \-\-spawn
+only: the session's start directory. For a remote spawn it is a directory on
+that host; for a local one it must exist here.
 .TP
 .BI \-\-scrollback " N"
 With any attach
@@ -1224,8 +1240,9 @@ bytes. The bridge handles one message at a time and rejects attachments.
 .SH REMOTE SERVER
 .B dch serve
 serves this host's sessions to the Prosper iPhone app over Prosper's remote
-frames protocol 1.0 on TCP port 8771, so a host with no Prosper (a Linux box,
-say) shows up on the phone. It runs in the foreground, logs to standard error,
+frames protocol 1.1 on TCP port 8771, so a host with no Prosper (a Linux box,
+say) shows up on the phone, and to dch's own remote client (see
+.BR "REMOTE HOSTS" ). It runs in the foreground, logs to standard error,
 and exits 0 on SIGINT or SIGTERM, leaving every session running.
 .PP
 It listens only on this host's Tailscale IPv4, the first line of
@@ -1378,9 +1395,105 @@ client it starts as
 .B \-\-scrollback
 .I N
 (clamped to 0..10000; missing, 0, negative or not an integer is none). A
-server that does not know the key ignores it, and
+server that does not know the key ignores it, so it needed no new protocol
+version.
+.PP
+Protocol 1.1 adds the
+.B ctl
+op: one of dch's control verbs, run on this host for the client. The
 .B 0x18
-still says protocol 1.0.
+hello says
+.B \(dqproto\(dq:\(dq1.1\(dq
+and always lists
+.B ctl
+in
+.B ops
+.RB ( create
+only with
+.BR \-\-allow\-create ).
+The request is
+.B 0x30
+.BR {\(dqargv\(dq:[...],\(dqcwd\(dq:\(dq/abs\(dq} ,
+.B cwd
+optional, the argv dch's own without the leading
+.BR dch ;
+the replies are
+.B 0x31
+stdout and
+.B 0x32
+stderr bytes as they come, then
+.B 0x33
+.BR {\(dqexit\(dq:\fIN\fP}
+and the FIN: one request per connection, and not on an attached or watching
+one. dch runs its own binary with fork and exec (no shell), in
+.B cwd
+or else
+.BR $HOME ,
+stdin
+.IR /dev/null ;
+.I N
+is its exit status, or 128 + the signal that ended it. Only these run
+.RI ( n
+a session name that passes the attach name check and does not start with
+.BR \- ):
+.RS
+.nf
+\-\-read \fIn\fP [\-\-ansi] [\-\-recent [\fIN\fP]] [\-\-cursor]
+\-\-send|\-\-run \fIn\fP [\-\-] \fItext...\fP
+\-\-keys \fIn\fP \fIkey...\fP
+\-\-follow \fIn\fP
+\-\-status \fIn\fP
+\-k \fIn\fP;  \-d \fIn\fP;  \-m \fIn\fP \fIalias\fP
+\-\-spawn \fIn\fP [\-\-size \fIC\fPx\fIR\fP] [\-\-] \fIcmd...\fP    (create, and cwd)
+\-\-history \-\-json
+\-\-revive \fIn\fP [\-\-as \fInew\fP] [\-\-no\-message] \-\-json    (create)
+\-\-pin|\-\-unpin|\-\-forget \fIn\fP... \-\-json;  \-\-forget \-\-all \-\-json
+\-\-stop \fIn\fP... \-\-json
+\-\-say \fIn\fP \-\-json \-\- \fItext\fP
+.fi
+.RE
+.PP
+Anything else is refused with an uncoded 0x13 and nothing runs: an argv of
+fewer than 2 elements, a verb or flag off that list, a bad name,
+.BR \-\-config ,
+.BR serve ,
+.B \-h
+or
+.B \-f
+outside the free text,
+.B \-\-all
+but in
+.BR "\-\-forget \-\-all \-\-json" ,
+a
+.B cwd
+that is no directory
+.RI ( "no such directory" ),
+and a (create) verb without
+.B \-\-allow\-create
+.RI ( "creating sessions is off on this host (dch serve \-\-allow\-create)" ).
+.B \-\-xray
+is reserved for a later release:
+.IR "xray not supported by this host" .
+Stdout and stderr together get 8 MiB; at that cap the server stops
+forwarding, sends the dch SIGTERM (SIGKILL 2 s later) and ends with
+.BR {\(dqexit\(dq:2,\(dqwhy\(dq:\(dqcap\(dq} .
+The timeout is 660 s for
+.BR \-\-say ,
+.B \-\-stop
+and
+.BR \-\-revive ,
+none for
+.BR \-\-follow ,
+60 s for the rest; past it, the same with
+.BR \(dqwhy\(dq:\(dqtimeout\(dq .
+A client that closes the connection ends its verb the same way. The gate is
+attach's. For tests,
+.B DCH_CTL_TIMEOUT_MS
+replaces every timeout
+.RB ( \-\-follow 's
+too) and
+.B DCH_CTL_CAP
+lowers the cap; both are read at startup and removed from the environment.
 .PP
 .B DCH_SERVE_TEST_LOOPBACK=1
 with a loopback
@@ -1389,7 +1502,7 @@ lets loopback peers past the address check. It exists for the test suite only,
 and is removed from the environment at startup.
 .SH REMOTE HOSTS
 dch lists and attaches to the sessions of other machines that serve them
-over Prosper's remote frames 1.0 on TCP port 8771
+over Prosper's remote frames on TCP port 8771
 .RB ( "dch serve" ,
 or Prosper on a Mac).
 The hosts are
@@ -1451,6 +1564,44 @@ attach to the same session took over (the 0x13
 restores the terminal, prints
 .I "dch: host: another client attached to this session"
 and exits 5.
+.PP
+The control verbs that
+.B dch serve
+runs (see
+.BR "REMOTE SERVER" )
+take
+.IR host : name
+too, resolved as
+.B \-a
+resolves it: an exact local session name wins,
+.B \-\-host
+is the unambiguous form (and the only one for
+.BR \-\-history ),
+and a discovered host must pass the same whois check. Names on two hosts in
+one command are refused. dch runs the verb there and writes its standard
+output and error as they come, byte for byte, and exits with its exit
+status. A form the host would refuse is refused here before any connection
+.RI ( "dch: can't run on a remote host: why" ,
+exit 1). A host whose hello lacks
+.B ctl
+(or
+.B create
+for
+.B \-\-spawn
+and
+.BR \-\-revive )
+prints
+.I "dch: host: does not support verb (needs dch serve 1.41+)"
+.RI ( "(needs dch serve \-\-allow\-create)" )
+and exits 6; one that cannot be reached, or whose connection is lost before
+the exit status, prints
+.I "dch: host: unreachable: why"
+and exits 7. The host's own refusal of the request prints
+.I "dch: host: why"
+and exits 1; a refusal by its gate exits 4. A verb the host cut short exits
+2 and prints
+.IR "dch: host: verb stopped by the host (cap|timeout)" .
+.PP
 Every name and message a peer sends is printed with control characters
 escaped as \fI\\xNN\fP
 .RB ( \-\-ls\-json
@@ -1467,7 +1618,16 @@ implies
 .B \-a
 takes
 .IR host : name ,
+the control verbs take
+.IR host : name
+or
+.B \-\-host
+(with
+.BR \-\-host ,
+.B \-\-hosts
 and
+.B \-\-cwd
+before the verb), and
 .B dch
 alone is the picker with the remote rows only (no History, Sidekicks,
 row actions or settings).
@@ -1579,6 +1739,18 @@ down or
 or another error (a lost link or busy may be retried); 4 refused by the
 host's gate (do not retry); 5 taken by another client's attach (do not
 retry).
+.PP
+A control verb on
+.I host:name
+(or with
+.BR \-\-host ):
+0\-3 the remote dch's own exit status; also 1 the host refused the request,
+an unknown host or a request dch would not send; 4 refused by the host's
+gate; 6 the host's
+.B dch serve
+lacks the op (1.41+ or
+.BR \-\-allow\-create );
+7 the host is unreachable.
 .SH ENVIRONMENT
 .TP
 .B DCH_CONFIG

@@ -1,0 +1,25 @@
+{
+  "id": "26-ctl-no-such-session",
+  "about": "dch's own failure passes through: its stderr as 0x32, its exit status in 0x33.",
+  "requires_op": "ctl",
+  "steps": [
+    {
+      "send": "30 00000027 7b2261726776223a5b222d2d737461747573222c22676f6c64656e2d3737362d6e6f6e65225d7d"
+    },
+    {
+      "expect": {
+        "type": "32",
+        "payload": "6e6f2073657373696f6e3a20676f6c64656e2d3737362d6e6f6e650a"
+      }
+    },
+    {
+      "expect": {
+        "type": "33",
+        "payload": "7b2265786974223a317d"
+      }
+    },
+    {
+      "expect_close": true
+    }
+  ]
+}

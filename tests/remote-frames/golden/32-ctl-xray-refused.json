@@ -1,0 +1,19 @@
+{
+  "id": "32-ctl-xray-refused",
+  "about": "--xray is reserved for a later release: its own 0x13 reason.",
+  "requires_op": "ctl",
+  "steps": [
+    {
+      "send": "30 00000024 7b2261726776223a5b222d2d78726179222c22676f6c64656e2d3737362d63746c225d7d"
+    },
+    {
+      "expect": {
+        "type": "13",
+        "payload": "7b226d657373616765223a2278726179206e6f7420737570706f72746564206279207468697320686f7374227d"
+      }
+    },
+    {
+      "expect_close": true
+    }
+  ]
+}

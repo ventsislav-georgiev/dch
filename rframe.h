@@ -26,6 +26,8 @@
 #define RF_LIST_MAX (1u << 20)
 #define SB_LIMIT (16u << 20)	/* any one growable buffer */
 #define NODE_ID_MAX 64		/* a tailcfg.StableNodeID; longer is junk */
+#define NAME_CAP 255		/* a session name a peer may send */
+#define DASH_MSG "a session name starting with - can't be passed to dch"
 
 enum { RF_NEED, RF_FRAME, RF_CHUNK, RF_CLOSE };
 
@@ -86,6 +88,21 @@ int pipe_ce(int p[2]);
 void exec_prep(void);
 int rf_run(char *const argv[], char **out, size_t *outn, size_t cap,
            char *err, size_t errcap, int timeout_ms);
+
+/* ctl (remote frames 1.1, #114): the dch verbs dch serve runs for a 0x30,
+** one allowlist (rframe.c) that the server refuses by and the clients check
+** before they send. ctl_check: the CTL_* flags of argv[0..argc) (dch's argv
+** without the program, host-local names), each element's CK_* in kind[argc];
+** or -1 with why in why[cap]. Pure. */
+#define CTL_CREATE 1		/* needs "create" in ops (--allow-create) */
+#define CTL_LONG 2		/* the 660 s timeout, not 60 s */
+#define CTL_FOREVER 4		/* no timeout (--follow) */
+#define CTL_ARGV_MAX 1024
+enum { CK_VERB = 1, CK_FLAG, CK_VALUE, CK_NAME, CK_TEXT };
+int ctl_check(int argc, char *const argv[], unsigned char *kind, char *why,
+              size_t cap);
+int ctl_known(const char *verb);
+int name_ok(const char *s);
 
 extern char g_ts[];	/* the tailscale CLI, after ts_find; "" none */
 void ts_find(void);

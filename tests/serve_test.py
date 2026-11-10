@@ -1,4 +1,4 @@
-"""dch serve (#073): Prosper's remote frames 1.0 over TCP.
+"""dch serve (#073): Prosper's remote frames 1.1 over TCP.
 
 The server runs on 127.0.0.1 with a fake `tailscale` first on PATH and the
 test-only loopback bypass (DCH_SERVE_TEST_LOOPBACK=1 plus a loopback --bind);
@@ -11,7 +11,10 @@ use); --allow-user by id and by login (case-insensitive); create off without
 --allow-create; the newest attach retiring the older, told so with a 0x13
 {"code":"taken"} before the FIN (#102); 0x09 from the mirror;
 a newer proto major; an oversize control frame; a client half-close; SIGTERM;
-0x01's optional "scrollback" reaching the spawned client (#101).
+0x01's optional "scrollback" reaching the spawned client (#101). #114: the
+ctl op (goldens 17-38, some against a dch serve of their own: create off,
+a lowered cap, a lowered timeout); a 0x30 on an attached connection; a
+client's close ending its dch.
 Security review F1-F8: --whois-optional only while tailscaled is down; this
 host's own address and node refused; log escaping; the CLI from absolute
 PATH entries; odd whois/status JSON failing closed; the test variable unset
@@ -236,18 +239,57 @@ def main():
                                 text=True).stdout.strip() == "full"
 
         # --- the goldens, every fixture, --mutating ----------------------
+        # dch's own (17+, #114) with a "dch_serve" key need a server started
+        # their way: plain run.py skips them (their requires_op is an op no
+        # server names), so each group runs here against its own dch serve.
+        # --read, --keys, --follow (dch_mirror) are the full build's.
+        groups = {}
+        gdir = os.path.dirname(RUNPY)
+        for name in sorted(os.listdir(gdir)):
+            if not name.endswith(".json"):
+                continue
+            with open(os.path.join(gdir, name)) as f:
+                fx = json.load(f)
+            if fx.get("dch_mirror") and not mirror:
+                continue
+            key = json.dumps(fx.get("dch_serve"), sort_keys=True)
+            if "dch_serve" in fx:
+                fx["requires_op"] = "ctl"
+            groups.setdefault(key, []).append(fx)
+
+        def golden(port, fxs, tag):
+            d = os.path.join(tmp, "golden-" + tag)
+            os.makedirs(d)
+            for fx in fxs:
+                with open(os.path.join(d, fx["id"] + ".json"), "w") as f:
+                    json.dump(fx, f)
+            r = subprocess.run([sys.executable, RUNPY, "127.0.0.1:%d" % port,
+                                "--mutating", "--fixtures", d],
+                               capture_output=True, text=True, timeout=180)
+            if r.returncode or r.stdout.count("PASS ") != len(fxs):
+                print(r.stdout + r.stderr)
+            return r.returncode == 0 and r.stdout.count("PASS ") == len(fxs)
+
         ts()
         p, port, log = serve("--allow-create")
         check("serves on a loopback test port", port is not None)
-        r = subprocess.run([sys.executable, RUNPY, "127.0.0.1:%d" % port,
-                            "--mutating"], capture_output=True, text=True,
-                           timeout=180)
-        check("golden fixtures 01-15 pass (--mutating)",
-              r.returncode == 0 and r.stdout.count("PASS ") == 15)
-        if r.returncode:
-            print(r.stdout + r.stderr)
+        main_fx = groups.pop("null")
+        check("golden fixtures 01-15, 17-34 and 39 pass (--mutating, %d)"
+              % len(main_fx), len(main_fx) == 34 - 4 * (not mirror)
+              and golden(port, main_fx, "main"))
         check("the bypass is logged loudly",
               "WARNING: DCH_SERVE_TEST_LOOPBACK=1" in text(log))
+        for n, (key, fxs) in enumerate(sorted(groups.items())):
+            cfg = json.loads(key)
+            gp, gport, _ = serve(*cfg["args"], e=dict(benv, **cfg["env"]))
+            check("golden %s pass against dch serve %s %s"
+                  % (", ".join(fx["id"][:2] for fx in fxs),
+                     " ".join(cfg["args"]) or "(no flags)",
+                     " ".join("%s=%s" % kv for kv in cfg["env"].items())),
+                  gport is not None and golden(gport, fxs, str(n)))
+            stop(gp)
+        check("golden 35-38: every server-config group ran",
+              sum(len(v) for v in groups.values()) == 4 - 2 * (not mirror))
 
         # --- 0x18 ---------------------------------------------------------
         s = conn(port)
@@ -255,11 +297,11 @@ def main():
         t, pl = frame(s)
         info = json.loads(pl)
         check("0x18 hello keys", t == 0x18 and info.get("server") == "dch"
-              and info.get("proto") == "1.0" and info.get("hostname")
+              and info.get("proto") == "1.1" and info.get("hostname")
               and info.get("name") and info.get("os")
               and re.fullmatch(r"[0-9a-f]{64}", info.get("device_id", "")))
-        check("ops lists create with --allow-create",
-              sorted(info.get("ops", [])) == ["create", "watch"])
+        check("ops lists create (and ctl) with --allow-create",
+              info.get("ops") == ["create", "ctl", "watch"])
         send(s, 0x08, {"proto": "2.0"})
         t, pl = frame(s)
         check("a newer proto major gets 0x13",
@@ -279,6 +321,40 @@ def main():
               got.startswith(b"\x13") or got == b"")
         s.close()
         dev1 = info["device_id"]
+
+        # --- ctl (#114): its own connection; a client close ends its dch --
+        subprocess.run([DCH, "--spawn", "svc-ctl", "--size", "20x2", "--",
+                        "/bin/cat"], env=env, capture_output=True, timeout=15)
+        s = conn(port)
+        send(s, 0x01, {"name": "svc-ctl", "cols": 20, "rows": 2})
+        frame(s)
+        send(s, 0x30, {"argv": ["--status", "svc-ctl"]})
+        t, pl = frame_not(s)
+        check("a 0x30 on an attached connection is a 0x13",
+              t == 0x13 and json.loads(pl)["message"]
+              == "ctl needs its own connection")
+        s.close()
+        if mirror:
+            # --follow runs until stopped (the mirror's: lite has none)
+            s = conn(port)
+            send(s, 0x30, {"argv": ["--follow", "svc-ctl"]})
+            t, _ = frame(s)
+            s.close()
+            gone, end = False, time.time() + 5
+            while time.time() < end and not gone:
+                m = re.search(r"ctl --follow svc-ctl \(pid (\d+)\)",
+                              text(log))
+                if m and "closed by the client; stopping its ctl" in \
+                        text(log):
+                    try:
+                        os.kill(int(m.group(1)), 0)	# a probe only
+                    except ProcessLookupError:
+                        gone = True
+                time.sleep(0.05)
+            check("--follow streams; the client's close ends that dch",
+                  t == 0x31 and gone)
+        subprocess.run([DCH, "-k", "svc-ctl"], env=env, capture_output=True,
+                       timeout=15)
 
         # --- half-close: the reply still comes ---------------------------
         s = conn(port)
@@ -444,8 +520,8 @@ def main():
         s = conn(port)
         send(s, 0x08)
         info = json.loads(frame(s)[1])
-        check("no create in ops without --allow-create",
-              info.get("ops") == ["watch"])
+        check("no create in ops without --allow-create (ctl is)",
+              info.get("ops") == ["ctl", "watch"])
         check("device_id is stable across runs", info["device_id"] == dev1)
         send(s, 0x02, {"name": "svc-nope"})
         t, pl = frame(s)

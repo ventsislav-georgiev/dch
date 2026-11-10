@@ -27,7 +27,11 @@ busy host (#095) is transient: -a says its message and exits 1, --ls/--ls-json
 DCH_REPLAY_SCROLLBACK put "scrollback" in the 0x01 (none for 0), and over a
 real dch serve the rows reach the terminal. #102: a newer attach to the same
 session over a real dch serve ends the older with its "taken" message and
-exit 5 (and a fake's 0x13 "taken" the same).
+exit 5 (and a fake's 0x13 "taken" the same). #114: each control verb on
+host:name (and --host) over a dch serve --allow-create prints and exits
+byte for byte as the same verb run there; --cwd; the client's own refusals;
+exit 6 for a host without ctl (or create), 7 for a closed port or a cut
+link, 4 for a coded 0x13, 1 with the reason for an uncoded one.
 
 Run:  python3 tests/remote_client_test.py        (uses ./dch)
 """
@@ -89,8 +93,9 @@ def frame(t, payload=b""):
 class Fake:
     """A remote-frames server on loopback that answers as `mode` says."""
 
-    def __init__(self, mode, rows=None, proto="1.0"):
+    def __init__(self, mode, rows=None, proto="1.0", ops=None):
         self.mode, self.rows, self.proto = mode, rows or [], proto
+        self.ops = ops
         self.sock = socket.socket()
         self.sock.bind(("127.0.0.1", 0))
         self.sock.listen(16)
@@ -135,8 +140,22 @@ class Fake:
                         break
                     body, buf = buf[5:5 + n], buf[5 + n:]
                     if t == 0x08:
-                        c.sendall(frame(0x18, {"proto": self.proto,
-                                               "server": "fake"}))
+                        hello = {"proto": self.proto, "server": "fake"}
+                        if self.ops is not None:
+                            hello["ops"] = self.ops
+                        c.sendall(frame(0x18, hello))
+                    elif t == 0x30:
+                        # a ctl (#114): what the mode says, then the FIN
+                        self.bodies.append(body)
+                        c.sendall({
+                            "ctlcoded": frame(0x13, REFUSAL),
+                            "ctlerr": frame(0x13, {"message": "nope-why"}),
+                            "ctlcut": frame(0x31, b"part\n")
+                            + frame(0x32, b"err\n")
+                            + frame(0x33, {"exit": 2, "why": "cap"}),
+                            "ctldrop": frame(0x31, b"half"),
+                        }[self.mode])
+                        c.shutdown(socket.SHUT_WR)
                     elif t == 0x03:
                         c.sendall(frame(0x11, self.rows))
                     elif t == 0x01:
@@ -176,6 +195,173 @@ class Fake:
                 c.close()
             except OSError:
                 pass
+
+
+# dch's exits for a control verb on a remote host (#114): 0-3 the remote
+# dch's own, 1 refused (uncoded) or a bad request, 4 refused (coded), 6 the
+# host lacks the op, 7 unreachable
+UNSUPPORTED_EXIT, UNREACHABLE_EXIT = 6, 7
+
+
+def ctl_checks(dch, check, senv, cenv, serve_at, procs, fakes, tmp, hosts):
+
+    """#114: each control verb on srv (a dch serve with --allow-create)
+    prints and exits exactly as the same verb run there locally: the local
+    one on session ctl-qa, the remote one on ctl-qb, read as ctl-qb."""
+    port = serve_at(os.path.join(tmp, "serve-ctl.log"), "--allow-create")
+    check("a dch serve --allow-create for the control verbs",
+          port is not None)
+    if port is None:
+        return
+    H = ["--hosts", "srv=127.0.0.1:%d" % port]
+    wd = os.path.join(tmp, "wd")
+    os.makedirs(wd)
+
+    def same(label, *args, a="ctl-qa", b="ctl-qb", settle=0):
+        loc = dch(senv, *[x.replace("@", a) for x in args])
+        time.sleep(settle)
+        # a verb with no name (--history) is remote by --host alone
+        rem = dch(cenv, *H, *([] if "@" in args else ["--host", "srv"]),
+                  *[x.replace("@", "srv:" + b) for x in args])
+        got = (rem.stdout, rem.stderr, rem.returncode)
+        want = (loc.stdout.replace(a, b), loc.stderr.replace(a, b),
+                loc.returncode)
+        check("ctl %s: byte for byte the local verb's (exit %d)"
+              % (label, loc.returncode), got == want, (want, got))
+        return rem
+
+    spawn = ["--spawn", "@", "--size", "20x2", "--cwd", wd, "--",
+             "/bin/sh", "-c", "pwd >> wd.txt; exec /bin/cat"]
+    same("--spawn --cwd", *spawn)
+    time.sleep(0.5)
+    with open(os.path.join(wd, "wd.txt")) as f:
+        check("--cwd: both sessions started in it",
+              f.read().split() == [os.path.realpath(wd)] * 2)
+    same("--send -- text", "--send", "@", "--", "say", "-f", "--config")
+    same("--run", "--run", "@", "printf", "x")
+    same("--keys", "--keys", "@", "Enter", "Tab")
+    same("--keys with a bad key", "--keys", "@", "C-a")
+    time.sleep(0.5)
+    same("--read", "--read", "@")
+    same("--read --ansi --cursor", "--read", "@", "--ansi", "--cursor")
+    same("--read --recent 5", "--read", "@", "--recent", "5")
+    same("--read --recent --cursor (dch refuses)", "--read", "@",
+         "--recent", "--cursor")
+    same("--status", "--status", "@")
+    same("-m", "-m", "@", "nick")
+    same("--pin --json", "--pin", "@", "--json")
+    same("--unpin --json", "--unpin", "@", "--json")
+    same("--say --json --", "--say", "@", "--json", "--", "hello")
+    same("-d", "-d", "@")
+    same("--history --json", "--history", "--json")
+    same("--status of no session", "--status", "@", a="nx", b="nx")
+    same("--stop --json", "--stop", "@", "--json")
+    same("-k of a stopped session", "-k", "@")
+    same("--forget --json", "--forget", "@", "--json")
+    same("--revive of no session", "--revive", "@", "--json", a="nx", b="nx")
+    rem = dch(cenv, "--host", "srv", *H, "--status", "ctl-qb")
+    check("--host srv --status <name>: the unambiguous form",
+          rem.returncode == 1 and rem.stderr == "no session: ctl-qb\n", rem)
+
+    # --follow: frames as they come, the exit when the session ends
+    for n in ("fa", "fb"):
+        dch(senv, "--spawn", n, "--size", "20x2", "--", "/bin/sh", "-c",
+            "sleep 1.5")
+    pl = subprocess.Popen([DCH, "--follow", "fa"], env=senv,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          stdin=subprocess.DEVNULL)
+    pr = subprocess.Popen([DCH] + H + ["--follow", "srv:fb"], env=cenv,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          stdin=subprocess.DEVNULL)
+    lo, le = pl.communicate(timeout=20)
+    ro, re_ = pr.communicate(timeout=20)
+    mirror = dch(cenv, "--build").stdout.strip() == "full"
+    check("ctl --follow: the local verb's frames, its exit at the end",
+          (ro, re_, pr.returncode) == (lo, le, pl.returncode)
+          and (not mirror or (pr.returncode == 0
+                              and ro.startswith(b"dch-frame"))),
+          ((lo, le, pl.returncode), (ro, re_, pr.returncode)))
+
+    # a reader that closes our stdout ends a remote --follow with 0
+    dch(senv, "--spawn", "fc", "--size", "20x2", "--", "/bin/cat")
+    if mirror:
+        pr = subprocess.Popen([DCH] + H + ["--follow", "srv:fc"], env=cenv,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              stdin=subprocess.DEVNULL)
+        first = pr.stdout.read(9)
+        pr.stdout.close()
+        dch(senv, "--send", "fc", "--", "more")
+        try:
+            rc = pr.wait(10)
+        except subprocess.TimeoutExpired:
+            pr.kill()
+            rc = pr.wait()
+        check("ctl --follow into a closed pipe: exit 0, as the local one",
+              first == b"dch-frame" and rc == 0, (first, rc))
+    dch(senv, "-k", "fc")
+
+    # what the client refuses itself, and what the host refuses
+    r = dch(cenv, *H, "--read", "srv:ctl-qa", "-f")
+    check("off the allowlist: refused here, exit 1", r.returncode == 1
+          and r.stderr == "dch: can't run on a remote host: -f is not "
+          "allowed\n", r)
+    r = dch(cenv, *H, "--xray", "srv:ctl-qa")
+    check("--xray is no control verb here", r.returncode == 1, r)
+    r = dch(cenv, *H, "--read", "srv:ctl-qa", "--cwd", "/")
+    check("--cwd with a verb but --spawn: a usage error", r.returncode == 1
+          and "--cwd only works with --spawn" in r.stderr, r)
+    r = dch(cenv, *H, "--cwd", "/nonexistent-dch-114", "--spawn", "srv:cz",
+            "--", "/bin/cat")
+    check("the host refusing the request: dch: srv: why, exit 1",
+          r.returncode == 1 and r.stderr == "dch: srv: no such directory\n",
+          r)
+    r = dch(cenv, "--cwd", "/nonexistent-dch-114", "--spawn", "lz", "--",
+            "/bin/cat")
+    check("--cwd for a local --spawn must be a directory",
+          r.returncode == 1 and "no such directory" in r.stderr, r)
+    r = dch(cenv, *H, "--read", "srv:ctl-qa", "nope:cb")
+    check("names on two hosts: refused", r.returncode == 1, r)
+    r = dch(cenv, "--hosts", hosts, "--spawn", "srv:cz", "--", "/bin/cat")
+    check("--spawn on a host without --allow-create: exit %d"
+          % UNSUPPORTED_EXIT, r.returncode == UNSUPPORTED_EXIT
+          and r.stderr == "dch: srv: does not support --spawn (needs dch "
+          "serve --allow-create)\n", r)
+    old = Fake("list", proto="1.0")
+    fakes.append(old)
+    r = dch(cenv, "--hosts", "q=127.0.0.1:%d" % old.port, "--read", "q:x")
+    check("a host whose hello lacks ctl: exit %d" % UNSUPPORTED_EXIT,
+          r.returncode == UNSUPPORTED_EXIT and r.stderr == "dch: q: does "
+          "not support --read (needs dch serve 1.41+)\n" and not old.bodies,
+          r)
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    dead = s.getsockname()[1]
+    s.close()
+    r = dch(cenv, "--hosts", "q=127.0.0.1:%d" % dead, "--status", "q:x")
+    check("a closed port: unreachable, exit %d" % UNREACHABLE_EXIT,
+          r.returncode == UNREACHABLE_EXIT
+          and r.stderr.startswith("dch: q: unreachable: "), r)
+    for mode, want, err in (
+            ("refuse", REFUSED_EXIT, "dch: q refused: " + REFUSAL["message"]),
+            ("ctlcoded", REFUSED_EXIT,
+             "dch: q refused: " + REFUSAL["message"]),
+            ("ctlerr", 1, "dch: q: nope-why"),
+            ("ctldrop", UNREACHABLE_EXIT,
+             "dch: q: unreachable: the connection was lost"),
+            ("ctlcut", 2, "err\ndch: q: --status stopped by the host (cap)")):
+        f = Fake(mode, ops=["ctl", "watch"])
+        fakes.append(f)
+        r = dch(cenv, "--hosts", "q=127.0.0.1:%d" % f.port, "--status",
+                "q:x")
+        check("a host that answers %s: exit %d" % (mode, want),
+              r.returncode == want and r.stderr == err + "\n"
+              and r.stdout == {"ctlcut": "part\n",
+                               "ctldrop": "half"}.get(mode, ""), r)
+    body = json.loads(f.bodies[-1])
+    check("the 0x30 is the argv as typed, the host: off",
+          body == {"argv": ["--status", "x"]}, body)
+    dch(senv, "-k", "ctl-qa")
+    dch(senv, "-k", "ctl-qb")
 
 
 def main():
@@ -268,12 +454,11 @@ def main():
             out += read(fd, b"\0never", 0.05)
         return None, out
 
-    try:
-        # the server and its session
-        log = os.path.join(tmp, "serve.log")
+    def serve_at(log, *args):
+        """dch serve on a loopback test port: the port, or None."""
         with open(log, "w") as lf:
             sp = subprocess.Popen([DCH, "serve", "--bind", "127.0.0.1",
-                                   "--port", "0"],
+                                   "--port", "0"] + list(args),
                                   env=dict(senv, DCH_SERVE_TEST_LOOPBACK="1"),
                                   stdin=subprocess.DEVNULL,
                                   stdout=subprocess.DEVNULL, stderr=lf)
@@ -284,6 +469,12 @@ def main():
             m = re.search(r"listening on 127\.0\.0\.1:(\d+)", open(log).read())
             port = int(m.group(1)) if m else None
             time.sleep(0.05)
+        return port
+
+    try:
+        # the server and its session
+        log = os.path.join(tmp, "serve.log")
+        port = serve_at(log)
         check("dch serve listens on a loopback test port", port is not None,
               open(log).read())
         if port is None:
@@ -437,10 +628,18 @@ def main():
                   out[-400:])
             dch(senv, "-k", "rsb")
 
+        # --- ctl (#114): the control verbs on a remote host ------------
+        ctl_checks(dch, check, senv, cenv, serve_at, procs, fakes, tmp,
+                   hosts)
+
         # --- precedence -----------------------------------------------
-        r = dch(cenv, "--spawn", "srv:rs1", "--size", "80x24", "--",
-                "/bin/sh")
-        check("a local session named srv:rs1", r.returncode == 0, r.stderr)
+        # (--spawn srv:rs1 is remote now, #114: -n makes the local one)
+        pid, fd = attach(["-n", "srv:rs1", "--", "/bin/sh"])
+        read(fd, b"$ ", 3)
+        os.write(fd, b"\x1c")
+        reap(pid, fd, 5)
+        check("a local session named srv:rs1",
+              "srv:rs1" in dch(cenv, "-ls").stdout.split())
         # the remote is unreachable now: only a local attach can work
         pid, fd = attach(["--hosts", "srv=127.0.0.1:1", "-a", "srv:rs1"])
         read(fd, b"\0never", 1.5)

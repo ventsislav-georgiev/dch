@@ -1,0 +1,21 @@
+{
+  "id": "27-ctl-bad-flag",
+  "about": "A flag off the allowlist is an uncoded 0x13 and nothing runs.",
+  "requires_op": "ctl",
+  "steps": [
+    {
+      "send": "30 0000002e 7b2261726776223a5b222d2d72656164222c22676f6c64656e2d3737362d63746c222c222d2d626f677573225d7d"
+    },
+    {
+      "expect": {
+        "type": "13",
+        "json": {
+          "message": "string~.+"
+        }
+      }
+    },
+    {
+      "expect_close": true
+    }
+  ]
+}

@@ -638,6 +638,17 @@ session_sock_path(const char *name, char *buf, size_t bufsz)
 	         canon_name(name, cb, sizeof(cb)));
 }
 
+/* host:name and no local session of that exact name: a remote one (#087). */
+static int
+name_is_remote(const char *name)
+{
+	char sp[1100];
+	struct stat st;
+
+	session_sock_path(name, sp, sizeof sp);
+	return strchr(name, ':') && (stat(sp, &st) < 0 || !S_ISSOCK(st.st_mode));
+}
+
 /* Read first line of `path` (NUL-terminated, newline stripped) into out.
 ** Returns 0 on success and non-empty content. */
 static int
@@ -2420,6 +2431,13 @@ usage(void)
 	    "  dch -a <name>    attach to a session, never create one;\n"
 	    "                   host:name attaches to one on a remote host\n"
 	    "  dch --host <h> -a <name>  attach to <name> on host h\n"
+	    "  dch <verb> host:name ...  a control verb on a remote host (its\n"
+	    "                   dch serve 1.41+): --read --send --run --keys\n"
+	    "                   --follow --status -k -m -d --spawn --history\n"
+	    "                   --revive --pin --unpin --forget --stop --say;\n"
+	    "                   --host <h> also works (--history needs it);\n"
+	    "                   exits 6 if the host lacks it, 7 if unreachable\n"
+	    "  dch --cwd <dir> --spawn ...  the spawned session's start dir\n"
 	    "  dch --scrollback <n>  with an attach: the last n lines of the\n"
 	    "                   session's scrollback first (DCH_REPLAY_SCROLLBACK)\n"
 	    "  dch --hosts <h1,h2,...>   the remote hosts, [label=]host[:port],\n"
@@ -2770,19 +2788,14 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 	** wins, and host:name is remote. */
 	if (remote_host)
 		return dch_remote_attach(remote_host, session_name);
-	if (remote_ok)
+	if (remote_ok && name_is_remote(session_name))
 	{
-		char sp[1100], host[512];
-		struct stat st;
+		char host[512];
 		char *colon = strchr(session_name, ':');
 
-		session_sock_path(session_name, sp, sizeof sp);
-		if ((stat(sp, &st) < 0 || !S_ISSOCK(st.st_mode)) && colon)
-		{
-			snprintf(host, sizeof host, "%.*s",
-			         (int)(colon - session_name), session_name);
-			return dch_remote_attach(host, colon + 1);
-		}
+		snprintf(host, sizeof host, "%.*s", (int)(colon - session_name),
+		         session_name);
+		return dch_remote_attach(host, colon + 1);
 	}
 
 	/* If auto-attaching and base is busy, advance to next free slot. */
@@ -9882,6 +9895,16 @@ main(int argc, char **argv)
 	if (argc >= 2 && strcmp(argv[1], "serve") == 0)
 		return serve_main(argc - 2, argv + 2);
 
+	/* A remote control verb (#114) is sent as typed, less --host, --hosts
+	** and --cwd (cskip): argv as it was, since --say and its kin pack it. */
+	char **oargv = calloc((size_t)argc + 1, sizeof *oargv);
+	unsigned char *cskip = calloc((size_t)argc + 1, 1);
+	const char *opt_cwd = NULL;
+
+	if (!oargv || !cskip)
+		return 1;
+	memcpy(oargv, argv, (size_t)argc * sizeof *oargv);
+
 	int i = 1;
 	while (i < argc)
 	{
@@ -9958,6 +9981,19 @@ main(int argc, char **argv)
 			}
 			if (a[6] != 's')
 				remote_host = argv[i];
+			cskip[i - 1] = cskip[i] = 1;
+			i++;
+		}
+		else if (strcmp(a, "--cwd") == 0)
+		{
+			/* #114: --spawn's start dir, here or on the host */
+			if (++i >= argc || !argv[i][0])
+			{
+				fprintf(stderr, "dch: --cwd needs a directory\n");
+				return 1;
+			}
+			opt_cwd = argv[i];
+			cskip[i - 1] = cskip[i] = 1;
 			i++;
 		}
 		else if (strcmp(a, "--scrollback") == 0)
@@ -10439,10 +10475,53 @@ main(int argc, char **argv)
 	int inner_argc = argc - i;
 	char **inner_argv = argv + i;
 
+	if (opt_cwd && action != A_SPAWN)
+	{
+		fprintf(stderr, "dch: --cwd only works with --spawn\n");
+		return 1;
+	}
+	/* Remote control verbs (#114): --host names the host; else a name that
+	** is host:name and no local session's makes it remote, as -a does. */
+	if (!attach_only &&
+	    (action == A_READ || action == A_SEND || action == A_RUN ||
+	     action == A_KEYS || action == A_FOLLOW || action == A_STATUS ||
+	     action == A_KILL || action == A_SETALIAS || action == A_DETACH ||
+	     action == A_SPAWN || action == A_HISTORY || action == A_REVIVE ||
+	     action == A_PIN || action == A_UNPIN || action == A_FORGET ||
+	     action == A_STOP || action == A_SAY))
+	{
+		int remote = remote_host != NULL, k, cn = 0;
+
+		if (!remote && session_name[0])
+			remote = name_is_remote(session_name);
+		for (k = 0; !remote && k < say_n; k++)
+			remote = name_is_remote(argv[say_at + k]);
+		if (remote)
+		{
+			for (k = 1; k < argc; k++)
+				if (!cskip[k])
+					oargv[cn++] = oargv[k];
+			oargv[cn] = NULL;
+			return dch_remote_ctl(remote_host, cn, oargv, opt_cwd);
+		}
+	}
 	if (remote_host && !attach_only)
 	{
-		fprintf(stderr, "dch: --host only works with -a <name>\n");
+		fprintf(stderr, "dch: --host only works with -a <name> and the "
+		        "control verbs\n");
 		return 1;
+	}
+	if (opt_cwd)
+	{
+		struct stat cst;
+
+		if (stat(opt_cwd, &cst) < 0 || !S_ISDIR(cst.st_mode) ||
+		    chdir(opt_cwd) < 0)
+		{
+			fprintf(stderr, "dch: --cwd: no such directory: %s\n",
+			        opt_cwd);
+			return 1;
+		}
 	}
 	if (attach_only && inner_argc > 0)
 	{

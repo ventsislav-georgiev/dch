@@ -1,5 +1,5 @@
 /*
-** dch serve: a server for Prosper's "remote frames" protocol 1.0, so the
+** dch serve: a server for Prosper's "remote frames" protocol 1.1, so the
 ** Prosper iPhone app can drive dch sessions on a host with no Prosper.
 ** Spec: ventsislav-georgiev/prosper docs/protocol/remote-frames.md; its
 ** conformance set runs from tests/remote-frames/.
@@ -21,6 +21,12 @@
 ** as MSG_WINCH. Every other verb runs dch itself: --ls-json, -k, -m, and
 ** --read --ansi --cursor. Nothing goes through a shell: argv vectors, execv,
 ** timeouts and capped output only.
+**
+** ctl (1.1, #114): a 0x30 runs one allowlisted dch verb (rframe.c's
+** ctl_check) as a child of the handler, its pipes in the same poll loop:
+** its output streams out as 0x31/0x32 while the client keeps up, its exit
+** comes as 0x33, then the FIN. A cap, a timeout or the client's close ends
+** it (SIGTERM, then SIGKILL).
 */
 #include "dtach.h"
 #include "rframe.h"
@@ -68,11 +74,15 @@
 #define NEG_MS 30000		/* for this long, refused with no fork */
 #define MAX_SELF 16		/* `tailscale ip -4` lines kept */
 #define MAX_WATCH_PER_DEV 4	/* spec */
-#define NAME_CAP 255
 #define DEV_CAP 128
 #define MAX_ALLOW 16
 #define MAX_CMD 256
-#define DASH_MSG "a session name starting with - can't be passed to dch"
+#define CTL_MS 60000		/* a ctl's timeout (#114) */
+#define CTL_LONG_MS 660000	/* --say, --stop, --revive: dch waits up to
+				** 600 s for an agent itself */
+#define CTL_CAP (8u << 20)	/* a ctl's stdout and stderr together */
+#define CTL_GRACE_MS 2000	/* a cut ctl: SIGTERM, then SIGKILL */
+#define CTL_CHUNK 65536
 
 static void slog(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
@@ -157,25 +167,6 @@ rq_scrollback(const struct json_parser *jp)
 	if (jint(jp, 0, "scrollback", &v) != 1 || v <= 0)
 		return 0;
 	return v > DCH_SCROLLBACK_MAX ? DCH_SCROLLBACK_MAX : (int)v;
-}
-
-/* A session name dch can be handed as one argv word: UTF-8 with no '/' and
-** no control logsafe would escape. The leading '-' is checked apart (it has
-** its own spec message). */
-static int
-name_ok(const char *s)
-{
-	const unsigned char *p = (const unsigned char *)s;
-	size_t n = strlen(s);
-	unsigned cp;
-	int k;
-
-	if (!n || n > NAME_CAP || s[0] == '-')
-		return 0;
-	for (; *p; p += k)
-		if (!(k = utf8_at(p, &cp)) || cp_ctl(cp) || cp == '/')
-			return 0;
-	return 1;
 }
 
 /* ---- listResp rows (pure) -------------------------------------------- */
@@ -723,11 +714,11 @@ build_hello(void)
 	sb_q(&g_hello, host);
 	sb_s(&g_hello, ",\"name\":");
 	sb_q(&g_hello, host);
-	sb_s(&g_hello, g_allow_create ? ",\"ops\":[\"create\",\"watch\"]"
-	                              : ",\"ops\":[\"watch\"]");
+	sb_s(&g_hello, g_allow_create ? ",\"ops\":[\"create\",\"ctl\",\"watch\"]"
+	                              : ",\"ops\":[\"ctl\",\"watch\"]");
 	sb_s(&g_hello, ",\"os\":");
 	sb_q(&g_hello, os);
-	sb_s(&g_hello, ",\"proto\":\"1.0\",\"server\":\"dch\"}");
+	sb_s(&g_hello, ",\"proto\":\"1.1\",\"server\":\"dch\"}");
 	return g_hello.bad ? -1 : 0;
 }
 
@@ -756,9 +747,19 @@ struct conn
 	long long next_poll, last_sent;
 	int eof, closing, guard_close;
 	long long last_frame, last_write, eof_at;
+	/* a ctl (0x30, #114): the dch it runs, its stdout and stderr (-1
+	** at EOF), what went out of them, its timeout (0 none) and, once
+	** cut ("cap", "timeout"), when SIGKILL follows the SIGTERM */
+	pid_t ctl;
+	int ctl_fd[2], ctl_st, ctl_reaped;
+	size_t ctl_sent;
+	long long ctl_end, ctl_kill;
+	const char *ctl_why;
 };
 
 static struct conn C;	/* one connection per handler process */
+static long g_ctl_ms;		/* DCH_CTL_TIMEOUT_MS (tests): every ctl's */
+static size_t g_ctl_cap = CTL_CAP;	/* DCH_CTL_CAP (tests), at most 8 MiB */
 /* SIGUSR1 from the parent: a newer attach took this handler's session */
 static volatile sig_atomic_t g_taken;
 static char rq_text[RF_CTRL_MAX + 3];
@@ -1138,6 +1139,287 @@ on_kill_rename(struct conn *c, int kill_, const unsigned char *p, size_t n)
 	out_frame(c, 0x14, "", 0);
 }
 
+/* ---- ctl (0x30, remote frames 1.1, #114) ---------------------------- */
+
+/* A 0x30's payload: its argv (dch_json_strv's block: free it) into *av and
+** *ac, and "cwd" ("" when absent) into cwd[PATH_MAX], checked against the
+** allowlist (ctl_check) and the cwd for being absolute. The CTL_* flags, or
+** -1 with why. Pure. */
+static int
+ctl_request(const unsigned char *p, size_t n, char ***av, int *ac, char *cwd,
+            char *why, size_t cap)
+{
+	static unsigned char kind[CTL_ARGV_MAX];
+	struct json_parser jp;
+	int t, r, any, arr;
+
+	*av = NULL;
+	*ac = 0;
+	cwd[0] = '\0';
+	if (rq_json(&jp, rq_text, p, n) < 0)
+	{
+		snprintf(why, cap, "malformed ctl request: send "
+		         "{\"argv\":[...]}");
+		return -1;
+	}
+	r = jstr(&jp, 0, "cwd", cwd, PATH_MAX);
+	t = dch_json_field(&jp, 0, "argv");
+	arr = t >= 0 && jp.tok[t].kind == JSON_ARRAY;
+	any = arr && jp.tok[t].next > t + 1;
+	dch_json_free(&jp);
+	if (r < 0 || t == -2 || (t >= 0 && !arr) ||
+	    (any && !(*av = dch_json_strv(rq_text, NULL, "argv", ac))))
+	{
+		cwd[0] = '\0';
+		snprintf(why, cap, "malformed ctl request: argv must be an "
+		         "array of strings, cwd a string");
+		return -1;
+	}
+	if ((t = ctl_check(*ac, *av, kind, why, cap)) >= 0 && r == 1 &&
+	    cwd[0] != '/')
+	{
+		snprintf(why, cap, "no such directory");
+		t = -1;
+	}
+	/* The child's dch reads a name with ':' and no local socket as
+	** host:name and dials on with this host's identity: a relay. */
+	for (int i = 0; t >= 0 && i < *ac; i++)
+		if ((kind[i] == CK_NAME || kind[i] == CK_VALUE) &&
+		    strchr((*av)[i], ':'))
+		{
+			snprintf(why, cap, "a session name with ':' is local "
+			         "only");
+			t = -1;
+		}
+	if (t < 0)
+	{
+		free(*av);
+		*av = NULL;
+	}
+	return t;
+}
+
+/* Stop forwarding the ctl's output and SIGTERM it (SIGKILL CTL_GRACE_MS
+** later, ctl_tick); its 0x33 says why once it is reaped. */
+static void
+ctl_cut(struct conn *c, const char *why)
+{
+	int k;
+
+	c->ctl_why = why;
+	for (k = 0; k < 2; k++)
+		if (c->ctl_fd[k] >= 0)
+		{
+			close(c->ctl_fd[k]);
+			c->ctl_fd[k] = -1;
+		}
+	if (!c->ctl_reaped)
+	{
+		kill(c->ctl, SIGTERM);
+		c->ctl_kill = now_ms() + CTL_GRACE_MS;
+	}
+	slog("%s: ctl cut short: %s", c->ipstr, why);
+}
+
+/* The ctl's stdout (k 0) or stderr (1) as 0x31 / 0x32 frames, as it
+** comes, while the client keeps up; up to the cap, then cut. Once the ctl
+** is reaped an empty pipe is done: what it wrote is in the pipe, and a
+** leftover writer (a process it started) is not waited for. */
+static void
+ctl_read(struct conn *c, int k)
+{
+	unsigned char buf[CTL_CHUNK];
+	ssize_t r;
+
+	while (c->ctl_fd[k] >= 0 && pending(c) <= OUT_HIGH)
+	{
+		if ((r = read(c->ctl_fd[k], buf, sizeof buf)) < 0 &&
+		    errno == EINTR)
+			continue;
+		if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) &&
+		    !c->ctl_reaped)
+			return;
+		if (r <= 0)
+		{
+			close(c->ctl_fd[k]);
+			c->ctl_fd[k] = -1;
+			return;
+		}
+		if ((size_t)r > g_ctl_cap - c->ctl_sent)
+			r = (ssize_t)(g_ctl_cap - c->ctl_sent);
+		if (r)
+			out_frame(c, 0x31 + (unsigned)k, buf, (size_t)r);
+		c->ctl_sent += (size_t)r;
+		if (c->ctl_sent >= g_ctl_cap)
+		{
+			ctl_cut(c, "cap");
+			return;
+		}
+	}
+}
+
+/* 0x30: dch itself with the request's argv, no shell, stdin /dev/null, in
+** its cwd or else HOME. Refused (a 0x13, nothing runs): anything off the
+** allowlist, a create verb with create off, a cwd that is no directory.
+** The connection's last request: after its 0x33 (or its 0x13) the FIN. */
+static void
+on_ctl(struct conn *c, const unsigned char *p, size_t n)
+{
+	char why[200], cwd[PATH_MAX], **av = NULL, *argv[CTL_ARGV_MAX + 2];
+	struct stat st;
+	int ac, fl, po[2] = { -1, -1 }, pe[2] = { -1, -1 }, k;
+	pid_t pid = -1;
+
+	if (c->attached || c->watching)
+	{
+		out_err(c, "ctl needs its own connection");
+		return;
+	}
+	c->closing = 1;		/* until the ctl runs: the 0x13, then the FIN */
+	if ((fl = ctl_request(p, n, &av, &ac, cwd, why, sizeof why)) < 0)
+	{
+		slog("%s: ctl refused: %s", c->ipstr, why);
+		out_err(c, why);
+		return;
+	}
+	if (fl & CTL_CREATE && !g_allow_create)
+		snprintf(why, sizeof why, "creating sessions is off on this "
+		         "host (dch serve --allow-create)");
+	else if (cwd[0] && (stat(cwd, &st) < 0 || !S_ISDIR(st.st_mode)))
+		snprintf(why, sizeof why, "no such directory");
+	else
+		why[0] = '\0';
+	if (!why[0])
+	{
+		argv[0] = dch_exe;
+		memcpy(argv + 1, av, (size_t)ac * sizeof *av);
+		argv[ac + 1] = NULL;
+		if (pipe_ce(po) == 0 && pipe_ce(pe) == 0 && (pid = fork()) == 0)
+		{
+			const char *home = getenv("HOME");
+			int nul = open("/dev/null", O_RDWR);
+
+			if (nul < 0)
+				_exit(127);
+			dup2(nul, 0);
+			dup2(po[1], 1);
+			dup2(pe[1], 2);
+			if (cwd[0] ? chdir(cwd) < 0
+			           : !home || chdir(home) < 0)
+				if (cwd[0] || chdir("/") < 0)
+					_exit(127);
+			exec_prep();
+			execv(argv[0], argv);
+			_exit(127);
+		}
+		if (pid < 0)
+			snprintf(why, sizeof why, "could not run dch: %s",
+			         strerror(errno));
+	}
+	for (k = 0; k < 2; k++)
+	{
+		if (po[k] >= 0 && (pid < 0 || k))
+			close(po[k]);
+		if (pe[k] >= 0 && (pid < 0 || k))
+			close(pe[k]);
+	}
+	if (why[0])
+	{
+		slog("%s: ctl %s refused: %s", c->ipstr, av[0], why);
+		out_err(c, why);
+		free(av);
+		return;
+	}
+	nonblock(po[0]);
+	nonblock(pe[0]);
+	c->closing = 0;
+	c->ctl = pid;
+	c->ctl_fd[0] = po[0];
+	c->ctl_fd[1] = pe[0];
+	c->ctl_end = g_ctl_ms > 0 ? now_ms() + g_ctl_ms	/* --follow's too */
+	             : fl & CTL_FOREVER ? 0
+	             : now_ms() + (fl & CTL_LONG ? CTL_LONG_MS : CTL_MS);
+	slog("%s: ctl %s %s (pid %ld)", c->ipstr, av[0], av[1], (long)pid);
+	free(av);
+}
+
+/* A running ctl, each turn of the loop: reaped, timed out, killed after
+** its grace; once reaped and its pipes drained, the 0x33 and the FIN. The
+** exit is dch's status, 128 + the signal when one ended it, or 2 with a
+** "why" when the server cut it. */
+static void
+ctl_tick(struct conn *c, long long now)
+{
+	struct sb b = {0};
+	int st;
+
+	if (c->ctl <= 0)
+		return;
+	if (!c->ctl_reaped && waitpid(c->ctl, &c->ctl_st, WNOHANG) == c->ctl)
+		c->ctl_reaped = 1;
+	if (!c->ctl_reaped && !c->ctl_why && c->ctl_end && now >= c->ctl_end)
+		ctl_cut(c, "timeout");
+	if (!c->ctl_reaped && c->ctl_kill && now >= c->ctl_kill)
+	{
+		kill(c->ctl, SIGKILL);
+		c->ctl_kill = 0;
+	}
+	if (!c->ctl_reaped)
+		return;
+	ctl_read(c, 0);
+	ctl_read(c, 1);
+	if (c->ctl_fd[0] >= 0 || c->ctl_fd[1] >= 0)
+		return;
+	st = c->ctl_st;
+	sb_s(&b, "{\"exit\":");
+	sb_ll(&b, c->ctl_why ? 2 : WIFEXITED(st) ? WEXITSTATUS(st)
+	                              : 128 + WTERMSIG(st));
+	if (c->ctl_why)
+	{
+		sb_s(&b, ",\"why\":");
+		sb_q(&b, c->ctl_why);
+	}
+	sb_s(&b, "}");
+	out_frame(c, 0x33, b.p, b.n);
+	slog("%s: ctl done: %s", c->ipstr, b.bad ? "?" : b.p);
+	free(b.p);
+	c->ctl = -1;
+	c->closing = 1;
+}
+
+/* The ctl on a connection that ends: SIGTERM (--stop and --say finish
+** safely on one), SIGKILL after CTL_GRACE_MS. */
+static void
+ctl_end(struct conn *c)
+{
+	long long end;
+	pid_t w;
+	int k;
+
+	for (k = 0; k < 2; k++)
+		if (c->ctl_fd[k] >= 0)
+			close(c->ctl_fd[k]);
+	c->ctl_fd[0] = c->ctl_fd[1] = -1;
+	if (c->ctl <= 0 || c->ctl_reaped)
+		return;
+	kill(c->ctl, SIGTERM);
+	end = now_ms() + CTL_GRACE_MS;
+	while ((w = waitpid(c->ctl, &c->ctl_st, WNOHANG)) == 0 ||
+	       (w < 0 && errno == EINTR))
+	{
+		if (w == 0 && now_ms() >= end)
+		{
+			kill(c->ctl, SIGKILL);
+			while (waitpid(c->ctl, &c->ctl_st, 0) < 0 &&
+			       errno == EINTR)
+				;
+			break;
+		}
+		poll(NULL, 0, 10);
+	}
+	c->ctl_reaped = 1;
+}
+
 static void
 on_hello(struct conn *c, const unsigned char *p, size_t n)
 {
@@ -1152,7 +1434,7 @@ on_hello(struct conn *c, const unsigned char *p, size_t n)
 		if (r == 1 && strtol(pv, NULL, 10) > 1)
 		{
 			snprintf(msg, sizeof msg, "protocol %.20s is newer than "
-			         "this server's 1.0", pv);
+			         "this server's 1.1", pv);
 			out_err(c, msg);
 			return;
 		}
@@ -1275,6 +1557,9 @@ on_frame(struct conn *c, unsigned int type, const unsigned char *p,
 		break;
 	case 0x09:
 		on_snapshot(c);
+		break;
+	case 0x30:
+		on_ctl(c, p, n);
 		break;
 	case 0x05:		/* resize: no reply */
 		if (c->pty >= 0 && rq_json(&jp, rq_text, p, n) == 0)
@@ -1403,6 +1688,7 @@ static void
 conn_end(struct conn *c, int graceful)
 {
 	kid_end(c);
+	ctl_end(c);
 	if (c->pty >= 0)
 		close(c->pty);
 	c->pty = -1;
@@ -1497,6 +1783,7 @@ serve_conn(int fd, uint32_t ip)
 	g_taken = 0;	/* only the parent's SIGUSR1 to this handler */
 	c->fd = fd;
 	c->pty = -1;
+	c->ctl_fd[0] = c->ctl_fd[1] = -1;
 	c->ip = ip;
 	a.s_addr = htonl(ip);
 	inet_ntop(AF_INET, &a, c->ipstr, sizeof c->ipstr);
@@ -1530,8 +1817,8 @@ serve_conn(int fd, uint32_t ip)
 	c->last_frame = c->last_write = now_ms();
 	for (;;)
 	{
-		struct pollfd pf[2];
-		int np = 0, si, pi = -1, tmo = 500;
+		struct pollfd pf[4];
+		int np = 0, si, pi = -1, ci = -1, tmo = 500, k;
 		long long now = now_ms();
 
 		if (g_stop)
@@ -1551,8 +1838,16 @@ serve_conn(int fd, uint32_t ip)
 		}
 		if (c->watching && !c->closing)
 			watch_tick(c, now);
-		if (!c->closing)
+		if (!c->closing && !c->ctl)
 			parse_input(c);
+		ctl_tick(c, now);
+		if (c->eof && c->ctl > 0)
+		{
+			/* a ctl's client is gone (a FIN is a close here) */
+			slog("%s: closed by the client; stopping its ctl",
+			     c->ipstr);
+			break;
+		}
 		if (c->kid > 0 && !c->kid_done &&
 		    waitpid(c->kid, &c->kid_status, WNOHANG) == c->kid)
 			c->kid_done = 1;
@@ -1591,7 +1886,7 @@ serve_conn(int fd, uint32_t ip)
 			     c->ipstr, STALL_MS / 1000);
 			break;
 		}
-		if (!c->attached && !c->watching && !c->closing &&
+		if (!c->attached && !c->watching && !c->closing && !c->ctl &&
 		    now - c->last_frame >= IDLE_MS)
 		{
 			slog("%s: idle; closing", c->ipstr);
@@ -1612,7 +1907,15 @@ serve_conn(int fd, uint32_t ip)
 			            (c->pinlen ? POLLOUT : 0));
 			pf[np++].revents = 0;
 		}
-		if (c->kid > 0 && !c->kid_done)
+		if (c->ctl > 0 && !c->closing && pending(c) <= OUT_HIGH)
+			for (ci = np, k = 0; k < 2; k++)
+				if (c->ctl_fd[k] >= 0)
+				{
+					pf[np].fd = c->ctl_fd[k];
+					pf[np].events = POLLIN;
+					pf[np++].revents = 0;
+				}
+		if ((c->kid > 0 && !c->kid_done) || c->ctl > 0)
 			tmo = 100;
 		if (c->jiggle_at && c->jiggle_at - now < tmo)
 			tmo = (int)(c->jiggle_at - now) + 1;
@@ -1653,6 +1956,9 @@ serve_conn(int fd, uint32_t ip)
 		}
 		if (pi >= 0 && pf[pi].revents & (POLLIN | POLLHUP | POLLERR))
 			pty_read(c, PTY_CHUNK);
+		for (k = ci; k >= 0 && k < np; k++)
+			if (pf[k].revents & (POLLIN | POLLHUP | POLLERR))
+				ctl_read(c, pf[k].fd == c->ctl_fd[0] ? 0 : 1);
 	}
 	if (c->eof && !c->closing)
 		slog("%s: closed by the client", c->ipstr);
@@ -2088,6 +2394,14 @@ serve_main(int argc, char **argv)
 	e = getenv("DCH_SERVE_TEST_LOOPBACK");
 	test_lo = e && !strcmp(e, "1");
 	unsetenv("DCH_SERVE_TEST_LOOPBACK");
+	/* ctl's limits for tests (#114), read once and gone, as above */
+	if ((e = getenv("DCH_CTL_TIMEOUT_MS")) && atol(e) > 0)
+		g_ctl_ms = atol(e);
+	if ((e = getenv("DCH_CTL_CAP")) && atol(e) > 0 &&
+	    (unsigned long)atol(e) < CTL_CAP)
+		g_ctl_cap = (size_t)atol(e);
+	unsetenv("DCH_CTL_TIMEOUT_MS");
+	unsetenv("DCH_CTL_CAP");
 
 	/* The tailscale CLI, absolute, for execv. */
 	ts_find();
@@ -2273,8 +2587,8 @@ serve_main(int argc, char **argv)
 	nonblock(np[0]);
 	nonblock(np[1]);
 	g_notify = np[1];
-	slog("listening on %s:%ld (dch %s, proto 1.0, ops: %s)", ipstr, port,
-	     DCH_VERSION, g_allow_create ? "create, watch" : "watch");
+	slog("listening on %s:%ld (dch %s, proto 1.1, ops: %s)", ipstr, port,
+	     DCH_VERSION, g_allow_create ? "create, ctl, watch" : "ctl, watch");
 	if (g_gate.self_uid >= 0)
 		slog("accepting nodes of user %lld%s", g_gate.self_uid,
 		     g_gate.nallow ? " and --allow-user" : "");

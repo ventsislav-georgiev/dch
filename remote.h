@@ -25,7 +25,14 @@ void dch_remote_stop(void);
 ** one of these, where a retry will not help: */
 #define DCH_EXIT_REFUSED 4	/* the host's gate refused us (a coded 0x13) */
 #define DCH_EXIT_TAKEN 5	/* another client attached ("taken") */
+#define DCH_EXIT_UNSUPPORTED 6	/* a ctl verb the host's serve lacks (#114) */
+#define DCH_EXIT_UNREACHABLE 7	/* a ctl's host could not be reached (#114) */
 int dch_remote_attach(const char *host, const char *name);
+/* A control verb on a remote host (#114): argv is the verb's own (argv[0] is
+** the verb), its names host:name when host is NULL. Runs it there through
+** dch serve's ctl op, its output onto ours: the remote dch's exit status
+** (0-3), else 1 (bad request, refused, unknown host), 4, 6 or 7. */
+int dch_remote_ctl(const char *host, int argc, char **argv, const char *cwd);
 void dch_remote_esc(char *out, size_t cap, const char *s);
 
 /* Attach replay scrollback (#101): rows of the session's history sent above

@@ -1,0 +1,19 @@
+{
+  "id": "39-ctl-colon-name-refused",
+  "about": "A name with ':' is refused: the host's dch would read it as host:name and dial onward with the host's identity (a relay).",
+  "requires_op": "ctl",
+  "steps": [
+    {
+      "send": "30 0000002a 7b2261726776223a5b222d2d72656164222c226f746865723a676f6c64656e2d3737362d63746c225d7d"
+    },
+    {
+      "expect": {
+        "type": "13",
+        "payload": "7b226d657373616765223a22612073657373696f6e206e616d65207769746820273a27206973206c6f63616c206f6e6c79227d"
+      }
+    },
+    {
+      "expect_close": true
+    }
+  ]
+}

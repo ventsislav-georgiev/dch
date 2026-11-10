@@ -4,7 +4,8 @@
 ** list or the cache, attach.c's packet stream (as frames, which must parse
 ** back as a client's), a server's frame stream into the probe and into the
 ** relay (each cut into reads of a size the input picks), and logsafe at a
-** small cap. Every peer string, once escaped, must hold no control byte:
+** small cap; #114's ctl stream (ctl_in) and a hello's ops (hello_op).
+** Every peer string, once escaped, must hold no control byte:
 ** C0, DEL, C1 or a bidi control. Linked with the rest of dch minus
 ** remote.o, and dch.c built with -Dmain=dch_main. */
 #include "../../remote.c"
@@ -58,7 +59,7 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		return 0;
 	memcpy(t, d + 1, n - 1);
 	t[n - 1] = '\0';
-	switch (d[0] % 8)
+	switch (d[0] % 9)
 	{
 	case 0:		/* --hosts */
 		k = hosts_parse(t, hv, RM_HOSTS, bad, sizeof bad);
@@ -215,6 +216,38 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 			abort();	/* a held frame past its cap closes */
 		free(tin.p);
 		free(to_sp.p);
+		break;
+	}
+	case 8:		/* #114: a ctl's frames, in reads of c; a hello's ops */
+	{
+		struct rf_state rs = { 0, 0, 1 };
+		struct sb tin = {0}, out = {0}, err = {0};
+		size_t c = n > 1 ? (size_t)d[1] % 64 + 1 : 1, off, got = 0;
+		char msg[400] = "", why[100] = "";
+		int r = 0, xit = 1, code = 1;
+
+		for (off = 2; off < n && r == 0; off += c)
+		{
+			size_t k = n - off < c ? n - off : c;
+
+			sb_add(&tin, d + off, k);
+			got += k;
+			r = ctl_in(&rs, &tin, &out, &err, &xit, why, msg,
+			           sizeof msg, &code);
+		}
+		inert(msg);
+		inert(why);
+		if (xit < 0 || xit > 255 ||
+		    (code != 1 && code != DCH_EXIT_REFUSED &&
+		     code != DCH_EXIT_TAKEN) ||
+		    out.n + err.n + tin.n > got)
+			abort();	/* bytes out came from bytes in */
+		if (tin.n >= RF_HDR + RF_CTRL_MAX && r == 0)
+			abort();	/* a held frame past its cap closes */
+		free(tin.p);
+		free(out.p);
+		free(err.p);
+		(void)hello_op(t, "ctl");
 		break;
 	}
 	case 7:		/* logsafe cut short */

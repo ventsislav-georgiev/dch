@@ -1,0 +1,33 @@
+{
+  "id": "36-ctl-cap",
+  "about": "At the output cap (lowered by DCH_CTL_CAP for the test) the server stops forwarding, ends the dch and sends 0x33 exit 2, why cap.",
+  "requires_op": "dch-serve-config",
+  "dch_serve": {
+    "args": [
+      "--allow-create"
+    ],
+    "env": {
+      "DCH_CTL_CAP": "16"
+    }
+  },
+  "steps": [
+    {
+      "send": "30 00000026 7b2261726776223a5b222d2d737461747573222c22676f6c64656e2d3737362d636170225d7d"
+    },
+    {
+      "expect": {
+        "type": "32",
+        "payload": "6e6f2073657373696f6e3a20676f6c64"
+      }
+    },
+    {
+      "expect": {
+        "type": "33",
+        "payload": "7b2265786974223a322c22776879223a22636170227d"
+      }
+    },
+    {
+      "expect_close": true
+    }
+  ]
+}

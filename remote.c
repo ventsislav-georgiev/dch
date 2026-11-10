@@ -1,6 +1,6 @@
 /*
 ** The dch client for remote hosts (#087): the sessions of the user's other
-** machines, served over Prosper's remote frames 1.0 (TCP 8771) by `dch
+** machines, served over Prosper's remote frames 1.0/1.1 (TCP 8771) by `dch
 ** serve` (serve.c) or by Prosper's DchSessionServer on a Mac.
 **
 ** Hosts. --hosts (or the config's remote_hosts), else discovery: the online
@@ -40,9 +40,14 @@
 ** and an attach is one loop over the console and the socket (win_relay),
 ** not attach.c and a relay child.
 **
+** Control verbs (#114): dch_remote_ctl sends one 0x30 (the verb's argv,
+** the host: off its names) on a connection of its own once the 0x18 lists
+** "ctl", and writes the 0x31/0x32 bytes out as they come; 0x33's exit is
+** its own.
+**
 ** ponytail: no 0x2e watch stream (the picker re-probes every RM_EVERY_MS),
-** and no remote kill, rename or create: those need ops-gated frames, and a
-** confirmation in the picker the way the local ones have one.
+** and no remote kill, rename or create from the picker: those need a
+** confirmation the way the local ones have one (the CLI verbs are ctl's).
 */
 #ifdef _WIN32
 #include "win/win.h"	/* Winsock, and the sock_* spellings below */
@@ -666,9 +671,11 @@ struct probe
 	int have;		/* sa is h's address */
 	int fd, st, hello;
 	int keep;		/* PR_OK leaves fd open, in holding what followed */
+	int hello_only;		/* a ctl's (#114): 0x08 alone, PR_OK on 0x18 */
 	struct rf_state rs;
 	struct sb in;
 	char *list;		/* the 0x11 payload, NUL-terminated */
+	char *hello_js;		/* hello_only: the 0x18 payload */
 	char why[300];		/* PR_FAIL, PR_NEWER, PR_REFUSED: printable */
 };
 
@@ -943,13 +950,20 @@ pr_frame(struct probe *p, const struct rf_frame *f)
 	else if (major > 1)
 	{
 		snprintf(why, sizeof why, "speaks protocol %s, newer than this "
-		         "dch's 1.0", proto);
+		         "dch's 1.1", proto);
 		pr_end(p, PR_NEWER, why);
 	}
 	else
+	{
 		p->hello = 1;
+		if (p->hello_only)
+		{
+			p->hello_js = t;
+			t = NULL;
+		}
+	}
 	free(t);
-	if (p->st == PR_WAIT && p->hello && p->list)
+	if (p->st == PR_WAIT && p->hello && (p->list || p->hello_only))
 	{
 		if (p->keep)
 			p->st = PR_OK;
@@ -1011,6 +1025,7 @@ static void
 probe_all(struct probe *v, int n, int ms)
 {
 	static const unsigned char rq[] = { 0x08, 0, 0, 0, 0, 0x03, 0, 0, 0, 0 };
+	size_t rqn = v[0].hello_only ? RF_HDR : sizeof rq;	/* one or all */
 	long long end = now_ms() + ms;
 	struct pollfd pf[RM_HOSTS];
 	int map[RM_HOSTS], i, np;
@@ -1060,8 +1075,8 @@ probe_all(struct probe *v, int n, int ms)
 			else if (getsockopt(p->fd, SOL_SOCKET, SO_ERROR,
 			                    (void *)&e, &l) < 0 || e)
 				pr_end(p, PR_FAIL, sock_str(e ? e : sock_err()));
-			else if (send(p->fd, (const void *)rq, sizeof rq,
-			              MSG_NOSIGNAL) != (ssize_t)sizeof rq)
+			else if (send(p->fd, (const void *)rq, rqn,
+			              MSG_NOSIGNAL) != (ssize_t)rqn)
 				pr_end(p, PR_FAIL, sock_str(sock_err()));
 			else
 				p->st = PR_WAIT;
@@ -1094,6 +1109,7 @@ probes_free(struct probe *v, int n)
 		if (v[i].fd >= 0)
 			sock_close(v[i].fd);
 		free(v[i].list);
+		free(v[i].hello_js);
 		free(v[i].in.p);
 	}
 	free(v);
@@ -2051,19 +2067,17 @@ win_relay(int fd, const char *label, const char *name, struct sb tin,
 }
 #endif
 
-/* host:name as a connection that has listed name, for the 0x01 to follow
-** on it: its socket, the host in *h, and what followed the list in *rest,
-** the parser's state in *rs; or -1, why said on stderr (-2: refused). */
+/* The host labelled `host` into *h: one the user named, or one discovery
+** found that `tailscale whois` says is the user's own. 0, or -1 with why
+** said on stderr. */
 static int
-attach_open(const char *host, const char *name, struct rhost *h,
-            struct sb *rest, struct rf_state *rs)
+host_pick(const char *host, struct rhost *h)
 {
 	struct rhost hv[RM_HOSTS];
-	char sh[300], sn[1100];
+	char sh[300];
 	int n = candidates(hv, RM_HOSTS, RM_TS_MS, 1), i;
 
 	logsafe(sh, sizeof sh, host);
-	logsafe(sn, sizeof sn, name);
 	if ((i = n > 0 ? host_find(hv, n, host) : -1) < 0)
 	{
 		fprintf(stderr, "dch: %s is not a known host (", sh);
@@ -2083,7 +2097,23 @@ attach_open(const char *host, const char *name, struct rhost *h,
 		return -1;
 	}
 	*h = hv[i];
-	return open_listed(&hv[i], name, sh, sn, rest, rs);
+	return 0;
+}
+
+/* host:name as a connection that has listed name, for the 0x01 to follow
+** on it: its socket, the host in *h, and what followed the list in *rest,
+** the parser's state in *rs; or -1, why said on stderr (-2: refused). */
+static int
+attach_open(const char *host, const char *name, struct rhost *h,
+            struct sb *rest, struct rf_state *rs)
+{
+	char sh[300], sn[1100];
+
+	if (host_pick(host, h) < 0)
+		return -1;
+	logsafe(sh, sizeof sh, host);
+	logsafe(sn, sizeof sn, name);
+	return open_listed(h, name, sh, sn, rest, rs);
 }
 
 #ifdef _WIN32
@@ -2175,3 +2205,347 @@ dch_remote_attach(const char *host, const char *name)
 	return rc;
 }
 #endif
+
+/* ---- ctl: a dch verb on a remote host (#114) ------------------------ */
+
+/* Whether the 0x18 hello js lists `op` in its "ops". Pure. */
+static int
+hello_op(const char *js, const char *op)
+{
+	struct json_parser jp;
+	char got[32];
+	int ops, i, hit = 0;
+
+	if (dch_json_parse(&jp, js) == 0 && jp.ntok > 0 &&
+	    jp.tok[0].kind == JSON_OBJECT &&
+	    (ops = jcont(&jp, 0, "ops", JSON_ARRAY)) >= 0)
+		for (i = ops + 1; i < jp.tok[ops].next && !hit;
+		     i = jp.tok[i].next)
+			hit = jp.tok[i].kind == JSON_STRING &&
+			      dch_json_decode(&jp, i, got, sizeof got) == 0 &&
+			      !strcmp(got, op);
+	dch_json_free(&jp);
+	return hit;
+}
+
+/* The server's frames in tin as a ctl client takes them: 0x31 onto out,
+** 0x32 onto err; 0x33's exit into *xit (0..255; a malformed one is 1) and
+** its "why", escaped, into why[cap]; a 0x13's message, escaped, into
+** msg[cap] and what its code makes the exit status into *code (err_text: 1
+** uncoded). What it parsed leaves tin. 1 once the ctl is over (a 0x33 or a
+** 0x13), 0 for more, -1 when the link must end (a frame over the limit).
+** Pure. */
+static int
+ctl_in(struct rf_state *rs, struct sb *tin, struct sb *out, struct sb *err,
+       int *xit, char *why, char *msg, size_t cap, int *code)
+{
+	struct rf_frame f;
+	size_t off = 0, used;
+	int r, rc = 0;
+
+	while (!rc && (r = rf_parse(rs, (const unsigned char *)tin->p + off,
+	                            tin->n - off, (size_t)-1, &f, &used))
+	       != RF_NEED)
+	{
+		off += used;
+		if (r == RF_CLOSE)
+		{
+			snprintf(msg, cap, "it sent a frame over the size limit");
+			rc = -1;
+		}
+		else if ((f.type == 0x31 || f.type == 0x32) && f.len)
+			sb_add(f.type == 0x31 ? out : err, f.data, f.len);
+		else if (f.type == 0x13 && r == RF_FRAME)
+		{
+			*code = err_text(f.data, f.len, msg, cap);
+			rc = 1;
+		}
+		else if (f.type == 0x33 && r == RF_FRAME)
+		{
+			struct json_parser jp;
+			char t[512], w[64];
+			long long v = -1;
+
+			*xit = 1;
+			why[0] = '\0';
+			if (f.len < sizeof t && !memchr(f.data, 0, f.len))
+			{
+				memcpy(t, f.data, f.len);
+				t[f.len] = '\0';
+				if (dch_json_parse(&jp, t) == 0 && jp.ntok > 0 &&
+				    jp.tok[0].kind == JSON_OBJECT)
+				{
+					if (jint(&jp, 0, "exit", &v) == 1 && v >= 0 &&
+					    v <= 255)
+						*xit = (int)v;
+					if (jstr(&jp, 0, "why", w, sizeof w) == 1)
+						logsafe(why, cap, w);
+				}
+				dch_json_free(&jp);
+			}
+			rc = 1;
+		}
+	}
+	if (off)
+	{
+		memmove(tin->p, tin->p + off, tin->n - off);
+		tin->n -= off;
+	}
+	return rc;
+}
+
+/* What ctl_in gathered, onto stdout and stderr as it comes: 0, or -1 when
+** stdout is gone (a reader that closed the pipe). */
+static int
+ctl_put(struct sb *out, struct sb *err)
+{
+	int rc = 0;
+
+	if (err->n)
+	{
+		fwrite(err->p, 1, err->n, stderr);
+		fflush(stderr);
+	}
+	if (out->n && (fwrite(out->p, 1, out->n, stdout) != out->n ||
+	               fflush(stdout)))
+		rc = -1;
+	out->n = err->n = 0;
+	return rc;
+}
+
+/* argv as a 0x30 request (cwd's too when set) into *b. */
+static void
+ctl_payload(struct sb *b, int argc, char **argv, const char *cwd)
+{
+	struct sb j = {0};
+	int i;
+
+	sb_s(&j, "{\"argv\":[");
+	for (i = 0; i < argc; i++)
+	{
+		sb_s(&j, i ? "," : "");
+		sb_q(&j, argv[i]);
+	}
+	sb_s(&j, "]");
+	if (cwd)
+	{
+		sb_s(&j, ",\"cwd\":");
+		sb_q(&j, cwd);
+	}
+	sb_s(&j, "}");
+	if (j.bad || j.n > RF_CTRL_MAX)
+		b->bad = 1;
+	else
+		put_frame(b, 0x30, j.p, j.n);
+	free(j.p);
+}
+
+/* The ctl's request out on fd, then its frames until 0x33 or 0x13: the
+** exit status (remote.h), what went wrong said on stderr. */
+static int
+ctl_run(int fd, const char *sh, const char *verb, struct sb *rq,
+        struct sb tin, struct rf_state rs)
+{
+	struct sb out = {0}, err = {0};
+	unsigned char buf[RM_READ];
+	char msg[400] = "", why[100] = "";
+	size_t off = 0;
+	long long end = now_ms() + RM_ATTACH_MS;
+	int r = 0, xit = 1, code = 1;
+	ssize_t k;
+
+	while (off < rq->n)
+	{
+		struct pollfd pf;
+		long long left = end - now_ms();
+
+		pf.fd = fd;
+		pf.events = POLLOUT;
+		pf.revents = 0;
+		k = send(fd, (const void *)(rq->p + off), rq->n - off,
+		         MSG_NOSIGNAL);
+		if (k > 0)
+			off += (size_t)k;
+		else if (left <= 0 || (sock_err() != SE_AGAIN &&
+		                       sock_err() != SE_INTR))
+		{
+			snprintf(msg, sizeof msg, "%s", left <= 0 ? "timed out"
+			         : sock_str(sock_err()));
+			r = -1;
+			break;
+		}
+		else
+			(void)poll(&pf, 1, (int)left);
+	}
+	while (!r)
+	{
+		struct pollfd pf;
+
+		r = ctl_in(&rs, &tin, &out, &err, &xit, why, msg, sizeof msg,
+		           &code);
+		if (tin.bad || out.bad || err.bad)
+		{
+			snprintf(msg, sizeof msg, "out of memory");
+			r = -1;
+		}
+		if (ctl_put(&out, &err) < 0)
+		{
+			r = 2;	/* our reader is gone: so are we */
+			break;
+		}
+		if (r)
+			break;
+		pf.fd = fd;
+		pf.events = POLLIN;
+		pf.revents = 0;
+		if (poll(&pf, 1, -1) < 0)
+		{
+			if (sock_err() == SE_INTR)
+				continue;
+			snprintf(msg, sizeof msg, "poll: %s",
+			         sock_str(sock_err()));
+			r = -1;
+			break;
+		}
+		k = sock_read(fd, buf, sizeof buf);
+		if (k < 0 && (sock_err() == SE_INTR || sock_err() == SE_AGAIN))
+			continue;
+		if (k <= 0)
+		{
+			snprintf(msg, sizeof msg, "%s", k ? sock_str(sock_err())
+			         : "the connection was lost");
+			r = -1;
+		}
+		else
+			sb_add(&tin, buf, (size_t)k);
+	}
+	free(tin.p);
+	free(out.p);
+	free(err.p);
+	if (r == 2)
+		return 0;
+	if (r < 0)
+	{
+		fprintf(stderr, "dch: %s: unreachable: %s\n", sh, msg);
+		return DCH_EXIT_UNREACHABLE;
+	}
+	if (msg[0])
+	{
+		/* a 0x13: the host refused this request, nothing ran */
+		if (code == 1)
+			fprintf(stderr, "dch: %s: %s\n", sh, msg);
+		else
+			fprintf(stderr, "dch: %s refused: %s\n", sh, msg);
+		return code == 1 ? 1 : DCH_EXIT_REFUSED;
+	}
+	if (why[0])
+		fprintf(stderr, "dch: %s: %s stopped by the host (%s)\n", sh,
+		        verb, why);
+	return xit;
+}
+
+int
+dch_remote_ctl(const char *host, int argc, char **argv, const char *cwd)
+{
+	static unsigned char kind[CTL_ARGV_MAX];
+	char why[300], hb[DCH_RHOST_MAX], sh[300], **av = NULL;
+	struct sb rq = {0};
+	struct rhost h;
+	struct probe *p = NULL;
+	int fl, i, rc = 1;
+
+	if ((fl = ctl_check(argc, argv, kind, why, sizeof why)) < 0)
+	{
+		fprintf(stderr, "dch: can't run on a remote host: %s\n", why);
+		return 1;
+	}
+#ifndef _WIN32
+	/* a reader that closed our stdout ends us with 0, as --follow's does */
+	signal(SIGPIPE, SIG_IGN);
+#endif
+	if (!(av = malloc(((size_t)argc + 1) * sizeof *av)))
+		return 1;
+	memcpy(av, argv, ((size_t)argc + 1) * sizeof *av);
+	/* host:name: every name on the one host, the prefix off */
+	hb[0] = '\0';
+	for (i = 0; !host && i < argc; i++)
+	{
+		const char *c = strchr(argv[i], ':');
+		size_t n = c ? (size_t)(c - argv[i]) : 0;
+
+		if (kind[i] != CK_NAME)
+			continue;
+		logsafe(sh, sizeof sh, argv[i]);
+		if (!n || n >= sizeof hb)
+		{
+			fprintf(stderr, "dch: %s is not host:name\n", sh);
+			goto out;
+		}
+		if (!hb[0])
+		{
+			memcpy(hb, argv[i], n);
+			hb[n] = '\0';
+		}
+		else if (strncasecmp(hb, argv[i], n) || hb[n])
+		{
+			fprintf(stderr, "dch: %s: the names are on different "
+			        "hosts\n", sh);
+			goto out;
+		}
+		av[i] = argv[i] + n + 1;
+	}
+	if (!host)
+	{
+		host = hb;
+		if (ctl_check(argc, av, kind, why, sizeof why) < 0)
+		{
+			fprintf(stderr, "dch: can't run on a remote host: %s\n", why);
+			goto out;
+		}
+	}
+	logsafe(sh, sizeof sh, host);
+	ctl_payload(&rq, argc, av, cwd);
+	if (rq.bad)
+	{
+		fprintf(stderr, "dch: the request is over %u KiB\n",
+		        RF_CTRL_MAX >> 10);
+		goto out;
+	}
+	if (host_pick(host, &h) < 0 || !(p = calloc(1, sizeof *p)))
+		goto out;
+	p->h = h;
+	p->keep = p->hello_only = 1;
+	probe_all(p, 1, RM_ATTACH_MS);
+	if (p->st == PR_REFUSED)
+	{
+		fprintf(stderr, "dch: %s refused: %s\n", sh, p->why);
+		rc = DCH_EXIT_REFUSED;
+	}
+	else if (p->st == PR_NEWER)
+		fprintf(stderr, "dch: %s %s\n", sh, p->why);
+	else if (p->st != PR_OK)
+	{
+		fprintf(stderr, "dch: %s: unreachable: %s\n", sh, p->why);
+		rc = DCH_EXIT_UNREACHABLE;
+	}
+	else if (!hello_op(p->hello_js, "ctl") ||
+	         (fl & CTL_CREATE && !hello_op(p->hello_js, "create")))
+	{
+		fprintf(stderr, "dch: %s: does not support %s (needs dch serve "
+		        "%s)\n", sh, argv[0], hello_op(p->hello_js, "ctl")
+		        ? "--allow-create" : "1.41+");
+		rc = DCH_EXIT_UNSUPPORTED;
+	}
+	else
+	{
+		keepalive(p->fd);
+		rc = ctl_run(p->fd, sh, argv[0], &rq, p->in, p->rs);
+		memset(&p->in, 0, sizeof p->in);
+	}
+out:
+	if (p)
+		probes_free(p, 1);
+	free(rq.p);
+	free(av);
+	return rc;
+}

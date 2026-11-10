@@ -1,7 +1,8 @@
 /*
 ** dch.exe (#077): the dch client for remote hosts on Windows. It lists the
 ** sessions of the user's other machines and attaches to one; it hosts none,
-** so every row and every attach is remote, and -ls implies --remote. The
+** so every row, every attach and every control verb (#114) is remote, and
+** -ls implies --remote. The
 ** hosts, discovery, the probes and the attach's checks are remote.c's, as
 ** on POSIX. dch alone is the picker (#090), picker.c's, on the console.
 */
@@ -27,6 +28,11 @@ usage(FILE *f)
 	    "  dch --host <h> -a <name>  attach to <name> on host h\n"
 	    "  dch --hosts <h1,h2,...>   the remote hosts, [label=]host[:port],\n"
 	    "                   instead of your online tailnet peers\n"
+	    "  dch [--host <h>] [--cwd <dir>] <verb> host:name ...  a control verb\n"
+	    "                   run on that host (dch serve 1.41+): --read,\n"
+	    "                   --send, --run, --keys, --follow, --status, -k, -m,\n"
+	    "                   -d, --spawn, --history, --revive, --pin, --unpin,\n"
+	    "                   --forget, --stop, --say (see dch -h on the host)\n"
 	    "  dch -h, --help   this help\n"
 	    "  dch -V, --version\n"
 	    "Ctrl-\\ detaches; the session lives on. Twice, quickly: back to\n"
@@ -231,7 +237,7 @@ utf8_argv(int *argc)
 int
 main(int argc, char **argv)
 {
-	const char *aname = NULL, *host = NULL;
+	const char *aname = NULL, *host = NULL, *cwd = NULL;
 	char hbuf[512];
 	int action = A_NONE, i;
 	WSADATA wd;
@@ -269,6 +275,17 @@ main(int argc, char **argv)
 			action = A_JSON;
 		else if (!strcmp(a, "--remote"))
 			;	/* implied */
+		else if (ctl_known(a))
+			break;	/* #114: the rest is a control verb's, as typed */
+		else if (!strcmp(a, "--cwd"))
+		{
+			if (++i >= argc || !argv[i][0])
+			{
+				fprintf(stderr, "dch: --cwd needs a directory\n");
+				return 1;
+			}
+			cwd = argv[i];
+		}
 		else if (!strcmp(a, "-a") || !strcmp(a, "--host") ||
 		         !strcmp(a, "--hosts"))
 		{
@@ -309,9 +326,21 @@ main(int argc, char **argv)
 			return 1;
 		}
 	}
-	if (host && action != A_ATTACH)
+	if (i < argc && action != A_NONE)
 	{
-		fprintf(stderr, "dch: --host only works with -a <name>\n");
+		fprintf(stderr, "dch: %s does not go with -a or a listing\n",
+		        argv[i]);
+		return 1;
+	}
+	if (cwd && (i == argc || strcmp(argv[i], "--spawn")))
+	{
+		fprintf(stderr, "dch: --cwd only works with --spawn\n");
+		return 1;
+	}
+	if (host && action != A_ATTACH && i == argc)
+	{
+		fprintf(stderr, "dch: --host only works with -a <name> and the "
+		        "control verbs\n");
 		return 1;
 	}
 	if (WSAStartup(MAKEWORD(2, 2), &wd))
@@ -319,6 +348,8 @@ main(int argc, char **argv)
 		fprintf(stderr, "dch: Winsock would not start\n");
 		return 1;
 	}
+	if (i < argc)
+		return dch_remote_ctl(host, argc - i, argv + i, cwd);
 	if (action == A_NONE)
 		return pick_attach(NULL, NULL);
 	if (action != A_ATTACH)

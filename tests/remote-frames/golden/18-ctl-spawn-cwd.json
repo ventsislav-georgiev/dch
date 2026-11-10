@@ -1,0 +1,26 @@
+{
+  "id": "18-ctl-spawn-cwd",
+  "about": "0x30 --spawn with a cwd (create on): one 0x31 with the name, 0x33 exit 0, then the FIN. Starts the session 19-25 use.",
+  "requires_op": "ctl",
+  "mutating": true,
+  "steps": [
+    {
+      "send": "30 0000004f 7b2261726776223a5b222d2d737061776e222c22676f6c64656e2d3737362d63746c222c222d2d73697a65222c2232307832222c222d2d222c222f62696e2f636174225d2c22637764223a222f227d"
+    },
+    {
+      "expect": {
+        "type": "31",
+        "payload": "676f6c64656e2d3737362d63746c0a"
+      }
+    },
+    {
+      "expect": {
+        "type": "33",
+        "payload": "7b2265786974223a307d"
+      }
+    },
+    {
+      "expect_close": true
+    }
+  ]
+}

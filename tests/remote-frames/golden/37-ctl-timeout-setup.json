@@ -1,0 +1,35 @@
+{
+  "id": "37-ctl-timeout-setup",
+  "about": "Starts a quiet session for 38.",
+  "mutating": true,
+  "dch_mirror": true,
+  "requires_op": "dch-serve-config",
+  "dch_serve": {
+    "args": [
+      "--allow-create"
+    ],
+    "env": {
+      "DCH_CTL_TIMEOUT_MS": "800"
+    }
+  },
+  "steps": [
+    {
+      "send": "30 00000044 7b2261726776223a5b222d2d737061776e222c22676f6c64656e2d3737362d746f222c222d2d73697a65222c2232307832222c222d2d222c222f62696e2f636174225d7d"
+    },
+    {
+      "expect": {
+        "type": "31",
+        "payload": "676f6c64656e2d3737362d746f0a"
+      }
+    },
+    {
+      "expect": {
+        "type": "33",
+        "payload": "7b2265786974223a307d"
+      }
+    },
+    {
+      "expect_close": true
+    }
+  ]
+}

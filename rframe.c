@@ -14,6 +14,7 @@
 #include "rframe.h"
 
 #include <ctype.h>
+#include <stdarg.h>
 #ifndef _WIN32
 #include <poll.h>
 #endif
@@ -120,16 +121,17 @@ copy_str(char *dst, size_t cap, const char *src)
 
 /* ---- the frame parser (pure; tests/fuzz/fuzz_serve.c) ---------------- */
 
-/* The frames buffered whole: from a client, the core subset's requests;
-** from a server, the replies a dch client reads (hello, list, exit, error,
-** ok). Everything else streams. */
+/* The frames buffered whole: from a client, the core subset's requests and
+** 1.1's ctl (0x30); from a server, the replies a dch client reads (hello,
+** list, exit, error, ok, a ctl's exit 0x33). Everything else streams (a
+** ctl's output, 0x31 and 0x32, too). */
 static int
 rf_control(const struct rf_state *st, unsigned int t)
 {
 	if (st->from_server)
 		return t == 0x11 || t == 0x12 || t == 0x13 || t == 0x14 ||
-		       t == 0x18;
-	return (t >= 0x01 && t <= 0x09) || t == 0x2e;
+		       t == 0x18 || t == 0x33;
+	return (t >= 0x01 && t <= 0x09) || t == 0x2e || t == 0x30;
 }
 
 /* The next piece of a peer's byte stream b[0..n): a client's, or with
@@ -419,6 +421,258 @@ whois_user(const char *js, long long *uid, char *node, char *login,
 	}
 	dch_json_free(&jp);
 	return rc;
+}
+
+/* ---- ctl: the verbs dch serve runs (pure; tests/fuzz) --------------- */
+
+/* A session name dch can be handed as one argv word: UTF-8 with no '/' and
+** no control logsafe would escape. The leading '-' is checked apart (it has
+** its own spec message). */
+int
+name_ok(const char *s)
+{
+	const unsigned char *p = (const unsigned char *)s;
+	size_t n = strlen(s);
+	unsigned cp;
+	int k;
+
+	if (!n || n > NAME_CAP || s[0] == '-')
+		return 0;
+	for (; *p; p += k)
+		if (!(k = utf8_at(p, &cp)) || cp_ctl(cp) || cp == '/')
+			return 0;
+	return 1;
+}
+
+enum { CN_NONE, CN_ONE, CN_MANY };	/* the session names a verb takes */
+enum { CT_NONE, CT_TEXT, CT_ALIAS, CT_SAY };	/* free text after them */
+#define CTL_JSON 8	/* --json, required */
+#define CTL_ALL 16	/* --all instead of the names (--forget only) */
+
+/* The allowlist (remote frames 1.1, #114). Each verb's shape is dch's own
+** parser's (dch.c main), narrowed: the names right after the verb (CN_ONE)
+** or anywhere among the flags (CN_MANY); then only the flags in `opts`;
+** then, for CT_TEXT, an optional `--` and free text (--send's words,
+** --keys' keys, --spawn's command), for CT_SAY a required `--` and the
+** text, for CT_ALIAS exactly one word. --recent takes an optional count,
+** --size COLSxROWS, --as a session name. Nothing else ever runs. */
+static const struct ctl_verb
+{
+	const char *verb;
+	unsigned char names, tail;
+	int flags;
+	const char *opts;	/* " --a --b ": the flags it takes */
+} ctl_verbs[] = {
+	/* verb         names    tail      flags                 opts */
+	{ "--read",     CN_ONE,  CT_NONE,  0, " --ansi --recent --cursor " },
+	{ "--send",     CN_ONE,  CT_TEXT,  0, "" },
+	{ "--run",      CN_ONE,  CT_TEXT,  0, "" },
+	{ "--keys",     CN_ONE,  CT_TEXT,  0, "" },
+	{ "--follow",   CN_ONE,  CT_NONE,  CTL_FOREVER, "" },
+	{ "--status",   CN_ONE,  CT_NONE,  0, "" },
+	{ "-k",         CN_ONE,  CT_NONE,  0, "" },
+	{ "-m",         CN_ONE,  CT_ALIAS, 0, "" },
+	{ "-d",         CN_ONE,  CT_NONE,  0, "" },
+	{ "--spawn",    CN_ONE,  CT_TEXT,  CTL_CREATE, " --size " },
+	{ "--history",  CN_NONE, CT_NONE,  CTL_JSON, "" },
+	{ "--revive",   CN_ONE,  CT_NONE,  CTL_CREATE | CTL_LONG | CTL_JSON,
+	                " --as --no-message " },
+	{ "--pin",      CN_MANY, CT_NONE,  CTL_JSON, "" },
+	{ "--unpin",    CN_MANY, CT_NONE,  CTL_JSON, "" },
+	{ "--forget",   CN_MANY, CT_NONE,  CTL_JSON | CTL_ALL, "" },
+	{ "--stop",     CN_MANY, CT_NONE,  CTL_LONG | CTL_JSON, "" },
+	{ "--say",      CN_ONE,  CT_SAY,   CTL_LONG | CTL_JSON, "" },
+};
+
+static const struct ctl_verb *
+ctl_find(const char *verb)
+{
+	size_t i;
+
+	for (i = 0; i < sizeof ctl_verbs / sizeof *ctl_verbs; i++)
+		if (!strcmp(verb, ctl_verbs[i].verb))
+			return &ctl_verbs[i];
+	return NULL;
+}
+
+int
+ctl_known(const char *verb)
+{
+	return ctl_find(verb) != NULL;
+}
+
+/* Never in a ctl's argv, but in free text: dch's other modes and help, the
+** forced forget. */
+static int
+ctl_never(const char *a)
+{
+	return !strcmp(a, "--config") || !strcmp(a, "serve") ||
+	       !strcmp(a, "-h") || !strcmp(a, "--help") || !strcmp(a, "-f");
+}
+
+/* All digits, lo..hi. */
+static int
+ctl_count(const char *s, long lo, long hi)
+{
+	size_t k = strspn(s, "0123456789");
+	long v;
+
+	if (!k || k > 5 || s[k])
+		return 0;
+	v = strtol(s, NULL, 10);
+	return v >= lo && v <= hi;
+}
+
+static int
+ctl_size(const char *s)
+{
+	const char *x = strchr(s, 'x');
+	char c[8];
+
+	if (!x || (size_t)(x - s) >= sizeof c)
+		return 0;
+	memcpy(c, s, (size_t)(x - s));
+	c[x - s] = '\0';
+	return ctl_count(c, 1, 4096) && ctl_count(x + 1, 1, 4096);
+}
+
+static int ctl_no(char *why, size_t cap, const char *fmt, ...)
+	__attribute__((format(printf, 3, 4)));
+
+static int
+ctl_no(char *why, size_t cap, const char *fmt, ...)
+{
+	va_list ap;
+
+	va_start(ap, fmt);
+	vsnprintf(why, cap, fmt, ap);
+	va_end(ap);
+	return -1;
+}
+
+/* A session name in a ctl: 0, or -1 with why. */
+static int
+ctl_name(const char *s, char *why, size_t cap)
+{
+	if (s[0] == '-')
+		return ctl_never(s) || !strcmp(s, "--all")
+		       ? ctl_no(why, cap, "%.60s is not allowed", s)
+		       : ctl_no(why, cap, "%s", DASH_MSG);
+	if (!name_ok(s) || ctl_never(s))
+		return ctl_no(why, cap, "invalid session name");
+	return 0;
+}
+
+int
+ctl_check(int argc, char *const argv[], unsigned char *kind, char *why,
+          size_t cap)
+{
+	const struct ctl_verb *v;
+	int i = 1, names = 0, json = 0, all = 0, dd = 0;
+
+	/* reserved for a later release: its own reason, whatever follows */
+	if (argc >= 1 && !strcmp(argv[0], "--xray"))
+		return ctl_no(why, cap, "xray not supported by this host");
+	if (argc < 2)
+		return ctl_no(why, cap, "a ctl request takes a verb and a "
+		              "session name");
+	if (argc > CTL_ARGV_MAX)
+		return ctl_no(why, cap, "too many arguments");
+	if (!(v = ctl_find(argv[0])))
+		return ctl_no(why, cap, "%.60s is not allowed", argv[0]);
+	memset(kind, 0, (size_t)argc);
+	kind[0] = CK_VERB;
+	if (v->names == CN_ONE && v->tail != CT_SAY)
+	{
+		if (ctl_name(argv[1], why, cap) < 0)
+			return -1;
+		kind[i++] = CK_NAME;
+		names = 1;
+	}
+	if (v->tail == CT_ALIAS)
+	{
+		if (argc != 3)
+			return ctl_no(why, cap, "%s takes a session name and an "
+			              "alias", v->verb);
+		kind[2] = CK_TEXT;
+		return v->flags & (CTL_CREATE | CTL_LONG | CTL_FOREVER);
+	}
+	for (; i < argc; i++)
+	{
+		const char *a = argv[i];
+		char sp[80];
+
+		if (v->tail >= CT_TEXT && !strcmp(a, "--"))
+		{
+			kind[i++] = CK_FLAG;
+			dd = 1;
+			break;
+		}
+		/* dch's parser: "", "-" or a word start the command */
+		if (v->tail == CT_TEXT && (a[0] != '-' || !a[1]))
+			break;
+		if ((v->flags & CTL_JSON && !strcmp(a, "--json")) ||
+		    (v->flags & CTL_ALL && !strcmp(a, "--all")))
+		{
+			*(a[2] == 'j' ? &json : &all) = 1;
+			kind[i] = CK_FLAG;
+			continue;
+		}
+		if ((v->names == CN_MANY || v->tail == CT_SAY) && a[0] &&
+		    a[0] != '-')
+		{
+			if (ctl_name(a, why, cap) < 0)
+				return -1;
+			kind[i] = CK_NAME;
+			names++;
+			continue;
+		}
+		snprintf(sp, sizeof sp, " %.70s ", a);
+		if (a[0] != '-' || strchr(a, ' ') || !strstr(v->opts, sp))
+			return ctl_never(a) || !strcmp(a, "--all")
+			       ? ctl_no(why, cap, "%.60s is not allowed", a)
+			       : a[0] == '-'
+			       ? ctl_no(why, cap, "%.60s is not allowed with %s",
+			                a, v->verb)
+			       : ctl_no(why, cap, "unexpected %.60s after %s", a,
+			                v->verb);
+		kind[i] = CK_FLAG;
+		if (!strcmp(a, "--recent") && i + 1 < argc &&
+		    argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9')
+		{
+			if (!ctl_count(argv[++i], 1, 65535))
+				return ctl_no(why, cap, "--recent wants 1..65535 "
+				              "lines");
+			kind[i] = CK_VALUE;
+		}
+		else if (!strcmp(a, "--size"))
+		{
+			if (++i >= argc || !ctl_size(argv[i]))
+				return ctl_no(why, cap, "--size wants COLSxROWS");
+			kind[i] = CK_VALUE;
+		}
+		else if (!strcmp(a, "--as"))
+		{
+			if (++i >= argc)
+				return ctl_no(why, cap, "--as needs a session "
+				              "name");
+			if (ctl_name(argv[i], why, cap) < 0)
+				return -1;
+			kind[i] = CK_VALUE;
+		}
+	}
+	for (; i < argc; i++)
+		kind[i] = CK_TEXT;	/* the loop ends here only for text */
+	if (v->tail == CT_SAY && !dd)
+		return ctl_no(why, cap, "%s needs -- before its text", v->verb);
+	if (v->tail == CT_SAY && names != 1)
+		return ctl_no(why, cap, "%s takes one session name", v->verb);
+	if (v->names == CN_MANY && !!names == all)
+		return ctl_no(why, cap, "%s takes session names%s", v->verb,
+		              v->flags & CTL_ALL ? ", or --all" : "");
+	if (v->flags & CTL_JSON && !json)
+		return ctl_no(why, cap, "%s needs --json", v->verb);
+	return v->flags & (CTL_CREATE | CTL_LONG | CTL_FOREVER);
 }
 
 /* ---- subprocesses ---------------------------------------------------- */

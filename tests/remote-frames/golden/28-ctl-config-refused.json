@@ -1,0 +1,21 @@
+{
+  "id": "28-ctl-config-refused",
+  "about": "--config anywhere outside the text is refused.",
+  "requires_op": "ctl",
+  "steps": [
+    {
+      "send": "30 0000002f 7b2261726776223a5b222d2d72656164222c22676f6c64656e2d3737362d63746c222c222d2d636f6e666967225d7d"
+    },
+    {
+      "expect": {
+        "type": "13",
+        "json": {
+          "message": "string~.+"
+        }
+      }
+    },
+    {
+      "expect_close": true
+    }
+  ]
+}

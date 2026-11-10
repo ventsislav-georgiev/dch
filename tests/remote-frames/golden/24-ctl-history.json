@@ -1,0 +1,25 @@
+{
+  "id": "24-ctl-history",
+  "about": "0x30 --history --json: the JSON as 0x31, 0x33 exit 0, the FIN.",
+  "requires_op": "ctl",
+  "steps": [
+    {
+      "send": "30 0000001f 7b2261726776223a5b222d2d686973746f7279222c222d2d6a736f6e225d7d"
+    },
+    {
+      "expect": {
+        "type": "31",
+        "nonempty": true
+      }
+    },
+    {
+      "expect": {
+        "type": "33",
+        "payload": "7b2265786974223a307d"
+      }
+    },
+    {
+      "expect_close": true
+    }
+  ]
+}

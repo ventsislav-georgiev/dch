@@ -1,0 +1,20 @@
+{
+  "id": "19-ctl-send-text",
+  "about": "0x30 --send <n> -- <text>: no output, 0x33 exit 0, the FIN.",
+  "requires_op": "ctl",
+  "mutating": true,
+  "steps": [
+    {
+      "send": "30 00000041 7b2261726776223a5b222d2d73656e64222c22676f6c64656e2d3737362d63746c222c222d2d222c2268656c6c6f222c222d66222c222d2d636f6e666967225d7d"
+    },
+    {
+      "expect": {
+        "type": "33",
+        "payload": "7b2265786974223a307d"
+      }
+    },
+    {
+      "expect_close": true
+    }
+  ]
+}

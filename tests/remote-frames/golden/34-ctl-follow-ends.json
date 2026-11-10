@@ -1,0 +1,30 @@
+{
+  "id": "34-ctl-follow-ends",
+  "about": "0x30 --follow <n>: the frames as they come, then when the session ends 0x33 exit 0 and the FIN.",
+  "cleanup": [
+    "04 00000019 7b226e616d65223a22676f6c64656e2d3737362d666f6c227d"
+  ],
+  "dch_mirror": true,
+  "requires_op": "ctl",
+  "mutating": true,
+  "steps": [
+    {
+      "send": "30 00000026 7b2261726776223a5b222d2d666f6c6c6f77222c22676f6c64656e2d3737362d666f6c225d7d"
+    },
+    {
+      "expect": {
+        "type": "31",
+        "nonempty": true
+      }
+    },
+    {
+      "expect": {
+        "type": "33",
+        "payload": "7b2265786974223a307d"
+      }
+    },
+    {
+      "expect_close": true
+    }
+  ]
+}

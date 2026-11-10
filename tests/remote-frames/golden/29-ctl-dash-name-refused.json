@@ -1,0 +1,19 @@
+{
+  "id": "29-ctl-dash-name-refused",
+  "about": "A session name starting with - is refused (dch would read it as a flag).",
+  "requires_op": "ctl",
+  "steps": [
+    {
+      "send": "30 0000001d 7b2261726776223a5b222d2d72656164222c222d676f6c64656e225d7d"
+    },
+    {
+      "expect": {
+        "type": "13",
+        "payload": "7b226d657373616765223a22612073657373696f6e206e616d65207374617274696e672077697468202d2063616e27742062652070617373656420746f20646368227d"
+      }
+    },
+    {
+      "expect_close": true
+    }
+  ]
+}

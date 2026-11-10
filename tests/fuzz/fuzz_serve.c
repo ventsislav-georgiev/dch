@@ -5,7 +5,10 @@
 ** buffer must never stall. The same bytes as text go through rows_wire
 ** (its output must parse as JSON), the whois/status readers and the peer
 ** gate, the pull-url allowlist, the name check and an attach request's
-** JSON (size and #101's scrollback). Linked with the rest of dch minus
+** JSON (size and #101's scrollback); #114's ctl allowlist, over a 0x30's
+** JSON (ctl_request) and over the input's lines as an argv (ctl_check):
+** what passes starts with an allowlisted verb, its names pass name_ok and
+** no forbidden word sits outside free text. Linked with the rest of dch minus
 ** serve.o, and dch.c built with -Dmain=dch_main. */
 #include "../../serve.c"
 
@@ -116,6 +119,32 @@ parse_pieces(const uint8_t *d, size_t n, size_t room, struct sb *out)
 	memset(&ev, 0, sizeof ev);
 }
 
+/* What ctl_check let through (fl >= 0) is on the allowlist. */
+static void
+ctl_inv(int ac, char **av, const unsigned char *kind, int fl)
+{
+	int i;
+
+	if (fl < 0)
+		return;
+	if (ac < 2 || ac > CTL_ARGV_MAX || !ctl_known(av[0]) ||
+	    kind[0] != CK_VERB || (fl & ~(CTL_CREATE | CTL_LONG | CTL_FOREVER)))
+		abort();
+	for (i = 1; i < ac; i++)
+	{
+		const char *a = av[i];
+
+		if (kind[i] < CK_FLAG || kind[i] > CK_TEXT ||
+		    (kind[i] == CK_NAME && !name_ok(a)))
+			abort();
+		if (kind[i] != CK_TEXT &&
+		    (!strcmp(a, "--config") || !strcmp(a, "serve") ||
+		     !strcmp(a, "-h") || !strcmp(a, "--help") || !strcmp(a, "-f") ||
+		     (!strcmp(a, "--all") && strcmp(av[0], "--forget"))))
+			abort();
+	}
+}
+
 int
 LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 {
@@ -214,6 +243,43 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		if (cols < 1 || cols > 1000 || rows < 1 || rows > 1000 ||
 		    sb < 0 || sb > DCH_SCROLLBACK_MAX)
 			abort();
+	}
+	if (n <= RF_CTRL_MAX)
+	{
+		/* #114: a 0x30 as on_ctl reads it; ctl_check agrees on argv */
+		static unsigned char kind[CTL_ARGV_MAX];
+		char **av, cwd[PATH_MAX], why[200];
+		int ac, fl = ctl_request(d, n, &av, &ac, cwd, why, sizeof why);
+
+		if (fl < 0 ? av != NULL || !why[0]
+		           : !av || (cwd[0] && cwd[0] != '/') ||
+		             ctl_check(ac, av, kind, why, sizeof why) != fl)
+			abort();
+		if (fl >= 0)
+			ctl_inv(ac, av, kind, fl);
+		free(av);
+	}
+	{
+		/* the input's lines as an argv */
+		unsigned char kind[64];
+		char *v[64], *c = strdup(text), *q = c, why[200];
+		int ac = 0, fl;
+
+		while (q && ac < 64)
+		{
+			v[ac++] = q;
+			if ((q = strchr(q, '\n')))
+				*q++ = '\0';
+		}
+		fl = c ? ctl_check(ac, v, kind, why, sizeof why) : -1;
+		if (c && fl < 0 && !why[0])
+			abort();
+		if (c && ac && !strcmp(v[0], "--xray") &&
+		    (fl >= 0 || strcmp(why, "xray not supported by this host")))
+			abort();
+		if (c)
+			ctl_inv(ac, v, kind, fl);
+		free(c);
 	}
 	cut_scalars(text, 3);
 	free(text);

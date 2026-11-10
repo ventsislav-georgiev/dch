@@ -1,0 +1,23 @@
+{
+  "id": "35-ctl-create-off",
+  "about": "Without --allow-create, --spawn over ctl is refused and nothing runs. dch's test runs it against dch serve with no --allow-create.",
+  "requires_op": "dch-serve-config",
+  "dch_serve": {
+    "args": [],
+    "env": {}
+  },
+  "steps": [
+    {
+      "send": "30 00000034 7b2261726776223a5b222d2d737061776e222c22676f6c64656e2d3737362d6e63222c222d2d222c222f62696e2f636174225d7d"
+    },
+    {
+      "expect": {
+        "type": "13",
+        "payload": "7b226d657373616765223a226372656174696e672073657373696f6e73206973206f6666206f6e207468697320686f73742028646368207365727665202d2d616c6c6f772d63726561746529227d"
+      }
+    },
+    {
+      "expect_close": true
+    }
+  ]
+}

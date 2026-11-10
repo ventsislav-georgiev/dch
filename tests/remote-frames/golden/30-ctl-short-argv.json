@@ -1,0 +1,21 @@
+{
+  "id": "30-ctl-short-argv",
+  "about": "An argv of fewer than two elements is refused.",
+  "requires_op": "ctl",
+  "steps": [
+    {
+      "send": "30 00000016 7b2261726776223a5b222d2d686973746f7279225d7d"
+    },
+    {
+      "expect": {
+        "type": "13",
+        "json": {
+          "message": "string~.+"
+        }
+      }
+    },
+    {
+      "expect_close": true
+    }
+  ]
+}

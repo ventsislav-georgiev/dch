@@ -1,0 +1,20 @@
+{
+  "id": "23-ctl-alias",
+  "about": "0x30 -m <n> <alias>: 0x33 exit 0, the FIN.",
+  "requires_op": "ctl",
+  "mutating": true,
+  "steps": [
+    {
+      "send": "30 0000002f 7b2261726776223a5b222d6d222c22676f6c64656e2d3737362d63746c222c22676f6c64656e20616c696173225d7d"
+    },
+    {
+      "expect": {
+        "type": "33",
+        "payload": "7b2265786974223a307d"
+      }
+    },
+    {
+      "expect_close": true
+    }
+  ]
+}

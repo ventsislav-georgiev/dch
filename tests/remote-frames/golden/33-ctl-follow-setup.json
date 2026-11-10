@@ -1,0 +1,27 @@
+{
+  "id": "33-ctl-follow-setup",
+  "about": "Starts a session that ends on its own in 2 s, for 34's --follow.",
+  "requires_op": "ctl",
+  "mutating": true,
+  "steps": [
+    {
+      "send": "30 00000053 7b2261726776223a5b222d2d737061776e222c22676f6c64656e2d3737362d666f6c222c222d2d73697a65222c2232307832222c222d2d222c222f62696e2f7368222c222d63222c22736c6565702032225d7d"
+    },
+    {
+      "expect": {
+        "type": "31",
+        "payload": "676f6c64656e2d3737362d666f6c0a"
+      }
+    },
+    {
+      "expect": {
+        "type": "33",
+        "payload": "7b2265786974223a307d"
+      }
+    },
+    {
+      "expect_close": true
+    }
+  ],
+  "dch_mirror": true
+}

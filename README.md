@@ -272,6 +272,7 @@ dch -ls          # list sessions as alias/harness (real-name), or real-name
 dch -lj          # list as name<TAB>alias<TAB>activity_epoch
 dch -l           # session picker: tabs, live states, actions; Enter attaches
 dch -a host:name # attach to a session on another host (see Remote hosts)
+dch --read host:name  # a control verb on another host (dch serve 1.41+)
 dch -a <name> --scrollback 200  # attach with the last 200 lines of history above the screen
 dch -rl          # rename: pick a session, type a display alias, repeat
 dch -m <name> [alias]  # set the alias without the picker (none: clear it)
@@ -1226,13 +1227,14 @@ has a reason to touch it in the first place.
 
 `dch serve` lets the Prosper iPhone app drive the dch sessions of a host
 that runs no Prosper, such as a Linux box on your tailnet. It speaks
-Prosper's "remote frames" protocol 1.0 on TCP port 8771, the port the phone
-dials. It runs in the foreground and logs to stderr with timestamps.
+Prosper's "remote frames" protocol 1.1 (1.0 plus the [control
+verbs](#control-verbs-ctl)) on TCP port 8771, the port the phone dials, and
+serves dch's own [remote client](#remote-hosts) the same way. It runs in the foreground and logs to stderr with timestamps.
 SIGINT or SIGTERM stops it and leaves every session running.
 
 ```sh
-dch serve                    # list, attach, kill, rename, watch
-dch serve --allow-create     # also let the phone start sessions
+dch serve                    # list, attach, kill, rename, watch, control verbs
+dch serve --allow-create     # also let the phone (and dch --spawn) start sessions
 dch serve --check-peer 100.101.102.103   # would this peer get in?
 ```
 
@@ -1287,7 +1289,7 @@ an address outside 100.64.0.0/10 is closed without a byte.
 | --- | --- |
 | `--bind <ipv4>` | Listen there instead. Relaxes nothing: the peer checks above still apply, so an address that is not on your tailnet admits nobody (it warns). A wildcard or non-unicast address is refused. |
 | `--port <n>` | Another port, 0 for any (tests). The phone always dials 8771. |
-| `--allow-create` | Let the phone start a session with its own command (0x02). Off by default, and `create` is then missing from the ops the phone sees, and attach (0x01) only reaches a session already in the list (else 0x13 and a close). With it, attach to a new name starts a shell session, as `dch -n` does. |
+| `--allow-create` | Let the phone start a session with its own command (0x02). Off by default, and `create` is then missing from the ops the phone sees, and attach (0x01) only reaches a session already in the list (else 0x13 and a close). With it, attach to a new name starts a shell session, as `dch -n` does. It also gates the control verbs that start sessions, `--spawn` and `--revive`. |
 | `--allow-user <u>` | On a tagged host, accept this user's nodes (numeric id or login). Repeatable. |
 | `--whois-optional` | Accept a tailnet peer while tailscaled is not answering (whois and status both fail), with a warning (see above). The owner must still be known at startup. |
 | `--check-peer <ip>` | Print whether that peer would get in, and the refusal code in parentheses, then exit 0 (accept) or 1. |
@@ -1364,8 +1366,69 @@ scrollback to print above the screen ([Scrollback above the
 screen](#attaching-replays-the-screen)). It reaches the client dch serve
 spawns as `--scrollback N`, clamped to 0..10000; missing, `0`, negative or
 not an integer means none. It is additive: a server that does not know it
-ignores it (an unknown key in a JSON object), and the protocol version in
-`0x18` stays `1.0`. Commands run as argument vectors, never through a shell.
+ignores it (an unknown key in a JSON object), so it needed no new protocol
+version. Commands run as argument vectors, never through a shell.
+
+#### Control verbs (ctl)
+
+Remote frames 1.1 adds one op, `ctl`: a client runs one of dch's own verbs
+on the host and gets its output and exit status, exactly as if it had run
+there. `0x18` says `"proto":"1.1"` and always lists `ctl` in `ops` (`create`
+only with `--allow-create`). The connection gets one request:
+
+```
+→ 0x30  {"argv":["--read","api"],"cwd":"/abs/dir"}    cwd optional
+← 0x31  stdout bytes, as they come       (any number)
+← 0x32  stderr bytes, as they come       (any number)
+← 0x33  {"exit":N}                       last, then the FIN
+```
+
+`argv` is dch's command line without the `dch`: the verb first. The server
+runs its own dch binary with it, with fork and exec (no shell), in `cwd` or
+else `$HOME`, stdin `/dev/null`, and streams its output while it runs. `exit`
+is dch's exit status, or 128 + the signal that ended it. A request it
+refuses gets one `0x13` `{"message":"<why>"}` (no `code`), then the FIN,
+and nothing runs. A `0x30` on a connection that is attached or watching is
+refused (`ctl needs its own connection`).
+
+Only these forms run. `<n>` is a session name: it must pass the same check
+as an attach's, and never start with `-`.
+
+| Verb | Form | Timeout |
+| --- | --- | --- |
+| `--read` | `--read <n> [--ansi] [--recent [N]] [--cursor]` | 60 s |
+| `--send`, `--run` | `--send <n> [--] <text...>` | 60 s |
+| `--keys` | `--keys <n> <key...>` | 60 s |
+| `--follow` | `--follow <n>` | none |
+| `--status` | `--status <n>` | 60 s |
+| `-k`, `-d` | `-k <n>`, `-d <n>` | 60 s |
+| `-m` | `-m <n> <alias>` | 60 s |
+| `--spawn` | `--spawn <n> [--size CxR] [--] <cmd...>`, with `cwd`; needs `--allow-create` | 60 s |
+| `--history` | `--history --json` | 60 s |
+| `--revive` | `--revive <n> [--as <new>] [--no-message] --json`; needs `--allow-create` | 660 s |
+| `--pin`, `--unpin`, `--forget` | `--pin <n>... --json`; `--forget --all --json` | 60 s |
+| `--stop` | `--stop <n>... --json` | 660 s |
+| `--say` | `--say <n> --json -- <text>` | 660 s |
+
+Refused, before anything runs: an `argv` of fewer than 2 elements; a verb
+or flag not in the table; a bad name; `--config`, `serve`, `-h` or `-f`
+anywhere outside the free text (`--send`'s words, `--keys`' keys,
+`--spawn`'s command, `--say`'s text, `-m`'s alias); `--all` except in
+`--forget --all --json`; a `cwd` that is no directory (`no such directory`);
+`--spawn` or `--revive` without `--allow-create` (`creating sessions is off
+on this host (dch serve --allow-create)`). `--xray` is reserved for a later
+release: `xray not supported by this host`.
+
+**Its limits.** Stdout and stderr together get 8 MiB. At that cap the server
+stops forwarding, sends the dch SIGTERM (SIGKILL 2 s later) and ends with
+`{"exit":2,"why":"cap"}`. Past its timeout (the table) it does the same with
+`"why":"timeout"`. A client that closes the connection (or half-closes it)
+while the verb runs ends it the same way. The server's loop never waits on
+the dch: one slow verb holds up nothing else. The ctl op has the same gate
+as attach: only peers the [trust model](#dch-serve-prosper-remote-hosts)
+lets in. For tests, `DCH_CTL_TIMEOUT_MS` replaces every timeout (`--follow`
+included) and `DCH_CTL_CAP` lowers the cap; `dch serve` reads both at
+startup and removes them from the environment.
 
 **Port in use.** On a Mac where Prosper's Remote Terminal is on, Prosper
 already holds port 8771, and `dch serve` refuses to start with a message
@@ -1430,16 +1493,19 @@ phone. A connection past the first two gets `busy` (see
 [Refusals](#refusals)) and the close. A connection that is not attached or watching closes after 30 s
 without a whole frame, and any connection closes when its output goes untaken
 for 20 s. Control frames over 64 KiB, and any frame over the protocol's
-256 MiB guard, close the connection. Sent frames are at most 8 MiB.
+256 MiB guard, close the connection. Sent frames are at most 8 MiB. A
+control verb has its own cap and timeouts ([above](#control-verbs-ctl)).
 
-The golden fixtures in `tests/remote-frames/` are Prosper's conformance set;
-`tests/serve_test.py` runs them.
+The golden fixtures in `tests/remote-frames/` are Prosper's conformance set,
+plus dch's own from 17 on for the control verbs; `tests/serve_test.py` runs
+them.
 
 ## Remote hosts
 
 dch is also the client: it lists and attaches to the sessions of your other
-machines, the ones serving them over Prosper's remote frames 1.0 on port 8771
-(`dch serve` above, or Prosper's own server on a Mac).
+machines, the ones serving them over Prosper's remote frames on port 8771
+(`dch serve` above, or Prosper's own server on a Mac), and runs dch's
+control verbs there.
 
 ```sh
 dch --ls --remote                 # local sessions, then host:name for remote ones
@@ -1448,6 +1514,9 @@ dch --host mybox -a api           # the same, for a name with a ':' in it
 dch -l                            # the picker lists remote rows too
 dch --ls-json --remote            # remote rows, each with a "host" field
 dch --hosts mini,pi=100.64.1.2:8771 --ls --remote   # these hosts, not your tailnet
+dch --read mybox:api              # a control verb on mybox (dch serve 1.41+)
+dch --host mybox --send api -- make test
+dch --cwd /srv/app --spawn mybox:build -- make   # needs dch serve --allow-create
 ```
 
 **Which hosts.** `--hosts` (a comma-separated `[label=]host[:port]` list), else
@@ -1503,6 +1572,28 @@ the `0x13` `taken`) restores the terminal, prints
 | 4 | Refused: the host's gate sent a coded `0x13` (see [Refusals](#refusals)). | No: it will refuse again. |
 | 5 | Taken: another client attached to the session. | No: it would take the session back. |
 
+**Control verbs.** The verbs in the [ctl table](#control-verbs-ctl) take
+`host:name` too, resolved as `-a` resolves it (an exact local session name
+wins; `--host <h>` is the unambiguous form, and the only one for
+`--history`, which takes no name; a discovered host passes the same whois
+check). Names on two hosts in one command are refused. dch runs the verb on
+the host through its `dch serve` and writes its stdout and stderr as they
+come, byte for byte: the output and the exit status are the remote dch's.
+Anything off the table is refused here, before any connection (`dch: can't
+run on a remote host: <why>`, exit 1). `--cwd <dir>` is `--spawn`'s start
+directory: on the host for a remote spawn, here (it must exist) for a local
+one; it goes with no other verb.
+
+| Code | Means |
+| --- | --- |
+| 0-3 | The remote dch's own exit status. 2 with `dch: <host>: <verb> stopped by the host (cap\|timeout)` on stderr: the host cut it short. |
+| 1 | Also: the host refused the request (`dch: <host>: <why>`), an unknown host, or a request dch would not send. |
+| 4 | Refused: the host's gate sent a coded `0x13` (`dch: <host> refused: <message>`). |
+| 6 | The host lacks the op: `dch: <host>: does not support <verb> (needs dch serve 1.41+)`, or `(needs dch serve --allow-create)` for `--spawn` and `--revive`. |
+| 7 | Unreachable: `dch: <host>: unreachable: <why>` (down, `busy`, or the connection lost before the exit status). |
+
+`-a`'s codes are unchanged.
+
 **Trust.** Before an attach to a host that discovery found, dch asks
 `tailscale whois` about its address and goes on only when it is your own
 Tailscale user's untagged machine; if whois fails, it does not connect. A
@@ -1514,9 +1605,9 @@ or message a peer sent is printed with its control characters escaped
 controls as `\u` escapes. Only the screen bytes of an attach go to the
 terminal as they are, as a local session's do.
 
-**Not yet.** No live list stream (the picker polls) and no remote kill,
-rename or create: those are mutating operations that will need the server's
-`ops` and the same confirmation the local ones have.
+**Not yet.** No live list stream (the picker polls), no remote rename (`-rl`)
+and no remote kill or create from the picker: the control verbs above are
+the command-line form, and the picker's row actions stay local.
 
 ### Windows client
 
@@ -1542,6 +1633,8 @@ dch --ls-json
 dch --hosts mini,pi=100.64.1.2:8771 -ls
 dch -a mybox:api                    :: host:name is required, there are no local sessions
 dch --host mybox -a api
+dch --read mybox:api                :: a control verb, as on macOS and Linux
+dch --host mybox --cwd /srv --spawn build -- make
 ```
 
 The hosts, discovery and trust are the same as on macOS and Linux, including
@@ -1559,7 +1652,10 @@ restores the console on every exit, Ctrl-C and Ctrl-Break included. Ctrl-\
 detaches, and twice quickly switches to the picker, as on macOS and Linux
 (`DCH_DOUBLE_TAP_MS`, `detach_key`). A lost
 connection restores the console, says why, and exits 1; a refused or taken
-one exits 4 or 5, as on macOS and Linux.
+one exits 4 or 5, as on macOS and Linux. The [control
+verbs](#control-verbs-ctl) work as there, every name `host:name` (or
+`--host`), with the same exit codes; `--host`, `--hosts` and `--cwd` go
+before the verb.
 
 `dch` alone is the picker, `dch -l`'s, with the remote rows only: arrows or
 `j`/`k` move, Enter attaches, `q` or Esc quits; it redraws on a resize and
