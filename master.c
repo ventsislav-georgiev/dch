@@ -21,6 +21,11 @@
 #ifdef __linux__
 #include <sys/syscall.h>
 #endif
+#ifdef __APPLE__
+#include <libproc.h>
+#include <sys/mman.h>
+#include <sys/sysctl.h>
+#endif
 #include <limits.h>
 #include <poll.h>
 
@@ -461,7 +466,7 @@ static char *rec_agent;		/* the agent object, or null */
 static struct dch_agent rec_ag;	/* last agent seen; pid 0 = none */
 static char *rec_seed;		/* --revive's agent object until one is seen */
 static long rec_started;
-static char rec_end[32];	/* how the master ended, set before exit */
+static char rec_end[192];	/* how the master ended, set before exit */
 static struct timespec rec_at;	/* last refresh */
 static long rec_ms = 60L * 1000L;	/* DCH_RECORD_MS */
 static char rec_stop[65536];	/* <sock>.stopped, as rec_stopped() read it */
@@ -504,7 +509,7 @@ rec_put(int fd, const char *s)
 static void
 rec_write(const char *end)
 {
-	char tmp[1300], mid[200];
+	char tmp[1300], q[sizeof rec_end * 6 + 3], mid[sizeof q + 80];
 	time_t now = time(NULL);
 	int fd, ok;
 
@@ -512,8 +517,11 @@ rec_write(const char *end)
 	    snprintf(tmp, sizeof tmp, "%s.%d.tmp", rec_path, (int)getpid()) >=
 	        (int)sizeof tmp)
 		return;
-	snprintf(mid, sizeof mid, "\"updated\":%ld,\"ended\":%ld,\"end\":\"%s\","
-	         "\"agent\":", (long)now, end[0] ? (long)now : 0L, end);
+	/* end carries the sender's command line (die()): quoted, not pasted */
+	if (dch_json_quote(q, sizeof q, end) == (size_t)-1)
+		snprintf(q, sizeof q, "\"\"");
+	snprintf(mid, sizeof mid, "\"updated\":%ld,\"ended\":%ld,\"end\":%s,"
+	         "\"agent\":", (long)now, end[0] ? (long)now : 0L, q);
 	fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
 	/* another socket dir's master pruned our dir while it was empty */
 	if (fd < 0 && errno == ENOENT && mkdir(rec_dir, 0700) == 0)
@@ -923,6 +931,79 @@ rec_init(int resumed)
 	atexit(rec_exit);
 }
 
+/* Who sent die() its fatal signal (si_pid, si_uid): 0 = the kernel. */
+static pid_t die_pid;
+static uid_t die_uid;
+
+/* Bytes [s, s+n) into out as one printable line: NULs (argv's separators)
+** as spaces, anything but printable ASCII as '?', cut at cap - 1. */
+static void
+sender_put(char *out, size_t cap, const char *s, size_t n)
+{
+	size_t k = 0;
+
+	while (n && !s[n - 1])
+		n--;
+	for (; k < n && k + 1 < cap; k++)
+		out[k] = !s[k] ? ' ' : s[k] > 0x1f && s[k] < 0x7f ? s[k] : '?';
+	out[k] = '\0';
+}
+
+/* pid's command line, "" when it is gone or not ours to read. Runs inside
+** die(): syscalls and plain loops only, no malloc or stdio — a signal that
+** lands inside malloc() must not deadlock the exit. */
+static void
+sender_cmd(pid_t pid, char *out, size_t cap)
+{
+#ifdef __APPLE__
+	int mib[3] = { CTL_KERN, KERN_PROCARGS2, (int)pid };
+	int am[2] = { CTL_KERN, KERN_ARGMAX }, argmax = 0, argc;
+	char path[PROC_PIDPATHINFO_MAXSIZE], *buf;
+	size_t len = sizeof argmax, i, e;
+
+	out[0] = '\0';
+	/* KERN_PROCARGS2 needs room for all of it; mmap, as malloc may be
+	** what the signal interrupted */
+	if (sysctl(am, 2, &argmax, &len, NULL, 0) == 0 && argmax > 0 &&
+	    (buf = mmap(NULL, (size_t)argmax, PROT_READ | PROT_WRITE,
+	                MAP_PRIVATE | MAP_ANON, -1, 0)) != MAP_FAILED)
+	{
+		len = (size_t)argmax;
+		if (sysctl(mib, 3, buf, &len, NULL, 0) == 0 && len > sizeof argc)
+		{
+			memcpy(&argc, buf, sizeof argc);
+			for (i = sizeof argc; i < len && buf[i]; i++)
+				;	/* the exec path */
+			while (i < len && !buf[i])
+				i++;
+			for (e = i; e < len && argc > 0; e++)
+				argc -= !buf[e];
+			sender_put(out, cap, buf + i, e - i);
+		}
+		munmap(buf, (size_t)argmax);
+	}
+	/* another uid's process (root's): its path is still ours to read */
+	if (!out[0] && proc_pidpath((int)pid, path, sizeof path) > 0)
+		sender_put(out, cap, path, strlen(path));
+#elif defined(__linux__)
+	char p[64], buf[512];
+	ssize_t r = -1;
+	int fd;
+
+	snprintf(p, sizeof p, "/proc/%ld/cmdline", (long)pid);
+	if ((fd = open(p, O_RDONLY)) >= 0)
+	{
+		r = read(fd, buf, sizeof buf);
+		close(fd);
+	}
+	sender_put(out, cap, buf, r > 0 ? (size_t)r : 0);
+#else
+	(void)pid;
+	out[0] = '\0';
+	(void)cap;
+#endif
+}
+
 /* Signal */
 static RETSIGTYPE
 die(int sig)
@@ -940,9 +1021,34 @@ die(int sig)
 	** only does fprintf() here, not fopen() — good enough for a debug build to
 	** catch "who killed the master" (the bug this whole trace facility exists
 	** to diagnose). Not strictly async-signal-safe; debug-only. */
-	dch_trace("master die sig=%d", sig);
-	snprintf(rec_end, sizeof rec_end, "signal %d", sig);
+	if (die_pid > 0)
+	{
+		/* "signal N from <pid> <cmd>": whoever sent it may exit any
+		** moment, so this is best effort — "from <pid>" alone if so.
+		** exit() below already runs the atexit writes in this handler. */
+		char cmd[121];
+
+		sender_cmd(die_pid, cmd, sizeof cmd);
+		snprintf(rec_end, sizeof rec_end, "signal %d from %ld%s%s", sig,
+		         (long)die_pid, cmd[0] ? " " : "", cmd);
+		dch_trace("master die sig=%d from pid=%ld uid=%ld cmd=%s", sig,
+		          (long)die_pid, (long)die_uid, cmd);
+	}
+	else
+	{
+		dch_trace("master die sig=%d", sig);
+		snprintf(rec_end, sizeof rec_end, "signal %d", sig);
+	}
 	exit(1);
+}
+
+static void
+die_info(int sig, siginfo_t *si, void *uc)
+{
+	(void)uc;
+	die_pid = si ? si->si_pid : 0;
+	die_uid = si ? si->si_uid : 0;
+	die(sig);
 }
 
 /* Sets a file descriptor to non-blocking mode. */
@@ -3666,8 +3772,18 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 	signal(SIGHUP, SIG_IGN);
 	signal(SIGTTIN, SIG_IGN);
 	signal(SIGTTOU, SIG_IGN);
-	signal(SIGINT, die);
-	signal(SIGTERM, die);
+	{
+		struct sigaction sa;
+
+		memset(&sa, 0, sizeof sa);
+		sa.sa_sigaction = die_info;
+		sa.sa_flags = SA_SIGINFO | SA_RESTART;
+		sigemptyset(&sa.sa_mask);
+		sigaddset(&sa.sa_mask, SIGINT);
+		sigaddset(&sa.sa_mask, SIGTERM);
+		sigaction(SIGINT, &sa, NULL);
+		sigaction(SIGTERM, &sa, NULL);
+	}
 
 	/* Close statusfd, since we don't need it anymore. */
 	if (statusfd != -1)

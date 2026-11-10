@@ -1047,6 +1047,17 @@ survive the name shortening.
 .B \-\-all
 takes the sessions that died in the last 3 days after running 5 minutes or
 more.
+A record's end is
+.BI "exit " N ,
+.BI "signal " N ,
+.BR killed ,
+.B stopped
+or
+.BR vanished ;
+a master that another process sent SIGTERM or SIGINT ends
+.BI "signal " N " from " "pid command"
+(the sender's command line made printable, cut at 120 bytes; without it
+when the sender was already gone), and counts as died.
 Never two Claudes on one conversation: a record whose Claude id a live
 Claude already runs (probed in each live session, else found in Claude's
 sessions dir or the record's

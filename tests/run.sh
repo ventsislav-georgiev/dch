@@ -224,6 +224,7 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "-k/--stop signal exactly the session's master" kill_test.py
     pyrun "attached client exits cleanly on SIGHUP/SIGTERM" hangup_test.py
     pyrun "records with odd bytes, long aliases and long argv read back" record_utf8_test.py
+    pyrun "a signalled master's history end names the sender" signal_sender_test.py
     pyrun "--cmd survives empty reply frames" cmd_frames_test.py
     pyrun "dch serve: remote frames goldens, peer gate, startup refusals" serve_test.py
     pyrun "remote hosts: -ls, --remote, -a host:name, hostile peers" remote_client_test.py

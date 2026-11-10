@@ -7737,7 +7737,7 @@ struct hrec
 {
 	char file[300];		/* record basename without .json */
 	char *body;		/* as stored, one line */
-	char name[512], alias[600], cwd[PATH_MAX], end[32];
+	char name[512], alias[600], cwd[PATH_MAX], end[192];
 	char sid[64], aname[256], acwd[PATH_MAX];
 	char acfg[1400];	/* agent's config_dir, "" = the default (#065) */
 	long started, updated, ended;
