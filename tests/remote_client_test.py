@@ -709,8 +709,9 @@ def main():
                   r.stderr)
         put("whois.json", WHOIS)
         r = dch(dict(denv, DCH_NO_REMOTE="1"), "-a", "nope:x")
-        check("DCH_NO_REMOTE=1: no hosts", r.returncode == 1
-              and "remote hosts are off" in r.stderr, r.stderr)
+        check("DCH_NO_REMOTE=1: -a host:name stays local (#122)",
+              r.returncode == 1 and "no session: nope:x" in r.stderr
+              and "known host" not in r.stderr, r.stderr)
         put("status.json", OWNER)
 
         # --- a hostile server -----------------------------------------

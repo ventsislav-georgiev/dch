@@ -200,7 +200,11 @@ that name and it has the form \fIhost\fP:\fIname\fP, attach to
 .I name
 on that remote host (see
 .BR "REMOTE HOSTS" );
-an unknown host is an error that lists the known ones.
+an unknown host is an error that lists the known ones. With remote hosts
+off
+.RB ( DCH_NO_REMOTE=1 ,
+.BR "remote_hosts = off" )
+the name stays local.
 .TP
 .BI \-\-host " host"
 With
@@ -566,7 +570,23 @@ then 80x24. Prints the session name. Exits 1 if the session exists or
 .I cmd
 cannot be executed (the error is printed); a
 .I cmd
-that runs and exits at once is still a successful spawn.
+that runs and exits at once is still a successful spawn. Like
+.B \-\-revive
+and a plain
+.BR "dch <new>" ,
+it sets
+.B LC_TERMINAL=ghostty
+unless the caller has it: Claude Code then keeps its statusline's OSC 8
+links under
+.B TERM=xterm\-256color
+with no
+.BR TERM_PROGRAM ,
+and Node CLIs (supports\-hyperlinks), which never read it, keep OSC 8 out
+of pipes and files. ssh sends it on (macOS's default
+.BR "SendEnv LC_*" ).
+dch sets no
+.BR FORCE_HYPERLINK ;
+a caller's own value reaches the session.
 .TP
 .BI \-\-xray " name " "" \fR[\fB\-\-clear\fR]\fP " \-\-json"
 X\-ray: print one JSON object
@@ -1629,9 +1649,10 @@ forwarding, sends the dch SIGTERM (SIGKILL 2 s later) and ends with
 .BR {\(dqexit\(dq:2,\(dqwhy\(dq:\(dqcap\(dq} .
 The timeout is 660 s for
 .BR \-\-say ,
-.B \-\-stop
+.BR \-\-stop ,
+.B \-\-revive
 and
-.BR \-\-revive ,
+.BR \-\-run ,
 none for
 .BR \-\-follow ,
 60 s for the rest; past it, the same with
@@ -1725,11 +1746,25 @@ runs (see
 .BR "REMOTE SERVER" )
 take
 .IR host : name
-too, resolved as
-.B \-a
-resolves it: an exact local session name wins,
+too: such a name is remote only when no local session or History record
+has exactly that name and
+.I host
+is a known host
+.RB ( \-\-hosts ,
+.BR remote_hosts ,
+or a cached remote row), never with remote hosts off
+.RB ( DCH_NO_REMOTE=1 ,
+.BR "remote_hosts = off" );
+anything else stays local, so a local session named
+.I proj:task
+can be spawned, revived and forgotten by name. When such a name fails
+locally while remote hosts are on, one more line on standard error names the
+host:
+.RI ( "host is not a known host; \-\-host host to reach it" );
+the exit status is the local one.
 .B \-\-host
-is the unambiguous form (and the only one for
+is the unambiguous form (the one for a host only discovery knows, and the
+only one for
 .BR \-\-history ),
 and a discovered host must pass the same whois check. Names on two hosts in
 one command are refused. dch runs the verb there and writes its standard
@@ -2007,7 +2042,12 @@ Empty or 0 is off; anything else lists and discovers no remote hosts in
 the picker,
 .B \-a
 or
-.B \-\-remote
+.BR \-\-remote ,
+and
+.BR \-a 's
+or a control verb's
+.I host:name
+stays local
 .RB ( \-\-hosts
 still applies).
 .TP

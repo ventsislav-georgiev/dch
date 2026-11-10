@@ -1,0 +1,4 @@
+--run
+s1
+--
+echo hi

@@ -86,8 +86,8 @@
 #define MAX_ALLOW 16
 #define MAX_CMD 256
 #define CTL_MS 60000		/* a ctl's timeout (#114) */
-#define CTL_LONG_MS 660000	/* --say, --stop, --revive: dch waits up to
-				** 600 s for an agent itself */
+#define CTL_LONG_MS 660000	/* --say, --stop, --revive, --run: dch
+				** waits up to 600 s for an agent itself */
 #define CTL_CAP (8u << 20)	/* a ctl's stdout and stderr together */
 #define CTL_GRACE_MS 2000	/* a cut ctl: SIGTERM, then SIGKILL */
 #define CTL_IDLE_MS 300000	/* a warm ctl connection, no frame: closes */
@@ -774,6 +774,9 @@ static size_t g_ctl_cap = CTL_CAP;	/* DCH_CTL_CAP (tests), at most 8 MiB */
 static long g_ctl_idle = CTL_IDLE_MS;	/* DCH_CTL_IDLE_MS (tests) */
 /* SIGUSR1 from the parent: a newer attach took this handler's session */
 static volatile sig_atomic_t g_taken;
+/* SIGUSR2 from the parent (or set at fork): slots are short, so a warm ctl
+** connection idles a tenth of g_ctl_idle (30 s), not 5 min (#122). Sticky. */
+static volatile sig_atomic_t g_press;
 static char rq_text[RF_CTRL_MAX + 3];
 
 static size_t
@@ -1956,7 +1959,8 @@ serve_conn(int fd, uint32_t ip)
 			break;
 		}
 		if (!c->attached && !c->watching && !c->closing && c->ctl <= 0 &&
-		    now - c->last_frame >= (c->ctl ? g_ctl_idle : IDLE_MS))
+		    now - c->last_frame >= (!c->ctl ? IDLE_MS : g_press
+		                            ? g_ctl_idle / 10 : g_ctl_idle))
 		{
 			slog("%s: idle; closing", c->ipstr);
 			break;
@@ -2133,6 +2137,8 @@ on_signal(int sig)
 {
 	if (sig == SIGUSR1)
 		g_taken = 1;
+	else if (sig == SIGUSR2)
+		g_press = 1;
 	else if (sig != SIGCHLD)
 		g_stop = 1;
 }
@@ -2291,6 +2297,13 @@ accept_one(int lfd, int nr)
 		refused_wait(fd);
 		return;
 	}
+	/* Half the slots taken, the peer's or all: its handlers (all of them)
+	** and this one idle out sooner, so warm ctl connections cannot hold
+	** the slots for CTL_IDLE_MS. */
+	g_press = same + 1 >= MAX_PER_PEER / 2 || nkids + 1 >= MAX_CONN / 2;
+	for (i = 0; g_press && i < nkids; i++)
+		if (kids[i].ip == ip || nkids + 1 >= MAX_CONN / 2)
+			kill(kids[i].pid, SIGUSR2);
 	pid = fork();
 	if (pid == 0)
 	{
@@ -2448,6 +2461,9 @@ serve_main(int argc, char **argv)
 	sigaction(SIGHUP, &act, NULL);
 	sigaction(SIGCHLD, &act, NULL);
 	sigaction(SIGUSR1, &act, NULL);	/* the handler's retire */
+	act.sa_flags = SA_RESTART;	/* a handler's pressure: no EINTR */
+	sigaction(SIGUSR2, &act, NULL);
+	act.sa_flags = 0;
 	/* Run from inside a dch session, the clients we spawn would refuse
 	** to nest. */
 	unsetenv("DCH_SESSION");

@@ -467,7 +467,7 @@ static const struct ctl_verb
 	/* verb         names    tail      flags                 opts */
 	{ "--read",     CN_ONE,  CT_NONE,  0, " --ansi --recent --cursor " },
 	{ "--send",     CN_ONE,  CT_TEXT,  0, "" },
-	{ "--run",      CN_ONE,  CT_TEXT,  0, "" },
+	{ "--run",      CN_ONE,  CT_TEXT,  CTL_LONG, "" },	/* ag_type, #112 */
 	{ "--keys",     CN_ONE,  CT_TEXT,  0, "" },
 	{ "--follow",   CN_ONE,  CT_NONE,  CTL_FOREVER, "" },
 	{ "--status",   CN_ONE,  CT_NONE,  0, "" },

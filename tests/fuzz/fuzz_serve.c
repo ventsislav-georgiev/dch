@@ -134,6 +134,11 @@ ctl_inv(int ac, char **av, const unsigned char *kind, int fl)
 	if (ac < 2 || ac > CTL_ARGV_MAX || !ctl_known(av[0]) ||
 	    kind[0] != CK_VERB || (fl & ~(CTL_CREATE | CTL_LONG | CTL_FOREVER)))
 		abort();
+	/* the verbs that wait on an agent get the long timeout (#122: --run) */
+	if (!(fl & CTL_LONG) &&
+	    (!strcmp(av[0], "--say") || !strcmp(av[0], "--stop") ||
+	     !strcmp(av[0], "--revive") || !strcmp(av[0], "--run")))
+		abort();
 	for (i = 1; i < ac; i++)
 	{
 		const char *a = av[i];

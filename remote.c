@@ -607,6 +607,12 @@ cache_load(struct rlist *l, long long now)
 	free(text);
 }
 
+int
+dch_remote_on(void)
+{
+	return remote_on();
+}
+
 /* host is one dch knows without a probe: a named host (--hosts,
 ** remote_hosts) or a cached row's; never discovery (no tailscale run). */
 int
@@ -620,12 +626,12 @@ dch_remote_known(const char *host)
 		return 0;
 	n = named_hosts(v, RM_HOSTS, 0);
 	for (k = 0; k < n && !hit; k++)
-		hit = !strcmp(v[k].label, host);
+		hit = !strcasecmp(v[k].label, host);	/* as host_find */
 	if (!hit)
 	{
 		cache_load(&l, (long long)time(NULL));
 		for (k = 0; k < l.n && !hit; k++)
-			hit = !strcmp(l.v[k].host, host);
+			hit = !strcasecmp(l.v[k].host, host);
 		free(l.v);
 	}
 	return hit;
