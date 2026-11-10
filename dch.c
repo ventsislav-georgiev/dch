@@ -2620,6 +2620,8 @@ wall_ms(void)
 	return (long long)tv.tv_sec * 1000 + tv.tv_usec / 1000;
 }
 
+static void strip_caller_agent(void);
+
 static int
 spawn_master(char *exe, const char *name, char *sockp,
              char **inner_argv)
@@ -2871,6 +2873,7 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 	/* No node, a stray non-socket file, or a dead socket: clear whatever is
 	** there so bind() succeeds, then spawn a fresh master and attach. */
 	unlink(sock_path);
+	strip_caller_agent();
 	setenv("DCH_SESSION", session_name, 1);
 	{
 	char *default_argv[] = { NULL, NULL };
@@ -5230,6 +5233,7 @@ do_spawn_verb(char *exe, const char *name, int cols, int rows,
 	/* Caller env first; DCH_SESSION is force-set after, so --env cannot
 	** spoof session identity. (TERM below is only defaulted when absent
 	** or dumb — a caller-supplied TERM legitimately wins.) */
+	strip_caller_agent();
 	for (rc = 0; rc < spawn_env_n; rc++)
 		putenv(spawn_env[rc]);
 	setenv("DCH_SESSION", name, 1);
@@ -8834,6 +8838,22 @@ static const char *const rv_harness[] = {
 	"NoDefaultCurrentDirectoryInExePath",
 };
 
+/* Drop the calling Claude Code session's identity (and, when the caller is
+** Claude Code, its harness vars) before a client starts a new master:
+** --revive, --spawn and a plain `dch <new>` are often run from inside an
+** agent (#067, #111). Callers apply --env after, so an explicit one wins. */
+static void
+strip_caller_agent(void)
+{
+	size_t k;
+
+	if (getenv("CLAUDECODE"))
+		for (k = 0; k < sizeof rv_harness / sizeof rv_harness[0]; k++)
+			unsetenv(rv_harness[k]);
+	for (k = 0; k < sizeof rv_strip / sizeof rv_strip[0]; k++)
+		unsetenv(rv_strip[k]);
+}
+
 /* Take the environment the user's login shell builds (~/.zshrc and the
 ** rest) on top of ours: a revive run by a GUI app or a daemon would hand its
 ** sessions that app's PATH, without what the rc files add (gcloud, kubectl
@@ -9378,12 +9398,7 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 		hrec_free(r, n);
 		return 1;
 	}
-	if (getenv("CLAUDECODE"))
-		for (k = 0; k < (int)(sizeof rv_harness / sizeof rv_harness[0]);
-		     k++)
-			unsetenv(rv_harness[k]);
-	for (k = 0; k < (int)(sizeof rv_strip / sizeof rv_strip[0]); k++)
-		unsetenv(rv_strip[k]);
+	strip_caller_agent();
 	login_env();
 	(void)dch_history_dir(dir, sizeof dir, sock_dir, 0);
 	if (n)

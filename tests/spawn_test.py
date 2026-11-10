@@ -13,7 +13,7 @@ Covers the leftover-socket bug and the attach-first hot path:
 Run:  python3 tests/spawn_test.py            (uses ./dch)
       DCH=/path/to/dch python3 tests/spawn_test.py
 """
-import json, os, sys, pty, signal, select, time, errno, socket, tempfile, shutil
+import json, os, sys, pty, subprocess, signal, select, time, errno, socket, tempfile, shutil
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.environ.get("DCH", os.path.join(HERE, "..", "dch"))
@@ -217,6 +217,72 @@ def main():
             ok("--spawn --size: the program starts at that size")
         else:
             bad("--spawn --size: program saw %r, want 10 40" % seen)
+
+        # 6. A client run from inside Claude Code must not hand the new
+        #    session the caller's identity (#111): a resumed Claude saw the
+        #    inherited CLAUDE_CODE_CHILD_SESSION and turned transcripts off.
+        #    Harness vars (GIT_EDITOR) go only when CLAUDECODE is set; an
+        #    explicit --env still wins.
+        agent = {"CLAUDECODE": "1", "CLAUDE_CODE_CHILD_SESSION": "1",
+                 "CLAUDE_CODE_SESSION_ID": "x", "GIT_EDITOR": "true"}
+
+        def child_env(tag, argv, extra, attach=False):
+            out = os.path.join(tmp, tag + ".env")
+            dump = ["sh", "-c", "env >%s.t; mv %s.t %s; exec sleep 60"
+                    % (out, out, out)]
+            # The runner itself may be inside Claude Code: start clean.
+            env = {k: v for k, v in os.environ.items()
+                   if not k.startswith("CLAUDE") and k not in
+                   ("DCH_SESSION", "GIT_EDITOR")}
+            env.update(extra)
+            if attach:
+                pid, fd = pty.fork()
+                if pid == 0:
+                    os.execve(DCH, [DCH, "-E", "-n", tag] + dump, env)
+                    os._exit(127)
+            else:
+                subprocess.run([DCH, "--spawn", tag] + argv + ["--"] + dump,
+                               env=env, stdout=subprocess.DEVNULL)
+            got = None
+            for _ in range(100):
+                if os.path.exists(out):
+                    with open(out) as f:
+                        got = dict(l.split("=", 1) for l in
+                                   f.read().splitlines() if "=" in l)
+                    break
+                time.sleep(0.05)
+            if attach:
+                os.kill(pid, signal.SIGHUP)
+                os.waitpid(pid, 0)
+                os.close(fd)
+            return got or {}
+
+        def no_agent(e):
+            return not any(k in e for k in agent)
+
+        e = child_env("agsp", [], agent)
+        if e and no_agent(e):
+            ok("--spawn from Claude Code: caller identity + GIT_EDITOR dropped")
+        else:
+            bad("--spawn leaked caller agent env: %r" %
+                {k: e.get(k) for k in agent})
+        e = child_env("agat", [], agent, attach=True)
+        if e and no_agent(e):
+            ok("dch <new> from Claude Code: caller identity dropped")
+        else:
+            bad("dch <new> leaked caller agent env: %r" %
+                {k: e.get(k) for k in agent})
+        e = child_env("agenv", ["--env", "CLAUDE_CODE_SESSION_ID=keep"], agent)
+        if e.get("CLAUDE_CODE_SESSION_ID") == "keep" and "CLAUDECODE" not in e:
+            ok("--spawn --env CLAUDE_CODE_SESSION_ID survives the scrub")
+        else:
+            bad("--spawn --env lost to the scrub: %r" %
+                e.get("CLAUDE_CODE_SESSION_ID"))
+        e = child_env("nocc", [], {"GIT_EDITOR": "true"})
+        if e.get("GIT_EDITOR") == "true":
+            ok("--spawn without CLAUDECODE keeps GIT_EDITOR")
+        else:
+            bad("--spawn without CLAUDECODE dropped GIT_EDITOR")
     finally:
         os.system("'%s' -kl >/dev/null 2>&1" % DCH)
         shutil.rmtree(tmp, ignore_errors=True)

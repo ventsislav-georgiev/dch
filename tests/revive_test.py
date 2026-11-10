@@ -370,8 +370,8 @@ def main():
         # --- the agent, as the session's command --------------------------
         cl = spawn("rcl", "fakewrap", "wrap", "claude", "--chrome")
         s1 = until(lambda: starts(cl) and starts(cl)[0])
-        check("caller's Claude env reaches a plain --spawn (control)",
-              s1 and "CLAUDECODE" in s1["env"])
+        check("caller's Claude env does not reach a plain --spawn (#111)",
+              s1 and "CLAUDECODE" not in s1["env"])
         a = until(lambda: ((rec(cl) or {}).get("agent") or {})
                   .get("session_id") == s1["sid"] and rec(cl)["agent"])
         check("record picks up the agent: kind, id, cwd, launch",
