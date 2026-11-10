@@ -7650,7 +7650,7 @@ do_stop_verb(char **names, int nnames, int json)
 			bad = 1;
 			continue;
 		}
-		else if (strcmp(ci.state, "running") != 0)
+		else if (!ci.state || strcmp(ci.state, "running") != 0)
 		{
 			/* --stop arms its own hold: someone else's owns the exit */
 			stop_print(names[k], "skipped", "respawn_pending",

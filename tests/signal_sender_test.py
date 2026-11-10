@@ -76,9 +76,11 @@ def main():
         check("session up, master found", r.returncode == 0 and mpid)
 
         # the helper: SIGTERM the master, then wait to be resolved; its
-        # code ends in a comment with the bytes the record must not trust
-        code = 'import os,sys;os.kill(%d,15);sys.stdin.read()#q"b\\\x01\xe9' % mpid
-        argv = [sys.executable, "-c", code]
+        # script ends in a comment with the bytes the record must not trust.
+        # /bin/sh, not python: a framework python re-execs under a long
+        # Python.app path, so its argv is neither predictable nor short.
+        code = 'kill -TERM %d; read x #q"b\\\x01\xe9' % mpid
+        argv = ["/bin/sh", "-c", code]
         h = subprocess.Popen(argv, stdin=subprocess.PIPE)
         helpers.append(h)
         until(lambda: (rec(n) or {}).get("ended", 0) > 0)
