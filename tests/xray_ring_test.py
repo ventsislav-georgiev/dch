@@ -4,17 +4,17 @@
 Covers what tests/ring_unit.c cannot reach from inside vt.c: the master
 protocol's read op (MSG_RING_READ: range, the 1 MiB cap, session_id),
 subscribers and their edge-triggered wake (a clear wakes one too; a wake at a
-full subscriber's out cap drops it safely), the clear message, the xray_ring
+full subscriber's out cap drops it safely; a stale one loses its slot), the clear message, the xray_ring
 config (0 = off), the client-input flag on a C mark from real keystrokes,
 `dch --shell-init` in real zsh and bash, the --restart handover (the ring and
 session_id survive, the resume blob carries no ring bytes, no shm object is
 left open; a failed handover rotates to an empty ring with a new seq base and
-session_id), the trace canary (S3: no ring text in DCH_DEBUG traces) and the
+session_id; a pre-1.43 client gets no handover and the core limit back), the trace canary (S3: no ring text in DCH_DEBUG traces) and the
 master's core-dump limit.
 
 Run:  python3 tests/xray_ring_test.py       (uses ./dch; run.sh isolates it)
 """
-import os, re, resource, shutil, socket, struct, subprocess, sys, tempfile, time
+import json, os, re, resource, shutil, socket, struct, subprocess, sys, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -118,6 +118,22 @@ def kill(name):
     dch("-k", name)
 
 
+def restart_raw(name, exe, caps=True):
+    """MSG_RESTART onto exe -> (type, status) of the reply. caps=True first
+    sends MSG_RESTART_CAPS as a current dch does; caps=False is a pre-1.43
+    client, which sends the path only (#121)."""
+    s = X.connect(name)
+    try:
+        if caps:
+            s.sendall(struct.pack("<BHB", X.MSG_RESTART_CAPS, 1, X.F_RING))
+            X.recv_frame(s)
+        s.sendall(struct.pack("<BH", X.MSG_RESTART, len(exe)) + exe.encode())
+        t, st, _ = X.recv_frame(s)
+        return t, st
+    finally:
+        s.close()
+
+
 def test_read_op():
     n = "xr-read" + TAG
     spawn(n, "sh")
@@ -206,6 +222,43 @@ def test_subscribers():
         socks.append(s5)
         h, _ = X.read(s5, 0, sub=True)
         check("a closed subscriber frees its slot", h["status"] & X.S_SUB, h)
+    finally:
+        for s in socks:
+            s.close()
+        kill(n)
+
+
+def test_sub_evict():
+    """QA 1.43 NIT-2 (#121): with the slots full, a new subscriber takes the
+    slot of the one that has left a wake unanswered past 3 s; a younger
+    wake, or a caught-up subscriber, keeps its slot."""
+    n = "xr-evict" + TAG
+    spawn(n, "sh")
+    socks = []
+    try:
+        run(n, "seq 1 10", "warm")
+        for i in range(4):
+            socks.append(X.connect(n))
+            X.read(socks[i], 0, sub=True)
+        send(n, "seq 1 50\n")
+        time.sleep(1.0)
+        for s in socks[1:]:
+            h, _ = X.read(s, 0, sub=True)       # answer the wake
+        new = X.connect(n)
+        socks.append(new)
+        h, _ = X.read(new, 0, sub=True)
+        check("evict: a wake unanswered for 1 s keeps its slot",
+              h["status"] & X.S_SUBFULL and not h["status"] & X.S_SUB, h)
+        time.sleep(2.6)
+        h, _ = X.read(new, 0, sub=True)
+        check("evict: past 3 s the stale subscriber's slot goes to the new "
+              "one", h["status"] & X.S_SUB, h)
+        h, _ = X.read(socks[0], 0)
+        check("evict: the stale one reads on, unsubscribed",
+              "end" in h and not h["status"] & X.S_SUB, h)
+        h, _ = X.read(socks[1], 0)
+        check("evict: a caught-up subscriber keeps its slot",
+              h["status"] & X.S_SUB, h)
     finally:
         for s in socks:
             s.close()
@@ -389,7 +442,8 @@ def test_shell_init(tmp):
         else:
             rcf = os.path.join(d, "rc")
             with open(rcf, "w") as f:
-                f.write("PS1='bp$ '\n" + init)
+                # NIT-1 (#121): the hooks must hold under set -u
+                f.write("set -u\nPS1='bp$ '\n" + init)
             env = dict(os.environ)
             cmd = [path, "--noprofile", "--rcfile", rcf, "-i"]
         n = "xr-%s%s" % (sh, TAG)
@@ -410,6 +464,10 @@ def test_shell_init(tmp):
             check("%s: A, B, C (input flag), D;1 for `false`" % sh,
                   i >= 3 and seqm[i - 3:i] == ["A", "B", "C"] and
                   m[i - 1][1] & X.F_INPUT and m[i][1] & X.F_EXIT, m[:12])
+            if sh == "bash":
+                bad = [r["text"] for r in recs if b"unbound" in r["text"]]
+                check("bash under set -u: no unbound-variable error",
+                      not bad and "unbound" not in screen(n), bad[:2])
             kinds = [(r["kind"], r["text"].decode()) for r in recs
                      if r["kind"] in (1, 2)]
             check("%s: the prompt and the typed command are told apart" % sh,
@@ -465,15 +523,9 @@ def test_restart(tmp):
             f.write('#!/bin/sh\ncp "$DCH_RESUME" "%s"\nulimit -c > "%s"\n'
                     'exec "%s" "$@"\n' % (blobcopy, corefile, DCH))
         os.chmod(wrap, 0o755)
-        s = X.connect(n)
-        try:
-            s.sendall(bytes([13, len(wrap) & 255, len(wrap) >> 8]) +
-                      wrap.encode())
-            t, st, _ = X.recv_frame(s)
-            check("restart: ACK from the new image", t == X.MSG_ACK and
-                  st == 0, (t, st))
-        finally:
-            s.close()
+        t, st = restart_raw(n, wrap)
+        check("restart: ACK from the new image", t == X.MSG_ACK and
+              st == 0, (t, st))
         blob = open(blobcopy, "rb").read()
         if soft:
             check("S5: the master's own soft core limit is 0 (its exec sees "
@@ -509,13 +561,7 @@ def test_restart(tmp):
             f.write('#!/bin/sh\nsed -i.x "/^ringfd /d" "$DCH_RESUME"\n'
                     'exec "%s" "$@"\n' % DCH)
         os.chmod(bad, 0o755)
-        s = X.connect(n)
-        try:
-            s.sendall(bytes([13, len(bad) & 255, len(bad) >> 8]) +
-                      bad.encode())
-            t, st, _ = X.recv_frame(s)
-        finally:
-            s.close()
+        t, st = restart_raw(n, bad)
         h3, r3 = X.read_all(n, h2["tail"])
         check("10: a failed handover: empty ring, new seq base, new id",
               t == X.MSG_ACK and st == 0 and
@@ -530,13 +576,7 @@ def test_restart(tmp):
         with open(bad, "w") as f:
             f.write('#!/bin/sh\nsed -i.x "s/^sid m/sid z/" "$DCH_RESUME"\n'
                     'exec "%s" "$@"\n' % DCH)
-        s = X.connect(n)
-        try:
-            s.sendall(bytes([13, len(bad) & 255, len(bad) >> 8]) +
-                      bad.encode())
-            t, st, _ = X.recv_frame(s)
-        finally:
-            s.close()
+        t, st = restart_raw(n, bad)
         h4, r4 = X.read_all(n, h3["tail"])
         check("10: a bad handed-over session_id: the imported ring goes, "
               "new seq base, new id", t == X.MSG_ACK and st == 0 and
@@ -550,6 +590,83 @@ def test_restart(tmp):
               canary.encode() not in tr)
         check("S5: the master lowers its own core limit (trace)",
               b"core limit: soft 0" in tr)
+    finally:
+        kill(n)
+
+
+def test_restart_legacy(tmp):
+    """QA 1.43 LOW-1 (#121): --restart from a pre-1.43 client lands on a
+    pre-1.43 image, which knows no ringfd/core lines. The master must hand
+    that image neither: no ring fd left open across the exec, and the
+    child's soft core limit back. A python stand-in for the old image
+    records what it was handed, then execs the real dch."""
+    n = "xr-old" + TAG
+    hard = resource.getrlimit(resource.RLIMIT_CORE)[1]
+    soft = hard if hard != resource.RLIM_INFINITY else 1 << 30
+    env = dict(os.environ)
+    if env.get("ASAN_OPTIONS"):
+        # ASan's own disable_coredump would lower the inherited limit (to 1
+        # under a piped core_pattern) before the master saves it
+        env["ASAN_OPTIONS"] += ":disable_coredump=0"
+    r = dch("--spawn", n, "--size", "80x24", "sh", env=env,
+            preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_CORE,
+                                                  (soft, hard)))
+    if r.returncode != 0:
+        raise SystemExit("spawn %s failed: %s" % (n, r.stderr))
+    rec = os.path.join(tmp, "old-image.json")
+    old = os.path.join(tmp, "old-dch")
+    with open(old, "w") as f:
+        f.write("#!%s -I\n"
+                "import fcntl, json, os, resource, sys\n"
+                "def kept(fd):\n"
+                "    try:\n"
+                "        return not fcntl.fcntl(fd, fcntl.F_GETFD) & 1\n"
+                "    except OSError:\n"
+                "        return False\n"
+                "fds = [fd for fd in range(3, 256) if kept(fd)]\n"
+                "head = open(os.environ['DCH_RESUME'], 'rb').read()\n"
+                "head = head.split(b'\\nsnap ')[0].decode('latin-1')\n"
+                "json.dump({'fds': fds, 'head': head, 'core':\n"
+                "           resource.getrlimit(resource.RLIMIT_CORE)[0]},\n"
+                "          open(%r, 'w'))\n"
+                "os.execv(%r, [%r] + sys.argv[1:])\n"
+                % (sys.executable, rec, DCH, DCH))
+    os.chmod(old, 0o755)
+    try:
+        run(n, "seq 1 100", "o1")
+        h0, _ = X.read_all(n, 0)
+        t, st = restart_raw(n, old, caps=False)
+        check("old client: ACK from the image it landed on",
+              t == X.MSG_ACK and st == 0, (t, st))
+        got = json.load(open(rec))
+        head = got["head"].splitlines()
+        carried = set()
+        for l in head:
+            f = l.split()
+            if f and f[0] in ("lfd", "pfd", "ack", "cli"):
+                carried.add(int(f[1]))
+        extra = sorted(set(got["fds"]) - carried)
+        check("old client: the old image inherits no fd but the carried ones"
+              " (no ring handover fd)", not extra and
+              not [l for l in head if l.startswith("ringfd ")],
+              (extra, got["fds"], sorted(carried)))
+        check("old client: no core line in the blob",
+              not [l for l in head if l.startswith("core ")], head)
+        if soft:
+            check("old client: the old image gets the child's soft core "
+                  "limit back (%d), not 0" % soft, got["core"] == soft, got)
+        h1, _ = X.read_all(n, 0)
+        check("old client: the session serves on (a fresh ring)",
+              h1.get("session_id") and
+              h1["session_id"] != h0["session_id"], (h0, h1))
+        # a current client on the same session: the handover still works
+        run(n, "seq 1 30", "o2")
+        h2, r2 = X.read_all(n, 0)
+        r = dch("--restart", n)
+        h3, r3 = X.read_all(n, 0)
+        check("current client: --restart still hands the ring over",
+              r.returncode == 0 and h3["session_id"] == h2["session_id"] and
+              h3["tail"] == h2["tail"], (r.returncode, r.stderr, h2, h3))
     finally:
         kill(n)
 
@@ -570,11 +687,13 @@ def main():
     try:
         test_read_op()
         test_subscribers()
+        test_sub_evict()
         test_clear_and_off()
         test_wake_at_cap(tmp)
         test_shell_init(tmp)
         test_forged_block()
         test_restart(tmp)
+        test_restart_legacy(tmp)
         test_help_clean()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
