@@ -26,7 +26,10 @@
 ** ctl_check) as a child of the handler, its pipes in the same poll loop:
 ** its output streams out as 0x31/0x32 while the client keeps up, its exit
 ** comes as 0x33. A cap, a timeout, a 0x34 (cancel, #118) or the client's
-** close ends it (SIGTERM, then SIGKILL). Each 0x30 that runs gets exactly
+** close ends it: SIGTERM, then SIGKILL of its process group after
+** CTL_GRACE_MS, or for a 0x34 or the close of a CTL_LONG verb (--say,
+** --stop, --revive, --run: dch finishes safely on a SIGTERM, typing resume
+** messages) after CTL_LONG_MS (#124). Each 0x30 that runs gets exactly
 ** one 0x33; after it the connection stays open (warm) for the next 0x30,
 ** until CTL_IDLE_MS without a frame. A 0x30 while one runs is refused with
 ** a 0x13 "busy" and the running one goes on; any other refused 0x30 is a
@@ -759,10 +762,11 @@ struct conn
 	long long last_frame, last_write, eof_at;
 	/* a ctl (0x30, #114): the dch it runs (0 none yet, -1 done: warm),
 	** its stdout and stderr (-1 at EOF), what went out of them, its
-	** timeout (0 none) and, once cut ("cap", "timeout", "cancel"), when
-	** SIGKILL follows the SIGTERM */
+	** timeout (0 none) and, once cut ("cap", "timeout", "cancel",
+	** "closed"), when SIGKILL follows the SIGTERM; whether it is a
+	** CTL_LONG verb */
 	pid_t ctl;
-	int ctl_fd[2], ctl_st, ctl_reaped;
+	int ctl_fd[2], ctl_st, ctl_reaped, ctl_long;
 	size_t ctl_sent;
 	long long ctl_end, ctl_kill;
 	const char *ctl_why;
@@ -1227,12 +1231,25 @@ ctl_request(const unsigned char *p, size_t n, char ***av, int *ac, char *cwd,
 	return t;
 }
 
-/* Stop forwarding the ctl's output and SIGTERM it (SIGKILL CTL_GRACE_MS
-** later, ctl_tick); its 0x33 says why once it is reaped. */
+/* SIGKILL the ctl's process group (its own, on_ctl), what it started too */
+static void
+ctl_sigkill(pid_t pid)
+{
+	if (kill(-pid, SIGKILL) < 0)
+		kill(pid, SIGKILL);
+}
+
+/* Stop forwarding the ctl's output and SIGTERM it; ctl_tick (or ctl_wait)
+** SIGKILLs it CTL_GRACE_MS later, or CTL_LONG_MS later for a CTL_LONG verb
+** cut by a "cancel" or the connection's "closed" (#124): those finish safely
+** on a SIGTERM. Not while the server stops: the parent SIGKILLs handlers 3 s
+** after their SIGTERM, which would orphan the ctl with no deadline. Its 0x33
+** says why once it is reaped. */
 static void
 ctl_cut(struct conn *c, const char *why)
 {
-	int k;
+	int k, safe = c->ctl_long && !g_stop &&
+	              (!strcmp(why, "cancel") || !strcmp(why, "closed"));
 
 	c->ctl_why = why;
 	for (k = 0; k < 2; k++)
@@ -1244,7 +1261,7 @@ ctl_cut(struct conn *c, const char *why)
 	if (!c->ctl_reaped)
 	{
 		kill(c->ctl, SIGTERM);
-		c->ctl_kill = now_ms() + CTL_GRACE_MS;
+		c->ctl_kill = now_ms() + (safe ? CTL_LONG_MS : CTL_GRACE_MS);
 	}
 	slog("%s: ctl cut short: %s", c->ipstr, why);
 }
@@ -1347,6 +1364,7 @@ on_ctl(struct conn *c, const unsigned char *p, size_t n)
 			dup2(nul, 0);
 			dup2(po[1], 1);
 			dup2(pe[1], 2);
+			setpgid(0, 0);	/* its group: SIGKILLed whole */
 			if (cwd[0] ? chdir(cwd) < 0
 			           : !home || chdir(home) < 0)
 				if (cwd[0] || chdir("/") < 0)
@@ -1373,9 +1391,11 @@ on_ctl(struct conn *c, const unsigned char *p, size_t n)
 		free(av);
 		return;
 	}
+	setpgid(pid, pid);	/* either side may win the race */
 	nonblock(po[0]);
 	nonblock(pe[0]);
 	c->closing = 0;
+	c->ctl_long = !!(fl & CTL_LONG);
 	c->ctl = pid;
 	c->ctl_reaped = 0;
 	c->ctl_sent = 0;
@@ -1409,7 +1429,7 @@ ctl_tick(struct conn *c, long long now)
 		ctl_cut(c, "timeout");
 	if (!c->ctl_reaped && c->ctl_kill && now >= c->ctl_kill)
 	{
-		kill(c->ctl, SIGKILL);
+		ctl_sigkill(c->ctl);
 		c->ctl_kill = 0;
 	}
 	if (!c->ctl_reaped)
@@ -1435,12 +1455,14 @@ ctl_tick(struct conn *c, long long now)
 	c->last_frame = now;
 }
 
-/* The ctl on a connection that ends: SIGTERM (--stop and --say finish
-** safely on one), SIGKILL after CTL_GRACE_MS. */
+/* The ctl of a connection that has ended, called once its socket is
+** closed: nothing is forwarded, nobody waits on this handler but the
+** parent, which counts its slot until the ctl is reaped. One not cut yet
+** was cut "closed" by conn_end. Wait out its deadline (ctl_cut's), then
+** SIGKILL; a server stop shortens it to CTL_GRACE_MS. */
 static void
-ctl_end(struct conn *c)
+ctl_wait(struct conn *c)
 {
-	long long end;
 	pid_t w;
 	int k;
 
@@ -1450,20 +1472,23 @@ ctl_end(struct conn *c)
 	c->ctl_fd[0] = c->ctl_fd[1] = -1;
 	if (c->ctl <= 0 || c->ctl_reaped)
 		return;
-	kill(c->ctl, SIGTERM);
-	end = now_ms() + CTL_GRACE_MS;
 	while ((w = waitpid(c->ctl, &c->ctl_st, WNOHANG)) == 0 ||
 	       (w < 0 && errno == EINTR))
 	{
-		if (w == 0 && now_ms() >= end)
+		long long now = now_ms();
+
+		if (g_stop && c->ctl_kill > now + CTL_GRACE_MS)
+			c->ctl_kill = now + CTL_GRACE_MS;
+		/* ctl_kill 0: ctl_tick has SIGKILLed it already */
+		if (w == 0 && (!c->ctl_kill || now >= c->ctl_kill))
 		{
-			kill(c->ctl, SIGKILL);
+			ctl_sigkill(c->ctl);
 			while (waitpid(c->ctl, &c->ctl_st, 0) < 0 &&
 			       errno == EINTR)
 				;
 			break;
 		}
-		poll(NULL, 0, 10);
+		poll(NULL, 0, 20);
 	}
 	c->ctl_reaped = 1;
 }
@@ -1752,14 +1777,16 @@ pty_read(struct conn *c, size_t budget)
 	}
 }
 
-/* Close: the dch client first, then the socket. A graceful close sends what
-** is queued and the FIN, and reads off what the client still sends for a
-** moment, so the close is a FIN and not a reset that could eat the reply. */
+/* Close: the dch client first, then the socket, then the ctl's wait. A
+** graceful close sends what is queued and the FIN, and reads off what the
+** client still sends for a moment, so the close is a FIN and not a reset
+** that could eat the reply. */
 static void
 conn_end(struct conn *c, int graceful)
 {
 	kid_end(c);
-	ctl_end(c);
+	if (c->ctl > 0 && !c->ctl_reaped && !c->ctl_why)
+		ctl_cut(c, "closed");
 	if (c->pty >= 0)
 		close(c->pty);
 	c->pty = -1;
@@ -1781,6 +1808,7 @@ conn_end(struct conn *c, int graceful)
 		}
 	}
 	close(c->fd);
+	ctl_wait(c);
 	free(c->last_list);
 	free(c->out.p);
 }

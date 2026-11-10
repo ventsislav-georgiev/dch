@@ -1594,8 +1594,14 @@ connection, and a ctl connection takes only hello, list, 0x30 and 0x34
 (anything else: a 0x13, then the close). After the 0x33 the connection stays open for the next 0x30 (one
 at a time); with no frame for 300 s it closes. A
 .B 0x34
-(cancel, any payload) while the verb runs ends it (SIGTERM, SIGKILL 2 s
-later) with
+(cancel, any payload) while the verb runs ends it (SIGTERM, then SIGKILL
+of its process group 2 s later; 660 s later for
+.BR \-\-say ,
+.BR \-\-stop ,
+.B \-\-revive
+and
+.BR \-\-run ,
+which finish safely on a SIGTERM) with
 .BR {\(dqexit\(dq:2,\(dqwhy\(dq:\(dqcancel\(dq} ;
 one with nothing running, or after the verb was already cut, is ignored. A
 0x30 while one runs gets 0x13
@@ -1669,8 +1675,10 @@ none for
 .BR \-\-follow ,
 60 s for the rest; past it, the same with
 .BR \(dqwhy\(dq:\(dqtimeout\(dq .
-A client that closes the connection while its verb runs ends it the same
-way, with no 0x33 (one that sent a 0x34 first still gets it). The gate is
+A client that closes the connection while its verb runs ends it as a 0x34
+does (the same 2 s or 660 s grace), with no 0x33 (one that sent a 0x34
+first still gets it); the handler holds its connection slot until that dch
+is gone, and a server stop cuts the grace to 2 s. The gate is
 attach's. For tests,
 .B DCH_CTL_TIMEOUT_MS
 replaces every timeout

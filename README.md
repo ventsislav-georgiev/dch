@@ -1558,8 +1558,10 @@ in `ops` (`create` only with `--allow-create`). A client checks for the
 
 Each `0x30` that runs gets exactly one `0x33`. After it the connection stays
 open (warm) for the next `0x30`; a warm connection with no frame for 300 s
-closes. A `0x34` while the verb runs ends it (SIGTERM, SIGKILL 2 s later) and
-its `0x33` is `{"exit":2,"why":"cancel"}`. A `0x34` with nothing running
+closes. A `0x34` while the verb runs ends it (SIGTERM, then SIGKILL of its
+process group 2 s later; 660 s later for `--say`, `--stop`, `--revive` and
+`--run`, which finish safely on a SIGTERM, typing the resume message into an
+agent still waiting to pause) and its `0x33` is `{"exit":2,"why":"cancel"}`. A `0x34` with nothing running
 (before any `0x30`, after a `0x33`, or once the verb was already cut) is
 ignored. A `0x30` while one runs gets `0x13`
 `{"code":"busy","message":"a ctl is already running on this connection"}`;
@@ -1613,7 +1615,9 @@ release: `xray not supported by this host`.
 stops forwarding, sends the dch SIGTERM (SIGKILL 2 s later) and ends with
 `{"exit":2,"why":"cap"}`. Past its timeout (the table) it does the same with
 `"why":"timeout"`. A client that closes the connection (or half-closes it)
-while the verb runs ends it the same way, with no `0x33`. The server's
+while the verb runs ends it as a `0x34` does (the same 2 s or 660 s grace),
+with no `0x33`; the handler then holds its connection slot until the dch has
+exited or been killed (a server stop cuts the grace to 2 s). The server's
 loop never waits on the dch: one slow verb holds up nothing else. The ctl op has the same gate
 as attach: only peers the [trust model](#dch-serve-prosper-remote-hosts)
 lets in. For tests, `DCH_CTL_TIMEOUT_MS` replaces every timeout (`--follow`
