@@ -400,8 +400,12 @@ def main():
               and "nope is not a known host" in r.err
               and "known: q" in r.err, r.err)
         r = dch("-a", "nope:x")
-        check("DCH_NO_REMOTE=1: no hosts", r.returncode == 1
-              and "remote hosts are off" in r.err, r.err)
+        # dch.exe has no local sessions; POSIX dch keeps the name local
+        check("DCH_NO_REMOTE=1: no hosts" if WIN else
+              "DCH_NO_REMOTE=1: -a host:name stays local (#122)",
+              r.returncode == 1 and ("remote hosts are off" in r.err if WIN
+                                     else "no session: nope:x" in r.err
+                                     and "known host" not in r.err), r.err)
         r = dch("--hosts", qh, "-a", "q:gone")
         check("-a host:missing says so", r.returncode == 1
               and "no session gone on q" in r.err, r.err)

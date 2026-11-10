@@ -56,6 +56,9 @@ static char client_pidfile[1200];
 ** creates; remote_host: --host; pk_remote: the picker lists remote rows. */
 static int remote_ok, attach_only, pk_remote;
 static const char *remote_host;
+/* the host of an a:b name that stayed local only because the host is not
+** known (#122): a failed verb names it in one hint line */
+static char g_rhint[DCH_RHOST_MAX];
 /* --xray: the stderr line a failed write exits 1 with (SIGPIPE ignored) */
 static const char *write_fail_line;
 
@@ -2910,7 +2913,8 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 	** wins, and host:name is remote. */
 	if (remote_host)
 		return dch_remote_attach(remote_host, session_name);
-	if (remote_ok && name_is_remote(session_name))
+	/* never with remote hosts off (#122); discovery still names hosts */
+	if (remote_ok && dch_remote_on() && name_is_remote(session_name))
 	{
 		char host[512];
 		char *colon = strchr(session_name, ':');
@@ -10683,17 +10687,20 @@ name_routes_remote(const char *n)
 	char host[DCH_RHOST_MAX];
 	struct hrec *r;
 	size_t hl = strcspn(n, ":");
-	int nr, hit;
+	int nr, hit, known;
 
 	if (!name_is_remote(n) || hl >= sizeof host)
 		return 0;
 	snprintf(host, sizeof host, "%.*s", (int)hl, n);
-	if (!dch_remote_known(host))
+	known = dch_remote_known(host);
+	if (!known && !dch_remote_on())
 		return 0;
 	nr = history_load(&r);
 	hit = !xr_local(n, r, nr);
 	hrec_free(r, nr);
-	return hit;
+	if (hit && !known && !g_rhint[0])
+		snprintf(g_rhint, sizeof g_rhint, "%s", host);
+	return hit && known;
 }
 
 /* `dch --xray <n> [--json] [--clear]` (spec 3.1): flags in any order, each
@@ -10761,8 +10768,21 @@ xray_main(int argc, char **argv)
 
 /* ---- main ----------------------------------------------------------- */
 
+static int main_run(int argc, char **argv);
+
 int
 main(int argc, char **argv)
+{
+	int rc = main_run(argc, argv);
+
+	if (rc != 0 && g_rhint[0])
+		fprintf(stderr, "(%s is not a known host; --host %s to reach it)\n",
+		        g_rhint, g_rhint);
+	return rc;
+}
+
+static int
+main_run(int argc, char **argv)
 {
 	int forced_name = 0;
 	int force = 0;

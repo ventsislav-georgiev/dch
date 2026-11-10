@@ -353,7 +353,7 @@ someone is watching is invisible to them.
 
 | Verb | Does | Exit codes |
 | --- | --- | --- |
-| `--spawn <n> [--size CxR] [--env K=V]... [cmd...]` | Start headless session (default: `$SHELL`, 80x24 or `$COLUMNS`/`$LINES`). `--env` (max 32, first `=` splits) adds variables to the child; reserved keys (`DCH_SESSION`, `TERM` fixup) always win. Like `--revive` (and a plain `dch <new>`), it drops the calling Claude Code session's identity (`CLAUDECODE`, `CLAUDE_CODE_*` session vars), plus `GIT_EDITOR` and the other harness vars when `CLAUDECODE` is set, and sets `LC_TERMINAL=ghostty` unless the caller has it (dch keeps OSC 8 links, but under `TERM=xterm-256color` with no `TERM_PROGRAM` Claude Code would strip its statusline's, and `LC_TERMINAL` is the one signal its check reads that supports-hyperlinks and other Node CLIs ignore). dch sets no `FORCE_HYPERLINK`: those CLIs honour it before they check for a terminal, so it put OSC 8 into pipes and files (`stylelint t.css > out`, an agent's Bash tool); a caller's own value still reaches the session. An explicit `--env` (`--env LC_TERMINAL=` included) still wins. Prints the name. A program that cannot be executed is an error (`dch: <n>: <cmd>: <reason>`); one that runs and exits at once is not. | 0 ok, 1 exists/failed/not executable/bad --env |
+| `--spawn <n> [--size CxR] [--env K=V]... [cmd...]` | Start headless session (default: `$SHELL`, 80x24 or `$COLUMNS`/`$LINES`). `--env` (max 32, first `=` splits) adds variables to the child; reserved keys (`DCH_SESSION`, `TERM` fixup) always win. Like `--revive` (and a plain `dch <new>`), it drops the calling Claude Code session's identity (`CLAUDECODE`, `CLAUDE_CODE_*` session vars), plus `GIT_EDITOR` and the other harness vars when `CLAUDECODE` is set, and sets `LC_TERMINAL=ghostty` unless the caller has it (dch keeps OSC 8 links, but under `TERM=xterm-256color` with no `TERM_PROGRAM` Claude Code would strip its statusline's, and `LC_TERMINAL` is the one signal its check reads that supports-hyperlinks and other Node CLIs ignore; ssh sends it on, by macOS's default `SendEnv LC_*`). dch sets no `FORCE_HYPERLINK`: those CLIs honour it before they check for a terminal, so it put OSC 8 into pipes and files (`stylelint t.css > out`, an agent's Bash tool); a caller's own value still reaches the session. An explicit `--env` (`--env LC_TERMINAL=` included) still wins. Prints the name. A program that cannot be executed is an error (`dch: <n>: <cmd>: <reason>`); one that runs and exits at once is not. | 0 ok, 1 exists/failed/not executable/bad --env |
 | `--xray <n> --json` | One JSON object: the session's corpus and chapters (see [X-ray queries](#x-ray-queries---xray)). `--clear` empties a shell's ring instead. Must be the first argument. | 0 ok, 1 no such session/ambiguous/no corpus, 2 usage, 3 read failure |
 | `--send <n> <text...>` | Type text (joined with spaces), no enter. | 0 ok |
 | `--run <n> <text...>` | `--send` + enter. Into a session whose Claude Code runs — as its command or typed into its shell — the text goes through `--say`'s composer gate instead: typed only over an empty composer, Enter pressed once it shows and again while it stays (Claude Code folds an Enter sent with the text into the paste). A `/command` is typed raw, a message pasted. A shell or any other program, a master without a mirror (`DCH_NO_VT`), dch-lite and your own session (`$DCH_SESSION`) keep the plain burst. A gate failure prints `dch: <n>: <reason> — <why>` on stderr: `prompt` and `draft` (nothing typed), `not_typed` (the text never showed in the composer, no Enter), `not_submitted` (it stayed there through every Enter); `no_screen` when the composer is not on screen. | 0 ok, 1 gate failure |
@@ -1744,7 +1744,8 @@ and sends the attach on that same connection. `--scrollback N` (or
 (see [dch serve](#dch-serve-prosper-remote-hosts)); a host that does not know
 it attaches without scrollback. A host that refuses us
 prints `dch: <host> refused: <message>` and exits 4; a `busy` one prints
-`dch: <host>: says: <message>` and exits 1, like a host that is down. An exact local session name wins over `host:name`; `--host` is the
+`dch: <host>: says: <message>` and exits 1, like a host that is down. An exact local session name wins over `host:name`, and with remote hosts off
+(`DCH_NO_REMOTE=1`, `remote_hosts = off`) the name stays local; `--host` is the
 unambiguous form. A lost connection restores the terminal, says so, and exits
 1. An attach another client took over (a newer attach to the same session,
 the `0x13` `taken`) restores the terminal, prints
@@ -1766,6 +1767,9 @@ History record has exactly that name and `host` is a known host (`--hosts`,
 picker); never with remote hosts off (`DCH_NO_REMOTE=1`, `remote_hosts =
 off`). Anything else stays local, so a local session named `proj:task`
 (`dch -n proj:task`) can be spawned, revived, pinned and forgotten by name.
+When such a name fails here while remote hosts are on, one more stderr line
+names the host: `(<host> is not a known host; --host <host> to reach it)`;
+the exit status is the local one.
 `--host <h>` is the unambiguous form, the one for a host only discovery
 knows, and the only one for `--history`, which takes no name; a discovered
 host passes the same whois check. Names on two hosts in one command are refused. dch runs the verb on

@@ -200,7 +200,11 @@ that name and it has the form \fIhost\fP:\fIname\fP, attach to
 .I name
 on that remote host (see
 .BR "REMOTE HOSTS" );
-an unknown host is an error that lists the known ones.
+an unknown host is an error that lists the known ones. With remote hosts
+off
+.RB ( DCH_NO_REMOTE=1 ,
+.BR "remote_hosts = off" )
+the name stays local.
 .TP
 .BI \-\-host " host"
 With
@@ -578,7 +582,9 @@ links under
 with no
 .BR TERM_PROGRAM ,
 and Node CLIs (supports\-hyperlinks), which never read it, keep OSC 8 out
-of pipes and files. dch sets no
+of pipes and files. ssh sends it on (macOS's default
+.BR "SendEnv LC_*" ).
+dch sets no
 .BR FORCE_HYPERLINK ;
 a caller's own value reaches the session.
 .TP
@@ -1751,7 +1757,11 @@ or a cached remote row), never with remote hosts off
 .BR "remote_hosts = off" );
 anything else stays local, so a local session named
 .I proj:task
-can be spawned, revived and forgotten by name.
+can be spawned, revived and forgotten by name. When such a name fails
+locally while remote hosts are on, one more line on standard error names the
+host:
+.RI ( "host is not a known host; \-\-host host to reach it" );
+the exit status is the local one.
 .B \-\-host
 is the unambiguous form (the one for a host only discovery knows, and the
 only one for
@@ -2033,7 +2043,9 @@ the picker,
 .B \-a
 or
 .BR \-\-remote ,
-and a control verb's
+and
+.BR \-a 's
+or a control verb's
 .I host:name
 stays local
 .RB ( \-\-hosts

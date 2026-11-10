@@ -607,6 +607,12 @@ cache_load(struct rlist *l, long long now)
 	free(text);
 }
 
+int
+dch_remote_on(void)
+{
+	return remote_on();
+}
+
 /* host is one dch knows without a probe: a named host (--hosts,
 ** remote_hosts) or a cached row's; never discovery (no tailscale run). */
 int

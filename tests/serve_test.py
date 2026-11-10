@@ -169,8 +169,9 @@ def main():
         with open(path, errors="replace") as f:
             return f.read()
 
-    def conn(port):
-        s = socket.create_connection(("127.0.0.1", port), timeout=5)
+    def conn(port, src=None):
+        s = socket.create_connection(("127.0.0.1", port), timeout=5,
+                                     source_address=(src, 0) if src else None)
         return s
 
     def send(s, t, payload=b""):
@@ -729,8 +730,8 @@ def main():
 
         # --- #122: warm ctl connections idle out sooner at half the slots
         # (DCH_CTL_IDLE_MS 20 s here; under pressure a tenth, 2 s)
-        def warm(port):
-            s = conn(port)
+        def warm(port, src=None):
+            s = conn(port, src)
             send(s, 0x30, {"argv": ["--history", "--json"]})
             return s if frame_not(s, (0x31, 0x32))[0] == 0x33 else None
 
@@ -743,22 +744,44 @@ def main():
             except OSError:
                 return True
 
-        p, port, log = serve(e=dict(benv, DCH_CTL_IDLE_MS="20000"))
-        w = [warm(port)]
-        time.sleep(3)
-        check("one warm ctl connection outlives the pressure limit (2 s)",
-              w[0] is not None and not gone(w[0]))
-        w += [warm(port) for _ in range(7)]
-        end = time.time() + 6
-        while time.time() < end and not all(s and gone(s) for s in w):
-            time.sleep(0.2)
-        check("at 8 of 16 slots, the peer's warm ctl connections close "
-              "after 2 s idle, not 20 s (#122)",
-              all(s and gone(s) for s in w))
-        for s in w:
-            if s:
-                s.close()
-        stop(p)
+        def all_gone(w, secs):
+            end = time.time() + secs
+            while time.time() < end and not all(s and gone(s) for s in w):
+                time.sleep(0.2)
+            return all(s and gone(s) for s in w)
+
+        def edge(srcs, what):
+            # srcs[:-1] warm and idle past 2 s with none closed; the last
+            # one tips it: all close after 2 s idle, not 20 s
+            p, port, log = serve(e=dict(benv, DCH_CTL_IDLE_MS="20000"))
+            w = [warm(port, a) for a in srcs[:-1]]
+            time.sleep(3)
+            check("at %d %s, warm ctl connections outlive the pressure "
+                  "limit (2 s)" % (len(w), what),
+                  all(w) and not any(gone(s) for s in w))
+            w.append(warm(port, srcs[-1]))
+            check("at %d %s, they close after 2 s idle, not 20 s (#122)"
+                  % (len(w), what), all_gone(w, 6))
+            for s in w:
+                if s:
+                    s.close()
+            stop(p)
+
+        # per peer: 7 of 16 is no pressure, the 8th is
+        edge([None] * 8, "of the peer's 16 slots")
+        # overall: 31 of 64 from five peers of at most 7 each is none, the
+        # 32nd is; needs 127.0.0.2-6 (Linux has 127/8, macOS lo0 has
+        # only 127.0.0.1 unless aliased)
+        peers = ["127.0.0.%d" % i for i in range(2, 7)]
+        try:
+            for a in peers:
+                with socket.socket() as t:
+                    t.bind((a, 0))
+        except OSError:
+            print("skip at 32 of 64 slots overall (no 127.0.0.2-6 here)")
+        else:
+            edge([a for a in peers[:4] for _ in range(7)] + [peers[4]] * 4,
+                 "of 64 slots overall")
 
         # --- F3: peer strings reach the log escaped ----------------------
         ts()

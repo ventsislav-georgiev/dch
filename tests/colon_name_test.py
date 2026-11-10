@@ -14,6 +14,9 @@ a:b name:
   known    remote_hosts names proj (127.0.0.1:1, refused at once): proj:a
            has a local record, so it stays local; a name with none still
            goes remote (exit 7, unreachable) - routing is not lost.
+A missing proj:zz is a local "no session" for the control verbs; only with
+remote on (unknown) is it followed by one hint line naming --host. -a keeps
+discovery while remote is on, and is local with remote off.
 No host is ever dialled but loopback port 1, and no tailscale runs (the
 configs name hosts, so there is no discovery; PATH has no tailscale).
 
@@ -212,9 +215,28 @@ def one_mode(mode):
         r = run(env, "--status", "proj:b")
         check(t + "--status proj:b answers here", r.returncode == 0, r)
         run(env, "-k", "proj:b")
+        hint = "(proj is not a known host; --host proj to reach it)\n"
         r = run(env, "--status", "proj:zz")
         check(t + "a missing proj:zz is a local no-such-session (exit 1)",
-              r.returncode == 1 and "not a known host" not in r.stderr, r)
+              r.returncode == 1 and "no session: proj:zz" in r.stderr, r)
+        # the hint only while remote is on: unknown, not off / cfgoff
+        check(t + "the not-a-known-host hint " +
+              ("follows it" if mode == "unknown" else "is absent"),
+              r.stderr.endswith(hint) if mode == "unknown"
+              else "not a known host" not in r.stderr, r)
+        r = run(env, "--spawn", "proj:c", "/bin/sh")
+        check(t + "a local --spawn that works has no hint",
+              r.returncode == 0 and "not a known host" not in r.stderr, r)
+        run(env, "-k", "proj:c")
+        r = run(env, "-a", "proj:zz")
+        if mode == "unknown":	# -a keeps discovery: the remote error
+            check(t + "-a proj:zz: not a known host (known: other), exit 1",
+                  r.returncode == 1 and "proj is not a known host (known: "
+                  "other)" in r.stderr and "no session" not in r.stderr, r)
+        else:
+            check(t + "-a proj:zz with remote off: no session (exit 1)",
+                  r.returncode == 1 and r.stderr == "no session: proj:zz\n",
+                  r)
     else:
         r = run(env, "--spawn", "proj:b", "/bin/sh")
         check(t + "--spawn proj:b with no local record goes to proj (7)",
@@ -223,6 +245,10 @@ def one_mode(mode):
         r = run(env, "--status", "PROJ:zz")
         check(t + "the host part is case-insensitive, as -a's (7)",
               r.returncode == 7 and "unreachable" in r.stderr, r)
+        r = run(env, "-a", "proj:zz")
+        check(t + "-a proj:zz goes to proj (refused, exit 1)",
+              r.returncode == 1 and "proj: Connection refused" in r.stderr
+              and "no session" not in r.stderr, r)
 
 
 def main():
@@ -237,7 +263,7 @@ def main():
             d = os.path.join(ROOT, mode)
             if os.path.isdir(d):
                 env = mkenv_existing(d)
-                for n in ("proj:a", "proj:b", "pkc"):
+                for n in ("proj:a", "proj:b", "proj:c", "pkc"):
                     run(env, "-k", n)
         shutil.rmtree(ROOT, ignore_errors=True)
     print("%d failure(s)" % len(failures))
