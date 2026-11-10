@@ -16,6 +16,28 @@
 
 int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n);
 
+#ifdef __linux__
+#include <sys/mman.h>
+#include <sys/types.h>
+
+/* libghostty's page allocator (Zig's std.heap.PageAllocator) hints each
+** mmap just past its previous mapping, so every input's terminal lands on
+** fresh addresses: about 2 MB of new address space per input. Natively that
+** costs nothing. Under ASan, the mmap/munmap interceptors zero the shadow
+** of every range and never give it back, so RSS climbed about 0.26 MB per
+** input into libFuzzer's 2 GB limit. scripts/fuzz.sh links this target with
+** --wrap=mmap64 (the symbol libghostty calls), and the wrapper drops the
+** hint, so the kernel reuses the ranges a freed terminal left. */
+void *__real_mmap64(void *, size_t, int, int, int, off_t);
+void *__wrap_mmap64(void *, size_t, int, int, int, off_t);
+
+void *
+__wrap_mmap64(void *a, size_t len, int prot, int fl, int fd, off_t off)
+{
+	return __real_mmap64(fl & MAP_FIXED ? a : NULL, len, prot, fl, fd, off);
+}
+#endif
+
 static struct dch_ring R;
 static unsigned char rb[RING_MAX + 64];
 

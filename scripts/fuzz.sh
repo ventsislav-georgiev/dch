@@ -44,20 +44,26 @@ make attach.o master.o serve.o rframe.o remote.o bridge.o json.o picker.o ring.o
 $CC $CF -Dmain=dch_main -c dch.c -o dch.o
 
 mkdir -p "$art"
+# fuzz_ring makes a terminal per input: on Linux its mmap64 wrapper keeps
+# libghostty's mappings from drifting through ASan shadow (fuzz_ring.c).
+ringld=
+[ "$(uname -s)" = Linux ] && ringld=-Wl,--wrap=mmap64
 rc=0
 for t in $targets; do
+	ld=
 	case $t in
 	json)  objs="attach.o master.o dch.o serve.o remote.o" ;;  # the API
 	frames) objs="attach.o dch.o serve.o remote.o" ;;  # includes master.c
 	keys)  objs="master.o dch.o serve.o remote.o" ;;   # includes attach.c
 	serve) objs="attach.o master.o dch.o remote.o" ;;  # includes serve.c
 	remote) objs="attach.o master.o dch.o serve.o" ;;  # includes remote.c
-	ring)  objs="attach.o master.o dch.o serve.o remote.o" ;;  # the API
+	ring)  objs="attach.o master.o dch.o serve.o remote.o"  # the API
+	       ld=$ringld ;;
 	*)     objs="attach.o master.o serve.o remote.o" ;; # includes dch.c
 	esac
 	$CC $CF -Dmain=dch_main -fsanitize=fuzzer -o "fuzz_$t" \
 		"tests/fuzz/fuzz_$t.c" $objs rframe.o bridge.o json.o picker.o ring.o \
-		$vt_objs $vt_libs
+		$vt_objs $vt_libs $ld
 	mkdir -p "corpus/$t"
 	cp "$src/tests/fuzz/corpus/$t"/* "corpus/$t/" 2>/dev/null || :
 	echo "fuzz_$t: ${secs}s"
