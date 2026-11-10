@@ -136,6 +136,40 @@ end(struct xr_chapters *c)
 #define A(t) "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":" \
              "\"text\",\"text\":\"" t "\"}]}}"
 
+/* iso_time through a chapter's `at`: offsets are exactly [+-]HH:MM; a
+** short form is unparsed (-1), never read past the string's end (ASan) */
+static long long
+at_of(const char *ts)
+{
+	char l[256];
+	struct xr_chapters c;
+	long long at;
+
+	snprintf(l, sizeof l, "{\"type\":\"user\",\"message\":{\"content\":"
+	         "\"hi\"},\"timestamp\":\"%s\"}", ts);
+	begin();
+	line(l);
+	end(&c);
+	at = c.n ? xr_chapter_at(&c, 0)->at : -2;
+	xr_chapters_free(&c);
+	return at;
+}
+
+static void
+t_time(void)
+{
+	CHECK("time: Z", at_of("2026-01-02T03:04:05Z") == 1767323045);
+	CHECK("time: fraction and +01:00",
+	      at_of("2026-01-02T03:04:05.678+01:00") == 1767323045 - 3600);
+	CHECK("time: -02:30", at_of("2026-01-02T03:04:05-02:30") ==
+	      1767323045 + 9000);
+	CHECK("time: short offsets are unparsed (+1:2, +01:0, +01, -)",
+	      at_of("2026-01-02T03:04:05+1:2") == -1 &&
+	      at_of("2026-01-02T03:04:05+01:0") == -1 &&
+	      at_of("2026-01-02T03:04:05+01") == -1 &&
+	      at_of("2026-01-02T03:04:05-") == -1);
+}
+
 static void
 t_claude(void)
 {
@@ -206,6 +240,43 @@ t_claude(void)
 	      xr_chapter_at(&c, 1)->offset == 2000000 &&
 	      !strcmp(xr_chapter_at(&c, 1)->anchor, "fabc:2000000"));
 	xr_chapters_free(&c);
+
+	/* past XR_LINE_TOKENS a line is a failed step, as an oversized one;
+	** commas inside a string count for nothing */
+	{
+		size_t n = 2 * XR_LINE_TOKENS + 256, k2;
+		char *big = malloc(n + 64);
+
+		if (big)
+		{
+			k2 = (size_t)snprintf(big, n, "{\"type\":\"user\",\"message\":"
+			                     "{\"content\":\"big\"},\"a\":[");
+			while (k2 < 2 * XR_LINE_TOKENS + 200)
+				big[k2++] = '0', big[k2++] = ',';
+			memcpy(big + k2, "0]}", 4);
+			begin();
+			line(big);
+			line(U("after"));
+			end(&c);
+			CHECK("claude: a line past XR_LINE_TOKENS is a failed step",
+			      c.n == 2 && xr_chapter_at(&c, 0)->partial &&
+			      !strcmp(xr_chapter_at(&c, 1)->title, "after"));
+			xr_chapters_free(&c);
+			k2 = (size_t)snprintf(big, n, "{\"type\":\"user\",\"message\":"
+			                     "{\"content\":\"x");
+			while (k2 < 2 * XR_LINE_TOKENS + 200)
+				big[k2++] = ',';
+			memcpy(big + k2, "\"}}", 4);
+			begin();
+			line(big);
+			end(&c);
+			CHECK("claude: commas in a string are no tokens",
+			      c.n == 1 && !xr_chapter_at(&c, 0)->partial &&
+			      xr_chapter_at(&c, 0)->title[0] == 'x');
+			xr_chapters_free(&c);
+			free(big);
+		}
+	}
 
 	/* 5000 chapters: the newest kept, total counts all */
 	begin();
@@ -335,6 +406,37 @@ t_shell(void)
 	CHECK("shell: the D exit is read within the record's length",
 	      c.n == 1 && !xr_chapter_at(&c, 0)->error);
 	xr_chapters_free(&c);
+
+	/* a B or a C inside the open C..D orphans that block, as a forged C
+	** does: its chapter goes and it pairs nothing; the block before stays */
+	RN = 0;
+	rec(RING_K_MARK, 0, "A");
+	rec(RING_K_MARK, 0, "B");
+	rec(RING_K_INPUT, 0, "make");
+	rec(RING_K_MARK, RING_F_INPUT, "C");
+	rec(RING_K_MARK, 0, "B");
+	xr_shell_chapters(R, RN, &c, &paired, &alt);
+	CHECK("shell: a B inside C..D orphans the block (no chapter, unpaired)",
+	      c.n == 0 && c.total == 0 && !paired);
+	xr_chapters_free(&c);
+	RN = 0;
+	rec(RING_K_MARK, 0, "A");
+	rec(RING_K_MARK, 0, "B");
+	rec(RING_K_INPUT, 0, "ls");
+	rec(RING_K_MARK, RING_F_INPUT, "C");
+	rec(RING_K_MARK, 0, "D;0");
+	rec(RING_K_MARK, 0, "A");
+	rec(RING_K_MARK, 0, "B");
+	rec(RING_K_INPUT, 0, "make");
+	rec(RING_K_MARK, RING_F_INPUT, "C");
+	rec(RING_K_MARK, RING_F_INPUT, "C");
+	rec(RING_K_MARK, RING_F_EXIT, "D;2");
+	xr_shell_chapters(R, RN, &c, &paired, &alt);
+	CHECK("shell: a C inside C..D orphans only that block",
+	      c.n == 1 && c.total == 1 && paired &&
+	      !strcmp(xr_chapter_at(&c, 0)->title, "ls") &&
+	      !xr_chapter_at(&c, 0)->error);
+	xr_chapters_free(&c);
 }
 
 /* ---- the output cap ------------------------------------------------------- */
@@ -432,6 +534,7 @@ main(void)
 	t_key();
 	t_ids();
 	t_claude();
+	t_time();
 	t_read();
 	t_shell();
 	t_print();

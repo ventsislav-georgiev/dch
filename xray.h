@@ -22,6 +22,8 @@
 #define XR_TAIL_RANGE  (256ull << 20)	/* ... plus the newest 256 MB */
 #define XR_CHUNK       (4u << 20)	/* read size */
 #define XR_LINE_MAX    (1u << 20)	/* longer lines are one failed step */
+#define XR_LINE_TOKENS 100000		/* so are lines of more JSON tokens
+					** (about 20 B each: 3.8's 16 MB) */
 #define XR_OUT_MAX     (4u << 20)	/* the --json object cap */
 #define XR_PENDING     256		/* open tool calls, Prosper's bound */
 #define XR_PATH_MAX    1024		/* config_dir and cwd bound (8.1) */
@@ -108,6 +110,22 @@ struct xr_rec
 ** the corpus is mentions only); *alt: the newest A came on the alt screen. */
 void xr_shell_chapters(const struct xr_rec *r, size_t n,
                        struct xr_chapters *out, int *paired, int *alt);
+/* The same, one record at a time, so a ring is never held whole (3.8):
+** xr_shell_begin, xr_shell_feed per record oldest first (x is not kept),
+** then paired = npaired != 0 and alt. */
+#define XR_CMD_MAX 4096	/* command text kept per block; the title is 120 */
+struct xr_shell
+{
+	struct xr_chapters *out;
+	int st, havep, alt;
+	uint64_t aseq, npaired;	/* npaired: chapters still standing */
+	uint32_t at;
+	long long ord;		/* the open block's chapter, -1 for none */
+	size_t cl;
+	char cmd[XR_CMD_MAX + 1];
+};
+void xr_shell_begin(struct xr_shell *s, struct xr_chapters *out);
+void xr_shell_feed(struct xr_shell *s, const struct xr_rec *x);
 
 /* ---- helpers ----------------------------------------------------------- */
 /* Claude Code's project-dir rule over cwd (7.1): each UTF-16 unit outside

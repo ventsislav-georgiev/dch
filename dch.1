@@ -603,7 +603,12 @@ Must be the first argument; every other flag exits 2.
 is an agent UUID (the live session whose Claude Code has it, else the
 newest ended History record carrying it), a History record name
 .I file\fB.json\fP
-(that record, even when a new session took its name), or a session name
+(that ended record, even when a new session took its name; a record a live
+session holds, such as a plain shell's
+.I name\fB.json\fP
+after its name starts again, exits 1
+.IR "no such session" ),
+or a session name
 (the live session, else its newest ended record).
 A Claude Code session's chapters come from its transcript, found by one
 directory listing and opened with
@@ -613,7 +618,12 @@ it is read as its first 16 MiB and its newest 256 MiB, and past that
 is false with
 .BR why:\(dqrange\(dq .
 A shell's chapters come from its ring's OSC 133 marks: one per typed command
-block (\fBA\fR, \fBB\fR, client input, \fBC\fR, a non-blank command).
+block (\fBA\fR, \fBB\fR, client input, \fBC\fR, a non-blank command);
+evicted rows or a gap make
+.B complete
+false with
+.BR why:\(dqrange\(dq .
+The ring is read 1 MiB at a time, so a query stays under 16 MB.
 The object is capped at 4 MiB (the oldest chapters go,
 .BR why:\(dqoutput\(dq ).
 Nothing is written to disk and nothing is shelled out.

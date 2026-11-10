@@ -580,11 +580,13 @@ iso_time(const char *s)
 			;
 	if (*p == '+' || *p == '-')
 	{
-		int oh, om;
-
-		if (sscanf(p + 1, "%2d:%2d", &oh, &om) != 2)
+		/* exactly [+-]HH:MM, byte by byte: p += 6 must stay in bounds */
+		if (!isdigit((unsigned char)p[1]) || !isdigit((unsigned char)p[2]) ||
+		    p[3] != ':' || !isdigit((unsigned char)p[4]) ||
+		    !isdigit((unsigned char)p[5]))
 			return -1;
-		off = (oh * 60 + om) * 60 * (*p == '-' ? -1 : 1);
+		off = (((p[1] - '0') * 10 + p[2] - '0') * 60 +
+		       (p[4] - '0') * 10 + p[5] - '0') * 60 * (*p == '-' ? -1 : 1);
 		p += 6;
 	}
 	else if (*p == 'Z')
@@ -1217,6 +1219,29 @@ listed(const char *const *v, const char *s)
 	return 0;
 }
 
+/* An upper bound on the line's JSON tokens: one per value and key, each
+** after an opener, ',' or ':' outside strings. */
+static size_t
+tokens_max(const char *s, size_t n)
+{
+	size_t k, c = 1;
+	int in = 0;
+
+	for (k = 0; k < n; k++)
+		if (in)
+		{
+			if (s[k] == '\\')
+				k++;
+			else if (s[k] == '"')
+				in = 0;
+		}
+		else if (s[k] == '"')
+			in = 1;
+		else if (s[k] == ',' || s[k] == ':' || s[k] == '[' || s[k] == '{')
+			c++;
+	return c;
+}
+
 void
 xr_claude_line(struct xr_claude *d, const char *line, size_t len,
                uint64_t off, int oversized)
@@ -1229,7 +1254,10 @@ xr_claude_line(struct xr_claude *d, const char *line, size_t len,
 	d->off = off;
 	d->at = -1;
 	memset(&p, 0, sizeof p);
+	/* shortcut: a line past XR_LINE_TOKENS is one failed step, as an
+	** oversized one; upgrade to a streaming tokenizer if real lines do */
 	if (oversized || memchr(line, '\0', len) ||
+	    tokens_max(line, len) > XR_LINE_TOKENS ||
 	    dch_json_parse(&p, line) < 0 || p.tok[0].kind != JSON_OBJECT)
 	{
 		dch_json_free(&p);
@@ -1403,8 +1431,6 @@ xr_claude_read(struct xr_claude *d, int fd, uint64_t size, int *capped)
 
 /* ---- shell ring ------------------------------------------------------------ */
 
-#define XR_CMD_MAX 4096	/* command text kept per block; the title is 120 */
-
 /* D;<n>'s exit status. Record text is not NUL-terminated: copy first. */
 static long
 mark_exit(const struct xr_rec *x)
@@ -1417,124 +1443,150 @@ mark_exit(const struct xr_rec *x)
 	return strtol(eb, NULL, 10);
 }
 
+enum { S_NONE, S_PROMPT, S_INPUT, S_OUTPUT };
+
+/* A B or C inside the open C..D: that block is an orphan (7.3), so the
+** chapter pushed at its C goes again, as a forged C never gets one. */
+static void
+sh_orphan(struct xr_shell *s)
+{
+	if (s->st == S_OUTPUT && s->ord >= 0 &&
+	    (uint64_t)s->ord + 1 == s->out->total && s->out->n)
+	{
+		s->out->n--;
+		s->out->total--;
+		s->npaired--;
+	}
+	s->st = S_NONE;
+	s->ord = -1;
+}
+
+void
+xr_shell_begin(struct xr_shell *s, struct xr_chapters *out)
+{
+	memset(s, 0, sizeof *s);
+	memset(out, 0, sizeof *out);
+	s->out = out;
+	s->st = S_NONE;
+	s->ord = -1;
+}
+
+void
+xr_shell_feed(struct xr_shell *s, const struct xr_rec *x)
+{
+	char m;
+
+	if (x->kind == RING_K_GAP)
+	{
+		s->st = S_NONE;	/* capture lost or paused: the block is gone */
+		return;
+	}
+	if (x->kind == RING_K_PROMPT && s->st == S_PROMPT && !s->havep)
+	{
+		s->aseq = x->seq;
+		s->at = x->t;
+		s->havep = 1;
+		return;
+	}
+	if (x->kind == RING_K_INPUT && s->st == S_INPUT)
+	{
+		size_t l = x->len;
+
+		if (s->cl && !(x->flags & RING_F_CONT) && s->cl < XR_CMD_MAX)
+			s->cmd[s->cl++] = '\n';
+		if (l > XR_CMD_MAX - s->cl)
+			l = XR_CMD_MAX - s->cl;
+		memcpy(s->cmd + s->cl, x->text, l);
+		s->cl += l;
+		return;
+	}
+	if (x->kind != RING_K_MARK || !x->len ||
+	    (x->len > 1 && x->text[1] != ';'))
+		return;
+	m = x->text[0];
+	if (m == 'A')
+	{
+		if (x->len > 1)
+			return;	/* A;k: a secondary prompt */
+		s->alt = (x->flags & RING_F_ALT) != 0;
+		if (s->st == S_PROMPT)
+			return;	/* a redraw before B */
+		s->st = S_PROMPT;
+		s->aseq = x->seq;
+		s->at = x->t;
+		s->havep = 0;
+		s->ord = -1;
+	}
+	else if (m == 'B')
+	{
+		if (s->st == S_PROMPT)
+		{
+			s->st = S_INPUT;
+			s->cl = 0;
+		}
+		else
+			sh_orphan(s);	/* B outside A..B: an orphan */
+	}
+	else if (m == 'C')
+	{
+		const char *c = x->len > 2 ? x->text + 2 : s->cmd;
+		size_t l = x->len > 2 ? x->len - 2 : s->cl;
+		struct xr_chapter *ch;
+
+		if (s->st != S_INPUT)
+		{
+			sh_orphan(s);	/* C without B */
+			return;
+		}
+		if (!(x->flags & RING_F_INPUT))
+		{
+			/* no client input between B and C: forged by output
+			** (7.3, QA677 F4), an orphan */
+			s->st = S_NONE;
+			return;
+		}
+		if (x->len > 2 && blank(c, l))
+		{
+			c = s->cmd;
+			l = s->cl;
+		}
+		s->st = S_OUTPUT;
+		if (blank(c, l) || !(ch = ch_push(s->out)))
+			return;	/* an empty command is an orphan */
+		s->ord = (long long)s->out->total - 1;
+		ch->offset = s->aseq;
+		ch->at = s->at;
+		ch->kind = "command";
+		snprintf(ch->anchor, sizeof ch->anchor, "s%llu",
+		         (unsigned long long)s->aseq);
+		xr_title(c, l, ch->title, sizeof ch->title);
+		s->npaired++;
+	}
+	else if (m == 'D')
+	{
+		struct xr_chapter *ch;
+
+		if (s->st == S_OUTPUT && s->ord >= 0 &&
+		    (ch = ch_ord(s->out, (uint64_t)s->ord)) &&
+		    (x->flags & RING_F_EXIT) && x->len > 2 && mark_exit(x) != 0)
+			ch->error = 1;
+		s->st = S_NONE;
+		s->ord = -1;
+	}
+}
+
 void
 xr_shell_chapters(const struct xr_rec *r, size_t n, struct xr_chapters *out,
                   int *paired, int *alt)
 {
-	enum { S_NONE, S_PROMPT, S_INPUT, S_OUTPUT } st = S_NONE;
-	char cmd[XR_CMD_MAX + 1];
-	size_t cl = 0, k;
-	uint64_t aseq = 0;	/* the prompt record's seq (3.2), else the A's */
-	uint32_t at = 0;
-	int havep = 0;
-	long long ord = -1;	/* the open block's chapter */
+	struct xr_shell s;
+	size_t k;
 
-	memset(out, 0, sizeof *out);
-	*paired = *alt = 0;
+	xr_shell_begin(&s, out);
 	for (k = 0; k < n; k++)
-	{
-		const struct xr_rec *x = &r[k];
-		char m;
-
-		if (x->kind == RING_K_GAP)
-		{
-			st = S_NONE;	/* capture lost or paused: the block is gone */
-			continue;
-		}
-		if (x->kind == RING_K_PROMPT && st == S_PROMPT && !havep)
-		{
-			aseq = x->seq;
-			at = x->t;
-			havep = 1;
-			continue;
-		}
-		if (x->kind == RING_K_INPUT && st == S_INPUT)
-		{
-			size_t l = x->len;
-
-			if (cl && !(x->flags & RING_F_CONT) && cl < XR_CMD_MAX)
-				cmd[cl++] = '\n';
-			if (l > XR_CMD_MAX - cl)
-				l = XR_CMD_MAX - cl;
-			memcpy(cmd + cl, x->text, l);
-			cl += l;
-			continue;
-		}
-		if (x->kind != RING_K_MARK || !x->len ||
-		    (x->len > 1 && x->text[1] != ';'))
-			continue;
-		m = x->text[0];
-		if (m == 'A')
-		{
-			if (x->len > 1)
-				continue;	/* A;k: a secondary prompt */
-			*alt = (x->flags & RING_F_ALT) != 0;
-			if (st == S_PROMPT)
-				continue;	/* a redraw before B */
-			st = S_PROMPT;
-			aseq = x->seq;
-			at = x->t;
-			havep = 0;
-			ord = -1;
-		}
-		else if (m == 'B')
-		{
-			if (st == S_PROMPT)
-			{
-				st = S_INPUT;
-				cl = 0;
-			}
-			else
-				st = S_NONE;	/* B outside A..B: an orphan */
-		}
-		else if (m == 'C')
-		{
-			const char *c = x->len > 2 ? x->text + 2 : cmd;
-			size_t l = x->len > 2 ? x->len - 2 : cl;
-			struct xr_chapter *ch;
-
-			if (st != S_INPUT)
-			{
-				st = S_NONE;	/* C without B */
-				continue;
-			}
-			if (!(x->flags & RING_F_INPUT))
-			{
-				/* no client input between B and C: forged by
-				** output (7.3, QA677 F4), an orphan */
-				st = S_NONE;
-				continue;
-			}
-			if (x->len > 2 && blank(c, l))
-			{
-				c = cmd;
-				l = cl;
-			}
-			st = S_OUTPUT;
-			if (blank(c, l) || !(ch = ch_push(out)))
-				continue;	/* an empty command is an orphan */
-			ord = (long long)out->total - 1;
-			ch->offset = aseq;
-			ch->at = at;
-			ch->kind = "command";
-			snprintf(ch->anchor, sizeof ch->anchor, "s%llu",
-			         (unsigned long long)aseq);
-			xr_title(c, l, ch->title, sizeof ch->title);
-			*paired = 1;
-		}
-		else if (m == 'D')
-		{
-			struct xr_chapter *ch;
-
-			if (st == S_OUTPUT && ord >= 0 &&
-			    (ch = ch_ord(out, (uint64_t)ord)) &&
-			    (x->flags & RING_F_EXIT) && x->len > 2 &&
-			    mark_exit(x) != 0)
-				ch->error = 1;
-			st = S_NONE;
-			ord = -1;
-		}
-	}
+		xr_shell_feed(&s, &r[k]);
+	*paired = s.npaired != 0;
+	*alt = s.alt;
 }
 
 /* ---- the project key -------------------------------------------------------- */

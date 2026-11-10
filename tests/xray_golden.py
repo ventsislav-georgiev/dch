@@ -12,8 +12,10 @@ Each case is a directory:
                    <config>/projects/<setup "project_dir">/<uuid>.jsonl
   shell/<name>.ring.ndjson  a live shell session <name>: ring records,
                    served by a test-only fake master (below)
-  setup.json       what the case needs around the corpus: History records
-                   and the fake masters' ring status. Ignored by Prosper.
+  setup.json       what the case needs around the corpus: History records,
+                   the fake masters' ring status, config lines ("config":
+                   xray_ring sets the cap the evicted-rows check reads).
+                   Ignored by Prosper.
 
 The fake master lives here, in tests/, never in dch: it answers the control
 ops a query sends (MSG_RING_READ, MSG_READ, MSG_RING_CLEAR, MSG_CMD) from
@@ -221,6 +223,9 @@ def run_case(name):
                     load_ring(os.path.join(sdir, f)), o.get("status", 0),
                     o.get("session_id", "m0000000000000000"),
                     None if o.get("lite") else "screen row\n"))
+        # config lines (xray_ring for a ring's cap)
+        with open(os.path.join(t, "config"), "w") as f:
+            f.write("".join(l + "\n" for l in setup.get("config", [])))
         env = {k: v for k, v in os.environ.items()
                if not k.startswith(("DCH_", "Malloc", "CLAUDE"))}
         env.update(HOME=home, XDG_RUNTIME_DIR=t, XDG_STATE_HOME=state,

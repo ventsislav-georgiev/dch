@@ -792,9 +792,12 @@ master parses anything, nothing is written to disk and nothing is shelled out.
 - an agent UUID (36 characters of `0-9a-f-`): the live session whose Claude
   Code has that session id, else the newest ended History record carrying
   it;
-- a History record name, `<file>.json`: that record, even when a new session
-  has taken its name since. A value that is also a live session's name, or a
-  record's, is refused as ambiguous;
+- a History record name, `<file>.json`: that ended record, even when a new
+  session has taken its name since. A record that a live session holds is not
+  History: a plain shell's `<name>.json` is rewritten when the name starts
+  again, and then exits 1 `dch: no such session`, so it never reads the new
+  session's ring. A value that is also a live session's name, or a record's,
+  is refused as ambiguous;
 - a session name: the live session, else that name's newest ended record.
 
 `host:name` (remote sessions) is not supported yet: it exits 2. Over
@@ -808,10 +811,17 @@ The corpus:
     saw.
   - It is read in 4 MiB chunks: the first 16 MiB and the newest 256 MiB.
     Past that, `complete` is `false` with `why: "range"`.
+  - A line over 1 MiB or over 100000 JSON tokens counts as one failed step.
 - **Shell.** The chapters come from the [ring](#shell-output-ring-x-ray)'s
   OSC 133 marks: one per typed command block (`A`, `B`, then `C` with client
-  input before it and a non-blank command). Without marks there are no
+  input before it and a non-blank command). A `B` or `C` inside an open
+  `C`..`D` orphans that block: it gets no chapter. Without marks there are no
   chapters (`mentions_only: true`).
+  - `complete` is `false` with `why: "range"` when the ring has evicted rows
+    or holds a gap. Evicted rows are judged from how full the ring is, against
+    the current `xray_ring`.
+  - The ring is read 1 MiB at a time, and only up to its tail as it stood
+    when the read began. A query stays under 16 MB whatever `xray_ring` is.
 - **None.** An ended or History shell (`reason: "ended"`), dch-lite
   (`"lite"`), `xray_ring 0` (`"off"`), or a Claude session whose transcript is
   gone (`reason: null`).
@@ -842,7 +852,8 @@ The corpus:
 the master's control socket. Nothing is typed into the session. It prints
 `{"schema":1,"session","session_id","corpus","ring_cleared"}`.
 - **Resolution.** Here `<n>` is first matched as a live ring's exact
-  `session_id`, then as a name.
+  `session_id`, then as a name. A `session_id` match reads only each ring's
+  header. The ring is cleared only if it still carries that id.
 - **Agent sessions.** A Claude Code session has no ring:
   `ring_cleared: false`.
 - **Failures.** An ended session or a History record exits 1 with

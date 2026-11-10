@@ -1,0 +1,1 @@
+{"schema":1,"about":"Rows evicted (the ring holds more than its cap less one largest record, xray_ring 128K): complete:false, why:\"range\", chapters_evicted stays false","session":"box","argv":[["--xray","box","--json"]],"display_only":[]}

@@ -84,7 +84,9 @@ def test_shell():
             "printf '\\033]133;D;4\\007'; seq 1 40; "
             "printf '\\033]133;A\\007$ '; read x; echo \"$x\" > %s; "
             "sleep 60" % flag)
-    r = dch("--spawn", n, "--size", "80x24", "sh", "-c", prog)
+    cwd = os.path.join(T, "sh proj")
+    os.makedirs(cwd, exist_ok=True)
+    r = dch("--spawn", n, "--size", "80x24", "--cwd", cwd, "sh", "-c", prog)
     check("shell: spawned", r.returncode == 0, r.stderr)
     try:
         wait_for(lambda: "$" in screen(n), 5)
@@ -112,13 +114,17 @@ def test_shell():
         check("shell: lines = ring rows plus the screen's",
               o["lines"] >= 40 and o["complete"] and not o["mentions_only"],
               o)
+        real = os.path.realpath(cwd)
+        check("shell: project_label is the shell's cwd, project its key "
+              "(7.1)", o["project_label"] == real and
+              o["project"] == key(real), (o["project"], o["project_label"]))
         rc, c, err = xray(n, "--clear", "--json")
         check("clear: {schema, session, session_id, corpus, ring_cleared}",
               rc == 0 and c == {"schema": 1, "session": n, "session_id":
                                 o["session_id"], "corpus": "shell",
                                 "ring_cleared": True}, (rc, c, err))
         time.sleep(0.5)
-        check("clear: nothing reached the pty", not os.path.exists(flag))
+        check("clear: nothing reached the pty yet", not os.path.exists(flag))
         rc, o2, _ = xray(n, "--json")
         check("clear: the ring is empty after it", rc == 0 and
               o2["chapters"] == [] and o2["session_id"] == o["session_id"],
@@ -128,6 +134,12 @@ def test_shell():
         check("clear: the screen and scrollback are cleared (--read "
               "--recent agrees)", "ran:hello" not in rec and
               "hello world" not in rec, rec[-300:])
+        # the shell's pending `read x` takes the next line: had the clear's
+        # ESC[H ESC[2J ESC[3J reached the pty, they would lead it
+        dch("--send", n, "MARKER\n")
+        got = wait_for(lambda: os.path.exists(flag) and open(flag).read(), 5)
+        check("clear: nothing reached the pty (the next line read is "
+              "exactly the marker)", got == "MARKER\n", repr(got))
         rc, c, _ = xray(o["session_id"], "--clear", "--json")
         check("clear: an exact live session_id resolves", rc == 0 and
               c and c["session"] == n, c)
@@ -136,6 +148,90 @@ def test_shell():
               rc == 1 and err.strip() == "dch: no such session", err)
     finally:
         dch("-k", n)
+
+
+# ---- a record name is History only (3.1) ---------------------------------
+
+def test_record():
+    """A plain shell's record is <name>.json; its next cold start rewrites
+    it. The Ended pane holding that name never reads the new ring."""
+    n = "xc-box"
+    r = dch("--spawn", n, "sh", "-c", "echo OLD; sleep 60")
+    check("record: spawned", r.returncode == 0, r.stderr)
+    wait_for(lambda: "OLD" in screen(n), 5)
+    dch("-k", n)
+    wait_for(lambda: not os.path.exists(sock(n)), 5)
+    rc, o, err = xray(n + ".json", "--json")
+    check("record: the ended record answers corpus none, its record name",
+          rc == 0 and o and o["corpus"] == "none" and o["reason"] ==
+          "ended" and o["session_id"] == n + ".json" and not o["live"],
+          (rc, o, err))
+    r = dch("--spawn", n, "sh", "-c", "echo NEW; sleep 60")
+    try:
+        wait_for(lambda: "NEW" in screen(n), 5)
+        h0, _ = X.read_all(n, 0)
+        rc, o, err = xray(n + ".json", "--json")
+        check("record: once the name runs again, <name>.json is no record "
+              "(exit 1), never the new ring", rc == 1 and
+              err.strip() == "dch: no such session", (rc, o, err))
+        rc, o, err = xray(n + ".json", "--clear", "--json")
+        check("record: --clear by that name exits 1 no such session",
+              rc == 1 and err.strip() == "dch: no such session", (rc, err))
+        h, _ = X.read_all(n, 0)
+        check("record: the new ring is untouched (never cleared: same "
+              "epoch, same session_id)", h["epoch"] == h0["epoch"] and
+              h["session_id"] == h0["session_id"], (h0, h))
+    finally:
+        dch("-k", n)
+
+
+# ---- 3.8: a 16M ring under 16 MB ------------------------------------------
+
+def maxrss(argv, env):
+    """(rc, stdout, max RSS in bytes) of one run; wait4 counts this child
+    only (ru_maxrss: bytes on macOS, KiB on Linux)."""
+    out = os.path.join(T, "rss.out")
+    with open(out, "w") as f:
+        p = subprocess.Popen(argv, stdout=f, stderr=subprocess.DEVNULL,
+                             env=env)
+        _, status, ru = os.wait4(p.pid, 0)
+    p.returncode = os.waitstatus_to_exitcode(status)
+    rss = ru.ru_maxrss * (1 if sys.platform == "darwin" else 1024)
+    return p.returncode, open(out).read(), rss
+
+
+def test_heavy():
+    n = "xc-flood"
+    cfg = ENV["DCH_CONFIG"]
+    with open(cfg, "w") as f:
+        f.write("xray_ring = 16M\n")
+    try:
+        r = dch("--spawn", n, "--size", "80x24", "sh", "-c",
+                "yes x | head -n 2500000; echo FLOOD''DONE; sleep 120")
+        check("heavy: spawned", r.returncode == 0, r.stderr)
+        done = wait_for(lambda: "FLOODDONE" in screen(n), 120)
+        check("heavy: the flood finished", done)
+        c = X.connect(n)
+        h, _ = X.read(c, 0, 1 << 16)
+        c.close()
+        rows = h["tail"] - h["head"]
+        rc, out, rss = maxrss([DCH, "--xray", n, "--json"], ENV)
+        try:
+            o = json.loads(out)
+        except ValueError:
+            o = None
+        check("heavy: a 16M ring (%d records) answers" % rows,
+              rc == 0 and o and o["corpus"] == "shell" and rows > 1000000,
+              (rc, out[:200]))
+        check("heavy: under 16 MB in the querying process (3.8): %.1f MB"
+              % (rss / 1e6), rss < 16 << 20, rss)
+        check("heavy: evicted rows are complete:false, why range (3.2)",
+              o and o["complete"] is False and o["why"] == "range" and
+              o["chapters_evicted"] is False, o and
+              {k: o[k] for k in ("complete", "why", "lines")})
+    finally:
+        dch("-k", n)
+        os.unlink(cfg)
 
 
 # ---- a live Claude and the open seam --------------------------------------
@@ -299,6 +395,8 @@ def main():
     try:
         test_names()
         test_shell()
+        test_record()
+        test_heavy()
         test_claude()
     finally:
         shutil.rmtree(T, ignore_errors=True)
