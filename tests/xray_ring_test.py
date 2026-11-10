@@ -603,7 +603,12 @@ def test_restart_legacy(tmp):
     n = "xr-old" + TAG
     hard = resource.getrlimit(resource.RLIMIT_CORE)[1]
     soft = hard if hard != resource.RLIM_INFINITY else 1 << 30
-    r = dch("--spawn", n, "--size", "80x24", "sh",
+    env = dict(os.environ)
+    if env.get("ASAN_OPTIONS"):
+        # ASan's own disable_coredump would lower the inherited limit (to 1
+        # under a piped core_pattern) before the master saves it
+        env["ASAN_OPTIONS"] += ":disable_coredump=0"
+    r = dch("--spawn", n, "--size", "80x24", "sh", env=env,
             preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_CORE,
                                                   (soft, hard)))
     if r.returncode != 0:
