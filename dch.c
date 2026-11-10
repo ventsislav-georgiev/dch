@@ -7472,7 +7472,7 @@ say_print(const char *name, int c, int json)
 ** Claude Code queues ours: ag_type counts the text leaving the composer as
 ** sent, whether it started a turn or joined the queue above it. */
 static int
-say_type(const char *path, const char *text)
+say_type(const char *path, const char *text, int paste)
 {
 	switch (claude_gate_q(path, 1))
 	{
@@ -7485,7 +7485,7 @@ say_type(const char *path, const char *text)
 	default:
 		return SAY_NO_SCREEN;
 	}
-	switch (ag_type(path, text, 1))
+	switch (ag_type(path, text, paste))
 	{
 	case 0:
 		return SAY_OK;
@@ -7553,7 +7553,7 @@ do_say_verb(char **names, int nnames, char **words, int nwords, int json)
 		}
 #ifdef HAVE_LIBGHOSTTY_VT
 		if (c < 0 && (kids[k] = fork()) == 0)
-			_exit(SAY_EXIT + say_type(path, text));
+			_exit(SAY_EXIT + say_type(path, text, 1));
 		if (c < 0 && kids[k] > 0)
 		{
 			live++;
@@ -7592,6 +7592,46 @@ do_say_verb(char **names, int nnames, char **words, int nwords, int json)
 	free(text);
 	slist_free(&sl);
 	return bad ? 1 : 0;
+}
+
+/* `--run <n> <text...>` (#112): into a Claude Code session, text and Enter in
+** one burst fold the Enter into the paste, so the text goes through --say's
+** gate (empty composer, typed, Enter once it shows, re-Entered). A slash
+** command is typed raw, as Claude's menu must see it. Anything else — a
+** shell, another program, a master without a mirror, dch-lite — keeps the
+** plain burst. Exit 1 with `dch: <n>: <reason> — <why>` when the gate fails. */
+static int
+do_run_verb(const char *name, char **words, int nwords)
+{
+#ifdef HAVE_LIBGHOSTTY_VT
+	struct cmd_info ci;
+	struct crec r;
+	char path[1100], *text;
+	size_t len = 1;
+	int k, c;
+
+	session_sock_path(name, path, sizeof path);
+	if (nwords == 0 || cmd_query(path, &ci) != 0)
+		goto burst;
+	c = ci.pid > 0 && claude_find(ci.pid, 1, &r) != 0;
+	cmd_info_free(&ci);
+	if (!c || claude_gate_q(path, 1) == CG_NOVT)
+		goto burst;
+	for (k = 0; k < nwords; k++)
+		len += strlen(words[k]) + 1;
+	if (!(text = malloc(len)))
+		return 1;
+	for (text[0] = '\0', k = 0; k < nwords; k++)
+		strcat(strcat(text, k ? " " : ""), words[k]);
+	c = say_type(path, text, text[0] != '/');
+	free(text);
+	if (c == SAY_OK)
+		return 0;
+	fprintf(stderr, "dch: %s: %s — %s\n", name, say_code[c], say_why[c]);
+	return 1;
+burst:
+#endif
+	return do_send_verb(name, words, nwords, 1);
 }
 
 /* --stop needs a 1.24.0 master: an older one (or one without a version
@@ -11188,7 +11228,7 @@ main(int argc, char **argv)
 	case A_SEND:
 		return do_send_verb(session_name, inner_argv, inner_argc, 0);
 	case A_RUN:
-		return do_send_verb(session_name, inner_argv, inner_argc, 1);
+		return do_run_verb(session_name, inner_argv, inner_argc);
 	case A_HISTORY:
 		return do_history_verb(opt_hist_json);
 	case A_SAY:

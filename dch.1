@@ -568,7 +568,19 @@ Type
 .BI \-\-run " name text..."
 Same as
 .B \-\-send
-plus a carriage return.
+plus a carriage return. Into a session running Claude Code (as its command or
+typed into its shell) the text goes through the
+.B \-\-say
+composer gate instead: typed only over an empty composer, Enter pressed once it
+shows and again while it stays. A failure exits 1 with
+.RI "dch: " name ": " reason
+.RB ( prompt ,
+.BR draft ,
+.BR not_typed ,
+.BR not_submitted ,
+.BR no_screen )
+on stderr. Other programs, masters without a mirror and dch-lite keep the
+plain burst.
 .TP
 .BI \-\-keys " name key..."
 Encode and send keys mode-aware (kitty keyboard protocol, application cursor

@@ -17,6 +17,8 @@ State lives in $FAKE_CLAUDE_DIR:
                     +3 lines]" transcript line), eat_enters (ignore that
                     many Enters on a draft, as a just-resumed Claude did),
                     lag_ms (a paste shows in the composer that late),
+                    fold (an Enter read together with typed text folds
+                    into it, as Claude Code's paste detection does),
                     exit_ms (/exit takes that long to quit),
                     screen (rows painted in place of the composer and
                     footer: a dialog; every key typed then is logged as
@@ -26,7 +28,7 @@ State lives in $FAKE_CLAUDE_DIR:
                     DCH_REVIVE* and Claude Code tool env keys, CLAUDE_CONFIG_DIR's value as
                     cfg), line (typed), turn (a message taken),
                     enter_dialog (Enter while a prompt is up: it would have
-                    answered it), enter_eaten, key (typed while a screen
+                    answered it), enter_eaten, enter_folded, key (typed while a screen
                     knob is up), exit
 <session> is DCH_SESSION, which the master sets for its child.
 """
@@ -247,6 +249,7 @@ while True:
         if not chunk:
             bye(0)
         buf += chunk
+        burst = len(chunk) > 1
         while buf:
             if buf.startswith(b"\033["):          # paste marker / key
                 end = 2
@@ -270,6 +273,8 @@ while True:
                     dismissed = json.dumps(c)
             elif ch == b"\r" and (prompt_up or c.get("dialog")):
                 log(ev="enter_dialog", text=draft)
+            elif ch == b"\r" and burst and c.get("fold"):
+                log(ev="enter_folded", text=draft)
             elif ch == b"\r" and draft and eaten < c.get("eat_enters", 0):
                 eaten += 1
                 log(ev="enter_eaten", text=draft)

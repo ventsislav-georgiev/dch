@@ -213,6 +213,7 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "--revive never starts two claudes on one id" revive_sid_test.py
     pyrun "--pin/--unpin/--forget keep and clean history" history_pin_test.py
     pyrun "--say messages Claude sessions (busy too), gated" say_test.py
+    pyrun "--run into a Claude session goes through the gate (#112)" run_agent_test.py
     pyrun "auto-allow answers plain permission prompts; --config" auto_allow_test.py
     # --stop's own 3 s deadlines expire on the ASan-slowed macOS CI runner
     # (a different check each run, no sanitizer report); ASan on Linux and
