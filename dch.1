@@ -643,14 +643,21 @@ remote
 .I host\fB:\fIname
 (exit 2, not supported yet).
 A Claude Code session's chapters come from its transcript, found by one
-directory listing and opened with
+directory listing (a symlinked project directory is not followed; two hits
+answer corpus
+.B none
+with the cwd's
+.BR project )
+and opened with
 .BR O_NOFOLLOW ;
-it is read as its first 16 MiB and its newest 256 MiB, and past that
+it is read as its first 16 MiB and its newest 256 MiB, and past that, when
+the file shrinks during the read, or past 5000 chapters,
 .B complete
 is false with
 .BR why:\(dqrange\(dq .
 A shell's chapters come from its ring's OSC 133 marks: one per typed command
-block (\fBA\fR, \fBB\fR, client input, \fBC\fR, a non-blank command);
+block (\fBA\fR, \fBB\fR, client input, \fBC\fR, a non-blank command),
+once its rows scroll off the screen (commands still on it have none yet);
 evicted rows (the master's own status bit, reset by a clear; a dch 1.43.0
 master has none, and there only a gap, a lost range or a cut first row
 counts) or a gap make
@@ -670,7 +677,11 @@ typed into the session) and print
 is first matched as a live ring's exact session_id (\fBm\fR + 16 hex;
 each master is asked for its ring's header only), then as a name.
 A Claude Code session has no ring
-.RB ( ring_cleared:false ).
+.RB ( ring_cleared:false ),
+nor has one with
+.B xray_ring 0
+or a ring paused for an agent: nothing is cleared there, and the screen
+and scrollback stay.
 Exits 1
 .I "no such session"
 (also for an ended session or a record with
@@ -683,7 +694,8 @@ in dch\-lite,
 .IR "no x\-ray corpus" ;
 2 bad usage or a bad or remote
 .IR name ;
-3 the session or its transcript could not be read.
+3 the session or its transcript could not be read (a transcript that is
+there but cannot be opened counts).
 No new session or rename takes a name of exactly
 .B m
 + 16 lowercase hex digits (a session_id):

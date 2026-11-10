@@ -2020,7 +2020,7 @@ load_codex_names(struct slist *sl)
 static int
 refuse_id_name(const char *name)
 {
-	if (!xr_id_shaped(name))
+	if (!xr_label_id_shaped(name, strlen(name)))	/* the listing trims */
 		return 0;
 	fputs("dch: name looks like a session_id\n", stderr);
 	return 1;
@@ -2963,7 +2963,8 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 
 	if (make_sock_path(session_name) < 0)
 		return 1;
-	if (!attach_only && xr_id_shaped(session_name))
+	if (!attach_only && xr_label_id_shaped(session_name,
+	                                       strlen(session_name)))
 	{
 		int probe = control_connect_path(sock_path);
 
@@ -10399,9 +10400,10 @@ xr_claude_answer(const char *cfg, const char *sid, struct xr_answer *a,
 		cfg = home;
 	}
 	if (xr_claude_lookup(cfg, sid, path, sizeof path, &st, project,
-	                     projectsz) < 0 ||
-	    (fd = xr_seam_open(path, &st)) < 0)
+	                     projectsz) < 0)
 		return -1;
+	if ((fd = xr_seam_open(path, &st)) < 0)	/* there but unreadable: 3 */
+		return errno == EACCES || errno == EPERM || errno == EIO ? -2 : -1;
 	if (!(d = xr_claude_new()))
 	{
 		close(fd);
@@ -10641,9 +10643,12 @@ xr_clear(const struct xr_target *t)
 	cleared = !claude && !(rs.status & (DCH_RING_S_OFF | DCH_RING_S_PAUSED));
 	if (!claude && (rs.status & DCH_RING_S_OFF))
 		corpus = "none";
-	send_ctl(s, MSG_RING_CLEAR, NULL, 0);
-	if (ctl_next_frame(s, &r, CTL_IDLE_MS, &type, payload, &len) != 1 ||
-	    type != MSG_ACK || len != DCH_ST_OK)
+	/* no ring to clear: the mirror stays (QA 1.44 MED-1) */
+	if (cleared)
+		send_ctl(s, MSG_RING_CLEAR, NULL, 0);
+	if (cleared &&
+	    (ctl_next_frame(s, &r, CTL_IDLE_MS, &type, payload, &len) != 1 ||
+	     type != MSG_ACK || len != DCH_ST_OK))
 	{
 		close(s);
 		fputs("dch: X-ray failed on this session\n", stderr);

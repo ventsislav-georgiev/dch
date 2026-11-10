@@ -207,6 +207,46 @@ t_claude(void)
 	      !strcmp(xr_chapter_at(&c, 3)->kind, "prompt"));
 	xr_chapters_free(&c);
 
+	/* QA 1.44 MED-3: unwrap stops once the title is settled; the title
+	** is what a whole unwrap gives: an unclosed opener stays text, a
+	** later closed one is still unwrapped, blank pastes before it go */
+	begin();
+	line(U("<pasted_content id=\\\"b\\\">\\n \\n</pasted_content "
+	       "id=\\\"b\\\">\\n<pasted_content id=\\\"a\\\">"
+	       "<pasted_content id=\\\"c\\\">C</pasted_content "
+	       "id=\\\"c\\\"> tail\\nnext line"));
+	end(&c);
+	CHECK("claude: unwrap: an unclosed opener is text, a closed one after "
+	      "it unwrapped",
+	      c.n == 1 && !strcmp(xr_chapter_at(&c, 0)->title,
+	                          "<pasted_content id=\"a\">C tail"));
+	xr_chapters_free(&c);
+	{
+		char *big = malloc(40000 * 30 + 64);
+		size_t k2 = 0;
+
+		if (big)
+		{
+			k2 = (size_t)sprintf(big, "{\"type\":\"user\",\"message\":"
+			                     "{\"content\":\"");
+			for (k = 0; k < 40000; k++)
+				k2 += (size_t)sprintf(big + k2,
+				                      "<pasted_content id=\\\"a%d\\\">", k);
+			memcpy(big + k2, "\"}}", 4);
+			begin();
+			line(big);
+			end(&c);
+			CHECK("claude: unwrap: 40000 unclosed openers cut at 120 "
+			      "scalars",
+			      c.n == 1 && !strncmp(xr_chapter_at(&c, 0)->title,
+			                           "<pasted_content id=\"a0\">"
+			                           "<pasted_content id=\"a1\">", 48) &&
+			      strlen(xr_chapter_at(&c, 0)->title) == XR_TITLE_MAX);
+			xr_chapters_free(&c);
+			free(big);
+		}
+	}
+
 	/* the 256 open tool calls: an evicted Grep's error result is an
 	** orphan (an error); a tracked Grep's is quiet */
 	begin();
@@ -330,6 +370,23 @@ t_read(void)
 	CHECK("read: the head range and the tail range both read",
 	      c.n == 2 && !strcmp(xr_chapter_at(&c, 0)->title, "head prompt") &&
 	      !strcmp(xr_chapter_at(&c, 1)->title, "tail prompt"));
+	xr_chapters_free(&c);
+
+	/* QA 1.44 LOW-5: the file shrank under the read (it is shorter than
+	** the size the lookup saw): what was read stands, capped */
+	fd = mkstemp(path);
+	if (fd < 0)
+		return;
+	unlink(path);
+	(void)!write(fd, head, sizeof head - 1);
+	D = xr_claude_new();
+	rc = xr_claude_read(D, fd, sizeof head - 1 + 4096, &capped);
+	xr_claude_end(D, 1, &c);
+	xr_claude_free(D);
+	close(fd);
+	CHECK("read: a file that shrank mid-read is capped (complete:false)",
+	      rc == 0 && capped && c.n == 1 &&
+	      !strcmp(xr_chapter_at(&c, 0)->title, "head prompt"));
 	xr_chapters_free(&c);
 }
 

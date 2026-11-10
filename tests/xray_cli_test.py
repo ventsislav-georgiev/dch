@@ -297,6 +297,39 @@ def test_evicted():
             os.unlink(cfg)
 
 
+# ---- MED-1 (QA 1.44): no ring, no clear ----------------------------------
+
+def test_clear_off():
+    """xray_ring 0: --clear answers corpus none, ring_cleared false, and
+    the mirror's screen and scrollback stay, from dch or from a raw op."""
+    cfg = ENV["DCH_CONFIG"]
+    n = "xc-off"
+    with open(cfg, "w") as f:
+        f.write("xray_ring = 0\n")
+    try:
+        r = dch("--spawn", n, "--size", "80x24", "sh", "-c",
+                "seq 1 200; echo OFF''TAIL; sleep 60")
+        check("clear off: spawned under xray_ring 0", r.returncode == 0,
+              r.stderr)
+        wait_for(lambda: "OFFTAIL" in screen(n), 10)
+        rec0 = dch("--read", n, "--recent", "1000").stdout
+        rc, c, err = xray(n, "--clear", "--json")
+        check("clear off: corpus none, ring_cleared false",
+              rc == 0 and c and c["corpus"] == "none" and
+              c["ring_cleared"] is False, (rc, c, err))
+        rec = dch("--read", n, "--recent", "1000").stdout
+        check("clear off: the screen and scrollback survive (--read "
+              "--recent)", "OFFTAIL" in screen(n) and "\n7\n" in rec and
+              rec == rec0, (rec0[-120:], rec[-120:]))
+        check("clear off: a raw MSG_RING_CLEAR is ACKed and clears nothing",
+              X.clear(n) and dch("--read", n, "--recent", "1000").stdout ==
+              rec0)
+    finally:
+        dch("-k", n)
+        if os.path.exists(cfg):
+            os.unlink(cfg)
+
+
 # ---- a hostile master never holds the query (F2, F7) ----------------------
 
 MSG_READ_DATA, MSG_READ_END, MSG_RING_READ, MSG_RING_HDR = 8, 9, 18, 19
@@ -496,11 +529,25 @@ def test_claude():
         check("claude: the agent UUID answers the same session",
               rc == 0 and o2 and o2["session"] == n and
               o2["chapters"] == o["chapters"], o2)
+        wait_for(lambda: "Claude Code" in screen(n), 10)
+        scr0 = screen(n)
+        rec0 = dch("--read", n, "--recent", "1000").stdout
         rc, c, err = xray(n, "--clear", "--json", env=dbg)
         check("clear: an agent session has no ring (ring_cleared false)",
               rc == 0 and c == {"schema": 1, "session": n, "session_id": sid,
                                 "corpus": "claude", "ring_cleared": False},
               (c, err))
+        # MED-1 (QA 1.44): ring_cleared false means the mirror is untouched
+        check("clear: an agent session's screen and scrollback survive "
+              "(--read, --read --recent)", scr0.strip() and
+              screen(n) == scr0 and dch("--read", n, "--recent",
+                                        "1000").stdout == rec0,
+              (scr0[-200:], screen(n)[-200:]))
+        # an older or foreign client still sends the op: the master ignores
+        # it while an agent runs (ACK, nothing cleared)
+        check("clear: a raw MSG_RING_CLEAR to an agent session is ACKed and "
+              "clears nothing", X.clear(n) and screen(n) == scr0,
+              screen(n)[-200:])
 
         # the seam's counting test
         open(trace, "w").close()
@@ -526,6 +573,10 @@ def test_claude():
               rc == 0 and o3["corpus"] == "none" and
               o3["session_id"] == sid and "xray seam:" not in tr and
               "xray lookup: 2 hits" in tr, (o3, tr[-400:]))
+        check("seam: two hits report the cwd's project key, not a hit's "
+              "(QA 1.44 LOW-3)", o3 and o3["project"] ==
+              key(o3["project_label"]) and o3["project_label"] ==
+              os.path.realpath(proj), o3)
         shutil.rmtree(other)
         # a symlink in the transcript's place: lstat'ed, never opened
         os.rename(tp, tp + ".real")
@@ -554,6 +605,101 @@ def test_claude():
               os.listdir(tmpd) == [], os.listdir(tmpd))
         check("nothing written: the transcript is untouched",
               after.get(tp, (0, 0))[0] == before[tp][0])
+
+        # QA 1.44 LOW-4: there but unreadable is exit 3, not "gone"
+        if os.geteuid() != 0:
+            os.chmod(tp, 0)
+            r = dch("--xray", n, "--json")
+            os.chmod(tp, 0o600)
+            check("claude: an unreadable transcript exits 3", r.returncode ==
+                  3 and r.stderr == "dch: X-ray failed on this session\n",
+                  (r.returncode, r.stderr))
+        # QA 1.44 LOW-7: a symlinked project dir is not followed
+        moved = os.path.join(T, "moved-proj")
+        os.rename(pdir, moved)
+        os.symlink(moved, pdir)
+        rc, o5, _ = xray(n, "--json")
+        check("claude: a symlinked project dir is not followed (corpus "
+              "none)", rc == 0 and o5 and o5["corpus"] == "none", o5)
+        os.unlink(pdir)
+        os.rename(moved, pdir)
+        rc, o5, _ = xray(n, "--json")
+        check("claude: the real dir back, the transcript answers",
+              rc == 0 and o5 and o5["corpus"] == "claude", o5)
+        # MED-2 (QA 1.44): ids are kept as a bounded key, never whole
+        def put(lines):
+            with open(tp, "w") as f:
+                f.write(json.dumps({"type": "user", "cwd": proj, "message":
+                                    {"content": "start"}}) + "\n")
+                for ln in lines:
+                    f.write(json.dumps(ln) + "\n")
+        big = lambda i: "%08d" % i + "x" * 1000000
+        for what, mk in (
+                ("tool_use ids", lambda i: {"type": "assistant", "message": {
+                    "content": [{"type": "tool_use", "id": big(i),
+                                 "name": "Bash", "input": {}}]}}),
+                ("agentIds", lambda i: {"type": "assistant",
+                                        "isSidechain": True,
+                                        "agentId": big(i),
+                                        "message": {"content": "s"}})):
+            put(mk(i) for i in range(24))
+            rc, out, rss = maxrss([DCH, "--xray", n, "--json"], env)
+            try:
+                o = json.loads(out)
+            except ValueError:
+                o = None
+            check("claude: 24 x 1 MB %s answer" % what, rc == 0 and o and
+                  o["corpus"] == "claude", (rc, out[:200]))
+            rss_ok("claude: 24 x 1 MB %s" % what, rss)
+        # QA 1.44 LOW-8: lines near every cap at once (6000 chapters, then
+        # 20 lines just under 1 MiB of ~100k tokens and one paste each)
+        z = ",".join(["0"] * 99960)
+        room = 1048576 - len(z) - 300
+        heavy = ('{"type":"user","x":[' + z + '],"message":{"content":'
+                 '"<pasted_content id=\\"k\\">' + "a" * (room - 60) +
+                 '</pasted_content id=\\"k\\">"}}')
+        with open(tp, "w") as f:
+            f.write((json.dumps({"type": "user", "message": {
+                "content": "\u0001" * 130}}) + "\n" +
+                '{"type":"assistant","message":{"content":"s"}}\n') * 6000)
+            f.write((heavy + '\n{"type":"assistant","message":{"content":'
+                     '"s"}}\n') * 20)
+        rc, out, rss = maxrss([DCH, "--xray", n, "--json"], env)
+        check("claude: near-cap lines answer", rc == 0 and
+              out.startswith("{"), (rc, out[:200]))
+        rss_ok("claude: near-cap lines (6000 chapters, 20 x 1 MiB pastes)",
+               rss)
+        # the long ids still pair: a quiet Grep's failed result shows no
+        # error; an orphan result (no pairing) would mark the chapter
+        put([{"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": big(1), "name": "Grep",
+                 "input": {"pattern": "x"}}]}},
+             {"type": "user", "message": {"content": [
+                 {"type": "tool_result", "tool_use_id": big(1),
+                  "is_error": True, "content": "x"}]}}])
+        rc, o, err = xray(n, "--json")
+        check("claude: a 1 MB tool_use id still pairs with its result",
+              rc == 0 and o and [(c["title"], c["error"]) for c in
+                                 o["chapters"]] == [("start", False)],
+              (rc, o and o["chapters"], err))
+        # MED-3 (QA 1.44): unclosed <pasted_content> openers are linear
+        # (each line under the 1 MiB line cap)
+        for what, op, cnt in (
+                ("one id", lambda k: '<pasted_content id="a">', 40000),
+                ("unique ids", lambda k: '<pasted_content id="a%d">' % k,
+                 30000)):
+            ask = {"type": "user", "message": {"content": "".join(
+                op(k) for k in range(cnt))}}
+            put([{"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "ok"}]}}, ask] * 3)
+            t0 = time.time()
+            rc, o, err = xray(n, "--json")
+            dt = time.time() - t0
+            check("claude: 3 lines of %dk unclosed openers (%s) in %.2fs "
+                  "(< 2 s)" % (cnt // 1000, what, dt), rc == 0 and o and dt < 2 and
+                  [c["title"] for c in o["chapters"][1:]] == [
+                      "".join(op(k) for k in range(6))[:120]] * 3,
+                  (rc, dt, o and o["chapters"][:2], err))
     finally:
         dch("-k", n, env=env)
 
@@ -570,6 +716,13 @@ def test_names():
 
     refused(dch("-n", ID), "-n")
     refused(dch("--spawn", ID, "sh"), "--spawn")
+    for pad in (" " + ID, ID + " ", "\t" + ID):
+        r = dch("--spawn", pad, "sh", "-c", "sleep 5")
+        check("name rule: --spawn %r (padded) exits 2" % pad,
+              r.returncode == 2 and "looks like a session_id" in r.stderr,
+              (r.returncode, r.stderr))
+        if r.returncode == 0:
+            dch("-k", pad)
     r = dch("--spawn", "xc-old", "sh", "-c", "exit 0")
     time.sleep(0.5)
     refused(dch("--revive", "xc-old", "--as", ID), "--revive --as")
@@ -603,6 +756,7 @@ def main():
         test_record()
         test_heavy()
         test_evicted()
+        test_clear_off()
         test_evil()
         test_claude()
     finally:

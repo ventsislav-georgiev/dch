@@ -808,17 +808,26 @@ record of that name. Only when nothing local matches and the part before the
 The corpus:
 - **Claude Code.** The chapters come from the session's transcript
   (`<config>/projects/<dir>/<session id>.jsonl`). The file is found by one
-  directory listing and must be the only regular file of that name.
+  directory listing and must be the only regular file of that name, in a
+  real directory: a symlinked `<dir>` is not followed. With two or more,
+  the answer is `corpus: "none"` and `project` is the session cwd's key.
   - It is opened with `O_NOFOLLOW` and must still be the file the lookup
-    saw.
-  - It is read in 4 MiB chunks: the first 16 MiB and the newest 256 MiB.
-    Past that, `complete` is `false` with `why: "range"`.
+    saw. A transcript that is there but cannot be opened (permissions, an
+    I/O error) exits 3.
+  - It is read in 1 MiB chunks: the first 16 MiB and the newest 256 MiB.
+    Past that, `complete` is `false` with `why: "range"`. So it is when the
+    file shrinks during the read, or when more than 5000 chapters were
+    found (the oldest go).
   - A line over 1 MiB or over 100000 JSON tokens counts as one failed step.
 - **Shell.** The chapters come from the [ring](#shell-output-ring-x-ray)'s
   OSC 133 marks: one per typed command block (`A`, `B`, then `C` with client
   input before it and a non-blank command). A `B` or `C` inside an open
   `C`..`D` orphans that block: it gets no chapter. Without marks there are no
   chapters (`mentions_only: true`).
+  - Rows, and the marks on them, enter the ring only when they scroll off
+    the primary screen. So the commands still on the visible screen (in a
+    fresh shell or after a `clear`, up to a screen's worth) have no chapter
+    yet, and with none older the answer says `mentions_only: true`.
   - `complete` is `false` with `why: "range"` when the ring has evicted rows
     or holds a gap. The master reports evicted rows itself (a status bit, reset
     by a clear), so the querying process's `xray_ring` does not matter. A dch
@@ -861,7 +870,10 @@ the master's control socket. Nothing is typed into the session. It prints
   reply of records, which is dropped unread). The ring is cleared only if it
   still carries that id.
 - **Agent sessions.** A Claude Code session has no ring:
-  `ring_cleared: false`.
+  `ring_cleared: false`. So it is with `xray_ring 0` and while an agent
+  runs in a shell (the ring is paused). Then nothing is cleared: the
+  screen and scrollback stay, for `--read`, attach replay and the say gate.
+  A master asked to clear anyway (an older client) ignores it there.
 - **Failures.** An ended session or a History record exits 1 with
   `dch: no such session`, as does a master that hangs up mid-request. A dch-lite master exits 1 with
   `dch: no x-ray corpus`.
@@ -878,7 +890,7 @@ such a name keeps it.
 | 0 | the object was printed |
 | 1 | `dch: no such session`, `dch: ambiguous session`, `dch: no x-ray corpus` (`--clear`) |
 | 2 | bad usage: `--json` missing, a flag twice, a flag of a later release (`--ref`, `--follow`, `--chapter`, ...), `--xray` not first, a bad or remote `<n>` |
-| 3 | the session answered garbage, or the transcript could not be read |
+| 3 | the session answered garbage, or the transcript could not be read (it is there, but opening or reading it failed) |
 
 ### Auto-allow
 

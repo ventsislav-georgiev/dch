@@ -3648,6 +3648,23 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 		return do_ring_read(p, payload, len);
 	else if (type == MSG_RING_CLEAR)
 	{
+		struct dch_agent a;
+		int none = !xring.cap || dch_vt_capture_paused();
+
+		/* No ring, or an agent's (its corpus is its transcript): nothing
+		** to clear, and the mirror stays (QA 1.44 MED-1). The probe
+		** covers an agent the refresh tick has not paused for yet. */
+		if (!none && the_pty.fd >= 0 &&
+		    dch_agent_probe(the_pty.pid, &a) == 0)
+		{
+			free(a.launch);
+			none = 1;
+		}
+		if (none)
+		{
+			dch_trace("xray clear: no ring here, ignored");
+			return queue_status(p, MSG_ACK, DCH_ST_OK);
+		}
 		dch_vt_clear();
 		/* latched off: no mirror to clear, but its rows must still go */
 		if (!dch_vt_enabled() && xring.cap)
