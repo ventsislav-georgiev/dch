@@ -246,6 +246,9 @@ const struct dch_conf config_keys[] = {
 	/* the attach client takes the session's size on focus-in (#100) */
 	{ "focus_resize", 1, "true", NULL,
 	  "The focused client sets the session's size" },
+	/* the X-ray shell ring's size (#119), read when a session starts */
+	{ "xray_ring", 0, "2M", NULL,
+	  "Shell output kept for X-ray: 0 (off) to 16M" },
 };
 _Static_assert(sizeof config_keys / sizeof *config_keys == NCONF,
                "picker.h's NCONF counts config_keys");
@@ -389,6 +392,87 @@ config_set(int k, const char *s)
 		unlink(tmp);
 		errno = e;
 		return -1;
+	}
+	return 0;
+}
+
+/* dch --shell-init zsh|bash|fish (#119): the OSC 133 A/B/C/D hooks for an
+** rc file, so a shell inside dch marks its prompts, commands and exit codes
+** for X-ray. Idempotent (sourcing twice adds nothing); a shell or terminal
+** integration that already emits OSC 133 needs none of it. */
+static const char shell_init_zsh[] =
+"# dch --shell-init zsh: OSC 133 prompt marks for dch's X-ray\n"
+"if [[ -z ${__dch_osc133-} ]]; then\n"
+"  typeset -g __dch_osc133=1 __dch_ran=\n"
+"  autoload -Uz add-zsh-hook\n"
+"  __dch_precmd() {\n"
+"    local ret=$?\n"
+"    [[ -n $__dch_ran ]] && printf '\\033]133;D;%s\\007' $ret\n"
+"    __dch_ran=\n"
+"    printf '\\033]133;A\\007'\n"
+"    [[ $PS1 == *'133;B'* ]] || PS1=$PS1$'%{\\e]133;B\\a%}'\n"
+"    return $ret\n"
+"  }\n"
+"  __dch_preexec() { printf '\\033]133;C\\007'; __dch_ran=1; }\n"
+"  add-zsh-hook precmd __dch_precmd\n"
+"  add-zsh-hook preexec __dch_preexec\n"
+"fi\n";
+static const char shell_init_bash[] =
+"# dch --shell-init bash: OSC 133 prompt marks for dch's X-ray (bash 4.4+)\n"
+"if [[ -z ${__dch_osc133-} ]]; then\n"
+"  __dch_osc133=1 __dch_ran=\n"
+"  __dch_prompt() {\n"
+"    local ret=$?\n"
+"    [[ -n $__dch_ran ]] && printf '\\033]133;D;%s\\007' \"$ret\"\n"
+"    __dch_ran=\n"
+"    printf '\\033]133;A\\007'\n"
+"    return $ret\n"
+"  }\n"
+"  __dch_ps1() {\n"
+"    local ret=$?\n"
+"    [[ $PS1 == *'133;B'* ]] || PS1=$PS1'\\[\\e]133;B\\a\\]'\n"
+"    return $ret\n"
+"  }\n"
+"  PROMPT_COMMAND=\"__dch_prompt${PROMPT_COMMAND:+;$PROMPT_COMMAND};__dch_ps1\"\n"
+"  # PS0 runs as a command starts; the subscript sets __dch_ran here\n"
+"  PS0=${PS0-}'\\e]133;C\\a${__dch_nil[__dch_ran=1]}'\n"
+"fi\n";
+static const char shell_init_fish[] =
+"# dch --shell-init fish: OSC 133 prompt marks for dch's X-ray (fish 4\n"
+"# emits them itself)\n"
+"if not set -q __dch_osc133; and test (string split . $version)[1] -lt 4\n"
+"  set -g __dch_osc133 1\n"
+"  function __dch_prompt_start --on-event fish_prompt\n"
+"    printf '\\033]133;A\\007'\n"
+"  end\n"
+"  functions -q fish_prompt; and functions -c fish_prompt __dch_fish_prompt\n"
+"  function fish_prompt\n"
+"    functions -q __dch_fish_prompt; and __dch_fish_prompt\n"
+"    printf '\\033]133;B\\007'\n"
+"  end\n"
+"  function __dch_preexec --on-event fish_preexec\n"
+"    printf '\\033]133;C\\007'\n"
+"  end\n"
+"  function __dch_postexec --on-event fish_postexec\n"
+"    printf '\\033]133;D;%s\\007' $status\n"
+"  end\n"
+"end\n";
+
+static int
+shell_init_main(int argc, char **argv)
+{
+	const char *sh = argc == 1 ? argv[0] : "";
+
+	if (!strcmp(sh, "zsh"))
+		fputs(shell_init_zsh, stdout);
+	else if (!strcmp(sh, "bash"))
+		fputs(shell_init_bash, stdout);
+	else if (!strcmp(sh, "fish"))
+		fputs(shell_init_fish, stdout);
+	else
+	{
+		fprintf(stderr, "usage: dch --shell-init zsh|bash|fish\n");
+		return 2;
 	}
 	return 0;
 }
@@ -2570,9 +2654,15 @@ usage(void)
 	    "                                             (detach|switch: what\n"
 	    "                                             one Ctrl-\\ does),\n"
 	    "                                             remote_hosts (off,\n"
-	    "                                             or a --hosts list); the\n"
+	    "                                             or a --hosts list),\n"
+	    "                                             xray_ring (shell output\n"
+	    "                                             kept for X-ray, 0 to\n"
+	    "                                             16M, default 2M); the\n"
 	    "                                             picker's , key edits\n"
 	    "                                             them too\n"
+	    "  dch --shell-init zsh|bash|fish             print OSC 133 prompt\n"
+	    "                                             hooks for your rc file\n"
+	    "                                             (X-ray's command marks)\n"
 	    "  dch --agent-list [--json]                  list native Claude peers\n"
 	    "  dch --agent-send <name> <message...>       message one native peer\n"
 	    "  dch serve [--allow-create] [--allow-user <u>]...  serve sessions to\n"
@@ -9938,6 +10028,8 @@ main(int argc, char **argv)
 	/* The user config (#074): no session dir needed. */
 	if (argc >= 2 && strcmp(argv[1], "--config") == 0)
 		return config_main(argc - 2, argv + 2);
+	if (argc >= 2 && strcmp(argv[1], "--shell-init") == 0)
+		return shell_init_main(argc - 2, argv + 2);
 
 	if (compute_sock_dir() < 0)
 		return 1;

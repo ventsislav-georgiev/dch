@@ -709,6 +709,7 @@ running sessions.
 | `detach_key` | `detach` or `switch`: what one `Ctrl-\` press does; two presses do the other (see [Cheatsheet](#cheatsheet)) | `detach` |
 | `remote_hosts` | empty: your tailnet peers; `off`: none; else a `[label=]host[:port],...` list (see [Remote hosts](#remote-hosts)) | empty |
 | `focus_resize` | `true`/`false`: an attached client takes the session's size when its window gains focus (see [The focused client sets the size](#the-focused-client-sets-the-size)) | `true` |
+| `xray_ring` | the shell output a session keeps in memory for X-ray: `0` (off) up to `16M` (`K`/`M` suffixes, rounded up to 64 KiB). Read when a session starts (see [Shell output ring](#shell-output-ring-x-ray)) | `2M` |
 
 ```sh
 dch --config                         # the path, then every known key's effective value
@@ -722,6 +723,45 @@ symlinked one), keeps every other line and comment, and creates the parent
 directory. An unknown key, a bool key given anything else, or a choice key
 given a value not its own, is refused with exit 1. The session picker's
 settings view (`,`) sets the same keys the same way.
+
+### Shell output ring (X-ray)
+
+With the terminal mirror on (not in dch-lite), every session's master keeps
+the plain text of the shell's output in memory, in a ring of `xray_ring` bytes
+(default 2 MiB, allocated in 64 KiB chunks as it fills).
+- **What goes in.** A row goes in when it scrolls off the top of the
+  primary screen. The text is ANSI-free, with trailing blanks trimmed and soft
+  wraps joined. The alternate screen (vim, less, full-screen TUIs) is never
+  captured.
+- **Clearing.** Erasing the scrollback (`clear`, `ESC[3J`, `reset`/`ESC c`,
+  Cmd-K) empties the ring.
+- **Agents.** The ring pauses while an agent (Claude Code, Codex) runs in the
+  shell, because the agent's own transcript is its record. It resumes at the
+  shell's next prompt.
+- **`--restart`.** The ring survives `dch --restart`: it is handed to the new
+  image in memory and never written to disk.
+- **Core dumps.** The master lowers its own soft core-dump limit to 0 so ring
+  text cannot land in a core file. The program it runs keeps your limit.
+
+The ring is read over the session's own control socket (same user only). It
+is not a ctl verb, so `dch serve` does not expose it.
+
+Prompt and command marks make the output searchable by command. They come from
+OSC 133 (`A` prompt, `B` input, `C` output, `D;<exit>` end). Shells started
+by a dch master do not get the outer terminal's shell integration, so add the
+hooks to your rc file:
+
+```sh
+eval "$(dch --shell-init zsh)"     # ~/.zshrc
+eval "$(dch --shell-init bash)"    # ~/.bashrc (bash 4.4 or newer: it needs PS0)
+dch --shell-init fish | source     # ~/.config/fish/config.fish (fish 4 emits them itself)
+```
+
+They are idempotent: sourcing twice adds nothing. A shell that already emits
+OSC 133 needs none of this. A command block counts as typed only if client
+input (keystrokes, `--send`, `--keys`) reached the pty between its `B` and its
+`C`. A program that prints a fake prompt and command in one burst gets no
+credit for it.
 
 ### Auto-allow
 

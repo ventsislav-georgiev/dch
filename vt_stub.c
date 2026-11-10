@@ -91,3 +91,42 @@ dch_vt_buf_free(char *buf)
 {
 	free(buf);
 }
+
+/* X-ray capture: no mirror, no rows (ring stays empty). */
+void
+dch_vt_capture(struct dch_ring *r)
+{
+	(void)r;
+}
+
+void
+dch_vt_capture_rebase(void)
+{
+}
+
+void
+dch_vt_capture_pause(int on)
+{
+	(void)on;
+}
+
+int
+dch_vt_capture_paused(void)
+{
+	return 0;
+}
+
+void
+dch_vt_input_seen(void)
+{
+}
+
+void
+dch_vt_capture_flush(void)
+{
+}
+
+void
+dch_vt_clear(void)
+{
+}

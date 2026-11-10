@@ -89,4 +89,27 @@ int dch_vt_encode_keys(const char *spec, char **out, size_t *outlen);
 /* Free a buffer returned by dch_vt_snapshot / dch_vt_encode_keys. */
 void dch_vt_buf_free(char *buf);
 
+/*
+ * X-ray capture (#119). With a ring set (before dch_vt_init), every row the
+ * PRIMARY screen scrolls into history is appended to it, ANSI-free, after
+ * each feed slice; OSC 133 marks are placed at their row. Any erase of the
+ * history (ED 3 in any spelling, RIS) empties the ring. The lite build's
+ * stubs do nothing, so a ring there stays empty.
+ */
+struct dch_ring;
+void dch_vt_capture(struct dch_ring *r);
+/* The rows in history now count as captured: after a --restart re-feed. */
+void dch_vt_capture_rebase(void);
+/* on: an agent runs in the shell; rows are skipped and a gap is written.
+** off: resume (rows printed while paused never enter). */
+void dch_vt_capture_pause(int on);
+int dch_vt_capture_paused(void);
+/* The master forwarded client input to the pty (OSC 133 B..C fact). */
+void dch_vt_input_seen(void);
+/* Append marks still waiting for their row (before a --restart). */
+void dch_vt_capture_flush(void);
+/* Clear the mirror's history like ⌘K (ESC[H ESC[2J ESC[3J into the mirror
+** only, never the pty) and empty the ring whatever the active screen. */
+void dch_vt_clear(void);
+
 #endif /* DCH_VT_H */

@@ -17,6 +17,8 @@
 */
 #include "dtach.h"
 #include "vt.h"
+#include "ring.h"
+#include <sys/mman.h>
 #include <dirent.h>
 #ifdef __linux__
 #include <sys/syscall.h>
@@ -92,6 +94,11 @@ struct client
 	** stalling everyone (head-of-line). */
 	unsigned char *out;
 	size_t outlen, outcap, outoff;
+
+	/* X-ray ring subscriber (#119): subscribed; a wake is out and not yet
+	** answered by a read; the ring's gen at this client's last read. */
+	int xsub, xwake;
+	unsigned long xgen;
 };
 
 /* ponytail: 4 MB per-client output backlog before we give up on a slow
@@ -124,6 +131,17 @@ static int n_waiters;
 /* Set once the mirror hits a runtime error and is freed; distinguishes
 ** "never had a mirror" (DCH_ST_NOVT) from "mirror died" (DCH_ST_ERR). */
 static int vt_latched_off;
+/* The X-ray shell ring (#119): rows the mirror's primary screen scrolls into
+** history, read back over MSG_RING_READ. cap 0 = off. xsid is the live
+** shell's session_id (m + 16 hex), kept across a --restart handover. */
+static struct dch_ring xring;
+static char xsid[18];
+static int n_xsubs;		/* subscribed clients, <= DCH_RING_SUBS */
+static pid_t xagent;		/* the agent pid capture is paused for */
+static struct rlimit core_orig;	/* RLIMIT_CORE before core_off() */
+static int core_saved;
+static void xray_agent(pid_t agent);
+static void xray_wake(void);
 /* DCH_NO_REPLAY=1: don't repaint an attaching client from the mirror. Escape
 ** hatch for a program whose own WINCH repaint is enough and that dislikes
 ** seeing its screen handed back to it. Resolved once at master start. */
@@ -606,6 +624,9 @@ rec_refresh(void)
 		free(rec_ag.launch);
 		memset(&rec_ag, 0, sizeof rec_ag);
 	}
+	/* a stopped or gone agent no longer holds the ring's pause */
+	xray_agent(!stopped && the_pty.fd >= 0 && rec_ag.pid > 0 &&
+	           kill(rec_ag.pid, 0) == 0 ? rec_ag.pid : 0);
 	if (sidecar_path(".alias", ap, sizeof ap) == 0 &&
 	    (fd = open(ap, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)) >= 0)
 	{
@@ -1129,6 +1150,9 @@ init_pty(char **argv, int statusfd)
 		/* An interactive Codex gets --no-daemon (#083), in the
 		** child only: the recorded argv stays as typed. */
 		argv = dch_codex_argv(argv);
+		/* the master's core_off() is not the child's to keep */
+		if (core_saved)
+			setrlimit(RLIMIT_CORE, &core_orig);
 		execvp(*argv, argv);
 
 		/* Hand the errno to the master, or (a respawn: nobody waits)
@@ -1557,6 +1581,8 @@ remove_client(struct client *p)
 	          p->attached, p->outlen);
 	if (p->wait_pat[0])
 		n_waiters--;
+	if (p->xsub)
+		n_xsubs--;
 	close(p->fd);
 	if (p->next)
 		p->next->pprev = p->pprev;
@@ -1696,6 +1722,8 @@ process_pty_buf(const unsigned char *buf, size_t len)
 	/* Feed the terminal mirror AFTER the flush loop: attached clients
 	** keep first claim on the wake's time budget. */
 	dch_vt_feed(buf, len);
+	if (n_xsubs)
+		xray_wake();
 }
 
 /* Pull any pty output that is pending RIGHT NOW into the mirror (and to
@@ -1770,6 +1798,9 @@ static void
 vt_latch_off(void)
 {
 	dch_trace("vt mirror error -> latched off");
+	/* Capture ends here: say so in the ring (§11.4). */
+	dch_vt_capture_flush();
+	ring_append(&xring, RING_K_GAP, 0, (uint32_t)time(NULL), "latch", 5);
 	dch_vt_free();
 	vt_latched_off = 1;
 }
@@ -1778,6 +1809,306 @@ static unsigned int
 vt_missing_status(void)
 {
 	return vt_latched_off ? DCH_ST_ERR : DCH_ST_NOVT;
+}
+
+/* ---- X-ray shell ring (#119) ---------------------------------------------
+** The ring itself is ring.c, the capture vt.c. Here: its size from the
+** config, the read op and its subscribers, the agent pause, the core-dump
+** limit, and the --restart handover. Traces carry lengths and seqs only,
+** never ring text (S3). */
+
+/* The ring from the xray_ring config (default 2M), wired into the mirror
+** before dch_vt_init. A fresh session_id either way. */
+static void
+xray_setup(void)
+{
+	char v[64];
+	long cap = RING_DEFAULT;
+
+	ring_session_id(xsid);
+	if (dch_config_get("xray_ring", v, sizeof v))
+	{
+		long c = ring_parse_size(v);
+
+		if (c >= 0)
+			cap = c;
+	}
+	if (cap && ring_init(&xring, (size_t)cap, ring_seq_base()) == 0)
+		dch_vt_capture(&xring);
+}
+
+/* After dch_vt_init: no mirror (lite, DCH_NO_VT, failure), no ring. */
+static void
+xray_check(void)
+{
+	if (!dch_vt_enabled() && xring.cap)
+		ring_free(&xring);
+}
+
+/* An empty ring at a fresh seq base: old anchors answer stale. */
+static void
+xray_rotate(void)
+{
+	size_t cap = xring.cap;
+
+	ring_free(&xring);
+	if (cap && ring_init(&xring, cap, ring_seq_base()) < 0)
+		dch_trace("xray: ring lost (no memory)");
+	ring_session_id(xsid);
+}
+
+/* S5: ring text must not land in a core file. Soft limit only, so a user
+** who wants one can raise it again; the child keeps the original. */
+static void
+core_off(void)
+{
+	struct rlimit r;
+
+	if (getrlimit(RLIMIT_CORE, &r) < 0)
+		return;
+	if (!core_saved)
+	{
+		core_orig = r;
+		core_saved = 1;
+	}
+	r.rlim_cur = 0;
+	if (setrlimit(RLIMIT_CORE, &r) == 0)
+		dch_trace("core limit: soft 0 (child keeps %llu)",
+		          (unsigned long long)core_orig.rlim_cur);
+}
+
+/* An agent in the shell pauses capture (its corpus is its transcript), the
+** shell's next prompt (vt.c) or the agent's exit resumes it (§11.10). Runs
+** on the history record's refresh tick.
+** shortcut: agent output before the first tick after its start (rec_ms,
+** 60 s) is captured; hook dch_agent_probe into the pty batch if it matters. */
+static void
+xray_agent(pid_t agent)
+{
+	if (!xring.cap)
+		return;
+	if (agent && agent != xagent)
+	{
+		dch_vt_capture_pause(1);
+		dch_trace("xray: paused for agent pid=%d", (int)agent);
+	}
+	else if (!agent && xagent)
+	{
+		dch_vt_capture_pause(0);
+		dch_trace("xray: agent gone, resumed");
+	}
+	xagent = agent;
+}
+
+/* Edge-triggered wake (§10 Reading): one MSG_RING_WAKE per subscriber whose
+** last read is behind, then nothing until it reads again. */
+static void
+xray_wake(void)
+{
+	static const unsigned char none[1];
+	struct client *p, *next;
+
+	for (p = clients; p && n_xsubs; p = next)
+	{
+		next = p->next;
+		if (!p->xsub || p->xwake || p->xgen == xring.gen)
+			continue;
+		p->xwake = 1;
+		queue_frame(p, MSG_RING_WAKE, 0, none, 0);
+	}
+}
+
+static void
+put_le(unsigned char *o, uint64_t v, int n)
+{
+	int i;
+
+	for (i = 0; i < n; i++)
+		o[i] = (unsigned char)(v >> (8 * i));
+}
+
+static uint64_t
+get_le(const unsigned char *b, int n)
+{
+	uint64_t v = 0;
+
+	while (n--)
+		v = v << 8 | b[n];
+	return v;
+}
+
+/* Serve MSG_RING_READ (dtach.h has the wire format). Returns -1 if the
+** client is gone. */
+static int
+do_ring_read(struct client *p, const unsigned char *payload, unsigned int len)
+{
+	unsigned char hdr[DCH_RING_HDR_LEN], *buf = NULL;
+	uint64_t seq, first = 0, n = 0;
+	size_t max, got = 0, off;
+	int st = 0, rst = 0;
+
+	if (len < 12)
+	{
+		remove_client(p);
+		return -1;
+	}
+	seq = get_le(payload, 8);
+	max = (size_t)get_le(payload + 8, 4);
+	if (max < RING_HDR + RING_TEXT_MAX)
+		max = RING_HDR + RING_TEXT_MAX;
+	if (max > DCH_RING_READ_MAX)
+		max = DCH_RING_READ_MAX;
+	if (p->outlen - p->outoff + max + DCH_RING_HDR_LEN + 4096 > OUT_CAP)
+		return queue_status(p, MSG_READ_END, DCH_ST_BUSY);
+	if (len > 12 && (payload[12] & DCH_RING_F_SUB) && !p->xsub)
+	{
+		if (n_xsubs < DCH_RING_SUBS)
+		{
+			p->xsub = 1;
+			n_xsubs++;
+		}
+		else
+			st |= DCH_RING_S_SUBFULL;
+	}
+	p->xwake = 0;
+	p->xgen = xring.gen;
+	if (!xring.cap)
+		st |= DCH_RING_S_OFF;
+	else if (!(buf = malloc(max)))
+		return queue_status(p, MSG_READ_END, DCH_ST_ERR);
+	else
+		got = ring_read(&xring, seq, buf, max, &first, &n, &rst);
+	if (rst & RING_R_RANGE)
+		st |= DCH_RING_S_RANGE;
+	if (xring.chapters_evicted)
+		st |= DCH_RING_S_CHAPTERS;
+	if (dch_vt_capture_paused())
+		st |= DCH_RING_S_PAUSED;
+	if (vt_latched_off)
+		st |= DCH_RING_S_LATCHED;
+	if (p->xsub)
+		st |= DCH_RING_S_SUB;
+	hdr[0] = (unsigned char)st;
+	put_le(hdr + 1, xring.head_seq, 8);
+	put_le(hdr + 9, xring.tail_seq, 8);
+	put_le(hdr + 17, n ? first : xring.tail_seq, 8);
+	put_le(hdr + 25, n, 4);
+	put_le(hdr + 29, xring.epoch, 4);
+	memcpy(hdr + 33, xsid, 17);
+	dch_trace("xray read from=%llu first=%llu n=%llu bytes=%zu st=%d",
+	          (unsigned long long)seq, (unsigned long long)first,
+	          (unsigned long long)n, got, st);
+	if (queue_frame(p, MSG_RING_HDR, sizeof hdr, hdr, sizeof hdr) < 0)
+	{
+		free(buf);
+		return -1;
+	}
+	for (off = 0; off < got; off += PKT_MAX)
+	{
+		size_t c = got - off > PKT_MAX ? PKT_MAX : got - off;
+
+		if (queue_frame(p, MSG_READ_DATA, (unsigned int)c, buf + off,
+		    c) < 0)
+		{
+			free(buf);
+			return -1;
+		}
+	}
+	free(buf);
+	return queue_status(p, MSG_READ_END, DCH_ST_OK);
+}
+
+/* The handover object (§11.1): the ring's export in an unnamed shared
+** memory fd, close-on-exec until do_restart clears it. -1: no ring, or no
+** object (the new image then starts empty with a new seq base). */
+static int
+xray_export_fd(void)
+{
+	unsigned char *m;
+	size_t n;
+	int fd;
+
+	if (!xring.cap)
+		return -1;
+	dch_vt_capture_flush();
+	n = ring_export_size(&xring);
+#if defined(__linux__) && defined(MFD_CLOEXEC)
+	fd = memfd_create("dch-ring", MFD_CLOEXEC);
+#else
+	{
+		char name[24];
+
+		/* a random name, unlinked at once: nothing else can open it */
+		ring_session_id(name);
+		name[0] = '/';
+		name[17] = '\0';
+		fd = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
+		if (fd >= 0)
+		{
+			shm_unlink(name);
+			fcntl(fd, F_SETFD, FD_CLOEXEC);
+		}
+	}
+#endif
+	if (fd < 0)
+		return -1;
+	if (fd <= 2 || ftruncate(fd, (off_t)n) < 0 ||
+	    (m = mmap(NULL, n, PROT_READ | PROT_WRITE, MAP_SHARED, fd,
+	    0)) == MAP_FAILED)
+	{
+		close(fd);
+		return -1;
+	}
+#ifdef MADV_DONTDUMP
+	madvise(m, n, MADV_DONTDUMP);
+#endif
+	ring_export(&xring, m);
+	munmap(m, n);
+	dch_trace("xray handover out fd=%d bytes=%zu", fd, n);
+	return fd;
+}
+
+/* The new image's side: validate and copy the handed-over ring into our own
+** chunks, then close the object. Anything wrong: an empty ring with a new
+** seq base and a new session_id ("rotated"). Called after the snapshot
+** re-feed, which may have captured rows of its own: they go too. */
+static void
+xray_adopt(int fd, const char *sid)
+{
+	unsigned char *m;
+	struct stat st;
+	size_t n = 0;
+	int ok = -1, i;
+
+	if (fd > 2)
+	{
+		fcntl(fd, F_SETFD, FD_CLOEXEC);
+		/* macOS rounds a shm object up to a page: the header says
+		** how much of it is the export */
+		if (xring.cap && fstat(fd, &st) == 0 && st.st_size >= 48 &&
+		    (uint64_t)st.st_size <= (uint64_t)RING_MAX * 2 &&
+		    (m = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_SHARED,
+		    fd, 0)) != MAP_FAILED)
+		{
+#ifdef MADV_DONTDUMP
+			madvise(m, (size_t)st.st_size, MADV_DONTDUMP);
+#endif
+			n = 48 + (size_t)get_le(m + 36, 8);
+			if (n <= (size_t)st.st_size)
+				ok = ring_import(&xring, m, n);
+			munmap(m, (size_t)st.st_size);
+		}
+		close(fd);
+	}
+	for (i = 1; ok == 0 && i < 17; i++)
+		if (!sid || !strchr("0123456789abcdef", sid[i]) || !sid[i])
+			ok = -1;
+	if (ok == 0 && sid[0] == 'm' && !sid[17])
+		memcpy(xsid, sid, 18);
+	else if (xring.cap)
+		xray_rotate();
+	dch_trace("xray handover in fd=%d bytes=%zu ok=%d", fd, n, ok == 0);
+	dch_vt_capture_rebase();
 }
 
 /* Build the byte string that repaints the mirror's current visible screen
@@ -2297,7 +2628,10 @@ do_keys(struct client *p, const unsigned char *payload, unsigned int len)
 	}
 	/* Held (no child): dropped, like any other input. */
 	if (the_pty.fd >= 0)
+	{
 		write_buf_or_fail(the_pty.fd, bytes, nbytes);
+		dch_vt_input_seen();	/* OSC 133 B..C (§11.5) */
+	}
 	dch_vt_buf_free(bytes);
 	return queue_status(p, MSG_ACK, DCH_ST_OK);
 }
@@ -2361,6 +2695,10 @@ struct resume_state
 	int ncfd;
 	unsigned char *snap;
 	size_t snaplen;
+	int ringfd;		/* the X-ray ring's handover object, or -1 */
+	char sid[18];		/* its session_id */
+	struct rlimit core;	/* the child's RLIMIT_CORE (core_orig) */
+	int core_saved;
 };
 static struct resume_state resume;
 
@@ -2416,7 +2754,7 @@ hex_decode(const char *hex, unsigned char *out, size_t cap)
 /* Serialize everything the next image needs into `path`. Text header lines
 ** followed by `snap <len>` and that many raw bytes. Returns 0 on success. */
 static int
-restart_save(const char *path, int lfd, int ackfd)
+restart_save(const char *path, int lfd, int ackfd, int ringfd)
 {
 	char *blob = NULL, hex[sizeof ((struct client *)0)->inbuf * 2 + 1];
 	size_t bloblen = 0;
@@ -2454,6 +2792,14 @@ restart_save(const char *path, int lfd, int ackfd)
 	fprintf(f, "ku %s\n", hex);
 	hex_encode(kbd_m, kbd_m_len, hex);
 	fprintf(f, "km %s\n", hex);
+	/* The X-ray ring: its fd and id only, never its bytes (§11.1). */
+	if (ringfd > 2)
+		fprintf(f, "ringfd %d\n", ringfd);
+	fprintf(f, "sid %s\n", xsid);
+	if (core_saved)
+		fprintf(f, "core %llu %llu\n",
+		        (unsigned long long)core_orig.rlim_cur,
+		        (unsigned long long)core_orig.rlim_max);
 	/* Attached clients ride across as bare fds. fd > 2 because the daemon
 	** re-points 0/1/2 at /dev/null on the way back up.
 	**
@@ -2569,7 +2915,7 @@ restart_load(void)
 	** the NUL-terminated copy is safe: the raw tail is never tokenized
 	** because we stop at the snap line. */
 	memset(&resume, 0, sizeof resume);
-	resume.lfd = resume.pfd = resume.ackfd = -1;
+	resume.lfd = resume.pfd = resume.ackfd = resume.ringfd = -1;
 	body = buf + sizeof RESUME_MAGIC - 1;
 	line = strtok_r((char *)body, "\n", &save);
 	for (; line; line = strtok_r(NULL, "\n", &save))
@@ -2584,6 +2930,21 @@ restart_load(void)
 			continue;
 		if (sscanf(line, "ack %d", &resume.ackfd) == 1)
 			continue;
+		if (sscanf(line, "ringfd %d", &resume.ringfd) == 1)
+			continue;
+		if (sscanf(line, "sid %17s", resume.sid) == 1)
+			continue;
+		{
+			unsigned long long cc, cm;
+
+			if (sscanf(line, "core %llu %llu", &cc, &cm) == 2)
+			{
+				resume.core.rlim_cur = (rlim_t)cc;
+				resume.core.rlim_max = (rlim_t)cm;
+				resume.core_saved = 1;
+				continue;
+			}
+		}
 		if (sscanf(line, "cpid %ld", &v) == 1)
 		{
 			resume.cpid = (pid_t)v;
@@ -2688,7 +3049,7 @@ do_restart(struct client *p, const unsigned char *req, unsigned int reqlen)
 	char path[1100], exe[PKT_MAX + 1];
 	const char *target = dch_exe;
 	struct client *q, *next;
-	int lfd = listen_fd;
+	int lfd = listen_fd, rfd;
 
 	/* A pending arm or a hold is not in the resume blob: the new image
 	** would silently drop the orchestrator's respawn (or, held, have no
@@ -2728,8 +3089,13 @@ do_restart(struct client *p, const unsigned char *req, unsigned int reqlen)
 	** screen we carry over is the screen as of right now. */
 	drain_pty();
 
-	if (restart_save(path, lfd, p->fd) < 0)
+	rfd = xray_export_fd();
+	if (restart_save(path, lfd, p->fd, rfd) < 0)
+	{
+		if (rfd >= 0)
+			close(rfd);
 		return queue_status(p, MSG_ACK, DCH_ST_ERR);
+	}
 
 	/* Drop every connection except the requester's. Other control conns are
 	** one-shot RPCs mid-flight; they get a clean EOF and their caller
@@ -2746,15 +3112,21 @@ do_restart(struct client *p, const unsigned char *req, unsigned int reqlen)
 #if defined(F_SETFD) && defined(FD_CLOEXEC)
 	/* The listen socket is the only descriptor we deliberately marked
 	** close-on-exec; the pty and the client sockets never were. */
-	if (fcntl(lfd, F_SETFD, 0) < 0)
+	if (fcntl(lfd, F_SETFD, 0) < 0 ||
+	    (rfd >= 0 && fcntl(rfd, F_SETFD, 0) < 0))
 	{
 		unlink(path);
+		if (rfd >= 0)
+			close(rfd);
+		fcntl(lfd, F_SETFD, FD_CLOEXEC);
 		return queue_status(p, MSG_ACK, DCH_ST_ERR);
 	}
 #endif
 	if (setenv("DCH_RESUME", path, 1) < 0)
 	{
 		unlink(path);
+		if (rfd >= 0)
+			close(rfd);
 		return queue_status(p, MSG_ACK, DCH_ST_ERR);
 	}
 
@@ -2766,6 +3138,9 @@ do_restart(struct client *p, const unsigned char *req, unsigned int reqlen)
 	dch_trace("restart exec failed errno=%d", errno);
 	unsetenv("DCH_RESUME");
 	unlink(path);
+	/* the old image keeps its own ring: nothing moved */
+	if (rfd >= 0)
+		close(rfd);
 #if defined(F_SETFD) && defined(FD_CLOEXEC)
 	fcntl(lfd, F_SETFD, FD_CLOEXEC);
 #endif
@@ -3193,7 +3568,8 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 		return do_restart(p, payload, len);
 	}
 	else if (type == MSG_KEYS || type == MSG_READ || type == MSG_WAIT ||
-	         type == MSG_RESPAWN || type == MSG_CMD)
+	         type == MSG_RESPAWN || type == MSG_CMD ||
+	         type == MSG_RING_READ || type == MSG_RING_CLEAR)
 	{
 		if (p->role == ROLE_ATTACHED)
 		{
@@ -3225,7 +3601,10 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 	{
 		/* Held (no child): input has nowhere to go; drop it. */
 		if (the_pty.fd >= 0)
+		{
 			write_buf_or_fail(the_pty.fd, payload, len);
+			dch_vt_input_seen();	/* OSC 133 B..C (§11.5) */
+		}
 	}
 
 	else if (type == MSG_KEYS)
@@ -3234,6 +3613,14 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 		return do_respawn(p, payload, len);
 	else if (type == MSG_CMD)
 		return do_cmd(p, payload, len);
+	else if (type == MSG_RING_READ)
+		return do_ring_read(p, payload, len);
+	else if (type == MSG_RING_CLEAR)
+	{
+		dch_vt_clear();
+		dch_trace("xray clear epoch=%u", (unsigned)xring.epoch);
+		return queue_status(p, MSG_ACK, DCH_ST_OK);
+	}
 	else if (type == MSG_READ)
 	{
 		/* 4-byte payload {format,source,lines LE}; shorter is a
@@ -3551,11 +3938,20 @@ master_adopt(void)
 			scrollback = 0;
 		if (scrollback > 100000)
 			scrollback = 100000;
+		xray_setup();
 		if (dch_vt_init(cols, rows, scrollback) < 0)
 			dch_trace("vt mirror unavailable after restart");
 		else if (resume.snap)
 			dch_vt_feed(resume.snap, resume.snaplen);
 	}
+	xray_check();
+	xray_adopt(resume.ringfd, resume.sid[0] ? resume.sid : NULL);
+	if (resume.core_saved)
+	{
+		core_orig = resume.core;
+		core_saved = 1;
+	}
+	core_off();
 	free(resume.snap);
 	resume.snap = NULL;
 	resume.snaplen = 0;
@@ -3754,9 +4150,12 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 				scrollback = 0;
 			if (scrollback > 100000)
 				scrollback = 100000;
+			xray_setup();
 			if (dch_vt_init(80, 24, scrollback) < 0)
 				dch_trace("vt mirror unavailable");
 		}
+		xray_check();
+		core_off();
 	}
 	dch_bridge_start(argv, resume.valid, the_pty.fd, s, statusfd);
 	rec_init(resume.valid);

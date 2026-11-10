@@ -929,5 +929,38 @@ if [ -x "$DCH" ]; then
     fi
 fi
 
+# --- X-ray shell ring (#119): ring.c units, capture through the mirror, the
+# .ring.ndjson golden round-trip, then the master over its socket ----------
+xsrc=$(cd "$(dirname "$0")/.." && pwd)
+xcc=$(sed -n 's/^CC = //p' Makefile 2>/dev/null)
+xcc=${xcc:-cc}
+if command -v "${xcc%% *}" >/dev/null 2>&1; then  # CC may carry flags
+    xlibs=$(sed -n 's/^VT_LIBS = //p' Makefile 2>/dev/null)
+    xvt=
+    [ "$MIRROR" = "1" ] && [ -n "$xlibs" ] &&
+        xvt="-DWITH_VT -I$xsrc/vendor/libghostty-vt/include $xsrc/vt.c $xlibs"
+    # shellcheck disable=SC2086 # xcc and xvt are word lists
+    if $xcc -O1 -I"$xsrc" -I. -o "$TMP/ring_unit" "$xsrc/tests/ring_unit.c" \
+        "$xsrc/ring.c" $xvt >"$TMP/ring_unit.log" 2>&1; then
+        if "$TMP/ring_unit" >"$TMP/ring_unit.log" 2>&1; then
+            ok "ring units$([ -n "$xvt" ] && echo ' + capture through the mirror')"
+        else
+            bad "ring units"; grep -v '^  ok' "$TMP/ring_unit.log" | sed 's/^/       /'
+        fi
+        "$TMP/ring_unit" roundtrip "$xsrc/tests/xray/golden.ring.ndjson" |
+            cmp -s - "$xsrc/tests/xray/golden.ring.ndjson"
+        check ".ring.ndjson golden: load, dump, byte-identical" "$?" "0"
+    else
+        bad "ring_unit builds"; sed 's/^/       /' "$TMP/ring_unit.log"
+    fi
+else
+    bad "ring units: no compiler ($xcc)"
+fi
+if [ "$MIRROR" = "1" ]; then
+    pyrun "X-ray ring: read op, wakes, clears, --restart handover, traces" xray_ring_test.py
+else
+    skipmirror "X-ray ring: read op, wakes, clears, --restart handover, traces"
+fi
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

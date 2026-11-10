@@ -174,7 +174,43 @@ enum
 				** master holds. ONLY sent, ahead of the
 				** MSG_CMD reply, when the request set
 				** DCH_CMD_F_STAT (dch --ls-json). */
+	/* X-ray shell ring (#119). Control verbs; the master protocol only,
+	** never a ctl verb (S19). */
+	MSG_RING_READ	= 18,	/* payload: {u64 seq LE; u32 max LE; u8 flags
+				** (DCH_RING_F_*, optional)}. Reply:
+				** MSG_RING_HDR, MSG_READ_DATA chunks of whole
+				** records from seq (u16 len LE, u8 kind, u8
+				** flags, u32 time LE, text; ring.h), then
+				** MSG_READ_END. max is clamped to 64K+8 ..
+				** DCH_RING_READ_MAX. */
+	MSG_RING_HDR	= 19,	/* payload: DCH_RING_HDR_LEN bytes: {u8
+				** status (DCH_RING_S_*); u64 head_seq; u64
+				** tail_seq; u64 first (seq of the first
+				** record sent); u32 count; u32 epoch (moves
+				** on every clear); char session_id[17]}, LE */
+	MSG_RING_WAKE	= 20,	/* no payload: the ring moved since this
+				** subscriber's last read. Edge-triggered: one
+				** until its next MSG_RING_READ. */
+	MSG_RING_CLEAR	= 21,	/* no payload: ESC[H ESC[2J ESC[3J into the
+				** mirror only (never the pty), and the ring
+				** empties whatever the active screen.
+				** MSG_ACK reply. */
 };
+
+/* MSG_RING_READ flags */
+#define DCH_RING_F_SUB    0x01	/* subscribe this connection to wakes */
+#define DCH_RING_READ_MAX (1u << 20)	/* S10: one reply's record bytes */
+#define DCH_RING_SUBS     4	/* S10: subscribers per master */
+#define DCH_RING_HDR_LEN  50
+/* MSG_RING_HDR status bits */
+#define DCH_RING_S_RANGE   0x01	/* seq was evicted (or never was): data
+				** starts at the head; why:"range" */
+#define DCH_RING_S_CHAPTERS 0x02	/* a prompt was evicted */
+#define DCH_RING_S_PAUSED  0x04	/* an agent runs: capture paused */
+#define DCH_RING_S_OFF     0x08	/* no ring (xray_ring 0, lite, no mirror) */
+#define DCH_RING_S_SUB     0x10	/* this connection is subscribed */
+#define DCH_RING_S_SUBFULL 0x20	/* subscribe refused: DCH_RING_SUBS taken */
+#define DCH_RING_S_LATCHED 0x40	/* the mirror latched off: capture ended */
 
 /* MSG_READ_END / MSG_ACK statuses */
 enum

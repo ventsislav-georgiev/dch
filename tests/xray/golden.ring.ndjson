@@ -1,0 +1,13 @@
+{"seq":281474976710000,"kind":"mark","flags":0,"t":1794300000,"text":"A"}
+{"seq":281474976710001,"kind":"prompt","flags":0,"t":1794300000,"text":"~/src $"}
+{"seq":281474976710002,"kind":"mark","flags":0,"t":1794300000,"text":"B"}
+{"seq":281474976710003,"kind":"input","flags":0,"t":1794300001,"text":"grep -n \"TODO\" src\\main.c"}
+{"seq":281474976710004,"kind":"mark","flags":8,"t":1794300002,"text":"C;grep -n \"TODO\" src\\main.c"}
+{"seq":281474976710005,"kind":"output","flags":0,"t":1794300002,"text":"src/main.c:12:\t/* TODO: ünïcødé 中文 🙂 */"}
+{"seq":281474976710006,"kind":"output","flags":1,"t":1794300002,"text":"continued after a soft wrap"}
+{"seq":281474976710007,"kind":"output","flags":4,"t":1794300002,"text":"cut at a boundary \u0001\u001f"}
+{"seq":281474976710008,"kind":"mark","flags":2,"t":1794300003,"text":"D;1","exit":1}
+{"seq":281474976710009,"kind":"mark","flags":16,"t":1794300004,"text":"A;c"}
+{"seq":281474976710010,"kind":"gap","flags":0,"t":1794300005,"text":"agent"}
+{"seq":281474976710011,"kind":"mark","flags":0,"t":1794300006,"text":"D"}
+{"seq":281474976710012,"kind":"output","flags":0,"t":1794300007,"text":""}

@@ -97,7 +97,7 @@ struct dch_conf
 	const char *choices;	/* "a|b": all it takes; NULL: any one line */
 	const char *desc;	/* the picker's settings view says it (#086) */
 };
-#define NCONF 6
+#define NCONF 7
 extern const struct dch_conf config_keys[];
 const char *config_show(int k, char *v, size_t cap, int *set);
 #endif
