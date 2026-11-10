@@ -278,7 +278,7 @@ test_wrap(void)
 {
 	struct dch_ring r;
 	struct rec *v;
-	static char text[3000];
+	static char text[4096];	/* the boundary case appends 4088 */
 	size_t n, i, total = 0;
 	int st, ok = 1;
 
