@@ -323,8 +323,10 @@ def ctl_checks(dch, check, senv, cenv, serve_at, procs, fakes, tmp, hosts):
     check("off the allowlist: refused here, exit 1", r.returncode == 1
           and r.stderr == "dch: can't run on a remote host: -f is not "
           "allowed\n", r)
+    # #120: --xray exists, but only as argv[1]; never sent to the host
     r = dch(cenv, *H, "--xray", "srv:ctl-qa")
-    check("--xray is no control verb here", r.returncode == 1, r)
+    check("--xray is no control verb here", r.returncode == 2
+          and "--xray comes first" in r.stderr, r)
     r = dch(cenv, *H, "--read", "srv:ctl-qa", "--cwd", "/")
     check("--cwd with a verb but --spawn: a usage error", r.returncode == 1
           and "--cwd only works with --spawn" in r.stderr, r)

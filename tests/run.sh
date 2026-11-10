@@ -950,6 +950,12 @@ if command -v "${xcc%% *}" >/dev/null 2>&1; then  # CC may carry flags
         "$TMP/ring_unit" roundtrip "$xsrc/tests/xray/golden.ring.ndjson" |
             cmp -s - "$xsrc/tests/xray/golden.ring.ndjson"
         check ".ring.ndjson golden: load, dump, byte-identical" "$?" "0"
+        xrt=0 xrn=0
+        for f in "$xsrc"/tests/xray/fixtures/*/shell/*.ring.ndjson; do
+            xrn=$((xrn + 1))
+            "$TMP/ring_unit" roundtrip "$f" | cmp -s - "$f" || xrt=$((xrt + 1))
+        done
+        check "fixture rings ($xrn): load, dump, byte-identical" "$xrt" "0"
     else
         bad "ring_unit builds"; sed 's/^/       /' "$TMP/ring_unit.log"
     fi
@@ -960,6 +966,30 @@ if [ "$MIRROR" = "1" ]; then
     pyrun "X-ray ring: read op, wakes, clears, --restart handover, traces" xray_ring_test.py
 else
     skipmirror "X-ray ring: read op, wakes, clears, --restart handover, traces"
+fi
+
+# --- dch --xray (#120): the engine's units, the goldens, real masters -------
+# shellcheck disable=SC2086 # xcc is a word list
+if $xcc -O1 -I"$xsrc" -I. -o "$TMP/xray_unit" "$xsrc/tests/xray_unit.c" \
+    "$xsrc/xray.c" "$xsrc/json.c" >"$TMP/xray_unit.log" 2>&1; then
+    if "$TMP/xray_unit" >"$TMP/xray_unit.log" 2>&1; then
+        ok "xray units: titles, project key, ids, the seam, decoder caps"
+    else
+        bad "xray units"; grep -v '^  ok' "$TMP/xray_unit.log" | sed 's/^/       /'
+    fi
+else
+    bad "xray_unit builds"; sed 's/^/       /' "$TMP/xray_unit.log"
+fi
+# spec 2.1: the engine is client-only; the master never links an xr_ symbol
+if [ -f master.o ] && command -v nm >/dev/null 2>&1; then
+    xrsym=$(nm master.o 2>/dev/null | grep -cE ' _?xr_')
+    check "the master links no x-ray engine symbol (nm master.o)" "$xrsym" "0"
+fi
+pyrun "xray goldens: chapters, identity, corpus labels, MANIFEST" xray_golden.py
+if [ "$MIRROR" = "1" ]; then
+    pyrun "xray: a typed shell block, --clear, a live Claude, the seam, names" xray_cli_test.py
+else
+    skipmirror "xray: a typed shell block, --clear, a live Claude, the seam, names"
 fi
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

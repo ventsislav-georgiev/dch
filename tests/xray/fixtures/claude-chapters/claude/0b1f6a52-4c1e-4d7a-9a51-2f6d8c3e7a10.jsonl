@@ -1,0 +1,22 @@
+{"type":"file-history-snapshot","messageId":"x"}
+{"type":"user","message":{"role":"user","content":"Fix the flaky   build\n\nsecond line"},"timestamp":"2026-11-10T10:01:00.000Z","cwd":"/home/demo/proj"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"On it."}]},"timestamp":"2026-11-10T10:01:30.000Z","cwd":"/home/demo/proj"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"make test"}}]},"timestamp":"2026-11-10T10:02:30.000Z","cwd":"/home/demo/proj"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"FAIL: 2 tests","is_error":true}]},"timestamp":"2026-11-10T10:02:00.000Z","cwd":"/home/demo/proj"}
+{"type":"user","message":{"role":"user","content":"<command-name>/review</command-name>\n<command-message>review</command-message>\n<command-args>  PR 12  </command-args>"},"timestamp":"2026-11-10T10:03:00.000Z","cwd":"/home/demo/proj"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Reviewed."}]},"timestamp":"2026-11-10T10:03:30.000Z","cwd":"/home/demo/proj"}
+{"type":"system","subtype":"compact_boundary","timestamp":"2026-11-10T10:04:00.000Z","cwd":"/home/demo/proj"}
+{"type":"user","message":{"role":"user","content":"This session is being continued from a previous conversation."},"timestamp":"2026-11-10T10:04:00.000Z","cwd":"/home/demo/proj","isCompactSummary":true}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Picking up where we left off."}]},"timestamp":"2026-11-10T10:04:30.000Z","cwd":"/home/demo/proj"}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Look at this screenshot"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}]},"timestamp":"2026-11-10T10:05:00.000Z","cwd":"/home/demo/proj"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I see a stack trace."}]},"timestamp":"2026-11-10T10:05:30.000Z","cwd":"/home/demo/proj"}
+{"type":"user","message":{"role":"user","content":"<system-reminder>meta</system-reminder>"},"timestamp":"2026-11-10T10:06:00.000Z","cwd":"/home/demo/proj","isMeta":true}
+{"type":"attachment","attachment":{"type":"queued_command","prompt":"and then deploy"},"timestamp":"2026-11-10T10:07:00.000Z","cwd":"/home/demo/proj"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t2","name":"Grep","input":{"pattern":"TODO"}}]},"timestamp":"2026-11-10T10:07:30.000Z","cwd":"/home/demo/proj"}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","content":"No matches","is_error":true}]},"timestamp":"2026-11-10T10:07:00.000Z","cwd":"/home/demo/proj"}
+{"type":"system","subtype":"turn_duration","timestamp":"2026-11-10T10:08:00.000Z"}
+{"type":"user","message":{"role":"user","content":"\ud800 half a pair"},"timestamp":"2026-11-10T10:20:00.000Z","cwd":"/home/demo/proj"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]},"timestamp":"2026-11-10T10:20:30.000Z","cwd":"/home/demo/proj"}
+{"type":"user","message":{"role":"user","content":"éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé"},"timestamp":"2026-11-10T10:21:00.000Z","cwd":"/home/demo/proj"}
+{"type":"user","message":{"role":"user","content":"a second prompt with no step between"},"timestamp":"2026-11-10T10:22:00.000Z","cwd":"/home/demo/proj"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]},"timestamp":"2026-11-10T10:22:30.000Z","cwd":"/home/demo/proj"}

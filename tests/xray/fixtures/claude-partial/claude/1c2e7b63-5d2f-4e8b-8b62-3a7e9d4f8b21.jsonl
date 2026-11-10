@@ -1,0 +1,8 @@
+this line is not JSON
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"continuing the earlier work"}]},"timestamp":"2026-11-10T10:00:30.000Z","cwd":"/home/demo/proj"}
+{"type":"user","message":{"role":"user","content":"hello there"},"timestamp":"2026-11-10T10:01:00.000Z","cwd":"/home/demo/proj"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"side work"}]},"timestamp":"2026-11-10T10:01:30.000Z","cwd":"/home/demo/proj","isSidechain":true,"agentId":"a1"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"more side work"}]},"timestamp":"2026-11-10T10:01:30.000Z","cwd":"/home/demo/proj","isSidechain":true,"agentId":"a1"}
+{"type":"user","message":{"role":"user","content":"after the side agent"},"timestamp":"2026-11-10T10:02:00.000Z","cwd":"/home/demo/proj"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"fine"}]},"timestamp":"2026-11-10T10:02:30.000Z","cwd":"/home/demo/proj"}
+{"type":"user","message":{"role":"user","content":"bye"},"timestamp":"2026-11-10T10:03:00.000Z","cwd":"/home/demo/proj"}

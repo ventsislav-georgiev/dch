@@ -14,7 +14,7 @@ master's core-dump limit.
 
 Run:  python3 tests/xray_ring_test.py       (uses ./dch; run.sh isolates it)
 """
-import os, re, shutil, socket, struct, subprocess, sys, tempfile, time
+import os, re, resource, shutil, socket, struct, subprocess, sys, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -437,7 +437,16 @@ def test_restart(tmp):
     canary = "CANARY-%s-ringtext" % TAG
     trace = os.path.join(tmp, "trace")
     env = dict(os.environ, DCH_DEBUG=trace)
-    spawn(n, "sh", env=env)
+    # S5 (mutant 44): spawn with a raised soft core limit, so a master that
+    # keeps it is seen by the --restart image it execs (wrap.sh records it)
+    hard = resource.getrlimit(resource.RLIMIT_CORE)[1]
+    soft = hard if hard != resource.RLIM_INFINITY else 1 << 30
+    r = dch("--spawn", n, "--size", "80x24", "sh", env=env,
+            preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_CORE,
+                                                  (soft, hard)))
+    if r.returncode != 0:
+        raise SystemExit("spawn %s failed: %s" % (n, r.stderr))
+    corefile = os.path.join(tmp, "core-limit")
     try:
         run(n, "echo %s; seq 1 100" % canary, "r1")
         h0, r0 = X.read_all(n, 0)
@@ -446,8 +455,8 @@ def test_restart(tmp):
         blobcopy = os.path.join(tmp, "blob")
         wrap = os.path.join(tmp, "wrap.sh")
         with open(wrap, "w") as f:
-            f.write('#!/bin/sh\ncp "$DCH_RESUME" "%s"\nexec "%s" "$@"\n'
-                    % (blobcopy, DCH))
+            f.write('#!/bin/sh\ncp "$DCH_RESUME" "%s"\nulimit -c > "%s"\n'
+                    'exec "%s" "$@"\n' % (blobcopy, corefile, DCH))
         os.chmod(wrap, 0o755)
         s = X.connect(n)
         try:
@@ -459,6 +468,12 @@ def test_restart(tmp):
         finally:
             s.close()
         blob = open(blobcopy, "rb").read()
+        if soft:
+            check("S5: the master's own soft core limit is 0 (its exec sees "
+                  "0; it was spawned with %d)" % soft,
+                  open(corefile).read().strip() == "0", open(corefile).read())
+        else:
+            print("  skip S5's raised limit (hard core limit 0 here)")
         check("10: the resume blob has no ring bytes (canary absent)",
               canary.encode() not in blob and b"ringfd " in blob and
               h0["session_id"].encode() in blob)
@@ -501,6 +516,26 @@ def test_restart(tmp):
               h3["status_any"] & X.S_RANGE and
               not (h0["head"] <= h3["head"] <= h2["tail"]) and
               h3["tail"] - h3["head"] < 30, h3)
+        # mutant 47's other half: the ring imports, the session_id does not
+        # validate, so the imported seqs must go too (a rotate, not a keep)
+        run(n, "seq 700 720", "r3")
+        h3, r3 = X.read_all(n, 0)
+        with open(bad, "w") as f:
+            f.write('#!/bin/sh\nsed -i.x "s/^sid m/sid z/" "$DCH_RESUME"\n'
+                    'exec "%s" "$@"\n' % DCH)
+        s = X.connect(n)
+        try:
+            s.sendall(bytes([13, len(bad) & 255, len(bad) >> 8]) +
+                      bad.encode())
+            t, st, _ = X.recv_frame(s)
+        finally:
+            s.close()
+        h4, r4 = X.read_all(n, h3["tail"])
+        check("10: a bad handed-over session_id: the imported ring goes, "
+              "new seq base, new id", t == X.MSG_ACK and st == 0 and
+              r3 and h4["session_id"] != h3["session_id"] and
+              not (h3["head"] <= h4["head"] <= h3["tail"]) and
+              "720" not in X.texts(X.read_all(n, 0)[1]), (h3, h4))
         X.read_all(n, 0)
         tr = open(trace, "rb").read()
         check("S3 trace canary: traces carry lengths and seqs, no text",

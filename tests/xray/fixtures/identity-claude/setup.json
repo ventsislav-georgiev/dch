@@ -1,0 +1,1 @@
+{"schema":1,"history":[{"file":"demo.1794300000","record":{"name":"demo","cwd":"/home/demo/proj","end":"exited","argv":["claude"],"started":1794299400,"updated":1794300000,"ended":1794300000,"agent":{"session_id":"2d3f8c74-6e3a-4f9c-9c73-4b8fae5a9c32","cwd":"/home/demo/proj","config_dir":"@CFG@"}}}],"live":{"demo":{"session_id":"ma1b2c3d4e5f6a7b8"}}}

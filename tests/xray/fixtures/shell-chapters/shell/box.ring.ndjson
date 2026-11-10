@@ -1,0 +1,53 @@
+{"seq":281474976710000,"kind":"mark","flags":0,"t":1794300000,"text":"A"}
+{"seq":281474976710001,"kind":"prompt","flags":0,"t":1794300000,"text":"~/proj $"}
+{"seq":281474976710002,"kind":"mark","flags":0,"t":1794300000,"text":"B"}
+{"seq":281474976710003,"kind":"input","flags":0,"t":1794300000,"text":"ls -la"}
+{"seq":281474976710004,"kind":"mark","flags":8,"t":1794300000,"text":"C"}
+{"seq":281474976710005,"kind":"output","flags":0,"t":1794300000,"text":"total 8"}
+{"seq":281474976710006,"kind":"output","flags":0,"t":1794300000,"text":"x"}
+{"seq":281474976710007,"kind":"mark","flags":2,"t":1794300000,"text":"D;0","exit":0}
+{"seq":281474976710008,"kind":"mark","flags":0,"t":1794300005,"text":"A"}
+{"seq":281474976710009,"kind":"prompt","flags":0,"t":1794300005,"text":"~/proj $"}
+{"seq":281474976710010,"kind":"mark","flags":0,"t":1794300005,"text":"B"}
+{"seq":281474976710011,"kind":"input","flags":0,"t":1794300005,"text":"make"}
+{"seq":281474976710012,"kind":"input","flags":1,"t":1794300005,"text":" test"}
+{"seq":281474976710013,"kind":"mark","flags":8,"t":1794300005,"text":"C"}
+{"seq":281474976710014,"kind":"output","flags":0,"t":1794300005,"text":"error: 1"}
+{"seq":281474976710015,"kind":"mark","flags":2,"t":1794300005,"text":"D;2","exit":2}
+{"seq":281474976710016,"kind":"mark","flags":0,"t":1794300005,"text":"A"}
+{"seq":281474976710017,"kind":"mark","flags":0,"t":1794300005,"text":"A"}
+{"seq":281474976710018,"kind":"prompt","flags":0,"t":1794300005,"text":"~/proj $"}
+{"seq":281474976710019,"kind":"mark","flags":0,"t":1794300005,"text":"B"}
+{"seq":281474976710020,"kind":"input","flags":0,"t":1794300005,"text":"git st"}
+{"seq":281474976710021,"kind":"mark","flags":8,"t":1794300005,"text":"C;git status"}
+{"seq":281474976710022,"kind":"output","flags":0,"t":1794300005,"text":"clean"}
+{"seq":281474976710023,"kind":"mark","flags":0,"t":1794300005,"text":"D"}
+{"seq":281474976710024,"kind":"mark","flags":0,"t":1794300005,"text":"A"}
+{"seq":281474976710025,"kind":"prompt","flags":0,"t":1794300005,"text":"~/proj $"}
+{"seq":281474976710026,"kind":"mark","flags":0,"t":1794300005,"text":"B"}
+{"seq":281474976710027,"kind":"input","flags":0,"t":1794300005,"text":""}
+{"seq":281474976710028,"kind":"mark","flags":8,"t":1794300005,"text":"C"}
+{"seq":281474976710029,"kind":"mark","flags":2,"t":1794300005,"text":"D;0","exit":0}
+{"seq":281474976710030,"kind":"mark","flags":0,"t":1794300010,"text":"A"}
+{"seq":281474976710031,"kind":"prompt","flags":0,"t":1794300010,"text":"~/proj $"}
+{"seq":281474976710032,"kind":"mark","flags":8,"t":1794300010,"text":"C"}
+{"seq":281474976710033,"kind":"output","flags":0,"t":1794300010,"text":"?"}
+{"seq":281474976710034,"kind":"mark","flags":2,"t":1794300010,"text":"D;0","exit":0}
+{"seq":281474976710035,"kind":"mark","flags":0,"t":1794300010,"text":"A;k=s"}
+{"seq":281474976710036,"kind":"prompt","flags":0,"t":1794300010,"text":"> "}
+{"seq":281474976710037,"kind":"mark","flags":0,"t":1794300010,"text":"A"}
+{"seq":281474976710038,"kind":"prompt","flags":0,"t":1794300010,"text":"~/proj $"}
+{"seq":281474976710039,"kind":"mark","flags":0,"t":1794300010,"text":"B"}
+{"seq":281474976710040,"kind":"input","flags":0,"t":1794300010,"text":"cat notes.txt"}
+{"seq":281474976710041,"kind":"mark","flags":0,"t":1794300010,"text":"C"}
+{"seq":281474976710042,"kind":"output","flags":0,"t":1794300010,"text":"secret"}
+{"seq":281474976710043,"kind":"mark","flags":2,"t":1794300010,"text":"D;0","exit":0}
+{"seq":281474976710044,"kind":"mark","flags":0,"t":1794300015,"text":"A"}
+{"seq":281474976710045,"kind":"prompt","flags":0,"t":1794300015,"text":"~/proj $"}
+{"seq":281474976710046,"kind":"mark","flags":0,"t":1794300015,"text":"B"}
+{"seq":281474976710047,"kind":"input","flags":0,"t":1794300015,"text":"echo after"}
+{"seq":281474976710048,"kind":"mark","flags":8,"t":1794300015,"text":"C"}
+{"seq":281474976710049,"kind":"output","flags":0,"t":1794300015,"text":"after"}
+{"seq":281474976710050,"kind":"mark","flags":2,"t":1794300015,"text":"D;0","exit":0}
+{"seq":281474976710051,"kind":"mark","flags":0,"t":1794300020,"text":"A"}
+{"seq":281474976710052,"kind":"prompt","flags":0,"t":1794300020,"text":"~/proj $"}

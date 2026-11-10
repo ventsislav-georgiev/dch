@@ -312,6 +312,8 @@ dch --say <name>...|--all [--json] -- <text...>  # message each Claude Code, bus
 dch --stop <name>...|--all [--json]             # pause Claude, end the session; --revive wakes it
 dch --config [<key> [<value>|--unset]]          # show, read or set the config file
 dch --shell-init zsh|bash|fish                 # OSC 133 prompt marks for your rc file (X-ray)
+dch --xray <n> --json                           # a session's chapters (prompts / commands) as one JSON object
+dch --xray <n> --clear --json                   # empty a shell session's X-ray ring
 dch --agent-list [--json]                       # native Claude peers
 dch --agent-send <peer> <message...>            # message one (from a Codex session)
 ```
@@ -352,6 +354,7 @@ someone is watching is invisible to them.
 | Verb | Does | Exit codes |
 | --- | --- | --- |
 | `--spawn <n> [--size CxR] [--env K=V]... [cmd...]` | Start headless session (default: `$SHELL`, 80x24 or `$COLUMNS`/`$LINES`). `--env` (max 32, first `=` splits) adds variables to the child; reserved keys (`DCH_SESSION`, `TERM` fixup) always win. Like `--revive` (and a plain `dch <new>`), it drops the calling Claude Code session's identity (`CLAUDECODE`, `CLAUDE_CODE_*` session vars), plus `GIT_EDITOR` and the other harness vars when `CLAUDECODE` is set, and sets `FORCE_HYPERLINK=1` unless the caller has it (dch keeps OSC 8 links, but under `TERM=xterm-256color` with no `TERM_PROGRAM` Claude Code would strip its statusline's); an explicit `--env` still wins. Prints the name. A program that cannot be executed is an error (`dch: <n>: <cmd>: <reason>`); one that runs and exits at once is not. | 0 ok, 1 exists/failed/not executable/bad --env |
+| `--xray <n> --json` | One JSON object: the session's corpus and chapters (see [X-ray queries](#x-ray-queries---xray)). `--clear` empties a shell's ring instead. Must be the first argument. | 0 ok, 1 no such session/ambiguous/no corpus, 2 usage, 3 read failure |
 | `--send <n> <text...>` | Type text (joined with spaces), no enter. | 0 ok |
 | `--run <n> <text...>` | `--send` + enter. Into a session whose Claude Code runs — as its command or typed into its shell — the text goes through `--say`'s composer gate instead: typed only over an empty composer, Enter pressed once it shows and again while it stays (Claude Code folds an Enter sent with the text into the paste). A `/command` is typed raw, a message pasted. A shell or any other program, a master without a mirror (`DCH_NO_VT`), dch-lite and your own session (`$DCH_SESSION`) keep the plain burst. A gate failure prints `dch: <n>: <reason> — <why>` on stderr: `prompt` and `draft` (nothing typed), `not_typed` (the text never showed in the composer, no Enter), `not_submitted` (it stayed there through every Enter); `no_screen` when the composer is not on screen. | 0 ok, 1 gate failure |
 | `--keys <n> <key...>` | Encode+send keys mode-aware: `ctrl+c`, `alt+x`, `shift+tab`, `up`, `f5`, `enter`, `esc`, single chars. | 0 ok, 1 unknown key |
@@ -778,6 +781,86 @@ OSC 133 needs none of this. A command block counts as typed only if client
 input (keystrokes, `--send`, `--keys`) reached the pty between its `B` and its
 `C`. A program that prints a fake prompt and command in one burst gets no
 credit for it.
+
+### X-ray queries (`--xray`)
+
+`dch --xray <n> --json` prints one JSON object about session `<n>`: its
+corpus and a chapter per prompt. It runs entirely in the calling process. No
+master parses anything, nothing is written to disk and nothing is shelled out.
+
+`<n>` is one of these (checked in this order):
+- an agent UUID (36 characters of `0-9a-f-`): the live session whose Claude
+  Code has that session id, else the newest ended History record carrying
+  it;
+- a History record name, `<file>.json`: that record, even when a new session
+  has taken its name since. A value that is also a live session's name, or a
+  record's, is refused as ambiguous;
+- a session name: the live session, else that name's newest ended record.
+
+`host:name` (remote sessions) is not supported yet: it exits 2. Over
+`dch serve`'s ctl, `--xray` still answers `xray not supported by this host`.
+
+The corpus:
+- **Claude Code.** The chapters come from the session's transcript
+  (`<config>/projects/<dir>/<session id>.jsonl`). The file is found by one
+  directory listing and must be the only regular file of that name.
+  - It is opened with `O_NOFOLLOW` and must still be the file the lookup
+    saw.
+  - It is read in 4 MiB chunks: the first 16 MiB and the newest 256 MiB.
+    Past that, `complete` is `false` with `why: "range"`.
+- **Shell.** The chapters come from the [ring](#shell-output-ring-x-ray)'s
+  OSC 133 marks: one per typed command block (`A`, `B`, then `C` with client
+  input before it and a non-blank command). Without marks there are no
+  chapters (`mentions_only: true`).
+- **None.** An ended or History shell (`reason: "ended"`), dch-lite
+  (`"lite"`), `xray_ring 0` (`"off"`), or a Claude session whose transcript is
+  gone (`reason: null`).
+
+```json
+{"schema":1,"session":"api","session_id":"0b1f6a52-4c1e-4d7a-9a51-2f6d8c3e7a10",
+ "live":true,"corpus":"claude","reason":null,"available":true,
+ "mentions_only":false,"lines":null,"complete":true,"why":null,
+ "project":"-home-me-api","project_label":"/home/me/api","other_projects":0,
+ "chapters":[{"anchor":"f3a41c:0","offset":0,"i":1,"at":1794304860,
+   "title":"Fix the flaky build","kind":"prompt","partial":false,"error":true}],
+ "chapters_evicted":false,"refs":[],"dropped_keys":0}
+```
+
+(Printed on one line.)
+- **`session_id`.** The agent UUID for Claude Code, the ring's id (`m` + 16
+  hex) for a live shell, and the record name for an ended shell.
+- **Chapters.** Oldest first; at most 5000 (the newest).
+  - `anchor` is opaque: `f<inode>:<offset>` for Claude Code,
+    `s<seq of the prompt record>` for a shell.
+  - `kind` is `prompt`, `command` or `compact`.
+  - `title` is at most 120 Unicode scalars.
+- **`refs`.** Always `[]` in this release.
+- **Size.** The object is capped at 4 MiB: past that, the oldest chapters go
+  and `why` is `"output"`.
+
+`dch --xray <n> --clear --json` empties a live shell session's ring through
+the master's control socket. Nothing is typed into the session. It prints
+`{"schema":1,"session","session_id","corpus","ring_cleared"}`.
+- **Resolution.** Here `<n>` is first matched as a live ring's exact
+  `session_id`, then as a name.
+- **Agent sessions.** A Claude Code session has no ring:
+  `ring_cleared: false`.
+- **Failures.** An ended session or a History record exits 1 with
+  `dch: no such session`. A dch-lite master exits 1 with
+  `dch: no x-ray corpus`.
+
+No new session or rename takes a name of exactly `m` + 16 lowercase hex,
+because that is a ring `session_id`. `-n`, `--spawn`, `--revive --as`, `-m`,
+the pickers' rename, and `dch serve`'s create and rename all refuse it with
+exit 2 and `dch: name looks like a session_id`. A session that already has
+such a name keeps it.
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | the object was printed |
+| 1 | `dch: no such session`, `dch: ambiguous session`, `dch: no x-ray corpus` (`--clear`) |
+| 2 | bad usage: `--json` missing, a flag twice, a flag of a later release (`--ref`, `--follow`, `--chapter`, ...), `--xray` not first, a bad or remote `<n>` |
+| 3 | the session answered garbage, or the transcript could not be read |
 
 ### Auto-allow
 

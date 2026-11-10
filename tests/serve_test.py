@@ -406,6 +406,26 @@ def main():
               t == 0x10 and "svc-made" in sessions())
         s.close()
 
+        # --- INFO-2 (#120): no new session takes a session_id's shape ----
+        for typ in (0x01, 0x02):
+            s = conn(port)
+            send(s, typ, {"name": "m0123456789abcdef", "cols": 80,
+                          "rows": 24})
+            t, pl = frame_not(s)
+            check("%s refuses a name shaped like a session_id"
+                  % ("attach-or-create" if typ == 1 else "create"),
+                  t == 0x13 and "looks like a session_id" in
+                  json.loads(pl)["message"] and
+                  "m0123456789abcdef" not in sessions())
+            s.close()
+        s = conn(port)
+        send(s, 0x06, {"name": "svc-made", "alias": "m0123456789abcdef"})
+        t, pl = frame_not(s)
+        check("0x06 rename refuses an alias shaped like a session_id",
+              t == 0x13 and "looks like a session_id" in
+              json.loads(pl)["message"])
+        s.close()
+
         # --- create with a command, exit code ----------------------------
         s = conn(port)
         send(s, 0x02, {"name": "svc-create", "cols": 80, "rows": 24,

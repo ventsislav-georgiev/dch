@@ -34,6 +34,7 @@
 */
 #include "dtach.h"
 #include "rframe.h"
+#include "xray.h"
 
 #include <arpa/inet.h>
 #include <ctype.h>
@@ -983,6 +984,13 @@ on_attach(struct conn *c, int create, const unsigned char *p, size_t n)
 		out_err(c, name[0] == '-' ? DASH_MSG : "invalid session name");
 		return;
 	}
+	/* INFO-2 (#120): a new session never takes a session_id's shape */
+	if (name[0] && xr_id_shaped(name) && session_listed(name) != 1)
+	{
+		dch_json_free(&jp);
+		out_err(c, "name looks like a session_id");
+		return;
+	}
 	/* `dch -n` attaches or creates. With create off, a phone must not
 	** start a shell under a name of its choosing: attach only to a
 	** session that is listed. ponytail: a session ending between this
@@ -1117,7 +1125,8 @@ on_snapshot(struct conn *c)
 }
 
 /* 0x04 kill, 0x06 rename: always an empty 0x14 (dch's result is not
-** reported), but for a name starting with '-'. */
+** reported), but for a name starting with '-' or an alias shaped like a
+** session_id (INFO-2). */
 static void
 on_kill_rename(struct conn *c, int kill_, const unsigned char *p, size_t n)
 {
@@ -1135,6 +1144,11 @@ on_kill_rename(struct conn *c, int kill_, const unsigned char *p, size_t n)
 	if (r == 1 && name[0] == '-')
 	{
 		out_err(c, DASH_MSG);
+		return;
+	}
+	if (!kill_ && ra == 1 && xr_id_shaped(alias))
+	{
+		out_err(c, "name looks like a session_id");	/* INFO-2 */
 		return;
 	}
 	if (r == 1 && name_ok(name) && ra >= 0)

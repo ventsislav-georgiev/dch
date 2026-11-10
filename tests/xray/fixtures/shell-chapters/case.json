@@ -1,0 +1,1 @@
+{"schema":1,"about":"OSC 133 chapters: anchored on the prompt record; a wrapped command; C;<cmd> text; a redraw A; an exit != 0; no chapter for an empty command, a C without B, a secondary prompt, a forged block (no client input between B and C) or the open prompt","session":"box","argv":[["--xray","box","--json"]],"display_only":[]}

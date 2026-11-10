@@ -93,6 +93,11 @@ dch \- detachable terminal sessions with a headless agent API
 .B dch \-\-shell\-init
 .BR zsh | bash | fish
 .br
+.B dch \-\-xray
+.I name
+.RB [ \-\-clear ]
+.B \-\-json
+.br
 .B dch
 .RB [ \-\-host
 .IR host ]
@@ -562,6 +567,89 @@ then 80x24. Prints the session name. Exits 1 if the session exists or
 cannot be executed (the error is printed); a
 .I cmd
 that runs and exits at once is still a successful spawn.
+.TP
+.BI \-\-xray " name " "" \fR[\fB\-\-clear\fR]\fP " \-\-json"
+X\-ray: print one JSON object
+.RB ( schema:1 )
+about session
+.IR name :
+its corpus (\fBclaude\fR, \fBshell\fR or \fBnone\fR, with a
+.BR reason :
+.BR ended ,
+.B lite
+or
+.BR off )
+and its chapters, one per prompt, oldest first, at most 5000.
+Each chapter has an opaque
+.BR anchor ,
+an
+.BR offset ,
+.BR at ,
+a
+.B title
+(at most 120 Unicode scalars),
+.B kind
+.RB ( prompt ,
+.B command
+or
+.BR compact ),
+.B partial
+and
+.BR error .
+.B refs
+is always empty in this release.
+Must be the first argument; every other flag exits 2.
+.I name
+is an agent UUID (the live session whose Claude Code has it, else the
+newest ended History record carrying it), a History record name
+.I file\fB.json\fP
+(that record, even when a new session took its name), or a session name
+(the live session, else its newest ended record).
+A Claude Code session's chapters come from its transcript, found by one
+directory listing and opened with
+.BR O_NOFOLLOW ;
+it is read as its first 16 MiB and its newest 256 MiB, and past that
+.B complete
+is false with
+.BR why:\(dqrange\(dq .
+A shell's chapters come from its ring's OSC 133 marks: one per typed command
+block (\fBA\fR, \fBB\fR, client input, \fBC\fR, a non-blank command).
+The object is capped at 4 MiB (the oldest chapters go,
+.BR why:\(dqoutput\(dq ).
+Nothing is written to disk and nothing is shelled out.
+With
+.BR \-\-clear ,
+empty a live shell session's ring through its control socket (nothing is
+typed into the session) and print
+.BR {\(dqschema\(dq:1,\(dqsession\(dq,\(dqsession_id\(dq,\(dqcorpus\(dq,\(dqring_cleared\(dq} ;
+.I name
+is first matched as a live ring's exact session_id (\fBm\fR + 16 hex),
+then as a name.
+A Claude Code session has no ring
+.RB ( ring_cleared:false ).
+Exits 1
+.I "no such session"
+(also for an ended session or a record with
+.BR \-\-clear ),
+.I "ambiguous session"
+or, for
+.B \-\-clear
+in dch\-lite,
+.IR "no x\-ray corpus" ;
+2 bad usage or a bad or remote
+.IR name ;
+3 the session or its transcript could not be read.
+No new session or rename takes a name of exactly
+.B m
++ 16 lowercase hex digits (a session_id):
+.BR \-n ,
+.BR \-\-spawn ,
+.BR "\-\-revive \-\-as" ,
+.BR \-m ,
+the pickers' rename and
+.BR "dch serve" 's
+create and rename refuse it with exit 2 and
+.IR "name looks like a session_id" .
 .TP
 .BI \-\-send " name text..."
 Type

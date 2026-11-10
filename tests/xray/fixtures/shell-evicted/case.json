@@ -1,0 +1,1 @@
+{"schema":1,"about":"Older prompt records evicted (ring status CHAPTERS): chapters_evicted:true, complete:false, why:\"range\"","session":"box","argv":[["--xray","box","--json"]],"display_only":[]}

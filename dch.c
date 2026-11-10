@@ -10,6 +10,9 @@
 */
 #include "dtach.h"
 #include "picker.h"
+#include "rframe.h"
+#include "ring.h"
+#include "xray.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -76,7 +79,7 @@ write_buf_or_fail(int fd, const void *buf, size_t count)
 }
 
 /* Payload byte count carried on the wire for a packet, derived from type.
-** PUSH/KEYS/READ/WAIT/RESTART/RESPAWN = pkt->len bytes; WINCH/REDRAW = a
+** PUSH/KEYS/READ/WAIT/RESTART/RESPAWN/CMD/RING_READ = pkt->len bytes; WINCH/REDRAW = a
 ** winsize; ATTACH/DETACH/CMD = none. */
 size_t
 packet_payload_len(const struct packet *pkt)
@@ -84,7 +87,7 @@ packet_payload_len(const struct packet *pkt)
 	if (pkt->type == MSG_PUSH || pkt->type == MSG_KEYS ||
 	    pkt->type == MSG_READ || pkt->type == MSG_WAIT ||
 	    pkt->type == MSG_RESTART || pkt->type == MSG_RESPAWN ||
-	    pkt->type == MSG_CMD)
+	    pkt->type == MSG_CMD || pkt->type == MSG_RING_READ)
 		return pkt->len;
 	if (pkt->type == MSG_WINCH || pkt->type == MSG_REDRAW)
 		return sizeof(struct winsize);
@@ -2002,6 +2005,18 @@ load_codex_names(struct slist *sl)
 		(void)each_pid(load_codex_pid, sl);
 }
 
+/* INFO-2 (#120): no new session or rename takes a name shaped like a live
+** shell's session_id ("m" + 16 lowercase hex), so `--xray <id> --clear`
+** never meets a name that shadows an id. 1, the line printed, when refused. */
+static int
+refuse_id_name(const char *name)
+{
+	if (!xr_id_shaped(name))
+		return 0;
+	fputs("dch: name looks like a session_id\n", stderr);
+	return 1;
+}
+
 /* Write (or clear, when alias is empty) the sidecar for `name`. At most
 ** the 599 bytes the master reads into its record, cut on a character
 ** boundary (callers cut by bytes). */
@@ -2012,6 +2027,8 @@ write_alias(const char *name, const char *alias)
 	size_t n = alias ? strlen(alias) : 0;
 
 	n = dch_utf8_trim(alias, n > 599 ? 599 : n);
+	if (n && xr_id_shaped(alias))
+		return -2;
 	if (alias_path(name, ap, sizeof(ap)) < 0)
 		return -1;
 	if (!n)
@@ -2286,18 +2303,24 @@ rename_sessions_interactive(void)
 		if (c == '\r' || c == '\n')
 		{
 			char prompt[700], in[600];
+			int refused = 0;
+
 			picker_erase(fd, prev_lines);
 			snprintf(prompt, sizeof(prompt),
 			         "new name for '%s' (empty=clear): ", sl.v[sel]);
 			if (prompt_line(fd, prompt, in, sizeof(in)) == 0)
 			{
 				sanitize(in);
-				write_alias(sl.v[sel], in);
-				free(sl.alias[sel]);
-				sl.alias[sel] = in[0] ? strdup(in) : NULL;
+				refused = write_alias(sl.v[sel], in) == -2;
+				if (!refused)
+				{
+					free(sl.alias[sel]);
+					sl.alias[sel] = in[0] ? strdup(in) : NULL;
+				}
 			}
 			picker_raw_on(fd);
-			tw(fd, "\033[2K\r");
+			tw(fd, refused ? "\033[2K\rdch: name looks like a "
+			   "session_id\r\n" : "\033[2K\r");
 			drawn = 0; /* redraw fresh, nothing to erase */
 			continue;
 		}
@@ -2663,6 +2686,9 @@ usage(void)
 	    "  dch --shell-init zsh|bash|fish             print OSC 133 prompt\n"
 	    "                                             hooks for your rc file\n"
 	    "                                             (X-ray's command marks)\n"
+	    "  dch --xray <n> [--clear] --json            a session's chapters as\n"
+	    "                                             one JSON object; --clear\n"
+	    "                                             empties a shell's ring\n"
 	    "  dch --agent-list [--json]                  list native Claude peers\n"
 	    "  dch --agent-send <name> <message...>       message one native peer\n"
 	    "  dch serve [--allow-create] [--allow-user <u>]...  serve sessions to\n"
@@ -2927,6 +2953,14 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 
 	if (make_sock_path(session_name) < 0)
 		return 1;
+	if (!attach_only && xr_id_shaped(session_name))
+	{
+		int probe = control_connect_path(sock_path);
+
+		if (probe < 0 && refuse_id_name(session_name))
+			exit(2);	/* not 2 returned: that is ATTACH_SWITCH */
+		close(probe);
+	}
 	{
 		struct stat st;
 
@@ -3143,7 +3177,8 @@ ctl_next_frame(int s, struct ctl_reader *r, int idle_ms,
 			     r->buf[0] == MSG_WAIT_HIT ||
 			     r->buf[0] == MSG_READ_CURSOR ||
 			     r->buf[0] == MSG_READ_META ||
-			     r->buf[0] == MSG_CMD_STAT) ? flen : 0;
+			     r->buf[0] == MSG_CMD_STAT ||
+			     r->buf[0] == MSG_RING_HDR) ? flen : 0;
 
 			if (plen > PKT_MAX)
 				return -1; /* corrupt */
@@ -5309,6 +5344,8 @@ do_spawn_verb(char *exe, const char *name, int cols, int rows,
 	struct stat st;
 	int s, rc;
 
+	if (refuse_id_name(name))
+		return 2;
 	if (make_sock_path(name) < 0)
 		return 1;
 	if (stat(sock_path, &st) == 0 && S_ISSOCK(st.st_mode))
@@ -6074,6 +6111,30 @@ stop_end(const char *name, const char *path, long mpid,
 	return NULL;
 }
 
+/* A process's cwd (the agent verbs, and --xray's live-shell label) */
+static int
+proc_cwd(long pid, char *out, size_t outsz)
+{
+#ifdef __APPLE__
+	struct proc_vnodepathinfo vi;
+
+	if (proc_pidinfo((int)pid, PROC_PIDVNODEPATHINFO, 0, &vi, sizeof vi)
+	    != (int)sizeof vi)
+		return -1;
+	snprintf(out, outsz, "%s", vi.pvi_cdir.vip_path);
+#else
+	char p[64];
+	ssize_t n;
+
+	snprintf(p, sizeof p, "/proc/%ld/cwd", pid);
+	n = readlink(p, out, outsz - 1);
+	if (n <= 0)
+		return -1;
+	out[n] = '\0';
+#endif
+	return 0;
+}
+
 #ifdef HAVE_LIBGHOSTTY_VT
 
 #define AG_POLL_MS  250
@@ -6131,29 +6192,6 @@ struct agent
 	struct dch_agent ag;	/* probed right before /exit */
 	const char *res, *code;	/* the result, when not by failed/step */
 };
-
-static int
-proc_cwd(long pid, char *out, size_t outsz)
-{
-#ifdef __APPLE__
-	struct proc_vnodepathinfo vi;
-
-	if (proc_pidinfo((int)pid, PROC_PIDVNODEPATHINFO, 0, &vi, sizeof vi)
-	    != (int)sizeof vi)
-		return -1;
-	snprintf(out, outsz, "%s", vi.pvi_cdir.vip_path);
-#else
-	char p[64];
-	ssize_t n;
-
-	snprintf(p, sizeof p, "/proc/%ld/cwd", pid);
-	n = readlink(p, out, outsz - 1);
-	if (n <= 0)
-		return -1;
-	out[n] = '\0';
-#endif
-	return 0;
-}
 
 /* Length of the escape sequence at p (p[0] == ESC): CSI up to its final
 ** byte, OSC up to BEL or ST, else ESC + intermediates + one final byte. */
@@ -8472,6 +8510,7 @@ static void
 pk_rename(struct pk *p, int fd, const struct pkrow *w)
 {
 	char q[700], in[600], pos[32], *c;
+	int rc;
 
 	snprintf(pos, sizeof pos, "\033[%d;1H", p->status_row);
 	tw(fd, pos);
@@ -8481,7 +8520,10 @@ pk_rename(struct pk *p, int fd, const struct pkrow *w)
 		for (c = in; *c; c++)
 			if ((unsigned char)*c < 0x20 || *c == 0x7f)
 				*c = ' ';
-		if (write_alias(w->name, in) < 0)
+		if ((rc = write_alias(w->name, in)) == -2)
+			snprintf(p->status, sizeof p->status, "%s: name looks like "
+			         "a session_id", w->name);
+		else if (rc < 0)
 			snprintf(p->status, sizeof p->status, "%s: rename failed",
 			         w->name);
 		else
@@ -9131,7 +9173,7 @@ rv_cfg(const char *cfg, char **v, int tok)
 {
 	int k;
 
-	for (k = 0; *cfg && k < tok; k++)
+	for (k = 0; *cfg && v && k < tok; k++)
 		if (strncmp(v[k], "CLAUDE_CONFIG_DIR=", 18) == 0)
 			return NULL;
 	return *cfg ? cfg : NULL;
@@ -9943,6 +9985,671 @@ master_print(const char *name, int rc, int all, int json)
 	           : "not restarted (see stderr)", "");
 }
 
+/* ---- dch --xray (#120, XR1b) ----------------------------------------- */
+
+/* The one ring client (XR1a's MSG_RING_READ, dtach.h): every record from the
+** head to the tail, read in DCH_RING_READ_MAX replies. */
+#define RING_BUSY_TRIES 50
+
+struct ring_snap
+{
+	unsigned status;	/* DCH_RING_S_* of every reply, or'ed */
+	uint32_t epoch;
+	char sid[18];
+	int seqgap;		/* a later reply did not start where we asked */
+	unsigned char *data;	/* every record, back to back */
+	size_t dl;
+	struct xr_rec *r;
+	size_t n;
+};
+
+static void
+ring_snap_free(struct ring_snap *rs)
+{
+	free(rs->data);
+	free(rs->r);
+	memset(rs, 0, sizeof *rs);
+}
+
+static uint64_t
+le64(const unsigned char *p)
+{
+	uint64_t v = 0;
+	int k;
+
+	for (k = 7; k >= 0; k--)
+		v = v << 8 | p[k];
+	return v;
+}
+
+/* 0, rs filled; -1 nothing listens; -2 the master does not answer the op
+** (it predates #119); -3 a malformed or failed reply. */
+static int
+ring_fetch(const char *path, struct ring_snap *rs)
+{
+	unsigned char req[13], payload[PKT_MAX], type, hdr[DCH_RING_HDR_LEN];
+	struct ctl_reader r = {0};
+	unsigned int len;
+	uint64_t seq = 0, first, tail;
+	uint32_t count;
+	int s, rc, k, tries = 0, replies = 0, have_hdr;
+
+	memset(rs, 0, sizeof *rs);
+	if ((s = control_connect_path(path)) < 0)
+		return -1;
+	for (;;)
+	{
+		size_t base = rs->dl;
+
+		for (k = 0; k < 8; k++)
+			req[k] = (unsigned char)(seq >> (8 * k));
+		req[8] = (unsigned char)DCH_RING_READ_MAX;
+		req[9] = (unsigned char)(DCH_RING_READ_MAX >> 8);
+		req[10] = (unsigned char)(DCH_RING_READ_MAX >> 16);
+		req[11] = (unsigned char)(DCH_RING_READ_MAX >> 24);
+		req[12] = 0;
+		send_ctl(s, MSG_RING_READ, req, sizeof req);
+		have_hdr = 0;
+		for (;;)
+		{
+			rc = ctl_next_frame(s, &r, CTL_IDLE_MS, &type, payload, &len);
+			if (rc <= 0)
+			{
+				close(s);
+				return replies || r.got_any ? -3 : -2;
+			}
+			if (type == MSG_RING_HDR && len == DCH_RING_HDR_LEN)
+			{
+				memcpy(hdr, payload, sizeof hdr);
+				have_hdr = 1;
+			}
+			else if (type == MSG_READ_DATA && have_hdr && len)
+			{
+				unsigned char *nd = realloc(rs->data, rs->dl + len);
+
+				if (!nd)
+				{
+					close(s);
+					return -3;
+				}
+				rs->data = nd;
+				memcpy(rs->data + rs->dl, payload, len);
+				rs->dl += len;
+			}
+			else if (type == MSG_READ_END || type == MSG_ACK)
+				break;
+			else if (type != MSG_RING_WAKE)
+			{
+				close(s);
+				return -3;
+			}
+		}
+		if (type == MSG_ACK || len == DCH_ST_UNSUP)
+		{
+			close(s);
+			return -2;
+		}
+		if (len == DCH_ST_BUSY && ++tries < RING_BUSY_TRIES)
+		{
+			rs->dl = base;
+			poll(NULL, 0, 20);
+			continue;
+		}
+		if (len != DCH_ST_OK || !have_hdr)
+		{
+			close(s);
+			return -3;
+		}
+		replies++;
+		tail = le64(hdr + 9);
+		first = le64(hdr + 17);
+		count = (uint32_t)hdr[25] | (uint32_t)hdr[26] << 8 |
+		        (uint32_t)hdr[27] << 16 | (uint32_t)hdr[28] << 24;
+		if (replies == 1)
+		{
+			rs->epoch = le64(hdr + 29) & 0xffffffffu;
+			memcpy(rs->sid, hdr + 33, 17);
+			rs->sid[17] = '\0';
+		}
+		else
+		{
+			/* the first read asks from 0 and lands on the head; a
+			** later one that lands elsewhere lost records */
+			if ((hdr[0] & DCH_RING_S_RANGE) || first != seq)
+				rs->seqgap = 1;
+			if ((le64(hdr + 29) & 0xffffffffu) != rs->epoch)
+				rs->seqgap = 1;	/* cleared mid-read */
+		}
+		rs->status |= hdr[0] & (unsigned)~DCH_RING_S_RANGE;
+		if (hdr[0] & DCH_RING_S_OFF)
+			break;
+		/* index this reply's records, bounds-checked */
+		{
+			size_t off = base;
+			uint32_t got = 0;
+
+			while (off + 8 <= rs->dl)
+			{
+				size_t l = (size_t)rs->data[off] |
+				           (size_t)rs->data[off + 1] << 8;
+				struct xr_rec *nr;
+
+				if (off + 8 + l > rs->dl ||
+				    !(nr = realloc(rs->r, (rs->n + 1) * sizeof *nr)))
+					break;
+				rs->r = nr;
+				nr[rs->n].seq = first + got;
+				nr[rs->n].kind = rs->data[off + 2];
+				nr[rs->n].flags = rs->data[off + 3];
+				nr[rs->n].t = (uint32_t)rs->data[off + 4] |
+				              (uint32_t)rs->data[off + 5] << 8 |
+				              (uint32_t)rs->data[off + 6] << 16 |
+				              (uint32_t)rs->data[off + 7] << 24;
+				nr[rs->n].len = l;
+				nr[rs->n].text = NULL;	/* set once data stops moving */
+				rs->n++;
+				got++;
+				off += 8 + l;
+			}
+			if (off != rs->dl || got != count)
+			{
+				close(s);
+				return -3;	/* a torn record: never skipped */
+			}
+		}
+		if (!count || first + count >= tail)
+			break;
+		seq = first + count;
+	}
+	close(s);
+	{
+		size_t off = 0, i;
+
+		for (i = 0; i < rs->n; i++)
+		{
+			rs->r[i].text = (const char *)rs->data + off + 8;
+			off += 8 + rs->r[i].len;
+		}
+	}
+	return 0;
+}
+
+/* The live Claude under a session's child, as --ls-json joins it: exactly
+** one record, uuid-shaped. 1 with *c, else 0. ci: the MSG_CMD answer. */
+static int
+xr_live_claude(const struct cmd_info *ci, struct crec *c)
+{
+	return ci->pid > 0 && strcmp(ci->state, "held") != 0 &&
+	       claude_find(ci->pid, 1, c) == 1 && xr_uuid_shaped(c->sid);
+}
+
+/* <cfg> of a live Claude: its record's <cfg>/sessions/<pid>.json. */
+static void
+xr_crec_cfg(const struct crec *c, char *cfg, size_t cfgsz)
+{
+	char *s;
+	int k;
+
+	snprintf(cfg, cfgsz, "%s", c->rec);
+	for (k = 0; k < 2 && (s = strrchr(cfg, '/')); k++)
+		*s = '\0';
+	if (k < 2)
+		cfg[0] = '\0';
+}
+
+enum { XR_NONE, XR_LIVE, XR_ENDED };
+
+struct xr_target
+{
+	int kind;
+	char name[600];		/* the session, host-local */
+	char sock[1100];
+	const struct hrec *rec;	/* XR_ENDED */
+};
+
+static int
+xr_no_session(void)
+{
+	fputs("dch: no such session\n", stderr);
+	return 1;
+}
+
+/* The live session whose Claude has this id; 1 with t filled. */
+static int
+xr_by_agent(const char *id, struct xr_target *t)
+{
+	struct slist sl = {0};
+	int k, hit = 0;
+
+	list_sessions(&sl);
+	for (k = 0; k < sl.n && !hit; k++)
+	{
+		struct cmd_info ci;
+		struct crec c;
+
+		session_sock_path(sl.v[k], t->sock, sizeof t->sock);
+		if (cmd_query(t->sock, &ci) != 0)
+			continue;
+		if (xr_live_claude(&ci, &c) && strcmp(c.sid, id) == 0)
+		{
+			snprintf(t->name, sizeof t->name, "%s", sl.v[k]);
+			t->kind = XR_LIVE;
+			hit = 1;
+		}
+		cmd_info_free(&ci);
+	}
+	slist_free(&sl);
+	return hit;
+}
+
+/* The live session whose ring session_id this is (--clear only). */
+static int
+xr_by_session_id(const char *id, struct xr_target *t)
+{
+	struct slist sl = {0};
+	int k, hit = 0;
+
+	list_sessions(&sl);
+	for (k = 0; k < sl.n && !hit; k++)
+	{
+		struct ring_snap rs;
+
+		session_sock_path(sl.v[k], t->sock, sizeof t->sock);
+		if (ring_fetch(t->sock, &rs) == 0 && strcmp(rs.sid, id) == 0)
+		{
+			snprintf(t->name, sizeof t->name, "%s", sl.v[k]);
+			t->kind = XR_LIVE;
+			hit = 1;
+		}
+		ring_snap_free(&rs);
+	}
+	slist_free(&sl);
+	return hit;
+}
+
+/* 3.1's resolution. 0 with t; else the exit code, its line printed.
+** clear: --clear's, which takes only a live session. */
+static int
+xr_resolve(const char *n, const struct hrec *r, int nr, int clear,
+           struct xr_target *t)
+{
+	char cb[256];
+	const char *stem, *why;
+	int byfile, k;
+
+	memset(t, 0, sizeof *t);
+	/* INFO-2: an exact live session_id first, then names, so a legacy
+	** session named like an id never shadows a live id */
+	if (clear && xr_id_shaped(n) && xr_by_session_id(n, t))
+		return 0;
+	if (xr_uuid_form(n))
+	{
+		if (xr_by_agent(n, t))
+			return 0;
+		for (k = 0; !clear && k < nr; k++)
+			if (!r[k].live && strcmp(r[k].sid, n) == 0)
+			{
+				t->kind = XR_ENDED;
+				t->rec = &r[k];
+				snprintf(t->name, sizeof t->name, "%s", r[k].name);
+				return 0;
+			}
+		return xr_no_session();
+	}
+	if (xr_record_form(n))
+	{
+		/* a .json value that is also a session's name: refused */
+		if (name_live(n) || ((why = rec_arg(n, r, nr, cb, sizeof cb,
+		                                    &stem, &byfile)) &&
+		                     *why == 'a'))
+		{
+			fputs("dch: ambiguous session\n", stderr);
+			return 1;
+		}
+		if (why)
+			return xr_no_session();
+		for (k = 0; k < nr; k++)
+			if (rec_hit(&r[k], n, stem, 1))
+			{
+				if (r[k].live)
+				{
+					t->kind = XR_LIVE;
+					snprintf(t->name, sizeof t->name, "%s", r[k].name);
+					session_sock_path(r[k].name, t->sock,
+					                  sizeof t->sock);
+					return 0;
+				}
+				if (clear)
+					break;
+				t->kind = XR_ENDED;
+				t->rec = &r[k];
+				snprintf(t->name, sizeof t->name, "%s", r[k].name);
+				return 0;
+			}
+		return xr_no_session();
+	}
+	if (name_live(n))
+	{
+		t->kind = XR_LIVE;
+		snprintf(t->name, sizeof t->name, "%s", n);
+		session_sock_path(n, t->sock, sizeof t->sock);
+		return 0;
+	}
+	if (clear)
+		return xr_no_session();
+	stem = canon_name(n, cb, sizeof cb);
+	for (k = 0; k < nr; k++)	/* newest first: the newest ended one */
+		if (!r[k].live && rec_hit(&r[k], n, stem, 0))
+		{
+			t->kind = XR_ENDED;
+			t->rec = &r[k];
+			snprintf(t->name, sizeof t->name, "%s", r[k].name);
+			return 0;
+		}
+	return xr_no_session();
+}
+
+/* Claude chapters for (cfg, sid) into a; 0, -1 no transcript, -2 a read
+** failure (exit 3). */
+static int
+xr_claude_answer(const char *cfg, const char *sid, struct xr_answer *a,
+                 struct xr_chapters *ch, char *project, size_t projectsz,
+                 char *label, size_t labelsz)
+{
+	char path[2048], home[1400];
+	struct xr_claude *d;
+	struct stat st;
+	int fd, capped = 0, rc;
+
+	if (!cfg[0])
+	{
+		const char *h = getenv("HOME");
+
+		if (!h || snprintf(home, sizeof home, "%s/.claude", h)
+		    >= (int)sizeof home)
+			return -1;
+		cfg = home;
+	}
+	if (xr_claude_lookup(cfg, sid, path, sizeof path, &st, project,
+	                     projectsz) < 0 ||
+	    (fd = xr_seam_open(path, &st)) < 0)
+		return -1;
+	if (!(d = xr_claude_new()))
+	{
+		close(fd);
+		return -2;
+	}
+	rc = xr_claude_read(d, fd, (uint64_t)st.st_size, &capped);
+	close(fd);
+	xr_claude_end(d, (uint64_t)st.st_ino, ch);
+	if (xr_claude_cwd(d)[0])
+		snprintf(label, labelsz, "%s", xr_claude_cwd(d));
+	xr_claude_free(d);
+	if (rc < 0)
+	{
+		xr_chapters_free(ch);
+		return -2;
+	}
+	a->corpus = "claude";
+	a->available = 1;
+	a->complete = !capped && ch->total == ch->n;
+	a->why = a->complete ? NULL : "range";
+	a->chapters_evicted = ch->total != ch->n;
+	a->ch = ch;
+	return 0;
+}
+
+static int
+xr_json(const struct xr_target *t)
+{
+	struct xr_answer a;
+	struct xr_chapters ch = {0};
+	char project[1200] = "", label[PATH_MAX] = "", sid[64] = "", cfg[1400];
+	char recname[400];
+	int rc = 0;
+
+	memset(&a, 0, sizeof a);
+	a.session = t->name;
+	a.session_id = sid;
+	a.corpus = "none";
+	a.lines = -1;
+	a.complete = 1;
+	a.project = project;
+	a.project_label = label;
+	if (t->kind == XR_ENDED)
+	{
+		const struct hrec *h = t->rec;
+
+		snprintf(label, sizeof label, "%s", h->acwd[0] ? h->acwd : h->cwd);
+		if (h->sid[0])
+		{
+			snprintf(sid, sizeof sid, "%s", h->sid);
+			rc = xr_claude_answer(h->acfg, h->sid, &a, &ch, project,
+			                      sizeof project, label, sizeof label);
+		}
+		else
+		{
+			snprintf(recname, sizeof recname, "%s.json", h->file);
+			a.session_id = recname;
+			a.reason = "ended";
+		}
+		if (!project[0])
+			xr_project_key(label, project, sizeof project);
+	}
+	else
+	{
+		struct cmd_info ci;
+		struct crec c;
+		struct ring_snap rs;
+		int qc = cmd_query_f(t->sock, &ci, DCH_CMD_F_STAT), fr;
+
+		a.live = 1;
+		if (qc == -4)
+			return xr_no_session();
+		if (qc == 0 && ci.pid > 0)
+			(void)proc_cwd(ci.pid, label, sizeof label);
+		if (qc == 0 && xr_live_claude(&ci, &c))
+		{
+			snprintf(sid, sizeof sid, "%s", c.sid);
+			if (!label[0] || c.cwd[0])
+				snprintf(label, sizeof label, "%s", c.cwd);
+			xr_crec_cfg(&c, cfg, sizeof cfg);
+			rc = cfg[0] ? xr_claude_answer(cfg, c.sid, &a, &ch, project,
+			                               sizeof project, label,
+			                               sizeof label) : -1;
+		}
+		else if ((fr = ring_fetch(t->sock, &rs)) == 0)
+		{
+			snprintf(sid, sizeof sid, "%s", rs.sid);
+			if (rs.status & DCH_RING_S_OFF)
+			{
+				int novt = 0;
+
+				free(screen_tail(t->sock, &novt));
+				a.reason = novt ? "lite" : "off";
+			}
+			else if (rs.status & DCH_RING_S_PAUSED)
+				;	/* another agent's corpus (Codex: XR3c) */
+			else
+			{
+				int paired, alt;
+				size_t k;
+				long long rows = 0;
+				int gap = rs.seqgap, cont = 0;
+
+				xr_shell_chapters(rs.r, rs.n, &ch, &paired, &alt);
+				for (k = 0; k < rs.n; k++)
+				{
+					if (rs.r[k].kind == RING_K_GAP)
+						gap = 1;
+					else if (rs.r[k].kind != RING_K_MARK)
+						rows++;
+				}
+				for (k = 0; k < rs.n && rs.r[k].kind == RING_K_MARK; k++)
+					;
+				cont = k < rs.n && (rs.r[k].flags & RING_F_CONT);
+				a.corpus = "shell";
+				a.available = 1;
+				a.mentions_only = !paired;
+				a.lines = rows + (qc == 0 && ci.stat ? ci.rows : 0);
+				a.chapters_evicted = (rs.status & DCH_RING_S_CHAPTERS) ||
+				                     ch.total != ch.n;
+				a.ch = &ch;
+				if (alt)
+					a.why = "alt";
+				else if (gap || cont || a.chapters_evicted)
+					a.why = "range";	/* rows gone or lost */
+				a.complete = a.why == NULL;
+			}
+			ring_snap_free(&rs);
+		}
+		else if (fr == -3)
+			rc = -2;
+		/* fr -1/-2: gone, or a master before #119: no corpus */
+		if (qc == 0)
+			cmd_info_free(&ci);
+		if (!project[0])
+			xr_project_key(label, project, sizeof project);
+	}
+	if (rc == -2)
+	{
+		xr_chapters_free(&ch);
+		fputs("dch: X-ray failed on this session\n", stderr);
+		return 3;
+	}
+	a.available = strcmp(a.corpus, "none") != 0;
+	dch_trace("xray json: chapters=%zu seam opened=%lu refused=%lu",
+	          ch.n, xr_seam_opened, xr_seam_refused);
+	rc = xr_print(stdout, &a) == 0 ? 0 : 3;
+	xr_chapters_free(&ch);
+	return rc;
+}
+
+/* --clear: MSG_RING_CLEAR to a live master; never the pty. */
+static int
+xr_clear(const struct xr_target *t)
+{
+	struct cmd_info ci;
+	struct crec c;
+	struct ring_snap rs;
+	struct ctl_reader r = {0};
+	unsigned char payload[PKT_MAX], type;
+	unsigned int len;
+	char sid[64] = "";
+	const char *corpus = "shell";
+	int qc, claude = 0, s, novt = 0, fr, cleared;
+
+	if ((qc = cmd_query(t->sock, &ci)) == -4)
+		return xr_no_session();
+	if (qc == 0 && xr_live_claude(&ci, &c))
+	{
+		claude = 1;
+		corpus = "claude";
+		snprintf(sid, sizeof sid, "%s", c.sid);
+	}
+	if (qc == 0)
+		cmd_info_free(&ci);
+	fr = ring_fetch(t->sock, &rs);
+	if (fr == -1)
+		return xr_no_session();
+	if (fr == 0 && !claude)
+		snprintf(sid, sizeof sid, "%s", rs.sid);
+	if (fr == 0 && (rs.status & DCH_RING_S_OFF))
+		free(screen_tail(t->sock, &novt));
+	if (fr == -2 || novt)
+	{
+		ring_snap_free(&rs);
+		fputs("dch: no x-ray corpus\n", stderr);
+		return 1;
+	}
+	if (fr == -3)
+	{
+		fputs("dch: X-ray failed on this session\n", stderr);
+		return 3;
+	}
+	cleared = !claude && !(rs.status & (DCH_RING_S_OFF | DCH_RING_S_PAUSED));
+	if (!claude && (rs.status & DCH_RING_S_OFF))
+		corpus = "none";
+	ring_snap_free(&rs);
+	if ((s = control_connect_path(t->sock)) < 0)
+		return xr_no_session();
+	send_ctl(s, MSG_RING_CLEAR, NULL, 0);
+	if (ctl_next_frame(s, &r, CTL_IDLE_MS, &type, payload, &len) != 1 ||
+	    type != MSG_ACK || len != DCH_ST_OK)
+	{
+		close(s);
+		fputs("dch: X-ray failed on this session\n", stderr);
+		return 3;
+	}
+	close(s);
+	dch_trace("xray clear: ring_cleared=%d", cleared);
+	fputs("{\"schema\":1,\"session\":", stdout);
+	xr_put_str(stdout, t->name);
+	fputs(",\"session_id\":", stdout);
+	xr_put_str(stdout, sid);
+	printf(",\"corpus\":\"%s\",\"ring_cleared\":%s}\n", corpus,
+	       cleared ? "true" : "false");
+	return fflush(stdout) == 0 && !ferror(stdout) ? 0 : 3;
+}
+
+/* `dch --xray <n> [--json] [--clear]` (spec 3.1): flags in any order, each
+** once; the rest of the family (--ref, --follow, --chapter, the view)
+** comes with XR2-XR5 and exits 2 here. */
+static int
+xray_main(int argc, char **argv)
+{
+	const char *n = NULL;
+	int json = 0, clear = 0, k, rc, nr;
+	struct hrec *r = NULL;
+	struct xr_target t;
+
+	for (k = 0; k < argc; k++)
+	{
+		if (!strcmp(argv[k], "--json") && !json)
+			json = 1;
+		else if (!strcmp(argv[k], "--clear") && !clear)
+			clear = 1;
+		else if (argv[k][0] == '-' && argv[k][1])
+		{
+			fprintf(stderr, "dch: bad usage: %s%s\n", argv[k],
+			        (!strcmp(argv[k], "--json") ||
+			         !strcmp(argv[k], "--clear")) ? " twice"
+			        : " is not an --xray flag of this dch");
+			return 2;
+		}
+		else if (!n)
+			n = argv[k];
+		else
+		{
+			fputs("dch: bad usage: one session per --xray\n", stderr);
+			return 2;
+		}
+	}
+	if (!n || !(name_ok(n) || xr_uuid_form(n) || xr_record_form(n)))
+	{
+		fputs("dch: bad session\n", stderr);
+		return 2;
+	}
+	if (!json)
+	{
+		fputs("dch: bad usage: --json is required (the --xray view "
+		      "comes later)\n", stderr);
+		return 2;
+	}
+	if (name_is_remote(n))
+	{
+		fputs("dch: bad session\nremote sessions (host:name) come with "
+		      "a later dch\n", stderr);
+		return 2;
+	}
+	nr = history_load(&r);
+	rc = xr_resolve(n, r, nr, clear, &t);
+	if (rc == 0)
+		rc = clear ? xr_clear(&t) : xr_json(&t);
+	hrec_free(r, nr);
+	return rc;
+}
+
 /* ---- main ----------------------------------------------------------- */
 
 int
@@ -10037,6 +10744,9 @@ main(int argc, char **argv)
 	/* The Prosper remote-frames server (#073), serve.c. */
 	if (argc >= 2 && strcmp(argv[1], "serve") == 0)
 		return serve_main(argc - 2, argv + 2);
+	/* X-ray (#120): its own flag rules (spec 3.1), so first or never. */
+	if (argc >= 2 && strcmp(argv[1], "--xray") == 0)
+		return xray_main(argc - 2, argv + 2);
 
 	/* A remote control verb (#114) is sent as typed, less --host, --hosts
 	** and --cwd (cskip): argv as it was, since --say and its kin pack it. */
@@ -10481,6 +11191,8 @@ main(int argc, char **argv)
 				fprintf(stderr, "dch: --as needs a session name\n");
 				return 1;
 			}
+			if (refuse_id_name(argv[i]))
+				return 2;
 			snprintf(opt_as, sizeof(opt_as), "%s", argv[i]);
 			i++;
 		}
@@ -10608,6 +11320,13 @@ main(int argc, char **argv)
 		{
 			i++;
 			break;
+		}
+		else if (strcmp(a, "--xray") == 0)
+		{
+			/* xray_main takes it as argv[1] only (spec 3.1) */
+			fputs("dch: bad usage: --xray comes first: dch --xray <n> "
+			      "--json\n", stderr);
+			return 2;
 		}
 		else if (a[0] == '-' && a[1] != '\0')
 		{
@@ -11038,7 +11757,16 @@ main(int argc, char **argv)
 		for (char *p = alias_arg; *p; p++)
 			if (*p == '\t' || *p == '\n' || *p == '\r')
 				*p = ' ';
-		return write_alias(session_name, alias_arg) == 0 ? 0 : 1;
+		switch (write_alias(session_name, alias_arg))
+		{
+		case 0:
+			return 0;
+		case -2:
+			(void)refuse_id_name(alias_arg);
+			return 2;
+		default:
+			return 1;
+		}
 	}
 	case A_LIST:
 	{

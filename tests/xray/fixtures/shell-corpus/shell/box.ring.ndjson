@@ -1,0 +1,7 @@
+{"seq":281474976710000,"kind":"mark","flags":0,"t":1794300000,"text":"A"}
+{"seq":281474976710001,"kind":"prompt","flags":0,"t":1794300000,"text":"~/proj $"}
+{"seq":281474976710002,"kind":"mark","flags":0,"t":1794300000,"text":"B"}
+{"seq":281474976710003,"kind":"input","flags":0,"t":1794300000,"text":"make"}
+{"seq":281474976710004,"kind":"mark","flags":8,"t":1794300000,"text":"C"}
+{"seq":281474976710005,"kind":"output","flags":0,"t":1794300000,"text":"ok"}
+{"seq":281474976710006,"kind":"mark","flags":2,"t":1794300000,"text":"D;0","exit":0}

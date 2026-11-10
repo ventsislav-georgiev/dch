@@ -1014,6 +1014,19 @@ test_resize(void)
 	CHECK("T9j: a resize on the alt screen re-anchors on return",
 	      R.epoch == 0 && !count_kind(RING_K_GAP, NULL) &&
 	      seq_hole(101, 200 - 12) == 0);
+	/* mutant 13: output on the alt screen after the resize must not
+	** anchor there (no history: the ref is lost, and the primary's
+	** history is captured a second time on return) */
+	start(80, 24, 2000);
+	seq_feed(1, 100);
+	feed("\033[?1049h");
+	dch_vt_resize(60, 12);
+	feed("vim\r\n");
+	feed("\033[?1049l");
+	seq_feed(101, 200);
+	CHECK("T9i: no anchor on the alt screen: the pre-alt rows stay once",
+	      count_kind(RING_K_OUTPUT, "50") == 1 &&
+	      seq_hole(101, 200 - 12) == 0);
 }
 
 /* 5: OSC 133 marks land between the right records; C's input flag */
