@@ -713,8 +713,7 @@ running sessions.
 | `detach_key` | `detach` or `switch`: what one `Ctrl-\` press does; two presses do the other (see [Cheatsheet](#cheatsheet)) | `detach` |
 | `remote_hosts` | empty: your tailnet peers; `off`: none; else a `[label=]host[:port],...` list (see [Remote hosts](#remote-hosts)) | empty |
 | `focus_resize` | `true`/`false`: an attached client takes the session's size when its window gains focus (see [The focused client sets the size](#the-focused-client-sets-the-size)) | `true` |
-| `xray_ring` | `0` (off) to `16M` (`K`/`M` suffixes): the shell output each new session keeps in its master's memory for X-ray, the rows that scroll off its primary screen, as text, with OSC 133 prompt marks. Read when a session starts; kept across `--restart`; never on disk, never in core dumps. dch-lite keeps none | `2M` |
-| `xray_ring` | the shell output a session keeps in memory for X-ray: `0` (off) up to `16M` (`K`/`M` suffixes, rounded up to 64 KiB). Read when a session starts (see [Shell output ring](#shell-output-ring-x-ray)) | `2M` |
+| `xray_ring` | `0` (off) to `16M` (`K`/`M` suffixes, rounded up to 64 KiB): the shell output each new session keeps in its master's memory for X-ray, the rows that scroll off its primary screen, as text, with OSC 133 prompt marks. Read when a session starts (see [Shell output ring](#shell-output-ring-x-ray)); kept across `--restart`; never on disk, never in core dumps. dch-lite keeps none | `2M` |
 
 ```sh
 dch --config                         # the path, then every known key's effective value
