@@ -141,6 +141,9 @@ def main():
 
         # exit: the fake removes its record; a hold keeps the row
         run("--respawn", fake)
+        # --run into Claude goes through the composer gate (#112), which
+        # never waits: let the fake draw its composer first
+        until(lambda: "auto mode on" in run("--read", fake).stdout)
         run("--run", fake, "/exit")
         until(lambda: rows().get(fake, {}).get("state") is not None and
               field(fake, "claude_session_id") is None, 15)
