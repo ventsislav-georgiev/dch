@@ -311,6 +311,7 @@ dch --forget <name>... [-f]|--all [--json]      # delete ended sessions' records
 dch --say <name>...|--all [--json] -- <text...>  # message each Claude Code, busy too (queued), never over a prompt
 dch --stop <name>...|--all [--json]             # pause Claude, end the session; --revive wakes it
 dch --config [<key> [<value>|--unset]]          # show, read or set the config file
+dch --shell-init zsh|bash|fish                 # OSC 133 prompt marks for your rc file (X-ray)
 dch --agent-list [--json]                       # native Claude peers
 dch --agent-send <peer> <message...>            # message one (from a Codex session)
 ```
@@ -709,6 +710,7 @@ running sessions.
 | `detach_key` | `detach` or `switch`: what one `Ctrl-\` press does; two presses do the other (see [Cheatsheet](#cheatsheet)) | `detach` |
 | `remote_hosts` | empty: your tailnet peers; `off`: none; else a `[label=]host[:port],...` list (see [Remote hosts](#remote-hosts)) | empty |
 | `focus_resize` | `true`/`false`: an attached client takes the session's size when its window gains focus (see [The focused client sets the size](#the-focused-client-sets-the-size)) | `true` |
+| `xray_ring` | `0` (off) to `16M` (`K`/`M` suffixes): the shell output each new session keeps in its master's memory for X-ray, the rows that scroll off its primary screen, as text, with OSC 133 prompt marks. Read when a session starts; kept across `--restart`; never on disk, never in core dumps. dch-lite keeps none | `2M` |
 | `xray_ring` | the shell output a session keeps in memory for X-ray: `0` (off) up to `16M` (`K`/`M` suffixes, rounded up to 64 KiB). Read when a session starts (see [Shell output ring](#shell-output-ring-x-ray)) | `2M` |
 
 ```sh
@@ -723,6 +725,20 @@ symlinked one), keeps every other line and comment, and creates the parent
 directory. An unknown key, a bool key given anything else, or a choice key
 given a value not its own, is refused with exit 1. The session picker's
 settings view (`,`) sets the same keys the same way.
+
+**Prompt marks for X-ray.** A shell inside dch that marks its prompts, commands
+and exit codes with OSC 133 lets X-ray tell commands and their output apart.
+Many prompts and terminal integrations already emit them (fish 4 does). For the
+rest, add one line to your rc file:
+
+```sh
+eval "$(dch --shell-init zsh)"      # ~/.zshrc
+eval "$(dch --shell-init bash)"     # ~/.bashrc (bash 4.4+)
+dch --shell-init fish | source      # ~/.config/fish/config.fish (fish < 4)
+```
+
+The hooks are idempotent: sourcing twice adds nothing. A terminal without OSC 133
+support ignores the marks.
 
 ### Shell output ring (X-ray)
 

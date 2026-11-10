@@ -90,6 +90,9 @@ dch \- detachable terminal sessions with a headless agent API
 .RI [ key
 .RI [ value \fR|\fP\fB\-\-unset\fP]]
 .br
+.B dch \-\-shell\-init
+.BR zsh | bash | fish
+.br
 .B dch
 .RB [ \-\-host
 .IR host ]
@@ -1767,6 +1770,18 @@ list (see
 whether an attached client takes the session's size when its window gains
 focus (see
 .BR "FOCUS AND SIZE" ).
+.TP
+.B xray_ring
+.B 0
+(off) to
+.BR 16M ,
+default
+.BR 2M :
+the shell output each new session keeps in its master's memory for X\-ray
+(the rows that scroll off its primary screen, as text, with OSC 133 prompt
+marks). Kept across
+.BR \-\-restart ;
+never on disk, never in core dumps.
 .SH EXIT STATUS
 0 on success. Control verbs: 1 generic error, 2
 .B \-\-wait
