@@ -10604,16 +10604,20 @@ xr_clear(const struct xr_target *t)
 	unsigned int len;
 	char sid[64] = "";
 	const char *corpus = "shell";
-	int qc, claude = 0, s, novt = 0, fr, cleared;
+	int qc, claude = 0, agent = 0, s, novt = 0, fr, cleared;
 
 	if ((qc = cmd_query(t->sock, &ci)) == -4)
 		return xr_no_session();
 	if (qc == 0 && xr_live_claude(&ci, &c))
 	{
-		claude = 1;
+		claude = agent = 1;
 		corpus = "claude";
 		snprintf(sid, sizeof sid, "%s", c.sid);
 	}
+	/* the master ignores a clear while any Claude runs (dch_agent_probe:
+	** claude_find != 0), so two Claudes or a non-UUID sid clear nothing */
+	else if (qc == 0 && ci.pid > 0 && claude_find(ci.pid, 1, &c) != 0)
+		agent = 1;
 	if (qc == 0)
 		cmd_info_free(&ci);
 	if ((s = control_connect_path(t->sock)) < 0)
@@ -10640,7 +10644,7 @@ xr_clear(const struct xr_target *t)
 		fputs("dch: X-ray failed on this session\n", stderr);
 		return 3;
 	}
-	cleared = !claude && !(rs.status & (DCH_RING_S_OFF | DCH_RING_S_PAUSED));
+	cleared = !agent && !(rs.status & (DCH_RING_S_OFF | DCH_RING_S_PAUSED));
 	if (!claude && (rs.status & DCH_RING_S_OFF))
 		corpus = "none";
 	/* no ring to clear: the mirror stays (QA 1.44 MED-1) */

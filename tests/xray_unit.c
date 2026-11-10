@@ -374,10 +374,15 @@ t_read(void)
 
 	/* QA 1.44 LOW-5: the file shrank under the read (it is shorter than
 	** the size the lookup saw): what was read stands, capped */
-	fd = mkstemp(path);
+	char path2[] = "/tmp/xray_unit.XXXXXX";
+
+	fd = mkstemp(path2);
 	if (fd < 0)
+	{
+		CHECK("read: shrink temp file", 0);
 		return;
-	unlink(path);
+	}
+	unlink(path2);
 	(void)!write(fd, head, sizeof head - 1);
 	D = xr_claude_new();
 	rc = xr_claude_read(D, fd, sizeof head - 1 + 4096, &capped);

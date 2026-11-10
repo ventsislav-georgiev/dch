@@ -749,6 +749,44 @@ def test_names():
         dch("-k", "m0123456789abcdeg")
 
 
+# ---- two Claudes under one shell: the master ignores the clear -----------
+
+def test_two_claudes():
+    """claude_find answers 2: the master's probe says agent and ignores the
+    clear, so the client must say ring_cleared false (review LOW-1)."""
+    n = "xc-two"
+    bindir = os.path.join(T, "bin2")
+    fdir = os.path.join(T, "fake2")
+    for d in (bindir, fdir):
+        os.makedirs(d, exist_ok=True)
+    shutil.copy(os.path.join(HERE, "fake_claude.py"),
+                os.path.join(bindir, "claude"))
+    os.chmod(os.path.join(bindir, "claude"), 0o755)
+    env = dict(ENV, PATH=bindir + ":" + ENV.get("PATH", "/usr/bin:/bin"),
+               FAKE_CLAUDE_DIR=fdir)
+    sdir = os.path.join(HOME, ".claude", "sessions")
+    had = set(os.listdir(sdir)) if os.path.isdir(sdir) else set()
+    r = subprocess.run([DCH, "--spawn", n, "--size", "80x24", "sh", "-c",
+                        "seq 1 300; exec 3<&0; claude <&3 & sleep 0.5; "
+                        "claude"], capture_output=True, text=True,
+                       timeout=30, env=env)
+    check("two claudes: spawned", r.returncode == 0, r.stderr)
+    try:
+        wait_for(lambda: len([f for f in os.listdir(sdir) if f not in had
+                              and f.endswith(".json")]) >= 2
+                 if os.path.isdir(sdir) else None, 10)
+        _, o0, _ = xray(n, "--json")
+        rc, c, err = xray(n, "--clear", "--json")
+        check("two claudes: --clear says ring_cleared false",
+              rc == 0 and c and c["ring_cleared"] is False, (rc, c, err))
+        _, o, _ = xray(n, "--json")
+        check("two claudes: the ring keeps its lines",
+              o0 and o and o["lines"] == o0["lines"] and o["lines"] >= 300,
+              (o0 and o0.get("lines"), o and o.get("lines")))
+    finally:
+        dch("-k", n)
+
+
 def main():
     try:
         test_names()
@@ -759,6 +797,7 @@ def main():
         test_clear_off()
         test_evil()
         test_claude()
+        test_two_claudes()
     finally:
         shutil.rmtree(T, ignore_errors=True)
     if fails[0]:

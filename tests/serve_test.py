@@ -408,16 +408,18 @@ def main():
         s.close()
 
         # --- INFO-2 (#120): no new session takes a session_id's shape ----
-        for typ in (0x01, 0x02):
+        for typ, nm in ((0x01, "m0123456789abcdef"),
+                        (0x02, "m0123456789abcdef"),
+                        (0x01, " m0123456789abcdef"),
+                        (0x02, "m0123456789abcdef ")):
             s = conn(port)
-            send(s, typ, {"name": "m0123456789abcdef", "cols": 80,
-                          "rows": 24})
+            send(s, typ, {"name": nm, "cols": 80, "rows": 24})
             t, pl = frame_not(s)
-            check("%s refuses a name shaped like a session_id"
-                  % ("attach-or-create" if typ == 1 else "create"),
+            check("%s refuses a name shaped like a session_id (%r)"
+                  % ("attach-or-create" if typ == 1 else "create", nm),
                   t == 0x13 and "looks like a session_id" in
                   json.loads(pl)["message"] and
-                  "m0123456789abcdef" not in sessions())
+                  nm not in sessions())
             s.close()
         for alias in ("m0123456789abcdef", " m0123456789abcdef\t"):
             s = conn(port)

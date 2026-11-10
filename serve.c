@@ -988,7 +988,7 @@ on_attach(struct conn *c, int create, const unsigned char *p, size_t n)
 		return;
 	}
 	/* INFO-2 (#120): a new session never takes a session_id's shape */
-	if (name[0] && xr_id_shaped(name) && session_listed(name) != 1)
+	if (name[0] && xr_label_id_shaped(name, strlen(name)) && session_listed(name) != 1)
 	{
 		dch_json_free(&jp);
 		out_err(c, "name looks like a session_id");
