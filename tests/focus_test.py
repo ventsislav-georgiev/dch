@@ -11,8 +11,10 @@ byte passes through exactly.
   2. focus-in on A takes the size back from B (a WINCH in the program);
   3. a program without 1004 never sees ESC[I / ESC[O;
   4. keys around a report pass byte-exact; a report split across two
-     writes still counts and leaks nothing; Esc then a key 20 ms later
-     reaches the program as two reads, not one Meta-key (#107);
+     writes 10-20 ms apart still counts and leaks nothing; a lone Esc
+     arrives after the hold; Esc then a key 20 or 2 ms later reaches the
+     program as two reads, not one Meta-key (#107, #117); Alt-j in one
+     write stays one read;
   5. after the program prints ESC[?1004h it gets the reports, also on a
      client attaching later (the master's mode re-arm); its ESC[?1004l
      turns them off again and the client turns its own 1004 back on;
@@ -194,45 +196,52 @@ def main():
         ok = a.wait(b"WINCH:100x30", m) and a.wait_keys(b"xy", m)
         check("4. keys around reports pass byte-exact, the report acts",
               ok, a.since(m))
-        m = a.mark()
-        b.send(b"\033[I")
-        a.wait(b"WINCH:80x24", m)
+        # A report split across two writes, the second half 10 and 20 ms
+        # later (a loaded host, an ssh hop): inside the hold, so it acts
+        # and nothing of it is typed (#117).
+        for gap in (0.01, 0.02):
+            m = a.mark()
+            b.send(b"\033[I")
+            a.wait(b"WINCH:80x24", m)
+            m = a.mark()
+            a.send(b"\033")
+            time.sleep(gap)
+            a.send(b"[I")
+            ok = a.wait(b"WINCH:100x30", m)
+            a.send(b"z")
+            ok = a.wait_keys(b"z", m) and ok
+            check("4. a report split %d ms apart: acted on, nothing typed"
+                  % (gap * 1000), ok, a.since(m))
+        # A lone Esc still arrives, alone, once the hold is up: 50 ms, the
+        # rest of the 0.5 s is slack for a loaded host.
         m = a.mark()
         a.send(b"\033")
-        time.sleep(0.001)	# inside the hold (FOCUS_HOLD_MS)
-        a.send(b"[I")
-        ok = a.wait(b"WINCH:100x30", m)
-        a.send(b"z")
-        ok = a.wait_keys(b"z", m) and ok
-        check("4. a report split across writes: acted on, nothing typed",
+        ok = a.wait(b"KEY:1b\r", m, 0.5)
+        ok = a.wait_keys(b"\033", m) and ok
+        check("4. a lone Esc goes through, within the hold + slack",
               ok, a.since(m))
-        # A lone Esc still arrives (after the hold), alone.
+        # Esc, then j 20 or 2 ms later (#107, #117): the held Esc goes out
+        # on its own and j the same gap after it, as with
+        # DCH_FOCUS_RESIZE=0, never glued to it as Meta-j.
+        for gap in (0.02, 0.002):
+            m = a.mark()
+            a.send(b"\033")
+            time.sleep(gap)
+            a.send(b"j")
+            ok = a.wait_keys(b"\033j", m)
+            # 2 ms: order only; a runner that wakes the program late
+            # can hand it both bytes in one read whatever dch does.
+            if gap >= 0.02:
+                ok = ok and reads(a.since(m)) == [b"\033", b"j"]
+            check("4. Esc then j %d ms later: %s"
+                  % (gap * 1000, "two reads, in order" if gap >= 0.02
+                     else "both, in order"), ok, a.since(m))
+        # A terminal's own Alt-j (one write) stays one read.
         m = a.mark()
-        a.send(b"\033")
-        check("4. a lone Esc goes through", a.wait_keys(b"\033", m),
-              a.since(m))
-        # Esc, then j a beat later (#107): the held Esc goes out on its own
-        # before j comes, as with DCH_FOCUS_RESIZE=0 — not glued to it as
-        # Meta-j. A terminal's own Alt-j (one write) stays one read.
-        m = a.mark()
-        a.send(b"\033")
-        time.sleep(0.02)
-        a.send(b"j")
-        ok = a.wait_keys(b"\033j", m)
-        m2 = a.mark()
         a.send(b"\033j")
-        ok = a.wait_keys(b"\033j", m2) and ok
-        check("4. Esc then j 20 ms later: two reads; Alt-j: one",
-              ok and reads(a.since(m)) == [b"\033", b"j", b"\033j"],
+        check("4. Alt-j in one write: one read",
+              a.wait_keys(b"\033j", m) and reads(a.since(m)) == [b"\033j"],
               a.since(m))
-        # j inside the hold: the Esc goes out as its own packet first;
-        # every byte still arrives, once, in order.
-        m = a.mark()
-        a.send(b"\033")
-        time.sleep(0.001)
-        a.send(b"j")
-        check("4. Esc then j inside the hold: both, in order",
-              a.wait_keys(b"\033j", m), a.since(m))
         check("3. the program without 1004 never saw a report",
               b"KEY:1b5b49" not in a.since(0) and
               b"KEY:1b5b4f" not in a.since(0) and

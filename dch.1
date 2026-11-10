@@ -514,7 +514,10 @@ The client passes focus reports to the program in the session only while that
 program has mode 1004 set itself; otherwise it drops them. The client tracks
 the mode in the session's output and gets it from the master's mode re\-arm
 on attach. All other input passes through unchanged. A read that ends in a bare
-ESC waits up to 5 ms for the rest of a report.
+ESC waits up to 50 ms for the rest of a report, which delays a lone Esc key by
+up to that much. A key that follows the ESC inside the wait reaches the
+program after the ESC, with the same gap it had, so the two are not read as an
+Alt\-key; an Alt\-key the terminal sends in one write stays one.
 .PP
 .B DCH_FOCUS_RESIZE=0
 (or

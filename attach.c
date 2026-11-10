@@ -346,16 +346,30 @@ static int inner_focus;		/* the inner program has 1004 on */
 static int fo_st, fo_val, fo_hit;	/* focus_scan's parser state */
 static unsigned char fpend[2];	/* a trailing ESC / ESC [ held back */
 static int fpend_n;
-static int focus_cut;		/* bytes of the packet that go out alone first */
-static struct timeval fpend_at;	/* when a held prefix goes out as typed */
+static long long fpend_t;	/* when the held prefix came in (mono_us) */
+static unsigned char dq[PKT_MAX];	/* keys a cut-off Esc's gap delays */
+static int dq_n;
+static long long dq_at;		/* when dq goes out */
 
 /* ponytail: a held ESC waits this long for the rest of a split report — the
 ** lone Esc key pays it as latency (tmux's escape-time, same trade). Only a
 ** read that ENDS in ESC or ESC [ waits; a kitty-keyboard Esc (CSI 27 u) never
-** does. Short (#107): a key typed inside the hold reaches the pty right
-** behind the Esc, and the program reads the two as one Meta-key; a terminal
-** writes its 3-byte report at once, so a split one is microseconds apart. */
-#define FOCUS_HOLD_MS	5
+** does. 50 ms (#117): a loaded host or an ssh hop can space a report's halves
+** well past the 5 ms #107 had, and the report then leaked in as typed text.
+** A key typed inside the hold no longer needs a short one: the Esc goes out
+** at once, the key after the gap it had (focus_filter), so the program never
+** reads the two as one Meta-key. 50 ms is the hold before #107, whose only
+** complaint was that merge. */
+#define FOCUS_HOLD_MS	50
+
+static long long
+mono_us(void)
+{
+	struct timeval tv;
+
+	now_us(&tv);
+	return tv.tv_sec * 1000000LL + tv.tv_usec;
+}
 
 static int
 focus_wanted(void)
@@ -427,19 +441,23 @@ focus_scan(const unsigned char *b, ssize_t n)
 ** bytes in b (room for 2 more): put back what the last read held, note a
 ** focus-in in *in, keep a report only while the inner program wants them,
 ** and hold a trailing ESC or ESC [ that may begin one (unless flush). Every
-** other byte stays, in order. The new length. */
+** other byte stays, in order. The new length: what goes out now; what has to
+** wait is moved to dq. */
 static int
 focus_filter(unsigned char *b, int len, int *in, int flush)
 {
-	int i, o = 0;
+	long long now = mono_us(), gap = now - fpend_t;
+	int i, o = 0, cut = 0;
 
-	focus_cut = 0;
 	if (fpend_n)
 	{
 		/* A held lone ESC the read does not continue with '[' was the
-		** Esc key: it goes out as its own packet, ahead of the next
-		** key, not glued to it as Meta-<key> (#107). */
-		focus_cut = fpend_n == 1 && len && b[0] != '[';
+		** Esc key: it goes out now as its own packet, and what follows
+		** it the gap it had later, so the program reads the two apart,
+		** not as Meta-<key> (#107, #117). A held ESC [ goes out with
+		** the byte after it, as today: a CSI the link split (an arrow
+		** key over ssh) stays one sequence. */
+		cut = fpend_n == 1 && len && b[0] != '[';
 		memmove(b + fpend_n, b, len);
 		memcpy(b, fpend, fpend_n);
 		len += fpend_n;
@@ -465,16 +483,27 @@ focus_filter(unsigned char *b, int len, int *in, int flush)
 		{
 			fpend_n = len - i;
 			memcpy(fpend, b + i, fpend_n);
-			now_us(&fpend_at);
-			fpend_at.tv_usec += FOCUS_HOLD_MS * 1000L;
-			fpend_at.tv_sec += fpend_at.tv_usec / 1000000;
-			fpend_at.tv_usec %= 1000000;
+			fpend_t = now;
 			break;
 		}
 		b[o++] = b[i];
 	}
-	if (o <= focus_cut)
-		focus_cut = 0;
+	/* The delay line: past the cut, or all of it behind keys already
+	** waiting (order first). shortcut: what joins a waiting dq goes out
+	** in one packet with it, so Esc + key typed again inside that gap
+	** can merge; a per-chunk queue if anyone types that fast. */
+	if (dq_n)
+		cut = 0;
+	else if (!cut)
+		return o;
+	if (o > cut)
+	{
+		if (!dq_n)
+			dq_at = now + gap;
+		memcpy(dq + dq_n, b + cut, o - cut);
+		dq_n += o - cut;
+		o = cut;
+	}
 	return o;
 }
 
@@ -578,17 +607,7 @@ process_kbd(int s, struct packet *pkt)
 		}
 	}
 
-	/* Push it out: a held Esc first, on its own (focus_filter) */
-	if (focus_cut)
-	{
-		int n = pkt->len;
-
-		pkt->len = focus_cut;
-		write_packet_or_fail(s, pkt);
-		memmove(pkt->u.buf, pkt->u.buf + focus_cut, n - focus_cut);
-		pkt->len = n - focus_cut;
-		focus_cut = 0;
-	}
+	/* Push it out. */
 	write_packet_or_fail(s, pkt);
 	return KBD_OK;
 }
@@ -690,7 +709,7 @@ attach_main(int noerror)
 	** (ESC[?1004h when the inner program has it) arrives in the replay
 	** and focus_scan picks it up from there, so it starts off. */
 	focus_on = focus_wanted();
-	inner_focus = fo_st = fpend_n = 0;
+	inner_focus = fo_st = fpend_n = dq_n = 0;
 	if (focus_on)
 		write_buf_or_fail(1, "\033[?1004h", 8);
 
@@ -714,7 +733,7 @@ attach_main(int noerror)
 	/* Wait for things to happen */
 	while (1)
 	{
-		int n, in, flush = 0;
+		int n, in, flush = 0, dq_due = 0;
 		long wait_us = -1;
 		struct timeval tv, *tvp = NULL;
 
@@ -739,16 +758,25 @@ attach_main(int noerror)
 				return detach_key_done(s, 0);
 			wait_us = us;
 		}
-		/* A held ESC prefix: wake when it is due to go out as typed. */
-		if (fpend_n)
+		/* A held ESC prefix: wake when it is due to go out as typed;
+		** delayed keys: wake when their gap is up. Timers, so pty
+		** output never waits on them. */
+		if (fpend_n || dq_n)
 		{
-			struct timeval now;
-			long us;
+			long long now = mono_us(), us = LLONG_MAX, d;
 
-			now_us(&now);
-			us = (fpend_at.tv_sec - now.tv_sec) * 1000000L
-			   + (fpend_at.tv_usec - now.tv_usec);
-			flush = us <= 0;
+			if (fpend_n)
+			{
+				d = fpend_t + FOCUS_HOLD_MS * 1000LL - now;
+				flush = d <= 0;
+				us = d;
+			}
+			if (dq_n)
+			{
+				d = dq_at - now;
+				dq_due = d <= 0;
+				us = d < us ? d : us;
+			}
 			if (us < 0)
 				us = 0;
 			if (wait_us < 0 || us < wait_us)
@@ -762,7 +790,9 @@ attach_main(int noerror)
 		}
 
 		FD_ZERO(&readfds);
-		FD_SET(0, &readfds);
+		/* a full delay line reads no more keys until it goes out */
+		if (dq_n <= (int)sizeof(dq) - 3)
+			FD_SET(0, &readfds);
 		FD_SET(s, &readfds);
 		n = select(s + 1, &readfds, NULL, NULL, tvp);
 		if (n < 0 && errno != EINTR && errno != EAGAIN)
@@ -793,31 +823,44 @@ attach_main(int noerror)
 			n--;
 		}
 		/* stdin activity, or a held ESC prefix that nothing completed
-		** (flush: it was due before this select, and no byte came). */
-		in = n > 0 && FD_ISSET(0, &readfds);
-		if (in || (flush && fpend_n))
+		** (flush: it was due before this select, and no byte came), or
+		** delayed keys whose time came (first: they are older; stdin
+		** stays readable for the next turn). */
+		in = n > 0 && FD_ISSET(0, &readfds) && !dq_due;
+		if (in || (flush && fpend_n) || dq_due)
 		{
 			ssize_t len = 0;
 			int focus_in = 0;
 
 			pkt.type = MSG_PUSH;
-			if (in)
+			if (dq_due)
 			{
-				/* 2 short: room for a held prefix */
-				len = read(0, pkt.u.buf,
-				           sizeof(pkt.u.buf) - (focus_on ? 2 : 0));
-				if (len <= 0)
-					exit(1);
-				n--;
+				memcpy(pkt.u.buf, dq, dq_n);
+				len = dq_n;
+				dq_n = 0;
 			}
-			if (focus_on)
+			else
 			{
-				len = focus_filter(pkt.u.buf, len, &focus_in, !in);
-				win_changed |= focus_in;
-				/* all of it a report or held: no keystroke,
-				** so the detach window stays as it was */
-				if (len == 0)
-					goto keys_done;
+				if (in)
+				{
+					/* room for a held prefix, and for dq */
+					len = read(0, pkt.u.buf, sizeof(pkt.u.buf) -
+					           (focus_on ? 2 + dq_n : 0));
+					if (len <= 0)
+						exit(1);
+					n--;
+				}
+				if (focus_on)
+				{
+					len = focus_filter(pkt.u.buf, len, &focus_in,
+					                   !in);
+					win_changed |= focus_in;
+					/* all of it a report, held or delayed: no
+					** keystroke now, so the detach window stays
+					** as it was */
+					if (len == 0)
+						goto keys_done;
+				}
 			}
 
 			pkt.len = len;

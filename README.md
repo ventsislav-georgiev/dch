@@ -1163,9 +1163,12 @@ focus reporting on itself, as Claude Code does. The client tracks
 program's modes, so the client knows the state from the first byte.
 Otherwise the client drops the reports, so no stray `[I`/`[O` is typed into a
 shell. All other input passes through unchanged. A read that ends in a bare
-`Esc` waits up to 5 ms for the rest of a report, which delays a lone Esc key
-by that much; a key typed after the Esc still reaches the program on its own,
-not as Alt-key.
+`Esc` waits up to 50 ms for the rest of a report, so a report split by a slow
+link or a loaded host is still recognised. A lone Esc key is delayed by up to
+that much. When another key follows the Esc inside those 50 ms, the Esc goes to
+the program at once and the key follows after the same gap it had behind the
+Esc, so the program reads Esc and the key apart, not as Alt-key. A
+terminal's own Alt-key (Esc and the key in one write) still arrives as one.
 
 `DCH_FOCUS_RESIZE=0` (or `false`, `no`, `off`) in the client's environment,
 or `focus_resize = false`
