@@ -199,19 +199,34 @@ def main():
         # A report split across two writes, the second half 10 and 20 ms
         # later (a loaded host, an ssh hop): inside the hold, so it acts
         # and nothing of it is typed (#117).
+        # A runner that oversleeps past the 50 ms hold splits the report
+        # for real; that try proves nothing, so it is retried (3 at most)
+        # and its bytes are left out of check 3.
+        late_spans = []
         for gap in (0.01, 0.02):
-            m = a.mark()
-            b.send(b"\033[I")
-            a.wait(b"WINCH:80x24", m)
-            m = a.mark()
-            a.send(b"\033")
-            time.sleep(gap)
-            a.send(b"[I")
-            ok = a.wait(b"WINCH:100x30", m)
-            a.send(b"z")
-            ok = a.wait_keys(b"z", m) and ok
-            check("4. a report split %d ms apart: acted on, nothing typed"
-                  % (gap * 1000), ok, a.since(m))
+            for _ in range(3):
+                m = a.mark()
+                b.send(b"\033[I")
+                a.wait(b"WINCH:80x24", m)
+                m = a.mark()
+                t0 = time.monotonic()
+                a.send(b"\033")
+                time.sleep(gap)
+                late = time.monotonic() - t0 > 0.04
+                a.send(b"[I")
+                if late:
+                    a.send(b"z")
+                    a.wait(b"KEY:7a", m)
+                    time.sleep(0.2)
+                    late_spans.append((m, a.mark()))
+                    continue
+                ok = a.wait(b"WINCH:100x30", m)
+                a.send(b"z")
+                ok = a.wait_keys(b"z", m) and ok
+                break
+            check("4. a report split %d ms apart: acted on, nothing typed%s"
+                  % (gap * 1000, " (runner overslept 3 times: unmeasured)"
+                     if late else ""), late or ok, a.since(m))
         # A lone Esc still arrives, alone, once the hold is up: 50 ms, the
         # rest of the 0.5 s is slack for a loaded host.
         m = a.mark()
@@ -223,16 +238,20 @@ def main():
         # Esc, then j 20 or 2 ms later (#107, #117): the held Esc goes out
         # on its own and j the same gap after it, as with
         # DCH_FOCUS_RESIZE=0, never glued to it as Meta-j.
+        # A runner that wakes the program late can hand it both bytes in
+        # one read whatever dch does: 20 ms gets 3 tries (a dch that
+        # merges fails all of them), 2 ms checks the order only.
         for gap in (0.02, 0.002):
-            m = a.mark()
-            a.send(b"\033")
-            time.sleep(gap)
-            a.send(b"j")
-            ok = a.wait_keys(b"\033j", m)
-            # 2 ms: order only; a runner that wakes the program late
-            # can hand it both bytes in one read whatever dch does.
-            if gap >= 0.02:
-                ok = ok and reads(a.since(m)) == [b"\033", b"j"]
+            for _ in range(3 if gap >= 0.02 else 1):
+                m = a.mark()
+                a.send(b"\033")
+                time.sleep(gap)
+                a.send(b"j")
+                ok = a.wait_keys(b"\033j", m)
+                if gap >= 0.02:
+                    ok = ok and reads(a.since(m)) == [b"\033", b"j"]
+                if ok:
+                    break
             check("4. Esc then j %d ms later: %s"
                   % (gap * 1000, "two reads, in order" if gap >= 0.02
                      else "both, in order"), ok, a.since(m))
@@ -242,10 +261,12 @@ def main():
         check("4. Alt-j in one write: one read",
               a.wait_keys(b"\033j", m) and reads(a.since(m)) == [b"\033j"],
               a.since(m))
+        seen = a.since(0)
+        for lo, hi in reversed(late_spans):
+            seen = seen[:lo] + seen[hi:]
         check("3. the program without 1004 never saw a report",
-              b"KEY:1b5b49" not in a.since(0) and
-              b"KEY:1b5b4f" not in a.since(0) and
-              b"5b49" not in a.since(0).replace(b"WINCH", b""), a.since(0))
+              b"KEY:1b5b49" not in seen and b"KEY:1b5b4f" not in seen and
+              b"5b49" not in seen.replace(b"WINCH", b""), seen)
 
         # 5: the program turns 1004 on: reports reach it.
         m = a.mark()

@@ -29,15 +29,23 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 
 		(void)focus_scan(d, (ssize_t)n);
 		inner_focus = 1;	/* forwarding: identity */
-		fpend_n = 0;
+		fpend_n = dq_n = 0;
 		memcpy(b, d, cut);
 		l = focus_filter(b, (int)cut, &in, 0);
 		memcpy(got, b, l);
 		gl = l;
+		/* the delay line (#117) goes out on its timer, before the
+		** next read's bytes */
+		memcpy(got + gl, dq, dq_n);
+		gl += dq_n;
+		dq_n = 0;
 		memcpy(b, d + cut, n - cut);
 		l = focus_filter(b, (int)(n - cut), &in, 1);
 		memcpy(got + gl, b, l);
 		gl += l;
+		memcpy(got + gl, dq, dq_n);
+		gl += dq_n;
+		dq_n = 0;
 		if (gl != n || memcmp(got, d, n) != 0 || fpend_n)
 			abort();
 	}
