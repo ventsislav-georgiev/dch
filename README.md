@@ -353,7 +353,7 @@ someone is watching is invisible to them.
 
 | Verb | Does | Exit codes |
 | --- | --- | --- |
-| `--spawn <n> [--size CxR] [--env K=V]... [cmd...]` | Start headless session (default: `$SHELL`, 80x24 or `$COLUMNS`/`$LINES`). `--env` (max 32, first `=` splits) adds variables to the child; reserved keys (`DCH_SESSION`, `TERM` fixup) always win. Like `--revive` (and a plain `dch <new>`), it drops the calling Claude Code session's identity (`CLAUDECODE`, `CLAUDE_CODE_*` session vars), plus `GIT_EDITOR` and the other harness vars when `CLAUDECODE` is set, and sets `FORCE_HYPERLINK=1` unless the caller has it (dch keeps OSC 8 links, but under `TERM=xterm-256color` with no `TERM_PROGRAM` Claude Code would strip its statusline's); an explicit `--env` still wins. Prints the name. A program that cannot be executed is an error (`dch: <n>: <cmd>: <reason>`); one that runs and exits at once is not. | 0 ok, 1 exists/failed/not executable/bad --env |
+| `--spawn <n> [--size CxR] [--env K=V]... [cmd...]` | Start headless session (default: `$SHELL`, 80x24 or `$COLUMNS`/`$LINES`). `--env` (max 32, first `=` splits) adds variables to the child; reserved keys (`DCH_SESSION`, `TERM` fixup) always win. Like `--revive` (and a plain `dch <new>`), it drops the calling Claude Code session's identity (`CLAUDECODE`, `CLAUDE_CODE_*` session vars), plus `GIT_EDITOR` and the other harness vars when `CLAUDECODE` is set, and sets `LC_TERMINAL=ghostty` unless the caller has it (dch keeps OSC 8 links, but under `TERM=xterm-256color` with no `TERM_PROGRAM` Claude Code would strip its statusline's, and `LC_TERMINAL` is the one signal its check reads that supports-hyperlinks and other Node CLIs ignore). dch sets no `FORCE_HYPERLINK`: those CLIs honour it before they check for a terminal, so it put OSC 8 into pipes and files (`stylelint t.css > out`, an agent's Bash tool); a caller's own value still reaches the session. An explicit `--env` (`--env LC_TERMINAL=` included) still wins. Prints the name. A program that cannot be executed is an error (`dch: <n>: <cmd>: <reason>`); one that runs and exits at once is not. | 0 ok, 1 exists/failed/not executable/bad --env |
 | `--xray <n> --json` | One JSON object: the session's corpus and chapters (see [X-ray queries](#x-ray-queries---xray)). `--clear` empties a shell's ring instead. Must be the first argument. | 0 ok, 1 no such session/ambiguous/no corpus, 2 usage, 3 read failure |
 | `--send <n> <text...>` | Type text (joined with spaces), no enter. | 0 ok |
 | `--run <n> <text...>` | `--send` + enter. Into a session whose Claude Code runs — as its command or typed into its shell — the text goes through `--say`'s composer gate instead: typed only over an empty composer, Enter pressed once it shows and again while it stays (Claude Code folds an Enter sent with the text into the paste). A `/command` is typed raw, a message pasted. A shell or any other program, a master without a mirror (`DCH_NO_VT`), dch-lite and your own session (`$DCH_SESSION`) keep the plain burst. A gate failure prints `dch: <n>: <reason> — <why>` on stderr: `prompt` and `draft` (nothing typed), `not_typed` (the text never showed in the composer, no Enter), `not_submitted` (it stayed there through every Enter); `no_screen` when the composer is not on screen. | 0 ok, 1 gate failure |
@@ -1574,7 +1574,8 @@ for a local session named that way.
 | Verb | Form | Timeout |
 | --- | --- | --- |
 | `--read` | `--read <n> [--ansi] [--recent [N]] [--cursor]` | 60 s |
-| `--send`, `--run` | `--send <n> [--] <text...>` | 60 s |
+| `--send` | `--send <n> [--] <text...>` | 60 s |
+| `--run` | `--run <n> [--] <text...>` (into Claude through the gate, up to about 60 s itself) | 660 s |
 | `--keys` | `--keys <n> <key...>` | 60 s |
 | `--follow` | `--follow <n>` | none |
 | `--status` | `--status <n>` | 60 s |
@@ -1759,10 +1760,15 @@ the `0x13` `taken`) restores the terminal, prints
 | 5 | Taken: another client attached to the session. | No: it would take the session back. |
 
 **Control verbs.** The verbs in the [ctl table](#control-verbs-ctl) take
-`host:name` too, resolved as `-a` resolves it (an exact local session name
-wins; `--host <h>` is the unambiguous form, and the only one for
-`--history`, which takes no name; a discovered host passes the same whois
-check). Names on two hosts in one command are refused. dch runs the verb on
+`host:name` too: such a name is remote only when no local session or
+History record has exactly that name and `host` is a known host (`--hosts`,
+`remote_hosts`, or a cached remote row from `dch -ls --remote` or the
+picker); never with remote hosts off (`DCH_NO_REMOTE=1`, `remote_hosts =
+off`). Anything else stays local, so a local session named `proj:task`
+(`dch -n proj:task`) can be spawned, revived, pinned and forgotten by name.
+`--host <h>` is the unambiguous form, the one for a host only discovery
+knows, and the only one for `--history`, which takes no name; a discovered
+host passes the same whois check. Names on two hosts in one command are refused. dch runs the verb on
 the host through its `dch serve` and writes its stdout and stderr as they
 come, byte for byte: the output and the exit status are the remote dch's.
 Anything off the table is refused here, before any connection (`dch: can't

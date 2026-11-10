@@ -727,6 +727,39 @@ def main():
               "(#095)", back and "refused before fork" not in text(log))
         stop(p)
 
+        # --- #122: warm ctl connections idle out sooner at half the slots
+        # (DCH_CTL_IDLE_MS 20 s here; under pressure a tenth, 2 s)
+        def warm(port):
+            s = conn(port)
+            send(s, 0x30, {"argv": ["--history", "--json"]})
+            return s if frame_not(s, (0x31, 0x32))[0] == 0x33 else None
+
+        def gone(s):
+            s.settimeout(0.1)
+            try:
+                return s.recv(1) == b""
+            except socket.timeout:
+                return False
+            except OSError:
+                return True
+
+        p, port, log = serve(e=dict(benv, DCH_CTL_IDLE_MS="20000"))
+        w = [warm(port)]
+        time.sleep(3)
+        check("one warm ctl connection outlives the pressure limit (2 s)",
+              w[0] is not None and not gone(w[0]))
+        w += [warm(port) for _ in range(7)]
+        end = time.time() + 6
+        while time.time() < end and not all(s and gone(s) for s in w):
+            time.sleep(0.2)
+        check("at 8 of 16 slots, the peer's warm ctl connections close "
+              "after 2 s idle, not 20 s (#122)",
+              all(s and gone(s) for s in w))
+        for s in w:
+            if s:
+                s.close()
+        stop(p)
+
         # --- F3: peer strings reach the log escaped ----------------------
         ts()
         p, port, log = serve()

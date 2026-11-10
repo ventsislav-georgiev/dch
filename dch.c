@@ -9036,7 +9036,7 @@ static const char *const rv_harness[] = {
 };
 
 /* Drop the calling Claude Code session's identity (and, when the caller is
-** Claude Code, its harness vars), and default FORCE_HYPERLINK, before a
+** Claude Code, its harness vars), and default LC_TERMINAL, before a
 ** client starts a new master:
 ** --revive, --spawn and a plain `dch <new>` are often run from inside an
 ** agent (#067, #111). Callers apply --env after, so an explicit one wins. */
@@ -9052,8 +9052,11 @@ strip_caller_agent(void)
 		unsetenv(rv_strip[k]);
 	/* dch's mirror keeps OSC 8 (#069), but under TERM=xterm-256color with
 	** no TERM_PROGRAM, Claude Code's hyperlink check fails and it strips the
-	** statusline's links. A caller's own value (0 included) wins. */
-	setenv("FORCE_HYPERLINK", "1", 0);
+	** statusline's links. Claude Code also takes LC_TERMINAL=ghostty (its
+	** check's last resort, past isTTY); supports-hyperlinks and the like
+	** never read it, so Node CLIs keep OSC 8 out of pipes and files, as
+	** FORCE_HYPERLINK=1 did not (#122). A caller's own value wins. */
+	setenv("LC_TERMINAL", "ghostty", 0);
 }
 
 /* Take the environment the user's login shell builds (~/.zshrc and the
@@ -10670,6 +10673,29 @@ xr_local(const char *n, const struct hrec *r, int nr)
 	return 0;
 }
 
+/* host:name is a remote session's (#087, #122): no local session or History
+** record of that exact name, and the part before the ':' a known host
+** (--hosts, remote_hosts or a cached remote row; none while remote hosts
+** are off). --xray and the control verbs both route by it. */
+static int
+name_routes_remote(const char *n)
+{
+	char host[DCH_RHOST_MAX];
+	struct hrec *r;
+	size_t hl = strcspn(n, ":");
+	int nr, hit;
+
+	if (!name_is_remote(n) || hl >= sizeof host)
+		return 0;
+	snprintf(host, sizeof host, "%.*s", (int)hl, n);
+	if (!dch_remote_known(host))
+		return 0;
+	nr = history_load(&r);
+	hit = !xr_local(n, r, nr);
+	hrec_free(r, nr);
+	return hit;
+}
+
 /* `dch --xray <n> [--json] [--clear]` (spec 3.1): flags in any order, each
 ** once; the rest of the family (--ref, --follow, --chapter, the view)
 ** comes with XR2-XR5 and exits 2 here. */
@@ -10719,20 +10745,13 @@ xray_main(int argc, char **argv)
 	/* a failed write says so and exits 1, never a silent SIGPIPE death */
 	signal(SIGPIPE, SIG_IGN);
 	write_fail_line = "dch: no such session\n";
-	nr = history_load(&r);
-	if (name_is_remote(n) && !xr_local(n, r, nr))
+	if (name_routes_remote(n))
 	{
-		char host[DCH_RHOST_MAX];
-
-		snprintf(host, sizeof host, "%.*s", (int)strcspn(n, ":"), n);
-		if (dch_remote_known(host))
-		{
-			hrec_free(r, nr);
-			fputs("dch: bad session\nremote sessions (host:name) come "
-			      "with a later dch\n", stderr);
-			return 2;
-		}
+		fputs("dch: bad session\nremote sessions (host:name) come "
+		      "with a later dch\n", stderr);
+		return 2;
 	}
+	nr = history_load(&r);
 	rc = xr_resolve(n, r, nr, clear, &t);
 	if (rc == 0)
 		rc = clear ? xr_clear(&t) : xr_json(&t);
@@ -11437,7 +11456,9 @@ main(int argc, char **argv)
 		return 1;
 	}
 	/* Remote control verbs (#114): --host names the host; else a name that
-	** is host:name and no local session's makes it remote, as -a does. */
+	** is host:name for a known host and no local session's or History
+	** record's (#122: a local a:b name stays local, remote hosts off
+	** included). */
 	if (!attach_only &&
 	    (action == A_READ || action == A_SEND || action == A_RUN ||
 	     action == A_KEYS || action == A_FOLLOW || action == A_STATUS ||
@@ -11449,9 +11470,9 @@ main(int argc, char **argv)
 		int remote = remote_host != NULL, k, cn = 0;
 
 		if (!remote && session_name[0])
-			remote = name_is_remote(session_name);
+			remote = name_routes_remote(session_name);
 		for (k = 0; !remote && k < say_n; k++)
-			remote = name_is_remote(argv[say_at + k]);
+			remote = name_routes_remote(argv[say_at + k]);
 		if (remote)
 		{
 			for (k = 1; k < argc; k++)

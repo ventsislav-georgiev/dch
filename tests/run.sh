@@ -212,6 +212,8 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "--history/--revive bring dead sessions back" revive_test.py
     pyrun "--revive never starts two claudes on one id" revive_sid_test.py
     pyrun "--pin/--unpin/--forget keep and clean history" history_pin_test.py
+    pyrun "a local a:b session stays local, remote hosts off or not (#122)" colon_name_test.py
+    pyrun "new sessions: statusline links, no OSC 8 into pipes (#122)" hyperlink_env_test.py
     pyrun "--say messages Claude sessions (busy too), gated" say_test.py
     pyrun "--run into a Claude session goes through the gate (#112)" run_agent_test.py
     pyrun "auto-allow answers plain permission prompts; --config" auto_allow_test.py
@@ -779,14 +781,6 @@ print(next(s for s in json.load(sys.stdin) if s["name"] == sys.argv[1])["agents"
         "$DCH" --run "$EN" 'echo sess_out $DCH_SESSION' >/dev/null 2>&1
         "$DCH" --wait "$EN" --match "sess_out $EN" --timeout 5000 >/dev/null 2>&1
         check "--env cannot spoof DCH_SESSION" "$?" "0"
-        "$DCH" --run "$EN" 'echo fh_out $FORCE_HYPERLINK' >/dev/null 2>&1
-        "$DCH" --wait "$EN" --match "fh_out 1" --timeout 5000 >/dev/null 2>&1
-        check "a new session gets FORCE_HYPERLINK=1" "$?" "0"
-        "$DCH" -k "$EN" >/dev/null 2>&1
-        FORCE_HYPERLINK=0 "$DCH" --spawn "$EN" sh >/dev/null 2>&1
-        "$DCH" --run "$EN" 'echo fh_out $FORCE_HYPERLINK' >/dev/null 2>&1
-        "$DCH" --wait "$EN" --match "fh_out 0" --timeout 5000 >/dev/null 2>&1
-        check "a caller's FORCE_HYPERLINK=0 wins" "$?" "0"
         "$DCH" -k "$EN" >/dev/null 2>&1
     fi
     "$DCH" --spawn "${EN}b" --env FOO sh >/dev/null 2>&1
