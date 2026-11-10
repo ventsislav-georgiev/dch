@@ -7598,18 +7598,24 @@ do_say_verb(char **names, int nnames, char **words, int nwords, int json)
 ** one burst fold the Enter into the paste, so the text goes through --say's
 ** gate (empty composer, typed, Enter once it shows, re-Entered). A slash
 ** command is typed raw, as Claude's menu must see it. Anything else — a
-** shell, another program, a master without a mirror, dch-lite — keeps the
-** plain burst. Exit 1 with `dch: <n>: <reason> — <why>` when the gate fails. */
+** shell, another program, a master without a mirror, dch-lite, your own
+** session — keeps the plain burst. Exit 1 with `dch: <n>: <reason> — <why>` when the gate fails. */
 static int
 do_run_verb(const char *name, char **words, int nwords)
 {
 #ifdef HAVE_LIBGHOSTTY_VT
 	struct cmd_info ci;
 	struct crec r;
-	char path[1100], *text;
+	const char *self = getenv("DCH_SESSION");
+	char selfb[256], cb[256], path[1100], *text;
 	size_t len = 1;
 	int k, c;
 
+	/* Your own session keeps the burst: the gate would wait on the composer
+	** of the agent that is running this very command. */
+	if (self && *self && strcmp(canon_name(self, selfb, sizeof selfb),
+	    canon_name(name, cb, sizeof cb)) == 0)
+		goto burst;
 	session_sock_path(name, path, sizeof path);
 	if (nwords == 0 || cmd_query(path, &ci) != 0)
 		goto burst;
