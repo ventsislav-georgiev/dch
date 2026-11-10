@@ -99,6 +99,9 @@ struct client
 	** answered by a read; the ring's gen at this client's last read. */
 	int xsub, xwake;
 	unsigned long xgen;
+	struct timespec xwake_at;	/* when that wake went out */
+	/* MSG_RESTART_CAPS flags this connection sent (DCH_RESTART_F_*) */
+	unsigned int rcaps;
 };
 
 /* ponytail: 4 MB per-client output backlog before we give up on a slow
@@ -1935,6 +1938,7 @@ xray_wake(void)
 		if (!p->xsub || p->xwake || p->xgen == xring.gen)
 			continue;
 		p->xwake = 1;
+		clock_gettime(CLOCK_MONOTONIC, &p->xwake_at);
 		queue_frame(p, MSG_RING_WAKE, 0, none, 0);
 	}
 }
@@ -1956,6 +1960,31 @@ get_le(const unsigned char *b, int n)
 	while (n--)
 		v = v << 8 | b[n];
 	return v;
+}
+
+/* Slots full (QA 1.43 NIT-2): free the one held by the subscriber that has
+** left a wake unanswered longest, past DCH_RING_STALE_MS. A live reader
+** answers a wake within milliseconds; one that is caught up holds no wake
+** and keeps its slot. Unsubscribed only, never disconnected: the client
+** walk above us stays intact, and its next read says so (no S_SUB). */
+static void
+xray_evict_stale(void)
+{
+	struct client *p, *old = NULL;
+	long age, oldest = DCH_RING_STALE_MS - 1;
+
+	for (p = clients; p; p = p->next)
+		if (p->xsub && p->xwake &&
+		    (age = ms_since(&p->xwake_at)) > oldest)
+		{
+			oldest = age;
+			old = p;
+		}
+	if (!old)
+		return;
+	dch_trace("xray evict fd=%d wake unanswered %ld ms", old->fd, oldest);
+	old->xsub = 0;
+	n_xsubs--;
 }
 
 /* Serve MSG_RING_READ (dtach.h has the wire format). Returns -1 if the
@@ -1985,6 +2014,8 @@ do_ring_read(struct client *p, const unsigned char *payload, unsigned int len)
 		return queue_status(p, MSG_READ_END, DCH_ST_BUSY);
 	if (len > 12 && (payload[12] & DCH_RING_F_SUB) && !p->xsub)
 	{
+		if (n_xsubs >= DCH_RING_SUBS)
+			xray_evict_stale();
 		if (n_xsubs < DCH_RING_SUBS)
 		{
 			p->xsub = 1;
@@ -2785,7 +2816,7 @@ hex_decode(const char *hex, unsigned char *out, size_t cap)
 /* Serialize everything the next image needs into `path`. Text header lines
 ** followed by `snap <len>` and that many raw bytes. Returns 0 on success. */
 static int
-restart_save(const char *path, int lfd, int ackfd, int ringfd)
+restart_save(const char *path, int lfd, int ackfd, int ringfd, int core)
 {
 	char *blob = NULL, hex[sizeof ((struct client *)0)->inbuf * 2 + 1];
 	size_t bloblen = 0;
@@ -2827,7 +2858,7 @@ restart_save(const char *path, int lfd, int ackfd, int ringfd)
 	if (ringfd > 2)
 		fprintf(f, "ringfd %d\n", ringfd);
 	fprintf(f, "sid %s\n", xsid);
-	if (core_saved)
+	if (core && core_saved)
 		fprintf(f, "core %llu %llu\n",
 		        (unsigned long long)core_orig.rlim_cur,
 		        (unsigned long long)core_orig.rlim_max);
@@ -3080,7 +3111,7 @@ do_restart(struct client *p, const unsigned char *req, unsigned int reqlen)
 	char path[1100], exe[PKT_MAX + 1];
 	const char *target = dch_exe;
 	struct client *q, *next;
-	int lfd = listen_fd, rfd;
+	int lfd = listen_fd, rfd, legacy;
 
 	/* A pending arm or a hold is not in the resume blob: the new image
 	** would silently drop the orchestrator's respawn (or, held, have no
@@ -3120,8 +3151,16 @@ do_restart(struct client *p, const unsigned char *req, unsigned int reqlen)
 	** screen we carry over is the screen as of right now. */
 	drain_pty();
 
-	rfd = xray_export_fd();
-	if (restart_save(path, lfd, p->fd, rfd) < 0)
+	/* QA 1.43 LOW-1: a requester that sent no MSG_RESTART_CAPS is older
+	** than the ring handover, and so is its binary, our target. That image
+	** would leave the ring's fd open (no CLOEXEC) and the soft core limit
+	** at 0 for every child it spawns: hand it neither. Our own path (the
+	** requester's was refused) is taken to be current. */
+	legacy = target == exe && !(p->rcaps & DCH_RESTART_F_RING);
+	if (legacy)
+		dch_trace("restart: requester sent no caps, no ring handover");
+	rfd = legacy ? -1 : xray_export_fd();
+	if (restart_save(path, lfd, p->fd, rfd, !legacy) < 0)
 	{
 		if (rfd >= 0)
 			close(rfd);
@@ -3161,8 +3200,12 @@ do_restart(struct client *p, const unsigned char *req, unsigned int reqlen)
 		return queue_status(p, MSG_ACK, DCH_ST_ERR);
 	}
 
+	if (legacy && core_saved)
+		setrlimit(RLIMIT_CORE, &core_orig);
 	dch_trace("restart exec %s", target);
 	execv(target, dch_argv);
+	if (legacy && xring.cap)
+		core_off();
 
 	/* Rollback. Nothing was handed over, nothing was signalled: put the
 	** close-on-exec flag back, drop the blob, and keep serving. */
@@ -3597,6 +3640,18 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 		}
 		p->role = ROLE_CONTROL;
 		return do_restart(p, payload, len);
+	}
+	else if (type == MSG_RESTART_CAPS)
+	{
+		/* MSG_RESTART's preamble: same role rule, no gate opening */
+		if (p->role == ROLE_ATTACHED)
+		{
+			remove_client(p);
+			return -1;
+		}
+		p->role = ROLE_CONTROL;
+		p->rcaps = len ? payload[0] : 0;
+		return queue_status(p, MSG_ACK, DCH_ST_OK);
 	}
 	else if (type == MSG_KEYS || type == MSG_READ || type == MSG_WAIT ||
 	         type == MSG_RESPAWN || type == MSG_CMD ||

@@ -96,7 +96,8 @@ packet_payload_len(const struct packet *pkt)
 	if (pkt->type == MSG_PUSH || pkt->type == MSG_KEYS ||
 	    pkt->type == MSG_READ || pkt->type == MSG_WAIT ||
 	    pkt->type == MSG_RESTART || pkt->type == MSG_RESPAWN ||
-	    pkt->type == MSG_CMD || pkt->type == MSG_RING_READ)
+	    pkt->type == MSG_CMD || pkt->type == MSG_RING_READ ||
+	    pkt->type == MSG_RESTART_CAPS)
 		return pkt->len;
 	if (pkt->type == MSG_WINCH || pkt->type == MSG_REDRAW)
 		return sizeof(struct winsize);
@@ -446,8 +447,9 @@ static const char shell_init_bash[] =
 "    return $ret\n"
 "  }\n"
 "  PROMPT_COMMAND=\"__dch_prompt${PROMPT_COMMAND:+;$PROMPT_COMMAND};__dch_ps1\"\n"
-"  # PS0 runs as a command starts; the subscript sets __dch_ran here\n"
-"  PS0=${PS0-}'\\e]133;C\\a${__dch_nil[__dch_ran=1]}'\n"
+"  # PS0 runs as a command starts; the subscript sets __dch_ran here (the\n"
+"  # '-' keeps set -u quiet: an unset element is unbound, declared or not)\n"
+"  PS0=${PS0-}'\\e]133;C\\a${__dch_nil[__dch_ran=1]-}'\n"
 "fi\n";
 static const char shell_init_fish[] =
 "# dch --shell-init fish: OSC 133 prompt marks for dch's X-ray (fish 4\n"
@@ -4841,6 +4843,20 @@ do_restart_verb(const char *name, int no_version, int quiet)
 		        " tick). Retry shortly; if\n     restart keeps failing,"
 		        " recreate the session\n", name);
 		return 3;
+	}
+	/* First say this image takes the ring handover over (#121): a master
+	** that hears no caps hands none over, as to a pre-1.43 dch. An older
+	** master answers DCH_ST_UNSUP; any ACK will do. */
+	{
+		unsigned char caps = DCH_RESTART_F_RING;
+
+		send_ctl(s, MSG_RESTART_CAPS, &caps, 1);
+		rc = ctl_next_frame(s, &r, CTL_IDLE_MS, &type, payload, &len);
+		if (rc <= 0)
+		{
+			close(s);
+			return ctl_dead_exit(&r, "restart");
+		}
 	}
 	/* Tell the master which binary to land on: its own dch_exe was
 	** resolved when the session started, and on a versioned prefix

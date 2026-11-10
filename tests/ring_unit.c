@@ -1244,6 +1244,78 @@ test_extras(void)
 	      count_kind(RING_K_OUTPUT, "1") == 1 &&
 	      !count_kind(RING_K_GAP, NULL) && !ring_check(&R));
 }
+
+/* #125/#121 item 7: a record already in the ring (an alt-screen mark, an
+** agent GAP) while the primary history is empty, then rows plus ED 3 in ONE
+** feed slice. No history row was ever tracked, so only the slice's own
+** rows can show the erase. */
+static void
+test_empty_history_clear(void)
+{
+	static const char *what[] = { "an alt-screen mark", "an agent gap" };
+	char b[2048];
+	size_t w;
+	int k, i, two;
+
+	for (two = 0; two < 2; two++)
+		for (k = 0; k < 2; k++)
+		{
+			char name[160];
+
+			start(80, 24, 2000);
+			if (k == 0)
+				feed("\033[?1049h\033]133;A\007\033[?1049l");
+			else
+			{
+				dch_vt_capture_pause(1);
+				dch_vt_capture_pause(0);
+			}
+			for (w = 0, i = 1; i <= 40; i++)
+				w += (size_t)snprintf(b + w, sizeof b - w,
+				    "r%d\r\n", i);
+			if (two)
+				dch_vt_feed((unsigned char *)b, w);
+			w += (size_t)snprintf(two ? b : b + w,
+			    sizeof b - (two ? 0 : w), "\033[3J");
+			if (two)
+				feed(b);
+			else
+				dch_vt_feed((unsigned char *)b, w);
+			snprintf(name, sizeof name, "#125: %s, empty history, "
+			    "rows + ED 3 in %s: the ring empties", what[k],
+			    two ? "two feeds" : "one slice");
+			CHECK(name, R.tail_seq == R.head_seq);
+		}
+	/* ... and nothing that erases no history row empties it */
+	{
+		static const char *keep[] = { "\033[2J", "\033[H\033[M",
+		    "\033[H\033[L", "\033[5S", "\033[5T", "\033[H\033M",
+		    "\033[1;10r\033[10H\n\n\n\n\n\n\033[r",
+		    "\033[2;10r\033[10H\n\n\n\n\n\n\033[r", "\033[?1049h\033[3J"
+		    "\033[?1049l", "r\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n"
+		    "\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n"
+		    "\r\n\r\n\r\n\r\n\r\n" };
+		size_t f;
+		int bad = 0;
+
+		for (f = 0; f < sizeof keep / sizeof *keep; f++)
+		{
+			start(80, 24, 2000);
+			feed("top\r\nnext\r\n");
+			dch_vt_capture_pause(1);
+			dch_vt_capture_pause(0);
+			feed(keep[f]);
+			if (count_kind(RING_K_GAP, "agent") != 1)
+			{
+				printf("       kept-form %zu cleared it\n", f);
+				bad++;
+			}
+		}
+		CHECK("#125: ED 2, IL/DL, SU/SD, RI, scroll regions, alt ED 3 "
+		    "and plain scrolling on an empty history keep the gap",
+		    bad == 0);
+	}
+}
 #endif
 
 int
@@ -1270,6 +1342,7 @@ main(int argc, char **argv)
 	test_pause();
 	test_zalgo();
 	test_extras();
+	test_empty_history_clear();
 #endif
 	return fails ? 1 : 0;
 }

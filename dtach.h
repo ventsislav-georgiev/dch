@@ -196,7 +196,15 @@ enum
 				** empties whatever the active screen.
 				** MSG_ACK reply. With no ring, or while an
 				** agent runs, ACKed and nothing cleared. */
+	MSG_RESTART_CAPS = 22,	/* payload: u8 flags (DCH_RESTART_F_*): what
+				** the requester's image takes over on the
+				** MSG_RESTART that follows on this connection.
+				** MSG_ACK reply (a master older than this
+				** answers DCH_ST_UNSUP). With no CAPS, the
+				** target is taken to be pre-1.43 (#121): no
+				** ring handover, core limit restored. */
 };
+#define DCH_RESTART_F_RING 0x01	/* adopts the blob's ringfd and core lines */
 
 /* MSG_RING_READ flags */
 #define DCH_RING_F_SUB    0x01	/* subscribe this connection to wakes */
@@ -205,6 +213,9 @@ enum
 				** and sends one reply of records as usual */
 #define DCH_RING_READ_MAX (1u << 20)	/* S10: one reply's record bytes */
 #define DCH_RING_SUBS     4	/* S10: subscribers per master */
+#define DCH_RING_STALE_MS 3000	/* a subscriber whose wake waits this long
+				** loses its slot to a new one when all are
+				** taken (none is free otherwise) */
 #define DCH_RING_HDR_LEN  50
 /* MSG_RING_HDR status bits */
 #define DCH_RING_S_RANGE   0x01	/* seq was evicted (or never was): data

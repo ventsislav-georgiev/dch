@@ -87,6 +87,9 @@ static int select_rows(size_t y0, size_t y1, GhosttySelection *sel);
 ** never takes the ref's row and its loss can only mean an erase. */
 static struct dch_ring *xr;		/* NULL: capture off */
 static GhosttyTrackedGridRef xref;	/* newest captured history row */
+/* With no history row tracked, the screen's top row over one slice: rows
+** plus an erase in the same slice only show as its loss (#125) */
+static GhosttyTrackedGridRef xsent;
 static int xpaused, xresume, xreanchor;
 static int xris;			/* a full reset (RIS) came */
 static int xb_open, xinput;		/* inside OSC 133 B..C; input seen */
@@ -618,7 +621,8 @@ capture(void)
 			else
 				i++;
 	}
-	else if (xref && !ghostty_tracked_grid_ref_has_value(xref))
+	else if ((xref && !ghostty_tracked_grid_ref_has_value(xref)) ||
+	    (xsent && !ghostty_tracked_grid_ref_has_value(xsent)))
 	{
 		/* Any clear, whatever screen is active (RIS on alt too). Unless
 		** more rows are in history than one slice can have pushed since
@@ -881,8 +885,16 @@ dch_vt_feed(const unsigned char *buf, size_t len)
 		{
 			size_t n = slice_len(buf, len);
 
+			/* Only records the rows cannot vouch for (marks, gaps)
+			** need it: an empty ring has nothing to clear. */
+			if (!xref && xr->tail_seq != xr->head_seq &&
+			    !alt_active())
+				xsent = track(NULL, GHOSTTY_POINT_TAG_ACTIVE, 0,
+				    0);
 			ghostty_terminal_vt_write(the_term, buf, n);
 			capture();
+			ghostty_tracked_grid_ref_free(xsent);
+			xsent = NULL;
 			buf += n;
 			len -= n;
 		}
