@@ -437,6 +437,27 @@ run_flush(void)
 	wcls = -1;
 }
 
+/* The first max codepoints of a cell's need-long cluster into cps; on
+** failure one U+FFFD, never the unwritten buffer. Returns the count. */
+static size_t
+graphemes_head(const GhosttyGridRef *g, size_t need, uint32_t *cps,
+               size_t max)
+{
+	uint32_t *all = malloc(need * sizeof *all);
+	size_t got = 0;
+
+	if (all && ghostty_grid_ref_graphemes(g, all, need, &got) ==
+	    GHOSTTY_SUCCESS && got >= max)
+		memcpy(cps, all, max * sizeof *cps);
+	else
+	{
+		cps[0] = 0xfffd;
+		max = 1;
+	}
+	free(all);
+	return max;
+}
+
 /* A row that carries marks, cell by cell: runs of prompt, input and output
 ** text become records, and each mark lands before the cell it was set at.
 ** Only rows with marks pay for this; the rest go through the formatter. */
@@ -482,10 +503,12 @@ walk_row(size_t y)
 		    w == GHOSTTY_CELL_WIDE_SPACER_HEAD)
 			continue;
 		ghostty_cell_get(c, GHOSTTY_CELL_DATA_SEMANTIC_CONTENT, &sem);
-		/* shortcut: a cluster past 32 codepoints keeps its first 32 */
+		/* shortcut: a cluster past 32 codepoints keeps its first 32.
+		** OUT_OF_SPACE writes nothing into cps, only the size it needs,
+		** so read it whole into a heap buffer first. */
 		if (ghostty_grid_ref_graphemes(&g, cps, 32, &n) !=
 		    GHOSTTY_SUCCESS)
-			n = n > 32 ? 32 : 0;
+			n = n > 32 ? graphemes_head(&g, n, cps, 32) : 0;
 		if (n && wcls >= 0 && (int)sem != wcls)
 			run_flush();
 		if (wcls < 0)

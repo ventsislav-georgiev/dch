@@ -54,6 +54,9 @@ struct dch_ring
 	uint64_t head, tail;	/* logical byte offsets, tail - head <= cap */
 	uint64_t head_seq, tail_seq;
 	uint64_t cache_seq, cache_off;	/* last read position, a hint */
+	struct ring_mark { uint64_t seq, off; } *mark;	/* per chunk slot: the
+				** first record starting in it, so a read
+				** walks at most one chunk of records */
 	unsigned long gen;	/* moves on every append and clear */
 	uint32_t epoch;		/* clears so far; a reader's reset trigger */
 	int chapters_evicted;	/* a prompt (or A mark) was evicted */

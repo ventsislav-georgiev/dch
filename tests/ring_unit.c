@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "ring.h"
 #ifdef WITH_VT
 #include "vt.h"
@@ -317,6 +318,76 @@ test_wrap(void)
 	ring_append(&r, RING_K_OUTPUT, 0, 0, "y", 1);
 	CHECK("1: the next one evicts one whole record",
 	      r.head == 4096 && r.head_seq == 1 && !ring_check(&r));
+	ring_free(&r);
+}
+
+/* A read from any seq lands on that record (the per-chunk index across
+** laps, evictions and a clear), and a far-back read after a tail read
+** costs one chunk of records, not the whole ring (the master thread). */
+static void
+test_index(void)
+{
+	static unsigned char buf[600];
+	struct dch_ring r;
+	char text[400];
+	uint64_t s, from, first, cnt;
+	size_t i, l;
+	int st, k, ok = 1;
+	clock_t t0;
+
+	ring_init(&r, RING_DEFAULT, 5000);
+	memset(text, '.', sizeof text);
+	srand(119);
+	for (k = 0; k < 3; k++)
+	{
+		for (i = 0; i < 30000; i++)
+		{
+			s = r.tail_seq;
+			l = (size_t)snprintf(text, 24, "%llu", (unsigned long long)s);
+			text[l] = '.';
+			ring_append(&r, RING_K_OUTPUT, 0, 0, text,
+			            l + 1 + (size_t)(rand() % 300));
+		}
+		for (i = 0; i < 3000; i++)
+		{
+			char want[24];
+
+			from = r.head_seq + (uint64_t)rand() %
+			       (r.tail_seq - r.head_seq);
+			if (i % 2)	/* a follower's tail read moves the cache */
+				ring_read(&r, r.tail_seq - 1, buf, sizeof buf,
+				          &first, &cnt, &st);
+			ring_read(&r, from, buf, sizeof buf, &first, &cnt, &st);
+			l = (size_t)snprintf(want, sizeof want, "%llu",
+			                     (unsigned long long)from);
+			if (st || first != from || !cnt ||
+			    memcmp(buf + RING_HDR, want, l) ||
+			    buf[RING_HDR + l] != '.')
+				ok = 0;
+		}
+		if (k == 1)
+			ring_clear(&r);
+	}
+	CHECK("index: a read from any seq lands on it, laps and a clear",
+	      ok && r.tail > 2 * r.cap && !ring_check(&r));
+	ring_free(&r);
+
+	/* 2M empty records in 16 MiB: the worst case for a walk */
+	ring_init(&r, RING_MAX, 0);
+	while (r.tail - r.head + RING_HDR <= r.cap)
+		ring_append(&r, RING_K_OUTPUT, 0, 0, "", 0);
+	ring_append(&r, RING_K_OUTPUT, 0, 0, "", 0);
+	t0 = clock();
+	for (i = 0, ok = 1; i < 2000; i++)
+	{
+		ring_read(&r, r.tail_seq - 1, buf, 64, &first, &cnt, &st);
+		ring_read(&r, r.head_seq + 1, buf, 64, &first, &cnt, &st);
+		if (st || first != r.head_seq + 1 || cnt != 8)
+			ok = 0;
+	}
+	CHECK("index: 2000 head reads after tail reads, 2M records, < 2 s cpu",
+	      ok && r.tail_seq - r.head_seq == RING_MAX / RING_HDR &&
+	      (double)(clock() - t0) / CLOCKS_PER_SEC < 2.0);
 	ring_free(&r);
 }
 
@@ -1101,6 +1172,33 @@ test_extras(void)
 	      count_kind(RING_K_MARK, "D;7") == 1 &&
 	      count_kind(RING_K_OUTPUT, "out") == 1);
 
+	/* a cluster of 61 codepoints on a marked row (cell walk): its first
+	** 32, never the walk's unwritten buffer */
+	start(80, 24, 2000);
+	b = malloc(256);
+	w = (size_t)snprintf(b, 256, "\033]133;A\007$ \033]133;C\007z");
+	for (i = 0; i < 60; i++)
+	{
+		memcpy(b + w, "\xcc\x81", 2);
+		w += 2;
+	}
+	memcpy(b + w, "\r\n", 2);
+	dch_vt_feed((unsigned char *)b, w + 2);
+	seq_feed(1, 30);
+	memcpy(b, "z", 1);
+	for (i = 0; i < 31; i++)
+		memcpy(b + 1 + 2 * i, "\xcc\x81", 2);
+	b[63] = '\0';
+	v = recs(&R, R.head_seq, &n, &st);
+	for (i = 0, bad = 1; i < n; i++)
+		if (v[i].len == 63 && !memcmp(v[i].text, b, 63))
+			bad = 0;
+	recs_free(v, n);
+	free(b);
+	CHECK("a 61-codepoint cluster on a marked row: its first 32, exactly",
+	      !bad);
+	bad = 0;
+
 	/* 11.8 + 11.11 6: a logical line keeps its first 64 KiB whole; rows
 	** joined past that in one slice are cut (TRUNC), later slices
 	** continue it (CONT), and the next line starts fresh */
@@ -1138,6 +1236,7 @@ main(int argc, char **argv)
 	test_parse();
 	test_ids();
 	test_wrap();
+	test_index();
 	test_evict();
 	test_trunc();
 	test_race();

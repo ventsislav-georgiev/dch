@@ -111,10 +111,21 @@ chunk_new(void)
 	if (p == MAP_FAILED)
 		return NULL;
 #ifdef MADV_DONTDUMP
-	/* S5: a core dump never carries ring text */
+	/* S5: keeps the ring chunks out of a core; the soft RLIMIT_CORE 0
+	** (master.c core_off) covers the heap copies */
 	(void)madvise(p, RING_CHUNK, MADV_DONTDUMP);
 #endif
 	return p;
+}
+
+/* No chunk has a first record yet: UINT64_MAX is past every tail. */
+static void
+marks_reset(struct dch_ring *r)
+{
+	size_t i;
+
+	for (i = 0; i < r->cap / RING_CHUNK; i++)
+		r->mark[i].off = UINT64_MAX;
 }
 
 int
@@ -128,9 +139,17 @@ ring_init(struct dch_ring *r, size_t cap, uint64_t seq_base)
 	if (!cap)
 		return 0;
 	r->chunk = calloc(cap / RING_CHUNK, sizeof *r->chunk);
-	if (!r->chunk)
+	r->mark = malloc(cap / RING_CHUNK * sizeof *r->mark);
+	if (!r->chunk || !r->mark)
+	{
+		free(r->chunk);
+		free(r->mark);
+		r->chunk = NULL;
+		r->mark = NULL;
 		return -1;
+	}
 	r->cap = cap;
+	marks_reset(r);
 	return 0;
 }
 
@@ -143,7 +162,9 @@ ring_free(struct dch_ring *r)
 		if (r->chunk[i])
 			munmap(r->chunk[i], RING_CHUNK);
 	free(r->chunk);
+	free(r->mark);
 	r->chunk = NULL;
+	r->mark = NULL;
 	r->cap = 0;
 	r->head = r->tail = 0;
 	r->head_seq = r->tail_seq;
@@ -280,6 +301,19 @@ ring_append(struct dch_ring *r, int kind, int flags, uint32_t t,
 	h[6] = (unsigned char)(t >> 16 & 0xff);
 	h[7] = (unsigned char)(t >> 24 & 0xff);
 	ring_put(r, r->tail, h, RING_HDR);
+	{
+		struct ring_mark *m = &r->mark[(size_t)(r->tail % r->cap) /
+		                               RING_CHUNK];
+
+		/* the chunk's first record: its slot holds an older lap's, or
+		** one evicted or cleared */
+		if (m->off / RING_CHUNK != r->tail / RING_CHUNK ||
+		    m->off < r->head)
+		{
+			m->seq = r->tail_seq;
+			m->off = r->tail;
+		}
+	}
 	if (len)
 		ring_put(r, r->tail + RING_HDR, (const unsigned char *)text,
 		         len);
@@ -304,9 +338,30 @@ ring_read(struct dch_ring *r, uint64_t from, unsigned char *out, size_t max,
 		*status |= RING_R_RANGE;
 		from = r->head_seq;
 	}
-	/* Followers read from near the tail: start at the last stop when it
-	** is still inside the ring instead of walking from the head. */
-	if (r->cache_seq >= r->head_seq && r->cache_seq <= from &&
+	/* Start at the nearest known record at or before from: the last
+	** chunk whose first record is not past it (bounding the walk to one
+	** chunk of records, S6: the master thread), or the last stop. */
+	if (r->tail > r->head)
+	{
+		uint64_t c = (r->tail - 1) / RING_CHUNK, h0 = r->head / RING_CHUNK;
+
+		for (;; c--)
+		{
+			const struct ring_mark *m =
+			    &r->mark[(size_t)(c % (r->cap / RING_CHUNK))];
+
+			if (m->off / RING_CHUNK == c && m->off >= r->head &&
+			    m->off < r->tail && m->seq <= from)
+			{
+				off = m->off;
+				seq = m->seq;
+				break;
+			}
+			if (c == h0)
+				break;
+		}
+	}
+	if (r->cache_seq >= seq && r->cache_seq <= from &&
 	    r->cache_off >= r->head && r->cache_off <= r->tail)
 	{
 		off = r->cache_off;
@@ -417,12 +472,16 @@ ring_import(struct dch_ring *r, const unsigned char *buf, size_t len)
 		return -1;
 	r->head = r->tail = 0;
 	r->head_seq = r->tail_seq = head_seq;
+	marks_reset(r);
 	for (off = EXPORT_HDR; off < len; )
 	{
 		const unsigned char *h = buf + off;
-		size_t l = (size_t)h[0] | (size_t)h[1] << 8;
+		size_t l = off + RING_HDR <= len ?
+		    (size_t)h[0] | (size_t)h[1] << 8 : len;
 
-		if (ring_append(r, h[2], h[3], (uint32_t)le_get(h + 4, 4),
+		/* again: buf may be a shared mapping */
+		if (off + RING_HDR + l > len ||
+		    ring_append(r, h[2], h[3], (uint32_t)le_get(h + 4, 4),
 		                (const char *)h + RING_HDR, l) == UINT64_MAX)
 		{
 			ring_clear(r);

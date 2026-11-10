@@ -3,7 +3,8 @@
 
 Covers what tests/ring_unit.c cannot reach from inside vt.c: the master
 protocol's read op (MSG_RING_READ: range, the 1 MiB cap, session_id),
-subscribers and their edge-triggered wake, the clear message, the xray_ring
+subscribers and their edge-triggered wake (a clear wakes one too; a wake at a
+full subscriber's out cap drops it safely), the clear message, the xray_ring
 config (0 = off), the client-input flag on a C mark from real keystrokes,
 `dch --shell-init` in real zsh and bash, the --restart handover (the ring and
 session_id survive, the resume blob carries no ring bytes, no shm object is
@@ -179,7 +180,12 @@ def test_clear_and_off():
         run(n, "seq 1 200", "c1")
         h0, recs = X.read_all(n, 0)
         check("before clear: rows captured", len(recs) > 100, len(recs))
+        sub = X.connect(n)
+        X.read(sub, h0["tail"], sub=True)
         check("clear message: ACK", X.clear(n))
+        check("clear message: a subscriber wakes (no pty output needed)",
+              recv_wakes(sub, 1.5) == 1)
+        sub.close()
         h1, recs = X.read_all(n, 0)
         check("clear message: the ring is empty, epoch moves, seqs go on",
               not recs and h1["epoch"] == h0["epoch"] + 1 and
@@ -204,6 +210,88 @@ def test_clear_and_off():
     finally:
         kill(n)
         shutil.rmtree(os.path.dirname(cfg), ignore_errors=True)
+
+
+def test_wake_at_cap(tmp):
+    """A subscriber that never reads, its out queue one 3-byte frame short
+    of the 4 MiB cap, armed for a wake: pty output plus a read on that same
+    connection. The wake cannot fit, so the master drops the subscriber, and
+    must do it outside that client's packet handling (round 1 freed it under
+    do_ring_read: a use-after-free, the session's shell gone with it). The
+    frame count to the cap is measured first, then probed at k-1 .. k-6."""
+    n = "xr-cap" + TAG
+    trace = os.path.join(tmp, "trace-cap")
+    env = dict(os.environ, DCH_DEBUG=trace)
+    spawn(n, "sh", "-c", "yes %s | head -2000; exec cat" % ("y" * 60),
+          env=env)
+
+    def rd(sub=0):
+        return struct.pack("<BHQIB", X.MSG_RING_READ, 13, 0, 65543, sub)
+    q = X.connect(n)
+
+    def sync():                 # the master has handled what came before
+        q.sendall(struct.pack("<BH", 15, 0))
+        while X.recv_frame(q)[0] != X.MSG_READ_END:
+            pass
+    tf = []
+
+    def drops():                # subscribers dropped full since last call
+        if not tf:
+            tf.append(open(trace, "rb"))
+        return len(re.findall(rb"remove client fd=\d+ attached=0 "
+                              rb"outlen=4\d{6}", tf[0].read()))
+
+    def conn():                 # subscribe, then bulk-fill to near BUSY
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2048)
+        s.settimeout(10)
+        s.connect(X.sock_path(n))
+        s.sendall(rd(1) + rd() * 70)
+        sync()
+        return s
+
+    def done(s):
+        s.close()
+        time.sleep(0.1)
+        sync()
+        drops()
+    try:
+        wait_for(lambda: len(X.read_all(n, 0)[1]) > 1900)
+        drops()
+        s = conn()
+        s.sendall(rd() * 800)
+        sync()
+        k = 800
+        while not drops() and k < 30000:
+            s.sendall(rd())
+            k += 1
+            sync()
+        done(s)
+        hits, alive = 0, True
+        for back in range(1, 7):
+            s = conn()
+            s.sendall(rd() * (k - back))
+            sync()
+            if drops():
+                done(s)
+                continue
+            try:
+                s.sendall(struct.pack("<BH", 0, 120) + b"x\n" * 60 + rd())
+            except OSError:
+                pass
+            time.sleep(0.3)
+            try:
+                sync()
+            except (OSError, EOFError):
+                alive = False       # the master died under the wake
+                break
+            hits += drops()
+            done(s)
+        check("a wake at the out cap drops its subscriber, master lives",
+              k < 30000 and alive and hits >= 1, (k, hits, alive))
+    finally:
+        q.close()
+        kill(n)
 
 
 def marks(recs):
@@ -399,6 +487,7 @@ def main():
         test_read_op()
         test_subscribers()
         test_clear_and_off()
+        test_wake_at_cap(tmp)
         test_shell_init(tmp)
         test_forged_block()
         test_restart(tmp)

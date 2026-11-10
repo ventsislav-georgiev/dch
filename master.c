@@ -141,7 +141,6 @@ static pid_t xagent;		/* the agent pid capture is paused for */
 static struct rlimit core_orig;	/* RLIMIT_CORE before core_off() */
 static int core_saved;
 static void xray_agent(pid_t agent);
-static void xray_wake(void);
 /* DCH_NO_REPLAY=1: don't repaint an attaching client from the mirror. Escape
 ** hatch for a program whose own WINCH repaint is enough and that dislikes
 ** seeing its screen handed back to it. Resolved once at master start. */
@@ -1573,10 +1572,25 @@ track_decmode(const unsigned char *buf, size_t len)
 	}
 }
 
+static unsigned long clients_gone;	/* remove_client() calls so far */
+
+/* q is still in the client list (NULL counts as listed). */
+static int
+client_listed(const struct client *q)
+{
+	const struct client *p;
+
+	for (p = clients; p && q; p = p->next)
+		if (p == q)
+			return 1;
+	return !q;
+}
+
 /* Unlink a client from the list and free it (socket + output queue). */
 static void
 remove_client(struct client *p)
 {
+	clients_gone++;
 	dch_trace("remove client fd=%d attached=%d outlen=%zu", p->fd,
 	          p->attached, p->outlen);
 	if (p->wait_pat[0])
@@ -1722,8 +1736,8 @@ process_pty_buf(const unsigned char *buf, size_t len)
 	/* Feed the terminal mirror AFTER the flush loop: attached clients
 	** keep first claim on the wake's time budget. */
 	dch_vt_feed(buf, len);
-	if (n_xsubs)
-		xray_wake();
+	/* No xray_wake() here: this runs inside handle_packet (drain_pty),
+	** and a wake can drop the client being handled. The main loop wakes. */
 }
 
 /* Pull any pty output that is pending RIGHT NOW into the mirror (and to
@@ -1857,8 +1871,15 @@ xray_rotate(void)
 	ring_session_id(xsid);
 }
 
-/* S5: ring text must not land in a core file. Soft limit only, so a user
-** who wants one can raise it again; the child keeps the original. */
+/* S5: ring text must not land in a core file, and with the ring on the
+** limit is the barrier: MADV_DONTDUMP (Linux) covers only the ring chunks,
+** while copies of ring text also sit in heap: the capture's row and
+** unwrap scratch (vt.c wb/ubuf, long-lived, sized to the widest row seen),
+** client out queues and RING_READ replies (short-lived), and the mirror's
+** scrollback, which libghostty allocates and only the limit can cover. So
+** wb/ubuf stay heap too: mapping them DONTDUMP would close nothing.
+** Soft limit only, so a user who wants a core can raise it again; the
+** child keeps the original. Ring off: the limit is left alone. */
 static void
 core_off(void)
 {
@@ -2032,9 +2053,13 @@ xray_export_fd(void)
 		return -1;
 	dch_vt_capture_flush();
 	n = ring_export_size(&xring);
-#if defined(__linux__) && defined(MFD_CLOEXEC)
-	fd = memfd_create("dch-ring", MFD_CLOEXEC);
-#else
+	fd = -1;
+#if defined(__linux__) && defined(SYS_memfd_create)
+	/* memfd_create by number, like renameat2: its glibc wrapper needs
+	** _GNU_SOURCE; 1 is MFD_CLOEXEC. ENOSYS falls back to shm_open. */
+	fd = (int)syscall(SYS_memfd_create, "dch-ring", 1);
+#endif
+	if (fd < 0)
 	{
 		char name[24];
 
@@ -2049,7 +2074,6 @@ xray_export_fd(void)
 			fcntl(fd, F_SETFD, FD_CLOEXEC);
 		}
 	}
-#endif
 	if (fd < 0)
 		return -1;
 	if (fd <= 2 || ftruncate(fd, (off_t)n) < 0 ||
@@ -3618,6 +3642,9 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 	else if (type == MSG_RING_CLEAR)
 	{
 		dch_vt_clear();
+		/* latched off: no mirror to clear, but its rows must still go */
+		if (!dch_vt_enabled() && xring.cap)
+			ring_clear(&xring);
 		dch_trace("xray clear epoch=%u", (unsigned)xring.epoch);
 		return queue_status(p, MSG_ACK, DCH_ST_OK);
 	}
@@ -3899,6 +3926,26 @@ adoptable_client_fd(int fd, const int *taken, int ntaken)
 	return 1;
 }
 
+/* The ring's handover fd from the blob, like adoptable_client_fd: not
+** 0-2, not a descriptor the blob names for something else, and a memory
+** object (a Linux memfd is a regular file, a macOS shm object has no type).
+** A rejected number is not ours to close. */
+static int
+xray_fd_ok(int fd)
+{
+	struct stat st;
+	int i;
+
+	if (fd <= 2 || fd == resume.pfd || fd == resume.lfd ||
+	    fd == resume.ackfd)
+		return 0;
+	for (i = 0; i < resume.ncfd; i++)
+		if (fd == resume.cfd[i])
+			return 0;
+	return fstat(fd, &st) == 0 &&
+	    (S_ISREG(st.st_mode) || (st.st_mode & S_IFMT) == 0);
+}
+
 static void
 master_adopt(void)
 {
@@ -3945,13 +3992,19 @@ master_adopt(void)
 			dch_vt_feed(resume.snap, resume.snaplen);
 	}
 	xray_check();
-	xray_adopt(resume.ringfd, resume.sid[0] ? resume.sid : NULL);
+	if (resume.ringfd >= 0 && !xray_fd_ok(resume.ringfd))
+		dch_trace("xray handover fd=%d rejected", resume.ringfd);
+	xray_adopt(xray_fd_ok(resume.ringfd) ? resume.ringfd : -1,
+	           resume.sid[0] ? resume.sid : NULL);
 	if (resume.core_saved)
 	{
 		core_orig = resume.core;
 		core_saved = 1;
 	}
-	core_off();
+	if (xring.cap)
+		core_off();
+	else if (core_saved)	/* the ring went: the master's own limit back */
+		setrlimit(RLIMIT_CORE, &core_orig);
 	free(resume.snap);
 	resume.snap = NULL;
 	resume.snaplen = 0;
@@ -4155,7 +4208,8 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 				dch_trace("vt mirror unavailable");
 		}
 		xray_check();
-		core_off();
+		if (xring.cap)
+			core_off();
 	}
 	dch_bridge_start(argv, resume.valid, the_pty.fd, s, statusfd);
 	rec_init(resume.valid);
@@ -4253,6 +4307,11 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 			if (left < wait_ms)
 				wait_ms = left;
 		}
+		/* Subscribers whose last read is behind the ring, whatever moved
+		** it (pty output, a resize, a gap, a clear). Here, outside every
+		** client walk: a wake may drop a client. */
+		if (n_xsubs)
+			xray_wake();
 		pfd = the_pty.fd;
 
 		/* Re-initialize the file descriptor set for select. */
@@ -4358,9 +4417,16 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 		/* Activity on a client? */
 		for (p = clients; p; p = next)
 		{
+			unsigned long gone = clients_gone;
+
 			next = p->next;
 			if (FD_ISSET(p->fd, &readfds))
 				client_activity(p);
+			/* p's verb may have dropped OTHER clients (check_waiters,
+			** a drain's flush, a rolled-back --restart): never follow
+			** a freed next. Ready clients left now stay readable. */
+			if (clients_gone != gone && !client_listed(next))
+				break;
 		}
 		/* pty activity? Read it and queue to attached clients. */
 		/* Only the pty we selected on: a client's MSG_RESPAWN may have
