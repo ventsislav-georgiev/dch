@@ -2053,11 +2053,12 @@ xray_export_fd(void)
 		return -1;
 	dch_vt_capture_flush();
 	n = ring_export_size(&xring);
-	fd = -1;
 #if defined(__linux__) && defined(SYS_memfd_create)
 	/* memfd_create by number, like renameat2: its glibc wrapper needs
 	** _GNU_SOURCE; 1 is MFD_CLOEXEC. ENOSYS falls back to shm_open. */
 	fd = (int)syscall(SYS_memfd_create, "dch-ring", 1);
+#else
+	fd = -1;
 #endif
 	if (fd < 0)
 	{

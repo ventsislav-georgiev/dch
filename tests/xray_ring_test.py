@@ -69,10 +69,49 @@ def run(name, cmd, marker):
 
 
 def master_pid(name):
-    r = subprocess.run(["/usr/sbin/lsof", "-t", X.sock_path(name)],
-                       capture_output=True, text=True)
-    pids = [int(p) for p in r.stdout.split()]
-    return pids[0] if pids else 0
+    """The pid whose argv is `dch --master-of <sock> ...`: /proc on Linux,
+    ps elsewhere; 0 when there is none (or no way to look)."""
+    sock = X.sock_path(name)
+    if os.path.isdir("/proc/self/fd"):
+        for d in os.listdir("/proc"):
+            try:
+                a = open("/proc/%s/cmdline" % d, "rb").read().split(b"\0")
+            except (OSError, ValueError):
+                continue
+            if a[1:3] == [b"--master-of", sock.encode()]:
+                return int(d)
+        return 0
+    ps = shutil.which("ps") or "/bin/ps"
+    if not os.access(ps, os.X_OK):
+        return 0
+    out = subprocess.run([ps, "-axo", "pid=,args="], capture_output=True,
+                         text=True).stdout
+    for line in out.splitlines():
+        f = line.split()
+        if f[2:4] == ["--master-of", sock]:
+            return int(f[0])
+    return 0
+
+
+def shm_objects(pid):
+    """The pid's open shm/memfd objects as text ("" = none), or None when
+    this platform offers no way to list them (the caller says skip)."""
+    if os.path.isdir("/proc/%d/fd" % pid):
+        links = []
+        for fd in os.listdir("/proc/%d/fd" % pid):
+            try:
+                links.append(os.readlink("/proc/%d/fd/%s" % (pid, fd)))
+            except OSError:
+                pass
+        return "\n".join(l for l in links
+                         if "memfd:" in l or l.startswith("/dev/shm/"))
+    lsof = shutil.which("lsof") or "/usr/sbin/lsof"
+    if not os.access(lsof, os.X_OK):
+        return None
+    lo = subprocess.run([lsof, "-p", str(pid)], capture_output=True,
+                        text=True).stdout
+    return "\n".join(l for l in lo.splitlines()
+                     if "PSXSHM" in l or "dch-ring" in l)
 
 
 def kill(name):
@@ -430,10 +469,13 @@ def test_restart(tmp):
               [r["text"] for r in r1] == [r["text"] for r in r0],
               (h0, h1))
         pid = master_pid(n)
-        lo = subprocess.run(["/usr/sbin/lsof", "-p", str(pid)],
-                            capture_output=True, text=True).stdout
-        check("T10b: the new master holds no shm/memfd object",
-              pid and "PSXSHM" not in lo and "dch-ring" not in lo, lo[-400:])
+        check("T10b: the new master's pid is found", pid > 0)
+        objs = shm_objects(pid) if pid else None
+        if pid and objs is None:
+            print("  skip T10b: no /proc and no lsof to list the master's fds")
+        elif pid:
+            check("T10b: the new master holds no shm/memfd object",
+                  objs == "", objs[-400:])
         run(n, "seq 500 600", "r2")
         h2, r2 = X.read_all(n, h1["tail"])
         check("10: capture goes on after the handover, seqs continue",
