@@ -229,7 +229,14 @@ def test_clear_and_off():
         check("clear message: the ring is empty, epoch moves, seqs go on",
               not recs and h1["epoch"] == h0["epoch"] + 1 and
               h1["head"] == h1["tail"] == h0["tail"], (h0, h1))
-        run(n, "seq 1 100; printf '\\033[3J'", "c2")
+        # Rows and the ED 3 in separate commands: the ring is empty and the
+        # history too, so rows pushed and erased inside one feed slice (one
+        # pty read; a slow master on Linux) never enter the ring and there
+        # is nothing to clear: no epoch bump (CI run 42900970189).
+        run(n, "seq 1 100", "c2")
+        h2, recs = X.read_all(n, 0)
+        check("before ED 3: rows captured", len(recs) > 50, (h1, h2))
+        run(n, "printf '\\033[3J'", "c3")
         h2, recs = X.read_all(n, 0)
         check("ED 3 from the shell empties it", h2["epoch"] == h1["epoch"] + 1,
               h2)
