@@ -212,6 +212,14 @@ With
 or a remote control verb (see
 .BR "REMOTE HOSTS" ):
 the session is on that remote host; its name may hold a colon.
+With remote hosts off
+.RB ( DCH_NO_REMOTE=1 ,
+.BR "remote_hosts = off" )
+it reaches only a host named in the same command's
+.BR \-\-hosts ;
+any other is
+.IR "not a known host" ,
+exit 1.
 .TP
 .BI \-\-cwd " dir"
 With
@@ -584,6 +592,10 @@ with no
 and Node CLIs (supports\-hyperlinks), which never read it, keep OSC 8 out
 of pipes and files. ssh sends it on (macOS's default
 .BR "SendEnv LC_*" ).
+It reaches every program in the session, not only Claude Code: a tool that
+keys on
+.B ghostty
+may assume Ghostty\-only features the attaching terminal lacks.
 dch sets no
 .BR FORCE_HYPERLINK ;
 a caller's own value reaches the session.
@@ -682,6 +694,13 @@ nor has one with
 .B xray_ring 0
 or a ring paused for an agent: nothing is cleared there, and the screen
 and scrollback stay.
+Otherwise the clear blanks the mirror too, as \[u2318]K does (ED 2 and ED 3
+into the mirror, never into the pty):
+.BR \-\-read ,
+.B \-\-read \-\-recent
+and the next attach's replay show an empty screen and no scrollback, while
+a client attached at that moment keeps the old screen until the program
+repaints.
 Exits 1
 .I "no such session"
 (also for an ended session or a record with
@@ -1781,7 +1800,9 @@ can be spawned, revived and forgotten by name. When such a name fails
 locally while remote hosts are on, one more line on standard error names the
 host:
 .RI ( "host is not a known host; \-\-host host to reach it" );
-the exit status is the local one.
+the exit status is the local one. It comes when the verb returns its
+failure; one that exits on the spot prints none, and with remote hosts off
+none comes at all.
 .B \-\-host
 is the unambiguous form (the one for a host only discovery knows, and the
 only one for
@@ -1948,7 +1969,9 @@ default
 the shell output each new session keeps in its master's memory for X\-ray
 (the rows that scroll off its primary screen, as text, with OSC 133 prompt
 marks). Kept across
-.BR \-\-restart ;
+.B \-\-restart
+(a restart asked by an older dch, which may predate the ring, starts empty
+and gets the core\-dump limit back);
 never on disk, never in core dumps.
 .SH EXIT STATUS
 0 on success. Control verbs: 1 generic error, 2
