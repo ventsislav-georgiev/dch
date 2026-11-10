@@ -20,6 +20,7 @@ import xray_ring as X  # noqa: E402
 
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
 ID = "m0123456789abcdef"
+UP = "M0123456789ABCDEF"
 fails = [0]
 
 
@@ -738,9 +739,19 @@ def test_names():
             check("name rule: -m with whitespace padding %r exits 2" % pad,
                   r.returncode == 2 and "looks like a session_id" in r.stderr,
                   (r.returncode, r.stderr))
-        r = dch("-m", "xc-live", "m0123456789abcdeF")
-        check("name rule: only the exact shape (an uppercase digit is fine)",
-              r.returncode == 0, r.stderr)
+        # LOW-1 (QA 1.45.1): any case, since a case-insensitive file
+        # system answers the id with the variant's socket
+        for v in ("m0123456789abcdeF", UP):
+            r = dch("-m", "xc-live", v)
+            check("name rule: -m %s (a case variant) exits 2" % v,
+                  r.returncode == 2 and "looks like a session_id" in r.stderr,
+                  r.stderr)
+            r = dch("--spawn", v, "sh", "-c", "sleep 5")
+            check("name rule: --spawn %s (a case variant) exits 2" % v,
+                  r.returncode == 2 and "looks like a session_id" in r.stderr,
+                  r.stderr)
+            if r.returncode == 0:
+                dch("-k", v)
         r = dch("--spawn", "m0123456789abcdeg", "sh", "-c", "sleep 1")
         check("name rule: a non-hex letter is a name", r.returncode == 0,
               r.stderr)
@@ -748,8 +759,94 @@ def test_names():
         dch("-k", "xc-live")
         dch("-k", "m0123456789abcdeg")
 
+    # a session that already has such a name (an older dch let it) keeps
+    # it, by its exact name only: its case variant (the id) is no name
+    legacy = subprocess.Popen([DCH, "--master-of", sock(UP), "--", "sh",
+                               "-c", "sleep 60"], env=ENV,
+                              stdin=subprocess.DEVNULL,
+                              stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL,
+                              start_new_session=True)
+    try:
+        wait_for(lambda: os.path.exists(sock(UP)) and
+                 dch("--status", UP).returncode == 0, 10)
+        rc, o, err = xray(UP, "--json")
+        check("legacy %s: --xray by its exact name answers" % UP,
+              rc == 0 and o and o["session"] == UP, (rc, err))
+        r = dch("-n", UP)
+        check("legacy %s: -n still finds it (attaching needs a terminal)"
+              % UP, r.returncode == 1 and "terminal" in r.stderr,
+              (r.returncode, r.stderr))
+        rc, o, err = xray(ID, "--json")
+        check("legacy: --xray %s is not that session by name" % ID,
+              rc == 1 and "no such session" in err, (rc, o, err))
+        rc, o, err = xray(ID, "--clear", "--json")
+        check("legacy: --xray %s --clear clears nothing of it" % ID,
+              rc == 1 and "no such session" in err, (rc, o, err))
+        r = dch("-n", ID)
+        check("legacy: -n %s is refused, not attached to it" % ID,
+              r.returncode == 2 and "looks like a session_id" in r.stderr,
+              (r.returncode, r.stderr))
+    finally:
+        dch("-k", UP)
+        try:
+            legacy.wait(10)
+        except subprocess.TimeoutExpired:
+            legacy.kill()
+            legacy.wait()
+
 
 # ---- two Claudes under one shell: the master ignores the clear -----------
+
+def test_clear_after_claude():
+    """LOW-3 (QA 1.45.1): a Claude typed into a shell pauses the shell's
+    ring on the master's next agent tick; once it exits, a --clear clears
+    the ring at once, not only after the next tick (DCH_RECORD_MS apart)."""
+    n = "xc-after"
+    bindir = os.path.join(T, "bin")
+    fdir = os.path.join(T, "fake")
+    for d in (bindir, fdir):
+        os.makedirs(d, exist_ok=True)
+    shutil.copy(os.path.join(HERE, "fake_claude.py"),
+                os.path.join(bindir, "claude"))
+    os.chmod(os.path.join(bindir, "claude"), 0o755)
+    env = dict(ENV, PATH=bindir + ":" + ENV.get("PATH", "/usr/bin:/bin"),
+               FAKE_CLAUDE_DIR=fdir, DCH_RECORD_MS="10000")
+    r = subprocess.run([DCH, "--spawn", n, "--size", "80x24", "sh"],
+                       capture_output=True, text=True, timeout=30, env=env)
+    check("after claude: shell spawned", r.returncode == 0, r.stderr)
+
+    def status():
+        try:
+            s = X.connect(n)
+            try:
+                return X.read(s, 0, 1)[0].get("status", 0)
+            finally:
+                s.close()
+        except (OSError, EOFError):
+            return 0
+    try:
+        wait_for(lambda: "$" in screen(n) or "#" in screen(n), 5)
+        dch("--send", n, "claude\r", env=env)
+        paused = wait_for(lambda: status() & X.S_PAUSED, 25)
+        t0 = time.time()
+        log = os.path.join(fdir, n + ".log")
+        dch("--send", n, "/exit\r", env=env)
+        quit_ = wait_for(lambda: os.path.exists(log) and
+                         '"exit"' in open(log).read(), 5)
+        sdir = os.path.join(HOME, ".claude", "sessions")
+        wait_for(lambda: not [f for f in os.listdir(sdir)
+                              if f.endswith(".json")], 5)
+        rc, c, err = xray(n, "--clear", "--json")
+        secs = time.time() - t0
+        check("after claude: --clear at once clears the shell's ring "
+              "(%.1f s after the pause, the tick is 10 s)" % secs,
+              paused and quit_ and rc == 0 and c and
+              c["corpus"] == "shell" and c["ring_cleared"] is True and
+              secs < 8, (paused, quit_, rc, c, err))
+    finally:
+        dch("-k", n)
+
 
 def test_two_claudes():
     """claude_find answers 2: the master's probe says agent and ignores the
@@ -797,6 +894,7 @@ def main():
         test_clear_off()
         test_evil()
         test_claude()
+        test_clear_after_claude()
         test_two_claudes()
     finally:
         shutil.rmtree(T, ignore_errors=True)

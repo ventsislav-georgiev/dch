@@ -717,7 +717,8 @@ in dch\-lite,
 there but cannot be opened counts).
 No new session or rename takes a name of exactly
 .B m
-+ 16 lowercase hex digits (a session_id):
++ 16 hex digits in any case (a session_id; on a case\-insensitive file
+system the name's socket answers to the id too):
 .BR \-n ,
 .BR \-\-spawn ,
 .BR "\-\-revive \-\-as" ,
@@ -726,6 +727,11 @@ the pickers' rename and
 .BR "dch serve" 's
 create and rename refuse it (also with surrounding whitespace) with exit 2 and
 .IR "name looks like a session_id" .
+A session that already has such a name keeps it;
+.B \-n
+and
+.B \-\-xray
+reach it by its exact listed name only.
 .TP
 .BI \-\-send " name text..."
 Type
@@ -745,7 +751,9 @@ shows and again while it stays. A failure exits 1 with
 .BR draft ,
 .BR not_typed ,
 .BR not_submitted ,
-.BR no_screen )
+.BR no_screen ,
+or on a signal
+.BR interrupted ", " withdrawn ", " draft_left )
 on stderr. Other programs, masters without a mirror, dch-lite and your own
 session (\fB$DCH_SESSION\fR) keep the plain burst.
 .TP
@@ -1087,9 +1095,18 @@ prints one object per line instead:
 .I reason
 .RB ( not_claude ", " self ", " prompt ", " draft ,
 .BR no_screen ", " no_session ", " not_submitted ", " not_typed ,
-.BR old_master ,
+.BR old_master ", " interrupted ", " withdrawn ", " draft_left ,
 or empty) and
 .IR detail .
+A first SIGINT, SIGTERM or SIGHUP types nothing more, never presses Enter
+again and takes text already typed back out of the composer: a session not
+yet sent fails
+.B interrupted
+(nothing typed),
+.B withdrawn
+(taken back) or
+.B draft_left
+(it may still sit in the composer, unsent). A second signal exits at once.
 The caller's own session
 .RB ( DCH_SESSION )
 is skipped. A dch-lite build has no mirror to check the composer with and
@@ -1620,9 +1637,20 @@ of its process group 2 s later; 660 s later for
 .B \-\-revive
 and
 .BR \-\-run ,
-which finish safely on a SIGTERM) with
-.BR {\(dqexit\(dq:2,\(dqwhy\(dq:\(dqcancel\(dq} ;
-one with nothing running, or after the verb was already cut, is ignored. A
+which stop at a safe point on a SIGTERM) with
+.BR {\(dqexit\(dq:2,\(dqwhy\(dq:\(dqcancel\(dq} .
+.B \-\-stop
+types the resume message into an agent still waiting to pause;
+.BR \-\-say ,
+.B \-\-run
+and
+.B \-\-revive
+type nothing more, never press Enter again, take typed text back out of
+the composer and exit 1 within seconds
+.RB ( interrupted ", " withdrawn " or " draft_left ).
+The dch's own exit goes to the server's log. Until the dch is reaped the
+server keeps reading its pipes, dropping what it reads. A 0x34
+with nothing running, or after the verb was already cut, is ignored. A
 0x30 while one runs gets 0x13
 .B {\(dqcode\(dq:\(dqbusy\(dq,...}
 and the running one goes on; nothing closes. dch runs its own binary with
@@ -1696,8 +1724,9 @@ none for
 .BR \(dqwhy\(dq:\(dqtimeout\(dq .
 A client that closes the connection while its verb runs ends it as a 0x34
 does (the same 2 s or 660 s grace), with no 0x33 (one that sent a 0x34
-first still gets it); the handler holds its connection slot until that dch
-is gone, and a server stop cuts the grace to 2 s. The gate is
+first still gets it); the handler holds its connection slot, one of the
+peer's 16, until that dch is gone (on purpose: it is that peer's dch still
+running), and a server stop cuts the grace to 2 s. The gate is
 attach's. For tests,
 .B DCH_CTL_TIMEOUT_MS
 replaces every timeout
