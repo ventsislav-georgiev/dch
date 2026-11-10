@@ -778,6 +778,14 @@ print(next(s for s in json.load(sys.stdin) if s["name"] == sys.argv[1])["agents"
         "$DCH" --run "$EN" 'echo sess_out $DCH_SESSION' >/dev/null 2>&1
         "$DCH" --wait "$EN" --match "sess_out $EN" --timeout 5000 >/dev/null 2>&1
         check "--env cannot spoof DCH_SESSION" "$?" "0"
+        "$DCH" --run "$EN" 'echo fh_out $FORCE_HYPERLINK' >/dev/null 2>&1
+        "$DCH" --wait "$EN" --match "fh_out 1" --timeout 5000 >/dev/null 2>&1
+        check "a new session gets FORCE_HYPERLINK=1" "$?" "0"
+        "$DCH" -k "$EN" >/dev/null 2>&1
+        FORCE_HYPERLINK=0 "$DCH" --spawn "$EN" sh >/dev/null 2>&1
+        "$DCH" --run "$EN" 'echo fh_out $FORCE_HYPERLINK' >/dev/null 2>&1
+        "$DCH" --wait "$EN" --match "fh_out 0" --timeout 5000 >/dev/null 2>&1
+        check "a caller's FORCE_HYPERLINK=0 wins" "$?" "0"
         "$DCH" -k "$EN" >/dev/null 2>&1
     fi
     "$DCH" --spawn "${EN}b" --env FOO sh >/dev/null 2>&1

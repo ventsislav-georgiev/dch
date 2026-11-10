@@ -8852,7 +8852,8 @@ static const char *const rv_harness[] = {
 };
 
 /* Drop the calling Claude Code session's identity (and, when the caller is
-** Claude Code, its harness vars) before a client starts a new master:
+** Claude Code, its harness vars), and default FORCE_HYPERLINK, before a
+** client starts a new master:
 ** --revive, --spawn and a plain `dch <new>` are often run from inside an
 ** agent (#067, #111). Callers apply --env after, so an explicit one wins. */
 static void
@@ -8865,6 +8866,10 @@ strip_caller_agent(void)
 			unsetenv(rv_harness[k]);
 	for (k = 0; k < sizeof rv_strip / sizeof rv_strip[0]; k++)
 		unsetenv(rv_strip[k]);
+	/* dch's mirror keeps OSC 8 (#069), but under TERM=xterm-256color with
+	** no TERM_PROGRAM, Claude Code's hyperlink check fails and it strips the
+	** statusline's links. A caller's own value (0 included) wins. */
+	setenv("FORCE_HYPERLINK", "1", 0);
 }
 
 /* Take the environment the user's login shell builds (~/.zshrc and the
