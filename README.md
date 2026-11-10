@@ -808,17 +808,26 @@ record of that name. Only when nothing local matches and the part before the
 The corpus:
 - **Claude Code.** The chapters come from the session's transcript
   (`<config>/projects/<dir>/<session id>.jsonl`). The file is found by one
-  directory listing and must be the only regular file of that name.
+  directory listing and must be the only regular file of that name, in a
+  real directory: a symlinked `<dir>` is not followed. With two or more,
+  the answer is `corpus: "none"` and `project` is the session cwd's key.
   - It is opened with `O_NOFOLLOW` and must still be the file the lookup
-    saw.
-  - It is read in 4 MiB chunks: the first 16 MiB and the newest 256 MiB.
-    Past that, `complete` is `false` with `why: "range"`.
+    saw. A transcript that is there but cannot be opened (permissions, an
+    I/O error) exits 3.
+  - It is read in 1 MiB chunks: the first 16 MiB and the newest 256 MiB.
+    Past that, `complete` is `false` with `why: "range"`. So it is when the
+    file shrinks during the read, or when more than 5000 chapters were
+    found (the oldest go).
   - A line over 1 MiB or over 100000 JSON tokens counts as one failed step.
 - **Shell.** The chapters come from the [ring](#shell-output-ring-x-ray)'s
   OSC 133 marks: one per typed command block (`A`, `B`, then `C` with client
   input before it and a non-blank command). A `B` or `C` inside an open
   `C`..`D` orphans that block: it gets no chapter. Without marks there are no
   chapters (`mentions_only: true`).
+  - Rows, and the marks on them, enter the ring only when they scroll off
+    the primary screen. So the commands still on the visible screen (in a
+    fresh shell or after a `clear`, up to a screen's worth) have no chapter
+    yet, and with none older the answer says `mentions_only: true`.
   - `complete` is `false` with `why: "range"` when the ring has evicted rows
     or holds a gap. The master reports evicted rows itself (a status bit, reset
     by a clear), so the querying process's `xray_ring` does not matter. A dch
@@ -861,7 +870,10 @@ the master's control socket. Nothing is typed into the session. It prints
   reply of records, which is dropped unread). The ring is cleared only if it
   still carries that id.
 - **Agent sessions.** A Claude Code session has no ring:
-  `ring_cleared: false`.
+  `ring_cleared: false`. So it is with `xray_ring 0` and while an agent
+  runs in a shell (the ring is paused). Then nothing is cleared: the
+  screen and scrollback stay, for `--read`, attach replay and the say gate.
+  A master asked to clear anyway (an older client) ignores it there.
 - **Failures.** An ended session or a History record exits 1 with
   `dch: no such session`, as does a master that hangs up mid-request. A dch-lite master exits 1 with
   `dch: no x-ray corpus`.
@@ -878,7 +890,7 @@ such a name keeps it.
 | 0 | the object was printed |
 | 1 | `dch: no such session`, `dch: ambiguous session`, `dch: no x-ray corpus` (`--clear`) |
 | 2 | bad usage: `--json` missing, a flag twice, a flag of a later release (`--ref`, `--follow`, `--chapter`, ...), `--xray` not first, a bad or remote `<n>` |
-| 3 | the session answered garbage, or the transcript could not be read |
+| 3 | the session answered garbage, or the transcript could not be read (it is there, but opening or reading it failed) |
 
 ### Auto-allow
 
@@ -1546,8 +1558,10 @@ in `ops` (`create` only with `--allow-create`). A client checks for the
 
 Each `0x30` that runs gets exactly one `0x33`. After it the connection stays
 open (warm) for the next `0x30`; a warm connection with no frame for 300 s
-closes. A `0x34` while the verb runs ends it (SIGTERM, SIGKILL 2 s later) and
-its `0x33` is `{"exit":2,"why":"cancel"}`. A `0x34` with nothing running
+closes. A `0x34` while the verb runs ends it (SIGTERM, then SIGKILL of its
+process group 2 s later; 660 s later for `--say`, `--stop`, `--revive` and
+`--run`, which finish safely on a SIGTERM, typing the resume message into an
+agent still waiting to pause) and its `0x33` is `{"exit":2,"why":"cancel"}`. A `0x34` with nothing running
 (before any `0x30`, after a `0x33`, or once the verb was already cut) is
 ignored. A `0x30` while one runs gets `0x13`
 `{"code":"busy","message":"a ctl is already running on this connection"}`;
@@ -1601,7 +1615,9 @@ release: `xray not supported by this host`.
 stops forwarding, sends the dch SIGTERM (SIGKILL 2 s later) and ends with
 `{"exit":2,"why":"cap"}`. Past its timeout (the table) it does the same with
 `"why":"timeout"`. A client that closes the connection (or half-closes it)
-while the verb runs ends it the same way, with no `0x33`. The server's
+while the verb runs ends it as a `0x34` does (the same 2 s or 660 s grace),
+with no `0x33`; the handler then holds its connection slot until the dch has
+exited or been killed (a server stop cuts the grace to 2 s). The server's
 loop never waits on the dch: one slow verb holds up nothing else. The ctl op has the same gate
 as attach: only peers the [trust model](#dch-serve-prosper-remote-hosts)
 lets in. For tests, `DCH_CTL_TIMEOUT_MS` replaces every timeout (`--follow`

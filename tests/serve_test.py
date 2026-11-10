@@ -16,6 +16,8 @@ ctl op (goldens 17-39, some against a dch serve of their own: create off,
 a lowered cap, a lowered timeout); a 0x30 on an attached connection; a
 client's close ending its dch. #118: 0x34 cancel, warm reuse, busy, the
 idle close (goldens 40-43); a 0x34 then the FIN still gets its 0x33.
+#124: a --say cut by the close or a 0x34 outlives the 2 s grace and ends on
+its own; a --status is SIGKILLed 2 s after its SIGTERM.
 Security review F1-F8: --whois-optional only while tailscaled is down; this
 host's own address and node refused; log escaping; the CLI from absolute
 PATH entries; odd whois/status JSON failing closed; the test variable unset
@@ -122,14 +124,16 @@ def main():
 
     log_n = [0]
 
-    def serve(*args, e=benv, bind=True, cwd=None):
-        """Start dch serve: (proc, port, log path); port None when it exited."""
+    def serve(*args, e=benv, bind=True, cwd=None, argv0=None):
+        """Start dch serve: (proc, port, log path); port None when it exited.
+        argv0 "dch": found on e's PATH, so that is the dch its ctls run."""
         log_n[0] += 1
         log = os.path.join(tmp, "serve%d.log" % log_n[0])
-        argv = [DCH, "serve"] + (["--bind", "127.0.0.1"] if bind else []) + \
+        argv = [argv0 or DCH, "serve"] + (["--bind", "127.0.0.1"] if bind else []) + \
             ["--port", "0"] + list(args)
         with open(log, "w") as lf:
-            p = subprocess.Popen(argv, env=e, stdin=subprocess.DEVNULL,
+            p = subprocess.Popen(argv, executable=DCH, env=e,
+                                 stdin=subprocess.DEVNULL,
                                  stdout=subprocess.DEVNULL, stderr=lf,
                                  cwd=cwd)
         procs.append(p)
@@ -372,6 +376,86 @@ def main():
         subprocess.run([DCH, "-k", "svc-ctl"], env=env, capture_output=True,
                        timeout=15)
 
+        # --- #124: a CTL_LONG verb (--say here) cut by the close or a 0x34
+        # gets CTL_LONG_MS after its SIGTERM, not 2 s: dch finishes safely
+        # on one. Any other verb (--status) is SIGKILLed 2 s after. A `dch`
+        # first on serve's PATH stands in for those two; the rest it execs.
+        wrap = os.path.join(tmp, "wrap")
+        os.makedirs(wrap)
+        with open(os.path.join(wrap, "dch"), "w") as f:
+            f.write("""#!/bin/sh
+W=%s
+case "$1 $2" in
+"--say slow"|"--status slow")
+    v=${1#--}; rm -f "$W/$v.log"
+    if [ "$v" = say ]; then
+        trap 'echo term >> "$W/$v.log"; sleep 4; echo done >> "$W/$v.log"
+              exit 0' TERM
+    else
+        trap 'echo term >> "$W/$v.log"' TERM
+    fi
+    echo $$ > "$W/$v.pid"
+    echo started
+    while :; do sleep 0.1; done ;;
+esac
+exec %s "$@"
+""" % (wrap, DCH))
+        os.chmod(os.path.join(wrap, "dch"), 0o755)
+
+        def slow_cut(port, verb, cancel):
+            """Cut a slow verb (cancel: a 0x34, else the close): seconds
+            from its SIGTERM to its end, and whether it finished its own
+            SIGTERM work."""
+            argv = ["--say", "slow", "--json", "--", "hi"] if verb == "say" \
+                else ["--status", "slow"]
+            vlog = os.path.join(wrap, verb + ".log")
+            s = conn(port)
+            send(s, 0x30, {"argv": argv})
+            frame(s)		# "started": the trap is set
+            pid = int(text(os.path.join(wrap, verb + ".pid")))
+            if cancel:
+                send(s, 0x34)
+            else:
+                s.close()
+            t0, gone = time.time(), None
+            while time.time() - t0 < 15 and gone is None:
+                try:
+                    os.kill(pid, 0)	# a probe only
+                except ProcessLookupError:
+                    gone = time.time()
+                time.sleep(0.05)
+            if cancel:
+                try:
+                    t, pl = frame_not(s, (0x31,))
+                except (EOFError, OSError):
+                    t, pl = None, b""
+                ok = t == 0x33 and json.loads(pl) == {"exit": 2,
+                                                       "why": "cancel"}
+                s.close()
+            else:
+                ok = True
+            got = text(vlog) if os.path.exists(vlog) else ""
+            return ok and "term" in got, \
+                gone - t0 if gone else None, "done" in got
+
+        p, sport, slog_ = serve(argv0="dch", e=dict(
+            benv, PATH="%s:%s:/usr/bin:/bin" % (wrap, fake)))
+        check("#124: a serve whose ctls run the stand-in dch starts",
+              sport is not None)
+        if sport is not None:
+            for cancel, how in ((False, "the close"), (True, "a 0x34")):
+                ok, secs, done = slow_cut(sport, "say", cancel)
+                check("#124: --say cut by %s: SIGTERM, not SIGKILLed at 2 s, "
+                      "finishes on its own (%s s)" % (how, secs and
+                                                       round(secs, 1)),
+                      ok and secs is not None and secs >= 3.5 and done)
+                ok, secs, done = slow_cut(sport, "status", cancel)
+                check("#124: --status cut by %s: SIGTERM, SIGKILLed about "
+                      "2 s later (%s s)" % (how, secs and round(secs, 1)),
+                      ok and secs is not None and 1.5 <= secs <= 3.5
+                      and not done)
+            stop(p)
+
         # --- #118: a warm ctl connection takes no attach, watch or kill --
         for t0, body in ((0x01, {"name": "svc-x", "cols": 20, "rows": 2}),
                          (0x2e, {}), (0x04, {"name": "svc-x"})):
@@ -408,16 +492,18 @@ def main():
         s.close()
 
         # --- INFO-2 (#120): no new session takes a session_id's shape ----
-        for typ in (0x01, 0x02):
+        for typ, nm in ((0x01, "m0123456789abcdef"),
+                        (0x02, "m0123456789abcdef"),
+                        (0x01, " m0123456789abcdef"),
+                        (0x02, "m0123456789abcdef ")):
             s = conn(port)
-            send(s, typ, {"name": "m0123456789abcdef", "cols": 80,
-                          "rows": 24})
+            send(s, typ, {"name": nm, "cols": 80, "rows": 24})
             t, pl = frame_not(s)
-            check("%s refuses a name shaped like a session_id"
-                  % ("attach-or-create" if typ == 1 else "create"),
+            check("%s refuses a name shaped like a session_id (%r)"
+                  % ("attach-or-create" if typ == 1 else "create", nm),
                   t == 0x13 and "looks like a session_id" in
                   json.loads(pl)["message"] and
-                  "m0123456789abcdef" not in sessions())
+                  nm not in sessions())
             s.close()
         for alias in ("m0123456789abcdef", " m0123456789abcdef\t"):
             s = conn(port)

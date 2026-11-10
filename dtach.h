@@ -194,7 +194,8 @@ enum
 	MSG_RING_CLEAR	= 21,	/* no payload: ESC[H ESC[2J ESC[3J into the
 				** mirror only (never the pty), and the ring
 				** empties whatever the active screen.
-				** MSG_ACK reply. */
+				** MSG_ACK reply. With no ring, or while an
+				** agent runs, ACKed and nothing cleared. */
 };
 
 /* MSG_RING_READ flags */

@@ -278,8 +278,11 @@ xr_seam_open(const char *path, const struct stat *want)
 
 	if (fd < 0)
 	{
+		int e = errno;
+
 		xr_seam_refused++;
-		dch_trace("xray seam: refused (open errno %d)", errno);
+		dch_trace("xray seam: refused (open errno %d)", e);
+		errno = e;
 		return -1;
 	}
 	if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode) ||
@@ -288,6 +291,7 @@ xr_seam_open(const char *path, const struct stat *want)
 		close(fd);
 		xr_seam_refused++;
 		dch_trace("xray seam: refused (not the file looked up)");
+		errno = 0;	/* swapped, not unreadable */
 		return -1;
 	}
 #ifdef F_NOCACHE
@@ -330,7 +334,11 @@ xr_claude_lookup(const char *cfg, const char *sid, char *path, size_t pathsz,
 		return -1;
 	while ((de = readdir(d)) && hits < 2)
 	{
+		/* the project dir is lstat'ed too: a symlinked one is not
+		** followed (QA 1.44 LOW-7) */
 		if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..") ||
+		    snprintf(p, sizeof p, "%s/%s", dir, de->d_name)
+		    >= (int)sizeof p || lstat(p, &s) < 0 || !S_ISDIR(s.st_mode) ||
 		    snprintf(p, sizeof p, "%s/%s/%s.jsonl", dir, de->d_name, sid)
 		    >= (int)sizeof p ||
 		    lstat(p, &s) < 0 || !S_ISREG(s.st_mode))
@@ -343,6 +351,8 @@ xr_claude_lookup(const char *cfg, const char *sid, char *path, size_t pathsz,
 		*st = s;
 	}
 	closedir(d);
+	if (hits != 1 && projectsz)
+		project[0] = '\0';	/* ambiguous: no one hit's dir */
 	dch_trace("xray lookup: %d hit%s", hits, hits == 1 ? "" : "s");
 	return hits == 1 ? 0 : -1;
 }
@@ -718,19 +728,42 @@ command(const char *s, size_t n, char *title, size_t titlesz)
 	return 1;
 }
 
+/* The title (xr_title) is settled once the first non-blank line has ended or
+** holds XR_TITLE_MAX non-blank scalars: each of those is one title scalar. */
+static int
+settled(const char *o, size_t k, size_t *t, size_t *nb)
+{
+	size_t a;
+	uint32_t c;
+
+	while (*t < k)
+	{
+		c = u8_next((const unsigned char *)o + *t, k - *t, &a);
+		*t += a;
+		if (u_newline(c))
+		{
+			if (*nb)
+				return 1;
+		}
+		else if (!u_space(c) && ++*nb >= XR_TITLE_MAX)
+			return 1;
+	}
+	return 0;
+}
+
 /* unwrapPasted: each <pasted_content id="k">\n?…\n?</pasted_content id="k">
-** becomes its text. malloc'd (NUL-terminated), *n its length. */
-static char *
-unwrap(const char *s, size_t n, size_t *on)
+** becomes its text; in place (the output never passes the input), the new
+** length returned. It stops once the title is settled: an opener with no
+** close scans to the end, and only a few fit before that (QA 1.44 MED-3). */
+static size_t
+unwrap(char *s, size_t n)
 {
 	static const char open[] = "<pasted_content id=\"";
-	char *o = malloc(n + 1), close[96];
-	size_t i = 0, k = 0, j, cs, ce;
+	char close[96];
+	size_t i = 0, k = 0, j, cs, ce, t = 0, nb = 0, a;
 	const char *e;
 
-	if (!o)
-		return NULL;
-	while (i < n)
+	while (i < n && !settled(s, k, &t, &nb))
 	{
 		if (s[i] == '<' && i + sizeof open - 1 <= n &&
 		    !memcmp(s + i, open, sizeof open - 1))
@@ -754,18 +787,20 @@ unwrap(const char *s, size_t n, size_t *on)
 					ce = (size_t)(e - s);
 					if (ce > cs && s[ce - 1] == '\n')
 						ce--;
-					memcpy(o + k, s + cs, ce - cs);
+					memmove(s + k, s + cs, ce - cs);
 					k += ce - cs;
 					i = (size_t)(e - s) + strlen(close);
 					continue;
 				}
 			}
 		}
-		o[k++] = s[i++];
+		/* a whole scalar, so settled() never sees half of one */
+		(void)u8_next((const unsigned char *)s + i, n - i, &a);
+		memmove(s + k, s + i, a);
+		k += a;
+		i += a;
 	}
-	o[k] = '\0';
-	*on = k;
-	return o;
+	return k;
 }
 
 /* ---- Claude: the assembler ------------------------------------------------- */
@@ -866,12 +901,35 @@ main_block(struct xr_claude *d, int b, const char *kind, const char *title)
 	d->bare = 0;
 }
 
+/* An id as kept: itself up to XR_ID_MAX bytes, else 0xff (never in UTF-8,
+** so never a short id) and its 64-bit FNV-1a in hex. Pairing and thread
+** identity need only equality; a long id is never held whole (QA 1.44
+** MED-2). */
+#define XR_ID_MAX 64
+
+static const char *
+id_key(const char *id, char key[XR_ID_MAX + 1])
+{
+	uint64_t h = 0xcbf29ce484222325ULL;
+	const unsigned char *u = (const unsigned char *)id;
+
+	if (strlen(id) <= XR_ID_MAX)
+		return id;
+	for (; *u; u++)
+		h = (h ^ *u) * 0x100000001b3ULL;
+	snprintf(key, XR_ID_MAX + 1, "\xff%016llx", (unsigned long long)h);
+	return key;
+}
+
 /* A block on a sidechain: its thread's first one adds the thread (a step)
 ** to the main thread. */
 static void
 side_block(struct xr_claude *d, const char *agent)
 {
+	char kb[XR_ID_MAX + 1];
 	int k;
+
+	agent = id_key(agent, kb);
 
 	for (k = 0; k < d->nthreads; k++)
 		if (!strcmp(d->threads[k], agent))
@@ -933,19 +991,20 @@ pend_drop(struct xr_claude *d, int k)
 }
 
 static void
-tool_use(struct xr_claude *d, const char *agent, char *id, int quiet)
+tool_use(struct xr_claude *d, const char *agent, const char *id, int quiet)
 {
+	char kb[XR_ID_MAX + 1], *c;
 	int k;
 
 	block(d, agent, B_STEP, NULL, NULL);
 	if (!id)
 		return;
-	if ((k = pend_find(d, id)) < 0)
+	if ((k = pend_find(d, id = id_key(id, kb))) < 0)
 	{
-		if (!(id = strdup(id)))
+		if (!(c = strdup(id)))
 			return;
 		k = d->npend++;
-		d->pend[k].id = id;
+		d->pend[k].id = c;
 	}
 	d->pend[k].ord = agent ? -1 : (long long)d->ch.total - 1;
 	d->pend[k].quiet = quiet;
@@ -966,9 +1025,10 @@ tool_use(struct xr_claude *d, const char *agent, char *id, int quiet)
 static void
 tool_result(struct xr_claude *d, const char *agent, const char *id, int err)
 {
+	char kb[XR_ID_MAX + 1];
 	int k, j, w;
 
-	if (id && (k = pend_find(d, id)) >= 0)
+	if (id && (k = pend_find(d, id = id_key(id, kb))) >= 0)
 	{
 		if (err && !d->pend[k].quiet)
 			mark_error(d, d->pend[k].ord);
@@ -1033,20 +1093,18 @@ texts(const struct json_parser *p, int arr, size_t *n)
 
 /* A user text block: a slash command, else a prompt; blank is hidden. */
 static void
-user_text(struct xr_claude *d, const char *agent, const char *s, size_t n)
+user_text(struct xr_claude *d, const char *agent, char *s, size_t n)
 {
-	char title[XR_TITLE_MAX * 4 + 1], *u;
-	size_t un;
+	char title[XR_TITLE_MAX * 4 + 1];
 
 	if (command(s, n, title, sizeof title))
 	{
 		block(d, agent, B_PROMPT, "command", title);
 		return;
 	}
-	if (blank(s, n) || !(u = unwrap(s, n, &un)))
+	if (blank(s, n))
 		return;
-	xr_title(u, un, title, sizeof title);
-	free(u);
+	xr_title(s, unwrap(s, n), title, sizeof title);	/* s is spent */
 	block(d, agent, B_PROMPT, "prompt", title);
 }
 
@@ -1374,8 +1432,8 @@ read_range(struct xr_claude *d, int fd, uint64_t from, uint64_t to, int mid,
 
 		if (got < 0 && errno == EINTR)
 			continue;
-		if (got <= 0)
-			return got < 0 ? -1 : 0;	/* shrank: what was read stands */
+		if (got <= 0)	/* shrank: what was read stands, incomplete */
+			return got < 0 ? -1 : 1;
 		while (i < (size_t)got)
 		{
 			char *nl = memchr(buf + i, '\n', (size_t)got - i);
@@ -1441,6 +1499,11 @@ xr_claude_read(struct xr_claude *d, int fd, uint64_t size, int *capped)
 			if (rc == 0)
 				rc = read_range(d, fd, size - xr_lim.tail, size, 1,
 				                buf, acc);
+		}
+		if (rc == 1)
+		{
+			*capped = 1;
+			rc = 0;
 		}
 	}
 	free(buf);
@@ -1711,6 +1774,26 @@ put_or_null(FILE *f, const char *s)
 		fputs("null", f);
 }
 
+static void
+put_chapter(FILE *m, const struct xr_chapter *c, uint64_t i, int comma)
+{
+	fputs(comma ? ",{\"anchor\":" : "{\"anchor\":", m);
+	xr_put_str(m, c->anchor);
+	fprintf(m, ",\"offset\":%llu,\"i\":%llu,\"at\":",
+	        (unsigned long long)c->offset, (unsigned long long)i);
+	if (c->at >= 0)
+		fprintf(m, "%lld", c->at);
+	else
+		fputs("null", m);
+	fputs(",\"title\":", m);
+	xr_put_str(m, c->title);
+	fprintf(m, ",\"kind\":\"%s\",\"partial\":%s,\"error\":%s}",
+	        c->kind, c->partial ? "true" : "false",
+	        c->error ? "true" : "false");
+}
+
+/* Two passes: each chapter's size first (one at a time, so no 4 MiB body is
+** held: QA 1.44 LOW-8), then the kept ones straight to f. */
 int
 xr_print(FILE *f, const struct xr_answer *a)
 {
@@ -1727,33 +1810,20 @@ xr_print(FILE *f, const struct xr_answer *a)
 		free(at);
 		return -1;
 	}
-	for (k = 0; k < n; k++)
+	for (k = 0; k < n && fseek(m, 0, SEEK_SET) == 0; k++)
 	{
-		const struct xr_chapter *c = xr_chapter_at(a->ch, k);
-
-		at[k] = (size_t)ftell(m);
-		fputs(k ? ",{\"anchor\":" : "{\"anchor\":", m);
-		xr_put_str(m, c->anchor);
-		fprintf(m, ",\"offset\":%llu,\"i\":%llu,\"at\":",
-		        (unsigned long long)c->offset,
-		        (unsigned long long)(first + k + 1));
-		if (c->at >= 0)
-			fprintf(m, "%lld", c->at);
-		else
-			fputs("null", m);
-		fputs(",\"title\":", m);
-		xr_put_str(m, c->title);
-		fprintf(m, ",\"kind\":\"%s\",\"partial\":%s,\"error\":%s}",
-		        c->kind, c->partial ? "true" : "false",
-		        c->error ? "true" : "false");
+		put_chapter(m, xr_chapter_at(a->ch, k), first + k + 1, k > 0);
+		at[k + 1] = at[k] + (size_t)ftell(m);
 	}
-	if (fclose(m) != 0)
+	if (fclose(m) != 0 || k < n)
 	{
 		free(body);
 		free(at);
 		return -1;
 	}
-	at[n] = bl;
+	free(body);
+	body = NULL;
+	bl = at[n];
 	/* 4 MiB: the oldest chapters go first (refs are empty in XR1) */
 	slack = 4096 + 6 * (strlen(a->session) + strlen(a->session_id) +
 	                    (a->project ? strlen(a->project) : 0) +
@@ -1796,13 +1866,10 @@ xr_print(FILE *f, const struct xr_answer *a)
 		rc = -1;
 	if (rc == 0)
 	{
-		const char *b = body + at[cut];
-
-		/* the first kept chapter lost its leading comma's partner */
-		if (cut < n && *b == ',')
-			b++;
 		fputs(head, f);
-		fputs(b, f);
+		for (k = cut; k < n; k++)	/* the first kept one: no comma */
+			put_chapter(f, xr_chapter_at(a->ch, k), first + k + 1,
+			            k > cut);
 		fprintf(f, "],\"chapters_evicted\":%s,\"refs\":[],"
 		        "\"dropped_keys\":0}\n",
 		        a->chapters_evicted ? "true" : "false");
@@ -1810,7 +1877,6 @@ xr_print(FILE *f, const struct xr_answer *a)
 			rc = -1;
 	}
 	free(head);
-	free(body);
 	free(at);
 	return rc;
 }

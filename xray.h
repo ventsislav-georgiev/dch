@@ -20,7 +20,8 @@
 #define XR_CHAPTERS    5000		/* 13.2 item 6: the newest kept */
 #define XR_HEAD_RANGE  (16ull << 20)	/* 3.8 per-file range: head ... */
 #define XR_TAIL_RANGE  (256ull << 20)	/* ... plus the newest 256 MB */
-#define XR_CHUNK       (4u << 20)	/* read size */
+#define XR_CHUNK       (1u << 20)	/* read size (QA 1.44 LOW-8: 4 MiB
+				** put a near-cap query over 16 MB) */
 #define XR_LINE_MAX    (1u << 20)	/* longer lines are one failed step */
 #define XR_LINE_TOKENS 100000		/* so are lines of more JSON tokens
 					** (about 20 B each: 3.8's 16 MB) */
@@ -104,8 +105,9 @@ void xr_claude_end(struct xr_claude *d, uint64_t ino,
                    struct xr_chapters *out);
 /* The newest absolute cwd an entry carried, "" for none. */
 const char *xr_claude_cwd(const struct xr_claude *d);
-/* Read fd under 3.8's range (head 16 MB + newest 256 MB, 4 MB chunks,
-** 1 MB lines): 0, *capped set when bytes were skipped; -1 on a read error. */
+/* Read fd under 3.8's range (head 16 MB + newest 256 MB, 1 MB chunks,
+** 1 MB lines): 0, *capped set when bytes were skipped or the file shrank
+** mid-read; -1 on a read error. */
 int xr_claude_read(struct xr_claude *d, int fd, uint64_t size, int *capped);
 
 /* ---- shell ring (7.3) -------------------------------------------------- */
