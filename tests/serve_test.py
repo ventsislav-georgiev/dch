@@ -371,6 +371,23 @@ def main():
         subprocess.run([DCH, "-k", "svc-ctl"], env=env, capture_output=True,
                        timeout=15)
 
+        # --- #118: a warm ctl connection takes no attach, watch or kill --
+        for t0, body in ((0x01, {"name": "svc-x", "cols": 20, "rows": 2}),
+                         (0x2e, {}), (0x04, {"name": "svc-x"})):
+            s = conn(port)
+            send(s, 0x30, {"argv": ["--history", "--json"]})
+            t = frame_not(s, (0x31, 0x32))[0]
+            send(s, t0, body)
+            try:
+                t2, pl = frame(s)
+                gone = s.recv(1) == b""
+            except (EOFError, OSError):
+                t2, pl, gone = None, b"", False
+            check("a warm ctl connection refuses 0x%02x, then the close" % t0,
+                  t == 0x33 and t2 == 0x13 and gone and
+                  b"only ctl frames" in pl)
+            s.close()
+
         # --- half-close: the reply still comes ---------------------------
         s = conn(port)
         send(s, 0x03)

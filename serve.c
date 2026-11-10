@@ -1567,6 +1567,17 @@ on_frame(struct conn *c, unsigned int type, const unsigned char *p,
 {
 	struct json_parser jp;
 
+	/* A ctl connection (running or warm, #118) stays one: frames are read
+	** while its ctl runs, so an attach, watch, kill or rename there would
+	** mix a pty or a request into the ctl's stream. Hello, list, 0x30 and
+	** 0x34 only; anything else is refused and closes. */
+	if (c->ctl && type != 0x08 && type != 0x03 && type != 0x30 &&
+	    type != 0x34)
+	{
+		out_err(c, "a ctl connection takes only ctl frames");
+		c->closing = 1;
+		return;
+	}
 	switch (type)
 	{
 	case 0x08:

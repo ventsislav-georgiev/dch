@@ -1442,7 +1442,8 @@ stderr bytes as they come, then
 .B 0x33
 .BR {\(dqexit\(dq:\fIN\fP} ,
 exactly one per request that runs. Not on an attached or watching
-connection. After the 0x33 the connection stays open for the next 0x30 (one
+connection, and a ctl connection takes only hello, list, 0x30 and 0x34
+(anything else: a 0x13, then the close). After the 0x33 the connection stays open for the next 0x30 (one
 at a time); with no frame for 300 s it closes. A
 .B 0x34
 (cancel, any payload) while the verb runs ends it (SIGTERM, SIGKILL 2 s

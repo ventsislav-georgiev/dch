@@ -1403,7 +1403,10 @@ else `$HOME`, stdin `/dev/null`, and streams its output while it runs. `exit`
 is dch's exit status, or 128 + the signal that ended it. A request it
 refuses gets one `0x13` `{"message":"<why>"}` (no `code`), then the FIN
 (on a warm connection too), and nothing runs. A `0x30` on a connection
-that is attached or watching is refused (`ctl needs its own connection`).
+that is attached or watching is refused (`ctl needs its own connection`),
+and a ctl connection, running or warm, stays one: anything but a hello
+(`0x08`), a list (`0x03`), a `0x30` or a `0x34` gets `0x13` `{"message":"a
+ctl connection takes only ctl frames"}`, then the FIN.
 
 Only these forms run. `<n>` is a session name: it must pass the same check
 as an attach's, never start with `-`, and never contain `:` (`a session name
