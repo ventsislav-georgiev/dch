@@ -6,8 +6,9 @@
 **
 ** Input: byte 0 = geometry/size choice, then ops: 0xF0 next-byte = feed the
 ** next (byte) bytes as one slice, 0xF1 = resize, 0xF2 = ED 3 forms split at
-** a fuzzer-chosen point, 0xF3 = clear message; any other byte is fed
-** one-by-one in runs. */
+** a fuzzer-chosen point, 0xF3 = clear message, 0xF4 = an agent's pause
+** toggled (its GAP record can sit in a ring with no history row, #125); any
+** other byte is fed one-by-one in runs. */
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -35,6 +36,25 @@ void *
 __wrap_mmap64(void *a, size_t len, int prot, int fl, int fd, off_t off)
 {
 	return __real_mmap64(fl & MAP_FIXED ? a : NULL, len, prot, fl, fd, off);
+}
+#elif defined(__APPLE__)
+#include <dlfcn.h>
+#include <sys/mman.h>
+#include <sys/types.h>
+
+/* The same drift on macOS (#121: OOM at about 7k units). ld64 has no
+** --wrap, and DYLD interposing skips calls inside the interposing image,
+** which is where the static libghostty lives. A definition of mmap here
+** does take them: static references bind to it at link time. dlsym hands
+** back what the rest of the process calls (ASan's interceptor first). */
+void *
+mmap(void *a, size_t len, int prot, int fl, int fd, off_t off)
+{
+	static void *(*real)(void *, size_t, int, int, int, off_t);
+
+	if (!real)
+		*(void **)&real = dlsym(RTLD_NEXT, "mmap");
+	return real(fl & MAP_FIXED ? a : NULL, len, prot, fl, fd, off);
 }
 #endif
 
@@ -118,6 +138,8 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 			dch_vt_feed((const unsigned char *)s + cut, l - cut);
 			i += 2;
 		}
+		else if (op == 0xF4)
+			dch_vt_capture_pause(!dch_vt_capture_paused());
 		else if (op == 0xF3)
 		{
 			dch_vt_clear();
