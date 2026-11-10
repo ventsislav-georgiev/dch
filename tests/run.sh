@@ -989,8 +989,19 @@ else
         "$( [ -f master.o ] && echo 'no nm' || echo 'no master.o')"
 fi
 pyrun "xray goldens: chapters, identity, corpus labels, MANIFEST" xray_golden.py
+# xray_cli_test.py's RSS budget: a fork()+exec+wait4 helper, because a child
+# spawned by Python inherits Python's RSS high-water mark on Linux (maxrss.c)
+# shellcheck disable=SC2086 # xcc is a word list
+if $xcc -O1 -o "$TMP/maxrss" "$xsrc/tests/maxrss.c" >"$TMP/maxrss.log" 2>&1; then
+    export DCH_MAXRSS="$TMP/maxrss"
+else
+    bad "maxrss helper builds"; sed 's/^/       /' "$TMP/maxrss.log"
+fi
 if [ "$MIRROR" = "1" ]; then
     pyrun "xray: a typed shell block, --clear, a live Claude, the seam, names" xray_cli_test.py
+    # pyrun shows a passing test's own skip lines only on failure
+    [ -n "${ASAN_OPTIONS:-}" ] &&
+        printf '  skip xray: the 16 MiB RSS budget (sanitizer build)\n'
 else
     skipmirror "xray: a typed shell block, --clear, a live Claude, the seam, names"
 fi

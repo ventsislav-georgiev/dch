@@ -190,20 +190,30 @@ def test_record():
 
 # ---- 3.8: a 16M ring under 16 MB ------------------------------------------
 
+# ASan's shadow memory and quarantine inflate RSS past any budget for dch
+# itself; scripts/sanitize.sh exports ASAN_OPTIONS.
+SANITIZED = "ASAN_OPTIONS" in os.environ
+HELPER = os.environ.get("DCH_MAXRSS")   # tests/maxrss.c, built by run.sh
+
+
 def maxrss(argv, env):
-    """(rc, stdout, max RSS in bytes) of one run; wait4 counts this child
-    only (ru_maxrss: bytes on macOS, KiB on Linux)."""
-    out = os.path.join(T, "rss.out")
-    with open(out, "w") as f:
-        p = subprocess.Popen(argv, stdout=f, stderr=subprocess.DEVNULL,
-                             env=env)
-        dog = threading.Timer(60, p.kill)     # ours, by its pid
-        dog.start()
-        _, status, ru = os.wait4(p.pid, 0)
-        dog.cancel()
-    p.returncode = os.waitstatus_to_exitcode(status)
-    rss = ru.ru_maxrss * (1 if sys.platform == "darwin" else 1024)
-    return p.returncode, open(out).read(), rss
+    """(rc, stdout, max RSS in bytes) of one run, through tests/maxrss.c: a
+    child Python spawns starts at Python's RSS high-water mark on Linux."""
+    if not HELPER:
+        return -1, "", 1 << 62
+    r = subprocess.run([HELPER] + argv, capture_output=True, text=True,
+                       timeout=90, env=env)
+    m = re.search(r"^maxrss (\d+)$", r.stderr, re.M)
+    return r.returncode, r.stdout, int(m.group(1)) if m else 1 << 62
+
+
+def rss_ok(what, rss):
+    """The 16 MiB budget (3.8); skipped, visibly, under sanitizers."""
+    if SANITIZED:
+        print("  skip %s: %.1f MB, no RSS budget under ASan" % (what, rss / 1e6))
+        return
+    check("%s: under 16 MB (3.8): %.1f MB" % (what, rss / 1e6),
+          rss < 16 << 20, "no DCH_MAXRSS helper" if not HELPER else rss)
 
 
 def test_heavy():
@@ -229,8 +239,7 @@ def test_heavy():
         check("heavy: a 16M ring (%d records) answers" % rows,
               rc == 0 and o and o["corpus"] == "shell" and rows > 1000000,
               (rc, out[:200]))
-        check("heavy: under 16 MB in the querying process (3.8): %.1f MB"
-              % (rss / 1e6), rss < 16 << 20, rss)
+        rss_ok("heavy: the querying process", rss)
         check("heavy: evicted rows are complete:false, why range (3.2)",
               o and o["complete"] is False and o["why"] == "range" and
               o["chapters_evicted"] is False, o and
@@ -379,10 +388,11 @@ def test_evil():
         try:
             t0 = time.time()
             rc, out, rss = maxrss([DCH, "--xray", "xc-evil", "--json"], ENV)
-            check("evil: %s exits 3 in %.1fs, %.1f MB, %d reads" % (
-                      what, time.time() - t0, rss / 1e6, e.reads),
-                  rc == 3 and time.time() - t0 < 20 and rss < 16 << 20 and
-                  e.reads <= reads, (rc, out[:200]))
+            check("evil: %s exits 3 in %.1fs, %d reads" % (
+                      what, time.time() - t0, e.reads),
+                  rc == 3 and time.time() - t0 < 20 and e.reads <= reads,
+                  (rc, out[:200]))
+            rss_ok("evil: %s" % mode, rss)
         finally:
             e.close()
     # F4: --clear <id> asks every live master for the header only
