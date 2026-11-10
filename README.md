@@ -1373,23 +1373,37 @@ version. Commands run as argument vectors, never through a shell.
 
 Remote frames 1.1 adds one op, `ctl`: a client runs one of dch's own verbs
 on the host and gets its output and exit status, exactly as if it had run
-there. `0x18` says `"proto":"1.1"` and always lists `ctl` in `ops` (`create`
-only with `--allow-create`). The connection gets one request:
+there. `0x18` says `"proto":"1.1"` and always lists `ctl` and `ctl-cancel`
+in `ops` (`create` only with `--allow-create`). A client checks for the
+`ctl-cancel` token, not the proto, before it sends a `0x34` or a second
+`0x30`. One request at a time:
 
 ```
 → 0x30  {"argv":["--read","api"],"cwd":"/abs/dir"}    cwd optional
 ← 0x31  stdout bytes, as they come       (any number)
 ← 0x32  stderr bytes, as they come       (any number)
-← 0x33  {"exit":N}                       last, then the FIN
+→ 0x34  cancel (any payload)             optional, while it runs
+← 0x33  {"exit":N}                       last for this request
+→ 0x30  the next request, same connection
 ```
+
+Each `0x30` that runs gets exactly one `0x33`. After it the connection stays
+open (warm) for the next `0x30`; a warm connection with no frame for 300 s
+closes. A `0x34` while the verb runs ends it (SIGTERM, SIGKILL 2 s later) and
+its `0x33` is `{"exit":2,"why":"cancel"}`. A `0x34` with nothing running
+(before any `0x30`, after a `0x33`, or once the verb was already cut) is
+ignored. A `0x30` while one runs gets `0x13`
+`{"code":"busy","message":"a ctl is already running on this connection"}`;
+nothing closes and the running one goes on to its `0x33`. A client that
+sends a `0x34` and then the FIN still gets the `0x33`.
 
 `argv` is dch's command line without the `dch`: the verb first. The server
 runs its own dch binary with it, with fork and exec (no shell), in `cwd` or
 else `$HOME`, stdin `/dev/null`, and streams its output while it runs. `exit`
 is dch's exit status, or 128 + the signal that ended it. A request it
-refuses gets one `0x13` `{"message":"<why>"}` (no `code`), then the FIN,
-and nothing runs. A `0x30` on a connection that is attached or watching is
-refused (`ctl needs its own connection`).
+refuses gets one `0x13` `{"message":"<why>"}` (no `code`), then the FIN
+(on a warm connection too), and nothing runs. A `0x30` on a connection
+that is attached or watching is refused (`ctl needs its own connection`).
 
 Only these forms run. `<n>` is a session name: it must pass the same check
 as an attach's, never start with `-`, and never contain `:` (`a session name
@@ -1426,12 +1440,21 @@ release: `xray not supported by this host`.
 stops forwarding, sends the dch SIGTERM (SIGKILL 2 s later) and ends with
 `{"exit":2,"why":"cap"}`. Past its timeout (the table) it does the same with
 `"why":"timeout"`. A client that closes the connection (or half-closes it)
-while the verb runs ends it the same way. The server's loop never waits on
-the dch: one slow verb holds up nothing else. The ctl op has the same gate
+while the verb runs ends it the same way, with no `0x33`. The server's
+loop never waits on the dch: one slow verb holds up nothing else. The ctl op has the same gate
 as attach: only peers the [trust model](#dch-serve-prosper-remote-hosts)
 lets in. For tests, `DCH_CTL_TIMEOUT_MS` replaces every timeout (`--follow`
-included) and `DCH_CTL_CAP` lowers the cap; `dch serve` reads both at
-startup and removes them from the environment.
+included), `DCH_CTL_CAP` lowers the cap and `DCH_CTL_IDLE_MS` the warm
+connection's 300 s; `dch serve` reads them at startup and removes them from
+the environment.
+
+**The dch client.** `dch --read host:api` and the other verbs open one
+connection per verb. Ctrl-C (SIGINT), SIGTERM, or a reader that closes its
+stdout (EPIPE) cancel the verb on the host: with `ctl-cancel` in `ops`, dch
+sends a `0x34` and waits up to 3 s for the `0x33`, then exits (128 + the
+signal, re-raised so the shell sees it; 0 for a closed stdout). A host
+without `ctl-cancel` gets the close instead, which ends the verb there too.
+A second Ctrl-C exits at once.
 
 **Port in use.** On a Mac where Prosper's Remote Terminal is on, Prosper
 already holds port 8771, and `dch serve` refuses to start with a message

@@ -1,0 +1,34 @@
+{
+  "id": "43-ctl-idle-close",
+  "about": "A warm ctl connection (after its 0x33) closes when no frame comes for the idle limit (300 s; lowered by DCH_CTL_IDLE_MS for the test).",
+  "requires_op": "dch-serve-config",
+  "dch_serve": {
+    "args": [],
+    "env": {
+      "DCH_CTL_IDLE_MS": "600"
+    }
+  },
+  "steps": [
+    {
+      "send": "30 00000027 7b2261726776223a5b222d2d737461747573222c22676f6c64656e2d3737362d6e6f6e65225d7d"
+    },
+    {
+      "expect": {
+        "type": "32",
+        "payload": "6e6f2073657373696f6e3a20676f6c64656e2d3737362d6e6f6e650a"
+      }
+    },
+    {
+      "expect": {
+        "type": "33",
+        "payload": "7b2265786974223a317d"
+      }
+    },
+    {
+      "expect_quiet": 0.2
+    },
+    {
+      "expect_close": true
+    }
+  ]
+}

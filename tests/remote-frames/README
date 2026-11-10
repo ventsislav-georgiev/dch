@@ -5,8 +5,10 @@ re-copy them from a newer Prosper commit and update the commit named here.
 
 Fixtures 17 and up are dch's own (#114), in the same format: the "ctl" op of
 remote frames 1.1 (0x30 request; 0x31 stdout, 0x32 stderr, 0x33 exit). They
-need "ctl" in ops. Two keys are dch's: "dch_serve" ({"args", "env"}) names
-how the server must start (create off, a lowered cap, a lowered timeout);
+need "ctl" in ops; 40-43 (#118: 0x34 cancel, warm reuse, busy, the idle
+close) need "ctl-cancel". Two keys are dch's: "dch_serve" ({"args",
+"env"}) names how the server must start (create off, a lowered cap, a
+lowered timeout, a lowered idle limit);
 those fixtures require the op "dch-serve-config", which no server names, so
 a plain run.py run skips them. "dch_mirror" marks a fixture for the full
 build only (--read, --keys and --follow need the terminal mirror).

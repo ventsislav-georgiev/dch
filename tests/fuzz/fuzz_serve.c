@@ -8,7 +8,11 @@
 ** JSON (size and #101's scrollback); #114's ctl allowlist, over a 0x30's
 ** JSON (ctl_request) and over the input's lines as an argv (ctl_check):
 ** what passes starts with an allowlisted verb, its names pass name_ok and
-** no forbidden word sits outside free text. Linked with the rest of dch minus
+** no forbidden word sits outside free text. #118: the input's frames as one
+** connection's sequence through ctl_action (0x30, 0x34, and a streamed 0x33
+** or 0x35 standing for the running ctl's exit or timeout): each 0x30 that
+** runs gets exactly one 0x33, busy changes nothing, a 0x34 cancels only a
+** running ctl not yet cut. Linked with the rest of dch minus
 ** serve.o, and dch.c built with -Dmain=dch_main. */
 #include "../../serve.c"
 
@@ -280,6 +284,56 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		if (c)
 			ctl_inv(ac, v, kind, fl);
 		free(c);
+	}
+	{
+		/* #118: the frames as on_frame and ctl_tick take them */
+		struct rf_state st = {0, 0};
+		struct rf_frame f;
+		size_t off = 0, used;
+		pid_t ctl = 0;		/* a stand-in: never signalled */
+		const char *why = NULL;
+		int r, a, ac, runs = 0, ends = 0;
+		char cwd[PATH_MAX], w[200], **av;
+
+		while ((r = rf_parse(&st, d + off, n - off, (size_t)-1, &f,
+		                     &used)) != RF_NEED && r != RF_CLOSE)
+		{
+			off += used;
+			if (r == RF_CHUNK && f.end && ctl > 0 &&
+			    (f.type == 0x33 || (f.type == 0x35 && !why)))
+			{
+				if (f.type == 0x35)
+					why = "timeout";	/* ctl_cut */
+				else
+				{
+					ctl = -1;	/* reaped: its one 0x33 */
+					ends++;
+				}
+				continue;
+			}
+			if (r != RF_FRAME || (f.type != 0x30 && f.type != 0x34))
+				continue;
+			a = ctl_action(f.type, ctl, why);
+			if ((f.type == 0x30) != (a == CA_RUN || a == CA_BUSY) ||
+			    (a == CA_RUN && ctl > 0) ||
+			    ((a == CA_BUSY || a == CA_CANCEL) && ctl <= 0) ||
+			    (a == CA_CANCEL && why) ||
+			    (f.type == 0x34 && ctl > 0 && !why && a != CA_CANCEL))
+				abort();
+			if (a == CA_CANCEL)
+				why = "cancel";
+			else if (a == CA_RUN)
+			{
+				if (ctl_request(f.data, f.len, &av, &ac, cwd, w,
+				                sizeof w) < 0 || !av)
+					break;	/* refused: the 0x13, the FIN */
+				free(av);
+				ctl = ++runs;
+				why = NULL;
+			}
+		}
+		if (runs != ends + (ctl > 0))
+			abort();
 	}
 	cut_scalars(text, 3);
 	free(text);

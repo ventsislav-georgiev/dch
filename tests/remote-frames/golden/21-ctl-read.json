@@ -1,6 +1,6 @@
 {
   "id": "21-ctl-read",
-  "about": "0x30 --read <n>: the screen as one 0x31, 0x33 exit 0, the FIN.",
+  "about": "0x30 --read <n>: the screen as one 0x31, 0x33 exit 0.",
   "dch_mirror": true,
   "requires_op": "ctl",
   "mutating": true,
@@ -19,9 +19,6 @@
         "type": "33",
         "payload": "7b2265786974223a307d"
       }
-    },
-    {
-      "expect_close": true
     }
   ]
 }

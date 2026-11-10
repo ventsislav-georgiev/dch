@@ -4,10 +4,10 @@
 ** list or the cache, attach.c's packet stream (as frames, which must parse
 ** back as a client's), a server's frame stream into the probe and into the
 ** relay (each cut into reads of a size the input picks), and logsafe at a
-** small cap; #114's ctl stream (ctl_in) and a hello's ops (hello_op).
-** Every peer string, once escaped, must hold no control byte:
-** C0, DEL, C1 or a bidi control. Linked with the rest of dch minus
-** remote.o, and dch.c built with -Dmain=dch_main. */
+** small cap; #114's ctl stream (ctl_in) and a hello's ops (hello_op,
+** #118's ctl-cancel too). Every peer string, once escaped, must hold no
+** control byte: C0, DEL, C1 or a bidi control. Linked with the rest of dch
+** minus remote.o, and dch.c built with -Dmain=dch_main. */
 #include "../../remote.c"
 
 int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n);
@@ -248,6 +248,7 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		free(out.p);
 		free(err.p);
 		(void)hello_op(t, "ctl");
+		(void)hello_op(t, "ctl-cancel");	/* #118 */
 		break;
 	}
 	case 7:		/* logsafe cut short */

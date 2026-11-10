@@ -12,9 +12,10 @@ use); --allow-user by id and by login (case-insensitive); create off without
 {"code":"taken"} before the FIN (#102); 0x09 from the mirror;
 a newer proto major; an oversize control frame; a client half-close; SIGTERM;
 0x01's optional "scrollback" reaching the spawned client (#101). #114: the
-ctl op (goldens 17-38, some against a dch serve of their own: create off,
+ctl op (goldens 17-39, some against a dch serve of their own: create off,
 a lowered cap, a lowered timeout); a 0x30 on an attached connection; a
-client's close ending its dch.
+client's close ending its dch. #118: 0x34 cancel, warm reuse, busy, the
+idle close (goldens 40-43); a 0x34 then the FIN still gets its 0x33.
 Security review F1-F8: --whois-optional only while tailscaled is down; this
 host's own address and node refused; log escaping; the CLI from absolute
 PATH entries; odd whois/status JSON failing closed; the test variable unset
@@ -274,8 +275,8 @@ def main():
         p, port, log = serve("--allow-create")
         check("serves on a loopback test port", port is not None)
         main_fx = groups.pop("null")
-        check("golden fixtures 01-15, 17-34 and 39 pass (--mutating, %d)"
-              % len(main_fx), len(main_fx) == 34 - 4 * (not mirror)
+        check("golden fixtures 01-15, 17-34 and 39-42 pass (--mutating, %d)"
+              % len(main_fx), len(main_fx) == 37 - 7 * (not mirror)
               and golden(port, main_fx, "main"))
         check("the bypass is logged loudly",
               "WARNING: DCH_SERVE_TEST_LOOPBACK=1" in text(log))
@@ -288,8 +289,8 @@ def main():
                      " ".join("%s=%s" % kv for kv in cfg["env"].items())),
                   gport is not None and golden(gport, fxs, str(n)))
             stop(gp)
-        check("golden 35-38: every server-config group ran",
-              sum(len(v) for v in groups.values()) == 4 - 2 * (not mirror))
+        check("golden 35-38 and 43: every server-config group ran",
+              sum(len(v) for v in groups.values()) == 5 - 2 * (not mirror))
 
         # --- 0x18 ---------------------------------------------------------
         s = conn(port)
@@ -300,8 +301,8 @@ def main():
               and info.get("proto") == "1.1" and info.get("hostname")
               and info.get("name") and info.get("os")
               and re.fullmatch(r"[0-9a-f]{64}", info.get("device_id", "")))
-        check("ops lists create (and ctl) with --allow-create",
-              info.get("ops") == ["create", "ctl", "watch"])
+        check("ops lists create (and ctl, ctl-cancel) with --allow-create",
+              info.get("ops") == ["create", "ctl", "ctl-cancel", "watch"])
         send(s, 0x08, {"proto": "2.0"})
         t, pl = frame(s)
         check("a newer proto major gets 0x13",
@@ -353,6 +354,20 @@ def main():
                 time.sleep(0.05)
             check("--follow streams; the client's close ends that dch",
                   t == 0x31 and gone)
+            # #118: a 0x34, then the FIN at once: the 0x33 still comes
+            s = conn(port)
+            send(s, 0x30, {"argv": ["--follow", "svc-ctl"]})
+            frame(s)
+            send(s, 0x34)
+            s.shutdown(socket.SHUT_WR)
+            try:
+                t, pl = frame_not(s, (0x10, 0x31))
+            except (EOFError, OSError):
+                t, pl = None, b""
+            check("a 0x34 then the FIN: 0x33 why cancel, then the close",
+                  t == 0x33 and json.loads(pl) == {"exit": 2, "why": "cancel"}
+                  and s.recv(1) == b"")
+            s.close()
         subprocess.run([DCH, "-k", "svc-ctl"], env=env, capture_output=True,
                        timeout=15)
 
@@ -521,7 +536,7 @@ def main():
         send(s, 0x08)
         info = json.loads(frame(s)[1])
         check("no create in ops without --allow-create (ctl is)",
-              info.get("ops") == ["ctl", "watch"])
+              info.get("ops") == ["ctl", "ctl-cancel", "watch"])
         check("device_id is stable across runs", info["device_id"] == dev1)
         send(s, 0x02, {"name": "svc-nope"})
         t, pl = frame(s)

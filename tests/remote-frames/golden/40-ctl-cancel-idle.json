@@ -1,0 +1,30 @@
+{
+  "id": "40-ctl-cancel-idle",
+  "about": "A 0x34 (cancel) with no ctl running is ignored, and the connection still takes a 0x30: --spawn, 0x31 with the name, 0x33 exit 0. Starts the session 41-42 use.",
+  "requires_op": "ctl-cancel",
+  "mutating": true,
+  "dch_mirror": true,
+  "steps": [
+    {
+      "send": "34 00000000"
+    },
+    {
+      "expect_quiet": 0.3
+    },
+    {
+      "send": "30 00000041 7b2261726776223a5b222d2d737061776e222c22676f6c64656e2d313138222c222d2d73697a65222c2232307832222c222d2d222c222f62696e2f636174225d7d"
+    },
+    {
+      "expect": {
+        "type": "31",
+        "payload": "676f6c64656e2d3131380a"
+      }
+    },
+    {
+      "expect": {
+        "type": "33",
+        "payload": "7b2265786974223a307d"
+      }
+    }
+  ]
+}

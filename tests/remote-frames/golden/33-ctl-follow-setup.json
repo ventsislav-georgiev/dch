@@ -18,9 +18,6 @@
         "type": "33",
         "payload": "7b2265786974223a307d"
       }
-    },
-    {
-      "expect_close": true
     }
   ],
   "dch_mirror": true

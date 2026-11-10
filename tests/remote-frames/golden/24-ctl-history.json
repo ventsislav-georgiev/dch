@@ -1,6 +1,6 @@
 {
   "id": "24-ctl-history",
-  "about": "0x30 --history --json: the JSON as 0x31, 0x33 exit 0, the FIN.",
+  "about": "0x30 --history --json: the JSON as 0x31, 0x33 exit 0.",
   "requires_op": "ctl",
   "steps": [
     {
@@ -17,9 +17,6 @@
         "type": "33",
         "payload": "7b2265786974223a307d"
       }
-    },
-    {
-      "expect_close": true
     }
   ]
 }

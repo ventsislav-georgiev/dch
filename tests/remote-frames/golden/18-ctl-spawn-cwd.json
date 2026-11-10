@@ -1,6 +1,6 @@
 {
   "id": "18-ctl-spawn-cwd",
-  "about": "0x30 --spawn with a cwd (create on): one 0x31 with the name, 0x33 exit 0, then the FIN. Starts the session 19-25 use.",
+  "about": "0x30 --spawn with a cwd (create on): one 0x31 with the name, 0x33 exit 0. Starts the session 19-25 use.",
   "requires_op": "ctl",
   "mutating": true,
   "steps": [
@@ -18,9 +18,6 @@
         "type": "33",
         "payload": "7b2265786974223a307d"
       }
-    },
-    {
-      "expect_close": true
     }
   ]
 }

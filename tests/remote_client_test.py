@@ -208,7 +208,8 @@ def ctl_checks(dch, check, senv, cenv, serve_at, procs, fakes, tmp, hosts):
     """#114: each control verb on srv (a dch serve with --allow-create)
     prints and exits exactly as the same verb run there locally: the local
     one on session ctl-qa, the remote one on ctl-qb, read as ctl-qb."""
-    port = serve_at(os.path.join(tmp, "serve-ctl.log"), "--allow-create")
+    slog = os.path.join(tmp, "serve-ctl.log")
+    port = serve_at(slog, "--allow-create")
     check("a dch serve --allow-create for the control verbs",
           port is not None)
     if port is None:
@@ -298,6 +299,23 @@ def ctl_checks(dch, check, senv, cenv, serve_at, procs, fakes, tmp, hosts):
             rc = pr.wait()
         check("ctl --follow into a closed pipe: exit 0, as the local one",
               first == b"dch-frame" and rc == 0, (first, rc))
+        # #118: Ctrl-C cancels it on the host (a 0x34), then dies of SIGINT
+        pr = subprocess.Popen([DCH] + H + ["--follow", "srv:fc"], env=cenv,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              stdin=subprocess.DEVNULL)
+        first = pr.stdout.read(9)
+        pr.send_signal(signal.SIGINT)
+        try:
+            _, err = pr.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            pr.kill()
+            _, err = pr.communicate()
+        with open(slog) as f:
+            cut = f.read().count("ctl cut short: cancel")
+        check("ctl --follow, SIGINT: a 0x34 each (closed pipe too), "
+              "then the signal's death, quietly",
+              first == b"dch-frame" and pr.returncode == -signal.SIGINT
+              and err == b"" and cut == 2, (first, pr.returncode, err, cut))
     dch(senv, "-k", "fc")
 
     # what the client refuses itself, and what the host refuses

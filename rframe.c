@@ -122,16 +122,17 @@ copy_str(char *dst, size_t cap, const char *src)
 /* ---- the frame parser (pure; tests/fuzz/fuzz_serve.c) ---------------- */
 
 /* The frames buffered whole: from a client, the core subset's requests and
-** 1.1's ctl (0x30); from a server, the replies a dch client reads (hello,
-** list, exit, error, ok, a ctl's exit 0x33). Everything else streams (a
-** ctl's output, 0x31 and 0x32, too). */
+** 1.1's ctl (0x30, and #118's 0x34 cancel); from a server, the replies a
+** dch client reads (hello, list, exit, error, ok, a ctl's exit 0x33).
+** Everything else streams (a ctl's output, 0x31 and 0x32, too). */
 static int
 rf_control(const struct rf_state *st, unsigned int t)
 {
 	if (st->from_server)
 		return t == 0x11 || t == 0x12 || t == 0x13 || t == 0x14 ||
 		       t == 0x18 || t == 0x33;
-	return (t >= 0x01 && t <= 0x09) || t == 0x2e || t == 0x30;
+	return (t >= 0x01 && t <= 0x09) || t == 0x2e || t == 0x30 ||
+	       t == 0x34;
 }
 
 /* The next piece of a peer's byte stream b[0..n): a client's, or with

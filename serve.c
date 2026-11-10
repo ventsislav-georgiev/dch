@@ -25,8 +25,12 @@
 ** ctl (1.1, #114): a 0x30 runs one allowlisted dch verb (rframe.c's
 ** ctl_check) as a child of the handler, its pipes in the same poll loop:
 ** its output streams out as 0x31/0x32 while the client keeps up, its exit
-** comes as 0x33, then the FIN. A cap, a timeout or the client's close ends
-** it (SIGTERM, then SIGKILL).
+** comes as 0x33. A cap, a timeout, a 0x34 (cancel, #118) or the client's
+** close ends it (SIGTERM, then SIGKILL). Each 0x30 that runs gets exactly
+** one 0x33; after it the connection stays open (warm) for the next 0x30,
+** until CTL_IDLE_MS without a frame. A 0x30 while one runs is refused with
+** a 0x13 "busy" and the running one goes on; any other refused 0x30 is a
+** 0x13, then the FIN. A 0x34 with no ctl running is ignored.
 */
 #include "dtach.h"
 #include "rframe.h"
@@ -56,6 +60,9 @@
 ** Ended by another client; do not auto-retry. */
 #define TAKEN_JSON "{\"code\":\"taken\",\"message\":\"another client " \
                    "attached to this session\"}"
+/* A 0x30 while this connection's ctl runs (#118): refused, nothing closes */
+#define BUSY_JSON "{\"code\":\"busy\",\"message\":\"a ctl is already " \
+                  "running on this connection\"}"
 #define PTY_CHUNK 32768		/* a pty 0x10 frame, as Prosper's */
 #define OUT_HIGH 65536		/* past this unsent, stop making more output */
 #define PIN_MAX 65536		/* client bytes waiting for the pty */
@@ -82,6 +89,7 @@
 				** 600 s for an agent itself */
 #define CTL_CAP (8u << 20)	/* a ctl's stdout and stderr together */
 #define CTL_GRACE_MS 2000	/* a cut ctl: SIGTERM, then SIGKILL */
+#define CTL_IDLE_MS 300000	/* a warm ctl connection, no frame: closes */
 #define CTL_CHUNK 65536
 
 static void slog(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
@@ -714,8 +722,9 @@ build_hello(void)
 	sb_q(&g_hello, host);
 	sb_s(&g_hello, ",\"name\":");
 	sb_q(&g_hello, host);
-	sb_s(&g_hello, g_allow_create ? ",\"ops\":[\"create\",\"ctl\",\"watch\"]"
-	                              : ",\"ops\":[\"ctl\",\"watch\"]");
+	sb_s(&g_hello, g_allow_create
+	     ? ",\"ops\":[\"create\",\"ctl\",\"ctl-cancel\",\"watch\"]"
+	     : ",\"ops\":[\"ctl\",\"ctl-cancel\",\"watch\"]");
 	sb_s(&g_hello, ",\"os\":");
 	sb_q(&g_hello, os);
 	sb_s(&g_hello, ",\"proto\":\"1.1\",\"server\":\"dch\"}");
@@ -747,9 +756,10 @@ struct conn
 	long long next_poll, last_sent;
 	int eof, closing, guard_close;
 	long long last_frame, last_write, eof_at;
-	/* a ctl (0x30, #114): the dch it runs, its stdout and stderr (-1
-	** at EOF), what went out of them, its timeout (0 none) and, once
-	** cut ("cap", "timeout"), when SIGKILL follows the SIGTERM */
+	/* a ctl (0x30, #114): the dch it runs (0 none yet, -1 done: warm),
+	** its stdout and stderr (-1 at EOF), what went out of them, its
+	** timeout (0 none) and, once cut ("cap", "timeout", "cancel"), when
+	** SIGKILL follows the SIGTERM */
 	pid_t ctl;
 	int ctl_fd[2], ctl_st, ctl_reaped;
 	size_t ctl_sent;
@@ -760,6 +770,7 @@ struct conn
 static struct conn C;	/* one connection per handler process */
 static long g_ctl_ms;		/* DCH_CTL_TIMEOUT_MS (tests): every ctl's */
 static size_t g_ctl_cap = CTL_CAP;	/* DCH_CTL_CAP (tests), at most 8 MiB */
+static long g_ctl_idle = CTL_IDLE_MS;	/* DCH_CTL_IDLE_MS (tests) */
 /* SIGUSR1 from the parent: a newer attach took this handler's session */
 static volatile sig_atomic_t g_taken;
 static char rq_text[RF_CTRL_MAX + 3];
@@ -1258,10 +1269,24 @@ ctl_read(struct conn *c, int k)
 	}
 }
 
+/* What a client's 0x30 or 0x34 does (#118), by the connection's ctl (0
+** none yet, > 0 running, -1 done) and why it was cut (NULL not cut). Pure,
+** so fuzz_serve runs frame sequences through it. */
+enum { CA_IGNORE, CA_RUN, CA_BUSY, CA_CANCEL };
+
+static int
+ctl_action(unsigned int type, pid_t ctl, const char *why)
+{
+	if (type == 0x30)
+		return ctl > 0 ? CA_BUSY : CA_RUN;
+	return type == 0x34 && ctl > 0 && !why ? CA_CANCEL : CA_IGNORE;
+}
+
 /* 0x30: dch itself with the request's argv, no shell, stdin /dev/null, in
 ** its cwd or else HOME. Refused (a 0x13, nothing runs): anything off the
-** allowlist, a create verb with create off, a cwd that is no directory.
-** The connection's last request: after its 0x33 (or its 0x13) the FIN. */
+** allowlist, a create verb with create off, a cwd that is no directory;
+** then the FIN. Not called while a ctl runs (ctl_action: a 0x13 "busy").
+** After its 0x33 the connection takes the next 0x30 (#118). */
 static void
 on_ctl(struct conn *c, const unsigned char *p, size_t n)
 {
@@ -1335,6 +1360,10 @@ on_ctl(struct conn *c, const unsigned char *p, size_t n)
 	nonblock(pe[0]);
 	c->closing = 0;
 	c->ctl = pid;
+	c->ctl_reaped = 0;
+	c->ctl_sent = 0;
+	c->ctl_kill = 0;
+	c->ctl_why = NULL;
 	c->ctl_fd[0] = po[0];
 	c->ctl_fd[1] = pe[0];
 	c->ctl_end = g_ctl_ms > 0 ? now_ms() + g_ctl_ms	/* --follow's too */
@@ -1345,7 +1374,8 @@ on_ctl(struct conn *c, const unsigned char *p, size_t n)
 }
 
 /* A running ctl, each turn of the loop: reaped, timed out, killed after
-** its grace; once reaped and its pipes drained, the 0x33 and the FIN. The
+** its grace; once reaped and its pipes drained, the 0x33, and the
+** connection is warm (its idle clock starts). The
 ** exit is dch's status, 128 + the signal when one ended it, or 2 with a
 ** "why" when the server cut it. */
 static void
@@ -1385,7 +1415,7 @@ ctl_tick(struct conn *c, long long now)
 	slog("%s: ctl done: %s", c->ipstr, b.bad ? "?" : b.p);
 	free(b.p);
 	c->ctl = -1;
-	c->closing = 1;
+	c->last_frame = now;
 }
 
 /* The ctl on a connection that ends: SIGTERM (--stop and --say finish
@@ -1560,7 +1590,19 @@ on_frame(struct conn *c, unsigned int type, const unsigned char *p,
 		on_snapshot(c);
 		break;
 	case 0x30:
-		on_ctl(c, p, n);
+	case 0x34:		/* cancel: ignored with no ctl running, or once cut */
+		switch (ctl_action(type, c->ctl, c->ctl_why))
+		{
+		case CA_RUN:
+			on_ctl(c, p, n);
+			break;
+		case CA_BUSY:	/* the running one goes on: nothing closes */
+			out_frame(c, 0x13, BUSY_JSON, sizeof BUSY_JSON - 1);
+			break;
+		case CA_CANCEL:
+			ctl_cut(c, "cancel");
+			break;
+		}
 		break;
 	case 0x05:		/* resize: no reply */
 		if (c->pty >= 0 && rq_json(&jp, rq_text, p, n) == 0)
@@ -1839,12 +1881,13 @@ serve_conn(int fd, uint32_t ip)
 		}
 		if (c->watching && !c->closing)
 			watch_tick(c, now);
-		if (!c->closing && !c->ctl)
+		if (!c->closing)
 			parse_input(c);
 		ctl_tick(c, now);
-		if (c->eof && c->ctl > 0)
+		if (c->eof && c->ctl > 0 && !c->ctl_why)
 		{
-			/* a ctl's client is gone (a FIN is a close here) */
+			/* a ctl's client is gone (a FIN is a close here); one
+			** already cut (a 0x34 before the FIN) still gets its 0x33 */
 			slog("%s: closed by the client; stopping its ctl",
 			     c->ipstr);
 			break;
@@ -1871,7 +1914,7 @@ serve_conn(int fd, uint32_t ip)
 			c->closing = 1;
 		}
 		/* The client's FIN: answer every frame it sent first. */
-		if (c->eof && !c->closing && c->parse_need &&
+		if (c->eof && !c->closing && c->ctl <= 0 && c->parse_need &&
 		    (!c->pinlen || now - c->eof_at > LINGER_MS))
 			c->closing = 1;
 		if (out_flush(c) < 0)
@@ -1887,8 +1930,8 @@ serve_conn(int fd, uint32_t ip)
 			     c->ipstr, STALL_MS / 1000);
 			break;
 		}
-		if (!c->attached && !c->watching && !c->closing && !c->ctl &&
-		    now - c->last_frame >= IDLE_MS)
+		if (!c->attached && !c->watching && !c->closing && c->ctl <= 0 &&
+		    now - c->last_frame >= (c->ctl ? g_ctl_idle : IDLE_MS))
 		{
 			slog("%s: idle; closing", c->ipstr);
 			break;
@@ -2401,8 +2444,11 @@ serve_main(int argc, char **argv)
 	if ((e = getenv("DCH_CTL_CAP")) && atol(e) > 0 &&
 	    (unsigned long)atol(e) < CTL_CAP)
 		g_ctl_cap = (size_t)atol(e);
+	if ((e = getenv("DCH_CTL_IDLE_MS")) && atol(e) > 0)
+		g_ctl_idle = atol(e);
 	unsetenv("DCH_CTL_TIMEOUT_MS");
 	unsetenv("DCH_CTL_CAP");
+	unsetenv("DCH_CTL_IDLE_MS");
 
 	/* The tailscale CLI, absolute, for execv. */
 	ts_find();
@@ -2589,7 +2635,8 @@ serve_main(int argc, char **argv)
 	nonblock(np[1]);
 	g_notify = np[1];
 	slog("listening on %s:%ld (dch %s, proto 1.1, ops: %s)", ipstr, port,
-	     DCH_VERSION, g_allow_create ? "create, ctl, watch" : "ctl, watch");
+	     DCH_VERSION, g_allow_create ? "create, ctl, ctl-cancel, watch"
+	                                 : "ctl, ctl-cancel, watch");
 	if (g_gate.self_uid >= 0)
 		slog("accepting nodes of user %lld%s", g_gate.self_uid,
 		     g_gate.nallow ? " and --allow-user" : "");

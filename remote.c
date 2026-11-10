@@ -43,7 +43,9 @@
 ** Control verbs (#114): dch_remote_ctl sends one 0x30 (the verb's argv,
 ** the host: off its names) on a connection of its own once the 0x18 lists
 ** "ctl", and writes the 0x31/0x32 bytes out as they come; 0x33's exit is
-** its own.
+** its own. SIGINT, SIGTERM or a closed stdout (EPIPE) cancels it (#118):
+** a 0x34 when the host lists "ctl-cancel", then its 0x33 for a moment;
+** else the close, which the host takes as one.
 **
 ** ponytail: no 0x2e watch stream (the picker re-probes every RM_EVERY_MS),
 ** and no remote kill, rename or create from the picker: those need a
@@ -99,6 +101,8 @@
 #endif
 #define RM_BG_MS 2000		/* the picker's background probe */
 #define RM_ATTACH_MS 5000	/* -a: connect, hello and list */
+#define RM_CANCEL_MS 3000	/* a ctl's 0x34 sent: its 0x33 within this
+				** (the server's SIGKILL comes at 2 s) */
 #define RM_EVERY_MS 2000	/* the picker re-probes this often */
 #define RM_FRESH_S 10		/* the picker: older rows show as stale */
 #define RM_TTL_S 120		/* a silent host's cached rows, this long */
@@ -2340,18 +2344,30 @@ ctl_payload(struct sb *b, int argc, char **argv, const char *cwd)
 	free(j.p);
 }
 
+static volatile sig_atomic_t g_ctl_sig;	/* SIGINT or SIGTERM: cancel */
+
+static void
+ctl_sig(int sig)
+{
+	g_ctl_sig = sig;
+	signal(sig, SIG_DFL);	/* a second one ends us at once */
+}
+
 /* The ctl's request out on fd, then its frames until 0x33 or 0x13: the
-** exit status (remote.h), what went wrong said on stderr. */
+** exit status (remote.h), what went wrong said on stderr. Cancelled (a
+** signal, or our stdout gone): a 0x34 when the host takes one (cancel_ok),
+** its 0x33 for up to RM_CANCEL_MS; 128 + the signal, or 0 for EPIPE. */
 static int
 ctl_run(int fd, const char *sh, const char *verb, struct sb *rq,
-        struct sb tin, struct rf_state rs)
+        struct sb tin, struct rf_state rs, int cancel_ok)
 {
+	static const unsigned char c34[] = { 0x34, 0, 0, 0, 0 };
 	struct sb out = {0}, err = {0};
 	unsigned char buf[RM_READ];
 	char msg[400] = "", why[100] = "";
 	size_t off = 0;
-	long long end = now_ms() + RM_ATTACH_MS;
-	int r = 0, xit = 1, code = 1;
+	long long end = now_ms() + RM_ATTACH_MS, cend = 0;
+	int r = 0, xit = 1, code = 1, cx = 0;	/* cx: the signal, -1 EPIPE */
 	ssize_t k;
 
 	while (off < rq->n)
@@ -2389,19 +2405,31 @@ ctl_run(int fd, const char *sh, const char *verb, struct sb *rq,
 			snprintf(msg, sizeof msg, "out of memory");
 			r = -1;
 		}
-		if (ctl_put(&out, &err) < 0)
-		{
-			r = 2;	/* our reader is gone: so are we */
-			break;
-		}
+		if (cx < 0)
+			out.n = 0;	/* our reader is gone */
+		if (ctl_put(&out, &err) < 0 && !cx)
+			cx = -1;
+		if (!cx && g_ctl_sig)
+			cx = g_ctl_sig;
 		if (r)
+			break;
+		if (cx && !cend)
+		{
+			if (!cancel_ok || send(fd, (const void *)c34, sizeof c34,
+			                       MSG_NOSIGNAL) != (ssize_t)sizeof c34)
+				break;	/* the close: the host's cancel */
+			cend = now_ms() + RM_CANCEL_MS;
+		}
+		if (cend && now_ms() >= cend)
 			break;
 		pf.fd = fd;
 		pf.events = POLLIN;
 		pf.revents = 0;
-		if (poll(&pf, 1, -1) < 0)
+		/* bounded: a signal between the check and the poll (or on
+		** Windows, where it does not interrupt one) is seen soon */
+		if ((k = poll(&pf, 1, 200)) <= 0)
 		{
-			if (sock_err() == SE_INTR)
+			if (!k || sock_err() == SE_INTR)
 				continue;
 			snprintf(msg, sizeof msg, "poll: %s",
 			         sock_str(sock_err()));
@@ -2423,8 +2451,8 @@ ctl_run(int fd, const char *sh, const char *verb, struct sb *rq,
 	free(tin.p);
 	free(out.p);
 	free(err.p);
-	if (r == 2)
-		return 0;
+	if (cx)
+		return cx < 0 ? 0 : 128 + cx;
 	if (r < 0)
 	{
 		fprintf(stderr, "dch: %s: unreachable: %s\n", sh, msg);
@@ -2540,7 +2568,10 @@ dch_remote_ctl(const char *host, int argc, char **argv, const char *cwd)
 	else
 	{
 		keepalive(p->fd);
-		rc = ctl_run(p->fd, sh, argv[0], &rq, p->in, p->rs);
+		signal(SIGINT, ctl_sig);
+		signal(SIGTERM, ctl_sig);
+		rc = ctl_run(p->fd, sh, argv[0], &rq, p->in, p->rs,
+		             hello_op(p->hello_js, "ctl-cancel"));
 		memset(&p->in, 0, sizeof p->in);
 	}
 out:
@@ -2548,5 +2579,9 @@ out:
 		probes_free(p, 1);
 	free(rq.p);
 	free(av);
+#ifndef _WIN32
+	if (g_ctl_sig && rc == 128 + g_ctl_sig)
+		raise(g_ctl_sig);	/* the shell sees the signal (now SIG_DFL) */
+#endif
 	return rc;
 }

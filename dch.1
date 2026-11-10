@@ -1418,11 +1418,16 @@ hello says
 .B \(dqproto\(dq:\(dq1.1\(dq
 and always lists
 .B ctl
+and
+.B ctl\-cancel
 in
 .B ops
 .RB ( create
 only with
-.BR \-\-allow\-create ).
+.BR \-\-allow\-create );
+a client checks the
+.B ctl\-cancel
+token, not the proto, before it sends a 0x34 or a second 0x30.
 The request is
 .B 0x30
 .BR {\(dqargv\(dq:[...],\(dqcwd\(dq:\(dq/abs\(dq} ,
@@ -1435,9 +1440,19 @@ stdout and
 .B 0x32
 stderr bytes as they come, then
 .B 0x33
-.BR {\(dqexit\(dq:\fIN\fP}
-and the FIN: one request per connection, and not on an attached or watching
-one. dch runs its own binary with fork and exec (no shell), in
+.BR {\(dqexit\(dq:\fIN\fP} ,
+exactly one per request that runs. Not on an attached or watching
+connection. After the 0x33 the connection stays open for the next 0x30 (one
+at a time); with no frame for 300 s it closes. A
+.B 0x34
+(cancel, any payload) while the verb runs ends it (SIGTERM, SIGKILL 2 s
+later) with
+.BR {\(dqexit\(dq:2,\(dqwhy\(dq:\(dqcancel\(dq} ;
+one with nothing running, or after the verb was already cut, is ignored. A
+0x30 while one runs gets 0x13
+.B {\(dqcode\(dq:\(dqbusy\(dq,...}
+and the running one goes on; nothing closes. dch runs its own binary with
+fork and exec (no shell), in
 .B cwd
 or else
 .BR $HOME ,
@@ -1465,7 +1480,8 @@ a session name that passes the attach name check and does not start with
 .fi
 .RE
 .PP
-Anything else is refused with an uncoded 0x13 and nothing runs: an argv of
+Anything else is refused with an uncoded 0x13, then the FIN, and nothing
+runs: an argv of
 fewer than 2 elements, a verb or flag off that list, a bad name, a name
 with
 .B :
@@ -1503,14 +1519,18 @@ none for
 .BR \-\-follow ,
 60 s for the rest; past it, the same with
 .BR \(dqwhy\(dq:\(dqtimeout\(dq .
-A client that closes the connection ends its verb the same way. The gate is
+A client that closes the connection while its verb runs ends it the same
+way, with no 0x33 (one that sent a 0x34 first still gets it). The gate is
 attach's. For tests,
 .B DCH_CTL_TIMEOUT_MS
 replaces every timeout
 .RB ( \-\-follow 's
-too) and
+too),
 .B DCH_CTL_CAP
-lowers the cap; both are read at startup and removed from the environment.
+lowers the cap and
+.B DCH_CTL_IDLE_MS
+the warm connection's 300 s; all are read at startup and removed from the
+environment.
 .PP
 .B DCH_SERVE_TEST_LOOPBACK=1
 with a loopback
@@ -1618,6 +1638,12 @@ and exits 7. The host's own refusal of the request prints
 and exits 1; a refusal by its gate exits 4. A verb the host cut short exits
 2 and prints
 .IR "dch: host: verb stopped by the host (cap|timeout)" .
+SIGINT (Ctrl-C), SIGTERM or a closed standard output cancel the verb on the
+host: a 0x34 when its hello lists
+.BR ctl\-cancel ,
+then up to 3 s for its 0x33 (else the close, which ends it there too). dch
+then dies of the signal, or exits 0 for a closed output. A second signal
+ends it at once.
 .PP
 Every name and message a peer sends is printed with control characters
 escaped as \fI\\xNN\fP
