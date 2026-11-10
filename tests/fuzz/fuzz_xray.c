@@ -2,19 +2,26 @@
 ** in the querying process (K3), over a transcript or a ring the session
 ** controls, so every byte here is hostile.
 **
-** Input: byte 0 picks the decoder, the rest is its input.
-**   even: a Claude JSONL transcript, cut at '\n' as xr_claude_read cuts it
-**         (a line past XR_LINE_MAX goes in as oversized), then the
-**         chapters printed through xr_print;
-**   odd:  ring records as MSG_RING_READ carries them ({u16 len, u8 kind,
-**         u8 flags, u32 time, text}), through xr_shell_chapters, then
-**         printed; byte 0's high bits pick an output cap squeeze.
-** Every chapter's title must be valid UTF-8 of at most XR_TITLE_MAX
-** scalars, and the printed object one line. */
+** Input: byte 0's low 2 bits pick the decoder, the rest is its input.
+**   0: a Claude JSONL transcript, cut at '\n' here (a line past xr_lim.line
+**      goes in as oversized);
+**   1: ring records ({u16 len, u8 kind, u8 flags, u32 time, text}), a short
+**      tail taken as what is left, through xr_shell_chapters;
+**   2: a Claude transcript as a file, through xr_claude_read (read_range:
+**      the chunking, the line cap, the head and tail ranges);
+**   3: one MSG_RING_READ reply: u32 count LE, then its record bytes, through
+**      xr_ring_walk (dch.c's reply walker) into xr_shell_feed.
+** Byte 0's high bits squeeze xr_lim (fuzz only): the output cap to 8-64K,
+** the read chunk to 16 B or 4093 B, the line cap to 64 B, the ranges to a
+** 128 B head and a 256 B tail, so a small input reaches every cap.
+** Then the chapters are printed through xr_print. Every chapter's title must
+** be valid UTF-8 of at most XR_TITLE_MAX scalars, and the printed object one
+** line, within the output cap. */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include "../../xray.h"
 
 int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n);
@@ -68,19 +75,97 @@ emit(struct xr_chapters *c, int shell)
 		abort();
 	fclose(f);
 	if (!bl || buf[bl - 1] != '\n' || memchr(buf, '\n', bl - 1) ||
-	    bl > XR_OUT_MAX)
+	    bl > xr_lim.out)
 		abort();
 	free(buf);
+}
+
+struct walk
+{
+	struct xr_shell sh;
+	uint32_t got;
+	uint64_t next;
+};
+
+static void
+walk_rec(void *ctx, const struct xr_rec *x)
+{
+	struct walk *w = ctx;
+
+	if (x->seq != w->next++)
+		abort();	/* seqs run from first, one per record */
+	w->got++;
+	xr_shell_feed(&w->sh, x);
+}
+
+/* The transcript file mode 2 reads: one per process, rewritten per input. */
+static int
+tfile(void)
+{
+	static int fd = -1;
+	char path[] = "/tmp/fuzz_xray.XXXXXX";
+
+	if (fd < 0 && (fd = mkstemp(path)) >= 0)
+		unlink(path);
+	return fd;
 }
 
 int
 LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 {
-	struct xr_chapters c;
+	static const size_t outs[] = {XR_OUT_MAX, 8192, 16384, 65536};
+	struct xr_chapters c = {0};
+	unsigned sq;
 
 	if (!n)
 		return 0;
-	if (!(d[0] & 1))
+	sq = d[0] >> 2;
+	xr_lim.out = outs[sq & 3];
+	xr_lim.head = sq & 4 ? 128 : XR_HEAD_RANGE;
+	xr_lim.tail = sq & 4 ? 256 : XR_TAIL_RANGE;
+	xr_lim.chunk = sq & 8 ? 16 : sq & 16 ? 4093 : XR_CHUNK;
+	xr_lim.line = sq & 32 ? 64 : XR_LINE_MAX;
+	if ((d[0] & 3) == 2)
+	{
+		struct xr_claude *x = xr_claude_new();
+		int fd = tfile(), capped;
+
+		if (!x)
+			return 0;
+		if (fd >= 0 && ftruncate(fd, 0) == 0 &&
+		    pwrite(fd, d + 1, n - 1, 0) == (ssize_t)(n - 1) &&
+		    xr_claude_read(x, fd, n - 1, &capped) == 0 &&
+		    capped != (n - 1 > xr_lim.head + xr_lim.tail))
+			abort();	/* capped is exactly "past the ranges" */
+		xr_claude_end(x, 0x1234, &c);
+		xr_claude_free(x);
+	}
+	else if ((d[0] & 3) == 3)
+	{
+		struct walk w;
+		uint32_t count;
+		unsigned char *b;
+		long long r;
+
+		if (n < 5)
+			return 0;
+		count = (uint32_t)d[1] | (uint32_t)d[2] << 8 |
+		        (uint32_t)d[3] << 16 | (uint32_t)d[4] << 24;
+		/* an exact block: ASan must see a read past the reply */
+		if (!(b = malloc(n - 5 ? n - 5 : 1)))
+			return 0;
+		memcpy(b, d + 5, n - 5);
+		memset(&w, 0, sizeof w);
+		w.next = 1000;
+		xr_shell_begin(&w.sh, &c);
+		r = xr_ring_walk(b, n - 5, 1000, count, walk_rec, &w);
+		if (r >= 0 && ((size_t)r != n - 5 || w.got != count))
+			abort();	/* whole means every byte, every record */
+		if (w.got > count)
+			abort();
+		free(b);
+	}
+	else if (!(d[0] & 1))
 	{
 		struct xr_claude *x = xr_claude_new();
 		size_t i = 1, s = 1;
@@ -90,7 +175,7 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		for (; i <= n; i++)
 			if (i == n || d[i] == '\n')
 			{
-				int big = i - s > XR_LINE_MAX;
+				int big = i - s > xr_lim.line;
 				char *l = big ? NULL : malloc(i - s + 1);
 
 				if (i > s && (big || l))

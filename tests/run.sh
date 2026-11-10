@@ -984,6 +984,9 @@ fi
 if [ -f master.o ] && command -v nm >/dev/null 2>&1; then
     xrsym=$(nm master.o 2>/dev/null | grep -cE ' _?xr_')
     check "the master links no x-ray engine symbol (nm master.o)" "$xrsym" "0"
+else
+    printf '  skip the master links no x-ray engine symbol (%s)\n' \
+        "$( [ -f master.o ] && echo 'no nm' || echo 'no master.o')"
 fi
 pyrun "xray goldens: chapters, identity, corpus labels, MANIFEST" xray_golden.py
 if [ "$MIRROR" = "1" ]; then

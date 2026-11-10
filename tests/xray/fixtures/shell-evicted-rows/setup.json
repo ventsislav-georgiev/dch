@@ -1,1 +1,1 @@
-{"schema":1,"config":["xray_ring = 128K"],"live":{"box":{"session_id":"m4d5e6f7a8b9c0d1e"}}}
+{"schema":1,"config":["xray_ring = 16M"],"live":{"box":{"session_id":"m4d5e6f7a8b9c0d1e","status":128}}}

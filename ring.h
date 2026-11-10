@@ -60,6 +60,7 @@ struct dch_ring
 	unsigned long gen;	/* moves on every append and clear */
 	uint32_t epoch;		/* clears so far; a reader's reset trigger */
 	int chapters_evicted;	/* a prompt (or A mark) was evicted */
+	int rows_evicted;	/* any record was evicted since the last clear */
 };
 
 /* Size from the xray_ring config value ("2M", "512K", "0", bytes); -1 when

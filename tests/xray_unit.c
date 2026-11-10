@@ -91,6 +91,14 @@ t_ids(void)
 	CHECK("id: 15 or 17 hex is not", !xr_id_shaped("m0123456789abcde") &&
 	      !xr_id_shaped("m0123456789abcdef0"));
 	CHECK("id: other first letter is not", !xr_id_shaped("n0123456789abcdef"));
+	CHECK("label id: padding trimmed as the listing shows it",
+	      xr_label_id_shaped("  m0123456789abcdef", 19) &&
+	      xr_label_id_shaped("m0123456789abcdef \n", 19) &&
+	      xr_label_id_shaped("\tm0123456789abcdef\r", 19));
+	CHECK("label id: only the first n bytes, and inner text is a label",
+	      xr_label_id_shaped("m0123456789abcdefXX", 17) &&
+	      !xr_label_id_shaped("m0123456789abcdef x", 19) &&
+	      !xr_label_id_shaped("   ", 3) && !xr_label_id_shaped("", 0));
 	CHECK("uuid form", xr_uuid_form("0b1f6a52-4c1e-4d7a-9a51-2f6d8c3e7a10"));
 	CHECK("uuid form: uppercase is a name",
 	      !xr_uuid_form("0B1F6A52-4C1E-4D7A-9A51-2F6D8C3E7A10"));
@@ -342,6 +350,44 @@ rec(int kind, int flags, const char *text)
 	RN++;
 }
 
+static int walked;
+static uint64_t walk_seq;
+
+static void
+walk_one(void *ctx, const struct xr_rec *x)
+{
+	(void)ctx;
+	walk_seq = x->seq;
+	walked++;
+}
+
+/* dch.c's reply walker: whole replies only (F2) */
+static void
+t_walk(void)
+{
+	/* two records: "ab" (output) and "" (mark) */
+	static const unsigned char b[] = {2, 0, 3, 0, 1, 0, 0, 0, 'a', 'b',
+	                                  0, 0, 4, 0, 2, 0, 0, 0};
+
+	walked = 0;
+	CHECK("walk: a whole reply is every byte, seqs from first",
+	      xr_ring_walk(b, sizeof b, 50, 2, walk_one, NULL) == (long long)
+	      sizeof b && walked == 2 && walk_seq == 51);
+	walked = 0;
+	CHECK("walk: a record past the reply is torn, never read",
+	      xr_ring_walk(b, sizeof b - 1, 50, 2, walk_one, NULL) == -1 &&
+	      walked == 1);
+	CHECK("walk: fewer records than count is torn",
+	      xr_ring_walk(b, 10, 50, 2, walk_one, NULL) == -1);
+	CHECK("walk: bytes past count's records are torn",
+	      xr_ring_walk(b, sizeof b, 50, 1, walk_one, NULL) == -1);
+	CHECK("walk: a length past the buffer is torn",
+	      xr_ring_walk((const unsigned char *)"\xff\xff\3\0\0\0\0\0", 8,
+	                   1, 1, walk_one, NULL) == -1);
+	CHECK("walk: an empty reply of count 0 is whole",
+	      xr_ring_walk(b, 0, 1, 0, walk_one, NULL) == 0);
+}
+
 static void
 t_shell(void)
 {
@@ -537,6 +583,7 @@ main(void)
 	t_time();
 	t_read();
 	t_shell();
+	t_walk();
 	t_print();
 	printf("%s: %d failed\n", fails ? "FAIL" : "ok", fails);
 	return fails != 0;

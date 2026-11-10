@@ -27,6 +27,8 @@ void dch_remote_stop(void);
 #define DCH_EXIT_TAKEN 5	/* another client attached ("taken") */
 #define DCH_EXIT_UNSUPPORTED 6	/* a ctl verb the host's serve lacks (#114) */
 #define DCH_EXIT_UNREACHABLE 7	/* a ctl's host could not be reached (#114) */
+/* host is a named host (--hosts, remote_hosts) or a cached row's. */
+int dch_remote_known(const char *host);
 int dch_remote_attach(const char *host, const char *name);
 /* A control verb on a remote host (#114): argv is the verb's own (argv[0] is
 ** the verb), its names host:name when host is NULL. Runs it there through

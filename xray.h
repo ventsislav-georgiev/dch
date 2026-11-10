@@ -28,6 +28,16 @@
 #define XR_PENDING     256		/* open tool calls, Prosper's bound */
 #define XR_PATH_MAX    1024		/* config_dir and cwd bound (8.1) */
 
+/* The limits above as the code reads them. Only fuzz_xray lowers them, so
+** a small input reaches every cap; never above the defaults (the buffers are
+** sized by the macros). */
+struct xr_limits
+{
+	uint64_t head, tail;		/* XR_HEAD_RANGE, XR_TAIL_RANGE */
+	size_t chunk, line, out;	/* XR_CHUNK, XR_LINE_MAX, XR_OUT_MAX */
+};
+extern struct xr_limits xr_lim;
+
 /* One chapter (3.2). at < 0 prints null. */
 struct xr_chapter
 {
@@ -55,6 +65,9 @@ const struct xr_chapter *xr_chapter_at(const struct xr_chapters *c,
 /* A live shell's session_id: "m" + 16 lowercase hex, nothing else. Also the
 ** name rule (INFO-2): no create path takes a name of this shape. */
 int xr_id_shaped(const char *s);
+/* The first n bytes of a label, ASCII whitespace trimmed as the listing
+** shows it, are id-shaped (INFO-2 for aliases). */
+int xr_label_id_shaped(const char *s, size_t n);
 /* 3.1's Claude UUID form: 36 chars of [0-9a-f-]. */
 int xr_uuid_form(const char *s);
 /* 8-4-4-4-12 lowercase-or-upper hex: the shape a path join may take. */
@@ -126,6 +139,15 @@ struct xr_shell
 };
 void xr_shell_begin(struct xr_shell *s, struct xr_chapters *out);
 void xr_shell_feed(struct xr_shell *s, const struct xr_rec *x);
+/* One MSG_RING_READ reply's records ({u16 len, u8 kind, u8 flags, u32 time,
+** text}, seqs from first), bounds-checked, to fn one at a time (x and its
+** text live until fn returns). The record bytes walked, or -1 when the
+** reply is torn: a record past bl, bytes left over, or not `count` records.
+** Records before the tear were handed over. */
+long long xr_ring_walk(const unsigned char *buf, size_t bl, uint64_t first,
+                       uint32_t count,
+                       void (*fn)(void *ctx, const struct xr_rec *x),
+                       void *ctx);
 
 /* ---- helpers ----------------------------------------------------------- */
 /* Claude Code's project-dir rule over cwd (7.1): each UTF-16 unit outside

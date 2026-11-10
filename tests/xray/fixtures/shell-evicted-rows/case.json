@@ -1,1 +1,1 @@
-{"schema":1,"about":"Rows evicted (the ring holds more than its cap less one largest record, xray_ring 128K): complete:false, why:\"range\", chapters_evicted stays false","session":"box","argv":[["--xray","box","--json"]],"display_only":[]}
+{"schema":1,"about":"Rows evicted (ring status EVICTED, the master's own fact): complete:false, why:\"range\", chapters_evicted stays false, whatever this process's xray_ring says (16M here, the ring's 128K)","session":"box","argv":[["--xray","box","--json"]],"display_only":[]}

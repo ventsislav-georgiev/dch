@@ -603,13 +603,25 @@ Must be the first argument; every other flag exits 2.
 is an agent UUID (the live session whose Claude Code has it, else the
 newest ended History record carrying it), a History record name
 .I file\fB.json\fP
-(that ended record, even when a new session took its name; a record a live
-session holds, such as a plain shell's
+(that ended record, even when a new session took its name, from History
+only: a plain shell's
 .I name\fB.json\fP
-after its name starts again, exits 1
-.IR "no such session" ),
+after its name starts again answers corpus
+.B none
+with reason
+.BR ended ,
+never the new ring),
 or a session name
 (the live session, else its newest ended record).
+A
+.I name
+with a
+.B :
+is resolved locally first; only when nothing local matches and its host is
+known (\fB\-\-hosts\fR, \fBremote_hosts\fR, a cached remote row) is it a
+remote
+.I host\fB:\fIname
+(exit 2, not supported yet).
 A Claude Code session's chapters come from its transcript, found by one
 directory listing and opened with
 .BR O_NOFOLLOW ;
@@ -619,7 +631,9 @@ is false with
 .BR why:\(dqrange\(dq .
 A shell's chapters come from its ring's OSC 133 marks: one per typed command
 block (\fBA\fR, \fBB\fR, client input, \fBC\fR, a non-blank command);
-evicted rows or a gap make
+evicted rows (the master's own status bit, reset by a clear; a dch 1.43.0
+master has none, and there only a gap, a lost range or a cut first row
+counts) or a gap make
 .B complete
 false with
 .BR why:\(dqrange\(dq .
@@ -633,14 +647,15 @@ empty a live shell session's ring through its control socket (nothing is
 typed into the session) and print
 .BR {\(dqschema\(dq:1,\(dqsession\(dq,\(dqsession_id\(dq,\(dqcorpus\(dq,\(dqring_cleared\(dq} ;
 .I name
-is first matched as a live ring's exact session_id (\fBm\fR + 16 hex),
-then as a name.
+is first matched as a live ring's exact session_id (\fBm\fR + 16 hex;
+each master is asked for its ring's header only), then as a name.
 A Claude Code session has no ring
 .RB ( ring_cleared:false ).
 Exits 1
 .I "no such session"
 (also for an ended session or a record with
-.BR \-\-clear ),
+.BR \-\-clear ,
+and when a master hangs up mid\-request),
 .I "ambiguous session"
 or, for
 .B \-\-clear
@@ -658,7 +673,7 @@ No new session or rename takes a name of exactly
 .BR \-m ,
 the pickers' rename and
 .BR "dch serve" 's
-create and rename refuse it with exit 2 and
+create and rename refuse it (also with surrounding whitespace) with exit 2 and
 .IR "name looks like a session_id" .
 .TP
 .BI \-\-send " name text..."

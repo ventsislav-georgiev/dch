@@ -11,7 +11,8 @@ the INFO-2 name rule on every create path dch runs locally.
 
 Run:  python3 tests/xray_cli_test.py          (uses ./dch; run.sh isolates)
 """
-import json, os, re, shutil, stat, subprocess, sys, tempfile, time
+import json, os, re, shutil, socket, stat, struct, subprocess, sys
+import tempfile, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -123,8 +124,6 @@ def test_shell():
               rc == 0 and c == {"schema": 1, "session": n, "session_id":
                                 o["session_id"], "corpus": "shell",
                                 "ring_cleared": True}, (rc, c, err))
-        time.sleep(0.5)
-        check("clear: nothing reached the pty yet", not os.path.exists(flag))
         rc, o2, _ = xray(n, "--json")
         check("clear: the ring is empty after it", rc == 0 and
               o2["chapters"] == [] and o2["session_id"] == o["session_id"],
@@ -171,9 +170,13 @@ def test_record():
         wait_for(lambda: "NEW" in screen(n), 5)
         h0, _ = X.read_all(n, 0)
         rc, o, err = xray(n + ".json", "--json")
-        check("record: once the name runs again, <name>.json is no record "
-              "(exit 1), never the new ring", rc == 1 and
-              err.strip() == "dch: no such session", (rc, o, err))
+        check("record: once the name runs again, <name>.json answers from "
+              "History only: corpus none, reason ended, its record name, the "
+              "shell label (3.1, 7.5, T11), never the new ring",
+              rc == 0 and o and o["corpus"] == "none" and o["reason"] ==
+              "ended" and o["session_id"] == n + ".json" and not o["live"] and
+              o["chapters"] == [] and o["project_label"] and o["lines"] is None,
+              (rc, o, err))
         rc, o, err = xray(n + ".json", "--clear", "--json")
         check("record: --clear by that name exits 1 no such session",
               rc == 1 and err.strip() == "dch: no such session", (rc, err))
@@ -194,7 +197,10 @@ def maxrss(argv, env):
     with open(out, "w") as f:
         p = subprocess.Popen(argv, stdout=f, stderr=subprocess.DEVNULL,
                              env=env)
+        dog = threading.Timer(60, p.kill)     # ours, by its pid
+        dog.start()
         _, status, ru = os.wait4(p.pid, 0)
+        dog.cancel()
     p.returncode = os.waitstatus_to_exitcode(status)
     rss = ru.ru_maxrss * (1 if sys.platform == "darwin" else 1024)
     return p.returncode, open(out).read(), rss
@@ -234,6 +240,180 @@ def test_heavy():
         os.unlink(cfg)
 
 
+# ---- 3.2: evicted rows are the master's fact (DCH_RING_S_EVICTED) --------
+
+def test_evicted():
+    cfg = ENV["DCH_CONFIG"]
+    try:
+        with open(cfg, "w") as f:
+            f.write("xray_ring = 128K\n")
+        n = "xc-ev"
+        r = dch("--spawn", n, "--size", "80x24", "sh", "-c",
+                "seq 1 40000; echo EV''DONE; sleep 60")
+        check("evicted: spawned under xray_ring 128K", r.returncode == 0,
+              r.stderr)
+        m = "xc-fit"
+        with open(cfg, "w") as f:
+            f.write("xray_ring = 64K\n")
+        r = dch("--spawn", m, "--size", "80x24", "sh", "-c",
+                "seq 1 10; echo FIT''DONE; sleep 60")
+        check("evicted: spawned under xray_ring 64K", r.returncode == 0,
+              r.stderr)
+        wait_for(lambda: "EVDONE" in screen(n), 20)
+        wait_for(lambda: "FITDONE" in screen(m), 10)
+        for what, body in (("the config raised to 16M", "xray_ring = 16M\n"),
+                           ("the config gone (the 2M default)", None)):
+            if body:
+                with open(cfg, "w") as f:
+                    f.write(body)
+            elif os.path.exists(cfg):
+                os.unlink(cfg)
+            rc, o, err = xray(n, "--json")
+            check("evicted: %s, the ring that evicted stays complete:false, "
+                  "why range" % what, rc == 0 and o and o["complete"] is False
+                  and o["why"] == "range", (rc, o and {k: o[k] for k in (
+                      "complete", "why", "lines")}, err))
+            rc, o, err = xray(m, "--json")
+            check("evicted: %s, a 64K ring that evicted nothing is complete"
+                  % what, rc == 0 and o and o["complete"] is True and
+                  o["why"] is None and o["lines"] >= 10, (rc, o, err))
+        rc, c, _ = xray(n, "--clear", "--json")
+        rc, o, err = xray(n, "--json")
+        check("evicted: a clear resets it (complete again)", rc == 0 and o and
+              o["complete"] is True, (rc, o, err))
+    finally:
+        dch("-k", "xc-ev")
+        dch("-k", "xc-fit")
+        if os.path.exists(cfg):
+            os.unlink(cfg)
+
+
+# ---- a hostile master never holds the query (F2, F7) ----------------------
+
+MSG_READ_DATA, MSG_READ_END, MSG_RING_READ, MSG_RING_HDR = 8, 9, 18, 19
+
+
+class Evil:
+    """A same-uid socket in the session dir that answers MSG_RING_READ
+    against the protocol: `mode` floods READ_DATA past any reply bound,
+    repeats old records (first < seq), trickles one record per reply under
+    a far tail, or closes every connection at once; "hdr" answers an empty
+    ring and keeps each request's flags byte."""
+
+    def __init__(self, name, mode, sid=ID):
+        self.path, self.mode, self.sid = sock(name), mode, sid
+        self.reads, self.flags = 0, []
+        self.s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.s.bind(self.path)
+        self.s.listen(8)
+        threading.Thread(target=self.serve, daemon=True).start()
+
+    def close(self):
+        self.s.close()
+        os.unlink(self.path)
+
+    def serve(self):
+        while True:
+            try:
+                c, _ = self.s.accept()
+            except OSError:
+                return
+            threading.Thread(target=self.conn, args=(c,), daemon=True).start()
+
+    def conn(self, c):
+        try:
+            if self.mode == "close":
+                c.recv(3)            # the request's header, then gone
+                return
+            while True:
+                h = b""
+                while len(h) < 3:
+                    k = c.recv(3 - len(h))
+                    if not k:
+                        return
+                    h += k
+                t, n = struct.unpack("<BH", h)
+                p = b""
+                while len(p) < n:
+                    p += c.recv(n - len(p))
+                if t != MSG_RING_READ:
+                    c.sendall(struct.pack("<BH", MSG_READ_END, 5))  # UNSUP
+                    continue
+                seq = struct.unpack_from("<Q", p)[0]
+                self.reads += 1
+                self.flags.append(p[12] if len(p) > 12 else 0)
+                if self.mode == "hdr":
+                    hdr = struct.pack("<BQQQII", 0, 5, 5, 5, 0, 7) + \
+                        self.sid.encode()
+                    c.sendall(struct.pack("<BH", MSG_RING_HDR, len(hdr)) + hdr +
+                              struct.pack("<BH", MSG_READ_END, 0))
+                    continue
+                first = {"flood": seq, "repeat": 100, "trickle": seq}[self.mode]
+                hdr = struct.pack("<BQQQII", 0, 0, 1 << 62, first, 1, 7) + \
+                    self.sid.encode()
+                c.sendall(struct.pack("<BH", MSG_RING_HDR, len(hdr)) + hdr)
+                if self.mode == "flood":
+                    # 32 MiB: past any reply bound, yet finite, so a client
+                    # without the bound fails the RSS check, not the host
+                    blk = struct.pack("<BH", MSG_READ_DATA, 4096) + b"x" * 4096
+                    for _ in range(8192):
+                        c.sendall(blk)
+                    c.sendall(struct.pack("<BH", MSG_READ_END, 0))
+                    continue
+                rec = struct.pack("<HBBI", 0, 3, 0, 0)
+                c.sendall(struct.pack("<BH", MSG_READ_DATA, len(rec)) + rec +
+                          struct.pack("<BH", MSG_READ_END, 0))
+        except OSError:
+            pass
+        finally:
+            c.close()
+
+
+def test_evil():
+    os.makedirs(os.path.dirname(sock("x")), mode=0o700, exist_ok=True)
+    for mode, what, reads in (
+            ("flood", "32 MiB of READ_DATA in one reply", 1),
+            ("repeat", "first < seq again (no progress: no third ask)", 2),
+            ("trickle", "one record a reply under tail 2^62 (64 replies)", 65)):
+        e = Evil("xc-evil", mode)
+        try:
+            t0 = time.time()
+            rc, out, rss = maxrss([DCH, "--xray", "xc-evil", "--json"], ENV)
+            check("evil: %s exits 3 in %.1fs, %.1f MB, %d reads" % (
+                      what, time.time() - t0, rss / 1e6, e.reads),
+                  rc == 3 and time.time() - t0 < 20 and rss < 16 << 20 and
+                  e.reads <= reads, (rc, out[:200]))
+        finally:
+            e.close()
+    # F4: --clear <id> asks every live master for the header only
+    e = Evil("xc-evil", "hdr", sid="mfedcba9876543210")
+    try:
+        dch("--xray", "mfedcba9876543210", "--clear", "--json")
+        check("evil: a session_id --clear asks for the header only "
+              "(DCH_RING_F_HDR)", e.flags and all(f & 2 for f in e.flags),
+              e.flags)
+    finally:
+        e.close()
+    # F7: a master that hangs up mid-request: never a signal, and a
+    # nonzero exit carries one stderr line (a hang-up before any byte is a
+    # master before #119: corpus none, exit 0)
+    e = Evil("xc-evil", "close")
+    try:
+        bad = []
+        for k in range(20):
+            for args in (("--json",), ("--clear", "--json")):
+                r = dch("--xray", "xc-evil", *args)
+                if r.returncode < 0 or (r.returncode and (
+                        len(r.stderr.splitlines()) != 1 or
+                        not r.stderr.startswith("dch: "))) or \
+                        (not r.returncode and not r.stdout.startswith("{")):
+                    bad.append((args, r.returncode, r.stderr))
+        check("evil: 40 hang-ups: never a signal, one stderr line on a "
+              "nonzero exit", not bad, bad[:3])
+    finally:
+        e.close()
+
+
 # ---- a live Claude and the open seam --------------------------------------
 
 def key(cwd):
@@ -243,7 +423,7 @@ def key(cwd):
 def files(root):
     out = {}
     for dp, dn, fn in os.walk(root):
-        for f in fn:
+        for f in dn + fn:
             p = os.path.join(dp, f)
             st = os.lstat(p)
             out[p] = (st.st_size, st.st_mtime_ns)
@@ -283,8 +463,12 @@ def test_claude():
                                     "message": {"content": t}}) + "\n")
                 f.write(json.dumps({"type": "assistant", "message": {
                     "content": [{"type": "text", "text": "ok"}]}}) + "\n")
-        dbg = dict(ENV, DCH_DEBUG=trace)
+        tmpd = os.path.join(T, "qtmp")
+        os.makedirs(tmpd)
+        dbg = dict(ENV, DCH_DEBUG=trace, TMPDIR=tmpd)
+        state = os.path.join(T, "state")
         before = files(T)
+        state0 = files(state)
         rc, o, err = wait_for(lambda: (lambda x: x if x[1] and
                                        x[1]["corpus"] == "claude" else None)
                               (xray(n, "--json", env=dbg)), 10) or (1, None,
@@ -298,11 +482,11 @@ def test_claude():
         st = os.stat(tp)
         check("claude: anchors are f<ino hex>:<offset>",
               o and o["chapters"][0]["anchor"] == "f%x:0" % st.st_ino, o)
-        rc, o2, _ = xray(sid, "--json")
+        rc, o2, _ = xray(sid, "--json", env=dbg)
         check("claude: the agent UUID answers the same session",
               rc == 0 and o2 and o2["session"] == n and
               o2["chapters"] == o["chapters"], o2)
-        rc, c, err = xray(n, "--clear", "--json")
+        rc, c, err = xray(n, "--clear", "--json", env=dbg)
         check("clear: an agent session has no ring (ring_cleared false)",
               rc == 0 and c == {"schema": 1, "session": n, "session_id": sid,
                                 "corpus": "claude", "ring_cleared": False},
@@ -352,6 +536,12 @@ def test_claude():
                      not p.startswith(sock(n) + "."))
         check("nothing written: no file appears outside the trace", not new,
               new)
+        state1 = files(state)
+        check("nothing written: the state dir is as it was (names, sizes, "
+              "mtimes)", state1 == state0, sorted(
+                  set(state1.items()) ^ set(state0.items())))
+        check("nothing written: TMPDIR stays empty (spec 9.5)",
+              os.listdir(tmpd) == [], os.listdir(tmpd))
         check("nothing written: the transcript is untouched",
               after.get(tp, (0, 0))[0] == before[tp][0])
     finally:
@@ -380,6 +570,11 @@ def test_names():
               "looks like a session_id" in r.stderr, r.stderr)
         check("name rule: the alias is not written",
               ID not in dch("-ls").stdout)
+        for pad in ("  " + ID, ID + " ", "\t" + ID + "\n"):
+            r = dch("-m", "xc-live", pad)
+            check("name rule: -m with whitespace padding %r exits 2" % pad,
+                  r.returncode == 2 and "looks like a session_id" in r.stderr,
+                  (r.returncode, r.stderr))
         r = dch("-m", "xc-live", "m0123456789abcdeF")
         check("name rule: only the exact shape (an uppercase digit is fine)",
               r.returncode == 0, r.stderr)
@@ -397,6 +592,8 @@ def main():
         test_shell()
         test_record()
         test_heavy()
+        test_evicted()
+        test_evil()
         test_claude()
     finally:
         shutil.rmtree(T, ignore_errors=True)

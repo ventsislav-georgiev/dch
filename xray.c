@@ -30,6 +30,8 @@ void dch_trace(const char *fmt, ...)
 	;
 
 unsigned long xr_seam_opened, xr_seam_refused;
+struct xr_limits xr_lim = {XR_HEAD_RANGE, XR_TAIL_RANGE, XR_CHUNK, XR_LINE_MAX,
+                           XR_OUT_MAX};
 
 /* ---- UTF-8 and Unicode classes ----------------------------------------- */
 
@@ -215,6 +217,22 @@ xr_id_shaped(const char *s)
 		if (!((s[k] >= '0' && s[k] <= '9') || (s[k] >= 'a' && s[k] <= 'f')))
 			return 0;
 	return s[17] == '\0';
+}
+
+int
+xr_label_id_shaped(const char *s, size_t n)
+{
+	char b[18];
+
+	while (n && (*s == ' ' || (*s >= '\t' && *s <= '\r')))
+		s++, n--;
+	while (n && (s[n - 1] == ' ' || (s[n - 1] >= '\t' && s[n - 1] <= '\r')))
+		n--;
+	if (n != 17)
+		return 0;
+	memcpy(b, s, 17);
+	b[17] = '\0';
+	return xr_id_shaped(b);
 }
 
 int
@@ -1349,7 +1367,8 @@ read_range(struct xr_claude *d, int fd, uint64_t from, uint64_t to, int mid,
 	}
 	while (pos < to)
 	{
-		size_t want = to - pos > XR_CHUNK ? XR_CHUNK : (size_t)(to - pos);
+		size_t want = to - pos > xr_lim.chunk ? xr_lim.chunk
+		              : (size_t)(to - pos);
 		ssize_t got = pread(fd, buf, want, (off_t)pos);
 		size_t i = 0;
 
@@ -1364,7 +1383,7 @@ read_range(struct xr_claude *d, int fd, uint64_t from, uint64_t to, int mid,
 
 			if (!drop && !skipping)
 			{
-				if (fill + seg > XR_LINE_MAX)
+				if (fill + seg > xr_lim.line)
 				{
 					skipping = 1;
 					fill = 0;
@@ -1413,14 +1432,14 @@ xr_claude_read(struct xr_claude *d, int fd, uint64_t size, int *capped)
 	*capped = 0;
 	if (buf && acc)
 	{
-		if (size <= XR_HEAD_RANGE + XR_TAIL_RANGE)
+		if (size <= xr_lim.head + xr_lim.tail)
 			rc = read_range(d, fd, 0, size, 0, buf, acc);
 		else
 		{
 			*capped = 1;
-			rc = read_range(d, fd, 0, XR_HEAD_RANGE, 0, buf, acc);
+			rc = read_range(d, fd, 0, xr_lim.head, 0, buf, acc);
 			if (rc == 0)
-				rc = read_range(d, fd, size - XR_TAIL_RANGE, size, 1,
+				rc = read_range(d, fd, size - xr_lim.tail, size, 1,
 				                buf, acc);
 		}
 	}
@@ -1430,6 +1449,35 @@ xr_claude_read(struct xr_claude *d, int fd, uint64_t size, int *capped)
 }
 
 /* ---- shell ring ------------------------------------------------------------ */
+
+long long
+xr_ring_walk(const unsigned char *buf, size_t bl, uint64_t first,
+             uint32_t count, void (*fn)(void *ctx, const struct xr_rec *x),
+             void *ctx)
+{
+	size_t off = 0;
+	uint32_t got = 0;
+
+	while (off + 8 <= bl && got < count)
+	{
+		size_t l = (size_t)buf[off] | (size_t)buf[off + 1] << 8;
+		struct xr_rec x;
+
+		if (l > bl - off - 8)
+			return -1;
+		x.seq = first + got;
+		x.kind = buf[off + 2];
+		x.flags = buf[off + 3];
+		x.t = (uint32_t)buf[off + 4] | (uint32_t)buf[off + 5] << 8 |
+		      (uint32_t)buf[off + 6] << 16 | (uint32_t)buf[off + 7] << 24;
+		x.text = (const char *)buf + off + 8;
+		x.len = l;
+		fn(ctx, &x);
+		got++;
+		off += 8 + l;
+	}
+	return off == bl && got == count ? (long long)off : -1;
+}
 
 /* D;<n>'s exit status. Record text is not NUL-terminated: copy first. */
 static long
@@ -1710,7 +1758,7 @@ xr_print(FILE *f, const struct xr_answer *a)
 	slack = 4096 + 6 * (strlen(a->session) + strlen(a->session_id) +
 	                    (a->project ? strlen(a->project) : 0) +
 	                    (a->project_label ? strlen(a->project_label) : 0));
-	while (cut < n && bl - at[cut] + slack > XR_OUT_MAX)
+	while (cut < n && bl - at[cut] + slack > xr_lim.out)
 		cut++;
 	if (cut)
 	{

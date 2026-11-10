@@ -176,6 +176,7 @@ ring_clear(struct dch_ring *r)
 	r->head = r->tail;
 	r->head_seq = r->tail_seq;
 	r->chapters_evicted = 0;
+	r->rows_evicted = 0;
 	r->epoch++;
 	r->gen++;
 }
@@ -264,6 +265,7 @@ evict_one(struct dch_ring *r)
 		ring_get(r, r->head + RING_HDR, &c, 1);
 	if (h[2] == RING_K_PROMPT || c == 'A')
 		r->chapters_evicted = 1;
+	r->rows_evicted = 1;
 	r->head += RING_HDR + len;
 	r->head_seq++;
 }
@@ -423,13 +425,15 @@ ring_export_size(const struct dch_ring *r)
 	return EXPORT_HDR + (size_t)(r->tail - r->head);
 }
 
-/* magic[8] | u32 flags | u64 cap | u64 head_seq | u64 count | u64 used |
+/* flags: 1 chapters evicted, 2 rows evicted.
+** magic[8] | u32 flags | u64 cap | u64 head_seq | u64 count | u64 used |
 ** u32 epoch | used bytes of records, oldest first */
 void
 ring_export(const struct dch_ring *r, unsigned char *out)
 {
 	memcpy(out, EXPORT_MAGIC, 8);
-	le_put(out + 8, r->chapters_evicted ? 1 : 0, 4);
+	le_put(out + 8, (r->chapters_evicted ? 1 : 0) | (r->rows_evicted ? 2 : 0),
+	       4);
 	le_put(out + 12, r->cap, 8);
 	le_put(out + 20, r->head_seq, 8);
 	le_put(out + 28, r->tail_seq - r->head_seq, 8);
@@ -491,6 +495,8 @@ ring_import(struct dch_ring *r, const unsigned char *buf, size_t len)
 	}
 	if (le_get(buf + 8, 4) & 1)
 		r->chapters_evicted = 1;
+	if (le_get(buf + 8, 4) & 2)
+		r->rows_evicted = 1;
 	r->epoch = (uint32_t)le_get(buf + 44, 4);
 	r->cache_seq = r->cache_off = 0;
 	return 0;

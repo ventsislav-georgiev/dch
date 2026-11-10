@@ -418,13 +418,15 @@ def main():
                   json.loads(pl)["message"] and
                   "m0123456789abcdef" not in sessions())
             s.close()
-        s = conn(port)
-        send(s, 0x06, {"name": "svc-made", "alias": "m0123456789abcdef"})
-        t, pl = frame_not(s)
-        check("0x06 rename refuses an alias shaped like a session_id",
-              t == 0x13 and "looks like a session_id" in
-              json.loads(pl)["message"])
-        s.close()
+        for alias in ("m0123456789abcdef", " m0123456789abcdef\t"):
+            s = conn(port)
+            send(s, 0x06, {"name": "svc-made", "alias": alias})
+            t, pl = frame_not(s)
+            check("0x06 rename refuses an alias shaped like a session_id "
+                  "(%r: padding trimmed)" % alias,
+                  t == 0x13 and "looks like a session_id" in
+                  json.loads(pl)["message"])
+            s.close()
 
         # --- create with a command, exit code ----------------------------
         s = conn(port)

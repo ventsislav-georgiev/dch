@@ -13,9 +13,13 @@ Each case is a directory:
   shell/<name>.ring.ndjson  a live shell session <name>: ring records,
                    served by a test-only fake master (below)
   setup.json       what the case needs around the corpus: History records,
-                   the fake masters' ring status, config lines ("config":
-                   xray_ring sets the cap the evicted-rows check reads).
-                   Ignored by Prosper.
+                   the fake masters' ring status, config lines. A live
+                   shell's pane runs in <tmp>/work/<name> (MSG_CMD answers
+                   a real child there, 24x80), unless "cmd":"unsup" (a
+                   master that does not answer MSG_CMD). Ignored by Prosper.
+
+The temp root is masked as /T in the output, and its project key as -T (7.1
+maps every '/' to '-'), so a golden carries the real pane-cwd key shape.
 
 The fake master lives here, in tests/, never in dch: it answers the control
 ops a query sends (MSG_RING_READ, MSG_READ, MSG_RING_CLEAR, MSG_CMD) from
@@ -41,6 +45,7 @@ fails = [0]
 
 MSG_READ, MSG_READ_DATA, MSG_READ_END, MSG_ACK = 6, 8, 9, 11
 MSG_CMD, MSG_RING_READ, MSG_RING_HDR, MSG_RING_CLEAR = 15, 18, 19, 21
+MSG_CMD_STAT = 17
 MSG_WINCH, MSG_REDRAW, MSG_ATTACH, MSG_DETACH = 4, 5, 1, 2
 ST_OK, ST_NOVT, ST_UNSUP = 0, 2, 5
 S_RANGE = 0x01
@@ -62,9 +67,12 @@ class FakeMaster:
     """One session's control socket over a fixed list of ring records."""
 
     def __init__(self, path, records, status=0, sid="m0000000000000000",
-                 screen="screen row\n"):
+                 screen="screen row\n", cwd=None):
         self.recs = records          # [(seq, kind, flags, t, bytes)]
         self.status, self.sid, self.screen = status, sid, screen
+        # the pane: a real child whose cwd the client reads, or None
+        self.child = (subprocess.Popen(["sleep", "600"], cwd=cwd)
+                      if cwd else None)
         self.epoch = 0
         self.ops = []
         self.base = records[0][0] if records else 1 << 40
@@ -75,6 +83,9 @@ class FakeMaster:
         threading.Thread(target=self.serve, daemon=True).start()
 
     def close(self):
+        if self.child:
+            self.child.kill()        # ours: by its exact pid
+            self.child.wait()
         self.sock.close()
         try:
             os.unlink(self.path)
@@ -126,6 +137,13 @@ class FakeMaster:
             b = self.screen.encode()
             return (struct.pack("<BH", MSG_READ_DATA, len(b)) + b +
                     struct.pack("<BH", MSG_READ_END, ST_OK))
+        if t == MSG_CMD and self.child:
+            b = b"\0".join(x.encode() for x in (
+                str(self.child.pid), "running", "-1", "0", "1", "sleep")) + b"\0"
+            stat = (struct.pack("<BH", MSG_CMD_STAT, 6) +
+                    struct.pack("<HHH", 24, 80, 0)) if p[:1] == b"\1" else b""
+            return (stat + struct.pack("<BH", MSG_READ_DATA, len(b)) + b +
+                    struct.pack("<BH", MSG_READ_END, ST_OK))
         return struct.pack("<BH", MSG_READ_END, ST_UNSUP)   # MSG_CMD too
 
     def ring_read(self, p):
@@ -174,8 +192,13 @@ def load_ring(path):
 ANCHOR = re.compile(r'"anchor":"f[0-9a-f]+:')
 
 
-def mask(s):
-    return ANCHOR.sub('"anchor":"f*:', s)
+def key(path):
+    return "".join(c if c.isascii() and c.isalnum() else "-" for c in path)
+
+
+def mask(s, root):
+    s = ANCHOR.sub('"anchor":"f*:', s)
+    return s.replace(root, "/T").replace(key(root), "-T")
 
 
 def run_case(name):
@@ -218,11 +241,15 @@ def run_case(name):
             for f in sorted(os.listdir(sdir)):
                 n = f[:-len(".ring.ndjson")]
                 o = live.get(n, {})
+                cwd = None
+                if o.get("cmd") != "unsup":
+                    cwd = os.path.join(t, "work", n)
+                    os.makedirs(cwd)
                 masters.append(FakeMaster(
                     os.path.join(sockdir, n + ".sock"),
                     load_ring(os.path.join(sdir, f)), o.get("status", 0),
                     o.get("session_id", "m0000000000000000"),
-                    None if o.get("lite") else "screen row\n"))
+                    None if o.get("lite") else "screen row\n", cwd))
         # config lines (xray_ring for a ring's cap)
         with open(os.path.join(t, "config"), "w") as f:
             f.write("".join(l + "\n" for l in setup.get("config", [])))
@@ -231,11 +258,13 @@ def run_case(name):
         env.update(HOME=home, XDG_RUNTIME_DIR=t, XDG_STATE_HOME=state,
                    DCH_CONFIG=os.path.join(t, "config"), DCH_LOGIN_ENV="0",
                    DCH_NO_REMOTE="1")
+        if any(l.startswith("remote_hosts") for l in setup.get("config", [])):
+            del env["DCH_NO_REMOTE"]     # named hosts only: nothing dialled
         for k, argv in enumerate(case["argv"], 1):
             r = subprocess.run([DCH] + argv, capture_output=True, text=True,
                                timeout=30, env=env)
             if r.returncode == 0:
-                got = mask(r.stdout)
+                got = mask(r.stdout, os.path.realpath(t))
             else:
                 got = json.dumps({"schema": 1, "exit": r.returncode,
                                   "stderr": (r.stderr.splitlines() or [""])[0]},

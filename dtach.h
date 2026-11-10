@@ -199,6 +199,9 @@ enum
 
 /* MSG_RING_READ flags */
 #define DCH_RING_F_SUB    0x01	/* subscribe this connection to wakes */
+#define DCH_RING_F_HDR    0x02	/* the header only: no records (max is
+				** ignored). A 1.43.0 master ignores the flag
+				** and sends one reply of records as usual */
 #define DCH_RING_READ_MAX (1u << 20)	/* S10: one reply's record bytes */
 #define DCH_RING_SUBS     4	/* S10: subscribers per master */
 #define DCH_RING_HDR_LEN  50
@@ -211,6 +214,9 @@ enum
 #define DCH_RING_S_SUB     0x10	/* this connection is subscribed */
 #define DCH_RING_S_SUBFULL 0x20	/* subscribe refused: DCH_RING_SUBS taken */
 #define DCH_RING_S_LATCHED 0x40	/* the mirror latched off: capture ended */
+#define DCH_RING_S_EVICTED 0x80	/* rows were evicted since the last clear
+				** (why:"range"). A 1.43.0 master never sets
+				** it: no bit is no evidence either way */
 
 /* MSG_READ_END / MSG_ACK statuses */
 enum

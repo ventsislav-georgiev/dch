@@ -56,6 +56,8 @@ static char client_pidfile[1200];
 ** creates; remote_host: --host; pk_remote: the picker lists remote rows. */
 static int remote_ok, attach_only, pk_remote;
 static const char *remote_host;
+/* --xray: the stderr line a failed write exits 1 with (SIGPIPE ignored) */
+static const char *write_fail_line;
 
 /* Write a buffer or exit — used by attach.c and master.c (declared in
 ** dtach.h). Lives here to keep main.c-equivalent self-contained. */
@@ -74,7 +76,11 @@ write_buf_or_fail(int fd, const void *buf, size_t count)
 		else if (ret < 0 && errno == EINTR)
 			continue;
 		else
+		{
+			if (write_fail_line)
+				fputs(write_fail_line, stderr);
 			exit(1);
+		}
 	}
 }
 
@@ -2027,7 +2033,7 @@ write_alias(const char *name, const char *alias)
 	size_t n = alias ? strlen(alias) : 0;
 
 	n = dch_utf8_trim(alias, n > 599 ? 599 : n);
-	if (n && xr_id_shaped(alias))
+	if (n && xr_label_id_shaped(alias, n))
 		return -2;
 	if (alias_path(name, ap, sizeof(ap)) < 0)
 		return -1;
@@ -9992,6 +9998,10 @@ master_print(const char *name, int rc, int all, int json)
 ** replies, handed to a callback one at a time. Only one reply is ever held
 ** (3.8's 16 MB, whatever xray_ring is). */
 #define RING_BUSY_TRIES 50
+/* Replies per walk: a real master fills each but the last to within one
+** record of DCH_RING_READ_MAX, so RING_MAX (plus the last reply's overshoot)
+** takes about 19; a peer that trickles a record at a time is cut off. */
+#define RING_REPLIES_MAX 64
 
 struct ring_snap
 {
@@ -10016,10 +10026,12 @@ le64(const unsigned char *p)
 	return v;
 }
 
-/* Over an open control connection s. fn NULL: the header only, from one
-** minimum reply whose records are dropped unread. 0, rs filled; -2 the
-** master does not answer the op (it predates #119); -3 a malformed or failed
-** reply; -4 the ring was cleared mid-read (the caller starts over). */
+/* Over an open control connection s. fn NULL: the header only
+** (DCH_RING_F_HDR; a 1.43.0 master's records are dropped unread). 0, rs
+** filled; -2 the master does not answer the op (it predates #119); -3 a
+** malformed or failed reply, one over DCH_RING_READ_MAX record bytes, or a
+** later one that does not move past seq (a hostile master never holds the
+** read); -4 the ring was cleared mid-read (the caller starts over). */
 static int
 ring_fetch_fd(int s, struct ring_snap *rs, ring_rec_fn fn, void *ctx)
 {
@@ -10029,7 +10041,8 @@ ring_fetch_fd(int s, struct ring_snap *rs, ring_rec_fn fn, void *ctx)
 	struct ctl_reader r = {0};
 	unsigned int len;
 	uint64_t seq = 0, first, tail0 = 0;
-	uint32_t count, max = fn ? DCH_RING_READ_MAX : 0;
+	uint32_t count, max = DCH_RING_READ_MAX;
+	long long wl;
 	int rc, k, tries = 0, replies = 0, have_hdr, ret = 0;
 
 	memset(rs, 0, sizeof *rs);
@@ -10039,7 +10052,7 @@ ring_fetch_fd(int s, struct ring_snap *rs, ring_rec_fn fn, void *ctx)
 			req[k] = (unsigned char)(seq >> (8 * k));
 		for (k = 0; k < 4; k++)
 			req[8 + k] = (unsigned char)(max >> (8 * k));
-		req[12] = 0;
+		req[12] = fn ? 0 : DCH_RING_F_HDR;
 		send_ctl(s, MSG_RING_READ, req, sizeof req);
 		have_hdr = 0;
 		bl = 0;
@@ -10058,8 +10071,16 @@ ring_fetch_fd(int s, struct ring_snap *rs, ring_rec_fn fn, void *ctx)
 			}
 			else if (type == MSG_READ_DATA && have_hdr && len)
 			{
+				if (bl + len > DCH_RING_READ_MAX)
+				{
+					ret = -3;	/* past S10's reply bound */
+					goto out;
+				}
 				if (!fn)
-					continue;	/* header only: never kept */
+				{
+					bl += len;	/* header only: never kept */
+					continue;
+				}
 				if (bl + len > bcap)
 				{
 					size_t nc = bcap ? bcap : 65536;
@@ -10101,7 +10122,11 @@ ring_fetch_fd(int s, struct ring_snap *rs, ring_rec_fn fn, void *ctx)
 			ret = -3;
 			goto out;
 		}
-		replies++;
+		if (++replies > RING_REPLIES_MAX)
+		{
+			ret = -3;
+			goto out;
+		}
 		first = le64(hdr + 17);
 		count = (uint32_t)hdr[25] | (uint32_t)hdr[26] << 8 |
 		        (uint32_t)hdr[27] << 16 | (uint32_t)hdr[28] << 24;
@@ -10123,41 +10148,26 @@ ring_fetch_fd(int s, struct ring_snap *rs, ring_rec_fn fn, void *ctx)
 			** later one that lands elsewhere lost records */
 			if ((hdr[0] & DCH_RING_S_RANGE) || first != seq)
 				rs->seqgap = 1;
+			if (count && first + count <= seq)
+			{
+				ret = -3;	/* no progress: never asked again */
+				goto out;
+			}
 		}
 		rs->status |= hdr[0] & (unsigned)~DCH_RING_S_RANGE;
 		if (!fn || (hdr[0] & DCH_RING_S_OFF))
 			break;
 		/* this reply's records, bounds-checked, one at a time */
+		if ((wl = xr_ring_walk(buf, bl, first, count, fn, ctx)) < 0)
 		{
-			size_t off = 0;
-			uint32_t got = 0;
-
-			while (off + 8 <= bl)
-			{
-				size_t l = (size_t)buf[off] | (size_t)buf[off + 1] << 8;
-				struct xr_rec x;
-
-				if (off + 8 + l > bl)
-					break;
-				x.seq = first + got;
-				x.kind = buf[off + 2];
-				x.flags = buf[off + 3];
-				x.t = (uint32_t)buf[off + 4] |
-				      (uint32_t)buf[off + 5] << 8 |
-				      (uint32_t)buf[off + 6] << 16 |
-				      (uint32_t)buf[off + 7] << 24;
-				x.text = (const char *)buf + off + 8;
-				x.len = l;
-				fn(ctx, &x);
-				rs->bytes += 8 + l;
-				got++;
-				off += 8 + l;
-			}
-			if (off != bl || got != count)
-			{
-				ret = -3;	/* a torn record: never skipped */
-				goto out;
-			}
+			ret = -3;	/* a torn record: never skipped */
+			goto out;
+		}
+		rs->bytes += (uint64_t)wl;
+		if (rs->bytes > (uint64_t)RING_MAX + DCH_RING_READ_MAX)
+		{
+			ret = -3;	/* more than any ring holds, plus a reply */
+			goto out;
 		}
 		/* up to the first reply's tail: a flooding shell is never
 		** chased, so the read ends within about one ring's bytes */
@@ -10183,27 +10193,6 @@ ring_fetch(const char *path, struct ring_snap *rs, ring_rec_fn fn,
 	rc = ring_fetch_fd(s, rs, fn, ctx);
 	close(s);
 	return rc;
-}
-
-/* Rows the ring evicted (3.2's complete:false). The header carries no such
-** bit, but the ring evicts only when an append will not fit, so after an
-** eviction it holds more than cap - (RING_HDR + the largest record) until a
-** clear. shortcut: cap is this config's xray_ring, which misses a session
-** started under a larger one (and a ring that only came close reads as
-** evicted); upgrade with an XR1a status bit for evicted rows. */
-static int
-ring_evicted(uint64_t bytes)
-{
-	char v[64];
-	long cap = RING_DEFAULT;
-	uint64_t big;
-
-	if (dch_config_get("xray_ring", v, sizeof v) &&
-	    ring_parse_size(v) >= 0)
-		cap = ring_parse_size(v);
-	big = (uint64_t)cap < RING_HDR + RING_TEXT_MAX ? (uint64_t)cap
-	      : RING_HDR + RING_TEXT_MAX;
-	return bytes && bytes > (uint64_t)cap - big;
 }
 
 /* The live Claude under a session's child, as --ls-json joins it: exactly
@@ -10344,13 +10333,14 @@ xr_resolve(const char *n, const struct hrec *r, int nr, int clear,
 		}
 		if (why)
 			return xr_no_session();
-		/* a record form is History only: a record a live session holds
-		** (a plain shell's <name>.json, rewritten by its next cold
-		** start) is no record, so an Ended pane never reads a new ring */
+		/* a record form is History only, so an Ended pane never reads
+		** a new ring: a plain shell's <name>.json, which the reused
+		** name's session rewrites, answers corpus "none", "ended"
+		** (3.1, 7.5, T11); --clear takes no record */
 		for (k = 0; k < nr; k++)
 			if (rec_hit(&r[k], n, stem, 1))
 			{
-				if (r[k].live || clear)
+				if (clear || (r[k].live && r[k].sid[0]))
 					break;
 				t->kind = XR_ENDED;
 				t->rec = &r[k];
@@ -10558,8 +10548,11 @@ xr_json(const struct xr_target *t)
 				if (acc->sh.alt)
 					a.why = "alt";
 				else if (gap || acc->cont || a.chapters_evicted ||
-				         ring_evicted(rs.bytes))
-					a.why = "range";	/* rows gone or lost */
+				         (rs.status & DCH_RING_S_EVICTED))
+					a.why = "range";	/* rows gone or lost: a
+						** 1.43.0 master never sets
+						** EVICTED, so only this
+						** evidence speaks there */
 				a.complete = a.why == NULL;
 			}
 		}
@@ -10660,6 +10653,23 @@ xr_clear(const struct xr_target *t)
 	return fflush(stdout) == 0 && !ferror(stdout) ? 0 : 3;
 }
 
+/* n names a History record (by name, file or <file>.json): a local name
+** with ':' is resolved here before it is read as host:name. */
+static int
+xr_local(const char *n, const struct hrec *r, int nr)
+{
+	char cb[256];
+	int byfile = xr_record_form(n), k;
+	const char *stem = byfile ? cb : canon_name(n, cb, sizeof cb);
+
+	if (byfile)
+		snprintf(cb, sizeof cb, "%.*s", (int)(strlen(n) - 5), n);
+	for (k = 0; k < nr; k++)
+		if (rec_hit(&r[k], n, stem, byfile))
+			return 1;
+	return 0;
+}
+
 /* `dch --xray <n> [--json] [--clear]` (spec 3.1): flags in any order, each
 ** once; the rest of the family (--ref, --follow, --chapter, the view)
 ** comes with XR2-XR5 and exits 2 here. */
@@ -10706,13 +10716,23 @@ xray_main(int argc, char **argv)
 		      "comes later)\n", stderr);
 		return 2;
 	}
-	if (name_is_remote(n))
-	{
-		fputs("dch: bad session\nremote sessions (host:name) come with "
-		      "a later dch\n", stderr);
-		return 2;
-	}
+	/* a failed write says so and exits 1, never a silent SIGPIPE death */
+	signal(SIGPIPE, SIG_IGN);
+	write_fail_line = "dch: no such session\n";
 	nr = history_load(&r);
+	if (name_is_remote(n) && !xr_local(n, r, nr))
+	{
+		char host[DCH_RHOST_MAX];
+
+		snprintf(host, sizeof host, "%.*s", (int)strcspn(n, ":"), n);
+		if (dch_remote_known(host))
+		{
+			hrec_free(r, nr);
+			fputs("dch: bad session\nremote sessions (host:name) come "
+			      "with a later dch\n", stderr);
+			return 2;
+		}
+	}
 	rc = xr_resolve(n, r, nr, clear, &t);
 	if (rc == 0)
 		rc = clear ? xr_clear(&t) : xr_json(&t);
@@ -11831,8 +11851,8 @@ main(int argc, char **argv)
 		{
 		case 0:
 			return 0;
-		case -2:
-			(void)refuse_id_name(alias_arg);
+		case -2:	/* the shape trimmed, as the listing shows it */
+			fputs("dch: name looks like a session_id\n", stderr);
 			return 2;
 		default:
 			return 1;

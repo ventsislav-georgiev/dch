@@ -1146,7 +1146,7 @@ on_kill_rename(struct conn *c, int kill_, const unsigned char *p, size_t n)
 		out_err(c, DASH_MSG);
 		return;
 	}
-	if (!kill_ && ra == 1 && xr_id_shaped(alias))
+	if (!kill_ && ra == 1 && xr_label_id_shaped(alias, strlen(alias)))
 	{
 		out_err(c, "name looks like a session_id");	/* INFO-2 */
 		return;

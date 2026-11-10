@@ -1975,7 +1975,9 @@ do_ring_read(struct client *p, const unsigned char *payload, unsigned int len)
 	}
 	seq = get_le(payload, 8);
 	max = (size_t)get_le(payload + 8, 4);
-	if (max < RING_HDR + RING_TEXT_MAX)
+	if (len > 12 && (payload[12] & DCH_RING_F_HDR))
+		max = 0;	/* the header only: no records, no buffer */
+	else if (max < RING_HDR + RING_TEXT_MAX)
 		max = RING_HDR + RING_TEXT_MAX;
 	if (max > DCH_RING_READ_MAX)
 		max = DCH_RING_READ_MAX;
@@ -1995,6 +1997,8 @@ do_ring_read(struct client *p, const unsigned char *payload, unsigned int len)
 	p->xgen = xring.gen;
 	if (!xring.cap)
 		st |= DCH_RING_S_OFF;
+	else if (!max)
+		;
 	else if (!(buf = malloc(max)))
 		return queue_status(p, MSG_READ_END, DCH_ST_ERR);
 	else
@@ -2003,6 +2007,8 @@ do_ring_read(struct client *p, const unsigned char *payload, unsigned int len)
 		st |= DCH_RING_S_RANGE;
 	if (xring.chapters_evicted)
 		st |= DCH_RING_S_CHAPTERS;
+	if (xring.rows_evicted)
+		st |= DCH_RING_S_EVICTED;
 	if (dch_vt_capture_paused())
 		st |= DCH_RING_S_PAUSED;
 	if (vt_latched_off)

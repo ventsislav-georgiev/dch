@@ -607,6 +607,30 @@ cache_load(struct rlist *l, long long now)
 	free(text);
 }
 
+/* host is one dch knows without a probe: a named host (--hosts,
+** remote_hosts) or a cached row's; never discovery (no tailscale run). */
+int
+dch_remote_known(const char *host)
+{
+	struct rhost v[RM_HOSTS];
+	struct rlist l = {0};
+	int n, k, hit = 0;
+
+	if (!remote_on())
+		return 0;
+	n = named_hosts(v, RM_HOSTS, 0);
+	for (k = 0; k < n && !hit; k++)
+		hit = !strcmp(v[k].label, host);
+	if (!hit)
+	{
+		cache_load(&l, (long long)time(NULL));
+		for (k = 0; k < l.n && !hit; k++)
+			hit = !strcmp(l.v[k].host, host);
+		free(l.v);
+	}
+	return hit;
+}
+
 /* l as the cache: up to RM_CACHE_MAX less a row's worst case, so the
 ** loader never refuses the file (a host past that is left out). The write
 ** is to a new mkstemp file (created exclusively, here and on Windows)

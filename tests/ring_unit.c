@@ -405,9 +405,12 @@ test_evict(void)
 	memset(text, 'z', sizeof text);
 	ring_append(&r, RING_K_OUTPUT, 0, 0, text, 60000);
 	ring_append(&r, RING_K_OUTPUT, 0, 0, text, 60000);
+	CHECK("2: a full ring that evicted nothing: rows_evicted unset",
+	      !r.rows_evicted && r.head_seq == 7);
 	ring_append(&r, RING_K_OUTPUT, 0, 0, text, 60000);
 	CHECK("2: whole records go, oldest first; no prompt, no flag",
 	      !r.chapters_evicted && r.head_seq == 10 && !ring_check(&r));
+	CHECK("2: any eviction sets rows_evicted", r.rows_evicted);
 	ring_append(&r, RING_K_PROMPT, 0, 0, "$ ", 2);
 	ring_append(&r, RING_K_MARK, 0, 0, "A", 1);
 	for (i = 0; i < 3; i++)
@@ -418,6 +421,7 @@ test_evict(void)
 	CHECK("clear: empty, seqs continue, epoch moves, flag reset",
 	      r.head_seq == r.tail_seq && r.tail_seq == 17 && r.epoch == 1 &&
 	      !r.chapters_evicted && !ring_check(&r));
+	CHECK("clear: rows_evicted reset", !r.rows_evicted);
 	ring_free(&r);
 }
 
@@ -495,6 +499,7 @@ test_export(void)
 		ring_append(&a, i % 7 ? RING_K_OUTPUT : RING_K_PROMPT, 0,
 		            (uint32_t)i, "hello world", 5 + i % 6);
 	a.chapters_evicted = 1;
+	a.rows_evicted = 1;
 	a.epoch = 4;
 	n = ring_export_size(&a);
 	x = malloc(n);
@@ -504,7 +509,7 @@ test_export(void)
 	CHECK("10: export/import keeps seqs, records, flags, epoch",
 	      ok && b.head_seq == a.head_seq && b.tail_seq == a.tail_seq &&
 	      b.tail - b.head == a.tail - a.head && b.chapters_evicted &&
-	      b.epoch == 4 && !ring_check(&b));
+	      b.rows_evicted && b.epoch == 4 && !ring_check(&b));
 	ring_free(&b);
 	ring_init(&b, RING_DEFAULT, 1);
 	x[48 + 2] = 9;			/* a bad kind in the first record */

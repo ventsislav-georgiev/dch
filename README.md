@@ -793,14 +793,17 @@ master parses anything, nothing is written to disk and nothing is shelled out.
   Code has that session id, else the newest ended History record carrying
   it;
 - a History record name, `<file>.json`: that ended record, even when a new
-  session has taken its name since. A record that a live session holds is not
-  History: a plain shell's `<name>.json` is rewritten when the name starts
-  again, and then exits 1 `dch: no such session`, so it never reads the new
-  session's ring. A value that is also a live session's name, or a record's,
-  is refused as ambiguous;
+  session has taken its name since. It is answered from History only and
+  never reads a live ring. A plain shell's `<name>.json` is rewritten when the
+  name starts again; it still answers `corpus: "none"`, `reason: "ended"`,
+  with the record's directory as its label. A value that is also a live
+  session's name, or a record's, is refused as ambiguous;
 - a session name: the live session, else that name's newest ended record.
 
-`host:name` (remote sessions) is not supported yet: it exits 2. Over
+A `<n>` with a `:` is resolved locally first: a live session or a History
+record of that name. Only when nothing local matches and the part before the
+`:` is a known host (`--hosts`, `remote_hosts`, or a cached remote row) is it
+`host:name`, which is not supported yet: it exits 2. Over
 `dch serve`'s ctl, `--xray` still answers `xray not supported by this host`.
 
 The corpus:
@@ -818,8 +821,10 @@ The corpus:
   `C`..`D` orphans that block: it gets no chapter. Without marks there are no
   chapters (`mentions_only: true`).
   - `complete` is `false` with `why: "range"` when the ring has evicted rows
-    or holds a gap. Evicted rows are judged from how full the ring is, against
-    the current `xray_ring`.
+    or holds a gap. The master reports evicted rows itself (a status bit, reset
+    by a clear), so the querying process's `xray_ring` does not matter. A dch
+    1.43.0 master has no such bit: there only a gap, a lost range or a cut
+    first row says so.
   - The ring is read 1 MiB at a time, and only up to its tail as it stood
     when the read began. A query stays under 16 MB whatever `xray_ring` is.
 - **None.** An ended or History shell (`reason: "ended"`), dch-lite
@@ -852,18 +857,21 @@ The corpus:
 the master's control socket. Nothing is typed into the session. It prints
 `{"schema":1,"session","session_id","corpus","ring_cleared"}`.
 - **Resolution.** Here `<n>` is first matched as a live ring's exact
-  `session_id`, then as a name. A `session_id` match reads only each ring's
-  header. The ring is cleared only if it still carries that id.
+  `session_id`, then as a name. A `session_id` match asks each live master
+  for its ring's header only, never its records (a dch 1.43.0 master sends one
+  reply of records, which is dropped unread). The ring is cleared only if it
+  still carries that id.
 - **Agent sessions.** A Claude Code session has no ring:
   `ring_cleared: false`.
 - **Failures.** An ended session or a History record exits 1 with
-  `dch: no such session`. A dch-lite master exits 1 with
+  `dch: no such session`, as does a master that hangs up mid-request. A dch-lite master exits 1 with
   `dch: no x-ray corpus`.
 
 No new session or rename takes a name of exactly `m` + 16 lowercase hex,
 because that is a ring `session_id`. `-n`, `--spawn`, `--revive --as`, `-m`,
 the pickers' rename, and `dch serve`'s create and rename all refuse it with
-exit 2 and `dch: name looks like a session_id`. A session that already has
+exit 2 and `dch: name looks like a session_id`, also with whitespace
+around it (the listing trims it). A session that already has
 such a name keeps it.
 
 | Exit | Meaning |
