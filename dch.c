@@ -9897,8 +9897,12 @@ main(int argc, char **argv)
 
 	/* A remote control verb (#114) is sent as typed, less --host, --hosts
 	** and --cwd (cskip): argv as it was, since --say and its kin pack it. */
-	char **oargv = calloc((size_t)argc + 1, sizeof *oargv);
-	unsigned char *cskip = calloc((size_t)argc + 1, 1);
+	/* static: main's every return would leak them otherwise */
+	static char **oargv;
+	static unsigned char *cskip;
+
+	oargv = calloc((size_t)argc + 1, sizeof *oargv);
+	cskip = calloc((size_t)argc + 1, 1);
 	const char *opt_cwd = NULL;
 
 	if (!oargv || !cskip)

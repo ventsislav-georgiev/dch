@@ -2366,10 +2366,11 @@ ctl_run(int fd, const char *sh, const char *verb, struct sb *rq,
 		         MSG_NOSIGNAL);
 		if (k > 0)
 			off += (size_t)k;
-		else if (left <= 0 || (sock_err() != SE_AGAIN &&
-		                       sock_err() != SE_INTR))
+		else if (left <= 0 || k == 0 || (sock_err() != SE_AGAIN &&
+		                                 sock_err() != SE_INTR))
 		{
 			snprintf(msg, sizeof msg, "%s", left <= 0 ? "timed out"
+			         : k == 0 ? "connection closed"
 			         : sock_str(sock_err()));
 			r = -1;
 			break;

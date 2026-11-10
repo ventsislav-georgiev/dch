@@ -1276,7 +1276,8 @@ on_ctl(struct conn *c, const unsigned char *p, size_t n)
 		return;
 	}
 	c->closing = 1;		/* until the ctl runs: the 0x13, then the FIN */
-	if ((fl = ctl_request(p, n, &av, &ac, cwd, why, sizeof why)) < 0)
+	if ((fl = ctl_request(p, n, &av, &ac, cwd, why, sizeof why)) < 0 ||
+	    !av)
 	{
 		slog("%s: ctl refused: %s", c->ipstr, why);
 		out_err(c, why);

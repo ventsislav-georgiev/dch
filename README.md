@@ -1392,7 +1392,10 @@ and nothing runs. A `0x30` on a connection that is attached or watching is
 refused (`ctl needs its own connection`).
 
 Only these forms run. `<n>` is a session name: it must pass the same check
-as an attach's, and never start with `-`.
+as an attach's, never start with `-`, and never contain `:` (`a session name
+with ':' is local only`). The host's dch would read such a name as
+`host:name` and dial on with the host's own identity, so it is refused, even
+for a local session named that way.
 
 | Verb | Form | Timeout |
 | --- | --- | --- |

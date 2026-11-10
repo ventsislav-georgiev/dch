@@ -1454,7 +1454,12 @@ a session name that passes the attach name check and does not start with
 .RE
 .PP
 Anything else is refused with an uncoded 0x13 and nothing runs: an argv of
-fewer than 2 elements, a verb or flag off that list, a bad name,
+fewer than 2 elements, a verb or flag off that list, a bad name, a name
+with
+.B :
+.RI ( "a session name with \(aq:\(aq is local only" :
+the host's dch would read it as host:name and dial on with the host's
+identity),
 .BR \-\-config ,
 .BR serve ,
 .B \-h
