@@ -92,6 +92,20 @@ def main():
         revive of a name still answering is refused."""
         until(lambda: not os.path.exists(os.path.join(sockdir, n + ".sock")),
               10)
+        # The fake claude can outlive the socket a moment, and --revive
+        # refuses while a claude with that session id still runs.
+        until(lambda: not any(alive(e.get("pid")) for e in starts(n)), 10)
+
+    def alive(pid):
+        if not pid:
+            return False
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            pass
+        return True
 
     def raw(n):
         try:

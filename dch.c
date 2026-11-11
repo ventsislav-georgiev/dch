@@ -11408,8 +11408,11 @@ xray_main(int argc, char **argv)
 		      "comes later)\n", stderr);
 		return 2;
 	}
-	/* every write is checked: EPIPE is a cancel (3.4), exit 0, no done */
+	/* SIGPIPE ignored: a failed socket write to the master exits 1 with
+	** write_fail_line; stdout writes are checked apart (EPIPE is a
+	** cancel, 3.4: exit 0, no done) */
 	signal(SIGPIPE, SIG_IGN);
+	write_fail_line = "dch: no such session\n";
 	if (name_routes_remote(n))
 	{
 		fputs("dch: bad session\nremote sessions (host:name) come "

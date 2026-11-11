@@ -370,6 +370,8 @@ class Evil:
             if self.mode == "close":
                 c.recv(3)            # the request's header, then gone
                 return
+            if self.mode == "rst":
+                return               # gone before reading a byte
             while True:
                 h = b""
                 while len(h) < 3:
@@ -456,6 +458,26 @@ def test_evil():
                     bad.append((args, r.returncode, r.stderr))
         check("evil: 40 hang-ups: never a signal, one stderr line on a "
               "nonzero exit", not bad, bad[:3])
+    finally:
+        e.close()
+    # #142: a master that closes before reading anything. The close races
+    # the client's write (macOS loses every race: all exit 0), so no hit is
+    # required; "40 hang-ups" already hits the failed-write path on Linux.
+    # Every nonzero exit must carry exactly "dch: no such session".
+    e = Evil("xc-evil", "rst")
+    try:
+        bad, fails = [], 0
+        for k in range(200):
+            r = dch("--xray", "xc-evil", "--json")
+            if r.returncode < 0 or (r.returncode and (
+                    r.stderr != "dch: no such session\n")):
+                bad.append((r.returncode, r.stderr))
+            fails += r.returncode > 0
+            if fails >= 5 or bad:
+                break
+        check("evil: a close before any read: a failed request write "
+              "exits nonzero with one stderr line (%d hit)" % fails,
+              not bad, bad[:3])
     finally:
         e.close()
 
