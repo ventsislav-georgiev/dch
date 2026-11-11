@@ -8653,14 +8653,21 @@ pk_load(struct pk *p)
 	p->interrupted = 0;
 	for (k = 0; k < nh; k++)
 		p->interrupted += rv_all_takes(&h[k]);
-	/* pinned first, then the newest of the rest up to the cap */
+	/* one row per name (#144): its newest pinned record, else its newest;
+	** pinned first, then the newest of the rest up to the cap */
 	for (pin = 1; p->r[2] && pin >= 0; pin--)
 		for (k = 0; k < nh; k++)
 		{
 			struct pkrow *w;
+			int j;
 
 			if (h[k].live || h[k].pinned != pin ||
 			    (!pin && p->n[2] >= PK_HIST_MAX))
+				continue;
+			for (j = 0; j < p->n[2] && strcmp(p->r[2][j].sname,
+			     h[k].name); j++)
+				;
+			if (j < p->n[2])
 				continue;
 			w = &p->r[2][p->n[2]++];
 			snprintf(w->name, sizeof w->name, "%s", h[k].file);
@@ -8714,7 +8721,7 @@ pk_ended(const char *name, long since)
 	if (!f[0] && name_live(name))
 		pk_focus(name);
 	else
-		pk_focus_history(f);
+		pk_focus_history(f, name);
 }
 
 /* ---- actions ---- */

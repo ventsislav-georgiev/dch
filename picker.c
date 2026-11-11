@@ -5,7 +5,8 @@
 ** `dch -l`, `dch -k`/`-d` without a name, and the double-tap switch. Tabs:
 ** Sessions; Sidekicks (n), the live sessions whose name, alias or harness
 ** title matches the config's sidekick_pattern (default "-qa"), shown only when there are
-** some; History (n), the ended records, pinned first, at most 50. "/"
+** some; History (n), the ended records, one row per name (its newest
+** pinned record, else its newest), pinned first, by name, at most 50. "/"
 ** filters every tab, as vim's search (#096). Rows carry
 ** --ls-json's data (state, agents, meta.prs) and --history's, reloaded about
 ** once a second. Enter hands the session back to the caller; every other
@@ -125,6 +126,23 @@ pk_cmp(const void *x, const void *y)
 	else if ((c = pk_natcmp(a->title, b->title)))
 		return c;
 	return strcmp(a->name, b->name);
+}
+
+/* History (#144): pinned first, then by the shown title, numeric-aware;
+** ties the newest first, then the dch name. */
+static int
+pk_hcmp(const void *x, const void *y)
+{
+	const struct pkrow *a = x, *b = y;
+	int c;
+
+	if (a->pinned != b->pinned)
+		return a->pinned ? -1 : 1;
+	if ((c = pk_natcmp(a->title, b->title)))
+		return c;
+	if (a->when != b->when)
+		return a->when > b->when ? -1 : 1;
+	return strcmp(a->sname, b->sname);
 }
 
 int
@@ -262,6 +280,8 @@ pk_sort(struct pk *p, char sel[3][600])
 	for (t = 0; t < 2; t++)
 		if (p->n[t] > 1)
 			qsort(p->r[t], (size_t)p->n[t], sizeof *p->r[t], pk_cmp);
+	if (p->n[2] > 1)
+		qsort(p->r[2], (size_t)p->n[2], sizeof *p->r[2], pk_hcmp);
 	pk_reselect(p, sel);
 }
 
@@ -1606,6 +1626,7 @@ static struct
 	int set, tab, byname;
 	char filt[sizeof ((struct pk *)0)->filt], sel[3][600], focus[600];
 	int fhist;	/* the focus is a History record's (#133) */
+	char fname[600];	/* its dch name: the row of that name (#144) */
 } pk_mem;
 
 void
@@ -1616,9 +1637,10 @@ pk_focus(const char *name)
 }
 
 void
-pk_focus_history(const char *file)
+pk_focus_history(const char *file, const char *name)
 {
 	pk_focus(file);
+	snprintf(pk_mem.fname, sizeof pk_mem.fname, "%s", name ? name : "");
 	pk_mem.fhist = 1;
 }
 
@@ -1690,7 +1712,13 @@ pk_open(struct pk *p, int remote, int vt)
 	for (j = 0; pk_mem.focus[0] && j < (pk_mem.fhist ? p->tab == 2 : 3); j++)
 	{
 		t = (p->tab + j) % 3;
-		if (pk_shown(p, t) && (k = pk_find(p, t, pk_mem.focus)) >= 0)
+		/* not the record's own row: its name's, which shows a pinned
+		** one (#144) */
+		if ((k = pk_find(p, t, pk_mem.focus)) < 0 && pk_mem.fhist)
+			for (k = p->n[t] - 1; k >= 0 &&
+			     strcmp(p->r[t][k].sname, pk_mem.fname); k--)
+				;
+		if (pk_shown(p, t) && k >= 0)
 		{
 			p->tab = t;
 			p->sel[t] = k;

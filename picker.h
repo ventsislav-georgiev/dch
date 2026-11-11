@@ -75,7 +75,7 @@ int pk_csi(const unsigned char *s, int n);
 void pk_focus(const char *name);
 /* Or a History record's file (#133): the next pk_open opens on History,
 ** that row selected when it is there ("" for none). */
-void pk_focus_history(const char *file);
+void pk_focus_history(const char *file, const char *name);
 int pk_open(struct pk *p, int remote, int vt);
 int pk_run(struct pk *p, int fd, const char *header, char *out,
            size_t outsz);

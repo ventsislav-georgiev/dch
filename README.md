@@ -125,8 +125,10 @@ sessions whose name, alias or harness title (the Claude or Codex name the row
 shows) matches `sidekick_pattern` in the config file (a POSIX extended regex,
 case-insensitive, default `-qa`; an invalid one, or one that matches every
 name, is matched as plain text; set it empty for no tab), shown only when
-there are some; and **History**, the ended sessions of `--history`, pinned
-first, at most 50. Every list has column headers and fixed, aligned columns,
+there are some; and **History**, the ended sessions of `--history`, one row
+per session name (its newest pinned record, else its newest), pinned first,
+then by name, case-insensitive, at most 50 (`--history` itself still lists
+every record, newest first). Every list has column headers and fixed, aligned columns,
 sized to the rows on screen. A session row shows NAME (alias, else harness
 name, else name), STATE as a glyph and a word (Needs input, red and the
 loudest; Working, in the accent; Done, green; Idle, faint), ACTIVE (how long
