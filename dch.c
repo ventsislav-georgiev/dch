@@ -28,6 +28,11 @@
 #include <libproc.h>
 #include <sys/sysctl.h>
 #endif
+#ifdef __linux__
+#include <sys/inotify.h>	/* --xray --follow's tail (#136) */
+#else
+#include <sys/event.h>
+#endif
 
 /* DCH_VERSION lives in dtach.h — the master needs it for the .ver sidecar. */
 
@@ -2725,6 +2730,8 @@ usage(void)
 	    "  dch --xray <n> [--clear] --json            a session's chapters as\n"
 	    "                                             one JSON object; --clear\n"
 	    "                                             empties a shell's ring\n"
+	    "  dch --xray <n> --follow --json             that object, then its\n"
+	    "                                             deltas as NDJSON\n"
 	    "  dch --xray <n> --ref <ref> --scope session [--full] [--budget-ms <ms>]\n"
 	    "       --json                                one ref's mentions and\n"
 	    "                                             definitions as NDJSON\n"
@@ -10578,6 +10585,8 @@ struct ring_snap
 	char sid[18];
 	int seqgap;		/* a later reply did not start where we asked */
 	uint64_t bytes;		/* record bytes handed over, headers included */
+	uint64_t head;		/* the first reply's head_seq (#136) */
+	int woke;		/* a MSG_RING_WAKE came in mid-read (#136) */
 };
 
 /* x and its text live until the call returns. */
@@ -10599,14 +10608,16 @@ le64(const unsigned char *p)
 ** filled; -2 the master does not answer the op (it predates #119); -3 a
 ** malformed or failed reply, one over DCH_RING_READ_MAX record bytes, or a
 ** later one that does not move past seq (a hostile master never holds the
-** read); -4 the ring was cleared mid-read (the caller starts over). */
+** read); -4 the ring was cleared mid-read (the caller starts over).
+** ring_fetch_rd: on the caller's reader, which keeps frames that came in
+** behind the reply (a follower's next wake), with DCH_RING_F_* flags. */
 static int
-ring_fetch_fd(int s, struct ring_snap *rs, ring_rec_fn fn, void *ctx)
+ring_fetch_rd(int s, struct ctl_reader *rd, int flags, struct ring_snap *rs,
+              ring_rec_fn fn, void *ctx)
 {
 	unsigned char req[13], payload[PKT_MAX], type, hdr[DCH_RING_HDR_LEN];
 	unsigned char *buf = NULL;
 	size_t bl, bcap = 0;
-	struct ctl_reader r = {0};
 	unsigned int len;
 	uint64_t seq = 0, first, tail0 = 0;
 	uint32_t count, max = DCH_RING_READ_MAX;
@@ -10620,16 +10631,16 @@ ring_fetch_fd(int s, struct ring_snap *rs, ring_rec_fn fn, void *ctx)
 			req[k] = (unsigned char)(seq >> (8 * k));
 		for (k = 0; k < 4; k++)
 			req[8 + k] = (unsigned char)(max >> (8 * k));
-		req[12] = fn ? 0 : DCH_RING_F_HDR;
+		req[12] = (unsigned char)((fn ? 0 : DCH_RING_F_HDR) | flags);
 		send_ctl(s, MSG_RING_READ, req, sizeof req);
 		have_hdr = 0;
 		bl = 0;
 		for (;;)
 		{
-			rc = ctl_next_frame(s, &r, CTL_IDLE_MS, &type, payload, &len);
+			rc = ctl_next_frame(s, rd, CTL_IDLE_MS, &type, payload, &len);
 			if (rc <= 0)
 			{
-				ret = replies || r.got_any ? -3 : -2;
+				ret = replies || rd->got_any ? -3 : -2;
 				goto out;
 			}
 			if (type == MSG_RING_HDR && len == DCH_RING_HDR_LEN)
@@ -10669,7 +10680,9 @@ ring_fetch_fd(int s, struct ring_snap *rs, ring_rec_fn fn, void *ctx)
 			}
 			else if (type == MSG_READ_END || type == MSG_ACK)
 				break;
-			else if (type != MSG_RING_WAKE)
+			else if (type == MSG_RING_WAKE)
+				rs->woke = 1;	/* the ring moved past this read */
+			else
 			{
 				ret = -3;
 				goto out;
@@ -10704,6 +10717,7 @@ ring_fetch_fd(int s, struct ring_snap *rs, ring_rec_fn fn, void *ctx)
 			memcpy(rs->sid, hdr + 33, 17);
 			rs->sid[17] = '\0';
 			tail0 = le64(hdr + 9);
+			rs->head = le64(hdr + 1);
 		}
 		else
 		{
@@ -10746,6 +10760,14 @@ ring_fetch_fd(int s, struct ring_snap *rs, ring_rec_fn fn, void *ctx)
 out:
 	free(buf);
 	return ret;
+}
+
+static int
+ring_fetch_fd(int s, struct ring_snap *rs, ring_rec_fn fn, void *ctx)
+{
+	struct ctl_reader r = {0};
+
+	return ring_fetch_rd(s, &r, 0, rs, fn, ctx);
 }
 
 /* ring_fetch_fd on a connection of its own; -1 nothing listens. */
@@ -11130,8 +11152,52 @@ xr_ring_rec(void *ctx, const struct xr_rec *x)
 	}
 }
 
+/* A shell's answer from one ring read (3.2, 7.3), as --json and every
+** --follow batch give it: corpus none for a ring that is off or paused.
+** screen: the pane's rows (3.2's lines: the ring plus the screen). */
+static void
+xr_shell_fill(struct xr_answer *a, const struct ring_snap *rs,
+              const struct xr_ring_acc *acc, const struct xr_chapters *ch,
+              struct xr_index *refs, long long screen, const char *sock)
+{
+	if (rs->status & DCH_RING_S_OFF)
+	{
+		int novt = 0;
+
+		free(screen_tail(sock, &novt));
+		a->reason = novt ? "lite" : "off";
+	}
+	else if (rs->status & DCH_RING_S_PAUSED)
+		;	/* another agent's corpus (Codex: XR3c) */
+	else
+	{
+		int gap = rs->seqgap || acc->gap;
+
+		if (refs)
+			xr_index_per_row(refs, !acc->sh.npaired);
+		a->refs = refs;
+		a->corpus = "shell";
+		a->available = 1;
+		a->mentions_only = !acc->sh.npaired;
+		/* 3.2: the ring plus the current primary screen */
+		a->lines = acc->rows + screen;
+		a->chapters_evicted = (rs->status & DCH_RING_S_CHAPTERS) ||
+		                      ch->total != ch->n;
+		a->ch = ch;
+		if (acc->sh.alt)
+			a->why = "alt";
+		else if (gap || acc->cont || a->chapters_evicted ||
+		         (rs->status & DCH_RING_S_EVICTED))
+			a->why = "range";	/* rows gone or lost: a 1.43.0
+					** master never sets EVICTED, so
+					** only this evidence speaks there */
+		a->complete = a->why == NULL;
+	}
+}
+
+/* snap: --follow's History form, the answer as its one snapshot line */
 static int
-xr_json(const struct xr_target *t, const struct xr_refq *q)
+xr_json(const struct xr_target *t, const struct xr_refq *q, int snap)
 {
 	struct xr_answer a;
 	struct xr_chapters ch = {0};
@@ -11144,6 +11210,7 @@ xr_json(const struct xr_target *t, const struct xr_refq *q)
 	struct xr_span sp;
 
 	memset(&a, 0, sizeof a);
+	a.snapshot = snap;
 	a.session = t->name;
 	a.session_id = sid;
 	a.corpus = "none";
@@ -11251,40 +11318,8 @@ xr_json(const struct xr_target *t, const struct xr_refq *q)
 		if (acc && fr == 0)
 		{
 			snprintf(sid, sizeof sid, "%s", rs.sid);
-			if (rs.status & DCH_RING_S_OFF)
-			{
-				int novt = 0;
-
-				free(screen_tail(t->sock, &novt));
-				a.reason = novt ? "lite" : "off";
-			}
-			else if (rs.status & DCH_RING_S_PAUSED)
-				;	/* another agent's corpus (Codex: XR3c) */
-			else
-			{
-				int gap = rs.seqgap || acc->gap;
-
-				if (refs)
-					xr_index_per_row(refs, !acc->sh.npaired);
-				a.refs = refs;
-				a.corpus = "shell";
-				a.available = 1;
-				a.mentions_only = !acc->sh.npaired;
-				/* 3.2: the ring plus the current primary screen */
-				a.lines = acc->rows + (qc == 0 && ci.stat ? ci.rows : 0);
-				a.chapters_evicted = (rs.status & DCH_RING_S_CHAPTERS) ||
-				                     ch.total != ch.n;
-				a.ch = &ch;
-				if (acc->sh.alt)
-					a.why = "alt";
-				else if (gap || acc->cont || a.chapters_evicted ||
-				         (rs.status & DCH_RING_S_EVICTED))
-					a.why = "range";	/* rows gone or lost: a
-						** 1.43.0 master never sets
-						** EVICTED, so only this
-						** evidence speaks there */
-				a.complete = a.why == NULL;
-			}
+			xr_shell_fill(&a, &rs, acc, &ch, refs,
+			              qc == 0 && ci.stat ? ci.rows : 0, t->sock);
 		}
 		else if (acc && (fr == -3 || fr == -4))
 			rc = -2;
@@ -11429,6 +11464,866 @@ xr_clear(const struct xr_target *t)
 	return xr_out_exit(fflush(stdout) == 0 && !ferror(stdout));
 }
 
+/* ---- dch --xray <n> --follow --json (#136, XR2b; spec 3.3) -------------- */
+
+/* One loop: the target's answer as a snapshot line, then deltas as the
+** corpus moves (xr_delta: a diff against what was written, so the deltas
+** applied are the --json of the same moment). A reset goes round again, so
+** a snapshot always follows it. Events only, never a timer (K3): the one
+** finite wait is the coalescing deadline, armed only while an event waits. */
+#define XF_BATCH_MS 250		/* 3.3: at most one batch per 250 ms */
+#define XF_EVICT_KEYS 256	/* proposal 11.6: past this, one reset ... */
+#define XF_EVICT_MS 1000	/* ... at most once a second */
+#define XF_SLICE (4u << 20)	/* the full pass: bytes between events */
+#define XF_RESET (-1)
+
+enum { XE_FILE = 1, XE_ROT = 2, XE_CONN = 4, XE_OUT = 8 };
+
+struct xf
+{
+	const struct xr_target *t;
+	struct xr_sent *sent;
+	int q;			/* kqueue, or inotify; -1 none */
+	int conn;		/* the subscribed control connection, -1 none */
+	struct ctl_reader rd;
+#ifdef __linux__
+	int wf, wd;		/* inotify watches: the transcript, its dir */
+#else
+	int dirfd;
+#endif
+	long long last;		/* the last batch (a snapshot is one) */
+	long long evict_at;	/* the last "evicted" reset, -1 none */
+	long gap;		/* the coalescing interval: 250 ms, or twice the
+				** last build when that is longer */
+	int pending, rc;
+	const char *why;	/* XF_RESET's reason, for the next snapshot */
+	unsigned long woke, timed;	/* 9.5's no-timer seam */
+};
+
+static int
+xf_watch_open(struct xf *f)
+{
+	f->conn = -1;
+	memset(&f->rd, 0, sizeof f->rd);
+#ifdef __linux__
+	f->wf = f->wd = -1;
+	f->q = inotify_init1(IN_CLOEXEC | IN_NONBLOCK);
+#else
+	struct kevent ev;
+
+	f->dirfd = -1;
+	if ((f->q = kqueue()) >= 0)
+	{
+		/* EV_CLEAR: once per drain, and EV_EOF when the reader leaves,
+		** so an idle follower ends at once (a pipe gives no POLLHUP) */
+		EV_SET(&ev, 1, EVFILT_WRITE, EV_ADD | EV_CLEAR, 0, 0, NULL);
+		(void)kevent(f->q, &ev, 1, NULL, 0, NULL);
+		(void)fcntl(f->q, F_SETFD, FD_CLOEXEC);
+	}
+#endif
+	return f->q < 0 ? -1 : 0;
+}
+
+static void
+xf_watch_close(struct xf *f)
+{
+	if (f->conn >= 0)
+		close(f->conn);
+#ifndef __linux__
+	if (f->dirfd >= 0)
+		close(f->dirfd);
+#endif
+	if (f->q >= 0)
+		close(f->q);
+	f->conn = f->q = -1;
+}
+
+static void
+xf_watch_conn(struct xf *f, int s)
+{
+	f->conn = s;
+#ifndef __linux__
+	{
+		struct kevent ev;
+
+		EV_SET(&ev, s, EVFILT_READ, EV_ADD, 0, 0, NULL);
+		(void)kevent(f->q, &ev, 1, NULL, 0, NULL);
+	}
+#endif
+}
+
+/* The transcript (its fd: the inode we read) and its project dir. */
+static void
+xf_watch_file(struct xf *f, int fd, const char *dir)
+{
+#ifdef __linux__
+	char p[64];
+
+	if (fd >= 0)
+	{
+		snprintf(p, sizeof p, "/proc/self/fd/%d", fd);
+		f->wf = inotify_add_watch(f->q, p, IN_MODIFY | IN_DELETE_SELF |
+		                          IN_MOVE_SELF);
+	}
+	if (dir)
+		f->wd = inotify_add_watch(f->q, dir, IN_CREATE | IN_MOVED_TO |
+		                          IN_DELETE | IN_ONLYDIR);
+#else
+	struct kevent ev[2];
+	int n = 0;
+
+	if (fd >= 0)
+		EV_SET(&ev[n++], fd, EVFILT_VNODE, EV_ADD | EV_CLEAR,
+		       NOTE_WRITE | NOTE_EXTEND | NOTE_ATTRIB | NOTE_DELETE |
+		       NOTE_RENAME, 0,
+		       NULL);
+#ifdef O_EVTONLY
+	if (dir && (f->dirfd = open(dir, O_EVTONLY | O_DIRECTORY |
+	                                 O_CLOEXEC)) >= 0)
+#else
+	if (dir && (f->dirfd = open(dir, O_RDONLY | O_DIRECTORY |
+	                                 O_CLOEXEC)) >= 0)
+#endif
+		EV_SET(&ev[n++], f->dirfd, EVFILT_VNODE, EV_ADD | EV_CLEAR,
+		       NOTE_WRITE, 0, NULL);
+	if (n)
+		(void)kevent(f->q, ev, n, NULL, 0, NULL);
+#endif
+	dch_trace("xray follow: watch file=%d dir=%d", fd >= 0, dir != NULL);
+}
+
+/* The events in, waiting at most ms (-1: until one comes). */
+static int
+xf_wait(struct xf *f, long ms)
+{
+	int ev = 0, k, n;
+
+	if (ms > 0)
+	{
+		f->timed++;
+		dch_trace("xray follow: deadline %ld ms", ms);
+	}
+#ifdef __linux__
+	{
+		struct pollfd p[3] = { { f->q, POLLIN, 0 }, { 1, 0, 0 },
+		                       { f->conn, POLLIN, 0 } };
+		char buf[4096] __attribute__((aligned(8)));
+		ssize_t got;
+
+		n = poll(p, f->conn >= 0 ? 3 : 2, (int)ms);
+		if (n > 0 && (p[1].revents & (POLLERR | POLLHUP | POLLNVAL)))
+			ev |= XE_OUT;
+		if (n > 0 && f->conn >= 0 && p[2].revents)
+			ev |= XE_CONN;
+		while (n > 0 && (p[0].revents & POLLIN) &&
+		       (got = read(f->q, buf, sizeof buf)) > 0)
+		{
+			for (k = 0; k + (int)sizeof(struct inotify_event) <= got;)
+			{
+				const struct inotify_event *e =
+				    (const struct inotify_event *)(buf + k);
+
+				if (e->wd == f->wf)
+					ev |= e->mask & IN_MODIFY ? XE_FILE : XE_ROT;
+				else if (e->wd == f->wd)
+					ev |= XE_ROT;
+				k += (int)sizeof *e + (int)e->len;
+			}
+		}
+	}
+#else
+	{
+		struct kevent out[8];
+		struct timespec ts = { ms / 1000, (ms % 1000) * 1000000L };
+
+		n = kevent(f->q, NULL, 0, out, 8, ms < 0 ? NULL : &ts);
+		for (k = 0; k < n; k++)
+			if (out[k].filter == EVFILT_WRITE)
+				ev |= out[k].flags & EV_EOF ? XE_OUT : 0;
+			else if (out[k].filter == EVFILT_READ)
+				ev |= XE_CONN;
+			else if ((int)out[k].ident == f->dirfd)
+				ev |= XE_ROT;
+			else
+				ev |= out[k].fflags & (NOTE_DELETE | NOTE_RENAME)
+				      ? XE_ROT | XE_FILE : XE_FILE;
+	}
+#endif
+	if (n < 0 && errno != EINTR)
+		ev |= XE_OUT;	/* the wait itself failed: end, never spin */
+	if (n > 0 || ms != 0)
+	{
+		f->woke++;
+		dch_trace("xray follow: woke ev=%d", ev);
+	}
+	return ev;
+}
+
+/* Frames already in, and those the socket holds: 1 a wake, 0 none, -1 the
+** connection is gone (the master exited, or --restart dropped it). */
+static int
+xf_drain(struct xf *f)
+{
+	unsigned char payload[PKT_MAX], type;
+	unsigned int len;
+	int rc, wake = 0;
+
+	if (f->conn < 0)
+		return 0;
+	while ((rc = ctl_next_frame(f->conn, &f->rd, 0, &type, payload,
+	                            &len)) == 1)
+		wake |= type == MSG_RING_WAKE;
+	return rc < 0 ? -1 : wake;
+}
+
+/* A write failed: the reader left (EPIPE, exit 0), else 3. */
+static int
+xf_out(struct xf *f)
+{
+	if (fflush(stdout) == 0 && !ferror(stdout))
+		return 0;
+	f->rc = xr_out_exit(0);
+	return 1;
+}
+
+static int
+xf_line(struct xf *f, const char *what, const char *v)
+{
+	printf("{\"schema\":1,\"%s\":{%s}}\n", what, v);
+	return xf_out(f);
+}
+
+/* The reset (when set) and a's snapshot; what was written is all of a. */
+static int
+xf_snapshot(struct xf *f, struct xr_answer *a, const char *reset)
+{
+	char b[64];
+
+	if (reset)
+	{
+		snprintf(b, sizeof b, "\"why\":\"%s\"", reset);
+		if (xf_line(f, "reset", b))
+			return 1;
+	}
+	a->snapshot = 1;
+	if (xr_print(stdout, a) != 0)
+	{
+		f->rc = ferror(stdout) ? xr_out_exit(0) : xr_failed();
+		return 1;
+	}
+	if (xf_out(f))
+		return 1;
+	if (xr_sent_take(f->sent, a) != 0)
+	{
+		f->rc = xr_failed();
+		return 1;
+	}
+	f->last = xr_now_ms();
+	dch_trace("xray follow: snapshot%s%s keys=%zu", reset ? " after " : "",
+	          reset ? reset : "", a->refs ? xr_index_keys(a->refs) : 0);
+	return 0;
+}
+
+static int
+xf_deltas(struct xf *f, const struct xr_answer *a)
+{
+	if (xr_delta_write(stdout, f->sent, a) != 0)
+	{
+		f->rc = ferror(stdout) ? xr_out_exit(0) : xr_failed();
+		return 1;
+	}
+	return xf_out(f);
+}
+
+/* A batch is due now, or in the ms returned (-1: none waits). */
+static long
+xf_due(const struct xf *f)
+{
+	long long left;
+
+	if (!f->pending)
+		return -1;
+	left = f->last + f->gap - xr_now_ms();
+	return left > 0 ? (long)left : 0;
+}
+
+static void
+xf_built(struct xf *f, long long t0)
+{
+	long long took = xr_now_ms() - t0;
+
+	f->last = xr_now_ms();
+	/* a rebuild that takes long spaces the next out: at most a third of
+	** a core however big the ring */
+	f->gap = took * 2 > XF_BATCH_MS ? (long)(took * 2) : XF_BATCH_MS;
+}
+
+/* ---- Claude: the transcript's tail (3.3 Tail) ---- */
+
+struct xf_cl
+{
+	struct xr_claude *d, *d2;	/* live; the full pass (3.3 item 1) */
+	struct xr_index *ix, *ix2;
+	int fd, capped;
+	uint64_t ino;
+	char cfg[1400], sid[64], path[2048], project[1200], label[PATH_MAX];
+};
+
+static int
+xf_slice(void *ctx, uint64_t bytes)
+{
+	(void)ctx;
+	return bytes >= XF_SLICE;
+}
+
+static void
+xf_cl_free(struct xf_cl *s)
+{
+	xr_claude_free(s->d);
+	xr_claude_free(s->d2);
+	xr_index_free(s->ix);
+	xr_index_free(s->ix2);
+	if (s->fd >= 0)
+		close(s->fd);
+	s->d = s->d2 = NULL;
+	s->ix = s->ix2 = NULL;
+	s->fd = -1;
+}
+
+static void
+xf_cl_answer(const struct xr_target *t, struct xf_cl *s, struct xr_answer *a)
+{
+	memset(a, 0, sizeof *a);
+	a->session = t->name;
+	a->session_id = s->sid;
+	a->live = 1;
+	a->corpus = "none";
+	a->lines = -1;
+	a->complete = 1;
+	a->project = s->project;
+	a->project_label = s->label;
+	if (!s->d)
+		return;
+	if (xr_claude_cwd(s->d)[0])
+		snprintf(s->label, sizeof s->label, "%s", xr_claude_cwd(s->d));
+	a->corpus = "claude";
+	a->available = 1;
+	a->ch = xr_claude_chapters(s->d);
+	a->refs = s->ix;
+	a->complete = !s->capped && a->ch->total == a->ch->n;
+	a->why = a->complete ? NULL : "range";
+}
+
+/* Still the stream's transcript? Asked of the master, as --ls-json does:
+** 0 yes, 1 no (rotated: another id, inode or none at all), -1 the session
+** is gone. */
+static int
+xf_cl_same(const struct xr_target *t, const struct xf_cl *s)
+{
+	struct cmd_info ci;
+	struct crec c;
+	struct stat st;
+	char path[2048], project[1200];
+	int qc = cmd_query(t->sock, &ci), same;
+
+	if (qc == -4)
+		return -1;
+	same = qc == 0 && xr_live_claude(&ci, &c) && !strcmp(c.sid, s->sid);
+	if (qc == 0)
+		cmd_info_free(&ci);
+	if (!same)
+		return 1;
+	if (xr_claude_lookup(s->cfg, s->sid, path, sizeof path, &st, project,
+	                     sizeof project) < 0)
+		return s->fd >= 0;	/* gone, or still not there */
+	return s->fd < 0 || (uint64_t)st.st_ino != s->ino;
+}
+
+static int
+xf_claude(struct xf *f, const struct crec *c, const char *label)
+{
+	const struct xr_target *t = f->t;
+	struct xf_cl s;
+	struct xr_answer a;
+	struct xr_sink k;
+	struct ring_snap rs;
+	struct stat st;
+	char dir[2048] = "";
+	const char *h;
+	int rc = 0, ev, r;
+	long ms;
+
+	memset(&s, 0, sizeof s);
+	s.fd = -1;
+	snprintf(s.sid, sizeof s.sid, "%s", c->sid);
+	snprintf(s.label, sizeof s.label, "%s", c->cwd[0] ? c->cwd : label);
+	xr_crec_cfg(c, s.cfg, sizeof s.cfg);
+	if (!s.cfg[0] && (h = getenv("HOME")))
+		snprintf(s.cfg, sizeof s.cfg, "%s/.claude", h);
+	if (xr_claude_lookup(s.cfg, s.sid, s.path, sizeof s.path, &st,
+	                     s.project, sizeof s.project) == 0)
+	{
+		if ((size_t)snprintf(dir, sizeof dir, "%s/projects/%s", s.cfg,
+		                     s.project) >= sizeof dir ||
+		    (s.fd = xr_seam_open(s.path, &st)) < 0 ||
+		    !(s.d = xr_claude_new()) || !(s.ix = xr_index_new()))
+		{
+			xf_cl_free(&s);
+			return xr_failed();
+		}
+		s.ino = (uint64_t)st.st_ino;
+		xr_index_sink(s.ix, &k);
+		xr_claude_refs(s.d, &k, s.ino, NULL, NULL);
+		if (xr_claude_read(s.d, s.fd, (uint64_t)st.st_size,
+		                   &s.capped) < 0)
+		{
+			xf_cl_free(&s);
+			return xr_failed();
+		}
+	}
+	else
+	{
+		/* no transcript yet: its project dir, or the projects dir, so
+		** the first file is seen (a reset then gives its snapshot) */
+		xr_project_key(s.label, s.project, sizeof s.project);
+		if ((size_t)snprintf(dir, sizeof dir, "%s/projects/%s", s.cfg,
+		                     s.project) >= sizeof dir ||
+		    access(dir, X_OK) != 0)
+			snprintf(dir, sizeof dir, "%s/projects", s.cfg);
+	}
+	if (!s.project[0])
+		xr_project_key(s.label, s.project, sizeof s.project);
+	xf_cl_answer(t, &s, &a);
+	if (xf_snapshot(f, &a, f->why))
+	{
+		xf_cl_free(&s);
+		return f->rc;
+	}
+	if (s.capped && (!(s.d2 = xr_claude_new()) ||
+	                 !(s.ix2 = xr_index_new())))
+	{
+		xf_cl_free(&s);
+		return xr_failed();
+	}
+	if (s.d2)
+	{
+		xr_index_sink(s.ix2, &k);
+		xr_claude_refs(s.d2, &k, s.ino, xf_slice, NULL);
+	}
+	/* the master's connection: its EOF is the session's end, its wake the
+	** ring resuming after the agent left (no slot is no failure here) */
+	if ((r = control_connect_path(t->sock)) < 0 ||
+	    (xf_watch_conn(f, r),
+	     ring_fetch_rd(r, &f->rd, DCH_RING_F_SUB, &rs, NULL, NULL)) == -3 ||
+	    xf_drain(f) < 0)
+	{
+		xf_cl_free(&s);
+		return 0;	/* gone already */
+	}
+	xf_watch_file(f, s.fd, dir[0] ? dir : NULL);
+	/* lines written between the read and the watch */
+	f->pending = s.fd >= 0 && fstat(s.fd, &st) == 0 &&
+	             (uint64_t)st.st_size > xr_claude_next(s.d);
+	for (;;)
+	{
+		ms = xf_due(f);
+		ev = xf_wait(f, s.d2 ? 0 : ms);	/* the full pass runs between
+						** events */
+		if (ev & XE_OUT)
+			break;
+		if (ev & XE_CONN)
+		{
+			if ((r = xf_drain(f)) < 0)
+				break;	/* the master exited */
+			/* a wake: re-armed by a header read, then the question */
+			if (r && (ring_fetch_rd(f->conn, &f->rd, DCH_RING_F_SUB, &rs,
+			                        NULL, NULL) == -3 || xf_drain(f) < 0))
+				break;
+			if (r)
+				ev |= XE_ROT;
+		}
+		if (ev & XE_ROT)
+		{
+			if ((r = xf_cl_same(t, &s)) < 0)
+				break;
+			if (r)
+			{
+				f->why = "rotated";
+				rc = XF_RESET;
+				break;
+			}
+		}
+		if ((ev & XE_FILE) && s.fd >= 0)
+			f->pending = 1;
+		if (f->pending && s.fd >= 0 && xf_due(f) == 0)
+		{
+			long long t0 = xr_now_ms();
+			uint64_t from = xr_claude_next(s.d);
+			size_t nref;
+			int lost;
+
+			f->pending = 0;
+			if (fstat(s.fd, &st) != 0)
+			{
+				rc = xr_failed();
+				break;
+			}
+			if ((uint64_t)st.st_size < from ||
+			    (r = xr_claude_tail(s.d, s.fd, from,
+			                        (uint64_t)st.st_size)) == 1)
+			{
+				f->why = "shrunk";	/* cut under us */
+				rc = XF_RESET;
+				break;
+			}
+			if (r < 0)
+			{
+				rc = xr_failed();
+				break;
+			}
+			xf_cl_answer(t, &s, &a);
+			/* lost ignored: past XR_CHAPTERS the oldest chapter drops
+			** from --json with no line here; a reset per new chapter
+			** would be worse (open decision 17) */
+			if (xr_delta(f->sent, &a, 0, &nref, &lost) != 0)
+			{
+				rc = xr_failed();
+				break;
+			}
+			if (xf_deltas(f, &a))
+			{
+				rc = f->rc;
+				break;
+			}
+			xf_built(f, t0);
+			dch_trace("xray follow: batch keys=%zu changed=%zu",
+			          xr_index_keys(s.ix), nref);
+		}
+		if (s.d2)
+		{
+			uint64_t to = xr_claude_next(s.d);
+
+			if ((r = xr_claude_tail(s.d2, s.fd, xr_claude_next(s.d2),
+			                        to)) != 0)
+			{
+				f->why = "shrunk";
+				rc = r < 0 ? xr_failed() : XF_RESET;
+				break;
+			}
+			if (xr_claude_next(s.d2) >= to)
+			{
+				/* caught up: the whole file's index replaces the
+				** capped one in one step (3.3 item 1) */
+				xr_claude_free(s.d);
+				xr_index_free(s.ix);
+				s.d = s.d2;
+				s.ix = s.ix2;
+				s.d2 = NULL;
+				s.ix2 = NULL;
+				s.capped = 0;
+				xr_index_sink(s.ix, &k);
+				xr_claude_refs(s.d, &k, s.ino, NULL, NULL);
+				xf_cl_answer(t, &s, &a);
+				f->why = "full";
+				if (xf_snapshot(f, &a, f->why))
+				{
+					rc = f->rc;
+					break;
+				}
+				f->pending = 0;
+			}
+		}
+	}
+	xf_cl_free(&s);
+	return rc;
+}
+
+/* ---- shell: the ring, over a subscribed connection (3.3 Shell) ---- */
+
+struct xf_sb
+{
+	struct xr_ring_acc acc;
+	struct xr_chapters ch;
+	struct xr_index *refs;
+	struct ring_snap rs;
+	int none;		/* a master before #119: no ring op */
+};
+
+static void
+xf_sb_free(struct xf_sb *b)
+{
+	xr_chapters_free(&b->ch);
+	xr_index_free(b->refs);
+	memset(&b->ch, 0, sizeof b->ch);
+	b->refs = NULL;
+}
+
+/* The whole ring again, built as the one-shot builds it (so a batch's diff
+** is exact): ring_fetch_rd's code, or -5 out of memory. */
+static int
+xf_sb_build(struct xf *f, struct xf_sb *b, const char *label)
+{
+	struct xr_sink k;
+	int tries, fr = -4, r = 0;
+
+	for (tries = 0; tries < 3 && fr == -4; tries++)
+	{
+		xf_sb_free(b);
+		memset(&b->acc, 0, sizeof b->acc);
+		xr_shell_begin(&b->acc.sh, &b->ch);
+		if (!(b->refs = xr_index_new()))
+			return -5;
+		xr_index_sink(b->refs, &k);
+		if (xr_shell_refs(&b->acc.sh, &k, label) != 0)
+			return -5;
+		fr = ring_fetch_rd(f->conn, &f->rd, DCH_RING_F_SUB, &b->rs,
+		                   xr_ring_rec, &b->acc);
+		xr_shell_end(&b->acc.sh);
+	}
+	/* moved while we read, or a wake behind the reply (kqueue says
+	** nothing of bytes already read): once more */
+	if (fr == 0 && (r = xf_drain(f)) < 0)
+		return -3;
+	if (fr == 0 && (b->rs.woke || r))
+		f->pending = 1;
+	return fr;
+}
+
+static void
+xf_sb_answer(const struct xr_target *t, struct xf_sb *b, const char *project,
+             const char *label, long long rows, struct xr_answer *a)
+{
+	memset(a, 0, sizeof *a);
+	a->session = t->name;
+	a->session_id = b->rs.sid;
+	a->live = 1;
+	a->corpus = "none";
+	a->lines = -1;
+	a->complete = 1;
+	a->project = project;
+	a->project_label = label;
+	if (!b->none)
+		xr_shell_fill(a, &b->rs, &b->acc, &b->ch, b->refs, rows, t->sock);
+	a->available = strcmp(a->corpus, "none") != 0;
+}
+
+#define XF_MODE (DCH_RING_S_OFF | DCH_RING_S_PAUSED)
+
+/* first: nothing written yet, so a fifth subscriber can still say busy. */
+/* 1 when the session is gone (cmd_query -4); a live answer is freed */
+static int
+xf_gone(const struct xr_target *t)
+{
+	struct cmd_info ci;
+	int qc = cmd_query(t->sock, &ci);
+
+	if (qc == 0)
+		cmd_info_free(&ci);
+	return qc == -4;
+}
+
+static int
+xf_shell(struct xf *f, const char *label, long long rows, int first)
+{
+	const struct xr_target *t = f->t;
+	struct xf_sb *b = calloc(1, sizeof *b);
+	struct xr_answer a;
+	struct ring_snap was;
+	char project[1200];
+	int rc = 0, ev, fr, r;
+
+	xr_project_key(label, project, sizeof project);
+	if (!b)
+		return xr_failed();
+	if ((r = control_connect_path(t->sock)) < 0)
+	{
+		free(b);
+		return first ? xr_no_session() : 0;
+	}
+	xf_watch_conn(f, r);
+	fr = xf_sb_build(f, b, label);
+	if (fr == -3 || fr == -5)
+	{
+		rc = fr == -5 ? xr_failed() : xf_gone(t)
+		     ? (first ? xr_no_session() : 0) : xr_failed();
+		goto out;
+	}
+	if (fr == 0 && !(b->rs.status & DCH_RING_S_SUB) &&
+	    !(b->rs.status & DCH_RING_S_OFF))
+	{
+		if (first)
+		{
+			fputs("dch: busy\n", stderr);	/* 3.3: a fifth */
+			rc = 1;
+		}
+		goto out;
+	}
+	/* fr -2: a master before #119, no corpus; its EOF still ends us */
+	if (fr != 0)
+	{
+		b->none = 1;
+		b->rs.status = DCH_RING_S_OFF;
+	}
+	xf_sb_answer(t, b, project, label, rows, &a);
+	if (xf_snapshot(f, &a, f->why))
+	{
+		rc = f->rc;
+		goto out;
+	}
+	was = b->rs;
+	for (;;)
+	{
+		long long t0;
+		size_t nref = 0;
+		int lost = 0, evict = 0;
+
+		ev = xf_wait(f, xf_due(f));
+		if (ev & XE_OUT)
+			break;
+		if ((ev & XE_CONN) && (r = xf_drain(f)) != 0)
+		{
+			if (r < 0)
+				break;	/* the session ended, or --restart */
+			f->pending = 1;
+		}
+		if (!f->pending || xf_due(f) != 0)
+			continue;
+		t0 = xr_now_ms();
+		f->pending = 0;
+		if ((fr = xf_sb_build(f, b, label)) != 0)
+		{
+			rc = fr == -3 && xf_gone(t) ? 0 : xr_failed();
+			break;
+		}
+		if (!(b->rs.status & DCH_RING_S_SUB))
+			break;	/* our slot was taken (a stale wake): end */
+		xf_sb_answer(t, b, project, label, rows, &a);
+		if (strcmp(b->rs.sid, was.sid) ||
+		    (b->rs.status & XF_MODE) != (was.status & XF_MODE))
+		{
+			/* a new image (a failed handover), or the ring paused
+			** for an agent or resumed: what the session is now */
+			f->why = "rotated";
+			rc = XF_RESET;
+			break;
+		}
+		if (b->rs.status & XF_MODE)
+		{
+			xf_built(f, t0);
+			continue;	/* no ring: nothing to diff */
+		}
+		if (b->rs.epoch != was.epoch)
+		{
+			/* ED 3, RIS or --clear: always, never evict (T9g) */
+			if (xf_snapshot(f, &a, "cleared"))
+			{
+				rc = f->rc;
+				break;
+			}
+		}
+		else
+		{
+			evict = b->rs.head > was.head;
+			if (xr_delta(f->sent, &a, b->rs.head, &nref, &lost) != 0)
+			{
+				rc = xr_failed();
+				break;
+			}
+			if (evict)
+			{
+				/* 3.3: the step's first line, before its counts */
+				printf("{\"schema\":1,\"evict\":{\"seq\":%llu}}\n",
+				       (unsigned long long)b->rs.head);
+				if (xf_out(f))
+				{
+					rc = f->rc;
+					break;
+				}
+			}
+			if (lost || (evict && nref > XF_EVICT_KEYS &&
+			             (f->evict_at < 0 ||
+			              t0 - f->evict_at >= XF_EVICT_MS)))
+			{
+				f->evict_at = t0;
+				if (xf_snapshot(f, &a, "evicted"))
+				{
+					rc = f->rc;
+					break;
+				}
+			}
+			else if (xf_deltas(f, &a))
+			{
+				rc = f->rc;
+				break;
+			}
+		}
+		xf_built(f, t0);
+		dch_trace("xray follow: batch keys=%zu changed=%zu evict=%d",
+		          xr_index_keys(b->refs), nref, evict);
+		was = b->rs;
+	}
+out:
+	xf_sb_free(b);
+	free(b);
+	return rc;
+}
+
+/* --follow (3.3): a History session's snapshot and exit 0; a live one's,
+** then its deltas until it ends or the reader leaves. */
+static int
+xr_follow(const struct xr_target *t)
+{
+	struct xf f;
+	int rc, first = 1;
+
+	if (t->kind == XR_ENDED)
+		return xr_json(t, NULL, 1);
+	memset(&f, 0, sizeof f);
+	f.t = t;
+	f.evict_at = -1;
+	f.gap = XF_BATCH_MS;
+	f.q = f.conn = -1;
+	if (!(f.sent = xr_sent_new()))
+		return xr_failed();
+	for (;;)
+	{
+		struct cmd_info ci;
+		struct crec c;
+		char label[PATH_MAX] = "";
+		int qc = cmd_query_f(t->sock, &ci, DCH_CMD_F_STAT), claude;
+		long long rows;
+
+		if (qc == -4)
+		{
+			rc = first ? xr_no_session() : 0;
+			break;
+		}
+		if (qc == 0 && ci.pid > 0)
+			(void)proc_cwd(ci.pid, label, sizeof label);
+		claude = qc == 0 && xr_live_claude(&ci, &c);
+		rows = qc == 0 && ci.stat ? ci.rows : 0;
+		if (qc == 0)
+			cmd_info_free(&ci);
+		if (xf_watch_open(&f) < 0)
+		{
+			rc = xr_failed();
+			break;
+		}
+		f.pending = 0;
+		rc = claude ? xf_claude(&f, &c, label)
+		            : xf_shell(&f, label, rows, first);
+		xf_watch_close(&f);
+		first = 0;
+		if (rc != XF_RESET)
+			break;
+		dch_trace("xray follow: reset %s", f.why);
+	}
+	dch_trace("xray follow: end rc=%d woke=%lu deadlines=%lu", rc, f.woke,
+	          f.timed);
+	xr_sent_free(f.sent);
+	return rc;
+}
+
 /* n names a History record (by name, file or <file>.json): a local name
 ** with ':' is resolved here before it is read as host:name. */
 static int
@@ -11472,15 +12367,15 @@ name_routes_remote(const char *n)
 	return hit && known;
 }
 
-/* `dch --xray <n> [--json] [--clear]` and `--ref <text> --scope session
-** [--full] [--budget-ms <ms>] --json` (spec 3.1, 3.4): flags in any order,
-** each once; the rest of the family (--follow, --chapter, the view, the
-** wider scopes) comes with XR2b-XR5 and exits 2 here. */
+/* `dch --xray <n> [--json] [--clear|--follow]` and `--ref <text> --scope
+** session [--full] [--budget-ms <ms>] --json` (spec 3.1, 3.3, 3.4): flags in
+** any order, each once; the rest of the family (--chapter, the view, the
+** wider scopes) comes with XR3-XR5 and exits 2 here. */
 static int
 xray_main(int argc, char **argv)
 {
 	const char *n = NULL, *ref = NULL, *scope = NULL, *budget = NULL;
-	int json = 0, clear = 0, full = 0, k, rc, nr;
+	int json = 0, clear = 0, full = 0, follow = 0, k, rc, nr;
 	struct hrec *r = NULL;
 	struct xr_target t;
 	struct xr_refq q;
@@ -11501,13 +12396,16 @@ xray_main(int argc, char **argv)
 			clear = 1;
 		else if (!strcmp(argv[k], "--full") && !full)
 			full = 1;
+		else if (!strcmp(argv[k], "--follow") && !follow)
+			follow = 1;
 		else if (argv[k][0] == '-' && argv[k][1])
 		{
 			fprintf(stderr, "dch: bad usage: %s%s\n", argv[k],
 			        v && *v ? " twice" : v ? " needs a value"
 			        : (!strcmp(argv[k], "--json") ||
 			           !strcmp(argv[k], "--clear") ||
-			           !strcmp(argv[k], "--full")) ? " twice"
+			           !strcmp(argv[k], "--full") ||
+			           !strcmp(argv[k], "--follow")) ? " twice"
 			        : " is not an --xray flag of this dch");
 			return 2;
 		}
@@ -11530,6 +12428,12 @@ xray_main(int argc, char **argv)
 	if (ref && clear)
 	{
 		fputs("dch: bad usage: --ref and --clear\n", stderr);
+		return 2;
+	}
+	if (follow && (ref || clear))
+	{
+		fprintf(stderr, "dch: bad usage: --follow and %s\n",
+		        ref ? "--ref" : "--clear");
 		return 2;
 	}
 	if (!n || !name_ok(n))
@@ -11598,7 +12502,8 @@ xray_main(int argc, char **argv)
 	nr = history_load(&r);
 	rc = xr_resolve(n, r, nr, clear, &t);
 	if (rc == 0)
-		rc = clear ? xr_clear(&t) : xr_json(&t, ref ? &q : NULL);
+		rc = clear ? xr_clear(&t) : follow ? xr_follow(&t)
+		     : xr_json(&t, ref ? &q : NULL, 0);
 	hrec_free(r, nr);
 	return rc;
 }

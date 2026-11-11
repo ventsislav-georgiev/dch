@@ -1326,6 +1326,646 @@ def test_cancel():
         os.unlink(tp)
 
 
+# ---- --follow (#136, XR2b; spec 3.3, 9.5's tail row) ---------------------
+
+class Follow:
+    """`dch --xray <n> --follow --json`, its lines read off as they come,
+    each with its arrival time."""
+
+    def __init__(self, n, env=None):
+        self.p = subprocess.Popen([DCH, "--xray", n, "--follow", "--json"],
+                                  stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, env=env or ENV)
+        self.got = []
+        self.th = threading.Thread(target=self.run, daemon=True)
+        self.th.start()
+
+    def run(self):
+        for raw in self.p.stdout:
+            try:
+                o = json.loads(raw)
+            except ValueError:
+                o = {"bad": raw.decode(errors="replace")}
+            self.got.append((time.time(), o))
+
+    def objs(self, frm=0):
+        return [o for _, o in self.got[frm:]]
+
+    def kinds(self, frm=0):
+        return [next((k for k in o if k != "schema"), "?")
+                for o in self.objs(frm)]
+
+    def wait(self, pred, secs=10.0, frm=0):
+        return wait_for(lambda: [o for o in self.objs(frm) if pred(o)], secs)
+
+    def stop(self):
+        if self.p.poll() is None:
+            self.p.terminate()
+        try:
+            self.p.wait(5)
+        except subprocess.TimeoutExpired:
+            self.p.kill()
+            self.p.wait(5)
+        self.th.join(5)
+        return self.p.returncode
+
+
+def is_ref(key, **kv):
+    return lambda o: "ref" in o and o["ref"]["key"] == key and \
+        all(o["ref"].get(k) == v for k, v in kv.items())
+
+
+def is_reset(why):
+    return lambda o: o.get("reset") == {"why": why}
+
+
+def trace_from(path, off):
+    with open(path) as f:
+        f.seek(off)
+        return f.read()
+
+
+def test_follow_claude():
+    n = "xc-fl"
+    bindir = os.path.join(T, "bin")
+    fdir = os.path.join(T, "fake")
+    proj = os.path.join(T, "fproj")
+    for d in (bindir, fdir, proj):
+        os.makedirs(d, exist_ok=True)
+    shutil.copy(os.path.join(HERE, "fake_claude.py"),
+                os.path.join(bindir, "claude"))
+    os.chmod(os.path.join(bindir, "claude"), 0o755)
+    env = dict(ENV, PATH=bindir + ":" + ENV.get("PATH", "/usr/bin:/bin"),
+               FAKE_CLAUDE_DIR=fdir)
+    sdir = os.path.join(HOME, ".claude", "sessions")
+    had = set(os.listdir(sdir)) if os.path.isdir(sdir) else set()
+    r = subprocess.run([DCH, "--spawn", n, "--size", "80x24", "--cwd", proj,
+                        "claude"], capture_output=True, text=True, timeout=30,
+                       env=env)
+    check("follow: claude spawned", r.returncode == 0, r.stderr)
+    trace = os.path.join(T, "trace-follow")
+    open(trace, "w").close()
+    dbg = dict(ENV, DCH_DEBUG=trace)
+    fl = None
+    try:
+        rec = wait_for(lambda: [f for f in os.listdir(sdir)
+                                if f.endswith(".json") and f not in had]
+                       if os.path.isdir(sdir) else None, 10)
+        rp = os.path.join(sdir, rec[0])
+        sid = json.load(open(rp))["sessionId"]
+        pdir = os.path.join(HOME, ".claude", "projects", key(proj))
+        os.makedirs(pdir, exist_ok=True)
+        tp = os.path.join(pdir, sid + ".jsonl")
+
+        def put(objs, mode="a"):
+            with open(tp, mode) as f:
+                f.write("".join(json.dumps(o) + "\n" for o in objs))
+
+        put([{"type": "user", "cwd": proj, "message": {
+                "content": "first ask #11"}},
+             {"type": "assistant", "message": {"content": [
+                 {"type": "text", "text": "ok"}]}}], "w")
+        wait_for(lambda: (xray(n, "--json")[1] or {}).get("corpus") ==
+                 "claude", 10)
+        _, one, _ = xray(n, "--json")
+        fl = Follow(n, dbg)
+        snap = fl.wait(lambda o: "snapshot" in o)
+        check("follow: the first line is a snapshot, the --json object",
+              snap and fl.kinds()[0] == "snapshot" and
+              snap[0]["snapshot"] == one, (fl.objs(), one))
+
+        # mutant 34: idle, no timer and no wake (9.5: a counting seam)
+        time.sleep(0.2)
+        off = os.path.getsize(trace)
+        time.sleep(1.0)
+        idle = trace_from(trace, off)
+        check("follow: idle, no deadline armed and no wake (no timer)",
+              "xray follow: deadline" not in idle and
+              "xray follow: woke" not in idle and fl.p.poll() is None, idle)
+
+        # a tool_use, then its tool_result in a later read (QA A2)
+        k0 = len(fl.got)
+        put([{"type": "user", "message": {"content": "second ask #12"}},
+             {"type": "assistant", "message": {"content": [
+                 {"type": "tool_use", "id": "t1", "name": "Bash",
+                  "input": {"command": "gh issue view 12"}}]}}])
+        a = fl.wait(is_ref("issue:#12"), frm=k0)
+        ch = fl.wait(lambda o: "chapter" in o, frm=k0)
+        check("follow: appended lines give a chapter and a ref delta",
+              a and not a[0]["ref"]["defined"] and ch and
+              ch[0]["chapter"]["title"] == "second ask #12",
+              fl.objs(k0))
+        time.sleep(0.4)
+        k1 = len(fl.got)
+        put([{"type": "user", "toolUseResult": {"stdout": "# #12 Twelve"},
+              "message": {"content": [{"type": "tool_result",
+                                       "tool_use_id": "t1",
+                                       "content": "# #12 Twelve"}]}}])
+        d = fl.wait(is_ref("issue:#12", defined=True), frm=k1)
+        check("follow: a tool_result in the read after its tool_use pairs "
+              "(the tool_use ring survives)", d and
+              d[0]["ref"]["title"] == "Twelve", fl.objs(k1))
+        time.sleep(0.4)
+        _, now, _ = xray(n, "--json")
+        state = {"chapters": {}, "refs": {}}
+        for o in fl.objs():
+            if "snapshot" in o:
+                state = {"chapters": {c["anchor"]: c for c in
+                                      o["snapshot"]["chapters"]},
+                         "refs": {x["key"]: x for x in
+                                  o["snapshot"]["refs"]}}
+            elif "chapter" in o:
+                state["chapters"][o["chapter"]["anchor"]] = o["chapter"]
+            elif "ref" in o:
+                state["refs"][o["ref"]["key"]] = o["ref"]
+        strip = lambda c: {k: v for k, v in c.items() if k != "i"}
+        check("follow: the snapshot plus its deltas is the --json of now",
+              now and sorted(state["refs"].values(), key=str) ==
+              sorted(now["refs"], key=str) and
+              [strip(c) for c in sorted(state["chapters"].values(),
+                                        key=lambda c: c["offset"])] ==
+              [strip(c) for c in now["chapters"]], (state, now))
+
+        # coalescing: lines 30 ms apart, at most one batch per 250 ms (the
+        # trace's batch times)
+        k2 = len(fl.got)
+        off = os.path.getsize(trace)
+        for i in range(12):
+            put([{"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "see #%d" % (200 + i)}]}}])
+            time.sleep(0.03)
+        fl.wait(is_ref("issue:#211"), frm=k2)
+        ts = [float(l.split()[0]) for l in trace_from(trace, off).splitlines()
+              if "xray follow: batch" in l]
+        gaps = [b - a for a, b in zip(ts, ts[1:])]
+        nref = sum("ref" in o for o in fl.objs(k2))
+        check("follow: deltas coalesce, batches >= 250 ms apart (%d refs in "
+              "%d batches, gaps %s)" % (nref, len(ts),
+                                        ["%.3f" % g for g in gaps]),
+              # the count depends on how fast the lines land (a loaded
+              # runner spreads them): the gap is the rule
+              nref == 12 and 1 < len(ts) <= nref and
+              all(g >= 0.245 for g in gaps), ts)
+
+        # shrink: cut back to the first line
+        time.sleep(0.4)
+        k3 = len(fl.got)
+        first = len(json.dumps({"type": "user", "cwd": proj, "message": {
+            "content": "first ask #11"}})) + 1
+        os.truncate(tp, first)
+        s = fl.wait(lambda o: "snapshot" in o, frm=k3)
+        check("follow: a shrunk transcript sends reset shrunk, then a "
+              "snapshot", s and fl.kinds(k3)[:2] == ["reset", "snapshot"] and
+              fl.objs(k3)[0] == {"schema": 1, "reset": {"why": "shrunk"}} and
+              [c["title"] for c in s[0]["snapshot"]["chapters"]] ==
+              ["first ask #11"], fl.objs(k3))
+
+        # mutant 37: rotated (a /clear: a new id, a new file)
+        time.sleep(0.4)
+        k4 = len(fl.got)
+        sid2 = "22222222-3333-4444-8555-66666666666b"
+        r0 = json.load(open(rp))
+        r0["sessionId"] = sid2
+        with open(rp + ".tmp", "w") as f:
+            json.dump(r0, f)
+        os.rename(rp + ".tmp", rp)
+        with open(os.path.join(pdir, sid2 + ".jsonl"), "w") as f:
+            f.write(json.dumps({"type": "user", "cwd": proj, "message": {
+                "content": "rotated ask #13"}}) + "\n")
+        s = fl.wait(lambda o: "snapshot" in o, frm=k4)
+        check("follow: a rotated transcript sends reset rotated, then the "
+              "new session_id's snapshot", s and
+              fl.objs(k4)[0] == {"schema": 1, "reset": {"why": "rotated"}} and
+              s[0]["snapshot"]["session_id"] == sid2 and
+              [c["title"] for c in s[0]["snapshot"]["chapters"]] ==
+              ["rotated ask #13"], fl.objs(k4))
+        _, one, _ = xray(n, "--json")
+        check("follow: the rotated snapshot is the --json object",
+              s and s[0]["snapshot"] == one, (s, one))
+
+        # the same id at a new inode (the file replaced): rotated too
+        time.sleep(0.4)
+        k4 = len(fl.got)
+        tp2 = os.path.join(pdir, sid2 + ".jsonl")
+        with open(tp2 + ".new", "w") as f:
+            f.write(json.dumps({"type": "user", "cwd": proj, "message": {
+                "content": "replaced ask #15"}}) + "\n")
+        os.rename(tp2 + ".new", tp2)
+        s = fl.wait(lambda o: "snapshot" in o, frm=k4)
+        check("follow: a transcript replaced under the same id (a new "
+              "inode) sends reset rotated, then its snapshot", s and
+              fl.objs(k4)[0] == {"schema": 1, "reset": {"why": "rotated"}} and
+              [c["title"] for c in s[0]["snapshot"]["chapters"]] ==
+              ["replaced ask #15"], fl.objs(k4))
+
+        # the reader leaves: exit 0 at once, idle
+        rd, wr = os.pipe()
+        p = subprocess.Popen([DCH, "--xray", n, "--follow", "--json"],
+                             stdout=wr, stderr=subprocess.PIPE, env=ENV)
+        os.close(wr)
+        line = b""
+        while not line.endswith(b"\n"):
+            b = os.read(rd, 65536)
+            if not b:
+                break
+            line += b
+        t0 = time.time()
+        os.close(rd)
+        try:
+            rc = p.wait(5)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            rc = p.wait()
+        check("follow: the reader's close ends an idle follower, exit 0 "
+              "(%.2fs)" % (time.time() - t0), rc == 0 and
+              time.time() - t0 < 1.0 and not p.stderr.read(), rc)
+
+        # nothing written by a follow (9.5)
+        before = files(T)
+        k5 = len(fl.got)
+        put([{"type": "user", "message": {"content": "late #14"}}])
+        fl.wait(is_ref("issue:#14"), frm=k5)
+        tr = open(trace).read()
+        new = sorted(set(files(T)) - set(before))
+        check("follow: nothing written, no passage in the trace",
+              not [p for p in new if p != trace] and
+              "late #14" not in tr and "rotated ask" not in tr, new)
+
+        # the session ends: exit 0
+        dch("-k", n)
+        try:
+            rc = fl.p.wait(5)
+        except subprocess.TimeoutExpired:
+            rc = None
+        check("follow: the session's end ends it, exit 0", rc == 0, rc)
+        tr = open(trace).read()
+        m = re.search(r"xray follow: end rc=(-?\d+) woke=(\d+) "
+                      r"deadlines=(\d+)", tr)
+        check("follow: the end trace counts its wakes and deadlines",
+              m and m.group(1) == "0", tr[-400:])
+    finally:
+        if fl:
+            fl.stop()
+        dch("-k", n)
+
+
+def test_follow_agent():
+    """A shell's follower across an agent's start and exit. The start: the
+    ring pauses on the master's agent tick (vt.c appends a GAP record, so
+    the wake fires), and the stream sends reset rotated, then a snapshot of
+    corpus claude. The exit, on an idle shell (no row pushed): the resume
+    appends no record but moves the ring's gen (ring_touch), so the wake
+    fires; reset rotated, then a snapshot of corpus shell."""
+    n = "xc-fa"
+    bindir = os.path.join(T, "bin-fa")
+    fdir = os.path.join(T, "fake-fa")
+    proj = os.path.join(T, "faproj")
+    for d in (bindir, fdir, proj):
+        os.makedirs(d, exist_ok=True)
+    shutil.copy(os.path.join(HERE, "fake_claude.py"),
+                os.path.join(bindir, "claude"))
+    os.chmod(os.path.join(bindir, "claude"), 0o755)
+    env = dict(ENV, PATH=bindir + ":" + ENV.get("PATH", "/usr/bin:/bin"),
+               FAKE_CLAUDE_DIR=fdir, DCH_RECORD_MS="1000")
+    sdir = os.path.join(HOME, ".claude", "sessions")
+    had = set(os.listdir(sdir)) if os.path.isdir(sdir) else set()
+    r = subprocess.run([DCH, "--spawn", n, "--size", "80x24", "--cwd", proj,
+                        "sh"], capture_output=True, text=True, timeout=30,
+                       env=env)
+    check("follow agent: shell spawned", r.returncode == 0, r.stderr)
+    fl = None
+    try:
+        wait_for(lambda: "$" in screen(n) or "#" in screen(n), 5)
+        fl = Follow(n)
+        s0 = fl.wait(lambda o: "snapshot" in o)
+        check("follow agent: the first snapshot is corpus shell",
+              s0 and s0[0]["snapshot"]["corpus"] == "shell", fl.objs())
+
+        k0 = len(fl.got)
+        dch("--send", n, "claude\r", env=env)
+        rec = wait_for(lambda: [f for f in os.listdir(sdir)
+                                if f.endswith(".json") and f not in had]
+                       if os.path.isdir(sdir) else None, 10)
+        if rec:
+            sid = json.load(open(os.path.join(sdir, rec[0])))["sessionId"]
+            pdir = os.path.join(HOME, ".claude", "projects", key(proj))
+            os.makedirs(pdir, exist_ok=True)
+            with open(os.path.join(pdir, sid + ".jsonl"), "w") as f:
+                f.write(json.dumps({"type": "user", "cwd": proj, "message": {
+                    "content": "ask #11"}}) + "\n")
+
+        def rotated_then(k0):
+            ob = fl.objs(k0)
+            i = next((j for j, o in enumerate(ob)
+                      if is_reset("rotated")(o)), None)
+            return ob[i + 1] if i is not None and i + 1 < len(ob) else None
+        wait_for(lambda: rotated_then(k0), 15)
+        nxt = rotated_then(k0)
+        check("follow agent: the agent's start sends reset rotated, then a "
+              "snapshot of corpus claude",
+              nxt is not None and "snapshot" in nxt and
+              nxt["snapshot"]["corpus"] == "claude", fl.objs(k0))
+        k1 = len(fl.got)
+        t1 = time.time()
+        dch("--send", n, "/exit\r", env=env)
+        # the tick is 1 s (DCH_RECORD_MS): the resume lands within ~2 s
+        wait_for(lambda: rotated_then(k1), 5)
+        secs = time.time() - t1
+        nxt = rotated_then(k1)
+        check("follow agent: the agent's exit on an idle shell sends reset "
+              "rotated, then a snapshot of corpus shell (%.1f s)" % secs,
+              nxt is not None and "snapshot" in nxt and
+              nxt["snapshot"]["corpus"] == "shell" and secs < 5,
+              fl.objs(k1))
+    finally:
+        dch("-k", n)
+        if fl:
+            wait_for(lambda: fl.p.poll() is not None, 5)
+            rc = fl.stop()
+            check("follow agent: the session's end exits 0", rc == 0,
+                  (rc, fl.p.stderr.read() if fl.p.stderr else ""))
+
+def test_follow_history():
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, RSID + ".jsonl")
+    with open(tp, "w") as f:
+        f.write(json.dumps({"type": "user", "cwd": "/home/demo/proj",
+                            "message": {"content": "ended #31"}}) + "\n")
+    history("xr-fh", RSID, cfg)
+    try:
+        _, one, _ = xray("xr-fh", "--json")
+        r = dch("--xray", "xr-fh", "--follow", "--json")
+        ls = ref_lines(r.stdout) or []
+        check("follow: a History session writes one snapshot, exit 0",
+              r.returncode == 0 and len(ls) == 1 and
+              ls[0] == {"schema": 1, "snapshot": one} and one["refs"],
+              (r.returncode, r.stdout[-400:], r.stderr))
+        r = dch("--xray", "xr-fh", "--follow", "--clear", "--json")
+        check("follow: --follow with --clear is usage (exit 2)",
+              r.returncode == 2 and "--follow and --clear" in r.stderr,
+              r.stderr)
+        r = dch("--xray", "xr-fh", "--follow", "--ref", "#31", "--json")
+        check("follow: --follow with --ref is usage (exit 2)",
+              r.returncode == 2 and "--follow and --ref" in r.stderr,
+              r.stderr)
+        r = dch("--xray", "xr-fh", "--follow", "--follow", "--json")
+        check("follow: --follow twice is usage (exit 2)",
+              r.returncode == 2 and "--follow twice" in r.stderr, r.stderr)
+        r = dch("--xray", "nosuch", "--follow", "--json")
+        check("follow: no such session, exit 1, nothing on stdout",
+              r.returncode == 1 and not r.stdout and
+              "no such session" in r.stderr, r.stderr)
+    finally:
+        os.unlink(tp)
+
+
+def test_follow_cap():
+    """Past the per-file range (3.3 item 1): the capped snapshot, then
+    exactly one reset full and the whole file's. Sparse: the holes are
+    over-long lines, cheap to read and to skip."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, RSID + ".jsonl")
+    u = lambda t: (json.dumps({"type": "user", "cwd": "/home/demo/proj",
+                               "message": {"content": t}}) + "\n").encode()
+    with open(tp, "wb") as f:
+        f.write(u("head #61"))
+        f.seek(30 << 20)
+        f.write(b"\n" + u("middle #62"))
+        f.seek(300 << 20)
+        f.write(b"\n" + u("tail #63"))
+    n = "xc-fc"
+    # a live Claude for the History record's transcript: the fake's id
+    # pointed at RSID (a follow of a History session ends at once)
+    bindir = os.path.join(T, "bin")
+    fdir = os.path.join(T, "fake")
+    for d in (bindir, fdir):
+        os.makedirs(d, exist_ok=True)
+    shutil.copy(os.path.join(HERE, "fake_claude.py"),
+                os.path.join(bindir, "claude"))
+    os.chmod(os.path.join(bindir, "claude"), 0o755)
+    env = dict(ENV, PATH=bindir + ":" + ENV.get("PATH", "/usr/bin:/bin"),
+               FAKE_CLAUDE_DIR=fdir)
+    sdir = os.path.join(HOME, ".claude", "sessions")
+    had = set(os.listdir(sdir)) if os.path.isdir(sdir) else set()
+    r = subprocess.run([DCH, "--spawn", n, "--size", "80x24", "--cwd", T,
+                        "claude"], capture_output=True, text=True, timeout=30,
+                       env=env)
+    fl = None
+    try:
+        rec = wait_for(lambda: [f for f in os.listdir(sdir)
+                                if f.endswith(".json") and f not in had]
+                       if os.path.isdir(sdir) else None, 10)
+        rp = os.path.join(sdir, rec[0])
+        r0 = json.load(open(rp))
+        r0["sessionId"] = RSID
+        with open(rp + ".tmp", "w") as f:
+            json.dump(r0, f)
+        os.rename(rp + ".tmp", rp)
+        fl = Follow(n)
+        s = fl.wait(lambda o: "snapshot" in o and len(
+            [x for x in fl.objs() if "snapshot" in x]) >= 2, 30)
+        time.sleep(1.0)
+        ks = fl.kinds()
+        keys = [[x["key"] for x in o["snapshot"]["refs"]]
+                for o in fl.objs() if "snapshot" in o]
+        check("follow: past the cap, the capped snapshot (no middle #62), "
+              "then exactly one reset full and the whole file's",
+              ks == ["snapshot", "reset", "snapshot"] and
+              fl.objs()[1] == {"schema": 1, "reset": {"why": "full"}} and
+              len(keys) == 2 and "issue:#62" not in keys[0] and
+              "issue:#62" in keys[1] and
+              not fl.objs()[0]["snapshot"]["complete"] and
+              fl.objs()[2]["snapshot"]["complete"], (ks, keys))
+    finally:
+        if fl:
+            fl.stop()
+        dch("-k", n)
+        os.unlink(tp)
+
+
+def test_follow_shell():
+    """A shell's --follow over a 64K ring: typed blocks give chapter and ref
+    deltas, an eviction its evict line first, then counts down and
+    underline off (mutant 42); a clear (--clear, ED 3, RIS) reset cleared,
+    never evict (T9g); more than 256 keys evicted reset evicted; a fifth
+    subscriber busy."""
+    n = "xc-fs"
+    cfg = ENV["DCH_CONFIG"]
+    with open(cfg, "w") as f:
+        f.write("xray_ring = 64K\n")
+    prog = ("while :; do printf '\\033]133;A\\007$ \\033]133;B\\007'; "
+            "read -r cmd || exit; printf '\\033]133;C\\007'; eval \"$cmd\"; "
+            "printf '\\033]133;D;0\\007'; done")
+    cwd = os.path.join(T, "fs proj")
+    os.makedirs(cwd, exist_ok=True)
+    trace = os.path.join(T, "trace-fs")
+    open(trace, "w").close()
+    dbg = dict(ENV, DCH_DEBUG=trace)
+    fls = []
+    try:
+        r = dch("--spawn", n, "--size", "80x24", "--cwd", cwd, "sh", "-c",
+                prog)
+        check("follow shell: spawned under xray_ring 64K", r.returncode == 0,
+              r.stderr)
+        wait_for(lambda: "$" in screen(n), 5)
+        for _ in range(2):
+            dch("--send", n, "echo 'see o/r#41'; seq 1 30\n")
+            time.sleep(0.3)
+        wait_for(lambda: "30" in screen(n), 5)
+        time.sleep(0.3)
+        _, one, _ = xray(n, "--json")
+        fl = Follow(n, dbg)
+        fls.append(fl)
+        snap = fl.wait(lambda o: "snapshot" in o)
+        r41 = [x for x in (one or {}).get("refs", [])
+               if x["key"] == "pull:o/r#41"]
+        check("follow shell: the snapshot is the --json object",
+              snap and snap[0]["snapshot"] == one and r41 and
+              r41[0]["underline"], (snap, one))
+
+        time.sleep(0.2)
+        off = os.path.getsize(trace)
+        time.sleep(1.0)
+        idle = trace_from(trace, off)
+        check("follow shell: idle, no deadline and no wake (no timer)",
+              "xray follow: deadline" not in idle and
+              "xray follow: woke" not in idle, idle)
+
+        k0 = len(fl.got)
+        dch("--send", n, "echo 'more o/r#42'; seq 1 30\n")
+        a = fl.wait(is_ref("pull:o/r#42"), frm=k0)
+        c = fl.wait(lambda o: "chapter" in o, frm=k0)
+        check("follow shell: a typed block gives a chapter and a ref delta",
+              a and c and c[0]["chapter"]["title"] == "echo 'more o/r#42'; seq 1 30",
+              fl.objs(k0))
+        time.sleep(0.4)
+        _, now, _ = xray(n, "--json")
+        cur = {x["key"]: x for x in snap[0]["snapshot"]["refs"]} if snap \
+            else {}
+        for o in fl.objs():
+            if "ref" in o:
+                cur[o["ref"]["key"]] = o["ref"]
+        check("follow shell: the snapshot plus its deltas is the --json of "
+              "now (refs)", now and sorted(cur.values(), key=str) ==
+              sorted(now["refs"], key=str), (cur, now and now["refs"]))
+
+        # mutant 42: the eviction step's evict line first, then underline off
+        k1 = len(fl.got)
+        dch("--send", n, "seq 1 20000\n")
+        gone = fl.wait(is_ref("pull:o/r#41", count=0), 15, frm=k1)
+        ob = fl.objs(k1)
+        i = next((j for j, o in enumerate(ob) if is_ref("pull:o/r#41",
+                                                         count=0)(o)), None)
+        j = i
+        while j is not None and j > 0 and ("ref" in ob[j - 1] or
+                                           "chapter" in ob[j - 1]):
+            j -= 1
+        ev = ob[j - 1] if j else None
+        check("follow shell: an eviction sends evict first, then the gone "
+              "key as count 0, underline and defined off", gone and
+              ev and "evict" in ev and gone[0]["ref"]["underline"] is False
+              and gone[0]["ref"]["defined"] is False,
+              [list(o)[1:] for o in ob][:40])
+        chs = (one or {}).get("chapters", [])
+        check("follow shell: evict's seq is past the evicted block's anchor",
+              ev and "evict" in ev and chs and
+              ev["evict"]["seq"] > chs[0]["offset"], (ev, chs))
+        check("follow shell: no reset for a small eviction",
+              not [o for o in ob if "reset" in o], ob[:20])
+        wait_for(lambda: "20000" in screen(n), 10)
+
+        # T9g: a clear sends reset cleared and a snapshot, never evict
+        for what, how in (("--clear", None), ("ED 3", "printf '\\033[3J'\n"),
+                          ("RIS", "printf '\\033c'\n")):
+            time.sleep(0.4)
+            k = len(fl.got)
+            if how:
+                dch("--send", n, "echo 'pre o/r#43'; seq 1 30\n")
+                fl.wait(is_ref("pull:o/r#43"), frm=k)
+                time.sleep(0.4)
+                k = len(fl.got)
+                dch("--send", n, how)
+            else:
+                rc, cl, err = xray(n, "--clear", "--json")
+            s = fl.wait(lambda o: "snapshot" in o, frm=k)
+            ob = fl.objs(k)
+            check("follow shell: %s sends reset cleared, then a snapshot, "
+                  "and no evict" % what, s and
+                  ob[0] == {"schema": 1, "reset": {"why": "cleared"}} and
+                  "snapshot" in ob[1] and
+                  not [o for o in ob if "evict" in o] and
+                  not [x for x in s[0]["snapshot"]["refs"]
+                       if x["key"] in ("pull:o/r#41", "pull:o/r#43")],
+                  [list(o)[1:] for o in ob][:10])
+
+        # 4 subscribers per master: a fifth is busy, before any line
+        for _ in range(3):
+            fls.append(Follow(n))
+        ok = all(f.wait(lambda o: "snapshot" in o) for f in fls)
+        r = dch("--xray", n, "--follow", "--json")
+        check("follow shell: a fifth subscriber gets busy, exit 1, nothing "
+              "on stdout", ok and r.returncode == 1 and not r.stdout and
+              r.stderr == "dch: busy\n", (ok, r.returncode, r.stdout[:200],
+                                          r.stderr))
+
+        # the session's end ends every follower, exit 0
+        dch("-k", n)
+        rcs = []
+        for f in fls:
+            try:
+                rcs.append(f.p.wait(5))
+            except subprocess.TimeoutExpired:
+                rcs.append(None)
+        check("follow shell: the session's end ends every follower, exit 0",
+              rcs == [0] * len(fls), rcs)
+        tr = open(trace).read()
+        check("follow shell: the trace holds no passage",
+              "see o/r#41" not in tr and "more o/r" not in tr, tr[-300:])
+    finally:
+        for f in fls:
+            f.stop()
+        dch("-k", n)
+
+    # more than 256 keys in one eviction step: reset evicted. The keys sit
+    # on three adjacent rows of 100 (a 1000-column pane; 128 mentions per
+    # entry, 3.8), so one step evicts them all.
+    n = "xc-fs2"
+    fl = None
+    try:
+        r = dch("--spawn", n, "--size", "1000x24", "--cwd", cwd, "sh", "-c",
+                prog)
+        wait_for(lambda: "$" in screen(n), 5)
+        fl = Follow(n)
+        fl.wait(lambda o: "snapshot" in o)
+        # typed as a loop: a canonical-mode line holds 1024 bytes
+        dch("--send", n, "for i in $(seq 1000 1299); do printf 'o/r#%s ' "
+            "$i; [ $((i % 100)) = 99 ] && echo; done; seq 1 30\n")
+        fl.wait(is_ref("pull:o/r#1299"), 10)
+        time.sleep(0.4)
+        k = len(fl.got)
+        dch("--send", n, "seq 1 20000\n")
+        s = fl.wait(is_reset("evicted"), 15, frm=k)
+        ob = fl.objs(k)
+        i = next((j for j, o in enumerate(ob) if is_reset("evicted")(o)), 0)
+        check("follow shell: an eviction of more than 256 keys sends evict, "
+              "reset evicted, then a snapshot", s and i > 0 and
+              "evict" in ob[i - 1] and i + 1 < len(ob) and
+              "snapshot" in ob[i + 1] and
+              not [x for x in ob[i + 1]["snapshot"]["refs"]
+                   if x["key"] == "pull:o/r#1000"],
+              [list(o)[1:] for o in ob][:12])
+    finally:
+        if fl:
+            fl.stop()
+        dch("-k", n)
+        if os.path.exists(cfg):
+            os.unlink(cfg)
+
+
 def main():
     try:
         test_names()
@@ -1344,6 +1984,11 @@ def main():
         test_cancel()
         test_claude_caps()
         test_shell_caps()
+        test_follow_history()
+        test_follow_claude()
+        test_follow_cap()
+        test_follow_shell()
+        test_follow_agent()
     finally:
         shutil.rmtree(T, ignore_errors=True)
     if fails[0]:

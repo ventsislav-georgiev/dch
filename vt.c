@@ -270,8 +270,11 @@ on_prompt(GhosttyTerminal t, void *ud, const GhosttyTerminalSemanticPrompt *ev)
 		if (ev->prompt_kind == GHOSTTY_SEMANTIC_PROMPT_PROMPT_PRIMARY)
 		{
 			snprintf(head, sizeof head, "A");
-			if (xpaused)
+			if (xpaused && !xresume)
+			{
 				xresume = 1;	/* the shell's prompt is back */
+				ring_touch(xr);	/* paused flips: wake readers */
+			}
 		}
 		else
 			snprintf(head, sizeof head, "A;%c",
@@ -787,6 +790,8 @@ dch_vt_capture_pause(int on)
 	}
 	else if (!on && xpaused)
 	{
+		if (!xresume)
+			ring_touch(xr);	/* paused flips, no record: wake readers */
 		xresume = 1;
 		capture();
 	}

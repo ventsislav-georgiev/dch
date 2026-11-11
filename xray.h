@@ -223,6 +223,16 @@ void xr_claude_refs(struct xr_claude *d, const struct xr_sink *k,
                     void *tctx);
 /* Lines over xr_lim.line seen so far (--ref's lines_too_long). */
 uint64_t xr_claude_too_long(const struct xr_claude *d);
+/* --follow (#136): the tail. Lines of fd in [from, to), from a line start;
+** a line still open at `to` is left for the next call, which starts at
+** xr_claude_next(d) (also set by xr_claude_read). The refs' tick may stop it
+** early at a line end (the full pass's slices). 0, 1 the file shrank under
+** the read, -1 a read error. The decoder (its tool_use ring, its open turn)
+** carries on across calls (QA A2). */
+int xr_claude_tail(struct xr_claude *d, int fd, uint64_t from, uint64_t to);
+uint64_t xr_claude_next(const struct xr_claude *d);
+/* The chapters so far, anchored, the open turn included; d keeps them. */
+const struct xr_chapters *xr_claude_chapters(struct xr_claude *d);
 
 /* ---- shell ring (7.3) -------------------------------------------------- */
 struct xr_rec
@@ -288,6 +298,7 @@ struct xr_answer
 	const char *session, *session_id, *corpus, *reason, *why;
 	const char *project, *project_label;
 	int live, available, mentions_only, complete, chapters_evicted;
+	int snapshot;			/* --follow: {"schema":1,"snapshot":{…}} */
 	long long lines;		/* < 0 prints null */
 	const struct xr_chapters *ch;
 	struct xr_index *refs;		/* NULL prints [] */
@@ -297,5 +308,24 @@ struct xr_answer
 int xr_print(FILE *f, const struct xr_answer *a);
 /* A JSON string as --ls-json writes it (dch_json_quote). */
 void xr_put_str(FILE *f, const char *s);
+
+/* ---- --follow's deltas (3.3; #136) ------------------------------------- */
+/* What a follower last wrote: per ref key and chapter anchor, the hash of the
+** object's bytes (a chapter's i, display only, is left out). */
+struct xr_sent;
+struct xr_sent *xr_sent_new(void);
+void xr_sent_free(struct xr_sent *s);
+/* After a snapshot of a: all of it counts as written. 0, -1 out of memory. */
+int xr_sent_take(struct xr_sent *s, const struct xr_answer *a);
+/* The diff of a against what was written, held for xr_delta_write: *nref,
+** the ref keys new, changed or gone; *lost, a written chapter gone whose
+** offset is at or past head (a shell's ring head: below it, the evict line
+** drops it; pass 0 for a transcript). Nothing written. 0, -1 no memory. */
+int xr_delta(struct xr_sent *s, const struct xr_answer *a, uint64_t head,
+             size_t *nref, int *lost);
+/* Write the held diff for the same a: a chapter line per new or changed
+** chapter (oldest first), a ref line per new or changed key, a count-0 ref
+** per gone key; then that is what was written. 0, -1 a write failed. */
+int xr_delta_write(FILE *f, struct xr_sent *s, const struct xr_answer *a);
 
 #endif /* DCH_XRAY_H */
