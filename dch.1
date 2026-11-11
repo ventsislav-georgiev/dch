@@ -715,6 +715,12 @@ to read it all (a
 with it is accepted and has no effect);
 .B \-\-scope session
 is required (\fBproject\fR and \fBall\fR come later and exit 2).
+A reader that closes the pipe ends any form at dch's next write (at most
+250 ms later for
+.BR \-\-ref ),
+silently, with exit 0 and no
+.BR done ;
+any other write failure exits 3.
 Must be the first argument; every other flag exits 2.
 .I name
 is an agent UUID (the live session whose Claude Code has it, else the

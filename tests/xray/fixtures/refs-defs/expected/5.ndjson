@@ -2,4 +2,4 @@
 {"schema":1,"definition":{"session":"defs","live":false,"project":"-home-demo-proj","at":1794304831,"title":"Own title","passage":null,"rule":"D3","offset":6968,"chapter":"f*:0"}}
 {"schema":1,"mention":{"session":"defs","chapter":"f*:0","at":1794304831,"line":"dch meta --title=\"Own title\" PROJ-71","offset":6968,"live":false,"project":"-home-demo-proj"}}
 {"schema":1,"tally":{"session":"defs","live":false,"project":"-home-demo-proj","count":1,"definitions":1,"partial":false}}
-{"schema":1,"done":true,"partial":false,"counts":{"session":1,"project":0,"project_sessions":0,"all":null,"all_sessions":null},"why":null,"files":1,"bytes":21307,"lines_too_long":0}
+{"schema":1,"done":true,"partial":false,"counts":{"session":1,"project":0,"project_sessions":0,"all":null,"all_sessions":null},"why":null,"files":1,"bytes":22827,"lines_too_long":0}

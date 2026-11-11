@@ -443,7 +443,27 @@ r_url(const char *s, size_t n, size_t i, struct xr_span *sp)
 	return e;
 }
 
-/* R (owner) and r (no owner): {repo}#{n}. */
+/* r's stoplist (v3.2.2 Q3), case-insensitive: glue words and standards. */
+static int
+r_stop(const char *s, size_t k)
+{
+	static const char *const stop[] = {
+		"issue", "issues", "pull", "pulls", "item", "items", "step",
+		"steps", "page", "pages", "line", "lines", "test", "tests", "case",
+		"cases", "task", "tasks", "note", "notes", "part", "parts", "entry",
+		"round", "phase", "build", "ticket", "number", "version", "link",
+		"repo", "pkcs",
+	};
+	size_t m;
+
+	for (m = 0; m < sizeof stop / sizeof stop[0]; m++)
+		if (strlen(stop[m]) == k && !strncasecmp(stop[m], s, k))
+			return 1;
+	return 0;
+}
+
+/* R (owner) and r (no owner): {repo}#{n}. r's repo (v3.2.2 Q3): 3+ chars,
+** a letter first, a letter or digit last, not in the stoplist. */
 static size_t
 r_repo(const char *s, size_t n, size_t i, uint32_t prev, int owner,
        struct xr_span *sp)
@@ -468,7 +488,9 @@ r_repo(const char *s, size_t n, size_t i, uint32_t prev, int owner,
 	                                  s[j] == '_' || s[j] == '.' ||
 	                                  s[j] == '-'); j++)
 		k++;
-	if (k < 1 || k > 100 || j >= n || s[j] != '#')
+	if (k < 1 || k > 100 || j >= n || s[j] != '#' ||
+	    (!owner && (k < 3 || !A_ALNUM((unsigned char)s[j - 1]) ||
+	                r_stop(s + i, k))))
 		return 0;
 	for (d = 0, j++; j < n && d < 8 && A_DIG((unsigned char)s[j]); j++)
 		d++;
@@ -2072,6 +2094,7 @@ struct dres
 {
 	struct xr_span sp;	/* the key; s/e its anchor in out (or cmd) */
 	int incmd;
+	int ind2;		/* D2: s/e in dsrc.d2out when that is set */
 	const char *rule;
 	char title[XR_TITLE_MAX * 4 + 1];
 	char *passage;
@@ -2488,6 +2511,7 @@ d2(const char *out, size_t ol, const char *cmd, size_t cl, const char *cwd,
 		d->sp.s = (size_t)(t - out) + (size_t)p.tok[iv].start;
 		d->sp.e = (size_t)(t - out) + (size_t)p.tok[iv].end;
 		d->rule = "D2";
+		d->ind2 = 1;
 		/* the title, leading # markup and the ref itself stripped */
 		ti = j_str(&p, tv, &tl);
 		tp = ti ? ti : "";
@@ -2532,6 +2556,9 @@ struct dsrc
 	size_t cl;
 	int bash, failed, noexit, d2ok;
 	const char *cwd;
+	/* D2's source when out is a clip of it: the whole result (Q5) */
+	const char *d2out;	/* NUL-terminated; NULL: out */
+	size_t d2l;
 };
 
 struct d3m
@@ -2676,7 +2703,8 @@ defs_find(const struct dsrc *s, struct dset *ds)
 	}
 	olines_free(&o);
 	if (s->d2ok && ds->n < XR_DEFS)
-		d2(s->out, s->ol, s->cmd, s->cl, s->cwd, ds);
+		d2(s->d2out ? s->d2out : s->out, s->d2out ? s->d2l : s->ol,
+		   s->cmd, s->cl, s->cwd, ds);
 	if (s->bash && s->cmd && !s->noexit && ds->n < XR_DEFS)
 		d3(s, ds);
 }
@@ -2700,7 +2728,8 @@ defs_emit(const struct dsrc *s, struct remit *out_r, struct remit *cmd_r)
 
 		if (!r)
 			continue;
-		r->text = d->incmd ? s->cmd : s->out;
+		r->text = d->incmd ? s->cmd :
+		          d->ind2 && s->d2out ? s->d2out : s->out;
 		r->ctext = NULL;
 		rm_hit(r, &d->sp, d->title, d->passage ? d->passage : NULL, d->rule);
 		for (c = 0; c < r->ncov && !covered; c++)
@@ -4083,7 +4112,7 @@ refs_result(struct xr_claude *d, const struct json_parser *p, int i, int err,
 {
 	int extra = k_obj(p, 0, (const char *const[]){ "toolUseResult", 0 });
 	size_t n, bl;
-	char *t = output_text(p, i, extra, &n), a[48], *body;
+	char *t = output_text(p, i, extra, &n), a[48], *body = NULL;
 	struct remit r, cr;
 	struct dsrc ds;
 
@@ -4103,8 +4132,19 @@ refs_result(struct xr_claude *d, const struct json_parser *p, int i, int err,
 	if (!t)
 		goto out;
 	bl = clip(t, n, XR_OUTPUT_CAP);
-	t[bl] = '\0';
-	body = t;
+	/* Q5: D2 parses the whole result (<= XR_D2_MAX), all else the clip */
+	if (bl < n && rr->paired && n <= XR_D2_MAX)
+	{
+		if (!(body = malloc(bl + 1)))
+			goto out;
+		memcpy(body, t, bl);
+		body[bl] = '\0';
+	}
+	else
+	{
+		t[bl] = '\0';
+		body = t;
+	}
 	rm_scan(&r, body, bl, XR_CODE);
 	if (!rr->paired)
 		goto out;
@@ -4112,7 +4152,9 @@ refs_result(struct xr_claude *d, const struct json_parser *p, int i, int err,
 	ds.out = body;
 	ds.ol = bl;
 	ds.failed = err;
-	ds.d2ok = 1;
+	ds.d2ok = n <= XR_D2_MAX;
+	ds.d2out = body != t ? t : NULL;
+	ds.d2l = n;
 	ds.cwd = r.cwd;
 	memset(&cr, 0, sizeof cr);
 	if (rr->c.kind == RC_BASH && rr->c.cmd)
@@ -4132,6 +4174,8 @@ refs_result(struct xr_claude *d, const struct json_parser *p, int i, int err,
 	free(cr.cov);
 out:
 	free(r.cov);
+	if (body != t)
+		free(body);
 	free(t);
 	free(rr->c.cmd);
 }

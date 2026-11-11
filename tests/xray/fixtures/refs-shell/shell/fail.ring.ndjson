@@ -1,0 +1,21 @@
+{"seq":281474976720000,"kind":"mark","flags":0,"t":1794300000,"text":"A"}
+{"seq":281474976720001,"kind":"prompt","flags":0,"t":1794300000,"text":"~/proj $"}
+{"seq":281474976720002,"kind":"mark","flags":0,"t":1794300000,"text":"B"}
+{"seq":281474976720003,"kind":"input","flags":0,"t":1794300000,"text":"gh issue create --title 'Shell failed'"}
+{"seq":281474976720004,"kind":"mark","flags":8,"t":1794300000,"text":"C"}
+{"seq":281474976720005,"kind":"output","flags":0,"t":1794300000,"text":"https://github.com/o/r/issues/837"}
+{"seq":281474976720006,"kind":"mark","flags":2,"t":1794300000,"text":"D;1","exit":1}
+{"seq":281474976720007,"kind":"mark","flags":0,"t":1794300000,"text":"A"}
+{"seq":281474976720008,"kind":"prompt","flags":0,"t":1794300000,"text":"~/proj $"}
+{"seq":281474976720009,"kind":"mark","flags":0,"t":1794300000,"text":"B"}
+{"seq":281474976720010,"kind":"input","flags":0,"t":1794300000,"text":"gh issue view 838 -R o/r --json number,title"}
+{"seq":281474976720011,"kind":"mark","flags":8,"t":1794300000,"text":"C"}
+{"seq":281474976720012,"kind":"output","flags":0,"t":1794300000,"text":"{\"number\": 838, \"title\": \"Shell JSON failed\"}"}
+{"seq":281474976720013,"kind":"mark","flags":2,"t":1794300000,"text":"D;2","exit":2}
+{"seq":281474976720014,"kind":"mark","flags":0,"t":1794300000,"text":"A"}
+{"seq":281474976720015,"kind":"prompt","flags":0,"t":1794300000,"text":"~/proj $"}
+{"seq":281474976720016,"kind":"mark","flags":0,"t":1794300000,"text":"B"}
+{"seq":281474976720017,"kind":"input","flags":0,"t":1794300000,"text":"gh issue view 839"}
+{"seq":281474976720018,"kind":"mark","flags":8,"t":1794300000,"text":"C"}
+{"seq":281474976720019,"kind":"output","flags":0,"t":1794300000,"text":"# #839 Shell ok"}
+{"seq":281474976720020,"kind":"mark","flags":2,"t":1794300000,"text":"D;0","exit":0}

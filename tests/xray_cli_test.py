@@ -1103,6 +1103,142 @@ def test_claude_caps():
         os.unlink(tp)
 
 
+# ---- v3.2.2 Q5: D2 parses the whole Claude result, <= 256 KiB ---------------
+
+def test_d2_whole():
+    """A gh --json object past the 3000-scalar clip defines through D2 in
+    the index and in --ref alike; one over 256 KiB defines nothing."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, RSID + ".jsonl")
+
+    def gh(id, n, title, body, late=False, pad=""):
+        o = {"title": title, "body": body, "number": n} if late else \
+            {"number": n, "title": title, "body": body}
+        out = json.dumps(o) + pad
+        return out, [
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": id, "name": "Bash", "input": {
+                    "command": "gh pr view %d --json number,title,body" %
+                    n}}]}},
+            {"type": "user", "toolUseResult": {"stdout": out},
+             "message": {"content": [{"type": "tool_result",
+                                      "tool_use_id": id, "content": out}]}}]
+    small, a = gh("d1", 12, "Fix login", "Body line.\n" + "y" * 10240)
+    big, b = gh("d2", 13, "Too big", "z" * (300 << 10))
+    # the id past the clip: its anchor still counts once (Q8)
+    late, c = gh("d3", 15, "Late id", "w" * 10240, late=True)
+    # small JSON, the whole result over 256 KiB: no D2 off its clip
+    _, e = gh("d4", 14, "Padded", "p", pad=" " * (260 << 10))
+    with open(tp, "w") as f:
+        for o in [{"type": "user", "cwd": "/home/demo/proj",
+                   "timestamp": "2026-11-10T10:00:00Z",
+                   "message": {"content": "see #12 and #13 and #14"}}] + \
+                a + b + c + e:
+            f.write(json.dumps(o) + "\n")
+    history("xr-d2", RSID, cfg)
+    try:
+        rc, o, err = xray("xr-d2", "--json")
+        refs = {r["key"]: r for r in (o or {}).get("refs", [])}
+        r12, r13 = refs.get("issue:#12", {}), refs.get("issue:#13", {})
+        check("d2: a %d KiB object defines in the index, one of %d KiB "
+              "does not" % (len(small) >> 10, len(big) >> 10),
+              rc == 0 and r12.get("defined") is True and
+              r12.get("definitions") == 1 and
+              r12.get("title") == "Fix login" and
+              r13.get("defined") is False and r13.get("definitions") == 0,
+              (r12, r13, err))
+        r14, r15 = refs.get("issue:#14", {}), refs.get("issue:#15", {})
+        check("d2: a small object padded past 256 KiB does not define; an "
+              "id past the clip defines and counts once",
+              r14.get("defined") is False and r15.get("defined") is True and
+              r15.get("title") == "Late id" and r15.get("count") == 1,
+              (r14, r15))
+
+        def defs(ref):
+            r = dch("--xray", "xr-d2", "--ref", ref, "--scope", "session",
+                    "--full", "--json")
+            ls = ref_lines(r.stdout) or [{}]
+            return (r.returncode, ls[-1].get("done"),
+                    [l["definition"] for l in ls if "definition" in l])
+        rc12, done12, d12 = defs("#12")
+        rc13, done13, d13 = defs("#13")
+        rc15, done15, d15 = defs("#15")
+        r = dch("--xray", "xr-d2", "--ref", "#15", "--scope", "session",
+                "--full", "--json")
+        m15 = [l["mention"] for l in ref_lines(r.stdout) or [] if
+               "mention" in l]
+        check("d2: --ref agrees on an id past the clip: one D2, its "
+              "anchor's line", rc15 == 0 and done15 and len(d15) == 1 and
+              d15[0]["title"] == "Late id" and len(m15) == 1 and
+              '"number": 15' in m15[0]["line"], (d15, m15))
+        check("d2: --ref agrees: #12 has its D2, #13 none",
+              rc12 == 0 and done12 and len(d12) == 1 and
+              d12[0]["rule"] == "D2" and d12[0]["title"] == "Fix login" and
+              d12[0]["passage"].startswith("Body line.") and
+              rc13 == 0 and done13 and d13 == [], (d12, d13))
+        rc, out, rss = maxrss([DCH, "--xray", "xr-d2", "--ref", "#13",
+                               "--scope", "session", "--full", "--json"],
+                              ENV)
+        rss_ok("d2: --ref over a 300 KiB result", rss)
+    finally:
+        os.unlink(tp)
+
+
+# ---- v3.2.2 Q14: EPIPE is exit 0, silent, for every form ---------------------
+
+def to_fd(argv, how):
+    """argv with stdout a pipe whose reader has left ("epipe"), or a
+    read-only fd ("ebadf", a write error that is not EPIPE)."""
+    if how == "epipe":
+        r, w = os.pipe()
+        os.close(r)
+    else:
+        w = os.open(os.devnull, os.O_RDONLY)
+    try:
+        p = subprocess.run(argv, stdout=w, stderr=subprocess.PIPE, env=ENV,
+                           timeout=30)
+    finally:
+        os.close(w)
+    return p.returncode, p.stderr.decode()
+
+
+def test_write_fail():
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, RSID + ".jsonl")
+    with open(tp, "w") as f:
+        f.write(json.dumps({"type": "user", "cwd": "/home/demo/proj",
+                            "message": {"content": "see #831"}}) + "\n")
+    history("xr-wf", RSID, cfg)
+    n = "xc-wf"
+    try:
+        r = dch("--spawn", n, "--size", "80x24", "sh", "-c",
+                "echo WF''UP; sleep 60")
+        check("write fail: spawned", r.returncode == 0 and
+              wait_for(lambda: "WFUP" in screen(n), 10), r.stderr)
+        forms = [("--json", ["xr-wf", "--json"]),
+                 ("--ref", ["xr-wf", "--ref", "#831", "--scope", "session",
+                            "--full", "--json"]),
+                 ("--clear", [n, "--clear", "--json"])]
+        for what, a in forms:
+            rc, err = to_fd([DCH, "--xray"] + a, "epipe")
+            check("write fail: %s into a closed pipe: exit 0, silent" % what,
+                  rc == 0 and err == "", (rc, err))
+            rc, err = to_fd([DCH, "--xray"] + a, "ebadf")
+            check("write fail: %s on a read-only stdout: exit 3, the "
+                  "failure line" % what, rc == 3 and
+                  err == "dch: X-ray failed on this session\n", (rc, err))
+        r = dch("--xray", "xr-wf", "--chapter", "1")
+        check("write fail: --chapter is not in XR2a (exit 2)",
+              r.returncode == 2, r.stderr)
+    finally:
+        dch("-k", n)
+        os.unlink(tp)
+
+
 # ---- 3.4: SIGTERM and EPIPE cancel a --ref (FROZEN l.464, l.635) ---------
 
 def test_cancel():
@@ -1156,15 +1292,14 @@ def test_cancel():
         dt = time.time() - t0
         err = p.stderr.read()
         p.stderr.close()
-        # dch learns of the close at its next write: the first progress
-        # line, 250 ms after it started, then stops before reading another
-        # line (an unchecked progress flush would wait for a second one)
-        check("cancel: a closed pipe (EPIPE) ends it at the first progress "
-              "line (%.3fs, the whole scan %.2fs), exit 0, nothing on "
+        # dch learns of the close at its next write, at most 250 ms later
+        # (the progress cadence): 500 ms wall from close to exit (v3.2.2
+        # Q15). xray_unit pins the progress write's own EPIPE check.
+        check("cancel: a closed pipe (EPIPE) ends it within 500 ms "
+              "(%.3fs, the whole scan %.2fs), exit 0, nothing on "
               "stderr" % (dt, full),
               running and b'"first"' in first and p.returncode == 0 and
-              err == b"" and dt < 0.45 and dt < full / 2,
-              (p.returncode, err))
+              err == b"" and dt < 0.5, (p.returncode, err))
     finally:
         os.unlink(tp)
 
@@ -1182,6 +1317,8 @@ def main():
         test_clear_after_claude()
         test_two_claudes()
         test_refs()
+        test_d2_whole()
+        test_write_fail()
         test_cancel()
         test_claude_caps()
         test_shell_caps()

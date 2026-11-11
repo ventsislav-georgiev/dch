@@ -7,6 +7,7 @@
 **   cc -I. -o xray_unit tests/xray_unit.c xray.c json.c && ./xray_unit
 */
 #include <fcntl.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -681,6 +682,24 @@ t_grammar(void)
 		{ "x/acme/widgets#12", XR_PROSE, "" },
 		{ "example.com/page#12", XR_PROSE, "" },
 		{ "widgets#12", XR_PROSE, "issue:widgets#12" },
+		/* Q3 (v3.2.2): r's repo is 3+ chars, ends alnum, not a stopword */
+		{ "a#12", XR_PROSE, "" },
+		{ "PR#831", XR_PROSE, "" },
+		{ "C#10", XR_PROSE, "" },
+		{ "issue#12", XR_PROSE, "" },
+		{ "PKCS#12", XR_PROSE, "" },
+		{ "Steps#4 tests#5", XR_PROSE, "" },
+		{ "abc#831", XR_PROSE, "issue:abc#831" },
+		{ "pre-#831", XR_PROSE, "issue:#831" },
+		{ "post-#20338 x_#12", XR_PROSE, "issue:#20338" },
+		{ "issuer#12", XR_PROSE, "issue:issuer#12" },
+		/* Q4 (v3.2.2): ~/ kept as written, folded lexically, .. at ~
+		** dropped; ~user/ is no path */
+		{ "~/demo/../x.md", XR_PROSE, "file:~/x.md" },
+		{ "~/../x.md", XR_PROSE, "file:~/x.md" },
+		{ "~/a/./b//c.md", XR_PROSE, "file:~/a/b/c.md" },
+		{ "~user/x.md", XR_PROSE, "" },
+		{ "`~user/x.md`", XR_PROSE, "" },
 	};
 	size_t k;
 
@@ -695,6 +714,36 @@ t_grammar(void)
 		if (strcmp(got, g[k].want))
 			printf("       got [%s]\n", got);
 	}
+}
+
+/* Q15: the progress write checks its flush, so a reader gone before it
+** is a cancel at that write, not at the one after (review M2, mutant R5) */
+static void
+t_cancel(void)
+{
+	int fd[2];
+	FILE *f;
+	struct xr_scan *x;
+
+	signal(SIGPIPE, SIG_IGN);
+	if (pipe(fd) || !(f = fdopen(fd[1], "w")))
+	{
+		CHECK("cancel: a pipe", 0);
+		return;
+	}
+	/* t0 a second ago: the first tick is due a progress line */
+	x = xr_scan_new(f, "issue:#831", "s", "", 0, 1, 0, 300,
+	                xr_now_ms() - 1000);
+	CHECK("cancel: first written", x && xr_scan_first(x, "id", XR_ISSUE,
+	                                                   "#831") == 0);
+	close(fd[0]);
+	if (x)
+		(void)xr_scan_tick(x, 1);
+	CHECK("cancel: EPIPE at the progress write is a cancel (1)",
+	      x && xr_scan_cancelled(x) == 1);
+	CHECK("cancel: no done after it", x && xr_scan_done(x) != 0);
+	xr_scan_free(x);
+	fclose(f);
 }
 
 static void
@@ -1132,6 +1181,7 @@ main(void)
 	t_ref();
 	t_index();
 	t_caps();
+	t_cancel();
 	t_lookup();
 	printf("%s: %d failed\n", fails ? "FAIL" : "ok", fails);
 	return fails != 0;

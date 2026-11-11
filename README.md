@@ -954,7 +954,10 @@ A ref is an issue (`#831`, `dch#120`), a pull request (`o/r#7`), a ticket
 (`PROJ-12`, not `UTF-8` or `SHA-256`), a commit (7 to 40 lowercase hex with a
 letter and a digit), a file path (`src/main.c:12`, keyed absolute against the
 session's cwd) or a URL (a GitHub issue or pull URL keys as `owner/repo#n`,
-a commit URL as the commit). A ref needs a word boundary on both sides,
+a commit URL as the commit). A bare `repo#n` needs a repo of at least 3
+characters that starts with a letter, ends with a letter or digit and is not a
+glue word or standard (`issue#12`, `step#3`, `PKCS#12`, `PR#831`, `a#12` are
+none; `pre-#831` is the issue `#831`). A ref needs a word boundary on both sides,
 Unicode-aware: `#831é` is none. Prompts and assistant text use every rule outside code spans and fences;
 tool input and output, and a shell's ring, use the code rules only (URLs,
 `owner/repo#n`, paths with a line number, commits), so a bare `#831`
@@ -970,7 +973,8 @@ Each entry of `refs` carries `key` (`<shape>:<text>`), `shape`, `text`,
 without. A definition comes only from a paired tool result or a finished,
 typed shell block that did not fail: a heading (`# #831 Agent panes`), a
 `#831` line with `title:` within 3 lines, a JSON object or array with a number
-or id and a title, or a `--title` on the command with its ref on the command
+or id and a title (the whole tool result, up to 256 KiB, not the 3000-scalar
+clip), or a `--title` on the command with its ref on the command
 or in the output. An orphan result, a forged or orphaned shell block, an error,
 a fence, a diff, a listing command (`rg`, `grep`, `ls`, ...), a file printed
 from outside the cwd, and more than 3 headings of one shape never define.
@@ -989,7 +993,10 @@ with it is accepted and has no effect.
 until then `--scope session` must be given. A session with no corpus exits 1
 with `dch: no x-ray corpus`. Nothing is written to disk: the index lives in the
 calling process for that one query. A reader that closes the pipe cancels the
-scan: dch stops at its next write, prints no `done` and exits 0. SIGTERM ends
+scan: dch stops at its next write, at most 250 ms later (the `progress`
+cadence), prints no `done` and exits 0; `--json` and `--clear` exit 0
+silently too. Any other write failure prints `dch: X-ray failed on this
+session` and exits 3. SIGTERM ends
 it at once, with no `done` either.
 
 No new session or rename takes a name of exactly `m` + 16 hex in any case

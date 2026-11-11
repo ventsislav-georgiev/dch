@@ -1,1 +1,1 @@
-{"schema": 1, "live": {"box": {"session_id": "m1a2b3c4d5e6f7a8b"}, "plain": {"session_id": "m1a2b3c4d5e6f7a8c"}, "gone": {"session_id": "m1a2b3c4d5e6f7a8d", "status": 128}}}
+{"schema": 1, "live": {"box": {"session_id": "m1a2b3c4d5e6f7a8b"}, "plain": {"session_id": "m1a2b3c4d5e6f7a8c"}, "gone": {"session_id": "m1a2b3c4d5e6f7a8d", "status": 128}, "fail": {"session_id": "m1a2b3c4d5e6f7a8e"}}}
