@@ -1,12 +1,21 @@
 name: Update Homebrew tap
 
-# Publishes/updates Formula/dch.rb in ventsislav-georgiev/homebrew-tap on every
-# release. Requires the HOMEBREW_TAP_TOKEN secret (a PAT with write access to
-# the tap repo).
+# Publishes/updates Formula/dch.rb and Formula/dch-lite.rb in
+# ventsislav-georgiev/homebrew-tap. Called by release-assets.yml once the
+# release's bottles are attached; dispatch it by hand to re-render a tag.
+# Each formula carries a bottle block for the bottles the release has, and
+# builds from source where none fits. Requires the HOMEBREW_TAP_TOKEN secret
+# (a PAT with write access to the tap repo).
 
 on:
-  release:
-    types: [published]
+  workflow_call:
+    inputs:
+      tag:
+        type: string
+        required: true
+    secrets:
+      HOMEBREW_TAP_TOKEN:
+        required: true
   workflow_dispatch:
     inputs:
       tag:
@@ -22,8 +31,10 @@ jobs:
     steps:
       - name: Resolve tag and version
         id: ver
+        env:
+          TAG: ${{ inputs.tag }}
         run: |
-          tag="${{ github.event.release.tag_name || github.event.inputs.tag }}"
+          tag="$TAG"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
 
@@ -33,6 +44,34 @@ jobs:
           url="https://github.com/${{ github.repository }}/archive/refs/tags/${{ steps.ver.outputs.tag }}.tar.gz"
           curl -fsSL "$url" -o src.tar.gz
           echo "sha256=$(sha256sum src.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      # brew fetches ROOT_URL/NAME-VERSION.TAG.bottle.tar.gz (one dash) for a
+      # root_url that is not ghcr.io. A tag the release lacks gets no line.
+      - name: Bottle blocks
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          REPO: ${{ github.repository }}
+        run: |
+          root="https://github.com/${REPO}/releases/download/${TAG}"
+          for f in dch dch-lite; do
+            : > "sha-$f"
+            for t in arm64_sonoma sonoma arm64_linux x86_64_linux; do
+              if curl -fsSL --retry 3 "$root/$f-$VERSION.$t.bottle.tar.gz" -o bottle.tar.gz; then
+                printf '    sha256 cellar: :any_skip_relocation, %s: "%s"\n' \
+                  "$t" "$(sha256sum bottle.tar.gz | cut -d' ' -f1)" >> "sha-$f"
+              else
+                echo "::warning::$f $TAG has no $t bottle: brew builds it from source there"
+              fi
+            done
+            # Leading newlines: end the license line, then a blank line.
+            : > "bottle-$f.rb"
+            if [ -s "sha-$f" ]; then
+              { printf '\n\n  bottle do\n    root_url "%s"\n' "$root"
+                cat "sha-$f"; printf '  end\n'; } > "bottle-$f.rb"
+            fi
+            cat "bottle-$f.rb"
+          done
 
       - name: Checkout tap
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -47,6 +86,8 @@ jobs:
           SHA: ${{ steps.sha.outputs.sha256 }}
           REPO: ${{ github.repository }}
         run: |
+          BOTTLE_DCH=$(cat bottle-dch.rb)
+          BOTTLE_LITE=$(cat bottle-dch-lite.rb)
           mkdir -p tap/Formula
           cat > tap/Formula/dch.rb <<EOF
           # typed: false
@@ -58,7 +99,7 @@ jobs:
             homepage "https://github.com/${REPO}"
             url "https://github.com/${REPO}/archive/refs/tags/${TAG}.tar.gz"
             sha256 "${SHA}"
-            license "GPL-2.0-or-later"
+            license "GPL-2.0-or-later"${BOTTLE_DCH}
 
             conflicts_with "dch-lite", because: "both install a dch binary"
 
@@ -87,7 +128,7 @@ jobs:
             homepage "https://github.com/${REPO}"
             url "https://github.com/${REPO}/archive/refs/tags/${TAG}.tar.gz"
             sha256 "${SHA}"
-            license "GPL-2.0-or-later"
+            license "GPL-2.0-or-later"${BOTTLE_LITE}
 
             conflicts_with "dch", because: "both install a dch binary"
 
@@ -105,6 +146,8 @@ jobs:
           EOF
 
       - name: Commit and push
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
         run: |
           cd tap
           git config user.name "github-actions[bot]"
@@ -113,6 +156,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "Formula already up to date."
           else
-            git commit -m "dch ${{ steps.ver.outputs.tag }}"
+            git commit -m "dch $TAG"
             git push
           fi
