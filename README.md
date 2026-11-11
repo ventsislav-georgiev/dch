@@ -178,7 +178,7 @@ hint.
 | `m` | | resume without the message (`--no-message`) |
 | `I` | | resume interrupted (n) (`--revive --all`), asks first |
 | `p` | | pin / unpin every record of the row's name |
-| `d` | | remove every ended record of the row's name (`--forget`), asks first; a pinned name must be unpinned first. While a session of that name is live, one press removes at most 9 of its ended records (the rest stay a row: press `d` again) |
+| `d` | | remove every ended record of the row's name (`--forget`), asks first; a pinned name must be unpinned first. While a session of that name is live, one press removes at most 8 of its ended records (the rest stay a row: press `d` again) |
 | `/` | filter (below) | filter (below) |
 | `,` | settings | settings |
 | `q` `Esc` `Ctrl-C` `Ctrl-D` | quit (`Esc` clears a filter first) | quit (`Esc` clears a filter first) |
@@ -336,6 +336,7 @@ dch -a <name> --scrollback 200  # attach with the last 200 lines of history abov
 dch -rl          # rename: pick a session, type a display alias, repeat
 dch -m <name> [alias]  # set the alias without the picker (none: clear it)
 dch -k [name]    # kill a session (interactive picker if no name)
+dch -k -- <name> # kill one whose name starts with '-' (an older dch made it)
 dch -kl          # kill ALL sessions
 dch -d [name]    # detach all clients of a session (sends SIGUSR1)
 dch -n <name>    # override the auto-name
@@ -1512,6 +1513,16 @@ to the new name along with the record. The exemption holds for masters from
 dch 1.25.0 on: a master of an older dch still prunes by age alone when it
 cold-starts. `--forget` never deletes a live session's record (its master
 would write it back), and `--forget --all` leaves pinned records alone.
+
+A session name cannot start with `-`: every verb would read it as a flag.
+`--spawn -h`, `-n -h`, `--revive <n> --as -h` and a revive of such a record
+are refused (`dch: a session name cannot start with '-'`, exit 2; `--as`
+exits 1), and a directory named `-x` auto-names its session `_x`. An older
+dch could make one; `--` reaches it: `--pin`, `--unpin`, `--forget` and
+`--stop` read every word after `--` as a name or record file
+(`dch --forget -- -h`), and `dch -k -- -x` kills it. In the picker such a
+row attaches and kills (live), pins and removes (History, `p` and `d`); any
+other key says so.
 
 The record is one line of JSON, mode 0600 in a 0700 directory:
 

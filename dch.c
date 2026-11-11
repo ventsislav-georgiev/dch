@@ -864,6 +864,8 @@ auto_name(char *out, size_t outsz)
 
 		sanitize(branch);
 		snprintf(out, outsz, "%s-%s", base, branch);
+		if (out[0] == '-')	/* a dir named -x: no name starts so (#162) */
+			out[0] = '_';
 		return;
 	}
 
@@ -874,6 +876,8 @@ auto_name(char *out, size_t outsz)
 	const char *bn = slash ? slash + 1 : cwd;
 	snprintf(out, outsz, "%.*s", (int)outsz - 1, bn);
 	sanitize(out);
+	if (out[0] == '-')
+		out[0] = '_';
 }
 
 /* ---- client tracking (PID files) ------------------------------------ */
@@ -2040,10 +2044,16 @@ name_listed(const char *name)
 /* INFO-2 (#120): no new session or rename takes a name shaped like a live
 ** shell's session_id ("m" + 16 hex, in any case: QA 1.45.1 LOW-1), so
 ** `--xray <id> --clear` never meets a name that shadows an id. 1, the line
-** printed, when refused. */
+** printed, when refused. #162: nor a leading '-', which every verb would
+** read as a flag. */
 static int
 refuse_id_name(const char *name)
 {
+	if (name[0] == '-')
+	{
+		fputs("dch: a session name cannot start with '-'\n", stderr);
+		return 1;
+	}
 	if (!xr_label_id_shaped(name, strlen(name)))	/* the listing trims */
 		return 0;
 	fputs("dch: name looks like a session_id\n", stderr);
@@ -3000,8 +3010,9 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 
 	if (make_sock_path(session_name) < 0)
 		return 1;
-	if (!attach_only && xr_label_id_shaped(session_name,
-	                                       strlen(session_name)))
+	if (!attach_only && (session_name[0] == '-' ||
+	                     xr_label_id_shaped(session_name,
+	                                        strlen(session_name))))
 	{
 		int probe = control_connect_path(sock_path);
 
@@ -6114,6 +6125,14 @@ static void
 stop_print(const char *name, const char *res, const char *code,
            const char *detail, const char *aname, const char *sid, int json)
 {
+	char hint[700];
+
+	/* #162: no session takes a name starting with '-', not even back */
+	if (name[0] == '-')
+		snprintf(hint, sizeof hint, "a name starting with '-' is not "
+		         "revived");
+	else
+		snprintf(hint, sizeof hint, "revive with dch --revive %s", name);
 	if (json)
 		json_final(name, NULL, NULL, res, code, detail, sid);
 	else if (strcmp(res, "ok") != 0)
@@ -6123,9 +6142,9 @@ stop_print(const char *name, const char *res, const char *code,
 		       *sid && !strstr(detail, sid) ? sid : "",
 		       *sid && !strstr(detail, sid) ? ")" : "");
 	else
-		printf("%s: stopped (%s%s%s%s%srevive with dch --revive %s)%s%s\n",
+		printf("%s: stopped (%s%s%s%s%s%s)%s%s\n",
 		       name, *sid ? "claude " : "", aname, *sid && *aname ? " " : "",
-		       sid, *sid ? "; " : "", name, *detail ? " " : "", detail);
+		       sid, *sid ? "; " : "", hint, *detail ? " " : "", detail);
 	fflush(stdout);
 }
 
@@ -9392,11 +9411,16 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 	}
 	if (!w || (c > 0 && c < 256 && !strchr("\r\nrRSxapmdo", c)))
 		return 0;
-	/* dch would read a name that starts with '-' as a flag */
-	if (w->name[0] == '-')
+	/* dch would read a name that starts with '-' as a flag: Enter, x, p
+	** and d pass it after `--` or need no flag; no such name is made or
+	** resumed (#162) */
+	if (w->name[0] == '-' && !(t == 2 ? c == 'p' || c == 'd' : c == 'x' ||
+	                           c == '\r' || c == '\n'))
 	{
-		snprintf(p->status, sizeof p->status, "%s: a name starting "
-		         "with '-' needs the command line", w->name);
+		snprintf(p->status, sizeof p->status, t == 2 ? "%s: a name "
+		         "starting with '-' can't be resumed; p pins, d removes"
+		         : "%s: a name starting with '-'; Enter attaches, x "
+		         "kills", w->name);
 		return 0;
 	}
 	/* ponytail: a remote row only attaches; kill, rename, restart and
@@ -9449,7 +9473,7 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 			return 0;
 		case 'x':
 			snprintf(d, sizeof d, "killing %s", w->title);
-			pk_act(&p->ask, t, w->name, d, "-k", w->name, NULL);
+			pk_act(&p->ask, t, w->name, d, "-k", "--", w->name, NULL);
 			pk_ask(p, "Kill %s?", w->title);
 			return 0;
 		case 'a':
@@ -9517,7 +9541,7 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 		snprintf(d, sizeof d, "%s %s", w->pinned ? "unpinning"
 		         : "pinning", w->title);
 		pk_act(&p->ask, 2, w->name, d, w->pinned ? "--unpin" : "--pin",
-		       pk_recs(w, f), NULL);
+		       "--", pk_recs(w, f), NULL);
 		pk_start(p, &p->ask);
 		return 0;
 	case 'd':
@@ -9528,7 +9552,8 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 			return 0;
 		}
 		snprintf(d, sizeof d, "removing %s", w->title);
-		pk_act(&p->ask, 2, w->name, d, "--forget", pk_recs(w, f), NULL);
+		pk_act(&p->ask, 2, w->name, d, "--forget", "--", pk_recs(w, f),
+		       NULL);
 		/* a live session of the name: its record is not History's, and
 		** --forget <name> would fail on it; the ended records' files */
 		if (pk_recs(w, f) == w->sname && name_live(w->sname))
@@ -9536,8 +9561,8 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 			struct hrec *h;
 			int nh = history_load(&h);
 
-			pk_act(&p->ask, 2, w->name, d, "--forget", NULL);
-			/* shortcut: as many as an action's argv holds (9); the
+			pk_act(&p->ask, 2, w->name, d, "--forget", "--", NULL);
+			/* shortcut: as many as an action's argv holds (8); the
 			** rest stay a row for the next d */
 			for (k = 0; k < nh; k++)
 				if (!name_live(h[k].file) &&
@@ -13027,9 +13052,13 @@ main_run(int argc, char **argv)
 		}
 		else if (strcmp(a, "-k") == 0)
 		{
+			/* `-k -- <name>`: a name starting with '-' (#162) */
+			int dd = i + 2 < argc && strcmp(argv[i + 1], "--") == 0 &&
+			         argv[i + 2][0];
+
 			action = A_KILL;
-			i++;
-			if (i < argc && argv[i][0] != '-')
+			i += 1 + dd;
+			if (i < argc && (dd || argv[i][0] != '-'))
 			{
 				snprintf(session_name, sizeof(session_name),
 				         "%s", argv[i]);
@@ -13215,9 +13244,15 @@ main_run(int argc, char **argv)
 		{
 			/* <name>... or --all, maybe --json: the rest of the
 			** line, names packed as --say packs them */
+			int dd = 0;	/* after `--`, every word is a name (#162) */
+
 			action = A_STOP;
 			for (say_at = ++i; i < argc; i++)
-				if (strcmp(argv[i], "--all") == 0)
+				if (dd && argv[i][0])
+					argv[say_at + say_n++] = argv[i];
+				else if (!dd && strcmp(argv[i], "--") == 0)
+					dd = 1;
+				else if (strcmp(argv[i], "--all") == 0)
 					opt_all = 1;
 				else if (strcmp(argv[i], "--json") == 0)
 					opt_json = 1;
@@ -13243,10 +13278,16 @@ main_run(int argc, char **argv)
 			/* <name>... (--forget: or --all), maybe --json, -f:
 			** the rest of the line, names packed as --stop packs
 			** them; -f is gated below */
+			int dd = 0;	/* after `--`, every word is a name (#162) */
+
 			action = a[2] == 'p' ? A_PIN : a[2] == 'u' ? A_UNPIN
 			         : A_FORGET;
 			for (say_at = ++i; i < argc; i++)
-				if (strcmp(argv[i], "--all") == 0 &&
+				if (dd && argv[i][0])
+					argv[say_at + say_n++] = argv[i];
+				else if (!dd && strcmp(argv[i], "--") == 0)
+					dd = 1;
+				else if (strcmp(argv[i], "--all") == 0 &&
 				    action == A_FORGET)
 					opt_all = 1;
 				else if (strcmp(argv[i], "--json") == 0)

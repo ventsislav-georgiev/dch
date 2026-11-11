@@ -350,6 +350,11 @@ does.
 .TP
 .BR \-k " [\fIname\fP]"
 Kill a session (interactive picker without a name).
+.B "\-k \-\-"
+.I name
+kills one whose name starts with
+.B \-
+(an older dch could make one).
 .TP
 .B \-kl
 Kill all sessions.
@@ -359,6 +364,17 @@ Detach all clients of a session.
 .TP
 .BI \-n " name"
 Override the auto-name.
+A session name cannot start with
+.BR \- :
+every verb that would make one
+.RB ( \-n ", " \-\-spawn ", " "\-\-revive \-\-as" ,
+a revive of such a record) refuses with
+.B "dch: a session name cannot start with '\-'"
+and exits 2
+.RB ( \-\-as :
+exit 1); an auto-name from a directory named so starts with
+.B _
+instead.
 .TP
 .B \-f
 Force-attach even if another client is connected.
@@ -532,9 +548,16 @@ pins or unpins,
 removes
 .RB ( \-\-forget ),
 every record of the row's name; while a session of that name is live, at
-most 9 of its ended records per press (the rest stay a row: press
+most 8 of its ended records per press (the rest stay a row: press
 .B d
 again).
+On a row whose name starts with
+.B \-
+(an older dch made it) only attach and kill work live, only
+.B p
+and
+.B d
+in History; any other key says so.
 Every action but attach, rename, resume and pin asks first and runs on
 .BR y .
 The status line shows the action while it runs, then its result.
@@ -1688,6 +1711,14 @@ per name (per record for
 then
 .RI { ok ", " skipped ", " failed }
 counts. Exits 0 when nothing failed, 1 otherwise.
+For
+.BR \-\-pin ", " \-\-unpin ", " \-\-forget " and " \-\-stop ,
+.B \-\-
+ends the options: every word after it is a name or a record file, one
+starting with
+.B \-
+too
+.RB ( "dch \-\-forget \-\- \-h" ).
 .TP
 .BR \-\-agent\-list " [" \-\-json "]"
 List live authenticated Claude native peers. The default writes exact names,
