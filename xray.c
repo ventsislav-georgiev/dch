@@ -16,6 +16,7 @@
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -202,6 +203,871 @@ xr_title(const char *s, size_t n, char *out, size_t outsz)
 		k++;
 	}
 	out[o] = '\0';
+}
+
+/* ---- refs: the grammar (v2.1 2.2-2.5; #135, XR2a) ---------------------- */
+
+#include "xray_uni.h"
+
+const char *const xr_shape_name[] = { "ticket", "issue", "pull", "commit",
+                                      "file", "url" };
+
+#define A_DIG(c) ((c) >= '0' && (c) <= '9')
+#define A_UP(c) ((c) >= 'A' && (c) <= 'Z')
+#define A_LO(c) ((c) >= 'a' && (c) <= 'z')
+#define A_AL(c) (A_UP(c) || A_LO(c))
+#define A_ALNUM(c) (A_AL(c) || A_DIG(c))
+#define A_HEX(c) (A_DIG(c) || ((c) >= 'a' && (c) <= 'f'))
+
+/* \p{L}, \p{N} or '_': the boundary class, (?<![\p{L}\p{N}_]) and
+** (?![\p{L}\p{N}_]) (v2.1 2.2; QA F1.4: `#831é` is no `#831`). */
+static int
+u_word(uint32_t c)
+{
+	size_t lo = 0, hi = sizeof xr_uni_ln / sizeof xr_uni_ln[0];
+
+	if (c < 0x80)
+		return A_ALNUM(c) || c == '_';
+	while (lo < hi)
+	{
+		size_t mid = (lo + hi) / 2;
+
+		if (c < xr_uni_ln[mid][0])
+			hi = mid;
+		else if (c > xr_uni_ln[mid][1])
+			lo = mid + 1;
+		else
+			return 1;
+	}
+	return 0;
+}
+
+/* The scalar ending at i (0 at the start); U+FFFD when the bytes before i
+** are no whole scalar. */
+static uint32_t
+prev_scalar(const char *s, size_t i)
+{
+	size_t k, a;
+	uint32_t c;
+
+	if (!i)
+		return 0;
+	k = i - 1;
+	while (k > 0 && i - k < 4 && ((unsigned char)s[k] & 0xc0) == 0x80)
+		k--;
+	c = u8_next((const unsigned char *)s + k, i - k, &a);
+	return k + a == i ? c : 0xfffd;
+}
+
+static int
+after_ok(const char *s, size_t n, size_t e)
+{
+	size_t a;
+
+	return e >= n || !u_word(u8_next((const unsigned char *)s + e, n - e, &a));
+}
+
+/* The first `cap` scalars of s[0..n): their byte length (R3: scalars, never
+** bytes or graphemes). */
+static size_t
+clip(const char *s, size_t n, size_t cap)
+{
+	size_t i = 0, a, k = 0;
+
+	while (i < n && k < cap)
+	{
+		(void)u8_next((const unsigned char *)s + i, n - i, &a);
+		i += a;
+		k++;
+	}
+	return i;
+}
+
+enum { RU = 1, RR = 2, RF = 4, RT = 8, Rr = 16, RS = 32, RH = 64 };
+#define R_PROSE (RU | RR | RF | RT | Rr | RS | RH)
+#define R_CODE (RU | RR | RF | RS)		/* tool fields, code spans */
+#define R_ANCHOR (RR | RT | Rr | RH)		/* definition anchors (2.4) */
+#define R_D3 (RU | RR | RT | Rr | RH)		/* D3: no file, no commit */
+
+static int
+span_key(struct xr_span *sp, int shape, const char *t, size_t tl, int lower)
+{
+	size_t pl = strlen(xr_shape_name[shape]), k;
+
+	if (!tl || tl > XR_KEY_MAX)
+		return 0;
+	memcpy(sp->key, xr_shape_name[shape], pl);
+	sp->key[pl] = ':';
+	for (k = 0; k < tl; k++)
+		sp->key[pl + 1 + k] = lower && A_UP((unsigned char)t[k])
+		                      ? (char)(t[k] + 32) : t[k];
+	sp->key[pl + 1 + tl] = '\0';
+	sp->shape = shape;
+	return 1;
+}
+
+const char *
+xr_span_text(const struct xr_span *sp)
+{
+	return sp->key + strlen(xr_shape_name[sp->shape]) + 1;
+}
+
+/* A GitHub owner or repo name: [A-Za-z0-9._-], not "." or "..". */
+static int
+gh_name(const char *s, size_t n, size_t max)
+{
+	size_t k;
+
+	if (!n || n > max || (n == 1 && s[0] == '.') ||
+	    (n == 2 && s[0] == '.' && s[1] == '.'))
+		return 0;
+	for (k = 0; k < n; k++)
+		if (!A_ALNUM((unsigned char)s[k]) && s[k] != '-' && s[k] != '_' &&
+		    s[k] != '.')
+			return 0;
+	return 1;
+}
+
+/* U's kind (v2.1 2.3), validated like DchSessionMeta.PR.pullURL: exactly
+** https://github.com/<o>/<r>/(pull|issues)/<1-9 digits> is a pull,
+** .../commit/<7-40 lowercase hex> a commit; anything else a url. */
+static void
+url_kind(const char *s, size_t n, struct xr_span *sp)
+{
+	static const char gh[] = "https://github.com/";
+	const char *p[4];
+	size_t pl[4], k, j = sizeof gh - 1, np = 0, d;
+	char t[200];
+
+	if (n > j && !memcmp(s, gh, j))
+	{
+		while (np < 4)
+		{
+			p[np] = s + j;
+			for (k = j; k < n && s[k] != '/'; k++)
+				;
+			pl[np++] = k - j;
+			if (k >= n)
+				break;
+			j = k + 1;
+		}
+		if (np == 4 && p[3] + pl[3] == s + n && gh_name(p[0], pl[0], 39) &&
+		    gh_name(p[1], pl[1], 100))
+		{
+			for (d = 0; d < pl[3] && A_DIG((unsigned char)p[3][d]); d++)
+				;
+			if (((pl[2] == 4 && !memcmp(p[2], "pull", 4)) ||
+			     (pl[2] == 6 && !memcmp(p[2], "issues", 6))) &&
+			    d == pl[3] && d >= 1 && d <= 9)
+			{
+				k = (size_t)snprintf(t, sizeof t, "%.*s/%.*s#%.*s",
+				                     (int)pl[0], p[0], (int)pl[1], p[1],
+				                     (int)pl[3], p[3]);
+				(void)span_key(sp, XR_PULL, t, k, 1);
+				return;
+			}
+			for (d = 0; d < pl[3] && A_HEX((unsigned char)p[3][d]); d++)
+				;
+			if (pl[2] == 6 && !memcmp(p[2], "commit", 6) && d == pl[3] &&
+			    d >= 7 && d <= 40)
+			{
+				(void)span_key(sp, XR_COMMIT, p[3], 7, 0);
+				memcpy(sp->full, p[3], d);
+				sp->full[d] = '\0';
+				return;
+			}
+		}
+	}
+	(void)span_key(sp, XR_URL, s, n, 0);
+}
+
+/* U: http(s)://, then anything but space, controls and <>"'`{}|\^; a
+** trailing .,;:!? and an unbalanced ) or ] trimmed. */
+static size_t
+r_url(const char *s, size_t n, size_t i, struct xr_span *sp)
+{
+	size_t j, e, k, a;
+	int o, c;
+
+	if (n - i >= 8 && !strncasecmp(s + i, "https://", 8))
+		j = i + 8;
+	else if (n - i >= 7 && !strncasecmp(s + i, "http://", 7))
+		j = i + 7;
+	else
+		return 0;
+	for (e = j; e < n; e += a)
+	{
+		unsigned char b = (unsigned char)s[e];
+		uint32_t u;
+
+		if (e - i > XR_KEY_MAX)
+			return 0;
+		if (b < 0x80)
+		{
+			if (b <= 0x20 || b == 0x7f || strchr("<>\"'`{}|\\^", b))
+				break;
+			a = 1;
+			continue;
+		}
+		u = u8_next((const unsigned char *)s + e, n - e, &a);
+		if (u_space(u) || u == 0xfffd || u < 0xa0 || u == 0x200b ||
+		    (u >= 0x200e && u <= 0x200f) || (u >= 0x202a && u <= 0x202e) ||
+		    (u >= 0x2066 && u <= 0x2069))
+			break;
+	}
+	for (;;)
+	{
+		if (e > j && strchr(".,;:!?", s[e - 1]))
+		{
+			e--;
+			continue;
+		}
+		if (e > j && (s[e - 1] == ')' || s[e - 1] == ']'))
+		{
+			char cl = s[e - 1], op = cl == ')' ? '(' : '[';
+
+			for (k = i, o = c = 0; k < e; k++)
+				o += s[k] == op, c += s[k] == cl;
+			if (c > o)
+			{
+				e--;
+				continue;
+			}
+		}
+		break;
+	}
+	if (e == j || e - i > XR_KEY_MAX || !A_ALNUM((unsigned char)s[j]) ||
+	    !after_ok(s, n, e))
+		return 0;
+	url_kind(s + i, e - i, sp);
+	return e;
+}
+
+/* R (owner) and r (no owner): {repo}#{n}. */
+static size_t
+r_repo(const char *s, size_t n, size_t i, uint32_t prev, int owner,
+       struct xr_span *sp)
+{
+	size_t j = i, k, d;
+
+	if (owner)
+	{
+		if (prev == '/' || prev == '.' || prev == '-')
+			return 0;
+		for (k = 0; j < n && k < 40 && (A_ALNUM((unsigned char)s[j]) ||
+		                                s[j] == '-'); j++)
+			k++;
+		if (k < 1 || k > 39 || j >= n || s[j] != '/')
+			return 0;
+		j++;
+	}
+	else if (!A_AL((unsigned char)s[i]))
+		return 0;
+	for (k = 0; j < n && k <= 100 && (A_ALNUM((unsigned char)s[j]) ||
+	                                  s[j] == '_' || s[j] == '.' ||
+	                                  s[j] == '-'); j++)
+		k++;
+	if (k < 1 || k > 100 || j >= n || s[j] != '#')
+		return 0;
+	for (d = 0, j++; j < n && d < 8 && A_DIG((unsigned char)s[j]); j++)
+		d++;
+	if (d < 1 || d > 7 || !after_ok(s, n, j) ||
+	    !span_key(sp, owner ? XR_PULL : XR_ISSUE, s + i, j - i, 1))
+		return 0;
+	return j;
+}
+
+static int
+path_c(unsigned char c)
+{
+	return A_ALNUM(c) || c == '_' || c == '.' || c == '-' || c == '/' ||
+	       c == '~' || c == '+' || c == '@';
+}
+
+/* :line, :line:col (col 0: without) or #L<line>; the end, 0 for none. */
+static size_t
+line_sfx(const char *s, size_t n, size_t e, int col)
+{
+	size_t j = e, d, k;
+
+	if (j < n && s[j] == ':')
+	{
+		for (d = 0, j++; j < n && d < 8 && A_DIG((unsigned char)s[j]); j++)
+			d++;
+		if (d < 1 || d > 7)
+			return 0;
+		if (col && j + 1 < n && s[j] == ':' && A_DIG((unsigned char)s[j + 1]))
+		{
+			for (d = 0, k = j + 1; k < n && d < 8 &&
+			     A_DIG((unsigned char)s[k]); k++)
+				d++;
+			if (d <= 7)
+				j = k;
+		}
+		return j;
+	}
+	if (j + 2 < n && s[j] == '#' && s[j + 1] == 'L' &&
+	    A_DIG((unsigned char)s[j + 2]))
+	{
+		for (d = 0, j += 2; j < n && d < 8 && A_DIG((unsigned char)s[j]); j++)
+			d++;
+		return d <= 7 ? j : 0;
+	}
+	return 0;
+}
+
+/* Lexically absolute (2.5): "." and ".." and "//" folded, a relative path
+** joined to cwd when that is absolute; "~/" kept. 0 when it does not fit. */
+static size_t
+path_norm(const char *p, size_t pl, const char *cwd, char *out, size_t outsz)
+{
+	char src[XR_PATH_MAX + XR_KEY_MAX + 4];
+	size_t sl, k, cs, o = 0, nst = 0, st[XR_PATH_MAX / 2 + XR_KEY_MAX / 2 + 4];
+	int root = p[0] == '/' ? 1 : p[0] == '~' ? 2 : 0;
+
+	if (!root && cwd && cwd[0] == '/' && strlen(cwd) <= XR_PATH_MAX)
+	{
+		sl = (size_t)snprintf(src, sizeof src, "%s/%.*s", cwd, (int)pl, p);
+		root = 1;
+	}
+	else
+		sl = (size_t)snprintf(src, sizeof src, "%.*s",
+		                      (int)(pl - (root == 2)), p + (root == 2));
+	if (sl >= sizeof src)
+		return 0;
+	for (k = 0; k <= sl; k = cs + 1)
+	{
+		size_t cl;
+
+		for (cs = k; cs < sl && src[cs] != '/'; cs++)
+			;
+		cl = cs - k;
+		if (!cl || (cl == 1 && src[k] == '.'))
+			continue;
+		if (cl == 2 && src[k] == '.' && src[k + 1] == '.')
+		{
+			if (nst && !(src[st[nst - 1]] == '.' &&
+			             src[st[nst - 1] + 1] == '.' &&
+			             (st[nst - 1] + 2 == sl ||
+			              src[st[nst - 1] + 2] == '/')))
+			{
+				nst--;
+				continue;
+			}
+			if (root)
+				continue;	/* above the root: stays there */
+		}
+		st[nst++] = k;
+	}
+	if (root == 2)
+		out[o++] = '~';
+	for (k = 0; k < nst; k++)
+	{
+		size_t cl = strcspn(src + st[k], "/");
+
+		if (o + cl + 2 >= outsz)
+			return 0;
+		if (root || k)
+			out[o++] = '/';
+		memcpy(out + o, src + st[k], cl);
+		o += cl;
+	}
+	if (!o)
+		out[o++] = root == 1 ? '/' : '.';
+	out[o] = '\0';
+	return o;
+}
+
+/* F: {path}, its line optional in prose and required in code and for a
+** bare Name.ext. Not 1/2, and/or, 2026/11/09, Node.js, e.g., v1.2.3. */
+static size_t
+r_path(const char *s, size_t n, size_t i, uint32_t prev, int code,
+       const char *cwd, struct xr_span *sp)
+{
+	size_t j = i, e, k, ls = 0, comps = 0, x, a, sfx, pl;
+	unsigned char c = (unsigned char)s[i];
+	int ext = 0, bare;
+	char norm[XR_KEY_MAX + 1];
+
+	if (prev == '/' || prev == '.' || prev == '-' || prev == '~' ||
+	    prev == '+' || prev == '@' || c == '-' || c == '+' || c == '@' ||
+	    (c == '~' && (i + 1 >= n || s[i + 1] != '/')))
+		return 0;
+	while (j < n)
+	{
+		unsigned char b = (unsigned char)s[j];
+
+		if (j - i > XR_KEY_MAX)
+			return 0;
+		if (b < 0x80)
+		{
+			if (!path_c(b))
+				break;
+			j++;
+		}
+		else if (u_word(u8_next((const unsigned char *)s + j, n - j, &a)))
+			j += a;
+		else
+			break;
+	}
+	for (e = j; e > i && s[e - 1] == '.'; e--)
+		;
+	if (e == i)
+		return 0;
+	bare = 1;
+	ls = i;		/* the last component's start */
+	for (k = x = i; k <= e; k++)
+		if (k == e || s[k] == '/')
+		{
+			comps += k > x;
+			if (k < e)
+			{
+				bare = 0;
+				ls = k + 1;
+			}
+			x = k + 1;
+		}
+	comps -= s[i] == '~';	/* "~" names no part */
+	/* the extension: 1-10 alnum after the last component's last dot, from
+	** a letter, with a name before it */
+	for (x = e; x > ls && s[x - 1] != '.'; x--)
+		;
+	if (x > ls + 1 && e - x >= 1 && e - x <= 10 && A_AL((unsigned char)s[x]))
+	{
+		ext = 1;
+		for (k = x; k < e; k++)
+			if (!A_ALNUM((unsigned char)s[k]))
+				ext = 0;
+	}
+	/* bare or relative: an extension; absolute or ~/: that or 2 parts */
+	if ((bare || !(s[i] == '/' || s[i] == '~')) ? !ext : (!ext && comps < 2))
+		return 0;
+	sfx = e == j ? line_sfx(s, n, e, 1) : 0;
+	if (sfx && !after_ok(s, n, sfx))
+		sfx = line_sfx(s, n, e, 0);
+	if (sfx && !after_ok(s, n, sfx))
+		sfx = 0;
+	if (!sfx && (code || bare || !after_ok(s, n, e)))
+		return 0;
+	if (!(pl = path_norm(s + i, e - i, cwd, norm, sizeof norm)) ||
+	    !span_key(sp, XR_FILE, norm, pl, 0))
+		return 0;
+	return sfx ? sfx : e;
+}
+
+static const char *const t_stop[] = {
+	"UTF", "ISO", "SHA", "MD", "RFC", "CVE", "TLS", "SSL", "HTTP", "IPV",
+	"AES", "RSA", "GPT", "PEP", "ES", "ECMA", "WCAG", "ARM", "X86", "COVID",
+	"PM", "AM", 0
+};
+
+/* T: {KEY}-{n}, KEY [A-Z][A-Z0-9]{1,9} past the stoplist, n 1-6 digits. */
+static size_t
+r_ticket(const char *s, size_t n, size_t i, struct xr_span *sp)
+{
+	size_t j = i + 1, d, k;
+
+	if (!A_UP((unsigned char)s[i]))
+		return 0;
+	while (j < n && j - i < 11 && (A_UP((unsigned char)s[j]) ||
+	                               A_DIG((unsigned char)s[j])))
+		j++;
+	if (j - i < 2 || j - i > 10 || j >= n || s[j] != '-')
+		return 0;
+	for (k = 0; t_stop[k]; k++)
+		if (strlen(t_stop[k]) == j - i && !memcmp(t_stop[k], s + i, j - i))
+			return 0;
+	for (d = 0, j++; j < n && d < 7 && A_DIG((unsigned char)s[j]); j++)
+		d++;
+	if (d < 1 || d > 6 || !after_ok(s, n, j) ||
+	    !span_key(sp, XR_TICKET, s + i, j - i, 0))
+		return 0;
+	return j;
+}
+
+/* S: 7-40 lowercase hex, a letter and a digit; not after # 0x -, not before
+** - or \w. */
+static size_t
+r_sha(const char *s, size_t n, size_t i, uint32_t prev, struct xr_span *sp)
+{
+	size_t j = i;
+	int let = 0, dig = 0;
+
+	if (prev == '#' || prev == '-')
+		return 0;
+	for (; j < n && j - i <= 40 && A_HEX((unsigned char)s[j]); j++)
+		if (A_DIG((unsigned char)s[j]))
+			dig = 1;
+		else
+			let = 1;
+	if (j - i < 7 || j - i > 40 || !let || !dig ||
+	    (j < n && s[j] == '-') || !after_ok(s, n, j) ||
+	    !span_key(sp, XR_COMMIT, s + i, 7, 0))
+		return 0;
+	memcpy(sp->full, s + i, j - i);
+	sp->full[j - i] = '\0';
+	return j;
+}
+
+/* H: #{n}, n 2-6 digits; not after \w & # /, not before \w -. */
+static size_t
+r_hash(const char *s, size_t n, size_t i, uint32_t prev, struct xr_span *sp)
+{
+	size_t j = i + 1, d;
+
+	if (s[i] != '#' || prev == '&' || prev == '#' || prev == '/')
+		return 0;
+	for (d = 0; j < n && d < 7 && A_DIG((unsigned char)s[j]); j++)
+		d++;
+	if (d < 2 || d > 6 || (j < n && s[j] == '-') || !after_ok(s, n, j) ||
+	    !span_key(sp, XR_ISSUE, s + i, j - i, 0))
+		return 0;
+	return j;
+}
+
+/* The first rule (U, R, F, T, r, S, H) matching at i: the span's end, 0 for
+** none. The caller has checked the boundary before i. */
+static size_t
+try_rules(const char *s, size_t n, size_t i, uint32_t prev, int rules,
+          int code, const char *cwd, struct xr_span *sp)
+{
+	unsigned char c = (unsigned char)s[i];
+	size_t e = 0;
+
+	sp->full[0] = '\0';
+	if ((rules & RU) && (c == 'h' || c == 'H') && (e = r_url(s, n, i, sp)))
+		sp->rule = 'U';
+	else if ((rules & RR) && (A_ALNUM(c) || c == '-') &&
+	         (e = r_repo(s, n, i, prev, 1, sp)))
+		sp->rule = 'R';
+	else if ((rules & RF) && (path_c(c) || c >= 0x80) &&
+	         (e = r_path(s, n, i, prev, code, cwd, sp)))
+		sp->rule = 'F';
+	else if ((rules & RT) && (e = r_ticket(s, n, i, sp)))
+		sp->rule = 'T';
+	else if ((rules & Rr) && A_AL(c) && (e = r_repo(s, n, i, prev, 0, sp)))
+		sp->rule = 'r';
+	else if ((rules & RS) && A_HEX(c) && (e = r_sha(s, n, i, prev, sp)))
+		sp->rule = 'S';
+	else if ((rules & RH) && c == '#' && (e = r_hash(s, n, i, prev, sp)))
+		sp->rule = 'H';
+	if (e)
+	{
+		sp->s = i;
+		sp->e = e;
+	}
+	return e;
+}
+
+struct gscan
+{
+	const char *s;
+	const char *cwd;
+	xr_span_fn fn;
+	void *ctx;
+	size_t count;
+	int stop;
+};
+
+static void
+g_emit(struct gscan *g, const struct xr_span *sp)
+{
+	g->count++;
+	if (g->fn && g->fn(g->ctx, sp))
+		g->stop = 1;
+}
+
+/* Greedy by start, then rule order (v2.1 2.3): a span accepted at i hides
+** every candidate starting inside it. whole: a code span, where only U may
+** match short of the whole trimmed run. */
+static void
+scan_run(struct gscan *g, size_t a, size_t b, int rules, int code, int whole)
+{
+	const char *s = g->s;
+	uint32_t prev = prev_scalar(s, a), c;
+	size_t i = a, adv;
+	struct xr_span sp;
+
+	while (i < b && !g->stop)
+	{
+		c = u8_next((const unsigned char *)s + i, b - i, &adv);
+		if (!u_word(prev) && try_rules(s, b, i, prev, rules, code, g->cwd,
+		                               &sp))
+		{
+			if (!whole || sp.rule == 'U' || (sp.s == a && sp.e == b))
+				g_emit(g, &sp);
+			prev = prev_scalar(s, sp.e);
+			i = sp.e;
+			continue;
+		}
+		prev = c;
+		i += adv;
+	}
+}
+
+/* A fence line (CommonMark): up to 3 spaces, then 3+ backticks or tildes. */
+static int
+fence_open(const char *s, size_t n, size_t ls, char *fc, size_t *fl)
+{
+	size_t i = ls, k = 0;
+
+	while (i < n && s[i] == ' ' && k < 3)
+		i++, k++;
+	if (i >= n || (s[i] != '`' && s[i] != '~'))
+		return 0;
+	*fc = s[i];
+	for (k = 0; i < n && s[i] == *fc; i++)
+		k++;
+	if (k < 3)
+		return 0;
+	if (*fc == '`')
+		for (; i < n && s[i] != '\n'; i++)
+			if (s[i] == '`')
+				return 0;
+	*fl = k;
+	return 1;
+}
+
+static int
+fence_close(const char *s, size_t n, size_t ls, char fc, size_t fl)
+{
+	size_t i = ls, k = 0;
+
+	while (i < n && s[i] == ' ' && k < 3)
+		i++, k++;
+	for (k = 0; i < n && s[i] == fc; i++)
+		k++;
+	if (k < fl)
+		return 0;
+	while (i < n && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r'))
+		i++;
+	return i >= n || s[i] == '\n';
+}
+
+static size_t
+line_end(const char *s, size_t n, size_t i)
+{
+	const char *nl = memchr(s + i, '\n', n - i);
+
+	return nl ? (size_t)(nl - s) : n;
+}
+
+/* A code span's content: nothing when it holds a newline (2.4), else the
+** whole-span rules on its trimmed text. */
+static void
+code_span(struct gscan *g, size_t a, size_t b)
+{
+	size_t n = b - a;
+	const char *t;
+
+	if (memchr(g->s + a, '\n', n))
+		return;
+	t = trim(g->s + a, &n);
+	if (n)
+		scan_run(g, (size_t)(t - g->s), (size_t)(t - g->s) + n, R_CODE, 1, 1);
+}
+
+/* [label](url) at i in [i, b): 1 with the label's end m and the ')' at q. */
+static int
+md_link(const char *s, size_t i, size_t b, size_t *m, size_t *q)
+{
+	size_t k;
+
+	for (k = i + 1; k < b && k - i < 4096 && s[k] != ']'; k++)
+		if (s[k] == '[' || s[k] == '\n')
+			return 0;
+	if (k + 1 >= b || s[k] != ']' || s[k + 1] != '(')
+		return 0;
+	*m = k;
+	for (k += 2; k < b && k - *m < XR_KEY_MAX + 4 && s[k] != ')'; k++)
+		if ((unsigned char)s[k] <= ' ')
+			return 0;
+	if (k >= b || s[k] != ')')
+		return 0;
+	*q = k;
+	return 1;
+}
+
+/* Inline code spans and (Markdown) links over the prose run [a, b). */
+static void
+inline_run(struct gscan *g, size_t a, size_t b, int md)
+{
+	const char *s = g->s;
+	size_t i = a, seg = a, k, j, r, m, q;
+
+	while (i < b && !g->stop)
+	{
+		if (s[i] == '`')
+		{
+			for (k = 0; i + k < b && s[i + k] == '`'; k++)
+				;
+			for (j = i + k; j < b; j += r ? r : 1)
+			{
+				for (r = 0; j + r < b && s[j + r] == '`'; r++)
+					;
+				if (r == k)
+					break;
+			}
+			if (j < b)
+			{
+				scan_run(g, seg, i, R_PROSE, 0, 0);
+				code_span(g, i + k, j);
+				i = seg = j + k;
+			}
+			else
+				i += k;	/* no closer: literal backticks */
+			continue;
+		}
+		if (md && s[i] == '[' && md_link(s, i, b, &m, &q))
+		{
+			struct xr_span sp;
+
+			scan_run(g, seg, i, R_PROSE, 0, 0);
+			/* already linked: no span in the label; the URL is a url
+			** span on the label's range (2.3) */
+			if (!g->stop && r_url(s, q, m + 2, &sp) == q)
+			{
+				sp.rule = 'U';
+				sp.s = i + 1;
+				sp.e = m;
+				g_emit(g, &sp);
+			}
+			i = seg = q + 1;
+			continue;
+		}
+		i++;
+	}
+	if (!g->stop)
+		scan_run(g, seg, b, R_PROSE, 0, 0);
+}
+
+/* Plain or Markdown prose: fences (an unclosed one makes the rest code),
+** then inline spans (v2.1 2.4, v1 4.3's small scanner). */
+static void
+scan_prose(struct gscan *g, size_t n, int md)
+{
+	const char *s = g->s;
+	size_t ls = 0, ps = 0, fl;
+	char fc;
+
+	while (ls < n && !g->stop)
+	{
+		size_t le = line_end(s, n, ls);
+
+		if (fence_open(s, n, ls, &fc, &fl))
+		{
+			size_t k = le < n ? le + 1 : n;
+
+			inline_run(g, ps, ls, md);
+			while (k < n && !fence_close(s, n, k, fc, fl))
+			{
+				size_t ke = line_end(s, n, k);
+
+				k = ke < n ? ke + 1 : n;
+			}
+			if (k >= n)
+				return;
+			le = line_end(s, n, k);
+			ls = ps = le < n ? le + 1 : n;
+			continue;
+		}
+		ls = le < n ? le + 1 : n;
+	}
+	if (!g->stop)
+		inline_run(g, ps, n, md);
+}
+
+static size_t
+grammar(const char *s, size_t n, int mode, int rules, const char *cwd,
+        xr_span_fn fn, void *ctx)
+{
+	struct gscan g = { s, cwd, fn, ctx, 0, 0 };
+
+	if (mode == XR_PROSE || mode == XR_MD)
+		scan_prose(&g, n, mode == XR_MD);
+	else
+		scan_run(&g, 0, n, rules, mode == XR_CODE, 0);
+	return g.count;
+}
+
+size_t
+xr_grammar(const char *s, size_t n, int mode, const char *cwd, xr_span_fn fn,
+           void *ctx)
+{
+	return grammar(s, n, mode, mode == XR_CODE ? R_CODE : R_PROSE, cwd, fn,
+	               ctx);
+}
+
+/* The span at exactly i under `rules` (prose: no code scan), 1 with *sp. */
+static int
+anchor_at(const char *s, size_t n, size_t i, int rules, const char *cwd,
+          struct xr_span *sp)
+{
+	return i < n && !u_word(prev_scalar(s, i)) &&
+	       try_rules(s, n, i, prev_scalar(s, i), rules, 0, cwd, sp) != 0;
+}
+
+int
+xr_ref_ok(const char *text)
+{
+	size_t n = strlen(text), i, a;
+
+	if (!n || n > 256)
+		return 0;
+	for (i = 0; i < n; i += a)
+	{
+		uint32_t c;
+
+		if (!(a = dch_utf8_len((const unsigned char *)text + i, n - i)))
+			return 0;
+		c = u8_next((const unsigned char *)text + i, n - i, &a);
+		if (c < 0x20 || (c >= 0x7f && c <= 0x9f) || c == 0x200e ||
+		    c == 0x200f || (c >= 0x202a && c <= 0x202e) ||
+		    (c >= 0x2066 && c <= 0x2069))
+			return 0;
+	}
+	return 1;
+}
+
+struct one_span
+{
+	struct xr_span sp;
+	int n;
+};
+
+static int
+one_span(void *ctx, const struct xr_span *sp)
+{
+	struct one_span *o = ctx;
+
+	if (!o->n++)
+		o->sp = *sp;
+	return o->n > 1;
+}
+
+int
+xr_ref_parse(const char *text, const char *cwd, struct xr_span *out)
+{
+	size_t n = strlen(text);
+	const char *t = trim(text, &n);
+	struct one_span o;
+
+	o.n = 0;
+	/* the trimmed text as its own string: boundaries end where it does */
+	{
+		char *c = malloc(n + 1);
+
+		if (!c)
+			return 0;
+		memcpy(c, t, n);
+		c[n] = '\0';
+		grammar(c, n, XR_PROSE, R_PROSE, cwd, one_span, &o);
+		free(c);
+	}
+	if (o.n != 1 || o.sp.s != 0 || o.sp.e != n)
+		return 0;
+	*out = o.sp;
+	return 1;
 }
 
 /* ---- identity ----------------------------------------------------------- */
@@ -759,16 +1625,19 @@ settled(const char *o, size_t k, size_t *t, size_t *nb)
 ** length returned. It stops once the title is settled: an opener with no
 ** close scans to the end, and only a few fit before that (QA 1.44 MED-3). */
 static size_t
-unwrap(char *s, size_t n)
+unwrap(char *s, size_t n, size_t cap)
 {
 	static const char open[] = "<pasted_content id=\"";
 	char close[96];
-	size_t i = 0, k = 0, j, cs, ce, t = 0, nb = 0, a;
+	size_t i = 0, k = 0, j, cs, ce, t = 0, nb = 0, a, sc = 0;
 	const char *e;
+	int miss = 0;
 
-	while (i < n && !settled(s, k, &t, &nb))
+	/* cap 0: until the title is settled; else until cap scalars are out
+	** (the refs' clip, 3.1), after at most 16 openers with no closer */
+	while (i < n && (cap ? sc < cap : !settled(s, k, &t, &nb)))
 	{
-		if (s[i] == '<' && i + sizeof open - 1 <= n &&
+		if (s[i] == '<' && i + sizeof open - 1 <= n && miss < 16 &&
 		    !memcmp(s + i, open, sizeof open - 1))
 		{
 			j = i + sizeof open - 1;
@@ -791,10 +1660,13 @@ unwrap(char *s, size_t n)
 					if (ce > cs && s[ce - 1] == '\n')
 						ce--;
 					memmove(s + k, s + cs, ce - cs);
+					if (cap)
+						sc += scalars(s + k, ce - cs);
 					k += ce - cs;
 					i = (size_t)(e - s) + strlen(close);
 					continue;
 				}
+				miss += cap != 0;
 			}
 		}
 		/* a whole scalar, so settled() never sees half of one */
@@ -802,13 +1674,1686 @@ unwrap(char *s, size_t n)
 		memmove(s + k, s + i, a);
 		k += a;
 		i += a;
+		sc++;
 	}
 	return k;
+}
+
+/* ---- refs: emitting mentions and definitions ------------------------------ */
+
+static void put_or_null(FILE *f, const char *s);
+static size_t tokens_max(const char *s, size_t n);
+
+/* s[0..n) less a scalar cut short at its end (bridge.c's dch_utf8_trim,
+** kept here so the engine links alone: units, fuzz). */
+static size_t
+u8_cut(const char *s, size_t n)
+{
+	size_t k = n, want;
+	unsigned char c;
+
+	while (k > 0 && n - k < 3 && ((unsigned char)s[k - 1] & 0xc0) == 0x80)
+		k--;
+	if (!k || (c = (unsigned char)s[k - 1]) < 0xc0)
+		return n;
+	want = c >= 0xf0 ? 4 : c >= 0xe0 ? 3 : 2;
+	return n - (k - 1) < want ? k - 1 : n;
+}
+
+static uint64_t
+fnv(const char *s, size_t n)
+{
+	uint64_t h = 0xcbf29ce484222325ULL;
+
+	while (n--)
+		h = (h ^ (unsigned char)*s++) * 0x100000001b3ULL;
+	return h;
+}
+
+/* A definition's identity (v2.1 6.3): its title, whitespace collapsed and
+** case-folded (shortcut: ASCII folding only). */
+static uint64_t
+title_hash(const char *t)
+{
+	uint64_t h = 0xcbf29ce484222325ULL;
+	const unsigned char *u = (const unsigned char *)t;
+
+	for (; *u; u++)
+		h = (h ^ (A_UP(*u) ? *u + 32 : *u)) * 0x100000001b3ULL;
+	return h;
+}
+
+/* Where a field's mentions go: the sink plus what each hit carries. */
+struct remit
+{
+	const struct xr_sink *k;
+	const char *cwd;
+	const char *text;	/* the field scanned */
+	uint64_t off;		/* Claude: the line's offset; shell: the seq */
+	long long at;
+	const char *chapter;
+	uint64_t *ctr;		/* Claude: each mention its own unit */
+	uint64_t unit, row;	/* shell: the block and the row */
+	int left;		/* spans left in the block, -1 no cap */
+	/* the field's code spans, for a definition anchor's one mention */
+	struct cov { size_t s, e; uint64_t h; } *cov;
+	size_t ncov, ccov;
+	/* shell: a block's output, its lines' starts and seqs (offset, row) */
+	const size_t *lpos;
+	const uint64_t *lseq;
+	size_t nl;
+};
+
+static size_t
+line_start(const char *s, size_t i)
+{
+	while (i > 0 && s[i - 1] != '\n')
+		i--;
+	return i;
+}
+
+static void
+rm_hit(struct remit *r, const struct xr_span *sp, const char *title,
+       const char *passage, const char *rule)
+{
+	struct xr_hit h;
+	struct xr_span c = *sp;
+	size_t ls = line_start(r->text, sp->s), le = sp->e;
+
+	while (r->text[le] && r->text[le] != '\n')
+		le++;
+	c.s -= ls;
+	c.e -= ls;
+	memset(&h, 0, sizeof h);
+	h.sp = &c;
+	h.line = r->text + ls;
+	h.ll = le - ls;
+	h.off = r->off;
+	h.at = r->at;
+	h.chapter = r->chapter;
+	if (title)
+	{
+		h.title = title;
+		h.passage = passage;
+		h.rule = rule;
+	}
+	if (r->ctr)
+		h.unit = h.row = ++*r->ctr;
+	else
+	{
+		h.unit = r->unit;
+		h.row = r->row;
+	}
+	if (r->nl)
+	{
+		size_t lo = 0, hi = r->nl;
+
+		while (hi - lo > 1)
+			if (r->lpos[(lo + hi) / 2] <= sp->s)
+				lo = (lo + hi) / 2;
+			else
+				hi = (lo + hi) / 2;
+		h.off = h.row = r->lseq[lo];
+	}
+	r->k->hit(r->k->ctx, &h);
+}
+
+static void
+cov_add(struct remit *r, const struct xr_span *sp)
+{
+	if (r->ncov == r->ccov)
+	{
+		size_t nc = r->ccov ? r->ccov * 2 : 16;
+		struct cov *v = realloc(r->cov, nc * sizeof *v);
+
+		if (v)
+		{
+			r->cov = v;
+			r->ccov = nc;
+		}
+	}
+	if (r->ncov < r->ccov)
+	{
+		r->cov[r->ncov].s = sp->s;
+		r->cov[r->ncov].e = sp->e;
+		r->cov[r->ncov++].h = fnv(sp->key, strlen(sp->key));
+	}
+}
+
+/* A span recorded for coverage only (a command scanned again at its result). */
+static int
+cov_span(void *ctx, const struct xr_span *sp)
+{
+	cov_add(ctx, sp);
+	return 0;
+}
+
+static int
+rm_span(void *ctx, const struct xr_span *sp)
+{
+	struct remit *r = ctx;
+
+	if (!r->left)
+		return 1;
+	if (r->left > 0)
+		r->left--;
+	cov_add(r, sp);
+	rm_hit(r, sp, NULL, NULL, NULL);
+	return 0;
+}
+
+/* Every span of text[0..n) in mode to the sink; text NUL-terminated. */
+static void
+rm_scan(struct remit *r, const char *text, size_t n, int mode)
+{
+	r->text = text;
+	r->ncov = 0;
+	(void)xr_grammar(text, n, mode, r->cwd, rm_span, r);
+}
+
+/* ---- refs: definitions (v2.1 4.2-4.3) ------------------------------------- */
+
+/* A command's words, unquoted (a small sh reading: '…', "…", \x), with
+** their raw byte range; operators (| ; & < > ( )) are words of their own. */
+#define SW_MAX 64
+struct sw
+{
+	char *b;
+	size_t n;
+	size_t off[SW_MAX], rs[SW_MAX], re[SW_MAX];
+	char op[SW_MAX];
+};
+
+static void
+shell_words(const char *c, size_t cl, struct sw *w)
+{
+	size_t i = 0, o = 0;
+
+	w->n = 0;
+	if (!(w->b = malloc(cl + SW_MAX + 1)))
+		return;
+	while (i < cl && w->n < SW_MAX)
+	{
+		while (i < cl && (c[i] == ' ' || c[i] == '\t' || c[i] == '\n' ||
+		                  c[i] == '\r'))
+			i++;
+		if (i >= cl)
+			break;
+		w->rs[w->n] = i;
+		w->off[w->n] = o;
+		w->op[w->n] = strchr("|;&<>()", c[i]) != NULL && c[i];
+		if (w->op[w->n])
+		{
+			w->b[o++] = c[i++];
+			if (i < cl && c[i] == c[i - 1] && strchr("&|<>", c[i]))
+				w->b[o++] = c[i++];
+		}
+		else
+			while (i < cl && c[i] != ' ' && c[i] != '\t' && c[i] != '\n' &&
+			       c[i] != '\r' && !strchr("|;&<>()", c[i]))
+			{
+				char q = c[i];
+
+				if (q == '\'' || q == '"')
+				{
+					for (i++; i < cl && c[i] != q; i++)
+					{
+						if (q == '"' && c[i] == '\\' && i + 1 < cl)
+							i++;
+						w->b[o++] = c[i];
+					}
+					i += i < cl;
+				}
+				else if (q == '\\' && i + 1 < cl)
+				{
+					w->b[o++] = c[i + 1];
+					i += 2;
+				}
+				else
+					w->b[o++] = c[i++];
+			}
+		w->b[o++] = '\0';
+		w->re[w->n++] = i;
+	}
+}
+
+#define SWD(w, k) ((w)->b + (w)->off[k])
+
+static int
+is_assign(const char *s)
+{
+	const char *p = s;
+
+	if (!A_AL((unsigned char)*p) && *p != '_')
+		return 0;
+	while (A_ALNUM((unsigned char)*p) || *p == '_')
+		p++;
+	return *p == '=';
+}
+
+/* The first command word: past `cd … &&`, env assignments and sudo. */
+static size_t
+cmd_head(const struct sw *w)
+{
+	size_t k = 0;
+
+	while (k < w->n && !w->op[k])
+	{
+		if (!strcmp(SWD(w, k), "cd"))
+		{
+			while (k < w->n && !(w->op[k] && (!strcmp(SWD(w, k), "&&") ||
+			                                 !strcmp(SWD(w, k), ";"))))
+				k++;
+			if (k >= w->n)
+				return w->n;
+			k++;
+		}
+		else if (is_assign(SWD(w, k)) || !strcmp(SWD(w, k), "sudo"))
+			k++;
+		else
+			return k;
+	}
+	return w->n;
+}
+
+static const char *
+base(const char *s)
+{
+	const char *b = strrchr(s, '/');
+
+	return b ? b + 1 : s;
+}
+
+static int
+in_list(const char *s, const char *const *v)
+{
+	for (; *v; v++)
+		if (!strcmp(s, *v))
+			return 1;
+	return 0;
+}
+
+/* An absolute or ~ path outside cwd (exclusion #1); no cwd: outside. */
+static int
+outside(const char *p, const char *cwd)
+{
+	char a[XR_KEY_MAX + 1], b[XR_KEY_MAX + 1], t[XR_PATH_MAX + 8];
+	const char *h = getenv("HOME");
+	size_t al, bl;
+
+	if (p[0] == '~')
+	{
+		if (!h || h[0] != '/' || (p[1] && p[1] != '/') ||
+		    snprintf(t, sizeof t, "%s%s", h, p + 1) >= (int)sizeof t)
+			return 1;
+		p = t;
+	}
+	if (!cwd || cwd[0] != '/' ||
+	    !(al = path_norm(p, strlen(p), NULL, a, sizeof a)) ||
+	    !(bl = path_norm(cwd, strlen(cwd), NULL, b, sizeof b)))
+		return 1;
+	if (bl == 1)
+		return 0;	/* cwd "/" */
+	return !(al >= bl && !memcmp(a, b, bl) && (a[bl] == '\0' || a[bl] == '/'));
+}
+
+enum { X_NONE, X_QUOTE = 1, X_DIFF = 3, X_LIST = 4 };
+
+/* Exclusions #1, #3 and #4 on the paired command (v2.1 4.3). */
+static int
+excluded(const char *cmd, size_t cl, const char *cwd)
+{
+	static const char *const list[] = { "rg", "grep", "egrep", "fgrep", "ag",
+	                                    "ack", "fd", "find", "ls", 0 };
+	static const char *const print[] = { "cat", "head", "tail", "bat",
+	                                     "less", "awk", "nl", "more", 0 };
+	struct sw w;
+	size_t h, k, sub;
+	int r = X_NONE, sedn = 0;
+	const char *c0;
+
+	shell_words(cmd, cl, &w);
+	if (!w.b)
+		return X_LIST;	/* no memory: no definition */
+	h = cmd_head(&w);
+	if (h < w.n)
+	{
+		c0 = base(SWD(&w, h));
+		/* git's subcommand: past its global options */
+		for (sub = h + 1; sub < w.n && !w.op[sub] && SWD(&w, sub)[0] == '-';
+		     sub++)
+			if (!strcmp(SWD(&w, sub), "-C") || !strcmp(SWD(&w, sub), "-c"))
+				sub++;
+		if (sub >= w.n || w.op[sub])
+			sub = 0;
+		if (in_list(c0, list) ||
+		    (!strcmp(c0, "git") && sub && !strcmp(SWD(&w, sub), "grep")))
+			r = X_LIST;
+		else if (!strcmp(c0, "diff") || !strcmp(c0, "patch") ||
+		         (!strcmp(c0, "git") && sub &&
+		          (!strcmp(SWD(&w, sub), "diff") ||
+		           !strcmp(SWD(&w, sub), "show"))))
+			r = X_DIFF;
+		else if (!strcmp(c0, "git") && sub && !strcmp(SWD(&w, sub), "log"))
+		{
+			for (k = sub + 1; k < w.n && !w.op[k]; k++)
+				if (!strcmp(SWD(&w, k), "-p") || !strcmp(SWD(&w, k), "-u") ||
+				    !strcmp(SWD(&w, k), "--patch"))
+					r = X_DIFF;
+		}
+		else
+		{
+			for (k = h + 1; k < w.n && !w.op[k]; k++)
+				sedn |= !strncmp(SWD(&w, k), "-n", 2);
+			if (in_list(c0, print) || (!strcmp(c0, "sed") && sedn))
+				for (k = h + 1; k < w.n && !w.op[k]; k++)
+					if ((SWD(&w, k)[0] == '/' || SWD(&w, k)[0] == '~') &&
+					    outside(SWD(&w, k), cwd))
+						r = X_QUOTE;
+		}
+	}
+	free(w.b);
+	return r;
+}
+
+/* One definition found in a block. */
+struct dres
+{
+	struct xr_span sp;	/* the key; s/e its anchor in out (or cmd) */
+	int incmd;
+	const char *rule;
+	char title[XR_TITLE_MAX * 4 + 1];
+	char *passage;
+};
+
+struct dset
+{
+	struct dres *v;
+	size_t n, cap;
+};
+
+static struct dres *
+dpush(struct dset *d)
+{
+	if (d->n == d->cap)
+	{
+		size_t nc = d->cap ? d->cap * 2 : 8;
+		struct dres *v = realloc(d->v, nc * sizeof *v);
+
+		if (!v)
+			return NULL;
+		d->v = v;
+		d->cap = nc;
+	}
+	memset(&d->v[d->n], 0, sizeof d->v[d->n]);
+	return &d->v[d->n++];
+}
+
+static void
+dfree(struct dset *d)
+{
+	size_t k;
+
+	for (k = 0; k < d->n; k++)
+		free(d->v[k].passage);
+	free(d->v);
+	memset(d, 0, sizeof *d);
+}
+
+/* A passage: the scalars of s[0..n), at most XR_PASSAGE, malloc'd. */
+static char *
+passage_of(const char *s, size_t n)
+{
+	size_t l;
+	const char *t = trim(s, &n);
+	char *p;
+
+	l = clip(t, n, XR_PASSAGE);
+	if (!l || !(p = malloc(l + 1)))
+		return NULL;
+	memcpy(p, t, l);
+	p[l] = '\0';
+	return p;
+}
+
+/* The id part of a key (D2, D4): n for #n / repo#n / owner/repo#n, the
+** whole text for KEY-N. */
+static const char *
+id_part(const struct xr_span *sp)
+{
+	const char *t = xr_span_text(sp), *h = strrchr(t, '#');
+
+	return sp->shape == XR_TICKET ? t : h ? h + 1 : t;
+}
+
+struct idm
+{
+	const char *v;
+	size_t vl;
+	struct xr_span sp;
+	int found;
+};
+
+static int
+idm_span(void *ctx, const struct xr_span *sp)
+{
+	struct idm *m = ctx;
+	const char *ip = id_part(sp);
+
+	if ((sp->shape == XR_TICKET || sp->shape == XR_ISSUE ||
+	     sp->shape == XR_PULL) && strlen(ip) == m->vl &&
+	    !memcmp(ip, m->v, m->vl))
+	{
+		m->sp = *sp;
+		m->found = 1;
+		return 1;
+	}
+	return 0;
+}
+
+/* D2/D4's key for an id value v: a ref on the command line whose id part
+** equals it; else #v for digits; else v itself when rule T matches it. */
+static int
+id_resolve(const char *v, size_t vl, const char *cmd, size_t cl,
+           const char *cwd, struct xr_span *sp)
+{
+	struct idm m = { v, vl, { 0 }, 0 };
+	char t[16];
+	size_t k;
+
+	if (!vl || vl > 64)
+		return 0;
+	if (cmd)
+		(void)grammar(cmd, cl, XR_PLAIN, R_ANCHOR, cwd, idm_span, &m);
+	if (m.found)
+	{
+		*sp = m.sp;
+		return 1;
+	}
+	for (k = 0; k < vl && A_DIG((unsigned char)v[k]); k++)
+		;
+	if (k == vl && vl <= 7)
+	{
+		t[0] = '#';
+		memcpy(t + 1, v, vl);
+		sp->full[0] = '\0';
+		sp->rule = 'H';
+		return span_key(sp, XR_ISSUE, t, vl + 1, 0);
+	}
+	return r_ticket(v, vl, 0, sp) == vl;
+}
+
+/* The output's lines: [ls, le) each, '\r' off, and whether a fence holds it
+** (exclusion #2). */
+struct olines
+{
+	size_t n;
+	size_t *ls, *le;
+	char *fence;
+};
+
+static int
+olines(const char *s, size_t n, struct olines *o)
+{
+	size_t k = 0, i = 0, cnt = 1, fl = 0;
+	char fc = 0;
+	int in = 0;
+
+	for (i = 0; i < n; i++)
+		cnt += s[i] == '\n';
+	o->ls = malloc(cnt * sizeof *o->ls);
+	o->le = malloc(cnt * sizeof *o->le);
+	o->fence = malloc(cnt);
+	if (!o->ls || !o->le || !o->fence)
+		return -1;
+	for (i = 0; i <= n && k < cnt; k++)
+	{
+		size_t e = line_end(s, n, i);
+
+		o->ls[k] = i;
+		o->le[k] = e > i && s[e - 1] == '\r' ? e - 1 : e;
+		if (in)
+		{
+			o->fence[k] = 1;
+			if (fence_close(s, n, i, fc, fl))
+				in = 0;
+		}
+		else
+			o->fence[k] = in = fence_open(s, n, i, &fc, &fl);
+		i = e + 1;
+	}
+	o->n = k;
+	return 0;
+}
+
+static void
+olines_free(struct olines *o)
+{
+	free(o->ls);
+	free(o->le);
+	free(o->fence);
+}
+
+/* The rest of a heading or a title value as a title. */
+static void
+title_of(const char *s, size_t n, char *out)
+{
+	xr_title(s, n | XR_WHOLE, out, XR_TITLE_MAX * 4 + 1);
+}
+
+/* D1 at line k: `^#{1,6} ` and the ref as the first token. */
+static int
+d1(const char *s, const struct olines *o, size_t k, const char *cwd,
+   struct dres *d)
+{
+	size_t p = o->ls[k], le = o->le[k], h = 0, e, t, j, got = 0, pl = 0;
+	char pb[XR_PASSAGE * 4 + 8];
+
+	while (p < le && s[p] == '#' && h < 7)
+		p++, h++;
+	if (h < 1 || h > 6 || p >= le || s[p] != ' ' ||
+	    !anchor_at(s, le, ++p, R_ANCHOR, cwd, &d->sp))
+		return 0;
+	e = d->sp.e;
+	if (e == le)
+		t = le;
+	else if (s[e] == ':')
+		t = e + 1;
+	else if (le - e >= 3 && !memcmp(s + e, " - ", 3))
+		t = e + 3;
+	else if (le - e >= 5 && !memcmp(s + e, " \xe2\x80\x94 ", 5))
+		t = e + 5;
+	else if (s[e] == ' ')
+		t = e + 1;
+	else
+		return 0;
+	title_of(s + t, le - t, d->title);
+	/* the passage: up to 6 following non-blank lines */
+	for (j = k + 1; j < o->n && got < 6 && pl < sizeof pb - 8; j++)
+	{
+		size_t l = o->le[j] - o->ls[j];
+
+		if (o->fence[j] || blank(s + o->ls[j], l))
+			continue;
+		if (l > sizeof pb - 8 - pl)
+			l = sizeof pb - 8 - pl;
+		if (pl)
+			pb[pl++] = '\n';
+		memcpy(pb + pl, s + o->ls[j], l);
+		pl += l;
+		got++;
+	}
+	pl = u8_cut(pb, pl);
+	d->passage = passage_of(pb, pl);
+	d->rule = "D1";
+	return 1;
+}
+
+/* ^\s*<word>\s*: then the value; its start, or 0. */
+static size_t
+field_line(const char *s, size_t ls, size_t le, const char *word)
+{
+	size_t p = ls, wl = strlen(word);
+
+	while (p < le && (s[p] == ' ' || s[p] == '\t'))
+		p++;
+	if (le - p < wl + 1 || strncasecmp(s + p, word, wl))
+		return 0;
+	p += wl;
+	while (p < le && (s[p] == ' ' || s[p] == '\t') && strcmp(word, "title"))
+		p++;
+	if (p >= le || s[p] != ':')
+		return 0;
+	for (p++; p < le && (s[p] == ' ' || s[p] == '\t'); p++)
+		;
+	return p < le ? p : 0;
+}
+
+struct same_shape
+{
+	int shape;
+	const char *key;
+	int other;
+};
+
+static int
+same_shape(void *ctx, const struct xr_span *sp)
+{
+	struct same_shape *x = ctx;
+
+	if (sp->shape == x->shape && strcmp(sp->key, x->key))
+		x->other = 1;
+	return x->other;
+}
+
+/* D4 at line k: the ref as the line's first token (or a number:/id: line's
+** value), and a `title:` line within 3 either way, with no other ref of its
+** shape in the window. */
+static int
+d4(const char *s, const struct olines *o, size_t k, const char *cmd,
+   size_t cl, const char *cwd, struct dres *d)
+{
+	size_t p = o->ls[k], le = o->le[k], v, j, lo, hi, tl = 0, pl = 0, tv = 0;
+	char pb[XR_PASSAGE * 4 + 8];
+	struct same_shape ss;
+
+	while (p < le && (s[p] == ' ' || s[p] == '\t'))
+		p++;
+	if (anchor_at(s, le, p, R_ANCHOR, cwd, &d->sp) &&
+	    (d->sp.e == le || s[d->sp.e] == ' ' || s[d->sp.e] == '\t' ||
+	     s[d->sp.e] == ':'))
+		;
+	else if ((v = field_line(s, o->ls[k], le, "number")) ||
+	         (v = field_line(s, o->ls[k], le, "id")))
+	{
+		size_t ve = le;
+
+		while (ve > v && (u_space((unsigned char)s[ve - 1]) ||
+		                  s[ve - 1] == ','))
+			ve--;
+		if (ve - v >= 2 && (s[v] == '"' || s[v] == '\'') &&
+		    s[ve - 1] == s[v])
+			v++, ve--;
+		if (!id_resolve(s + v, ve - v, cmd, cl, cwd, &d->sp))
+			return 0;
+		d->sp.s = v;
+		d->sp.e = ve;
+	}
+	else
+		return 0;
+	lo = k >= 3 ? k - 3 : 0;
+	hi = k + 3 < o->n ? k + 3 : o->n - 1;
+	for (j = lo; j <= hi && !tl; j++)
+		if (j != k && !o->fence[j] &&
+		    (tv = field_line(s, o->ls[j], o->le[j], "title")))
+			tl = j + 1;
+	if (!tl)
+		return 0;
+	ss.shape = d->sp.shape;
+	ss.key = d->sp.key;
+	ss.other = 0;
+	for (j = lo; j <= hi && !ss.other; j++)
+		(void)grammar(s + o->ls[j], o->le[j] - o->ls[j], XR_PLAIN, R_PROSE,
+		              cwd, same_shape, &ss);
+	if (ss.other)
+		return 0;
+	title_of(s + tv, o->le[tl - 1] - tv, d->title);
+	for (j = lo; j <= hi && pl < sizeof pb - 8; j++)
+	{
+		size_t l = o->le[j] - o->ls[j];
+
+		if (j == k || j == tl - 1 || blank(s + o->ls[j], l))
+			continue;
+		if (l > sizeof pb - 8 - pl)
+			l = sizeof pb - 8 - pl;
+		if (pl)
+			pb[pl++] = '\n';
+		memcpy(pb + pl, s + o->ls[j], l);
+		pl += l;
+	}
+	pl = u8_cut(pb, pl);
+	d->passage = passage_of(pb, pl);
+	d->rule = "D4";
+	return 1;
+}
+
+static const char *const A_IDF[] = { "id", "number", "entry_id", "key", "iid",
+                                     0 };
+static const char *const A_TITLEF[] = { "title", "heading", "summary", "name",
+                                        0 };
+
+/* D2: the trimmed output one JSON object, or an array of at most 200, within
+** XR_D2_MAX. */
+static void
+d2(const char *out, size_t ol, const char *cmd, size_t cl, const char *cwd,
+   struct dset *ds)
+{
+	size_t n = ol, k;
+	const char *t = trim(out, &n);
+	struct json_parser p;
+	char *buf;
+	int objs[200], no = 0, i;
+
+	if (!n || n > XR_D2_MAX || (t[0] != '{' && t[0] != '[') ||
+	    memchr(t, '\0', n) || !(buf = malloc(n + 1)))
+		return;
+	memcpy(buf, t, n);
+	buf[n] = '\0';
+	memset(&p, 0, sizeof p);
+	if (tokens_max(buf, n) > XR_LINE_TOKENS || dch_json_parse(&p, buf) < 0)
+		goto out;
+	if (p.tok[0].kind == JSON_OBJECT)
+		objs[no++] = 0;
+	else if (p.tok[0].kind == JSON_ARRAY)
+		for (i = 1; i < p.tok[0].next; i = p.tok[i].next)
+		{
+			if (no == 200 || p.tok[i].kind != JSON_OBJECT)
+				goto out;
+			objs[no++] = i;
+		}
+	for (k = 0; k < (size_t)no && ds->n < XR_DEFS; k++)
+	{
+		int iv = -1, tv = -1, bv, a;
+		char *v, *ti, *bd;
+		size_t vl, tl, bl, x;
+		struct dres *d;
+		struct xr_span sp;
+		const char *rt, *tp;
+
+		for (a = 0; A_IDF[a] && iv < 0; a++)
+			if ((iv = j_field(&p, objs[k], A_IDF[a])) >= 0 &&
+			    p.tok[iv].kind != JSON_STRING &&
+			    p.tok[iv].kind != JSON_PRIMITIVE)
+				iv = -1;
+		for (a = 0; A_TITLEF[a] && tv < 0; a++)
+			if ((tv = j_field(&p, objs[k], A_TITLEF[a])) >= 0)
+			{
+				size_t l = 0;
+				char *s = j_str(&p, tv, &l);
+
+				if (!s || blank(s, l))
+					tv = -1;
+				free(s);
+			}
+		if (iv < 0 || tv < 0)
+			continue;
+		if (p.tok[iv].kind == JSON_STRING)
+			v = j_str(&p, iv, &vl);
+		else if ((v = malloc((size_t)(p.tok[iv].end - p.tok[iv].start) + 1)))
+		{
+			vl = (size_t)(p.tok[iv].end - p.tok[iv].start);
+			memcpy(v, buf + p.tok[iv].start, vl);
+			v[vl] = '\0';
+		}
+		if (!v)
+			continue;
+		if (!id_resolve(v, vl, cmd, cl, cwd, &sp) || !(d = dpush(ds)))
+		{
+			free(v);
+			continue;
+		}
+		free(v);
+		d->sp = sp;
+		d->sp.s = (size_t)(t - out) + (size_t)p.tok[iv].start;
+		d->sp.e = (size_t)(t - out) + (size_t)p.tok[iv].end;
+		d->rule = "D2";
+		/* the title, leading # markup and the ref itself stripped */
+		ti = j_str(&p, tv, &tl);
+		tp = ti ? ti : "";
+		for (x = 0; tp[x] == '#'; x++)
+			;
+		if (x && (tp[x] == ' ' || tp[x] == '\t'))
+			for (tp += x; *tp == ' ' || *tp == '\t'; tp++)
+				;	/* heading markup, then the ref */
+		rt = xr_span_text(&sp);
+		x = strlen(rt);
+		if (!strncasecmp(tp, rt, x) && after_ok(tp, strlen(tp), x))
+		{
+			tp += x;
+			while (*tp == ' ' || *tp == ':' || *tp == '-' || *tp == '\t')
+				tp++;
+			if (!strncmp(tp, "\xe2\x80\x94", 3))
+				for (tp += 3; *tp == ' '; tp++)
+					;
+		}
+		title_of(tp, strlen(tp), d->title);
+		free(ti);
+		bv = j_field(&p, objs[k], "body");
+		if (bv < 0 || p.tok[bv].kind != JSON_STRING)
+			bv = j_field(&p, objs[k], "description");
+		if (bv >= 0 && (bd = j_str(&p, bv, &bl)))
+		{
+			d->passage = passage_of(bd, bl);
+			free(bd);
+		}
+	}
+out:
+	dch_json_free(&p);
+	free(buf);
+}
+
+/* A block's command and output, as the definition rules read them. */
+struct dsrc
+{
+	const char *out;	/* NUL-terminated */
+	size_t ol;
+	const char *cmd;	/* NULL: a generic card (no command) */
+	size_t cl;
+	int bash, failed, noexit, d2ok;
+	const char *cwd;
+};
+
+struct d3m
+{
+	size_t xs, xe;		/* the --title word: skipped */
+	struct xr_span sp;
+	int n, multi;
+	char seen[6];
+	struct xr_span one[6];
+	int cnt[6];
+};
+
+static int
+d3_cmd(void *ctx, const struct xr_span *sp)
+{
+	struct d3m *m = ctx;
+
+	if (sp->e > m->xs && sp->s < m->xe)
+		return 0;
+	if (!m->n++)
+		m->sp = *sp;
+	else if (strcmp(m->sp.key, sp->key))
+		m->multi = 1;
+	return 0;
+}
+
+static int
+d3_out(void *ctx, const struct xr_span *sp)
+{
+	struct d3m *m = ctx;
+
+	if (!m->cnt[sp->shape]++)
+		m->one[sp->shape] = *sp;
+	else if (!strcmp(m->one[sp->shape].key, sp->key))
+		m->cnt[sp->shape]--;	/* the same key again */
+	return 0;
+}
+
+/* D3: --title on a bash command that did not fail. */
+static void
+d3(const struct dsrc *s, struct dset *ds)
+{
+	struct sw w;
+	struct d3m m;
+	const char *val = NULL;
+	size_t k;
+	struct dres *d;
+	char title[XR_TITLE_MAX * 4 + 1];
+
+	shell_words(s->cmd, s->cl, &w);
+	if (!w.b)
+		return;
+	memset(&m, 0, sizeof m);
+	for (k = 0; k < w.n && !val; k++)
+		if (w.op[k])
+			continue;
+		else if (!strcmp(SWD(&w, k), "--title") && k + 1 < w.n &&
+		         !w.op[k + 1])
+		{
+			val = SWD(&w, k + 1);
+			m.xs = w.rs[k];
+			m.xe = w.re[k + 1];
+		}
+		else if (!strncmp(SWD(&w, k), "--title=", 8))
+		{
+			val = SWD(&w, k) + 8;
+			m.xs = w.rs[k];
+			m.xe = w.re[k];
+		}
+	if (val)
+		title_of(val, strlen(val), title);
+	free(w.b);
+	if (!val || !title[0])
+		return;
+	(void)grammar(s->cmd, s->cl, XR_PLAIN, R_D3, s->cwd, d3_cmd, &m);
+	if (m.n && !m.multi)
+	{
+		if ((d = dpush(ds)))
+		{
+			d->sp = m.sp;
+			d->incmd = 1;
+			d->rule = "D3";
+			memcpy(d->title, title, sizeof title);
+		}
+		return;
+	}
+	if (m.n)
+		return;
+	(void)grammar(s->out, s->ol, XR_PLAIN, R_D3, s->cwd, d3_out, &m);
+	for (k = 0; k < 6; k++)
+		if (m.cnt[k] == 1 && ds->n < XR_DEFS && (d = dpush(ds)))
+		{
+			d->sp = m.one[k];
+			d->rule = "D3";
+			memcpy(d->title, title, sizeof title);
+		}
+}
+
+/* Every definition of one paired block, at most XR_DEFS (v2.1 3.6). */
+static void
+defs_find(const struct dsrc *s, struct dset *ds)
+{
+	struct olines o;
+	size_t k, j;
+
+	memset(ds, 0, sizeof *ds);
+	if (s->failed || (s->cmd && excluded(s->cmd, s->cl, s->cwd)))
+		return;		/* #5; #1, #3, #4 */
+	memset(&o, 0, sizeof o);
+	if (olines(s->out, s->ol, &o) == 0)
+	{
+		for (k = 0; k < o.n; k++)
+		{
+			struct dres *d;
+
+			if (o.fence[k] || !(d = dpush(ds)))
+				continue;	/* #2: nothing in a fence */
+			if (!d1(s->out, &o, k, s->cwd, d) &&
+			    !d4(s->out, &o, k, s->cmd, s->cl, s->cwd, d))
+				ds->n--;
+		}
+		/* #4: more than 3 distinct D1/D4 keys of one shape: a listing */
+		for (k = 0; k < ds->n; k++)
+		{
+			size_t distinct = 0, i;
+
+			for (j = 0; j < ds->n; j++)
+			{
+				if (ds->v[j].sp.shape != ds->v[k].sp.shape)
+					continue;
+				for (i = 0; i < j && (ds->v[i].sp.shape !=
+				                      ds->v[j].sp.shape ||
+				                      strcmp(ds->v[i].sp.key,
+				                             ds->v[j].sp.key)); i++)
+					;
+				distinct += i == j;
+			}
+			if (distinct > 3)
+			{
+				dfree(ds);
+				break;
+			}
+		}
+		while (ds->n > XR_DEFS)
+			free(ds->v[--ds->n].passage);
+	}
+	olines_free(&o);
+	if (s->d2ok && ds->n < XR_DEFS)
+		d2(s->out, s->ol, s->cmd, s->cl, s->cwd, ds);
+	if (s->bash && s->cmd && !s->noexit && ds->n < XR_DEFS)
+		d3(s, ds);
+}
+
+/* A block's definitions to the sink, each with its anchor as one mention
+** unless a code span of the same key already covers it (4.2). out_r and
+** cmd_r: the remits the block's output and command were scanned with. */
+static void
+defs_emit(const struct dsrc *s, struct remit *out_r, struct remit *cmd_r)
+{
+	struct dset ds;
+	size_t k, c;
+
+	defs_find(s, &ds);
+	for (k = 0; k < ds.n; k++)
+	{
+		struct dres *d = &ds.v[k];
+		struct remit *r = d->incmd ? cmd_r : out_r;
+		uint64_t h = fnv(d->sp.key, strlen(d->sp.key));
+		int covered = 0;
+
+		if (!r)
+			continue;
+		r->text = d->incmd ? s->cmd : s->out;
+		rm_hit(r, &d->sp, d->title, d->passage ? d->passage : NULL, d->rule);
+		for (c = 0; c < r->ncov && !covered; c++)
+			covered = r->cov[c].h == h && r->cov[c].s < d->sp.e &&
+			          d->sp.s < r->cov[c].e;
+		if (!covered)
+			rm_hit(r, &d->sp, NULL, NULL, NULL);
+	}
+	dfree(&ds);
+}
+
+/* ---- refs: the index (3.2) ------------------------------------------------- */
+
+struct xr_ent
+{
+	char *key;
+	int shape;
+	char full[41];
+	uint64_t nunit, lastunit, nrow, lastrow, first;
+	int ndefs;
+	uint64_t defh[XR_DEFS];
+	char *title;
+};
+
+#define XR_HASH 4096		/* slots, > 2 x XR_KEYS */
+#define XR_DROPSET 65536
+
+struct xr_index
+{
+	struct xr_ent *v;
+	size_t n;
+	uint32_t slot[XR_HASH];	/* entry + 1 */
+	uint64_t *drop;		/* dropped keys' hashes, open addressing */
+	uint64_t dropped;
+	uint64_t ord;
+	int per_row;
+};
+
+unsigned long xr_index_live;
+
+struct xr_index *
+xr_index_new(void)
+{
+	struct xr_index *x = calloc(1, sizeof *x);
+
+	if (x && !(x->v = calloc(XR_KEYS, sizeof *x->v)))
+	{
+		free(x);
+		return NULL;
+	}
+	if (x)
+		xr_index_live++;
+	return x;
+}
+
+void
+xr_index_free(struct xr_index *x)
+{
+	size_t k;
+
+	if (!x)
+		return;
+	for (k = 0; k < x->n; k++)
+	{
+		free(x->v[k].key);
+		free(x->v[k].title);
+	}
+	free(x->v);
+	free(x->drop);
+	free(x);
+	xr_index_live--;
+}
+
+void
+xr_index_per_row(struct xr_index *x, int per_row)
+{
+	x->per_row = per_row;
+}
+
+size_t
+xr_index_keys(const struct xr_index *x)
+{
+	return x->n;
+}
+
+static void
+ix_drop(struct xr_index *x, uint64_t h)
+{
+	size_t i;
+
+	if (!h)
+		h = 1;
+	if (!x->drop && !(x->drop = calloc(XR_DROPSET, sizeof *x->drop)))
+	{
+		x->dropped++;	/* no set: every dropped mention counts */
+		return;
+	}
+	for (i = h % XR_DROPSET; x->drop[i]; i = (i + 1) % XR_DROPSET)
+		if (x->drop[i] == h)
+			return;
+	if (x->dropped < XR_DROPSET - 1)
+		x->drop[i] = h;
+	x->dropped++;
+}
+
+static struct xr_ent *
+ix_get(struct xr_index *x, const struct xr_span *sp)
+{
+	uint64_t h = fnv(sp->key, strlen(sp->key));
+	size_t i;
+	struct xr_ent *e;
+
+	for (i = h % XR_HASH; x->slot[i]; i = (i + 1) % XR_HASH)
+		if (!strcmp(x->v[x->slot[i] - 1].key, sp->key))
+			return &x->v[x->slot[i] - 1];
+	if (x->n == XR_KEYS)
+	{
+		ix_drop(x, h);
+		return NULL;
+	}
+	e = &x->v[x->n];
+	memset(e, 0, sizeof *e);
+	if (!(e->key = strdup(sp->key)))
+		return NULL;
+	e->shape = sp->shape;
+	e->first = x->ord++;
+	x->slot[i] = (uint32_t)++x->n;
+	return e;
+}
+
+static void
+ix_hit(void *ctx, const struct xr_hit *h)
+{
+	struct xr_index *x = ctx;
+	struct xr_ent *e = ix_get(x, h->sp);
+	int k;
+
+	if (!e)
+		return;
+	if (strlen(h->sp->full) > strlen(e->full))
+		snprintf(e->full, sizeof e->full, "%s", h->sp->full);
+	if (h->title)
+	{
+		uint64_t th = title_hash(h->title);
+		char *t;
+
+		for (k = 0; k < e->ndefs && e->defh[k] != th; k++)
+			;
+		if (k == e->ndefs && e->ndefs < XR_DEFS)
+			e->defh[e->ndefs++] = th;
+		if (!e->ndefs)
+			e->ndefs = 1;	/* defined: never 0 past the cap */
+		if ((t = strdup(h->title)))
+		{
+			free(e->title);
+			e->title = t;	/* the newest definition's */
+		}
+		return;
+	}
+	if (!e->nunit || e->lastunit != h->unit)
+	{
+		e->nunit++;
+		e->lastunit = h->unit;
+	}
+	if (!e->nrow || e->lastrow != h->row)
+	{
+		e->nrow++;
+		e->lastrow = h->row;
+	}
+}
+
+void
+xr_index_sink(struct xr_index *x, struct xr_sink *k)
+{
+	k->hit = ix_hit;
+	k->ctx = x;
+}
+
+static uint64_t
+ix_count(const struct xr_index *x, const struct xr_ent *e)
+{
+	return x->per_row ? e->nrow : e->nunit;
+}
+
+/* ---- refs: the --ref scan's lines (3.4) ------------------------------------ */
+
+#define XR_HELD 199		/* a file's newest mentions, after its first */
+
+struct xr_scan
+{
+	FILE *f;
+	char key[XR_KEY_MAX + 16];
+	const char *session, *project;
+	int live, full, shell, budget;
+	long long t0;
+	uint64_t written;
+	/* hold: lines kept in memory until xr_scan_release (a shell's ring is
+	** read before its first line can name the session) */
+	int hold;
+	char *hb;
+	size_t hl;
+	FILE *hm;
+	/* this file */
+	uint64_t nunit, lastunit, nrow, lastrow, lines, lastoff, lasth, foff;
+	int found, ndefs, mentioned;
+	uint64_t defh[XR_DEFS];
+	char *held[XR_HELD];
+	size_t hn, h0;
+	/* the scan */
+	uint64_t files, bytes, base, too_long;
+	int stop, out_full;
+	const char *why;
+	long long last;
+};
+
+long long
+xr_now_ms(void)
+{
+	struct timespec ts;
+
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+struct xr_scan *
+xr_scan_new(FILE *f, const char *key, const char *session,
+            const char *project, int live, int full, int shell, int budget,
+            long long t0)
+{
+	struct xr_scan *x = calloc(1, sizeof *x);
+
+	if (!x)
+		return NULL;
+	x->f = f;
+	snprintf(x->key, sizeof x->key, "%s", key);
+	x->session = session;
+	x->project = project;
+	x->live = live;
+	x->full = full;
+	x->shell = shell;
+	x->budget = budget;
+	x->t0 = x->last = t0;
+	return x;
+}
+
+void
+xr_scan_free(struct xr_scan *x)
+{
+	size_t k;
+
+	if (!x)
+		return;
+	for (k = 0; k < x->hn; k++)
+		free(x->held[(x->h0 + k) % XR_HELD]);
+	if (x->hm)
+		fclose(x->hm);
+	free(x->hb);
+	free(x);
+}
+
+/* One line under the 4 MiB cap, with room kept for `done` (3.4). */
+static int
+sc_line(struct xr_scan *x, const char *l, size_t n)
+{
+	if (x->out_full)
+		return -1;
+	if (x->written + n + 1024 > xr_lim.out)
+	{
+		x->out_full = x->stop = 1;
+		x->why = "output";
+		return -1;
+	}
+	if (x->hold && !x->hm && !(x->hm = open_memstream(&x->hb, &x->hl)))
+		return -1;
+	fwrite(l, 1, n, x->hold ? x->hm : x->f);
+	x->written += n;
+	return 0;
+}
+
+/* A line built on a memstream, then sent. */
+static FILE *
+ln_open(char **b, size_t *bl)
+{
+	*b = NULL;
+	return open_memstream(b, bl);
+}
+
+/* *b is the memstream's buffer: valid only once m is closed. */
+static void
+ln_send(struct xr_scan *x, FILE *m, char **b, size_t *bl)
+{
+	if (fclose(m) == 0)
+		(void)sc_line(x, *b, *bl);
+	free(*b);
+}
+
+static void
+put_at(FILE *m, long long at)
+{
+	if (at >= 0)
+		fprintf(m, "%lld", at);
+	else
+		fputs("null", m);
+}
+
+/* The line around the span, at most 200 scalars (3.4). */
+static char *
+cut_line(const char *l, size_t ll, size_t s, size_t e)
+{
+	size_t tot = scalars(l, ll), ss = scalars(l, s), sl = scalars(l + s, e - s);
+	size_t from = 0, a, b, k, i;
+	char *o;
+
+	if (tot > 200)
+	{
+		if (sl >= 200)
+			from = ss;
+		else
+		{
+			from = ss > (200 - sl) / 2 ? ss - (200 - sl) / 2 : 0;
+			if (from + 200 > tot)
+				from = tot - 200;
+		}
+	}
+	for (i = k = 0; i < ll && k < from; k++)
+		(void)u8_next((const unsigned char *)l + i, ll - i, &a), i += a;
+	b = i + clip(l + i, ll - i, 200);
+	if (!(o = malloc(b - i + 1)))
+		return NULL;
+	memcpy(o, l + i, b - i);
+	o[b - i] = '\0';
+	return o;
+}
+
+static char *
+mention_line(struct xr_scan *x, const struct xr_hit *h)
+{
+	char *b, *line = cut_line(h->line, h->ll, h->sp->s, h->sp->e);
+	size_t bl;
+	FILE *m = ln_open(&b, &bl);
+
+	if (!m || !line)
+	{
+		if (m)
+			fclose(m);
+		free(line);
+		free(m ? b : NULL);
+		return NULL;
+	}
+	fputs("{\"schema\":1,\"mention\":{\"session\":", m);
+	xr_put_str(m, x->session);
+	fputs(",\"chapter\":", m);
+	put_or_null(m, h->chapter);
+	fputs(",\"at\":", m);
+	put_at(m, h->at);
+	fputs(",\"line\":", m);
+	xr_put_str(m, line);
+	fprintf(m, ",\"offset\":%llu,\"live\":%s,\"project\":",
+	        (unsigned long long)h->off, x->live ? "true" : "false");
+	xr_put_str(m, x->project);
+	fputs("}}\n", m);
+	free(line);
+	if (fclose(m) != 0)
+	{
+		free(b);
+		return NULL;
+	}
+	return b;
+}
+
+static void
+sc_hit(void *ctx, const struct xr_hit *h)
+{
+	struct xr_scan *x = ctx;
+	char *b;
+	size_t bl;
+	FILE *m;
+
+	if (!x->stop && x->found && x->shell && h->off != x->foff)
+	{
+		x->stop = 1;	/* a shell's first result: its row is done */
+		x->why = "first";
+	}
+	if (x->stop || strcmp(h->sp->key, x->key))
+		return;
+	if (h->title)
+	{
+		uint64_t th = title_hash(h->title);
+		int k;
+
+		for (k = 0; k < x->ndefs && x->defh[k] != th; k++)
+			;
+		if (k == x->ndefs && x->ndefs < XR_DEFS)
+			x->defh[x->ndefs++] = th;
+		if (!(m = ln_open(&b, &bl)))
+			return;
+		fputs("{\"schema\":1,\"definition\":{\"session\":", m);
+		xr_put_str(m, x->session);
+		fprintf(m, ",\"live\":%s,\"project\":", x->live ? "true" : "false");
+		xr_put_str(m, x->project);
+		fputs(",\"at\":", m);
+		put_at(m, h->at);
+		fputs(",\"title\":", m);
+		xr_put_str(m, h->title);
+		/* a shell <n> in light mode: titles and counts only (S18) */
+		if (x->full || !x->shell)
+		{
+			fputs(",\"passage\":", m);
+			put_or_null(m, h->passage);
+		}
+		fprintf(m, ",\"rule\":\"%s\",\"offset\":%llu,\"chapter\":", h->rule,
+		        (unsigned long long)h->off);
+		put_or_null(m, h->chapter);
+		fputs("}}\n", m);
+		ln_send(x, m, &b, &bl);
+	}
+	else
+	{
+		int newrow = !x->nrow || x->lastrow != h->row;
+		uint64_t lh = fnv(h->line, h->ll);
+		int newline = !x->lines++ || x->lastoff != h->off ||
+		              x->lasth != lh;
+
+		if (!x->nunit || x->lastunit != h->unit)
+		{
+			x->nunit++;
+			x->lastunit = h->unit;
+		}
+		if (newrow)
+		{
+			x->nrow++;
+			x->lastrow = h->row;
+		}
+		/* one line per source line (a Claude entry, a shell row); never
+		** for a shell <n> in light mode (S18) */
+		x->lastoff = h->off;
+		x->lasth = lh;
+		if (newline && (x->full || !x->shell) &&
+		    (b = mention_line(x, h)))
+		{
+			if (!x->mentioned++)
+			{
+				(void)sc_line(x, b, strlen(b));
+				free(b);
+			}
+			else
+			{
+				if (x->hn == XR_HELD)
+				{
+					free(x->held[x->h0]);
+					x->h0 = (x->h0 + 1) % XR_HELD;
+					x->hn--;
+				}
+				x->held[(x->h0 + x->hn++) % XR_HELD] = b;
+			}
+		}
+	}
+	/* light, --scope session: the first result ends the scan once its
+	** line (a shell: its row) is done, so a definition keeps its anchor's
+	** mention */
+	if (!x->full && !x->found)
+	{
+		x->found = 1;
+		x->foff = h->off;
+	}
+}
+
+void
+xr_scan_sink(struct xr_scan *x, struct xr_sink *k)
+{
+	k->hit = sc_hit;
+	k->ctx = x;
+}
+
+static void
+put_counts(FILE *m, uint64_t session)
+{
+	fprintf(m, "\"counts\":{\"session\":%llu,\"project\":0,"
+	        "\"project_sessions\":0,\"all\":null,\"all_sessions\":null}",
+	        (unsigned long long)session);
+}
+
+int
+xr_scan_tick(void *ctx, uint64_t bytes)
+{
+	struct xr_scan *x = ctx;
+	long long now = xr_now_ms();
+
+	x->bytes = x->base + bytes;
+	if (!x->stop && x->found)
+	{
+		x->stop = 1;
+		x->why = "first";
+	}
+	else if (!x->stop && !x->full && now - x->t0 >= x->budget)
+	{
+		x->stop = 1;
+		x->why = "budget";
+	}
+	else if (!x->stop && x->full && now - x->t0 >= 10000)
+	{
+		x->stop = 1;
+		x->why = "time";
+	}
+	/* one progress line per 250 ms window while the scan runs (R6) */
+	if (!x->stop && !x->hold && now - x->last >= 250)
+	{
+		char *b;
+		size_t bl;
+		FILE *m = ln_open(&b, &bl);
+
+		x->last += (now - x->last) / 250 * 250;
+		if (m)
+		{
+			fprintf(m, "{\"schema\":1,\"progress\":{\"files\":%llu,"
+			        "\"bytes\":%llu,\"partial\":true,",
+			        (unsigned long long)x->files + 1,
+			        (unsigned long long)x->bytes);
+			put_counts(m, x->nunit);
+			fputs("}}\n", m);
+			ln_send(x, m, &b, &bl);
+			(void)fflush(x->f);
+		}
+	}
+	return x->stop;
+}
+
+void
+xr_scan_file(struct xr_scan *x, uint64_t bytes, uint64_t too_long,
+             int partial, int per_row)
+{
+	char *b;
+	size_t bl, k;
+	FILE *m;
+	uint64_t count = per_row ? x->nrow : x->nunit;
+
+	x->files++;
+	if (x->found && !x->stop)
+	{
+		x->stop = 1;	/* a shell's first result, its row the last read */
+		x->why = "first";
+	}
+	if (x->stop && !x->shell && x->bytes >= x->base)
+		bytes = x->bytes - x->base;	/* stopped: what the ticks saw */
+	x->base += bytes;
+	x->bytes = x->base;
+	x->too_long += too_long;
+	for (k = 0; k < x->hn; k++)
+	{
+		char *l = x->held[(x->h0 + k) % XR_HELD];
+
+		(void)sc_line(x, l, strlen(l));
+		free(l);
+	}
+	x->hn = x->h0 = 0;
+	x->nunit = count;	/* the session's count, for done */
+	if (!(m = ln_open(&b, &bl)))
+		return;
+	fputs("{\"schema\":1,\"tally\":{\"session\":", m);
+	xr_put_str(m, x->session);
+	fprintf(m, ",\"live\":%s,\"project\":", x->live ? "true" : "false");
+	xr_put_str(m, x->project);
+	/* partial: the per-file range cap cut it (3.4); a stop says so in done */
+	fprintf(m, ",\"count\":%llu,\"definitions\":%d,\"partial\":%s}}\n",
+	        (unsigned long long)count, x->ndefs, partial ? "true" : "false");
+	ln_send(x, m, &b, &bl);
+	if (partial && !x->why)
+		x->why = "range";
+}
+
+int
+xr_scan_first(struct xr_scan *x, const char *session_id, int shape,
+              const char *text)
+{
+	FILE *f = x->f;
+	char *b;
+	size_t bl;
+	FILE *m = ln_open(&b, &bl);
+	int rc;
+
+	if (!m)
+		return -1;
+	fputs("{\"schema\":1,\"first\":{\"session\":", m);
+	xr_put_str(m, x->session);
+	fputs(",\"session_id\":", m);
+	xr_put_str(m, session_id);
+	fputs(",\"key\":", m);
+	xr_put_str(m, x->key);
+	fprintf(m, ",\"shape\":\"%s\",\"text\":", xr_shape_name[shape]);
+	xr_put_str(m, text);
+	fputs(",\"project\":", m);
+	xr_put_str(m, x->project);
+	fprintf(m, ",\"mode\":\"%s\",\"scope\":\"session\",\"budget_ms\":",
+	        x->full ? "full" : "light");
+	if (x->full)
+		fputs("null", m);
+	else
+		fprintf(m, "%d", x->budget);
+	fprintf(m, ",\"elapsed_ms\":%lld}}\n", xr_now_ms() - x->t0);
+	if (fclose(m) != 0)
+	{
+		free(b);
+		return -1;
+	}
+	x->hold = 0;
+	rc = sc_line(x, b, strlen(b));
+	free(b);
+	(void)f;
+	return rc == 0 && fflush(x->f) == 0 ? 0 : -1;
+}
+
+void
+xr_scan_hold(struct xr_scan *x)
+{
+	x->hold = 1;
+}
+
+/* After `first`: what was held goes out (it was counted when held). */
+int
+xr_scan_release(struct xr_scan *x)
+{
+	if (x->hm && fclose(x->hm) == 0 && x->hb)
+		fwrite(x->hb, 1, x->hl, x->f);
+	x->hm = NULL;
+	x->hold = 0;
+	return fflush(x->f) == 0 && !ferror(x->f) ? 0 : -1;
+}
+
+int
+xr_scan_done(struct xr_scan *x)
+{
+	int partial = x->stop || x->why != NULL;
+
+	fprintf(x->f, "{\"schema\":1,\"done\":true,\"partial\":%s,",
+	        partial ? "true" : "false");
+	put_counts(x->f, x->nunit);
+	fputs(",\"why\":", x->f);
+	put_or_null(x->f, partial ? x->why : NULL);
+	fprintf(x->f, ",\"files\":%llu,\"bytes\":%llu,\"lines_too_long\":%llu}\n",
+	        (unsigned long long)x->files, (unsigned long long)x->bytes,
+	        (unsigned long long)x->too_long);
+	return fflush(x->f) == 0 && !ferror(x->f) ? 0 : -1;
 }
 
 /* ---- Claude: the assembler ------------------------------------------------- */
 
 #define XR_THREADS 1024
+#define XR_ID_MAX 64
+
+/* An open call as the refs see it: its tier and, for Bash, its command. */
+enum { RC_BASH, RC_OTHER, RC_SEARCH, RC_CARD };
+struct rcall
+{
+	char id[XR_ID_MAX + 1];
+	int kind;
+	char *cmd;		/* RC_BASH: <= XR_BASH_MAX bytes */
+	size_t cl;
+	char chapter[48];	/* the call's chapter anchor, "" for none */
+	uint64_t off;
+	long long at;
+};
 
 struct pend
 {
@@ -834,6 +3379,15 @@ struct xr_claude
 	/* the line being decoded */
 	uint64_t off;
 	long long at;
+	/* refs (#135): rk.hit NULL for chapters only */
+	struct xr_sink rk;
+	uint64_t ino, unit, too_long;
+	int (*tick)(void *ctx, uint64_t bytes);
+	void *tctx;
+	int halt;
+	struct rcall *calls;	/* the refs ring: XR_CALLS open calls, oldest
+				** first, apart from pend (3.6, QA A2) */
+	int ncalls;
 };
 
 enum { B_PROMPT, B_IMAGE, B_STEP };
@@ -858,6 +3412,9 @@ xr_claude_free(struct xr_claude *d)
 	for (k = 0; k < d->nthreads; k++)
 		free(d->threads[k]);
 	free(d->threads);
+	for (k = 0; k < d->ncalls; k++)
+		free(d->calls[k].cmd);
+	free(d->calls);
 	xr_chapters_free(&d->ch);
 	free(d);
 }
@@ -909,8 +3466,6 @@ main_block(struct xr_claude *d, int b, const char *kind, const char *title)
 ** the decode is checked again, QA 1.45.1 NIT-2) and its 64-bit FNV-1a in
 ** hex. Pairing and thread identity need only equality; a long id is never
 ** held whole (QA 1.44 MED-2). */
-#define XR_ID_MAX 64
-
 static const char *
 id_key(const char *id, char key[XR_ID_MAX + 1])
 {
@@ -1095,21 +3650,472 @@ texts(const struct json_parser *p, int arr, size_t *n)
 	return o;
 }
 
+/* ---- Claude: refs (v2.1 3.1, 3.6; spec 7.2) -------------------------------- */
+
+/* The open chapter's anchor, as xr_claude_end will write it ("" for none). */
+static void
+ch_anchor(struct xr_claude *d, char out[48])
+{
+	struct xr_chapter *x = cur(d);
+
+	out[0] = '\0';
+	if (x)
+		snprintf(out, 48, "f%llx:%llu", (unsigned long long)d->ino,
+		         (unsigned long long)x->offset);
+}
+
+static void
+rm_claude(struct xr_claude *d, struct remit *r, const char *chapter)
+{
+	memset(r, 0, sizeof *r);
+	r->k = &d->rk;
+	r->cwd = d->cwd[0] ? d->cwd : NULL;
+	r->off = d->off;
+	r->at = d->at;
+	r->chapter = chapter && chapter[0] ? chapter : NULL;
+	r->ctr = &d->unit;
+	r->left = XR_SPANS;	/* shortcut: 3.6's cap, counted per field group */
+}
+
+/* s[0..n) clipped to cap scalars, scanned in mode under r (a NUL-ended copy:
+** rm_hit reads to the line's end). */
+static void
+rm_clip(struct remit *r, const char *s, size_t n, size_t cap, int mode)
+{
+	size_t l = cap ? clip(s, n, cap) : n;
+	char *b = malloc(l + 1);
+
+	if (!b)
+		return;
+	memcpy(b, s, l);
+	b[l] = '\0';
+	rm_scan(r, b, l, mode);
+	free(b);
+}
+
+/* One block's text to the sink, in the open chapter. */
+static void
+refs_text(struct xr_claude *d, const char *s, size_t n, size_t cap, int mode)
+{
+	struct remit r;
+	char a[48];
+
+	if (!d->rk.hit || !s)
+		return;
+	ch_anchor(d, a);
+	rm_claude(d, &r, a);
+	rm_clip(&r, s, n, cap, mode);
+	free(r.cov);
+}
+
+/* A notice's text: stripWrapperTags (</?[a-z][a-z_-]*>), in place. */
+static size_t
+strip_tags(char *s, size_t n)
+{
+	size_t i = 0, k = 0, j;
+
+	while (i < n)
+	{
+		j = i + 1 + (i + 1 < n && s[i + 1] == '/');
+		if (s[i] == '<' && j < n && A_LO((unsigned char)s[j]))
+		{
+			for (j++; j < n && (A_LO((unsigned char)s[j]) || s[j] == '_' ||
+			                    s[j] == '-'); j++)
+				;
+			if (j < n && s[j] == '>')
+			{
+				i = j + 1;
+				continue;
+			}
+		}
+		s[k++] = s[i++];
+	}
+	return k;
+}
+
+static struct rcall *
+rc_find(struct xr_claude *d, const char *id)
+{
+	int k;
+
+	for (k = 0; k < d->ncalls; k++)
+		if (!strcmp(d->calls[k].id, id))
+			return &d->calls[k];
+	return NULL;
+}
+
+static void
+rc_drop(struct xr_claude *d, struct rcall *c)
+{
+	int k = (int)(c - d->calls);
+
+	free(c->cmd);
+	memmove(c, c + 1, (size_t)(d->ncalls - k - 1) * sizeof *c);
+	d->ncalls--;
+}
+
+/* A call joins the refs ring (a repeated id replaces its older call; past
+** XR_CALLS the oldest goes). */
+static struct rcall *
+rc_push(struct xr_claude *d, const char *id, int kind)
+{
+	char kb[XR_ID_MAX + 1];
+	struct rcall *c;
+
+	id = id_key(id, kb);
+	if ((c = rc_find(d, id)))
+		rc_drop(d, c);
+	if (!d->calls && !(d->calls = calloc(XR_CALLS, sizeof *d->calls)))
+		return NULL;
+	if (d->ncalls == XR_CALLS)
+		rc_drop(d, &d->calls[0]);
+	c = &d->calls[d->ncalls++];
+	memset(c, 0, sizeof *c);
+	snprintf(c->id, sizeof c->id, "%s", id);
+	c->kind = kind;
+	c->off = d->off;
+	c->at = d->at;
+	ch_anchor(d, c->chapter);
+	return c;
+}
+
+static int
+str_cmp(const void *a, const void *b)
+{
+	return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+/* A generic card's fields: the input's keys sorted, the first 8, each value
+** (its last, as a dictionary keeps it) prefixed to 240 scalars in code.
+** shortcut: a nested value is its raw JSON text, not Prosper's rendering. */
+static void
+refs_card(struct xr_claude *d, const struct json_parser *p, int in)
+{
+	char *keys[64], a[48];
+	int nk = 0, i, k;
+	struct remit r;
+
+	if (in < 0)
+		return;
+	for (i = in + 1; i < p->tok[in].next && i + 1 < p->ntok && nk < 64;
+	     i = p->tok[i + 1].next)
+	{
+		size_t l;
+		char *s = j_str(p, i, &l);
+
+		for (k = 0; s && k < nk && strcmp(keys[k], s); k++)
+			;
+		if (s && k == nk)
+			keys[nk++] = s;
+		else
+			free(s);
+	}
+	qsort(keys, (size_t)nk, sizeof *keys, str_cmp);
+	ch_anchor(d, a);
+	rm_claude(d, &r, a);
+	for (k = 0; k < nk; k++)
+	{
+		int v = k < 8 ? j_field(p, in, keys[k]) : -1;
+
+		if (v >= 0 && p->tok[v].kind == JSON_STRING)
+		{
+			size_t l;
+			char *s = j_str(p, v, &l);
+
+			if (s)
+				rm_clip(&r, s, l, XR_FIELD_CAP, XR_CODE);
+			free(s);
+		}
+		else if (v >= 0 && !j_null(p, v))
+			rm_clip(&r, p->text + p->tok[v].start,
+			        (size_t)(p->tok[v].end - p->tok[v].start),
+			        XR_FIELD_CAP, XR_CODE);
+		free(keys[k]);
+	}
+	free(r.cov);
+}
+
+/* A tool_use or server_tool_use (3.6's tiers): Bash shows its command, an
+** edit/read its path, a search its rows, anything else a generic card. */
+static void
+refs_call(struct xr_claude *d, const struct json_parser *p, int i)
+{
+	char *id = k_str(p, i, A_ID, NULL), *name = k_str(p, i, A_NAME, NULL);
+	int in = k_obj(p, i, A_INPUT), v;
+	char *s = NULL, a[48];
+	size_t l = 0;
+	struct rcall *c;
+	struct remit r;
+
+	if (!name)
+		name = strdup("");
+	if (name && !strcmp(name, "Bash") &&
+	    (v = j_field(p, in, "command")) >= 0 &&
+	    p->tok[v].kind == JSON_STRING && (s = j_str(p, v, &l)) &&
+	    !blank(s, l))
+	{
+		ch_anchor(d, a);
+		rm_claude(d, &r, a);
+		rm_clip(&r, s, l, 0, XR_CODE);
+		free(r.cov);
+		if (id && (c = rc_push(d, id, RC_BASH)))
+		{
+			c->cl = u8_cut(s, l > XR_BASH_MAX ? XR_BASH_MAX : l);
+			if ((c->cmd = malloc(c->cl + 1)))
+			{
+				memcpy(c->cmd, s, c->cl);
+				c->cmd[c->cl] = '\0';
+			}
+		}
+	}
+	else if (name && (!strcmp(name, "Edit") || !strcmp(name, "MultiEdit") ||
+	                  !strcmp(name, "Write") || !strcmp(name, "Read")) &&
+	         (v = j_field(p, in, "file_path")) >= 0 &&
+	         p->tok[v].kind == JSON_STRING && (s = j_str(p, v, &l)) &&
+	         !blank(s, l) &&
+	         (strcmp(name, "Write") || j_field(p, in, "content") >= 0) &&
+	         (strcmp(name, "Edit") || (j_field(p, in, "old_string") >= 0 &&
+	                                   j_field(p, in, "new_string") >= 0)))
+	{
+		/* the header's path: one file ref (2.5) */
+		struct xr_span sp;
+		char norm[XR_KEY_MAX + 1];
+		size_t nl;
+
+		memset(&sp, 0, sizeof sp);
+		ch_anchor(d, a);
+		rm_claude(d, &r, a);
+		r.text = s;
+		sp.rule = 'F';
+		sp.e = l;
+		if ((nl = path_norm(s, l, r.cwd, norm, sizeof norm)) &&
+		    span_key(&sp, XR_FILE, norm, nl, 0))
+			rm_hit(&r, &sp, NULL, NULL, NULL);
+		if (id)
+			(void)rc_push(d, id, RC_OTHER);
+	}
+	else if (name && (!strcmp(name, "Grep") || !strcmp(name, "Glob")) &&
+	         (v = j_field(p, in, "pattern")) >= 0 &&
+	         p->tok[v].kind == JSON_STRING &&
+	         p->tok[v].end > p->tok[v].start)
+	{
+		if (id)
+			(void)rc_push(d, id, RC_SEARCH);
+	}
+	else
+	{
+		refs_card(d, p, in);
+		if (id)
+			(void)rc_push(d, id, RC_CARD);
+	}
+	free(s);
+	free(id);
+	free(name);
+}
+
+/* outputText: toolUseResult's stdout (+ stderr, + [interrupted]) before the
+** tool_result's own text (QA A1). malloc'd, NULL for none. */
+static char *
+output_text(const struct json_parser *p, int i, int extra, size_t *n)
+{
+	int c, v;
+	char *o, *e = NULL;
+	size_t ol, el = 0;
+
+	*n = 0;
+	if ((v = j_field(p, extra, "stdout")) >= 0 &&
+	    p->tok[v].kind == JSON_STRING && (o = j_str(p, v, &ol)))
+	{
+		int intr = (v = j_field(p, extra, "interrupted")) >= 0 &&
+		           p->tok[v].kind == JSON_PRIMITIVE &&
+		           p->text[p->tok[v].start] == 't';
+		char *no;
+
+		if ((v = j_field(p, extra, "stderr")) >= 0 &&
+		    p->tok[v].kind == JSON_STRING)
+			e = j_str(p, v, &el);
+		if ((no = realloc(o, ol + el + 16)))
+		{
+			o = no;
+			if (e && el)
+			{
+				o[ol++] = '\n';
+				memcpy(o + ol, e, el);
+				ol += el;
+			}
+			if (intr)
+			{
+				memcpy(o + ol, "\n[interrupted]", 14);
+				ol += 14;
+			}
+			o[ol] = '\0';
+		}
+		free(e);
+		*n = ol;
+		return o;
+	}
+	c = j_get(p, i, A_CONTENT);
+	if (c >= 0 && p->tok[c].kind == JSON_STRING)
+		return j_str(p, c, n);
+	if (c >= 0 && p->tok[c].kind == JSON_ARRAY)
+		return texts(p, c, n);
+	return NULL;
+}
+
+/* A search card's rows: extra.filenames, else extra.content or the text
+** split at "\n", empties dropped; the first 20, each prefixed to 240. */
+static void
+refs_rows(struct xr_claude *d, struct remit *r, const struct json_parser *p,
+          int extra, const char *text, size_t tl)
+{
+	int f = j_field(p, extra, "filenames"), v, rows = 0;
+	char *s = NULL;
+	size_t l = 0, i, e;
+
+	(void)d;
+	if (f >= 0 && p->tok[f].kind == JSON_ARRAY)
+	{
+		for (v = f + 1; v < p->tok[f].next && rows < 20; v = p->tok[v].next)
+			if (p->tok[v].kind == JSON_STRING && (s = j_str(p, v, &l)))
+			{
+				if (l)
+				{
+					rm_clip(r, s, l, XR_FIELD_CAP, XR_CODE);
+					rows++;
+				}
+				free(s);
+			}
+		return;
+	}
+	if ((v = j_field(p, extra, "content")) >= 0 &&
+	    p->tok[v].kind == JSON_STRING && (s = j_str(p, v, &l)))
+	{
+		text = s;
+		tl = l;
+	}
+	for (i = 0; text && i < tl && rows < 20; i = e + 1)
+	{
+		e = line_end(text, tl, i);
+		if (e > i)
+		{
+			rm_clip(r, text + i, e - i, XR_FIELD_CAP, XR_CODE);
+			rows++;
+		}
+	}
+	free(s);
+}
+
+/* A tool_result (3.6): paired, its call's tier decides what is read and
+** what may define, in the call's chapter; an orphan is a "Tool result"
+** card, mentions only. Before tool_result(): the pairing is still open. */
+struct rres
+{
+	struct rcall c;		/* a copy; c.cmd owned */
+	int paired;
+};
+
+static void
+refs_pair(struct xr_claude *d, const char *id, struct rres *rr)
+{
+	char kb[XR_ID_MAX + 1];
+	struct rcall *c;
+
+	memset(rr, 0, sizeof *rr);
+	if (!d->rk.hit || !id || !(c = rc_find(d, id_key(id, kb))))
+		return;
+	rr->c = *c;
+	c->cmd = NULL;
+	rc_drop(d, c);
+	rr->paired = 1;
+}
+
+static void
+refs_result(struct xr_claude *d, const struct json_parser *p, int i, int err,
+            struct rres *rr)
+{
+	int extra = k_obj(p, 0, (const char *const[]){ "toolUseResult", 0 });
+	size_t n, bl;
+	char *t = output_text(p, i, extra, &n), a[48], *body;
+	struct remit r, cr;
+	struct dsrc ds;
+
+	memset(&r, 0, sizeof r);
+	if (!d->rk.hit)
+		goto out;
+	if (!rr->paired)
+		ch_anchor(d, a);
+	rm_claude(d, &r, rr->paired ? rr->c.chapter : a);
+	if (rr->paired && rr->c.kind == RC_OTHER)
+		goto out;
+	if (rr->paired && rr->c.kind == RC_SEARCH)
+	{
+		refs_rows(d, &r, p, extra, t, t ? n : 0);
+		goto out;
+	}
+	if (!t)
+		goto out;
+	bl = clip(t, n, XR_OUTPUT_CAP);
+	t[bl] = '\0';
+	body = t;
+	rm_scan(&r, body, bl, XR_CODE);
+	if (!rr->paired)
+		goto out;
+	memset(&ds, 0, sizeof ds);
+	ds.out = body;
+	ds.ol = bl;
+	ds.failed = err;
+	ds.d2ok = 1;
+	ds.cwd = r.cwd;
+	memset(&cr, 0, sizeof cr);
+	if (rr->c.kind == RC_BASH && rr->c.cmd)
+	{
+		ds.bash = 1;
+		ds.cmd = rr->c.cmd;
+		ds.cl = rr->c.cl;
+		/* the command's code spans, for a D3 anchor's one mention */
+		rm_claude(d, &cr, rr->c.chapter);
+		cr.off = rr->c.off;
+		cr.at = rr->c.at;
+		cr.left = 0;
+		cr.text = ds.cmd;
+		(void)grammar(ds.cmd, ds.cl, XR_CODE, R_CODE, cr.cwd, cov_span, &cr);
+	}
+	defs_emit(&ds, &r, ds.bash ? &cr : NULL);
+	free(cr.cov);
+out:
+	free(r.cov);
+	free(t);
+	free(rr->c.cmd);
+}
+
 /* A user text block: a slash command, else a prompt; blank is hidden. */
 static void
 user_text(struct xr_claude *d, const char *agent, char *s, size_t n)
 {
-	char title[XR_TITLE_MAX * 4 + 1];
+	char title[XR_TITLE_MAX * 4 + 1], *u = NULL;
+	size_t ul = 0, tl = n;
+	const char *t, *args;
 
 	if (command(s, n, title, sizeof title))
 	{
 		block(d, agent, B_PROMPT, "command", title);
+		/* its args, prefix(240), as prose (3.6) */
+		t = trim(s, &tl);
+		if (d->rk.hit && (args = tag(t, tl, "command-args", &ul)))
+			refs_text(d, args, ul, XR_FIELD_CAP, XR_PROSE);
 		return;
 	}
 	if (blank(s, n))
 		return;
-	xr_title(s, unwrap(s, n), title, sizeof title);	/* s is spent */
+	if (d->rk.hit && (u = malloc(n + 1)))
+	{
+		memcpy(u, s, n);
+		ul = unwrap(u, n, XR_TEXT_CAP);
+	}
+	xr_title(s, unwrap(s, n, 0), title, sizeof title);	/* s is spent */
 	block(d, agent, B_PROMPT, "prompt", title);
+	refs_text(d, u, ul, XR_TEXT_CAP, XR_PROSE);
+	free(u);
 }
 
 static void
@@ -1142,8 +4148,9 @@ entry_user(struct xr_claude *d, const struct json_parser *p, const char *ag)
 		s = c >= 0 && p->tok[c].kind == JSON_STRING ? j_str(p, c, &n)
 		    : c >= 0 && p->tok[c].kind == JSON_ARRAY ? texts(p, c, &n)
 		    : NULL;
-		free(s);
 		compaction(d, ag, n > 0);
+		refs_text(d, s, n, XR_TEXT_CAP, XR_PROSE);
+		free(s);
 		return;
 	}
 	if (c >= 0 && p->tok[c].kind == JSON_STRING)
@@ -1202,8 +4209,12 @@ entry_user(struct xr_claude *d, const struct json_parser *p, const char *ag)
 		else if (t && !strcmp(t, "tool_result"))
 		{
 			char *id = k_str(p, i, A_TUID, NULL);
+			struct rres rr;
 
+			refs_pair(d, id, &rr);
 			tool_result(d, ag, id, k_bool(p, i, A_ERR));
+			if (d->rk.hit)
+				refs_result(d, p, i, k_bool(p, i, A_ERR), &rr);
 			free(id);
 		}
 		else
@@ -1224,7 +4235,10 @@ entry_assistant(struct xr_claude *d, const struct json_parser *p,
 	if (c >= 0 && p->tok[c].kind == JSON_STRING)
 	{
 		if ((s = j_str(p, c, &n)) && !blank(s, n))
+		{
 			block(d, ag, B_STEP, NULL, NULL);
+			refs_text(d, s, n, XR_TEXT_CAP, XR_MD);
+		}
 		free(s);
 		return;
 	}
@@ -1244,7 +4258,10 @@ entry_assistant(struct xr_claude *d, const struct json_parser *p,
 		if (t && !strcmp(t, "text"))
 		{
 			if ((s = k_str(p, i, A_TEXT, &n)) && !blank(s, n))
+			{
 				block(d, ag, B_STEP, NULL, NULL);
+				refs_text(d, s, n, XR_TEXT_CAP, XR_MD);
+			}
 			free(s);
 		}
 		else if (t && (!strcmp(t, "thinking") ||
@@ -1268,6 +4285,8 @@ entry_assistant(struct xr_claude *d, const struct json_parser *p,
 			    p->tok[pat].end > p->tok[pat].start)
 				quiet = 1;
 			tool_use(d, ag, id, quiet);
+			if (d->rk.hit)
+				refs_call(d, p, i);
 			free(id);
 			free(name);
 		}
@@ -1367,7 +4386,19 @@ xr_claude_line(struct xr_claude *d, const char *line, size_t len,
 		if (sub && !strcmp(sub, "compact_boundary"))
 			compaction(d, ag, 0);
 		else if (!sub || !listed(noise_sub, sub))
+		{
 			block(d, ag, B_STEP, NULL, NULL);	/* notice or card */
+			/* a notice: wrapper tags out, trimmed, prefix(6000) */
+			if (d->rk.hit && (s = k_str(&p, 0, A_CONTENT, &n)))
+			{
+				const char *t;
+
+				n = strip_tags(s, n);
+				t = trim(s, &n);
+				refs_text(d, t, n, XR_TEXT_CAP, XR_PROSE);
+				free(s);
+			}
+		}
 		free(sub);
 	}
 	else if (type && !strcmp(type, "attachment"))
@@ -1461,7 +4492,10 @@ read_range(struct xr_claude *d, int fd, uint64_t from, uint64_t to, int mid,
 			if (drop)
 				drop = 0;
 			else if (skipping)
+			{
 				xr_claude_line(d, "", 0, start, 1);
+				d->too_long++;
+			}
 			else
 			{
 				size_t k;
@@ -1477,6 +4511,10 @@ read_range(struct xr_claude *d, int fd, uint64_t from, uint64_t to, int mid,
 			fill = 0;
 			i += seg + 1;
 			start = pos + i;
+			/* --ref: the budget, the output cap, light's first result */
+			if (d->tick && (d->halt = d->tick(d->tctx, start - from +
+			                                     (mid ? xr_lim.head : 0))))
+				return 0;
 		}
 		pos += (uint64_t)got;
 	}
@@ -1500,7 +4538,7 @@ xr_claude_read(struct xr_claude *d, int fd, uint64_t size, int *capped)
 		{
 			*capped = 1;
 			rc = read_range(d, fd, 0, xr_lim.head, 0, buf, acc);
-			if (rc == 0)
+			if (rc == 0 && !d->halt)
 				rc = read_range(d, fd, size - xr_lim.tail, size, 1,
 				                buf, acc);
 		}
@@ -1513,6 +4551,22 @@ xr_claude_read(struct xr_claude *d, int fd, uint64_t size, int *capped)
 	free(buf);
 	free(acc);
 	return rc;
+}
+
+void
+xr_claude_refs(struct xr_claude *d, const struct xr_sink *k, uint64_t ino,
+               int (*tick)(void *ctx, uint64_t bytes), void *tctx)
+{
+	d->rk = *k;
+	d->ino = ino;
+	d->tick = tick;
+	d->tctx = tctx;
+}
+
+uint64_t
+xr_claude_too_long(const struct xr_claude *d)
+{
+	return d->too_long;
 }
 
 /* ---- shell ring ------------------------------------------------------------ */
@@ -1586,8 +4640,8 @@ xr_shell_begin(struct xr_shell *s, struct xr_chapters *out)
 	s->ord = -1;
 }
 
-void
-xr_shell_feed(struct xr_shell *s, const struct xr_rec *x)
+static void
+sh_feed(struct xr_shell *s, const struct xr_rec *x)
 {
 	char m;
 
@@ -1688,6 +4742,280 @@ xr_shell_feed(struct xr_shell *s, const struct xr_rec *x)
 		s->st = S_NONE;
 		s->ord = -1;
 	}
+}
+
+static void sh_refs_pre(struct xr_shell *s, const struct xr_rec *x);
+static void sh_refs_post(struct xr_shell *s, const struct xr_rec *x);
+
+void
+xr_shell_feed(struct xr_shell *s, const struct xr_rec *x)
+{
+	if (s->refs)
+		sh_refs_pre(s, x);
+	sh_feed(s, x);
+	if (s->refs)
+		sh_refs_post(s, x);
+}
+
+/* ---- shell: refs (7.3) ----------------------------------------------------- */
+
+struct xr_shref
+{
+	struct xr_sink k;
+	char *cwd;
+	uint64_t unit;		/* the block: bumped at a primary A and a gap */
+	/* the open logical line: rows joined through RING_F_CONT */
+	char *l;
+	size_t ll;
+	uint64_t lseq;
+	uint32_t lt;
+	int lkind, open;
+	/* the paired block's output (<= XR_D2_MAX) and its lines */
+	char *ob;
+	size_t obl;
+	int over;
+	size_t *opos;
+	uint64_t *oseq;
+	size_t on, ocap;
+	char cmd[XR_CMD_MAX + 1];
+	size_t cl;
+	uint64_t cseq;
+	char chapter[32];
+};
+
+int
+xr_shell_refs(struct xr_shell *s, const struct xr_sink *k, const char *cwd)
+{
+	struct xr_shref *r = calloc(1, sizeof *r);
+
+	if (!r || !(r->l = malloc(XR_SH_LINE + 1)) ||
+	    !(r->ob = malloc(XR_D2_MAX + 1)) ||
+	    !(r->cwd = strdup(cwd && cwd[0] == '/' ? cwd : "")))
+	{
+		if (r)
+		{
+			free(r->l);
+			free(r->ob);
+		}
+		free(r);
+		return -1;
+	}
+	r->k = *k;
+	s->refs = r;
+	return 0;
+}
+
+static void
+sh_block_reset(struct xr_shref *r)
+{
+	r->obl = r->on = 0;
+	r->over = 0;
+	r->cl = 0;
+	r->chapter[0] = '\0';
+}
+
+/* The open line out: its mentions in code, and a paired block's output
+** row into the block buffer. */
+static void
+sh_flush(struct xr_shell *s)
+{
+	struct xr_shref *r = s->refs;
+	struct remit m;
+	int inblock = s->st == S_OUTPUT && s->ord >= 0;
+
+	if (!r->open)
+		return;
+	r->open = 0;
+	r->l[r->ll] = '\0';
+	memset(&m, 0, sizeof m);
+	m.k = &r->k;
+	m.cwd = r->cwd[0] ? r->cwd : NULL;
+	m.off = m.row = r->lseq;
+	m.at = r->lt;
+	m.unit = r->unit;
+	m.left = -1;
+	/* shortcut: a mention's chapter is its block's for output rows of a
+	** paired block, else null */
+	m.chapter = inblock && r->lkind == RING_K_OUTPUT && r->chapter[0]
+	            ? r->chapter : NULL;
+	rm_scan(&m, r->l, r->ll, XR_CODE);
+	free(m.cov);
+	if (!inblock || r->lkind != RING_K_OUTPUT || r->over)
+		return;
+	if (r->obl + r->ll + 1 > XR_D2_MAX)
+	{
+		r->over = 1;	/* past 256 KB: what is kept stands, D2 off */
+		return;
+	}
+	if (r->on == r->ocap)
+	{
+		size_t nc = r->ocap ? r->ocap * 2 : 64;
+		size_t *np = realloc(r->opos, nc * sizeof *np);
+		uint64_t *ns;
+
+		if (np)
+			r->opos = np;
+		if (!np || !(ns = realloc(r->oseq, nc * sizeof *ns)))
+		{
+			r->over = 1;
+			return;
+		}
+		r->oseq = ns;
+		r->ocap = nc;
+	}
+	r->opos[r->on] = r->obl;
+	r->oseq[r->on++] = r->lseq;
+	memcpy(r->ob + r->obl, r->l, r->ll);
+	r->obl += r->ll;
+	r->ob[r->obl++] = '\n';
+}
+
+/* A row record joins the open line (RING_F_CONT) or starts one. */
+static void
+sh_row(struct xr_shell *s, const struct xr_rec *x)
+{
+	struct xr_shref *r = s->refs;
+	size_t l = x->len;
+
+	if (!(x->flags & RING_F_CONT) || !r->open || r->ll + l > XR_SH_LINE)
+	{
+		sh_flush(s);	/* shortcut: a row past the 64 KiB line starts the
+				** next, it is not split */
+		r->open = 1;
+		r->ll = 0;
+		r->lseq = x->seq;
+		r->lt = x->t;
+		r->lkind = x->kind;
+	}
+	if (l > XR_SH_LINE - r->ll)
+		l = u8_cut(x->text, XR_SH_LINE - r->ll);
+	memcpy(r->l + r->ll, x->text, l);
+	r->ll += l;
+}
+
+/* D on a paired block: its definitions (v2.1 4.2-4.3 over 7.3's block). */
+static void
+sh_defs(struct xr_shell *s, const struct xr_rec *x)
+{
+	struct xr_shref *r = s->refs;
+	struct dsrc ds;
+	struct remit o, c;
+	int ex = (x->flags & RING_F_EXIT) && x->len > 2;
+
+	if (!r->cl || blank(r->cmd, r->cl))
+		return;
+	r->ob[r->obl] = '\0';
+	r->cmd[r->cl] = '\0';
+	memset(&ds, 0, sizeof ds);
+	ds.out = r->ob;
+	ds.ol = r->obl;
+	ds.cmd = r->cmd;
+	ds.cl = r->cl;
+	ds.bash = 1;
+	ds.failed = ex && mark_exit(x) != 0;
+	ds.noexit = !(x->flags & RING_F_EXIT);
+	ds.d2ok = !r->over;
+	ds.cwd = r->cwd[0] ? r->cwd : NULL;
+	memset(&o, 0, sizeof o);
+	o.k = &r->k;
+	o.cwd = ds.cwd;
+	o.at = s->at;
+	o.chapter = r->chapter[0] ? r->chapter : NULL;
+	o.unit = r->unit;
+	o.left = -1;
+	o.lpos = r->opos;
+	o.lseq = r->oseq;
+	o.nl = r->on;
+	c = o;
+	c.nl = 0;
+	c.off = c.row = r->cseq;
+	/* the code spans the rows already counted, for the anchors' one mention */
+	o.text = ds.out;
+	(void)grammar(ds.out, ds.ol, XR_CODE, R_CODE, ds.cwd, cov_span, &o);
+	c.text = ds.cmd;
+	(void)grammar(ds.cmd, ds.cl, XR_CODE, R_CODE, ds.cwd, cov_span, &c);
+	defs_emit(&ds, &o, &c);
+	free(o.cov);
+	free(c.cov);
+}
+
+/* Before the state machine: rows to lines, marks and gaps flush; after it
+** (post), the block's bookkeeping. */
+static void
+sh_refs_pre(struct xr_shell *s, const struct xr_rec *x)
+{
+	struct xr_shref *r = s->refs;
+
+	if (x->kind == RING_K_PROMPT || x->kind == RING_K_INPUT ||
+	    x->kind == RING_K_OUTPUT)
+	{
+		sh_row(s, x);
+		return;
+	}
+	sh_flush(s);
+	if (x->kind == RING_K_GAP)
+	{
+		r->unit++;
+		sh_block_reset(r);
+	}
+	else if (x->kind == RING_K_MARK && x->len == 1 && x->text[0] == 'A' &&
+	         s->st != S_PROMPT)
+	{
+		r->unit++;	/* a new primary prompt, not a redraw */
+		sh_block_reset(r);
+	}
+	else if (x->kind == RING_K_MARK && x->len && x->text[0] == 'D' &&
+	         (x->len == 1 || x->text[1] == ';') && s->st == S_OUTPUT &&
+	         s->ord >= 0)
+		sh_defs(s, x);
+}
+
+static void
+sh_refs_post(struct xr_shell *s, const struct xr_rec *x)
+{
+	struct xr_shref *r = s->refs;
+
+	if (x->kind != RING_K_MARK || !x->len)
+		return;
+	if (x->text[0] == 'C' && s->st == S_OUTPUT && s->ord >= 0)
+	{
+		const char *c = x->len > 2 ? x->text + 2 : s->cmd;
+		size_t l = x->len > 2 ? x->len - 2 : s->cl;
+
+		if (x->len > 2 && blank(c, l))
+		{
+			c = s->cmd;
+			l = s->cl;
+		}
+		if (l > XR_CMD_MAX)
+			l = u8_cut(c, XR_CMD_MAX);
+		memcpy(r->cmd, c, l);
+		r->cl = l;
+		r->cseq = x->seq;
+		r->obl = r->on = 0;
+		r->over = 0;
+		snprintf(r->chapter, sizeof r->chapter, "s%llu",
+		         (unsigned long long)s->aseq);
+	}
+	else if (s->st == S_NONE)
+		sh_block_reset(r);	/* an orphan, a forged C, a D: nothing held */
+}
+
+void
+xr_shell_end(struct xr_shell *s)
+{
+	struct xr_shref *r = s->refs;
+
+	if (!r)
+		return;
+	sh_flush(s);
+	free(r->l);
+	free(r->ob);
+	free(r->opos);
+	free(r->oseq);
+	free(r->cwd);
+	free(r);
+	s->refs = NULL;
 }
 
 void
@@ -1796,6 +5124,46 @@ put_chapter(FILE *m, const struct xr_chapter *c, uint64_t i, int comma)
 	        c->error ? "true" : "false");
 }
 
+static const struct xr_index *ref_sort_x;
+
+static int
+ref_cmp(const void *pa, const void *pb)
+{
+	const struct xr_ent *a = &ref_sort_x->v[*(const size_t *)pa];
+	const struct xr_ent *b = &ref_sort_x->v[*(const size_t *)pb];
+	uint64_t ca = ix_count(ref_sort_x, a), cb = ix_count(ref_sort_x, b);
+
+	if (ca != cb)
+		return ca > cb ? -1 : 1;
+	return a->first < b->first ? -1 : a->first > b->first;
+}
+
+/* One ref (3.2): count descending, then first appearance. */
+static void
+put_ref(FILE *m, const struct xr_index *x, const struct xr_ent *e,
+        const char *project, int comma)
+{
+	uint64_t c = ix_count(x, e);
+
+	fputs(comma ? ",{\"key\":" : "{\"key\":", m);
+	xr_put_str(m, e->key);
+	fprintf(m, ",\"shape\":\"%s\",\"text\":", xr_shape_name[e->shape]);
+	xr_put_str(m, strchr(e->key, ':') + 1);
+	if (e->shape == XR_COMMIT)
+	{
+		fputs(",\"full\":", m);
+		xr_put_str(m, e->full[0] ? e->full : strchr(e->key, ':') + 1);
+	}
+	fputs(",\"project\":", m);
+	xr_put_str(m, project);
+	fprintf(m, ",\"count\":%llu,\"defined\":%s,\"definitions\":%d,"
+	        "\"title\":", (unsigned long long)c, e->ndefs ? "true" : "false",
+	        e->ndefs);
+	put_or_null(m, e->title);
+	fprintf(m, ",\"underline\":%s}",
+	        e->ndefs || c >= 2 ? "true" : "false");
+}
+
 /* Two passes: each chapter's size first (one at a time, so no 4 MiB body is
 ** held: QA 1.44 LOW-8), then the kept ones straight to f. */
 int
@@ -1808,9 +5176,43 @@ xr_print(FILE *f, const struct xr_answer *a)
 	FILE *m;
 	int complete = a->complete, rc = 0;
 	const char *why = a->why;
+	const char *proj = a->project ? a->project : "";
+	size_t nr = a->refs ? a->refs->n : 0, keep, *ord = NULL, *rat = NULL;
+	uint64_t dropped = a->refs ? a->refs->dropped : 0;
 
+	if (!(rat = calloc(nr + 1, sizeof *rat)) ||
+	    (nr && !(ord = malloc(nr * sizeof *ord))))
+	{
+		free(rat);
+		free(ord);
+		free(at);
+		return -1;
+	}
+	for (k = 0; k < nr; k++)
+		ord[k] = k;
+	if (nr)
+	{
+		ref_sort_x = a->refs;
+		qsort(ord, nr, sizeof *ord, ref_cmp);
+	}
+	/* each ref's size, as chapters' below */
+	if (nr && !(m = open_memstream(&body, &bl)))
+		goto fail;
+	for (k = 0; k < nr && fseek(m, 0, SEEK_SET) == 0; k++)
+	{
+		put_ref(m, a->refs, &a->refs->v[ord[k]], proj, k > 0);
+		rat[k + 1] = rat[k] + (size_t)ftell(m);
+	}
+	if (nr && (fclose(m) != 0 || k < nr))
+		goto fail;
+	free(body);
+	body = NULL;
 	if (!at || !(m = open_memstream(&body, &bl)))
 	{
+fail:
+		free(body);
+		free(ord);
+		free(rat);
 		free(at);
 		return -1;
 	}
@@ -1822,28 +5224,33 @@ xr_print(FILE *f, const struct xr_answer *a)
 	if (fclose(m) != 0 || k < n)
 	{
 		free(body);
+		free(ord);
+		free(rat);
 		free(at);
 		return -1;
 	}
 	free(body);
 	body = NULL;
 	bl = at[n];
-	/* 4 MiB: the oldest chapters go first (refs are empty in XR1) */
+	/* 4 MiB: refs go first, from the end (each a dropped key), then the
+	** oldest chapters */
 	slack = 4096 + 6 * (strlen(a->session) + strlen(a->session_id) +
 	                    (a->project ? strlen(a->project) : 0) +
 	                    (a->project_label ? strlen(a->project_label) : 0));
-	while (cut < n && bl - at[cut] + slack > xr_lim.out)
+	for (keep = nr; keep && bl + rat[keep] + slack > xr_lim.out; keep--)
+		;
+	while (cut < n && bl - at[cut] + rat[keep] + slack > xr_lim.out)
 		cut++;
-	if (cut)
+	if (cut || keep < nr)
 	{
 		complete = 0;
 		why = "output";
+		dropped += nr - keep;
 	}
 	if (!(m = open_memstream(&head, &hl)))
 	{
-		free(body);
-		free(at);
-		return -1;
+		body = NULL;
+		goto fail;
 	}
 	fputs("{\"schema\":1,\"session\":", m);
 	xr_put_str(m, a->session);
@@ -1874,13 +5281,18 @@ xr_print(FILE *f, const struct xr_answer *a)
 		for (k = cut; k < n; k++)	/* the first kept one: no comma */
 			put_chapter(f, xr_chapter_at(a->ch, k), first + k + 1,
 			            k > cut);
-		fprintf(f, "],\"chapters_evicted\":%s,\"refs\":[],"
-		        "\"dropped_keys\":0}\n",
+		fprintf(f, "],\"chapters_evicted\":%s,\"refs\":[",
 		        a->chapters_evicted ? "true" : "false");
+		for (k = 0; k < keep; k++)
+			put_ref(f, a->refs, &a->refs->v[ord[k]], proj, k > 0);
+		fprintf(f, "],\"dropped_keys\":%llu}\n",
+		        (unsigned long long)dropped);
 		if (fflush(f) != 0 || ferror(f))
 			rc = -1;
 	}
 	free(head);
 	free(at);
+	free(ord);
+	free(rat);
 	return rc;
 }

@@ -1,0 +1,4 @@
+{"seq":281474976720000,"kind":"prompt","flags":0,"t":1794300000,"text":"$ cat x"}
+{"seq":281474976720001,"kind":"output","flags":0,"t":1794300000,"text":"o/r#120 one"}
+{"seq":281474976720002,"kind":"output","flags":0,"t":1794300000,"text":"o/r#120 two"}
+{"seq":281474976720003,"kind":"output","flags":0,"t":1794300000,"text":"# #836 No marks"}

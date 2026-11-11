@@ -1,0 +1,4 @@
+{"schema":1,"first":{"session":"defs","session_id":"11111111-2222-4333-8444-555555555502","key":"issue:#831","shape":"issue","text":"#831","project":"-home-demo-proj","mode":"light","scope":"session","budget_ms":300,"elapsed_ms":0}}
+{"schema":1,"mention":{"session":"defs","chapter":"f*:0","at":1794304801,"line":"Work on #831 please","offset":0,"live":false,"project":"-home-demo-proj"}}
+{"schema":1,"tally":{"session":"defs","live":false,"project":"-home-demo-proj","count":1,"definitions":0,"partial":false}}
+{"schema":1,"done":true,"partial":true,"counts":{"session":1,"project":0,"project_sessions":0,"all":null,"all_sessions":null},"why":"first","files":1,"bytes":147,"lines_too_long":0}

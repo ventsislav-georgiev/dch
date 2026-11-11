@@ -2725,7 +2725,10 @@ usage(void)
 	    "  dch --xray <n> [--clear] --json            a session's chapters as\n"
 	    "                                             one JSON object; --clear\n"
 	    "                                             empties a shell's ring\n"
-	    "  dch --agent-list [--json]                  list native Claude peers\n"
+	    "  dch --xray <n> --ref <ref> --scope session [--full|--budget-ms <ms>]\n"
+	    "       --json                                one ref's mentions and\n"
+	    "                                             definitions as NDJSON\n"
+	    "  dch --agent-list [--json]                 list native Claude peers\n"
 	    "  dch --agent-send <name> <message...>       message one native peer\n"
 	    "  dch serve [--allow-create] [--allow-user <u>]...  serve sessions to\n"
 	    "                                             the Prosper iPhone app\n"
@@ -10767,7 +10770,7 @@ xr_resolve(const char *n, const struct hrec *r, int nr, int clear,
 static int
 xr_claude_answer(const char *cfg, const char *sid, struct xr_answer *a,
                  struct xr_chapters *ch, char *project, size_t projectsz,
-                 char *label, size_t labelsz)
+                 char *label, size_t labelsz, struct xr_index *refs)
 {
 	char path[2048], home[1400];
 	struct xr_claude *d;
@@ -10793,6 +10796,13 @@ xr_claude_answer(const char *cfg, const char *sid, struct xr_answer *a,
 		close(fd);
 		return -2;
 	}
+	if (refs)
+	{
+		struct xr_sink k;
+
+		xr_index_sink(refs, &k);
+		xr_claude_refs(d, &k, (uint64_t)st.st_ino, NULL, NULL);
+	}
 	rc = xr_claude_read(d, fd, (uint64_t)st.st_size, &capped);
 	close(fd);
 	xr_claude_end(d, (uint64_t)st.st_ino, ch);
@@ -10813,11 +10823,103 @@ xr_claude_answer(const char *cfg, const char *sid, struct xr_answer *a,
 	return 0;
 }
 
+/* --ref's request (3.4): the text, light or full, the light budget. */
+static long long xr_t0;		/* dch's start, CLOCK_MONOTONIC ms */
+
+struct xr_refq
+{
+	const char *text;
+	int full, budget;
+};
+
+static int
+xr_no_corpus(void)
+{
+	fputs("dch: no x-ray corpus\n", stderr);
+	return 1;
+}
+
+/* --ref over (cfg, sid)'s transcript (3.4): `first` once the file is
+** found, before it is opened; then its lines, its tally, `done`. */
+static int
+xr_claude_ref(const char *cfg, const char *sid, const char *session,
+              int live, const char *label, const struct xr_refq *q)
+{
+	char path[2048], home[1400], project[1200] = "";
+	struct xr_claude *d;
+	struct xr_chapters ch = {0};
+	struct xr_scan *sc;
+	struct xr_span sp;
+	struct xr_sink k;
+	struct stat st;
+	int fd, capped = 0, rc;
+	uint64_t span;
+
+	if (!cfg[0])
+	{
+		const char *h = getenv("HOME");
+
+		if (!h || snprintf(home, sizeof home, "%s/.claude", h)
+		    >= (int)sizeof home)
+			return xr_no_corpus();
+		cfg = home;
+	}
+	if (xr_claude_lookup(cfg, sid, path, sizeof path, &st, project,
+	                     sizeof project) < 0)
+		return xr_no_corpus();
+	if (!project[0])
+		xr_project_key(label, project, sizeof project);
+	if (!xr_ref_parse(q->text, label, &sp) ||
+	    !(sc = xr_scan_new(stdout, sp.key, session, project, live, q->full,
+	                       0, q->budget, xr_t0)))
+		return 3;
+	if (xr_scan_first(sc, sid, sp.shape, xr_span_text(&sp)) != 0)
+	{
+		xr_scan_free(sc);
+		fputs(write_fail_line, stderr);
+		return 1;
+	}
+	if ((fd = xr_seam_open(path, &st)) < 0 || !(d = xr_claude_new()))
+	{
+		if (fd >= 0)
+			close(fd);
+		xr_scan_free(sc);
+		fputs("dch: X-ray failed on this session\n", stderr);
+		return 3;
+	}
+	xr_scan_sink(sc, &k);
+	xr_claude_refs(d, &k, (uint64_t)st.st_ino, xr_scan_tick, sc);
+	rc = xr_claude_read(d, fd, (uint64_t)st.st_size, &capped);
+	close(fd);
+	xr_claude_end(d, (uint64_t)st.st_ino, &ch);
+	xr_chapters_free(&ch);
+	span = (uint64_t)st.st_size;
+	if (capped && span > xr_lim.head + xr_lim.tail)
+		span = xr_lim.head + xr_lim.tail;
+	xr_scan_file(sc, span, xr_claude_too_long(d), capped, 0);
+	xr_claude_free(d);
+	if (rc < 0)
+	{
+		xr_scan_free(sc);
+		fputs("dch: X-ray failed on this session\n", stderr);
+		return 3;
+	}
+	rc = xr_scan_done(sc);
+	xr_scan_free(sc);
+	if (rc != 0)
+	{
+		fputs(write_fail_line, stderr);
+		return 1;
+	}
+	return 0;
+}
+
 /* The shell answer, built as the records stream past. */
 struct xr_ring_acc
 {
 	struct xr_shell sh;
 	long long rows;
+	uint64_t bytes;		/* record text, for --ref's done */
 	int gap, cont, seen;
 };
 
@@ -10827,6 +10929,7 @@ xr_ring_rec(void *ctx, const struct xr_rec *x)
 	struct xr_ring_acc *a = ctx;
 
 	xr_shell_feed(&a->sh, x);
+	a->bytes += x->len;
 	if (x->kind == RING_K_GAP)
 		a->gap = 1;
 	else if (x->kind != RING_K_MARK)
@@ -10839,13 +10942,17 @@ xr_ring_rec(void *ctx, const struct xr_rec *x)
 }
 
 static int
-xr_json(const struct xr_target *t)
+xr_json(const struct xr_target *t, const struct xr_refq *q)
 {
 	struct xr_answer a;
 	struct xr_chapters ch = {0};
 	char project[1200] = "", label[PATH_MAX] = "", sid[64] = "", cfg[1400];
 	char recname[400];
 	int rc = 0;
+	struct xr_index *refs = NULL;
+	struct xr_scan *sc = NULL;
+	struct xr_sink k;
+	struct xr_span sp;
 
 	memset(&a, 0, sizeof a);
 	a.session = t->name;
@@ -10860,11 +10967,17 @@ xr_json(const struct xr_target *t)
 		const struct hrec *h = t->rec;
 
 		snprintf(label, sizeof label, "%s", h->acwd[0] ? h->acwd : h->cwd);
+		if (q)
+			return h->sid[0] ? xr_claude_ref(h->acfg, h->sid, t->name, 0,
+			                                 label, q)
+			                 : xr_no_corpus();
 		if (h->sid[0])
 		{
 			snprintf(sid, sizeof sid, "%s", h->sid);
+			if (!(refs = xr_index_new()))
+				return 3;
 			rc = xr_claude_answer(h->acfg, h->sid, &a, &ch, project,
-			                      sizeof project, label, sizeof label);
+			                      sizeof project, label, sizeof label, refs);
 		}
 		else
 		{
@@ -10895,9 +11008,18 @@ xr_json(const struct xr_target *t)
 			if (!label[0] || c.cwd[0])
 				snprintf(label, sizeof label, "%s", c.cwd);
 			xr_crec_cfg(&c, cfg, sizeof cfg);
-			rc = cfg[0] ? xr_claude_answer(cfg, c.sid, &a, &ch, project,
-			                               sizeof project, label,
-			                               sizeof label) : -1;
+			if (q)
+			{
+				cmd_info_free(&ci);
+				return cfg[0] ? xr_claude_ref(cfg, c.sid, t->name, 1, label,
+				                              q) : xr_no_corpus();
+			}
+			if (!(refs = xr_index_new()))
+				rc = -2;
+			else
+				rc = cfg[0] ? xr_claude_answer(cfg, c.sid, &a, &ch, project,
+				                               sizeof project, label,
+				                               sizeof label, refs) : -1;
 		}
 		else if (!(acc = malloc(sizeof *acc)))
 			rc = -2;
@@ -10907,12 +11029,35 @@ xr_json(const struct xr_target *t)
 			for (tries = 0; tries < 3; tries++)
 			{
 				xr_chapters_free(&ch);
+				xr_index_free(refs);
+				xr_scan_free(sc);
+				refs = NULL;
+				sc = NULL;
 				memset(acc, 0, sizeof *acc);
 				xr_shell_begin(&acc->sh, &ch);
-				if ((fr = ring_fetch(t->sock, &rs, xr_ring_rec, acc))
-				    != -4)
+				/* refs over the ring, keyed by the pane's cwd (7.3); a
+				** --ref's lines held until `first` can name the ring */
+				if (q)
+				{
+					if (!project[0])
+						xr_project_key(label, project, sizeof project);
+					if (!xr_ref_parse(q->text, label, &sp) ||
+					    !(sc = xr_scan_new(stdout, sp.key, t->name, project,
+					                       1, q->full, 1, q->budget, xr_t0)))
+						break;
+					xr_scan_hold(sc);
+					xr_scan_sink(sc, &k);
+				}
+				else if ((refs = xr_index_new()))
+					xr_index_sink(refs, &k);
+				if ((sc || refs) && xr_shell_refs(&acc->sh, &k, label) != 0)
+					break;
+				fr = ring_fetch(t->sock, &rs, xr_ring_rec, acc);
+				xr_shell_end(&acc->sh);
+				if (fr != -4)
 					break;
 			}
+			xr_shell_end(&acc->sh);
 		}
 		if (acc && fr == 0)
 		{
@@ -10930,6 +11075,9 @@ xr_json(const struct xr_target *t)
 			{
 				int gap = rs.seqgap || acc->gap;
 
+				if (refs)
+					xr_index_per_row(refs, !acc->sh.npaired);
+				a.refs = refs;
 				a.corpus = "shell";
 				a.available = 1;
 				a.mentions_only = !acc->sh.npaired;
@@ -10951,7 +11099,39 @@ xr_json(const struct xr_target *t)
 		}
 		else if (acc && (fr == -3 || fr == -4))
 			rc = -2;
+		if (q && sc && rc == 0 && a.available)
+		{
+			/* --ref over a shell <n>: first, then what the ring held */
+			int partial = rs.seqgap || acc->gap || acc->cont ||
+			              (rs.status & DCH_RING_S_EVICTED);
+
+			rc = xr_scan_first(sc, sid, sp.shape, xr_span_text(&sp)) ||
+			     xr_scan_release(sc);
+			if (rc == 0)
+			{
+				xr_scan_file(sc, acc->bytes, 0, partial,
+				             !acc->sh.npaired);
+				rc = xr_scan_done(sc);
+			}
+			if (rc != 0)
+				fputs(write_fail_line, stderr);
+			rc = rc ? 1 : 0;
+			xr_chapters_free(&ch);
+			xr_scan_free(sc);
+			free(acc);
+			if (qc == 0)
+				cmd_info_free(&ci);
+			return rc;
+		}
+		xr_scan_free(sc);
 		free(acc);
+		if (q && rc != -2)
+		{
+			xr_chapters_free(&ch);
+			if (qc == 0)
+				cmd_info_free(&ci);
+			return xr_no_corpus();
+		}
 		/* fr -1/-2: gone, or a master before #119: no corpus */
 		if (qc == 0)
 			cmd_info_free(&ci);
@@ -10961,14 +11141,24 @@ xr_json(const struct xr_target *t)
 	if (rc == -2)
 	{
 		xr_chapters_free(&ch);
+		xr_index_free(refs);
 		fputs("dch: X-ray failed on this session\n", stderr);
 		return 3;
 	}
 	a.available = strcmp(a.corpus, "none") != 0;
+	if (a.available && !a.refs && refs && !strcmp(a.corpus, "claude"))
+		a.refs = refs;
 	dch_trace("xray json: chapters=%zu seam opened=%lu refused=%lu",
 	          ch.n, xr_seam_opened, xr_seam_refused);
 	rc = xr_print(stdout, &a) == 0 ? 0 : 3;
 	xr_chapters_free(&ch);
+	{
+		size_t keys = refs ? xr_index_keys(refs) : 0;
+
+		xr_index_free(refs);
+		/* K3: the index lives exactly as long as its query */
+		dch_trace("xray refs: keys=%zu live=%lu", keys, xr_index_live);
+	}
 	return rc;
 }
 
@@ -11096,28 +11286,42 @@ name_routes_remote(const char *n)
 	return hit && known;
 }
 
-/* `dch --xray <n> [--json] [--clear]` (spec 3.1): flags in any order, each
-** once; the rest of the family (--ref, --follow, --chapter, the view)
-** comes with XR2-XR5 and exits 2 here. */
+/* `dch --xray <n> [--json] [--clear]` and `--ref <text> --scope session
+** [--full] [--budget-ms <ms>] --json` (spec 3.1, 3.4): flags in any order,
+** each once; the rest of the family (--follow, --chapter, the view, the
+** wider scopes) comes with XR2b-XR5 and exits 2 here. */
 static int
 xray_main(int argc, char **argv)
 {
-	const char *n = NULL;
-	int json = 0, clear = 0, k, rc, nr;
+	const char *n = NULL, *ref = NULL, *scope = NULL, *budget = NULL;
+	int json = 0, clear = 0, full = 0, k, rc, nr;
 	struct hrec *r = NULL;
 	struct xr_target t;
+	struct xr_refq q;
+	struct xr_span sp;
 
+	xr_t0 = xr_now_ms();
 	for (k = 0; k < argc; k++)
 	{
-		if (!strcmp(argv[k], "--json") && !json)
+		const char **v = !strcmp(argv[k], "--ref") ? &ref
+		                 : !strcmp(argv[k], "--scope") ? &scope
+		                 : !strcmp(argv[k], "--budget-ms") ? &budget : NULL;
+
+		if (v && !*v && k + 1 < argc)
+			*v = argv[++k];	/* the next element, even "-x" (3.1) */
+		else if (!strcmp(argv[k], "--json") && !json)
 			json = 1;
 		else if (!strcmp(argv[k], "--clear") && !clear)
 			clear = 1;
+		else if (!strcmp(argv[k], "--full") && !full)
+			full = 1;
 		else if (argv[k][0] == '-' && argv[k][1])
 		{
 			fprintf(stderr, "dch: bad usage: %s%s\n", argv[k],
-			        (!strcmp(argv[k], "--json") ||
-			         !strcmp(argv[k], "--clear")) ? " twice"
+			        v && *v ? " twice" : v ? " needs a value"
+			        : (!strcmp(argv[k], "--json") ||
+			           !strcmp(argv[k], "--clear") ||
+			           !strcmp(argv[k], "--full")) ? " twice"
 			        : " is not an --xray flag of this dch");
 			return 2;
 		}
@@ -11131,9 +11335,61 @@ xray_main(int argc, char **argv)
 	}
 	/* every form is one name-shaped word (3.1: a record name validated
 	** like a name); xr_resolve tells the forms apart */
+	if ((scope || full || budget) && !ref)
+	{
+		fputs("dch: bad usage: --scope, --full and --budget-ms come with "
+		      "--ref\n", stderr);
+		return 2;
+	}
+	if (ref && clear)
+	{
+		fputs("dch: bad usage: --ref and --clear\n", stderr);
+		return 2;
+	}
 	if (!n || !name_ok(n))
 	{
 		fputs("dch: bad session\n", stderr);
+		return 2;
+	}
+	/* the value rules (3.1), in the table's order */
+	if (ref && !xr_ref_ok(ref))
+	{
+		fputs("dch: bad ref\n", stderr);
+		return 2;
+	}
+	if (ref && !xr_ref_parse(ref, NULL, &sp))
+	{
+		fputs("dch: not a ref\n", stderr);
+		return 2;
+	}
+	if (scope && strcmp(scope, "session") && strcmp(scope, "project") &&
+	    strcmp(scope, "all"))
+	{
+		fputs("dch: bad scope\n", stderr);
+		return 2;
+	}
+	q.text = ref;
+	q.full = full;
+	q.budget = 300;
+	if (budget)
+	{
+		/* digits only, no strtoul: no sign, no 0x, no wrap */
+		for (k = 0, q.budget = 0; budget[k] >= '0' && budget[k] <= '9'; k++)
+			if ((q.budget = q.budget * 10 + budget[k] - '0') > 1000)
+				q.budget = 1000;
+		if (budget[k] || !k)
+			q.budget = -1;
+		if (q.budget < 50 || q.budget > 300)
+		{
+			fputs("dch: bad budget\n", stderr);
+			return 2;
+		}
+	}
+	if (ref && (!scope || strcmp(scope, "session")))
+	{
+		fprintf(stderr, "dch: bad usage: --scope %s comes with a later dch "
+		        "(this one takes --scope session)\n",
+		        scope ? scope : "project");
 		return 2;
 	}
 	if (!json)
@@ -11154,7 +11410,7 @@ xray_main(int argc, char **argv)
 	nr = history_load(&r);
 	rc = xr_resolve(n, r, nr, clear, &t);
 	if (rc == 0)
-		rc = clear ? xr_clear(&t) : xr_json(&t);
+		rc = clear ? xr_clear(&t) : xr_json(&t, ref ? &q : NULL);
 	hrec_free(r, nr);
 	return rc;
 }

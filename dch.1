@@ -98,6 +98,15 @@ dch \- detachable terminal sessions with a headless agent API
 .RB [ \-\-clear ]
 .B \-\-json
 .br
+.B dch \-\-xray
+.I name
+.B \-\-ref
+.I ref
+.B \-\-scope session
+.RB [ \-\-full | \-\-budget\-ms
+.IR ms ]
+.B \-\-json
+.br
 .B dch
 .RB [ \-\-host
 .IR host ]
@@ -677,7 +686,32 @@ or
 and
 .BR error .
 .B refs
-is always empty in this release.
+lists the issues, pull requests, tickets, commits, files and URLs the corpus
+mentions (at most 2000 keys), each with
+.BR key ,
+.BR count ,
+.BR defined ,
+.B title
+and
+.BR underline .
+With
+.BI \-\-ref " ref"
+it streams that one ref's lines as NDJSON instead
+.RB ( first ,
+.BR definition ,
+.BR mention ,
+.BR tally ,
+.BR progress ,
+then
+.BR done ),
+light by default (stops at the first result or after
+.B \-\-budget\-ms
+.IR ms ,
+50 to 300, default 300),
+.B \-\-full
+to read it all;
+.B \-\-scope session
+is required (\fBproject\fR and \fBall\fR come later and exit 2).
 Must be the first argument; every other flag exits 2.
 .I name
 is an agent UUID (the live session whose Claude Code has it, else the

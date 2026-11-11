@@ -8,6 +8,9 @@ Each case is a directory:
                    as dch prints it (anchors' inode masked as f*:<offset>),
                    or {"schema":1,"exit":N,"stderr":"<first line>"} for a
                    nonzero exit
+  expected/<k>.ndjson  a --ref stream (3.4, #135): its lines with
+                   elapsed_ms masked to 0 and progress lines left out (they
+                   are timing; checked to sit between first and done)
   claude/<uuid>.jsonl  transcripts, placed at
                    <config>/projects/<setup "project_dir">/<uuid>.jsonl
   shell/<name>.ring.ndjson  a live shell session <name>: ring records,
@@ -33,6 +36,7 @@ this test recomputes it (spec 9.2: a hand edit or a stale copy fails).
 Run:  python3 tests/xray_golden.py            (uses ./dch)
       python3 tests/xray_golden.py --update   (rewrites expected/ and
                                                MANIFEST: review the diff)
+      python3 tests/xray_golden.py <case>...  (only those cases)
 """
 import hashlib, json, os, re, shutil, socket, struct, subprocess, sys
 import tempfile, threading
@@ -190,6 +194,8 @@ def load_ring(path):
 # ---- one case ---------------------------------------------------------------
 
 ANCHOR = re.compile(r'"anchor":"f[0-9a-f]+:')
+CHAPTER = re.compile(r'"chapter":"f[0-9a-f]+:')
+ELAPSED = re.compile(r'"elapsed_ms":\d+')
 
 
 def key(path):
@@ -198,7 +204,19 @@ def key(path):
 
 def mask(s, root):
     s = ANCHOR.sub('"anchor":"f*:', s)
+    s = CHAPTER.sub('"chapter":"f*:', s)
+    s = ELAPSED.sub('"elapsed_ms":0', s)
     return s.replace(root, "/T").replace(key(root), "-T")
+
+
+def stream(got):
+    """A --ref stream: progress lines out, after checking where they sit."""
+    lines = got.splitlines(True)
+    objs = [json.loads(l) for l in lines]
+    ok = (len(objs) >= 2 and "first" in objs[0] and objs[-1].get("done") is
+          True and all(o.get("schema") == 1 for o in objs))
+    keep = [l for l, o in zip(lines, objs) if "progress" not in o]
+    return "".join(keep), ok
 
 
 def run_case(name):
@@ -263,13 +281,17 @@ def run_case(name):
         for k, argv in enumerate(case["argv"], 1):
             r = subprocess.run([DCH] + argv, capture_output=True, text=True,
                                timeout=30, env=env)
+            ref = "--ref" in argv and r.returncode == 0
             if r.returncode == 0:
                 got = mask(r.stdout, os.path.realpath(t))
+                if ref:
+                    got, shape = stream(got)
             else:
                 got = json.dumps({"schema": 1, "exit": r.returncode,
                                   "stderr": (r.stderr.splitlines() or [""])[0]},
                                  separators=(",", ":")) + "\n"
-            ep = os.path.join(d, "expected", "%d.json" % k)
+            ep = os.path.join(d, "expected",
+                              "%d.%s" % (k, "ndjson" if ref else "json"))
             if UPDATE:
                 os.makedirs(os.path.dirname(ep), exist_ok=True)
                 with open(ep, "w") as f:
@@ -278,6 +300,10 @@ def run_case(name):
             check("%s/%d: %s" % (name, k, " ".join(argv)), got == want,
                   "want %r\n       got  %r\n       stderr %r"
                   % (want, got, r.stderr))
+            if ref:
+                check("%s/%d: first, schema 1 on every line, done last" %
+                      (name, k), shape, got)
+                continue
             obj = json.loads(got) if got.strip() else {}
             check("%s/%d: one line, schema 1%s" % (
                       name, k, ", session_id" if r.returncode == 0 else ""),
@@ -307,8 +333,10 @@ def manifest():
 
 
 def main():
+    only = [a for a in sys.argv[1:] if not a.startswith("--")]
     cases = sorted(c for c in os.listdir(FIX)
-                   if os.path.isdir(os.path.join(FIX, c)))
+                   if os.path.isdir(os.path.join(FIX, c)) and
+                   (not only or c in only))
     for c in cases:
         run_case(c)
     mp = os.path.join(FIX, "MANIFEST")
@@ -318,7 +346,8 @@ def main():
     check("MANIFEST: the sha256 of every fixture file, sorted by path",
           os.path.exists(mp) and open(mp).read() == manifest(),
           "run tests/xray_golden.py --update and review the diff")
-    check("goldens: %d cases" % len(cases), len(cases) >= 10)
+    if not only:
+        check("goldens: %d cases" % len(cases), len(cases) >= 10)
     if fails[0]:
         print("%d failed" % fails[0])
         sys.exit(1)

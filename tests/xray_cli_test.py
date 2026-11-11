@@ -7,7 +7,8 @@ this drives what a fixture cannot: a real shell's OSC 133 block typed with
 reaching the pty, a live Claude (tests/fake_claude.py as `claude`) and its
 transcript, the open seam's counting test (spec 8.1: one open per Claude
 query, none for a shell, a clear or a refused lookup; nothing written), and
-the INFO-2 name rule on every create path dch runs locally.
+the INFO-2 name rule on every create path dch runs locally, and refs (#135):
+the index freed with its query (K3), --ref's budget stop, nothing written.
 
 Run:  python3 tests/xray_cli_test.py          (uses ./dch; run.sh isolates)
 """
@@ -884,6 +885,126 @@ def test_two_claudes():
         dch("-k", n)
 
 
+# ---- refs (#135, XR2a): the index's lifetime, --ref's budget and stop -----
+
+RSID = "11111111-2222-4333-8444-5555555555a1"
+
+
+def ref_lines(out):
+    try:
+        return [json.loads(l) for l in out.splitlines() if l.strip()]
+    except ValueError:
+        return None
+
+
+def history(name, sid, cfg):
+    sockdir = os.path.join(T, "dch-%d" % os.getuid())
+    hdir = os.path.join(T, "state", "dch", "sessions",
+                        sockdir.replace("/", "-"))
+    os.makedirs(hdir, exist_ok=True)
+    rec = {"name": name, "cwd": "/home/demo/proj", "end": "exited",
+           "argv": ["claude"], "started": 1794299400, "updated": 1794300000,
+           "ended": 1794300000, "sock_dir": sockdir,
+           "agent": {"session_id": sid, "cwd": "/home/demo/proj",
+                     "config_dir": cfg}}
+    with open(os.path.join(hdir, name + ".json"), "w") as f:
+        f.write(json.dumps(rec) + "\n")
+
+
+def test_refs():
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, RSID + ".jsonl")
+    canary = "Canary passage 7f3a"
+
+    def put(lines):
+        with open(tp, "w") as f:
+            for o in lines:
+                f.write(json.dumps(o) + "\n")
+
+    def bash(id, cmd, out):
+        return [{"type": "assistant", "message": {"content": [
+                    {"type": "tool_use", "id": id, "name": "Bash",
+                     "input": {"command": cmd}}]}},
+                {"type": "user", "toolUseResult": {"stdout": out},
+                 "message": {"content": [{"type": "tool_result",
+                                          "tool_use_id": id,
+                                          "content": out}]}}]
+    put([{"type": "user", "cwd": "/home/demo/proj",
+          "timestamp": "2026-11-10T10:00:00Z",
+          "message": {"content": "look at #831 and o/r#7"}}] +
+        bash("b1", "gh issue view 831", "# #831 " + canary))
+    history("xr-refs", RSID, cfg)
+    trace = os.path.join(T, "trace-refs")
+    dbg = dict(ENV, DCH_DEBUG=trace)
+
+    # mutant 3 (K3): the index goes with its query
+    open(trace, "w").close()
+    rc, o, err = xray("xr-refs", "--json", env=dbg)
+    tr = open(trace).read()
+    m = re.search(r"xray refs: keys=(\d+) live=(\d+)", tr)
+    check("refs: the index answers the transcript's keys",
+          rc == 0 and o and [r["key"] for r in o["refs"]] ==
+          ["issue:#831", "pull:o/r#7"] and o["refs"][0]["defined"], (o, err))
+    check("refs: the index is freed with its query (K3: live=0)",
+          m and int(m.group(1)) == 2 and m.group(2) == "0", tr[-400:])
+
+    # nothing written by an index build and a full --ref (9.5)
+    before = files(T)
+    open(trace, "w").close()
+    r = dch("--xray", "xr-refs", "--ref", "#831", "--scope", "session", "--full",
+            "--json", env=dbg)
+    ls = ref_lines(r.stdout) or []
+    check("ref: a full --ref finds the definition",
+          r.returncode == 0 and any(l.get("definition") for l in ls) and
+          ls[-1].get("done") is True and ls[-1]["why"] is None,
+          r.stdout[-600:] + r.stderr)
+    tr = open(trace).read()
+    check("ref: the trace holds no passage or transcript text",
+          canary not in tr and "look at" not in tr, tr[-400:])
+    new = sorted(set(files(T)) - set(before) - {trace})
+    check("ref: nothing written by a --ref", not new, new)
+
+    # a big transcript: light stops at its budget, full reads it all
+    pad = "x" * 900
+    with open(tp, "w") as f:
+        f.write(json.dumps({"type": "user", "cwd": "/home/demo/proj",
+                            "timestamp": "2026-11-10T10:00:00Z",
+                            "message": {"content": "start #1"}}) + "\n")
+        line = json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "PROJ-5 o/r#3 " + pad}]}}) + "\n"
+        f.write(line * 40000)
+        f.write(json.dumps({"type": "user", "message": {
+            "content": "the end #424242"}}) + "\n")
+    t0 = time.time()
+    r = dch("--xray", "xr-refs", "--ref", "#424242", "--scope", "session",
+            "--budget-ms", "50", "--json")
+    ls = ref_lines(r.stdout) or [{}]
+    d = ls[-1]
+    check("ref: light past its budget stops, partial, why budget "
+          "(%.2fs)" % (time.time() - t0),
+          r.returncode == 0 and d.get("done") is True and d["partial"] and
+          d["why"] == "budget" and d["bytes"] < os.path.getsize(tp) and
+          not any("mention" in l for l in ls), r.stdout[-600:] + r.stderr)
+    t0 = time.time()
+    r = dch("--xray", "xr-refs", "--ref", "#424242", "--scope", "session",
+            "--full", "--json")
+    wall = time.time() - t0
+    ls = ref_lines(r.stdout) or [{}]
+    d = ls[-1]
+    check("ref: full reads the whole transcript, one mention",
+          r.returncode == 0 and d.get("done") is True and not d["partial"] and
+          d["bytes"] == os.path.getsize(tp) and
+          sum("mention" in l for l in ls) == 1, r.stdout[-600:] + r.stderr)
+    prog = [l for l in ls if "progress" in l]
+    check("ref: schema 1 on every line; a progress line per 250 ms "
+          "(%d in %.2fs)" % (len(prog), wall),
+          all(l.get("schema") == 1 for l in ls) and
+          (prog or wall < 0.5), r.stdout[:600])
+    os.unlink(tp)
+
+
 def main():
     try:
         test_names()
@@ -896,6 +1017,7 @@ def main():
         test_claude()
         test_clear_after_claude()
         test_two_claudes()
+        test_refs()
     finally:
         shutil.rmtree(T, ignore_errors=True)
     if fails[0]:

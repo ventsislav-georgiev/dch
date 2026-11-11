@@ -1,0 +1,1 @@
+{"schema":1,"exit":2,"stderr":"dch: bad usage: --scope all comes with a later dch (this one takes --scope session)"}
