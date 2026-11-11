@@ -15,7 +15,8 @@ spans lines (the fake's Ctrl-U kills one visual row, as Claude Code's
 does); a short first line, and one line wrapped in a 40-column pane
 (#128: the row left last is under the 32 bytes a prefix check reads, and
 must still go: withdrawn, composer empty); a dialog over the text
-(draft_left: the keys went to the dialog);
+(draft_left: the keys went to the dialog); a human typing into the
+composer during the take-back (draft_left, never withdrawn);
 a paste that never painted in the land wait (draft_left: it may still
 paint); a second signal (exit 143 at
 once); --revive SIGTERMed while it waits for an idle Claude (interrupted,
@@ -355,6 +356,24 @@ def main():
               typed(d) == [],
               lambda: ev(rc, out, err, secs, up=bool(sd), held=held,
                          typed=typed(d), screen=screen(d)[-80:]))
+
+        # --- a human types into the composer during the take-back (#130):
+        # the fake adds text after every Ctrl-U, so the composer holds text
+        # that is not a start of ours whichever Ctrl-U dch reads after
+        h = sess("vhum", "claude", eat_enters=99, type_on_kill="zzz")
+        sh = up(h)
+        pr = start("--run", h, "hello", "human")
+        held = until(lambda: composer(h, "hello human"))
+        pr.send_signal(signal.SIGTERM)
+        rc, out, err, secs = finish_p(pr)
+        check("--run SIGTERMed while a human types into the composer: "
+              "`draft_left`, not `withdrawn`, nothing sent (%.1f s)" % secs,
+              held and rc == 1 and
+              err.startswith("dch: %s: draft_left — " % h) and
+              until(lambda: composer(h, "zzz"), 3) and
+              typed(h) == [],
+              lambda: ev(rc, out, err, secs, up=bool(sh), held=held,
+                         typed=typed(h), screen=screen(h)[-200:]))
 
         # --- a paste that has not painted when the signal comes, nor by
         # the end of the land wait: it may still paint, so `draft_left`.

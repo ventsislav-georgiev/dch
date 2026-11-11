@@ -2265,7 +2265,8 @@ hello_op(const char *js, const char *op)
 
 /* The server's frames in tin as a ctl client takes them: 0x31 onto out,
 ** 0x32 onto err; 0x33's exit into *xit (0..255; a malformed one is 1) and
-** its "why", escaped, into why[wcap]; a 0x13's message, escaped, into
+** its "why", escaped, into why[wcap] ("unreadable" for a why or a 0x33
+** we cannot read); a 0x13's message, escaped, into
 ** msg[cap] and what its code makes the exit status into *code (err_text: 1
 ** uncoded). What it parsed leaves tin. 1 once the ctl is over (a 0x33 or a
 ** 0x13), 0 for more, -1 when the link must end (a frame over the limit).
@@ -2302,7 +2303,8 @@ ctl_in(struct rf_state *rs, struct sb *tin, struct sb *out, struct sb *err,
 			long long v = -1;
 
 			*xit = 1;
-			why[0] = '\0';
+			/* a 0x33 or a why we cannot read still says so (#130) */
+			snprintf(why, wcap, "unreadable");
 			if (f.len < sizeof t && !memchr(f.data, 0, f.len))
 			{
 				memcpy(t, f.data, f.len);
@@ -2310,11 +2312,15 @@ ctl_in(struct rf_state *rs, struct sb *tin, struct sb *out, struct sb *err,
 				if (dch_json_parse(&jp, t) == 0 && jp.ntok > 0 &&
 				    jp.tok[0].kind == JSON_OBJECT)
 				{
+					int wr;
+
 					if (jint(&jp, 0, "exit", &v) == 1 && v >= 0 &&
 					    v <= 255)
 						*xit = (int)v;
-					if (jstr(&jp, 0, "why", w, sizeof w) == 1)
+					if ((wr = jstr(&jp, 0, "why", w, sizeof w)) == 1)
 						logsafe(why, wcap, w);
+					else if (!wr)
+						why[0] = '\0';	/* no why: a plain end */
 				}
 				dch_json_free(&jp);
 			}
