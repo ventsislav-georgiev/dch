@@ -6760,7 +6760,7 @@ exit_prompt(const char *path, char *out, size_t outsz)
 		nx = strchr(l, '\n');
 		if (nx)
 			*nx++ = '\0';
-		l = (char *)ap_skip(l);
+		l += ap_skip(l) - l;
 		w = ap_rtrim(l, strlen(l));
 		if (w && l[w - 1] == '\r')
 			w--;
