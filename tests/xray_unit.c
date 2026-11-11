@@ -3,17 +3,23 @@
 ** JSONL reader, the shell chapter machine and the output cap; refs (#135):
 ** the grammar rows, --ref's parse and value rule, the index's lifetime and
 ** caps (keys, spans, definitions, the dropped set) and the config_dir check;
-** --chapter (#156): the anchor rule and a chapter's entries.
+** --chapter (#156): the anchor rule and a chapter's entries; resolvers
+** (#159, XR6): the file rules and every state, git's argv, env, probe,
+** states, timeout and group kill through a fake git.
 **
 **   cc -I. -o xray_unit tests/xray_unit.c xray.c json.c && ./xray_unit
 */
+#include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 #include "xray.h"
 #include "ring.h"
@@ -1676,6 +1682,475 @@ t_chapter(void)
 	}
 }
 
+/* ---- resolvers (#159, XR6) ---------------------------------------------- */
+
+static char rd[256];	/* the resolver tests' temp dir (short: no snprintf cuts) */
+
+static void
+put(const char *rel, const char *body, size_t n)
+{
+	char p[PATH_MAX + 64];
+	FILE *f;
+
+	snprintf(p, sizeof p, "%s/%s", rd, rel);
+	if ((f = fopen(p, "w")))
+	{
+		fwrite(body, 1, n, f);
+		fclose(f);
+	}
+}
+
+static void
+dir(const char *rel)
+{
+	char p[PATH_MAX + 64];
+
+	snprintf(p, sizeof p, "%s/%s", rd, rel);
+	mkdir(p, 0700);
+}
+
+/* --ref text against cwd (relative to rd): 1 with *r */
+static int
+res(const char *text, const char *cwd, int live, struct xr_resolved *r)
+{
+	char c[PATH_MAX + 64];
+	struct xr_span sp;
+
+	snprintf(c, sizeof c, "%s%s%s", rd, *cwd ? "/" : "", cwd);
+	memset(r, 0, sizeof *r);
+	if (!xr_ref_parse(text, c, &sp))
+		return -1;
+	return xr_res_ref(&sp, text, c, live, r);
+}
+
+static int
+is(const struct xr_resolved *r, const char *kind, const char *state)
+{
+	return r->kind && r->state && !strcmp(r->kind, kind) &&
+	       !strcmp(r->state, state);
+}
+
+static void
+t_res_file(void)
+{
+	struct xr_resolved r;
+	char b[2000];
+	static const char *const secret[] = {
+		".env", ".env.local", ".ssh/config", ".gnupg/k", ".aws/credentials",
+		".netrc", ".npmrc", ".pypirc", ".git-credentials", "a/k.pem",
+		"k.key", "c.p12", "login.keychain", "login.keychain-db", "id_rsa",
+		"keys/id_ed25519", NULL
+	};
+	char *buf;
+	size_t k, n = 0;
+	int ok;
+
+	dir("proj");
+	dir("proj/.git");
+	dir("proj/src");
+	dir("out");
+	for (k = 1; k <= 40; k++)
+		n += (size_t)snprintf(b + n, sizeof b - n, "line %zu\n", k);
+	put("proj/src/a.c", b, n);
+	CHECK("file: ok, title the name, subtitle path and line",
+	      res("src/a.c:20", "proj", 1, &r) == 1 && is(&r, "file", "ok") &&
+	      !strcmp(r.title, "a.c") &&
+	      !strcmp(r.subtitle, "src/a.c \xc2\xb7 line 20"));
+	CHECK("file: 14 lines around the line, it the seventh",
+	      r.nlines == 14 && !strcmp(r.line[0], "line 14") &&
+	      !strcmp(r.line[6], "line 20") && !strcmp(r.line[13], "line 27"));
+	CHECK("file: line 1 gives the first 14", res("src/a.c:1", "proj", 1, &r)
+	      == 1 && r.nlines == 14 && !strcmp(r.line[0], "line 1"));
+	CHECK("file: the last line gives the last 14",
+	      res("src/a.c:40", "proj", 1, &r) == 1 && r.nlines == 14 &&
+	      !strcmp(r.line[0], "line 27") && !strcmp(r.line[13], "line 40"));
+	CHECK("file: a line past the end gives the last 14",
+	      res("src/a.c#L999", "proj", 1, &r) == 1 &&
+	      !strcmp(r.line[13], "line 40"));
+	snprintf(b, sizeof b, "%s/proj/src/a.c", rd);
+	CHECK("file: an absolute path without a line: the first 14",
+	      res(b, "proj", 1, &r) == 1 && is(&r, "file", "ok") &&
+	      !strcmp(r.line[0], "line 1") && !strcmp(r.subtitle, "src/a.c"));
+	CHECK("file: :line:col reads the line",
+	      res("src/a.c:20:3", "proj", 1, &r) == 1 &&
+	      !strcmp(r.line[6], "line 20"));
+	CHECK("file: from a subdir cwd, inside the git root: relative to the cwd",
+	      res("a.c:2", "proj/src", 1, &r) == 1 && is(&r, "file", "ok") &&
+	      !strcmp(r.subtitle, "a.c \xc2\xb7 line 2"));
+	put("proj/top.c", "x\n", 2);
+	CHECK("file: in the root, above the cwd: inside, relative to the root",
+	      res("../top.c:1", "proj/src", 1, &r) == 1 && is(&r, "file", "ok") &&
+	      !strcmp(r.subtitle, "top.c \xc2\xb7 line 1"));
+	put("out/y.c", "y\n", 2);
+	CHECK("file: outside the project: outside_project, path only",
+	      res("../out/y.c:1", "proj", 1, &r) == 1 &&
+	      is(&r, "file", "outside_project") && r.nlines == 0);
+	CHECK("file: no git root: the cwd is the boundary",
+	      res("../y.c:1", "out", 1, &r) == 1 &&
+	      is(&r, "file", "outside_project") &&
+	      res("y.c:1", "out", 1, &r) == 1 && is(&r, "file", "ok"));
+	/* a symlinked dir inside out of the project; a symlink as the name */
+	snprintf(b, sizeof b, "%s/out", rd);
+	{
+		char l[PATH_MAX];
+
+		snprintf(l, sizeof l, "%s/proj/sub", rd);
+		ok = symlink(b, l) == 0;
+		snprintf(l, sizeof l, "%s/proj/ln.c", rd);
+		ok = ok && symlink("src/a.c", l) == 0;
+		snprintf(l, sizeof l, "%s/proj/fifo.c", rd);
+		ok = ok && mkfifo(l, 0600) == 0;
+	}
+	CHECK("file: a symlinked dir out of the project: outside_project",
+	      ok && res("sub/y.c:1", "proj", 1, &r) == 1 &&
+	      is(&r, "file", "outside_project") && r.nlines == 0);
+	CHECK("file: a symlink as the name is no block (lstat: not regular)",
+	      res("ln.c:1", "proj", 1, &r) == 0);
+	CHECK("file: a FIFO is no block, and never opened (no hang)",
+	      res("fifo.c:1", "proj", 1, &r) == 0);
+	dir("proj/dir.c");
+	CHECK("file: a directory is no block", res("dir.c:1", "proj", 1, &r) == 0);
+	CHECK("file: a missing file is no block",
+	      res("nope.c:1", "proj", 1, &r) == 0);
+	for (k = 0; secret[k]; k++)
+	{
+		char t[400];
+
+		snprintf(t, sizeof t, "%s/proj/%s:1", rd, secret[k]);
+		snprintf(b, sizeof b, "file: secret name %s: secret_name, unread",
+		         secret[k]);
+		CHECK(b, xr_secret_name(secret[k]) && res(t, "proj", 1, &r) == 1 &&
+		      is(&r, "file", "secret_name") && r.nlines == 0);
+	}
+	CHECK("file: id_rsa.pub, id_x.txt, env.c, a.key.c are not secret names",
+	      !xr_secret_name("id_rsa.pub") && !xr_secret_name("id_x.txt") &&
+	      !xr_secret_name("env.c") && !xr_secret_name("a.key.c") &&
+	      !xr_secret_name("src/keys.c"));
+	if ((buf = malloc(XR_RES_FILE + 1)))
+	{
+		memset(buf, 'a', XR_RES_FILE + 1);
+		buf[10] = '\n';
+		put("proj/big.c", buf, XR_RES_FILE + 1);
+		CHECK("file: 2 MB + 1 is too_large, unread",
+		      res("big.c:1", "proj", 1, &r) == 1 &&
+		      is(&r, "file", "too_large") && r.nlines == 0);
+		put("proj/big.c", buf, XR_RES_FILE);
+		CHECK("file: exactly 2 MB is read",
+		      res("big.c:1", "proj", 1, &r) == 1 && is(&r, "file", "ok"));
+		free(buf);
+	}
+	put("proj/u.c", "ok \xff\xfe end\r\nnul\0here\n", 20);
+	CHECK("file: invalid UTF-8 and NUL as U+FFFD, CR dropped",
+	      res("u.c:1", "proj", 1, &r) == 1 && r.nlines == 2 &&
+	      !strcmp(r.line[0], "ok \xef\xbf\xbd\xef\xbf\xbd end") &&
+	      !strcmp(r.line[1], "nul\xef\xbf\xbdhere"));
+	memset(b, 'w', 900);
+	b[900] = '\n';
+	put("proj/w.c", b, 901);
+	CHECK("file: a line cut to 200 scalars",
+	      res("w.c:1", "proj", 1, &r) == 1 && strlen(r.line[0]) == 200);
+	{
+		const char *h = getenv("HOME");
+		char hb[PATH_MAX], sv[PATH_MAX];
+
+		snprintf(sv, sizeof sv, "%s", h ? h : "");
+		snprintf(hb, sizeof hb, "%s/proj", rd);
+		setenv("HOME", hb, 1);
+		CHECK("file: ~/ is the querying process's HOME",
+		      res("~/src/a.c:3", "proj", 1, &r) == 1 && is(&r, "file", "ok") &&
+		      !strcmp(r.line[2], "line 3"));
+		if (h)
+			setenv("HOME", sv, 1);
+		else
+			unsetenv("HOME");
+	}
+	CHECK("file: an ended session still resolves files",
+	      res("src/a.c:5", "proj", 0, &r) == 1 && is(&r, "file", "ok"));
+	CHECK("ref line: :12, :12:3, #L7, none",
+	      xr_ref_line("a.c:12") == 12 && xr_ref_line("a.c:12:3") == 12 &&
+	      xr_ref_line(" a.c#L7 ") == 7 && xr_ref_line("a/b.c") == 0);
+}
+
+/* A fake git: records its argv and env, then acts as $D/mode says. */
+static void
+fake_git(void)
+{
+	char s[4000];
+	int n = snprintf(s, sizeof s,
+	    "#!/bin/sh\n"
+	    "D='%s'\n"
+	    "printf '%%s\\n' \"$@\" >> \"$D/argv\"; echo -- >> \"$D/argv\"\n"
+	    "/usr/bin/env > \"$D/env\"\n"
+	    "m=$(/bin/cat \"$D/mode\")\n"
+	    "case \"$*\" in *rev-parse*)\n"
+	    "  [ \"$m\" = notrepo ] && { echo false; exit 0; }\n"
+	    "  [ \"$m\" = slowrev ] || { echo true; exit 0; } ;; esac\n"
+	    "case \"$m\" in\n"
+	    "ok) printf '0123456789abcdef0123456789abcdef01234567\\000Ann B\\0001700000000"
+	    "\\000a subject\\n\\n f | 1 +\\n 1 file changed\\n'; exit 0 ;;\n"
+	    "amb) echo 'error: short object ID abcdef1 is ambiguous' >&2; exit 128 ;;\n"
+	    "bad) echo \"fatal: bad object\" >&2; exit 128 ;;\n"
+	    "flood) /usr/bin/yes | /usr/bin/head -c 10000000; "
+	    "/usr/bin/yes e | /usr/bin/head -c 10000000 >&2; exit 0 ;;\n"
+	    "slow|slowrev) echo $$ > \"$D/pid\"; /bin/sleep 30 & /bin/sleep 30 ;;\n"
+	    "esac\n", rd);
+
+	put("git", s, (size_t)n);
+	snprintf(s, sizeof s, "%s/git", rd);
+	chmod(s, 0700);
+}
+
+static void
+mode(const char *m)
+{
+	put("mode", m, strlen(m));
+	put("argv", "", 0);
+}
+
+static char *
+slurp(const char *rel)
+{
+	static char b[8192];
+	char p[PATH_MAX + 64];
+	FILE *f;
+	size_t n = 0;
+
+	snprintf(p, sizeof p, "%s/%s", rd, rel);
+	if ((f = fopen(p, "r")))
+	{
+		n = fread(b, 1, sizeof b - 1, f);
+		fclose(f);
+	}
+	b[n] = '\0';
+	return b;
+}
+
+static void
+t_res_git(void)
+{
+	char git[PATH_MAX], cwd[PATH_MAX], want[4000], gb[PATH_MAX], *e;
+	const char *probe[3] = {"/nonexistent/git", git, NULL};
+	const char *none[2] = {"/nonexistent/git", NULL};
+	struct xr_resolved r;
+	struct xr_span sp;
+	unsigned long s0;
+	long long t0;
+	pid_t pid;
+	int k;
+
+	snprintf(git, sizeof git, "%s/git", rd);
+	snprintf(cwd, sizeof cwd, "%s/proj", rd);
+	fake_git();
+#ifdef __APPLE__
+	CHECK("git probe: never /usr/bin/git on macOS",
+	      !xr_git_bin(gb, sizeof gb) || strcmp(gb, "/usr/bin/git"));
+#endif
+	xr_git_probe = none;
+	s0 = xr_res_spawned;
+	CHECK("git: none found: no_git, \"git is not installed\", 0 spawns",
+	      res("abcdef1", "proj", 1, &r) == 1 && is(&r, "commit", "no_git") &&
+	      !strcmp(r.title, "git is not installed") && xr_res_spawned == s0);
+	xr_git_probe = probe;
+	CHECK("git probe: the first executable in order",
+	      xr_git_bin(gb, sizeof gb) && !strcmp(gb, git));
+	mode("ok");
+	s0 = xr_res_spawned;
+	CHECK("git: an ended session: ended, \"Session ended\", 0 spawns",
+	      res("abcdef1", "proj", 0, &r) == 1 && is(&r, "commit", "ended") &&
+	      !strcmp(r.title, "Session ended") &&
+	      !strcmp(r.subtitle, "abcdef1") && xr_res_spawned == s0);
+	memset(&sp, 0, sizeof sp);
+	sp.shape = XR_COMMIT;
+	snprintf(sp.key, sizeof sp.key, "commit:abcdef1");
+	for (k = 0; k < 4; k++)
+	{
+		static const char *const bad[] = {"ABCDEF1", "-cfoo=1", "abc",
+		                                  "abcdef1 x"};
+
+		snprintf(sp.full, sizeof sp.full, "%s", bad[k]);
+		CHECK("git: a SHA not 7-40 lowercase hex never spawns",
+		      xr_res_ref(&sp, bad[k], cwd, 1, &r) == 0 &&
+		      xr_res_spawned == s0);
+	}
+	CHECK("git: ok: subject, \"author \xc2\xb7 age \xc2\xb7 short\", the stat",
+	      res("abcdef1234", "proj", 1, &r) == 1 && is(&r, "commit", "ok") &&
+	      !strcmp(r.title, "a subject") && r.nlines == 2 &&
+	      !strcmp(r.line[0], " f | 1 +") &&
+	      !strncmp(r.subtitle, "Ann B \xc2\xb7 ", 8) &&
+	      strstr(r.subtitle, "d ago \xc2\xb7 0123456") &&
+	      xr_res_spawned == s0 + 2);
+	snprintf(want, sizeof want,
+	         "--no-pager\n-c\ncore.fsmonitor=\n-c\ncore.hooksPath=/dev/null\n"
+	         "-c\nprotocol.allow=never\n-c\ndiff.external=\n-c\ncolor.ui=never\n"
+	         "-c\nlog.showSignature=false\n-C\n%s\nrev-parse\n"
+	         "--is-inside-work-tree\n--\n"
+	         "--no-pager\n-c\ncore.fsmonitor=\n-c\ncore.hooksPath=/dev/null\n"
+	         "-c\nprotocol.allow=never\n-c\ndiff.external=\n-c\ncolor.ui=never\n"
+	         "-c\nlog.showSignature=false\n-C\n%s\nshow\n--no-color\n"
+	         "--no-ext-diff\n--no-textconv\n--stat=80\n--stat-count=14\n"
+	         "--format=%%H%%x00%%an%%x00%%at%%x00%%s\n--end-of-options\n"
+	         "abcdef1234^{commit}\n--\n", cwd, cwd);
+	CHECK("git: argv exactly 8.3's (plus log.showSignature=false), the SHA "
+	      "after --end-of-options", !strcmp(slurp("argv"), want));
+	e = slurp("env");
+	{
+		static const char *const env[] = {
+			"GIT_CONFIG_NOSYSTEM=1\n", "GIT_CONFIG_GLOBAL=/dev/null\n",
+			"GIT_OPTIONAL_LOCKS=0\n", "GIT_TERMINAL_PROMPT=0\n",
+			"GIT_NO_LAZY_FETCH=1\n", "PATH=/usr/bin:/bin\n",
+			"LANG=en_US.UTF-8\n", "HOME=", NULL
+		};
+		int all = 1, extra = 0;
+		char *l;
+
+		for (k = 0; env[k]; k++)
+			all &= strstr(e, env[k]) != NULL;
+		/* what /bin/sh adds itself */
+		for (l = e; *l; l = strchr(l, '\n') ? strchr(l, '\n') + 1 : l + strlen(l))
+			if (strncmp(l, "GIT_", 4) && strncmp(l, "PATH=", 5) &&
+			    strncmp(l, "LANG=", 5) && strncmp(l, "HOME=", 5) &&
+			    strncmp(l, "PWD=", 4) && strncmp(l, "SHLVL=", 6) &&
+			    strncmp(l, "_=", 2) && strncmp(l, "OLDPWD=", 7) &&
+			    strncmp(l, "__CF_USER_TEXT_ENCODING=", 24))
+				extra = 1;
+		CHECK("git: env exactly 8.3's list, nothing else inherited",
+		      all && !extra && !strstr(e, "GIT_CONFIG_PARAMETERS"));
+		if (!all || extra)
+			printf("%s\n", e);
+	}
+	CHECK("git: a 40-hex SHA reaches git whole, ^{commit} after it",
+	      res("0123456789abcdef0123456789abcdef01234567", "proj", 1, &r) == 1 &&
+	      is(&r, "commit", "ok") &&
+	      strstr(slurp("argv"), "\n--end-of-options\n"
+	             "0123456789abcdef0123456789abcdef01234567^{commit}\n--\n"));
+	mode("notrepo");
+	CHECK("git: rev-parse says false: not_repo, show never runs",
+	      res("abcdef1", "proj", 1, &r) == 1 && is(&r, "commit", "not_repo") &&
+	      !strcmp(r.title, "Not in a git repository") &&
+	      !strstr(slurp("argv"), "show\n"));
+	mode("amb");
+	CHECK("git: \"is ambiguous\": ambiguous",
+	      res("abcdef1", "proj", 1, &r) == 1 && is(&r, "commit", "ambiguous") &&
+	      !strcmp(r.title, "Ambiguous short SHA"));
+	mode("bad");
+	CHECK("git: anything else: not_commit, named by the git root",
+	      res("abcdef1", "proj/src", 1, &r) == 1 &&
+	      is(&r, "commit", "not_commit") &&
+	      !strcmp(r.title, "Not a commit in proj"));
+	CHECK("git: a relative or empty cwd: not_repo, no spawn",
+	      (s0 = xr_res_spawned, 1) &&
+	      xr_ref_parse("abcdef1", NULL, &sp) &&
+	      xr_res_ref(&sp, "abcdef1", "", 1, &r) == 1 &&
+	      is(&r, "commit", "not_repo") && xr_res_spawned == s0);
+	mode("flood");
+	t0 = xr_now_ms();
+	CHECK("git: a 10 MB flood on both pipes is drained, git exits",
+	      res("abcdef1", "proj", 1, &r) == 1 &&
+	      is(&r, "commit", "not_commit") && xr_now_ms() - t0 < XR_GIT_MS);
+	for (k = 0; k < 2; k++)
+	{
+		mode(k ? "slowrev" : "slow");
+		put("pid", "", 0);
+		t0 = xr_now_ms();
+		CHECK(k ? "git: a slow rev-parse: timeout" :
+		      "git: a slow show: timeout, \"git timed out after 3 s\"",
+		      res("abcdef1", "proj", 1, &r) == 1 &&
+		      is(&r, "commit", "timeout") &&
+		      !strcmp(r.title, "git timed out after 3 s"));
+		t0 = xr_now_ms() - t0;
+		CHECK("git: the timeout is 3 s (one deadline for both runs)",
+		      t0 >= XR_GIT_MS - 50 && t0 < XR_GIT_MS + 1500);
+		pid = (pid_t)atoi(slurp("pid"));
+		t0 = xr_now_ms();
+		while (pid > 0 && !(kill(-pid, 0) == -1 && errno == ESRCH) &&
+		       xr_now_ms() - t0 < 5000)
+			usleep(10000);
+		CHECK("git: the timeout ends git's whole group (kill(-pgid, 0): ESRCH)",
+		      pid > 0 && kill(-pid, 0) == -1 && errno == ESRCH);
+	}
+	/* 3.7: SIGTERM to the querying process takes git's group with it */
+	mode("slow");
+	put("pid", "", 0);
+	if ((pid = fork()) == 0)
+	{
+		(void)res("abcdef1", "proj", 1, &r);
+		_exit(0);
+	}
+	{
+		pid_t g = 0;
+		int st = 0;
+
+		t0 = xr_now_ms();
+		while (pid > 0 && !(g = (pid_t)atoi(slurp("pid"))) &&
+		       xr_now_ms() - t0 < 2000)
+			usleep(10000);
+		usleep(50000);	/* the slow show itself, past the pid write */
+		if (pid > 0)
+			kill(pid, SIGTERM);
+		if (pid > 0)
+			waitpid(pid, &st, 0);
+		/* killed at once; EPERM while init holds the zombies, then gone */
+		t0 = xr_now_ms();
+		while (g > 0 && !(kill(-g, 0) == -1 && errno == ESRCH) &&
+		       xr_now_ms() - t0 < 5000)
+			usleep(10000);
+		CHECK("git: SIGTERM ends the querying process, git's group with it",
+		      g > 0 && WIFSIGNALED(st) && WTERMSIG(st) == SIGTERM &&
+		      kill(-g, 0) == -1 && errno == ESRCH);
+	}
+	xr_git_probe = NULL;
+}
+
+static void
+t_res_parse(void)
+{
+	struct xr_resolved r;
+	char b[4000];
+	size_t n, k;
+
+	n = (size_t)snprintf(b, sizeof b, "%s", "0123456789abcdef0123456789abcdef"
+	                     "01234567");
+	memcpy(b + n, "\0A\0" "100\0sub\xff\n\n", 13);
+	n += 13;
+	for (k = 0; k < 16; k++)
+		n += (size_t)snprintf(b + n, sizeof b - n, " f%zu | 1 +\n", k);
+	n += (size_t)snprintf(b + n, sizeof b - n, " 16 files changed\n");
+	CHECK("git parse: past 14 stat lines, the first 13 and the summary",
+	      xr_git_parse(b, n, 100 + 7200, &r) == 1 && r.nlines == 14 &&
+	      !strcmp(r.line[12], " f12 | 1 +") &&
+	      !strcmp(r.line[13], " 16 files changed") &&
+	      !strcmp(r.title, "sub\xef\xbf\xbd") &&
+	      !strcmp(r.subtitle, "A \xc2\xb7 2h ago \xc2\xb7 0123456"));
+	CHECK("git parse: age now, minutes, days",
+	      xr_git_parse(b, n, 100, &r) && strstr(r.subtitle, " now ") &&
+	      xr_git_parse(b, n, 100 + 300, &r) && strstr(r.subtitle, "5m ago") &&
+	      xr_git_parse(b, n, 100 + 3 * 86400, &r) &&
+	      strstr(r.subtitle, "3d ago"));
+	CHECK("git parse: a short hash, a missing field, a non-digit time: no",
+	      !xr_git_parse("abc\0A\0" "1\0s\n", 10, 0, &r) &&
+	      !xr_git_parse(b, 45, 0, &r) &&
+	      !xr_git_parse("0123456789abcdef0123456789abcdef01234567\0A\0x\0s",
+	                    46, 0, &r));
+}
+
+static void
+t_resolve(void)
+{
+	char d[] = "/tmp/xray_res.XXXXXX", cmd[PATH_MAX + 16], real[PATH_MAX];
+
+	if (!mkdtemp(d) || !realpath(d, real) ||
+	    snprintf(rd, sizeof rd, "%s", real) >= (int)sizeof rd)
+	{
+		CHECK("resolve: temp dir", 0);
+		return;
+	}
+	t_res_parse();
+	t_res_file();
+	t_res_git();
+	snprintf(cmd, sizeof cmd, "rm -rf '%s'", rd);
+	(void)!system(cmd);
+}
+
 int
 main(void)
 {
@@ -1698,6 +2173,7 @@ main(void)
 	t_scan_scope();
 	t_lookup();
 	t_chapter();
+	t_resolve();
 	printf("%s: %d failed\n", fails ? "FAIL" : "ok", fails);
 	return fails != 0;
 }

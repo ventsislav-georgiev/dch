@@ -980,7 +980,7 @@ fi
 if $xcc -O1 -I"$xsrc" -I. -o "$TMP/xray_unit" "$xsrc/tests/xray_unit.c" \
     "$xsrc/xray.c" "$xsrc/json.c" >"$TMP/xray_unit.log" 2>&1; then
     if "$TMP/xray_unit" >"$TMP/xray_unit.log" 2>&1; then
-        ok "xray units: titles, project key, ids, the seam, decoder caps"
+        ok "xray units: titles, project key, ids, the seam, decoder caps, resolvers"
     else
         bad "xray units"; grep -v '^  ok' "$TMP/xray_unit.log" | sed 's/^/       /'
     fi
@@ -1009,8 +1009,10 @@ if [ "$MIRROR" = "1" ]; then
     # pyrun shows a passing test's own skip lines only on failure
     [ -n "${ASAN_OPTIONS:-}" ] &&
         printf '  skip xray: the 16 MiB RSS budget (sanitizer build)\n'
+    pyrun "xray resolvers: commit and file, the hostile-repo sentinel" xray_resolve_test.py
 else
     skipmirror "xray: a typed shell block, --clear, a live Claude, the seam, names"
+    skipmirror "xray resolvers: commit and file, the hostile-repo sentinel"
 fi
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

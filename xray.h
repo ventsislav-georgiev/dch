@@ -382,4 +382,44 @@ void xr_claude_entries(struct xr_claude *d, struct xr_entries *e,
 int xr_chapter_print(FILE *f, const char *session, const char *session_id,
                      const struct xr_chapter *c, const struct xr_entries *e);
 
+/* ---- resolvers (XR6, K13; spec 3.7, 8.3) ------------------------------- */
+/* The one place the engine runs a program: git, for a commit ref, in the
+** querying process (never a master), with 8.3's probe, argv and env. */
+#define XR_RES_LINES   14		/* lines per block (3.7) */
+#define XR_RES_LINE    200		/* scalars per line and subtitle */
+#define XR_RES_FILE    (2u << 20)	/* the file cap (v2.1 7.1: 2 MB) */
+#define XR_GIT_MS      3000		/* 8.3: "git timed out after 3 s" */
+struct xr_resolved
+{
+	const char *kind, *state;	/* 3.7's enums */
+	char title[XR_TITLE_MAX * 4 + 1];
+	char subtitle[XR_RES_LINE * 4 + 1];
+	char line[XR_RES_LINES][XR_RES_LINE * 4 + 1];
+	int nlines;
+};
+/* Resolve sp (a commit or file span of --ref's text, against the session's
+** cwd; live 0: an ended session, which never runs git). 1 with *r filled,
+** 0 for no resolved line (another shape, a missing or non-regular file). */
+int xr_res_ref(const struct xr_span *sp, const char *text, const char *cwd,
+               int live, struct xr_resolved *r);
+/* --full only: the resolved line, under the output cap; the one call site
+** per session kind, before done. */
+void xr_scan_resolved(struct xr_scan *x, const struct xr_span *sp,
+                      const char *text, const char *cwd, int live);
+/* The parsers, for the units and fuzz_xref: git show's output as a commit
+** block (1, else 0); a file's 14-line window around line (0: the first);
+** --ref's line suffix (:line, :line:col, #L<line>; 0 for none); the
+** secret-name list over a relative path (1: never read). */
+int xr_git_parse(const char *s, size_t n, long long now,
+                 struct xr_resolved *r);
+void xr_file_lines(const char *s, size_t n, long line,
+                   struct xr_resolved *r);
+long xr_ref_line(const char *text);
+int xr_secret_name(const char *rel);
+/* Test seams: the probe list (NULL: 8.3's for this OS), the probe's pick
+** (NULL: none), and the git spawns so far. */
+extern const char *const *xr_git_probe;
+const char *xr_git_bin(char *buf, size_t bufsz);
+extern unsigned long xr_res_spawned;
+
 #endif /* DCH_XRAY_H */

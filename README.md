@@ -1081,6 +1081,47 @@ silently too. Any other write failure prints `dch: X-ray failed on this
 session` and exits 3. SIGTERM ends
 it at once, with no `done` either.
 
+With `--full`, a commit or file ref also gets one `resolved` line, just
+before `done`: `{"schema":1,"resolved":{"kind","state","title","subtitle","lines"}}`,
+`kind` `"commit"` or `"file"`, `lines` at most 14, each at most 200
+characters; the light scan never resolves. Every string is the text with
+invalid UTF-8 and NUL as U+FFFD, the controls JSON-escaped.
+
+- **Commit.** The SHA is checked again (7 to 40 lowercase hex). An ended
+  session runs nothing: `state: "ended"`. Otherwise dch runs git directly,
+  never through a shell: on macOS the first of the Command Line Tools git,
+  the git under `/var/db/xcode_select_link`, Xcode.app's,
+  `/opt/homebrew/bin/git` and `/usr/local/bin/git` (never `/usr/bin/git`,
+  the shim that can prompt to install them); elsewhere `/usr/bin/git`, then
+  `/usr/local/bin/git`; none is `no_git`. The argv is
+  `git --no-pager -c core.fsmonitor= -c core.hooksPath=/dev/null -c protocol.allow=never -c diff.external= -c color.ui=never -c log.showSignature=false -C <cwd>`,
+  then `rev-parse --is-inside-work-tree` (not `true`: `not_repo`), then
+  `show --no-color --no-ext-diff --no-textconv --stat=80 --stat-count=14 --format=%H%x00%an%x00%at%x00%s --end-of-options <sha>^{commit}`.
+  The environment is only `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`,
+  `GIT_OPTIONAL_LOCKS=0`, `GIT_TERMINAL_PROMPT=0`, `GIT_NO_LAZY_FETCH=1`,
+  `PATH=/usr/bin:/bin`, `HOME` and `LANG=en_US.UTF-8`; stdin is
+  `/dev/null`, and on macOS no other fd is inherited.
+  Both runs share one 3 s deadline (`timeout`: git's process group gets
+  SIGTERM, then SIGKILL a second later); dch keeps 64 KiB of
+  its output and 4 KiB of its errors and drains the rest. `ok` gives the
+  subject as `title`, `author · 3h ago · abc1234` as `subtitle` and the
+  stat as `lines` (past 14: the first 13 and the summary); a short SHA
+  matching several objects is `ambiguous`, anything else git refuses
+  `not_commit`.
+- **File.** The ref's path (a relative one against the session's cwd, a
+  `~/` one against `HOME`), in an ended session too, must lie inside the
+  project: the cwd's git root (the nearest parent holding `.git`), else the
+  cwd. Outside it is `outside_project` and nothing is touched; a path any of
+  whose parts under the root starts with `.env`, `.ssh`, `.gnupg`, `.aws`,
+  `.netrc`, `.npmrc`, `.pypirc` or `.git-credentials`, or whose name ends in
+  `.pem`, `.key`, `.p12`, `.keychain` or `.keychain-db`, or is an `id_` name
+  with no dot, is `secret_name` and is not opened. Both checks run again on
+  the real path. Over 2 MB is `too_large`. `ok` reads it with no symlink
+  followed and gives the name as `title`, the path from the cwd (`· line N`
+  with one) as `subtitle`, and up to 14 lines with line N the seventh, CRs
+  dropped. A path
+  that is gone, a symlink or not a regular file gives no `resolved` line.
+
 `dch --xray <n> --follow --json` streams NDJSON, each line with
 `schema:1`. The first line is `{"schema":1,"snapshot":{…}}`, holding the
 `--json` object. Then come deltas as the corpus grows, at most one batch

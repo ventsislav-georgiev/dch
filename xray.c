@@ -14,10 +14,15 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <poll.h>
+#include <signal.h>
+#include <spawn.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <time.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "bridge.h"
@@ -6281,4 +6286,744 @@ xr_chapter_print(FILE *f, const char *session, const char *session_id,
 		fwrite(e->buf, 1, e->len, f);
 	fprintf(f, "],\"truncated\":%s}\n", e->truncated ? "true" : "false");
 	return fflush(f) != 0 || ferror(f) ? -1 : 0;
+}
+
+/* ---- resolvers (XR6, K13; spec 3.7, 8.3) ------------------------------- */
+
+const char *const *xr_git_probe;
+unsigned long xr_res_spawned;
+
+#define RES_OUT_MAX (64u << 10)	/* git's stdout kept; the rest drained */
+#define RES_ERR_MAX 4096
+
+/* s[0..n) into o (cap * 4 + 1 bytes): at most cap scalars, invalid UTF-8
+** and NUL as U+FFFD; the JSON writer escapes the controls. */
+static void
+res_text(char *o, const char *s, size_t n, size_t cap)
+{
+	size_t i = 0, a, k = 0, w = 0;
+
+	while (i < n && k++ < cap)
+	{
+		uint32_t c = u8_next((const unsigned char *)s + i, n - i, &a);
+
+		w += u8_put(o + w, c ? c : 0xfffd);
+		i += a;
+	}
+	o[w] = '\0';
+}
+
+static void
+res_set(struct xr_resolved *r, const char *state, const char *title)
+{
+	r->state = state;
+	snprintf(r->title, sizeof r->title, "%s", title);
+}
+
+/* "<git root>/.git" exists, walking up from cwd by its text alone: root,
+** else cwd itself (v2.1 7.1's project boundary). 1 when a root was found. */
+static int
+res_root(const char *cwd, char *root, size_t rootsz)
+{
+	char p[PATH_MAX + 8];
+	struct stat st;
+	size_t l = strlen(cwd);
+
+	snprintf(root, rootsz, "%s", cwd);
+	if (cwd[0] != '/' || l >= PATH_MAX)
+		return 0;
+	memcpy(p, cwd, l + 1);
+	while (l > 1 && p[l - 1] == '/')
+		l--;
+	for (;;)	/* p[0..l) the dir; l 0 is "/" */
+	{
+		memcpy(p + l, "/.git", 6);
+		if (lstat(p, &st) == 0)
+		{
+			snprintf(root, rootsz, "%.*s", (int)(l ? l : 1), l ? p : "/");
+			return 1;
+		}
+		if (!l)
+			return 0;
+		while (l && p[l - 1] != '/')
+			l--;
+		if (l)
+			l--;
+	}
+}
+
+/* p inside root (lexically): the part after it, "" for root itself. */
+static const char *
+res_under(const char *p, const char *root)
+{
+	size_t rl = strlen(root);
+
+	if (rl == 1 && root[0] == '/')
+		return p[0] == '/' ? p + 1 : NULL;
+	if (strncmp(p, root, rl) || (p[rl] && p[rl] != '/'))
+		return NULL;
+	return p[rl] ? p + rl + 1 : p + rl;
+}
+
+/* ---- git (8.3) ---- */
+
+static int
+res_exec(const char *p)
+{
+	struct stat st;
+
+	return stat(p, &st) == 0 && S_ISREG(st.st_mode) && access(p, X_OK) == 0;
+}
+
+/* 8.3's probe, no process run. On macOS /usr/bin/git is never a pick: the
+** shim opens the install dialog without a developer dir, and with one, that
+** dir's own git is found first. */
+const char *
+xr_git_bin(char *buf, size_t bufsz)
+{
+#ifdef __APPLE__
+	static const char *const def[] = {
+		"/Library/Developer/CommandLineTools/usr/bin/git",
+		"/var/db/xcode_select_link",
+		"/Applications/Xcode.app/Contents/Developer/usr/bin/git",
+		"/opt/homebrew/bin/git", "/usr/local/bin/git", NULL
+	};
+#else
+	/* 13.2 item 4 */
+	static const char *const def[] = {"/usr/bin/git", "/usr/local/bin/git",
+	                                  NULL};
+#endif
+	const char *const *v = xr_git_probe ? xr_git_probe : def;
+	size_t k;
+
+	for (k = 0; v[k]; k++)
+	{
+		char d[PATH_MAX];
+		ssize_t l;
+
+		if (!strcmp(v[k], "/var/db/xcode_select_link"))
+		{
+			/* step 2: usr/bin/git under the dir that link names */
+			if ((l = readlink(v[k], d, sizeof d - 1)) <= 0)
+				continue;
+			d[l] = '\0';
+			if (d[0] != '/' || snprintf(buf, bufsz, "%s/usr/bin/git", d)
+			    >= (int)bufsz || !res_exec(buf))
+				continue;
+			return buf;
+		}
+		if (res_exec(v[k]))
+			return snprintf(buf, bufsz, "%s", v[k]) < (int)bufsz ? buf
+			       : NULL;
+	}
+	return NULL;
+}
+
+struct res_run
+{
+	char out[RES_OUT_MAX + 1], err[RES_ERR_MAX + 1];
+	size_t on, en;
+	int status;
+};
+
+/* The running git's group, for the signal handler (3.7). */
+static volatile sig_atomic_t res_pg;
+static const int res_sigs[] = {SIGTERM, SIGINT, SIGHUP};
+
+/* The querying process is ending: the group goes with it (3.7, #833). */
+static void
+res_sig(int sig)
+{
+	if (res_pg > 0)
+		kill(-(pid_t)res_pg, SIGKILL);
+	signal(sig, SIG_DFL);
+	raise(sig);
+}
+
+static void
+res_keep(char *b, size_t *bn, size_t cap, const char *s, ssize_t n)
+{
+	size_t k = (size_t)n < cap - *bn ? (size_t)n : cap - *bn;
+
+	memcpy(b + *bn, s, k);
+	*bn += k;
+	b[*bn] = '\0';
+}
+
+/* Reap pid, by `until` (ms), else end its group: SIGTERM, a 1 s grace,
+** SIGKILL (#833). 0 exited (*st), 1 timed out. */
+static int
+res_reap(pid_t pid, long long until, int *st)
+{
+	long long grace;
+	pid_t w;
+
+	while ((w = waitpid(pid, st, WNOHANG)) == 0 && xr_now_ms() < until)
+		poll(NULL, 0, 10);
+	if (w == pid)
+		return 0;
+	kill(-pid, SIGTERM);
+	for (grace = xr_now_ms() + 1000;
+	     (w = waitpid(pid, st, WNOHANG)) == 0 && xr_now_ms() < grace;)
+		poll(NULL, 0, 20);
+	kill(-pid, SIGKILL);	/* what ignored SIGTERM, the leader's kids */
+	if (w == 0)
+		(void)waitpid(pid, st, 0);
+	return 1;
+}
+
+/* One git run: argv as built, env exactly envp, stdin /dev/null, its own
+** group (3.7), stdout and stderr kept to their caps and drained past them
+** so git never blocks on a pipe. 0 ran (r->status), 1 timed out (the group
+** ended), -1 not run. */
+static int
+res_run(char *const argv[], char *const envp[], long long until,
+        struct res_run *r)
+{
+	posix_spawn_file_actions_t fa;
+	posix_spawnattr_t at;
+	struct sigaction sa, old[3];
+	struct pollfd p[2];
+	sigset_t set, omask;
+	int po[2] = {-1, -1}, pe[2] = {-1, -1}, k, st = 0, timed = 0, rc;
+	short fl = POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGMASK |
+	           POSIX_SPAWN_SETSIGDEF;
+	pid_t pid;
+
+	r->on = r->en = 0;
+	r->out[0] = r->err[0] = '\0';
+	r->status = -1;
+	if (pipe(po) != 0 || pipe(pe) != 0)
+	{
+		for (k = 0; k < 2; k++)
+			if (po[k] >= 0)
+				close(po[k]);
+		return -1;
+	}
+	for (k = 0; k < 2; k++)
+	{
+		fcntl(po[k], F_SETFD, FD_CLOEXEC);
+		fcntl(pe[k], F_SETFD, FD_CLOEXEC);
+	}
+	posix_spawn_file_actions_init(&fa);
+	posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
+	posix_spawn_file_actions_adddup2(&fa, po[1], 1);
+	posix_spawn_file_actions_adddup2(&fa, pe[1], 2);
+	posix_spawnattr_init(&at);
+#ifdef POSIX_SPAWN_CLOEXEC_DEFAULT
+	fl |= POSIX_SPAWN_CLOEXEC_DEFAULT;	/* no other fd of ours */
+#endif
+	posix_spawnattr_setflags(&at, fl);
+	posix_spawnattr_setpgroup(&at, 0);
+	sigemptyset(&set);
+	posix_spawnattr_setsigmask(&at, &set);
+	sigaddset(&set, SIGPIPE);
+	for (k = 0; k < 3; k++)
+		sigaddset(&set, res_sigs[k]);
+	posix_spawnattr_setsigdefault(&at, &set);
+	/* no window where git runs and a SIGTERM would miss its group */
+	sigprocmask(SIG_BLOCK, &set, &omask);
+	rc = posix_spawn(&pid, argv[0], &fa, &at, argv, envp);
+	if (rc == 0)
+	{
+		xr_res_spawned++;
+		res_pg = pid;
+		memset(&sa, 0, sizeof sa);
+		sa.sa_handler = res_sig;
+		for (k = 0; k < 3; k++)
+			if (sigaction(res_sigs[k], NULL, &old[k]) != 0)
+				old[k].sa_handler = SIG_IGN;	/* left alone */
+			else if (old[k].sa_handler != SIG_IGN)
+				sigaction(res_sigs[k], &sa, NULL);
+	}
+	sigprocmask(SIG_SETMASK, &omask, NULL);
+	posix_spawn_file_actions_destroy(&fa);
+	posix_spawnattr_destroy(&at);
+	close(po[1]);
+	close(pe[1]);
+	p[0].fd = po[0];
+	p[1].fd = pe[0];
+	p[0].events = p[1].events = POLLIN;
+	while (rc == 0 && (p[0].fd >= 0 || p[1].fd >= 0))
+	{
+		long long left = until - xr_now_ms();
+		char b[4096];
+		ssize_t n;
+
+		if (left <= 0)
+		{
+			timed = 1;
+			break;
+		}
+		if (poll(p, 2, (int)left) < 0)
+		{
+			if (errno == EINTR)
+				continue;
+			break;
+		}
+		for (k = 0; k < 2; k++)
+		{
+			if (p[k].fd < 0 || !p[k].revents)
+				continue;
+			if ((n = read(p[k].fd, b, sizeof b)) > 0)
+			{
+				if (k == 0)
+					res_keep(r->out, &r->on, RES_OUT_MAX, b, n);
+				else
+					res_keep(r->err, &r->en, RES_ERR_MAX, b, n);
+			}
+			else if (n == 0 || errno != EINTR)
+			{
+				close(p[k].fd);
+				p[k].fd = -1;
+			}
+		}
+	}
+	for (k = 0; k < 2; k++)
+		if (p[k].fd >= 0)
+			close(p[k].fd);
+	if (rc != 0)
+		return -1;
+	timed = res_reap(pid, timed ? 0 : until, &st) || timed;
+	sigprocmask(SIG_BLOCK, &set, &omask);
+	res_pg = 0;
+	for (k = 0; k < 3; k++)
+		if (old[k].sa_handler != SIG_IGN)
+			sigaction(res_sigs[k], &old[k], NULL);
+	sigprocmask(SIG_SETMASK, &omask, NULL);
+	r->status = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+	return timed;
+}
+
+static int
+res_hex(const char *s, size_t n)
+{
+	size_t k;
+
+	for (k = 0; k < n; k++)
+		if (!A_HEX((unsigned char)s[k]))
+			return 0;
+	return 1;
+}
+
+int
+xr_git_parse(const char *s, size_t n, long long now, struct xr_resolved *r)
+{
+	const char *f[4], *ls[64];
+	size_t fl[4], ll[64], i = 0, k, nl = 0;
+	char who[1200], age[32];
+	long long at = 0, d;
+
+	for (k = 0; k < 3; k++)
+	{
+		const char *z = memchr(s + i, '\0', n - i);
+
+		if (!z)
+			return 0;
+		f[k] = s + i;
+		fl[k] = (size_t)(z - f[k]);
+		i += fl[k] + 1;
+	}
+	f[3] = s + i;
+	for (fl[3] = 0; i + fl[3] < n && s[i + fl[3]] != '\n'; fl[3]++)
+		;
+	i += fl[3];
+	if ((fl[0] != 40 && fl[0] != 64) || !res_hex(f[0], fl[0]) ||
+	    !fl[2] || fl[2] > 15)
+		return 0;
+	for (k = 0; k < fl[2]; k++)
+	{
+		if (!A_DIG((unsigned char)f[2][k]))
+			return 0;
+		at = at * 10 + (f[2][k] - '0');
+	}
+	xr_title(f[3], fl[3], r->title, sizeof r->title);
+	/* the picker's short age: now, 22m, 3h, 2d */
+	d = now > at ? now - at : 0;
+	if (d < 60)
+		snprintf(age, sizeof age, "now");
+	else
+		snprintf(age, sizeof age, "%lld%s ago", d < 3600 ? d / 60 : d < 86400
+		         ? d / 3600 : d / 86400, d < 3600 ? "m" : d < 86400 ? "h"
+		         : "d");
+	k = (size_t)snprintf(who, sizeof who, "%.*s \xc2\xb7 %s \xc2\xb7 %.7s",
+	                     (int)(fl[1] < 800 ? fl[1] : 800), f[1], age, f[0]);
+	res_text(r->subtitle, who, k < sizeof who ? k : sizeof who - 1,
+	         XR_RES_LINE);
+	/* the stat: its rows, then the summary; past 14, the first 13 and it */
+	while (i < n)
+	{
+		size_t e = i;
+
+		while (e < n && s[e] != '\n')
+			e++;
+		if (e > i && nl < 64)
+		{
+			ls[nl] = s + i;
+			ll[nl++] = e - i;
+		}
+		i = e + 1;
+	}
+	for (k = 0; k < nl && k < XR_RES_LINES; k++)
+	{
+		size_t j = nl > XR_RES_LINES && k == XR_RES_LINES - 1 ? nl - 1 : k;
+
+		res_text(r->line[k], ls[j], ll[j], XR_RES_LINE);
+	}
+	r->nlines = (int)k;
+	r->kind = "commit";
+	r->state = "ok";
+	return 1;
+}
+
+/* GitCommitResolver (8.3): rev-parse, then show, under one 3 s deadline. */
+static int
+res_commit(const char *sha, const char *cwd, int live,
+           struct xr_resolved *r)
+{
+	static struct res_run run;	/* 68 KB: off the stack */
+	char git[PATH_MAX], dir[PATH_MAX], rev[64], home[PATH_MAX + 8];
+	char root[PATH_MAX], name[300], *av[40], *env[9];
+	const char *h = getenv("HOME"), *b;
+	size_t n = strlen(sha), k, e = 0, a = 0;
+	long long until;
+	int rc;
+
+	/* 8.3: checked again, 7-40 lowercase hex, so it is never an option */
+	if (n < 7 || n > 40 || !res_hex(sha, n))
+		return 0;
+	r->kind = "commit";
+	snprintf(r->subtitle, sizeof r->subtitle, "%.7s", sha);
+	if (!live)
+	{
+		res_set(r, "ended", "Session ended");	/* v2.1 7.1 */
+		return 1;
+	}
+	if (!xr_git_bin(git, sizeof git))
+	{
+		res_set(r, "no_git", "git is not installed");
+		return 1;
+	}
+	if (cwd[0] != '/' || snprintf(dir, sizeof dir, "%s", cwd)
+	    >= (int)sizeof dir)
+	{
+		res_set(r, "not_repo", "Not in a git repository");
+		return 1;
+	}
+	snprintf(rev, sizeof rev, "%s^{commit}", sha);
+	/* exactly 8.3's list; HOME as the querying process has it */
+	{
+		static char e0[] = "GIT_CONFIG_NOSYSTEM=1",
+		            e1[] = "GIT_CONFIG_GLOBAL=/dev/null",
+		            e2[] = "GIT_OPTIONAL_LOCKS=0",
+		            e3[] = "GIT_TERMINAL_PROMPT=0",
+		            e4[] = "GIT_NO_LAZY_FETCH=1", e5[] = "PATH=/usr/bin:/bin",
+		            e6[] = "LANG=en_US.UTF-8";
+		char *v[] = {e0, e1, e2, e3, e4, e5, e6};
+
+		for (k = 0; k < 7; k++)
+			env[e++] = v[k];
+		if (h && snprintf(home, sizeof home, "HOME=%s", h)
+		    < (int)sizeof home)
+			env[e++] = home;
+		env[e] = NULL;
+	}
+	{
+		/* 8.3's argv verbatim, plus log.showSignature=false: a repo's
+		** log.showSignature and gpg.program would run that program on a
+		** signed commit (#159's sentinel test) */
+		static char g0[] = "--no-pager", c[] = "-c",
+		            g1[] = "core.fsmonitor=", g2[] = "core.hooksPath=/dev/null",
+		            g3[] = "protocol.allow=never", g4[] = "diff.external=",
+		            g5[] = "color.ui=never", g6[] = "log.showSignature=false",
+		            g7[] = "-C";
+		char *v[] = {g0, c, g1, c, g2, c, g3, c, g4, c, g5, c, g6, g7};
+
+		av[a++] = git;
+		for (k = 0; k < sizeof v / sizeof *v; k++)
+			av[a++] = v[k];
+		av[a++] = dir;
+	}
+	until = xr_now_ms() + XR_GIT_MS;
+	{
+		static char s0[] = "rev-parse", s1[] = "--is-inside-work-tree";
+
+		av[a] = s0;
+		av[a + 1] = s1;
+		av[a + 2] = NULL;
+	}
+	if ((rc = res_run(av, env, until, &run)) < 0)
+		return 0;
+	if (rc == 0 && (run.status != 0 || strcmp(run.out, "true\n")))
+	{
+		res_set(r, "not_repo", "Not in a git repository");
+		return 1;
+	}
+	if (rc == 0)
+	{
+		static char s0[] = "show", s1[] = "--no-color", s2[] = "--no-ext-diff",
+		            s3[] = "--no-textconv", s4[] = "--stat=80",
+		            s5[] = "--stat-count=14",
+		            s6[] = "--format=%H%x00%an%x00%at%x00%s",
+		            s7[] = "--end-of-options";
+		char *v[] = {s0, s1, s2, s3, s4, s5, s6, s7};
+
+		for (k = 0; k < sizeof v / sizeof *v; k++)
+			av[a + k] = v[k];
+		av[a + k] = rev;	/* after --end-of-options: never an option */
+		av[a + k + 1] = NULL;
+		if ((rc = res_run(av, env, until, &run)) < 0)
+			return 0;
+	}
+	if (rc == 1)
+	{
+		res_set(r, "timeout", "git timed out after 3 s");
+		return 1;
+	}
+	if (run.status == 0 &&
+	    xr_git_parse(run.out, run.on, (long long)time(NULL), r))
+		return 1;
+	if (strstr(run.err, " is ambiguous"))
+	{
+		res_set(r, "ambiguous", "Ambiguous short SHA");
+		return 1;
+	}
+	(void)res_root(dir, root, sizeof root);
+	b = strrchr(root, '/');
+	res_text(name, b && b[1] ? b + 1 : root, strlen(b && b[1] ? b + 1 : root),
+	         60);
+	r->state = "not_commit";
+	snprintf(r->title, sizeof r->title, "Not a commit in %s", name);
+	return 1;
+}
+
+/* ---- files (v2.1 7.1, v1 7.3) ---- */
+
+long
+xr_ref_line(const char *text)
+{
+	const char *p = text + strcspn(text, ":#");
+	long v = 0;
+	int d;
+
+	if (p[0] == ':')
+		p++;
+	else if (p[0] == '#' && p[1] == 'L')
+		p += 2;
+	else
+		return 0;
+	for (d = 0; d < 7 && A_DIG((unsigned char)p[d]); d++)
+		v = v * 10 + (p[d] - '0');
+	return v;
+}
+
+int
+xr_secret_name(const char *rel)
+{
+	static const char *const pre[] = {
+		".env", ".ssh", ".gnupg", ".aws", ".netrc", ".npmrc", ".pypirc",
+		".git-credentials", NULL
+	};
+	static const char *const suf[] = {
+		".pem", ".key", ".p12", ".keychain", ".keychain-db", NULL
+	};
+	const char *c = rel, *e;
+	size_t l, k;
+
+	for (; *c; c = *e ? e + 1 : e)
+	{
+		e = c + strcspn(c, "/");
+		l = (size_t)(e - c);
+		for (k = 0; pre[k]; k++)
+			if (l >= strlen(pre[k]) && !memcmp(c, pre[k], strlen(pre[k])))
+				return 1;
+		if (*e)
+			continue;
+		/* the name itself */
+		for (k = 0; suf[k]; k++)
+			if (l > strlen(suf[k]) &&
+			    !memcmp(e - strlen(suf[k]), suf[k], strlen(suf[k])))
+				return 1;
+		/* id_rsa, id_ed25519: no extension (so never id_rsa.pub) */
+		if (l > 3 && !memcmp(c, "id_", 3) && !memchr(c, '.', l))
+			return 1;
+	}
+	return 0;
+}
+
+void
+xr_file_lines(const char *s, size_t n, long line, struct xr_resolved *r)
+{
+	size_t i, total = 0, start = 0, ln = 0;
+
+	for (i = 0; i < n; i++)
+		total += s[i] == '\n';
+	total += n && s[n - 1] != '\n';
+	/* line N seventh, the window kept whole at either end */
+	if (line > 7)
+		start = (size_t)line - 7;
+	if (total > XR_RES_LINES && start > total - XR_RES_LINES)
+		start = total - XR_RES_LINES;
+	if (total <= XR_RES_LINES)
+		start = 0;
+	r->nlines = 0;
+	for (i = 0; i < n && r->nlines < XR_RES_LINES; ln++)
+	{
+		size_t e = i;
+
+		while (e < n && s[e] != '\n')
+			e++;
+		if (ln >= start)
+			res_text(r->line[r->nlines++], s + i,
+			         e - i - (e > i && s[e - 1] == '\r'), XR_RES_LINE);
+		i = e + 1;
+	}
+}
+
+/* FileResolver: the key's path, inside the project (the cwd's git root,
+** else the cwd) by its text and again by realpath; never a secret name;
+** lstat a regular file, at most 2 MB, opened through the seam. Outside the
+** project nothing is touched, so no TCC prompt (QA D). */
+static int
+res_file(const char *key, const char *text, const char *cwd,
+         struct xr_resolved *r)
+{
+	char p[PATH_MAX], root[PATH_MAX], rp[PATH_MAX], rr[PATH_MAX];
+	char shown[PATH_MAX + 32], *buf;
+	const char *h = getenv("HOME"), *rel, *base;
+	long line = xr_ref_line(text);
+	struct stat st;
+	ssize_t got;
+	size_t n = 0;
+	int fd;
+
+	if (cwd[0] != '/' || strlen(cwd) >= PATH_MAX)
+		return 0;
+	if (key[0] == '~')
+	{
+		if (!h || h[0] != '/' || snprintf(p, sizeof p, "%s%s", h, key + 1)
+		    >= (int)sizeof p)
+			return 0;
+	}
+	else if (key[0] != '/' || snprintf(p, sizeof p, "%s", key)
+	         >= (int)sizeof p)
+		return 0;
+	r->kind = "file";
+	(void)res_root(cwd, root, sizeof root);
+	/* shown: relative to the cwd, else the root, else whole */
+	rel = res_under(p, cwd);
+	snprintf(shown, sizeof shown, "%s", rel && *rel ? rel
+	         : (rel = res_under(p, root)) && *rel ? rel : p);
+	res_text(r->subtitle, shown, strlen(shown), XR_RES_LINE);
+	if (!(rel = res_under(p, root)))
+	{
+		res_set(r, "outside_project", "Outside this session's project");
+		return 1;
+	}
+	if (xr_secret_name(rel))
+	{
+		res_set(r, "secret_name", "Not previewed: may hold secrets");
+		return 1;
+	}
+	if (lstat(p, &st) != 0 || !S_ISREG(st.st_mode))
+		return 0;	/* gone, a symlink, a FIFO, a dir: no block */
+	if (!realpath(p, rp) || !realpath(root, rr))
+		return 0;
+	if (!(rel = res_under(rp, rr)))
+	{
+		res_set(r, "outside_project", "Outside this session's project");
+		return 1;
+	}
+	if (xr_secret_name(rel))
+	{
+		res_set(r, "secret_name", "Not previewed: may hold secrets");
+		return 1;
+	}
+	if ((uint64_t)st.st_size > XR_RES_FILE)
+	{
+		res_set(r, "too_large", "Not previewed: over 2 MB");
+		return 1;
+	}
+	/* the real path, and only the inode lstat saw (the seam checks) */
+	if ((fd = xr_seam_open(rp, &st)) < 0)
+		return 0;
+	if (!(buf = malloc(XR_RES_FILE + 1)))
+	{
+		close(fd);
+		return 0;
+	}
+	while (n <= XR_RES_FILE &&
+	       ((got = read(fd, buf + n, XR_RES_FILE + 1 - n)) > 0 ||
+	        (got < 0 && errno == EINTR)))
+		n += got > 0 ? (size_t)got : 0;
+	close(fd);
+	if (n > XR_RES_FILE)
+		res_set(r, "too_large", "Not previewed: over 2 MB");
+	else
+	{
+		base = strrchr(p, '/') + 1;
+		r->state = "ok";
+		res_text(r->title, base, strlen(base), XR_TITLE_MAX);
+		if (line > 0)
+		{
+			snprintf(shown + strlen(shown), sizeof shown - strlen(shown),
+			         " \xc2\xb7 line %ld", line);
+			res_text(r->subtitle, shown, strlen(shown), XR_RES_LINE);
+		}
+		xr_file_lines(buf, n, line, r);
+	}
+	free(buf);
+	return 1;
+}
+
+int
+xr_res_ref(const struct xr_span *sp, const char *text, const char *cwd,
+           int live, struct xr_resolved *r)
+{
+	memset(r, 0, sizeof *r);
+	if (sp->shape == XR_COMMIT)
+		return res_commit(sp->full, cwd ? cwd : "", live, r);
+	if (sp->shape == XR_FILE)
+		return res_file(xr_span_text(sp), text, cwd ? cwd : "", r);
+	return 0;
+}
+
+void
+xr_scan_resolved(struct xr_scan *x, const struct xr_span *sp,
+                 const char *text, const char *cwd, int live)
+{
+	struct xr_resolved *r;
+	long long t = xr_now_ms();
+	unsigned long sp0 = xr_res_spawned;
+	char *b;
+	size_t bl;
+	FILE *m;
+	int k;
+
+	if (!x->full || x->cancel || x->out_full || !(r = malloc(sizeof *r)))
+		return;
+	if (xr_res_ref(sp, text, cwd, live, r) && (m = ln_open(&b, &bl)))
+	{
+		fputs("{\"schema\":1,\"resolved\":{\"kind\":", m);
+		xr_put_str(m, r->kind);
+		fputs(",\"state\":", m);
+		xr_put_str(m, r->state);
+		fputs(",\"title\":", m);
+		xr_put_str(m, r->title);
+		fputs(",\"subtitle\":", m);
+		xr_put_str(m, r->subtitle);
+		fputs(",\"lines\":[", m);
+		for (k = 0; k < r->nlines; k++)
+		{
+			if (k)
+				fputc(',', m);
+			xr_put_str(m, r->line[k]);
+		}
+		fputs("]}}\n", m);
+		ln_send(x, m, &b, &bl);
+		/* K12: the kind, the state, counts; never a path or a line */
+		dch_trace("xray resolve: kind=%s state=%s spawned=%lu ms=%lld",
+		          r->kind, r->state, xr_res_spawned - sp0, xr_now_ms() - t);
+	}
+	free(r);
 }

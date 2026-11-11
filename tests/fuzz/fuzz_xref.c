@@ -11,7 +11,10 @@
 **      scan for the first key the index met, then xr_print with the refs;
 **   2: ring records ({u16 len, u8 kind, u8 flags, u32 time, text}) through
 **      xr_shell_feed with xr_shell_refs into an index, then xr_print;
-**   3: xr_ref_ok and xr_ref_parse over the bytes as a C string.
+**   3: xr_ref_ok and xr_ref_parse over the bytes as a C string; with byte
+**      0's bit 2 set, the resolvers' parsers instead (#159): git show's
+**      output, a file's 14-line window around the bytes' own :line, the
+**      secret-name list; every block line valid UTF-8 within 200 scalars.
 ** Path 1's scan: bit 3 reads the transcript twice, the second time as
 ** another session's (#155), bit 4 makes it light.
 ** Path 1 with byte 0's bit 2 set is --follow's instead (#136): the transcript
@@ -343,6 +346,46 @@ out:
 		fclose(tf);
 }
 
+/* A resolved block (#159): at most 14 lines, each of them, the title and
+** the subtitle valid UTF-8 and within their scalar caps. */
+static void
+check_res(const struct xr_resolved *r)
+{
+	const char *const t[2] = {r->title, r->subtitle};
+	int k;
+
+	if (r->nlines < 0 || r->nlines > XR_RES_LINES)
+		abort();
+	for (k = 0; k < r->nlines + 2; k++)
+	{
+		const char *l = k < 2 ? t[k] : r->line[k - 2];
+		size_t ln = strlen(l), sc = 0, i;
+
+		check_utf8(l, ln);
+		for (i = 0; i < ln; i++)
+			sc += ((unsigned char)l[i] & 0xc0) != 0x80;
+		if (sc > (k == 0 ? XR_TITLE_MAX : XR_RES_LINE))
+			abort();
+	}
+}
+
+/* s[0..n) (s[n] == '\0') as git's output, a file and a path */
+static void
+resolvers(const char *s, size_t n)
+{
+	static struct xr_resolved r;
+
+	memset(&r, 0, sizeof r);
+	if (xr_git_parse(s, n, (long long)n * 977, &r))
+		check_res(&r);
+	memset(&r, 0, sizeof r);
+	xr_file_lines(s, n, xr_ref_line(s), &r);
+	check_res(&r);
+	if (xr_ref_line(s) < 0 || xr_ref_line(s) > 9999999)
+		abort();
+	(void)xr_secret_name(s);
+}
+
 int
 LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 {
@@ -375,7 +418,9 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 			return 0;
 		memcpy(s, d + 1, n - 1);
 		s[n - 1] = '\0';
-		if (xr_ref_ok(s) && xr_ref_parse(s, "/w", &sp))
+		if (d[0] & 4)
+			resolvers(s, n - 1);
+		else if (xr_ref_ok(s) && xr_ref_parse(s, "/w", &sp))
 			check_key(&sp);
 		free(s);
 		return 0;

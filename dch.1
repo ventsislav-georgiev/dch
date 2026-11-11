@@ -806,6 +806,84 @@ one
 .B definition
 line per title, at most 8; output capped at 4 MiB, then
 .BR why:\(dqoutput\(dq );
+with
+.BR \-\-full ,
+a commit or file ref also gets one
+.B resolved
+line before
+.B done
+.RB ( kind ,
+.BR state ,
+.BR title ,
+.BR subtitle ,
+and at most 14
+.BR lines ).
+A commit runs git, never through a shell and never in an ended session
+.RB ( state:\(dqended\(dq ):
+on macOS the first of the Command Line Tools, xcode\-select, Xcode.app,
+.I /opt/homebrew/bin/git
+and
+.I /usr/local/bin/git
+(never
+.IR /usr/bin/git ),
+elsewhere
+.I /usr/bin/git
+then
+.IR /usr/local/bin/git ,
+as
+.B git \-\-no\-pager \-c core.fsmonitor= \-c core.hooksPath=/dev/null
+.B \-c protocol.allow=never \-c diff.external= \-c color.ui=never
+.B \-c log.showSignature=false \-C
+.I cwd
+.B rev\-parse \-\-is\-inside\-work\-tree
+and then
+.B show \-\-no\-color \-\-no\-ext\-diff \-\-no\-textconv \-\-stat=80
+.B \-\-stat\-count=14 \-\-format=%H%x00%an%x00%at%x00%s \-\-end\-of\-options
+.IB sha ^{commit} ,
+with only
+.BR GIT_CONFIG_NOSYSTEM=1 ,
+.BR GIT_CONFIG_GLOBAL=/dev/null ,
+.BR GIT_OPTIONAL_LOCKS=0 ,
+.BR GIT_TERMINAL_PROMPT=0 ,
+.BR GIT_NO_LAZY_FETCH=1 ,
+.BR PATH=/usr/bin:/bin ,
+.B HOME
+and
+.B LANG=en_US.UTF\-8
+in its environment, 3 s for both runs (then its process group is ended),
+64 KiB of output kept; states
+.BR ok ,
+.BR no_git ,
+.BR not_repo ,
+.BR not_commit ,
+.BR ambiguous ,
+.BR timeout ,
+.BR ended .
+A file is read only inside the project (the cwd's git root, else the cwd),
+checked by its text and again by its real path, never through a symlink,
+never a secret name
+.RB ( .env* ,
+.BR .ssh ,
+.BR .gnupg ,
+.BR .aws ,
+.BR .netrc ,
+.BR .npmrc ,
+.BR .pypirc ,
+.B .git\-credentials
+in any part,
+.BR *.pem ,
+.BR *.key ,
+.BR *.p12 ,
+.BR *.keychain ,
+.BR *.keychain\-db ,
+.B id_
+names with no dot), at most 2 MB, as 14 lines with the ref's line the
+seventh; states
+.BR ok ,
+.BR outside_project ,
+.BR secret_name ,
+.BR too_large ;
+a missing file, a symlink or a non\-regular file gives no line;
 .B \-\-scope session
 reads
 .IR name 's

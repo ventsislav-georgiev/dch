@@ -11545,6 +11545,10 @@ xr_claude_ref(const char *cfg, const char *sid, const char *session,
 	rc = xr_ref_file(sc, path, &st);
 	if (rc == 0)
 		rc = xr_ref_others(sc, q->scope, sid, project);
+	/* XR6, --full: after every file; reads no session name, so it may
+	** follow xr_ref_others, which frees the list sc's names point into */
+	if (rc == 0)
+		xr_scan_resolved(sc, &sp, q->text, label, live);
 	/* a cancel stopped the read: no done */
 	return xr_ref_exit(sc, rc != 0 || xr_scan_done(sc) != 0);
 }
@@ -11695,7 +11699,10 @@ xr_shell_ref(const struct xr_target *t, const struct xr_refq *q,
 		/* then the project's Claude files, never another ring (S17) */
 		rc = xr_ref_others(f.sc, q->scope, "", project);
 		if (rc == 0)
+		{
+			xr_scan_resolved(f.sc, &sp, q->text, label, 1);	/* XR6: --full */
 			rc = xr_scan_done(f.sc);
+		}
 	}
 	xr_shell_end(&f.acc->sh);
 	xr_chapters_free(&ch);
