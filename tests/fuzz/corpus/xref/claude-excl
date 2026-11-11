@@ -1,0 +1,13 @@
+{"type":"user","cwd":"/home/demo/proj","message":{"content":"see src/a.c:3 ~bob/x.c:1 ~/../y.c:2"}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b0", "name": "Bash", "input": {"command": "cat ../o/n.md"}}]}}
+{"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "b0", "is_error": false, "content": "# #800 t\n## #850"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b1", "name": "Bash", "input": {"command": "cd /etc && cat n.md; echo x|rg y"}}]}}
+{"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "b1", "is_error": false, "content": "# #801 t\n## #850"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b2", "name": "Bash", "input": {"command": "env -u X A=1 command -p xargs -n 1 sh -lc 'cat $H/x'"}}]}}
+{"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "b2", "is_error": false, "content": "# #802 t\n## #850"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b3", "name": "Bash", "input": {"command": "cd sub && sed -n '1,$p' ../n.md 2>/dev/null"}}]}}
+{"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "b3", "is_error": false, "content": "# #803 t\n## #850"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b4", "name": "Bash", "input": {"command": "nice -n 5 time git -C .. log -p"}}]}}
+{"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "b4", "is_error": false, "content": "# #804 t\n## #850"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b5", "name": "Bash", "input": {"command": "cat < ./a/../../b `x`"}}]}}
+{"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "b5", "is_error": false, "content": "# #805 t\n## #850"}]}}

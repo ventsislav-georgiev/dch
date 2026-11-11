@@ -1,4 +1,4 @@
 {"schema":1,"first":{"session":"gone","session_id":"m1a2b3c4d5e6f7a8d","key":"pull:o/r#990","shape":"pull","text":"o/r#990","project":"-T-work-gone","mode":"full","scope":"session","budget_ms":null,"elapsed_ms":0}}
 {"schema":1,"mention":{"session":"gone","chapter":null,"at":1794300000,"line":"# o/r#990 Gone head","offset":281474976720000,"live":true,"project":"-T-work-gone"}}
-{"schema":1,"tally":{"session":"gone","live":true,"project":"-T-work-gone","count":1,"definitions":0,"partial":true}}
+{"schema":1,"tally":{"session":"gone","live":true,"project":"-T-work-gone","count":1,"definitions":0,"partial":true,"mentions_dropped":0}}
 {"schema":1,"done":true,"partial":true,"counts":{"session":1,"project":0,"project_sessions":0,"all":null,"all_sessions":null},"why":"range","files":1,"bytes":42,"lines_too_long":0}

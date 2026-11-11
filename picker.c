@@ -7,7 +7,8 @@
 ** title matches the config's sidekick_pattern (default "-qa"), shown only when there are
 ** some; History (n), the ended records, one row per name (its newest
 ** record, pinned when any of the name's is), pinned first, by name, at
-** most 50. "/"
+** most 50; and other hosts' as host:name (#115), at most 50 per host,
+** never pinned here, which only resume (there). "/"
 ** filters every tab, as vim's search (#096). Rows carry
 ** --ls-json's data (state, agents, meta.prs) and --history's, reloaded about
 ** once a second. Enter hands the session back to the caller; every other
@@ -1023,7 +1024,7 @@ pk_row(const struct pk *p, const struct pkrow *w, int sel)
 	else
 		pk_fit(w->title, pk_c.name);
 	pk_gap();
-	if (w->remote == 2)
+	if (w->remote == 2 && !hist)
 	{
 		pk_set("2");
 		pk_fit("Stale", pk_c.state);

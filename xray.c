@@ -541,13 +541,17 @@ line_sfx(const char *s, size_t n, size_t e, int col)
 }
 
 /* Lexically absolute (2.5): "." and ".." and "//" folded, a relative path
-** joined to cwd when that is absolute; "~/" kept. 0 when it does not fit. */
+** joined to cwd when that is absolute; "~/" kept, ".." at "~" dropped (Q4).
+** 0 when it does not fit, or for "~user": no path (Q4). */
 static size_t
 path_norm(const char *p, size_t pl, const char *cwd, char *out, size_t outsz)
 {
 	char src[XR_PATH_MAX + XR_KEY_MAX + 4];
 	size_t sl, k, cs, o = 0, nst = 0, st[XR_PATH_MAX / 2 + XR_KEY_MAX / 2 + 4];
 	int root = p[0] == '/' ? 1 : p[0] == '~' ? 2 : 0;
+
+	if (root == 2 && pl > 1 && p[1] != '/')
+		return 0;
 
 	if (!root && cwd && cwd[0] == '/' && strlen(cwd) <= XR_PATH_MAX)
 	{
@@ -1861,6 +1865,17 @@ cov_span(void *ctx, const struct xr_span *sp)
 	return 0;
 }
 
+/* A file key still relative: seen before any line carried a cwd (LOW-7),
+** so no --ref can name it. Dropped, not held: a cwd seen later may not be
+** the one it was written in. */
+static int
+rel_file(const struct xr_span *sp)
+{
+	const char *t = xr_span_text(sp);
+
+	return sp->shape == XR_FILE && t[0] != '/' && t[0] != '~';
+}
+
 static int
 rm_span(void *ctx, const struct xr_span *sp)
 {
@@ -1868,6 +1883,8 @@ rm_span(void *ctx, const struct xr_span *sp)
 
 	if (!r->left)
 		return 1;
+	if (rel_file(sp))
+		return 0;
 	if (r->left > 0)
 		r->left--;
 	cov_add(r, sp);
@@ -1965,29 +1982,44 @@ is_assign(const char *s)
 	return *p == '=';
 }
 
-/* The first command word: past `cd … &&`, env assignments and sudo. */
-static size_t
-cmd_head(const struct sw *w)
-{
-	size_t k = 0;
+/* Words that only run the command after them, and the letters of their
+** options that take a value (`sudo -u root cat`, `xargs -n 1 rg`). */
+static const struct { const char *w, *argopt; } wraps[] = {
+	{ "sudo", "ugCDhprTt" }, { "env", "uSCP" }, { "command", "" },
+	{ "xargs", "IJLnPsEdaR" }, { "nice", "n" }, { "time", "" }, { 0, 0 }
+};
 
-	while (k < w->n && !w->op[k])
+/* The first command word of the simple command w[k..e): past env
+** assignments and the wraps with their options. e when there is none. */
+static size_t
+cmd_head(const struct sw *w, size_t k, size_t e)
+{
+	const char *o;
+	size_t j;
+
+	while (k < e)
 	{
-		if (!strcmp(SWD(w, k), "cd"))
+		if (is_assign(SWD(w, k)))
 		{
-			while (k < w->n && !(w->op[k] && (!strcmp(SWD(w, k), "&&") ||
-			                                 !strcmp(SWD(w, k), ";"))))
-				k++;
-			if (k >= w->n)
-				return w->n;
 			k++;
+			continue;
 		}
-		else if (is_assign(SWD(w, k)) || !strcmp(SWD(w, k), "sudo"))
-			k++;
-		else
+		for (j = 0; wraps[j].w && strcmp(SWD(w, k), wraps[j].w); j++)
+			;
+		if (!wraps[j].w)
 			return k;
+		for (k++; k < e && (o = SWD(w, k))[0] == '-'; k++)
+		{
+			if (!strcmp(o, "--"))
+			{
+				k++;
+				break;
+			}
+			if (o[1] && !o[2] && strchr(wraps[j].argopt, o[1]))
+				k++;
+		}
 	}
-	return w->n;
+	return e;
 }
 
 static const char *
@@ -2031,34 +2063,92 @@ outside(const char *p, const char *cwd)
 	return !(al >= bl && !memcmp(a, b, bl) && (a[bl] == '\0' || a[bl] == '/'));
 }
 
+/* A printed file argument from outside cwd (exclusion #1): one whose value
+** only the shell knows ($, `), or a path that leaves cwd once made absolute
+** against cur, the directory after any cd (lost: a cd went somewhere
+** unknown). With no cwd at all, only a leading .. leaves it. */
+static int
+arg_outside(const char *a, const char *cur, int lost, const char *cwd)
+{
+	char n[XR_KEY_MAX + 1];
+
+	if (strpbrk(a, "$`"))
+		return 1;
+	if (a[0] == '/' || a[0] == '~')
+		return outside(a, cwd);
+	if (lost || !path_norm(a, strlen(a), cur, n, sizeof n))
+		return 1;
+	if (n[0] == '/')
+		return outside(n, cwd);
+	return !strcmp(n, "..") || !strncmp(n, "../", 3);
+}
+
 enum { X_NONE, X_QUOTE = 1, X_DIFF = 3, X_LIST = 4 };
 
-/* Exclusions #1, #3 and #4 on the paired command (v2.1 4.3). */
+/* excluded() on cmd run in cur (lost: unknown), depth sh -c levels in. */
 static int
-excluded(const char *cmd, size_t cl, const char *cwd)
+excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
+        int lost, int depth)
 {
 	static const char *const list[] = { "rg", "grep", "egrep", "fgrep", "ag",
 	                                    "ack", "fd", "find", "ls", 0 };
 	static const char *const print[] = { "cat", "head", "tail", "bat",
 	                                     "less", "awk", "nl", "more", 0 };
+	static const char *const shells[] = { "sh", "bash", "zsh", "dash", "ksh",
+	                                      0 };
 	struct sw w;
-	size_t h, k, sub;
-	int r = X_NONE, sedn = 0;
-	const char *c0;
+	char cdb[XR_KEY_MAX + 1];
+	size_t s, e, h, k, sub;
+	int r = X_NONE, sedn, skip;
+	const char *c0, *a;
 
 	shell_words(cmd, cl, &w);
-	if (!w.b)
-		return X_LIST;	/* no memory: no definition */
-	h = cmd_head(&w);
-	if (h < w.n)
+	if (!w.b || w.n == SW_MAX)
 	{
+		free(w.b);
+		return X_LIST;	/* no memory, or words past SW_MAX unseen */
+	}
+	/* every simple command: split on ; & && | || ( ) */
+	for (s = 0; s < w.n && !r; s = e + 1)
+	{
+		for (e = s; e < w.n && !(w.op[e] && !strchr("<>", SWD(&w, e)[0]));
+		     e++)
+			;
+		if ((h = cmd_head(&w, s, e)) >= e)
+			continue;
 		c0 = base(SWD(&w, h));
+		if (!strcmp(c0, "cd"))
+		{
+			/* later relative arguments resolve where cd went */
+			for (k = h + 1; k < e && SWD(&w, k)[0] == '-' && SWD(&w, k)[1];
+			     k++)
+				;
+			a = k < e && !w.op[k] ? SWD(&w, k) : "";
+			lost = !a[0] || a[0] == '~' || a[0] == '-' || strpbrk(a, "$`") ||
+			       !path_norm(a, strlen(a), lost ? NULL : cur, cdb,
+			                  sizeof cdb) || cdb[0] != '/';
+			cur = lost ? NULL : cdb;
+			continue;
+		}
+		if (in_list(c0, shells))
+		{
+			/* sh -c 'cmd' (or -lc, -ec): its command, classified alike */
+			for (k = h + 1; k + 1 < e && !w.op[k]; k++)
+				if (SWD(&w, k)[0] == '-' && SWD(&w, k)[1] != '-' &&
+				    strchr(SWD(&w, k), 'c'))
+				{
+					r = depth >= 3 || w.op[k + 1] ? X_LIST :
+					    excl_in(SWD(&w, k + 1), strlen(SWD(&w, k + 1)), cwd,
+					            cur, lost, depth + 1);
+					break;
+				}
+			continue;
+		}
 		/* git's subcommand: past its global options */
-		for (sub = h + 1; sub < w.n && !w.op[sub] && SWD(&w, sub)[0] == '-';
-		     sub++)
+		for (sub = h + 1; sub < e && SWD(&w, sub)[0] == '-'; sub++)
 			if (!strcmp(SWD(&w, sub), "-C") || !strcmp(SWD(&w, sub), "-c"))
 				sub++;
-		if (sub >= w.n || w.op[sub])
+		if (sub >= e || w.op[sub])
 			sub = 0;
 		if (in_list(c0, list) ||
 		    (!strcmp(c0, "git") && sub && !strcmp(SWD(&w, sub), "grep")))
@@ -2070,24 +2160,44 @@ excluded(const char *cmd, size_t cl, const char *cwd)
 			r = X_DIFF;
 		else if (!strcmp(c0, "git") && sub && !strcmp(SWD(&w, sub), "log"))
 		{
-			for (k = sub + 1; k < w.n && !w.op[k]; k++)
+			for (k = sub + 1; k < e; k++)
 				if (!strcmp(SWD(&w, k), "-p") || !strcmp(SWD(&w, k), "-u") ||
 				    !strcmp(SWD(&w, k), "--patch"))
 					r = X_DIFF;
 		}
 		else
 		{
-			for (k = h + 1; k < w.n && !w.op[k]; k++)
+			for (sedn = 0, k = h + 1; k < e; k++)
 				sedn |= !strncmp(SWD(&w, k), "-n", 2);
-			if (in_list(c0, print) || (!strcmp(c0, "sed") && sedn))
-				for (k = h + 1; k < w.n && !w.op[k]; k++)
-					if ((SWD(&w, k)[0] == '/' || SWD(&w, k)[0] == '~') &&
-					    outside(SWD(&w, k), cwd))
-						r = X_QUOTE;
+			if (!in_list(c0, print) && !(!strcmp(c0, "sed") && sedn))
+				continue;
+			/* the file arguments: not options, not sed's or awk's
+			** script, not a > target; a < source is one */
+			skip = !strcmp(c0, "sed") || !strcmp(c0, "awk");
+			for (k = h + 1; k < e; k++)
+			{
+				a = SWD(&w, k);
+				if (w.op[k])
+					k += a[0] == '>';
+				else if (a[0] == '-' && a[1])
+					;
+				else if (skip)
+					skip = 0;
+				else if (arg_outside(a, cur, lost, cwd))
+					r = X_QUOTE;
+			}
 		}
 	}
 	free(w.b);
 	return r;
+}
+
+/* Exclusions #1, #3 and #4 on the paired command (v2.1 4.3), over every
+** simple command of it. */
+static int
+excluded(const char *cmd, size_t cl, const char *cwd)
+{
+	return excl_in(cmd, cl, cwd, cwd, 0, 0);
 }
 
 /* One definition found in a block. */
@@ -2303,6 +2413,8 @@ d1(const char *s, const struct olines *o, size_t k, const char *cwd,
 	else
 		return 0;
 	title_of(s + t, le - t, d->title);
+	if (!d->title[0])
+		return 0;	/* `## #831` alone: an empty title never defines */
 	/* the passage: up to 6 following non-blank lines */
 	for (j = k + 1; j < o->n && got < 6 && pl < sizeof pb - 8; j++)
 	{
@@ -2931,18 +3043,14 @@ struct xr_scan
 	int live, full, shell, budget;
 	long long t0;
 	uint64_t written;
-	/* hold: lines kept in memory until xr_scan_release (a shell's ring is
-	** read before its first line can name the session) */
-	int hold;
-	char *hb;
-	size_t hl;
-	FILE *hm;
+	size_t room;		/* kept under the cap for the tally and done */
 	/* this file */
 	uint64_t nunit, lastunit, nrow, lastrow, lines, lastoff, lasth, foff;
 	int found, ndefs, mentioned;
 	uint64_t defh[XR_DEFS];
 	char *held[XR_HELD];
 	size_t hn, h0;
+	uint64_t dropped;	/* mention lines the XR_HELD bound left out */
 	/* the scan */
 	uint64_t files, bytes, base, too_long;
 	int stop, out_full;
@@ -2960,12 +3068,42 @@ xr_now_ms(void)
 	return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
+/* A file's tally line (3.4); mentions_dropped: the mention lines past the
+** first and the newest 199, counted in count but not written. */
+static char *
+tally_line(const struct xr_scan *x, uint64_t count, uint64_t dropped,
+           int partial)
+{
+	char *b = NULL;
+	size_t bl;
+	FILE *m = open_memstream(&b, &bl);
+
+	if (!m)
+		return NULL;
+	fputs("{\"schema\":1,\"tally\":{\"session\":", m);
+	xr_put_str(m, x->session);
+	fprintf(m, ",\"live\":%s,\"project\":", x->live ? "true" : "false");
+	xr_put_str(m, x->project);
+	/* partial: the per-file range cap cut it (3.4); a stop says so in done */
+	fprintf(m, ",\"count\":%llu,\"definitions\":%d,\"partial\":%s,"
+	        "\"mentions_dropped\":%llu}}\n", (unsigned long long)count,
+	        x->ndefs, partial ? "true" : "false",
+	        (unsigned long long)dropped);
+	if (fclose(m) != 0)
+	{
+		free(b);
+		return NULL;
+	}
+	return b;
+}
+
 struct xr_scan *
 xr_scan_new(FILE *f, const char *key, const char *session,
             const char *project, int live, int full, int shell, int budget,
             long long t0)
 {
 	struct xr_scan *x = calloc(1, sizeof *x);
+	char *t;
 
 	if (!x)
 		return NULL;
@@ -2978,6 +3116,14 @@ xr_scan_new(FILE *f, const char *key, const char *session,
 	x->shell = shell;
 	x->budget = budget;
 	x->t0 = x->last = t0;
+	/* room for done and the widest tally: both always go (3.4) */
+	if (!(t = tally_line(x, UINT64_MAX, UINT64_MAX, 1)))
+	{
+		free(x);
+		return NULL;
+	}
+	x->room = 1024 + strlen(t);
+	free(t);
 	return x;
 }
 
@@ -2990,9 +3136,6 @@ xr_scan_free(struct xr_scan *x)
 		return;
 	for (k = 0; k < x->hn; k++)
 		free(x->held[(x->h0 + k) % XR_HELD]);
-	if (x->hm)
-		fclose(x->hm);
-	free(x->hb);
 	free(x);
 }
 
@@ -3015,25 +3158,29 @@ sc_check(struct xr_scan *x, int ok)
 	return ok && !ferror(x->f) ? 0 : sc_fail(x, errno == EPIPE);
 }
 
-/* One line under the 4 MiB cap, with room kept for `done` (3.4). */
+static int
+sc_put(struct xr_scan *x, const char *l, size_t n)
+{
+	if (sc_check(x, fwrite(l, 1, n, x->f) == n) != 0)
+		return -1;
+	x->written += n;
+	return 0;
+}
+
+/* One line under the 4 MiB cap, with room kept for the tally and `done`
+** (3.4). */
 static int
 sc_line(struct xr_scan *x, const char *l, size_t n)
 {
 	if (x->out_full || x->cancel)
 		return -1;
-	if (x->written + n + 1024 > xr_lim.out)
+	if (x->written + n + x->room > xr_lim.out)
 	{
 		x->out_full = x->stop = 1;
 		x->why = "output";
 		return -1;
 	}
-	if (x->hold && !x->hm && !(x->hm = open_memstream(&x->hb, &x->hl)))
-		return sc_fail(x, 0);
-	if (x->hold ? fwrite(l, 1, n, x->hm) != n
-	            : sc_check(x, fwrite(l, 1, n, x->f) == n) != 0)
-		return sc_fail(x, x->cancel == 1);
-	x->written += n;
-	return 0;
+	return sc_put(x, l, n);
 }
 
 /* A line built on a memstream, then sent. */
@@ -3149,8 +3296,10 @@ sc_hit(void *ctx, const struct xr_hit *h)
 
 		for (k = 0; k < x->ndefs && x->defh[k] != th; k++)
 			;
-		if (k == x->ndefs && x->ndefs < XR_DEFS)
-			x->defh[x->ndefs++] = th;
+		/* a line per distinct title, at most XR_DEFS (3.8) */
+		if (k < x->ndefs || x->ndefs == XR_DEFS)
+			goto anchor;
+		x->defh[x->ndefs++] = th;
 		if (!(m = ln_open(&b, &bl)))
 			return;
 		fputs("{\"schema\":1,\"definition\":{\"session\":", m);
@@ -3209,6 +3358,7 @@ sc_hit(void *ctx, const struct xr_hit *h)
 					free(x->held[x->h0]);
 					x->h0 = (x->h0 + 1) % XR_HELD;
 					x->hn--;
+					x->dropped++;
 				}
 				x->held[(x->h0 + x->hn++) % XR_HELD] = b;
 			}
@@ -3217,6 +3367,7 @@ sc_hit(void *ctx, const struct xr_hit *h)
 	/* light, --scope session: the first result ends the scan once its
 	** line (a shell: its row) is done, so a definition keeps its anchor's
 	** mention */
+anchor:
 	if (!x->full && !x->found)
 	{
 		x->found = 1;
@@ -3248,8 +3399,11 @@ xr_scan_tick(void *ctx, uint64_t bytes)
 	x->bytes = x->base + bytes;
 	if (!x->stop && x->found)
 	{
-		x->stop = 1;
-		x->why = "first";
+		if (!x->shell)	/* a shell's: its row ends the scan (sc_hit) */
+		{
+			x->stop = 1;
+			x->why = "first";
+		}
 	}
 	else if (!x->stop && !x->full && now - x->t0 >= x->budget)
 	{
@@ -3262,7 +3416,7 @@ xr_scan_tick(void *ctx, uint64_t bytes)
 		x->why = "time";
 	}
 	/* one progress line per 250 ms window while the scan runs (R6) */
-	if (!x->stop && !x->hold && now - x->last >= 250)
+	if (!x->stop && now - x->last >= 250)
 	{
 		char *b;
 		size_t bl;
@@ -3291,7 +3445,6 @@ xr_scan_file(struct xr_scan *x, uint64_t bytes, uint64_t too_long,
 {
 	char *b;
 	size_t bl, k;
-	FILE *m;
 	uint64_t count = per_row ? x->nrow : x->nunit;
 
 	x->files++;
@@ -3314,16 +3467,14 @@ xr_scan_file(struct xr_scan *x, uint64_t bytes, uint64_t too_long,
 	}
 	x->hn = x->h0 = 0;
 	x->nunit = count;	/* the session's count, for done */
-	if (!(m = ln_open(&b, &bl)))
+	if (!(b = tally_line(x, count, x->dropped, partial)))
 		return;
-	fputs("{\"schema\":1,\"tally\":{\"session\":", m);
-	xr_put_str(m, x->session);
-	fprintf(m, ",\"live\":%s,\"project\":", x->live ? "true" : "false");
-	xr_put_str(m, x->project);
-	/* partial: the per-file range cap cut it (3.4); a stop says so in done */
-	fprintf(m, ",\"count\":%llu,\"definitions\":%d,\"partial\":%s}}\n",
-	        (unsigned long long)count, x->ndefs, partial ? "true" : "false");
-	ln_send(x, m, &b, &bl);
+	x->dropped = 0;
+	/* the tally goes past a full output: sc_line kept its room */
+	bl = strlen(b);
+	if (!x->cancel && x->written + bl + 1024 <= xr_lim.out)
+		(void)sc_put(x, b, bl);
+	free(b);
 	if (partial && !x->why)
 		x->why = "range";
 }
@@ -3332,7 +3483,6 @@ int
 xr_scan_first(struct xr_scan *x, const char *session_id, int shape,
               const char *text)
 {
-	FILE *f = x->f;
 	char *b;
 	size_t bl;
 	FILE *m = ln_open(&b, &bl);
@@ -3362,33 +3512,9 @@ xr_scan_first(struct xr_scan *x, const char *session_id, int shape,
 		free(b);
 		return -1;
 	}
-	x->hold = 0;
 	rc = sc_line(x, b, strlen(b));
 	free(b);
-	(void)f;
 	return rc == 0 ? sc_check(x, fflush(x->f) == 0) : -1;
-}
-
-void
-xr_scan_hold(struct xr_scan *x)
-{
-	x->hold = 1;
-}
-
-/* After `first`: what was held goes out (it was counted when held). */
-int
-xr_scan_release(struct xr_scan *x)
-{
-	int ok = 1;
-
-	if (x->cancel)
-		return -1;
-	if (x->hm)
-		ok = fclose(x->hm) == 0 &&
-		     (!x->hb || fwrite(x->hb, 1, x->hl, x->f) == x->hl);
-	x->hm = NULL;
-	x->hold = 0;
-	return sc_check(x, ok && fflush(x->f) == 0);
 }
 
 int
@@ -3969,7 +4095,7 @@ refs_call(struct xr_claude *d, const struct json_parser *p, int i)
 		sp.rule = 'F';
 		sp.e = l;
 		if ((nl = path_norm(s, l, r.cwd, norm, sizeof norm)) &&
-		    span_key(&sp, XR_FILE, norm, nl, 0))
+		    span_key(&sp, XR_FILE, norm, nl, 0) && !rel_file(&sp))
 			rm_hit(&r, &sp, NULL, NULL, NULL);
 		if (id)
 			(void)rc_push(d, id, RC_OTHER);

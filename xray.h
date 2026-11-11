@@ -174,7 +174,8 @@ void xr_index_per_row(struct xr_index *x, int per_row);
 size_t xr_index_keys(const struct xr_index *x);
 
 /* --ref (3.4): one key's NDJSON lines (first, definition, mention, tally,
-** progress, done), all under xr_lim.out with room kept for done. */
+** progress, done), all under xr_lim.out with room kept for the tally and
+** done. */
 long long xr_now_ms(void);	/* CLOCK_MONOTONIC */
 struct xr_scan;
 struct xr_scan *xr_scan_new(FILE *f, const char *key, const char *session,
@@ -182,12 +183,9 @@ struct xr_scan *xr_scan_new(FILE *f, const char *key, const char *session,
                             int shell, int budget, long long t0);
 void xr_scan_free(struct xr_scan *x);
 void xr_scan_sink(struct xr_scan *x, struct xr_sink *k);
-/* hold: lines wait in memory until xr_scan_first (a shell's ring is read
-** before the session can be named); xr_scan_release then writes them */
-void xr_scan_hold(struct xr_scan *x);
+/* line 1, before any record is read */
 int xr_scan_first(struct xr_scan *x, const char *session_id, int shape,
                   const char *text);
-int xr_scan_release(struct xr_scan *x);
 /* the --ref tick: bytes so far; nonzero once the scan should stop */
 int xr_scan_tick(void *ctx, uint64_t bytes);
 /* one file read: its held mentions and its tally (partial: range-capped) */

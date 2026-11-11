@@ -2590,8 +2590,8 @@ usage(void)
 	    "                   session's scrollback first (DCH_REPLAY_SCROLLBACK)\n"
 	    "  dch --hosts <h1,h2,...>   the remote hosts, [label=]host[:port],\n"
 	    "                   instead of your online tailnet peers\n"
-	    "  dch --remote     with -ls, -lj, --ls-json: remote rows too, as\n"
-	    "                   host:name (the picker always shows them)\n"
+	    "  dch --remote     with -ls, -lj, --ls-json, --history: remote rows\n"
+	    "                   too, as host:name (the picker always shows them)\n"
 	    "  dch -rl          interactively rename (alias) sessions\n"
 	    "  dch -m <name> [alias]  set alias non-interactively (empty clears)\n"
 	    "  dch -d [name]    detach all clients of session (sends SIGUSR1)\n"
@@ -8578,8 +8578,62 @@ put_argv(char **v)
 		printf("%s%s", k ? " " : "", v[k]);
 }
 
+/* --history's remote records (#115), after the local ones: every field a
+** peer sent escaped in text; in JSON the record as it sent it (C1, DEL and
+** bidi controls as \u escapes) with "host" and "stale" added. */
+static void
+history_remote(int json, int first)
+{
+	struct dch_rrec *v;
+	int n = dch_remote_history(&v, 1), k;
+	char en[1100], ea[1100], ee[300], ec[1600], eg[1600], es[300], ef[1000];
+
+	for (k = 0; k < n; k++)
+	{
+		const struct dch_rrec *r = &v[k];
+		char when[32] = "-";
+		time_t t = (time_t)r->when;
+		size_t jl = strlen(r->json);
+
+		if (json)
+		{
+			printf("%s%.*s,\"host\":", first ? "" : ",", (int)(jl - 1),
+			       r->json);
+			put_json_str(r->host);
+			printf(",\"stale\":%s}", r->stale ? "true" : "false");
+			first = 0;
+			continue;
+		}
+		dch_remote_esc(en, sizeof en, r->name);
+		dch_remote_esc(ea, sizeof ea, r->alias);
+		dch_remote_esc(ee, sizeof ee, r->end[0] ? r->end : "vanished");
+		dch_remote_esc(ec, sizeof ec, r->cwd);
+		dch_remote_esc(eg, sizeof eg, r->argv);
+		if (t)
+			strftime(when, sizeof when, "%Y-%m-%d %H:%M",
+			         localtime(&t));
+		printf("%s:%s%s%s%s  %s  %s  %s  $ %s", r->host, en,
+		       ea[0] ? " (" : "", ea, ea[0] ? ")" : "", when, ee, ec, eg);
+		if (r->sid[0])
+		{
+			dch_remote_esc(ea, sizeof ea, r->aname);
+			dch_remote_esc(es, sizeof es, r->sid);
+			printf("  [claude %s%s%s]", ea, ea[0] ? " " : "", es);
+		}
+		if (r->pinned)
+			fputs("  [pinned]", stdout);
+		if (strcmp(r->file, r->name))
+		{
+			dch_remote_esc(ef, sizeof ef, r->file);
+			printf("  [record %s]", ef);
+		}
+		puts(r->stale ? "  [stale]" : "");
+	}
+	dch_remote_hfree(v, n);
+}
+
 static int
-do_history_verb(int json)
+do_history_verb(int json, int remote)
 {
 	struct hrec *r;
 	int n = history_load(&r), k, first = 1;
@@ -8637,6 +8691,11 @@ do_history_verb(int json)
 		if (aside)
 			printf("  [record %s]", r[k].file);
 		putchar('\n');
+	}
+	if (remote)
+	{
+		fflush(stdout);	/* the local lines first, a stderr note after */
+		history_remote(json, first);
 	}
 	if (json)
 		puts("]");
@@ -8713,7 +8772,8 @@ pk_load(struct pk *p)
 	size_t hl = home ? strlen(home) : 0;
 	regex_t re;
 	struct dch_rrow *rr = NULL;
-	int mode = 0, k, j, t, nh, pin, nr;
+	struct dch_rrec *rh = NULL;
+	int mode = 0, k, j, t, nh, pin, nr, nrh, base = 0, cnt = 0;
 
 	pk_selnames(p, sel);
 	for (t = 0; t < 3; t++)
@@ -8772,7 +8832,8 @@ pk_load(struct pk *p)
 	free(rr);
 
 	nh = history_load(&h);
-	p->r[2] = calloc((size_t)nh + 1, sizeof **p->r);
+	nrh = pk_remote ? dch_remote_history(&rh, 0) : 0;
+	p->r[2] = calloc((size_t)(nh + nrh) + 1, sizeof **p->r);
 	p->interrupted = 0;
 	for (k = 0; k < nh; k++)
 		p->interrupted += rv_all_takes(&h[k]);
@@ -8821,6 +8882,40 @@ pk_load(struct pk *p)
 		}
 	p->n[2] = j;
 	hrec_free(h, nh);
+	/* the other hosts' (#115), as their host last answered: per host the
+	** first PK_HIST_MAX names, each its newest record (the host's order),
+	** never pinned here; host:file the row, host:name its name */
+	for (k = 0; p->r[2] && k < nrh; k++)
+	{
+		const struct dch_rrec *x = &rh[k];
+		char e[sizeof p->r[2]->title - DCH_RHOST_MAX];
+		struct pkrow *w = &p->r[2][p->n[2]];
+
+		if (!k || strcmp(x->host, rh[k - 1].host))
+		{
+			base = p->n[2];
+			cnt = 0;
+		}
+		memset(w, 0, sizeof *w);	/* a slot the cap left over */
+		snprintf(w->sname, sizeof w->sname, "%s:%s", x->host, x->name);
+		for (j = base; j < p->n[2] && strcmp(p->r[2][j].sname, w->sname);
+		     j++)
+			;
+		if (j < p->n[2] || cnt >= PK_HIST_MAX)
+			continue;
+		cnt++;
+		p->n[2]++;
+		snprintf(w->name, sizeof w->name, "%s:%s", x->host, x->file);
+		dch_remote_esc(e, sizeof e, x->alias[0] ? x->alias : x->aname[0]
+		               ? x->aname : x->name);
+		snprintf(w->title, sizeof w->title, "%s:%s", x->host, e);
+		dch_remote_esc(w->state, sizeof w->state, x->end[0] ? x->end
+		               : "vanished");
+		dch_remote_esc(w->cwd, sizeof w->cwd, x->cwd);
+		w->when = x->when;
+		w->remote = x->stale ? 2 : 1;
+	}
+	dch_remote_hfree(rh, nrh);
 	pk_sort(p, sel);
 }
 
@@ -8976,7 +9071,8 @@ pk_reap(struct pk *p)
 		}
 	}
 	if (res[0] && strcmp(res, "ok") == 0)
-		snprintf(p->status, sizeof p->status, "Resumed as %s%s", as,
+		snprintf(p->status, sizeof p->status, "Resumed as %s%s%s%s",
+		         p->run.host, p->run.host[0] ? ":" : "", as,
 		         p->run.nomsg ? " without the message" : "");
 	else if (res[0])
 		snprintf(p->status, sizeof p->status, "%s: %s", p->run.target,
@@ -8990,7 +9086,19 @@ pk_reap(struct pk *p)
 		         : "failed");
 	/* o, Shift+Enter (#132): the session this revive made, by the name
 	** it answered, attached by pk_run; gone already, the line stays */
-	if (res[0] && !strcmp(res, "ok") && p->run.go && as[0] && name_live(as))
+	if (p->run.host[0])
+	{
+		/* on another host (#115): what it said, escaped; attached as
+		** host:name, the way Enter on a Sessions row of it is */
+		char e[sizeof p->status];
+
+		dch_remote_esc(e, sizeof e, p->status);
+		memcpy(p->status, e, sizeof e);
+		if (res[0] && !strcmp(res, "ok") && p->run.go && as[0])
+			snprintf(p->go, sizeof p->go, "%s:%s", p->run.host, as);
+	}
+	else if (res[0] && !strcmp(res, "ok") && p->run.go && as[0] &&
+	         name_live(as))
 		snprintf(p->go, sizeof p->go, "%s", as);
 	p->loaded = 0;
 }
@@ -9158,6 +9266,37 @@ pk_recs(const struct pkrow *w, const char *f)
 	       ? w->sname : f;
 }
 
+/* Enter, m or o on another host's History row (#115): --revive of its
+** record there, by --host (a host only discovery knows has no host:name
+** route) and the picker's --hosts. No --as: a live name there is that
+** host's dch to refuse, and its line is the status. */
+static void
+pk_rrevive(struct pk *p, const struct pkrow *w, int c)
+{
+	const char *f = strchr(w->name, ':'), *hl = dch_remote_hosts();
+	char d[800], rf[620];
+	struct pkact *a = &p->ask;
+
+	if (!f)
+		return;
+	snprintf(rf, sizeof rf, "%s.json", f + 1);
+	snprintf(d, sizeof d, "resuming %s", w->title);
+	pk_act(a, 2, w->name, d, "--revive", rf, "--json", NULL);
+	snprintf(a->host, sizeof a->host, "%.*s", (int)(f - w->name), w->name);
+	if (pk_arg(a, "--host") < 0 || pk_arg(a, a->host) < 0 ||
+	    (hl && (pk_arg(a, "--hosts") < 0 || pk_arg(a, hl) < 0)) ||
+	    (c == 'm' && pk_arg(a, "--no-message") < 0))
+	{
+		snprintf(p->status, sizeof p->status, "%s: too long for the "
+		         "picker; dch --revive on the command line", w->title);
+		return;
+	}
+	a->revive = 1;
+	a->nomsg = c == 'm';
+	a->go = c == 'o';
+	pk_start(p, a);
+}
+
 /* One key. 1: out holds the session to attach; -1: quit; 0: go on. */
 int
 pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
@@ -9254,14 +9393,20 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 		return 0;
 	}
 	/* ponytail: a remote row only attaches; kill, rename, restart and
-	** the rest need ops-gated frames and the same confirmation (#087) */
+	** the rest need ops-gated frames and the same confirmation (#087).
+	** A remote History row (#115) only resumes, there: Enter, m, o. */
 	if (w->remote)
 	{
-		if ((c == '\r' || c == '\n') &&
+		if (t < 2 && (c == '\r' || c == '\n') &&
 		    (size_t)snprintf(out, outsz, "%s", w->name) < outsz)
 			return 1;
-		snprintf(p->status, sizeof p->status, "%s: a remote session; "
-		         "Enter attaches, nothing else here yet", w->title);
+		if (t == 2 && (c == '\r' || c == '\n' || c == 'm' || c == 'o'))
+			pk_rrevive(p, w, c);
+		else
+			snprintf(p->status, sizeof p->status, t == 2 ? "%s: on "
+			         "another host; Enter resumes it there, p and d "
+			         "are for this host's" : "%s: a remote session; "
+			         "Enter attaches, nothing else here yet", w->title);
 		return 0;
 	}
 	if (t < 2)
@@ -11044,6 +11189,15 @@ xr_failed(void)
 	return 3;
 }
 
+/* a relative path that outgrows the key only against the session's cwd
+** fails here, not in main's cwd-less check: still 3.1's "not a ref" */
+static int
+xr_not_ref(void)
+{
+	fputs("dch: not a ref\n", stderr);
+	return 2;
+}
+
 /* A one-shot answer's exit: written (ok), or the reader left (EPIPE, a
 ** cancel: 3.4), else a failure. */
 static int
@@ -11098,8 +11252,9 @@ xr_claude_ref(const char *cfg, const char *sid, const char *session,
 		return xr_no_corpus();
 	if (!project[0])
 		xr_project_key(label, project, sizeof project);
-	if (!xr_ref_parse(q->text, label, &sp) ||
-	    !(sc = xr_scan_new(stdout, sp.key, session, project, live, q->full,
+	if (!xr_ref_parse(q->text, label, &sp))
+		return xr_not_ref();
+	if (!(sc = xr_scan_new(stdout, sp.key, session, project, live, q->full,
 	                       0, q->budget, xr_t0)))
 		return xr_failed();
 	if (xr_scan_first(sc, sid, sp.shape, xr_span_text(&sp)) != 0)
@@ -11195,6 +11350,82 @@ xr_shell_fill(struct xr_answer *a, const struct ring_snap *rs,
 	}
 }
 
+/* --ref's record sink over a shell: the scan's tick before each record, as
+** over a transcript (3.4: the budget, 10 s, progress, a closed reader); a
+** stopped scan reads on but feeds nothing. */
+struct xr_ref_ring
+{
+	struct xr_ring_acc *acc;
+	struct xr_scan *sc;
+};
+
+static void
+xr_ref_rec(void *ctx, const struct xr_rec *x)
+{
+	struct xr_ref_ring *f = ctx;
+
+	if (!xr_scan_tick(f->sc, f->acc->bytes))
+		xr_ring_rec(f->acc, x);
+}
+
+/* --ref over a live shell's ring (3.4): the ring's header names it, so
+** `first` is line 1 before a record is read; then its lines, its tally,
+** `done`. A ring cleared mid-read ends it there, partial: the lines
+** already out stand. */
+static int
+xr_shell_ref(const struct xr_target *t, const struct xr_refq *q,
+             const char *label)
+{
+	char project[1200] = "";
+	struct xr_chapters ch = {0};
+	struct xr_ref_ring f;
+	struct ring_snap rs;
+	struct xr_span sp;
+	struct xr_sink k;
+	int fr = ring_fetch(t->sock, &rs, NULL, NULL), rc;
+
+	if (fr == -3)
+		return xr_failed();
+	/* gone, a master before #119, a ring off or paused: no corpus */
+	if (fr != 0 || (rs.status & (DCH_RING_S_OFF | DCH_RING_S_PAUSED)))
+		return xr_no_corpus();
+	xr_project_key(label, project, sizeof project);
+	if (!xr_ref_parse(q->text, label, &sp))
+		return xr_not_ref();
+	if (!(f.acc = calloc(1, sizeof *f.acc)))
+		return xr_failed();
+	if (!(f.sc = xr_scan_new(stdout, sp.key, t->name, project, 1, q->full,
+	                         1, q->budget, xr_t0)))
+	{
+		free(f.acc);
+		return xr_failed();
+	}
+	rc = xr_scan_first(f.sc, rs.sid, sp.shape, xr_span_text(&sp));
+	xr_shell_begin(&f.acc->sh, &ch);
+	xr_scan_sink(f.sc, &k);
+	if (rc == 0 && xr_shell_refs(&f.acc->sh, &k, label) == 0)
+	{
+		fr = ring_fetch(t->sock, &rs, xr_ref_rec, &f);
+		xr_shell_end(&f.acc->sh);
+		rc = fr != 0 && fr != -4;
+	}
+	else
+		rc = -1;
+	if (rc == 0)
+	{
+		int partial = fr == -4 || rs.seqgap || f.acc->gap || f.acc->cont ||
+		              (rs.status & (DCH_RING_S_EVICTED | DCH_RING_S_OFF |
+		                            DCH_RING_S_PAUSED));
+
+		xr_scan_file(f.sc, f.acc->bytes, 0, partial, !f.acc->sh.npaired);
+		rc = xr_scan_done(f.sc);
+	}
+	xr_shell_end(&f.acc->sh);
+	xr_chapters_free(&ch);
+	free(f.acc);
+	return xr_ref_exit(f.sc, rc);
+}
+
 /* snap: --follow's History form, the answer as its one snapshot line */
 static int
 xr_json(const struct xr_target *t, const struct xr_refq *q, int snap)
@@ -11205,9 +11436,7 @@ xr_json(const struct xr_target *t, const struct xr_refq *q, int snap)
 	char recname[400];
 	int rc = 0;
 	struct xr_index *refs = NULL;
-	struct xr_scan *sc = NULL;
 	struct xr_sink k;
-	struct xr_span sp;
 
 	memset(&a, 0, sizeof a);
 	a.snapshot = snap;
@@ -11277,6 +11506,12 @@ xr_json(const struct xr_target *t, const struct xr_refq *q, int snap)
 				                               sizeof project, label,
 				                               sizeof label, refs) : -1;
 		}
+		else if (q)
+		{
+			if (qc == 0)
+				cmd_info_free(&ci);
+			return xr_shell_ref(t, q, label);
+		}
 		else if (!(acc = malloc(sizeof *acc)))
 			rc = -2;
 		else
@@ -11286,27 +11521,13 @@ xr_json(const struct xr_target *t, const struct xr_refq *q, int snap)
 			{
 				xr_chapters_free(&ch);
 				xr_index_free(refs);
-				xr_scan_free(sc);
 				refs = NULL;
-				sc = NULL;
 				memset(acc, 0, sizeof *acc);
 				xr_shell_begin(&acc->sh, &ch);
-				/* refs over the ring, keyed by the pane's cwd (7.3); a
-				** --ref's lines held until `first` can name the ring */
-				if (q)
-				{
-					if (!project[0])
-						xr_project_key(label, project, sizeof project);
-					if (!xr_ref_parse(q->text, label, &sp) ||
-					    !(sc = xr_scan_new(stdout, sp.key, t->name, project,
-					                       1, q->full, 1, q->budget, xr_t0)))
-						break;
-					xr_scan_hold(sc);
-					xr_scan_sink(sc, &k);
-				}
-				else if ((refs = xr_index_new()))
+				/* refs over the ring, keyed by the pane's cwd (7.3) */
+				if ((refs = xr_index_new()))
 					xr_index_sink(refs, &k);
-				if ((sc || refs) && xr_shell_refs(&acc->sh, &k, label) != 0)
+				if (refs && xr_shell_refs(&acc->sh, &k, label) != 0)
 					break;
 				fr = ring_fetch(t->sock, &rs, xr_ring_rec, acc);
 				xr_shell_end(&acc->sh);
@@ -11323,36 +11544,7 @@ xr_json(const struct xr_target *t, const struct xr_refq *q, int snap)
 		}
 		else if (acc && (fr == -3 || fr == -4))
 			rc = -2;
-		if (q && sc && rc == 0 && a.available)
-		{
-			/* --ref over a shell <n>: first, then what the ring held */
-			int partial = rs.seqgap || acc->gap || acc->cont ||
-			              (rs.status & DCH_RING_S_EVICTED);
-
-			rc = xr_scan_first(sc, sid, sp.shape, xr_span_text(&sp)) ||
-			     xr_scan_release(sc);
-			if (rc == 0)
-			{
-				xr_scan_file(sc, acc->bytes, 0, partial,
-				             !acc->sh.npaired);
-				rc = xr_scan_done(sc);
-			}
-			rc = xr_ref_exit(sc, rc);
-			xr_chapters_free(&ch);
-			free(acc);
-			if (qc == 0)
-				cmd_info_free(&ci);
-			return rc;
-		}
-		xr_scan_free(sc);
 		free(acc);
-		if (q && rc != -2)
-		{
-			xr_chapters_free(&ch);
-			if (qc == 0)
-				cmd_info_free(&ci);
-			return xr_no_corpus();
-		}
 		/* fr -1/-2: gone, or a master before #119: no corpus */
 		if (qc == 0)
 			cmd_info_free(&ci);
@@ -13268,10 +13460,10 @@ main_run(int argc, char **argv)
 		return 1;
 	}
 	if (opt_remote && action != A_LISTJSON && action != A_LISTJSON2 &&
-	    action != A_LISTRAW)
+	    action != A_LISTRAW && action != A_HISTORY)
 	{
 		fprintf(stderr, "dch: --remote only works with -ls, -lj, "
-		        "--ls-json\n");
+		        "--ls-json, --history\n");
 		return 1;
 	}
 	/* --cancel only means something to --respawn; elsewhere it would be
@@ -13496,6 +13688,12 @@ main_run(int argc, char **argv)
 		proc_tree_keep = 0;
 		for (k = 0; cr.v && k < nd; k++)
 			(void)visit_records_in(cdirs[k], crec_visit_rows, &cr);
+		/* "cwd" (#115): the session's directory, from its own live
+		** history record */
+		char hdir[1024];
+		int hfd = dch_history_dir(hdir, sizeof hdir, sock_dir, 0) < 0 ? -1
+		          : open(hdir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW |
+		                 O_CLOEXEC);
 		putchar('[');
 		for (k = 0; k < sl.n; k++)
 		{
@@ -13548,8 +13746,25 @@ main_run(int argc, char **argv)
 			if (sz && sz[k][0] >= 0)
 				printf(",\"cols\":%ld,\"rows\":%ld,\"clients\":%ld",
 				       sz[k][1], sz[k][0], sz[k][2]);
+			/* last, so every key before keeps its place; null with
+			** no record (DCH_NO_HISTORY) or an ended one */
+			struct hrec h = {0};
+			char hf[300];
+
+			fputs(",\"cwd\":", stdout);
+			if (snprintf(hf, sizeof hf, "%s.json", canon_name(sl.v[k],
+			             tp, sizeof tp)) < (int)sizeof hf &&
+			    hrec_load(hfd, hf, &h) == 0 && !h.end[0] && h.cwd[0])
+				put_json_str(h.cwd);
+			else
+				fputs("null", stdout);
+			free(h.body);
+			free(h.argv);
+			free(h.launch);
 			putchar('}');
 		}
+		if (hfd >= 0)
+			close(hfd);
 		if (opt_remote)
 		{
 			/* the other hosts' (#087): name and alias as the peer
@@ -13565,8 +13780,13 @@ main_run(int argc, char **argv)
 				put_json_str(rr[r].alias);
 				fputs(",\"host\":", stdout);
 				put_json_str(rr[r].host);
-				printf(",\"state\":\"%s\",\"stale\":%s}",
+				printf(",\"state\":\"%s\",\"stale\":%s,\"cwd\":",
 				       rr[r].state, rr[r].stale ? "true" : "false");
+				if (rr[r].cwd[0])
+					put_json_str(rr[r].cwd);
+				else
+					fputs("null", stdout);
+				putchar('}');
 			}
 			free(rr);
 		}
@@ -13929,7 +14149,7 @@ main_run(int argc, char **argv)
 	case A_RUN:
 		return do_run_verb(session_name, inner_argv, inner_argc);
 	case A_HISTORY:
-		return do_history_verb(opt_hist_json);
+		return do_history_verb(opt_hist_json, opt_remote);
 	case A_SAY:
 		return do_say_verb(opt_all ? NULL : argv + say_at, say_n,
 		                   inner_argv, inner_argc, opt_json);

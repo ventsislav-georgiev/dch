@@ -108,6 +108,10 @@
 #define RM_TTL_S 120		/* a silent host's cached rows, this long */
 #define RM_TS_MS 1500		/* `tailscale status --json` */
 #define RM_CACHE_MAX (8u << 20)
+#define RM_HIST_MAX (2u << 20)	/* a host's --history --json, at most */
+#define RM_HRECS 500		/* records kept per host, at most (newest first) */
+#define RM_HIST_EVERY_MS 10000	/* the picker re-fetches history this often */
+#define RM_HIST_FRESH_S 30	/* the picker: older history shows as stale */
 #define RM_HIGH 262144		/* relay: past this unsent, stop reading */
 #define RM_READ 65536
 
@@ -421,6 +425,12 @@ label_in(const char *host)
 }
 #endif
 
+const char *
+dch_remote_hosts(void)
+{
+	return g_hosts;
+}
+
 int
 dch_remote_set_hosts(const char *list)
 {
@@ -495,6 +505,8 @@ rows_from(const struct json_parser *jp, int arr, const char *host,
 			continue;
 		if (jstr(jp, i, "alias", r->alias, sizeof r->alias) != 1)
 			r->alias[0] = '\0';
+		if (jstr(jp, i, "cwd", r->cwd, sizeof r->cwd) != 1)
+			r->cwd[0] = '\0';
 		if (jstr(jp, i, "state", r->state, sizeof r->state) != 1 ||
 		    (strcmp(r->state, "working") && strcmp(r->state, "idle") &&
 		     strcmp(r->state, "blocked") && strcmp(r->state, "done")))
@@ -561,6 +573,199 @@ row_cmp(const void *x, const void *y)
 	return c ? c : strcmp(a->name, b->name);
 }
 
+/* ---- remote history (#115) ------------------------------------------ */
+
+struct hlist
+{
+	struct dch_rrec *v;
+	int n, cap;
+};
+
+void
+dch_remote_hfree(struct dch_rrec *v, int n)
+{
+	int i;
+
+	for (i = 0; v && i < n; i++)
+		free(v[i].json);
+	free(v);
+}
+
+static struct dch_rrec *
+hl_new(struct hlist *l)
+{
+	if (l->n == l->cap)
+	{
+		int c = l->cap ? l->cap * 2 : 64;
+		struct dch_rrec *q;
+
+		if (c > RM_HOSTS * RM_HRECS * 2 ||
+		    !(q = realloc(l->v, (size_t)c * sizeof *q)))
+			return NULL;
+		l->v = q;
+		l->cap = c;
+	}
+	memset(&l->v[l->n], 0, sizeof *l->v);
+	return &l->v[l->n];
+}
+
+/* Object token o as text, malloc'd: every C1, DEL and bidi control (which
+** a valid document holds raw only inside a string) as a \u escape, the way
+** --ls-json writes them, and any whitespace byte as a space. NULL when out
+** of memory. Pure. */
+static char *
+obj_safe(const struct json_parser *jp, int o)
+{
+	const unsigned char *s = (const unsigned char *)jp->text +
+	                         jp->tok[o].start;
+	size_t n = (size_t)(jp->tok[o].end - jp->tok[o].start), i;
+	struct sb b = {0};
+	char e[8];
+	unsigned cp;
+	int k;
+
+	for (i = 0; i < n; i += (size_t)k)
+	{
+		if (!(k = utf8_at(s + i, &cp)))
+		{
+			k = 1;	/* never: the parser took only UTF-8 */
+			cp = s[i];
+		}
+		if (cp < 0x20)
+			sb_s(&b, " ");
+		else if (cp_ctl(cp))
+		{
+			snprintf(e, sizeof e, "\\u%04x", cp);
+			sb_s(&b, e);
+		}
+		else
+			sb_add(&b, s + i, (size_t)k);
+	}
+	if (b.bad || !b.p)
+	{
+		free(b.p);
+		return NULL;
+	}
+	return b.p;
+}
+
+/* The records of array token arr, host's --history --json answered at at:
+** each an object with a "name", at most RM_HRECS. One without a name, or
+** with a "host" or "stale" key of its own (dch adds those), is skipped;
+** every other field kept only when it fits, the record whole in json.
+** Pure. */
+static void
+hist_from(const struct json_parser *jp, int arr, const char *host,
+          long long at, struct hlist *l)
+{
+	int i, took = 0;
+
+	for (i = arr + 1; i < jp->tok[arr].next && took < RM_HRECS;
+	     i = jp->tok[i].next)
+	{
+		struct dch_rrec *r;
+		char w[512];
+		long long v;
+		size_t o = 0;
+		int a, t;
+
+		if (jp->tok[i].kind != JSON_OBJECT ||
+		    dch_json_field(jp, i, "host") != -1 ||
+		    dch_json_field(jp, i, "stale") != -1 || !(r = hl_new(l)) ||
+		    jstr(jp, i, "name", r->name, sizeof r->name) != 1 ||
+		    !r->name[0])
+			continue;
+		if (jstr(jp, i, "file", r->file, sizeof r->file) != 1 ||
+		    !r->file[0])
+			copy_str(r->file, sizeof r->file, r->name);
+		if (jstr(jp, i, "alias", r->alias, sizeof r->alias) != 1)
+			r->alias[0] = '\0';
+		if (jstr(jp, i, "end", r->end, sizeof r->end) != 1)
+			r->end[0] = '\0';
+		if (jstr(jp, i, "cwd", r->cwd, sizeof r->cwd) != 1)
+			r->cwd[0] = '\0';
+		a = jcont(jp, i, "argv", JSON_ARRAY);
+		for (t = a + 1; a >= 0 && t < jp->tok[a].next && o < sizeof r->argv;
+		     t = jp->tok[t].next)
+			if (jp->tok[t].kind == JSON_STRING &&
+			    dch_json_decode(jp, t, w, sizeof w) == 0)
+				o += (size_t)snprintf(r->argv + o, sizeof r->argv - o,
+				                      "%s%s", o ? " " : "", w);
+		if ((a = jcont(jp, i, "agent", JSON_OBJECT)) >= 0)
+		{
+			if (jstr(jp, a, "session_id", r->sid, sizeof r->sid) != 1)
+				r->sid[0] = '\0';
+			if (jstr(jp, a, "name", r->aname, sizeof r->aname) != 1)
+				r->aname[0] = '\0';
+		}
+		/* a long that fits 32 bits too (Windows) */
+		if ((jint(jp, i, "ended", &v) == 1 && v > 0 && v < 0x7fffffffLL) ||
+		    (jint(jp, i, "updated", &v) == 1 && v > 0 &&
+		     v < 0x7fffffffLL))
+			r->when = (long)v;
+		t = dch_json_field(jp, i, "pinned");
+		r->pinned = t >= 0 && jp->tok[t].kind == JSON_PRIMITIVE &&
+		            jp->tok[t].end - jp->tok[t].start == 4 &&
+		            !memcmp(jp->text + jp->tok[t].start, "true", 4);
+		copy_str(r->host, sizeof r->host, host);
+		r->at = (long)at;
+		if (!(r->json = obj_safe(jp, i)))
+			continue;
+		l->n++;
+		took++;
+	}
+}
+
+/* A host's --history --json reply js: its records, 0; or -1 when it is not
+** a JSON array. Pure. */
+static int
+hist_doc(const char *js, const char *host, long long at, struct hlist *l)
+{
+	struct json_parser jp;
+	int rc = -1;
+
+	if (dch_json_parse(&jp, js) == 0 && jp.ntok > 0 &&
+	    jp.tok[0].kind == JSON_ARRAY)
+	{
+		hist_from(&jp, 0, host, at, l);
+		rc = 0;
+	}
+	dch_json_free(&jp);
+	return rc;
+}
+
+/* The history cache js: [{"at":N,"host":"label","recs":[...]}...], a
+** host a plain label that answered after 0 and at most a minute past now.
+** 0, or -1 when it is not a JSON array. Pure. */
+static int
+hist_cdoc(const char *js, long long now, struct hlist *l)
+{
+	struct json_parser jp;
+	char host[DCH_RHOST_MAX];
+	long long at;
+	int i, recs, nh = 0, rc = -1;
+
+	if (dch_json_parse(&jp, js) == 0 && jp.ntok > 0 &&
+	    jp.tok[0].kind == JSON_ARRAY)
+	{
+		for (i = 1; i < jp.tok[0].next && nh < RM_HOSTS;
+		     i = jp.tok[i].next)
+			if (jp.tok[i].kind == JSON_OBJECT &&
+			    jstr(&jp, i, "host", host, sizeof host) == 1 &&
+			    host[0] && plain(host, strlen(host), "-._") &&
+			    jint(&jp, i, "at", &at) == 1 && at > 0 &&
+			    at <= now + 60 &&
+			    (recs = jcont(&jp, i, "recs", JSON_ARRAY)) >= 0)
+			{
+				hist_from(&jp, recs, host, at, l);
+				nh++;
+			}
+		rc = 0;
+	}
+	dch_json_free(&jp);
+	return rc;
+}
+
 /* ---- the cache ------------------------------------------------------- */
 
 /* In <state>/dch/sessions, which dch_history_dir has checked is a
@@ -578,33 +783,57 @@ cache_path(char *out, size_t cap, const char *leaf)
 	return (size_t)snprintf(out, cap, "%s/%s", dir, leaf) < cap ? 0 : -1;
 }
 
-/* The cached rows, each its host's and when that host answered (now: the
-** time, against which a row's is checked). */
-static void
-cache_load(struct rlist *l, long long now)
+/* Cache file leaf, this user's and at most RM_CACHE_MAX: its text, or
+** NULL. */
+static char *
+cache_read(const char *leaf)
 {
 	char path[PATH_MAX + 32], *text;
 	struct stat st;
 	ssize_t k;
 	int fd;
 
-	if (cache_path(path, sizeof path, ".remote-cache") < 0 ||
+	if (cache_path(path, sizeof path, leaf) < 0 ||
 	    (fd = open(path, O_RDONLY | O_BINARY | O_CLOEXEC | O_NOFOLLOW)) < 0)
-		return;
+		return NULL;
 	if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode) || !file_mine(&st) ||
 	    (size_t)st.st_size > RM_CACHE_MAX ||
 	    !(text = malloc((size_t)st.st_size + 1)))
 	{
 		close(fd);
-		return;
+		return NULL;
 	}
 	k = read(fd, text, (size_t)st.st_size);
 	close(fd);
 	if (k == st.st_size && !memchr(text, 0, (size_t)k))
 	{
 		text[k] = '\0';
-		(void)rows_doc(text, NULL, now, l);
+		return text;
 	}
+	free(text);
+	return NULL;
+}
+
+/* The cached rows, each its host's and when that host answered (now: the
+** time, against which a row's is checked). */
+static void
+cache_load(struct rlist *l, long long now)
+{
+	char *text = cache_read(".remote-cache");
+
+	if (text)
+		(void)rows_doc(text, NULL, now, l);
+	free(text);
+}
+
+/* The cached history records (#115), as cache_load's rows. */
+static void
+hist_cload(struct hlist *l, long long now)
+{
+	char *text = cache_read(".remote-history");
+
+	if (text)
+		(void)hist_cdoc(text, now, l);
 	free(text);
 }
 
@@ -635,30 +864,63 @@ dch_remote_known(const char *host)
 			hit = !strcasecmp(l.v[k].host, host);
 		free(l.v);
 	}
+	if (!hit)
+	{
+		/* a host whose History rows were listed (#115) */
+		struct hlist hl = {0};
+
+		hist_cload(&hl, (long long)time(NULL));
+		for (k = 0; k < hl.n && !hit; k++)
+			hit = !strcasecmp(hl.v[k].host, host);
+		dch_remote_hfree(hl.v, hl.n);
+	}
 	return hit;
 }
 
-/* l as the cache: up to RM_CACHE_MAX less a row's worst case, so the
-** loader never refuses the file (a host past that is left out). The write
-** is to a new mkstemp file (created exclusively, here and on Windows)
-** renamed over the old, SIGTERM held meanwhile (dch_remote_stop's), so no
-** half-written file is ever left behind. */
+/* b as the cache file leaf: written to a new mkstemp file (created
+** exclusively, here and on Windows) renamed over the old, SIGTERM held
+** meanwhile (dch_remote_stop's), so no half-written file is ever left
+** behind. */
 static void
-cache_save(const struct rlist *l)
+cache_write(const char *leaf, struct sb *b)
 {
-	char path[PATH_MAX + 32], tmp[PATH_MAX + 32];
-	struct sb b = {0};
+	char path[PATH_MAX + 32], tmp[PATH_MAX + 48], tl[64];
 #ifndef _WIN32
 	sigset_t term, old;
 #endif
-	int i, fd;
+	int fd;
 	ssize_t w;
 
-	if (cache_path(path, sizeof path, ".remote-cache") < 0 ||
-	    cache_path(tmp, sizeof tmp, ".remote-cache.XXXXXX") < 0)
+	snprintf(tl, sizeof tl, "%s.XXXXXX", leaf);
+	if (b->bad || cache_path(path, sizeof path, leaf) < 0 ||
+	    cache_path(tmp, sizeof tmp, tl) < 0)
 		return;
+#ifndef _WIN32
+	sigemptyset(&term);
+	sigaddset(&term, SIGTERM);
+	sigprocmask(SIG_BLOCK, &term, &old);
+#endif
+	if ((fd = mkstemp(tmp)) >= 0)
+	{
+		w = write(fd, b->p, b->n);
+		if (close(fd) < 0 || w != (ssize_t)b->n || rename_over(tmp, path) < 0)
+			unlink(tmp);
+	}
+#ifndef _WIN32
+	sigprocmask(SIG_SETMASK, &old, NULL);
+#endif
+}
+
+/* l as the cache: up to RM_CACHE_MAX less a row's worst case, so the
+** loader never refuses the file (a host past that is left out). */
+static void
+cache_save(const struct rlist *l)
+{
+	struct sb b = {0};
+	int i;
+
 	sb_s(&b, "[");
-	for (i = 0; i < l->n && b.n + 6 * (DCH_RHOST_MAX + 2 * 256 + 16) + 64 <
+	for (i = 0; i < l->n && b.n + 6 * (DCH_RHOST_MAX + 3 * 256 + 512) + 64 <
 	     RM_CACHE_MAX; i++)
 	{
 		const struct dch_rrow *r = &l->v[i];
@@ -667,6 +929,8 @@ cache_save(const struct rlist *l)
 		sb_q(&b, r->alias);
 		sb_s(&b, ",\"at\":");
 		sb_ll(&b, r->at);
+		sb_s(&b, ",\"cwd\":");
+		sb_q(&b, r->cwd);
 		sb_s(&b, ",\"host\":");
 		sb_q(&b, r->host);
 		sb_s(&b, ",\"name\":");
@@ -676,28 +940,50 @@ cache_save(const struct rlist *l)
 		sb_s(&b, "}");
 	}
 	sb_s(&b, "]\n");
-#ifndef _WIN32
-	sigemptyset(&term);
-	sigaddset(&term, SIGTERM);
-	sigprocmask(SIG_BLOCK, &term, &old);
-#endif
-	if (!b.bad && (fd = mkstemp(tmp)) >= 0)
+	cache_write(".remote-cache", &b);
+	free(b.p);
+}
+
+/* l (each host's records together) as the history cache, hist_cdoc's
+** shape: up to RM_CACHE_MAX, a host past that left out. */
+static void
+hist_save(const struct hlist *l)
+{
+	struct sb b = {0};
+	size_t sz;
+	int i, j, k;
+
+	sb_s(&b, "[");
+	for (i = 0; i < l->n; i = j)
 	{
-		w = write(fd, b.p, b.n);
-		if (close(fd) < 0 || w != (ssize_t)b.n || rename_over(tmp, path) < 0)
-			unlink(tmp);
+		for (j = i, sz = 0; j < l->n && !strcmp(l->v[j].host,
+		     l->v[i].host); j++)
+			sz += strlen(l->v[j].json) + 2;
+		if (b.n + sz + 6 * DCH_RHOST_MAX + 64 >= RM_CACHE_MAX)
+			continue;
+		sb_s(&b, b.n > 1 ? ",\n{\"at\":" : "{\"at\":");
+		sb_ll(&b, l->v[i].at);
+		sb_s(&b, ",\"host\":");
+		sb_q(&b, l->v[i].host);
+		sb_s(&b, ",\"recs\":[");
+		for (k = i; k < j; k++)
+		{
+			sb_s(&b, k > i ? ",\n" : "");
+			sb_s(&b, l->v[k].json);
+		}
+		sb_s(&b, "]}");
 	}
-#ifndef _WIN32
-	sigprocmask(SIG_SETMASK, &old, NULL);
-#endif
+	sb_s(&b, "]\n");
+	cache_write(".remote-history", &b);
 	free(b.p);
 }
 
 /* ---- probes ---------------------------------------------------------- */
 
 /* PR_REFUSED: the server's gate turned us away with a 0x13 that has a
-** "code" (#094), not a host that is down: why holds its message. */
-enum { PR_CONN, PR_WAIT, PR_OK, PR_FAIL, PR_NEWER, PR_REFUSED };
+** "code" (#094), not a host that is down: why holds its message. PR_OLD: a
+** history probe's host has no ctl op (#115). */
+enum { PR_CONN, PR_WAIT, PR_OK, PR_FAIL, PR_NEWER, PR_REFUSED, PR_OLD };
 
 struct probe
 {
@@ -712,7 +998,17 @@ struct probe
 	char *list;		/* the 0x11 payload, NUL-terminated */
 	char *hello_js;		/* hello_only: the 0x18 payload */
 	char why[300];		/* PR_FAIL, PR_NEWER, PR_REFUSED: printable */
+	/* hist (#115): once the hello lists "ctl", a 0x30 of --history --json,
+	** its 0x31 bytes into hout (RM_HIST_MAX at most); PR_OK on exit 0 */
+	int hist;
+	struct sb hout, herr;
 };
+
+static int hello_op(const char *js, const char *op);
+static void ctl_payload(struct sb *b, int argc, char **argv, const char *cwd);
+static int ctl_in(struct rf_state *rs, struct sb *tin, struct sb *out,
+                  struct sb *err, int *xit, char *why, size_t wcap, char *msg,
+                  size_t cap, int *code);
 
 /* Every probe's sa, its address when it is an IPv4 literal: how many are
 ** names, not literals. */
@@ -948,6 +1244,52 @@ err_text(const unsigned char *d, size_t n, char *out, size_t cap)
 	return coded;
 }
 
+/* A history probe's host said hello (js): the 0x30 for its --history
+** --json when it lists "ctl"; else PR_OLD. */
+static void
+hist_ask(struct probe *p, const char *js)
+{
+	static char *av[] = { "--history", "--json", NULL };
+	struct sb rq = {0};
+
+	if (!hello_op(js, "ctl"))
+	{
+		pr_end(p, PR_OLD, "does not support remote history (needs dch "
+		       "serve 1.41+)");
+		return;
+	}
+	/* a few dozen bytes into an idle socket: sent whole */
+	ctl_payload(&rq, 2, av, NULL);
+	if (rq.bad || send(p->fd, (const void *)rq.p, rq.n, MSG_NOSIGNAL) !=
+	    (ssize_t)rq.n)
+		pr_end(p, PR_FAIL, rq.bad ? "out of memory"
+		       : sock_str(sock_err()));
+	free(rq.p);
+}
+
+/* A history probe's ctl frames in p->in, as far as they have come: PR_OK
+** once its dch exited 0, else PR_FAIL (or PR_REFUSED for a coded 0x13). */
+static void
+hist_in(struct probe *p)
+{
+	char why[100] = "", msg[300] = "";
+	int xit = 1, code = 1;
+	int r = ctl_in(&p->rs, &p->in, &p->hout, &p->herr, &xit, why,
+	               sizeof why, msg, sizeof msg, &code);
+
+	p->herr.n = 0;		/* its stderr: not ours to show */
+	if (p->hout.bad || p->herr.bad || p->hout.n > RM_HIST_MAX)
+		pr_end(p, PR_FAIL, "sent too much");
+	else if (r < 0)
+		pr_end(p, PR_FAIL, msg);
+	else if (r && msg[0])
+		pr_end(p, code == 1 ? PR_FAIL : PR_REFUSED, msg);
+	else if (r && (xit || why[0]))
+		pr_end(p, PR_FAIL, "its dch --history --json failed");
+	else if (r)
+		pr_end(p, PR_OK, NULL);
+}
+
 static void
 pr_frame(struct probe *p, const struct rf_frame *f)
 {
@@ -991,14 +1333,17 @@ pr_frame(struct probe *p, const struct rf_frame *f)
 	else
 	{
 		p->hello = 1;
-		if (p->hello_only)
+		if (p->hist)
+			hist_ask(p, t);
+		else if (p->hello_only)
 		{
 			p->hello_js = t;
 			t = NULL;
 		}
 	}
 	free(t);
-	if (p->st == PR_WAIT && p->hello && (p->list || p->hello_only))
+	if (p->st == PR_WAIT && p->hello && !p->hist &&
+	    (p->list || p->hello_only))
 	{
 		if (p->keep)
 			p->st = PR_OK;
@@ -1021,7 +1366,8 @@ pr_feed(struct probe *p, const unsigned char *buf, size_t k)
 		pr_end(p, PR_FAIL, "sent too much");
 		return;
 	}
-	while (p->st == PR_WAIT &&
+	/* a history probe past its hello: ctl frames, hist_in's */
+	while (p->st == PR_WAIT && !(p->hist && p->hello) &&
 	       (r = rf_parse(&p->rs, (const unsigned char *)p->in.p + off,
 	                     p->in.n - off, (size_t)-1, &f, &used)) != RF_NEED)
 	{
@@ -1036,6 +1382,8 @@ pr_feed(struct probe *p, const unsigned char *buf, size_t k)
 		memmove(p->in.p, p->in.p + off, p->in.n - off);
 		p->in.n -= off;
 	}
+	if (p->st == PR_WAIT && p->hist && p->hello)
+		hist_in(p);
 }
 
 static void
@@ -1146,17 +1494,84 @@ probes_free(struct probe *v, int n)
 		free(v[i].list);
 		free(v[i].hello_js);
 		free(v[i].in.p);
+		free(v[i].hout.p);
+		free(v[i].herr.p);
 	}
 	free(v);
+}
+
+static int
+probe_cmp(const void *x, const void *y)
+{
+	return strcmp(((const struct probe *)x)->h.label,
+	              ((const struct probe *)y)->h.label);
+}
+
+/* Every host's history (#115) within ms, in label order: the records of
+** those that answered, then the cached ones (stale) of those that did not,
+** for RM_TTL_S, as rows_now's rows. Saves the history cache. loud: a host
+** that speaks a newer protocol, refuses us or has no ctl is said on
+** stderr, and shows nothing. */
+static void
+hist_now(const struct rhost *hv, int n, int ms, struct hlist *l, int loud)
+{
+	struct probe *pv;
+	struct hlist old = {0};
+	struct dch_rrec *r;
+	long long now = (long long)time(NULL);
+	int i, k;
+
+	if (n <= 0 || !(pv = calloc((size_t)n, sizeof *pv)))
+		return;
+	for (i = 0; i < n; i++)
+	{
+		pv[i].h = hv[i];
+		pv[i].hello_only = pv[i].hist = 1;
+	}
+	qsort(pv, (size_t)n, sizeof *pv, probe_cmp);
+	probe_all(pv, n, ms);
+	hist_cload(&old, now);
+	for (i = 0; i < n; i++)
+	{
+		const char *lab = pv[i].h.label;
+
+		if (pv[i].st == PR_OK && pv[i].hout.p &&
+		    hist_doc(pv[i].hout.p, lab, now, l) == 0)
+			continue;
+		if (pv[i].st == PR_NEWER || pv[i].st == PR_REFUSED ||
+		    pv[i].st == PR_OLD)
+		{
+			if (loud)
+				fprintf(stderr, pv[i].st == PR_NEWER ? "dch: %s %s; "
+				        "skipped\n" : pv[i].st == PR_REFUSED ? "dch: %s "
+				        "refused: %s\n" : "dch: %s: %s\n", lab,
+				        pv[i].why);
+			continue;
+		}
+		/* 0 < at <= now + 60: no overflow */
+		for (k = 0; k < old.n; k++)
+			if (!strcmp(old.v[k].host, lab) &&
+			    old.v[k].at >= now - RM_TTL_S && (r = hl_new(l)))
+			{
+				*r = old.v[k];
+				r->stale = 1;
+				old.v[k].json = NULL;	/* l's now */
+				l->n++;
+			}
+	}
+	dch_remote_hfree(old.v, old.n);
+	probes_free(pv, n);
+	hist_save(l);
 }
 
 /* Probe every host within ms, the tailscale call and name lookups
 ** included; the rows of those that answered, then the cached rows (stale)
 ** of those that did not, for RM_TTL_S. Saves the cache, and sets the
 ** candidate labels (written to lfd too, then closed, when lfd >= 0). loud:
-** a host that speaks a newer protocol is said on stderr. */
+** a host that speaks a newer protocol is said on stderr. hist: then their
+** history too, in RM_BG_MS more (the picker's background probe, #115). */
 static void
-rows_now(struct rlist *l, int ms, int loud, int lfd)
+rows_now(struct rlist *l, int ms, int loud, int lfd, int hist)
 {
 	struct rhost hv[RM_HOSTS];
 	struct probe *pv;
@@ -1216,6 +1631,13 @@ rows_now(struct rlist *l, int ms, int loud, int lfd)
 	free(old.v);
 	probes_free(pv, n);
 	cache_save(l);
+	if (hist)
+	{
+		struct hlist hl = {0};
+
+		hist_now(hv, n, RM_BG_MS, &hl, 0);
+		dch_remote_hfree(hl.v, hl.n);
+	}
 }
 
 #ifdef _WIN32
@@ -1233,7 +1655,7 @@ static DWORD WINAPI
 bg_run(void *arg)
 {
 	(void)arg;
-	rows_now(&bg_new, RM_BG_MS, 0, -1);
+	rows_now(&bg_new, RM_BG_MS, 0, -1, 0);
 	return 0;
 }
 
@@ -1298,6 +1720,7 @@ bg_rows(struct rlist *l, long long t)
 #else
 static pid_t bg_pid = -1;
 static long long bg_at = -RM_EVERY_MS;
+static long long bg_hist_at = -RM_HIST_EVERY_MS;
 static int lab_fd = -1;		/* the bg child's labels, read end */
 static char lab_in[sizeof g_lab];
 static size_t lab_n;
@@ -1337,6 +1760,17 @@ labels_poll(void)
 }
 #endif
 
+/* --ls's time box: DCH_REMOTE_BOX_MS for a slower link (or a sanitizer
+** build), else RM_BOX_MS. */
+static int
+box_ms(void)
+{
+	const char *e = getenv("DCH_REMOTE_BOX_MS");
+	long box = e ? atol(e) : 0;
+
+	return box > 0 && box <= 60000 ? (int)box : RM_BOX_MS;
+}
+
 /* The rows: now, probed in the foreground (--ls); else the picker's, from
 ** the cache, re-probed behind it (on Windows bg_rows'). */
 int
@@ -1353,15 +1787,10 @@ dch_remote_rows(struct dch_rrow **out, int now)
 		return 0;
 	if (now)
 	{
-		/* DCH_REMOTE_BOX_MS: a slower link (or a sanitizer build) */
-		const char *e = getenv("DCH_REMOTE_BOX_MS");
-		long box = e ? atol(e) : 0;
-
 #ifdef _WIN32
 		bg_stop();	/* one probe at a time: they share rows_now's state */
 #endif
-		rows_now(&l, box > 0 && box <= 60000 ? (int)box : RM_BOX_MS, 1,
-		         -1);
+		rows_now(&l, box_ms(), 1, -1, 0);
 	}
 #ifdef _WIN32
 	else
@@ -1376,7 +1805,12 @@ dch_remote_rows(struct dch_rrow **out, int now)
 		if (bg_pid < 0 && lab_fd < 0 && now_ms() - bg_at >= RM_EVERY_MS &&
 		    pipe_ce(lp) == 0)
 		{
+			/* the history less often: each is a dch run there */
+			int hist = now_ms() - bg_hist_at >= RM_HIST_EVERY_MS;
+
 			bg_at = now_ms();
+			if (hist)
+				bg_hist_at = bg_at;
 			if ((bg_pid = fork()) == 0)
 			{
 				struct rlist bl = {0};
@@ -1390,7 +1824,7 @@ dch_remote_rows(struct dch_rrow **out, int now)
 					dup2(nul, 1);
 					dup2(nul, 2);
 				}
-				rows_now(&bl, RM_BG_MS, 0, lp[1]);
+				rows_now(&bl, RM_BG_MS, 0, lp[1], hist);
 				_exit(0);
 			}
 			close(lp[1]);
@@ -1424,6 +1858,52 @@ dch_remote_rows(struct dch_rrow **out, int now)
 #endif
 	if (l.n > 1)
 		qsort(l.v, (size_t)l.n, sizeof *l.v, row_cmp);
+	*out = l.v;
+	return l.n;
+}
+
+int
+dch_remote_history(struct dch_rrec **out, int now)
+{
+	struct hlist l = {0};
+
+	*out = NULL;
+	if (!remote_on())
+		return 0;
+	if (now)
+	{
+		/* --ls --remote's box, the tailscale call included */
+		struct rhost hv[RM_HOSTS];
+		int ms = box_ms(), n;
+		long long end = now_ms() + ms, left;
+
+#ifdef _WIN32
+		bg_stop();	/* rows_now's state is the probe thread's */
+#endif
+		n = candidates(hv, RM_HOSTS, ms < RM_TS_MS ? ms : RM_TS_MS, 1);
+		left = end - now_ms();
+		hist_now(hv, n, left > 0 ? (int)left : 0, &l, 1);
+	}
+#ifndef _WIN32
+	else
+	{
+		/* the picker's: the cache the bg child keeps, of the hosts
+		** that are candidates now (dch_remote_rows' labels) */
+		long long t = (long long)time(NULL);
+		int i, k;
+
+		hist_cload(&l, t);
+		for (i = k = 0; i < l.n; i++)
+			if (label_in(l.v[i].host) && l.v[i].at >= t - RM_TTL_S)
+			{
+				l.v[k] = l.v[i];
+				l.v[k++].stale = l.v[i].at < t - RM_HIST_FRESH_S;
+			}
+			else
+				free(l.v[i].json);
+		l.n = k;
+	}
+#endif
 	*out = l.v;
 	return l.n;
 }

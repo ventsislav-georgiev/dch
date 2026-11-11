@@ -5,7 +5,9 @@
 ** back as a client's), a server's frame stream into the probe and into the
 ** relay (each cut into reads of a size the input picks), and logsafe at a
 ** small cap; #114's ctl stream (ctl_in) and a hello's ops (hello_op,
-** #118's ctl-cancel too). Every peer string, once escaped, must hold no
+** #118's ctl-cancel too); #115's history: a host's --history --json reply,
+** the history cache, and a history probe's hello and ctl frames. Every peer
+** string, once escaped, must hold no
 ** control byte: C0, DEL, C1 or a bidi control. Linked with the rest of dch
 ** minus remote.o, and dch.c built with -Dmain=dch_main. */
 #include "../../remote.c"
@@ -64,6 +66,40 @@ label_ok(const char *l, size_t cap, const char *extra)
 		abort();
 }
 
+/* A remote history record (#115): every field inert once escaped, json an
+** object that parses back with no "host" or "stale" key of its own and
+** nothing raw a terminal acts on; a cached one's host a plain label that
+** answered in (0, now + 60]. */
+static void
+hrec_ok(const struct dch_rrec *r, int cached)
+{
+	struct json_parser jp;
+	int ok;
+
+	if (!r->name[0] || !r->file[0] || !r->host[0] || !r->json ||
+	    r->when < 0 || r->when >= 0x7fffffffL || (r->pinned & ~1) ||
+	    r->stale)
+		abort();
+	printable(r->name);
+	printable(r->file);
+	printable(r->alias);
+	printable(r->aname);
+	printable(r->end);
+	printable(r->cwd);
+	printable(r->argv);
+	printable(r->sid);
+	inert(r->json);
+	ok = dch_json_parse(&jp, r->json) == 0 && jp.ntok > 0 &&
+	     jp.tok[0].kind == JSON_OBJECT &&
+	     dch_json_field(&jp, 0, "host") == -1 &&
+	     dch_json_field(&jp, 0, "stale") == -1;
+	dch_json_free(&jp);
+	if (!ok || (cached && (!plain(r->host, strlen(r->host), "-._") ||
+	                       r->at <= 0 || r->at > NOW + 60)) ||
+	    (!cached && (strcmp(r->host, "h") || r->at != NOW)))
+		abort();
+}
+
 int
 LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 {
@@ -75,7 +111,7 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		return 0;
 	memcpy(t, d + 1, n - 1);
 	t[n - 1] = '\0';
-	switch (d[0] % 9)
+	switch (d[0] % 10)
 	{
 	case 0:		/* --hosts */
 		k = hosts_parse(t, hv, RM_HOSTS, bad, sizeof bad);
@@ -264,6 +300,52 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		free(err.p);
 		(void)hello_op(t, "ctl");
 		(void)hello_op(t, "ctl-cancel");	/* #118 */
+		break;
+	}
+	case 9:		/* #115: --history --json, the cache; a history probe */
+	{
+		struct hlist l = {0};
+		struct probe *p;
+		size_t c = n > 1 ? (size_t)d[1] % 64 + 1 : 1, off;
+		int sv[2];
+
+		(void)hist_doc(t, "h", NOW, &l);
+		k = l.n;
+		(void)hist_cdoc(t, NOW, &l);
+		if (k > RM_HRECS)
+			abort();
+		for (i = 0; i < l.n; i++)
+			hrec_ok(&l.v[i], i >= k);
+		dch_remote_hfree(l.v, l.n);
+		/* the frames after the hello: ctl_in's, into hout */
+		if (!(p = calloc(1, sizeof *p)) ||
+		    socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0)
+		{
+			free(p);
+			break;
+		}
+		p->fd = sv[0];
+		p->st = PR_WAIT;
+		p->hist = 1;
+		p->rs.from_server = 1;
+		for (off = 2; off < n && p->st == PR_WAIT; off += c)
+			pr_feed(p, d + off, n - off < c ? n - off : c);
+		inert(p->why);
+		if ((p->st == PR_OK && (!p->hello || p->hout.n > RM_HIST_MAX)) ||
+		    (p->st == PR_REFUSED && !p->why[0]) ||
+		    (p->st != PR_WAIT && p->fd >= 0))
+			abort();	/* OK only after a hello, closed once done */
+		if (p->st == PR_OK && p->hout.p)
+		{
+			struct hlist h = {0};
+
+			(void)hist_doc(p->hout.p, "h", NOW, &h);
+			for (i = 0; i < h.n; i++)
+				hrec_ok(&h.v[i], 0);
+			dch_remote_hfree(h.v, h.n);
+		}
+		close(sv[1]);
+		probes_free(p, 1);
 		break;
 	}
 	case 7:		/* logsafe cut short */

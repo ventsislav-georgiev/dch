@@ -2,5 +2,5 @@
 {"schema":1,"mention":{"session":"defs","chapter":"f*:0","at":1794304801,"line":"Work on #831 please","offset":0,"live":false,"project":"-home-demo-proj"}}
 {"schema":1,"definition":{"session":"defs","live":false,"project":"-home-demo-proj","at":1794304803,"title":"Agent panes","passage":"The panes show agents.\nSecond line.","rule":"D1","offset":376,"chapter":"f*:0"}}
 {"schema":1,"mention":{"session":"defs","chapter":"f*:0","at":1794304803,"line":"# #831 Agent panes","offset":376,"live":false,"project":"-home-demo-proj"}}
-{"schema":1,"tally":{"session":"defs","live":false,"project":"-home-demo-proj","count":2,"definitions":1,"partial":false}}
+{"schema":1,"tally":{"session":"defs","live":false,"project":"-home-demo-proj","count":2,"definitions":1,"partial":false,"mentions_dropped":0}}
 {"schema":1,"done":true,"partial":false,"counts":{"session":2,"project":0,"project_sessions":0,"all":null,"all_sessions":null},"why":null,"files":1,"bytes":22827,"lines_too_long":0}

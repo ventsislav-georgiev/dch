@@ -920,15 +920,15 @@ def ref_lines(out):
         return None
 
 
-def history(name, sid, cfg):
+def history(name, sid, cfg, cwd="/home/demo/proj"):
     sockdir = os.path.join(T, "dch-%d" % os.getuid())
     hdir = os.path.join(T, "state", "dch", "sessions",
                         sockdir.replace("/", "-"))
     os.makedirs(hdir, exist_ok=True)
-    rec = {"name": name, "cwd": "/home/demo/proj", "end": "exited",
+    rec = {"name": name, "cwd": cwd, "end": "exited",
            "argv": ["claude"], "started": 1794299400, "updated": 1794300000,
            "ended": 1794300000, "sock_dir": sockdir,
-           "agent": {"session_id": sid, "cwd": "/home/demo/proj",
+           "agent": {"session_id": sid, "cwd": cwd,
                      "config_dir": cfg}}
     with open(os.path.join(hdir, name + ".json"), "w") as f:
         f.write(json.dumps(rec) + "\n")
@@ -988,6 +988,16 @@ def test_refs():
           canary not in tr and "look at" not in tr, tr[-400:])
     new = sorted(set(files(T)) - set(before) - {trace})
     check("ref: nothing written by a --ref", not new, new)
+
+    # NIT-7 (#150): a relative path that only outgrows the key against the
+    # session's cwd is no ref, as main's check says for a short one (exit 2)
+    history("xr-deep", RSID, cfg, "/" + "d" * 1000)
+    r = dch("--xray", "xr-deep", "--ref", "src/" + "a" * 40 + ".c:3",
+            "--scope", "session", "--json")
+    check("ref: a relative path past the key cap against a deep cwd is "
+          "not a ref (exit 2)",
+          r.returncode == 2 and r.stderr == "dch: not a ref\n" and
+          not r.stdout, (r.returncode, r.stderr, r.stdout[:200]))
 
     # a big transcript: light stops at its budget, full reads it all
     pad = "x" * 900
@@ -1966,6 +1976,148 @@ def test_follow_shell():
             os.unlink(cfg)
 
 
+# ---- #149: a shell --ref's output caps and its tick (QA 1.50.0 MED-3) -----
+
+def typed_blocks(n, nblocks, body, done):
+    """A live shell of nblocks typed OSC 133 blocks, each printing body (sh
+    commands); one --send per block, so each has input between B and C."""
+    prog = ("i=0; while [ $i -lt %d ]; do printf '\\033]133;A\\007$ "
+            "\\033]133;B\\007'; read cmd; printf '\\033]133;C\\007'; %s"
+            "printf '\\033]133;D;0\\007'; i=$((i+1)); done; echo %s''DONE; "
+            "sleep 300") % (nblocks, body, done)
+    r = dch("--spawn", n, "--size", "200x24", "sh", "-c", prog)
+    check("%s: spawned" % n, r.returncode == 0, r.stderr)
+    wait_for(lambda: "$" in screen(n), 5)
+    for _ in range(nblocks):
+        dch("--send", n, "x\n")
+        time.sleep(0.005)
+    return wait_for(lambda: done + "DONE" in screen(n), 60)
+
+
+def test_ref_shell_caps():
+    """MED-3's repro: 1300 typed blocks of three `# PROJ-9 <30 emoji> k`
+    headings and six emoji lines in a 4M ring. A full --ref is first ...
+    done, exit 0; definition lines once per title (LOW-2); mention lines
+    past 200 counted in the tally's mentions_dropped (LOW-1)."""
+    n = "xc-refcap"
+    cfg = ENV["DCH_CONFIG"]
+    with open(cfg, "w") as f:
+        f.write("xray_ring = 4M\n")
+    e = "\U0001F600" * 30
+    body = "".join("echo '# PROJ-9 %s %d'; " % (e, k) for k in range(3)) + \
+        "".join("echo '%s line %d'; " % (e, k) for k in range(6))
+    try:
+        check("refcap: 1300 blocks typed", typed_blocks(n, 1300, body, "RC"))
+        rc, o, err = xray(n, "--json")
+        p9 = [x for x in (o or {}).get("refs", []) if x["key"] == "ticket:PROJ-9"]
+        # a block whose input raced its B is forged (7.3): about 1300
+        count = p9[0]["count"] if p9 else 0
+        check("refcap: the index counts ~1300 blocks, 3 definitions",
+              rc == 0 and count > 1200 and p9[0]["definitions"] == 3,
+              (rc, p9, err))
+        r = dch("--xray", n, "--ref", "PROJ-9", "--scope", "session",
+                "--full", "--json")
+        ls = ref_lines(r.stdout) or [{}]
+        defs = [l["definition"]["title"] for l in ls if "definition" in l]
+        ment = sum("mention" in l for l in ls)
+        tally = [l["tally"] for l in ls if "tally" in l]
+        check("refcap: --ref --full exits 0 with first ... done (%d bytes)" %
+              len(r.stdout.encode()), r.returncode == 0 and
+              "first" in ls[0] and ls[-1].get("done") is True and
+              len(r.stdout.encode()) <= 4 << 20, (r.returncode, r.stderr,
+                                                  r.stdout[-300:]))
+        check("refcap: definition lines once per title (3, LOW-2)",
+              len(defs) == 3 and len(set(defs)) == 3, defs)
+        check("refcap: 200 mention lines, the rest in mentions_dropped "
+              "(LOW-1)", ment == 200 and len(tally) == 1 and
+              tally[0]["count"] == count and
+              tally[0]["mentions_dropped"] >= 3 * count - 200 and
+              ls[-1]["counts"]["session"] == count, (ment, tally))
+    finally:
+        dch("-k", n)
+        os.unlink(cfg)
+
+
+def test_ref_shell_tick():
+    """LOW-4: a shell --ref is ticked per record as a transcript is. A ring
+    scans in well under a second, so each run is held with SIGSTOP right
+    after `first`, mid-scan, to let the clock pass: a full one then writes
+    progress, a light one stops at --budget-ms, a closed pipe ends one
+    silently."""
+    import signal
+    n = "xc-reftick"
+    cfg = ENV["DCH_CONFIG"]
+    with open(cfg, "w") as f:
+        f.write("xray_ring = 16M\n")
+    prog = ("awk 'BEGIN{for(i=0;i<30000;i++){s=\"\";for(j=0;j<8;j++) "
+            "s=s sprintf(\"https://github.com/o/r/pull/%d src/a%d.c:%d \", "
+            "j+i%90, j, i%300); print s}}'; echo TICK''DONE; sleep 300")
+    argv = [DCH, "--xray", n, "--ref", "#424242", "--scope", "session",
+            "--json"]
+
+    def held(extra, close=False):
+        """argv + extra, stopped 300 ms once `first` is out: (rc, the
+        lines, stderr)."""
+        p = subprocess.Popen(argv + extra, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, env=ENV)
+        first = p.stdout.readline()
+        p.send_signal(signal.SIGSTOP)
+        if close:
+            p.stdout.close()
+        time.sleep(0.3)
+        p.send_signal(signal.SIGCONT)
+        rest = b"" if close else p.stdout.read()
+        p.wait(10)
+        err = p.stderr.read()
+        p.stderr.close()
+        if not close:
+            p.stdout.close()
+        return p.returncode, ref_lines((first + rest).decode()) or [{}], err
+
+    try:
+        r = dch("--spawn", n, "--size", "200x24", "sh", "-c", prog)
+        check("tick: spawned", r.returncode == 0, r.stderr)
+        check("tick: the output finished",
+              wait_for(lambda: "TICKDONE" in screen(n), 60))
+        t0 = time.time()
+        r = subprocess.run(argv + ["--full"], capture_output=True, text=True,
+                           env=ENV, timeout=60)
+        full = time.time() - t0
+        ls = ref_lines(r.stdout) or [{}]
+        d = ls[-1]
+        check("tick: a full --ref reads the ring, first ... done (%.2fs)" %
+              full, r.returncode == 0 and "first" in ls[0] and
+              d.get("done") is True and not d["partial"] and
+              d["bytes"] > 4 << 20, (r.returncode, r.stderr, r.stdout[-300:]))
+        # the scan can end before SIGSTOP lands on a loaded machine: retry
+        # until a run is caught mid-scan, strict on the one that is
+        for k in range(5):
+            rc, ls, err = held(["--full"])
+            prog_ = [l["progress"] for l in ls if "progress" in l]
+            if prog_:
+                break
+        check("tick: a full --ref held mid-scan writes progress, then done "
+              "(%d tries)" % (k + 1),
+              rc == 0 and "first" in ls[0] and ls[-1].get("done") is True and
+              prog_ and prog_[0]["bytes"] < d["bytes"] and
+              ls[-1]["bytes"] == d["bytes"], (rc, err, ls[-2:]))
+        for k in range(5):
+            rc, ls, err = held(["--budget-ms", "50"])
+            b = ls[-1]
+            if b.get("why") == "budget":
+                break
+        check("tick: a light --ref past --budget-ms 50 stops, why budget "
+              "(%d tries)" % (k + 1),
+              rc == 0 and b.get("done") is True and b["why"] == "budget" and
+              b["partial"] and b["bytes"] < d["bytes"], (rc, err, ls[-1:]))
+        rc, ls, err = held(["--full"], close=True)
+        check("tick: a closed pipe ends a shell --ref, exit 0, silent",
+              rc == 0 and err == b"" and "first" in ls[0], (rc, err))
+    finally:
+        dch("-k", n)
+        os.unlink(cfg)
+
+
 def main():
     try:
         test_names()
@@ -1989,6 +2141,8 @@ def main():
         test_follow_cap()
         test_follow_shell()
         test_follow_agent()
+        test_ref_shell_caps()
+        test_ref_shell_tick()
     finally:
         shutil.rmtree(T, ignore_errors=True)
     if fails[0]:

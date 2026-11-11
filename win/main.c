@@ -87,8 +87,13 @@ list(int action)
 			put_json_str(rr[k].alias);
 			fputs(",\"host\":", stdout);
 			put_json_str(rr[k].host);
-			printf(",\"state\":\"%s\",\"stale\":%s}", rr[k].state,
-			       rr[k].stale ? "true" : "false");
+			printf(",\"state\":\"%s\",\"stale\":%s,\"cwd\":",
+			       rr[k].state, rr[k].stale ? "true" : "false");
+			if (rr[k].cwd[0])
+				put_json_str(rr[k].cwd);
+			else
+				fputs("null", stdout);
+			putchar('}');
 		}
 	}
 	if (action == A_JSON)

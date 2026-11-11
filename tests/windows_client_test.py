@@ -287,7 +287,7 @@ def main():
         check("--ls-json --remote: rows with host, state, stale",
               len(rows) == 2 and rows[0] == {"name": "q1", "alias": "Al",
                                              "host": "q", "state": "",
-                                             "stale": False}
+                                             "stale": False, "cwd": None}
               and rows[1]["state"] == "idle", r.out)
         check("--ls-json ends in a newline, no CR", r.out.endswith("]\n")
               and "\r" not in r.out, repr(r.out))
