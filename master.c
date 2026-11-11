@@ -143,6 +143,11 @@ static struct dch_ring xring;
 static char xsid[18];
 static int n_xsubs;		/* subscribed clients, <= DCH_RING_SUBS */
 static pid_t xagent;		/* the agent pid capture is paused for */
+/* While a follower is subscribed, the agent probe's interval (MED-2 QA
+** 1.52.0): its start or exit reaches --follow in about a second, not on
+** the record tick. No follower, no probe. */
+#define XRAY_AGENT_MS 1000L
+static struct timespec xagent_at;	/* last probe for a follower */
 static struct rlimit core_orig;	/* RLIMIT_CORE before core_off() */
 static int core_saved;
 static void xray_agent(pid_t agent);
@@ -608,25 +613,18 @@ rec_stopped(void)
 	return n;
 }
 
-/* Rebuild the record from the live session and write it. The agent sticks
+/* The agent under the child, for the record and the X-ray ring. It sticks
 ** while its claude's session file is still there: a claude killed under a
 ** shell (out of memory) leaves it, so a revive still brings it back; one
-** that quit cleanly removed it. Once dch --stop left its agent, that one
-** stands. Until the first agent is seen, --revive's (rec_seed) stands in. */
-static void
-rec_refresh(void)
+** that quit cleanly removed it. Runs on the record tick, and every
+** XRAY_AGENT_MS while a follower is subscribed. 1 when dch --stop left its
+** agent (that one stands). */
+static int
+rec_probe(void)
 {
 	struct dch_agent a;
-	char alias[600] = "", ap[1100], *hb = NULL, *ab = NULL, *old;
-	char exe[PATH_MAX];
-	const char *path = getenv("PATH");
-	size_t hl, al;
-	FILE *f;
-	int fd, stopped;
+	int stopped = rec_stopped() > 0;
 
-	if (!rec_path[0])
-		return;
-	stopped = rec_stopped() > 0;
 	if (!stopped && the_pty.fd >= 0 &&
 	    dch_agent_probe(the_pty.pid, &a) == 0)
 	{
@@ -646,6 +644,25 @@ rec_refresh(void)
 	xray_agent(stopped || the_pty.fd < 0 ? 0
 	           : rec_ag.pid > 0 && kill(rec_ag.pid, 0) == 0 ? rec_ag.pid
 	           : (pid_t)dch_codex_below(the_pty.pid));
+	return stopped;
+}
+
+/* Rebuild the record from the live session and write it. Once dch --stop
+** left its agent, that one stands. Until the first agent is seen,
+** --revive's (rec_seed) stands in. */
+static void
+rec_refresh(void)
+{
+	char alias[600] = "", ap[1100], *hb = NULL, *ab = NULL, *old;
+	char exe[PATH_MAX];
+	const char *path = getenv("PATH");
+	size_t hl, al;
+	FILE *f;
+	int fd, stopped;
+
+	if (!rec_path[0])
+		return;
+	stopped = rec_probe();
 	if (sidecar_path(".alias", ap, sizeof ap) == 0 &&
 	    (fd = open(ap, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)) >= 0)
 	{
@@ -1921,14 +1938,17 @@ core_off(void)
 
 /* An agent in the shell pauses capture (its corpus is its transcript), the
 ** shell's next prompt (vt.c) or the agent's exit resumes it (§11.10). Runs
-** on the history record's refresh tick.
-** shortcut: agent output before the first tick after its start (rec_ms,
-** 60 s) is captured; hook dch_agent_probe into the pty batch if it matters. */
+** on the history record's refresh tick, and every XRAY_AGENT_MS while a
+** follower is subscribed. Ring or no ring, a change wakes the followers:
+** theirs is a reset (with the ring off, S_PAUSED still says an agent runs).
+** shortcut: agent output before the first probe after its start (rec_ms,
+** 60 s, with no follower) is captured; hook dch_agent_probe into the pty
+** batch if it matters. */
 static void
 xray_agent(pid_t agent)
 {
-	if (!xring.cap)
-		return;
+	if (agent != xagent)
+		ring_touch(&xring);
 	if (agent && agent != xagent)
 	{
 		dch_vt_capture_pause(1);
@@ -2091,7 +2111,7 @@ do_ring_read(struct client *p, const unsigned char *payload, unsigned int len)
 		st |= DCH_RING_S_CHAPTERS;
 	if (xring.rows_evicted)
 		st |= DCH_RING_S_EVICTED;
-	if (dch_vt_capture_paused())
+	if (dch_vt_capture_paused() || (!xring.cap && xagent))
 		st |= DCH_RING_S_PAUSED;
 	if (vt_latched_off)
 		st |= DCH_RING_S_LATCHED;
@@ -4419,6 +4439,14 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 		}
 		if (rec_ms - ms_since(&rec_at) < wait_ms)
 			wait_ms = rec_ms - ms_since(&rec_at);
+		/* A follower's agent probe, before its wake below. */
+		if (n_xsubs && ms_since(&xagent_at) >= XRAY_AGENT_MS)
+		{
+			(void)rec_probe();
+			clock_gettime(CLOCK_MONOTONIC, &xagent_at);
+		}
+		if (n_xsubs && XRAY_AGENT_MS - ms_since(&xagent_at) < wait_ms)
+			wait_ms = XRAY_AGENT_MS - ms_since(&xagent_at);
 		/* The auto-allow check (#074), due after quiet output. */
 		if (aa_due() <= 0)
 			auto_allow();

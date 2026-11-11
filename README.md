@@ -1212,6 +1212,12 @@ Nothing runs on a timer:
 - a shell is followed through the master's wake, sent when its ring or its
   screen changes (an alternate-screen switch included).
 
+An agent starting or ending in a followed session sends `reset` `rotated`
+within 2 s, with the ring on or with `xray_ring = 0`. While a follower holds
+one of the master's 4 subscriber slots, the master looks for the agent once a
+second; with no follower it does not. A Claude Code follower past the 4 slots
+is not told when its agent exits.
+
 Rules for shells and endings:
 - A master takes 4 shell subscribers. A fifth gets `dch: busy` and exit 1.
 - An ended session or a History record writes its one snapshot and exits 0.

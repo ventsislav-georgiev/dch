@@ -224,7 +224,8 @@ enum
 #define DCH_RING_S_RANGE   0x01	/* seq was evicted (or never was): data
 				** starts at the head; why:"range" */
 #define DCH_RING_S_CHAPTERS 0x02	/* a prompt was evicted */
-#define DCH_RING_S_PAUSED  0x04	/* an agent runs: capture paused */
+#define DCH_RING_S_PAUSED  0x04	/* an agent runs: capture paused (with
+				** S_OFF: the agent alone) */
 #define DCH_RING_S_OFF     0x08	/* no ring (xray_ring 0, lite, no mirror) */
 #define DCH_RING_S_SUB     0x10	/* this connection is subscribed */
 #define DCH_RING_S_SUBFULL 0x20	/* subscribe refused: DCH_RING_SUBS taken */

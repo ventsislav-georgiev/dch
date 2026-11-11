@@ -2011,14 +2011,17 @@ def test_follow_claude():
         dch("-k", n)
 
 
-def test_follow_agent():
-    """A shell's follower across an agent's start and exit. The start: the
-    ring pauses on the master's agent tick (vt.c appends a GAP record, so
-    the wake fires), and the stream sends reset rotated, then a snapshot of
-    corpus claude. The exit, on an idle shell (no row pushed): the resume
-    appends no record but moves the ring's gen (ring_touch), so the wake
-    fires; reset rotated, then a snapshot of corpus shell."""
-    n = "xc-fa"
+def test_follow_agent(off=False):
+    """A shell's follower across an agent's start and exit, on the default
+    60 s record tick: while a follower is subscribed the master probes for
+    an agent every second and wakes it on a change, ring or no ring. The
+    start: reset rotated, then a snapshot of corpus claude. The exit, on an
+    idle shell (no row pushed): reset rotated, then a snapshot of corpus
+    shell (none with xray_ring 0). Each within 3 s."""
+    n = "xc-fa" + ("o" if off else "")
+    tag = "follow agent%s: " % (" (xray_ring 0)" if off else "")
+    base = "none" if off else "shell"
+    cfg = ENV["DCH_CONFIG"]
     bindir = os.path.join(T, "bin-fa")
     fdir = os.path.join(T, "fake-fa")
     proj = os.path.join(T, "faproj")
@@ -2028,22 +2031,27 @@ def test_follow_agent():
                 os.path.join(bindir, "claude"))
     os.chmod(os.path.join(bindir, "claude"), 0o755)
     env = dict(ENV, PATH=bindir + ":" + ENV.get("PATH", "/usr/bin:/bin"),
-               FAKE_CLAUDE_DIR=fdir, DCH_RECORD_MS="1000")
+               FAKE_CLAUDE_DIR=fdir)
+    env.pop("DCH_RECORD_MS", None)
+    if off:
+        with open(cfg, "w") as f:
+            f.write("xray_ring = 0\n")
     sdir = os.path.join(HOME, ".claude", "sessions")
     had = set(os.listdir(sdir)) if os.path.isdir(sdir) else set()
     r = subprocess.run([DCH, "--spawn", n, "--size", "80x24", "--cwd", proj,
                         "sh"], capture_output=True, text=True, timeout=30,
                        env=env)
-    check("follow agent: shell spawned", r.returncode == 0, r.stderr)
+    check(tag + "shell spawned", r.returncode == 0, r.stderr)
     fl = None
     try:
         wait_for(lambda: "$" in screen(n) or "#" in screen(n), 5)
         fl = Follow(n)
         s0 = fl.wait(lambda o: "snapshot" in o)
-        check("follow agent: the first snapshot is corpus shell",
-              s0 and s0[0]["snapshot"]["corpus"] == "shell", fl.objs())
+        check(tag + "the first snapshot is corpus " + base,
+              s0 and s0[0]["snapshot"]["corpus"] == base, fl.objs())
 
         k0 = len(fl.got)
+        t0 = time.time()
         dch("--send", n, "claude\r", env=env)
         rec = wait_for(lambda: [f for f in os.listdir(sdir)
                                 if f.endswith(".json") and f not in had]
@@ -2062,29 +2070,32 @@ def test_follow_agent():
                       if is_reset("rotated")(o)), None)
             return ob[i + 1] if i is not None and i + 1 < len(ob) else None
         wait_for(lambda: rotated_then(k0), 15)
+        secs = time.time() - t0
         nxt = rotated_then(k0)
-        check("follow agent: the agent's start sends reset rotated, then a "
-              "snapshot of corpus claude",
+        check(tag + "the agent's start sends reset rotated, then a "
+              "snapshot of corpus claude (%.1f s)" % secs,
               nxt is not None and "snapshot" in nxt and
-              nxt["snapshot"]["corpus"] == "claude", fl.objs(k0))
+              nxt["snapshot"]["corpus"] == "claude" and secs < 3,
+              fl.objs(k0))
         k1 = len(fl.got)
         t1 = time.time()
         dch("--send", n, "/exit\r", env=env)
-        # the tick is 1 s (DCH_RECORD_MS): the resume lands within ~2 s
-        wait_for(lambda: rotated_then(k1), 5)
+        wait_for(lambda: rotated_then(k1), 15)
         secs = time.time() - t1
         nxt = rotated_then(k1)
-        check("follow agent: the agent's exit on an idle shell sends reset "
-              "rotated, then a snapshot of corpus shell (%.1f s)" % secs,
+        check(tag + "the agent's exit on an idle shell sends reset "
+              "rotated, then a snapshot of corpus %s (%.1f s)" % (base, secs),
               nxt is not None and "snapshot" in nxt and
-              nxt["snapshot"]["corpus"] == "shell" and secs < 5,
+              nxt["snapshot"]["corpus"] == base and secs < 3,
               fl.objs(k1))
     finally:
         dch("-k", n)
+        if off and os.path.exists(cfg):
+            os.unlink(cfg)
         if fl:
             wait_for(lambda: fl.p.poll() is not None, 5)
             rc = fl.stop()
-            check("follow agent: the session's end exits 0", rc == 0,
+            check(tag + "the session's end exits 0", rc == 0,
                   (rc, fl.p.stderr.read() if fl.p.stderr else ""))
 
 def test_follow_history():
@@ -2780,6 +2791,7 @@ def main():
         test_follow_cap()
         test_follow_shell()
         test_follow_agent()
+        test_follow_agent(off=True)
         test_screen()
         test_ref_shell_caps()
         test_ref_shell_tick()
