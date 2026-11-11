@@ -904,7 +904,10 @@ answers to the lowercase id), because that is a ring `session_id`. `-n`,
 create and rename all refuse it with exit 2 and `dch: name looks like a
 session_id`, also with whitespace around it (the listing trims it). A session
 that already has such a name keeps it, and `-n` and `--xray` reach it by its
-exact listed name only: a case variant of it is read as an id.
+exact listed name only: `-n` refuses a case variant of it as a new name, and
+`--xray` reads a case variant of it as an id. Other verbs (`-a`, `--read`,
+`--status`, `--send`, `-k`) reach it by any case on a case-insensitive file
+system, like any name.
 
 | Exit | Meaning |
 | --- | --- |

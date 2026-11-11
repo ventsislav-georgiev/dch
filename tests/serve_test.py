@@ -19,7 +19,8 @@ idle close (goldens 40-43); a 0x34 then the FIN still gets its 0x33.
 #124: a --say stand-in cut by the close or a 0x34 outlives the 2 s grace and
 ends on its own; a --status is SIGKILLed 2 s after its SIGTERM. #126: the
 real --run and --say cut mid-gate take their text back out of a fake
-Claude's composer and end at once.
+Claude's composer and end at once; #128: a --say with a short first line
+cut by the close leaves the composer empty.
 Security review F1-F8: --whois-optional only while tailscaled is down; this
 host's own address and node refused; log escaping; the CLI from absolute
 PATH entries; odd whois/status JSON failing closed; the test variable unset
@@ -493,9 +494,18 @@ exec %s "$@"
                     time.sleep(0.1)
                 return fn()
 
-            for k, (verb, cancel) in enumerate(
-                    (("run", False), ("run", True), ("say", False),
-                     ("say", True)) if cport else ()):
+            def empty(n):
+                return '\u276f Try "fix the tests"' in \
+                    screen(n).replace("\xa0", " ")
+
+            # #128: the last --say's first line is short, so "Hi," is all
+            # that is left before the last Ctrl-Us; it must still go
+            for k, (verb, cancel, msg) in enumerate(
+                    (("run", False, None), ("run", True, None),
+                     ("say", False, None), ("say", True, None),
+                     ("say", False, "Hi,\n\nThanks! Please review the "
+                      "change on the branch and tell me what breaks."))
+                    if cport else ()):
                 n = "svc-cl%d" % k
                 with open(os.path.join(fc, n + ".ctl"), "w") as f:
                     json.dump({"eat_enters": 99}, f)
@@ -503,12 +513,12 @@ exec %s "$@"
                                 "claude"], env=cenv, capture_output=True,
                                timeout=15)
                 up = wait(lambda: "auto mode on" in screen(n), 15)
-                msg = "cut %s %d" % (verb, k)
-                argv = ["--run", n, "--"] + msg.split() if verb == "run" \
-                    else ["--say", n, "--json", "--"] + msg.split()
+                msg = msg or "cut %s %d" % (verb, k)
+                argv = ["--run", n, "--"] + msg.split(" ") if verb == "run" \
+                    else ["--say", n, "--json", "--"] + msg.split(" ")
                 s = conn(cport)
                 send(s, 0x30, {"argv": argv})
-                held = wait(lambda: composer(n, msg), 15)
+                held = wait(lambda: composer(n, msg.split("\n")[0]), 15)
                 t0 = time.time()
                 if cancel:
                     send(s, 0x34)
@@ -528,7 +538,7 @@ exec %s "$@"
                 secs = time.time() - t0
                 if cancel:
                     s.close()
-                gone = wait(lambda: not composer(n, msg), 5)
+                gone = wait(lambda: empty(n), 5)
                 lines = []
                 try:
                     with open(os.path.join(fc, n + ".log")) as f:
@@ -536,9 +546,10 @@ exec %s "$@"
                 except OSError:
                     pass
                 sent = [e for e in lines if e["ev"] == "line"]
-                check("#126: the real --%s cut by %s mid-gate: taken back out "
-                      "of the composer, nothing sent, dch ended (%.1f s%s)"
-                      % (verb, "a 0x34" if cancel else "the close", secs,
+                check("#126: the real --%s%s cut by %s mid-gate: taken back "
+                      "out of the composer, nothing sent, dch ended (%.1f s%s)"
+                      % (verb, " (#128: a short first line)" if "\n" in msg
+                         else "", "a 0x34" if cancel else "the close", secs,
                          "" if gone and not sent else
                          "; the composer still holds it" if not gone else
                          "; it was sent"),
