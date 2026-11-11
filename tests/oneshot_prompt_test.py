@@ -87,6 +87,12 @@ def main():
             until(lambda: "auto mode on" in run("--read", n).stdout)
         return s
 
+    def gone(n):
+        """-k returns before the master has gone: wait for its socket, as a
+        revive of a name still answering is refused."""
+        until(lambda: not os.path.exists(os.path.join(sockdir, n + ".sock")),
+              10)
+
     def raw(n):
         try:
             with open(os.path.join(recdir, n + ".json")) as f:
@@ -153,6 +159,7 @@ def main():
         n0 = len(starts("p1"))
         run("-k", "p1")
         until(lambda: '"end":"killed"' in raw("p1"), 10)
+        gone("p1")
         h = run("--history", "--json")
         t = run("--history")
         check("--history --json and --history do not show the prompt",
@@ -160,8 +167,8 @@ def main():
               P1 not in h.stdout and "p1" in t.stdout and P1 not in t.stdout)
         r = run("--revive", "p1", "--no-message")
         s3 = up("p1", n0 + 1)
-        check("--revive resumes with --name x, no prompt [%r %r]"
-              % (r.stdout, s3 and s3["argv"]),
+        check("--revive resumes with --name x, no prompt [%r %r %r %r]"
+              % (r.returncode, r.stdout, r.stderr, s3 and s3["argv"]),
               r.returncode == 0 and s3 and
               s3["argv"] == ["--resume", sid, "--name", "x"])
         run("-k", "p1")
@@ -182,10 +189,11 @@ def main():
               json.loads(rec)["agent"]["launch"] == [claude, "--model", "m2"])
         run("-k", "p2")
         until(lambda: '"end":"killed"' in raw("p2"), 10)
+        gone("p2")
         r = run("--revive", "p2", "--no-message")
         t2 = up("p2", 2)
-        check("p2 --revive: --resume <id> --model m2, no prompt [%r]"
-              % (t2 and t2["argv"]),
+        check("p2 --revive: --resume <id> --model m2, no prompt [%r %r %r]"
+              % (r.returncode, r.stderr, t2 and t2["argv"]),
               r.returncode == 0 and t2 and
               t2["argv"] == ["--resume", t1["sid"], "--model", "m2"])
         run("-k", "p2")
