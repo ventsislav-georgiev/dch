@@ -10,16 +10,23 @@ Cases:
     carrying its DCH_SESSION      -> no snapshot title for that session (#083)
   - "nameSource":"derived"     -> skipped (auto-titles beat no one)
   - dead, malformed, empty and wrong-session records -> skipped
-  - resolution overhead        -> budget (mean over N runs vs empty HOME)
+  - resolution overhead        -> budget (mean CPU time over N runs vs empty
+                                  HOME, as a multiple of that base run)
 
 Run:  python3 tests/harness_names_test.py        (uses ./dch)
 """
-import json, os, shutil, signal, subprocess, sys, tempfile, time
+import json, os, resource, shutil, signal, subprocess, sys, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.environ.get("DCH", os.path.join(HERE, "..", "dch"))
 
-OVERHEAD_BUDGET_MS = 25.0  # generous for loaded CI; locally well under 1 ms
+# Resolution overhead as a multiple of a plain --ls-json's own CPU time. That
+# base run already holds one walk of every pid (load_codex_names); each Codex
+# session here without a thread ID adds one more (dch_codex_shared), ~0.8x
+# base in all. A walk per record or per session multiplies it. A fixed ms
+# budget instead tracked the box: CPU contention, slow cores and the pid count
+# (25 ms failed at load ~20 with suites in parallel, #146).
+OVERHEAD_FACTOR = 2.0
 N = 30
 
 
@@ -206,22 +213,31 @@ def main():
         empty_home = os.path.join(tmp, "home-empty")
         os.makedirs(empty_home)
 
-        def mean_ms(h):
+        # CPU time (user+sys) of the dch child, not wall time: waiting for a
+        # core is not resolution work. Interleaved so drift hits both sides.
+        def cost_ms(h):
+            r0 = resource.getrusage(resource.RUSAGE_CHILDREN)
             t0 = time.perf_counter()
-            for _ in range(N):
-                ls_json(h)
-            return (time.perf_counter() - t0) / N * 1000.0
+            ls_json(h)
+            t1 = time.perf_counter()
+            r1 = resource.getrusage(resource.RUSAGE_CHILDREN)
+            cpu = (r1.ru_utime + r1.ru_stime) - (r0.ru_utime + r0.ru_stime)
+            return cpu * 1000.0, (t1 - t0) * 1000.0
 
-        base = mean_ms(empty_home)
-        withres = mean_ms(home)
+        runs = [(cost_ms(empty_home), cost_ms(home)) for _ in range(N)]
+        base = sum(b[0] for b, _ in runs) / N
+        withres = sum(w[0] for _, w in runs) / N
         overhead = withres - base
-        print("  info resolution overhead: %.3f ms/run "
-              "(%.3f with, %.3f without)" % (overhead, withres, base))
+        wall = (sum(w[1] for _, w in runs) - sum(b[1] for b, _ in runs)) / N
+        print("  info resolution overhead: %.3f ms CPU/run, %.2fx base "
+              "(%.3f with, %.3f without; wall %.3f ms)"
+              % (overhead, overhead / base if base else 0, withres, base,
+                 wall))
         if os.environ.get("DCH_TEST_NO_BUDGET"):  # sanitizer build
             print("  skip resolution overhead budget (sanitizer build)")
         else:
-            check("resolution overhead <= %.1f ms" % OVERHEAD_BUDGET_MS,
-                  overhead <= OVERHEAD_BUDGET_MS)
+            check("resolution overhead <= %.1fx a plain --ls-json"
+                  % OVERHEAD_FACTOR, overhead <= OVERHEAD_FACTOR * base)
     finally:
         for p in procs:
             try:
