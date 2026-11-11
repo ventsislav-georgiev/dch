@@ -361,7 +361,7 @@ dch --config [<key> [<value>|--unset]]          # show, read or set the config f
 dch --shell-init zsh|bash|fish                 # OSC 133 prompt marks for your rc file (X-ray)
 dch --xray <n> --json                           # a session's chapters (prompts / commands) as one JSON object
 dch --xray <n> --clear --json                   # empty a shell session's X-ray ring
-dch --xray <n> --ref <ref> --scope session [--full|--budget-ms <ms>] --json  # one ref's mentions and definitions, NDJSON
+dch --xray <n> --ref <ref> --scope session [--full] [--budget-ms <ms>] --json  # one ref's mentions and definitions, NDJSON
 dch --agent-list [--json]                       # native Claude peers
 dch --agent-send <peer> <message...>            # message one (from a Codex session)
 ```
@@ -918,7 +918,8 @@ The corpus:
   - `kind` is `prompt`, `command` or `compact`.
   - `title` is at most 120 Unicode scalars.
 - **`refs`.** The refs the corpus mentions (see [Refs](#refs)), at most 2000
-  keys (the rest counted in `dropped_keys`). `[]` for corpus `none`.
+  keys. The rest are counted in `dropped_keys`, exactly up to 32768 distinct
+  keys and as a lower bound past that. `[]` for corpus `none`.
 - **Size.** The object is capped at 4 MiB: past that, the oldest chapters go
   and `why` is `"output"`.
 
@@ -958,7 +959,9 @@ Unicode-aware: `#831é` is none. Prompts and assistant text use every rule outsi
 tool input and output, and a shell's ring, use the code rules only (URLs,
 `owner/repo#n`, paths with a line number, commits), so a bare `#831`
 mid-line in output is no ref. Texts are clipped before the scan: 6000 Unicode
-scalars of prose, 3000 of tool output, 240 per tool field.
+scalars of prose and of a Bash command, 3000 of tool output, 240 per tool
+field. A shell line (rows joined at soft wraps, at most 64 KiB) gives at most
+128 mentions.
 
 Each entry of `refs` carries `key` (`<shape>:<text>`), `shape`, `text`,
 `full` (a commit's hex as written), `project`, `count`, `defined`,
@@ -980,11 +983,14 @@ lines as NDJSON, each with `schema:1`: `first` (the key, `mode` and
 control or bidi character and must parse as exactly one ref. The default is a
 light scan: it stops after the first result, or after `--budget-ms` (50 to
 300, default 300) with `why: "budget"`; on a live shell it prints titles and
-counts only. `--full` reads the whole corpus (up to 10 s, `why: "time"`).
+counts only. `--full` reads the whole corpus (up to 10 s, `why: "time"`); a `--budget-ms`
+with it is accepted and has no effect.
 `--scope project` and `--scope all` come with a later release and exit 2;
 until then `--scope session` must be given. A session with no corpus exits 1
 with `dch: no x-ray corpus`. Nothing is written to disk: the index lives in the
-calling process for that one query.
+calling process for that one query. A reader that closes the pipe cancels the
+scan: dch stops at its next write, prints no `done` and exits 0. SIGTERM ends
+it at once, with no `done` either.
 
 No new session or rename takes a name of exactly `m` + 16 hex in any case
 (`M0123456789ABCDEF` too: on a case-insensitive file system its socket also
@@ -1003,7 +1009,7 @@ system, like any name.
 | 0 | the object was printed |
 | 1 | `dch: no such session`, `dch: ambiguous session`, `dch: no x-ray corpus` (`--clear`, `--ref`) |
 | 2 | bad usage: `--json` missing, a flag twice, a flag of a later release (`--follow`, `--chapter`, `--scope project`, `--scope all`, ...), `--xray` not first, a bad or remote `<n>`, a bad `--ref`, `--scope` or `--budget-ms` |
-| 3 | the session answered garbage, or the transcript could not be read (it is there, but opening or reading it failed) |
+| 3 | `dch: X-ray failed on this session`: the session answered garbage, the transcript could not be read (it is there, but opening or reading it failed), memory ran out, or a write failed with an error other than a closed pipe |
 
 ### Auto-allow
 

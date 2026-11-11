@@ -765,8 +765,8 @@ def main():
               "state dropped", "\x1b" not in r.stdout and len(rows) == 2
               and rows[0]["name"].startswith("ev\x1b]")
               and all(x["state"] == "" for x in rows), r.stdout)
-        c1 = Fake("list", rows=[{"name": "c1\u009b31m", "alias":
-                                 "bi\u202edi\u2066x"}])
+        c1 = Fake("list", rows=[{"name": "c1\u009b31m\x7f", "alias":
+                                 "bi\u202edi\u2066x\u200e\u200fy"}])
         fakes.append(c1)
         r = subprocess.run([DCH, "--ls-json", "--remote", "--hosts",
                             "c=127.0.0.1:%d" % c1.port], env=cenv,
@@ -774,12 +774,15 @@ def main():
                            timeout=20)
         out = r.stdout
         rows = [x for x in json.loads(out) if "host" in x]
-        check("C1 and bidi in --ls-json: \\u-escaped, the same value",
+        check("C1, DEL and bidi in --ls-json: \\u-escaped, the same value",
               b"\xc2\x9b" not in out and b"\xe2\x80\xae" not in out
-              and b"\xe2\x81\xa6" not in out and b"c1\\u009b31m" in out
+              and b"\xe2\x81\xa6" not in out and b"\x7f" not in out
+              and b"\xe2\x80\x8e" not in out and b"\xe2\x80\x8f" not in out
+              and b"c1\\u009b31m\\u007f" in out
               and b"\\u202e" in out and b"\\u2066" in out
-              and rows and rows[0]["name"] == "c1\u009b31m"
-              and rows[0]["alias"] == "bi\u202edi\u2066x", out)
+              and b"\\u200e\\u200fy" in out
+              and rows and rows[0]["name"] == "c1\u009b31m\x7f"
+              and rows[0]["alias"] == "bi\u202edi\u2066x\u200e\u200fy", out)
 
         # --- a hanging host, then its rows stale ----------------------
         hang = Fake("hang")

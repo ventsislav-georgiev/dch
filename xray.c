@@ -450,10 +450,11 @@ r_repo(const char *s, size_t n, size_t i, uint32_t prev, int owner,
 {
 	size_t j = i, k, d;
 
+	/* both forms: not after \w (the caller's boundary) or / . - */
+	if (prev == '/' || prev == '.' || prev == '-')
+		return 0;
 	if (owner)
 	{
-		if (prev == '/' || prev == '.' || prev == '-')
-			return 0;
 		for (k = 0; j < n && k < 40 && (A_ALNUM((unsigned char)s[j]) ||
 		                                s[j] == '-'); j++)
 			k++;
@@ -1742,15 +1743,11 @@ struct remit
 	const size_t *lpos;
 	const uint64_t *lseq;
 	size_t nl;
+	/* the last hit's line [cls, cle) in ctext: hits arrive sorted, so a
+	** line's bounds are found once, not once per span */
+	const char *ctext;
+	size_t cls, cle;
 };
-
-static size_t
-line_start(const char *s, size_t i)
-{
-	while (i > 0 && s[i - 1] != '\n')
-		i--;
-	return i;
-}
 
 static void
 rm_hit(struct remit *r, const struct xr_span *sp, const char *title,
@@ -1758,10 +1755,23 @@ rm_hit(struct remit *r, const struct xr_span *sp, const char *title,
 {
 	struct xr_hit h;
 	struct xr_span c = *sp;
-	size_t ls = line_start(r->text, sp->s), le = sp->e;
+	size_t ls, le, from = 0;
 
-	while (r->text[le] && r->text[le] != '\n')
-		le++;
+	if (r->ctext == r->text && r->cls <= sp->s && sp->e <= r->cle)
+		ls = r->cls, le = r->cle;
+	else
+	{
+		/* text[cle] is the '\n' ending the cached line */
+		if (r->ctext == r->text && sp->s > r->cle)
+			from = r->cle + 1;
+		for (ls = sp->s; ls > from && r->text[ls - 1] != '\n'; ls--)
+			;
+		for (le = sp->e; r->text[le] && r->text[le] != '\n'; le++)
+			;
+		r->ctext = r->text;
+		r->cls = ls;
+		r->cle = le;
+	}
 	c.s -= ls;
 	c.e -= ls;
 	memset(&h, 0, sizeof h);
@@ -1847,6 +1857,7 @@ static void
 rm_scan(struct remit *r, const char *text, size_t n, int mode)
 {
 	r->text = text;
+	r->ctext = NULL;
 	r->ncov = 0;
 	(void)xr_grammar(text, n, mode, r->cwd, rm_span, r);
 }
@@ -2528,7 +2539,6 @@ struct d3m
 	size_t xs, xe;		/* the --title word: skipped */
 	struct xr_span sp;
 	int n, multi;
-	char seen[6];
 	struct xr_span one[6];
 	int cnt[6];
 };
@@ -2619,12 +2629,17 @@ d3(const struct dsrc *s, struct dset *ds)
 		}
 }
 
-/* Every definition of one paired block, at most XR_DEFS (v2.1 3.6). */
+/* Every definition of one paired block, at most XR_DEFS (v2.1 3.6). D1/D4
+** are decided while streaming: a 4th distinct key of one shape is a listing
+** (#4) and ends the scan with none, so a block costs O(lines) and at most
+** XR_DEFS kept results whatever its size. */
 static void
 defs_find(const struct dsrc *s, struct dset *ds)
 {
 	struct olines o;
-	size_t k, j;
+	size_t k;
+	char seen[6][3][XR_KEY_MAX + 16];
+	int nseen[6] = {0};
 
 	memset(ds, 0, sizeof *ds);
 	if (s->failed || (s->cmd && excluded(s->cmd, s->cl, s->cwd)))
@@ -2634,38 +2649,30 @@ defs_find(const struct dsrc *s, struct dset *ds)
 	{
 		for (k = 0; k < o.n; k++)
 		{
-			struct dres *d;
+			struct dres t, *d;
+			int sh, i;
 
-			if (o.fence[k] || !(d = dpush(ds)))
+			memset(&t, 0, sizeof t);
+			if (o.fence[k] || (!d1(s->out, &o, k, s->cwd, &t) &&
+			    !d4(s->out, &o, k, s->cmd, s->cl, s->cwd, &t)))
 				continue;	/* #2: nothing in a fence */
-			if (!d1(s->out, &o, k, s->cwd, d) &&
-			    !d4(s->out, &o, k, s->cmd, s->cl, s->cwd, d))
-				ds->n--;
-		}
-		/* #4: more than 3 distinct D1/D4 keys of one shape: a listing */
-		for (k = 0; k < ds->n; k++)
-		{
-			size_t distinct = 0, i;
-
-			for (j = 0; j < ds->n; j++)
+			sh = t.sp.shape;
+			for (i = 0; i < nseen[sh] && strcmp(seen[sh][i], t.sp.key); i++)
+				;
+			if (i == nseen[sh] && nseen[sh] == 3)
 			{
-				if (ds->v[j].sp.shape != ds->v[k].sp.shape)
-					continue;
-				for (i = 0; i < j && (ds->v[i].sp.shape !=
-				                      ds->v[j].sp.shape ||
-				                      strcmp(ds->v[i].sp.key,
-				                             ds->v[j].sp.key)); i++)
-					;
-				distinct += i == j;
-			}
-			if (distinct > 3)
-			{
+				/* #4: more than 3 distinct D1/D4 keys of one shape */
+				free(t.passage);
 				dfree(ds);
 				break;
 			}
+			if (i == nseen[sh])
+				memcpy(seen[sh][nseen[sh]++], t.sp.key, sizeof t.sp.key);
+			if (ds->n < XR_DEFS && (d = dpush(ds)))
+				*d = t;
+			else
+				free(t.passage);
 		}
-		while (ds->n > XR_DEFS)
-			free(ds->v[--ds->n].passage);
 	}
 	olines_free(&o);
 	if (s->d2ok && ds->n < XR_DEFS)
@@ -2694,6 +2701,7 @@ defs_emit(const struct dsrc *s, struct remit *out_r, struct remit *cmd_r)
 		if (!r)
 			continue;
 		r->text = d->incmd ? s->cmd : s->out;
+		r->ctext = NULL;
 		rm_hit(r, &d->sp, d->title, d->passage ? d->passage : NULL, d->rule);
 		for (c = 0; c < r->ncov && !covered; c++)
 			covered = r->cov[c].h == h && r->cov[c].s < d->sp.e &&
@@ -2787,15 +2795,19 @@ ix_drop(struct xr_index *x, uint64_t h)
 		h = 1;
 	if (!x->drop && !(x->drop = calloc(XR_DROPSET, sizeof *x->drop)))
 	{
-		x->dropped++;	/* no set: every dropped mention counts */
+		x->dropped = x->dropped ? x->dropped : 1;	/* a lower bound */
 		return;
 	}
 	for (i = h % XR_DROPSET; x->drop[i]; i = (i + 1) % XR_DROPSET)
 		if (x->drop[i] == h)
 			return;
-	if (x->dropped < XR_DROPSET - 1)
+	/* the set stops at half load, so a probe stays short: past 32768
+	** distinct dropped keys, dropped_keys is a lower bound */
+	if (x->dropped < XR_DROPSET / 2)
+	{
 		x->drop[i] = h;
-	x->dropped++;
+		x->dropped++;
+	}
 }
 
 static struct xr_ent *
@@ -2904,6 +2916,7 @@ struct xr_scan
 	/* the scan */
 	uint64_t files, bytes, base, too_long;
 	int stop, out_full;
+	int cancel;		/* a write failed: 1 EPIPE (the reader left), 2 other */
 	const char *why;
 	long long last;
 };
@@ -2953,11 +2966,30 @@ xr_scan_free(struct xr_scan *x)
 	free(x);
 }
 
+/* A failed write ends the scan as a cancel (FROZEN 3.4): nothing more is
+** written, `done` included. */
+static int
+sc_fail(struct xr_scan *x, int epipe)
+{
+	if (!x->cancel)
+		x->cancel = epipe ? 1 : 2;
+	x->stop = 1;
+	x->why = "cancel";
+	return -1;
+}
+
+/* stdio's verdict on x->f after a write or flush that returned ok. */
+static int
+sc_check(struct xr_scan *x, int ok)
+{
+	return ok && !ferror(x->f) ? 0 : sc_fail(x, errno == EPIPE);
+}
+
 /* One line under the 4 MiB cap, with room kept for `done` (3.4). */
 static int
 sc_line(struct xr_scan *x, const char *l, size_t n)
 {
-	if (x->out_full)
+	if (x->out_full || x->cancel)
 		return -1;
 	if (x->written + n + 1024 > xr_lim.out)
 	{
@@ -2966,8 +2998,10 @@ sc_line(struct xr_scan *x, const char *l, size_t n)
 		return -1;
 	}
 	if (x->hold && !x->hm && !(x->hm = open_memstream(&x->hb, &x->hl)))
-		return -1;
-	fwrite(l, 1, n, x->hold ? x->hm : x->f);
+		return sc_fail(x, 0);
+	if (x->hold ? fwrite(l, 1, n, x->hm) != n
+	            : sc_check(x, fwrite(l, 1, n, x->f) == n) != 0)
+		return sc_fail(x, x->cancel == 1);
 	x->written += n;
 	return 0;
 }
@@ -3214,7 +3248,8 @@ xr_scan_tick(void *ctx, uint64_t bytes)
 			put_counts(m, x->nunit);
 			fputs("}}\n", m);
 			ln_send(x, m, &b, &bl);
-			(void)fflush(x->f);
+			if (!x->cancel)
+				(void)sc_check(x, fflush(x->f) == 0);
 		}
 	}
 	return x->stop;
@@ -3301,7 +3336,7 @@ xr_scan_first(struct xr_scan *x, const char *session_id, int shape,
 	rc = sc_line(x, b, strlen(b));
 	free(b);
 	(void)f;
-	return rc == 0 && fflush(x->f) == 0 ? 0 : -1;
+	return rc == 0 ? sc_check(x, fflush(x->f) == 0) : -1;
 }
 
 void
@@ -3314,11 +3349,16 @@ xr_scan_hold(struct xr_scan *x)
 int
 xr_scan_release(struct xr_scan *x)
 {
-	if (x->hm && fclose(x->hm) == 0 && x->hb)
-		fwrite(x->hb, 1, x->hl, x->f);
+	int ok = 1;
+
+	if (x->cancel)
+		return -1;
+	if (x->hm)
+		ok = fclose(x->hm) == 0 &&
+		     (!x->hb || fwrite(x->hb, 1, x->hl, x->f) == x->hl);
 	x->hm = NULL;
 	x->hold = 0;
-	return fflush(x->f) == 0 && !ferror(x->f) ? 0 : -1;
+	return sc_check(x, ok && fflush(x->f) == 0);
 }
 
 int
@@ -3326,6 +3366,8 @@ xr_scan_done(struct xr_scan *x)
 {
 	int partial = x->stop || x->why != NULL;
 
+	if (x->cancel)
+		return -1;	/* a cancel has no done line */
 	fprintf(x->f, "{\"schema\":1,\"done\":true,\"partial\":%s,",
 	        partial ? "true" : "false");
 	put_counts(x->f, x->nunit);
@@ -3334,7 +3376,13 @@ xr_scan_done(struct xr_scan *x)
 	fprintf(x->f, ",\"files\":%llu,\"bytes\":%llu,\"lines_too_long\":%llu}\n",
 	        (unsigned long long)x->files, (unsigned long long)x->bytes,
 	        (unsigned long long)x->too_long);
-	return fflush(x->f) == 0 && !ferror(x->f) ? 0 : -1;
+	return sc_check(x, fflush(x->f) == 0);
+}
+
+int
+xr_scan_cancelled(const struct xr_scan *x)
+{
+	return x->cancel;
 }
 
 /* ---- Claude: the assembler ------------------------------------------------- */
@@ -3856,7 +3904,7 @@ refs_call(struct xr_claude *d, const struct json_parser *p, int i)
 	{
 		ch_anchor(d, a);
 		rm_claude(d, &r, a);
-		rm_clip(&r, s, l, 0, XR_CODE);
+		rm_clip(&r, s, l, XR_TEXT_CAP, XR_CODE);
 		free(r.cov);
 		if (id && (c = rc_push(d, id, RC_BASH)))
 		{
@@ -4833,7 +4881,7 @@ sh_flush(struct xr_shell *s)
 	m.off = m.row = r->lseq;
 	m.at = r->lt;
 	m.unit = r->unit;
-	m.left = -1;
+	m.left = XR_SPANS;	/* 3.8: per logical line */
 	/* shortcut: a mention's chapter is its block's for output rows of a
 	** paired block, else null */
 	m.chapter = inblock && r->lkind == RING_K_OUTPUT && r->chapter[0]
@@ -4922,7 +4970,7 @@ sh_defs(struct xr_shell *s, const struct xr_rec *x)
 	o.at = s->at;
 	o.chapter = r->chapter[0] ? r->chapter : NULL;
 	o.unit = r->unit;
-	o.left = -1;
+	o.left = XR_SPANS;
 	o.lpos = r->opos;
 	o.lseq = r->oseq;
 	o.nl = r->on;

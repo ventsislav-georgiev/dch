@@ -9,3 +9,4 @@
 {"type": "user", "message": {"role": "user", "content": "before #844\n```\n#845 inside\n```\nafter #846\n```\n#847 unclosed"}, "timestamp": "2026-11-10T10:00:09.000Z", "cwd": "/home/demo/proj"}
 {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "[the PR](https://github.com/o/r/pull/9) and [#848](x) and **#849** and _PROJ-13_"}]}, "timestamp": "2026-11-10T10:00:10.000Z", "cwd": "/home/demo/proj"}
 {"type": "user", "message": {"role": "user", "content": "PULL: O/R#7 and o/r#7 and https://github.com/O/R/pull/7"}, "timestamp": "2026-11-10T10:00:11.000Z", "cwd": "/home/demo/proj"}
+{"type": "user", "message": {"role": "user", "content": "x/acme/widgets#12 and example.com/page#12"}, "timestamp": "2026-11-10T10:00:12.000Z", "cwd": "/home/demo/proj"}

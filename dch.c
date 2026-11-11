@@ -2725,7 +2725,7 @@ usage(void)
 	    "  dch --xray <n> [--clear] --json            a session's chapters as\n"
 	    "                                             one JSON object; --clear\n"
 	    "                                             empties a shell's ring\n"
-	    "  dch --xray <n> --ref <ref> --scope session [--full|--budget-ms <ms>]\n"
+	    "  dch --xray <n> --ref <ref> --scope session [--full] [--budget-ms <ms>]\n"
 	    "       --json                                one ref's mentions and\n"
 	    "                                             definitions as NDJSON\n"
 	    "  dch --agent-list [--json]                 list native Claude peers\n"
@@ -10839,6 +10839,37 @@ xr_no_corpus(void)
 	return 1;
 }
 
+static int
+xr_failed(void)
+{
+	fputs("dch: X-ray failed on this session\n", stderr);
+	return 3;
+}
+
+/* A one-shot answer's exit: written (ok), or the reader left (EPIPE, a
+** cancel: 3.4), else a failure. */
+static int
+xr_out_exit(int ok)
+{
+	if (ok)
+		return 0;
+	return ferror(stdout) && errno == EPIPE ? 0 : xr_failed();
+}
+
+/* --ref's exit once sc is done with (freed here): a reader that left (EPIPE)
+** is a cancel (3.4), exit 0 with no done line; any other write error, or
+** rc, a failure. */
+static int
+xr_ref_exit(struct xr_scan *sc, int rc)
+{
+	int c = xr_scan_cancelled(sc);
+
+	xr_scan_free(sc);
+	if (c == 1)
+		return 0;
+	return c || rc ? xr_failed() : 0;
+}
+
 /* --ref over (cfg, sid)'s transcript (3.4): `first` once the file is
 ** found, before it is opened; then its lines, its tally, `done`. */
 static int
@@ -10872,20 +10903,14 @@ xr_claude_ref(const char *cfg, const char *sid, const char *session,
 	if (!xr_ref_parse(q->text, label, &sp) ||
 	    !(sc = xr_scan_new(stdout, sp.key, session, project, live, q->full,
 	                       0, q->budget, xr_t0)))
-		return 3;
+		return xr_failed();
 	if (xr_scan_first(sc, sid, sp.shape, xr_span_text(&sp)) != 0)
-	{
-		xr_scan_free(sc);
-		fputs(write_fail_line, stderr);
-		return 1;
-	}
+		return xr_ref_exit(sc, -1);
 	if ((fd = xr_seam_open(path, &st)) < 0 || !(d = xr_claude_new()))
 	{
 		if (fd >= 0)
 			close(fd);
-		xr_scan_free(sc);
-		fputs("dch: X-ray failed on this session\n", stderr);
-		return 3;
+		return xr_ref_exit(sc, -1);
 	}
 	xr_scan_sink(sc, &k);
 	xr_claude_refs(d, &k, (uint64_t)st.st_ino, xr_scan_tick, sc);
@@ -10898,20 +10923,8 @@ xr_claude_ref(const char *cfg, const char *sid, const char *session,
 		span = xr_lim.head + xr_lim.tail;
 	xr_scan_file(sc, span, xr_claude_too_long(d), capped, 0);
 	xr_claude_free(d);
-	if (rc < 0)
-	{
-		xr_scan_free(sc);
-		fputs("dch: X-ray failed on this session\n", stderr);
-		return 3;
-	}
-	rc = xr_scan_done(sc);
-	xr_scan_free(sc);
-	if (rc != 0)
-	{
-		fputs(write_fail_line, stderr);
-		return 1;
-	}
-	return 0;
+	/* a cancel stopped the read: no done */
+	return xr_ref_exit(sc, rc < 0 || xr_scan_done(sc) != 0);
 }
 
 /* The shell answer, built as the records stream past. */
@@ -10975,7 +10988,7 @@ xr_json(const struct xr_target *t, const struct xr_refq *q)
 		{
 			snprintf(sid, sizeof sid, "%s", h->sid);
 			if (!(refs = xr_index_new()))
-				return 3;
+				return xr_failed();
 			rc = xr_claude_answer(h->acfg, h->sid, &a, &ch, project,
 			                      sizeof project, label, sizeof label, refs);
 		}
@@ -11113,11 +11126,8 @@ xr_json(const struct xr_target *t, const struct xr_refq *q)
 				             !acc->sh.npaired);
 				rc = xr_scan_done(sc);
 			}
-			if (rc != 0)
-				fputs(write_fail_line, stderr);
-			rc = rc ? 1 : 0;
+			rc = xr_ref_exit(sc, rc);
 			xr_chapters_free(&ch);
-			xr_scan_free(sc);
 			free(acc);
 			if (qc == 0)
 				cmd_info_free(&ci);
@@ -11150,7 +11160,7 @@ xr_json(const struct xr_target *t, const struct xr_refq *q)
 		a.refs = refs;
 	dch_trace("xray json: chapters=%zu seam opened=%lu refused=%lu",
 	          ch.n, xr_seam_opened, xr_seam_refused);
-	rc = xr_print(stdout, &a) == 0 ? 0 : 3;
+	rc = xr_out_exit(xr_print(stdout, &a) == 0);
 	xr_chapters_free(&ch);
 	{
 		size_t keys = refs ? xr_index_keys(refs) : 0;
@@ -11240,7 +11250,7 @@ xr_clear(const struct xr_target *t)
 	xr_put_str(stdout, sid);
 	printf(",\"corpus\":\"%s\",\"ring_cleared\":%s}\n", corpus,
 	       cleared ? "true" : "false");
-	return fflush(stdout) == 0 && !ferror(stdout) ? 0 : 3;
+	return xr_out_exit(fflush(stdout) == 0 && !ferror(stdout));
 }
 
 /* n names a History record (by name, file or <file>.json): a local name
@@ -11398,9 +11408,8 @@ xray_main(int argc, char **argv)
 		      "comes later)\n", stderr);
 		return 2;
 	}
-	/* a failed write says so and exits 1, never a silent SIGPIPE death */
+	/* every write is checked: EPIPE is a cancel (3.4), exit 0, no done */
 	signal(SIGPIPE, SIG_IGN);
-	write_fail_line = "dch: no such session\n";
 	if (name_routes_remote(n))
 	{
 		fputs("dch: bad session\nremote sessions (host:name) come "

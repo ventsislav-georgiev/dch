@@ -103,7 +103,8 @@ dch \- detachable terminal sessions with a headless agent API
 .B \-\-ref
 .I ref
 .B \-\-scope session
-.RB [ \-\-full | \-\-budget\-ms
+.RB [ \-\-full ]
+.RB [ \-\-budget\-ms
 .IR ms ]
 .B \-\-json
 .br
@@ -709,7 +710,9 @@ light by default (stops at the first result or after
 .IR ms ,
 50 to 300, default 300),
 .B \-\-full
-to read it all;
+to read it all (a
+.B \-\-budget\-ms
+with it is accepted and has no effect);
 .B \-\-scope session
 is required (\fBproject\fR and \fBall\fR come later and exit 2).
 Must be the first argument; every other flag exits 2.

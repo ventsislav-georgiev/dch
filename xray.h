@@ -194,6 +194,9 @@ int xr_scan_tick(void *ctx, uint64_t bytes);
 void xr_scan_file(struct xr_scan *x, uint64_t bytes, uint64_t too_long,
                   int partial, int per_row);
 int xr_scan_done(struct xr_scan *x);
+/* a write failed (3.4's cancel: no more lines, no done): 1 EPIPE, the
+** reader left; 2 any other error; 0 none */
+int xr_scan_cancelled(const struct xr_scan *x);
 
 /* ---- Claude (7.2, 5.3) ------------------------------------------------- */
 struct xr_claude;

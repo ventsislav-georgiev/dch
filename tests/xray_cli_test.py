@@ -8,7 +8,8 @@ reaching the pty, a live Claude (tests/fake_claude.py as `claude`) and its
 transcript, the open seam's counting test (spec 8.1: one open per Claude
 query, none for a shell, a clear or a refused lookup; nothing written), and
 the INFO-2 name rule on every create path dch runs locally, and refs (#135):
-the index freed with its query (K3), --ref's budget stop, nothing written.
+the index freed with its query (K3), --ref's budget stop, nothing written,
+SIGTERM and EPIPE as a cancel, and the 16 MB budget at the index's caps.
 
 Run:  python3 tests/xray_cli_test.py          (uses ./dch; run.sh isolates)
 """
@@ -1005,6 +1006,169 @@ def test_refs():
     os.unlink(tp)
 
 
+# ---- 3.8's caps on a live shell (review #135 H1, M1) ---------------------
+
+def test_shell_caps():
+    """A paired block of 32000 D1 headings (256 KB kept for definitions),
+    then 32 lines of 64 KiB of shas: the index and a full --ref each answer
+    under 1 s and 16 MB."""
+    n = "xc-caps"
+    cfg = ENV["DCH_CONFIG"]
+    with open(cfg, "w") as f:
+        f.write("xray_ring = 4M\n")
+    prog = ("printf '\\033]133;A\\007$ \\033]133;B\\007'; read cmd; "
+            "printf '\\033]133;C\\007'; "
+            "awk 'BEGIN{for(i=0;i<32000;i++) printf \"# #12 x%d\\n\", i}'; "
+            "printf '\\033]133;D;0\\007'; "
+            "awk 'BEGIN{for(r=0;r<32;r++){s=\"\";for(i=0;i<8000;i++) "
+            "s=s sprintf(\"a%06x \",i); print s}}'; "
+            "echo CAPS''DONE; sleep 120")
+    try:
+        r = dch("--spawn", n, "--size", "80x24", "sh", "-c", prog)
+        check("caps: spawned", r.returncode == 0, r.stderr)
+        wait_for(lambda: "$" in screen(n), 5)
+        dch("--send", n, "cat notes.md\n")
+        done = wait_for(lambda: "CAPSDONE" in screen(n), 60)
+        check("caps: the output finished", done)
+        t0 = time.time()
+        rc, out, rss = maxrss([DCH, "--xray", n, "--json"], ENV)
+        wall = time.time() - t0
+        try:
+            o = json.loads(out)
+        except ValueError:
+            o = None
+        h12 = [x for x in (o or {}).get("refs", []) if x["key"] == "issue:#12"]
+        check("caps: 32000 headings in one block: 8 definitions (%.2fs)" %
+              wall, rc == 0 and h12 and h12[0]["definitions"] == 8,
+              (rc, out[:300]))
+        check("caps: the index over 2 MiB of 64 KiB sha lines and 32000 "
+              "headings under 1 s (%.2fs)" % wall, SANITIZED or wall < 1.0)
+        rss_ok("caps: --json at the caps", rss)
+        t0 = time.time()
+        rc, out, rss = maxrss([DCH, "--xray", n, "--ref", "a000001",
+                               "--scope", "session", "--full", "--json"], ENV)
+        wall = time.time() - t0
+        ls = ref_lines(out) or [{}]
+        check("caps: a full --ref over the same ring under 1 s (%.2fs)" %
+              wall, rc == 0 and ls[-1].get("done") is True and
+              (SANITIZED or wall < 1.0), out[-300:])
+        rss_ok("caps: --ref at the caps", rss)
+    finally:
+        dch("-k", n)
+        os.unlink(cfg)
+
+
+def test_claude_caps():
+    """Retained memory at the index's caps (3.8, l.717): 5000 chapters of
+    120-scalar titles, 2000 keys each with 8 definitions of 120-scalar
+    titles, and 100 keys past the cap."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, RSID + ".jsonl")
+    pad = "\u00e9" * 100
+    with open(tp, "w") as f:
+        for i in range(5000):
+            f.write(json.dumps({"type": "user", "cwd": "/home/demo/proj",
+                                "message": {"content": "prompt %d %s" %
+                                            (i, pad)}}) + "\n")
+            if i >= 2100:
+                continue
+            out = "\n".join("# PROJ-%d %s %d" % (i + 1, pad, j)
+                            for j in range(8 if i < 2000 else 1))
+            f.write(json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "b%d" % i, "name": "Bash",
+                 "input": {"command": "gh issue view %d" % i}}]}}) + "\n")
+            f.write(json.dumps({"type": "user", "toolUseResult": {
+                "stdout": out}, "message": {"content": [
+                    {"type": "tool_result", "tool_use_id": "b%d" % i,
+                     "content": out}]}}) + "\n")
+    history("xr-caps", RSID, cfg)
+    try:
+        t0 = time.time()
+        rc, out, rss = maxrss([DCH, "--xray", "xr-caps", "--json"], ENV)
+        wall = time.time() - t0
+        try:
+            o = json.loads(out)
+        except ValueError:
+            o = None
+        refs = (o or {}).get("refs", [])
+        check("caps: 2000 keys of 8 definitions each, 100 dropped (%.2fs)" %
+              wall, rc == 0 and len(refs) == 2000 and
+              all(x["definitions"] == 8 for x in refs) and
+              o["dropped_keys"] == 100, (rc, len(refs), out[-300:]))
+        rss_ok("caps: --json with 5000 chapters and 2000 x 8 definitions",
+               rss)
+    finally:
+        os.unlink(tp)
+
+
+# ---- 3.4: SIGTERM and EPIPE cancel a --ref (FROZEN l.464, l.635) ---------
+
+def test_cancel():
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, RSID + ".jsonl")
+    line = json.dumps({"type": "assistant", "message": {"content": [
+        {"type": "text", "text": "PROJ-5 o/r#3 " + "x" * 900}]}}) + "\n"
+    with open(tp, "w") as f:
+        f.write(json.dumps({"type": "user", "cwd": "/home/demo/proj",
+                            "message": {"content": "start #1"}}) + "\n")
+        for _ in range(16):
+            f.write(line * 10000)
+    history("xr-cancel", RSID, cfg)
+    argv = [DCH, "--xray", "xr-cancel", "--ref", "#424242", "--scope",
+            "session", "--full", "--json"]
+    try:
+        t0 = time.time()
+        r = subprocess.run(argv, capture_output=True, text=True, env=ENV,
+                           timeout=60)
+        full = time.time() - t0
+        ls = ref_lines(r.stdout) or [{}]
+        check("cancel: the whole scan of %d MB ends with done (%.2fs)" %
+              (os.path.getsize(tp) >> 20, full),
+              r.returncode == 0 and ls[-1].get("done") is True, r.stderr)
+
+        p = subprocess.Popen(argv, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, env=ENV)
+        first = p.stdout.readline()
+        running = p.poll() is None
+        t0 = time.time()
+        p.send_signal(15)
+        p.wait(10)
+        dt = time.time() - t0
+        rest = p.stdout.read()
+        p.stdout.close()
+        p.stderr.close()
+        check("cancel: SIGTERM mid-scan ends it at once (%.3fs, the whole "
+              "scan %.2fs), no done" % (dt, full),
+              running and b'"first"' in first and p.returncode == -15 and
+              dt < 0.5 and b'"done"' not in rest, (p.returncode, rest[-300:]))
+
+        p = subprocess.Popen(argv, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, env=ENV)
+        first = p.stdout.readline()
+        running = p.poll() is None
+        t0 = time.time()
+        p.stdout.close()
+        p.wait(10)
+        dt = time.time() - t0
+        err = p.stderr.read()
+        p.stderr.close()
+        # dch learns of the close at its next write: the first progress
+        # line, 250 ms after it started, then stops before reading another
+        # line (an unchecked progress flush would wait for a second one)
+        check("cancel: a closed pipe (EPIPE) ends it at the first progress "
+              "line (%.3fs, the whole scan %.2fs), exit 0, nothing on "
+              "stderr" % (dt, full),
+              running and b'"first"' in first and p.returncode == 0 and
+              err == b"" and dt < 0.45 and dt < full / 2,
+              (p.returncode, err))
+    finally:
+        os.unlink(tp)
+
+
 def main():
     try:
         test_names()
@@ -1018,6 +1182,9 @@ def main():
         test_clear_after_claude()
         test_two_claudes()
         test_refs()
+        test_cancel()
+        test_claude_caps()
+        test_shell_caps()
     finally:
         shutil.rmtree(T, ignore_errors=True)
     if fails[0]:
