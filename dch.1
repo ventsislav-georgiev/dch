@@ -378,7 +378,8 @@ turns the tab off), shown only when there are some; and
 .BR History ,
 the ended sessions of
 .BR \-\-history ,
-one row per session name (its newest pinned record, else its newest),
+one row per session name (its newest record, pinned when any record of
+the name is),
 pinned first, then by name, case-insensitive, at most 50.
 Every list has column headers and aligned columns sized to the rows on
 screen.
@@ -498,7 +499,8 @@ resumes every interrupted session
 pins or unpins,
 .B d
 removes
-.RB ( \-\-forget ).
+.RB ( \-\-forget ),
+every record of the row's name.
 Every action but attach, rename, resume and pin asks first and runs on
 .BR y .
 The status line shows the action while it runs, then its result.

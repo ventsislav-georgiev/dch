@@ -6,7 +6,8 @@
 ** Sessions; Sidekicks (n), the live sessions whose name, alias or harness
 ** title matches the config's sidekick_pattern (default "-qa"), shown only when there are
 ** some; History (n), the ended records, one row per name (its newest
-** pinned record, else its newest), pinned first, by name, at most 50. "/"
+** record, pinned when any of the name's is), pinned first, by name, at
+** most 50. "/"
 ** filters every tab, as vim's search (#096). Rows carry
 ** --ls-json's data (state, agents, meta.prs) and --history's, reloaded about
 ** once a second. Enter hands the session back to the caller; every other
@@ -1626,7 +1627,6 @@ static struct
 	int set, tab, byname;
 	char filt[sizeof ((struct pk *)0)->filt], sel[3][600], focus[600];
 	int fhist;	/* the focus is a History record's (#133) */
-	char fname[600];	/* its dch name: the row of that name (#144) */
 } pk_mem;
 
 void
@@ -1637,10 +1637,9 @@ pk_focus(const char *name)
 }
 
 void
-pk_focus_history(const char *file, const char *name)
+pk_focus_history(const char *file)
 {
 	pk_focus(file);
-	snprintf(pk_mem.fname, sizeof pk_mem.fname, "%s", name ? name : "");
 	pk_mem.fhist = 1;
 }
 
@@ -1712,13 +1711,7 @@ pk_open(struct pk *p, int remote, int vt)
 	for (j = 0; pk_mem.focus[0] && j < (pk_mem.fhist ? p->tab == 2 : 3); j++)
 	{
 		t = (p->tab + j) % 3;
-		/* not the record's own row: its name's, which shows a pinned
-		** one (#144) */
-		if ((k = pk_find(p, t, pk_mem.focus)) < 0 && pk_mem.fhist)
-			for (k = p->n[t] - 1; k >= 0 &&
-			     strcmp(p->r[t][k].sname, pk_mem.fname); k--)
-				;
-		if (pk_shown(p, t) && k >= 0)
+		if (pk_shown(p, t) && (k = pk_find(p, t, pk_mem.focus)) >= 0)
 		{
 			p->tab = t;
 			p->sel[t] = k;

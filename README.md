@@ -126,9 +126,9 @@ shows) matches `sidekick_pattern` in the config file (a POSIX extended regex,
 case-insensitive, default `-qa`; an invalid one, or one that matches every
 name, is matched as plain text; set it empty for no tab), shown only when
 there are some; and **History**, the ended sessions of `--history`, one row
-per session name (its newest pinned record, else its newest), pinned first,
-then by name, case-insensitive, at most 50 (`--history` itself still lists
-every record, newest first). Every list has column headers and fixed, aligned columns,
+per session name (its newest record, pinned when any record of the name is),
+pinned first, then by name, case-insensitive, at most 50 (`--history` itself
+still lists every record, newest first). Every list has column headers and fixed, aligned columns,
 sized to the rows on screen. A session row shows NAME (alias, else harness
 name, else name), STATE as a glyph and a word (Needs input, red and the
 loudest; Working, in the accent; Done, green; Idle, faint), ACTIVE (how long
@@ -167,8 +167,8 @@ hint.
 | `s` | sort by activity (blocked, working, done, idle, newest first) or by name (`a2` before `a10`); saved as `picker_sort`, so the next picker starts in it | |
 | `m` | | resume without the message (`--no-message`) |
 | `I` | | resume interrupted (n) (`--revive --all`), asks first |
-| `p` | | pin / unpin |
-| `d` | | remove (`--forget`), asks first; a pinned record must be unpinned first |
+| `p` | | pin / unpin every record of the row's name |
+| `d` | | remove every ended record of the row's name (`--forget`), asks first; a pinned name must be unpinned first |
 | `/` | filter (below) | filter (below) |
 | `,` | settings | settings |
 | `q` `Esc` `Ctrl-C` `Ctrl-D` | quit (`Esc` clears a filter first) | quit (`Esc` clears a filter first) |

@@ -2,20 +2,21 @@
 """The picker's History tab: one row per session name, by name (#144).
 
 Records written straight into the record dir: two of alpha, an unpinned
-newer and a pinned older mix, two pinned pz-b, one each of pz-a, Beta and
-gamma. The picker runs as the command of a dch session (--read shows it,
+newer and a pinned older mix, two pinned pz-b, one each of pinned pz-a,
+Beta and gamma. The picker runs as the command of a dch session (--read shows it,
 --keys and --send type into it).
 
 Covers:
   1. one row per name, the tab count the rows': [History 6];
   2. pinned first, each block by name, case folded: mix pz-a pz-b, then
      alpha Beta gamma;
-  3. a name with a pinned record shows the pinned one (mix: killed, "closed 1h"), one
-     without its newest (alpha: exit 2);
-  4. the filter keeps that one row: /alpha is one row, [History 1];
-  5. open picks the record the row shows: Shift+Enter in the /alpha
-     prompt alpha's newest (ALPHA_NEW), o on mix its pinned one
-     (MIX_PIN), not its newer one.
+  3. each row shows its name's newest record, pinned (◆) when any record of
+     the name is: mix "exited (1)" with ◆, alpha "exited (2)" without;
+  4. p on pz-b unpins both its records: no ◆, pz-b sorts among the rest;
+  5. the filter keeps that one row: /alpha is one row, [History 1];
+  6. open picks the record the row shows: Shift+Enter in the /alpha
+     prompt alpha's newest (ALPHA_NEW), o on mix its newest (MIX_NEW),
+     not the older pinned one.
 
 Run:  python3 tests/picker_history_test.py      (uses ./dch)
 """
@@ -159,10 +160,20 @@ def main():
           "[History 6]" in s and len(rows(s)) == 6, s)
     check("pinned first, each block by name, case folded: %s" % want,
           rows(s) == want, rows(s))
-    check("mix shows its pinned record (killed: closed 1h), alpha its newest "
-          "(exited (2))", "closed" in line(s, "mix") and "1h" in line(s, "mix")
-          and "exited (2)" in line(s, "alpha"),
-          line(s, "mix"), line(s, "alpha"))
+    check("mix shows its newest record (exited (1)) with ◆, alpha its newest "
+          "(exited (2)) without",
+          "exited (1)" in line(s, "mix") and "\u25c6" in line(s, "mix") and
+          "exited (2)" in line(s, "alpha") and
+          "\u25c6" not in line(s, "alpha"), line(s, "mix"), line(s, "alpha"))
+
+    check("select pz-b", select("pk", "pz-b"), screen("pk"))
+    dch("--keys", "pk", "p")
+    after = ["mix", "pz-a", "alpha", "Beta", "gamma", "pz-b"]
+    s = wait_screen("pk", lambda s: rows(s) == after, 15)
+    check("p unpins both pz-b records: no ◆, %s" % after,
+          rows(s) == after and "\u25c6" not in line(s, "pz-b") and
+          not [f for f in os.listdir(rec) if f.startswith("pz-b") and
+               f.endswith(".pin")], s)
 
     dch("--keys", "pk", "/")
     wait_screen("pk", lambda s: "/█" in s)
@@ -179,8 +190,8 @@ def main():
     check("select mix", select("pm", "mix"), screen("pm"))
     dch("--keys", "pm", "o")
     s = wait_screen("pm", lambda s: "MIX_" in s, 20)
-    check("o on mix opens the pinned record the row shows (MIX_PIN)",
-          "MIX_PIN" in s and "MIX_NEW" not in s, s)
+    check("o on mix opens the newest record the row shows (MIX_NEW)",
+          "MIX_NEW" in s and "MIX_PIN" not in s, s)
     return 1 if failures else 0
 
 

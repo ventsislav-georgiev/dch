@@ -8590,7 +8590,7 @@ pk_load(struct pk *p)
 	size_t hl = home ? strlen(home) : 0;
 	regex_t re;
 	struct dch_rrow *rr = NULL;
-	int mode = 0, k, t, nh, pin, nr;
+	int mode = 0, k, j, t, nh, pin, nr;
 
 	pk_selnames(p, sel);
 	for (t = 0; t < 3; t++)
@@ -8653,39 +8653,44 @@ pk_load(struct pk *p)
 	p->interrupted = 0;
 	for (k = 0; k < nh; k++)
 		p->interrupted += rv_all_takes(&h[k]);
-	/* one row per name (#144): its newest pinned record, else its newest;
-	** pinned first, then the newest of the rest up to the cap */
-	for (pin = 1; p->r[2] && pin >= 0; pin--)
-		for (k = 0; k < nh; k++)
-		{
-			struct pkrow *w;
-			int j;
+	/* one row per name (#144): its newest record, pinned when any of
+	** the name's is; h is newest first */
+	for (k = 0; p->r[2] && k < nh; k++)
+	{
+		struct pkrow *w;
 
-			if (h[k].live || h[k].pinned != pin ||
-			    (!pin && p->n[2] >= PK_HIST_MAX))
-				continue;
-			for (j = 0; j < p->n[2] && strcmp(p->r[2][j].sname,
-			     h[k].name); j++)
-				;
-			if (j < p->n[2])
-				continue;
-			w = &p->r[2][p->n[2]++];
-			snprintf(w->name, sizeof w->name, "%s", h[k].file);
-			snprintf(w->sname, sizeof w->sname, "%s", h[k].name);
-			/* alias, else the agent's session name, else the dch
-			 * name: slist_label's order, and Prosper's (#097) */
-			snprintf(w->title, sizeof w->title, "%s", h[k].alias[0]
-			         ? h[k].alias : h[k].aname[0] ? h[k].aname
-			         : h[k].name);
-			snprintf(w->state, sizeof w->state, "%s", h[k].end);
-			if (hl && strncmp(h[k].cwd, home, hl) == 0 &&
-			    (h[k].cwd[hl] == '/' || !h[k].cwd[hl]))
-				snprintf(w->cwd, sizeof w->cwd, "~%s", h[k].cwd + hl);
-			else
-				snprintf(w->cwd, sizeof w->cwd, "%s", h[k].cwd);
-			w->when = hrec_when(&h[k]);
-			w->pinned = h[k].pinned;
+		if (h[k].live)
+			continue;
+		for (j = 0; j < p->n[2] && strcmp(p->r[2][j].sname,
+		     h[k].name); j++)
+			;
+		if (j < p->n[2])
+		{
+			p->r[2][j].pinned |= h[k].pinned;
+			continue;
 		}
+		w = &p->r[2][p->n[2]++];
+		snprintf(w->name, sizeof w->name, "%s", h[k].file);
+		snprintf(w->sname, sizeof w->sname, "%s", h[k].name);
+		/* alias, else the agent's session name, else the dch
+		 * name: slist_label's order, and Prosper's (#097) */
+		snprintf(w->title, sizeof w->title, "%s", h[k].alias[0]
+		         ? h[k].alias : h[k].aname[0] ? h[k].aname
+		         : h[k].name);
+		snprintf(w->state, sizeof w->state, "%s", h[k].end);
+		if (hl && strncmp(h[k].cwd, home, hl) == 0 &&
+		    (h[k].cwd[hl] == '/' || !h[k].cwd[hl]))
+			snprintf(w->cwd, sizeof w->cwd, "~%s", h[k].cwd + hl);
+		else
+			snprintf(w->cwd, sizeof w->cwd, "%s", h[k].cwd);
+		w->when = hrec_when(&h[k]);
+		w->pinned = h[k].pinned;
+	}
+	/* every pinned name, then the newest of the rest up to the cap */
+	for (k = j = pin = 0; k < p->n[2]; k++)
+		if (p->r[2][k].pinned || pin++ < PK_HIST_MAX)
+			p->r[2][j++] = p->r[2][k];
+	p->n[2] = j;
 	hrec_free(h, nh);
 	pk_sort(p, sel);
 }
@@ -8721,7 +8726,7 @@ pk_ended(const char *name, long since)
 	if (!f[0] && name_live(name))
 		pk_focus(name);
 	else
-		pk_focus_history(f, name);
+		pk_focus_history(f);
 }
 
 /* ---- actions ---- */
@@ -9004,6 +9009,18 @@ pk_free_name(const struct pk *p, const char *name, char *as, size_t asz)
 	}
 }
 
+/* What p and d act on: a History row is its name's (#144), so every record
+** of the name; f, the shown record's file, when the name would read as a
+** record file. */
+static const char *
+pk_recs(const struct pkrow *w, const char *f)
+{
+	size_t n = strlen(w->sname);
+
+	return n && !(n > 5 && !strcmp(w->sname + n - 5, ".json"))
+	       ? w->sname : f;
+}
+
 /* One key. 1: out holds the session to attach; -1: quit; 0: go on. */
 int
 pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
@@ -9211,7 +9228,7 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 		snprintf(d, sizeof d, "%s %s", w->pinned ? "unpinning"
 		         : "pinning", w->title);
 		pk_act(&p->ask, 2, w->name, d, w->pinned ? "--unpin" : "--pin",
-		       f, NULL);
+		       pk_recs(w, f), NULL);
 		pk_start(p, &p->ask);
 		return 0;
 	case 'd':
@@ -9222,7 +9239,7 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 			return 0;
 		}
 		snprintf(d, sizeof d, "removing %s", w->title);
-		pk_act(&p->ask, 2, w->name, d, "--forget", f, NULL);
+		pk_act(&p->ask, 2, w->name, d, "--forget", pk_recs(w, f), NULL);
 		pk_ask(p, "Remove %s from History?", w->title);
 		return 0;
 	}

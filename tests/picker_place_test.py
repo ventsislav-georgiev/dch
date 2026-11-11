@@ -24,8 +24,8 @@ Covers:
      line;
   5. a session the picker opened that ends goes back to the picker, on
      History, its record selected (#133): the fake Claude's Ctrl-D twice
-     ends c1, and its name's one row is selected: an older pinned c1,
-     the record that row shows (#144), not the one this end wrote; e1,
+     ends c1, and the record this end wrote is selected, c1's one row
+     (#144), though an older pinned c1 put the name first; e1,
      revived by Shift+Enter with Caps Lock on (CSI 13;66u, #137), ends
      the same way; q and Esc there exit to the shell; `dch -a g1` (no picker) still exits to the shell;
   6. the kill picker (dch -k, no name) has no open: History hints no
@@ -305,8 +305,7 @@ def main():
                        ended=now - 3600, end="killed"), f,
                   separators=(",", ":"))
     open(os.path.join(rec, "c1.1000.pin"), "w").close()
-    # a pinned b0 above it: the c1 row is found by its name, not left at
-    # the top (#144)
+    # a pinned b0 above it: the c1 row is found, not left at the top
     with os.fdopen(os.open(os.path.join(rec, "b0.json"),
                            os.O_WRONLY | os.O_CREAT, 0o600), "w") as f:
         json.dump(dict(name="b0", sock_dir=ENV["DCH_SOCKET_DIR"],
@@ -329,9 +328,9 @@ def main():
                     15)
     check("Claude's Ctrl-D twice: back to the picker, on History",
           "[History" in s and not live("c1"), s)
-    check("... c1's one row selected: the pinned older c1 it shows (#144)",
+    check("... the record c1's end wrote selected, c1's one row (#144)",
           rows(s).count("c1") == 1 and current(s) == "c1" and
-          "closed" in selline(s) and "1h" in selline(s), s)
+          "exited" in selline(s) and "now" in selline(s), s)
     dch("--keys", "pe", "q")
     s = wait_screen("pe", lambda s: "SHELL_BACK" in s)
     check("q there exits to the shell", "SHELL_BACK" in s, s)
