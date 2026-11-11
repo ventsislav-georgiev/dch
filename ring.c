@@ -181,6 +181,12 @@ ring_clear(struct dch_ring *r)
 	r->gen++;
 }
 
+void
+ring_touch(struct dch_ring *r)
+{
+	r->gen++;
+}
+
 /* Copy n bytes between the ring at logical offset off and a flat buffer.
 ** Chunks are cap-aligned, so a wrap is just another chunk boundary. */
 static void

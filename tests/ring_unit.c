@@ -1080,6 +1080,7 @@ static void
 test_pause(void)
 {
 	char *o;
+	unsigned long g;
 
 	start(80, 24, 2000);
 	seq_feed(1, 100);
@@ -1087,8 +1088,11 @@ test_pause(void)
 	CHECK("pause: a gap record says agent",
 	      count_kind(RING_K_GAP, "agent") == 1 && dch_vt_capture_paused());
 	seq_feed(5000, 5200);
-	feed("\033]133;A\007$ \r\n");
-	CHECK("pause: the next A mark resumes", !dch_vt_capture_paused());
+	g = R.gen;
+	feed("\033]133;A\007");
+	CHECK("pause: the next A mark resumes and moves gen (the wake)",
+	      !dch_vt_capture_paused() && R.gen != g);
+	feed("$ \r\n");
 	seq_feed(300, 400);
 	o = outs(1 << RING_K_OUTPUT);
 	CHECK("pause: rows printed while paused never enter",
@@ -1096,7 +1100,10 @@ test_pause(void)
 	free(o);
 	dch_vt_capture_pause(1);
 	seq_feed(6000, 6100);
+	g = R.gen;
 	dch_vt_capture_pause(0);
+	CHECK("pause: the agent's exit moves gen with no record (the wake)",
+	      R.gen != g && count_kind(RING_K_GAP, "agent") == 2);
 	seq_feed(700, 800);
 	o = outs(1 << RING_K_OUTPUT);
 	CHECK("pause: the agent's exit resumes too",

@@ -76,6 +76,8 @@ int ring_init(struct dch_ring *r, size_t cap, uint64_t seq_base);
 void ring_free(struct dch_ring *r);
 /* Empty it (ED 3, RIS, a lost tracked ref). seqs continue; epoch moves. */
 void ring_clear(struct dch_ring *r);
+/* Move gen with no record: subscribers behind get their wake (a resume). */
+void ring_touch(struct dch_ring *r);
 /* Append one record, evicting the oldest as needed. Text past 65535 bytes
 ** (or past what the ring holds) is cut on a UTF-8 boundary and flagged.
 ** Returns the record's seq, or UINT64_MAX when the ring is off. */

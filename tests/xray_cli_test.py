@@ -1608,12 +1608,12 @@ def test_follow_claude():
 
 
 def test_follow_agent():
-    """A shell's follower across an agent's start: the ring pauses on the
-    master's agent tick (vt.c appends a GAP record, so the wake fires) and
-    the stream sends reset rotated, then a snapshot of corpus claude.
-    Not asserted: the agent's exit. The resume (dch_vt_capture_pause(0))
-    appends no ring record, so no wake goes out; --json says shell at the
-    resume, the stream only on the shell's next ring row (#136 round 2)."""
+    """A shell's follower across an agent's start and exit. The start: the
+    ring pauses on the master's agent tick (vt.c appends a GAP record, so
+    the wake fires), and the stream sends reset rotated, then a snapshot of
+    corpus claude. The exit, on an idle shell (no row pushed): the resume
+    appends no record but moves the ring's gen (ring_touch), so the wake
+    fires; reset rotated, then a snapshot of corpus shell."""
     n = "xc-fa"
     bindir = os.path.join(T, "bin-fa")
     fdir = os.path.join(T, "fake-fa")
@@ -1652,18 +1652,29 @@ def test_follow_agent():
                 f.write(json.dumps({"type": "user", "cwd": proj, "message": {
                     "content": "ask #11"}}) + "\n")
 
-        def rotated_then():
+        def rotated_then(k0):
             ob = fl.objs(k0)
             i = next((j for j, o in enumerate(ob)
                       if is_reset("rotated")(o)), None)
             return ob[i + 1] if i is not None and i + 1 < len(ob) else None
-        wait_for(rotated_then, 15)
-        nxt = rotated_then()
+        wait_for(lambda: rotated_then(k0), 15)
+        nxt = rotated_then(k0)
         check("follow agent: the agent's start sends reset rotated, then a "
               "snapshot of corpus claude",
               nxt is not None and "snapshot" in nxt and
               nxt["snapshot"]["corpus"] == "claude", fl.objs(k0))
+        k1 = len(fl.got)
+        t1 = time.time()
         dch("--send", n, "/exit\r", env=env)
+        # the tick is 1 s (DCH_RECORD_MS): the resume lands within ~2 s
+        wait_for(lambda: rotated_then(k1), 5)
+        secs = time.time() - t1
+        nxt = rotated_then(k1)
+        check("follow agent: the agent's exit on an idle shell sends reset "
+              "rotated, then a snapshot of corpus shell (%.1f s)" % secs,
+              nxt is not None and "snapshot" in nxt and
+              nxt["snapshot"]["corpus"] == "shell" and secs < 5,
+              fl.objs(k1))
     finally:
         dch("-k", n)
         if fl:
