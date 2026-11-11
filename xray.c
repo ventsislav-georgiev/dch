@@ -389,6 +389,7 @@ r_url(const char *s, size_t n, size_t i, struct xr_span *sp)
 	size_t j, e, k, a;
 	int o, c;
 
+	sp->full[0] = '\0';	/* inline_run calls this directly (#147) */
 	if (n - i >= 8 && !strncasecmp(s + i, "https://", 8))
 		j = i + 8;
 	else if (n - i >= 7 && !strncasecmp(s + i, "http://", 7))
@@ -2197,6 +2198,7 @@ id_resolve(const char *v, size_t vl, const char *cmd, size_t cl,
 
 	if (!vl || vl > 64)
 		return 0;
+	sp->full[0] = '\0';	/* the r_ticket path sets no full (#147) */
 	if (cmd)
 		(void)grammar(cmd, cl, XR_PLAIN, R_ANCHOR, cwd, idm_span, &m);
 	if (m.found)
@@ -2210,7 +2212,6 @@ id_resolve(const char *v, size_t vl, const char *cmd, size_t cl,
 	{
 		t[0] = '#';
 		memcpy(t + 1, v, vl);
-		sp->full[0] = '\0';
 		sp->rule = 'H';
 		return span_key(sp, XR_ISSUE, t, vl + 1, 0);
 	}
