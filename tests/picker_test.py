@@ -180,7 +180,7 @@ def harness(session, title):
                    "name": title}, f, separators=(",", ":"))
 
 
-def select(pk, name, timeout=10.0):
+def select(pk, name, timeout=20.0):
     """Move the selection to the row titled `name`."""
     end = time.time() + timeout
     while time.time() < end:
@@ -189,9 +189,12 @@ def select(pk, name, timeout=10.0):
         if cur == name:
             return True
         if cur in r and name in r:
-            d = r.index(name) - r.index(cur)
-            dch("--keys", pk, *(["down"] * d if d > 0 else ["up"] * -d))
-        time.sleep(0.3)
+            # one step, then wait for it: keys sent ahead of a slow picker
+            # overshoot and the loop chases its own moves (#154)
+            dch("--keys", pk, "down" if r.index(name) > r.index(cur) else "up")
+            wait_screen(pk, lambda s: current(s) != cur, 3.0)
+        else:
+            time.sleep(0.3)
     return False
 
 
@@ -614,10 +617,13 @@ def main():
     dch("--keys", "pk7", "down")
     s = wait_screen("pk7", lambda s: "/pk\u2588" not in s and
                     current(s) not in (None, was), 3.0)
-    if current(s) == was:
-        # a reload had just sorted `was` last: Down had nowhere to go
-        dch("--keys", "pk7", "up")
-        s = wait_screen("pk7", lambda s: current(s) not in (None, was))
+    # A reload can sort `was` to the edge the arrow pushes against, so the
+    # arrow has nowhere to go: try the other way until the selection moves.
+    key, end = "up", time.time() + 15
+    while current(s) == was and time.time() < end:
+        dch("--keys", "pk7", key)
+        key = "down" if key == "up" else "up"
+        s = wait_screen("pk7", lambda s: current(s) not in (None, was), 3.0)
     sel = current(s)
     check("Down moves within the filtered list, closes the prompt and keeps "
           "the filter (#108)",

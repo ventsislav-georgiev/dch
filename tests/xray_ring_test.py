@@ -2,7 +2,8 @@
 """The X-ray shell ring (#119) through a real master.
 
 Covers what tests/ring_unit.c cannot reach from inside vt.c: the master
-protocol's read op (MSG_RING_READ: range, the 1 MiB cap, session_id),
+protocol's read op (MSG_RING_READ: range, the 1 MiB cap, session_id), the
+primary-screen read (DCH_READ_F_PRIMARY, #140; nothing while alt or paused),
 subscribers and their edge-triggered wake (a clear wakes one too; a wake at a
 full subscriber's out cap drops it safely; a stale one loses its slot), the clear message, the xray_ring
 config (0 = off), the client-input flag on a C mark from real keystrokes,
@@ -227,6 +228,133 @@ def test_subscribers():
             s.close()
         kill(n)
 
+
+def screen_read(name, payload):
+    """One MSG_READ with this payload on a connection of its own ->
+    (MSG_READ_END status, text)."""
+    s = X.connect(name)
+    try:
+        s.sendall(struct.pack("<BH", 6, len(payload)) + payload)
+        data = b""
+        while True:
+            t, n, p = X.recv_frame(s)
+            if t == X.MSG_READ_DATA:
+                data += p
+            elif t == X.MSG_READ_END:
+                return n, data.decode("utf-8", "replace")
+    finally:
+        s.close()
+
+
+def test_primary():
+    """#140: DCH_READ_F_PRIMARY answers the visible primary rows with soft
+    wraps joined, DCH_ST_ALT and nothing while the alt screen is active, and
+    DCH_ST_ERR with another flag, ANSI or recent-N; the rows come back when
+    alt exits. A DCH_RING_F_SCREEN subscriber is woken by a screen change that
+    moves no ring row (the switch into alt and out of it, not a redraw on
+    alt), a plain one is not."""
+    n = "xr-pri" + TAG
+    spawn(n, "sh")
+    socks = []
+    joined = "ab" * 50 + "END"
+    try:
+        wait_for(lambda: screen(n).strip())
+        send(n, "printf 'ab%.0s' $(seq 1 50); echo END\n")
+        # abEND is the output's end only: the typed line has "echo END"
+        wait_for(lambda: "abEND" in screen(n))
+        st, txt = screen_read(n, bytes([0, 0, 0, 0, 0x08]))
+        check("primary: status OK, the wrapped row joined into one line",
+              st == 0 and joined in txt.split("\n"), (st, txt))
+        st, txt = screen_read(n, bytes([0, 0, 0, 0]))
+        check("primary: a plain read still breaks it at the edge",
+              st == 0 and "END" in txt and joined not in txt, (st, txt))
+        for what, p in (("ANSI", [1, 0, 0, 0, 0x08]),
+                        ("recent-N", [0, 1, 0, 0, 0x08]),
+                        ("with F_CURSOR", [0, 0, 0, 0, 0x09]),
+                        ("with F_META", [0, 0, 0, 0, 0x0a])):
+            st, txt = screen_read(n, bytes(p))
+            check("primary: %s is refused (DCH_ST_ERR)" % what,
+                  st == 1 and txt == "", (st, txt))
+        scr, plain = X.connect(n), X.connect(n)
+        socks += [scr, plain]
+        X.read(scr, 0, sub=True, flags=X.F_SCREEN)
+        h0, _ = X.read(plain, 0, sub=True)
+        # \101 is A: the typed line never reads ALT
+        send(n, "printf '\\033[?1049h\\101LT\\n'; read x; "
+             "printf '\\033[?1049l'\n")
+        wait_for(lambda: "ALT" in screen(n))
+        check("primary: a screen subscriber is woken by the alt switch",
+              recv_wakes(scr, 1.5) == 1)
+        check("primary: a plain subscriber is not (no ring row moved)",
+              recv_wakes(plain, 0.5) == 0)
+        h1, _ = X.read(plain, 0)
+        check("primary: ... and the ring did not move", h1["tail"] ==
+              h0["tail"], (h0, h1))
+        st, txt = screen_read(n, bytes([0, 0, 0, 0, 0x08]))
+        check("primary: while alt is active, DCH_ST_ALT and no data",
+              st == 7 and txt == "", (st, txt))
+        st, txt = screen_read(n, bytes([0, 0, 0, 0]))
+        check("primary: a plain visible read is the alt screen, as before",
+              st == 0 and "ALT" in txt, (st, txt))
+        X.read(scr, 0)                  # re-arms its wake
+        send(n, "abc")
+        wait_for(lambda: "abc" in screen(n))
+        check("primary: a redraw on the alt screen wakes no screen subscriber",
+              recv_wakes(scr, 0.5) == 0)
+        send(n, "\n")
+        wait_for(lambda: "ALT" not in screen(n))
+        check("primary: leaving alt wakes it", recv_wakes(scr, 1.5) == 1)
+        st, txt = screen_read(n, bytes([0, 0, 0, 0, 0x08]))
+        check("primary: alt exited, the primary rows are back",
+              st == 0 and joined in txt.split("\n") and "ALT" not in txt,
+              (st, txt))
+    finally:
+        for s in socks:
+            s.close()
+        kill(n)
+
+
+def test_primary_paused(tmp):
+    """#140 review: while capture is paused for an agent (Claude paints its
+    TUI on the primary screen), DCH_READ_F_PRIMARY answers DCH_ST_ALT and no
+    rows, decided by the master, so a shell answer racing the agent's start
+    never takes the TUI as output; a plain visible read still renders it."""
+    n = "xr-pp" + TAG
+    bindir, fdir = os.path.join(tmp, "ppbin"), os.path.join(tmp, "ppfake")
+    for d in (bindir, fdir):
+        os.makedirs(d, exist_ok=True)
+    shutil.copy(os.path.join(HERE, "fake_claude.py"),
+                os.path.join(bindir, "claude"))
+    os.chmod(os.path.join(bindir, "claude"), 0o755)
+    env = dict(os.environ, FAKE_CLAUDE_DIR=fdir, DCH_RECORD_MS="300",
+               PATH=bindir + ":" + os.environ.get("PATH", "/usr/bin:/bin"))
+
+    def status():
+        try:
+            s = X.connect(n)
+            try:
+                return X.read(s, 0, 1)[0].get("status", 0)
+            finally:
+                s.close()
+        except (OSError, EOFError):
+            return 0
+    spawn(n, "sh", env=env)
+    try:
+        wait_for(lambda: screen(n).strip())
+        dch("--send", n, "claude\r", env=env)
+        paused = wait_for(lambda: status() & X.S_PAUSED, 25)
+        drawn = wait_for(lambda: "Claude Code" in screen(n))
+        check("primary paused: an agent pauses capture, its TUI drawn",
+              paused and drawn, screen(n))
+        st, txt = screen_read(n, bytes([0, 0, 0, 0, 0x08]))
+        check("primary paused: F_PRIMARY gives DCH_ST_ALT and no data",
+              st == 7 and txt == "", (st, txt))
+        st, txt = screen_read(n, bytes([0, 0, 0, 0]))
+        check("primary paused: a plain visible read still renders the TUI",
+              st == 0 and "Claude Code" in txt, (st, txt))
+        dch("--send", n, "/exit\r", env=env)
+    finally:
+        kill(n)
 
 def test_sub_evict():
     """QA 1.43 NIT-2 (#121): with the slots full, a new subscriber takes the
@@ -688,6 +816,8 @@ def main():
         test_read_op()
         test_subscribers()
         test_sub_evict()
+        test_primary()
+        test_primary_paused(tmp)
         test_clear_and_off()
         test_wake_at_cap(tmp)
         test_shell_init(tmp)

@@ -9,7 +9,8 @@ transcript, the open seam's counting test (spec 8.1: one open per Claude
 query, none for a shell, a clear or a refused lookup; nothing written), and
 the INFO-2 name rule on every create path dch runs locally, and refs (#135):
 the index freed with its query (K3), --ref's budget stop, nothing written,
-SIGTERM and EPIPE as a cancel, and the 16 MB budget at the index's caps.
+SIGTERM and EPIPE as a cancel, and the 16 MB budget at the index's caps,
+and the primary screen (#140): read with the ring, never the alt buffer.
 
 Run:  python3 tests/xray_cli_test.py          (uses ./dch; run.sh isolates)
 """
@@ -901,8 +902,10 @@ def test_two_claudes():
         check("two claudes: --clear says ring_cleared false",
               rc == 0 and c and c["ring_cleared"] is False, (rc, c, err))
         _, o, _ = xray(n, "--json")
+        # lines counts the rows read (#140): at least seq's rows that
+        # scrolled off the 24-row pane, whatever the screen holds now
         check("two claudes: the ring keeps its lines",
-              o0 and o and o["lines"] == o0["lines"] and o["lines"] >= 300,
+              o0 and o and o["lines"] == o0["lines"] and o["lines"] >= 276,
               (o0 and o0.get("lines"), o and o.get("lines")))
     finally:
         dch("-k", n)
@@ -2118,6 +2121,101 @@ def test_ref_shell_tick():
         os.unlink(cfg)
 
 
+# ---- #140 (Q16): the current primary screen, never the alt buffer ---------
+
+def test_screen():
+    """A shell's answer is the ring plus the current primary screen: a ref
+    printed but not yet scrolled is found by --json, --ref and --follow, and
+    lines counts the rows read. While a program holds the alt screen, neither
+    the alt buffer nor the primary screen is read: the ring alone, no error,
+    no why (never "alt"); the follower drops the screen's ref with no ring
+    row moved, and takes it back when alt exits."""
+    n = "xc-scr"
+    fl = None
+    r = dch("--spawn", n, "--size", "80x24", "sh")
+    check("screen: spawned", r.returncode == 0, r.stderr)
+
+    def refs(o):
+        return {x["key"]: x for x in (o or {}).get("refs", [])}
+
+    def rows():
+        return [l for l in screen(n).split("\n") if l.strip()]
+
+    try:
+        wait_for(lambda: screen(n).strip(), 5)
+        # \043 is #: the typed line holds no ref, only the output does
+        dch("--send", n, "printf 'see q/w\\043140 here\\n'\n")
+        wait_for(lambda: "q/w#140" in screen(n), 5)
+        _, recs = X.read_all(n, 0)
+        rc, o, err = xray(n, "--json")
+        check("screen: a ref on the primary screen, not yet in the ring, is "
+              "found", rc == 0 and o and not recs and "pull:q/w#140" in
+              refs(o) and refs(o)["pull:q/w#140"]["count"] == 1 and
+              o["complete"] and o["why"] is None, (rc, o, recs, err))
+        check("screen: lines counts the rows read (the screen's non-blank "
+              "rows; the ring is empty)", o and o["lines"] == len(rows()),
+              (o and o["lines"], rows()))
+        r = dch("--xray", n, "--ref", "q/w#140", "--scope", "session",
+                "--full", "--json")
+        men = [json.loads(l).get("mention") for l in r.stdout.splitlines()]
+        men = [m for m in men if m]
+        check("screen: --ref --full gives its mention line", r.returncode == 0
+              and len(men) == 1 and men[0]["line"] == "see q/w#140 here",
+              r.stdout)
+        fl = Follow(n)
+        snap = fl.wait(lambda x: "snapshot" in x)
+        check("screen: the follower's snapshot is the --json object",
+              snap and snap[0]["snapshot"] == o, (snap, o))
+
+        k = len(fl.got)
+        dch("--send", n, "printf '\\033[?1049halt k/l\\043150\\n'; read x; "
+            "printf '\\033[?1049l'\n")
+        wait_for(lambda: "k/l#150" in screen(n), 5)
+        gone = fl.wait(is_ref("pull:q/w#140", count=0), 5, frm=k)
+        rc, a, err = xray(n, "--json")
+        _, recs = X.read_all(n, 0)
+        check("screen: alt active, neither the alt buffer nor the primary "
+              "screen is read (the ring alone)", rc == 0 and a and not
+              set(refs(a)) & {"pull:k/l#150", "pull:q/w#140"} and
+              a["lines"] == len([x for x in recs if x["kind"] != 4]),
+              (rc, a, err))
+        check("screen: alt is no error: exit 0, nothing on stderr, "
+              "available, complete, why null (never \"alt\")", rc == 0 and
+              a and a["available"] and a["complete"] and a["why"] is None and
+              err == "", (rc, a, err))
+        check("screen: the follower drops the screen's ref on the alt switch "
+              "(no ring row moved)", gone, fl.objs(k))
+        r = dch("--xray", n, "--ref", "k/l#150", "--scope", "session",
+                "--full", "--json")
+        check("screen: --ref never reads the alt buffer", r.returncode == 0
+              and '"count":0' in r.stdout and '{"mention"' not in
+              r.stdout.replace('"schema":1,', ''), r.stdout)
+
+        k = len(fl.got)
+        dch("--send", n, "\n")
+        wait_for(lambda: "k/l#150" not in screen(n), 5)
+        back = fl.wait(is_ref("pull:q/w#140", count=1), 5, frm=k)
+        time.sleep(0.4)
+        rc, b, err = xray(n, "--json")
+        check("screen: alt exited, the screen's rows rejoin --json",
+              rc == 0 and b and "pull:q/w#140" in refs(b) and
+              "pull:k/l#150" not in refs(b) and b["why"] is None and
+              b["lines"] == len(rows()), (rc, b, rows()))
+        check("screen: ... and the follower, with no new output",
+              back, fl.objs(k))
+        cur = refs(snap[0]["snapshot"]) if snap else {}
+        for x in fl.objs():
+            if "ref" in x:
+                cur[x["ref"]["key"]] = x["ref"]
+        cur = {kk: v for kk, v in cur.items() if v["count"]}
+        check("screen: the snapshot plus its deltas is the --json of now",
+              b and cur == refs(b), (cur, b and refs(b)))
+    finally:
+        if fl:
+            fl.stop()
+        dch("-k", n)
+
+
 def main():
     try:
         test_names()
@@ -2141,6 +2239,7 @@ def main():
         test_follow_cap()
         test_follow_shell()
         test_follow_agent()
+        test_screen()
         test_ref_shell_caps()
         test_ref_shell_tick()
     finally:

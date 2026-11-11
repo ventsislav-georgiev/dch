@@ -97,9 +97,10 @@ struct client
 	size_t outlen, outcap, outoff;
 
 	/* X-ray ring subscriber (#119): subscribed; a wake is out and not yet
-	** answered by a read; the ring's gen at this client's last read. */
-	int xsub, xwake;
-	unsigned long xgen;
+	** answered by a read; the ring's gen at this client's last read; with
+	** DCH_RING_F_SCREEN (#140) screen_gen() then too. */
+	int xsub, xwake, xscr;
+	unsigned long xgen, xvgen;
 	struct timespec xwake_at;	/* when that wake went out */
 	/* MSG_RESTART_CAPS flags this connection sent (DCH_RESTART_F_*) */
 	unsigned int rcaps;
@@ -1939,6 +1940,22 @@ xray_agent(pid_t agent)
 	xagent = agent;
 }
 
+/* What a screen follower's answer reads besides the ring (#140): the
+** mirror's gen while the primary screen is read, one fixed value while alt
+** or an agent's pause leaves it out, so a vim redraw wakes nobody but the
+** switch in and out wakes once. */
+static unsigned long
+screen_gen(void)
+{
+	int c, r;
+	unsigned long g = 0;
+
+	if (dch_vt_alt() || dch_vt_capture_paused())
+		return ~0UL;
+	(void)dch_vt_size(&c, &r, &g);
+	return g;
+}
+
 /* Edge-triggered wake (§10 Reading): one MSG_RING_WAKE per subscriber whose
 ** last read is behind, then nothing until it reads again. */
 static void
@@ -1946,11 +1963,14 @@ xray_wake(void)
 {
 	static const unsigned char none[1];
 	struct client *p, *next;
+	unsigned long vg = screen_gen();
 
 	for (p = clients; p && n_xsubs; p = next)
 	{
 		next = p->next;
-		if (!p->xsub || p->xwake || p->xgen == xring.gen)
+		/* a screen follower also reads the screen (screen_gen) */
+		if (!p->xsub || p->xwake || (p->xgen == xring.gen &&
+		    (!p->xscr || p->xvgen == vg)))
 			continue;
 		p->xwake = 1;
 		clock_gettime(CLOCK_MONOTONIC, &p->xwake_at);
@@ -2051,6 +2071,9 @@ do_ring_read(struct client *p, const unsigned char *payload, unsigned int len)
 	}
 	p->xwake = 0;
 	p->xgen = xring.gen;
+	if (len > 12 && (payload[12] & DCH_RING_F_SCREEN))
+		p->xscr = 1;
+	p->xvgen = screen_gen();
 	xray_agent_gone();
 	if (!xring.cap)
 		st |= DCH_RING_S_OFF;
@@ -2399,6 +2422,10 @@ read_req_parse(const unsigned char *payload, unsigned int len,
 	if ((q->flags & (DCH_READ_F_CURSOR | DCH_READ_F_META |
 	    DCH_READ_F_SINCE)) && q->source == DCH_READ_RECENT)
 		return DCH_ST_ERR;
+	/* X-ray's screen rows: one shape, so no flag changes what they mean */
+	if ((q->flags & DCH_READ_F_PRIMARY) && (q->flags != DCH_READ_F_PRIMARY ||
+	    q->format != DCH_READ_PLAIN || q->source != DCH_READ_VISIBLE))
+		return DCH_ST_ERR;
 	if (q->flags & DCH_READ_F_SINCE)
 	{
 		if (len < DCH_READ_REQ_MAX)
@@ -2444,6 +2471,11 @@ do_read(struct client *p, const unsigned char *payload, unsigned int len)
 	if (read_req_parse(payload, len, &q) != 0)
 		return queue_status(p, MSG_READ_END, DCH_ST_ERR);
 	flags = q.flags;
+	/* never the alt buffer, nor an agent's TUI while capture is paused
+	** (#140): decided in the servicing that renders */
+	if ((flags & DCH_READ_F_PRIMARY) &&
+	    (dch_vt_alt() || dch_vt_capture_paused()))
+		return queue_status(p, MSG_READ_END, DCH_ST_ALT);
 
 	/* --follow polls with the generation of the last screen it got: an
 	** idle session answers here, without rendering anything. The size and
@@ -2455,8 +2487,8 @@ do_read(struct client *p, const unsigned char *payload, unsigned int len)
 	if ((flags & DCH_READ_F_SINCE) && q.since == gen)
 		return queue_status(p, MSG_READ_END, DCH_ST_SAME);
 
-	if (dch_vt_snapshot(q.format == DCH_READ_ANSI ? DCH_VT_FMT_ANSI
-	    : DCH_VT_FMT_PLAIN,
+	if (dch_vt_snapshot((flags & DCH_READ_F_PRIMARY) ? DCH_VT_FMT_UNWRAP
+	    : q.format == DCH_READ_ANSI ? DCH_VT_FMT_ANSI : DCH_VT_FMT_PLAIN,
 	    q.source == DCH_READ_RECENT ? (int)q.lines : 0,
 	    &snap, &snaplen) < 0)
 	{

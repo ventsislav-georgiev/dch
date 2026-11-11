@@ -19,7 +19,11 @@ Each case is a directory:
                    the fake masters' ring status, config lines. A live
                    shell's pane runs in <tmp>/work/<name> (MSG_CMD answers
                    a real child there, 24x80), unless "cmd":"unsup" (a
-                   master that does not answer MSG_CMD). Ignored by Prosper.
+                   master that does not answer MSG_CMD). Its primary screen
+                   (MSG_READ with DCH_READ_F_PRIMARY, #140) is "screen"
+                   (default "screen row\n"); "primary":"alt" answers
+                   DCH_ST_ALT (the alt screen is active), "primary":"old"
+                   DCH_ST_ERR (a master before #140). Ignored by Prosper.
 
 The temp root is masked as /T in the output, and its project key as -T (7.1
 maps every '/' to '-'), so a golden carries the real pane-cwd key shape.
@@ -51,7 +55,8 @@ MSG_READ, MSG_READ_DATA, MSG_READ_END, MSG_ACK = 6, 8, 9, 11
 MSG_CMD, MSG_RING_READ, MSG_RING_HDR, MSG_RING_CLEAR = 15, 18, 19, 21
 MSG_CMD_STAT = 17
 MSG_WINCH, MSG_REDRAW, MSG_ATTACH, MSG_DETACH = 4, 5, 1, 2
-ST_OK, ST_NOVT, ST_UNSUP = 0, 2, 5
+ST_OK, ST_ERR, ST_NOVT, ST_UNSUP, ST_ALT = 0, 1, 2, 5, 7
+READ_F_PRIMARY = 0x08
 S_RANGE = 0x01
 PKT_MAX = 4096
 KINDS = {"prompt": 1, "input": 2, "output": 3, "mark": 4, "gap": 5}
@@ -71,9 +76,10 @@ class FakeMaster:
     """One session's control socket over a fixed list of ring records."""
 
     def __init__(self, path, records, status=0, sid="m0000000000000000",
-                 screen="screen row\n", cwd=None):
+                 screen="screen row\n", cwd=None, primary=None):
         self.recs = records          # [(seq, kind, flags, t, bytes)]
         self.status, self.sid, self.screen = status, sid, screen
+        self.primary = primary
         # the pane: a real child whose cwd the client reads, or None
         self.child = (subprocess.Popen(["sleep", "600"], cwd=cwd)
                       if cwd else None)
@@ -138,6 +144,9 @@ class FakeMaster:
         if t == MSG_READ:
             if self.screen is None:
                 return struct.pack("<BH", MSG_READ_END, ST_NOVT)
+            if len(p) > 4 and p[4] & READ_F_PRIMARY and self.primary:
+                return struct.pack("<BH", MSG_READ_END, ST_ALT
+                                   if self.primary == "alt" else ST_ERR)
             b = self.screen.encode()
             return (struct.pack("<BH", MSG_READ_DATA, len(b)) + b +
                     struct.pack("<BH", MSG_READ_END, ST_OK))
@@ -267,7 +276,8 @@ def run_case(name):
                     os.path.join(sockdir, n + ".sock"),
                     load_ring(os.path.join(sdir, f)), o.get("status", 0),
                     o.get("session_id", "m0000000000000000"),
-                    None if o.get("lite") else "screen row\n", cwd))
+                    None if o.get("lite") else o.get("screen", "screen row\n"),
+                    cwd, o.get("primary")))
         # config lines (xray_ring for a ring's cap)
         with open(os.path.join(t, "config"), "w") as f:
             f.write("".join(l + "\n" for l in setup.get("config", [])))

@@ -2,4 +2,4 @@
 {"schema":1,"mention":{"session":"box","chapter":"s281474976720001","at":1794300000,"line":"see src/sh.c:4 and o/r#120 and o/r#120","offset":281474976720007,"live":true,"project":"-T-work-box"}}
 {"schema":1,"mention":{"session":"box","chapter":"s281474976720001","at":1794300000,"line":"o/r#120 on a second row","offset":281474976720008,"live":true,"project":"-T-work-box"}}
 {"schema":1,"tally":{"session":"box","live":true,"project":"-T-work-box","count":1,"definitions":0,"partial":false,"mentions_dropped":0}}
-{"schema":1,"done":true,"partial":false,"counts":{"session":1,"project":0,"project_sessions":0,"all":null,"all_sessions":null},"why":null,"files":1,"bytes":313,"lines_too_long":0}
+{"schema":1,"done":true,"partial":false,"counts":{"session":1,"project":0,"project_sessions":0,"all":null,"all_sessions":null},"why":null,"files":1,"bytes":323,"lines_too_long":0}

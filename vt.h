@@ -22,6 +22,7 @@
 /* Snapshot formats */
 #define DCH_VT_FMT_PLAIN 0
 #define DCH_VT_FMT_ANSI  1
+#define DCH_VT_FMT_UNWRAP 2	/* plain, soft wraps joined (X-ray's rows) */
 
 /* Returns 1 when a live mirror exists (init succeeded, not disabled). */
 int dch_vt_enabled(void);
@@ -47,6 +48,9 @@ void dch_vt_resize(int cols, int rows);
  * changed. Returns 0, or -1 when disabled (outputs untouched).
  */
 int dch_vt_size(int *cols, int *rows, unsigned long *gen);
+
+/* 1 while the alternate screen is active; 0 on the primary or disabled. */
+int dch_vt_alt(void);
 
 /*
  * Render the screen. lines == 0: visible screen only; lines > 0: the

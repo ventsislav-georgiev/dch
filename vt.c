@@ -71,7 +71,7 @@ set_scrollback_lines(void)
 	    ? 0 : -1;
 }
 
-#define FMT_UNWRAP 2	/* plain with soft wraps joined: capture only */
+#define FMT_UNWRAP DCH_VT_FMT_UNWRAP
 static int format_sel(int format, const GhosttySelection *sel, char **out,
                       size_t *outlen);
 static int format_unwrap(const GhosttySelection *sel, char **out,
@@ -1204,6 +1204,12 @@ format_sel(int format, const GhosttySelection *sel, char **out,
 	*out = buf;
 	*outlen = written;
 	return 0;
+}
+
+int
+dch_vt_alt(void)
+{
+	return the_term && alt_active();
 }
 
 int

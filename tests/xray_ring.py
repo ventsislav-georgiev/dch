@@ -12,7 +12,7 @@ import json, os, socket, struct, sys
 MSG_READ_DATA, MSG_READ_END, MSG_ACK = 8, 9, 11
 MSG_RING_READ, MSG_RING_HDR, MSG_RING_WAKE, MSG_RING_CLEAR = 18, 19, 20, 21
 MSG_RESTART, MSG_RESTART_CAPS, F_RING = 13, 22, 0x01
-F_SUB = 0x01
+F_SUB, F_SCREEN = 0x01, 0x04
 S_RANGE, S_CHAPTERS, S_PAUSED, S_OFF, S_SUB, S_SUBFULL, S_LATCHED = (
     0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40)
 KINDS = {1: "prompt", 2: "input", 3: "output", 4: "mark", 5: "gap"}
@@ -72,10 +72,10 @@ def parse_records(data, first):
     return out
 
 
-def read(sock, seq=0, maxb=1 << 20, sub=False, wakes=None):
+def read(sock, seq=0, maxb=1 << 20, sub=False, wakes=None, flags=0):
     """One MSG_RING_READ on an open connection -> (hdr, records)."""
     sock.sendall(struct.pack("<BHQIB", MSG_RING_READ, 13, seq, maxb,
-                             F_SUB if sub else 0))
+                             (F_SUB if sub else 0) | flags))
     hdr, data = None, b""
     while True:
         t, n, p = recv_frame(sock)

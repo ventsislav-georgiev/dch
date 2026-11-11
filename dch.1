@@ -800,7 +800,16 @@ A shell's chapters come from its ring's OSC 133 marks: one per typed command
 block (\fBA\fR, \fBB\fR, client input, \fBC\fR, a non-blank command),
 once its rows scroll off the screen (commands still on it have none yet;
 commands typed ahead in one burst give only the first one a chapter, the
-others having had no client input inside their own B..C);
+others having had no client input inside their own B..C).
+A query also reads the current primary screen after the ring: its rows count
+as output (refs only, no chapter, no definition), and
+.B lines
+counts the rows read; while the alternate screen is active, or from a master
+started by an older dch (until
+.BR \-\-restart ),
+the answer is the ring's alone, with no error and no
+.BR why .
+In a shell's ring,
 evicted rows (the master's own status bit, reset by a clear; a dch 1.43.0
 master has none, and there only a gap, a lost range or a cut first row
 counts) or a gap make
@@ -878,7 +887,8 @@ drops, so a client can hold more chapters than
 .B \-\-json
 shows.
 No timer: a transcript is watched with kqueue (inotify on Linux), its
-project directory for a new file, a shell through the master's wake.
+project directory for a new file, a shell through the master's wake (its
+ring or its screen changed, an alternate\-screen switch included).
 At most 4 shell followers per master: a fifth exits 1
 .IR busy .
 An ended session or a History record writes its snapshot and exits 0;

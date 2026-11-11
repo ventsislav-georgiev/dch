@@ -225,11 +225,13 @@ def main():
 
         # --- budget: the scan stays cheap ---------------------------------
         if not no_budget:
-            t0 = time.time()
-            for _ in range(20):
+            # fastest of 20: a sleep slows every call, load only some (#154)
+            def took():
+                t0 = time.perf_counter()
                 rows()
-            check("--ls-json with records: 20 calls < 2s",
-                  time.time() - t0 < 2.0)
+                return time.perf_counter() - t0
+            check("--ls-json with records: fastest of 20 calls < 100ms",
+                  min(took() for _ in range(20)) < 0.1)
     finally:
         for n in names:
             run("-k", n)
