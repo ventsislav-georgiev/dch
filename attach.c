@@ -86,6 +86,7 @@ restore_term(void)
 }
 
 int attach_sock = -1;
+int attach_end_back;
 const char *(*attach_lost)(int *code);
 
 /* A remote attach's socket closed: when the link (not the session) ended,
@@ -808,6 +809,12 @@ attach_main(int noerror)
 			if (len == 0)
 			{
 				dch_trace("client exit: master closed socket");
+				if (attach_end_back && attach_sock < 0)
+				{
+					restore_term();
+					close(s);
+					return ATTACH_ENDED;
+				}
 				exit(0);
 			}
 			else if (len < 0)

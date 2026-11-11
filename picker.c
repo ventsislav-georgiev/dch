@@ -1228,6 +1228,8 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 	else
 	{
 		PK_K(0, ret, "resume", NULL, 0);
+		PK_K(0, pk_utf ? "\xe2\x87\xa7\xe2\x86\xb5/o" : "S-enter/o",
+		     "open", NULL, 0);
 		PK_K(0, "m", "no message", NULL, 0);
 		if (p->interrupted)
 		{
@@ -1396,10 +1398,36 @@ pk_key(int fd)
 	while (n < (int)sizeof s && pk_more(fd) && pk_rd(fd, &s[n]) == 0)
 		if (s[n++] >= 0x40)	/* the final byte */
 			break;
-	if (!n)
+	return pk_csi(s, n);
+}
+
+/* The key a CSI (or SS3) sequence's bytes after ESC [ name, s[n - 1] its
+** final byte; 0 for one we do not know. The kitty keyboard protocol's
+** CSI code[;mods]u (#132; the picker pushes its disambiguate flag): Esc,
+** Ctrl-letter and Shift+Tab as their legacy keys, Shift+Enter as
+** PK_SENTER, as is xterm modifyOtherKeys' CSI 27;2;13~. */
+int
+pk_csi(const unsigned char *s, int n)
+{
+	int code = 0, mods = 1, k = 0;
+
+	if (n <= 0)
 		return 0;
 	switch (s[n - 1])
 	{
+	case 'u':
+		while (k < n - 1 && isdigit(s[k]) && code < 0x110000)
+			code = code * 10 + (s[k++] - '0');
+		if (k < n - 1 && s[k] == ';')
+			for (mods = 0, k++; k < n - 1 && isdigit(s[k]) &&
+			     mods < 1000; k++)
+				mods = mods * 10 + (s[k] - '0');
+		if (mods == 2)	/* Shift */
+			return code == 13 ? PK_SENTER : code == 9 ? PK_BTAB : 0;
+		if (mods == 5 && code >= 'a' && code <= 'z')	/* Ctrl */
+			return code & 0x1f;
+		return mods > 1 ? 0 : code == 27 ? PK_ESC : code > 0 &&
+		       code < 0x80 ? code : 0;
 	case 'A': return PK_UP;
 	case 'B': return PK_DOWN;
 	case 'C': return PK_RIGHT;
@@ -1408,6 +1436,8 @@ pk_key(int fd)
 	case 'H': return PK_HOME;
 	case 'F': return PK_END;
 	case '~':
+		if (n == 8 && !memcmp(s, "27;2;13~", 8))
+			return PK_SENTER;
 		return s[0] == '5' ? PK_PGUP : s[0] == '6' ? PK_PGDN
 		       : s[0] == '1' || s[0] == '7' ? PK_HOME
 		       : s[0] == '4' || s[0] == '8' ? PK_END : 0;
@@ -1524,7 +1554,7 @@ pk_filt(struct pk *p, int fd, int c)
 	}
 	switch (c)
 	{
-	case '\r': case '\n': case PK_UP: case PK_DOWN:
+	case '\r': case '\n': case PK_SENTER: case PK_UP: case PK_DOWN:
 		p->filtering = 0;
 		return 0;
 	case PK_ESC:
@@ -1571,12 +1601,21 @@ static struct
 {
 	int set, tab, byname;
 	char filt[sizeof ((struct pk *)0)->filt], sel[3][600], focus[600];
+	int fhist;	/* the focus is a History record's (#133) */
 } pk_mem;
 
 void
 pk_focus(const char *name)
 {
 	snprintf(pk_mem.focus, sizeof pk_mem.focus, "%s", name ? name : "");
+	pk_mem.fhist = 0;
+}
+
+void
+pk_focus_history(const char *file)
+{
+	pk_focus(file);
+	pk_mem.fhist = 1;
 }
 
 /* p's place, for the next picker; its filter's prompt closed. */
@@ -1640,8 +1679,11 @@ pk_open(struct pk *p, int remote, int vt)
 		if (pk_shown(p, pk_mem.tab))
 			p->tab = pk_mem.tab;
 	}
+	/* a session that ended: History, its record or none (#133) */
+	if (pk_mem.fhist && pk_shown(p, 2))
+		p->tab = 2;
 	/* the session left: on its tab, this one first */
-	for (j = 0; pk_mem.focus[0] && j < 3; j++)
+	for (j = 0; pk_mem.focus[0] && j < (pk_mem.fhist ? p->tab == 2 : 3); j++)
 	{
 		t = (p->tab + j) % 3;
 		if (pk_shown(p, t) && (k = pk_find(p, t, pk_mem.focus)) >= 0)
@@ -1653,6 +1695,7 @@ pk_open(struct pk *p, int remote, int vt)
 		}
 	}
 	pk_mem.focus[0] = '\0';
+	pk_mem.fhist = 0;
 	return 0;
 }
 
@@ -1683,6 +1726,14 @@ pk_run(struct pk *p, int fd, const char *header, char *out, size_t outsz)
 			wait = 100;	/* the running action's end shows soon */
 		k = pk_wait(fd, wait < 10 ? 10 : (long)wait);
 		pk_reap(p);
+		/* a revive asked to attach (#132) is up; a cut name is
+		** another session's */
+		if (p->go[0] && (size_t)snprintf(out, outsz, "%s", p->go) < outsz)
+		{
+			pk_keep(p);
+			return 0;
+		}
+		p->go[0] = '\0';
 		if (k <= 0)
 			continue;	/* the tick, or a resize */
 		if ((c = pk_key(fd)) < 0)

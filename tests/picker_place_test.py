@@ -14,11 +14,24 @@ Covers:
      memory: the config says activity by then), gamma-qa selected;
   2. a filter set there (/qa, Enter attaches its top match beta-qa) is kept
      by the next switch, its prompt closed, beta-qa selected;
-  3. dch -f -n gamma-qa, then the double tap: Sidekicks, gamma-qa selected.
+  3. dch -f -n gamma-qa, then the double tap: Sidekicks, gamma-qa selected;
+  4. History (#132): Shift+Enter (kitty CSI 13;2u) on h1 revives it and
+     attaches; the double tap then opens on Sessions, h1 selected. o (the
+     fallback) does the same for h2-qa, and the switch lands on Sidekicks,
+     h2-qa selected. xterm's modifyOtherKeys Shift+Enter (CSI 27;2;13~)
+     attaches h3. Plain Enter on h4 only resumes it, the picker stays. A
+     revive that fails (its directory gone) stays in the picker with its
+     line;
+  5. a session the picker opened that ends goes back to the picker, on
+     History, its record selected (#133): the fake Claude's Ctrl-D twice
+     ends c1, and of two records named c1 the one this end wrote is
+     selected, not an older pinned one the History tab had selected; e1,
+     revived by Shift+Enter, ends the same way; q and Esc there exit to
+     the shell; `dch -a g1` (no picker) still exits to the shell.
 
 Run:  python3 tests/picker_place_test.py      (uses ./dch)
 """
-import os, re, shutil, subprocess, sys, tempfile, time
+import json, os, re, shutil, subprocess, sys, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
@@ -85,6 +98,44 @@ def current(s):
         if m and m.group(1) != " ":
             return m.group(2)
     return None
+
+
+def select(pk, name, timeout=10.0):
+    """Move the selection to the row titled `name`."""
+    end = time.time() + timeout
+    while time.time() < end:
+        s = screen(pk)
+        r, cur = rows(s), current(s)
+        if cur == name:
+            return True
+        if cur in r and name in r:
+            d = r.index(name) - r.index(cur)
+            dch("--keys", pk, *(["down"] * d if d > 0 else ["up"] * -d))
+        time.sleep(0.3)
+    return False
+
+
+def to_tab(pk, label):
+    for _ in range(4):
+        s = screen(pk)
+        if "[%s" % label in s:
+            return s
+        dch("--keys", pk, "tab")
+        time.sleep(0.3)
+    return wait_screen(pk, lambda s: "[%s" % label in s)
+
+
+def selline(s):
+    """The selected row's whole line."""
+    for l in body(s):
+        m = ROW_RE.match(l)
+        if m and m.group(1) != " ":
+            return l
+    return ""
+
+
+def live(name):
+    return any(l == name for l in dch("-ls").stdout.split("\n"))
 
 
 def switch(name):
@@ -154,6 +205,155 @@ def main():
     s = switch("pb")
     check("its first switch opens on Sidekicks, gamma-qa selected",
           "[Sidekicks" in s and current(s) == "gamma-qa", s)
+    dch("--keys", "pb", "q")
+
+    # 4. History: Shift+Enter and o revive and attach; Enter only resumes
+    hist = ("h1", "h2-qa", "h3", "h4")
+    for n in hist:
+        dch("--spawn", n, "--size", "100x30", "sh", "-c",
+            "echo %s_SCREEN; sleep 600" % n.upper())
+    wait_screen("h4", lambda s: "H4_SCREEN" in s)
+    for n in hist:
+        dch("-k", n)
+    rec = os.path.join(ROOT, "state", "dch", "sessions",
+                       ENV["DCH_SOCKET_DIR"].replace("/", "-"))
+    now = int(time.time())
+    with os.fdopen(os.open(os.path.join(rec, "hgone.json"),
+                           os.O_WRONLY | os.O_CREAT, 0o600), "w") as f:
+        json.dump(dict(name="hgone", sock_dir=ENV["DCH_SOCKET_DIR"],
+                       alias="", cwd=os.path.join(ROOT, "gone"),
+                       argv=["sleep", "60"], started=now - 660,
+                       updated=now - 60, ended=now - 60, end="exit 3"), f,
+                  separators=(",", ":"))
+    dch("--spawn", "pc", "--size", "100x30", "env", *TAPENV, DCH, "-l")
+    wait_screen("pc", lambda s: "History " in s)
+    s = to_tab("pc", "History")
+    s = wait_screen("pc", lambda s: all(n in rows(s) for n in hist))
+    check("History lists h1 h2-qa h3 h4", all(n in rows(s) for n in hist), s)
+    check("History's hints show Shift+Enter/o open",
+          "\u21e7\u21b5/o open" in s, s)
+    check("select h1", select("pc", "h1"), screen("pc"))
+    dch("--send", "pc", "\x1b[13;2u")
+    s = wait_screen("pc", lambda s: "H1_SCREEN" in s, 20)
+    check("Shift+Enter (CSI 13;2u) revives h1 and attaches it",
+          "H1_SCREEN" in s and live("h1"), s)
+    s = switch("pc")
+    check("the double tap opens on Sessions, h1 selected",
+          "[Sessions" in s and current(s) == "h1", s)
+
+    s = to_tab("pc", "History")
+    check("select h2-qa", select("pc", "h2-qa"), screen("pc"))
+    dch("--keys", "pc", "o")
+    s = wait_screen("pc", lambda s: "H2-QA_SCREEN" in s, 20)
+    check("o revives h2-qa and attaches it", "H2-QA_SCREEN" in s, s)
+    s = switch("pc")
+    check("the double tap opens on Sidekicks, h2-qa selected",
+          "[Sidekicks" in s and current(s) == "h2-qa", s)
+
+    s = to_tab("pc", "History")
+    check("select h3", select("pc", "h3"), screen("pc"))
+    dch("--send", "pc", "\x1b[27;2;13~")
+    s = wait_screen("pc", lambda s: "H3_SCREEN" in s, 20)
+    check("modifyOtherKeys Shift+Enter (CSI 27;2;13~) attaches h3",
+          "H3_SCREEN" in s, s)
+    s = switch("pc")
+    check("... and the switch selects h3 on Sessions",
+          "[Sessions" in s and current(s) == "h3", s)
+
+    s = to_tab("pc", "History")
+    check("select h4", select("pc", "h4"), screen("pc"))
+    dch("--keys", "pc", "enter")
+    s = wait_screen("pc", lambda s: "Resumed as h4" in s, 20)
+    check("plain Enter only resumes h4: the picker stays on History",
+          "Resumed as h4" in s and "[History" in s and
+          "H4_SCREEN" not in s and live("h4"), s)
+
+    check("select hgone", select("pc", "hgone"), screen("pc"))
+    dch("--keys", "pc", "o")
+    s = wait_screen("pc", lambda s: "NOT revived" in s, 20)
+    check("a failed revive stays in the picker with its line",
+          "NOT revived" in s and "[History" in s and not live("hgone"), s)
+    dch("--keys", "pc", "q")
+
+    # 5. an end goes back to the picker, on History (#133)
+    bindir, fc = os.path.join(ROOT, "bin"), os.path.join(ROOT, "fc")
+    for d in (bindir, fc, os.path.join(ROOT, "home", ".claude", "sessions")):
+        os.makedirs(d, exist_ok=True)
+    shutil.copy(os.path.join(HERE, "fake_claude.py"),
+                os.path.join(bindir, "claude"))
+    os.chmod(os.path.join(bindir, "claude"), 0o755)
+    with open(os.path.join(fc, "version"), "w") as f:
+        f.write("1.0.0")
+    dch("--spawn", "c1", "--size", "100x30", "env",
+        "PATH=%s:%s" % (bindir, os.environ["PATH"]),
+        "FAKE_CLAUDE_DIR=" + fc, "claude")
+    s = wait_screen("c1", lambda s: "auto mode on" in s)
+    check("the fake Claude is up in c1", "auto mode on" in s, s)
+    wrap = '"$0" %s; echo SHELL_BACK; sleep 600'
+    # an older c1, pinned: the top of History, where its selection starts
+    with os.fdopen(os.open(os.path.join(rec, "c1.1000.json"),
+                           os.O_WRONLY | os.O_CREAT, 0o600), "w") as f:
+        json.dump(dict(name="c1", sock_dir=ENV["DCH_SOCKET_DIR"],
+                       alias="", cwd=ROOT, argv=["sleep", "60"],
+                       started=now - 7200, updated=now - 3600,
+                       ended=now - 3600, end="killed"), f,
+                  separators=(",", ":"))
+    open(os.path.join(rec, "c1.1000.pin"), "w").close()
+    dch("--spawn", "pe", "--size", "100x30", "env", *TAPENV, "sh", "-c",
+        wrap % "-l", DCH)
+    wait_screen("pe", lambda s: "c1" in rows(s))
+    check("select c1", select("pe", "c1"), screen("pe"))
+    dch("--keys", "pe", "enter")
+    s = wait_screen("pe", lambda s: "auto mode on" in s)
+    check("Enter attaches c1", "auto mode on" in s, s)
+    dch("--send", "pe", "\x04")
+    time.sleep(0.3)
+    dch("--send", "pe", "\x04")
+    s = wait_screen("pe", lambda s: "switch to session:" in s and rows(s),
+                    15)
+    check("Claude's Ctrl-D twice: back to the picker, on History",
+          "[History" in s and not live("c1"), s)
+    check("... the record c1's end wrote selected, not the older c1",
+          rows(s).count("c1") == 2 and current(s) == "c1" and
+          "exited" in selline(s) and "now" in selline(s), s)
+    dch("--keys", "pe", "q")
+    s = wait_screen("pe", lambda s: "SHELL_BACK" in s)
+    check("q there exits to the shell", "SHELL_BACK" in s, s)
+
+    dch("--spawn", "e1", "--size", "100x30", "sh", "-c",
+        "echo E1_SCREEN; read x")
+    wait_screen("e1", lambda s: "E1_SCREEN" in s)
+    dch("-k", "e1")
+    dch("--spawn", "pf", "--size", "100x30", "env", *TAPENV, "sh", "-c",
+        wrap % "-l", DCH)
+    wait_screen("pf", lambda s: "History " in s)
+    to_tab("pf", "History")
+    check("select e1 (killed)", select("pf", "e1"), screen("pf"))
+    dch("--send", "pf", "\x1b[13;2u")
+    s = wait_screen("pf", lambda s: "E1_SCREEN" in s, 20)
+    check("Shift+Enter revives e1 and attaches it", "E1_SCREEN" in s, s)
+    dch("--keys", "pf", "enter")	# its read returns: e1 ends
+    s = wait_screen("pf", lambda s: "switch to session:" in s and rows(s),
+                    15)
+    check("e1's end: back to the picker, on History",
+          "[History" in s and not live("e1"), s)
+    check("... its record selected",
+          current(s) == "e1" and "exited" in selline(s), s)
+    dch("--keys", "pf", "esc")
+    s = wait_screen("pf", lambda s: "SHELL_BACK" in s)
+    check("Esc there exits to the shell", "SHELL_BACK" in s, s)
+
+    dch("--spawn", "g1", "--size", "100x30", "sh", "-c",
+        "echo G1_SCREEN; read x")
+    wait_screen("g1", lambda s: "G1_SCREEN" in s)
+    dch("--spawn", "pg", "--size", "100x30", "env", *TAPENV, "sh", "-c",
+        wrap % "-a g1", DCH)
+    s = wait_screen("pg", lambda s: "G1_SCREEN" in s)
+    check("dch -a g1 attaches", "G1_SCREEN" in s, s)
+    dch("--keys", "pg", "enter")
+    s = wait_screen("pg", lambda s: "SHELL_BACK" in s, 15)
+    check("g1's end under dch -a: the shell, no picker",
+          "SHELL_BACK" in s and "switch to session:" not in s, s)
     return 1 if failures else 0
 
 
@@ -162,7 +362,8 @@ if __name__ == "__main__":
     try:
         rc = main()
     finally:
-        for n in ("pa", "pb", "alpha", "beta-qa", "gamma-qa"):
+        for n in ("pa", "pb", "pc", "pe", "pf", "pg", "alpha", "beta-qa",
+                  "gamma-qa", "h1", "h2-qa", "h3", "h4", "c1", "e1", "g1"):
             dch("-k", n)
         shutil.rmtree(ROOT, ignore_errors=True)
     print("PASS" if rc == 0 else "FAILED: %d" % len(failures))
