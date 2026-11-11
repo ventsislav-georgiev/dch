@@ -1050,8 +1050,18 @@ placeholder) shows in the composer row, and the same holds for
 and the resume message. All agents are paused first and then waited on
 together. An agent is ready when its record reads idle, it has visibly taken
 the pause message, no subagents show on its agent panel, and that holds for a
-settle window. dch then holds the session, types
+settle window. A record that has read
+.B shell
+(a background shell is running) for
+.B DCH_AGENT_SHELL_MS
+after the pause counts as idle. dch then holds the session, types
 .BR /exit ,
+answers
+.B 1
+(exit and stop tasks) if Claude Code asks about background work, and
+names what that stopped in the result line and in the resume message. An
+.B /exit
+that does not end Claude is taken back out of the composer. dch
 takes the session id from the last
 .B claude \-\-resume
 .I id
@@ -2324,6 +2334,11 @@ and
 How long an agent must stay ready before
 .B /exit
 (default 3000).
+.TP
+.B DCH_AGENT_SHELL_MS
+How long the agent's record may read
+.B shell
+after the pause before the agent counts as idle (default 60000).
 .TP
 .B DCH_AGENT_LAND_MS
 How long dch waits for typed text to show in the composer before giving up

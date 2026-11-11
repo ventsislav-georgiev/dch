@@ -1156,10 +1156,19 @@ session only. The step is opt-in: without `--include-agents`, `--restart`
 3. **Wait.** An agent is ready when its record says `idle`, it has visibly
    taken the pause message (it went busy, or its record changed after the
    message with nothing left queued), no subagents show on the agent panel,
-   and all of that holds for a settle window. A background shell or monitor
-   keeps the record off `idle`.
+   and all of that holds for a settle window. A background shell keeps the
+   record at `shell`, not `idle`. Claude Code can report `shell` for a shell
+   the agent cannot see or stop, so once the record has read `shell` for
+   `DCH_AGENT_SHELL_MS` after the pause, the agent counts as idle.
 4. **Restart.** dch arms a hold on the session, types `/exit`, and reads the
    session id from the last `claude --resume <id>` line Claude prints on exit.
+   If `/exit` brings up Claude Code's "Background work is running" prompt,
+   dch picks `1. Exit and stop tasks`. The result line then names what that
+   stopped: `(at /exit claude stopped the background work it still ran: …)`.
+   The resume message then tells the agent what was stopped, so it can
+   re-arm what it still needs.
+   If `/exit` does not end Claude, dch takes it back out of the composer, so
+   that a later Enter cannot end the session without the hold.
    It then starts the original command again, with `--resume <id>` inserted
    right after the `claude` token. Any `--resume`, `-r`, `--continue`, `-c`,
    `--session-id` and `--fork-session` from the original command are dropped,
@@ -1201,6 +1210,7 @@ and the session ends.
 | `DCH_RESUME_MSG` | `resume all work. …` | Text typed after the relaunch. |
 | `DCH_AGENT_TIMEOUT_MS` | `600000` | How long an agent may take to pause. |
 | `DCH_AGENT_SETTLE_MS` | `3000` | How long it must stay ready before `/exit`. |
+| `DCH_AGENT_SHELL_MS` | `60000` | How long the record may read `shell` after the pause before the agent counts as idle. `/exit` then stops that shell. |
 | `DCH_AGENT_LAND_MS` | `30000` | How long dch waits for typed text to show in the composer before giving up without pressing Enter. The wait ends as soon as it shows; a just-resumed Claude under load can take seconds. |
 | `DCH_AGENT_STEP_MS` | `60000` | Limit for `/exit` to end Claude and for the relaunch to show a composer. |
 | `DCH_AGENT_REENTER_MS` | `5000` | After Enter, how long a message may stay in the composer before Enter is pressed again (at most 5 more times, never on a dialog). A just-resumed Claude can drop the first Enter. |

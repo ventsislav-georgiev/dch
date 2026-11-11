@@ -224,9 +224,12 @@ def main():
         with open(os.path.join(fc, "version"), "w") as f:
             f.write("2.0.0")
 
+        # b's shell must hold for the whole run: no DCH_AGENT_SHELL_MS grace
         proc = subprocess.Popen([DCH, "--restart", "--all", "--include-agents"],
                                 stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, text=True)
+                                stderr=subprocess.STDOUT, text=True,
+                                env=dict(os.environ,
+                                         DCH_AGENT_SHELL_MS="600000"))
         # four pauses go out one by one first; seen to take ~14s on a busy host
         a2 = up(a, 2, 45.0)
         check("a relaunched while b (shell), c (subagent), d (busy) wait",
@@ -617,6 +620,95 @@ def main():
               typed(t)[-1].startswith(RESUME) and "/exit" not in typed(t))
         run("-k", t)
         names.remove(t)
+
+        # --- #143: Claude Code 2.1.322's /exit and shell status -----------
+        # A shell the agent does not see keeps its record on "shell": once
+        # that has held DCH_AGENT_SHELL_MS dch goes on, and /exit's
+        # "Background work is running" prompt gets 1 (exit and stop tasks).
+        # The composer's top rule carries the session name, as 2.1.322's.
+        def one(n, ver, **env):
+            with open(os.path.join(fc, "version")) as f:
+                one.was = f.read().strip()
+            with open(os.path.join(fc, "version"), "w") as f:
+                f.write(ver)
+            return run("--restart", n, "--include-agents", timeout=120,
+                       env=dict(os.environ, **env))
+
+        def answers(n):
+            return [e["text"] for e in events(n) if e["ev"] == "exit_answer"]
+
+        sh = sess("agsh", "claude", shell=True, name="prosper")
+        s1 = up(sh)
+        # 1 stops the shell: the relaunched claude has none
+        stopped = threading.Thread(target=lambda: until(
+            lambda: answers(sh) and setctl(sh, name="prosper") is None, 60))
+        stopped.start()
+        r = one(sh, "3.7.0", DCH_AGENT_SHELL_MS="1500")
+        stopped.join()
+        print("     | " + r.stdout.rstrip().replace("\n", "\n     | "))
+        s2 = up(sh, 2)
+        check("shell past DCH_AGENT_SHELL_MS: restarted, the exit prompt "
+              "answered 1 once, what it stopped reported",
+              r.returncode == 0 and s1 and
+              "%s: claude %s -> 3.7.0, resumed %s (at /exit claude "
+              "stopped the background work it still ran: shell \u00b7 sleep "
+              "300)" % (sh, one.was, s1["sid"]) in r.stdout and answers(sh) == ["1"]
+              and len(starts(sh)) == 2)
+        def resumed(n, pid, work):
+            """The relaunched claude got the resume message naming work."""
+            return until(lambda: any(
+                t.startswith(RESUME) and t.endswith(
+                    " At exit, Claude Code stopped background work that was "
+                    "still running: %s. Re-arm what is still needed." % work)
+                for t in typed(n, pid)))
+
+        check("shell: the relaunched claude's resume message names what "
+              "/exit stopped",
+              s2 and resumed(sh, s2["pid"], "shell \u00b7 sleep 300"))
+        run("-k", sh)
+        names.remove(sh)
+
+        # an idle record, and work only /exit's prompt shows (a monitor);
+        # the second item carries a paste end and a bell: the screen text
+        # dch pastes back never ends the paste early
+        bw = sess("agbw", "claude", bgwork=["monitor \u00b7 watch PRs",
+                                            "agent \x1b[201~\x07build"])
+        b1 = up(bw)
+        r = one(bw, "3.8.0")
+        print("     | " + r.stdout.rstrip().replace("\n", "\n     | "))
+        b2 = up(bw, 2)
+        check("idle, work only /exit lists: answered 1, restarted",
+              r.returncode == 0 and b1 and
+              "%s: claude %s -> 3.8.0, resumed %s (at /exit claude "
+              "stopped the background work it still ran: monitor \u00b7 "
+              "watch PRs; agent build)" % (bw, one.was, b1["sid"])
+              in r.stdout and answers(bw) == ["1"] and b2)
+        check("idle: the resume message names it, one paste, no control byte",
+              b2 and resumed(bw, b2["pid"],
+                             "monitor \u00b7 watch PRs; agent build") and
+              not any(ord(ch) < 0x20 for t in typed(bw, b2["pid"])
+                      for ch in t))
+        run("-k", bw)
+        names.remove(bw)
+
+        # /exit stays in the composer through every Enter: once the step
+        # gives up, it is taken back out (a later Enter would end the
+        # session with no hold)
+        ee = sess("agee", "claude", exit_eaten=True)
+        up(ee)
+        r = one(ee, "3.9.0", DCH_AGENT_STEP_MS="2000",
+                DCH_AGENT_REENTER_MS="200")
+        print("     | " + r.stdout.rstrip().replace("\n", "\n     | "))
+        scr = run("--read", ee).stdout
+        check("/exit never taken: reported, taken back out of the composer",
+              r.returncode == 1 and
+              "%s: NOT restarted — /exit did not end claude within 2s; hold "
+              "cancelled, claude left running" % ee in r.stdout and
+              "/exit taken back out of the composer" in r.stdout and
+              "\u276f /exit" not in scr and "Try" in scr and
+              len(starts(ee)) == 1)
+        run("-k", ee)
+        names.remove(ee)
 
         # --- SIGTERM while waiting: the paused agent is resumed -----------
         i = sess("agi", "claude", shell=True)

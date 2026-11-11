@@ -306,6 +306,26 @@ def main():
                   (gone(s) and rec(s)["end"] == "stopped"))
             return finish(fails[0], tmp, names, pids)
 
+        # --- #143: /exit raises Claude Code's "Background work is running"
+        # prompt (a monitor the record does not show): dch answers 1 and
+        # says what it stopped
+        if not lite:
+            bw = sess("stbw", "claude", bgwork=["monitor \u00b7 watch PRs"])
+            b1 = up(bw)
+            bsid = b1 and b1["sid"]
+            agent_sid(bw, bsid)
+            r = stop(bw)
+            print("     | " + r.stdout.rstrip())
+            check("exit prompt: answered 1 once, stopped with the id, what "
+                  "it stopped said, exit 0",
+                  r.returncode == 0 and r.stdout ==
+                  "%s: stopped (claude %s; revive with dch --revive %s) (at "
+                  "/exit claude stopped the background work it still ran: "
+                  "monitor \u00b7 watch PRs)\n" % (bw, bsid, bw) and
+                  [e["text"] for e in events(bw)
+                   if e["ev"] == "exit_answer"] == ["1"] and
+                  gone(bw) and rec(bw)["end"] == "stopped")
+
         # --- claude as the command: stop, then --revive ------------------
         c = sess("stc", "claude", "--chrome")
         s1 = up(c)
