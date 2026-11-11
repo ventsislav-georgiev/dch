@@ -26,8 +26,8 @@ Covers:
      History, its record selected (#133): the fake Claude's Ctrl-D twice
      ends c1, and of two records named c1 the one this end wrote is
      selected, not an older pinned one the History tab had selected; e1,
-     revived by Shift+Enter, ends the same way; q and Esc there exit to
-     the shell; `dch -a g1` (no picker) still exits to the shell;
+     revived by Shift+Enter with Caps Lock on (CSI 13;66u, #137), ends
+     the same way; q and Esc there exit to the shell; `dch -a g1` (no picker) still exits to the shell;
   6. the kill picker (dch -k, no name) has no open: History hints no
      Shift+Enter/o, and o and Shift+Enter on k1 revive nothing, kill
      nothing and say where open works;
@@ -335,9 +335,10 @@ def main():
     wait_screen("pf", lambda s: "History " in s)
     to_tab("pf", "History")
     check("select e1 (killed)", select("pf", "e1"), screen("pf"))
-    dch("--send", "pf", "\x1b[13;2u")
+    dch("--send", "pf", "\x1b[13;66u")	# Caps Lock on (#137)
     s = wait_screen("pf", lambda s: "E1_SCREEN" in s, 20)
-    check("Shift+Enter revives e1 and attaches it", "E1_SCREEN" in s, s)
+    check("Shift+Enter with Caps Lock (CSI 13;66u) revives e1 and "
+          "attaches it", "E1_SCREEN" in s, s)
     dch("--keys", "pf", "enter")	# its read returns: e1 ends
     s = wait_screen("pf", lambda s: "switch to session:" in s and rows(s),
                     15)

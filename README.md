@@ -210,7 +210,9 @@ too. Where the terminal cannot tell them apart, `o` does the same.
 A session the picker opened (`dch -l`, the switch, `Shift-Enter`) that ends —
 its program exits, Claude Code after `Ctrl-D` twice, a shell's `exit` — takes
 you back to the picker instead of the shell, on History with the record that
-end wrote selected (`q` / `Esc` there leave for the shell). A session attached
+end wrote selected. `q` there leaves for the shell; so does `Esc`, but a
+filter kept from finding the row takes the first `Esc` and the second leaves.
+A session attached
 with `dch <name>` or `dch -a <name>`, or a remote one, still exits to the
 shell when it ends.
 Colour is truecolor when `COLORTERM` is `truecolor` or `24bit`, else the 256

@@ -1404,9 +1404,10 @@ pk_key(int fd)
 
 /* The key a CSI (or SS3) sequence's bytes after ESC [ name, s[n - 1] its
 ** final byte; 0 for one we do not know. The kitty keyboard protocol's
-** CSI code[;mods]u (#132; the picker pushes its disambiguate flag): Esc,
-** Ctrl-letter and Shift+Tab as their legacy keys, Shift+Enter as
-** PK_SENTER, as is xterm modifyOtherKeys' CSI 27;2;13~. */
+** CSI code[;mods]u (#132; the picker pushes its disambiguate flag), lock
+** bits ignored (#137): Esc, Ctrl-letter and Shift+Tab as their legacy
+** keys, Shift+Enter as PK_SENTER, as is xterm modifyOtherKeys' CSI
+** 27;2;13~. */
 int
 pk_csi(const unsigned char *s, int n)
 {
@@ -1423,6 +1424,8 @@ pk_csi(const unsigned char *s, int n)
 			for (mods = 0, k++; k < n - 1 && isdigit(s[k]) &&
 			     mods < 1000; k++)
 				mods = mods * 10 + (s[k] - '0');
+		if (mods > 1)	/* drop Caps Lock (64) and Num Lock (128) */
+			mods = ((mods - 1) & ~(64 | 128)) + 1;
 		if (mods == 2)	/* Shift */
 			return code == 13 ? PK_SENTER : code == 9 ? PK_BTAB : 0;
 		if (mods == 5 && code >= 'a' && code <= 'z')	/* Ctrl */
