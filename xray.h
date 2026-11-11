@@ -396,6 +396,7 @@ struct xr_resolved
 	char subtitle[XR_RES_LINE * 4 + 1];
 	char line[XR_RES_LINES][XR_RES_LINE * 4 + 1];
 	int nlines;
+	long first;	/* a file's: line[0]'s 1-based number (Prosper's ruling) */
 };
 /* Resolve sp (a commit or file span of --ref's text, against the session's
 ** cwd; live 0: an ended session, which never runs git). 1 with *r filled,

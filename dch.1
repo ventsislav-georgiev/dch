@@ -816,8 +816,11 @@ line before
 .BR state ,
 .BR title ,
 .BR subtitle ,
-and at most 14
-.BR lines ).
+at most 14
+.BR lines ,
+and for a file shown
+.BR first ,
+the number of the first line).
 A commit runs git, never through a shell and never in an ended session
 .RB ( state:\(dqended\(dq ):
 on macOS the first of the Command Line Tools, xcode\-select, Xcode.app,
@@ -851,7 +854,10 @@ with only
 and
 .B LANG=en_US.UTF\-8
 in its environment, 3 s for both runs (then its process group is ended),
-64 KiB of output kept; states
+64 KiB of output kept (a repo's
+.I objects/info/alternates
+can make git read objects outside the project: nothing runs, nothing is
+written); states
 .BR ok ,
 .BR no_git ,
 .BR not_repo ,

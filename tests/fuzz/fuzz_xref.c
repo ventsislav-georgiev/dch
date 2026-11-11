@@ -378,9 +378,26 @@ resolvers(const char *s, size_t n)
 	memset(&r, 0, sizeof r);
 	if (xr_git_parse(s, n, (long long)n * 977, &r))
 		check_res(&r);
+	if (r.first)	/* a file's field only */
+		abort();
 	memset(&r, 0, sizeof r);
 	xr_file_lines(s, n, xr_ref_line(s), &r);
 	check_res(&r);
+	/* line[0]'s number: from 1, the window inside the file, the asked
+	** line in it when the file has that line */
+	{
+		long L = xr_ref_line(s), total = 0;
+		size_t i;
+
+		for (i = 0; i < n; i++)
+			total += s[i] == '\n';
+		total += n && s[n - 1] != '\n';
+		if (r.first < 1 || r.nlines != (total < XR_RES_LINES ? total
+		    : XR_RES_LINES) || r.first + r.nlines - 1 > total ||
+		    (L >= 1 && L <= total && (L < r.first ||
+		     L > r.first + r.nlines - 1)))
+			abort();
+	}
 	if (xr_ref_line(s) < 0 || xr_ref_line(s) > 9999999)
 		abort();
 	(void)xr_secret_name(s);

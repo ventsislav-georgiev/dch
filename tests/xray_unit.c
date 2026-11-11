@@ -1684,6 +1684,7 @@ t_chapter(void)
 
 /* ---- resolvers (#159, XR6) ---------------------------------------------- */
 
+static char self[PATH_MAX];	/* this binary, for the fake git's fd probe */
 static char rd[256];	/* the resolver tests' temp dir (short: no snprintf cuts) */
 
 static void
@@ -1756,21 +1757,33 @@ t_res_file(void)
 	      res("src/a.c:20", "proj", 1, &r) == 1 && is(&r, "file", "ok") &&
 	      !strcmp(r.title, "a.c") &&
 	      !strcmp(r.subtitle, "src/a.c \xc2\xb7 line 20"));
-	CHECK("file: 14 lines around the line, it the seventh",
+	CHECK("file: 14 lines around the line, it the seventh, first 14",
 	      r.nlines == 14 && !strcmp(r.line[0], "line 14") &&
-	      !strcmp(r.line[6], "line 20") && !strcmp(r.line[13], "line 27"));
-	CHECK("file: line 1 gives the first 14", res("src/a.c:1", "proj", 1, &r)
-	      == 1 && r.nlines == 14 && !strcmp(r.line[0], "line 1"));
-	CHECK("file: the last line gives the last 14",
+	      !strcmp(r.line[6], "line 20") && !strcmp(r.line[13], "line 27") &&
+	      r.first == 14);
+	CHECK("file: line 1 gives the first 14, first 1",
+	      res("src/a.c:1", "proj", 1, &r) == 1 && r.nlines == 14 &&
+	      !strcmp(r.line[0], "line 1") && r.first == 1);
+	CHECK("file: line 5 (start clamp) gives the first 14, first 1",
+	      res("src/a.c:5", "proj", 1, &r) == 1 && r.nlines == 14 &&
+	      !strcmp(r.line[4], "line 5") && r.first == 1);
+	CHECK("file: the last line gives the last 14, first 27",
 	      res("src/a.c:40", "proj", 1, &r) == 1 && r.nlines == 14 &&
-	      !strcmp(r.line[0], "line 27") && !strcmp(r.line[13], "line 40"));
-	CHECK("file: a line past the end gives the last 14",
+	      !strcmp(r.line[0], "line 27") && !strcmp(r.line[13], "line 40") &&
+	      r.first == 27);
+	CHECK("file: a line past the end gives the last 14, first 27",
 	      res("src/a.c#L999", "proj", 1, &r) == 1 &&
-	      !strcmp(r.line[13], "line 40"));
+	      !strcmp(r.line[13], "line 40") && r.first == 27);
 	snprintf(b, sizeof b, "%s/proj/src/a.c", rd);
-	CHECK("file: an absolute path without a line: the first 14",
+	CHECK("file: an absolute path without a line: the first 14, first 1",
 	      res(b, "proj", 1, &r) == 1 && is(&r, "file", "ok") &&
-	      !strcmp(r.line[0], "line 1") && !strcmp(r.subtitle, "src/a.c"));
+	      !strcmp(r.line[0], "line 1") && !strcmp(r.subtitle, "src/a.c") &&
+	      r.first == 1);
+	put("proj/s.c", "s1\ns2\ns3\ns4\ns5\n", 15);
+	CHECK("file: shorter than 14: all of it, first 1 whatever the line",
+	      res("s.c:4", "proj", 1, &r) == 1 && r.nlines == 5 &&
+	      !strcmp(r.line[3], "s4") && r.first == 1 &&
+	      res("s.c:99", "proj", 1, &r) == 1 && r.first == 1);
 	CHECK("file: :line:col reads the line",
 	      res("src/a.c:20:3", "proj", 1, &r) == 1 &&
 	      !strcmp(r.line[6], "line 20"));
@@ -1782,9 +1795,9 @@ t_res_file(void)
 	      res("../top.c:1", "proj/src", 1, &r) == 1 && is(&r, "file", "ok") &&
 	      !strcmp(r.subtitle, "top.c \xc2\xb7 line 1"));
 	put("out/y.c", "y\n", 2);
-	CHECK("file: outside the project: outside_project, path only",
+	CHECK("file: outside the project: outside_project, path only, no first",
 	      res("../out/y.c:1", "proj", 1, &r) == 1 &&
-	      is(&r, "file", "outside_project") && r.nlines == 0);
+	      is(&r, "file", "outside_project") && r.nlines == 0 && !r.first);
 	CHECK("file: no git root: the cwd is the boundary",
 	      res("../y.c:1", "out", 1, &r) == 1 &&
 	      is(&r, "file", "outside_project") &&
@@ -1893,7 +1906,8 @@ fake_git(void)
 	    "flood) /usr/bin/yes | /usr/bin/head -c 10000000; "
 	    "/usr/bin/yes e | /usr/bin/head -c 10000000 >&2; exit 0 ;;\n"
 	    "slow|slowrev) echo $$ > \"$D/pid\"; /bin/sleep 30 & /bin/sleep 30 ;;\n"
-	    "esac\n", rd);
+	    "fds) '%s' --fds > \"$D/fds\"; exit 1 ;;\n"
+	    "esac\n", rd, self);
 
 	put("git", s, (size_t)n);
 	snprintf(s, sizeof s, "%s/git", rd);
@@ -2042,6 +2056,22 @@ t_res_git(void)
 	      xr_ref_parse("abcdef1", NULL, &sp) &&
 	      xr_res_ref(&sp, "abcdef1", "", 1, &r) == 1 &&
 	      is(&r, "commit", "not_repo") && xr_res_spawned == s0);
+	mode("fds");
+	put("fds", "", 0);
+	{
+		/* an fd of ours without CLOEXEC; the probe execs, so the shell's
+		** own close-on-exec fds are gone there: what it sees came from us */
+		int x = open("/dev/null", O_RDONLY);
+
+		CHECK("git: no fd of the querying process reaches git (one without "
+		      "CLOEXEC open), only 0 1 2",
+		      x >= 3 && self[0] && res("abcdef1", "proj", 1, &r) == 1 &&
+		      !strcmp(slurp("fds"), "0 1 2\n"));
+		if (strcmp(slurp("fds"), "0 1 2\n"))
+			printf("  fds: [%s] fd %d\n", slurp("fds"), x);
+		if (x >= 0)
+			close(x);
+	}
 	mode("flood");
 	t0 = xr_now_ms();
 	CHECK("git: a 10 MB flood on both pipes is drained, git exits",
@@ -2152,8 +2182,21 @@ t_resolve(void)
 }
 
 int
-main(void)
+main(int argc, char **argv)
 {
+	/* the fake git's fd probe: the fds this process was started with */
+	if (argc == 2 && !strcmp(argv[1], "--fds"))
+	{
+		int fd, n = 0;
+
+		for (fd = 0; fd < 1024; fd++)
+			if (fcntl(fd, F_GETFD) != -1)
+				printf("%s%d", n++ ? " " : "", fd);
+		printf("\n");
+		return 0;
+	}
+	if (!realpath(argv[0], self))
+		self[0] = '\0';
 	t_seam();
 	t_title();
 	t_key();

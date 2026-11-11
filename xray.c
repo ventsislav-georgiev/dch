@@ -6419,6 +6419,37 @@ xr_git_bin(char *buf, size_t bufsz)
 	return NULL;
 }
 
+/* glibc 2.34+ closes the rest in the child; it is declared without
+** _GNU_SOURCE (__USE_MISC, the default), so no configure check. */
+#if defined(__GLIBC__) && defined(__USE_MISC) && \
+    (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 34))
+#define RES_CLOSEFROM 1
+#else
+#define RES_CLOSEFROM 0
+#endif
+
+#if !defined(POSIX_SPAWN_CLOEXEC_DEFAULT) && !RES_CLOSEFROM
+/* Neither a spawn flag nor an action closes the rest: every fd >= 3 is
+** marked close-on-exec first. The querying process is one-shot and execs
+** nothing else. -1 when /proc/self/fd cannot be listed: git is not run. */
+static int
+res_cloexec(void)
+{
+	DIR *d = opendir("/proc/self/fd");
+	struct dirent *e;
+	int fd, f;
+
+	if (!d)
+		return -1;
+	while ((e = readdir(d)))
+		if ((fd = atoi(e->d_name)) >= 3 && fd != dirfd(d) &&
+		    (f = fcntl(fd, F_GETFD)) >= 0)
+			fcntl(fd, F_SETFD, f | FD_CLOEXEC);
+	closedir(d);
+	return 0;
+}
+#endif
+
 struct res_run
 {
 	char out[RES_OUT_MAX + 1], err[RES_ERR_MAX + 1];
@@ -6493,6 +6524,10 @@ res_run(char *const argv[], char *const envp[], long long until,
 	r->on = r->en = 0;
 	r->out[0] = r->err[0] = '\0';
 	r->status = -1;
+#if !defined(POSIX_SPAWN_CLOEXEC_DEFAULT) && !RES_CLOSEFROM
+	if (res_cloexec() != 0)
+		return -1;
+#endif
 	if (pipe(po) != 0 || pipe(pe) != 0)
 	{
 		for (k = 0; k < 2; k++)
@@ -6510,8 +6545,11 @@ res_run(char *const argv[], char *const envp[], long long until,
 	posix_spawn_file_actions_adddup2(&fa, po[1], 1);
 	posix_spawn_file_actions_adddup2(&fa, pe[1], 2);
 	posix_spawnattr_init(&at);
+	/* no other fd of ours reaches git (macOS; glibc; else res_cloexec) */
 #ifdef POSIX_SPAWN_CLOEXEC_DEFAULT
-	fl |= POSIX_SPAWN_CLOEXEC_DEFAULT;	/* no other fd of ours */
+	fl |= POSIX_SPAWN_CLOEXEC_DEFAULT;
+#elif RES_CLOSEFROM
+	posix_spawn_file_actions_addclosefrom_np(&fa, 3);
 #endif
 	posix_spawnattr_setflags(&at, fl);
 	posix_spawnattr_setpgroup(&at, 0);
@@ -6867,6 +6905,7 @@ xr_file_lines(const char *s, size_t n, long line, struct xr_resolved *r)
 	if (total <= XR_RES_LINES)
 		start = 0;
 	r->nlines = 0;
+	r->first = (long)start + 1;
 	for (i = 0; i < n && r->nlines < XR_RES_LINES; ln++)
 	{
 		size_t e = i;
@@ -7012,6 +7051,9 @@ xr_scan_resolved(struct xr_scan *x, const struct xr_span *sp,
 		xr_put_str(m, r->title);
 		fputs(",\"subtitle\":", m);
 		xr_put_str(m, r->subtitle);
+		/* which row is line N, even clamped at the end; only a file shown */
+		if (!strcmp(r->kind, "file") && !strcmp(r->state, "ok"))
+			fprintf(m, ",\"first\":%ld", r->first);
 		fputs(",\"lines\":[", m);
 		for (k = 0; k < r->nlines; k++)
 		{

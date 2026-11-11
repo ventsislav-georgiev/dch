@@ -208,6 +208,14 @@ def test_shell():
               rv[0]["subtitle"] == "src/w.c · line 20" and
               len(rv[0]["lines"]) == 14 and rv[0]["lines"][6] == "int w20;",
               rv)
+        check("shell file: first is line[0]'s number (14), fields in order",
+              rv and rv[0].get("first") == 14 and
+              list(rv[0]) == ["kind", "state", "title", "subtitle", "first",
+                              "lines"], rv)
+        r, ls, rv = ref(n, "src/w.c:39")
+        check("shell file: clamped at the end, first 27, line 39 at [12]",
+              len(rv) == 1 and rv[0].get("first") == 27 and
+              rv[0]["lines"][12] == "int w39;", rv)
         r, ls, rv = ref(n, "src/w.c:20", full=False)
         check("shell file: a light stream has no resolved line", not rv,
               r.stdout[-300:])
@@ -216,7 +224,7 @@ def test_shell():
         r, ls, rv = ref(n, "../plain/x.c:1")
         check("shell file: outside the project: outside_project, no lines",
               len(rv) == 1 and rv[0]["state"] == "outside_project" and
-              rv[0]["lines"] == [], rv)
+              rv[0]["lines"] == [] and "first" not in rv[0], rv)
         os.makedirs(os.path.join(repo, ".ssh"))
         with open(os.path.join(repo, ".ssh", "id_ed25519"), "w") as f:
             f.write("PRIVATE KEY CANARY\n")
