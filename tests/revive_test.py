@@ -628,13 +628,15 @@ def main():
                             agent=dict(kind="claude", session_id=zid,
                                        name="", cwd=proj,
                                        launch=[os.path.join(bindir, "claude"),
-                                               "=x"])),
+                                               "--model", "=x"])),
                       os.path.join(recdir, "rzsh.json"))
             names.append("rzsh")
             run("--revive", "rzsh", timeout=120)
             z = until(lambda: starts("rzsh") and starts("rzsh")[0], 15)
+            # an option's value: a bare "=x" would be the one-shot prompt,
+            # which no relaunch sends again (#138)
             check("zsh shell revive: '=x' quoted, claude got it verbatim",
-                  z and z["argv"] == ["--resume", zid, "=x"])
+                  z and z["argv"] == ["--resume", zid, "--model", "=x"])
 
         # --- a bare argv[0] under launchd's PATH (#044) --------------------
         # --env PATH decides what the record resolves: dup is on both PATHs.

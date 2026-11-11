@@ -267,10 +267,10 @@ def main():
               masters(asock) == m0 and os.lstat(asock).st_ino == ino0)
         # b: -r with no value, --session-id=, positional after --
         b2 = up(b, 2)
-        check("b relaunched: -r (no value) and --session-id= dropped, "
-              "--resume before --",
+        check("b relaunched: -r (no value), --session-id= and the "
+              "one-shot `-- hi` dropped (#138)",
               (cmd(b) or {}).get("argv") ==
-              ["claude", "--resume", sb["sid"], "--", "hi"])
+              ["claude", "--resume", sb["sid"]])
         check("b: SGR-split, wrapped exit line still gives the real id",
               b2 and b2["sid"] == sb["sid"] and "exit line said" not in out
               and "no resume line" not in out)

@@ -15,6 +15,7 @@
     You should have received a copy of the GNU General Public License
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
+#include "cargv.h"
 #include "dtach.h"
 #include "vt.h"
 #include "ring.h"
@@ -501,14 +502,19 @@ rec_str(FILE *f, const char *s)
 	free(q);
 }
 
-/* v as a JSON array, v[0] written as v0 when that is given. */
+/* v as a JSON array, v[0] written as v0 when that is given. A claude argv
+** goes without its one-shot prompt: a revive must not send it again, and
+** the record is not the place to keep it (#138). */
 static void
 rec_strv(FILE *f, char **v, const char *v0)
 {
-	int k;
+	int k, n;
 
+	for (n = 0; v && v[n]; n++)
+		;
+	n = v ? dch_claude_keep(v, n) : 0;
 	fputc('[', f);
-	for (k = 0; v && v[k]; k++)
+	for (k = 0; k < n; k++)
 	{
 		if (k)
 			fputc(',', f);

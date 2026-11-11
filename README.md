@@ -1104,7 +1104,9 @@ session only. The step is opt-in: without `--include-agents`, `--restart`
    session id from the last `claude --resume <id>` line Claude prints on exit.
    It then starts the original command again, with `--resume <id>` inserted
    right after the `claude` token. Any `--resume`, `-r`, `--continue`, `-c`,
-   `--session-id` and `--fork-session` from the original command are dropped.
+   `--session-id` and `--fork-session` from the original command are dropped,
+   and so is Claude's one-shot prompt (see
+   [Bringing sessions back](#bringing-sessions-back)).
    The session keeps its name, socket and attached clients.
 5. **Resume.** Once the new Claude is idle with an empty composer, it gets the
    resume message, and dch checks that it now reports the installed version.
@@ -1187,6 +1189,21 @@ ended. A revived session's record carries the agent it resumed from the
 first write, so it keeps the resume id even if it ends within that minute.
 A reboot, a crash or a SIGKILL ends sessions without a word; the
 record outlives them.
+
+Claude's startup prompt is sent once. `dch --spawn api -- claude --name api --
+"fix the login bug"` starts Claude with that first message, and dch keeps it
+out of everything after: the record stores the command without it, and
+`--revive`, the picker's resume, `--restart`'s agent step and a revive with
+no Claude id all start `claude --name api` (with `--resume <id>`), every other
+option kept. `--history`, `--history --json` and `--ls-json` never show it;
+a record an older dch wrote with one is read without it. The prompt is
+everything after a bare `--`, else Claude's first argument that is neither an
+option nor an option's value, and everything after that, the options read
+the way Claude Code 2.1.318's `--help` lists them. Put it after `--`: an
+option dch does not know, followed by a word, keeps the whole command, prompt
+included, rather than guess which word is its value. Claude Code itself runs
+a one-word prompt that names one of its commands (`update`, `doctor`, `mcp`,
+…) as that command, `--` or not, so give such a prompt more words.
 
 A new session under a dead session's name — `dch` in the same repo after
 `dch --stop`, `dch work` again, `--revive other --as work` — would replace

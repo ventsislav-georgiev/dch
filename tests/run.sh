@@ -211,6 +211,7 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "--restart --include-agents restarts stale Claude agents" agent_restart_test.py
     pyrun "--history/--revive bring dead sessions back" revive_test.py
     pyrun "--revive never starts two claudes on one id" revive_sid_test.py
+    pyrun "claude's one-shot prompt is never sent again (#138)" oneshot_prompt_test.py
     pyrun "--pin/--unpin/--forget keep and clean history" history_pin_test.py
     pyrun "a local a:b session stays local, remote hosts off or not (#122)" colon_name_test.py
     pyrun "new sessions: statusline links, no OSC 8 into pipes (#122)" hyperlink_env_test.py
@@ -922,6 +923,21 @@ if [ -x "$DCH" ]; then
         check "--spawn waits for a slow-starting master" "$?" "0"
         "$DCH" -k "slow$$" >/dev/null 2>&1
     fi
+fi
+
+# --- claude's one-shot prompt (#138): cargv.c units ---------------------------
+csrc=$(cd "$(dirname "$0")/.." && pwd)
+ccc=$(sed -n 's/^CC = //p' Makefile 2>/dev/null)
+# shellcheck disable=SC2086 # CC may carry flags
+if ${ccc:-cc} -O1 -I"$csrc" -o "$TMP/cargv_unit" "$csrc/tests/cargv_unit.c" \
+    "$csrc/cargv.c" >"$TMP/cargv_unit.log" 2>&1; then
+    if "$TMP/cargv_unit" >"$TMP/cargv_unit.log" 2>&1; then
+        ok "claude argv units: the one-shot prompt"
+    else
+        bad "claude argv units"; grep -v '^  ok' "$TMP/cargv_unit.log" | sed 's/^/       /'
+    fi
+else
+    bad "cargv_unit builds"; sed 's/^/       /' "$TMP/cargv_unit.log"
 fi
 
 # --- X-ray shell ring (#119): ring.c units, capture through the mirror, the
