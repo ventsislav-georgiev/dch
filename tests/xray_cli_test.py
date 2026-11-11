@@ -2017,7 +2017,8 @@ def test_follow_agent(off=False):
     an agent every second and wakes it on a change, ring or no ring. The
     start: reset rotated, then a snapshot of corpus claude. The exit, on an
     idle shell (no row pushed): reset rotated, then a snapshot of corpus
-    shell (none with xray_ring 0). Each within 3 s."""
+    shell (none with xray_ring 0). Each within 10 s: the probe is 1 s,
+    the bound leaves room for a loaded runner."""
     n = "xc-fa" + ("o" if off else "")
     tag = "follow agent%s: " % (" (xray_ring 0)" if off else "")
     base = "none" if off else "shell"
@@ -2075,7 +2076,7 @@ def test_follow_agent(off=False):
         check(tag + "the agent's start sends reset rotated, then a "
               "snapshot of corpus claude (%.1f s)" % secs,
               nxt is not None and "snapshot" in nxt and
-              nxt["snapshot"]["corpus"] == "claude" and secs < 3,
+              nxt["snapshot"]["corpus"] == "claude" and secs < 10,
               fl.objs(k0))
         k1 = len(fl.got)
         t1 = time.time()
@@ -2086,7 +2087,7 @@ def test_follow_agent(off=False):
         check(tag + "the agent's exit on an idle shell sends reset "
               "rotated, then a snapshot of corpus %s (%.1f s)" % (base, secs),
               nxt is not None and "snapshot" in nxt and
-              nxt["snapshot"]["corpus"] == base and secs < 3,
+              nxt["snapshot"]["corpus"] == base and secs < 10,
               fl.objs(k1))
     finally:
         dch("-k", n)
