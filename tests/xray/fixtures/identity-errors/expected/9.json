@@ -1,1 +1,1 @@
-{"schema":1,"exit":2,"stderr":"dch: bad usage: --follow is not an --xray flag of this dch"}
+{"schema":1,"exit":2,"stderr":"dch: bad usage: --json is required (the --xray view comes later)"}

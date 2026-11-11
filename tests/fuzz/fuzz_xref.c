@@ -12,6 +12,11 @@
 **   2: ring records ({u16 len, u8 kind, u8 flags, u32 time, text}) through
 **      xr_shell_feed with xr_shell_refs into an index, then xr_print;
 **   3: xr_ref_ok and xr_ref_parse over the bytes as a C string.
+** Path 1 with byte 0's bit 2 set is --follow's instead (#136): the transcript
+** read whole, and read again in pieces at cut points the input seeds, a delta
+** batch after each; the pieces end where the whole read does, with the same
+** object printed, every delta line one schema-1 chapter or ref object, and a
+** second diff of the last moment empty.
 ** Every hit handed to a sink lies inside its line; a definition's title is
 ** valid UTF-8, its passage within XR_PASSAGE scalars' bytes; the printed object is one line within the cap. */
 #include <stdint.h>
@@ -19,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "../../xray.h"
+#include "../../bridge.h"
 
 int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n);
 
@@ -191,6 +197,138 @@ scan(const uint8_t *d, size_t n, const char *key)
 	free(buf);
 }
 
+static void
+claude_answer(struct xr_answer *a, struct xr_claude *x, struct xr_index *ix)
+{
+	memset(a, 0, sizeof *a);
+	a->session = "fuzz";
+	a->session_id = "11111111-2222-4333-8444-555555555555";
+	a->corpus = "claude";
+	a->project = a->project_label = "";
+	a->available = a->live = a->complete = 1;
+	a->lines = -1;
+	a->ch = xr_claude_chapters(x);
+	a->refs = ix;
+}
+
+static char *
+printed(struct xr_answer *a, size_t *bl)
+{
+	char *buf = NULL;
+	FILE *f = open_memstream(&buf, bl);
+
+	if (!f)
+		return NULL;
+	if (xr_print(f, a) != 0)
+		abort();
+	fclose(f);
+	return buf;
+}
+
+/* Each line of the deltas: {"schema":1,"chapter"|"ref":{...}}, valid JSON. */
+#define CH_LINE "{\"schema\":1,\"chapter\":{"
+#define REF_LINE "{\"schema\":1,\"ref\":{"
+static void
+check_deltas(char *b, size_t n)
+{
+	char *l = b, *e;
+
+	while (l < b + n)
+	{
+		struct json_parser p;
+
+		if (!(e = memchr(l, '\n', (size_t)(b + n - l))))
+			abort();
+		*e = '\0';
+		if (strncmp(l, CH_LINE, sizeof CH_LINE - 1) &&
+		    strncmp(l, REF_LINE, sizeof REF_LINE - 1))
+			abort();
+		memset(&p, 0, sizeof p);
+		if (dch_json_parse(&p, l) < 0 || p.tok[0].kind != JSON_OBJECT ||
+		    p.tok[0].end != (int)(e - l))
+			abort();
+		dch_json_free(&p);
+		l = e + 1;
+	}
+}
+
+static void
+follow(const uint8_t *d, size_t n)
+{
+	FILE *tf = tmpfile(), *m = NULL;
+	struct xr_claude *one = xr_claude_new(), *inc = xr_claude_new();
+	struct xr_index *ix1 = xr_index_new(), *ix2 = xr_index_new();
+	struct xr_sent *s = xr_sent_new();
+	struct xr_sink k1, k2;
+	struct xr_answer a;
+	uint64_t to = 0, size = n - 1;
+	uint32_t r = d[0] * 2654435761u + (uint32_t)n;
+	char *dl = NULL, *p1 = NULL, *p2 = NULL;
+	size_t dll = 0, l1 = 0, l2 = 0, nref, mark;
+	int lost, fd;
+
+	if (!tf || !one || !inc || !ix1 || !ix2 || !s ||
+	    fwrite(d + 1, 1, size, tf) != size || fflush(tf) != 0 ||
+	    !(m = open_memstream(&dl, &dll)))
+		goto out;
+	fd = fileno(tf);
+	xr_index_sink(ix1, &k1);
+	xr_claude_refs(one, &k1, 0x1234, NULL, NULL);
+	xr_index_sink(ix2, &k2);
+	xr_claude_refs(inc, &k2, 0x1234, NULL, NULL);
+	if (xr_claude_tail(one, fd, 0, size) != 0)
+		abort();
+	claude_answer(&a, inc, ix2);	/* the empty snapshot */
+	if (xr_sent_take(s, &a) != 0)
+		goto out;
+	while (to < size)
+	{
+		r = r * 1103515245u + 12345u;
+		to += 1 + (r >> 16) % 97;
+		if (to > size)
+			to = size;
+		if (xr_claude_tail(inc, fd, xr_claude_next(inc), to) != 0)
+			abort();
+		if (xr_claude_next(inc) > to)
+			abort();
+		claude_answer(&a, inc, ix2);
+		if (xr_delta(s, &a, 0, &nref, &lost) != 0 ||
+		    xr_delta_write(m, s, &a) != 0)
+			goto out;
+	}
+	if (xr_claude_next(inc) != xr_claude_next(one))
+		abort();
+	claude_answer(&a, inc, ix2);
+	if (xr_delta(s, &a, 0, &nref, &lost) != 0)
+		goto out;
+	fflush(m);
+	mark = dll;
+	if (nref || lost || xr_delta_write(m, s, &a) != 0 || fflush(m) ||
+	    dll != mark)
+		abort();	/* everything was written already */
+	fclose(m);
+	m = NULL;
+	check_deltas(dl, dll);
+	p2 = printed(&a, &l2);
+	claude_answer(&a, one, ix1);
+	p1 = printed(&a, &l1);
+	if (p1 && p2 && (l1 != l2 || memcmp(p1, p2, l1)))
+		abort();	/* pieces or whole: one answer */
+out:
+	if (m)
+		fclose(m);
+	free(dl);
+	free(p1);
+	free(p2);
+	xr_sent_free(s);
+	xr_claude_free(one);
+	xr_claude_free(inc);
+	xr_index_free(ix1);
+	xr_index_free(ix2);
+	if (tf)
+		fclose(tf);
+}
+
 int
 LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 {
@@ -226,6 +364,13 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		if (xr_ref_ok(s) && xr_ref_parse(s, "/w", &sp))
 			check_key(&sp);
 		free(s);
+		return 0;
+	}
+	if ((d[0] & 7) == 5)
+	{
+		follow(d, n);
+		if (xr_index_live)
+			abort();
 		return 0;
 	}
 	if (!(ix = xr_index_new()))

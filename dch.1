@@ -95,7 +95,7 @@ dch \- detachable terminal sessions with a headless agent API
 .br
 .B dch \-\-xray
 .I name
-.RB [ \-\-clear ]
+.RB [ \-\-clear | \-\-follow ]
 .B \-\-json
 .br
 .B dch \-\-xray
@@ -661,7 +661,7 @@ dch sets no
 .BR FORCE_HYPERLINK ;
 a caller's own value reaches the session.
 .TP
-.BI \-\-xray " name " "" \fR[\fB\-\-clear\fR]\fP " \-\-json"
+.BI \-\-xray " name " "" \fR[\fB\-\-clear\fR|\fB\-\-follow\fR]\fP " \-\-json"
 X\-ray: print one JSON object
 .RB ( schema:1 )
 about session
@@ -797,6 +797,56 @@ into the mirror, never into the pty):
 and the next attach's replay show an empty screen and no scrollback, while
 a client attached at that moment keeps the old screen until the program
 repaints.
+With
+.BR \-\-follow ,
+stream NDJSON: a
+.B snapshot
+line holding the object, then deltas as the corpus grows, at most one batch
+per 250 ms:
+.B chapter
+(new, or a known anchor replaced),
+.B ref
+(the whole object of a changed key;
+.B count:0
+removes it, and for a shell
+.B count
+can fall and
+.B underline
+turn off),
+.B evict
+.RB ( seq ,
+a shell ring's new head, first in its batch: drop the chapters below it),
+and
+.B reset
+.RB ( why :
+.B rotated
+for a new transcript, a /clear, or a shell ring paused, resumed or
+given a new session_id;
+.B shrunk
+for a cut transcript;
+.B cleared
+for a shell's clear, ED 3 or RIS, never with evict;
+.B evicted
+past 256 keys in one eviction, at most once a second;
+.B full
+for the whole-file index after a capped transcript), each followed by a
+new snapshot.
+The snapshot plus its deltas is the
+.B \-\-json
+answer of that moment; top\-level fields change only with a snapshot.
+No timer: a transcript is watched with kqueue (inotify on Linux), its
+project directory for a new file, a shell through the master's wake.
+At most 4 shell followers per master: a fifth exits 1
+.IR busy .
+An ended session or a History record writes its snapshot and exits 0;
+a live one exits 0 when the session ends, its connection drops, or the
+reader closes the pipe, idle or not.
+.B \-\-follow
+takes no
+.B \-\-ref
+or
+.B \-\-clear
+(exit 2).
 Exits 1
 .I "no such session"
 (also for an ended session or a record with

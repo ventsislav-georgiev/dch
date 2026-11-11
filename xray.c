@@ -3465,6 +3465,8 @@ struct xr_claude
 	struct rcall *calls;	/* the refs ring: XR_CALLS open calls, oldest
 				** first, apart from pend (3.6, QA A2) */
 	int ncalls;
+	uint64_t next;		/* the last read's resume offset: the start of
+				** the line it did not finish (#136) */
 };
 
 enum { B_PROMPT, B_IMAGE, B_STEP };
@@ -4514,8 +4516,8 @@ xr_claude_line(struct xr_claude *d, const char *line, size_t len,
 	dch_json_free(&p);
 }
 
-void
-xr_claude_end(struct xr_claude *d, uint64_t ino, struct xr_chapters *out)
+static void
+ch_anchors(struct xr_claude *d, uint64_t ino)
 {
 	size_t k;
 
@@ -4526,9 +4528,22 @@ xr_claude_end(struct xr_claude *d, uint64_t ino, struct xr_chapters *out)
 		snprintf(x->anchor, sizeof x->anchor, "f%llx:%llu",
 		         (unsigned long long)ino, (unsigned long long)x->offset);
 	}
+}
+
+void
+xr_claude_end(struct xr_claude *d, uint64_t ino, struct xr_chapters *out)
+{
+	ch_anchors(d, ino);
 	*out = d->ch;
 	memset(&d->ch, 0, sizeof d->ch);
 	d->turn = 0;
+}
+
+const struct xr_chapters *
+xr_claude_chapters(struct xr_claude *d)
+{
+	ch_anchors(d, d->ino);
+	return &d->ch;
 }
 
 /* One range [from, to) of fd through the line splitter (Prosper's
@@ -4560,7 +4575,10 @@ read_range(struct xr_claude *d, int fd, uint64_t from, uint64_t to, int mid,
 		if (got < 0 && errno == EINTR)
 			continue;
 		if (got <= 0)	/* shrank: what was read stands, incomplete */
+		{
+			d->next = start;
 			return got < 0 ? -1 : 1;
+		}
 		while (i < (size_t)got)
 		{
 			char *nl = memchr(buf + i, '\n', (size_t)got - i);
@@ -4606,12 +4624,17 @@ read_range(struct xr_claude *d, int fd, uint64_t from, uint64_t to, int mid,
 			/* --ref: the budget, the output cap, light's first result */
 			if (d->tick && (d->halt = d->tick(d->tctx, start - from +
 			                                     (mid ? xr_lim.head : 0))))
+			{
+				d->next = start;
 				return 0;
+			}
 		}
 		pos += (uint64_t)got;
 	}
 	/* a line still open at the range's end (the head's cut, or one the
-	** agent is writing) waits, as LineBuffer's pending does: dropped */
+	** agent is writing) waits, as LineBuffer's pending does: dropped,
+	** and the next read (--follow) starts there */
+	d->next = start;
 	return 0;
 }
 
@@ -4659,6 +4682,27 @@ uint64_t
 xr_claude_too_long(const struct xr_claude *d)
 {
 	return d->too_long;
+}
+
+int
+xr_claude_tail(struct xr_claude *d, int fd, uint64_t from, uint64_t to)
+{
+	char *buf = malloc(XR_CHUNK), *acc = malloc(XR_LINE_MAX + 1);
+	int rc = -1;
+
+	d->halt = 0;
+	d->next = from;
+	if (buf && acc)
+		rc = from < to ? read_range(d, fd, from, to, 0, buf, acc) : 0;
+	free(buf);
+	free(acc);
+	return rc;
+}
+
+uint64_t
+xr_claude_next(const struct xr_claude *d)
+{
+	return d->next;
 }
 
 /* ---- shell ring ------------------------------------------------------------ */
@@ -5231,12 +5275,11 @@ ref_cmp(const void *pa, const void *pb)
 }
 
 /* One ref (3.2): count descending, then first appearance. */
+/* count 0 with no definitions: the removal line of a follow (3.3) */
 static void
-put_ref(FILE *m, const struct xr_index *x, const struct xr_ent *e,
-        const char *project, int comma)
+put_ref_n(FILE *m, const struct xr_ent *e, uint64_t c, const char *project,
+          int comma)
 {
-	uint64_t c = ix_count(x, e);
-
 	fputs(comma ? ",{\"key\":" : "{\"key\":", m);
 	xr_put_str(m, e->key);
 	fprintf(m, ",\"shape\":\"%s\",\"text\":", xr_shape_name[e->shape]);
@@ -5254,6 +5297,13 @@ put_ref(FILE *m, const struct xr_index *x, const struct xr_ent *e,
 	put_or_null(m, e->title);
 	fprintf(m, ",\"underline\":%s}",
 	        e->ndefs || c >= 2 ? "true" : "false");
+}
+
+static void
+put_ref(FILE *m, const struct xr_index *x, const struct xr_ent *e,
+        const char *project, int comma)
+{
+	put_ref_n(m, e, x ? ix_count(x, e) : 0, project, comma);
 }
 
 /* Two passes: each chapter's size first (one at a time, so no 4 MiB body is
@@ -5344,7 +5394,8 @@ fail:
 		body = NULL;
 		goto fail;
 	}
-	fputs("{\"schema\":1,\"session\":", m);
+	fputs(a->snapshot ? "{\"schema\":1,\"snapshot\":{\"schema\":1,\"session\":"
+	      : "{\"schema\":1,\"session\":", m);
 	xr_put_str(m, a->session);
 	fputs(",\"session_id\":", m);
 	xr_put_str(m, a->session_id);
@@ -5377,8 +5428,8 @@ fail:
 		        a->chapters_evicted ? "true" : "false");
 		for (k = 0; k < keep; k++)
 			put_ref(f, a->refs, &a->refs->v[ord[k]], proj, k > 0);
-		fprintf(f, "],\"dropped_keys\":%llu}\n",
-		        (unsigned long long)dropped);
+		fprintf(f, "],\"dropped_keys\":%llu}%s\n",
+		        (unsigned long long)dropped, a->snapshot ? "}" : "");
 		if (fflush(f) != 0 || ferror(f))
 			rc = -1;
 	}
@@ -5387,4 +5438,272 @@ fail:
 	free(ord);
 	free(rat);
 	return rc;
+}
+
+/* ---- --follow's deltas (3.3; #136, XR2b) ------------------------------------ */
+
+/* What a follower last wrote, per ref key and per chapter anchor: the hash of
+** the object's bytes. A delta is the diff of the answer now against it, so
+** the deltas applied to the snapshot are the --json of the same moment. */
+struct sref
+{
+	uint64_t kh, vh;
+	char *key;
+	int shape;
+	size_t ix;		/* the entry, in the answer it was built from */
+};
+struct sch
+{
+	uint64_t kh, vh, offset;
+	char anchor[40];
+	size_t ix;
+};
+struct stab
+{
+	struct sref *r;
+	struct sch *c;
+	size_t nr, nc;
+	int own;		/* keys strdup'ed (a table kept past its answer) */
+};
+struct xr_sent
+{
+	struct stab sent, pend;
+	int have;		/* pend holds the last xr_delta's diff */
+};
+
+static void
+stab_free(struct stab *t)
+{
+	size_t k;
+
+	for (k = 0; t->own && k < t->nr; k++)
+		free(t->r[k].key);
+	free(t->r);
+	free(t->c);
+	memset(t, 0, sizeof *t);
+}
+
+struct xr_sent *
+xr_sent_new(void)
+{
+	return calloc(1, sizeof(struct xr_sent));
+}
+
+void
+xr_sent_free(struct xr_sent *s)
+{
+	if (!s)
+		return;
+	stab_free(&s->sent);
+	stab_free(&s->pend);
+	free(s);
+}
+
+static int
+sref_cmp(const void *pa, const void *pb)
+{
+	const struct sref *a = pa, *b = pb;
+
+	if (a->kh != b->kh)
+		return a->kh < b->kh ? -1 : 1;
+	return strcmp(a->key, b->key);
+}
+
+static int
+sch_cmp(const void *pa, const void *pb)
+{
+	const struct sch *a = pa, *b = pb;
+
+	if (a->kh != b->kh)
+		return a->kh < b->kh ? -1 : 1;
+	return strcmp(a->anchor, b->anchor);
+}
+
+/* The answer's refs and chapters as a table, keys borrowed from a. */
+static int
+stab_build(const struct xr_answer *a, struct stab *t)
+{
+	size_t nr = a->refs ? a->refs->n : 0, nc = a->ch ? a->ch->n : 0, k;
+	const char *proj = a->project ? a->project : "";
+	char *b = NULL;
+	size_t bl = 0;
+	FILE *m;
+
+	memset(t, 0, sizeof *t);
+	if (!(t->r = calloc(nr + 1, sizeof *t->r)) ||
+	    !(t->c = calloc(nc + 1, sizeof *t->c)) ||
+	    !(m = open_memstream(&b, &bl)))
+	{
+		stab_free(t);
+		return -1;
+	}
+	for (k = 0; k < nr && fseek(m, 0, SEEK_SET) == 0; k++)
+	{
+		const struct xr_ent *e = &a->refs->v[k];
+		struct sref *r = &t->r[k];
+
+		put_ref(m, a->refs, e, proj, 0);
+		if (fflush(m) != 0)
+			break;
+		r->kh = fnv(e->key, strlen(e->key));
+		r->vh = fnv(b, (size_t)ftell(m));
+		r->key = e->key;
+		r->shape = e->shape;
+		r->ix = k;
+	}
+	t->nr = k;
+	for (k = 0; t->nr == nr && k < nc && fseek(m, 0, SEEK_SET) == 0; k++)
+	{
+		const struct xr_chapter *x = xr_chapter_at(a->ch, k);
+		struct sch *c = &t->c[k];
+
+		put_chapter(m, x, 0, 0);	/* i is display only: not compared */
+		if (fflush(m) != 0)
+			break;
+		snprintf(c->anchor, sizeof c->anchor, "%s", x->anchor);
+		c->kh = fnv(c->anchor, strlen(c->anchor));
+		c->vh = fnv(b, (size_t)ftell(m));
+		c->offset = x->offset;
+		c->ix = k;
+	}
+	t->nc = k;
+	if (fclose(m) != 0 || t->nr != nr || t->nc != nc)
+	{
+		free(b);
+		stab_free(t);
+		return -1;
+	}
+	free(b);
+	qsort(t->r, t->nr, sizeof *t->r, sref_cmp);
+	qsort(t->c, t->nc, sizeof *t->c, sch_cmp);
+	return 0;
+}
+
+/* pend becomes sent, its keys copied (the answer goes before the next). */
+static int
+stab_keep(struct xr_sent *s)
+{
+	size_t k;
+
+	for (k = 0; k < s->pend.nr; k++)
+		if (!(s->pend.r[k].key = strdup(s->pend.r[k].key)))
+		{
+			s->pend.nr = k;	/* the copies so far are freed */
+			s->pend.own = 1;
+			stab_free(&s->pend);
+			stab_free(&s->sent);
+			return -1;
+		}
+	s->pend.own = 1;
+	stab_free(&s->sent);
+	s->sent = s->pend;
+	memset(&s->pend, 0, sizeof s->pend);
+	s->have = 0;
+	return 0;
+}
+
+int
+xr_sent_take(struct xr_sent *s, const struct xr_answer *a)
+{
+	stab_free(&s->pend);
+	if (stab_build(a, &s->pend) != 0)
+		return -1;
+	return stab_keep(s);
+}
+
+int
+xr_delta(struct xr_sent *s, const struct xr_answer *a, uint64_t head,
+         size_t *nref, int *lost)
+{
+	size_t k;
+
+	*nref = 0;
+	*lost = 0;
+	stab_free(&s->pend);
+	s->have = 0;
+	if (stab_build(a, &s->pend) != 0)
+		return -1;
+	s->have = 1;
+	for (k = 0; k < s->pend.nr; k++)
+	{
+		const struct sref *o = bsearch(&s->pend.r[k], s->sent.r,
+		                               s->sent.nr, sizeof *o, sref_cmp);
+
+		*nref += !o || o->vh != s->pend.r[k].vh;
+	}
+	for (k = 0; k < s->sent.nr; k++)
+		*nref += !bsearch(&s->sent.r[k], s->pend.r, s->pend.nr,
+		                  sizeof *s->pend.r, sref_cmp);
+	/* a chapter gone with its prompt record still in the ring: no line
+	** removes it, so the caller resets (an evicted one the client drops at
+	** the evict line) */
+	for (k = 0; k < s->sent.nc; k++)
+		if (s->sent.c[k].offset >= head &&
+		    !bsearch(&s->sent.c[k], s->pend.c, s->pend.nc,
+		             sizeof *s->pend.c, sch_cmp))
+			*lost = 1;
+	return 0;
+}
+
+int
+xr_delta_write(FILE *f, struct xr_sent *s, const struct xr_answer *a)
+{
+	size_t nr = a->refs ? a->refs->n : 0, nc = a->ch ? a->ch->n : 0, k;
+	const char *proj = a->project ? a->project : "";
+	uint64_t first = a->ch ? a->ch->total - a->ch->n : 0;
+	unsigned char *chg;
+
+	if (!s->have || s->pend.nr != nr || s->pend.nc != nc ||
+	    !(chg = calloc(nr + nc + 1, 1)))
+		return -1;
+	for (k = 0; k < nr; k++)
+	{
+		const struct sref *p = &s->pend.r[k], *o = bsearch(p, s->sent.r,
+		                                                    s->sent.nr,
+		                                                    sizeof *o,
+		                                                    sref_cmp);
+
+		chg[p->ix] = !o || o->vh != p->vh;
+	}
+	for (k = 0; k < nc; k++)
+	{
+		const struct sch *p = &s->pend.c[k], *o = bsearch(p, s->sent.c,
+		                                                   s->sent.nc,
+		                                                   sizeof *o,
+		                                                   sch_cmp);
+
+		chg[nr + p->ix] = !o || o->vh != p->vh;
+	}
+	for (k = 0; k < nc; k++)	/* oldest first, as a snapshot's */
+		if (chg[nr + k])
+		{
+			fputs("{\"schema\":1,\"chapter\":", f);
+			put_chapter(f, xr_chapter_at(a->ch, k), first + k + 1, 0);
+			fputs("}\n", f);
+		}
+	for (k = 0; k < nr; k++)
+		if (chg[k])
+		{
+			fputs("{\"schema\":1,\"ref\":", f);
+			put_ref(f, a->refs, &a->refs->v[k], proj, 0);
+			fputs("}\n", f);
+		}
+	for (k = 0; k < s->sent.nr; k++)
+		if (!bsearch(&s->sent.r[k], s->pend.r, s->pend.nr,
+		             sizeof *s->pend.r, sref_cmp))
+		{
+			struct xr_ent e;
+
+			/* gone: count 0 removes the key (3.3) */
+			memset(&e, 0, sizeof e);
+			e.key = s->sent.r[k].key;
+			e.shape = s->sent.r[k].shape;
+			fputs("{\"schema\":1,\"ref\":", f);
+			put_ref_n(f, &e, 0, proj, 0);
+			fputs("}\n", f);
+		}
+	free(chg);
+	if (stab_keep(s) != 0)
+		return -1;
+	return ferror(f) ? -1 : 0;
 }
