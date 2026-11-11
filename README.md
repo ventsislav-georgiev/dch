@@ -260,7 +260,8 @@ Each [release](https://github.com/ventsislav-georgiev/dch/releases) carries
 `dch-lite-<version>-<os>-<arch>.tar.gz`, each with a `.sha256` beside it, for
 `darwin-arm64` and `darwin-x86_64` (macOS 14 or later) and `linux-aarch64`
 and `linux-x86_64` (glibc 2.28 or later: RHEL 8, Debian 10, Ubuntu 18.10 and
-newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README.
+newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
+full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
 v=1.48.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
@@ -277,7 +278,8 @@ dch --version
 
 Make sure `~/.local/bin` is in your `$PATH`. A file fetched with curl
 carries no quarantine flag, so macOS runs it as is. One downloaded in a
-browser does: clear it with `xattr -d com.apple.quarantine dch`.
+browser does: clear it on the installed binary with
+`xattr -d com.apple.quarantine ~/.local/bin/dch`.
 
 ## Build from source
 

@@ -6,7 +6,9 @@ name: Release assets
 #   dch[-lite]-VER-OS-ARCH.tar.gz + .sha256        macOS and Linux, arm64 and x86_64
 #   dch[-lite]-VER.TAG.bottle.tar.gz + .sha256     the Homebrew bottles
 # scripts/build-release.sh builds, smoke-tests and packages each Unix pair.
-# Re-runnable: uploads use --clobber.
+# Re-runnable: uploads use --clobber, and the Unix archives are
+# reproducible, so a re-run on the same runner image re-uploads the bytes
+# (and shas) the tap already has.
 # workflow_dispatch: with a tag, rebuild, re-attach to that release and
 # re-render the tap; without one, build the dispatched ref and keep run
 # artifacts only.
@@ -96,6 +98,11 @@ jobs:
         with:
           ref: ${{ env.TAG && format('refs/tags/{0}', env.TAG) || github.ref }}
 
+      # Archive mtimes: the commit time, so a re-run gives the same bytes
+      # (the container has no git). build-release.sh also checks TAG.
+      - name: Source date
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+
       - name: Build, smoke-test and package (macOS, minos 14.0)
         if: runner.os == 'macOS'
         run: scripts/build-release.sh ${{ matrix.variant }}
@@ -103,7 +110,7 @@ jobs:
       - name: Build, smoke-test and package (Linux, glibc 2.28)
         if: runner.os == 'Linux'
         run: |
-          docker run --rm -v "$PWD:/src" -w /src "$IMAGE" sh -c \
+          docker run --rm -e TAG -e SOURCE_DATE_EPOCH -v "$PWD:/src" -w /src "$IMAGE" sh -c \
             'dnf -y -q install gcc make && scripts/build-release.sh "$0"' \
             ${{ matrix.variant }}
           # The same binary on the runner's newer glibc.
@@ -127,10 +134,11 @@ jobs:
 
   # After the bottles are attached: the formula's bottle shas are taken from
   # the release. Runs when a target failed too: brew builds that one from
-  # source, as before bottles.
+  # source, as before bottles. always(): a cancelled re-run that already
+  # re-uploaded some bottles still re-renders the tap from what is attached.
   homebrew:
     needs: unix
-    if: ${{ !cancelled() && (github.event.release.tag_name || inputs.tag) != '' }}
+    if: ${{ always() && (github.event.release.tag_name || inputs.tag) != '' }}
     uses: ./.github/workflows/homebrew.yml
     with:
       tag: ${{ github.event.release.tag_name || inputs.tag }}

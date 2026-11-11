@@ -101,6 +101,14 @@ jobs:
             sha256 "${SHA}"
             license "GPL-2.0-or-later"${BOTTLE_DCH}
 
+            # Bottle tags do not encode glibc: build from source below 2.28.
+            pour_bottle? do
+              on_linux do
+                reason "The bottle needs glibc 2.28 or later."
+                satisfy { OS::Linux::Glibc.system_version >= Version.new("2.28") }
+              end
+            end
+
             conflicts_with "dch-lite", because: "both install a dch binary"
 
             def install
@@ -129,6 +137,14 @@ jobs:
             url "https://github.com/${REPO}/archive/refs/tags/${TAG}.tar.gz"
             sha256 "${SHA}"
             license "GPL-2.0-or-later"${BOTTLE_LITE}
+
+            # Bottle tags do not encode glibc: build from source below 2.17.
+            pour_bottle? do
+              on_linux do
+                reason "The bottle needs glibc 2.17 or later."
+                satisfy { OS::Linux::Glibc.system_version >= Version.new("2.17") }
+              end
+            end
 
             conflicts_with "dch", because: "both install a dch binary"
 
