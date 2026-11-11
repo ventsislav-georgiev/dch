@@ -299,7 +299,11 @@ def test_live():
         before = files(T)
         xray(n, "--json")
         dch("--xray", n, "--ref", "#41", "--scope", "session", "--json")
-        new = sorted(set(files(T)) - set(before))
+        # the master's agent bridge (bridge.c) publishes this Codex's peer
+        # record in ~/.claude/sessions on its own clock: not an --xray write
+        peers = os.path.join(HOME, ".claude", "sessions") + os.sep
+        new = sorted(p for p in set(files(T)) - set(before)
+                     if not p.startswith(peers))
         check("nothing written by --json or --ref", not new, new)
     finally:
         dch("-k", n)
