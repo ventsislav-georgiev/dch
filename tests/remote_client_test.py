@@ -566,10 +566,12 @@ class Proxy:
     """#158: a loopback relay to a dch serve, frame by frame. "nocancel"
     takes "ctl-cancel" out of the hello's ops; "cut" closes the first
     connection at its first 0x30 (a lost link); "hold" swallows the first
-    connection's 0x30s and 0x34s (a request that never ends)."""
+    connection's 0x30s and 0x34s (a request that never ends); "lines" sends
+    `lines` as a connection's first 0x31 and drops the rest (a host's own
+    stdout bytes)."""
 
-    def __init__(self, up, mode):
-        self.up, self.mode, self.n = up, mode, 0
+    def __init__(self, up, mode, lines=b""):
+        self.up, self.mode, self.n, self.lines = up, mode, 0, lines
         self.sock = socket.socket()
         self.sock.bind(("127.0.0.1", 0))
         self.sock.listen(16)
@@ -592,7 +594,7 @@ class Proxy:
                                  daemon=True).start()
 
     def pipe(self, a, b, up, first):
-        buf = b""
+        buf, sent = b"", False
         try:
             while True:
                 d = a.recv(65536)
@@ -616,6 +618,10 @@ class Proxy:
                         h = json.loads(body)
                         h["ops"] = [o for o in h["ops"] if o != "ctl-cancel"]
                         body = json.dumps(h).encode()
+                    if not up and t == 0x31 and self.mode == "lines":
+                        if sent:
+                            continue
+                        sent, body = True, self.lines
                     b.sendall(frame(t, body))
         except OSError:
             return
@@ -917,6 +923,35 @@ def requests_checks(dch, check, senv, cenv, serve_at, fakes, tmp, slog):
     check("requests: stdin EOF with one in flight: it ends cancel, exit 0",
           rc == 0 and rest == b'{"req":3,"exit":2,"why":"cancel"}\n'
           and err == b"", (rc, rest, err))
+    rq.end()
+
+    # a host stdout line passes byte for byte only when it is one JSON
+    # object any reader takes, also once wrapped a level deeper; else it is
+    # a JSON string (raw bytes compared: Python's json stops short of 1024)
+    def deep(d):
+        return b'{"a":' * (d - 1) + b"{}" + b"}" * (d - 1)
+    keep = [b'{"a":1}', b'{"a":"\\ud800","b":1e999}', deep(1023)]
+    wrap = [b'{"a":"\xff"}', b'{"a":"\x01"}', b'{"a":1}x', b'{"a":1} {"b":2}',
+            b'{"a":01}', b'{"a":1.}', b'{"a":.5}', b'{"a":+1}', b'{"a":-}',
+            b'{"a":NaN}', b'{"a":tRUE}', b'{"a":1,}', b"{a:1}", b"{'a':1}",
+            b'{"a":1}\x7f', b'{"a":"\x7f"}', b'{"a":"\xc2\x9b"}',
+            b'{"a":"\xe2\x80\xae"}', b'{"a":1}\r', deep(1024)]
+    px = Proxy(port, "lines", b"".join(x + b"\n" for x in keep + wrap))
+    fakes.append(px)
+    rq = Requests(side("q=127.0.0.1:%d" % px.port), "q:xq1")
+    rq.line()
+    rq.send({"req": 1, "argv": ["--json"]})
+    got = [rq.line() for _ in keep + wrap + [0]]
+    check("requests: a host object line passes byte for byte, escapes, "
+          "numbers and depth 1023 as they are",
+          got[:len(keep)] == [b'{"req":1,"line":%s}' % x for x in keep],
+          got[:len(keep)])
+    for x, g in zip(wrap, got[len(keep):]):
+        check("requests: host line %r comes back as a JSON string" % x[:24],
+              g is not None and g.startswith(b'{"req":1,"line":"')
+              and isinstance(json.loads(g)["line"], str), g)
+    check("requests: then the host's end line",
+          got[-1] == b'{"req":1,"exit":0,"why":null}', got[-1])
     rq.end()
 
     # the host's idle close, and its cap: re-dialled, wrapped

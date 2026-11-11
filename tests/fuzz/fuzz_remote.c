@@ -388,7 +388,8 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		}
 		free(av);
 		/* t as a host's stdout, then stderr, then a hello: each line
-		** out is one JSON object of req's, whatever the host sent */
+		** out is one JSON object of req's, whatever the host sent, and
+		** parses at its depth (a host object 1024 deep, wrapped) */
 		for (k = 0; k < 2; k++)
 		{
 			sb_add(&b, t, n - 1);
@@ -406,6 +407,7 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 			if (!nl)
 				abort();	/* every line ends */
 			*nl = '\0';
+			inert(o.p + i);	/* no raw control a host sent */
 			if (dch_json_parse(&jp, o.p + i) != 0 || jp.ntok < 1 ||
 			    jp.tok[0].kind != JSON_OBJECT ||
 			    (jint(&jp, 0, "req", &v) != 1 &&

@@ -3283,15 +3283,40 @@ rq_exit(struct sb *o, long long req, int code, const char *why)
 	sb_s(o, "}\n");
 }
 
+/* s (k bytes) may go out byte for byte as a "line": one JSON object by
+** json.c's RFC 8259 grammar (valid UTF-8, nothing after it, no NUL), with
+** no raw code point dch's own quoting escapes (C0, DEL, C1, bidi), so it is
+** as safe to print as a line dch wrote. Pure. */
+static int
+rq_obj(const char *s, size_t k)
+{
+	struct json_parser jp;
+	const unsigned char *u = (const unsigned char *)s;
+	unsigned cp;
+	size_t i;
+	int n, ok;
+
+	if (strlen(s) != k)
+		return 0;
+	for (i = 0; i < k; i += (size_t)n)
+		if (!(n = utf8_at(u + i, &cp)) || cp_ctl(cp) ||
+		    cp == 0x200e || cp == 0x200f)
+			return 0;
+	ok = dch_json_parse(&jp, s) == 0 && jp.ntok > 0 &&
+	     jp.tok[0].kind == JSON_OBJECT;
+	dch_json_free(&jp);
+	return ok;
+}
+
 /* The complete lines of buf (all of it when last) onto o, each one line of
-** req: stderr's escaped; stdout's byte for byte when it is one JSON object,
-** as dch writes them, else as a JSON string, so a host never writes a line
-** of its own here. What is left stays in buf. Pure. */
+** req: stderr's escaped; stdout's byte for byte when rq_obj passes it and
+** the wrapped line still parses, else as a JSON string, so a host never
+** writes a line of its own here. What is left stays in buf. Pure. */
 static void
 rq_wrap(struct sb *o, long long req, int err, struct sb *buf, int last)
 {
 	struct json_parser jp;
-	size_t off = 0, k;
+	size_t off = 0, k, at;
 	char *s, *nl;
 	int obj;
 
@@ -3309,19 +3334,31 @@ rq_wrap(struct sb *o, long long req, int err, struct sb *buf, int last)
 			continue;
 		}
 		obj = 0;
-		if (strlen(s) == k)
+		at = o->n;
+		if (rq_obj(s, k))
 		{
-			obj = dch_json_parse(&jp, s) == 0 && jp.ntok > 0 &&
-			      jp.tok[0].kind == JSON_OBJECT;
-			dch_json_free(&jp);
-		}
-		rq_head(o, req);
-		sb_s(o, ",\"line\":");
-		if (obj)
+			rq_head(o, req);
+			sb_s(o, ",\"line\":");
 			sb_add(o, s, k);
-		else
+			sb_s(o, "}");
+			/* wrapped, the object sits a level deeper: past json.c's
+			** depth limit the line dch wrote would not parse */
+			if (!o->bad)
+			{
+				obj = dch_json_parse(&jp, o->p + at) == 0;
+				dch_json_free(&jp);
+				if (!obj)
+					o->p[o->n = at] = '\0';
+			}
+		}
+		if (!obj)
+		{
+			rq_head(o, req);
+			sb_s(o, ",\"line\":");
 			sb_q(o, s);
-		sb_s(o, "}\n");
+			sb_s(o, "}");
+		}
+		sb_s(o, "\n");
 		off += k + 1;
 	}
 	if (!off)
