@@ -68,12 +68,16 @@ utf8_at(const unsigned char *s, unsigned *cp)
 }
 
 /* A code point a terminal acts on: C0, DEL, C1, and the bidi embeddings,
-** overrides and isolates (U+202A-U+202E, U+2066-U+2069). */
+** overrides and isolates (U+202A-U+202E, U+2066-U+2069); also the bidi
+** marks (U+200E, U+200F, U+061C) and the line and paragraph separators
+** (U+2028, U+2029), which reorder text or cut it into lines (#167). */
 int
 cp_ctl(unsigned cp)
 {
 	return cp < 0x20 || (cp >= 0x7f && cp < 0xa0) ||
-	       (cp >= 0x202a && cp <= 0x202e) || (cp >= 0x2066 && cp <= 0x2069);
+	       (cp >= 0x202a && cp <= 0x202e) || (cp >= 0x2066 && cp <= 0x2069) ||
+	       cp == 0x200e || cp == 0x200f || cp == 0x061c || cp == 0x2028 ||
+	       cp == 0x2029;
 }
 
 /* s into out[cap] with every control escaped, \xNN for a byte (also one

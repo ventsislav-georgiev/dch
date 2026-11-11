@@ -136,7 +136,8 @@ per host on top of the local rows, so a full local History never hides them
 never is), then by the name shown (alias, else agent name, else name; a
 remote row's starts with `host:`, and it sorts among the local ones),
 case-insensitive, digit runs by value (`a2` before `a10`). On a remote row, `Enter`, `m` and `Shift-Enter`/`o`
-run `dch --revive host:name` there (`o` then attaches to `host:<as>`), a host
+resume the record on its host (`o` then attaches to `host:<as>`; see
+[Remote hosts](#remote-hosts) for the command), a host
 whose `dch serve` lacks `--allow-create` answering in one status line, and
 `p` and `d` say they are for this host's records. Every list has column headers and fixed, aligned columns,
 sized to the rows on screen. A session row shows NAME (alias, else harness
@@ -2198,7 +2199,8 @@ logs a loud warning and is removed from the environment at startup, so
 nothing `dch serve` starts inherits it; never set it on a real host.
 
 **Log.** Session names and device ids come from the phone. Every log line
-escapes control characters (C0, DEL, C1, bidi overrides and isolates) as
+escapes control characters (C0, DEL, C1, bidi overrides, isolates and
+marks, U+2028 and U+2029) as
 `\xNN` or `\u{NNNN}`, and a session name containing one is refused.
 
 **Limits.** At most 64 connections, 16 per peer, and 4 live-list streams per
@@ -2284,7 +2286,13 @@ each host's ended sessions, fetched as its own `dch --history --json` over
   each record as the host sent it, its C1, DEL and bidi controls written as
   `\u` escapes, plus `"host"` (its label) and `"stale"` last; a record that
   already holds a `"host"` or `"stale"` key, or has no `"name"`, is dropped,
-  so a host cannot pass for another. At most 500 records and 2 MiB per host.
+  so a host cannot pass for another. So is one a strict JSON reader would
+  reject (a lone surrogate `\u` escape, a number past a double's range,
+  nesting over 64 deep, a key counting as a level), and one that gives a
+  key dch reads
+  (`file`, `alias`, `end`, `cwd`, `argv`, `agent` and its `session_id` and
+  `name`, `ended`, `updated`, `pinned`) twice, so text, the picker and JSON
+  show the same records. At most 500 records and 2 MiB per host.
   Without `--remote` nothing is dialled and the output is unchanged.
 - *An old or odd host.* One whose hello lacks `ctl` (before dch serve 1.41,
   or an older Prosper) gets one stderr line, `dch: <host>: does not support remote
@@ -2294,7 +2302,7 @@ each host's ended sessions, fetched as its own `dch --history --json` over
   host that is down (its cached records, stale, if any). None of these
   change the exit status (0) or the local listing, and a hanging host costs
   at most the box.
-- *The picker.* History lists them after the local rows (above). `Enter`
+- *The picker.* History sorts them among the local rows (above). `Enter`
   runs `dch --revive <file>.json --host <host>` there, which needs `dch
   serve --allow-create` on the host; without it the status line says `dch:
   <host>: does not support --revive (needs dch serve --allow-create)`.

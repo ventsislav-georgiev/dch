@@ -67,6 +67,7 @@
 #include <arpa/inet.h>
 #endif
 #include <ctype.h>
+#include <float.h>
 #ifndef _WIN32
 #include <netdb.h>
 #include <netinet/in.h>
@@ -654,9 +655,82 @@ obj_safe(const struct json_parser *jp, int o)
 	return b.p;
 }
 
+/* Object token o as a strict JSON reader takes it (#167): no lone
+** surrogate escape, no number past a double's range, nothing nested over
+** 64 tokens deep (a key counts). Python, serde_json and the like reject a
+** whole --history --json --remote over one such record. Pure. */
+static int
+hist_strict(const struct json_parser *jp, int o)
+{
+	char x[5] = "";
+	unsigned long u;
+	int t, q, d, i, n;
+
+	for (t = o + 1; t < jp->tok[o].next; t++)
+	{
+		const char *s = jp->text + jp->tok[t].start;
+
+		n = jp->tok[t].end - jp->tok[t].start;
+		if (jp->tok[t].kind == JSON_OBJECT || jp->tok[t].kind == JSON_ARRAY)
+		{
+			for (q = t, d = 0; q != o && d <= 64; d++)
+				q = jp->tok[q].parent;
+			if (d > 64)
+				return 0;
+		}
+		else if (jp->tok[t].kind == JSON_PRIMITIVE)
+		{
+			double v = strtod(s, NULL);	/* true, false, null: 0 */
+
+			if (v > DBL_MAX || v < -DBL_MAX)
+				return 0;
+		}
+		else	/* the parser checked each \u has 4 hex digits */
+			for (i = 0; i < n; i++)
+				if (s[i] == '\\' && s[++i] == 'u')
+				{
+					memcpy(x, s + i + 1, 4);
+					u = strtoul(x, NULL, 16);
+					if (u >= 0xdc00 && u < 0xe000)
+						return 0;
+					if (u >= 0xd800 && u < 0xdc00)
+					{
+						if (i + 10 >= n || s[i + 5] != '\\' ||
+						    s[i + 6] != 'u')
+							return 0;
+						memcpy(x, s + i + 7, 4);
+						u = strtoul(x, NULL, 16);
+						if (u < 0xdc00 || u >= 0xe000)
+							return 0;
+						i += 6;
+					}
+					i += 4;
+				}
+	}
+	return 1;
+}
+
+/* A key hist_from reads, given twice in record o: text and the picker
+** would show it empty, a JSON reader the last value (#167). Pure. */
+static int
+hist_dup(const struct json_parser *jp, int o)
+{
+	static const char *const k[] = {"file", "alias", "end", "cwd", "argv",
+	                                "agent", "ended", "updated", "pinned",
+	                                "session_id", "name"};
+	int a = jcont(jp, o, "agent", JSON_OBJECT), i;
+
+	for (i = 0; i < 11; i++)
+		if ((i < 9 || a >= 0) &&
+		    dch_json_field(jp, i < 9 ? o : a, k[i]) == -2)
+			return 1;
+	return 0;
+}
+
 /* The records of array token arr, host's --history --json answered at at:
 ** each an object with a "name", at most RM_HRECS. One without a name, or
-** with a "host" or "stale" key of its own (dch adds those), is skipped;
+** with a "host" or "stale" key of its own (dch adds those), or one
+** hist_strict rejects or with a key hist_dup finds twice, is skipped;
 ** every other field kept only when it fits, the record whole in json.
 ** Pure. */
 static void
@@ -676,7 +750,8 @@ hist_from(const struct json_parser *jp, int arr, const char *host,
 
 		if (jp->tok[i].kind != JSON_OBJECT ||
 		    dch_json_field(jp, i, "host") != -1 ||
-		    dch_json_field(jp, i, "stale") != -1 || !(r = hl_new(l)) ||
+		    dch_json_field(jp, i, "stale") != -1 ||
+		    !hist_strict(jp, i) || hist_dup(jp, i) || !(r = hl_new(l)) ||
 		    jstr(jp, i, "name", r->name, sizeof r->name) != 1 ||
 		    !r->name[0])
 			continue;

@@ -21,7 +21,11 @@ cached records [stale]; a refusing one says so and shows none; the picker
 fetches a host's history once at its open, then only while its History tab
 shows (#163); the picker's History tab lists srv:gone, Enter there says the host's create-gate refusal
 in one line, and with --allow-create resumes it there; p on it says what
-works.
+works. #167: a record a strict JSON reader rejects (lone surrogate, 1e999,
+1000 deep) or with a key given twice is dropped from text, JSON and the
+picker; bidi marks and U+2028/9 escaped; with a local twin tw:gone the
+cursor stays on host tw's row and p pins nothing; remote rows sort among
+the local ones.
 
 Run:  python3 tests/remote_history_test.py      (uses ./dch)
 """
@@ -35,8 +39,9 @@ from remote_client_test import FAKE_TS, OWNER, REFUSAL, WHOIS, frame  # noqa
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
 # the 300 ms box plus a process start; ASan (DCH_TEST_NO_BUDGET) is slower
 BUDGET = 10.0 if os.environ.get("DCH_TEST_NO_BUDGET") else 1.5
-# what a terminal acts on: C0 (but \n), DEL, C1, the bidi controls
-CTL = re.compile("[\x00-\x09\x0b-\x1f\x7f-\x9f‪-‮⁦-⁩]")
+# what a terminal acts on: C0 (but \n), DEL, C1, the bidi controls and
+# marks, the line and paragraph separators (#167)
+CTL = re.compile("[\u200e\u200f\u061c\u2028\u2029\x00-\x09\x0b-\x1f\x7f-\x9f‪-‮⁦-⁩]")
 LS_KEYS = ["name", "alias", "harness", "activity_epoch", "state", "version",
            "agents", "meta", "meta_epoch", "auto_allowed",
            "claude_session_id", "transcript_path"]
@@ -313,6 +318,51 @@ def main():
               and not re.search("[\x7f-\x9f‪-‮⁦-⁩]",
                                 r.stdout)
               and "spoof" not in r.stdout, r.stdout)
+        # records a strict JSON reader rejects, keys given twice, bidi
+        # marks and separators (#167): the first two kinds dropped from
+        # every surface, the last escaped
+        mark = "m\u200f\u061c x"
+        sf = fake((
+            '[{"name":"sur","x":"\\ud800"},'
+            '{"name":"sur2","x":"\\udc00\\ud800"},'
+            '{"name":"pair","x":"\\ud83d\\ude00"},'
+            '{"name":"inf","n":1e999},{"name":"ninf","n":-1E400},'
+            '{"name":"deep","d":%s},'
+            '{"name":"d1","file":"d1","file":"evil-file"},'
+            '{"name":"d2","alias":"A1","alias":"A2"},'
+            '{"name":"d3","end":"exit 0","end":"exit 9"},'
+            '{"name":"d4","cwd":"/a","cwd":"/b"},'
+            '{"name":"d5","agent":{"name":"n1","name":"n2"}},'
+            '{"name":"%s","alias":"a\u2028b\u2029c","cwd":"/\u200e"}]'
+            % ("[" * 1000 + "]" * 1000, mark)).encode())
+        SH = ["--hosts", "s=127.0.0.1:%d" % sf.port]
+        r = dch(cenv, "--history", "--remote", *SH)
+        sl = [x for x in r.stdout.splitlines() if x.startswith("s:")]
+        check("text: a strict reader's rejects and the duplicate keys "
+              "dropped, the bidi marks and separators escaped",
+              r.returncode == 0 and len(sl) == 2
+              and sl[0].startswith("s:pair  ") and
+              sl[1].startswith("s:m\\u{200f}\\u{061c} x (a\\u{2028}b"
+                               "\\u{2029}c)  ") and "/\\u{200e}" in sl[1]
+              and not CTL.search(r.stdout), r.stdout)
+        r = dch(cenv, "--history", "--json", "--remote", *SH)
+
+        def nodup(kv):
+            if len({k for k, _ in kv}) != len(kv):
+                raise ValueError("duplicate key")
+            return dict(kv)
+        try:
+            doc = json.loads(r.stdout, object_pairs_hook=nodup,
+                             parse_constant=float)
+            got = [x for x in doc if x.get("host") == "s"]
+            json.dumps(doc, allow_nan=False).encode("utf-8")
+        except (ValueError, RecursionError, UnicodeError) as e:
+            got = [str(e)]
+        check("JSON: strict, the same two records, the marks as \\u "
+              "escapes", [x.get("name") if isinstance(x, dict) else x
+                          for x in got] == ["pair", mark]
+              and got[1]["alias"] == "a\u2028b\u2029c"
+              and not CTL.search(r.stdout), r.stdout[-600:])
         for label, f in (
                 ("a reply that is no array", fake(b'{"name":"x"}')),
                 ("a reply over 2 MiB", fake(json.dumps(
@@ -355,6 +405,7 @@ def main():
             picker_checks(dch, check, cenv, senv, H, serve_at, tmp, rev,
                           until)
             refetch_checks(dch, check, cenv, fake, until)
+            twin_checks(dch, check, cenv, fake, until)
     finally:
         for c in ("srv", "cli"):
             e = senv if c == "srv" else cenv
@@ -470,6 +521,72 @@ def refetch_checks(dch, check, cenv, fake, until):
           until(lambda: len(hf.bodies) >= 2, 6), hf.bodies)
     check("... and the next within the interval",
           until(lambda: len(hf.bodies) >= 3, 15), hf.bodies)
+    dch(cenv, "-k", pk)
+
+
+def twin_checks(dch, check, cenv, fake, until):
+    """#167: a local record tw:gone and host tw's gone are two rows; the
+    cursor stays on the remote one across the picker's reloads, and p there
+    pins nothing. A remote row sorts among the local ones by host:name; a
+    record with a key given twice is no row."""
+    def screen():
+        return dch(cenv, "--read", pk).stdout
+
+    def lines(s):
+        return [x for x in s.split("\n")[3:] if ROW_RE.match(x)]
+
+    def cur(s):
+        return next((x for x in lines(s) if ROW_RE.match(x).group(1) != " "),
+                    "")
+
+    def remote_row(x):
+        return re.match("^. . tw:gone +exited \\(3\\)", x)
+
+    dch(cenv, "--spawn", "tw:gone", "--", "/bin/sh", "-c", "exit 5")
+    dch(cenv, "--spawn", "zz", "--", "/bin/sh", "-c", "exit 0")
+    until(lambda: "tw:gone  " in dch(cenv, "--history").stdout
+          and "zz  " in dch(cenv, "--history").stdout)
+    hf = fake(b'[{"name":"gone","end":"exit 3","ended":1700000000},'
+              b'{"name":"aaa","end":"exit 0","ended":1700000000},'
+              b'{"name":"tdup","file":"a","file":"b"}]')
+    pk = "pk4"
+    dch(cenv, "--spawn", pk, "--size", "140x30", "--", "env", "-u",
+        "DCH_SESSION", "NO_COLOR=1", "TERM=xterm-256color", DCH,
+        "--hosts", "tw=127.0.0.1:%d" % hf.port, "-l")
+    until(lambda: "History" in screen())
+    for _ in range(4):
+        if "[History" in screen():
+            break
+        dch(cenv, "--keys", pk, "tab")
+        time.sleep(0.3)
+    s = until(lambda: any(map(remote_row, lines(screen()))) and screen(), 15)
+    rows = [ROW_RE.match(x).group(2) for x in lines(s or "")]
+    check("History: the local tw:gone and host tw's gone, tw:aaa among the "
+          "local rows (before zz), no row for a record with a key twice",
+          rows.count("tw:gone") == 2 and "tw:aaa" in rows and "zz" in rows
+          and rows.index("tw:aaa") < rows.index("zz")
+          and not any(x.startswith("tw:tdup") for x in rows), s)
+    for _ in range(10):
+        s = screen()
+        ls = lines(s)
+        c = next((k for k, x in enumerate(ls) if x == cur(s)), -1)
+        t = next((k for k, x in enumerate(ls) if remote_row(x)), -1)
+        if c < 0 or t < 0 or c == t:
+            break
+        dch(cenv, "--keys", pk, *(["down"] * (t - c) if t > c
+                                  else ["up"] * (c - t)))
+        time.sleep(0.3)
+    check("the cursor on host tw's gone", remote_row(cur(screen())), screen())
+    time.sleep(3.5)	# reloads about once a second
+    s = screen()
+    check("... and still there 3.5 s later", remote_row(cur(s)), s)
+    dch(cenv, "--keys", pk, "p")
+    s = until(lambda: "another host" in screen() and screen(), 5)
+    h = [x for x in json.loads(dch(cenv, "--history", "--json").stdout)
+         if x.get("name") == "tw:gone"]
+    check("p there says it is on another host and pins no local record",
+          "tw:gone: on another host" in (s or "") and len(h) == 1
+          and "pinned" not in h[0], (s, h))
     dch(cenv, "-k", pk)
 
 

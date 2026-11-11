@@ -20,7 +20,8 @@ int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n);
 
 /* Valid UTF-8 (logsafe writes any other byte as \xNN) holding nothing a
 ** terminal acts on: C0, DEL, C1 (U+0080-009F), the bidi embeddings,
-** overrides and isolates (U+202A-202E, U+2066-2069). The ranges are
+** overrides and isolates (U+202A-202E, U+2066-2069), the bidi marks
+** (U+200E, U+200F, U+061C) and U+2028/U+2029 (#167). The ranges are
 ** spelled out here, not cp_ctl's, so a regression there shows. */
 static void
 inert(const char *s)
@@ -32,7 +33,8 @@ inert(const char *s)
 	for (; *u; u += k)
 		if (!(k = utf8_at(u, &cp)) || cp < 0x20 ||
 		    (cp >= 0x7f && cp < 0xa0) || (cp >= 0x202a && cp <= 0x202e) ||
-		    (cp >= 0x2066 && cp <= 0x2069))
+		    (cp >= 0x2066 && cp <= 0x2069) || cp == 0x200e ||
+		    cp == 0x200f || cp == 0x061c || cp == 0x2028 || cp == 0x2029)
 			abort();
 }
 
@@ -69,8 +71,9 @@ label_ok(const char *l, size_t cap, const char *extra)
 }
 
 /* A remote history record (#115): every field inert once escaped, json an
-** object that parses back with no "host" or "stale" key of its own and
-** nothing raw a terminal acts on; a cached one's host a plain label that
+** object that parses back with no "host" or "stale" key of its own, still
+** strict and with no key read twice (#167), and nothing raw a terminal
+** acts on; a cached one's host a plain label that
 ** answered in (0, now + 60]. */
 static void
 hrec_ok(const struct dch_rrec *r, int cached)
@@ -94,7 +97,8 @@ hrec_ok(const struct dch_rrec *r, int cached)
 	ok = dch_json_parse(&jp, r->json) == 0 && jp.ntok > 0 &&
 	     jp.tok[0].kind == JSON_OBJECT &&
 	     dch_json_field(&jp, 0, "host") == -1 &&
-	     dch_json_field(&jp, 0, "stale") == -1;
+	     dch_json_field(&jp, 0, "stale") == -1 &&
+	     hist_strict(&jp, 0) && !hist_dup(&jp, 0);	/* #167 */
 	dch_json_free(&jp);
 	if (!ok || (cached && (!plain(r->host, strlen(r->host), "-._") ||
 	                       r->at <= 0 || r->at > NOW + 60)) ||
@@ -311,9 +315,10 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		size_t c = n > 1 ? (size_t)d[1] % 64 + 1 : 1, off;
 		int sv[2];
 
-		(void)hist_doc(t, "h", NOW, &l);
+		/* the document after d[1], as the seeds have it (#167) */
+		(void)hist_doc(n > 1 ? t + 1 : t, "h", NOW, &l);
 		k = l.n;
-		(void)hist_cdoc(t, NOW, &l);
+		(void)hist_cdoc(n > 1 ? t + 1 : t, NOW, &l);
 		if (k > RM_HRECS)
 			abort();
 		for (i = 0; i < l.n; i++)

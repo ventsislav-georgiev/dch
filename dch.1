@@ -2588,7 +2588,23 @@ or
 .I stale
 key of its own, or no
 .IR name ,
-is dropped; at most 500 records and 2 MiB per host. A host that does not
+is dropped, as is one a strict JSON reader would reject (a lone surrogate
+escape, a number past a double's range, nesting over 64 deep, a key
+counting as a level) and one that gives a key dch reads twice
+.RI ( file ,
+.IR alias ,
+.IR end ,
+.IR cwd ,
+.IR argv ,
+.I agent
+and its
+.I session_id
+and
+.IR name ,
+.IR ended ,
+.IR updated ,
+.IR pinned );
+at most 500 records and 2 MiB per host. A host that does not
 answer in time shows its last records, stale
 .RB ( [stale] ),
 for 2 minutes (a cache in
