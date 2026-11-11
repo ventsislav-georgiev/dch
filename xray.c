@@ -541,13 +541,17 @@ line_sfx(const char *s, size_t n, size_t e, int col)
 }
 
 /* Lexically absolute (2.5): "." and ".." and "//" folded, a relative path
-** joined to cwd when that is absolute; "~/" kept. 0 when it does not fit. */
+** joined to cwd when that is absolute; "~/" kept, ".." at "~" dropped (Q4).
+** 0 when it does not fit, or for "~user": no path (Q4). */
 static size_t
 path_norm(const char *p, size_t pl, const char *cwd, char *out, size_t outsz)
 {
 	char src[XR_PATH_MAX + XR_KEY_MAX + 4];
 	size_t sl, k, cs, o = 0, nst = 0, st[XR_PATH_MAX / 2 + XR_KEY_MAX / 2 + 4];
 	int root = p[0] == '/' ? 1 : p[0] == '~' ? 2 : 0;
+
+	if (root == 2 && pl > 1 && p[1] != '/')
+		return 0;
 
 	if (!root && cwd && cwd[0] == '/' && strlen(cwd) <= XR_PATH_MAX)
 	{
@@ -1861,6 +1865,17 @@ cov_span(void *ctx, const struct xr_span *sp)
 	return 0;
 }
 
+/* A file key still relative: seen before any line carried a cwd (LOW-7),
+** so no --ref can name it. Dropped, not held: a cwd seen later may not be
+** the one it was written in. */
+static int
+rel_file(const struct xr_span *sp)
+{
+	const char *t = xr_span_text(sp);
+
+	return sp->shape == XR_FILE && t[0] != '/' && t[0] != '~';
+}
+
 static int
 rm_span(void *ctx, const struct xr_span *sp)
 {
@@ -1868,6 +1883,8 @@ rm_span(void *ctx, const struct xr_span *sp)
 
 	if (!r->left)
 		return 1;
+	if (rel_file(sp))
+		return 0;
 	if (r->left > 0)
 		r->left--;
 	cov_add(r, sp);
@@ -1965,29 +1982,44 @@ is_assign(const char *s)
 	return *p == '=';
 }
 
-/* The first command word: past `cd … &&`, env assignments and sudo. */
-static size_t
-cmd_head(const struct sw *w)
-{
-	size_t k = 0;
+/* Words that only run the command after them, and the letters of their
+** options that take a value (`sudo -u root cat`, `xargs -n 1 rg`). */
+static const struct { const char *w, *argopt; } wraps[] = {
+	{ "sudo", "ugCDhprTt" }, { "env", "uSCP" }, { "command", "" },
+	{ "xargs", "IJLnPsEdaR" }, { "nice", "n" }, { "time", "" }, { 0, 0 }
+};
 
-	while (k < w->n && !w->op[k])
+/* The first command word of the simple command w[k..e): past env
+** assignments and the wraps with their options. e when there is none. */
+static size_t
+cmd_head(const struct sw *w, size_t k, size_t e)
+{
+	const char *o;
+	size_t j;
+
+	while (k < e)
 	{
-		if (!strcmp(SWD(w, k), "cd"))
+		if (is_assign(SWD(w, k)))
 		{
-			while (k < w->n && !(w->op[k] && (!strcmp(SWD(w, k), "&&") ||
-			                                 !strcmp(SWD(w, k), ";"))))
-				k++;
-			if (k >= w->n)
-				return w->n;
 			k++;
+			continue;
 		}
-		else if (is_assign(SWD(w, k)) || !strcmp(SWD(w, k), "sudo"))
-			k++;
-		else
+		for (j = 0; wraps[j].w && strcmp(SWD(w, k), wraps[j].w); j++)
+			;
+		if (!wraps[j].w)
 			return k;
+		for (k++; k < e && (o = SWD(w, k))[0] == '-'; k++)
+		{
+			if (!strcmp(o, "--"))
+			{
+				k++;
+				break;
+			}
+			if (o[1] && !o[2] && strchr(wraps[j].argopt, o[1]))
+				k++;
+		}
 	}
-	return w->n;
+	return e;
 }
 
 static const char *
@@ -2031,34 +2063,92 @@ outside(const char *p, const char *cwd)
 	return !(al >= bl && !memcmp(a, b, bl) && (a[bl] == '\0' || a[bl] == '/'));
 }
 
+/* A printed file argument from outside cwd (exclusion #1): one whose value
+** only the shell knows ($, `), or a path that leaves cwd once made absolute
+** against cur, the directory after any cd (lost: a cd went somewhere
+** unknown). With no cwd at all, only a leading .. leaves it. */
+static int
+arg_outside(const char *a, const char *cur, int lost, const char *cwd)
+{
+	char n[XR_KEY_MAX + 1];
+
+	if (strpbrk(a, "$`"))
+		return 1;
+	if (a[0] == '/' || a[0] == '~')
+		return outside(a, cwd);
+	if (lost || !path_norm(a, strlen(a), cur, n, sizeof n))
+		return 1;
+	if (n[0] == '/')
+		return outside(n, cwd);
+	return !strcmp(n, "..") || !strncmp(n, "../", 3);
+}
+
 enum { X_NONE, X_QUOTE = 1, X_DIFF = 3, X_LIST = 4 };
 
-/* Exclusions #1, #3 and #4 on the paired command (v2.1 4.3). */
+/* excluded() on cmd run in cur (lost: unknown), depth sh -c levels in. */
 static int
-excluded(const char *cmd, size_t cl, const char *cwd)
+excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
+        int lost, int depth)
 {
 	static const char *const list[] = { "rg", "grep", "egrep", "fgrep", "ag",
 	                                    "ack", "fd", "find", "ls", 0 };
 	static const char *const print[] = { "cat", "head", "tail", "bat",
 	                                     "less", "awk", "nl", "more", 0 };
+	static const char *const shells[] = { "sh", "bash", "zsh", "dash", "ksh",
+	                                      0 };
 	struct sw w;
-	size_t h, k, sub;
-	int r = X_NONE, sedn = 0;
-	const char *c0;
+	char cdb[XR_KEY_MAX + 1];
+	size_t s, e, h, k, sub;
+	int r = X_NONE, sedn, skip;
+	const char *c0, *a;
 
 	shell_words(cmd, cl, &w);
-	if (!w.b)
-		return X_LIST;	/* no memory: no definition */
-	h = cmd_head(&w);
-	if (h < w.n)
+	if (!w.b || w.n == SW_MAX)
 	{
+		free(w.b);
+		return X_LIST;	/* no memory, or words past SW_MAX unseen */
+	}
+	/* every simple command: split on ; & && | || ( ) */
+	for (s = 0; s < w.n && !r; s = e + 1)
+	{
+		for (e = s; e < w.n && !(w.op[e] && !strchr("<>", SWD(&w, e)[0]));
+		     e++)
+			;
+		if ((h = cmd_head(&w, s, e)) >= e)
+			continue;
 		c0 = base(SWD(&w, h));
+		if (!strcmp(c0, "cd"))
+		{
+			/* later relative arguments resolve where cd went */
+			for (k = h + 1; k < e && SWD(&w, k)[0] == '-' && SWD(&w, k)[1];
+			     k++)
+				;
+			a = k < e && !w.op[k] ? SWD(&w, k) : "";
+			lost = !a[0] || a[0] == '~' || a[0] == '-' || strpbrk(a, "$`") ||
+			       !path_norm(a, strlen(a), lost ? NULL : cur, cdb,
+			                  sizeof cdb) || cdb[0] != '/';
+			cur = lost ? NULL : cdb;
+			continue;
+		}
+		if (in_list(c0, shells))
+		{
+			/* sh -c 'cmd' (or -lc, -ec): its command, classified alike */
+			for (k = h + 1; k + 1 < e && !w.op[k]; k++)
+				if (SWD(&w, k)[0] == '-' && SWD(&w, k)[1] != '-' &&
+				    strchr(SWD(&w, k), 'c'))
+				{
+					r = depth >= 3 || w.op[k + 1] ? X_LIST :
+					    excl_in(SWD(&w, k + 1), strlen(SWD(&w, k + 1)), cwd,
+					            cur, lost, depth + 1);
+					break;
+				}
+			continue;
+		}
 		/* git's subcommand: past its global options */
-		for (sub = h + 1; sub < w.n && !w.op[sub] && SWD(&w, sub)[0] == '-';
-		     sub++)
+		for (sub = h + 1; sub < e && SWD(&w, sub)[0] == '-'; sub++)
 			if (!strcmp(SWD(&w, sub), "-C") || !strcmp(SWD(&w, sub), "-c"))
 				sub++;
-		if (sub >= w.n || w.op[sub])
+		if (sub >= e || w.op[sub])
 			sub = 0;
 		if (in_list(c0, list) ||
 		    (!strcmp(c0, "git") && sub && !strcmp(SWD(&w, sub), "grep")))
@@ -2070,24 +2160,44 @@ excluded(const char *cmd, size_t cl, const char *cwd)
 			r = X_DIFF;
 		else if (!strcmp(c0, "git") && sub && !strcmp(SWD(&w, sub), "log"))
 		{
-			for (k = sub + 1; k < w.n && !w.op[k]; k++)
+			for (k = sub + 1; k < e; k++)
 				if (!strcmp(SWD(&w, k), "-p") || !strcmp(SWD(&w, k), "-u") ||
 				    !strcmp(SWD(&w, k), "--patch"))
 					r = X_DIFF;
 		}
 		else
 		{
-			for (k = h + 1; k < w.n && !w.op[k]; k++)
+			for (sedn = 0, k = h + 1; k < e; k++)
 				sedn |= !strncmp(SWD(&w, k), "-n", 2);
-			if (in_list(c0, print) || (!strcmp(c0, "sed") && sedn))
-				for (k = h + 1; k < w.n && !w.op[k]; k++)
-					if ((SWD(&w, k)[0] == '/' || SWD(&w, k)[0] == '~') &&
-					    outside(SWD(&w, k), cwd))
-						r = X_QUOTE;
+			if (!in_list(c0, print) && !(!strcmp(c0, "sed") && sedn))
+				continue;
+			/* the file arguments: not options, not sed's or awk's
+			** script, not a > target; a < source is one */
+			skip = !strcmp(c0, "sed") || !strcmp(c0, "awk");
+			for (k = h + 1; k < e; k++)
+			{
+				a = SWD(&w, k);
+				if (w.op[k])
+					k += a[0] == '>';
+				else if (a[0] == '-' && a[1])
+					;
+				else if (skip)
+					skip = 0;
+				else if (arg_outside(a, cur, lost, cwd))
+					r = X_QUOTE;
+			}
 		}
 	}
 	free(w.b);
 	return r;
+}
+
+/* Exclusions #1, #3 and #4 on the paired command (v2.1 4.3), over every
+** simple command of it. */
+static int
+excluded(const char *cmd, size_t cl, const char *cwd)
+{
+	return excl_in(cmd, cl, cwd, cwd, 0, 0);
 }
 
 /* One definition found in a block. */
@@ -2303,6 +2413,8 @@ d1(const char *s, const struct olines *o, size_t k, const char *cwd,
 	else
 		return 0;
 	title_of(s + t, le - t, d->title);
+	if (!d->title[0])
+		return 0;	/* `## #831` alone: an empty title never defines */
 	/* the passage: up to 6 following non-blank lines */
 	for (j = k + 1; j < o->n && got < 6 && pl < sizeof pb - 8; j++)
 	{
@@ -3983,7 +4095,7 @@ refs_call(struct xr_claude *d, const struct json_parser *p, int i)
 		sp.rule = 'F';
 		sp.e = l;
 		if ((nl = path_norm(s, l, r.cwd, norm, sizeof norm)) &&
-		    span_key(&sp, XR_FILE, norm, nl, 0))
+		    span_key(&sp, XR_FILE, norm, nl, 0) && !rel_file(&sp))
 			rm_hit(&r, &sp, NULL, NULL, NULL);
 		if (id)
 			(void)rc_push(d, id, RC_OTHER);

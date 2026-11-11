@@ -957,7 +957,9 @@ the master's control socket. Nothing is typed into the session. It prints
 A ref is an issue (`#831`, `dch#120`), a pull request (`o/r#7`), a ticket
 (`PROJ-12`, not `UTF-8` or `SHA-256`), a commit (7 to 40 lowercase hex with a
 letter and a digit), a file path (`src/main.c:12`, keyed absolute against the
-session's cwd) or a URL (a GitHub issue or pull URL keys as `owner/repo#n`,
+session's cwd; `~/` is kept as written with `..` at `~` dropped, `~user/` is no
+path, and a relative path seen before any cwd is none) or a URL (a GitHub
+issue or pull URL keys as `owner/repo#n`,
 a commit URL as the commit). A bare `repo#n` needs a repo of at least 3
 characters that starts with a letter, ends with a letter or digit and is not a
 glue word or standard (`issue#12`, `step#3`, `PKCS#12`, `PR#831`, `a#12` are
@@ -981,7 +983,15 @@ or id and a title (the whole tool result, up to 256 KiB, not the 3000-scalar
 clip), or a `--title` on the command with its ref on the command
 or in the output. An orphan result, a forged or orphaned shell block, an error,
 a fence, a diff, a listing command (`rg`, `grep`, `ls`, ...), a file printed
-from outside the cwd, and more than 3 headings of one shape never define.
+from outside the cwd, a heading with an empty title, and more than 3 headings
+of one shape never define. The command counts in every simple command of its
+line (split at `;`, `&`, `&&`, `|`, `||`, parentheses), past env assignments
+and `sudo`, `env`, `command`, `xargs`, `nice` and `time`, and inside `sh -c
+'…'` (`sh`, `bash`, `zsh`, `dash`, `ksh`; `-lc` too). A printed file is
+outside the cwd when its path, made absolute against the cwd or the directory
+an earlier `cd` went to, leaves the cwd (`/etc/x`, `../x`, a `~/` path read
+against `HOME`), when it holds `$` or a backquote, or after a `cd` to a place
+it cannot follow (`cd`, `cd $X`, `cd ~/x`).
 
 `dch --xray <n> --ref <ref> --scope session --json` streams one ref's
 lines as NDJSON, each with `schema:1`: `first` (the key, `mode` and

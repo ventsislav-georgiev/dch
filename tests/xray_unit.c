@@ -884,6 +884,14 @@ t_ref(void)
 	CHECK("ref: a file ref keys on the cwd, the line dropped",
 	      xr_ref_parse("src/main.c:12", "/w", &sp) &&
 	      !strcmp(sp.key, "file:/w/src/main.c"));
+	CHECK("ref: a relative file ref still parses with no cwd (dch's shape "
+	      "check; #148 drops such keys only in the corpus)",
+	      xr_ref_parse("src/main.c:12", NULL, &sp) &&
+	      !strcmp(sp.key, "file:src/main.c"));
+	CHECK("ref: ~user is no path, .. at ~ dropped (Q4, #148 LOW-6)",
+	      !xr_ref_parse("~bob/x.c:3", "/w", &sp) &&
+	      xr_ref_parse("~/../x.c:3", "/w", &sp) &&
+	      !strcmp(sp.key, "file:~/x.c"));
 	CHECK("ref: two refs, or text around one, are no ref",
 	      !xr_ref_parse("#831 #832", NULL, &sp) &&
 	      !xr_ref_parse("see #831", NULL, &sp) &&
