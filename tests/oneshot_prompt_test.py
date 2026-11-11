@@ -213,6 +213,81 @@ def main():
         run("-k", "p2")
 
         # --- a record an older dch wrote, with the prompt -----------------
+        # #141: a `claude` that is not the program run (here a directory
+        # passed to sh -c) is no Claude argv: nothing of it is a prompt
+        cdir = os.path.join(tmp, "src", "claude")
+        os.makedirs(cdir)
+        nc = ["sh", "-c", 'echo "ARGS: $*"; sleep 600', "sh", cdir,
+              "extra-arg"]
+        subprocess.run([DCH, "--spawn", "nc", "--size", "100x30", "--"] + nc,
+                       check=True, capture_output=True)
+        until(lambda: raw("nc"), 10)
+        rec = raw("nc")
+        check("a non-Claude session's live record keeps extra-arg [%s]"
+              % rec.strip(),
+              rec and json.loads(rec)["argv"][1:] == nc[1:])
+        run("-k", "nc")
+        until(lambda: '"end":"killed"' in raw("nc"), 10)
+        gone("nc")
+        h = run("--history", "--json")
+        try:
+            hj = [o for o in json.loads(h.stdout) if o["name"] == "nc"]
+        except ValueError:
+            hj = []
+        check("...and --history --json keeps it [%r]" % hj,
+              len(hj) == 1 and hj[0]["argv"][1:] == nc[1:])
+        r = run("--revive", "nc", "--no-message")
+        want = "ARGS: %s extra-arg" % cdir
+        if lite:
+            # no screen to read: the revived record shows the argv it ran
+            ok = until(lambda: '"end":""' in raw("nc") and
+                       json.loads(raw("nc"))["argv"][1:] == nc[1:], 10)
+        else:
+            ok = until(lambda: want in run("--read", "nc").stdout, 10)
+        check("...and --revive runs it whole (%s) [%r %r]"
+              % (want, r.returncode, r.stderr),
+              r.returncode == 0 and ok)
+        run("-k", "nc")
+
+        # #141: claude behind a wrapper (headroom wrap claude ...) is cut
+        # once dch has seen Claude run in the session
+        wrap = os.path.join(bindir, "wrap")
+        with open(wrap, "w") as f:
+            f.write('#!/bin/sh\n"$@"\n')
+        os.chmod(wrap, 0o755)
+        P3 = "fix it"
+        subprocess.run([DCH, "--spawn", "wr", "--size", "100x30", "--",
+                        "wrap", "claude", P3, "--model", "opus"], check=True,
+                       capture_output=True)
+        w1 = up("wr")
+        check("the wrapped claude gets the prompt",
+              w1 and w1["argv"] == [P3, "--model", "opus"])
+        until(lambda: w1 and '"session_id":"%s"' % w1["sid"] in raw("wr"),
+              15)
+        rec = raw("wr")
+        check("the wrapped session's live record, agent seen: no prompt [%s]"
+              % rec.strip(),
+              P3 not in rec and rec and
+              json.loads(rec)["argv"] == [wrap, "claude", "--model", "opus"])
+        run("-k", "wr")
+        until(lambda: '"end":"killed"' in raw("wr"), 10)
+        gone("wr")
+        h = run("--history", "--json")
+        try:
+            hj = [o for o in json.loads(h.stdout) if o["name"] == "wr"]
+        except ValueError:
+            hj = []
+        check("...nor in --history --json [%r]" % hj,
+              len(hj) == 1 and P3 not in h.stdout and
+              hj[0]["argv"] == [wrap, "claude", "--model", "opus"])
+        r = run("--revive", "wr", "--no-message")
+        w2 = up("wr", 2)
+        check("...and --revive runs wrap claude --resume <id> --model opus "
+              "[%r %r %r]" % (r.returncode, r.stderr, w2 and w2["argv"]),
+              r.returncode == 0 and w1 and w2 and
+              w2["argv"] == ["--resume", w1["sid"], "--model", "opus"])
+        run("-k", "wr")
+
         plant("old", [claude, "--name", "y", "--model", "opus", "--", OLD],
               sid=X)
         h = run("--history", "--json")

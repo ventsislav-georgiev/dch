@@ -31,13 +31,21 @@ State lives in $FAKE_CLAUDE_DIR:
                     screen (rows painted in place of the composer and
                     footer: a dialog; every key typed then is logged as
                     key, and a digit dismisses it until the knob changes,
-                    unless sticky), above (rows painted above the composer)
+                    unless sticky), above (rows painted above the composer),
+                    name (the session name Claude Code 2.1.322 paints into
+                    the composer's top rule), bgwork (background work an
+                    idle record does not show, a monitor say: /exit then
+                    raises Claude Code's "Background work is running"
+                    prompt, as it does under shell; "1" or Enter exits, "3"
+                    or Esc stays), exit_eaten (every Enter on a typed
+                    /exit is ignored: it stays in the composer)
   <session>.log     JSON lines: start (argv, cwd, sid, the CLAUDE*,
                     DCH_REVIVE* and Claude Code tool env keys, CLAUDE_CONFIG_DIR's value as
                     cfg), line (typed), turn (a message taken),
                     enter_dialog (Enter while a prompt is up: it would have
                     answered it), enter_eaten, enter_folded, key (typed while a screen
                     knob is up), paste (a paste's start, before lag_ms),
+                    exit_prompt (the work it lists), exit_answer (the key),
                     exit
 <session> is DCH_SESSION, which the master sets for its child.
 """
@@ -137,6 +145,7 @@ in_paste = False
 ctrl_d = 0.0         # the first Ctrl-D of an exit's two
 turn_end = 0.0
 dismissed = None     # the screen knob a digit answered
+exit_up = []         # /exit's "Background work is running" prompt, its work
 
 
 def screen_up(c):
@@ -193,7 +202,15 @@ def paint(c):
     for q in queue:
         rows += ["❯ " + q, "  ctrl+enter to send now"]
     rule = "─" * 60
-    if prompt_up and c.get("dialog_on_paste") == "known":
+    if exit_up:
+        # Claude Code 2.1.322's, under a ▔ rule (dch reads it as a prompt)
+        rows += ["▔" * 60, "   Background work is running",
+                 "   The following will stop when you exit:"]
+        rows += ["   " + w for w in exit_up]
+        rows += ["   ❯ 1. Exit and stop tasks",
+                 "     2. Move to background and exit", "     3. Stay",
+                 "   Enter to confirm · Esc to cancel"]
+    elif prompt_up and c.get("dialog_on_paste") == "known":
         # a permission prompt dch knows (screen_modal: CG_DIALOG)
         rows += [rule, " Bash command", "", " Do you want to proceed?",
                  " ❯ 1. Yes", "   2. No", "", " Esc to cancel"]
@@ -223,7 +240,10 @@ def paint(c):
             comp = "❯ \033[2mPress up to edit queued messages\033[0m"
         else:
             comp = "❯ \033[0m\033[2mTry \"fix the tests\"\033[0m"
-        rows += [rule, comp, rule]
+        top = rule
+        if c.get("name"):
+            top = "─" * 50 + " %s ─" % c["name"]
+        rows += [top, comp, rule]
     rows.append("  ⏵⏵ auto mode on" +
                 (" · 1 shell" if status == "shell" else ""))
     if c.get("subagents"):
@@ -244,10 +264,18 @@ def take(text):
     turn_end = time.time() + ctl().get("turn_ms", 500) / 1000.0
 
 
-def submit(text, c):
+def submit(text, c, confirmed=False):
+    global exit_up
     log(ev="line", text=text)
     if text.strip() == "/exit":
         if c.get("noexit"):
+            return
+        work = (["shell · sleep 300"] if status == "shell" else []) + \
+            c.get("bgwork", [])
+        if work and not confirmed:
+            exit_up = work
+            log(ev="exit_prompt", text="; ".join(work))
+            set_status("waiting")
             return
         time.sleep(c.get("exit_ms", 0) / 1000.0)
         termios.tcsetattr(0, termios.TCSADRAIN, saved)
@@ -321,6 +349,17 @@ while True:
             ch, buf = buf[:1], buf[1:]
             if in_paste and ch in (b"\r", b"\n"):
                 draft += "\n"      # a paste keeps its line breaks
+            elif exit_up and ch in (b"1", b"\r"):
+                log(ev="exit_answer", text=ch.decode())
+                exit_up = []
+                submit("/exit", c, True)
+            elif exit_up and ch in (b"3", b"\x1b"):
+                log(ev="exit_answer", text=ch.decode())
+                exit_up = []
+                transcript.append("❯ /exit")
+                set_status("shell" if c.get("shell") else "idle")
+            elif exit_up:
+                pass               # the prompt takes no other key
             elif screen_up(c):
                 log(ev="key", text=ch.decode("latin-1"))
                 if ch.isdigit() and not c.get("sticky"):
@@ -329,13 +368,16 @@ while True:
                 log(ev="enter_dialog", text=draft)
             elif ch == b"\r" and burst and c.get("fold"):
                 log(ev="enter_folded", text=draft)
+            elif ch == b"\r" and draft == "/exit" and c.get("exit_eaten"):
+                log(ev="enter_eaten", text=draft)
             elif ch == b"\r" and draft and eaten < c.get("eat_enters", 0):
                 eaten += 1
                 log(ev="enter_eaten", text=draft)
             elif ch == b"\r":
                 collapsed = False
+                # the draft is bytes as latin-1: submit what was typed, UTF-8
                 text, draft = draft, ""
-                submit(text, c)
+                submit(text.encode("latin-1").decode("utf-8", "replace"), c)
             elif ch == b"\x04" and not draft:
                 if time.time() - ctrl_d < 2:
                     submit("/exit", c)
@@ -365,12 +407,12 @@ while True:
             set_status("shell" if c.get("shell") else "idle")
     elif status in ("idle", "shell") and queue and now >= idle_gap:
         take(queue.pop(0))
-    elif status in ("idle", "shell") and not queue:
+    elif status in ("idle", "shell") and not queue and not exit_up:
         want = "shell" if c.get("shell") else "idle"
         if want != status:
             set_status(want)
     view = (status, len(transcript), len(queue), draft, json.dumps(c),
-            prompt_up, collapsed, dismissed, kill_dialog)
+            prompt_up, collapsed, dismissed, kill_dialog, len(exit_up))
     if view != last:
         paint(c)
         last = view

@@ -60,11 +60,13 @@ def main():
     names, pids = [], set()
     fails = 0
 
-    def check(msg, cond):
+    def check(msg, cond, detail=None):
         nonlocal fails
         print("  %s %s" % ("ok  " if cond else "FAIL", msg))
         if not cond:
             fails += 1
+            if detail:
+                print("       %s" % detail())
 
     def sess(base, *cmd, **ctl):
         n = "%s%s" % (base, TAG)
@@ -137,11 +139,18 @@ def main():
         r = run("--run", sl, "/compact")
         check("slash command: typed raw, submitted, exit 0",
               r.returncode == 0 and typed(sl) == ["/compact"])
+        # The burst is two pushes ("own", then "\r"): the fake folds the
+        # Enter only when both land in one read, which a loaded box splits.
+        # Either way it is the burst; the gate would have pasted.
+        pastes = sum(e["ev"] == "paste" for e in events(sl))
         r = run("--run", sl, "own", env=dict(os.environ, DCH_SESSION=sl))
+        took = until(lambda: any(e["ev"] == "enter_folded"
+                                 for e in events(sl)) or "own" in typed(sl))
         check("own session ($DCH_SESSION): plain burst, exit 0",
-              r.returncode == 0 and
-              until(lambda: any(e["ev"] == "enter_folded"
-                                for e in events(sl))))
+              r.returncode == 0 and r.stderr == "" and took and
+              sum(e["ev"] == "paste" for e in events(sl)) == pastes,
+              lambda: "rc=%r stderr=%r pastes_before=%d events=%r" % (
+                  r.returncode, r.stderr, pastes, events(sl)))
 
         fast = dict(os.environ, DCH_AGENT_REENTER_MS="1000",
                     DCH_AGENT_LAND_MS="1000")

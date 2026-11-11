@@ -378,7 +378,9 @@ turns the tab off), shown only when there are some; and
 .BR History ,
 the ended sessions of
 .BR \-\-history ,
-pinned first, at most 50.
+one row per session name (its newest record, pinned when any record of
+the name is),
+pinned first, then by name, case-insensitive, at most 50.
 Every list has column headers and aligned columns sized to the rows on
 screen.
 A session row shows NAME, STATE as a glyph and a word (Needs input, Working,
@@ -497,7 +499,8 @@ resumes every interrupted session
 pins or unpins,
 .B d
 removes
-.RB ( \-\-forget ).
+.RB ( \-\-forget ),
+every record of the row's name.
 Every action but attach, rename, resume and pin asks first and runs on
 .BR y .
 The status line shows the action while it runs, then its result.
@@ -1047,8 +1050,18 @@ placeholder) shows in the composer row, and the same holds for
 and the resume message. All agents are paused first and then waited on
 together. An agent is ready when its record reads idle, it has visibly taken
 the pause message, no subagents show on its agent panel, and that holds for a
-settle window. dch then holds the session, types
+settle window. A record that has read
+.B shell
+(a background shell is running) for
+.B DCH_AGENT_SHELL_MS
+after the pause counts as idle. dch then holds the session, types
 .BR /exit ,
+answers
+.B 1
+(exit and stop tasks) if Claude Code asks about background work, and
+names what that stopped in the result line and in the resume message. An
+.B /exit
+that does not end Claude is taken back out of the composer. dch
 takes the session id from the last
 .B claude \-\-resume
 .I id
@@ -1341,10 +1354,33 @@ is everything after a bare
 and every argument that is neither an option nor an option's value, the
 options read as Claude Code 2.1.318's
 .B \-\-help
-lists them. Put it after
+lists them. It is cut only where
+.B claude
+is the program run: the command itself, after an
+.B env
+prefix, or behind a wrapper
+.RB ( "headroom wrap claude" " ...)"
+once dch has seen Claude run in the session. Any other command that merely
+holds a
+.B claude
+word
+.RB ( "git \-C src/claude log" ,
+.BR "docker run \-\-name claude img" ,
+.BR "ssh host claude" ,
+a
+.B sh \-c
+argument) is kept whole, and so are
+.BR "npx @anthropic\-ai/claude\-code" ,
+a renamed claude and
+.BR claude.exe ,
+which hold no word named
+.BR claude .
+Put it after
 .BR \-\- :
 an option dch does not know, followed by a word, keeps the whole command,
-prompt included. Claude Code runs a one\-word prompt that names one of its
+prompt included; an unknown
+.BI \-\-no\- name
+is a flag that never takes a value. Claude Code runs a one\-word prompt that names one of its
 commands
 .RB ( update ,
 .BR doctor ,
@@ -2298,6 +2334,11 @@ and
 How long an agent must stay ready before
 .B /exit
 (default 3000).
+.TP
+.B DCH_AGENT_SHELL_MS
+How long the agent's record may read
+.B shell
+after the pause before the agent counts as idle (default 60000).
 .TP
 .B DCH_AGENT_LAND_MS
 How long dch waits for typed text to show in the composer before giving up

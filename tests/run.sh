@@ -179,10 +179,12 @@ if [ "$MIRROR" = "1" ]; then
     pyrun "session picker: tabs, sort, actions, history, color, width" picker_test.py
     pyrun "the picker keeps its place across a switch" picker_place_test.py
     pyrun "the picker lines up its merged counts" picker_merged_test.py
+    pyrun "the picker's History: one row per name, by name" picker_history_test.py
 else
     skipmirror "double-tap detach opens the session picker"
     skipmirror "session picker: tabs, sort, actions, history, color, width"
     skipmirror "the picker keeps its place across a switch"
+    skipmirror "the picker's History: one row per name, by name"
 fi
 
 # --- attach replays the mirrored screen (blank-attach regression) -----------

@@ -125,8 +125,10 @@ sessions whose name, alias or harness title (the Claude or Codex name the row
 shows) matches `sidekick_pattern` in the config file (a POSIX extended regex,
 case-insensitive, default `-qa`; an invalid one, or one that matches every
 name, is matched as plain text; set it empty for no tab), shown only when
-there are some; and **History**, the ended sessions of `--history`, pinned
-first, at most 50. Every list has column headers and fixed, aligned columns,
+there are some; and **History**, the ended sessions of `--history`, one row
+per session name (its newest record, pinned when any record of the name is),
+pinned first, then by name, case-insensitive, at most 50 (`--history` itself
+still lists every record, newest first). Every list has column headers and fixed, aligned columns,
 sized to the rows on screen. A session row shows NAME (alias, else harness
 name, else name), STATE as a glyph and a word (Needs input, red and the
 loudest; Working, in the accent; Done, green; Idle, faint), ACTIVE (how long
@@ -165,8 +167,8 @@ hint.
 | `s` | sort by activity (blocked, working, done, idle, newest first) or by name (`a2` before `a10`); saved as `picker_sort`, so the next picker starts in it | |
 | `m` | | resume without the message (`--no-message`) |
 | `I` | | resume interrupted (n) (`--revive --all`), asks first |
-| `p` | | pin / unpin |
-| `d` | | remove (`--forget`), asks first; a pinned record must be unpinned first |
+| `p` | | pin / unpin every record of the row's name |
+| `d` | | remove every ended record of the row's name (`--forget`), asks first; a pinned name must be unpinned first |
 | `/` | filter (below) | filter (below) |
 | `,` | settings | settings |
 | `q` `Esc` `Ctrl-C` `Ctrl-D` | quit (`Esc` clears a filter first) | quit (`Esc` clears a filter first) |
@@ -264,7 +266,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.50.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.50.1 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -1154,10 +1156,19 @@ session only. The step is opt-in: without `--include-agents`, `--restart`
 3. **Wait.** An agent is ready when its record says `idle`, it has visibly
    taken the pause message (it went busy, or its record changed after the
    message with nothing left queued), no subagents show on the agent panel,
-   and all of that holds for a settle window. A background shell or monitor
-   keeps the record off `idle`.
+   and all of that holds for a settle window. A background shell keeps the
+   record at `shell`, not `idle`. Claude Code can report `shell` for a shell
+   the agent cannot see or stop, so once the record has read `shell` for
+   `DCH_AGENT_SHELL_MS` after the pause, the agent counts as idle.
 4. **Restart.** dch arms a hold on the session, types `/exit`, and reads the
    session id from the last `claude --resume <id>` line Claude prints on exit.
+   If `/exit` brings up Claude Code's "Background work is running" prompt,
+   dch picks `1. Exit and stop tasks`. The result line then names what that
+   stopped: `(at /exit claude stopped the background work it still ran: …)`.
+   The resume message then tells the agent what was stopped, so it can
+   re-arm what it still needs.
+   If `/exit` does not end Claude, dch takes it back out of the composer, so
+   that a later Enter cannot end the session without the hold.
    It then starts the original command again, with `--resume <id>` inserted
    right after the `claude` token. Any `--resume`, `-r`, `--continue`, `-c`,
    `--session-id` and `--fork-session` from the original command are dropped,
@@ -1199,6 +1210,7 @@ and the session ends.
 | `DCH_RESUME_MSG` | `resume all work. …` | Text typed after the relaunch. |
 | `DCH_AGENT_TIMEOUT_MS` | `600000` | How long an agent may take to pause. |
 | `DCH_AGENT_SETTLE_MS` | `3000` | How long it must stay ready before `/exit`. |
+| `DCH_AGENT_SHELL_MS` | `60000` | How long the record may read `shell` after the pause before the agent counts as idle. `/exit` then stops that shell. |
 | `DCH_AGENT_LAND_MS` | `30000` | How long dch waits for typed text to show in the composer before giving up without pressing Enter. The wait ends as soon as it shows; a just-resumed Claude under load can take seconds. |
 | `DCH_AGENT_STEP_MS` | `60000` | Limit for `/exit` to end Claude and for the relaunch to show a composer. |
 | `DCH_AGENT_REENTER_MS` | `5000` | After Enter, how long a message may stay in the composer before Enter is pressed again (at most 5 more times, never on a dialog). A just-resumed Claude can drop the first Enter. |
@@ -1256,9 +1268,17 @@ comes back as `claude --model opus`). `--history`, `--history --json` and `--ls-
 a record an older dch wrote with one is read without it. The prompt is
 everything after a bare `--`, and every argument that is neither an option
 nor an option's value, the options read the way Claude Code 2.1.318's
-`--help` lists them. Put it after `--`: an
+`--help` lists them. It is cut only where `claude` is the program run: the
+command itself, after an `env` prefix (`env FOO=1 claude ...`), or behind a
+wrapper (`headroom wrap claude ...`) once dch has seen Claude run in the
+session. Any other command that merely holds a `claude` word (`git -C
+src/claude log`, `docker run --name claude img`, `ssh host claude ...`, a
+`sh -c` argument) is kept whole, and so are `npx @anthropic-ai/claude-code`,
+a renamed claude and `claude.exe`, which hold no word named `claude`. Put it
+after `--`: an
 option dch does not know, followed by a word, keeps the whole command, prompt
-included, rather than guess which word is its value. Claude Code itself runs
+included, rather than guess which word is its value; an unknown `--no-<name>`
+is the exception, a flag that never takes one. Claude Code itself runs
 a one-word prompt that names one of its commands (`update`, `doctor`, `mcp`,
 …) as that command, `--` or not, so give such a prompt more words.
 

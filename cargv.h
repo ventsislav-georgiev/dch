@@ -11,6 +11,6 @@ int dch_claude_tok(char **v, int argc);
 ** values stay. All of in when there is no claude token, the first operand
 ** is a claude command, or an option the table does not know may own what
 ** follows. The new count. */
-int dch_claude_strip(char **in, int argc, char **out);
+int dch_claude_strip(char **in, int argc, char **out, int agent);
 
 #endif

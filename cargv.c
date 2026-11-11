@@ -130,16 +130,59 @@ copt_find(const char *s, size_t n)
 	return NULL;
 }
 
+/* claude is the program run: argv[0], or after `env` with only NAME=value
+** and value-less env flags between. A `claude` anywhere else (a directory,
+** an option value, an ssh or sh -c argument) belongs to another command,
+** whose words are not a prompt (#141), unless dch saw Claude run in the
+** session (agent: `headroom wrap claude ...`). An env option with a value
+** (-u N, -C dir, -S str, -P path) leaves a plain word between: kept whole. */
+static int
+claude_runs(char **v, int tok)
+{
+	static const char *const eflags[] = {
+		"-i", "-0", "-v", "--ignore-environment", "--null", "--debug",
+	};
+	const char *b;
+	int k;
+	size_t j;
+
+	if (tok == 0)
+		return 1;
+	b = strrchr(v[0], '/');
+	if (strcmp(b ? b + 1 : v[0], "env") != 0)
+		return 0;
+	for (k = 1; k < tok; k++)
+	{
+		const char *a = v[k], *p = a;
+
+		if ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+		    *p == '_')
+			while ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
+			       (*p >= '0' && *p <= '9') || *p == '_')
+				p++;
+		if (p > a && *p == '=')
+			continue;	/* NAME=value */
+		for (j = 0; j < sizeof eflags / sizeof eflags[0]; j++)
+			if (strcmp(a, eflags[j]) == 0)
+				break;
+		if (j == sizeof eflags / sizeof eflags[0])
+			return 0;
+	}
+	return 1;
+}
+
 /* commander parses options wherever they sit, operands among them: the root
 ** program has positional options (they only stop it at a command) and no
 ** pass-through. So every operand is the prompt or more of it, and every
 ** option before a bare `--` stays. */
 int
-dch_claude_strip(char **in, int argc, char **out)
+dch_claude_strip(char **in, int argc, char **out, int agent)
 {
 	int tok = dch_claude_tok(in, argc), k, n, var = 0, ops = 0;
 	size_t j;
 
+	if (tok < argc && !agent && !claude_runs(in, tok))
+		goto whole;
 	for (n = 0; n <= tok && n < argc; n++)
 		out[n] = in[n];
 	for (k = tok + 1; k < argc; k++)
@@ -183,8 +226,10 @@ dch_claude_strip(char **in, int argc, char **out)
 		if (!o)
 		{
 			/* Unknown: what follows may be its value, and dropping
-			** that would break the relaunch. Keep everything. */
-			if (k + 1 < argc && !dashed(in[k + 1]))
+			** that would break the relaunch. Keep everything. A
+			** --no-x never takes one (commander's negatable option). */
+			if (strncmp(a, "--no-", 5) != 0 && k + 1 < argc &&
+			    !dashed(in[k + 1]))
 				goto whole;
 			continue;
 		}

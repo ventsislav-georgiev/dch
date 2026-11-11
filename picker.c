@@ -5,7 +5,9 @@
 ** `dch -l`, `dch -k`/`-d` without a name, and the double-tap switch. Tabs:
 ** Sessions; Sidekicks (n), the live sessions whose name, alias or harness
 ** title matches the config's sidekick_pattern (default "-qa"), shown only when there are
-** some; History (n), the ended records, pinned first, at most 50. "/"
+** some; History (n), the ended records, one row per name (its newest
+** record, pinned when any of the name's is), pinned first, by name, at
+** most 50. "/"
 ** filters every tab, as vim's search (#096). Rows carry
 ** --ls-json's data (state, agents, meta.prs) and --history's, reloaded about
 ** once a second. Enter hands the session back to the caller; every other
@@ -125,6 +127,23 @@ pk_cmp(const void *x, const void *y)
 	else if ((c = pk_natcmp(a->title, b->title)))
 		return c;
 	return strcmp(a->name, b->name);
+}
+
+/* History (#144): pinned first, then by the shown title, numeric-aware;
+** ties the newest first, then the dch name. */
+static int
+pk_hcmp(const void *x, const void *y)
+{
+	const struct pkrow *a = x, *b = y;
+	int c;
+
+	if (a->pinned != b->pinned)
+		return a->pinned ? -1 : 1;
+	if ((c = pk_natcmp(a->title, b->title)))
+		return c;
+	if (a->when != b->when)
+		return a->when > b->when ? -1 : 1;
+	return strcmp(a->sname, b->sname);
 }
 
 int
@@ -262,6 +281,8 @@ pk_sort(struct pk *p, char sel[3][600])
 	for (t = 0; t < 2; t++)
 		if (p->n[t] > 1)
 			qsort(p->r[t], (size_t)p->n[t], sizeof *p->r[t], pk_cmp);
+	if (p->n[2] > 1)
+		qsort(p->r[2], (size_t)p->n[2], sizeof *p->r[2], pk_hcmp);
 	pk_reselect(p, sel);
 }
 

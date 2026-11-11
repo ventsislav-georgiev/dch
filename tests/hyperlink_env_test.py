@@ -113,7 +113,7 @@ def supports_hyperlinks(e, tty):
 
 
 def claude_links(e, tty):
-    """Claude Code 2.1.318's statusline check, in its order (no settings
+    """Claude Code's statusline check (2.1.318 to 2.1.322), in its order (no settings
     `hyperlinks` key)."""
     f = e.get("FORCE_HYPERLINK")
     if f:
@@ -199,8 +199,13 @@ def shipped_check():
         return
     lc = re.search(rb"\.LC_TERMINAL;if\(\w+&&(\w+)\.includes\(\w+\)\)"
                    rb"return!0", data)
-    lst = lc and re.search(rb"var " + re.escape(lc.group(1)) +
-                           rb"=\[([^\]]*)\]", data)
+    # The list's minified name is reused by other modules (2.1.322 has
+    # three `var L=[`): take the definition nearest before the check.
+    lst = None
+    if lc:
+        for lst in re.finditer(rb"(?:var|let|const) " + re.escape(lc.group(1))
+                               + rb"=\[([^\]]*)\]", data[:lc.start()]):
+            pass
     check("Claude Code's link check still reads LC_TERMINAL in a list with "
           "\"ghostty\" (else revisit #122)",
           lst is not None and b'"ghostty"' in lst.group(1),

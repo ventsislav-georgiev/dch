@@ -3414,6 +3414,7 @@ static const struct det_rule det_blocked[] = {
 	/* plan approval ("Ready to code?"): no esc footer; the question's
 	** start, as it wraps at its end under ~90 columns */
 	{ "^claude has written up a plan", 0 },            /* claude plan   */
+	{ "^background work is running", 0 },              /* claude /exit  */
 	{ "press enter to confirm or esc to cancel", 0 },  /* codex         */
 	{ "enter to submit answer", 0 },                   /* codex forms   */
 	{ "allow command?", 0 },                           /* codex exec    */
@@ -5887,7 +5888,7 @@ resume_argv(char **v, int argc, int tok, char *id, int *outc)
 		return NULL;
 	}
 	/* only entries past the claude token go: tok still indexes it */
-	argc = dch_claude_strip(v, argc, s);
+	argc = dch_claude_strip(v, argc, s, 1);
 	v = s;
 	for (k = 0; k <= tok; k++)
 		o[n++] = v[k];
@@ -6301,9 +6302,10 @@ struct agent
 	char name[600], path[1100];
 	char **argv;		/* the session's argv (owned by ci) */
 	struct cmd_info ci;
-	int tok, argc, saw_busy;
+	int tok, argc, saw_busy, exit_ans;	/* exit_ans: exit prompt answered */
+	char work[200];		/* what that prompt listed (exit_prompt) */
 	long cpid;
-	char ver[64], want[64], sid[64], id[64], note[200], why[120];
+	char ver[64], want[64], sid[64], id[64], note[480], why[120];
 	enum { AG_WAIT, AG_EXIT, AG_START, AG_DONE } step;
 	long long t_sent, ok_since, deadline;
 	/* --stop: no relaunch; the session ends instead */
@@ -6735,6 +6737,61 @@ ag_type(const char *path, const char *text, int paste)
 	}
 }
 
+/* Claude Code's prompt when /exit finds background work still running
+** (seen on 2.1.280 and 2.1.322): "Background work is running", "The
+** following will stop when you exit:", the work, then "1. Exit and stop
+** tasks", "2. Move to background and exit", "3. Stay". 1 when it is on the
+** screen at `path` with option 1 reading so; the work it lists goes to out,
+** "; "-joined. */
+static int
+exit_prompt(const char *path, char *out, size_t outsz)
+{
+	char *raw = malloc(DET_CAP + 1), *l, *nx;
+	size_t k = 0, w;
+	int n, st = 0, ok = 0;
+
+	out[0] = '\0';
+	if (!raw)
+		return 0;
+	n = fetch_screen(path, raw, DET_CAP, DET_DEADLINE_MS, 0);
+	raw[n > 0 ? n : 0] = '\0';
+	for (l = raw; l && !ok; l = nx)
+	{
+		nx = strchr(l, '\n');
+		if (nx)
+			*nx++ = '\0';
+		l += ap_skip(l) - l;
+		w = ap_rtrim(l, strlen(l));
+		if (w && l[w - 1] == '\r')
+			w--;
+		l[w] = '\0';
+		if (strncasecmp(l, "Background work is running", 26) == 0)
+			st = 1, k = 0, out[0] = '\0';
+		else if (st == 1 && strncasecmp(l, "The following will stop when "
+		                                "you exit:", 38) == 0)
+			st = 2;
+		else if (st == 2 && strstr(l, "1. Exit and stop tasks"))
+			ok = 1;
+		else if (st == 2 && *l && k + 3 < outsz)
+		{
+			const unsigned char *u = (const unsigned char *)l;
+
+			if (k)
+				out[k++] = ';', out[k++] = ' ';
+			/* screen text, later pasted into claude: no control byte
+			** (ESC, so no paste end; C0, DEL, UTF-8 C1) gets through */
+			for (; *u && k + 1 < outsz; u++)
+				if (*u == 0xc2 && u[1] >= 0x80 && u[1] <= 0x9f)
+					u++;
+				else if (*u >= 0x20 && *u != 0x7f)
+					out[k++] = (char)*u;
+			out[k] = '\0';
+		}
+	}
+	free(raw);
+	return ok;
+}
+
 static int
 is_uuid(const char *u)
 {
@@ -6897,6 +6954,26 @@ ag_say(struct agent *a, int failed, const char *fmt, ...)
 	a->step = AG_DONE;
 }
 
+/* Type the resume message. After /exit's prompt stopped background work
+** (exit_ans) it says what, so the agent can re-arm it. */
+static int
+ag_type_resume(struct agent *a, const char *resume)
+{
+	char *m;
+	int t;
+
+	if (!a->exit_ans)
+		return ag_type(a->path, resume, 1);
+	if (!(m = malloc(strlen(resume) + sizeof a->work + 120)))
+		return -1;
+	sprintf(m, "%s At exit, Claude Code stopped background work that was "
+	        "still running%s%s. Re-arm what is still needed.", resume,
+	        a->work[0] ? ": " : "", a->work);
+	t = ag_type(a->path, m, 1);
+	free(m);
+	return t;
+}
+
 /* Type the resume message into an agent we give up on, if the composer
 ** lets us. Returns how it went, for the report line. */
 static const char *
@@ -6904,7 +6981,7 @@ ag_resume(struct agent *a, const char *resume)
 {
 	if (claude_gate(a->path) != CG_EMPTY)
 		return "NOT typed";
-	switch (ag_type(a->path, resume, 1))
+	switch (ag_type_resume(a, resume))
 	{
 	case 0:
 		return "typed";
@@ -6999,6 +7076,19 @@ ag_relaunch(struct agent *a)
 	return 1;
 }
 
+/* /exit left unsent in a composer Claude stays in: a later Enter there
+** would end the session with no hold, so take it back out. The report's
+** suffix. */
+static const char *
+exit_back(const char *path)
+{
+	if (!composer_holds(path, "/exit"))
+		return "";
+	return ty_take_back(path, "/exit", env_ms("DCH_AGENT_LAND_MS", 30000))
+	       == -5 ? "; /exit taken back out of the composer"
+	             : "; /exit may still sit in the composer";
+}
+
 /* The id to resume into: the exit line's is primary; the record's (read
 ** right before /exit, as /clear rotates it) is the fallback and the
 ** cross-check. */
@@ -7010,16 +7100,17 @@ ag_read_id(struct agent *a, const struct cmd_info *ci)
 	if (resume_id(ci->tail, ci->tail_len, tid, sizeof tid) < 0)
 	{
 		snprintf(a->id, sizeof a->id, "%s", a->sid);
-		snprintf(a->note, sizeof a->note, " (no resume line in the "
-		         "exit output; used the session record's id)");
+		snprintf(a->note + strlen(a->note), sizeof a->note -
+		         strlen(a->note), " (no resume line in the exit output; "
+		         "used the session record's id)");
 	}
 	else
 	{
 		snprintf(a->id, sizeof a->id, "%s", tid);
 		if (strcmp(tid, a->sid) != 0)
-			snprintf(a->note, sizeof a->note, " (exit line said %s, "
-			         "session record said %s; used the exit line)",
-			         tid, a->sid);
+			snprintf(a->note + strlen(a->note), sizeof a->note -
+			         strlen(a->note), " (exit line said %s, session "
+			         "record said %s; used the exit line)", tid, a->sid);
 	}
 }
 
@@ -7057,8 +7148,8 @@ ag_exited(struct agent *a, const char *step_s)
 		{
 			respawn_req(a->path, 'c', NULL, 0);
 			ag_say(a, 1, "/exit did not end claude within %s; hold "
-			       "cancelled, claude left running (session %s)",
-			       step_s, a->sid);
+			       "cancelled, claude left running (session %s)%s%s",
+			       step_s, a->sid, a->note, exit_back(a->path));
 		}
 		cmd_info_free(&ci);
 		return a->step == AG_DONE;
@@ -7128,8 +7219,9 @@ stop_exited(struct agent *a, const char *step_s, const char *resume)
 		respawn_req(a->path, 'c', NULL, 0);
 		if (kill((pid_t)a->cpid, 0) == 0)
 			stop_mark(a->path, NULL, 1);
-		ag_say(a, 1, "/exit did not end claude within %s; resume message "
-		       "%s", step_s, ag_resume(a, resume));
+		why = exit_back(a->path);	/* before the resume message */
+		ag_say(a, 1, "/exit did not end claude within %s%s%s; resume "
+		       "message %s", step_s, a->note, why, ag_resume(a, resume));
 		return 1;
 	}
 	if (!gone && ag_quiet(a, st))
@@ -7197,12 +7289,26 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 	long long now = wall_ms();
 	char step_s[32];
 	struct crec r;
-	int g, ready;
+	int g, ready, idle, busy;
 
 	snprintf(step_s, sizeof step_s, "%lds", step / 1000);
 	if (a->step == AG_EXIT)
+	{
+		/* Our /exit asked Claude to quit; with background work left it
+		** asks first. The pause already told the agent to stop it all,
+		** so confirm the exit, as /exit did before the prompt existed. */
+		if (!a->exit_ans && exit_prompt(a->path, a->work, sizeof a->work) &&
+		    ty_push(a->path, "1", 0) == 0)
+		{
+			a->exit_ans = 1;
+			snprintf(a->note + strlen(a->note),
+			         sizeof a->note - strlen(a->note), " (at /exit claude "
+			         "stopped the background work it still ran: %s)",
+			         a->work[0] ? a->work : "unlisted");
+		}
 		return a->stop ? stop_exited(a, step_s, resume)
 		               : ag_exited(a, step_s);
+	}
 	if (a->step == AG_START)
 	{
 		struct cmd_info ci;
@@ -7244,8 +7350,8 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 		if (strcmp(ci.state, "armed") == 0)
 			respawn_req(a->path, 'c', NULL, 0);
 		g = CG_UNKNOWN;
-		if (ci.pid > 0 && claude_find(ci.pid, 1, &r) > 0 &&
-		    strcmp(r.status, "idle") == 0 &&
+		busy = ci.pid > 0 && claude_find(ci.pid, 1, &r) > 0;
+		if (busy && !(busy = strcmp(r.status, "idle") != 0) &&
 		    (g = claude_gate(a->path)) == CG_EMPTY)
 		{
 			int old = strcmp(r.ver, a->want) != 0;
@@ -7253,7 +7359,7 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 
 			cmd_info_free(&ci);
 			json_phase(a->name, "resuming", a->json);
-			t = ag_type(a->path, resume, 1);
+			t = ag_type_resume(a, resume);
 			a->code = t == -3 ? "not_submitted" : "not_typed";
 			if (t == -1)
 			{
@@ -7288,9 +7394,11 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 		cmd_info_free(&ci);
 		if (now < a->deadline)
 			return 0;
+		/* busy: the gate was never read, cg_why[g] would blame the screen */
 		ag_say(a, 1, "relaunched with --resume %s, but no empty composer "
-		       "within %s (%s); resume message not typed", a->id, step_s,
-		       g == CG_NOVT ? "no mirror" : cg_why[g]);
+		       "within %s (%s%s); resume message not typed", a->id, step_s,
+		       busy ? "claude is not idle, status " : g == CG_NOVT
+		       ? "no mirror" : cg_why[g], busy ? r.status : "");
 		return 1;
 	}
 
@@ -7307,8 +7415,16 @@ ag_tick(struct agent *a, long tmo, long settle, const char *resume)
 	/* Busy after the push proves the message was taken; an idle stamp
 	** newer than the push does too, unless the message sits queued —
 	** a turn that ends with one queued is idle for a moment first. */
+	/* "shell": idle, a background shell still running. The pause told the
+	** agent to stop them; one still there DCH_AGENT_SHELL_MS after its
+	** status says so is one it does not see (civ2-qa: "no background
+	** shells" over Claude's "2 shells still running"), and /exit's prompt
+	** stops it (ag_tick). */
+	idle = strcmp(r.status, "idle") == 0 ||
+	       (strcmp(r.status, "shell") == 0 && r.upd > a->t_sent &&
+	        now - r.upd >= env_ms("DCH_AGENT_SHELL_MS", 60000));
 	ready = (a->saw_busy || (r.upd > a->t_sent && g != CG_QUEUED)) &&
-	        strcmp(r.status, "idle") == 0 && g == CG_EMPTY;
+	        idle && g == CG_EMPTY;
 	if (!ready && g == CG_EMPTY)
 		snprintf(a->why, sizeof a->why, "status %s", r.status);
 	else if (!ready)
@@ -8267,9 +8383,13 @@ hrec_strip(struct hrec *r, char **v, int *argc, const char *object,
            const char *key)
 {
 	char **s = v ? malloc(((size_t)*argc + 1) * sizeof *s) : NULL;
-	int n;
+	char kind[16];
+	int n, ag;
 
-	if (s && (n = dch_claude_strip(v, *argc, s)) < *argc)
+	/* a Claude agent was seen: a wrapped claude's prompt goes too (#141) */
+	ag = dch_json_nested_string(r->body, "agent", "kind", kind,
+	                            sizeof kind) == 0 && !strcmp(kind, "claude");
+	if (s && (n = dch_claude_strip(v, *argc, s, ag)) < *argc)
 	{
 		/* v (dch_json_strv's block) has room: n < *argc */
 		memcpy(v, s, ((size_t)n + 1) * sizeof *s);
@@ -8586,7 +8706,7 @@ pk_load(struct pk *p)
 	size_t hl = home ? strlen(home) : 0;
 	regex_t re;
 	struct dch_rrow *rr = NULL;
-	int mode = 0, k, t, nh, pin, nr;
+	int mode = 0, k, j, t, nh, pin, nr;
 
 	pk_selnames(p, sel);
 	for (t = 0; t < 3; t++)
@@ -8649,32 +8769,50 @@ pk_load(struct pk *p)
 	p->interrupted = 0;
 	for (k = 0; k < nh; k++)
 		p->interrupted += rv_all_takes(&h[k]);
-	/* pinned first, then the newest of the rest up to the cap */
-	for (pin = 1; p->r[2] && pin >= 0; pin--)
-		for (k = 0; k < nh; k++)
-		{
-			struct pkrow *w;
+	/* one row per name (#144): its newest record, pinned when any of
+	** the name's is; h is newest first */
+	for (k = 0; p->r[2] && k < nh; k++)
+	{
+		struct pkrow *w;
 
-			if (h[k].live || h[k].pinned != pin ||
-			    (!pin && p->n[2] >= PK_HIST_MAX))
-				continue;
-			w = &p->r[2][p->n[2]++];
-			snprintf(w->name, sizeof w->name, "%s", h[k].file);
-			snprintf(w->sname, sizeof w->sname, "%s", h[k].name);
-			/* alias, else the agent's session name, else the dch
-			 * name: slist_label's order, and Prosper's (#097) */
-			snprintf(w->title, sizeof w->title, "%s", h[k].alias[0]
-			         ? h[k].alias : h[k].aname[0] ? h[k].aname
-			         : h[k].name);
-			snprintf(w->state, sizeof w->state, "%s", h[k].end);
-			if (hl && strncmp(h[k].cwd, home, hl) == 0 &&
-			    (h[k].cwd[hl] == '/' || !h[k].cwd[hl]))
-				snprintf(w->cwd, sizeof w->cwd, "~%s", h[k].cwd + hl);
-			else
-				snprintf(w->cwd, sizeof w->cwd, "%s", h[k].cwd);
-			w->when = hrec_when(&h[k]);
-			w->pinned = h[k].pinned;
+		if (h[k].live)
+			continue;
+		for (j = 0; j < p->n[2] && strcmp(p->r[2][j].sname,
+		     h[k].name); j++)
+			;
+		if (j < p->n[2])
+		{
+			p->r[2][j].pinned |= h[k].pinned;
+			continue;
 		}
+		w = &p->r[2][p->n[2]++];
+		snprintf(w->name, sizeof w->name, "%s", h[k].file);
+		snprintf(w->sname, sizeof w->sname, "%s", h[k].name);
+		/* alias, else the agent's session name, else the dch
+		 * name: slist_label's order, and Prosper's (#097) */
+		snprintf(w->title, sizeof w->title, "%s", h[k].alias[0]
+		         ? h[k].alias : h[k].aname[0] ? h[k].aname
+		         : h[k].name);
+		snprintf(w->state, sizeof w->state, "%s", h[k].end);
+		if (hl && strncmp(h[k].cwd, home, hl) == 0 &&
+		    (h[k].cwd[hl] == '/' || !h[k].cwd[hl]))
+			snprintf(w->cwd, sizeof w->cwd, "~%s", h[k].cwd + hl);
+		else
+			snprintf(w->cwd, sizeof w->cwd, "%s", h[k].cwd);
+		w->when = hrec_when(&h[k]);
+		w->pinned = h[k].pinned;
+	}
+	/* every pinned name, then the newest of the rest while the total is
+	** under the cap */
+	for (k = pin = 0; k < p->n[2]; k++)
+		pin += p->r[2][k].pinned;
+	for (k = j = 0; k < p->n[2]; k++)
+		if (p->r[2][k].pinned || pin < PK_HIST_MAX)
+		{
+			pin += !p->r[2][k].pinned;
+			p->r[2][j++] = p->r[2][k];
+		}
+	p->n[2] = j;
 	hrec_free(h, nh);
 	pk_sort(p, sel);
 }
@@ -8717,32 +8855,40 @@ pk_ended(const char *name, long since)
 
 /* An action: the dch words after argv[0] (NULL-terminated), what the
 ** status line says while it runs, the row it is about. */
+/* One more word on a's argv: 0, or -1 when it does not fit. */
+static int
+pk_arg(struct pkact *a, const char *w)
+{
+	size_t off = 0, l = strlen(w) + 1;
+	int n = 1;
+
+	while (a->argv[n])
+		n++;
+	if (n > 1)
+		off = (size_t)(a->argv[n - 1] - a->buf) + strlen(a->argv[n - 1]) + 1;
+	if (n >= 11 || off + l > sizeof a->buf)
+		return -1;
+	memcpy(a->buf + off, w, l);
+	a->argv[n] = a->buf + off;
+	a->argv[n + 1] = NULL;
+	return 0;
+}
+
 static void
 pk_act(struct pkact *a, int tab, const char *target, const char *doing, ...)
 {
 	va_list ap;
 	const char *w;
-	size_t off = 0;
-	int n = 0;
 
 	memset(a, 0, sizeof *a);
 	a->tab = tab;
 	snprintf(a->target, sizeof a->target, "%s", target);
 	snprintf(a->doing, sizeof a->doing, "%s", doing);
-	a->argv[n++] = dch_exe;
+	a->argv[0] = dch_exe;
 	va_start(ap, doing);
-	while (n < 11 && (w = va_arg(ap, const char *)))
-	{
-		size_t l = strlen(w) + 1;
-
-		if (off + l > sizeof a->buf)
-			break;
-		memcpy(a->buf + off, w, l);
-		a->argv[n++] = a->buf + off;
-		off += l;
-	}
+	while ((w = va_arg(ap, const char *)) && pk_arg(a, w) == 0)
+		;
 	va_end(ap);
-	a->argv[n] = NULL;
 }
 
 static void
@@ -8993,6 +9139,18 @@ pk_free_name(const struct pk *p, const char *name, char *as, size_t asz)
 	}
 }
 
+/* What p and d act on: a History row is its name's (#144), so every record
+** of the name; f, the shown record's file, when the name would read as a
+** record file. */
+static const char *
+pk_recs(const struct pkrow *w, const char *f)
+{
+	size_t n = strlen(w->sname);
+
+	return n && !(n > 5 && !strcmp(w->sname + n - 5, ".json"))
+	       ? w->sname : f;
+}
+
 /* One key. 1: out holds the session to attach; -1: quit; 0: go on. */
 int
 pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
@@ -9200,7 +9358,7 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 		snprintf(d, sizeof d, "%s %s", w->pinned ? "unpinning"
 		         : "pinning", w->title);
 		pk_act(&p->ask, 2, w->name, d, w->pinned ? "--unpin" : "--pin",
-		       f, NULL);
+		       pk_recs(w, f), NULL);
 		pk_start(p, &p->ask);
 		return 0;
 	case 'd':
@@ -9211,7 +9369,25 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 			return 0;
 		}
 		snprintf(d, sizeof d, "removing %s", w->title);
-		pk_act(&p->ask, 2, w->name, d, "--forget", f, NULL);
+		pk_act(&p->ask, 2, w->name, d, "--forget", pk_recs(w, f), NULL);
+		/* a live session of the name: its record is not History's, and
+		** --forget <name> would fail on it; the ended records' files */
+		if (pk_recs(w, f) == w->sname && name_live(w->sname))
+		{
+			struct hrec *h;
+			int nh = history_load(&h);
+
+			pk_act(&p->ask, 2, w->name, d, "--forget", NULL);
+			/* shortcut: as many as an action's argv holds (9); the
+			** rest stay a row for the next d */
+			for (k = 0; k < nh; k++)
+				if (!name_live(h[k].file) &&
+				    !strcmp(h[k].name, w->sname) &&
+				    snprintf(f, sizeof f, "%s.json", h[k].file) <
+				    (int)sizeof f && pk_arg(&p->ask, f) < 0)
+					break;
+			hrec_free(h, nh);
+		}
 		pk_ask(p, "Remove %s from History?", w->title);
 		return 0;
 	}
