@@ -11195,6 +11195,81 @@ xr_shell_fill(struct xr_answer *a, const struct ring_snap *rs,
 	}
 }
 
+/* --ref's record sink over a shell: the scan's tick before each record, as
+** over a transcript (3.4: the budget, 10 s, progress, a closed reader); a
+** stopped scan reads on but feeds nothing. */
+struct xr_ref_ring
+{
+	struct xr_ring_acc *acc;
+	struct xr_scan *sc;
+};
+
+static void
+xr_ref_rec(void *ctx, const struct xr_rec *x)
+{
+	struct xr_ref_ring *f = ctx;
+
+	if (!xr_scan_tick(f->sc, f->acc->bytes))
+		xr_ring_rec(f->acc, x);
+}
+
+/* --ref over a live shell's ring (3.4): the ring's header names it, so
+** `first` is line 1 before a record is read; then its lines, its tally,
+** `done`. A ring cleared mid-read ends it there, partial: the lines
+** already out stand. */
+static int
+xr_shell_ref(const struct xr_target *t, const struct xr_refq *q,
+             const char *label)
+{
+	char project[1200] = "";
+	struct xr_chapters ch = {0};
+	struct xr_ref_ring f;
+	struct ring_snap rs;
+	struct xr_span sp;
+	struct xr_sink k;
+	int fr = ring_fetch(t->sock, &rs, NULL, NULL), rc;
+
+	if (fr == -3)
+		return xr_failed();
+	/* gone, a master before #119, a ring off or paused: no corpus */
+	if (fr != 0 || (rs.status & (DCH_RING_S_OFF | DCH_RING_S_PAUSED)))
+		return xr_no_corpus();
+	xr_project_key(label, project, sizeof project);
+	if (!xr_ref_parse(q->text, label, &sp) ||
+	    !(f.acc = calloc(1, sizeof *f.acc)))
+		return xr_failed();
+	if (!(f.sc = xr_scan_new(stdout, sp.key, t->name, project, 1, q->full,
+	                         1, q->budget, xr_t0)))
+	{
+		free(f.acc);
+		return xr_failed();
+	}
+	rc = xr_scan_first(f.sc, rs.sid, sp.shape, xr_span_text(&sp));
+	xr_shell_begin(&f.acc->sh, &ch);
+	xr_scan_sink(f.sc, &k);
+	if (rc == 0 && xr_shell_refs(&f.acc->sh, &k, label) == 0)
+	{
+		fr = ring_fetch(t->sock, &rs, xr_ref_rec, &f);
+		xr_shell_end(&f.acc->sh);
+		rc = fr != 0 && fr != -4;
+	}
+	else
+		rc = -1;
+	if (rc == 0)
+	{
+		int partial = fr == -4 || rs.seqgap || f.acc->gap || f.acc->cont ||
+		              (rs.status & (DCH_RING_S_EVICTED | DCH_RING_S_OFF |
+		                            DCH_RING_S_PAUSED));
+
+		xr_scan_file(f.sc, f.acc->bytes, 0, partial, !f.acc->sh.npaired);
+		rc = xr_scan_done(f.sc);
+	}
+	xr_shell_end(&f.acc->sh);
+	xr_chapters_free(&ch);
+	free(f.acc);
+	return xr_ref_exit(f.sc, rc);
+}
+
 /* snap: --follow's History form, the answer as its one snapshot line */
 static int
 xr_json(const struct xr_target *t, const struct xr_refq *q, int snap)
@@ -11205,9 +11280,7 @@ xr_json(const struct xr_target *t, const struct xr_refq *q, int snap)
 	char recname[400];
 	int rc = 0;
 	struct xr_index *refs = NULL;
-	struct xr_scan *sc = NULL;
 	struct xr_sink k;
-	struct xr_span sp;
 
 	memset(&a, 0, sizeof a);
 	a.snapshot = snap;
@@ -11277,6 +11350,12 @@ xr_json(const struct xr_target *t, const struct xr_refq *q, int snap)
 				                               sizeof project, label,
 				                               sizeof label, refs) : -1;
 		}
+		else if (q)
+		{
+			if (qc == 0)
+				cmd_info_free(&ci);
+			return xr_shell_ref(t, q, label);
+		}
 		else if (!(acc = malloc(sizeof *acc)))
 			rc = -2;
 		else
@@ -11286,27 +11365,13 @@ xr_json(const struct xr_target *t, const struct xr_refq *q, int snap)
 			{
 				xr_chapters_free(&ch);
 				xr_index_free(refs);
-				xr_scan_free(sc);
 				refs = NULL;
-				sc = NULL;
 				memset(acc, 0, sizeof *acc);
 				xr_shell_begin(&acc->sh, &ch);
-				/* refs over the ring, keyed by the pane's cwd (7.3); a
-				** --ref's lines held until `first` can name the ring */
-				if (q)
-				{
-					if (!project[0])
-						xr_project_key(label, project, sizeof project);
-					if (!xr_ref_parse(q->text, label, &sp) ||
-					    !(sc = xr_scan_new(stdout, sp.key, t->name, project,
-					                       1, q->full, 1, q->budget, xr_t0)))
-						break;
-					xr_scan_hold(sc);
-					xr_scan_sink(sc, &k);
-				}
-				else if ((refs = xr_index_new()))
+				/* refs over the ring, keyed by the pane's cwd (7.3) */
+				if ((refs = xr_index_new()))
 					xr_index_sink(refs, &k);
-				if ((sc || refs) && xr_shell_refs(&acc->sh, &k, label) != 0)
+				if (refs && xr_shell_refs(&acc->sh, &k, label) != 0)
 					break;
 				fr = ring_fetch(t->sock, &rs, xr_ring_rec, acc);
 				xr_shell_end(&acc->sh);
@@ -11323,36 +11388,7 @@ xr_json(const struct xr_target *t, const struct xr_refq *q, int snap)
 		}
 		else if (acc && (fr == -3 || fr == -4))
 			rc = -2;
-		if (q && sc && rc == 0 && a.available)
-		{
-			/* --ref over a shell <n>: first, then what the ring held */
-			int partial = rs.seqgap || acc->gap || acc->cont ||
-			              (rs.status & DCH_RING_S_EVICTED);
-
-			rc = xr_scan_first(sc, sid, sp.shape, xr_span_text(&sp)) ||
-			     xr_scan_release(sc);
-			if (rc == 0)
-			{
-				xr_scan_file(sc, acc->bytes, 0, partial,
-				             !acc->sh.npaired);
-				rc = xr_scan_done(sc);
-			}
-			rc = xr_ref_exit(sc, rc);
-			xr_chapters_free(&ch);
-			free(acc);
-			if (qc == 0)
-				cmd_info_free(&ci);
-			return rc;
-		}
-		xr_scan_free(sc);
 		free(acc);
-		if (q && rc != -2)
-		{
-			xr_chapters_free(&ch);
-			if (qc == 0)
-				cmd_info_free(&ci);
-			return xr_no_corpus();
-		}
 		/* fr -1/-2: gone, or a master before #119: no corpus */
 		if (qc == 0)
 			cmd_info_free(&ci);

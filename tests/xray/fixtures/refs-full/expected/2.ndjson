@@ -1,4 +1,4 @@
 {"schema":1,"first":{"session":"full","session_id":"11111111-2222-4333-8444-555555555503","key":"pull:o/r#12","shape":"pull","text":"o/r#12","project":"-home-demo-proj","mode":"full","scope":"session","budget_ms":null,"elapsed_ms":0}}
 {"schema":1,"mention":{"session":"full","chapter":"f*:0","at":1794304802,"line":"See [x](https://github.com/o/r/pull/12) for the change.","offset":163,"live":false,"project":"-home-demo-proj"}}
-{"schema":1,"tally":{"session":"full","live":false,"project":"-home-demo-proj","count":1,"definitions":0,"partial":false}}
+{"schema":1,"tally":{"session":"full","live":false,"project":"-home-demo-proj","count":1,"definitions":0,"partial":false,"mentions_dropped":0}}
 {"schema":1,"done":true,"partial":false,"counts":{"session":1,"project":0,"project_sessions":0,"all":null,"all_sessions":null},"why":null,"files":1,"bytes":871,"lines_too_long":0}

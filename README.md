@@ -923,8 +923,9 @@ The corpus:
 - **`refs`.** The refs the corpus mentions (see [Refs](#refs)), at most 2000
   keys. The rest are counted in `dropped_keys`, exactly up to 32768 distinct
   keys and as a lower bound past that. `[]` for corpus `none`.
-- **Size.** The object is capped at 4 MiB: past that, the oldest chapters go
-  and `why` is `"output"`.
+- **Size.** The object is capped at 4 MiB: past that, `refs` go first, from
+  the end of the list, each counted in `dropped_keys`; then the oldest
+  chapters go. `why` is `"output"`.
 
 `dch --xray <n> --clear --json` empties a live shell session's ring through
 the master's control socket. Nothing is typed into the session. It prints
@@ -991,7 +992,12 @@ control or bidi character and must parse as exactly one ref. The default is a
 light scan: it stops after the first result, or after `--budget-ms` (50 to
 300, default 300) with `why: "budget"`; on a live shell it prints titles and
 counts only. `--full` reads the whole corpus (up to 10 s, `why: "time"`); a `--budget-ms`
-with it is accepted and has no effect.
+with it is accepted and has no effect. A file gives its first `mention` line
+and its newest 199; the `tally`'s `mentions_dropped` counts the mention lines
+left out, and its `count` stays exact. `definition` lines come once per title,
+at most 8 per file. The output is capped at 4 MiB with room kept for the
+`tally` and `done`; past the cap the scan stops and `done` says
+`partial: true, why: "output"`.
 `--scope project` and `--scope all` come with a later release and exit 2;
 until then `--scope session` must be given. A session with no corpus exits 1
 with `dch: no x-ray corpus`. Nothing is written to disk: the index lives in the

@@ -1,5 +1,5 @@
 {"schema":1,"first":{"session":"gram","session_id":"11111111-2222-4333-8444-555555555501","key":"pull:o/r#7","shape":"pull","text":"o/r#7","project":"-home-demo-proj","mode":"full","scope":"session","budget_ms":null,"elapsed_ms":0}}
 {"schema":1,"mention":{"session":"gram","chapter":"f*:0","at":1794304804,"line":"https://github.com/o/r/pull/7 and https://github.com/o/r/issues/8, https://github.com/o/r/commit/abc1234def and (https://example.com/a_(b)) and https://github.com/o/r/pull/7/files.","offset":595,"live":false,"project":"-home-demo-proj"}}
 {"schema":1,"mention":{"session":"gram","chapter":"f*:2216","at":1794304811,"line":"PULL: O/R#7 and o/r#7 and https://github.com/O/R/pull/7","offset":2216,"live":false,"project":"-home-demo-proj"}}
-{"schema":1,"tally":{"session":"gram","live":false,"project":"-home-demo-proj","count":4,"definitions":0,"partial":false}}
+{"schema":1,"tally":{"session":"gram","live":false,"project":"-home-demo-proj","count":4,"definitions":0,"partial":false,"mentions_dropped":0}}
 {"schema":1,"done":true,"partial":false,"counts":{"session":4,"project":0,"project_sessions":0,"all":null,"all_sessions":null},"why":null,"files":1,"bytes":2799,"lines_too_long":0}

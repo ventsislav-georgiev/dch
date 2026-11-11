@@ -2931,18 +2931,14 @@ struct xr_scan
 	int live, full, shell, budget;
 	long long t0;
 	uint64_t written;
-	/* hold: lines kept in memory until xr_scan_release (a shell's ring is
-	** read before its first line can name the session) */
-	int hold;
-	char *hb;
-	size_t hl;
-	FILE *hm;
+	size_t room;		/* kept under the cap for the tally and done */
 	/* this file */
 	uint64_t nunit, lastunit, nrow, lastrow, lines, lastoff, lasth, foff;
 	int found, ndefs, mentioned;
 	uint64_t defh[XR_DEFS];
 	char *held[XR_HELD];
 	size_t hn, h0;
+	uint64_t dropped;	/* mention lines the XR_HELD bound left out */
 	/* the scan */
 	uint64_t files, bytes, base, too_long;
 	int stop, out_full;
@@ -2960,12 +2956,42 @@ xr_now_ms(void)
 	return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
+/* A file's tally line (3.4); mentions_dropped: the mention lines past the
+** first and the newest 199, counted in count but not written. */
+static char *
+tally_line(const struct xr_scan *x, uint64_t count, uint64_t dropped,
+           int partial)
+{
+	char *b = NULL;
+	size_t bl;
+	FILE *m = open_memstream(&b, &bl);
+
+	if (!m)
+		return NULL;
+	fputs("{\"schema\":1,\"tally\":{\"session\":", m);
+	xr_put_str(m, x->session);
+	fprintf(m, ",\"live\":%s,\"project\":", x->live ? "true" : "false");
+	xr_put_str(m, x->project);
+	/* partial: the per-file range cap cut it (3.4); a stop says so in done */
+	fprintf(m, ",\"count\":%llu,\"definitions\":%d,\"partial\":%s,"
+	        "\"mentions_dropped\":%llu}}\n", (unsigned long long)count,
+	        x->ndefs, partial ? "true" : "false",
+	        (unsigned long long)dropped);
+	if (fclose(m) != 0)
+	{
+		free(b);
+		return NULL;
+	}
+	return b;
+}
+
 struct xr_scan *
 xr_scan_new(FILE *f, const char *key, const char *session,
             const char *project, int live, int full, int shell, int budget,
             long long t0)
 {
 	struct xr_scan *x = calloc(1, sizeof *x);
+	char *t;
 
 	if (!x)
 		return NULL;
@@ -2978,6 +3004,14 @@ xr_scan_new(FILE *f, const char *key, const char *session,
 	x->shell = shell;
 	x->budget = budget;
 	x->t0 = x->last = t0;
+	/* room for done and the widest tally: both always go (3.4) */
+	if (!(t = tally_line(x, UINT64_MAX, UINT64_MAX, 1)))
+	{
+		free(x);
+		return NULL;
+	}
+	x->room = 1024 + strlen(t);
+	free(t);
 	return x;
 }
 
@@ -2990,9 +3024,6 @@ xr_scan_free(struct xr_scan *x)
 		return;
 	for (k = 0; k < x->hn; k++)
 		free(x->held[(x->h0 + k) % XR_HELD]);
-	if (x->hm)
-		fclose(x->hm);
-	free(x->hb);
 	free(x);
 }
 
@@ -3015,25 +3046,29 @@ sc_check(struct xr_scan *x, int ok)
 	return ok && !ferror(x->f) ? 0 : sc_fail(x, errno == EPIPE);
 }
 
-/* One line under the 4 MiB cap, with room kept for `done` (3.4). */
+static int
+sc_put(struct xr_scan *x, const char *l, size_t n)
+{
+	if (sc_check(x, fwrite(l, 1, n, x->f) == n) != 0)
+		return -1;
+	x->written += n;
+	return 0;
+}
+
+/* One line under the 4 MiB cap, with room kept for the tally and `done`
+** (3.4). */
 static int
 sc_line(struct xr_scan *x, const char *l, size_t n)
 {
 	if (x->out_full || x->cancel)
 		return -1;
-	if (x->written + n + 1024 > xr_lim.out)
+	if (x->written + n + x->room > xr_lim.out)
 	{
 		x->out_full = x->stop = 1;
 		x->why = "output";
 		return -1;
 	}
-	if (x->hold && !x->hm && !(x->hm = open_memstream(&x->hb, &x->hl)))
-		return sc_fail(x, 0);
-	if (x->hold ? fwrite(l, 1, n, x->hm) != n
-	            : sc_check(x, fwrite(l, 1, n, x->f) == n) != 0)
-		return sc_fail(x, x->cancel == 1);
-	x->written += n;
-	return 0;
+	return sc_put(x, l, n);
 }
 
 /* A line built on a memstream, then sent. */
@@ -3149,8 +3184,10 @@ sc_hit(void *ctx, const struct xr_hit *h)
 
 		for (k = 0; k < x->ndefs && x->defh[k] != th; k++)
 			;
-		if (k == x->ndefs && x->ndefs < XR_DEFS)
-			x->defh[x->ndefs++] = th;
+		/* a line per distinct title, at most XR_DEFS (3.8) */
+		if (k < x->ndefs || x->ndefs == XR_DEFS)
+			goto anchor;
+		x->defh[x->ndefs++] = th;
 		if (!(m = ln_open(&b, &bl)))
 			return;
 		fputs("{\"schema\":1,\"definition\":{\"session\":", m);
@@ -3209,6 +3246,7 @@ sc_hit(void *ctx, const struct xr_hit *h)
 					free(x->held[x->h0]);
 					x->h0 = (x->h0 + 1) % XR_HELD;
 					x->hn--;
+					x->dropped++;
 				}
 				x->held[(x->h0 + x->hn++) % XR_HELD] = b;
 			}
@@ -3217,6 +3255,7 @@ sc_hit(void *ctx, const struct xr_hit *h)
 	/* light, --scope session: the first result ends the scan once its
 	** line (a shell: its row) is done, so a definition keeps its anchor's
 	** mention */
+anchor:
 	if (!x->full && !x->found)
 	{
 		x->found = 1;
@@ -3248,8 +3287,11 @@ xr_scan_tick(void *ctx, uint64_t bytes)
 	x->bytes = x->base + bytes;
 	if (!x->stop && x->found)
 	{
-		x->stop = 1;
-		x->why = "first";
+		if (!x->shell)	/* a shell's: its row ends the scan (sc_hit) */
+		{
+			x->stop = 1;
+			x->why = "first";
+		}
 	}
 	else if (!x->stop && !x->full && now - x->t0 >= x->budget)
 	{
@@ -3262,7 +3304,7 @@ xr_scan_tick(void *ctx, uint64_t bytes)
 		x->why = "time";
 	}
 	/* one progress line per 250 ms window while the scan runs (R6) */
-	if (!x->stop && !x->hold && now - x->last >= 250)
+	if (!x->stop && now - x->last >= 250)
 	{
 		char *b;
 		size_t bl;
@@ -3291,7 +3333,6 @@ xr_scan_file(struct xr_scan *x, uint64_t bytes, uint64_t too_long,
 {
 	char *b;
 	size_t bl, k;
-	FILE *m;
 	uint64_t count = per_row ? x->nrow : x->nunit;
 
 	x->files++;
@@ -3314,16 +3355,14 @@ xr_scan_file(struct xr_scan *x, uint64_t bytes, uint64_t too_long,
 	}
 	x->hn = x->h0 = 0;
 	x->nunit = count;	/* the session's count, for done */
-	if (!(m = ln_open(&b, &bl)))
+	if (!(b = tally_line(x, count, x->dropped, partial)))
 		return;
-	fputs("{\"schema\":1,\"tally\":{\"session\":", m);
-	xr_put_str(m, x->session);
-	fprintf(m, ",\"live\":%s,\"project\":", x->live ? "true" : "false");
-	xr_put_str(m, x->project);
-	/* partial: the per-file range cap cut it (3.4); a stop says so in done */
-	fprintf(m, ",\"count\":%llu,\"definitions\":%d,\"partial\":%s}}\n",
-	        (unsigned long long)count, x->ndefs, partial ? "true" : "false");
-	ln_send(x, m, &b, &bl);
+	x->dropped = 0;
+	/* the tally goes past a full output: sc_line kept its room */
+	bl = strlen(b);
+	if (!x->cancel && x->written + bl + 1024 <= xr_lim.out)
+		(void)sc_put(x, b, bl);
+	free(b);
 	if (partial && !x->why)
 		x->why = "range";
 }
@@ -3332,7 +3371,6 @@ int
 xr_scan_first(struct xr_scan *x, const char *session_id, int shape,
               const char *text)
 {
-	FILE *f = x->f;
 	char *b;
 	size_t bl;
 	FILE *m = ln_open(&b, &bl);
@@ -3362,33 +3400,9 @@ xr_scan_first(struct xr_scan *x, const char *session_id, int shape,
 		free(b);
 		return -1;
 	}
-	x->hold = 0;
 	rc = sc_line(x, b, strlen(b));
 	free(b);
-	(void)f;
 	return rc == 0 ? sc_check(x, fflush(x->f) == 0) : -1;
-}
-
-void
-xr_scan_hold(struct xr_scan *x)
-{
-	x->hold = 1;
-}
-
-/* After `first`: what was held goes out (it was counted when held). */
-int
-xr_scan_release(struct xr_scan *x)
-{
-	int ok = 1;
-
-	if (x->cancel)
-		return -1;
-	if (x->hm)
-		ok = fclose(x->hm) == 0 &&
-		     (!x->hb || fwrite(x->hb, 1, x->hl, x->f) == x->hl);
-	x->hm = NULL;
-	x->hold = 0;
-	return sc_check(x, ok && fflush(x->f) == 0);
 }
 
 int

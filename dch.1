@@ -715,7 +715,14 @@ light by default (stops at the first result or after
 .B \-\-full
 to read it all (a
 .B \-\-budget\-ms
-with it is accepted and has no effect);
+with it is accepted and has no effect; a file gives its first
+.B mention
+line and its newest 199, the rest counted in the tally's
+.BR mentions_dropped ;
+one
+.B definition
+line per title, at most 8; output capped at 4 MiB, then
+.BR why:\(dqoutput\(dq );
 .B \-\-scope session
 is required (\fBproject\fR and \fBall\fR come later and exit 2).
 A reader that closes the pipe ends any form at dch's next write (at most
@@ -773,7 +780,9 @@ counts) or a gap make
 false with
 .BR why:\(dqrange\(dq .
 The ring is read 1 MiB at a time, so a query stays under 16 MB.
-The object is capped at 4 MiB (the oldest chapters go,
+The object is capped at 4 MiB (refs go first, each counted in
+.BR dropped_keys ,
+then the oldest chapters;
 .BR why:\(dqoutput\(dq ).
 Nothing is written to disk and nothing is shelled out.
 With

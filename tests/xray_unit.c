@@ -746,6 +746,130 @@ t_cancel(void)
 	fclose(f);
 }
 
+/* #149: a scan's lines from hits fed straight to its sink; the output in
+** *out (freed by the caller), the scan's done rc in *rc. */
+static size_t
+scan_run(int full, int shell, int ndefs, int ntitles, int nment,
+         size_t pad, char **out, int *rc)
+{
+	struct xr_span sp;
+	struct xr_hit h;
+	struct xr_sink k;
+	struct xr_scan *x;
+	char line[2048], title_[64], *b = NULL;
+	size_t bl = 0;
+	FILE *f = open_memstream(&b, &bl);
+	int i;
+
+	*rc = -1;
+	*out = NULL;
+	if (!f || !xr_ref_parse("#831", NULL, &sp) ||
+	    !(x = xr_scan_new(f, sp.key, "s", "p", 1, full, shell, 300,
+	                      xr_now_ms())))
+	{
+		if (f)
+			fclose(f);
+		free(b);
+		return 0;
+	}
+	(void)xr_scan_first(x, "id", sp.shape, xr_span_text(&sp));
+	xr_scan_sink(x, &k);
+	memset(line, 'w', pad);
+	memcpy(line, "#831 ", 5);
+	line[pad] = '\0';
+	sp.s = 0;
+	sp.e = 4;
+	for (i = 0; i < ndefs + nment; i++)
+	{
+		memset(&h, 0, sizeof h);
+		h.sp = &sp;
+		h.line = line;
+		h.ll = pad;
+		h.off = h.unit = h.row = (uint64_t)i + 1;
+		h.at = -1;
+		if (i < ndefs)
+		{
+			snprintf(title_, sizeof title_, "title %d", i % ntitles);
+			h.title = title_;
+			h.passage = line;
+			h.rule = "D1";
+		}
+		k.hit(k.ctx, &h);
+	}
+	xr_scan_file(x, 1, 0, 0, 0);
+	*rc = xr_scan_done(x);
+	xr_scan_free(x);
+	fclose(f);
+	*out = b;
+	return bl;
+}
+
+static int
+count_of(const char *s, const char *needle)
+{
+	int n = 0;
+
+	for (; (s = strstr(s, needle)); s++)
+		n++;
+	return n;
+}
+
+/* #149: the --ref stream's caps (3.4): first and the tally always go,
+** definition lines once per title and at most 8, the mention lines the
+** 200-per-file bound left out counted, and a shell's scan ticked. */
+static void
+t_scan_caps(void)
+{
+	size_t out0 = xr_lim.out, n;
+	char *o, *d;
+	int rc;
+	struct xr_scan *x;
+
+	n = scan_run(1, 1, 21, 4, 0, 40, &o, &rc);
+	CHECK("scan: 21 definitions of 4 titles write 4 lines",
+	      o && rc == 0 && count_of(o, "\"definition\"") == 4 &&
+	      strstr(o, "\"definitions\":4,"));
+	free(o);
+	n = scan_run(1, 1, 12, 12, 0, 40, &o, &rc);
+	CHECK("scan: 12 distinct titles write 8 lines",
+	      o && rc == 0 && count_of(o, "\"definition\"") == 8);
+	free(o);
+	n = scan_run(1, 0, 0, 1, 300, 40, &o, &rc);
+	CHECK("scan: 300 mention lines write 200, tally mentions_dropped 100",
+	      o && rc == 0 && count_of(o, "\"mention\"") == 200 &&
+	      strstr(o, "\"count\":300,") &&
+	      strstr(o, "\"mentions_dropped\":100}") &&
+	      strstr(o, "\"partial\":false,\"counts\""));
+	free(o);
+	/* the cap reached by held mentions: first ... tally, done */
+	xr_lim.out = 64 << 10;
+	n = scan_run(1, 1, 8, 8, 400, 1000, &o, &rc);
+	d = o ? strstr(o, "{\"schema\":1,\"done\"") : NULL;
+	CHECK("scan: past the cap, first, then the tally, then done "
+	      "why output, all under the cap",
+	      o && rc == 0 && n <= xr_lim.out &&
+	      !strncmp(o, "{\"schema\":1,\"first\"", 19) &&
+	      strstr(o, "\"tally\"") && d && strstr(o, "\"tally\"") < d &&
+	      strstr(d, "\"why\":\"output\"") && d[strlen(d) - 1] == '\n' &&
+	      !strchr(d, '\n')[1]);
+	free(o);
+	xr_lim.out = out0;
+
+	/* the shell's tick (LOW-4): budget, 10 s, a first result left to its
+	** row */
+	x = xr_scan_new(stdout, "issue:#831", "s", "", 1, 1, 1, 300,
+	                xr_now_ms() - 10001);
+	CHECK("scan: a full shell scan past 10 s stops",
+	      x && xr_scan_tick(x, 1) != 0);
+	xr_scan_free(x);
+	x = xr_scan_new(stdout, "issue:#831", "s", "", 1, 0, 1, 50,
+	                xr_now_ms() - 60);
+	CHECK("scan: a light shell scan past its budget stops",
+	      x && xr_scan_tick(x, 1) != 0);
+	xr_scan_free(x);
+	(void)n;
+}
+
 static void
 t_ref(void)
 {
@@ -1182,6 +1306,7 @@ main(void)
 	t_index();
 	t_caps();
 	t_cancel();
+	t_scan_caps();
 	t_lookup();
 	printf("%s: %d failed\n", fails ? "FAIL" : "ok", fails);
 	return fails != 0;
