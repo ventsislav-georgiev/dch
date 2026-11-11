@@ -260,7 +260,8 @@ def test_primary():
     try:
         wait_for(lambda: screen(n).strip())
         send(n, "printf 'ab%.0s' $(seq 1 50); echo END\n")
-        wait_for(lambda: "END" in screen(n))
+        # abEND is the output's end only: the typed line has "echo END"
+        wait_for(lambda: "abEND" in screen(n))
         st, txt = screen_read(n, bytes([0, 0, 0, 0, 0x08]))
         check("primary: status OK, the wrapped row joined into one line",
               st == 0 and joined in txt.split("\n"), (st, txt))
