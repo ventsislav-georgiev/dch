@@ -115,6 +115,10 @@ dch \- detachable terminal sessions with a headless agent API
 .I anchor
 .B \-\-json
 .br
+.B dch \-\-xray
+.IB host : name
+.B \-\-requests \-\-json
+.br
 .B dch
 .RB [ \-\-host
 .IR host ]
@@ -1278,6 +1282,86 @@ Other verbs
 .BR \-\-send ,
 .BR \-k )
 reach it by any case on a case\-insensitive file system, like any name.
+.TP
+.BI \-\-xray " host\fB:\fPname " \-\-requests " " \-\-json
+One warm connection to
+.IR host 's
+.B dch serve
+for many X\-ray requests on
+.IR name ,
+one at a time, so a client asks without dialling each time.
+.I host\fB:\fPname
+and
+.B \-\-json
+only; a local name exits 2.
+On connect it writes
+.BR {"schema":1,"ready":{"ops":[...]}} ,
+the host's ops.
+Each standard\-input line is a request:
+.B {"req":\fIN\fP,"argv":[...]}
+(the flags after
+.B \-\-xray
+.IR name ,
+.I N
+1 to 2147483647), or
+.B {"cancel":\fIN\fP}
+to stop request
+.I N
+(nothing is written when it is not running).
+Only
+.BR \-\-json ,
+.B \-\-ref
+(with
+.BR \-\-scope ,
+.BR \-\-full ,
+.BR \-\-budget\-ms ),
+.B \-\-chapter
+and
+.B \-\-clear
+are taken, checked by dch's rules before anything is sent; any other form
+or a bad value is answered
+.B {"req":\fIN\fP,"stderr":"dch: ..."}
+and
+.BR {"req":\fIN\fP,"exit":2,"why":"refused"} .
+Each host output line comes back as
+.BR {"req":\fIN\fP,"line":\fIline\fP} ,
+byte for byte (a line that is not one JSON object as a JSON string), each
+standard\-error line as
+.BR {"req":\fIN\fP,"stderr":"..."} ,
+escaped, and every request ends with exactly one
+.BR {"req":\fIN\fP,"exit":\fIE\fP,"why":\fIW\fP} :
+.I E
+the host's exit status;
+.I W
+.BR null ,
+.BR cancel ,
+.B cap
+or
+.B timeout
+(the host cut it short),
+.B busy
+(exit 1: one was running, and goes on),
+.B refused
+(exit 2 as above; 1, or 4 by its gate, when the host refused it) or
+.B lost
+(exit 7: the connection dropped while it ran).
+A line that is no request gets the same refused pair with
+.BR \(dqreq\(dq:null ;
+blank lines are skipped, a line over 64 KiB is refused.
+Without
+.B ctl\-cancel
+on the host a cancel closes the connection and dch dials again; after the
+host's idle close or a lost connection the next request dials again.
+End of standard input closes the connection and exits 0 (a request still
+running ends
+.BR why:\(dqcancel\(dq ).
+With no connection at the start it writes one
+.B {"schema":1,"exit":\fIE\fP,"stderr":...}
+line, the message on standard error too, and exits
+.IR E :
+6 for a host without
+.BR xray ,
+7 unreachable, 4 refused by the gate.
 .TP
 .BI \-\-send " name text..."
 Type

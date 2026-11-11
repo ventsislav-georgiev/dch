@@ -2749,6 +2749,9 @@ usage(void)
 	    "                                             as one JSON object;\n"
 	    "                                             <n> as host:name runs\n"
 	    "                                             on that host's dch serve\n"
+	    "  dch --xray host:name --requests --json     one warm connection: X-ray\n"
+	    "                                             requests as NDJSON on\n"
+	    "                                             stdin, answers on stdout\n"
 	    "  dch --agent-list [--json]                 list native Claude peers\n"
 	    "  dch --agent-send <name> <message...>       message one native peer\n"
 	    "  dch serve [--allow-create] [--allow-user <u>]...  serve sessions to\n"
@@ -13314,13 +13317,16 @@ name_routes_remote(const char *n)
 ** <anchor> --json` (spec 3.1, 3.3-3.5): flags in any order, each once; the
 ** rest of the family (the view) comes with XR3-XR5 and exits 2 here. A
 ** host:name with --json (#157, spec 4.1) runs on the host over ctl once
-** 3.1's rules pass here, whatever this dch runs locally: the host answers. */
+** 3.1's rules pass here, whatever this dch runs locally: the host answers.
+** --requests (#158, spec 4.3) holds a warm connection for requests read off
+** stdin. */
 static int
 xray_main(int argc, char **argv)
 {
 	const char *n = NULL, *ref = NULL, *scope = NULL, *budget = NULL, *e;
 	const char *chapter = NULL;
 	int json = 0, clear = 0, full = 0, follow = 0, k, rc, nr, ni = 0;
+	int requests = 0;
 	struct hrec *r = NULL;
 	struct xr_target t;
 	struct xr_refq q;
@@ -13363,6 +13369,8 @@ xray_main(int argc, char **argv)
 			full = 1;
 		else if (!strcmp(argv[k], "--follow") && !follow)
 			follow = 1;
+		else if (!strcmp(argv[k], "--requests") && !requests)
+			requests = 1;
 		else if (argv[k][0] == '-' && argv[k][1])
 		{
 			fprintf(stderr, "dch: bad usage: %s%s\n", argv[k],
@@ -13370,7 +13378,8 @@ xray_main(int argc, char **argv)
 			        : (!strcmp(argv[k], "--json") ||
 			           !strcmp(argv[k], "--clear") ||
 			           !strcmp(argv[k], "--full") ||
-			           !strcmp(argv[k], "--follow")) ? " twice"
+			           !strcmp(argv[k], "--follow") ||
+			           !strcmp(argv[k], "--requests")) ? " twice"
 			        : " is not an --xray flag of this dch");
 			return 2;
 		}
@@ -13411,6 +13420,25 @@ xray_main(int argc, char **argv)
 	{
 		fputs("dch: bad session\n", stderr);
 		return 2;
+	}
+	if (requests)
+	{
+		/* #158, spec 4.3: each request's flags come on stdin; a local
+		** session takes one dch --xray per request (K4.1) */
+		if (!json || ref || chapter || clear || follow || scope || full ||
+		    budget)
+		{
+			fputs("dch: bad usage: --requests takes host:name and --json, "
+			      "nothing else\n", stderr);
+			return 2;
+		}
+		if (!name_routes_remote(n))
+		{
+			fputs("dch: bad usage: --requests takes a remote host:name\n",
+			      stderr);
+			return 2;
+		}
+		return dch_remote_requests(argv[ni]);
 	}
 	/* the value rules (3.1), in the table's order */
 	if (ref && !xr_ref_ok(ref))

@@ -418,7 +418,7 @@ someone is watching is invisible to them.
 | Verb | Does | Exit codes |
 | --- | --- | --- |
 | `--spawn <n> [--size CxR] [--env K=V]... [cmd...]` | Start headless session (default: `$SHELL`, 80x24 or `$COLUMNS`/`$LINES`). `--env` (max 32, first `=` splits) adds variables to the child; reserved keys (`DCH_SESSION`, `TERM` fixup) always win. Like `--revive` (and a plain `dch <new>`), it drops the calling Claude Code session's identity (`CLAUDECODE`, `CLAUDE_CODE_*` session vars), plus `GIT_EDITOR` and the other harness vars when `CLAUDECODE` is set, and sets `LC_TERMINAL=ghostty` unless the caller has it (dch keeps OSC 8 links, but under `TERM=xterm-256color` with no `TERM_PROGRAM` Claude Code would strip its statusline's, and `LC_TERMINAL` is the one signal its check reads that supports-hyperlinks and other Node CLIs ignore; ssh sends it on, by macOS's default `SendEnv LC_*`). Like any session variable it reaches every program in the session, not only Claude Code; a tool that keys on `ghostty` may assume Ghostty-only features (kitty graphics, for one) that the terminal you attach from may lack. dch sets no `FORCE_HYPERLINK`: those CLIs honour it before they check for a terminal, so it put OSC 8 into pipes and files (`stylelint t.css > out`, an agent's Bash tool); a caller's own value still reaches the session. An explicit `--env` (`--env LC_TERMINAL=` included) still wins. Prints the name. A program that cannot be executed is an error (`dch: <n>: <cmd>: <reason>`); one that runs and exits at once is not. | 0 ok, 1 exists/failed/not executable/bad --env |
-| `--xray <n> --json` | One JSON object: the session's corpus, chapters and refs (see [X-ray queries](#x-ray-queries---xray)). `--clear` empties a shell's ring instead; `--ref` streams one ref's lines; `--follow` streams the object and then its changes; `--chapter` prints one chapter's entries. `<n>` as `host:name` runs it on that host (dch serve 1.55.0+). Must be the first argument. | 0 ok, 1 no such session/ambiguous/no corpus, 2 usage, 3 read failure; remote: 4 gate, 6 host lacks `xray`, 7 unreachable |
+| `--xray <n> --json` | One JSON object: the session's corpus, chapters and refs (see [X-ray queries](#x-ray-queries---xray)). `--clear` empties a shell's ring instead; `--ref` streams one ref's lines; `--follow` streams the object and then its changes; `--chapter` prints one chapter's entries. `<n>` as `host:name` runs it on that host (dch serve 1.55.0+); `host:name --requests --json` holds one connection there for many requests read off standard input. Must be the first argument. | 0 ok, 1 no such session/ambiguous/no corpus, 2 usage, 3 read failure; remote: 4 gate, 6 host lacks `xray`, 7 unreachable |
 | `--send <n> <text...>` | Type text (joined with spaces), no enter. | 0 ok |
 | `--run <n> <text...>` | `--send` + enter. Into a session whose Claude Code runs — as its command or typed into its shell — the text goes through `--say`'s composer gate instead: typed only over an empty composer, Enter pressed once it shows and again while it stays (Claude Code folds an Enter sent with the text into the paste). A `/command` is typed raw, a message pasted. A shell or any other program, a master without a mirror (`DCH_NO_VT`), dch-lite and your own session (`$DCH_SESSION`) keep the plain burst. A gate failure prints `dch: <n>: <reason> — <why>` on stderr: `prompt` and `draft` (nothing typed), `not_typed` (the text never showed in the composer, no Enter), `not_submitted` (it stayed there through every Enter); `no_screen` when the composer is not on screen; `interrupted`, `withdrawn` or `draft_left` on a SIGINT, SIGTERM or SIGHUP, as for `--say`. | 0 ok, 1 gate failure |
 | `--keys <n> <key...>` | Encode+send keys mode-aware: `ctrl+c`, `alt+x`, `shift+tab`, `up`, `f5`, `enter`, `esc`, single chars. | 0 ok, 1 unknown key |
@@ -887,6 +887,41 @@ request exits 1 (`dch: <host>: <why>`), and an unreachable host or a lost
 connection exits 7. Ctrl-C, SIGTERM or a closed standard output cancel the
 query on the host, as for the [remote control verbs](#remote-hosts). There
 is no `--host` form.
+
+`dch --xray host:name --requests --json` holds one warm connection to the
+host for many requests, one at a time: it is how a client such as Prosper
+asks a remote session one question after another without dialling each
+time. It takes `host:name` and `--json` only; a local name exits 2 (run one
+`dch --xray` per request there). On connect it writes
+`{"schema":1,"ready":{"ops":[...]}}`, the host's ops. Then each line on
+standard input is a request, as NDJSON:
+- `{"req":N,"argv":["--ref","#831","--full","--json"]}`: the flags after
+  `--xray <name>`, `N` from 1 to 2147483647. Only the request forms are
+  taken: `--json`, `--ref` (with its `--scope`, `--full`, `--budget-ms`),
+  `--chapter` and `--clear`. dch checks them by its own rules first; any
+  other form (`--follow`, `--requests`, the view, an unknown flag) or a bad
+  value is answered `{"req":N,"stderr":"dch: ..."}` and
+  `{"req":N,"exit":2,"why":"refused"}`, and nothing is sent.
+- `{"cancel":N}`: stops request `N` on the host. Nothing is written when
+  `N` is not running.
+
+Each line the host writes comes back as `{"req":N,"line":<the line>}`, the
+line byte for byte (a line that is not one JSON object comes as a JSON
+string); each standard-error line as `{"req":N,"stderr":"..."}`, escaped.
+Every request ends with exactly one `{"req":N,"exit":E,"why":W}`: `E` is
+the host's exit status, `W` is `null`, `"cancel"`, `"cap"` or `"timeout"`
+(the host cut it short), `"busy"` (exit 1: a request was already running;
+the running one goes on), `"refused"` (exit 2 as above, or the host refused
+it: 1, or 4 by its gate) or `"lost"` (exit 7: the connection dropped while
+it ran). A line that is no request gets the same `refused` pair with
+`"req":null`; a blank line is skipped, a line over 64 KiB refused. On a host
+without `ctl-cancel` a cancel closes the connection and dch dials again,
+unseen. After the host's idle close (5 minutes) or a lost connection, the
+next request dials again. End of standard input closes the connection and
+exits 0; a request still running then ends `"why":"cancel"`. With no
+connection at the start, dch writes one `{"schema":1,"exit":E,"stderr":...}`
+line, prints the message on standard error and exits `E`: 6 for a host
+without `xray`, 7 unreachable, 4 refused by the gate.
 
 The corpus:
 - **Claude Code.** The chapters come from the session's transcript

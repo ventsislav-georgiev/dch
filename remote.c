@@ -47,7 +47,9 @@
 ** a 0x34 when the host lists "ctl-cancel", then its 0x33 for a moment;
 ** else the close, which the host takes as one. dch --xray host:name
 ** (#157) comes here too, its values checked first by dch --xray's own
-** rules; a host whose hello lacks "xray" is exit 6, nothing sent.
+** rules; a host whose hello lacks "xray" is exit 6, nothing sent. dch
+** --xray host:name --requests --json (#158) holds one such connection warm
+** for many requests, one at a time, each read off stdin (spec #832 4.3).
 **
 ** ponytail: no 0x2e watch stream (the picker re-probes every RM_EVERY_MS),
 ** and no remote kill, rename or create from the picker: those need a
@@ -57,6 +59,7 @@
 #include "win/win.h"	/* Winsock, and the sock_* spellings below */
 #else
 #include "dtach.h"
+#include "xray.h"	/* --requests checks a --ref as dch --xray does */
 #endif
 #include "rframe.h"
 
@@ -3118,3 +3121,662 @@ out:
 #endif
 	return rc;
 }
+
+#ifndef _WIN32
+/* ---- dch --xray host:name --requests --json (#158, spec #832 4.3) ---- */
+
+/* One warm ctl connection, many requests. Each stdin line {"req":N,
+** "argv":[...]} (the argv after --xray <name>) is checked here first, by
+** 3.1's value rules and in 4.3's request forms only, then sent as one 0x30;
+** its 0x31 lines come back as {"req":N,"line":<the host's line>}, its 0x32
+** lines as {"req":N,"stderr":"..."}, its end as one {"req":N,"exit":E,
+** "why":...}. One at a time ("busy"). {"cancel":N} is a 0x34, or the
+** close and a quiet re-dial when the host lacks "ctl-cancel". An idle close
+** or a lost link re-dials on the next request; the one in flight then ends
+** exit 7 "lost". stdin EOF: the close, exit 0. */
+
+#define RQ_LINE_MAX RF_CTRL_MAX	/* a stdin line, at most */
+
+enum { RQ_BAD, RQ_REQ, RQ_CANCEL };
+
+/* One stdin line s: RQ_REQ for {"req":N,"argv":[strings]} (*av
+** dch_json_strv's block to free, NULL for [], *ac its count), RQ_CANCEL
+** for {"cancel":N}, else RQ_BAD; *req is N when it is 1..2^31-1, else 0.
+** Any other key, a key twice or a wrong type is RQ_BAD: input is never
+** additive (3.1). Pure. */
+static int
+rq_parse(const char *s, long long *req, char ***av, int *ac)
+{
+	struct json_parser jp;
+	long long v = 0;
+	int keys = 0, i, t, a = -1, rc = RQ_BAD;
+
+	*req = 0;
+	*av = NULL;
+	*ac = 0;
+	if (dch_json_parse(&jp, s) < 0 || jp.ntok < 1 ||
+	    jp.tok[0].kind != JSON_OBJECT)
+		goto out;
+	/* key i, its value i + 1, the next key after the value */
+	for (i = 1; i + 1 < jp.ntok && i < jp.tok[0].next;
+	     i = jp.tok[i + 1].next)
+		keys++;
+	if ((t = dch_json_field(&jp, 0, "cancel")) != -1)
+	{
+		if (keys == 1 && tok_int(&jp, t, &v) == 0 && v >= 1 &&
+		    v <= 0x7fffffff)
+		{
+			*req = v;
+			rc = RQ_CANCEL;
+		}
+		goto out;
+	}
+	if (jint(&jp, 0, "req", &v) == 1 && v >= 1 && v <= 0x7fffffff)
+		*req = v;
+	if (!*req || keys != 2 || (a = jcont(&jp, 0, "argv", JSON_ARRAY)) < 0)
+		goto out;
+	rc = RQ_REQ;
+	for (i = a + 1; i < jp.tok[a].next; i = jp.tok[i].next)
+		if (jp.tok[i].kind != JSON_STRING)
+			rc = RQ_BAD;
+	if (rc == RQ_REQ && jp.tok[a].next > a + 1 &&
+	    !(*av = dch_json_strv(s, NULL, "argv", ac)))
+		rc = RQ_BAD;
+out:
+	dch_json_free(&jp);
+	return rc;
+}
+
+/* --xray, name, then a request's argv: a block to free, or NULL. */
+static char **
+rq_argv(char *name, int ac, char **av)
+{
+	char **xv = calloc((size_t)ac + 3, sizeof *xv);
+
+	if (!xv)
+		return NULL;
+	xv[0] = "--xray";
+	xv[1] = name;
+	if (ac)
+		memcpy(xv + 2, av, (size_t)ac * sizeof *av);
+	return xv;
+}
+
+/* A request's argv (after --xray <name>) by 3.1's value rules, in 4.3's
+** request forms only: --json, --ref <text> [--scope] [--full]
+** [--budget-ms], --chapter <anchor>, --clear. 0, else -1 with its stderr
+** line in msg[cap], worded as dch --xray's for a value rule. Pure. */
+static int
+rq_check(char *name, int ac, char **av, char *msg, size_t cap)
+{
+	static unsigned char kind[CTL_ARGV_MAX];
+	struct xr_span sp;
+	char why[300], **xv;
+	int fl, i;
+
+	if (ac > CTL_ARGV_MAX - 2)
+	{
+		snprintf(msg, cap, "dch: bad usage: too many arguments");
+		return -1;
+	}
+	if (!(xv = rq_argv(name, ac, av)))
+	{
+		snprintf(msg, cap, "dch: out of memory");
+		return -1;
+	}
+	/* the ctl allowlist's --xray entries (4.4), less --follow */
+	if ((fl = ctl_check(ac + 2, xv, kind, why, sizeof why)) < 0)
+		snprintf(msg, cap, "dch: %s%s", strncmp(why, "bad ", 4)
+		         ? "bad usage: " : "", why);
+	else if (fl & CTL_FOREVER)
+	{
+		snprintf(msg, cap, "dch: bad usage: --follow is not a request");
+		fl = -1;
+	}
+	for (i = 2; fl >= 0 && i + 1 < ac + 2; i++)
+		if (kind[i] == CK_FLAG && !strcmp(xv[i], "--ref"))
+		{
+			if (!xr_ref_ok(xv[i + 1]))
+				snprintf(msg, cap, "dch: bad ref");
+			else if (!xr_ref_parse(xv[i + 1], NULL, &sp))
+				snprintf(msg, cap, "dch: not a ref");
+			else
+				continue;
+			fl = -1;
+		}
+	free(xv);
+	return fl < 0 ? -1 : 0;
+}
+
+static void
+rq_head(struct sb *o, long long req)
+{
+	sb_s(o, "{\"req\":");
+	if (req)
+		sb_ll(o, req);
+	else
+		sb_s(o, "null");	/* a line with no req of its own */
+}
+
+/* req's stderr line s, escaped (C0, C1, bidi; U+FFFD for bad UTF-8) */
+static void
+rq_err(struct sb *o, long long req, const char *s)
+{
+	rq_head(o, req);
+	sb_s(o, ",\"stderr\":");
+	sb_q(o, s);
+	sb_s(o, "}\n");
+}
+
+/* req's one end line */
+static void
+rq_exit(struct sb *o, long long req, int code, const char *why)
+{
+	rq_head(o, req);
+	sb_s(o, ",\"exit\":");
+	sb_ll(o, code);
+	sb_s(o, ",\"why\":");
+	if (why)
+		sb_q(o, why);
+	else
+		sb_s(o, "null");
+	sb_s(o, "}\n");
+}
+
+/* The complete lines of buf (all of it when last) onto o, each one line of
+** req: stderr's escaped; stdout's byte for byte when it is one JSON object,
+** as dch writes them, else as a JSON string, so a host never writes a line
+** of its own here. What is left stays in buf. Pure. */
+static void
+rq_wrap(struct sb *o, long long req, int err, struct sb *buf, int last)
+{
+	struct json_parser jp;
+	size_t off = 0, k;
+	char *s, *nl;
+	int obj;
+
+	while (off < buf->n)
+	{
+		s = buf->p + off;
+		if (!(nl = memchr(s, '\n', buf->n - off)) && !last)
+			break;
+		k = nl ? (size_t)(nl - s) : buf->n - off;
+		s[k] = '\0';	/* the newline, or the sb's own NUL */
+		if (err)
+		{
+			rq_err(o, req, s);
+			off += k + 1;
+			continue;
+		}
+		obj = 0;
+		if (strlen(s) == k)
+		{
+			obj = dch_json_parse(&jp, s) == 0 && jp.ntok > 0 &&
+			      jp.tok[0].kind == JSON_OBJECT;
+			dch_json_free(&jp);
+		}
+		rq_head(o, req);
+		sb_s(o, ",\"line\":");
+		if (obj)
+			sb_add(o, s, k);
+		else
+			sb_q(o, s);
+		sb_s(o, "}\n");
+		off += k + 1;
+	}
+	if (!off)
+		return;
+	off = off < buf->n ? off : buf->n;
+	memmove(buf->p, buf->p + off, buf->n - off);
+	buf->n -= off;
+	buf->p[buf->n] = '\0';
+}
+
+/* The ready line: the ops of hello js, each quoted anew. Pure. */
+static void
+rq_ready(struct sb *o, const char *js)
+{
+	struct json_parser jp;
+	char got[64];
+	int ops, i, n = 0;
+
+	sb_s(o, "{\"schema\":1,\"ready\":{\"ops\":[");
+	if (dch_json_parse(&jp, js) == 0 && jp.ntok > 0 &&
+	    jp.tok[0].kind == JSON_OBJECT &&
+	    (ops = jcont(&jp, 0, "ops", JSON_ARRAY)) >= 0)
+		for (i = ops + 1; i < jp.tok[ops].next; i = jp.tok[i].next)
+			if (jp.tok[i].kind == JSON_STRING &&
+			    dch_json_decode(&jp, i, got, sizeof got) == 0)
+			{
+				sb_s(o, n++ ? "," : "");
+				sb_q(o, got);
+			}
+	dch_json_free(&jp);
+	sb_s(o, "]}}\n");
+}
+
+struct rq
+{
+	struct rhost h;
+	char sh[300], *name;	/* the host, printable; the host-local name */
+	struct probe *p;	/* the warm connection, NULL: none */
+	int cancel_ok;		/* its hello lists "ctl-cancel" */
+	struct rf_state rs;
+	struct sb tin, lo, le;	/* frames in; stdout, stderr to a newline */
+	long long req, cend;	/* the one running (0 none); its 0x34's end */
+};
+
+static void
+rq_close(struct rq *q)
+{
+	if (q->p)
+		probes_free(q->p, 1);
+	q->p = NULL;
+	free(q->tin.p);
+	free(q->lo.p);
+	free(q->le.p);
+	memset(&q->tin, 0, sizeof q->tin);
+	memset(&q->lo, 0, sizeof q->lo);
+	memset(&q->le, 0, sizeof q->le);
+}
+
+/* A new connection to q's host, its hello in: 0, else the exit status (4
+** refused, 6 no "ctl" or "xray", 7 unreachable, 1 a newer protocol) and its
+** stderr line in msg[cap]. */
+static int
+rq_dial(struct rq *q, char *msg, size_t cap)
+{
+	struct probe *p = calloc(1, sizeof *p);
+	int rc = 0;
+
+	rq_close(q);
+	if (!p)
+	{
+		snprintf(msg, cap, "dch: out of memory");
+		return 1;
+	}
+	p->h = q->h;
+	p->keep = p->hello_only = 1;
+	probe_all(p, 1, RM_ATTACH_MS);
+	if (p->st == PR_REFUSED)
+	{
+		snprintf(msg, cap, "dch: %s refused: %s", q->sh, p->why);
+		rc = DCH_EXIT_REFUSED;
+	}
+	else if (p->st == PR_NEWER)
+	{
+		snprintf(msg, cap, "dch: %s %s", q->sh, p->why);
+		rc = 1;
+	}
+	else if (p->st != PR_OK)
+	{
+		snprintf(msg, cap, "dch: %s: unreachable: %s", q->sh, p->why);
+		rc = DCH_EXIT_UNREACHABLE;
+	}
+	else if (!hello_op(p->hello_js, "ctl") || !hello_op(p->hello_js, "xray"))
+	{
+		snprintf(msg, cap, "dch: %s: does not support --xray (needs dch "
+		         "serve 1.55.0+)", q->sh);
+		rc = DCH_EXIT_UNSUPPORTED;
+	}
+	if (rc)
+	{
+		probes_free(p, 1);
+		return rc;
+	}
+	keepalive(p->fd);
+	q->p = p;
+	q->tin = p->in;
+	memset(&p->in, 0, sizeof p->in);
+	q->rs = p->rs;
+	q->cancel_ok = hello_op(p->hello_js, "ctl-cancel");
+	return 0;
+}
+
+/* n bytes out on fd within RM_ATTACH_MS: 0, else -1 and why in msg. */
+static int
+rq_send(int fd, const void *d, size_t n, char *msg, size_t cap)
+{
+	const char *b = d;
+	long long end = now_ms() + RM_ATTACH_MS;
+	size_t off = 0;
+	ssize_t k;
+
+	while (off < n)
+	{
+		struct pollfd pf;
+		long long left = end - now_ms();
+
+		if ((k = send(fd, b + off, n - off, MSG_NOSIGNAL)) > 0)
+		{
+			off += (size_t)k;
+			continue;
+		}
+		if (left <= 0 || !k || (errno != EAGAIN && errno != EINTR))
+		{
+			snprintf(msg, cap, "%s", left <= 0 ? "timed out"
+			         : !k ? "connection closed" : strerror(errno));
+			return -1;
+		}
+		pf.fd = fd;
+		pf.events = POLLOUT;
+		pf.revents = 0;
+		(void)poll(&pf, 1, (int)left);
+	}
+	return 0;
+}
+
+/* The link is gone (why): closed, and the request in flight ends exit 7
+** "lost"; the next request dials anew. */
+static void
+rq_lost(struct rq *q, struct sb *o, const char *why)
+{
+	char m[800];
+
+	if (q->req)
+	{
+		snprintf(m, sizeof m, "dch: %s: unreachable: %s", q->sh, why);
+		rq_err(o, q->req, m);
+		rq_exit(o, q->req, DCH_EXIT_UNREACHABLE, "lost");
+	}
+	q->req = q->cend = 0;
+	rq_close(q);
+}
+
+/* Cancelled by the close (no "ctl-cancel", or its 0x33 is late): what is
+** held is dropped, the request ends as the host's 0x34 would end it, and
+** a new connection is dialled, quietly (a failure: the next request's). */
+static void
+rq_drop(struct rq *q, struct sb *o)
+{
+	char m[800];
+
+	rq_exit(o, q->req, 2, "cancel");
+	q->req = q->cend = 0;
+	rq_close(q);
+	(void)rq_dial(q, m, sizeof m);
+}
+
+/* q's socket is readable: its frames, the request's lines onto o. */
+static void
+rq_net(struct rq *q, struct sb *o)
+{
+	unsigned char buf[RM_READ];
+	char msg[400], why[100], m[800];
+	int r, xit, code;
+	ssize_t k = read(q->p->fd, buf, sizeof buf);
+
+	if (k < 0 && (errno == EINTR || errno == EAGAIN))
+		return;
+	if (k <= 0)
+	{
+		/* idle: the host's idle close, quietly */
+		rq_lost(q, o, k ? strerror(errno) : "the connection was lost");
+		return;
+	}
+	sb_add(&q->tin, buf, (size_t)k);
+	do
+	{
+		msg[0] = why[0] = '\0';
+		xit = code = 1;
+		r = ctl_in(&q->rs, &q->tin, &q->lo, &q->le, &xit, why,
+		           sizeof why, msg, sizeof msg, &code);
+		if (r >= 0 && (q->tin.bad || q->lo.bad || q->le.bad))
+		{
+			snprintf(msg, sizeof msg, "it sent too much");
+			r = -1;
+		}
+		if (r < 0)
+		{
+			rq_lost(q, o, msg);
+			return;
+		}
+		if (!q->req)
+			q->lo.n = q->le.n = 0;	/* no request of ours: dropped */
+		else
+		{
+			rq_wrap(o, q->req, 1, &q->le, r);
+			rq_wrap(o, q->req, 0, &q->lo, r);
+		}
+		if (r && q->req && msg[0])
+		{
+			/* a 0x13: the host refused it, nothing ran */
+			snprintf(m, sizeof m, code == 1 ? "dch: %s: %s"
+			         : "dch: %s refused: %s", q->sh, msg);
+			rq_err(o, q->req, m);
+			rq_exit(o, q->req, code == 1 ? 1 : DCH_EXIT_REFUSED,
+			        "refused");
+		}
+		else if (r && q->req)
+			rq_exit(o, q->req, xit, !strcmp(why, "cancel") ||
+			        !strcmp(why, "cap") || !strcmp(why, "timeout")
+			        ? why : NULL);
+		if (r)
+			q->req = q->cend = 0;
+		if (r && msg[0])
+			rq_close(q);	/* its FIN follows */
+	} while (r && q->p && q->tin.n);
+}
+
+/* {"cancel":N}: a 0x34 for N while it runs, else nothing (as for 0x34). */
+static void
+rq_cancel(struct rq *q, struct sb *o, long long req)
+{
+	static const unsigned char c34[] = { 0x34, 0, 0, 0, 0 };
+	char m[400];
+
+	if (!q->req || req != q->req || q->cend)
+		return;
+	if (q->cancel_ok &&
+	    rq_send(q->p->fd, c34, sizeof c34, m, sizeof m) == 0)
+		q->cend = now_ms() + RM_CANCEL_MS;
+	else
+		rq_drop(q, o);
+}
+
+/* A checked request out as a 0x30 on the warm connection, dialled first
+** when there is none. */
+static void
+rq_start(struct rq *q, struct sb *o, long long req, int ac, char **av)
+{
+	struct sb b = {0};
+	char **xv, m[800];
+	int e;
+
+	if (!q->p && (e = rq_dial(q, m, sizeof m)))
+	{
+		rq_err(o, req, m);
+		rq_exit(o, req, e, e == DCH_EXIT_UNREACHABLE ? "lost"
+		                                              : "refused");
+		return;
+	}
+	if ((xv = rq_argv(q->name, ac, av)))
+		ctl_payload(&b, ac + 2, xv, NULL);
+	free(xv);
+	if (!xv || b.bad)
+	{
+		snprintf(m, sizeof m, "dch: the request is over %u KiB",
+		         RF_CTRL_MAX >> 10);
+		rq_err(o, req, m);
+		rq_exit(o, req, 2, "refused");
+	}
+	else
+	{
+		q->req = req;
+		if (rq_send(q->p->fd, b.p, b.n, m, sizeof m) < 0)
+			rq_lost(q, o, m);
+	}
+	free(b.p);
+}
+
+/* One stdin line s[0..k) (NUL-terminated there). */
+static void
+rq_line(struct rq *q, struct sb *o, const char *s, size_t k)
+{
+	long long req = 0;
+	char **av = NULL, m[400];
+	int ac = 0, kind;
+
+	if (strspn(s, " \t\r") == k)
+		return;		/* a blank line */
+	if (k > RQ_LINE_MAX)
+	{
+		rq_err(o, 0, "dch: bad request: a line over 64 KiB");
+		rq_exit(o, 0, 2, "refused");
+		return;
+	}
+	kind = strlen(s) != k ? RQ_BAD : rq_parse(s, &req, &av, &ac);
+	if (kind == RQ_CANCEL)
+		rq_cancel(q, o, req);
+	else if (kind == RQ_BAD)
+	{
+		rq_err(o, req, "dch: bad request: send {\"req\":N,\"argv\":"
+		       "[...]} or {\"cancel\":N}, one per line");
+		rq_exit(o, req, 2, "refused");
+	}
+	else if (q->req)
+		rq_exit(o, req, 1, "busy");	/* ctl's own rule (4.2) */
+	else if (rq_check(q->name, ac, av, m, sizeof m) < 0)
+	{
+		rq_err(o, req, m);
+		rq_exit(o, req, 2, "refused");
+	}
+	else
+		rq_start(q, o, req, ac, av);
+	free(av);
+}
+
+/* stdout gets o, flushed: 0, else -1 (our reader is gone). */
+static int
+rq_put(struct sb *o)
+{
+	int rc = o->bad ? -1 : 0;
+
+	if (!rc && o->n && (fwrite(o->p, 1, o->n, stdout) != o->n ||
+	                    fflush(stdout)))
+		rc = -1;
+	o->n = 0;
+	return rc;
+}
+
+/* No warm connection to start with: code, said on stderr and as the one
+** stdout line {"schema":1,"exit":code,"stderr":msg}. */
+static int
+rq_fail(int code, const char *msg)
+{
+	struct sb o = {0};
+
+	if (msg)
+		fprintf(stderr, "%s\n", msg);
+	sb_s(&o, "{\"schema\":1,\"exit\":");
+	sb_ll(&o, code);
+	if (msg)
+	{
+		sb_s(&o, ",\"stderr\":");
+		sb_q(&o, msg);
+	}
+	sb_s(&o, "}\n");
+	(void)rq_put(&o);
+	free(o.p);
+	return code;
+}
+
+int
+dch_remote_requests(char *n)
+{
+	unsigned char buf[RM_READ];
+	struct sb in = {0}, o = {0};
+	struct rq q;
+	char hb[DCH_RHOST_MAX], msg[800];
+	size_t hl = strcspn(n, ":"), off;
+	int rc, eof = 0, skip = 0;
+	ssize_t k;
+
+	memset(&q, 0, sizeof q);
+	if (!n[hl] || !hl || hl >= sizeof hb)
+		return rq_fail(2, "dch: bad session");
+	memcpy(hb, n, hl);
+	hb[hl] = '\0';
+	q.name = n + hl + 1;
+	logsafe(q.sh, sizeof q.sh, hb);
+	/* a closed stdout is a write that fails: exit 0, as --follow's */
+	signal(SIGPIPE, SIG_IGN);
+	if (host_pick(hb, &q.h) < 0)
+		return rq_fail(1, NULL);
+	if ((rc = rq_dial(&q, msg, sizeof msg)))
+		return rq_fail(rc, msg);
+	rq_ready(&o, q.p->hello_js);
+	while (!eof && rq_put(&o) == 0)
+	{
+		struct pollfd pf[2];
+		int np = 1, tmo = -1;
+
+		pf[0].fd = 0;
+		pf[0].events = POLLIN;
+		pf[0].revents = 0;
+		if (q.p)
+		{
+			pf[1].fd = q.p->fd;
+			pf[1].events = POLLIN;
+			pf[1].revents = 0;
+			np = 2;
+		}
+		if (q.cend)
+			tmo = q.cend > now_ms() ? (int)(q.cend - now_ms()) : 0;
+		if (poll(pf, (nfds_t)np, tmo) < 0)
+		{
+			if (errno == EINTR)
+				continue;
+			break;
+		}
+		if (np > 1 && pf[1].revents && q.p)
+			rq_net(&q, &o);
+		if (q.cend && now_ms() >= q.cend)
+			rq_drop(&q, &o);	/* its 0x33 never came */
+		if (!pf[0].revents)
+			continue;
+		if ((k = read(0, buf, sizeof buf)) < 0 &&
+		    (errno == EINTR || errno == EAGAIN))
+			continue;
+		if (k <= 0)
+		{
+			/* the close cancels a request in flight on the host;
+			** an unterminated last line is no request */
+			eof = 1;
+			if (q.req)
+				rq_exit(&o, q.req, 2, "cancel");
+			(void)rq_put(&o);
+			break;
+		}
+		sb_add(&in, buf, (size_t)k);
+		if (in.bad)
+			break;
+		for (off = 0;;)
+		{
+			char *s = in.p + off, *nl = memchr(s, '\n', in.n - off);
+
+			if (!nl)
+				break;
+			*nl = '\0';
+			if (!skip)
+				rq_line(&q, &o, s, (size_t)(nl - s));
+			skip = 0;
+			off += (size_t)(nl - s) + 1;
+		}
+		if (!skip && in.n - off > RQ_LINE_MAX)
+		{
+			rq_err(&o, 0, "dch: bad request: a line over 64 KiB");
+			rq_exit(&o, 0, 2, "refused");
+			skip = 1;	/* the rest of it, to its newline */
+		}
+		if (skip)
+			off = in.n;
+		memmove(in.p, in.p + off, in.n - off);
+		in.n -= off;
+	}
+	rq_close(&q);
+	free(in.p);
+	free(o.p);
+	return 0;
+}
+#endif
