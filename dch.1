@@ -669,7 +669,9 @@ is false with
 .BR why:\(dqrange\(dq .
 A shell's chapters come from its ring's OSC 133 marks: one per typed command
 block (\fBA\fR, \fBB\fR, client input, \fBC\fR, a non-blank command),
-once its rows scroll off the screen (commands still on it have none yet);
+once its rows scroll off the screen (commands still on it have none yet;
+commands typed ahead in one burst give only the first one a chapter, the
+others having had no client input inside their own B..C);
 evicted rows (the master's own status bit, reset by a clear; a dch 1.43.0
 master has none, and there only a gap, a lost range or a cut first row
 counts) or a gap make
@@ -1098,15 +1100,20 @@ prints one object per line instead:
 .BR old_master ", " interrupted ", " withdrawn ", " draft_left ,
 or empty) and
 .IR detail .
-A first SIGINT, SIGTERM or SIGHUP types nothing more, never presses Enter
-again and takes text already typed back out of the composer: a session not
-yet sent fails
+A first SIGINT, SIGTERM or SIGHUP, once handled, types nothing more and
+presses no Enter; text already in the composer is taken back out one
+Ctrl\-U at a time (Claude Code's kills one wrapped row), the screen re\-read
+after each. A session not yet sent fails
 .B interrupted
 (nothing typed),
 .B withdrawn
 (taken back) or
 .B draft_left
-(it may still sit in the composer, unsent). A second signal exits at once.
+(still there at the deadline, under a dialog, or a paste not painted by
+the end of the land wait: it may still sit in the composer, unsent). A
+second signal exits at once. Limit: an Enter sent before the signal that
+Claude takes only after it sends the text, reported
+.BR withdrawn .
 The caller's own session
 .RB ( DCH_SESSION )
 is skipped. A dch-lite build has no mirror to check the composer with and
@@ -1645,8 +1652,10 @@ types the resume message into an agent still waiting to pause;
 .B \-\-run
 and
 .B \-\-revive
-type nothing more, never press Enter again, take typed text back out of
-the composer and exit 1 within seconds
+type nothing more and press no Enter once the signal is handled, take
+typed text back out of the composer one Ctrl\-U at a time and exit 1,
+usually within seconds (up to twice the 30 s land wait when a paste is
+still painting or will not come out)
 .RB ( interrupted ", " withdrawn " or " draft_left ).
 The dch's own exit goes to the server's log. Until the dch is reaped the
 server keeps reading its pipes, dropping what it reads. A 0x34
