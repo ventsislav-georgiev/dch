@@ -130,29 +130,40 @@ copt_find(const char *s, size_t n)
 	return NULL;
 }
 
+/* commander parses options wherever they sit, operands among them: the root
+** program has positional options (they only stop it at a command) and no
+** pass-through. So every operand is the prompt or more of it, and every
+** option before a bare `--` stays. */
 int
-dch_claude_keep(char **v, int argc)
+dch_claude_strip(char **in, int argc, char **out)
 {
-	int k = dch_claude_tok(v, argc), var = 0;
+	int tok = dch_claude_tok(in, argc), k, n, var = 0, ops = 0;
 	size_t j;
 
-	for (k++; k < argc; k++)
+	for (n = 0; n <= tok && n < argc; n++)
+		out[n] = in[n];
+	for (k = tok + 1; k < argc; k++)
 	{
-		const char *a = v[k], *p;
-		const struct copt *o = NULL;
+		const char *a = in[k], *p;
+		const struct copt *o;
 
 		if (strcmp(a, "--") == 0)
-			return k;	/* the rest is the prompt; the `--` goes too */
+			break;	/* the rest is the prompt; the `--` goes too */
 		if (var && !dashed(a))
-			continue;	/* one more value of a variadic option */
+		{
+			out[n++] = in[k];	/* one more variadic value */
+			continue;
+		}
 		var = 0;
 		if (!dashed(a))
 		{
-			for (j = 0; j < sizeof csubs / sizeof csubs[0]; j++)
+			for (j = 0; !ops && j < sizeof csubs / sizeof csubs[0]; j++)
 				if (strcmp(a, csubs[j]) == 0)
-					return argc;
-			return k;	/* the first operand: the prompt and the rest */
+					goto whole;	/* a command, not a prompt */
+			ops++;
+			continue;	/* an operand: the prompt, or more of it */
 		}
+		out[n++] = in[k];
 		if (a[1] == '-' && strchr(a, '='))
 			continue;	/* --opt=value never takes the next token */
 		if (!(o = copt_find(a, strlen(a))) && a[1] != '-')
@@ -161,9 +172,9 @@ dch_claude_keep(char **v, int argc)
 			** takes n's value from the next token, as -n would */
 			for (p = a + 1; *p; p++)
 			{
-				char s[3] = { '-', *p, '\0' };
+				char sh[3] = { '-', *p, '\0' };
 
-				if (!(o = copt_find(s, 2)) || o->kind != 'b')
+				if (!(o = copt_find(sh, 2)) || o->kind != 'b')
 					break;
 			}
 			if (o && (o->kind == 'b' || p[1]))
@@ -173,18 +184,21 @@ dch_claude_keep(char **v, int argc)
 		{
 			/* Unknown: what follows may be its value, and dropping
 			** that would break the relaunch. Keep everything. */
-			if (k + 1 < argc && !dashed(v[k + 1]))
-				return argc;
+			if (k + 1 < argc && !dashed(in[k + 1]))
+				goto whole;
 			continue;
 		}
-		if (o->kind == 'r' || o->kind == 'v')
-		{
-			if (++k >= argc)
-				return argc;
-		}
-		else if (o->kind == 'o' && k + 1 < argc && !dashed(v[k + 1]))
-			k++;
+		if ((o->kind == 'r' || o->kind == 'v') && k + 1 < argc)
+			out[n++] = in[++k];
+		else if (o->kind == 'o' && k + 1 < argc && !dashed(in[k + 1]))
+			out[n++] = in[++k];
 		var = o->kind == 'v';
 	}
-	return argc;
+	out[n] = NULL;
+	return n;
+whole:
+	for (n = 0; n < argc; n++)
+		out[n] = in[n];
+	out[n] = NULL;
+	return n;
 }

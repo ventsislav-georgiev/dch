@@ -1,0 +1,1 @@
+{"sock_dir":"/s","name":"q","cwd":"/","end":"killed","argv":["/b/claude","fix \"it\"","--model","o","été","--add-dir","a","b"],"agent":{"kind":"claude","session_id":"1380f00d-0000-4000-8000-000000000138","name":"","cwd":"/","launch":["claude","x","-cn","y","--frob","--","z"],"config_dir":""}}

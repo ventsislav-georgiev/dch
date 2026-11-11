@@ -1,7 +1,8 @@
 """claude's one-shot startup prompt is sent once, never again (#138).
 
 `dch --spawn s -- claude --name x "first prompt"` starts Claude with a first
-message. Every later start drops it, and keeps every option: --restart's
+message. Every later start drops it, and keeps every option, one after
+the prompt too: --restart's
 agent pass (the picker's R), --revive (the picker's History resume), a revive
 with no session id, and a revive that types claude into its shell. The
 History record never stores it, and --history (text and --json) and
@@ -18,9 +19,11 @@ import json, os, shutil, stat, subprocess, sys, tempfile, time, traceback
 HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
 P1 = "first prompt for p1"
+P2 = "a prompt with an option after it"
 OLD = "an old record's prompt"
 X = "1380dead-0000-4000-8000-000000000138"
 Y = "1380beef-0000-4000-8000-000000000138"
+Z = "1380f00d-0000-4000-8000-000000000138"
 
 
 def run(*args, timeout=120):
@@ -163,6 +166,30 @@ def main():
               s3["argv"] == ["--resume", sid, "--name", "x"])
         run("-k", "p1")
 
+        # --- an option after the prompt stays (claude parses it there) ----
+        subprocess.run([DCH, "--spawn", "p2", "--size", "100x30", "--",
+                        "claude", P2, "--model", "m2"], check=True,
+                       capture_output=True)
+        t1 = up("p2")
+        check("p2's first start gets the prompt and --model m2",
+              t1 and t1["argv"] == [P2, "--model", "m2"])
+        until(lambda: '"session_id":"%s"' % t1["sid"] in raw("p2"), 15)
+        rec = raw("p2")
+        check("p2's live record keeps --model m2, drops the prompt [%s]"
+              % rec.strip(),
+              P2 not in rec and json.loads(rec)["argv"] ==
+              [claude, "--model", "m2"] and
+              json.loads(rec)["agent"]["launch"] == [claude, "--model", "m2"])
+        run("-k", "p2")
+        until(lambda: '"end":"killed"' in raw("p2"), 10)
+        r = run("--revive", "p2", "--no-message")
+        t2 = up("p2", 2)
+        check("p2 --revive: --resume <id> --model m2, no prompt [%r]"
+              % (t2 and t2["argv"]),
+              r.returncode == 0 and t2 and
+              t2["argv"] == ["--resume", t1["sid"], "--model", "m2"])
+        run("-k", "p2")
+
         # --- a record an older dch wrote, with the prompt -----------------
         plant("old", [claude, "--name", "y", "--model", "opus", "--", OLD],
               sid=X)
@@ -185,6 +212,27 @@ def main():
                              "opus"])
         run("-k", "old")
 
+        # --- an old record with options after its prompt ------------------
+        plant("old2", [claude, OLD, "--model", "o2"],
+              launch=[claude, "-n", "w", OLD, "--effort", "high"], sid=Z)
+        h = run("--history", "--json")
+        try:
+            hj = [o for o in json.loads(h.stdout) if o["name"] == "old2"]
+        except ValueError:
+            hj = []
+        check("an old record, options after the prompt: --history --json "
+              "valid, the options kept, the prompt gone [%r]" % hj,
+              len(hj) == 1 and OLD not in h.stdout and
+              hj[0]["argv"] == [claude, "--model", "o2"] and
+              hj[0]["agent"]["launch"] == [claude, "-n", "w", "--effort",
+                                           "high"])
+        r = run("--revive", "old2", "--no-message")
+        so = up("old2")
+        check("...and --revive keeps --model o2 [%r]" % (so and so["argv"]),
+              r.returncode == 0 and so and
+              so["argv"] == ["--resume", Z, "--model", "o2"])
+        run("-k", "old2")
+
         # --- a revive with no session id: a fresh start, no prompt --------
         plant("fresh", [claude, "--permission-mode", "plan", OLD])
         r = run("--revive", "fresh", "--no-message")
@@ -206,8 +254,9 @@ def main():
         run("-k", "shl")
         until(lambda: '"end":"killed"' in raw("shl"), 10)
         check("no record holds a prompt any more",
-              all(OLD not in raw(n) and P1 not in raw(n)
-                  for n in ("p1", "old", "fresh", "shl")))
+              all(OLD not in raw(n) and P1 not in raw(n) and
+                  P2 not in raw(n)
+                  for n in ("p1", "p2", "old", "old2", "fresh", "shl")))
     except Exception:
         traceback.print_exc()
         fails[0] += 1

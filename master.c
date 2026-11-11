@@ -508,19 +508,25 @@ rec_str(FILE *f, const char *s)
 static void
 rec_strv(FILE *f, char **v, const char *v0)
 {
+	char **s;
 	int k, n;
 
 	for (n = 0; v && v[n]; n++)
 		;
-	n = v ? dch_claude_keep(v, n) : 0;
+	/* a copy: v is the live child's argv. shortcut: out of memory the
+	** array is written empty (unreadable for one refresh), never with
+	** the prompt */
+	s = malloc(((size_t)n + 1) * sizeof *s);
+	n = s ? dch_claude_strip(v, n, s) : 0;
 	fputc('[', f);
 	for (k = 0; k < n; k++)
 	{
 		if (k)
 			fputc(',', f);
-		rec_str(f, k == 0 && v0 ? v0 : v[k]);
+		rec_str(f, k == 0 && v0 ? v0 : s[k]);
 	}
 	fputc(']', f);
+	free(s);
 }
 
 static int

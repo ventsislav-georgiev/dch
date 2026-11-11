@@ -13,11 +13,11 @@
 static int fails;
 
 /* words: space-separated argv, '_' inside a word is a space. want: what
-** dch_claude_keep keeps, joined the same way. */
+** dch_claude_strip keeps, joined by spaces. */
 static void
 check(const char *name, const char *words, const char *want)
 {
-	char buf[1024], got[1024] = "", *v[64], *w;
+	char buf[1024], got[1024] = "", *v[64], *out[65], *w;
 	int n = 0, k, keep;
 
 	snprintf(buf, sizeof buf, "%s", words);
@@ -28,10 +28,13 @@ check(const char *name, const char *words, const char *want)
 			if (*w == '_')
 				*w = ' ';
 	v[n] = NULL;
-	keep = dch_claude_keep(v, n);
+	memset(out, 0xa5, sizeof out);	/* a missing NULL would show */
+	keep = dch_claude_strip(v, n, out);
 	for (k = 0; k < keep; k++)
 		snprintf(got + strlen(got), sizeof got - strlen(got), "%s%s",
-		         k ? " " : "", v[k]);
+		         k ? " " : "", out[k]);
+	if (out[keep] != NULL)
+		snprintf(got, sizeof got, "(out not NULL-terminated)");
 	if (strcmp(got, want) == 0)
 		printf("  ok   %s\n", name);
 	else
@@ -61,8 +64,24 @@ main(void)
 	      "claude --name api");
 	check("unquoted multi-word prompt", "claude --model opus fix the bug",
 	      "claude --model opus");
-	check("everything after the prompt goes",
-	      "claude fix_it --model opus", "claude");
+	check("an option after the prompt stays", "claude fix --model opus",
+	      "claude --model opus");
+	check("options around the prompt stay",
+	      "claude --model opus fix --effort high",
+	      "claude --model opus --effort high");
+	check("an operand then --: the rest goes", "claude fix -- more",
+	      "claude");
+	check("options before a later -- stay",
+	      "claude fix --effort high -- x", "claude --effort high");
+	check("-c fix -n foo", "claude -c fix -n foo", "claude -c -n foo");
+	check("variadic after the prompt keeps its values",
+	      "claude fix --add-dir a b", "claude --add-dir a b");
+	check("excess operands go, options between stay",
+	      "claude fix -p the --verbose bug", "claude -p --verbose");
+	check("unknown after the prompt then a word: keep all",
+	      "claude fix --frob x", "claude fix --frob x");
+	check("a command word as a later operand is prompt",
+	      "claude fix update", "claude");
 	check("- alone is an operand", "claude -", "claude");
 	check("full path to claude", "/opt/homebrew/bin/claude -n x hi",
 	      "/opt/homebrew/bin/claude -n x");

@@ -1285,7 +1285,8 @@ Claude's startup prompt is sent once: the prompt in
 is its first message, and dch drops it from every later start (a revive, the
 picker's resume,
 .BR \-\-restart 's
-agent step, a revive with no Claude id) and keeps every other option. The
+agent step, a revive with no Claude id) and keeps every other option, one
+written after the prompt too. The
 history record stores the command without it, so
 .BR \-\-history ,
 .B \-\-history \-\-json
@@ -1294,8 +1295,8 @@ and
 never show it; an older record that has one is read without it. The prompt
 is everything after a bare
 .BR \-\- ,
-else Claude's first argument that is neither an option nor an option's value,
-and everything after that, the options read as Claude Code 2.1.318's
+and every argument that is neither an option nor an option's value, the
+options read as Claude Code 2.1.318's
 .B \-\-help
 lists them. Put it after
 .BR \-\- :

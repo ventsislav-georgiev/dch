@@ -1195,11 +1195,12 @@ Claude's startup prompt is sent once. `dch --spawn api -- claude --name api --
 out of everything after: the record stores the command without it, and
 `--revive`, the picker's resume, `--restart`'s agent step and a revive with
 no Claude id all start `claude --name api` (with `--resume <id>`), every other
-option kept. `--history`, `--history --json` and `--ls-json` never show it;
+option kept, one written after the prompt too (`claude "fix it" --model opus`
+comes back as `claude --model opus`). `--history`, `--history --json` and `--ls-json` never show it;
 a record an older dch wrote with one is read without it. The prompt is
-everything after a bare `--`, else Claude's first argument that is neither an
-option nor an option's value, and everything after that, the options read
-the way Claude Code 2.1.318's `--help` lists them. Put it after `--`: an
+everything after a bare `--`, and every argument that is neither an option
+nor an option's value, the options read the way Claude Code 2.1.318's
+`--help` lists them. Put it after `--`: an
 option dch does not know, followed by a word, keeps the whole command, prompt
 included, rather than guess which word is its value. Claude Code itself runs
 a one-word prompt that names one of its commands (`update`, `doctor`, `mcp`,

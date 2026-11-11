@@ -5874,11 +5874,18 @@ static char **
 resume_argv(char **v, int argc, int tok, char *id, int *outc)
 {
 	char **o = calloc((size_t)argc + 3, sizeof(char *));
+	char **s = calloc((size_t)argc + 1, sizeof(char *));
 	int k, n = 0, opts = 1;
 
-	if (!o)
+	if (!o || !s)
+	{
+		free(o);
+		free(s);
 		return NULL;
-	argc = dch_claude_keep(v, argc);
+	}
+	/* only entries past the claude token go: tok still indexes it */
+	argc = dch_claude_strip(v, argc, s);
+	v = s;
 	for (k = 0; k <= tok; k++)
 		o[n++] = v[k];
 	o[n++] = "--resume";
@@ -5910,6 +5917,7 @@ resume_argv(char **v, int argc, int tok, char *id, int *outc)
 			continue;
 		o[n++] = v[k];
 	}
+	free(s);
 	*outc = n;
 	return o;
 }
@@ -8203,36 +8211,50 @@ name_live(const char *name)
 	return 1;
 }
 
-/* An older master recorded claude's one-shot prompt (#138): cut the string
-** array `key` (in `object`, else at the top) of *body to its first keep
-** entries, so --history --json does not show what a revive would not send.
-** keep >= 1; the array is all strings (dch_json_strv read it). */
+/* An older master recorded claude's one-shot prompt (#138): write v[0..n)
+** over the string array `key` (in `object`, else at the top) of *body, so
+** --history --json does not show what a revive would not send. Left as it
+** was when anything fails: hrec_load's arrays are cut either way. */
 static void
-hrec_cut(char **body, const char *object, const char *key, int keep)
+hrec_put(char **body, const char *object, const char *key, char **v, int n)
 {
 	struct json_parser p;
-	int o = 0, f, i, n = 1;
-	size_t l = strlen(*body) + 2;
-	char *nb;
+	char *a = NULL, *nb = NULL, *q;
+	size_t al = 0, cap;
+	FILE *f;
+	int o = 0, fl, k, ok = 1;
 
-	if (dch_json_parse(&p, *body) == 0 &&
-	    (!object || ((o = dch_json_field(&p, 0, object)) >= 0 &&
-	                 p.tok[o].kind == JSON_OBJECT)) &&
-	    (f = dch_json_field(&p, o, key)) >= 0 &&
-	    p.tok[f].kind == JSON_ARRAY)
+	if (dch_json_parse(&p, *body) < 0 ||
+	    (object && ((o = dch_json_field(&p, 0, object)) < 0 ||
+	                p.tok[o].kind != JSON_OBJECT)) ||
+	    (fl = dch_json_field(&p, o, key)) < 0 ||
+	    p.tok[fl].kind != JSON_ARRAY || !(f = open_memstream(&a, &al)))
 	{
-		for (i = f + 1; n < keep && i < p.tok[f].next; n++)
-			i = p.tok[i].next;
-		/* i: the last kept entry; its closing quote is at .end */
-		if (i < p.tok[f].next && p.tok[i].next < p.tok[f].next &&
-		    (nb = malloc(l)))
-		{
-			snprintf(nb, l, "%.*s]%s", p.tok[i].end + 1, *body,
-			        *body + p.tok[f].end);
-			free(*body);
-			*body = nb;
-		}
+		dch_json_free(&p);
+		return;
 	}
+	fputc('[', f);
+	for (k = 0; k < n && ok; k++)
+	{
+		cap = strlen(v[k]) * 6 + 3;
+		ok = (q = malloc(cap)) &&
+		     dch_json_quote(q, cap, v[k]) != (size_t)-1;
+		if (ok)
+			fprintf(f, "%s%s", k ? "," : "", q);
+		free(q);
+	}
+	fputc(']', f);
+	ok = fclose(f) == 0 && ok;	/* al holds the size from here */
+	cap = strlen(*body) + al + 1;
+	if (ok && (nb = malloc(cap)))
+	{
+		/* the array's token runs from its '[' to just past its ']' */
+		snprintf(nb, cap, "%.*s%s%s", p.tok[fl].start, *body, a,
+		         *body + p.tok[fl].end);
+		free(*body);
+		*body = nb;
+	}
+	free(a);
 	dch_json_free(&p);
 }
 
@@ -8241,13 +8263,17 @@ static void
 hrec_strip(struct hrec *r, char **v, int *argc, const char *object,
            const char *key)
 {
-	int keep = v ? dch_claude_keep(v, *argc) : 0;
+	char **s = v ? malloc(((size_t)*argc + 1) * sizeof *s) : NULL;
+	int n;
 
-	if (!v || keep >= *argc)
-		return;
-	v[keep] = NULL;
-	*argc = keep;
-	hrec_cut(&r->body, object, key, keep);
+	if (s && (n = dch_claude_strip(v, *argc, s)) < *argc)
+	{
+		/* v (dch_json_strv's block) has room: n < *argc */
+		memcpy(v, s, ((size_t)n + 1) * sizeof *s);
+		*argc = n;
+		hrec_put(&r->body, object, key, v, n);
+	}
+	free(s);
 }
 
 static int
