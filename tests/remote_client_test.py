@@ -157,6 +157,14 @@ class Fake:
                             "ctlwhy": frame(0x33, {"exit": 2,
                                                    "why": "\x01" * 60}),
                             "ctldrop": frame(0x31, b"half"),
+                            # #130: a why or a 0x33 we cannot read
+                            "ctlwhylong": frame(0x33, {"exit": 2,
+                                                       "why": "\x01" * 64}),
+                            "ctlwhynul": frame(0x33, {"exit": 2,
+                                                      "why": "a\x00b"}),
+                            "ctlwhynum": frame(0x33, {"exit": 2, "why": 7}),
+                            "ctlbig": frame(0x33, {"exit": 2,
+                                                   "why": "\x1b" * 100}),
                         }[self.mode])
                         c.shutdown(socket.SHUT_WR)
                     elif t == 0x03:
@@ -364,6 +372,7 @@ def ctl_checks(dch, check, senv, cenv, serve_at, procs, fakes, tmp, hosts):
     check("a closed port: unreachable, exit %d" % UNREACHABLE_EXIT,
           r.returncode == UNREACHABLE_EXIT
           and r.stderr.startswith("dch: q: unreachable: "), r)
+    UNREADABLE = "dch: q: --status stopped by the host (unreadable)"
     for mode, want, err in (
             ("refuse", REFUSED_EXIT, "dch: q refused: " + REFUSAL["message"]),
             ("ctlcoded", REFUSED_EXIT,
@@ -373,13 +382,18 @@ def ctl_checks(dch, check, senv, cenv, serve_at, procs, fakes, tmp, hosts):
              "dch: q: unreachable: the connection was lost"),
             ("ctlcut", 2, "err\ndch: q: --status stopped by the host (cap)"),
             ("ctlwhy", 2, "dch: q: --status stopped by the host (%s)"
-             % ("\\x01" * 23))):
+             % ("\\x01" * 23)),
+            ("ctlwhylong", 2, UNREADABLE),
+            ("ctlwhynul", 2, UNREADABLE),
+            ("ctlwhynum", 2, UNREADABLE),
+            ("ctlbig", 1, UNREADABLE)):
         f = Fake(mode, ops=["ctl", "watch"])
         fakes.append(f)
         r = dch(cenv, "--hosts", "q=127.0.0.1:%d" % f.port, "--status",
                 "q:x")
         check("a host that answers %s: exit %d" % (mode, want),
               r.returncode == want and r.stderr == err + "\n"
+              and not re.search(r"[\x00-\x09\x0b-\x1f\x7f]", r.stderr)
               and r.stdout == {"ctlcut": "part\n",
                                "ctldrop": "half"}.get(mode, ""), r)
     body = json.loads(f.bodies[-1])

@@ -25,6 +25,8 @@ State lives in $FAKE_CLAUDE_DIR:
                     exit_ms (/exit takes that long to quit),
                     dialog_on_kill (the first Ctrl-U raises a known
                     prompt over the draft instead of killing a row),
+                    type_on_kill (text a human types after each Ctrl-U
+                    kills its row: the composer never empties),
                     screen (rows painted in place of the composer and
                     footer: a dialog; every key typed then is logged as
                     key, and a digit dismisses it until the knob changes,
@@ -335,7 +337,7 @@ while True:
             elif ch == b"\x15" and collapsed:
                 draft, collapsed = "", False    # one row: the placeholder
             elif ch == b"\x15":
-                draft = kill_row(draft)
+                draft = kill_row(draft) + c.get("type_on_kill", "")
             elif ch >= b" ":
                 draft += ch.decode("latin-1")
     now = time.time()
