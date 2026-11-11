@@ -469,6 +469,91 @@ def xray_checks(dch, check, senv, cenv, port, fakes, tmp, slog):
     check("xray: each remote form ran one ctl on the host",
           ctls() - n0 == 11, ctls() - n0)
 
+    # #168: forms that answer with content on the host, not only errors.
+    # The host's store gets History Claude sessions: xrs0 and xrs1 in one
+    # project dir (a real dir on this host, with a file to resolve), xrs2
+    # in another. srv:<n> must print exactly what the host prints.
+    cfg = os.path.join(senv["HOME"], ".claude")
+    sockdir = os.path.join(senv["XDG_RUNTIME_DIR"], "dch-%d" % os.getuid())
+    hdir = os.path.join(senv["XDG_STATE_HOME"], "dch", "sessions",
+                        sockdir.replace("/", "-"))
+    os.makedirs(hdir, exist_ok=True)
+    proj = os.path.join(tmp, "xproj")
+    os.makedirs(os.path.join(proj, "src"))
+    with open(os.path.join(proj, "src", "w.c"), "w") as f:
+        f.write("".join("line %d\n" % k for k in range(1, 41)))
+
+    def hist(k, cwd, prompts):
+        sid = "33333333-4444-4555-8666-%012d" % k
+        pdir = os.path.join(cfg, "projects", cwd.replace("/", "-"))
+        os.makedirs(pdir, exist_ok=True)
+        with open(os.path.join(pdir, sid + ".jsonl"), "w") as f:
+            for t in prompts:   # a reply after each: one chapter a prompt
+                f.write(json.dumps({"type": "user", "cwd": cwd,
+                                    "message": {"content": t}}) + "\n")
+                f.write(json.dumps({"type": "assistant", "message": {
+                    "content": [{"type": "text", "text": "done"}]}}) + "\n")
+        with open(os.path.join(hdir, "xrs%d.json" % k), "w") as f:
+            f.write(json.dumps({
+                "name": "xrs%d" % k, "cwd": cwd, "end": "exited",
+                "argv": ["claude"], "started": 1794299400,
+                "updated": 1794300000 + k, "ended": 1794300000 + k,
+                "sock_dir": sockdir,
+                "agent": {"session_id": sid, "cwd": cwd,
+                          "config_dir": cfg}}) + "\n")
+
+    hist(0, proj, ["fix #931 in src/w.c:20", "then o/r#7"])
+    hist(1, proj, ["older #931"])
+    hist(2, "/home/demo/elsewhere", ["far #931"])
+    loc = dch(senv, "--xray", "xrs0", "--json")
+    o = json.loads(loc.stdout) if loc.returncode == 0 else {}
+    anchors = [c["anchor"] for c in o.get("chapters", [])]
+    check("xray parity setup: xrs0 has two chapters on the host",
+          len(anchors) == 2, (loc.returncode, loc.stdout, loc.stderr))
+    n0 = ctls()
+    for a in anchors:
+        loc = dch(senv, "--xray", "xrs0", "--chapter", a, "--json")
+        check("xray --chapter %s on the host: its entries" % a,
+              loc.returncode == 0 and '"entries":[{"role":"user"'
+              in loc.stdout, loc)
+        same("--chapter <a real anchor>", "@", "--chapter", a, "--json",
+             n="xrs0")
+    loc = dch(senv, "--xray", "xrs0", "--ref", "#931", "--scope", "all",
+              "--full", "--json")
+    tal = [json.loads(l)["tally"]["session"] for l in loc.stdout.splitlines()
+           if '"tally"' in l]
+    check("xray --ref --scope all on the host: xrs0, its project, then the "
+          "other dir", loc.returncode == 0 and tal == ["xrs0", "xrs1", "xrs2"],
+          (tal, loc.stderr))
+    same("--ref --scope all --full, other sessions' transcripts", "@",
+         "--ref", "#931", "--scope", "all", "--full", "--json", n="xrs0",
+         mask=True)
+    same("--ref --scope all, light", "@", "--ref", "#931", "--scope", "all",
+         "--json", n="xrs0", mask=True)
+    # a dash-led anchor is --chapter's value on the host, never a flag
+    for a in ("-f", "--config", "--json"):
+        loc = dch(senv, "--xray", "xrs0", "--chapter", a, "--json")
+        check("xray --chapter %s on the host: read as the anchor (chapter "
+              "gone)" % a, loc.returncode == 1 and
+              loc.stderr == "dch: chapter gone\n", loc)
+        same("--chapter %s (a dash-led anchor)" % a, "@", "--chapter", a,
+             "--json", n="xrs0")
+    # --ref --full resolves a file on the host: its resolved line, first
+    loc = dch(senv, "--xray", "xrs0", "--ref", "src/w.c:20", "--scope",
+              "session", "--full", "--json")
+    rv = [json.loads(l)["resolved"] for l in loc.stdout.splitlines()
+          if '"resolved"' in l]
+    check("xray --ref <file> --full on the host: a resolved line, ok, "
+          "first 14", loc.returncode == 0 and len(rv) == 1 and
+          rv[0]["kind"] == "file" and rv[0]["state"] == "ok" and
+          rv[0].get("first") == 14 and rv[0]["lines"][6] == "line 20",
+          (rv, loc.stderr))
+    same("--ref <file> --full, the resolved line", "@", "--ref",
+         "src/w.c:20", "--scope", "session", "--full", "--json", n="xrs0",
+         mask=True)
+    check("xray parity: each remote form ran one ctl on the host",
+          ctls() - n0 == 8, ctls() - n0)
+
     # 3.1's value rules, here first: the local run's line, nothing sent
     n0 = ctls()
     for a, line in ((["--ref", "#1\x01"], "dch: bad ref"),

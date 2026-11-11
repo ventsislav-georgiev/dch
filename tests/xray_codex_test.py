@@ -233,6 +233,22 @@ def test_live():
               ls[0]["first"]["project"] == key(proj) and
               any("mention" in x for x in ls) and ls[-1].get("done") is True,
               r.stdout + r.stderr)
+        # #168: the default scope (project) still answers, from the
+        # rollout alone (Codex in the wider scopes is #169)
+        r = dch("--xray", n, "--ref", "#41", "--json")
+        ls = [json.loads(x) for x in r.stdout.splitlines()]
+        check("--ref, the default scope: the rollout alone, scope session",
+              r.returncode == 0 and ls and
+              ls[0]["first"]["session_id"] == TID and
+              ls[0]["first"]["scope"] == "session" and
+              [x["tally"]["session"] for x in ls if "tally" in x] == [n] and
+              ls[-1].get("done") is True, r.stdout + r.stderr)
+        # --chapter has no Codex reader yet (#169): no corpus, never the ring
+        r = dch("--xray", n, "--chapter", o["chapters"][0]["anchor"],
+                "--json")
+        check("--chapter on a live Codex: no x-ray corpus (exit 1)",
+              r.returncode == 1 and r.stdout == "" and
+              r.stderr == "dch: no x-ray corpus\n", (r.stdout, r.stderr))
 
         # a malformed line, then a truncated last line (no newline)
         with open(p, "a") as f:

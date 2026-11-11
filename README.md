@@ -2117,6 +2117,18 @@ needs a value`); and a value that fails `dch --xray`'s rules (`bad ref`,
 `--allow-create`, only the gate, like `-k`. Everything else, `--scope
 project` for one, is the host's dch's to answer.
 
+**What `xray` lets a peer read.** More than the chapters of the session it
+names. `--ref <file ref> --full` returns 14-line windows of files on this
+host: any file inside that session's project (its cwd's git root, else its
+cwd) that is a regular file of at most 2 MB, not a symlink and not
+secret-looking by name (`.env*`, `.ssh`, `*.pem`, `id_rsa`, ...). A commit
+ref returns that commit's `git show --stat` from the session's repo.
+`--scope all` returns lines (and with `--full`, definition passages) from
+every other session's Claude Code transcript of this store, in every project
+dir; `--scope project`, the default, from those in the session's own project
+dir. Nothing is written. Let in only peers you would let read those files and
+transcripts.
+
 **Its limits.** Stdout and stderr together get 8 MiB (`--xray --follow`:
 no cap). At that cap the server
 stops forwarding, sends the dch SIGTERM (SIGKILL 2 s later) and ends with
