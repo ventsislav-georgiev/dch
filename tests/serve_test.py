@@ -16,8 +16,10 @@ ctl op (goldens 17-39, some against a dch serve of their own: create off,
 a lowered cap, a lowered timeout); a 0x30 on an attached connection; a
 client's close ending its dch. #118: 0x34 cancel, warm reuse, busy, the
 idle close (goldens 40-43); a 0x34 then the FIN still gets its 0x33.
-#124: a --say cut by the close or a 0x34 outlives the 2 s grace and ends on
-its own; a --status is SIGKILLed 2 s after its SIGTERM.
+#124: a --say stand-in cut by the close or a 0x34 outlives the 2 s grace and
+ends on its own; a --status is SIGKILLed 2 s after its SIGTERM. #126: the
+real --run and --say cut mid-gate take their text back out of a fake
+Claude's composer and end at once.
 Security review F1-F8: --whois-optional only while tailscaled is down; this
 host's own address and node refused; log escaping; the CLI from absolute
 PATH entries; odd whois/status JSON failing closed; the test variable unset
@@ -377,9 +379,10 @@ def main():
                        timeout=15)
 
         # --- #124: a CTL_LONG verb (--say here) cut by the close or a 0x34
-        # gets CTL_LONG_MS after its SIGTERM, not 2 s: dch finishes safely
-        # on one. Any other verb (--status) is SIGKILLed 2 s after. A `dch`
-        # first on serve's PATH stands in for those two; the rest it execs.
+        # gets CTL_LONG_MS after its SIGTERM, not 2 s; any other verb
+        # (--status) is SIGKILLed 2 s after. A `dch` first on serve's PATH
+        # stands in for those two (the rest it execs): this measures serve's
+        # grace, not dch. The real --run and --say under the cut: #126 below.
         wrap = os.path.join(tmp, "wrap")
         os.makedirs(wrap)
         with open(os.path.join(wrap, "dch"), "w") as f:
@@ -456,6 +459,95 @@ exec %s "$@"
                       and not done)
             stop(p)
 
+        # --- #126: the real dch --run and --say, cut by the close or a 0x34
+        # with their text in a fake Claude's composer (every Enter eaten,
+        # so the gate is still re-Entering): the text is taken back out,
+        # nothing is sent, and the dch ends at once, not 660 s later.
+        if mirror:
+            fb, fc = os.path.join(tmp, "fbin"), os.path.join(tmp, "fc")
+            for d in (fb, fc, os.path.join(home, ".claude", "sessions")):
+                os.makedirs(d, exist_ok=True)
+            shutil.copy(os.path.join(HERE, "fake_claude.py"),
+                        os.path.join(fb, "claude"))
+            os.chmod(os.path.join(fb, "claude"), 0o755)
+            cenv = dict(env, FAKE_CLAUDE_DIR=fc, DCH_AGENT_REENTER_MS="5000",
+                        PATH="%s:%s" % (fb, env["PATH"]))
+            p, cport, clog = serve(e=dict(benv, **{k: cenv[k] for k in (
+                "FAKE_CLAUDE_DIR", "DCH_AGENT_REENTER_MS", "PATH")}))
+            check("#126: a serve for the real --run/--say cut starts",
+                  cport is not None)
+
+            def screen(n):
+                return subprocess.run([DCH, "--read", n], env=cenv,
+                                      capture_output=True, text=True,
+                                      timeout=15).stdout
+
+            def composer(n, t):
+                return any(l.startswith("\u276f") and
+                           t in l.replace("\xa0", " ")
+                           for l in screen(n).splitlines())
+
+            def wait(fn, secs):
+                end = time.time() + secs
+                while time.time() < end and not fn():
+                    time.sleep(0.1)
+                return fn()
+
+            for k, (verb, cancel) in enumerate(
+                    (("run", False), ("run", True), ("say", False),
+                     ("say", True)) if cport else ()):
+                n = "svc-cl%d" % k
+                with open(os.path.join(fc, n + ".ctl"), "w") as f:
+                    json.dump({"eat_enters": 99}, f)
+                subprocess.run([DCH, "--spawn", n, "--size", "100x30",
+                                "claude"], env=cenv, capture_output=True,
+                               timeout=15)
+                up = wait(lambda: "auto mode on" in screen(n), 15)
+                msg = "cut %s %d" % (verb, k)
+                argv = ["--run", n, "--"] + msg.split() if verb == "run" \
+                    else ["--say", n, "--json", "--"] + msg.split()
+                s = conn(cport)
+                send(s, 0x30, {"argv": argv})
+                held = wait(lambda: composer(n, msg), 15)
+                t0 = time.time()
+                if cancel:
+                    send(s, 0x34)
+                    try:
+                        s.settimeout(30)
+                        t, pl = frame_not(s, (0x31, 0x32))
+                    except (EOFError, OSError):
+                        t, pl = None, b""
+                    ended = t == 0x33 and json.loads(pl) == {
+                        "exit": 2, "why": "cancel"}
+                else:
+                    done = r"ctl done after the close: dch exit 1"
+                    before = len(re.findall(done, text(clog)))
+                    s.close()
+                    ended = wait(lambda: len(re.findall(done, text(clog)))
+                                 > before, 30)
+                secs = time.time() - t0
+                if cancel:
+                    s.close()
+                gone = wait(lambda: not composer(n, msg), 5)
+                lines = []
+                try:
+                    with open(os.path.join(fc, n + ".log")) as f:
+                        lines = [json.loads(l) for l in f if l.strip()]
+                except OSError:
+                    pass
+                sent = [e for e in lines if e["ev"] == "line"]
+                check("#126: the real --%s cut by %s mid-gate: taken back out "
+                      "of the composer, nothing sent, dch ended (%.1f s%s)"
+                      % (verb, "a 0x34" if cancel else "the close", secs,
+                         "" if gone and not sent else
+                         "; the composer still holds it" if not gone else
+                         "; it was sent"),
+                      up and held and ended and gone and not sent and
+                      secs < 10)
+                subprocess.run([DCH, "-k", n], env=cenv, capture_output=True,
+                               timeout=15)
+            stop(p)
+
         # --- #118: a warm ctl connection takes no attach, watch or kill --
         for t0, body in ((0x01, {"name": "svc-x", "cols": 20, "rows": 2}),
                          (0x2e, {}), (0x04, {"name": "svc-x"})):
@@ -495,7 +587,10 @@ exec %s "$@"
         for typ, nm in ((0x01, "m0123456789abcdef"),
                         (0x02, "m0123456789abcdef"),
                         (0x01, " m0123456789abcdef"),
-                        (0x02, "m0123456789abcdef ")):
+                        (0x02, "m0123456789abcdef "),
+                        # LOW-1 (QA 1.45.1): any case
+                        (0x02, "M0123456789ABCDEF"),
+                        (0x01, "m0123456789ABCdef")):
             s = conn(port)
             send(s, typ, {"name": nm, "cols": 80, "rows": 24})
             t, pl = frame_not(s)
@@ -505,7 +600,8 @@ exec %s "$@"
                   json.loads(pl)["message"] and
                   nm not in sessions())
             s.close()
-        for alias in ("m0123456789abcdef", " m0123456789abcdef\t"):
+        for alias in ("m0123456789abcdef", " m0123456789abcdef\t",
+                      "M0123456789ABCDEF"):
             s = conn(port)
             send(s, 0x06, {"name": "svc-made", "alias": alias})
             t, pl = frame_not(s)

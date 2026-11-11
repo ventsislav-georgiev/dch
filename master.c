@@ -1987,6 +1987,16 @@ xray_evict_stale(void)
 	n_xsubs--;
 }
 
+/* The agent capture is paused for has exited (QA 1.45.1 LOW-3): resume
+** now, not on the next refresh tick (up to rec_ms later), so a ring read
+** or a --clear right after the agent quit sees the shell's ring live. */
+static void
+xray_agent_gone(void)
+{
+	if (xagent && kill(xagent, 0) < 0 && errno == ESRCH)
+		xray_agent(0);
+}
+
 /* Serve MSG_RING_READ (dtach.h has the wire format). Returns -1 if the
 ** client is gone. */
 static int
@@ -2026,6 +2036,7 @@ do_ring_read(struct client *p, const unsigned char *payload, unsigned int len)
 	}
 	p->xwake = 0;
 	p->xgen = xring.gen;
+	xray_agent_gone();
 	if (!xring.cap)
 		st |= DCH_RING_S_OFF;
 	else if (!max)
@@ -3704,7 +3715,10 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 	else if (type == MSG_RING_CLEAR)
 	{
 		struct dch_agent a;
-		int none = !xring.cap || dch_vt_capture_paused();
+		int none;
+
+		xray_agent_gone();
+		none = !xring.cap || dch_vt_capture_paused();
 
 		/* No ring, or an agent's (its corpus is its transcript): nothing
 		** to clear, and the mirror stays (QA 1.44 MED-1). The probe

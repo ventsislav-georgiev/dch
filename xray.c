@@ -230,7 +230,10 @@ xr_label_id_shaped(const char *s, size_t n)
 		n--;
 	if (n != 17)
 		return 0;
-	memcpy(b, s, 17);
+	/* any case (QA 1.45.1 LOW-1): on a case-insensitive file system the
+	** name's socket also answers to the id */
+	for (n = 0; n < 17; n++)
+		b[n] = (char)tolower((unsigned char)s[n]);
 	b[17] = '\0';
 	return xr_id_shaped(b);
 }
@@ -902,9 +905,10 @@ main_block(struct xr_claude *d, int b, const char *kind, const char *title)
 }
 
 /* An id as kept: itself up to XR_ID_MAX bytes, else 0xff (never in UTF-8,
-** so never a short id) and its 64-bit FNV-1a in hex. Pairing and thread
-** identity need only equality; a long id is never held whole (QA 1.44
-** MED-2). */
+** so never a short id: dch_json_parse refuses a line that is not UTF-8 and
+** the decode is checked again, QA 1.45.1 NIT-2) and its 64-bit FNV-1a in
+** hex. Pairing and thread identity need only equality; a long id is never
+** held whole (QA 1.44 MED-2). */
 #define XR_ID_MAX 64
 
 static const char *

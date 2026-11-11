@@ -12,7 +12,9 @@
 ** connection's sequence through ctl_action (0x30, 0x34, and a streamed 0x33
 ** or 0x35 standing for the running ctl's exit or timeout): each 0x30 that
 ** runs gets exactly one 0x33, busy changes nothing, a 0x34 cancels only a
-** running ctl not yet cut. Linked with the rest of dch minus
+** running ctl not yet cut; each cut's grace (ctl_grace, #124/#126) is the
+** long one only for a CTL_LONG verb cut by a 0x34 or the close, never
+** while the server stops. Linked with the rest of dch minus
 ** serve.o, and dch.c built with -Dmain=dch_main. */
 #include "../../serve.c"
 
@@ -297,7 +299,7 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		size_t off = 0, used;
 		pid_t ctl = 0;		/* a stand-in: never signalled */
 		const char *why = NULL;
-		int r, a, ac, runs = 0, ends = 0;
+		int r, a, ac, runs = 0, ends = 0, lg = n && d[0] & 1;
 		char cwd[PATH_MAX], w[200], **av;
 
 		while ((r = rf_parse(&st, d + off, n - off, (size_t)-1, &f,
@@ -336,6 +338,14 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 				ctl = ++runs;
 				why = NULL;
 			}
+			if (why && (ctl_grace(lg, why, 1) != CTL_GRACE_MS ||
+			            ctl_grace(lg, why, 0) != (lg && (!strcmp(why,
+			            "cancel") || !strcmp(why, "closed"))
+			            ? CTL_LONG_MS : CTL_GRACE_MS) ||
+			            ctl_grace(lg, "closed", 0) != (lg ? CTL_LONG_MS
+			            : CTL_GRACE_MS) ||
+			            ctl_grace(lg, "cap", 0) != CTL_GRACE_MS))
+				abort();
 		}
 		if (runs != ends + (ctl > 0))
 			abort();

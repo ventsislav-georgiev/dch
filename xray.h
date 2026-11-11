@@ -67,7 +67,7 @@ const struct xr_chapter *xr_chapter_at(const struct xr_chapters *c,
 ** name rule (INFO-2): no create path takes a name of this shape. */
 int xr_id_shaped(const char *s);
 /* The first n bytes of a label, ASCII whitespace trimmed as the listing
-** shows it, are id-shaped (INFO-2 for aliases). */
+** shows it, are id-shaped in any case (INFO-2: the name rule, aliases). */
 int xr_label_id_shaped(const char *s, size_t n);
 /* 3.1's Claude UUID form: 36 chars of [0-9a-f-]. */
 int xr_uuid_form(const char *s);

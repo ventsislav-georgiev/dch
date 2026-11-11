@@ -276,6 +276,38 @@ t_claude(void)
 	      c.n == 2 && !xr_chapter_at(&c, 1)->error);
 	xr_chapters_free(&c);
 
+	/* NIT-2 (QA 1.45.1): a short id made to look like a long one's key
+	** (0xff + its FNV-1a) never reaches id_key: a raw 0xff is not UTF-8,
+	** so its whole line is refused and the long Grep stays quiet */
+	{
+		char lid[100], fake[20];
+		unsigned long long h = 0xcbf29ce484222325ULL;
+		const unsigned char *u;
+
+		memset(lid, 'L', 80);
+		lid[80] = '\0';
+		for (u = (const unsigned char *)lid; *u; u++)
+			h = (h ^ *u) * 0x100000001b3ULL;
+		snprintf(fake, sizeof fake, "\xff%016llx", h);
+		begin();
+		line(U("long"));
+		snprintf(b, sizeof b, "{\"type\":\"assistant\",\"message\":"
+		         "{\"content\":[{\"type\":\"tool_use\",\"id\":\"%s\","
+		         "\"name\":\"Grep\",\"input\":{\"pattern\":\"x\"}}]}}",
+		         lid);
+		line(b);
+		line(U("crafted"));
+		snprintf(b, sizeof b, "{\"type\":\"user\",\"message\":{"
+		         "\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":"
+		         "\"%s\",\"is_error\":true}]}}", fake);
+		line(b);
+		end(&c);
+		CHECK("claude: a crafted 0xff id never pairs with a long id's key",
+		      c.n == 2 && !xr_chapter_at(&c, 0)->error &&
+		      !xr_chapter_at(&c, 1)->error);
+		xr_chapters_free(&c);
+	}
+
 	/* an oversized line is a failed step: here it opens a partial */
 	begin();
 	xr_claude_line(D, "", 0, 0, 1);

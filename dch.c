@@ -2016,9 +2016,25 @@ load_codex_names(struct slist *sl)
 		(void)each_pid(load_codex_pid, sl);
 }
 
+/* A session listed under exactly this name: on a case-insensitive file
+** system (macOS) its socket path answers to every case variant too. */
+static int
+name_listed(const char *name)
+{
+	struct slist sl = {0};
+	int k, hit = 0;
+
+	(void)list_sessions(&sl);
+	for (k = 0; k < sl.n && !hit; k++)
+		hit = strcmp(sl.v[k], name) == 0;
+	slist_free(&sl);
+	return hit;
+}
+
 /* INFO-2 (#120): no new session or rename takes a name shaped like a live
-** shell's session_id ("m" + 16 lowercase hex), so `--xray <id> --clear`
-** never meets a name that shadows an id. 1, the line printed, when refused. */
+** shell's session_id ("m" + 16 hex, in any case: QA 1.45.1 LOW-1), so
+** `--xray <id> --clear` never meets a name that shadows an id. 1, the line
+** printed, when refused. */
 static int
 refuse_id_name(const char *name)
 {
@@ -2970,7 +2986,9 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 	{
 		int probe = control_connect_path(sock_path);
 
-		if (probe < 0 && refuse_id_name(session_name))
+		/* a session already named so is attached, by its exact name */
+		if ((probe < 0 || !name_listed(session_name)) &&
+		    refuse_id_name(session_name))
 			exit(2);	/* not 2 returned: that is ATTACH_SWITCH */
 		close(probe);
 	}
@@ -6162,6 +6180,64 @@ proc_cwd(long pid, char *out, size_t outsz)
 	return 0;
 }
 
+/* --say, --run and --revive under SIGINT, SIGTERM or SIGHUP (#126): the
+** first one stops the verb at its next safe point. Nothing more is typed,
+** text already typed is taken back out of the composer (never an Enter),
+** and the verb says so. A second one exits at once. A --say parent forwards
+** the first to its children as SIGUSR1, which only stops them: a child
+** under a Ctrl-C to its whole group gets the tty's SIGINT and the forward,
+** and must not read them as two (si_pid cannot tell them apart: macOS
+** gives 0 for both when they are pending together). SIGPIPE is ignored: a
+** cut dch serve ctl's reader may be gone. */
+static volatile sig_atomic_t ty_sig;	/* stop: any of them, or SIGUSR1 */
+static volatile sig_atomic_t ty_own;	/* an INT, TERM or HUP came */
+static pid_t *ty_kids;		/* in a --say parent: its children */
+static int ty_nkids;
+
+static void
+ty_set(sigset_t *set)
+{
+	sigemptyset(set);
+	sigaddset(set, SIGINT);
+	sigaddset(set, SIGTERM);
+	sigaddset(set, SIGHUP);
+	sigaddset(set, SIGUSR1);
+}
+
+static void
+ty_on_sig(int sig)
+{
+	int k;
+
+	if (sig == SIGUSR1)
+	{
+		ty_sig = 1;
+		return;
+	}
+	if (ty_own)
+		_exit(128 + sig);
+	ty_own = ty_sig = 1;
+	for (k = 0; k < ty_nkids; k++)
+		if (ty_kids[k] > 0)
+			kill(ty_kids[k], SIGUSR1);
+}
+
+static void
+ty_arm(void)
+{
+	static const int sigs[] = { SIGINT, SIGTERM, SIGHUP, SIGUSR1 };
+	struct sigaction sa;
+	int k;
+
+	memset(&sa, 0, sizeof sa);
+	sa.sa_handler = ty_on_sig;
+	sa.sa_flags = SA_RESTART;
+	ty_set(&sa.sa_mask);	/* never nested: one body at a time */
+	for (k = 0; k < 4; k++)
+		sigaction(sigs[k], &sa, NULL);
+	signal(SIGPIPE, SIG_IGN);
+}
+
 #ifdef HAVE_LIBGHOSTTY_VT
 
 #define AG_POLL_MS  250
@@ -6498,12 +6574,73 @@ composer_holds(const char *path, const char *text)
 	return ok;
 }
 
+/* A signal once our text is in the composer (#126): take it back out,
+** never an Enter. Claude Code's Ctrl-U (2.1.318: deleteToLineStart) kills
+** to the start of the cursor's visual (wrapped) row, and at its column 0
+** the newline or row before it; on an empty composer it does nothing. So
+** one Ctrl-U at a time, the screen re-read after each, until the text is
+** gone: -5. -6 when it is still there at the deadline (land ms) or after
+** strlen + 2 of them (each kills at least a byte), or once a dialog covers
+** the composer: the keys went to it and the text sits under it.
+** shortcut: an Enter Claude takes only after the signal still sends the
+** text, read here as taken back; upgrade by watching for the turn. */
+static int
+ty_take_back(const char *path, const char *text, long land)
+{
+	long long end = wall_ms() + land;
+	size_t n, max = strlen(text) + 2;
+	int s;
+
+	for (n = 0; ; n++)
+	{
+		if (claude_gate(path) == CG_DIALOG)
+			return -6;
+		if (!composer_holds(path, text))
+			return -5;
+		if (n == max || wall_ms() >= end ||
+		    (s = control_connect_path(path)) < 0)
+			return -6;
+		send_ctl(s, MSG_PUSH, "\x15", 1);
+		close(s);
+		poll(NULL, 0, AG_POLL_MS / 5);
+	}
+}
+
+/* Push text (NULL: an Enter) with INT, TERM, HUP and the forward blocked
+** across the ty_sig check (#126): -4 once a signal was handled, so nothing
+** is ever typed after one. Else 0, or -1 when it could not be pushed. */
+static int
+ty_push(const char *path, const char *text, int paste)
+{
+	sigset_t set, old;
+	int s, r = -4;
+
+	ty_set(&set);
+	sigprocmask(SIG_BLOCK, &set, &old);
+	if (!ty_sig && (paste || !text))
+		r = dch_pty_push(path, text) < 0 ? -1 : 0;
+	else if (!ty_sig)
+	{
+		r = (s = control_connect_path(path)) < 0 ? -1 : 0;
+		if (s >= 0)
+		{
+			send_ctl(s, MSG_PUSH, text, strlen(text));
+			close(s);
+		}
+	}
+	sigprocmask(SIG_SETMASK, &old, NULL);
+	return r;
+}
+
 /* Type text (paste = bracketed paste for messages; raw keystrokes for a
 ** slash command, which Claude's menu must see typed), then press Enter —
 ** only once the composer shows it. A prompt raised in between would take
 ** the Enter as an answer. Returns 0, -1 when nothing could be typed, -2
 ** when the text did not land (no Enter pressed), -3 when it landed but
-** stayed in the composer through every Enter. */
+** stayed in the composer through every Enter. Once ty_sig is set (#126):
+** -4 before anything is typed; text typed waits to land, then
+** ty_take_back's -5 or -6 instead of the next Enter; -6 too when it never
+** landed (it may still paint). */
 static int
 ag_type(const char *path, const char *text, int paste)
 {
@@ -6520,20 +6657,10 @@ ag_type(const char *path, const char *text, int paste)
 	** dialog never gets one: composer_holds() reads it as not holding. */
 	long gap = env_ms("DCH_AGENT_REENTER_MS", 5000);
 	long long next;
-	int s, t, n;
+	int t, n;
 
-	if (paste)
-	{
-		if (dch_pty_push(path, text) < 0)
-			return -1;
-	}
-	else
-	{
-		if ((s = control_connect_path(path)) < 0)
-			return -1;
-		send_ctl(s, MSG_PUSH, text, strlen(text));
-		close(s);
-	}
+	if ((t = ty_push(path, text, paste)) < 0)
+		return t;
 	for (t = AG_ENTER_MS; ; t += AG_POLL_MS / 2)
 	{
 		poll(NULL, 0, t == AG_ENTER_MS ? AG_ENTER_MS : AG_POLL_MS / 2);
@@ -6542,17 +6669,21 @@ ag_type(const char *path, const char *text, int paste)
 		/* a prompt the paste raised: nothing lands until a human
 		** answers it, so stop waiting */
 		if (t >= land || claude_gate(path) == CG_DIALOG)
-			return -2;
+			return ty_sig ? -6 : -2;	/* it may paint later */
 	}
 	for (n = 0; ; n++)
 	{
-		if (dch_pty_push(path, NULL) < 0)
+		if ((t = ty_push(path, NULL, 1)) == -4)
+			return ty_take_back(path, text, land);
+		if (t < 0)
 			return -1;
 		for (next = wall_ms() + gap; wall_ms() < next; )
 		{
 			poll(NULL, 0, AG_POLL_MS);
 			if (!composer_holds(path, text))
 				return 0;
+			if (ty_sig)
+				return ty_take_back(path, text, land);
 		}
 		if (n == AG_REENTER)
 			return -3;
@@ -7582,10 +7713,12 @@ restart_agents(int force, const char *only, int json)
 /* Outcomes; from SAY_NO_SESSION on they are failures. */
 enum { SAY_OK, SAY_NOT_CLAUDE, SAY_SELF, SAY_PROMPT, SAY_DRAFT,
        SAY_NO_SCREEN, SAY_NO_SESSION, SAY_NOT_SUBMITTED,
-       SAY_NOT_TYPED, SAY_OLD_MASTER, SAY_N };
+       SAY_NOT_TYPED, SAY_OLD_MASTER, SAY_INTERRUPTED, SAY_WITHDRAWN,
+       SAY_DRAFT_LEFT, SAY_N };
 static const char *const say_code[] = {
 	"", "not_claude", "self", "prompt", "draft", "no_screen", "no_session",
-	"not_submitted", "not_typed", "old_master",
+	"not_submitted", "not_typed", "old_master", "interrupted", "withdrawn",
+	"draft_left",
 };
 static const char *const say_why[] = {
 	"", "no claude runs in the session", "the session you are in",
@@ -7595,6 +7728,11 @@ static const char *const say_why[] = {
 	"the message stayed in the composer through every Enter",
 	"the message could not be typed",
 	"its master predates --cmd (dch --restart it)",
+	"a signal came before anything was typed",
+	"a signal came once it was typed: taken back out of the composer, "
+	"not sent",
+	"a signal came once it was typed: it may still sit in the composer, "
+	"not sent",
 };
 /* A child's exit status carries its outcome past exit(1) and the like. */
 #define SAY_EXIT 100
@@ -7646,6 +7784,12 @@ say_type(const char *path, const char *text, int paste)
 		return SAY_OK;
 	case -3:
 		return SAY_NOT_SUBMITTED;
+	case -4:
+		return SAY_INTERRUPTED;
+	case -5:
+		return SAY_WITHDRAWN;
+	case -6:
+		return SAY_DRAFT_LEFT;
 	default:
 		return SAY_NOT_TYPED;
 	}
@@ -7660,6 +7804,9 @@ do_say_verb(char **names, int nnames, char **words, int nwords, int json)
 	const char *self = getenv("DCH_SESSION");
 	char selfb[256], cb[256], path[1100], *text;
 	pid_t *kids;
+#ifdef HAVE_LIBGHOSTTY_VT
+	sigset_t term, old;
+#endif
 	size_t len = 1;
 	int k, c, st, live = 0, bad = 0, ws;
 
@@ -7675,6 +7822,10 @@ do_say_verb(char **names, int nnames, char **words, int nwords, int json)
 		free(text);
 		return 1;
 	}
+	ty_arm();
+#ifdef HAVE_LIBGHOSTTY_VT
+	ty_set(&term);
+#endif
 	if (self && *self)
 		self = canon_name(self, selfb, sizeof selfb);
 	if (!names)
@@ -7684,6 +7835,8 @@ do_say_verb(char **names, int nnames, char **words, int nwords, int json)
 		nnames = sl.n;
 	}
 	kids = calloc((size_t)nnames + 1, sizeof *kids);
+	ty_kids = kids;
+	ty_nkids = kids ? nnames : 0;
 	for (k = 0; kids && k < nnames; k++)
 	{
 		struct cmd_info ci;
@@ -7707,8 +7860,19 @@ do_say_verb(char **names, int nnames, char **words, int nwords, int json)
 			cmd_info_free(&ci);
 		}
 #ifdef HAVE_LIBGHOSTTY_VT
+		/* blocked over the fork: a signal now is forwarded to this
+		** child too, once kids[k] holds it */
+		if (c < 0)
+			sigprocmask(SIG_BLOCK, &term, &old);
 		if (c < 0 && (kids[k] = fork()) == 0)
+		{
+			ty_kids = NULL;
+			ty_nkids = 0;
+			sigprocmask(SIG_SETMASK, &old, NULL);
 			_exit(SAY_EXIT + say_type(path, text, 1));
+		}
+		if (c < 0)
+			sigprocmask(SIG_SETMASK, &old, NULL);
 		if (c < 0 && kids[k] > 0)
 		{
 			live++;
@@ -7727,6 +7891,11 @@ do_say_verb(char **names, int nnames, char **words, int nwords, int json)
 	{
 		pid_t p = wait(&ws);
 
+		if (p < 0 && errno == EINTR)
+		{
+			live++;
+			continue;
+		}
 		if (p < 0)
 			break;
 		for (k = 0; k < nnames && kids[k] != p; k++)
@@ -7743,6 +7912,7 @@ do_say_verb(char **names, int nnames, char **words, int nwords, int json)
 		bad |= c >= SAY_NO_SESSION;
 	}
 	bad |= !kids;
+	ty_nkids = 0;
 	free(kids);
 	free(text);
 	slist_free(&sl);
@@ -7784,6 +7954,7 @@ do_run_verb(const char *name, char **words, int nwords)
 		return 1;
 	for (text[0] = '\0', k = 0; k < nwords; k++)
 		strcat(strcat(text, k ? " " : ""), words[k]);
+	ty_arm();
 	c = say_type(path, text, text[0] != '/');
 	free(text);
 	if (c == SAY_OK)
@@ -9361,9 +9532,12 @@ shell_type_launch(const char *name, char **launch, char *id, const char *cd,
 static int
 revive_type_launch(struct hrec *r)
 {
-	while (activity_epoch(r->as) == 0 && wall_ms() < r->deadline)
+	while (!ty_sig && activity_epoch(r->as) == 0 && wall_ms() < r->deadline)
 		poll(NULL, 0, 100);
-	poll(NULL, 0, 300);
+	if (!ty_sig)
+		poll(NULL, 0, 300);
+	if (ty_sig)
+		return -2;	/* #126: nothing typed */
 	return shell_type_launch(r->as, r->launch, r->sid,
 	                         r->acwd[0] && strcmp(r->acwd, r->cwd)
 	                         ? r->acwd : NULL, r->acfg);
@@ -9385,7 +9559,14 @@ revive_message(struct hrec *r, const char *msg, const char **code)
 	session_sock_path(r->as, path, sizeof path);
 	for (;;)
 	{
-		int ok = cmd_query(path, &ci) == 0;
+		int ok;
+
+		if (ty_sig)
+		{
+			*code = say_code[SAY_INTERRUPTED];
+			return say_why[SAY_INTERRUPTED];
+		}
+		ok = cmd_query(path, &ci) == 0;
 
 		if (ok && ci.pid > 0 && claude_find(ci.pid, 1, &c) > 0 &&
 		    strcmp(c.status, "idle") == 0 &&
@@ -9409,6 +9590,13 @@ revive_message(struct hrec *r, const char *msg, const char **code)
 		poll(NULL, 0, AG_POLL_MS);
 	}
 	t = ag_type(path, msg, 1);
+	if (t <= -4)
+	{
+		t = t == -4 ? SAY_INTERRUPTED : t == -5 ? SAY_WITHDRAWN
+		    : SAY_DRAFT_LEFT;
+		*code = say_code[t];
+		return say_why[t];
+	}
 	*code = t == 0 ? "" : t == -3 ? "not_submitted" : "not_typed";
 	return t == 0 ? NULL : t == -2 ? "it did not land in the composer"
 	       : t == -3 ? "it stayed in the composer through every Enter"
@@ -9624,6 +9812,7 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 		hrec_free(r, n);
 		return 1;
 	}
+	ty_arm();
 	strip_caller_agent();
 	login_env();
 	(void)dch_history_dir(dir, sizeof dir, sock_dir, 0);
@@ -9706,6 +9895,15 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 				if (!name_live(h->as) && access(rp, F_OK) != 0)
 					break;
 			}
+		if (ty_sig)	/* #126: a signal stops before the next start */
+		{
+			rv_say(h, json, "failed", say_code[SAY_INTERRUPTED], "NOT "
+			       "revived — %s%s%s", say_why[SAY_INTERRUPTED],
+			       h->sid[0] ? "; resume by hand: claude --resume " : "",
+			       h->sid);
+			bad++;
+			continue;
+		}
 		json_phase(h->name, "starting", json);
 		if (revive_spawn(exe, h, cols, rows, json) < 0)
 		{
@@ -9774,15 +9972,18 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 	for (k = 0; k < n; k++)
 		if (r[k].mode == RV_SHELL)
 		{
-			if (revive_type_launch(&r[k]) == 0)
+			int tl = revive_type_launch(&r[k]);
+
+			if (tl == 0)
 			{
 				r[k].deadline = wall_ms() + step;
 				continue;
 			}
-			rv_say(&r[k], json, "failed", "relaunch_failed", "revived as "
-			       "%s in %s, but claude %s could not be started; resume "
-			       "by hand: claude --resume %s", r[k].as, r[k].cwd,
-			       r[k].aname, r[k].sid);
+			rv_say(&r[k], json, "failed", tl == -2 ? say_code[SAY_INTERRUPTED]
+			       : "relaunch_failed", "revived as %s in %s, but claude %s "
+			       "%s; resume by hand: claude --resume %s", r[k].as,
+			       r[k].cwd, r[k].aname, tl == -2 ? "was not started: a "
+			       "signal came first" : "could not be started", r[k].sid);
 			r[k].mode = RV_PLAIN;
 			bad++;
 		}
@@ -10373,7 +10574,10 @@ xr_resolve(const char *n, const struct hrec *r, int nr, int clear,
 			}
 		return xr_no_session();
 	}
-	if (name_live(n))
+	/* an id-shaped name only as listed: a case variant's socket answers
+	** for it on macOS (QA 1.45.1 LOW-1) */
+	if (name_live(n) && (!xr_label_id_shaped(n, strlen(n)) ||
+	                     name_listed(n)))
 	{
 		t->kind = XR_LIVE;
 		snprintf(t->name, sizeof t->name, "%s", n);
