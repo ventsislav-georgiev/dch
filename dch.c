@@ -8,6 +8,7 @@
     Originally GPLv2 from dtach by Ned T. Crigler. This file is the dch
     entry point that replaces upstream main.c.
 */
+#include "cargv.h"
 #include "dtach.h"
 #include "picker.h"
 #include "rframe.h"
@@ -5507,22 +5508,6 @@ do_spawn_verb(char *exe, const char *name, int cols, int rows,
 ** on screen — Enter on a permission prompt would approve a tool call — so
 ** the whole step needs the terminal mirror and dch-lite skips it. */
 
-/* Index of the argv entry whose basename is `claude`, argc when none. */
-static int
-claude_tok(char **v, int argc)
-{
-	int k;
-
-	for (k = 0; k < argc; k++)
-	{
-		const char *b = strrchr(v[k], '/');
-
-		if (strcmp(b ? b + 1 : v[k], "claude") == 0)
-			break;
-	}
-	return k;
-}
-
 /* First regular, executable <dir>/<name> along path, the way execvp()
 ** searches it: an empty component means cwd. Leaves the hit in out and
 ** returns 0, or returns -1 with out empty. Shared with the master's record. */
@@ -5870,7 +5855,7 @@ claude_proc(long root)
 	{
 		char **v = proc_argv(tree[i]);
 
-		hit = v && claude_tok(v, 1) == 0 && !claude_batch(v + 1);
+		hit = v && dch_claude_tok(v, 1) == 0 && !claude_batch(v + 1);
 		free(v);
 		if (hit)
 			return tree[i];
@@ -5880,17 +5865,27 @@ claude_proc(long root)
 
 /* argv for the relaunch: up to the claude token, then --resume <id>, then
 ** the rest minus any earlier session choice (--resume/-r [id], --resume=,
-** --session-id, --continue/-c, --fork-session). Inserted after the token,
-** not appended: a trailing `-- <prompt>` would swallow it. --resume/-r take
-** an OPTIONAL value, so only a non-flag next token is theirs. */
+** --session-id, --continue/-c, --fork-session) and minus the one-shot
+** prompt, which was the first message only (#138). Inserted after the
+** token, not appended: a trailing `-- <prompt>` would swallow it.
+** --resume/-r take an OPTIONAL value, so only a non-flag next token is
+** theirs. */
 static char **
 resume_argv(char **v, int argc, int tok, char *id, int *outc)
 {
 	char **o = calloc((size_t)argc + 3, sizeof(char *));
+	char **s = calloc((size_t)argc + 1, sizeof(char *));
 	int k, n = 0, opts = 1;
 
-	if (!o)
+	if (!o || !s)
+	{
+		free(o);
+		free(s);
 		return NULL;
+	}
+	/* only entries past the claude token go: tok still indexes it */
+	argc = dch_claude_strip(v, argc, s);
+	v = s;
 	for (k = 0; k <= tok; k++)
 		o[n++] = v[k];
 	o[n++] = "--resume";
@@ -5922,6 +5917,7 @@ resume_argv(char **v, int argc, int tok, char *id, int *outc)
 			continue;
 		o[n++] = v[k];
 	}
+	free(s);
 	*outc = n;
 	return o;
 }
@@ -7483,7 +7479,7 @@ restart_agents(int force, const char *only, int json)
 			continue;	/* dead socket: nothing to restart */
 		a->argv = a->ci.argv;
 		a->argc = a->ci.argc;
-		a->tok = claude_tok(a->argv, a->argc);
+		a->tok = dch_claude_tok(a->argv, a->argc);
 		n = a->ci.pid > 0 && strcmp(a->ci.state, "held") != 0
 		    ? claude_find(a->ci.pid, 1, &r) : 0;
 		mpid = a->ci.pid > 0 ? proc_ppid(a->ci.pid) : -1;
@@ -7728,7 +7724,7 @@ restart_agents(int force, const char *only, int json)
 		session_sock_path(sl.v[k], path, sizeof path);
 		if (cmd_query(path, &ci) == 0)
 		{
-			h = claude_tok(ci.argv, ci.argc) < ci.argc;
+			h = dch_claude_tok(ci.argv, ci.argc) < ci.argc;
 			cmd_info_free(&ci);
 			if (h && json)
 				stop_print(sl.v[k], "skipped", "no_screen", "dch-lite "
@@ -8136,7 +8132,7 @@ do_stop_verb(char **names, int nnames, int json)
 			a->ci = ci;
 			a->argv = ci.argv;
 			a->argc = ci.argc;
-			a->tok = claude_tok(a->argv, a->argc);
+			a->tok = dch_claude_tok(a->argv, a->argc);
 			a->cpid = r.pid;
 			snprintf(a->ver, sizeof a->ver, "%s", r.ver);
 			a->mpid = mpid;
@@ -8215,6 +8211,71 @@ name_live(const char *name)
 	return 1;
 }
 
+/* An older master recorded claude's one-shot prompt (#138): write v[0..n)
+** over the string array `key` (in `object`, else at the top) of *body, so
+** --history --json does not show what a revive would not send. Left as it
+** was when anything fails: hrec_load's arrays are cut either way. */
+static void
+hrec_put(char **body, const char *object, const char *key, char **v, int n)
+{
+	struct json_parser p;
+	char *a = NULL, *nb = NULL, *q;
+	size_t al = 0, cap;
+	FILE *f;
+	int o = 0, fl, k, ok = 1;
+
+	if (dch_json_parse(&p, *body) < 0 ||
+	    (object && ((o = dch_json_field(&p, 0, object)) < 0 ||
+	                p.tok[o].kind != JSON_OBJECT)) ||
+	    (fl = dch_json_field(&p, o, key)) < 0 ||
+	    p.tok[fl].kind != JSON_ARRAY || !(f = open_memstream(&a, &al)))
+	{
+		dch_json_free(&p);
+		return;
+	}
+	fputc('[', f);
+	for (k = 0; k < n && ok; k++)
+	{
+		cap = strlen(v[k]) * 6 + 3;
+		ok = (q = malloc(cap)) &&
+		     dch_json_quote(q, cap, v[k]) != (size_t)-1;
+		if (ok)
+			fprintf(f, "%s%s", k ? "," : "", q);
+		free(q);
+	}
+	fputc(']', f);
+	ok = fclose(f) == 0 && ok;	/* al holds the size from here */
+	cap = strlen(*body) + al + 1;
+	if (ok && (nb = malloc(cap)))
+	{
+		/* the array's token runs from its '[' to just past its ']' */
+		snprintf(nb, cap, "%.*s%s%s", p.tok[fl].start, *body, a,
+		         *body + p.tok[fl].end);
+		free(*body);
+		*body = nb;
+	}
+	free(a);
+	dch_json_free(&p);
+}
+
+/* Drop claude's one-shot prompt from a record's argv (and body). */
+static void
+hrec_strip(struct hrec *r, char **v, int *argc, const char *object,
+           const char *key)
+{
+	char **s = v ? malloc(((size_t)*argc + 1) * sizeof *s) : NULL;
+	int n;
+
+	if (s && (n = dch_claude_strip(v, *argc, s)) < *argc)
+	{
+		/* v (dch_json_strv's block) has room: n < *argc */
+		memcpy(v, s, ((size_t)n + 1) * sizeof *s);
+		*argc = n;
+		hrec_put(&r->body, object, key, v, n);
+	}
+	free(s);
+}
+
 static int
 hrec_load(int dfd, const char *fn, struct hrec *r)
 {
@@ -8282,9 +8343,11 @@ hrec_load(int dfd, const char *fn, struct hrec *r)
 			r->acfg[0] = '\0';
 		r->launch = dch_json_strv(r->body, "agent", "launch",
 		                          &r->launchc);
+		hrec_strip(r, r->launch, &r->launchc, "agent", "launch");
 	}
 	else
 		r->sid[0] = '\0';
+	hrec_strip(r, r->argv, &r->argc, NULL, "argv");
 	/* A record with an end is over even if a new session took its name;
 	** live means its own socket answers, so a record a cold start moved
 	** aside (<name>.<ended>.json) is history beside the name's live one. */
@@ -9489,7 +9552,7 @@ static int
 revive_spawn(char *exe, struct hrec *r, int cols, int rows, int json)
 {
 	char **nv = NULL, **v = r->argv;
-	int tok = claude_tok(r->argv, r->argc), nc = r->argc, rc;
+	int tok = dch_claude_tok(r->argv, r->argc), nc = r->argc, rc;
 	const char *lossy = hrec_lossy(r), *cfg = NULL, *o;
 	char *was = NULL;
 
@@ -9592,7 +9655,7 @@ shell_type_launch(const char *name, char **launch, char *id, const char *cd,
 
 	for (n = 0; launch && launch[n]; n++)
 		;
-	tok = claude_tok(launch, n);
+	tok = dch_claude_tok(launch, n);
 	if (tok == n)
 		tok = n - 1;	/* no claude token: --resume goes last */
 	if (!(nv = resume_argv(launch, n, tok, id, &nc)))

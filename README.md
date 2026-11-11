@@ -260,10 +260,11 @@ Each [release](https://github.com/ventsislav-georgiev/dch/releases) carries
 `dch-lite-<version>-<os>-<arch>.tar.gz`, each with a `.sha256` beside it, for
 `darwin-arm64` and `darwin-x86_64` (macOS 14 or later) and `linux-aarch64`
 and `linux-x86_64` (glibc 2.28 or later: RHEL 8, Debian 10, Ubuntu 18.10 and
-newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README.
+newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
+full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.48.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.49.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -277,7 +278,8 @@ dch --version
 
 Make sure `~/.local/bin` is in your `$PATH`. A file fetched with curl
 carries no quarantine flag, so macOS runs it as is. One downloaded in a
-browser does: clear it with `xattr -d com.apple.quarantine dch`.
+browser does: clear it on the installed binary with
+`xattr -d com.apple.quarantine ~/.local/bin/dch`.
 
 ## Build from source
 
@@ -1104,7 +1106,9 @@ session only. The step is opt-in: without `--include-agents`, `--restart`
    session id from the last `claude --resume <id>` line Claude prints on exit.
    It then starts the original command again, with `--resume <id>` inserted
    right after the `claude` token. Any `--resume`, `-r`, `--continue`, `-c`,
-   `--session-id` and `--fork-session` from the original command are dropped.
+   `--session-id` and `--fork-session` from the original command are dropped,
+   and so is Claude's one-shot prompt (see
+   [Bringing sessions back](#bringing-sessions-back)).
    The session keeps its name, socket and attached clients.
 5. **Resume.** Once the new Claude is idle with an empty composer, it gets the
    resume message, and dch checks that it now reports the installed version.
@@ -1187,6 +1191,22 @@ ended. A revived session's record carries the agent it resumed from the
 first write, so it keeps the resume id even if it ends within that minute.
 A reboot, a crash or a SIGKILL ends sessions without a word; the
 record outlives them.
+
+Claude's startup prompt is sent once. `dch --spawn api -- claude --name api --
+"fix the login bug"` starts Claude with that first message, and dch keeps it
+out of everything after: the record stores the command without it, and
+`--revive`, the picker's resume, `--restart`'s agent step and a revive with
+no Claude id all start `claude --name api` (with `--resume <id>`), every other
+option kept, one written after the prompt too (`claude "fix it" --model opus`
+comes back as `claude --model opus`). `--history`, `--history --json` and `--ls-json` never show it;
+a record an older dch wrote with one is read without it. The prompt is
+everything after a bare `--`, and every argument that is neither an option
+nor an option's value, the options read the way Claude Code 2.1.318's
+`--help` lists them. Put it after `--`: an
+option dch does not know, followed by a word, keeps the whole command, prompt
+included, rather than guess which word is its value. Claude Code itself runs
+a one-word prompt that names one of its commands (`update`, `doctor`, `mcp`,
+…) as that command, `--` or not, so give such a prompt more words.
 
 A new session under a dead session's name — `dch` in the same repo after
 `dch --stop`, `dch work` again, `--revive other --as work` — would replace
