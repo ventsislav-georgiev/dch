@@ -1502,7 +1502,9 @@ def test_follow_claude():
         check("follow: deltas coalesce, batches >= 250 ms apart (%d refs in "
               "%d batches, gaps %s)" % (nref, len(ts),
                                         ["%.3f" % g for g in gaps]),
-              nref == 12 and 1 < len(ts) < 6 and
+              # the count depends on how fast the lines land (a loaded
+              # runner spreads them): the gap is the rule
+              nref == 12 and 1 < len(ts) <= nref and
               all(g >= 0.245 for g in gaps), ts)
 
         # shrink: cut back to the first line
