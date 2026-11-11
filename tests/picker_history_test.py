@@ -16,7 +16,11 @@ Covers:
   5. the filter keeps that one row: /alpha is one row, [History 1];
   6. open picks the record the row shows: Shift+Enter in the /alpha
      prompt alpha's newest (ALPHA_NEW), o on mix its newest (MIX_NEW),
-     not the older pinned one.
+     not the older pinned one;
+  7. d, y on a name that also has a live session removes the row and both
+     ended records, keeps the live one's, and says no failure;
+  8. the cap counts pinned names: 3 pinned and 60 others are 50 rows, the
+     47 newest of the 60.
 
 Run:  python3 tests/picker_history_test.py      (uses ./dch)
 """
@@ -192,6 +196,48 @@ def main():
     s = wait_screen("pm", lambda s: "MIX_" in s, 20)
     check("o on mix opens the newest record the row shows (MIX_NEW)",
           "MIX_NEW" in s and "MIX_PIN" not in s, s)
+
+    # d on a name with a live session: its two ended records go, the live
+    # one's record stays, and no failure is said
+    dch("--spawn", "lv", "--size", "80x24", "sh", "-c", "sleep 600")
+    # ended "after" the live one's last update (a clock step back): the
+    # live record lists last, so a failure on it would be the line shown
+    lv = ["lv.%d" % (now + 100), "lv.%d" % (now + 200)]
+    for i, file in enumerate(lv):
+        record(file, "lv", -100 * (i + 1), "exit 0", "LV")
+    s = history("pd")
+    check("select lv", select("pd", "lv"), screen("pd"))
+    dch("--keys", "pd", "d")
+    wait_screen("pd", lambda s: "Remove lv from History?" in s)
+    dch("--keys", "pd", "y")
+    s = wait_screen("pd", lambda s: "lv" not in rows(s) and "forgotten" in s,
+                    15)
+    left = os.listdir(rec)
+    check("d, y on lv (live too): its row and both ended records gone, the "
+          "live record kept, no failure said",
+          "lv" not in rows(s) and "forgotten" in s and "failed" not in s and
+          not [f for f in left if f.startswith("lv.") and f != "lv.json"] and
+          "lv.json" in left,
+          s, left)
+
+    # the cap: 3 pinned and 60 more names, 50 rows; the 47 newest of the 60
+    for f in os.listdir(rec):        # every record but the live ones'
+        if f not in ("pk.json", "pm.json", "pd.json", "lv.json", "mix.json",
+                     "alpha.json"):
+            os.unlink(os.path.join(rec, f))
+    for i in range(3):
+        record("cp%d" % i, "cp%d" % i, 5000 + i, "exit 0", "CP", True)
+    for i in range(60):
+        record("cu%02d" % i, "cu%02d" % i, 1000 - i * 10, "exit 0", "CU")
+    s = history("pc")
+    check("3 pinned and 60 other names: [History 50], pinned first",
+          "[History 50]" in s and rows(s)[:3] == ["cp0", "cp1", "cp2"], s)
+    dch("--keys", "pc", "/")
+    wait_screen("pc", lambda s: "/█" in s)
+    dch("--send", "pc", "cu")
+    s = wait_screen("pc", lambda s: "/cu█" in s and "[History 47]" in s)
+    check("... the 47 newest of the 60: /cu is [History 47], cu13 first",
+          "[History 47]" in s and rows(s)[:1] == ["cu13"], s)
     return 1 if failures else 0
 
 
@@ -200,7 +246,7 @@ if __name__ == "__main__":
     try:
         rc = main()
     finally:
-        for n in ("pk", "pm", "probe", "mix", "alpha"):
+        for n in ("pk", "pm", "pd", "pc", "lv", "probe", "mix", "alpha"):
             dch("-k", n)
         shutil.rmtree(ROOT, ignore_errors=True)
     print("PASS" if rc == 0 else "FAILED: %d" % len(failures))

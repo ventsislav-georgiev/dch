@@ -8686,10 +8686,16 @@ pk_load(struct pk *p)
 		w->when = hrec_when(&h[k]);
 		w->pinned = h[k].pinned;
 	}
-	/* every pinned name, then the newest of the rest up to the cap */
-	for (k = j = pin = 0; k < p->n[2]; k++)
-		if (p->r[2][k].pinned || pin++ < PK_HIST_MAX)
+	/* every pinned name, then the newest of the rest while the total is
+	** under the cap */
+	for (k = pin = 0; k < p->n[2]; k++)
+		pin += p->r[2][k].pinned;
+	for (k = j = 0; k < p->n[2]; k++)
+		if (p->r[2][k].pinned || pin < PK_HIST_MAX)
+		{
+			pin += !p->r[2][k].pinned;
 			p->r[2][j++] = p->r[2][k];
+		}
 	p->n[2] = j;
 	hrec_free(h, nh);
 	pk_sort(p, sel);
@@ -8733,32 +8739,40 @@ pk_ended(const char *name, long since)
 
 /* An action: the dch words after argv[0] (NULL-terminated), what the
 ** status line says while it runs, the row it is about. */
+/* One more word on a's argv: 0, or -1 when it does not fit. */
+static int
+pk_arg(struct pkact *a, const char *w)
+{
+	size_t off = 0, l = strlen(w) + 1;
+	int n = 1;
+
+	while (a->argv[n])
+		n++;
+	if (n > 1)
+		off = (size_t)(a->argv[n - 1] - a->buf) + strlen(a->argv[n - 1]) + 1;
+	if (n >= 11 || off + l > sizeof a->buf)
+		return -1;
+	memcpy(a->buf + off, w, l);
+	a->argv[n] = a->buf + off;
+	a->argv[n + 1] = NULL;
+	return 0;
+}
+
 static void
 pk_act(struct pkact *a, int tab, const char *target, const char *doing, ...)
 {
 	va_list ap;
 	const char *w;
-	size_t off = 0;
-	int n = 0;
 
 	memset(a, 0, sizeof *a);
 	a->tab = tab;
 	snprintf(a->target, sizeof a->target, "%s", target);
 	snprintf(a->doing, sizeof a->doing, "%s", doing);
-	a->argv[n++] = dch_exe;
+	a->argv[0] = dch_exe;
 	va_start(ap, doing);
-	while (n < 11 && (w = va_arg(ap, const char *)))
-	{
-		size_t l = strlen(w) + 1;
-
-		if (off + l > sizeof a->buf)
-			break;
-		memcpy(a->buf + off, w, l);
-		a->argv[n++] = a->buf + off;
-		off += l;
-	}
+	while ((w = va_arg(ap, const char *)) && pk_arg(a, w) == 0)
+		;
 	va_end(ap);
-	a->argv[n] = NULL;
 }
 
 static void
@@ -9240,6 +9254,24 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 		}
 		snprintf(d, sizeof d, "removing %s", w->title);
 		pk_act(&p->ask, 2, w->name, d, "--forget", pk_recs(w, f), NULL);
+		/* a live session of the name: its record is not History's, and
+		** --forget <name> would fail on it; the ended records' files */
+		if (pk_recs(w, f) == w->sname && name_live(w->sname))
+		{
+			struct hrec *h;
+			int nh = history_load(&h);
+
+			pk_act(&p->ask, 2, w->name, d, "--forget", NULL);
+			/* shortcut: as many as an action's argv holds (9); the
+			** rest stay a row for the next d */
+			for (k = 0; k < nh; k++)
+				if (!name_live(h[k].file) &&
+				    !strcmp(h[k].name, w->sname) &&
+				    snprintf(f, sizeof f, "%s.json", h[k].file) <
+				    (int)sizeof f && pk_arg(&p->ask, f) < 0)
+					break;
+			hrec_free(h, nh);
+		}
 		pk_ask(p, "Remove %s from History?", w->title);
 		return 0;
 	}
