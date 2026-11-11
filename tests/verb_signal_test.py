@@ -256,19 +256,23 @@ def main():
 
         # --- a dialog over the composer when the signal comes ------------
         # the Ctrl-Us go to the dialog and the text sits under it
-        d = sess("vdlg", "claude", eat_enters=99)
+        # (the fake raises it at the first Ctrl-U: a dialog put up from
+        # here while --run polls its Enter reads as "sent", as a real tool
+        # prompt after a taken message does, so the order must be fixed)
+        d = sess("vdlg", "claude", eat_enters=99, dialog_on_kill=True)
         up(d)
         pr = start("--run", d, "hello", "under", "a", "dialog")
         held = until(lambda: composer(d, "hello under a dialog"))
-        setctl(d, eat_enters=99, dialog=True)
-        until(lambda: "Do you want to proceed?" in screen(d), 5)
         pr.send_signal(signal.SIGTERM)
         rc, out, err, secs = finish_p(pr)
         check("--run SIGTERMed with a dialog over its text: `draft_left`, "
               "not `withdrawn` (%.1f s)" % secs,
               held and rc == 1 and
               err.startswith("dch: %s: draft_left — " % d) and
+              "Do you want to proceed?" in screen(d) and
               typed(d) == [])
+        if not (rc == 1 and err.startswith("dch: %s: draft_left" % d)):
+            print("       rc=%r err=%r" % (rc, err))
 
         # --- a paste that has not painted when the signal comes, nor by
         # the end of the land wait: it may still paint, so `draft_left`

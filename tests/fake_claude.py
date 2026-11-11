@@ -23,6 +23,8 @@ State lives in $FAKE_CLAUDE_DIR:
                     fold (an Enter read together with typed text folds
                     into it, as Claude Code's paste detection does),
                     exit_ms (/exit takes that long to quit),
+                    dialog_on_kill (the first Ctrl-U raises a known
+                    prompt over the draft instead of killing a row),
                     screen (rows painted in place of the composer and
                     footer: a dialog; every key typed then is logged as
                     key, and a digit dismisses it until the knob changes,
@@ -126,6 +128,7 @@ tty.setraw(0)
 out = sys.stdout.buffer
 transcript, queue, draft = [], [], ""
 collapsed, prompt_up, pstart, eaten = False, False, 0, 0
+kill_dialog = False   # dialog_on_kill: a Ctrl-U raised a prompt
 in_paste = False
 turn_end = 0.0
 dismissed = None     # the screen knob a digit answered
@@ -194,7 +197,7 @@ def paint(c):
         # only the composer check stands between it and our Enter
         rows += [rule, " A new kind of prompt", "", " \u276f 1. Yes",
                  "   2. No", "", " Enter to confirm \u00b7 Esc to cancel"]
-    elif c.get("dialog"):
+    elif c.get("dialog") or kill_dialog:
         rows += [rule, " Bash command", "", " Do you want to proceed?",
                  " ❯ 1. Yes", "   2. No", "", " Esc to cancel"]
     else:
@@ -311,7 +314,7 @@ while True:
                 log(ev="key", text=ch.decode("latin-1"))
                 if ch.isdigit() and not c.get("sticky"):
                     dismissed = json.dumps(c)
-            elif ch == b"\r" and (prompt_up or c.get("dialog")):
+            elif ch == b"\r" and (prompt_up or c.get("dialog") or kill_dialog):
                 log(ev="enter_dialog", text=draft)
             elif ch == b"\r" and burst and c.get("fold"):
                 log(ev="enter_folded", text=draft)
@@ -324,6 +327,9 @@ while True:
                 submit(text, c)
             elif ch == b"\x7f":
                 draft = draft[:-1]
+            elif ch == b"\x15" and (kill_dialog or c.get("dialog_on_kill")):
+                kill_dialog = True     # the key went to the prompt
+                log(ev="key", text="\x15")
             elif ch == b"\x15" and collapsed:
                 draft, collapsed = "", False    # one row: the placeholder
             elif ch == b"\x15":
@@ -349,7 +355,7 @@ while True:
         if want != status:
             set_status(want)
     view = (status, len(transcript), len(queue), draft, json.dumps(c),
-            prompt_up, collapsed, dismissed)
+            prompt_up, collapsed, dismissed, kill_dialog)
     if view != last:
         paint(c)
         last = view
