@@ -345,6 +345,11 @@ size_t packet_payload_len(const struct packet *pkt);
 ** user asked for the session picker with the detach key: two presses, or one
 ** with detach_key = switch. */
 #define ATTACH_SWITCH 2
+/* ... and ATTACH_ENDED when the session ended (the master closed the socket)
+** under attach_end_back, set by the host for an attach the picker made
+** (#133): back to the picker, not the shell. Local attaches only. */
+#define ATTACH_ENDED 3
+extern int attach_end_back;
 
 /* Session history (#042): each master keeps a JSON record of its session in
 ** dch_history_dir(); `--history` lists the dead ones, `--revive` restarts

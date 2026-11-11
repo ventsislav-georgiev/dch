@@ -155,6 +155,7 @@ hint.
 | `↑` `↓` / `j` `k`, `PgUp` `PgDn`, `g` `G` | move | move |
 | `Tab` `→` `l` / `Shift-Tab` `←` `h` | next / previous tab | next / previous tab |
 | `Enter` | attach (`-k`: kill, `-d`: detach) | resume (`--revive`, with the carry-on message) |
+| `Shift-Enter` / `o` | attach (`Shift-Enter`; as `Enter`) | resume, then attach to it once it is up (open); `dch -l` and the switch only, the `-k` / `-d` pickers say so and do nothing |
 | `r` | rename (set the alias; empty clears) | |
 | `R` | restart the agent (`--restart <n> --include-agents -f`), asks first | |
 | `S` | stop (`--stop`), asks first | |
@@ -198,6 +199,20 @@ A question waits for `y`; any other key cancels. Actions run the matching
 `dch` verb in the background: the status line shows `restarting …` while it
 runs, then its result (`Resumed as <name>`, `killed: <name>`, or the error).
 Resuming a record whose name is live again resumes it as `<name>-2`.
+`Shift-Enter` or `o` on a History row resumes it the same way and, once the
+revive reports `ok`, attaches to the session it made (by the name the revive
+answered, so never another session of that name); a failed revive leaves you
+in the picker with its line. The picker turns on the kitty keyboard protocol's
+disambiguate flag (`CSI > 1 u`) while it is up, popped again before it exits
+or attaches, so a terminal that speaks it (Ghostty, kitty, WezTerm, foot)
+sends `Shift-Enter` apart from `Enter`; xterm's modifyOtherKeys form works
+too. Where the terminal cannot tell them apart, `o` does the same.
+A session the picker opened (`dch -l`, the switch, `Shift-Enter`) that ends —
+its program exits, Claude Code after `Ctrl-D` twice, a shell's `exit` — takes
+you back to the picker instead of the shell, on History with the record that
+end wrote selected (`q` / `Esc` there leave for the shell). A session attached
+with `dch <name>` or `dch -a <name>`, or a remote one, still exits to the
+shell when it ends.
 Colour is truecolor when `COLORTERM` is `truecolor` or `24bit`, else the 256
 palette for a `*256color` `TERM`, else the basic eight (the selection in
 reverse video); a light background in `COLORFGBG` picks lighter tints.
@@ -324,8 +339,9 @@ etc. — terminals that swallow most control keys still pass `Ctrl-\` through.
 Press `Ctrl-\` **twice quickly** to switch sessions: dch detaches and shows the
 same picker as `dch -l`, so you can hop straight into another session. It opens
 where the last picker of that dch left off (its tab, sort and `/` filter) with
-the session you just left selected, on whichever tab holds it now; the first
-switch after a plain attach opens on that session too. Quitting
+the session you just left selected, on whichever tab holds it now (Sessions
+or Sidekicks); the first switch after a plain attach opens on that session
+too, and so does a session opened from History with `Shift-Enter`. Quitting
 the picker (`q` / `Esc`) just leaves you detached. A single press still detaches
 — it waits out the double-press window first. `DCH_DOUBLE_TAP_MS` sets that
 window in milliseconds (default `300`); `DCH_DOUBLE_TAP_MS=0` turns switching

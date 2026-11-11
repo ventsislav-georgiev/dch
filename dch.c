@@ -2103,8 +2103,10 @@ picker_restore(void)
 		    "\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?1015l"
 		    "\033[?2004l\033[?7h",
 		    6 + 5 * 8 + 8 + 5);
+		/* the kitty flags pushed on the alternate screen popped there:
+		** Ghostty keeps a stack per screen (#132) */
 		if (picker_alt)
-			(void)!write(picker_tty_fd, "\033[0m\033[?1049l", 12);
+			(void)!write(picker_tty_fd, "\033[<u\033[0m\033[?1049l", 16);
 		picker_alt = 0;
 		close(picker_tty_fd);
 		picker_tty_fd = -1;
@@ -2183,7 +2185,9 @@ tty_rows(int fd)
 
 /* The interactive picker (#075), defined after the history code it reads.
 ** 0 with the chosen session in out; 1 when none, no tty or cancelled. */
-static int pick_session(const char *header, char *out, size_t outsz);
+static int pick_session(const char *header, char *out, size_t outsz,
+                        int opens);
+static void pk_ended(const char *name, long since);
 
 /* ---- interactive rename (alias sidecar) ---------------------------- */
 
@@ -2200,6 +2204,8 @@ picker_raw_on(int fd)
 	tw(fd, "\033[?25l"
 	       "\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?1015l"
 	       "\033[?2004l");
+	if (picker_alt)	/* back from prompt_line: Shift+Enter told apart */
+		tw(fd, "\033[>1u");
 }
 
 /* Read one cooked line from the tty (echo on). Returns 0 with the trimmed
@@ -2209,6 +2215,8 @@ static int
 prompt_line(int fd, const char *prompt, char *out, size_t outsz)
 {
 	tcsetattr(fd, TCSANOW, &picker_saved_term); /* cooked + echo */
+	if (picker_alt)	/* the kitty flags off: ^D, ^U as the line editor's */
+		tw(fd, "\033[<u");
 	tw(fd, "\033[?25h\033[2K\r");
 	tw(fd, prompt);
 	ssize_t r;
@@ -3027,8 +3035,10 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 		/* Returns only if connect() failed, or the user asked to
 		** switch sessions — the latter is a live session, not a dead
 		** socket, so it must not fall through to the respawn. */
-		if (attach_main(1) == ATTACH_SWITCH)
-			return ATTACH_SWITCH;
+		int rc = attach_main(1);
+
+		if (rc == ATTACH_SWITCH || rc == ATTACH_ENDED)
+			return rc;
 		dch_trace("hot-path connect failed; dead socket, respawning");
 	}
 	}
@@ -3070,30 +3080,38 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 /* do_attach(), plus the double-tap-detach session switcher: when the attached
 ** client returns ATTACH_SWITCH, show the same picker as `dch -l` and attach to
 ** whatever the user selects. Quitting the picker just ends the loop, leaving
-** the previous session detached and running. */
+** the previous session detached and running. picked: the first attach is
+** the picker's (dch -l); a session the picker opened that ends goes back to
+** it, on History (#133), where any other's end exits to the shell. */
 static int
 attach_with_switch(char *exe, int forced_name, int force, char **inner_argv,
-                   int inner_argc)
+                   int inner_argc, int picked)
 {
 	for (;;)
 	{
 		char chosen[sizeof session_name];
-		int rc = do_attach(exe, forced_name, force, inner_argv,
-		                   inner_argc);
+		long since = (long)time(NULL);
+		int rc;
 
-		if (rc != ATTACH_SWITCH)
+		attach_end_back = picked;
+		rc = do_attach(exe, forced_name, force, inner_argv, inner_argc);
+		attach_end_back = 0;
+		if (rc == ATTACH_ENDED)
+			pk_ended(session_name, since);
+		else if (rc != ATTACH_SWITCH)
 			return rc;
 		/* the picker opens on the session just left (#098) */
-		if (!remote_host)
+		else if (!remote_host)
 			pk_focus(session_name);
 		else if ((size_t)snprintf(chosen, sizeof chosen, "%s:%s",
 		                          remote_host, session_name) < sizeof chosen)
 			pk_focus(chosen);
 		pk_remote = 1;
 		if (pick_session("switch to session:", chosen,
-		                 sizeof(chosen)) != 0)
+		                 sizeof(chosen), 1) != 0)
 			return 0;
 		snprintf(session_name, sizeof(session_name), "%s", chosen);
+		picked = 1;
 		forced_name = 1;
 		force = 1;
 		remote_ok = 1;
@@ -8595,6 +8613,40 @@ pk_load(struct pk *p)
 	pk_sort(p, sel);
 }
 
+/* The session the picker opened ended (#133): the next picker opens on
+** History, on the record that end wrote: this name's, ended at `since` or
+** later (an older one of the name ended before the attach), the newest.
+** The master writes it as it exits, so it is waited for, up to 2s; none
+** by then: History as it is, or the session's own row when it still
+** answers (the master dropped the client, it did not end). */
+static void
+pk_ended(const char *name, long since)
+{
+	char f[sizeof ((struct hrec *)0)->file] = "";
+	struct hrec *h;
+	long best = 0;
+	int k, n, tries;
+
+	for (tries = 0; !f[0] && tries < 40; tries++)
+	{
+		if (tries)
+			usleep(50 * 1000);
+		n = history_load(&h);
+		for (k = 0; k < n; k++)
+			if (!h[k].live && h[k].ended >= since &&
+			    h[k].ended > best && !strcmp(h[k].name, name))
+			{
+				best = h[k].ended;
+				snprintf(f, sizeof f, "%s", h[k].file);
+			}
+		hrec_free(h, n);
+	}
+	if (!f[0] && name_live(name))
+		pk_focus(name);
+	else
+		pk_focus_history(f);
+}
+
 /* ---- actions ---- */
 
 /* An action: the dch words after argv[0] (NULL-terminated), what the
@@ -8717,6 +8769,10 @@ pk_reap(struct pk *p)
 		snprintf(p->status, sizeof p->status, "%s: %s", p->run.doing,
 		         WIFEXITED(st) && WEXITSTATUS(st) == 0 ? "done"
 		         : "failed");
+	/* o, Shift+Enter (#132): the session this revive made, by the name
+	** it answered, attached by pk_run; gone already, the line stays */
+	if (res[0] && !strcmp(res, "ok") && p->run.go && as[0] && name_live(as))
+		snprintf(p->go, sizeof p->go, "%s", as);
 	p->loaded = 0;
 }
 
@@ -8896,6 +8952,16 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 		return pk_cfdo(p, fd, c);
 	if ((k = pk_nav(p, c)))
 		return k < 0 ? -1 : 0;
+	/* Shift+Enter: Enter; in History, o, only where the pick is attached:
+	** -k and -d would kill or detach what it revived */
+	if (c == PK_SENTER)
+		c = t < 2 ? '\r' : 'o';
+	if (c == 'o' && t == 2 && !p->opens)
+	{
+		snprintf(p->status, sizeof p->status, "o opens a session: from "
+		         "dch -l or the switch");
+		return 0;
+	}
 	switch (c)
 	{
 	case ',':
@@ -8918,7 +8984,7 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 		return 0;
 	}
 	if (c != '\r' && c != '\n' && c != 'r' && c > 0 && c < 256 &&
-	    strchr("RSxabBmIpd", c) && p->pid > 0)
+	    strchr("RSxabBmIpdo", c) && p->pid > 0)
 	{
 		snprintf(p->status, sizeof p->status, "busy, one at a time");
 		return 0;
@@ -8947,7 +9013,7 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 		}
 		return 0;
 	}
-	if (!w || (c > 0 && c < 256 && !strchr("\r\nrRSxapmd", c)))
+	if (!w || (c > 0 && c < 256 && !strchr("\r\nrRSxapmdo", c)))
 		return 0;
 	/* dch would read a name that starts with '-' as a flag */
 	if (w->name[0] == '-')
@@ -9049,7 +9115,7 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 	snprintf(f, sizeof f, "%s.json", w->name);	/* this one record */
 	switch (c)
 	{
-	case '\r': case '\n': case 'm':
+	case '\r': case '\n': case 'm': case 'o':
 		pk_free_name(p, w->sname, as, sizeof as);
 		nm = c == 'm' ? "--no-message" : NULL;
 		snprintf(d, sizeof d, "resuming %s", w->title);
@@ -9061,6 +9127,7 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 			       NULL);
 		p->ask.revive = 1;
 		p->ask.nomsg = c == 'm';
+		p->ask.go = c == 'o';	/* and attach once it is up (#132) */
 		pk_start(p, &p->ask);
 		return 0;
 	case 'p':
@@ -9128,8 +9195,10 @@ pk_write(int fd, const void *b, size_t n)
 	(void)!write(fd, b, n);
 }
 
+/* opens: the caller attaches what is picked, so History's o and
+** Shift+Enter may revive and hand it back (#132); -k and -d must not. */
 static int
-pick_session(const char *header, char *out, size_t outsz)
+pick_session(const char *header, char *out, size_t outsz, int opens)
 {
 	struct sigaction sa, owinch;
 	struct pk p;
@@ -9163,6 +9232,7 @@ pick_session(const char *header, char *out, size_t outsz)
 		close(fd);
 		goto done;
 	}
+	p.opens = opens;
 	picker_tty_fd = fd;
 	picker_term_saved = 1;
 	signal(SIGINT, picker_sigint);
@@ -9175,7 +9245,10 @@ pick_session(const char *header, char *out, size_t outsz)
 	sigaction(SIGWINCH, &sa, &owinch);
 	picker_raw_on(fd);
 	picker_alt = 1;
-	tw(fd, "\033[?1049h\033[?7l\033[H\033[2J");
+	/* the kitty protocol's disambiguate flag, pushed on the alternate
+	** screen and popped there (picker_restore): Shift+Enter is CSI 13;2u,
+	** Enter stays \r (#132) */
+	tw(fd, "\033[?1049h\033[?7l\033[H\033[2J\033[>1u");
 	rc = pk_run(&p, fd, header, out, outsz);
 	picker_restore();
 	signal(SIGINT, SIG_DFL);
@@ -12163,14 +12236,14 @@ main_run(int argc, char **argv)
 
 		pk_remote = 1;
 		rc = pick_session("attach session (mirror):", chosen,
-		                  sizeof(chosen));
+		                  sizeof(chosen), 1);
 		if (rc == 0)
 		{
 			remote_ok = 1;
 			snprintf(session_name, sizeof(session_name),
 			         "%s", chosen);
 			return attach_with_switch(exe, 1, 1, inner_argv,
-			                          inner_argc);
+			                          inner_argc, 1);
 		}
 		return 0;
 	}
@@ -12180,7 +12253,7 @@ main_run(int argc, char **argv)
 		{
 			char chosen[sizeof session_name];
 			int rc = pick_session("kill session:", chosen,
-			                      sizeof(chosen));
+			                      sizeof(chosen), 0);
 			if (rc != 0)
 				return 0;
 			snprintf(session_name, sizeof(session_name),
@@ -12198,7 +12271,7 @@ main_run(int argc, char **argv)
 		{
 			char chosen[sizeof session_name];
 			int rc = pick_session("detach session:", chosen,
-			                      sizeof(chosen));
+			                      sizeof(chosen), 0);
 			if (rc != 0)
 				return 0;
 			snprintf(session_name, sizeof(session_name),
@@ -12483,7 +12556,7 @@ main_run(int argc, char **argv)
 	}
 	case A_ATTACH:
 		return attach_with_switch(exe, forced_name, force,
-		                          inner_argv, inner_argc);
+		                          inner_argv, inner_argc, 0);
 	}
 	return 0;
 }

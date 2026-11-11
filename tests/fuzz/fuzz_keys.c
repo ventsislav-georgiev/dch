@@ -3,8 +3,11 @@
 ** PKT_MAX chunks, as attach_main does. focus_filter (#100) gets the same
 ** bytes cut in two reads: forwarding, it must hand every byte back in order;
 ** the output scan must survive anything. Linked with the rest of dch minus
-** attach.o, and dch.c built with -Dmain=dch_main (detach_char is ^\). */
+** attach.o, and dch.c built with -Dmain=dch_main (detach_char is ^\).
+** The picker's sequence reader (pk_csi, #132) gets the bytes after ESC [
+** as pk_key collects them, at most 16. */
 #include "../../attach.c"
+#include "../../picker.h"
 #include <stdint.h>
 
 int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n);
@@ -21,6 +24,12 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 	pkt.len = (unsigned short)n;
 	if (detach_hits(&pkt) > 2)
 		abort();	/* the scan stops at two */
+	{
+		int k = pk_csi(d, n < 16 ? (int)n : 16);
+
+		if (k < 0 || k > PK_SENTER)
+			abort();
+	}
 
 	{
 		unsigned char b[sizeof pkt.u.buf + 2], got[sizeof pkt.u.buf + 2];

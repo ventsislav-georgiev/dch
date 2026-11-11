@@ -466,6 +466,18 @@ On History:
 .B Enter
 resumes
 .RB ( \-\-revive ),
+.B Shift\-Enter
+or
+.B o
+resumes and then attaches to the session the revive made, once it is up
+(a failed revive stays in the picker with its line; only in the pickers
+that attach,
+.B dch \-l
+and the switch: the
+.B \-k
+and
+.B \-d
+pickers say so and do nothing),
 .B m
 resumes without the message,
 .B I
@@ -491,6 +503,40 @@ draws no colour,
 .B TERM=dumb
 no colour and ASCII markers; without a terminal the session list is printed
 instead.
+While it is up the picker pushes the kitty keyboard protocol's disambiguate
+flag
+.RB ( "CSI > 1 u" ),
+popped before it exits or attaches, so Ghostty, kitty and the like send
+.B Shift\-Enter
+apart from
+.BR Enter ;
+xterm's modifyOtherKeys form is read too.
+.B o
+does the same on any terminal.
+On Sessions and Sidekicks
+.B Shift\-Enter
+attaches, as
+.B Enter
+does.
+.PP
+A session the picker opened
+.RB ( "dch \-l" ,
+the switch, History's
+.BR Shift\-Enter )
+that ends (its program exits: Claude Code after
+.B Ctrl\-D
+twice, a shell's
+.BR exit )
+returns to the picker instead of the shell, on History with the record
+that end wrote selected;
+.B q
+or
+.B Esc
+there leaves for the shell.
+A session attached by name
+.RB ( "dch <name>" ,
+.BR "dch \-a <name>" )
+or a remote one still exits to the shell when it ends.
 .PP
 The settings view lists every config file key (see
 .BR "CONFIG FILE" )

@@ -33,6 +33,7 @@ struct pkact
 	char doing[700];	/* "killing alpha", while it runs */
 	char target[600];	/* the row it is about; "" = a bulk action */
 	int tab, revive, nomsg;
+	int go;			/* a revive: attach to it once it is up (#132) */
 };
 
 struct pk
@@ -49,10 +50,13 @@ struct pk
 	char status[800];
 	char filt[256];		/* the "/" filter (#096); "" = every row */
 	int filtering;		/* its prompt is open: keys type into it */
+	char go[600];		/* a revive's session, up: pk_run attaches it */
+	int opens;		/* the host attaches the pick (dch -l, the
+				** switch): History's o / Shift+Enter may */
 };
 
 enum { PK_UP = 256, PK_DOWN, PK_RIGHT, PK_LEFT, PK_BTAB, PK_PGUP, PK_PGDN,
-       PK_HOME, PK_END, PK_ESC };
+       PK_HOME, PK_END, PK_ESC, PK_SENTER /* Shift+Enter (#132) */ };
 
 /* picker.c */
 extern volatile sig_atomic_t pk_winch;	/* the host saw a resize */
@@ -65,9 +69,13 @@ void pk_sort(struct pk *p, char sel[3][600]);
 void pk_rrow(struct pkrow *w, const struct dch_rrow *r);
 int pk_cfbyname(void);
 int pk_nav(struct pk *p, int c);
+int pk_csi(const unsigned char *s, int n);
 /* The session just left (host:name for a remote), selected on its tab by
 ** the next pk_open, which also keeps the last picker's place (#098). */
 void pk_focus(const char *name);
+/* Or a History record's file (#133): the next pk_open opens on History,
+** that row selected when it is there ("" for none). */
+void pk_focus_history(const char *file);
 int pk_open(struct pk *p, int remote, int vt);
 int pk_run(struct pk *p, int fd, const char *header, char *out,
            size_t outsz);

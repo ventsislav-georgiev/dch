@@ -8,7 +8,8 @@ message, queues messages typed while busy, exits on /exit printing the
 `claude --resume <id>` line, and accepts --resume <id>. Its composer
 word-wraps at the pane's width and keeps a paste's line breaks; Ctrl-U kills
 to the start of the visual row, or the newline before it, as Claude Code
-2.1.318's deleteToLineStart does; Backspace deletes one character.
+2.1.318's deleteToLineStart does; Backspace deletes one character. Ctrl-D
+twice within 2s on an empty composer exits as /exit does.
 
 State lives in $FAKE_CLAUDE_DIR:
   version           installed version (read at start and by --version)
@@ -133,6 +134,7 @@ transcript, queue, draft = [], [], ""
 collapsed, prompt_up, pstart, eaten = False, False, 0, 0
 kill_dialog = False   # dialog_on_kill: a Ctrl-U raised a prompt
 in_paste = False
+ctrl_d = 0.0         # the first Ctrl-D of an exit's two
 turn_end = 0.0
 dismissed = None     # the screen knob a digit answered
 
@@ -334,6 +336,10 @@ while True:
                 collapsed = False
                 text, draft = draft, ""
                 submit(text, c)
+            elif ch == b"\x04" and not draft:
+                if time.time() - ctrl_d < 2:
+                    submit("/exit", c)
+                ctrl_d = time.time()
             elif ch == b"\x7f":
                 draft = draft[:-1]
             elif ch == b"\x15" and (kill_dialog or c.get("dialog_on_kill")):

@@ -30,12 +30,18 @@ and --keys types into it. Covers:
      leaves the prompt, Enter attaches the top match; Down moves among
      the kept rows, closing the prompt and keeping the filter so a letter
      action (x) works on the filtered row, j/k type into the prompt, and a
-     reload keeps the filter and the selection (#108).
+     reload keeps the filter and the selection (#108);
+ 13. the kitty keyboard protocol (#132), on a real pty: the picker pushes
+     the disambiguate flag (CSI > 1 u) after entering the alternate screen
+     and pops it (CSI < u) before leaving it, on quit (by a kitty Esc,
+     CSI 27 u) and on attach; the attached session's own push comes back
+     after the pop and nothing pops it again; History hints Shift+Enter/o.
 
 Run:  python3 tests/picker_test.py            (uses ./dch)
       DCH=/path/to/dch python3 tests/picker_test.py
 """
-import json, os, re, shutil, subprocess, sys, tempfile, time
+import errno, json, os, pty, re, shutil, subprocess, sys, tempfile, time
+from select import select as fdselect
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
@@ -209,6 +215,76 @@ def picker(name, size, *env):
     return r.returncode == 0
 
 
+def drain(fd, timeout, until=None):
+    out = b""
+    end = time.time() + timeout
+    while time.time() < end and not (until and until in out):
+        if fdselect([fd], [], [], 0.1)[0]:
+            try:
+                chunk = os.read(fd, 65536)
+            except OSError as e:
+                if e.errno in (errno.EIO, errno.EAGAIN):
+                    break
+                raise
+            if not chunk:
+                break
+            out += chunk
+    return out
+
+
+def pty_picker():
+    pid, fd = pty.fork()
+    if pid == 0:
+        e = dict(ENV, TERM="xterm-256color", NO_COLOR="1",
+                 DCH_DOUBLE_TAP_MS="0")
+        os.execve(DCH, [DCH, "-l"], e)
+        os._exit(127)
+    return pid, fd
+
+
+def kitty():
+    """13. The picker's kitty push and pop, as bytes on a pty (#132)."""
+    PUSH, POP = b"\x1b[>1u", b"\x1b[<u"
+    ALT_ON, ALT_OFF = b"\x1b[?1049h", b"\x1b[?1049l"
+    dch("--spawn", "zkbd", "--size", "80x24", "sh", "-c",
+        "printf '\\033[>3u'; echo ZKBD_SCREEN; sleep 600")
+    wait_screen("zkbd", lambda s: "ZKBD_SCREEN" in s)
+
+    pid, fd = pty_picker()
+    out = drain(fd, 10, b"q quit")
+    on = out.find(ALT_ON)
+    check("the picker pushes the kitty flag on the alternate screen",
+          on >= 0 and out.find(PUSH, on) > on, out[:200])
+    os.write(fd, b"\x1b[27u")  # kitty's Esc: quit
+    out += drain(fd, 5)
+    os.waitpid(pid, 0)
+    off = out.rfind(ALT_OFF)
+    check("a kitty Esc quits; the flag is popped before 1049l",
+          off > 0 and out.rfind(POP, 0, off) > out.rfind(PUSH),
+          out[-120:])
+
+    pid, fd = pty_picker()
+    out = drain(fd, 10, b"q quit")
+    os.write(fd, b"/zkbd")
+    out += drain(fd, 3, b"/zkbd")
+    os.write(fd, b"\r")
+    out += drain(fd, 10, b"ZKBD_SCREEN")
+    out += drain(fd, 1)
+    os.write(fd, b"\x1c")  # DCH_DOUBLE_TAP_MS=0: one tap detaches
+    drain(fd, 5)
+    os.waitpid(pid, 0)
+    off = out.find(ALT_OFF, out.find(PUSH))
+    after = out[off:] if off > 0 else b""
+    check("on attach the flag is popped before the picker leaves 1049h",
+          off > 0 and out.rfind(POP, 0, off) > out.find(PUSH), out[-300:])
+    check("the session's own push is replayed, the picker's never",
+          b"ZKBD_SCREEN" in after and b"\x1b[>3u" in after and
+          PUSH not in after, after)
+    check("... and nothing pops the session's push after it",
+          after.find(b"\x1b[<", after.rfind(b"\x1b[>3u")) < 0, after)
+    dch("-k", "zkbd")
+
+
 def main():
     if not os.access(DCH, os.X_OK):
         print("FAIL dch not executable at " + DCH)
@@ -327,6 +403,8 @@ def main():
           "claude-title" in rows(s) and "hx" not in rows(s), s)
     check("History: its own key hints only",
           "resume" in s and "rename" not in s and "s sort" not in s, s)
+    check("History: Shift+Enter/o open is hinted (#132)",
+          "\u21e7\u21b5/o open" in s, s)
     check("select s2 in History", select("pk1", "s2"), screen("pk1"))
     dch("--keys", "pk1", "enter")
     s = wait_screen("pk1", lambda s: "Resumed as s2" in s, 20)
@@ -609,6 +687,7 @@ def main():
 
     dch("--keys", "pk3", "q")
     check("q quits the picker", wait_live("pk3", False), live())
+    kitty()
     return 1 if failures else 0
 
 
@@ -618,7 +697,7 @@ if __name__ == "__main__":
     finally:
         for n in ("pk1", "pk2", "pk3", "pk4", "pk5", "pk6", "pk7", "pk8",
                   "s2", "s10",
-                  "helper-qa", "a4k-2", "perm", "form"):
+                  "helper-qa", "a4k-2", "perm", "form", "zkbd"):
             dch("-k", n)
         for pr in procs:
             pr.kill()
