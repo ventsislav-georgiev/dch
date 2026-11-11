@@ -1341,7 +1341,28 @@ is everything after a bare
 and every argument that is neither an option nor an option's value, the
 options read as Claude Code 2.1.318's
 .B \-\-help
-lists them. Put it after
+lists them. It is cut only where
+.B claude
+is the program run: the command itself, after an
+.B env
+prefix, or behind a wrapper
+.RB ( "headroom wrap claude" " ...)"
+once dch has seen Claude run in the session. Any other command that merely
+holds a
+.B claude
+word
+.RB ( "git \-C src/claude log" ,
+.BR "docker run \-\-name claude img" ,
+.BR "ssh host claude" ,
+a
+.B sh \-c
+argument) is kept whole, and so are
+.BR "npx @anthropic\-ai/claude\-code" ,
+a renamed claude and
+.BR claude.exe ,
+which hold no word named
+.BR claude .
+Put it after
 .BR \-\- :
 an option dch does not know, followed by a word, keeps the whole command,
 prompt included. Claude Code runs a one\-word prompt that names one of its

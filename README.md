@@ -1256,7 +1256,14 @@ comes back as `claude --model opus`). `--history`, `--history --json` and `--ls-
 a record an older dch wrote with one is read without it. The prompt is
 everything after a bare `--`, and every argument that is neither an option
 nor an option's value, the options read the way Claude Code 2.1.318's
-`--help` lists them. Put it after `--`: an
+`--help` lists them. It is cut only where `claude` is the program run: the
+command itself, after an `env` prefix (`env FOO=1 claude ...`), or behind a
+wrapper (`headroom wrap claude ...`) once dch has seen Claude run in the
+session. Any other command that merely holds a `claude` word (`git -C
+src/claude log`, `docker run --name claude img`, `ssh host claude ...`, a
+`sh -c` argument) is kept whole, and so are `npx @anthropic-ai/claude-code`,
+a renamed claude and `claude.exe`, which hold no word named `claude`. Put it
+after `--`: an
 option dch does not know, followed by a word, keeps the whole command, prompt
 included, rather than guess which word is its value. Claude Code itself runs
 a one-word prompt that names one of its commands (`update`, `doctor`, `mcp`,

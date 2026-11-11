@@ -486,6 +486,7 @@ static char *rec_head;		/* {"name":…,"started":N, */
 static char *rec_agent;		/* the agent object, or null */
 static struct dch_agent rec_ag;	/* last agent seen; pid 0 = none */
 static char *rec_seed;		/* --revive's agent object until one is seen */
+static int rec_claude;		/* an agent was ever seen: wrapped claude argvs cut (#141) */
 static long rec_started;
 static char rec_end[192];	/* how the master ended, set before exit */
 static struct timespec rec_at;	/* last refresh */
@@ -506,7 +507,7 @@ rec_str(FILE *f, const char *s)
 ** goes without its one-shot prompt: a revive must not send it again, and
 ** the record is not the place to keep it (#138). */
 static void
-rec_strv(FILE *f, char **v, const char *v0)
+rec_strv(FILE *f, char **v, const char *v0, int agent)
 {
 	char **s;
 	int k, n;
@@ -517,7 +518,7 @@ rec_strv(FILE *f, char **v, const char *v0)
 	** array is written empty (unreadable for one refresh), never with
 	** the prompt */
 	s = malloc(((size_t)n + 1) * sizeof *s);
-	n = s ? dch_claude_strip(v, n, s) : 0;
+	n = s ? dch_claude_strip(v, n, s, agent) : 0;
 	fputc('[', f);
 	for (k = 0; k < n; k++)
 	{
@@ -577,7 +578,7 @@ dch_agent_json(FILE *f, const struct dch_agent *a)
 	fputs(",\"cwd\":", f);
 	rec_str(f, a->cwd);
 	fputs(",\"launch\":", f);
-	rec_strv(f, a->launch, NULL);
+	rec_strv(f, a->launch, NULL, 1);
 	fputs(",\"config_dir\":", f);
 	rec_str(f, a->cfg);
 	fputc('}', f);
@@ -628,6 +629,7 @@ rec_refresh(void)
 	if (!stopped && the_pty.fd >= 0 &&
 	    dch_agent_probe(the_pty.pid, &a) == 0)
 	{
+		rec_claude = 1;
 		free(rec_ag.launch);
 		rec_ag = a;
 		free(rec_seed);
@@ -669,7 +671,8 @@ rec_refresh(void)
 	    path_lookup(cur_argv[0], path, rec_cwd, exe, sizeof exe) < 0)
 		exe[0] = '\0';
 	fputs(",\"argv\":", f);
-	rec_strv(f, cur_argv, exe[0] ? exe : NULL);
+	rec_strv(f, cur_argv, exe[0] ? exe : NULL,
+	         rec_claude || stopped || rec_seed);
 	fprintf(f, ",\"started\":%ld,", rec_started);
 	if (fclose(f) != 0 || !(f = open_memstream(&ab, &al)))
 	{

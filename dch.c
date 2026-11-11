@@ -5887,7 +5887,7 @@ resume_argv(char **v, int argc, int tok, char *id, int *outc)
 		return NULL;
 	}
 	/* only entries past the claude token go: tok still indexes it */
-	argc = dch_claude_strip(v, argc, s);
+	argc = dch_claude_strip(v, argc, s, 1);
 	v = s;
 	for (k = 0; k <= tok; k++)
 		o[n++] = v[k];
@@ -8267,9 +8267,13 @@ hrec_strip(struct hrec *r, char **v, int *argc, const char *object,
            const char *key)
 {
 	char **s = v ? malloc(((size_t)*argc + 1) * sizeof *s) : NULL;
-	int n;
+	char kind[16];
+	int n, ag;
 
-	if (s && (n = dch_claude_strip(v, *argc, s)) < *argc)
+	/* a Claude agent was seen: a wrapped claude's prompt goes too (#141) */
+	ag = dch_json_nested_string(r->body, "agent", "kind", kind,
+	                            sizeof kind) == 0 && !strcmp(kind, "claude");
+	if (s && (n = dch_claude_strip(v, *argc, s, ag)) < *argc)
 	{
 		/* v (dch_json_strv's block) has room: n < *argc */
 		memcpy(v, s, ((size_t)n + 1) * sizeof *s);
