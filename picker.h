@@ -34,6 +34,7 @@ struct pkact
 	char target[600];	/* the row it is about; "" = a bulk action */
 	int tab, revive, nomsg;
 	int go;			/* a revive: attach to it once it is up (#132) */
+	char host[DCH_RHOST_MAX];	/* a revive on this host (#115) */
 };
 
 struct pk

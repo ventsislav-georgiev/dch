@@ -128,7 +128,13 @@ name, is matched as plain text; set it empty for no tab), shown only when
 there are some; and **History**, the ended sessions of `--history`, one row
 per session name (its newest record, pinned when any record of the name is),
 pinned first, then by name, case-insensitive, at most 50 (`--history` itself
-still lists every record, newest first). Every list has column headers and fixed, aligned columns,
+still lists every record, newest first). With remote hosts on, History then
+lists the other hosts' ended sessions as `host:name`, the host faint, at most
+50 names per host, so a full local History never hides them (see
+[Remote hosts](#remote-hosts)); on one, `Enter`, `m` and `Shift-Enter`/`o`
+run `dch --revive host:name` there (`o` then attaches to `host:<as>`), a host
+whose `dch serve` lacks `--allow-create` answering in one status line, and
+`p` and `d` say they are for this host's records. Every list has column headers and fixed, aligned columns,
 sized to the rows on screen. A session row shows NAME (alias, else harness
 name, else name), STATE as a glyph and a word (Needs input, red and the
 loudest; Working, in the accent; Done, green; Idle, faint), ACTIVE (how long
@@ -417,12 +423,12 @@ someone is watching is invisible to them.
 | `--report <n> <state>` | Push a semantic state: `working`, `idle`, `blocked`, or `done` (closed set, unknown tokens rejected); `clear` reverts to auto (detection + heuristic). Last write wins; cleared automatically when the session ends. | 0 ok, 1 no session / bad state |
 | `--meta <n> '<json>'` | Attach one JSON object of metadata to the session (see [Optional: session metadata](#optional-session-metadata)); `clear` removes it. Replaced atomically, last write wins, never interpreted; a byte-identical push is a no-op; rejected input leaves the stored object unchanged. Removed automatically when the session's program exits. | 0 ok, 1 no session / not a single-line JSON object ≤ 16 KB |
 | `--wait <n> --state <s[,s...]> [--timeout ms]` | Block until the state matches any of the comma list (e.g. `idle,blocked,done` = "turn over"); prints the matched state. `active` is accepted as an alias for `working`. Polls every 100 ms. | 0 hit, 2 timeout, 1 no session |
-| `--ls-json` | All sessions as JSON: `[{"name","alias","harness","activity_epoch","state","version","agents","meta","meta_epoch","auto_allowed","claude_session_id","transcript_path","cols","rows","clients"}]`. `cols` and `rows` are the pty size the session's master holds (set by the attached clients' windows, or `--spawn --size`), `clients` how many clients are attached right now; read in the same control round trip as the rest, never by attaching or resizing, and left out (not `0`) for a master too old to report them and for `--remote` rows. `harness` is the name of the Claude Code or Codex session running inside, or `""`; the real `name` remains separate. `state` follows the same resolution rule as `--status`. `version` is the dch version of the master serving that session, or `""` for a master old enough not to report one. `agents` is the number of live subagents on Claude Code's agent panel (the `⏺ main` block under the prompt), `0` when no panel is on screen — including while a prompt covers it — or `DCH_NO_DETECT=1` is set. `meta` is the object last pushed with `--meta`, verbatim, or `null`; `meta_epoch` is when that content last changed (epoch seconds, like `activity_epoch`), `0` with no meta. `auto_allowed` is the permission prompt the master answered last with [auto-allow](#auto-allow), `{"at":<epoch seconds>,"title":"<the dialog's first line, e.g. Bash command>"}`, or `null`; cleared when the session's program exits, like `meta`. `claude_session_id` is the `sessionId` of the one live interactive Claude Code under the session's program, read fresh from its own `<config>/sessions/<pid>.json` (pid descending from the program, `procStart` matching the process; `CLAUDE_CONFIG_DIR` honoured), so it follows `/clear` and resume; `null` when no Claude runs there, when more than one does, once it exits, or when the id is not a UUID. `transcript_path` is that conversation's absolute `<config>/projects/<dir>/<sessionId>.jsonl` when exactly one such file exists, else `null` (also right after `/clear`, until the new conversation writes its first line). | 0 |
+| `--ls-json` | All sessions as JSON: `[{"name","alias","harness","activity_epoch","state","version","agents","meta","meta_epoch","auto_allowed","claude_session_id","transcript_path","cols","rows","clients"}]`. `cols` and `rows` are the pty size the session's master holds (set by the attached clients' windows, or `--spawn --size`), `clients` how many clients are attached right now; read in the same control round trip as the rest, never by attaching or resizing, and left out (not `0`) for a master too old to report them and for `--remote` rows. Every row ends with `"cwd"`, after every other key: the directory the session started in, from its live history record, `null` when it has none (a master from before history records) or the record already says it ended; a `--remote` row's is the host's, from its `dch serve` list, `null` from a server that does not send one. `harness` is the name of the Claude Code or Codex session running inside, or `""`; the real `name` remains separate. `state` follows the same resolution rule as `--status`. `version` is the dch version of the master serving that session, or `""` for a master old enough not to report one. `agents` is the number of live subagents on Claude Code's agent panel (the `⏺ main` block under the prompt), `0` when no panel is on screen — including while a prompt covers it — or `DCH_NO_DETECT=1` is set. `meta` is the object last pushed with `--meta`, verbatim, or `null`; `meta_epoch` is when that content last changed (epoch seconds, like `activity_epoch`), `0` with no meta. `auto_allowed` is the permission prompt the master answered last with [auto-allow](#auto-allow), `{"at":<epoch seconds>,"title":"<the dialog's first line, e.g. Bash command>"}`, or `null`; cleared when the session's program exits, like `meta`. `claude_session_id` is the `sessionId` of the one live interactive Claude Code under the session's program, read fresh from its own `<config>/sessions/<pid>.json` (pid descending from the program, `procStart` matching the process; `CLAUDE_CONFIG_DIR` honoured), so it follows `/clear` and resume; `null` when no Claude runs there, when more than one does, once it exits, or when the id is not a UUID. `transcript_path` is that conversation's absolute `<config>/projects/<dir>/<sessionId>.jsonl` when exactly one such file exists, else `null` (also right after `/clear`, until the new conversation writes its first line). | 0 |
 | `--restart <n>` \| `--restart --all` `[--include-agents] [-f] [--json]` | Re-exec the session's master onto the current `dch` binary, in place — the program inside keeps running (see [Upgrading a live session](#upgrading-a-live-session)). `--all` restarts only sessions whose `version` differs from this binary's; `-f` restarts all of them. With `--include-agents`, it then restarts the stale Claude Code agents of those sessions — Claude as the session's command; one typed into its shell is skipped (`in_shell`); every session with `--all`, only `<n>` otherwise; `-f` forces current agents too (see [Restarting Claude Code agents](#restarting-claude-code-agents)). Without the flag no agent is touched, `--all` included. `--include-agents` without `--restart` is a usage error. `--json`: stdout is NDJSON, the master pass included, with or without `--include-agents` (see [Machine-readable output](#machine-readable-output)). | 0 ok, 1 failed / master too old / an agent restart failed |
 | `--respawn <n> [-- cmd...]` | Arm a one-shot respawn: when the session's program next exits, the master keeps the session (same socket, pty size, attached clients) and starts `cmd` in its place. No `cmd` arms a *hold*: the session stays up childless until a second `--respawn <n> -- cmd` starts one, or until `DCH_HOLD_MS` (default 120000) ends it. An arm that nothing consumes expires after `DCH_RESPAWN_TTL_MS` (default 300000); both are read from the master's environment. `--restart` refuses while a respawn is armed or held. | 0 ok, 1 no session / refused / master too old |
 | `--respawn <n> --cancel` | Drop a pending arm. On a held (childless) session it ends the session. | 0 ok, 1 no session |
 | `--cmd <n>` | Print `{"pid","state","argv","exit_code","exit_signal","tail"}`: the child's pid (`null` while held), `state` `running`, `armed` or `held`, the argv it was started with, the exit status of a child reaped under an arm (`null` otherwise), and `tail`, the last 8 KB the child wrote since the arm, raw. | 0 ok, 1 no session / master too old |
-| `--history [--json]` | List the sessions that ended, newest first, one line each: `name (alias)  when  end  cwd  $ argv  [claude <name> <session id>]`. `end` is `exit N`, `signal N`, `signal N from <pid> <command>` (the master itself got SIGTERM or SIGINT from that process: its command line made printable, cut at 120 bytes; `signal N from <pid>` when it was already gone), `killed` (`dch -k`), `stopped` (`dch --stop`) or `vanished` (the master died without a word: SIGKILL, power loss). Only the records of the current socket dir are listed. A pinned record (`--pin`) ends its line with `  [pinned]`, one a new session under its name moved aside with `  [record <name>.<ended>]`. `--json` prints the stored records as an array, a pinned one with `"pinned":true` added (absent otherwise), every one with `"file"`, its record file without `.json` (`work`, or `work.<ended>` for a moved one), the exact handle for `--pin`/`--unpin`/`--forget <file>.json` (see [Bringing sessions back](#bringing-sessions-back)). | 0 |
+| `--history [--json]` | List the sessions that ended, newest first, one line each: `name (alias)  when  end  cwd  $ argv  [claude <name> <session id>]`. `end` is `exit N`, `signal N`, `signal N from <pid> <command>` (the master itself got SIGTERM or SIGINT from that process: its command line made printable, cut at 120 bytes; `signal N from <pid>` when it was already gone), `killed` (`dch -k`), `stopped` (`dch --stop`) or `vanished` (the master died without a word: SIGKILL, power loss). Only the records of the current socket dir are listed. A pinned record (`--pin`) ends its line with `  [pinned]`, one a new session under its name moved aside with `  [record <name>.<ended>]`. `--json` prints the stored records as an array, a pinned one with `"pinned":true` added (absent otherwise), every one with `"file"`, its record file without `.json` (`work`, or `work.<ended>` for a moved one), the exact handle for `--pin`/`--unpin`/`--forget <file>.json` (see [Bringing sessions back](#bringing-sessions-back)). With `--remote`, after the local records (unchanged, byte for byte) come the remote hosts' (see [Remote hosts](#remote-hosts)): text lines as `host:name ...`, ending `  [stale]` for a host's cached answer; JSON records as the host sent them plus `"host"` and `"stale"`. | 0 |
 | `--revive <n> [--as <new>] [--no-message]` \| `--revive --all [--no-message]` | Start ended sessions again: in their cwd, with their argv, with the Claude Code agent in them resumed via `--resume <id>` and told to carry on (see [Bringing sessions back](#bringing-sessions-back)). `--no-message`: resumed only, no message typed (`ok`, the line says it was not sent). `<n>` revives its newest ended record, whatever its end — never a live session's; `<file>.json` (or the bare file `--history` prints, `[record <file>]`) exactly that record file; a live `<n>` is refused unless `--as <new>` names another session. `--all` revives every session that died — anything but `exit 0`, `killed` and `stopped` — within the last 3 days after running at least 5 minutes, and gives one whose name is now taken the first free `<n>-2`, `<n>-3`, …. Older or shorter-lived sessions stay in `--history` and revive by name. Never two Claudes on one conversation: a record whose Claude id a live Claude already runs is skipped by `--all` and refused by name (`live_sid`, naming the holder), and of two records carrying one id `--all` revives only the newest (`dup_sid`). One line per session. `--json`: stdout is NDJSON, each result carrying `"as"`, the name it came back under (see [Machine-readable output](#machine-readable-output)). | 0 ok (skips included), 1 no history / ambiguous / name live / id live / a revive or resume failed |
 | `--pin <n>... [--json]` \| `--unpin <n>... [--json]` | Pin a session's history record so the 30-day prune never takes it, or unpin it (see [Bringing sessions back](#bringing-sessions-back)). `--pin` needs a record for the name, live or ended (`<n>: failed — …`, `not_found`, otherwise), and pins every record of the name; pinning a pinned one is `ok`. `--unpin` unpins every record of the name and is `ok` with or without a pin, but `not_found` when there is no record (nor a stray pin) to act on. An argument ending in `.json` names exactly one record file instead, never a name: `--pin work.json` pins the primary `work.json` only, `--pin work.<ended>.json` only that moved record. One that is also a session's name (sessions `a` and `a.json`: `a.json` would be both) is refused, `ambiguous`, nothing touched: `a.json.json` names session `a.json`'s record. A bare argument also matches a record file exactly as given, so the `[record <file>]` that `--history` prints works for a long name's moved record (which the name shortening would hash again). One line per name: `<n>: pinned`, `<n>: unpinned` or `<n>: failed — <why>`. `-f` is a usage error. | 0 nothing failed, 1 usage error / a name failed |
 | `--forget <n>... [-f] [--json]` \| `--forget --all [--json]` | Delete history records of the current socket dir, matched by name as `--revive` matches them (every record that matches); `<file>.json` (`work.json`, `work.<ended>.json`) deletes exactly that one record file; one that is also a session's name is refused, `ambiguous`, as for `--pin`. Never a live session's (`live`: its master would write it back; `-f` does not change that); a pinned one only with `-f`, which removes its pin too (`pinned` otherwise); `not_found` when no record matches. One line per record: `<n>: forgotten` or `<n>: failed — <why>`. `--all` deletes every record that is neither live nor pinned and skips the rest: one `<n>: forgotten` per record deleted, then `forgot N (K pinned, L live kept)`; `-f` with `--all` is a usage error (it never removes a pin). | 0 nothing failed (skips included), 1 usage error / a name failed |
@@ -1744,7 +1750,8 @@ refused or busy peers wait for their close at once; past that, one is closed
 at once, and a reset may then lose its frame.
 
 **What the phone gets.** The session list (`dch --ls-json`, re-encoded: name,
-alias, state, agent count, and only GitHub pull-request links from `--meta`),
+alias, state, agent count, `cwd` when known, and only GitHub pull-request
+links from `--meta`),
 a live list for its home screen (polled every 2 s), attach with resize and
 redraw, kill, rename, and a screen snapshot from the terminal mirror (empty in
 a dch-lite build). An attached connection runs a real `dch -E -f -n <name>`
@@ -1953,6 +1960,7 @@ dch -a mybox:api                  # attach to session api on mybox
 dch --host mybox -a api           # the same, for a name with a ':' in it
 dch -l                            # the picker lists remote rows too
 dch --ls-json --remote            # remote rows, each with a "host" field
+dch --history --remote            # ended sessions here, then host:name (dch serve 1.41+)
 dch --hosts mini,pi=100.64.1.2:8771 --ls --remote   # these hosts, not your tailnet
 dch --read mybox:api              # a control verb on mybox (dch serve 1.41+)
 dch --host mybox --send api -- make test
@@ -1988,6 +1996,38 @@ skipped, with a note on stderr. A host whose `dch serve` refuses us (a
 `--ls-json` say `dch: <host> refused: <message>` on stderr and show none of
 its cached rows, and the picker drops them. A `busy` host is not a refusal:
 it is treated like a host that is down, its cached rows shown `[stale]`.
+
+**Remote history.** `dch --history --remote` and `dch --history --json
+--remote` print the local records first, exactly as without `--remote`, then
+each host's ended sessions, fetched as its own `dch --history --json` over
+`dch serve`'s `ctl` op (the `0x30` argv is exactly `["--history","--json"]`).
+- *Budget.* The same as `--ls --remote`: every host at once within 300 ms
+  in all (`DCH_REMOTE_BOX_MS`), discovery included. A host that does not
+  answer in time, or whose connection fails, shows the records it last sent,
+  `[stale]` (`"stale":true`), for two minutes, from
+  `.remote-history` beside the row cache. The picker reads only that cache;
+  its background probe refreshes it every 10 s, not every 2 s, since each
+  fetch runs a `dch` on the host and logs two lines there, and shows a
+  host's records stale once they are 30 s old.
+- *Shape.* Text: `host:name (alias)  when  end  cwd  $ argv  [claude <name>
+  <id>]  [pinned]  [record <file>]  [stale]`, every field escaped. JSON:
+  each record as the host sent it, its C1, DEL and bidi controls written as
+  `\u` escapes, plus `"host"` (its label) and `"stale"` last; a record that
+  already holds a `"host"` or `"stale"` key, or has no `"name"`, is dropped,
+  so a host cannot pass for another. At most 500 records and 2 MiB per host.
+  Without `--remote` nothing is dialled and the output is unchanged.
+- *An old or odd host.* One whose hello lacks `ctl` (before dch serve 1.41,
+  or Prosper) gets one stderr line, `dch: <host>: does not support remote
+  history (needs dch serve 1.41+)`, and no records; a refusal is `dch:
+  <host> refused: <message>`, its cached records dropped; a reply that is
+  not a JSON array or is too big, or a remote dch that failed, counts as a
+  host that is down (its cached records, stale, if any). None of these
+  change the exit status (0) or the local listing, and a hanging host costs
+  at most the box.
+- *The picker.* History lists them after the local rows (above). `Enter`
+  runs `dch --revive <file>.json --host <host>` there, which needs `dch
+  serve --allow-create` on the host; without it the status line says `dch:
+  <host>: does not support --revive (needs dch serve --allow-create)`.
 
 **Attaching.** `dch -a host:name`, or Enter on a remote row in the picker,
 attaches the way a local attach does: raw terminal, the detach key and its
@@ -2060,7 +2100,8 @@ terminal as they are, as a local session's do.
 
 **Not yet.** No live list stream (the picker polls), no remote rename (`-rl`)
 and no remote kill or create from the picker: the control verbs above are
-the command-line form, and the picker's row actions stay local.
+the command-line form, and the picker's row actions stay local, but for
+resuming a remote History row.
 
 ### Windows client
 

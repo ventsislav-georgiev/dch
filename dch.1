@@ -272,14 +272,20 @@ key or tailnet discovery.
 .B \-\-remote
 With
 .BR \-ls ,
-.B \-lj
+.BR \-lj ,
+.B \-\-ls\-json
 or
-.BR \-\-ls\-json :
-the remote rows too (the picker always shows them).
+.BR \-\-history :
+the remote rows or records too (the picker always shows them).
 .TP
 .B \-\-ls\-json
 List sessions as a JSON array of
-.BR {name,alias,harness,activity_epoch,state,version,agents,meta,meta_epoch,auto_allowed,claude_session_id,transcript_path,cols,rows,clients} .
+.BR {name,alias,harness,activity_epoch,state,version,agents,meta,meta_epoch,auto_allowed,claude_session_id,transcript_path,cols,rows,clients,cwd} .
+.I cwd
+is last: the directory the session started in, from its live history
+record, or
+.B null
+when it has none or the record says it ended.
 .I cols
 and
 .I rows
@@ -317,7 +323,7 @@ remain separate fields.
 With
 .BR \-\-remote ,
 the remote hosts' sessions follow as
-.BR {name,alias,host,state,stale} :
+.BR {name,alias,host,state,stale,cwd} :
 .I name
 and
 .I alias
@@ -325,7 +331,11 @@ as the host sent them,
 .I host
 the host's label,
 .I stale
-true when the host did not answer this time and the row is its last answer.
+true when the host did not answer this time and the row is its last answer,
+.I cwd
+the host's, or
+.B null
+from a server that does not send one.
 .TP
 .B \-rl
 Rename (alias) sessions interactively. Aliases are display-only.
@@ -380,7 +390,23 @@ the ended sessions of
 .BR \-\-history ,
 one row per session name (its newest record, pinned when any record of
 the name is),
-pinned first, then by name, case-insensitive, at most 50.
+pinned first, then by name, case-insensitive, at most 50; with remote
+hosts on, then the other hosts' (see
+.BR "REMOTE HOSTS" ),
+as \fIhost\fP:\fIname\fP with the host faint, at most 50 names per host.
+.BR Enter ,
+.B m
+and
+.B o
+on one run
+.B \-\-revive
+there, which needs
+.B dch serve \-\-allow\-create
+on the host (else its one\-line refusal shows);
+.B p
+and
+.B d
+are for this host's records.
 Every list has column headers and aligned columns sized to the rows on
 screen.
 A session row shows NAME, STATE as a glyph and a word (Needs input, Working,
@@ -2040,6 +2066,38 @@ The picker lists remote rows in Sessions, the host faint, of the hosts that
 are candidates now, and re\-probes in the background; Enter attaches, on
 the connection that checked the name is listed, and no other action applies
 to them yet.
+.PP
+.B dch \-\-history \-\-remote
+.RB ( \-\-json
+too) prints the local records unchanged, then each host's, fetched as its
+.B dch \-\-history \-\-json
+over the
+.B ctl
+op within the same 300 ms box: text lines as
+\fIhost\fP:\fIname\fP ..., JSON records as the host sent them (C1, DEL
+and bidi controls as \fI\\uXXXX\fP) plus
+.I host
+and
+.IR stale .
+A record with a
+.I host
+or
+.I stale
+key of its own, or no
+.IR name ,
+is dropped; at most 500 records and 2 MiB per host. A host that does not
+answer in time shows its last records, stale
+.RB ( [stale] ),
+for 2 minutes (a cache in
+.IR .remote\-history );
+the picker's background probe refreshes it every 10 s. A host whose hello
+lacks
+.B ctl
+prints
+.I "dch: host: does not support remote history (needs dch serve 1.41+)"
+and adds nothing; a refusal prints
+.IR "dch: host refused: message" .
+Neither changes the exit status or the local records.
 .PP
 An attach is a local one over the network: the detach character and its
 double press stay local, the window size follows the terminal, and a detach
