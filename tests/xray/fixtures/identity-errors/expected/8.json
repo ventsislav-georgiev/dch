@@ -1,1 +1,1 @@
-{"schema":1,"exit":2,"stderr":"dch: bad usage: --ref is not an --xray flag of this dch"}
+{"schema":1,"exit":2,"stderr":"dch: not a ref"}

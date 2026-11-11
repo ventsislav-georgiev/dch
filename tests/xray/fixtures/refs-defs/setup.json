@@ -1,0 +1,1 @@
+{"schema": 1, "history": [{"file": "defs", "record": {"name": "defs", "cwd": "/home/demo/proj", "end": "exited", "argv": ["claude"], "started": 1794299400, "updated": 1794300000, "ended": 1794300000, "agent": {"session_id": "11111111-2222-4333-8444-555555555502", "cwd": "/home/demo/proj", "config_dir": "@CFG@"}}}]}

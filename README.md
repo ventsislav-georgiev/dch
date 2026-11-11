@@ -264,7 +264,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.49.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.50.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -361,6 +361,7 @@ dch --config [<key> [<value>|--unset]]          # show, read or set the config f
 dch --shell-init zsh|bash|fish                 # OSC 133 prompt marks for your rc file (X-ray)
 dch --xray <n> --json                           # a session's chapters (prompts / commands) as one JSON object
 dch --xray <n> --clear --json                   # empty a shell session's X-ray ring
+dch --xray <n> --ref <ref> --scope session [--full] [--budget-ms <ms>] --json  # one ref's mentions and definitions, NDJSON
 dch --agent-list [--json]                       # native Claude peers
 dch --agent-send <peer> <message...>            # message one (from a Codex session)
 ```
@@ -402,7 +403,7 @@ someone is watching is invisible to them.
 | Verb | Does | Exit codes |
 | --- | --- | --- |
 | `--spawn <n> [--size CxR] [--env K=V]... [cmd...]` | Start headless session (default: `$SHELL`, 80x24 or `$COLUMNS`/`$LINES`). `--env` (max 32, first `=` splits) adds variables to the child; reserved keys (`DCH_SESSION`, `TERM` fixup) always win. Like `--revive` (and a plain `dch <new>`), it drops the calling Claude Code session's identity (`CLAUDECODE`, `CLAUDE_CODE_*` session vars), plus `GIT_EDITOR` and the other harness vars when `CLAUDECODE` is set, and sets `LC_TERMINAL=ghostty` unless the caller has it (dch keeps OSC 8 links, but under `TERM=xterm-256color` with no `TERM_PROGRAM` Claude Code would strip its statusline's, and `LC_TERMINAL` is the one signal its check reads that supports-hyperlinks and other Node CLIs ignore; ssh sends it on, by macOS's default `SendEnv LC_*`). Like any session variable it reaches every program in the session, not only Claude Code; a tool that keys on `ghostty` may assume Ghostty-only features (kitty graphics, for one) that the terminal you attach from may lack. dch sets no `FORCE_HYPERLINK`: those CLIs honour it before they check for a terminal, so it put OSC 8 into pipes and files (`stylelint t.css > out`, an agent's Bash tool); a caller's own value still reaches the session. An explicit `--env` (`--env LC_TERMINAL=` included) still wins. Prints the name. A program that cannot be executed is an error (`dch: <n>: <cmd>: <reason>`); one that runs and exits at once is not. | 0 ok, 1 exists/failed/not executable/bad --env |
-| `--xray <n> --json` | One JSON object: the session's corpus and chapters (see [X-ray queries](#x-ray-queries---xray)). `--clear` empties a shell's ring instead. Must be the first argument. | 0 ok, 1 no such session/ambiguous/no corpus, 2 usage, 3 read failure |
+| `--xray <n> --json` | One JSON object: the session's corpus, chapters and refs (see [X-ray queries](#x-ray-queries---xray)). `--clear` empties a shell's ring instead; `--ref` streams one ref's lines. Must be the first argument. | 0 ok, 1 no such session/ambiguous/no corpus, 2 usage, 3 read failure |
 | `--send <n> <text...>` | Type text (joined with spaces), no enter. | 0 ok |
 | `--run <n> <text...>` | `--send` + enter. Into a session whose Claude Code runs — as its command or typed into its shell — the text goes through `--say`'s composer gate instead: typed only over an empty composer, Enter pressed once it shows and again while it stays (Claude Code folds an Enter sent with the text into the paste). A `/command` is typed raw, a message pasted. A shell or any other program, a master without a mirror (`DCH_NO_VT`), dch-lite and your own session (`$DCH_SESSION`) keep the plain burst. A gate failure prints `dch: <n>: <reason> — <why>` on stderr: `prompt` and `draft` (nothing typed), `not_typed` (the text never showed in the composer, no Enter), `not_submitted` (it stayed there through every Enter); `no_screen` when the composer is not on screen; `interrupted`, `withdrawn` or `draft_left` on a SIGINT, SIGTERM or SIGHUP, as for `--say`. | 0 ok, 1 gate failure |
 | `--keys <n> <key...>` | Encode+send keys mode-aware: `ctrl+c`, `alt+x`, `shift+tab`, `up`, `f5`, `enter`, `esc`, single chars. | 0 ok, 1 unknown key |
@@ -916,7 +917,9 @@ The corpus:
     `s<seq of the prompt record>` for a shell.
   - `kind` is `prompt`, `command` or `compact`.
   - `title` is at most 120 Unicode scalars.
-- **`refs`.** Always `[]` in this release.
+- **`refs`.** The refs the corpus mentions (see [Refs](#refs)), at most 2000
+  keys. The rest are counted in `dropped_keys`, exactly up to 32768 distinct
+  keys and as a lower bound past that. `[]` for corpus `none`.
 - **Size.** The object is capped at 4 MiB: past that, the oldest chapters go
   and `why` is `"output"`.
 
@@ -945,6 +948,57 @@ the master's control socket. Nothing is typed into the session. It prints
   `dch: no such session`, as does a master that hangs up mid-request. A dch-lite master exits 1 with
   `dch: no x-ray corpus`.
 
+#### Refs
+
+A ref is an issue (`#831`, `dch#120`), a pull request (`o/r#7`), a ticket
+(`PROJ-12`, not `UTF-8` or `SHA-256`), a commit (7 to 40 lowercase hex with a
+letter and a digit), a file path (`src/main.c:12`, keyed absolute against the
+session's cwd) or a URL (a GitHub issue or pull URL keys as `owner/repo#n`,
+a commit URL as the commit). A bare `repo#n` needs a repo of at least 3
+characters that starts with a letter, ends with a letter or digit and is not a
+glue word or standard (`issue#12`, `step#3`, `PKCS#12`, `PR#831`, `a#12` are
+none; `pre-#831` is the issue `#831`). A ref needs a word boundary on both sides,
+Unicode-aware: `#831é` is none. Prompts and assistant text use every rule outside code spans and fences;
+tool input and output, and a shell's ring, use the code rules only (URLs,
+`owner/repo#n`, paths with a line number, commits), so a bare `#831`
+mid-line in output is no ref. Texts are clipped before the scan: 6000 Unicode
+scalars of prose and of a Bash command, 3000 of tool output, 240 per tool
+field. A shell line (rows joined at soft wraps, at most 64 KiB) gives at most
+128 mentions.
+
+Each entry of `refs` carries `key` (`<shape>:<text>`), `shape`, `text`,
+`full` (a commit's hex as written), `project`, `count`, `defined`,
+`definitions`, `title` and `underline` (defined, or counted at least twice).
+`count` is per Claude mention, per shell block with OSC 133 marks, and per row
+without. A definition comes only from a paired tool result or a finished,
+typed shell block that did not fail: a heading (`# #831 Agent panes`), a
+`#831` line with `title:` within 3 lines, a JSON object or array with a number
+or id and a title (the whole tool result, up to 256 KiB, not the 3000-scalar
+clip), or a `--title` on the command with its ref on the command
+or in the output. An orphan result, a forged or orphaned shell block, an error,
+a fence, a diff, a listing command (`rg`, `grep`, `ls`, ...), a file printed
+from outside the cwd, and more than 3 headings of one shape never define.
+
+`dch --xray <n> --ref <ref> --scope session --json` streams one ref's
+lines as NDJSON, each with `schema:1`: `first` (the key, `mode` and
+`budget_ms`), then `definition` and `mention` lines, a `tally` per file,
+`progress` at most every 250 ms, and `done` last (`partial`, `why`, `counts`,
+`files`, `bytes`, `lines_too_long`). `<ref>` is 1 to 256 bytes of UTF-8 with no
+control or bidi character and must parse as exactly one ref. The default is a
+light scan: it stops after the first result, or after `--budget-ms` (50 to
+300, default 300) with `why: "budget"`; on a live shell it prints titles and
+counts only. `--full` reads the whole corpus (up to 10 s, `why: "time"`); a `--budget-ms`
+with it is accepted and has no effect.
+`--scope project` and `--scope all` come with a later release and exit 2;
+until then `--scope session` must be given. A session with no corpus exits 1
+with `dch: no x-ray corpus`. Nothing is written to disk: the index lives in the
+calling process for that one query. A reader that closes the pipe cancels the
+scan: dch stops at its next write, at most 250 ms later (the `progress`
+cadence), prints no `done` and exits 0; `--json` and `--clear` exit 0
+silently too. Any other write failure prints `dch: X-ray failed on this
+session` and exits 3. SIGTERM ends
+it at once, with no `done` either.
+
 No new session or rename takes a name of exactly `m` + 16 hex in any case
 (`M0123456789ABCDEF` too: on a case-insensitive file system its socket also
 answers to the lowercase id), because that is a ring `session_id`. `-n`,
@@ -960,9 +1014,9 @@ system, like any name.
 | Exit | Meaning |
 | --- | --- |
 | 0 | the object was printed |
-| 1 | `dch: no such session`, `dch: ambiguous session`, `dch: no x-ray corpus` (`--clear`) |
-| 2 | bad usage: `--json` missing, a flag twice, a flag of a later release (`--ref`, `--follow`, `--chapter`, ...), `--xray` not first, a bad or remote `<n>` |
-| 3 | the session answered garbage, or the transcript could not be read (it is there, but opening or reading it failed) |
+| 1 | `dch: no such session`, `dch: ambiguous session`, `dch: no x-ray corpus` (`--clear`, `--ref`) |
+| 2 | bad usage: `--json` missing, a flag twice, a flag of a later release (`--follow`, `--chapter`, `--scope project`, `--scope all`, ...), `--xray` not first, a bad or remote `<n>`, a bad `--ref`, `--scope` or `--budget-ms` |
+| 3 | `dch: X-ray failed on this session`: the session answered garbage, the transcript could not be read (it is there, but opening or reading it failed), memory ran out, or a write failed with an error other than a closed pipe |
 
 ### Auto-allow
 

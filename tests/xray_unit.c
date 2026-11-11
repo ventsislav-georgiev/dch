@@ -1,10 +1,13 @@
 /* Units for the X-ray engine, xray.c (#120, XR1b): titles, the project key,
 ** the identity shapes, the Claude decoder's turn rules and caps, the bounded
-** JSONL reader, the shell chapter machine and the output cap.
+** JSONL reader, the shell chapter machine and the output cap; refs (#135):
+** the grammar rows, --ref's parse and value rule, the index's lifetime and
+** caps (keys, spans, definitions, the dropped set) and the config_dir check.
 **
 **   cc -I. -o xray_unit tests/xray_unit.c xray.c json.c && ./xray_unit
 */
 #include <fcntl.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -625,6 +628,501 @@ t_print(void)
 	xr_chapters_free(&c);
 }
 
+/* ---- refs (XR2a, #135) --------------------------------------------------- */
+
+struct keys
+{
+	char b[2048];
+	size_t n;
+};
+
+static int
+key_cat(void *ctx, const struct xr_span *sp)
+{
+	struct keys *k = ctx;
+
+	k->n += (size_t)snprintf(k->b + k->n, sizeof k->b - k->n, "%s%s",
+	                         k->n ? " " : "", sp->key);
+	return k->n >= sizeof k->b - 1;
+}
+
+/* every span's key in s, space-joined */
+static const char *
+spans(const char *s, int mode)
+{
+	static struct keys k;
+
+	k.n = 0;
+	k.b[0] = '\0';
+	(void)xr_grammar(s, strlen(s), mode, "/home/demo/proj", key_cat, &k);
+	return k.b;
+}
+
+/* the grammar rows the mutants turn on (v2.1 2.2-2.4, 9.7) */
+static void
+t_grammar(void)
+{
+	static const struct { const char *s; int mode; const char *want; } g[] = {
+		/* mutant 6: Unicode boundaries, not ASCII ones */
+		{ "#831\xc3\xa9", XR_PROSE, "" },
+		{ "\xc3\xa9#838", XR_PROSE, "" },
+		{ "\xe4\xb8\xad#840", XR_PROSE, "" },
+		{ "#841\xe3\x80\x82", XR_PROSE, "issue:#841" },
+		{ "PROJ-1\xc3\xa9", XR_PROSE, "" },
+		/* mutant 16: the ticket stoplist */
+		{ "UTF-8 SHA-256 ISO-8601 PROJ-12", XR_PROSE, "ticket:PROJ-12" },
+		/* mutant 15: H and T are prose rules, never code ones */
+		{ "#831 PROJ-12", XR_CODE, "" },
+		{ "#831", XR_PROSE, "issue:#831" },
+		{ "see `#831` and #832", XR_PROSE, "issue:#832" },
+		{ "o/r#7 https://x.org/y", XR_CODE, "pull:o/r#7 url:https://x.org/y" },
+		{ "src/a.c:3 and src/b.c", XR_CODE, "file:/home/demo/proj/src/a.c" },
+		{ "x #831_", XR_PROSE, "" },
+		/* L2: r has R's left guard, no repo#n tail of a path or host */
+		{ "x/acme/widgets#12", XR_PROSE, "" },
+		{ "example.com/page#12", XR_PROSE, "" },
+		{ "widgets#12", XR_PROSE, "issue:widgets#12" },
+		/* Q3 (v3.2.2): r's repo is 3+ chars, ends alnum, not a stopword */
+		{ "a#12", XR_PROSE, "" },
+		{ "PR#831", XR_PROSE, "" },
+		{ "C#10", XR_PROSE, "" },
+		{ "issue#12", XR_PROSE, "" },
+		{ "PKCS#12", XR_PROSE, "" },
+		{ "Steps#4 tests#5", XR_PROSE, "" },
+		{ "abc#831", XR_PROSE, "issue:abc#831" },
+		{ "pre-#831", XR_PROSE, "issue:#831" },
+		{ "post-#20338 x_#12", XR_PROSE, "issue:#20338" },
+		{ "issuer#12", XR_PROSE, "issue:issuer#12" },
+		/* Q4 (v3.2.2): ~/ kept as written, folded lexically, .. at ~
+		** dropped; ~user/ is no path */
+		{ "~/demo/../x.md", XR_PROSE, "file:~/x.md" },
+		{ "~/../x.md", XR_PROSE, "file:~/x.md" },
+		{ "~/a/./b//c.md", XR_PROSE, "file:~/a/b/c.md" },
+		{ "~user/x.md", XR_PROSE, "" },
+		{ "`~user/x.md`", XR_PROSE, "" },
+	};
+	size_t k;
+
+	for (k = 0; k < sizeof g / sizeof g[0]; k++)
+	{
+		const char *got = spans(g[k].s, g[k].mode);
+		char m[160];
+
+		snprintf(m, sizeof m, "grammar: %s in %s -> [%s]", g[k].s,
+		         g[k].mode == XR_CODE ? "code" : "prose", g[k].want);
+		CHECK(m, !strcmp(got, g[k].want));
+		if (strcmp(got, g[k].want))
+			printf("       got [%s]\n", got);
+	}
+}
+
+/* Q15: the progress write checks its flush, so a reader gone before it
+** is a cancel at that write, not at the one after (review M2, mutant R5) */
+static void
+t_cancel(void)
+{
+	int fd[2];
+	FILE *f;
+	struct xr_scan *x;
+
+	signal(SIGPIPE, SIG_IGN);
+	if (pipe(fd) || !(f = fdopen(fd[1], "w")))
+	{
+		CHECK("cancel: a pipe", 0);
+		return;
+	}
+	/* t0 a second ago: the first tick is due a progress line */
+	x = xr_scan_new(f, "issue:#831", "s", "", 0, 1, 0, 300,
+	                xr_now_ms() - 1000);
+	CHECK("cancel: first written", x && xr_scan_first(x, "id", XR_ISSUE,
+	                                                   "#831") == 0);
+	close(fd[0]);
+	if (x)
+		(void)xr_scan_tick(x, 1);
+	CHECK("cancel: EPIPE at the progress write is a cancel (1)",
+	      x && xr_scan_cancelled(x) == 1);
+	CHECK("cancel: no done after it", x && xr_scan_done(x) != 0);
+	xr_scan_free(x);
+	fclose(f);
+}
+
+static void
+t_ref(void)
+{
+	struct xr_span sp;
+	char big[300];
+
+	CHECK("ref: #831 parses to issue:#831",
+	      xr_ref_parse("#831", NULL, &sp) && !strcmp(sp.key, "issue:#831") &&
+	      !strcmp(xr_span_text(&sp), "#831"));
+	CHECK("ref: surrounding blanks are trimmed",
+	      xr_ref_parse("  o/r#7 ", NULL, &sp) && !strcmp(sp.key, "pull:o/r#7"));
+	CHECK("ref: a file ref keys on the cwd, the line dropped",
+	      xr_ref_parse("src/main.c:12", "/w", &sp) &&
+	      !strcmp(sp.key, "file:/w/src/main.c"));
+	CHECK("ref: two refs, or text around one, are no ref",
+	      !xr_ref_parse("#831 #832", NULL, &sp) &&
+	      !xr_ref_parse("see #831", NULL, &sp) &&
+	      !xr_ref_parse("UTF-8", NULL, &sp) && !xr_ref_parse("", NULL, &sp));
+	memset(big, 'a', sizeof big);
+	big[256] = '\0';
+	CHECK("ref value: 256 bytes ok, 257 refused", xr_ref_ok(big) &&
+	      (big[256] = 'a', big[257] = '\0', !xr_ref_ok(big)));
+	CHECK("ref value: empty, C0, DEL, C1 and bidi controls refused",
+	      !xr_ref_ok("") && !xr_ref_ok("a\x01") && !xr_ref_ok("a\x7f") &&
+	      !xr_ref_ok("a\xc2\x85") && !xr_ref_ok("a\xe2\x80\xae") &&
+	      !xr_ref_ok("a\xe2\x81\xa6") && !xr_ref_ok("a\xe2\x80\x8f") &&
+	      !xr_ref_ok("a\xff"));
+	CHECK("ref value: a dash-led value is accepted", xr_ref_ok("-831"));
+}
+
+/* K3 (mutant 3's unit half): an index is counted live until freed */
+static void
+t_index(void)
+{
+	unsigned long l0 = xr_index_live;
+	struct xr_index *a = xr_index_new(), *b = xr_index_new();
+
+	CHECK("index: two live", a && b && xr_index_live == l0 + 2);
+	xr_index_free(a);
+	xr_index_free(b);
+	xr_index_free(NULL);
+	CHECK("index: none live after free", xr_index_live == l0);
+}
+
+/* ---- the caps (3.2, 3.8; review #135 H1, M1, M4, L1) ---------------------- */
+
+struct cnt
+{
+	size_t m, d;
+};
+
+static void
+cnt_hit(void *ctx, const struct xr_hit *h)
+{
+	struct cnt *c = ctx;
+
+	if (h->title)
+		c->d++;
+	else
+		c->m++;
+}
+
+/* records through the shell's refs into k */
+static void
+shell_refs(const struct xr_rec *r, size_t n, const struct xr_sink *k)
+{
+	struct xr_chapters c;
+	struct xr_shell s;
+	size_t i;
+
+	xr_shell_begin(&s, &c);
+	if (xr_shell_refs(&s, k, "/w") == 0)
+		for (i = 0; i < n; i++)
+			xr_shell_feed(&s, &r[i]);
+	xr_shell_end(&s);
+	xr_chapters_free(&c);
+}
+
+/* one paired block (cat notes.md, D;0) whose output is the rows of out */
+static size_t
+block(struct xr_rec *r, char *out)
+{
+	static const struct { int kind, flags; const char *t; } h[] = {
+		{ RING_K_MARK, 0, "A" }, { RING_K_PROMPT, 0, "$" },
+		{ RING_K_MARK, 0, "B" }, { RING_K_INPUT, 0, "cat notes.md" },
+		{ RING_K_MARK, RING_F_INPUT, "C" },
+	};
+	size_t n = 0, k;
+	char *l, *nl;
+
+	for (k = 0; k < sizeof h / sizeof h[0]; k++, n++)
+	{
+		r[n].seq = n + 1;
+		r[n].kind = h[k].kind;
+		r[n].flags = h[k].flags;
+		r[n].t = 1000;
+		r[n].text = h[k].t;
+		r[n].len = strlen(h[k].t);
+	}
+	for (l = out; *l; l = nl + 1, n++)
+	{
+		nl = strchr(l, '\n');
+		r[n].seq = n + 1;
+		r[n].kind = RING_K_OUTPUT;
+		r[n].flags = 0;
+		r[n].t = 1000;
+		r[n].text = l;
+		r[n].len = (size_t)(nl - l);
+	}
+	r[n].seq = n + 1;
+	r[n].kind = RING_K_MARK;
+	r[n].flags = RING_F_EXIT;
+	r[n].t = 1000;
+	r[n].text = "D;0";
+	r[n].len = 3;
+	return n + 1;
+}
+
+/* the definitions of one block of n heading rows "# #<base + k % keys> t<k>" */
+static struct cnt
+headings(size_t n, int keys, long long *ms)
+{
+	struct xr_rec *r = calloc(n + 8, sizeof *r);
+	char *out = malloc(n * 32 + 1), *o = out;
+	struct cnt c = {0, 0};
+	struct xr_sink k = { cnt_hit, &c };
+	long long t0;
+	size_t i;
+
+	if (!r || !out)
+	{
+		free(r);
+		free(out);
+		c.d = (size_t)-1;
+		return c;
+	}
+	for (i = 0; i < n; i++)
+		o += sprintf(o, "# #%d t%zu\n", 831 + (int)(i % (size_t)keys), i);
+	t0 = xr_now_ms();
+	shell_refs(r, block(r, out), &k);
+	*ms = xr_now_ms() - t0;
+	free(r);
+	free(out);
+	return c;
+}
+
+static void
+t_caps(void)
+{
+	/* ASan and UBSan slow the scan many times over: the times are
+	** reported, not held to a budget, under a sanitizer */
+	int timed = !getenv("ASAN_OPTIONS");
+	struct cnt c;
+	struct xr_sink k = { cnt_hit, &c };
+	struct xr_rec r1;
+	char *row = malloc(70000), *b;
+	struct xr_rec *rows;
+	struct xr_index *ix;
+	struct xr_answer a;
+	size_t i, bl, o;
+	long long ms, t0;
+	FILE *f;
+	char m[160];
+
+	if (!row)
+		return;
+	/* 200 shas on one shell line: 128 mentions (3.8) */
+	for (i = o = 0; i < 200; i++)
+		o += (size_t)sprintf(row + o, "a%06zx ", i);
+	memset(&r1, 0, sizeof r1);
+	r1.seq = 1;
+	r1.kind = RING_K_OUTPUT;
+	r1.text = row;
+	r1.len = o;
+	memset(&c, 0, sizeof c);
+	shell_refs(&r1, 1, &k);
+	CHECK("caps: 200 shas on one shell line give 128 mentions",
+	      c.m == XR_SPANS && c.d == 0);
+
+	/* 2 MiB of 64 KiB sha rows: linear, well under 1 s (M1) */
+	for (i = o = 0; o + 8 < 65000; i++)
+		o += (size_t)sprintf(row + o, "a%06zx ", i);
+	rows = calloc(32, sizeof *rows);
+	if (rows)
+	{
+		for (i = 0; i < 32; i++)
+		{
+			rows[i].seq = i + 1;
+			rows[i].kind = RING_K_OUTPUT;
+			rows[i].text = row;
+			rows[i].len = o;
+		}
+		memset(&c, 0, sizeof c);
+		t0 = xr_now_ms();
+		shell_refs(rows, 32, &k);
+		ms = xr_now_ms() - t0;
+		snprintf(m, sizeof m, "caps: 32 x 64 KiB sha rows: 128 mentions a "
+		         "row, %lld ms (< 1000)", ms);
+		CHECK(m, c.m == 32 * XR_SPANS && (!timed || ms < 1000));
+		free(rows);
+	}
+
+	/* 9 D1 headings of one key: 8 definitions; 4 keys: a listing (#4) */
+	c = headings(9, 1, &ms);
+	CHECK("caps: 9 headings of one key give 8 definitions",
+	      c.d == XR_DEFS);
+	c = headings(3, 3, &ms);
+	CHECK("caps: 3 distinct headings are 3 definitions", c.d == 3);
+	c = headings(4, 4, &ms);
+	CHECK("caps: 4 distinct headings are a listing, 0 definitions",
+	      c.d == 0);
+	/* H1: a 256 KB block of headings is O(n), not O(n^2) */
+	c = headings(32000, 1, &ms);
+	snprintf(m, sizeof m, "caps: 32000 heading rows of one key: 8 "
+	         "definitions, %lld ms (< 1000)", ms);
+	CHECK(m, c.d == XR_DEFS && (!timed || ms < 1000));
+	c = headings(32000, 32000, &ms);
+	snprintf(m, sizeof m, "caps: 32000 distinct heading rows: a listing, "
+	         "%lld ms (< 1000)", ms);
+	CHECK(m, c.d == 0 && (!timed || ms < 1000));
+
+	/* 2100 distinct shas over a Claude transcript: 2000 keys, 100 dropped */
+	if ((ix = xr_index_new()))
+	{
+		struct xr_chapters ch;
+
+		xr_index_sink(ix, &k);
+		begin();
+		xr_claude_refs(D, &k, 1, NULL, NULL);
+		for (i = 0; i < 21; i++)
+		{
+			size_t j;
+
+			o = (size_t)sprintf(row, "{\"type\":\"user\",\"message\":"
+			                    "{\"content\":\"");
+			for (j = 0; j < 100; j++)
+				o += (size_t)sprintf(row + o, "a%06zx ", i * 100 + j);
+			strcpy(row + o, "\"}}");
+			line(row);
+		}
+		end(&ch);
+		memset(&a, 0, sizeof a);
+		a.session = a.session_id = "s";
+		a.corpus = "claude";
+		a.project = a.project_label = "";
+		a.available = a.complete = 1;
+		a.lines = -1;
+		a.ch = &ch;
+		a.refs = ix;
+		b = NULL;
+		f = open_memstream(&b, &bl);
+		CHECK("caps: 2100 distinct shas give 2000 keys, dropped_keys 100",
+		      xr_index_keys(ix) == XR_KEYS && f && xr_print(f, &a) == 0 &&
+		      fclose(f) == 0 && strstr(b, "\"dropped_keys\":100}"));
+		free(b);
+		xr_chapters_free(&ch);
+		xr_index_free(ix);
+	}
+
+	/* a Bash command is clipped like any text field: 6000 scalars */
+	{
+		static const char pre[] = "{\"type\":\"assistant\",\"message\":"
+		                          "{\"content\":[{\"type\":\"tool_use\","
+		                          "\"id\":\"b1\",\"name\":\"Bash\","
+		                          "\"input\":{\"command\":\"o/r#1 ";
+		struct xr_chapters ch;
+
+		o = strlen(pre);
+		memcpy(row, pre, o);
+		memset(row + o, 'x', 6000);
+		o += 6000;
+		strcpy(row + o, " o/r#2\"}}]}}");
+		memset(&c, 0, sizeof c);
+		k.hit = cnt_hit;
+		k.ctx = &c;
+		begin();
+		xr_claude_refs(D, &k, 1, NULL, NULL);
+		line(row);
+		end(&ch);
+		xr_chapters_free(&ch);
+		CHECK("caps: a Bash command's ref past 6000 scalars is not scanned",
+		      c.m == 1);
+	}
+
+	/* L1: past 32768 distinct dropped keys the count is a lower bound,
+	** and the set stays fast: 320 rows of 128 new shas, 40960 keys */
+	if ((ix = xr_index_new()) && (rows = calloc(320, sizeof *rows)))
+	{
+		char *big = malloc(320 * 1040);
+
+		xr_index_sink(ix, &k);
+		for (i = 0; big && i < 320; i++)
+		{
+			size_t j;
+			char *p = big + i * 1040;
+
+			for (j = o = 0; j < 128; j++)
+				o += (size_t)sprintf(p + o, "a%06zx ", i * 128 + j);
+			rows[i].seq = i + 1;
+			rows[i].kind = RING_K_OUTPUT;
+			rows[i].text = p;
+			rows[i].len = o;
+		}
+		t0 = xr_now_ms();
+		if (big)
+			shell_refs(rows, 320, &k);
+		ms = xr_now_ms() - t0;
+		memset(&a, 0, sizeof a);
+		a.session = a.session_id = "s";
+		a.corpus = "shell";
+		a.project = a.project_label = "";
+		a.available = a.complete = 1;
+		a.lines = -1;
+		a.refs = ix;
+		b = NULL;
+		f = open_memstream(&b, &bl);
+		snprintf(m, sizeof m, "caps: 40960 keys: 2000 kept, dropped_keys "
+		         "the lower bound 32768, %lld ms (< 1000)", ms);
+		CHECK(m, big && xr_index_keys(ix) == XR_KEYS && f &&
+		      xr_print(f, &a) == 0 && fclose(f) == 0 &&
+		      strstr(b, "\"dropped_keys\":32768}") && (!timed || ms < 1000));
+		free(b);
+		free(big);
+		free(rows);
+	}
+	xr_index_free(ix);
+	free(row);
+}
+
+/* mutant 8: config_dir is validated before any readdir (7.2) */
+static void
+t_lookup(void)
+{
+	char d[] = "/tmp/xray_look.XXXXXX", p[256], q[256], path[1100];
+	char proj[256], cwd[1100];
+	const char *sid = "11111111-2222-4333-8444-555555555555";
+	struct stat st;
+
+	if (!mkdtemp(d))
+	{
+		CHECK("lookup: temp dir", 0);
+		return;
+	}
+	snprintf(p, sizeof p, "%s/projects", d);
+	mkdir(p, 0700);
+	snprintf(p, sizeof p, "%s/projects/-w", d);
+	mkdir(p, 0700);
+	snprintf(p, sizeof p, "%s/projects/-w/%s.jsonl", d, sid);
+	close(open(p, O_WRONLY | O_CREAT, 0600));
+	CHECK("lookup: the absolute config_dir finds the transcript",
+	      xr_claude_lookup(d, sid, path, sizeof path, &st, proj,
+	                       sizeof proj) == 0 && !strcmp(proj, "-w"));
+	snprintf(q, sizeof q, "%s/projects/../", d);
+	CHECK("lookup: a config_dir with .. is refused (same dir)",
+	      !xr_config_ok(q) && xr_claude_lookup(q, sid, path, sizeof path,
+	                                           &st, proj, sizeof proj) < 0);
+	if (getcwd(cwd, sizeof cwd) && chdir(d) == 0)
+	{
+		CHECK("lookup: a relative config_dir is refused",
+		      !xr_config_ok(".") &&
+		      xr_claude_lookup(".", sid, path, sizeof path, &st, proj,
+		                       sizeof proj) < 0);
+		(void)!chdir(cwd);
+	}
+	CHECK("lookup: a non-UUID sid is refused",
+	      xr_claude_lookup(d, "../x", path, sizeof path, &st, proj,
+	                       sizeof proj) < 0);
+	CHECK("lookup: a name with .. inside it is fine",
+	      xr_config_ok("/a/b..c/"));
+	unlink(p);
+	snprintf(p, sizeof p, "%s/projects/-w", d);
+	rmdir(p);
+	snprintf(p, sizeof p, "%s/projects", d);
+	rmdir(p);
+	rmdir(d);
+}
+
 /* the open seam (8.1): every open counted, refusals closed unread */
 static void
 t_seam(void)
@@ -679,6 +1177,12 @@ main(void)
 	t_shell();
 	t_walk();
 	t_print();
+	t_grammar();
+	t_ref();
+	t_index();
+	t_caps();
+	t_cancel();
+	t_lookup();
 	printf("%s: %d failed\n", fails ? "FAIL" : "ok", fails);
 	return fails != 0;
 }

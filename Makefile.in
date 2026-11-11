@@ -18,7 +18,7 @@ SRC = $(srcdir)/attach.c $(srcdir)/master.c $(srcdir)/dch.c \
 
 TARFILES = $(srcdir)/README $(srcdir)/COPYING $(srcdir)/Makefile.in \
 	   $(srcdir)/config.h.in $(srcdir)/bridge.h $(srcdir)/rframe.h $(SRC) \
-	   $(srcdir)/remote.h $(srcdir)/picker.h $(srcdir)/ring.h $(srcdir)/xray.h $(srcdir)/cargv.h $(srcdir)/dtach.h $(srcdir)/dtach.spec \
+	   $(srcdir)/remote.h $(srcdir)/picker.h $(srcdir)/ring.h $(srcdir)/xray.h $(srcdir)/xray_uni.h $(srcdir)/cargv.h $(srcdir)/dtach.h $(srcdir)/dtach.spec \
 	   $(srcdir)/configure $(srcdir)/configure.ac $(srcdir)/dch.1
 
 dch: $(OBJ)
@@ -64,5 +64,5 @@ bridge.o: @srcdir@/bridge.c @srcdir@/bridge.h @srcdir@/dtach.h @srcdir@/remote.h
 json.o: @srcdir@/json.c @srcdir@/bridge.h
 ring.o: @srcdir@/ring.c @srcdir@/ring.h
 cargv.o: @srcdir@/cargv.c @srcdir@/cargv.h
-xray.o: @srcdir@/xray.c @srcdir@/xray.h @srcdir@/ring.h @srcdir@/bridge.h config.h
+xray.o: @srcdir@/xray.c @srcdir@/xray.h @srcdir@/xray_uni.h @srcdir@/ring.h @srcdir@/bridge.h config.h
 picker.o: @srcdir@/picker.c @srcdir@/picker.h @srcdir@/dtach.h @srcdir@/remote.h @srcdir@/rframe.h config.h

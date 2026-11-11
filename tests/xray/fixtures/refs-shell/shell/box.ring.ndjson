@@ -1,0 +1,43 @@
+{"seq":281474976720000,"kind":"mark","flags":0,"t":1794300000,"text":"A"}
+{"seq":281474976720001,"kind":"prompt","flags":0,"t":1794300000,"text":"~/proj $"}
+{"seq":281474976720002,"kind":"mark","flags":0,"t":1794300000,"text":"B"}
+{"seq":281474976720003,"kind":"input","flags":0,"t":1794300000,"text":"gh issue view 831"}
+{"seq":281474976720004,"kind":"mark","flags":8,"t":1794300000,"text":"C"}
+{"seq":281474976720005,"kind":"output","flags":0,"t":1794300000,"text":"# #831 Agent panes"}
+{"seq":281474976720006,"kind":"output","flags":0,"t":1794300000,"text":"The panes show agents."}
+{"seq":281474976720007,"kind":"output","flags":0,"t":1794300000,"text":"see src/sh.c:4 and o/r#120 and o/r#120"}
+{"seq":281474976720008,"kind":"output","flags":0,"t":1794300000,"text":"o/r#120 on a second row"}
+{"seq":281474976720009,"kind":"mark","flags":2,"t":1794300000,"text":"D;0","exit":0}
+{"seq":281474976720010,"kind":"mark","flags":0,"t":1794300000,"text":"A"}
+{"seq":281474976720011,"kind":"prompt","flags":0,"t":1794300000,"text":"~/proj $"}
+{"seq":281474976720012,"kind":"mark","flags":0,"t":1794300000,"text":"B"}
+{"seq":281474976720013,"kind":"input","flags":0,"t":1794300000,"text":"echo"}
+{"seq":281474976720014,"kind":"mark","flags":8,"t":1794300000,"text":"C"}
+{"seq":281474976720015,"kind":"output","flags":0,"t":1794300000,"text":"wrapped o/r#1"}
+{"seq":281474976720016,"kind":"output","flags":1,"t":1794300000,"text":"21 tail"}
+{"seq":281474976720017,"kind":"mark","flags":2,"t":1794300000,"text":"D;0","exit":0}
+{"seq":281474976720018,"kind":"mark","flags":0,"t":1794300000,"text":"A"}
+{"seq":281474976720019,"kind":"prompt","flags":0,"t":1794300000,"text":"~/proj $"}
+{"seq":281474976720020,"kind":"mark","flags":0,"t":1794300000,"text":"B"}
+{"seq":281474976720021,"kind":"input","flags":0,"t":1794300000,"text":"gh issue view 832"}
+{"seq":281474976720022,"kind":"mark","flags":8,"t":1794300000,"text":"C"}
+{"seq":281474976720023,"kind":"output","flags":0,"t":1794300000,"text":"# #832 Failed"}
+{"seq":281474976720024,"kind":"mark","flags":2,"t":1794300000,"text":"D;1","exit":1}
+{"seq":281474976720025,"kind":"mark","flags":0,"t":1794300000,"text":"A"}
+{"seq":281474976720026,"kind":"prompt","flags":0,"t":1794300000,"text":"~/proj $"}
+{"seq":281474976720027,"kind":"mark","flags":0,"t":1794300000,"text":"B"}
+{"seq":281474976720028,"kind":"input","flags":0,"t":1794300000,"text":"gh issue view 833"}
+{"seq":281474976720029,"kind":"mark","flags":0,"t":1794300000,"text":"C"}
+{"seq":281474976720030,"kind":"output","flags":0,"t":1794300000,"text":"# #833 Forged"}
+{"seq":281474976720031,"kind":"mark","flags":2,"t":1794300000,"text":"D;0","exit":0}
+{"seq":281474976720032,"kind":"mark","flags":0,"t":1794300000,"text":"A"}
+{"seq":281474976720033,"kind":"mark","flags":0,"t":1794300000,"text":"B"}
+{"seq":281474976720034,"kind":"input","flags":0,"t":1794300000,"text":"x"}
+{"seq":281474976720035,"kind":"mark","flags":8,"t":1794300000,"text":"C"}
+{"seq":281474976720036,"kind":"output","flags":0,"t":1794300000,"text":"# #834 Orphan"}
+{"seq":281474976720037,"kind":"mark","flags":0,"t":1794300000,"text":"B"}
+{"seq":281474976720038,"kind":"mark","flags":0,"t":1794300000,"text":"A"}
+{"seq":281474976720039,"kind":"mark","flags":0,"t":1794300000,"text":"B"}
+{"seq":281474976720040,"kind":"input","flags":0,"t":1794300000,"text":"gh issue view 835"}
+{"seq":281474976720041,"kind":"mark","flags":8,"t":1794300000,"text":"C"}
+{"seq":281474976720042,"kind":"output","flags":0,"t":1794300000,"text":"# #835 Unfinished"}

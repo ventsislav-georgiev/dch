@@ -7,7 +7,9 @@ this drives what a fixture cannot: a real shell's OSC 133 block typed with
 reaching the pty, a live Claude (tests/fake_claude.py as `claude`) and its
 transcript, the open seam's counting test (spec 8.1: one open per Claude
 query, none for a shell, a clear or a refused lookup; nothing written), and
-the INFO-2 name rule on every create path dch runs locally.
+the INFO-2 name rule on every create path dch runs locally, and refs (#135):
+the index freed with its query (K3), --ref's budget stop, nothing written,
+SIGTERM and EPIPE as a cancel, and the 16 MB budget at the index's caps.
 
 Run:  python3 tests/xray_cli_test.py          (uses ./dch; run.sh isolates)
 """
@@ -884,6 +886,424 @@ def test_two_claudes():
         dch("-k", n)
 
 
+# ---- refs (#135, XR2a): the index's lifetime, --ref's budget and stop -----
+
+RSID = "11111111-2222-4333-8444-5555555555a1"
+
+
+def ref_lines(out):
+    try:
+        return [json.loads(l) for l in out.splitlines() if l.strip()]
+    except ValueError:
+        return None
+
+
+def history(name, sid, cfg):
+    sockdir = os.path.join(T, "dch-%d" % os.getuid())
+    hdir = os.path.join(T, "state", "dch", "sessions",
+                        sockdir.replace("/", "-"))
+    os.makedirs(hdir, exist_ok=True)
+    rec = {"name": name, "cwd": "/home/demo/proj", "end": "exited",
+           "argv": ["claude"], "started": 1794299400, "updated": 1794300000,
+           "ended": 1794300000, "sock_dir": sockdir,
+           "agent": {"session_id": sid, "cwd": "/home/demo/proj",
+                     "config_dir": cfg}}
+    with open(os.path.join(hdir, name + ".json"), "w") as f:
+        f.write(json.dumps(rec) + "\n")
+
+
+def test_refs():
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, RSID + ".jsonl")
+    canary = "Canary passage 7f3a"
+
+    def put(lines):
+        with open(tp, "w") as f:
+            for o in lines:
+                f.write(json.dumps(o) + "\n")
+
+    def bash(id, cmd, out):
+        return [{"type": "assistant", "message": {"content": [
+                    {"type": "tool_use", "id": id, "name": "Bash",
+                     "input": {"command": cmd}}]}},
+                {"type": "user", "toolUseResult": {"stdout": out},
+                 "message": {"content": [{"type": "tool_result",
+                                          "tool_use_id": id,
+                                          "content": out}]}}]
+    put([{"type": "user", "cwd": "/home/demo/proj",
+          "timestamp": "2026-11-10T10:00:00Z",
+          "message": {"content": "look at #831 and o/r#7"}}] +
+        bash("b1", "gh issue view 831", "# #831 " + canary))
+    history("xr-refs", RSID, cfg)
+    trace = os.path.join(T, "trace-refs")
+    dbg = dict(ENV, DCH_DEBUG=trace)
+
+    # mutant 3 (K3): the index goes with its query
+    open(trace, "w").close()
+    rc, o, err = xray("xr-refs", "--json", env=dbg)
+    tr = open(trace).read()
+    m = re.search(r"xray refs: keys=(\d+) live=(\d+)", tr)
+    check("refs: the index answers the transcript's keys",
+          rc == 0 and o and [r["key"] for r in o["refs"]] ==
+          ["issue:#831", "pull:o/r#7"] and o["refs"][0]["defined"], (o, err))
+    check("refs: the index is freed with its query (K3: live=0)",
+          m and int(m.group(1)) == 2 and m.group(2) == "0", tr[-400:])
+
+    # nothing written by an index build and a full --ref (9.5)
+    before = files(T)
+    open(trace, "w").close()
+    r = dch("--xray", "xr-refs", "--ref", "#831", "--scope", "session", "--full",
+            "--json", env=dbg)
+    ls = ref_lines(r.stdout) or []
+    check("ref: a full --ref finds the definition",
+          r.returncode == 0 and any(l.get("definition") for l in ls) and
+          ls[-1].get("done") is True and ls[-1]["why"] is None,
+          r.stdout[-600:] + r.stderr)
+    tr = open(trace).read()
+    check("ref: the trace holds no passage or transcript text",
+          canary not in tr and "look at" not in tr, tr[-400:])
+    new = sorted(set(files(T)) - set(before) - {trace})
+    check("ref: nothing written by a --ref", not new, new)
+
+    # a big transcript: light stops at its budget, full reads it all
+    pad = "x" * 900
+    with open(tp, "w") as f:
+        f.write(json.dumps({"type": "user", "cwd": "/home/demo/proj",
+                            "timestamp": "2026-11-10T10:00:00Z",
+                            "message": {"content": "start #1"}}) + "\n")
+        line = json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "PROJ-5 o/r#3 " + pad}]}}) + "\n"
+        f.write(line * 40000)
+        f.write(json.dumps({"type": "user", "message": {
+            "content": "the end #424242"}}) + "\n")
+    t0 = time.time()
+    r = dch("--xray", "xr-refs", "--ref", "#424242", "--scope", "session",
+            "--budget-ms", "50", "--json")
+    ls = ref_lines(r.stdout) or [{}]
+    d = ls[-1]
+    check("ref: light past its budget stops, partial, why budget "
+          "(%.2fs)" % (time.time() - t0),
+          r.returncode == 0 and d.get("done") is True and d["partial"] and
+          d["why"] == "budget" and d["bytes"] < os.path.getsize(tp) and
+          not any("mention" in l for l in ls), r.stdout[-600:] + r.stderr)
+    t0 = time.time()
+    r = dch("--xray", "xr-refs", "--ref", "#424242", "--scope", "session",
+            "--full", "--json")
+    wall = time.time() - t0
+    ls = ref_lines(r.stdout) or [{}]
+    d = ls[-1]
+    check("ref: full reads the whole transcript, one mention",
+          r.returncode == 0 and d.get("done") is True and not d["partial"] and
+          d["bytes"] == os.path.getsize(tp) and
+          sum("mention" in l for l in ls) == 1, r.stdout[-600:] + r.stderr)
+    prog = [l for l in ls if "progress" in l]
+    check("ref: schema 1 on every line; a progress line per 250 ms "
+          "(%d in %.2fs)" % (len(prog), wall),
+          all(l.get("schema") == 1 for l in ls) and
+          (prog or wall < 0.5), r.stdout[:600])
+    os.unlink(tp)
+
+
+# ---- 3.8's caps on a live shell (review #135 H1, M1) ---------------------
+
+def test_shell_caps():
+    """A paired block of 32000 D1 headings (256 KB kept for definitions),
+    then 32 lines of 64 KiB of shas: the index and a full --ref each answer
+    under 1 s and 16 MB."""
+    n = "xc-caps"
+    cfg = ENV["DCH_CONFIG"]
+    with open(cfg, "w") as f:
+        f.write("xray_ring = 4M\n")
+    prog = ("printf '\\033]133;A\\007$ \\033]133;B\\007'; read cmd; "
+            "printf '\\033]133;C\\007'; "
+            "awk 'BEGIN{for(i=0;i<32000;i++) printf \"# #12 x%d\\n\", i}'; "
+            "printf '\\033]133;D;0\\007'; "
+            "awk 'BEGIN{for(r=0;r<32;r++){s=\"\";for(i=0;i<8000;i++) "
+            "s=s sprintf(\"a%06x \",i); print s}}'; "
+            "echo CAPS''DONE; sleep 120")
+    try:
+        r = dch("--spawn", n, "--size", "80x24", "sh", "-c", prog)
+        check("caps: spawned", r.returncode == 0, r.stderr)
+        wait_for(lambda: "$" in screen(n), 5)
+        dch("--send", n, "cat notes.md\n")
+        done = wait_for(lambda: "CAPSDONE" in screen(n), 60)
+        check("caps: the output finished", done)
+        t0 = time.time()
+        rc, out, rss = maxrss([DCH, "--xray", n, "--json"], ENV)
+        wall = time.time() - t0
+        try:
+            o = json.loads(out)
+        except ValueError:
+            o = None
+        h12 = [x for x in (o or {}).get("refs", []) if x["key"] == "issue:#12"]
+        check("caps: 32000 headings in one block: 8 definitions (%.2fs)" %
+              wall, rc == 0 and h12 and h12[0]["definitions"] == 8,
+              (rc, out[:300]))
+        check("caps: the index over 2 MiB of 64 KiB sha lines and 32000 "
+              "headings under 1 s (%.2fs)" % wall, SANITIZED or wall < 1.0)
+        rss_ok("caps: --json at the caps", rss)
+        t0 = time.time()
+        rc, out, rss = maxrss([DCH, "--xray", n, "--ref", "a000001",
+                               "--scope", "session", "--full", "--json"], ENV)
+        wall = time.time() - t0
+        ls = ref_lines(out) or [{}]
+        check("caps: a full --ref over the same ring under 1 s (%.2fs)" %
+              wall, rc == 0 and ls[-1].get("done") is True and
+              (SANITIZED or wall < 1.0), out[-300:])
+        rss_ok("caps: --ref at the caps", rss)
+    finally:
+        dch("-k", n)
+        os.unlink(cfg)
+
+
+def test_claude_caps():
+    """Retained memory at the index's caps (3.8, l.717): 5000 chapters of
+    120-scalar titles, 2000 keys each with 8 definitions of 120-scalar
+    titles, and 100 keys past the cap."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, RSID + ".jsonl")
+    pad = "\u00e9" * 100
+    with open(tp, "w") as f:
+        for i in range(5000):
+            f.write(json.dumps({"type": "user", "cwd": "/home/demo/proj",
+                                "message": {"content": "prompt %d %s" %
+                                            (i, pad)}}) + "\n")
+            if i >= 2100:
+                continue
+            out = "\n".join("# PROJ-%d %s %d" % (i + 1, pad, j)
+                            for j in range(8 if i < 2000 else 1))
+            f.write(json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "b%d" % i, "name": "Bash",
+                 "input": {"command": "gh issue view %d" % i}}]}}) + "\n")
+            f.write(json.dumps({"type": "user", "toolUseResult": {
+                "stdout": out}, "message": {"content": [
+                    {"type": "tool_result", "tool_use_id": "b%d" % i,
+                     "content": out}]}}) + "\n")
+    history("xr-caps", RSID, cfg)
+    try:
+        t0 = time.time()
+        rc, out, rss = maxrss([DCH, "--xray", "xr-caps", "--json"], ENV)
+        wall = time.time() - t0
+        try:
+            o = json.loads(out)
+        except ValueError:
+            o = None
+        refs = (o or {}).get("refs", [])
+        check("caps: 2000 keys of 8 definitions each, 100 dropped (%.2fs)" %
+              wall, rc == 0 and len(refs) == 2000 and
+              all(x["definitions"] == 8 for x in refs) and
+              o["dropped_keys"] == 100, (rc, len(refs), out[-300:]))
+        rss_ok("caps: --json with 5000 chapters and 2000 x 8 definitions",
+               rss)
+    finally:
+        os.unlink(tp)
+
+
+# ---- v3.2.2 Q5: D2 parses the whole Claude result, <= 256 KiB ---------------
+
+def test_d2_whole():
+    """A gh --json object past the 3000-scalar clip defines through D2 in
+    the index and in --ref alike; one over 256 KiB defines nothing."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, RSID + ".jsonl")
+
+    def gh(id, n, title, body, late=False, pad=""):
+        o = {"title": title, "body": body, "number": n} if late else \
+            {"number": n, "title": title, "body": body}
+        out = json.dumps(o) + pad
+        return out, [
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": id, "name": "Bash", "input": {
+                    "command": "gh pr view %d --json number,title,body" %
+                    n}}]}},
+            {"type": "user", "toolUseResult": {"stdout": out},
+             "message": {"content": [{"type": "tool_result",
+                                      "tool_use_id": id, "content": out}]}}]
+    small, a = gh("d1", 12, "Fix login", "Body line.\n" + "y" * 10240)
+    big, b = gh("d2", 13, "Too big", "z" * (300 << 10))
+    # the id past the clip: its anchor still counts once (Q8)
+    late, c = gh("d3", 15, "Late id", "w" * 10240, late=True)
+    # small JSON, the whole result over 256 KiB: no D2 off its clip
+    _, e = gh("d4", 14, "Padded", "p", pad=" " * (260 << 10))
+    with open(tp, "w") as f:
+        for o in [{"type": "user", "cwd": "/home/demo/proj",
+                   "timestamp": "2026-11-10T10:00:00Z",
+                   "message": {"content": "see #12 and #13 and #14"}}] + \
+                a + b + c + e:
+            f.write(json.dumps(o) + "\n")
+    history("xr-d2", RSID, cfg)
+    try:
+        rc, o, err = xray("xr-d2", "--json")
+        refs = {r["key"]: r for r in (o or {}).get("refs", [])}
+        r12, r13 = refs.get("issue:#12", {}), refs.get("issue:#13", {})
+        check("d2: a %d KiB object defines in the index, one of %d KiB "
+              "does not" % (len(small) >> 10, len(big) >> 10),
+              rc == 0 and r12.get("defined") is True and
+              r12.get("definitions") == 1 and
+              r12.get("title") == "Fix login" and
+              r13.get("defined") is False and r13.get("definitions") == 0,
+              (r12, r13, err))
+        r14, r15 = refs.get("issue:#14", {}), refs.get("issue:#15", {})
+        check("d2: a small object padded past 256 KiB does not define; an "
+              "id past the clip defines and counts once",
+              r14.get("defined") is False and r15.get("defined") is True and
+              r15.get("title") == "Late id" and r15.get("count") == 1,
+              (r14, r15))
+
+        def defs(ref):
+            r = dch("--xray", "xr-d2", "--ref", ref, "--scope", "session",
+                    "--full", "--json")
+            ls = ref_lines(r.stdout) or [{}]
+            return (r.returncode, ls[-1].get("done"),
+                    [l["definition"] for l in ls if "definition" in l])
+        rc12, done12, d12 = defs("#12")
+        rc13, done13, d13 = defs("#13")
+        rc15, done15, d15 = defs("#15")
+        r = dch("--xray", "xr-d2", "--ref", "#15", "--scope", "session",
+                "--full", "--json")
+        m15 = [l["mention"] for l in ref_lines(r.stdout) or [] if
+               "mention" in l]
+        check("d2: --ref agrees on an id past the clip: one D2, its "
+              "anchor's line", rc15 == 0 and done15 and len(d15) == 1 and
+              d15[0]["title"] == "Late id" and len(m15) == 1 and
+              '"number": 15' in m15[0]["line"], (d15, m15))
+        check("d2: --ref agrees: #12 has its D2, #13 none",
+              rc12 == 0 and done12 and len(d12) == 1 and
+              d12[0]["rule"] == "D2" and d12[0]["title"] == "Fix login" and
+              d12[0]["passage"].startswith("Body line.") and
+              rc13 == 0 and done13 and d13 == [], (d12, d13))
+        rc, out, rss = maxrss([DCH, "--xray", "xr-d2", "--ref", "#13",
+                               "--scope", "session", "--full", "--json"],
+                              ENV)
+        rss_ok("d2: --ref over a 300 KiB result", rss)
+    finally:
+        os.unlink(tp)
+
+
+# ---- v3.2.2 Q14: EPIPE is exit 0, silent, for every form ---------------------
+
+def to_fd(argv, how):
+    """argv with stdout a pipe whose reader has left ("epipe"), or a
+    read-only fd ("ebadf", a write error that is not EPIPE)."""
+    if how == "epipe":
+        r, w = os.pipe()
+        os.close(r)
+    else:
+        w = os.open(os.devnull, os.O_RDONLY)
+    try:
+        p = subprocess.run(argv, stdout=w, stderr=subprocess.PIPE, env=ENV,
+                           timeout=30)
+    finally:
+        os.close(w)
+    return p.returncode, p.stderr.decode()
+
+
+def test_write_fail():
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, RSID + ".jsonl")
+    with open(tp, "w") as f:
+        f.write(json.dumps({"type": "user", "cwd": "/home/demo/proj",
+                            "message": {"content": "see #831"}}) + "\n")
+    history("xr-wf", RSID, cfg)
+    n = "xc-wf"
+    try:
+        r = dch("--spawn", n, "--size", "80x24", "sh", "-c",
+                "echo WF''UP; sleep 60")
+        check("write fail: spawned", r.returncode == 0 and
+              wait_for(lambda: "WFUP" in screen(n), 10), r.stderr)
+        forms = [("--json", ["xr-wf", "--json"]),
+                 ("--ref", ["xr-wf", "--ref", "#831", "--scope", "session",
+                            "--full", "--json"]),
+                 ("--clear", [n, "--clear", "--json"])]
+        for what, a in forms:
+            rc, err = to_fd([DCH, "--xray"] + a, "epipe")
+            check("write fail: %s into a closed pipe: exit 0, silent" % what,
+                  rc == 0 and err == "", (rc, err))
+            rc, err = to_fd([DCH, "--xray"] + a, "ebadf")
+            check("write fail: %s on a read-only stdout: exit 3, the "
+                  "failure line" % what, rc == 3 and
+                  err == "dch: X-ray failed on this session\n", (rc, err))
+        r = dch("--xray", "xr-wf", "--chapter", "1")
+        check("write fail: --chapter is not in XR2a (exit 2)",
+              r.returncode == 2, r.stderr)
+    finally:
+        dch("-k", n)
+        os.unlink(tp)
+
+
+# ---- 3.4: SIGTERM and EPIPE cancel a --ref (FROZEN l.464, l.635) ---------
+
+def test_cancel():
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, RSID + ".jsonl")
+    line = json.dumps({"type": "assistant", "message": {"content": [
+        {"type": "text", "text": "PROJ-5 o/r#3 " + "x" * 900}]}}) + "\n"
+    with open(tp, "w") as f:
+        f.write(json.dumps({"type": "user", "cwd": "/home/demo/proj",
+                            "message": {"content": "start #1"}}) + "\n")
+        for _ in range(16):
+            f.write(line * 10000)
+    history("xr-cancel", RSID, cfg)
+    argv = [DCH, "--xray", "xr-cancel", "--ref", "#424242", "--scope",
+            "session", "--full", "--json"]
+    try:
+        t0 = time.time()
+        r = subprocess.run(argv, capture_output=True, text=True, env=ENV,
+                           timeout=60)
+        full = time.time() - t0
+        ls = ref_lines(r.stdout) or [{}]
+        check("cancel: the whole scan of %d MB ends with done (%.2fs)" %
+              (os.path.getsize(tp) >> 20, full),
+              r.returncode == 0 and ls[-1].get("done") is True, r.stderr)
+
+        p = subprocess.Popen(argv, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, env=ENV)
+        first = p.stdout.readline()
+        running = p.poll() is None
+        t0 = time.time()
+        p.send_signal(15)
+        p.wait(10)
+        dt = time.time() - t0
+        rest = p.stdout.read()
+        p.stdout.close()
+        p.stderr.close()
+        check("cancel: SIGTERM mid-scan ends it at once (%.3fs, the whole "
+              "scan %.2fs), no done" % (dt, full),
+              running and b'"first"' in first and p.returncode == -15 and
+              dt < 0.5 and b'"done"' not in rest, (p.returncode, rest[-300:]))
+
+        p = subprocess.Popen(argv, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, env=ENV)
+        first = p.stdout.readline()
+        running = p.poll() is None
+        t0 = time.time()
+        p.stdout.close()
+        p.wait(10)
+        dt = time.time() - t0
+        err = p.stderr.read()
+        p.stderr.close()
+        # dch learns of the close at its next write, at most 250 ms later
+        # (the progress cadence): 500 ms wall from close to exit (v3.2.2
+        # Q15). xray_unit pins the progress write's own EPIPE check.
+        check("cancel: a closed pipe (EPIPE) ends it within 500 ms "
+              "(%.3fs, the whole scan %.2fs), exit 0, nothing on "
+              "stderr" % (dt, full),
+              running and b'"first"' in first and p.returncode == 0 and
+              err == b"" and dt < 0.5, (p.returncode, err))
+    finally:
+        os.unlink(tp)
+
+
 def main():
     try:
         test_names()
@@ -896,6 +1316,12 @@ def main():
         test_claude()
         test_clear_after_claude()
         test_two_claudes()
+        test_refs()
+        test_d2_whole()
+        test_write_fail()
+        test_cancel()
+        test_claude_caps()
+        test_shell_caps()
     finally:
         shutil.rmtree(T, ignore_errors=True)
     if fails[0]:

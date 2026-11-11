@@ -1,0 +1,4 @@
+{"schema":1,"first":{"session":"box","session_id":"m1a2b3c4d5e6f7a8b","key":"issue:#831","shape":"issue","text":"#831","project":"-T-work-box","mode":"light","scope":"session","budget_ms":300,"elapsed_ms":0}}
+{"schema":1,"definition":{"session":"box","live":true,"project":"-T-work-box","at":1794300000,"title":"Agent panes","rule":"D1","offset":281474976720005,"chapter":"s281474976720001"}}
+{"schema":1,"tally":{"session":"box","live":true,"project":"-T-work-box","count":1,"definitions":1,"partial":false}}
+{"schema":1,"done":true,"partial":true,"counts":{"session":1,"project":0,"project_sessions":0,"all":null,"all_sessions":null},"why":"first","files":1,"bytes":313,"lines_too_long":0}
