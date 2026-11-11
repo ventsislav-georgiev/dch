@@ -1607,6 +1607,71 @@ def test_follow_claude():
         dch("-k", n)
 
 
+def test_follow_agent():
+    """A shell's follower across an agent's start: the ring pauses on the
+    master's agent tick (vt.c appends a GAP record, so the wake fires) and
+    the stream sends reset rotated, then a snapshot of corpus claude.
+    Not asserted: the agent's exit. The resume (dch_vt_capture_pause(0))
+    appends no ring record, so no wake goes out; --json says shell at the
+    resume, the stream only on the shell's next ring row (#136 round 2)."""
+    n = "xc-fa"
+    bindir = os.path.join(T, "bin-fa")
+    fdir = os.path.join(T, "fake-fa")
+    proj = os.path.join(T, "faproj")
+    for d in (bindir, fdir, proj):
+        os.makedirs(d, exist_ok=True)
+    shutil.copy(os.path.join(HERE, "fake_claude.py"),
+                os.path.join(bindir, "claude"))
+    os.chmod(os.path.join(bindir, "claude"), 0o755)
+    env = dict(ENV, PATH=bindir + ":" + ENV.get("PATH", "/usr/bin:/bin"),
+               FAKE_CLAUDE_DIR=fdir, DCH_RECORD_MS="1000")
+    sdir = os.path.join(HOME, ".claude", "sessions")
+    had = set(os.listdir(sdir)) if os.path.isdir(sdir) else set()
+    r = subprocess.run([DCH, "--spawn", n, "--size", "80x24", "--cwd", proj,
+                        "sh"], capture_output=True, text=True, timeout=30,
+                       env=env)
+    check("follow agent: shell spawned", r.returncode == 0, r.stderr)
+    fl = None
+    try:
+        wait_for(lambda: "$" in screen(n) or "#" in screen(n), 5)
+        fl = Follow(n)
+        s0 = fl.wait(lambda o: "snapshot" in o)
+        check("follow agent: the first snapshot is corpus shell",
+              s0 and s0[0]["snapshot"]["corpus"] == "shell", fl.objs())
+
+        k0 = len(fl.got)
+        dch("--send", n, "claude\r", env=env)
+        rec = wait_for(lambda: [f for f in os.listdir(sdir)
+                                if f.endswith(".json") and f not in had]
+                       if os.path.isdir(sdir) else None, 10)
+        if rec:
+            sid = json.load(open(os.path.join(sdir, rec[0])))["sessionId"]
+            pdir = os.path.join(HOME, ".claude", "projects", key(proj))
+            os.makedirs(pdir, exist_ok=True)
+            with open(os.path.join(pdir, sid + ".jsonl"), "w") as f:
+                f.write(json.dumps({"type": "user", "cwd": proj, "message": {
+                    "content": "ask #11"}}) + "\n")
+
+        def rotated_then():
+            ob = fl.objs(k0)
+            i = next((j for j, o in enumerate(ob)
+                      if is_reset("rotated")(o)), None)
+            return ob[i + 1] if i is not None and i + 1 < len(ob) else None
+        wait_for(rotated_then, 15)
+        nxt = rotated_then()
+        check("follow agent: the agent's start sends reset rotated, then a "
+              "snapshot of corpus claude",
+              nxt is not None and "snapshot" in nxt and
+              nxt["snapshot"]["corpus"] == "claude", fl.objs(k0))
+        dch("--send", n, "/exit\r", env=env)
+    finally:
+        dch("-k", n)
+        if fl:
+            wait_for(lambda: fl.p.poll() is not None, 5)
+            rc = fl.stop()
+            check("follow agent: the session's end exits 0", rc == 0,
+                  (rc, fl.p.stderr.read() if fl.p.stderr else ""))
+
 def test_follow_history():
     cfg = os.path.join(HOME, ".claude")
     pdir = os.path.join(cfg, "projects", "-home-demo-proj")
@@ -1910,6 +1975,7 @@ def main():
         test_follow_claude()
         test_follow_cap()
         test_follow_shell()
+        test_follow_agent()
     finally:
         shutil.rmtree(T, ignore_errors=True)
     if fails[0]:

@@ -834,6 +834,12 @@ new snapshot.
 The snapshot plus its deltas is the
 .B \-\-json
 answer of that moment; top\-level fields change only with a snapshot.
+Past 5000 chapters, a Claude Code stream sends no line for the oldest
+chapter
+.B \-\-json
+drops, so a client can hold more chapters than
+.B \-\-json
+shows.
 No timer: a transcript is watched with kqueue (inotify on Linux), its
 project directory for a new file, a shell through the master's wake.
 At most 4 shell followers per master: a fifth exits 1

@@ -11980,6 +11980,9 @@ xf_claude(struct xf *f, const struct crec *c, const char *label)
 				break;
 			}
 			xf_cl_answer(t, &s, &a);
+			/* lost ignored: past XR_CHAPTERS the oldest chapter drops
+			** from --json with no line here; a reset per new chapter
+			** would be worse (open decision 17) */
 			if (xr_delta(f->sent, &a, 0, &nref, &lost) != 0)
 			{
 				rc = xr_failed();
@@ -12105,6 +12108,18 @@ xf_sb_answer(const struct xr_target *t, struct xf_sb *b, const char *project,
 #define XF_MODE (DCH_RING_S_OFF | DCH_RING_S_PAUSED)
 
 /* first: nothing written yet, so a fifth subscriber can still say busy. */
+/* 1 when the session is gone (cmd_query -4); a live answer is freed */
+static int
+xf_gone(const struct xr_target *t)
+{
+	struct cmd_info ci;
+	int qc = cmd_query(t->sock, &ci);
+
+	if (qc == 0)
+		cmd_info_free(&ci);
+	return qc == -4;
+}
+
 static int
 xf_shell(struct xf *f, const char *label, long long rows, int first)
 {
@@ -12127,9 +12142,7 @@ xf_shell(struct xf *f, const char *label, long long rows, int first)
 	fr = xf_sb_build(f, b, label);
 	if (fr == -3 || fr == -5)
 	{
-		struct cmd_info ci;
-
-		rc = fr == -5 ? xr_failed() : cmd_query(t->sock, &ci) == -4
+		rc = fr == -5 ? xr_failed() : xf_gone(t)
 		     ? (first ? xr_no_session() : 0) : xr_failed();
 		goto out;
 	}
@@ -12177,10 +12190,7 @@ xf_shell(struct xf *f, const char *label, long long rows, int first)
 		f->pending = 0;
 		if ((fr = xf_sb_build(f, b, label)) != 0)
 		{
-			struct cmd_info ci;
-
-			rc = fr == -3 && cmd_query(t->sock, &ci) == -4 ? 0
-			     : xr_failed();
+			rc = fr == -3 && xf_gone(t) ? 0 : xr_failed();
 			break;
 		}
 		if (!(b->rs.status & DCH_RING_S_SUB))

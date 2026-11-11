@@ -1029,7 +1029,9 @@ every 250 ms:
 
 Applying the deltas to the snapshot gives the `--json` answer of that moment.
 Top-level fields (`lines`, `complete`, `why`, `mentions_only`) change only
-with a snapshot.
+with a snapshot. Past 5000 chapters, a Claude Code stream sends no line for
+the oldest chapter `--json` drops, so a client can hold more chapters than
+`--json` shows.
 
 Nothing runs on a timer:
 - a Claude Code transcript is watched with kqueue (inotify on Linux);
