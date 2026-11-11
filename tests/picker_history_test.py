@@ -130,10 +130,24 @@ def main():
     if dch("--read", "probe").returncode == 3:
         print("skip: no terminal mirror in this build")
         return 0
-    dch("-k", "probe")
-    dch("--forget", "probe")
     rec = os.path.join(ROOT, "state", "dch", "sessions",
                        ENV["DCH_SOCKET_DIR"].replace("/", "-"))
+    dch("-k", "probe")
+    # -k unlinks the socket and returns; the master writes its end record
+    # later, at exit. --forget before that write leaves the record behind.
+    end = time.time() + 10
+    while time.time() < end:
+        try:
+            with open(os.path.join(rec, "probe.json")) as f:
+                if json.load(f).get("end"):
+                    break
+        except (OSError, ValueError):
+            pass
+        time.sleep(0.1)
+    dch("--forget", "probe")
+    left = [f for f in os.listdir(rec) if f.startswith("probe")] \
+        if os.path.isdir(rec) else []
+    check("the probe session's record is forgotten", not left, left)
     os.makedirs(rec, exist_ok=True)
     now = int(time.time())
 
