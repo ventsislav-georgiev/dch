@@ -1315,8 +1315,9 @@ Limitations:
   that starts a new Claude. `dch --stop` then `dch --revive` brings such a
   session back resumed, never running the rest of the line.
 - **Positional prompt.** A positional prompt argument (`claude "fix the
-  tests"`) is kept and sent again on resume. dch cannot tell it apart from an
-  option value cheaply.
+  tests"`) is dropped on resume (see [Bringing sessions
+  back](#bringing-sessions-back)). After an option dch does not know, followed
+  by a word, the whole command is kept and the prompt is sent again.
 - **Own session.** The session running `dch --restart --include-agents` itself
   is skipped. Run it from outside dch to restart that one.
 - **dch-lite.** dch-lite (no mirror) skips this step. Given

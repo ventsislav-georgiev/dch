@@ -1208,8 +1208,10 @@ typed into a session's shell
 would hand the shell back to run whatever followed
 .B claude
 on its line), a session with a pending respawn, and the session running the
-command. A positional prompt argument is sent
-again on resume. A dch\-lite client skips this step, with a note when a
+command. A positional prompt argument is dropped on resume (see
+.BR \-\-revive );
+after an option dch does not know, followed by a word, the whole command is
+kept and the prompt is sent again. A dch\-lite client skips this step, with a note when a
 session runs claude and
 .B \-\-include\-agents
 was given. The step can take up to
