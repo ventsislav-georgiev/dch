@@ -275,10 +275,11 @@ peer_label(const struct json_parser *jp, int p, char *out)
 
 /* `tailscale status --json` into v[cap]: the peers worth probing, online,
 ** untagged and owned by Self's user (by numeric id, into *me), each at its
-** first IPv4 in 100.64.0.0/10. None on a tagged host (no user owns it), and
-** none unless BackendState is "Running": a stopped or logged-out tailscaled
-** still lists its peers, and 100.64.0.0/10 off the tailnet is any ISP's
-** carrier-grade NAT. Pure. */
+** first IPv4 in 100.64.0.0/10. None on a tagged host (no user owns it) or
+** for a negative Self.UserID (-1 is "unknown" to peer_is_mine and dch
+** serve's gate), and none unless BackendState is "Running": a stopped or
+** logged-out tailscaled still lists its peers, and 100.64.0.0/10 off the
+** tailnet is any ISP's carrier-grade NAT. Pure. */
 static int
 peers_from(const char *js, struct rhost *v, int cap, long long *me)
 {
@@ -288,7 +289,7 @@ peers_from(const char *js, struct rhost *v, int cap, long long *me)
 	int tagged, peers, i, n = 0;
 
 	*me = -1;
-	if (status_self(js, me, node, &tagged) < 0 || tagged)
+	if (status_self(js, me, node, &tagged) < 0 || tagged || *me < 0)
 		return 0;
 	if (dch_json_parse(&jp, js) < 0 ||
 	    jstr(&jp, 0, "BackendState", bs, sizeof bs) != 1 ||
@@ -2264,14 +2265,14 @@ hello_op(const char *js, const char *op)
 
 /* The server's frames in tin as a ctl client takes them: 0x31 onto out,
 ** 0x32 onto err; 0x33's exit into *xit (0..255; a malformed one is 1) and
-** its "why", escaped, into why[cap]; a 0x13's message, escaped, into
+** its "why", escaped, into why[wcap]; a 0x13's message, escaped, into
 ** msg[cap] and what its code makes the exit status into *code (err_text: 1
 ** uncoded). What it parsed leaves tin. 1 once the ctl is over (a 0x33 or a
 ** 0x13), 0 for more, -1 when the link must end (a frame over the limit).
 ** Pure. */
 static int
 ctl_in(struct rf_state *rs, struct sb *tin, struct sb *out, struct sb *err,
-       int *xit, char *why, char *msg, size_t cap, int *code)
+       int *xit, char *why, size_t wcap, char *msg, size_t cap, int *code)
 {
 	struct rf_frame f;
 	size_t off = 0, used;
@@ -2313,7 +2314,7 @@ ctl_in(struct rf_state *rs, struct sb *tin, struct sb *out, struct sb *err,
 					    v <= 255)
 						*xit = (int)v;
 					if (jstr(&jp, 0, "why", w, sizeof w) == 1)
-						logsafe(why, cap, w);
+						logsafe(why, wcap, w);
 				}
 				dch_json_free(&jp);
 			}
@@ -2428,8 +2429,8 @@ ctl_run(int fd, const char *sh, const char *verb, struct sb *rq,
 	{
 		struct pollfd pf;
 
-		r = ctl_in(&rs, &tin, &out, &err, &xit, why, msg, sizeof msg,
-		           &code);
+		r = ctl_in(&rs, &tin, &out, &err, &xit, why, sizeof why, msg,
+		           sizeof msg, &code);
 		if (tin.bad || out.bad || err.bad)
 		{
 			snprintf(msg, sizeof msg, "out of memory");

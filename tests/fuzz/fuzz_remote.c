@@ -41,6 +41,22 @@ printable(const char *s)
 	inert(e);
 }
 
+/* BackendState is "Running", as JSON: a raw-text search misses an escaped
+** letter ("Runn\u0069ng") that peers_from rightly decodes. */
+static int
+running(const char *js)
+{
+	struct json_parser jp;
+	char bs[32];
+	int r = dch_json_parse(&jp, js) == 0 && jp.ntok > 0 &&
+	        jp.tok[0].kind == JSON_OBJECT &&
+	        jstr(&jp, 0, "BackendState", bs, sizeof bs) == 1 &&
+	        !strcmp(bs, "Running");
+
+	dch_json_free(&jp);
+	return r;
+}
+
 static void
 label_ok(const char *l, size_t cap, const char *extra)
 {
@@ -85,8 +101,7 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		{
 			label_ok(hv[i].label, DCH_RHOST_MAX, "-");
 			if (!ip_cgnat4(hv[i].addr) || hv[i].port != RM_PORT ||
-			    !hv[i].found || me < 0 ||
-			    !strstr(t, "\"Running\""))
+			    !hv[i].found || me < 0 || !running(t))
 				abort();
 		}
 		break;
@@ -232,8 +247,8 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 
 			sb_add(&tin, d + off, k);
 			got += k;
-			r = ctl_in(&rs, &tin, &out, &err, &xit, why, msg,
-			           sizeof msg, &code);
+			r = ctl_in(&rs, &tin, &out, &err, &xit, why,
+			           sizeof why, msg, sizeof msg, &code);
 		}
 		inert(msg);
 		inert(why);
