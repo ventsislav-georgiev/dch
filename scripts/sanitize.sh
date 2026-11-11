@@ -13,6 +13,10 @@
 set -eu
 cd "$(dirname "$0")/.."
 SAN="-fsanitize=address,undefined -fno-omit-frame-pointer"
+# Fill uninitialized stack with a pattern so an unset read fails instead of
+# finding a leftover 0 (#147). gcc < 12 lacks the flag: add it only if accepted.
+echo 'int x;' | ${CC:-cc} -ftrivial-auto-var-init=pattern -x c -c -o /dev/null - 2>/dev/null &&
+	SAN="$SAN -ftrivial-auto-var-init=pattern"
 ./configure --disable-hardening "$@" CFLAGS="$SAN -g -O1" LDFLAGS="$SAN" >/dev/null
 make clean >/dev/null
 make

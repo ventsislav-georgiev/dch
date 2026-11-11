@@ -34,7 +34,9 @@ cp "$src"/tests/fuzz/*.c "$b/tests/fuzz/"
 cd "$b"
 
 # -fno-sanitize-recover: a UBSan finding must stop the fuzzer like a crash.
-SAN="-fsanitize=address,undefined -fno-sanitize-recover=undefined"
+# -ftrivial-auto-var-init=pattern: an unset stack read fails, not reads a
+# leftover 0 (#147); every clang with libFuzzer here has it (clang >= 8).
+SAN="-fsanitize=address,undefined -fno-sanitize-recover=undefined -ftrivial-auto-var-init=pattern"
 CF="-g -O1 -fno-omit-frame-pointer $SAN -fsanitize=fuzzer-no-link"
 ./configure --disable-hardening CC="$CC" CFLAGS="$CF" "$@" >/dev/null
 vt_objs=$(sed -n 's/^VT_OBJS = //p' Makefile)
