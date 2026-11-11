@@ -418,7 +418,7 @@ someone is watching is invisible to them.
 | Verb | Does | Exit codes |
 | --- | --- | --- |
 | `--spawn <n> [--size CxR] [--env K=V]... [cmd...]` | Start headless session (default: `$SHELL`, 80x24 or `$COLUMNS`/`$LINES`). `--env` (max 32, first `=` splits) adds variables to the child; reserved keys (`DCH_SESSION`, `TERM` fixup) always win. Like `--revive` (and a plain `dch <new>`), it drops the calling Claude Code session's identity (`CLAUDECODE`, `CLAUDE_CODE_*` session vars), plus `GIT_EDITOR` and the other harness vars when `CLAUDECODE` is set, and sets `LC_TERMINAL=ghostty` unless the caller has it (dch keeps OSC 8 links, but under `TERM=xterm-256color` with no `TERM_PROGRAM` Claude Code would strip its statusline's, and `LC_TERMINAL` is the one signal its check reads that supports-hyperlinks and other Node CLIs ignore; ssh sends it on, by macOS's default `SendEnv LC_*`). Like any session variable it reaches every program in the session, not only Claude Code; a tool that keys on `ghostty` may assume Ghostty-only features (kitty graphics, for one) that the terminal you attach from may lack. dch sets no `FORCE_HYPERLINK`: those CLIs honour it before they check for a terminal, so it put OSC 8 into pipes and files (`stylelint t.css > out`, an agent's Bash tool); a caller's own value still reaches the session. An explicit `--env` (`--env LC_TERMINAL=` included) still wins. Prints the name. A program that cannot be executed is an error (`dch: <n>: <cmd>: <reason>`); one that runs and exits at once is not. | 0 ok, 1 exists/failed/not executable/bad --env |
-| `--xray <n> --json` | One JSON object: the session's corpus, chapters and refs (see [X-ray queries](#x-ray-queries---xray)). `--clear` empties a shell's ring instead; `--ref` streams one ref's lines; `--follow` streams the object and then its changes; `--chapter` prints one chapter's entries. Must be the first argument. | 0 ok, 1 no such session/ambiguous/no corpus, 2 usage, 3 read failure |
+| `--xray <n> --json` | One JSON object: the session's corpus, chapters and refs (see [X-ray queries](#x-ray-queries---xray)). `--clear` empties a shell's ring instead; `--ref` streams one ref's lines; `--follow` streams the object and then its changes; `--chapter` prints one chapter's entries. `<n>` as `host:name` runs it on that host (dch serve 1.55.0+). Must be the first argument. | 0 ok, 1 no such session/ambiguous/no corpus, 2 usage, 3 read failure; remote: 4 gate, 6 host lacks `xray`, 7 unreachable |
 | `--send <n> <text...>` | Type text (joined with spaces), no enter. | 0 ok |
 | `--run <n> <text...>` | `--send` + enter. Into a session whose Claude Code runs — as its command or typed into its shell — the text goes through `--say`'s composer gate instead: typed only over an empty composer, Enter pressed once it shows and again while it stays (Claude Code folds an Enter sent with the text into the paste). A `/command` is typed raw, a message pasted. A shell or any other program, a master without a mirror (`DCH_NO_VT`), dch-lite and your own session (`$DCH_SESSION`) keep the plain burst. A gate failure prints `dch: <n>: <reason> — <why>` on stderr: `prompt` and `draft` (nothing typed), `not_typed` (the text never showed in the composer, no Enter), `not_submitted` (it stayed there through every Enter); `no_screen` when the composer is not on screen; `interrupted`, `withdrawn` or `draft_left` on a SIGINT, SIGTERM or SIGHUP, as for `--say`. | 0 ok, 1 gate failure |
 | `--keys <n> <key...>` | Encode+send keys mode-aware: `ctrl+c`, `alt+x`, `shift+tab`, `up`, `f5`, `enter`, `esc`, single chars. | 0 ok, 1 unknown key |
@@ -872,8 +872,20 @@ master parses anything, nothing is written to disk and nothing is shelled out.
 A `<n>` with a `:` is resolved locally first: a live session or a History
 record of that name. Only when nothing local matches and the part before the
 `:` is a known host (`--hosts`, `remote_hosts`, or a cached remote row) is it
-`host:name`, which is not supported yet: it exits 2. Over
-`dch serve`'s ctl, `--xray` still answers `xray not supported by this host`.
+`host:name`. With `--json`, dch first checks the flags and values by its
+own rules (exit 2 and nothing sent on a bad one; the view form, without
+`--json`, stays local and exits 2), then runs `--xray <name>` and the other
+flags as typed on that host's `dch serve` over [ctl](#control-verbs-ctl). It
+writes the host's output and standard error as they come (the `--follow`
+and `--ref` streams included) and exits with the host's exit status. The
+host answers by its own release: `--scope`, `--chapter` and the corpus are
+the host's. A host whose hello lacks the `xray` token gets nothing and dch
+prints `dch: <host>: does not support --xray (needs dch serve 1.55.0+)`,
+exit 6. A refusal by the host's gate exits 4, its own refusal of the
+request exits 1 (`dch: <host>: <why>`), and an unreachable host or a lost
+connection exits 7. Ctrl-C, SIGTERM or a closed standard output cancel the
+query on the host, as for the [remote control verbs](#remote-hosts). There
+is no `--host` form.
 
 The corpus:
 - **Claude Code.** The chapters come from the session's transcript
@@ -1161,7 +1173,8 @@ system, like any name.
 | --- | --- |
 | 0 | the object was printed; a `--follow` ended with its session, its connection, or its reader |
 | 1 | `dch: no such session` (also a master that hangs up after the connect, before its answer is complete, in every form: nothing more is written; `--ref` keeps the lines already out and writes no `done`; `--follow` once its snapshot is out exits 0 instead), `dch: ambiguous session`, `dch: no x-ray corpus` (`--clear`, `--ref`, `--chapter`), `dch: chapter gone` (`--chapter`: no chapter has that anchor now), `dch: busy` (a fifth `--follow` on one shell) |
-| 2 | bad usage: `--json` missing, a flag twice, `--follow` with `--ref` or `--clear`, `--chapter` with `--ref`, `--follow` or `--clear`, a flag of a later release, `--xray` not first, a bad or remote `<n>`, a bad `--ref`, `--chapter` anchor, `--scope` or `--budget-ms` |
+| 2 | bad usage: `--json` missing, a flag twice, `--follow` with `--ref` or `--clear`, `--chapter` with `--ref`, `--follow` or `--clear`, a flag of a later release, `--xray` not first, a bad `<n>`, a bad `--ref`, `--chapter` anchor, `--scope` or `--budget-ms` |
+| 4, 6, 7 | a remote `host:name` only: refused by the host's gate; the host lacks `xray`; the host is unreachable or the connection was lost |
 | 3 | `dch: X-ray failed on this session`: the session answered garbage, the transcript could not be read (it is there, but opening or reading it failed), memory ran out, or a write failed with an error other than a closed pipe |
 
 ### Auto-allow
@@ -1866,10 +1879,11 @@ version. Commands run as argument vectors, never through a shell.
 
 Remote frames 1.1 adds one op, `ctl`: a client runs one of dch's own verbs
 on the host and gets its output and exit status, exactly as if it had run
-there. `0x18` says `"proto":"1.1"` and always lists `ctl` and `ctl-cancel`
-in `ops` (`create` only with `--allow-create`). A client checks for the
-`ctl-cancel` token, not the proto, before it sends a `0x34` or a second
-`0x30`. One request at a time:
+there. `0x18` says `"proto":"1.1"` and always lists `ctl`, `ctl-cancel` and
+`xray` in `ops` (`create` only with `--allow-create`). A client checks for
+the `ctl-cancel` token, not the proto, before it sends a `0x34` or a second
+`0x30`, and for the `xray` token before it sends an `--xray`. One request at
+a time:
 
 ```
 → 0x30  {"argv":["--read","api"],"cwd":"/abs/dir"}    cwd optional
@@ -1934,6 +1948,9 @@ for a local session named that way.
 | `--pin`, `--unpin`, `--forget` | `--pin <n>... --json`; `--forget --all --json` | 60 s |
 | `--stop` | `--stop <n>... --json` | 660 s |
 | `--say` | `--say <n> --json -- <text>` | 660 s |
+| `--xray` | `--xray <n> --json [--clear \| --chapter <anchor>]` | 60 s |
+| `--xray` | `--xray <n> --json --follow` (no cap either) | none |
+| `--xray` | `--xray <n> --ref <ref> [--scope <s>] [--full] [--budget-ms <ms>] --json` | 60 s |
 
 Refused, before anything runs: an `argv` of fewer than 2 elements; a verb
 or flag not in the table; a bad name; `--config`, `serve`, `-h` or `-f`
@@ -1941,10 +1958,21 @@ anywhere outside the free text (`--send`'s words, `--keys`' keys,
 `--spawn`'s command, `--say`'s text, `-m`'s alias); `--all` except in
 `--forget --all --json`; a `cwd` that is no directory (`no such directory`);
 `--spawn` or `--revive` without `--allow-create` (`creating sessions is off
-on this host (dch serve --allow-create)`). `--xray` is reserved for a later
-release: `xray not supported by this host`.
+on this host (dch serve --allow-create)`).
 
-**Its limits.** Stdout and stderr together get 8 MiB. At that cap the server
+`--xray` takes its name right after it, then its flags in any order, each
+once (`--json twice`). A flag's value is the next element even when it
+starts with `-`. Refused: no `--json` (`--xray needs --json (the view is
+client-side only)`); two of `--ref`, `--follow`, `--chapter` and `--clear`;
+`--scope`, `--full` or `--budget-ms` without `--ref`; a flag not in the
+table (`--requests is not allowed with --xray`); a missing value (`--ref
+needs a value`); and a value that fails `dch --xray`'s rules (`bad ref`,
+`not a ref`, `bad anchor`, `bad scope`, `bad budget`). `--clear` needs no
+`--allow-create`, only the gate, like `-k`. Everything else, `--scope
+project` for one, is the host's dch's to answer.
+
+**Its limits.** Stdout and stderr together get 8 MiB (`--xray --follow`:
+no cap). At that cap the server
 stops forwarding, sends the dch SIGTERM (SIGKILL 2 s later) and ends with
 `{"exit":2,"why":"cap"}`. Past its timeout (the table) it does the same with
 `"why":"timeout"`. A client that closes the connection (or half-closes it)
@@ -2058,6 +2086,7 @@ dch --hosts mini,pi=100.64.1.2:8771 --ls --remote   # these hosts, not your tail
 dch --read mybox:api              # a control verb on mybox (dch serve 1.41+)
 dch --host mybox --send api -- make test
 dch --cwd /srv/app --spawn mybox:build -- make   # needs dch serve --allow-create
+dch --xray mybox:api --json       # X-ray a session on mybox (dch serve 1.55.0+)
 ```
 
 **Which hosts.** `--hosts` (a comma-separated `[label=]host[:port]` list), else
@@ -2171,14 +2200,17 @@ come, byte for byte: the output and the exit status are the remote dch's.
 Anything off the table is refused here, before any connection (`dch: can't
 run on a remote host: <why>`, exit 1). `--cwd <dir>` is `--spawn`'s start
 directory: on the host for a remote spawn, here (it must exist) for a local
-one; it goes with no other verb.
+one; it goes with no other verb. `dch --xray host:name ... --json` goes the
+same way (see [X-ray queries](#x-ray-queries---xray)): `--xray` must come first, so
+it has no `--host` form, and dch checks its values by its own rules before
+any connection (exit 2).
 
 | Code | Means |
 | --- | --- |
 | 0-3 | The remote dch's own exit status. 2 with `dch: <host>: <verb> stopped by the host (cap\|timeout)` on stderr: the host cut it short. |
 | 1 | Also: the host refused the request (`dch: <host>: <why>`), an unknown host, or a request dch would not send. |
 | 4 | Refused: the host's gate sent a coded `0x13` (`dch: <host> refused: <message>`). |
-| 6 | The host lacks the op: `dch: <host>: does not support <verb> (needs dch serve 1.41+)`, or `(needs dch serve --allow-create)` for `--spawn` and `--revive`. |
+| 6 | The host lacks the op: `dch: <host>: does not support <verb> (needs dch serve 1.41+)`, or `(needs dch serve --allow-create)` for `--spawn` and `--revive`, or `(needs dch serve 1.55.0+)` for `--xray` when the hello lacks `xray`; nothing is sent. |
 | 7 | Unreachable: `dch: <host>: unreachable: <why>` (down, `busy`, or the connection lost before the exit status). |
 
 `-a`'s codes are unchanged.

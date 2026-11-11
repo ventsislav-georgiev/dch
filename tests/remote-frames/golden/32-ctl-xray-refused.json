@@ -1,7 +1,7 @@
 {
   "id": "32-ctl-xray-refused",
-  "about": "--xray is reserved for a later release: its own 0x13 reason.",
-  "requires_op": "ctl",
+  "about": "The --xray view form (no --json) is the client's own: a server with the xray op refuses it with its own 0x13 reason, then the FIN.",
+  "requires_op": "xray",
   "steps": [
     {
       "send": "30 00000024 7b2261726776223a5b222d2d78726179222c22676f6c64656e2d3737362d63746c225d7d"
@@ -9,7 +9,7 @@
     {
       "expect": {
         "type": "13",
-        "payload": "7b226d657373616765223a2278726179206e6f7420737570706f72746564206279207468697320686f7374227d"
+        "payload": "7b226d657373616765223a222d2d78726179206e65656473202d2d6a736f6e2028746865207669657720697320636c69656e742d73696465206f6e6c7929227d"
       }
     },
     {

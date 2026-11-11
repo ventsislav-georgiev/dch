@@ -945,8 +945,39 @@ with a
 is resolved locally first; only when nothing local matches and its host is
 known (\fB\-\-hosts\fR, \fBremote_hosts\fR, a cached remote row) is it a
 remote
-.I host\fB:\fIname
-(exit 2, not supported yet).
+.IR host\fB:\fIname :
+with
+.B \-\-json
+dch checks the flags and values by its own rules above (exit 2, nothing
+sent; the view form, without
+.BR \-\-json ,
+stays local and exits 2), then runs
+.B "\-\-xray"
+.I name
+and the other flags as typed on that host's
+.B dch serve
+over ctl (see
+.BR "REMOTE SERVER" ),
+and writes its output, standard error and exit status as its own, the
+.B \-\-follow
+and
+.B \-\-ref
+streams as they come.
+The host answers by its own release:
+.BR \-\-scope ,
+.B \-\-chapter
+and the corpus are the host's.
+A host whose hello lacks
+.B xray
+prints
+.I "dch: host: does not support \-\-xray (needs dch serve 1.55.0+)"
+and exits 6, nothing sent; a refusal by its gate exits 4, an unreachable
+host or a lost connection exits 7, and the host's own refusal exits 1.
+SIGINT, SIGTERM or a
+closed standard output cancel it on the host, as for the control verbs.
+There is no
+.B \-\-host
+form.
 A Claude Code session's chapters come from its transcript, found by one
 directory listing (a symlinked project directory is not followed; two hits
 answer corpus
@@ -2076,9 +2107,10 @@ op: one of dch's control verbs, run on this host for the client. The
 hello says
 .B \(dqproto\(dq:\(dq1.1\(dq
 and always lists
-.B ctl
-and
+.BR ctl ,
 .B ctl\-cancel
+and
+.B xray
 in
 .B ops
 .RB ( create
@@ -2086,7 +2118,10 @@ only with
 .BR \-\-allow\-create );
 a client checks the
 .B ctl\-cancel
-token, not the proto, before it sends a 0x34 or a second 0x30.
+token, not the proto, before it sends a 0x34 or a second 0x30, and the
+.B xray
+token before it sends an
+.BR \-\-xray .
 The request is
 .B 0x30
 .BR {\(dqargv\(dq:[...],\(dqcwd\(dq:\(dq/abs\(dq} ,
@@ -2156,6 +2191,8 @@ a session name that passes the attach name check and does not start with
 \-\-pin|\-\-unpin|\-\-forget \fIn\fP... \-\-json;  \-\-forget \-\-all \-\-json
 \-\-stop \fIn\fP... \-\-json
 \-\-say \fIn\fP \-\-json \-\- \fItext\fP
+\-\-xray \fIn\fP \-\-json [\-\-follow|\-\-clear|\-\-chapter \fIanchor\fP]
+\-\-xray \fIn\fP \-\-ref \fIref\fP [\-\-scope \fIs\fP] [\-\-full] [\-\-budget\-ms \fIms\fP] \-\-json
 .fi
 .RE
 .PP
@@ -2183,10 +2220,48 @@ that is no directory
 and a (create) verb without
 .B \-\-allow\-create
 .RI ( "creating sessions is off on this host (dch serve \-\-allow\-create)" ).
+For
+.BR \-\-xray ,
+the name comes right after it and the flags follow in any order, each once
+.RI ( "\-\-json twice" ),
+a flag's value is the next element even when it starts with
+.BR \- ,
+and the
 .B \-\-xray
-is reserved for a later release:
-.IR "xray not supported by this host" .
-Stdout and stderr together get 8 MiB; at that cap the server stops
+rules apply: no
+.B \-\-json
+.RI ( "\-\-xray needs \-\-json (the view is client\-side only)" ),
+two of
+.BR \-\-ref ,
+.BR \-\-follow ,
+.B \-\-chapter
+and
+.BR \-\-clear ,
+.BR \-\-scope ,
+.B \-\-full
+or
+.B \-\-budget\-ms
+without
+.BR \-\-ref ,
+a flag off the list
+.RI ( "\-\-requests is not allowed with \-\-xray" ),
+a missing value
+.RI ( "\-\-ref needs a value" ),
+and a value that fails
+.RI ( "bad ref" ,
+.IR "not a ref" ,
+.IR "bad anchor" ,
+.IR "bad scope" ,
+.IR "bad budget" )
+are refused.
+.B \-\-clear
+needs no
+.BR \-\-allow\-create ,
+only the gate, like
+.BR \-k .
+Stdout and stderr together get 8 MiB
+.RB ( "\-\-xray \-\-follow" :
+no cap); at that cap the server stops
 forwarding, sends the dch SIGTERM (SIGKILL 2 s later) and ends with
 .BR {\(dqexit\(dq:2,\(dqwhy\(dq:\(dqcap\(dq} .
 The timeout is 660 s for
@@ -2196,7 +2271,9 @@ The timeout is 660 s for
 and
 .BR \-\-run ,
 none for
-.BR \-\-follow ,
+.B \-\-follow
+and
+.BR "\-\-xray \-\-follow" ,
 60 s for the rest; past it, the same with
 .BR \(dqwhy\(dq:\(dqtimeout\(dq .
 A client that closes the connection while its verb runs ends it as a 0x34
@@ -2361,7 +2438,14 @@ and
 .BR \-\-revive )
 prints
 .I "dch: host: does not support verb (needs dch serve 1.41+)"
-.RI ( "(needs dch serve \-\-allow\-create)" )
+.RI ( "(needs dch serve \-\-allow\-create)" ;
+for
+.B \-\-xray
+on
+.IR host : name ,
+one whose hello lacks
+.BR xray :
+.IR "(needs dch serve 1.55.0+)" )
 and exits 6; one that cannot be reached, or whose connection is lost before
 the exit status, prints
 .I "dch: host: unreachable: why"
@@ -2532,13 +2616,20 @@ retry).
 A control verb on
 .I host:name
 (or with
-.BR \-\-host ):
+.BR \-\-host ),
+and
+.B \-\-xray
+on
+.IR host:name :
 0\-3 the remote dch's own exit status; also 1 the host refused the request,
 an unknown host or a request dch would not send; 4 refused by the host's
 gate; 6 the host's
 .B dch serve
-lacks the op (1.41+ or
-.BR \-\-allow\-create );
+lacks the op (1.41+,
+.B \-\-allow\-create
+or, for
+.BR \-\-xray ,
+1.55.0+);
 7 the host is unreachable.
 .SH ENVIRONMENT
 .TP

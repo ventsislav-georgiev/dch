@@ -36,7 +36,9 @@
 ** one 0x33; after it the connection stays open (warm) for the next 0x30,
 ** until CTL_IDLE_MS without a frame. A 0x30 while one runs is refused with
 ** a 0x13 "busy" and the running one goes on; any other refused 0x30 is a
-** 0x13, then the FIN. A 0x34 with no ctl running is ignored.
+** 0x13, then the FIN. A 0x34 with no ctl running is ignored. --xray
+** (#157, "xray" in ops) is one of them: ctl_check's own entries, its
+** --ref text checked here with xray.c's rules; --follow has no cap.
 */
 #include "dtach.h"
 #include "rframe.h"
@@ -738,8 +740,9 @@ build_hello(void)
 	sb_s(&g_hello, ",\"name\":");
 	sb_q(&g_hello, host);
 	sb_s(&g_hello, g_allow_create
-	     ? ",\"ops\":[\"create\",\"ctl\",\"ctl-cancel\",\"watch\"]"
-	     : ",\"ops\":[\"ctl\",\"ctl-cancel\",\"watch\"]");
+	     ? ",\"ops\":[\"create\",\"ctl\",\"ctl-cancel\",\"watch\","
+	       "\"xray\"]"
+	     : ",\"ops\":[\"ctl\",\"ctl-cancel\",\"watch\",\"xray\"]");
 	sb_s(&g_hello, ",\"os\":");
 	sb_q(&g_hello, os);
 	sb_s(&g_hello, ",\"proto\":\"1.1\",\"server\":\"dch\"}");
@@ -775,10 +778,10 @@ struct conn
 	** its stdout and stderr (-1 at EOF), what went out of them, its
 	** timeout (0 none) and, once cut ("cap", "timeout", "cancel",
 	** "closed"), when SIGKILL follows the SIGTERM; whether it is a
-	** CTL_LONG verb */
+	** CTL_LONG verb; its cap (CTL_NOCAP: none) */
 	pid_t ctl;
 	int ctl_fd[2], ctl_st, ctl_reaped, ctl_long;
-	size_t ctl_sent;
+	size_t ctl_sent, ctl_cap;
 	long long ctl_end, ctl_kill;
 	const char *ctl_why;
 };
@@ -1224,6 +1227,23 @@ ctl_request(const unsigned char *p, size_t n, char ***av, int *ac, char *cwd,
 		snprintf(why, cap, "no such directory");
 		t = -1;
 	}
+	/* --xray --ref's text: 3.1's byte and grammar rules, xray.c's (the
+	** ones dch --xray applies), before any child runs (4.4) */
+	for (int i = 2; t >= 0 && !strcmp((*av)[0], "--xray") && i + 1 < *ac;
+	     i++)
+		if (kind[i] == CK_FLAG && !strcmp((*av)[i], "--ref"))
+		{
+			struct xr_span sp;
+			const char *bad = !xr_ref_ok((*av)[i + 1]) ? "bad ref"
+			                  : !xr_ref_parse((*av)[i + 1], NULL, &sp)
+			                  ? "not a ref" : NULL;
+
+			if (bad)
+			{
+				snprintf(why, cap, "%s", bad);
+				t = -1;
+			}
+		}
 	/* The child's dch reads a name with ':' and no local socket as
 	** host:name and dials on with this host's identity: a relay. */
 	for (int i = 0; t >= 0 && i < *ac; i++)
@@ -1309,12 +1329,12 @@ ctl_read(struct conn *c, int k)
 		}
 		if (c->ctl_why)
 			continue;
-		if ((size_t)r > g_ctl_cap - c->ctl_sent)
-			r = (ssize_t)(g_ctl_cap - c->ctl_sent);
+		if ((size_t)r > c->ctl_cap - c->ctl_sent)
+			r = (ssize_t)(c->ctl_cap - c->ctl_sent);
 		if (r)
 			out_frame(c, 0x31 + (unsigned)k, buf, (size_t)r);
 		c->ctl_sent += (size_t)r;
-		if (c->ctl_sent >= g_ctl_cap)
+		if (c->ctl_sent >= c->ctl_cap)
 		{
 			ctl_cut(c, "cap");
 			return;
@@ -1418,6 +1438,7 @@ on_ctl(struct conn *c, const unsigned char *p, size_t n)
 	c->ctl = pid;
 	c->ctl_reaped = 0;
 	c->ctl_sent = 0;
+	c->ctl_cap = fl & CTL_NOCAP ? (size_t)-1 : g_ctl_cap;
 	c->ctl_kill = 0;
 	c->ctl_why = NULL;
 	c->ctl_fd[0] = po[0];
@@ -2744,8 +2765,8 @@ serve_main(int argc, char **argv)
 	nonblock(np[1]);
 	g_notify = np[1];
 	slog("listening on %s:%ld (dch %s, proto 1.1, ops: %s)", ipstr, port,
-	     DCH_VERSION, g_allow_create ? "create, ctl, ctl-cancel, watch"
-	                                 : "ctl, ctl-cancel, watch");
+	     DCH_VERSION, g_allow_create ? "create, ctl, ctl-cancel, watch, xray"
+	                                 : "ctl, ctl-cancel, watch, xray");
 	if (g_gate.self_uid >= 0)
 		slog("accepting nodes of user %lld%s", g_gate.self_uid,
 		     g_gate.nallow ? " and --allow-user" : "");

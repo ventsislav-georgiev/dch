@@ -302,7 +302,7 @@ def run_case(name):
                    DCH_CONFIG=os.path.join(t, "config"), DCH_LOGIN_ENV="0",
                    DCH_NO_REMOTE="1")
         if any(l.startswith("remote_hosts") for l in setup.get("config", [])):
-            del env["DCH_NO_REMOTE"]     # named hosts only: nothing dialled
+            del env["DCH_NO_REMOTE"]     # named hosts only, on loopback
         for k, argv in enumerate(case["argv"], 1):
             argv = ["f%x:" % ino + a[3:] if a.startswith("f*:") else a
                     for a in argv]

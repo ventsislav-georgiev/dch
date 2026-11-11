@@ -31,7 +31,11 @@ exit 5 (and a fake's 0x13 "taken" the same). #114: each control verb on
 host:name (and --host) over a dch serve --allow-create prints and exits
 byte for byte as the same verb run there; --cwd; the client's own refusals;
 exit 6 for a host without ctl (or create), 7 for a closed port or a cut
-link, 4 for a coded 0x13, 1 with the reason for an uncoded one.
+link, 4 for a coded 0x13, 1 with the reason for an uncoded one. #157: each
+--xray form on srv:<n> (remote_hosts) byte for byte as run on the host,
+3.1's value rules checked before anything is sent, exit 6 for a host
+without "xray", 4 and 7 as above, and Ctrl-C, SIGTERM or a closed stdout
+ending the host's --follow.
 
 Run:  python3 tests/remote_client_test.py        (uses ./dch)
 """
@@ -334,7 +338,8 @@ def ctl_checks(dch, check, senv, cenv, serve_at, procs, fakes, tmp, hosts):
     check("off the allowlist: refused here, exit 1", r.returncode == 1
           and r.stderr == "dch: can't run on a remote host: -f is not "
           "allowed\n", r)
-    # #120: --xray exists, but only as argv[1]; never sent to the host
+    # #120: --xray is argv[1] only, so after --hosts it is never sent;
+    # dch --xray srv:<n> goes to the host (#157, xray_checks)
     r = dch(cenv, *H, "--xray", "srv:ctl-qa")
     check("--xray is no control verb here", r.returncode == 2
           and "--xray comes first" in r.stderr, r)
@@ -401,6 +406,160 @@ def ctl_checks(dch, check, senv, cenv, serve_at, procs, fakes, tmp, hosts):
           body == {"argv": ["--status", "x"]}, body)
     dch(senv, "-k", "ctl-qa")
     dch(senv, "-k", "ctl-qb")
+
+
+def xray_checks(dch, check, senv, cenv, port, fakes, tmp, slog):
+    """#157 (spec #832 4.1-4.2, 9.5 Remote): every --xray form on srv:<n>
+    goes over ctl to srv's dch serve (no --allow-create) and prints and
+    exits exactly as the same argv run there; 3.1's value rules are checked
+    here first, nothing sent; a host without "xray" in its ops is exit 6
+    with nothing sent, a refusal 4, an unreachable host 7; Ctrl-C, SIGTERM
+    and a closed stdout end the host's dch. dch --xray takes no --hosts
+    (argv[1] only), so the client names srv in remote_hosts."""
+    def side(hosts):
+        cfg = os.path.join(tmp, "xcfg-%d" % len(fakes))
+        with open(cfg, "w") as f:
+            f.write("remote_hosts = %s\n" % hosts)
+        e = dict(cenv, DCH_CONFIG=cfg)
+        e.pop("DCH_NO_REMOTE", None)
+        return e
+
+    xenv = side("srv=127.0.0.1:%d" % port)
+    elapsed = re.compile(r'"elapsed_ms":\d+')
+
+    def ctls():
+        with open(slog) as f:
+            return f.read().count(" ctl --xray ")
+
+    def same(label, *args, n="xr1", mask=False):
+        """args with "@" for the name: n there, srv:n here."""
+        loc = dch(senv, "--xray", *[n if a == "@" else a for a in args])
+        rem = dch(xenv, "--xray", *["srv:" + n if a == "@" else a
+                                    for a in args])
+        got = (rem.stdout, rem.stderr, rem.returncode)
+        want = (loc.stdout, loc.stderr, loc.returncode)
+        if mask:
+            got, want = [(elapsed.sub('"elapsed_ms":0', o),) + g[1:]
+                         for o, g in ((got[0], got), (want[0], want))]
+        check("xray %s: byte for byte the host's own run (exit %d)"
+              % (label, loc.returncode), got == want, (want, got))
+
+    dch(senv, "--spawn", "xr1", "--size", "60x6", "--", "/bin/sh")
+    dch(senv, "--send", "xr1", "--", "echo see #831 and o/r#7")
+    time.sleep(0.8)
+    n0 = ctls()
+    same("--json", "@", "--json")
+    same("--json, flags first", "--json", "@")
+    same("--ref --scope session", "@", "--ref", "#831", "--scope",
+         "session", "--json", mask=True)
+    same("--ref --full --budget-ms", "--json", "--full", "--ref", "o/r#7",
+         "@", "--budget-ms", "50", "--scope", "session", mask=True)
+    same("--ref --scope project", "@", "--ref", "#831", "--scope",
+         "project", "--json", mask=True)
+    same("--ref --scope all", "@", "--ref", "#831", "--scope", "all",
+         "--json", mask=True)
+    same("--chapter", "@", "--chapter", "s1", "--json")
+    same("--clear", "@", "--clear", "--json")
+    same("a Claude session UUID", "@", "--json",
+         n="9f9f9f9f-0000-4000-8000-000000000000")
+    same("a <file>.json record name", "@", "--json", n="nosuch.json")
+    same("no such session", "@", "--json", n="xr-nope")
+    check("xray: each remote form ran one ctl on the host",
+          ctls() - n0 == 11, ctls() - n0)
+
+    # 3.1's value rules, here first: the local run's line, nothing sent
+    n0 = ctls()
+    for a, line in ((["--ref", "#1\x01"], "dch: bad ref"),
+                    (["--ref", "#1\u202e"], "dch: bad ref"),
+                    (["--ref", "x"], "dch: not a ref"),
+                    (["--chapter", "a/b"], "dch: bad anchor"),
+                    (["--ref", "#831", "--scope", "none"], "dch: bad scope"),
+                    (["--ref", "#831", "--budget-ms", "0x40"],
+                     "dch: bad budget"),
+                    (["--json"], "dch: bad usage: --json twice"),
+                    (["--requests"], "dch: bad usage: --requests is not an "
+                     "--xray flag of this dch")):
+        r = dch(xenv, "--xray", "srv:xr1", "--json", *a)
+        check("xray value rule %r: %s, exit 2, nothing sent" % (a, line),
+              r.returncode == 2 and r.stderr == line + "\n", r)
+    r = dch(xenv, "--xray", "srv:xr1")
+    check("xray view form on srv:xr1: not sent (the view comes later)",
+          r.returncode == 2 and "--json is required" in r.stderr, r)
+    check("xray: no value-rule case reached the host", ctls() == n0)
+
+    # --follow: the snapshot as the host's own; Ctrl-C and SIGTERM cancel
+    # it there (0x34), a closed stdout ends it with 0
+    pl = subprocess.Popen([DCH, "--xray", "xr1", "--follow", "--json"],
+                          env=senv, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
+    a = pl.stdout.readline()
+    pl.terminate()
+    pl.communicate(timeout=10)
+    for sig in (signal.SIGINT, signal.SIGTERM, None):
+        with open(slog) as f:
+            cut0 = f.read().count("ctl cut short: cancel")
+        pr = subprocess.Popen([DCH, "--xray", "srv:xr1", "--follow",
+                               "--json"], env=xenv, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE,
+                              stdin=subprocess.DEVNULL)
+        b = pr.stdout.readline()
+        if sig:
+            pr.send_signal(sig)
+        else:
+            pr.stdout.close()
+            # a new ref is a delta line: its write meets the EPIPE
+            dch(senv, "--send", "xr1", "--", "echo more o/r#11")
+        try:
+            pr.wait(10)
+        except subprocess.TimeoutExpired:
+            pr.kill()
+            pr.wait()
+        err = pr.stderr.read()
+        time.sleep(0.3)
+        with open(slog) as f:
+            cut = f.read().count("ctl cut short: cancel") - cut0
+        check("xray --follow (%s): the host's snapshot line, then %s"
+              % (sig and sig.name or "stdout closed",
+                 "its death, quietly, the host's dch cancelled" if sig
+                 else "exit 0"),
+              a.startswith(b'{"schema":1,"snapshot":') and b == a
+              and err == b"" and cut == 1
+              and pr.returncode == (-sig if sig else 0),
+              (a[:60], b[:60], err, cut, pr.returncode))
+    dch(senv, "-k", "xr1")
+
+    # ctl's own exits: 6 without "xray" (nothing sent), 4, 7
+    nox = Fake("ctlerr", ops=["ctl", "ctl-cancel", "watch"])
+    fakes.append(nox)
+    r = dch(side("q=127.0.0.1:%d" % nox.port), "--xray", "q:x", "--json")
+    check("xray on a host whose ops lack xray: exit %d, nothing sent"
+          % UNSUPPORTED_EXIT, r.returncode == UNSUPPORTED_EXIT
+          and r.stderr == "dch: q: does not support --xray (needs dch "
+          "serve 1.55.0+)\n" and not nox.bodies, r)
+    for mode, want, err in (
+            ("refuse", REFUSED_EXIT, "dch: q refused: " + REFUSAL["message"]),
+            ("ctlcoded", REFUSED_EXIT,
+             "dch: q refused: " + REFUSAL["message"]),
+            ("ctlerr", 1, "dch: q: nope-why"),
+            ("ctldrop", UNREACHABLE_EXIT,
+             "dch: q: unreachable: the connection was lost")):
+        f = Fake(mode, ops=["ctl", "ctl-cancel", "watch", "xray"])
+        fakes.append(f)
+        r = dch(side("q=127.0.0.1:%d" % f.port), "--xray", "q:x",
+                "--follow", "--json")
+        check("xray on a host that answers %s: exit %d" % (mode, want),
+              r.returncode == want and r.stderr == err + "\n", r)
+    body = json.loads(f.bodies[-1])
+    check("xray: the 0x30 is --xray <name> first, the host: off",
+          body == {"argv": ["--xray", "x", "--follow", "--json"]}, body)
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    dead = s.getsockname()[1]
+    s.close()
+    r = dch(side("q=127.0.0.1:%d" % dead), "--xray", "q:x", "--json")
+    check("xray on a closed port: unreachable, exit %d" % UNREACHABLE_EXIT,
+          r.returncode == UNREACHABLE_EXIT
+          and r.stderr.startswith("dch: q: unreachable: "), r)
 
 
 def main():
@@ -670,6 +829,7 @@ def main():
         # --- ctl (#114): the control verbs on a remote host ------------
         ctl_checks(dch, check, senv, cenv, serve_at, procs, fakes, tmp,
                    hosts)
+        xray_checks(dch, check, senv, cenv, port, fakes, tmp, log)
 
         # --- precedence -----------------------------------------------
         # (--spawn srv:rs1 is remote now, #114: -n makes the local one)

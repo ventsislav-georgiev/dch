@@ -2746,7 +2746,9 @@ usage(void)
 	    "       [--budget-ms <ms>] --json             one ref's mentions and\n"
 	    "                                             definitions as NDJSON\n"
 	    "  dch --xray <n> --chapter <anchor> --json   one chapter's entries\n"
-	    "                                             as one JSON object\n"
+	    "                                             as one JSON object;\n"
+	    "                                             <n> as host:name runs\n"
+	    "                                             on that host's dch serve\n"
 	    "  dch --agent-list [--json]                 list native Claude peers\n"
 	    "  dch --agent-send <name> <message...>       message one native peer\n"
 	    "  dch serve [--allow-create] [--allow-user <u>]...  serve sessions to\n"
@@ -12982,13 +12984,15 @@ name_routes_remote(const char *n)
 /* `dch --xray <n> [--json] [--clear|--follow]`, `--ref <text> [--scope
 ** session|project|all] [--full] [--budget-ms <ms>] --json` and `--chapter
 ** <anchor> --json` (spec 3.1, 3.3-3.5): flags in any order, each once; the
-** rest of the family (the view) comes with XR3-XR5 and exits 2 here. */
+** rest of the family (the view) comes with XR3-XR5 and exits 2 here. A
+** host:name with --json (#157, spec 4.1) runs on the host over ctl once
+** 3.1's rules pass here, whatever this dch runs locally: the host answers. */
 static int
 xray_main(int argc, char **argv)
 {
 	const char *n = NULL, *ref = NULL, *scope = NULL, *budget = NULL, *e;
 	const char *chapter = NULL;
-	int json = 0, clear = 0, full = 0, follow = 0, k, rc, nr;
+	int json = 0, clear = 0, full = 0, follow = 0, k, rc, nr, ni = 0;
 	struct hrec *r = NULL;
 	struct xr_target t;
 	struct xr_refq q;
@@ -13043,7 +13047,7 @@ xray_main(int argc, char **argv)
 			return 2;
 		}
 		else if (!n)
-			n = argv[k];
+			n = argv[ni = k];
 		else
 		{
 			fputs("dch: bad usage: one session per --xray\n", stderr);
@@ -13091,13 +13095,12 @@ xray_main(int argc, char **argv)
 		fputs("dch: not a ref\n", stderr);
 		return 2;
 	}
-	if (chapter && !xr_anchor_ok(chapter))
+	if (chapter && !xray_anchor_ok(chapter))
 	{
 		fputs("dch: bad anchor\n", stderr);
 		return 2;
 	}
-	if (scope && strcmp(scope, "session") && strcmp(scope, "project") &&
-	    strcmp(scope, "all"))
+	if (scope && !xray_scope_ok(scope))
 	{
 		fputs("dch: bad scope\n", stderr);
 		return 2;
@@ -13105,19 +13108,28 @@ xray_main(int argc, char **argv)
 	q.text = ref;
 	q.full = full;
 	q.budget = 300;
-	if (budget)
+	if (budget && (q.budget = xray_budget(budget)) < 0)
 	{
-		/* digits only, no strtoul: no sign, no 0x, no wrap */
-		for (k = 0, q.budget = 0; budget[k] >= '0' && budget[k] <= '9'; k++)
-			if ((q.budget = q.budget * 10 + budget[k] - '0') > 1000)
-				q.budget = 1000;
-		if (budget[k] || !k)
-			q.budget = -1;
-		if (q.budget < 50 || q.budget > 300)
-		{
-			fputs("dch: bad budget\n", stderr);
-			return 2;
-		}
+		fputs("dch: bad budget\n", stderr);
+		return 2;
+	}
+	if (json && name_routes_remote(n))
+	{
+		/* `--xray <name>` first, the rest as typed (4.1); the host
+		** checks it all again (4.4) */
+		char **av = calloc((size_t)argc + 2, sizeof *av);
+		int ac = 2;
+
+		if (!av)
+			return 3;
+		av[0] = "--xray";
+		av[1] = argv[ni];
+		for (k = 0; k < argc; k++)
+			if (k != ni)
+				av[ac++] = argv[k];
+		rc = dch_remote_ctl(NULL, ac, av, NULL);
+		free(av);
+		return rc;
 	}
 	/* 3.4: project unless asked; a remote caller too (XR4) */
 	q.scope = !scope || !strcmp(scope, "project") ? 1
@@ -13133,12 +13145,6 @@ xray_main(int argc, char **argv)
 	** cancel, 3.4: exit 0, no done) */
 	signal(SIGPIPE, SIG_IGN);
 	write_fail_line = "dch: no such session\n";
-	if (name_routes_remote(n))
-	{
-		fputs("dch: bad session\nremote sessions (host:name) come "
-		      "with a later dch\n", stderr);
-		return 2;
-	}
 	nr = history_load(&r);
 	rc = xr_resolve(n, r, nr, clear, &t);
 	if (rc == 0)

@@ -45,7 +45,9 @@
 ** "ctl", and writes the 0x31/0x32 bytes out as they come; 0x33's exit is
 ** its own. SIGINT, SIGTERM or a closed stdout (EPIPE) cancels it (#118):
 ** a 0x34 when the host lists "ctl-cancel", then its 0x33 for a moment;
-** else the close, which the host takes as one.
+** else the close, which the host takes as one. dch --xray host:name
+** (#157) comes here too, its values checked first by dch --xray's own
+** rules; a host whose hello lacks "xray" is exit 6, nothing sent.
 **
 ** ponytail: no 0x2e watch stream (the picker re-probes every RM_EVERY_MS),
 ** and no remote kill, rename or create from the picker: those need a
@@ -3010,7 +3012,7 @@ dch_remote_ctl(const char *host, int argc, char **argv, const char *cwd)
 	struct sb rq = {0};
 	struct rhost h;
 	struct probe *p = NULL;
-	int fl, i, rc = 1;
+	int fl, i, rc = 1, xray = argc > 0 && !strcmp(argv[0], "--xray");
 
 	if ((fl = ctl_check(argc, argv, kind, why, sizeof why)) < 0)
 	{
@@ -3087,11 +3089,13 @@ dch_remote_ctl(const char *host, int argc, char **argv, const char *cwd)
 		rc = DCH_EXIT_UNREACHABLE;
 	}
 	else if (!hello_op(p->hello_js, "ctl") ||
-	         (fl & CTL_CREATE && !hello_op(p->hello_js, "create")))
+	         (fl & CTL_CREATE && !hello_op(p->hello_js, "create")) ||
+	         (xray && !hello_op(p->hello_js, "xray")))
 	{
+		/* the request is not sent (spec #832 4.2: tokens, never proto) */
 		fprintf(stderr, "dch: %s: does not support %s (needs dch serve "
-		        "%s)\n", sh, argv[0], hello_op(p->hello_js, "ctl")
-		        ? "--allow-create" : "1.41+");
+		        "%s)\n", sh, argv[0], xray ? "1.55.0+"
+		        : hello_op(p->hello_js, "ctl") ? "--allow-create" : "1.41+");
 		rc = DCH_EXIT_UNSUPPORTED;
 	}
 	else
