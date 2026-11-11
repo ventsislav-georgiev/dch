@@ -15,7 +15,9 @@ Each case is a directory:
                    <config>/projects/<setup "project_dir">/<uuid>.jsonl,
                    or at setup "project_dirs"[<uuid>] (#155: another
                    project dir; "@WORK:<name>@" is live shell <name>'s
-                   pane cwd's key)
+                   pane cwd's key); an argv element f*:<offset> (a
+                   --chapter anchor, #156) is f<the last copied
+                   transcript's inode>:<offset>
   shell/<name>.ring.ndjson  a live shell session <name>: ring records,
                    served by a test-only fake master (below)
   setup.json       what the case needs around the corpus: History records,
@@ -261,6 +263,7 @@ def run_case(name):
                 proj = os.path.join(cfg, "projects", pd)
                 os.makedirs(proj, exist_ok=True)
                 shutil.copy(os.path.join(cdir, f), os.path.join(proj, f))
+                ino = os.stat(os.path.join(proj, f)).st_ino
         # History records
         hdir = os.path.join(state, "dch", "sessions",
                             sockdir.replace("/", "-"))
@@ -301,6 +304,8 @@ def run_case(name):
         if any(l.startswith("remote_hosts") for l in setup.get("config", [])):
             del env["DCH_NO_REMOTE"]     # named hosts only: nothing dialled
         for k, argv in enumerate(case["argv"], 1):
+            argv = ["f%x:" % ino + a[3:] if a.startswith("f*:") else a
+                    for a in argv]
             r = subprocess.run([DCH] + argv, capture_output=True, text=True,
                                timeout=30, env=env)
             ref = "--ref" in argv and r.returncode == 0

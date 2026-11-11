@@ -265,6 +265,7 @@ void xr_shell_chapters(const struct xr_rec *r, size_t n,
 ** then paired = npaired != 0 and alt. */
 #define XR_CMD_MAX 4096	/* command text kept per block; the title is 120 */
 struct xr_shref;
+struct xr_entries;
 struct xr_shell
 {
 	struct xr_chapters *out;
@@ -275,6 +276,7 @@ struct xr_shell
 	size_t cl;
 	char cmd[XR_CMD_MAX + 1];
 	struct xr_shref *refs;	/* xr_shell_refs, else NULL */
+	struct xr_entries *want;	/* --chapter: set after xr_shell_begin */
 };
 void xr_shell_begin(struct xr_shell *s, struct xr_chapters *out);
 void xr_shell_feed(struct xr_shell *s, const struct xr_rec *x);
@@ -339,5 +341,45 @@ int xr_delta(struct xr_sent *s, const struct xr_answer *a, uint64_t head,
 ** chapter (oldest first), a ref line per new or changed key, a count-0 ref
 ** per gone key; then that is what was written. 0, -1 a write failed. */
 int xr_delta_write(FILE *f, struct xr_sent *s, const struct xr_answer *a);
+
+/* ---- --chapter (3.5; #156, XR3b) --------------------------------------- */
+#define XR_CH_OUT      (1u << 20)	/* the --chapter object cap (3.8) */
+
+/* --chapter's value rule (3.1): 1..128 bytes of [A-Za-z0-9:_.-]. */
+int xr_anchor_ok(const char *s);
+
+/* One chapter's entries (3.5), gathered while a decoder builds the
+** chapters-only index: those of the chapter whose anchor equals `anchor`
+** byte for byte, and nothing else (K14.2: no offset is ever taken on the
+** anchor's say). Each entry is a JSON object, comma-joined in buf, cut at an
+** entry once the whole object would pass its cap (truncated). */
+struct xr_ent_call;
+struct xr_entries
+{
+	const char *anchor;
+	size_t cap;			/* buf's bound: the object's less its head */
+	char *buf;
+	size_t len;
+	uint64_t ord;			/* the chapter's, once hit */
+	int hit, truncated, done, failed;	/* failed: out of memory */
+	struct xr_ent_call *calls;	/* Claude: the chapter's calls */
+	int ncalls;
+	char *out;			/* shell: the block's C..D rows */
+	size_t ol;
+};
+/* Zeroed, for anchor, under out bytes of output for this session (its
+** session_id at most 64 bytes: a UUID or a ring's id). */
+void xr_entries_begin(struct xr_entries *e, const char *anchor,
+                      const char *session, size_t out);
+void xr_entries_free(struct xr_entries *e);
+/* Claude: before the read; ino is the transcript's. A shell sets s->want
+** after xr_shell_begin: its block's output entry is written when the block
+** closes, or at xr_shell_end. */
+void xr_claude_entries(struct xr_claude *d, struct xr_entries *e,
+                       uint64_t ino);
+/* {"schema":1,"session","session_id","anchor","title","at","kind",
+** "entries":[…],"truncated"} and a newline. 0, or -1 the write failed. */
+int xr_chapter_print(FILE *f, const char *session, const char *session_id,
+                     const struct xr_chapter *c, const struct xr_entries *e);
 
 #endif /* DCH_XRAY_H */

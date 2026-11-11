@@ -1,0 +1,1 @@
+{"schema":1,"session":"box","session_id":"m1a2b3c4d5e6f7a8b","anchor":"s281474976710010","title":"make test","at":1794300005,"kind":"command","entries":[{"role":"tool","tool":null,"text":"make test","error":false},{"role":"output","tool":null,"text":"error: 1","error":true}],"truncated":false}

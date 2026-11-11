@@ -109,6 +109,12 @@ dch \- detachable terminal sessions with a headless agent API
 .IR ms ]
 .B \-\-json
 .br
+.B dch \-\-xray
+.I name
+.B \-\-chapter
+.I anchor
+.B \-\-json
+.br
 .B dch
 .RB [ \-\-host
 .IR host ]
@@ -827,6 +833,90 @@ has
 .BR all_sessions ;
 the last two null unless
 .BR \-\-scope\ all ).
+.B \-\-chapter
+.I anchor
+prints one chapter's entries as one object
+.RB ( schema ,
+.BR session ,
+.BR session_id ,
+.BR anchor ,
+.BR title ,
+.BR at ,
+.BR kind ,
+.BR entries ,
+.BR truncated ).
+.I anchor
+is a chapter's
+.B anchor
+from
+.BR \-\-json :
+1 to 128 bytes of
+.BR A\-Z ,
+.BR a\-z ,
+.BR 0\-9 ,
+.BR : ,
+.BR _ ,
+.B .
+and
+.B \-
+(else exit 2,
+.IR "bad anchor" ).
+dch reads the chapters again and answers only when one has exactly that
+anchor, never seeking to the offset in it; otherwise it exits 1 with
+.I "chapter gone"
+(the transcript was rewritten, or the ring evicted or cleared the block).
+Each entry is
+.BR role ,
+.BR tool ,
+.B text
+and
+.BR error .
+Claude Code:
+.B user
+(the prompt, a slash command as
+.IR "/name args" ,
+a compaction's summary),
+.B assistant
+(its text),
+.B tool
+(a call, with its name: a Bash command, the path of an Edit, MultiEdit,
+Write or Read, else the input's first 8 fields as
+.I "key: value"
+lines, each value cut at 240 characters) and
+.B output
+(its result, in the call's chapter, with the call's name or
+.B null
+for a result with no call;
+.B error
+is the result's error flag, never for a Grep or Glob that found nothing);
+thinking, images, notices and subagent turns are left out.
+A shell: one
+.B tool
+entry with the typed command and one
+.B output
+entry with the block's output rows, soft\-wrapped rows joined,
+.B error
+for a non\-zero exit; only rows that scrolled into the ring count, not the
+screen's.
+.B text
+is cut at 6000 Unicode scalars (3000 for an
+.BR output )
+and escaped like
+.BR \-\-ls\-json ;
+the object is capped at 1 MiB, entries past it left out and
+.B truncated
+true.
+An ended or History Claude Code session is read from its transcript; an
+ended shell, a ring that is off or paused, and a session with no transcript
+exit 1 with
+.IR "no x\-ray corpus" .
+.B \-\-chapter
+takes no
+.BR \-\-ref ,
+.B \-\-follow
+or
+.B \-\-clear
+(exit 2).
 A reader that closes the pipe ends any form at dch's next write (at most
 250 ms later for
 .BR \-\-ref ),
@@ -985,8 +1075,12 @@ then keeps the lines already written and writes no
 .I "ambiguous session"
 or, for
 .B \-\-clear
-in dch\-lite,
-.IR "no x\-ray corpus" ;
+in dch\-lite and for
+.BR \-\-chapter ,
+.IR "no x\-ray corpus" ,
+or for
+.BR \-\-chapter ,
+.IR "chapter gone" ;
 2 bad usage or a bad or remote
 .IR name ;
 3 the session or its transcript could not be read (a transcript that is

@@ -2745,6 +2745,8 @@ usage(void)
 	    "  dch --xray <n> --ref <ref> [--scope session|project|all] [--full]\n"
 	    "       [--budget-ms <ms>] --json             one ref's mentions and\n"
 	    "                                             definitions as NDJSON\n"
+	    "  dch --xray <n> --chapter <anchor> --json   one chapter's entries\n"
+	    "                                             as one JSON object\n"
 	    "  dch --agent-list [--json]                 list native Claude peers\n"
 	    "  dch --agent-send <name> <message...>       message one native peer\n"
 	    "  dch serve [--allow-create] [--allow-user <u>]...  serve sessions to\n"
@@ -11857,6 +11859,129 @@ xr_json(const struct xr_target *t, const struct xr_refq *q, int snap)
 	return rc;
 }
 
+/* ---- dch --xray <n> --chapter <anchor> --json (#156, XR3b; spec 3.5) ---- */
+
+/* The answer once the decode is done: the wanted chapter only while the
+** index still holds its anchor, exactly, and the entries gathered are that
+** chapter's (K14.2); else it went stale (K14.3). */
+static int
+xr_chapter_out(const char *session, const char *sid,
+               const struct xr_chapters *ch, const struct xr_entries *e)
+{
+	size_t k;
+
+	if (e->failed)
+		return xr_failed();
+	for (k = 0; k < ch->n; k++)
+		if (!strcmp(xr_chapter_at(ch, k)->anchor, e->anchor) && e->hit &&
+		    e->ord == ch->total - ch->n + k)
+			return xr_out_exit(xr_chapter_print(stdout, session, sid,
+			                                    xr_chapter_at(ch, k), e) == 0);
+	fputs("dch: chapter gone\n", stderr);
+	return 1;
+}
+
+/* One pass over (cfg, sid)'s transcript: the chapters-only index, and the
+** wanted chapter's entries as it goes. Never a seek (K14.2). */
+static int
+xr_chapter_claude(const char *cfg, const char *sid, const char *session,
+                  const char *anchor)
+{
+	char path[2048], home[1400], project[1200];
+	struct xr_chapters ch = {0};
+	struct xr_entries e;
+	struct xr_claude *d;
+	struct stat st;
+	int fd, capped, rc;
+
+	if (!cfg[0])
+	{
+		const char *h = getenv("HOME");
+
+		if (!h || snprintf(home, sizeof home, "%s/.claude", h)
+		    >= (int)sizeof home)
+			return xr_no_corpus();
+		cfg = home;
+	}
+	if (xr_claude_lookup(cfg, sid, path, sizeof path, &st, project,
+	                     sizeof project) < 0)
+		return xr_no_corpus();
+	if ((fd = xr_seam_open(path, &st)) < 0)	/* there but unreadable: 3 */
+		return errno == EACCES || errno == EPERM || errno == EIO
+		       ? xr_failed() : xr_no_corpus();
+	if (!(d = xr_claude_new()))
+	{
+		close(fd);
+		return xr_failed();
+	}
+	xr_entries_begin(&e, anchor, session, XR_CH_OUT);
+	xr_claude_entries(d, &e, (uint64_t)st.st_ino);
+	rc = xr_claude_read(d, fd, (uint64_t)st.st_size, &capped);
+	close(fd);
+	xr_claude_end(d, (uint64_t)st.st_ino, &ch);
+	xr_claude_free(d);
+	rc = rc < 0 ? xr_failed() : xr_chapter_out(session, sid, &ch, &e);
+	xr_chapters_free(&ch);
+	xr_entries_free(&e);
+	return rc;
+}
+
+/* --chapter: a Claude session's transcript (live, ended or History: K8),
+** else a live shell's ring, one read of it (the screen holds no marks, so
+** no chapter). An ended shell, dch-lite, a ring that is off or paused: no
+** corpus. A ring cleared mid-read took the anchor with it. */
+static int
+xr_chapter(const struct xr_target *t, const char *anchor)
+{
+	struct xr_chapters ch = {0};
+	struct xr_entries e;
+	struct xr_ring_acc *acc;
+	struct ring_snap rs;
+	struct cmd_info ci;
+	struct crec c;
+	char cfg[1400];
+	int qc, fr, rc;
+
+	if (t->kind == XR_ENDED)
+		return t->rec->sid[0] ? xr_chapter_claude(t->rec->acfg, t->rec->sid,
+		                                          t->name, anchor)
+		                      : xr_no_corpus();
+	if ((qc = cmd_query(t->sock, &ci)) == -4)
+		return xr_no_session();
+	if (qc == 0 && xr_live_claude(&ci, &c))
+	{
+		cmd_info_free(&ci);
+		xr_crec_cfg(&c, cfg, sizeof cfg);
+		return cfg[0] ? xr_chapter_claude(cfg, c.sid, t->name, anchor)
+		              : xr_no_corpus();
+	}
+	if (qc == 0)
+		cmd_info_free(&ci);
+	if (!(acc = calloc(1, sizeof *acc)))
+		return xr_failed();
+	xr_shell_begin(&acc->sh, &ch);
+	xr_entries_begin(&e, anchor, t->name, XR_CH_OUT);
+	acc->sh.want = &e;
+	fr = ring_fetch(t->sock, &rs, xr_ring_rec, acc);
+	xr_shell_end(&acc->sh);
+	free(acc);
+	if (fr == -1)
+		rc = xr_no_session();
+	else if (fr == -2 || (fr == 0 &&
+	                      (rs.status & (DCH_RING_S_OFF | DCH_RING_S_PAUSED))))
+		rc = xr_no_corpus();
+	else if (fr == -4)
+	{
+		fputs("dch: chapter gone\n", stderr);
+		rc = 1;
+	}
+	else
+		rc = fr ? xr_failed() : xr_chapter_out(t->name, rs.sid, &ch, &e);
+	xr_chapters_free(&ch);
+	xr_entries_free(&e);
+	return rc;
+}
+
 /* --clear: MSG_RING_CLEAR to a live master; never the pty. The header and
 ** the clear go over one connection, so a session resolved by its ring
 ** session_id is cleared only while it still carries that id (shortcut: a
@@ -12854,14 +12979,15 @@ name_routes_remote(const char *n)
 	return hit && known;
 }
 
-/* `dch --xray <n> [--json] [--clear|--follow]` and `--ref <text> [--scope
-** session|project|all] [--full] [--budget-ms <ms>] --json` (spec 3.1, 3.3,
-** 3.4): flags in any order, each once; the rest of the family (--chapter,
-** the view) comes with XR3-XR5 and exits 2 here. */
+/* `dch --xray <n> [--json] [--clear|--follow]`, `--ref <text> [--scope
+** session|project|all] [--full] [--budget-ms <ms>] --json` and `--chapter
+** <anchor> --json` (spec 3.1, 3.3-3.5): flags in any order, each once; the
+** rest of the family (the view) comes with XR3-XR5 and exits 2 here. */
 static int
 xray_main(int argc, char **argv)
 {
 	const char *n = NULL, *ref = NULL, *scope = NULL, *budget = NULL, *e;
+	const char *chapter = NULL;
 	int json = 0, clear = 0, full = 0, follow = 0, k, rc, nr;
 	struct hrec *r = NULL;
 	struct xr_target t;
@@ -12892,7 +13018,8 @@ xray_main(int argc, char **argv)
 	{
 		const char **v = !strcmp(argv[k], "--ref") ? &ref
 		                 : !strcmp(argv[k], "--scope") ? &scope
-		                 : !strcmp(argv[k], "--budget-ms") ? &budget : NULL;
+		                 : !strcmp(argv[k], "--budget-ms") ? &budget
+		                 : !strcmp(argv[k], "--chapter") ? &chapter : NULL;
 
 		if (v && !*v && k + 1 < argc)
 			*v = argv[++k];	/* the next element, even "-x" (3.1) */
@@ -12942,6 +13069,12 @@ xray_main(int argc, char **argv)
 		        ref ? "--ref" : "--clear");
 		return 2;
 	}
+	if (chapter && (ref || clear || follow))
+	{
+		fprintf(stderr, "dch: bad usage: --chapter and %s\n",
+		        ref ? "--ref" : clear ? "--clear" : "--follow");
+		return 2;
+	}
 	if (!n || !name_ok(n))
 	{
 		fputs("dch: bad session\n", stderr);
@@ -12956,6 +13089,11 @@ xray_main(int argc, char **argv)
 	if (ref && !xr_ref_parse(ref, NULL, &sp))
 	{
 		fputs("dch: not a ref\n", stderr);
+		return 2;
+	}
+	if (chapter && !xr_anchor_ok(chapter))
+	{
+		fputs("dch: bad anchor\n", stderr);
 		return 2;
 	}
 	if (scope && strcmp(scope, "session") && strcmp(scope, "project") &&
@@ -13005,6 +13143,7 @@ xray_main(int argc, char **argv)
 	rc = xr_resolve(n, r, nr, clear, &t);
 	if (rc == 0)
 		rc = clear ? xr_clear(&t) : follow ? xr_follow(&t)
+		     : chapter ? xr_chapter(&t, chapter)
 		     : xr_json(&t, ref ? &q : NULL, 0);
 	hrec_free(r, nr);
 	return rc;

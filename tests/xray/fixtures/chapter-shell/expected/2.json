@@ -1,0 +1,1 @@
+{"schema":1,"session":"box","session_id":"m1a2b3c4d5e6f7a8b","anchor":"s281474976710001","title":"ls -la","at":1794300000,"kind":"command","entries":[{"role":"tool","tool":null,"text":"ls -la","error":false},{"role":"output","tool":null,"text":"total 8\nxyz \u0007","error":false}],"truncated":false}

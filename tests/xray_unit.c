@@ -2,7 +2,8 @@
 ** the identity shapes, the Claude decoder's turn rules and caps, the bounded
 ** JSONL reader, the shell chapter machine and the output cap; refs (#135):
 ** the grammar rows, --ref's parse and value rule, the index's lifetime and
-** caps (keys, spans, definitions, the dropped set) and the config_dir check.
+** caps (keys, spans, definitions, the dropped set) and the config_dir check;
+** --chapter (#156): the anchor rule and a chapter's entries.
 **
 **   cc -I. -o xray_unit tests/xray_unit.c xray.c json.c && ./xray_unit
 */
@@ -1462,6 +1463,219 @@ t_seam(void)
 	rmdir(d);
 }
 
+/* ---- --chapter (3.5; #156) ----------------------------------------------- */
+
+#define TU(id, name, in) "{\"type\":\"assistant\",\"message\":{\"content\":" \
+	"[{\"type\":\"tool_use\",\"id\":\"" id "\",\"name\":\"" name "\"," \
+	"\"input\":" in "}]}}"
+#define TR(id, err, t) "{\"type\":\"user\",\"message\":{\"content\":[{" \
+	"\"type\":\"tool_result\",\"tool_use_id\":\"" id "\",\"is_error\":" \
+	err ",\"content\":\"" t "\"}]}}"
+
+/* one decode of l with the wanted anchor, as dch.c runs it */
+static void
+ch_run(const char *const *l, int n, const char *anchor, size_t out,
+       struct xr_chapters *c, struct xr_entries *e)
+{
+	int k;
+
+	xr_entries_begin(e, anchor, "s", out);
+	begin();
+	xr_claude_entries(D, e, 0xabc);
+	for (k = 0; k < n; k++)
+		line(l[k]);
+	end(c);
+}
+
+static const char *
+ch_buf(const struct xr_entries *e)
+{
+	return e->buf ? e->buf : "";
+}
+
+static void
+t_chapter(void)
+{
+	static const char *const L[] = {
+		U("first"),
+		TU("t1", "Bash", "{\"command\":\"ls\"}"),
+		A("one"),
+		U("second"),
+		TR("t1", "false", "late"),	/* the call's chapter, not this */
+		TU("g1", "Grep", "{\"pattern\":\"x\"}"),
+		TR("g1", "true", "none"),	/* a quiet tool: no error */
+		TR("zz", "true", "orphan"),	/* no call: this chapter's */
+		TU("f1", "Foo", "{\"b\":\"2\",\"a\":{\"x\":1}}"),
+		"{\"type\":\"assistant\",\"isSidechain\":true,\"agentId\":\"a1\","
+		"\"message\":{\"content\":\"thread\"}}",
+		U("<command-name>/clear</command-name><command-args>all"
+		  "</command-args>"),
+	};
+	static char big[5000], ok[130];
+	struct xr_chapters c;
+	struct xr_entries e;
+	char a1[48], a2[48];
+	char *mb = NULL;
+	size_t ml = 0;
+	FILE *f;
+	int k;
+
+	/* the value rule (3.1): [A-Za-z0-9:_.-], 1..128 bytes */
+	memset(ok, 'a', 128);
+	CHECK("anchor: charset and 1..128 bytes",
+	      xr_anchor_ok("f1a:0") && xr_anchor_ok("s12") &&
+	      xr_anchor_ok("A-Z_a.z:9") && xr_anchor_ok("-") && xr_anchor_ok(ok));
+	ok[128] = 'a';
+	CHECK("anchor: empty, 129 bytes, a space, '/', UTF-8, a newline are "
+	      "not", !xr_anchor_ok("") && !xr_anchor_ok(ok) &&
+	      !xr_anchor_ok("a b") && !xr_anchor_ok("a/b") &&
+	      !xr_anchor_ok("\xc3\xa9") && !xr_anchor_ok("a\n"));
+
+	ch_run(L, (int)(sizeof L / sizeof *L), "-", 1 << 20, &c, &e);
+	CHECK("chapter: three chapters", c.n == 3);
+	snprintf(a1, sizeof a1, "%s", c.n ? xr_chapter_at(&c, 0)->anchor : "");
+	snprintf(a2, sizeof a2, "%s", c.n > 1 ? xr_chapter_at(&c, 1)->anchor : "");
+	CHECK("chapter: an anchor in no chapter hits nothing, keeps nothing",
+	      !e.hit && !e.len && !e.truncated);
+	xr_chapters_free(&c);
+	xr_entries_free(&e);
+
+	ch_run(L, (int)(sizeof L / sizeof *L), a1, 1 << 20, &c, &e);
+	CHECK("chapter: the first: its prompt, its call, its text, and the "
+	      "result paired back from the next chapter",
+	      e.hit && e.ord == 0 && !strcmp(ch_buf(&e),
+	      "{\"role\":\"user\",\"tool\":null,\"text\":\"first\",\"error\":false},"
+	      "{\"role\":\"tool\",\"tool\":\"Bash\",\"text\":\"ls\",\"error\":false},"
+	      "{\"role\":\"assistant\",\"tool\":null,\"text\":\"one\","
+	      "\"error\":false},"
+	      "{\"role\":\"output\",\"tool\":\"Bash\",\"text\":\"late\","
+	      "\"error\":false}"));
+	xr_chapters_free(&c);
+	xr_entries_free(&e);
+
+	ch_run(L, (int)(sizeof L / sizeof *L), a2, 1 << 20, &c, &e);
+	CHECK("chapter: the second: a quiet tool's error is none, an orphan "
+	      "is tool null, a card is its sorted keys, no subagent text",
+	      e.hit && e.ord == 1 && !strcmp(ch_buf(&e),
+	      "{\"role\":\"user\",\"tool\":null,\"text\":\"second\","
+	      "\"error\":false},"
+	      "{\"role\":\"tool\",\"tool\":\"Grep\",\"text\":\"pattern: x\","
+	      "\"error\":false},"
+	      "{\"role\":\"output\",\"tool\":\"Grep\",\"text\":\"none\","
+	      "\"error\":false},"
+	      "{\"role\":\"output\",\"tool\":null,\"text\":\"orphan\","
+	      "\"error\":true},"
+	      "{\"role\":\"tool\",\"tool\":\"Foo\",\"text\":\"a: {\\\"x\\\":1}\\n"
+	      "b: 2\",\"error\":false}"));
+	CHECK("chapter: the second's anchor is the index's",
+	      c.n == 3 && !strcmp(xr_chapter_at(&c, 1)->anchor, a2));
+	xr_chapters_free(&c);
+	xr_entries_free(&e);
+
+	ch_run(L, (int)(sizeof L / sizeof *L), "fabc:", 1 << 20, &c, &e);
+	snprintf(a1, sizeof a1, "%s", c.n == 3 ? xr_chapter_at(&c, 2)->anchor
+	                                       : "");
+	xr_chapters_free(&c);
+	xr_entries_free(&e);
+	ch_run(L, (int)(sizeof L / sizeof *L), a1, 1 << 20, &c, &e);
+	CHECK("chapter: a slash command is /name args", e.hit &&
+	      !strcmp(ch_buf(&e), "{\"role\":\"user\",\"tool\":null,\"text\":"
+	              "\"/clear all\",\"error\":false}"));
+	xr_chapters_free(&c);
+	xr_entries_free(&e);
+	snprintf(a1, sizeof a1, "%s", "fabc:0");
+
+	/* K14.2 (mutant 10): an offset, inode or form not exactly the index's
+	** is no chapter, never a seek */
+	{
+		static const char *const bad[] = {"fabc:1", "fabd:0", "fabc:00",
+		                                  "fABC:0", "f0abc:0", "s0"};
+
+		for (k = 0; k < (int)(sizeof bad / sizeof *bad); k++)
+		{
+			ch_run(L, (int)(sizeof L / sizeof *L), bad[k], 1 << 20, &c, &e);
+			CHECK(bad[k], !e.hit && !e.len);
+			xr_chapters_free(&c);
+			xr_entries_free(&e);
+		}
+	}
+
+	/* the object cap: entries cut whole, truncated set, nothing after */
+	ch_run(L, (int)(sizeof L / sizeof *L), a1, 6 * (1 + 64) + 2048 + 100,
+	       &c, &e);
+	CHECK("chapter: a small cap keeps whole entries only, truncated",
+	      e.hit && e.truncated && e.len <= e.cap && e.cap == 100 &&
+	      !strcmp(ch_buf(&e), "{\"role\":\"user\",\"tool\":null,\"text\":"
+	              "\"first\",\"error\":false}"));
+	xr_chapters_free(&c);
+	xr_entries_free(&e);
+
+	/* print: the object, at null when the corpus has none */
+	begin();
+	xr_entries_begin(&e, "fabc:0", "s", 1 << 20);
+	xr_claude_entries(D, &e, 0xabc);
+	line(U("hi \\u0007"));
+	end(&c);
+	f = open_memstream(&mb, &ml);
+	CHECK("print: the object, one line, escaped (K14.5)",
+	      c.n == 1 && f && xr_chapter_print(f, "s", "id", xr_chapter_at(&c, 0),
+	                                        &e) == 0 &&
+	      fclose(f) == 0 && !strcmp(mb, "{\"schema\":1,\"session\":\"s\","
+	      "\"session_id\":\"id\",\"anchor\":\"fabc:0\",\"title\":"
+	      "\"hi \\u0007\",\"at\":null,\"kind\":\"prompt\",\"entries\":["
+	      "{\"role\":\"user\",\"tool\":null,\"text\":\"hi \\u0007\","
+	      "\"error\":false}],\"truncated\":false}\n"));
+	free(mb);
+	xr_chapters_free(&c);
+	xr_entries_free(&e);
+
+	/* shell: the command, then C..D joined at soft wraps, D's exit */
+	memset(big, 'o', 4000);
+	RN = 0;
+	rec(RING_K_MARK, 0, "A");
+	rec(RING_K_PROMPT, 0, "$");
+	rec(RING_K_MARK, 0, "B");
+	rec(RING_K_INPUT, 0, "make");
+	rec(RING_K_MARK, RING_F_INPUT, "C");
+	rec(RING_K_OUTPUT, 0, "ab");
+	rec(RING_K_OUTPUT, RING_F_CONT, "cd");
+	rec(RING_K_OUTPUT, 0, "ef");
+	rec(RING_K_MARK, RING_F_EXIT, "D;2");
+	rec(RING_K_OUTPUT, 0, "not the block's");
+	rec(RING_K_MARK, 0, "A");
+	rec(RING_K_PROMPT, 0, "$");
+	rec(RING_K_MARK, 0, "B");
+	rec(RING_K_INPUT, 0, "cat");
+	rec(RING_K_MARK, RING_F_INPUT, "C");
+	rec(RING_K_OUTPUT, 0, big);
+	for (k = 0; k < 2; k++)
+	{
+		struct xr_shell s;
+		size_t i;
+
+		xr_shell_begin(&s, &c);
+		xr_entries_begin(&e, k ? "s111" : "s101", "s", 1 << 20);
+		s.want = &e;
+		for (i = 0; i < RN; i++)
+			xr_shell_feed(&s, &R[i]);
+		xr_shell_end(&s);
+		if (!k)
+			CHECK("shell chapter: the command, rows WRAP-joined, error "
+			      "from D;2", e.hit && c.n == 2 && !strcmp(ch_buf(&e),
+			      "{\"role\":\"tool\",\"tool\":null,\"text\":\"make\","
+			      "\"error\":false},{\"role\":\"output\",\"tool\":null,"
+			      "\"text\":\"abcd\\nef\",\"error\":true}"));
+		else
+			CHECK("shell chapter: an open block's output at the end, "
+			      "clipped to 3000 scalars", e.hit && e.len ==
+			      strlen("{\"role\":\"tool\",\"tool\":null,\"text\":\"cat\","
+			             "\"error\":false},{\"role\":\"output\",\"tool\":"
+			             "null,\"text\":\"\",\"error\":false}") + 3000);
+		xr_chapters_free(&c);
+		xr_entries_free(&e);
+	}
+}
+
 int
 main(void)
 {
@@ -1483,6 +1697,7 @@ main(void)
 	t_scan_caps();
 	t_scan_scope();
 	t_lookup();
+	t_chapter();
 	printf("%s: %d failed\n", fails ? "FAIL" : "ok", fails);
 	return fails != 0;
 }

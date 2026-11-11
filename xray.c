@@ -6,7 +6,7 @@
  * key aliases, the same hidden noise, the same prompt/step/image split, the
  * same tool pairing (256 open calls) and sidechain threads. Only what decides
  * a chapter's start, kind, title, offset and error is kept; block bodies are
- * never built.
+ * never built, except one chapter's entries for --chapter (#156), clipped.
  */
 #include <config.h>
 
@@ -3654,6 +3654,7 @@ struct xr_claude
 	int ncalls;
 	uint64_t next;		/* the last read's resume offset: the start of
 				** the line it did not finish (#136) */
+	struct xr_entries *want;	/* --chapter (#156), else NULL */
 };
 
 enum { B_PROMPT, B_IMAGE, B_STEP };
@@ -3697,6 +3698,9 @@ cur(struct xr_claude *d)
 	return d->turn ? ch_ord(&d->ch, d->ch.total - 1) : NULL;
 }
 
+static void ch_anchor(struct xr_claude *d, char out[48]);
+static int ent_hit(struct xr_entries *e, const char *anchor, uint64_t ord);
+
 /* A block on the main thread: turns()'s rule. kind/title for a prompt. */
 static void
 main_block(struct xr_claude *d, int b, const char *kind, const char *title)
@@ -3713,6 +3717,13 @@ main_block(struct xr_claude *d, int b, const char *kind, const char *title)
 		x->offset = d->off;
 		x->at = d->at;
 		x->partial = b != B_PROMPT;
+		if (d->want)
+		{
+			char a[48];
+
+			ch_anchor(d, a);
+			(void)ent_hit(d->want, a, d->ch.total - 1);
+		}
 	}
 	x = cur(d);
 	if (x && b == B_PROMPT && !d->titled)
@@ -4051,18 +4062,13 @@ str_cmp(const void *a, const void *b)
 	return strcmp(*(char *const *)a, *(char *const *)b);
 }
 
-/* A generic card's fields: the input's keys sorted, the first 8, each value
-** (its last, as a dictionary keeps it) prefixed to 240 scalars in code.
-** shortcut: a nested value is its raw JSON text, not Prosper's rendering. */
-static void
-refs_card(struct xr_claude *d, const struct json_parser *p, int in)
+/* A generic card's keys: the input's, once each, at most 64, sorted
+** (malloc'd). The count. */
+static int
+card_keys(const struct json_parser *p, int in, char **keys)
 {
-	char *keys[64], a[48];
 	int nk = 0, i, k;
-	struct remit r;
 
-	if (in < 0)
-		return;
 	for (i = in + 1; i < p->tok[in].next && i + 1 < p->ntok && nk < 64;
 	     i = p->tok[i + 1].next)
 	{
@@ -4077,6 +4083,22 @@ refs_card(struct xr_claude *d, const struct json_parser *p, int in)
 			free(s);
 	}
 	qsort(keys, (size_t)nk, sizeof *keys, str_cmp);
+	return nk;
+}
+
+/* A generic card's fields: the input's keys sorted, the first 8, each value
+** (its last, as a dictionary keeps it) prefixed to 240 scalars in code.
+** shortcut: a nested value is its raw JSON text, not Prosper's rendering. */
+static void
+refs_card(struct xr_claude *d, const struct json_parser *p, int in)
+{
+	char *keys[64], a[48];
+	int nk, k;
+	struct remit r;
+
+	if (in < 0)
+		return;
+	nk = card_keys(p, in, keys);
 	ch_anchor(d, a);
 	rm_claude(d, &r, a);
 	for (k = 0; k < nk; k++)
@@ -4369,6 +4391,226 @@ out:
 	free(rr->c.cmd);
 }
 
+/* ---- --chapter: one chapter's entries (3.5; #156, XR3b) --------------------- */
+
+struct xr_ent_call
+{
+	char id[XR_ID_MAX + 1];
+	char *name;
+};
+
+/* The chapter anchored `anchor` (ordinal ord) is the wanted one only when the
+** two strings are equal, byte for byte (K14.2). 1 when it is hit now. */
+static int
+ent_hit(struct xr_entries *e, const char *anchor, uint64_t ord)
+{
+	if (!e || e->hit || strcmp(anchor, e->anchor))
+		return 0;
+	e->hit = 1;
+	e->ord = ord;
+	return 1;
+}
+
+/* One entry (3.5): s[0..n) clipped to cap scalars, escaped as --ls-json
+** escapes; dropped, and truncated set, once the object would pass its cap. */
+static void
+ent_put(struct xr_entries *e, const char *role, const char *tool,
+        const char *s, size_t n, size_t cap, int err)
+{
+	size_t l = s ? clip(s, n, cap) : 0, tl = tool ? strlen(tool) : 0;
+	size_t qc = (l + tl) * 6 + 96, k;
+	char *t, *q, *nb;
+
+	if (e->truncated || e->failed)
+		return;
+	if (!(t = malloc(l + 1)) || !(q = malloc(qc)))
+	{
+		e->failed = 1;
+		free(t);
+		return;
+	}
+	if (l)
+		memcpy(t, s, l);
+	t[l] = '\0';
+	k = (size_t)snprintf(q, qc, "%s{\"role\":\"%s\",\"tool\":",
+	                     e->len ? "," : "", role);
+	if (tool)
+		k += dch_json_quote(q + k, qc - k, tool);
+	else
+		k += (size_t)snprintf(q + k, qc - k, "null");
+	k += (size_t)snprintf(q + k, qc - k, ",\"text\":");
+	k += dch_json_quote(q + k, qc - k, t);
+	k += (size_t)snprintf(q + k, qc - k, ",\"error\":%s}",
+	                      err ? "true" : "false");
+	if (e->len + k > e->cap)
+		e->truncated = 1;	/* cut here: no later entry either */
+	else if (!(nb = realloc(e->buf, e->len + k + 1)))
+		e->failed = 1;
+	else
+	{
+		memcpy(nb + e->len, q, k + 1);
+		e->buf = nb;
+		e->len += k;
+	}
+	free(t);
+	free(q);
+}
+
+/* An entry of the wanted chapter, on the main thread (a subagent's own
+** blocks are its thread's, not the turn's entries). */
+static int
+ent_here(const struct xr_claude *d, const char *agent)
+{
+	return !agent && d->want && d->want->hit && d->turn &&
+	       d->ch.total - 1 == d->want->ord;
+}
+
+/* A generic call's input as its card shows it (refs_card): "key: value"
+** lines, the first 8 keys sorted, each value prefixed to 240 scalars, a
+** nested value as its raw JSON text. malloc'd, NULL for none. */
+static char *
+card_text(const struct json_parser *p, int in, size_t *n)
+{
+	char *keys[64], *o = NULL;
+	size_t ol = 0;
+	int nk = in < 0 ? 0 : card_keys(p, in, keys), k, any = 0;
+	FILE *m = nk ? open_memstream(&o, &ol) : NULL;
+
+	*n = 0;
+	for (k = 0; k < nk; k++)
+	{
+		int v = m && k < 8 ? j_field(p, in, keys[k]) : -1;
+		size_t l = 0;
+		char *s = j_str(p, v, &l);
+		const char *t = s;
+
+		if (!s && v >= 0 && !j_null(p, v))
+		{
+			t = p->text + p->tok[v].start;
+			l = (size_t)(p->tok[v].end - p->tok[v].start);
+		}
+		if (t)
+		{
+			fprintf(m, "%s%s: ", any++ ? "\n" : "", keys[k]);
+			fwrite(t, 1, clip(t, l, XR_FIELD_CAP), m);
+		}
+		free(s);
+		free(keys[k]);
+	}
+	if (m && fclose(m) == 0)
+		*n = ol;
+	else
+	{
+		free(o);
+		o = NULL;
+	}
+	return o;
+}
+
+/* A call's tool entry: Bash its command, an edit or a read its path,
+** anything else its card's fields; the call is kept so that its result
+** names its tool. */
+static void
+ent_call(struct xr_claude *d, const struct json_parser *p, int i,
+         const char *id, const char *name)
+{
+	struct xr_entries *e = d->want;
+	struct xr_ent_call *c;
+	int in = k_obj(p, i, A_INPUT), v = -1;
+	char kb[XR_ID_MAX + 1], *s;
+	size_t l = 0;
+
+	if (name && !strcmp(name, "Bash"))
+		v = j_field(p, in, "command");
+	else if (name && (!strcmp(name, "Edit") || !strcmp(name, "MultiEdit") ||
+	                  !strcmp(name, "Write") || !strcmp(name, "Read")))
+		v = j_field(p, in, "file_path");
+	if (!(s = j_str(p, v, &l)) || blank(s, l))
+	{
+		free(s);
+		s = card_text(p, in, &l);
+	}
+	ent_put(e, "tool", name, s, l, XR_TEXT_CAP, 0);
+	free(s);
+	if (!id)
+		return;
+	if (!e->calls && !(e->calls = calloc(XR_PENDING, sizeof *e->calls)))
+	{
+		e->failed = 1;
+		return;
+	}
+	if (e->ncalls == XR_PENDING)	/* the oldest goes, as pending's does */
+	{
+		free(e->calls[0].name);
+		memmove(e->calls, e->calls + 1, (size_t)--e->ncalls *
+		        sizeof *e->calls);
+	}
+	c = &e->calls[e->ncalls++];
+	snprintf(c->id, sizeof c->id, "%s", id_key(id, kb));
+	c->name = name ? strdup(name) : NULL;
+}
+
+/* A result's chapter, before tool_result() closes its pairing: its call's
+** (*quiet: a search's, whose error does not show), or -2 for an orphan,
+** placed where it lands. */
+static long long
+ent_paired(struct xr_claude *d, const char *id, int *quiet)
+{
+	char kb[XR_ID_MAX + 1];
+	int k = id ? pend_find(d, id_key(id, kb)) : -1;
+
+	*quiet = k >= 0 && d->pend[k].quiet;
+	return k >= 0 ? d->pend[k].ord : -2;
+}
+
+/* A result's output entry (after tool_result()): its call's tool name, the
+** clipped output (v2.1 3.1: toolUseResult's stdout first, 3000 scalars). */
+static void
+ent_result(struct xr_claude *d, const struct json_parser *p, int i,
+           const char *agent, const char *id, long long ord, int err)
+{
+	struct xr_entries *e = d->want;
+	const char *name = NULL;
+	char kb[XR_ID_MAX + 1], *t;
+	size_t n;
+	int k;
+
+	if (ord == -2 ? !ent_here(d, agent) : !e->hit || ord != (long long)e->ord)
+		return;
+	for (k = e->ncalls - 1; ord != -2 && k >= 0 && !name; k--)
+		if (!strcmp(e->calls[k].id, id_key(id, kb)))
+			name = e->calls[k].name;
+	t = output_text(p, i, k_obj(p, 0, (const char *const[]){
+	                    "toolUseResult", 0 }), &n);
+	ent_put(e, "output", name, t, n, XR_OUTPUT_CAP, err);
+	free(t);
+}
+
+/* A slash command's user entry: "/name args", the args as typed (trimmed). */
+static void
+ent_command(struct xr_entries *e, const char *t, size_t tl)
+{
+	size_t nl = 0, al = 0;
+	const char *name = tag(t, tl, "command-name", &nl);
+	const char *args = tag(t, tl, "command-args", &al);
+	char *b = malloc(nl + al + 2);
+
+	if (!b)
+	{
+		e->failed = 1;
+		return;
+	}
+	memcpy(b, name, nl);
+	if (args && al)
+	{
+		b[nl++] = ' ';
+		memcpy(b + nl, args, al);
+		nl += al;
+	}
+	ent_put(e, "user", NULL, b, nl, XR_TEXT_CAP, 0);
+	free(b);
+}
+
 /* A user text block: a slash command, else a prompt; blank is hidden. */
 static void
 user_text(struct xr_claude *d, const char *agent, char *s, size_t n)
@@ -4384,11 +4626,13 @@ user_text(struct xr_claude *d, const char *agent, char *s, size_t n)
 		t = trim(s, &tl);
 		if (d->rk.hit && (args = tag(t, tl, "command-args", &ul)))
 			refs_text(d, args, ul, XR_FIELD_CAP, XR_PROSE);
+		if (ent_here(d, agent))
+			ent_command(d->want, t, tl);
 		return;
 	}
 	if (blank(s, n))
 		return;
-	if (d->rk.hit && (u = malloc(n + 1)))
+	if ((d->rk.hit || d->want) && (u = malloc(n + 1)))
 	{
 		memcpy(u, s, n);
 		ul = unwrap(u, n, XR_TEXT_CAP);
@@ -4396,6 +4640,11 @@ user_text(struct xr_claude *d, const char *agent, char *s, size_t n)
 	xr_title(s, unwrap(s, n, 0), title, sizeof title);	/* s is spent */
 	block(d, agent, B_PROMPT, "prompt", title);
 	refs_text(d, u, ul, XR_TEXT_CAP, XR_PROSE);
+	if (ent_here(d, agent))
+	{
+		d->want->failed |= !u;
+		ent_put(d->want, "user", NULL, u, ul, XR_TEXT_CAP, 0);
+	}
 	free(u);
 }
 
@@ -4431,6 +4680,8 @@ entry_user(struct xr_claude *d, const struct json_parser *p, const char *ag)
 		    : NULL;
 		compaction(d, ag, n > 0);
 		refs_text(d, s, n, XR_TEXT_CAP, XR_PROSE);
+		if (n && ent_here(d, ag))
+			ent_put(d->want, "user", NULL, s, n, XR_TEXT_CAP, 0);
 		free(s);
 		return;
 	}
@@ -4491,11 +4742,16 @@ entry_user(struct xr_claude *d, const struct json_parser *p, const char *ag)
 		{
 			char *id = k_str(p, i, A_TUID, NULL);
 			struct rres rr;
+			int quiet = 0;
+			long long ord = d->want ? ent_paired(d, id, &quiet) : -2;
 
 			refs_pair(d, id, &rr);
 			tool_result(d, ag, id, k_bool(p, i, A_ERR));
 			if (d->rk.hit)
 				refs_result(d, p, i, k_bool(p, i, A_ERR), &rr);
+			if (d->want)
+				ent_result(d, p, i, ag, id, ord,
+				           k_bool(p, i, A_ERR) && !quiet);
 			free(id);
 		}
 		else
@@ -4519,6 +4775,8 @@ entry_assistant(struct xr_claude *d, const struct json_parser *p,
 		{
 			block(d, ag, B_STEP, NULL, NULL);
 			refs_text(d, s, n, XR_TEXT_CAP, XR_MD);
+			if (ent_here(d, ag))
+				ent_put(d->want, "assistant", NULL, s, n, XR_TEXT_CAP, 0);
 		}
 		free(s);
 		return;
@@ -4542,6 +4800,9 @@ entry_assistant(struct xr_claude *d, const struct json_parser *p,
 			{
 				block(d, ag, B_STEP, NULL, NULL);
 				refs_text(d, s, n, XR_TEXT_CAP, XR_MD);
+				if (ent_here(d, ag))
+					ent_put(d->want, "assistant", NULL, s, n, XR_TEXT_CAP,
+					        0);
 			}
 			free(s);
 		}
@@ -4568,6 +4829,8 @@ entry_assistant(struct xr_claude *d, const struct json_parser *p,
 			tool_use(d, ag, id, quiet);
 			if (d->rk.hit)
 				refs_call(d, p, i);
+			if (ent_here(d, ag))
+				ent_call(d, p, i, id, name);
 			free(id);
 			free(name);
 		}
@@ -5053,6 +5316,9 @@ sh_feed(struct xr_shell *s, const struct xr_rec *x)
 		         (unsigned long long)s->aseq);
 		xr_title(c, l, ch->title, sizeof ch->title);
 		s->npaired++;
+		/* --chapter: the block's command (B..C) is its tool entry */
+		if (ent_hit(s->want, ch->anchor, (uint64_t)s->ord))
+			ent_put(s->want, "tool", NULL, c, l, XR_TEXT_CAP, 0);
 	}
 	else if (m == 'D')
 	{
@@ -5070,6 +5336,55 @@ sh_feed(struct xr_shell *s, const struct xr_rec *x)
 static void sh_refs_pre(struct xr_shell *s, const struct xr_rec *x);
 static void sh_refs_post(struct xr_shell *s, const struct xr_rec *x);
 
+/* --chapter: the wanted block's output entry, once (its C..D rows, the
+** error its D gave). */
+static void
+sh_ent_close(struct xr_shell *s)
+{
+	struct xr_entries *e = s->want;
+	const struct xr_chapter *c;
+
+	if (!e || !e->hit || e->done)
+		return;
+	e->done = 1;
+	c = ch_ord(s->out, e->ord);
+	ent_put(e, "output", NULL, e->out, e->ol, XR_OUTPUT_CAP, c && c->error);
+}
+
+/* --chapter: the wanted block's output rows while it is open, joined at
+** soft wraps, kept to 4 bytes a scalar of the clip (3.5); closed by the
+** first record after it. */
+static void
+sh_ent(struct xr_shell *s, const struct xr_rec *x)
+{
+	struct xr_entries *e = s->want;
+	size_t room, l;
+
+	if (!e->hit || e->done)
+		return;
+	if (s->st != S_OUTPUT || s->ord < 0 || (uint64_t)s->ord != e->ord)
+	{
+		sh_ent_close(s);
+		return;
+	}
+	if (x->kind != RING_K_OUTPUT)
+		return;
+	if (!e->out && !(e->out = malloc(XR_OUTPUT_CAP * 4)))
+	{
+		e->failed = 1;
+		return;
+	}
+	room = XR_OUTPUT_CAP * 4 - e->ol;
+	if (e->ol && room && !(x->flags & RING_F_CONT))
+	{
+		e->out[e->ol++] = '\n';
+		room--;
+	}
+	l = x->len < room ? x->len : room;
+	memcpy(e->out + e->ol, x->text, l);
+	e->ol += l;
+}
+
 void
 xr_shell_feed(struct xr_shell *s, const struct xr_rec *x)
 {
@@ -5078,6 +5393,8 @@ xr_shell_feed(struct xr_shell *s, const struct xr_rec *x)
 	sh_feed(s, x);
 	if (s->refs)
 		sh_refs_post(s, x);
+	if (s->want)
+		sh_ent(s, x);
 }
 
 /* ---- shell: refs (7.3) ----------------------------------------------------- */
@@ -5329,6 +5646,7 @@ xr_shell_end(struct xr_shell *s)
 {
 	struct xr_shref *r = s->refs;
 
+	sh_ent_close(s);	/* a block still open at the read's end */
 	if (!r)
 		return;
 	sh_flush(s);
@@ -5893,4 +6211,74 @@ xr_delta_write(FILE *f, struct xr_sent *s, const struct xr_answer *a)
 	if (stab_keep(s) != 0)
 		return -1;
 	return ferror(f) ? -1 : 0;
+}
+
+/* ---- --chapter (3.5; #156, XR3b) ------------------------------------------- */
+
+int
+xr_anchor_ok(const char *s)
+{
+	size_t n = strspn(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	                     "0123456789:_.-");
+
+	return n >= 1 && n <= 128 && !s[n];
+}
+
+void
+xr_entries_begin(struct xr_entries *e, const char *anchor,
+                 const char *session, size_t out)
+{
+	/* the head's room: the session and its id escaped (6 bytes a byte at
+	** worst), a 128-byte anchor, a 120-scalar title, the fixed keys */
+	size_t head = 6 * (strlen(session) + 64) + 2048;
+
+	memset(e, 0, sizeof *e);
+	e->anchor = anchor;
+	e->cap = out > head ? out - head : 0;
+}
+
+void
+xr_entries_free(struct xr_entries *e)
+{
+	int k;
+
+	for (k = 0; k < e->ncalls; k++)
+		free(e->calls[k].name);
+	free(e->calls);
+	free(e->buf);
+	free(e->out);
+	e->calls = NULL;
+	e->buf = e->out = NULL;
+	e->ncalls = 0;
+}
+
+void
+xr_claude_entries(struct xr_claude *d, struct xr_entries *e, uint64_t ino)
+{
+	d->want = e;
+	d->ino = ino;
+}
+
+int
+xr_chapter_print(FILE *f, const char *session, const char *session_id,
+                 const struct xr_chapter *c, const struct xr_entries *e)
+{
+	fputs("{\"schema\":1,\"session\":", f);
+	xr_put_str(f, session);
+	fputs(",\"session_id\":", f);
+	xr_put_str(f, session_id);
+	fputs(",\"anchor\":", f);
+	xr_put_str(f, c->anchor);
+	fputs(",\"title\":", f);
+	xr_put_str(f, c->title);
+	fputs(",\"at\":", f);
+	if (c->at >= 0)
+		fprintf(f, "%lld", c->at);
+	else
+		fputs("null", f);
+	fprintf(f, ",\"kind\":\"%s\",\"entries\":[", c->kind);
+	if (e->len)
+		fwrite(e->buf, 1, e->len, f);
+	fprintf(f, "],\"truncated\":%s}\n", e->truncated ? "true" : "false");
+	return fflush(f) != 0 || ferror(f) ? -1 : 0;
 }

@@ -1,0 +1,1 @@
+{"schema":1,"session":"demo","session_id":"0b1f6a52-4c1e-4d7a-9a51-2f6d8c3e7a10","anchor":"f*:1660","title":"Look at this screenshot","at":1794305100,"kind":"prompt","entries":[{"role":"user","tool":null,"text":"Look at this screenshot","error":false},{"role":"assistant","tool":null,"text":"I see a stack trace.","error":false}],"truncated":false}

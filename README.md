@@ -376,6 +376,7 @@ dch --xray <n> --json                           # a session's chapters (prompts 
 dch --xray <n> --clear --json                   # empty a shell session's X-ray ring
 dch --xray <n> --follow --json                  # the same object, then its deltas as NDJSON until the session ends
 dch --xray <n> --ref <ref> [--scope session|project|all] [--full] [--budget-ms <ms>] --json  # one ref's mentions and definitions, NDJSON
+dch --xray <n> --chapter <anchor> --json        # one chapter's entries (prompt, replies, tool calls, output)
 dch --agent-list [--json]                       # native Claude peers
 dch --agent-send <peer> <message...>            # message one (from a Codex session)
 ```
@@ -417,7 +418,7 @@ someone is watching is invisible to them.
 | Verb | Does | Exit codes |
 | --- | --- | --- |
 | `--spawn <n> [--size CxR] [--env K=V]... [cmd...]` | Start headless session (default: `$SHELL`, 80x24 or `$COLUMNS`/`$LINES`). `--env` (max 32, first `=` splits) adds variables to the child; reserved keys (`DCH_SESSION`, `TERM` fixup) always win. Like `--revive` (and a plain `dch <new>`), it drops the calling Claude Code session's identity (`CLAUDECODE`, `CLAUDE_CODE_*` session vars), plus `GIT_EDITOR` and the other harness vars when `CLAUDECODE` is set, and sets `LC_TERMINAL=ghostty` unless the caller has it (dch keeps OSC 8 links, but under `TERM=xterm-256color` with no `TERM_PROGRAM` Claude Code would strip its statusline's, and `LC_TERMINAL` is the one signal its check reads that supports-hyperlinks and other Node CLIs ignore; ssh sends it on, by macOS's default `SendEnv LC_*`). Like any session variable it reaches every program in the session, not only Claude Code; a tool that keys on `ghostty` may assume Ghostty-only features (kitty graphics, for one) that the terminal you attach from may lack. dch sets no `FORCE_HYPERLINK`: those CLIs honour it before they check for a terminal, so it put OSC 8 into pipes and files (`stylelint t.css > out`, an agent's Bash tool); a caller's own value still reaches the session. An explicit `--env` (`--env LC_TERMINAL=` included) still wins. Prints the name. A program that cannot be executed is an error (`dch: <n>: <cmd>: <reason>`); one that runs and exits at once is not. | 0 ok, 1 exists/failed/not executable/bad --env |
-| `--xray <n> --json` | One JSON object: the session's corpus, chapters and refs (see [X-ray queries](#x-ray-queries---xray)). `--clear` empties a shell's ring instead; `--ref` streams one ref's lines; `--follow` streams the object and then its changes. Must be the first argument. | 0 ok, 1 no such session/ambiguous/no corpus, 2 usage, 3 read failure |
+| `--xray <n> --json` | One JSON object: the session's corpus, chapters and refs (see [X-ray queries](#x-ray-queries---xray)). `--clear` empties a shell's ring instead; `--ref` streams one ref's lines; `--follow` streams the object and then its changes; `--chapter` prints one chapter's entries. Must be the first argument. | 0 ok, 1 no such session/ambiguous/no corpus, 2 usage, 3 read failure |
 | `--send <n> <text...>` | Type text (joined with spaces), no enter. | 0 ok |
 | `--run <n> <text...>` | `--send` + enter. Into a session whose Claude Code runs — as its command or typed into its shell — the text goes through `--say`'s composer gate instead: typed only over an empty composer, Enter pressed once it shows and again while it stays (Claude Code folds an Enter sent with the text into the paste). A `/command` is typed raw, a message pasted. A shell or any other program, a master without a mirror (`DCH_NO_VT`), dch-lite and your own session (`$DCH_SESSION`) keep the plain burst. A gate failure prints `dch: <n>: <reason> — <why>` on stderr: `prompt` and `draft` (nothing typed), `not_typed` (the text never showed in the composer, no Enter), `not_submitted` (it stayed there through every Enter); `no_screen` when the composer is not on screen; `interrupted`, `withdrawn` or `draft_left` on a SIGINT, SIGTERM or SIGHUP, as for `--say`. | 0 ok, 1 gate failure |
 | `--keys <n> <key...>` | Encode+send keys mode-aware: `ctrl+c`, `alt+x`, `shift+tab`, `up`, `f5`, `enter`, `esc`, single chars. | 0 ok, 1 unknown key |
@@ -1112,6 +1113,38 @@ Rules for shells and endings:
 - A live one exits 0 when the session ends, when its connection drops (a
   `--restart`), or when the reader closes the pipe, idle or not.
 
+`dch --xray <n> --chapter <anchor> --json` prints one chapter's entries as
+one object: `{"schema":1,"session","session_id","anchor","title","at","kind","entries":[…],"truncated":bool}`.
+`<anchor>` is a chapter's `anchor` from `--json`: 1 to 128 bytes of
+`A-Z`, `a-z`, `0-9`, `:`, `_`, `.` and `-`, else exit 2 with `dch: bad
+anchor`. dch reads the session's chapters again and answers only when one of
+them has exactly that anchor; it never seeks to the offset in it. Otherwise it
+exits 1 with `dch: chapter gone` (the transcript was rewritten, or the ring
+evicted or cleared the block): read `--json` again. `--chapter` does not go
+with `--ref`, `--follow` or `--clear`.
+
+Each entry is `{"role","tool","text","error"}`:
+- Claude Code: `user` is the prompt (a slash command as `/name args`, a
+  compaction's summary too), `assistant` its text. `tool` is a call, with the
+  tool's name: a Bash command, the path of an Edit, MultiEdit, Write or Read,
+  else the input's first 8 fields as `key: value` lines, each value cut at 240
+  characters. `output` is its result, in the call's chapter, with the call's
+  name (`null` for a result with no call); `error` is the result's error flag,
+  never set for a Grep or Glob that found nothing. Thinking, images, notices
+  and subagent turns are left out.
+- A shell: one `tool` entry with the typed command and one `output` entry
+  with the block's output rows, soft-wrapped rows joined; `error` is a
+  non-zero exit. Only rows that scrolled into the ring count: rows still on
+  the screen are not in it. A block with no marks has no chapter.
+
+`text` is cut at 6000 Unicode scalars (3000 for an `output`) and escaped like
+`--ls-json`. The whole object is capped at 1 MiB: entries past the cap are
+left out and `truncated` is `true`. An ended or History Claude Code session is
+read from its transcript. An ended shell, a ring that is off or paused, and a
+session with no transcript exit 1 with `dch: no x-ray corpus`. Nothing is
+written to disk. A reader that closes the pipe gets exit 0 and no message;
+SIGTERM ends it at once.
+
 No new session or rename takes a name of exactly `m` + 16 hex in any case
 (`M0123456789ABCDEF` too: on a case-insensitive file system its socket also
 answers to the lowercase id), because that is a ring `session_id`. `-n`,
@@ -1127,8 +1160,8 @@ system, like any name.
 | Exit | Meaning |
 | --- | --- |
 | 0 | the object was printed; a `--follow` ended with its session, its connection, or its reader |
-| 1 | `dch: no such session` (also a master that hangs up after the connect, before its answer is complete, in every form: nothing more is written; `--ref` keeps the lines already out and writes no `done`; `--follow` once its snapshot is out exits 0 instead), `dch: ambiguous session`, `dch: no x-ray corpus` (`--clear`, `--ref`), `dch: busy` (a fifth `--follow` on one shell) |
-| 2 | bad usage: `--json` missing, a flag twice, `--follow` with `--ref` or `--clear`, a flag of a later release (`--chapter`, ...), `--xray` not first, a bad or remote `<n>`, a bad `--ref`, `--scope` or `--budget-ms` |
+| 1 | `dch: no such session` (also a master that hangs up after the connect, before its answer is complete, in every form: nothing more is written; `--ref` keeps the lines already out and writes no `done`; `--follow` once its snapshot is out exits 0 instead), `dch: ambiguous session`, `dch: no x-ray corpus` (`--clear`, `--ref`, `--chapter`), `dch: chapter gone` (`--chapter`: no chapter has that anchor now), `dch: busy` (a fifth `--follow` on one shell) |
+| 2 | bad usage: `--json` missing, a flag twice, `--follow` with `--ref` or `--clear`, `--chapter` with `--ref`, `--follow` or `--clear`, a flag of a later release, `--xray` not first, a bad or remote `<n>`, a bad `--ref`, `--chapter` anchor, `--scope` or `--budget-ms` |
 | 3 | `dch: X-ray failed on this session`: the session answered garbage, the transcript could not be read (it is there, but opening or reading it failed), memory ran out, or a write failed with an error other than a closed pipe |
 
 ### Auto-allow

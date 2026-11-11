@@ -10,7 +10,9 @@ query, none for a shell, a clear or a refused lookup; nothing written), and
 the INFO-2 name rule on every create path dch runs locally, and refs (#135):
 the index freed with its query (K3), --ref's budget stop, nothing written,
 SIGTERM and EPIPE as a cancel, and the 16 MB budget at the index's caps,
-and the primary screen (#140): read with the ring, never the alt buffer.
+and the primary screen (#140): read with the ring, never the alt buffer, and
+--chapter (#156): a live and a History Claude chapter and a live shell's,
+the value rules, stale anchors, the 6000/3000 caps and the 1 MiB cap.
 
 Run:  python3 tests/xray_cli_test.py          (uses ./dch; run.sh isolates)
 """
@@ -681,6 +683,18 @@ def test_claude():
         check("claude: the agent UUID answers the same session",
               rc == 0 and o2 and o2["session"] == n and
               o2["chapters"] == o["chapters"], o2)
+        # --chapter on a live Claude (3.5, #156): one seam open, no write
+        open(trace, "w").close()
+        rc, c, err, _ = chapter(n, o["chapters"][1]["anchor"], env=dbg)
+        tr = open(trace).read()
+        check("chapter: a live Claude's chapter, from the transcript",
+              rc == 0 and c and c["session"] == n and
+              c["session_id"] == sid and c["title"] == "second ask" and
+              c["entries"] == [ent("user", "second ask"),
+                               ent("assistant", "ok")], (rc, c, err))
+        check("chapter: one seam open, no transcript text traced",
+              tr.count("xray seam: open") == 1 and "second ask" not in tr,
+              tr[-400:])
         wait_for(lambda: "Claude Code" in screen(n), 10)
         scr0 = screen(n)
         rec0 = dch("--read", n, "--recent", "1000").stdout
@@ -1403,7 +1417,9 @@ def test_write_fail():
         forms = [("--json", ["xr-wf", "--json"]),
                  ("--ref", ["xr-wf", "--ref", "#831", "--scope", "session",
                             "--full", "--json"]),
-                 ("--clear", [n, "--clear", "--json"])]
+                 ("--clear", [n, "--clear", "--json"]),
+                 ("--chapter", ["xr-wf", "--chapter", "f%x:0" %
+                                os.stat(tp).st_ino, "--json"])]
         for what, a in forms:
             rc, err = to_fd([DCH, "--xray"] + a, "epipe")
             check("write fail: %s into a closed pipe: exit 0, silent" % what,
@@ -1412,12 +1428,239 @@ def test_write_fail():
             check("write fail: %s on a read-only stdout: exit 3, the "
                   "failure line" % what, rc == 3 and
                   err == "dch: X-ray failed on this session\n", (rc, err))
-        r = dch("--xray", "xr-wf", "--chapter", "1")
-        check("write fail: --chapter is not in XR2a (exit 2)",
-              r.returncode == 2, r.stderr)
     finally:
         dch("-k", n)
         os.unlink(tp)
+
+
+# ---- 3.5: --chapter <anchor> --json (#156, XR3b) --------------------------
+
+def chapter(n, anchor, env=None):
+    r = dch("--xray", n, "--chapter", anchor, "--json", env=env)
+    try:
+        return r.returncode, json.loads(r.stdout), r.stderr, r.stdout
+    except ValueError:
+        return r.returncode, None, r.stderr, r.stdout
+
+
+def ent(role, text, tool=None, error=False):
+    return {"role": role, "tool": tool, "text": text, "error": error}
+
+
+def test_chapter():
+    """A History Claude chapter's entries, the value rules, mutual
+    exclusion, stale anchors (K14.2, K14.3), the 6000/3000 caps and the
+    1 MiB cap (K14.4), an ended shell (no corpus), nothing written."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, RSID + ".jsonl")
+
+    def put(lines):
+        with open(tp, "w") as f:
+            for o in lines:
+                f.write(json.dumps(o) + "\n")
+
+    def use(id, name, inp):
+        return {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": id, "name": name, "input": inp}]}}
+
+    def res(id, out, err=False):
+        return {"type": "user", "toolUseResult": {"stdout": out},
+                "message": {"content": [{"type": "tool_result",
+                                         "tool_use_id": id, "is_error": err,
+                                         "content": out}]}}
+    put([{"type": "user", "cwd": "/home/demo/proj",
+          "timestamp": "2026-11-10T10:00:00Z",
+          "message": {"content": "first ask"}},
+         {"type": "assistant", "message": {"content": [
+             {"type": "text", "text": "one"}]}},
+         use("b1", "Bash", {"command": "ls -la"}), res("b1", "a\nb"),
+         {"type": "user", "timestamp": "2026-11-10T10:01:00Z",
+          "message": {"content": "second \u0007ask"}},
+         use("e1", "Edit", {"file_path": "/home/demo/proj/x.c",
+                            "old_string": "a", "new_string": "b"}),
+         res("e1", "boom", True),
+         {"type": "assistant", "message": {"content": [
+             {"type": "text", "text": "done"}]}}])
+    history("xr-ch", RSID, cfg)
+    rc, o, err = xray("xr-ch", "--json")
+    ch = (o or {}).get("chapters", [])
+    check("chapter: the index has two chapters", rc == 0 and len(ch) == 2,
+          (rc, o, err))
+    if len(ch) != 2:
+        return
+    before = files(T)
+    rc, c, err, out = chapter("xr-ch", ch[1]["anchor"])
+    check("chapter: History Claude: one object, its keys in order",
+          rc == 0 and c and list(c) == ["schema", "session", "session_id",
+                                        "anchor", "title", "at", "kind",
+                                        "entries", "truncated"] and
+          c["schema"] == 1 and c["session"] == "xr-ch" and
+          c["session_id"] == RSID and c["anchor"] == ch[1]["anchor"] and
+          c["title"] == ch[1]["title"] and c["at"] == ch[1]["at"] and
+          c["kind"] == ch[1]["kind"] and c["truncated"] is False and
+          out.endswith("}\n") and out.count("\n") == 1, (rc, out, err))
+    check("chapter: its entries: the prompt, the call, its error, the text",
+          c and c["entries"] == [
+              ent("user", "second \u0007ask"),
+              ent("tool", "/home/demo/proj/x.c", "Edit"),
+              ent("output", "boom", "Edit", True),
+              ent("assistant", "done")], c and c["entries"])
+    check("chapter: text escaped like --ls-json (K14.5: BEL as \\u0007)",
+          "second \\u0007ask" in out, out[:300])
+    rc, c, _, _ = chapter("xr-ch", ch[0]["anchor"])
+    check("chapter: the first chapter: a Bash call is its command",
+          rc == 0 and c and c["entries"] == [
+              ent("user", "first ask"), ent("assistant", "one"),
+              ent("tool", "ls -la", "Bash"), ent("output", "a\nb", "Bash")],
+          c and c["entries"])
+    new = sorted(set(files(T)) - set(before))
+    check("chapter: nothing written", not new, new)
+
+    # stale anchors (K14.2, K14.3, mutant 10): no seek on the anchor's say
+    ino, off = ch[1]["anchor"][1:].split(":")
+    for bad in ("f%s:%d" % (ino, int(off) + 1), "f%s:%d" % (ino, int(off) - 1),
+                "f%s:0%s" % (ino, off), "f%x:%s" % (int(ino, 16) + 1, off),
+                "F%s:%s" % (ino, off), "s1", "x", "f" + "1" * 127):
+        rc, c, err, out = chapter("xr-ch", bad)
+        check("chapter: %r exits 1 chapter gone" % bad[:40], rc == 1 and
+              err == "dch: chapter gone\n" and out == "", (rc, err, out))
+    put([{"type": "user", "message": {"content": "first ask"}}])
+    rc, c, err, _ = chapter("xr-ch", ch[1]["anchor"])
+    check("chapter: a rewritten transcript (new inode): chapter gone",
+          rc == 1 and err == "dch: chapter gone\n", (rc, err))
+
+    # the value rules, mutual exclusion, --json (3.1)
+    for bad in ("", "a b", "a/b", "é", "a" * 129, "-", "a\n"):
+        r = dch("--xray", "xr-ch", "--chapter", bad, "--json")
+        ok = bad == "-"
+        check("chapter: %r: %s" % (bad[:20], "an anchor (gone)" if ok else
+                                   "exit 2 bad anchor"),
+              (r.returncode, r.stderr) == ((1, "dch: chapter gone\n") if ok
+                                           else (2, "dch: bad anchor\n")),
+              (r.returncode, r.stderr))
+    r = dch("--xray", "xr-ch", "--chapter", "a" * 128, "--json")
+    check("chapter: 128 bytes is an anchor", r.returncode == 1 and
+          r.stderr == "dch: chapter gone\n", (r.returncode, r.stderr))
+    for a, msg in ((["--ref", "#1"], "--chapter and --ref"),
+                   (["--clear"], "--chapter and --clear"),
+                   (["--follow"], "--chapter and --follow")):
+        r = dch("--xray", "xr-ch", "--chapter", "s1", "--json", *a)
+        check("chapter: with %s: exit 2" % a[0], r.returncode == 2 and
+              r.stderr == "dch: bad usage: %s\n" % msg and not r.stdout,
+              (r.returncode, r.stderr))
+    for a, e in ((["--chapter", "s1"], "dch: bad usage: --json is required "
+                  "(the --xray view comes later)\n"),
+                 (["--chapter"], "dch: bad usage: --chapter needs a value\n"),
+                 (["--chapter", "s1", "--chapter", "s2", "--json"],
+                  "dch: bad usage: --chapter twice\n"),
+                 (["--chapter", "s1", "--scope", "session", "--json"],
+                  "dch: bad usage: --scope, --full and --budget-ms come with "
+                  "--ref\n")):
+        r = dch("--xray", "xr-ch", *a)
+        check("chapter: %s: exit 2" % " ".join(a)[:50], r.returncode == 2 and
+              r.stderr == e, (r.returncode, r.stderr))
+    r = dch("--xray", "nope-ch", "--chapter", "s1", "--json")
+    check("chapter: no such session (exit 1)", r.returncode == 1 and
+          r.stderr == "dch: no such session\n", (r.returncode, r.stderr))
+    r = dch("--xray", "bad/name", "--chapter", "a b", "--json")
+    check("chapter: a bad session is told before a bad anchor",
+          r.returncode == 2 and r.stderr == "dch: bad session\n", r.stderr)
+
+    # the scalar caps (v2.1 3.1: 6000 and 3000) and the 1 MiB cap (K14.4)
+    put([{"type": "user", "cwd": "/home/demo/proj",
+          "message": {"content": "é" * 7000}},
+         use("b1", "Bash", {"command": "é" * 7000}),
+         res("b1", "é" * 4000),
+         {"type": "assistant", "message": {"content": [
+             {"type": "text", "text": "é" * 7000}]}}])
+    rc, o, _ = xray("xr-ch", "--json")
+    rc, c, err, _ = chapter("xr-ch", o["chapters"][0]["anchor"])
+    check("chapter: text clipped in scalars: 6000 (prompt, call, reply), "
+          "3000 (output)", rc == 0 and c and [len(e["text"]) for e in
+                                              c["entries"]] ==
+          [6000, 6000, 3000, 6000] and
+          all(set(e["text"]) == {"é"} for e in c["entries"]),
+          (rc, err, c and [len(e["text"]) for e in c["entries"]]))
+    out = "\u0001" * 3000    # 18000 escaped bytes an entry
+    put([{"type": "user", "cwd": "/home/demo/proj",
+          "message": {"content": "big"}}] +
+        [x for i in range(100) for x in (use("c%d" % i, "Bash",
+                                             {"command": "c%d" % i}),
+                                         res("c%d" % i, out))] +
+        [{"type": "user", "message": {"content": "next"}}])
+    rc, o, _ = xray("xr-ch", "--json")
+    r = dch("--xray", "xr-ch", "--chapter", o["chapters"][0]["anchor"],
+            "--json")
+    try:
+        c = json.loads(r.stdout)
+    except ValueError:
+        c = None
+    n = len(r.stdout.encode())
+    check("chapter: 100 x 18 KB escaped outputs: cut at 1 MiB, truncated "
+          "(%d bytes, %d entries)" % (n, len((c or {}).get("entries", []))),
+          r.returncode == 0 and c and c["truncated"] is True and
+          n <= 1 << 20 and n > (1 << 20) - 20000 and
+          c["entries"][-1]["role"] in ("tool", "output") and
+          all(e["text"] == out for e in c["entries"]
+              if e["role"] == "output"), (r.returncode, r.stderr, n))
+
+    # an ended shell has no corpus (3.5)
+    r = dch("--spawn", "xc-chend", "sh", "-c", "echo UP; sleep 60")
+    wait_for(lambda: "UP" in screen("xc-chend"), 5)
+    dch("-k", "xc-chend")
+    wait_for(lambda: not os.path.exists(sock("xc-chend")), 5)
+    rc, c, err, out = chapter("xc-chend.json", "s1")
+    check("chapter: an ended shell: exit 1 no x-ray corpus", rc == 1 and
+          err == "dch: no x-ray corpus\n" and out == "", (rc, err))
+    os.unlink(tp)
+    rc, c, err, out = chapter("xr-ch", "s1")
+    check("chapter: a History Claude with no transcript: no x-ray corpus",
+          rc == 1 and err == "dch: no x-ray corpus\n", (rc, err))
+
+
+def test_chapter_shell():
+    """A live shell chapter: one tool entry (the typed command), one output
+    entry (C..D, WRAP-joined, error from D's exit); a stale seq and a
+    cleared ring are chapter gone."""
+    n = "xc-chs"
+    prog = ("while :; do printf '\\033]133;A\\007$ \\033]133;B\\007'; "
+            "read -r cmd || exit; printf '\\033]133;C\\007'; eval \"$cmd\"; "
+            "printf '\\033]133;D;%d\\007' $?; done")
+    try:
+        r = dch("--spawn", n, "--size", "80x24", "sh", "-c", prog)
+        check("chapter shell: spawned", r.returncode == 0, r.stderr)
+        wait_for(lambda: "$" in screen(n), 5)
+        dch("--send", n, "echo ran; printf '%0100d\\n' 7; false\n")
+        time.sleep(0.3)
+        dch("--send", n, "seq 1 40\n")
+        wait_for(lambda: "40" in screen(n), 5)
+        time.sleep(0.3)
+        rc, o, err = xray(n, "--json")
+        ch = (o or {}).get("chapters", [])
+        check("chapter shell: two chapters", rc == 0 and len(ch) == 2,
+              (rc, o, err))
+        if len(ch) != 2:
+            return
+        rc, c, err, out = chapter(n, ch[0]["anchor"])
+        check("chapter shell: the typed command, then its rows joined "
+              "across the wrap, error from D 1", rc == 0 and c and
+              c["session"] == n and c["session_id"] == o["session_id"] and
+              c["anchor"] == ch[0]["anchor"] and c["kind"] == "command" and
+              c["truncated"] is False and c["entries"] == [
+                  ent("tool", "echo ran; printf '%0100d\\n' 7; false"),
+                  ent("output", "ran\n" + "0" * 99 + "7", error=True)],
+              (rc, out, err))
+        rc, c, err, out = chapter(n, "s999999")
+        check("chapter shell: an unknown seq is chapter gone", rc == 1 and
+              err == "dch: chapter gone\n", (rc, err))
+        dch("--xray", n, "--clear", "--json")
+        rc, c, err, out = chapter(n, ch[0]["anchor"])
+        check("chapter shell: after a clear the anchor is gone", rc == 1 and
+              err == "dch: chapter gone\n", (rc, err))
+    finally:
+        dch("-k", n)
 
 
 # ---- 3.4: SIGTERM and EPIPE cancel a --ref (FROZEN l.464, l.635) ---------
@@ -2527,6 +2770,8 @@ def main():
         test_refs()
         test_d2_whole()
         test_write_fail()
+        test_chapter()
+        test_chapter_shell()
         test_cancel()
         test_claude_caps()
         test_shell_caps()
