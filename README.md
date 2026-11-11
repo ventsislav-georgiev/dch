@@ -2046,9 +2046,12 @@ each host's ended sessions, fetched as its own `dch --history --json` over
   answer in time, or whose connection fails, shows the records it last sent,
   `[stale]` (`"stale":true`), for two minutes, from
   `.remote-history` beside the row cache. The picker reads only that cache;
-  its background probe refreshes it every 10 s, not every 2 s, since each
-  fetch runs a `dch` on the host and logs two lines there, and shows a
-  host's records stale once they are 30 s old.
+  its background probe refreshes it once when the picker opens (the
+  History tab's count), then every 10 s, not every 2 s, and only while the
+  History tab shows, since each fetch runs a `dch` on the host and logs two
+  lines there. It shows a host's records stale once they are 30 s old, so
+  after a while on another tab they show stale until the fetch that
+  switching to History starts lands.
 - *Shape.* Text: `host:name (alias)  when  end  cwd  $ argv  [claude <name>
   <id>]  [pinned]  [record <file>]  [stale]`, every field escaped. JSON:
   each record as the host sent it, its C1, DEL and bidi controls written as
@@ -2057,7 +2060,7 @@ each host's ended sessions, fetched as its own `dch --history --json` over
   so a host cannot pass for another. At most 500 records and 2 MiB per host.
   Without `--remote` nothing is dialled and the output is unchanged.
 - *An old or odd host.* One whose hello lacks `ctl` (before dch serve 1.41,
-  or Prosper) gets one stderr line, `dch: <host>: does not support remote
+  or an older Prosper) gets one stderr line, `dch: <host>: does not support remote
   history (needs dch serve 1.41+)`, and no records; a refusal is `dch:
   <host> refused: <message>`, its cached records dropped; a reply that is
   not a JSON array or is too big, or a remote dch that failed, counts as a

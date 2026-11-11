@@ -2161,7 +2161,8 @@ answer in time shows its last records, stale
 .RB ( [stale] ),
 for 2 minutes (a cache in
 .IR .remote\-history );
-the picker's background probe refreshes it every 10 s. A host whose hello
+the picker's background probe refreshes it once when the picker opens, then
+every 10 s while its History tab shows. A host whose hello
 lacks
 .B ctl
 prints

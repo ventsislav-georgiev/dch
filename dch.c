@@ -8826,6 +8826,7 @@ pk_load(struct pk *p)
 	load_aliases(&sl);
 	load_harness_names(&sl);
 	load_codex_names(&sl);
+	dch_remote_hist_tab(!p->settings && p->tab == 2);
 	nr = pk_remote ? dch_remote_rows(&rr, 0) : 0;
 	p->r[0] = calloc((size_t)(sl.n + nr) + 1, sizeof **p->r);
 	p->r[1] = calloc((size_t)sl.n + 1, sizeof **p->r);
