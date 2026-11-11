@@ -903,8 +903,8 @@ The corpus:
     marks yet, so they give no chapter and no definition. While the alternate
     screen is active (vim, less), neither screen is read: the answer is the
     ring's alone, with no error and no `why`, and the screen's rows come back
-    once it exits. A master older than the screen read (it predates the
-    `--xray` client) answers from its ring alone until `dch --restart`.
+    once it exits. A master started by an older dch answers from its ring
+    alone until `dch --restart`.
   - `lines` counts the rows read: the ring's, plus the screen's when it was
     read.
   - `complete` is `false` with `why: "range"` when the ring has evicted rows

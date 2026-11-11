@@ -247,8 +247,9 @@ enum
 				** client's inactivity deadline covers both. */
 	DCH_ST_SAME	= 6,	/* DCH_READ_F_SINCE: the mirror generation still
 				** equals the one asked about, nothing rendered */
-	DCH_ST_ALT	= 7,	/* DCH_READ_F_PRIMARY: the alt screen is active,
-				** nothing rendered */
+	DCH_ST_ALT	= 7,	/* DCH_READ_F_PRIMARY: the alt screen is active
+				** or capture is paused for an agent, nothing
+				** rendered */
 };
 
 /* MSG_READ payload fields */
@@ -262,7 +263,8 @@ enum
 #define DCH_READ_F_SINCE  0x04	/* bytes 5..8 = gen: DCH_ST_SAME if unchanged */
 #define DCH_READ_F_PRIMARY 0x08	/* X-ray (#140): the visible rows, soft wraps
 				** joined, only while the primary screen is
-				** active, else DCH_ST_ALT and no data. Plain,
+				** active and capture not paused, else
+				** DCH_ST_ALT and no data. Plain,
 				** visible and alone; a master before #140
 				** answers DCH_ST_ERR (the client reads the
 				** ring alone) */

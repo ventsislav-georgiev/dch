@@ -2471,8 +2471,10 @@ do_read(struct client *p, const unsigned char *payload, unsigned int len)
 	if (read_req_parse(payload, len, &q) != 0)
 		return queue_status(p, MSG_READ_END, DCH_ST_ERR);
 	flags = q.flags;
-	/* never the alt buffer (#140): decided in the servicing that renders */
-	if ((flags & DCH_READ_F_PRIMARY) && dch_vt_alt())
+	/* never the alt buffer, nor an agent's TUI while capture is paused
+	** (#140): decided in the servicing that renders */
+	if ((flags & DCH_READ_F_PRIMARY) &&
+	    (dch_vt_alt() || dch_vt_capture_paused()))
 		return queue_status(p, MSG_READ_END, DCH_ST_ALT);
 
 	/* --follow polls with the generation of the last screen it got: an

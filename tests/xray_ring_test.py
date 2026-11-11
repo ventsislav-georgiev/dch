@@ -3,7 +3,7 @@
 
 Covers what tests/ring_unit.c cannot reach from inside vt.c: the master
 protocol's read op (MSG_RING_READ: range, the 1 MiB cap, session_id), the
-primary-screen read (DCH_READ_F_PRIMARY, #140),
+primary-screen read (DCH_READ_F_PRIMARY, #140; nothing while alt or paused),
 subscribers and their edge-triggered wake (a clear wakes one too; a wake at a
 full subscriber's out cap drops it safely; a stale one loses its slot), the clear message, the xray_ring
 config (0 = off), the client-input flag on a C mark from real keystrokes,
@@ -312,6 +312,48 @@ def test_primary():
             s.close()
         kill(n)
 
+
+def test_primary_paused(tmp):
+    """#140 review: while capture is paused for an agent (Claude paints its
+    TUI on the primary screen), DCH_READ_F_PRIMARY answers DCH_ST_ALT and no
+    rows, decided by the master, so a shell answer racing the agent's start
+    never takes the TUI as output; a plain visible read still renders it."""
+    n = "xr-pp" + TAG
+    bindir, fdir = os.path.join(tmp, "ppbin"), os.path.join(tmp, "ppfake")
+    for d in (bindir, fdir):
+        os.makedirs(d, exist_ok=True)
+    shutil.copy(os.path.join(HERE, "fake_claude.py"),
+                os.path.join(bindir, "claude"))
+    os.chmod(os.path.join(bindir, "claude"), 0o755)
+    env = dict(os.environ, FAKE_CLAUDE_DIR=fdir, DCH_RECORD_MS="300",
+               PATH=bindir + ":" + os.environ.get("PATH", "/usr/bin:/bin"))
+
+    def status():
+        try:
+            s = X.connect(n)
+            try:
+                return X.read(s, 0, 1)[0].get("status", 0)
+            finally:
+                s.close()
+        except (OSError, EOFError):
+            return 0
+    spawn(n, "sh", env=env)
+    try:
+        wait_for(lambda: screen(n).strip())
+        dch("--send", n, "claude\r", env=env)
+        paused = wait_for(lambda: status() & X.S_PAUSED, 25)
+        drawn = wait_for(lambda: "Claude Code" in screen(n))
+        check("primary paused: an agent pauses capture, its TUI drawn",
+              paused and drawn, screen(n))
+        st, txt = screen_read(n, bytes([0, 0, 0, 0, 0x08]))
+        check("primary paused: F_PRIMARY gives DCH_ST_ALT and no data",
+              st == 7 and txt == "", (st, txt))
+        st, txt = screen_read(n, bytes([0, 0, 0, 0]))
+        check("primary paused: a plain visible read still renders the TUI",
+              st == 0 and "Claude Code" in txt, (st, txt))
+        dch("--send", n, "/exit\r", env=env)
+    finally:
+        kill(n)
 
 def test_sub_evict():
     """QA 1.43 NIT-2 (#121): with the slots full, a new subscriber takes the
@@ -774,6 +816,7 @@ def main():
         test_subscribers()
         test_sub_evict()
         test_primary()
+        test_primary_paused(tmp)
         test_clear_and_off()
         test_wake_at_cap(tmp)
         test_shell_init(tmp)
