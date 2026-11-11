@@ -153,6 +153,9 @@ class Fake:
                             "ctlcut": frame(0x31, b"part\n")
                             + frame(0x32, b"err\n")
                             + frame(0x33, {"exit": 2, "why": "cap"}),
+                            # #129: 60 bytes, 240 escaped: past why[100]
+                            "ctlwhy": frame(0x33, {"exit": 2,
+                                                   "why": "\x01" * 60}),
                             "ctldrop": frame(0x31, b"half"),
                         }[self.mode])
                         c.shutdown(socket.SHUT_WR)
@@ -368,7 +371,9 @@ def ctl_checks(dch, check, senv, cenv, serve_at, procs, fakes, tmp, hosts):
             ("ctlerr", 1, "dch: q: nope-why"),
             ("ctldrop", UNREACHABLE_EXIT,
              "dch: q: unreachable: the connection was lost"),
-            ("ctlcut", 2, "err\ndch: q: --status stopped by the host (cap)")):
+            ("ctlcut", 2, "err\ndch: q: --status stopped by the host (cap)"),
+            ("ctlwhy", 2, "dch: q: --status stopped by the host (%s)"
+             % ("\\x01" * 23))):
         f = Fake(mode, ops=["ctl", "watch"])
         fakes.append(f)
         r = dch(cenv, "--hosts", "q=127.0.0.1:%d" % f.port, "--status",
@@ -692,6 +697,14 @@ def main():
         put("status.json", dict(PEERS, BackendState="Stopped"))
         r = dch(denv, "-a", "nope:x")
         check("discovery: none unless BackendState is Running",
+              r.returncode == 1 and "none:" in r.stderr, r.stderr)
+        neg = json.loads(json.dumps(PEERS))     # #129: -1 is "unknown"
+        neg["Self"]["UserID"] = -1
+        for peer in neg["Peer"].values():
+            peer["UserID"] = -1 if peer["UserID"] == 42 else peer["UserID"]
+        put("status.json", neg)
+        r = dch(denv, "-a", "nope:x")
+        check("discovery: none for a negative Self.UserID",
               r.returncode == 1 and "none:" in r.stderr, r.stderr)
         put("status.json", PEERS)
         for why, w in (("another user", dict(WHOIS, UserProfile={

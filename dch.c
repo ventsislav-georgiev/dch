@@ -6574,14 +6574,44 @@ composer_holds(const char *path, const char *text)
 	return ok;
 }
 
+/* What is left of `text` in the composer, for ty_take_back: 0 nothing
+** (only the placeholder), 1 a start of it (the rows Ctrl-U has not reached
+** yet, or the "[Pasted text #" chip), -1 anything else: a dialog, no
+** composer, an unreadable screen, or text that is not a start of ours.
+** Not composer_holds(): its 32-byte prefix misses a first row shorter
+** than that (#128), which is all that is left before the last Ctrl-U. */
+static int
+composer_left(const char *path, const char *text)
+{
+	char *txt, *dim, *comp, *end, *have = NULL, *want = NULL;
+	int err, res = -1, g;
+
+	if (!(txt = screen_faint(path, &dim, &err)))
+		return -1;
+	if ((g = gate_screen(txt, dim, 1)) == CG_EMPTY)
+		res = 0;
+	else if (g == CG_DRAFT && (comp = composer_find(txt, &end)) &&
+	         (have = squeeze(comp + 3, (size_t)(end - comp - 3), (size_t)-1)) &&
+	         (want = squeeze(text, strlen(text), (size_t)-1)) &&
+	         (strncmp(want, have, strlen(have)) == 0 ||
+	          strncmp(have, "[Pastedtext#", 12) == 0))
+		res = 1;
+	free(have);
+	free(want);
+	free(txt);
+	free(dim);
+	return res;
+}
+
 /* A signal once our text is in the composer (#126): take it back out,
 ** never an Enter. Claude Code's Ctrl-U (2.1.318: deleteToLineStart) kills
 ** to the start of the cursor's visual (wrapped) row, and at its column 0
 ** the newline or row before it; on an empty composer it does nothing. So
-** one Ctrl-U at a time, the screen re-read after each, until the text is
-** gone: -5. -6 when it is still there at the deadline (land ms) or after
-** strlen + 2 of them (each kills at least a byte), or once a dialog covers
-** the composer: the keys went to it and the text sits under it.
+** one Ctrl-U at a time, the screen re-read after each, while what is left
+** is a start of the text, until the composer is empty: -5. -6 when it
+** holds anything else (a dialog over it: the keys went to it and the text
+** sits under it), or text is still there at the deadline (land ms) or
+** after strlen + 2 of them (each kills at least a byte).
 ** shortcut: an Enter Claude takes only after the signal still sends the
 ** text, read here as taken back; upgrade by watching for the turn. */
 static int
@@ -6593,10 +6623,8 @@ ty_take_back(const char *path, const char *text, long land)
 
 	for (n = 0; ; n++)
 	{
-		if (claude_gate(path) == CG_DIALOG)
-			return -6;
-		if (!composer_holds(path, text))
-			return -5;
+		if ((s = composer_left(path, text)) <= 0)
+			return s == 0 ? -5 : -6;
 		if (n == max || wall_ms() >= end ||
 		    (s = control_connect_path(path)) < 0)
 			return -6;

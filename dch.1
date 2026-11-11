@@ -733,7 +733,18 @@ A session that already has such a name keeps it;
 .B \-n
 and
 .B \-\-xray
-reach it by its exact listed name only.
+reach it by its exact listed name only:
+.B \-n
+refuses a case variant of it as a new name, and
+.B \-\-xray
+reads a case variant of it as an id.
+Other verbs
+.RB ( \-a ,
+.BR \-\-read ,
+.BR \-\-status ,
+.BR \-\-send ,
+.BR \-k )
+reach it by any case on a case\-insensitive file system, like any name.
 .TP
 .BI \-\-send " name text..."
 Type

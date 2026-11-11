@@ -12,7 +12,10 @@ forwards to the child that types: one withdrawn line, no child left);
 the parent's forward as a second signal), also with both pending at once
 (the child SIGSTOPped across the Ctrl-C); --say of text that wraps and
 spans lines (the fake's Ctrl-U kills one visual row, as Claude Code's
-does); a dialog over the text (draft_left: the keys went to the dialog);
+does); a short first line, and one line wrapped in a 40-column pane
+(#128: the row left last is under the 32 bytes a prefix check reads, and
+must still go: withdrawn, composer empty); a dialog over the text
+(draft_left: the keys went to the dialog);
 a paste that never painted in the land wait (draft_left: it may still
 paint); a second signal (exit 143 at
 once); --revive SIGTERMed while it waits for an idle Claude (interrupted,
@@ -111,11 +114,11 @@ def main():
         os.rename(os.path.join(fc, n + ".ctl.tmp"),
                   os.path.join(fc, n + ".ctl"))
 
-    def sess(base, *cmd, **ctl):
+    def sess(base, *cmd, size="100x30", **ctl):
         n = "%s%s" % (base, TAG)
         names.append(n)
         setctl(n, **ctl)
-        subprocess.run([DCH, "--spawn", n, "--size", "100x30"] + list(cmd),
+        subprocess.run([DCH, "--spawn", n, "--size", size] + list(cmd),
                        capture_output=True, check=True)
         return n
 
@@ -149,6 +152,10 @@ def main():
         """The composer line holds text."""
         return any(l.startswith("❯") and text in l.replace("\xa0", " ")
                    for l in screen(n).splitlines())
+
+    def empty(n):
+        """The composer shows only the fake's placeholder."""
+        return '❯ Try "fix the tests"' in screen(n).replace("\xa0", " ")
 
     def start(*args, group=False, env=None):
         return subprocess.Popen([DCH] + list(args), stdout=subprocess.PIPE,
@@ -268,6 +275,39 @@ def main():
               until(lambda: not composer(b, "a message long enough"), 3) and
               typed(b) == [],
               lambda: ev(rc, out, err, secs, held=held, typed=typed(b)))
+
+        # --- --say: a short first line (#128). Ctrl-U takes the rows from
+        # the bottom, so "Hi," is all that is left before the last ones: a
+        # check on the text's first 32 bytes read that as gone (withdrawn)
+        pr = start("--say", b, "--json", "--", "Hi,\n\nThanks! Please "
+                   "review the change on the branch and tell me what breaks.")
+        held = until(lambda: composer(b, "Hi,"))
+        pr.send_signal(signal.SIGTERM)
+        rc, out, err, secs = finish_p(pr)
+        lines = [json.loads(l) for l in out.splitlines() if l.strip()]
+        check("--say with a short first line SIGTERMed: `withdrawn`, the "
+              "composer empty, nothing sent (%.1f s)" % secs,
+              held and rc == 1 and len(lines) == 1 and
+              lines[0].get("reason") == "withdrawn" and
+              until(lambda: empty(b), 3) and typed(b) == [],
+              lambda: ev(rc, out, err, secs, held=held, typed=typed(b),
+                         screen=screen(b)[-200:]))
+
+        # --- --run: one line wrapped in a 40-column pane (#128). Its first
+        # row, "word00 … word04", squeezes to 30 bytes: under the 32
+        w = sess("vnarrow", "claude", size="40x30", eat_enters=99)
+        sw = up(w)
+        pr = start("--run", w, *("word%02d" % i for i in range(20)))
+        held = until(lambda: composer(w, "word00 word01"))
+        pr.send_signal(signal.SIGTERM)
+        rc, out, err, secs = finish_p(pr)
+        check("--run of one line wrapped at 40 columns SIGTERMed: "
+              "`withdrawn`, the composer empty, nothing sent (%.1f s)" % secs,
+              held and rc == 1 and
+              err.startswith("dch: %s: withdrawn — " % w) and
+              until(lambda: empty(w), 3) and typed(w) == [],
+              lambda: ev(rc, out, err, secs, up=bool(sw), held=held,
+                         typed=typed(w), screen=screen(w)[-200:]))
 
         # --- --say: the child holds the tty's SIGINT and the forward at once
         # (a Ctrl-C to the group while the child is not scheduled): it must
