@@ -1067,14 +1067,18 @@ clip), or a `--title` on the command with its ref on the command
 or in the output. An orphan result, a forged or orphaned shell block, an error,
 a fence, a diff, a listing command (`rg`, `grep`, `ls`, ...), a file printed
 from outside the cwd, a heading with an empty title, and more than 3 headings
-of one shape never define. The command counts in every simple command of its
-line (split at `;`, `&`, `&&`, `|`, `||`, parentheses), past env assignments
-and `sudo`, `env`, `command`, `xargs`, `nice` and `time`, and inside `sh -c
-'…'` (`sh`, `bash`, `zsh`, `dash`, `ksh`; `-lc` too). A printed file is
+of one shape never define. The command counts in every simple command of it
+(split at `;`, `&`, `&&`, `|`, `||`, parentheses and newlines; a here-doc's
+body is not a command), past env assignments, `{`, `!`, `if`, `then`, `elif`,
+`else`, `do`, `while`, `until`, and `sudo`, `doas`, `env`, `command`, `exec`,
+`xargs`, `nice`, `nohup`, `stdbuf`, `time` and `timeout`, by name or by path
+(`/usr/bin/env`). It counts inside `sh -c '…'` (`sh`, `bash`, `zsh`, `dash`,
+`ksh`; `-lc` too), `eval`, `watch` and `env -S`, and inside `$(…)` and
+backquotes, quoted or not. A printed file is
 outside the cwd when its path, made absolute against the cwd or the directory
-an earlier `cd` went to, leaves the cwd (`/etc/x`, `../x`, a `~/` path read
-against `HOME`), when it holds `$` or a backquote, or after a `cd` to a place
-it cannot follow (`cd`, `cd $X`, `cd ~/x`).
+an earlier `cd` or `pushd` went to, leaves the cwd (`/etc/x`, `../x`, a `~/`
+path read against `HOME`), when it holds `$` or a backquote, or after a `cd`
+to a place it cannot follow (`cd`, `cd $X`, `cd ~/x`, `pushd +1`).
 
 `dch --xray <n> --ref <ref> --json` streams one ref's
 lines as NDJSON, each with `schema:1`: `first` (the key, `mode`, `scope` and

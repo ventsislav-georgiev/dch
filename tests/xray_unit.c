@@ -2368,6 +2368,116 @@ t_resolve(void)
 	(void)!system(cmd);
 }
 
+/* ---- definition exclusions on the command (#1, #3, #4; #164) ------------- */
+
+/* 1 when a paired Bash call of cmd in /home/demo/proj printing the heading
+** "# #831 Title" defines #831 */
+static int
+defines(const char *cmd)
+{
+	static const char res[] = "{\"type\":\"user\",\"cwd\":\"/home/demo/proj\","
+	                          "\"message\":{\"content\":[{\"type\":"
+	                          "\"tool_result\",\"tool_use_id\":\"b1\","
+	                          "\"content\":\"# #831 Title\\nbody\"}]}}";
+	char *b = malloc(strlen(cmd) * 2 + 200), *o;
+	struct cnt c = {0, 0};
+	struct xr_sink k = { cnt_hit, &c };
+	struct xr_chapters ch;
+
+	if (!b)
+		return -1;
+	o = b + sprintf(b, "{\"type\":\"assistant\",\"cwd\":\"/home/demo/proj\","
+	                "\"message\":{\"content\":[{\"type\":\"tool_use\","
+	                "\"id\":\"b1\",\"name\":\"Bash\",\"input\":{\"command\":\"");
+	for (; *cmd; cmd++)
+	{
+		if (strchr("\"\\\n\t\r", *cmd))
+			*o++ = '\\';
+		*o++ = *cmd == '\n' ? 'n' : *cmd == '\t' ? 't' : *cmd == '\r' ? 'r' :
+		       *cmd;
+	}
+	strcpy(o, "\"}}]}}");
+	begin();
+	xr_claude_refs(D, &k, 1, NULL, NULL);
+	line(b);
+	line(res);
+	end(&ch);
+	xr_chapters_free(&ch);
+	free(b);
+	return c.d > 0;
+}
+
+static void
+t_excl(void)
+{
+	static const char *const stop[] = {
+		/* MED-1: a newline ends a command, like ';' */
+		"echo x\ncat ../x", "echo x\nrg 831", "cd /etc\ncat notes.md",
+		"true\ngit diff", "true\r\ngit diff", "cd /etc && \\\n  cat notes.md",
+		"echo x; \\\nrg 831",
+		/* MED-1: a wrapper by its basename */
+		"/usr/bin/env rg x", "/usr/bin/env cat /etc/x", "/usr/bin/xargs rg x",
+		"/usr/bin/sudo cat /etc/x",
+		/* LOW-5: wrappers */
+		"nohup cat ../x", "timeout 5 cat ../x", "timeout -s KILL 5 rg x",
+		"doas cat ../x", "doas -u root rg x", "exec cat ../x",
+		"exec -a n rg x", "eval cat ../x", "eval 'rg x'",
+		"eval 'cd /etc; cat notes.md'", "stdbuf -oL cat ../x",
+		"stdbuf -o L rg x", "watch cat ../x", "watch -n 1 git diff",
+		"env -S 'rg x'", "env -S 'cat /etc/x'",
+		/* LOW-5: reserved words, a { } group */
+		"{ cat ../x; }", "! cat ../x", "if true; then cat ../x; fi",
+		"for f in a; do cat ../x; done", "while true; do rg x; done",
+		/* LOW-5: command substitution in quotes, backticks */
+		"echo \"$(cat ../x)\"", "echo \"x $(rg 831) y\"", "echo `cat ../x`",
+		"echo \"`rg x`\"", "cd /etc && echo \"$(cat notes.md)\"",
+		"sh -c 'echo \"$(cat ../x)\"'",
+		/* LOW-5: pushd is followed like cd */
+		"pushd /etc && cat notes.md", "pushd /etc >/dev/null; cat notes.md",
+		"pushd +1 && cat notes.md",
+		/* a here-doc's body is skipped, the command after it is not */
+		"cat <<EOF\nbody\nEOF\nrg x", "cat <<-EOF\n\tbody\n\tEOF\ngit diff",
+		0
+	};
+	static const char *const keep[] = {
+		/* quoted newlines and substitutions stay one word */
+		"echo \"a\nrg x\"", "echo 'x\ncat ../x'", "echo '$(cat ../x)'",
+		"echo \"\\$(cat ../x)\"", "echo \"$(true)\" ok",
+		/* the shipped reading (#148) is unchanged */
+		"cat notes.md", "cd sub && cat ../n.md", "sed -n '/pat/p' notes.md",
+		"cat sub/../x", "time -p cat notes.md", "\n\ncat notes.md\n\n",
+		"gh issue view 12 \\\n  --json title",
+		/* a here-doc's body is no command; its delimiter is no file */
+		"gh pr create --title Fix --body \"$(cat <<'EOF'\n## Summary\n"
+		"rg is used\ngit diff shows\ncat /etc/x\nEOF\n)\"",
+		"cat <<EOF | gh issue create --title X --body-file -\nls a\nEOF",
+		"cd $X && cat <<EOF\nbody\nEOF",
+		/* wrappers with nothing to run, a here-string */
+		"timeout 5", "eval", "env -S", "cat <<< \"x\"",
+		/* not printers in v2.1 4.3 #1 (ruling needed, #164 report) */
+		"sed 's/a/b/' ../x.md", "sed -e 's/a/b/' /etc/x", "jq . ../x.json",
+		"tac ../x", "sort ../x", "cut -f1 ../x",
+		0
+	};
+	char m[200], *p;
+	size_t i;
+
+	for (i = 0; stop[i]; i++)
+	{
+		snprintf(m, sizeof m, "excl: stops defining: %s", stop[i]);
+		for (p = m; (p = strpbrk(p, "\n\t\r")); )
+			*p = '|';
+		CHECK(m, defines(stop[i]) == 0);
+	}
+	for (i = 0; keep[i]; i++)
+	{
+		snprintf(m, sizeof m, "excl: still defines: %s", keep[i]);
+		for (p = m; (p = strpbrk(p, "\n\t\r")); )
+			*p = '|';
+		CHECK(m, defines(keep[i]) == 1);
+	}
+}
+
 int
 main(int argc, char **argv)
 {
@@ -2398,6 +2508,7 @@ main(int argc, char **argv)
 	t_ref();
 	t_index();
 	t_caps();
+	t_excl();
 	t_cancel();
 	t_scan_caps();
 	t_scan_scope();

@@ -2015,7 +2015,9 @@ rm_scan(struct remit *r, const char *text, size_t n, int mode)
 /* ---- refs: definitions (v2.1 4.2-4.3) ------------------------------------- */
 
 /* A command's words, unquoted (a small sh reading: '…', "…", \x), with
-** their raw byte range; operators (| ; & < > ( )) are words of their own. */
+** their raw byte range; operators (| ; & < > ( ) and an unquoted newline)
+** are words of their own. \ newline is a blank; a here-doc's body is
+** skipped to its delimiter line. */
 #define SW_MAX 64
 struct sw
 {
@@ -2028,18 +2030,52 @@ struct sw
 static void
 shell_words(const char *c, size_t cl, struct sw *w)
 {
-	size_t i = 0, o = 0;
+	size_t i = 0, o = 0, hd = 0, j, dl;
+	const char *d;
 
 	w->n = 0;
 	if (!(w->b = malloc(cl + SW_MAX + 1)))
 		return;
 	while (i < cl && w->n < SW_MAX)
 	{
-		while (i < cl && (c[i] == ' ' || c[i] == '\t' || c[i] == '\n' ||
-		                  c[i] == '\r'))
-			i++;
+		while (i < cl && (c[i] == ' ' || c[i] == '\t' || c[i] == '\r' ||
+		                  (c[i] == '\\' && i + 1 < cl && c[i + 1] == '\n')))
+			i += 1 + (c[i] == '\\');
 		if (i >= cl)
 			break;
+		if (c[i] == '\n')
+		{
+			/* a newline ends the command, like ';' (one after an operator
+			** or at the start does not); a here-doc's body follows it */
+			w->rs[w->n] = i++;
+			if (hd)
+			{
+				d = w->b + w->off[hd - 1];
+				d += d[0] == '-';	/* <<-EOF */
+				for (dl = strlen(d); i < cl; i = j + 1)
+				{
+					for (; i < cl && c[i] == '\t'; i++)
+						;	/* <<- strips leading tabs */
+					for (j = i; j < cl && c[j] != '\n'; j++)
+						;
+					if (j - i == dl && !memcmp(c + i, d, dl))
+					{
+						i = j;	/* its own newline follows an operator */
+						break;
+					}
+				}
+				hd = 0;
+			}
+			if (!w->n || w->op[w->n - 1])
+				continue;
+			w->off[w->n] = o;
+			w->op[w->n] = 1;
+			w->b[o++] = '\n';
+			w->b[o++] = '\0';
+			w->re[w->n] = w->rs[w->n] + 1;
+			w->n++;
+			continue;
+		}
 		w->rs[w->n] = i;
 		w->off[w->n] = o;
 		w->op[w->n] = strchr("|;&<>()", c[i]) != NULL && c[i];
@@ -2074,6 +2110,9 @@ shell_words(const char *c, size_t cl, struct sw *w)
 					w->b[o++] = c[i++];
 			}
 		w->b[o++] = '\0';
+		if (!w->op[w->n] && w->n && w->op[w->n - 1] &&
+		    !strcmp(w->b + w->off[w->n - 1], "<<"))
+			hd = w->n + 1;	/* the here-doc's delimiter word */
 		w->re[w->n++] = i;
 	}
 }
@@ -2092,29 +2131,43 @@ is_assign(const char *s)
 	return *p == '=';
 }
 
-/* Words that only run the command after them, and the letters of their
-** options that take a value (`sudo -u root cat`, `xargs -n 1 rg`). */
-static const struct { const char *w, *argopt; } wraps[] = {
-	{ "sudo", "ugCDhprTt" }, { "env", "uSCP" }, { "command", "" },
-	{ "xargs", "IJLnPsEdaR" }, { "nice", "n" }, { "time", "" }, { 0, 0 }
+/* Words that only run the command after them, the letters of their
+** options that take a value (`sudo -u root cat`, `xargs -n 1 rg`), and
+** the words they take before it (timeout's duration); -1: they run the
+** rest as one shell line (`eval`, `watch`). */
+static const struct { const char *w, *argopt; int pos; } wraps[] = {
+	{ "sudo", "ugCDhprTt", 0 }, { "env", "uSCP", 0 }, { "command", "", 0 },
+	{ "xargs", "IJLnPsEdaR", 0 }, { "nice", "n", 0 }, { "time", "", 0 },
+	{ "nohup", "", 0 }, { "doas", "auC", 0 }, { "exec", "a", 0 },
+	{ "stdbuf", "ioe", 0 }, { "timeout", "sk", 1 }, { "eval", "", -1 },
+	{ "watch", "nq", -1 }, { 0, 0, 0 }
 };
 
+static const char *base(const char *s);
+static int in_list(const char *s, const char *const *v);
+
 /* The first command word of the simple command w[k..e): past env
-** assignments and the wraps with their options. e when there is none. */
+** assignments, reserved words and the wraps with their options. e when
+** there is none. *line: the words from it on are one shell line
+** (`eval …`, `watch …`, `env -S '…'`). */
 static size_t
-cmd_head(const struct sw *w, size_t k, size_t e)
+cmd_head(const struct sw *w, size_t k, size_t e, int *line)
 {
+	static const char *const resv[] = { "{", "!", "if", "then", "elif",
+	                                    "else", "do", "while", "until", 0 };
 	const char *o;
 	size_t j;
+	int p;
 
+	*line = 0;
 	while (k < e)
 	{
-		if (is_assign(SWD(w, k)))
+		if (is_assign(SWD(w, k)) || in_list(SWD(w, k), resv))
 		{
 			k++;
 			continue;
 		}
-		for (j = 0; wraps[j].w && strcmp(SWD(w, k), wraps[j].w); j++)
+		for (j = 0; wraps[j].w && strcmp(base(SWD(w, k)), wraps[j].w); j++)
 			;
 		if (!wraps[j].w)
 			return k;
@@ -2125,8 +2178,20 @@ cmd_head(const struct sw *w, size_t k, size_t e)
 				k++;
 				break;
 			}
+			if (!strcmp(o, "-S") && !strcmp(wraps[j].w, "env"))
+			{
+				*line = k + 1 < e;
+				return k + 1;
+			}
 			if (o[1] && !o[2] && strchr(wraps[j].argopt, o[1]))
 				k++;
+		}
+		for (p = wraps[j].pos; p > 0 && k < e; p--)
+			k++;
+		if (wraps[j].pos < 0)
+		{
+			*line = k < e;
+			return k;
 		}
 	}
 	return e;
@@ -2207,9 +2272,9 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 	static const char *const shells[] = { "sh", "bash", "zsh", "dash", "ksh",
 	                                      0 };
 	struct sw w;
-	char cdb[XR_KEY_MAX + 1];
-	size_t s, e, h, k, sub;
-	int r = X_NONE, sedn, skip;
+	char cdb[XR_KEY_MAX + 1], q;
+	size_t s, e, h, k, sub, i, j, t, end;
+	int r = X_NONE, sedn, skip, line;
 	const char *c0, *a;
 
 	shell_words(cmd, cl, &w);
@@ -2218,23 +2283,55 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 		free(w.b);
 		return X_LIST;	/* no memory, or words past SW_MAX unseen */
 	}
-	/* every simple command: split on ; & && | || ( ) */
+	/* every simple command: split on ; & && | || ( ) and newlines */
 	for (s = 0; s < w.n && !r; s = e + 1)
 	{
 		for (e = s; e < w.n && !(w.op[e] && !strchr("<>", SWD(&w, e)[0]));
 		     e++)
 			;
-		if ((h = cmd_head(&w, s, e)) >= e)
+		/* $(…) and `…` in quotes or a word run too: their commands,
+		** classified alike (an unquoted $( is split at the ( already) */
+		end = e > s ? w.re[e - 1] : 0;
+		for (i = e > s ? w.rs[s] : 0, q = 0; i < end && !r; i++)
+			if (cmd[i] == '\\' && q != '\'')
+				i++;
+			else if ((cmd[i] == '\'' && q != '"') ||
+			         (cmd[i] == '"' && q != '\''))
+				q = q ? 0 : cmd[i];
+			else if (q != '\'' && (cmd[i] == '`' ||
+			         (cmd[i] == '$' && i + 1 < end && cmd[i + 1] == '(')))
+			{
+				t = i + 1 + (cmd[i] == '$');
+				for (j = t; cmd[i] == '`' && j < end && cmd[j] != '`';
+				     j += 1 + (cmd[j] == '\\'))
+					;
+				j = cmd[i] == '$' || j > end ? end : j;
+				r = depth >= 3 ? X_LIST :
+				    excl_in(cmd + t, j - t, cwd, cur, lost, depth + 1);
+				i = j;
+			}
+		if (r || (h = cmd_head(&w, s, e, &line)) >= e)
 			continue;
+		if (line)
+		{
+			/* eval/watch/env -S: the words from h on, re-read as a line */
+			for (k = h; k + 1 < e; k++)
+				w.b[w.off[k + 1] - 1] = ' ';
+			r = depth >= 3 ? X_LIST :
+			    excl_in(SWD(&w, h), strlen(SWD(&w, h)), cwd, cur, lost,
+			            depth + 1);
+			continue;
+		}
 		c0 = base(SWD(&w, h));
-		if (!strcmp(c0, "cd"))
+		if (!strcmp(c0, "cd") || !strcmp(c0, "pushd"))
 		{
 			/* later relative arguments resolve where cd went */
 			for (k = h + 1; k < e && SWD(&w, k)[0] == '-' && SWD(&w, k)[1];
 			     k++)
 				;
 			a = k < e && !w.op[k] ? SWD(&w, k) : "";
-			lost = !a[0] || a[0] == '~' || a[0] == '-' || strpbrk(a, "$`") ||
+			lost = !a[0] || a[0] == '~' || a[0] == '-' || a[0] == '+' ||
+			       strpbrk(a, "$`") ||
 			       !path_norm(a, strlen(a), lost ? NULL : cur, cdb,
 			                  sizeof cdb) || cdb[0] != '/';
 			cur = lost ? NULL : cdb;
@@ -2282,13 +2379,13 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 			if (!in_list(c0, print) && !(!strcmp(c0, "sed") && sedn))
 				continue;
 			/* the file arguments: not options, not sed's or awk's
-			** script, not a > target; a < source is one */
+			** script, not a > target or a << delimiter; a < source is one */
 			skip = !strcmp(c0, "sed") || !strcmp(c0, "awk");
 			for (k = h + 1; k < e; k++)
 			{
 				a = SWD(&w, k);
 				if (w.op[k])
-					k += a[0] == '>';
+					k += a[0] == '>' || !strcmp(a, "<<");
 				else if (a[0] == '-' && a[1])
 					;
 				else if (skip)
@@ -2911,7 +3008,8 @@ defs_find(const struct dsrc *s, struct dset *ds)
 				;
 			if (i == nseen[sh] && nseen[sh] == 3)
 			{
-				/* #4: more than 3 distinct D1/D4 keys of one shape */
+				/* #4: more than 3 distinct D1/D4 keys of one shape;
+				** D2 and D3 still apply (ruling Q7) */
 				free(t.passage);
 				dfree(ds);
 				break;
