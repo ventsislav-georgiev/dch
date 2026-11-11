@@ -34,7 +34,8 @@ State lives in $FAKE_CLAUDE_DIR:
                     cfg), line (typed), turn (a message taken),
                     enter_dialog (Enter while a prompt is up: it would have
                     answered it), enter_eaten, enter_folded, key (typed while a screen
-                    knob is up), exit
+                    knob is up), paste (a paste's start, before lag_ms),
+                    exit
 <session> is DCH_SESSION, which the master sets for its child.
 """
 import json, os, select, signal, subprocess, sys, termios, time
@@ -300,6 +301,7 @@ while True:
                 if seq == b"\033[200~":
                     in_paste = True
                     pstart = len(draft)
+                    log(ev="paste")    # before the lag: it has the paste
                     # busy right after --resume: a paste shows this late
                     time.sleep(c.get("lag_ms", 0) / 1000.0)
                 elif seq == b"\033[201~":
