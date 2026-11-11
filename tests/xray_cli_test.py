@@ -920,15 +920,15 @@ def ref_lines(out):
         return None
 
 
-def history(name, sid, cfg):
+def history(name, sid, cfg, cwd="/home/demo/proj"):
     sockdir = os.path.join(T, "dch-%d" % os.getuid())
     hdir = os.path.join(T, "state", "dch", "sessions",
                         sockdir.replace("/", "-"))
     os.makedirs(hdir, exist_ok=True)
-    rec = {"name": name, "cwd": "/home/demo/proj", "end": "exited",
+    rec = {"name": name, "cwd": cwd, "end": "exited",
            "argv": ["claude"], "started": 1794299400, "updated": 1794300000,
            "ended": 1794300000, "sock_dir": sockdir,
-           "agent": {"session_id": sid, "cwd": "/home/demo/proj",
+           "agent": {"session_id": sid, "cwd": cwd,
                      "config_dir": cfg}}
     with open(os.path.join(hdir, name + ".json"), "w") as f:
         f.write(json.dumps(rec) + "\n")
@@ -988,6 +988,16 @@ def test_refs():
           canary not in tr and "look at" not in tr, tr[-400:])
     new = sorted(set(files(T)) - set(before) - {trace})
     check("ref: nothing written by a --ref", not new, new)
+
+    # NIT-7 (#150): a relative path that only outgrows the key against the
+    # session's cwd is no ref, as main's check says for a short one (exit 2)
+    history("xr-deep", RSID, cfg, "/" + "d" * 1000)
+    r = dch("--xray", "xr-deep", "--ref", "src/" + "a" * 40 + ".c:3",
+            "--scope", "session", "--json")
+    check("ref: a relative path past the key cap against a deep cwd is "
+          "not a ref (exit 2)",
+          r.returncode == 2 and r.stderr == "dch: not a ref\n" and
+          not r.stdout, (r.returncode, r.stderr, r.stdout[:200]))
 
     # a big transcript: light stops at its budget, full reads it all
     pad = "x" * 900

@@ -750,7 +750,9 @@ one
 line per title, at most 8; output capped at 4 MiB, then
 .BR why:\(dqoutput\(dq );
 .B \-\-scope session
-is required (\fBproject\fR and \fBall\fR come later and exit 2).
+is required (\fBproject\fR, also the default with no
+.BR \-\-scope ,
+and \fBall\fR come later and exit 2).
 A reader that closes the pipe ends any form at dch's next write (at most
 250 ms later for
 .BR \-\-ref ),

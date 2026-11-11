@@ -11189,6 +11189,15 @@ xr_failed(void)
 	return 3;
 }
 
+/* a relative path that outgrows the key only against the session's cwd
+** fails here, not in main's cwd-less check: still 3.1's "not a ref" */
+static int
+xr_not_ref(void)
+{
+	fputs("dch: not a ref\n", stderr);
+	return 2;
+}
+
 /* A one-shot answer's exit: written (ok), or the reader left (EPIPE, a
 ** cancel: 3.4), else a failure. */
 static int
@@ -11243,8 +11252,9 @@ xr_claude_ref(const char *cfg, const char *sid, const char *session,
 		return xr_no_corpus();
 	if (!project[0])
 		xr_project_key(label, project, sizeof project);
-	if (!xr_ref_parse(q->text, label, &sp) ||
-	    !(sc = xr_scan_new(stdout, sp.key, session, project, live, q->full,
+	if (!xr_ref_parse(q->text, label, &sp))
+		return xr_not_ref();
+	if (!(sc = xr_scan_new(stdout, sp.key, session, project, live, q->full,
 	                       0, q->budget, xr_t0)))
 		return xr_failed();
 	if (xr_scan_first(sc, sid, sp.shape, xr_span_text(&sp)) != 0)
@@ -11380,8 +11390,9 @@ xr_shell_ref(const struct xr_target *t, const struct xr_refq *q,
 	if (fr != 0 || (rs.status & (DCH_RING_S_OFF | DCH_RING_S_PAUSED)))
 		return xr_no_corpus();
 	xr_project_key(label, project, sizeof project);
-	if (!xr_ref_parse(q->text, label, &sp) ||
-	    !(f.acc = calloc(1, sizeof *f.acc)))
+	if (!xr_ref_parse(q->text, label, &sp))
+		return xr_not_ref();
+	if (!(f.acc = calloc(1, sizeof *f.acc)))
 		return xr_failed();
 	if (!(f.sc = xr_scan_new(stdout, sp.key, t->name, project, 1, q->full,
 	                         1, q->budget, xr_t0)))

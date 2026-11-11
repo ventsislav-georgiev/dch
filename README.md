@@ -966,7 +966,12 @@ letter and a digit), a file path (`src/main.c:12`, keyed absolute against the
 session's cwd; `~/` is kept as written with `..` at `~` dropped, `~user/` is no
 path, and a relative path seen before any cwd is none) or a URL (a GitHub
 issue or pull URL keys as `owner/repo#n`,
-a commit URL as the commit). A bare `repo#n` needs a repo of at least 3
+a commit URL as the commit; only one that starts exactly `https://github.com/`
+does, so `https://GitHub.com/o/r/pull/7` stays a plain URL, as Prosper's pull
+links validate it). Numbers have set lengths: a bare `#n` takes 2 to 6 digits
+(`#5` and `#0` are none, `#00` is one), `repo#n` and `owner/repo#n` 1 to 7
+(`dch#5` and `o/r#0` are refs), a ticket 1 to 6, a GitHub URL 1 to 9. A number
+keys as written: `#00012` and `#12` are two refs. A bare `repo#n` needs a repo of at least 3
 characters that starts with a letter, ends with a letter or digit and is not a
 glue word or standard (`issue#12`, `step#3`, `PKCS#12`, `PR#831`, `a#12` are
 none; `pre-#831` is the issue `#831`). A ref needs a word boundary on both sides,
@@ -1004,7 +1009,9 @@ lines as NDJSON, each with `schema:1`: `first` (the key, `mode` and
 `budget_ms`), then `definition` and `mention` lines, a `tally` per file,
 `progress` at most every 250 ms, and `done` last (`partial`, `why`, `counts`,
 `files`, `bytes`, `lines_too_long`). `<ref>` is 1 to 256 bytes of UTF-8 with no
-control or bidi character and must parse as exactly one ref. The default is a
+control character and none of the bidi controls U+200E, U+200F, U+202A to
+U+202E and U+2066 to U+2069 (`dch: bad ref`), and must parse as exactly one
+ref (`dch: not a ref`), relative paths against the session's cwd. The default is a
 light scan: it stops after the first result, or after `--budget-ms` (50 to
 300, default 300) with `why: "budget"`; on a live shell it prints titles and
 counts only. `--full` reads the whole corpus (up to 10 s, `why: "time"`); a `--budget-ms`
@@ -1015,7 +1022,8 @@ at most 8 per file. The output is capped at 4 MiB with room kept for the
 `tally` and `done`; past the cap the scan stops and `done` says
 `partial: true, why: "output"`.
 `--scope project` and `--scope all` come with a later release and exit 2;
-until then `--scope session` must be given. A session with no corpus exits 1
+until then `--scope session` must be given. No `--scope` means `project`, the
+default in every release, so it exits 2 with the `--scope project` message. A session with no corpus exits 1
 with `dch: no x-ray corpus`. Nothing is written to disk: the index lives in the
 calling process for that one query. A reader that closes the pipe cancels the
 scan: dch stops at its next write, at most 250 ms later (the `progress`

@@ -896,6 +896,28 @@ t_ref(void)
 	      !xr_ref_parse("#831 #832", NULL, &sp) &&
 	      !xr_ref_parse("see #831", NULL, &sp) &&
 	      !xr_ref_parse("UTF-8", NULL, &sp) && !xr_ref_parse("", NULL, &sp));
+	/* README's number lengths (#150 NIT-1): #n 2-6, repo#n 1-7, ticket
+	** 1-6, a GitHub URL 1-9; a number keys as written */
+	CHECK("ref: number lengths as README says (#150)",
+	      !xr_ref_parse("#5", NULL, &sp) && !xr_ref_parse("#0", NULL, &sp) &&
+	      xr_ref_parse("#123456", NULL, &sp) &&
+	      !xr_ref_parse("#1234567", NULL, &sp) &&
+	      xr_ref_parse("#00012", NULL, &sp) &&
+	      !strcmp(sp.key, "issue:#00012") &&
+	      xr_ref_parse("o/r#0", NULL, &sp) && !strcmp(sp.key, "pull:o/r#0") &&
+	      xr_ref_parse("dch#1234567", NULL, &sp) &&
+	      !xr_ref_parse("dch#12345678", NULL, &sp) &&
+	      xr_ref_parse("PROJ-123456", NULL, &sp) &&
+	      !xr_ref_parse("PROJ-1234567", NULL, &sp) &&
+	      xr_ref_parse("https://github.com/o/r/pull/123456789", NULL, &sp) &&
+	      !strcmp(sp.key, "pull:o/r#123456789") &&
+	      xr_ref_parse("https://github.com/o/r/pull/1234567890", NULL, &sp) &&
+	      sp.shape == XR_URL);
+	/* 2.3's U is validated like Prosper's pullURL: host exactly
+	** github.com (#150 NIT-8, spec over QA) */
+	CHECK("ref: a GitHub.com URL stays a url",
+	      xr_ref_parse("https://GitHub.com/o/r/pull/7", NULL, &sp) &&
+	      sp.shape == XR_URL);
 	memset(big, 'a', sizeof big);
 	big[256] = '\0';
 	CHECK("ref value: 256 bytes ok, 257 refused", xr_ref_ok(big) &&
@@ -906,6 +928,10 @@ t_ref(void)
 	      !xr_ref_ok("a\xe2\x81\xa6") && !xr_ref_ok("a\xe2\x80\x8f") &&
 	      !xr_ref_ok("a\xff"));
 	CHECK("ref value: a dash-led value is accepted", xr_ref_ok("-831"));
+	/* 3.1 lists the bidi controls; U+061C is not one of them (#150 NIT-5),
+	** so it is no "bad ref", only no ref */
+	CHECK("ref value: U+061C passes the value check, then is no ref",
+	      xr_ref_ok("#831\xd8\x9c") && !xr_ref_parse("#831\xd8\x9c", NULL, &sp));
 }
 
 /* K3 (mutant 3's unit half): an index is counted live until freed */
