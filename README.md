@@ -1074,7 +1074,13 @@ body is not a command), past env assignments, `{`, `!`, `if`, `then`, `elif`,
 `xargs`, `nice`, `nohup`, `stdbuf`, `time` and `timeout`, by name or by path
 (`/usr/bin/env`). It counts inside `sh -c '…'` (`sh`, `bash`, `zsh`, `dash`,
 `ksh`; `-lc` too), `eval`, `watch` and `env -S`, and inside `$(…)` and
-backquotes, quoted or not. A printed file is
+backquotes, quoted or not. A search or a printed file found only inside
+`$(…)` or backquotes still leaves the command's `--title` to define: its text
+feeds the command, it is not the output. A command of more than 256 words
+never defines. The file printers are `cat`, `head`, `tail`, `bat`, `batcat`,
+`less`, `more`, `nl`, `awk`, `sed`, `jq`, `yq`, `tac`, `sort`, `cut`, `uniq`,
+`rev`, `column`, `fold`, `fmt`, `glow`, `zcat` and `gzcat`; with no file
+argument (`… | jq .`) they print their input and define. A printed file is
 outside the cwd when its path, made absolute against the cwd or the directory
 an earlier `cd` or `pushd` went to, leaves the cwd (`/etc/x`, `../x`, a `~/`
 path read against `HOME`), when it holds `$` or a backquote, or after a `cd`

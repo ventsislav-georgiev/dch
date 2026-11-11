@@ -2018,13 +2018,13 @@ rm_scan(struct remit *r, const char *text, size_t n, int mode)
 ** their raw byte range; operators (| ; & < > ( ) and an unquoted newline)
 ** are words of their own. \ newline is a blank; a here-doc's body is
 ** skipped to its delimiter line. */
-#define SW_MAX 64
+#define SW_MAX 256	/* one word more marks a command past the cap */
 struct sw
 {
 	char *b;
 	size_t n;
-	size_t off[SW_MAX], rs[SW_MAX], re[SW_MAX];
-	char op[SW_MAX];
+	size_t off[SW_MAX + 1], rs[SW_MAX + 1], re[SW_MAX + 1];
+	char op[SW_MAX + 1];
 };
 
 static void
@@ -2034,9 +2034,9 @@ shell_words(const char *c, size_t cl, struct sw *w)
 	const char *d;
 
 	w->n = 0;
-	if (!(w->b = malloc(cl + SW_MAX + 1)))
-		return;
-	while (i < cl && w->n < SW_MAX)
+	if (!(w->b = malloc(cl + SW_MAX + 2)))
+		return;	/* a word adds at most its NUL to the bytes it reads */
+	while (i < cl && w->n <= SW_MAX)
 	{
 		while (i < cl && (c[i] == ' ' || c[i] == '\t' || c[i] == '\r' ||
 		                  (c[i] == '\\' && i + 1 < cl && c[i + 1] == '\n')))
@@ -2066,6 +2066,10 @@ shell_words(const char *c, size_t cl, struct sw *w)
 				}
 				hd = 0;
 			}
+			for (j = i; j < cl && strchr(" \t\r\n", c[j]); j++)
+				;
+			if (j >= cl)
+				break;	/* a trailing newline ends nothing */
 			if (!w->n || w->op[w->n - 1])
 				continue;
 			w->off[w->n] = o;
@@ -2258,7 +2262,9 @@ arg_outside(const char *a, const char *cur, int lost, const char *cwd)
 	return !strcmp(n, "..") || !strncmp(n, "../", 3);
 }
 
-enum { X_NONE, X_QUOTE = 1, X_DIFF = 3, X_LIST = 4 };
+/* X_SUB: found only inside $(…) or backquotes, whose output is the outer
+** command's input: D3 (argv) still applies */
+enum { X_NONE, X_QUOTE = 1, X_DIFF = 3, X_LIST = 4, X_SUB = 8 };
 
 /* excluded() on cmd run in cur (lost: unknown), depth sh -c levels in. */
 static int
@@ -2268,17 +2274,21 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 	static const char *const list[] = { "rg", "grep", "egrep", "fgrep", "ag",
 	                                    "ack", "fd", "find", "ls", 0 };
 	static const char *const print[] = { "cat", "head", "tail", "bat",
-	                                     "less", "awk", "nl", "more", 0 };
+	                                     "less", "awk", "nl", "more", "sed",
+	                                     "jq", "tac", "sort", "cut", "zcat",
+	                                     "gzcat", "batcat", "glow", "yq",
+	                                     "uniq", "rev", "column", "fold",
+	                                     "fmt", 0 };
 	static const char *const shells[] = { "sh", "bash", "zsh", "dash", "ksh",
 	                                      0 };
 	struct sw w;
 	char cdb[XR_KEY_MAX + 1], q;
 	size_t s, e, h, k, sub, i, j, t, end;
-	int r = X_NONE, sedn, skip, line;
+	int r = X_NONE, sr = X_NONE, x, skip, line;
 	const char *c0, *a;
 
 	shell_words(cmd, cl, &w);
-	if (!w.b || w.n == SW_MAX)
+	if (!w.b || w.n > SW_MAX)
 	{
 		free(w.b);
 		return X_LIST;	/* no memory, or words past SW_MAX unseen */
@@ -2292,7 +2302,7 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 		/* $(…) and `…` in quotes or a word run too: their commands,
 		** classified alike (an unquoted $( is split at the ( already) */
 		end = e > s ? w.re[e - 1] : 0;
-		for (i = e > s ? w.rs[s] : 0, q = 0; i < end && !r; i++)
+		for (i = e > s ? w.rs[s] : 0, q = 0; i < end && !sr; i++)
 			if (cmd[i] == '\\' && q != '\'')
 				i++;
 			else if ((cmd[i] == '\'' && q != '"') ||
@@ -2306,20 +2316,25 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 				     j += 1 + (cmd[j] == '\\'))
 					;
 				j = cmd[i] == '$' || j > end ? end : j;
-				r = depth >= 3 ? X_LIST :
+				x = depth >= 3 ? X_LIST :
 				    excl_in(cmd + t, j - t, cwd, cur, lost, depth + 1);
+				sr = x & ~X_SUB;
 				i = j;
 			}
-		if (r || (h = cmd_head(&w, s, e, &line)) >= e)
+		if ((h = cmd_head(&w, s, e, &line)) >= e)
 			continue;
 		if (line)
 		{
 			/* eval/watch/env -S: the words from h on, re-read as a line */
 			for (k = h; k + 1 < e; k++)
 				w.b[w.off[k + 1] - 1] = ' ';
-			r = depth >= 3 ? X_LIST :
+			x = depth >= 3 ? X_LIST :
 			    excl_in(SWD(&w, h), strlen(SWD(&w, h)), cwd, cur, lost,
 			            depth + 1);
+			if (x & X_SUB)
+				sr = sr ? sr : x & ~X_SUB;
+			else
+				r = x;
 			continue;
 		}
 		c0 = base(SWD(&w, h));
@@ -2344,9 +2359,13 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 				if (SWD(&w, k)[0] == '-' && SWD(&w, k)[1] != '-' &&
 				    strchr(SWD(&w, k), 'c'))
 				{
-					r = depth >= 3 || w.op[k + 1] ? X_LIST :
+					x = depth >= 3 || w.op[k + 1] ? X_LIST :
 					    excl_in(SWD(&w, k + 1), strlen(SWD(&w, k + 1)), cwd,
 					            cur, lost, depth + 1);
+					if (x & X_SUB)
+						sr = sr ? sr : x & ~X_SUB;
+					else
+						r = x;
 					break;
 				}
 			continue;
@@ -2374,13 +2393,13 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 		}
 		else
 		{
-			for (sedn = 0, k = h + 1; k < e; k++)
-				sedn |= !strncmp(SWD(&w, k), "-n", 2);
-			if (!in_list(c0, print) && !(!strcmp(c0, "sed") && sedn))
+			if (!in_list(c0, print))
 				continue;
-			/* the file arguments: not options, not sed's or awk's
-			** script, not a > target or a << delimiter; a < source is one */
-			skip = !strcmp(c0, "sed") || !strcmp(c0, "awk");
+			/* the file arguments: not options, not the script or filter
+			** of sed, awk, jq or yq, not a > target or a << delimiter; a <
+			** source is one */
+			skip = !strcmp(c0, "sed") || !strcmp(c0, "awk") ||
+			       !strcmp(c0, "jq") || !strcmp(c0, "yq");
 			for (k = h + 1; k < e; k++)
 			{
 				a = SWD(&w, k);
@@ -2396,7 +2415,7 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 		}
 	}
 	free(w.b);
-	return r;
+	return r ? r : sr ? sr | X_SUB : X_NONE;
 }
 
 /* Exclusions #1, #3 and #4 on the paired command (v2.1 4.3), over every
@@ -2986,13 +3005,14 @@ defs_find(const struct dsrc *s, struct dset *ds)
 	struct olines o;
 	size_t k;
 	char seen[6][3][XR_KEY_MAX + 16];
-	int nseen[6] = {0};
+	int nseen[6] = {0}, x;
 
 	memset(ds, 0, sizeof *ds);
-	if (s->failed || (s->cmd && excluded(s->cmd, s->cl, s->cwd)))
-		return;		/* #5; #1, #3, #4 */
+	if (s->failed || ((x = s->cmd ? excluded(s->cmd, s->cl, s->cwd) : X_NONE) &&
+	                  !(x & X_SUB)))
+		return;		/* #5; #1, #3, #4 (only in a $(…): D3 still runs) */
 	memset(&o, 0, sizeof o);
-	if (olines(s->out, s->ol, &o) == 0)
+	if (!x && olines(s->out, s->ol, &o) == 0)
 	{
 		for (k = 0; k < o.n; k++)
 		{
@@ -3023,7 +3043,7 @@ defs_find(const struct dsrc *s, struct dset *ds)
 		}
 	}
 	olines_free(&o);
-	if (s->d2ok && ds->n < XR_DEFS)
+	if (!x && s->d2ok && ds->n < XR_DEFS)
 		d2(s->d2out ? s->d2out : s->out, s->d2out ? s->d2l : s->ol,
 		   s->cmd, s->cl, s->cwd, ds);
 	if (s->bash && s->cmd && !s->noexit && ds->n < XR_DEFS)

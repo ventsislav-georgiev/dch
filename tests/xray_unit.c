@@ -2370,22 +2370,30 @@ t_resolve(void)
 
 /* ---- definition exclusions on the command (#1, #3, #4; #164) ------------- */
 
-/* 1 when a paired Bash call of cmd in /home/demo/proj printing the heading
-** "# #831 Title" defines #831 */
-static int
-defines(const char *cmd)
+static void
+rule_hit(void *ctx, const struct xr_hit *h)
 {
-	static const char res[] = "{\"type\":\"user\",\"cwd\":\"/home/demo/proj\","
-	                          "\"message\":{\"content\":[{\"type\":"
-	                          "\"tool_result\",\"tool_use_id\":\"b1\","
-	                          "\"content\":\"# #831 Title\\nbody\"}]}}";
-	char *b = malloc(strlen(cmd) * 2 + 200), *o;
-	struct cnt c = {0, 0};
-	struct xr_sink k = { cnt_hit, &c };
+	if (h->rule && h->rule[0] == 'D' && h->rule[1] >= '1' && h->rule[1] <= '4')
+		*(int *)ctx |= 1 << (h->rule[1] - '1');
+}
+
+/* The rules (D1 1, D2 2, D3 4, D4 8) a paired Bash call of cmd in
+** /home/demo/proj defines by, its output out (JSON-escaped; NULL: the
+** heading "# #831 Title") */
+static int
+defines_out(const char *cmd, const char *out)
+{
+	char res[400], *b = malloc(strlen(cmd) * 2 + 200), *o;
+	int rules = 0;
+	struct xr_sink k = { rule_hit, &rules };
 	struct xr_chapters ch;
 
 	if (!b)
 		return -1;
+	snprintf(res, sizeof res, "{\"type\":\"user\",\"cwd\":\"/home/demo/proj\","
+	         "\"message\":{\"content\":[{\"type\":\"tool_result\","
+	         "\"tool_use_id\":\"b1\",\"content\":\"%s\"}]}}",
+	         out ? out : "# #831 Title\\nbody");
 	o = b + sprintf(b, "{\"type\":\"assistant\",\"cwd\":\"/home/demo/proj\","
 	                "\"message\":{\"content\":[{\"type\":\"tool_use\","
 	                "\"id\":\"b1\",\"name\":\"Bash\",\"input\":{\"command\":\"");
@@ -2404,7 +2412,13 @@ defines(const char *cmd)
 	end(&ch);
 	xr_chapters_free(&ch);
 	free(b);
-	return c.d > 0;
+	return rules;
+}
+
+static int
+defines(const char *cmd)
+{
+	return defines_out(cmd, NULL);
 }
 
 static void
@@ -2437,6 +2451,12 @@ t_excl(void)
 		"pushd +1 && cat notes.md",
 		/* a here-doc's body is skipped, the command after it is not */
 		"cat <<EOF\nbody\nEOF\nrg x", "cat <<-EOF\n\tbody\n\tEOF\ngit diff",
+		/* ruling 1: printers of #1 beyond v2.1's list, a file outside */
+		"sed 's/a/b/' ../x.md", "sed -e 's/a/b/' /etc/x", "jq . ../x.json",
+		"jq -r .title /etc/x.json", "tac ../x", "sort ../x", "cut -f1 ../x",
+		"zcat /etc/x.gz", "gzcat ../x.gz", "batcat /etc/x",
+		"glow ../README.md", "yq '.a' /etc/x.yaml", "uniq ../x", "rev ../x",
+		"column -t /etc/x", "fold -w 80 ../x", "fmt ../x",
 		0
 	};
 	static const char *const keep[] = {
@@ -2454,12 +2474,27 @@ t_excl(void)
 		"cd $X && cat <<EOF\nbody\nEOF",
 		/* wrappers with nothing to run, a here-string */
 		"timeout 5", "eval", "env -S", "cat <<< \"x\"",
-		/* not printers in v2.1 4.3 #1 (ruling needed, #164 report) */
-		"sed 's/a/b/' ../x.md", "sed -e 's/a/b/' /etc/x", "jq . ../x.json",
-		"tac ../x", "sort ../x", "cut -f1 ../x",
+		/* ruling 1: a printer of a file inside the cwd still defines */
+		"sed 's/a/b/' notes.md", "jq . x.json", "sort notes.md",
 		0
 	};
-	char m[200], *p;
+	/* change (a): a reader or search only inside $(…) or backquotes
+	** leaves D3 (argv) to the outer command; D1, D2, D4 stay off */
+	static const char *const d3[] = {
+		"gh pr create --title \"T\" --body \"$(cat /abs/outside/body.md)\"",
+		"gh pr create --title \"T\" --body \"`cat /etc/body.md`\"",
+		"gh pr create --title \"T\" --body \"$(rg -l x)\"",
+		"gh pr create --title T --body \"$(git diff)\"",
+		0
+	};
+	static const char *const d3no[] = {
+		"cat /etc/x; gh pr create --title \"T\" --body \"$(cat /etc/b.md)\"",
+		"gh pr create --title T --body \"$(cat /etc/b.md)\" && rg x",
+		"gh pr create --title T --body \"`rg x`\"\ncat ../x",
+		0
+	};
+	static const char url[] = "https://github.com/o/r/pull/12";
+	char m[200], *p, *big = malloc(257 * 4 + 2);
 	size_t i;
 
 	for (i = 0; stop[i]; i++)
@@ -2474,7 +2509,37 @@ t_excl(void)
 		snprintf(m, sizeof m, "excl: still defines: %s", keep[i]);
 		for (p = m; (p = strpbrk(p, "\n\t\r")); )
 			*p = '|';
-		CHECK(m, defines(keep[i]) == 1);
+		CHECK(m, defines(keep[i]) & 1);
+	}
+	for (i = 0; d3[i]; i++)
+	{
+		snprintf(m, sizeof m, "excl: D3 only: %s", d3[i]);
+		CHECK(m, defines_out(d3[i], url) == 4 && defines(d3[i]) == 4);
+	}
+	for (i = 0; d3no[i]; i++)
+	{
+		snprintf(m, sizeof m, "excl: no D3 with an outer reader: %s", d3no[i]);
+		for (p = m; (p = strpbrk(p, "\n\t\r")); )
+			*p = '|';
+		CHECK(m, defines_out(d3no[i], url) == 0);
+	}
+	CHECK("excl: `todo.py get … | jq .` (no file) defines by D2",
+	      defines_out("todo.py get dch 831 | jq .",
+	                  "{\\\"number\\\": 831, \\\"title\\\": \\\"Fix\\\"}") == 2);
+	/* change (b): 256 words are read, a 257th excludes the command whole */
+	if (big)
+	{
+		strcpy(big, "cat");
+		for (i = 1; i < 256; i++)
+			strcat(big, " a");
+		CHECK("excl: 256 words are read (cat a … a)", defines(big) == 1);
+		strcat(big, "\n");
+		CHECK("excl: 256 words and a trailing newline are read",
+		      defines(big) == 1);
+		big[strlen(big) - 1] = '\0';
+		strcat(big, " a");
+		CHECK("excl: 257 words exclude the command whole", defines(big) == 0);
+		free(big);
 	}
 }
 
