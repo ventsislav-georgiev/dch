@@ -2,4 +2,4 @@
 {"schema":1,"definition":{"session":"box","live":true,"project":"-T-work-box","at":1794300000,"title":"Agent panes","passage":"The panes show agents.\nsee src/sh.c:4 and o/r#120 and o/r#120\no/r#120 on a second row","rule":"D1","offset":281474976720005,"chapter":"s281474976720001"}}
 {"schema":1,"mention":{"session":"box","chapter":"s281474976720001","at":1794300000,"line":"# #831 Agent panes","offset":281474976720005,"live":true,"project":"-T-work-box"}}
 {"schema":1,"tally":{"session":"box","live":true,"project":"-T-work-box","count":1,"definitions":1,"partial":false,"mentions_dropped":0}}
-{"schema":1,"done":true,"partial":false,"counts":{"session":1,"project":0,"project_sessions":0,"all":null,"all_sessions":null},"why":null,"files":1,"bytes":313,"lines_too_long":0}
+{"schema":1,"done":true,"partial":false,"counts":{"session":1,"project":0,"project_sessions":0,"all":null,"all_sessions":null},"why":null,"files":1,"bytes":323,"lines_too_long":0}

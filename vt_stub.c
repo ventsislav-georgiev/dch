@@ -49,6 +49,12 @@ dch_vt_size(int *cols, int *rows, unsigned long *g)
 }
 
 int
+dch_vt_alt(void)
+{
+	return 0;
+}
+
+int
 dch_vt_snapshot(int format, int lines, char **out, size_t *outlen)
 {
 	(void)format;

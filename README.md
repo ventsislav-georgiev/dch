@@ -897,6 +897,16 @@ The corpus:
     the primary screen. So the commands still on the visible screen (in a
     fresh shell or after a `clear`, up to a screen's worth) have no chapter
     yet, and with none older the answer says `mentions_only: true`.
+  - A query also reads the current primary screen, after the ring: its rows
+    (soft wraps joined, blank ones dropped) count as output, so a ref still
+    on screen is found by `--json`, `--ref` and `--follow`. They carry no
+    marks yet, so they give no chapter and no definition. While the alternate
+    screen is active (vim, less), neither screen is read: the answer is the
+    ring's alone, with no error and no `why`, and the screen's rows come back
+    once it exits. A master older than the screen read (it predates the
+    `--xray` client) answers from its ring alone until `dch --restart`.
+  - `lines` counts the rows read: the ring's, plus the screen's when it was
+    read.
   - `complete` is `false` with `why: "range"` when the ring has evicted rows
     or holds a gap. The master reports evicted rows itself (a status bit, reset
     by a clear), so the querying process's `xray_ring` does not matter. A dch
@@ -1067,7 +1077,8 @@ Nothing runs on a timer:
 - a Claude Code transcript is watched with kqueue (inotify on Linux);
 - its project directory is watched for a new file, which the master is
   then asked about;
-- a shell is followed through the master's wake.
+- a shell is followed through the master's wake, sent when its ring or its
+  screen changes (an alternate-screen switch included).
 
 Rules for shells and endings:
 - A master takes 4 shell subscribers. A fifth gets `dch: busy` and exit 1.

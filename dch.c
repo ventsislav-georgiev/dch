@@ -3330,13 +3330,13 @@ ctl_dead_exit(struct ctl_reader *r, const char *verb)
 ** bytes + NUL). Keeps the TAIL when the stream exceeds cap — detection
 ** reads bottom lines (the master itself tail-caps at 2MB). The deadline is wall-clock:
 ** ctl_next_frame's timeout is inactivity-based, and a master trickling
-** bytes must not stall --ls-json. Returns content length, -1 on any
-** failure. */
+** bytes must not stall --ls-json. flags: DCH_READ_F_* (0: a 4-byte request).
+** Returns content length, -1 on any failure, -2 no mirror. */
 static int
 fetch_screen(const char *path, char *buf, size_t cap, int deadline_ms,
-             int ansi)
+             int ansi, unsigned int flags)
 {
-	unsigned char req[4], payload[PKT_MAX], type;
+	unsigned char req[5], payload[PKT_MAX], type;
 	struct ctl_reader r = {0};
 	struct timeval t0, now;
 	unsigned int len;
@@ -3351,7 +3351,8 @@ fetch_screen(const char *path, char *buf, size_t cap, int deadline_ms,
 	req[0] = ansi ? DCH_READ_ANSI : DCH_READ_PLAIN;
 	req[1] = DCH_READ_VISIBLE;
 	req[2] = req[3] = 0;
-	send_ctl(s, MSG_READ, req, sizeof(req));
+	req[4] = (unsigned char)flags;
+	send_ctl(s, MSG_READ, req, flags ? 5 : 4);
 	gettimeofday(&t0, NULL);
 	for (;;)
 	{
@@ -3595,7 +3596,7 @@ screen_tail(const char *path, int *novt)
 	raw = malloc(DET_CAP + 1);
 	if (!raw)
 		return NULL;
-	n = fetch_screen(path, raw, DET_CAP, DET_DEADLINE_MS, 0);
+	n = fetch_screen(path, raw, DET_CAP, DET_DEADLINE_MS, 0, 0);
 	if (n <= 0)
 	{
 		*novt = n == -2;
@@ -4608,7 +4609,7 @@ follow_refused(unsigned int status)
 	static char probe[PKT_MAX + 1];
 
 	if ((status == DCH_ST_ERR &&
-	     fetch_screen(sock_path, probe, PKT_MAX, CTL_IDLE_MS, 0) >= 0) ||
+	     fetch_screen(sock_path, probe, PKT_MAX, CTL_IDLE_MS, 0, 0) >= 0) ||
 	    status == DCH_ST_UNSUP)
 	{
 		fputs("dch: session master predates --follow; restart the "
@@ -6458,7 +6459,7 @@ screen_faint(const char *path, char **dimp, int *err)
 	raw = malloc(DET_CAP + 1);
 	if (!raw)
 		return NULL;
-	n = fetch_screen(path, raw, DET_CAP, DET_DEADLINE_MS, 1);
+	n = fetch_screen(path, raw, DET_CAP, DET_DEADLINE_MS, 1, 0);
 	if (n <= 0)
 	{
 		free(raw);
@@ -6760,7 +6761,7 @@ exit_prompt(const char *path, char *out, size_t outsz)
 	out[0] = '\0';
 	if (!raw)
 		return 0;
-	n = fetch_screen(path, raw, DET_CAP, DET_DEADLINE_MS, 0);
+	n = fetch_screen(path, raw, DET_CAP, DET_DEADLINE_MS, 0, 0);
 	raw[n > 0 ? n : 0] = '\0';
 	for (l = raw; l && !ok; l = nx)
 	{
@@ -9460,7 +9461,7 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 				     *pt = NULL;
 				int n = raw && make_sock_path(w->name) == 0 ?
 				        fetch_screen(sock_path, raw, DET_CAP,
-				                     DET_DEADLINE_MS, 0) : -1;
+				                     DET_DEADLINE_MS, 0, 0) : -1;
 				int ok = n > 0 &&
 				         (raw[n] = '\0', dch_allow_prompt(raw,
 				                                            &id,
@@ -10731,6 +10732,7 @@ struct ring_snap
 	int seqgap;		/* a later reply did not start where we asked */
 	uint64_t bytes;		/* record bytes handed over, headers included */
 	uint64_t head;		/* the first reply's head_seq (#136) */
+	uint64_t tail;		/* and its tail_seq (#140) */
 	int woke;		/* a MSG_RING_WAKE came in mid-read (#136) */
 };
 
@@ -10861,7 +10863,7 @@ ring_fetch_rd(int s, struct ctl_reader *rd, int flags, struct ring_snap *rs,
 			rs->epoch = le64(hdr + 29) & 0xffffffffu;
 			memcpy(rs->sid, hdr + 33, 17);
 			rs->sid[17] = '\0';
-			tail0 = le64(hdr + 9);
+			rs->tail = tail0 = le64(hdr + 9);
 			rs->head = le64(hdr + 1);
 		}
 		else
@@ -10928,6 +10930,43 @@ ring_fetch(const char *path, struct ring_snap *rs, ring_rec_fn fn,
 	rc = ring_fetch_fd(s, rs, fn, ctx);
 	close(s);
 	return rc;
+}
+
+/* After a ring read, the current primary screen (7.3, #140): its rows, soft
+** wraps joined, to fn as output records with seqs from the ring's tail on.
+** The alt screen (DCH_ST_ALT), a master before #140 (DCH_ST_ERR) and any
+** failure give nothing: the answer is the ring's alone, never an error. */
+#define XR_SCREEN_CAP (2u << 20)	/* the master's MSG_READ cap */
+static void
+ring_screen(const char *path, const struct ring_snap *rs, ring_rec_fn fn,
+            void *ctx)
+{
+	struct xr_rec x;
+	char *buf, *l, *nl;
+	int n;
+
+	if ((rs->status & (DCH_RING_S_OFF | DCH_RING_S_PAUSED)) ||
+	    !(buf = malloc(XR_SCREEN_CAP + 1)))
+		return;
+	/* shortcut: a screen past the cap keeps its tail, the first row cut */
+	n = fetch_screen(path, buf, XR_SCREEN_CAP, CTL_IDLE_MS, 0,
+	                 DCH_READ_F_PRIMARY);
+	memset(&x, 0, sizeof x);
+	x.seq = rs->tail;
+	x.kind = RING_K_OUTPUT;
+	x.t = (uint32_t)time(NULL);
+	for (l = buf; n > 0 && l < buf + n; l = nl + 1)
+	{
+		if (!(nl = memchr(l, '\n', (size_t)(buf + n - l))))
+			nl = buf + n;
+		if (nl == l)
+			continue;	/* blank rows never enter the ring either */
+		x.text = l;
+		x.len = (size_t)(nl - l);
+		fn(ctx, &x);
+		x.seq++;
+	}
+	free(buf);
 }
 
 /* The live Claude under a session's child, as --ls-json joins it: exactly
@@ -11307,13 +11346,13 @@ xr_ring_rec(void *ctx, const struct xr_rec *x)
 	}
 }
 
-/* A shell's answer from one ring read (3.2, 7.3), as --json and every
-** --follow batch give it: corpus none for a ring that is off or paused.
-** screen: the pane's rows (3.2's lines: the ring plus the screen). */
+/* A shell's answer from one ring read and its screen rows (3.2, 7.3), as
+** --json and every --follow batch give it: corpus none for a ring that is
+** off or paused. */
 static void
 xr_shell_fill(struct xr_answer *a, const struct ring_snap *rs,
               const struct xr_ring_acc *acc, const struct xr_chapters *ch,
-              struct xr_index *refs, long long screen, const char *sock)
+              struct xr_index *refs, const char *sock)
 {
 	if (rs->status & DCH_RING_S_OFF)
 	{
@@ -11334,8 +11373,8 @@ xr_shell_fill(struct xr_answer *a, const struct ring_snap *rs,
 		a->corpus = "shell";
 		a->available = 1;
 		a->mentions_only = !acc->sh.npaired;
-		/* 3.2: the ring plus the current primary screen */
-		a->lines = acc->rows + screen;
+		/* 3.2 (Q16): the rows read, the screen's only when it was */
+		a->lines = acc->rows;
 		a->chapters_evicted = (rs->status & DCH_RING_S_CHAPTERS) ||
 		                      ch->total != ch->n;
 		a->ch = ch;
@@ -11406,6 +11445,8 @@ xr_shell_ref(const struct xr_target *t, const struct xr_refq *q,
 	if (rc == 0 && xr_shell_refs(&f.acc->sh, &k, label) == 0)
 	{
 		fr = ring_fetch(t->sock, &rs, xr_ref_rec, &f);
+		if (fr == 0)
+			ring_screen(t->sock, &rs, xr_ref_rec, &f);
 		xr_shell_end(&f.acc->sh);
 		rc = fr != 0 && fr != -4;
 	}
@@ -11479,7 +11520,7 @@ xr_json(const struct xr_target *t, const struct xr_refq *q, int snap)
 		struct crec c;
 		struct ring_snap rs;
 		struct xr_ring_acc *acc = NULL;
-		int qc = cmd_query_f(t->sock, &ci, DCH_CMD_F_STAT), fr = -3;
+		int qc = cmd_query(t->sock, &ci), fr = -3;
 		int tries;
 
 		a.live = 1;
@@ -11530,6 +11571,8 @@ xr_json(const struct xr_target *t, const struct xr_refq *q, int snap)
 				if (refs && xr_shell_refs(&acc->sh, &k, label) != 0)
 					break;
 				fr = ring_fetch(t->sock, &rs, xr_ring_rec, acc);
+				if (fr == 0)
+					ring_screen(t->sock, &rs, xr_ring_rec, acc);
 				xr_shell_end(&acc->sh);
 				if (fr != -4)
 					break;
@@ -11539,8 +11582,7 @@ xr_json(const struct xr_target *t, const struct xr_refq *q, int snap)
 		if (acc && fr == 0)
 		{
 			snprintf(sid, sizeof sid, "%s", rs.sid);
-			xr_shell_fill(&a, &rs, acc, &ch, refs,
-			              qc == 0 && ci.stat ? ci.rows : 0, t->sock);
+			xr_shell_fill(&a, &rs, acc, &ch, refs, t->sock);
 		}
 		else if (acc && (fr == -3 || fr == -4))
 			rc = -2;
@@ -12268,8 +12310,10 @@ xf_sb_build(struct xf *f, struct xf_sb *b, const char *label)
 		xr_index_sink(b->refs, &k);
 		if (xr_shell_refs(&b->acc.sh, &k, label) != 0)
 			return -5;
-		fr = ring_fetch_rd(f->conn, &f->rd, DCH_RING_F_SUB, &b->rs,
-		                   xr_ring_rec, &b->acc);
+		fr = ring_fetch_rd(f->conn, &f->rd, DCH_RING_F_SUB |
+		                   DCH_RING_F_SCREEN, &b->rs, xr_ring_rec, &b->acc);
+		if (fr == 0)
+			ring_screen(f->t->sock, &b->rs, xr_ring_rec, &b->acc);
 		xr_shell_end(&b->acc.sh);
 	}
 	/* moved while we read, or a wake behind the reply (kqueue says
@@ -12283,7 +12327,7 @@ xf_sb_build(struct xf *f, struct xf_sb *b, const char *label)
 
 static void
 xf_sb_answer(const struct xr_target *t, struct xf_sb *b, const char *project,
-             const char *label, long long rows, struct xr_answer *a)
+             const char *label, struct xr_answer *a)
 {
 	memset(a, 0, sizeof *a);
 	a->session = t->name;
@@ -12295,7 +12339,7 @@ xf_sb_answer(const struct xr_target *t, struct xf_sb *b, const char *project,
 	a->project = project;
 	a->project_label = label;
 	if (!b->none)
-		xr_shell_fill(a, &b->rs, &b->acc, &b->ch, b->refs, rows, t->sock);
+		xr_shell_fill(a, &b->rs, &b->acc, &b->ch, b->refs, t->sock);
 	a->available = strcmp(a->corpus, "none") != 0;
 }
 
@@ -12315,7 +12359,7 @@ xf_gone(const struct xr_target *t)
 }
 
 static int
-xf_shell(struct xf *f, const char *label, long long rows, int first)
+xf_shell(struct xf *f, const char *label, int first)
 {
 	const struct xr_target *t = f->t;
 	struct xf_sb *b = calloc(1, sizeof *b);
@@ -12356,7 +12400,7 @@ xf_shell(struct xf *f, const char *label, long long rows, int first)
 		b->none = 1;
 		b->rs.status = DCH_RING_S_OFF;
 	}
-	xf_sb_answer(t, b, project, label, rows, &a);
+	xf_sb_answer(t, b, project, label, &a);
 	if (xf_snapshot(f, &a, f->why))
 	{
 		rc = f->rc;
@@ -12389,7 +12433,7 @@ xf_shell(struct xf *f, const char *label, long long rows, int first)
 		}
 		if (!(b->rs.status & DCH_RING_S_SUB))
 			break;	/* our slot was taken (a stale wake): end */
-		xf_sb_answer(t, b, project, label, rows, &a);
+		xf_sb_answer(t, b, project, label, &a);
 		if (strcmp(b->rs.sid, was.sid) ||
 		    (b->rs.status & XF_MODE) != (was.status & XF_MODE))
 		{
@@ -12482,8 +12526,7 @@ xr_follow(const struct xr_target *t)
 		struct cmd_info ci;
 		struct crec c;
 		char label[PATH_MAX] = "";
-		int qc = cmd_query_f(t->sock, &ci, DCH_CMD_F_STAT), claude;
-		long long rows;
+		int qc = cmd_query(t->sock, &ci), claude;
 
 		if (qc == -4)
 		{
@@ -12493,7 +12536,6 @@ xr_follow(const struct xr_target *t)
 		if (qc == 0 && ci.pid > 0)
 			(void)proc_cwd(ci.pid, label, sizeof label);
 		claude = qc == 0 && xr_live_claude(&ci, &c);
-		rows = qc == 0 && ci.stat ? ci.rows : 0;
 		if (qc == 0)
 			cmd_info_free(&ci);
 		if (xf_watch_open(&f) < 0)
@@ -12503,7 +12545,7 @@ xr_follow(const struct xr_target *t)
 		}
 		f.pending = 0;
 		rc = claude ? xf_claude(&f, &c, label)
-		            : xf_shell(&f, label, rows, first);
+		            : xf_shell(&f, label, first);
 		xf_watch_close(&f);
 		first = 0;
 		if (rc != XF_RESET)

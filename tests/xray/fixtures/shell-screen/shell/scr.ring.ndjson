@@ -1,0 +1,7 @@
+{"seq":281474976730000,"kind":"mark","flags":0,"t":1794300000,"text":"A"}
+{"seq":281474976730001,"kind":"prompt","flags":0,"t":1794300000,"text":"$"}
+{"seq":281474976730002,"kind":"mark","flags":0,"t":1794300000,"text":"B"}
+{"seq":281474976730003,"kind":"input","flags":0,"t":1794300000,"text":"echo o/r#120"}
+{"seq":281474976730004,"kind":"mark","flags":8,"t":1794300000,"text":"C"}
+{"seq":281474976730005,"kind":"output","flags":0,"t":1794300000,"text":"o/r#120 in the ring"}
+{"seq":281474976730006,"kind":"mark","flags":2,"t":1794300000,"text":"D;0","exit":0}

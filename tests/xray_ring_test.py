@@ -2,7 +2,8 @@
 """The X-ray shell ring (#119) through a real master.
 
 Covers what tests/ring_unit.c cannot reach from inside vt.c: the master
-protocol's read op (MSG_RING_READ: range, the 1 MiB cap, session_id),
+protocol's read op (MSG_RING_READ: range, the 1 MiB cap, session_id), the
+primary-screen read (DCH_READ_F_PRIMARY, #140),
 subscribers and their edge-triggered wake (a clear wakes one too; a wake at a
 full subscriber's out cap drops it safely; a stale one loses its slot), the clear message, the xray_ring
 config (0 = off), the client-input flag on a C mark from real keystrokes,
@@ -222,6 +223,90 @@ def test_subscribers():
         socks.append(s5)
         h, _ = X.read(s5, 0, sub=True)
         check("a closed subscriber frees its slot", h["status"] & X.S_SUB, h)
+    finally:
+        for s in socks:
+            s.close()
+        kill(n)
+
+
+def screen_read(name, payload):
+    """One MSG_READ with this payload on a connection of its own ->
+    (MSG_READ_END status, text)."""
+    s = X.connect(name)
+    try:
+        s.sendall(struct.pack("<BH", 6, len(payload)) + payload)
+        data = b""
+        while True:
+            t, n, p = X.recv_frame(s)
+            if t == X.MSG_READ_DATA:
+                data += p
+            elif t == X.MSG_READ_END:
+                return n, data.decode("utf-8", "replace")
+    finally:
+        s.close()
+
+
+def test_primary():
+    """#140: DCH_READ_F_PRIMARY answers the visible primary rows with soft
+    wraps joined, DCH_ST_ALT and nothing while the alt screen is active, and
+    DCH_ST_ERR with another flag, ANSI or recent-N; the rows come back when
+    alt exits. A DCH_RING_F_SCREEN subscriber is woken by a screen change that
+    moves no ring row (the switch into alt and out of it, not a redraw on
+    alt), a plain one is not."""
+    n = "xr-pri" + TAG
+    spawn(n, "sh")
+    socks = []
+    joined = "ab" * 50 + "END"
+    try:
+        wait_for(lambda: screen(n).strip())
+        send(n, "printf 'ab%.0s' $(seq 1 50); echo END\n")
+        wait_for(lambda: "END" in screen(n))
+        st, txt = screen_read(n, bytes([0, 0, 0, 0, 0x08]))
+        check("primary: status OK, the wrapped row joined into one line",
+              st == 0 and joined in txt.split("\n"), (st, txt))
+        st, txt = screen_read(n, bytes([0, 0, 0, 0]))
+        check("primary: a plain read still breaks it at the edge",
+              st == 0 and "END" in txt and joined not in txt, (st, txt))
+        for what, p in (("ANSI", [1, 0, 0, 0, 0x08]),
+                        ("recent-N", [0, 1, 0, 0, 0x08]),
+                        ("with F_CURSOR", [0, 0, 0, 0, 0x09]),
+                        ("with F_META", [0, 0, 0, 0, 0x0a])):
+            st, txt = screen_read(n, bytes(p))
+            check("primary: %s is refused (DCH_ST_ERR)" % what,
+                  st == 1 and txt == "", (st, txt))
+        scr, plain = X.connect(n), X.connect(n)
+        socks += [scr, plain]
+        X.read(scr, 0, sub=True, flags=X.F_SCREEN)
+        h0, _ = X.read(plain, 0, sub=True)
+        # \101 is A: the typed line never reads ALT
+        send(n, "printf '\\033[?1049h\\101LT\\n'; read x; "
+             "printf '\\033[?1049l'\n")
+        wait_for(lambda: "ALT" in screen(n))
+        check("primary: a screen subscriber is woken by the alt switch",
+              recv_wakes(scr, 1.5) == 1)
+        check("primary: a plain subscriber is not (no ring row moved)",
+              recv_wakes(plain, 0.5) == 0)
+        h1, _ = X.read(plain, 0)
+        check("primary: ... and the ring did not move", h1["tail"] ==
+              h0["tail"], (h0, h1))
+        st, txt = screen_read(n, bytes([0, 0, 0, 0, 0x08]))
+        check("primary: while alt is active, DCH_ST_ALT and no data",
+              st == 7 and txt == "", (st, txt))
+        st, txt = screen_read(n, bytes([0, 0, 0, 0]))
+        check("primary: a plain visible read is the alt screen, as before",
+              st == 0 and "ALT" in txt, (st, txt))
+        X.read(scr, 0)                  # re-arms its wake
+        send(n, "abc")
+        wait_for(lambda: "abc" in screen(n))
+        check("primary: a redraw on the alt screen wakes no screen subscriber",
+              recv_wakes(scr, 0.5) == 0)
+        send(n, "\n")
+        wait_for(lambda: "ALT" not in screen(n))
+        check("primary: leaving alt wakes it", recv_wakes(scr, 1.5) == 1)
+        st, txt = screen_read(n, bytes([0, 0, 0, 0, 0x08]))
+        check("primary: alt exited, the primary rows are back",
+              st == 0 and joined in txt.split("\n") and "ALT" not in txt,
+              (st, txt))
     finally:
         for s in socks:
             s.close()
@@ -688,6 +773,7 @@ def main():
         test_read_op()
         test_subscribers()
         test_sub_evict()
+        test_primary()
         test_clear_and_off()
         test_wake_at_cap(tmp)
         test_shell_init(tmp)

@@ -1,0 +1,3 @@
+{"schema":1,"first":{"session":"old","session_id":"m6a7b8c9d0e1f2a3d","key":"pull:x/y#77","shape":"pull","text":"x/y#77","project":"-T-work-old","mode":"light","scope":"session","budget_ms":300,"elapsed_ms":0}}
+{"schema":1,"tally":{"session":"old","live":true,"project":"-T-work-old","count":0,"definitions":0,"partial":false,"mentions_dropped":0}}
+{"schema":1,"done":true,"partial":false,"counts":{"session":0,"project":0,"project_sessions":0,"all":null,"all_sessions":null},"why":null,"files":1,"bytes":38,"lines_too_long":0}

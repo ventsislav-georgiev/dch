@@ -2,4 +2,4 @@
 {"schema":1,"mention":{"session":"plain","chapter":null,"at":1794300000,"line":"o/r#120 one","offset":281474976720001,"live":true,"project":"-T-work-plain"}}
 {"schema":1,"mention":{"session":"plain","chapter":null,"at":1794300000,"line":"o/r#120 two","offset":281474976720002,"live":true,"project":"-T-work-plain"}}
 {"schema":1,"tally":{"session":"plain","live":true,"project":"-T-work-plain","count":2,"definitions":0,"partial":false,"mentions_dropped":0}}
-{"schema":1,"done":true,"partial":false,"counts":{"session":2,"project":0,"project_sessions":0,"all":null,"all_sessions":null},"why":null,"files":1,"bytes":44,"lines_too_long":0}
+{"schema":1,"done":true,"partial":false,"counts":{"session":2,"project":0,"project_sessions":0,"all":null,"all_sessions":null},"why":null,"files":1,"bytes":54,"lines_too_long":0}

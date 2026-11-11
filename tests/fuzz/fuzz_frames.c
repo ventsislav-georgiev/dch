@@ -2,10 +2,10 @@
 ** client's byte stream: frame_size() splits it exactly as client_activity
 ** does, and each frame's payload goes through the pure parsers that
 ** handle_packet hands it to (the RESPAWN argv, the WAIT pattern scan, the
-** READ request incl. --follow's meta/since flags, ATTACH's scrollback) plus
-** the resume blob's hex decoder; the same bytes as pty output go through
-** track_decmode. Linked with the rest of dch minus master.o, and
-** dch.c built with -Dmain=dch_main. */
+** READ request incl. --follow's meta/since flags and X-ray's primary flag,
+** ATTACH's scrollback) plus the resume blob's hex decoder; the same bytes
+** as pty output go through track_decmode. Linked with the rest of dch minus
+** master.o, and dch.c built with -Dmain=dch_main. */
 #include "../../master.c"
 #include <stdint.h>
 
@@ -39,13 +39,18 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 			struct read_req q;
 
 			/* a request it accepts never asks for more than the
-			** wire carried, nor a scrollback tail with the caret */
+			** wire carried, nor a scrollback tail with the caret,
+			** and X-ray's primary rows come plain, visible, alone */
 			if (read_req_parse(payload, len, &q) == 0 &&
 			    (((q.flags & DCH_READ_F_SINCE) &&
 			      len < DCH_READ_REQ_MAX) ||
 			     (q.flags & ~(unsigned int)DCH_READ_F_ALL) ||
 			     ((q.flags & DCH_READ_F_CURSOR) &&
-			      q.source == DCH_READ_RECENT)))
+			      q.source == DCH_READ_RECENT) ||
+			     ((q.flags & DCH_READ_F_PRIMARY) &&
+			      (q.flags != DCH_READ_F_PRIMARY ||
+			       q.format != DCH_READ_PLAIN ||
+			       q.source != DCH_READ_VISIBLE))))
 				abort();
 		}
 		else if (type == MSG_ATTACH)
