@@ -27,11 +27,17 @@ Covers:
      ends c1, and of two records named c1 the one this end wrote is
      selected, not an older pinned one the History tab had selected; e1,
      revived by Shift+Enter, ends the same way; q and Esc there exit to
-     the shell; `dch -a g1` (no picker) still exits to the shell.
+     the shell; `dch -a g1` (no picker) still exits to the shell;
+  6. the kill picker (dch -k, no name) has no open: History hints no
+     Shift+Enter/o, and o and Shift+Enter on k1 revive nothing, kill
+     nothing and say where open works;
+  7. the master drops a client it cannot feed (stopped past 4 MB of
+     output) while dr1 lives on: the picker, after its bounded wait for a
+     record that never comes, opens on dr1's own row in Sessions.
 
 Run:  python3 tests/picker_place_test.py      (uses ./dch)
 """
-import json, os, re, shutil, subprocess, sys, tempfile, time
+import json, os, re, shutil, signal, subprocess, sys, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
@@ -354,6 +360,62 @@ def main():
     s = wait_screen("pg", lambda s: "SHELL_BACK" in s, 15)
     check("g1's end under dch -a: the shell, no picker",
           "SHELL_BACK" in s and "switch to session:" not in s, s)
+
+    # 6. the kill picker never opens what it revives
+    dch("--spawn", "k1", "--size", "100x30", "sh", "-c",
+        "echo K1_SCREEN; sleep 600")
+    wait_screen("k1", lambda s: "K1_SCREEN" in s)
+    dch("-k", "k1")
+    dch("--spawn", "pk", "--size", "100x30", "env", *TAPENV, "sh", "-c",
+        wrap % "-k", DCH)
+    wait_screen("pk", lambda s: "kill session:" in s and "History " in s)
+    s = to_tab("pk", "History")
+    check("select k1 in the kill picker", select("pk", "k1"), screen("pk"))
+    s = screen("pk")
+    check("the kill picker's History hints no open",
+          "resume" in s and "open" not in s and "/o" not in s, s)
+    for key in ("o", "\x1b[13;2u"):
+        dch("--send", "pk", key)
+        s = wait_screen("pk", lambda s: "o opens a session" in s)
+        time.sleep(1.5)
+        s = screen("pk")
+        check("%r in the kill picker: the line, no revive, no kill" % key,
+              "o opens a session: from dch -l or the switch" in s and
+              "kill session:" in s and not live("k1") and
+              "k1" in rows(s), s)
+        dch("--keys", "pk", "j")	# a key: the line clears
+        wait_screen("pk", lambda s: "o opens a session" not in s)
+    dch("--keys", "pk", "q")
+
+    # 7. a dropped client while the session lives: its own row, not History
+    dch("--spawn", "dr1", "--size", "100x30", "sh", "-c",
+        "echo DR1_SCREEN; read x; yes FLOODFLOODFLOODFLOOD | "
+        "head -c 30000000; echo FLOOD_DONE; sleep 600")
+    wait_screen("dr1", lambda s: "DR1_SCREEN" in s)
+    dch("--spawn", "pd", "--size", "100x30", "env", *TAPENV, "sh", "-c",
+        wrap % "-l", DCH)
+    wait_screen("pd", lambda s: "dr1" in rows(s))
+    check("select dr1", select("pd", "dr1"), screen("pd"))
+    dch("--keys", "pd", "enter")
+    s = wait_screen("pd", lambda s: "DR1_SCREEN" in s)
+    check("Enter attaches dr1", "DR1_SCREEN" in s, s)
+    sd = ENV["DCH_SOCKET_DIR"]
+    cl = [f for f in os.listdir(sd) if f.startswith("dr1.sock.client.")]
+    pid = int(cl[0].rsplit(".", 1)[1]) if len(cl) == 1 else 0
+    check("one client pidfile for dr1", pid > 0, cl, os.listdir(sd))
+    if pid:
+        os.kill(pid, signal.SIGSTOP)
+        try:
+            dch("--send", "dr1", "\r")
+            wait_screen("dr1", lambda s: "FLOOD_DONE" in s, 30)
+        finally:
+            os.kill(pid, signal.SIGCONT)
+        s = wait_screen("pd", lambda s: "switch to session:" in s and
+                        rows(s), 30)
+        check("a dropped client: the picker, on Sessions, dr1 selected, "
+              "dr1 still live",
+              "[Sessions" in s and current(s) == "dr1" and live("dr1"), s)
+        dch("--keys", "pd", "q")
     return 1 if failures else 0
 
 
@@ -363,7 +425,8 @@ if __name__ == "__main__":
         rc = main()
     finally:
         for n in ("pa", "pb", "pc", "pe", "pf", "pg", "alpha", "beta-qa",
-                  "gamma-qa", "h1", "h2-qa", "h3", "h4", "c1", "e1", "g1"):
+                  "gamma-qa", "h1", "h2-qa", "h3", "h4", "c1", "e1", "g1",
+                  "pk", "pd", "k1", "dr1"):
             dch("-k", n)
         shutil.rmtree(ROOT, ignore_errors=True)
     print("PASS" if rc == 0 else "FAILED: %d" % len(failures))

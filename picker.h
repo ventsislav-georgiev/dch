@@ -51,6 +51,8 @@ struct pk
 	char filt[256];		/* the "/" filter (#096); "" = every row */
 	int filtering;		/* its prompt is open: keys type into it */
 	char go[600];		/* a revive's session, up: pk_run attaches it */
+	int opens;		/* the host attaches the pick (dch -l, the
+				** switch): History's o / Shift+Enter may */
 };
 
 enum { PK_UP = 256, PK_DOWN, PK_RIGHT, PK_LEFT, PK_BTAB, PK_PGUP, PK_PGDN,

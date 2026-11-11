@@ -155,7 +155,7 @@ hint.
 | `↑` `↓` / `j` `k`, `PgUp` `PgDn`, `g` `G` | move | move |
 | `Tab` `→` `l` / `Shift-Tab` `←` `h` | next / previous tab | next / previous tab |
 | `Enter` | attach (`-k`: kill, `-d`: detach) | resume (`--revive`, with the carry-on message) |
-| `Shift-Enter` / `o` | attach (`Shift-Enter`; as `Enter`) | resume, then attach to it once it is up (open) |
+| `Shift-Enter` / `o` | attach (`Shift-Enter`; as `Enter`) | resume, then attach to it once it is up (open); `dch -l` and the switch only, the `-k` / `-d` pickers say so and do nothing |
 | `r` | rename (set the alias; empty clears) | |
 | `R` | restart the agent (`--restart <n> --include-agents -f`), asks first | |
 | `S` | stop (`--stop`), asks first | |

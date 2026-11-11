@@ -1228,8 +1228,9 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 	else
 	{
 		PK_K(0, ret, "resume", NULL, 0);
-		PK_K(0, pk_utf ? "\xe2\x87\xa7\xe2\x86\xb5/o" : "S-enter/o",
-		     "open", NULL, 0);
+		if (p->opens)
+			PK_K(0, pk_utf ? "\xe2\x87\xa7\xe2\x86\xb5/o"
+			     : "S-enter/o", "open", NULL, 0);
 		PK_K(0, "m", "no message", NULL, 0);
 		if (p->interrupted)
 		{

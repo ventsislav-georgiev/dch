@@ -2185,7 +2185,8 @@ tty_rows(int fd)
 
 /* The interactive picker (#075), defined after the history code it reads.
 ** 0 with the chosen session in out; 1 when none, no tty or cancelled. */
-static int pick_session(const char *header, char *out, size_t outsz);
+static int pick_session(const char *header, char *out, size_t outsz,
+                        int opens);
 static void pk_ended(const char *name, long since);
 
 /* ---- interactive rename (alias sidecar) ---------------------------- */
@@ -3107,7 +3108,7 @@ attach_with_switch(char *exe, int forced_name, int force, char **inner_argv,
 			pk_focus(chosen);
 		pk_remote = 1;
 		if (pick_session("switch to session:", chosen,
-		                 sizeof(chosen)) != 0)
+		                 sizeof(chosen), 1) != 0)
 			return 0;
 		snprintf(session_name, sizeof(session_name), "%s", chosen);
 		picked = 1;
@@ -8951,8 +8952,16 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 		return pk_cfdo(p, fd, c);
 	if ((k = pk_nav(p, c)))
 		return k < 0 ? -1 : 0;
-	if (c == PK_SENTER)	/* Shift+Enter: attach; in History, o (#132) */
+	/* Shift+Enter: Enter; in History, o, only where the pick is attached:
+	** -k and -d would kill or detach what it revived */
+	if (c == PK_SENTER)
 		c = t < 2 ? '\r' : 'o';
+	if (c == 'o' && t == 2 && !p->opens)
+	{
+		snprintf(p->status, sizeof p->status, "o opens a session: from "
+		         "dch -l or the switch");
+		return 0;
+	}
 	switch (c)
 	{
 	case ',':
@@ -9186,8 +9195,10 @@ pk_write(int fd, const void *b, size_t n)
 	(void)!write(fd, b, n);
 }
 
+/* opens: the caller attaches what is picked, so History's o and
+** Shift+Enter may revive and hand it back (#132); -k and -d must not. */
 static int
-pick_session(const char *header, char *out, size_t outsz)
+pick_session(const char *header, char *out, size_t outsz, int opens)
 {
 	struct sigaction sa, owinch;
 	struct pk p;
@@ -9221,6 +9232,7 @@ pick_session(const char *header, char *out, size_t outsz)
 		close(fd);
 		goto done;
 	}
+	p.opens = opens;
 	picker_tty_fd = fd;
 	picker_term_saved = 1;
 	signal(SIGINT, picker_sigint);
@@ -12224,7 +12236,7 @@ main_run(int argc, char **argv)
 
 		pk_remote = 1;
 		rc = pick_session("attach session (mirror):", chosen,
-		                  sizeof(chosen));
+		                  sizeof(chosen), 1);
 		if (rc == 0)
 		{
 			remote_ok = 1;
@@ -12241,7 +12253,7 @@ main_run(int argc, char **argv)
 		{
 			char chosen[sizeof session_name];
 			int rc = pick_session("kill session:", chosen,
-			                      sizeof(chosen));
+			                      sizeof(chosen), 0);
 			if (rc != 0)
 				return 0;
 			snprintf(session_name, sizeof(session_name),
@@ -12259,7 +12271,7 @@ main_run(int argc, char **argv)
 		{
 			char chosen[sizeof session_name];
 			int rc = pick_session("detach session:", chosen,
-			                      sizeof(chosen));
+			                      sizeof(chosen), 0);
 			if (rc != 0)
 				return 0;
 			snprintf(session_name, sizeof(session_name),
