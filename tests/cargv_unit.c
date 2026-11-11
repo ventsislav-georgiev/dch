@@ -138,6 +138,8 @@ main(void)
 	check("unknown then a dash: a flag", "claude --frob --model o hi",
 	      "claude --frob --model o");
 	check("unknown then --", "claude --frob -- hi", "claude --frob");
+	check("unknown --no-x then a word: cut", "claude --no-frob hi",
+	      "claude --no-frob");
 
 	/* subcommands */
 	check("claude update is a command", "claude update", "claude update");
@@ -191,10 +193,16 @@ main(void)
 	check("agent: headroom wrap claude, --resume",
 	      "headroom wrap claude --resume 1234 --chrome -- p",
 	      "headroom wrap claude --resume 1234 --chrome");
-	/* --no-rtk is not claude's: the #138 unknown-option rule keeps all */
-	check("agent: an unknown option then a word keeps all",
+	/* an unknown --no-x never takes a value (commander negation) */
+	check("agent: unknown --no-rtk then a word: the word is the prompt",
 	      "headroom wrap claude --chrome --no-rtk p",
-	      "headroom wrap claude --chrome --no-rtk p");
+	      "headroom wrap claude --chrome --no-rtk");
+	check("agent: unknown --no-rtk=1 then a word: cut",
+	      "headroom wrap claude --no-rtk=1 p",
+	      "headroom wrap claude --no-rtk=1");
+	check("agent: other unknown option then a word keeps all",
+	      "headroom wrap claude --chrome --rtk p",
+	      "headroom wrap claude --chrome --rtk p");
 	check("agent: claude argv[0] still cuts", "claude --name x hi",
 	      "claude --name x");
 	check("agent: no claude token", "zsh -l", "zsh -l");

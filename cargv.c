@@ -226,8 +226,10 @@ dch_claude_strip(char **in, int argc, char **out, int agent)
 		if (!o)
 		{
 			/* Unknown: what follows may be its value, and dropping
-			** that would break the relaunch. Keep everything. */
-			if (k + 1 < argc && !dashed(in[k + 1]))
+			** that would break the relaunch. Keep everything. A
+			** --no-x never takes one (commander's negatable option). */
+			if (strncmp(a, "--no-", 5) != 0 && k + 1 < argc &&
+			    !dashed(in[k + 1]))
 				goto whole;
 			continue;
 		}

@@ -1265,7 +1265,8 @@ src/claude log`, `docker run --name claude img`, `ssh host claude ...`, a
 a renamed claude and `claude.exe`, which hold no word named `claude`. Put it
 after `--`: an
 option dch does not know, followed by a word, keeps the whole command, prompt
-included, rather than guess which word is its value. Claude Code itself runs
+included, rather than guess which word is its value; an unknown `--no-<name>`
+is the exception, a flag that never takes one. Claude Code itself runs
 a one-word prompt that names one of its commands (`update`, `doctor`, `mcp`,
 …) as that command, `--` or not, so give such a prompt more words.
 
