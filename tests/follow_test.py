@@ -208,9 +208,15 @@ def main():
 
     name = "follow%d" % os.getpid()
     dch("--spawn", name, "--size", "40x10", "sh")
-    dch("--run", name, "echo READY")
+    # No job control: macOS bash can print "child setpgid ... Operation not
+    # permitted" when it forks, into a frame compared byte for byte (#154).
+    dch("--run", name, "set +m; echo READY")
     expect(wait_read(name, b"READY"), "session came up")
-    time.sleep(0.5)
+    # From idle, so a stamp by --follow would show; a "working" baseline
+    # could age into "idle" mid-check on a slow box (#154).
+    end = time.time() + 15
+    while dch("--status", name).stdout != b"idle\n" and time.time() < end:
+        time.sleep(0.2)
     act0 = act_mtime(name)
     status0 = dch("--status", name).stdout
     want = dch("--read", name, "--ansi").stdout
@@ -250,7 +256,8 @@ def main():
         dch("--run", name,
             "clear; sleep 1; printf '\\033[5;5H'; sleep 1; "
             "printf '\\033[?25l'; sleep 30")
-        mv = f.wait(lambda x: (x["crow"], x["ccol"]) == (5, 5), DUE + 2,
+        # the deadlines cover `sleep 1` + a fork on a loaded box, not latency
+        mv = f.wait(lambda x: (x["crow"], x["ccol"]) == (5, 5), DUE + 8,
                     mark)
         if expect(mv, "caret-only move produced a frame"):
             expect((mv["rows"], mv["cols"]) == (10, 40) and mv["cvis"] == 1,
@@ -259,7 +266,7 @@ def main():
             expect(prev["body"] == mv["body"] and
                    (prev["crow"], prev["ccol"]) != (5, 5),
                    "caret move frame differs only in the caret")
-            hid = f.wait(lambda x: x["cvis"] == 0, DUE + 2,
+            hid = f.wait(lambda x: x["cvis"] == 0, DUE + 8,
                          f.frames.index(mv) + 1)
             expect(hid and (hid["rows"], hid["cols"]) == (10, 40) and
                    hid["body"] == mv["body"] and

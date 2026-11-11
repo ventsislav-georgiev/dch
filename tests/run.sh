@@ -140,6 +140,17 @@ fi
 skipmirror(){ printf '  skip %s (build has no terminal mirror)\n' "$1"; }
 # Wall-clock budgets mean nothing under ASan (scripts/sanitize.sh sets this).
 nobudget(){ [ -n "${DCH_TEST_NO_BUDGET:-}" ] && printf '  skip %s (timing budget, sanitizer build)\n' "$1"; }
+# Latency budget: the fastest of 20 runs of "$@" under 100 ms wall. A sleep or
+# a deadline-driven read slows every run; a loaded box only some (#154).
+fast20(){ python3 -c '
+import subprocess, sys, time
+def one():
+    t = time.perf_counter()
+    subprocess.run(sys.argv[1:], stdout=subprocess.DEVNULL,
+                   stderr=subprocess.DEVNULL)
+    return time.perf_counter() - t
+sys.exit(0 if min(one() for _ in range(20)) < 0.1 else 1)
+' "$@"; }
 
 # --- spawn-vs-attach: leftover sockets + hot-path attach -------------------
 # Real forkpty spawn, so it needs an executable dch + python3. Skip gracefully.
@@ -455,19 +466,13 @@ if [ -x "$DCH" ]; then
             || bad "--keys ctrl+c stops flooding child"
     fi
 
-    # Control-verb latency budget: 20 --read round trips must finish inside
-    # 2 s wall (100 ms each — generous CI headroom over the ~3 ms local
-    # reality; catches accidental sleeps or timeout-driven reads).
-    if [ "$mirror" -eq 0 ] && ! nobudget "--read latency budget (20 reads < 2s)"; then
-        t0=$(python3 -c 'import time; print(time.time())')
-        n=0
-        while [ "$n" -lt 20 ]; do
-            "$DCH" --read "$SN" >/dev/null 2>&1
-            n=$((n + 1))
-        done
-        python3 -c "import time,sys; sys.exit(0 if time.time()-$t0 < 2.0 else 1)" \
-            && ok "--read latency budget (20 reads < 2s)" \
-            || bad "--read latency budget (20 reads < 2s)"
+    # Control-verb latency budget: a --read round trip within 100 ms (generous
+    # CI headroom over the ~3 ms local reality; catches accidental sleeps or
+    # timeout-driven reads).
+    if [ "$mirror" -eq 0 ] && ! nobudget "--read latency budget (fastest of 20 < 100ms)"; then
+        fast20 "$DCH" --read "$SN" \
+            && ok "--read latency budget (fastest of 20 < 100ms)" \
+            || bad "--read latency budget (fastest of 20 < 100ms)"
     fi
 
     "$DCH" --ls-json 2>/dev/null | python3 -c '
@@ -742,31 +747,19 @@ print(next(s for s in json.load(sys.stdin) if s["name"] == sys.argv[1])["agents"
         check "a line merely starting with main is no panel" "$(agents)" "0"
 
         # Hot-path budget: every --status runs detection (a control connect
-        # + full screen fetch), and --ls-json runs it per session. 20 calls
-        # each must finish inside 2 s wall (100 ms per call — generous CI
-        # headroom over the ~4 ms local reality; catches accidental sleeps
-        # or deadline-driven reads sneaking into the resolve path).
-        if ! nobudget "--status latency budget (20 calls < 2s)"; then
-            t0=$(python3 -c 'import time; print(time.time())')
-            n=0
-            while [ "$n" -lt 20 ]; do
-                "$DCH" --status "$DN" >/dev/null 2>&1
-                n=$((n + 1))
-            done
-            python3 -c "import time,sys; sys.exit(0 if time.time()-$t0 < 2.0 else 1)" \
-                && ok "--status latency budget (20 calls < 2s)" \
-                || bad "--status latency budget (20 calls < 2s)"
+        # + full screen fetch), and --ls-json runs it per session. A call
+        # within 100 ms (generous CI headroom over the ~4 ms local reality;
+        # catches accidental sleeps or deadline-driven reads sneaking into
+        # the resolve path).
+        if ! nobudget "--status latency budget (fastest of 20 < 100ms)"; then
+            fast20 "$DCH" --status "$DN" \
+                && ok "--status latency budget (fastest of 20 < 100ms)" \
+                || bad "--status latency budget (fastest of 20 < 100ms)"
         fi
-        if ! nobudget "--ls-json latency budget (20 calls < 2s)"; then
-            t0=$(python3 -c 'import time; print(time.time())')
-            n=0
-            while [ "$n" -lt 20 ]; do
-                "$DCH" --ls-json >/dev/null 2>&1
-                n=$((n + 1))
-            done
-            python3 -c "import time,sys; sys.exit(0 if time.time()-$t0 < 2.0 else 1)" \
-                && ok "--ls-json latency budget (20 calls < 2s)" \
-                || bad "--ls-json latency budget (20 calls < 2s)"
+        if ! nobudget "--ls-json latency budget (fastest of 20 < 100ms)"; then
+            fast20 "$DCH" --ls-json \
+                && ok "--ls-json latency budget (fastest of 20 < 100ms)" \
+                || bad "--ls-json latency budget (fastest of 20 < 100ms)"
         fi
 
         "$DCH" -k "$DN" >/dev/null 2>&1
