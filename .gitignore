@@ -26,3 +26,6 @@ __pycache__/
 
 # scripts/fuzz.sh crash inputs
 /fuzz-artifacts/
+
+# scripts/build-release.sh output
+/dist/

@@ -246,10 +246,38 @@ libghostty-vt (~3 MB binary). Both builds support the [Agent API](#agent-api).
 **dch-lite** omits only the terminal mirror; what that costs is in
 [dch-lite and `DCH_NO_VT`](#dch-lite-and-dch_no_vt). `dch --build` prints
 `full` or `lite`.
-The formulas are auto-published to the tap by dch's release workflow on
-every `v*` tag.
+Brew pours a prebuilt bottle on macOS 14 or later (arm64 and x86_64) and on
+Linux (x86_64 and arm64), so no compiler is needed there; anywhere else it
+builds from source. The formulas and bottles are published to the tap by
+dch's release workflow on every release.
 
-## Quick install
+## Install a prebuilt binary
+
+Each [release](https://github.com/ventsislav-georgiev/dch/releases) carries
+`dch-<version>-<os>-<arch>.tar.gz` (full) and
+`dch-lite-<version>-<os>-<arch>.tar.gz`, each with a `.sha256` beside it, for
+`darwin-arm64` and `darwin-x86_64` (macOS 14 or later) and `linux-aarch64`
+and `linux-x86_64` (glibc 2.28 or later: RHEL 8, Debian 10, Ubuntu 18.10 and
+newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README.
+
+```sh
+v=1.48.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+d=dch-$v-$t                       # or dch-lite-$v-$t
+u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
+curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
+shasum -a 256 -c $d.tar.gz.sha256 # Linux: sha256sum -c $d.tar.gz.sha256
+tar -xzf $d.tar.gz
+mkdir -p ~/.local/bin ~/.local/share/man/man1
+install -m 0755 $d/dch ~/.local/bin/dch
+install -m 0644 $d/dch.1 ~/.local/share/man/man1/dch.1
+dch --version
+```
+
+Make sure `~/.local/bin` is in your `$PATH`. A file fetched with curl
+carries no quarantine flag, so macOS runs it as is. One downloaded in a
+browser does: clear it with `xattr -d com.apple.quarantine dch`.
+
+## Build from source
 
 ```sh
 git clone https://github.com/ventsislav-georgiev/dch.git

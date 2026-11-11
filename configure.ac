@@ -88,6 +88,12 @@ fi
 # Checks for libraries.
 AC_CHECK_LIB(util, openpty)
 AC_CHECK_LIB(socket, socket)
+# glibc before 2.34 keeps shm_open in librt and pthread_kill (libghostty-vt
+# calls it) in libpthread; the Linux release binaries build on glibc 2.28.
+AC_SEARCH_LIBS(shm_open, rt)
+if test "x$with_libghostty" != xno; then
+	AC_SEARCH_LIBS(pthread_kill, pthread)
+fi
 
 # Checks for header files.
 AC_CHECK_HEADERS(fcntl.h sys/select.h sys/socket.h sys/time.h)

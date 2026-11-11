@@ -1,0 +1,138 @@
+name: Release assets
+
+# Builds the prebuilt binaries for a release's tag and attaches them to that
+# release, then renders the Homebrew tap with bottles that point at them:
+#   dch.exe, dch.exe.sha256                        Windows x64 client
+#   dch[-lite]-VER-OS-ARCH.tar.gz + .sha256        macOS and Linux, arm64 and x86_64
+#   dch[-lite]-VER.TAG.bottle.tar.gz + .sha256     the Homebrew bottles
+# scripts/build-release.sh builds, smoke-tests and packages each Unix pair.
+# Re-runnable: uploads use --clobber.
+# workflow_dispatch: with a tag, rebuild, re-attach to that release and
+# re-render the tap; without one, build the dispatched ref and keep run
+# artifacts only.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to attach to (e.g. v1.35.0); empty = artifact only"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  dch-exe:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - run: git config --global core.autocrlf false
+        shell: pwsh
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.TAG && format('refs/tags/{0}', env.TAG) || github.ref }}
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+        with:
+          msystem: UCRT64
+          update: false
+          install: mingw-w64-ucrt-x86_64-gcc
+      - name: Build dch.exe
+        run: |
+          CC=gcc scripts/build-windows.sh
+          ./dch.exe --version
+          sha256sum dch.exe > dch.exe.sha256
+          cat dch.exe.sha256
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dch-exe-release
+          path: |
+            dch.exe
+            dch.exe.sha256
+          if-no-files-found: error
+          retention-days: 14
+      - name: Attach to the release
+        if: env.TAG != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" dch.exe dch.exe.sha256 --clobber --repo "$GITHUB_REPOSITORY"
+
+  # Native runners only: configure picks the vendored libghostty-vt.a by
+  # uname, and each binary is run before it ships.
+  unix:
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [darwin-arm64, darwin-x86_64, linux-x86_64, linux-aarch64]
+        variant: [full, lite]
+        include:
+          - target: darwin-arm64
+            runner: macos-latest
+          - target: darwin-x86_64
+            runner: macos-15-intel
+          - target: linux-x86_64
+            runner: ubuntu-latest
+          - target: linux-aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      # glibc 2.28 (RHEL 8): the Linux binaries run on that and anything newer.
+      # Pinned by digest; bump it on purpose.
+      IMAGE: almalinux:8@sha256:2d0f2eb2a83cc09dbc2eb92fade4dbe8f709628149e81aa00aec70630406603b
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.TAG && format('refs/tags/{0}', env.TAG) || github.ref }}
+
+      - name: Build, smoke-test and package (macOS, minos 14.0)
+        if: runner.os == 'macOS'
+        run: scripts/build-release.sh ${{ matrix.variant }}
+
+      - name: Build, smoke-test and package (Linux, glibc 2.28)
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src "$IMAGE" sh -c \
+            'dnf -y -q install gcc make && scripts/build-release.sh "$0"' \
+            ${{ matrix.variant }}
+          # The same binary on the runner's newer glibc.
+          ./dch --version
+
+      - name: Check the target
+        run: ls -la dist/*-${{ matrix.target }}.tar.gz
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dch-${{ matrix.variant }}-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Attach to the release
+        if: env.TAG != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+
+  # After the bottles are attached: the formula's bottle shas are taken from
+  # the release. Runs when a target failed too: brew builds that one from
+  # source, as before bottles.
+  homebrew:
+    needs: unix
+    if: ${{ !cancelled() && (github.event.release.tag_name || inputs.tag) != '' }}
+    uses: ./.github/workflows/homebrew.yml
+    with:
+      tag: ${{ github.event.release.tag_name || inputs.tag }}
+    secrets:
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
