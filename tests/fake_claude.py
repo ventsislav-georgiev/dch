@@ -277,7 +277,12 @@ def submit(text, c):
         take(text)
 
 
-set_status("idle")
+# start busy if asked, so a status read before the first tick never sees idle
+if ctl().get("busy"):
+    set_status("busy")
+    turn_end = float("inf")
+else:
+    set_status("idle")
 last = None
 buf = b""
 while True:
