@@ -3217,6 +3217,7 @@ struct ctl_reader
 	unsigned char buf[PKT_HDR + PKT_MAX];
 	size_t fill;
 	int got_any; /* any bytes ever (old-master detection) */
+	int eof;     /* the peer hung up (EOF or a read error), not silence */
 };
 
 /* Next response frame. Returns 1 (frame), 0 (idle_ms of silence), -1 (EOF /
@@ -3268,7 +3269,10 @@ ctl_next_frame(int s, struct ctl_reader *r, int idle_ms,
 		ssize_t n = read(s, r->buf + r->fill,
 		                 sizeof(r->buf) - r->fill);
 		if (n <= 0)
+		{
+			r->eof = 1;
 			return -1;
+		}
 		r->fill += (size_t)n;
 		r->got_any = 1;
 	}
@@ -10752,7 +10756,9 @@ le64(const unsigned char *p)
 
 /* Over an open control connection s. fn NULL: the header only
 ** (DCH_RING_F_HDR; a 1.43.0 master's records are dropped unread). 0, rs
-** filled; -2 the master does not answer the op (it predates #119); -3 a
+** filled; -1 the master hung up (EOF or a reset at any point: the session
+** is gone, as when nothing listens); -2 the master does not answer the op
+** (it predates #119: silence, or DCH_ST_UNSUP); -3 a
 ** malformed or failed reply, one over DCH_RING_READ_MAX record bytes, or a
 ** later one that does not move past seq (a hostile master never holds the
 ** read); -4 the ring was cleared mid-read (the caller starts over).
@@ -10787,7 +10793,7 @@ ring_fetch_rd(int s, struct ctl_reader *rd, int flags, struct ring_snap *rs,
 			rc = ctl_next_frame(s, rd, CTL_IDLE_MS, &type, payload, &len);
 			if (rc <= 0)
 			{
-				ret = replies || rd->got_any ? -3 : -2;
+				ret = rd->eof ? -1 : replies || rd->got_any ? -3 : -2;
 				goto out;
 			}
 			if (type == MSG_RING_HDR && len == DCH_RING_HDR_LEN)
@@ -10917,7 +10923,8 @@ ring_fetch_fd(int s, struct ring_snap *rs, ring_rec_fn fn, void *ctx)
 	return ring_fetch_rd(s, &r, 0, rs, fn, ctx);
 }
 
-/* ring_fetch_fd on a connection of its own; -1 nothing listens. */
+/* ring_fetch_fd on a connection of its own; -1 nothing listens, or the
+** master hung up. */
 static int
 ring_fetch(const char *path, struct ring_snap *rs, ring_rec_fn fn,
            void *ctx)
@@ -11425,7 +11432,9 @@ xr_shell_ref(const struct xr_target *t, const struct xr_refq *q,
 
 	if (fr == -3)
 		return xr_failed();
-	/* gone, a master before #119, a ring off or paused: no corpus */
+	if (fr == -1)
+		return xr_no_session();
+	/* a master before #119, a ring off or paused: no corpus */
 	if (fr != 0 || (rs.status & (DCH_RING_S_OFF | DCH_RING_S_PAUSED)))
 		return xr_no_corpus();
 	xr_project_key(label, project, sizeof project);
@@ -11448,11 +11457,11 @@ xr_shell_ref(const struct xr_target *t, const struct xr_refq *q,
 		if (fr == 0)
 			ring_screen(t->sock, &rs, xr_ref_rec, &f);
 		xr_shell_end(&f.acc->sh);
-		rc = fr != 0 && fr != -4;
+		rc = fr != 0 && fr != -4 && fr != -1;
 	}
 	else
 		rc = -1;
-	if (rc == 0)
+	if (rc == 0 && fr != -1)
 	{
 		int partial = fr == -4 || rs.seqgap || f.acc->gap || f.acc->cont ||
 		              (rs.status & (DCH_RING_S_EVICTED | DCH_RING_S_OFF |
@@ -11464,6 +11473,12 @@ xr_shell_ref(const struct xr_target *t, const struct xr_refq *q,
 	xr_shell_end(&f.acc->sh);
 	xr_chapters_free(&ch);
 	free(f.acc);
+	/* hung up after `first`: the lines out stand, no done, as a cancel */
+	if (fr == -1 && xr_scan_cancelled(f.sc) == 0)
+	{
+		xr_scan_free(f.sc);
+		return xr_no_session();
+	}
 	return xr_ref_exit(f.sc, rc);
 }
 
@@ -11586,19 +11601,20 @@ xr_json(const struct xr_target *t, const struct xr_refq *q, int snap)
 		}
 		else if (acc && (fr == -3 || fr == -4))
 			rc = -2;
+		else if (acc && fr == -1)
+			rc = -3;	/* gone, or hung up mid-read */
 		free(acc);
-		/* fr -1/-2: gone, or a master before #119: no corpus */
+		/* fr -2: a master before #119: no corpus */
 		if (qc == 0)
 			cmd_info_free(&ci);
 		if (!project[0])
 			xr_project_key(label, project, sizeof project);
 	}
-	if (rc == -2)
+	if (rc == -2 || rc == -3)
 	{
 		xr_chapters_free(&ch);
 		xr_index_free(refs);
-		fputs("dch: X-ray failed on this session\n", stderr);
-		return 3;
+		return rc == -3 ? xr_no_session() : xr_failed();
 	}
 	a.available = strcmp(a.corpus, "none") != 0;
 	if (a.available && !a.refs && refs && !strcmp(a.corpus, "claude"))
@@ -11670,8 +11686,7 @@ xr_clear(const struct xr_target *t)
 	if (fr != 0)
 	{
 		close(s);
-		fputs("dch: X-ray failed on this session\n", stderr);
-		return 3;
+		return fr == -1 ? xr_no_session() : xr_failed();
 	}
 	cleared = !agent && !(rs.status & (DCH_RING_S_OFF | DCH_RING_S_PAUSED));
 	if (!claude && (rs.status & DCH_RING_S_OFF))
@@ -11683,9 +11698,8 @@ xr_clear(const struct xr_target *t)
 	    (ctl_next_frame(s, &r, CTL_IDLE_MS, &type, payload, &len) != 1 ||
 	     type != MSG_ACK || len != DCH_ST_OK))
 	{
-		close(s);
-		fputs("dch: X-ray failed on this session\n", stderr);
-		return 3;
+		close(s);	/* a hang-up before the ack: the session is gone */
+		return r.eof ? xr_no_session() : xr_failed();
 	}
 	close(s);
 	dch_trace("xray clear: ring_cleared=%d", cleared);
@@ -12378,9 +12392,9 @@ xf_shell(struct xf *f, const char *label, int first)
 	}
 	xf_watch_conn(f, r);
 	fr = xf_sb_build(f, b, label);
-	if (fr == -3 || fr == -5)
+	if (fr == -1 || fr == -3 || fr == -5)
 	{
-		rc = fr == -5 ? xr_failed() : xf_gone(t)
+		rc = fr == -5 ? xr_failed() : fr == -1 || xf_gone(t)
 		     ? (first ? xr_no_session() : 0) : xr_failed();
 		goto out;
 	}
@@ -12428,7 +12442,8 @@ xf_shell(struct xf *f, const char *label, int first)
 		f->pending = 0;
 		if ((fr = xf_sb_build(f, b, label)) != 0)
 		{
-			rc = fr == -3 && xf_gone(t) ? 0 : xr_failed();
+			/* hung up mid-batch: the session ended (3.3: exit 0) */
+			rc = fr == -1 || (fr == -3 && xf_gone(t)) ? 0 : xr_failed();
 			break;
 		}
 		if (!(b->rs.status & DCH_RING_S_SUB))

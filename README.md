@@ -965,7 +965,8 @@ the master's control socket. Nothing is typed into the session. It prints
   real one, with no wait for the next record tick.
   A master asked to clear anyway (an older client) ignores it there.
 - **Failures.** An ended session or a History record exits 1 with
-  `dch: no such session`, as does a master that hangs up mid-request. A dch-lite master exits 1 with
+  `dch: no such session`, as does a master that hangs up mid-request,
+  before or after the clear. A dch-lite master exits 1 with
   `dch: no x-ray corpus`.
 
 #### Refs
@@ -1101,7 +1102,7 @@ system, like any name.
 | Exit | Meaning |
 | --- | --- |
 | 0 | the object was printed; a `--follow` ended with its session, its connection, or its reader |
-| 1 | `dch: no such session`, `dch: ambiguous session`, `dch: no x-ray corpus` (`--clear`, `--ref`), `dch: busy` (a fifth `--follow` on one shell) |
+| 1 | `dch: no such session` (also a master that hangs up after the connect, before its answer is complete, in every form: nothing more is written; `--ref` keeps the lines already out and writes no `done`; `--follow` once its snapshot is out exits 0 instead), `dch: ambiguous session`, `dch: no x-ray corpus` (`--clear`, `--ref`), `dch: busy` (a fifth `--follow` on one shell) |
 | 2 | bad usage: `--json` missing, a flag twice, `--follow` with `--ref` or `--clear`, a flag of a later release (`--chapter`, `--scope project`, `--scope all`, ...), `--xray` not first, a bad or remote `<n>`, a bad `--ref`, `--scope` or `--budget-ms` |
 | 3 | `dch: X-ray failed on this session`: the session answered garbage, the transcript could not be read (it is there, but opening or reading it failed), memory ran out, or a write failed with an error other than a closed pipe |
 
