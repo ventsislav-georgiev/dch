@@ -11863,8 +11863,9 @@ xf_claude(struct xf *f, const struct crec *c, const char *label)
 	if (xr_claude_lookup(s.cfg, s.sid, s.path, sizeof s.path, &st,
 	                     s.project, sizeof s.project) == 0)
 	{
-		snprintf(dir, sizeof dir, "%s/projects/%s", s.cfg, s.project);
-		if ((s.fd = xr_seam_open(s.path, &st)) < 0 ||
+		if ((size_t)snprintf(dir, sizeof dir, "%s/projects/%s", s.cfg,
+		                     s.project) >= sizeof dir ||
+		    (s.fd = xr_seam_open(s.path, &st)) < 0 ||
 		    !(s.d = xr_claude_new()) || !(s.ix = xr_index_new()))
 		{
 			xf_cl_free(&s);
@@ -11885,8 +11886,9 @@ xf_claude(struct xf *f, const struct crec *c, const char *label)
 		/* no transcript yet: its project dir, or the projects dir, so
 		** the first file is seen (a reset then gives its snapshot) */
 		xr_project_key(s.label, s.project, sizeof s.project);
-		snprintf(dir, sizeof dir, "%s/projects/%s", s.cfg, s.project);
-		if (access(dir, X_OK) != 0)
+		if ((size_t)snprintf(dir, sizeof dir, "%s/projects/%s", s.cfg,
+		                     s.project) >= sizeof dir ||
+		    access(dir, X_OK) != 0)
 			snprintf(dir, sizeof dir, "%s/projects", s.cfg);
 	}
 	if (!s.project[0])
