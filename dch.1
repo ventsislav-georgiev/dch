@@ -730,7 +730,7 @@ X\-ray: print one JSON object
 .RB ( schema:1 )
 about session
 .IR name :
-its corpus (\fBclaude\fR, \fBshell\fR or \fBnone\fR, with a
+its corpus (\fBclaude\fR, \fBcodex\fR, \fBshell\fR or \fBnone\fR, with a
 .BR reason :
 .BR ended ,
 .B lite
@@ -917,6 +917,11 @@ has
 .BR all_sessions ;
 the last two null unless
 .BR \-\-scope\ all ).
+A live Codex
+.I name
+is read alone, whatever the scope: its rollout only, with
+.B first.scope
+.BR session .
 .B \-\-chapter
 .I anchor
 prints one chapter's entries as one object
@@ -991,8 +996,8 @@ the object is capped at 1 MiB, entries past it left out and
 .B truncated
 true.
 An ended or History Claude Code session is read from its transcript; an
-ended shell, a ring that is off or paused, and a session with no transcript
-exit 1 with
+ended shell, a ring that is off or paused, a session with no transcript, and
+a live Codex (its rollout has no chapter reader yet) exit 1 with
 .IR "no x\-ray corpus" .
 .B \-\-chapter
 takes no
@@ -1075,6 +1080,40 @@ the file shrinks during the read, or past 5000 chapters,
 .B complete
 is false with
 .BR why:\(dqrange\(dq .
+A live Codex's chapters come from its rollout, read the same way
+(corpus
+.BR codex ,
+always
+.BR mentions_only:true ;
+.B session_id
+is its thread id): its user turns, without the parts Codex adds itself,
+and its compactions.
+The thread id comes only from
+.IR $CODEX_HOME/shell_snapshots :
+exactly one UUID\-named snapshot, yours and not group\- or
+world\-writable, exporting the session's
+.BR DCH_SESSION ;
+a Codex outside the session's master, two ids or none answer corpus
+.B none
+with an empty
+.BR session_id .
+.B CODEX_HOME
+(the Codex process's, else its
+.IR HOME/.codex )
+must be absolute with no
+.B ..
+component.
+The rollout is the only regular file named
+.BI \- id .jsonl
+under
+.IR sessions/YYYY/MM/DD ,
+newest first, at most 400 day directories, no symlink followed.
+Assistant text uses the prose rules, tool calls and outputs the code rules;
+reasoning, developer messages and
+.B event_msg
+records give nothing.
+Nothing in the Codex directory is run or written.
+An ended Codex session has no corpus.
 A shell's chapters come from its ring's OSC 133 marks: one per typed command
 block (\fBA\fR, \fBB\fR, client input, \fBC\fR, a non-blank command),
 once its rows scroll off the screen (commands still on it have none yet;
@@ -1109,7 +1148,7 @@ typed into the session) and print
 .I name
 is first matched as a live ring's exact session_id (\fBm\fR + 16 hex;
 each master is asked for its ring's header only), then as a name.
-A Claude Code session has no ring
+A Claude Code or Codex session has no ring
 .RB ( ring_cleared:false ),
 nor has one with
 .B xray_ring 0
@@ -1145,10 +1184,10 @@ and
 .B reset
 .RB ( why :
 .B rotated
-for a new transcript, a /clear, or a shell ring paused, resumed or
-given a new session_id;
+for a new transcript, a /clear, a Codex's new thread or rollout, an agent
+that exited, or a shell ring paused, resumed or given a new session_id;
 .B shrunk
-for a cut transcript;
+for a cut transcript or rollout;
 .B cleared
 for a shell's clear, ED 3 or RIS, never with evict;
 .B evicted
@@ -1166,7 +1205,10 @@ drops, so a client can hold more chapters than
 .B \-\-json
 shows.
 No timer: a transcript is watched with kqueue (inotify on Linux), its
-project directory for a new file, a shell through the master's wake (its
+project directory for a new file; a Codex rollout too, with its
+.I shell_snapshots
+directory and, before the rollout exists, today's day directory; a shell
+through the master's wake (its
 ring or its screen changed, an alternate\-screen switch included).
 At most 4 shell followers per master: a fifth exits 1
 .IR busy .

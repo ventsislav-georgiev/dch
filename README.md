@@ -821,8 +821,9 @@ the plain text of the shell's output in memory, in a ring of `xray_ring` bytes
 - **Clearing.** Erasing the scrollback (`clear`, `ESC[3J`, `reset`/`ESC c`,
   Cmd-K) empties the ring.
 - **Agents.** The ring pauses while an agent (Claude Code, Codex) runs in the
-  shell, because the agent's own transcript is its record. It resumes at the
-  shell's next prompt.
+  shell, because the agent's own transcript (a Codex's rollout) is its record.
+  The master looks for one on its record tick (once a minute) and on a clear.
+  It resumes at the shell's next prompt.
 - **`--restart`.** The ring survives `dch --restart`: it is handed to the new
   image in memory and never written to disk. A `dch --restart` from a client
   older than this release starts the session on an empty ring: such a client
@@ -860,7 +861,7 @@ master parses anything, nothing is written to disk and nothing is shelled out.
 `<n>` is one of these (checked in this order):
 - an agent UUID (36 characters of `0-9a-f-`): the live session whose Claude
   Code has that session id, else the newest ended History record carrying
-  it;
+  it (a Codex thread id is not one: name its session);
 - a History record name, `<file>.json`: that ended record, even when a new
   session has taken its name since. It is answered from History only and
   never reads a live ring. A plain shell's `<name>.json` is rewritten when the
@@ -901,6 +902,41 @@ The corpus:
     file shrinks during the read, or when more than 5000 chapters were
     found (the oldest go).
   - A line over 1 MiB or over 100000 JSON tokens counts as one failed step.
+- **Codex.** A live Codex in the session (the first process named `codex`
+  below the session's shell) answers from its rollout: `corpus: "codex"`,
+  always `mentions_only: true` (Prosper's label: "Codex · mentions only").
+  Its chapters are its user turns and compactions, its refs are mentions, and
+  nothing is ever a definition. `session_id` is the Codex thread id.
+  - The thread comes only from Codex's shell snapshots,
+    `<CODEX_HOME>/shell_snapshots/<id>.<n>.sh`. Exactly one UUID-named
+    snapshot must export the session's `DCH_SESSION` (and its bridge marker,
+    when the Codex has one). It must be yours and not group- or
+    world-writable. No snapshot, two thread ids, or a Codex outside the
+    session's master that carries the session (the shared app-server daemon)
+    answer `corpus: "none"` with `session_id: ""`, never the newest rollout.
+  - `CODEX_HOME` is the Codex process's own, else its `HOME`'s `.codex`. It
+    must be absolute with no `..` component, or nothing under it is read.
+  - The rollout is found by names only: `sessions/YYYY/MM/DD`, newest first,
+    at most 400 day directories, a file whose name ends `-<id>.jsonl`. It
+    must be the only one, a regular file, under real directories (a
+    symlinked day directory or file is not followed); otherwise the answer is
+    `corpus: "none"` with the id. It is opened and read like a Claude Code
+    transcript, with the same limits.
+  - A user turn is a `response_item` user message, its text parts joined.
+    The parts Codex adds itself (its `AGENTS.md` instructions, and any part
+    wrapped in one tag, as `<environment_context>` or an `<image>`
+    placeholder) are left out; a message of only those is no turn. A
+    `compacted` record is a `compact` chapter, and its summary is prose.
+  - Assistant text uses the prose rules. Tool calls (`function_call`
+    arguments, `custom_tool_call` input, `local_shell_call` action) and their
+    outputs use the code rules, with the tool clips. Developer messages,
+    reasoning, every `event_msg` (a user turn's twin among them) and any other
+    record type give nothing.
+  - Rollouts are read as Codex 0.151 to 0.167 writes them (a `timestamp`,
+    `type`, `payload` line). `project_label` is the Codex process's cwd, or
+    the rollout's last `cwd` when that cannot be read; file refs resolve
+    against the rollout's `cwd`.
+  - Nothing in the Codex directory is run or written.
 - **Shell.** The chapters come from the [ring](#shell-output-ring-x-ray)'s
   OSC 133 marks: one per typed command block (`A`, `B`, then `C` with client
   input before it and a non-blank command). A `B` or `C` inside an open
@@ -933,8 +969,10 @@ The corpus:
   - The ring is read 1 MiB at a time, and only up to its tail as it stood
     when the read began. A query stays under 16 MB whatever `xray_ring` is.
 - **None.** An ended or History shell (`reason: "ended"`), dch-lite
-  (`"lite"`), `xray_ring 0` (`"off"`), or a Claude session whose transcript is
-  gone (`reason: null`).
+  (`"lite"`), `xray_ring 0` (`"off"`), a Claude session whose transcript is
+  gone, or a Codex with no thread id or rollout (`reason: null`). An ended
+  Codex session has no corpus either: History records carry only a Claude
+  agent, so it answers as an ended shell (`reason: "ended"`).
 
 ```json
 {"schema":1,"session":"api","session_id":"0b1f6a52-4c1e-4d7a-9a51-2f6d8c3e7a10",
@@ -950,10 +988,11 @@ The corpus:
 - **`other_projects`.** How many other sessions of this store have a
   transcript in another project dir: what `--ref --scope all` would add.
   Counted from names only; nothing is opened.
-- **`session_id`.** The agent UUID for Claude Code, the ring's id (`m` + 16
-  hex) for a live shell, and the record name for an ended shell.
+- **`session_id`.** The agent UUID for Claude Code, the thread id for Codex
+  (`""` while it has none), the ring's id (`m` + 16 hex) for a live shell,
+  and the record name for an ended shell.
 - **Chapters.** Oldest first; at most 5000 (the newest).
-  - `anchor` is opaque: `f<inode>:<offset>` for Claude Code,
+  - `anchor` is opaque: `f<inode>:<offset>` for Claude Code and Codex,
     `s<seq of the prompt record>` for a shell.
   - `kind` is `prompt`, `command` or `compact`.
   - `title` is at most 120 Unicode scalars.
@@ -978,8 +1017,9 @@ the master's control socket. Nothing is typed into the session. It prints
   for its ring's header only, never its records (a dch 1.43.0 master sends one
   reply of records, which is dropped unread). The ring is cleared only if it
   still carries that id.
-- **Agent sessions.** A Claude Code session has no ring:
-  `ring_cleared: false`. So it is with `xray_ring 0` and while an agent
+- **Agent sessions.** A Claude Code or Codex session has no ring:
+  `ring_cleared: false`, with `corpus` `"claude"` or `"codex"` and its id (a
+  Codex with no thread id: `"none"` and `""`). So it is with `xray_ring 0` and while an agent
   runs in a shell (the ring is paused). Then nothing is cleared: the
   screen and scrollback stay, for `--read`, attach replay and the say gate.
   Once that agent has exited the ring runs again: a clear right after is a
@@ -1018,8 +1058,8 @@ field. A shell line (rows joined at soft wraps, at most 64 KiB) gives at most
 Each entry of `refs` carries `key` (`<shape>:<text>`), `shape`, `text`,
 `full` (a commit's hex as written), `project`, `count`, `defined`,
 `definitions`, `title` and `underline` (defined, or counted at least twice).
-`count` is per Claude mention, per shell block with OSC 133 marks, and per row
-without. A definition comes only from a paired tool result or a finished,
+`count` is per Claude or Codex mention, per shell block with OSC 133 marks,
+and per row without. A definition comes only from a paired tool result or a finished,
 typed shell block that did not fail: a heading (`# #831 Agent panes`), a
 `#831` line with `title:` within 3 lines, a JSON object or array with a number
 or id and a title (the whole tool result, up to 256 KiB, not the 3000-scalar
@@ -1055,6 +1095,8 @@ ref (`dch: not a ref`), relative paths against the session's cwd.
   `config_dir`, one regular file in the store's project dirs, no symlink);
   one that cannot be found is skipped and never opened. A shell `<n>`'s
   project dir is its cwd's. Another session's lines carry `chapter: null`.
+  A live Codex `<n>` is read alone, whatever the scope: its rollout only,
+  with `first.scope` `"session"`.
 - **Light.** The default stops at its first result, or after `--budget-ms`
   (50 to 300, default 300, across all files) with `why: "budget"`. With
   `--scope project` or `all`, `<n>`'s own file is read to its end and only
@@ -1142,10 +1184,11 @@ every 250 ms:
   chapters whose `offset` is below `S`, then apply the batch's refs.
 - `{"schema":1,"reset":{"why":…}}`: drop what you hold for the session. A new
   snapshot follows at once.
-  - `"rotated"` means a Claude Code `/clear`, another transcript or none, or
-    a shell whose ring paused for an agent, resumed after one, or got a new
-    `session_id`.
-  - `"shrunk"` means the transcript was cut.
+  - `"rotated"` means a Claude Code `/clear`, another transcript or none, a
+    Codex whose thread id changed (a new thread, or none) or whose rollout
+    appeared or was replaced, an agent that exited, or a shell whose ring
+    paused for an agent, resumed after one, or got a new `session_id`.
+  - `"shrunk"` means the transcript or rollout was cut.
   - `"cleared"` means `--clear`, ED 3 or RIS emptied a shell's ring. It never
     comes with `evict`.
   - `"evicted"` means one eviction changed more than 256 keys. It is sent at
@@ -1163,6 +1206,9 @@ Nothing runs on a timer:
 - a Claude Code transcript is watched with kqueue (inotify on Linux);
 - its project directory is watched for a new file, which the master is
   then asked about;
+- a Codex rollout is watched the same way, with its `shell_snapshots`
+  directory for a new thread and, until the rollout exists, the deepest of
+  today's `sessions/YYYY/MM/DD` there (Codex names it by local time);
 - a shell is followed through the master's wake, sent when its ring or its
   screen changes (an alternate-screen switch included).
 
@@ -1199,8 +1245,9 @@ Each entry is `{"role","tool","text","error"}`:
 `text` is cut at 6000 Unicode scalars (3000 for an `output`) and escaped like
 `--ls-json`. The whole object is capped at 1 MiB: entries past the cap are
 left out and `truncated` is `true`. An ended or History Claude Code session is
-read from its transcript. An ended shell, a ring that is off or paused, and a
-session with no transcript exit 1 with `dch: no x-ray corpus`. Nothing is
+read from its transcript. An ended shell, a ring that is off or paused, a
+session with no transcript, and a live Codex (its rollout has no chapter
+reader yet) exit 1 with `dch: no x-ray corpus`. Nothing is
 written to disk. A reader that closes the pipe gets exit 0 and no message;
 SIGTERM ends it at once.
 

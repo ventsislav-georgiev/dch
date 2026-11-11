@@ -245,6 +245,19 @@ uint64_t xr_claude_next(const struct xr_claude *d);
 /* The chapters so far, anchored, the open turn included; d keeps them. */
 const struct xr_chapters *xr_claude_chapters(struct xr_claude *d);
 
+/* ---- Codex (7.4, K9) --------------------------------------------------- */
+#define XR_CODEX_DAYS  400		/* day dirs a lookup reads, newest first */
+/* <home>/sessions/YYYY/MM/DD/<any>-<tid>.jsonl: home checked as
+** xr_config_ok and tid uuid-shaped before any readdir; names only, digits
+** only, newest first, at most XR_CODEX_DAYS day dirs; no symlinked dir
+** followed; exactly one regular hit. 0 with path and st, else -1. */
+int xr_codex_lookup(const char *home, const char *tid, char *path,
+                    size_t pathsz, struct stat *st);
+/* The decoder reads a Codex rollout instead (set before the first line):
+** the same reads, tail, anchors and caps; user turns, compactions and
+** mentions only, never a definition. */
+void xr_claude_codex(struct xr_claude *d);
+
 /* ---- shell ring (7.3) -------------------------------------------------- */
 struct xr_rec
 {

@@ -22,6 +22,8 @@
 ** batch after each; the pieces end where the whole read does, with the same
 ** object printed, every delta line one schema-1 chapter or ref object, and a
 ** second diff of the last moment empty.
+** Paths 1 and 5 with byte 0's bit 5 set read the bytes as a Codex rollout
+** instead (#160, 7.4): mentions only, so no hit may carry a definition.
 ** Every hit handed to a sink lies inside its line; a definition's title is
 ** valid UTF-8, its passage within XR_PASSAGE scalars' bytes; the printed object is one line within the cap. */
 #include <stdint.h>
@@ -32,6 +34,18 @@
 #include "../../bridge.h"
 
 int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n);
+
+static int cx;			/* this input is a Codex rollout */
+
+static struct xr_claude *
+decoder(void)
+{
+	struct xr_claude *x = xr_claude_new();
+
+	if (x && cx)
+		xr_claude_codex(x);
+	return x;
+}
 
 static void
 check_utf8(const char *t, size_t n)
@@ -102,6 +116,8 @@ tee_hit(void *ctx, const struct xr_hit *h)
 	if (!h->sp || h->sp->s >= h->sp->e || h->sp->e > h->ll || !h->line)
 		abort();
 	check_key(h->sp);
+	if (cx && (h->title || h->passage || h->rule))
+		abort();	/* a Codex corpus defines nothing (7.4) */
 	if (h->title)
 		check_utf8(h->title, strlen(h->title));
 	/* a passage is the corpus's own bytes: xr_put_str writes U+FFFD */
@@ -176,7 +192,7 @@ scan(const uint8_t *d, size_t n, const char *key)
 			struct xr_chapters c = {0};
 
 			if ((pass && xr_scan_next(s, "other", "q", 0, 0)) ||
-			    !(x = xr_claude_new()))
+			    !(x = decoder()))
 				break;
 			xr_scan_sink(s, &k);
 			xr_claude_refs(x, &k, 0x1234, xr_scan_tick, s);
@@ -273,7 +289,7 @@ static void
 follow(const uint8_t *d, size_t n)
 {
 	FILE *tf = tmpfile(), *m = NULL;
-	struct xr_claude *one = xr_claude_new(), *inc = xr_claude_new();
+	struct xr_claude *one = decoder(), *inc = decoder();
 	struct xr_index *ix1 = xr_index_new(), *ix2 = xr_index_new();
 	struct xr_sent *s = xr_sent_new();
 	struct xr_sink k1, k2;
@@ -412,6 +428,7 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 	if (!n)
 		return 0;
 	memset(&t, 0, sizeof t);
+	cx = (d[0] & 3) == 1 && (d[0] & 32);
 	if ((d[0] & 3) == 0)
 	{
 		static const int modes[] = {XR_PROSE, XR_MD, XR_CODE, XR_PLAIN};
@@ -454,7 +471,7 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 	xr_index_sink(ix, &t.ix);
 	if ((d[0] & 3) == 1)
 	{
-		struct xr_claude *x = xr_claude_new();
+		struct xr_claude *x = decoder();
 		struct xr_chapters c = {0};
 		struct xr_sink k = {tee_hit, &t};
 		size_t i, s = 1;

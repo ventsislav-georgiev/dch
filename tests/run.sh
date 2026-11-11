@@ -1014,6 +1014,9 @@ else
     skipmirror "xray: a typed shell block, --clear, a live Claude, the seam, names"
     skipmirror "xray resolvers: commit and file, the hostile-repo sentinel"
 fi
+# a live Codex's rollout (#160, 7.4): the one-UUID mapping, the seam, --ref,
+# --follow; its ring-pause part skips itself without the mirror
+pyrun "xray: a live Codex's rollout, the mapping, the seam, --follow" xray_codex_test.py
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

@@ -1380,6 +1380,193 @@ t_caps(void)
 	free(row);
 }
 
+/* ---- Codex (7.4, K9) ---------------------------------------------------- */
+
+struct cxkeys
+{
+	char b[4096];
+	size_t d;
+};
+
+static void
+key_hit(void *ctx, const struct xr_hit *h)
+{
+	struct cxkeys *k = ctx;
+	size_t n = strlen(k->b);
+
+	if (h->title)
+		k->d++;
+	snprintf(k->b + n, sizeof k->b - n, "%s|", h->sp->key);
+}
+
+#define CXI(p) "{\"timestamp\":\"2026-11-10T10:00:00.000Z\",\"type\":" \
+               "\"response_item\",\"payload\":" p "}"
+
+/* the decoder: user turns are chapters (Codex's own parts left out), tool
+** fields and assistant text mentions; developer, reasoning, events and
+** unknown types nothing; never a definition */
+static void
+t_codex(void)
+{
+	struct cxkeys k = { "", 0 };
+	struct xr_sink sk = { key_hit, &k };
+	struct xr_chapters c;
+
+	begin();
+	xr_claude_codex(D);
+	xr_claude_refs(D, &sk, 1, NULL, NULL);
+	line("{\"timestamp\":\"2026-11-10T10:00:00.000Z\",\"type\":"
+	     "\"session_meta\",\"payload\":{\"id\":\"x\",\"cwd\":\"/w\"}}");
+	line(CXI("{\"type\":\"message\",\"role\":\"developer\",\"content\":"
+	         "[{\"type\":\"input_text\",\"text\":\"see devonly.c\"}]}"));
+	line(CXI("{\"type\":\"message\",\"role\":\"user\",\"content\":["
+	         "{\"type\":\"input_text\",\"text\":\"# AGENTS.md instructions "
+	         "for /w\\n<INSTRUCTIONS>agents.c</INSTRUCTIONS>\"},"
+	         "{\"type\":\"input_text\",\"text\":\"<environment_context>"
+	         "<cwd>/w</cwd></environment_context>\"}]}"));
+	line(CXI("{\"type\":\"message\",\"role\":\"user\",\"content\":["
+	         "{\"type\":\"input_text\",\"text\":\"<image name=[Image #1]>\"},"
+	         "{\"type\":\"input_image\",\"image_url\":\"data:x\"},"
+	         "{\"type\":\"input_text\",\"text\":\"</image>\"},"
+	         "{\"type\":\"input_text\",\"text\":\"fix src/main.c \"},"
+	         "{\"type\":\"input_text\",\"text\":\"please\"}]}"));
+	line("{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\","
+	     "\"message\":\"fix src/main.c please\"}}");
+	line(CXI("{\"type\":\"reasoning\",\"summary\":[{\"type\":"
+	         "\"summary_text\",\"text\":\"src/reason.c:1\"}]}"));
+	line(CXI("{\"type\":\"function_call\",\"name\":\"exec_command\","
+	         "\"arguments\":\"{\\\"cmd\\\":\\\"cat src/args.c:3\\\"}\"}"));
+	line(CXI("{\"type\":\"function_call_output\",\"output\":"
+	         "\"src/out.c:9: warning\"}"));
+	line(CXI("{\"type\":\"custom_tool_call\",\"name\":\"exec\",\"input\":"
+	         "\"sed -n 1p src/custom.c:4\"}"));
+	line(CXI("{\"type\":\"custom_tool_call_output\",\"output\":[{\"type\":"
+	         "\"input_text\",\"text\":\"src/arr.c:2\"}]}"));
+	line(CXI("{\"type\":\"message\",\"role\":\"assistant\",\"content\":["
+	         "{\"type\":\"output_text\",\"text\":\"done in src/util.c\"}]}"));
+	line(CXI("{\"type\":\"some_new_item\",\"text\":\"src/unknown.c:1\"}"));
+	line("{\"type\":\"world_state\",\"payload\":{\"text\":\"src/ws.c:1\"}}");
+	line("{\"type\":\"compacted\",\"payload\":{\"message\":\"summary of "
+	     "src/comp.c\"}}");
+	line("not json src/bad.c");
+	line(CXI("{\"type\":\"message\",\"role\":\"user\",\"content\":["
+	         "{\"type\":\"input_text\",\"text\":\"second turn\"}]}"));
+	CHECK("codex: the session's cwd", !strcmp(xr_claude_cwd(D), "/w"));
+	end(&c);
+	CHECK("codex: chapters are the typed turns and the compaction",
+	      c.n == 3 && !strcmp(xr_chapter_at(&c, 0)->title,
+	                          "fix src/main.c please") &&
+	      !strcmp(xr_chapter_at(&c, 1)->kind, "compact") &&
+	      !strcmp(xr_chapter_at(&c, 2)->title, "second turn"));
+	CHECK("codex: a chapter's time is its line's",
+	      c.n && xr_chapter_at(&c, 0)->at == 1794304800);
+	CHECK("codex: tool fields, outputs and assistant text mention",
+	      strstr(k.b, "main.c") && strstr(k.b, "args.c") &&
+	      strstr(k.b, "out.c") && strstr(k.b, "custom.c") &&
+	      strstr(k.b, "arr.c") && strstr(k.b, "util.c") &&
+	      strstr(k.b, "comp.c"));
+	CHECK("codex: Codex's own parts, developer text, reasoning, events, "
+	      "unknown and bad lines give no ref",
+	      !strstr(k.b, "agents.c") && !strstr(k.b, "devonly.c") &&
+	      !strstr(k.b, "reason.c") && !strstr(k.b, "unknown.c") &&
+	      !strstr(k.b, "ws.c") && !strstr(k.b, "bad.c"));
+	CHECK("codex: the user turn once (its event_msg twin is not read)",
+	      strstr(k.b, "main.c") && !strstr(strstr(k.b, "main.c") + 1,
+	                                       "main.c"));
+	CHECK("codex: mentions only, never a definition", k.d == 0);
+	xr_chapters_free(&c);
+}
+
+static void
+mkfile(const char *p)
+{
+	close(open(p, O_WRONLY | O_CREAT, 0600));
+}
+
+/* the lookup (7.4, mutant 36): names only, depth 3, newest first, at most
+** XR_CODEX_DAYS day dirs; exactly one regular file, never a link */
+static void
+t_codex_lookup(void)
+{
+	char d[] = "/tmp/xray_cx.XXXXXX", p[512], q[512], path[1100], cwd[1100];
+	const char *tid = "019a0000-1111-7222-8333-444455556666";
+	struct stat st;
+	int m, day;
+
+	if (!mkdtemp(d))
+	{
+		CHECK("codex lookup: temp dir", 0);
+		return;
+	}
+	snprintf(p, sizeof p, "%s/sessions", d);
+	mkdir(p, 0700);
+	snprintf(p, sizeof p, "%s/sessions/2000", d);
+	mkdir(p, 0700);
+	/* 401 day dirs: 2000/01..40 x 01..10, and 2000/41/01 */
+	for (m = 1; m <= 41; m++)
+	{
+		snprintf(p, sizeof p, "%s/sessions/2000/%02d", d, m);
+		mkdir(p, 0700);
+		for (day = 1; day <= (m == 41 ? 1 : 10); day++)
+		{
+			snprintf(p, sizeof p, "%s/sessions/2000/%02d/%02d", d, m, day);
+			mkdir(p, 0700);
+		}
+	}
+	snprintf(p, sizeof p, "%s/sessions/2000/01/01/rollout-2000-01-01T00-00"
+	         "-00-%s.jsonl", d, tid);
+	mkfile(p);
+	CHECK("codex lookup: the 401st newest day dir is past the bound",
+	      xr_codex_lookup(d, tid, path, sizeof path, &st) < 0);
+	unlink(p);
+	snprintf(p, sizeof p, "%s/sessions/2000/01/02/rollout-2000-01-02T00-00"
+	         "-00-%s.jsonl", d, tid);
+	mkfile(p);
+	CHECK("codex lookup: the 400th newest is read, its path whole",
+	      xr_codex_lookup(d, tid, path, sizeof path, &st) == 0 &&
+	      !strcmp(path, p) && S_ISREG(st.st_mode));
+	CHECK("codex lookup: another id's file is no hit",
+	      xr_codex_lookup(d, "019a0000-1111-7222-8333-444455556667", path,
+	                      sizeof path, &st) < 0);
+	CHECK("codex lookup: a non-UUID id is refused",
+	      xr_codex_lookup(d, "../../x", path, sizeof path, &st) < 0);
+	snprintf(q, sizeof q, "%s/sessions/../", d);
+	CHECK("codex lookup: a CODEX_HOME with .. is refused",
+	      xr_codex_lookup(q, tid, path, sizeof path, &st) < 0);
+	if (getcwd(cwd, sizeof cwd) && chdir(d) == 0)
+	{
+		CHECK("codex lookup: a relative CODEX_HOME is refused",
+		      xr_codex_lookup(".", tid, path, sizeof path, &st) < 0);
+		(void)!chdir(cwd);
+	}
+	/* two files for one id: none, never the newest */
+	snprintf(q, sizeof q, "%s/sessions/2000/41/01/rollout-2000-02-11T00-00"
+	         "-00-%s.jsonl", d, tid);
+	mkfile(q);
+	CHECK("codex lookup: two rollouts for one id are no hit",
+	      xr_codex_lookup(d, tid, path, sizeof path, &st) < 0);
+	unlink(q);
+	/* a symlink in place of the file, or of a day dir: refused */
+	(void)!symlink(p, q);
+	unlink(p);
+	CHECK("codex lookup: a symlinked rollout is refused",
+	      xr_codex_lookup(d, tid, path, sizeof path, &st) < 0);
+	unlink(q);
+	snprintf(q, sizeof q, "%s/real", d);
+	mkdir(q, 0700);
+	snprintf(path, sizeof path, "%s/real/rollout-x-%s.jsonl", d, tid);
+	mkfile(path);
+	snprintf(p, sizeof p, "%s/sessions/2000/41/02", d);
+	(void)!symlink(q, p);
+	CHECK("codex lookup: a symlinked day dir is not entered",
+	      xr_codex_lookup(d, tid, cwd, sizeof cwd, &st) < 0);
+	unlink(p);
+	unlink(path);
+	rmdir(q);
+	snprintf(p, sizeof p, "rm -rf '%s'", d);
+	(void)!system(p);
+}
+
 /* mutant 8: config_dir is validated before any readdir (7.2) */
 static void
 t_lookup(void)
@@ -2217,6 +2404,8 @@ main(int argc, char **argv)
 	t_lookup();
 	t_chapter();
 	t_resolve();
+	t_codex();
+	t_codex_lookup();
 	printf("%s: %d failed\n", fails ? "FAIL" : "ok", fails);
 	return fails != 0;
 }

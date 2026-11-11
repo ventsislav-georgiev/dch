@@ -6042,6 +6042,24 @@ dch_agent_probe(long child, struct dch_agent *a)
 	return 0;
 }
 
+/* The shallowest live Codex below (or at) `child`: the agent whose corpus
+** is its rollout (7.4), so the ring pauses for it as for a Claude (7.3).
+** 0 none. */
+long
+dch_codex_below(long child)
+{
+	long pids[64];
+	int n, k;
+
+	if (child <= 0)
+		return 0;
+	n = proc_tree(child, pids, 64);
+	for (k = 0; k < n; k++)
+		if (proc_is_codex(pids[k]))
+			return pids[k];
+	return 0;
+}
+
 /* ---- --stop: pause, /exit, end the session (#046) --------------------
 **
 ** `--stop <name>...|--all` ends sessions for --revive to bring back: the
@@ -11031,6 +11049,52 @@ xr_crec_cfg(const struct crec *c, char *cfg, size_t cfgsz)
 		cfg[0] = '\0';
 }
 
+/* The live Codex under a session's child (7.4, K9): the shallowest codex,
+** its CODEX_HOME (validated before any read: mutant 36) and the one thread
+** id dch_codex_snapshot_id's strict rule gives (ambiguous or absent: no
+** corpus, never the newest rollout: mutant 35). 1 mapped, -1 a Codex
+** with no id, 0 none. Nothing in the Codex dir is ever run. */
+struct xr_cx
+{
+	long pid;
+	char home[1400], tid[64], cwd[PATH_MAX];
+};
+
+static int
+xr_live_codex(const struct cmd_info *ci, struct xr_cx *x)
+{
+	char sess[600], mk[700], h[1200];
+	const char *e;
+
+	memset(x, 0, sizeof *x);
+	if (ci->pid <= 0 || strcmp(ci->state, "held") == 0 ||
+	    (x->pid = dch_codex_below(ci->pid)) <= 0)
+		return 0;
+	(void)proc_cwd(x->pid, x->cwd, sizeof x->cwd);
+	/* its own CODEX_HOME, else its HOME's .codex, as codex itself reads */
+	if (proc_env_value(x->pid, "CODEX_HOME", x->home, sizeof x->home) != 0 ||
+	    !x->home[0])
+	{
+		e = proc_env_value(x->pid, "HOME", h, sizeof h) == 0 && h[0] ? h
+		    : getenv("HOME");
+		if (!e || snprintf(x->home, sizeof x->home, "%s/.codex", e)
+		    >= (int)sizeof x->home)
+			x->home[0] = '\0';
+	}
+	if (!xr_config_ok(x->home) ||
+	    proc_dch_session(x->pid, sess, sizeof sess) != 0 ||
+	    dch_codex_snapshot_id(x->home, sess,
+	                          proc_env_value(x->pid, "DCH_NATIVE_BRIDGE_ID",
+	                                         mk, sizeof mk) == 0 && mk[0]
+	                          ? mk : NULL, x->tid, sizeof x->tid, 1) != 0 ||
+	    !xr_uuid_shaped(x->tid))
+	{
+		x->tid[0] = '\0';
+		return -1;
+	}
+	return 1;
+}
+
 enum { XR_NONE, XR_LIVE, XR_ENDED };
 
 struct xr_target
@@ -11553,6 +11617,110 @@ xr_claude_ref(const char *cfg, const char *sid, const char *session,
 	return xr_ref_exit(sc, rc != 0 || xr_scan_done(sc) != 0);
 }
 
+/* x's rollout, decoded (7.4): *d with refs into k, *st its stat. 0, -1 no
+** rollout, -2 a read failure. One open, through the seam. */
+static int
+xr_codex_read(const struct xr_cx *x, struct xr_claude **d, struct stat *st,
+              struct xr_sink *k, int (*tick)(void *, uint64_t), void *ctx,
+              int *capped)
+{
+	char path[2048];
+	int fd, rc;
+
+	*d = NULL;
+	if (xr_codex_lookup(x->home, x->tid, path, sizeof path, st) < 0)
+		return -1;
+	if ((fd = xr_seam_open(path, st)) < 0)	/* there but unreadable: 3 */
+		return errno == EACCES || errno == EPERM || errno == EIO ? -2 : -1;
+	if (!(*d = xr_claude_new()))
+	{
+		close(fd);
+		return -2;
+	}
+	xr_claude_codex(*d);
+	xr_claude_refs(*d, k, (uint64_t)st->st_ino, tick, ctx);
+	rc = xr_claude_read(*d, fd, (uint64_t)st->st_size, capped);
+	close(fd);
+	return rc < 0 ? -2 : 0;
+}
+
+/* A live Codex's answer (7.4): corpus "codex", mentions only, chapters its
+** user turns. 0, -1 no rollout, -2 a read failure (exit 3). */
+static int
+xr_codex_answer(const struct xr_cx *x, struct xr_answer *a,
+                struct xr_chapters *ch, char *label, size_t labelsz,
+                struct xr_index *refs)
+{
+	struct xr_claude *d;
+	struct xr_sink k;
+	struct stat st;
+	int capped = 0, rc;
+
+	xr_index_sink(refs, &k);
+	rc = xr_codex_read(x, &d, &st, &k, NULL, NULL, &capped);
+	if (d)
+	{
+		/* the label is the live Codex's cwd, as --ref keys it; the
+		** rollout's only when that is unreadable */
+		xr_claude_end(d, (uint64_t)st.st_ino, ch);
+		if (!label[0] && xr_claude_cwd(d)[0])
+			snprintf(label, labelsz, "%s", xr_claude_cwd(d));
+		xr_claude_free(d);
+	}
+	if (rc < 0)
+	{
+		xr_chapters_free(ch);
+		return rc;
+	}
+	a->corpus = "codex";
+	a->available = 1;
+	a->mentions_only = 1;
+	a->refs = refs;
+	a->complete = !capped && ch->total == ch->n;
+	a->why = a->complete ? NULL : "range";
+	a->ch = ch;
+	return 0;
+}
+
+/* --ref over a live Codex's rollout (3.4, 7.4): as over a transcript. */
+static int
+xr_codex_ref(const struct xr_cx *x, const char *session, const char *label,
+             const struct xr_refq *q)
+{
+	char path[2048], project[1200];
+	struct xr_claude *d;
+	struct xr_chapters ch = {0};
+	struct xr_scan *sc;
+	struct xr_span sp;
+	struct xr_sink k;
+	struct stat st;
+	int capped = 0, rc;
+	uint64_t span;
+
+	if (xr_codex_lookup(x->home, x->tid, path, sizeof path, &st) < 0)
+		return xr_no_corpus();
+	xr_project_key(label, project, sizeof project);
+	if (!xr_ref_parse(q->text, label, &sp))
+		return xr_not_ref();
+	if (!(sc = xr_scan_new(stdout, sp.key, session, project, 1, q->full,
+	                       0, q->budget, xr_t0)))
+		return xr_failed();
+	if (xr_scan_first(sc, x->tid, sp.shape, xr_span_text(&sp)) != 0)
+		return xr_ref_exit(sc, -1);
+	xr_scan_sink(sc, &k);
+	rc = xr_codex_read(x, &d, &st, &k, xr_scan_tick, sc, &capped);
+	if (!d)
+		return xr_ref_exit(sc, -1);
+	xr_claude_end(d, (uint64_t)st.st_ino, &ch);
+	xr_chapters_free(&ch);
+	span = (uint64_t)st.st_size;
+	if (capped && span > xr_lim.head + xr_lim.tail)
+		span = xr_lim.head + xr_lim.tail;
+	xr_scan_file(sc, span, xr_claude_too_long(d), capped, 0);
+	xr_claude_free(d);
+	return xr_ref_exit(sc, rc < 0 || xr_scan_done(sc) != 0);
+}
+
 /* The shell answer, built as the records stream past. */
 struct xr_ring_acc
 {
@@ -11769,8 +11937,9 @@ xr_json(const struct xr_target *t, const struct xr_refq *q, int snap)
 		struct crec c;
 		struct ring_snap rs;
 		struct xr_ring_acc *acc = NULL;
+		struct xr_cx xc;
 		int qc = cmd_query(t->sock, &ci), fr = -3;
-		int tries;
+		int tries, cx;
 
 		a.live = 1;
 		if (qc == -4)
@@ -11795,6 +11964,24 @@ xr_json(const struct xr_target *t, const struct xr_refq *q, int snap)
 				rc = cfg[0] ? xr_claude_answer(cfg, c.sid, &a, &ch, project,
 				                               sizeof project, label,
 				                               sizeof label, refs) : -1;
+		}
+		else if (qc == 0 && (cx = xr_live_codex(&ci, &xc)) != 0)
+		{
+			/* a Codex's corpus is its rollout, never the ring (7.4) */
+			if (xc.cwd[0])
+				snprintf(label, sizeof label, "%s", xc.cwd);
+			snprintf(sid, sizeof sid, "%s", xc.tid);
+			if (q)
+			{
+				cmd_info_free(&ci);
+				return cx > 0 ? xr_codex_ref(&xc, t->name, label, q)
+				              : xr_no_corpus();
+			}
+			if (cx > 0 && !(refs = xr_index_new()))
+				rc = -2;
+			else if (cx > 0)
+				rc = xr_codex_answer(&xc, &a, &ch, label, sizeof label,
+				                     refs);
 		}
 		else if (q)
 		{
@@ -11948,6 +12135,7 @@ xr_chapter(const struct xr_target *t, const char *anchor)
 	struct ring_snap rs;
 	struct cmd_info ci;
 	struct crec c;
+	struct xr_cx xc;
 	char cfg[1400];
 	int qc, fr, rc;
 
@@ -11963,6 +12151,13 @@ xr_chapter(const struct xr_target *t, const char *anchor)
 		xr_crec_cfg(&c, cfg, sizeof cfg);
 		return cfg[0] ? xr_chapter_claude(cfg, c.sid, t->name, anchor)
 		              : xr_no_corpus();
+	}
+	/* a live Codex: its rollout has no chapter reader yet (#169), and the
+	** ring under it is not its corpus (7.4): no corpus, never the ring */
+	if (qc == 0 && xr_live_codex(&ci, &xc) != 0)
+	{
+		cmd_info_free(&ci);
+		return xr_no_corpus();
 	}
 	if (qc == 0)
 		cmd_info_free(&ci);
@@ -12007,7 +12202,8 @@ xr_clear(const struct xr_target *t)
 	unsigned int len;
 	char sid[64] = "";
 	const char *corpus = "shell";
-	int qc, claude = 0, agent = 0, s, novt = 0, fr, cleared;
+	struct xr_cx xc;
+	int qc, claude = 0, agent = 0, s, novt = 0, fr, cleared, cx;
 
 	if ((qc = cmd_query(t->sock, &ci)) == -4)
 		return xr_no_session();
@@ -12021,6 +12217,13 @@ xr_clear(const struct xr_target *t)
 	** claude_find != 0), so two Claudes or a non-UUID sid clear nothing */
 	else if (qc == 0 && ci.pid > 0 && claude_find(ci.pid, 1, &c) != 0)
 		agent = 1;
+	/* a Codex's corpus is its rollout, never cleared; unmapped, none */
+	else if (qc == 0 && (cx = xr_live_codex(&ci, &xc)) != 0)
+	{
+		claude = agent = 1;
+		corpus = cx > 0 ? "codex" : "none";
+		snprintf(sid, sizeof sid, "%s", xc.tid);
+	}
 	if (qc == 0)
 		cmd_info_free(&ci);
 	if ((s = control_connect_path(t->sock)) < 0)
@@ -12094,8 +12297,9 @@ struct xf
 	struct ctl_reader rd;
 #ifdef __linux__
 	int wf, wd;		/* inotify watches: the transcript, its dir */
+	int wd2;		/* a Codex's second dir (7.4) */
 #else
-	int dirfd;
+	int dirfd, dirfd2;
 #endif
 	long long last;		/* the last batch (a snapshot is one) */
 	long long evict_at;	/* the last "evicted" reset, -1 none */
@@ -12112,12 +12316,12 @@ xf_watch_open(struct xf *f)
 	f->conn = -1;
 	memset(&f->rd, 0, sizeof f->rd);
 #ifdef __linux__
-	f->wf = f->wd = -1;
+	f->wf = f->wd = f->wd2 = -1;
 	f->q = inotify_init1(IN_CLOEXEC | IN_NONBLOCK);
 #else
 	struct kevent ev;
 
-	f->dirfd = -1;
+	f->dirfd = f->dirfd2 = -1;
 	if ((f->q = kqueue()) >= 0)
 	{
 		/* EV_CLEAR: once per drain, and EV_EOF when the reader leaves,
@@ -12138,6 +12342,9 @@ xf_watch_close(struct xf *f)
 #ifndef __linux__
 	if (f->dirfd >= 0)
 		close(f->dirfd);
+	if (f->dirfd2 >= 0)
+		close(f->dirfd2);
+	f->dirfd = f->dirfd2 = -1;
 #endif
 	if (f->q >= 0)
 		close(f->q);
@@ -12198,6 +12405,31 @@ xf_watch_file(struct xf *f, int fd, const char *dir)
 	dch_trace("xray follow: watch file=%d dir=%d", fd >= 0, dir != NULL);
 }
 
+/* A second dir whose entries changing is a rotation (a Codex's snapshot
+** dir beside its day dir, 7.4). */
+static void
+xf_watch_dir2(struct xf *f, const char *dir)
+{
+#ifdef __linux__
+	f->wd2 = inotify_add_watch(f->q, dir, IN_CREATE | IN_MOVED_TO |
+	                           IN_DELETE | IN_MOVED_FROM | IN_ONLYDIR);
+#else
+	struct kevent ev;
+
+#ifdef O_EVTONLY
+	if ((f->dirfd2 = open(dir, O_EVTONLY | O_DIRECTORY | O_CLOEXEC)) >= 0)
+#else
+	if ((f->dirfd2 = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC)) >= 0)
+#endif
+	{
+		EV_SET(&ev, f->dirfd2, EVFILT_VNODE, EV_ADD | EV_CLEAR, NOTE_WRITE,
+		       0, NULL);
+		(void)kevent(f->q, &ev, 1, NULL, 0, NULL);
+	}
+#endif
+	dch_trace("xray follow: watch dir2");
+}
+
 /* The events in, waiting at most ms (-1: until one comes). */
 static int
 xf_wait(struct xf *f, long ms)
@@ -12231,7 +12463,7 @@ xf_wait(struct xf *f, long ms)
 
 				if (e->wd == f->wf)
 					ev |= e->mask & IN_MODIFY ? XE_FILE : XE_ROT;
-				else if (e->wd == f->wd)
+				else if (e->wd == f->wd || e->wd == f->wd2)
 					ev |= XE_ROT;
 				k += (int)sizeof *e + (int)e->len;
 			}
@@ -12248,7 +12480,8 @@ xf_wait(struct xf *f, long ms)
 				ev |= out[k].flags & EV_EOF ? XE_OUT : 0;
 			else if (out[k].filter == EVFILT_READ)
 				ev |= XE_CONN;
-			else if ((int)out[k].ident == f->dirfd)
+			else if ((int)out[k].ident == f->dirfd ||
+			         (int)out[k].ident == f->dirfd2)
 				ev |= XE_ROT;
 			else
 				ev |= out[k].fflags & (NOTE_DELETE | NOTE_RENAME)
@@ -12373,6 +12606,8 @@ struct xf_cl
 	int fd, capped;
 	uint64_t ino;
 	char cfg[1400], sid[64], path[2048], project[1200], label[PATH_MAX];
+	const struct xr_cx *cx;		/* a Codex rollout (7.4), else NULL */
+	char watch[2048];		/* Codex, no rollout yet: the dir watched */
 };
 
 static int
@@ -12423,9 +12658,10 @@ xf_cl_answer(const struct xr_target *t, struct xf_cl *s, struct xr_answer *a)
 	a->other_projects = xf_others(s->sid, s->project);
 	if (!s->d)
 		return;
-	if (xr_claude_cwd(s->d)[0])
+	if ((!s->cx || !s->label[0]) && xr_claude_cwd(s->d)[0])
 		snprintf(s->label, sizeof s->label, "%s", xr_claude_cwd(s->d));
-	a->corpus = "claude";
+	a->corpus = s->cx ? "codex" : "claude";
+	a->mentions_only = s->cx != NULL;
 	a->available = 1;
 	a->ch = xr_claude_chapters(s->d);
 	a->refs = s->ix;
@@ -12436,6 +12672,27 @@ xf_cl_answer(const struct xr_target *t, struct xf_cl *s, struct xr_answer *a)
 /* Still the stream's transcript? Asked of the master, as --ls-json does:
 ** 0 yes, 1 no (rotated: another id, inode or none at all), -1 the session
 ** is gone. */
+/* A Codex with no rollout yet: the deepest of today's sessions/YYYY/MM/DD
+** there (Codex names it by local time), so its first rollout is seen.
+** shortcut: a rollout made under a day dir newer than the one watched (past
+** midnight) is seen at the next event; upgrade to a watch per level if
+** that shows. */
+static void
+xf_cx_dir(const struct xr_cx *x, char *dir, size_t dirsz)
+{
+	time_t now = time(NULL);
+	struct tm tm;
+	int k;
+
+	localtime_r(&now, &tm);
+	if (snprintf(dir, dirsz, "%s/sessions/%04d/%02d/%02d", x->home,
+	             tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday) >= (int)dirsz)
+		snprintf(dir, dirsz, "%s", x->home);
+	else
+		for (k = 0; k < 4 && access(dir, X_OK) != 0; k++)
+			*strrchr(dir, '/') = '\0';
+}
+
 static int
 xf_cl_same(const struct xr_target *t, const struct xf_cl *s)
 {
@@ -12445,21 +12702,43 @@ xf_cl_same(const struct xr_target *t, const struct xf_cl *s)
 	char path[2048], project[1200];
 	int qc = cmd_query(t->sock, &ci), same;
 
+	struct xr_cx x;
+
 	if (qc == -4)
 		return -1;
-	same = qc == 0 && xr_live_claude(&ci, &c) && !strcmp(c.sid, s->sid);
+	/* a Codex: the same mapping (unmapped stays unmapped: the id "") */
+	if (s->cx)
+		same = qc == 0 && !xr_live_claude(&ci, &c) &&
+		       xr_live_codex(&ci, &x) != 0 && !strcmp(x.tid, s->sid) &&
+		       !strcmp(x.home, s->cx->home);
+	else
+		same = qc == 0 && xr_live_claude(&ci, &c) && !strcmp(c.sid, s->sid);
 	if (qc == 0)
 		cmd_info_free(&ci);
 	if (!same)
 		return 1;
-	if (xr_claude_lookup(s->cfg, s->sid, path, sizeof path, &st, project,
-	                     sizeof project) < 0)
+	if (s->cx && !s->sid[0])
+		return 0;
+	if (s->cx ? xr_codex_lookup(s->cx->home, s->sid, path, sizeof path, &st)
+	            < 0
+	          : xr_claude_lookup(s->cfg, s->sid, path, sizeof path, &st,
+	                             project, sizeof project) < 0)
+	{
+		/* not there yet: a Codex day dir made since moves the watch */
+		if (s->fd < 0 && s->cx)
+		{
+			xf_cx_dir(s->cx, path, sizeof path);
+			return strcmp(path, s->watch) != 0;
+		}
 		return s->fd >= 0;	/* gone, or still not there */
+	}
 	return s->fd < 0 || (uint64_t)st.st_ino != s->ino;
 }
 
+/* c: a Claude's transcript; else x: a Codex's rollout (7.4) */
 static int
-xf_claude(struct xf *f, const struct crec *c, const char *label)
+xf_claude(struct xf *f, const struct crec *c, const struct xr_cx *x,
+          const char *label)
 {
 	const struct xr_target *t = f->t;
 	struct xf_cl s;
@@ -12474,6 +12753,38 @@ xf_claude(struct xf *f, const struct crec *c, const char *label)
 
 	memset(&s, 0, sizeof s);
 	s.fd = -1;
+	if (x)
+	{
+		/* its rollout, else (none yet, or no id) today's day dir; its
+		** snapshot dir besides: a mapping that moves is a rotation */
+		s.cx = x;
+		snprintf(s.sid, sizeof s.sid, "%s", x->tid);
+		snprintf(s.label, sizeof s.label, "%s", x->cwd[0] ? x->cwd : label);
+		if (!s.sid[0] || xr_codex_lookup(x->home, s.sid, s.path,
+		                                 sizeof s.path, &st) < 0)
+		{
+			xf_cx_dir(x, dir, sizeof dir);
+			snprintf(s.watch, sizeof s.watch, "%s", dir);
+			goto read;
+		}
+		if ((s.fd = xr_seam_open(s.path, &st)) < 0 ||
+		    !(s.d = xr_claude_new()) || !(s.ix = xr_index_new()))
+		{
+			xf_cl_free(&s);
+			return xr_failed();
+		}
+		xr_claude_codex(s.d);
+		s.ino = (uint64_t)st.st_ino;
+		xr_index_sink(s.ix, &k);
+		xr_claude_refs(s.d, &k, s.ino, NULL, NULL);
+		if (xr_claude_read(s.d, s.fd, (uint64_t)st.st_size,
+		                   &s.capped) < 0)
+		{
+			xf_cl_free(&s);
+			return xr_failed();
+		}
+		goto read;
+	}
 	snprintf(s.sid, sizeof s.sid, "%s", c->sid);
 	snprintf(s.label, sizeof s.label, "%s", c->cwd[0] ? c->cwd : label);
 	xr_crec_cfg(c, s.cfg, sizeof s.cfg);
@@ -12510,6 +12821,7 @@ xf_claude(struct xf *f, const struct crec *c, const char *label)
 		    access(dir, X_OK) != 0)
 			snprintf(dir, sizeof dir, "%s/projects", s.cfg);
 	}
+read:
 	if (!s.project[0])
 		xr_project_key(s.label, s.project, sizeof s.project);
 	xf_cl_answer(t, &s, &a);
@@ -12524,6 +12836,8 @@ xf_claude(struct xf *f, const struct crec *c, const char *label)
 		xf_cl_free(&s);
 		return xr_failed();
 	}
+	if (s.d2 && x)
+		xr_claude_codex(s.d2);
 	if (s.d2)
 	{
 		xr_index_sink(s.ix2, &k);
@@ -12540,6 +12854,9 @@ xf_claude(struct xf *f, const struct crec *c, const char *label)
 		return 0;	/* gone already */
 	}
 	xf_watch_file(f, s.fd, dir[0] ? dir : NULL);
+	if (x && (size_t)snprintf(dir, sizeof dir, "%s/shell_snapshots",
+	                          x->home) < sizeof dir)
+		xf_watch_dir2(f, dir);
 	/* lines written between the read and the watch */
 	f->pending = s.fd >= 0 && fstat(s.fd, &st) == 0 &&
 	             (uint64_t)st.st_size > xr_claude_next(s.d);
@@ -12912,8 +13229,9 @@ xr_follow(const struct xr_target *t)
 	{
 		struct cmd_info ci;
 		struct crec c;
+		struct xr_cx x;
 		char label[PATH_MAX] = "";
-		int qc = cmd_query(t->sock, &ci), claude;
+		int qc = cmd_query(t->sock, &ci), claude, codex = 0;
 
 		if (qc == -4)
 		{
@@ -12923,6 +13241,8 @@ xr_follow(const struct xr_target *t)
 		if (qc == 0 && ci.pid > 0)
 			(void)proc_cwd(ci.pid, label, sizeof label);
 		claude = qc == 0 && xr_live_claude(&ci, &c);
+		if (!claude && qc == 0)
+			codex = xr_live_codex(&ci, &x);	/* 7.4 */
 		if (qc == 0)
 			cmd_info_free(&ci);
 		if (xf_watch_open(&f) < 0)
@@ -12931,8 +13251,9 @@ xr_follow(const struct xr_target *t)
 			break;
 		}
 		f.pending = 0;
-		rc = claude ? xf_claude(&f, &c, label)
-		            : xf_shell(&f, label, first);
+		rc = claude ? xf_claude(&f, &c, NULL, label)
+		     : codex ? xf_claude(&f, NULL, &x, label)
+		     : xf_shell(&f, label, first);
 		xf_watch_close(&f);
 		first = 0;
 		if (rc != XF_RESET)

@@ -641,9 +641,11 @@ rec_refresh(void)
 		free(rec_ag.launch);
 		memset(&rec_ag, 0, sizeof rec_ag);
 	}
-	/* a stopped or gone agent no longer holds the ring's pause */
-	xray_agent(!stopped && the_pty.fd >= 0 && rec_ag.pid > 0 &&
-	           kill(rec_ag.pid, 0) == 0 ? rec_ag.pid : 0);
+	/* a stopped or gone agent no longer holds the ring's pause; a Codex
+	** holds it too (its corpus is its rollout: X-ray 7.4) */
+	xray_agent(stopped || the_pty.fd < 0 ? 0
+	           : rec_ag.pid > 0 && kill(rec_ag.pid, 0) == 0 ? rec_ag.pid
+	           : (pid_t)dch_codex_below(the_pty.pid));
 	if (sidecar_path(".alias", ap, sizeof ap) == 0 &&
 	    (fd = open(ap, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)) >= 0)
 	{
@@ -3776,6 +3778,9 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 			free(a.launch);
 			none = 1;
 		}
+		else if (!none && the_pty.fd >= 0 &&
+		         dch_codex_below(the_pty.pid) > 0)
+			none = 1;	/* a Codex's: its rollout (7.4) */
 		if (none)
 		{
 			dch_trace("xray clear: no ring here, ignored");

@@ -1259,6 +1259,111 @@ xr_claude_lookup(const char *cfg, const char *sid, char *path, size_t pathsz,
 	return hits == 1 ? 0 : -1;
 }
 
+/* A subdir of dfd, never through a symlink; -1 none. */
+static DIR *
+cx_dir(int dfd, const char *name)
+{
+	int fd = openat(dfd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW |
+	                O_CLOEXEC);
+	DIR *d = fd >= 0 ? fdopendir(fd) : NULL;
+
+	if (fd >= 0 && !d)
+		close(fd);
+	return d;
+}
+
+/* d's entries named by exactly w digits, as a bitmap (names only: no stat,
+** and a bound by construction: 10^w names at most). */
+static void
+cx_names(DIR *d, size_t w, unsigned char *bits)
+{
+	struct dirent *de;
+	size_t k;
+	unsigned v;
+
+	while ((de = readdir(d)))
+	{
+		for (k = 0, v = 0; k < w && isdigit((unsigned char)de->d_name[k]);
+		     k++)
+			v = v * 10 + (unsigned)(de->d_name[k] - '0');
+		if (k == w && !de->d_name[w])
+			bits[v / 8] |= (unsigned char)(1u << (v % 8));
+	}
+}
+
+#define CX_HAS(b, v) ((b)[(v) / 8] & (1u << ((v) % 8)))
+
+int
+xr_codex_lookup(const char *home, const char *tid, char *path, size_t pathsz,
+                struct stat *st)
+{
+	char dir[XR_PATH_MAX + 16], ys[12], ms[12], ds[12];
+	unsigned char yb[10000 / 8 + 1] = {0};
+	DIR *sd, *yd, *md, *dd;
+	struct dirent *de;
+	struct stat s;
+	int y, m, day, days = 0, hits = 0;
+	size_t tl = strlen(tid);
+
+	if (!xr_config_ok(home) || !xr_uuid_shaped(tid) ||
+	    snprintf(dir, sizeof dir, "%s/sessions", home) >= (int)sizeof dir ||
+	    !(sd = cx_dir(AT_FDCWD, dir)))
+		return -1;
+	cx_names(sd, 4, yb);
+	for (y = 9999; y >= 0 && days < XR_CODEX_DAYS && hits < 2; y--)
+	{
+		unsigned char mb[13] = {0};
+
+		snprintf(ys, sizeof ys, "%04d", y);
+		if (!CX_HAS(yb, (unsigned)y) || !(yd = cx_dir(dirfd(sd), ys)))
+			continue;
+		cx_names(yd, 2, mb);
+		for (m = 99; m >= 0 && days < XR_CODEX_DAYS && hits < 2; m--)
+		{
+			unsigned char db[13] = {0};
+
+			snprintf(ms, sizeof ms, "%02d", m);
+			if (!CX_HAS(mb, (unsigned)m) || !(md = cx_dir(dirfd(yd), ms)))
+				continue;
+			cx_names(md, 2, db);
+			for (day = 99; day >= 0 && days < XR_CODEX_DAYS && hits < 2;
+			     day--)
+			{
+				snprintf(ds, sizeof ds, "%02d", day);
+				if (!CX_HAS(db, (unsigned)day) ||
+				    !(dd = cx_dir(dirfd(md), ds)))
+					continue;
+				days++;
+				/* "<any>-<tid>.jsonl", a regular file, not a link */
+				while ((de = readdir(dd)) && hits < 2)
+				{
+					size_t n = strlen(de->d_name);
+
+					if (n < tl + 7 || de->d_name[n - tl - 7] != '-' ||
+					    memcmp(de->d_name + n - tl - 6, tid, tl) ||
+					    strcmp(de->d_name + n - 6, ".jsonl") ||
+					    fstatat(dirfd(dd), de->d_name, &s,
+					            AT_SYMLINK_NOFOLLOW) < 0 ||
+					    !S_ISREG(s.st_mode))
+						continue;
+					if (hits++ == 0 &&
+					    snprintf(path, pathsz, "%s/%s/%s/%s/%s", dir, ys,
+					             ms, ds, de->d_name) >= (int)pathsz)
+						hits = 2;	/* cut short: no path */
+					*st = s;
+				}
+				closedir(dd);
+			}
+			closedir(md);
+		}
+		closedir(yd);
+	}
+	closedir(sd);
+	dch_trace("xray codex lookup: %d hit%s, %d day dirs", hits,
+	          hits == 1 ? "" : "s", days);
+	return hits == 1 ? 0 : -1;
+}
+
 /* ---- chapters ------------------------------------------------------------ */
 
 void
@@ -3660,6 +3765,7 @@ struct xr_claude
 	uint64_t next;		/* the last read's resume offset: the start of
 				** the line it did not finish (#136) */
 	struct xr_entries *want;	/* --chapter (#156), else NULL */
+	int codex;		/* a Codex rollout (7.4) */
 };
 
 enum { B_PROMPT, B_IMAGE, B_STEP };
@@ -4890,6 +4996,192 @@ tokens_max(const char *s, size_t n)
 	return c;
 }
 
+/* ---- Codex: the rollout (7.4, K9) ------------------------------------------- */
+
+/* Rollout lines {"timestamp","type","payload"} as Codex 0.151-0.167 write
+** them (field names checked against real rollouts, 2026-11-11). Only
+** response_item, compacted, session_meta and turn_context are read; every
+** event_msg and any other type gives nothing, so a user turn Codex records
+** twice (the item and its event) counts once. */
+static const char *const A_PAYLOAD[] = { "payload", 0 };
+static const char *const A_ROLE[] = { "role", 0 };
+static const char *const A_ARGS[] = { "arguments", 0 };
+static const char *const A_OUTPUT[] = { "output", 0 };
+static const char *const A_ACTION[] = { "action", 0 };
+
+void
+xr_claude_codex(struct xr_claude *d)
+{
+	d->codex = 1;
+}
+
+/* A user-message part Codex adds itself, never typed: its AGENTS.md
+** instructions, or one tag-wrapped part (<environment_context>, an <image>
+** placeholder, ...). */
+static int
+cx_context(const char *s, size_t n)
+{
+	static const char ag[] = "# AGENTS.md instructions";
+	const char *t = trim(s, &n);
+
+	if (n >= sizeof ag - 1 && !memcmp(t, ag, sizeof ag - 1))
+		return 1;
+	return n >= 3 && t[0] == '<' && t[n - 1] == '>' &&
+	       (A_LO((unsigned char)t[1]) || t[1] == '_' || t[1] == '/');
+}
+
+/* A user message: its typed parts joined as Codex joins them (no separator)
+** make the prompt (5.3's rule, as a Claude user text); its images ride with
+** it. A message of Codex's own parts only is no turn. */
+static void
+cx_user(struct xr_claude *d, const struct json_parser *p, int pl)
+{
+	int c = j_get(p, pl, A_CONTENT), i, img = 0;
+	char *text = NULL, *nt, *s;
+	size_t tl = 0, l;
+
+	if (c < 0 || p->tok[c].kind != JSON_ARRAY)
+		return;
+	for (i = c + 1; i < p->tok[c].next; i = p->tok[i].next)
+	{
+		if (p->tok[i].kind != JSON_OBJECT)
+			continue;
+		if (k_streq(p, i, A_TYPE, "input_image"))
+			img = 1;
+		else if (k_streq(p, i, A_TYPE, "input_text") &&
+		         (s = k_str(p, i, A_TEXT, &l)))
+		{
+			if (!cx_context(s, l) && (nt = realloc(text, tl + l + 1)))
+			{
+				text = nt;
+				memcpy(text + tl, s, l);
+				tl += l;
+				text[tl] = '\0';
+			}
+			free(s);
+		}
+	}
+	if (text)
+		user_text(d, NULL, text, tl);
+	if (img)
+		main_block(d, B_IMAGE, NULL, NULL);
+	free(text);
+}
+
+/* function_call's arguments: a JSON object as a generic card (3.6), else
+** the string as one field. */
+static void
+cx_args(struct xr_claude *d, const struct json_parser *p, int pl)
+{
+	struct json_parser q;
+	size_t n;
+	char *s = k_str(p, pl, A_ARGS, &n);
+
+	if (!s)
+		return;
+	memset(&q, 0, sizeof q);
+	if (tokens_max(s, n) <= XR_LINE_TOKENS && dch_json_parse(&q, s) >= 0 &&
+	    q.tok[0].kind == JSON_OBJECT)
+		refs_card(d, &q, 0);
+	else
+		refs_text(d, s, n, XR_FIELD_CAP, XR_CODE);
+	dch_json_free(&q);
+	free(s);
+}
+
+/* One response_item: a user or assistant message, else a step whose tool
+** fields are scanned under the Claude tool-field rules (code context; a
+** command-like input 6000 scalars, an output 3000, a card's fields 240). */
+static void
+cx_item(struct xr_claude *d, const struct json_parser *p, int pl)
+{
+	char *t = k_str(p, pl, A_TYPE, NULL), *r, *s;
+	int c, i;
+	size_t n;
+
+	if (t && !strcmp(t, "message"))
+	{
+		r = k_str(p, pl, A_ROLE, NULL);
+		c = j_get(p, pl, A_CONTENT);
+		if (r && !strcmp(r, "user"))
+			cx_user(d, p, pl);
+		else if (r && !strcmp(r, "assistant") && c >= 0 &&
+		         p->tok[c].kind == JSON_ARRAY)
+			for (i = c + 1; i < p->tok[c].next; i = p->tok[i].next)
+			{
+				s = p->tok[i].kind == JSON_OBJECT
+				    ? k_str(p, i, A_TEXT, &n) : NULL;
+				if (s && !blank(s, n))
+				{
+					main_block(d, B_STEP, NULL, NULL);
+					refs_text(d, s, n, XR_TEXT_CAP, XR_MD);
+				}
+				free(s);
+			}
+		/* developer and system messages: Codex's own context */
+		free(r);
+		free(t);
+		return;
+	}
+	main_block(d, B_STEP, NULL, NULL);
+	if (!d->rk.hit || !t)
+		;
+	else if (!strcmp(t, "function_call"))
+		cx_args(d, p, pl);
+	else if (!strcmp(t, "custom_tool_call") &&
+	         (s = k_str(p, pl, A_INPUT, &n)))
+	{
+		refs_text(d, s, n, XR_TEXT_CAP, XR_CODE);
+		free(s);
+	}
+	else if (!strcmp(t, "local_shell_call"))
+		refs_card(d, p, k_obj(p, pl, A_ACTION));
+	else if (!strcmp(t, "function_call_output") ||
+	         !strcmp(t, "custom_tool_call_output"))
+	{
+		c = j_get(p, pl, A_OUTPUT);
+		s = c >= 0 && p->tok[c].kind == JSON_STRING ? j_str(p, c, &n)
+		    : c >= 0 && p->tok[c].kind == JSON_ARRAY ? texts(p, c, &n)
+		    : NULL;
+		refs_text(d, s, n, XR_OUTPUT_CAP, XR_CODE);
+		free(s);
+	}
+	/* reasoning, and any type not listed: a step, no ref (7.4) */
+	free(t);
+}
+
+static void
+cx_line(struct xr_claude *d, const struct json_parser *p)
+{
+	int pl = k_obj(p, 0, A_PAYLOAD);
+	char *t = pl >= 0 ? k_str(p, 0, A_TYPE, NULL) : NULL, *s;
+	size_t n;
+
+	if (!t)
+		;
+	else if (!strcmp(t, "response_item"))
+		cx_item(d, p, pl);
+	else if (!strcmp(t, "compacted"))
+	{
+		/* its summary, as a Claude compact summary's (3.6) */
+		main_block(d, B_PROMPT, "compact", "Conversation compacted");
+		if ((s = k_str(p, pl, A_MESSAGE, &n)))
+			refs_text(d, s, n, XR_TEXT_CAP, XR_PROSE);
+		free(s);
+		/* its lead ends here: the prompt after it is a turn of its own */
+		main_block(d, B_STEP, NULL, NULL);
+	}
+	else if ((!strcmp(t, "session_meta") || !strcmp(t, "turn_context")) &&
+	         (s = k_str(p, pl, A_CWD, &n)))
+	{
+		if (s[0] == '/' && scalars(s, n) <= XR_PATH_MAX &&
+		    n < sizeof d->cwd)
+			memcpy(d->cwd, s, n + 1);
+		free(s);
+	}
+	free(t);
+}
+
 void
 xr_claude_line(struct xr_claude *d, const char *line, size_t len,
                uint64_t off, int oversized)
@@ -4915,6 +5207,12 @@ xr_claude_line(struct xr_claude *d, const char *line, size_t len,
 	if ((s = k_str(&p, 0, A_TS, NULL)))
 		d->at = iso_time(s);
 	free(s);
+	if (d->codex)
+	{
+		cx_line(d, &p);
+		dch_json_free(&p);
+		return;
+	}
 	if ((s = k_str(&p, 0, A_CWD, &n)) && s[0] == '/' &&
 	    scalars(s, n) <= XR_PATH_MAX && n < sizeof d->cwd)
 		memcpy(d->cwd, s, n + 1);
