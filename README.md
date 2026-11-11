@@ -126,12 +126,16 @@ shows) matches `sidekick_pattern` in the config file (a POSIX extended regex,
 case-insensitive, default `-qa`; an invalid one, or one that matches every
 name, is matched as plain text; set it empty for no tab), shown only when
 there are some; and **History**, the ended sessions of `--history`, one row
-per session name (its newest record, pinned when any record of the name is),
-pinned first, then by name, case-insensitive, at most 50 (`--history` itself
-still lists every record, newest first). With remote hosts on, History then
-lists the other hosts' ended sessions as `host:name`, the host faint, at most
-50 names per host, so a full local History never hides them (see
-[Remote hosts](#remote-hosts)); on one, `Enter`, `m` and `Shift-Enter`/`o`
+per session name (its newest record, pinned when any record of the name is):
+every pinned name, then the newest other names while there are fewer than 50
+rows, so pinned names alone can make more (`--history` itself still lists
+every record, newest first). With remote hosts on, History also lists the
+other hosts' ended sessions as `host:name`, the host faint, at most 50 names
+per host on top of the local rows, so a full local History never hides them
+(see [Remote hosts](#remote-hosts)). Rows sort pinned first (a remote row
+never is), then by the name shown (alias, else agent name, else name; a
+remote row's starts with `host:`, and it sorts among the local ones),
+case-insensitive, digit runs by value (`a2` before `a10`). On a remote row, `Enter`, `m` and `Shift-Enter`/`o`
 run `dch --revive host:name` there (`o` then attaches to `host:<as>`), a host
 whose `dch serve` lacks `--allow-create` answering in one status line, and
 `p` and `d` say they are for this host's records. Every list has column headers and fixed, aligned columns,
@@ -174,7 +178,7 @@ hint.
 | `m` | | resume without the message (`--no-message`) |
 | `I` | | resume interrupted (n) (`--revive --all`), asks first |
 | `p` | | pin / unpin every record of the row's name |
-| `d` | | remove every ended record of the row's name (`--forget`), asks first; a pinned name must be unpinned first |
+| `d` | | remove every ended record of the row's name (`--forget`), asks first; a pinned name must be unpinned first. While a session of that name is live, one press removes at most 9 of its ended records (the rest stay a row: press `d` again) |
 | `/` | filter (below) | filter (below) |
 | `,` | settings | settings |
 | `q` `Esc` `Ctrl-C` `Ctrl-D` | quit (`Esc` clears a filter first) | quit (`Esc` clears a filter first) |
@@ -1357,7 +1361,11 @@ nor an option's value, the options read the way Claude Code 2.1.318's
 `--help` lists them. It is cut only where `claude` is the program run: the
 command itself, after an `env` prefix (`env FOO=1 claude ...`), or behind a
 wrapper (`headroom wrap claude ...`) once dch has seen Claude run in the
-session. Any other command that merely holds a `claude` word (`git -C
+session. Known limit: in such a session the first word named `claude` counts
+as the program even when it is a launcher's path argument (`make -C
+~/src/claude dev`, where `make` starts Claude), so the words after it are cut
+as the prompt (`dev` here) and `--resume <id>` goes in right after it; start
+Claude directly, or through a launcher with no word named `claude`. Any other command that merely holds a `claude` word (`git -C
 src/claude log`, `docker run --name claude img`, `ssh host claude ...`, a
 `sh -c` argument) is kept whole, and so are `npx @anthropic-ai/claude-code`,
 a renamed claude and `claude.exe`, which hold no word named `claude`. Put it

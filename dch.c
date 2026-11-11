@@ -6797,7 +6797,9 @@ exit_prompt(const char *path, char *out, size_t outsz)
 					u++;
 				else if (*u >= 0x20 && *u != 0x7f)
 					out[k++] = (char)*u;
-			out[k] = '\0';
+			/* cut at the cap: end on a character boundary; k stays
+			** at the cap, so no later item is joined on */
+			out[*u ? dch_utf8_trim(out, k) : k] = '\0';
 		}
 	}
 	free(raw);

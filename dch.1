@@ -389,11 +389,16 @@ turns the tab off), shown only when there are some; and
 the ended sessions of
 .BR \-\-history ,
 one row per session name (its newest record, pinned when any record of
-the name is),
-pinned first, then by name, case-insensitive, at most 50; with remote
-hosts on, then the other hosts' (see
+the name is): every pinned name, then the newest other names while there
+are fewer than 50 rows, so pinned names alone can make more; with remote
+hosts on, also the other hosts' (see
 .BR "REMOTE HOSTS" ),
-as \fIhost\fP:\fIname\fP with the host faint, at most 50 names per host.
+as \fIhost\fP:\fIname\fP with the host faint, at most 50 names per host
+on top of the local rows.
+Rows sort pinned first (a remote row never is), then by the name shown
+(alias, else agent name, else name; a remote row's starts with
+\fIhost\fP:, and it sorts among the local ones), case\-insensitive,
+digit runs by value.
 .BR Enter ,
 .B m
 and
@@ -526,7 +531,10 @@ pins or unpins,
 .B d
 removes
 .RB ( \-\-forget ),
-every record of the row's name.
+every record of the row's name; while a session of that name is live, at
+most 9 of its ended records per press (the rest stay a row: press
+.B d
+again).
 Every action but attach, rename, resume and pin asks first and runs on
 .BR y .
 The status line shows the action while it runs, then its result.
@@ -1466,7 +1474,22 @@ is the program run: the command itself, after an
 .B env
 prefix, or behind a wrapper
 .RB ( "headroom wrap claude" " ...)"
-once dch has seen Claude run in the session. Any other command that merely
+once dch has seen Claude run in the session.
+Known limit: in such a session the first word named
+.B claude
+counts as the program even when it is a launcher's path argument
+.RB ( "make \-C ~/src/claude dev" ,
+where
+.B make
+starts Claude), so the words after it are cut as the prompt
+.RB ( dev
+here) and
+.B \-\-resume
+.I id
+goes in right after it; start Claude directly, or through a launcher with
+no word named
+.BR claude .
+Any other command that merely
 holds a
 .B claude
 word

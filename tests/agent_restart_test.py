@@ -691,6 +691,29 @@ def main():
         run("-k", bw)
         names.remove(bw)
 
+        # #152: the listed work is cut at dch's 200-byte cap; the cut falls
+        # inside a 3-byte "€" and must not split it (4 joined items are 186
+        # bytes, the cap leaves 11 for the 5th: 3 whole "€", 2 bytes over)
+        u8 = sess("agu8", "claude", bgwork=["€" * 15] * 5)
+        u1 = up(u8)
+        with open(os.path.join(fc, "version")) as f:
+            was = f.read().strip()
+        with open(os.path.join(fc, "version"), "w") as f:
+            f.write("3.8.5")
+        rb = subprocess.run([DCH, "--restart", u8, "--include-agents"],
+                            capture_output=True, timeout=120).stdout
+        print("     | " + rb.decode("utf-8", "replace").rstrip()
+              .replace("\n", "\n     | "))
+        work = "; ".join(["€" * 15] * 4 + ["€" * 3])
+        u2 = up(u8, 2)
+        check("work cut at the cap ends on a character boundary",
+              u1 and ("%s: claude %s -> 3.8.5, resumed %s (at /exit claude "
+                      "stopped the background work it still ran: %s)"
+                      % (u8, was, u1["sid"], work)).encode() in rb and
+              u2 and resumed(u8, u2["pid"], work))
+        run("-k", u8)
+        names.remove(u8)
+
         # /exit stays in the composer through every Enter: once the step
         # gives up, it is taken back out (a later Enter would end the
         # session with no hold)
