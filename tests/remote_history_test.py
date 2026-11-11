@@ -17,8 +17,9 @@ exactly --history --json; an old host: one stderr line, exit 0, the local
 listing whole; a hostile host's control bytes escaped in text and \\u in
 JSON, a record with its own "host" dropped, a reply that is no array, too
 big or a failed run shows nothing; a hanging host within the box, then its
-cached records [stale]; a refusing one says so and shows none; the picker's
-History tab lists srv:gone, Enter there says the host's create-gate refusal
+cached records [stale]; a refusing one says so and shows none; the picker
+fetches a host's history once at its open, then only while its History tab
+shows (#163); the picker's History tab lists srv:gone, Enter there says the host's create-gate refusal
 in one line, and with --allow-create resumes it there; p on it says what
 works.
 
@@ -353,6 +354,7 @@ def main():
         else:
             picker_checks(dch, check, cenv, senv, H, serve_at, tmp, rev,
                           until)
+            refetch_checks(dch, check, cenv, fake, until)
     finally:
         for c in ("srv", "cli"):
             e = senv if c == "srv" else cenv
@@ -440,6 +442,35 @@ def picker_checks(dch, check, cenv, senv, H, serve_at, tmp, rev, until):
           "Resumed as srv:gone" in s and "gone" in
           dch(senv, "-ls").stdout.split(), (s, dch(senv, "-ls").stdout))
     dch(cenv, "-k", "pk2")
+
+
+def refetch_checks(dch, check, cenv, fake, until):
+    """#163: one fetch at the picker's open; none while Sessions shows (the
+    re-fetch interval is 10 s: one bounded 12 s wait); on History, at once
+    and again each interval."""
+    hf = fake(b'[{"name":"hx","end":"exit 0"}]')
+    pk = "pk3"
+    dch(cenv, "--spawn", pk, "--size", "140x30", "--", "env", "-u",
+        "DCH_SESSION", "NO_COLOR=1", "TERM=xterm-256color", DCH,
+        "--hosts", "h=127.0.0.1:%d" % hf.port, "-l")
+    until(lambda: "History" in dch(cenv, "--read", pk).stdout)
+    check("the picker opens on Sessions and fetches the history once",
+          until(lambda: len(hf.bodies) >= 1, 15)
+          and "[History" not in dch(cenv, "--read", pk).stdout, hf.bodies)
+    time.sleep(12)
+    s = dch(cenv, "--read", pk).stdout
+    check("... and not again in 12 s while Sessions shows",
+          len(hf.bodies) == 1 and "[History" not in s, (hf.bodies, s))
+    for _ in range(4):
+        if "[History" in dch(cenv, "--read", pk).stdout:
+            break
+        dch(cenv, "--keys", pk, "tab")
+        time.sleep(0.3)
+    check("History shown: a fetch at once",
+          until(lambda: len(hf.bodies) >= 2, 6), hf.bodies)
+    check("... and the next within the interval",
+          until(lambda: len(hf.bodies) >= 3, 15), hf.bodies)
+    dch(cenv, "-k", pk)
 
 
 if __name__ == "__main__":

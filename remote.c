@@ -1720,7 +1720,7 @@ bg_rows(struct rlist *l, long long t)
 #else
 static pid_t bg_pid = -1;
 static long long bg_at = -RM_EVERY_MS;
-static long long bg_hist_at = -RM_HIST_EVERY_MS;
+static long long bg_hist_at = -RM_HIST_EVERY_MS;	/* < 0: none yet */
 static int lab_fd = -1;		/* the bg child's labels, read end */
 static char lab_in[sizeof g_lab];
 static size_t lab_n;
@@ -1771,6 +1771,8 @@ box_ms(void)
 	return box > 0 && box <= 60000 ? (int)box : RM_BOX_MS;
 }
 
+static int bg_hist_tab;	/* the picker's History tab shows */
+
 /* The rows: now, probed in the foreground (--ls); else the picker's, from
 ** the cache, re-probed behind it (on Windows bg_rows'). */
 int
@@ -1805,8 +1807,11 @@ dch_remote_rows(struct dch_rrow **out, int now)
 		if (bg_pid < 0 && lab_fd < 0 && now_ms() - bg_at >= RM_EVERY_MS &&
 		    pipe_ce(lp) == 0)
 		{
-			/* the history less often: each is a dch run there */
-			int hist = now_ms() - bg_hist_at >= RM_HIST_EVERY_MS;
+			/* the history less often: each is a dch run there;
+			** once at the picker's open (the tab's count), then
+			** only while its History tab shows (#163) */
+			int hist = now_ms() - bg_hist_at >= RM_HIST_EVERY_MS &&
+			           (bg_hist_tab || bg_hist_at < 0);
 
 			bg_at = now_ms();
 			if (hist)
@@ -1931,7 +1936,14 @@ dch_remote_stop(void)
 		close(lab_fd);
 	lab_fd = -1;
 	lab_n = 0;
+	bg_hist_at = -RM_HIST_EVERY_MS;	/* the next picker fetches once */
 #endif
+}
+
+void
+dch_remote_hist_tab(int shown)
+{
+	bg_hist_tab = shown;
 }
 
 void

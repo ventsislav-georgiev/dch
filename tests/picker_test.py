@@ -37,7 +37,11 @@ and --keys types into it. Covers:
      CSI 27 u) and on attach; Esc and Ctrl-C with Caps or Num Lock on
      (CSI 27;65u, 27;129u, 99;69u) quit too (#137); the attached
      session's own push comes back after the pop and nothing pops it
-     again; History hints Shift+Enter/o.
+     again; History hints Shift+Enter/o;
+ 14. a name starting with '-' (#162), as an older dch made it: on a live
+     row x kills (`-k -- <name>`) and r says what works; on a History row
+     p pins and unpins, d removes (`--` before the name), Enter says it is
+     not resumed.
 
 Run:  python3 tests/picker_test.py            (uses ./dch)
       DCH=/path/to/dch python3 tests/picker_test.py
@@ -305,6 +309,65 @@ def kitty():
     check("... and nothing pops the session's push after it",
           after.find(b"\x1b[<", after.rfind(b"\x1b[>3u")) < 0, after)
     dch("-k", "zkbd")
+
+
+def dashname():
+    """14. Rows named with a leading '-' (#162). No dch makes such a name
+    now, so the live one is a master started directly and the History one
+    a record written by hand, as an older dch left them."""
+    rec = os.path.join(ROOT, "state", "dch", "sessions",
+                       SOCKDIR.replace("/", "-"))
+    os.makedirs(rec, mode=0o700, exist_ok=True)
+    now = int(time.time())
+    hf = os.path.join(rec, "-h.json")
+    with os.fdopen(os.open(hf, os.O_WRONLY | os.O_CREAT, 0o600), "w") as f:
+        json.dump(dict(name="-h", sock_dir=SOCKDIR, alias="", cwd=os.getcwd(),
+                       argv=["/bin/zsh"], started=now - 660, updated=now - 60,
+                       ended=now - 60, end="exit 0", agent=None), f,
+                  separators=(",", ":"))
+    procs.append(subprocess.Popen(
+        [DCH, "--master-of", os.path.join(SOCKDIR, "-x.sock"), "--",
+         "sleep", "600"], env=ENV, stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True))
+    check("a live session named -x is up", wait_live("-x", True), live())
+    picker("pk9", "100x30", "NO_COLOR=1", "TERM=xterm-256color")
+    wait_screen("pk9", lambda s: "-x" in rows(s))
+    check("select -x", select("pk9", "-x"), screen("pk9"))
+    dch("--keys", "pk9", "r")
+    s = wait_screen("pk9", lambda s: "Enter attaches, x kills" in s)
+    check("r on -x says what works",
+          "-x: a name starting with '-'; Enter attaches, x kills" in s, s)
+    dch("--keys", "pk9", "x")
+    s = wait_screen("pk9", lambda s: "Kill -x? [y/N]" in s)
+    check("x on -x asks", "Kill -x? [y/N]" in s, s)
+    dch("--keys", "pk9", "y")
+    check("y kills -x", wait_live("-x", False), live())
+
+    s = to_tab("pk9", "History")
+    wait_screen("pk9", lambda s: "-h" in rows(s))
+    check("select -h in History", select("pk9", "-h"), screen("pk9"))
+    dch("--keys", "pk9", "enter")
+    s = wait_screen("pk9", lambda s: "can't be resumed" in s)
+    check("Enter on -h: not resumed, p and d named",
+          "-h: a name starting with '-' can't be resumed; p pins, d removes"
+          in s, s)
+    pin = os.path.join(rec, "-h.pin")
+    dch("--keys", "pk9", "p")
+    s = wait_screen("pk9", lambda s: "-h: pinned" in s)
+    check("p pins -h", os.path.exists(pin), s)
+    dch("--keys", "pk9", "p")
+    s = wait_screen("pk9", lambda s: "-h: unpinned" in s)
+    check("p again unpins -h", not os.path.exists(pin), s)
+    dch("--keys", "pk9", "d")
+    s = wait_screen("pk9", lambda s: "Remove -h from History? [y/N]" in s)
+    check("d asks to remove -h", "Remove -h from History? [y/N]" in s, s)
+    dch("--keys", "pk9", "y")
+    s = wait_screen("pk9", lambda s: "-h" not in rows(s))
+    check("y removes -h: record gone, row gone",
+          not os.path.exists(hf) and "-h" not in rows(s), s)
+    dch("--keys", "pk9", "q")
+    wait_live("pk9", False)
 
 
 def main():
@@ -713,6 +776,7 @@ def main():
     dch("--keys", "pk3", "q")
     check("q quits the picker", wait_live("pk3", False), live())
     kitty()
+    dashname()
     return 1 if failures else 0
 
 
@@ -721,7 +785,7 @@ if __name__ == "__main__":
         rc = main()
     finally:
         for n in ("pk1", "pk2", "pk3", "pk4", "pk5", "pk6", "pk7", "pk8",
-                  "s2", "s10",
+                  "pk9", "s2", "s10",
                   "helper-qa", "a4k-2", "perm", "form", "zkbd"):
             dch("-k", n)
         for pr in procs:

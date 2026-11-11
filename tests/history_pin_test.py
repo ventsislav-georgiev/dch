@@ -20,8 +20,11 @@ prints for a long name's moved record (and a hashed name's) taken by --pin,
 --unpin and --revive, with and without .json, and refused as ambiguous when
 it is also another record's name; a master whose link() fails (an
 LD_PRELOAD/DYLD interposer, as on a filesystem without hard links) still
-moves the record aside, never over a taken name. HOME, the runtime dir
-and the state dir are all temporary.
+moves the record aside, never over a taken name. #162: a name starting
+with '-' (an older dch's `--spawn -h`): `--` ends the options of --pin,
+--unpin, --forget, --stop and -k, so each reaches it, and no verb makes
+such a name (--spawn, -n, --revive --as, a revive of the record). HOME,
+the runtime dir and the state dir are all temporary.
 
 Run:  python3 tests/history_pin_test.py        (uses ./dch)
 """
@@ -630,6 +633,71 @@ def main():
                        env=dict(os.environ, DCH_NO_HISTORY="0"))
         check("--revive lz --as lz2 under DCH_NO_HISTORY=0: lz's record is "
               "gone the moment --revive returns", rec("lz") is None)
+
+        # --- #162: a name starting with '-' -------------------------------
+        plant("-h", end="exit 0")
+        r = run("--forget", "-h")
+        check("--forget -h: still a flag, exit 1, record kept",
+              r.returncode == 1 and r.stderr ==
+              "dch: --forget: unexpected -h\n" and rec("-h") is not None)
+        r = run("--pin", "--", "-h")
+        check("--pin -- -h pins it", r.returncode == 0 and
+              r.stdout == "-h: pinned\n" and pinned("-h"))
+        r = run("--forget", "--", "-h")
+        check("--forget -- -h of the pinned record: failed pinned, kept",
+              r.returncode == 1 and rec("-h") is not None)
+        r = run("--unpin", "--json", "--", "-h")
+        check("--unpin --json -- -h unpins it", r.returncode == 0 and
+              (ndjson(r.stdout) or [{}])[0].get("result") == "ok" and
+              not pinned("-h"))
+        r = run("--forget", "--", "-h")
+        check("--forget -- -h removes the record",
+              r.returncode == 0 and r.stdout == "-h: forgotten\n" and
+              rec("-h") is None)
+        r = run("--forget", "--", "-h", "--all")
+        check("after --, --all is a name too: two not found, exit 1",
+              r.returncode == 1 and
+              r.stdout.count("no history for this session") == 2)
+        r = run("--forget", "--", "../-h", "a/b")
+        check("after --, a name with '/' is still refused",
+              r.returncode == 1 and r.stdout.count("no history") == 2)
+        dash = "dch: a session name cannot start with '-'\n"
+        sockdash = os.path.join(sockdir, "-h.sock")
+        for args in (["--spawn", "-h", "true"], ["-n", "-h", "true"]):
+            r = run(*args)
+            check("dch %s refused: exit 2, one line, no session" %
+                  " ".join(args), r.returncode == 2 and r.stderr == dash and
+                  not os.path.exists(sockdash))
+        plant("rv", end="stopped")
+        r = run("--revive", "rv", "--as", "-h")
+        check("--revive rv --as -h refused, exit 1",
+              r.returncode == 1 and not os.path.exists(sockdash))
+        plant("-h", end="stopped")
+        r = run("--revive", "-h.json")
+        check("--revive -h.json: not taken as a record, no session",
+              r.returncode == 1 and not os.path.exists(sockdash))
+        run("--forget", "--", "-h", "rv")
+        # a live one, as an older dch made it: its master started directly,
+        # orphaned so that --stop sees it exit (a child of ours would linger
+        # as a zombie)
+        for verb in (["-k", "--", "-x"], ["--stop", "--", "-x"]):
+            mp = int(subprocess.run(
+                ["sh", "-c", '"$@" </dev/null >/dev/null 2>&1 & echo $!',
+                 "sh", DCH, "--master-of", os.path.join(sockdir, "-x.sock"),
+                 "--", "sleep", "60"], capture_output=True,
+                text=True).stdout)
+            up = until(lambda: "-x" in run("-ls").stdout.split("\n"))
+            r = run(*verb)
+            gone = until(lambda: "-x" not in run("-ls").stdout.split("\n"))
+            check("dch %s ends a live -x (%r)" % (" ".join(verb),
+                                                  r.stdout.strip()),
+                  up and r.returncode == 0 and gone)
+            if not gone:
+                os.kill(mp, 9)  # ours: the pid sh printed
+        check("--stop's line names no revive for -x",
+              r.stdout == "-x: stopped (a name starting with '-' is not "
+              "revived)\n")
+        run("--forget", "--", "-x")
     except Exception:
         traceback.print_exc()
         fails[0] += 1

@@ -126,12 +126,16 @@ shows) matches `sidekick_pattern` in the config file (a POSIX extended regex,
 case-insensitive, default `-qa`; an invalid one, or one that matches every
 name, is matched as plain text; set it empty for no tab), shown only when
 there are some; and **History**, the ended sessions of `--history`, one row
-per session name (its newest record, pinned when any record of the name is),
-pinned first, then by name, case-insensitive, at most 50 (`--history` itself
-still lists every record, newest first). With remote hosts on, History then
-lists the other hosts' ended sessions as `host:name`, the host faint, at most
-50 names per host, so a full local History never hides them (see
-[Remote hosts](#remote-hosts)); on one, `Enter`, `m` and `Shift-Enter`/`o`
+per session name (its newest record, pinned when any record of the name is):
+every pinned name, then the newest other names while there are fewer than 50
+rows, so pinned names alone can make more (`--history` itself still lists
+every record, newest first). With remote hosts on, History also lists the
+other hosts' ended sessions as `host:name`, the host faint, at most 50 names
+per host on top of the local rows, so a full local History never hides them
+(see [Remote hosts](#remote-hosts)). Rows sort pinned first (a remote row
+never is), then by the name shown (alias, else agent name, else name; a
+remote row's starts with `host:`, and it sorts among the local ones),
+case-insensitive, digit runs by value (`a2` before `a10`). On a remote row, `Enter`, `m` and `Shift-Enter`/`o`
 run `dch --revive host:name` there (`o` then attaches to `host:<as>`), a host
 whose `dch serve` lacks `--allow-create` answering in one status line, and
 `p` and `d` say they are for this host's records. Every list has column headers and fixed, aligned columns,
@@ -174,7 +178,7 @@ hint.
 | `m` | | resume without the message (`--no-message`) |
 | `I` | | resume interrupted (n) (`--revive --all`), asks first |
 | `p` | | pin / unpin every record of the row's name |
-| `d` | | remove every ended record of the row's name (`--forget`), asks first; a pinned name must be unpinned first |
+| `d` | | remove every ended record of the row's name (`--forget`), asks first; a pinned name must be unpinned first. While a session of that name is live, one press removes at most 8 of its ended records (the rest stay a row: press `d` again) |
 | `/` | filter (below) | filter (below) |
 | `,` | settings | settings |
 | `q` `Esc` `Ctrl-C` `Ctrl-D` | quit (`Esc` clears a filter first) | quit (`Esc` clears a filter first) |
@@ -272,7 +276,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.53.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.54.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -332,6 +336,7 @@ dch -a <name> --scrollback 200  # attach with the last 200 lines of history abov
 dch -rl          # rename: pick a session, type a display alias, repeat
 dch -m <name> [alias]  # set the alias without the picker (none: clear it)
 dch -k [name]    # kill a session (interactive picker if no name)
+dch -k -- <name> # kill one whose name starts with '-' (an older dch made it)
 dch -kl          # kill ALL sessions
 dch -d [name]    # detach all clients of a session (sends SIGUSR1)
 dch -n <name>    # override the auto-name
@@ -965,7 +970,8 @@ the master's control socket. Nothing is typed into the session. It prints
   real one, with no wait for the next record tick.
   A master asked to clear anyway (an older client) ignores it there.
 - **Failures.** An ended session or a History record exits 1 with
-  `dch: no such session`, as does a master that hangs up mid-request. A dch-lite master exits 1 with
+  `dch: no such session`, as does a master that hangs up mid-request,
+  before or after the clear. A dch-lite master exits 1 with
   `dch: no x-ray corpus`.
 
 #### Refs
@@ -1101,7 +1107,7 @@ system, like any name.
 | Exit | Meaning |
 | --- | --- |
 | 0 | the object was printed; a `--follow` ended with its session, its connection, or its reader |
-| 1 | `dch: no such session`, `dch: ambiguous session`, `dch: no x-ray corpus` (`--clear`, `--ref`), `dch: busy` (a fifth `--follow` on one shell) |
+| 1 | `dch: no such session` (also a master that hangs up after the connect, before its answer is complete, in every form: nothing more is written; `--ref` keeps the lines already out and writes no `done`; `--follow` once its snapshot is out exits 0 instead), `dch: ambiguous session`, `dch: no x-ray corpus` (`--clear`, `--ref`), `dch: busy` (a fifth `--follow` on one shell) |
 | 2 | bad usage: `--json` missing, a flag twice, `--follow` with `--ref` or `--clear`, a flag of a later release (`--chapter`, `--scope project`, `--scope all`, ...), `--xray` not first, a bad or remote `<n>`, a bad `--ref`, `--scope` or `--budget-ms` |
 | 3 | `dch: X-ray failed on this session`: the session answered garbage, the transcript could not be read (it is there, but opening or reading it failed), memory ran out, or a write failed with an error other than a closed pipe |
 
@@ -1310,8 +1316,9 @@ Limitations:
   that starts a new Claude. `dch --stop` then `dch --revive` brings such a
   session back resumed, never running the rest of the line.
 - **Positional prompt.** A positional prompt argument (`claude "fix the
-  tests"`) is kept and sent again on resume. dch cannot tell it apart from an
-  option value cheaply.
+  tests"`) is dropped on resume (see [Bringing sessions
+  back](#bringing-sessions-back)). After an option dch does not know, followed
+  by a word, the whole command is kept and the prompt is sent again.
 - **Own session.** The session running `dch --restart --include-agents` itself
   is skipped. Run it from outside dch to restart that one.
 - **dch-lite.** dch-lite (no mirror) skips this step. Given
@@ -1356,7 +1363,11 @@ nor an option's value, the options read the way Claude Code 2.1.318's
 `--help` lists them. It is cut only where `claude` is the program run: the
 command itself, after an `env` prefix (`env FOO=1 claude ...`), or behind a
 wrapper (`headroom wrap claude ...`) once dch has seen Claude run in the
-session. Any other command that merely holds a `claude` word (`git -C
+session. Known limit: in such a session the first word named `claude` counts
+as the program even when it is a launcher's path argument (`make -C
+~/src/claude dev`, where `make` starts Claude), so the words after it are cut
+as the prompt (`dev` here) and `--resume <id>` goes in right after it; start
+Claude directly, or through a launcher with no word named `claude`. Any other command that merely holds a `claude` word (`git -C
 src/claude log`, `docker run --name claude img`, `ssh host claude ...`, a
 `sh -c` argument) is kept whole, and so are `npx @anthropic-ai/claude-code`,
 a renamed claude and `claude.exe`, which hold no word named `claude`. Put it
@@ -1502,6 +1513,16 @@ to the new name along with the record. The exemption holds for masters from
 dch 1.25.0 on: a master of an older dch still prunes by age alone when it
 cold-starts. `--forget` never deletes a live session's record (its master
 would write it back), and `--forget --all` leaves pinned records alone.
+
+A session name cannot start with `-`: every verb would read it as a flag.
+`--spawn -h`, `-n -h`, `--revive <n> --as -h` and a revive of such a record
+are refused (`dch: a session name cannot start with '-'`, exit 2; `--as`
+exits 1), and a directory named `-x` auto-names its session `_x`. An older
+dch could make one; `--` reaches it: `--pin`, `--unpin`, `--forget` and
+`--stop` read every word after `--` as a name or record file
+(`dch --forget -- -h`), and `dch -k -- -x` kills it. In the picker such a
+row attaches and kills (live), pins and removes (History, `p` and `d`); any
+other key says so.
 
 The record is one line of JSON, mode 0600 in a 0700 directory:
 
@@ -2025,9 +2046,12 @@ each host's ended sessions, fetched as its own `dch --history --json` over
   answer in time, or whose connection fails, shows the records it last sent,
   `[stale]` (`"stale":true`), for two minutes, from
   `.remote-history` beside the row cache. The picker reads only that cache;
-  its background probe refreshes it every 10 s, not every 2 s, since each
-  fetch runs a `dch` on the host and logs two lines there, and shows a
-  host's records stale once they are 30 s old.
+  its background probe refreshes it once when the picker opens (the
+  History tab's count), then every 10 s, not every 2 s, and only while the
+  History tab shows, since each fetch runs a `dch` on the host and logs two
+  lines there. It shows a host's records stale once they are 30 s old, so
+  after a while on another tab they show stale until the fetch that
+  switching to History starts lands.
 - *Shape.* Text: `host:name (alias)  when  end  cwd  $ argv  [claude <name>
   <id>]  [pinned]  [record <file>]  [stale]`, every field escaped. JSON:
   each record as the host sent it, its C1, DEL and bidi controls written as
@@ -2036,7 +2060,7 @@ each host's ended sessions, fetched as its own `dch --history --json` over
   so a host cannot pass for another. At most 500 records and 2 MiB per host.
   Without `--remote` nothing is dialled and the output is unchanged.
 - *An old or odd host.* One whose hello lacks `ctl` (before dch serve 1.41,
-  or Prosper) gets one stderr line, `dch: <host>: does not support remote
+  or an older Prosper) gets one stderr line, `dch: <host>: does not support remote
   history (needs dch serve 1.41+)`, and no records; a refusal is `dch:
   <host> refused: <message>`, its cached records dropped; a reply that is
   not a JSON array or is too big, or a remote dch that failed, counts as a

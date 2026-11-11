@@ -444,8 +444,8 @@ def test_evil():
     finally:
         e.close()
     # F7: a master that hangs up mid-request: never a signal, and a
-    # nonzero exit carries one stderr line (a hang-up before any byte is a
-    # master before #119: corpus none, exit 0)
+    # nonzero exit carries one stderr line (#153: the session is gone, exit
+    # 1; test_hangup pins each close point)
     e = Evil("xc-evil", "close")
     try:
         bad = []
@@ -462,9 +462,8 @@ def test_evil():
     finally:
         e.close()
     # #142: a master that closes before reading anything. The close races
-    # the client's write (macOS loses every race: all exit 0), so no hit is
-    # required; "40 hang-ups" already hits the failed-write path on Linux.
-    # Every nonzero exit must carry exactly "dch: no such session".
+    # the client's write; the write's failure and the read's EOF (#153)
+    # both exit 1 with exactly "dch: no such session".
     e = Evil("xc-evil", "rst")
     try:
         bad, fails = [], 0
@@ -479,6 +478,133 @@ def test_evil():
         check("evil: a close before any read: a failed request write "
               "exits nonzero with one stderr line (%d hit)" % fails,
               not bad, bad[:3])
+    finally:
+        e.close()
+
+
+MSG_READ, MSG_ACK, MSG_CMD, MSG_RING_CLEAR = 6, 11, 15, 21
+
+
+class Hang(Evil):
+    """#153: a master that hangs up at one point of the X-ray request.
+    "pre": every connection, once a request's header is in, before any reply
+    byte. On a record read (a header-only read and MSG_CMD are answered):
+    "hdr" after the ring header, "rec" inside a READ_DATA frame, "next" on
+    the second reply's request; --clear's MSG_RING_CLEAR before its ack.
+    "scr": the ring answers in full, the screen read (MSG_READ) hangs up."""
+
+    def conn(self, c):
+        def recv(n):
+            b = b""
+            while len(b) < n:
+                k = c.recv(n - len(b))
+                if not k:
+                    raise OSError
+                b += k
+            return b
+
+        def hdr(sub, tail):
+            h = struct.pack("<BQQQII", sub, 0, tail, 0, 1, 7) + \
+                self.sid.encode()
+            return struct.pack("<BH", MSG_RING_HDR, len(h)) + h
+
+        rec = struct.pack("<HBBI", 5, 3, 0, 0) + b"hello"
+        data = struct.pack("<BH", MSG_READ_DATA, len(rec)) + rec
+        end = struct.pack("<BH", MSG_READ_END, 0)
+        p, reads = self.mode, 0
+        try:
+            while True:
+                t, n = struct.unpack("<BH", recv(3))
+                if p == "pre":
+                    return
+                body = recv(n) if t in (MSG_READ, MSG_CMD,
+                                        MSG_RING_READ) else b""
+                if t == MSG_CMD:
+                    c.sendall(struct.pack("<BH", MSG_READ_END, 5))  # UNSUP
+                elif t == MSG_READ:
+                    if p == "scr":
+                        return
+                    c.sendall(struct.pack("<BH", MSG_READ_DATA, 3) + b"row" +
+                              end)
+                elif t == MSG_RING_CLEAR:
+                    if p != "scr":
+                        return
+                    c.sendall(struct.pack("<BH", MSG_ACK, 0))
+                elif t != MSG_RING_READ:
+                    return
+                else:
+                    flags = body[12] if len(body) > 12 else 0
+                    sub = 0x10 if flags & 1 else 0
+                    reads += not flags & 2
+                    if flags & 2 or p == "scr":
+                        c.sendall(hdr(sub, 1) + (b"" if flags & 2 else data) +
+                                  end)
+                    elif p == "hdr":
+                        return c.sendall(hdr(sub, 1 << 40))
+                    elif p == "rec":
+                        return c.sendall(hdr(sub, 1 << 40) + data[:9])
+                    elif reads > 1:
+                        return
+                    else:
+                        c.sendall(hdr(sub, 1 << 40) + data + end)
+        except OSError:
+            pass
+        finally:
+            c.close()
+
+
+def test_hangup():
+    """#153: a master that hangs up after the connect, before the answer is
+    complete, is a session gone at every close point and in every form: one
+    stderr line "dch: no such session", exit 1, no partial object; --ref
+    keeps its `first` line and writes no done. The screen read's own
+    connection is no hang-up of the query: silent, the ring's answer."""
+    forms = (("json", ("--json",)), ("clear", ("--clear", "--json")),
+             ("ref", ("--ref", "o/r#5", "--scope", "session", "--json")),
+             ("follow", ("--follow", "--json")))
+    for point in ("pre", "hdr", "rec", "next"):
+        e = Hang("xc-hang", point)
+        try:
+            for form, args in forms:
+                bad = []
+                for _ in range(30):
+                    r = dch("--xray", "xc-hang", *args)
+                    lines = r.stdout.splitlines()
+                    want = ['{"schema":1,"first":'] \
+                        if form == "ref" and point != "pre" else []
+                    if r.returncode != 1 or \
+                            r.stderr != "dch: no such session\n" or \
+                            [l[:20] for l in lines] != want:
+                        bad.append((r.returncode, r.stderr, r.stdout[:120]))
+                check("hang-up %s, %s: 30 runs exit 1, 'no such session'%s" % (
+                          point, form, ", `first` and no done" if want else
+                          ", no stdout"), not bad, bad[:2])
+        finally:
+            e.close()
+    e = Hang("xc-hang", "scr")
+    try:
+        for form, args in forms[:3]:
+            bad = []
+            for _ in range(30):
+                r = dch("--xray", "xc-hang", *args)
+                last = r.stdout.splitlines()[-1:] or [""]
+                if r.returncode or r.stderr or not (
+                        last[0].startswith('{"schema":1,"done":') if
+                        form == "ref" else last[0].startswith('{"schema":1,"s')):
+                    bad.append((r.returncode, r.stderr, r.stdout[:120]))
+            check("screen read hangs up, %s: 30 runs exit 0, silent, the "
+                  "ring's answer" % form, not bad, bad[:2])
+        p = subprocess.Popen([DCH, "--xray", "xc-hang", "--follow", "--json"],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             text=True, env=ENV)
+        try:
+            line = p.stdout.readline()
+            check("screen read hangs up, follow: the snapshot, and it follows",
+                  line.startswith('{"schema":1,"snapshot":') and
+                  p.poll() is None, line[:120])
+        finally:
+            p.kill()
+            p.communicate()
     finally:
         e.close()
 
@@ -2225,6 +2351,7 @@ def main():
         test_evicted()
         test_clear_off()
         test_evil()
+        test_hangup()
         test_claude()
         test_clear_after_claude()
         test_two_claudes()

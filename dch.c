@@ -864,6 +864,8 @@ auto_name(char *out, size_t outsz)
 
 		sanitize(branch);
 		snprintf(out, outsz, "%s-%s", base, branch);
+		if (out[0] == '-')	/* a dir named -x: no name starts so (#162) */
+			out[0] = '_';
 		return;
 	}
 
@@ -874,6 +876,8 @@ auto_name(char *out, size_t outsz)
 	const char *bn = slash ? slash + 1 : cwd;
 	snprintf(out, outsz, "%.*s", (int)outsz - 1, bn);
 	sanitize(out);
+	if (out[0] == '-')
+		out[0] = '_';
 }
 
 /* ---- client tracking (PID files) ------------------------------------ */
@@ -2040,10 +2044,16 @@ name_listed(const char *name)
 /* INFO-2 (#120): no new session or rename takes a name shaped like a live
 ** shell's session_id ("m" + 16 hex, in any case: QA 1.45.1 LOW-1), so
 ** `--xray <id> --clear` never meets a name that shadows an id. 1, the line
-** printed, when refused. */
+** printed, when refused. #162: nor a leading '-', which every verb would
+** read as a flag. */
 static int
 refuse_id_name(const char *name)
 {
+	if (name[0] == '-')
+	{
+		fputs("dch: a session name cannot start with '-'\n", stderr);
+		return 1;
+	}
 	if (!xr_label_id_shaped(name, strlen(name)))	/* the listing trims */
 		return 0;
 	fputs("dch: name looks like a session_id\n", stderr);
@@ -3000,8 +3010,9 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 
 	if (make_sock_path(session_name) < 0)
 		return 1;
-	if (!attach_only && xr_label_id_shaped(session_name,
-	                                       strlen(session_name)))
+	if (!attach_only && (session_name[0] == '-' ||
+	                     xr_label_id_shaped(session_name,
+	                                        strlen(session_name))))
 	{
 		int probe = control_connect_path(sock_path);
 
@@ -3217,6 +3228,7 @@ struct ctl_reader
 	unsigned char buf[PKT_HDR + PKT_MAX];
 	size_t fill;
 	int got_any; /* any bytes ever (old-master detection) */
+	int eof;     /* the peer hung up (EOF or a read error), not silence */
 };
 
 /* Next response frame. Returns 1 (frame), 0 (idle_ms of silence), -1 (EOF /
@@ -3268,7 +3280,10 @@ ctl_next_frame(int s, struct ctl_reader *r, int idle_ms,
 		ssize_t n = read(s, r->buf + r->fill,
 		                 sizeof(r->buf) - r->fill);
 		if (n <= 0)
+		{
+			r->eof = 1;
 			return -1;
+		}
 		r->fill += (size_t)n;
 		r->got_any = 1;
 	}
@@ -6110,6 +6125,14 @@ static void
 stop_print(const char *name, const char *res, const char *code,
            const char *detail, const char *aname, const char *sid, int json)
 {
+	char hint[700];
+
+	/* #162: no session takes a name starting with '-', not even back */
+	if (name[0] == '-')
+		snprintf(hint, sizeof hint, "a name starting with '-' is not "
+		         "revived");
+	else
+		snprintf(hint, sizeof hint, "revive with dch --revive %s", name);
 	if (json)
 		json_final(name, NULL, NULL, res, code, detail, sid);
 	else if (strcmp(res, "ok") != 0)
@@ -6119,9 +6142,9 @@ stop_print(const char *name, const char *res, const char *code,
 		       *sid && !strstr(detail, sid) ? sid : "",
 		       *sid && !strstr(detail, sid) ? ")" : "");
 	else
-		printf("%s: stopped (%s%s%s%s%srevive with dch --revive %s)%s%s\n",
+		printf("%s: stopped (%s%s%s%s%s%s)%s%s\n",
 		       name, *sid ? "claude " : "", aname, *sid && *aname ? " " : "",
-		       sid, *sid ? "; " : "", name, *detail ? " " : "", detail);
+		       sid, *sid ? "; " : "", hint, *detail ? " " : "", detail);
 	fflush(stdout);
 }
 
@@ -6793,7 +6816,9 @@ exit_prompt(const char *path, char *out, size_t outsz)
 					u++;
 				else if (*u >= 0x20 && *u != 0x7f)
 					out[k++] = (char)*u;
-			out[k] = '\0';
+			/* cut at the cap: end on a character boundary; k stays
+			** at the cap, so no later item is joined on */
+			out[*u ? dch_utf8_trim(out, k) : k] = '\0';
 		}
 	}
 	free(raw);
@@ -8801,6 +8826,7 @@ pk_load(struct pk *p)
 	load_aliases(&sl);
 	load_harness_names(&sl);
 	load_codex_names(&sl);
+	dch_remote_hist_tab(!p->settings && p->tab == 2);
 	nr = pk_remote ? dch_remote_rows(&rr, 0) : 0;
 	p->r[0] = calloc((size_t)(sl.n + nr) + 1, sizeof **p->r);
 	p->r[1] = calloc((size_t)sl.n + 1, sizeof **p->r);
@@ -9386,11 +9412,16 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 	}
 	if (!w || (c > 0 && c < 256 && !strchr("\r\nrRSxapmdo", c)))
 		return 0;
-	/* dch would read a name that starts with '-' as a flag */
-	if (w->name[0] == '-')
+	/* dch would read a name that starts with '-' as a flag: Enter, x, p
+	** and d pass it after `--` or need no flag; no such name is made or
+	** resumed (#162) */
+	if (w->name[0] == '-' && !(t == 2 ? c == 'p' || c == 'd' : c == 'x' ||
+	                           c == '\r' || c == '\n'))
 	{
-		snprintf(p->status, sizeof p->status, "%s: a name starting "
-		         "with '-' needs the command line", w->name);
+		snprintf(p->status, sizeof p->status, t == 2 ? "%s: a name "
+		         "starting with '-' can't be resumed; p pins, d removes"
+		         : "%s: a name starting with '-'; Enter attaches, x "
+		         "kills", w->name);
 		return 0;
 	}
 	/* ponytail: a remote row only attaches; kill, rename, restart and
@@ -9443,7 +9474,7 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 			return 0;
 		case 'x':
 			snprintf(d, sizeof d, "killing %s", w->title);
-			pk_act(&p->ask, t, w->name, d, "-k", w->name, NULL);
+			pk_act(&p->ask, t, w->name, d, "-k", "--", w->name, NULL);
 			pk_ask(p, "Kill %s?", w->title);
 			return 0;
 		case 'a':
@@ -9511,7 +9542,7 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 		snprintf(d, sizeof d, "%s %s", w->pinned ? "unpinning"
 		         : "pinning", w->title);
 		pk_act(&p->ask, 2, w->name, d, w->pinned ? "--unpin" : "--pin",
-		       pk_recs(w, f), NULL);
+		       "--", pk_recs(w, f), NULL);
 		pk_start(p, &p->ask);
 		return 0;
 	case 'd':
@@ -9522,7 +9553,8 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 			return 0;
 		}
 		snprintf(d, sizeof d, "removing %s", w->title);
-		pk_act(&p->ask, 2, w->name, d, "--forget", pk_recs(w, f), NULL);
+		pk_act(&p->ask, 2, w->name, d, "--forget", "--", pk_recs(w, f),
+		       NULL);
 		/* a live session of the name: its record is not History's, and
 		** --forget <name> would fail on it; the ended records' files */
 		if (pk_recs(w, f) == w->sname && name_live(w->sname))
@@ -9530,8 +9562,8 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 			struct hrec *h;
 			int nh = history_load(&h);
 
-			pk_act(&p->ask, 2, w->name, d, "--forget", NULL);
-			/* shortcut: as many as an action's argv holds (9); the
+			pk_act(&p->ask, 2, w->name, d, "--forget", "--", NULL);
+			/* shortcut: as many as an action's argv holds (8); the
 			** rest stay a row for the next d */
 			for (k = 0; k < nh; k++)
 				if (!name_live(h[k].file) &&
@@ -10752,7 +10784,9 @@ le64(const unsigned char *p)
 
 /* Over an open control connection s. fn NULL: the header only
 ** (DCH_RING_F_HDR; a 1.43.0 master's records are dropped unread). 0, rs
-** filled; -2 the master does not answer the op (it predates #119); -3 a
+** filled; -1 the master hung up (EOF or a reset at any point: the session
+** is gone, as when nothing listens); -2 the master does not answer the op
+** (it predates #119: silence, or DCH_ST_UNSUP); -3 a
 ** malformed or failed reply, one over DCH_RING_READ_MAX record bytes, or a
 ** later one that does not move past seq (a hostile master never holds the
 ** read); -4 the ring was cleared mid-read (the caller starts over).
@@ -10787,7 +10821,7 @@ ring_fetch_rd(int s, struct ctl_reader *rd, int flags, struct ring_snap *rs,
 			rc = ctl_next_frame(s, rd, CTL_IDLE_MS, &type, payload, &len);
 			if (rc <= 0)
 			{
-				ret = replies || rd->got_any ? -3 : -2;
+				ret = rd->eof ? -1 : replies || rd->got_any ? -3 : -2;
 				goto out;
 			}
 			if (type == MSG_RING_HDR && len == DCH_RING_HDR_LEN)
@@ -10917,7 +10951,8 @@ ring_fetch_fd(int s, struct ring_snap *rs, ring_rec_fn fn, void *ctx)
 	return ring_fetch_rd(s, &r, 0, rs, fn, ctx);
 }
 
-/* ring_fetch_fd on a connection of its own; -1 nothing listens. */
+/* ring_fetch_fd on a connection of its own; -1 nothing listens, or the
+** master hung up. */
 static int
 ring_fetch(const char *path, struct ring_snap *rs, ring_rec_fn fn,
            void *ctx)
@@ -11425,7 +11460,9 @@ xr_shell_ref(const struct xr_target *t, const struct xr_refq *q,
 
 	if (fr == -3)
 		return xr_failed();
-	/* gone, a master before #119, a ring off or paused: no corpus */
+	if (fr == -1)
+		return xr_no_session();
+	/* a master before #119, a ring off or paused: no corpus */
 	if (fr != 0 || (rs.status & (DCH_RING_S_OFF | DCH_RING_S_PAUSED)))
 		return xr_no_corpus();
 	xr_project_key(label, project, sizeof project);
@@ -11448,11 +11485,11 @@ xr_shell_ref(const struct xr_target *t, const struct xr_refq *q,
 		if (fr == 0)
 			ring_screen(t->sock, &rs, xr_ref_rec, &f);
 		xr_shell_end(&f.acc->sh);
-		rc = fr != 0 && fr != -4;
+		rc = fr != 0 && fr != -4 && fr != -1;
 	}
 	else
 		rc = -1;
-	if (rc == 0)
+	if (rc == 0 && fr != -1)
 	{
 		int partial = fr == -4 || rs.seqgap || f.acc->gap || f.acc->cont ||
 		              (rs.status & (DCH_RING_S_EVICTED | DCH_RING_S_OFF |
@@ -11464,6 +11501,12 @@ xr_shell_ref(const struct xr_target *t, const struct xr_refq *q,
 	xr_shell_end(&f.acc->sh);
 	xr_chapters_free(&ch);
 	free(f.acc);
+	/* hung up after `first`: the lines out stand, no done, as a cancel */
+	if (fr == -1 && xr_scan_cancelled(f.sc) == 0)
+	{
+		xr_scan_free(f.sc);
+		return xr_no_session();
+	}
 	return xr_ref_exit(f.sc, rc);
 }
 
@@ -11586,19 +11629,20 @@ xr_json(const struct xr_target *t, const struct xr_refq *q, int snap)
 		}
 		else if (acc && (fr == -3 || fr == -4))
 			rc = -2;
+		else if (acc && fr == -1)
+			rc = -3;	/* gone, or hung up mid-read */
 		free(acc);
-		/* fr -1/-2: gone, or a master before #119: no corpus */
+		/* fr -2: a master before #119: no corpus */
 		if (qc == 0)
 			cmd_info_free(&ci);
 		if (!project[0])
 			xr_project_key(label, project, sizeof project);
 	}
-	if (rc == -2)
+	if (rc == -2 || rc == -3)
 	{
 		xr_chapters_free(&ch);
 		xr_index_free(refs);
-		fputs("dch: X-ray failed on this session\n", stderr);
-		return 3;
+		return rc == -3 ? xr_no_session() : xr_failed();
 	}
 	a.available = strcmp(a.corpus, "none") != 0;
 	if (a.available && !a.refs && refs && !strcmp(a.corpus, "claude"))
@@ -11670,8 +11714,7 @@ xr_clear(const struct xr_target *t)
 	if (fr != 0)
 	{
 		close(s);
-		fputs("dch: X-ray failed on this session\n", stderr);
-		return 3;
+		return fr == -1 ? xr_no_session() : xr_failed();
 	}
 	cleared = !agent && !(rs.status & (DCH_RING_S_OFF | DCH_RING_S_PAUSED));
 	if (!claude && (rs.status & DCH_RING_S_OFF))
@@ -11683,9 +11726,8 @@ xr_clear(const struct xr_target *t)
 	    (ctl_next_frame(s, &r, CTL_IDLE_MS, &type, payload, &len) != 1 ||
 	     type != MSG_ACK || len != DCH_ST_OK))
 	{
-		close(s);
-		fputs("dch: X-ray failed on this session\n", stderr);
-		return 3;
+		close(s);	/* a hang-up before the ack: the session is gone */
+		return r.eof ? xr_no_session() : xr_failed();
 	}
 	close(s);
 	dch_trace("xray clear: ring_cleared=%d", cleared);
@@ -12378,9 +12420,9 @@ xf_shell(struct xf *f, const char *label, int first)
 	}
 	xf_watch_conn(f, r);
 	fr = xf_sb_build(f, b, label);
-	if (fr == -3 || fr == -5)
+	if (fr == -1 || fr == -3 || fr == -5)
 	{
-		rc = fr == -5 ? xr_failed() : xf_gone(t)
+		rc = fr == -5 ? xr_failed() : fr == -1 || xf_gone(t)
 		     ? (first ? xr_no_session() : 0) : xr_failed();
 		goto out;
 	}
@@ -12428,7 +12470,8 @@ xf_shell(struct xf *f, const char *label, int first)
 		f->pending = 0;
 		if ((fr = xf_sb_build(f, b, label)) != 0)
 		{
-			rc = fr == -3 && xf_gone(t) ? 0 : xr_failed();
+			/* hung up mid-batch: the session ended (3.3: exit 0) */
+			rc = fr == -1 || (fr == -3 && xf_gone(t)) ? 0 : xr_failed();
 			break;
 		}
 		if (!(b->rs.status & DCH_RING_S_SUB))
@@ -13010,9 +13053,13 @@ main_run(int argc, char **argv)
 		}
 		else if (strcmp(a, "-k") == 0)
 		{
+			/* `-k -- <name>`: a name starting with '-' (#162) */
+			int dd = i + 2 < argc && strcmp(argv[i + 1], "--") == 0 &&
+			         argv[i + 2][0];
+
 			action = A_KILL;
-			i++;
-			if (i < argc && argv[i][0] != '-')
+			i += 1 + dd;
+			if (i < argc && (dd || argv[i][0] != '-'))
 			{
 				snprintf(session_name, sizeof(session_name),
 				         "%s", argv[i]);
@@ -13198,9 +13245,15 @@ main_run(int argc, char **argv)
 		{
 			/* <name>... or --all, maybe --json: the rest of the
 			** line, names packed as --say packs them */
+			int dd = 0;	/* after `--`, every word is a name (#162) */
+
 			action = A_STOP;
 			for (say_at = ++i; i < argc; i++)
-				if (strcmp(argv[i], "--all") == 0)
+				if (dd && argv[i][0])
+					argv[say_at + say_n++] = argv[i];
+				else if (!dd && strcmp(argv[i], "--") == 0)
+					dd = 1;
+				else if (strcmp(argv[i], "--all") == 0)
 					opt_all = 1;
 				else if (strcmp(argv[i], "--json") == 0)
 					opt_json = 1;
@@ -13226,10 +13279,16 @@ main_run(int argc, char **argv)
 			/* <name>... (--forget: or --all), maybe --json, -f:
 			** the rest of the line, names packed as --stop packs
 			** them; -f is gated below */
+			int dd = 0;	/* after `--`, every word is a name (#162) */
+
 			action = a[2] == 'p' ? A_PIN : a[2] == 'u' ? A_UNPIN
 			         : A_FORGET;
 			for (say_at = ++i; i < argc; i++)
-				if (strcmp(argv[i], "--all") == 0 &&
+				if (dd && argv[i][0])
+					argv[say_at + say_n++] = argv[i];
+				else if (!dd && strcmp(argv[i], "--") == 0)
+					dd = 1;
+				else if (strcmp(argv[i], "--all") == 0 &&
 				    action == A_FORGET)
 					opt_all = 1;
 				else if (strcmp(argv[i], "--json") == 0)

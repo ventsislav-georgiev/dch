@@ -350,6 +350,11 @@ does.
 .TP
 .BR \-k " [\fIname\fP]"
 Kill a session (interactive picker without a name).
+.B "\-k \-\-"
+.I name
+kills one whose name starts with
+.B \-
+(an older dch could make one).
 .TP
 .B \-kl
 Kill all sessions.
@@ -359,6 +364,17 @@ Detach all clients of a session.
 .TP
 .BI \-n " name"
 Override the auto-name.
+A session name cannot start with
+.BR \- :
+every verb that would make one
+.RB ( \-n ", " \-\-spawn ", " "\-\-revive \-\-as" ,
+a revive of such a record) refuses with
+.B "dch: a session name cannot start with '\-'"
+and exits 2
+.RB ( \-\-as :
+exit 1); an auto-name from a directory named so starts with
+.B _
+instead.
 .TP
 .B \-f
 Force-attach even if another client is connected.
@@ -389,11 +405,16 @@ turns the tab off), shown only when there are some; and
 the ended sessions of
 .BR \-\-history ,
 one row per session name (its newest record, pinned when any record of
-the name is),
-pinned first, then by name, case-insensitive, at most 50; with remote
-hosts on, then the other hosts' (see
+the name is): every pinned name, then the newest other names while there
+are fewer than 50 rows, so pinned names alone can make more; with remote
+hosts on, also the other hosts' (see
 .BR "REMOTE HOSTS" ),
-as \fIhost\fP:\fIname\fP with the host faint, at most 50 names per host.
+as \fIhost\fP:\fIname\fP with the host faint, at most 50 names per host
+on top of the local rows.
+Rows sort pinned first (a remote row never is), then by the name shown
+(alias, else agent name, else name; a remote row's starts with
+\fIhost\fP:, and it sorts among the local ones), case\-insensitive,
+digit runs by value.
 .BR Enter ,
 .B m
 and
@@ -526,7 +547,17 @@ pins or unpins,
 .B d
 removes
 .RB ( \-\-forget ),
-every record of the row's name.
+every record of the row's name; while a session of that name is live, at
+most 8 of its ended records per press (the rest stay a row: press
+.B d
+again).
+On a row whose name starts with
+.B \-
+(an older dch made it) only attach and kill work live, only
+.B p
+and
+.B d
+in History; any other key says so.
 Every action but attach, rename, resume and pin asks first and runs on
 .BR y .
 The status line shows the action while it runs, then its result.
@@ -904,7 +935,10 @@ Exits 1
 .I "no such session"
 (also for an ended session or a record with
 .BR \-\-clear ,
-and when a master hangs up mid\-request),
+and when a master hangs up mid\-request, in any form;
+.B \-\-ref
+then keeps the lines already written and writes no
+.IR done ),
 .I "ambiguous session"
 or, for
 .B \-\-clear
@@ -1197,8 +1231,10 @@ typed into a session's shell
 would hand the shell back to run whatever followed
 .B claude
 on its line), a session with a pending respawn, and the session running the
-command. A positional prompt argument is sent
-again on resume. A dch\-lite client skips this step, with a note when a
+command. A positional prompt argument is dropped on resume (see
+.BR \-\-revive );
+after an option dch does not know, followed by a word, the whole command is
+kept and the prompt is sent again. A dch\-lite client skips this step, with a note when a
 session runs claude and
 .B \-\-include\-agents
 was given. The step can take up to
@@ -1463,7 +1499,22 @@ is the program run: the command itself, after an
 .B env
 prefix, or behind a wrapper
 .RB ( "headroom wrap claude" " ...)"
-once dch has seen Claude run in the session. Any other command that merely
+once dch has seen Claude run in the session.
+Known limit: in such a session the first word named
+.B claude
+counts as the program even when it is a launcher's path argument
+.RB ( "make \-C ~/src/claude dev" ,
+where
+.B make
+starts Claude), so the words after it are cut as the prompt
+.RB ( dev
+here) and
+.B \-\-resume
+.I id
+goes in right after it; start Claude directly, or through a launcher with
+no word named
+.BR claude .
+Any other command that merely
 holds a
 .B claude
 word
@@ -1660,6 +1711,14 @@ per name (per record for
 then
 .RI { ok ", " skipped ", " failed }
 counts. Exits 0 when nothing failed, 1 otherwise.
+For
+.BR \-\-pin ", " \-\-unpin ", " \-\-forget " and " \-\-stop ,
+.B \-\-
+ends the options: every word after it is a name or a record file, one
+starting with
+.B \-
+too
+.RB ( "dch \-\-forget \-\- \-h" ).
 .TP
 .BR \-\-agent\-list " [" \-\-json "]"
 List live authenticated Claude native peers. The default writes exact names,
@@ -2102,7 +2161,8 @@ answer in time shows its last records, stale
 .RB ( [stale] ),
 for 2 minutes (a cache in
 .IR .remote\-history );
-the picker's background probe refreshes it every 10 s. A host whose hello
+the picker's background probe refreshes it once when the picker opens, then
+every 10 s while its History tab shows. A host whose hello
 lacks
 .B ctl
 prints

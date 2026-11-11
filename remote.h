@@ -41,6 +41,9 @@ struct dch_rrec
 int dch_remote_history(struct dch_rrec **out, int now);
 void dch_remote_hfree(struct dch_rrec *v, int n);
 void dch_remote_stop(void);
+/* The picker's History tab shows (1) or not: its remote records are
+** re-fetched behind it only then, after one fetch at its open (#163). */
+void dch_remote_hist_tab(int shown);
 /* dch -a host:name's exit status (#102): 0 detached or the session ended,
 ** 1 the link was lost or the host is down or busy (a retry may work), else
 ** one of these, where a retry will not help: */
