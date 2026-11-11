@@ -6184,41 +6184,56 @@ proc_cwd(long pid, char *out, size_t outsz)
 ** first one stops the verb at its next safe point. Nothing more is typed,
 ** text already typed is taken back out of the composer (never an Enter),
 ** and the verb says so. A second one exits at once. A --say parent forwards
-** the first to its children as SIGTERM, which a child does not count as its
-** second. SIGPIPE is ignored: a cut dch serve ctl's reader may be gone. */
-static volatile sig_atomic_t ty_sig;
-static pid_t ty_parent;		/* in a --say child: its parent */
+** the first to its children as SIGUSR1, which only stops them: a child
+** under a Ctrl-C to its whole group gets the tty's SIGINT and the forward,
+** and must not read them as two (si_pid cannot tell them apart: macOS
+** gives 0 for both when they are pending together). SIGPIPE is ignored: a
+** cut dch serve ctl's reader may be gone. */
+static volatile sig_atomic_t ty_sig;	/* stop: any of them, or SIGUSR1 */
+static volatile sig_atomic_t ty_own;	/* an INT, TERM or HUP came */
 static pid_t *ty_kids;		/* in a --say parent: its children */
 static int ty_nkids;
 
 static void
-ty_on_sig(int sig, siginfo_t *si, void *uc)
+ty_set(sigset_t *set)
+{
+	sigemptyset(set);
+	sigaddset(set, SIGINT);
+	sigaddset(set, SIGTERM);
+	sigaddset(set, SIGHUP);
+	sigaddset(set, SIGUSR1);
+}
+
+static void
+ty_on_sig(int sig)
 {
 	int k;
 
-	(void)uc;
-	if (ty_sig && !(ty_parent && si && si->si_pid == ty_parent))
-		_exit(128 + sig);
-	if (ty_sig)
+	if (sig == SIGUSR1)
+	{
+		ty_sig = 1;
 		return;
-	ty_sig = sig;
+	}
+	if (ty_own)
+		_exit(128 + sig);
+	ty_own = ty_sig = 1;
 	for (k = 0; k < ty_nkids; k++)
 		if (ty_kids[k] > 0)
-			kill(ty_kids[k], SIGTERM);
+			kill(ty_kids[k], SIGUSR1);
 }
 
 static void
 ty_arm(void)
 {
-	static const int sigs[] = { SIGINT, SIGTERM, SIGHUP };
+	static const int sigs[] = { SIGINT, SIGTERM, SIGHUP, SIGUSR1 };
 	struct sigaction sa;
 	int k;
 
 	memset(&sa, 0, sizeof sa);
-	sa.sa_sigaction = ty_on_sig;
-	sa.sa_flags = SA_RESTART | SA_SIGINFO;
-	sigemptyset(&sa.sa_mask);
-	for (k = 0; k < 3; k++)
+	sa.sa_handler = ty_on_sig;
+	sa.sa_flags = SA_RESTART;
+	ty_set(&sa.sa_mask);	/* never nested: one body at a time */
+	for (k = 0; k < 4; k++)
 		sigaction(sigs[k], &sa, NULL);
 	signal(SIGPIPE, SIG_IGN);
 }
@@ -6560,32 +6575,61 @@ composer_holds(const char *path, const char *text)
 }
 
 /* A signal once our text is in the composer (#126): take it back out,
-** never an Enter. Ctrl-U clears the line before the cursor in Claude Code's
-** composer and Backspace joins the line above, so one Ctrl-U per line of
-** text, a Backspace between them. -5 once the composer stops holding it
-** (within land ms), else -6.
+** never an Enter. Claude Code's Ctrl-U (2.1.318: deleteToLineStart) kills
+** to the start of the cursor's visual (wrapped) row, and at its column 0
+** the newline or row before it; on an empty composer it does nothing. So
+** one Ctrl-U at a time, the screen re-read after each, until the text is
+** gone: -5. -6 when it is still there at the deadline (land ms) or after
+** strlen + 2 of them (each kills at least a byte), or once a dialog covers
+** the composer: the keys went to it and the text sits under it.
 ** shortcut: an Enter Claude takes only after the signal still sends the
 ** text, read here as taken back; upgrade by watching for the turn. */
 static int
 ty_take_back(const char *path, const char *text, long land)
 {
 	long long end = wall_ms() + land;
-	const char *c;
+	size_t n, max = strlen(text) + 2;
 	int s;
 
-	if ((s = control_connect_path(path)) < 0)
-		return -6;
-	send_ctl(s, MSG_PUSH, "\x15", 1);
-	for (c = text; (c = strchr(c, '\n')); c++)
-		send_ctl(s, MSG_PUSH, "\x7f\x15", 2);
-	close(s);
-	while (composer_holds(path, text))
+	for (n = 0; ; n++)
 	{
-		if (wall_ms() >= end)
+		if (claude_gate(path) == CG_DIALOG)
 			return -6;
-		poll(NULL, 0, AG_POLL_MS);
+		if (!composer_holds(path, text))
+			return -5;
+		if (n == max || wall_ms() >= end ||
+		    (s = control_connect_path(path)) < 0)
+			return -6;
+		send_ctl(s, MSG_PUSH, "\x15", 1);
+		close(s);
+		poll(NULL, 0, AG_POLL_MS / 5);
 	}
-	return -5;
+}
+
+/* Push text (NULL: an Enter) with INT, TERM, HUP and the forward blocked
+** across the ty_sig check (#126): -4 once a signal was handled, so nothing
+** is ever typed after one. Else 0, or -1 when it could not be pushed. */
+static int
+ty_push(const char *path, const char *text, int paste)
+{
+	sigset_t set, old;
+	int s, r = -4;
+
+	ty_set(&set);
+	sigprocmask(SIG_BLOCK, &set, &old);
+	if (!ty_sig && (paste || !text))
+		r = dch_pty_push(path, text) < 0 ? -1 : 0;
+	else if (!ty_sig)
+	{
+		r = (s = control_connect_path(path)) < 0 ? -1 : 0;
+		if (s >= 0)
+		{
+			send_ctl(s, MSG_PUSH, text, strlen(text));
+			close(s);
+		}
+	}
+	sigprocmask(SIG_SETMASK, &old, NULL);
+	return r;
 }
 
 /* Type text (paste = bracketed paste for messages; raw keystrokes for a
@@ -6595,7 +6639,8 @@ ty_take_back(const char *path, const char *text, long land)
 ** when the text did not land (no Enter pressed), -3 when it landed but
 ** stayed in the composer through every Enter. Once ty_sig is set (#126):
 ** -4 before anything is typed; text typed waits to land, then
-** ty_take_back's -5 or -6 instead of the next Enter. */
+** ty_take_back's -5 or -6 instead of the next Enter; -6 too when it never
+** landed (it may still paint). */
 static int
 ag_type(const char *path, const char *text, int paste)
 {
@@ -6612,22 +6657,10 @@ ag_type(const char *path, const char *text, int paste)
 	** dialog never gets one: composer_holds() reads it as not holding. */
 	long gap = env_ms("DCH_AGENT_REENTER_MS", 5000);
 	long long next;
-	int s, t, n;
+	int t, n;
 
-	if (ty_sig)
-		return -4;
-	if (paste)
-	{
-		if (dch_pty_push(path, text) < 0)
-			return -1;
-	}
-	else
-	{
-		if ((s = control_connect_path(path)) < 0)
-			return -1;
-		send_ctl(s, MSG_PUSH, text, strlen(text));
-		close(s);
-	}
+	if ((t = ty_push(path, text, paste)) < 0)
+		return t;
 	for (t = AG_ENTER_MS; ; t += AG_POLL_MS / 2)
 	{
 		poll(NULL, 0, t == AG_ENTER_MS ? AG_ENTER_MS : AG_POLL_MS / 2);
@@ -6636,13 +6669,13 @@ ag_type(const char *path, const char *text, int paste)
 		/* a prompt the paste raised: nothing lands until a human
 		** answers it, so stop waiting */
 		if (t >= land || claude_gate(path) == CG_DIALOG)
-			return -2;
+			return ty_sig ? -6 : -2;	/* it may paint later */
 	}
 	for (n = 0; ; n++)
 	{
-		if (ty_sig)
+		if ((t = ty_push(path, NULL, 1)) == -4)
 			return ty_take_back(path, text, land);
-		if (dch_pty_push(path, NULL) < 0)
+		if (t < 0)
 			return -1;
 		for (next = wall_ms() + gap; wall_ms() < next; )
 		{
@@ -7772,7 +7805,6 @@ do_say_verb(char **names, int nnames, char **words, int nwords, int json)
 	char selfb[256], cb[256], path[1100], *text;
 	pid_t *kids;
 #ifdef HAVE_LIBGHOSTTY_VT
-	pid_t me = getpid();
 	sigset_t term, old;
 #endif
 	size_t len = 1;
@@ -7792,10 +7824,7 @@ do_say_verb(char **names, int nnames, char **words, int nwords, int json)
 	}
 	ty_arm();
 #ifdef HAVE_LIBGHOSTTY_VT
-	sigemptyset(&term);
-	sigaddset(&term, SIGINT);
-	sigaddset(&term, SIGTERM);
-	sigaddset(&term, SIGHUP);
+	ty_set(&term);
 #endif
 	if (self && *self)
 		self = canon_name(self, selfb, sizeof selfb);
@@ -7837,7 +7866,6 @@ do_say_verb(char **names, int nnames, char **words, int nwords, int json)
 			sigprocmask(SIG_BLOCK, &term, &old);
 		if (c < 0 && (kids[k] = fork()) == 0)
 		{
-			ty_parent = me;
 			ty_kids = NULL;
 			ty_nkids = 0;
 			sigprocmask(SIG_SETMASK, &old, NULL);

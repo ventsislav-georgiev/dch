@@ -9,7 +9,12 @@ gate when the signal comes. Covers: --run SIGTERMed (withdrawn, exit 1,
 composer empty, nothing sent); --say SIGTERMed in the parent only (it
 forwards to the child that types: one withdrawn line, no child left);
 --say under a Ctrl-C to its whole process group (the child does not count
-the parent's forward as a second signal); a second signal (exit 143 at
+the parent's forward as a second signal), also with both pending at once
+(the child SIGSTOPped across the Ctrl-C); --say of text that wraps and
+spans lines (the fake's Ctrl-U kills one visual row, as Claude Code's
+does); a dialog over the text (draft_left: the keys went to the dialog);
+a paste that never painted in the land wait (draft_left: it may still
+paint); a second signal (exit 143 at
 once); --revive SIGTERMed while it waits for an idle Claude (interrupted,
 nothing typed) and once its message is typed (withdrawn). On dch-lite there
 is no gate to stop: skipped.
@@ -133,10 +138,10 @@ def main():
         return any(l.startswith("❯") and text in l.replace("\xa0", " ")
                    for l in screen(n).splitlines())
 
-    def start(*args, group=False):
+    def start(*args, group=False, env=None):
         return subprocess.Popen([DCH] + list(args), stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, text=True,
-                                start_new_session=group)
+                                start_new_session=group, env=env)
 
     def finish_p(pr, timeout=15):
         t0 = time.time()
@@ -206,6 +211,78 @@ def main():
               lines[0].get("reason") == "withdrawn" and
               until(lambda: not composer(b, "hello again"), 3) and
               typed(b) == [])
+
+        # --- --say: text that wraps and spans lines (#126 round 2) --------
+        # Claude Code's Ctrl-U kills one visual row (or the newline before
+        # it), so taking this back needs a Ctrl-U per row and per newline
+        long_ = ("a message long enough to wrap past the hundred column "
+                 "pane width of this session, so that its first line takes "
+                 "two visual rows in the composer")
+        pr = start("--say", b, "--json", "--", long_, "\nline two\nline",
+                   "three")
+        held = until(lambda: composer(b, "a message long enough"))
+        pr.send_signal(signal.SIGTERM)
+        rc, out, err, secs = finish_p(pr)
+        lines = [json.loads(l) for l in out.splitlines() if l.strip()]
+        check("--say of wrapped, multi-line text SIGTERMed: `withdrawn`, "
+              "composer empty, nothing sent (%.1f s)" % secs,
+              held and rc == 1 and len(lines) == 1 and
+              lines[0].get("reason") == "withdrawn" and secs < 10 and
+              until(lambda: not composer(b, "a message long enough"), 3) and
+              typed(b) == [])
+
+        # --- --say: the child holds the tty's SIGINT and the forward at once
+        # (a Ctrl-C to the group while the child is not scheduled): it must
+        # not read them as two signals. SIGSTOP makes the race certain.
+        pr = start("--say", b, "--json", "--", "hello", "both", group=True)
+        held = until(lambda: composer(b, "hello both"))
+        kids = kids_of(pr.pid)
+        if held and len(kids) == 1:
+            os.kill(kids[0], signal.SIGSTOP)
+            try:
+                os.killpg(pr.pid, signal.SIGINT)
+            except OSError:
+                pass
+            time.sleep(1.0)     # the parent's forward is pending too
+            os.kill(kids[0], signal.SIGCONT)
+        rc, out, err, secs = finish_p(pr)
+        lines = [json.loads(l) for l in out.splitlines() if l.strip()]
+        check("--say child with the group's SIGINT and the forward pending "
+              "together: `withdrawn`, not killed (%.1f s)" % secs,
+              held and len(kids) == 1 and rc == 1 and len(lines) == 1 and
+              lines[0].get("reason") == "withdrawn" and
+              until(lambda: not composer(b, "hello both"), 3) and
+              typed(b) == [])
+
+        # --- a dialog over the composer when the signal comes ------------
+        # the Ctrl-Us go to the dialog and the text sits under it
+        d = sess("vdlg", "claude", eat_enters=99)
+        up(d)
+        pr = start("--run", d, "hello", "under", "a", "dialog")
+        held = until(lambda: composer(d, "hello under a dialog"))
+        setctl(d, eat_enters=99, dialog=True)
+        until(lambda: "Do you want to proceed?" in screen(d), 5)
+        pr.send_signal(signal.SIGTERM)
+        rc, out, err, secs = finish_p(pr)
+        check("--run SIGTERMed with a dialog over its text: `draft_left`, "
+              "not `withdrawn` (%.1f s)" % secs,
+              held and rc == 1 and
+              err.startswith("dch: %s: draft_left — " % d) and
+              typed(d) == [])
+
+        # --- a paste that has not painted when the signal comes, nor by
+        # the end of the land wait: it may still paint, so `draft_left`
+        e = sess("vlag", "claude", lag_ms=4000)
+        up(e)
+        pr = start("--run", e, "late", "paint",
+                   env=dict(os.environ, DCH_AGENT_LAND_MS="1500"))
+        time.sleep(0.5)
+        pr.send_signal(signal.SIGTERM)
+        rc, out, err, secs = finish_p(pr)
+        check("--run SIGTERMed before its paste painted (nor by the end of "
+              "the land wait): `draft_left`, not `not_typed` (%.1f s)" % secs,
+              rc == 1 and err.startswith("dch: %s: draft_left — " % e) and
+              typed(e) == [])
 
         # --- a second signal exits at once --------------------------------
         c = sess("vtwice", "claude", lag_ms=6000)

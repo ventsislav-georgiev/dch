@@ -5,7 +5,10 @@ Installed as `claude` first on PATH. Like the real CLI it writes
 $HOME/.claude/sessions/<pid>.json (CLAUDE_CONFIG_DIR wins), paints a composer
 between two rules with a dim placeholder, goes busy for a turn per submitted
 message, queues messages typed while busy, exits on /exit printing the
-`claude --resume <id>` line, and accepts --resume <id>.
+`claude --resume <id>` line, and accepts --resume <id>. Its composer
+word-wraps at the pane's width and keeps a paste's line breaks; Ctrl-U kills
+to the start of the visual row, or the newline before it, as Claude Code
+2.1.318's deleteToLineStart does; Backspace deletes one character.
 
 State lives in $FAKE_CLAUDE_DIR:
   version           installed version (read at start and by --version)
@@ -32,7 +35,7 @@ State lives in $FAKE_CLAUDE_DIR:
                     knob is up), exit
 <session> is DCH_SESSION, which the master sets for its child.
 """
-import json, os, select, signal, subprocess, sys, termios, textwrap, time
+import json, os, select, signal, subprocess, sys, termios, time
 import tty, uuid
 
 D = os.environ["FAKE_CLAUDE_DIR"]
@@ -123,6 +126,7 @@ tty.setraw(0)
 out = sys.stdout.buffer
 transcript, queue, draft = [], [], ""
 collapsed, prompt_up, pstart, eaten = False, False, 0, 0
+in_paste = False
 turn_end = 0.0
 dismissed = None     # the screen knob a digit answered
 
@@ -130,6 +134,37 @@ dismissed = None     # the screen knob a digit answered
 def screen_up(c):
     return c.get("screen") and json.dumps(c) != dismissed
 idle_gap = 0.0       # a turn ended with a message queued: idle this long
+
+
+def row_starts(d):
+    """Where each visual row of draft d starts: d's lines, each word-wrapped
+    at the composer's width (the pane's, less the 2-column glyph)."""
+    try:
+        w = max(os.get_terminal_size(0).columns - 2, 10)
+    except OSError:
+        w = 70
+    starts, i = [], 0
+    for line in d.split("\n"):
+        starts.append(i)
+        off, rest = i, line
+        while len(rest) > w:
+            cut = rest.rfind(" ", 0, w + 1)
+            cut = cut + 1 if cut > 0 else w
+            off, rest = off + cut, rest[cut:]
+            starts.append(off)
+        i += len(line) + 1
+    return starts
+
+
+def kill_row(d):
+    """Ctrl-U, as Claude Code 2.1.318's deleteToLineStart: right after a
+    newline it deletes that newline, else it kills back to the start of the
+    cursor's visual row (the cursor is at the end of the draft); at that
+    row's column 0, the row before it."""
+    if d.endswith("\n"):
+        return d[:-1]
+    st = row_starts(d)
+    return d[:st[-1] if st[-1] < len(d) or len(st) < 2 else st[-2]]
 
 
 def paint(c):
@@ -166,10 +201,11 @@ def paint(c):
         d = draft or c.get("draft", "")
         if d:
             # like Ink: a long paste collapses, a long draft word-wraps
-            # under a two-space indent
+            # at the pane's width under a two-space indent, newlines kept
             if collapsed:
                 d = "[Pasted text #1]"
-            w = textwrap.wrap(d, 70) or [d]
+            st = row_starts(d) + [len(d) + 1]
+            w = [d[a:b].rstrip("\n ") for a, b in zip(st, st[1:])]
             comp = "\r\n".join(["❯ " + w[0]] +
                                  ["  " + l for l in w[1:]])
             # Ink moves the cursor over blanks instead of writing spaces,
@@ -259,15 +295,19 @@ while True:
                     break
                 seq, buf = buf[:end + 1], buf[end + 1:]
                 if seq == b"\033[200~":
+                    in_paste = True
                     pstart = len(draft)
                     # busy right after --resume: a paste shows this late
                     time.sleep(c.get("lag_ms", 0) / 1000.0)
                 elif seq == b"\033[201~":
+                    in_paste = False
                     collapsed = len(draft) - pstart > 800
                     prompt_up = bool(c.get("dialog_on_paste"))
                 continue
             ch, buf = buf[:1], buf[1:]
-            if screen_up(c):
+            if in_paste and ch in (b"\r", b"\n"):
+                draft += "\n"      # a paste keeps its line breaks
+            elif screen_up(c):
                 log(ev="key", text=ch.decode("latin-1"))
                 if ch.isdigit() and not c.get("sticky"):
                     dismissed = json.dumps(c)
@@ -284,8 +324,10 @@ while True:
                 submit(text, c)
             elif ch == b"\x7f":
                 draft = draft[:-1]
+            elif ch == b"\x15" and collapsed:
+                draft, collapsed = "", False    # one row: the placeholder
             elif ch == b"\x15":
-                draft = ""
+                draft = kill_row(draft)
             elif ch >= b" ":
                 draft += ch.decode("latin-1")
     now = time.time()

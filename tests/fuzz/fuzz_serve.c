@@ -329,14 +329,6 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 				abort();
 			if (a == CA_CANCEL)
 				why = "cancel";
-			if (why && (ctl_grace(lg, why, 1) != CTL_GRACE_MS ||
-			            ctl_grace(lg, why, 0) != (lg && (!strcmp(why,
-			            "cancel") || !strcmp(why, "closed"))
-			            ? CTL_LONG_MS : CTL_GRACE_MS) ||
-			            ctl_grace(lg, "closed", 0) != (lg ? CTL_LONG_MS
-			            : CTL_GRACE_MS) ||
-			            ctl_grace(lg, "cap", 0) != CTL_GRACE_MS))
-				abort();
 			else if (a == CA_RUN)
 			{
 				if (ctl_request(f.data, f.len, &av, &ac, cwd, w,
@@ -346,6 +338,14 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 				ctl = ++runs;
 				why = NULL;
 			}
+			if (why && (ctl_grace(lg, why, 1) != CTL_GRACE_MS ||
+			            ctl_grace(lg, why, 0) != (lg && (!strcmp(why,
+			            "cancel") || !strcmp(why, "closed"))
+			            ? CTL_LONG_MS : CTL_GRACE_MS) ||
+			            ctl_grace(lg, "closed", 0) != (lg ? CTL_LONG_MS
+			            : CTL_GRACE_MS) ||
+			            ctl_grace(lg, "cap", 0) != CTL_GRACE_MS))
+				abort();
 		}
 		if (runs != ends + (ctl > 0))
 			abort();
