@@ -34,13 +34,15 @@ and --keys types into it. Covers:
  13. the kitty keyboard protocol (#132), on a real pty: the picker pushes
      the disambiguate flag (CSI > 1 u) after entering the alternate screen
      and pops it (CSI < u) before leaving it, on quit (by a kitty Esc,
-     CSI 27 u) and on attach; the attached session's own push comes back
-     after the pop and nothing pops it again; History hints Shift+Enter/o.
+     CSI 27 u) and on attach; Esc and Ctrl-C with Caps or Num Lock on
+     (CSI 27;65u, 27;129u, 99;69u) quit too (#137); the attached
+     session's own push comes back after the pop and nothing pops it
+     again; History hints Shift+Enter/o.
 
 Run:  python3 tests/picker_test.py            (uses ./dch)
       DCH=/path/to/dch python3 tests/picker_test.py
 """
-import errno, json, os, pty, re, shutil, subprocess, sys, tempfile, time
+import errno, json, os, pty, re, shutil, signal, subprocess, sys, tempfile, time
 from select import select as fdselect
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -262,6 +264,23 @@ def kitty():
     check("a kitty Esc quits; the flag is popped before 1049l",
           off > 0 and out.rfind(POP, 0, off) > out.rfind(PUSH),
           out[-120:])
+
+    # Caps Lock (64) and Num Lock (128) ride in the mods (#137)
+    for key, what in ((b"\x1b[27;65u", "Caps Lock Esc"),
+                      (b"\x1b[27;129u", "Num Lock Esc"),
+                      (b"\x1b[99;69u", "Caps Lock Ctrl-C")):
+        pid, fd = pty_picker()
+        drain(fd, 10, b"q quit")
+        os.write(fd, key)
+        end, done = time.time() + 5, 0
+        while time.time() < end and not done:
+            drain(fd, 0.2)
+            done = os.waitpid(pid, os.WNOHANG)[0]
+        if not done:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+        os.close(fd)
+        check("a kitty %s (%r) quits the picker" % (what, key), done, key)
 
     pid, fd = pty_picker()
     out = drain(fd, 10, b"q quit")
