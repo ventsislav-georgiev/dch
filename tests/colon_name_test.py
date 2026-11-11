@@ -93,8 +93,9 @@ def wait_ended(env, name, timeout=10.0):
             h = json.loads(run(env, "--history", "--json").stdout or "[]")
         except ValueError:
             h = []
-        if h and not any(r.get("name") == name and not r.get("end")
-                         for r in h):
+        # a not-live record whose end is not written yet reads "vanished"
+        if h and not any(r.get("name") == name and
+                         r.get("end") in (None, "", "vanished") for r in h):
             return True
         time.sleep(0.2)
     return False
