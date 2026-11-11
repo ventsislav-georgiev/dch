@@ -1,0 +1,8 @@
+{"seq":281474976730000,"kind":"mark","flags":0,"t":1794300000,"text":"A"}
+{"seq":281474976730001,"kind":"prompt","flags":0,"t":1794300000,"text":"~/proj $"}
+{"seq":281474976730002,"kind":"mark","flags":0,"t":1794300000,"text":"B"}
+{"seq":281474976730003,"kind":"input","flags":0,"t":1794300000,"text":"gh issue view 831"}
+{"seq":281474976730004,"kind":"mark","flags":8,"t":1794300000,"text":"C"}
+{"seq":281474976730005,"kind":"output","flags":0,"t":1794300000,"text":"# #831 Shell title"}
+{"seq":281474976730006,"kind":"output","flags":0,"t":1794300000,"text":"body #831"}
+{"seq":281474976730007,"kind":"mark","flags":2,"t":1794300000,"text":"D;0","exit":0}

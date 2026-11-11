@@ -102,7 +102,8 @@ dch \- detachable terminal sessions with a headless agent API
 .I name
 .B \-\-ref
 .I ref
-.B \-\-scope session
+.RB [ \-\-scope
+.BR session | project | all ]
 .RB [ \-\-full ]
 .RB [ \-\-budget\-ms
 .IR ms ]
@@ -745,7 +746,12 @@ or
 .BR compact ),
 .B partial
 and
-.BR error .
+.BR error ;
+.B other_projects
+counts the other sessions with a transcript in another project directory
+(what
+.B \-\-scope all
+would add; from names only, nothing opened).
 .B refs
 lists the issues, pull requests, tickets, commits, files and URLs the corpus
 mentions (at most 2000 keys), each with
@@ -768,9 +774,23 @@ then
 light by default (stops at the first result or after
 .B \-\-budget\-ms
 .IR ms ,
-50 to 300, default 300),
+50 to 300, default 300, across all files; with
+.B \-\-scope project
+or
+.B all
+only another session's result stops it, and another session's lines, like
+a live shell's, carry no
+.B mention
+and no
+.BR passage ),
 .B \-\-full
-to read it all (a
+to read it all up to 64 files
+.RB ( why:\(dqfiles\(dq ),
+1 GiB
+.RB ( why:\(dqbytes\(dq )
+and 10 s
+.RB ( why:\(dqtime\(dq )
+(a
 .B \-\-budget\-ms
 with it is accepted and has no effect; a file gives its first
 .B mention
@@ -781,9 +801,32 @@ one
 line per title, at most 8; output capped at 4 MiB, then
 .BR why:\(dqoutput\(dq );
 .B \-\-scope session
-is required (\fBproject\fR, also the default with no
-.BR \-\-scope ,
-and \fBall\fR come later and exit 2).
+reads
+.IR name 's
+own transcript, or its ring and screen;
+.BR project ,
+the default (a remote caller's too), then reads every other session's
+Claude Code transcript in its project directory (a shell's: its cwd's),
+newest first, and
+.B all
+then the other project directories, the newest first.
+The other sessions are this store's live ones (asked for their command,
+never their ring) and History records, one per agent id, each transcript
+found and opened as
+.IR name 's
+is; one not found is never opened.
+Their lines carry
+.BR chapter:null .
+.B done
+has
+.B counts
+.RB ( session ,
+.BR project ,
+.BR project_sessions ,
+.BR all ,
+.BR all_sessions ;
+the last two null unless
+.BR \-\-scope\ all ).
 A reader that closes the pipe ends any form at dch's next write (at most
 250 ms later for
 .BR \-\-ref ),

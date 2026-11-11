@@ -32,7 +32,7 @@ void dch_trace(const char *fmt, ...)
 
 unsigned long xr_seam_opened, xr_seam_refused;
 struct xr_limits xr_lim = {XR_HEAD_RANGE, XR_TAIL_RANGE, XR_CHUNK, XR_LINE_MAX,
-                           XR_OUT_MAX};
+                           XR_OUT_MAX, XR_FILES, XR_BYTES, XR_WALL_MS};
 
 /* ---- UTF-8 and Unicode classes ----------------------------------------- */
 
@@ -3039,8 +3039,10 @@ struct xr_scan
 {
 	FILE *f;
 	char key[XR_KEY_MAX + 16];
-	const char *session, *project;
+	const char *session, *project;	/* this file's session */
 	int live, full, shell, budget;
+	int scope, other, same;	/* --scope; this file another session's, in
+				** <n>'s project dir */
 	long long t0;
 	uint64_t written;
 	size_t room;		/* kept under the cap for the tally and done */
@@ -3053,6 +3055,7 @@ struct xr_scan
 	uint64_t dropped;	/* mention lines the XR_HELD bound left out */
 	/* the scan */
 	uint64_t files, bytes, base, too_long;
+	uint64_t cs, cp, cps, ca, cas;	/* 3.4's counts, files done */
 	int stop, out_full;
 	int cancel;		/* a write failed: 1 EPIPE (the reader left), 2 other */
 	const char *why;
@@ -3256,7 +3259,7 @@ mention_line(struct xr_scan *x, const struct xr_hit *h)
 	fputs("{\"schema\":1,\"mention\":{\"session\":", m);
 	xr_put_str(m, x->session);
 	fputs(",\"chapter\":", m);
-	put_or_null(m, h->chapter);
+	put_or_null(m, x->other ? NULL : h->chapter);	/* <n>'s only */
 	fputs(",\"at\":", m);
 	put_at(m, h->at);
 	fputs(",\"line\":", m);
@@ -3310,15 +3313,16 @@ sc_hit(void *ctx, const struct xr_hit *h)
 		put_at(m, h->at);
 		fputs(",\"title\":", m);
 		xr_put_str(m, h->title);
-		/* a shell <n> in light mode: titles and counts only (S18) */
-		if (x->full || !x->shell)
+		/* a shell <n> and every other session in light mode: titles and
+		** counts only (S18, K4.2) */
+		if (x->full || (!x->shell && !x->other))
 		{
 			fputs(",\"passage\":", m);
 			put_or_null(m, h->passage);
 		}
 		fprintf(m, ",\"rule\":\"%s\",\"offset\":%llu,\"chapter\":", h->rule,
 		        (unsigned long long)h->off);
-		put_or_null(m, h->chapter);
+		put_or_null(m, x->other ? NULL : h->chapter);
 		fputs("}}\n", m);
 		ln_send(x, m, &b, &bl);
 	}
@@ -3340,10 +3344,10 @@ sc_hit(void *ctx, const struct xr_hit *h)
 			x->lastrow = h->row;
 		}
 		/* one line per source line (a Claude entry, a shell row); never
-		** for a shell <n> in light mode (S18) */
+		** in light mode for a shell <n> (S18) or another session (K4.2) */
 		x->lastoff = h->off;
 		x->lasth = lh;
-		if (newline && (x->full || !x->shell) &&
+		if (newline && (x->full || (!x->shell && !x->other)) &&
 		    (b = mention_line(x, h)))
 		{
 			if (!x->mentioned++)
@@ -3364,11 +3368,11 @@ sc_hit(void *ctx, const struct xr_hit *h)
 			}
 		}
 	}
-	/* light, --scope session: the first result ends the scan once its
-	** line (a shell: its row) is done, so a definition keeps its anchor's
-	** mention */
+	/* light: the first result (a wider scope: another session's, R5) ends
+	** the scan once its line (a shell: its row) is done, so a definition
+	** keeps its anchor's mention */
 anchor:
-	if (!x->full && !x->found)
+	if (!x->full && !x->found && (!x->scope || x->other))
 	{
 		x->found = 1;
 		x->foff = h->off;
@@ -3382,12 +3386,26 @@ xr_scan_sink(struct xr_scan *x, struct xr_sink *k)
 	k->ctx = x;
 }
 
+/* 3.4's counts: the files done, plus cur, this file's so far */
 static void
-put_counts(FILE *m, uint64_t session)
+put_counts(FILE *m, const struct xr_scan *x, uint64_t cur)
 {
-	fprintf(m, "\"counts\":{\"session\":%llu,\"project\":0,"
-	        "\"project_sessions\":0,\"all\":null,\"all_sessions\":null}",
-	        (unsigned long long)session);
+	uint64_t s = x->cs, p = x->cp, ps = x->cps, a = x->ca, as = x->cas;
+
+	if (!x->other)
+		s += cur;
+	else if (x->same)
+		p += cur, ps += cur > 0;
+	else
+		a += cur, as += cur > 0;
+	fprintf(m, "\"counts\":{\"session\":%llu,\"project\":%llu,"
+	        "\"project_sessions\":%llu,\"all\":", (unsigned long long)s,
+	        (unsigned long long)p, (unsigned long long)ps);
+	if (x->scope == 2)
+		fprintf(m, "%llu,\"all_sessions\":%llu}", (unsigned long long)a,
+		        (unsigned long long)as);
+	else
+		fputs("null,\"all_sessions\":null}", m);
 }
 
 int
@@ -3410,10 +3428,15 @@ xr_scan_tick(void *ctx, uint64_t bytes)
 		x->stop = 1;
 		x->why = "budget";
 	}
-	else if (!x->stop && x->full && now - x->t0 >= 10000)
+	else if (!x->stop && x->full && now - x->t0 >= xr_lim.ms)
 	{
 		x->stop = 1;
 		x->why = "time";
+	}
+	else if (!x->stop && x->bytes > xr_lim.bytes)
+	{
+		x->stop = 1;
+		x->why = "bytes";
 	}
 	/* one progress line per 250 ms window while the scan runs (R6) */
 	if (!x->stop && now - x->last >= 250)
@@ -3429,7 +3452,7 @@ xr_scan_tick(void *ctx, uint64_t bytes)
 			        "\"bytes\":%llu,\"partial\":true,",
 			        (unsigned long long)x->files + 1,
 			        (unsigned long long)x->bytes);
-			put_counts(m, x->nunit);
+			put_counts(m, x, x->nunit);
 			fputs("}}\n", m);
 			ln_send(x, m, &b, &bl);
 			if (!x->cancel)
@@ -3466,10 +3489,20 @@ xr_scan_file(struct xr_scan *x, uint64_t bytes, uint64_t too_long,
 		free(l);
 	}
 	x->hn = x->h0 = 0;
-	x->nunit = count;	/* the session's count, for done */
-	if (!(b = tally_line(x, count, x->dropped, partial)))
-		return;
+	if (!x->other)
+		x->cs = count;
+	else if (x->same)
+		x->cp += count, x->cps += count > 0;
+	else
+		x->ca += count, x->cas += count > 0;
+	b = tally_line(x, count, x->dropped, partial);
+	/* the next file starts from nothing; found and the stop carry on */
+	x->nunit = x->lastunit = x->nrow = x->lastrow = x->lines = 0;
+	x->lastoff = x->lasth = 0;
+	x->ndefs = x->mentioned = 0;
 	x->dropped = 0;
+	if (!b)
+		return;
 	/* the tally goes past a full output: sc_line kept its room */
 	bl = strlen(b);
 	if (!x->cancel && x->written + bl + 1024 <= xr_lim.out)
@@ -3500,8 +3533,9 @@ xr_scan_first(struct xr_scan *x, const char *session_id, int shape,
 	xr_put_str(m, text);
 	fputs(",\"project\":", m);
 	xr_put_str(m, x->project);
-	fprintf(m, ",\"mode\":\"%s\",\"scope\":\"session\",\"budget_ms\":",
-	        x->full ? "full" : "light");
+	fprintf(m, ",\"mode\":\"%s\",\"scope\":\"%s\",\"budget_ms\":",
+	        x->full ? "full" : "light",
+	        x->scope == 2 ? "all" : x->scope ? "project" : "session");
 	if (x->full)
 		fputs("null", m);
 	else
@@ -3526,7 +3560,7 @@ xr_scan_done(struct xr_scan *x)
 		return -1;	/* a cancel has no done line */
 	fprintf(x->f, "{\"schema\":1,\"done\":true,\"partial\":%s,",
 	        partial ? "true" : "false");
-	put_counts(x->f, x->nunit);
+	put_counts(x->f, x, 0);
 	fputs(",\"why\":", x->f);
 	put_or_null(x->f, partial ? x->why : NULL);
 	fprintf(x->f, ",\"files\":%llu,\"bytes\":%llu,\"lines_too_long\":%llu}\n",
@@ -3539,6 +3573,32 @@ int
 xr_scan_cancelled(const struct xr_scan *x)
 {
 	return x->cancel;
+}
+
+void
+xr_scan_scope(struct xr_scan *x, int scope)
+{
+	x->scope = scope;
+}
+
+int
+xr_scan_next(struct xr_scan *x, const char *session, const char *project,
+             int live, int same)
+{
+	if (!x->stop && (x->files >= xr_lim.files || x->bytes >= xr_lim.bytes))
+	{
+		x->stop = 1;	/* a cap used up: the next file is not opened */
+		x->why = x->files >= xr_lim.files ? "files" : "bytes";
+	}
+	if (xr_scan_tick(x, 0))	/* the budget, 10 s, a result, progress */
+		return 1;
+	x->session = session;
+	x->project = project;
+	x->live = live;
+	x->same = same;
+	x->other = 1;
+	x->shell = 0;	/* a Claude file: <n>'s shell rules end with its ring */
+	return 0;
 }
 
 /* ---- Claude: the assembler ------------------------------------------------- */
@@ -5542,7 +5602,7 @@ fail:
 	xr_put_str(m, a->project ? a->project : "");
 	fputs(",\"project_label\":", m);
 	xr_put_str(m, a->project_label ? a->project_label : "");
-	fputs(",\"other_projects\":0,\"chapters\":[", m);
+	fprintf(m, ",\"other_projects\":%lld,\"chapters\":[", a->other_projects);
 	if (fclose(m) != 0)
 		rc = -1;
 	if (rc == 0)

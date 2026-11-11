@@ -28,14 +28,19 @@
 #define XR_OUT_MAX     (4u << 20)	/* the --json object cap */
 #define XR_PENDING     256		/* open tool calls, Prosper's bound */
 #define XR_PATH_MAX    1024		/* config_dir and cwd bound (8.1) */
+#define XR_FILES       64		/* 3.8: files per --ref */
+#define XR_BYTES       (1ull << 30)	/* 3.8: bytes read per --ref */
+#define XR_WALL_MS     10000		/* 3.8: --ref --full's wall time */
 
-/* The limits above as the code reads them. Only fuzz_xray lowers them, so
-** a small input reaches every cap; never above the defaults (the buffers are
-** sized by the macros). */
+/* The limits above as the code reads them. Only fuzz_xray and dch's
+** DCH_XRAY_CAPS (tests) lower them, so a small input reaches every cap;
+** never above the defaults (the buffers are sized by the macros). */
 struct xr_limits
 {
 	uint64_t head, tail;		/* XR_HEAD_RANGE, XR_TAIL_RANGE */
 	size_t chunk, line, out;	/* XR_CHUNK, XR_LINE_MAX, XR_OUT_MAX */
+	uint64_t files, bytes;		/* XR_FILES, XR_BYTES */
+	long long ms;			/* XR_WALL_MS */
 };
 extern struct xr_limits xr_lim;
 
@@ -186,6 +191,14 @@ void xr_scan_sink(struct xr_scan *x, struct xr_sink *k);
 /* line 1, before any record is read */
 int xr_scan_first(struct xr_scan *x, const char *session_id, int shape,
                   const char *text);
+/* --scope (3.4), before xr_scan_first: 0 session (the default here), 1
+** project, 2 all */
+void xr_scan_scope(struct xr_scan *x, int scope);
+/* The next file after <n>'s (3.4's order): another session's, same: in
+** <n>'s project dir. 0 read it; nonzero the scan stopped (a cap, the
+** budget, a result in light mode), so no more files. */
+int xr_scan_next(struct xr_scan *x, const char *session, const char *project,
+                 int live, int same);
 /* the --ref tick: bytes so far; nonzero once the scan should stop */
 int xr_scan_tick(void *ctx, uint64_t bytes);
 /* one file read: its held mentions and its tally (partial: range-capped) */
@@ -298,6 +311,7 @@ struct xr_answer
 	int live, available, mentions_only, complete, chapters_evicted;
 	int snapshot;			/* --follow: {"schema":1,"snapshot":{…}} */
 	long long lines;		/* < 0 prints null */
+	long long other_projects;	/* 3.2: counted from names only */
 	const struct xr_chapters *ch;
 	struct xr_index *refs;		/* NULL prints [] */
 };

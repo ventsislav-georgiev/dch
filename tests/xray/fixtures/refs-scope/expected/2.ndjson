@@ -1,0 +1,12 @@
+{"schema":1,"first":{"session":"u","session_id":"11111111-2222-4333-8444-555555555560","key":"issue:#831","shape":"issue","text":"#831","project":"-home-demo-proj","mode":"full","scope":"project","budget_ms":null,"elapsed_ms":0}}
+{"schema":1,"mention":{"session":"u","chapter":"f*:0","at":1794304801,"line":"Look at #831 now","offset":0,"live":false,"project":"-home-demo-proj"}}
+{"schema":1,"mention":{"session":"u","chapter":"f*:0","at":1794304802,"line":"Reading #831.","offset":144,"live":false,"project":"-home-demo-proj"}}
+{"schema":1,"tally":{"session":"u","live":false,"project":"-home-demo-proj","count":2,"definitions":0,"partial":false,"mentions_dropped":0}}
+{"schema":1,"definition":{"session":"p1","live":false,"project":"-home-demo-proj","at":1794304803,"title":"Agent panes","passage":"The panes show agents.","rule":"D1","offset":375,"chapter":null}}
+{"schema":1,"mention":{"session":"p1","chapter":null,"at":1794304803,"line":"# #831 Agent panes","offset":375,"live":false,"project":"-home-demo-proj"}}
+{"schema":1,"mention":{"session":"p1","chapter":null,"at":1794304804,"line":"and #831 again","offset":623,"live":false,"project":"-home-demo-proj"}}
+{"schema":1,"tally":{"session":"p1","live":false,"project":"-home-demo-proj","count":2,"definitions":1,"partial":false,"mentions_dropped":0}}
+{"schema":1,"mention":{"session":"p2","chapter":null,"at":1794304801,"line":"first #831","offset":0,"live":false,"project":"-home-demo-proj"}}
+{"schema":1,"mention":{"session":"p2","chapter":null,"at":1794304802,"line":"second #831","offset":138,"live":false,"project":"-home-demo-proj"}}
+{"schema":1,"tally":{"session":"p2","live":false,"project":"-home-demo-proj","count":2,"definitions":0,"partial":false,"mentions_dropped":0}}
+{"schema":1,"done":true,"partial":false,"counts":{"session":2,"project":4,"project_sessions":2,"all":null,"all_sessions":null},"why":null,"files":3,"bytes":1365,"lines_too_long":0}

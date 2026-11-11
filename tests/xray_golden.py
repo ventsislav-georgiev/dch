@@ -12,7 +12,10 @@ Each case is a directory:
                    elapsed_ms masked to 0 and progress lines left out (they
                    are timing; checked to sit between first and done)
   claude/<uuid>.jsonl  transcripts, placed at
-                   <config>/projects/<setup "project_dir">/<uuid>.jsonl
+                   <config>/projects/<setup "project_dir">/<uuid>.jsonl,
+                   or at setup "project_dirs"[<uuid>] (#155: another
+                   project dir; "@WORK:<name>@" is live shell <name>'s
+                   pane cwd's key)
   shell/<name>.ring.ndjson  a live shell session <name>: ring records,
                    served by a test-only fake master (below)
   setup.json       what the case needs around the corpus: History records,
@@ -23,7 +26,10 @@ Each case is a directory:
                    (MSG_READ with DCH_READ_F_PRIMARY, #140) is "screen"
                    (default "screen row\n"); "primary":"alt" answers
                    DCH_ST_ALT (the alt screen is active), "primary":"old"
-                   DCH_ST_ERR (a master before #140). Ignored by Prosper.
+                   DCH_ST_ERR (a master before #140). "isolated": true
+                   fails the case if any argv reads that master's ring or
+                   screen (#155: no scope reads another session's ring,
+                   S17). Ignored by Prosper.
 
 The temp root is masked as /T in the output, and its project key as -T (7.1
 maps every '/' to '-'), so a golden carries the real pane-cwd key shape.
@@ -245,10 +251,15 @@ def run_case(name):
         # transcripts
         cdir = os.path.join(d, "claude")
         if os.path.isdir(cdir):
-            proj = os.path.join(cfg, "projects",
-                                setup.get("project_dir", "-home-demo-proj"))
-            os.makedirs(proj)
+            dirs = setup.get("project_dirs", {})
             for f in sorted(os.listdir(cdir)):
+                pd = dirs.get(f[:-len(".jsonl")],
+                              setup.get("project_dir", "-home-demo-proj"))
+                if pd.startswith("@WORK:"):
+                    pd = key(os.path.join(os.path.realpath(t), "work",
+                                          pd[6:-1]))
+                proj = os.path.join(cfg, "projects", pd)
+                os.makedirs(proj, exist_ok=True)
                 shutil.copy(os.path.join(cdir, f), os.path.join(proj, f))
         # History records
         hdir = os.path.join(state, "dch", "sessions",
@@ -278,6 +289,7 @@ def run_case(name):
                     o.get("session_id", "m0000000000000000"),
                     None if o.get("lite") else o.get("screen", "screen row\n"),
                     cwd, o.get("primary")))
+                masters[-1].isolated = (n, o.get("isolated"))
         # config lines (xray_ring for a ring's cap)
         with open(os.path.join(t, "config"), "w") as f:
             f.write("".join(l + "\n" for l in setup.get("config", [])))
@@ -319,6 +331,12 @@ def run_case(name):
                       name, k, ", session_id" if r.returncode == 0 else ""),
                   got.count("\n") == 1 and obj.get("schema") == 1 and
                   (r.returncode != 0 or "session_id" in obj), got)
+        for m in masters:
+            if m.isolated[1]:
+                check("%s: no argv read %s's ring or screen (S17)" %
+                      (name, m.isolated[0]),
+                      MSG_RING_READ not in m.ops and MSG_READ not in m.ops,
+                      m.ops)
         n_exp = len(os.listdir(os.path.join(d, "expected")))
         check("%s: one expected file per argv entry" % name,
               n_exp == len(case["argv"]), n_exp)

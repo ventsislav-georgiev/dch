@@ -1,0 +1,2 @@
+{"type": "user", "message": {"role": "user", "content": "Look at #831 now"}, "timestamp": "2026-11-10T10:00:01.000Z", "cwd": "/home/demo/proj"}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "Reading #831."}]}, "timestamp": "2026-11-10T10:00:02.000Z", "cwd": "/home/demo/proj"}

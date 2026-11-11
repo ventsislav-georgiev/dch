@@ -1,0 +1,7 @@
+{"schema":1,"first":{"session":"u","session_id":"11111111-2222-4333-8444-555555555560","key":"issue:#831","shape":"issue","text":"#831","project":"-home-demo-proj","mode":"light","scope":"project","budget_ms":300,"elapsed_ms":0}}
+{"schema":1,"mention":{"session":"u","chapter":"f*:0","at":1794304801,"line":"Look at #831 now","offset":0,"live":false,"project":"-home-demo-proj"}}
+{"schema":1,"mention":{"session":"u","chapter":"f*:0","at":1794304802,"line":"Reading #831.","offset":144,"live":false,"project":"-home-demo-proj"}}
+{"schema":1,"tally":{"session":"u","live":false,"project":"-home-demo-proj","count":2,"definitions":0,"partial":false,"mentions_dropped":0}}
+{"schema":1,"definition":{"session":"p1","live":false,"project":"-home-demo-proj","at":1794304803,"title":"Agent panes","rule":"D1","offset":375,"chapter":null}}
+{"schema":1,"tally":{"session":"p1","live":false,"project":"-home-demo-proj","count":1,"definitions":1,"partial":false,"mentions_dropped":0}}
+{"schema":1,"done":true,"partial":true,"counts":{"session":2,"project":1,"project_sessions":1,"all":null,"all_sessions":null},"why":"first","files":2,"bytes":946,"lines_too_long":0}

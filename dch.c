@@ -2742,8 +2742,8 @@ usage(void)
 	    "                                             empties a shell's ring\n"
 	    "  dch --xray <n> --follow --json             that object, then its\n"
 	    "                                             deltas as NDJSON\n"
-	    "  dch --xray <n> --ref <ref> --scope session [--full] [--budget-ms <ms>]\n"
-	    "       --json                                one ref's mentions and\n"
+	    "  dch --xray <n> --ref <ref> [--scope session|project|all] [--full]\n"
+	    "       [--budget-ms <ms>] --json             one ref's mentions and\n"
 	    "                                             definitions as NDJSON\n"
 	    "  dch --agent-list [--json]                 list native Claude peers\n"
 	    "  dch --agent-send <name> <message...>       message one native peer\n"
@@ -11246,7 +11246,7 @@ static long long xr_t0;		/* dch's start, CLOCK_MONOTONIC ms */
 struct xr_refq
 {
 	const char *text;
-	int full, budget;
+	int full, budget, scope;	/* scope: xr_scan_scope's */
 };
 
 static int
@@ -11296,6 +11296,214 @@ xr_ref_exit(struct xr_scan *sc, int rc)
 	return c || rc ? xr_failed() : 0;
 }
 
+/* One transcript through --ref's scan (3.4), the per-file reader for <n>'s
+** file and every other session's: its lines and its tally. 0; -1 a read
+** failure; -2 not opened (gone, or not the file looked up). */
+static int
+xr_ref_file(struct xr_scan *sc, const char *path, const struct stat *st)
+{
+	struct xr_chapters ch = {0};
+	struct xr_claude *d;
+	struct xr_sink k;
+	int fd, capped = 0, rc;
+	uint64_t span = (uint64_t)st->st_size;
+
+	if ((fd = xr_seam_open(path, st)) < 0)
+		return -2;
+	if (!(d = xr_claude_new()))
+	{
+		close(fd);
+		return -1;
+	}
+	xr_scan_sink(sc, &k);
+	xr_claude_refs(d, &k, (uint64_t)st->st_ino, xr_scan_tick, sc);
+	rc = xr_claude_read(d, fd, span, &capped);
+	close(fd);
+	xr_claude_end(d, (uint64_t)st->st_ino, &ch);
+	xr_chapters_free(&ch);
+	if (capped && span > xr_lim.head + xr_lim.tail)
+		span = xr_lim.head + xr_lim.tail;
+	xr_scan_file(sc, span, xr_claude_too_long(d), capped, 0);
+	xr_claude_free(d);
+	return rc < 0 ? -1 : 0;
+}
+
+/* A Claude session of this store other than <n> (7.6): a live row's (its
+** master's MSG_CMD, never its ring) or a History record's. */
+struct xr_cand
+{
+	char name[600], sid[64], cfg[1400];
+	long long seen, dseen;	/* lastSeen; its project dir's newest */
+	int live, same;
+	char path[2048], project[1200];	/* the lookup's */
+	struct stat st;
+};
+
+/* This store's Claude sessions but self (<n>'s id, or ""), one per id: the
+** live rows first, then the History records, newest first. Names only:
+** nothing is opened. The count, *out to free; 0 with *out NULL. */
+static int
+xr_corpus(const char *self, struct xr_cand **out)
+{
+	struct slist sl = {0};
+	struct xr_cand *v = NULL, *nv, c;
+	struct hrec *r;
+	const char *h = getenv("HOME");
+	int nr = history_load(&r), n = 0, cap = 0, k, j;
+
+	list_sessions(&sl);
+	for (k = 0; k < sl.n + nr; k++)
+	{
+		memset(&c, 0, sizeof c);
+		if (k < sl.n)
+		{
+			struct cmd_info ci;
+			struct crec cr;
+			char sock[1100];
+			int ok;
+
+			session_sock_path(sl.v[k], sock, sizeof sock);
+			if (cmd_query(sock, &ci) != 0)
+				continue;
+			ok = xr_live_claude(&ci, &cr);
+			cmd_info_free(&ci);
+			if (!ok)
+				continue;
+			snprintf(c.name, sizeof c.name, "%s", sl.v[k]);
+			snprintf(c.sid, sizeof c.sid, "%s", cr.sid);
+			xr_crec_cfg(&cr, c.cfg, sizeof c.cfg);
+			if (!c.cfg[0])
+				continue;	/* no corpus, as for <n> */
+			c.seen = cr.upd / 1000;
+			c.live = 1;
+		}
+		else
+		{
+			const struct hrec *x = &r[k - sl.n];
+
+			snprintf(c.name, sizeof c.name, "%s", x->name);
+			snprintf(c.sid, sizeof c.sid, "%s", x->sid);
+			if (x->acfg[0])
+				snprintf(c.cfg, sizeof c.cfg, "%s", x->acfg);
+			else if (!h || snprintf(c.cfg, sizeof c.cfg, "%s/.claude", h)
+			         >= (int)sizeof c.cfg)
+				continue;
+			c.seen = x->updated;
+			c.live = x->live;
+		}
+		if (!xr_uuid_shaped(c.sid) || !strcmp(c.sid, self))
+			continue;
+		for (j = 0; j < n && strcmp(v[j].sid, c.sid); j++)
+			;
+		if (j < n)
+			continue;	/* a live row's id: its record is older */
+		if (n == cap)
+		{
+			cap = cap ? cap * 2 : 16;
+			if (!(nv = realloc(v, (size_t)cap * sizeof *v)))
+				break;
+			v = nv;
+		}
+		v[n++] = c;
+	}
+	slist_free(&sl);
+	hrec_free(r, nr);
+	*out = v;
+	return n;
+}
+
+static int
+xr_cand_cmp(const void *a, const void *b)
+{
+	const struct xr_cand *x = a, *y = b;
+	int c;
+
+	if (x->same != y->same)
+		return y->same - x->same;
+	if (x->dseen != y->dseen)
+		return x->dseen < y->dseen ? 1 : -1;
+	if ((c = strcmp(x->project, y->project)))
+		return c;
+	if (x->seen != y->seen)
+		return x->seen < y->seen ? 1 : -1;
+	return (c = strcmp(x->name, y->name)) ? c : strcmp(x->sid, y->sid);
+}
+
+/* The other sessions' Claude files (7.6), each mapped like <n>'s by names
+** only (xr_claude_lookup: a uuid, a valid config_dir, one regular
+** <sid>.jsonl, no symlink; nothing opened), in 3.4's order: <n>'s project
+** dir newest lastSeen first, then (all) the other dirs, newest first. The
+** count, *out to free. */
+static int
+xr_mapped(const char *self, const char *project, int all,
+          struct xr_cand **out)
+{
+	struct xr_cand *v;
+	int n = xr_corpus(self, &v), m = 0, k, j;
+
+	for (k = 0; k < n; k++)
+	{
+		if (xr_claude_lookup(v[k].cfg, v[k].sid, v[k].path, sizeof v[k].path,
+		                     &v[k].st, v[k].project, sizeof v[k].project) < 0)
+			continue;	/* unmapped: never opened */
+		v[k].same = !strcmp(v[k].project, project);
+		if (!v[k].same && !all)
+			continue;
+		if (m != k)
+			v[m] = v[k];
+		m++;
+	}
+	for (k = 0; k < m; k++)
+		for (j = 0; j < m && !v[k].same; j++)
+			if (!strcmp(v[j].project, v[k].project) &&
+			    v[j].seen > v[k].dseen)
+				v[k].dseen = v[j].seen;
+	if (m)
+		qsort(v, (size_t)m, sizeof *v, xr_cand_cmp);
+	*out = v;
+	return m;
+}
+
+/* 3.2's other_projects: the sessions --scope all would add, from names
+** only (K4.5): nothing opened, nothing scanned. */
+static long long
+xr_other_projects(const char *self, const char *project)
+{
+	struct xr_cand *v;
+	int n = xr_mapped(self, project, 1, &v), k;
+	long long c = 0;
+
+	for (k = 0; k < n; k++)
+		c += !v[k].same;
+	free(v);
+	return c;
+}
+
+/* --scope project|all after <n>'s own file or ring (3.4, 7.6): the other
+** sessions' Claude files in xr_mapped's order, never a ring. 0, or -1 a
+** read failure. */
+static int
+xr_ref_others(struct xr_scan *sc, int scope, const char *self,
+              const char *project)
+{
+	struct xr_cand *v;
+	int m, k, rc = 0;
+
+	if (!scope)
+		return 0;
+	m = xr_mapped(self, project, scope == 2, &v);
+	for (k = 0; k < m && rc == 0; k++)
+	{
+		if (xr_scan_next(sc, v[k].name, v[k].project, v[k].live, v[k].same))
+			break;
+		if ((rc = xr_ref_file(sc, v[k].path, &v[k].st)) == -2)
+			rc = 0;	/* gone since the lookup: not read */
+	}
+	/* sc's session names point into v: only done (no names) follows */
+	free(v);
+	return rc;
+}
+
 /* --ref over (cfg, sid)'s transcript (3.4): `first` once the file is
 ** found, before it is opened; then its lines, its tally, `done`. */
 static int
@@ -11303,14 +11511,10 @@ xr_claude_ref(const char *cfg, const char *sid, const char *session,
               int live, const char *label, const struct xr_refq *q)
 {
 	char path[2048], home[1400], project[1200] = "";
-	struct xr_claude *d;
-	struct xr_chapters ch = {0};
 	struct xr_scan *sc;
 	struct xr_span sp;
-	struct xr_sink k;
 	struct stat st;
-	int fd, capped = 0, rc;
-	uint64_t span;
+	int rc;
 
 	if (!cfg[0])
 	{
@@ -11331,27 +11535,14 @@ xr_claude_ref(const char *cfg, const char *sid, const char *session,
 	if (!(sc = xr_scan_new(stdout, sp.key, session, project, live, q->full,
 	                       0, q->budget, xr_t0)))
 		return xr_failed();
+	xr_scan_scope(sc, q->scope);
 	if (xr_scan_first(sc, sid, sp.shape, xr_span_text(&sp)) != 0)
 		return xr_ref_exit(sc, -1);
-	if ((fd = xr_seam_open(path, &st)) < 0 || !(d = xr_claude_new()))
-	{
-		if (fd >= 0)
-			close(fd);
-		return xr_ref_exit(sc, -1);
-	}
-	xr_scan_sink(sc, &k);
-	xr_claude_refs(d, &k, (uint64_t)st.st_ino, xr_scan_tick, sc);
-	rc = xr_claude_read(d, fd, (uint64_t)st.st_size, &capped);
-	close(fd);
-	xr_claude_end(d, (uint64_t)st.st_ino, &ch);
-	xr_chapters_free(&ch);
-	span = (uint64_t)st.st_size;
-	if (capped && span > xr_lim.head + xr_lim.tail)
-		span = xr_lim.head + xr_lim.tail;
-	xr_scan_file(sc, span, xr_claude_too_long(d), capped, 0);
-	xr_claude_free(d);
+	rc = xr_ref_file(sc, path, &st);
+	if (rc == 0)
+		rc = xr_ref_others(sc, q->scope, sid, project);
 	/* a cancel stopped the read: no done */
-	return xr_ref_exit(sc, rc < 0 || xr_scan_done(sc) != 0);
+	return xr_ref_exit(sc, rc != 0 || xr_scan_done(sc) != 0);
 }
 
 /* The shell answer, built as the records stream past. */
@@ -11476,6 +11667,7 @@ xr_shell_ref(const struct xr_target *t, const struct xr_refq *q,
 		free(f.acc);
 		return xr_failed();
 	}
+	xr_scan_scope(f.sc, q->scope);
 	rc = xr_scan_first(f.sc, rs.sid, sp.shape, xr_span_text(&sp));
 	xr_shell_begin(&f.acc->sh, &ch);
 	xr_scan_sink(f.sc, &k);
@@ -11496,7 +11688,10 @@ xr_shell_ref(const struct xr_target *t, const struct xr_refq *q,
 		                            DCH_RING_S_PAUSED));
 
 		xr_scan_file(f.sc, f.acc->bytes, 0, partial, !f.acc->sh.npaired);
-		rc = xr_scan_done(f.sc);
+		/* then the project's Claude files, never another ring (S17) */
+		rc = xr_ref_others(f.sc, q->scope, "", project);
+		if (rc == 0)
+			rc = xr_scan_done(f.sc);
 	}
 	xr_shell_end(&f.acc->sh);
 	xr_chapters_free(&ch);
@@ -11644,6 +11839,7 @@ xr_json(const struct xr_target *t, const struct xr_refq *q, int snap)
 		xr_index_free(refs);
 		return rc == -3 ? xr_no_session() : xr_failed();
 	}
+	a.other_projects = xr_other_projects(sid, project);
 	a.available = strcmp(a.corpus, "none") != 0;
 	if (a.available && !a.refs && refs && !strcmp(a.corpus, "claude"))
 		a.refs = refs;
@@ -12066,6 +12262,18 @@ xf_cl_free(struct xf_cl *s)
 	s->fd = -1;
 }
 
+/* --follow's other_projects (3.2), counted once per stream: every batch
+** builds an answer, only a snapshot prints it */
+static long long
+xf_others(const char *self, const char *project)
+{
+	static long long n = -1;
+
+	if (n < 0 && project[0])
+		n = xr_other_projects(self, project);
+	return n < 0 ? 0 : n;
+}
+
 static void
 xf_cl_answer(const struct xr_target *t, struct xf_cl *s, struct xr_answer *a)
 {
@@ -12078,6 +12286,7 @@ xf_cl_answer(const struct xr_target *t, struct xf_cl *s, struct xr_answer *a)
 	a->complete = 1;
 	a->project = s->project;
 	a->project_label = s->label;
+	a->other_projects = xf_others(s->sid, s->project);
 	if (!s->d)
 		return;
 	if (xr_claude_cwd(s->d)[0])
@@ -12380,6 +12589,7 @@ xf_sb_answer(const struct xr_target *t, struct xf_sb *b, const char *project,
 	a->complete = 1;
 	a->project = project;
 	a->project_label = label;
+	a->other_projects = xf_others(b->rs.sid, project);
 	if (!b->none)
 		xr_shell_fill(a, &b->rs, &b->acc, &b->ch, b->refs, t->sock);
 	a->available = strcmp(a->corpus, "none") != 0;
@@ -12644,14 +12854,14 @@ name_routes_remote(const char *n)
 	return hit && known;
 }
 
-/* `dch --xray <n> [--json] [--clear|--follow]` and `--ref <text> --scope
-** session [--full] [--budget-ms <ms>] --json` (spec 3.1, 3.3, 3.4): flags in
-** any order, each once; the rest of the family (--chapter, the view, the
-** wider scopes) comes with XR3-XR5 and exits 2 here. */
+/* `dch --xray <n> [--json] [--clear|--follow]` and `--ref <text> [--scope
+** session|project|all] [--full] [--budget-ms <ms>] --json` (spec 3.1, 3.3,
+** 3.4): flags in any order, each once; the rest of the family (--chapter,
+** the view) comes with XR3-XR5 and exits 2 here. */
 static int
 xray_main(int argc, char **argv)
 {
-	const char *n = NULL, *ref = NULL, *scope = NULL, *budget = NULL;
+	const char *n = NULL, *ref = NULL, *scope = NULL, *budget = NULL, *e;
 	int json = 0, clear = 0, full = 0, follow = 0, k, rc, nr;
 	struct hrec *r = NULL;
 	struct xr_target t;
@@ -12659,6 +12869,25 @@ xray_main(int argc, char **argv)
 	struct xr_span sp;
 
 	xr_t0 = xr_now_ms();
+	/* tests only: 3.8's --ref caps lowered, never raised (files, bytes,
+	** ms, the per-file head and tail) */
+	if ((e = getenv("DCH_XRAY_CAPS")))
+	{
+		unsigned long long c[5] = {0};
+
+		(void)sscanf(e, "%llu:%llu:%llu:%llu:%llu", &c[0], &c[1], &c[2],
+		             &c[3], &c[4]);
+		if (c[0] && c[0] < xr_lim.files)
+			xr_lim.files = c[0];
+		if (c[1] && c[1] < xr_lim.bytes)
+			xr_lim.bytes = c[1];
+		if (c[2] && c[2] < (unsigned long long)xr_lim.ms)
+			xr_lim.ms = (long long)c[2];
+		if (c[3] && c[3] < xr_lim.head)
+			xr_lim.head = c[3];
+		if (c[4] && c[4] < xr_lim.tail)
+			xr_lim.tail = c[4];
+	}
 	for (k = 0; k < argc; k++)
 	{
 		const char **v = !strcmp(argv[k], "--ref") ? &ref
@@ -12752,13 +12981,9 @@ xray_main(int argc, char **argv)
 			return 2;
 		}
 	}
-	if (ref && (!scope || strcmp(scope, "session")))
-	{
-		fprintf(stderr, "dch: bad usage: --scope %s comes with a later dch "
-		        "(this one takes --scope session)\n",
-		        scope ? scope : "project");
-		return 2;
-	}
+	/* 3.4: project unless asked; a remote caller too (XR4) */
+	q.scope = !scope || !strcmp(scope, "project") ? 1
+	          : !strcmp(scope, "all") ? 2 : 0;
 	if (!json)
 	{
 		fputs("dch: bad usage: --json is required (the --xray view "

@@ -375,7 +375,7 @@ dch --shell-init zsh|bash|fish                 # OSC 133 prompt marks for your r
 dch --xray <n> --json                           # a session's chapters (prompts / commands) as one JSON object
 dch --xray <n> --clear --json                   # empty a shell session's X-ray ring
 dch --xray <n> --follow --json                  # the same object, then its deltas as NDJSON until the session ends
-dch --xray <n> --ref <ref> --scope session [--full] [--budget-ms <ms>] --json  # one ref's mentions and definitions, NDJSON
+dch --xray <n> --ref <ref> [--scope session|project|all] [--full] [--budget-ms <ms>] --json  # one ref's mentions and definitions, NDJSON
 dch --agent-list [--json]                       # native Claude peers
 dch --agent-send <peer> <message...>            # message one (from a Codex session)
 ```
@@ -934,6 +934,9 @@ The corpus:
 ```
 
 (Printed on one line.)
+- **`other_projects`.** How many other sessions of this store have a
+  transcript in another project dir: what `--ref --scope all` would add.
+  Counted from names only; nothing is opened.
 - **`session_id`.** The agent UUID for Claude Code, the ring's id (`m` + 16
   hex) for a live shell, and the record name for an ended shell.
 - **Chapters.** Oldest first; at most 5000 (the newest).
@@ -1020,26 +1023,43 @@ an earlier `cd` went to, leaves the cwd (`/etc/x`, `../x`, a `~/` path read
 against `HOME`), when it holds `$` or a backquote, or after a `cd` to a place
 it cannot follow (`cd`, `cd $X`, `cd ~/x`).
 
-`dch --xray <n> --ref <ref> --scope session --json` streams one ref's
-lines as NDJSON, each with `schema:1`: `first` (the key, `mode` and
+`dch --xray <n> --ref <ref> --json` streams one ref's
+lines as NDJSON, each with `schema:1`: `first` (the key, `mode`, `scope` and
 `budget_ms`), then `definition` and `mention` lines, a `tally` per file,
 `progress` at most every 250 ms, and `done` last (`partial`, `why`, `counts`,
 `files`, `bytes`, `lines_too_long`). `<ref>` is 1 to 256 bytes of UTF-8 with no
 control character and none of the bidi controls U+200E, U+200F, U+202A to
 U+202E and U+2066 to U+2069 (`dch: bad ref`), and must parse as exactly one
-ref (`dch: not a ref`), relative paths against the session's cwd. The default is a
-light scan: it stops after the first result, or after `--budget-ms` (50 to
-300, default 300) with `why: "budget"`; on a live shell it prints titles and
-counts only. `--full` reads the whole corpus (up to 10 s, `why: "time"`); a `--budget-ms`
-with it is accepted and has no effect. A file gives its first `mention` line
+ref (`dch: not a ref`), relative paths against the session's cwd.
+- **Scope.** `--scope session` reads `<n>`'s own transcript, or its ring and
+  screen. `--scope project`, the default (also for a remote caller), reads
+  that first, then the Claude Code transcript of every other session of this
+  store in `<n>`'s project dir, newest `lastSeen` first. `--scope all` then
+  adds the other project dirs, the dir with the newest session first. The
+  other sessions are the live ones (each master is asked for its command,
+  never for its ring or screen) and the History records, one per agent id.
+  Each transcript is found and opened as `<n>`'s is (a uuid, a valid
+  `config_dir`, one regular file in the store's project dirs, no symlink);
+  one that cannot be found is skipped and never opened. A shell `<n>`'s
+  project dir is its cwd's. Another session's lines carry `chapter: null`.
+- **Light.** The default stops at its first result, or after `--budget-ms`
+  (50 to 300, default 300, across all files) with `why: "budget"`. With
+  `--scope project` or `all`, `<n>`'s own file is read to its end and only
+  another session's result stops the scan. A live shell's lines and another
+  session's give titles and counts only: no `mention`, no `passage`.
+- **Full.** `--full` reads the whole corpus up to its caps: 64 files
+  (`why: "files"`), 1 GiB (`why: "bytes"`) and 10 s (`why: "time"`); a
+  `--budget-ms` with it is accepted and has no effect.
+- **Counts.** `done.counts` has `session` (`<n>`'s mentions), `project` and
+  `project_sessions` (the other sessions of its project dir: their mentions,
+  and how many mention it), and `all` and `all_sessions` for the other dirs
+  (`null` unless `--scope all`). `progress` carries the counts so far. A file gives its first `mention` line
 and its newest 199; the `tally`'s `mentions_dropped` counts the mention lines
 left out, and its `count` stays exact. `definition` lines come once per title,
 at most 8 per file. The output is capped at 4 MiB with room kept for the
 `tally` and `done`; past the cap the scan stops and `done` says
 `partial: true, why: "output"`.
-`--scope project` and `--scope all` come with a later release and exit 2;
-until then `--scope session` must be given. No `--scope` means `project`, the
-default in every release, so it exits 2 with the `--scope project` message. A session with no corpus exits 1
+A session with no corpus exits 1
 with `dch: no x-ray corpus`. Nothing is written to disk: the index lives in the
 calling process for that one query. A reader that closes the pipe cancels the
 scan: dch stops at its next write, at most 250 ms later (the `progress`
@@ -1108,7 +1128,7 @@ system, like any name.
 | --- | --- |
 | 0 | the object was printed; a `--follow` ended with its session, its connection, or its reader |
 | 1 | `dch: no such session` (also a master that hangs up after the connect, before its answer is complete, in every form: nothing more is written; `--ref` keeps the lines already out and writes no `done`; `--follow` once its snapshot is out exits 0 instead), `dch: ambiguous session`, `dch: no x-ray corpus` (`--clear`, `--ref`), `dch: busy` (a fifth `--follow` on one shell) |
-| 2 | bad usage: `--json` missing, a flag twice, `--follow` with `--ref` or `--clear`, a flag of a later release (`--chapter`, `--scope project`, `--scope all`, ...), `--xray` not first, a bad or remote `<n>`, a bad `--ref`, `--scope` or `--budget-ms` |
+| 2 | bad usage: `--json` missing, a flag twice, `--follow` with `--ref` or `--clear`, a flag of a later release (`--chapter`, ...), `--xray` not first, a bad or remote `<n>`, a bad `--ref`, `--scope` or `--budget-ms` |
 | 3 | `dch: X-ray failed on this session`: the session answered garbage, the transcript could not be read (it is there, but opening or reading it failed), memory ran out, or a write failed with an error other than a closed pipe |
 
 ### Auto-allow

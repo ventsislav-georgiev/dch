@@ -852,6 +852,26 @@ def test_claude():
                   [c["title"] for c in o["chapters"][1:]] == [
                       "".join(op(k) for k in range(6))[:120]] * 3,
                   (rc, dt, o and o["chapters"][:2], err))
+        # #155: a live Claude as <n>, --scope project: its own transcript
+        # (live), then a History session of its project dir
+        put([{"type": "user", "message": {"content": "see #941"}}])
+        osid = "33333333-4444-4555-8666-777777777777"
+        with open(os.path.join(pdir, osid + ".jsonl"), "w") as f:
+            f.write(json.dumps({"type": "user", "cwd": proj, "message": {
+                "content": "older #941"}}) + "\n")
+        history("xc-cl-old", osid, os.path.join(HOME, ".claude"),
+                os.path.realpath(proj))
+        open(trace, "w").close()
+        r = dch("--xray", n, "--ref", "#941", "--scope", "project", "--full",
+                "--json", env=dbg)
+        ls = ref_lines(r.stdout) or [{}]
+        tl = [(l["tally"]["session"], l["tally"]["live"]) for l in ls
+              if "tally" in l]
+        check("scope: a live Claude <n>, then its project's History session",
+              r.returncode == 0 and tl == [(n, True), ("xc-cl-old", False)]
+              and ls[-1]["counts"]["project"] == 1 and
+              open(trace).read().count("xray seam: open") == 2,
+              (tl, r.stdout[-400:], r.stderr))
     finally:
         dch("-k", n, env=env)
 
@@ -2342,6 +2362,155 @@ def test_screen():
         dch("-k", n)
 
 
+# ---- --ref across sessions (#155, XR3a): scope, order, the 3.8 caps -------
+
+def test_scope():
+    """A store of its own: <n>, Claude sessions in its project dir and in
+    another, an unmapped transcript beside them. The seam counts exactly the
+    mapped files a scope reads; 65 files scan 64; the bytes, time and
+    per-file range caps stop with their why; light stops at its budget across
+    files; nothing is written."""
+    S = os.path.join(T, "scope")
+    home = os.path.join(S, "home")
+    cfg = os.path.join(home, ".claude")
+    sockdir = os.path.join(S, "dch-%d" % os.getuid())
+    hdir = os.path.join(S, "state", "dch", "sessions",
+                        sockdir.replace("/", "-"))
+    for d in (home, hdir):
+        os.makedirs(d)
+    env = dict(ENV, XDG_RUNTIME_DIR=S, XDG_STATE_HOME=os.path.join(S, "state"),
+               HOME=home)
+    trace = os.path.join(T, "trace-scope")
+    dbg = dict(env, DCH_DEBUG=trace)
+    sid = lambda k: "22222222-3333-4444-8555-%012d" % k
+
+    def put(k, cwd, lines, updated):
+        pdir = os.path.join(cfg, "projects", key(cwd))
+        os.makedirs(pdir, exist_ok=True)
+        with open(os.path.join(pdir, sid(k) + ".jsonl"), "w") as f:
+            f.write("".join(json.dumps({"type": "user", "cwd": cwd,
+                                        "message": {"content": t}}) + "\n"
+                            for t in lines))
+        if updated is None:
+            return              # unmapped: a file with no record
+        rec = {"name": "s%d" % k, "cwd": cwd, "end": "exited",
+               "argv": ["claude"], "started": 1794299400,
+               "updated": updated, "ended": updated, "sock_dir": sockdir,
+               "agent": {"session_id": sid(k), "cwd": cwd,
+                         "config_dir": cfg}}
+        with open(os.path.join(hdir, "s%d.json" % k), "w") as f:
+            f.write(json.dumps(rec) + "\n")
+
+    def ref(*a, env=dbg):
+        open(trace, "w").close()
+        r = dch("--xray", "s0", "--ref", *a, "--json", env=env)
+        ls = ref_lines(r.stdout) or [{}]
+        tr = open(trace).read()
+        return (r.returncode, ls, tr.count("xray seam: open"),
+                [l["tally"]["session"] for l in ls if "tally" in l], r.stderr)
+
+    P, O = "/home/demo/scope", "/home/demo/elsewhere"
+    put(0, P, ["mine #931"], 1794300000)
+    put(1, P, ["older #931"], 1794300010)
+    put(2, P, ["newer #931", "again #931"], 1794300020)
+    put(3, O, ["far #931"], 1794300030)
+    put(4, P, ["unmapped #931"], None)
+    rc, ls, opens, order, err = ref("#931", "--scope", "project", "--full")
+    d = ls[-1]
+    check("scope: project reads <n>, then its dir newest first; the seam "
+          "opens exactly those 3 files",
+          rc == 0 and order == ["s0", "s2", "s1"] and opens == 3 and
+          d.get("counts") == {"session": 1, "project": 3,
+                              "project_sessions": 2, "all": None,
+                              "all_sessions": None} and not d["partial"],
+          (rc, order, opens, d, err))
+    rc, ls, opens, order, err = ref("#931", "--scope", "all", "--full")
+    d = ls[-1]
+    check("scope: all adds the other dir after; still never the unmapped "
+          "file (4 opens)",
+          rc == 0 and order == ["s0", "s2", "s1", "s3"] and opens == 4 and
+          d["counts"]["all"] == 1 and d["counts"]["all_sessions"] == 1,
+          (rc, order, opens, d, err))
+    rc, ls, opens, order, err = ref("#931", "--full")
+    check("scope: no --scope is project (a remote caller's default too: "
+          "all only when passed)",
+          rc == 0 and ls[0]["first"]["scope"] == "project" and
+          order == ["s0", "s2", "s1"] and opens == 3, (order, opens, err))
+    rc, ls, opens, order, err = ref("#931", "--scope", "session", "--full")
+    check("scope: session stops after <n> (1 open)",
+          rc == 0 and order == ["s0"] and opens == 1, (order, opens))
+    rc, o, err = xray("s0", "--json", env=env)
+    check("scope: other_projects counts the mapped session in the other "
+          "dir, from names only", rc == 0 and o and o["other_projects"] == 1,
+          (o and o.get("other_projects"), err))
+
+    # the per-file range of another session's file (3.8: head + newest),
+    # lowered by DCH_XRAY_CAPS: a mention in the head and the tail found,
+    # the one between not
+    pad = ["x" * 900] * 40
+    put(5, O, ["head #932"] + pad + ["middle #932"] + pad + ["tail #932"],
+        1794300040)
+    rc, ls, opens, order, err = ref("#932", "--scope", "all", "--full",
+                                    env=dict(dbg, DCH_XRAY_CAPS=
+                                             "0:0:0:4096:8192"))
+    t5 = [l["tally"] for l in ls if "tally" in l and
+          l["tally"]["session"] == "s5"]
+    lines = [l["mention"]["line"] for l in ls if "mention" in l]
+    check("caps: the per-file range finds the head and the tail, not the "
+          "middle; tally partial, done why range",
+          rc == 0 and t5 and t5[0]["count"] == 2 and t5[0]["partial"] and
+          lines == ["head #932", "tail #932"] and ls[-1]["partial"] and
+          ls[-1]["why"] == "range", (t5, lines, ls[-1], err))
+    rc, ls, opens, order, err = ref("#932", "--scope", "all", "--full",
+                                    env=dict(dbg, DCH_XRAY_CAPS="0:1000"))
+    check("caps: the bytes cap stops the scan before the next file, why "
+          "bytes", rc == 0 and ls[-1]["partial"] and
+          ls[-1]["why"] == "bytes" and opens < 5 and
+          ls[-1]["bytes"] < 2000, (opens, ls[-1], err))
+    rc, ls, opens, order, err = ref("#932", "--scope", "all", "--full",
+                                    env=dict(dbg, DCH_XRAY_CAPS="0:0:1"))
+    check("caps: the wall-time cap stops it, why time",
+          rc == 0 and ls[-1]["partial"] and ls[-1]["why"] == "time",
+          (ls[-1], err))
+    os.unlink(os.path.join(hdir, "s5.json"))
+
+    # 65 files scan 64 (3.8, 9.5); light over 1 MB files stops at its budget
+    big = "".join(json.dumps({"type": "user", "cwd": P, "message": {
+        "content": "pad " + "y" * 1000}}) + "\n" for _ in range(1000))
+    for k in range(10, 71):
+        put(k, P, ["#931 in %d" % k], 1794300100 + k)
+        with open(os.path.join(cfg, "projects", key(P), sid(k) + ".jsonl"),
+                  "a") as f:
+            f.write(big)
+    before = files(S)
+    rc, ls, opens, order, err = ref("#931", "--scope", "all", "--full")
+    d = ls[-1]
+    check("caps: 65 files scan 64, why files, the newest first",
+          rc == 0 and opens == 64 and d["files"] == 64 and d["partial"] and
+          d["why"] == "files" and order[:3] == ["s0", "s70", "s69"] and
+          "s3" not in order, (opens, d, order[:4], err))
+    t0 = time.time()
+    # untraced: DCH_DEBUG's lines cost more than the 50 ms budget
+    rc, ls, opens, order, err = ref("#933", "--scope", "all",
+                                    "--budget-ms", "50", env=env)
+    d = ls[-1]
+    check("caps: light stops at its budget across files (%d files, %.2fs)"
+          % (d.get("files", -1), time.time() - t0),
+          rc == 0 and d.get("why") == "budget" and d["partial"] and
+          d["files"] < 64, (d, err))
+    rc, ls, opens, order, err = ref("#931", "--scope", "all")
+    d = ls[-1]
+    check("light: stops at the first other session's result, titles and "
+          "counts only for it",
+          rc == 0 and d["why"] == "first" and order == ["s0", "s70"] and
+          not any("mention" in l and l["mention"]["session"] != "s0"
+                  for l in ls), (order, d, err))
+    after = files(S)
+    check("scope: nothing written by a full and a light --scope all "
+          "(names, sizes, mtimes)", after == before,
+          sorted(set(after.items()) ^ set(before.items()))[:6])
+
+
 def main():
     try:
         test_names()
@@ -2369,6 +2538,7 @@ def main():
         test_screen()
         test_ref_shell_caps()
         test_ref_shell_tick()
+        test_scope()
     finally:
         shutil.rmtree(T, ignore_errors=True)
     if fails[0]:

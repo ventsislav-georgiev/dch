@@ -12,6 +12,8 @@
 **   2: ring records ({u16 len, u8 kind, u8 flags, u32 time, text}) through
 **      xr_shell_feed with xr_shell_refs into an index, then xr_print;
 **   3: xr_ref_ok and xr_ref_parse over the bytes as a C string.
+** Path 1's scan: bit 3 reads the transcript twice, the second time as
+** another session's (#155), bit 4 makes it light.
 ** Path 1 with byte 0's bit 2 set is --follow's instead (#136): the transcript
 ** read whole, and read again in pieces at cut points the input seeds, a delta
 ** batch after each; the pieces end where the whole read does, with the same
@@ -138,62 +140,74 @@ emit(struct xr_index *ix, int shell)
 	free(buf);
 }
 
-/* A full --ref over the same transcript for key; its stream must hold
-** first, done last, one line each. */
+/* A --ref over the same transcript for key, full, or light with byte 0's
+** bit 4; with bit 3, read again as another session's file (#155, --scope
+** all). Its stream must hold first, done last, one line each; light, the
+** other session's lines carry no mention and no passage (K4.2). */
 static void
 scan(const uint8_t *d, size_t n, const char *key)
 {
-	struct xr_claude *x = xr_claude_new();
-	struct xr_chapters c = {0};
 	struct xr_scan *s;
 	struct xr_sink k;
-	char *buf = NULL;
-	size_t bl = 0, i, st = 1;
+	char *buf = NULL, *o;
+	size_t bl = 0, i, st;
+	int light = d[0] & 16, pass;
 	FILE *f;
 
-	if (!x)
-		return;
 	if (!(f = open_memstream(&buf, &bl)))
-	{
-		xr_claude_free(x);
 		return;
-	}
-	if (!(s = xr_scan_new(f, key, "fuzz", "", 0, 1, 0, 300, xr_now_ms())))
+	if (!(s = xr_scan_new(f, key, "fuzz", "", 0, !light, 0, 300,
+	                      xr_now_ms())))
 	{
 		fclose(f);
 		free(buf);
-		xr_claude_free(x);
 		return;
 	}
+	xr_scan_scope(s, d[0] & 8 ? 2 : 0);
 	if (xr_scan_first(s, "11111111-2222-4333-8444-555555555555",
 	                  XR_ISSUE, key) == 0)
 	{
-		xr_scan_sink(s, &k);
-		xr_claude_refs(x, &k, 0x1234, xr_scan_tick, s);
-		for (i = st; i <= n; i++)
-			if (i == n || d[i] == '\n')
-			{
-				char *l = i > st ? malloc(i - st + 1) : NULL;
+		for (pass = 0; pass < (d[0] & 8 ? 2 : 1); pass++)
+		{
+			struct xr_claude *x;
+			struct xr_chapters c = {0};
 
-				if (l)
+			if ((pass && xr_scan_next(s, "other", "q", 0, 0)) ||
+			    !(x = xr_claude_new()))
+				break;
+			xr_scan_sink(s, &k);
+			xr_claude_refs(x, &k, 0x1234, xr_scan_tick, s);
+			for (i = st = 1; i <= n; i++)
+				if (i == n || d[i] == '\n')
 				{
-					memcpy(l, d + st, i - st);
-					l[i - st] = '\0';
-					xr_claude_line(x, l, i - st, st, 0);
-					free(l);
+					char *l = i > st ? malloc(i - st + 1) : NULL;
+
+					if (l)
+					{
+						memcpy(l, d + st, i - st);
+						l[i - st] = '\0';
+						xr_claude_line(x, l, i - st, st, 0);
+						free(l);
+					}
+					st = i + 1;
 				}
-				st = i + 1;
-			}
-		xr_claude_end(x, 0x1234, &c);
-		xr_chapters_free(&c);
-		xr_scan_file(s, n, xr_claude_too_long(x), 0, 0);
+			xr_claude_end(x, 0x1234, &c);
+			xr_chapters_free(&c);
+			xr_scan_file(s, n, xr_claude_too_long(x), 0, 0);
+			xr_claude_free(x);
+		}
 		(void)xr_scan_done(s);
 	}
 	xr_scan_free(s);
-	xr_claude_free(x);
 	fclose(f);
 	if (bl && (buf[bl - 1] != '\n' || !strstr(buf, "{\"schema\":1,\"first\"")))
 		abort();
+	for (o = buf; light && o && (o = strstr(o, "\"session\":\"other\"")); o++)
+		if (!strncmp(o - 11, "\"mention\":{", 11) ||
+		    (!strncmp(o - 14, "\"definition\":{", 14) &&
+		     strstr(o, "\"passage\"") &&
+		     strstr(o, "\"passage\"") < strchr(o, '\n')))
+			abort();
 	free(buf);
 }
 

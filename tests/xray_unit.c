@@ -870,6 +870,146 @@ t_scan_caps(void)
 	(void)n;
 }
 
+/* #155: one hit of #831 to k (a definition when title is set) */
+static void
+hit831(const struct xr_sink *k, uint64_t off, const char *title)
+{
+	static const char line[] = "#831 here";
+	struct xr_span sp;
+	struct xr_hit h;
+
+	if (!xr_ref_parse("#831", NULL, &sp))
+		return;
+	sp.s = 0;
+	sp.e = 4;
+	memset(&h, 0, sizeof h);
+	h.sp = &sp;
+	h.line = line;
+	h.ll = sizeof line - 1;
+	h.off = h.unit = h.row = off;
+	h.at = -1;
+	h.chapter = "f1:0";
+	if (title)
+	{
+		h.title = title;
+		h.passage = "a passage";
+		h.rule = "D1";
+	}
+	k->hit(k->ctx, &h);
+}
+
+/* #155: --scope project|all over several files (3.4): <n>'s own results
+** never stop a light scan, another session's first does, with no passage,
+** no mention and chapter null; the counts per scope; the files and bytes
+** caps stop before the next file with their why. */
+static void
+t_scan_scope(void)
+{
+	struct xr_limits l0 = xr_lim;
+	struct xr_scan *x;
+	struct xr_sink k;
+	char *b = NULL;
+	size_t bl = 0;
+	FILE *f = open_memstream(&b, &bl);
+
+	x = f ? xr_scan_new(f, "issue:#831", "n", "p", 1, 0, 0, 300,
+	                    xr_now_ms()) : NULL;
+	if (!x)
+	{
+		CHECK("scope: a scan", 0);
+		if (f)
+			fclose(f);
+		free(b);
+		return;
+	}
+	xr_scan_scope(x, 1);
+	(void)xr_scan_first(x, "id", XR_ISSUE, "#831");
+	xr_scan_sink(x, &k);
+	hit831(&k, 1, NULL);
+	CHECK("scope: light, <n>'s own result does not stop it",
+	      xr_scan_tick(x, 10) == 0);
+	xr_scan_file(x, 10, 0, 0, 0);
+	CHECK("scope: the next file is read", xr_scan_next(x, "o", "p", 0, 1) == 0);
+	hit831(&k, 1, "Title");
+	hit831(&k, 1, NULL);
+	CHECK("scope: another session's first result stops it",
+	      xr_scan_tick(x, 10) != 0);
+	xr_scan_file(x, 10, 0, 0, 0);
+	CHECK("scope: no file after the stop", xr_scan_next(x, "o2", "p", 0, 1));
+	(void)xr_scan_done(x);
+	xr_scan_free(x);
+	fclose(f);
+	CHECK("scope: first says project; <n>'s line carries its chapter",
+	      b && strstr(b, "\"scope\":\"project\"") &&
+	      strstr(b, "\"mention\":{\"session\":\"n\",\"chapter\":\"f1:0\""));
+	CHECK("scope: light, another session's definition has no passage, "
+	      "chapter null, and no mention line",
+	      b && strstr(b, "\"definition\":{\"session\":\"o\"") &&
+	      !strstr(b, "\"passage\"") && strstr(b, "\"chapter\":null") &&
+	      !strstr(b, "\"mention\":{\"session\":\"o\""));
+	CHECK("scope: done why first, counts per scope, all null",
+	      b && strstr(b, "\"why\":\"first\"") &&
+	      strstr(b, "\"counts\":{\"session\":1,\"project\":1,"
+	                "\"project_sessions\":1,\"all\":null,"
+	                "\"all_sessions\":null}"));
+	free(b);
+
+	/* full, all: the files cap is checked before the next file opens */
+	b = NULL;
+	f = open_memstream(&b, &bl);
+	xr_lim.files = 3;
+	x = f ? xr_scan_new(f, "issue:#831", "n", "p", 1, 1, 0, 300,
+	                    xr_now_ms()) : NULL;
+	if (x)
+	{
+		xr_scan_scope(x, 2);
+		(void)xr_scan_first(x, "id", XR_ISSUE, "#831");
+		xr_scan_sink(x, &k);
+		xr_scan_file(x, 10, 0, 0, 0);
+		CHECK("scope: file 2 of 3", xr_scan_next(x, "a", "p", 0, 1) == 0);
+		hit831(&k, 1, NULL);
+		hit831(&k, 2, NULL);
+		xr_scan_file(x, 10, 0, 0, 0);
+		CHECK("scope: file 3 of 3", xr_scan_next(x, "b", "q", 0, 0) == 0);
+		hit831(&k, 1, "Other");
+		hit831(&k, 1, NULL);
+		xr_scan_file(x, 10, 0, 0, 0);
+		CHECK("scope: a 4th file is not opened (64 in production)",
+		      xr_scan_next(x, "c", "q", 0, 0) != 0);
+		(void)xr_scan_done(x);
+		xr_scan_free(x);
+	}
+	fclose(f);
+	CHECK("scope: full, other sessions' lines carry the passage",
+	      b && strstr(b, "\"passage\":\"a passage\"") &&
+	      strstr(b, "\"mention\":{\"session\":\"a\",\"chapter\":null"));
+	CHECK("scope: done why files, all counted",
+	      b && strstr(b, "\"partial\":true") && strstr(b, "\"why\":\"files\"") &&
+	      strstr(b, "\"counts\":{\"session\":0,\"project\":2,"
+	                "\"project_sessions\":1,\"all\":1,\"all_sessions\":1}"));
+	free(b);
+	xr_lim = l0;
+
+	/* the bytes cap: mid-file at the tick, and before the next file */
+	xr_lim.bytes = 100;
+	f = fopen("/dev/null", "w");
+	x = f ? xr_scan_new(f, "issue:#831", "n", "p", 1, 1, 0, 300,
+	                    xr_now_ms()) : NULL;
+	CHECK("scope: past the bytes cap the tick stops",
+	      x && xr_scan_tick(x, 50) == 0 && xr_scan_tick(x, 101) != 0);
+	xr_scan_free(x);
+	x = f ? xr_scan_new(f, "issue:#831", "n", "p", 1, 1, 0, 300,
+	                    xr_now_ms()) : NULL;
+	if (x)
+		xr_scan_file(x, 100, 0, 0, 0);
+	CHECK("scope: a used-up bytes cap opens no next file",
+	      x && xr_scan_next(x, "a", "p", 0, 1) != 0);
+	xr_scan_free(x);
+	if (f)
+		fclose(f);
+	xr_lim = l0;
+}
+
 static void
 t_ref(void)
 {
@@ -1341,6 +1481,7 @@ main(void)
 	t_caps();
 	t_cancel();
 	t_scan_caps();
+	t_scan_scope();
 	t_lookup();
 	printf("%s: %d failed\n", fails ? "FAIL" : "ok", fails);
 	return fails != 0;
