@@ -1178,12 +1178,18 @@ silently too. Any other write failure prints `dch: X-ray failed on this
 session` and exits 3. SIGTERM ends
 it at once, with no `done` either.
 
-With `--full`, a commit or file ref also gets one `resolved` line, just
-before `done`: `{"schema":1,"resolved":{"kind","state","title","subtitle","lines"}}`,
+With `--full`, a commit or file ref also gets one `resolved` line, right
+after `<n>`'s own file (its `tally`) and before any other session is read:
+`{"schema":1,"resolved":{"kind","state","title","subtitle","lines"}}`,
 plus `first` for a file shown (below),
 `kind` `"commit"` or `"file"`, `lines` at most 14, each at most 200
 characters; the light scan never resolves. Every string is the text with
-invalid UTF-8 and NUL as U+FFFD, the controls JSON-escaped.
+invalid UTF-8 and NUL as U+FFFD, the controls JSON-escaped. The resolver
+reads only the ref and `<n>`'s cwd, so with `--scope session` the line is
+just before `done`, and a wider read that a cap or the time limit stops
+(`done` with `partial: true`), a cancel, a read failure or a remote host's
+cut (no `done`) still carries it once `<n>`'s own file was read. A live
+Codex `<n>` gets it too.
 
 - **Commit.** The SHA is checked again (7 to 40 lowercase hex). An ended
   session runs nothing: `state: "ended"`. Otherwise dch runs git directly,
@@ -1341,8 +1347,8 @@ Each entry is `{"role","tool","text","error"}`:
   when it is not a JSON object), a `custom_tool_call`'s input, a
   `local_shell_call`'s action. `output` is a call's output where it lands,
   named by its `call_id`'s call in the chapter (else `null`); `error` is
-  never set, as a rollout has no error flag. Reasoning and events are left
-  out.
+  always `false`, as a rollout has no error flag: it means "not known",
+  never "succeeded". Reasoning and events are left out.
 - A shell: one `tool` entry with the typed command and one `output` entry
   with the block's output rows, soft-wrapped rows joined; `error` is a
   non-zero exit. Only rows that scrolled into the ring count: rows still on

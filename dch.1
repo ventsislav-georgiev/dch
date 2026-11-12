@@ -817,8 +817,10 @@ with
 .BR \-\-full ,
 a commit or file ref also gets one
 .B resolved
-line before
-.B done
+line right after
+.IR name 's
+own file and before any other session is read, so a wider read stopped by
+a cap, the time limit, a cancel or a remote host's cut still carries it
 .RB ( kind ,
 .BR state ,
 .BR title ,
@@ -1053,7 +1055,8 @@ custom tool's input; a local shell call's action) and
 chapter, else
 .BR null ;
 .B error
-is never set);
+is always false, as a rollout has no error flag: it means not known,
+never succeeded);
 reasoning and events are left out.
 A shell: one
 .B tool

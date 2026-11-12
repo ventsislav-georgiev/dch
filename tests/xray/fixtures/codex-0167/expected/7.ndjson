@@ -1,0 +1,4 @@
+{"schema":1,"first":{"session":"cx","session_id":"019a1111-2222-7333-8444-555566667702","key":"file:/T/work/cx/certs/server.pem","shape":"file","text":"/T/work/cx/certs/server.pem","project":"-T-work-cx","mode":"full","scope":"all","budget_ms":null,"elapsed_ms":0}}
+{"schema":1,"tally":{"session":"cx","live":true,"project":"-T-work-cx","count":0,"definitions":0,"partial":false,"mentions_dropped":0}}
+{"schema":1,"resolved":{"kind":"file","state":"secret_name","title":"Not previewed: may hold secrets","subtitle":"certs/server.pem","lines":[]}}
+{"schema":1,"done":true,"partial":false,"counts":{"session":0,"project":0,"project_sessions":0,"all":0,"all_sessions":0},"why":null,"files":1,"bytes":3819,"lines_too_long":0}

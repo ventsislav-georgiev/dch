@@ -2874,6 +2874,30 @@ def test_scope():
     rc, ls, opens, order, err = ref("#931", "--scope", "session", "--full")
     check("scope: session stops after <n> (1 open)",
           rc == 0 and order == ["s0"] and opens == 1, (order, opens))
+    # #176: --full's resolved line comes right after <n>'s own file, before
+    # the other sessions are read, so a capped or timed-out wide read keeps
+    # it (s0's cwd is absolute: /etc/hosts is outside_project, nothing read)
+    for sc, rest in (("project", ["s2", "s1"]), ("all", ["s2", "s1", "s3"])):
+        for caps, why in ((None, None), ("1", "files"), ("0:0:1", "time")):
+            rc, ls, opens, order, err = ref(
+                "/etc/hosts:1", "--scope", sc, "--full",
+                env=dict(dbg, DCH_XRAY_CAPS=caps) if caps else dbg)
+            seq = ["resolved" if "resolved" in l else
+                   "done" if l.get("done") else l["tally"]["session"]
+                   for l in ls if "resolved" in l or "done" in l or
+                   "tally" in l]
+            rv = [l["resolved"]["state"] for l in ls if "resolved" in l]
+            d = ls[-1]
+            check("resolved order, --scope %s, %s: right after s0's tally, "
+                  "before the others; done last%s" % (
+                      sc, "no cap" if not caps else "capped (%s)" % why,
+                      ", partial" if caps else ""),
+                  rc == 0 and rv == ["outside_project"] and
+                  seq[:2] == ["s0", "resolved"] and seq[-1] == "done" and
+                  (seq[2:-1] == rest if not caps else
+                   why == "time" or seq[2:-1] == []) and
+                  d.get("partial") == bool(caps) and d.get("why") == why,
+                  (rc, seq, d, err))
     rc, o, err = xray("s0", "--json", env=env)
     check("scope: other_projects counts the mapped session in the other "
           "dir, from names only", rc == 0 and o and o["other_projects"] == 1,

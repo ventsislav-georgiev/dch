@@ -555,8 +555,24 @@ def xray_checks(dch, check, senv, cenv, port, fakes, tmp, slog):
     same("--ref <file> --full, the resolved line", "@", "--ref",
          "src/w.c:20", "--scope", "session", "--full", "--json", n="xrs0",
          mask=True)
+    # #176: at --scope all the resolved line follows xrs0's own tally,
+    # before the other sessions' lines; srv:xrs0 carries the same order
+    loc = dch(senv, "--xray", "xrs0", "--ref", "src/w.c:20", "--scope",
+              "all", "--full", "--json")
+    seq = [k for l in loc.stdout.splitlines() for k in
+           (json.loads(l),) if "progress" not in k]
+    seq = ["resolved" if "resolved" in k else "done" if "done" in k else
+           k["tally"]["session"] if "tally" in k else list(k)[1]
+           for k in seq]
+    check("xray --ref <file> --scope all --full on the host: resolved right "
+          "after xrs0's tally, before xrs1 and xrs2",
+          loc.returncode == 0 and seq[seq.index("resolved") - 1:] ==
+          ["xrs0", "resolved", "xrs1", "xrs2", "done"], (seq, loc.stderr))
+    same("--ref <file> --scope all --full, the resolved line's order", "@",
+         "--ref", "src/w.c:20", "--scope", "all", "--full", "--json",
+         n="xrs0", mask=True)
     check("xray parity: each remote form ran one ctl on the host",
-          ctls() - n0 == 8, ctls() - n0)
+          ctls() - n0 == 9, ctls() - n0)
 
     # QA 1.55.0 LOW-7: the host's JSON escapes U+061C, U+2028 and U+2029
     # as \u, so its lines pass --requests as objects, byte for byte. A
@@ -1160,6 +1176,62 @@ def requests_checks(dch, check, senv, cenv, serve_at, fakes, tmp, slog):
                       {"req": 3, "exit": loc.returncode, "why": None}]
               and loc.returncode == 1, (got, loc))
         rq.end()
+
+    # #176: a wide --full read over --requests carries the host's order
+    # (resolved right after xrs0's own file, before the others); a host cap
+    # that cuts it after that line keeps the line: no done, exit 2 "cap",
+    # over --requests and over the plain ctl path alike
+    argv = ["--ref", "src/w.c:20", "--scope", "all", "--full", "--json"]
+    loc = subprocess.run([DCH, "--xray", "xrs0"] + argv, env=senv,
+                         capture_output=True, stdin=subprocess.DEVNULL)
+    prog = re.compile(rb'^\{"schema":1,"progress":')
+
+    def bare(lines):
+        return [elapsed.sub(b'"elapsed_ms":0', x) for x in lines
+                if not prog.match(x)]
+
+    rq = Requests(xenv, "srv:xrs0")
+    rq.line()
+    rq.send({"req": 1, "argv": argv})
+    got = rq.until(1)
+    lines = [g[len(b'{"req":1,"line":'):-1] for g in got
+             if g.startswith(b'{"req":1,"line":')]
+    check("requests --ref <file> --scope all --full: the host's lines in "
+          "its order, resolved before xrs1's tally",
+          loc.returncode == 0 and bare(lines) ==
+          bare(loc.stdout.splitlines()) and
+          json.loads(got[-1]) == {"req": 1, "exit": 0, "why": None} and
+          loc.stdout.index(b'"resolved"') <
+          loc.stdout.index(b'"tally":{"session":"xrs1"'), (loc, got))
+    rq.end()
+    # the cap ends the stream inside xrs1's tally, the first other session
+    out = loc.stdout
+    t1 = out.find(b'{"schema":1,"tally":{"session":"xrs1"')
+    clog = os.path.join(tmp, "serve-cap.log")
+    cport = serve_at(clog, DCH_CTL_CAP=str(out.index(b"\n", t1)))
+    check("a dch serve whose cap cuts the wide read in xrs1's tally",
+          cport is not None and t1 > 0)
+    if cport is not None:
+        cenv2 = side("c=127.0.0.1:%d" % cport)
+        rq = Requests(cenv2, "c:xrs0")
+        rq.line()
+        rq.send({"req": 1, "argv": argv})
+        got = rq.until(1)
+        objs = [json.loads(g)["line"] for g in got[:-1]]
+        objs = [o for o in objs if isinstance(o, dict)]
+        check("requests: a host cap in the other sessions: the resolved "
+              "line, no done, exit 2 cap",
+              json.loads(got[-1]) == {"req": 1, "exit": 2, "why": "cap"}
+              and any("resolved" in o for o in objs)
+              and not any("done" in o for o in objs), got)
+        rq.end()
+        r = subprocess.run([DCH, "--xray", "c:xrs0"] + argv, env=cenv2,
+                           capture_output=True, stdin=subprocess.DEVNULL)
+        check("xray c:xrs0: a host cap in the other sessions: the resolved "
+              "line, no done, exit 2 (cap)", r.returncode == 2 and
+              b'{"schema":1,"resolved":' in r.stdout and
+              b'"done":true' not in r.stdout and
+              r.stderr.endswith(b"stopped by the host (cap)\n"), r)
 
     # a local name, and the wrong flags: exit 2, nothing dialled
     for args, line in (

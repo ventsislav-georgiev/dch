@@ -11636,12 +11636,12 @@ xr_claude_ref(const char *cfg, const char *sid, const char *session,
 	if (xr_scan_first(sc, sid, sp.shape, xr_span_text(&sp)) != 0)
 		return xr_ref_exit(sc, -1);
 	rc = xr_ref_file(sc, path, &st, 0);
-	if (rc == 0)
-		rc = xr_ref_others(sc, q->scope, sid, project);
-	/* XR6, --full: after every file; reads no session name, so it may
-	** follow xr_ref_others, which frees the list sc's names point into */
+	/* XR6, --full: right after <n>'s own file, before the others (#176):
+	** it reads only the ref and <n>'s cwd, so a cap or a cut keeps it */
 	if (rc == 0)
 		xr_scan_resolved(sc, &sp, q->text, label, live);
+	if (rc == 0)
+		rc = xr_ref_others(sc, q->scope, sid, project);
 	/* a cancel stopped the read: no done */
 	return xr_ref_exit(sc, rc != 0 || xr_scan_done(sc) != 0);
 }
@@ -11735,6 +11735,8 @@ xr_codex_ref(const struct xr_cx *x, const char *session, const char *label,
 	if (xr_scan_first(sc, x->tid, sp.shape, xr_span_text(&sp)) != 0)
 		return xr_ref_exit(sc, -1);
 	rc = xr_ref_file(sc, path, &st, 1);
+	if (rc == 0)	/* XR6, --full: as over a transcript */
+		xr_scan_resolved(sc, &sp, q->text, label, 1);
 	if (rc == 0)
 		rc = xr_ref_others(sc, q->scope, x->tid, project);
 	return xr_ref_exit(sc, rc != 0 || xr_scan_done(sc) != 0);
@@ -11883,13 +11885,11 @@ xr_shell_ref(const struct xr_target *t, const struct xr_refq *q,
 		                            DCH_RING_S_PAUSED));
 
 		xr_scan_file(f.sc, f.acc->bytes, 0, partial, !f.acc->sh.npaired);
+		xr_scan_resolved(f.sc, &sp, q->text, label, 1);	/* XR6: --full */
 		/* then the project's Claude files, never another ring (S17) */
 		rc = xr_ref_others(f.sc, q->scope, "", project);
 		if (rc == 0)
-		{
-			xr_scan_resolved(f.sc, &sp, q->text, label, 1);	/* XR6: --full */
 			rc = xr_scan_done(f.sc);
-		}
 	}
 	xr_shell_end(&f.acc->sh);
 	xr_chapters_free(&ch);

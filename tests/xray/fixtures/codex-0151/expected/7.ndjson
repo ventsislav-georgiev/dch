@@ -1,0 +1,4 @@
+{"schema":1,"first":{"session":"cx","session_id":"019a1111-2222-7333-8444-555566667701","key":"file:/etc/hosts","shape":"file","text":"/etc/hosts","project":"-T-work-cx","mode":"full","scope":"project","budget_ms":null,"elapsed_ms":0}}
+{"schema":1,"tally":{"session":"cx","live":true,"project":"-T-work-cx","count":0,"definitions":0,"partial":false,"mentions_dropped":0}}
+{"schema":1,"resolved":{"kind":"file","state":"outside_project","title":"Outside this session's project","subtitle":"/etc/hosts","lines":[]}}
+{"schema":1,"done":true,"partial":false,"counts":{"session":0,"project":0,"project_sessions":0,"all":null,"all_sessions":null},"why":null,"files":1,"bytes":2804,"lines_too_long":0}
