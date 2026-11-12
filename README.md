@@ -1368,7 +1368,7 @@ Codex `<n>` gets it too.
   `git --no-pager -c core.fsmonitor= -c core.hooksPath=/dev/null -c protocol.allow=never -c diff.external= -c color.ui=never -c log.showSignature=false -C <cwd>`,
   then `rev-parse --is-inside-work-tree` (not `true`: `not_repo`), then,
   for a commit URL with a short SHA only,
-  `config --get-regexp ^remote\..*\.url$`, then
+  `config -z --get-regexp ^remote\..*\.url$`, then
   `show --no-color --no-ext-diff --no-textconv --stat=80 --stat-count=14 --format=%H%x00%an%x00%at%x00%s --end-of-options <sha>^{commit}`.
   The environment is only `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`,
   `GIT_OPTIONAL_LOCKS=0`, `GIT_TERMINAL_PROMPT=0`, `GIT_NO_LAZY_FETCH=1`,

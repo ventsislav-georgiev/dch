@@ -451,9 +451,10 @@ void xr_file_lines(const char *s, size_t n, long line,
 long xr_ref_line(const char *text);
 int xr_secret_name(const char *path);
 int xr_gitfile(const char *s, size_t n);
-/* git config --get-regexp's "remote.<name>.url <url>" lines: 1 when a URL
-** names github.com's want ("<owner>/<repo>"), ASCII case-insensitive, as
-** https://, ssh:// or git@host:, a trailing .git or / allowed. */
+/* git config -z --get-regexp's "remote.<name>.url\n<url>\0" entries: 1 when
+** a URL's host is github.com and its path want ("<owner>/<repo>"), ASCII
+** case-insensitive, as https://, ssh:// or git@host:, a trailing .git or /
+** allowed; an entry cut before its NUL never matches. */
 int xr_git_remote(const char *s, size_t n, const char *want);
 /* Test seams: the probe list (NULL: 8.3's for this OS), the probe's pick
 ** (NULL: none), and the git spawns so far. */

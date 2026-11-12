@@ -234,6 +234,17 @@ def test_shell():
               not any(x in t for t in (r1.stdout, r1.stderr, r2.stdout,
                                        r2.stderr, tr)
                       for x in (tok, "x-access-token")), (rv, rv2))
+        # github.com counts only as a URL's host, and a value's escaped
+        # newline cannot forge a second remote (QA 1.57.0 NIT-D1)
+        for u in ("https://evil.com//github.com/o/r",
+                  "https://evil.com/x@github.com/o/r",
+                  "https://evil.com/?u=//github.com/o/r",
+                  "https://evil/x\nremote.y.url https://github.com/o/r"):
+            git(repo, "config", "remote.origin.url", u)
+            r, ls, rv = ref(n, url)
+            check("shell commit: a remote %r names another host: not_commit"
+                  % u, len(rv) == 1 and rv[0]["state"] == "not_commit", rv)
+        git(repo, "config", "remote.origin.url", "git@github.com:O/R.git")
         if git(plain, "rev-parse", "--is-inside-work-tree") == "true":
             print("  skip not_repo: %s is inside a git work tree" % plain)
         else:

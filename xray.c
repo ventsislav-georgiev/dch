@@ -7395,30 +7395,48 @@ res_keep(char *b, size_t *bn, size_t cap, const char *s, ssize_t n)
 	b[*bn] = '\0';
 }
 
-/* Reap pid, by `until` (ms), else end its group: SIGTERM, a 1 s grace,
-** SIGKILL, at most 1 s more (#833). 0 exited (*st), 1 timed out. */
+/* 1 pid has exited, 0 not yet, -1 not ours to wait for; never reaps it: an
+** unreaped leader keeps its group id from being reused */
+static int
+res_done(pid_t pid)
+{
+	siginfo_t si;
+
+	memset(&si, 0, sizeof si);
+	if (waitid(P_PID, (id_t)pid, &si, WEXITED | WNOHANG | WNOWAIT) != 0)
+		return -1;
+	return si.si_pid == pid;
+}
+
+/* Wait for pid by `until` (ms), else SIGTERM its group and give it 1 s;
+** then SIGKILL the group, which also ends what the leader left behind
+** (QA 1.57.0 LOW-D4), and only then reap it, at most 1 s more (#833).
+** 0 exited (*st), 1 timed out. */
 static int
 res_reap(pid_t pid, long long until, int *st)
 {
 	long long grace;
-	pid_t w;
+	int d;
 
-	while ((w = waitpid(pid, st, WNOHANG)) == 0 && xr_now_ms() < until)
+	while (!(d = res_done(pid)) && xr_now_ms() < until)
 		poll(NULL, 0, 10);
-	if (w == pid)
-		return 0;
-	kill(-pid, SIGTERM);
-	for (grace = xr_now_ms() + 1000;
-	     (w = waitpid(pid, st, WNOHANG)) == 0 && xr_now_ms() < grace;)
-		poll(NULL, 0, 20);
-	kill(-pid, SIGKILL);	/* what ignored SIGTERM, the leader's kids */
+	if (!d)
+	{
+		kill(-pid, SIGTERM);
+		for (grace = xr_now_ms() + 1000;
+		     !res_done(pid) && xr_now_ms() < grace;)
+			poll(NULL, 0, 20);
+	}
+	if (d >= 0)
+		kill(-pid, SIGKILL);
+	res_pg = 0;	/* the group is ended: from the reap on its id is free */
 	/* a git in uninterruptible I/O (a stalled mount) outlives SIGKILL: it is
 	** left unreaped, to init when this one-shot process ends (QA 1.55.0
 	** LOW-3) */
-	for (grace = xr_now_ms() + 1000; w == 0 &&
-	     (w = waitpid(pid, st, WNOHANG)) == 0 && xr_now_ms() < grace;)
+	for (grace = xr_now_ms() + 1000;
+	     waitpid(pid, st, WNOHANG) == 0 && xr_now_ms() < grace;)
 		poll(NULL, 0, 20);
-	return 1;
+	return d != 1;
 }
 
 /* One git run: argv as built, env exactly envp, stdin /dev/null, its own
@@ -7542,7 +7560,6 @@ res_run(char *const argv[], char *const envp[], long long until,
 		return -1;
 	timed = res_reap(pid, timed ? 0 : until, &st) || timed;
 	sigprocmask(SIG_BLOCK, &set, &omask);
-	res_pg = 0;
 	for (k = 0; k < 3; k++)
 		if (old[k].sa_handler != SIG_IGN)
 			sigaction(res_sigs[k], &old[k], NULL);
@@ -7632,39 +7649,47 @@ xr_git_parse(const char *s, size_t n, long long now, struct xr_resolved *r)
 	return 1;
 }
 
+/* One URL, s[0..n): github.com is its host, want its whole path (QA 1.57.0
+** NIT-D1: never "//github.com/" or "@github.com" further in) */
+static int
+res_gh_url(const char *s, size_t n, const char *want)
+{
+	size_t wl = strlen(want), i = 0, u;
+	char sep = ':';	/* scp form: [user@]github.com:o/r */
+
+	if (n > 8 && !strncasecmp(s, "https://", 8))
+		i = 8, sep = '/';
+	else if (n > 6 && !strncasecmp(s, "ssh://", 6))
+		i = 6, sep = '/';
+	for (u = i; u < n && s[u] != '@' && s[u] != '/' &&
+	     (unsigned char)s[u] > ' '; u++)
+		;
+	if (u < n && s[u] == '@')	/* userinfo: no '/', space or control */
+		i = u + 1;
+	if (n - i < 11 || strncasecmp(s + i, "github.com", 10) ||
+	    s[i + 10] != sep)
+		return 0;
+	i += 11;
+	if (n - i < wl || strncasecmp(s + i, want, wl))
+		return 0;
+	i += wl;
+	if (n - i >= 4 && !strncasecmp(s + i, ".git", 4))
+		i += 4;
+	return i == n || (i + 1 == n && s[i] == '/');
+}
+
 int
 xr_git_remote(const char *s, size_t n, const char *want)
 {
-	static const char host[] = "github.com";
-	size_t wl = strlen(want), hl = sizeof host - 1, i, e, k, l;
-	const char *t;
+	const char *z, *v;
+	size_t i;
 
-	for (i = 0; i < n; i = e + 1)
-	{
-		for (e = i; e < n && s[e] != '\n'; e++)
-			;
-		for (k = i; k < e && s[k] != ' '; k++)	/* the key, then the url */
-			;
-		for (k++; k + hl < e; k++)
-		{
-			/* "@github.com:" or "//github.com/", then exactly o/r */
-			if ((s[k - 1] != '@' &&
-			     (k < i + 2 || s[k - 2] != '/' || s[k - 1] != '/')) ||
-			    strncasecmp(s + k, host, hl) ||
-			    (s[k + hl] != ':' && s[k + hl] != '/'))
-				continue;
-			t = s + k + hl + 1;
-			l = (size_t)(s + e - t);
-			if (l < wl || strncasecmp(t, want, wl))
-				continue;
-			t += wl;
-			l -= wl;
-			if (l >= 4 && !strncasecmp(t, ".git", 4))
-				t += 4, l -= 4;
-			if (!l || (l == 1 && *t == '/'))
-				return 1;
-		}
-	}
+	/* "<key>\n<value>\0" entries; a key has no newline, a value may */
+	for (i = 0; i < n && (z = memchr(s + i, '\0', n - i)) != NULL;
+	     i = (size_t)(z - s) + 1)
+		if ((v = memchr(s + i, '\n', (size_t)(z - s) - i)) != NULL &&
+		    res_gh_url(v + 1, (size_t)(z - v - 1), want))
+			return 1;
 	return 0;
 }
 
@@ -7761,13 +7786,15 @@ res_commit(const char *sha, const char *cwd, int live, const char *gh,
 	}
 	if (rc == 0 && gh)
 	{
-		static char s0[] = "config", s1[] = "--get-regexp",
-		            s2[] = "^remote\\..*\\.url$";
+		/* -z: a value's escaped newline cannot forge an entry (NIT-D1) */
+		static char s0[] = "config", s1[] = "-z", s2[] = "--get-regexp",
+		            s3[] = "^remote\\..*\\.url$";
 
 		av[a] = s0;
 		av[a + 1] = s1;
 		av[a + 2] = s2;
-		av[a + 3] = NULL;
+		av[a + 3] = s3;
+		av[a + 4] = NULL;
 		/* 1: no remote at all; a git error or the deadline: no line, never
 		** not_commit or timeout. run.out (remote URLs can carry a token)
 		** is only matched, never written anywhere. */
@@ -8109,6 +8136,10 @@ res_file(const char *key, const char *text, const char *cwd,
 		res_set(r, "secret_name", "Not previewed: may hold secrets");
 		return 1;
 	}
+	/* no deadline on lstat, realpath or read (QA 1.55.0 LOW-3, #206): only
+	** a helper process could bound an uninterruptible wait, and it would be
+	** left stuck instead; an interruptible one ends with the caller's
+	** SIGTERM, and res_root has already walked the same mount */
 	if (lstat(p, &st) != 0 || !S_ISREG(st.st_mode))
 		return 0;	/* gone, a symlink, a FIFO, a dir: no block */
 	if (!realpath(p, rp) || !rr[0])

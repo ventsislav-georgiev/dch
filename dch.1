@@ -1000,7 +1000,7 @@ as
 .I cwd
 .B rev\-parse \-\-is\-inside\-work\-tree
 (for a commit URL with a short SHA also
-.BR "config \-\-get\-regexp ^remote\e..*\e.url$" )
+.BR "config \-z \-\-get\-regexp ^remote\e..*\e.url$" )
 and then
 .B show \-\-no\-color \-\-no\-ext\-diff \-\-no\-textconv \-\-stat=80
 .B \-\-stat\-count=14 \-\-format=%H%x00%an%x00%at%x00%s \-\-end\-of\-options

@@ -3053,6 +3053,11 @@ fake_git(void)
 	    "slow|slowrev) echo $$ > \"$D/pid\"; /bin/sleep 30 & /bin/sleep 30 ;;\n"
 	    "fds) '%s' --fds > \"$D/fds\"; exit 1 ;;\n"
 	    "stuck) echo $$ > \"$D/pid\"; exec '%s' --stuck ;;\n"
+	    "kidholds) (trap '' TERM; exec /bin/sleep 30) & echo $! > \"$D/kid\";"
+	    " exit 0 ;;\n"
+	    "kidbg) (exec /bin/sleep 30) > /dev/null 2>&1 & echo $! > \"$D/kid\";"
+	    " printf '0123456789abcdef0123456789abcdef01234567\\000A\\0001700000000"
+	    "\\000s\\n'; exit 0 ;;\n"
 	    "esac\n", rd, self, self);
 
 	put("git", s, (size_t)n);
@@ -3222,13 +3227,13 @@ t_res_git(void)
 	      && is(&r, "commit", "not_commit") &&
 	      !strcmp(r.title, "Not a commit in proj") &&
 	      xr_res_spawned == s0 + 2 && !strstr(slurp("argv"), "show\n"));
-	snprintf(want, sizeof want, "-C\n%s\nconfig\n--get-regexp\n"
+	snprintf(want, sizeof want, "-C\n%s\nconfig\n-z\n--get-regexp\n"
 	         "^remote\\..*\\.url$\n--\n", cwd);
-	CHECK("git: the URL's remotes: config --get-regexp, same flags",
+	CHECK("git: the URL's remotes: config -z --get-regexp, same flags",
 	      strstr(slurp("argv"), want) != NULL);
 	{
-		static const char rm[] = "remote.up.url https://github.com/o/r2\n"
-			"remote.origin.url https://github.com/x/r.git\n";
+		static const char rm[] = "remote.up.url\nhttps://github.com/o/r2\0"
+			"remote.origin.url\nhttps://github.com/x/r.git\0";
 
 		put("remotes", rm, sizeof rm - 1);
 	}
@@ -3247,8 +3252,8 @@ t_res_git(void)
 	      && is(&r, "commit", "ok") && xr_res_spawned == s0 + 2 &&
 	      !strstr(slurp("argv"), "--get-regexp"));
 	{
-		static const char rm[] = "remote.up.url https://github.com/o/r2\n"
-			"remote.origin.url git@github.com:O/R.git\n";
+		static const char rm[] = "remote.up.url\nhttps://github.com/o/r2\0"
+			"remote.origin.url\ngit@github.com:O/R.git\0";
 
 		put("remotes", rm, sizeof rm - 1);
 	}
@@ -3258,8 +3263,8 @@ t_res_git(void)
 	      && is(&r, "commit", "ok") && xr_res_spawned == s0 + 3 &&
 	      strstr(slurp("argv"), "abcdef1234^{commit}\n"));
 	{
-		static const char rm[] = "remote.origin.url "
-			"https://x-access-token:ghp_FAKE179SECRET@github.com/o/r.git\n";
+		static const char rm[] = "remote.origin.url\n"
+			"https://x-access-token:ghp_FAKE179SECRET@github.com/o/r.git\0";
 
 		put("remotes", rm, sizeof rm - 1);
 	}
@@ -3338,6 +3343,27 @@ t_res_git(void)
 		kill(pid, SIGKILL);
 		(void)waitpid(pid, NULL, 0);
 	}
+	/* QA 1.57.0 LOW-D4: what git leaves in its group, holding a pipe (the
+	** timeout) or not (git exited 0), ends with it */
+	for (k = 0; k < 2; k++)
+	{
+		mode(k ? "kidbg" : "kidholds");
+		put("kid", "", 0);
+		CHECK(k ? "git: a kid git left behind, its pipes closed: ok" :
+		      "git: the leader exits, its kid holds the pipe: timeout",
+		      res("abcdef1", "proj", 1, &r) == 1 &&
+		      is(&r, "commit", k ? "ok" : "timeout"));
+		pid = (pid_t)atoi(slurp("kid"));
+		t0 = xr_now_ms();
+		while (pid > 0 && !(kill(pid, 0) == -1 && errno == ESRCH) &&
+		       xr_now_ms() - t0 < 2000)
+			usleep(10000);
+		CHECK(k ? "git: ... and that kid is ended with git's group" :
+		      "git: ... and that kid (it ignores SIGTERM) is ended",
+		      pid > 0 && kill(pid, 0) == -1 && errno == ESRCH);
+		if (pid > 0)
+			kill(pid, SIGKILL);	/* base: the sleep this test started */
+	}
 	/* 3.7: SIGTERM to the querying process takes git's group with it */
 	mode("slow");
 	put("pid", "", 0);
@@ -3396,23 +3422,40 @@ t_res_parse(void)
 	      xr_git_parse(b, n, 100 + 300, &r) && strstr(r.subtitle, "5m ago") &&
 	      xr_git_parse(b, n, 100 + 3 * 86400, &r) &&
 	      strstr(r.subtitle, "3d ago"));
-#define GR(s) xr_git_remote(s, strlen(s), "o/r")
-	CHECK("git remote: https, /, ssh, scp form, a token, case, 2nd line",
-	      GR("remote.o.url https://github.com/o/r.git\n") &&
-	      GR("remote.o.url https://github.com/o/r/") &&
-	      GR("remote.o.url ssh://git@github.com/O/R") &&
-	      GR("remote.o.url git@github.com:o/r.git") &&
-	      GR("remote.o.url https://u:t@github.com/o/r") &&
-	      GR("remote.a.url x\nremote.b.url https://github.com/o/r"));
+	/* git config -z: "<key>\n<value>\0" (QA 1.57.0 NIT-D1) */
+#define GR(s) xr_git_remote(s, sizeof s - 1, "o/r")
+	CHECK("git remote: https, /, ssh, scp form, a token, case, 2nd entry",
+	      GR("remote.o.url\nhttps://github.com/o/r.git\0") &&
+	      GR("remote.o.url\nhttps://github.com/o/r/\0") &&
+	      GR("remote.o.url\nhttps://github.com/o/r.git/\0") &&
+	      GR("remote.o.url\nSSH://git@GitHub.com/O/R\0") &&
+	      GR("remote.o.url\ngit@github.com:o/r.git\0") &&
+	      GR("remote.o.url\nhttps://u:t@github.com/o/r\0") &&
+	      GR("remote.a.url\nx\0remote.b.url\nhttps://github.com/o/r\0") &&
+	      GR("remote.a b.url\nhttps://github.com/o/r\0"));
 	CHECK("git remote: another repo, owner, host, a path, a cut: no",
-	      !GR("remote.o.url https://github.com/o/r2") &&
-	      !GR("remote.o.url https://github.com/x/r") &&
-	      !GR("remote.o.url https://github.com/o/r.git2") &&
-	      !GR("remote.o.url https://notgithub.com/o/r") &&
-	      !GR("remote.o.url https://e.com/github.com/o/r") &&
-	      !GR("remote.o.url https://github.com.e/o/r") &&
-	      !xr_git_remote("remote.o.url https://github.com/o/r", 34, "o/r") &&
-	      !GR("github.com/o/r") && !GR(""));
+	      !GR("remote.o.url\nhttps://github.com/o/r2\0") &&
+	      !GR("remote.o.url\nhttps://github.com/x/r\0") &&
+	      !GR("remote.o.url\nhttps://github.com/o/r.git2\0") &&
+	      !GR("remote.o.url\nhttps://github.com/o/r/x\0") &&
+	      !GR("remote.o.url\nhttps://notgithub.com/o/r\0") &&
+	      !GR("remote.o.url\nhttps://e.com/github.com/o/r\0") &&
+	      !GR("remote.o.url\nhttps://github.com.e/o/r\0") &&
+	      !GR("remote.o.url\nhttps://github.com:o/r\0") &&
+	      !GR("remote.o.url\nhttps://github.com/o/r") &&
+	      !GR("remote.o.url\0") && !GR("github.com/o/r") && !GR(""));
+	CHECK("git remote: github.com further in than the host: no (NIT-D1)",
+	      !GR("remote.o.url\nhttps://evil.com//github.com/o/r\0") &&
+	      !GR("remote.o.url\nhttps://evil.com/x@github.com/o/r\0") &&
+	      !GR("remote.o.url\nhttps://evil.com/?u=//github.com/o/r\0") &&
+	      !GR("remote.o.url\nhttps://evil.com/x git@github.com:o/r\0") &&
+	      !GR("remote.o.url\n\ngit@github.com:o/r\0") &&
+	      !GR("remote.//github.com/o/r.url\nhttps://e.com/\0"));
+	CHECK("git remote: a value with an escaped newline is one URL: no",
+	      !GR("remote.x.url\nhttps://evil/x\nremote.y.url "
+	          "https://github.com/o/r\0") &&
+	      !GR("remote.x.url\nhttps://evil/x\nhttps://github.com/o/r\0") &&
+	      !GR("remote.o.url https://github.com/o/r\n"));
 #undef GR
 	CHECK("git parse: a short hash, a missing field, a non-digit time: no",
 	      !xr_git_parse("abc\0A\0" "1\0s\n", 10, 0, &r) &&
