@@ -9,6 +9,9 @@ on:
 permissions:
   contents: read
 
+# timeout-minutes: about 3x each job's slowest green run (sanitizers 32 min,
+# vendor-verify 29, build-test 22, fuzz 15), so a hang fails the job instead
+# of holding the runner for hours. pyrun in tests/run.sh bounds each test.
 jobs:
   build-test:
     strategy:
@@ -17,6 +20,7 @@ jobs:
         os: [macos-latest, ubuntu-latest]
         variant: [full, lite]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -41,6 +45,7 @@ jobs:
   # client side is protocol-only, so every verb must work cross-build.
   mixed-binary:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build both variants
@@ -73,6 +78,7 @@ jobs:
   # the rebuilt blob. Zig is only needed here, never for `make`.
   vendor-verify:
     runs-on: macos-latest
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -99,6 +105,7 @@ jobs:
         os: [macos-latest, ubuntu-latest]
         variant: [full, lite]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build and test under ASan + UBSan
@@ -124,6 +131,7 @@ jobs:
           - os: macos-latest
             cc: clang
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     env:
       STRICT: >-
         -Wall -Wextra -Wformat=2 -Wshadow -Wpointer-arith -Wcast-qual
@@ -144,6 +152,7 @@ jobs:
   # narrow, commented annotation — never a blanket disable.
   static-analysis:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: clang --analyze
@@ -169,6 +178,7 @@ jobs:
   # Windows python and gcc (UCRT64); no Cygwin runtime in the binary.
   windows:
     runs-on: windows-latest
+    timeout-minutes: 20
     defaults:
       run:
         shell: msys2 {0}
@@ -204,6 +214,7 @@ jobs:
   # libFuzzer targets (tests/fuzz/), 60 s each under ASan + UBSan.
   fuzz:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Fuzz
