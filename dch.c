@@ -14100,7 +14100,9 @@ main_run(int argc, char **argv)
 				else if (argv[i][0] == '-' || argv[i][0] == '\0')
 				{
 					fprintf(stderr, "dch: --stop: unexpected "
-					        "%s\n", argv[i][0] ? argv[i] : "''");
+					        "%s%s\n", argv[i][0] ? argv[i] : "''",
+					        argv[i][0] ? " (a name starting with - "
+					        "goes after --)" : "");
 					return 1;
 				}
 				else
@@ -14137,8 +14139,10 @@ main_run(int argc, char **argv)
 					force = 1;
 				else if (argv[i][0] == '-' || argv[i][0] == '\0')
 				{
-					fprintf(stderr, "dch: %s: unexpected %s\n", a,
-					        argv[i][0] ? argv[i] : "''");
+					fprintf(stderr, "dch: %s: unexpected %s%s\n", a,
+					        argv[i][0] ? argv[i] : "''",
+					        argv[i][0] ? " (a name starting with - "
+					        "goes after --)" : "");
 					return 1;
 				}
 				else

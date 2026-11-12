@@ -639,7 +639,8 @@ def main():
         r = run("--forget", "-h")
         check("--forget -h: still a flag, exit 1, record kept",
               r.returncode == 1 and r.stderr ==
-              "dch: --forget: unexpected -h\n" and rec("-h") is not None)
+              "dch: --forget: unexpected -h"
+              " (a name starting with - goes after --)\n" and rec("-h") is not None)
         r = run("--pin", "--", "-h")
         check("--pin -- -h pins it", r.returncode == 0 and
               r.stdout == "-h: pinned\n" and pinned("-h"))
