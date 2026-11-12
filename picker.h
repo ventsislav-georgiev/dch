@@ -81,6 +81,40 @@ int pk_open(struct pk *p, int remote, int vt);
 int pk_run(struct pk *p, int fd, const char *header, char *out,
            size_t outsz);
 
+/* The renderer (picker.c), shared with the X-ray view (#175, xview.c): a
+** frame is pk_begin, lines (pk_line ... pk_eol) and pk_fend, which writes
+** only what changed. pk_txt draws a control or bidi code point as '?'. */
+enum { PK_ACC, PK_ACCB, PK_RED, PK_GRN, PK_WARN, PK_SEL, PK_CHIP, PK_NPAL };
+/* A key hint: the key, what it does, and a value in the accent ("sort
+** name"). group: 0 the actions, 1 the agents', 2 the view, 3 moving about;
+** warn: the key is a destructive one's. */
+struct pkkey
+{
+	const char *key, *label, *val;
+	int group, warn;
+};
+extern int pk_col, pk_w, pk_h, pk_utf;
+extern const char *pk_bg;
+const char *pk_p(int i);
+int pk_colors(int vt);
+void pk_tab(const char *name, int n, int on);
+void pk_begin(int fd, int color);
+void pk_fend(int fd, int force);
+void pk_flush(int fd, int force);
+void pk_rawn(const char *s, size_t n);
+void pk_raw(const char *s);
+void pk_set(const char *a);
+void pk_txtto(const char *s, int lim);
+void pk_txt(const char *s);
+int pk_cps(const char *s);
+void pk_pad(int end);
+void pk_fit(const char *s, int w);
+void pk_line(void);
+void pk_eol(void);
+void pk_rule(void);
+int pk_keys(const struct pkkey *it, int n, unsigned drop, int cap, int draw);
+int pk_key(int fd);
+
 /* The host's: dch.c, or win/. pk_load: every tab's rows afresh. pk_do: one
 ** key, 1 when out holds the session to attach, -1 to quit, else 0.
 ** pk_reap: a running action's end. The terminal: pk_wait, input within ms
@@ -109,6 +143,21 @@ struct dch_conf
 #define NCONF 7
 extern const struct dch_conf config_keys[];
 const char *config_show(int k, char *v, size_t cap, int *set);
+
+/* The X-ray view (#175), xview.c: `dch --xray <n>` and the picker's X, on
+** fd, a terminal the caller made raw and put on the alternate screen. 0 when
+** the user left it, else dch's exit code with err set (the session's
+** answer: "dch: no such session"). xv_kill: its children signalled, from a
+** signal handler too. */
+int xv_run(int fd, const char *n, char *err, size_t errsz);
+void xv_kill(void);
+extern int xv_tab;	/* the tab it opens on: 0 Chapters, 2 On screen */
+/* dch.c's, for it: xray_main(ac, av) in a forked child with stdout and
+** stderr into *out and *err (never exec, never the terminal fd); its pid,
+** or -1. A live session's visible screen, plain, into buf (cap bytes and a
+** NUL): its length, -1 none, -2 no mirror (dch-lite). */
+pid_t xv_spawn(int fd, int ac, char **av, int *out, int *err);
+int xv_screen(const char *name, char *buf, size_t cap);
 #endif
 
 #endif

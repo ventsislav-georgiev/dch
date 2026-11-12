@@ -1264,8 +1264,10 @@ xr_claude_lookup(const char *cfg, const char *sid, char *path, size_t pathsz,
 static DIR *
 cx_dir(int dfd, const char *name)
 {
-	int fd = openat(dfd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW |
-	                O_CLOEXEC);
+	/* dirfd() failing is -1; openat would only say EBADF, the analyzer
+	** wants it not passed at all */
+	int fd = dfd == -1 ? -1 : openat(dfd, name, O_RDONLY | O_DIRECTORY |
+	                                 O_NOFOLLOW | O_CLOEXEC);
 	DIR *d = fd >= 0 ? fdopendir(fd) : NULL;
 
 	if (fd >= 0 && !d)
@@ -1339,11 +1341,13 @@ xr_codex_lookup(const char *home, const char *tid, char *path, size_t pathsz,
 				while ((de = readdir(dd)) && hits < 2)
 				{
 					size_t n = strlen(de->d_name);
+					int dfd = dirfd(dd);
 
+					/* dfd < 0: dirfd() failing, as in cx_dir */
 					if (n < tl + 7 || de->d_name[n - tl - 7] != '-' ||
 					    memcmp(de->d_name + n - tl - 6, tid, tl) ||
-					    strcmp(de->d_name + n - 6, ".jsonl") ||
-					    fstatat(dirfd(dd), de->d_name, &s,
+					    strcmp(de->d_name + n - 6, ".jsonl") || dfd < 0 ||
+					    fstatat(dfd, de->d_name, &s,
 					            AT_SYMLINK_NOFOLLOW) < 0 ||
 					    !S_ISREG(s.st_mode))
 						continue;
@@ -2017,8 +2021,10 @@ rm_scan(struct remit *r, const char *text, size_t n, int mode)
 
 /* A command's words, unquoted (a small sh reading: '…', "…", \x), with
 ** their raw byte range; operators (| ; & < > ( ) and an unquoted newline)
-** are words of their own. \ newline is a blank; a here-doc's body is
-** skipped to its delimiter line. */
+** are words of their own. \ newline is a blank, or nothing inside a word;
+** a # starting a word is a comment to the line's end; each here-doc's body,
+** in order, is skipped to its delimiter line (a trailing CR ignored). hx:
+** a body sh expands ($(…) or ` under an unquoted delimiter). */
 #define SW_MAX 256	/* one word more marks a command past the cap */
 struct sw
 {
@@ -2026,47 +2032,79 @@ struct sw
 	size_t n;
 	size_t off[SW_MAX + 1], rs[SW_MAX + 1], re[SW_MAX + 1];
 	char op[SW_MAX + 1];
+	int hx;
 };
 
 static void
 shell_words(const char *c, size_t cl, struct sw *w)
 {
-	size_t i = 0, o = 0, hd = 0, j, dl;
+	size_t i = 0, o = 0, hd = 0, j, dl, b0, k, dk;
 	const char *d;
+	int bl, dash, uq;
 
 	w->n = 0;
+	w->hx = 0;
 	if (!(w->b = malloc(cl + SW_MAX + 2)))
 		return;	/* a word adds at most its NUL to the bytes it reads */
 	while (i < cl && w->n <= SW_MAX)
 	{
-		while (i < cl && (c[i] == ' ' || c[i] == '\t' || c[i] == '\r' ||
-		                  (c[i] == '\\' && i + 1 < cl && c[i + 1] == '\n')))
-			i += 1 + (c[i] == '\\');
+		for (b0 = i, bl = 0;
+		     i < cl && (c[i] == ' ' || c[i] == '\t' || c[i] == '\r' ||
+		                (c[i] == '\\' && i + 1 < cl && c[i + 1] == '\n'));
+		     i += 1 + (c[i] == '\\'))
+			bl |= c[i] == ' ' || c[i] == '\t';
 		if (i >= cl)
 			break;
+		if (c[i] == '#' && (bl || !w->n || w->op[w->n - 1] ||
+		                    w->re[w->n - 1] != b0))
+		{
+			/* a comment: not after a word's CR or \ newline (sh reads
+			** that # as the word's) */
+			while (i < cl && c[i] != '\n')
+				i++;
+			continue;
+		}
 		if (c[i] == '\n')
 		{
 			/* a newline ends the command, like ';' (one after an operator
-			** or at the start does not); a here-doc's body follows it */
+			** or at the start does not); each here-doc's body follows it,
+			** in the order of their << */
 			w->rs[w->n] = i++;
-			if (hd)
+			for (k = hd ? hd - 1 : w->n; k < w->n; k++)
 			{
-				d = w->b + w->off[hd - 1];
-				d += d[0] == '-';	/* <<-EOF */
-				for (dl = strlen(d); i < cl; i = j + 1)
+				if (w->op[k] || !w->op[k - 1] ||
+				    strcmp(w->b + w->off[k - 1], "<<"))
+					continue;
+				i += k >= hd && i < cl && c[i] == '\n';	/* a later body */
+				/* <<-EOF and <<- EOF (not << -EOF or <<'-EOF') */
+				dash = w->re[k - 1] == w->rs[k] && c[w->rs[k]] == '-';
+				dk = k + (dash && !w->b[w->off[k] + 1] && k + 1 < w->n &&
+				          !w->op[k + 1]);
+				d = w->b + w->off[dk] + (dk == k && dash);
+				for (j = w->rs[dk];
+				     j < w->re[dk] && !strchr("'\"\\", c[j]); j++)
+					;
+				uq = j == w->re[dk];	/* sh expands the body */
+				for (b0 = i, dl = strlen(d); i < cl; i = j + 1)
 				{
-					for (; i < cl && c[i] == '\t'; i++)
+					for (; dash && i < cl && c[i] == '\t'; i++)
 						;	/* <<- strips leading tabs */
 					for (j = i; j < cl && c[j] != '\n'; j++)
 						;
-					if (j - i == dl && !memcmp(c + i, d, dl))
+					if (j - i - (j > i && c[j - 1] == '\r') == dl &&
+					    !memcmp(c + i, d, dl))
 					{
 						i = j;	/* its own newline follows an operator */
 						break;
 					}
 				}
-				hd = 0;
+				if (i > cl)
+					i = cl;	/* no delimiter line: c[cl] is not the body's */
+				for (; uq && b0 < i; b0++)
+					w->hx |= c[b0] == '`' ||
+					         (c[b0] == '$' && b0 + 1 < i && c[b0 + 1] == '(');
 			}
+			hd = 0;
 			for (j = i; j < cl && strchr(" \t\r\n", c[j]); j++)
 				;
 			if (j >= cl)
@@ -2100,24 +2138,26 @@ shell_words(const char *c, size_t cl, struct sw *w)
 				{
 					for (i++; i < cl && c[i] != q; i++)
 					{
-						if (q == '"' && c[i] == '\\' && i + 1 < cl)
-							i++;
+						if (q == '"' && c[i] == '\\' && i + 1 < cl &&
+						    c[++i] == '\n')
+							continue;	/* \ newline: nothing */
 						w->b[o++] = c[i];
 					}
 					i += i < cl;
 				}
 				else if (q == '\\' && i + 1 < cl)
 				{
-					w->b[o++] = c[i + 1];
+					if (c[i + 1] != '\n')
+						w->b[o++] = c[i + 1];	/* \ newline: nothing */
 					i += 2;
 				}
 				else
 					w->b[o++] = c[i++];
 			}
 		w->b[o++] = '\0';
-		if (!w->op[w->n] && w->n && w->op[w->n - 1] &&
+		if (!hd && !w->op[w->n] && w->n && w->op[w->n - 1] &&
 		    !strcmp(w->b + w->off[w->n - 1], "<<"))
-			hd = w->n + 1;	/* the here-doc's delimiter word */
+			hd = w->n + 1;	/* the line's first here-doc delimiter word */
 		w->re[w->n++] = i;
 	}
 }
@@ -2152,21 +2192,32 @@ static const char *base(const char *s);
 static int in_list(const char *s, const char *const *v);
 
 /* The first command word of the simple command w[k..e): past env
-** assignments, reserved words and the wraps with their options. e when
-** there is none. *line: the words from it on are one shell line
-** (`eval …`, `watch …`, `env -S '…'`). */
+** assignments, redirects, reserved words and the wraps with their
+** options. e when there is none. *line: the words from it on, *line - 1
+** bytes into it, are one shell line (`eval …`, `watch …`, `env -S '…'`,
+** `env -S'…'`, `env --split-string=…`). */
 static size_t
 cmd_head(const struct sw *w, size_t k, size_t e, int *line)
 {
 	static const char *const resv[] = { "{", "!", "if", "then", "elif",
 	                                    "else", "do", "while", "until", 0 };
-	const char *o;
+	const char *o, *a;
 	size_t j;
 	int p;
 
 	*line = 0;
 	while (k < e)
 	{
+		o = SWD(w, k);
+		if (w->op[k] || (k + 1 < e && w->op[k + 1] && o[0] >= '0' &&
+		                 o[0] <= '9' && !o[strspn(o, "0123456789")] &&
+		                 w->re[k] == w->rs[k + 1]))
+		{
+			/* < f cat, 2>/dev/null cat: the redirect and its target */
+			k += 1 + !w->op[k];
+			k += k < e && !w->op[k];
+			continue;
+		}
 		if (is_assign(SWD(w, k)) || in_list(SWD(w, k), resv))
 		{
 			k++;
@@ -2183,7 +2234,18 @@ cmd_head(const struct sw *w, size_t k, size_t e, int *line)
 				k++;
 				break;
 			}
-			if (!strcmp(o, "-S") && !strcmp(wraps[j].w, "env"))
+			/* env -S, -iS'…', --split-string[=…]: the rest is a line */
+			a = strcmp(wraps[j].w, "env") ? NULL :
+			    !strncmp(o, "--split-string", 14) && (!o[14] || o[14] == '=') ?
+			    o + 14 + !!o[14] :
+			    o[1] != '-' && o[1 + strcspn(o + 1, "uCPS")] == 'S' ?
+			    o + 2 + strcspn(o + 1, "uCPS") : NULL;
+			if (a && *a)
+			{
+				*line = 1 + (int)(a - o);
+				return k;
+			}
+			if (a)
 			{
 				*line = k + 1 < e;
 				return k + 1;
@@ -2267,7 +2329,8 @@ arg_outside(const char *a, const char *cur, int lost, const char *cwd)
 ** command's input: D3 (argv) still applies */
 enum { X_NONE, X_QUOTE = 1, X_DIFF = 3, X_LIST = 4, X_SUB = 8 };
 
-/* excluded() on cmd run in cur (lost: unknown), depth sh -c levels in. */
+/* excluded() on cmd run in cur (lost: 1 unknown, 2 under xargs, whose
+** files come from its input), depth sh -c levels in. */
 static int
 excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
         int lost, int depth)
@@ -2281,11 +2344,12 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 	                                     "uniq", "rev", "column", "fold",
 	                                     "fmt", 0 };
 	static const char *const shells[] = { "sh", "bash", "zsh", "dash", "ksh",
-	                                      0 };
+	                                      "fish", 0 };
+	static const char *const closers[] = { "done", "fi", "esac", "}", 0 };
 	struct sw w;
 	char cdb[XR_KEY_MAX + 1], q;
 	size_t s, e, h, k, sub, i, j, t, end;
-	int r = X_NONE, sr = X_NONE, x, skip, line;
+	int r = X_NONE, sr = X_NONE, x, skip, line, rd, xa;
 	const char *c0, *a;
 
 	shell_words(cmd, cl, &w);
@@ -2294,6 +2358,8 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 		free(w.b);
 		return X_LIST;	/* no memory, or words past SW_MAX unseen */
 	}
+	if (w.hx)
+		r = X_LIST;	/* $(…) in a here-doc body sh expands: not read */
 	/* every simple command: split on ; & && | || ( ) and newlines */
 	for (s = 0; s < w.n && !r; s = e + 1)
 	{
@@ -2322,16 +2388,29 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 				sr = x & ~X_SUB;
 				i = j;
 			}
-		if ((h = cmd_head(&w, s, e, &line)) >= e)
+		/* a < source is a printed file of a printer, of a compound
+		** command (done < f, } < f) and with no command ($(< f), < f) */
+		for (k = s, rd = 0; k + 1 < e; k++)
+			if (w.op[k] && !strcmp(SWD(&w, k), "<") && !w.op[k + 1] &&
+			    arg_outside(SWD(&w, k + 1), cur, lost, cwd))
+				rd = 1;
+		if ((h = cmd_head(&w, s, e, &line)) >= e ||
+		    in_list(SWD(&w, h), closers))
+		{
+			r = rd ? X_QUOTE : r;
 			continue;
+		}
+		for (k = s, xa = lost & 2; k < h; k++)
+			if (!strcmp(base(SWD(&w, k)), "xargs"))
+				xa = 2;
 		if (line)
 		{
 			/* eval/watch/env -S: the words from h on, re-read as a line */
 			for (k = h; k + 1 < e; k++)
 				w.b[w.off[k + 1] - 1] = ' ';
+			a = SWD(&w, h) + line - 1;
 			x = depth >= 3 ? X_LIST :
-			    excl_in(SWD(&w, h), strlen(SWD(&w, h)), cwd, cur, lost,
-			            depth + 1);
+			    excl_in(a, strlen(a), cwd, cur, lost | xa, depth + 1);
 			if (x & X_SUB)
 				sr = sr ? sr : x & ~X_SUB;
 			else
@@ -2346,10 +2425,10 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 			     k++)
 				;
 			a = k < e && !w.op[k] ? SWD(&w, k) : "";
-			lost = !a[0] || a[0] == '~' || a[0] == '-' || a[0] == '+' ||
-			       strpbrk(a, "$`") ||
+			lost = (lost & 2) | (!a[0] || a[0] == '~' || a[0] == '-' ||
+			       a[0] == '+' || strpbrk(a, "$`") ||
 			       !path_norm(a, strlen(a), lost ? NULL : cur, cdb,
-			                  sizeof cdb) || cdb[0] != '/';
+			                  sizeof cdb) || cdb[0] != '/');
 			cur = lost ? NULL : cdb;
 			continue;
 		}
@@ -2362,7 +2441,7 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 				{
 					x = depth >= 3 || w.op[k + 1] ? X_LIST :
 					    excl_in(SWD(&w, k + 1), strlen(SWD(&w, k + 1)), cwd,
-					            cur, lost, depth + 1);
+					            cur, lost | xa, depth + 1);
 					if (x & X_SUB)
 						sr = sr ? sr : x & ~X_SUB;
 					else
@@ -2396,6 +2475,8 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 		{
 			if (!in_list(c0, print))
 				continue;
+			if (rd || xa)
+				r = X_QUOTE;	/* a < source outside, files from xargs */
 			/* the file arguments: not options, not the script or filter
 			** of sed, awk, jq or yq, not a > target or a << delimiter; a <
 			** source is one */
@@ -4713,13 +4794,16 @@ card_text(const struct json_parser *p, int in, size_t *n)
 		size_t l = 0;
 		char *s = j_str(p, v, &l);
 		const char *t = s;
+		int raw = !s && v >= 0 && !j_null(p, v);
 
-		if (!s && v >= 0 && !j_null(p, v))
+		if (raw)
 		{
 			t = p->text + p->tok[v].start;
 			l = (size_t)(p->tok[v].end - p->tok[v].start);
 		}
-		if (t)
+		/* v, not t: the analyzer reads "if (t)" as p->text maybe NULL,
+		** and v >= 0 is what ties m (non-NULL) to a field */
+		if (v >= 0 && (s || raw))
 		{
 			fprintf(m, "%s%s: ", any++ ? "\n" : "", keys[k]);
 			fwrite(t, 1, clip(t, l, XR_FIELD_CAP), m);
@@ -4737,31 +4821,13 @@ card_text(const struct json_parser *p, int in, size_t *n)
 	return o;
 }
 
-/* A call's tool entry: Bash its command, an edit or a read its path,
-** anything else its card's fields; the call is kept so that its result
-** names its tool. */
+/* A call of the wanted chapter, kept so that its result names its tool. */
 static void
-ent_call(struct xr_claude *d, const struct json_parser *p, int i,
-         const char *id, const char *name)
+ent_keep(struct xr_entries *e, const char *id, const char *name)
 {
-	struct xr_entries *e = d->want;
 	struct xr_ent_call *c;
-	int in = k_obj(p, i, A_INPUT), v = -1;
-	char kb[XR_ID_MAX + 1], *s;
-	size_t l = 0;
+	char kb[XR_ID_MAX + 1];
 
-	if (name && !strcmp(name, "Bash"))
-		v = j_field(p, in, "command");
-	else if (name && (!strcmp(name, "Edit") || !strcmp(name, "MultiEdit") ||
-	                  !strcmp(name, "Write") || !strcmp(name, "Read")))
-		v = j_field(p, in, "file_path");
-	if (!(s = j_str(p, v, &l)) || blank(s, l))
-	{
-		free(s);
-		s = card_text(p, in, &l);
-	}
-	ent_put(e, "tool", name, s, l, XR_TEXT_CAP, 0);
-	free(s);
 	if (!id)
 		return;
 	if (!e->calls && !(e->calls = calloc(XR_PENDING, sizeof *e->calls)))
@@ -4778,6 +4844,46 @@ ent_call(struct xr_claude *d, const struct json_parser *p, int i,
 	c = &e->calls[e->ncalls++];
 	snprintf(c->id, sizeof c->id, "%s", id_key(id, kb));
 	c->name = name ? strdup(name) : NULL;
+}
+
+/* The tool name of the kept call with this id, else NULL. */
+static const char *
+ent_tool(const struct xr_entries *e, const char *id)
+{
+	char kb[XR_ID_MAX + 1];
+	int k;
+
+	for (k = e->ncalls - 1; id && k >= 0; k--)
+		if (!strcmp(e->calls[k].id, id_key(id, kb)))
+			return e->calls[k].name;
+	return NULL;
+}
+
+/* A call's tool entry: Bash its command, an edit or a read its path,
+** anything else its card's fields; the call is kept so that its result
+** names its tool. */
+static void
+ent_call(struct xr_claude *d, const struct json_parser *p, int i,
+         const char *id, const char *name)
+{
+	struct xr_entries *e = d->want;
+	int in = k_obj(p, i, A_INPUT), v = -1;
+	char *s;
+	size_t l = 0;
+
+	if (name && !strcmp(name, "Bash"))
+		v = j_field(p, in, "command");
+	else if (name && (!strcmp(name, "Edit") || !strcmp(name, "MultiEdit") ||
+	                  !strcmp(name, "Write") || !strcmp(name, "Read")))
+		v = j_field(p, in, "file_path");
+	if (!(s = j_str(p, v, &l)) || blank(s, l))
+	{
+		free(s);
+		s = card_text(p, in, &l);
+	}
+	ent_put(e, "tool", name, s, l, XR_TEXT_CAP, 0);
+	free(s);
+	ent_keep(e, id, name);
 }
 
 /* A result's chapter, before tool_result() closes its pairing: its call's
@@ -4801,15 +4907,13 @@ ent_result(struct xr_claude *d, const struct json_parser *p, int i,
 {
 	struct xr_entries *e = d->want;
 	const char *name = NULL;
-	char kb[XR_ID_MAX + 1], *t;
+	char *t;
 	size_t n;
-	int k;
 
 	if (ord == -2 ? !ent_here(d, agent) : !e->hit || ord != (long long)e->ord)
 		return;
-	for (k = e->ncalls - 1; ord != -2 && k >= 0 && !name; k--)
-		if (!strcmp(e->calls[k].id, id_key(id, kb)))
-			name = e->calls[k].name;
+	if (ord != -2)
+		name = ent_tool(e, id);
 	t = output_text(p, i, k_obj(p, 0, (const char *const[]){
 	                    "toolUseResult", 0 }), &n);
 	ent_put(e, "output", name, t, n, XR_OUTPUT_CAP, err);
@@ -5127,6 +5231,7 @@ static const char *const A_ROLE[] = { "role", 0 };
 static const char *const A_ARGS[] = { "arguments", 0 };
 static const char *const A_OUTPUT[] = { "output", 0 };
 static const char *const A_ACTION[] = { "action", 0 };
+static const char *const A_CALLID[] = { "call_id", 0 };
 
 void
 xr_claude_codex(struct xr_claude *d)
@@ -5208,6 +5313,65 @@ cx_args(struct xr_claude *d, const struct json_parser *p, int pl)
 	free(s);
 }
 
+/* --chapter's entry for one Codex step of the wanted chapter (3.5): a call's
+** tool entry (function_call its arguments' card, else their text; a custom
+** tool its input; a local shell call its action's card), or an output entry
+** named by its call_id's call. error is false: a rollout has no error flag
+** of its own (7.4: never a guess). */
+static void
+cx_ent(struct xr_claude *d, const struct json_parser *p, int pl,
+       const char *t)
+{
+	struct xr_entries *e = d->want;
+	struct json_parser q;
+	char *id = k_str(p, pl, A_CALLID, NULL), *name = NULL, *s = NULL, *a;
+	size_t n = 0, al;
+	int c;
+
+	if (!strcmp(t, "function_call_output") ||
+	    !strcmp(t, "custom_tool_call_output"))
+	{
+		c = j_get(p, pl, A_OUTPUT);
+		s = c >= 0 && p->tok[c].kind == JSON_STRING ? j_str(p, c, &n)
+		    : c >= 0 && p->tok[c].kind == JSON_ARRAY ? texts(p, c, &n)
+		    : NULL;
+		ent_put(e, "output", ent_tool(e, id), s, n, XR_OUTPUT_CAP, 0);
+	}
+	else if (!strcmp(t, "function_call") || !strcmp(t, "custom_tool_call") ||
+	         !strcmp(t, "local_shell_call"))
+	{
+		name = k_str(p, pl, A_NAME, NULL);
+		if (!strcmp(t, "function_call"))
+		{
+			if ((a = k_str(p, pl, A_ARGS, &al)))
+			{
+				memset(&q, 0, sizeof q);
+				if (tokens_max(a, al) <= XR_LINE_TOKENS &&
+				    dch_json_parse(&q, a) >= 0 &&
+				    q.tok[0].kind == JSON_OBJECT)
+					s = card_text(&q, 0, &n);
+				dch_json_free(&q);
+				if (!s)
+				{
+					s = a;
+					n = al;
+				}
+				else
+					free(a);
+			}
+		}
+		else if (!strcmp(t, "custom_tool_call"))
+			s = k_str(p, pl, A_INPUT, &n);
+		else
+			s = card_text(p, k_obj(p, pl, A_ACTION), &n);
+		ent_put(e, "tool", name, s, n, XR_TEXT_CAP, 0);
+		ent_keep(e, id, name);
+	}
+	free(s);
+	free(name);
+	free(id);
+}
+
 /* One response_item: a user or assistant message, else a step whose tool
 ** fields are scanned under the Claude tool-field rules (code context; a
 ** command-like input 6000 scalars, an output 3000, a card's fields 240). */
@@ -5216,7 +5380,7 @@ cx_item(struct xr_claude *d, const struct json_parser *p, int pl)
 {
 	char *t = k_str(p, pl, A_TYPE, NULL), *r, *s;
 	int c, i;
-	size_t n;
+	size_t n = 0;
 
 	if (t && !strcmp(t, "message"))
 	{
@@ -5234,6 +5398,9 @@ cx_item(struct xr_claude *d, const struct json_parser *p, int pl)
 				{
 					main_block(d, B_STEP, NULL, NULL);
 					refs_text(d, s, n, XR_TEXT_CAP, XR_MD);
+					if (ent_here(d, NULL))
+						ent_put(d->want, "assistant", NULL, s, n,
+						        XR_TEXT_CAP, 0);
 				}
 				free(s);
 			}
@@ -5266,6 +5433,8 @@ cx_item(struct xr_claude *d, const struct json_parser *p, int pl)
 		free(s);
 	}
 	/* reasoning, and any type not listed: a step, no ref (7.4) */
+	if (t && ent_here(d, NULL))
+		cx_ent(d, p, pl, t);
 	free(t);
 }
 
@@ -5286,6 +5455,9 @@ cx_line(struct xr_claude *d, const struct json_parser *p)
 		main_block(d, B_PROMPT, "compact", "Conversation compacted");
 		if ((s = k_str(p, pl, A_MESSAGE, &n)))
 			refs_text(d, s, n, XR_TEXT_CAP, XR_PROSE);
+		/* as a Claude compact summary's user entry */
+		if (s && ent_here(d, NULL))
+			ent_put(d->want, "user", NULL, s, n, XR_TEXT_CAP, 0);
 		free(s);
 		/* its lead ends here: the prompt after it is a turn of its own */
 		main_block(d, B_STEP, NULL, NULL);
@@ -6233,6 +6405,8 @@ put_ref(FILE *m, const struct xr_index *x, const struct xr_ent *e,
 	put_ref_n(m, e, x ? ix_count(x, e) : 0, project, comma);
 }
 
+static int sent_cut(struct xr_sent *s, const size_t *ix, size_t n);
+
 /* Two passes: each chapter's size first (one at a time, so no 4 MiB body is
 ** held: QA 1.44 LOW-8), then the kept ones straight to f. */
 int
@@ -6316,6 +6490,8 @@ fail:
 		why = "output";
 		dropped += nr - keep;
 	}
+	if (a->sent && sent_cut(a->sent, ord + keep, nr - keep) != 0)
+		goto fail;
 	if (!(m = open_memstream(&head, &hl)))
 	{
 		body = NULL;
@@ -6377,6 +6553,7 @@ struct sref
 	uint64_t kh, vh;
 	char *key;
 	int shape;
+	int cut;		/* left out by a snapshot's cap: never sent */
 	size_t ix;		/* the entry, in the answer it was built from */
 };
 struct sch
@@ -6396,7 +6573,22 @@ struct xr_sent
 {
 	struct stab sent, pend;
 	int have;		/* pend holds the last xr_delta's diff */
+	size_t *cut, ncut;	/* the last xr_print's left-out refs (entries) */
 };
+
+static int
+sent_cut(struct xr_sent *s, const size_t *ix, size_t n)
+{
+	free(s->cut);
+	s->cut = NULL;
+	s->ncut = 0;
+	if (n && !(s->cut = malloc(n * sizeof *s->cut)))
+		return -1;
+	if (n)
+		memcpy(s->cut, ix, n * sizeof *s->cut);
+	s->ncut = n;
+	return 0;
+}
 
 static void
 stab_free(struct stab *t)
@@ -6423,6 +6615,7 @@ xr_sent_free(struct xr_sent *s)
 		return;
 	stab_free(&s->sent);
 	stab_free(&s->pend);
+	free(s->cut);
 	free(s);
 }
 
@@ -6532,9 +6725,22 @@ stab_keep(struct xr_sent *s)
 int
 xr_sent_take(struct xr_sent *s, const struct xr_answer *a)
 {
+	unsigned char *m;
+	size_t k;
+
 	stab_free(&s->pend);
-	if (stab_build(a, &s->pend) != 0)
+	if (stab_build(a, &s->pend) != 0 ||
+	    !(m = calloc(s->pend.nr + 1, 1)))
 		return -1;
+	/* the refs a's snapshot left out (LOW-9): a later change to one is
+	** no line, as --json does not show it */
+	for (k = 0; k < s->ncut; k++)
+		if (s->cut[k] < s->pend.nr)
+			m[s->cut[k]] = 1;
+	for (k = 0; k < s->pend.nr; k++)
+		s->pend.r[k].cut = m[s->pend.r[k].ix];
+	free(m);
+	(void)sent_cut(s, NULL, 0);
 	return stab_keep(s);
 }
 
@@ -6556,10 +6762,14 @@ xr_delta(struct xr_sent *s, const struct xr_answer *a, uint64_t head,
 		const struct sref *o = bsearch(&s->pend.r[k], s->sent.r,
 		                               s->sent.nr, sizeof *o, sref_cmp);
 
+		/* left out still: it stays out (LOW-9) */
+		if ((s->pend.r[k].cut = o && o->cut))
+			continue;
 		*nref += !o || o->vh != s->pend.r[k].vh;
 	}
 	for (k = 0; k < s->sent.nr; k++)
-		*nref += !bsearch(&s->sent.r[k], s->pend.r, s->pend.nr,
+		*nref += !s->sent.r[k].cut &&
+		         !bsearch(&s->sent.r[k], s->pend.r, s->pend.nr,
 		                  sizeof *s->pend.r, sref_cmp);
 	/* a chapter gone with its prompt record still in the ring: no line
 	** removes it, so the caller resets (an evicted one the client drops at
@@ -6590,7 +6800,7 @@ xr_delta_write(FILE *f, struct xr_sent *s, const struct xr_answer *a)
 		                                                    sizeof *o,
 		                                                    sref_cmp);
 
-		chg[p->ix] = !o || o->vh != p->vh;
+		chg[p->ix] = !p->cut && (!o || o->vh != p->vh);
 	}
 	for (k = 0; k < nc; k++)
 	{
@@ -6616,7 +6826,8 @@ xr_delta_write(FILE *f, struct xr_sent *s, const struct xr_answer *a)
 			fputs("}\n", f);
 		}
 	for (k = 0; k < s->sent.nr; k++)
-		if (!bsearch(&s->sent.r[k], s->pend.r, s->pend.nr,
+		if (!s->sent.r[k].cut &&
+		    !bsearch(&s->sent.r[k], s->pend.r, s->pend.nr,
 		             sizeof *s->pend.r, sref_cmp))
 		{
 			struct xr_ent e;

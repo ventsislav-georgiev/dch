@@ -4,8 +4,9 @@
 ** bytes cut in two reads: forwarding, it must hand every byte back in order;
 ** the output scan must survive anything. Linked with the rest of dch minus
 ** attach.o, and dch.c built with -Dmain=dch_main (detach_char is ^\).
-** The picker's sequence reader (pk_csi, #132) gets the bytes after ESC [
-** as pk_key collects them, at most 16. */
+** The X-ray chord's x decode (xray_x, #187) reads what follows a press
+** and a whole read. The picker's sequence reader (pk_csi, #132) gets the
+** bytes after ESC [ as pk_key collects them, at most 16. */
 #include "../../attach.c"
 #include "../../picker.h"
 #include <stdint.h>
@@ -22,8 +23,18 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 	memset(&pkt, 0, sizeof pkt);
 	memcpy(pkt.u.buf, d, n);
 	pkt.len = (unsigned short)n;
-	if (detach_hits(&pkt) > 2)
-		abort();	/* the scan stops at two */
+	{
+		int h = detach_hits(&pkt);
+
+		if (h > 2)
+			abort();	/* the scan stops at two */
+		/* the X-ray chord's x (#187): after the press, and a read */
+		if (h == 1 && (detach_end < 1 || detach_end > (int)n))
+			abort();
+		if (h == 1)
+			(void)xray_x(pkt.u.buf + detach_end, (int)n - detach_end);
+		(void)xray_x(d, (int)n);
+	}
 	{
 		int k = pk_csi(d, n < 16 ? (int)n : 16);
 

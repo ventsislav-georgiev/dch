@@ -1382,6 +1382,103 @@ t_caps(void)
 	free(row);
 }
 
+/* --follow past the 4 MiB cap (QA 1.52.0 LOW-9): a ref the snapshot left
+** out gets no line when it changes or goes; a kept one and a new one do */
+static char *
+follow_cut_out(struct xr_index *ix, struct xr_sent *s, struct xr_answer *a,
+               int snapshot)
+{
+	char *b = NULL;
+	size_t bl = 0, nref;
+	int lost, rc;
+	FILE *f = open_memstream(&b, &bl);
+
+	if (!f)
+		return NULL;
+	a->refs = ix;
+	a->snapshot = snapshot;
+	a->sent = s;
+	rc = snapshot ? xr_print(f, a) != 0 || xr_sent_take(s, a) != 0
+	     : xr_delta(s, a, 0, &nref, &lost) != 0 ||
+	       xr_delta_write(f, s, a) != 0;
+	if (fclose(f) != 0 || rc)
+	{
+		free(b);
+		return NULL;
+	}
+	return b;
+}
+
+static void
+t_follow_cut(void)
+{
+	struct xr_index *ix = xr_index_new(), *ix2 = xr_index_new();
+	struct xr_sent *s = xr_sent_new();
+	struct xr_answer a;
+	struct xr_sink k;
+	struct xr_rec r[2];
+	char t[1024], *b, *d;
+	size_t out0 = xr_lim.out, o, i;
+
+	if (!ix || !ix2 || !s)
+		goto out;
+	/* 100 keys mentioned once: the later ones are the cap's */
+	for (i = o = 0; i < 100; i++)
+		o += (size_t)sprintf(t + o, "a%06zx ", i + 1);
+	memset(r, 0, sizeof r);
+	r[0].seq = 1;
+	r[0].kind = RING_K_OUTPUT;
+	r[0].text = t;
+	r[0].len = o;
+	r[1].seq = 2;
+	r[1].kind = RING_K_OUTPUT;
+	r[1].text = "a000064 a000001 a0000ff";
+	r[1].len = strlen(r[1].text);
+	memset(&a, 0, sizeof a);
+	a.session = a.session_id = "s";
+	a.corpus = "shell";
+	a.project = a.project_label = "";
+	a.available = a.complete = 1;
+	a.lines = -1;
+	xr_index_per_row(ix, 1);	/* a row a mention: counts move */
+	xr_index_sink(ix, &k);
+	shell_refs(r, 1, &k);
+	xr_lim.out = 8192;
+	b = follow_cut_out(ix, s, &a, 1);
+	CHECK("follow cut: the snapshot leaves a000064 out (dropped_keys)",
+	      b && !strstr(b, "\"dropped_keys\":0}") && strstr(b, "a000001") &&
+	      !strstr(b, "a000064"));
+	free(b);
+	/* a000064 and a000001 again, a0000ff new */
+	xr_index_free(ix);
+	ix = xr_index_new();
+	if (!ix)
+		goto out;
+	xr_index_per_row(ix, 1);
+	xr_index_sink(ix, &k);
+	shell_refs(r, 2, &k);
+	d = follow_cut_out(ix, s, &a, 0);
+	CHECK("follow cut: a left-out ref that changes gets no line; a kept "
+	      "and a new one do", d && !strstr(d, "a000064") &&
+	      strstr(d, "\"key\":\"commit:a000001\"") && strstr(d, "a0000ff"));
+	free(d);
+	/* a000064 gone: no count-0 line for it; a0000ff's goes */
+	xr_index_per_row(ix2, 1);
+	xr_index_sink(ix2, &k);
+	t[o - 8] = '\0';	/* the first row without "a000064 " */
+	r[0].len = o - 8;
+	shell_refs(r, 1, &k);
+	d = follow_cut_out(ix2, s, &a, 0);
+	CHECK("follow cut: a left-out ref that goes gets no count-0 line",
+	      d && !strstr(d, "a000064") && strstr(d, "a0000ff"));
+	free(d);
+out:
+	xr_lim.out = out0;
+	xr_index_free(ix);
+	xr_index_free(ix2);
+	xr_sent_free(s);
+}
+
 /* ---- Codex (7.4, K9) ---------------------------------------------------- */
 
 struct cxkeys
@@ -1866,6 +1963,102 @@ t_chapter(void)
 			      strlen("{\"role\":\"tool\",\"tool\":null,\"text\":\"cat\","
 			             "\"error\":false},{\"role\":\"output\",\"tool\":"
 			             "null,\"text\":\"\",\"error\":false}") + 3000);
+		xr_chapters_free(&c);
+		xr_entries_free(&e);
+	}
+}
+
+/* --chapter over a Codex rollout (3.5, #169): the turn's prompt, each call
+** as its tool entry (a function_call its arguments' card, a non-object
+** arguments string as is, a custom tool its input, a local shell call its
+** action's card), each output named by its call_id's call (an unknown id:
+** tool null), the assistant text; error never set; the compact chapter
+** its summary; reasoning nothing */
+static void
+t_codex_chapter(void)
+{
+	static const char *const L[] = {
+		CXI("{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":"
+		    "\"input_text\",\"text\":\"go\"}]}"),
+		CXI("{\"type\":\"function_call\",\"name\":\"exec_command\","
+		    "\"arguments\":\"{\\\"cmd\\\":\\\"ls\\\"}\",\"call_id\":\"c1\"}"),
+		CXI("{\"type\":\"local_shell_call\",\"call_id\":\"c2\",\"action\":"
+		    "{\"type\":\"exec\",\"command\":[\"ls\"]}}"),
+		CXI("{\"type\":\"custom_tool_call\",\"name\":\"exec\",\"input\":"
+		    "\"make\",\"call_id\":\"c3\"}"),
+		CXI("{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\","
+		    "\"text\":\"hm\"}]}"),
+		CXI("{\"type\":\"function_call_output\",\"call_id\":\"c1\","
+		    "\"output\":\"out1\"}"),
+		CXI("{\"type\":\"custom_tool_call_output\",\"call_id\":\"c3\","
+		    "\"output\":[{\"type\":\"input_text\",\"text\":\"out3\"}]}"),
+		CXI("{\"type\":\"function_call_output\",\"call_id\":\"zz\","
+		    "\"output\":\"orphan\"}"),
+		CXI("{\"type\":\"function_call\",\"name\":\"f\",\"arguments\":"
+		    "\"not json\"}"),
+		CXI("{\"type\":\"message\",\"role\":\"assistant\",\"content\":["
+		    "{\"type\":\"output_text\",\"text\":\"ok\"}]}"),
+		"{\"type\":\"compacted\",\"payload\":{\"message\":\"sum\"}}",
+		CXI("{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":"
+		    "\"input_text\",\"text\":\"next\"}]}"),
+		CXI("{\"type\":\"message\",\"role\":\"assistant\",\"content\":["
+		    "{\"type\":\"output_text\",\"text\":\"two\"}]}"),
+	};
+	struct xr_chapters c;
+	struct xr_entries e;
+	char a[3][48];
+	int k, i;
+
+	for (i = 0; i < 4; i++)
+	{
+		xr_entries_begin(&e, i ? a[i - 1] : "-", "s", 1 << 20);
+		begin();
+		xr_claude_codex(D);
+		xr_claude_entries(D, &e, 0xabc);
+		for (k = 0; k < (int)(sizeof L / sizeof *L); k++)
+			line(L[k]);
+		end(&c);
+		if (!i)
+		{
+			CHECK("codex chapter: three chapters", c.n == 3);
+			for (k = 0; k < 3; k++)
+				snprintf(a[k], sizeof a[k], "%s", (size_t)k < c.n
+				         ? xr_chapter_at(&c, (size_t)k)->anchor : "");
+		}
+		else if (i == 1)
+			CHECK("codex chapter: the turn, its calls, their outputs by "
+			      "call_id, the text",
+			      e.hit && e.ord == 0 && !strcmp(ch_buf(&e),
+			      "{\"role\":\"user\",\"tool\":null,\"text\":\"go\","
+			      "\"error\":false},"
+			      "{\"role\":\"tool\",\"tool\":\"exec_command\",\"text\":"
+			      "\"cmd: ls\",\"error\":false},"
+			      "{\"role\":\"tool\",\"tool\":null,\"text\":\"command: "
+			      "[\\\"ls\\\"]\\ntype: exec\",\"error\":false},"
+			      "{\"role\":\"tool\",\"tool\":\"exec\",\"text\":\"make\","
+			      "\"error\":false},"
+			      "{\"role\":\"output\",\"tool\":\"exec_command\",\"text\":"
+			      "\"out1\",\"error\":false},"
+			      "{\"role\":\"output\",\"tool\":\"exec\",\"text\":\"out3\","
+			      "\"error\":false},"
+			      "{\"role\":\"output\",\"tool\":null,\"text\":\"orphan\","
+			      "\"error\":false},"
+			      "{\"role\":\"tool\",\"tool\":\"f\",\"text\":\"not json\","
+			      "\"error\":false},"
+			      "{\"role\":\"assistant\",\"tool\":null,\"text\":\"ok\","
+			      "\"error\":false}"));
+		else if (i == 2)
+			CHECK("codex chapter: the compaction, its summary",
+			      e.hit && e.ord == 1 && !strcmp(ch_buf(&e),
+			      "{\"role\":\"user\",\"tool\":null,\"text\":\"sum\","
+			      "\"error\":false}"));
+		else
+			CHECK("codex chapter: the next turn, its own entries only",
+			      e.hit && e.ord == 2 && !strcmp(ch_buf(&e),
+			      "{\"role\":\"user\",\"tool\":null,\"text\":\"next\","
+			      "\"error\":false},"
+			      "{\"role\":\"assistant\",\"tool\":null,\"text\":\"two\","
+			      "\"error\":false}"));
 		xr_chapters_free(&c);
 		xr_entries_free(&e);
 	}
@@ -2580,6 +2773,33 @@ t_excl(void)
 		"zcat /etc/x.gz", "gzcat ../x.gz", "batcat /etc/x",
 		"glow ../README.md", "yq '.a' /etc/x.yaml", "uniq ../x", "rev ../x",
 		"column -t /etc/x", "fold -w 80 ../x", "fmt ../x",
+		/* #183 1: a < before the command word, or with none */
+		"echo \"$(< /etc/x)\"", "echo $(< /etc/x)", "< /etc/x cat", "< /etc/x",
+		"2</dev/null cat /etc/x", "jq < /etc/x.json",
+		/* #183 2: a < on a compound command */
+		"while read l; do echo \"$l\"; done < /etc/x", "{ cat; } < /etc/x",
+		"(cat) < /etc/x", "if true; then cat; fi < /etc/x",
+		/* #183 3: a printer under xargs reads files from its input */
+		"echo /etc/x | xargs cat", "xargs cat < list.txt",
+		"printf /etc/x | xargs -I{} sh -c 'cat {}'",
+		"xargs -I{} sh -c 'cd /home/demo/proj && cat {}'",
+		/* #183 4: a here-doc delimiter line ending in CR closes */
+		"cat <<EOF\r\nx\r\nEOF\r\nrg x", "cat <<EOF\r\nx\r\nEOF\r\ncat /etc/x",
+		/* #183 5: a quote in a comment hides nothing */
+		"# don't\ncat /etc/x", "cat notes.md # it's\ncat /etc/x",
+		"cat notes.md\r# ; cat /etc/x",
+		/* #183 6: two here-docs on one line, each body in order */
+		"cat <<A <<B\nB\ndon't\nA\nb\nB\ncat /etc/x",
+		"cat <<'A' <<-B\nx\nA\n\ty\n\tB\ncat /etc/x",
+		/* #183 7: fish -c, env -S'…', env --split-string */
+		"fish -c 'cat /etc/x'", "env -S'cat /etc/x'", "env -iS'cat /etc/x'",
+		"env --split-string='cat /etc/x'", "env --split-string 'cat /etc/x'",
+		/* #183: \ newline joins a word; <<- by adjacency, tabs only for it;
+		** a body sh expands is not read */
+		"ca\\\nt /etc/x", "\"ca\\\nt\" /etc/x",
+		"cat <<- EOF\n\tdon't\n\tEOF\ncat /etc/x", "cat << -X\nb\n-X\ncat /etc/x",
+		"cat <<'-X'\nb\n-X\ncat /etc/x", "cat <<EOF\n\tEOF\ndon't\nEOF\ncat /etc/x",
+		"cat <<EOF\n$(cat /etc/x)\nEOF",
 		0
 	};
 	static const char *const keep[] = {
@@ -2599,6 +2819,17 @@ t_excl(void)
 		"timeout 5", "eval", "env -S", "cat <<< \"x\"",
 		/* ruling 1: a printer of a file inside the cwd still defines */
 		"sed 's/a/b/' notes.md", "jq . x.json", "sort notes.md",
+		/* #183: the same shapes with a file inside the cwd; a comment and a
+		** here-doc body are no command */
+		"< notes.md cat", "2>/dev/null cat notes.md",
+		"while read l; do echo \"$l\"; done < notes.md",
+		"cat <<EOF\r\nx\r\nEOF\r\ncat notes.md", "cat notes.md # ; rg x",
+		"cat notes.md # /etc/x", "cat <<A <<B\nB\nrg q\nA\nb\nB",
+		"env -S'cat notes.md'", "cat <<- EOF\n\tx\n\tEOF\ncat notes.md",
+		"cat <<'EOF'\n$(cat /etc/x)\nEOF", "cat <<EOF\n$HOME ${x}\nEOF\ncat notes.md",
+		/* #177: a body with no delimiter line ends at its slice; the `
+		** that closes the substitution is not the body's */
+		"cat notes.md; echo \"`cat <<E\nx`\"",
 		0
 	};
 	/* change (a): a reader or search only inside $(…) or backquotes
@@ -2608,6 +2839,8 @@ t_excl(void)
 		"gh pr create --title \"T\" --body \"`cat /etc/body.md`\"",
 		"gh pr create --title \"T\" --body \"$(rg -l x)\"",
 		"gh pr create --title T --body \"$(git diff)\"",
+		"gh pr create --title T --body \"$(< /etc/b.md)\"",
+		"gh pr create --title T --body \"$(cat <<EOF\n$(git log)\nEOF\n)\"",
 		0
 	};
 	static const char *const d3no[] = {
@@ -2721,6 +2954,7 @@ main(int argc, char **argv)
 	t_ref();
 	t_index();
 	t_caps();
+	t_follow_cut();
 	t_excl();
 	t_cancel();
 	t_scan_caps();
@@ -2729,6 +2963,7 @@ main(int argc, char **argv)
 	t_chapter();
 	t_resolve();
 	t_codex();
+	t_codex_chapter();
 	t_codex_lookup();
 	t_quote();
 	printf("%s: %d failed\n", fails ? "FAIL" : "ok", fails);

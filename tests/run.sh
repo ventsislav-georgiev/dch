@@ -995,7 +995,18 @@ else
     printf '  skip the master links no x-ray engine symbol (%s)\n' \
         "$( [ -f master.o ] && echo 'no nm' || echo 'no master.o')"
 fi
+# spec 9.5 "0 network": the view (#175) opens no socket and runs no program;
+# it forks dch itself for the engine's answers
+if [ -f xview.o ] && command -v nm >/dev/null 2>&1; then
+    xvsym=$(nm xview.o 2>/dev/null |
+        grep -cE ' U _?(socket|connect|exec[lv]p?e?|posix_spawnp?|popen|system)$')
+    check "the X-ray view links no socket or exec call (nm xview.o)" "$xvsym" "0"
+else
+    printf '  skip the X-ray view links no socket or exec call (%s)\n' \
+        "$( [ -f xview.o ] && echo 'no nm' || echo 'no xview.o')"
+fi
 pyrun "xray goldens: chapters, identity, corpus labels, MANIFEST" xray_golden.py
+pyrun "the --xray view: tabs, card, reader, hostile text, signals, picker X" xray_view_test.py
 # xray_cli_test.py's RSS budget: a fork()+exec+wait4 helper, because a child
 # spawned by Python inherits Python's RSS high-water mark on Linux (maxrss.c)
 # shellcheck disable=SC2086 # xcc is a word list

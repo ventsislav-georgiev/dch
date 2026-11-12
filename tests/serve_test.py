@@ -537,6 +537,32 @@ def main():
         check("golden 35-38 and 43: every server-config group ran",
               sum(len(v) for v in groups.values()) == 5 - 2 * (not mirror))
 
+        # --- QA 1.55.0 LOW-5 (#180): TCP keepalive on serve's connections,
+        # so a peer gone with no FIN (its idle --follow holding a session's
+        # subscriber slots) is closed in about 30 s. lsof -T f shows socket
+        # options on macOS; where it does not, the check is skipped.
+        ka = conn(port)
+        send(ka, 0x08, {"proto": "1.0"})
+        frame(ka)
+        try:
+            lo = subprocess.run(["lsof", "-nP", "-iTCP:%d" % port, "-T", "f"],
+                                capture_output=True, text=True,
+                                timeout=20).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            lo = ""
+        side = [ln for ln in lo.splitlines()
+                if "127.0.0.1:%d->" % port in ln]
+        if "SO=" in lo:
+            # lsof prints the keepalive timer in ms (15022 seen for 15 s)
+            ka_ms = [re.search(r"KEEPALIVE=(\d+)", ln) for ln in side]
+            check("LOW-5: serve's end of a connection has SO_KEEPALIVE "
+                  "(15 s idle)", side and all(
+                      m and 14000 <= int(m.group(1)) <= 16000
+                      for m in ka_ms))
+        else:
+            print("  skip LOW-5: lsof shows no socket options here")
+        ka.close()
+
         # --- 0x18 ---------------------------------------------------------
         s = conn(port)
         send(s, 0x08, {"proto": "1.0"})

@@ -12,7 +12,11 @@ masters running tests/fake_codex.c as `codex`, all under a temp HOME:
   - the open seam (8.1): one open per query, the rollout's own inode, the
     lookup's trace; no rollout text in a trace line
   - a malformed line and a truncated last line: the answer still stands
-  - --ref and --clear (the ring is never cleared under a Codex)
+  - --ref and --clear (the ring is never cleared under a Codex); --chapter
+    over the rollout (#169)
+  - --scope project|all (#169): a Codex <n> reads its rollout, then the
+    other sessions' Claude and Codex files; a shell or a Claude <n> reads
+    the live Codex sessions' rollouts too; one seam open each, never a ring
   - --follow: growth (a chapter and a ref delta), shrink (reset shrunk),
     rotation (a new thread: reset rotated, the new id's snapshot), a rollout
     that appears after the follower started, and a shell's follower as a
@@ -31,6 +35,10 @@ DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
 TID = "019a2222-3333-7444-8555-666677778801"
 TID2 = "019a2222-3333-7444-8555-666677778802"
 TID3 = "019a2222-3333-7444-8555-666677778803"
+TIDA = "019a2222-3333-7444-8555-666677778804"
+TIDB = "019a2222-3333-7444-8555-666677778805"
+TIDC = "019a2222-3333-7444-8555-666677778806"
+CLSID = "11111111-2222-4333-8444-555555555590"
 fails = [0]
 
 
@@ -233,22 +241,42 @@ def test_live():
               ls[0]["first"]["project"] == key(proj) and
               any("mention" in x for x in ls) and ls[-1].get("done") is True,
               r.stdout + r.stderr)
-        # #168: the default scope (project) still answers, from the
-        # rollout alone (Codex in the wider scopes is #169)
+        # the default scope (project, #169): the rollout first, then the
+        # store's other Claude and Codex files (none here)
         r = dch("--xray", n, "--ref", "#41", "--json")
         ls = [json.loads(x) for x in r.stdout.splitlines()]
-        check("--ref, the default scope: the rollout alone, scope session",
+        check("--ref, the default scope: scope project, the rollout first",
               r.returncode == 0 and ls and
               ls[0]["first"]["session_id"] == TID and
-              ls[0]["first"]["scope"] == "session" and
+              ls[0]["first"]["scope"] == "project" and
               [x["tally"]["session"] for x in ls if "tally" in x] == [n] and
               ls[-1].get("done") is True, r.stdout + r.stderr)
-        # --chapter has no Codex reader yet (#169): no corpus, never the ring
+        # --chapter (#169): the rollout's chapter reader, one seam open
+        open(trace, "w").close()
         r = dch("--xray", n, "--chapter", o["chapters"][0]["anchor"],
-                "--json")
-        check("--chapter on a live Codex: no x-ray corpus (exit 1)",
-              r.returncode == 1 and r.stdout == "" and
-              r.stderr == "dch: no x-ray corpus\n", (r.stdout, r.stderr))
+                "--json", env=dbg)
+        c = json.loads(r.stdout) if r.returncode == 0 else None
+        tr = open(trace).read()
+        check("--chapter on a live Codex: the turn, its call, the answer",
+              c and c["session"] == n and c["session_id"] == TID and
+              c["anchor"] == o["chapters"][0]["anchor"] and
+              c["kind"] == "prompt" and c["truncated"] is False and
+              c["entries"] == [
+                  {"role": "user", "tool": None,
+                   "text": "fix the parser, see #41", "error": False},
+                  {"role": "tool", "tool": "exec",
+                   "text": "git show 4e5f6a7b8c", "error": False},
+                  {"role": "assistant", "tool": None,
+                   "text": "done, see #41", "error": False}],
+              (r.stdout, r.stderr))
+        check("--chapter on a live Codex: one seam open, the rollout's",
+              tr.count("xray seam: open") == 1 and
+              "xray seam: open ino=%s" % ino in tr, tr)
+        r = dch("--xray", n, "--chapter", "f%s:1" % ino, "--json")
+        check("--chapter on a live Codex: an offset no chapter starts at is "
+              "chapter gone (exit 1)", r.returncode == 1 and
+              r.stdout == "" and r.stderr == "dch: chapter gone\n",
+              (r.stdout, r.stderr))
 
         # a malformed line, then a truncated last line (no newline)
         with open(p, "a") as f:
@@ -286,6 +314,11 @@ def test_live():
         r = dch("--xray", n, "--ref", "#77", "--scope", "session", "--json")
         check("two ids: --ref is no corpus", r.returncode == 1 and
               "no x-ray corpus" in r.stderr, r.stderr)
+        r = dch("--xray", n, "--chapter", o["chapters"][0]["anchor"],
+                "--json")
+        check("two ids: --chapter is no corpus, never the ring",
+              r.returncode == 1 and r.stderr == "dch: no x-ray corpus\n",
+              (r.stdout, r.stderr))
         os.unlink(s2)
 
         # a group-writable snapshot is not trusted (strict)
@@ -336,6 +369,131 @@ def test_relative_home():
               "xray seam:" not in open(trace).read(), (r.stdout, r.stderr))
     finally:
         dch("-k", n)
+
+
+# ---- --scope project|all across Codex and Claude files (#169) ---------------
+
+def history_claude(name, cwd, sid, text, updated):
+    """An ended Claude session: its transcript and its History record."""
+    cfg = os.path.join(HOME, ".claude")
+    pd = os.path.join(cfg, "projects", key(cwd))
+    os.makedirs(pd, exist_ok=True)
+    with open(os.path.join(pd, sid + ".jsonl"), "w") as f:
+        f.write(json.dumps({"type": "user", "message": {
+            "role": "user", "content": text}, "cwd": cwd,
+            "timestamp": ts(1)}) + "\n")
+    sock = os.path.join(T, "dch-%d" % os.getuid())
+    hdir = os.path.join(T, "state", "dch", "sessions", sock.replace("/", "-"))
+    os.makedirs(hdir, mode=0o700, exist_ok=True)
+    p = os.path.join(hdir, name + ".json")
+    with open(p, "w") as f:
+        f.write(json.dumps({
+            "name": name, "cwd": cwd, "end": "exited", "argv": ["claude"],
+            "started": updated - 60, "updated": updated, "ended": updated,
+            "agent": {"session_id": sid, "cwd": cwd, "config_dir": cfg},
+            "sock_dir": sock}) + "\n")
+    os.chmod(p, 0o600)
+
+
+def tallies(r):
+    ls = [json.loads(x) for x in r.stdout.splitlines()] \
+        if r.returncode == 0 else []
+    return ls, [x["tally"]["session"] for x in ls if "tally" in x]
+
+
+def test_scope():
+    proj = os.path.join(T, "scproj")
+    other = os.path.join(T, "scother")
+    now = int(time.time())
+    names = ("xx-a", "xx-b", "xx-c", "xx-s")
+    try:
+        for n, tid, cwd, age in (("xx-a", TIDA, proj, 150),
+                                 ("xx-b", TIDB, proj, 100),
+                                 ("xx-c", TIDC, other, 10)):
+            _, marker = spawn(n, cwd)
+            p = rollout(tid, cwd, user(1, "%s about #61" % n))
+            os.utime(p, (now - age, now - age))
+            snapshot(tid, n, marker)
+        history_claude("xx-h", proj, CLSID, "claude about #61", now - 50)
+        r = dch("--spawn", "xx-s", "--size", "80x24", "--cwd", proj, "sh")
+        check("scope: shell spawned", r.returncode == 0, r.stderr)
+
+        rc, o, err = xray("xx-a", "--json")
+        check("scope: --json other_projects counts the other dir's Codex",
+              rc == 0 and o and o["corpus"] == "codex" and
+              o["other_projects"] == 1, (o, err))
+
+        trace = os.path.join(T, "trace-scope")
+        open(trace, "w").close()
+        r = dch("--xray", "xx-a", "--ref", "#61", "--scope", "project",
+                "--full", "--json", env=dict(ENV, DCH_DEBUG=trace))
+        ls, ts_ = tallies(r)
+        tr = open(trace).read()
+        check("scope project, a Codex <n>: its rollout, then the project's "
+              "Claude and Codex files newest first, not the other dir's, "
+              "never the shell's ring",
+              ts_ == ["xx-a", "xx-h", "xx-b"] and
+              ls[0]["first"]["scope"] == "project" and
+              ls[-1]["counts"]["project_sessions"] == 2 and
+              ls[-1]["counts"]["project"] == 2 and
+              ls[-1]["counts"]["all"] is None and
+              ls[-1]["partial"] is False, r.stdout + r.stderr)
+        check("scope project: other sessions' mentions in full mode, a "
+              "Codex's among them",
+              any(x.get("mention", {}).get("session") == "xx-b" for x in ls),
+              r.stdout)
+        check("scope project: one seam open per file, none refused",
+              tr.count("xray seam: open") == 3 and
+              "xray seam: refused" not in tr, tr)
+
+        r = dch("--xray", "xx-a", "--ref", "#61", "--scope", "all", "--full",
+                "--json")
+        ls, ts_ = tallies(r)
+        check("scope all, a Codex <n>: then the other dir's Codex",
+              ts_ == ["xx-a", "xx-h", "xx-b", "xx-c"] and
+              ls[-1]["counts"]["all_sessions"] == 1 and
+              ls[-1]["counts"]["all"] == 1, r.stdout + r.stderr)
+
+        r = dch("--xray", "xx-a", "--ref", "#61", "--json")
+        ls, ts_ = tallies(r)
+        others = [x for x in ls if "mention" in x and
+                  x["mention"]["session"] != "xx-a"]
+        check("light, a Codex <n>: its rollout first; another session's "
+              "file gives counts only, and its first result stops the scan",
+              r.returncode == 0 and ts_[:1] == ["xx-a"] and not others and
+              (ls[-1]["why"] == "first" and len(ts_) == 2 or
+               ls[-1]["why"] == "budget"), r.stdout + r.stderr)
+
+        r = dch("--xray", "xx-h", "--ref", "#61", "--scope", "project",
+                "--full", "--json")
+        ls, ts_ = tallies(r)
+        check("scope project, a Claude <n>: its transcript, then the live "
+              "Codex sessions' rollouts", ts_ == ["xx-h", "xx-b", "xx-a"],
+              r.stdout + r.stderr)
+
+        rc, so, _ = xray("xx-s", "--json")
+        if so and so["corpus"] == "none":
+            print("  skip shell <n>: no ring corpus (%s)" % so["reason"])
+        else:
+            r = dch("--xray", "xx-s", "--ref", "#61", "--scope", "project",
+                    "--full", "--json")
+            ls, ts_ = tallies(r)
+            check("scope project, a shell <n>: its ring, then the project's "
+                  "Claude and Codex files", ts_ == ["xx-s", "xx-h", "xx-b",
+                                                    "xx-a"],
+                  r.stdout + r.stderr)
+
+        before = files(T)
+        dch("--xray", "xx-a", "--ref", "#61", "--scope", "all", "--full",
+            "--json")
+        dch("--xray", "xx-a", "--chapter", "f0:0", "--json")
+        peers = os.path.join(HOME, ".claude", "sessions") + os.sep
+        new = sorted(p for p in set(files(T)) - set(before)
+                     if not p.startswith(peers))
+        check("scope: nothing written", not new, new)
+    finally:
+        for n in names:
+            dch("-k", n)
 
 
 # ---- --follow --------------------------------------------------------------
@@ -538,6 +696,7 @@ def main():
     try:
         test_live()
         test_relative_home()
+        test_scope()
         test_follow()
         test_follow_agent()
         check("nothing in the Codex dir was ever run", not os.path.exists(RAN))

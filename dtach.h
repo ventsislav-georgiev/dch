@@ -405,6 +405,10 @@ int attach_main(int noerror);
 ** print once the terminal is restored, exiting with *code (remote.h). */
 extern int attach_sock;
 extern const char *(*attach_lost)(int *code);
+/* The in-attach X-ray chord (#187), the detach key then x: the host's view
+** of the attached session, run in a child attach_main forks; its exit code.
+** NULL, or a remote attach: no chord, the bytes go on as before. */
+extern int (*attach_xray)(void);
 
 #include "remote.h"
 void client_pidfile_unlink(void);

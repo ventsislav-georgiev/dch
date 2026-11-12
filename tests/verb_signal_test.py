@@ -455,6 +455,7 @@ def main():
               "`interrupted`, nothing typed (%.1f s)" % secs,
               '"phase":"resuming"' in pre and s1 and busy and rc == 1 and
               len(fin) == 1 and fin[0].get("reason") == "interrupted" and
+              fin[0].get("running") is True and
               secs < 10 and
               not [e for e in events(r1) if e["ev"] == "line" and
                    e["pid"] == s1["pid"]],
@@ -474,6 +475,7 @@ def main():
               "composer empty, nothing sent (%.1f s)" % secs,
               s2 and held and rc == 1 and len(fin) == 1 and
               fin[0].get("reason") == "withdrawn" and secs < 10 and
+              fin[0].get("running") is True and
               until(lambda: not composer(r2, "resume all work"), 3) and
               not [e for e in events(r2) if e["ev"] == "line" and
                    e["pid"] == s2["pid"]],

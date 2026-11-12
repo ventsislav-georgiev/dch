@@ -325,6 +325,8 @@ struct xr_answer
 	const char *project, *project_label;
 	int live, available, mentions_only, complete, chapters_evicted;
 	int snapshot;			/* --follow: {"schema":1,"snapshot":{…}} */
+	struct xr_sent *sent;		/* --follow: xr_print notes there the refs
+					** its cap left out, for xr_sent_take */
 	long long lines;		/* < 0 prints null */
 	long long other_projects;	/* 3.2: counted from names only */
 	const struct xr_chapters *ch;
@@ -342,7 +344,9 @@ void xr_put_str(FILE *f, const char *s);
 struct xr_sent;
 struct xr_sent *xr_sent_new(void);
 void xr_sent_free(struct xr_sent *s);
-/* After a snapshot of a: all of it counts as written. 0, -1 out of memory. */
+/* After a snapshot of a: all of it counts as written, but for the refs its
+** cap left out (a->sent): those stay out of the deltas until the next
+** snapshot (QA 1.52.0 LOW-9). 0, -1 out of memory. */
 int xr_sent_take(struct xr_sent *s, const struct xr_answer *a);
 /* The diff of a against what was written, held for xr_delta_write: *nref,
 ** the ref keys new, changed or gone; *lost, a written chapter gone whose

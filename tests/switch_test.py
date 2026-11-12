@@ -8,7 +8,8 @@ Covers, in order:
   3. one tap detaches even while the session floods output — the window is a
      deadline, not an idle timeout, or a chatty program would hold it open
      forever and the press would never land;
-  4. typing something else inside the window commits the detach;
+  4. typing something else inside the window commits the detach (x there
+     is the X-ray chord, #187);
   5. DCH_DOUBLE_TAP_MS=0 turns the shortcut off and detach is instant;
   6. detach_key = switch (#082) swaps them: one press opens the picker, two
      detach; with DCH_DOUBLE_TAP_MS=0 one press opens the picker at once;
@@ -181,12 +182,13 @@ def main():
             return fail("single tap did not detach a chatty session")
         pid = None
 
-        # 4. Any other key inside the window commits the detach.
+        # 4. Any other key inside the window commits the detach (not x:
+        # that is the X-ray chord, #187, xray_view_test.py).
         pid, fd = spawn_client(["-f", "-n", B])
         drain(fd, 10.0, b"BBB_BRAVO")
         os.write(fd, DETACH)
         time.sleep(0.02)
-        os.write(fd, b"x")
+        os.write(fd, b"y")
         if reap(pid, fd, 5.0) is None:
             return fail("a key inside the window did not commit the detach")
         pid = None

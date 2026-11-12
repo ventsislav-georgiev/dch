@@ -93,7 +93,6 @@
 #define DEV_CAP 128
 #define MAX_ALLOW 16
 #define MAX_CMD 256
-#define CTL_MS 60000		/* a ctl's timeout (#114) */
 #define CTL_LONG_MS 660000	/* --say, --stop, --revive, --run: dch
 				** waits up to 600 s for an agent itself */
 #define CTL_CAP (8u << 20)	/* a ctl's stdout and stderr together */
@@ -2338,6 +2337,10 @@ accept_one(int lfd, int nr)
 	if (fd < 0)
 		return;
 	cloexec(fd);
+	/* a peer gone with no FIN (asleep, off the network): its read fails
+	** in about 30 s, and its ctl (an idle --follow holding a subscriber
+	** slot) is stopped (QA 1.55.0 LOW-5) */
+	keepalive(fd);
 	if (sa.sin_family != AF_INET)
 	{
 		close(fd);

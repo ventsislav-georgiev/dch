@@ -147,7 +147,13 @@ static pid_t xagent;		/* the agent pid capture is paused for */
 ** 1.52.0): its start or exit reaches --follow in about a second, not on
 ** the record tick. No follower, no probe. */
 #define XRAY_AGENT_MS 1000L
-static struct timespec xagent_at;	/* last probe for a follower */
+/* A ring or screen read probes too (QA 1.54.0 MED-2): when the mirror
+** changed since the last probe, else at most this often. A probe reads
+** every Claude session record on the machine, about 0.2 ms each, and a
+** follower's batch is a ring read and a screen read. */
+#define XRAY_READ_MS 100L
+static struct timespec xagent_at;	/* last probe */
+static unsigned long xagent_gen;	/* the mirror's gen at the last probe */
 static struct rlimit core_orig;	/* RLIMIT_CORE before core_off() */
 static int core_saved;
 static void xray_agent(pid_t agent);
@@ -616,9 +622,9 @@ rec_stopped(void)
 /* The agent under the child, for the record and the X-ray ring. It sticks
 ** while its claude's session file is still there: a claude killed under a
 ** shell (out of memory) leaves it, so a revive still brings it back; one
-** that quit cleanly removed it. Runs on the record tick, and every
-** XRAY_AGENT_MS while a follower is subscribed. 1 when dch --stop left its
-** agent (that one stands). */
+** that quit cleanly removed it. Runs on the record tick, every
+** XRAY_AGENT_MS while a follower is subscribed and before an X-ray read
+** (xray_probe). 1 when dch --stop left its agent (that one stands). */
 static int
 rec_probe(void)
 {
@@ -645,6 +651,27 @@ rec_probe(void)
 	           : rec_ag.pid > 0 && kill(rec_ag.pid, 0) == 0 ? rec_ag.pid
 	           : (pid_t)dch_codex_below(the_pty.pid));
 	return stopped;
+}
+
+/* The agent probe, unless one ran in the last ms (with onchange: and the
+** mirror is unchanged since). A ring read and a screen read probe with
+** onchange, so the pause is current for what they answer: an agent's TUI
+** enters no shell answer, nor a follower's (it reads on its wake).
+** shortcut: what a Claude paints before it writes its session record is
+** not seen as an agent's, and enters answers until the first probe after
+** the record (XRAY_READ_MS at most); lower it if that matters. */
+static void
+xray_probe(long ms, int onchange)
+{
+	int c, r;
+	unsigned long g = xagent_gen;
+
+	(void)dch_vt_size(&c, &r, &g);
+	if (ms_since(&xagent_at) < ms && (!onchange || g == xagent_gen))
+		return;
+	(void)rec_probe();
+	xagent_gen = g;
+	clock_gettime(CLOCK_MONOTONIC, &xagent_at);
 }
 
 /* Rebuild the record from the live session and write it. Once dch --stop
@@ -1938,12 +1965,13 @@ core_off(void)
 
 /* An agent in the shell pauses capture (its corpus is its transcript), the
 ** shell's next prompt (vt.c) or the agent's exit resumes it (§11.10). Runs
-** on the history record's refresh tick, and every XRAY_AGENT_MS while a
-** follower is subscribed. Ring or no ring, a change wakes the followers:
-** theirs is a reset (with the ring off, S_PAUSED still says an agent runs).
+** on the history record's refresh tick, every XRAY_AGENT_MS while a
+** follower is subscribed and before an X-ray read (xray_probe). Ring or no
+** ring, a change wakes the followers: theirs is a reset (with the ring off,
+** S_PAUSED still says an agent runs).
 ** shortcut: agent output before the first probe after its start (rec_ms,
-** 60 s, with no follower) is captured; hook dch_agent_probe into the pty
-** batch if it matters. */
+** 60 s, with no follower and no read) is captured; hook dch_agent_probe
+** into the pty batch if it matters. */
 static void
 xray_agent(pid_t agent)
 {
@@ -2079,6 +2107,7 @@ do_ring_read(struct client *p, const unsigned char *payload, unsigned int len)
 		max = DCH_RING_READ_MAX;
 	if (p->outlen - p->outoff + max + DCH_RING_HDR_LEN + 4096 > OUT_CAP)
 		return queue_status(p, MSG_READ_END, DCH_ST_BUSY);
+	xray_probe(XRAY_READ_MS, 1);	/* S_PAUSED current, before p->xgen */
 	if (len > 12 && (payload[12] & DCH_RING_F_SUB) && !p->xsub)
 	{
 		if (n_xsubs >= DCH_RING_SUBS)
@@ -2494,7 +2523,9 @@ do_read(struct client *p, const unsigned char *payload, unsigned int len)
 		return queue_status(p, MSG_READ_END, DCH_ST_ERR);
 	flags = q.flags;
 	/* never the alt buffer, nor an agent's TUI while capture is paused
-	** (#140): decided in the servicing that renders */
+	** (#140): decided in the servicing that renders, on a fresh probe */
+	if (flags & DCH_READ_F_PRIMARY)
+		xray_probe(XRAY_READ_MS, 1);
 	if ((flags & DCH_READ_F_PRIMARY) &&
 	    (dch_vt_alt() || dch_vt_capture_paused()))
 		return queue_status(p, MSG_READ_END, DCH_ST_ALT);
@@ -4440,11 +4471,8 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 		if (rec_ms - ms_since(&rec_at) < wait_ms)
 			wait_ms = rec_ms - ms_since(&rec_at);
 		/* A follower's agent probe, before its wake below. */
-		if (n_xsubs && ms_since(&xagent_at) >= XRAY_AGENT_MS)
-		{
-			(void)rec_probe();
-			clock_gettime(CLOCK_MONOTONIC, &xagent_at);
-		}
+		if (n_xsubs)
+			xray_probe(XRAY_AGENT_MS, 0);
 		if (n_xsubs && XRAY_AGENT_MS - ms_since(&xagent_at) < wait_ms)
 			wait_ms = XRAY_AGENT_MS - ms_since(&xagent_at);
 		/* The auto-allow check (#074), due after quiet output. */

@@ -96,6 +96,8 @@ int rf_run(char *const argv[], char **out, size_t *outn, size_t cap,
 ** or -1 with why in why[cap]. Pure. */
 #define CTL_CREATE 1		/* needs "create" in ops (--allow-create) */
 #define CTL_LONG 2		/* the 660 s timeout, not 60 s */
+#define CTL_MS 60000		/* a ctl's timeout (#114); a client waits on a
+				** silent host this long and RM_ATTACH_MS */
 #define CTL_FOREVER 4		/* no timeout (--follow) */
 #define CTL_NOCAP 32		/* no output cap (--xray --follow, 4.4) */
 #define CTL_ARGV_MAX 1024

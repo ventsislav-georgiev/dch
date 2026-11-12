@@ -1054,19 +1054,26 @@ def test_two_claudes():
                        timeout=30, env=env)
     check("two claudes: spawned", r.returncode == 0, r.stderr)
     try:
+        if dch("--read", n).returncode == 3:
+            print("  skip two claudes: dch-lite keeps no ring")
+            return
         wait_for(lambda: len([f for f in os.listdir(sdir) if f not in had
                               and f.endswith(".json")]) >= 2
                  if os.path.isdir(sdir) else None, 10)
-        _, o0, _ = xray(n, "--json")
+        _, r0 = X.read_all(n, 0)
         rc, c, err = xray(n, "--clear", "--json")
         check("two claudes: --clear says ring_cleared false",
               rc == 0 and c and c["ring_cleared"] is False, (rc, c, err))
+        h, r1 = X.read_all(n, 0)
+        # at least seq's rows that scrolled off the 24-row pane
+        check("two claudes: the ring keeps its rows",
+              len(r1) == len(r0) and len(r1) >= 276, (len(r0), len(r1)))
+        # the read probes for the agent (QA 1.54.0 MED-2): paused, so the
+        # client, which maps no one Claude here, answers no shell corpus
         _, o, _ = xray(n, "--json")
-        # lines counts the rows read (#140): at least seq's rows that
-        # scrolled off the 24-row pane, whatever the screen holds now
-        check("two claudes: the ring keeps its lines",
-              o0 and o and o["lines"] == o0["lines"] and o["lines"] >= 276,
-              (o0 and o0.get("lines"), o and o.get("lines")))
+        check("two claudes: the ring reads paused, no shell answer",
+              h["status"] & X.S_PAUSED and o and o["corpus"] == "none",
+              (h, o))
     finally:
         dch("-k", n)
 
@@ -1551,7 +1558,7 @@ def test_chapter():
               r.stderr == "dch: bad usage: %s\n" % msg and not r.stdout,
               (r.returncode, r.stderr))
     for a, e in ((["--chapter", "s1"], "dch: bad usage: --json is required "
-                  "(the --xray view comes later)\n"),
+                  "(the --xray view takes no flag)\n"),
                  (["--chapter"], "dch: bad usage: --chapter needs a value\n"),
                  (["--chapter", "s1", "--chapter", "s2", "--json"],
                   "dch: bad usage: --chapter twice\n"),
@@ -1960,6 +1967,29 @@ def test_follow_claude():
               [c["title"] for c in s[0]["snapshot"]["chapters"]] ==
               ["replaced ask #15"], fl.objs(k4))
 
+        # QA 1.52.0 LOW-6: a /clear whose new transcript appears before the
+        # record names it, the record then rewritten in place (no dir event)
+        time.sleep(0.4)
+        k4 = len(fl.got)
+        sid3 = "33333333-4444-4555-8666-77777777777c"
+        with open(os.path.join(pdir, sid3 + ".jsonl"), "w") as f:
+            f.write(json.dumps({"type": "user", "cwd": proj, "message": {
+                "content": "cleared ask #16"}}) + "\n")
+        time.sleep(0.5)
+        early = fl.objs(k4)
+        r0 = json.load(open(rp))
+        r0["sessionId"] = sid3
+        with open(rp, "w") as f:
+            f.write(json.dumps(r0))
+        s = fl.wait(lambda o: "snapshot" in o, frm=k4)
+        check("follow: a new transcript before its record, the record "
+              "rewritten in place, sends reset rotated, then its snapshot",
+              not early and s and
+              fl.objs(k4)[0] == {"schema": 1, "reset": {"why": "rotated"}} and
+              s[0]["snapshot"]["session_id"] == sid3 and
+              [c["title"] for c in s[0]["snapshot"]["chapters"]] ==
+              ["cleared ask #16"], (early, fl.objs(k4)))
+
         # the reader leaves: exit 0 at once, idle
         rd, wr = os.pipe()
         p = subprocess.Popen([DCH, "--xray", n, "--follow", "--json"],
@@ -2011,11 +2041,169 @@ def test_follow_claude():
         dch("-k", n)
 
 
+def test_follow_late():
+    """QA 1.52.0: a project dir made after the follow started is watched
+    (LOW-6); time blocked on a stalled reader is no build time (LOW-8)."""
+    n = "xc-fl2"
+    bindir = os.path.join(T, "bin")
+    fdir = os.path.join(T, "fake")
+    proj = os.path.join(T, "fproj-late")
+    for d in (bindir, fdir, proj):
+        os.makedirs(d, exist_ok=True)
+    shutil.copy(os.path.join(HERE, "fake_claude.py"),
+                os.path.join(bindir, "claude"))
+    os.chmod(os.path.join(bindir, "claude"), 0o755)
+    env = dict(ENV, PATH=bindir + ":" + ENV.get("PATH", "/usr/bin:/bin"),
+               FAKE_CLAUDE_DIR=fdir)
+    sdir = os.path.join(HOME, ".claude", "sessions")
+    had = set(os.listdir(sdir)) if os.path.isdir(sdir) else set()
+    r = subprocess.run([DCH, "--spawn", n, "--size", "80x24", "--cwd", proj,
+                        "claude"], capture_output=True, text=True, timeout=30,
+                       env=env)
+    check("follow late: claude spawned", r.returncode == 0, r.stderr)
+    trace = os.path.join(T, "trace-follow-late")
+    open(trace, "w").close()
+    dbg = dict(ENV, DCH_DEBUG=trace)
+    fl = p = None
+    try:
+        rec = wait_for(lambda: [f for f in os.listdir(sdir)
+                                if f.endswith(".json") and f not in had]
+                       if os.path.isdir(sdir) else None, 10)
+        sid = json.load(open(os.path.join(sdir, rec[0])))["sessionId"]
+        # the dir dch watches: the key of Claude's cwd, as its record has it
+        pdir = os.path.join(HOME, ".claude", "projects",
+                            key(os.path.realpath(proj)))
+        tp = os.path.join(pdir, sid + ".jsonl")
+
+        def put(objs, mode="a"):
+            with open(tp, mode) as f:
+                f.write("".join(json.dumps(o) + "\n" for o in objs))
+
+        # LOW-6: no project dir yet; it is made, its first file 0.5 s later
+        fl = Follow(n, dbg)
+        snap = fl.wait(lambda o: "snapshot" in o)
+        check("follow late: no transcript, no project dir: a corpus none "
+              "snapshot", snap and snap[0]["snapshot"]["corpus"] == "none" and
+              not os.path.isdir(pdir), fl.objs())
+        k0 = len(fl.got)
+        os.makedirs(pdir)
+        time.sleep(0.5)
+        put([{"type": "user", "cwd": proj, "message": {
+            "content": "late dir ask #21"}}], "w")
+        s = fl.wait(lambda o: "snapshot" in o, frm=k0)
+        check("follow late: a file in a project dir made after the follow "
+              "started sends reset rotated, then its snapshot", s and
+              fl.objs(k0)[0] == {"schema": 1, "reset": {"why": "rotated"}} and
+              [c["title"] for c in s[0]["snapshot"]["chapters"]] ==
+              ["late dir ask #21"], fl.objs(k0))
+        fl.stop()
+
+        # LOW-8: a batch stalled 3 s on a full pipe, then a small one: its
+        # deadline is the 250 ms spacing, not twice the stall
+        p = subprocess.Popen([DCH, "--xray", n, "--follow", "--json"],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             env=dbg)
+        first = p.stdout.readline()
+        # 1200 ref lines (120 a line: under the 128 spans of a line)
+        put([{"type": "assistant", "message": {"content": [
+            {"type": "text", "text": " ".join("#%d" % (1000 + 120 * j + i)
+                                              for i in range(120))}]}}
+             for j in range(10)])
+        time.sleep(3.0)
+        got = []
+        th = threading.Thread(target=lambda: got.extend(p.stdout),
+                              daemon=True)
+        th.start()
+        wait_for(lambda: '"issue:#2199"'.encode() in b"".join(got), 15)
+        wait_for(lambda: "xray follow: batch" in open(trace).read(), 5)
+        off = os.path.getsize(trace)
+        put([{"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "see #99"}]}}])
+        wait_for(lambda: b'"issue:#99"' in b"".join(got), 15)
+        dl = [int(m) for m in re.findall(r"xray follow: deadline (\d+) ms",
+                                         trace_from(trace, off))]
+        check("follow late: after a 3 s stall on the reader, the next "
+              "deadline is the batch spacing (%s ms, < 1500)" % dl,
+              b'"snapshot"' in first and len(got) > 1000 and
+              b'"issue:#99"' in b"".join(got) and
+              all(d < 1500 for d in dl), (len(got), dl))
+    finally:
+        if fl:
+            fl.stop()
+        if p and p.poll() is None:
+            p.terminate()
+            p.wait(5)
+        dch("-k", n)
+
+
+def test_follow_stale():
+    """QA 1.52.0 LOW-7 (Prosper's ruling A): a shell follower that leaves a
+    wake unanswered 3 s loses its slot to a fifth; when it reads again and no
+    slot is free it exits 1 with `dch: busy` and writes nothing more."""
+    import signal
+    n = "xc-fst"
+    with open(ENV["DCH_CONFIG"], "w") as f:
+        f.write("xray_ring = 64K\n")
+    prog = ("while :; do printf '\\033]133;A\\007$ \\033]133;B\\007'; "
+            "read -r cmd || exit; printf '\\033]133;C\\007'; eval \"$cmd\"; "
+            "printf '\\033]133;D;0\\007'; done")
+    cwd = os.path.join(T, "fst proj")
+    os.makedirs(cwd, exist_ok=True)
+    fls, stopped = [], None
+    try:
+        r = dch("--spawn", n, "--size", "80x24", "--cwd", cwd, "sh", "-c",
+                prog)
+        check("follow stale: spawned", r.returncode == 0, r.stderr)
+        _, o, _ = xray(n, "--json")
+        if (o or {}).get("reason") == "lite":
+            # dch-lite keeps no ring: no wake, so nothing to leave unanswered
+            check("follow stale: lite, corpus none (no ring to subscribe)",
+                  o["corpus"] == "none", o)
+            return
+        wait_for(lambda: "$" in screen(n), 5)
+        dch("--send", n, "echo 'see o/r#51'\n")
+        wait_for(lambda: "see o/r#51" in screen(n), 5)
+        for _ in range(4):
+            fls.append(Follow(n))
+        ok = all(f.wait(lambda o: "snapshot" in o) for f in fls)
+        time.sleep(0.5)
+        stale = fls[3]
+        k = len(stale.got)
+        os.kill(stale.p.pid, signal.SIGSTOP)	# our own child: a paused reader
+        stopped = stale
+        dch("--send", n, "echo 'more o/r#52'\n")	# a wake it leaves unanswered
+        time.sleep(3.5)
+        fifth = Follow(n)
+        fls.append(fifth)
+        took = fifth.wait(lambda o: "snapshot" in o)
+        os.kill(stale.p.pid, signal.SIGCONT)
+        stopped = None
+        try:
+            rc = stale.p.wait(10)
+        except subprocess.TimeoutExpired:
+            rc = None
+        stale.th.join(5)
+        err = stale.p.stderr.read() if rc is not None else None
+        check("follow stale: the stalled follower, its slot taken by a "
+              "fifth, exits 1 with dch: busy and no further line",
+              ok and took and rc == 1 and err == b"dch: busy\n" and
+              len(stale.got) == k, (ok, bool(took), rc, err,
+                                    stale.objs(k)))
+        fls.remove(stale)
+    finally:
+        if stopped:
+            os.kill(stopped.p.pid, signal.SIGCONT)
+        for f in fls:
+            f.stop()
+        dch("-k", n)
+
+
 def test_follow_agent(off=False):
     """A shell's follower across an agent's start and exit, on the default
     60 s record tick: while a follower is subscribed the master probes for
     an agent every second and wakes it on a change, ring or no ring. The
-    start: reset rotated, then a snapshot of corpus claude. The exit, on an
+    start: reset rotated, then a snapshot of corpus claude (one of corpus
+    none may come first, while the transcript is not written). The exit, on an
     idle shell (no row pushed): reset rotated, then a snapshot of corpus
     shell (none with xray_ring 0). Each within 10 s: the probe is 1 s,
     the bound leaves room for a loaded runner."""
@@ -2059,20 +2247,31 @@ def test_follow_agent(off=False):
                        if os.path.isdir(sdir) else None, 10)
         if rec:
             sid = json.load(open(os.path.join(sdir, rec[0])))["sessionId"]
-            pdir = os.path.join(HOME, ".claude", "projects", key(proj))
+            # the key of the real path, as Claude Code names it and as the
+            # follower watches for a transcript that is not there yet
+            pdir = os.path.join(HOME, ".claude", "projects",
+                                key(os.path.realpath(proj)))
             os.makedirs(pdir, exist_ok=True)
             with open(os.path.join(pdir, sid + ".jsonl"), "w") as f:
                 f.write(json.dumps({"type": "user", "cwd": proj, "message": {
                     "content": "ask #11"}}) + "\n")
 
-        def rotated_then(k0):
+        def rotated_then(k0, want):
+            # the object after a reset rotated. A snapshot of corpus none
+            # on the way to `want` is passed over: the probe can see the
+            # Claude before its transcript is on disk (written above, after
+            # its session record), and a second reset rotated follows
             ob = fl.objs(k0)
-            i = next((j for j, o in enumerate(ob)
-                      if is_reset("rotated")(o)), None)
-            return ob[i + 1] if i is not None and i + 1 < len(ob) else None
-        wait_for(lambda: rotated_then(k0), 15)
+            for j, o in enumerate(ob[:-1]):
+                nx = ob[j + 1]
+                if is_reset("rotated")(o) and (
+                        want == "none" or "snapshot" not in nx or
+                        nx["snapshot"]["corpus"] != "none"):
+                    return nx
+            return None
+        wait_for(lambda: rotated_then(k0, "claude"), 15)
         secs = time.time() - t0
-        nxt = rotated_then(k0)
+        nxt = rotated_then(k0, "claude")
         check(tag + "the agent's start sends reset rotated, then a "
               "snapshot of corpus claude (%.1f s)" % secs,
               nxt is not None and "snapshot" in nxt and
@@ -2081,9 +2280,9 @@ def test_follow_agent(off=False):
         k1 = len(fl.got)
         t1 = time.time()
         dch("--send", n, "/exit\r", env=env)
-        wait_for(lambda: rotated_then(k1), 15)
+        wait_for(lambda: rotated_then(k1, base), 15)
         secs = time.time() - t1
-        nxt = rotated_then(k1)
+        nxt = rotated_then(k1, base)
         check(tag + "the agent's exit on an idle shell sends reset "
               "rotated, then a snapshot of corpus %s (%.1f s)" % (base, secs),
               nxt is not None and "snapshot" in nxt and
@@ -2098,6 +2297,80 @@ def test_follow_agent(off=False):
             rc = fl.stop()
             check(tag + "the session's end exits 0", rc == 0,
                   (rc, fl.p.stderr.read() if fl.p.stderr else ""))
+
+def test_screen_agent():
+    """QA 1.54.0 MED-2: an agent's TUI, on the primary screen, never enters
+    a shell answer, on the default 60 s record tick. The master probes for
+    an agent before it answers a ring or a screen read. A follower: no ref
+    from the TUI, then off corpus shell. A one-shot --ref with no follower:
+    no count, both for a Claude the client maps itself and for one it
+    cannot (a sessionId that is no UUID), where the master's pause alone
+    keeps the TUI out."""
+    bindir = os.path.join(T, "bin-sa")
+    fdir = os.path.join(T, "fake-sa")
+    for d in (bindir, fdir):
+        os.makedirs(d, exist_ok=True)
+    shutil.copy(os.path.join(HERE, "fake_claude.py"),
+                os.path.join(bindir, "claude"))
+    os.chmod(os.path.join(bindir, "claude"), 0o755)
+    env = dict(ENV, PATH=bindir + ":" + ENV.get("PATH", "/usr/bin:/bin"),
+               FAKE_CLAUDE_DIR=fdir)
+    env.pop("DCH_RECORD_MS", None)
+
+    def start(n):
+        with open(os.path.join(fdir, n + ".ctl"), "w") as f:
+            json.dump({"above": ["see q/z#909 in the agent TUI"]}, f)
+        r = dch("--spawn", n, "--size", "80x24", "sh", env=env)
+        check("screen agent: %s spawned" % n, r.returncode == 0, r.stderr)
+        wait_for(lambda: "$" in screen(n) or "#" in screen(n), 5)
+
+    fl = None
+    names = ["xc-saf", "xc-sao", "xc-sau"]
+    try:
+        n = names[0]
+        start(n)
+        if dch("--read", n).returncode == 3:
+            print("  skip screen agent: dch-lite reads no screen")
+            return
+        fl = Follow(n, env=env)
+        s0 = fl.wait(lambda o: "snapshot" in o)
+        check("screen agent: the follower starts on corpus shell",
+              s0 and s0[0]["snapshot"]["corpus"] == "shell", fl.objs())
+        k0 = len(fl.got)
+        dch("--send", n, "claude\r", env=env)
+        up = wait_for(lambda: "q/z#909" in screen(n), 10)
+        # no transcript here: the agent's corpus is claude or none
+        snap = fl.wait(lambda o: "snapshot" in o and
+                       o["snapshot"]["corpus"] != "shell", 10, frm=k0)
+        time.sleep(0.5)
+        leak = [o for o in fl.objs(k0) if "q/z#909" in json.dumps(o)]
+        check("screen agent: the follower emits nothing from the agent's TUI",
+              up and not leak, (bool(up), leak))
+        check("screen agent: ... and leaves corpus shell", snap,
+              fl.objs(k0))
+
+        for n, cmd, what in ((names[1], "claude\r", "a Claude the client "
+                              "maps"),
+                             (names[2], "claude --resume not-a-uuid\r",
+                              "a Claude with no UUID sessionId")):
+            start(n)
+            dch("--send", n, cmd, env=env)
+            up = wait_for(lambda: "q/z#909" in screen(n), 10)
+            r = dch("--xray", n, "--ref", "q/z#909", "--scope", "session",
+                    "--full", "--json", env=env)
+            ls = ref_lines(r.stdout) or []
+            leak = [l for l in ls if "mention" in l or
+                    l.get("tally", {}).get("count")]
+            check("screen agent: a one-shot --ref, %s: no mention, no count "
+                  "(no corpus, or count 0)" % what, up and not leak and
+                  (r.returncode == 0 or "no x-ray corpus" in r.stderr),
+                  (bool(up), r.returncode, r.stdout[-600:], r.stderr))
+    finally:
+        for n in names:
+            dch("-k", n)
+        if fl:
+            fl.stop()
+
 
 def test_follow_history():
     cfg = os.path.join(HOME, ".claude")
@@ -2694,6 +2967,30 @@ def test_scope():
     rc, ls, opens, order, err = ref("#931", "--scope", "session", "--full")
     check("scope: session stops after <n> (1 open)",
           rc == 0 and order == ["s0"] and opens == 1, (order, opens))
+    # #176: --full's resolved line comes right after <n>'s own file, before
+    # the other sessions are read, so a capped or timed-out wide read keeps
+    # it (s0's cwd is absolute: /etc/hosts is outside_project, nothing read)
+    for sc, rest in (("project", ["s2", "s1"]), ("all", ["s2", "s1", "s3"])):
+        for caps, why in ((None, None), ("1", "files"), ("0:0:1", "time")):
+            rc, ls, opens, order, err = ref(
+                "/etc/hosts:1", "--scope", sc, "--full",
+                env=dict(dbg, DCH_XRAY_CAPS=caps) if caps else dbg)
+            seq = ["resolved" if "resolved" in l else
+                   "done" if l.get("done") else l["tally"]["session"]
+                   for l in ls if "resolved" in l or "done" in l or
+                   "tally" in l]
+            rv = [l["resolved"]["state"] for l in ls if "resolved" in l]
+            d = ls[-1]
+            check("resolved order, --scope %s, %s: right after s0's tally, "
+                  "before the others; done last%s" % (
+                      sc, "no cap" if not caps else "capped (%s)" % why,
+                      ", partial" if caps else ""),
+                  rc == 0 and rv == ["outside_project"] and
+                  seq[:2] == ["s0", "resolved"] and seq[-1] == "done" and
+                  (seq[2:-1] == rest if not caps else
+                   why == "time" or seq[2:-1] == []) and
+                  d.get("partial") == bool(caps) and d.get("why") == why,
+                  (rc, seq, d, err))
     rc, o, err = xray("s0", "--json", env=env)
     check("scope: other_projects counts the mapped session in the other "
           "dir, from names only", rc == 0 and o and o["other_projects"] == 1,
@@ -2789,10 +3086,13 @@ def main():
         test_shell_caps()
         test_follow_history()
         test_follow_claude()
+        test_follow_late()
         test_follow_cap()
         test_follow_shell()
+        test_follow_stale()
         test_follow_agent()
         test_follow_agent(off=True)
+        test_screen_agent()
         test_screen()
         test_ref_shell_caps()
         test_ref_shell_tick()

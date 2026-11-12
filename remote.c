@@ -656,9 +656,10 @@ obj_safe(const struct json_parser *jp, int o)
 }
 
 /* Object token o as a strict JSON reader takes it (#167): no lone
-** surrogate escape, no number past a double's range, nothing nested over
-** 64 tokens deep (a key counts). Python, serde_json and the like reject a
-** whole --history --json --remote over one such record. Pure. */
+** surrogate escape, no number past a double's range, no object or array
+** nested over 64 deep in it (keys do not count, QA 1.55.0 NIT-8: serde_json
+** takes 128). Python, serde_json and the like reject a whole --history
+** --json --remote over one such record. Pure. */
 static int
 hist_strict(const struct json_parser *jp, int o)
 {
@@ -673,8 +674,9 @@ hist_strict(const struct json_parser *jp, int o)
 		n = jp->tok[t].end - jp->tok[t].start;
 		if (jp->tok[t].kind == JSON_OBJECT || jp->tok[t].kind == JSON_ARRAY)
 		{
-			for (q = t, d = 0; q != o && d <= 64; d++)
-				q = jp->tok[q].parent;
+			for (q = t, d = 0; q != o && d <= 64; q = jp->tok[q].parent)
+				d += jp->tok[q].kind == JSON_OBJECT ||
+				     jp->tok[q].kind == JSON_ARRAY;
 			if (d > 64)
 				return 0;
 		}
@@ -710,21 +712,56 @@ hist_strict(const struct json_parser *jp, int o)
 	return 1;
 }
 
-/* A key hist_from reads, given twice in record o: text and the picker
-** would show it empty, a JSON reader the last value (#167). Pure. */
+struct hkey
+{
+	int par;		/* its object's token */
+	const char *s;		/* the key, decoded */
+};
+
+static int
+hkey_cmp(const void *a, const void *b)
+{
+	const struct hkey *x = a, *y = b;
+
+	return x->par != y->par ? (x->par < y->par ? -1 : 1) : strcmp(x->s, y->s);
+}
+
+/* A key given twice in one object of record o, by its decoded text: text
+** and the picker would show a read one empty, a JSON reader the last value
+** (#167), and a reader that refuses duplicates the whole document over any
+** (QA 1.55.0 NIT-9). 1 too when out of memory. Pure. */
 static int
 hist_dup(const struct json_parser *jp, int o)
 {
-	static const char *const k[] = {"file", "alias", "end", "cwd", "argv",
-	                                "agent", "ended", "updated", "pinned",
-	                                "session_id", "name"};
-	int a = jcont(jp, o, "agent", JSON_OBJECT), i;
+	int cap = jp->tok[o].next - o, n = 0, t, dup = 0;
+	size_t at = 0, k;
+	struct hkey *v = malloc((size_t)cap * sizeof *v);
+	/* each key decoded is no longer than as written, plus its NUL */
+	char *b = malloc((size_t)(jp->tok[o].end - jp->tok[o].start) +
+	                 (size_t)cap);
 
-	for (i = 0; i < 11; i++)
-		if ((i < 9 || a >= 0) &&
-		    dch_json_field(jp, i < 9 ? o : a, k[i]) == -2)
-			return 1;
-	return 0;
+	for (t = o + 1; v && b && !dup && t < jp->tok[o].next; t++)
+	{
+		if (jp->tok[t].kind != JSON_STRING ||
+		    jp->tok[jp->tok[t].parent].kind != JSON_OBJECT)
+			continue;	/* a value, not a key */
+		k = (size_t)(jp->tok[t].end - jp->tok[t].start) + 1;
+		dup = dch_json_decode(jp, t, b + at, k) < 0;
+		v[n].par = jp->tok[t].parent;
+		v[n++].s = b + at;
+		at += k;
+	}
+	if (!v || !b)
+		dup = 1;
+	else if (!dup && n > 1)
+	{
+		qsort(v, (size_t)n, sizeof *v, hkey_cmp);
+		for (t = 1; t < n && !dup; t++)
+			dup = !hkey_cmp(&v[t - 1], &v[t]);
+	}
+	free(v);
+	free(b);
+	return dup;
 }
 
 /* The records of array token arr, host's --history --json answered at at:
@@ -1088,7 +1125,7 @@ static int hello_op(const char *js, const char *op);
 static void ctl_payload(struct sb *b, int argc, char **argv, const char *cwd);
 static int ctl_in(struct rf_state *rs, struct sb *tin, struct sb *out,
                   struct sb *err, int *xit, char *why, size_t wcap, char *msg,
-                  size_t cap, int *code);
+                  size_t cap, int *code, int split);
 
 /* Every probe's sa, its address when it is an IPv4 literal: how many are
 ** names, not literals. */
@@ -1355,7 +1392,7 @@ hist_in(struct probe *p)
 	char why[100] = "", msg[300] = "";
 	int xit = 1, code = 1;
 	int r = ctl_in(&p->rs, &p->in, &p->hout, &p->herr, &xit, why,
-	               sizeof why, msg, sizeof msg, &code);
+	               sizeof why, msg, sizeof msg, &code, 0);
 
 	p->herr.n = 0;		/* its stderr: not ours to show */
 	if (p->hout.bad || p->herr.bad || p->hout.n > RM_HIST_MAX)
@@ -2389,8 +2426,9 @@ remote_lost(int *code)
 #endif
 
 /* TCP keepalive, so a link that died silently ends the attach in about
-** half a minute rather than never. */
-static void
+** half a minute rather than never; dch serve's connections too, so a dead
+** peer's idle --follow lets its session's slots go (QA 1.55.0 LOW-5). */
+void
 keepalive(int fd)
 {
 	int on = 1, idle = 15, intvl = 5, cnt = 3;
@@ -2842,19 +2880,31 @@ hello_op(const char *js, const char *op)
 ** msg[cap] and what its code makes the exit status into *code (err_text: 1
 ** uncoded). What it parsed leaves tin. 1 once the ctl is over (a 0x33 or a
 ** 0x13), 0 for more, -1 when the link must end (a frame over the limit).
-** Pure. */
+** With split, 2 when output of the other stream is next, left in tin: the
+** caller takes what came so far, then calls again (the host's order of
+** stdout and stderr kept, QA 1.55.0 NIT-4). Pure. */
 static int
 ctl_in(struct rf_state *rs, struct sb *tin, struct sb *out, struct sb *err,
-       int *xit, char *why, size_t wcap, char *msg, size_t cap, int *code)
+       int *xit, char *why, size_t wcap, char *msg, size_t cap, int *code,
+       int split)
 {
+	struct rf_state was = *rs;
 	struct rf_frame f;
 	size_t off = 0, used;
-	int r, rc = 0;
+	int r, rc = 0, last = 0;
 
 	while (!rc && (r = rf_parse(rs, (const unsigned char *)tin->p + off,
 	                            tin->n - off, (size_t)-1, &f, &used))
 	       != RF_NEED)
 	{
+		if (split && r == RF_CHUNK && (f.type == 0x31 ||
+		    f.type == 0x32) && f.len && last && f.type != last)
+		{
+			*rs = was;	/* not taken: the next call's */
+			rc = 2;
+			break;
+		}
+		was = *rs;
 		off += used;
 		if (r == RF_CLOSE)
 		{
@@ -2862,7 +2912,10 @@ ctl_in(struct rf_state *rs, struct sb *tin, struct sb *out, struct sb *err,
 			rc = -1;
 		}
 		else if ((f.type == 0x31 || f.type == 0x32) && f.len)
+		{
 			sb_add(f.type == 0x31 ? out : err, f.data, f.len);
+			last = f.type;
+		}
 		else if (f.type == 0x13 && r == RF_FRAME)
 		{
 			*code = err_text(f.data, f.len, msg, cap);
@@ -2907,23 +2960,69 @@ ctl_in(struct rf_state *rs, struct sb *tin, struct sb *out, struct sb *err,
 	return rc;
 }
 
-/* What ctl_in gathered, onto stdout and stderr as it comes: 0, or -1 when
-** stdout is gone (a reader that closed the pipe). */
-static int
-ctl_put(struct sb *out, struct sb *err)
+/* s[0..n) onto b with every code point a terminal acts on (cp_ctl) but a
+** newline or a tab as a \u escape, a byte that is not UTF-8 as \ufffd: a
+** JSON line stays the same JSON (a valid one holds them raw only inside a
+** string), and a host's bytes cannot drive the terminal (QA 1.55.0 LOW-6).
+** Pure. */
+static void
+ctl_esc(struct sb *b, const char *s, size_t n)
 {
+	const unsigned char *u = (const unsigned char *)s;
+	char e[8];
+	unsigned cp;
+	size_t i;
+	int k;
+
+	for (i = 0; i < n; i += (size_t)k)
+		if (!(k = utf8_at(u + i, &cp)) || (size_t)k > n - i)
+		{
+			k = 1;
+			sb_s(b, "\\ufffd");
+		}
+		else if (cp_ctl(cp) && cp != '\n' && cp != '\t')
+		{
+			snprintf(e, sizeof e, "\\u%04x", cp);
+			sb_s(b, e);
+		}
+		else
+			sb_add(b, s + i, (size_t)k);
+}
+
+/* One stream ctl_in gathered onto f: all of b as it comes, or with esc (a
+** host's --xray --json) its whole lines, all of it when last, through
+** ctl_esc; the rest stays in b. 0, or -1 when the write failed. */
+static int
+ctl_out(FILE *f, struct sb *b, int esc, int last)
+{
+	struct sb e = {0};
+	size_t k = b->n;
 	int rc = 0;
 
-	if (err->n)
-	{
-		fwrite(err->p, 1, err->n, stderr);
-		fflush(stderr);
-	}
-	if (out->n && (fwrite(out->p, 1, out->n, stdout) != out->n ||
-	               fflush(stdout)))
+	while (esc && !last && k && b->p[k - 1] != '\n')
+		k--;
+	if (!k)
+		return 0;
+	if (esc)
+		ctl_esc(&e, b->p, k);
+	if (e.bad || fwrite(esc ? e.p : b->p, 1, esc ? e.n : k, f) !=
+	             (esc ? e.n : k) || fflush(f))
 		rc = -1;
-	out->n = err->n = 0;
+	free(e.p);
+	memmove(b->p, b->p + k, b->n - k);
+	b->n -= k;
+	b->p[b->n] = '\0';
 	return rc;
+}
+
+/* What ctl_in gathered, onto stdout and stderr as it comes (esc, last: as
+** ctl_out's): 0, or -1 when stdout is gone (a reader that closed the
+** pipe). */
+static int
+ctl_put(struct sb *out, struct sb *err, int esc, int last)
+{
+	(void)ctl_out(stderr, err, esc, last);
+	return ctl_out(stdout, out, esc, last);
 }
 
 /* argv as a 0x30 request (cwd's too when set) into *b. */
@@ -2962,20 +3061,34 @@ ctl_sig(int sig)
 	signal(sig, SIG_DFL);	/* a second one ends us at once */
 }
 
+/* How long an X-ray request may hear nothing from the host before it is a
+** lost link: the host's own ctl timeout (CTL_MS; DCH_CTL_TIMEOUT_MS, as dch
+** serve reads it, in tests), then RM_ATTACH_MS (QA 1.55.0 LOW-10). */
+static long long
+ctl_quiet(void)
+{
+	const char *e = getenv("DCH_CTL_TIMEOUT_MS");
+
+	return (e && atol(e) > 0 ? atol(e) : CTL_MS) + RM_ATTACH_MS;
+}
+
 /* The ctl's request out on fd, then its frames until 0x33 or 0x13: the
 ** exit status (remote.h), what went wrong said on stderr. Cancelled (a
 ** signal, or our stdout gone): a 0x34 when the host takes one (cancel_ok),
-** its 0x33 for up to RM_CANCEL_MS; 128 + the signal, or 0 for EPIPE. */
+** its 0x33 for up to RM_CANCEL_MS; 128 + the signal, or 0 for EPIPE. esc:
+** the output through ctl_esc, line by line. quiet: nothing from the host
+** this long (ms, 0 never) is a lost link. */
 static int
 ctl_run(int fd, const char *sh, const char *verb, struct sb *rq,
-        struct sb tin, struct rf_state rs, int cancel_ok)
+        struct sb tin, struct rf_state rs, int cancel_ok, int esc,
+        long long quiet)
 {
 	static const unsigned char c34[] = { 0x34, 0, 0, 0, 0 };
 	struct sb out = {0}, err = {0};
 	unsigned char buf[RM_READ];
 	char msg[400] = "", why[100] = "";
 	size_t off = 0;
-	long long end = now_ms() + RM_ATTACH_MS, cend = 0;
+	long long end = now_ms() + RM_ATTACH_MS, cend = 0, heard;
 	int r = 0, xit = 1, code = 1, cx = 0;	/* cx: the signal, -1 EPIPE */
 	ssize_t k;
 
@@ -3003,12 +3116,13 @@ ctl_run(int fd, const char *sh, const char *verb, struct sb *rq,
 		else
 			(void)poll(&pf, 1, (int)left);
 	}
+	heard = now_ms();
 	while (!r)
 	{
 		struct pollfd pf;
 
 		r = ctl_in(&rs, &tin, &out, &err, &xit, why, sizeof why, msg,
-		           sizeof msg, &code);
+		           sizeof msg, &code, 0);
 		if (tin.bad || out.bad || err.bad)
 		{
 			snprintf(msg, sizeof msg, "out of memory");
@@ -3016,7 +3130,7 @@ ctl_run(int fd, const char *sh, const char *verb, struct sb *rq,
 		}
 		if (cx < 0)
 			out.n = 0;	/* our reader is gone */
-		if (ctl_put(&out, &err) < 0 && !cx)
+		if (ctl_put(&out, &err, esc, r > 0) < 0 && !cx)
 			cx = -1;
 		if (!cx && g_ctl_sig)
 			cx = g_ctl_sig;
@@ -3031,6 +3145,13 @@ ctl_run(int fd, const char *sh, const char *verb, struct sb *rq,
 		}
 		if (cend && now_ms() >= cend)
 			break;
+		if (quiet && !cend && now_ms() - heard >= quiet)
+		{
+			/* a host that never answers (QA 1.55.0 LOW-10) */
+			snprintf(msg, sizeof msg, "no answer within %lld ms", quiet);
+			r = -1;
+			break;
+		}
 		pf.fd = fd;
 		pf.events = POLLIN;
 		pf.revents = 0;
@@ -3055,8 +3176,16 @@ ctl_run(int fd, const char *sh, const char *verb, struct sb *rq,
 			r = -1;
 		}
 		else
+		{
 			sb_add(&tin, buf, (size_t)k);
+			heard = now_ms();
+		}
 	}
+	/* a lost link (r < 0, not a cancel) drops the stdout line esc held: a
+	** cut JSON line is no line (QA 1.55.0 NIT-5, Prosper's ruling) */
+	if (cx < 0 || (r < 0 && !cx))
+		out.n = 0;
+	(void)ctl_put(&out, &err, esc, 1);	/* a line esc held, cut short */
 	free(tin.p);
 	free(out.p);
 	free(err.p);
@@ -3182,7 +3311,8 @@ dch_remote_ctl(const char *host, int argc, char **argv, const char *cwd)
 		signal(SIGINT, ctl_sig);
 		signal(SIGTERM, ctl_sig);
 		rc = ctl_run(p->fd, sh, argv[0], &rq, p->in, p->rs,
-		             hello_op(p->hello_js, "ctl-cancel"));
+		             hello_op(p->hello_js, "ctl-cancel"), xray,
+		             xray && !(fl & CTL_FOREVER) ? ctl_quiet() : 0);
 		memset(&p->in, 0, sizeof p->in);
 	}
 out:
@@ -3338,6 +3468,31 @@ rq_head(struct sb *o, long long req)
 		sb_s(o, "null");	/* a line with no req of its own */
 }
 
+/* s[0..k) (s[k] a NUL) as one JSON string: sb_q's escapes, and a NUL,
+** where sb_q would stop, as \u0000 (QA 1.55.0 LOW-9). Pure. */
+static void
+rq_q(struct sb *o, const char *s, size_t k)
+{
+	size_t i = 0, n, at;
+
+	sb_s(o, "\"");
+	for (;;)
+	{
+		n = strlen(s + i);
+		at = o->n;
+		sb_q(o, s + i);		/* "..." with s[i + n] a NUL or the end */
+		if (o->bad)
+			return;
+		memmove(o->p + at, o->p + at + 1, o->n - at - 2);
+		o->p[o->n -= 2] = '\0';	/* its quotes off */
+		if ((i += n) >= k)
+			break;
+		sb_s(o, "\\u0000");
+		i++;
+	}
+	sb_s(o, "\"");
+}
+
 /* req's stderr line s, escaped (C0, C1, bidi; U+FFFD for bad UTF-8) */
 static void
 rq_err(struct sb *o, long long req, const char *s)
@@ -3390,10 +3545,11 @@ rq_obj(const char *s, size_t k)
 
 /* The complete lines of buf (all of it when last) onto o, each one line of
 ** req: stderr's escaped; stdout's byte for byte when rq_obj passes it and
-** the wrapped line still parses, else as a JSON string, so a host never
-** writes a line of its own here. What is left stays in buf: 0. -1 for a
-** line over RQ_HOST_MAX (held or whole) or one o cannot take: the lines
-** before it are on o, nothing of it, and o is not bad. Pure. */
+** the wrapped line still parses, else as a JSON string (rq_q: a NUL kept
+** as \u0000), so a host never writes a line of its own here. What is left
+** stays in buf: 0. -1 for a line over RQ_HOST_MAX (held or whole) or one o
+** cannot take: the lines before it are on o, nothing of it, and o is not
+** bad. Pure. */
 static int
 rq_wrap(struct sb *o, long long req, int err, struct sb *buf, int last)
 {
@@ -3413,9 +3569,7 @@ rq_wrap(struct sb *o, long long req, int err, struct sb *buf, int last)
 		s[k] = '\0';	/* the newline, or the sb's own NUL */
 		obj = 0;
 		at = o->n;
-		if (err)
-			rq_err(o, req, s);
-		else if (rq_obj(s, k))
+		if (!err && rq_obj(s, k))
 		{
 			rq_head(o, req);
 			sb_s(o, ",\"line\":");
@@ -3431,11 +3585,11 @@ rq_wrap(struct sb *o, long long req, int err, struct sb *buf, int last)
 					o->p[o->n = at] = '\0';
 			}
 		}
-		if (!err && !obj)
+		if (err || !obj)
 		{
 			rq_head(o, req);
-			sb_s(o, ",\"line\":");
-			sb_q(o, s);
+			sb_s(o, err ? ",\"stderr\":" : ",\"line\":");
+			rq_q(o, s, k);
 			sb_s(o, "}\n");
 		}
 		if (o->bad)
@@ -3490,6 +3644,10 @@ struct rq
 	struct rf_state rs;
 	struct sb tin, lo, le;	/* frames in; stdout, stderr to a newline */
 	long long req, cend;	/* the one running (0 none); its 0x34's end */
+	long long heard;	/* its request sent, or the host's last bytes */
+	long long dark;		/* a failed dial stands until then: */
+	int dcode;		/* its status */
+	char dmsg[800];		/* and its stderr line */
 };
 
 static void
@@ -3508,15 +3666,22 @@ rq_close(struct rq *q)
 
 /* A new connection to q's host, its hello in: 0, else the exit status (4
 ** refused, 6 no "ctl" or "xray", 7 unreachable, 1 a newer protocol) and its
-** stderr line in msg[cap]. */
+** stderr line in msg[cap]. A failure stands for RM_ATTACH_MS: the requests
+** queued behind a dark host's dial get it at once, not a dial each (QA
+** 1.55.0 LOW-10). */
 static int
 rq_dial(struct rq *q, char *msg, size_t cap)
 {
-	struct probe *p = calloc(1, sizeof *p);
+	struct probe *p;
 	int rc = 0;
 
 	rq_close(q);
-	if (!p)
+	if (now_ms() < q->dark)
+	{
+		snprintf(msg, cap, "%s", q->dmsg);
+		return q->dcode;
+	}
+	if (!(p = calloc(1, sizeof *p)))
 	{
 		snprintf(msg, cap, "dch: out of memory");
 		return 1;
@@ -3548,6 +3713,9 @@ rq_dial(struct rq *q, char *msg, size_t cap)
 	if (rc)
 	{
 		probes_free(p, 1);
+		q->dark = now_ms() + RM_ATTACH_MS;
+		q->dcode = rc;
+		snprintf(q->dmsg, sizeof q->dmsg, "%s", msg);
 		return rc;
 	}
 	keepalive(p->fd);
@@ -3642,12 +3810,13 @@ rq_net(struct rq *q, struct sb *o)
 		return;
 	}
 	sb_add(&q->tin, buf, (size_t)k);
+	q->heard = now_ms();
 	do
 	{
 		msg[0] = why[0] = '\0';
 		xit = code = 1;
 		r = ctl_in(&q->rs, &q->tin, &q->lo, &q->le, &xit, why,
-		           sizeof why, msg, sizeof msg, &code);
+		           sizeof why, msg, sizeof msg, &code, 1);
 		if (r >= 0 && (q->tin.bad || q->lo.bad || q->le.bad))
 		{
 			snprintf(msg, sizeof msg, "it sent too much");
@@ -3660,12 +3829,14 @@ rq_net(struct rq *q, struct sb *o)
 		}
 		if (!q->req)
 			q->lo.n = q->le.n = 0;	/* no request of ours: dropped */
-		else if (rq_wrap(o, q->req, 1, &q->le, r) < 0 ||
-		         rq_wrap(o, q->req, 0, &q->lo, r) < 0)
+		else if (rq_wrap(o, q->req, 1, &q->le, r == 1) < 0 ||
+		         rq_wrap(o, q->req, 0, &q->lo, r == 1) < 0)
 		{
 			rq_drop(q, o, "cap");
 			return;
 		}
+		if (r == 2)
+			continue;	/* the other stream's output next */
 		if (r && q->req && msg[0])
 		{
 			/* a 0x13: the host refused it, nothing ran */
@@ -3731,6 +3902,7 @@ rq_start(struct rq *q, struct sb *o, long long req, int ac, char **av)
 	else
 	{
 		q->req = req;
+		q->heard = now_ms();
 		if (rq_send(q->p->fd, b.p, b.n, m, sizeof m) < 0)
 			rq_lost(q, o, m);
 	}
@@ -3763,7 +3935,9 @@ rq_line(struct rq *q, struct sb *o, const char *s, size_t k)
 		rq_exit(o, req, 2, "refused");
 	}
 	else if (q->req)
-		rq_exit(o, req, 1, "busy");	/* ctl's own rule (4.2) */
+		/* ctl's own rule (4.2); the running one's own id is not this
+		** line's to end (QA 1.55.0 LOW-8) */
+		rq_exit(o, req == q->req ? 0 : req, 1, "busy");
 	else if (rq_check(q->name, ac, av, m, sizeof m) < 0)
 	{
 		rq_err(o, req, m);
@@ -3817,6 +3991,7 @@ dch_remote_requests(char *n)
 	struct rq q;
 	char hb[DCH_RHOST_MAX], msg[800];
 	size_t hl = strcspn(n, ":"), off;
+	long long quiet = ctl_quiet();
 	int rc, skip = 0;
 	ssize_t k;
 
@@ -3837,6 +4012,7 @@ dch_remote_requests(char *n)
 	while (rq_put(&o) == 0)
 	{
 		struct pollfd pf[2];
+		long long due = 0;
 		int np = 1, tmo = -1;
 
 		pf[0].fd = 0;
@@ -3849,8 +4025,11 @@ dch_remote_requests(char *n)
 			pf[1].revents = 0;
 			np = 2;
 		}
-		if (q.cend)
-			tmo = q.cend > now_ms() ? (int)(q.cend - now_ms()) : 0;
+		/* a 0x34's 0x33, else the host's answer within ctl_quiet */
+		if (q.req && q.p)
+			due = q.cend ? q.cend : q.heard + quiet;
+		if (due)
+			tmo = due > now_ms() ? (int)(due - now_ms()) : 0;
 		if (poll(pf, (nfds_t)np, tmo) < 0)
 		{
 			if (errno == EINTR)
@@ -3861,6 +4040,11 @@ dch_remote_requests(char *n)
 			rq_net(&q, &o);
 		if (q.cend && now_ms() >= q.cend)
 			rq_drop(&q, &o, "cancel");	/* its 0x33 never came */
+		else if (q.req && q.p && !q.cend && now_ms() - q.heard >= quiet)
+		{
+			snprintf(msg, sizeof msg, "no answer within %lld ms", quiet);
+			rq_lost(&q, &o, msg);	/* QA 1.55.0 LOW-10 */
+		}
 		if (!pf[0].revents)
 			continue;
 		if ((k = read(0, buf, sizeof buf)) < 0 &&

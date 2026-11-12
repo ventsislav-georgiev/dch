@@ -1,0 +1,5 @@
+{"schema":1,"first":{"session":"cx","session_id":"019a1111-2222-7333-8444-555566667701","key":"issue:#41","shape":"issue","text":"#41","project":"-T-work-cx","mode":"light","scope":"project","budget_ms":300,"elapsed_ms":0}}
+{"schema":1,"mention":{"session":"cx","chapter":"f*:1029","at":1794304802,"line":"Fix the flaky parser test from #41","offset":1029,"live":true,"project":"-T-work-cx"}}
+{"schema":1,"mention":{"session":"cx","chapter":"f*:1029","at":1794304806,"line":"Fixed in `a1b2c3d4`; see #41 and src/parse.c:12.","offset":2186,"live":true,"project":"-T-work-cx"}}
+{"schema":1,"tally":{"session":"cx","live":true,"project":"-T-work-cx","count":2,"definitions":0,"partial":false,"mentions_dropped":0}}
+{"schema":1,"done":true,"partial":false,"counts":{"session":2,"project":0,"project_sessions":0,"all":null,"all_sessions":null},"why":null,"files":1,"bytes":2804,"lines_too_long":0}
