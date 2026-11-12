@@ -44,7 +44,10 @@ Covers:
      n showing it faint and titled by its summary (its title without one),
      the footer saying how many, the tab count the shown-by-default ones,
      the selection kept on its chapter, the filter matching a summary, the
-     empty state when every chapter is one; o on the Chapters list and in
+     empty state when every chapter is one; a compaction (#223) hidden
+     and counted with them, n showing it faint with its = marker, Enter
+     reading its summary, compactions and auto chapters alone the same
+     empty state; o on the Chapters list and in
      the reader leaves the view (the terminal restored as q does) and
      attaches as dch -a, from the picker's x too (the -k picker refuses);
      an ended session's o says so and stays; in the chord o goes back to the
@@ -524,6 +527,8 @@ def test_refs():
 
 ASID = "11111111-2222-4333-8444-5555555555a4"
 BSID = "11111111-2222-4333-8444-5555555555a5"
+CSID = "11111111-2222-4333-8444-5555555555a6"
+DSID = "11111111-2222-4333-8444-5555555555a7"
 
 
 def note(inner):
@@ -535,7 +540,9 @@ def fixture_auto():
     summary, one with a hostile summary, one with none); xv-aa: only
     notifications. Each in a shape Claude Code writes: a user record with
     "origin", or a queued_command attachment with commandMode (and, newer,
-    its own origin)."""
+    its own origin). xv-ac: two prompts, a compaction (a compact_boundary,
+    then its isCompactSummary user record) and a notification between
+    them; xv-ca: only a compaction and a notification (#223)."""
     cfg = os.path.join(HOME, ".claude")
     pdir = os.path.join(cfg, "projects", "-home-demo-proj")
     os.makedirs(pdir, exist_ok=True)
@@ -551,11 +558,18 @@ def fixture_auto():
                       "\007 evil\u202edone</summary>")),
           "deploy it"]
     aa = [note("<task-id>t9</task-id>\n<summary>Only a notice</summary>")]
-    for sid, name, prompts in ((ASID, "xv-au", au), (BSID, "xv-aa", aa)):
+    cp = ("c", "This session is being continued: the compact summary")
+    ac = ["start the work", cp, aa[0], "finish the work"]
+    for sid, name, prompts in ((ASID, "xv-au", au), (BSID, "xv-aa", aa),
+                               (CSID, "xv-ac", ac), (DSID, "xv-ca", [cp, aa[0]])):
         lines = []
         for i, t in enumerate(prompts):
             o = {"cwd": P, "timestamp": "2026-11-10T1%d:00:00Z" % i}
-            if isinstance(t, tuple):
+            if isinstance(t, tuple) and t[0] == "c":
+                lines.append(dict(o, type="system", subtype="compact_boundary"))
+                o.update(type="user", isCompactSummary=True,
+                         message={"content": t[1]})
+            elif isinstance(t, tuple):
                 a = {"type": "queued_command", "prompt": t[1],
                      "commandMode": "task-notification"}
                 if t[0] == "qo":
@@ -694,6 +708,57 @@ def test_auto():
         check("Chapters: n shows it, selected", any(
             r.startswith("\u258c") and "Only a notice" in r
             for r in text.split("\n")), text)
+        v.key(b"q")
+        v.exit()
+    finally:
+        v.close()
+
+
+def test_compact():
+    o = json.loads(dch("--xray", "xv-ac", "--json").stdout)
+    ch = o["chapters"]
+    check("compact fixture: the engine reads one compaction, not auto",
+          [c["kind"] for c in ch] == ["prompt", "compact", "prompt", "prompt"] and
+          [c.get("auto", False) for c in ch] == [False, False, True, False],
+          ch)
+    v = Pty([DCH, "--xray", "xv-ac"], env={"NO_COLOR": ""})
+    try:
+        v.wait(b"finish the work")
+        v.pump(0.5)
+        text = screen(v, 0)
+        check("Chapters: a compaction is hidden by default, the tab count "
+              "the prompts (2)", "start the work" in text and
+              "Conversation compacted" not in text and "Chapters 2" in text,
+              text)
+        check("Chapters: the footer counts a compaction with the auto rows",
+              "n notifications 2 hidden" in text, text)
+        mark = len(v.out)
+        v.key(b"n", 1.0)
+        text = screen(v, mark)
+        check("Chapters: n shows the compaction, its = marker, faint",
+              "= Conversation compacted" in text and
+              re.search(rb"\033\[0;2m[^\033]*Conversation compacted",
+                        v.out[mark:]), v.out[mark:][-800:])
+        v.key(b"k", 0.3)  # the newest is selected; up past the notification
+        v.key(b"k", 0.3)
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        check("Chapters: Enter on a shown compaction reads its summary",
+              v.wait(b"the compact summary", start=mark), v.out[mark:])
+        v.key(b"\033", 0.5)
+        v.key(b"q")
+        check("Chapters: q exits 0", v.exit() == 0, v.out[-80:])
+    finally:
+        v.close()
+    v = Pty([DCH, "--xray", "xv-ca"])
+    try:
+        v.wait(b"Chapters")
+        v.pump(0.8)
+        text = screen(v, 0)
+        check("Chapters: only a compaction and an auto chapter: the empty "
+              "state of xv-aa", "Only notifications: n shows them" in text
+              and "Chapters 0" in text and "n notifications 2 hidden" in text,
+              text)
         v.key(b"q")
         v.exit()
     finally:
@@ -1375,6 +1440,7 @@ def main():
         test_refs()
         fixture_auto()
         test_auto()
+        test_compact()
         test_resize()
         test_small_card()
         shell()

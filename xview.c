@@ -1254,6 +1254,14 @@ xv_ref_cmp(const void *pa, const void *pb)
 	return a->seen < b->seen ? 1 : a->seen > b->seen ? -1 : 0;
 }
 
+/* A chapter hidden by default, n shows it: one the harness wrote (#192) or
+** a compaction (#223) */
+static int
+xv_hid(const struct xv_ch *c)
+{
+	return c->aut || !strcmp(c->kind, "compact");
+}
+
 /* The rows a list tab shows (Chapters, Refs): their indexes, filtered. */
 static void
 xv_vis(struct xv *v)
@@ -1271,7 +1279,7 @@ xv_vis(struct xv *v)
 			continue;
 		if (v->tab == 1 && xv_temp(v, &v->rf[k]) && (v->ntmp++, !v->alltmp))
 			continue;
-		if (v->tab == 0 && v->ch[k].aut && (v->nauto++, !v->allauto))
+		if (v->tab == 0 && xv_hid(&v->ch[k]) && (v->nauto++, !v->allauto))
 			continue;
 		if (xv_grow(&v->vis, &v->avis, v->nvis, sizeof *v->vis) < 0)
 			return;
@@ -1325,7 +1333,7 @@ xv_row_ch(const struct xv_ch *c, int i, int on)
 	pk_txt(c->error ? "! " : !strcmp(c->kind, "command") ? "/ "
 	       : !strcmp(c->kind, "compact") ? "= " : "  ");
 	/* an auto chapter, shown: faint, by what it says it is */
-	pk_set(c->aut || !strcmp(c->kind, "compact") ? "2" : "");
+	pk_set(xv_hid(c) ? "2" : "");
 	pk_txt(c->aut && c->summary[0] ? c->summary : c->title);
 	if (on)
 		pk_pad(pk_w);
@@ -1796,7 +1804,7 @@ xv_draw(struct xv *v, int force)
 		/* Chapters: the ones shown by default; On screen: no number
 		** before its screen is read */
 		for (k = n = 0; k < v->nch; k++)
-			n += !v->ch[k].aut;
+			n += !xv_hid(&v->ch[k]);
 		for (k = 0; k < 3; k++)
 			pk_tab(tabn[k], k == 0 ? n : k == 1 ? v->nrf
 			       : v->scr ? v->nlab : -1, k == v->tab);
