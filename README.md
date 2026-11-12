@@ -1046,8 +1046,9 @@ The corpus:
   - `CODEX_HOME` is the Codex process's own, else its `HOME`'s `.codex`. It
     must be absolute with no `..` component, or nothing under it is read.
   - The rollout is found by names only: `sessions/YYYY/MM/DD`, newest first,
-    at most 400 day directories, a file whose name ends `-<id>.jsonl`. It
-    must be the only one, a regular file, under real directories (a
+    at most 400 day directories and 400 year and month directories, a file
+    whose name ends `-<id>.jsonl`. It must be the only one, a regular file
+    that is yours and not group- or world-writable, under real directories (a
     symlinked day directory or file is not followed); otherwise the answer is
     `corpus: "none"` with the id. It is opened and read like a Claude Code
     transcript, with the same limits.
@@ -1292,19 +1293,31 @@ Codex `<n>` gets it too.
   the shim that can prompt to install them); elsewhere `/usr/bin/git`, then
   `/usr/local/bin/git`; none is `no_git`. The argv is
   `git --no-pager -c core.fsmonitor= -c core.hooksPath=/dev/null -c protocol.allow=never -c diff.external= -c color.ui=never -c log.showSignature=false -C <cwd>`,
-  then `rev-parse --is-inside-work-tree` (not `true`: `not_repo`), then
+  then `rev-parse --is-inside-work-tree` (not `true`: `not_repo`), then,
+  for a commit URL only, `config --get-regexp ^remote\..*\.url$`, then
   `show --no-color --no-ext-diff --no-textconv --stat=80 --stat-count=14 --format=%H%x00%an%x00%at%x00%s --end-of-options <sha>^{commit}`.
   The environment is only `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`,
   `GIT_OPTIONAL_LOCKS=0`, `GIT_TERMINAL_PROMPT=0`, `GIT_NO_LAZY_FETCH=1`,
   `PATH=/usr/bin:/bin`, `HOME` and `LANG=en_US.UTF-8`; stdin is
   `/dev/null`, and no other fd of dch's reaches git.
-  Both runs share one 3 s deadline (`timeout`: git's process group gets
-  SIGTERM, then SIGKILL a second later); dch keeps 64 KiB of
+  All runs share one 3 s deadline (`timeout`: git's process group gets
+  SIGTERM, then SIGKILL a second later; a git that even SIGKILL cannot end,
+  such as one stuck on a stalled network mount, is left behind a second
+  after that); dch keeps 64 KiB of
   its output and 4 KiB of its errors and drains the rest. `ok` gives the
   subject as `title`, `author · 3h ago · abc1234` as `subtitle` and the
   stat as `lines` (past 14: the first 13 and the summary); a short SHA
-  matching several objects is `ambiguous`, anything else git refuses
-  `not_commit`. A repo's `objects/info/alternates` can make git read
+  matching several objects is `ambiguous`, one git does not know
+  (`unknown revision`) `not_commit`. git's own "not a git repository"
+  (or a cwd that is gone) is `not_repo`. Any other git failure gives no
+  `resolved` line, never a wrong state: for example a `.gitmodules` with
+  an invalid `update` value, or a blob missing from a partial clone.
+  A commit URL (`https://github.com/<owner>/<repo>/commit/<sha>`) resolves
+  only when one of the repo's remote URLs names that owner and repo on
+  github.com (any case; `https://`, `ssh://` or `git@github.com:`, with or
+  without `.git`); else it is `not_commit` and `show` never runs. This only
+  stops a link to another repo from showing a local commit; the repo's own
+  config decides its remotes. A repo's `objects/info/alternates` can make git read
   objects from outside the project: the stat may then name another repo's
   files. No code runs and nothing is written, and the lines go to the same
   user who can read that repo.
@@ -1340,7 +1353,9 @@ Codex `<n>` gets it too.
   `outside_project` too: its other names can lie outside. Over 2 MB is
   `too_large`. `ok` reads it, the file itself never a symlink, and
   gives the name as `title`, the path from the cwd (`· line N`
-  with one) as `subtitle`, and up to 14 lines with line N the seventh, CRs
+  with one) as `subtitle`. A file with a NUL byte in its first 8000 bytes
+  (git's own test) is binary: `ok` with `· binary` in the subtitle and no
+  lines. Otherwise it gives up to 14 lines with line N the seventh, CRs
   dropped, kept whole at either end of the file; `first`, only here, is the
   1-based number of `lines[0]` (1 for a ref with no line), so a consumer
   can tell which row is line N at the end of the file. A path

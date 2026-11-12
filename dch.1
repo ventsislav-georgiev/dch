@@ -928,6 +928,8 @@ as
 .B \-c log.showSignature=false \-C
 .I cwd
 .B rev\-parse \-\-is\-inside\-work\-tree
+(for a commit URL also
+.BR "config \-\-get\-regexp ^remote\e..*\e.url$" )
 and then
 .B show \-\-no\-color \-\-no\-ext\-diff \-\-no\-textconv \-\-stat=80
 .B \-\-stat\-count=14 \-\-format=%H%x00%an%x00%at%x00%s \-\-end\-of\-options
@@ -942,7 +944,8 @@ with only
 .B HOME
 and
 .B LANG=en_US.UTF\-8
-in its environment, 3 s for both runs (then its process group is ended),
+in its environment, 3 s for all runs (then its process group is ended;
+a git that outlives SIGKILL is left behind a second later),
 64 KiB of output kept (a repo's
 .I objects/info/alternates
 can make git read objects outside the project: nothing runs, nothing is
@@ -954,6 +957,14 @@ written); states
 .BR ambiguous ,
 .BR timeout ,
 .BR ended .
+Only git's own unknown revision is
+.BR not_commit ,
+only its \(lqnot a git repository\(rq or a missing cwd
+.BR not_repo ;
+any other git failure gives no line.
+A commit URL resolves only when a remote URL of the repo names its
+github.com owner and repo, else it is
+.BR not_commit .
 A file is read only inside the project (the cwd's git root, else the cwd;
 none when that is
 .BR / ,
@@ -1025,7 +1036,9 @@ names with no dot.
 The list guards the common credential files by name; a secret in a file
 with any other name is shown.
 At most 2 MB, as 14 lines with the ref's line the
-seventh; states
+seventh; a NUL in the first 8000 bytes makes it binary: no lines and
+\(lq\[u00B7] binary\(rq
+in the subtitle; states
 .BR ok ,
 .BR outside_project ,
 .BR secret_name ,
@@ -1279,7 +1292,8 @@ The rollout is the only regular file named
 .BI \- id .jsonl
 under
 .IR sessions/YYYY/MM/DD ,
-newest first, at most 400 day directories, no symlink followed.
+newest first, at most 400 day directories and 400 year and month
+directories, no symlink followed, yours and not group\- or world\-writable.
 Assistant text uses the prose rules, tool calls and outputs the code rules;
 reasoning, developer messages and
 .B event_msg

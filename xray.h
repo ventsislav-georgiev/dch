@@ -249,8 +249,10 @@ const struct xr_chapters *xr_claude_chapters(struct xr_claude *d);
 #define XR_CODEX_DAYS  400		/* day dirs a lookup reads, newest first */
 /* <home>/sessions/YYYY/MM/DD/<any>-<tid>.jsonl: home checked as
 ** xr_config_ok and tid uuid-shaped before any readdir; names only, digits
-** only, newest first, at most XR_CODEX_DAYS day dirs; no symlinked dir
-** followed; exactly one regular hit. 0 with path and st, else -1. */
+** only, newest first, at most XR_CODEX_DAYS day dirs and XR_CODEX_DAYS
+** year and month dirs; no symlinked dir followed; exactly one regular hit,
+** the caller's and not group- or world-writable. 0 with path and st,
+** else -1. */
 int xr_codex_lookup(const char *home, const char *tid, char *path,
                     size_t pathsz, struct stat *st);
 /* The decoder reads a Codex rollout instead (set before the first line):
@@ -434,6 +436,10 @@ void xr_file_lines(const char *s, size_t n, long line,
                    struct xr_resolved *r);
 long xr_ref_line(const char *text);
 int xr_secret_name(const char *path);
+/* git config --get-regexp's "remote.<name>.url <url>" lines: 1 when a URL
+** names github.com's want ("<owner>/<repo>"), ASCII case-insensitive, as
+** https://, ssh:// or git@host:, a trailing .git or / allowed. */
+int xr_git_remote(const char *s, size_t n, const char *want);
 /* Test seams: the probe list (NULL: 8.3's for this OS), the probe's pick
 ** (NULL: none), and the git spawns so far. */
 extern const char *const *xr_git_probe;

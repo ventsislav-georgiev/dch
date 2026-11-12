@@ -1582,6 +1582,19 @@ mkfile(const char *p)
 	close(open(p, O_WRONLY | O_CREAT, 0600));
 }
 
+static void
+mkdirp(char *p)
+{
+	char *s;
+
+	for (s = p + 1; (s = strchr(s, '/')); *s++ = '/')
+	{
+		*s = '\0';
+		mkdir(p, 0700);
+	}
+	mkdir(p, 0700);
+}
+
 /* the lookup (7.4, mutant 36): names only, depth 3, newest first, at most
 ** XR_CODEX_DAYS day dirs; exactly one regular file, never a link */
 static void
@@ -1662,6 +1675,55 @@ t_codex_lookup(void)
 	unlink(p);
 	unlink(path);
 	rmdir(q);
+	/* NIT-6: a rollout as a snapshot, ours and not group/world-writable */
+	snprintf(p, sizeof p, "%s/sessions/2000/01/02/rollout-2000-01-02T00-00"
+	         "-00-%s.jsonl", d, tid);
+	mkfile(p);
+	chmod(p, 0664);
+	CHECK("codex lookup: a group-writable rollout is refused",
+	      xr_codex_lookup(d, tid, path, sizeof path, &st) < 0);
+	chmod(p, 0646);
+	CHECK("codex lookup: a world-writable rollout is refused",
+	      xr_codex_lookup(d, tid, path, sizeof path, &st) < 0);
+	chmod(p, 0644);
+	CHECK("codex lookup: a 0644 rollout of ours is read",
+	      xr_codex_lookup(d, tid, path, sizeof path, &st) == 0);
+	snprintf(p, sizeof p, "rm -rf '%s'", d);
+	(void)!system(p);
+	/* LOW-11: empty year and month dirs count against a bound of their own */
+	if (!mkdtemp(strcpy(d, "/tmp/xray_cx.XXXXXX")))
+		return;
+	snprintf(p, sizeof p, "%s/sessions/2000/01/01", d);
+	mkdirp(p);
+	snprintf(p, sizeof p, "%s/sessions/2000/01/01/rollout-x-%s.jsonl", d, tid);
+	mkfile(p);
+	for (m = 0; m < 10; m++)
+	{
+		snprintf(p, sizeof p, "%s/sessions/%04d", d, 9999 - m);
+		mkdir(p, 0700);
+	}
+	CHECK("codex lookup: 10 empty newer year dirs, the rollout is found",
+	      xr_codex_lookup(d, tid, path, sizeof path, &st) == 0);
+	for (; m < 400; m++)
+	{
+		snprintf(p, sizeof p, "%s/sessions/%04d", d, 9999 - m);
+		mkdir(p, 0700);
+	}
+	CHECK("codex lookup: 400 empty newer year dirs: past the bound, none",
+	      xr_codex_lookup(d, tid, path, sizeof path, &st) < 0);
+	for (m = 0; m < 400; m++)
+	{
+		snprintf(p, sizeof p, "%s/sessions/%04d", d, 9999 - m);
+		rmdir(p);
+	}
+	for (m = 0; m < 5 * 90; m++)
+	{
+		snprintf(p, sizeof p, "%s/sessions/%04d/%02d", d, 9999 - m / 90,
+		         99 - m % 90);
+		mkdirp(p);
+	}
+	CHECK("codex lookup: 5 newer years of 90 empty month dirs: none",
+	      xr_codex_lookup(d, tid, path, sizeof path, &st) < 0);
 	snprintf(p, sizeof p, "rm -rf '%s'", d);
 	(void)!system(p);
 }
@@ -2234,11 +2296,28 @@ t_res_file(void)
 		      res("big.c:1", "proj", 1, &r) == 1 && is(&r, "file", "ok"));
 		free(buf);
 	}
-	put("proj/u.c", "ok \xff\xfe end\r\nnul\0here\n", 20);
-	CHECK("file: invalid UTF-8 and NUL as U+FFFD, CR dropped",
+	put("proj/u.c", "ok \xff\xfe end\r\nno nul\n", 18);
+	CHECK("file: invalid UTF-8 as U+FFFD, CR dropped",
 	      res("u.c:1", "proj", 1, &r) == 1 && r.nlines == 2 &&
 	      !strcmp(r.line[0], "ok \xef\xbf\xbd\xef\xbf\xbd end") &&
-	      !strcmp(r.line[1], "nul\xef\xbf\xbdhere"));
+	      !strcmp(r.line[1], "no nul"));
+	/* NIT-2: a NUL in the first 8000 bytes is binary: said, no lines */
+	put("proj/bin.dat", "A\0B\xff\xfe\0C\n", 8);
+	CHECK("file: a NUL early: ok, \"bin.dat \xc2\xb7 binary\", no lines",
+	      res("bin.dat:1", "proj", 1, &r) == 1 && is(&r, "file", "ok") &&
+	      r.nlines == 0 && r.first == 1 && !strcmp(r.title, "bin.dat") &&
+	      !strcmp(r.subtitle, "bin.dat \xc2\xb7 binary"));
+	{
+		static char late[8009];
+
+		for (k = 0; k < 4000; k++)
+			memcpy(late + 2 * k, "x\n", 2);
+		memcpy(late + 8000, "nul\0here\n", 9);
+		put("proj/late.c", late, sizeof late);
+		CHECK("file: a NUL past 8000 bytes is text, the NUL as U+FFFD",
+		      res("late.c:4001", "proj", 1, &r) == 1 && r.nlines == 14 &&
+		      !strcmp(r.line[13], "nul\xef\xbf\xbdhere"));
+	}
 	memset(b, 'w', 900);
 	b[900] = '\n';
 	put("proj/w.c", b, 901);
@@ -2399,17 +2478,28 @@ fake_git(void)
 	    "m=$(/bin/cat \"$D/mode\")\n"
 	    "case \"$*\" in *rev-parse*)\n"
 	    "  [ \"$m\" = notrepo ] && { echo false; exit 0; }\n"
-	    "  [ \"$m\" = slowrev ] || { echo true; exit 0; } ;; esac\n"
+	    "  [ \"$m\" = notgit ] && { echo 'fatal: not a git repository (or any"
+	    " of the parent directories): .git' >&2; exit 128; }\n"
+	    "  [ \"$m\" = dubious ] && { echo 'fatal: detected dubious ownership"
+	    " in repository at /x' >&2; exit 128; }\n"
+	    "  [ \"$m\" = slowrev ] || { echo true; exit 0; } ;;\n"
+	    "*--get-regexp*)\n"
+	    "  [ \"$m\" = cfgerr ] && { echo 'fatal: bad config' >&2; exit 3; }\n"
+	    "  [ -s \"$D/remotes\" ] || exit 1; /bin/cat \"$D/remotes\"; exit 0 ;;\n"
+	    "esac\n"
 	    "case \"$m\" in\n"
 	    "ok) printf '0123456789abcdef0123456789abcdef01234567\\000Ann B\\0001700000000"
 	    "\\000a subject\\n\\n f | 1 +\\n 1 file changed\\n'; exit 0 ;;\n"
 	    "amb) echo 'error: short object ID abcdef1 is ambiguous' >&2; exit 128 ;;\n"
 	    "bad) echo \"fatal: bad object\" >&2; exit 128 ;;\n"
+	    "unknown) echo \"fatal: ambiguous argument 'abcdef1^{commit}': unknown"
+	    " revision or path not in the working tree.\" >&2; exit 128 ;;\n"
 	    "flood) /usr/bin/yes | /usr/bin/head -c 10000000; "
 	    "/usr/bin/yes e | /usr/bin/head -c 10000000 >&2; exit 0 ;;\n"
 	    "slow|slowrev) echo $$ > \"$D/pid\"; /bin/sleep 30 & /bin/sleep 30 ;;\n"
 	    "fds) '%s' --fds > \"$D/fds\"; exit 1 ;;\n"
-	    "esac\n", rd, self);
+	    "stuck) echo $$ > \"$D/pid\"; exec '%s' --stuck ;;\n"
+	    "esac\n", rd, self, self);
 
 	put("git", s, (size_t)n);
 	snprintf(s, sizeof s, "%s/git", rd);
@@ -2548,11 +2638,59 @@ t_res_git(void)
 	CHECK("git: \"is ambiguous\": ambiguous",
 	      res("abcdef1", "proj", 1, &r) == 1 && is(&r, "commit", "ambiguous") &&
 	      !strcmp(r.title, "Ambiguous short SHA"));
-	mode("bad");
-	CHECK("git: anything else: not_commit, named by the git root",
+	mode("unknown");
+	CHECK("git: \"unknown revision\": not_commit, named by the git root",
 	      res("abcdef1", "proj/src", 1, &r) == 1 &&
 	      is(&r, "commit", "not_commit") &&
 	      !strcmp(r.title, "Not a commit in proj"));
+	/* LOW-4: a git that failed otherwise is no line, never a wrong state */
+	mode("bad");
+	CHECK("git: show fails otherwise (\"bad object\"): no line",
+	      res("abcdef1", "proj/src", 1, &r) == 0);
+	mode("notgit");
+	CHECK("git: rev-parse's \"not a git repository\": not_repo",
+	      res("abcdef1", "proj", 1, &r) == 1 && is(&r, "commit", "not_repo"));
+	mode("dubious");
+	CHECK("git: rev-parse fails otherwise (dubious ownership): no line, "
+	      "show never runs", res("abcdef1", "proj", 1, &r) == 0 &&
+	      !strstr(slurp("argv"), "show\n"));
+	/* LOW-1: a commit URL answers only in a clone of its repo */
+	mode("ok");
+	put("remotes", "", 0);
+	s0 = xr_res_spawned;
+	CHECK("git: a commit URL, no remote: not_commit, show never runs",
+	      res("https://github.com/o/r/commit/abcdef1234", "proj", 1, &r) == 1
+	      && is(&r, "commit", "not_commit") &&
+	      !strcmp(r.title, "Not a commit in proj") &&
+	      xr_res_spawned == s0 + 2 && !strstr(slurp("argv"), "show\n"));
+	snprintf(want, sizeof want, "-C\n%s\nconfig\n--get-regexp\n"
+	         "^remote\\..*\\.url$\n--\n", cwd);
+	CHECK("git: the URL's remotes: config --get-regexp, same flags",
+	      strstr(slurp("argv"), want) != NULL);
+	{
+		static const char rm[] = "remote.up.url https://github.com/o/r2\n"
+			"remote.origin.url https://github.com/x/r.git\n";
+
+		put("remotes", rm, sizeof rm - 1);
+	}
+	CHECK("git: a commit URL, other repos' remotes: not_commit",
+	      res("https://github.com/o/r/commit/abcdef1234", "proj", 1, &r) == 1
+	      && is(&r, "commit", "not_commit"));
+	{
+		static const char rm[] = "remote.up.url https://github.com/o/r2\n"
+			"remote.origin.url git@github.com:O/R.git\n";
+
+		put("remotes", rm, sizeof rm - 1);
+	}
+	s0 = xr_res_spawned;
+	CHECK("git: a commit URL, a remote names it: ok, 3 spawns",
+	      res("https://github.com/o/r/commit/abcdef1234", "proj", 1, &r) == 1
+	      && is(&r, "commit", "ok") && xr_res_spawned == s0 + 3 &&
+	      strstr(slurp("argv"), "abcdef1234^{commit}\n"));
+	mode("cfgerr");
+	CHECK("git: config fails: no line",
+	      res("https://github.com/o/r/commit/abcdef1234", "proj", 1, &r) == 0);
+	put("remotes", "", 0);
 	CHECK("git: a relative or empty cwd: not_repo, no spawn",
 	      (s0 = xr_res_spawned, 1) &&
 	      xr_ref_parse("abcdef1", NULL, &sp) &&
@@ -2567,7 +2705,7 @@ t_res_git(void)
 
 		CHECK("git: no fd of the querying process reaches git (one without "
 		      "CLOEXEC open), only 0 1 2",
-		      x >= 3 && self[0] && res("abcdef1", "proj", 1, &r) == 1 &&
+		      x >= 3 && self[0] && res("abcdef1", "proj", 1, &r) == 0 &&
 		      !strcmp(slurp("fds"), "0 1 2\n"));
 		if (strcmp(slurp("fds"), "0 1 2\n"))
 			printf("  fds: [%s] fd %d\n", slurp("fds"), x);
@@ -2576,9 +2714,9 @@ t_res_git(void)
 	}
 	mode("flood");
 	t0 = xr_now_ms();
-	CHECK("git: a 10 MB flood on both pipes is drained, git exits",
-	      res("abcdef1", "proj", 1, &r) == 1 &&
-	      is(&r, "commit", "not_commit") && xr_now_ms() - t0 < XR_GIT_MS);
+	CHECK("git: a 10 MB flood on both pipes is drained, git exits, no "
+	      "block from it", res("abcdef1", "proj", 1, &r) == 0 &&
+	      xr_now_ms() - t0 < XR_GIT_MS);
 	for (k = 0; k < 2; k++)
 	{
 		mode(k ? "slowrev" : "slow");
@@ -2599,6 +2737,19 @@ t_res_git(void)
 			usleep(10000);
 		CHECK("git: the timeout ends git's whole group (kill(-pgid, 0): ESRCH)",
 		      pid > 0 && kill(-pid, 0) == -1 && errno == ESRCH);
+	}
+	/* LOW-3: a git that outlives SIGKILL holds dch at most 1 s past the
+	** grace, then is left (here reaped by the test) */
+	mode("stuck");
+	put("pid", "", 0);
+	t0 = xr_now_ms();
+	CHECK("git: a git SIGKILL cannot end: timeout, by 3 s + 1 s grace + 1 s",
+	      res("abcdef1", "proj", 1, &r) == 1 && is(&r, "commit", "timeout") &&
+	      xr_now_ms() - t0 < XR_GIT_MS + 2500);
+	if ((pid = (pid_t)atoi(slurp("pid"))) > 0)
+	{
+		kill(pid, SIGKILL);
+		(void)waitpid(pid, NULL, 0);
 	}
 	/* 3.7: SIGTERM to the querying process takes git's group with it */
 	mode("slow");
@@ -2658,6 +2809,24 @@ t_res_parse(void)
 	      xr_git_parse(b, n, 100 + 300, &r) && strstr(r.subtitle, "5m ago") &&
 	      xr_git_parse(b, n, 100 + 3 * 86400, &r) &&
 	      strstr(r.subtitle, "3d ago"));
+#define GR(s) xr_git_remote(s, strlen(s), "o/r")
+	CHECK("git remote: https, /, ssh, scp form, a token, case, 2nd line",
+	      GR("remote.o.url https://github.com/o/r.git\n") &&
+	      GR("remote.o.url https://github.com/o/r/") &&
+	      GR("remote.o.url ssh://git@github.com/O/R") &&
+	      GR("remote.o.url git@github.com:o/r.git") &&
+	      GR("remote.o.url https://u:t@github.com/o/r") &&
+	      GR("remote.a.url x\nremote.b.url https://github.com/o/r"));
+	CHECK("git remote: another repo, owner, host, a path, a cut: no",
+	      !GR("remote.o.url https://github.com/o/r2") &&
+	      !GR("remote.o.url https://github.com/x/r") &&
+	      !GR("remote.o.url https://github.com/o/r.git2") &&
+	      !GR("remote.o.url https://notgithub.com/o/r") &&
+	      !GR("remote.o.url https://e.com/github.com/o/r") &&
+	      !GR("remote.o.url https://github.com.e/o/r") &&
+	      !xr_git_remote("remote.o.url https://github.com/o/r", 34, "o/r") &&
+	      !GR("github.com/o/r") && !GR(""));
+#undef GR
 	CHECK("git parse: a short hash, a missing field, a non-digit time: no",
 	      !xr_git_parse("abc\0A\0" "1\0s\n", 10, 0, &r) &&
 	      !xr_git_parse(b, 45, 0, &r) &&
@@ -2936,6 +3105,15 @@ main(int argc, char **argv)
 			if (fcntl(fd, F_GETFD) != -1)
 				printf("%s%d", n++ ? " " : "", fd);
 		printf("\n");
+		return 0;
+	}
+	/* the fake git SIGKILL cannot end: out of its group, as a git stuck in
+	** uninterruptible I/O is to waitpid (QA 1.55.0 LOW-3) */
+	if (argc == 2 && !strcmp(argv[1], "--stuck"))
+	{
+		(void)setpgid(0, getpgid(getppid()));
+		signal(SIGTERM, SIG_IGN);
+		sleep(20);
 		return 0;
 	}
 	if (!realpath(argv[0], self))

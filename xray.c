@@ -1305,7 +1305,7 @@ xr_codex_lookup(const char *home, const char *tid, char *path, size_t pathsz,
 	DIR *sd, *yd, *md, *dd;
 	struct dirent *de;
 	struct stat s;
-	int y, m, day, days = 0, hits = 0;
+	int y, m, day, days = 0, ups = 0, hits = 0;
 	size_t tl = strlen(tid);
 
 	if (!xr_config_ok(home) || !xr_uuid_shaped(tid) ||
@@ -1313,21 +1313,27 @@ xr_codex_lookup(const char *home, const char *tid, char *path, size_t pathsz,
 	    !(sd = cx_dir(AT_FDCWD, dir)))
 		return -1;
 	cx_names(sd, 4, yb);
-	for (y = 9999; y >= 0 && days < XR_CODEX_DAYS && hits < 2; y--)
+	/* year and month dirs opened count too, against a bound of their own:
+	** empty ones open no day dir (QA 1.55.0 LOW-11) */
+	for (y = 9999; y >= 0 && days < XR_CODEX_DAYS && ups < XR_CODEX_DAYS &&
+	     hits < 2; y--)
 	{
 		unsigned char mb[13] = {0};
 
 		snprintf(ys, sizeof ys, "%04d", y);
 		if (!CX_HAS(yb, (unsigned)y) || !(yd = cx_dir(dirfd(sd), ys)))
 			continue;
+		ups++;
 		cx_names(yd, 2, mb);
-		for (m = 99; m >= 0 && days < XR_CODEX_DAYS && hits < 2; m--)
+		for (m = 99; m >= 0 && days < XR_CODEX_DAYS && ups < XR_CODEX_DAYS &&
+		     hits < 2; m--)
 		{
 			unsigned char db[13] = {0};
 
 			snprintf(ms, sizeof ms, "%02d", m);
 			if (!CX_HAS(mb, (unsigned)m) || !(md = cx_dir(dirfd(yd), ms)))
 				continue;
+			ups++;
 			cx_names(md, 2, db);
 			for (day = 99; day >= 0 && days < XR_CODEX_DAYS && hits < 2;
 			     day--)
@@ -1337,7 +1343,9 @@ xr_codex_lookup(const char *home, const char *tid, char *path, size_t pathsz,
 				    !(dd = cx_dir(dirfd(md), ds)))
 					continue;
 				days++;
-				/* "<any>-<tid>.jsonl", a regular file, not a link */
+				/* "<any>-<tid>.jsonl", a regular file, not a link; ours and
+				** not group- or world-writable, as a snapshot (QA 1.55.0
+				** NIT-6) */
 				while ((de = readdir(dd)) && hits < 2)
 				{
 					size_t n = strlen(de->d_name);
@@ -1349,7 +1357,8 @@ xr_codex_lookup(const char *home, const char *tid, char *path, size_t pathsz,
 					    strcmp(de->d_name + n - 6, ".jsonl") || dfd < 0 ||
 					    fstatat(dfd, de->d_name, &s,
 					            AT_SYMLINK_NOFOLLOW) < 0 ||
-					    !S_ISREG(s.st_mode))
+					    !S_ISREG(s.st_mode) || s.st_uid != getuid() ||
+					    (s.st_mode & 022))
 						continue;
 					if (hits++ == 0 &&
 					    snprintf(path, pathsz, "%s/%s/%s/%s/%s", dir, ys,
@@ -7131,7 +7140,7 @@ res_keep(char *b, size_t *bn, size_t cap, const char *s, ssize_t n)
 }
 
 /* Reap pid, by `until` (ms), else end its group: SIGTERM, a 1 s grace,
-** SIGKILL (#833). 0 exited (*st), 1 timed out. */
+** SIGKILL, at most 1 s more (#833). 0 exited (*st), 1 timed out. */
 static int
 res_reap(pid_t pid, long long until, int *st)
 {
@@ -7147,8 +7156,12 @@ res_reap(pid_t pid, long long until, int *st)
 	     (w = waitpid(pid, st, WNOHANG)) == 0 && xr_now_ms() < grace;)
 		poll(NULL, 0, 20);
 	kill(-pid, SIGKILL);	/* what ignored SIGTERM, the leader's kids */
-	if (w == 0)
-		(void)waitpid(pid, st, 0);
+	/* a git in uninterruptible I/O (a stalled mount) outlives SIGKILL: it is
+	** left unreaped, to init when this one-shot process ends (QA 1.55.0
+	** LOW-3) */
+	for (grace = xr_now_ms() + 1000; w == 0 &&
+	     (w = waitpid(pid, st, WNOHANG)) == 0 && xr_now_ms() < grace;)
+		poll(NULL, 0, 20);
 	return 1;
 }
 
@@ -7363,9 +7376,47 @@ xr_git_parse(const char *s, size_t n, long long now, struct xr_resolved *r)
 	return 1;
 }
 
-/* GitCommitResolver (8.3): rev-parse, then show, under one 3 s deadline. */
+int
+xr_git_remote(const char *s, size_t n, const char *want)
+{
+	static const char host[] = "github.com";
+	size_t wl = strlen(want), hl = sizeof host - 1, i, e, k, l;
+	const char *t;
+
+	for (i = 0; i < n; i = e + 1)
+	{
+		for (e = i; e < n && s[e] != '\n'; e++)
+			;
+		for (k = i; k < e && s[k] != ' '; k++)	/* the key, then the url */
+			;
+		for (k++; k + hl < e; k++)
+		{
+			/* "@github.com:" or "//github.com/", then exactly o/r */
+			if ((s[k - 1] != '@' &&
+			     (k < i + 2 || s[k - 2] != '/' || s[k - 1] != '/')) ||
+			    strncasecmp(s + k, host, hl) ||
+			    (s[k + hl] != ':' && s[k + hl] != '/'))
+				continue;
+			t = s + k + hl + 1;
+			l = (size_t)(s + e - t);
+			if (l < wl || strncasecmp(t, want, wl))
+				continue;
+			t += wl;
+			l -= wl;
+			if (l >= 4 && !strncasecmp(t, ".git", 4))
+				t += 4, l -= 4;
+			if (!l || (l == 1 && *t == '/'))
+				return 1;
+		}
+	}
+	return 0;
+}
+
+/* GitCommitResolver (8.3): rev-parse, then show, under one 3 s deadline.
+** gh, a commit URL's "<owner>/<repo>": config's remote URLs run between,
+** and a repo none of them names is not that commit's (QA 1.55.0 LOW-1). */
 static int
-res_commit(const char *sha, const char *cwd, int live,
+res_commit(const char *sha, const char *cwd, int live, const char *gh,
            struct xr_resolved *r)
 {
 	static struct res_run run;	/* 68 KB: off the stack */
@@ -7374,7 +7425,7 @@ res_commit(const char *sha, const char *cwd, int live,
 	const char *h = getenv("HOME"), *b;
 	size_t n = strlen(sha), k, e = 0, a = 0;
 	long long until;
-	int rc;
+	int rc, foreign = 0;
 
 	/* 8.3: checked again, 7-40 lowercase hex, so it is never an option */
 	if (n < 7 || n > 40 || !res_hex(sha, n))
@@ -7443,10 +7494,31 @@ res_commit(const char *sha, const char *cwd, int live,
 		return 0;
 	if (rc == 0 && (run.status != 0 || strcmp(run.out, "true\n")))
 	{
+		/* only git's own "not a git repository" (or a cwd gone) says so;
+		** any other git error gives no line (QA 1.55.0 LOW-4) */
+		if (run.status != 0 && !strstr(run.err, "not a git repository") &&
+		    !strstr(run.err, "cannot change to"))
+			return 0;
 		res_set(r, "not_repo", "Not in a git repository");
 		return 1;
 	}
-	if (rc == 0)
+	if (rc == 0 && gh)
+	{
+		static char s0[] = "config", s1[] = "--get-regexp",
+		            s2[] = "^remote\\..*\\.url$";
+
+		av[a] = s0;
+		av[a + 1] = s1;
+		av[a + 2] = s2;
+		av[a + 3] = NULL;
+		if ((rc = res_run(av, env, until, &run)) < 0)
+			return 0;
+		/* 1: no remote at all; above it, a git error: no line */
+		if (rc == 0 && run.status != 0 && run.status != 1)
+			return 0;
+		foreign = rc == 0 && !xr_git_remote(run.out, run.on, gh);
+	}
+	if (rc == 0 && !foreign)
 	{
 		static char s0[] = "show", s1[] = "--no-color", s2[] = "--no-ext-diff",
 		            s3[] = "--no-textconv", s4[] = "--stat=80",
@@ -7467,13 +7539,20 @@ res_commit(const char *sha, const char *cwd, int live,
 		res_set(r, "timeout", "git timed out after 3 s");
 		return 1;
 	}
-	if (run.status == 0 &&
-	    xr_git_parse(run.out, run.on, (long long)time(NULL), r))
-		return 1;
-	if (strstr(run.err, " is ambiguous"))
+	if (!foreign)
 	{
-		res_set(r, "ambiguous", "Ambiguous short SHA");
-		return 1;
+		if (run.status == 0 &&
+		    xr_git_parse(run.out, run.on, (long long)time(NULL), r))
+			return 1;
+		if (strstr(run.err, " is ambiguous"))
+		{
+			res_set(r, "ambiguous", "Ambiguous short SHA");
+			return 1;
+		}
+		/* git's own "unknown revision" only; a git that failed otherwise
+		** (a bad .gitmodules, a missing blob) gives no line (LOW-4) */
+		if (!strstr(run.err, "unknown revision"))
+			return 0;
 	}
 	(void)res_root(dir, root, sizeof root);
 	b = strrchr(root, '/');
@@ -7679,16 +7758,25 @@ res_file(const char *key, const char *text, const char *cwd,
 		res_set(r, "too_large", "Not previewed: over 2 MB");
 	else
 	{
+		/* a NUL in the first 8000 bytes (git's test): binary, said in the
+		** subtitle, no lines of U+FFFD (QA 1.55.0 NIT-2) */
+		int bin = memchr(buf, '\0', n < 8000 ? n : 8000) != NULL;
+
 		base = strrchr(p, '/') + 1;
 		r->state = "ok";
 		res_text(r->title, base, strlen(base), XR_TITLE_MAX);
-		if (line > 0)
-		{
+		if (bin)
+			snprintf(shown + strlen(shown), sizeof shown - strlen(shown),
+			         " \xc2\xb7 binary");
+		else if (line > 0)
 			snprintf(shown + strlen(shown), sizeof shown - strlen(shown),
 			         " \xc2\xb7 line %ld", line);
+		if (bin || line > 0)
 			res_text(r->subtitle, shown, strlen(shown), XR_RES_LINE);
-		}
-		xr_file_lines(buf, n, line, r);
+		if (bin)
+			r->first = 1;
+		else
+			xr_file_lines(buf, n, line, r);
 	}
 	free(buf);
 	return 1;
@@ -7700,7 +7788,18 @@ xr_res_ref(const struct xr_span *sp, const char *text, const char *cwd,
 {
 	memset(r, 0, sizeof *r);
 	if (sp->shape == XR_COMMIT)
-		return res_commit(sp->full, cwd ? cwd : "", live, r);
+	{
+		/* url_kind made it: https://github.com/<o>/<r>/commit/<sha> */
+		const char *u = strstr(text, "https://github.com/");
+		const char *o = u ? u + 19 : "", *e = strchr(o, '/');
+		char gh[160];
+
+		e = e ? strchr(e + 1, '/') : NULL;
+		if (u && (!e || snprintf(gh, sizeof gh, "%.*s", (int)(e - o), o)
+		          >= (int)sizeof gh))
+			return 0;
+		return res_commit(sp->full, cwd ? cwd : "", live, u ? gh : NULL, r);
+	}
 	if (sp->shape == XR_FILE)
 		return res_file(xr_span_text(sp), text, cwd ? cwd : "", r);
 	return 0;
