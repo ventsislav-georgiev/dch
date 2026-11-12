@@ -3328,33 +3328,6 @@ rq_check(char *name, int ac, char **av, char *msg, size_t cap)
 	return fl < 0 ? -1 : 0;
 }
 
-/* s as a JSON string as sb_q writes it, plus the code points cp_ctl has
-** and dch_json_quote leaves raw (U+061C, U+2028, U+2029, #167) as \u
-** escapes: the same JSON value, inert on a terminal. Pure. */
-static void
-rq_q(struct sb *o, const char *s)
-{
-	struct sb t = {0};
-	size_t i;
-	unsigned cp;
-	char e[8];
-	int k;
-
-	sb_q(&t, s);
-	o->bad |= t.bad;
-	for (i = 0; !t.bad && i < t.n; i += (size_t)k)
-		if (!(k = utf8_at((const unsigned char *)t.p + i, &cp)))
-			sb_add(o, t.p + i, (size_t)(k = 1));	/* never: sb_q writes UTF-8 */
-		else if (cp >= 0x80 && cp_ctl(cp))
-		{
-			snprintf(e, sizeof e, "\\u%04x", cp);
-			sb_s(o, e);
-		}
-		else
-			sb_add(o, t.p + i, (size_t)k);
-	free(t.p);
-}
-
 static void
 rq_head(struct sb *o, long long req)
 {
@@ -3371,7 +3344,7 @@ rq_err(struct sb *o, long long req, const char *s)
 {
 	rq_head(o, req);
 	sb_s(o, ",\"stderr\":");
-	rq_q(o, s);
+	sb_q(o, s);
 	sb_s(o, "}\n");
 }
 
@@ -3462,7 +3435,7 @@ rq_wrap(struct sb *o, long long req, int err, struct sb *buf, int last)
 		{
 			rq_head(o, req);
 			sb_s(o, ",\"line\":");
-			rq_q(o, s);
+			sb_q(o, s);
 			sb_s(o, "}\n");
 		}
 		if (o->bad)
@@ -3502,7 +3475,7 @@ rq_ready(struct sb *o, const char *js)
 			    dch_json_decode(&jp, i, got, sizeof got) == 0)
 			{
 				sb_s(o, n++ ? "," : "");
-				rq_q(o, got);
+				sb_q(o, got);
 			}
 	dch_json_free(&jp);
 	sb_s(o, "]}}\n");
@@ -3828,7 +3801,7 @@ rq_fail(int code, const char *msg)
 	if (msg)
 	{
 		sb_s(&o, ",\"stderr\":");
-		rq_q(&o, msg);
+		sb_q(&o, msg);
 	}
 	sb_s(&o, "}\n");
 	(void)rq_put(&o);

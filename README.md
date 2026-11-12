@@ -2394,7 +2394,7 @@ since it may be on a LAN or behind a name tailscale does not know. Every byte
 from a peer is untrusted: frames and JSON fields are bounded, and every name
 or message a peer sent is printed with its control characters escaped
 (`\xNN`), in `--ls`, `-lj` and the picker; `--ls-json` writes C1 and bidi
-controls as `\u` escapes. Only the screen bytes of an attach go to the
+controls, U+2028 and U+2029 as `\u` escapes, as all of dch's JSON does. Only the screen bytes of an attach go to the
 terminal as they are, as a local session's do.
 
 **Not yet.** No live list stream (the picker polls), no remote rename (`-rl`)

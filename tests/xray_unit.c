@@ -5,7 +5,8 @@
 ** caps (keys, spans, definitions, the dropped set) and the config_dir check;
 ** --chapter (#156): the anchor rule and a chapter's entries; resolvers
 ** (#159, XR6): the file rules and every state, git's argv, env, probe,
-** states, timeout and group kill through a fake git.
+** states, timeout and group kill through a fake git; json.c's quoting of
+** the code points a terminal acts on (QA 1.55.0 LOW-7).
 **
 **   cc -I. -o xray_unit tests/xray_unit.c xray.c json.c && ./xray_unit
 */
@@ -23,6 +24,7 @@
 #include <unistd.h>
 #include "xray.h"
 #include "ring.h"
+#include "bridge.h"
 
 static int fails;
 
@@ -2543,6 +2545,31 @@ t_excl(void)
 	}
 }
 
+/* json.c's dch_json_quote (QA 1.55.0 LOW-7): every code point a terminal
+** acts on as \u, its neighbours raw */
+static int
+quoted(const char *s, const char *want)
+{
+	char b[64];
+
+	return dch_json_quote(b, sizeof b, s) != SIZE_MAX && !strcmp(b, want);
+}
+
+static void
+t_quote(void)
+{
+	CHECK("quote: U+061C, U+2028, U+2029 as \\u",
+	      quoted("a\xd8\x9c" "b\xe2\x80\xa8" "c\xe2\x80\xa9",
+	             "\"a\\u061cb\\u2028c\\u2029\""));
+	CHECK("quote: C1, LRM, RLE, RLO, LRI, PDI as \\u, as before",
+	      quoted("\xc2\x85\xe2\x80\x8e\xe2\x80\xab\xe2\x80\xae"
+	             "\xe2\x81\xa6\xe2\x81\xa9",
+	             "\"\\u0085\\u200e\\u202b\\u202e\\u2066\\u2069\""));
+	CHECK("quote: U+061B, U+2027, U+202F, U+00A0 stay raw",
+	      quoted("\xd8\x9b\xe2\x80\xa7\xe2\x80\xaf\xc2\xa0",
+	             "\"\xd8\x9b\xe2\x80\xa7\xe2\x80\xaf\xc2\xa0\""));
+}
+
 int
 main(int argc, char **argv)
 {
@@ -2582,6 +2609,7 @@ main(int argc, char **argv)
 	t_resolve();
 	t_codex();
 	t_codex_lookup();
+	t_quote();
 	printf("%s: %d failed\n", fails ? "FAIL" : "ok", fails);
 	return fails != 0;
 }

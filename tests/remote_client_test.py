@@ -558,6 +558,37 @@ def xray_checks(dch, check, senv, cenv, port, fakes, tmp, slog):
     check("xray parity: each remote form ran one ctl on the host",
           ctls() - n0 == 8, ctls() - n0)
 
+    # QA 1.55.0 LOW-7: the host's JSON escapes U+061C, U+2028 and U+2029
+    # as \u, so its lines pass --requests as objects, byte for byte. A
+    # title ends at U+2028 (a newline), so the title carries U+061C and
+    # the chapter's entry all three.
+    hist(3, proj, ["see\u061c it a\u2028b\u2029c"])
+    loc = dch(senv, "--xray", "xrs3", "--json")
+    o = json.loads(loc.stdout) if loc.returncode == 0 else {}
+    ch = o.get("chapters", [])
+    check("xray xrs3 on the host: U+061C in its title, written \\u061c",
+          len(ch) == 1 and ch[0]["title"] == "see\u061c it a"
+          and "\\u061c" in loc.stdout and "\u061c" not in loc.stdout,
+          (loc.returncode, loc.stdout[:400], loc.stderr))
+    rq = Requests(xenv, "srv:xrs3")
+    rq.line()
+    for req, argv, esc in (
+            (1, ["--json"], [b"\\u061c"]),
+            (2, ["--chapter", ch[0]["anchor"] if ch else "s1", "--json"],
+             [b"\\u061c", b"\\u2028", b"\\u2029"])):
+        lr = subprocess.run([DCH, "--xray", "xrs3"] + argv, env=senv,
+                            capture_output=True, stdin=subprocess.DEVNULL)
+        rq.send({"req": req, "argv": argv})
+        got = rq.until(req)
+        want = [b'{"req":%d,"line":%s}' % (req, x)
+                for x in lr.stdout.splitlines()]
+        check("requests %s on xrs3: U+061C/U+2028/U+2029 \\u-escaped, "
+              "the host's lines as objects, byte for byte" % " ".join(argv),
+              lr.returncode == 0 and all(e in lr.stdout for e in esc)
+              and got == want + [b'{"req":%d,"exit":0,"why":null}' % req],
+              (want, got))
+    rq.end()
+
     # 3.1's value rules, here first: the local run's line, nothing sent
     n0 = ctls()
     for a, line in ((["--ref", "#1\x01"], "dch: bad ref"),
