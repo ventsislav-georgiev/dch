@@ -2416,7 +2416,9 @@ transcripts.
 no cap). At that cap the server
 stops forwarding, sends the dch SIGTERM (SIGKILL 2 s later) and ends with
 `{"exit":2,"why":"cap"}`. Past its timeout (the table) it does the same with
-`"why":"timeout"`. A client that closes the connection (or half-closes it)
+`"why":"timeout"`. A device (its tailnet address) runs at most 2
+`--xray --follow` of one session: a third ends the oldest the same way, with
+`"why":"timeout"`, and is run once more 1 s later if it met `busy` first. A client that closes the connection (or half-closes it)
 while the verb runs ends it as a `0x34` does (the same 2 s or 660 s grace),
 with no `0x33` (the log line reads `ctl done after the close: dch exit 1`);
 the handler then holds its connection slot, one of the peer's 16, until the

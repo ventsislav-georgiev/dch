@@ -28,6 +28,9 @@ for children; refused peers cached before fork. #094: every refusal of a
 tailnet peer is one exact 0x13 {"code","message"} then the close (the
 cached one too); an address off the tailnet gets no byte. #095: past the
 per-peer limit, the transient {"code":"busy"} then the close, never cached.
+#202: a device runs at most 2 --xray --follow of one session; a third ends
+the oldest as a timeout cut, never busy for it; 4 stalled follows of one
+device leave 2 master slots free.
 
 Run:  python3 tests/serve_test.py        (uses ./dch)
 """
@@ -479,6 +482,189 @@ def main():
         stop(cp)
         subprocess.run([DCH, "-k", "svc"], env=env, capture_output=True,
                        timeout=15)
+
+    def follow_cap_checks():
+        """#202 (QA 1.56.0 LOW-R4, spec v3.2.4): a device (its address)
+        runs at most 2 --xray --follow of one session; a third closes its
+        oldest, which ends as a timeout cut does (0x33 exit 2, "timeout").
+        The master's 4 subscriber slots stay as they are: a fifth of
+        another identity is still busy (QA 1.52.0 LOW-7)."""
+        ts()
+        p, port, log = serve()
+        want = b'{"schema":1,"snapshot":{"schema":1,"session":"'
+        for n in ("svf", "svg"):
+            subprocess.run([DCH, "--spawn", n, "--size", "40x5", "--",
+                            "/bin/sh"], env=env, capture_output=True,
+                           timeout=15)
+        time.sleep(0.5)
+        locs, evn = [], [0]
+
+        def ran(n):
+            return text(log).count(" ctl --xray %s (pid" % n)
+
+        def fl(n="svf", src=None, order=("--follow", "--json"), read=True):
+            """A follow from src: its socket, once its dch runs (and, read,
+            with its first frame, the snapshot, in fl.first)."""
+            k = ran(n)
+            s = conn(port, src)
+            send(s, 0x30, {"argv": ["--xray", n] + list(order)})
+            end = time.time() + 8
+            while time.time() < end and ran(n) <= k:
+                time.sleep(0.05)
+            fl.first = frame(s) if read else None
+            return s
+
+        def end_of(s, secs):
+            """The 0x33 that ends s's follow within secs, else None."""
+            s.settimeout(secs)
+            try:
+                t, pl = frame_not(s, (0x31, 0x32))
+                return (t, pl)
+            except socket.timeout:
+                return None
+            except (EOFError, OSError) as e:
+                return ("lost", str(e))
+
+        def event(socks):
+            """Each of socks gets a 0x31 (a ref delta) after a line in svf
+            that names a new ref."""
+            evn[0] += 1
+            subprocess.run([DCH, "--send", "svf", "--", "echo see o/r#%d"
+                            % (202000 + evn[0])], env=env,
+                           capture_output=True, timeout=15)
+            got = []
+            for s in socks:
+                s.settimeout(6)
+                try:
+                    got.append(frame(s)[0] == 0x31)
+                except (socket.timeout, EOFError, OSError):
+                    got.append(False)
+            return all(got)
+
+        def local():
+            """A local --xray svf --json --follow: "following" while it
+            runs (its slot), else its exit and stderr."""
+            out = os.path.join(tmp, "loc%d" % len(locs))
+            lp = subprocess.Popen([DCH, "--xray", "svf", "--json",
+                                   "--follow"], env=env,
+                                  stdin=subprocess.DEVNULL,
+                                  stdout=open(out, "w"),
+                                  stderr=subprocess.PIPE)
+            locs.append(lp)
+            try:
+                return lp.wait(3), lp.stderr.read()
+            except subprocess.TimeoutExpired:
+                return "following", text(out)[:len(want)].encode()
+
+        timeout = (0x33, b'{"exit":2,"why":"timeout"}')
+        # three of one session from one device: the oldest ends as a
+        # timeout cut; the two newest (one with its flags the other way
+        # round) still run and still deliver an event
+        a = fl()
+        b = fl(order=("--json", "--follow"))
+        c = fl()
+        firsts = fl.first
+        ea = end_of(a, 5)
+        eb, ec = end_of(b, 1), end_of(c, 1)
+        check("#202: a third --xray --follow of a session from one device "
+              "ends its oldest: 0x33 exit 2, why timeout", ea == timeout)
+        check("#202: the two newest still run (no 0x33)",
+              eb is None and ec is None and firsts[0] == 0x31
+              and firsts[1].startswith(want))
+        if mirror:
+            check("#202: the two newest still deliver an event",
+                  event([b, c]))
+        check("#202: the parent says which it closed",
+              "the device's oldest --xray --follow of svf" in text(log))
+        # another session's follows from the same device do not count
+        g1, g2 = fl("svg"), fl("svg")
+        check("#202: follows of another session from the device do not "
+              "count with these", end_of(b, 1.5) is None
+              and end_of(c, 0.2) is None and end_of(g1, 0.2) is None
+              and end_of(g2, 0.2) is None)
+        for s in (a, b, c, g1, g2):
+            s.close()
+        time.sleep(1)
+        # another device: its own 2, never closing this device's
+        try:
+            with socket.socket() as t:
+                t.bind(("127.0.0.2", 0))
+            two = True
+        except OSError:
+            two = False
+            print("skip #202 two devices (no 127.0.0.2 here: macOS lo0 "
+                  "has only 127.0.0.1 unless aliased)")
+        if two:
+            d1, d2 = fl(), fl()
+            o1, o2 = fl(src="127.0.0.2"), fl(src="127.0.0.2")
+            check("#202: two devices, 2 follows each: none closed",
+                  all(end_of(s, 1 if s is d1 else 0.2) is None
+                      for s in (d1, d2, o1, o2)))
+            o3 = fl(src="127.0.0.2")
+            check("#202: a third from one device closes its own oldest "
+                  "only", end_of(o1, 5) == timeout
+                  and all(end_of(s, 0.5 if s is d1 else 0.2) is None
+                          for s in (d1, d2, o2, o3)))
+            for s in (d1, d2, o1, o2, o3):
+                s.close()
+            time.sleep(1)
+        if mirror:
+            # 4 that never read, from one device: 2 master slots stay free
+            k = text(log).count("--follow of svf")
+            st = [fl(read=False) for _ in range(4)]
+            end = time.time() + 8
+            while time.time() < end and \
+                    text(log).count("--follow of svf") < k + 2:
+                time.sleep(0.05)
+            time.sleep(0.5)
+            check("#202: a device's 4 stalled follows leave a local "
+                  "--xray --follow a slot (not busy, LOW-R4)",
+                  local() == ("following", want))
+            for s in st:
+                s.close()
+            for lp in locs:
+                lp.terminate()
+                lp.wait(5)
+            del locs[:]
+            time.sleep(1.5)
+            # 2 local followers and 2 of the device fill the 4 slots: the
+            # device's third does not get busy for its own closing one
+            l1, l2 = local(), local()
+            a, b = fl(), fl()
+            c = fl()
+            firsts = fl.first
+            check("#202: with the 4 slots full, the device's third gets "
+                  "its snapshot, not busy",
+                  l1 == l2 == ("following", want) and firsts[0] == 0x31
+                  and firsts[1].startswith(want) and end_of(a, 5) == timeout
+                  and end_of(c, 0.5) is None)
+            check("#202: ... and runs on: an event reaches it", event([b, c]))
+            check("#202: a fifth of another identity is still busy "
+                  "(LOW-7 stands)", local()[0] == 1)
+            for s in (a, b, c):
+                s.close()
+            for lp in locs:
+                lp.terminate()
+                lp.wait(5)
+            del locs[:]
+            time.sleep(1.5)
+            # 4 local followers: the device's first is busy, after one run
+            # more (its own older one might have been closing)
+            ls = [local() for _ in range(4)]
+            k = text(log).count("busy at its start")
+            got = ctl1(port, ["--xray", "svf", "--follow", "--json"])
+            check("#202: the slots full of others: a device's follow is "
+                  "busy, once retried",
+                  all(x == ("following", want) for x in ls)
+                  and got == ("ran", 1, None, b"", b"dch: busy\n")
+                  and text(log).count("busy at its start") == k + 1)
+            for lp in locs:
+                lp.terminate()
+                lp.wait(5)
+        stop(p)
+        for n in ("svf", "svg"):
+            subprocess.run([DCH, "-k", n], env=env, capture_output=True,
+                           timeout=15)
 
     try:
         mirror = subprocess.run([DCH, "--build"], env=env, capture_output=True,
@@ -1067,6 +1253,7 @@ exec %s "$@"
         s.close()
         xray_checks(port, log)
         stop(p)
+        follow_cap_checks()
 
         # --- the gate, per connection (whois runs per peer) --------------
         # A refusal on tailscaled's word is remembered by the parent for

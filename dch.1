@@ -2873,6 +2873,13 @@ and
 .BR "\-\-xray \-\-follow" ,
 60 s for the rest; past it, the same with
 .BR \(dqwhy\(dq:\(dqtimeout\(dq .
+A device (its tailnet address) runs at most 2
+.B "\-\-xray \-\-follow"
+of one session: a third ends the oldest the same way, with
+.BR \(dqwhy\(dq:\(dqtimeout\(dq ,
+and is run once more 1 s later if it met
+.I busy
+first.
 A client that closes the connection while its verb runs ends it as a 0x34
 does (the same 2 s or 660 s grace), with no 0x33 (one that sent a 0x34
 first still gets it); the handler holds its connection slot, one of the

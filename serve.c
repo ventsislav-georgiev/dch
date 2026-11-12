@@ -38,7 +38,11 @@
 ** a 0x13 "busy" and the running one goes on; any other refused 0x30 is a
 ** 0x13, then the FIN. A 0x34 with no ctl running is ignored. --xray
 ** (#157, "xray" in ops) is one of them: ctl_check's own entries, its
-** --ref text checked here with xray.c's rules; --follow has no cap.
+** --ref text checked here with xray.c's rules; --follow has no cap. A
+** device (its tailnet address) runs at most 2 --xray --follow of one
+** session (#202, spec v3.2.4): a third closes the oldest as a timeout cut
+** would, so a peer that stops reading cannot hold all 4 of the master's
+** subscriber slots, and one that reconnects is never cut.
 */
 #include "dtach.h"
 #include "rframe.h"
@@ -90,6 +94,8 @@
 #define NEG_MS 30000		/* for this long, refused with no fork */
 #define MAX_SELF 16		/* `tailscale ip -4` lines kept */
 #define MAX_WATCH_PER_DEV 4	/* spec */
+#define MAX_FOLLOW_PER_DEV 2	/* --xray --follow of one session (#202) */
+#define CTL_RETRY_MS 1000	/* a follow busy at its start: run again */
 #define DEV_CAP 128
 #define MAX_ALLOW 16
 #define MAX_CMD 256
@@ -777,12 +783,17 @@ struct conn
 	** its stdout and stderr (-1 at EOF), what went out of them, its
 	** timeout (0 none) and, once cut ("cap", "timeout", "cancel",
 	** "closed"), when SIGKILL follows the SIGTERM; whether it is a
-	** CTL_LONG verb; its cap (CTL_NOCAP: none) */
+	** CTL_LONG verb; its cap (CTL_NOCAP: none). Whether it is an --xray
+	** --follow (#202); its stderr held while it has written no stdout (a
+	** fifth subscriber's busy); the next on_ctl is its rerun; when that
+	** rerun is due (0 none) */
 	pid_t ctl;
 	int ctl_fd[2], ctl_st, ctl_reaped, ctl_long;
 	size_t ctl_sent, ctl_cap;
 	long long ctl_end, ctl_kill;
 	const char *ctl_why;
+	int ctl_follow, ctl_hold, ctl_retry;
+	long long ctl_again;
 };
 
 static struct conn C;	/* one connection per handler process */
@@ -795,6 +806,8 @@ static volatile sig_atomic_t g_taken;
 ** connection idles a tenth of g_ctl_idle (30 s), not 5 min (#122). Sticky. */
 static volatile sig_atomic_t g_press;
 static char rq_text[RF_CTRL_MAX + 3];
+static unsigned char ctl_rq[RF_CTRL_MAX];	/* a follow's 0x30, to rerun */
+static size_t ctl_rqn;
 
 static size_t
 pending(const struct conn *c)
@@ -1293,6 +1306,7 @@ static void
 ctl_cut(struct conn *c, const char *why)
 {
 	c->ctl_why = why;
+	c->ctl_hold = 0;	/* a cut one does not run again */
 	if (!c->ctl_reaped)
 	{
 		kill(c->ctl, SIGTERM);
@@ -1312,6 +1326,8 @@ ctl_read(struct conn *c, int k)
 	unsigned char buf[CTL_CHUNK];
 	ssize_t r;
 
+	if (k && c->ctl_hold)
+		return;		/* read at the reap: ctl_busy */
 	while (c->ctl_fd[k] >= 0 && (c->ctl_why || pending(c) <= OUT_HIGH))
 	{
 		if ((r = read(c->ctl_fd[k], buf, sizeof buf)) < 0 &&
@@ -1326,6 +1342,8 @@ ctl_read(struct conn *c, int k)
 			c->ctl_fd[k] = -1;
 			return;
 		}
+		if (!k)
+			c->ctl_hold = 0;	/* it has a slot: no busy now */
 		if (c->ctl_why)
 			continue;
 		if ((size_t)r > c->ctl_cap - c->ctl_sent)
@@ -1365,7 +1383,10 @@ on_ctl(struct conn *c, const unsigned char *p, size_t n)
 	char why[200], cwd[PATH_MAX], **av = NULL, *argv[CTL_ARGV_MAX + 2];
 	struct stat st;
 	int ac, fl, po[2] = { -1, -1 }, pe[2] = { -1, -1 }, k;
+	int again = c->ctl_retry;
 	pid_t pid = -1;
+
+	c->ctl_retry = 0;
 
 	if (c->attached || c->watching)
 	{
@@ -1445,8 +1466,59 @@ on_ctl(struct conn *c, const unsigned char *p, size_t n)
 	c->ctl_end = g_ctl_ms > 0 ? now_ms() + g_ctl_ms	/* --follow's too */
 	             : fl & CTL_FOREVER ? 0
 	             : now_ms() + (fl & CTL_LONG ? CTL_LONG_MS : CTL_MS);
+	/* CTL_NOCAP: only an --xray <av[1]> with --follow among its flags
+	** (ctl_xray; fuzz_serve's ctl_inv checks it). Its first run may meet
+	** a busy that this device's own older follow, being closed, causes. */
+	c->ctl_follow = !!(fl & CTL_NOCAP);
+	c->ctl_hold = c->ctl_follow && !again && n <= sizeof ctl_rq;
+	c->ctl_again = 0;
+	if (c->ctl_hold)
+	{
+		memcpy(ctl_rq, p, n);
+		ctl_rqn = n;
+	}
 	slog("%s: ctl %s %s (pid %ld)", c->ipstr, av[0], av[1], (long)pid);
+	if (c->ctl_follow)
+		notify('F', av[1]);
 	free(av);
+}
+
+/* A follow's first run that wrote no stdout, reaped: its stderr, held
+** (ctl_read), is "dch: busy" with exit 1 when the master's 4 subscriber
+** slots were full at its start. The parent may be closing this device's
+** oldest follow of the session for it (kids_note), so it runs once more
+** CTL_RETRY_MS later, nothing sent: 1. Else 0, and what it wrote goes out
+** as 0x32, as ctl_read would. */
+static int
+ctl_busy(struct conn *c, long long now)
+{
+	static const char busy[] = "dch: busy\n";
+	char b[sizeof busy];
+	ssize_t r;
+	int k;
+
+	c->ctl_hold = 0;
+	while ((r = read(c->ctl_fd[1], b, sizeof b)) < 0 && errno == EINTR)
+		;
+	if (r == (ssize_t)sizeof busy - 1 && !memcmp(b, busy, sizeof busy - 1) &&
+	    c->ctl_fd[0] < 0 && WIFEXITED(c->ctl_st) &&
+	    WEXITSTATUS(c->ctl_st) == 1)
+	{
+		for (k = 0; k < 2; k++)
+			if (c->ctl_fd[k] >= 0)
+				close(c->ctl_fd[k]);
+		c->ctl_fd[0] = c->ctl_fd[1] = -1;
+		c->ctl_again = now + CTL_RETRY_MS;
+		slog("%s: ctl --xray --follow busy at its start; once more in "
+		     "%d ms", c->ipstr, CTL_RETRY_MS);
+		return 1;
+	}
+	if (r > 0)
+	{
+		out_frame(c, 0x32, b, (size_t)r);
+		c->ctl_sent += (size_t)r;
+	}
+	return 0;
 }
 
 /* A running ctl, each turn of the loop: reaped, timed out, killed after
@@ -1462,6 +1534,17 @@ ctl_tick(struct conn *c, long long now)
 
 	if (c->ctl <= 0)
 		return;
+	if (c->ctl_again && !c->ctl_why)
+	{
+		if (now >= c->ctl_again)
+		{
+			c->ctl_again = 0;
+			c->ctl_retry = 1;
+			on_ctl(c, ctl_rq, ctl_rqn);
+		}
+		return;
+	}
+	c->ctl_again = 0;	/* cut while it waited: its 0x33 now */
 	if (!c->ctl_reaped && waitpid(c->ctl, &c->ctl_st, WNOHANG) == c->ctl)
 		c->ctl_reaped = 1;
 	if (!c->ctl_reaped && !c->ctl_why && c->ctl_end && now >= c->ctl_end)
@@ -1474,6 +1557,8 @@ ctl_tick(struct conn *c, long long now)
 	if (!c->ctl_reaped)
 		return;
 	ctl_read(c, 0);
+	if (c->ctl_hold && ctl_busy(c, now))
+		return;
 	ctl_read(c, 1);
 	if (c->ctl_fd[0] >= 0 || c->ctl_fd[1] >= 0)
 		return;
@@ -1495,6 +1580,9 @@ ctl_tick(struct conn *c, long long now)
 		     WIFEXITED(st) ? "exit" : "signal", WIFEXITED(st)
 		     ? WEXITSTATUS(st) : WTERMSIG(st));
 	free(b.p);
+	if (c->ctl_follow)
+		notify('F', "");	/* this connection follows nothing now */
+	c->ctl_follow = 0;
 	c->ctl = -1;
 	c->last_frame = now;
 }
@@ -1994,6 +2082,19 @@ serve_conn(int fd, uint32_t ip)
 			out_frame(c, 0x13, TAKEN_JSON, sizeof TAKEN_JSON - 1);
 			c->closing = 1;
 		}
+		if (g_taken && !c->attached)
+		{
+			/* #202: a third --xray --follow of this one's session from
+			** this device; it ends as a timeout cut does (0x33 exit 2,
+			** why "timeout") and the connection stays warm */
+			g_taken = 0;
+			if (c->ctl > 0 && c->ctl_follow && !c->ctl_why)
+			{
+				slog("%s: a newer --xray --follow of the session "
+				     "from this device; closing this one", c->ipstr);
+				ctl_cut(c, "timeout");
+			}
+		}
 		if (c->jiggle_at && now >= c->jiggle_at)
 		{
 			c->jiggle_at = 0;
@@ -2075,7 +2176,7 @@ serve_conn(int fd, uint32_t ip)
 		if (c->ctl > 0 && !c->closing &&
 		    (c->ctl_why || pending(c) <= OUT_HIGH))
 			for (ci = np, k = 0; k < 2; k++)
-				if (c->ctl_fd[k] >= 0)
+				if (c->ctl_fd[k] >= 0 && !(k && c->ctl_hold))
 				{
 					pf[np].fd = c->ctl_fd[k];
 					pf[np].events = POLLIN;
@@ -2141,6 +2242,8 @@ struct kid
 	long long seq;
 	char name[NAME_CAP + 1];	/* attached to */
 	char dev[DEV_CAP + 1];		/* watching for */
+	char follow[NAME_CAP + 1];	/* --xray --follow of, since fseq */
+	long long fseq;
 };
 
 static struct kid kids[MAX_CONN];
@@ -2258,7 +2361,10 @@ kids_reap(void)
 
 /* "A <pid> <name>": the newest attach to a session retires the older
 ** connections attached to it. "W <pid> <dev>": a device keeps at most 4
-** watch streams, the oldest goes. Only ever our own children. */
+** watch streams, the oldest goes. "F <pid> <name>": a device (address)
+** runs at most 2 --xray --follow of a session, the oldest is closed
+** (SIGUSR1: its handler cuts it, #202); "F <pid> " its follow ended. Only
+** ever our own children. */
 static void
 kids_note(const char *line)
 {
@@ -2270,8 +2376,34 @@ kids_note(const char *line)
 	for (i = 0; i < nkids; i++)
 		if (kids[i].pid == (pid_t)pid)
 			k = &kids[i];
-	if (!k || *end != ' ' || (line[0] != 'A' && line[0] != 'W'))
+	if (!k || *end != ' ' ||
+	    (line[0] != 'A' && line[0] != 'W' && line[0] != 'F'))
 		return;
+	if (line[0] == 'F')
+	{
+		copy_str(k->follow, sizeof k->follow, end + 1);
+		k->fseq = ++kid_seq;
+		for (;;)
+		{
+			for (old = NULL, n = 0, i = 0; k->follow[0] && i < nkids;
+			     i++)
+				if (kids[i].ip == k->ip &&
+				    !strcmp(kids[i].follow, k->follow))
+				{
+					n++;
+					if (&kids[i] != k &&
+					    (!old || kids[i].fseq < old->fseq))
+						old = &kids[i];
+				}
+			if (n <= MAX_FOLLOW_PER_DEV || !old)
+				break;
+			slog("closing pid %ld: the device's oldest --xray "
+			     "--follow of %s", (long)old->pid, k->follow);
+			kill(old->pid, SIGUSR1);
+			old->follow[0] = '\0';
+		}
+		return;
+	}
 	if (line[0] == 'A')
 	{
 		copy_str(k->name, sizeof k->name, end + 1);
@@ -2420,6 +2552,7 @@ accept_one(int lfd, int nr)
 	kids[nkids].ip = ip;
 	kids[nkids].seq = ++kid_seq;
 	kids[nkids].name[0] = kids[nkids].dev[0] = '\0';
+	kids[nkids].follow[0] = '\0';
 	nkids++;
 }
 
