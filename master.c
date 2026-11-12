@@ -1540,8 +1540,8 @@ heal_tick(int s, int has_attached_client)
 **   ESC[<...u  kitty pop     -> clear kbd_u
 **   ESC[>...m  modifyOtherKeys-> remember verbatim in kbd_m
 ** Only digits/';'/':' are allowed between the marker and the terminator, so
-** this never matches ordinary SGR (ESC[...m without the '>'). Sequences split
-** across two reads are not stitched — they are emitted atomically in practice. */
+** this never matches ordinary SGR (ESC[...m without the '>'). A sequence split
+** across two reads is stitched by track_modes. */
 static void
 track_keymode(const unsigned char *buf, size_t len)
 {
@@ -1592,7 +1592,8 @@ track_keymode(const unsigned char *buf, size_t len)
 /* Scan a chunk of child output for DEC private mode set/reset (CSI ? Pm... h/l)
 ** and update dec_on[] for any tracked mode. Handles grouped params
 ** (e.g. ESC[?1000;1006h sets both). The terminator h/l applies to every param
-** in that one sequence. Sequences split across reads are not stitched. */
+** in that one sequence. A sequence split across reads is stitched by
+** track_modes. */
 static void
 track_decmode(const unsigned char *buf, size_t len)
 {
@@ -1639,6 +1640,60 @@ track_decmode(const unsigned char *buf, size_t len)
 			}
 			break; /* h/l handled above; any other byte ends this CSI */
 		}
+	}
+}
+
+/* The tail of the last pty read when it ends inside what may still become a
+** tracked CSI (ESC, ESC[, ESC[? / ESC[> / ESC[< and parameters), so that a
+** sequence split across two reads is still seen. Only the trackers read it:
+** the bytes went to the clients and the mirror with their own read. A
+** sequence longer than the carry is dropped, not grown. */
+static unsigned char mode_carry[64];
+static size_t mode_carry_len;
+
+/* A byte that leaves a tracked CSI unfinished: an introducer or a parameter.
+** Looser than the grammar; the trackers check that on the stitched bytes. */
+static int
+mode_cont(unsigned char b)
+{
+	return (b >= '0' && b <= '9') || b == ';' || b == ':' || b == '[' ||
+	    b == '?' || b == '>' || b == '<';
+}
+
+/* track_keymode + track_decmode over one pty read, the carried head of a
+** split sequence first. */
+static void
+track_modes(const unsigned char *buf, size_t len)
+{
+	size_t e, i;
+
+	if (mode_carry_len)
+	{
+		for (e = 0; e < len && mode_cont(buf[e]); e++)
+			;
+		i = e < len ? e + 1 : e;	/* with the byte that ends it */
+		if (mode_carry_len + i > sizeof mode_carry)
+			mode_carry_len = 0;
+		else
+		{
+			memcpy(mode_carry + mode_carry_len, buf, i);
+			mode_carry_len += i;
+			if (e == len)
+				return;	/* still unfinished; buf holds no ESC */
+			track_keymode(mode_carry, mode_carry_len);
+			track_decmode(mode_carry, mode_carry_len);
+			mode_carry_len = 0;
+		}
+	}
+	track_keymode(buf, len);
+	track_decmode(buf, len);
+	for (i = len; i > 0 && len - i < sizeof mode_carry - 1 &&
+	     mode_cont(buf[i - 1]); i--)
+		;
+	if (i > 0 && buf[i - 1] == '\033')
+	{
+		mode_carry_len = len - i + 1;
+		memcpy(mode_carry, buf + i - 1, mode_carry_len);
 	}
 }
 
@@ -1760,8 +1815,7 @@ process_pty_buf(const unsigned char *buf, size_t len)
 
 	/* Remember any enhanced-keyboard mode toggles so we can re-arm a
 	** client that attaches later (see kbd_u / kbd_m). */
-	track_keymode(buf, len);
-	track_decmode(buf, len);
+	track_modes(buf, len);
 
 	/* Armed: keep the raw tail of what the child says on its way out. */
 	if (respawn_armed)
@@ -3415,6 +3469,7 @@ reset_child_modes(void)
 	char seq[256];
 	int n, k;
 
+	mode_carry_len = 0;	/* the dead child's unfinished sequence */
 	n = snprintf(seq, sizeof seq, "\033[<99u");
 	for (k = 0; k < N_DEC_MODES; k++)
 		if (dec_modes[k] == 1049 && dec_on[k])

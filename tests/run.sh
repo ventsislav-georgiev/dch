@@ -171,6 +171,7 @@ sys.exit(0 if min(one() for _ in range(20)) < 0.1 else 1)
 if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
 	pyrun "child owns alternate-screen mode" alt_screen_test.py
 	pyrun "kitty keyboard pop reaches both screens" kbd_altscreen_test.py
+	pyrun "mode sequences split across pty reads are re-armed" mode_split_test.py
 	pyrun "spawn over leftover socket + hot-path attach" spawn_test.py
 fi
 
