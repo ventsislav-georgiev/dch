@@ -398,7 +398,8 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		for (k = 0; k < 2; k++)
 		{
 			sb_add(&b, t, n - 1);
-			rq_wrap(&o, 7, k, &b, 1);
+			if (rq_wrap(&o, 7, k, &b, 1) < 0)
+				abort();	/* a line under the bound always goes */
 		}
 		rq_ready(&o, t);
 		if (b.n || o.bad)

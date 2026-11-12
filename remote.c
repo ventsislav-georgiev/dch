@@ -3208,9 +3208,14 @@ out:
 ** "why":...}. One at a time ("busy"). {"cancel":N} is a 0x34, or the
 ** close and a quiet re-dial when the host lacks "ctl-cancel". An idle close
 ** or a lost link re-dials on the next request; the one in flight then ends
-** exit 7 "lost". stdin EOF: the close, exit 0. */
+** exit 7 "lost". A host line too long to carry ends it exit 2 "cap", the
+** close and a quiet re-dial. stdin EOF: the close, exit 0. */
 
 #define RQ_LINE_MAX RF_CTRL_MAX	/* a stdin line, at most */
+/* a host line held, at most: a stock host's own cap (8 MiB); one past it,
+** or one o cannot take escaped (sb_q's SB_LIMIT / 6), ends its request
+** exit 2 "cap" */
+#define RQ_HOST_MAX (SB_LIMIT / 2)
 
 enum { RQ_BAD, RQ_REQ, RQ_CANCEL };
 
@@ -3413,8 +3418,10 @@ rq_obj(const char *s, size_t k)
 /* The complete lines of buf (all of it when last) onto o, each one line of
 ** req: stderr's escaped; stdout's byte for byte when rq_obj passes it and
 ** the wrapped line still parses, else as a JSON string, so a host never
-** writes a line of its own here. What is left stays in buf. Pure. */
-static void
+** writes a line of its own here. What is left stays in buf: 0. -1 for a
+** line over RQ_HOST_MAX (held or whole) or one o cannot take: the lines
+** before it are on o, nothing of it, and o is not bad. Pure. */
+static int
 rq_wrap(struct sb *o, long long req, int err, struct sb *buf, int last)
 {
 	struct json_parser jp;
@@ -3428,21 +3435,19 @@ rq_wrap(struct sb *o, long long req, int err, struct sb *buf, int last)
 		if (!(nl = memchr(s, '\n', buf->n - off)) && !last)
 			break;
 		k = nl ? (size_t)(nl - s) : buf->n - off;
+		if (k > RQ_HOST_MAX)
+			return -1;
 		s[k] = '\0';	/* the newline, or the sb's own NUL */
-		if (err)
-		{
-			rq_err(o, req, s);
-			off += k + 1;
-			continue;
-		}
 		obj = 0;
 		at = o->n;
-		if (rq_obj(s, k))
+		if (err)
+			rq_err(o, req, s);
+		else if (rq_obj(s, k))
 		{
 			rq_head(o, req);
 			sb_s(o, ",\"line\":");
 			sb_add(o, s, k);
-			sb_s(o, "}");
+			sb_s(o, "}\n");
 			/* wrapped, the object sits a level deeper: past json.c's
 			** depth limit the line dch wrote would not parse */
 			if (!o->bad)
@@ -3453,22 +3458,31 @@ rq_wrap(struct sb *o, long long req, int err, struct sb *buf, int last)
 					o->p[o->n = at] = '\0';
 			}
 		}
-		if (!obj)
+		if (!err && !obj)
 		{
 			rq_head(o, req);
 			sb_s(o, ",\"line\":");
 			rq_q(o, s);
-			sb_s(o, "}");
+			sb_s(o, "}\n");
 		}
-		sb_s(o, "\n");
+		if (o->bad)
+		{
+			o->bad = 0;	/* o as it was: the line is not there */
+			o->n = at;
+			if (o->p)
+				o->p[at] = '\0';
+			return -1;
+		}
 		off += k + 1;
 	}
-	if (!off)
-		return;
-	off = off < buf->n ? off : buf->n;
-	memmove(buf->p, buf->p + off, buf->n - off);
-	buf->n -= off;
-	buf->p[buf->n] = '\0';
+	if (off)
+	{
+		off = off < buf->n ? off : buf->n;
+		memmove(buf->p, buf->p + off, buf->n - off);
+		buf->n -= off;
+		buf->p[buf->n] = '\0';
+	}
+	return buf->n > RQ_HOST_MAX ? -1 : 0;
 }
 
 /* The ready line: the ops of hello js, each quoted anew. Pure. */
@@ -3622,15 +3636,16 @@ rq_lost(struct rq *q, struct sb *o, const char *why)
 	rq_close(q);
 }
 
-/* Cancelled by the close (no "ctl-cancel", or its 0x33 is late): what is
-** held is dropped, the request ends as the host's 0x34 would end it, and
-** a new connection is dialled, quietly (a failure: the next request's). */
+/* Ended by the close: "cancel" (no "ctl-cancel", or its 0x33 is late), as
+** the host's 0x34 would end it, or "cap" (a host line past what dch
+** carries), as the host's cap would. What is held is dropped, and a new
+** connection is dialled, quietly (a failure: the next request's). */
 static void
-rq_drop(struct rq *q, struct sb *o)
+rq_drop(struct rq *q, struct sb *o, const char *why)
 {
 	char m[800];
 
-	rq_exit(o, q->req, 2, "cancel");
+	rq_exit(o, q->req, 2, why);
 	q->req = q->cend = 0;
 	rq_close(q);
 	(void)rq_dial(q, m, sizeof m);
@@ -3672,10 +3687,11 @@ rq_net(struct rq *q, struct sb *o)
 		}
 		if (!q->req)
 			q->lo.n = q->le.n = 0;	/* no request of ours: dropped */
-		else
+		else if (rq_wrap(o, q->req, 1, &q->le, r) < 0 ||
+		         rq_wrap(o, q->req, 0, &q->lo, r) < 0)
 		{
-			rq_wrap(o, q->req, 1, &q->le, r);
-			rq_wrap(o, q->req, 0, &q->lo, r);
+			rq_drop(q, o, "cap");
+			return;
 		}
 		if (r && q->req && msg[0])
 		{
@@ -3710,7 +3726,7 @@ rq_cancel(struct rq *q, struct sb *o, long long req)
 	    rq_send(q->p->fd, c34, sizeof c34, m, sizeof m) == 0)
 		q->cend = now_ms() + RM_CANCEL_MS;
 	else
-		rq_drop(q, o);
+		rq_drop(q, o, "cancel");
 }
 
 /* A checked request out as a 0x30 on the warm connection, dialled first
@@ -3871,7 +3887,7 @@ dch_remote_requests(char *n)
 		if (np > 1 && pf[1].revents && q.p)
 			rq_net(&q, &o);
 		if (q.cend && now_ms() >= q.cend)
-			rq_drop(&q, &o);	/* its 0x33 never came */
+			rq_drop(&q, &o, "cancel");	/* its 0x33 never came */
 		if (!pf[0].revents)
 			continue;
 		if ((k = read(0, buf, sizeof buf)) < 0 &&
@@ -3913,8 +3929,11 @@ dch_remote_requests(char *n)
 		in.n -= off;
 	}
 	rq_close(&q);
+	rc = in.bad || o.bad;	/* never a silent end: only a failed alloc */
+	if (rc)
+		fprintf(stderr, "dch: out of memory\n");
 	free(in.p);
 	free(o.p);
-	return 0;
+	return rc;
 }
 #endif

@@ -914,7 +914,10 @@ line byte for byte (a line that is not one JSON object comes as a JSON
 string); each standard-error line as `{"req":N,"stderr":"..."}`, escaped.
 Every request ends with exactly one `{"req":N,"exit":E,"why":W}`: `E` is
 the host's exit status, `W` is `null`, `"cancel"`, `"cap"` or `"timeout"`
-(the host cut it short), `"busy"` (exit 1: a request was already running;
+(the host cut it short; `"cap"` with exit 2 also when one host line is more
+than dch carries: over 8 MiB, or over about 2.67 MiB as a standard-error
+line or a line that comes as a string; dch then closes the connection and
+dials again, unseen), `"busy"` (exit 1: a request was already running;
 the running one goes on), `"refused"` (exit 2 as above, or the host refused
 it: 1, or 4 by its gate) or `"lost"` (exit 7: the connection dropped while
 it ran). A line that is no request gets the same `refused` pair with

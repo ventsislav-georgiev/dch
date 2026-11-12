@@ -663,11 +663,13 @@ class Proxy:
     takes "ctl-cancel" out of the hello's ops; "cut" closes the first
     connection at its first 0x30 (a lost link); "hold" swallows the first
     connection's 0x30s and 0x34s (a request that never ends); "lines" sends
-    `lines` as a connection's first 0x31 and drops the rest (a host's own
-    stdout bytes)."""
+    `lines` in place of the first connection's first 0x31, as frames of
+    type `lt` of 1 MiB at most, and drops its other 0x31s (a host's own
+    stdout or stderr bytes)."""
 
-    def __init__(self, up, mode, lines=b""):
+    def __init__(self, up, mode, lines=b"", lt=0x31):
         self.up, self.mode, self.n, self.lines = up, mode, 0, lines
+        self.lt = lt
         self.sock = socket.socket()
         self.sock.bind(("127.0.0.1", 0))
         self.sock.listen(16)
@@ -714,10 +716,14 @@ class Proxy:
                         h = json.loads(body)
                         h["ops"] = [o for o in h["ops"] if o != "ctl-cancel"]
                         body = json.dumps(h).encode()
-                    if not up and t == 0x31 and self.mode == "lines":
-                        if sent:
-                            continue
-                        sent, body = True, self.lines
+                    if not up and first and t == 0x31 \
+                            and self.mode == "lines":
+                        if not sent:
+                            for i in range(0, len(self.lines), 1 << 20):
+                                b.sendall(frame(self.lt,
+                                                self.lines[i:i + (1 << 20)]))
+                        sent = True
+                        continue
                     b.sendall(frame(t, body))
         except OSError:
             return
@@ -743,10 +749,13 @@ class Requests:
         self.buf = b""
 
     def send(self, *lines):
-        self.p.stdin.write(b"".join(
-            (x if isinstance(x, bytes) else json.dumps(x).encode()) + b"\n"
-            for x in lines))
-        self.p.stdin.flush()
+        try:
+            self.p.stdin.write(b"".join(
+                (x if isinstance(x, bytes) else json.dumps(x).encode())
+                + b"\n" for x in lines))
+            self.p.stdin.flush()
+        except BrokenPipeError:
+            pass	# it has gone: the checks say so
 
     def line(self, secs=15):
         """the next stdout line (no newline), or None"""
@@ -782,7 +791,10 @@ class Requests:
 
     def end(self, secs=15):
         """stdin closed: (exit, the rest of stdout, stderr)"""
-        self.p.stdin.close()
+        try:
+            self.p.stdin.close()
+        except BrokenPipeError:
+            pass
         self.p.stdin = None	# communicate() would flush it
         try:
             out, err = self.p.communicate(timeout=secs)
@@ -1054,6 +1066,32 @@ def requests_checks(dch, check, senv, cenv, serve_at, fakes, tmp, slog):
     check("requests: then the host's end line",
           got[-1] == b'{"req":1,"exit":0,"why":null}', got[-1])
     rq.end()
+
+    # a host line past what dch carries (one over 8 MiB, or one it cannot
+    # escape, about 2.67 MiB): the request in flight ends exit 2 "cap", the
+    # close and a quiet re-dial; one queued behind it got "busy", the next
+    # runs on the new connection, and stdin EOF is still exit 0
+    for what, lt, body in (
+            ("a 3 MiB stderr line", 0x32, b"e" * (3 << 20) + b"\n"),
+            ("a 3 MiB stdout line, no object", 0x31, b"x" * (3 << 20) + b"\n"),
+            ("a 9 MiB stdout object", 0x31,
+             b'{"a":"' + b"y" * (9 << 20) + b'"}\n')):
+        px = Proxy(port, "lines", body, lt)
+        fakes.append(px)
+        rq = Requests(side("q=127.0.0.1:%d" % px.port), "q:xq1")
+        rq.line()
+        rq.send({"req": 1, "argv": ["--json"]}, {"req": 2, "argv": ["--json"]})
+        got = [json.loads(g) for g in rq.until(1, 30)]
+        rq.send({"req": 3, "argv": ["--json"]})
+        got3 = rq.until(3)
+        rc, rest, err = rq.end()
+        check("requests: %s: exit 2 cap, re-dialled; the next runs" % what,
+              got == [{"req": 2, "exit": 1, "why": "busy"},
+                      {"req": 1, "exit": 2, "why": "cap"}]
+              and [json.loads(g).get("req") for g in got3] == [3] * len(got3)
+              and got3[-1:] == [b'{"req":3,"exit":0,"why":null}']
+              and px.n == 2 and rc == 0 and rest == b"" and err == b"",
+              (got, got3[-1:], px.n, rc, rest[:80], err[:200]))
 
     # the host's idle close, and its cap: re-dialled, wrapped
     ilog = os.path.join(tmp, "serve-idle.log")
