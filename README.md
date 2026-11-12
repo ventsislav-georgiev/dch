@@ -278,7 +278,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.58.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.59.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -1275,26 +1275,36 @@ and per row without. A definition comes only from a paired tool result or a fini
 typed shell block that did not fail: a heading (`# #831 Agent panes`), a
 `#831` line with `title:` within 3 lines, a JSON object or array with a number
 or id and a title (the whole tool result, up to 256 KiB, not the 3000-scalar
-clip), or a `--title` on the command with its ref on the command
-or in the output. An orphan result, a forged or orphaned shell block, an error,
+clip), or a `--title` on the command with its ref on the command line or in
+the output. On the command line the ref is a word by itself that does not
+follow an option (a word starting with `-`; one with `=`, like `--title=T`,
+carries its own value and does not count); a ref inside a longer word
+(`--body "Fixes #9"`, `--opt=#9`) does not count, and with none left the
+output defines. A create command (`gh pr create`, `gh pr new`,
+`gh issue create`, `gh issue new`) takes its ref from its output only: what it
+creates has no number until it prints one. An orphan result, a forged or orphaned shell block, an error,
 a fence, a diff, a listing command (`rg`, `grep`, `ls`, ...), a file printed
 from outside the cwd, a heading with an empty title, and more than 3 headings
 of one shape never define. The command counts in every simple command of it
-(split at `;`, `&`, `&&`, `|`, `||`, parentheses and newlines; a `#` comment
+(split at `;`, `&`, `&&`, `|`, `||`, parentheses and newlines, not at the `&`
+of `2>&1`, `<&3` or `&>`; a `<<` inside `$(( ))` is a shift; a `#` comment
 and each here-doc's body are not a command, and a command with a body the
 shell expands, `$(…)` under an unquoted delimiter, never defines), past env
 assignments, redirects, `{`, `!`, `if`, `then`, `elif`,
-`else`, `do`, `while`, `until`, and `sudo`, `doas`, `env`, `command`, `exec`,
-`xargs`, `nice`, `nohup`, `stdbuf`, `time` and `timeout`, by name or by path
-(`/usr/bin/env`). It counts inside `sh -c '…'` (`sh`, `bash`, `zsh`, `dash`,
-`ksh`, `fish`; `-lc` too), `eval`, `watch` and `env -S` (`-S'…'` and
+`else`, `do`, `while`, `until`, `coproc`, `function f`, and `sudo`, `doas`,
+`env`, `command`, `exec`, `builtin`, `xargs`, `nice`, `nohup`, `stdbuf`,
+`time` and `timeout` with their options (`sudo -iu root`,
+`timeout --signal KILL 5`), by name, by path (`/usr/bin/env`) or by GNU name
+(`gtimeout`). It counts inside `sh -c '…'` (`sh`, `bash`, `zsh`, `dash`,
+`ksh`, `fish`; `-lc`, `-c --` and `-c -e` too), `eval`, `watch` and `env -S` (`-S'…'` and
 `--split-string` too), and inside `$(…)` and
 backquotes, quoted or not. A search or a printed file found only inside
 `$(…)` or backquotes still leaves the command's `--title` to define: its text
 feeds the command, it is not the output. A command of more than 256 words
 never defines. The file printers are `cat`, `head`, `tail`, `bat`, `batcat`,
 `less`, `more`, `nl`, `awk`, `sed`, `jq`, `yq`, `tac`, `sort`, `cut`, `uniq`,
-`rev`, `column`, `fold`, `fmt`, `glow`, `zcat` and `gzcat`; with no file
+`rev`, `column`, `fold`, `fmt`, `glow`, `zcat` and `gzcat` (also by GNU name:
+`gcat`, `gsed`); with no file
 argument (`… | jq .`) they print their input and define, but under `xargs`
 they print files named by their input and never define. A `<` source is a
 printed file of a printer, of a compound command (`done < f`, `} < f`) and
