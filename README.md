@@ -1440,7 +1440,7 @@ Codex `<n>` gets it too.
   regard to case against every part of the whole path, as given and again
   as its real path:
   - a part that starts with `.env`, `.ssh`, `.gnupg`, `.aws`, `.netrc`,
-    `.npmrc`, `.pypirc` or `.git-credentials`;
+    `.npmrc`, `.pypirc`, `.git-credentials` or `.yarnrc`;
   - a directory `.git`, `.kube`, `.docker`, `.azure`, `.oci`, `.claude`,
     `.codex`, `.gcloud`, `.password-store`, `.m2`, `.bash_sessions`,
     `.zsh_sessions`, `.config/gh`, `.config/gcloud`, `.config/hub`,
@@ -1453,7 +1453,7 @@ Codex `<n>` gets it too.
     `secrets.json`, `credentials.tfrc.json`, `.yarnrc.yml`,
     `gradle.properties`, `rclone.conf`, `.boto`, `.dockercfg`,
     `.Xauthority`, `Xauthority`, `.ICEauthority`, `.credentials.json`,
-    `.terraformrc`, `terraform.rc` or `.databrickscfg`;
+    `.terraformrc`, `terraform.rc`, `.databrickscfg` or `auth.json`;
   - a name that ends in `.pem`, `.key`, `.p12`, `.pfx`, `.p8`, `.ppk`,
     `.jks`, `.keystore`, `.keychain`, `.keychain-db`, `.keyring`,
     `.tfstate`, `.tfstate.backup` or `history` (shell and REPL history);

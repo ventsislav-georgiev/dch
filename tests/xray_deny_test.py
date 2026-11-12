@@ -26,6 +26,9 @@ QA 1.58.0 NIT-D2: a worktree's git file pointing nowhere (no repo's .git
 above it) lifts nothing; NIT-D3: a .git symlinked to a git file in its own
 dir makes a root, one out of that dir does not.
 
+#228 (QA 1.57.0 LOW-D3): .yarnrc and a bare auth.json refuse, in a project,
+its subdir and a project under the HOME.
+
 Run:  python3 tests/xray_deny_test.py        (uses ./dch)
 """
 import json, os, re, shutil, signal, subprocess, sys, tempfile, time
@@ -264,6 +267,20 @@ def main():
         put(os.path.join(proj, f), "token=FAKE\n")
         cases.append(("a project: " + f, "xd-proj",
                       os.path.join(proj, f) + ":1", "secret_name"))
+    # #228 (LOW-D3's last two): classic yarn's .yarnrc (npmAuthToken) and a
+    # bare auth.json, in a project, a subdir and a project under the HOME
+    hp = os.path.join(home, "src", "hp")
+    put(os.path.join(hp, ".git", "HEAD"), "ref: refs/heads/main\n")
+    put(os.path.join(hp, "b.txt"), "home line\n")
+    ss["xd-hproj"] = hp
+    cases.append(("a project under ~: a plain b.txt", "xd-hproj", "b.txt:1",
+                  "ok:home line"))
+    for d, n in ((proj, "xd-proj"), (os.path.join(proj, "sub"), "xd-proj"),
+                 (hp, "xd-hproj")):
+        for f in (".yarnrc", "auth.json"):
+            put(os.path.join(d, f), "npmAuthToken FAKE\n")
+            cases.append(("%s: %s" % (os.path.relpath(d, tmp), f), n,
+                          os.path.join(d, f) + ":1", "secret_name"))
     # ended Claude sessions (History records and transcripts): files resolve
     # against the record's cwd, on a lite build too (no shell ring there)
     sockdir = os.path.join(tmp, "srv", "dch-%d" % os.getuid())

@@ -3193,8 +3193,13 @@ t_res_tree(void)
 	      xr_secret_name("gdm/Xauthority") &&
 	      xr_secret_name(".ICEauthority") &&
 	      !xr_secret_name(".composer/composer.json") &&
-	      !xr_secret_name("src/auth.json") && !xr_secret_name("main.tf") &&
-	      !xr_secret_name(".zsh_sessions.c"));
+	      !xr_secret_name("main.tf") && !xr_secret_name(".zsh_sessions.c"));
+	CHECK("#228: .yarnrc in any part and a bare auth.json, not their kin",
+	      xr_secret_name(".yarnrc") && xr_secret_name("a/.YARNRC") &&
+	      xr_secret_name("src/auth.json") && xr_secret_name("Auth.JSON") &&
+	      !xr_secret_name("yarnrc") && !xr_secret_name("oauth.json") &&
+	      !xr_secret_name("auth.json.example") &&
+	      !xr_secret_name("auth.json/x.txt"));
 	CHECK("LOW-D1: a .git file counts only as \"gitdir: <path>\"",
 	      xr_gitfile("gitdir: x\n", 10) && xr_gitfile("gitdir: /a/b", 12) &&
 	      !xr_gitfile("gitdir: ", 8) && !xr_gitfile("gitdir: \n", 9) &&

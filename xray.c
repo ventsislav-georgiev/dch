@@ -8055,7 +8055,7 @@ static const struct { char how; const char *s; } xr_deny[] = {
 	/* env files, ssh, gpg, aws, the package managers' tokens (.env*) */
 	{ 'p', ".env" }, { 'p', ".ssh" }, { 'p', ".gnupg" }, { 'p', ".aws" },
 	{ 'p', ".netrc" }, { 'p', ".npmrc" }, { 'p', ".pypirc" },
-	{ 'p', ".git-credentials" },
+	{ 'p', ".git-credentials" }, { 'p', ".yarnrc" },
 	/* git internals: .git/config can hold https://user:token@ remotes */
 	{ 'd', ".git" },
 	/* cloud, container, agent and password stores, whole directories */
@@ -8084,6 +8084,8 @@ static const struct { char how; const char *s; } xr_deny[] = {
 	{ 'n', ".credentials.json" }, { 'n', ".terraformrc" },
 	{ 'n', "terraform.rc" }, { 'n', ".databrickscfg" },
 	{ 'n', "Xauthority" }, { 'n', ".ICEauthority" },
+	/* #228: Codex's, composer's and others' tokens under a bare auth.json */
+	{ 'n', "auth.json" },
 	/* keys, certificates, keystores, keychains, terraform state */
 	{ 's', ".pem" }, { 's', ".key" }, { 's', ".p12" }, { 's', ".pfx" },
 	{ 's', ".p8" }, { 's', ".ppk" }, { 's', ".jks" }, { 's', ".keystore" },
