@@ -1477,8 +1477,10 @@ BZ = ("import os, select, sys, time, tty\n"
       "        os.write(1, b'GOT:' + b.hex().encode() + b'\\r\\n')\n"
       "    os.write(1, b'\\033[5;1HT%.4f ' % time.time())\n")
 # the client as a shell runs a job: its own foreground process group, so
-# its ctrl-z SIGTSTP really stops it; STOPPED is written then, and it is
-# continued a second later; exits with the client's exit code
+# its ctrl-z SIGTSTP really stops it; STOPPED is written then, after its
+# own clock's time (the resume is a full second after that time, however
+# late the test reads the marker), and it is continued a second later;
+# exits with the client's exit code
 JOB = ("import os, signal, sys, time\n"
        "job = os.fork()\n"
        "if job == 0:\n"
@@ -1491,7 +1493,7 @@ JOB = ("import os, signal, sys, time\n"
        "    _, st = os.waitpid(job, os.WUNTRACED)\n"
        "    if not os.WIFSTOPPED(st):\n"
        "        sys.exit(os.waitstatus_to_exitcode(st))\n"
-       "    os.write(1, b'<<stopped>>')\n"
+       "    os.write(1, b'<<at %.4f>><<stopped>>' % time.time())\n"
        "    time.sleep(1)\n"
        "    os.kill(job, signal.SIGCONT)\n")
 STOPPED = b"<<stopped>>"
@@ -1511,8 +1513,9 @@ def test_suspend():
             mark = len(a.out)
             a.key(b"\x1a", 0)
             ok = a.wait(STOPPED, start=mark)
-            t0 = time.time()
             stop = a.out.find(STOPPED, mark) + len(STOPPED)
+            at = re.findall(rb"<<at (\d+\.\d+)>>", a.out[mark:stop])
+            t0 = float(at[-1]) if at else time.time()
             a.wait(b"\033[?1049h", start=stop)
             alt = a.out.find(b"\033[?1049h", stop)
             late = [t for t in re.findall(rb"T(\d+\.\d+) ",

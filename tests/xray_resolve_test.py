@@ -507,7 +507,8 @@ def test_hostile():
         # git fails on the missing blob: no line, never not_commit (LOW-4)
         check("hostile: the lazy commit, nothing fetched: no block, never "
               "\"Not a commit\"", r2.returncode == 0 and not rv2 and
-              ls2 and ls2[-1].get("done") is True, rv2)
+              ls2 and ls2[-1].get("done") is True,
+              (r2.returncode, rv2, r2.stdout[-300:], r2.stderr[-600:]))
         check("hostile: a file ref reads the file, no filter runs",
               len(rv3) == 1 and rv3[0]["state"] == "ok" and
               rv3[0]["lines"][0] == "int w1;", rv3)
