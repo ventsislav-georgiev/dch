@@ -10,6 +10,11 @@ copy it across 1049h/l. Two consequences dch has to respect:
   2. On detach the client must pop on BOTH screens: once before leaving the
      alt screen and once after, so neither screen keeps stale flags. This is
      the "ctrl-d types 0;5u in the bare shell after detach" bug.
+  3. A local ctrl-z resume (MSG_DETACH, then MSG_ATTACH on the same
+     connection, no terminal reset between) pops once before its re-arm push
+     (#200): over three suspend/resume cycles a per-screen stack model of the
+     whole attach ends at 1 on the alternate screen, 0 on the main one. The
+     first attach pops nothing.
 
 Run:  python3 tests/kbd_altscreen_test.py            (uses ./dch)
 """
@@ -21,6 +26,23 @@ SESS = "kbdaltscreen-%d" % os.getpid()
 POP = re.compile(rb"\x1b\[<\d*u")
 PUSH = b"\x1b[>1u"
 ALT_ON, ALT_OFF = b"\x1b[?1049h", b"\x1b[?1049l"
+KSEQ = re.compile(rb"\033\[(\?1049[hl]|>\d*u|<\d*u)")
+
+
+def kitty_stacks(out):
+    """The kitty flag stack depths (main, alt) a terminal ends with after
+    out: a stack per screen, 1049h/l switch, ESC[<Nu pops N (default 1).
+    The model of tests/xray_remote_view_test.py."""
+    st, alt = [0, 0], 0
+    for m in KSEQ.finditer(out):
+        t = m.group(1)
+        if t[:1] == b"?":
+            alt = int(t[-1:] == b"h")
+        elif t[:1] == b">":
+            st[alt] += 1
+        else:
+            st[alt] = max(0, st[alt] - int(t[1:-1] or 1))
+    return tuple(st)
 
 
 def spawn(args):
@@ -60,6 +82,17 @@ def detach(pid, fd):
     out = drain(fd, 5.0)
     os.waitpid(pid, 0)
     return out
+
+
+def suspend(pid, fd):
+    """Ctrl-z: the client sends MSG_DETACH and SIGTSTPs itself (dropped in
+    this orphaned process group, else continued here), then MSG_ATTACH and a
+    redraw on the same connection. Returns the bytes of the resume."""
+    os.write(fd, b"\x1a")
+    time.sleep(0.3)
+    os.kill(pid, signal.SIGCONT)
+    out = drain(fd, 5.0, PUSH)
+    return out + drain(fd, 0.5)
 
 
 def check_detach(who, out):
@@ -115,7 +148,7 @@ def main():
         shutil.rmtree(tmp, ignore_errors=True)
         print("FAIL: inner program did not queue startup output"); return 1
     pid_a, fd_a = spawn(["-f", "-n", SESS])
-    pid_b = None
+    pid_b = pid_c = None
     try:
         first = drain(fd_a, 15.0, b"READY")
         if b"READY" not in first:
@@ -140,10 +173,37 @@ def main():
         if check_detach("reattach", detach(pid_b, fd_b)):
             return 1
         pid_b = None
-        print("PASS: kitty push follows 1049h on attach; detach pops on both screens.")
+
+        pid_c, fd_c = spawn(["-f", "-n", SESS])
+        out = drain(fd_c, 10.0, PUSH) + drain(fd_c, 0.5)
+        if POP.search(out) or out.count(PUSH) != 1:
+            print("FAIL: the attach before the suspends is not push-only:",
+                  repr(out))
+            return 1
+        bad = 0
+        for i in range(1, 4):
+            got = suspend(pid_c, fd_c)
+            out += got
+            pops = [m.start() for m in POP.finditer(got)]
+            if got.count(PUSH) != 1 or len(pops) != 1 \
+               or pops[0] > got.find(PUSH):
+                print("FAIL: ctrl-z resume %d is not one kitty pop before "
+                      "its one push:" % i, repr(got))
+                bad = 1
+        if kitty_stacks(out) != (0, 1):
+            print("FAIL: three ctrl-z resumes leave the kitty stacks at "
+                  "(main, alt) =", kitty_stacks(out), "not (0, 1)")
+            bad = 1
+        if bad:
+            return 1
+        if check_detach("suspended", detach(pid_c, fd_c)):
+            return 1
+        pid_c = None
+        print("PASS: kitty push follows 1049h on attach; detach pops on both "
+              "screens; a ctrl-z resume pops before it pushes again.")
         return 0
     finally:
-        for pid in (pid_b, pid_a):
+        for pid in (pid_c, pid_b, pid_a):
             if pid:
                 try:
                     os.kill(pid, signal.SIGHUP)
