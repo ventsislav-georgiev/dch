@@ -7003,23 +7003,40 @@ res_under(const char *p, const char *root)
 }
 
 /* root is "/", $HOME or an ancestor of it, by real path (HOME and the
-** passwd entry's): too wide to be a project, so none (#178) */
+** passwd entry's): too wide to be a project, so none (#178). So is
+** ~/.config or ~/Library, or a root inside one that is no git root below
+** it: their apps keep tokens under any name (QA 1.55.0 LOW-14, #184). */
 static int
-res_wide(const char *root)
+res_wide(const char *root, int git)
 {
 	const struct passwd *pw = getpwuid(getuid());
 	const char *h[2] = { getenv("HOME"), pw ? pw->pw_dir : NULL };
-	char rr[PATH_MAX], hr[PATH_MAX];
-	int k;
+	static const char *const app[2] = { ".config", "Library" };
+	char rr[PATH_MAX], hr[PATH_MAX], d[PATH_MAX + 16];
+	size_t l;
+	int k, a;
 
 	if (!realpath(root, rr))
 		snprintf(rr, sizeof rr, "%s", root);
 	if (!strcmp(rr, "/"))
 		return 1;
 	for (k = 0; k < 2; k++)
-		if (h[k] && h[k][0] == '/' &&
-		    res_under(realpath(h[k], hr) ? hr : h[k], rr))
-			return 1;
+		if (h[k] && h[k][0] == '/')
+		{
+			const char *hb = realpath(h[k], hr) ? hr : h[k];
+
+			if (res_under(hb, rr))
+				return 1;
+			for (a = 0; a < 2; a++)
+			{
+				l = (size_t)snprintf(d, sizeof d, "%s%s%s", hb,
+				                     hb[strlen(hb) - 1] == '/' ? "" : "/",
+				                     app[a]);
+				if (!strncasecmp(rr, d, l) && (!rr[l] ||
+				    (rr[l] == '/' && (!git || !rr[l + 1]))))
+					return 1;
+			}
+		}
 	return 0;
 }
 
@@ -7590,7 +7607,9 @@ xr_ref_line(const char *text)
 /* The deny list (#178), ASCII case-insensitive. 'p': a part of the path
 ** starts with it; 'd': a part (or parts, "a/b") equals it; on the name
 ** only, 'n': equals it, 's': ends in it, 'i': starts with it and has no
-** dot. A guard against the common credential files, not a guarantee. */
+** dot. A guard against the common credential files, not a guarantee.
+** res_file matches 'd' only below a git root whose own path lies in such
+** a directory, and the home's own always (#184). */
 static const struct { char how; const char *s; } xr_deny[] = {
 	/* env files, ssh, gpg, aws, the package managers' tokens (.env*) */
 	{ 'p', ".env" }, { 'p', ".ssh" }, { 'p', ".gnupg" }, { 'p', ".aws" },
@@ -7603,6 +7622,9 @@ static const struct { char how; const char *s; } xr_deny[] = {
 	{ 'd', ".claude" }, { 'd', ".codex" }, { 'd', ".config/gh" },
 	{ 'd', ".config/gcloud" }, { 'd', ".gcloud" },
 	{ 'd', ".password-store" },
+	/* QA 1.55.0 LOW-14: maven, hub, 1Password, macOS shell sessions */
+	{ 'd', ".m2" }, { 'd', ".config/hub" }, { 'd', ".config/op" },
+	{ 'd', ".bash_sessions" },
 	/* single token and password files */
 	{ 'n', ".claude.json" }, { 'n', ".pgpass" }, { 'n', ".my.cnf" },
 	{ 'n', ".vault-token" }, { 'n', ".htpasswd" }, { 'n', ".s3cfg" },
@@ -7610,19 +7632,25 @@ static const struct { char how; const char *s; } xr_deny[] = {
 	{ 'n', "credentials.toml" }, { 'n', "credentials.db" },
 	{ 'n', "application_default_credentials.json" },
 	{ 'n', "secrets.yaml" }, { 'n', "secrets.yml" }, { 'n', "secrets.json" },
+	/* LOW-14: terraform, yarn, gradle, rclone, boto, docker, X11 */
+	{ 'n', "credentials.tfrc.json" }, { 'n', ".yarnrc.yml" },
+	{ 'n', "gradle.properties" }, { 'n', "rclone.conf" }, { 'n', ".boto" },
+	{ 'n', ".dockercfg" }, { 'n', ".Xauthority" },
 	/* keys, certificates, keystores, keychains, terraform state */
 	{ 's', ".pem" }, { 's', ".key" }, { 's', ".p12" }, { 's', ".pfx" },
 	{ 's', ".p8" }, { 's', ".ppk" }, { 's', ".jks" }, { 's', ".keystore" },
 	{ 's', ".keychain" }, { 's', ".keychain-db" }, { 's', ".tfstate" },
-	{ 's', ".tfstate.backup" },
+	{ 's', ".tfstate.backup" }, { 's', ".keyring" },
 	/* shell and REPL history: .zsh_history, .psql_history, fish_history */
 	{ 's', "history" },
 	/* ssh keys: id_rsa, id_ed25519, never id_rsa.pub */
 	{ 'i', "id_" },
 };
 
-int
-xr_secret_name(const char *path)
+/* path on the deny list, its 'd' entries only on the parts from dirs on
+** (a pointer into path; path itself for the whole of it) */
+static int
+xr_secret_at(const char *path, const char *dirs)
 {
 	const char *c = path, *e, *s;
 	size_t l, k, n;
@@ -7636,14 +7664,63 @@ xr_secret_name(const char *path)
 			s = xr_deny[k].s;
 			n = strlen(s);
 			if (xr_deny[k].how == 'p' ? l >= n && !strncasecmp(c, s, n)
-			    : xr_deny[k].how == 'd' ? !strncasecmp(c, s, n) &&
-			      (!c[n] || c[n] == '/')
+			    : xr_deny[k].how == 'd' ? c >= dirs &&
+			      !strncasecmp(c, s, n) && (!c[n] || c[n] == '/')
 			    : *e ? 0	/* the rest: the name only */
 			    : xr_deny[k].how == 'n' ? l == n && !strncasecmp(c, s, n)
 			    : xr_deny[k].how == 's' ? l >= n && !strncasecmp(e - n, s, n)
 			    : l > n && !strncasecmp(c, s, n) && !memchr(c, '.', l))
 				return 1;
 		}
+	}
+	return 0;
+}
+
+int
+xr_secret_name(const char *path)
+{
+	return xr_secret_at(path, path);
+}
+
+/* a 'd' entry starts at c, or with every at any part of it */
+static int
+xr_deny_dir(const char *c, int every)
+{
+	size_t k, n;
+
+	for (; c; c = every && (c = strchr(c, '/')) ? c + 1 : NULL)
+		for (k = 0; k < sizeof xr_deny / sizeof *xr_deny; k++)
+		{
+			n = strlen(xr_deny[k].s);
+			if (xr_deny[k].how == 'd' &&
+			    !strncasecmp(c, xr_deny[k].s, n) && (!c[n] || c[n] == '/'))
+				return 1;
+		}
+	return 0;
+}
+
+/* path in a denied directory of the home (~/.claude, ~/.config/gh, ...),
+** whatever the project root: HOME and the passwd entry's home, each as
+** given and as its real path, without regard to case (#184) */
+static int
+res_home_deny(const char *path)
+{
+	const struct passwd *pw = getpwuid(getuid());
+	const char *h[2] = { getenv("HOME"), pw ? pw->pw_dir : NULL }, *c;
+	char hr[PATH_MAX];
+	size_t l;
+	int k;
+
+	for (k = 0; k < 4; k++)
+	{
+		c = h[k / 2];
+		if (!c || c[0] != '/' || ((k & 1) && !(c = realpath(c, hr))))
+			continue;
+		for (l = strlen(c); l && c[l - 1] == '/'; l--)
+			;
+		if (!strncasecmp(path, c, l) && path[l] == '/' &&
+		    xr_deny_dir(path + l + 1, 0))
+			return 1;
 	}
 	return 0;
 }
@@ -7679,11 +7756,14 @@ xr_file_lines(const char *s, size_t n, long line, struct xr_resolved *r)
 }
 
 /* FileResolver: the key's path, inside the project (the cwd's git root,
-** else the cwd; none when that is /, $HOME or above) by its text and again
-** by realpath; never a denied name, on either whole path; lstat a regular
-** file with one link, at most 2 MB, opened through the seam. Outside the
+** else the cwd; none when that is /, $HOME or above, or ~/.config or
+** ~/Library) by its text and again by realpath; never a denied name, on
+** either whole path, nor a denied dir of the home; lstat a regular file
+** with one link, at most 2 MB, opened through the seam. Outside the
 ** project nothing is touched, so no TCC prompt (QA D), unless a symlinked
-** dir inside points out: realpath follows it, then refuses. */
+** dir inside points out: realpath follows it, then refuses. A git root
+** whose typed path lies in a denied dir (a worktree in .claude/worktrees)
+** has the denied dirs matched below it only (#184). */
 static int
 res_file(const char *key, const char *text, const char *cwd,
          struct xr_resolved *r)
@@ -7695,7 +7775,7 @@ res_file(const char *key, const char *text, const char *cwd,
 	struct stat st;
 	ssize_t got;
 	size_t n = 0;
-	int fd;
+	int fd, git, below;
 
 	if (cwd[0] != '/' || strlen(cwd) >= PATH_MAX)
 		return 0;
@@ -7709,18 +7789,19 @@ res_file(const char *key, const char *text, const char *cwd,
 	         >= (int)sizeof p)
 		return 0;
 	r->kind = "file";
-	(void)res_root(cwd, root, sizeof root);
+	git = res_root(cwd, root, sizeof root);
+	below = git && xr_deny_dir(root, 1);
 	/* shown: relative to the cwd, else the root, else whole */
 	rel = res_under(p, cwd);
 	snprintf(shown, sizeof shown, "%s", rel && *rel ? rel
 	         : (rel = res_under(p, root)) && *rel ? rel : p);
 	res_text(r->subtitle, shown, strlen(shown), XR_RES_LINE);
-	if (res_wide(root) || !res_under(p, root))
+	if (res_wide(root, git) || !res_under(p, root))
 	{
 		res_set(r, "outside_project", "Outside this session's project");
 		return 1;
 	}
-	if (xr_secret_name(p))
+	if (xr_secret_at(p, below ? res_under(p, root) : p) || res_home_deny(p))
 	{
 		res_set(r, "secret_name", "Not previewed: may hold secrets");
 		return 1;
@@ -7735,7 +7816,8 @@ res_file(const char *key, const char *text, const char *cwd,
 		res_set(r, "outside_project", "Outside this session's project");
 		return 1;
 	}
-	if (xr_secret_name(rp))
+	if (xr_secret_at(rp, below ? res_under(rp, rr) : rp) ||
+	    res_home_deny(rp))
 	{
 		res_set(r, "secret_name", "Not previewed: may hold secrets");
 		return 1;

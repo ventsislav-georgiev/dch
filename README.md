@@ -1093,7 +1093,9 @@ The corpus:
   - A query also reads the current primary screen, after the ring: its rows
     (soft wraps joined, blank ones dropped) count as output, so a ref still
     on screen is found by `--json`, `--ref` and `--follow`. They carry no
-    marks yet, so they give no chapter and no definition. While the alternate
+    marks yet, so they give no chapter and no definition. Their `at` is the
+    time of the read, not the time the row was written: two queries a
+    second apart can give the same row different `at` values. While the alternate
     screen is active (vim, less), neither screen is read: the answer is the
     ring's alone, with no error and no `why`, and the screen's rows come back
     once it exits. A master started by an older dch answers from its ring
@@ -1343,24 +1345,42 @@ Codex `<n>` gets it too.
   project: the cwd's git root (the nearest parent holding `.git`), else the
   cwd. A root that is `/`, `$HOME` or a directory above `$HOME` (by real
   path; `HOME` and the passwd entry's home both count) is no project: every
-  file is then `outside_project`. Outside the project is `outside_project`
-  and nothing is touched. A path on the deny list is `secret_name` and is
-  not opened. The list is matched without regard to case against every part
-  of the whole path, as given and again as its real path:
+  file is then `outside_project`. So is `~/.config` or `~/Library`, and a
+  root inside either that is not a git root below it (a shell in
+  `~/.config/rclone`): apps keep tokens there under any name. A git root
+  below them (`~/.config/nvim` as its own repo) is a project. Outside the
+  project is `outside_project` and nothing is touched. A path on the deny
+  list is `secret_name` and is not opened. The list is matched without
+  regard to case against every part of the whole path, as given and again
+  as its real path:
   - a part that starts with `.env`, `.ssh`, `.gnupg`, `.aws`, `.netrc`,
     `.npmrc`, `.pypirc` or `.git-credentials`;
   - a directory `.git`, `.kube`, `.docker`, `.azure`, `.oci`, `.claude`,
-    `.codex`, `.gcloud`, `.password-store`, `.config/gh` or
-    `.config/gcloud`, and everything under it;
+    `.codex`, `.gcloud`, `.password-store`, `.m2`, `.bash_sessions`,
+    `.config/gh`, `.config/gcloud`, `.config/hub` or `.config/op`, and
+    everything under it;
   - the name `.claude.json`, `.pgpass`, `.my.cnf`, `.vault-token`,
     `.htpasswd`, `.s3cfg`, `credentials`, `credentials.json`,
     `credentials.toml`, `credentials.db`,
-    `application_default_credentials.json`, `secrets.yaml`, `secrets.yml`
-    or `secrets.json`;
+    `application_default_credentials.json`, `secrets.yaml`, `secrets.yml`,
+    `secrets.json`, `credentials.tfrc.json`, `.yarnrc.yml`,
+    `gradle.properties`, `rclone.conf`, `.boto`, `.dockercfg` or
+    `.Xauthority`;
   - a name that ends in `.pem`, `.key`, `.p12`, `.pfx`, `.p8`, `.ppk`,
-    `.jks`, `.keystore`, `.keychain`, `.keychain-db`, `.tfstate`,
-    `.tfstate.backup` or `history` (shell and REPL history);
+    `.jks`, `.keystore`, `.keychain`, `.keychain-db`, `.keyring`,
+    `.tfstate`, `.tfstate.backup` or `history` (shell and REPL history);
   - an `id_` name with no dot (`id_rsa`, never `id_rsa.pub`).
+
+  One exception for the directories: when the project is a git root whose
+  own path, as given, lies in one of them (a Claude Code worktree in
+  `<repo>/.claude/worktrees/<name>`), they are matched only on the part of
+  the path below that root, as given and as real path. The worktree reads
+  its own `a.txt` and still refuses its `.env`, its own `.claude/` and the
+  like. A root reached through a symlink that hides the directory, or a
+  shell in one with no git root, gets no exception. Whatever the root, a
+  path whose real path (or path as given) enters one of these directories
+  of the home (`~/.claude`, `~/.codex`, `~/.config/gh`, ...) is
+  `secret_name`, so a git repo inside `~/.claude` shows nothing.
 
   This guards the common credential files by name. It is not a guarantee:
   a secret in a file with any other name (a `config.yml`, a script, a log)
@@ -2311,7 +2331,8 @@ host: any file inside that session's project (its cwd's git root, else its
 cwd; none when that is `/`, `$HOME` or above it) that is a regular file of
 at most 2 MB with one link, not itself a symlink and not on the deny list
 (`.env*`, `.ssh`, `.git/`, `.claude/`, `.config/gh/`, `*.pem`, `id_rsa`,
-`*history`, ...: the File resolver's full list). The list catches the
+`*history`, ...: the File resolver's full list; nothing under `~/.config` or
+`~/Library` but a git root below them). The list catches the
 common credential files by name, not every file that holds a secret. A commit
 ref returns that commit's `git show --stat` from the session's repo.
 `--scope all` returns lines (and with `--full`, definition passages) from

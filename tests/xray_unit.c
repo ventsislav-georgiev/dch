@@ -2483,6 +2483,187 @@ t_res_deny(void)
 	      is(&r, "file", "outside_project") && r.nlines == 0);
 }
 
+/* #184: a git root whose typed path lies in a denied directory (a Claude
+** Code worktree in <repo>/.claude/worktrees/<name>) reads its own files;
+** the denied dirs are matched below that root only, the home's always;
+** ~/.config and ~/Library are no project but a git root below them; QA
+** 1.55.0 LOW-14's names. Every file holds FAKE. */
+static void
+t_res_tree(void)
+{
+	static const char *const mkd[] = {
+		"wr", "wr/.git", "wr/.claude", "wr/.claude/worktrees",
+		"wr/.claude/worktrees/w", "wr/.claude/worktrees/w/.claude",
+		"wr/.claude/worktrees/w/.ssh", "wr/.claude/worktrees/w/.kube",
+		"wr/.claude/worktrees/w/.Claude", "wr/.claude/worktrees/w/sub",
+		"wr/.claude/worktrees/w/sub/.codex", "nog", "nog/.claude",
+		"nog/.claude/plain", "th", "th/.claude", "th/.claude/projects",
+		"th/.claude/projects/x", "th/.claude/plugins",
+		"th/.claude/plugins/m", "th/.claude/plugins/m/.git", "th/.config",
+		"th/.config/rclone", "th/.config/x", "th/.config/nvim",
+		"th/.config/nvim/.git", "th/.config/gh", "th/.config/gh/r",
+		"th/.config/gh/r/.git", "th/Library", "th/Library/App", "lq",
+		"lq/.git", "lq/.terraform.d", "lq/.config", "lq/.config/rclone",
+		"lq/.config/op", "lq/.m2", "lq/.bash_sessions", "lq/.local",
+		"lq/.local/share", "lq/.local/share/keyrings", "cfg", "cfg/.git",
+		NULL
+	};
+	static const char *const in[] = {	/* inside w: refused */
+		".env", ".claude/settings.json", ".ssh/config", ".kube/config",
+		".Claude/s.json", "sub/.codex/auth.json", NULL
+	};
+	static const char *const low14[] = {
+		".terraform.d/credentials.tfrc.json", ".config/hub", ".yarnrc.yml",
+		".m2/settings.xml", "gradle.properties",
+		".config/rclone/rclone.conf", ".boto", ".dockercfg",
+		".config/op/config", ".Xauthority", ".bash_sessions/x.session",
+		".local/share/keyrings/login.keyring", NULL
+	};
+	const char *h = getenv("HOME"), *w = "wr/.claude/worktrees/w";
+	char b[PATH_MAX + 64], l[PATH_MAX + 64], sv[PATH_MAX];
+	struct xr_resolved r;
+	size_t k;
+	int ok;
+
+	for (k = 0; mkd[k]; k++)
+		dir(mkd[k]);
+	put("wr/.claude/worktrees/w/.git", "gitdir: ../../../.git/wt/w\n", 27);
+	put("wr/.claude/worktrees/w/a.txt", "FAKE A\n", 7);
+	put("wr/.claude/x.txt", "FAKE\n", 5);
+	CHECK("tree: a worktree in .claude/worktrees reads its own a.txt",
+	      res("a.txt:1", w, 1, &r) == 1 && is(&r, "file", "ok") &&
+	      r.nlines == 1 && !strcmp(r.line[0], "FAKE A"));
+	for (k = 0; in[k]; k++)
+	{
+		snprintf(b, sizeof b, "%s/%s", w, in[k]);
+		put(b, "FAKE\n", 5);
+		snprintf(b, sizeof b, "%s/%s/%s:1", rd, w, in[k]);
+		snprintf(l, sizeof l, "tree: the worktree's own %s: secret_name, "
+		         "unread", in[k]);
+		CHECK(l, res(b, w, 1, &r) == 1 && is(&r, "file", "secret_name") &&
+		      r.nlines == 0);
+	}
+	snprintf(b, sizeof b, "%s/%s/.env:1", rd, w);
+	CHECK("tree: a trailing slash on the cwd: a.txt ok, .env secret_name",
+	      res("a.txt:1", "wr/.claude/worktrees/w/", 1, &r) == 1 &&
+	      is(&r, "file", "ok") &&
+	      res(b, "wr/.claude/worktrees/w/", 1, &r) == 1 &&
+	      is(&r, "file", "secret_name"));
+	CHECK("tree: .. up into the repo's .claude: outside_project, unread",
+	      res("../../x.txt:1", w, 1, &r) == 1 &&
+	      is(&r, "file", "outside_project") && r.nlines == 0);
+	snprintf(b, sizeof b, "%s/%s/sub/../.kube/config:1", rd, w);
+	CHECK("tree: sub/../.kube/config folds to .kube/config: secret_name",
+	      res(b, w, 1, &r) == 1 &&
+	      is(&r, "file", "secret_name"));
+	CHECK("tree: the repo's own root still refuses .claude/ below it",
+	      res(".claude/x.txt:1", "wr", 1, &r) == 1 &&
+	      is(&r, "file", "secret_name") &&
+	      res(".claude/worktrees/w/a.txt:1", "wr", 1, &r) == 1 &&
+	      is(&r, "file", "secret_name"));
+	/* symlinks: a dir out of the root, a name into a denied dir below it */
+	snprintf(b, sizeof b, "%s/wr/.claude", rd);
+	snprintf(l, sizeof l, "%s/%s/up", rd, w);
+	ok = symlink(b, l) == 0;
+	snprintf(l, sizeof l, "%s/%s/k", rd, w);
+	ok = ok && symlink(".kube", l) == 0;
+	CHECK("tree: a symlinked dir up to the repo's .claude: outside_project",
+	      ok && res("up/x.txt:1", w, 1, &r) == 1 &&
+	      is(&r, "file", "outside_project") && r.nlines == 0);
+	snprintf(b, sizeof b, "%s/%s/k/config:1", rd, w);
+	CHECK("tree: a symlinked dir onto the worktree's .kube: secret_name "
+	      "(real path below the root)",
+	      res(b, w, 1, &r) == 1 &&
+	      is(&r, "file", "secret_name") && r.nlines == 0);
+	/* a root reached through a symlink that hides the denied dir */
+	snprintf(b, sizeof b, "%s/%s", rd, w);
+	snprintf(l, sizeof l, "%s/wl", rd);
+	CHECK("tree: the worktree reached through a symlink (wl): secret_name, "
+	      "the whole real path",
+	      symlink(b, l) == 0 && res("a.txt:1", "wl", 1, &r) == 1 &&
+	      is(&r, "file", "secret_name") && r.nlines == 0);
+	/* a hard link to the repo's .claude/x.txt */
+	snprintf(b, sizeof b, "%s/wr/.claude/x.txt", rd);
+	snprintf(l, sizeof l, "%s/%s/h.txt", rd, w);
+	CHECK("tree: a hard link out of the worktree: outside_project, unread",
+	      link(b, l) == 0 && res("h.txt:1", w, 1, &r) == 1 &&
+	      is(&r, "file", "outside_project") && r.nlines == 0);
+	put("nog/.claude/plain/a.txt", "FAKE\n", 5);
+	CHECK("tree: a cwd in a denied dir with no git root: secret_name",
+	      res("a.txt:1", "nog/.claude/plain", 1, &r) == 1 &&
+	      is(&r, "file", "secret_name"));
+	/* the home's denied dirs, whatever the root; ~/.config, ~/Library */
+	snprintf(sv, sizeof sv, "%s", h ? h : "");
+	snprintf(b, sizeof b, "%s/th", rd);
+	setenv("HOME", b, 1);
+	put("th/.claude/projects/x/a.txt", "FAKE\n", 5);
+	put("th/.claude/plugins/m/a.txt", "FAKE\n", 5);
+	put("th/.config/gh/r/a.txt", "FAKE\n", 5);
+	put("th/.config/rclone/r.conf", "FAKE\n", 5);
+	put("th/.config/x/token.json", "FAKE\n", 5);
+	put("th/.config/nvim/init.lua", "FAKE\n", 5);
+	put("th/Library/App/s.json", "FAKE\n", 5);
+	CHECK("home: a cwd in ~/.claude, no git root: secret_name",
+	      res("a.txt:1", "th/.claude/projects/x", 1, &r) == 1 &&
+	      is(&r, "file", "secret_name") && r.nlines == 0);
+	CHECK("home: a git root in ~/.claude: secret_name (the home's dir, "
+	      "whatever the root)",
+	      res("a.txt:1", "th/.claude/plugins/m", 1, &r) == 1 &&
+	      is(&r, "file", "secret_name") && r.nlines == 0);
+	CHECK("home: a git root in ~/.config/gh: secret_name",
+	      res("a.txt:1", "th/.config/gh/r", 1, &r) == 1 &&
+	      is(&r, "file", "secret_name") && r.nlines == 0);
+	CHECK("home: cwd ~/.config, no git root: outside_project, unread",
+	      res("x/token.json:1", "th/.config", 1, &r) == 1 &&
+	      is(&r, "file", "outside_project") && r.nlines == 0);
+	CHECK("home: cwd ~/.config/rclone, no git root: outside_project",
+	      res("r.conf:1", "th/.config/rclone", 1, &r) == 1 &&
+	      is(&r, "file", "outside_project") && r.nlines == 0);
+	CHECK("home: cwd ~/Library/App, no git root: outside_project",
+	      res("s.json:1", "th/Library/App", 1, &r) == 1 &&
+	      is(&r, "file", "outside_project") && r.nlines == 0);
+	CHECK("home: a git root below ~/.config (nvim) is a project: ok",
+	      res("init.lua:1", "th/.config/nvim", 1, &r) == 1 &&
+	      is(&r, "file", "ok"));
+	snprintf(l, sizeof l, "%s/th/.config/.git", rd);
+	CHECK("home: a git root at ~/.config itself: outside_project",
+	      mkdir(l, 0700) == 0 &&
+	      res("x/token.json:1", "th/.config", 1, &r) == 1 &&
+	      is(&r, "file", "outside_project"));
+	snprintf(b, sizeof b, "%s/TH", rd);
+	setenv("HOME", b, 1);
+	CHECK("home: HOME given in another case still guards ~/.claude",
+	      res("a.txt:1", "th/.claude/plugins/m", 1, &r) == 1 &&
+	      is(&r, "file", "secret_name"));
+	if (h)
+		setenv("HOME", sv, 1);
+	else
+		unsetenv("HOME");
+	CHECK("home: the same git root, HOME elsewhere: an ordinary project, ok",
+	      res("a.txt:1", "th/.claude/plugins/m", 1, &r) == 1 &&
+	      is(&r, "file", "ok"));
+	/* LOW-14: each name, in a project and by name */
+	for (k = 0; low14[k]; k++)
+	{
+		snprintf(b, sizeof b, "lq/%s", low14[k]);
+		put(b, "FAKE\n", 5);
+		snprintf(b, sizeof b, "%s/lq/%s:1", rd, low14[k]);
+		snprintf(l, sizeof l, "LOW-14: %s: secret_name, unread", low14[k]);
+		CHECK(l, xr_secret_name(low14[k]) && res(b, "lq", 1, &r) == 1 &&
+		      is(&r, "file", "secret_name") && r.nlines == 0);
+	}
+	CHECK("LOW-14: settings.xml, properties, hubble.c, op.c, a.keyrings "
+	      "are not denied",
+	      !xr_secret_name("src/settings.xml") &&
+	      !xr_secret_name("app.properties") &&
+	      !xr_secret_name(".config/hubble.c") &&
+	      !xr_secret_name("op/config") && !xr_secret_name("a.keyrings"));
+	dir("cfg/.config");
+	put("cfg/.config/x.txt", "FAKE\n", 5);
+	CHECK("LOW-14: a project's own .config dir (not the home's) is read",
+	      res(".config/x.txt:1", "cfg", 1, &r) == 1 && is(&r, "file", "ok"));
+}
+
 /* A fake git: records its argv and env, then acts as $D/mode says. */
 static void
 fake_git(void)
@@ -2988,6 +3169,7 @@ t_resolve(void)
 	t_res_parse();
 	t_res_file();
 	t_res_deny();
+	t_res_tree();
 	t_res_git();
 	t_res_git_pin();
 	snprintf(cmd, sizeof cmd, "rm -rf '%s'", rd);
