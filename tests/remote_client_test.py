@@ -441,8 +441,12 @@ def xray_checks(dch, check, senv, cenv, port, fakes, tmp, slog):
         got = (rem.stdout, rem.stderr, rem.returncode)
         want = (loc.stdout, loc.stderr, loc.returncode)
         if mask:
-            got, want = [(elapsed.sub('"elapsed_ms":0', o),) + g[1:]
-                         for o, g in ((got[0], got), (want[0], want))]
+            # progress lines are timing (one per 250 ms of scan), as in
+            # xray_golden.py: under load one run crosses 250 ms, the other not
+            got, want = [("".join(x for x in elapsed.sub(
+                              '"elapsed_ms":0', o).splitlines(True)
+                              if not x.startswith('{"schema":1,"progress":')),)
+                         + g[1:] for o, g in ((got[0], got), (want[0], want))]
         check("xray %s: byte for byte the host's own run (exit %d)"
               % (label, loc.returncode), got == want, (want, got))
 
@@ -838,13 +842,18 @@ def requests_checks(dch, check, senv, cenv, serve_at, fakes, tmp, slog):
         errs = [json.loads(g)["stderr"] for g in got if b'"stderr":' in g]
         want = [b'{"req":%d,"line":%s}' % (req, x)
                 for x in loc.stdout.splitlines()]
+        cmp = lines
         if mask:
-            lines = [elapsed.sub(b'"elapsed_ms":0', x) for x in lines]
-            want = [elapsed.sub(b'"elapsed_ms":0', x) for x in want]
+            # progress lines are timing (see the xray same() above)
+            prog = b'{"req":%d,"line":{"schema":1,"progress":' % req
+            cmp = [elapsed.sub(b'"elapsed_ms":0', x) for x in lines
+                   if not x.startswith(prog)]
+            want = [elapsed.sub(b'"elapsed_ms":0', x) for x in want
+                    if not x.startswith(prog)]
         end = json.loads(got[-1]) if got else None
         check("requests %s: each host line byte for byte, its stderr, one "
               "end line (exit %d)" % (" ".join(argv), loc.returncode),
-              lines == want and errs == loc.stderr.decode().splitlines()
+              cmp == want and errs == loc.stderr.decode().splitlines()
               and end == {"req": req, "exit": loc.returncode, "why": None}
               and len(got) == len(lines) + len(errs) + 1,
               (want, loc.stderr, got))
