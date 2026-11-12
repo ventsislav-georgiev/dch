@@ -7413,8 +7413,9 @@ xr_git_remote(const char *s, size_t n, const char *want)
 }
 
 /* GitCommitResolver (8.3): rev-parse, then show, under one 3 s deadline.
-** gh, a commit URL's "<owner>/<repo>": config's remote URLs run between,
-** and a repo none of them names is not that commit's (QA 1.55.0 LOW-1). */
+** gh, a commit URL's "<owner>/<repo>" when its SHA is short: config's
+** remote URLs run between, and a repo none of them names is not that
+** commit's (QA 1.55.0 LOW-1). */
 static int
 res_commit(const char *sha, const char *cwd, int live, const char *gh,
            struct xr_resolved *r)
@@ -7511,12 +7512,13 @@ res_commit(const char *sha, const char *cwd, int live, const char *gh,
 		av[a + 1] = s1;
 		av[a + 2] = s2;
 		av[a + 3] = NULL;
-		if ((rc = res_run(av, env, until, &run)) < 0)
+		/* 1: no remote at all; a git error or the deadline: no line, never
+		** not_commit or timeout. run.out (remote URLs can carry a token)
+		** is only matched, never written anywhere. */
+		if (res_run(av, env, until, &run) != 0 ||
+		    (run.status != 0 && run.status != 1))
 			return 0;
-		/* 1: no remote at all; above it, a git error: no line */
-		if (rc == 0 && run.status != 0 && run.status != 1)
-			return 0;
-		foreign = rc == 0 && !xr_git_remote(run.out, run.on, gh);
+		foreign = !xr_git_remote(run.out, run.on, gh);
 	}
 	if (rc == 0 && !foreign)
 	{
@@ -7791,7 +7793,10 @@ xr_res_ref(const struct xr_span *sp, const char *text, const char *cwd,
 	memset(r, 0, sizeof *r);
 	if (sp->shape == XR_COMMIT)
 	{
-		/* url_kind made it: https://github.com/<o>/<r>/commit/<sha> */
+		/* url_kind made it: https://github.com/<o>/<r>/commit/<sha>. A full
+		** 40-hex name is that commit in any repo: only a short one can
+		** match an unrelated local commit, so only it is checked (LOW-1
+		** ruling). */
 		const char *u = strstr(text, "https://github.com/");
 		const char *o = u ? u + 19 : "", *e = strchr(o, '/');
 		char gh[160];
@@ -7800,7 +7805,8 @@ xr_res_ref(const struct xr_span *sp, const char *text, const char *cwd,
 		if (u && (!e || snprintf(gh, sizeof gh, "%.*s", (int)(e - o), o)
 		          >= (int)sizeof gh))
 			return 0;
-		return res_commit(sp->full, cwd ? cwd : "", live, u ? gh : NULL, r);
+		return res_commit(sp->full, cwd ? cwd : "", live,
+		                  u && strlen(sp->full) < 40 ? gh : NULL, r);
 	}
 	if (sp->shape == XR_FILE)
 		return res_file(xr_span_text(sp), text, cwd ? cwd : "", r);

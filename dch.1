@@ -928,7 +928,7 @@ as
 .B \-c log.showSignature=false \-C
 .I cwd
 .B rev\-parse \-\-is\-inside\-work\-tree
-(for a commit URL also
+(for a commit URL with a short SHA also
 .BR "config \-\-get\-regexp ^remote\e..*\e.url$" )
 and then
 .B show \-\-no\-color \-\-no\-ext\-diff \-\-no\-textconv \-\-stat=80
@@ -963,9 +963,15 @@ Only git's own \(lqunknown revision\(rq or \(lqexpected commit type\(rq
 only its \(lqnot a git repository\(rq or a missing cwd
 .BR not_repo ;
 any other git failure gives no line.
-A commit URL resolves only when a remote URL of the repo names its
+A commit URL with a full 40\-hex SHA resolves as a bare SHA.
+With a shorter SHA it resolves only when a remote URL of the repo names its
 github.com owner and repo, else it is
-.BR not_commit .
+.BR not_commit ;
+a remote reached only through
+.BI url. base .insteadOf
+does not match, other hosts never match, a failed or timed\-out
+.B config
+run gives no line, and the remote URLs are never printed.
 A file is read only inside the project (the cwd's git root, else the cwd;
 none when that is
 .BR / ,

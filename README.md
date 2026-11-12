@@ -1294,7 +1294,8 @@ Codex `<n>` gets it too.
   `/usr/local/bin/git`; none is `no_git`. The argv is
   `git --no-pager -c core.fsmonitor= -c core.hooksPath=/dev/null -c protocol.allow=never -c diff.external= -c color.ui=never -c log.showSignature=false -C <cwd>`,
   then `rev-parse --is-inside-work-tree` (not `true`: `not_repo`), then,
-  for a commit URL only, `config --get-regexp ^remote\..*\.url$`, then
+  for a commit URL with a short SHA only,
+  `config --get-regexp ^remote\..*\.url$`, then
   `show --no-color --no-ext-diff --no-textconv --stat=80 --stat-count=14 --format=%H%x00%an%x00%at%x00%s --end-of-options <sha>^{commit}`.
   The environment is only `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`,
   `GIT_OPTIONAL_LOCKS=0`, `GIT_TERMINAL_PROMPT=0`, `GIT_NO_LAZY_FETCH=1`,
@@ -1313,12 +1314,18 @@ Codex `<n>` gets it too.
   (or a cwd that is gone) is `not_repo`. Any other git failure gives no
   `resolved` line, never a wrong state: for example a `.gitmodules` with
   an invalid `update` value, or a blob missing from a partial clone.
-  A commit URL (`https://github.com/<owner>/<repo>/commit/<sha>`) resolves
-  only when one of the repo's remote URLs names that owner and repo on
-  github.com (any case; `https://`, `ssh://` or `git@github.com:`, with or
-  without `.git`); else it is `not_commit` and `show` never runs. This only
-  stops a link to another repo from showing a local commit; the repo's own
-  config decides its remotes. A repo's `objects/info/alternates` can make git read
+  A commit URL (`https://github.com/<owner>/<repo>/commit/<sha>`) with a
+  full 40-hex SHA resolves as a bare SHA does. With a shorter SHA, it
+  resolves only when one of the repo's remote URLs names that owner and
+  repo on github.com (any case; `https://`, `ssh://` or `git@github.com:`,
+  with or without `.git`). Otherwise it is `not_commit` and `show` never
+  runs. A remote reached only through `url.<base>.insteadOf` does not
+  match, and hosts other than github.com never match. If the `config` run
+  fails or times out, there is no `resolved` line. The remote URLs are only
+  compared, never printed or traced (they can hold a token). This only
+  stops a short link to another repo from showing an unrelated local
+  commit; the repo's own config decides its remotes. A repo's
+  `objects/info/alternates` can make git read
   objects from outside the project: the stat may then name another repo's
   files. No code runs and nothing is written, and the lines go to the same
   user who can read that repo.

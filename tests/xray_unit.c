@@ -2307,6 +2307,24 @@ t_res_file(void)
 	      res("bin.dat:1", "proj", 1, &r) == 1 && is(&r, "file", "ok") &&
 	      r.nlines == 0 && r.first == 1 && !strcmp(r.title, "bin.dat") &&
 	      !strcmp(r.subtitle, "bin.dat \xc2\xb7 binary"));
+	/* the refusals keep their order before the binary test */
+	put("out/b.bin", "A\0B\n", 4);
+	put("proj/k.p12", "A\0B\n", 4);
+	CHECK("file: a binary file outside: outside_project; with a secret "
+	      "name: secret_name",
+	      res("../out/b.bin:1", "proj", 1, &r) == 1 &&
+	      is(&r, "file", "outside_project") &&
+	      res("k.p12:1", "proj", 1, &r) == 1 &&
+	      is(&r, "file", "secret_name"));
+	if ((buf = malloc(XR_RES_FILE + 1)))
+	{
+		memset(buf, 0, XR_RES_FILE + 1);
+		put("proj/big.bin", buf, XR_RES_FILE + 1);
+		CHECK("file: a binary file over 2 MB: too_large",
+		      res("big.bin:1", "proj", 1, &r) == 1 &&
+		      is(&r, "file", "too_large") && r.nlines == 0);
+		free(buf);
+	}
 	{
 		static char late[8009];
 
@@ -2485,6 +2503,7 @@ fake_git(void)
 	    "  [ \"$m\" = slowrev ] || { echo true; exit 0; } ;;\n"
 	    "*--get-regexp*)\n"
 	    "  [ \"$m\" = cfgerr ] && { echo 'fatal: bad config' >&2; exit 3; }\n"
+	    "  [ \"$m\" = cfgslow ] && { /bin/sleep 30; exit 0; }\n"
 	    "  [ -s \"$D/remotes\" ] || exit 1; /bin/cat \"$D/remotes\"; exit 0 ;;\n"
 	    "esac\n"
 	    "case \"$m\" in\n"
@@ -2680,9 +2699,20 @@ t_res_git(void)
 
 		put("remotes", rm, sizeof rm - 1);
 	}
-	CHECK("git: a commit URL, other repos' remotes: not_commit",
-	      res("https://github.com/o/r/commit/abcdef1234", "proj", 1, &r) == 1
-	      && is(&r, "commit", "not_commit"));
+	put("argv", "", 0);
+	s0 = xr_res_spawned;
+	CHECK("git: a commit URL, other repos' remotes: not_commit, show never "
+	      "runs", res("https://github.com/o/r/commit/abcdef1234", "proj", 1,
+	                  &r) == 1 && is(&r, "commit", "not_commit") &&
+	      xr_res_spawned == s0 + 2 && !strstr(slurp("argv"), "show\n"));
+	put("argv", "", 0);
+	s0 = xr_res_spawned;
+	CHECK("git: a commit URL with a full 40-hex SHA, no matching remote: "
+	      "resolves as a bare SHA, config never runs",
+	      res("https://github.com/o/r/commit/"
+	          "0123456789abcdef0123456789abcdef01234567", "proj", 1, &r) == 1
+	      && is(&r, "commit", "ok") && xr_res_spawned == s0 + 2 &&
+	      !strstr(slurp("argv"), "--get-regexp"));
 	{
 		static const char rm[] = "remote.up.url https://github.com/o/r2\n"
 			"remote.origin.url git@github.com:O/R.git\n";
@@ -2694,9 +2724,26 @@ t_res_git(void)
 	      res("https://github.com/o/r/commit/abcdef1234", "proj", 1, &r) == 1
 	      && is(&r, "commit", "ok") && xr_res_spawned == s0 + 3 &&
 	      strstr(slurp("argv"), "abcdef1234^{commit}\n"));
+	{
+		static const char rm[] = "remote.origin.url "
+			"https://x-access-token:ghp_FAKE179SECRET@github.com/o/r.git\n";
+
+		put("remotes", rm, sizeof rm - 1);
+	}
+	CHECK("git: a remote with userinfo matches; no byte of it in the block",
+	      res("https://github.com/o/r/commit/abcdef1234", "proj", 1, &r) == 1
+	      && is(&r, "commit", "ok") && !strstr(r.title, "FAKE179") &&
+	      !strstr(r.subtitle, "FAKE179") && !strstr(r.subtitle, "x-access") &&
+	      (r.nlines < 1 || !strstr(r.line[0], "FAKE179")) &&
+	      (r.nlines < 2 || !strstr(r.line[1], "FAKE179")));
 	mode("cfgerr");
 	CHECK("git: config fails: no line",
 	      res("https://github.com/o/r/commit/abcdef1234", "proj", 1, &r) == 0);
+	mode("cfgslow");
+	t0 = xr_now_ms();
+	CHECK("git: config times out: no line, never the timeout state",
+	      res("https://github.com/o/r/commit/abcdef1234", "proj", 1, &r) == 0
+	      && xr_now_ms() - t0 >= XR_GIT_MS - 50);
 	put("remotes", "", 0);
 	CHECK("git: a relative or empty cwd: not_repo, no spawn",
 	      (s0 = xr_res_spawned, 1) &&
@@ -2841,6 +2888,92 @@ t_res_parse(void)
 	                    46, 0, &r));
 }
 
+/* The git messages res_commit keys on, pinned against every git the probe
+** can pick on this host (QA 1.55.0 LOW-4 ruling): a later wording change
+** must show here, and in dch it degrades to no line, never a wrong state. */
+static void
+t_res_git_pin(void)
+{
+#ifdef __APPLE__
+	static const char *const cand[] = {
+		"/Library/Developer/CommandLineTools/usr/bin/git",
+		"/var/db/xcode_select_link",
+		"/Applications/Xcode.app/Contents/Developer/usr/bin/git",
+		"/opt/homebrew/bin/git", "/usr/local/bin/git"
+	};
+#else
+	static const char *const cand[] = {"/usr/bin/git", "/usr/local/bin/git"};
+#endif
+	static char seen[5][PATH_MAX], cmd[4 * PATH_MAX];
+	char gb[PATH_MAX], rp[PATH_MAX], name[PATH_MAX + 200], head[64] = "";
+	char tree[64] = "", pin[32], plain[32];
+	const char *probe[2] = {NULL, NULL};
+	struct xr_resolved r;
+	size_t k, j, ns = 0;
+	int inside;
+	FILE *f;
+
+	for (k = 0; k < sizeof cand / sizeof *cand; k++)
+	{
+		probe[0] = cand[k];
+		xr_git_probe = probe;
+		if (!xr_git_bin(gb, sizeof gb) || !realpath(gb, rp))
+		{
+			printf("  skip git pin: %s (none here)\n", cand[k]);
+			continue;
+		}
+		for (j = 0; j < ns && strcmp(seen[j], rp); j++)
+			;
+		if (j < ns)
+		{
+			printf("  skip git pin: %s (the same git as %s)\n", cand[k], rp);
+			continue;
+		}
+		snprintf(seen[ns++], sizeof *seen, "%s", rp);
+		snprintf(pin, sizeof pin, "pin%zu", k);
+		snprintf(plain, sizeof plain, "plain%zu", k);
+		snprintf(cmd, sizeof cmd,
+		         "cd '%s' && mkdir -p %s %s && cd %s && G='%s' && "
+		         "export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null "
+		         "GIT_AUTHOR_NAME=A GIT_AUTHOR_EMAIL=a@b GIT_COMMITTER_NAME=A "
+		         "GIT_COMMITTER_EMAIL=a@b && \"$G\" init -q . && echo x > f && "
+		         "\"$G\" add f && \"$G\" commit -qm pinned && "
+		         "\"$G\" rev-parse HEAD 'HEAD^{tree}' > ../%s.out && "
+		         "{ \"$G\" -C ../%s rev-parse --git-dir >/dev/null 2>&1 && "
+		         "echo inside >> ../%s.out; true; }",
+		         rd, pin, plain, pin, gb, pin, plain, pin);
+		snprintf(name, sizeof name, "%s/%s.out", rd, pin);
+		head[0] = tree[0] = '\0';
+		inside = 0;
+		if (system(cmd) == 0 && (f = fopen(name, "r")))
+		{
+			if (fscanf(f, "%40s %40s", head, tree) != 2)
+				head[0] = '\0';
+			inside = fscanf(f, "%8s", name) == 1;
+			fclose(f);
+		}
+		snprintf(name, sizeof name, "git pin %s: ok; \"unknown revision\" "
+		         "and \"expected commit type\" (a tree): not_commit", rp);
+		CHECK(name, strlen(head) == 40 && strlen(tree) == 40 &&
+		      res(head, pin, 1, &r) == 1 && is(&r, "commit", "ok") &&
+		      !strcmp(r.title, "pinned") &&
+		      res("abcdef1234", pin, 1, &r) == 1 &&
+		      is(&r, "commit", "not_commit") &&
+		      res(tree, pin, 1, &r) == 1 && is(&r, "commit", "not_commit"));
+		if (inside)
+		{
+			printf("  skip git pin not_repo: %s/%s is in a work tree\n", rd,
+			       plain);
+			continue;
+		}
+		snprintf(name, sizeof name, "git pin %s: \"not a git repository\": "
+		         "not_repo", rp);
+		CHECK(name, res("abcdef1234", plain, 1, &r) == 1 &&
+		      is(&r, "commit", "not_repo"));
+	}
+	xr_git_probe = NULL;
+}
+
 static void
 t_resolve(void)
 {
@@ -2856,6 +2989,7 @@ t_resolve(void)
 	t_res_file();
 	t_res_deny();
 	t_res_git();
+	t_res_git_pin();
 	snprintf(cmd, sizeof cmd, "rm -rf '%s'", rd);
 	(void)!system(cmd);
 }

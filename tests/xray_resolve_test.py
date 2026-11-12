@@ -193,23 +193,47 @@ def test_shell():
         check("shell commit: a tree SHA: not_commit (\"expected commit "
               "type\")", len(rv) == 1 and rv[0]["state"] == "not_commit" and
               rv[0]["title"] == "Not a commit in repo", rv)
-        # a commit URL answers only in a clone of its repo (QA 1.55.0 LOW-1)
-        url = "https://github.com/o/r/commit/" + sha
+        # a commit URL with a short SHA answers only in a clone of its repo
+        # (QA 1.55.0 LOW-1); a full 40-hex SHA is that commit anywhere
+        url = "https://github.com/o/r/commit/" + sha[:10]
         r, ls, rv = ref(n, url)
-        check("shell commit: a commit URL, no remote: not_commit",
+        check("shell commit: a short-SHA commit URL, no remote: not_commit",
               len(rv) == 1 and rv[0]["state"] == "not_commit", rv)
+        open(TRACE, "w").close()
+        r, ls, rv = ref(n, "https://github.com/o/r/commit/" + sha)
+        check("shell commit: a full-SHA commit URL, no remote: ok, no config "
+              "run (2 spawns)", len(rv) == 1 and rv[0]["state"] == "ok" and
+              "kind=commit state=ok spawned=2" in trace_tail(), rv)
         git(repo, "remote", "add", "origin", "git@github.com:O/R.git")
         open(TRACE, "w").close()
         r, ls, rv = ref(n, url)
-        check("shell commit: a commit URL whose repo is a remote resolves "
-              "its full SHA (3 spawns)", len(rv) == 1 and
+        check("shell commit: a short-SHA commit URL whose repo is a remote "
+              "resolves (3 spawns)", len(rv) == 1 and
               rv[0]["state"] == "ok" and
               "kind=commit state=ok spawned=3" in trace_tail(), rv)
-        r, ls, rv = ref(n, "https://github.com/someone/else/commit/" + sha)
-        check("shell commit: a commit URL of another repo: not_commit, not "
-              "the local commit", len(rv) == 1 and
+        open(TRACE, "w").close()
+        r, ls, rv = ref(n, "https://github.com/someone/else/commit/" +
+                        sha[:10])
+        check("shell commit: a short-SHA commit URL of another repo: "
+              "not_commit, show never runs (2 spawns)", len(rv) == 1 and
               rv[0]["state"] == "not_commit" and
-              rv[0]["title"] == "Not a commit in repo", rv)
+              rv[0]["title"] == "Not a commit in repo" and
+              "kind=commit state=not_commit spawned=2" in trace_tail(), rv)
+        # a remote URL with a token: it matches, and no byte of it leaks
+        tok = "ghp_FAKE179TOKEN"
+        git(repo, "remote", "set-url", "origin",
+            "https://x-access-token:%s@github.com/o/r.git" % tok)
+        open(TRACE, "w").close()
+        r1, ls, rv = ref(n, url)
+        r2, ls2, rv2 = ref(n, "https://github.com/o/x/commit/" + sha[:10])
+        tr = trace_tail()
+        check("shell commit: a remote with userinfo matches; the token is in "
+              "no stdout, stderr or trace", len(rv) == 1 and
+              rv[0]["state"] == "ok" and len(rv2) == 1 and
+              rv2[0]["state"] == "not_commit" and
+              not any(x in t for t in (r1.stdout, r1.stderr, r2.stdout,
+                                       r2.stderr, tr)
+                      for x in (tok, "x-access-token")), (rv, rv2))
         if git(plain, "rev-parse", "--is-inside-work-tree") == "true":
             print("  skip not_repo: %s is inside a git work tree" % plain)
         else:
@@ -519,10 +543,16 @@ def test_git_error():
         check("git error: show dies on the bad .gitmodules: no block, never "
               "\"Not a commit\"", r.returncode == 0 and not rv and ls and
               ls[-1].get("done") is True, (rv, r.stdout[-300:]))
+        bad = (r.returncode, ls[-1] if ls else None)
         r, ls, rv = ref(n, first[:10])
         check("git error: a commit that does not touch the gitlink: ok",
               len(rv) == 1 and rv[0]["state"] == "ok" and
               rv[0]["title"] == "Before the submodule", rv)
+        check("git error: the --ref exit code and end line are those of an "
+              "ok resolve (exit 0, done, partial false, why null)",
+              ls and bad == (r.returncode, ls[-1]) and bad[0] == 0 and
+              bad[1]["partial"] is False and bad[1]["why"] is None,
+              (bad, r.returncode, ls[-1:]))
         r, ls, rv = ref(n, "abcdef1234")
         check("git error: a SHA not in the repo is still not_commit",
               len(rv) == 1 and rv[0]["state"] == "not_commit", rv)
