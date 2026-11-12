@@ -5193,42 +5193,15 @@ compaction(struct xr_claude *d, const char *agent, int summary)
 		d->bare = 1;
 }
 
+/* A user content array c: its text blocks joined as one prompt (inj as
+** user_text's), then its images and tool results; a queued_command's list
+** prompt is the same array. */
 static void
-entry_user(struct xr_claude *d, const struct json_parser *p, const char *ag)
+user_parts(struct xr_claude *d, const struct json_parser *p, int c,
+           const char *ag, int inj)
 {
-	int m, c, i;
-	size_t n;
-	char *s;
+	int i;
 
-	if (k_bool(p, 0, A_META))
-		return;
-	m = k_obj(p, 0, A_MESSAGE);
-	c = m >= 0 ? j_get(p, m, A_CONTENT) : -1;
-	if (k_bool(p, 0, A_SUMMARY))
-	{
-		n = 0;
-		s = c >= 0 && p->tok[c].kind == JSON_STRING ? j_str(p, c, &n)
-		    : c >= 0 && p->tok[c].kind == JSON_ARRAY ? texts(p, c, &n)
-		    : NULL;
-		compaction(d, ag, n > 0);
-		refs_text(d, s, n, XR_TEXT_CAP, XR_PROSE);
-		if (n && ent_here(d, ag))
-			ent_put(d->want, "user", NULL, s, n, XR_TEXT_CAP, 0);
-		free(s);
-		return;
-	}
-	if (c >= 0 && p->tok[c].kind == JSON_STRING)
-	{
-		if ((s = j_str(p, c, &n)))
-			user_text(d, ag, s, n, injected(p, 0));
-		free(s);
-		return;
-	}
-	if (c < 0 || p->tok[c].kind != JSON_ARRAY)
-	{
-		block(d, ag, B_STEP, NULL, NULL);	/* "user without content" */
-		return;
-	}
 	{
 		/* the text parts joined, the prompt first, then the rest */
 		char *text = NULL, *nt;
@@ -5256,7 +5229,7 @@ entry_user(struct xr_claude *d, const struct json_parser *p, const char *ag)
 			free(t);
 		}
 		if (text)
-			user_text(d, ag, text, tl, injected(p, 0));
+			user_text(d, ag, text, tl, inj);
 		free(text);
 	}
 	for (i = c + 1; i < p->tok[c].next; i = p->tok[i].next)
@@ -5290,6 +5263,45 @@ entry_user(struct xr_claude *d, const struct json_parser *p, const char *ag)
 			block(d, ag, B_STEP, NULL, NULL);	/* unrecognized */
 		free(t);
 	}
+}
+
+static void
+entry_user(struct xr_claude *d, const struct json_parser *p, const char *ag)
+{
+	int m, c;
+	size_t n;
+	char *s;
+
+	if (k_bool(p, 0, A_META))
+		return;
+	m = k_obj(p, 0, A_MESSAGE);
+	c = m >= 0 ? j_get(p, m, A_CONTENT) : -1;
+	if (k_bool(p, 0, A_SUMMARY))
+	{
+		n = 0;
+		s = c >= 0 && p->tok[c].kind == JSON_STRING ? j_str(p, c, &n)
+		    : c >= 0 && p->tok[c].kind == JSON_ARRAY ? texts(p, c, &n)
+		    : NULL;
+		compaction(d, ag, n > 0);
+		refs_text(d, s, n, XR_TEXT_CAP, XR_PROSE);
+		if (n && ent_here(d, ag))
+			ent_put(d->want, "user", NULL, s, n, XR_TEXT_CAP, 0);
+		free(s);
+		return;
+	}
+	if (c >= 0 && p->tok[c].kind == JSON_STRING)
+	{
+		if ((s = j_str(p, c, &n)))
+			user_text(d, ag, s, n, injected(p, 0));
+		free(s);
+		return;
+	}
+	if (c < 0 || p->tok[c].kind != JSON_ARRAY)
+	{
+		block(d, ag, B_STEP, NULL, NULL);	/* "user without content" */
+		return;
+	}
+	user_parts(d, p, c, ag, injected(p, 0));
 }
 
 static void
@@ -5743,15 +5755,22 @@ xr_claude_line(struct xr_claude *d, const char *line, size_t len,
 
 		/* a prompt typed while the agent worked (no line source in
 		** Prosper's clip, but the block's source is the line) */
-		if (a >= 0 && k_streq(&p, a, A_TYPE, "queued_command") &&
-		    (s = k_str(&p, a, A_PROMPT, &n)))
+		if (a >= 0 && k_streq(&p, a, A_TYPE, "queued_command"))
 		{
-			if (!blank(s, n))
-				/* commandMode is on every real one; older
-				** versions wrote no attachment origin */
-				user_text(d, ag, s, n, k_streq(&p, a, A_CMODE,
-				    "task-notification") || injected(&p, a));
-			free(s);
+			/* commandMode is on every real one; older versions
+			** wrote no attachment origin */
+			int inj = k_streq(&p, a, A_CMODE, "task-notification") ||
+			          injected(&p, a), c = j_get(&p, a, A_PROMPT);
+
+			/* a list: text and pasted image blocks, as a user's */
+			if (c >= 0 && p.tok[c].kind == JSON_ARRAY)
+				user_parts(d, &p, c, ag, inj);
+			else if ((s = k_str(&p, a, A_PROMPT, &n)))
+			{
+				if (!blank(s, n))
+					user_text(d, ag, s, n, inj);
+				free(s);
+			}
 		}
 	}
 	else

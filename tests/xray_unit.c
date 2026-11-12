@@ -1891,6 +1891,62 @@ out:
 	xr_sent_free(s);
 }
 
+/* #222: a queued prompt with pasted images: "prompt" is a list of text and
+** image blocks, read as a user record's content array (the same auto rule) */
+#define QL(l, att) "{\"type\":\"attachment\",\"attachment\":{\"type\":" \
+	"\"queued_command\",\"prompt\":[" l "]" att "}}"
+#define QT(t) "{\"type\":\"text\",\"text\":\"" t "\"}"
+#define QI "{\"type\":\"image\",\"source\":{\"type\":\"base64\"," \
+	"\"media_type\":\"image/png\",\"data\":\"AAAA\"}}"
+#define QH ",\"commandMode\":\"prompt\",\"origin\":{\"kind\":\"human\"}"
+
+static void
+t_queued_list(void)
+{
+	struct xr_chapters c;
+
+	begin();
+	line(QL(QI, QH));	/* an image first: a partial chapter */
+	line(A("x"));
+	line(QL(QT("look at this") "," QI "," QI, QH));
+	line(U("and this"));	/* rides: the images keep the prompt's lead */
+	line(A("x"));
+	line(QL(QI "," QT("one") "," QT("two"), QH));
+	line(A("x"));
+	line(QL("", QH));
+	line(QL(QT(" ") "," QT(""), QH));
+	line(A("x"));
+	line(QL(QT(TN("<summary>listed</summary>")),
+	        ",\"commandMode\":\"task-notification\""));
+	line(A("x"));
+	line(QL(QT(TN("<summary>typed</summary>")) "," QI, QH));
+	line(A("x"));
+	end(&c);
+	CHECK("queued list: 5 chapters", c.n == 5);
+	if (c.n != 5)
+	{
+		xr_chapters_free(&c);
+		return;
+	}
+	CHECK("queued list: an image alone opens a partial chapter",
+	      xr_chapter_at(&c, 0)->partial && !xr_chapter_at(&c, 0)->title[0]);
+	CHECK("queued list: its text is the title, its images ride (the next "
+	      "prompt joins it)",
+	      !strcmp(xr_chapter_at(&c, 1)->title, "look at this") &&
+	      !xr_chapter_at(&c, 1)->partial && !xr_chapter_at(&c, 1)->harness);
+	CHECK("queued list: an image first, then text blocks: the text is "
+	      "the title (the first line of the joined text)",
+	      !strcmp(xr_chapter_at(&c, 2)->title, "one"));
+	CHECK("queued list: an empty or blank list makes nothing; "
+	      "commandMode task-notification and harness text: auto",
+	      xr_chapter_at(&c, 3)->harness &&
+	      !strcmp(xr_chapter_at(&c, 3)->summary, "listed"));
+	CHECK("queued list: commandMode prompt is never auto",
+	      !xr_chapter_at(&c, 4)->harness &&
+	      !strcmp(xr_chapter_at(&c, 4)->title, "<task-notification>"));
+	xr_chapters_free(&c);
+}
+
 /* #192 round 2: summaries are held out of line, at most XR_SUMMARIES bytes
 ** of them; past that the oldest give theirs up, and the ring's drops give
 ** the room back (ASan: nothing leaks or is freed twice) */
@@ -4275,6 +4331,7 @@ main(int argc, char **argv)
 	t_caps();
 	t_follow_cut();
 	t_auto();
+	t_queued_list();
 	t_auto_cap();
 	t_excl();
 	t_d3();
