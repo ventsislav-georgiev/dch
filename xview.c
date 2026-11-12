@@ -26,6 +26,7 @@
 				** engine's are under 4 MiB) */
 #endif
 #define XV_MENTIONS  10000	/* a card keeps at most these */
+#define XV_STOP_MS   50	/* a child's grace after its SIGTERM (#204) */
 #define XV_ALPHA     "asdfghjklzxcvbnmwertyuiop"	/* hint labels: no q */
 
 enum { XV_LIST, XV_CARD, XV_READ };
@@ -307,20 +308,44 @@ xv_fitlen(const char *s, size_t n, int w)
 
 /* ---- the children ---------------------------------------------------- */
 
+/* A child ended. Its pipes close first: a write it is blocked in fails
+** (EPIPE) instead of waiting for a reader that is gone (QA 1.57.0 HIGH-R1).
+** SIGTERM lets a remote one send the host its 0x34; after XV_STOP_MS it is
+** SIGKILLed, so the view never sits out a silent host's RM_CANCEL_MS
+** (MED-R2): the host takes the closed connection as the cancel. The
+** signals that run xv_kill wait until the pid is reaped and its slot
+** cleared, so xv_kill never signals a reaped pid. */
 static void
 xv_stop(struct xv_kid *k, int slot)
 {
-	if (k->pid > 0)
-	{
-		kill(k->pid, SIGTERM);
-		xv_pids[slot] = 0;
-		while (waitpid(k->pid, NULL, 0) < 0 && errno == EINTR)
-			;
-	}
 	if (k->fd >= 0)
 		close(k->fd);
 	if (k->efd >= 0)
 		close(k->efd);
+	if (k->pid > 0)
+	{
+		struct timespec ts = { 0, 5000000 };
+		long long end = now_ms() + XV_STOP_MS;
+		sigset_t s, o;
+		pid_t w;
+
+		sigemptyset(&s);
+		sigaddset(&s, SIGINT);
+		sigaddset(&s, SIGTERM);
+		sigaddset(&s, SIGHUP);
+		sigprocmask(SIG_BLOCK, &s, &o);
+		kill(k->pid, SIGTERM);
+		while ((w = waitpid(k->pid, NULL, WNOHANG)) == 0 && now_ms() < end)
+			nanosleep(&ts, NULL);
+		if (w == 0)
+		{
+			kill(k->pid, SIGKILL);
+			while (waitpid(k->pid, NULL, 0) < 0 && errno == EINTR)
+				;
+		}
+		xv_pids[slot] = 0;
+		sigprocmask(SIG_SETMASK, &o, NULL);
+	}
 	free(k->buf);
 	memset(k, 0, sizeof *k);
 	k->fd = k->efd = -1;

@@ -59,7 +59,16 @@ Covers:
      pops nothing. A key after still reaches the session;
   9. o (#194): on srv:xv-sh's Chapters the view is left as q leaves it and
      the client attaches to xv-sh on the host (the host's log says so);
-     on the ended srv:xv-cl it says the session has ended and stays.
+     on the ended srv:xv-cl it says the session has ended and stays;
+  10. stopping a remote child (#204): a fake host whose answers stream
+      without end (more than a pipe holds) and never take a 0x34: q while
+      the follow streams (3 times), 20 cards each left with Esc while its
+      lines stream (every other one after f replaced the light card), Esc
+      then q; a silent host: Esc from a pending card, f over a pending
+      card, Esc then q, q with no snapshot. Each within STOP_S (1 s; it used
+      to hang for good, or wait 3 s per child), only the follow child after
+      each card, no zombie, the view's fd count flat over the 20 cards, the
+      terminal restored, exit 0, and no child the test saw left running.
 
 Run:  python3 tests/xray_remote_view_test.py      (uses ./dch)
 """
@@ -578,6 +587,286 @@ def test_failures():
     ref.close()
 
 
+# ---- 10: stopping a remote child (#204) --------------------------------------
+
+STOP_S = 1.0    # the bug is a hang or RM_CANCEL_MS (3 s) per child
+SNAP = ('{"schema":1,"snapshot":{"session":"fk","session_id":'
+        '"m0000000000000001","corpus":"claude","live":true,"lines":3,'
+        '"project_label":"/x","chapters":[{"anchor":"s1","title":"first",'
+        '"kind":"prompt","at":1794300000,"offset":0}],"refs":[{"key":'
+        '"pull:o/r#41","shape":"pull","text":"o/r#41","title":"a ref",'
+        '"count":2,"underline":true}]}}\n').encode()
+PAD = b"".join(b'{"pad":"%s"}\n' % (b"p" * 240) for _ in range(128))
+MENTIONS = b"".join(json.dumps({"mention": {
+    "session": "fk", "line": "mention %d " % k + "m" * 200, "chapter": "s1",
+    "at": k}}).encode() + b"\n" for k in range(128))
+
+
+class Stopper(Fake):
+    """A host with ctl, ctl-cancel and xray that never answers a 0x34.
+    stream: --follow's snapshot then pad lines without end (follow=1, else
+    held), --ref's mention lines without end, both until the close. silent:
+    the snapshot (snap=1), then nothing at all."""
+
+    def __init__(self, mode, follow=0, snap=1):
+        super().__init__("ok", ops=["ctl", "ctl-cancel", "xray"])
+        self.smode, self.follow, self.snap = mode, follow, snap
+
+    def flood(self, c, data):
+        while True:
+            c.sendall(frame(0x31, data))
+            time.sleep(0.01)    # ~3 MB/s: a pipe's worth in ~20 ms
+
+    def run(self, c, argv):
+        try:
+            if "--follow" in argv:
+                if self.snap:
+                    c.sendall(frame(0x31, SNAP))
+                if self.smode == "stream" and self.follow:
+                    self.flood(c, PAD)
+            elif "--ref" in argv and self.smode == "stream":
+                self.flood(c, MENTIONS)
+            elif self.smode == "stream":
+                c.sendall(frame(0x33, {"exit": 0}))
+        except OSError:
+            pass
+
+    def serve(self, c):
+        buf = b""
+        try:
+            while True:
+                d = c.recv(65536)
+                if not d:
+                    return
+                buf += d
+                while len(buf) >= 5:
+                    t, n = struct.unpack(">BI", buf[:5])
+                    if len(buf) < 5 + n:
+                        break
+                    body, buf = buf[5:5 + n], buf[5 + n:]
+                    if t == 0x08:
+                        c.sendall(frame(0x18, {"proto": "1.0",
+                                               "server": "fake",
+                                               "ops": self.ops}))
+                    elif t == 0x30:
+                        argv = json.loads(body)["argv"]
+                        self.bodies.append(argv)
+                        threading.Thread(target=self.run, args=(c, argv),
+                                         daemon=True).start()
+        except OSError:
+            return
+
+
+def kids_of(pid):
+    """The view's children: {pid: ps state}."""
+    o = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,stat="],
+                       capture_output=True, text=True).stdout
+    return {int(p[0]): p[2] for p in (ln.split() for ln in o.splitlines())
+            if len(p) == 3 and p[1] == str(pid)}
+
+
+def alive(pids):
+    """Which of pids still run as a dch (pid reuse aside)."""
+    if not pids:
+        return []
+    o = subprocess.run(["ps", "-o", "pid=,comm=", "-p",
+                        ",".join(str(p) for p in pids)],
+                       capture_output=True, text=True).stdout
+    return [ln.strip() for ln in o.splitlines() if "dch" in ln]
+
+
+def nfds(pid):
+    """The view's open fds, or None when neither /proc nor lsof says."""
+    if os.path.isdir("/proc/%d/fd" % pid):
+        return len(os.listdir("/proc/%d/fd" % pid))
+    if not os.path.exists("/usr/sbin/lsof"):
+        return None
+    o = subprocess.run(["/usr/sbin/lsof", "-p", str(pid)],
+                       capture_output=True, text=True).stdout
+    return len(o.splitlines()) - 1
+
+
+def gone(what, v, rc, seen):
+    check("%s: the terminal restored, exit 0" % what,
+          rc == 0 and RESTORE in v.out[-60:], (rc, v.out[-80:]))
+    time.sleep(0.2)
+    left = alive(sorted(seen))
+    check("%s: no child of the view left running" % what, not left, left)
+
+
+def card(v, tab=False):
+    if tab:
+        v.key(b"\t", 0.3)  # to Refs; Esc from a card keeps the tab
+    mark = len(v.out)
+    v.key(b"\r", 0.1)
+    return v.wait(b"light", start=mark, secs=5)
+
+
+def esc_q(v):
+    """Esc, the list back, then q (one write would be Alt-q): the exit
+    code or None, and the seconds both took."""
+    mark = len(v.out)
+    t0 = time.time()
+    v.key(b"\033", 0)
+    if not v.wait(b"Chapters 1", start=mark, secs=STOP_S):
+        return None, time.time() - t0
+    v.key(b"q", 0)
+    return v.exit(STOP_S), time.time() - t0
+
+
+def shut(v):
+    """Pty.close, reading the pty meanwhile: a hung view's output fills it,
+    and its exit then waits for the drain."""
+    if v.reap() is None:
+        os.kill(v.pid, signal.SIGKILL)
+        end = time.time() + 10
+        while v.reap() is None and time.time() < end:
+            v.pump(0.1)
+    os.close(v.fd)
+    if v.rc is None:
+        os.waitpid(v.pid, 0)
+
+
+def test_stop():
+    # (a) an answer larger than a pipe still streaming
+    for i in range(3):
+        h = Stopper("stream", follow=1)
+        seen = set()
+        hosts("q=127.0.0.1:%d" % h.port)
+        v = Pty([DCH, "--xray", "q:fk"])
+        try:
+            v.wait(b"Chapters 1")
+            v.pump(0.5)
+            seen.update(kids_of(v.pid))
+            t0 = time.time()
+            v.key(b"q", 0)
+            rc = v.exit(STOP_S)
+            dt = time.time() - t0
+            check("stream %d: q while the follow streams exits within %.1f s "
+                  "(%.2f s)" % (i, STOP_S, dt), rc is not None, v.out[-200:])
+            v.exit(10)
+            gone("stream %d" % i, v, v.rc, seen)
+        finally:
+            shut(v)
+            h.close()
+    h = Stopper("stream")
+    seen = set()
+    hosts("q=127.0.0.1:%d" % h.port)
+    v = Pty([DCH, "--xray", "q:fk"])
+    try:
+        check("stream: the view opens", v.wait(b"Chapters 1"), v.out[-300:])
+        seen.update(kids_of(v.pid))
+        n0 = None
+        worst = [0.0, 0.0]
+        bad = []
+        for i in range(20):
+            ok = card(v, i == 0)
+            v.pump(0.2)     # the mention lines stream
+            seen.update(kids_of(v.pid))
+            if i % 2:
+                # f: the full card stops the light one still streaming
+                mark = len(v.out)
+                t0 = time.time()
+                v.key(b"f", 0)
+                ok = v.wait(b"full scan", start=mark, secs=STOP_S) and ok
+                worst[1] = max(worst[1], time.time() - t0)
+                v.pump(0.2)
+                seen.update(kids_of(v.pid))
+            mark = len(v.out)
+            t0 = time.time()
+            v.key(b"\033", 0)
+            ok = v.wait(b"Chapters 1", start=mark, secs=STOP_S) and ok
+            worst[0] = max(worst[0], time.time() - t0)
+            v.pump(0.1)
+            k = kids_of(v.pid)
+            if not ok or len(k) != 1 or "Z" in "".join(k.values()):
+                bad.append((i, ok, k))
+            if v.reap() is not None or len(bad) > 2:
+                break
+            if i == 0:
+                n0 = nfds(v.pid)
+        n1 = nfds(v.pid)
+        check("stream: 20 cards, each left with Esc while its lines stream "
+              "(odd ones after f replaced the light card) within %.1f s "
+              "(worst Esc %.2f s, f %.2f s), only the follow child after "
+              "each, no zombie" % (STOP_S, worst[0], worst[1]),
+              not bad and i == 19, bad)
+        if n0 is None or n1 is None:
+            print("  skip the view's fd count (no /proc, no lsof)")
+        else:
+            check("stream: the view's fds do not grow over 20 cards "
+                  "(%s, %s)" % (n0, n1), n1 <= n0, (n0, n1))
+        ok = card(v)
+        v.pump(0.2)
+        seen.update(kids_of(v.pid))
+        rc, dt = esc_q(v)
+        check("stream: Esc then q while a card streams exits within %.1f s "
+              "(%.2f s)" % (STOP_S, dt), ok and rc is not None and dt < STOP_S,
+              v.out[-200:])
+        v.exit(10)
+        gone("stream", v, v.rc, seen)
+    finally:
+        shut(v)
+        h.close()
+    # (b) a silent host: each stop used to wait RM_CANCEL_MS
+    h = Stopper("silent")
+    seen = set()
+    hosts("q=127.0.0.1:%d" % h.port)
+    v = Pty([DCH, "--xray", "q:fk"])
+    try:
+        check("silent: the view opens", v.wait(b"Chapters 1"), v.out[-300:])
+        seen.update(kids_of(v.pid))
+        ok = card(v, True)
+        seen.update(kids_of(v.pid))
+        mark = len(v.out)
+        t0 = time.time()
+        v.key(b"\033", 0)
+        ok = v.wait(b"Chapters 1", start=mark, secs=STOP_S) and ok
+        check("silent: Esc from a pending card within %.1f s (%.2f s)" % (
+            STOP_S, time.time() - t0), ok, v.out[mark:][-300:])
+        ok = card(v)
+        seen.update(kids_of(v.pid))
+        mark = len(v.out)
+        t0 = time.time()
+        v.key(b"f", 0)
+        ok = v.wait(b"full scan", start=mark, secs=STOP_S) and ok
+        check("silent: f (a new card) over a pending one within %.1f s "
+              "(%.2f s)" % (STOP_S, time.time() - t0), ok,
+              v.out[mark:][-300:])
+        seen.update(kids_of(v.pid))
+        k = kids_of(v.pid)
+        check("silent: only the follow and the new card's child run, no "
+              "zombie", len(k) == 2 and "Z" not in "".join(k.values()), k)
+        rc, dt = esc_q(v)
+        check("silent: Esc then q (card and follow pending) exits within "
+              "%.1f s (%.2f s)" % (STOP_S, dt), rc is not None and dt < STOP_S,
+              v.out[-200:])
+        v.exit(10)
+        gone("silent", v, v.rc, seen)
+    finally:
+        shut(v)
+        h.close()
+    h = Stopper("silent", snap=0)
+    seen = set()
+    hosts("q=127.0.0.1:%d" % h.port)
+    v = Pty([DCH, "--xray", "q:fk"])
+    try:
+        v.pump(1.0)
+        seen.update(kids_of(v.pid))
+        t0 = time.time()
+        v.key(b"q", 0)
+        rc = v.exit(STOP_S)
+        dt = time.time() - t0
+        check("silent, no snapshot: q exits within %.1f s (%.2f s)" % (
+            STOP_S, dt), len(seen) == 1 and rc is not None,
+            (seen, v.out[-200:]))
+        v.exit(10)
+        gone("silent, no snapshot", v, v.rc, seen)
+    finally:
+        shut(v)
+        h.close()
+
+
 # ---- 5: the picker's X on a remote row --------------------------------------
 
 def test_picker(port):
@@ -991,6 +1280,7 @@ def main():
         test_open()
         test_hostile()
         test_failures()
+        test_stop()
         test_chord(port)
         test_chord_fail()
         hosts("srv=127.0.0.1:%d" % port)
