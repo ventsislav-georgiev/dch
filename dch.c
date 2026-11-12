@@ -10068,6 +10068,8 @@ rv_running(const char *as, int argv)
 	struct crec c;
 	int on;
 
+	if (!name_ok(as))
+		return 0;	/* a path-like name: no socket outside the store */
 	session_sock_path(as, path, sizeof path);
 	if (cmd_query(path, &ci) != 0)
 		return 0;
