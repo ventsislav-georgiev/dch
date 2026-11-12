@@ -6233,6 +6233,8 @@ put_ref(FILE *m, const struct xr_index *x, const struct xr_ent *e,
 	put_ref_n(m, e, x ? ix_count(x, e) : 0, project, comma);
 }
 
+static int sent_cut(struct xr_sent *s, const size_t *ix, size_t n);
+
 /* Two passes: each chapter's size first (one at a time, so no 4 MiB body is
 ** held: QA 1.44 LOW-8), then the kept ones straight to f. */
 int
@@ -6316,6 +6318,8 @@ fail:
 		why = "output";
 		dropped += nr - keep;
 	}
+	if (a->sent && sent_cut(a->sent, ord + keep, nr - keep) != 0)
+		goto fail;
 	if (!(m = open_memstream(&head, &hl)))
 	{
 		body = NULL;
@@ -6377,6 +6381,7 @@ struct sref
 	uint64_t kh, vh;
 	char *key;
 	int shape;
+	int cut;		/* left out by a snapshot's cap: never sent */
 	size_t ix;		/* the entry, in the answer it was built from */
 };
 struct sch
@@ -6396,7 +6401,22 @@ struct xr_sent
 {
 	struct stab sent, pend;
 	int have;		/* pend holds the last xr_delta's diff */
+	size_t *cut, ncut;	/* the last xr_print's left-out refs (entries) */
 };
+
+static int
+sent_cut(struct xr_sent *s, const size_t *ix, size_t n)
+{
+	free(s->cut);
+	s->cut = NULL;
+	s->ncut = 0;
+	if (n && !(s->cut = malloc(n * sizeof *s->cut)))
+		return -1;
+	if (n)
+		memcpy(s->cut, ix, n * sizeof *s->cut);
+	s->ncut = n;
+	return 0;
+}
 
 static void
 stab_free(struct stab *t)
@@ -6423,6 +6443,7 @@ xr_sent_free(struct xr_sent *s)
 		return;
 	stab_free(&s->sent);
 	stab_free(&s->pend);
+	free(s->cut);
 	free(s);
 }
 
@@ -6532,9 +6553,22 @@ stab_keep(struct xr_sent *s)
 int
 xr_sent_take(struct xr_sent *s, const struct xr_answer *a)
 {
+	unsigned char *m;
+	size_t k;
+
 	stab_free(&s->pend);
-	if (stab_build(a, &s->pend) != 0)
+	if (stab_build(a, &s->pend) != 0 ||
+	    !(m = calloc(s->pend.nr + 1, 1)))
 		return -1;
+	/* the refs a's snapshot left out (LOW-9): a later change to one is
+	** no line, as --json does not show it */
+	for (k = 0; k < s->ncut; k++)
+		if (s->cut[k] < s->pend.nr)
+			m[s->cut[k]] = 1;
+	for (k = 0; k < s->pend.nr; k++)
+		s->pend.r[k].cut = m[s->pend.r[k].ix];
+	free(m);
+	(void)sent_cut(s, NULL, 0);
 	return stab_keep(s);
 }
 
@@ -6556,10 +6590,14 @@ xr_delta(struct xr_sent *s, const struct xr_answer *a, uint64_t head,
 		const struct sref *o = bsearch(&s->pend.r[k], s->sent.r,
 		                               s->sent.nr, sizeof *o, sref_cmp);
 
+		/* left out still: it stays out (LOW-9) */
+		if ((s->pend.r[k].cut = o && o->cut))
+			continue;
 		*nref += !o || o->vh != s->pend.r[k].vh;
 	}
 	for (k = 0; k < s->sent.nr; k++)
-		*nref += !bsearch(&s->sent.r[k], s->pend.r, s->pend.nr,
+		*nref += !s->sent.r[k].cut &&
+		         !bsearch(&s->sent.r[k], s->pend.r, s->pend.nr,
 		                  sizeof *s->pend.r, sref_cmp);
 	/* a chapter gone with its prompt record still in the ring: no line
 	** removes it, so the caller resets (an evicted one the client drops at
@@ -6590,7 +6628,7 @@ xr_delta_write(FILE *f, struct xr_sent *s, const struct xr_answer *a)
 		                                                    sizeof *o,
 		                                                    sref_cmp);
 
-		chg[p->ix] = !o || o->vh != p->vh;
+		chg[p->ix] = !p->cut && (!o || o->vh != p->vh);
 	}
 	for (k = 0; k < nc; k++)
 	{
@@ -6616,7 +6654,8 @@ xr_delta_write(FILE *f, struct xr_sent *s, const struct xr_answer *a)
 			fputs("}\n", f);
 		}
 	for (k = 0; k < s->sent.nr; k++)
-		if (!bsearch(&s->sent.r[k], s->pend.r, s->pend.nr,
+		if (!s->sent.r[k].cut &&
+		    !bsearch(&s->sent.r[k], s->pend.r, s->pend.nr,
 		             sizeof *s->pend.r, sref_cmp))
 		{
 			struct xr_ent e;

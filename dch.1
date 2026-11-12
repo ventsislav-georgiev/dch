@@ -802,7 +802,9 @@ and 10 s
 .RB ( why:\(dqtime\(dq )
 (a
 .B \-\-budget\-ms
-with it is accepted and has no effect; a file gives its first
+with it has no effect but is still checked: outside 50 to 300 it exits 2,
+.IR "bad budget" ;
+a file gives its first
 .B mention
 line and its newest 199, the rest counted in the tally's
 .BR mentions_dropped ;
@@ -1247,13 +1249,22 @@ for a cut transcript or rollout;
 .B cleared
 for a shell's clear, ED 3 or RIS, never with evict;
 .B evicted
-past 256 keys in one eviction, at most once a second;
+past 256 keys in one eviction, at most once a second, or a shell chapter
+gone while its prompt record is still in the ring;
 .B full
 for the whole-file index after a capped transcript), each followed by a
 new snapshot.
 The snapshot plus its deltas is the
 .B \-\-json
-answer of that moment; top\-level fields change only with a snapshot.
+answer of that moment; top\-level fields
+.RB ( chapters_evicted
+and
+.B dropped_keys
+too) change only with a snapshot, and refs match as a set (a ref line
+carries no position).
+When the 4 MiB cap left a ref out of the snapshot, a change to that ref or
+its removal sends no line until the next snapshot; a new key still sends
+one.
 Past 5000 chapters, a Claude Code stream sends no line for the oldest
 chapter
 .B \-\-json
@@ -1261,7 +1272,12 @@ drops, so a client can hold more chapters than
 .B \-\-json
 shows.
 No timer: a transcript is watched with kqueue (inotify on Linux), its
-project directory for a new file; a Codex rollout too, with its
+project directory for a new file and its
+.I sessions/<pid>.json
+for a rewrite (with no transcript yet, the deepest of the project
+directory,
+.I projects
+and the config directory that exists); a Codex rollout too, with its
 .I shell_snapshots
 directory and, before the rollout exists, today's day directory; a shell
 through the master's wake (its
@@ -1276,6 +1292,8 @@ looks for the agent once a second; with no follower it does not.
 A Claude Code follower past the 4 slots is not told when its agent exits.
 At most 4 shell followers per master: a fifth exits 1
 .IR busy .
+A follower that leaves the master's wake unanswered for 3 s can lose its
+slot to a fifth; it then exits 0 with no further line.
 An ended session or a History record writes its snapshot and exits 0;
 a live one exits 0 when the session ends, its connection drops, or the
 reader closes the pipe, idle or not.

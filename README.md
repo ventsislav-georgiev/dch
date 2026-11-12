@@ -1155,8 +1155,9 @@ ref (`dch: not a ref`), relative paths against the session's cwd.
   another session's result stops the scan. A live shell's lines and another
   session's give titles and counts only: no `mention`, no `passage`.
 - **Full.** `--full` reads the whole corpus up to its caps: 64 files
-  (`why: "files"`), 1 GiB (`why: "bytes"`) and 10 s (`why: "time"`); a
-  `--budget-ms` with it is accepted and has no effect.
+  (`why: "files"`), 1 GiB (`why: "bytes"`) and 10 s (`why: "time"`). A
+  `--budget-ms` with it has no effect, but it is still checked: outside 50
+  to 300 it exits 2 (`dch: bad budget`).
 - **Counts.** `done.counts` has `session` (`<n>`'s mentions), `project` and
   `project_sessions` (the other sessions of its project dir: their mentions,
   and how many mention it), and `all` and `all_sessions` for the other dirs
@@ -1265,21 +1266,30 @@ every 250 ms:
   - `"shrunk"` means the transcript or rollout was cut.
   - `"cleared"` means `--clear`, ED 3 or RIS emptied a shell's ring. It never
     comes with `evict`.
-  - `"evicted"` means one eviction changed more than 256 keys. It is sent at
-    most once a second.
+  - `"evicted"` means one eviction changed more than 256 keys (sent at most
+    once a second), or a shell chapter went while its prompt record is still
+    in the ring, which no line could remove.
   - `"full"`: a transcript past the per-file range first sends the capped
     snapshot. Its whole-file snapshot follows, read in the background.
 
 Applying the deltas to the snapshot gives the `--json` answer of that moment.
-Top-level fields (`lines`, `complete`, `why`, `mentions_only`) change only
-with a snapshot. Past 5000 chapters, a Claude Code stream sends no line for
-the oldest chapter `--json` drops, so a client can hold more chapters than
-`--json` shows.
+Top-level fields (`lines`, `complete`, `why`, `mentions_only`,
+`chapters_evicted`, `dropped_keys`) change only with a snapshot. `refs` match
+`--json` as a set: `--json` orders refs of the same count by first
+appearance, and a `ref` line carries no position. Past 5000 chapters, a
+Claude Code stream sends no line for the oldest chapter `--json` drops, so a
+client can hold more chapters than `--json` shows. When the 4 MiB cap left
+a ref out of the snapshot, a change to that ref or its removal sends no line
+until the next snapshot. A new key still sends one.
 
 Nothing runs on a timer:
 - a Claude Code transcript is watched with kqueue (inotify on Linux);
-- its project directory is watched for a new file, which the master is
-  then asked about;
+- its project directory is watched for a new file, and its
+  `sessions/<pid>.json` for a rewrite (a `/clear` can make the new file
+  before it names it); the master is then asked about them. With no
+  transcript yet, the watch is on the deepest of the project directory,
+  `projects` and the config directory that exists, and moves down as they
+  are made;
 - a Codex rollout is watched the same way, with its `shell_snapshots`
   directory for a new thread and, until the rollout exists, the deepest of
   today's `sessions/YYYY/MM/DD` there (Codex names it by local time);
@@ -1294,6 +1304,9 @@ is not told when its agent exits.
 
 Rules for shells and endings:
 - A master takes 4 shell subscribers. A fifth gets `dch: busy` and exit 1.
+  A follower that leaves the master's wake unanswered for 3 s (a paused
+  reader) can lose its slot to a fifth; today it then exits 0 with no
+  further line, as if the session had ended.
 - An ended session or a History record writes its one snapshot and exits 0.
 - A live one exits 0 when the session ends, when its connection drops (a
   `--restart`), or when the reader closes the pipe, idle or not.

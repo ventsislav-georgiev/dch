@@ -12381,6 +12381,8 @@ xf_watch_file(struct xf *f, int fd, const char *dir)
 		f->wf = inotify_add_watch(f->q, p, IN_MODIFY | IN_DELETE_SELF |
 		                          IN_MOVE_SELF);
 	}
+	if (dir && f->wd >= 0)
+		(void)inotify_rm_watch(f->q, f->wd);	/* moved (LOW-6) */
 	if (dir)
 		f->wd = inotify_add_watch(f->q, dir, IN_CREATE | IN_MOVED_TO |
 		                          IN_DELETE | IN_ONLYDIR);
@@ -12388,6 +12390,8 @@ xf_watch_file(struct xf *f, int fd, const char *dir)
 	struct kevent ev[2];
 	int n = 0;
 
+	if (dir && f->dirfd >= 0)
+		close(f->dirfd);	/* moved (LOW-6): its kevent goes with it */
 	if (fd >= 0)
 		EV_SET(&ev[n++], fd, EVFILT_VNODE, EV_ADD | EV_CLEAR,
 		       NOTE_WRITE | NOTE_EXTEND | NOTE_ATTRIB | NOTE_DELETE |
@@ -12431,6 +12435,35 @@ xf_watch_dir2(struct xf *f, const char *dir)
 	}
 #endif
 	dch_trace("xray follow: watch dir2");
+}
+
+/* A Claude's session record, in dir2's place (QA 1.52.0 LOW-6): a /clear
+** rewrites it in place, maybe after its new transcript appeared, which no
+** other watch sees. Opened again before each question, so a record
+** replaced by a rename stays watched. */
+static void
+xf_watch_rec(struct xf *f, const char *path)
+{
+#ifdef __linux__
+	f->wd2 = inotify_add_watch(f->q, path, IN_MODIFY | IN_ATTRIB |
+	                           IN_DELETE_SELF | IN_MOVE_SELF);
+#else
+	struct kevent ev;
+
+	if (f->dirfd2 >= 0)
+		close(f->dirfd2);
+#ifdef O_EVTONLY
+	if ((f->dirfd2 = open(path, O_EVTONLY | O_CLOEXEC)) >= 0)
+#else
+	if ((f->dirfd2 = open(path, O_RDONLY | O_CLOEXEC)) >= 0)
+#endif
+	{
+		EV_SET(&ev, f->dirfd2, EVFILT_VNODE, EV_ADD | EV_CLEAR,
+		       NOTE_WRITE | NOTE_EXTEND | NOTE_DELETE | NOTE_RENAME, 0,
+		       NULL);
+		(void)kevent(f->q, &ev, 1, NULL, 0, NULL);
+	}
+#endif
 }
 
 /* The events in, waiting at most ms (-1: until one comes). */
@@ -12548,6 +12581,7 @@ xf_snapshot(struct xf *f, struct xr_answer *a, const char *reset)
 			return 1;
 	}
 	a->snapshot = 1;
+	a->sent = f->sent;	/* the refs its 4 MiB cap leaves out (LOW-9) */
 	if (xr_print(stdout, a) != 0)
 	{
 		f->rc = ferror(stdout) ? xr_out_exit(0) : xr_failed();
@@ -12589,11 +12623,11 @@ xf_due(const struct xf *f)
 	return left > 0 ? (long)left : 0;
 }
 
+/* took: the build alone, measured before its lines were written (time
+** blocked on a slow reader is no build time: QA 1.52.0 LOW-8) */
 static void
-xf_built(struct xf *f, long long t0)
+xf_built(struct xf *f, long long took)
 {
-	long long took = xr_now_ms() - t0;
-
 	f->last = xr_now_ms();
 	/* a rebuild that takes long spaces the next out: at most a third of
 	** a core however big the ring */
@@ -12611,6 +12645,7 @@ struct xf_cl
 	char cfg[1400], sid[64], path[2048], project[1200], label[PATH_MAX];
 	const struct xr_cx *cx;		/* a Codex rollout (7.4), else NULL */
 	char watch[2048];		/* Codex, no rollout yet: the dir watched */
+	const char *rec;		/* a Claude's session record, else NULL */
 };
 
 static int
@@ -12696,6 +12731,20 @@ xf_cx_dir(const struct xr_cx *x, char *dir, size_t dirsz)
 			*strrchr(dir, '/') = '\0';
 }
 
+/* A Claude with no transcript yet: the deepest of <cfg>/projects/<key>,
+** <cfg>/projects and <cfg> there, so its first file is seen (LOW-6) */
+static void
+xf_cl_dir(const struct xf_cl *s, char *dir, size_t dirsz)
+{
+	int k;
+
+	if (snprintf(dir, dirsz, "%s/projects/%s", s->cfg, s->project) >=
+	    (int)dirsz)
+		snprintf(dir, dirsz, "%s/projects", s->cfg);
+	for (k = 0; k < 2 && access(dir, X_OK) != 0; k++)
+		*strrchr(dir, '/') = '\0';
+}
+
 static int
 xf_cl_same(const struct xr_target *t, const struct xf_cl *s)
 {
@@ -12718,6 +12767,10 @@ xf_cl_same(const struct xr_target *t, const struct xf_cl *s)
 		same = qc == 0 && xr_live_claude(&ci, &c) && !strcmp(c.sid, s->sid);
 	if (qc == 0)
 		cmd_info_free(&ci);
+	/* our record truncated and not yet written (Claude Code rewrites it in
+	** place; xf_watch_rec wakes us then): its write wakes us again */
+	if (!same && s->rec && stat(s->rec, &st) == 0 && st.st_size == 0)
+		return 0;
 	if (!same)
 		return 1;
 	if (s->cx && !s->sid[0])
@@ -12749,9 +12802,9 @@ xf_claude(struct xf *f, const struct crec *c, const struct xr_cx *x,
 	struct xr_sink k;
 	struct ring_snap rs;
 	struct stat st;
-	char dir[2048] = "";
+	char dir[2048] = "", kd[2048];
 	const char *h;
-	int rc = 0, ev, r;
+	int rc = 0, ev, r, rot;
 	long ms;
 
 	memset(&s, 0, sizeof s);
@@ -12790,6 +12843,7 @@ xf_claude(struct xf *f, const struct crec *c, const struct xr_cx *x,
 	}
 	snprintf(s.sid, sizeof s.sid, "%s", c->sid);
 	snprintf(s.label, sizeof s.label, "%s", c->cwd[0] ? c->cwd : label);
+	s.rec = c->rec;
 	xr_crec_cfg(c, s.cfg, sizeof s.cfg);
 	if (!s.cfg[0] && (h = getenv("HOME")))
 		snprintf(s.cfg, sizeof s.cfg, "%s/.claude", h);
@@ -12819,10 +12873,7 @@ xf_claude(struct xf *f, const struct crec *c, const struct xr_cx *x,
 		/* no transcript yet: its project dir, or the projects dir, so
 		** the first file is seen (a reset then gives its snapshot) */
 		xr_project_key(s.label, s.project, sizeof s.project);
-		if ((size_t)snprintf(dir, sizeof dir, "%s/projects/%s", s.cfg,
-		                     s.project) >= sizeof dir ||
-		    access(dir, X_OK) != 0)
-			snprintf(dir, sizeof dir, "%s/projects", s.cfg);
+		xf_cl_dir(&s, dir, sizeof dir);
 	}
 read:
 	if (!s.project[0])
@@ -12857,17 +12908,22 @@ read:
 		return 0;	/* gone already */
 	}
 	xf_watch_file(f, s.fd, dir[0] ? dir : NULL);
+	if (c)
+		xf_watch_rec(f, c->rec);
 	if (x && (size_t)snprintf(dir, sizeof dir, "%s/shell_snapshots",
 	                          x->home) < sizeof dir)
 		xf_watch_dir2(f, dir);
-	/* lines written between the read and the watch */
+	/* lines written between the read and the watch; a record rewritten
+	** or a dir made then is asked about once (LOW-6) */
 	f->pending = s.fd >= 0 && fstat(s.fd, &st) == 0 &&
 	             (uint64_t)st.st_size > xr_claude_next(s.d);
+	rot = XE_ROT;
 	for (;;)
 	{
 		ms = xf_due(f);
-		ev = xf_wait(f, s.d2 ? 0 : ms);	/* the full pass runs between
-						** events */
+		/* the full pass runs between events; rot: the first question */
+		ev = xf_wait(f, s.d2 || rot ? 0 : ms) | rot;
+		rot = 0;
 		if (ev & XE_OUT)
 			break;
 		if (ev & XE_CONN)
@@ -12880,6 +12936,20 @@ read:
 				break;
 			if (r)
 				ev |= XE_ROT;
+		}
+		if ((ev & XE_ROT) && c)
+		{
+			/* before the question, so a write after it wakes us */
+			xf_watch_rec(f, c->rec);
+			/* no transcript yet: a dir made below the one watched
+			** takes the watch (LOW-6); asked again once watched, as
+			** the next level may have come before the watch did */
+			while (s.fd < 0 && (xf_cl_dir(&s, kd, sizeof kd),
+			                    strcmp(kd, dir) != 0))
+			{
+				snprintf(dir, sizeof dir, "%s", kd);
+				xf_watch_file(f, -1, dir);
+			}
 		}
 		if (ev & XE_ROT)
 		{
@@ -12896,7 +12966,7 @@ read:
 			f->pending = 1;
 		if (f->pending && s.fd >= 0 && xf_due(f) == 0)
 		{
-			long long t0 = xr_now_ms();
+			long long t0 = xr_now_ms(), took;
 			uint64_t from = xr_claude_next(s.d);
 			size_t nref;
 			int lost;
@@ -12929,12 +12999,13 @@ read:
 				rc = xr_failed();
 				break;
 			}
+			took = xr_now_ms() - t0;	/* before the write */
 			if (xf_deltas(f, &a))
 			{
 				rc = f->rc;
 				break;
 			}
-			xf_built(f, t0);
+			xf_built(f, took);
 			dch_trace("xray follow: batch keys=%zu changed=%zu",
 			          xr_index_keys(s.ix), nref);
 		}
@@ -13115,7 +13186,7 @@ xf_shell(struct xf *f, const char *label, int first)
 	was = b->rs;
 	for (;;)
 	{
-		long long t0;
+		long long t0, took;
 		size_t nref = 0;
 		int lost = 0, evict = 0;
 
@@ -13152,9 +13223,10 @@ xf_shell(struct xf *f, const char *label, int first)
 		}
 		if (b->rs.status & XF_MODE)
 		{
-			xf_built(f, t0);
+			xf_built(f, xr_now_ms() - t0);
 			continue;	/* no ring: nothing to diff */
 		}
+		took = xr_now_ms() - t0;	/* before the write (LOW-8) */
 		if (b->rs.epoch != was.epoch)
 		{
 			/* ED 3, RIS or --clear: always, never evict (T9g) */
@@ -13172,6 +13244,7 @@ xf_shell(struct xf *f, const char *label, int first)
 				rc = xr_failed();
 				break;
 			}
+			took = xr_now_ms() - t0;
 			if (evict)
 			{
 				/* 3.3: the step's first line, before its counts */
@@ -13200,7 +13273,7 @@ xf_shell(struct xf *f, const char *label, int first)
 				break;
 			}
 		}
-		xf_built(f, t0);
+		xf_built(f, took);
 		dch_trace("xray follow: batch keys=%zu changed=%zu evict=%d",
 		          xr_index_keys(b->refs), nref, evict);
 		was = b->rs;

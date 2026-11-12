@@ -1960,6 +1960,29 @@ def test_follow_claude():
               [c["title"] for c in s[0]["snapshot"]["chapters"]] ==
               ["replaced ask #15"], fl.objs(k4))
 
+        # QA 1.52.0 LOW-6: a /clear whose new transcript appears before the
+        # record names it, the record then rewritten in place (no dir event)
+        time.sleep(0.4)
+        k4 = len(fl.got)
+        sid3 = "33333333-4444-4555-8666-77777777777c"
+        with open(os.path.join(pdir, sid3 + ".jsonl"), "w") as f:
+            f.write(json.dumps({"type": "user", "cwd": proj, "message": {
+                "content": "cleared ask #16"}}) + "\n")
+        time.sleep(0.5)
+        early = fl.objs(k4)
+        r0 = json.load(open(rp))
+        r0["sessionId"] = sid3
+        with open(rp, "w") as f:
+            f.write(json.dumps(r0))
+        s = fl.wait(lambda o: "snapshot" in o, frm=k4)
+        check("follow: a new transcript before its record, the record "
+              "rewritten in place, sends reset rotated, then its snapshot",
+              not early and s and
+              fl.objs(k4)[0] == {"schema": 1, "reset": {"why": "rotated"}} and
+              s[0]["snapshot"]["session_id"] == sid3 and
+              [c["title"] for c in s[0]["snapshot"]["chapters"]] ==
+              ["cleared ask #16"], (early, fl.objs(k4)))
+
         # the reader leaves: exit 0 at once, idle
         rd, wr = os.pipe()
         p = subprocess.Popen([DCH, "--xray", n, "--follow", "--json"],
@@ -2008,6 +2031,101 @@ def test_follow_claude():
     finally:
         if fl:
             fl.stop()
+        dch("-k", n)
+
+
+def test_follow_late():
+    """QA 1.52.0: a project dir made after the follow started is watched
+    (LOW-6); time blocked on a stalled reader is no build time (LOW-8)."""
+    n = "xc-fl2"
+    bindir = os.path.join(T, "bin")
+    fdir = os.path.join(T, "fake")
+    proj = os.path.join(T, "fproj-late")
+    for d in (bindir, fdir, proj):
+        os.makedirs(d, exist_ok=True)
+    shutil.copy(os.path.join(HERE, "fake_claude.py"),
+                os.path.join(bindir, "claude"))
+    os.chmod(os.path.join(bindir, "claude"), 0o755)
+    env = dict(ENV, PATH=bindir + ":" + ENV.get("PATH", "/usr/bin:/bin"),
+               FAKE_CLAUDE_DIR=fdir)
+    sdir = os.path.join(HOME, ".claude", "sessions")
+    had = set(os.listdir(sdir)) if os.path.isdir(sdir) else set()
+    r = subprocess.run([DCH, "--spawn", n, "--size", "80x24", "--cwd", proj,
+                        "claude"], capture_output=True, text=True, timeout=30,
+                       env=env)
+    check("follow late: claude spawned", r.returncode == 0, r.stderr)
+    trace = os.path.join(T, "trace-follow-late")
+    open(trace, "w").close()
+    dbg = dict(ENV, DCH_DEBUG=trace)
+    fl = p = None
+    try:
+        rec = wait_for(lambda: [f for f in os.listdir(sdir)
+                                if f.endswith(".json") and f not in had]
+                       if os.path.isdir(sdir) else None, 10)
+        sid = json.load(open(os.path.join(sdir, rec[0])))["sessionId"]
+        # the dir dch watches: the key of Claude's cwd, as its record has it
+        pdir = os.path.join(HOME, ".claude", "projects",
+                            key(os.path.realpath(proj)))
+        tp = os.path.join(pdir, sid + ".jsonl")
+
+        def put(objs, mode="a"):
+            with open(tp, mode) as f:
+                f.write("".join(json.dumps(o) + "\n" for o in objs))
+
+        # LOW-6: no project dir yet; it is made, its first file 0.5 s later
+        fl = Follow(n, dbg)
+        snap = fl.wait(lambda o: "snapshot" in o)
+        check("follow late: no transcript, no project dir: a corpus none "
+              "snapshot", snap and snap[0]["snapshot"]["corpus"] == "none" and
+              not os.path.isdir(pdir), fl.objs())
+        k0 = len(fl.got)
+        os.makedirs(pdir)
+        time.sleep(0.5)
+        put([{"type": "user", "cwd": proj, "message": {
+            "content": "late dir ask #21"}}], "w")
+        s = fl.wait(lambda o: "snapshot" in o, frm=k0)
+        check("follow late: a file in a project dir made after the follow "
+              "started sends reset rotated, then its snapshot", s and
+              fl.objs(k0)[0] == {"schema": 1, "reset": {"why": "rotated"}} and
+              [c["title"] for c in s[0]["snapshot"]["chapters"]] ==
+              ["late dir ask #21"], fl.objs(k0))
+        fl.stop()
+
+        # LOW-8: a batch stalled 3 s on a full pipe, then a small one: its
+        # deadline is the 250 ms spacing, not twice the stall
+        p = subprocess.Popen([DCH, "--xray", n, "--follow", "--json"],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             env=dbg)
+        first = p.stdout.readline()
+        # 1200 ref lines (120 a line: under the 128 spans of a line)
+        put([{"type": "assistant", "message": {"content": [
+            {"type": "text", "text": " ".join("#%d" % (1000 + 120 * j + i)
+                                              for i in range(120))}]}}
+             for j in range(10)])
+        time.sleep(3.0)
+        got = []
+        th = threading.Thread(target=lambda: got.extend(p.stdout),
+                              daemon=True)
+        th.start()
+        wait_for(lambda: '"issue:#2199"'.encode() in b"".join(got), 15)
+        wait_for(lambda: "xray follow: batch" in open(trace).read(), 5)
+        off = os.path.getsize(trace)
+        put([{"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "see #99"}]}}])
+        wait_for(lambda: b'"issue:#99"' in b"".join(got), 15)
+        dl = [int(m) for m in re.findall(r"xray follow: deadline (\d+) ms",
+                                         trace_from(trace, off))]
+        check("follow late: after a 3 s stall on the reader, the next "
+              "deadline is the batch spacing (%s ms, < 1500)" % dl,
+              b'"snapshot"' in first and len(got) > 1000 and
+              b'"issue:#99"' in b"".join(got) and
+              all(d < 1500 for d in dl), (len(got), dl))
+    finally:
+        if fl:
+            fl.stop()
+        if p and p.poll() is None:
+            p.terminate()
+            p.wait(5)
         dch("-k", n)
 
 
@@ -2789,6 +2907,7 @@ def main():
         test_shell_caps()
         test_follow_history()
         test_follow_claude()
+        test_follow_late()
         test_follow_cap()
         test_follow_shell()
         test_follow_agent()

@@ -1382,6 +1382,103 @@ t_caps(void)
 	free(row);
 }
 
+/* --follow past the 4 MiB cap (QA 1.52.0 LOW-9): a ref the snapshot left
+** out gets no line when it changes or goes; a kept one and a new one do */
+static char *
+follow_cut_out(struct xr_index *ix, struct xr_sent *s, struct xr_answer *a,
+               int snapshot)
+{
+	char *b = NULL;
+	size_t bl = 0, nref;
+	int lost, rc;
+	FILE *f = open_memstream(&b, &bl);
+
+	if (!f)
+		return NULL;
+	a->refs = ix;
+	a->snapshot = snapshot;
+	a->sent = s;
+	rc = snapshot ? xr_print(f, a) != 0 || xr_sent_take(s, a) != 0
+	     : xr_delta(s, a, 0, &nref, &lost) != 0 ||
+	       xr_delta_write(f, s, a) != 0;
+	if (fclose(f) != 0 || rc)
+	{
+		free(b);
+		return NULL;
+	}
+	return b;
+}
+
+static void
+t_follow_cut(void)
+{
+	struct xr_index *ix = xr_index_new(), *ix2 = xr_index_new();
+	struct xr_sent *s = xr_sent_new();
+	struct xr_answer a;
+	struct xr_sink k;
+	struct xr_rec r[2];
+	char t[1024], *b, *d;
+	size_t out0 = xr_lim.out, o, i;
+
+	if (!ix || !ix2 || !s)
+		goto out;
+	/* 100 keys mentioned once: the later ones are the cap's */
+	for (i = o = 0; i < 100; i++)
+		o += (size_t)sprintf(t + o, "a%06zx ", i + 1);
+	memset(r, 0, sizeof r);
+	r[0].seq = 1;
+	r[0].kind = RING_K_OUTPUT;
+	r[0].text = t;
+	r[0].len = o;
+	r[1].seq = 2;
+	r[1].kind = RING_K_OUTPUT;
+	r[1].text = "a000064 a000001 a0000ff";
+	r[1].len = strlen(r[1].text);
+	memset(&a, 0, sizeof a);
+	a.session = a.session_id = "s";
+	a.corpus = "shell";
+	a.project = a.project_label = "";
+	a.available = a.complete = 1;
+	a.lines = -1;
+	xr_index_per_row(ix, 1);	/* a row a mention: counts move */
+	xr_index_sink(ix, &k);
+	shell_refs(r, 1, &k);
+	xr_lim.out = 8192;
+	b = follow_cut_out(ix, s, &a, 1);
+	CHECK("follow cut: the snapshot leaves a000064 out (dropped_keys)",
+	      b && !strstr(b, "\"dropped_keys\":0}") && strstr(b, "a000001") &&
+	      !strstr(b, "a000064"));
+	free(b);
+	/* a000064 and a000001 again, a0000ff new */
+	xr_index_free(ix);
+	ix = xr_index_new();
+	if (!ix)
+		goto out;
+	xr_index_per_row(ix, 1);
+	xr_index_sink(ix, &k);
+	shell_refs(r, 2, &k);
+	d = follow_cut_out(ix, s, &a, 0);
+	CHECK("follow cut: a left-out ref that changes gets no line; a kept "
+	      "and a new one do", d && !strstr(d, "a000064") &&
+	      strstr(d, "\"key\":\"commit:a000001\"") && strstr(d, "a0000ff"));
+	free(d);
+	/* a000064 gone: no count-0 line for it; a0000ff's goes */
+	xr_index_per_row(ix2, 1);
+	xr_index_sink(ix2, &k);
+	t[o - 8] = '\0';	/* the first row without "a000064 " */
+	r[0].len = o - 8;
+	shell_refs(r, 1, &k);
+	d = follow_cut_out(ix2, s, &a, 0);
+	CHECK("follow cut: a left-out ref that goes gets no count-0 line",
+	      d && !strstr(d, "a000064") && strstr(d, "a0000ff"));
+	free(d);
+out:
+	xr_lim.out = out0;
+	xr_index_free(ix);
+	xr_index_free(ix2);
+	xr_sent_free(s);
+}
+
 /* ---- Codex (7.4, K9) ---------------------------------------------------- */
 
 struct cxkeys
@@ -2721,6 +2818,7 @@ main(int argc, char **argv)
 	t_ref();
 	t_index();
 	t_caps();
+	t_follow_cut();
 	t_excl();
 	t_cancel();
 	t_scan_caps();
