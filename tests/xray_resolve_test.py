@@ -69,6 +69,15 @@ def ref(n, text, full=True):
     return r, ls, [l["resolved"] for l in ls if "resolved" in l]
 
 
+def short(sha, n):
+    """The first n or more of sha that the grammar takes as a short SHA: a
+    letter and a digit. 1 in 100 ten-character prefixes of a commit's SHA is
+    all digits, which is no ref (exit 2)."""
+    while n < len(sha) and (sha[:n].isdigit() or sha[:n].isalpha()):
+        n += 1
+    return sha[:n]
+
+
 def wait_for(fn, secs=10.0):
     end = time.time() + secs
     while time.time() < end:
@@ -155,7 +164,7 @@ def test_shell():
     spawn_shell(n, repo)
     spawn_shell(m, plain)
     try:
-        r, ls, rv = ref(n, sha[:10])
+        r, ls, rv = ref(n, short(sha, 10))
         check("shell commit: --full: one resolved line, ok, the subject",
               r.returncode == 0 and len(rv) == 1 and rv[0]["kind"] ==
               "commit" and rv[0]["state"] == "ok" and rv[0]["title"] ==
@@ -178,7 +187,7 @@ def test_shell():
               ls[-1]["why"] is None, [list(l)[1] for l in ls])
         check("all: schema 1 on every line", all(l.get("schema") == 1
                                                 for l in ls))
-        r, ls, rv = ref(n, sha[:10], full=False)
+        r, ls, rv = ref(n, short(sha, 10), full=False)
         check("shell commit: a light stream has no resolved line",
               r.returncode == 0 and not rv and ls and
               ls[-1].get("done") is True, r.stdout[-400:])
@@ -189,13 +198,13 @@ def test_shell():
               rv[0]["title"] == "Not a commit in repo" and
               rv[0]["subtitle"] == "abcdef1" and rv[0]["lines"] == [], rv)
         tree = git(repo, "rev-parse", "HEAD^{tree}")
-        r, ls, rv = ref(n, tree[:12])
+        r, ls, rv = ref(n, short(tree, 12))
         check("shell commit: a tree SHA: not_commit (\"expected commit "
               "type\")", len(rv) == 1 and rv[0]["state"] == "not_commit" and
               rv[0]["title"] == "Not a commit in repo", rv)
         # a commit URL with a short SHA answers only in a clone of its repo
         # (QA 1.55.0 LOW-1); a full 40-hex SHA is that commit anywhere
-        url = "https://github.com/o/r/commit/" + sha[:10]
+        url = "https://github.com/o/r/commit/" + short(sha, 10)
         r, ls, rv = ref(n, url)
         check("shell commit: a short-SHA commit URL, no remote: not_commit",
               len(rv) == 1 and rv[0]["state"] == "not_commit", rv)
@@ -213,7 +222,7 @@ def test_shell():
               "kind=commit state=ok spawned=3" in trace_tail(), rv)
         open(TRACE, "w").close()
         r, ls, rv = ref(n, "https://github.com/someone/else/commit/" +
-                        sha[:10])
+                        short(sha, 10))
         check("shell commit: a short-SHA commit URL of another repo: "
               "not_commit, show never runs (2 spawns)", len(rv) == 1 and
               rv[0]["state"] == "not_commit" and
@@ -225,7 +234,7 @@ def test_shell():
             "https://x-access-token:%s@github.com/o/r.git" % tok)
         open(TRACE, "w").close()
         r1, ls, rv = ref(n, url)
-        r2, ls2, rv2 = ref(n, "https://github.com/o/x/commit/" + sha[:10])
+        r2, ls2, rv2 = ref(n, "https://github.com/o/x/commit/" + short(sha, 10))
         tr = trace_tail()
         check("shell commit: a remote with userinfo matches; the token is in "
               "no stdout, stderr or trace", len(rv) == 1 and
@@ -248,7 +257,7 @@ def test_shell():
         if git(plain, "rev-parse", "--is-inside-work-tree") == "true":
             print("  skip not_repo: %s is inside a git work tree" % plain)
         else:
-            r, ls, rv = ref(m, sha[:10])
+            r, ls, rv = ref(m, short(sha, 10))
             check("shell commit: outside a repo: not_repo, \"Not in a git "
                   "repository\"", len(rv) == 1 and
                   rv[0]["state"] == "not_repo" and
@@ -322,7 +331,7 @@ def test_shell():
         # socket dir, TMPDIR (qtmp) and the repo; the trace is DCH_DEBUG's
         before = files(T)
         open(TRACE, "w").close()
-        ref(n, sha[:10])
+        ref(n, short(sha, 10))
         ref(n, "src/w.c:3")
         tr = trace_tail()
         new = {p: v for p, v in files(T).items()
@@ -372,7 +381,7 @@ def test_ended():
     transcript(SID, repo)
     history("xres-end", SID, os.path.join(HOME, ".claude"), repo)
     open(TRACE, "w").close()
-    r, ls, rv = ref("xres-end", sha[:10])
+    r, ls, rv = ref("xres-end", short(sha, 10))
     tr = trace_tail()
     check("ended commit: state ended, \"Session ended\", git never spawned",
           r.returncode == 0 and len(rv) == 1 and
@@ -386,7 +395,7 @@ def test_ended():
     check("ended file: an ended session still resolves files",
           len(rv) == 1 and rv[0]["state"] == "ok" and
           rv[0]["lines"][1] == "int w2;", rv)
-    r, ls, rv = ref("xres-end", sha[:10], full=False)
+    r, ls, rv = ref("xres-end", short(sha, 10), full=False)
     check("ended commit: light: no resolved line", r.returncode == 0 and
           not rv, r.stdout[-300:])
 
@@ -415,7 +424,7 @@ def test_live_claude():
                        if os.path.isdir(sdir) else None, 10)
         sid = json.load(open(os.path.join(sdir, rec[0])))["sessionId"]
         transcript(sid, repo)
-        rv = wait_for(lambda: ref(n, sha[:10])[2], 10)
+        rv = wait_for(lambda: ref(n, short(sha, 10))[2], 10)
         check("live claude commit: ok in the session's cwd",
               rv and len(rv) == 1 and rv[0]["state"] == "ok" and
               rv[0]["title"] == "Add the widget", rv)
@@ -498,8 +507,8 @@ def test_hostile():
     try:
         before = files(T)
         open(TRACE, "w").close()
-        r1, ls1, rv1 = ref(n, signed[:12])
-        r2, ls2, rv2 = ref(n, lazy[:12])
+        r1, ls1, rv1 = ref(n, short(signed, 12))
+        r2, ls2, rv2 = ref(n, short(lazy, 12))
         r3, ls3, rv3 = ref(n, "src/w.c:1")
         check("hostile: the signed commit still resolves (ok), its "
               "signature unchecked", len(rv1) == 1 and rv1[0]["state"] == "ok"
@@ -551,12 +560,12 @@ def test_git_error():
     n = "xres-mods"
     spawn_shell(n, sr)
     try:
-        r, ls, rv = ref(n, sha[:10])
+        r, ls, rv = ref(n, short(sha, 10))
         check("git error: show dies on the bad .gitmodules: no block, never "
               "\"Not a commit\"", r.returncode == 0 and not rv and ls and
               ls[-1].get("done") is True, (rv, r.stdout[-300:]))
         bad = (r.returncode, ls[-1] if ls else None)
-        r, ls, rv = ref(n, first[:10])
+        r, ls, rv = ref(n, short(first, 10))
         check("git error: a commit that does not touch the gitlink: ok",
               len(rv) == 1 and rv[0]["state"] == "ok" and
               rv[0]["title"] == "Before the submodule", rv)
