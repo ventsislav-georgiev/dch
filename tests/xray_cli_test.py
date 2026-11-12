@@ -2129,6 +2129,68 @@ def test_follow_late():
         dch("-k", n)
 
 
+def test_follow_stale():
+    """QA 1.52.0 LOW-7 (Prosper's ruling A): a shell follower that leaves a
+    wake unanswered 3 s loses its slot to a fifth; when it reads again and no
+    slot is free it exits 1 with `dch: busy` and writes nothing more."""
+    import signal
+    n = "xc-fst"
+    with open(ENV["DCH_CONFIG"], "w") as f:
+        f.write("xray_ring = 64K\n")
+    prog = ("while :; do printf '\\033]133;A\\007$ \\033]133;B\\007'; "
+            "read -r cmd || exit; printf '\\033]133;C\\007'; eval \"$cmd\"; "
+            "printf '\\033]133;D;0\\007'; done")
+    cwd = os.path.join(T, "fst proj")
+    os.makedirs(cwd, exist_ok=True)
+    fls, stopped = [], None
+    try:
+        r = dch("--spawn", n, "--size", "80x24", "--cwd", cwd, "sh", "-c",
+                prog)
+        check("follow stale: spawned", r.returncode == 0, r.stderr)
+        _, o, _ = xray(n, "--json")
+        if (o or {}).get("reason") == "lite":
+            # dch-lite keeps no ring: no wake, so nothing to leave unanswered
+            check("follow stale: lite, corpus none (no ring to subscribe)",
+                  o["corpus"] == "none", o)
+            return
+        wait_for(lambda: "$" in screen(n), 5)
+        dch("--send", n, "echo 'see o/r#51'\n")
+        wait_for(lambda: "see o/r#51" in screen(n), 5)
+        for _ in range(4):
+            fls.append(Follow(n))
+        ok = all(f.wait(lambda o: "snapshot" in o) for f in fls)
+        time.sleep(0.5)
+        stale = fls[3]
+        k = len(stale.got)
+        os.kill(stale.p.pid, signal.SIGSTOP)	# our own child: a paused reader
+        stopped = stale
+        dch("--send", n, "echo 'more o/r#52'\n")	# a wake it leaves unanswered
+        time.sleep(3.5)
+        fifth = Follow(n)
+        fls.append(fifth)
+        took = fifth.wait(lambda o: "snapshot" in o)
+        os.kill(stale.p.pid, signal.SIGCONT)
+        stopped = None
+        try:
+            rc = stale.p.wait(10)
+        except subprocess.TimeoutExpired:
+            rc = None
+        stale.th.join(5)
+        err = stale.p.stderr.read() if rc is not None else None
+        check("follow stale: the stalled follower, its slot taken by a "
+              "fifth, exits 1 with dch: busy and no further line",
+              ok and took and rc == 1 and err == b"dch: busy\n" and
+              len(stale.got) == k, (ok, bool(took), rc, err,
+                                    stale.objs(k)))
+        fls.remove(stale)
+    finally:
+        if stopped:
+            os.kill(stopped.p.pid, signal.SIGCONT)
+        for f in fls:
+            f.stop()
+        dch("-k", n)
+
+
 def test_follow_agent(off=False):
     """A shell's follower across an agent's start and exit, on the default
     60 s record tick: while a follower is subscribed the master probes for
@@ -2910,6 +2972,7 @@ def main():
         test_follow_late()
         test_follow_cap()
         test_follow_shell()
+        test_follow_stale()
         test_follow_agent()
         test_follow_agent(off=True)
         test_screen()

@@ -12732,16 +12732,15 @@ xf_cx_dir(const struct xr_cx *x, char *dir, size_t dirsz)
 }
 
 /* A Claude with no transcript yet: the deepest of <cfg>/projects/<key>,
-** <cfg>/projects and <cfg> there, so its first file is seen (LOW-6) */
+** <cfg>/projects and <cfg> there, so its first file is seen (LOW-6); never
+** above <cfg> */
 static void
 xf_cl_dir(const struct xf_cl *s, char *dir, size_t dirsz)
 {
-	int k;
-
 	if (snprintf(dir, dirsz, "%s/projects/%s", s->cfg, s->project) >=
 	    (int)dirsz)
 		snprintf(dir, dirsz, "%s/projects", s->cfg);
-	for (k = 0; k < 2 && access(dir, X_OK) != 0; k++)
+	while (strlen(dir) > strlen(s->cfg) && access(dir, X_OK) != 0)
 		*strrchr(dir, '/') = '\0';
 }
 
@@ -13210,7 +13209,14 @@ xf_shell(struct xf *f, const char *label, int first)
 			break;
 		}
 		if (!(b->rs.status & DCH_RING_S_SUB))
-			break;	/* our slot was taken (a stale wake): end */
+		{
+			/* our slot went to a fifth while we left a wake unanswered
+			** 3 s, and none is free: busy, as a fifth at the start
+			** (QA 1.52.0 LOW-7, Prosper's ruling A) */
+			fputs("dch: busy\n", stderr);
+			rc = 1;
+			break;
+		}
 		xf_sb_answer(t, b, project, label, &a);
 		if (strcmp(b->rs.sid, was.sid) ||
 		    (b->rs.status & XF_MODE) != (was.status & XF_MODE))

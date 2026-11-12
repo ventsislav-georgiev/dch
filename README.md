@@ -1305,8 +1305,11 @@ is not told when its agent exits.
 Rules for shells and endings:
 - A master takes 4 shell subscribers. A fifth gets `dch: busy` and exit 1.
   A follower that leaves the master's wake unanswered for 3 s (a paused
-  reader) can lose its slot to a fifth; today it then exits 0 with no
-  further line, as if the session had ended.
+  reader) can lose its slot to a fifth. When it reads again and no slot is
+  free, it writes `dch: busy` to stderr and exits 1, with no further line on
+  stdout. Exit 1 with `busy` can come after the snapshot: then it means the
+  stream stopped, not that the session ended. Run `--follow` again for a
+  new snapshot.
 - An ended session or a History record writes its one snapshot and exits 0.
 - A live one exits 0 when the session ends, when its connection drops (a
   `--restart`), or when the reader closes the pipe, idle or not.
@@ -1359,7 +1362,7 @@ system, like any name.
 | Exit | Meaning |
 | --- | --- |
 | 0 | the object was printed; a `--follow` ended with its session, its connection, or its reader |
-| 1 | `dch: no such session` (also a master that hangs up after the connect, before its answer is complete, in every form: nothing more is written; `--ref` keeps the lines already out and writes no `done`; `--follow` once its snapshot is out exits 0 instead), `dch: ambiguous session`, `dch: no x-ray corpus` (`--clear`, `--ref`, `--chapter`), `dch: chapter gone` (`--chapter`: no chapter has that anchor now), `dch: busy` (a fifth `--follow` on one shell) |
+| 1 | `dch: no such session` (also a master that hangs up after the connect, before its answer is complete, in every form: nothing more is written; `--ref` keeps the lines already out and writes no `done`; `--follow` once its snapshot is out exits 0 instead), `dch: ambiguous session`, `dch: no x-ray corpus` (`--clear`, `--ref`, `--chapter`), `dch: chapter gone` (`--chapter`: no chapter has that anchor now), `dch: busy` (a fifth `--follow` on one shell; also after the snapshot, when a stalled follower's slot went to a fifth: the stream stopped, the session did not end) |
 | 2 | bad usage: `--json` missing, a flag twice, `--follow` with `--ref` or `--clear`, `--chapter` with `--ref`, `--follow` or `--clear`, a flag of a later release, `--xray` not first, a bad `<n>`, a bad `--ref`, `--chapter` anchor, `--scope` or `--budget-ms` |
 | 4, 6, 7 | a remote `host:name` only: refused by the host's gate; the host lacks `xray`; the host is unreachable or the connection was lost |
 | 3 | `dch: X-ray failed on this session`: the session answered garbage, the transcript could not be read (it is there, but opening or reading it failed), memory ran out, or a write failed with an error other than a closed pipe |

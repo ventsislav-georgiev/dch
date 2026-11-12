@@ -1293,7 +1293,13 @@ A Claude Code follower past the 4 slots is not told when its agent exits.
 At most 4 shell followers per master: a fifth exits 1
 .IR busy .
 A follower that leaves the master's wake unanswered for 3 s can lose its
-slot to a fifth; it then exits 0 with no further line.
+slot to a fifth; when it reads again and no slot is free, it exits 1
+.I busy
+with no further line.
+Exit 1
+.I busy
+can come after the snapshot: then the stream stopped; the session did not
+end.
 An ended session or a History record writes its snapshot and exits 0;
 a live one exits 0 when the session ends, its connection drops, or the
 reader closes the pipe, idle or not.
