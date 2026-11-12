@@ -13744,7 +13744,7 @@ static int
 attach_xray_view(void)
 {
 	char n[DCH_RHOST_MAX + sizeof session_name];
-	unsigned char c;
+	unsigned char c[4096];
 	int rc;
 
 	xv_tab = 2;
@@ -13756,7 +13756,9 @@ attach_xray_view(void)
 	if (rc != 0)
 	{
 		tw(STDERR_FILENO, "\r(any key: back to the session)");
-		(void)!read(STDIN_FILENO, &c, 1);
+		/* the whole read: an arrow key, a UTF-8 character or a paste
+		** is one key here, none of it for the session (LOW-R8) */
+		(void)!read(STDIN_FILENO, c, sizeof c);
 	}
 	return rc;
 }

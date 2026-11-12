@@ -405,6 +405,9 @@ int attach_main(int noerror);
 ** print once the terminal is restored, exiting with *code (remote.h). */
 extern int attach_sock;
 extern const char *(*attach_lost)(int *code);
+/* And, asked by the X-ray overlay then, 1 when the host detached its
+** client (dch -d there, #217): the view leaves as on a local dch -d. */
+extern int (*attach_detached)(void);
 /* The in-attach X-ray chord (#187), the detach key then x: the host's view
 ** of the attached session, run in a child attach_main forks; its exit code.
 ** A remote attach's too (#189). NULL: no chord, the bytes go on as before. */

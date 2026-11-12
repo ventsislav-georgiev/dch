@@ -269,6 +269,18 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		inert(msg);
 		if (code != 1 && code != DCH_EXIT_REFUSED && code != DCH_EXIT_TAKEN)
 			abort();	/* only dch -a's documented codes (#102) */
+		{
+			/* #217: a 0x12 says a detach only by "why":"detach" */
+			static const char det[] = "{\"code\":0,\"why\":\"detach\"}",
+			    end[] = "{\"code\":0,\"why\":\"detached\"}";
+
+			if (exited < 0 || exited > 2 ||
+			    end_detach((const unsigned char *)det,
+			               sizeof det - 1) != 1 ||
+			    end_detach((const unsigned char *)end,
+			               sizeof end - 1) != 0)
+				abort();
+		}
 		if (tin.n >= RF_HDR + RF_LIST_MAX && r == 0)
 			abort();	/* a held frame past its cap closes */
 		free(tin.p);

@@ -2202,8 +2202,29 @@ sb_drop(struct sb *b, size_t *off)
 	}
 }
 
+/* A 0x12's payload: 1 when it says "why":"detach" (#217: the host's dch -d
+** detached its attach client, the session lives on), else 0. Pure. */
+static int
+end_detach(const unsigned char *d, size_t n)
+{
+	struct json_parser jp;
+	char t[256], why[16];
+	int k = 0;
+
+	if (n >= sizeof t || memchr(d, 0, n))
+		return 0;
+	memcpy(t, d, n);
+	t[n] = '\0';
+	if (dch_json_parse(&jp, t) == 0 && jp.ntok > 0 &&
+	    jp.tok[0].kind == JSON_OBJECT)
+		k = jstr(&jp, 0, "why", why, sizeof why) == 1 &&
+		    !strcmp(why, "detach");
+	dch_json_free(&jp);
+	return k;
+}
+
 /* The server's frames in tin as the relay takes them: 0x10 onto to_sp,
-** 0x12 sets *exited, the first 0x13's message into msg[cap] (escaped, kept
+** 0x12 sets *exited (2 when it says "why":"detach", #217), the first 0x13's message into msg[cap] (escaped, kept
 ** whatever ends the link after it) and what its code makes the exit status
 ** into *code (err_text). What it parsed leaves tin. -1 when the link must
 ** end: a frame over the limit. Pure. */
@@ -2229,7 +2250,7 @@ relay_in(struct rf_state *rs, struct sb *tin, struct sb *to_sp, int *exited,
 		if (f.type == 0x10 && f.len)
 			sb_add(to_sp, f.data, f.len);
 		else if (f.type == 0x12 && r == RF_FRAME)
-			*exited = 1;
+			*exited = 1 + end_detach(f.data, f.len);
 		else if (f.type == 0x13 && r == RF_FRAME && !msg[0])
 		{
 			char m[300];
@@ -2266,11 +2287,14 @@ end_line(char *line, size_t cap, int code, const char *label, const char *msg)
 }
 
 #ifndef _WIN32
+#define RELAY_DETACHED 3	/* not a dch -a status: the relay's own */
+
 /* The relay child: the attach client's packets on sp as frames on tcp,
 ** 0x10 back raw; tin and rs hold what followed the list on tcp. 0 when the
 ** session ended (0x12) or the attach side closed (a detach: the TCP close
-** is all, nothing is killed); else dch -a's exit status (remote.h), with
-** why the connection ended written to `why`. */
+** is all, nothing is killed); RELAY_DETACHED when the host detached its
+** client (a 0x12 with "why":"detach"); else dch -a's exit status
+** (remote.h), with why the connection ended written to `why`. */
 static int
 relay(int tcp, int sp, int why, const char *label, struct sb tin,
       struct rf_state rs)
@@ -2400,8 +2424,8 @@ relay(int tcp, int sp, int why, const char *label, struct sb tin,
 				drain = now_ms() + 2000;
 		}
 	}
-	if (exited)
-		return 0;	/* the session ended, whatever came after */
+	if (exited)	/* the session ended, whatever came after */
+		return exited == 2 ? RELAY_DETACHED : 0;
 	{
 		char line[800];
 
@@ -2412,24 +2436,44 @@ relay(int tcp, int sp, int why, const char *label, struct sb tin,
 }
 
 static pid_t relay_pid = -1;
-static int why_fd = -1;
+static int why_fd = -1, relay_st = -1;
+
+/* The relay's wait status once it closed the session socket, reaped once
+** (the X-ray overlay may ask before the main loop does); -1: none. */
+static int
+relay_status(void)
+{
+	if (relay_pid > 0)
+	{
+		while (waitpid(relay_pid, &relay_st, 0) < 0 && errno == EINTR)
+			;
+		relay_pid = -1;
+	}
+	return relay_st;
+}
+
+/* attach.c's hook, when the relay closed the session socket: whether the
+** host detached its client (#217), so the X-ray overlay leaves too. */
+static int
+remote_detached(void)
+{
+	int st = relay_status();
+
+	return st != -1 && WIFEXITED(st) && WEXITSTATUS(st) == RELAY_DETACHED;
+}
 
 /* attach.c's hook, when the relay closed the session socket: NULL for a
-** session that ended, else what to say once the terminal is back, with the
-** exit status in *code (the relay's; 1 for one that died). */
+** session that ended or a detach, else what to say once the terminal is
+** back, with the exit status in *code (the relay's; 1 for one that died). */
 static const char *
 remote_lost(int *code)
 {
 	static char msg[900];
 	ssize_t k = -1;
-	int st = 0;
+	int st = relay_status();
 
-	if (relay_pid <= 0)
-		return NULL;
-	while (waitpid(relay_pid, &st, 0) < 0 && errno == EINTR)
-		;
-	relay_pid = -1;
-	if (WIFEXITED(st) && WEXITSTATUS(st) == 0)
+	if (st == -1 || (WIFEXITED(st) && (WEXITSTATUS(st) == 0 ||
+	                                   WEXITSTATUS(st) == RELAY_DETACHED)))
 		return NULL;
 	*code = WIFEXITED(st) ? WEXITSTATUS(st) : 1;
 	if (why_fd >= 0)
@@ -2839,6 +2883,7 @@ dch_remote_attach(const char *host, const char *name)
 		return 1;
 	}
 	free(out.p);
+	relay_st = -1;
 	if (relay_pid == 0)
 	{
 		child_signals();
@@ -2854,11 +2899,13 @@ dch_remote_attach(const char *host, const char *name)
 	why_fd = wp[0];
 	attach_sock = sp[0];
 	attach_lost = remote_lost;
+	attach_detached = remote_detached;
 	snprintf(g_attached, sizeof g_attached, "%s", h.label);
 	dch_trace("remote attach %s relay=%d", h.label, (int)relay_pid);
 	rc = attach_main(0);	/* returns only to switch sessions */
 	attach_sock = -1;
 	attach_lost = NULL;
+	attach_detached = NULL;
 	g_attached[0] = '\0';
 	if (relay_pid > 0)
 		while (waitpid(relay_pid, NULL, 0) < 0 && errno == EINTR)

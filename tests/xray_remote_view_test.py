@@ -45,11 +45,17 @@ Covers:
      key or the x; q goes back, the host is asked to redraw (the program's
      SIGWINCH), a key after reaches the session, and the host saw one attach
      (never retired); next to a local srv:xv-rx too (LOW-R2). Off under -E
-     and DCH_DOUBLE_TAP_MS=0, as the local chord;
+     and DCH_DOUBLE_TAP_MS=0, as the local chord. dch -d xv-rx on the
+     host, or dch -d srv:xv-rx from the client, with the view up: the
+     client leaves at once, exit 0, the view and the relay gone, the
+     session untouched (QA 1.58.0 MED-R6); a session that ends under the
+     view leaves it up until q, as before;
   7. the view's failure lines over an attach to a fake host without "xray"
      (exit 6), whose gate refuses the view's connection (exit 4), or whose
      port closes once the attach is in (exit 7): the line, q, any key, and
      the attach goes on (the host gets the redraw, then only the next key);
+     an arrow key, a UTF-8 character or a paste as the any key is all
+     swallowed (QA 1.58.0 LOW-R8);
   8. the host re-arms on its redraw (#189 round 2): a program on the
      alternate screen with bracketed paste, mouse reporting and kitty flags
      on, over `dch -a srv:xv-md`; after the chord's view the client's output
@@ -1259,6 +1265,83 @@ def test_chord(port):
         time.sleep(0.5)
 
 
+def test_chord_detach():
+    """QA 1.58.0 MED-R6: dch -d xv-rx on the host, or dch -d srv:xv-rx from
+    the client, with the chord's view up: the client leaves as a local
+    dch -d makes it (#196): the view goes, exit 0, no line, and the session
+    gets nothing and lives on. A session that ends under the view leaves
+    the view up as before (#217: serve's 0x12 tells the two apart), then q
+    exits 0."""
+    for how in ("on the host", "-d srv:xv-rx from the client"):
+        a, _ = rattach()
+        try:
+            got = rx()
+            mark = len(a.out)
+            a.key(b"\x1cx", 0.05)
+            ok = a.wait(b"X-ray  srv:xv-rx", start=mark)
+            check("remote -d, %s: the view opens" % how, ok,
+                  a.out[mark:][-300:])
+            kids = list(kids_of(a.pid))
+            mark = len(a.out)
+            r = dch(SENV, "-d", "xv-rx") if how == "on the host" else \
+                dch(CENV, "-d", "srv:xv-rx")
+            check("remote -d, %s: it says it detached one client" % how,
+                  r.returncode == 0 and "detached 1 client" in r.stdout,
+                  (r.returncode, r.stdout, r.stderr))
+            # the bug keeps the view up until q: 15 s is far past a detach
+            rc = a.exit(15)
+            tail = a.out[mark:]
+            check("remote -d, %s: the client leaves without q, exit 0, no "
+                  "line" % how, rc == 0 and b"lost the connection" not in
+                  tail, (rc, tail[-300:]))
+            check("remote -d, %s: the view's alternate screen was left" % how,
+                  RESTORE in tail, tail[-300:])
+            check("remote -d, %s: the view and the relay are gone" % how,
+                  kids and until(lambda: not alive(kids), 5), kids)
+            dch(SENV, "--send", "xv-rx", "alive")
+            check("remote -d, %s: the session got nothing and lives on" % how,
+                  until(lambda: rx()[len(got):] == "616c697665", 5),
+                  rx()[len(got):])
+        finally:
+            a.close()
+        time.sleep(0.5)
+
+    # the session ends under the view: the view stays up, as before
+    r = dch(SENV, "--spawn", "xv-re", "--size", "100x30", "sh", "-c",
+            "echo READY; read x; echo BYE")
+    check("remote end: the session spawned on the host", r.returncode == 0,
+          r.stderr)
+    a = Pty([DCH, "-a", "srv:xv-re"])
+    try:
+        a.wait(b"READY")
+        a.pump(0.5)
+        mark = len(a.out)
+        a.key(b"\x1cx", 0.05)
+        # its screen read before the end (dch-lite: read, no mirror): a
+        # view slower than that (ASan) says "no such session" itself
+        a.wait(b"X-ray  srv:xv-re", start=mark)
+        check("remote end: the view opens and reads the screen",
+              until(lambda: a.pump(0.1) or re.search(
+                  rb" READY\033\[K|No screen: ", a.out[mark:])),
+              a.out[mark:][-300:])
+        mark = len(a.out)
+        dch(SENV, "--send", "xv-re", "go\n")
+        ended = until(lambda: " xv-re exited" in open(SLOG).read())
+        a.pump(3)
+        check("remote end: the session ended under the view; the view stays",
+              ended and a.reap() is None and RESTORE not in a.out[mark:],
+              (ended, a.rc, a.out[mark:][-300:]))
+        a.key(b"q", 0.3)
+        rc = a.exit(10)
+        check("remote end: q leaves, exit 0, no line", rc == 0 and
+              b"lost the connection" not in a.out[mark:],
+              (rc, a.out[mark:][-300:]))
+    finally:
+        a.close()
+        dch(SENV, "-k", "xv-re")
+    time.sleep(0.5)
+
+
 # ---- 7: the view's failure lines over a remote attach ----------------------
 
 class Attachable(Fake):
@@ -1304,7 +1387,7 @@ class Attachable(Fake):
             return
 
 
-def chord_fail(what, mode, line, close=False):
+def chord_fail(what, mode, line, close=False, anykey=b" "):
     h = Attachable(mode)
     hosts("q=127.0.0.1:%d" % h.port)
     a = Pty([DCH, "-a", "q:fk"])
@@ -1329,7 +1412,7 @@ def chord_fail(what, mode, line, close=False):
         check("remote chord, %s: q says the line and waits for a key" % what,
               a.wait(b"(any key: back to the session)", start=mark) and
               a.reap() is None, a.out[mark:][-300:])
-        a.key(b" ", 0.5)
+        a.key(anykey, 0.5)
         a.key(b"z", 0.3)
         until(lambda: h.keys == b"z", 5)
         check("remote chord, %s: a key goes back to the attach: the host got "
@@ -1348,6 +1431,14 @@ def test_chord_fail():
                "dch: q refused: " + REFUSAL["message"])
     chord_fail("an unreachable host (exit 7)", "ok", "dch: q: unreachable: ",
                close=True)
+    # QA 1.58.0 LOW-R8: the any key is the whole read, none of it for the
+    # session
+    for what, k in (("an arrow key", b"\033[A"),
+                    ("a UTF-8 character", "\u00a9".encode()),
+                    ("a paste", b"\033[200~pasted text\033[201~")):
+        chord_fail("%s as the any key" % what, "ok",
+                   "dch: q: does not support --xray (needs dch serve "
+                   "1.55.0+)", anykey=k)
 
 
 # ---- 8: the host re-arms the session's modes on 0x07 (#189 round 2) --------
@@ -1568,6 +1659,7 @@ def main():
         test_link_drop()
         test_stop()
         test_chord(port)
+        test_chord_detach()
         test_chord_fail()
         hosts("srv=127.0.0.1:%d" % port)
         test_rearm()

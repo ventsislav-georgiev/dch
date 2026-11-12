@@ -2119,14 +2119,24 @@ serve_conn(int fd, uint32_t ip)
 		if (c->kid_done && c->attached && !c->closing)
 		{
 			/* the session's client exited: its last output, then
-			** 0x12 and the FIN */
+			** 0x12 and the FIN. "why":"detach" when its session is
+			** still there (#217: a dch -d here, or -d host:name),
+			** as an ending master unlinks its socket before its
+			** clients see the close; an older client ignores it */
 			struct sb b = {0};
+			struct stat ss;
+			char sp[PATH_MAX];
 			int st = c->kid_status;
 
 			pty_read(c, 1u << 20);
 			sb_s(&b, "{\"code\":");
 			sb_ll(&b, WIFEXITED(st) ? WEXITSTATUS(st)
 			                        : 128 + WTERMSIG(st));
+			if (c->name[0] && WIFEXITED(st) && !WEXITSTATUS(st) &&
+			    snprintf(sp, sizeof sp, "%s/%s.sock", dch_sock_dir(),
+			             c->name) < (int)sizeof sp &&
+			    stat(sp, &ss) == 0 && S_ISSOCK(ss.st_mode))
+				sb_s(&b, ",\"why\":\"detach\"");
 			sb_s(&b, "}");
 			out_frame(c, 0x12, b.p, b.n);
 			free(b.p);

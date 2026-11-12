@@ -98,6 +98,7 @@ restore_term(void)
 int attach_sock = -1;
 int attach_end_back;
 const char *(*attach_lost)(int *code);
+int (*attach_detached)(void);
 int (*attach_xray)(void);
 
 /* A remote attach's socket closed: when the link (not the session) ended,
@@ -693,9 +694,14 @@ xray_overlay(int s)
 		{
 			ssize_t r = read(s, buf, sizeof buf);
 
-			/* the session ended: the loop's read says so after */
+			/* the session ended: the loop's read says so after;
+			** a remote dch -d (#217) leaves as a local one does */
 			if (r == 0 || (r < 0 && errno != EINTR))
+			{
 				live = 0;
+				if (!r && attach_detached && attach_detached())
+					want_detach = 1;
+			}
 		}
 		if (n > 0 && FD_ISSET(p[0], &rs) && read(p[0], buf, 1) == 0)
 		{
