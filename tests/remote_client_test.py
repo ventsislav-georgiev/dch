@@ -287,6 +287,12 @@ def ctl_checks(dch, check, senv, cenv, serve_at, procs, fakes, tmp, hosts):
     same("--read --recent 5", "--read", "@", "--recent", "5")
     same("--read --recent --cursor (dch refuses)", "--read", "@",
          "--recent", "--cursor")
+    # "working" lasts a moment past the last output: both idle before the pair
+    for _ in range(100):
+        if (dch(senv, "--status", "ctl-qa").stdout,
+                dch(senv, "--status", "ctl-qb").stdout) == ("idle\n",) * 2:
+            break
+        time.sleep(0.1)
     same("--status", "--status", "@")
     same("-m", "-m", "@", "nick")
     same("--pin --json", "--pin", "@", "--json")

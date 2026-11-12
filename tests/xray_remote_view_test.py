@@ -84,6 +84,9 @@ def side(name, **kw):
 
 SENV = side("srv")
 CENV = side("cli")
+# the picker probes the host once inside --ls's box (300 ms): a loaded
+# machine or a sanitizer build misses it and the picker says "no sessions"
+CENV["DCH_REMOTE_BOX_MS"] = "5000"
 SLOG = os.path.join(T, "serve.log")
 
 
