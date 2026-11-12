@@ -1044,10 +1044,21 @@ does not match, other hosts never match, a failed or timed\-out
 .B config
 run gives no line, and the remote URLs are never printed.
 A file is read only inside the project (the cwd's git root, else the cwd;
+a git root holds a
+.B .git
+directory or a
+.B .git
+file starting
+.RB \(lq "gitdir: " \(rq,
+and any other
+.B .git
+file ends the search with none;
 none when that is
 .BR / ,
 .B $HOME
-or a directory above it, by real path; none at
+or a directory above it, by real path and by device and inode, so
+.I /System/Volumes/Data$HOME
+is the home too; none at
 .I ~/.config
 or
 .I ~/Library
@@ -1081,11 +1092,14 @@ anything under a directory
 .BR .password\-store ,
 .BR .m2 ,
 .BR .bash_sessions ,
+.BR .zsh_sessions ,
 .BR .config/gh ,
 .BR .config/gcloud ,
-.B .config/hub
+.BR .config/hub ,
+.BR .config/op ,
+.B .config/github\-copilot
 or
-.BR .config/op ;
+.BR .composer/auth.json ;
 the names
 .BR .claude.json ,
 .BR .pgpass ,
@@ -1106,9 +1120,15 @@ the names
 .BR gradle.properties ,
 .BR rclone.conf ,
 .BR .boto ,
-.B .dockercfg
+.BR .dockercfg ,
+.BR .Xauthority ,
+.BR Xauthority ,
+.BR .ICEauthority ,
+.BR .credentials.json ,
+.BR .terraformrc ,
+.B terraform.rc
 and
-.BR .Xauthority ;
+.BR .databrickscfg ;
 names ending in
 .BR .pem ,
 .BR .key ,
@@ -1127,17 +1147,37 @@ or
 .BR history ;
 .B id_
 names with no dot.
-A git root whose own path, as given, lies in one of those directories (a
-Claude Code worktree in
-.IR <repo>/.claude/worktrees/<name> )
-has them matched only below the root; a root reached through a symlink
-that hides the directory, or a cwd in one with no git root, has no such
-exception.
+One exception, for a Claude Code worktree: a part
+.B .claude
+is no denied directory when it is followed by
+.IR worktrees/<name> ,
+that
+.I <repo>/.claude/worktrees/<name>
+is the project root or a directory above it, its
+.B .git
+is a regular file (not a symlink) starting
+.RB \(lq "gitdir: " \(rq,
+and the root as given and its real path both end in the same parts from
+that
+.B .claude
+on.
+Only that part is lifted; every other part, above the root, the root
+itself and below it, keeps the whole list, so a
+.BR .claude ,
+.B .codex
+or
+.B .kube
+directory that is itself a git repo refuses every file.
+A root reached through a symlink that hides the
+.BR .claude ,
+a clone in
+.IR worktrees/ ,
+or a cwd there with no git root, has no exception.
 Whatever the root, a path that enters one of them in the home
 .RI ( ~/.claude ,
 .IR ~/.codex ,
 .IR ~/.config/gh ,
-\&...), as given or by its real path, is
+\&...), as given, by its real path or by the home's device and inode, is
 .BR secret_name .
 The list guards the common credential files by name; a secret in a file
 with any other name is shown.

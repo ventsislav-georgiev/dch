@@ -1404,9 +1404,12 @@ Codex `<n>` gets it too.
   user who can read that repo.
 - **File.** The ref's path (a relative one against the session's cwd, a
   `~/` one against `HOME`), in an ended session too, must lie inside the
-  project: the cwd's git root (the nearest parent holding `.git`), else the
-  cwd. A root that is `/`, `$HOME` or a directory above `$HOME` (by real
-  path; `HOME` and the passwd entry's home both count) is no project: every
+  project: the cwd's git root (the nearest parent holding a `.git`
+  directory, or a `.git` file starting `gitdir: `; any other `.git` file
+  ends the search with no git root), else the cwd. A root that is `/`,
+  `$HOME` or a directory above `$HOME` (by real path, and by device and
+  inode, so `/System/Volumes/Data$HOME` is the home too; `HOME` and the
+  passwd entry's home both count) is no project: every
   file is then `outside_project`. So is `~/.config` or `~/Library`, and a
   root inside either that is not a git root below it (a shell in
   `~/.config/rclone`): apps keep tokens there under any name. A git root
@@ -1419,30 +1422,40 @@ Codex `<n>` gets it too.
     `.npmrc`, `.pypirc` or `.git-credentials`;
   - a directory `.git`, `.kube`, `.docker`, `.azure`, `.oci`, `.claude`,
     `.codex`, `.gcloud`, `.password-store`, `.m2`, `.bash_sessions`,
-    `.config/gh`, `.config/gcloud`, `.config/hub` or `.config/op`, and
+    `.zsh_sessions`, `.config/gh`, `.config/gcloud`, `.config/hub`,
+    `.config/op`, `.config/github-copilot` or `.composer/auth.json`, and
     everything under it;
   - the name `.claude.json`, `.pgpass`, `.my.cnf`, `.vault-token`,
     `.htpasswd`, `.s3cfg`, `credentials`, `credentials.json`,
     `credentials.toml`, `credentials.db`,
     `application_default_credentials.json`, `secrets.yaml`, `secrets.yml`,
     `secrets.json`, `credentials.tfrc.json`, `.yarnrc.yml`,
-    `gradle.properties`, `rclone.conf`, `.boto`, `.dockercfg` or
-    `.Xauthority`;
+    `gradle.properties`, `rclone.conf`, `.boto`, `.dockercfg`,
+    `.Xauthority`, `Xauthority`, `.ICEauthority`, `.credentials.json`,
+    `.terraformrc`, `terraform.rc` or `.databrickscfg`;
   - a name that ends in `.pem`, `.key`, `.p12`, `.pfx`, `.p8`, `.ppk`,
     `.jks`, `.keystore`, `.keychain`, `.keychain-db`, `.keyring`,
     `.tfstate`, `.tfstate.backup` or `history` (shell and REPL history);
   - an `id_` name with no dot (`id_rsa`, never `id_rsa.pub`).
 
-  One exception for the directories: when the project is a git root whose
-  own path, as given, lies in one of them (a Claude Code worktree in
-  `<repo>/.claude/worktrees/<name>`), they are matched only on the part of
-  the path below that root, as given and as real path. The worktree reads
-  its own `a.txt` and still refuses its `.env`, its own `.claude/` and the
-  like. A root reached through a symlink that hides the directory, or a
-  shell in one with no git root, gets no exception. Whatever the root, a
-  path whose real path (or path as given) enters one of these directories
-  of the home (`~/.claude`, `~/.codex`, `~/.config/gh`, ...) is
-  `secret_name`, so a git repo inside `~/.claude` shows nothing.
+  One exception, for a Claude Code worktree: a part `.claude` is no denied
+  directory when it is followed by `worktrees/<name>`, that
+  `<repo>/.claude/worktrees/<name>` is the project root or a directory
+  above it, its `.git` is a regular file (not a symlink) starting
+  `gitdir: ` (what `git worktree add` writes), and the root as given and
+  its real path both end in the same `.claude/worktrees/<name>...` parts.
+  Only that one part is lifted. Every other part of the path, above the
+  root, the root itself and below it, keeps the whole list: the worktree
+  reads its own `a.txt` and still refuses its `.env`, its own `.claude/`
+  and the like, and a `.claude`, `.codex` or `.kube` directory that is
+  itself a git repo (a config dir kept in git) refuses every file. A root
+  reached through a symlink that hides the `.claude`, a clone (a `.git`
+  directory) in `worktrees/`, or a shell there with no git root gets no
+  exception. Whatever the root, a path that enters one of these
+  directories of the home (`~/.claude`, `~/.codex`, `~/.config/gh`, ...)
+  is `secret_name`, so a worktree or a git repo inside `~/.claude` shows
+  nothing. The home is matched as given, by real path and by device and
+  inode, so `/System/Volumes/Data$HOME` is the home too.
 
   This guards the common credential files by name. It is not a guarantee:
   a secret in a file with any other name (a `config.yml`, a script, a log)

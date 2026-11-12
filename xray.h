@@ -442,13 +442,15 @@ void xr_scan_resolved(struct xr_scan *x, const struct xr_span *sp,
 /* The parsers, for the units and fuzz_xref: git show's output as a commit
 ** block (1, else 0); a file's 14-line window around line (0: the first);
 ** --ref's line suffix (:line, :line:col, #L<line>; 0 for none); the
-** deny list over every part of a path (1: never read). */
+** deny list over every part of a path (1: never read); a .git file's
+** first n bytes as git takes a git file ("gitdir: " and a path: 1). */
 int xr_git_parse(const char *s, size_t n, long long now,
                  struct xr_resolved *r);
 void xr_file_lines(const char *s, size_t n, long line,
                    struct xr_resolved *r);
 long xr_ref_line(const char *text);
 int xr_secret_name(const char *path);
+int xr_gitfile(const char *s, size_t n);
 /* git config --get-regexp's "remote.<name>.url <url>" lines: 1 when a URL
 ** names github.com's want ("<owner>/<repo>"), ASCII case-insensitive, as
 ** https://, ssh:// or git@host:, a trailing .git or / allowed. */

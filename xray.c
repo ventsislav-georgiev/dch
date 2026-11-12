@@ -7102,14 +7102,50 @@ res_set(struct xr_resolved *r, const char *state, const char *title)
 	snprintf(r->title, sizeof r->title, "%s", title);
 }
 
-/* "<git root>/.git" exists, walking up from cwd by its text alone: root,
-** else cwd itself (v2.1 7.1's project boundary). 1 when a root was found. */
+int
+xr_gitfile(const char *s, size_t n)
+{
+	return n > 8 && !memcmp(s, "gitdir: ", 8) && s[8] && s[8] != '\n' &&
+	       s[8] != '\r';
+}
+
+/* The .git at path as git takes it (QA 1.57.0 LOW-D1): 1 for a directory
+** (a symlink to one too) or a regular file starting "gitdir: " and a path;
+** 0 for none, a dangling symlink, a FIFO or a socket (git looks further
+** up); -1 for any other file, which git refuses, and for a symlink to a
+** file. Only a regular file is opened, through the seam (no symlink, no
+** FIFO, never blocks). */
+static int
+res_gitent(const char *path)
+{
+	struct stat st;
+	char b[16];
+	ssize_t n = -1;
+	int fd;
+
+	if (stat(path, &st) != 0)
+		return 0;
+	if (S_ISDIR(st.st_mode))
+		return 1;
+	if (!S_ISREG(st.st_mode))
+		return 0;
+	if ((fd = xr_seam_open(path, &st)) >= 0)
+	{
+		n = read(fd, b, sizeof b);
+		close(fd);
+	}
+	return n > 0 && xr_gitfile(b, (size_t)n) ? 1 : -1;
+}
+
+/* "<git root>/.git" a git dir or git file, walking up from cwd by its text
+** alone: root, else cwd itself (v2.1 7.1's project boundary). 1 when a root
+** was found; a .git git refuses ends the walk with none. */
 static int
 res_root(const char *cwd, char *root, size_t rootsz)
 {
 	char p[PATH_MAX + 8];
-	struct stat st;
 	size_t l = strlen(cwd);
+	int g;
 
 	snprintf(root, rootsz, "%s", cwd);
 	if (cwd[0] != '/' || l >= PATH_MAX)
@@ -7120,7 +7156,9 @@ res_root(const char *cwd, char *root, size_t rootsz)
 	for (;;)	/* p[0..l) the dir; l 0 is "/" */
 	{
 		memcpy(p + l, "/.git", 6);
-		if (lstat(p, &st) == 0)
+		if ((g = res_gitent(p)) < 0)
+			return 0;
+		if (g)
 		{
 			snprintf(root, rootsz, "%.*s", (int)(l ? l : 1), l ? p : "/");
 			return 1;
@@ -7147,15 +7185,41 @@ res_under(const char *p, const char *root)
 	return p[rl] ? p + rl + 1 : p + rl;
 }
 
+/* path[0..l) is a home (HOME's or the passwd entry's) by (st_dev, st_ino),
+** lstat: any other spelling of it too, which text and realpath miss: the
+** firmlink /System/Volumes/Data$HOME, a bind mount (QA 1.57.0 LOW-D2) */
+static int
+res_home_ino(const char *path, size_t l)
+{
+	const struct passwd *pw = getpwuid(getuid());
+	const char *h[2] = { getenv("HOME"), pw ? pw->pw_dir : NULL };
+	char b[PATH_MAX];
+	struct stat a, st;
+	int k;
+
+	if (!l || l >= sizeof b)
+		return 0;
+	memcpy(b, path, l);
+	b[l] = '\0';
+	if (lstat(b, &a) != 0)
+		return 0;
+	for (k = 0; k < 2; k++)
+		if (h[k] && h[k][0] == '/' && stat(h[k], &st) == 0 &&
+		    st.st_dev == a.st_dev && st.st_ino == a.st_ino)
+			return 1;
+	return 0;
+}
+
 /* root is "/", $HOME or an ancestor of it, by real path (HOME and the
 ** passwd entry's): too wide to be a project, so none (#178). So is
 ** ~/.config or ~/Library, or a root inside one that is no git root below
-** it: their apps keep tokens under any name (QA 1.55.0 LOW-14, #184). */
+** it: their apps keep tokens under any name (QA 1.55.0 LOW-14, #184).
+** Then the same by inode, for another spelling of the home (LOW-D2). */
 static int
 res_wide(const char *root, int git)
 {
 	const struct passwd *pw = getpwuid(getuid());
-	const char *h[2] = { getenv("HOME"), pw ? pw->pw_dir : NULL };
+	const char *h[2] = { getenv("HOME"), pw ? pw->pw_dir : NULL }, *s;
 	static const char *const app[2] = { ".config", "Library" };
 	char rr[PATH_MAX], hr[PATH_MAX], d[PATH_MAX + 16];
 	size_t l;
@@ -7181,6 +7245,23 @@ res_wide(const char *root, int git)
 				    (rr[l] == '/' && (!git || !rr[l + 1]))))
 					return 1;
 			}
+			/* the home below rr by inode: rr and each tail of hb */
+			for (s = hb; s; s = strchr(s + 1, '/'))
+				if ((l = (size_t)snprintf(d, sizeof d, "%s%s", rr, s))
+				    < sizeof d && res_home_ino(d, l))
+					return 1;
+		}
+	if (res_home_ino(rr, strlen(rr)))
+		return 1;
+	/* rr at or in ~/.config or ~/Library by the home's inode */
+	for (s = rr; (s = strchr(s, '/')); s++)
+		for (a = 0; a < 2; a++)
+		{
+			l = strlen(app[a]);
+			if (!strncasecmp(s + 1, app[a], l) && (!s[l + 1] ||
+			    (s[l + 1] == '/' && (!git || !s[l + 2]))) &&
+			    res_home_ino(rr, (size_t)(s - rr)))
+				return 1;
 		}
 	return 0;
 }
@@ -7753,8 +7834,8 @@ xr_ref_line(const char *text)
 ** starts with it; 'd': a part (or parts, "a/b") equals it; on the name
 ** only, 'n': equals it, 's': ends in it, 'i': starts with it and has no
 ** dot. A guard against the common credential files, not a guarantee.
-** res_file matches 'd' only below a git root whose own path lies in such
-** a directory, and the home's own always (#184). */
+** res_file lifts '.claude' only where res_lift says: a git worktree in
+** <repo>/.claude/worktrees/<name> (#184, QA 1.57.0 MED-D1). */
 static const struct { char how; const char *s; } xr_deny[] = {
 	/* env files, ssh, gpg, aws, the package managers' tokens (.env*) */
 	{ 'p', ".env" }, { 'p', ".ssh" }, { 'p', ".gnupg" }, { 'p', ".aws" },
@@ -7770,6 +7851,9 @@ static const struct { char how; const char *s; } xr_deny[] = {
 	/* QA 1.55.0 LOW-14: maven, hub, 1Password, macOS shell sessions */
 	{ 'd', ".m2" }, { 'd', ".config/hub" }, { 'd', ".config/op" },
 	{ 'd', ".bash_sessions" },
+	/* QA 1.57.0 LOW-D3: zsh sessions, Copilot's GitHub token, composer */
+	{ 'd', ".zsh_sessions" }, { 'd', ".config/github-copilot" },
+	{ 'd', ".composer/auth.json" },
 	/* single token and password files */
 	{ 'n', ".claude.json" }, { 'n', ".pgpass" }, { 'n', ".my.cnf" },
 	{ 'n', ".vault-token" }, { 'n', ".htpasswd" }, { 'n', ".s3cfg" },
@@ -7781,6 +7865,10 @@ static const struct { char how; const char *s; } xr_deny[] = {
 	{ 'n', "credentials.tfrc.json" }, { 'n', ".yarnrc.yml" },
 	{ 'n', "gradle.properties" }, { 'n', "rclone.conf" }, { 'n', ".boto" },
 	{ 'n', ".dockercfg" }, { 'n', ".Xauthority" },
+	/* LOW-D3: Claude Code's token file (Linux), terraform, databricks, X11 */
+	{ 'n', ".credentials.json" }, { 'n', ".terraformrc" },
+	{ 'n', "terraform.rc" }, { 'n', ".databrickscfg" },
+	{ 'n', "Xauthority" }, { 'n', ".ICEauthority" },
 	/* keys, certificates, keystores, keychains, terraform state */
 	{ 's', ".pem" }, { 's', ".key" }, { 's', ".p12" }, { 's', ".pfx" },
 	{ 's', ".p8" }, { 's', ".ppk" }, { 's', ".jks" }, { 's', ".keystore" },
@@ -7792,24 +7880,26 @@ static const struct { char how; const char *s; } xr_deny[] = {
 	{ 'i', "id_" },
 };
 
-/* path on the deny list, its 'd' entries only on the parts from dirs on
-** (a pointer into path; path itself for the whole of it) */
+/* path on the deny list, but for the parts lift has a bit for (part i:
+** the one after the i-th '/' counted from the start; 0 for none) */
 static int
-xr_secret_at(const char *path, const char *dirs)
+xr_secret_at(const char *path, uint64_t lift)
 {
 	const char *c = path, *e, *s;
-	size_t l, k, n;
+	size_t l, k, n, i;
 
-	for (; *c; c = *e ? e + 1 : e)
+	for (i = 0; *c; c = *e ? e + 1 : e, i++)
 	{
 		e = c + strcspn(c, "/");
 		l = (size_t)(e - c);
+		if (i < 64 && (lift >> i & 1))
+			continue;
 		for (k = 0; k < sizeof xr_deny / sizeof *xr_deny; k++)
 		{
 			s = xr_deny[k].s;
 			n = strlen(s);
 			if (xr_deny[k].how == 'p' ? l >= n && !strncasecmp(c, s, n)
-			    : xr_deny[k].how == 'd' ? c >= dirs &&
+			    : xr_deny[k].how == 'd' ?
 			      !strncasecmp(c, s, n) && (!c[n] || c[n] == '/')
 			    : *e ? 0	/* the rest: the name only */
 			    : xr_deny[k].how == 'n' ? l == n && !strncasecmp(c, s, n)
@@ -7824,29 +7914,77 @@ xr_secret_at(const char *path, const char *dirs)
 int
 xr_secret_name(const char *path)
 {
-	return xr_secret_at(path, path);
+	return xr_secret_at(path, 0);
 }
 
-/* a 'd' entry starts at c, or with every at any part of it */
+/* a 'd' entry starts at c */
 static int
-xr_deny_dir(const char *c, int every)
+xr_deny_dir(const char *c)
 {
 	size_t k, n;
 
-	for (; c; c = every && (c = strchr(c, '/')) ? c + 1 : NULL)
-		for (k = 0; k < sizeof xr_deny / sizeof *xr_deny; k++)
-		{
-			n = strlen(xr_deny[k].s);
-			if (xr_deny[k].how == 'd' &&
-			    !strncasecmp(c, xr_deny[k].s, n) && (!c[n] || c[n] == '/'))
-				return 1;
-		}
+	for (k = 0; k < sizeof xr_deny / sizeof *xr_deny; k++)
+	{
+		n = strlen(xr_deny[k].s);
+		if (xr_deny[k].how == 'd' &&
+		    !strncasecmp(c, xr_deny[k].s, n) && (!c[n] || c[n] == '/'))
+			return 1;
+	}
 	return 0;
+}
+
+/* The worktree exception (#184, narrowed by QA 1.57.0 MED-D1). A part
+** ".claude" of rr (the root's real path) is no denied dir when it is
+** followed by "worktrees/<name>", that "<...>/.claude/worktrees/<name>" is
+** the root or a parent of it, its ".git" is a regular file (no symlink)
+** starting "gitdir: " (a git worktree, what Claude Code makes there), and
+** the typed root ends in the same parts from that ".claude" on. Only those
+** parts are lifted; every other part, above the root, the root itself and
+** below it, keeps the whole list, and res_home_deny still refuses a
+** worktree in the home's .claude. The lifted parts, as xr_secret_at's bits:
+** the typed root's returned, the real one's in *lr. shortcut: a part past
+** the 63rd is never lifted (refused); no real tree is that deep. */
+static uint64_t
+res_lift(const char *root, const char *rr, uint64_t *lr)
+{
+	static const char wt[] = ".claude/worktrees/";
+	char g[PATH_MAX + 8];
+	const char *c, *e;
+	size_t tl = strlen(root), l, i = 0, j;
+	uint64_t lt = 0;
+	struct stat st;
+
+	*lr = 0;
+	for (c = rr; (c = strchr(c, '/')); c++)
+	{
+		if (++i >= 64 || strncasecmp(c + 1, wt, sizeof wt - 1))
+			continue;	/* c + 1 starts part i */
+		e = c + sizeof wt;
+		if (!*e || *e == '/')
+			continue;
+		e += strcspn(e, "/");	/* the end of <name> */
+		l = strlen(c + 1);	/* ".claude/..." to the end of rr */
+		if (tl <= l || root[tl - l - 1] != '/' ||
+		    strncasecmp(root + tl - l, c + 1, l) ||
+		    snprintf(g, sizeof g, "%.*s/.git", (int)(e - rr), rr)
+		    >= (int)sizeof g || lstat(g, &st) != 0 ||
+		    !S_ISREG(st.st_mode) || res_gitent(g) != 1)
+			continue;
+		for (j = 0, e = root; e < root + tl - l; e++)
+			j += *e == '/';
+		if (j < 64)
+		{
+			*lr |= (uint64_t)1 << i;
+			lt |= (uint64_t)1 << j;
+		}
+	}
+	return lt;
 }
 
 /* path in a denied directory of the home (~/.claude, ~/.config/gh, ...),
 ** whatever the project root: HOME and the passwd entry's home, each as
-** given and as its real path, without regard to case (#184) */
+** given and as its real path, without regard to case (#184), then any
+** spelling of it by inode (LOW-D2) */
 static int
 res_home_deny(const char *path)
 {
@@ -7864,9 +8002,12 @@ res_home_deny(const char *path)
 		for (l = strlen(c); l && c[l - 1] == '/'; l--)
 			;
 		if (!strncasecmp(path, c, l) && path[l] == '/' &&
-		    xr_deny_dir(path + l + 1, 0))
+		    xr_deny_dir(path + l + 1))
 			return 1;
 	}
+	for (c = path; (c = strchr(c, '/')); c++)
+		if (xr_deny_dir(c + 1) && res_home_ino(path, (size_t)(c - path)))
+			return 1;
 	return 0;
 }
 
@@ -7906,9 +8047,9 @@ xr_file_lines(const char *s, size_t n, long line, struct xr_resolved *r)
 ** either whole path, nor a denied dir of the home; lstat a regular file
 ** with one link, at most 2 MB, opened through the seam. Outside the
 ** project nothing is touched, so no TCC prompt (QA D), unless a symlinked
-** dir inside points out: realpath follows it, then refuses. A git root
-** whose typed path lies in a denied dir (a worktree in .claude/worktrees)
-** has the denied dirs matched below it only (#184). */
+** dir inside points out: realpath follows it, then refuses. A git
+** worktree in <repo>/.claude/worktrees/<name> has that one ".claude" part
+** lifted, on both paths (res_lift, #184, QA 1.57.0 MED-D1). */
 static int
 res_file(const char *key, const char *text, const char *cwd,
          struct xr_resolved *r)
@@ -7920,7 +8061,8 @@ res_file(const char *key, const char *text, const char *cwd,
 	struct stat st;
 	ssize_t got;
 	size_t n = 0;
-	int fd, git, below;
+	uint64_t lt = 0, lr = 0;
+	int fd, git;
 
 	if (cwd[0] != '/' || strlen(cwd) >= PATH_MAX)
 		return 0;
@@ -7935,7 +8077,6 @@ res_file(const char *key, const char *text, const char *cwd,
 		return 0;
 	r->kind = "file";
 	git = res_root(cwd, root, sizeof root);
-	below = git && xr_deny_dir(root, 1);
 	/* shown: relative to the cwd, else the root, else whole */
 	rel = res_under(p, cwd);
 	snprintf(shown, sizeof shown, "%s", rel && *rel ? rel
@@ -7946,14 +8087,19 @@ res_file(const char *key, const char *text, const char *cwd,
 		res_set(r, "outside_project", "Outside this session's project");
 		return 1;
 	}
-	if (xr_secret_at(p, below ? res_under(p, root) : p) || res_home_deny(p))
+	/* rr: the root's real path, "" when it has none */
+	if (!realpath(root, rr))
+		rr[0] = '\0';
+	else if (git)
+		lt = res_lift(root, rr, &lr);
+	if (xr_secret_at(p, lt) || res_home_deny(p))
 	{
 		res_set(r, "secret_name", "Not previewed: may hold secrets");
 		return 1;
 	}
 	if (lstat(p, &st) != 0 || !S_ISREG(st.st_mode))
 		return 0;	/* gone, a symlink, a FIFO, a dir: no block */
-	if (!realpath(p, rp) || !realpath(root, rr))
+	if (!realpath(p, rp) || !rr[0])
 		return 0;
 	/* a hard link's other names can lie outside: the boundary's answer */
 	if (!res_under(rp, rr) || st.st_nlink > 1)
@@ -7961,8 +8107,7 @@ res_file(const char *key, const char *text, const char *cwd,
 		res_set(r, "outside_project", "Outside this session's project");
 		return 1;
 	}
-	if (xr_secret_at(rp, below ? res_under(rp, rr) : rp) ||
-	    res_home_deny(rp))
+	if (xr_secret_at(rp, lr) || res_home_deny(rp))
 	{
 		res_set(r, "secret_name", "Not previewed: may hold secrets");
 		return 1;

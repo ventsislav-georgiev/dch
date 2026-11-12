@@ -576,6 +576,78 @@ def test_no_git():
           len(rv) == 1 and rv[0]["state"] == "ended", rv)
 
 
+def test_worktree():
+    """#205 (QA 1.57.0 MED-D1): a real `git worktree add` worktree in
+    <repo>/.claude/worktrees/<name> (and one nested in it) reads its own
+    files and refuses its own deny-list entries; a .claude that is itself
+    a git repo, or a worktree below a denied dir, refuses everything."""
+    def put(path, text="FAKE\n"):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+
+    R = os.path.join(T, "wtrepo")
+    make_repo(R)
+    W = os.path.join(R, ".claude", "worktrees", "w")
+    Y = os.path.join(W, ".claude", "worktrees", "y")
+    git(R, "worktree", "add", "-q", W)
+    git(R, "worktree", "add", "-q", Y)
+    for f in (".env", ".claude/settings.local.json", ".ssh/config",
+              ".credentials.json", ".kube/config"):
+        put(os.path.join(W, f))
+    put(os.path.join(R, ".claude", "settings.local.json"))
+    put(os.path.join(Y, ".claude", "s.json"))
+    C = os.path.join(T, "cfgrepo", ".claude")  # CLAUDE_CONFIG_DIR as a repo
+    os.makedirs(C)
+    git(C, "init", "-q", ".")
+    put(os.path.join(C, ".credentials.json"), '{"accessToken":"FAKE"}\n')
+    put(os.path.join(C, "settings.json"))
+    K = os.path.join(T, "kx", ".kube", "repo")  # a worktree under .kube
+    make_repo(K)
+    KW = os.path.join(K, ".claude", "worktrees", "w")
+    git(K, "worktree", "add", "-q", KW)
+    ok = all(os.path.isfile(os.path.join(d, ".git")) for d in (W, Y, KW))
+    check("worktree: git worktree add made three worktrees (.git files)", ok)
+    for k, (n, cwd) in enumerate((("xres-wt", W), ("xres-wty", Y),
+                                  ("xres-cfg", C), ("xres-kw", KW))):
+        sid = "11111111-2222-4333-8444-5555555555e%d" % k
+        transcript(sid, cwd)
+        history(n, sid, os.path.join(HOME, ".claude"), cwd)
+    for label, n, text, want in (
+            ("its own src/w.c", "xres-wt", "src/w.c:2", "ok"),
+            ("its own .env", "xres-wt", W + "/.env:1", "secret_name"),
+            ("its own .claude/settings.local.json", "xres-wt",
+             W + "/.claude/settings.local.json:1", "secret_name"),
+            ("its own .ssh/config", "xres-wt", W + "/.ssh/config:1",
+             "secret_name"),
+            ("its own .credentials.json", "xres-wt",
+             W + "/.credentials.json:1", "secret_name"),
+            ("its own .kube/config", "xres-wt", W + "/.kube/config:1",
+             "secret_name"),
+            ("the main repo's .claude/settings.local.json", "xres-wt",
+             R + "/.claude/settings.local.json:1", "outside_project"),
+            ("nested: its own src/w.c", "xres-wty", "src/w.c:2", "ok"),
+            ("nested: its own .claude/s.json", "xres-wty",
+             Y + "/.claude/s.json:1", "secret_name"),
+            ("nested: the outer worktree's src/w.c", "xres-wty",
+             W + "/src/w.c:2", "outside_project"),
+            ("a .claude that is a git repo: .credentials.json", "xres-cfg",
+             C + "/.credentials.json:1", "secret_name"),
+            ("a .claude that is a git repo: settings.json", "xres-cfg",
+             C + "/settings.json:1", "secret_name"),
+            ("a worktree below .kube: src/w.c", "xres-kw",
+             KW + "/src/w.c:2", "secret_name")):
+        r, ls, rv = ref(n, text)
+        if want == "ok":
+            good = (len(rv) == 1 and rv[0]["state"] == "ok" and
+                    rv[0]["lines"][1] == "int w2;")
+        else:
+            good = (len(rv) == 1 and rv[0]["state"] == want and
+                    rv[0]["lines"] == [] and "FAKE" not in r.stdout)
+        check("worktree: %s: %s" % (label, want), good,
+              (r.returncode, r.stderr, rv))
+
+
 def main():
     if subprocess.run([DCH, "--build"], capture_output=True,
                       text=True).stdout.strip() != "full":
@@ -591,6 +663,7 @@ def main():
             test_live_claude()
             test_hostile()
             test_git_error()
+            test_worktree()
     finally:
         shutil.rmtree(T, ignore_errors=True)
     if fails[0]:

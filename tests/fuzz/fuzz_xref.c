@@ -17,7 +17,8 @@
 **   3: xr_ref_ok and xr_ref_parse over the bytes as a C string; with byte
 **      0's bit 2 set, the resolvers' parsers instead (#159): git show's
 **      output, a file's 14-line window around the bytes' own :line, the
-**      secret-name list; every block line valid UTF-8 within 200 scalars.
+**      secret-name list, a .git file's "gitdir: " test (#205); every
+**      block line valid UTF-8 within 200 scalars.
 ** Path 1's scan: bit 3 reads the transcript twice, the second time as
 ** another session's (#155), bit 4 makes it light.
 ** Path 1 with byte 0's bit 2 set is --follow's instead (#136): the transcript
@@ -424,6 +425,9 @@ resolvers(const char *s, size_t n)
 	if (xr_ref_line(s) < 0 || xr_ref_line(s) > 9999999)
 		abort();
 	(void)xr_secret_name(s);
+	if (xr_gitfile(s, n) != (n > 8 && !memcmp(s, "gitdir: ", 8) &&
+	    !strchr("\r\n", s[8])))
+		abort();
 }
 
 int

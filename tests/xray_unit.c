@@ -2972,9 +2972,10 @@ t_res_tree(void)
 		setenv("HOME", sv, 1);
 	else
 		unsetenv("HOME");
-	CHECK("home: the same git root, HOME elsewhere: an ordinary project, ok",
+	/* #205 (QA 1.57.0 MED-D1): only a worktree in .claude/worktrees lifts */
+	CHECK("home: the same git root, HOME elsewhere: no worktree, secret_name",
 	      res("a.txt:1", "th/.claude/plugins/m", 1, &r) == 1 &&
-	      is(&r, "file", "ok"));
+	      is(&r, "file", "secret_name") && r.nlines == 0);
 	/* LOW-14: each name, in a project and by name */
 	for (k = 0; low14[k]; k++)
 	{
@@ -2995,6 +2996,24 @@ t_res_tree(void)
 	put("cfg/.config/x.txt", "FAKE\n", 5);
 	CHECK("LOW-14: a project's own .config dir (not the home's) is read",
 	      res(".config/x.txt:1", "cfg", 1, &r) == 1 && is(&r, "file", "ok"));
+	/* #205 (QA 1.57.0 LOW-D3, LOW-D1) */
+	CHECK("LOW-D3: the new names are denied, their neighbours not",
+	      xr_secret_name(".zsh_sessions/x.session") &&
+	      xr_secret_name("a/.credentials.json") &&
+	      xr_secret_name(".TERRAFORMRC") && xr_secret_name("terraform.rc") &&
+	      xr_secret_name(".config/github-copilot/apps.json") &&
+	      xr_secret_name(".databrickscfg") &&
+	      xr_secret_name(".composer/auth.json") &&
+	      xr_secret_name("gdm/Xauthority") &&
+	      xr_secret_name(".ICEauthority") &&
+	      !xr_secret_name(".composer/composer.json") &&
+	      !xr_secret_name("src/auth.json") && !xr_secret_name("main.tf") &&
+	      !xr_secret_name(".zsh_sessions.c"));
+	CHECK("LOW-D1: a .git file counts only as \"gitdir: <path>\"",
+	      xr_gitfile("gitdir: x\n", 10) && xr_gitfile("gitdir: /a/b", 12) &&
+	      !xr_gitfile("gitdir: ", 8) && !xr_gitfile("gitdir: \n", 9) &&
+	      !xr_gitfile("gitdir:x", 8) && !xr_gitfile("GITDIR: x", 9) &&
+	      !xr_gitfile("", 0) && !xr_gitfile("ref: refs/heads/m", 17));
 }
 
 /* A fake git: records its argv and env, then acts as $D/mode says. */

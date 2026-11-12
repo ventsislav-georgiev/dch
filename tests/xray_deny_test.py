@@ -14,6 +14,14 @@ from a client that reaches it only through remote_hosts. No FAKE text may
 appear in any refused answer. The sessions are ended Claude sessions (a
 History record and a transcript each), so the test runs on a lite build too.
 
+#205 (QA 1.57.0 MED-D1, LOW-D1..D3): only a git worktree in
+<repo>/.claude/worktrees/<name> (its .git a git file) lifts that .claude; a
+config dir that is its own git root (.claude, .codex, .kube, .docker,
+.password-store), a worktrees/w symlinked to a .kube repo, a fake .git (empty,
+dangling, FIFO, not "gitdir: ", a symlink, a clone's dir) refuse; the
+firmlink alias /System/Volumes/Data$HOME is the home; the new names refuse;
+a worktree, a nested one and ~/.config/nvim still read their lines.
+
 Run:  python3 tests/xray_deny_test.py        (uses ./dch)
 """
 import json, os, re, shutil, signal, subprocess, sys, tempfile, time
@@ -89,6 +97,148 @@ def main():
     procs = []
     ss = {"xd-home": home, "xd-root": "/", "xd-proj": proj,
           "xd-claude": os.path.join(home, ".claude")}
+    cases = []
+
+    # #205 (QA 1.57.0 MED-D1): a config dir that is its own git root, out
+    # of HOME (CLAUDE_CONFIG_DIR, CODEX_HOME, ...): every file refused
+    for d, f in ((".claude", ".credentials.json"), (".claude", "settings.json"),
+                 (".codex", "auth.json"), (".codex", "config.toml"),
+                 (".kube", "config"), (".docker", "config.json"),
+                 (".password-store", "notes.txt")):
+        c = os.path.join(tmp, "cfg", d)
+        os.makedirs(os.path.join(c, ".git"), exist_ok=True)
+        put(os.path.join(c, f), '{"token":"FAKE"}\n')
+        ss["xd-cfg" + d] = c
+        cases.append(("a git root that is %s itself: %s" % (d, f),
+                      "xd-cfg" + d, os.path.join(c, f) + ":1", "secret_name"))
+    # a typed .claude/worktrees/w that is a symlink to a .kube repo (its .git
+    # a dir, or a git file): the real path decides
+    for k, gitfile in enumerate((False, True)):
+        sk = os.path.join(tmp, "sk%d" % k, ".kube")
+        os.makedirs(sk)
+        if gitfile:
+            put(os.path.join(sk, ".git"), "gitdir: /nonexistent/wt\n")
+        else:
+            os.makedirs(os.path.join(sk, ".git"))
+        put(os.path.join(sk, "config"), "token: FAKE\n")
+        sy = os.path.join(tmp, "sy%d" % k)
+        os.makedirs(os.path.join(sy, ".git"))
+        os.makedirs(os.path.join(sy, ".claude", "worktrees"))
+        os.symlink(sk, os.path.join(sy, ".claude", "worktrees", "w"))
+        w = os.path.join(sy, ".claude", "worktrees", "w")
+        ss["xd-sym%d" % k] = w
+        cases.append(("worktrees/w a symlink to a .kube repo (%s): config"
+                      % ("git file" if gitfile else ".git dir"),
+                      "xd-sym%d" % k, os.path.join(w, "config") + ":1",
+                      "secret_name"))
+
+    # LOW-D1: a fake .git in <proj>/.claude, <proj>/.codex and in the
+    # worktree shape; a clone (a .git dir) there is no worktree either
+    def fake_git(path, kind):
+        if kind == "empty":
+            put(path, "")
+        elif kind == "dangling":
+            os.symlink(os.path.join(tmp, "nonexistent"), path)
+        elif kind == "fifo":
+            os.mkfifo(path)
+        elif kind == "notgitdir":
+            put(path, "ref: refs/heads/main\n")
+        elif kind == "symlink":   # to a valid git file
+            put(path + "-target", "gitdir: /nonexistent/wt\n")
+            os.symlink(path + "-target", path)
+        else:
+            os.makedirs(path)
+    for kind in ("empty", "dangling", "fifo", "notgitdir"):
+        for d, f in ((".claude", "settings.local.json"),
+                     (".codex", "auth.json")):
+            c = os.path.join(tmp, "fg-" + kind, d)
+            os.makedirs(c)
+            fake_git(os.path.join(c, ".git"), kind)
+            put(os.path.join(c, f))
+            ss["xd-fg-%s%s" % (kind, d)] = c
+            cases.append(("a %s .git in <proj>/%s: %s" % (kind, d, f),
+                          "xd-fg-%s%s" % (kind, d),
+                          os.path.join(c, f) + ":1", "secret_name"))
+    for kind in ("empty", "dangling", "fifo", "notgitdir", "symlink", "dir"):
+        w = os.path.join(tmp, "fw-" + kind, ".claude", "worktrees", "w")
+        os.makedirs(w)
+        os.makedirs(os.path.join(tmp, "fw-" + kind, ".git"))
+        fake_git(os.path.join(w, ".git"), kind)
+        put(os.path.join(w, "a.txt"))
+        ss["xd-fw-" + kind] = w
+        cases.append(("a %s .git in .claude/worktrees/w: a.txt" % kind,
+                      "xd-fw-" + kind, os.path.join(w, "a.txt") + ":1",
+                      "secret_name"))
+
+    # the exception's own shape still reads: a worktree (its .git a git
+    # file), a nested one, and a git repo below ~/.config
+    wr = os.path.join(tmp, "wr")
+    ww = os.path.join(wr, ".claude", "worktrees", "w")
+    wy = os.path.join(ww, ".claude", "worktrees", "y")
+    os.makedirs(os.path.join(wr, ".git", "worktrees"))
+    put(os.path.join(ww, ".git"), "gitdir: %s/.git/worktrees/w\n" % wr)
+    put(os.path.join(wy, ".git"), "gitdir: %s/.git/worktrees/y\n" % wr)
+    put(os.path.join(ww, "a.txt"), "worktree line\n")
+    put(os.path.join(wy, "a.txt"), "nested line\n")
+    for f in (".env", ".claude/settings.json", ".ssh/config",
+              ".credentials.json", ".kube/config"):
+        put(os.path.join(ww, f))
+    put(os.path.join(wy, ".claude", "s.json"))
+    put(os.path.join(home, ".config", "nvim", "init.lua"), "nvim line\n")
+    os.makedirs(os.path.join(home, ".config", "nvim", ".git"))
+    ss.update({"xd-wt": ww, "xd-wty": wy,
+               "xd-nvim": os.path.join(home, ".config", "nvim")})
+    cases += [
+        ("a worktree in .claude/worktrees: its own a.txt", "xd-wt",
+         "a.txt:1", "ok:worktree line"),
+        ("a nested worktree: its own a.txt", "xd-wty", "a.txt:1",
+         "ok:nested line"),
+        ("a git repo below ~/.config (nvim): init.lua", "xd-nvim",
+         "init.lua:1", "ok:nvim line"),
+        ("a nested worktree: its own .claude/s.json", "xd-wty",
+         os.path.join(wy, ".claude", "s.json") + ":1", "secret_name"),
+        ("a nested worktree: the outer one's a.txt", "xd-wty",
+         os.path.join(ww, "a.txt") + ":1", "outside_project"),
+    ] + [("a worktree: its own " + f, "xd-wt",
+          os.path.join(ww, f) + ":1", "secret_name")
+         for f in (".env", ".claude/settings.json", ".ssh/config",
+                   ".credentials.json", ".kube/config")]
+
+    # LOW-D2: the firmlink alias /System/Volumes/Data$HOME as a session's
+    # cwd (an ended Claude's record holds it as written)
+    hw = os.path.join(home, ".claude", "worktrees", "w")
+    put(os.path.join(hw, ".git"), "gitdir: /nonexistent/wt\n")
+    put(os.path.join(hw, "README.md"), "FAKE readme\n")
+    put(os.path.join(home, ".config", "foo", "token.txt"), "FAKE token\n")
+    ss["xd-hw"] = hw
+    cases.append(("a worktree in ~/.claude: README.md", "xd-hw",
+                  "README.md:1", "secret_name"))
+    fl = "/System/Volumes/Data"
+    if os.path.isdir(fl) and os.path.samestat(os.stat(fl + home),
+                                               os.stat(home)):
+        ss.update({"xd-al-hw": fl + hw, "xd-al-home": fl + home,
+                   "xd-al-cfg": fl + os.path.join(home, ".config", "foo")})
+        cases += [
+            ("firmlink cwd, a worktree in ~/.claude: README.md", "xd-al-hw",
+             "README.md:1", "secret_name"),
+            ("firmlink cwd, the same typed whole", "xd-al-hw",
+             fl + os.path.join(hw, "README.md") + ":1", "secret_name"),
+            ("firmlink cwd ~: notes.txt", "xd-al-home", "notes.txt:1",
+             "outside_project"),
+            ("firmlink cwd ~/.config/foo (no git): token.txt", "xd-al-cfg",
+             "token.txt:1", "outside_project"),
+        ]
+    else:
+        print("  skip firmlink alias: no %s alias of the home here" % fl)
+
+    # LOW-D3: the names added
+    for f in (".zsh_sessions/x.session", ".credentials.json", ".terraformrc",
+              "terraform.rc", ".config/github-copilot/apps.json",
+              ".databrickscfg", ".composer/auth.json", "Xauthority",
+              ".ICEauthority"):
+        put(os.path.join(proj, f), "token=FAKE\n")
+        cases.append(("a project: " + f, "xd-proj",
+                      os.path.join(proj, f) + ":1", "secret_name"))
     # ended Claude sessions (History records and transcripts): files resolve
     # against the record's cwd, on a lite build too (no shell ring there)
     sockdir = os.path.join(tmp, "srv", "dch-%d" % os.getuid())
@@ -130,7 +280,7 @@ def main():
                 rv.append(o["resolved"])
         return r, rv
 
-    cases = [
+    cases[:0] = [
         ("a pane in ~: ~/.claude/.credentials.json", "xd-home",
          "~/.claude/.credentials.json:1", "outside_project"),
         ("a pane in ~: ~/.config/gh/hosts.yml", "xd-home",
@@ -150,6 +300,13 @@ def main():
         ("a project: a hard link to a file outside", "xd-proj",
          "hard.txt:1", "outside_project"),
     ]
+
+    def good(r, rv, want):
+        if want.startswith("ok:"):  # read: its one line
+            return (len(rv) == 1 and rv[0]["state"] == "ok" and
+                    rv[0]["lines"] == [want[3:]])
+        return (len(rv) == 1 and rv[0]["state"] == want and
+                rv[0]["lines"] == [] and "FAKE" not in r.stdout)
     try:
         r, rv = resolved(senv, "xd-proj", "a.txt:1")
         check("control: a plain project file is read (ok, its line)",
@@ -157,9 +314,7 @@ def main():
               rv[0]["lines"] == ["plain line"], (r.returncode, r.stderr, rv))
         for label, n, ref, want in cases:
             r, rv = resolved(senv, n, ref)
-            check("local, %s: %s, no lines, no FAKE" % (label, want),
-                  len(rv) == 1 and rv[0]["state"] == want and
-                  rv[0]["lines"] == [] and "FAKE" not in r.stdout,
+            check("local, %s: %s" % (label, want), good(r, rv, want),
                   (r.returncode, r.stderr, rv))
 
         # the same through dch serve's xray op on loopback
@@ -187,9 +342,7 @@ def main():
               len(rv) == 1 and rv[0]["state"] == "ok", (r.stderr, rv))
         for label, n, ref, want in cases:
             r, rv = resolved(cenv, "srv:" + n, ref)
-            check("serve, %s: %s, no lines, no FAKE" % (label, want),
-                  len(rv) == 1 and rv[0]["state"] == want and
-                  rv[0]["lines"] == [] and "FAKE" not in r.stdout,
+            check("serve, %s: %s" % (label, want), good(r, rv, want),
                   (r.returncode, r.stderr, rv))
     finally:
         for p in procs:
