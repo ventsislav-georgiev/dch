@@ -6,7 +6,7 @@
  * key aliases, the same hidden noise, the same prompt/step/image split, the
  * same tool pairing (256 open calls) and sidechain threads. Only what decides
  * a chapter's start, kind, title, offset and error is kept; block bodies are
- * never built.
+ * never built, except one chapter's entries for --chapter (#156), clipped.
  */
 #include <config.h>
 
@@ -14,10 +14,16 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <poll.h>
+#include <pwd.h>
+#include <signal.h>
+#include <spawn.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <time.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "bridge.h"
@@ -32,7 +38,7 @@ void dch_trace(const char *fmt, ...)
 
 unsigned long xr_seam_opened, xr_seam_refused;
 struct xr_limits xr_lim = {XR_HEAD_RANGE, XR_TAIL_RANGE, XR_CHUNK, XR_LINE_MAX,
-                           XR_OUT_MAX};
+                           XR_OUT_MAX, XR_FILES, XR_BYTES, XR_WALL_MS};
 
 /* ---- UTF-8 and Unicode classes ----------------------------------------- */
 
@@ -1254,6 +1260,111 @@ xr_claude_lookup(const char *cfg, const char *sid, char *path, size_t pathsz,
 	return hits == 1 ? 0 : -1;
 }
 
+/* A subdir of dfd, never through a symlink; -1 none. */
+static DIR *
+cx_dir(int dfd, const char *name)
+{
+	int fd = openat(dfd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW |
+	                O_CLOEXEC);
+	DIR *d = fd >= 0 ? fdopendir(fd) : NULL;
+
+	if (fd >= 0 && !d)
+		close(fd);
+	return d;
+}
+
+/* d's entries named by exactly w digits, as a bitmap (names only: no stat,
+** and a bound by construction: 10^w names at most). */
+static void
+cx_names(DIR *d, size_t w, unsigned char *bits)
+{
+	struct dirent *de;
+	size_t k;
+	unsigned v;
+
+	while ((de = readdir(d)))
+	{
+		for (k = 0, v = 0; k < w && isdigit((unsigned char)de->d_name[k]);
+		     k++)
+			v = v * 10 + (unsigned)(de->d_name[k] - '0');
+		if (k == w && !de->d_name[w])
+			bits[v / 8] |= (unsigned char)(1u << (v % 8));
+	}
+}
+
+#define CX_HAS(b, v) ((b)[(v) / 8] & (1u << ((v) % 8)))
+
+int
+xr_codex_lookup(const char *home, const char *tid, char *path, size_t pathsz,
+                struct stat *st)
+{
+	char dir[XR_PATH_MAX + 16], ys[12], ms[12], ds[12];
+	unsigned char yb[10000 / 8 + 1] = {0};
+	DIR *sd, *yd, *md, *dd;
+	struct dirent *de;
+	struct stat s;
+	int y, m, day, days = 0, hits = 0;
+	size_t tl = strlen(tid);
+
+	if (!xr_config_ok(home) || !xr_uuid_shaped(tid) ||
+	    snprintf(dir, sizeof dir, "%s/sessions", home) >= (int)sizeof dir ||
+	    !(sd = cx_dir(AT_FDCWD, dir)))
+		return -1;
+	cx_names(sd, 4, yb);
+	for (y = 9999; y >= 0 && days < XR_CODEX_DAYS && hits < 2; y--)
+	{
+		unsigned char mb[13] = {0};
+
+		snprintf(ys, sizeof ys, "%04d", y);
+		if (!CX_HAS(yb, (unsigned)y) || !(yd = cx_dir(dirfd(sd), ys)))
+			continue;
+		cx_names(yd, 2, mb);
+		for (m = 99; m >= 0 && days < XR_CODEX_DAYS && hits < 2; m--)
+		{
+			unsigned char db[13] = {0};
+
+			snprintf(ms, sizeof ms, "%02d", m);
+			if (!CX_HAS(mb, (unsigned)m) || !(md = cx_dir(dirfd(yd), ms)))
+				continue;
+			cx_names(md, 2, db);
+			for (day = 99; day >= 0 && days < XR_CODEX_DAYS && hits < 2;
+			     day--)
+			{
+				snprintf(ds, sizeof ds, "%02d", day);
+				if (!CX_HAS(db, (unsigned)day) ||
+				    !(dd = cx_dir(dirfd(md), ds)))
+					continue;
+				days++;
+				/* "<any>-<tid>.jsonl", a regular file, not a link */
+				while ((de = readdir(dd)) && hits < 2)
+				{
+					size_t n = strlen(de->d_name);
+
+					if (n < tl + 7 || de->d_name[n - tl - 7] != '-' ||
+					    memcmp(de->d_name + n - tl - 6, tid, tl) ||
+					    strcmp(de->d_name + n - 6, ".jsonl") ||
+					    fstatat(dirfd(dd), de->d_name, &s,
+					            AT_SYMLINK_NOFOLLOW) < 0 ||
+					    !S_ISREG(s.st_mode))
+						continue;
+					if (hits++ == 0 &&
+					    snprintf(path, pathsz, "%s/%s/%s/%s/%s", dir, ys,
+					             ms, ds, de->d_name) >= (int)pathsz)
+						hits = 2;	/* cut short: no path */
+					*st = s;
+				}
+				closedir(dd);
+			}
+			closedir(md);
+		}
+		closedir(yd);
+	}
+	closedir(sd);
+	dch_trace("xray codex lookup: %d hit%s, %d day dirs", hits,
+	          hits == 1 ? "" : "s", days);
+	return hits == 1 ? 0 : -1;
+}
+
 /* ---- chapters ------------------------------------------------------------ */
 
 void
@@ -1905,31 +2016,71 @@ rm_scan(struct remit *r, const char *text, size_t n, int mode)
 /* ---- refs: definitions (v2.1 4.2-4.3) ------------------------------------- */
 
 /* A command's words, unquoted (a small sh reading: '…', "…", \x), with
-** their raw byte range; operators (| ; & < > ( )) are words of their own. */
-#define SW_MAX 64
+** their raw byte range; operators (| ; & < > ( ) and an unquoted newline)
+** are words of their own. \ newline is a blank; a here-doc's body is
+** skipped to its delimiter line. */
+#define SW_MAX 256	/* one word more marks a command past the cap */
 struct sw
 {
 	char *b;
 	size_t n;
-	size_t off[SW_MAX], rs[SW_MAX], re[SW_MAX];
-	char op[SW_MAX];
+	size_t off[SW_MAX + 1], rs[SW_MAX + 1], re[SW_MAX + 1];
+	char op[SW_MAX + 1];
 };
 
 static void
 shell_words(const char *c, size_t cl, struct sw *w)
 {
-	size_t i = 0, o = 0;
+	size_t i = 0, o = 0, hd = 0, j, dl;
+	const char *d;
 
 	w->n = 0;
-	if (!(w->b = malloc(cl + SW_MAX + 1)))
-		return;
-	while (i < cl && w->n < SW_MAX)
+	if (!(w->b = malloc(cl + SW_MAX + 2)))
+		return;	/* a word adds at most its NUL to the bytes it reads */
+	while (i < cl && w->n <= SW_MAX)
 	{
-		while (i < cl && (c[i] == ' ' || c[i] == '\t' || c[i] == '\n' ||
-		                  c[i] == '\r'))
-			i++;
+		while (i < cl && (c[i] == ' ' || c[i] == '\t' || c[i] == '\r' ||
+		                  (c[i] == '\\' && i + 1 < cl && c[i + 1] == '\n')))
+			i += 1 + (c[i] == '\\');
 		if (i >= cl)
 			break;
+		if (c[i] == '\n')
+		{
+			/* a newline ends the command, like ';' (one after an operator
+			** or at the start does not); a here-doc's body follows it */
+			w->rs[w->n] = i++;
+			if (hd)
+			{
+				d = w->b + w->off[hd - 1];
+				d += d[0] == '-';	/* <<-EOF */
+				for (dl = strlen(d); i < cl; i = j + 1)
+				{
+					for (; i < cl && c[i] == '\t'; i++)
+						;	/* <<- strips leading tabs */
+					for (j = i; j < cl && c[j] != '\n'; j++)
+						;
+					if (j - i == dl && !memcmp(c + i, d, dl))
+					{
+						i = j;	/* its own newline follows an operator */
+						break;
+					}
+				}
+				hd = 0;
+			}
+			for (j = i; j < cl && strchr(" \t\r\n", c[j]); j++)
+				;
+			if (j >= cl)
+				break;	/* a trailing newline ends nothing */
+			if (!w->n || w->op[w->n - 1])
+				continue;
+			w->off[w->n] = o;
+			w->op[w->n] = 1;
+			w->b[o++] = '\n';
+			w->b[o++] = '\0';
+			w->re[w->n] = w->rs[w->n] + 1;
+			w->n++;
+			continue;
+		}
 		w->rs[w->n] = i;
 		w->off[w->n] = o;
 		w->op[w->n] = strchr("|;&<>()", c[i]) != NULL && c[i];
@@ -1964,6 +2115,9 @@ shell_words(const char *c, size_t cl, struct sw *w)
 					w->b[o++] = c[i++];
 			}
 		w->b[o++] = '\0';
+		if (!w->op[w->n] && w->n && w->op[w->n - 1] &&
+		    !strcmp(w->b + w->off[w->n - 1], "<<"))
+			hd = w->n + 1;	/* the here-doc's delimiter word */
 		w->re[w->n++] = i;
 	}
 }
@@ -1982,29 +2136,43 @@ is_assign(const char *s)
 	return *p == '=';
 }
 
-/* Words that only run the command after them, and the letters of their
-** options that take a value (`sudo -u root cat`, `xargs -n 1 rg`). */
-static const struct { const char *w, *argopt; } wraps[] = {
-	{ "sudo", "ugCDhprTt" }, { "env", "uSCP" }, { "command", "" },
-	{ "xargs", "IJLnPsEdaR" }, { "nice", "n" }, { "time", "" }, { 0, 0 }
+/* Words that only run the command after them, the letters of their
+** options that take a value (`sudo -u root cat`, `xargs -n 1 rg`), and
+** the words they take before it (timeout's duration); -1: they run the
+** rest as one shell line (`eval`, `watch`). */
+static const struct { const char *w, *argopt; int pos; } wraps[] = {
+	{ "sudo", "ugCDhprTt", 0 }, { "env", "uSCP", 0 }, { "command", "", 0 },
+	{ "xargs", "IJLnPsEdaR", 0 }, { "nice", "n", 0 }, { "time", "", 0 },
+	{ "nohup", "", 0 }, { "doas", "auC", 0 }, { "exec", "a", 0 },
+	{ "stdbuf", "ioe", 0 }, { "timeout", "sk", 1 }, { "eval", "", -1 },
+	{ "watch", "nq", -1 }, { 0, 0, 0 }
 };
 
+static const char *base(const char *s);
+static int in_list(const char *s, const char *const *v);
+
 /* The first command word of the simple command w[k..e): past env
-** assignments and the wraps with their options. e when there is none. */
+** assignments, reserved words and the wraps with their options. e when
+** there is none. *line: the words from it on are one shell line
+** (`eval …`, `watch …`, `env -S '…'`). */
 static size_t
-cmd_head(const struct sw *w, size_t k, size_t e)
+cmd_head(const struct sw *w, size_t k, size_t e, int *line)
 {
+	static const char *const resv[] = { "{", "!", "if", "then", "elif",
+	                                    "else", "do", "while", "until", 0 };
 	const char *o;
 	size_t j;
+	int p;
 
+	*line = 0;
 	while (k < e)
 	{
-		if (is_assign(SWD(w, k)))
+		if (is_assign(SWD(w, k)) || in_list(SWD(w, k), resv))
 		{
 			k++;
 			continue;
 		}
-		for (j = 0; wraps[j].w && strcmp(SWD(w, k), wraps[j].w); j++)
+		for (j = 0; wraps[j].w && strcmp(base(SWD(w, k)), wraps[j].w); j++)
 			;
 		if (!wraps[j].w)
 			return k;
@@ -2015,8 +2183,20 @@ cmd_head(const struct sw *w, size_t k, size_t e)
 				k++;
 				break;
 			}
+			if (!strcmp(o, "-S") && !strcmp(wraps[j].w, "env"))
+			{
+				*line = k + 1 < e;
+				return k + 1;
+			}
 			if (o[1] && !o[2] && strchr(wraps[j].argopt, o[1]))
 				k++;
+		}
+		for (p = wraps[j].pos; p > 0 && k < e; p--)
+			k++;
+		if (wraps[j].pos < 0)
+		{
+			*line = k < e;
+			return k;
 		}
 	}
 	return e;
@@ -2083,7 +2263,9 @@ arg_outside(const char *a, const char *cur, int lost, const char *cwd)
 	return !strcmp(n, "..") || !strncmp(n, "../", 3);
 }
 
-enum { X_NONE, X_QUOTE = 1, X_DIFF = 3, X_LIST = 4 };
+/* X_SUB: found only inside $(…) or backquotes, whose output is the outer
+** command's input: D3 (argv) still applies */
+enum { X_NONE, X_QUOTE = 1, X_DIFF = 3, X_LIST = 4, X_SUB = 8 };
 
 /* excluded() on cmd run in cur (lost: unknown), depth sh -c levels in. */
 static int
@@ -2093,38 +2275,79 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 	static const char *const list[] = { "rg", "grep", "egrep", "fgrep", "ag",
 	                                    "ack", "fd", "find", "ls", 0 };
 	static const char *const print[] = { "cat", "head", "tail", "bat",
-	                                     "less", "awk", "nl", "more", 0 };
+	                                     "less", "awk", "nl", "more", "sed",
+	                                     "jq", "tac", "sort", "cut", "zcat",
+	                                     "gzcat", "batcat", "glow", "yq",
+	                                     "uniq", "rev", "column", "fold",
+	                                     "fmt", 0 };
 	static const char *const shells[] = { "sh", "bash", "zsh", "dash", "ksh",
 	                                      0 };
 	struct sw w;
-	char cdb[XR_KEY_MAX + 1];
-	size_t s, e, h, k, sub;
-	int r = X_NONE, sedn, skip;
+	char cdb[XR_KEY_MAX + 1], q;
+	size_t s, e, h, k, sub, i, j, t, end;
+	int r = X_NONE, sr = X_NONE, x, skip, line;
 	const char *c0, *a;
 
 	shell_words(cmd, cl, &w);
-	if (!w.b || w.n == SW_MAX)
+	if (!w.b || w.n > SW_MAX)
 	{
 		free(w.b);
 		return X_LIST;	/* no memory, or words past SW_MAX unseen */
 	}
-	/* every simple command: split on ; & && | || ( ) */
+	/* every simple command: split on ; & && | || ( ) and newlines */
 	for (s = 0; s < w.n && !r; s = e + 1)
 	{
 		for (e = s; e < w.n && !(w.op[e] && !strchr("<>", SWD(&w, e)[0]));
 		     e++)
 			;
-		if ((h = cmd_head(&w, s, e)) >= e)
+		/* $(…) and `…` in quotes or a word run too: their commands,
+		** classified alike (an unquoted $( is split at the ( already) */
+		end = e > s ? w.re[e - 1] : 0;
+		for (i = e > s ? w.rs[s] : 0, q = 0; i < end && !sr; i++)
+			if (cmd[i] == '\\' && q != '\'')
+				i++;
+			else if ((cmd[i] == '\'' && q != '"') ||
+			         (cmd[i] == '"' && q != '\''))
+				q = q ? 0 : cmd[i];
+			else if (q != '\'' && (cmd[i] == '`' ||
+			         (cmd[i] == '$' && i + 1 < end && cmd[i + 1] == '(')))
+			{
+				t = i + 1 + (cmd[i] == '$');
+				for (j = t; cmd[i] == '`' && j < end && cmd[j] != '`';
+				     j += 1 + (cmd[j] == '\\'))
+					;
+				j = cmd[i] == '$' || j > end ? end : j;
+				x = depth >= 3 ? X_LIST :
+				    excl_in(cmd + t, j - t, cwd, cur, lost, depth + 1);
+				sr = x & ~X_SUB;
+				i = j;
+			}
+		if ((h = cmd_head(&w, s, e, &line)) >= e)
 			continue;
+		if (line)
+		{
+			/* eval/watch/env -S: the words from h on, re-read as a line */
+			for (k = h; k + 1 < e; k++)
+				w.b[w.off[k + 1] - 1] = ' ';
+			x = depth >= 3 ? X_LIST :
+			    excl_in(SWD(&w, h), strlen(SWD(&w, h)), cwd, cur, lost,
+			            depth + 1);
+			if (x & X_SUB)
+				sr = sr ? sr : x & ~X_SUB;
+			else
+				r = x;
+			continue;
+		}
 		c0 = base(SWD(&w, h));
-		if (!strcmp(c0, "cd"))
+		if (!strcmp(c0, "cd") || !strcmp(c0, "pushd"))
 		{
 			/* later relative arguments resolve where cd went */
 			for (k = h + 1; k < e && SWD(&w, k)[0] == '-' && SWD(&w, k)[1];
 			     k++)
 				;
 			a = k < e && !w.op[k] ? SWD(&w, k) : "";
-			lost = !a[0] || a[0] == '~' || a[0] == '-' || strpbrk(a, "$`") ||
+			lost = !a[0] || a[0] == '~' || a[0] == '-' || a[0] == '+' ||
+			       strpbrk(a, "$`") ||
 			       !path_norm(a, strlen(a), lost ? NULL : cur, cdb,
 			                  sizeof cdb) || cdb[0] != '/';
 			cur = lost ? NULL : cdb;
@@ -2137,9 +2360,13 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 				if (SWD(&w, k)[0] == '-' && SWD(&w, k)[1] != '-' &&
 				    strchr(SWD(&w, k), 'c'))
 				{
-					r = depth >= 3 || w.op[k + 1] ? X_LIST :
+					x = depth >= 3 || w.op[k + 1] ? X_LIST :
 					    excl_in(SWD(&w, k + 1), strlen(SWD(&w, k + 1)), cwd,
 					            cur, lost, depth + 1);
+					if (x & X_SUB)
+						sr = sr ? sr : x & ~X_SUB;
+					else
+						r = x;
 					break;
 				}
 			continue;
@@ -2167,18 +2394,18 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 		}
 		else
 		{
-			for (sedn = 0, k = h + 1; k < e; k++)
-				sedn |= !strncmp(SWD(&w, k), "-n", 2);
-			if (!in_list(c0, print) && !(!strcmp(c0, "sed") && sedn))
+			if (!in_list(c0, print))
 				continue;
-			/* the file arguments: not options, not sed's or awk's
-			** script, not a > target; a < source is one */
-			skip = !strcmp(c0, "sed") || !strcmp(c0, "awk");
+			/* the file arguments: not options, not the script or filter
+			** of sed, awk, jq or yq, not a > target or a << delimiter; a <
+			** source is one */
+			skip = !strcmp(c0, "sed") || !strcmp(c0, "awk") ||
+			       !strcmp(c0, "jq") || !strcmp(c0, "yq");
 			for (k = h + 1; k < e; k++)
 			{
 				a = SWD(&w, k);
 				if (w.op[k])
-					k += a[0] == '>';
+					k += a[0] == '>' || !strcmp(a, "<<");
 				else if (a[0] == '-' && a[1])
 					;
 				else if (skip)
@@ -2189,7 +2416,7 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 		}
 	}
 	free(w.b);
-	return r;
+	return r ? r : sr ? sr | X_SUB : X_NONE;
 }
 
 /* Exclusions #1, #3 and #4 on the paired command (v2.1 4.3), over every
@@ -2779,13 +3006,14 @@ defs_find(const struct dsrc *s, struct dset *ds)
 	struct olines o;
 	size_t k;
 	char seen[6][3][XR_KEY_MAX + 16];
-	int nseen[6] = {0};
+	int nseen[6] = {0}, x;
 
 	memset(ds, 0, sizeof *ds);
-	if (s->failed || (s->cmd && excluded(s->cmd, s->cl, s->cwd)))
-		return;		/* #5; #1, #3, #4 */
+	if (s->failed || ((x = s->cmd ? excluded(s->cmd, s->cl, s->cwd) : X_NONE) &&
+	                  !(x & X_SUB)))
+		return;		/* #5; #1, #3, #4 (only in a $(…): D3 still runs) */
 	memset(&o, 0, sizeof o);
-	if (olines(s->out, s->ol, &o) == 0)
+	if (!x && olines(s->out, s->ol, &o) == 0)
 	{
 		for (k = 0; k < o.n; k++)
 		{
@@ -2801,7 +3029,8 @@ defs_find(const struct dsrc *s, struct dset *ds)
 				;
 			if (i == nseen[sh] && nseen[sh] == 3)
 			{
-				/* #4: more than 3 distinct D1/D4 keys of one shape */
+				/* #4: more than 3 distinct D1/D4 keys of one shape;
+				** D2 and D3 still apply (ruling Q7) */
 				free(t.passage);
 				dfree(ds);
 				break;
@@ -2815,7 +3044,7 @@ defs_find(const struct dsrc *s, struct dset *ds)
 		}
 	}
 	olines_free(&o);
-	if (s->d2ok && ds->n < XR_DEFS)
+	if (!x && s->d2ok && ds->n < XR_DEFS)
 		d2(s->d2out ? s->d2out : s->out, s->d2out ? s->d2l : s->ol,
 		   s->cmd, s->cl, s->cwd, ds);
 	if (s->bash && s->cmd && !s->noexit && ds->n < XR_DEFS)
@@ -3039,8 +3268,10 @@ struct xr_scan
 {
 	FILE *f;
 	char key[XR_KEY_MAX + 16];
-	const char *session, *project;
+	const char *session, *project;	/* this file's session */
 	int live, full, shell, budget;
+	int scope, other, same;	/* --scope; this file another session's, in
+				** <n>'s project dir */
 	long long t0;
 	uint64_t written;
 	size_t room;		/* kept under the cap for the tally and done */
@@ -3053,6 +3284,7 @@ struct xr_scan
 	uint64_t dropped;	/* mention lines the XR_HELD bound left out */
 	/* the scan */
 	uint64_t files, bytes, base, too_long;
+	uint64_t cs, cp, cps, ca, cas;	/* 3.4's counts, files done */
 	int stop, out_full;
 	int cancel;		/* a write failed: 1 EPIPE (the reader left), 2 other */
 	const char *why;
@@ -3256,7 +3488,7 @@ mention_line(struct xr_scan *x, const struct xr_hit *h)
 	fputs("{\"schema\":1,\"mention\":{\"session\":", m);
 	xr_put_str(m, x->session);
 	fputs(",\"chapter\":", m);
-	put_or_null(m, h->chapter);
+	put_or_null(m, x->other ? NULL : h->chapter);	/* <n>'s only */
 	fputs(",\"at\":", m);
 	put_at(m, h->at);
 	fputs(",\"line\":", m);
@@ -3310,15 +3542,16 @@ sc_hit(void *ctx, const struct xr_hit *h)
 		put_at(m, h->at);
 		fputs(",\"title\":", m);
 		xr_put_str(m, h->title);
-		/* a shell <n> in light mode: titles and counts only (S18) */
-		if (x->full || !x->shell)
+		/* a shell <n> and every other session in light mode: titles and
+		** counts only (S18, K4.2) */
+		if (x->full || (!x->shell && !x->other))
 		{
 			fputs(",\"passage\":", m);
 			put_or_null(m, h->passage);
 		}
 		fprintf(m, ",\"rule\":\"%s\",\"offset\":%llu,\"chapter\":", h->rule,
 		        (unsigned long long)h->off);
-		put_or_null(m, h->chapter);
+		put_or_null(m, x->other ? NULL : h->chapter);
 		fputs("}}\n", m);
 		ln_send(x, m, &b, &bl);
 	}
@@ -3340,10 +3573,10 @@ sc_hit(void *ctx, const struct xr_hit *h)
 			x->lastrow = h->row;
 		}
 		/* one line per source line (a Claude entry, a shell row); never
-		** for a shell <n> in light mode (S18) */
+		** in light mode for a shell <n> (S18) or another session (K4.2) */
 		x->lastoff = h->off;
 		x->lasth = lh;
-		if (newline && (x->full || !x->shell) &&
+		if (newline && (x->full || (!x->shell && !x->other)) &&
 		    (b = mention_line(x, h)))
 		{
 			if (!x->mentioned++)
@@ -3364,11 +3597,11 @@ sc_hit(void *ctx, const struct xr_hit *h)
 			}
 		}
 	}
-	/* light, --scope session: the first result ends the scan once its
-	** line (a shell: its row) is done, so a definition keeps its anchor's
-	** mention */
+	/* light: the first result (a wider scope: another session's, R5) ends
+	** the scan once its line (a shell: its row) is done, so a definition
+	** keeps its anchor's mention */
 anchor:
-	if (!x->full && !x->found)
+	if (!x->full && !x->found && (!x->scope || x->other))
 	{
 		x->found = 1;
 		x->foff = h->off;
@@ -3382,12 +3615,26 @@ xr_scan_sink(struct xr_scan *x, struct xr_sink *k)
 	k->ctx = x;
 }
 
+/* 3.4's counts: the files done, plus cur, this file's so far */
 static void
-put_counts(FILE *m, uint64_t session)
+put_counts(FILE *m, const struct xr_scan *x, uint64_t cur)
 {
-	fprintf(m, "\"counts\":{\"session\":%llu,\"project\":0,"
-	        "\"project_sessions\":0,\"all\":null,\"all_sessions\":null}",
-	        (unsigned long long)session);
+	uint64_t s = x->cs, p = x->cp, ps = x->cps, a = x->ca, as = x->cas;
+
+	if (!x->other)
+		s += cur;
+	else if (x->same)
+		p += cur, ps += cur > 0;
+	else
+		a += cur, as += cur > 0;
+	fprintf(m, "\"counts\":{\"session\":%llu,\"project\":%llu,"
+	        "\"project_sessions\":%llu,\"all\":", (unsigned long long)s,
+	        (unsigned long long)p, (unsigned long long)ps);
+	if (x->scope == 2)
+		fprintf(m, "%llu,\"all_sessions\":%llu}", (unsigned long long)a,
+		        (unsigned long long)as);
+	else
+		fputs("null,\"all_sessions\":null}", m);
 }
 
 int
@@ -3410,10 +3657,15 @@ xr_scan_tick(void *ctx, uint64_t bytes)
 		x->stop = 1;
 		x->why = "budget";
 	}
-	else if (!x->stop && x->full && now - x->t0 >= 10000)
+	else if (!x->stop && x->full && now - x->t0 >= xr_lim.ms)
 	{
 		x->stop = 1;
 		x->why = "time";
+	}
+	else if (!x->stop && x->bytes > xr_lim.bytes)
+	{
+		x->stop = 1;
+		x->why = "bytes";
 	}
 	/* one progress line per 250 ms window while the scan runs (R6) */
 	if (!x->stop && now - x->last >= 250)
@@ -3429,7 +3681,7 @@ xr_scan_tick(void *ctx, uint64_t bytes)
 			        "\"bytes\":%llu,\"partial\":true,",
 			        (unsigned long long)x->files + 1,
 			        (unsigned long long)x->bytes);
-			put_counts(m, x->nunit);
+			put_counts(m, x, x->nunit);
 			fputs("}}\n", m);
 			ln_send(x, m, &b, &bl);
 			if (!x->cancel)
@@ -3466,10 +3718,20 @@ xr_scan_file(struct xr_scan *x, uint64_t bytes, uint64_t too_long,
 		free(l);
 	}
 	x->hn = x->h0 = 0;
-	x->nunit = count;	/* the session's count, for done */
-	if (!(b = tally_line(x, count, x->dropped, partial)))
-		return;
+	if (!x->other)
+		x->cs = count;
+	else if (x->same)
+		x->cp += count, x->cps += count > 0;
+	else
+		x->ca += count, x->cas += count > 0;
+	b = tally_line(x, count, x->dropped, partial);
+	/* the next file starts from nothing; found and the stop carry on */
+	x->nunit = x->lastunit = x->nrow = x->lastrow = x->lines = 0;
+	x->lastoff = x->lasth = 0;
+	x->ndefs = x->mentioned = 0;
 	x->dropped = 0;
+	if (!b)
+		return;
 	/* the tally goes past a full output: sc_line kept its room */
 	bl = strlen(b);
 	if (!x->cancel && x->written + bl + 1024 <= xr_lim.out)
@@ -3500,8 +3762,9 @@ xr_scan_first(struct xr_scan *x, const char *session_id, int shape,
 	xr_put_str(m, text);
 	fputs(",\"project\":", m);
 	xr_put_str(m, x->project);
-	fprintf(m, ",\"mode\":\"%s\",\"scope\":\"session\",\"budget_ms\":",
-	        x->full ? "full" : "light");
+	fprintf(m, ",\"mode\":\"%s\",\"scope\":\"%s\",\"budget_ms\":",
+	        x->full ? "full" : "light",
+	        x->scope == 2 ? "all" : x->scope ? "project" : "session");
 	if (x->full)
 		fputs("null", m);
 	else
@@ -3526,7 +3789,7 @@ xr_scan_done(struct xr_scan *x)
 		return -1;	/* a cancel has no done line */
 	fprintf(x->f, "{\"schema\":1,\"done\":true,\"partial\":%s,",
 	        partial ? "true" : "false");
-	put_counts(x->f, x->nunit);
+	put_counts(x->f, x, 0);
 	fputs(",\"why\":", x->f);
 	put_or_null(x->f, partial ? x->why : NULL);
 	fprintf(x->f, ",\"files\":%llu,\"bytes\":%llu,\"lines_too_long\":%llu}\n",
@@ -3539,6 +3802,32 @@ int
 xr_scan_cancelled(const struct xr_scan *x)
 {
 	return x->cancel;
+}
+
+void
+xr_scan_scope(struct xr_scan *x, int scope)
+{
+	x->scope = scope;
+}
+
+int
+xr_scan_next(struct xr_scan *x, const char *session, const char *project,
+             int live, int same)
+{
+	if (!x->stop && (x->files >= xr_lim.files || x->bytes >= xr_lim.bytes))
+	{
+		x->stop = 1;	/* a cap used up: the next file is not opened */
+		x->why = x->files >= xr_lim.files ? "files" : "bytes";
+	}
+	if (xr_scan_tick(x, 0))	/* the budget, 10 s, a result, progress */
+		return 1;
+	x->session = session;
+	x->project = project;
+	x->live = live;
+	x->same = same;
+	x->other = 1;
+	x->shell = 0;	/* a Claude file: <n>'s shell rules end with its ring */
+	return 0;
 }
 
 /* ---- Claude: the assembler ------------------------------------------------- */
@@ -3594,6 +3883,8 @@ struct xr_claude
 	int ncalls;
 	uint64_t next;		/* the last read's resume offset: the start of
 				** the line it did not finish (#136) */
+	struct xr_entries *want;	/* --chapter (#156), else NULL */
+	int codex;		/* a Codex rollout (7.4) */
 };
 
 enum { B_PROMPT, B_IMAGE, B_STEP };
@@ -3637,6 +3928,9 @@ cur(struct xr_claude *d)
 	return d->turn ? ch_ord(&d->ch, d->ch.total - 1) : NULL;
 }
 
+static void ch_anchor(struct xr_claude *d, char out[48]);
+static int ent_hit(struct xr_entries *e, const char *anchor, uint64_t ord);
+
 /* A block on the main thread: turns()'s rule. kind/title for a prompt. */
 static void
 main_block(struct xr_claude *d, int b, const char *kind, const char *title)
@@ -3653,6 +3947,13 @@ main_block(struct xr_claude *d, int b, const char *kind, const char *title)
 		x->offset = d->off;
 		x->at = d->at;
 		x->partial = b != B_PROMPT;
+		if (d->want)
+		{
+			char a[48];
+
+			ch_anchor(d, a);
+			(void)ent_hit(d->want, a, d->ch.total - 1);
+		}
 	}
 	x = cur(d);
 	if (x && b == B_PROMPT && !d->titled)
@@ -3991,18 +4292,13 @@ str_cmp(const void *a, const void *b)
 	return strcmp(*(char *const *)a, *(char *const *)b);
 }
 
-/* A generic card's fields: the input's keys sorted, the first 8, each value
-** (its last, as a dictionary keeps it) prefixed to 240 scalars in code.
-** shortcut: a nested value is its raw JSON text, not Prosper's rendering. */
-static void
-refs_card(struct xr_claude *d, const struct json_parser *p, int in)
+/* A generic card's keys: the input's, once each, at most 64, sorted
+** (malloc'd). The count. */
+static int
+card_keys(const struct json_parser *p, int in, char **keys)
 {
-	char *keys[64], a[48];
 	int nk = 0, i, k;
-	struct remit r;
 
-	if (in < 0)
-		return;
 	for (i = in + 1; i < p->tok[in].next && i + 1 < p->ntok && nk < 64;
 	     i = p->tok[i + 1].next)
 	{
@@ -4017,6 +4313,22 @@ refs_card(struct xr_claude *d, const struct json_parser *p, int in)
 			free(s);
 	}
 	qsort(keys, (size_t)nk, sizeof *keys, str_cmp);
+	return nk;
+}
+
+/* A generic card's fields: the input's keys sorted, the first 8, each value
+** (its last, as a dictionary keeps it) prefixed to 240 scalars in code.
+** shortcut: a nested value is its raw JSON text, not Prosper's rendering. */
+static void
+refs_card(struct xr_claude *d, const struct json_parser *p, int in)
+{
+	char *keys[64], a[48];
+	int nk, k;
+	struct remit r;
+
+	if (in < 0)
+		return;
+	nk = card_keys(p, in, keys);
 	ch_anchor(d, a);
 	rm_claude(d, &r, a);
 	for (k = 0; k < nk; k++)
@@ -4309,6 +4621,226 @@ out:
 	free(rr->c.cmd);
 }
 
+/* ---- --chapter: one chapter's entries (3.5; #156, XR3b) --------------------- */
+
+struct xr_ent_call
+{
+	char id[XR_ID_MAX + 1];
+	char *name;
+};
+
+/* The chapter anchored `anchor` (ordinal ord) is the wanted one only when the
+** two strings are equal, byte for byte (K14.2). 1 when it is hit now. */
+static int
+ent_hit(struct xr_entries *e, const char *anchor, uint64_t ord)
+{
+	if (!e || e->hit || strcmp(anchor, e->anchor))
+		return 0;
+	e->hit = 1;
+	e->ord = ord;
+	return 1;
+}
+
+/* One entry (3.5): s[0..n) clipped to cap scalars, escaped as --ls-json
+** escapes; dropped, and truncated set, once the object would pass its cap. */
+static void
+ent_put(struct xr_entries *e, const char *role, const char *tool,
+        const char *s, size_t n, size_t cap, int err)
+{
+	size_t l = s ? clip(s, n, cap) : 0, tl = tool ? strlen(tool) : 0;
+	size_t qc = (l + tl) * 6 + 96, k;
+	char *t, *q, *nb;
+
+	if (e->truncated || e->failed)
+		return;
+	if (!(t = malloc(l + 1)) || !(q = malloc(qc)))
+	{
+		e->failed = 1;
+		free(t);
+		return;
+	}
+	if (l)
+		memcpy(t, s, l);
+	t[l] = '\0';
+	k = (size_t)snprintf(q, qc, "%s{\"role\":\"%s\",\"tool\":",
+	                     e->len ? "," : "", role);
+	if (tool)
+		k += dch_json_quote(q + k, qc - k, tool);
+	else
+		k += (size_t)snprintf(q + k, qc - k, "null");
+	k += (size_t)snprintf(q + k, qc - k, ",\"text\":");
+	k += dch_json_quote(q + k, qc - k, t);
+	k += (size_t)snprintf(q + k, qc - k, ",\"error\":%s}",
+	                      err ? "true" : "false");
+	if (e->len + k > e->cap)
+		e->truncated = 1;	/* cut here: no later entry either */
+	else if (!(nb = realloc(e->buf, e->len + k + 1)))
+		e->failed = 1;
+	else
+	{
+		memcpy(nb + e->len, q, k + 1);
+		e->buf = nb;
+		e->len += k;
+	}
+	free(t);
+	free(q);
+}
+
+/* An entry of the wanted chapter, on the main thread (a subagent's own
+** blocks are its thread's, not the turn's entries). */
+static int
+ent_here(const struct xr_claude *d, const char *agent)
+{
+	return !agent && d->want && d->want->hit && d->turn &&
+	       d->ch.total - 1 == d->want->ord;
+}
+
+/* A generic call's input as its card shows it (refs_card): "key: value"
+** lines, the first 8 keys sorted, each value prefixed to 240 scalars, a
+** nested value as its raw JSON text. malloc'd, NULL for none. */
+static char *
+card_text(const struct json_parser *p, int in, size_t *n)
+{
+	char *keys[64], *o = NULL;
+	size_t ol = 0;
+	int nk = in < 0 ? 0 : card_keys(p, in, keys), k, any = 0;
+	FILE *m = nk ? open_memstream(&o, &ol) : NULL;
+
+	*n = 0;
+	for (k = 0; k < nk; k++)
+	{
+		int v = m && k < 8 ? j_field(p, in, keys[k]) : -1;
+		size_t l = 0;
+		char *s = j_str(p, v, &l);
+		const char *t = s;
+
+		if (!s && v >= 0 && !j_null(p, v))
+		{
+			t = p->text + p->tok[v].start;
+			l = (size_t)(p->tok[v].end - p->tok[v].start);
+		}
+		if (t)
+		{
+			fprintf(m, "%s%s: ", any++ ? "\n" : "", keys[k]);
+			fwrite(t, 1, clip(t, l, XR_FIELD_CAP), m);
+		}
+		free(s);
+		free(keys[k]);
+	}
+	if (m && fclose(m) == 0)
+		*n = ol;
+	else
+	{
+		free(o);
+		o = NULL;
+	}
+	return o;
+}
+
+/* A call's tool entry: Bash its command, an edit or a read its path,
+** anything else its card's fields; the call is kept so that its result
+** names its tool. */
+static void
+ent_call(struct xr_claude *d, const struct json_parser *p, int i,
+         const char *id, const char *name)
+{
+	struct xr_entries *e = d->want;
+	struct xr_ent_call *c;
+	int in = k_obj(p, i, A_INPUT), v = -1;
+	char kb[XR_ID_MAX + 1], *s;
+	size_t l = 0;
+
+	if (name && !strcmp(name, "Bash"))
+		v = j_field(p, in, "command");
+	else if (name && (!strcmp(name, "Edit") || !strcmp(name, "MultiEdit") ||
+	                  !strcmp(name, "Write") || !strcmp(name, "Read")))
+		v = j_field(p, in, "file_path");
+	if (!(s = j_str(p, v, &l)) || blank(s, l))
+	{
+		free(s);
+		s = card_text(p, in, &l);
+	}
+	ent_put(e, "tool", name, s, l, XR_TEXT_CAP, 0);
+	free(s);
+	if (!id)
+		return;
+	if (!e->calls && !(e->calls = calloc(XR_PENDING, sizeof *e->calls)))
+	{
+		e->failed = 1;
+		return;
+	}
+	if (e->ncalls == XR_PENDING)	/* the oldest goes, as pending's does */
+	{
+		free(e->calls[0].name);
+		memmove(e->calls, e->calls + 1, (size_t)--e->ncalls *
+		        sizeof *e->calls);
+	}
+	c = &e->calls[e->ncalls++];
+	snprintf(c->id, sizeof c->id, "%s", id_key(id, kb));
+	c->name = name ? strdup(name) : NULL;
+}
+
+/* A result's chapter, before tool_result() closes its pairing: its call's
+** (*quiet: a search's, whose error does not show), or -2 for an orphan,
+** placed where it lands. */
+static long long
+ent_paired(struct xr_claude *d, const char *id, int *quiet)
+{
+	char kb[XR_ID_MAX + 1];
+	int k = id ? pend_find(d, id_key(id, kb)) : -1;
+
+	*quiet = k >= 0 && d->pend[k].quiet;
+	return k >= 0 ? d->pend[k].ord : -2;
+}
+
+/* A result's output entry (after tool_result()): its call's tool name, the
+** clipped output (v2.1 3.1: toolUseResult's stdout first, 3000 scalars). */
+static void
+ent_result(struct xr_claude *d, const struct json_parser *p, int i,
+           const char *agent, const char *id, long long ord, int err)
+{
+	struct xr_entries *e = d->want;
+	const char *name = NULL;
+	char kb[XR_ID_MAX + 1], *t;
+	size_t n;
+	int k;
+
+	if (ord == -2 ? !ent_here(d, agent) : !e->hit || ord != (long long)e->ord)
+		return;
+	for (k = e->ncalls - 1; ord != -2 && k >= 0 && !name; k--)
+		if (!strcmp(e->calls[k].id, id_key(id, kb)))
+			name = e->calls[k].name;
+	t = output_text(p, i, k_obj(p, 0, (const char *const[]){
+	                    "toolUseResult", 0 }), &n);
+	ent_put(e, "output", name, t, n, XR_OUTPUT_CAP, err);
+	free(t);
+}
+
+/* A slash command's user entry: "/name args", the args as typed (trimmed). */
+static void
+ent_command(struct xr_entries *e, const char *t, size_t tl)
+{
+	size_t nl = 0, al = 0;
+	const char *name = tag(t, tl, "command-name", &nl);
+	const char *args = tag(t, tl, "command-args", &al);
+	char *b = malloc(nl + al + 2);
+
+	if (!b)
+	{
+		e->failed = 1;
+		return;
+	}
+	memcpy(b, name, nl);
+	if (args && al)
+	{
+		b[nl++] = ' ';
+		memcpy(b + nl, args, al);
+		nl += al;
+	}
+	ent_put(e, "user", NULL, b, nl, XR_TEXT_CAP, 0);
+	free(b);
+}
+
 /* A user text block: a slash command, else a prompt; blank is hidden. */
 static void
 user_text(struct xr_claude *d, const char *agent, char *s, size_t n)
@@ -4324,11 +4856,13 @@ user_text(struct xr_claude *d, const char *agent, char *s, size_t n)
 		t = trim(s, &tl);
 		if (d->rk.hit && (args = tag(t, tl, "command-args", &ul)))
 			refs_text(d, args, ul, XR_FIELD_CAP, XR_PROSE);
+		if (ent_here(d, agent))
+			ent_command(d->want, t, tl);
 		return;
 	}
 	if (blank(s, n))
 		return;
-	if (d->rk.hit && (u = malloc(n + 1)))
+	if ((d->rk.hit || d->want) && (u = malloc(n + 1)))
 	{
 		memcpy(u, s, n);
 		ul = unwrap(u, n, XR_TEXT_CAP);
@@ -4336,6 +4870,11 @@ user_text(struct xr_claude *d, const char *agent, char *s, size_t n)
 	xr_title(s, unwrap(s, n, 0), title, sizeof title);	/* s is spent */
 	block(d, agent, B_PROMPT, "prompt", title);
 	refs_text(d, u, ul, XR_TEXT_CAP, XR_PROSE);
+	if (ent_here(d, agent))
+	{
+		d->want->failed |= !u;
+		ent_put(d->want, "user", NULL, u, ul, XR_TEXT_CAP, 0);
+	}
 	free(u);
 }
 
@@ -4371,6 +4910,8 @@ entry_user(struct xr_claude *d, const struct json_parser *p, const char *ag)
 		    : NULL;
 		compaction(d, ag, n > 0);
 		refs_text(d, s, n, XR_TEXT_CAP, XR_PROSE);
+		if (n && ent_here(d, ag))
+			ent_put(d->want, "user", NULL, s, n, XR_TEXT_CAP, 0);
 		free(s);
 		return;
 	}
@@ -4431,11 +4972,16 @@ entry_user(struct xr_claude *d, const struct json_parser *p, const char *ag)
 		{
 			char *id = k_str(p, i, A_TUID, NULL);
 			struct rres rr;
+			int quiet = 0;
+			long long ord = d->want ? ent_paired(d, id, &quiet) : -2;
 
 			refs_pair(d, id, &rr);
 			tool_result(d, ag, id, k_bool(p, i, A_ERR));
 			if (d->rk.hit)
 				refs_result(d, p, i, k_bool(p, i, A_ERR), &rr);
+			if (d->want)
+				ent_result(d, p, i, ag, id, ord,
+				           k_bool(p, i, A_ERR) && !quiet);
 			free(id);
 		}
 		else
@@ -4459,6 +5005,8 @@ entry_assistant(struct xr_claude *d, const struct json_parser *p,
 		{
 			block(d, ag, B_STEP, NULL, NULL);
 			refs_text(d, s, n, XR_TEXT_CAP, XR_MD);
+			if (ent_here(d, ag))
+				ent_put(d->want, "assistant", NULL, s, n, XR_TEXT_CAP, 0);
 		}
 		free(s);
 		return;
@@ -4482,6 +5030,9 @@ entry_assistant(struct xr_claude *d, const struct json_parser *p,
 			{
 				block(d, ag, B_STEP, NULL, NULL);
 				refs_text(d, s, n, XR_TEXT_CAP, XR_MD);
+				if (ent_here(d, ag))
+					ent_put(d->want, "assistant", NULL, s, n, XR_TEXT_CAP,
+					        0);
 			}
 			free(s);
 		}
@@ -4508,6 +5059,8 @@ entry_assistant(struct xr_claude *d, const struct json_parser *p,
 			tool_use(d, ag, id, quiet);
 			if (d->rk.hit)
 				refs_call(d, p, i);
+			if (ent_here(d, ag))
+				ent_call(d, p, i, id, name);
 			free(id);
 			free(name);
 		}
@@ -4562,6 +5115,192 @@ tokens_max(const char *s, size_t n)
 	return c;
 }
 
+/* ---- Codex: the rollout (7.4, K9) ------------------------------------------- */
+
+/* Rollout lines {"timestamp","type","payload"} as Codex 0.151-0.167 write
+** them (field names checked against real rollouts, 2026-11-11). Only
+** response_item, compacted, session_meta and turn_context are read; every
+** event_msg and any other type gives nothing, so a user turn Codex records
+** twice (the item and its event) counts once. */
+static const char *const A_PAYLOAD[] = { "payload", 0 };
+static const char *const A_ROLE[] = { "role", 0 };
+static const char *const A_ARGS[] = { "arguments", 0 };
+static const char *const A_OUTPUT[] = { "output", 0 };
+static const char *const A_ACTION[] = { "action", 0 };
+
+void
+xr_claude_codex(struct xr_claude *d)
+{
+	d->codex = 1;
+}
+
+/* A user-message part Codex adds itself, never typed: its AGENTS.md
+** instructions, or one tag-wrapped part (<environment_context>, an <image>
+** placeholder, ...). */
+static int
+cx_context(const char *s, size_t n)
+{
+	static const char ag[] = "# AGENTS.md instructions";
+	const char *t = trim(s, &n);
+
+	if (n >= sizeof ag - 1 && !memcmp(t, ag, sizeof ag - 1))
+		return 1;
+	return n >= 3 && t[0] == '<' && t[n - 1] == '>' &&
+	       (A_LO((unsigned char)t[1]) || t[1] == '_' || t[1] == '/');
+}
+
+/* A user message: its typed parts joined as Codex joins them (no separator)
+** make the prompt (5.3's rule, as a Claude user text); its images ride with
+** it. A message of Codex's own parts only is no turn. */
+static void
+cx_user(struct xr_claude *d, const struct json_parser *p, int pl)
+{
+	int c = j_get(p, pl, A_CONTENT), i, img = 0;
+	char *text = NULL, *nt, *s;
+	size_t tl = 0, l;
+
+	if (c < 0 || p->tok[c].kind != JSON_ARRAY)
+		return;
+	for (i = c + 1; i < p->tok[c].next; i = p->tok[i].next)
+	{
+		if (p->tok[i].kind != JSON_OBJECT)
+			continue;
+		if (k_streq(p, i, A_TYPE, "input_image"))
+			img = 1;
+		else if (k_streq(p, i, A_TYPE, "input_text") &&
+		         (s = k_str(p, i, A_TEXT, &l)))
+		{
+			if (!cx_context(s, l) && (nt = realloc(text, tl + l + 1)))
+			{
+				text = nt;
+				memcpy(text + tl, s, l);
+				tl += l;
+				text[tl] = '\0';
+			}
+			free(s);
+		}
+	}
+	if (text)
+		user_text(d, NULL, text, tl);
+	if (img)
+		main_block(d, B_IMAGE, NULL, NULL);
+	free(text);
+}
+
+/* function_call's arguments: a JSON object as a generic card (3.6), else
+** the string as one field. */
+static void
+cx_args(struct xr_claude *d, const struct json_parser *p, int pl)
+{
+	struct json_parser q;
+	size_t n;
+	char *s = k_str(p, pl, A_ARGS, &n);
+
+	if (!s)
+		return;
+	memset(&q, 0, sizeof q);
+	if (tokens_max(s, n) <= XR_LINE_TOKENS && dch_json_parse(&q, s) >= 0 &&
+	    q.tok[0].kind == JSON_OBJECT)
+		refs_card(d, &q, 0);
+	else
+		refs_text(d, s, n, XR_FIELD_CAP, XR_CODE);
+	dch_json_free(&q);
+	free(s);
+}
+
+/* One response_item: a user or assistant message, else a step whose tool
+** fields are scanned under the Claude tool-field rules (code context; a
+** command-like input 6000 scalars, an output 3000, a card's fields 240). */
+static void
+cx_item(struct xr_claude *d, const struct json_parser *p, int pl)
+{
+	char *t = k_str(p, pl, A_TYPE, NULL), *r, *s;
+	int c, i;
+	size_t n;
+
+	if (t && !strcmp(t, "message"))
+	{
+		r = k_str(p, pl, A_ROLE, NULL);
+		c = j_get(p, pl, A_CONTENT);
+		if (r && !strcmp(r, "user"))
+			cx_user(d, p, pl);
+		else if (r && !strcmp(r, "assistant") && c >= 0 &&
+		         p->tok[c].kind == JSON_ARRAY)
+			for (i = c + 1; i < p->tok[c].next; i = p->tok[i].next)
+			{
+				s = p->tok[i].kind == JSON_OBJECT
+				    ? k_str(p, i, A_TEXT, &n) : NULL;
+				if (s && !blank(s, n))
+				{
+					main_block(d, B_STEP, NULL, NULL);
+					refs_text(d, s, n, XR_TEXT_CAP, XR_MD);
+				}
+				free(s);
+			}
+		/* developer and system messages: Codex's own context */
+		free(r);
+		free(t);
+		return;
+	}
+	main_block(d, B_STEP, NULL, NULL);
+	if (!d->rk.hit || !t)
+		;
+	else if (!strcmp(t, "function_call"))
+		cx_args(d, p, pl);
+	else if (!strcmp(t, "custom_tool_call") &&
+	         (s = k_str(p, pl, A_INPUT, &n)))
+	{
+		refs_text(d, s, n, XR_TEXT_CAP, XR_CODE);
+		free(s);
+	}
+	else if (!strcmp(t, "local_shell_call"))
+		refs_card(d, p, k_obj(p, pl, A_ACTION));
+	else if (!strcmp(t, "function_call_output") ||
+	         !strcmp(t, "custom_tool_call_output"))
+	{
+		c = j_get(p, pl, A_OUTPUT);
+		s = c >= 0 && p->tok[c].kind == JSON_STRING ? j_str(p, c, &n)
+		    : c >= 0 && p->tok[c].kind == JSON_ARRAY ? texts(p, c, &n)
+		    : NULL;
+		refs_text(d, s, n, XR_OUTPUT_CAP, XR_CODE);
+		free(s);
+	}
+	/* reasoning, and any type not listed: a step, no ref (7.4) */
+	free(t);
+}
+
+static void
+cx_line(struct xr_claude *d, const struct json_parser *p)
+{
+	int pl = k_obj(p, 0, A_PAYLOAD);
+	char *t = pl >= 0 ? k_str(p, 0, A_TYPE, NULL) : NULL, *s;
+	size_t n;
+
+	if (!t)
+		;
+	else if (!strcmp(t, "response_item"))
+		cx_item(d, p, pl);
+	else if (!strcmp(t, "compacted"))
+	{
+		/* its summary, as a Claude compact summary's (3.6) */
+		main_block(d, B_PROMPT, "compact", "Conversation compacted");
+		if ((s = k_str(p, pl, A_MESSAGE, &n)))
+			refs_text(d, s, n, XR_TEXT_CAP, XR_PROSE);
+		free(s);
+		/* its lead ends here: the prompt after it is a turn of its own */
+		main_block(d, B_STEP, NULL, NULL);
+	}
+	else if ((!strcmp(t, "session_meta") || !strcmp(t, "turn_context")) &&
+	         (s = k_str(p, pl, A_CWD, &n)))
+	{
+		if (s[0] == '/' && scalars(s, n) <= XR_PATH_MAX &&
+		    n < sizeof d->cwd)
+			memcpy(d->cwd, s, n + 1);
+		free(s);
+	}
+	free(t);
+}
+
 void
 xr_claude_line(struct xr_claude *d, const char *line, size_t len,
                uint64_t off, int oversized)
@@ -4587,6 +5326,12 @@ xr_claude_line(struct xr_claude *d, const char *line, size_t len,
 	if ((s = k_str(&p, 0, A_TS, NULL)))
 		d->at = iso_time(s);
 	free(s);
+	if (d->codex)
+	{
+		cx_line(d, &p);
+		dch_json_free(&p);
+		return;
+	}
 	if ((s = k_str(&p, 0, A_CWD, &n)) && s[0] == '/' &&
 	    scalars(s, n) <= XR_PATH_MAX && n < sizeof d->cwd)
 		memcpy(d->cwd, s, n + 1);
@@ -4993,6 +5738,9 @@ sh_feed(struct xr_shell *s, const struct xr_rec *x)
 		         (unsigned long long)s->aseq);
 		xr_title(c, l, ch->title, sizeof ch->title);
 		s->npaired++;
+		/* --chapter: the block's command (B..C) is its tool entry */
+		if (ent_hit(s->want, ch->anchor, (uint64_t)s->ord))
+			ent_put(s->want, "tool", NULL, c, l, XR_TEXT_CAP, 0);
 	}
 	else if (m == 'D')
 	{
@@ -5010,6 +5758,55 @@ sh_feed(struct xr_shell *s, const struct xr_rec *x)
 static void sh_refs_pre(struct xr_shell *s, const struct xr_rec *x);
 static void sh_refs_post(struct xr_shell *s, const struct xr_rec *x);
 
+/* --chapter: the wanted block's output entry, once (its C..D rows, the
+** error its D gave). */
+static void
+sh_ent_close(struct xr_shell *s)
+{
+	struct xr_entries *e = s->want;
+	const struct xr_chapter *c;
+
+	if (!e || !e->hit || e->done)
+		return;
+	e->done = 1;
+	c = ch_ord(s->out, e->ord);
+	ent_put(e, "output", NULL, e->out, e->ol, XR_OUTPUT_CAP, c && c->error);
+}
+
+/* --chapter: the wanted block's output rows while it is open, joined at
+** soft wraps, kept to 4 bytes a scalar of the clip (3.5); closed by the
+** first record after it. */
+static void
+sh_ent(struct xr_shell *s, const struct xr_rec *x)
+{
+	struct xr_entries *e = s->want;
+	size_t room, l;
+
+	if (!e->hit || e->done)
+		return;
+	if (s->st != S_OUTPUT || s->ord < 0 || (uint64_t)s->ord != e->ord)
+	{
+		sh_ent_close(s);
+		return;
+	}
+	if (x->kind != RING_K_OUTPUT)
+		return;
+	if (!e->out && !(e->out = malloc(XR_OUTPUT_CAP * 4)))
+	{
+		e->failed = 1;
+		return;
+	}
+	room = XR_OUTPUT_CAP * 4 - e->ol;
+	if (e->ol && room && !(x->flags & RING_F_CONT))
+	{
+		e->out[e->ol++] = '\n';
+		room--;
+	}
+	l = x->len < room ? x->len : room;
+	memcpy(e->out + e->ol, x->text, l);
+	e->ol += l;
+}
+
 void
 xr_shell_feed(struct xr_shell *s, const struct xr_rec *x)
 {
@@ -5018,6 +5815,8 @@ xr_shell_feed(struct xr_shell *s, const struct xr_rec *x)
 	sh_feed(s, x);
 	if (s->refs)
 		sh_refs_post(s, x);
+	if (s->want)
+		sh_ent(s, x);
 }
 
 /* ---- shell: refs (7.3) ----------------------------------------------------- */
@@ -5269,6 +6068,7 @@ xr_shell_end(struct xr_shell *s)
 {
 	struct xr_shref *r = s->refs;
 
+	sh_ent_close(s);	/* a block still open at the read's end */
 	if (!r)
 		return;
 	sh_flush(s);
@@ -5542,7 +6342,7 @@ fail:
 	xr_put_str(m, a->project ? a->project : "");
 	fputs(",\"project_label\":", m);
 	xr_put_str(m, a->project_label ? a->project_label : "");
-	fputs(",\"other_projects\":0,\"chapters\":[", m);
+	fprintf(m, ",\"other_projects\":%lld,\"chapters\":[", a->other_projects);
 	if (fclose(m) != 0)
 		rc = -1;
 	if (rc == 0)
@@ -5833,4 +6633,907 @@ xr_delta_write(FILE *f, struct xr_sent *s, const struct xr_answer *a)
 	if (stab_keep(s) != 0)
 		return -1;
 	return ferror(f) ? -1 : 0;
+}
+
+/* ---- --chapter (3.5; #156, XR3b) ------------------------------------------- */
+
+int
+xr_anchor_ok(const char *s)
+{
+	size_t n = strspn(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	                     "0123456789:_.-");
+
+	return n >= 1 && n <= 128 && !s[n];
+}
+
+void
+xr_entries_begin(struct xr_entries *e, const char *anchor,
+                 const char *session, size_t out)
+{
+	/* the head's room: the session and its id escaped (6 bytes a byte at
+	** worst), a 128-byte anchor, a 120-scalar title, the fixed keys */
+	size_t head = 6 * (strlen(session) + 64) + 2048;
+
+	memset(e, 0, sizeof *e);
+	e->anchor = anchor;
+	e->cap = out > head ? out - head : 0;
+}
+
+void
+xr_entries_free(struct xr_entries *e)
+{
+	int k;
+
+	for (k = 0; k < e->ncalls; k++)
+		free(e->calls[k].name);
+	free(e->calls);
+	free(e->buf);
+	free(e->out);
+	e->calls = NULL;
+	e->buf = e->out = NULL;
+	e->ncalls = 0;
+}
+
+void
+xr_claude_entries(struct xr_claude *d, struct xr_entries *e, uint64_t ino)
+{
+	d->want = e;
+	d->ino = ino;
+}
+
+int
+xr_chapter_print(FILE *f, const char *session, const char *session_id,
+                 const struct xr_chapter *c, const struct xr_entries *e)
+{
+	fputs("{\"schema\":1,\"session\":", f);
+	xr_put_str(f, session);
+	fputs(",\"session_id\":", f);
+	xr_put_str(f, session_id);
+	fputs(",\"anchor\":", f);
+	xr_put_str(f, c->anchor);
+	fputs(",\"title\":", f);
+	xr_put_str(f, c->title);
+	fputs(",\"at\":", f);
+	if (c->at >= 0)
+		fprintf(f, "%lld", c->at);
+	else
+		fputs("null", f);
+	fprintf(f, ",\"kind\":\"%s\",\"entries\":[", c->kind);
+	if (e->len)
+		fwrite(e->buf, 1, e->len, f);
+	fprintf(f, "],\"truncated\":%s}\n", e->truncated ? "true" : "false");
+	return fflush(f) != 0 || ferror(f) ? -1 : 0;
+}
+
+/* ---- resolvers (XR6, K13; spec 3.7, 8.3) ------------------------------- */
+
+const char *const *xr_git_probe;
+unsigned long xr_res_spawned;
+
+#define RES_OUT_MAX (64u << 10)	/* git's stdout kept; the rest drained */
+#define RES_ERR_MAX 4096
+
+/* s[0..n) into o (cap * 4 + 1 bytes): at most cap scalars, invalid UTF-8
+** and NUL as U+FFFD; the JSON writer escapes the controls. */
+static void
+res_text(char *o, const char *s, size_t n, size_t cap)
+{
+	size_t i = 0, a, k = 0, w = 0;
+
+	while (i < n && k++ < cap)
+	{
+		uint32_t c = u8_next((const unsigned char *)s + i, n - i, &a);
+
+		w += u8_put(o + w, c ? c : 0xfffd);
+		i += a;
+	}
+	o[w] = '\0';
+}
+
+static void
+res_set(struct xr_resolved *r, const char *state, const char *title)
+{
+	r->state = state;
+	snprintf(r->title, sizeof r->title, "%s", title);
+}
+
+/* "<git root>/.git" exists, walking up from cwd by its text alone: root,
+** else cwd itself (v2.1 7.1's project boundary). 1 when a root was found. */
+static int
+res_root(const char *cwd, char *root, size_t rootsz)
+{
+	char p[PATH_MAX + 8];
+	struct stat st;
+	size_t l = strlen(cwd);
+
+	snprintf(root, rootsz, "%s", cwd);
+	if (cwd[0] != '/' || l >= PATH_MAX)
+		return 0;
+	memcpy(p, cwd, l + 1);
+	while (l > 1 && p[l - 1] == '/')
+		l--;
+	for (;;)	/* p[0..l) the dir; l 0 is "/" */
+	{
+		memcpy(p + l, "/.git", 6);
+		if (lstat(p, &st) == 0)
+		{
+			snprintf(root, rootsz, "%.*s", (int)(l ? l : 1), l ? p : "/");
+			return 1;
+		}
+		if (!l)
+			return 0;
+		while (l && p[l - 1] != '/')
+			l--;
+		if (l)
+			l--;
+	}
+}
+
+/* p inside root (lexically): the part after it, "" for root itself. */
+static const char *
+res_under(const char *p, const char *root)
+{
+	size_t rl = strlen(root);
+
+	if (rl == 1 && root[0] == '/')
+		return p[0] == '/' ? p + 1 : NULL;
+	if (strncmp(p, root, rl) || (p[rl] && p[rl] != '/'))
+		return NULL;
+	return p[rl] ? p + rl + 1 : p + rl;
+}
+
+/* root is "/", $HOME or an ancestor of it, by real path (HOME and the
+** passwd entry's): too wide to be a project, so none (#178) */
+static int
+res_wide(const char *root)
+{
+	const struct passwd *pw = getpwuid(getuid());
+	const char *h[2] = { getenv("HOME"), pw ? pw->pw_dir : NULL };
+	char rr[PATH_MAX], hr[PATH_MAX];
+	int k;
+
+	if (!realpath(root, rr))
+		snprintf(rr, sizeof rr, "%s", root);
+	if (!strcmp(rr, "/"))
+		return 1;
+	for (k = 0; k < 2; k++)
+		if (h[k] && h[k][0] == '/' &&
+		    res_under(realpath(h[k], hr) ? hr : h[k], rr))
+			return 1;
+	return 0;
+}
+
+/* ---- git (8.3) ---- */
+
+static int
+res_exec(const char *p)
+{
+	struct stat st;
+
+	return stat(p, &st) == 0 && S_ISREG(st.st_mode) && access(p, X_OK) == 0;
+}
+
+/* 8.3's probe, no process run. On macOS /usr/bin/git is never a pick: the
+** shim opens the install dialog without a developer dir, and with one, that
+** dir's own git is found first. */
+const char *
+xr_git_bin(char *buf, size_t bufsz)
+{
+#ifdef __APPLE__
+	static const char *const def[] = {
+		"/Library/Developer/CommandLineTools/usr/bin/git",
+		"/var/db/xcode_select_link",
+		"/Applications/Xcode.app/Contents/Developer/usr/bin/git",
+		"/opt/homebrew/bin/git", "/usr/local/bin/git", NULL
+	};
+#else
+	/* 13.2 item 4 */
+	static const char *const def[] = {"/usr/bin/git", "/usr/local/bin/git",
+	                                  NULL};
+#endif
+	const char *const *v = xr_git_probe ? xr_git_probe : def;
+	size_t k;
+
+	for (k = 0; v[k]; k++)
+	{
+		char d[PATH_MAX];
+		ssize_t l;
+
+		if (!strcmp(v[k], "/var/db/xcode_select_link"))
+		{
+			/* step 2: usr/bin/git under the dir that link names */
+			if ((l = readlink(v[k], d, sizeof d - 1)) <= 0)
+				continue;
+			d[l] = '\0';
+			if (d[0] != '/' || snprintf(buf, bufsz, "%s/usr/bin/git", d)
+			    >= (int)bufsz || !res_exec(buf))
+				continue;
+			return buf;
+		}
+		if (res_exec(v[k]))
+			return snprintf(buf, bufsz, "%s", v[k]) < (int)bufsz ? buf
+			       : NULL;
+	}
+	return NULL;
+}
+
+/* glibc 2.34+ closes the rest in the child; it is declared without
+** _GNU_SOURCE (__USE_MISC, the default), so no configure check. */
+#if defined(__GLIBC__) && defined(__USE_MISC) && \
+    (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 34))
+#define RES_CLOSEFROM 1
+#else
+#define RES_CLOSEFROM 0
+#endif
+
+#if !defined(POSIX_SPAWN_CLOEXEC_DEFAULT) && !RES_CLOSEFROM
+/* Neither a spawn flag nor an action closes the rest: every fd >= 3 is
+** marked close-on-exec first. The querying process is one-shot and execs
+** nothing else. -1 when /proc/self/fd cannot be listed: git is not run. */
+static int
+res_cloexec(void)
+{
+	DIR *d = opendir("/proc/self/fd");
+	struct dirent *e;
+	int fd, f;
+
+	if (!d)
+		return -1;
+	while ((e = readdir(d)))
+		if ((fd = atoi(e->d_name)) >= 3 && fd != dirfd(d) &&
+		    (f = fcntl(fd, F_GETFD)) >= 0)
+			fcntl(fd, F_SETFD, f | FD_CLOEXEC);
+	closedir(d);
+	return 0;
+}
+#endif
+
+struct res_run
+{
+	char out[RES_OUT_MAX + 1], err[RES_ERR_MAX + 1];
+	size_t on, en;
+	int status;
+};
+
+/* The running git's group, for the signal handler (3.7). */
+static volatile sig_atomic_t res_pg;
+static const int res_sigs[] = {SIGTERM, SIGINT, SIGHUP};
+
+/* The querying process is ending: the group goes with it (3.7, #833). */
+static void
+res_sig(int sig)
+{
+	if (res_pg > 0)
+		kill(-(pid_t)res_pg, SIGKILL);
+	signal(sig, SIG_DFL);
+	raise(sig);
+}
+
+static void
+res_keep(char *b, size_t *bn, size_t cap, const char *s, ssize_t n)
+{
+	size_t k = (size_t)n < cap - *bn ? (size_t)n : cap - *bn;
+
+	memcpy(b + *bn, s, k);
+	*bn += k;
+	b[*bn] = '\0';
+}
+
+/* Reap pid, by `until` (ms), else end its group: SIGTERM, a 1 s grace,
+** SIGKILL (#833). 0 exited (*st), 1 timed out. */
+static int
+res_reap(pid_t pid, long long until, int *st)
+{
+	long long grace;
+	pid_t w;
+
+	while ((w = waitpid(pid, st, WNOHANG)) == 0 && xr_now_ms() < until)
+		poll(NULL, 0, 10);
+	if (w == pid)
+		return 0;
+	kill(-pid, SIGTERM);
+	for (grace = xr_now_ms() + 1000;
+	     (w = waitpid(pid, st, WNOHANG)) == 0 && xr_now_ms() < grace;)
+		poll(NULL, 0, 20);
+	kill(-pid, SIGKILL);	/* what ignored SIGTERM, the leader's kids */
+	if (w == 0)
+		(void)waitpid(pid, st, 0);
+	return 1;
+}
+
+/* One git run: argv as built, env exactly envp, stdin /dev/null, its own
+** group (3.7), stdout and stderr kept to their caps and drained past them
+** so git never blocks on a pipe. 0 ran (r->status), 1 timed out (the group
+** ended), -1 not run. */
+static int
+res_run(char *const argv[], char *const envp[], long long until,
+        struct res_run *r)
+{
+	posix_spawn_file_actions_t fa;
+	posix_spawnattr_t at;
+	struct sigaction sa, old[3];
+	struct pollfd p[2];
+	sigset_t set, omask;
+	int po[2] = {-1, -1}, pe[2] = {-1, -1}, k, st = 0, timed = 0, rc;
+	short fl = POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGMASK |
+	           POSIX_SPAWN_SETSIGDEF;
+	pid_t pid;
+
+	r->on = r->en = 0;
+	r->out[0] = r->err[0] = '\0';
+	r->status = -1;
+#if !defined(POSIX_SPAWN_CLOEXEC_DEFAULT) && !RES_CLOSEFROM
+	if (res_cloexec() != 0)
+		return -1;
+#endif
+	if (pipe(po) != 0 || pipe(pe) != 0)
+	{
+		for (k = 0; k < 2; k++)
+			if (po[k] >= 0)
+				close(po[k]);
+		return -1;
+	}
+	for (k = 0; k < 2; k++)
+	{
+		fcntl(po[k], F_SETFD, FD_CLOEXEC);
+		fcntl(pe[k], F_SETFD, FD_CLOEXEC);
+	}
+	posix_spawn_file_actions_init(&fa);
+	posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
+	posix_spawn_file_actions_adddup2(&fa, po[1], 1);
+	posix_spawn_file_actions_adddup2(&fa, pe[1], 2);
+	posix_spawnattr_init(&at);
+	/* no other fd of ours reaches git (macOS; glibc; else res_cloexec) */
+#ifdef POSIX_SPAWN_CLOEXEC_DEFAULT
+	fl |= POSIX_SPAWN_CLOEXEC_DEFAULT;
+#elif RES_CLOSEFROM
+	posix_spawn_file_actions_addclosefrom_np(&fa, 3);
+#endif
+	posix_spawnattr_setflags(&at, fl);
+	posix_spawnattr_setpgroup(&at, 0);
+	sigemptyset(&set);
+	posix_spawnattr_setsigmask(&at, &set);
+	sigaddset(&set, SIGPIPE);
+	for (k = 0; k < 3; k++)
+		sigaddset(&set, res_sigs[k]);
+	posix_spawnattr_setsigdefault(&at, &set);
+	/* no window where git runs and a SIGTERM would miss its group */
+	sigprocmask(SIG_BLOCK, &set, &omask);
+	rc = posix_spawn(&pid, argv[0], &fa, &at, argv, envp);
+	if (rc == 0)
+	{
+		xr_res_spawned++;
+		res_pg = pid;
+		memset(&sa, 0, sizeof sa);
+		sa.sa_handler = res_sig;
+		for (k = 0; k < 3; k++)
+			if (sigaction(res_sigs[k], NULL, &old[k]) != 0)
+				old[k].sa_handler = SIG_IGN;	/* left alone */
+			else if (old[k].sa_handler != SIG_IGN)
+				sigaction(res_sigs[k], &sa, NULL);
+	}
+	sigprocmask(SIG_SETMASK, &omask, NULL);
+	posix_spawn_file_actions_destroy(&fa);
+	posix_spawnattr_destroy(&at);
+	close(po[1]);
+	close(pe[1]);
+	p[0].fd = po[0];
+	p[1].fd = pe[0];
+	p[0].events = p[1].events = POLLIN;
+	while (rc == 0 && (p[0].fd >= 0 || p[1].fd >= 0))
+	{
+		long long left = until - xr_now_ms();
+		char b[4096];
+		ssize_t n;
+
+		if (left <= 0)
+		{
+			timed = 1;
+			break;
+		}
+		if (poll(p, 2, (int)left) < 0)
+		{
+			if (errno == EINTR)
+				continue;
+			break;
+		}
+		for (k = 0; k < 2; k++)
+		{
+			if (p[k].fd < 0 || !p[k].revents)
+				continue;
+			if ((n = read(p[k].fd, b, sizeof b)) > 0)
+			{
+				if (k == 0)
+					res_keep(r->out, &r->on, RES_OUT_MAX, b, n);
+				else
+					res_keep(r->err, &r->en, RES_ERR_MAX, b, n);
+			}
+			else if (n == 0 || errno != EINTR)
+			{
+				close(p[k].fd);
+				p[k].fd = -1;
+			}
+		}
+	}
+	for (k = 0; k < 2; k++)
+		if (p[k].fd >= 0)
+			close(p[k].fd);
+	if (rc != 0)
+		return -1;
+	timed = res_reap(pid, timed ? 0 : until, &st) || timed;
+	sigprocmask(SIG_BLOCK, &set, &omask);
+	res_pg = 0;
+	for (k = 0; k < 3; k++)
+		if (old[k].sa_handler != SIG_IGN)
+			sigaction(res_sigs[k], &old[k], NULL);
+	sigprocmask(SIG_SETMASK, &omask, NULL);
+	r->status = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+	return timed;
+}
+
+static int
+res_hex(const char *s, size_t n)
+{
+	size_t k;
+
+	for (k = 0; k < n; k++)
+		if (!A_HEX((unsigned char)s[k]))
+			return 0;
+	return 1;
+}
+
+int
+xr_git_parse(const char *s, size_t n, long long now, struct xr_resolved *r)
+{
+	const char *f[4], *ls[64];
+	size_t fl[4], ll[64], i = 0, k, nl = 0;
+	char who[1200], age[32];
+	long long at = 0, d;
+
+	for (k = 0; k < 3; k++)
+	{
+		const char *z = memchr(s + i, '\0', n - i);
+
+		if (!z)
+			return 0;
+		f[k] = s + i;
+		fl[k] = (size_t)(z - f[k]);
+		i += fl[k] + 1;
+	}
+	f[3] = s + i;
+	for (fl[3] = 0; i + fl[3] < n && s[i + fl[3]] != '\n'; fl[3]++)
+		;
+	i += fl[3];
+	if ((fl[0] != 40 && fl[0] != 64) || !res_hex(f[0], fl[0]) ||
+	    !fl[2] || fl[2] > 15)
+		return 0;
+	for (k = 0; k < fl[2]; k++)
+	{
+		if (!A_DIG((unsigned char)f[2][k]))
+			return 0;
+		at = at * 10 + (f[2][k] - '0');
+	}
+	xr_title(f[3], fl[3], r->title, sizeof r->title);
+	/* the picker's short age: now, 22m, 3h, 2d */
+	d = now > at ? now - at : 0;
+	if (d < 60)
+		snprintf(age, sizeof age, "now");
+	else
+		snprintf(age, sizeof age, "%lld%s ago", d < 3600 ? d / 60 : d < 86400
+		         ? d / 3600 : d / 86400, d < 3600 ? "m" : d < 86400 ? "h"
+		         : "d");
+	k = (size_t)snprintf(who, sizeof who, "%.*s \xc2\xb7 %s \xc2\xb7 %.7s",
+	                     (int)(fl[1] < 800 ? fl[1] : 800), f[1], age, f[0]);
+	res_text(r->subtitle, who, k < sizeof who ? k : sizeof who - 1,
+	         XR_RES_LINE);
+	/* the stat: its rows, then the summary; past 14, the first 13 and it */
+	while (i < n)
+	{
+		size_t e = i;
+
+		while (e < n && s[e] != '\n')
+			e++;
+		if (e > i && nl < 64)
+		{
+			ls[nl] = s + i;
+			ll[nl++] = e - i;
+		}
+		i = e + 1;
+	}
+	for (k = 0; k < nl && k < XR_RES_LINES; k++)
+	{
+		size_t j = nl > XR_RES_LINES && k == XR_RES_LINES - 1 ? nl - 1 : k;
+
+		res_text(r->line[k], ls[j], ll[j], XR_RES_LINE);
+	}
+	r->nlines = (int)k;
+	r->kind = "commit";
+	r->state = "ok";
+	return 1;
+}
+
+/* GitCommitResolver (8.3): rev-parse, then show, under one 3 s deadline. */
+static int
+res_commit(const char *sha, const char *cwd, int live,
+           struct xr_resolved *r)
+{
+	static struct res_run run;	/* 68 KB: off the stack */
+	char git[PATH_MAX], dir[PATH_MAX], rev[64], home[PATH_MAX + 8];
+	char root[PATH_MAX], name[300], *av[40], *env[9];
+	const char *h = getenv("HOME"), *b;
+	size_t n = strlen(sha), k, e = 0, a = 0;
+	long long until;
+	int rc;
+
+	/* 8.3: checked again, 7-40 lowercase hex, so it is never an option */
+	if (n < 7 || n > 40 || !res_hex(sha, n))
+		return 0;
+	r->kind = "commit";
+	snprintf(r->subtitle, sizeof r->subtitle, "%.7s", sha);
+	if (!live)
+	{
+		res_set(r, "ended", "Session ended");	/* v2.1 7.1 */
+		return 1;
+	}
+	if (!xr_git_bin(git, sizeof git))
+	{
+		res_set(r, "no_git", "git is not installed");
+		return 1;
+	}
+	if (cwd[0] != '/' || snprintf(dir, sizeof dir, "%s", cwd)
+	    >= (int)sizeof dir)
+	{
+		res_set(r, "not_repo", "Not in a git repository");
+		return 1;
+	}
+	snprintf(rev, sizeof rev, "%s^{commit}", sha);
+	/* exactly 8.3's list; HOME as the querying process has it */
+	{
+		static char e0[] = "GIT_CONFIG_NOSYSTEM=1",
+		            e1[] = "GIT_CONFIG_GLOBAL=/dev/null",
+		            e2[] = "GIT_OPTIONAL_LOCKS=0",
+		            e3[] = "GIT_TERMINAL_PROMPT=0",
+		            e4[] = "GIT_NO_LAZY_FETCH=1", e5[] = "PATH=/usr/bin:/bin",
+		            e6[] = "LANG=en_US.UTF-8";
+		char *v[] = {e0, e1, e2, e3, e4, e5, e6};
+
+		for (k = 0; k < 7; k++)
+			env[e++] = v[k];
+		if (h && snprintf(home, sizeof home, "HOME=%s", h)
+		    < (int)sizeof home)
+			env[e++] = home;
+		env[e] = NULL;
+	}
+	{
+		/* 8.3's argv verbatim, plus log.showSignature=false: a repo's
+		** log.showSignature and gpg.program would run that program on a
+		** signed commit (#159's sentinel test) */
+		static char g0[] = "--no-pager", c[] = "-c",
+		            g1[] = "core.fsmonitor=", g2[] = "core.hooksPath=/dev/null",
+		            g3[] = "protocol.allow=never", g4[] = "diff.external=",
+		            g5[] = "color.ui=never", g6[] = "log.showSignature=false",
+		            g7[] = "-C";
+		char *v[] = {g0, c, g1, c, g2, c, g3, c, g4, c, g5, c, g6, g7};
+
+		av[a++] = git;
+		for (k = 0; k < sizeof v / sizeof *v; k++)
+			av[a++] = v[k];
+		av[a++] = dir;
+	}
+	until = xr_now_ms() + XR_GIT_MS;
+	{
+		static char s0[] = "rev-parse", s1[] = "--is-inside-work-tree";
+
+		av[a] = s0;
+		av[a + 1] = s1;
+		av[a + 2] = NULL;
+	}
+	if ((rc = res_run(av, env, until, &run)) < 0)
+		return 0;
+	if (rc == 0 && (run.status != 0 || strcmp(run.out, "true\n")))
+	{
+		res_set(r, "not_repo", "Not in a git repository");
+		return 1;
+	}
+	if (rc == 0)
+	{
+		static char s0[] = "show", s1[] = "--no-color", s2[] = "--no-ext-diff",
+		            s3[] = "--no-textconv", s4[] = "--stat=80",
+		            s5[] = "--stat-count=14",
+		            s6[] = "--format=%H%x00%an%x00%at%x00%s",
+		            s7[] = "--end-of-options";
+		char *v[] = {s0, s1, s2, s3, s4, s5, s6, s7};
+
+		for (k = 0; k < sizeof v / sizeof *v; k++)
+			av[a + k] = v[k];
+		av[a + k] = rev;	/* after --end-of-options: never an option */
+		av[a + k + 1] = NULL;
+		if ((rc = res_run(av, env, until, &run)) < 0)
+			return 0;
+	}
+	if (rc == 1)
+	{
+		res_set(r, "timeout", "git timed out after 3 s");
+		return 1;
+	}
+	if (run.status == 0 &&
+	    xr_git_parse(run.out, run.on, (long long)time(NULL), r))
+		return 1;
+	if (strstr(run.err, " is ambiguous"))
+	{
+		res_set(r, "ambiguous", "Ambiguous short SHA");
+		return 1;
+	}
+	(void)res_root(dir, root, sizeof root);
+	b = strrchr(root, '/');
+	res_text(name, b && b[1] ? b + 1 : root, strlen(b && b[1] ? b + 1 : root),
+	         60);
+	r->state = "not_commit";
+	snprintf(r->title, sizeof r->title, "Not a commit in %s", name);
+	return 1;
+}
+
+/* ---- files (v2.1 7.1, v1 7.3) ---- */
+
+long
+xr_ref_line(const char *text)
+{
+	const char *p = text + strcspn(text, ":#");
+	long v = 0;
+	int d;
+
+	if (p[0] == ':')
+		p++;
+	else if (p[0] == '#' && p[1] == 'L')
+		p += 2;
+	else
+		return 0;
+	for (d = 0; d < 7 && A_DIG((unsigned char)p[d]); d++)
+		v = v * 10 + (p[d] - '0');
+	return v;
+}
+
+/* The deny list (#178), ASCII case-insensitive. 'p': a part of the path
+** starts with it; 'd': a part (or parts, "a/b") equals it; on the name
+** only, 'n': equals it, 's': ends in it, 'i': starts with it and has no
+** dot. A guard against the common credential files, not a guarantee. */
+static const struct { char how; const char *s; } xr_deny[] = {
+	/* env files, ssh, gpg, aws, the package managers' tokens (.env*) */
+	{ 'p', ".env" }, { 'p', ".ssh" }, { 'p', ".gnupg" }, { 'p', ".aws" },
+	{ 'p', ".netrc" }, { 'p', ".npmrc" }, { 'p', ".pypirc" },
+	{ 'p', ".git-credentials" },
+	/* git internals: .git/config can hold https://user:token@ remotes */
+	{ 'd', ".git" },
+	/* cloud, container, agent and password stores, whole directories */
+	{ 'd', ".kube" }, { 'd', ".docker" }, { 'd', ".azure" }, { 'd', ".oci" },
+	{ 'd', ".claude" }, { 'd', ".codex" }, { 'd', ".config/gh" },
+	{ 'd', ".config/gcloud" }, { 'd', ".gcloud" },
+	{ 'd', ".password-store" },
+	/* single token and password files */
+	{ 'n', ".claude.json" }, { 'n', ".pgpass" }, { 'n', ".my.cnf" },
+	{ 'n', ".vault-token" }, { 'n', ".htpasswd" }, { 'n', ".s3cfg" },
+	{ 'n', "credentials" }, { 'n', "credentials.json" },
+	{ 'n', "credentials.toml" }, { 'n', "credentials.db" },
+	{ 'n', "application_default_credentials.json" },
+	{ 'n', "secrets.yaml" }, { 'n', "secrets.yml" }, { 'n', "secrets.json" },
+	/* keys, certificates, keystores, keychains, terraform state */
+	{ 's', ".pem" }, { 's', ".key" }, { 's', ".p12" }, { 's', ".pfx" },
+	{ 's', ".p8" }, { 's', ".ppk" }, { 's', ".jks" }, { 's', ".keystore" },
+	{ 's', ".keychain" }, { 's', ".keychain-db" }, { 's', ".tfstate" },
+	{ 's', ".tfstate.backup" },
+	/* shell and REPL history: .zsh_history, .psql_history, fish_history */
+	{ 's', "history" },
+	/* ssh keys: id_rsa, id_ed25519, never id_rsa.pub */
+	{ 'i', "id_" },
+};
+
+int
+xr_secret_name(const char *path)
+{
+	const char *c = path, *e, *s;
+	size_t l, k, n;
+
+	for (; *c; c = *e ? e + 1 : e)
+	{
+		e = c + strcspn(c, "/");
+		l = (size_t)(e - c);
+		for (k = 0; k < sizeof xr_deny / sizeof *xr_deny; k++)
+		{
+			s = xr_deny[k].s;
+			n = strlen(s);
+			if (xr_deny[k].how == 'p' ? l >= n && !strncasecmp(c, s, n)
+			    : xr_deny[k].how == 'd' ? !strncasecmp(c, s, n) &&
+			      (!c[n] || c[n] == '/')
+			    : *e ? 0	/* the rest: the name only */
+			    : xr_deny[k].how == 'n' ? l == n && !strncasecmp(c, s, n)
+			    : xr_deny[k].how == 's' ? l >= n && !strncasecmp(e - n, s, n)
+			    : l > n && !strncasecmp(c, s, n) && !memchr(c, '.', l))
+				return 1;
+		}
+	}
+	return 0;
+}
+
+void
+xr_file_lines(const char *s, size_t n, long line, struct xr_resolved *r)
+{
+	size_t i, total = 0, start = 0, ln = 0;
+
+	for (i = 0; i < n; i++)
+		total += s[i] == '\n';
+	total += n && s[n - 1] != '\n';
+	/* line N seventh, the window kept whole at either end */
+	if (line > 7)
+		start = (size_t)line - 7;
+	if (total > XR_RES_LINES && start > total - XR_RES_LINES)
+		start = total - XR_RES_LINES;
+	if (total <= XR_RES_LINES)
+		start = 0;
+	r->nlines = 0;
+	r->first = (long)start + 1;
+	for (i = 0; i < n && r->nlines < XR_RES_LINES; ln++)
+	{
+		size_t e = i;
+
+		while (e < n && s[e] != '\n')
+			e++;
+		if (ln >= start)
+			res_text(r->line[r->nlines++], s + i,
+			         e - i - (e > i && s[e - 1] == '\r'), XR_RES_LINE);
+		i = e + 1;
+	}
+}
+
+/* FileResolver: the key's path, inside the project (the cwd's git root,
+** else the cwd; none when that is /, $HOME or above) by its text and again
+** by realpath; never a denied name, on either whole path; lstat a regular
+** file with one link, at most 2 MB, opened through the seam. Outside the
+** project nothing is touched, so no TCC prompt (QA D), unless a symlinked
+** dir inside points out: realpath follows it, then refuses. */
+static int
+res_file(const char *key, const char *text, const char *cwd,
+         struct xr_resolved *r)
+{
+	char p[PATH_MAX], root[PATH_MAX], rp[PATH_MAX], rr[PATH_MAX];
+	char shown[PATH_MAX + 32], *buf;
+	const char *h = getenv("HOME"), *rel, *base;
+	long line = xr_ref_line(text);
+	struct stat st;
+	ssize_t got;
+	size_t n = 0;
+	int fd;
+
+	if (cwd[0] != '/' || strlen(cwd) >= PATH_MAX)
+		return 0;
+	if (key[0] == '~')
+	{
+		if (!h || h[0] != '/' || snprintf(p, sizeof p, "%s%s", h, key + 1)
+		    >= (int)sizeof p)
+			return 0;
+	}
+	else if (key[0] != '/' || snprintf(p, sizeof p, "%s", key)
+	         >= (int)sizeof p)
+		return 0;
+	r->kind = "file";
+	(void)res_root(cwd, root, sizeof root);
+	/* shown: relative to the cwd, else the root, else whole */
+	rel = res_under(p, cwd);
+	snprintf(shown, sizeof shown, "%s", rel && *rel ? rel
+	         : (rel = res_under(p, root)) && *rel ? rel : p);
+	res_text(r->subtitle, shown, strlen(shown), XR_RES_LINE);
+	if (res_wide(root) || !res_under(p, root))
+	{
+		res_set(r, "outside_project", "Outside this session's project");
+		return 1;
+	}
+	if (xr_secret_name(p))
+	{
+		res_set(r, "secret_name", "Not previewed: may hold secrets");
+		return 1;
+	}
+	if (lstat(p, &st) != 0 || !S_ISREG(st.st_mode))
+		return 0;	/* gone, a symlink, a FIFO, a dir: no block */
+	if (!realpath(p, rp) || !realpath(root, rr))
+		return 0;
+	/* a hard link's other names can lie outside: the boundary's answer */
+	if (!res_under(rp, rr) || st.st_nlink > 1)
+	{
+		res_set(r, "outside_project", "Outside this session's project");
+		return 1;
+	}
+	if (xr_secret_name(rp))
+	{
+		res_set(r, "secret_name", "Not previewed: may hold secrets");
+		return 1;
+	}
+	if ((uint64_t)st.st_size > XR_RES_FILE)
+	{
+		res_set(r, "too_large", "Not previewed: over 2 MB");
+		return 1;
+	}
+	/* the real path, and only the inode lstat saw (the seam checks) */
+	if ((fd = xr_seam_open(rp, &st)) < 0)
+		return 0;
+	if (!(buf = malloc(XR_RES_FILE + 1)))
+	{
+		close(fd);
+		return 0;
+	}
+	while (n <= XR_RES_FILE &&
+	       ((got = read(fd, buf + n, XR_RES_FILE + 1 - n)) > 0 ||
+	        (got < 0 && errno == EINTR)))
+		n += got > 0 ? (size_t)got : 0;
+	close(fd);
+	if (n > XR_RES_FILE)
+		res_set(r, "too_large", "Not previewed: over 2 MB");
+	else
+	{
+		base = strrchr(p, '/') + 1;
+		r->state = "ok";
+		res_text(r->title, base, strlen(base), XR_TITLE_MAX);
+		if (line > 0)
+		{
+			snprintf(shown + strlen(shown), sizeof shown - strlen(shown),
+			         " \xc2\xb7 line %ld", line);
+			res_text(r->subtitle, shown, strlen(shown), XR_RES_LINE);
+		}
+		xr_file_lines(buf, n, line, r);
+	}
+	free(buf);
+	return 1;
+}
+
+int
+xr_res_ref(const struct xr_span *sp, const char *text, const char *cwd,
+           int live, struct xr_resolved *r)
+{
+	memset(r, 0, sizeof *r);
+	if (sp->shape == XR_COMMIT)
+		return res_commit(sp->full, cwd ? cwd : "", live, r);
+	if (sp->shape == XR_FILE)
+		return res_file(xr_span_text(sp), text, cwd ? cwd : "", r);
+	return 0;
+}
+
+void
+xr_scan_resolved(struct xr_scan *x, const struct xr_span *sp,
+                 const char *text, const char *cwd, int live)
+{
+	struct xr_resolved *r;
+	long long t = xr_now_ms();
+	unsigned long sp0 = xr_res_spawned;
+	char *b;
+	size_t bl;
+	FILE *m;
+	int k;
+
+	if (!x->full || x->cancel || x->out_full || !(r = malloc(sizeof *r)))
+		return;
+	if (xr_res_ref(sp, text, cwd, live, r) && (m = ln_open(&b, &bl)))
+	{
+		fputs("{\"schema\":1,\"resolved\":{\"kind\":", m);
+		xr_put_str(m, r->kind);
+		fputs(",\"state\":", m);
+		xr_put_str(m, r->state);
+		fputs(",\"title\":", m);
+		xr_put_str(m, r->title);
+		fputs(",\"subtitle\":", m);
+		xr_put_str(m, r->subtitle);
+		/* which row is line N, even clamped at the end; only a file shown */
+		if (!strcmp(r->kind, "file") && !strcmp(r->state, "ok"))
+			fprintf(m, ",\"first\":%ld", r->first);
+		fputs(",\"lines\":[", m);
+		for (k = 0; k < r->nlines; k++)
+		{
+			if (k)
+				fputc(',', m);
+			xr_put_str(m, r->line[k]);
+		}
+		fputs("]}}\n", m);
+		ln_send(x, m, &b, &bl);
+		/* K12: the kind, the state, counts; never a path or a line */
+		dch_trace("xray resolve: kind=%s state=%s spawned=%lu ms=%lld",
+		          r->kind, r->state, xr_res_spawned - sp0, xr_now_ms() - t);
+	}
+	free(r);
 }

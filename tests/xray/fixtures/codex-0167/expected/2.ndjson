@@ -1,0 +1,4 @@
+{"schema":1,"first":{"session":"cx","session_id":"019a1111-2222-7333-8444-555566667702","key":"issue:#77","shape":"issue","text":"#77","project":"-T-work-cx","mode":"light","scope":"session","budget_ms":300,"elapsed_ms":0}}
+{"schema":1,"mention":{"session":"cx","chapter":"f*:1031","at":1794304802,"line":"Why does this screenshot show #77 failing?","offset":1031,"live":true,"project":"-T-work-cx"}}
+{"schema":1,"tally":{"session":"cx","live":true,"project":"-T-work-cx","count":1,"definitions":0,"partial":false,"mentions_dropped":0}}
+{"schema":1,"done":true,"partial":true,"counts":{"session":1,"project":0,"project_sessions":0,"all":null,"all_sessions":null},"why":"first","files":1,"bytes":1383,"lines_too_long":0}

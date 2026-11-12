@@ -60,6 +60,11 @@ int dch_remote_attach(const char *host, const char *name);
 ** dch serve's ctl op, its output onto ours: the remote dch's exit status
 ** (0-3), else 1 (bad request, refused, unknown host), 4, 6 or 7. */
 int dch_remote_ctl(const char *host, int argc, char **argv, const char *cwd);
+/* dch --xray host:name --requests --json (#158, spec #832 4.3): one warm
+** ctl connection to host, X-ray requests on name read off stdin as NDJSON,
+** each answer wrapped on stdout. 0 at stdin EOF; else no connection: 1, 4,
+** 6 or 7, said on stderr and as one {"schema":1,"exit":N,...} line. */
+int dch_remote_requests(char *n);
 void dch_remote_esc(char *out, size_t cap, const char *s);
 
 /* Attach replay scrollback (#101): rows of the session's history sent above

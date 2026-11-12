@@ -68,12 +68,16 @@ utf8_at(const unsigned char *s, unsigned *cp)
 }
 
 /* A code point a terminal acts on: C0, DEL, C1, and the bidi embeddings,
-** overrides and isolates (U+202A-U+202E, U+2066-U+2069). */
+** overrides and isolates (U+202A-U+202E, U+2066-U+2069); also the bidi
+** marks (U+200E, U+200F, U+061C) and the line and paragraph separators
+** (U+2028, U+2029), which reorder text or cut it into lines (#167). */
 int
 cp_ctl(unsigned cp)
 {
 	return cp < 0x20 || (cp >= 0x7f && cp < 0xa0) ||
-	       (cp >= 0x202a && cp <= 0x202e) || (cp >= 0x2066 && cp <= 0x2069);
+	       (cp >= 0x202a && cp <= 0x202e) || (cp >= 0x2066 && cp <= 0x2069) ||
+	       cp == 0x200e || cp == 0x200f || cp == 0x061c || cp == 0x2028 ||
+	       cp == 0x2029;
 }
 
 /* s into out[cap] with every control escaped, \xNN for a byte (also one
@@ -565,23 +569,120 @@ ctl_name(const char *s, char *why, size_t cap)
 }
 
 int
+xray_scope_ok(const char *s)
+{
+	return !strcmp(s, "session") || !strcmp(s, "project") ||
+	       !strcmp(s, "all");
+}
+
+int
+xray_anchor_ok(const char *s)
+{
+	size_t n = strspn(s, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+	                     "0123456789:_.-");
+
+	return n >= 1 && n <= 128 && !s[n];
+}
+
+int
+xray_budget(const char *s)
+{
+	int k, v = 0;
+
+	/* digits only, no strtoul: no sign, no 0x, no wrap */
+	for (k = 0; s[k] >= '0' && s[k] <= '9'; k++)
+		if ((v = v * 10 + s[k] - '0') > 1000)
+			v = 1000;
+	return !s[k] && k && v >= 50 && v <= 300 ? v : -1;
+}
+
+/* --xray (spec #832 v3.2.1 4.4): the name right after the verb, then 3.1's
+** flags in any order, each once: --json, required (the view is the
+** client's own, as --requests is); one of --follow, --ref <text>,
+** --chapter <anchor> and --clear; --scope, --full and --budget-ms only with
+** --ref. A value is the next element even when it starts with '-'. --ref's
+** text and the anchor are CK_TEXT (an anchor may hold ':'). The --ref
+** text's byte and grammar rules are xray.c's, which the Windows client does
+** not build: dch serve checks them (ctl_request), the dch client before
+** it sends. --follow has no timeout and no cap. */
+static int
+ctl_xray(int argc, char *const argv[], unsigned char *kind, char *why,
+         size_t cap)
+{
+	static const char *const opt[] = { "--json", "--follow", "--clear",
+	                                   "--full", "--ref", "--chapter",
+	                                   "--scope", "--budget-ms" };
+	enum { X_JSON = 1, X_FOLLOW = 2, X_CLEAR = 4, X_FULL = 8, X_REF = 16,
+	       X_CHAPTER = 32, X_SCOPE = 64, X_BUDGET = 128 };
+	const char *val[8] = { NULL };
+	unsigned seen = 0, k, one;
+	int i;
+
+	if (ctl_name(argv[1], why, cap) < 0)
+		return -1;
+	kind[0] = CK_VERB;
+	kind[1] = CK_NAME;
+	for (i = 2; i < argc; i++)
+	{
+		const char *a = argv[i];
+
+		for (k = 0; k < 8 && strcmp(a, opt[k]); k++)
+			;
+		if (k == 8)
+			return ctl_never(a) || !strcmp(a, "--all")
+			       ? ctl_no(why, cap, "%.60s is not allowed", a)
+			       : a[0] == '-'
+			       ? ctl_no(why, cap, "%.60s is not allowed with --xray",
+			                a)
+			       : ctl_no(why, cap, "unexpected %.60s after --xray", a);
+		if (seen & 1u << k)
+			return ctl_no(why, cap, "%s twice", opt[k]);
+		seen |= 1u << k;
+		kind[i] = CK_FLAG;
+		if (k >= 4)
+		{
+			if (++i >= argc)
+				return ctl_no(why, cap, "%s needs a value", opt[k]);
+			val[k] = argv[i];
+			kind[i] = k >= 6 ? CK_VALUE : CK_TEXT;
+		}
+	}
+	one = seen & (X_FOLLOW | X_CLEAR | X_REF | X_CHAPTER);
+	if (!(seen & X_JSON))
+		return ctl_no(why, cap, "--xray needs --json (the view is "
+		              "client-side only)");
+	if (one & (one - 1))
+		return ctl_no(why, cap, "--ref, --follow, --chapter and --clear "
+		              "exclude each other");
+	if (seen & (X_FULL | X_SCOPE | X_BUDGET) && !(seen & X_REF))
+		return ctl_no(why, cap, "--scope, --full and --budget-ms come "
+		              "with --ref");
+	if (val[5] && !xray_anchor_ok(val[5]))
+		return ctl_no(why, cap, "bad anchor");
+	if (val[6] && !xray_scope_ok(val[6]))
+		return ctl_no(why, cap, "bad scope");
+	if (val[7] && xray_budget(val[7]) < 0)
+		return ctl_no(why, cap, "bad budget");
+	return seen & X_FOLLOW ? CTL_FOREVER | CTL_NOCAP : 0;
+}
+
+int
 ctl_check(int argc, char *const argv[], unsigned char *kind, char *why,
           size_t cap)
 {
 	const struct ctl_verb *v;
 	int i = 1, names = 0, json = 0, all = 0, dd = 0;
 
-	/* reserved for a later release: its own reason, whatever follows */
-	if (argc >= 1 && !strcmp(argv[0], "--xray"))
-		return ctl_no(why, cap, "xray not supported by this host");
 	if (argc < 2)
 		return ctl_no(why, cap, "a ctl request takes a verb and a "
 		              "session name");
 	if (argc > CTL_ARGV_MAX)
 		return ctl_no(why, cap, "too many arguments");
+	memset(kind, 0, (size_t)argc);
+	if (!strcmp(argv[0], "--xray"))
+		return ctl_xray(argc, argv, kind, why, cap);
 	if (!(v = ctl_find(argv[0])))
 		return ctl_no(why, cap, "%.60s is not allowed", argv[0]);
-	memset(kind, 0, (size_t)argc);
 	kind[0] = CK_VERB;
 	if (v->names == CN_ONE && v->tail != CT_SAY)
 	{

@@ -12,9 +12,20 @@ Each case is a directory:
                    elapsed_ms masked to 0 and progress lines left out (they
                    are timing; checked to sit between first and done)
   claude/<uuid>.jsonl  transcripts, placed at
-                   <config>/projects/<setup "project_dir">/<uuid>.jsonl
+                   <config>/projects/<setup "project_dir">/<uuid>.jsonl,
+                   or at setup "project_dirs"[<uuid>] (#155: another
+                   project dir; "@WORK:<name>@" is live shell <name>'s
+                   pane cwd's key); an argv element f*:<offset> (a
+                   --chapter anchor, #156) is f<the last copied
+                   transcript's inode>:<offset>
   shell/<name>.ring.ndjson  a live shell session <name>: ring records,
                    served by a test-only fake master (below)
+  codex/<uuid>.jsonl  Codex rollouts (7.4, #160), placed at
+                   <home>/.codex/sessions/<setup codex.day>/rollout-...-
+                   <uuid>.jsonl; a real dch master runs tests/fake_codex.c
+                   as `codex` in session <setup codex.session>, and the
+                   first rollout's id is its thread (a shell snapshot that
+                   carries the session, as Codex writes one)
   setup.json       what the case needs around the corpus: History records,
                    the fake masters' ring status, config lines. A live
                    shell's pane runs in <tmp>/work/<name> (MSG_CMD answers
@@ -23,7 +34,10 @@ Each case is a directory:
                    (MSG_READ with DCH_READ_F_PRIMARY, #140) is "screen"
                    (default "screen row\n"); "primary":"alt" answers
                    DCH_ST_ALT (the alt screen is active), "primary":"old"
-                   DCH_ST_ERR (a master before #140). Ignored by Prosper.
+                   DCH_ST_ERR (a master before #140). "isolated": true
+                   fails the case if any argv reads that master's ring or
+                   screen (#155: no scope reads another session's ring,
+                   S17). Ignored by Prosper.
 
 The temp root is masked as /T in the output, and its project key as -T (7.1
 maps every '/' to '-'), so a golden carries the real pane-cwd key shape.
@@ -43,7 +57,7 @@ Run:  python3 tests/xray_golden.py            (uses ./dch)
       python3 tests/xray_golden.py <case>...  (only those cases)
 """
 import hashlib, json, os, re, shutil, socket, struct, subprocess, sys
-import tempfile, threading
+import tempfile, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIX = os.path.join(HERE, "xray", "fixtures")
@@ -228,6 +242,51 @@ def stream(got):
     return "".join(keep), ok
 
 
+def codex_live(t, home, env, cx, xdir, spawned):
+    """A live session running tests/fake_codex.c as `codex`, its rollouts
+    under <home>/.codex and its thread's shell snapshot (7.4)."""
+    day = cx.get("day", "2026/11/10")
+    sess = os.path.join(home, ".codex", "sessions", day)
+    snaps = os.path.join(home, ".codex", "shell_snapshots")
+    os.makedirs(sess, mode=0o700)
+    os.makedirs(snaps, mode=0o700)
+    tids = sorted(f[:-len(".jsonl")] for f in os.listdir(xdir))
+    for tid in tids:
+        shutil.copy(os.path.join(xdir, tid + ".jsonl"), os.path.join(
+            sess, "rollout-%sT10-00-00-%s.jsonl" % (day.replace("/", "-"),
+                                                    tid)))
+    bindir = os.path.join(t, "bin")
+    os.makedirs(bindir)
+    fake = os.path.join(bindir, "codex")
+    b = subprocess.run(["cc", "-o", fake, os.path.join(HERE, "fake_codex.c")],
+                       capture_output=True, text=True, timeout=60)
+    check("codex: the fake codex builds", b.returncode == 0, b.stderr)
+    n = cx.get("session", "cx")
+    cwd = os.path.join(t, "work", n)
+    os.makedirs(cwd)
+    log = os.path.join(t, "codex.log")
+    e = dict(env, FAKE_CODEX_LOG=log)
+    r = subprocess.run([DCH, "--spawn", n, "--size", "80x24", "--cwd", cwd,
+                        fake], capture_output=True, text=True, timeout=30,
+                       env=e)
+    check("codex: session %s spawned" % n, r.returncode == 0, r.stderr)
+    spawned.append((n, e))
+    line = None
+    for _ in range(200):
+        if os.path.exists(log) and open(log).read().endswith("\n"):
+            line = open(log).read().split()
+            break
+        time.sleep(0.05)
+    check("codex: the fake codex started", line is not None)
+    marker = line[1] if line and line[1] != "-" else None
+    p = os.path.join(snaps, tids[0] + ".1.sh")
+    with open(p, "w") as f:
+        f.write("# Snapshot file\nexport DCH_SESSION=%s\n%s" % (
+            n, "export DCH_NATIVE_BRIDGE_ID=%s\n" % marker if marker
+            else ""))
+    os.chmod(p, 0o600)
+
+
 def run_case(name):
     d = os.path.join(FIX, name)
     case = json.load(open(os.path.join(d, "case.json")))
@@ -236,6 +295,7 @@ def run_case(name):
     check("%s: case.json carries schema 1" % name, case.get("schema") == 1)
     t = tempfile.mkdtemp(prefix="xg")
     masters = []
+    spawned = []
     try:
         home, state = os.path.join(t, "home"), os.path.join(t, "state")
         sockdir = os.path.join(t, "dch-%d" % os.getuid())
@@ -245,11 +305,17 @@ def run_case(name):
         # transcripts
         cdir = os.path.join(d, "claude")
         if os.path.isdir(cdir):
-            proj = os.path.join(cfg, "projects",
-                                setup.get("project_dir", "-home-demo-proj"))
-            os.makedirs(proj)
+            dirs = setup.get("project_dirs", {})
             for f in sorted(os.listdir(cdir)):
+                pd = dirs.get(f[:-len(".jsonl")],
+                              setup.get("project_dir", "-home-demo-proj"))
+                if pd.startswith("@WORK:"):
+                    pd = key(os.path.join(os.path.realpath(t), "work",
+                                          pd[6:-1]))
+                proj = os.path.join(cfg, "projects", pd)
+                os.makedirs(proj, exist_ok=True)
                 shutil.copy(os.path.join(cdir, f), os.path.join(proj, f))
+                ino = os.stat(os.path.join(proj, f)).st_ino
         # History records
         hdir = os.path.join(state, "dch", "sessions",
                             sockdir.replace("/", "-"))
@@ -278,6 +344,7 @@ def run_case(name):
                     o.get("session_id", "m0000000000000000"),
                     None if o.get("lite") else o.get("screen", "screen row\n"),
                     cwd, o.get("primary")))
+                masters[-1].isolated = (n, o.get("isolated"))
         # config lines (xray_ring for a ring's cap)
         with open(os.path.join(t, "config"), "w") as f:
             f.write("".join(l + "\n" for l in setup.get("config", [])))
@@ -287,8 +354,13 @@ def run_case(name):
                    DCH_CONFIG=os.path.join(t, "config"), DCH_LOGIN_ENV="0",
                    DCH_NO_REMOTE="1")
         if any(l.startswith("remote_hosts") for l in setup.get("config", [])):
-            del env["DCH_NO_REMOTE"]     # named hosts only: nothing dialled
+            del env["DCH_NO_REMOTE"]     # named hosts only, on loopback
+        xdir = os.path.join(d, "codex")
+        if os.path.isdir(xdir):
+            codex_live(t, home, env, setup.get("codex", {}), xdir, spawned)
         for k, argv in enumerate(case["argv"], 1):
+            argv = ["f%x:" % ino + a[3:] if a.startswith("f*:") else a
+                    for a in argv]
             r = subprocess.run([DCH] + argv, capture_output=True, text=True,
                                timeout=30, env=env)
             ref = "--ref" in argv and r.returncode == 0
@@ -319,12 +391,21 @@ def run_case(name):
                       name, k, ", session_id" if r.returncode == 0 else ""),
                   got.count("\n") == 1 and obj.get("schema") == 1 and
                   (r.returncode != 0 or "session_id" in obj), got)
+        for m in masters:
+            if m.isolated[1]:
+                check("%s: no argv read %s's ring or screen (S17)" %
+                      (name, m.isolated[0]),
+                      MSG_RING_READ not in m.ops and MSG_READ not in m.ops,
+                      m.ops)
         n_exp = len(os.listdir(os.path.join(d, "expected")))
         check("%s: one expected file per argv entry" % name,
               n_exp == len(case["argv"]), n_exp)
     finally:
         for m in masters:
             m.close()
+        for n, e in spawned:
+            subprocess.run([DCH, "-k", n], capture_output=True, timeout=30,
+                           env=e)
         shutil.rmtree(t, ignore_errors=True)
 
 

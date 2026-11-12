@@ -11,12 +11,19 @@
 **      scan for the first key the index met, then xr_print with the refs;
 **   2: ring records ({u16 len, u8 kind, u8 flags, u32 time, text}) through
 **      xr_shell_feed with xr_shell_refs into an index, then xr_print;
-**   3: xr_ref_ok and xr_ref_parse over the bytes as a C string.
+**   3: xr_ref_ok and xr_ref_parse over the bytes as a C string; with byte
+**      0's bit 2 set, the resolvers' parsers instead (#159): git show's
+**      output, a file's 14-line window around the bytes' own :line, the
+**      secret-name list; every block line valid UTF-8 within 200 scalars.
+** Path 1's scan: bit 3 reads the transcript twice, the second time as
+** another session's (#155), bit 4 makes it light.
 ** Path 1 with byte 0's bit 2 set is --follow's instead (#136): the transcript
 ** read whole, and read again in pieces at cut points the input seeds, a delta
 ** batch after each; the pieces end where the whole read does, with the same
 ** object printed, every delta line one schema-1 chapter or ref object, and a
 ** second diff of the last moment empty.
+** Paths 1 and 5 with byte 0's bit 5 set read the bytes as a Codex rollout
+** instead (#160, 7.4): mentions only, so no hit may carry a definition.
 ** Every hit handed to a sink lies inside its line; a definition's title is
 ** valid UTF-8, its passage within XR_PASSAGE scalars' bytes; the printed object is one line within the cap. */
 #include <stdint.h>
@@ -27,6 +34,18 @@
 #include "../../bridge.h"
 
 int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n);
+
+static int cx;			/* this input is a Codex rollout */
+
+static struct xr_claude *
+decoder(void)
+{
+	struct xr_claude *x = xr_claude_new();
+
+	if (x && cx)
+		xr_claude_codex(x);
+	return x;
+}
 
 static void
 check_utf8(const char *t, size_t n)
@@ -97,6 +116,8 @@ tee_hit(void *ctx, const struct xr_hit *h)
 	if (!h->sp || h->sp->s >= h->sp->e || h->sp->e > h->ll || !h->line)
 		abort();
 	check_key(h->sp);
+	if (cx && (h->title || h->passage || h->rule))
+		abort();	/* a Codex corpus defines nothing (7.4) */
 	if (h->title)
 		check_utf8(h->title, strlen(h->title));
 	/* a passage is the corpus's own bytes: xr_put_str writes U+FFFD */
@@ -138,62 +159,74 @@ emit(struct xr_index *ix, int shell)
 	free(buf);
 }
 
-/* A full --ref over the same transcript for key; its stream must hold
-** first, done last, one line each. */
+/* A --ref over the same transcript for key, full, or light with byte 0's
+** bit 4; with bit 3, read again as another session's file (#155, --scope
+** all). Its stream must hold first, done last, one line each; light, the
+** other session's lines carry no mention and no passage (K4.2). */
 static void
 scan(const uint8_t *d, size_t n, const char *key)
 {
-	struct xr_claude *x = xr_claude_new();
-	struct xr_chapters c = {0};
 	struct xr_scan *s;
 	struct xr_sink k;
-	char *buf = NULL;
-	size_t bl = 0, i, st = 1;
+	char *buf = NULL, *o;
+	size_t bl = 0, i, st;
+	int light = d[0] & 16, pass;
 	FILE *f;
 
-	if (!x)
-		return;
 	if (!(f = open_memstream(&buf, &bl)))
-	{
-		xr_claude_free(x);
 		return;
-	}
-	if (!(s = xr_scan_new(f, key, "fuzz", "", 0, 1, 0, 300, xr_now_ms())))
+	if (!(s = xr_scan_new(f, key, "fuzz", "", 0, !light, 0, 300,
+	                      xr_now_ms())))
 	{
 		fclose(f);
 		free(buf);
-		xr_claude_free(x);
 		return;
 	}
+	xr_scan_scope(s, d[0] & 8 ? 2 : 0);
 	if (xr_scan_first(s, "11111111-2222-4333-8444-555555555555",
 	                  XR_ISSUE, key) == 0)
 	{
-		xr_scan_sink(s, &k);
-		xr_claude_refs(x, &k, 0x1234, xr_scan_tick, s);
-		for (i = st; i <= n; i++)
-			if (i == n || d[i] == '\n')
-			{
-				char *l = i > st ? malloc(i - st + 1) : NULL;
+		for (pass = 0; pass < (d[0] & 8 ? 2 : 1); pass++)
+		{
+			struct xr_claude *x;
+			struct xr_chapters c = {0};
 
-				if (l)
+			if ((pass && xr_scan_next(s, "other", "q", 0, 0)) ||
+			    !(x = decoder()))
+				break;
+			xr_scan_sink(s, &k);
+			xr_claude_refs(x, &k, 0x1234, xr_scan_tick, s);
+			for (i = st = 1; i <= n; i++)
+				if (i == n || d[i] == '\n')
 				{
-					memcpy(l, d + st, i - st);
-					l[i - st] = '\0';
-					xr_claude_line(x, l, i - st, st, 0);
-					free(l);
+					char *l = i > st ? malloc(i - st + 1) : NULL;
+
+					if (l)
+					{
+						memcpy(l, d + st, i - st);
+						l[i - st] = '\0';
+						xr_claude_line(x, l, i - st, st, 0);
+						free(l);
+					}
+					st = i + 1;
 				}
-				st = i + 1;
-			}
-		xr_claude_end(x, 0x1234, &c);
-		xr_chapters_free(&c);
-		xr_scan_file(s, n, xr_claude_too_long(x), 0, 0);
+			xr_claude_end(x, 0x1234, &c);
+			xr_chapters_free(&c);
+			xr_scan_file(s, n, xr_claude_too_long(x), 0, 0);
+			xr_claude_free(x);
+		}
 		(void)xr_scan_done(s);
 	}
 	xr_scan_free(s);
-	xr_claude_free(x);
 	fclose(f);
 	if (bl && (buf[bl - 1] != '\n' || !strstr(buf, "{\"schema\":1,\"first\"")))
 		abort();
+	for (o = buf; light && o && (o = strstr(o, "\"session\":\"other\"")); o++)
+		if (!strncmp(o - 11, "\"mention\":{", 11) ||
+		    (!strncmp(o - 14, "\"definition\":{", 14) &&
+		     strstr(o, "\"passage\"") &&
+		     strstr(o, "\"passage\"") < strchr(o, '\n')))
+			abort();
 	free(buf);
 }
 
@@ -256,7 +289,7 @@ static void
 follow(const uint8_t *d, size_t n)
 {
 	FILE *tf = tmpfile(), *m = NULL;
-	struct xr_claude *one = xr_claude_new(), *inc = xr_claude_new();
+	struct xr_claude *one = decoder(), *inc = decoder();
 	struct xr_index *ix1 = xr_index_new(), *ix2 = xr_index_new();
 	struct xr_sent *s = xr_sent_new();
 	struct xr_sink k1, k2;
@@ -329,6 +362,63 @@ out:
 		fclose(tf);
 }
 
+/* A resolved block (#159): at most 14 lines, each of them, the title and
+** the subtitle valid UTF-8 and within their scalar caps. */
+static void
+check_res(const struct xr_resolved *r)
+{
+	const char *const t[2] = {r->title, r->subtitle};
+	int k;
+
+	if (r->nlines < 0 || r->nlines > XR_RES_LINES)
+		abort();
+	for (k = 0; k < r->nlines + 2; k++)
+	{
+		const char *l = k < 2 ? t[k] : r->line[k - 2];
+		size_t ln = strlen(l), sc = 0, i;
+
+		check_utf8(l, ln);
+		for (i = 0; i < ln; i++)
+			sc += ((unsigned char)l[i] & 0xc0) != 0x80;
+		if (sc > (k == 0 ? XR_TITLE_MAX : XR_RES_LINE))
+			abort();
+	}
+}
+
+/* s[0..n) (s[n] == '\0') as git's output, a file and a path */
+static void
+resolvers(const char *s, size_t n)
+{
+	static struct xr_resolved r;
+
+	memset(&r, 0, sizeof r);
+	if (xr_git_parse(s, n, (long long)n * 977, &r))
+		check_res(&r);
+	if (r.first)	/* a file's field only */
+		abort();
+	memset(&r, 0, sizeof r);
+	xr_file_lines(s, n, xr_ref_line(s), &r);
+	check_res(&r);
+	/* line[0]'s number: from 1, the window inside the file, the asked
+	** line in it when the file has that line */
+	{
+		long L = xr_ref_line(s), total = 0;
+		size_t i;
+
+		for (i = 0; i < n; i++)
+			total += s[i] == '\n';
+		total += n && s[n - 1] != '\n';
+		if (r.first < 1 || r.nlines != (total < XR_RES_LINES ? total
+		    : XR_RES_LINES) || r.first + r.nlines - 1 > total ||
+		    (L >= 1 && L <= total && (L < r.first ||
+		     L > r.first + r.nlines - 1)))
+			abort();
+	}
+	if (xr_ref_line(s) < 0 || xr_ref_line(s) > 9999999)
+		abort();
+	(void)xr_secret_name(s);
+}
+
 int
 LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 {
@@ -338,6 +428,7 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 	if (!n)
 		return 0;
 	memset(&t, 0, sizeof t);
+	cx = (d[0] & 3) == 1 && (d[0] & 32);
 	if ((d[0] & 3) == 0)
 	{
 		static const int modes[] = {XR_PROSE, XR_MD, XR_CODE, XR_PLAIN};
@@ -361,7 +452,9 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 			return 0;
 		memcpy(s, d + 1, n - 1);
 		s[n - 1] = '\0';
-		if (xr_ref_ok(s) && xr_ref_parse(s, "/w", &sp))
+		if (d[0] & 4)
+			resolvers(s, n - 1);
+		else if (xr_ref_ok(s) && xr_ref_parse(s, "/w", &sp))
 			check_key(&sp);
 		free(s);
 		return 0;
@@ -378,7 +471,7 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 	xr_index_sink(ix, &t.ix);
 	if ((d[0] & 3) == 1)
 	{
-		struct xr_claude *x = xr_claude_new();
+		struct xr_claude *x = decoder();
 		struct xr_chapters c = {0};
 		struct xr_sink k = {tee_hit, &t};
 		size_t i, s = 1;

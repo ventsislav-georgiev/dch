@@ -84,6 +84,23 @@ def wait_live(env, name, present, timeout=10.0):
     return False
 
 
+def wait_ended(env, name, timeout=10.0):
+    """-k unlinks the socket and returns; the master writes the record's end
+    later, at exit. Wait for it, so a --forget after is not undone."""
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            h = json.loads(run(env, "--history", "--json").stdout or "[]")
+        except ValueError:
+            h = []
+        # a not-live record whose end is not written yet reads "vanished"
+        if h and not any(r.get("name") == name and
+                         r.get("end") in (None, "", "vanished") for r in h):
+            return True
+        time.sleep(0.2)
+    return False
+
+
 def new_attached(env, name):
     """`dch -n name /bin/sh` on a pty, detached once the session is up."""
     pid, fd = pty.fork()
@@ -204,6 +221,7 @@ def one_mode(mode):
               ok and wait_live(env, a, True), s)
         run(env, "-k", a)
         wait_live(env, a, False)
+    wait_ended(env, a)
     r = run(env, "--forget", a, "--json")
     h = run(env, "--history", "--json").stdout
     check(t + "--forget proj:a", r.returncode == 0 and

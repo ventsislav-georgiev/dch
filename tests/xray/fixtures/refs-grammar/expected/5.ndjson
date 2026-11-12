@@ -2,4 +2,5 @@
 {"schema":1,"mention":{"session":"gram","chapter":"f*:0","at":1794304804,"line":"https://github.com/o/r/pull/7 and https://github.com/o/r/issues/8, https://github.com/o/r/commit/abc1234def and (https://example.com/a_(b)) and https://github.com/o/r/pull/7/files.","offset":595,"live":false,"project":"-home-demo-proj"}}
 {"schema":1,"mention":{"session":"gram","chapter":"f*:0","at":1794304806,"line":"abc1234 and deadbeef00 and 1234567 and abcdefa and #abc1234 and -abc1234 and abc1234-x and ABC1234","offset":1165,"live":false,"project":"-home-demo-proj"}}
 {"schema":1,"tally":{"session":"gram","live":false,"project":"-home-demo-proj","count":2,"definitions":0,"partial":false,"mentions_dropped":0}}
+{"schema":1,"resolved":{"kind":"commit","state":"ended","title":"Session ended","subtitle":"abc1234","lines":[]}}
 {"schema":1,"done":true,"partial":false,"counts":{"session":2,"project":0,"project_sessions":0,"all":null,"all_sessions":null},"why":null,"files":1,"bytes":2799,"lines_too_long":0}

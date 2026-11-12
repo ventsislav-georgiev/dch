@@ -10,7 +10,9 @@ query, none for a shell, a clear or a refused lookup; nothing written), and
 the INFO-2 name rule on every create path dch runs locally, and refs (#135):
 the index freed with its query (K3), --ref's budget stop, nothing written,
 SIGTERM and EPIPE as a cancel, and the 16 MB budget at the index's caps,
-and the primary screen (#140): read with the ring, never the alt buffer.
+and the primary screen (#140): read with the ring, never the alt buffer, and
+--chapter (#156): a live and a History Claude chapter and a live shell's,
+the value rules, stale anchors, the 6000/3000 caps and the 1 MiB cap.
 
 Run:  python3 tests/xray_cli_test.py          (uses ./dch; run.sh isolates)
 """
@@ -681,6 +683,18 @@ def test_claude():
         check("claude: the agent UUID answers the same session",
               rc == 0 and o2 and o2["session"] == n and
               o2["chapters"] == o["chapters"], o2)
+        # --chapter on a live Claude (3.5, #156): one seam open, no write
+        open(trace, "w").close()
+        rc, c, err, _ = chapter(n, o["chapters"][1]["anchor"], env=dbg)
+        tr = open(trace).read()
+        check("chapter: a live Claude's chapter, from the transcript",
+              rc == 0 and c and c["session"] == n and
+              c["session_id"] == sid and c["title"] == "second ask" and
+              c["entries"] == [ent("user", "second ask"),
+                               ent("assistant", "ok")], (rc, c, err))
+        check("chapter: one seam open, no transcript text traced",
+              tr.count("xray seam: open") == 1 and "second ask" not in tr,
+              tr[-400:])
         wait_for(lambda: "Claude Code" in screen(n), 10)
         scr0 = screen(n)
         rec0 = dch("--read", n, "--recent", "1000").stdout
@@ -852,6 +866,26 @@ def test_claude():
                   [c["title"] for c in o["chapters"][1:]] == [
                       "".join(op(k) for k in range(6))[:120]] * 3,
                   (rc, dt, o and o["chapters"][:2], err))
+        # #155: a live Claude as <n>, --scope project: its own transcript
+        # (live), then a History session of its project dir
+        put([{"type": "user", "message": {"content": "see #941"}}])
+        osid = "33333333-4444-4555-8666-777777777777"
+        with open(os.path.join(pdir, osid + ".jsonl"), "w") as f:
+            f.write(json.dumps({"type": "user", "cwd": proj, "message": {
+                "content": "older #941"}}) + "\n")
+        history("xc-cl-old", osid, os.path.join(HOME, ".claude"),
+                os.path.realpath(proj))
+        open(trace, "w").close()
+        r = dch("--xray", n, "--ref", "#941", "--scope", "project", "--full",
+                "--json", env=dbg)
+        ls = ref_lines(r.stdout) or [{}]
+        tl = [(l["tally"]["session"], l["tally"]["live"]) for l in ls
+              if "tally" in l]
+        check("scope: a live Claude <n>, then its project's History session",
+              r.returncode == 0 and tl == [(n, True), ("xc-cl-old", False)]
+              and ls[-1]["counts"]["project"] == 1 and
+              open(trace).read().count("xray seam: open") == 2,
+              (tl, r.stdout[-400:], r.stderr))
     finally:
         dch("-k", n, env=env)
 
@@ -1383,7 +1417,9 @@ def test_write_fail():
         forms = [("--json", ["xr-wf", "--json"]),
                  ("--ref", ["xr-wf", "--ref", "#831", "--scope", "session",
                             "--full", "--json"]),
-                 ("--clear", [n, "--clear", "--json"])]
+                 ("--clear", [n, "--clear", "--json"]),
+                 ("--chapter", ["xr-wf", "--chapter", "f%x:0" %
+                                os.stat(tp).st_ino, "--json"])]
         for what, a in forms:
             rc, err = to_fd([DCH, "--xray"] + a, "epipe")
             check("write fail: %s into a closed pipe: exit 0, silent" % what,
@@ -1392,12 +1428,239 @@ def test_write_fail():
             check("write fail: %s on a read-only stdout: exit 3, the "
                   "failure line" % what, rc == 3 and
                   err == "dch: X-ray failed on this session\n", (rc, err))
-        r = dch("--xray", "xr-wf", "--chapter", "1")
-        check("write fail: --chapter is not in XR2a (exit 2)",
-              r.returncode == 2, r.stderr)
     finally:
         dch("-k", n)
         os.unlink(tp)
+
+
+# ---- 3.5: --chapter <anchor> --json (#156, XR3b) --------------------------
+
+def chapter(n, anchor, env=None):
+    r = dch("--xray", n, "--chapter", anchor, "--json", env=env)
+    try:
+        return r.returncode, json.loads(r.stdout), r.stderr, r.stdout
+    except ValueError:
+        return r.returncode, None, r.stderr, r.stdout
+
+
+def ent(role, text, tool=None, error=False):
+    return {"role": role, "tool": tool, "text": text, "error": error}
+
+
+def test_chapter():
+    """A History Claude chapter's entries, the value rules, mutual
+    exclusion, stale anchors (K14.2, K14.3), the 6000/3000 caps and the
+    1 MiB cap (K14.4), an ended shell (no corpus), nothing written."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, RSID + ".jsonl")
+
+    def put(lines):
+        with open(tp, "w") as f:
+            for o in lines:
+                f.write(json.dumps(o) + "\n")
+
+    def use(id, name, inp):
+        return {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": id, "name": name, "input": inp}]}}
+
+    def res(id, out, err=False):
+        return {"type": "user", "toolUseResult": {"stdout": out},
+                "message": {"content": [{"type": "tool_result",
+                                         "tool_use_id": id, "is_error": err,
+                                         "content": out}]}}
+    put([{"type": "user", "cwd": "/home/demo/proj",
+          "timestamp": "2026-11-10T10:00:00Z",
+          "message": {"content": "first ask"}},
+         {"type": "assistant", "message": {"content": [
+             {"type": "text", "text": "one"}]}},
+         use("b1", "Bash", {"command": "ls -la"}), res("b1", "a\nb"),
+         {"type": "user", "timestamp": "2026-11-10T10:01:00Z",
+          "message": {"content": "second \u0007ask"}},
+         use("e1", "Edit", {"file_path": "/home/demo/proj/x.c",
+                            "old_string": "a", "new_string": "b"}),
+         res("e1", "boom", True),
+         {"type": "assistant", "message": {"content": [
+             {"type": "text", "text": "done"}]}}])
+    history("xr-ch", RSID, cfg)
+    rc, o, err = xray("xr-ch", "--json")
+    ch = (o or {}).get("chapters", [])
+    check("chapter: the index has two chapters", rc == 0 and len(ch) == 2,
+          (rc, o, err))
+    if len(ch) != 2:
+        return
+    before = files(T)
+    rc, c, err, out = chapter("xr-ch", ch[1]["anchor"])
+    check("chapter: History Claude: one object, its keys in order",
+          rc == 0 and c and list(c) == ["schema", "session", "session_id",
+                                        "anchor", "title", "at", "kind",
+                                        "entries", "truncated"] and
+          c["schema"] == 1 and c["session"] == "xr-ch" and
+          c["session_id"] == RSID and c["anchor"] == ch[1]["anchor"] and
+          c["title"] == ch[1]["title"] and c["at"] == ch[1]["at"] and
+          c["kind"] == ch[1]["kind"] and c["truncated"] is False and
+          out.endswith("}\n") and out.count("\n") == 1, (rc, out, err))
+    check("chapter: its entries: the prompt, the call, its error, the text",
+          c and c["entries"] == [
+              ent("user", "second \u0007ask"),
+              ent("tool", "/home/demo/proj/x.c", "Edit"),
+              ent("output", "boom", "Edit", True),
+              ent("assistant", "done")], c and c["entries"])
+    check("chapter: text escaped like --ls-json (K14.5: BEL as \\u0007)",
+          "second \\u0007ask" in out, out[:300])
+    rc, c, _, _ = chapter("xr-ch", ch[0]["anchor"])
+    check("chapter: the first chapter: a Bash call is its command",
+          rc == 0 and c and c["entries"] == [
+              ent("user", "first ask"), ent("assistant", "one"),
+              ent("tool", "ls -la", "Bash"), ent("output", "a\nb", "Bash")],
+          c and c["entries"])
+    new = sorted(set(files(T)) - set(before))
+    check("chapter: nothing written", not new, new)
+
+    # stale anchors (K14.2, K14.3, mutant 10): no seek on the anchor's say
+    ino, off = ch[1]["anchor"][1:].split(":")
+    for bad in ("f%s:%d" % (ino, int(off) + 1), "f%s:%d" % (ino, int(off) - 1),
+                "f%s:0%s" % (ino, off), "f%x:%s" % (int(ino, 16) + 1, off),
+                "F%s:%s" % (ino, off), "s1", "x", "f" + "1" * 127):
+        rc, c, err, out = chapter("xr-ch", bad)
+        check("chapter: %r exits 1 chapter gone" % bad[:40], rc == 1 and
+              err == "dch: chapter gone\n" and out == "", (rc, err, out))
+    put([{"type": "user", "message": {"content": "first ask"}}])
+    rc, c, err, _ = chapter("xr-ch", ch[1]["anchor"])
+    check("chapter: a rewritten transcript (new inode): chapter gone",
+          rc == 1 and err == "dch: chapter gone\n", (rc, err))
+
+    # the value rules, mutual exclusion, --json (3.1)
+    for bad in ("", "a b", "a/b", "é", "a" * 129, "-", "a\n"):
+        r = dch("--xray", "xr-ch", "--chapter", bad, "--json")
+        ok = bad == "-"
+        check("chapter: %r: %s" % (bad[:20], "an anchor (gone)" if ok else
+                                   "exit 2 bad anchor"),
+              (r.returncode, r.stderr) == ((1, "dch: chapter gone\n") if ok
+                                           else (2, "dch: bad anchor\n")),
+              (r.returncode, r.stderr))
+    r = dch("--xray", "xr-ch", "--chapter", "a" * 128, "--json")
+    check("chapter: 128 bytes is an anchor", r.returncode == 1 and
+          r.stderr == "dch: chapter gone\n", (r.returncode, r.stderr))
+    for a, msg in ((["--ref", "#1"], "--chapter and --ref"),
+                   (["--clear"], "--chapter and --clear"),
+                   (["--follow"], "--chapter and --follow")):
+        r = dch("--xray", "xr-ch", "--chapter", "s1", "--json", *a)
+        check("chapter: with %s: exit 2" % a[0], r.returncode == 2 and
+              r.stderr == "dch: bad usage: %s\n" % msg and not r.stdout,
+              (r.returncode, r.stderr))
+    for a, e in ((["--chapter", "s1"], "dch: bad usage: --json is required "
+                  "(the --xray view comes later)\n"),
+                 (["--chapter"], "dch: bad usage: --chapter needs a value\n"),
+                 (["--chapter", "s1", "--chapter", "s2", "--json"],
+                  "dch: bad usage: --chapter twice\n"),
+                 (["--chapter", "s1", "--scope", "session", "--json"],
+                  "dch: bad usage: --scope, --full and --budget-ms come with "
+                  "--ref\n")):
+        r = dch("--xray", "xr-ch", *a)
+        check("chapter: %s: exit 2" % " ".join(a)[:50], r.returncode == 2 and
+              r.stderr == e, (r.returncode, r.stderr))
+    r = dch("--xray", "nope-ch", "--chapter", "s1", "--json")
+    check("chapter: no such session (exit 1)", r.returncode == 1 and
+          r.stderr == "dch: no such session\n", (r.returncode, r.stderr))
+    r = dch("--xray", "bad/name", "--chapter", "a b", "--json")
+    check("chapter: a bad session is told before a bad anchor",
+          r.returncode == 2 and r.stderr == "dch: bad session\n", r.stderr)
+
+    # the scalar caps (v2.1 3.1: 6000 and 3000) and the 1 MiB cap (K14.4)
+    put([{"type": "user", "cwd": "/home/demo/proj",
+          "message": {"content": "é" * 7000}},
+         use("b1", "Bash", {"command": "é" * 7000}),
+         res("b1", "é" * 4000),
+         {"type": "assistant", "message": {"content": [
+             {"type": "text", "text": "é" * 7000}]}}])
+    rc, o, _ = xray("xr-ch", "--json")
+    rc, c, err, _ = chapter("xr-ch", o["chapters"][0]["anchor"])
+    check("chapter: text clipped in scalars: 6000 (prompt, call, reply), "
+          "3000 (output)", rc == 0 and c and [len(e["text"]) for e in
+                                              c["entries"]] ==
+          [6000, 6000, 3000, 6000] and
+          all(set(e["text"]) == {"é"} for e in c["entries"]),
+          (rc, err, c and [len(e["text"]) for e in c["entries"]]))
+    out = "\u0001" * 3000    # 18000 escaped bytes an entry
+    put([{"type": "user", "cwd": "/home/demo/proj",
+          "message": {"content": "big"}}] +
+        [x for i in range(100) for x in (use("c%d" % i, "Bash",
+                                             {"command": "c%d" % i}),
+                                         res("c%d" % i, out))] +
+        [{"type": "user", "message": {"content": "next"}}])
+    rc, o, _ = xray("xr-ch", "--json")
+    r = dch("--xray", "xr-ch", "--chapter", o["chapters"][0]["anchor"],
+            "--json")
+    try:
+        c = json.loads(r.stdout)
+    except ValueError:
+        c = None
+    n = len(r.stdout.encode())
+    check("chapter: 100 x 18 KB escaped outputs: cut at 1 MiB, truncated "
+          "(%d bytes, %d entries)" % (n, len((c or {}).get("entries", []))),
+          r.returncode == 0 and c and c["truncated"] is True and
+          n <= 1 << 20 and n > (1 << 20) - 20000 and
+          c["entries"][-1]["role"] in ("tool", "output") and
+          all(e["text"] == out for e in c["entries"]
+              if e["role"] == "output"), (r.returncode, r.stderr, n))
+
+    # an ended shell has no corpus (3.5)
+    r = dch("--spawn", "xc-chend", "sh", "-c", "echo UP; sleep 60")
+    wait_for(lambda: "UP" in screen("xc-chend"), 5)
+    dch("-k", "xc-chend")
+    wait_for(lambda: not os.path.exists(sock("xc-chend")), 5)
+    rc, c, err, out = chapter("xc-chend.json", "s1")
+    check("chapter: an ended shell: exit 1 no x-ray corpus", rc == 1 and
+          err == "dch: no x-ray corpus\n" and out == "", (rc, err))
+    os.unlink(tp)
+    rc, c, err, out = chapter("xr-ch", "s1")
+    check("chapter: a History Claude with no transcript: no x-ray corpus",
+          rc == 1 and err == "dch: no x-ray corpus\n", (rc, err))
+
+
+def test_chapter_shell():
+    """A live shell chapter: one tool entry (the typed command), one output
+    entry (C..D, WRAP-joined, error from D's exit); a stale seq and a
+    cleared ring are chapter gone."""
+    n = "xc-chs"
+    prog = ("while :; do printf '\\033]133;A\\007$ \\033]133;B\\007'; "
+            "read -r cmd || exit; printf '\\033]133;C\\007'; eval \"$cmd\"; "
+            "printf '\\033]133;D;%d\\007' $?; done")
+    try:
+        r = dch("--spawn", n, "--size", "80x24", "sh", "-c", prog)
+        check("chapter shell: spawned", r.returncode == 0, r.stderr)
+        wait_for(lambda: "$" in screen(n), 5)
+        dch("--send", n, "echo ran; printf '%0100d\\n' 7; false\n")
+        time.sleep(0.3)
+        dch("--send", n, "seq 1 40\n")
+        wait_for(lambda: "40" in screen(n), 5)
+        time.sleep(0.3)
+        rc, o, err = xray(n, "--json")
+        ch = (o or {}).get("chapters", [])
+        check("chapter shell: two chapters", rc == 0 and len(ch) == 2,
+              (rc, o, err))
+        if len(ch) != 2:
+            return
+        rc, c, err, out = chapter(n, ch[0]["anchor"])
+        check("chapter shell: the typed command, then its rows joined "
+              "across the wrap, error from D 1", rc == 0 and c and
+              c["session"] == n and c["session_id"] == o["session_id"] and
+              c["anchor"] == ch[0]["anchor"] and c["kind"] == "command" and
+              c["truncated"] is False and c["entries"] == [
+                  ent("tool", "echo ran; printf '%0100d\\n' 7; false"),
+                  ent("output", "ran\n" + "0" * 99 + "7", error=True)],
+              (rc, out, err))
+        rc, c, err, out = chapter(n, "s999999")
+        check("chapter shell: an unknown seq is chapter gone", rc == 1 and
+              err == "dch: chapter gone\n", (rc, err))
+        dch("--xray", n, "--clear", "--json")
+        rc, c, err, out = chapter(n, ch[0]["anchor"])
+        check("chapter shell: after a clear the anchor is gone", rc == 1 and
+              err == "dch: chapter gone\n", (rc, err))
+    finally:
+        dch("-k", n)
 
 
 # ---- 3.4: SIGTERM and EPIPE cancel a --ref (FROZEN l.464, l.635) ---------
@@ -1748,14 +2011,18 @@ def test_follow_claude():
         dch("-k", n)
 
 
-def test_follow_agent():
-    """A shell's follower across an agent's start and exit. The start: the
-    ring pauses on the master's agent tick (vt.c appends a GAP record, so
-    the wake fires), and the stream sends reset rotated, then a snapshot of
-    corpus claude. The exit, on an idle shell (no row pushed): the resume
-    appends no record but moves the ring's gen (ring_touch), so the wake
-    fires; reset rotated, then a snapshot of corpus shell."""
-    n = "xc-fa"
+def test_follow_agent(off=False):
+    """A shell's follower across an agent's start and exit, on the default
+    60 s record tick: while a follower is subscribed the master probes for
+    an agent every second and wakes it on a change, ring or no ring. The
+    start: reset rotated, then a snapshot of corpus claude. The exit, on an
+    idle shell (no row pushed): reset rotated, then a snapshot of corpus
+    shell (none with xray_ring 0). Each within 10 s: the probe is 1 s,
+    the bound leaves room for a loaded runner."""
+    n = "xc-fa" + ("o" if off else "")
+    tag = "follow agent%s: " % (" (xray_ring 0)" if off else "")
+    base = "none" if off else "shell"
+    cfg = ENV["DCH_CONFIG"]
     bindir = os.path.join(T, "bin-fa")
     fdir = os.path.join(T, "fake-fa")
     proj = os.path.join(T, "faproj")
@@ -1765,22 +2032,27 @@ def test_follow_agent():
                 os.path.join(bindir, "claude"))
     os.chmod(os.path.join(bindir, "claude"), 0o755)
     env = dict(ENV, PATH=bindir + ":" + ENV.get("PATH", "/usr/bin:/bin"),
-               FAKE_CLAUDE_DIR=fdir, DCH_RECORD_MS="1000")
+               FAKE_CLAUDE_DIR=fdir)
+    env.pop("DCH_RECORD_MS", None)
+    if off:
+        with open(cfg, "w") as f:
+            f.write("xray_ring = 0\n")
     sdir = os.path.join(HOME, ".claude", "sessions")
     had = set(os.listdir(sdir)) if os.path.isdir(sdir) else set()
     r = subprocess.run([DCH, "--spawn", n, "--size", "80x24", "--cwd", proj,
                         "sh"], capture_output=True, text=True, timeout=30,
                        env=env)
-    check("follow agent: shell spawned", r.returncode == 0, r.stderr)
+    check(tag + "shell spawned", r.returncode == 0, r.stderr)
     fl = None
     try:
         wait_for(lambda: "$" in screen(n) or "#" in screen(n), 5)
         fl = Follow(n)
         s0 = fl.wait(lambda o: "snapshot" in o)
-        check("follow agent: the first snapshot is corpus shell",
-              s0 and s0[0]["snapshot"]["corpus"] == "shell", fl.objs())
+        check(tag + "the first snapshot is corpus " + base,
+              s0 and s0[0]["snapshot"]["corpus"] == base, fl.objs())
 
         k0 = len(fl.got)
+        t0 = time.time()
         dch("--send", n, "claude\r", env=env)
         rec = wait_for(lambda: [f for f in os.listdir(sdir)
                                 if f.endswith(".json") and f not in had]
@@ -1799,29 +2071,32 @@ def test_follow_agent():
                       if is_reset("rotated")(o)), None)
             return ob[i + 1] if i is not None and i + 1 < len(ob) else None
         wait_for(lambda: rotated_then(k0), 15)
+        secs = time.time() - t0
         nxt = rotated_then(k0)
-        check("follow agent: the agent's start sends reset rotated, then a "
-              "snapshot of corpus claude",
+        check(tag + "the agent's start sends reset rotated, then a "
+              "snapshot of corpus claude (%.1f s)" % secs,
               nxt is not None and "snapshot" in nxt and
-              nxt["snapshot"]["corpus"] == "claude", fl.objs(k0))
+              nxt["snapshot"]["corpus"] == "claude" and secs < 10,
+              fl.objs(k0))
         k1 = len(fl.got)
         t1 = time.time()
         dch("--send", n, "/exit\r", env=env)
-        # the tick is 1 s (DCH_RECORD_MS): the resume lands within ~2 s
-        wait_for(lambda: rotated_then(k1), 5)
+        wait_for(lambda: rotated_then(k1), 15)
         secs = time.time() - t1
         nxt = rotated_then(k1)
-        check("follow agent: the agent's exit on an idle shell sends reset "
-              "rotated, then a snapshot of corpus shell (%.1f s)" % secs,
+        check(tag + "the agent's exit on an idle shell sends reset "
+              "rotated, then a snapshot of corpus %s (%.1f s)" % (base, secs),
               nxt is not None and "snapshot" in nxt and
-              nxt["snapshot"]["corpus"] == "shell" and secs < 5,
+              nxt["snapshot"]["corpus"] == base and secs < 10,
               fl.objs(k1))
     finally:
         dch("-k", n)
+        if off and os.path.exists(cfg):
+            os.unlink(cfg)
         if fl:
             wait_for(lambda: fl.p.poll() is not None, 5)
             rc = fl.stop()
-            check("follow agent: the session's end exits 0", rc == 0,
+            check(tag + "the session's end exits 0", rc == 0,
                   (rc, fl.p.stderr.read() if fl.p.stderr else ""))
 
 def test_follow_history():
@@ -2342,6 +2617,155 @@ def test_screen():
         dch("-k", n)
 
 
+# ---- --ref across sessions (#155, XR3a): scope, order, the 3.8 caps -------
+
+def test_scope():
+    """A store of its own: <n>, Claude sessions in its project dir and in
+    another, an unmapped transcript beside them. The seam counts exactly the
+    mapped files a scope reads; 65 files scan 64; the bytes, time and
+    per-file range caps stop with their why; light stops at its budget across
+    files; nothing is written."""
+    S = os.path.join(T, "scope")
+    home = os.path.join(S, "home")
+    cfg = os.path.join(home, ".claude")
+    sockdir = os.path.join(S, "dch-%d" % os.getuid())
+    hdir = os.path.join(S, "state", "dch", "sessions",
+                        sockdir.replace("/", "-"))
+    for d in (home, hdir):
+        os.makedirs(d)
+    env = dict(ENV, XDG_RUNTIME_DIR=S, XDG_STATE_HOME=os.path.join(S, "state"),
+               HOME=home)
+    trace = os.path.join(T, "trace-scope")
+    dbg = dict(env, DCH_DEBUG=trace)
+    sid = lambda k: "22222222-3333-4444-8555-%012d" % k
+
+    def put(k, cwd, lines, updated):
+        pdir = os.path.join(cfg, "projects", key(cwd))
+        os.makedirs(pdir, exist_ok=True)
+        with open(os.path.join(pdir, sid(k) + ".jsonl"), "w") as f:
+            f.write("".join(json.dumps({"type": "user", "cwd": cwd,
+                                        "message": {"content": t}}) + "\n"
+                            for t in lines))
+        if updated is None:
+            return              # unmapped: a file with no record
+        rec = {"name": "s%d" % k, "cwd": cwd, "end": "exited",
+               "argv": ["claude"], "started": 1794299400,
+               "updated": updated, "ended": updated, "sock_dir": sockdir,
+               "agent": {"session_id": sid(k), "cwd": cwd,
+                         "config_dir": cfg}}
+        with open(os.path.join(hdir, "s%d.json" % k), "w") as f:
+            f.write(json.dumps(rec) + "\n")
+
+    def ref(*a, env=dbg):
+        open(trace, "w").close()
+        r = dch("--xray", "s0", "--ref", *a, "--json", env=env)
+        ls = ref_lines(r.stdout) or [{}]
+        tr = open(trace).read()
+        return (r.returncode, ls, tr.count("xray seam: open"),
+                [l["tally"]["session"] for l in ls if "tally" in l], r.stderr)
+
+    P, O = "/home/demo/scope", "/home/demo/elsewhere"
+    put(0, P, ["mine #931"], 1794300000)
+    put(1, P, ["older #931"], 1794300010)
+    put(2, P, ["newer #931", "again #931"], 1794300020)
+    put(3, O, ["far #931"], 1794300030)
+    put(4, P, ["unmapped #931"], None)
+    rc, ls, opens, order, err = ref("#931", "--scope", "project", "--full")
+    d = ls[-1]
+    check("scope: project reads <n>, then its dir newest first; the seam "
+          "opens exactly those 3 files",
+          rc == 0 and order == ["s0", "s2", "s1"] and opens == 3 and
+          d.get("counts") == {"session": 1, "project": 3,
+                              "project_sessions": 2, "all": None,
+                              "all_sessions": None} and not d["partial"],
+          (rc, order, opens, d, err))
+    rc, ls, opens, order, err = ref("#931", "--scope", "all", "--full")
+    d = ls[-1]
+    check("scope: all adds the other dir after; still never the unmapped "
+          "file (4 opens)",
+          rc == 0 and order == ["s0", "s2", "s1", "s3"] and opens == 4 and
+          d["counts"]["all"] == 1 and d["counts"]["all_sessions"] == 1,
+          (rc, order, opens, d, err))
+    rc, ls, opens, order, err = ref("#931", "--full")
+    check("scope: no --scope is project (a remote caller's default too: "
+          "all only when passed)",
+          rc == 0 and ls[0]["first"]["scope"] == "project" and
+          order == ["s0", "s2", "s1"] and opens == 3, (order, opens, err))
+    rc, ls, opens, order, err = ref("#931", "--scope", "session", "--full")
+    check("scope: session stops after <n> (1 open)",
+          rc == 0 and order == ["s0"] and opens == 1, (order, opens))
+    rc, o, err = xray("s0", "--json", env=env)
+    check("scope: other_projects counts the mapped session in the other "
+          "dir, from names only", rc == 0 and o and o["other_projects"] == 1,
+          (o and o.get("other_projects"), err))
+
+    # the per-file range of another session's file (3.8: head + newest),
+    # lowered by DCH_XRAY_CAPS: a mention in the head and the tail found,
+    # the one between not
+    pad = ["x" * 900] * 40
+    put(5, O, ["head #932"] + pad + ["middle #932"] + pad + ["tail #932"],
+        1794300040)
+    rc, ls, opens, order, err = ref("#932", "--scope", "all", "--full",
+                                    env=dict(dbg, DCH_XRAY_CAPS=
+                                             "0:0:0:4096:8192"))
+    t5 = [l["tally"] for l in ls if "tally" in l and
+          l["tally"]["session"] == "s5"]
+    lines = [l["mention"]["line"] for l in ls if "mention" in l]
+    check("caps: the per-file range finds the head and the tail, not the "
+          "middle; tally partial, done why range",
+          rc == 0 and t5 and t5[0]["count"] == 2 and t5[0]["partial"] and
+          lines == ["head #932", "tail #932"] and ls[-1]["partial"] and
+          ls[-1]["why"] == "range", (t5, lines, ls[-1], err))
+    rc, ls, opens, order, err = ref("#932", "--scope", "all", "--full",
+                                    env=dict(dbg, DCH_XRAY_CAPS="0:1000"))
+    check("caps: the bytes cap stops the scan before the next file, why "
+          "bytes", rc == 0 and ls[-1]["partial"] and
+          ls[-1]["why"] == "bytes" and opens < 5 and
+          ls[-1]["bytes"] < 2000, (opens, ls[-1], err))
+    rc, ls, opens, order, err = ref("#932", "--scope", "all", "--full",
+                                    env=dict(dbg, DCH_XRAY_CAPS="0:0:1"))
+    check("caps: the wall-time cap stops it, why time",
+          rc == 0 and ls[-1]["partial"] and ls[-1]["why"] == "time",
+          (ls[-1], err))
+    os.unlink(os.path.join(hdir, "s5.json"))
+
+    # 65 files scan 64 (3.8, 9.5); light over 1 MB files stops at its budget
+    big = "".join(json.dumps({"type": "user", "cwd": P, "message": {
+        "content": "pad " + "y" * 1000}}) + "\n" for _ in range(1000))
+    for k in range(10, 71):
+        put(k, P, ["#931 in %d" % k], 1794300100 + k)
+        with open(os.path.join(cfg, "projects", key(P), sid(k) + ".jsonl"),
+                  "a") as f:
+            f.write(big)
+    before = files(S)
+    rc, ls, opens, order, err = ref("#931", "--scope", "all", "--full")
+    d = ls[-1]
+    check("caps: 65 files scan 64, why files, the newest first",
+          rc == 0 and opens == 64 and d["files"] == 64 and d["partial"] and
+          d["why"] == "files" and order[:3] == ["s0", "s70", "s69"] and
+          "s3" not in order, (opens, d, order[:4], err))
+    t0 = time.time()
+    # untraced: DCH_DEBUG's lines cost more than the 50 ms budget
+    rc, ls, opens, order, err = ref("#933", "--scope", "all",
+                                    "--budget-ms", "50", env=env)
+    d = ls[-1]
+    check("caps: light stops at its budget across files (%d files, %.2fs)"
+          % (d.get("files", -1), time.time() - t0),
+          rc == 0 and d.get("why") == "budget" and d["partial"] and
+          d["files"] < 64, (d, err))
+    rc, ls, opens, order, err = ref("#931", "--scope", "all")
+    d = ls[-1]
+    check("light: stops at the first other session's result, titles and "
+          "counts only for it",
+          rc == 0 and d["why"] == "first" and order == ["s0", "s70"] and
+          not any("mention" in l and l["mention"]["session"] != "s0"
+                  for l in ls), (order, d, err))
+    after = files(S)
+    check("scope: nothing written by a full and a light --scope all "
+          "(names, sizes, mtimes)", after == before,
+          sorted(set(after.items()) ^ set(before.items()))[:6])
+
+
 def main():
     try:
         test_names()
@@ -2358,6 +2782,8 @@ def main():
         test_refs()
         test_d2_whole()
         test_write_fail()
+        test_chapter()
+        test_chapter_shell()
         test_cancel()
         test_claude_caps()
         test_shell_caps()
@@ -2366,9 +2792,11 @@ def main():
         test_follow_cap()
         test_follow_shell()
         test_follow_agent()
+        test_follow_agent(off=True)
         test_screen()
         test_ref_shell_caps()
         test_ref_shell_tick()
+        test_scope()
     finally:
         shutil.rmtree(T, ignore_errors=True)
     if fails[0]:

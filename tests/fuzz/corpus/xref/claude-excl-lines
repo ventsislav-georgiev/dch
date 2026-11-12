@@ -1,0 +1,27 @@
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": "go"}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b0", "name": "Bash", "input": {"command": "echo x\nrg 831"}}]}}
+{"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "b0", "is_error": false, "content": "# #800 t\nbody"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b1", "name": "Bash", "input": {"command": "cd /etc\ncat notes.md"}}]}}
+{"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "b1", "is_error": false, "content": "# #801 t\nbody"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b2", "name": "Bash", "input": {"command": "/usr/bin/env rg x"}}]}}
+{"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "b2", "is_error": false, "content": "# #802 t\nbody"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b3", "name": "Bash", "input": {"command": "timeout -s KILL 5 cat ../x"}}]}}
+{"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "b3", "is_error": false, "content": "# #803 t\nbody"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b4", "name": "Bash", "input": {"command": "eval 'cd /etc; cat n.md'"}}]}}
+{"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "b4", "is_error": false, "content": "# #804 t\nbody"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b5", "name": "Bash", "input": {"command": "watch -n 1 git diff"}}]}}
+{"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "b5", "is_error": false, "content": "# #805 t\nbody"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b6", "name": "Bash", "input": {"command": "env -S 'rg x'"}}]}}
+{"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "b6", "is_error": false, "content": "# #806 t\nbody"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b7", "name": "Bash", "input": {"command": "{ cat ../x; }"}}]}}
+{"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "b7", "is_error": false, "content": "# #807 t\nbody"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b8", "name": "Bash", "input": {"command": "echo \"$(cat ../x)\" `rg y`"}}]}}
+{"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "b8", "is_error": false, "content": "# #808 t\nbody"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b9", "name": "Bash", "input": {"command": "pushd /etc >/dev/null\ncat n.md"}}]}}
+{"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "b9", "is_error": false, "content": "# #809 t\nbody"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b10", "name": "Bash", "input": {"command": "gh pr create --title Fix --body \"$(cat <<'EOF'\n## Summary\nrg x\nEOF\n)\""}}]}}
+{"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "b10", "is_error": false, "content": "# #810 t\nbody"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b11", "name": "Bash", "input": {"command": "cat <<-EOF | rg x\n\tbody\n\tEOF\nls"}}]}}
+{"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "b11", "is_error": false, "content": "# #811 t\nbody"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b12", "name": "Bash", "input": {"command": "cd /x && \\\n  cat n.md"}}]}}
+{"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "b12", "is_error": false, "content": "# #812 t\nbody"}]}}

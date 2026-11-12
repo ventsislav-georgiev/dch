@@ -1,1 +1,1 @@
-{"schema":1,"exit":2,"stderr":"dch: bad usage: --chapter is not an --xray flag of this dch"}
+{"schema":1,"exit":1,"stderr":"dch: no x-ray corpus"}

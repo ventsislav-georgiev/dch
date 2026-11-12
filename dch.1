@@ -102,11 +102,22 @@ dch \- detachable terminal sessions with a headless agent API
 .I name
 .B \-\-ref
 .I ref
-.B \-\-scope session
+.RB [ \-\-scope
+.BR session | project | all ]
 .RB [ \-\-full ]
 .RB [ \-\-budget\-ms
 .IR ms ]
 .B \-\-json
+.br
+.B dch \-\-xray
+.I name
+.B \-\-chapter
+.I anchor
+.B \-\-json
+.br
+.B dch \-\-xray
+.IB host : name
+.B \-\-requests \-\-json
 .br
 .B dch
 .RB [ \-\-host
@@ -723,7 +734,7 @@ X\-ray: print one JSON object
 .RB ( schema:1 )
 about session
 .IR name :
-its corpus (\fBclaude\fR, \fBshell\fR or \fBnone\fR, with a
+its corpus (\fBclaude\fR, \fBcodex\fR, \fBshell\fR or \fBnone\fR, with a
 .BR reason :
 .BR ended ,
 .B lite
@@ -745,7 +756,12 @@ or
 .BR compact ),
 .B partial
 and
-.BR error .
+.BR error ;
+.B other_projects
+counts the other sessions with a transcript in another project directory
+(what
+.B \-\-scope all
+would add; from names only, nothing opened).
 .B refs
 lists the issues, pull requests, tickets, commits, files and URLs the corpus
 mentions (at most 2000 keys), each with
@@ -768,9 +784,23 @@ then
 light by default (stops at the first result or after
 .B \-\-budget\-ms
 .IR ms ,
-50 to 300, default 300),
+50 to 300, default 300, across all files; with
+.B \-\-scope project
+or
+.B all
+only another session's result stops it, and another session's lines, like
+a live shell's, carry no
+.B mention
+and no
+.BR passage ),
 .B \-\-full
-to read it all (a
+to read it all up to 64 files
+.RB ( why:\(dqfiles\(dq ),
+1 GiB
+.RB ( why:\(dqbytes\(dq )
+and 10 s
+.RB ( why:\(dqtime\(dq )
+(a
 .B \-\-budget\-ms
 with it is accepted and has no effect; a file gives its first
 .B mention
@@ -780,10 +810,258 @@ one
 .B definition
 line per title, at most 8; output capped at 4 MiB, then
 .BR why:\(dqoutput\(dq );
+with
+.BR \-\-full ,
+a commit or file ref also gets one
+.B resolved
+line before
+.B done
+.RB ( kind ,
+.BR state ,
+.BR title ,
+.BR subtitle ,
+at most 14
+.BR lines ,
+and for a file shown
+.BR first ,
+the number of the first line).
+A commit runs git, never through a shell and never in an ended session
+.RB ( state:\(dqended\(dq ):
+on macOS the first of the Command Line Tools, xcode\-select, Xcode.app,
+.I /opt/homebrew/bin/git
+and
+.I /usr/local/bin/git
+(never
+.IR /usr/bin/git ),
+elsewhere
+.I /usr/bin/git
+then
+.IR /usr/local/bin/git ,
+as
+.B git \-\-no\-pager \-c core.fsmonitor= \-c core.hooksPath=/dev/null
+.B \-c protocol.allow=never \-c diff.external= \-c color.ui=never
+.B \-c log.showSignature=false \-C
+.I cwd
+.B rev\-parse \-\-is\-inside\-work\-tree
+and then
+.B show \-\-no\-color \-\-no\-ext\-diff \-\-no\-textconv \-\-stat=80
+.B \-\-stat\-count=14 \-\-format=%H%x00%an%x00%at%x00%s \-\-end\-of\-options
+.IB sha ^{commit} ,
+with only
+.BR GIT_CONFIG_NOSYSTEM=1 ,
+.BR GIT_CONFIG_GLOBAL=/dev/null ,
+.BR GIT_OPTIONAL_LOCKS=0 ,
+.BR GIT_TERMINAL_PROMPT=0 ,
+.BR GIT_NO_LAZY_FETCH=1 ,
+.BR PATH=/usr/bin:/bin ,
+.B HOME
+and
+.B LANG=en_US.UTF\-8
+in its environment, 3 s for both runs (then its process group is ended),
+64 KiB of output kept (a repo's
+.I objects/info/alternates
+can make git read objects outside the project: nothing runs, nothing is
+written); states
+.BR ok ,
+.BR no_git ,
+.BR not_repo ,
+.BR not_commit ,
+.BR ambiguous ,
+.BR timeout ,
+.BR ended .
+A file is read only inside the project (the cwd's git root, else the cwd;
+none when that is
+.BR / ,
+.B $HOME
+or a directory above it, by real path), checked by its text and again by
+its real path (a symlinked directory is followed only while it stays
+inside), the file itself never a symlink, a file with more than one hard
+link
+.BR outside_project ,
+never on the deny list
+.RB ( secret_name ),
+matched without regard to case against every part of the whole path, as
+given and as its real path: a part starting with
+.BR .env ,
+.BR .ssh ,
+.BR .gnupg ,
+.BR .aws ,
+.BR .netrc ,
+.BR .npmrc ,
+.BR .pypirc
+or
+.BR .git\-credentials ;
+anything under a directory
+.BR .git ,
+.BR .kube ,
+.BR .docker ,
+.BR .azure ,
+.BR .oci ,
+.BR .claude ,
+.BR .codex ,
+.BR .gcloud ,
+.BR .password\-store ,
+.B .config/gh
+or
+.BR .config/gcloud ;
+the names
+.BR .claude.json ,
+.BR .pgpass ,
+.BR .my.cnf ,
+.BR .vault\-token ,
+.BR .htpasswd ,
+.BR .s3cfg ,
+.BR credentials ,
+.BR credentials.json ,
+.BR credentials.toml ,
+.BR credentials.db ,
+.BR application_default_credentials.json ,
+.BR secrets.yaml ,
+.B secrets.yml
+and
+.BR secrets.json ;
+names ending in
+.BR .pem ,
+.BR .key ,
+.BR .p12 ,
+.BR .pfx ,
+.BR .p8 ,
+.BR .ppk ,
+.BR .jks ,
+.BR .keystore ,
+.BR .keychain ,
+.BR .keychain\-db ,
+.BR .tfstate ,
+.B .tfstate.backup
+or
+.BR history ;
+.B id_
+names with no dot.
+The list guards the common credential files by name; a secret in a file
+with any other name is shown.
+At most 2 MB, as 14 lines with the ref's line the
+seventh; states
+.BR ok ,
+.BR outside_project ,
+.BR secret_name ,
+.BR too_large ;
+a missing file, a symlink or a non\-regular file gives no line;
 .B \-\-scope session
-is required (\fBproject\fR, also the default with no
-.BR \-\-scope ,
-and \fBall\fR come later and exit 2).
+reads
+.IR name 's
+own transcript, or its ring and screen;
+.BR project ,
+the default (a remote caller's too), then reads every other session's
+Claude Code transcript in its project directory (a shell's: its cwd's),
+newest first, and
+.B all
+then the other project directories, the newest first.
+The other sessions are this store's live ones (asked for their command,
+never their ring) and History records, one per agent id, each transcript
+found and opened as
+.IR name 's
+is; one not found is never opened.
+Their lines carry
+.BR chapter:null .
+.B done
+has
+.B counts
+.RB ( session ,
+.BR project ,
+.BR project_sessions ,
+.BR all ,
+.BR all_sessions ;
+the last two null unless
+.BR \-\-scope\ all ).
+A live Codex
+.I name
+is read alone, whatever the scope: its rollout only, with
+.B first.scope
+.BR session .
+.B \-\-chapter
+.I anchor
+prints one chapter's entries as one object
+.RB ( schema ,
+.BR session ,
+.BR session_id ,
+.BR anchor ,
+.BR title ,
+.BR at ,
+.BR kind ,
+.BR entries ,
+.BR truncated ).
+.I anchor
+is a chapter's
+.B anchor
+from
+.BR \-\-json :
+1 to 128 bytes of
+.BR A\-Z ,
+.BR a\-z ,
+.BR 0\-9 ,
+.BR : ,
+.BR _ ,
+.B .
+and
+.B \-
+(else exit 2,
+.IR "bad anchor" ).
+dch reads the chapters again and answers only when one has exactly that
+anchor, never seeking to the offset in it; otherwise it exits 1 with
+.I "chapter gone"
+(the transcript was rewritten, or the ring evicted or cleared the block).
+Each entry is
+.BR role ,
+.BR tool ,
+.B text
+and
+.BR error .
+Claude Code:
+.B user
+(the prompt, a slash command as
+.IR "/name args" ,
+a compaction's summary),
+.B assistant
+(its text),
+.B tool
+(a call, with its name: a Bash command, the path of an Edit, MultiEdit,
+Write or Read, else the input's first 8 fields as
+.I "key: value"
+lines, each value cut at 240 characters) and
+.B output
+(its result, in the call's chapter, with the call's name or
+.B null
+for a result with no call;
+.B error
+is the result's error flag, never for a Grep or Glob that found nothing);
+thinking, images, notices and subagent turns are left out.
+A shell: one
+.B tool
+entry with the typed command and one
+.B output
+entry with the block's output rows, soft\-wrapped rows joined,
+.B error
+for a non\-zero exit; only rows that scrolled into the ring count, not the
+screen's.
+.B text
+is cut at 6000 Unicode scalars (3000 for an
+.BR output )
+and escaped like
+.BR \-\-ls\-json ;
+the object is capped at 1 MiB, entries past it left out and
+.B truncated
+true.
+An ended or History Claude Code session is read from its transcript; an
+ended shell, a ring that is off or paused, a session with no transcript, and
+a live Codex (its rollout has no chapter reader yet) exit 1 with
+.IR "no x\-ray corpus" .
+.B \-\-chapter
+takes no
+.BR \-\-ref ,
+.B \-\-follow
+or
+.B \-\-clear
+(exit 2).
 A reader that closes the pipe ends any form at dch's next write (at most
 250 ms later for
 .BR \-\-ref ),
@@ -812,8 +1090,39 @@ with a
 is resolved locally first; only when nothing local matches and its host is
 known (\fB\-\-hosts\fR, \fBremote_hosts\fR, a cached remote row) is it a
 remote
-.I host\fB:\fIname
-(exit 2, not supported yet).
+.IR host\fB:\fIname :
+with
+.B \-\-json
+dch checks the flags and values by its own rules above (exit 2, nothing
+sent; the view form, without
+.BR \-\-json ,
+stays local and exits 2), then runs
+.B "\-\-xray"
+.I name
+and the other flags as typed on that host's
+.B dch serve
+over ctl (see
+.BR "REMOTE SERVER" ),
+and writes its output, standard error and exit status as its own, the
+.B \-\-follow
+and
+.B \-\-ref
+streams as they come.
+The host answers by its own release:
+.BR \-\-scope ,
+.B \-\-chapter
+and the corpus are the host's.
+A host whose hello lacks
+.B xray
+prints
+.I "dch: host: does not support \-\-xray (needs dch serve 1.55.0+)"
+and exits 6, nothing sent; a refusal by its gate exits 4, an unreachable
+host or a lost connection exits 7, and the host's own refusal exits 1.
+SIGINT, SIGTERM or a
+closed standard output cancel it on the host, as for the control verbs.
+There is no
+.B \-\-host
+form.
 A Claude Code session's chapters come from its transcript, found by one
 directory listing (a symlinked project directory is not followed; two hits
 answer corpus
@@ -827,6 +1136,40 @@ the file shrinks during the read, or past 5000 chapters,
 .B complete
 is false with
 .BR why:\(dqrange\(dq .
+A live Codex's chapters come from its rollout, read the same way
+(corpus
+.BR codex ,
+always
+.BR mentions_only:true ;
+.B session_id
+is its thread id): its user turns, without the parts Codex adds itself,
+and its compactions.
+The thread id comes only from
+.IR $CODEX_HOME/shell_snapshots :
+exactly one UUID\-named snapshot, yours and not group\- or
+world\-writable, exporting the session's
+.BR DCH_SESSION ;
+a Codex outside the session's master, two ids or none answer corpus
+.B none
+with an empty
+.BR session_id .
+.B CODEX_HOME
+(the Codex process's, else its
+.IR HOME/.codex )
+must be absolute with no
+.B ..
+component.
+The rollout is the only regular file named
+.BI \- id .jsonl
+under
+.IR sessions/YYYY/MM/DD ,
+newest first, at most 400 day directories, no symlink followed.
+Assistant text uses the prose rules, tool calls and outputs the code rules;
+reasoning, developer messages and
+.B event_msg
+records give nothing.
+Nothing in the Codex directory is run or written.
+An ended Codex session has no corpus.
 A shell's chapters come from its ring's OSC 133 marks: one per typed command
 block (\fBA\fR, \fBB\fR, client input, \fBC\fR, a non-blank command),
 once its rows scroll off the screen (commands still on it have none yet;
@@ -861,7 +1204,7 @@ typed into the session) and print
 .I name
 is first matched as a live ring's exact session_id (\fBm\fR + 16 hex;
 each master is asked for its ring's header only), then as a name.
-A Claude Code session has no ring
+A Claude Code or Codex session has no ring
 .RB ( ring_cleared:false ),
 nor has one with
 .B xray_ring 0
@@ -897,10 +1240,10 @@ and
 .B reset
 .RB ( why :
 .B rotated
-for a new transcript, a /clear, or a shell ring paused, resumed or
-given a new session_id;
+for a new transcript, a /clear, a Codex's new thread or rollout, an agent
+that exited, or a shell ring paused, resumed or given a new session_id;
 .B shrunk
-for a cut transcript;
+for a cut transcript or rollout;
 .B cleared
 for a shell's clear, ED 3 or RIS, never with evict;
 .B evicted
@@ -918,8 +1261,19 @@ drops, so a client can hold more chapters than
 .B \-\-json
 shows.
 No timer: a transcript is watched with kqueue (inotify on Linux), its
-project directory for a new file, a shell through the master's wake (its
+project directory for a new file; a Codex rollout too, with its
+.I shell_snapshots
+directory and, before the rollout exists, today's day directory; a shell
+through the master's wake (its
 ring or its screen changed, an alternate\-screen switch included).
+An agent starting or ending in a followed session sends
+.B reset
+.B rotated
+within 2 s, ring on or
+.BR "xray_ring = 0" :
+while a follower holds one of the master's 4 subscriber slots, the master
+looks for the agent once a second; with no follower it does not.
+A Claude Code follower past the 4 slots is not told when its agent exits.
 At most 4 shell followers per master: a fifth exits 1
 .IR busy .
 An ended session or a History record writes its snapshot and exits 0;
@@ -942,8 +1296,12 @@ then keeps the lines already written and writes no
 .I "ambiguous session"
 or, for
 .B \-\-clear
-in dch\-lite,
-.IR "no x\-ray corpus" ;
+in dch\-lite and for
+.BR \-\-chapter ,
+.IR "no x\-ray corpus" ,
+or for
+.BR \-\-chapter ,
+.IR "chapter gone" ;
 2 bad usage or a bad or remote
 .IR name ;
 3 the session or its transcript could not be read (a transcript that is
@@ -976,6 +1334,86 @@ Other verbs
 .BR \-\-send ,
 .BR \-k )
 reach it by any case on a case\-insensitive file system, like any name.
+.TP
+.BI \-\-xray " host\fB:\fPname " \-\-requests " " \-\-json
+One warm connection to
+.IR host 's
+.B dch serve
+for many X\-ray requests on
+.IR name ,
+one at a time, so a client asks without dialling each time.
+.I host\fB:\fPname
+and
+.B \-\-json
+only; a local name exits 2.
+On connect it writes
+.BR {"schema":1,"ready":{"ops":[...]}} ,
+the host's ops.
+Each standard\-input line is a request:
+.B {"req":\fIN\fP,"argv":[...]}
+(the flags after
+.B \-\-xray
+.IR name ,
+.I N
+1 to 2147483647), or
+.B {"cancel":\fIN\fP}
+to stop request
+.I N
+(nothing is written when it is not running).
+Only
+.BR \-\-json ,
+.B \-\-ref
+(with
+.BR \-\-scope ,
+.BR \-\-full ,
+.BR \-\-budget\-ms ),
+.B \-\-chapter
+and
+.B \-\-clear
+are taken, checked by dch's rules before anything is sent; any other form
+or a bad value is answered
+.B {"req":\fIN\fP,"stderr":"dch: ..."}
+and
+.BR {"req":\fIN\fP,"exit":2,"why":"refused"} .
+Each host output line comes back as
+.BR {"req":\fIN\fP,"line":\fIline\fP} ,
+byte for byte (a line that is not one JSON object as a JSON string), each
+standard\-error line as
+.BR {"req":\fIN\fP,"stderr":"..."} ,
+escaped, and every request ends with exactly one
+.BR {"req":\fIN\fP,"exit":\fIE\fP,"why":\fIW\fP} :
+.I E
+the host's exit status;
+.I W
+.BR null ,
+.BR cancel ,
+.B cap
+or
+.B timeout
+(the host cut it short),
+.B busy
+(exit 1: one was running, and goes on),
+.B refused
+(exit 2 as above; 1, or 4 by its gate, when the host refused it) or
+.B lost
+(exit 7: the connection dropped while it ran).
+A line that is no request gets the same refused pair with
+.BR \(dqreq\(dq:null ;
+blank lines are skipped, a line over 64 KiB is refused.
+Without
+.B ctl\-cancel
+on the host a cancel closes the connection and dch dials again; after the
+host's idle close or a lost connection the next request dials again.
+End of standard input closes the connection and exits 0 (a request still
+running ends
+.BR why:\(dqcancel\(dq ).
+With no connection at the start it writes one
+.B {"schema":1,"exit":\fIE\fP,"stderr":...}
+line, the message on standard error too, and exits
+.IR E :
+6 for a host without
+.BR xray ,
+7 unreachable, 4 refused by the gate.
 .TP
 .BI \-\-send " name text..."
 Type
@@ -1939,9 +2377,10 @@ op: one of dch's control verbs, run on this host for the client. The
 hello says
 .B \(dqproto\(dq:\(dq1.1\(dq
 and always lists
-.B ctl
-and
+.BR ctl ,
 .B ctl\-cancel
+and
+.B xray
 in
 .B ops
 .RB ( create
@@ -1949,7 +2388,10 @@ only with
 .BR \-\-allow\-create );
 a client checks the
 .B ctl\-cancel
-token, not the proto, before it sends a 0x34 or a second 0x30.
+token, not the proto, before it sends a 0x34 or a second 0x30, and the
+.B xray
+token before it sends an
+.BR \-\-xray .
 The request is
 .B 0x30
 .BR {\(dqargv\(dq:[...],\(dqcwd\(dq:\(dq/abs\(dq} ,
@@ -2019,6 +2461,8 @@ a session name that passes the attach name check and does not start with
 \-\-pin|\-\-unpin|\-\-forget \fIn\fP... \-\-json;  \-\-forget \-\-all \-\-json
 \-\-stop \fIn\fP... \-\-json
 \-\-say \fIn\fP \-\-json \-\- \fItext\fP
+\-\-xray \fIn\fP \-\-json [\-\-follow|\-\-clear|\-\-chapter \fIanchor\fP]
+\-\-xray \fIn\fP \-\-ref \fIref\fP [\-\-scope \fIs\fP] [\-\-full] [\-\-budget\-ms \fIms\fP] \-\-json
 .fi
 .RE
 .PP
@@ -2046,10 +2490,48 @@ that is no directory
 and a (create) verb without
 .B \-\-allow\-create
 .RI ( "creating sessions is off on this host (dch serve \-\-allow\-create)" ).
+For
+.BR \-\-xray ,
+the name comes right after it and the flags follow in any order, each once
+.RI ( "\-\-json twice" ),
+a flag's value is the next element even when it starts with
+.BR \- ,
+and the
 .B \-\-xray
-is reserved for a later release:
-.IR "xray not supported by this host" .
-Stdout and stderr together get 8 MiB; at that cap the server stops
+rules apply: no
+.B \-\-json
+.RI ( "\-\-xray needs \-\-json (the view is client\-side only)" ),
+two of
+.BR \-\-ref ,
+.BR \-\-follow ,
+.B \-\-chapter
+and
+.BR \-\-clear ,
+.BR \-\-scope ,
+.B \-\-full
+or
+.B \-\-budget\-ms
+without
+.BR \-\-ref ,
+a flag off the list
+.RI ( "\-\-requests is not allowed with \-\-xray" ),
+a missing value
+.RI ( "\-\-ref needs a value" ),
+and a value that fails
+.RI ( "bad ref" ,
+.IR "not a ref" ,
+.IR "bad anchor" ,
+.IR "bad scope" ,
+.IR "bad budget" )
+are refused.
+.B \-\-clear
+needs no
+.BR \-\-allow\-create ,
+only the gate, like
+.BR \-k .
+Stdout and stderr together get 8 MiB
+.RB ( "\-\-xray \-\-follow" :
+no cap); at that cap the server stops
 forwarding, sends the dch SIGTERM (SIGKILL 2 s later) and ends with
 .BR {\(dqexit\(dq:2,\(dqwhy\(dq:\(dqcap\(dq} .
 The timeout is 660 s for
@@ -2059,7 +2541,9 @@ The timeout is 660 s for
 and
 .BR \-\-run ,
 none for
-.BR \-\-follow ,
+.B \-\-follow
+and
+.BR "\-\-xray \-\-follow" ,
 60 s for the rest; past it, the same with
 .BR \(dqwhy\(dq:\(dqtimeout\(dq .
 A client that closes the connection while its verb runs ends it as a 0x34
@@ -2156,7 +2640,23 @@ or
 .I stale
 key of its own, or no
 .IR name ,
-is dropped; at most 500 records and 2 MiB per host. A host that does not
+is dropped, as is one a strict JSON reader would reject (a lone surrogate
+escape, a number past a double's range, nesting over 64 deep, a key
+counting as a level) and one that gives a key dch reads twice
+.RI ( file ,
+.IR alias ,
+.IR end ,
+.IR cwd ,
+.IR argv ,
+.I agent
+and its
+.I session_id
+and
+.IR name ,
+.IR ended ,
+.IR updated ,
+.IR pinned );
+at most 500 records and 2 MiB per host. A host that does not
 answer in time shows its last records, stale
 .RB ( [stale] ),
 for 2 minutes (a cache in
@@ -2224,7 +2724,14 @@ and
 .BR \-\-revive )
 prints
 .I "dch: host: does not support verb (needs dch serve 1.41+)"
-.RI ( "(needs dch serve \-\-allow\-create)" )
+.RI ( "(needs dch serve \-\-allow\-create)" ;
+for
+.B \-\-xray
+on
+.IR host : name ,
+one whose hello lacks
+.BR xray :
+.IR "(needs dch serve 1.55.0+)" )
 and exits 6; one that cannot be reached, or whose connection is lost before
 the exit status, prints
 .I "dch: host: unreachable: why"
@@ -2395,13 +2902,20 @@ retry).
 A control verb on
 .I host:name
 (or with
-.BR \-\-host ):
+.BR \-\-host ),
+and
+.B \-\-xray
+on
+.IR host:name :
 0\-3 the remote dch's own exit status; also 1 the host refused the request,
 an unknown host or a request dch would not send; 4 refused by the host's
 gate; 6 the host's
 .B dch serve
-lacks the op (1.41+ or
-.BR \-\-allow\-create );
+lacks the op (1.41+,
+.B \-\-allow\-create
+or, for
+.BR \-\-xray ,
+1.55.0+);
 7 the host is unreachable.
 .SH ENVIRONMENT
 .TP

@@ -419,15 +419,17 @@ static size_t json_quote(char *out, size_t cap, const char *s) {
       if (!l)
         esc = "\\ufffd";
       else if ((l == 2 && c == 0xc2 && u[1] < 0xa0) ||
+               (l == 2 && c == 0xd8 && u[1] == 0x9c) ||
                (l == 3 && c == 0xe2 &&
-                ((u[1] == 0x80 && ((u[2] >= 0xaa && u[2] <= 0xae) ||
+                ((u[1] == 0x80 && ((u[2] >= 0xa8 && u[2] <= 0xae) ||
                                    u[2] == 0x8e || u[2] == 0x8f)) ||
                  (u[1] == 0x81 && u[2] >= 0xa6 && u[2] <= 0xa9)))) {
-        /* C1 controls, the bidi marks (LRM, RLM), embeddings, overrides
-           and isolates as \u: the same JSON value, and inert on a
+        /* C1 controls, the bidi marks (LRM, RLM, ALM), embeddings,
+           overrides and isolates, and the line and paragraph separators
+           (U+2028, U+2029) as \u: the same JSON value, and inert on a
            terminal */
         snprintf(small, sizeof small, "\\u%04x",
-                 l == 2 ? u[1]
+                 l == 2 ? (c & 0x1f) << 6 | (u[1] & 0x3f)
                         : (c & 0x0f) << 12 | (u[1] & 0x3f) << 6 | (u[2] & 0x3f));
         esc = small;
         s += l - 1;

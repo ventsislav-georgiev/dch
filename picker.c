@@ -245,29 +245,38 @@ pk_fix(struct pk *p, int t)
 	p->sel[t] = j < 0 ? p->n[t] : j;
 }
 
-/* Keep each tab's selection on the same row (by name) when rows come, go
-** or move; a row that went, or that the filter no longer keeps, leaves it
-** on the nearest kept one. */
+/* Keep each tab's selection on the same row (by name, and remote or not:
+** a local srv:gone is not host srv's gone, #167) when rows come, go or
+** move; a row that went, or that the filter no longer keeps, leaves it on
+** the nearest kept one. */
 static void
 pk_reselect(struct pk *p, char sel[3][600])
 {
-	int t, k;
+	int t, k, r;
 
 	for (t = 0; t < 3; t++)
 	{
-		if (sel[t][0] && (k = pk_find(p, t, sel[t])) >= 0)
+		r = sel[t][0] == '\1';
+		for (k = 0; sel[t][r] && k < p->n[t] &&
+		     (!p->r[t][k].remote != !r ||
+		      strcmp(p->r[t][k].name, sel[t] + r)); k++)
+			;
+		if (sel[t][r] && k < p->n[t])
 			p->sel[t] = k;
 		pk_fix(p, t);
 	}
 }
 
+/* Each tab's selected row for pk_reselect: its name, after a \1 when it
+** is a remote row's. */
 void
 pk_selnames(const struct pk *p, char sel[3][600])
 {
 	int t;
 
 	for (t = 0; t < 3; t++)
-		snprintf(sel[t], 600, "%s", p->sel[t] < p->n[t]
+		snprintf(sel[t], 600, "%s%.598s", p->sel[t] < p->n[t] &&
+		         p->r[t][p->sel[t]].remote ? "\1" : "", p->sel[t] < p->n[t]
 		         ? p->r[t][p->sel[t]].name : "");
 }
 

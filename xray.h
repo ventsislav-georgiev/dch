@@ -28,14 +28,19 @@
 #define XR_OUT_MAX     (4u << 20)	/* the --json object cap */
 #define XR_PENDING     256		/* open tool calls, Prosper's bound */
 #define XR_PATH_MAX    1024		/* config_dir and cwd bound (8.1) */
+#define XR_FILES       64		/* 3.8: files per --ref */
+#define XR_BYTES       (1ull << 30)	/* 3.8: bytes read per --ref */
+#define XR_WALL_MS     10000		/* 3.8: --ref --full's wall time */
 
-/* The limits above as the code reads them. Only fuzz_xray lowers them, so
-** a small input reaches every cap; never above the defaults (the buffers are
-** sized by the macros). */
+/* The limits above as the code reads them. Only fuzz_xray and dch's
+** DCH_XRAY_CAPS (tests) lower them, so a small input reaches every cap;
+** never above the defaults (the buffers are sized by the macros). */
 struct xr_limits
 {
 	uint64_t head, tail;		/* XR_HEAD_RANGE, XR_TAIL_RANGE */
 	size_t chunk, line, out;	/* XR_CHUNK, XR_LINE_MAX, XR_OUT_MAX */
+	uint64_t files, bytes;		/* XR_FILES, XR_BYTES */
+	long long ms;			/* XR_WALL_MS */
 };
 extern struct xr_limits xr_lim;
 
@@ -186,6 +191,14 @@ void xr_scan_sink(struct xr_scan *x, struct xr_sink *k);
 /* line 1, before any record is read */
 int xr_scan_first(struct xr_scan *x, const char *session_id, int shape,
                   const char *text);
+/* --scope (3.4), before xr_scan_first: 0 session (the default here), 1
+** project, 2 all */
+void xr_scan_scope(struct xr_scan *x, int scope);
+/* The next file after <n>'s (3.4's order): another session's, same: in
+** <n>'s project dir. 0 read it; nonzero the scan stopped (a cap, the
+** budget, a result in light mode), so no more files. */
+int xr_scan_next(struct xr_scan *x, const char *session, const char *project,
+                 int live, int same);
 /* the --ref tick: bytes so far; nonzero once the scan should stop */
 int xr_scan_tick(void *ctx, uint64_t bytes);
 /* one file read: its held mentions and its tally (partial: range-capped) */
@@ -232,6 +245,19 @@ uint64_t xr_claude_next(const struct xr_claude *d);
 /* The chapters so far, anchored, the open turn included; d keeps them. */
 const struct xr_chapters *xr_claude_chapters(struct xr_claude *d);
 
+/* ---- Codex (7.4, K9) --------------------------------------------------- */
+#define XR_CODEX_DAYS  400		/* day dirs a lookup reads, newest first */
+/* <home>/sessions/YYYY/MM/DD/<any>-<tid>.jsonl: home checked as
+** xr_config_ok and tid uuid-shaped before any readdir; names only, digits
+** only, newest first, at most XR_CODEX_DAYS day dirs; no symlinked dir
+** followed; exactly one regular hit. 0 with path and st, else -1. */
+int xr_codex_lookup(const char *home, const char *tid, char *path,
+                    size_t pathsz, struct stat *st);
+/* The decoder reads a Codex rollout instead (set before the first line):
+** the same reads, tail, anchors and caps; user turns, compactions and
+** mentions only, never a definition. */
+void xr_claude_codex(struct xr_claude *d);
+
 /* ---- shell ring (7.3) -------------------------------------------------- */
 struct xr_rec
 {
@@ -252,6 +278,7 @@ void xr_shell_chapters(const struct xr_rec *r, size_t n,
 ** then paired = npaired != 0 and alt. */
 #define XR_CMD_MAX 4096	/* command text kept per block; the title is 120 */
 struct xr_shref;
+struct xr_entries;
 struct xr_shell
 {
 	struct xr_chapters *out;
@@ -262,6 +289,7 @@ struct xr_shell
 	size_t cl;
 	char cmd[XR_CMD_MAX + 1];
 	struct xr_shref *refs;	/* xr_shell_refs, else NULL */
+	struct xr_entries *want;	/* --chapter: set after xr_shell_begin */
 };
 void xr_shell_begin(struct xr_shell *s, struct xr_chapters *out);
 void xr_shell_feed(struct xr_shell *s, const struct xr_rec *x);
@@ -298,6 +326,7 @@ struct xr_answer
 	int live, available, mentions_only, complete, chapters_evicted;
 	int snapshot;			/* --follow: {"schema":1,"snapshot":{…}} */
 	long long lines;		/* < 0 prints null */
+	long long other_projects;	/* 3.2: counted from names only */
 	const struct xr_chapters *ch;
 	struct xr_index *refs;		/* NULL prints [] */
 };
@@ -325,5 +354,86 @@ int xr_delta(struct xr_sent *s, const struct xr_answer *a, uint64_t head,
 ** chapter (oldest first), a ref line per new or changed key, a count-0 ref
 ** per gone key; then that is what was written. 0, -1 a write failed. */
 int xr_delta_write(FILE *f, struct xr_sent *s, const struct xr_answer *a);
+
+/* ---- --chapter (3.5; #156, XR3b) --------------------------------------- */
+#define XR_CH_OUT      (1u << 20)	/* the --chapter object cap (3.8) */
+
+/* --chapter's value rule (3.1): 1..128 bytes of [A-Za-z0-9:_.-]. */
+int xr_anchor_ok(const char *s);
+
+/* One chapter's entries (3.5), gathered while a decoder builds the
+** chapters-only index: those of the chapter whose anchor equals `anchor`
+** byte for byte, and nothing else (K14.2: no offset is ever taken on the
+** anchor's say). Each entry is a JSON object, comma-joined in buf, cut at an
+** entry once the whole object would pass its cap (truncated). */
+struct xr_ent_call;
+struct xr_entries
+{
+	const char *anchor;
+	size_t cap;			/* buf's bound: the object's less its head */
+	char *buf;
+	size_t len;
+	uint64_t ord;			/* the chapter's, once hit */
+	int hit, truncated, done, failed;	/* failed: out of memory */
+	struct xr_ent_call *calls;	/* Claude: the chapter's calls */
+	int ncalls;
+	char *out;			/* shell: the block's C..D rows */
+	size_t ol;
+};
+/* Zeroed, for anchor, under out bytes of output for this session (its
+** session_id at most 64 bytes: a UUID or a ring's id). */
+void xr_entries_begin(struct xr_entries *e, const char *anchor,
+                      const char *session, size_t out);
+void xr_entries_free(struct xr_entries *e);
+/* Claude: before the read; ino is the transcript's. A shell sets s->want
+** after xr_shell_begin: its block's output entry is written when the block
+** closes, or at xr_shell_end. */
+void xr_claude_entries(struct xr_claude *d, struct xr_entries *e,
+                       uint64_t ino);
+/* {"schema":1,"session","session_id","anchor","title","at","kind",
+** "entries":[…],"truncated"} and a newline. 0, or -1 the write failed. */
+int xr_chapter_print(FILE *f, const char *session, const char *session_id,
+                     const struct xr_chapter *c, const struct xr_entries *e);
+
+/* ---- resolvers (XR6, K13; spec 3.7, 8.3) ------------------------------- */
+/* The one place the engine runs a program: git, for a commit ref, in the
+** querying process (never a master), with 8.3's probe, argv and env. */
+#define XR_RES_LINES   14		/* lines per block (3.7) */
+#define XR_RES_LINE    200		/* scalars per line and subtitle */
+#define XR_RES_FILE    (2u << 20)	/* the file cap (v2.1 7.1: 2 MB) */
+#define XR_GIT_MS      3000		/* 8.3: "git timed out after 3 s" */
+struct xr_resolved
+{
+	const char *kind, *state;	/* 3.7's enums */
+	char title[XR_TITLE_MAX * 4 + 1];
+	char subtitle[XR_RES_LINE * 4 + 1];
+	char line[XR_RES_LINES][XR_RES_LINE * 4 + 1];
+	int nlines;
+	long first;	/* a file's: line[0]'s 1-based number (Prosper's ruling) */
+};
+/* Resolve sp (a commit or file span of --ref's text, against the session's
+** cwd; live 0: an ended session, which never runs git). 1 with *r filled,
+** 0 for no resolved line (another shape, a missing or non-regular file). */
+int xr_res_ref(const struct xr_span *sp, const char *text, const char *cwd,
+               int live, struct xr_resolved *r);
+/* --full only: the resolved line, under the output cap; the one call site
+** per session kind, before done. */
+void xr_scan_resolved(struct xr_scan *x, const struct xr_span *sp,
+                      const char *text, const char *cwd, int live);
+/* The parsers, for the units and fuzz_xref: git show's output as a commit
+** block (1, else 0); a file's 14-line window around line (0: the first);
+** --ref's line suffix (:line, :line:col, #L<line>; 0 for none); the
+** deny list over every part of a path (1: never read). */
+int xr_git_parse(const char *s, size_t n, long long now,
+                 struct xr_resolved *r);
+void xr_file_lines(const char *s, size_t n, long line,
+                   struct xr_resolved *r);
+long xr_ref_line(const char *text);
+int xr_secret_name(const char *path);
+/* Test seams: the probe list (NULL: 8.3's for this OS), the probe's pick
+** (NULL: none), and the git spawns so far. */
+extern const char *const *xr_git_probe;
+const char *xr_git_bin(char *buf, size_t bufsz);
+extern unsigned long xr_res_spawned;
 
 #endif /* DCH_XRAY_H */

@@ -1,0 +1,1 @@
+{"schema":1,"session":"demo","session_id":"0b1f6a52-4c1e-4d7a-9a51-2f6d8c3e7a10","anchor":"f*:766","title":"/review PR 12","at":1794304980,"kind":"command","entries":[{"role":"user","tool":null,"text":"/review PR 12","error":false},{"role":"assistant","tool":null,"text":"Reviewed.","error":false}],"truncated":false}

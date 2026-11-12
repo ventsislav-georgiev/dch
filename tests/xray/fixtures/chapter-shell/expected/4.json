@@ -1,0 +1,1 @@
+{"schema":1,"session":"box","session_id":"m1a2b3c4d5e6f7a8b","anchor":"s281474976710019","title":"git status","at":1794300005,"kind":"command","entries":[{"role":"tool","tool":null,"text":"git status","error":false},{"role":"output","tool":null,"text":"clean","error":false}],"truncated":false}

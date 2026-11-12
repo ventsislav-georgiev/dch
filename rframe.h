@@ -97,11 +97,19 @@ int rf_run(char *const argv[], char **out, size_t *outn, size_t cap,
 #define CTL_CREATE 1		/* needs "create" in ops (--allow-create) */
 #define CTL_LONG 2		/* the 660 s timeout, not 60 s */
 #define CTL_FOREVER 4		/* no timeout (--follow) */
+#define CTL_NOCAP 32		/* no output cap (--xray --follow, 4.4) */
 #define CTL_ARGV_MAX 1024
 enum { CK_VERB = 1, CK_FLAG, CK_VALUE, CK_NAME, CK_TEXT };
 int ctl_check(int argc, char *const argv[], unsigned char *kind, char *why,
               size_t cap);
 int ctl_known(const char *verb);
+/* X-ray's value rules (spec #832 3.1), one copy for dch --xray and the ctl
+** allowlist: --scope's enum; a --chapter anchor, [A-Za-z0-9:_.-]{1,128};
+** --budget-ms as ASCII digits only (no sign, no 0x, no wrap), its value
+** 50..300, else -1. */
+int xray_scope_ok(const char *s);
+int xray_anchor_ok(const char *s);
+int xray_budget(const char *s);
 int name_ok(const char *s);
 
 extern char g_ts[];	/* the tailscale CLI, after ts_find; "" none */

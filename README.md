@@ -136,7 +136,8 @@ per host on top of the local rows, so a full local History never hides them
 never is), then by the name shown (alias, else agent name, else name; a
 remote row's starts with `host:`, and it sorts among the local ones),
 case-insensitive, digit runs by value (`a2` before `a10`). On a remote row, `Enter`, `m` and `Shift-Enter`/`o`
-run `dch --revive host:name` there (`o` then attaches to `host:<as>`), a host
+resume the record on its host (`o` then attaches to `host:<as>`; see
+[Remote hosts](#remote-hosts) for the command), a host
 whose `dch serve` lacks `--allow-create` answering in one status line, and
 `p` and `d` say they are for this host's records. Every list has column headers and fixed, aligned columns,
 sized to the rows on screen. A session row shows NAME (alias, else harness
@@ -276,7 +277,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.54.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.55.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -375,7 +376,8 @@ dch --shell-init zsh|bash|fish                 # OSC 133 prompt marks for your r
 dch --xray <n> --json                           # a session's chapters (prompts / commands) as one JSON object
 dch --xray <n> --clear --json                   # empty a shell session's X-ray ring
 dch --xray <n> --follow --json                  # the same object, then its deltas as NDJSON until the session ends
-dch --xray <n> --ref <ref> --scope session [--full] [--budget-ms <ms>] --json  # one ref's mentions and definitions, NDJSON
+dch --xray <n> --ref <ref> [--scope session|project|all] [--full] [--budget-ms <ms>] --json  # one ref's mentions and definitions, NDJSON
+dch --xray <n> --chapter <anchor> --json        # one chapter's entries (prompt, replies, tool calls, output)
 dch --agent-list [--json]                       # native Claude peers
 dch --agent-send <peer> <message...>            # message one (from a Codex session)
 ```
@@ -417,7 +419,7 @@ someone is watching is invisible to them.
 | Verb | Does | Exit codes |
 | --- | --- | --- |
 | `--spawn <n> [--size CxR] [--env K=V]... [cmd...]` | Start headless session (default: `$SHELL`, 80x24 or `$COLUMNS`/`$LINES`). `--env` (max 32, first `=` splits) adds variables to the child; reserved keys (`DCH_SESSION`, `TERM` fixup) always win. Like `--revive` (and a plain `dch <new>`), it drops the calling Claude Code session's identity (`CLAUDECODE`, `CLAUDE_CODE_*` session vars), plus `GIT_EDITOR` and the other harness vars when `CLAUDECODE` is set, and sets `LC_TERMINAL=ghostty` unless the caller has it (dch keeps OSC 8 links, but under `TERM=xterm-256color` with no `TERM_PROGRAM` Claude Code would strip its statusline's, and `LC_TERMINAL` is the one signal its check reads that supports-hyperlinks and other Node CLIs ignore; ssh sends it on, by macOS's default `SendEnv LC_*`). Like any session variable it reaches every program in the session, not only Claude Code; a tool that keys on `ghostty` may assume Ghostty-only features (kitty graphics, for one) that the terminal you attach from may lack. dch sets no `FORCE_HYPERLINK`: those CLIs honour it before they check for a terminal, so it put OSC 8 into pipes and files (`stylelint t.css > out`, an agent's Bash tool); a caller's own value still reaches the session. An explicit `--env` (`--env LC_TERMINAL=` included) still wins. Prints the name. A program that cannot be executed is an error (`dch: <n>: <cmd>: <reason>`); one that runs and exits at once is not. | 0 ok, 1 exists/failed/not executable/bad --env |
-| `--xray <n> --json` | One JSON object: the session's corpus, chapters and refs (see [X-ray queries](#x-ray-queries---xray)). `--clear` empties a shell's ring instead; `--ref` streams one ref's lines; `--follow` streams the object and then its changes. Must be the first argument. | 0 ok, 1 no such session/ambiguous/no corpus, 2 usage, 3 read failure |
+| `--xray <n> --json` | One JSON object: the session's corpus, chapters and refs (see [X-ray queries](#x-ray-queries---xray)). `--clear` empties a shell's ring instead; `--ref` streams one ref's lines; `--follow` streams the object and then its changes; `--chapter` prints one chapter's entries. `<n>` as `host:name` runs it on that host (dch serve 1.55.0+); `host:name --requests --json` holds one connection there for many requests read off standard input. Must be the first argument. | 0 ok, 1 no such session/ambiguous/no corpus, 2 usage, 3 read failure; remote: 4 gate, 6 host lacks `xray`, 7 unreachable |
 | `--send <n> <text...>` | Type text (joined with spaces), no enter. | 0 ok |
 | `--run <n> <text...>` | `--send` + enter. Into a session whose Claude Code runs — as its command or typed into its shell — the text goes through `--say`'s composer gate instead: typed only over an empty composer, Enter pressed once it shows and again while it stays (Claude Code folds an Enter sent with the text into the paste). A `/command` is typed raw, a message pasted. A shell or any other program, a master without a mirror (`DCH_NO_VT`), dch-lite and your own session (`$DCH_SESSION`) keep the plain burst. A gate failure prints `dch: <n>: <reason> — <why>` on stderr: `prompt` and `draft` (nothing typed), `not_typed` (the text never showed in the composer, no Enter), `not_submitted` (it stayed there through every Enter); `no_screen` when the composer is not on screen; `interrupted`, `withdrawn` or `draft_left` on a SIGINT, SIGTERM or SIGHUP, as for `--say`. | 0 ok, 1 gate failure |
 | `--keys <n> <key...>` | Encode+send keys mode-aware: `ctrl+c`, `alt+x`, `shift+tab`, `up`, `f5`, `enter`, `esc`, single chars. | 0 ok, 1 unknown key |
@@ -820,8 +822,9 @@ the plain text of the shell's output in memory, in a ring of `xray_ring` bytes
 - **Clearing.** Erasing the scrollback (`clear`, `ESC[3J`, `reset`/`ESC c`,
   Cmd-K) empties the ring.
 - **Agents.** The ring pauses while an agent (Claude Code, Codex) runs in the
-  shell, because the agent's own transcript is its record. It resumes at the
-  shell's next prompt.
+  shell, because the agent's own transcript (a Codex's rollout) is its record.
+  The master looks for one on its record tick (once a minute) and on a clear.
+  It resumes at the shell's next prompt.
 - **`--restart`.** The ring survives `dch --restart`: it is handed to the new
   image in memory and never written to disk. A `dch --restart` from a client
   older than this release starts the session on an empty ring: such a client
@@ -859,7 +862,7 @@ master parses anything, nothing is written to disk and nothing is shelled out.
 `<n>` is one of these (checked in this order):
 - an agent UUID (36 characters of `0-9a-f-`): the live session whose Claude
   Code has that session id, else the newest ended History record carrying
-  it;
+  it (a Codex thread id is not one: name its session);
 - a History record name, `<file>.json`: that ended record, even when a new
   session has taken its name since. It is answered from History only and
   never reads a live ring. A plain shell's `<name>.json` is rewritten when the
@@ -871,8 +874,61 @@ master parses anything, nothing is written to disk and nothing is shelled out.
 A `<n>` with a `:` is resolved locally first: a live session or a History
 record of that name. Only when nothing local matches and the part before the
 `:` is a known host (`--hosts`, `remote_hosts`, or a cached remote row) is it
-`host:name`, which is not supported yet: it exits 2. Over
-`dch serve`'s ctl, `--xray` still answers `xray not supported by this host`.
+`host:name`. With `--json`, dch first checks the flags and values by its
+own rules (exit 2 and nothing sent on a bad one; the view form, without
+`--json`, stays local and exits 2), then runs `--xray <name>` and the other
+flags as typed on that host's `dch serve` over [ctl](#control-verbs-ctl). It
+writes the host's output and standard error as they come (the `--follow`
+and `--ref` streams included) and exits with the host's exit status. The
+host answers by its own release: `--scope`, `--chapter` and the corpus are
+the host's. A host whose hello lacks the `xray` token gets nothing and dch
+prints `dch: <host>: does not support --xray (needs dch serve 1.55.0+)`,
+exit 6. A refusal by the host's gate exits 4, its own refusal of the
+request exits 1 (`dch: <host>: <why>`), and an unreachable host or a lost
+connection exits 7. Ctrl-C, SIGTERM or a closed standard output cancel the
+query on the host, as for the [remote control verbs](#remote-hosts). A
+closed standard output shows at the next line the host sends. A `--follow`
+of a shell with no ring (dch-lite, `xray_ring 0`) sends nothing after its
+snapshot until an agent starts: it runs on until a signal or the session
+ends. There is no `--host` form.
+
+`dch --xray host:name --requests --json` holds one warm connection to the
+host for many requests, one at a time: it is how a client such as Prosper
+asks a remote session one question after another without dialling each
+time. It takes `host:name` and `--json` only; a local name exits 2 (run one
+`dch --xray` per request there). On connect it writes
+`{"schema":1,"ready":{"ops":[...]}}`, the host's ops. Then each line on
+standard input is a request, as NDJSON:
+- `{"req":N,"argv":["--ref","#831","--full","--json"]}`: the flags after
+  `--xray <name>`, `N` from 1 to 2147483647. Only the request forms are
+  taken: `--json`, `--ref` (with its `--scope`, `--full`, `--budget-ms`),
+  `--chapter` and `--clear`. dch checks them by its own rules first; any
+  other form (`--follow`, `--requests`, the view, an unknown flag) or a bad
+  value is answered `{"req":N,"stderr":"dch: ..."}` and
+  `{"req":N,"exit":2,"why":"refused"}`, and nothing is sent.
+- `{"cancel":N}`: stops request `N` on the host. Nothing is written when
+  `N` is not running.
+
+Each line the host writes comes back as `{"req":N,"line":<the line>}`, the
+line byte for byte (a line that is not one JSON object comes as a JSON
+string); each standard-error line as `{"req":N,"stderr":"..."}`, escaped.
+Every request ends with exactly one `{"req":N,"exit":E,"why":W}`: `E` is
+the host's exit status, `W` is `null`, `"cancel"`, `"cap"` or `"timeout"`
+(the host cut it short; `"cap"` with exit 2 also when one host line is more
+than dch carries: over 8 MiB, or over about 2.67 MiB as a standard-error
+line or a line that comes as a string; dch then closes the connection and
+dials again, unseen), `"busy"` (exit 1: a request was already running;
+the running one goes on), `"refused"` (exit 2 as above, or the host refused
+it: 1, or 4 by its gate) or `"lost"` (exit 7: the connection dropped while
+it ran). A line that is no request gets the same `refused` pair with
+`"req":null`; a blank line is skipped, a line over 64 KiB refused. On a host
+without `ctl-cancel` a cancel closes the connection and dch dials again,
+unseen. After the host's idle close (5 minutes) or a lost connection, the
+next request dials again. End of standard input closes the connection and
+exits 0; a request still running then ends `"why":"cancel"`. With no
+connection at the start, dch writes one `{"schema":1,"exit":E,"stderr":...}`
+line, prints the message on standard error and exits `E`: 6 for a host
+without `xray`, 7 unreachable, 4 refused by the gate.
 
 The corpus:
 - **Claude Code.** The chapters come from the session's transcript
@@ -888,6 +944,41 @@ The corpus:
     file shrinks during the read, or when more than 5000 chapters were
     found (the oldest go).
   - A line over 1 MiB or over 100000 JSON tokens counts as one failed step.
+- **Codex.** A live Codex in the session (the first process named `codex`
+  below the session's shell) answers from its rollout: `corpus: "codex"`,
+  always `mentions_only: true` (Prosper's label: "Codex · mentions only").
+  Its chapters are its user turns and compactions, its refs are mentions, and
+  nothing is ever a definition. `session_id` is the Codex thread id.
+  - The thread comes only from Codex's shell snapshots,
+    `<CODEX_HOME>/shell_snapshots/<id>.<n>.sh`. Exactly one UUID-named
+    snapshot must export the session's `DCH_SESSION` (and its bridge marker,
+    when the Codex has one). It must be yours and not group- or
+    world-writable. No snapshot, two thread ids, or a Codex outside the
+    session's master that carries the session (the shared app-server daemon)
+    answer `corpus: "none"` with `session_id: ""`, never the newest rollout.
+  - `CODEX_HOME` is the Codex process's own, else its `HOME`'s `.codex`. It
+    must be absolute with no `..` component, or nothing under it is read.
+  - The rollout is found by names only: `sessions/YYYY/MM/DD`, newest first,
+    at most 400 day directories, a file whose name ends `-<id>.jsonl`. It
+    must be the only one, a regular file, under real directories (a
+    symlinked day directory or file is not followed); otherwise the answer is
+    `corpus: "none"` with the id. It is opened and read like a Claude Code
+    transcript, with the same limits.
+  - A user turn is a `response_item` user message, its text parts joined.
+    The parts Codex adds itself (its `AGENTS.md` instructions, and any part
+    wrapped in one tag, as `<environment_context>` or an `<image>`
+    placeholder) are left out; a message of only those is no turn. A
+    `compacted` record is a `compact` chapter, and its summary is prose.
+  - Assistant text uses the prose rules. Tool calls (`function_call`
+    arguments, `custom_tool_call` input, `local_shell_call` action) and their
+    outputs use the code rules, with the tool clips. Developer messages,
+    reasoning, every `event_msg` (a user turn's twin among them) and any other
+    record type give nothing.
+  - Rollouts are read as Codex 0.151 to 0.167 writes them (a `timestamp`,
+    `type`, `payload` line). `project_label` is the Codex process's cwd, or
+    the rollout's last `cwd` when that cannot be read; file refs resolve
+    against the rollout's `cwd`.
+  - Nothing in the Codex directory is run or written.
 - **Shell.** The chapters come from the [ring](#shell-output-ring-x-ray)'s
   OSC 133 marks: one per typed command block (`A`, `B`, then `C` with client
   input before it and a non-blank command). A `B` or `C` inside an open
@@ -920,8 +1011,10 @@ The corpus:
   - The ring is read 1 MiB at a time, and only up to its tail as it stood
     when the read began. A query stays under 16 MB whatever `xray_ring` is.
 - **None.** An ended or History shell (`reason: "ended"`), dch-lite
-  (`"lite"`), `xray_ring 0` (`"off"`), or a Claude session whose transcript is
-  gone (`reason: null`).
+  (`"lite"`), `xray_ring 0` (`"off"`), a Claude session whose transcript is
+  gone, or a Codex with no thread id or rollout (`reason: null`). An ended
+  Codex session has no corpus either: History records carry only a Claude
+  agent, so it answers as an ended shell (`reason: "ended"`).
 
 ```json
 {"schema":1,"session":"api","session_id":"0b1f6a52-4c1e-4d7a-9a51-2f6d8c3e7a10",
@@ -934,10 +1027,14 @@ The corpus:
 ```
 
 (Printed on one line.)
-- **`session_id`.** The agent UUID for Claude Code, the ring's id (`m` + 16
-  hex) for a live shell, and the record name for an ended shell.
+- **`other_projects`.** How many other sessions of this store have a
+  transcript in another project dir: what `--ref --scope all` would add.
+  Counted from names only; nothing is opened.
+- **`session_id`.** The agent UUID for Claude Code, the thread id for Codex
+  (`""` while it has none), the ring's id (`m` + 16 hex) for a live shell,
+  and the record name for an ended shell.
 - **Chapters.** Oldest first; at most 5000 (the newest).
-  - `anchor` is opaque: `f<inode>:<offset>` for Claude Code,
+  - `anchor` is opaque: `f<inode>:<offset>` for Claude Code and Codex,
     `s<seq of the prompt record>` for a shell.
   - `kind` is `prompt`, `command` or `compact`.
   - `title` is at most 120 Unicode scalars.
@@ -962,8 +1059,9 @@ the master's control socket. Nothing is typed into the session. It prints
   for its ring's header only, never its records (a dch 1.43.0 master sends one
   reply of records, which is dropped unread). The ring is cleared only if it
   still carries that id.
-- **Agent sessions.** A Claude Code session has no ring:
-  `ring_cleared: false`. So it is with `xray_ring 0` and while an agent
+- **Agent sessions.** A Claude Code or Codex session has no ring:
+  `ring_cleared: false`, with `corpus` `"claude"` or `"codex"` and its id (a
+  Codex with no thread id: `"none"` and `""`). So it is with `xray_ring 0` and while an agent
   runs in a shell (the ring is paused). Then nothing is cleared: the
   screen and scrollback stay, for `--read`, attach replay and the say gate.
   Once that agent has exited the ring runs again: a clear right after is a
@@ -1002,8 +1100,8 @@ field. A shell line (rows joined at soft wraps, at most 64 KiB) gives at most
 Each entry of `refs` carries `key` (`<shape>:<text>`), `shape`, `text`,
 `full` (a commit's hex as written), `project`, `count`, `defined`,
 `definitions`, `title` and `underline` (defined, or counted at least twice).
-`count` is per Claude mention, per shell block with OSC 133 marks, and per row
-without. A definition comes only from a paired tool result or a finished,
+`count` is per Claude or Codex mention, per shell block with OSC 133 marks,
+and per row without. A definition comes only from a paired tool result or a finished,
 typed shell block that did not fail: a heading (`# #831 Agent panes`), a
 `#831` line with `title:` within 3 lines, a JSON object or array with a number
 or id and a title (the whole tool result, up to 256 KiB, not the 3000-scalar
@@ -1011,35 +1109,64 @@ clip), or a `--title` on the command with its ref on the command
 or in the output. An orphan result, a forged or orphaned shell block, an error,
 a fence, a diff, a listing command (`rg`, `grep`, `ls`, ...), a file printed
 from outside the cwd, a heading with an empty title, and more than 3 headings
-of one shape never define. The command counts in every simple command of its
-line (split at `;`, `&`, `&&`, `|`, `||`, parentheses), past env assignments
-and `sudo`, `env`, `command`, `xargs`, `nice` and `time`, and inside `sh -c
-'…'` (`sh`, `bash`, `zsh`, `dash`, `ksh`; `-lc` too). A printed file is
+of one shape never define. The command counts in every simple command of it
+(split at `;`, `&`, `&&`, `|`, `||`, parentheses and newlines; a here-doc's
+body is not a command), past env assignments, `{`, `!`, `if`, `then`, `elif`,
+`else`, `do`, `while`, `until`, and `sudo`, `doas`, `env`, `command`, `exec`,
+`xargs`, `nice`, `nohup`, `stdbuf`, `time` and `timeout`, by name or by path
+(`/usr/bin/env`). It counts inside `sh -c '…'` (`sh`, `bash`, `zsh`, `dash`,
+`ksh`; `-lc` too), `eval`, `watch` and `env -S`, and inside `$(…)` and
+backquotes, quoted or not. A search or a printed file found only inside
+`$(…)` or backquotes still leaves the command's `--title` to define: its text
+feeds the command, it is not the output. A command of more than 256 words
+never defines. The file printers are `cat`, `head`, `tail`, `bat`, `batcat`,
+`less`, `more`, `nl`, `awk`, `sed`, `jq`, `yq`, `tac`, `sort`, `cut`, `uniq`,
+`rev`, `column`, `fold`, `fmt`, `glow`, `zcat` and `gzcat`; with no file
+argument (`… | jq .`) they print their input and define. A printed file is
 outside the cwd when its path, made absolute against the cwd or the directory
-an earlier `cd` went to, leaves the cwd (`/etc/x`, `../x`, a `~/` path read
-against `HOME`), when it holds `$` or a backquote, or after a `cd` to a place
-it cannot follow (`cd`, `cd $X`, `cd ~/x`).
+an earlier `cd` or `pushd` went to, leaves the cwd (`/etc/x`, `../x`, a `~/`
+path read against `HOME`), when it holds `$` or a backquote, or after a `cd`
+to a place it cannot follow (`cd`, `cd $X`, `cd ~/x`, `pushd +1`).
 
-`dch --xray <n> --ref <ref> --scope session --json` streams one ref's
-lines as NDJSON, each with `schema:1`: `first` (the key, `mode` and
+`dch --xray <n> --ref <ref> --json` streams one ref's
+lines as NDJSON, each with `schema:1`: `first` (the key, `mode`, `scope` and
 `budget_ms`), then `definition` and `mention` lines, a `tally` per file,
 `progress` at most every 250 ms, and `done` last (`partial`, `why`, `counts`,
 `files`, `bytes`, `lines_too_long`). `<ref>` is 1 to 256 bytes of UTF-8 with no
 control character and none of the bidi controls U+200E, U+200F, U+202A to
 U+202E and U+2066 to U+2069 (`dch: bad ref`), and must parse as exactly one
-ref (`dch: not a ref`), relative paths against the session's cwd. The default is a
-light scan: it stops after the first result, or after `--budget-ms` (50 to
-300, default 300) with `why: "budget"`; on a live shell it prints titles and
-counts only. `--full` reads the whole corpus (up to 10 s, `why: "time"`); a `--budget-ms`
-with it is accepted and has no effect. A file gives its first `mention` line
+ref (`dch: not a ref`), relative paths against the session's cwd.
+- **Scope.** `--scope session` reads `<n>`'s own transcript, or its ring and
+  screen. `--scope project`, the default (also for a remote caller), reads
+  that first, then the Claude Code transcript of every other session of this
+  store in `<n>`'s project dir, newest `lastSeen` first. `--scope all` then
+  adds the other project dirs, the dir with the newest session first. The
+  other sessions are the live ones (each master is asked for its command,
+  never for its ring or screen) and the History records, one per agent id.
+  Each transcript is found and opened as `<n>`'s is (a uuid, a valid
+  `config_dir`, one regular file in the store's project dirs, no symlink);
+  one that cannot be found is skipped and never opened. A shell `<n>`'s
+  project dir is its cwd's. Another session's lines carry `chapter: null`.
+  A live Codex `<n>` is read alone, whatever the scope: its rollout only,
+  with `first.scope` `"session"`.
+- **Light.** The default stops at its first result, or after `--budget-ms`
+  (50 to 300, default 300, across all files) with `why: "budget"`. With
+  `--scope project` or `all`, `<n>`'s own file is read to its end and only
+  another session's result stops the scan. A live shell's lines and another
+  session's give titles and counts only: no `mention`, no `passage`.
+- **Full.** `--full` reads the whole corpus up to its caps: 64 files
+  (`why: "files"`), 1 GiB (`why: "bytes"`) and 10 s (`why: "time"`); a
+  `--budget-ms` with it is accepted and has no effect.
+- **Counts.** `done.counts` has `session` (`<n>`'s mentions), `project` and
+  `project_sessions` (the other sessions of its project dir: their mentions,
+  and how many mention it), and `all` and `all_sessions` for the other dirs
+  (`null` unless `--scope all`). `progress` carries the counts so far. A file gives its first `mention` line
 and its newest 199; the `tally`'s `mentions_dropped` counts the mention lines
 left out, and its `count` stays exact. `definition` lines come once per title,
 at most 8 per file. The output is capped at 4 MiB with room kept for the
 `tally` and `done`; past the cap the scan stops and `done` says
 `partial: true, why: "output"`.
-`--scope project` and `--scope all` come with a later release and exit 2;
-until then `--scope session` must be given. No `--scope` means `project`, the
-default in every release, so it exits 2 with the `--scope project` message. A session with no corpus exits 1
+A session with no corpus exits 1
 with `dch: no x-ray corpus`. Nothing is written to disk: the index lives in the
 calling process for that one query. A reader that closes the pipe cancels the
 scan: dch stops at its next write, at most 250 ms later (the `progress`
@@ -1047,6 +1174,75 @@ cadence), prints no `done` and exits 0; `--json` and `--clear` exit 0
 silently too. Any other write failure prints `dch: X-ray failed on this
 session` and exits 3. SIGTERM ends
 it at once, with no `done` either.
+
+With `--full`, a commit or file ref also gets one `resolved` line, just
+before `done`: `{"schema":1,"resolved":{"kind","state","title","subtitle","lines"}}`,
+plus `first` for a file shown (below),
+`kind` `"commit"` or `"file"`, `lines` at most 14, each at most 200
+characters; the light scan never resolves. Every string is the text with
+invalid UTF-8 and NUL as U+FFFD, the controls JSON-escaped.
+
+- **Commit.** The SHA is checked again (7 to 40 lowercase hex). An ended
+  session runs nothing: `state: "ended"`. Otherwise dch runs git directly,
+  never through a shell: on macOS the first of the Command Line Tools git,
+  the git under `/var/db/xcode_select_link`, Xcode.app's,
+  `/opt/homebrew/bin/git` and `/usr/local/bin/git` (never `/usr/bin/git`,
+  the shim that can prompt to install them); elsewhere `/usr/bin/git`, then
+  `/usr/local/bin/git`; none is `no_git`. The argv is
+  `git --no-pager -c core.fsmonitor= -c core.hooksPath=/dev/null -c protocol.allow=never -c diff.external= -c color.ui=never -c log.showSignature=false -C <cwd>`,
+  then `rev-parse --is-inside-work-tree` (not `true`: `not_repo`), then
+  `show --no-color --no-ext-diff --no-textconv --stat=80 --stat-count=14 --format=%H%x00%an%x00%at%x00%s --end-of-options <sha>^{commit}`.
+  The environment is only `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`,
+  `GIT_OPTIONAL_LOCKS=0`, `GIT_TERMINAL_PROMPT=0`, `GIT_NO_LAZY_FETCH=1`,
+  `PATH=/usr/bin:/bin`, `HOME` and `LANG=en_US.UTF-8`; stdin is
+  `/dev/null`, and no other fd of dch's reaches git.
+  Both runs share one 3 s deadline (`timeout`: git's process group gets
+  SIGTERM, then SIGKILL a second later); dch keeps 64 KiB of
+  its output and 4 KiB of its errors and drains the rest. `ok` gives the
+  subject as `title`, `author · 3h ago · abc1234` as `subtitle` and the
+  stat as `lines` (past 14: the first 13 and the summary); a short SHA
+  matching several objects is `ambiguous`, anything else git refuses
+  `not_commit`. A repo's `objects/info/alternates` can make git read
+  objects from outside the project: the stat may then name another repo's
+  files. No code runs and nothing is written, and the lines go to the same
+  user who can read that repo.
+- **File.** The ref's path (a relative one against the session's cwd, a
+  `~/` one against `HOME`), in an ended session too, must lie inside the
+  project: the cwd's git root (the nearest parent holding `.git`), else the
+  cwd. A root that is `/`, `$HOME` or a directory above `$HOME` (by real
+  path; `HOME` and the passwd entry's home both count) is no project: every
+  file is then `outside_project`. Outside the project is `outside_project`
+  and nothing is touched. A path on the deny list is `secret_name` and is
+  not opened. The list is matched without regard to case against every part
+  of the whole path, as given and again as its real path:
+  - a part that starts with `.env`, `.ssh`, `.gnupg`, `.aws`, `.netrc`,
+    `.npmrc`, `.pypirc` or `.git-credentials`;
+  - a directory `.git`, `.kube`, `.docker`, `.azure`, `.oci`, `.claude`,
+    `.codex`, `.gcloud`, `.password-store`, `.config/gh` or
+    `.config/gcloud`, and everything under it;
+  - the name `.claude.json`, `.pgpass`, `.my.cnf`, `.vault-token`,
+    `.htpasswd`, `.s3cfg`, `credentials`, `credentials.json`,
+    `credentials.toml`, `credentials.db`,
+    `application_default_credentials.json`, `secrets.yaml`, `secrets.yml`
+    or `secrets.json`;
+  - a name that ends in `.pem`, `.key`, `.p12`, `.pfx`, `.p8`, `.ppk`,
+    `.jks`, `.keystore`, `.keychain`, `.keychain-db`, `.tfstate`,
+    `.tfstate.backup` or `history` (shell and REPL history);
+  - an `id_` name with no dot (`id_rsa`, never `id_rsa.pub`).
+
+  This guards the common credential files by name. It is not a guarantee:
+  a secret in a file with any other name (a `config.yml`, a script, a log)
+  is shown. The real path must also lie inside the project's real path, so
+  a symlinked directory on the way is followed only while it stays inside;
+  else it is `outside_project`. A file with more than one hard link is
+  `outside_project` too: its other names can lie outside. Over 2 MB is
+  `too_large`. `ok` reads it, the file itself never a symlink, and
+  gives the name as `title`, the path from the cwd (`· line N`
+  with one) as `subtitle`, and up to 14 lines with line N the seventh, CRs
+  dropped, kept whole at either end of the file; `first`, only here, is the
+  1-based number of `lines[0]` (1 for a ref with no line), so a consumer
+  can tell which row is line N at the end of the file. A path
+  that is gone, a symlink or not a regular file gives no `resolved` line.
 
 `dch --xray <n> --follow --json` streams NDJSON, each line with
 `schema:1`. The first line is `{"schema":1,"snapshot":{…}}`, holding the
@@ -1062,10 +1258,11 @@ every 250 ms:
   chapters whose `offset` is below `S`, then apply the batch's refs.
 - `{"schema":1,"reset":{"why":…}}`: drop what you hold for the session. A new
   snapshot follows at once.
-  - `"rotated"` means a Claude Code `/clear`, another transcript or none, or
-    a shell whose ring paused for an agent, resumed after one, or got a new
-    `session_id`.
-  - `"shrunk"` means the transcript was cut.
+  - `"rotated"` means a Claude Code `/clear`, another transcript or none, a
+    Codex whose thread id changed (a new thread, or none) or whose rollout
+    appeared or was replaced, an agent that exited, or a shell whose ring
+    paused for an agent, resumed after one, or got a new `session_id`.
+  - `"shrunk"` means the transcript or rollout was cut.
   - `"cleared"` means `--clear`, ED 3 or RIS emptied a shell's ring. It never
     comes with `evict`.
   - `"evicted"` means one eviction changed more than 256 keys. It is sent at
@@ -1083,14 +1280,56 @@ Nothing runs on a timer:
 - a Claude Code transcript is watched with kqueue (inotify on Linux);
 - its project directory is watched for a new file, which the master is
   then asked about;
+- a Codex rollout is watched the same way, with its `shell_snapshots`
+  directory for a new thread and, until the rollout exists, the deepest of
+  today's `sessions/YYYY/MM/DD` there (Codex names it by local time);
 - a shell is followed through the master's wake, sent when its ring or its
   screen changes (an alternate-screen switch included).
+
+An agent starting or ending in a followed session sends `reset` `rotated`
+within 2 s, with the ring on or with `xray_ring = 0`. While a follower holds
+one of the master's 4 subscriber slots, the master looks for the agent once a
+second; with no follower it does not. A Claude Code follower past the 4 slots
+is not told when its agent exits.
 
 Rules for shells and endings:
 - A master takes 4 shell subscribers. A fifth gets `dch: busy` and exit 1.
 - An ended session or a History record writes its one snapshot and exits 0.
 - A live one exits 0 when the session ends, when its connection drops (a
   `--restart`), or when the reader closes the pipe, idle or not.
+
+`dch --xray <n> --chapter <anchor> --json` prints one chapter's entries as
+one object: `{"schema":1,"session","session_id","anchor","title","at","kind","entries":[…],"truncated":bool}`.
+`<anchor>` is a chapter's `anchor` from `--json`: 1 to 128 bytes of
+`A-Z`, `a-z`, `0-9`, `:`, `_`, `.` and `-`, else exit 2 with `dch: bad
+anchor`. dch reads the session's chapters again and answers only when one of
+them has exactly that anchor; it never seeks to the offset in it. Otherwise it
+exits 1 with `dch: chapter gone` (the transcript was rewritten, or the ring
+evicted or cleared the block): read `--json` again. `--chapter` does not go
+with `--ref`, `--follow` or `--clear`.
+
+Each entry is `{"role","tool","text","error"}`:
+- Claude Code: `user` is the prompt (a slash command as `/name args`, a
+  compaction's summary too), `assistant` its text. `tool` is a call, with the
+  tool's name: a Bash command, the path of an Edit, MultiEdit, Write or Read,
+  else the input's first 8 fields as `key: value` lines, each value cut at 240
+  characters. `output` is its result, in the call's chapter, with the call's
+  name (`null` for a result with no call); `error` is the result's error flag,
+  never set for a Grep or Glob that found nothing. Thinking, images, notices
+  and subagent turns are left out.
+- A shell: one `tool` entry with the typed command and one `output` entry
+  with the block's output rows, soft-wrapped rows joined; `error` is a
+  non-zero exit. Only rows that scrolled into the ring count: rows still on
+  the screen are not in it. A block with no marks has no chapter.
+
+`text` is cut at 6000 Unicode scalars (3000 for an `output`) and escaped like
+`--ls-json`. The whole object is capped at 1 MiB: entries past the cap are
+left out and `truncated` is `true`. An ended or History Claude Code session is
+read from its transcript. An ended shell, a ring that is off or paused, a
+session with no transcript, and a live Codex (its rollout has no chapter
+reader yet) exit 1 with `dch: no x-ray corpus`. Nothing is
+written to disk. A reader that closes the pipe gets exit 0 and no message;
+SIGTERM ends it at once.
 
 No new session or rename takes a name of exactly `m` + 16 hex in any case
 (`M0123456789ABCDEF` too: on a case-insensitive file system its socket also
@@ -1107,8 +1346,9 @@ system, like any name.
 | Exit | Meaning |
 | --- | --- |
 | 0 | the object was printed; a `--follow` ended with its session, its connection, or its reader |
-| 1 | `dch: no such session` (also a master that hangs up after the connect, before its answer is complete, in every form: nothing more is written; `--ref` keeps the lines already out and writes no `done`; `--follow` once its snapshot is out exits 0 instead), `dch: ambiguous session`, `dch: no x-ray corpus` (`--clear`, `--ref`), `dch: busy` (a fifth `--follow` on one shell) |
-| 2 | bad usage: `--json` missing, a flag twice, `--follow` with `--ref` or `--clear`, a flag of a later release (`--chapter`, `--scope project`, `--scope all`, ...), `--xray` not first, a bad or remote `<n>`, a bad `--ref`, `--scope` or `--budget-ms` |
+| 1 | `dch: no such session` (also a master that hangs up after the connect, before its answer is complete, in every form: nothing more is written; `--ref` keeps the lines already out and writes no `done`; `--follow` once its snapshot is out exits 0 instead), `dch: ambiguous session`, `dch: no x-ray corpus` (`--clear`, `--ref`, `--chapter`), `dch: chapter gone` (`--chapter`: no chapter has that anchor now), `dch: busy` (a fifth `--follow` on one shell) |
+| 2 | bad usage: `--json` missing, a flag twice, `--follow` with `--ref` or `--clear`, `--chapter` with `--ref`, `--follow` or `--clear`, a flag of a later release, `--xray` not first, a bad `<n>`, a bad `--ref`, `--chapter` anchor, `--scope` or `--budget-ms` |
+| 4, 6, 7 | a remote `host:name` only: refused by the host's gate; the host lacks `xray`; the host is unreachable or the connection was lost |
 | 3 | `dch: X-ray failed on this session`: the session answered garbage, the transcript could not be read (it is there, but opening or reading it failed), memory ran out, or a write failed with an error other than a closed pipe |
 
 ### Auto-allow
@@ -1813,10 +2053,11 @@ version. Commands run as argument vectors, never through a shell.
 
 Remote frames 1.1 adds one op, `ctl`: a client runs one of dch's own verbs
 on the host and gets its output and exit status, exactly as if it had run
-there. `0x18` says `"proto":"1.1"` and always lists `ctl` and `ctl-cancel`
-in `ops` (`create` only with `--allow-create`). A client checks for the
-`ctl-cancel` token, not the proto, before it sends a `0x34` or a second
-`0x30`. One request at a time:
+there. `0x18` says `"proto":"1.1"` and always lists `ctl`, `ctl-cancel` and
+`xray` in `ops` (`create` only with `--allow-create`). A client checks for
+the `ctl-cancel` token, not the proto, before it sends a `0x34` or a second
+`0x30`, and for the `xray` token before it sends an `--xray`. One request at
+a time:
 
 ```
 → 0x30  {"argv":["--read","api"],"cwd":"/abs/dir"}    cwd optional
@@ -1881,6 +2122,9 @@ for a local session named that way.
 | `--pin`, `--unpin`, `--forget` | `--pin <n>... --json`; `--forget --all --json` | 60 s |
 | `--stop` | `--stop <n>... --json` | 660 s |
 | `--say` | `--say <n> --json -- <text>` | 660 s |
+| `--xray` | `--xray <n> --json [--clear \| --chapter <anchor>]` | 60 s |
+| `--xray` | `--xray <n> --json --follow` (no cap either) | none |
+| `--xray` | `--xray <n> --ref <ref> [--scope <s>] [--full] [--budget-ms <ms>] --json` | 60 s |
 
 Refused, before anything runs: an `argv` of fewer than 2 elements; a verb
 or flag not in the table; a bad name; `--config`, `serve`, `-h` or `-f`
@@ -1888,10 +2132,37 @@ anywhere outside the free text (`--send`'s words, `--keys`' keys,
 `--spawn`'s command, `--say`'s text, `-m`'s alias); `--all` except in
 `--forget --all --json`; a `cwd` that is no directory (`no such directory`);
 `--spawn` or `--revive` without `--allow-create` (`creating sessions is off
-on this host (dch serve --allow-create)`). `--xray` is reserved for a later
-release: `xray not supported by this host`.
+on this host (dch serve --allow-create)`).
 
-**Its limits.** Stdout and stderr together get 8 MiB. At that cap the server
+`--xray` takes its name right after it, then its flags in any order, each
+once (`--json twice`). A flag's value is the next element even when it
+starts with `-`. Refused: no `--json` (`--xray needs --json (the view is
+client-side only)`); two of `--ref`, `--follow`, `--chapter` and `--clear`;
+`--scope`, `--full` or `--budget-ms` without `--ref`; a flag not in the
+table (`--requests is not allowed with --xray`); a missing value (`--ref
+needs a value`); and a value that fails `dch --xray`'s rules (`bad ref`,
+`not a ref`, `bad anchor`, `bad scope`, `bad budget`). `--clear` needs no
+`--allow-create`, only the gate, like `-k`. Everything else, `--scope
+project` for one, is the host's dch's to answer.
+
+**What `xray` lets a peer read.** More than the chapters of the session it
+names. `--ref <file ref> --full` returns 14-line windows of files on this
+host: any file inside that session's project (its cwd's git root, else its
+cwd; none when that is `/`, `$HOME` or above it) that is a regular file of
+at most 2 MB with one link, not itself a symlink and not on the deny list
+(`.env*`, `.ssh`, `.git/`, `.claude/`, `.config/gh/`, `*.pem`, `id_rsa`,
+`*history`, ...: the File resolver's full list). The list catches the
+common credential files by name, not every file that holds a secret. A commit
+ref returns that commit's `git show --stat` from the session's repo.
+`--scope all` returns lines (and with `--full`, definition passages) from
+every other session's Claude Code transcript of this store, in every project
+dir; `--scope project`, the default, from those in the session's own project
+dir. Nothing is written to disk; `--clear` empties a shell session's X-ray
+ring. Let in only peers you would let read those files and
+transcripts.
+
+**Its limits.** Stdout and stderr together get 8 MiB (`--xray --follow`:
+no cap). At that cap the server
 stops forwarding, sends the dch SIGTERM (SIGKILL 2 s later) and ends with
 `{"exit":2,"why":"cap"}`. Past its timeout (the table) it does the same with
 `"why":"timeout"`. A client that closes the connection (or half-closes it)
@@ -1972,7 +2243,8 @@ logs a loud warning and is removed from the environment at startup, so
 nothing `dch serve` starts inherits it; never set it on a real host.
 
 **Log.** Session names and device ids come from the phone. Every log line
-escapes control characters (C0, DEL, C1, bidi overrides and isolates) as
+escapes control characters (C0, DEL, C1, bidi overrides, isolates and
+marks, U+2028 and U+2029) as
 `\xNN` or `\u{NNNN}`, and a session name containing one is refused.
 
 **Limits.** At most 64 connections, 16 per peer, and 4 live-list streams per
@@ -2005,6 +2277,7 @@ dch --hosts mini,pi=100.64.1.2:8771 --ls --remote   # these hosts, not your tail
 dch --read mybox:api              # a control verb on mybox (dch serve 1.41+)
 dch --host mybox --send api -- make test
 dch --cwd /srv/app --spawn mybox:build -- make   # needs dch serve --allow-create
+dch --xray mybox:api --json       # X-ray a session on mybox (dch serve 1.55.0+)
 ```
 
 **Which hosts.** `--hosts` (a comma-separated `[label=]host[:port]` list), else
@@ -2057,7 +2330,13 @@ each host's ended sessions, fetched as its own `dch --history --json` over
   each record as the host sent it, its C1, DEL and bidi controls written as
   `\u` escapes, plus `"host"` (its label) and `"stale"` last; a record that
   already holds a `"host"` or `"stale"` key, or has no `"name"`, is dropped,
-  so a host cannot pass for another. At most 500 records and 2 MiB per host.
+  so a host cannot pass for another. So is one a strict JSON reader would
+  reject (a lone surrogate `\u` escape, a number past a double's range,
+  nesting over 64 deep, a key counting as a level), and one that gives a
+  key dch reads
+  (`file`, `alias`, `end`, `cwd`, `argv`, `agent` and its `session_id` and
+  `name`, `ended`, `updated`, `pinned`) twice, so text, the picker and JSON
+  show the same records. At most 500 records and 2 MiB per host.
   Without `--remote` nothing is dialled and the output is unchanged.
 - *An old or odd host.* One whose hello lacks `ctl` (before dch serve 1.41,
   or an older Prosper) gets one stderr line, `dch: <host>: does not support remote
@@ -2067,7 +2346,7 @@ each host's ended sessions, fetched as its own `dch --history --json` over
   host that is down (its cached records, stale, if any). None of these
   change the exit status (0) or the local listing, and a hanging host costs
   at most the box.
-- *The picker.* History lists them after the local rows (above). `Enter`
+- *The picker.* History sorts them among the local rows (above). `Enter`
   runs `dch --revive <file>.json --host <host>` there, which needs `dch
   serve --allow-create` on the host; without it the status line says `dch:
   <host>: does not support --revive (needs dch serve --allow-create)`.
@@ -2118,14 +2397,17 @@ come, byte for byte: the output and the exit status are the remote dch's.
 Anything off the table is refused here, before any connection (`dch: can't
 run on a remote host: <why>`, exit 1). `--cwd <dir>` is `--spawn`'s start
 directory: on the host for a remote spawn, here (it must exist) for a local
-one; it goes with no other verb.
+one; it goes with no other verb. `dch --xray host:name ... --json` goes the
+same way (see [X-ray queries](#x-ray-queries---xray)): `--xray` must come first, so
+it has no `--host` form, and dch checks its values by its own rules before
+any connection (exit 2).
 
 | Code | Means |
 | --- | --- |
 | 0-3 | The remote dch's own exit status. 2 with `dch: <host>: <verb> stopped by the host (cap\|timeout)` on stderr: the host cut it short. |
 | 1 | Also: the host refused the request (`dch: <host>: <why>`), an unknown host, or a request dch would not send. |
 | 4 | Refused: the host's gate sent a coded `0x13` (`dch: <host> refused: <message>`). |
-| 6 | The host lacks the op: `dch: <host>: does not support <verb> (needs dch serve 1.41+)`, or `(needs dch serve --allow-create)` for `--spawn` and `--revive`. |
+| 6 | The host lacks the op: `dch: <host>: does not support <verb> (needs dch serve 1.41+)`, or `(needs dch serve --allow-create)` for `--spawn` and `--revive`, or `(needs dch serve 1.55.0+)` for `--xray` when the hello lacks `xray`; nothing is sent. |
 | 7 | Unreachable: `dch: <host>: unreachable: <why>` (down, `busy`, or the connection lost before the exit status). |
 
 `-a`'s codes are unchanged.
@@ -2138,7 +2420,7 @@ since it may be on a LAN or behind a name tailscale does not know. Every byte
 from a peer is untrusted: frames and JSON fields are bounded, and every name
 or message a peer sent is printed with its control characters escaped
 (`\xNN`), in `--ls`, `-lj` and the picker; `--ls-json` writes C1 and bidi
-controls as `\u` escapes. Only the screen bytes of an attach go to the
+controls, U+2028 and U+2029 as `\u` escapes, as all of dch's JSON does. Only the screen bytes of an attach go to the
 terminal as they are, as a local session's do.
 
 **Not yet.** No live list stream (the picker polls), no remote rename (`-rl`)

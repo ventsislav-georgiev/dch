@@ -980,7 +980,7 @@ fi
 if $xcc -O1 -I"$xsrc" -I. -o "$TMP/xray_unit" "$xsrc/tests/xray_unit.c" \
     "$xsrc/xray.c" "$xsrc/json.c" >"$TMP/xray_unit.log" 2>&1; then
     if "$TMP/xray_unit" >"$TMP/xray_unit.log" 2>&1; then
-        ok "xray units: titles, project key, ids, the seam, decoder caps"
+        ok "xray units: titles, project key, ids, the seam, decoder caps, resolvers"
     else
         bad "xray units"; grep -v '^  ok' "$TMP/xray_unit.log" | sed 's/^/       /'
     fi
@@ -1009,9 +1009,17 @@ if [ "$MIRROR" = "1" ]; then
     # pyrun shows a passing test's own skip lines only on failure
     [ -n "${ASAN_OPTIONS:-}" ] &&
         printf '  skip xray: the 16 MiB RSS budget (sanitizer build)\n'
+    pyrun "xray resolvers: commit and file, the hostile-repo sentinel" xray_resolve_test.py
 else
     skipmirror "xray: a typed shell block, --clear, a live Claude, the seam, names"
+    skipmirror "xray resolvers: commit and file, the hostile-repo sentinel"
 fi
+# a live Codex's rollout (#160, 7.4): the one-UUID mapping, the seam, --ref,
+# --follow; its ring-pause part skips itself without the mirror
+pyrun "xray: a live Codex's rollout, the mapping, the seam, --follow" xray_codex_test.py
+# the file window's guard (#178): QA's repro with FAKE files, local and over
+# a loopback dch serve, through ended sessions so lite runs it too
+pyrun "xray file windows: no wide root, the deny list, hard links" xray_deny_test.py
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

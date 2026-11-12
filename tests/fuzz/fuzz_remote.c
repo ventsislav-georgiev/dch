@@ -6,7 +6,9 @@
 ** relay (each cut into reads of a size the input picks), and logsafe at a
 ** small cap; #114's ctl stream (ctl_in) and a hello's ops (hello_op,
 ** #118's ctl-cancel too); #115's history: a host's --history --json reply,
-** the history cache, and a history probe's hello and ctl frames. Every peer
+** the history cache, and a history probe's hello and ctl frames; #158's
+** --requests: a stdin line (rq_parse, then rq_check's request forms), a
+** host's output and a hello wrapped as NDJSON. Every peer
 ** string, once escaped, must hold no
 ** control byte: C0, DEL, C1 or a bidi control. Linked with the rest of dch
 ** minus remote.o, and dch.c built with -Dmain=dch_main. */
@@ -18,7 +20,8 @@ int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n);
 
 /* Valid UTF-8 (logsafe writes any other byte as \xNN) holding nothing a
 ** terminal acts on: C0, DEL, C1 (U+0080-009F), the bidi embeddings,
-** overrides and isolates (U+202A-202E, U+2066-2069). The ranges are
+** overrides and isolates (U+202A-202E, U+2066-2069), the bidi marks
+** (U+200E, U+200F, U+061C) and U+2028/U+2029 (#167). The ranges are
 ** spelled out here, not cp_ctl's, so a regression there shows. */
 static void
 inert(const char *s)
@@ -30,7 +33,8 @@ inert(const char *s)
 	for (; *u; u += k)
 		if (!(k = utf8_at(u, &cp)) || cp < 0x20 ||
 		    (cp >= 0x7f && cp < 0xa0) || (cp >= 0x202a && cp <= 0x202e) ||
-		    (cp >= 0x2066 && cp <= 0x2069))
+		    (cp >= 0x2066 && cp <= 0x2069) || cp == 0x200e ||
+		    cp == 0x200f || cp == 0x061c || cp == 0x2028 || cp == 0x2029)
 			abort();
 }
 
@@ -67,8 +71,9 @@ label_ok(const char *l, size_t cap, const char *extra)
 }
 
 /* A remote history record (#115): every field inert once escaped, json an
-** object that parses back with no "host" or "stale" key of its own and
-** nothing raw a terminal acts on; a cached one's host a plain label that
+** object that parses back with no "host" or "stale" key of its own, still
+** strict and with no key read twice (#167), and nothing raw a terminal
+** acts on; a cached one's host a plain label that
 ** answered in (0, now + 60]. */
 static void
 hrec_ok(const struct dch_rrec *r, int cached)
@@ -92,7 +97,8 @@ hrec_ok(const struct dch_rrec *r, int cached)
 	ok = dch_json_parse(&jp, r->json) == 0 && jp.ntok > 0 &&
 	     jp.tok[0].kind == JSON_OBJECT &&
 	     dch_json_field(&jp, 0, "host") == -1 &&
-	     dch_json_field(&jp, 0, "stale") == -1;
+	     dch_json_field(&jp, 0, "stale") == -1 &&
+	     hist_strict(&jp, 0) && !hist_dup(&jp, 0);	/* #167 */
 	dch_json_free(&jp);
 	if (!ok || (cached && (!plain(r->host, strlen(r->host), "-._") ||
 	                       r->at <= 0 || r->at > NOW + 60)) ||
@@ -111,7 +117,7 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		return 0;
 	memcpy(t, d + 1, n - 1);
 	t[n - 1] = '\0';
-	switch (d[0] % 10)
+	switch (d[0] % 11)
 	{
 	case 0:		/* --hosts */
 		k = hosts_parse(t, hv, RM_HOSTS, bad, sizeof bad);
@@ -309,9 +315,10 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		size_t c = n > 1 ? (size_t)d[1] % 64 + 1 : 1, off;
 		int sv[2];
 
-		(void)hist_doc(t, "h", NOW, &l);
+		/* the document after d[1], as the seeds have it (#167) */
+		(void)hist_doc(n > 1 ? t + 1 : t, "h", NOW, &l);
 		k = l.n;
-		(void)hist_cdoc(t, NOW, &l);
+		(void)hist_cdoc(n > 1 ? t + 1 : t, NOW, &l);
 		if (k > RM_HRECS)
 			abort();
 		for (i = 0; i < l.n; i++)
@@ -346,6 +353,78 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		}
 		close(sv[1]);
 		probes_free(p, 1);
+		break;
+	}
+	case 10:	/* #158: a --requests line; a host's lines wrapped */
+	{
+		static const char *const never[] = { "--follow", "--requests",
+		                                     "--all", NULL };
+		struct sb o = {0}, b = {0};
+		long long req;
+		char **av, msg[400];
+		int ac, kind = rq_parse(t, &req, &av, &ac), ok;
+
+		if (kind != RQ_BAD && kind != RQ_REQ && kind != RQ_CANCEL)
+			abort();
+		if ((kind != RQ_BAD && (req < 1 || req > 0x7fffffff)) ||
+		    (kind != RQ_REQ && (av || ac)) || (ac && !av) || ac < 0)
+			abort();
+		if (kind == RQ_REQ)
+		{
+			char x[] = "x";
+
+			msg[0] = '\0';
+			ok = rq_check(x, ac, av, msg, sizeof msg) == 0;
+			/* refused: dch's own stderr line; else --json is
+			** there and nothing that streams or is client-only */
+			if (!ok && strncmp(msg, "dch: ", 5))
+				abort();
+			for (i = 0, j = 0; ok && i < ac; i++)
+			{
+				j |= !strcmp(av[i], "--json");
+				for (k = 0; never[k]; k++)
+					if (!strcmp(av[i], never[k]) &&
+					    (i == 0 || (strcmp(av[i - 1], "--ref") &&
+					                strcmp(av[i - 1], "--chapter"))))
+						abort();
+			}
+			if (ok && !j)
+				abort();
+		}
+		free(av);
+		/* t as a host's stdout, then stderr, then a hello: each line
+		** out is one JSON object of req's, whatever the host sent, and
+		** parses at its depth (a host object 1024 deep, wrapped) */
+		for (k = 0; k < 2; k++)
+		{
+			sb_add(&b, t, n - 1);
+			if (rq_wrap(&o, 7, k, &b, 1) < 0)
+				abort();	/* a line under the bound always goes */
+		}
+		rq_ready(&o, t);
+		if (b.n || o.bad)
+			abort();
+		for (i = 0; o.p && o.p[i];)
+		{
+			struct json_parser jp;
+			char *nl = strchr(o.p + i, '\n');
+			long long v = 0;
+
+			if (!nl)
+				abort();	/* every line ends */
+			*nl = '\0';
+			inert(o.p + i);	/* no raw control a host sent */
+			if (dch_json_parse(&jp, o.p + i) != 0 || jp.ntok < 1 ||
+			    jp.tok[0].kind != JSON_OBJECT ||
+			    (jint(&jp, 0, "req", &v) != 1 &&
+			     dch_json_field(&jp, 0, "ready") < 0) ||
+			    (dch_json_field(&jp, 0, "req") >= 0 && v != 7))
+				abort();
+			dch_json_free(&jp);
+			i = (int)(nl - o.p) + 1;
+		}
+		free(o.p);
+		free(b.p);
 		break;
 	}
 	case 7:		/* logsafe cut short */

@@ -1,0 +1,4 @@
+{"type": "user", "message": {"role": "user", "content": "Plan for the panes"}, "timestamp": "2026-11-10T10:00:01.000Z", "cwd": "/home/demo/proj"}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "b1", "name": "Bash", "input": {"command": "gh issue view 831"}}]}, "timestamp": "2026-11-10T10:00:02.000Z", "cwd": "/home/demo/proj"}
+{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "b1", "content": "# #831 Agent panes\nThe panes show agents.", "is_error": false}]}, "timestamp": "2026-11-10T10:00:03.000Z", "cwd": "/home/demo/proj"}
+{"type": "user", "message": {"role": "user", "content": "and #831 again"}, "timestamp": "2026-11-10T10:00:04.000Z", "cwd": "/home/demo/proj"}

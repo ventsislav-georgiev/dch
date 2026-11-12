@@ -125,6 +125,44 @@ parse_pieces(const uint8_t *d, size_t n, size_t room, struct sb *out)
 	memset(&ev, 0, sizeof ev);
 }
 
+/* An --xray ctl_check let through (#157, spec #832 4.4): the name right
+** after the verb; 3.1's flags only, each once, --json among them, at most
+** one of --follow, --ref, --chapter, --clear; --scope, --full, --budget-ms
+** only with --ref; each value by its rule; no timeout and no cap for
+** --follow alone. */
+static void
+xray_inv(int ac, char **av, const unsigned char *kind, int fl)
+{
+	static const char *const opt[] = { "--json", "--follow", "--clear",
+	                                   "--full", "--ref", "--chapter",
+	                                   "--scope", "--budget-ms" };
+	unsigned seen = 0, k, one;
+	int i;
+
+	if (kind[1] != CK_NAME)
+		abort();
+	for (i = 2; i < ac; i++)
+	{
+		for (k = 0; k < 8 && strcmp(av[i], opt[k]); k++)
+			;
+		if (k == 8 || kind[i] != CK_FLAG || seen & 1u << k)
+			abort();
+		seen |= 1u << k;
+		if (k < 4)
+			continue;
+		if (++i >= ac || kind[i] != (k >= 6 ? CK_VALUE : CK_TEXT) ||
+		    (k == 5 && !xray_anchor_ok(av[i])) ||
+		    (k == 6 && !xray_scope_ok(av[i])) ||
+		    (k == 7 && xray_budget(av[i]) < 50))
+			abort();
+	}
+	one = seen & (2 | 4 | 16 | 32);
+	if (!(seen & 1) || one & (one - 1) || (seen & (8 | 64 | 128) &&
+	                                       !(seen & 16)) ||
+	    fl != (seen & 2 ? CTL_FOREVER | CTL_NOCAP : 0))
+		abort();
+}
+
 /* What ctl_check let through (fl >= 0) is on the allowlist. */
 static void
 ctl_inv(int ac, char **av, const unsigned char *kind, int fl)
@@ -133,9 +171,14 @@ ctl_inv(int ac, char **av, const unsigned char *kind, int fl)
 
 	if (fl < 0)
 		return;
-	if (ac < 2 || ac > CTL_ARGV_MAX || !ctl_known(av[0]) ||
-	    kind[0] != CK_VERB || (fl & ~(CTL_CREATE | CTL_LONG | CTL_FOREVER)))
+	if (ac < 2 || ac > CTL_ARGV_MAX ||
+	    (!ctl_known(av[0]) && strcmp(av[0], "--xray")) ||
+	    kind[0] != CK_VERB ||
+	    (fl & ~(CTL_CREATE | CTL_LONG | CTL_FOREVER | CTL_NOCAP)) ||
+	    (fl & CTL_NOCAP && strcmp(av[0], "--xray")))
 		abort();
+	if (!strcmp(av[0], "--xray"))
+		xray_inv(ac, av, kind, fl);
 	/* the verbs that wait on an agent get the long timeout (#122: --run) */
 	if (!(fl & CTL_LONG) &&
 	    (!strcmp(av[0], "--say") || !strcmp(av[0], "--stop") ||
@@ -268,6 +311,17 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 			abort();
 		if (fl >= 0)
 			ctl_inv(ac, av, kind, fl);
+		/* #157: an --xray --ref that serve runs has 3.1's text */
+		for (int i = 2; fl >= 0 && !strcmp(av[0], "--xray") && i + 1 < ac;
+		     i++)
+		{
+			struct xr_span sp;
+
+			if (kind[i] == CK_FLAG && !strcmp(av[i], "--ref") &&
+			    (!xr_ref_ok(av[i + 1]) ||
+			     !xr_ref_parse(av[i + 1], NULL, &sp)))
+				abort();
+		}
 		free(av);
 	}
 	{
@@ -284,9 +338,6 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		}
 		fl = c ? ctl_check(ac, v, kind, why, sizeof why) : -1;
 		if (c && fl < 0 && !why[0])
-			abort();
-		if (c && ac && !strcmp(v[0], "--xray") &&
-		    (fl >= 0 || strcmp(why, "xray not supported by this host")))
 			abort();
 		if (c)
 			ctl_inv(ac, v, kind, fl);

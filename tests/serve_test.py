@@ -243,6 +243,243 @@ def main():
                            text=True, timeout=10)
         return r.stdout.split()
 
+    def ctl1(port, argv, s=None):
+        """One 0x30 of argv: ("ran", exit, why, stdout, stderr) at its 0x33,
+        or ("refused", message) at a 0x13."""
+        s = s or conn(port)
+        out, err = b"", b""
+        try:
+            send(s, 0x30, {"argv": argv})
+            while True:
+                t, pl = frame(s)
+                if t == 0x13:
+                    return "refused", json.loads(pl).get("message")
+                if t == 0x31:
+                    out += pl
+                elif t == 0x32:
+                    err += pl
+                elif t == 0x33:
+                    j = json.loads(pl)
+                    return "ran", j["exit"], j.get("why"), out, err
+        except (EOFError, OSError) as e:
+            return "lost", str(e)
+        finally:
+            s.close()
+
+    def xray_checks(port, log):
+        """#157 (spec #832 4.4, 9.5): the --xray allowlist entries on a dch
+        serve without --allow-create. Each accepted form runs the host's
+        dch, its bytes and exit those of the same argv run locally; each
+        refused one is a 0x13 naming 3.1's rule, nothing run."""
+        def chk(msg, cond, extra):
+            check(msg, cond)
+            if not cond:
+                print("       %r" % (extra,))
+
+        n = "svx-none"		# no such session: every run ends at once
+        bidi = ["\u200e", "\u200f", "\u202a", "\u202b", "\u202c",
+                "\u202d", "\u202e", "\u2066", "\u2067", "\u2068",
+                "\u2069"]
+        url = "https://example.com/" + "a" * 236		# 256 bytes, a ref
+        ok = [["--json"], ["--follow", "--json"], ["--json", "--follow"],
+              ["--clear", "--json"], ["--json", "--clear"],
+              ["--ref", "#831", "--json"],
+              ["--json", "--budget-ms", "50", "--full", "--scope",
+               "session", "--ref", "#831"],
+              ["--ref", url, "--scope", "session", "--json"],
+              ["--ref", "#831", "--scope", "project", "--json"],
+              ["--ref", "#831", "--scope", "all", "--json"],
+              ["--ref", "#831", "--budget-ms", "300", "--json"],
+              ["--chapter", "a", "--json"],
+              ["--chapter", "Az09:_.-", "--json"],
+              ["--chapter", "-f", "--json"],
+              ["--chapter", "c" * 128, "--json"]]
+        names = ["9f9f9f9f-0000-4000-8000-000000000000", "rec.json",
+                 "m0123456789abcdef"]
+        no = [([], "--xray needs --json (the view is client-side only)"),
+              (["--follow"], "--xray needs --json (the view is "
+               "client-side only)"),
+              (["--requests", "--json"],
+               "--requests is not allowed with --xray"),
+              (["--json", "--json"], "--json twice"),
+              (["--clear", "--json", "--clear"], "--clear twice"),
+              (["--ref", "#1", "--ref", "#2", "--json"], "--ref twice"),
+              (["--json", "--ref"], "--ref needs a value"),
+              (["--follow", "--ref", "#1", "--json"],
+               "--ref, --follow, --chapter and --clear exclude each other"),
+              (["--clear", "--chapter", "a", "--json"],
+               "--ref, --follow, --chapter and --clear exclude each other"),
+              (["--clear", "--full", "--json"],
+               "--scope, --full and --budget-ms come with --ref"),
+              (["--scope", "session", "--json"],
+               "--scope, --full and --budget-ms come with --ref"),
+              (["--json", "--config"], "--config is not allowed"),
+              (["--json", "--cwd"], "--cwd is not allowed with --xray"),
+              (["--json", "other"], "unexpected other after --xray"),
+              (["--ref", "", "--json"], "bad ref"),
+              (["--ref", url + "a", "--json"], "bad ref"),
+              (["--ref", "#1\x01", "--json"], "bad ref"),
+              (["--ref", "#1\x1b", "--json"], "bad ref"),
+              (["--ref", "#1\x7f", "--json"], "bad ref"),
+              (["--ref", "#1\x85", "--json"], "bad ref"),
+              (["--ref", "#1\x9f", "--json"], "bad ref"),
+              (["--ref", "x", "--json"], "not a ref"),
+              # dash-led: the value, not a flag (else "--json twice")
+              (["--ref", "--json", "--json"], "not a ref"),
+              (["--chapter", "", "--json"], "bad anchor"),
+              (["--chapter", "c" * 129, "--json"], "bad anchor"),
+              (["--chapter", "a/b", "--json"], "bad anchor"),
+              (["--chapter", "a b", "--json"], "bad anchor"),
+              (["--chapter", "\u00e9", "--json"], "bad anchor"),
+              (["--ref", "#1", "--scope", "Session", "--json"], "bad scope"),
+              (["--ref", "#1", "--scope", "", "--json"], "bad scope"),
+              (["--ref", "#1", "--scope", "none", "--json"], "bad scope")]
+        no += [(["--ref", "#1" + b, "--json"], "bad ref") for b in bidi]
+        no += [(["--ref", "#1", "--budget-ms", b, "--json"], "bad budget")
+               for b in ("49", "301", "+50", "0x40", "4294967346", "",
+                         " 50", "-50")]
+        bad_names = [("-x", "a session name starting with - can't be "
+                      "passed to dch"),
+                     ("a:b", "a session name with ':' is local only"),
+                     ("a/b", "invalid session name"),
+                     ("", "invalid session name"),
+                     ("a\x1bb", "invalid session name")]
+        before = text(log).count(" ctl --xray ")
+        for a in ok:
+            got = ctl1(port, ["--xray", n] + a)
+            loc = subprocess.run([DCH, "--xray", n] + a, env=env,
+                                 capture_output=True, timeout=20)
+            check("xray serve: --xray <n> %s runs, as local (exit %d)"
+                  % (" ".join(x[:12] for x in a), loc.returncode),
+                  got == ("ran", loc.returncode, None, loc.stdout,
+                          loc.stderr))
+        for nm in names:
+            a = ["--clear", "--json"] if nm[0] == "m" else ["--json"]
+            got = ctl1(port, ["--xray", nm] + a)
+            loc = subprocess.run([DCH, "--xray", nm] + a, env=env,
+                                 capture_output=True, timeout=20)
+            check("xray serve: the %s name form runs, as local" % nm,
+                  got == ("ran", loc.returncode, None, loc.stdout,
+                          loc.stderr))
+        ran = text(log).count(" ctl --xray ")
+        for a, why in no:
+            got = ctl1(port, ["--xray", n] + a)
+            check("xray serve: %r refused: %s" % (a, why),
+                  got == ("refused", why))
+        for nm, why in bad_names:
+            got = ctl1(port, ["--xray", nm, "--json"])
+            check("xray serve: name %r refused: %s" % (nm, why),
+                  got == ("refused", why))
+        check("xray serve: every accepted form ran a dch, no refused one",
+              ran - before == len(ok) + len(names)
+              and text(log).count(" ctl --xray ") == ran)
+
+        # a live session: --clear (owner-gated like -k, no --allow-create)
+        # and --follow, which no cap and no timeout cut; a 0x34 and a
+        # close each end it
+        subprocess.run([DCH, "--spawn", "svx", "--size", "40x5", "--",
+                        "/bin/sh"], env=env, capture_output=True, timeout=15)
+        subprocess.run([DCH, "--send", "svx", "--", "echo svx-mark"],
+                       env=env, capture_output=True, timeout=15)
+        time.sleep(0.5)
+        got = ctl1(port, ["--xray", "svx", "--clear", "--json"])
+        loc = subprocess.run([DCH, "--xray", "svx", "--clear", "--json"],
+                             env=env, capture_output=True, timeout=20)
+        chk("xray serve: --clear on a live session, create off: as local",
+              got == ("ran", loc.returncode, None, loc.stdout, loc.stderr)
+              and (not mirror or got[1] == 0), (got, loc))
+
+        def follow(s):
+            send(s, 0x30, {"argv": ["--xray", "svx", "--follow", "--json"]})
+            t, pl = frame(s)
+            m = None
+            end = time.time() + 5
+            while time.time() < end and not m:
+                m = re.findall(r"ctl --xray svx \(pid (\d+)\)", text(log))
+                time.sleep(0.05)
+            return t, pl, int(m[-1]) if m else None
+
+        def gone(pid):
+            end = time.time() + 8
+            while time.time() < end:
+                try:
+                    os.kill(pid, 0)	# a probe only
+                except ProcessLookupError:
+                    return True
+                time.sleep(0.05)
+            return False
+
+        s = conn(port)
+        t, pl, pid = follow(s)
+        send(s, 0x34)
+        try:
+            t2, p2 = frame_not(s, (0x31, 0x32))
+        except (EOFError, OSError):
+            t2, p2 = None, b""
+        s.settimeout(0.5)
+        try:
+            more = s.recv(1)
+        except socket.timeout:
+            more = None
+        s.close()
+        want = b'{"schema":1,"snapshot":{"schema":1,"session":"svx"'
+        chk("xray serve: --follow streams 0x31; a 0x34 ends its dch with "
+              "exactly one 0x33 cancel",
+              # lite too: a ringless shell's --follow streams its corpus
+              # none snapshot and waits for an agent (it never exits alone)
+              t == 0x31 and pid and gone(pid) and pl.startswith(want)
+              and (t2, p2) == (0x33, b'{"exit":2,"why":"cancel"}')
+              and more is None, (t, pl[:60], t2, p2))
+        if mirror:
+            s = conn(port)
+            t, pl, pid = follow(s)
+            s.close()
+            check("xray serve: a peer close ends the --follow dch (one "
+                  "ctl done after the close)", t == 0x31 and pid
+                  and gone(pid) and text(log).count(
+                      "ctl done after the close") == 1)
+        subprocess.run([DCH, "-k", "svx"], env=env, capture_output=True,
+                       timeout=15)
+
+        # the owner gate (whois) comes first: another user's peer never
+        # reaches --clear (a server of its own: the refusal is cached)
+        ts(who=whois(7, "other@example.com"))
+        gp, gport, glog = serve()
+        got = ctl1(gport, ["--xray", "svx", "--clear", "--json"])
+        stop(gp)
+        ts()
+        chk("xray serve: --clear from another user's node: not_owner, "
+              "nothing run", got == ("refused", CODES["not_owner"])
+              and " ctl " not in text(glog), got)
+
+        # DCH_CTL_CAP: --json is cut at the cap, --follow is not (4.4)
+        cp, cport, clog = serve(e=dict(benv, DCH_CTL_CAP="64"))
+        subprocess.run([DCH, "--spawn", "svc", "--size", "40x5", "--",
+                        "/bin/sh"], env=env, capture_output=True, timeout=15)
+        time.sleep(0.3)
+        got = ctl1(cport, ["--xray", "svc", "--json"])
+        chk("xray serve: --json under DCH_CTL_CAP=64 is cut (why cap)",
+              got[:3] == ("ran", 2, "cap") and len(got[3]) == 64, got)
+        if mirror:
+            s = conn(cport)
+            send(s, 0x30, {"argv": ["--xray", "svc", "--follow", "--json"]})
+            out, t = b"", None
+            s.settimeout(3)
+            try:
+                while len(out) < 200:
+                    t, pl = frame(s)
+                    if t != 0x31:
+                        break
+                    out += pl
+            except (EOFError, OSError):
+                pass
+            s.close()
+            chk("xray serve: --follow under DCH_CTL_CAP=64 streams on "
+                  "past it", len(out) >= 200 and t == 0x31, (t, out[:80]))
+        stop(cp)
+        subprocess.run([DCH, "-k", "svc"], env=env, capture_output=True,
+                       timeout=15)
+
     try:
         mirror = subprocess.run([DCH, "--build"], env=env, capture_output=True,
                                 text=True).stdout.strip() == "full"
@@ -309,8 +546,9 @@ def main():
               and info.get("proto") == "1.1" and info.get("hostname")
               and info.get("name") and info.get("os")
               and re.fullmatch(r"[0-9a-f]{64}", info.get("device_id", "")))
-        check("ops lists create (and ctl, ctl-cancel) with --allow-create",
-              info.get("ops") == ["create", "ctl", "ctl-cancel", "watch"])
+        check("ops lists create (and ctl, ctl-cancel, xray) with "
+              "--allow-create", info.get("ops")
+              == ["create", "ctl", "ctl-cancel", "watch", "xray"])
         send(s, 0x08, {"proto": "2.0"})
         t, pl = frame(s)
         check("a newer proto major gets 0x13",
@@ -768,8 +1006,8 @@ exec %s "$@"
         s = conn(port)
         send(s, 0x08)
         info = json.loads(frame(s)[1])
-        check("no create in ops without --allow-create (ctl is)",
-              info.get("ops") == ["ctl", "ctl-cancel", "watch"])
+        check("no create in ops without --allow-create (ctl, xray are)",
+              info.get("ops") == ["ctl", "ctl-cancel", "watch", "xray"])
         check("device_id is stable across runs", info["device_id"] == dev1)
         send(s, 0x02, {"name": "svc-nope"})
         t, pl = frame(s)
@@ -801,7 +1039,7 @@ exec %s "$@"
         check("create off: attach to a listed session streams 0x10",
               r.returncode == 0 and t == 0x10)
         s.close()
-
+        xray_checks(port, log)
         stop(p)
 
         # --- the gate, per connection (whois runs per peer) --------------

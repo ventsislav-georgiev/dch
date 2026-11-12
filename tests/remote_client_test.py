@@ -31,7 +31,13 @@ exit 5 (and a fake's 0x13 "taken" the same). #114: each control verb on
 host:name (and --host) over a dch serve --allow-create prints and exits
 byte for byte as the same verb run there; --cwd; the client's own refusals;
 exit 6 for a host without ctl (or create), 7 for a closed port or a cut
-link, 4 for a coded 0x13, 1 with the reason for an uncoded one.
+link, 4 for a coded 0x13, 1 with the reason for an uncoded one. #157: each
+--xray form on srv:<n> (remote_hosts) byte for byte as run on the host,
+3.1's value rules checked before anything is sent, exit 6 for a host
+without "xray", 4 and 7 as above, and Ctrl-C, SIGTERM or a closed stdout
+ending the host's --follow. #158: --xray srv:<n> --requests --json, every
+rule of spec 4.3 (requests_checks), with a relay (Proxy) that hides
+"ctl-cancel", cuts the link or holds a request.
 
 Run:  python3 tests/remote_client_test.py        (uses ./dch)
 """
@@ -334,7 +340,8 @@ def ctl_checks(dch, check, senv, cenv, serve_at, procs, fakes, tmp, hosts):
     check("off the allowlist: refused here, exit 1", r.returncode == 1
           and r.stderr == "dch: can't run on a remote host: -f is not "
           "allowed\n", r)
-    # #120: --xray exists, but only as argv[1]; never sent to the host
+    # #120: --xray is argv[1] only, so after --hosts it is never sent;
+    # dch --xray srv:<n> goes to the host (#157, xray_checks)
     r = dch(cenv, *H, "--xray", "srv:ctl-qa")
     check("--xray is no control verb here", r.returncode == 2
           and "--xray comes first" in r.stderr, r)
@@ -401,6 +408,798 @@ def ctl_checks(dch, check, senv, cenv, serve_at, procs, fakes, tmp, hosts):
           body == {"argv": ["--status", "x"]}, body)
     dch(senv, "-k", "ctl-qa")
     dch(senv, "-k", "ctl-qb")
+
+
+def xray_checks(dch, check, senv, cenv, port, fakes, tmp, slog):
+    """#157 (spec #832 4.1-4.2, 9.5 Remote): every --xray form on srv:<n>
+    goes over ctl to srv's dch serve (no --allow-create) and prints and
+    exits exactly as the same argv run there; 3.1's value rules are checked
+    here first, nothing sent; a host without "xray" in its ops is exit 6
+    with nothing sent, a refusal 4, an unreachable host 7; Ctrl-C, SIGTERM
+    and a closed stdout end the host's dch. dch --xray takes no --hosts
+    (argv[1] only), so the client names srv in remote_hosts."""
+    def side(hosts):
+        cfg = os.path.join(tmp, "xcfg-%d" % len(fakes))
+        with open(cfg, "w") as f:
+            f.write("remote_hosts = %s\n" % hosts)
+        e = dict(cenv, DCH_CONFIG=cfg)
+        e.pop("DCH_NO_REMOTE", None)
+        return e
+
+    xenv = side("srv=127.0.0.1:%d" % port)
+    elapsed = re.compile(r'"elapsed_ms":\d+')
+
+    def ctls():
+        with open(slog) as f:
+            return f.read().count(" ctl --xray ")
+
+    def same(label, *args, n="xr1", mask=False):
+        """args with "@" for the name: n there, srv:n here."""
+        loc = dch(senv, "--xray", *[n if a == "@" else a for a in args])
+        rem = dch(xenv, "--xray", *["srv:" + n if a == "@" else a
+                                    for a in args])
+        got = (rem.stdout, rem.stderr, rem.returncode)
+        want = (loc.stdout, loc.stderr, loc.returncode)
+        if mask:
+            # progress lines are timing (one per 250 ms of scan), as in
+            # xray_golden.py: under load one run crosses 250 ms, the other not
+            got, want = [("".join(x for x in elapsed.sub(
+                              '"elapsed_ms":0', o).splitlines(True)
+                              if not x.startswith('{"schema":1,"progress":')),)
+                         + g[1:] for o, g in ((got[0], got), (want[0], want))]
+        check("xray %s: byte for byte the host's own run (exit %d)"
+              % (label, loc.returncode), got == want, (want, got))
+
+    dch(senv, "--spawn", "xr1", "--size", "60x6", "--", "/bin/sh")
+    dch(senv, "--send", "xr1", "--", "echo see #831 and o/r#7")
+    time.sleep(0.8)
+    n0 = ctls()
+    same("--json", "@", "--json")
+    same("--json, flags first", "--json", "@")
+    same("--ref --scope session", "@", "--ref", "#831", "--scope",
+         "session", "--json", mask=True)
+    same("--ref --full --budget-ms", "--json", "--full", "--ref", "o/r#7",
+         "@", "--budget-ms", "50", "--scope", "session", mask=True)
+    same("--ref --scope project", "@", "--ref", "#831", "--scope",
+         "project", "--json", mask=True)
+    same("--ref --scope all", "@", "--ref", "#831", "--scope", "all",
+         "--json", mask=True)
+    same("--chapter", "@", "--chapter", "s1", "--json")
+    same("--clear", "@", "--clear", "--json")
+    same("a Claude session UUID", "@", "--json",
+         n="9f9f9f9f-0000-4000-8000-000000000000")
+    same("a <file>.json record name", "@", "--json", n="nosuch.json")
+    same("no such session", "@", "--json", n="xr-nope")
+    check("xray: each remote form ran one ctl on the host",
+          ctls() - n0 == 11, ctls() - n0)
+
+    # #168: forms that answer with content on the host, not only errors.
+    # The host's store gets History Claude sessions: xrs0 and xrs1 in one
+    # project dir (a real dir on this host, with a file to resolve), xrs2
+    # in another. srv:<n> must print exactly what the host prints.
+    cfg = os.path.join(senv["HOME"], ".claude")
+    sockdir = os.path.join(senv["XDG_RUNTIME_DIR"], "dch-%d" % os.getuid())
+    hdir = os.path.join(senv["XDG_STATE_HOME"], "dch", "sessions",
+                        sockdir.replace("/", "-"))
+    os.makedirs(hdir, exist_ok=True)
+    proj = os.path.join(tmp, "xproj")
+    os.makedirs(os.path.join(proj, "src"))
+    with open(os.path.join(proj, "src", "w.c"), "w") as f:
+        f.write("".join("line %d\n" % k for k in range(1, 41)))
+
+    def hist(k, cwd, prompts):
+        sid = "33333333-4444-4555-8666-%012d" % k
+        pdir = os.path.join(cfg, "projects", cwd.replace("/", "-"))
+        os.makedirs(pdir, exist_ok=True)
+        with open(os.path.join(pdir, sid + ".jsonl"), "w") as f:
+            for t in prompts:   # a reply after each: one chapter a prompt
+                f.write(json.dumps({"type": "user", "cwd": cwd,
+                                    "message": {"content": t}}) + "\n")
+                f.write(json.dumps({"type": "assistant", "message": {
+                    "content": [{"type": "text", "text": "done"}]}}) + "\n")
+        with open(os.path.join(hdir, "xrs%d.json" % k), "w") as f:
+            f.write(json.dumps({
+                "name": "xrs%d" % k, "cwd": cwd, "end": "exited",
+                "argv": ["claude"], "started": 1794299400,
+                "updated": 1794300000 + k, "ended": 1794300000 + k,
+                "sock_dir": sockdir,
+                "agent": {"session_id": sid, "cwd": cwd,
+                          "config_dir": cfg}}) + "\n")
+
+    hist(0, proj, ["fix #931 in src/w.c:20", "then o/r#7"])
+    hist(1, proj, ["older #931"])
+    hist(2, "/home/demo/elsewhere", ["far #931"])
+    loc = dch(senv, "--xray", "xrs0", "--json")
+    o = json.loads(loc.stdout) if loc.returncode == 0 else {}
+    anchors = [c["anchor"] for c in o.get("chapters", [])]
+    check("xray parity setup: xrs0 has two chapters on the host",
+          len(anchors) == 2, (loc.returncode, loc.stdout, loc.stderr))
+    n0 = ctls()
+    for a in anchors:
+        loc = dch(senv, "--xray", "xrs0", "--chapter", a, "--json")
+        check("xray --chapter %s on the host: its entries" % a,
+              loc.returncode == 0 and '"entries":[{"role":"user"'
+              in loc.stdout, loc)
+        same("--chapter <a real anchor>", "@", "--chapter", a, "--json",
+             n="xrs0")
+    loc = dch(senv, "--xray", "xrs0", "--ref", "#931", "--scope", "all",
+              "--full", "--json")
+    tal = [json.loads(l)["tally"]["session"] for l in loc.stdout.splitlines()
+           if '"tally"' in l]
+    check("xray --ref --scope all on the host: xrs0, its project, then the "
+          "other dir", loc.returncode == 0 and tal == ["xrs0", "xrs1", "xrs2"],
+          (tal, loc.stderr))
+    same("--ref --scope all --full, other sessions' transcripts", "@",
+         "--ref", "#931", "--scope", "all", "--full", "--json", n="xrs0",
+         mask=True)
+    same("--ref --scope all, light", "@", "--ref", "#931", "--scope", "all",
+         "--json", n="xrs0", mask=True)
+    # a dash-led anchor is --chapter's value on the host, never a flag
+    for a in ("-f", "--config", "--json"):
+        loc = dch(senv, "--xray", "xrs0", "--chapter", a, "--json")
+        check("xray --chapter %s on the host: read as the anchor (chapter "
+              "gone)" % a, loc.returncode == 1 and
+              loc.stderr == "dch: chapter gone\n", loc)
+        same("--chapter %s (a dash-led anchor)" % a, "@", "--chapter", a,
+             "--json", n="xrs0")
+    # --ref --full resolves a file on the host: its resolved line, first
+    loc = dch(senv, "--xray", "xrs0", "--ref", "src/w.c:20", "--scope",
+              "session", "--full", "--json")
+    rv = [json.loads(l)["resolved"] for l in loc.stdout.splitlines()
+          if '"resolved"' in l]
+    check("xray --ref <file> --full on the host: a resolved line, ok, "
+          "first 14", loc.returncode == 0 and len(rv) == 1 and
+          rv[0]["kind"] == "file" and rv[0]["state"] == "ok" and
+          rv[0].get("first") == 14 and rv[0]["lines"][6] == "line 20",
+          (rv, loc.stderr))
+    same("--ref <file> --full, the resolved line", "@", "--ref",
+         "src/w.c:20", "--scope", "session", "--full", "--json", n="xrs0",
+         mask=True)
+    check("xray parity: each remote form ran one ctl on the host",
+          ctls() - n0 == 8, ctls() - n0)
+
+    # QA 1.55.0 LOW-7: the host's JSON escapes U+061C, U+2028 and U+2029
+    # as \u, so its lines pass --requests as objects, byte for byte. A
+    # title ends at U+2028 (a newline), so the title carries U+061C and
+    # the chapter's entry all three.
+    hist(3, proj, ["see\u061c it a\u2028b\u2029c"])
+    loc = dch(senv, "--xray", "xrs3", "--json")
+    o = json.loads(loc.stdout) if loc.returncode == 0 else {}
+    ch = o.get("chapters", [])
+    check("xray xrs3 on the host: U+061C in its title, written \\u061c",
+          len(ch) == 1 and ch[0]["title"] == "see\u061c it a"
+          and "\\u061c" in loc.stdout and "\u061c" not in loc.stdout,
+          (loc.returncode, loc.stdout[:400], loc.stderr))
+    rq = Requests(xenv, "srv:xrs3")
+    rq.line()
+    for req, argv, esc in (
+            (1, ["--json"], [b"\\u061c"]),
+            (2, ["--chapter", ch[0]["anchor"] if ch else "s1", "--json"],
+             [b"\\u061c", b"\\u2028", b"\\u2029"])):
+        lr = subprocess.run([DCH, "--xray", "xrs3"] + argv, env=senv,
+                            capture_output=True, stdin=subprocess.DEVNULL)
+        rq.send({"req": req, "argv": argv})
+        got = rq.until(req)
+        want = [b'{"req":%d,"line":%s}' % (req, x)
+                for x in lr.stdout.splitlines()]
+        check("requests %s on xrs3: U+061C/U+2028/U+2029 \\u-escaped, "
+              "the host's lines as objects, byte for byte" % " ".join(argv),
+              lr.returncode == 0 and all(e in lr.stdout for e in esc)
+              and got == want + [b'{"req":%d,"exit":0,"why":null}' % req],
+              (want, got))
+    rq.end()
+
+    # 3.1's value rules, here first: the local run's line, nothing sent
+    n0 = ctls()
+    for a, line in ((["--ref", "#1\x01"], "dch: bad ref"),
+                    (["--ref", "#1\u202e"], "dch: bad ref"),
+                    (["--ref", "x"], "dch: not a ref"),
+                    (["--chapter", "a/b"], "dch: bad anchor"),
+                    (["--ref", "#831", "--scope", "none"], "dch: bad scope"),
+                    (["--ref", "#831", "--budget-ms", "0x40"],
+                     "dch: bad budget"),
+                    (["--json"], "dch: bad usage: --json twice")):
+        r = dch(xenv, "--xray", "srv:xr1", "--json", *a)
+        check("xray value rule %r: %s, exit 2, nothing sent" % (a, line),
+              r.returncode == 2 and r.stderr == line + "\n", r)
+    r = dch(xenv, "--xray", "srv:xr1")
+    check("xray view form on srv:xr1: not sent (the view comes later)",
+          r.returncode == 2 and "--json is required" in r.stderr, r)
+    check("xray: no value-rule case reached the host", ctls() == n0)
+
+    # --follow: the snapshot as the host's own; Ctrl-C and SIGTERM cancel
+    # it there (0x34), a closed stdout ends it with 0
+    pl = subprocess.Popen([DCH, "--xray", "xr1", "--follow", "--json"],
+                          env=senv, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
+    a = pl.stdout.readline()
+    pl.terminate()
+    pl.communicate(timeout=10)
+    mirror = dch(cenv, "--build").stdout.strip() == "full"
+    for sig in (signal.SIGINT, signal.SIGTERM, None):
+        if not sig and not mirror:
+            # a closed stdout shows at the next line written, and a lite
+            # shell's --follow writes none after its snapshot
+            print("  skip xray --follow (stdout closed): the shell writes "
+                  "no delta (build has no terminal mirror)")
+            continue
+        with open(slog) as f:
+            cut0 = f.read().count("ctl cut short: cancel")
+        pr = subprocess.Popen([DCH, "--xray", "srv:xr1", "--follow",
+                               "--json"], env=xenv, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE,
+                              stdin=subprocess.DEVNULL)
+        b = pr.stdout.readline()
+        if sig:
+            pr.send_signal(sig)
+        else:
+            pr.stdout.close()
+            # a new ref is a delta line: its write meets the EPIPE
+            dch(senv, "--send", "xr1", "--", "echo more o/r#11")
+        try:
+            pr.wait(10)
+        except subprocess.TimeoutExpired:
+            pr.kill()
+            pr.wait()
+        err = pr.stderr.read()
+        time.sleep(0.3)
+        with open(slog) as f:
+            cut = f.read().count("ctl cut short: cancel") - cut0
+        check("xray --follow (%s): the host's snapshot line, then %s"
+              % (sig and sig.name or "stdout closed",
+                 "its death, quietly, the host's dch cancelled" if sig
+                 else "exit 0"),
+              a.startswith(b'{"schema":1,"snapshot":') and b == a
+              and err == b"" and cut == 1
+              and pr.returncode == (-sig if sig else 0),
+              (a[:60], b[:60], err, cut, pr.returncode))
+    dch(senv, "-k", "xr1")
+
+    # ctl's own exits: 6 without "xray" (nothing sent), 4, 7
+    nox = Fake("ctlerr", ops=["ctl", "ctl-cancel", "watch"])
+    fakes.append(nox)
+    r = dch(side("q=127.0.0.1:%d" % nox.port), "--xray", "q:x", "--json")
+    check("xray on a host whose ops lack xray: exit %d, nothing sent"
+          % UNSUPPORTED_EXIT, r.returncode == UNSUPPORTED_EXIT
+          and r.stderr == "dch: q: does not support --xray (needs dch "
+          "serve 1.55.0+)\n" and not nox.bodies, r)
+    for mode, want, err in (
+            ("refuse", REFUSED_EXIT, "dch: q refused: " + REFUSAL["message"]),
+            ("ctlcoded", REFUSED_EXIT,
+             "dch: q refused: " + REFUSAL["message"]),
+            ("ctlerr", 1, "dch: q: nope-why"),
+            ("ctldrop", UNREACHABLE_EXIT,
+             "dch: q: unreachable: the connection was lost")):
+        f = Fake(mode, ops=["ctl", "ctl-cancel", "watch", "xray"])
+        fakes.append(f)
+        r = dch(side("q=127.0.0.1:%d" % f.port), "--xray", "q:x",
+                "--follow", "--json")
+        check("xray on a host that answers %s: exit %d" % (mode, want),
+              r.returncode == want and r.stderr == err + "\n", r)
+    body = json.loads(f.bodies[-1])
+    check("xray: the 0x30 is --xray <name> first, the host: off",
+          body == {"argv": ["--xray", "x", "--follow", "--json"]}, body)
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    dead = s.getsockname()[1]
+    s.close()
+    r = dch(side("q=127.0.0.1:%d" % dead), "--xray", "q:x", "--json")
+    check("xray on a closed port: unreachable, exit %d" % UNREACHABLE_EXIT,
+          r.returncode == UNREACHABLE_EXIT
+          and r.stderr.startswith("dch: q: unreachable: "), r)
+
+
+class Proxy:
+    """#158: a loopback relay to a dch serve, frame by frame. "nocancel"
+    takes "ctl-cancel" out of the hello's ops; "cut" closes the first
+    connection at its first 0x30 (a lost link); "hold" swallows the first
+    connection's 0x30s and 0x34s (a request that never ends); "lines" sends
+    `lines` in place of the first connection's first 0x31, as frames of
+    type `lt` of 1 MiB at most, and drops its other 0x31s (a host's own
+    stdout or stderr bytes)."""
+
+    def __init__(self, up, mode, lines=b"", lt=0x31):
+        self.up, self.mode, self.n, self.lines = up, mode, 0, lines
+        self.lt = lt
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(16)
+        self.port = self.sock.getsockname()[1]
+        self.conns = []
+        threading.Thread(target=self.loop, daemon=True).start()
+
+    def loop(self):
+        while True:
+            try:
+                c, _ = self.sock.accept()
+                u = socket.create_connection(("127.0.0.1", self.up))
+            except OSError:
+                return
+            self.n += 1
+            self.conns += [c, u]
+            for a, b, up in ((c, u, True), (u, c, False)):
+                threading.Thread(target=self.pipe, args=(a, b, up,
+                                                         self.n == 1),
+                                 daemon=True).start()
+
+    def pipe(self, a, b, up, first):
+        buf, sent = b"", False
+        try:
+            while True:
+                d = a.recv(65536)
+                if not d:
+                    b.shutdown(socket.SHUT_WR)
+                    return
+                buf += d
+                while len(buf) >= 5:
+                    t, n = struct.unpack(">BI", buf[:5])
+                    if len(buf) < 5 + n:
+                        break
+                    body, buf = buf[5:5 + n], buf[5 + n:]
+                    if up and first and t == 0x30 and self.mode == "cut":
+                        a.close()
+                        b.close()
+                        return
+                    if up and first and t in (0x30, 0x34) \
+                            and self.mode == "hold":
+                        continue
+                    if not up and t == 0x18 and self.mode == "nocancel":
+                        h = json.loads(body)
+                        h["ops"] = [o for o in h["ops"] if o != "ctl-cancel"]
+                        body = json.dumps(h).encode()
+                    if not up and first and t == 0x31 \
+                            and self.mode == "lines":
+                        if not sent:
+                            for i in range(0, len(self.lines), 1 << 20):
+                                b.sendall(frame(self.lt,
+                                                self.lines[i:i + (1 << 20)]))
+                        sent = True
+                        continue
+                    b.sendall(frame(t, body))
+        except OSError:
+            return
+
+    def close(self):
+        self.sock.close()
+        for c in self.conns:
+            try:
+                c.close()
+            except OSError:
+                pass
+
+
+class Requests:
+    """#158: one `dch --xray <n> --requests --json`, its stdin and stdout
+    as NDJSON lines, raw bytes kept for the byte-exact checks."""
+
+    def __init__(self, env, n):
+        self.p = subprocess.Popen([DCH, "--xray", n, "--requests", "--json"],
+                                  env=env, stdin=subprocess.PIPE,
+                                  stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE)
+        self.buf = b""
+
+    def send(self, *lines):
+        try:
+            self.p.stdin.write(b"".join(
+                (x if isinstance(x, bytes) else json.dumps(x).encode())
+                + b"\n" for x in lines))
+            self.p.stdin.flush()
+        except BrokenPipeError:
+            pass	# it has gone: the checks say so
+
+    def line(self, secs=15):
+        """the next stdout line (no newline), or None"""
+        end = time.time() + secs
+        fd = self.p.stdout.fileno()
+        while b"\n" not in self.buf and time.time() < end:
+            r, _, _ = select.select([fd], [], [], 0.1)
+            if r:
+                d = os.read(fd, 65536)
+                if not d:
+                    break
+                self.buf += d
+        if b"\n" not in self.buf:
+            return None
+        ln, self.buf = self.buf.split(b"\n", 1)
+        return ln
+
+    def until(self, req, secs=15):
+        """every line up to req's end line (its "exit")"""
+        out = []
+        while True:
+            ln = self.line(secs)
+            if ln is None:
+                return out
+            out.append(ln)
+            j = json.loads(ln)
+            if j.get("req") == req and "exit" in j:
+                return out
+
+    def quiet(self, secs=0.5):
+        """nothing more on stdout within secs"""
+        return self.line(secs) is None
+
+    def end(self, secs=15):
+        """stdin closed: (exit, the rest of stdout, stderr)"""
+        try:
+            self.p.stdin.close()
+        except BrokenPipeError:
+            pass
+        self.p.stdin = None	# communicate() would flush it
+        try:
+            out, err = self.p.communicate(timeout=secs)
+        except subprocess.TimeoutExpired:
+            self.p.kill()
+            out, err = self.p.communicate()
+        return self.p.returncode, self.buf + out, err
+
+
+def requests_checks(dch, check, senv, cenv, serve_at, fakes, tmp, slog):
+    """#158 (spec #832 4.3): dch --xray srv:<n> --requests --json holds one
+    warm ctl connection to a dch serve on loopback. The ready line carries
+    the host's ops; each {"req":N,"argv":[...]} on stdin runs on the host,
+    its stdout lines wrapped byte for byte, its stderr escaped, one end line
+    each; the argv is checked here first (3.1's value rules, the request
+    forms only), refusals sent nowhere; one at a time (busy); {"cancel":N}
+    is a 0x34, or without "ctl-cancel" the close and a quiet re-dial; an
+    idle close or a lost link re-dials, the request in flight ends exit 7
+    "lost"; stdin EOF exits 0; a local name exits 2; a host without "xray"
+    gets one exit 6 line."""
+    cfgs = []
+
+    def side(hosts):
+        cfg = os.path.join(tmp, "rcfg-%d" % len(cfgs))
+        cfgs.append(cfg)
+        with open(cfg, "w") as f:
+            f.write("remote_hosts = %s\n" % hosts)
+        e = dict(cenv, DCH_CONFIG=cfg)
+        e.pop("DCH_NO_REMOTE", None)
+        return e
+
+    def count(what, log=slog):
+        with open(log) as f:
+            return f.read().count(what)
+
+    def ctls(log=slog):
+        return count(" ctl --xray ", log)
+
+    def conns(log=slog):
+        return count("let in by the test-only bypass", log)
+
+    port = int(re.search(r"listening on 127\.0\.0\.1:(\d+)",
+                         open(slog).read()).group(1))
+    xenv = side("srv=127.0.0.1:%d" % port)
+    elapsed = re.compile(rb'"elapsed_ms":\d+')
+    dch(senv, "--spawn", "xq1", "--size", "60x6", "--", "/bin/sh")
+    dch(senv, "--send", "xq1", "--", "echo see #831 and o/r#7")
+    time.sleep(0.8)
+
+    rq = Requests(xenv, "srv:xq1")
+    ready = rq.line()
+    check("requests: the ready line carries the host's ops",
+          ready == b'{"schema":1,"ready":{"ops":["ctl","ctl-cancel",'
+          b'"watch","xray"]}}', ready)
+    c0 = conns()
+
+    def same(req, argv, mask=False):
+        """argv on the warm connection, as the host's own run of it"""
+        loc = subprocess.run([DCH, "--xray", "xq1"] + argv, env=senv,
+                             capture_output=True, stdin=subprocess.DEVNULL)
+        rq.send({"req": req, "argv": argv})
+        got = rq.until(req)
+        lines = [g for g in got if g.startswith(b'{"req":%d,"line":' % req)]
+        errs = [json.loads(g)["stderr"] for g in got if b'"stderr":' in g]
+        want = [b'{"req":%d,"line":%s}' % (req, x)
+                for x in loc.stdout.splitlines()]
+        cmp = lines
+        if mask:
+            # progress lines are timing (see the xray same() above)
+            prog = b'{"req":%d,"line":{"schema":1,"progress":' % req
+            cmp = [elapsed.sub(b'"elapsed_ms":0', x) for x in lines
+                   if not x.startswith(prog)]
+            want = [elapsed.sub(b'"elapsed_ms":0', x) for x in want
+                    if not x.startswith(prog)]
+        end = json.loads(got[-1]) if got else None
+        check("requests %s: each host line byte for byte, its stderr, one "
+              "end line (exit %d)" % (" ".join(argv), loc.returncode),
+              cmp == want and errs == loc.stderr.decode().splitlines()
+              and end == {"req": req, "exit": loc.returncode, "why": None}
+              and len(got) == len(lines) + len(errs) + 1,
+              (want, loc.stderr, got))
+
+    n0 = ctls()
+    same(1, ["--json"])
+    same(2, ["--ref", "#831", "--scope", "session", "--json"], mask=True)
+    same(3, ["--json", "--full", "--ref", "o/r#7", "--budget-ms", "50",
+             "--scope", "session"], mask=True)
+    same(4, ["--chapter", "s1", "--json"])
+    same(5, ["--clear", "--json"])
+    check("requests: each ran one ctl, all on the one warm connection",
+          ctls() - n0 == 5 and conns() == c0, (ctls() - n0, conns() - c0))
+
+    # the argv checked here first: refused, nothing sent
+    n0 = ctls()
+    req = 10
+    for argv, line in (
+            (["--follow", "--json"],
+             "dch: bad usage: --follow is not a request"),
+            (["--requests", "--json"],
+             "dch: bad usage: --requests is not allowed with --xray"),
+            ([], "dch: bad usage: --xray needs --json (the view is "
+             "client-side only)"),
+            (["--ref", "#1\x01", "--json"], "dch: bad ref"),
+            (["--ref", "#1‮", "--json"], "dch: bad ref"),
+            (["--ref", "x", "--json"], "dch: not a ref"),
+            (["--chapter", "a/b", "--json"], "dch: bad anchor"),
+            (["--ref", "#831", "--scope", "none", "--json"],
+             "dch: bad scope"),
+            (["--ref", "#831", "--budget-ms", "0x40", "--json"],
+             "dch: bad budget"),
+            (["--json", "--json"], "dch: bad usage: --json twice"),
+            (["--clear", "--full", "--json"], "dch: bad usage: --scope, "
+             "--full and --budget-ms come with --ref"),
+            (["xq2", "--json"], "dch: bad usage: unexpected xq2 after "
+             "--xray"),
+            (["--all", "--json"], "dch: bad usage: --all is not allowed")):
+        req += 1
+        rq.send({"req": req, "argv": argv})
+        got = [json.loads(g) for g in rq.until(req)]
+        check("requests refuse %r: %s, exit 2, refused" % (argv, line),
+              got == [{"req": req, "stderr": line},
+                      {"req": req, "exit": 2, "why": "refused"}], got)
+    bad = "dch: bad request: send {\"req\":N,\"argv\":[...]} or " \
+          "{\"cancel\":N}, one per line"
+    for raw, rn in ((b"garbage", None),
+                    (b'{"req":0,"argv":["--json"]}', None),
+                    (b'{"req":2147483648,"argv":["--json"]}', None),
+                    (b'{"req":-3,"argv":["--json"]}', None),
+                    (b'{"req":1.5,"argv":["--json"]}', None),
+                    (b'{"req":"7","argv":["--json"]}', None),
+                    (b'{"req":40,"argv":"--json"}', 40),
+                    (b'{"req":41,"argv":["--json",1]}', 41),
+                    (b'{"req":42,"argv":["--json"],"x":1}', 42),
+                    (b'{"req":43,"req":43,"argv":["--json"]}', None),
+                    (b'{"req":44}', 44),
+                    (b'{"cancel":45,"x":1}', None),
+                    (b'{"req":46,"argv":["--json"]}\x00', None),
+                    (b'[1]', None)):
+        rq.send(raw)
+        got = [json.loads(g) for g in rq.until(rn)]
+        check("requests: a malformed line %r is refused as req %s"
+              % (raw, rn), got == [{"req": rn, "stderr": bad},
+                                   {"req": rn, "exit": 2,
+                                    "why": "refused"}], got)
+    rq.send(b"", b"  \r")
+    rq.send(b'{"req":47,"argv":["--json"]}'.replace(b"--json", b"x" * 70000))
+    got = [json.loads(g) for g in rq.until(None)]
+    check("requests: blank lines are skipped, a line over 64 KiB refused",
+          got == [{"req": None,
+                   "stderr": "dch: bad request: a line over 64 KiB"},
+                  {"req": None, "exit": 2, "why": "refused"}], got)
+    check("requests: no refused request reached the host", ctls() == n0,
+          ctls() - n0)
+
+    # one at a time: a second while one runs is busy, the first goes on
+    rq.send({"req": 50, "argv": ["--json"]}, {"req": 51, "argv": ["--json"]})
+    a = rq.line()
+    got = rq.until(50)
+    check("requests: a second request while one runs: busy, exit 1",
+          json.loads(a) == {"req": 51, "exit": 1, "why": "busy"}
+          and json.loads(got[-1]) == {"req": 50, "exit": 0, "why": None}
+          and len(got) == 2, (a, got))
+
+    # cancel: a 0x34 ("ctl-cancel"), its 0x33 ends it; the connection stays
+    cut0, n0 = count("ctl cut short: cancel"), ctls()
+    rq.send({"req": 60, "argv": ["--json"]}, {"cancel": 60})
+    got = [json.loads(g) for g in rq.until(60)]
+    time.sleep(0.3)
+    check("requests: {\"cancel\":N} is a 0x34, the host's 0x33 ends it",
+          got == [{"req": 60, "exit": 2, "why": "cancel"}]
+          and count("ctl cut short: cancel") - cut0 == 1, got)
+    rq.send({"cancel": 60}, {"cancel": 99})
+    check("requests: a cancel with nothing of its req running: nothing",
+          rq.quiet())
+    same(61, ["--json"])
+    check("requests: after a cancel the same warm connection takes more",
+          conns() == c0 and ctls() - n0 == 2, conns() - c0)
+    rc, rest, err = rq.end()
+    check("requests: stdin EOF closes the connection, exit 0",
+          rc == 0 and rest == b"" and err == b"", (rc, rest, err))
+
+    # without "ctl-cancel": the close and a quiet re-dial
+    px = Proxy(port, "nocancel")
+    fakes.append(px)
+    rq = Requests(side("q=127.0.0.1:%d" % px.port), "q:xq1")
+    ready = rq.line()
+    rq.send({"req": 1, "argv": ["--json"]}, {"cancel": 1})
+    got = [json.loads(g) for g in rq.until(1)]
+    time.sleep(0.3)
+    check("requests without ctl-cancel: a cancel closes and re-dials",
+          b'"ctl-cancel"' not in ready
+          and got == [{"req": 1, "exit": 2, "why": "cancel"}]
+          and px.n == 2, (ready, got, px.n))
+    rq.send({"req": 2, "argv": ["--json"]})
+    got = [json.loads(g) for g in rq.until(2) if b'"exit"' in g]
+    check("requests without ctl-cancel: the next request runs on the new "
+          "connection", got == [{"req": 2, "exit": 0, "why": None}]
+          and px.n == 2, (got, px.n))
+    rq.end()
+
+    # a lost link: the request in flight ends exit 7 "lost"; the next dials
+    px = Proxy(port, "cut")
+    fakes.append(px)
+    rq = Requests(side("q=127.0.0.1:%d" % px.port), "q:xq1")
+    rq.line()
+    rq.send({"req": 1, "argv": ["--json"]})
+    got = [json.loads(g) for g in rq.until(1)]
+    check("requests: a lost link ends the request in flight exit 7 lost",
+          got == [{"req": 1, "stderr": "dch: q: unreachable: the "
+                   "connection was lost"},
+                  {"req": 1, "exit": UNREACHABLE_EXIT, "why": "lost"}], got)
+    rq.send({"req": 2, "argv": ["--json"]})
+    got = rq.until(2)
+    check("requests: after a lost link the next request re-dials",
+          json.loads(got[-1]) == {"req": 2, "exit": 0, "why": None}
+          and px.n == 2, (got, px.n))
+    rq.end()
+
+    # stdin EOF with one in flight: it ends "cancel", exit 0; a 0x33 that
+    # never comes after the 0x34 is the close's cancel too
+    px = Proxy(port, "hold")
+    fakes.append(px)
+    rq = Requests(side("q=127.0.0.1:%d" % px.port), "q:xq1")
+    rq.line()
+    rq.send({"req": 1, "argv": ["--json"]}, {"cancel": 1})
+    t0 = time.time()
+    got = [json.loads(g) for g in rq.until(1)]
+    check("requests: a 0x34 with no 0x33 in 3 s: the close cancels it",
+          got == [{"req": 1, "exit": 2, "why": "cancel"}]
+          and time.time() - t0 > 2.5 and px.n == 2,
+          (got, time.time() - t0, px.n))
+    px.n = 0	# the next connection is "first" again: it holds
+    time.sleep(0.2)
+    rq2 = Requests(side("q=127.0.0.1:%d" % px.port), "q:xq1")
+    rq2.line()
+    rq2.send({"req": 3, "argv": ["--json"]})
+    time.sleep(0.5)
+    rc, rest, err = rq2.end()
+    check("requests: stdin EOF with one in flight: it ends cancel, exit 0",
+          rc == 0 and rest == b'{"req":3,"exit":2,"why":"cancel"}\n'
+          and err == b"", (rc, rest, err))
+    rq.end()
+
+    # a host stdout line passes byte for byte only when it is one JSON
+    # object any reader takes, also once wrapped a level deeper; else it is
+    # a JSON string (raw bytes compared: Python's json stops short of 1024)
+    def deep(d):
+        return b'{"a":' * (d - 1) + b"{}" + b"}" * (d - 1)
+    keep = [b'{"a":1}', b'{"a":"\\ud800","b":1e999}', deep(1023)]
+    wrap = [b'{"a":"\xff"}', b'{"a":"\x01"}', b'{"a":1}x', b'{"a":1} {"b":2}',
+            b'{"a":01}', b'{"a":1.}', b'{"a":.5}', b'{"a":+1}', b'{"a":-}',
+            b'{"a":NaN}', b'{"a":tRUE}', b'{"a":1,}', b"{a:1}", b"{'a':1}",
+            b'{"a":1}\x7f', b'{"a":"\x7f"}', b'{"a":"\xc2\x9b"}',
+            b'{"a":"\xe2\x80\xae"}', b'{"a":1}\r', deep(1024)]
+    px = Proxy(port, "lines", b"".join(x + b"\n" for x in keep + wrap))
+    fakes.append(px)
+    rq = Requests(side("q=127.0.0.1:%d" % px.port), "q:xq1")
+    rq.line()
+    rq.send({"req": 1, "argv": ["--json"]})
+    got = [rq.line() for _ in keep + wrap + [0]]
+    check("requests: a host object line passes byte for byte, escapes, "
+          "numbers and depth 1023 as they are",
+          got[:len(keep)] == [b'{"req":1,"line":%s}' % x for x in keep],
+          got[:len(keep)])
+    for x, g in zip(wrap, got[len(keep):]):
+        check("requests: host line %r comes back as a JSON string" % x[:24],
+              g is not None and g.startswith(b'{"req":1,"line":"')
+              and isinstance(json.loads(g)["line"], str), g)
+    check("requests: then the host's end line",
+          got[-1] == b'{"req":1,"exit":0,"why":null}', got[-1])
+    rq.end()
+
+    # a host line past what dch carries (one over 8 MiB, or one it cannot
+    # escape, about 2.67 MiB): the request in flight ends exit 2 "cap", the
+    # close and a quiet re-dial; one queued behind it got "busy", the next
+    # runs on the new connection, and stdin EOF is still exit 0
+    for what, lt, body in (
+            ("a 3 MiB stderr line", 0x32, b"e" * (3 << 20) + b"\n"),
+            ("a 3 MiB stdout line, no object", 0x31, b"x" * (3 << 20) + b"\n"),
+            ("a 9 MiB stdout object", 0x31,
+             b'{"a":"' + b"y" * (9 << 20) + b'"}\n')):
+        px = Proxy(port, "lines", body, lt)
+        fakes.append(px)
+        rq = Requests(side("q=127.0.0.1:%d" % px.port), "q:xq1")
+        rq.line()
+        rq.send({"req": 1, "argv": ["--json"]}, {"req": 2, "argv": ["--json"]})
+        got = [json.loads(g) for g in rq.until(1, 30)]
+        rq.send({"req": 3, "argv": ["--json"]})
+        got3 = rq.until(3)
+        rc, rest, err = rq.end()
+        check("requests: %s: exit 2 cap, re-dialled; the next runs" % what,
+              got == [{"req": 2, "exit": 1, "why": "busy"},
+                      {"req": 1, "exit": 2, "why": "cap"}]
+              and [json.loads(g).get("req") for g in got3] == [3] * len(got3)
+              and got3[-1:] == [b'{"req":3,"exit":0,"why":null}']
+              and px.n == 2 and rc == 0 and rest == b"" and err == b"",
+              (got, got3[-1:], px.n, rc, rest[:80], err[:200]))
+
+    # the host's idle close, and its cap: re-dialled, wrapped
+    ilog = os.path.join(tmp, "serve-idle.log")
+    iport = serve_at(ilog, DCH_CTL_IDLE_MS="400", DCH_CTL_CAP="64")
+    check("a dch serve with a short idle and a small cap", iport is not None)
+    if iport is not None:
+        rq = Requests(side("i=127.0.0.1:%d" % iport), "i:xq1")
+        rq.line()
+        # lite: a shell has no corpus, so no --ref line; --json still cuts
+        full = dch(cenv, "--build").stdout.strip() == "full"
+        rq.send({"req": 1, "argv": ["--ref", "#831", "--scope", "session",
+                                    "--json"] if full else ["--json"]})
+        got = rq.until(1)
+        check("requests: the host's cap: a cut line as a string, exit 2 cap",
+              json.loads(got[-1]) == {"req": 1, "exit": 2, "why": "cap"}
+              and all(g.startswith(b'{"req":1,"line":') for g in got[:-1])
+              and isinstance(json.loads(got[-2])["line"], str), got)
+        time.sleep(1.2)
+        check("requests: the host's idle close: nothing on stdout",
+              count("idle; closing", ilog) == 1 and rq.quiet(0.2))
+        rq.send({"req": 2, "argv": ["--json"]})
+        got = rq.until(2)
+        check("requests: after an idle close the next request re-dials",
+              json.loads(got[-1]) == {"req": 2, "exit": 2, "why": "cap"}
+              and conns(ilog) == 2, (got, conns(ilog)))
+        rq.end()
+        loc = subprocess.run([DCH, "--xray", "xq-none", "--json"], env=senv,
+                             capture_output=True, stdin=subprocess.DEVNULL)
+        rq = Requests(side("i=127.0.0.1:%d" % iport), "i:xq-none")
+        rq.line()
+        rq.send({"req": 3, "argv": ["--json"]})
+        got = [json.loads(g) for g in rq.until(3)]
+        check("requests: the host's stderr a line of its own, its exit",
+              got == [{"req": 3, "stderr": loc.stderr.decode().rstrip("\n")},
+                      {"req": 3, "exit": loc.returncode, "why": None}]
+              and loc.returncode == 1, (got, loc))
+        rq.end()
+
+    # a local name, and the wrong flags: exit 2, nothing dialled
+    for args, line in (
+            (["xq1"], "dch: bad usage: --requests takes a remote "
+             "host:name"),
+            (["srv:xq1", "--ref", "#831"], "dch: bad usage: --requests "
+             "takes host:name and --json, nothing else"),
+            (["srv:xq1", "--follow"], "dch: bad usage: --requests takes "
+             "host:name and --json, nothing else"),
+            (["srv:xq1", "--requests"], "dch: bad usage: --requests "
+             "twice")):
+        r = dch(xenv, "--xray", "--requests", "--json", *args)
+        check("requests %r: exit 2" % args, r.returncode == 2
+              and r.stderr == line + "\n" and r.stdout == "", r)
+    r = dch(xenv, "--xray", "srv:xq1", "--requests")
+    check("requests without --json: exit 2", r.returncode == 2
+          and "takes host:name and --json" in r.stderr, r)
+
+    # no warm connection at all: one exit line, its status
+    nox = Fake("ctlerr", ops=["ctl", "ctl-cancel", "watch"])
+    fakes.append(nox)
+    r = dch(side("q=127.0.0.1:%d" % nox.port), "--xray", "q:x",
+            "--requests", "--json")
+    msg = "dch: q: does not support --xray (needs dch serve 1.55.0+)"
+    check("requests on a host whose ops lack xray: one exit 6 line",
+          r.returncode == UNSUPPORTED_EXIT and r.stderr == msg + "\n"
+          and json.loads(r.stdout) == {"schema": 1, "exit": 6,
+                                       "stderr": msg}
+          and r.stdout.count("\n") == 1 and not nox.bodies, r)
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    dead = s.getsockname()[1]
+    s.close()
+    r = dch(side("q=127.0.0.1:%d" % dead), "--xray", "q:x", "--requests",
+            "--json")
+    check("requests on a closed port: one exit 7 line",
+          r.returncode == UNREACHABLE_EXIT
+          and json.loads(r.stdout)["exit"] == UNREACHABLE_EXIT
+          and r.stderr.startswith("dch: q: unreachable: "), r)
+    dch(senv, "-k", "xq1")
 
 
 def main():
@@ -493,12 +1292,13 @@ def main():
             out += read(fd, b"\0never", 0.05)
         return None, out
 
-    def serve_at(log, *args):
+    def serve_at(log, *args, **env):
         """dch serve on a loopback test port: the port, or None."""
         with open(log, "w") as lf:
             sp = subprocess.Popen([DCH, "serve", "--bind", "127.0.0.1",
                                    "--port", "0"] + list(args),
-                                  env=dict(senv, DCH_SERVE_TEST_LOOPBACK="1"),
+                                  env=dict(senv, DCH_SERVE_TEST_LOOPBACK="1",
+                                           **env),
                                   stdin=subprocess.DEVNULL,
                                   stdout=subprocess.DEVNULL, stderr=lf)
         procs.append(sp)
@@ -670,6 +1470,8 @@ def main():
         # --- ctl (#114): the control verbs on a remote host ------------
         ctl_checks(dch, check, senv, cenv, serve_at, procs, fakes, tmp,
                    hosts)
+        xray_checks(dch, check, senv, cenv, port, fakes, tmp, log)
+        requests_checks(dch, check, senv, cenv, serve_at, fakes, tmp, log)
 
         # --- precedence -----------------------------------------------
         # (--spawn srv:rs1 is remote now, #114: -n makes the local one)

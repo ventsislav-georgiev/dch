@@ -1,0 +1,19 @@
+!{"timestamp":"2026-11-10T10:00:00.000Z","type":"session_meta","payload":{"id":"019a1111-2222-7333-8444-555566667702","timestamp":"2026-11-10T10:00:00.000Z","cwd":"/home/demo/proj","originator":"codex_cli_rs","cli_version":"0.167.0","source":"cli","model_provider":"openai"}}
+{"timestamp":"2026-11-10T10:00:01.000Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<permissions instructions>\nsandbox; see #900\n</permissions instructions>"}]}}
+{"timestamp":"2026-11-10T10:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /home/demo/proj\n\n<INSTRUCTIONS>\nAlways cite #901.\n</INSTRUCTIONS>"},{"type":"input_text","text":"<environment_context>\n  <cwd>/home/demo/proj</cwd>\n  <shell>zsh</shell>\n</environment_context>"}]}}
+{"timestamp":"2026-11-10T10:00:02.000Z","type":"turn_context","payload":{"cwd":"/home/demo/proj","approval_policy":"on-request","model":"gpt-5.5"}}
+{"timestamp":"2026-11-10T10:00:02.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<image name=[Image #1]>"},{"type":"input_image","image_url":"data:image/png;base64,AAAA"},{"type":"input_text","text":"</image>"},{"type":"input_text","text":"Why does this screenshot show #77 failing?"}]}}
+{"timestamp":"2026-11-10T10:00:02.000Z","type":"world_state","payload":{"files":[{"path":"src/ws.c:1"}]}}
+{"timestamp":"2026-11-10T10:00:03.000Z","type":"response_item","payload":{"type":"reasoning","summary":[],"content":null,"encrypted_content":"gAAAAA"}}
+{"timestamp":"2026-11-10T10:00:04.000Z","type":"response_item","payload":{"type":"custom_tool_call","status":"completed","call_id":"c1","name":"exec","input":"git log --oneline -3 && gh pr view 78"}}
+{"timestamp":"2026-11-10T10:00:05.000Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"c1","output":[{"type":"input_text","text":"9f8e7d6 fix #77\nhttps://github.com/demo/proj/pull/78\n"}]}}
+{"timestamp":"2026-11-10T10:00:05.000Z","type":"response_item","payload":{"type":"function_call","name":"wait","arguments":"{\"ms\": 100}","call_id":"c2"}}
+{"timestamp":"2026-11-10T10:00:05.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"c2","output":"done"}}
+{"timestamp":"2026-11-10T10:00:06.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"PR #78 fixes it (commit 9f8e7d6c)."}]}}
+{"timestamp":"2026-11-10T10:00:07.000Z","type":"compacted","payload":{"message":"Summary: investigated #77; PR #78 has the fix.","replacement_history":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Why does this screenshot show #77 failing?"}]}]}}
+{"timestamp":"2026-11-10T10:00:07.000Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<permissions instructions>\nsandbox; see #900\n</permissions instructions>"}]}}
+{"timestamp":"2026-11-10T10:00:07.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<codex_internal_context source=\"compaction\">\nprior work on #903\n</codex_internal_context>"}]}}
+{"timestamp":"2026-11-10T10:00:08.000Z","type":"turn_context","payload":{"cwd":"/home/demo/proj","approval_policy":"on-request","model":"gpt-5.5"}}
+{"timestamp":"2026-11-10T10:00:08.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Ship it and close #77"}]}}
+{"timestamp":"2026-11-10T10:00:09.000Z","type":"token_usage_record","payload":{"input":1,"output":2}}
+{"timestamp":"2026-11-10T10:00:09.000Z","type":"some_future_item_kind","payload":{"text":"see #904"}}
