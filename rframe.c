@@ -905,10 +905,10 @@ rf_run(char *const argv[], char **out, size_t *outn, size_t cap, char *err,
 			if (!pf[j].revents)
 				continue;
 			if (isout)
-				r = on < cap ? read(po[0], ob + on, cap - on)
-				             : read(po[0], junk, 1);
+				r = ob && on < cap ? read(po[0], ob + on, cap - on)
+				                   : read(po[0], junk, 1);
 			else
-				r = en < errcap - 1
+				r = err && en < errcap - 1
 				        ? read(pe[0], err + en, errcap - 1 - en)
 				        : read(pe[0], junk, sizeof junk);
 			if (r < 0 && (errno == EINTR || errno == EAGAIN))

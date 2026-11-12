@@ -1264,8 +1264,10 @@ xr_claude_lookup(const char *cfg, const char *sid, char *path, size_t pathsz,
 static DIR *
 cx_dir(int dfd, const char *name)
 {
-	int fd = openat(dfd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW |
-	                O_CLOEXEC);
+	/* dirfd() failing is -1; openat would only say EBADF, the analyzer
+	** wants it not passed at all */
+	int fd = dfd == -1 ? -1 : openat(dfd, name, O_RDONLY | O_DIRECTORY |
+	                                 O_NOFOLLOW | O_CLOEXEC);
 	DIR *d = fd >= 0 ? fdopendir(fd) : NULL;
 
 	if (fd >= 0 && !d)
@@ -2094,6 +2096,8 @@ shell_words(const char *c, size_t cl, struct sw *w)
 						break;
 					}
 				}
+				if (i > cl)
+					i = cl;	/* no delimiter line: c[cl] is not the body's */
 				for (; uq && b0 < i; b0++)
 					w->hx |= c[b0] == '`' ||
 					         (c[b0] == '$' && b0 + 1 < i && c[b0 + 1] == '(');
@@ -4788,13 +4792,16 @@ card_text(const struct json_parser *p, int in, size_t *n)
 		size_t l = 0;
 		char *s = j_str(p, v, &l);
 		const char *t = s;
+		int raw = !s && v >= 0 && !j_null(p, v);
 
-		if (!s && v >= 0 && !j_null(p, v))
+		if (raw)
 		{
 			t = p->text + p->tok[v].start;
 			l = (size_t)(p->tok[v].end - p->tok[v].start);
 		}
-		if (t)
+		/* v, not t: the analyzer reads "if (t)" as p->text maybe NULL,
+		** and v >= 0 is what ties m (non-NULL) to a field */
+		if (v >= 0 && (s || raw))
 		{
 			fprintf(m, "%s%s: ", any++ ? "\n" : "", keys[k]);
 			fwrite(t, 1, clip(t, l, XR_FIELD_CAP), m);
@@ -5371,7 +5378,7 @@ cx_item(struct xr_claude *d, const struct json_parser *p, int pl)
 {
 	char *t = k_str(p, pl, A_TYPE, NULL), *r, *s;
 	int c, i;
-	size_t n;
+	size_t n = 0;
 
 	if (t && !strcmp(t, "message"))
 	{

@@ -5322,7 +5322,7 @@ do_keys_verb(const char *name, char **combos, int ncombos)
 	size_t fill = 0;
 	int s, rc, k;
 
-	if (ncombos == 0)
+	if (ncombos <= 0)
 	{
 		fprintf(stderr, "dch: --keys needs at least one key\n");
 		return 1;

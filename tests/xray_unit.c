@@ -2827,6 +2827,9 @@ t_excl(void)
 		"cat notes.md # /etc/x", "cat <<A <<B\nB\nrg q\nA\nb\nB",
 		"env -S'cat notes.md'", "cat <<- EOF\n\tx\n\tEOF\ncat notes.md",
 		"cat <<'EOF'\n$(cat /etc/x)\nEOF", "cat <<EOF\n$HOME ${x}\nEOF\ncat notes.md",
+		/* #177: a body with no delimiter line ends at its slice; the `
+		** that closes the substitution is not the body's */
+		"cat notes.md; echo \"`cat <<E\nx`\"",
 		0
 	};
 	/* change (a): a reader or search only inside $(…) or backquotes
