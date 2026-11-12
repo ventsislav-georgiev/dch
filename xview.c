@@ -1,6 +1,6 @@
 /*
 ** The X-ray view (#175, XR5a): `dch --xray <n>` with no --json, and the
-** picker's X. Three tabs over one session, Chapters, Refs and On screen; a
+** picker's x. Three tabs over one session, Chapters, Refs and On screen; a
 ** ref's card; a chapter's reader. Drawn with the picker's renderer, on the
 ** terminal its host (dch.c) made raw and put on the alternate screen.
 **
@@ -2036,7 +2036,7 @@ xv_copy(struct xv *v)
 }
 
 /* o: leave the view for an attach to the session, xv_go naming it for the
-** host (dch.c: dch --xray, the picker's X; the in-attach chord's view is
+** host (dch.c: dch --xray, the picker's x; the in-attach chord's view is
 ** already on it, so leaving is all). 1: leave. Ended: said, kept. */
 static int
 xv_open(struct xv *v)

@@ -172,8 +172,8 @@ hint.
 | `r` | rename (set the alias; empty clears) | |
 | `R` | restart the agent (`--restart <n> --include-agents -f`), asks first | |
 | `S` | stop (`--stop`), asks first | |
-| `x` | kill (`-k`), asks first | |
-| `X` | open the session's [X-ray view](#x-ray-view-dch---xray-n); `q` comes back (a remote row's runs on its host) | the same, for the row's record |
+| `x` | open the session's [X-ray view](#x-ray-view-dch---xray-n); `q` comes back (a remote row's runs on its host) | the same, for the row's record |
+| `X` | kill (`-k`), asks first | |
 | `a` | allow a plain Yes/No permission prompt (presses `1`, Yes), asks first; a question form or any other prompt is refused: attach to answer it | |
 | `b` / `B` | restart stale agents / restart all agents (force), asks first | |
 | `s` | sort by activity (blocked, working, done, idle, newest first) or by name (`a2` before `a10`); saved as `picker_sort`, so the next picker starts in it | |
@@ -193,7 +193,7 @@ and the filter stays across tab switches and reloads, with `No match` for an
 empty result. While typing, every printable key goes to the filter (no letter
 binding fires; `j` `k` type too), `Tab` switches tabs, `Backspace` edits (on
 an empty filter it closes the prompt), `Ctrl-U` clears the text, `↑` `↓`
-close the prompt and move, keeping the filter, so the letter actions (`x`,
+close the prompt and move, keeping the filter, so the letter actions (`X`,
 `S`, `R`, ...) work on the filtered rows, and `Enter` closes the prompt and
 acts on the selected row as it always does. `/` reopens the prompt on the
 kept text; the filter stays until `Esc`, which clears it, and a later `Esc`
@@ -868,7 +868,7 @@ credit for it.
 ### X-ray view (`dch --xray <n>`)
 
 `dch --xray <n>` with no other flag opens a full-screen view of session
-`<n>`'s X-ray. `X` on a picker row opens the same view, and `q` returns to
+`<n>`'s X-ray. `x` on a picker row opens the same view, and `q` returns to
 the picker. The view asks the same engine as `--json` and holds its index as
 `--follow` does, so a live session's new chapters and refs appear while it is
 open. It writes nothing to disk. Text from the session (titles, lines,
@@ -884,7 +884,7 @@ The view has three tabs:
   shown without `n`. A host or an older dch that sends no `auto` shows
   every chapter. `o`, here and in a chapter, leaves the view (as `q` does)
   and attaches to the live session, as `dch -a <n>` does (`host:name` too;
-  from the picker's `X`, as the picker's `Enter`; the `-k` and `-d` pickers
+  from the picker's `x`, as the picker's `Enter`; the `-k` and `-d` pickers
   say it is not theirs). On an ended session `o` says so and the view
   stays. The attach opens at the session's live screen, not at the
   chapter.
@@ -954,18 +954,18 @@ reporting, the kitty keyboard flags, the alternate screen). An older dch
 serve or the Prosper server only resizes: those modes stay off on your
 terminal until you attach again. There is no
 `xray_key` setting: the chord takes no key from the program. In the picker,
-lowercase `x` is still kill, which asks first; `X` opens the view.
+`x` opens the view too; `X` is kill, which asks first.
 
 A window smaller than 24x8 shows only "X-ray: the window is too small".
 
 `dch --xray host:name` opens the view of a session on another host (dch
-serve 1.55.0+), and so does `X` on a remote row in the picker. Every query
+serve 1.55.0+), and so does `x` on a remote row in the picker. Every query
 runs on the host, each over its own ctl connection. On screen reads the
 host's screen with `--read <name> --ansi`, once a second while it shows: on
 the host that is one dch and two serve log lines (`ctl --read`, `ctl done`)
 a second. The host's text is drawn
 as a local session's is, every control and bidi character, every byte of
-an invalid UTF-8 sequence and a NUL as `?`. `X` opens the session of the
+an invalid UTF-8 sequence and a NUL as `?`. `x` opens the session of the
 row it is on, also next to a local session literally named `host:name`. A
 host that refuses us, lacks `--xray` or cannot be reached shows its line in
 place of the tabs (`dch: <host>: does not support --xray (needs dch serve

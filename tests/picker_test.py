@@ -7,7 +7,8 @@ and --keys types into it. Covers:
      (default "-qa"), live, and that session leaves the Sessions tab;
   2. the sort toggle: activity (working first) vs name (s2 before s10);
   3. rename through the picker sets the alias;
-  4. kill asks first: n keeps the session, y kills it;
+  4. X kills and asks first: n keeps the session, y kills it; x opens
+     the row's X-ray view and never kills (OQ-6), the hints say so;
   5. the History tab lists the killed session and Enter resumes it, and
      titles a record by its agent.name (#097);
   6. NO_COLOR and TERM=dumb draw no ESC[3x color, a colored one does;
@@ -29,7 +30,7 @@ and --keys types into it. Covers:
      Esc restores every row and a later Esc quits, Backspace on nothing
      leaves the prompt, Enter attaches the top match; Down moves among
      the kept rows, closing the prompt and keeping the filter so a letter
-     action (x) works on the filtered row, j/k type into the prompt, and a
+     action (X) works on the filtered row, j/k type into the prompt, and a
      reload keeps the filter and the selection (#108);
  13. the kitty keyboard protocol (#132), on a real pty: the picker pushes
      the disambiguate flag (CSI > 1 u) after entering the alternate screen
@@ -39,7 +40,7 @@ and --keys types into it. Covers:
      session's own push comes back after the pop and nothing pops it
      again; History hints Shift+Enter/o;
  14. a name starting with '-' (#162), as an older dch made it: on a live
-     row x kills (`-k -- <name>`) and r says what works; on a History row
+     row X kills (`-k -- <name>`) and r says what works; on a History row
      p pins and unpins, d removes (`--` before the name), Enter says it is
      not resumed.
 
@@ -335,12 +336,12 @@ def dashname():
     wait_screen("pk9", lambda s: "-x" in rows(s))
     check("select -x", select("pk9", "-x"), screen("pk9"))
     dch("--keys", "pk9", "r")
-    s = wait_screen("pk9", lambda s: "Enter attaches, x kills" in s)
+    s = wait_screen("pk9", lambda s: "Enter attaches, X kills" in s)
     check("r on -x says what works",
-          "-x: a name starting with '-'; Enter attaches, x kills" in s, s)
-    dch("--keys", "pk9", "x")
+          "-x: a name starting with '-'; Enter attaches, X kills" in s, s)
+    dch("--keys", "pk9", "X")
     s = wait_screen("pk9", lambda s: "Kill -x? [y/N]" in s)
-    check("x on -x asks", "Kill -x? [y/N]" in s, s)
+    check("X on -x asks", "Kill -x? [y/N]" in s, s)
     dch("--keys", "pk9", "y")
     check("y kills -x", wait_live("-x", False), live())
 
@@ -447,16 +448,27 @@ def main():
     check("rename sets the alias",
           wait_live("s10", True) and "nick (s10)" in live(), live())
 
-    # 4. kill asks first
+    # 4. kill asks first; x is the X-ray view, X the kill (OQ-6)
     check("select s2", select("pk1", "s2"), screen("pk1"))
+    f = " ".join(footer(screen("pk1")))
+    check("the hints name x x-ray and X kill",
+          "x x-ray" in f and "X kill" in f, f)
     dch("--keys", "pk1", "x")
+    s = wait_screen("pk1", lambda s: "X-ray  s2" in s or "[y/N]" in s)
+    check("x opens the row's X-ray view and never asks to kill",
+          "X-ray  s2" in s and "[y/N]" not in s, s)
+    dch("--keys", "pk1", "q")
+    s = wait_screen("pk1", lambda s: "X-ray  s2" not in s and "s10" in s)
+    check("q in the view returns to the picker, s2 still live",
+          "X-ray  s2" not in s and wait_live("s2", True), s)
+    dch("--keys", "pk1", "X")
     s = wait_screen("pk1", lambda s: "Kill s2? [y/N]" in s)
-    check("x asks before killing", "Kill s2? [y/N]" in s, s)
+    check("X asks before killing", "Kill s2? [y/N]" in s, s)
     dch("--keys", "pk1", "n")
     s = wait_screen("pk1", lambda s: "cancelled" in s)
     check("n cancels and keeps the session",
           "cancelled" in s and wait_live("s2", True), s)
-    dch("--keys", "pk1", "x")
+    dch("--keys", "pk1", "X")
     wait_screen("pk1", lambda s: "Kill s2? [y/N]" in s)
     dch("--keys", "pk1", "y")
     check("y kills it", wait_live("s2", False), live())
@@ -693,9 +705,9 @@ def main():
           sel not in (None, was) and sel.startswith("pk") and
           all(x.startswith("pk") for x in rows(s)) and
           "/pk" in s and "/pk\u2588" not in s and "q quit" in s, s)
-    dch("--keys", "pk7", "x")
+    dch("--keys", "pk7", "X")
     s = wait_screen("pk7", lambda s: "[y/N]" in s)
-    check("a letter action works on the filtered row: x asks about it",
+    check("a letter action works on the filtered row: X asks about it",
           "Kill %s? [y/N]" % sel in s, s)
     dch("--keys", "pk7", "n")
     wait_screen("pk7", lambda s: "[y/N]" not in s)

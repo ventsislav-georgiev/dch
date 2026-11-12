@@ -1277,8 +1277,8 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 	{
 		PK_K(0, ret, "attach", NULL, 0);
 		PK_K(0, "r", "rename", NULL, 0);
-		PK_K(0, "x", "kill", NULL, 1);
-		PK_K(0, "X", "x-ray", NULL, 0);
+		PK_K(0, "X", "kill", NULL, 1);
+		PK_K(0, "x", "x-ray", NULL, 0);
 		PK_K(1, "R", "restart", NULL, 0);
 		PK_K(1, "S", "stop", NULL, 1);
 		if (cur && !strcmp(cur->state, "blocked"))
@@ -1301,7 +1301,7 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 		}
 		PK_K(0, "p", cur && cur->pinned ? "unpin" : "pin", NULL, 0);
 		PK_K(0, "d", "remove", NULL, 1);
-		PK_K(0, "X", "x-ray", NULL, 0);
+		PK_K(0, "x", "x-ray", NULL, 0);
 	}
 	if (!p->settings && !p->filtering)
 		PK_K(2, ",", "settings", NULL, 0);

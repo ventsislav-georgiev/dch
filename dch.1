@@ -522,9 +522,9 @@ restarts the agent
 .RB ( "\-\-restart \-\-include\-agents \-f" ),
 .B S
 stops,
-.B x
-kills,
 .B X
+kills,
+.B x
 opens the row's X\-ray view
 .RB ( "dch \-\-xray" ;
 .B q
@@ -844,7 +844,7 @@ setting.
 opens the view of a session on another host
 .RB ( "dch serve"
 1.55.0+), as does
-.B X
+.B x
 on a remote row in the picker.
 Every query runs on the host, each over its own ctl connection; On screen
 reads the host's screen with
@@ -854,7 +854,7 @@ the host).
 The host's text is drawn as a local session's, every control and bidi
 character, every byte of an invalid UTF\-8 sequence and a NUL as
 .BR ? .
-.B X
+.B x
 opens the session of the row it is on, also next to a local session
 literally named
 .IR host : name .

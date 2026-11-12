@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """The X-ray view of a remote session (#188, XR5c): `dch --xray host:name`
-and the picker's X on a remote row.
+and the picker's x on a remote row.
 
 A real `dch serve` runs on 127.0.0.1 (DCH_SERVE_TEST_LOOPBACK=1, --bind
 127.0.0.1 --port 0, a fake `tailscale` first on PATH), its sessions in their
@@ -33,10 +33,11 @@ Covers:
   4. a host without "xray" (exit 6), a closed port (exit 7) and a gate that
      refuses us (exit 4): the line in place of the tabs, the view open until
      q, then the exit code and the line on stderr;
-  5. the picker: X on the remote Sessions row srv:xv-sh opens its view, q
-     returns to the picker; X on the remote History row srv:xv-cl opens
-     that record's view; next to a local session literally named
-     srv:xv-sh, X on each row opens that row's session (QA 1.57.0 LOW-R2);
+  5. the picker: x on the remote Sessions row srv:xv-sh opens its view, q
+     returns to the picker, X (kill) there opens no view (OQ-6); x on the
+     remote History row srv:xv-cl opens that record's view; next to a local
+     session literally named srv:xv-sh, x on each row opens that row's
+     session (QA 1.57.0 LOW-R2);
   6. the in-attach chord over `dch -a srv:xv-rx` (#189): the detach key then
      x (a later read, one burst, the kitty CSI form, --host srv -a xv-rx,
      detach_key = switch) opens the view of srv:xv-rx over the attach, On
@@ -1003,7 +1004,7 @@ def test_stop():
         h.close()
 
 
-# ---- 5: the picker's X on a remote row --------------------------------------
+# ---- 5: the picker's x on a remote row --------------------------------------
 
 def test_picker(port):
     hosts("srv=127.0.0.1:%d" % port)
@@ -1013,8 +1014,8 @@ def test_picker(port):
               v.wait(b"xv-sh", 15), v.out[-600:])
         v.pump(1.0)
         mark = len(v.out)
-        v.key(b"X", 1.0)
-        check("picker: X on the remote row opens its view",
+        v.key(b"x", 1.0)
+        check("picker: x on the remote row opens its view",
               v.wait(b"X-ray  srv:xv-sh", start=mark) and
               v.wait(b"Chapters", start=mark), v.out[mark:][-600:])
         mark = len(v.out)
@@ -1022,6 +1023,13 @@ def test_picker(port):
         check("picker: q in the view returns to the picker",
               v.reap() is None and v.wait(b"Sessions", start=mark),
               v.out[mark:][-600:])
+        n0 = ctls("--xray")
+        mark = len(v.out)
+        v.key(b"X", 1.0)
+        check("picker: X on the remote row opens no view and kills nothing "
+              "(OQ-6)", v.wait(b"Enter attaches, nothing else", start=mark)
+              and b"X-ray  srv:xv-sh" not in v.out[mark:] and
+              ctls("--xray") == n0, v.out[mark:][-600:])
         # History: the host's record srv:xv-cl, its only row
         for _ in range(3):
             mark = len(v.out)
@@ -1032,8 +1040,8 @@ def test_picker(port):
               v.wait(b"xv-cl", 15, start=mark), v.out[mark:][-600:])
         v.pump(0.5)
         mark = len(v.out)
-        v.key(b"X", 1.0)
-        check("picker: X on the remote History row opens its record's view",
+        v.key(b"x", 1.0)
+        check("picker: x on the remote History row opens its record's view",
               v.wait(b"X-ray  srv:xv-cl", start=mark) and
               v.wait(b"Chapters 2", start=mark), v.out[mark:][-600:])
         v.key(b"q", 1.0)
@@ -1045,7 +1053,7 @@ def test_picker(port):
 
 def test_same_name():
     """QA 1.57.0 LOW-R2: a local session literally named srv:xv-sh next to
-    the host's xv-sh; X on each row opens that row's session (only the
+    the host's xv-sh; x on each row opens that row's session (only the
     remote one asks the host)."""
     # its own client dirs, the same remote_hosts: the History record the
     # local srv:xv-sh leaves would route srv:xv-sh here for the next tests
@@ -1064,13 +1072,13 @@ def test_same_name():
         for keys in (b"kkk", b"jjj"):
             n0 = ctls("--xray")
             mark = len(v.out)
-            v.key(keys + b"X", 1.0)
+            v.key(keys + b"x", 1.0)
             ok = v.wait(b"X-ray  srv:xv-sh", start=mark) and \
                 v.wait(b"Chapters", start=mark)
             v.pump(0.5)
             asked.append((ok, ctls("--xray") - n0))
             v.key(b"q", 1.0)
-        check("same name: X on the remote row opens the host's session, X "
+        check("same name: x on the remote row opens the host's session, x "
               "on the local row the local one",
               all(a[0] for a in asked) and
               sorted(a[1] > 0 for a in asked) == [False, True], asked)

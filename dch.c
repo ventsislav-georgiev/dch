@@ -9479,7 +9479,7 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 		return 0;
 	}
 	if (c != '\r' && c != '\n' && c != 'r' && c > 0 && c < 256 &&
-	    strchr("RSxabBmIpdo", c) && p->pid > 0)
+	    strchr("RSXabBmIpdo", c) && p->pid > 0)
 	{
 		snprintf(p->status, sizeof p->status, "busy, one at a time");
 		return 0;
@@ -9510,19 +9510,19 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 	}
 	if (!w || (c > 0 && c < 256 && !strchr("\r\nrRSxXapmdo", c)))
 		return 0;
-	/* dch would read a name that starts with '-' as a flag: Enter, x, p
+	/* dch would read a name that starts with '-' as a flag: Enter, X, p
 	** and d pass it after `--` or need no flag; no such name is made or
 	** resumed (#162) */
-	if (w->name[0] == '-' && !(t == 2 ? c == 'p' || c == 'd' : c == 'x' ||
+	if (w->name[0] == '-' && !(t == 2 ? c == 'p' || c == 'd' : c == 'X' ||
 	                           c == '\r' || c == '\n'))
 	{
 		snprintf(p->status, sizeof p->status, t == 2 ? "%s: a name "
 		         "starting with '-' can't be resumed; p pins, d removes"
-		         : "%s: a name starting with '-'; Enter attaches, x "
+		         : "%s: a name starting with '-'; Enter attaches, X "
 		         "kills", w->name);
 		return 0;
 	}
-	if (c == 'X')
+	if (c == 'x')
 	{
 		/* the X-ray view (#175): a live session by name, a History row
 		** by its record; a remote one's on its host (#188) */
@@ -9576,7 +9576,7 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 			pk_ask(p, "Stop %s? Claude Code exits; resume it from "
 			       "History.", w->title);
 			return 0;
-		case 'x':
+		case 'X':
 			snprintf(d, sizeof d, "killing %s", w->title);
 			pk_act(&p->ask, t, w->name, d, "-k", "--", w->name, NULL);
 			pk_ask(p, "Kill %s?", w->title);
@@ -9776,7 +9776,7 @@ xv_screen(const char *name, char *buf, size_t cap)
 	return n;
 }
 
-/* The picker's X: the view on its terminal, as it is (raw, alternate
+/* The picker's x: the view on its terminal, as it is (raw, alternate
 ** screen); the picker drawn whole after. The view's o (#194): 1, out
 ** holds the session to attach, as Enter's; not in the -k and -d pickers. */
 static int
