@@ -1662,6 +1662,9 @@ out:
 /* #192: a prompt that is wholly harness text (<task-notification>,
 ** <system-reminder>) is auto and carries its <summary>, else its <event>,
 ** made as a title is; the title stays; JSON adds "auto"/"summary" only then */
+/* a queued_command attachment: att inside the attachment, top beside it */
+#define QC(t, att, top) "{\"type\":\"attachment\",\"attachment\":{\"type\":" \
+	"\"queued_command\",\"prompt\":\"" t "\"" att "}" top "}"
 #define TN(b) "<task-notification>\\n<task-id>b1</task-id>\\n" b \
               "\\n</task-notification>"
 
@@ -1726,9 +1729,24 @@ t_auto(void)
 	line("{\"type\":\"user\",\"origin\":\"task-notification\",\"message\":"
 	     "{\"content\":\"" TN("<summary>a string origin</summary>") "\"}}");
 	line(A("x"));
+	/* a queued_command carries its mark in the attachment: commandMode
+	** (older versions: only that), its own origin; a typed one "prompt" */
+	line(QC(TN("<summary>mode only</summary>"),
+	        ",\"commandMode\":\"task-notification\"", ""));
+	line(A("x"));
+	line(QC(TN("<summary>its origin</summary>"),
+	        ",\"origin\":{\"kind\":\"task-notification\"}", ""));
+	line(A("x"));
+	line(QC(TN("<summary>queued typed</summary>"),
+	        ",\"commandMode\":\"prompt\",\"origin\":{\"kind\":\"human\"}",
+	        ""));
+	line(A("x"));
+	line(QC(TN("<summary>top origin</summary>"), "",
+	        ",\"origin\":{\"kind\":\"task-notification\"}"));
+	line(A("x"));
 	end(&c);
-	CHECK("auto: 18 chapters", c.n == 18);
-	if (c.n != 18)
+	CHECK("auto: 22 chapters", c.n == 22);
+	if (c.n != 22)
 	{
 		xr_chapters_free(&c);
 		goto out;
@@ -1788,6 +1806,19 @@ t_auto(void)
 	      "plain", !xr_chapter_at(&c, 16)->harness &&
 	      !xr_chapter_at(&c, 17)->harness &&
 	      !xr_chapter_at(&c, 17)->summary[0]);
+	CHECK("auto (LOW-V5 r2): a queued notification with commandMode "
+	      "task-notification and no origin is auto, its summary",
+	      xr_chapter_at(&c, 18)->harness &&
+	      !strcmp(xr_chapter_at(&c, 18)->summary, "mode only"));
+	CHECK("auto (LOW-V5 r2): a queued notification with attachment.origin "
+	      "task-notification is auto",
+	      xr_chapter_at(&c, 19)->harness &&
+	      !strcmp(xr_chapter_at(&c, 19)->summary, "its origin"));
+	CHECK("auto (LOW-V5 r2): a queued prompt (commandMode prompt) in the "
+	      "shape is plain", !xr_chapter_at(&c, 20)->harness &&
+	      !xr_chapter_at(&c, 20)->summary[0]);
+	CHECK("auto (LOW-V5 r2): a top-level origin on an attachment record "
+	      "alone is plain", !xr_chapter_at(&c, 21)->harness);
 
 	/* the snapshot row, the --chapter head and a --follow chapter line */
 	memset(&a, 0, sizeof a);

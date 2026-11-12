@@ -1583,6 +1583,7 @@ static const char *const A_PROMPT[] = { "prompt", 0 };
 static const char *const A_TS[] = { "timestamp", 0 };
 static const char *const A_ORIGIN[] = { "origin", 0 };
 static const char *const A_KIND[] = { "kind", 0 };
+static const char *const A_CMODE[] = { "commandMode", 0 };
 
 /* K.str: a string value or NULL (malloc'd). */
 static char *
@@ -5125,13 +5126,14 @@ ent_command(struct xr_entries *e, const char *t, size_t tl)
 	free(b);
 }
 
-/* The record says Claude Code wrote it: "origin":{"kind":
-** "task-notification"} (QA 1.58.0 LOW-V5). A typed prompt has no origin,
-** so text alone never makes a prompt auto. */
+/* Object obj says Claude Code wrote it: "origin":{"kind":
+** "task-notification"} (QA 1.58.0 LOW-V5); a user record carries it at the
+** top, a queued_command in its attachment. A typed prompt has no origin, so
+** text alone never makes a prompt auto. */
 static int
-injected(const struct json_parser *p)
+injected(const struct json_parser *p, int obj)
 {
-	int o = k_obj(p, 0, A_ORIGIN);
+	int o = k_obj(p, obj, A_ORIGIN);
 
 	return o >= 0 && k_streq(p, o, A_KIND, "task-notification");
 }
@@ -5218,7 +5220,7 @@ entry_user(struct xr_claude *d, const struct json_parser *p, const char *ag)
 	if (c >= 0 && p->tok[c].kind == JSON_STRING)
 	{
 		if ((s = j_str(p, c, &n)))
-			user_text(d, ag, s, n, injected(p));
+			user_text(d, ag, s, n, injected(p, 0));
 		free(s);
 		return;
 	}
@@ -5254,7 +5256,7 @@ entry_user(struct xr_claude *d, const struct json_parser *p, const char *ag)
 			free(t);
 		}
 		if (text)
-			user_text(d, ag, text, tl, injected(p));
+			user_text(d, ag, text, tl, injected(p, 0));
 		free(text);
 	}
 	for (i = c + 1; i < p->tok[c].next; i = p->tok[i].next)
@@ -5745,7 +5747,10 @@ xr_claude_line(struct xr_claude *d, const char *line, size_t len,
 		    (s = k_str(&p, a, A_PROMPT, &n)))
 		{
 			if (!blank(s, n))
-				user_text(d, ag, s, n, injected(&p));
+				/* commandMode is on every real one; older
+				** versions wrote no attachment origin */
+				user_text(d, ag, s, n, k_streq(&p, a, A_CMODE,
+				    "task-notification") || injected(&p, a));
 			free(s);
 		}
 	}

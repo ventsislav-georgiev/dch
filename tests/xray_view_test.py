@@ -533,7 +533,9 @@ def note(inner):
 def fixture_auto():
     """xv-au: two prompts, three notifications between them (one with a
     summary, one with a hostile summary, one with none); xv-aa: only
-    notifications."""
+    notifications. Each in a shape Claude Code writes: a user record with
+    "origin", or a queued_command attachment with commandMode (and, newer,
+    its own origin)."""
     cfg = os.path.join(HOME, ".claude")
     pdir = os.path.join(cfg, "projects", "-home-demo-proj")
     os.makedirs(pdir, exist_ok=True)
@@ -544,17 +546,26 @@ def fixture_auto():
     au = ["fix the login bug",
           note("<task-id>t1</task-id>\n<status>completed</status>\n"
                "<summary>Build finished: 3 passed</summary>"),
-          note("<task-id>t2</task-id>\n<status>failed</status>"),
-          note("<task-id>t3</task-id>\n<summary>Lint \033]0;pwned\007 "
-               "evil\u202edone</summary>"),
+          ("q", note("<task-id>t2</task-id>\n<status>failed</status>")),
+          ("qo", note("<task-id>t3</task-id>\n<summary>Lint \033]0;pwned"
+                      "\007 evil\u202edone</summary>")),
           "deploy it"]
     aa = [note("<task-id>t9</task-id>\n<summary>Only a notice</summary>")]
     for sid, name, prompts in ((ASID, "xv-au", au), (BSID, "xv-aa", aa)):
         lines = []
         for i, t in enumerate(prompts):
-            lines += [{"type": "user", "cwd": P,
-                       "timestamp": "2026-11-10T1%d:00:00Z" % i,
-                       "message": {"content": t}},
+            o = {"cwd": P, "timestamp": "2026-11-10T1%d:00:00Z" % i}
+            if isinstance(t, tuple):
+                a = {"type": "queued_command", "prompt": t[1],
+                     "commandMode": "task-notification"}
+                if t[0] == "qo":
+                    a["origin"] = {"kind": "task-notification"}
+                o.update(type="attachment", attachment=a)
+            else:
+                o.update(type="user", message={"content": t})
+                if t.startswith("<task-notification>"):
+                    o["origin"] = {"kind": "task-notification"}
+            lines += [o,
                       {"type": "assistant", "message": {"content": [
                           {"type": "text", "text": "reply %d" % i}]}}]
         with open(os.path.join(pdir, sid + ".jsonl"), "w") as f:
