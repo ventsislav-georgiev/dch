@@ -160,7 +160,7 @@ extern int xv_tab;	/* the tab it opens on: 0 Chapters, 2 On screen */
 pid_t xv_spawn(int fd, int ac, char **av, int *out, int *err);
 int xv_screen(const char *name, char *buf, size_t cap);
 /* A remote view (#188): xv_remote, n is host:name; xv_plain, the host's
-** `--read <name> --ansi --cursor` bytes as plain text, malloc'd, or NULL. */
+** `--read <name> --ansi` bytes as plain text, malloc'd, or NULL. */
 int xv_remote(const char *n);
 char *xv_plain(const char *raw, size_t n);
 #endif
