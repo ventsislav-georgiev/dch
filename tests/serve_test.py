@@ -425,11 +425,11 @@ def main():
         want = b'{"schema":1,"snapshot":{"schema":1,"session":"svx"'
         chk("xray serve: --follow streams 0x31; a 0x34 ends its dch with "
               "exactly one 0x33 cancel",
-              t == (0x31 if mirror else 0x33) and pid and gone(pid)
-              and (not mirror or (pl.startswith(want)
-                                  and (t2, p2) == (0x33, b'{"exit":2,'
-                                                   b'"why":"cancel"}')
-                                  and more is None)), (t, pl[:60], t2, p2))
+              # lite too: a ringless shell's --follow streams its corpus
+              # none snapshot and waits for an agent (it never exits alone)
+              t == 0x31 and pid and gone(pid) and pl.startswith(want)
+              and (t2, p2) == (0x33, b'{"exit":2,"why":"cancel"}')
+              and more is None, (t, pl[:60], t2, p2))
         if mirror:
             s = conn(port)
             t, pl, pid = follow(s)

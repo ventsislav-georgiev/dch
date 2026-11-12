@@ -1229,8 +1229,8 @@ ctl_request(const unsigned char *p, size_t n, char ***av, int *ac, char *cwd,
 	}
 	/* --xray --ref's text: 3.1's byte and grammar rules, xray.c's (the
 	** ones dch --xray applies), before any child runs (4.4) */
-	for (int i = 2; t >= 0 && !strcmp((*av)[0], "--xray") && i + 1 < *ac;
-	     i++)
+	for (int i = 2; t >= 0 && *av && i + 1 < *ac &&
+	     !strcmp((*av)[0], "--xray"); i++)
 		if (kind[i] == CK_FLAG && !strcmp((*av)[i], "--ref"))
 		{
 			struct xr_span sp;

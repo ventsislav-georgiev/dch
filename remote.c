@@ -3828,7 +3828,7 @@ dch_remote_requests(char *n)
 	struct rq q;
 	char hb[DCH_RHOST_MAX], msg[800];
 	size_t hl = strcspn(n, ":"), off;
-	int rc, eof = 0, skip = 0;
+	int rc, skip = 0;
 	ssize_t k;
 
 	memset(&q, 0, sizeof q);
@@ -3845,7 +3845,7 @@ dch_remote_requests(char *n)
 	if ((rc = rq_dial(&q, msg, sizeof msg)))
 		return rq_fail(rc, msg);
 	rq_ready(&o, q.p->hello_js);
-	while (!eof && rq_put(&o) == 0)
+	while (rq_put(&o) == 0)
 	{
 		struct pollfd pf[2];
 		int np = 1, tmo = -1;
@@ -3881,7 +3881,6 @@ dch_remote_requests(char *n)
 		{
 			/* the close cancels a request in flight on the host;
 			** an unterminated last line is no request */
-			eof = 1;
 			if (q.req)
 				rq_exit(&o, q.req, 2, "cancel");
 			(void)rq_put(&o);

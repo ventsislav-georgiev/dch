@@ -584,7 +584,14 @@ def xray_checks(dch, check, senv, cenv, port, fakes, tmp, slog):
     a = pl.stdout.readline()
     pl.terminate()
     pl.communicate(timeout=10)
+    mirror = dch(cenv, "--build").stdout.strip() == "full"
     for sig in (signal.SIGINT, signal.SIGTERM, None):
+        if not sig and not mirror:
+            # a closed stdout shows at the next line written, and a lite
+            # shell's --follow writes none after its snapshot
+            print("  skip xray --follow (stdout closed): the shell writes "
+                  "no delta (build has no terminal mirror)")
+            continue
         with open(slog) as f:
             cut0 = f.read().count("ctl cut short: cancel")
         pr = subprocess.Popen([DCH, "--xray", "srv:xr1", "--follow",
@@ -1055,8 +1062,10 @@ def requests_checks(dch, check, senv, cenv, serve_at, fakes, tmp, slog):
     if iport is not None:
         rq = Requests(side("i=127.0.0.1:%d" % iport), "i:xq1")
         rq.line()
+        # lite: a shell has no corpus, so no --ref line; --json still cuts
+        full = dch(cenv, "--build").stdout.strip() == "full"
         rq.send({"req": 1, "argv": ["--ref", "#831", "--scope", "session",
-                                    "--json"]})
+                                    "--json"] if full else ["--json"]})
         got = rq.until(1)
         check("requests: the host's cap: a cut line as a string, exit 2 cap",
               json.loads(got[-1]) == {"req": 1, "exit": 2, "why": "cap"}

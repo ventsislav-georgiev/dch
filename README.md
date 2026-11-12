@@ -886,8 +886,11 @@ prints `dch: <host>: does not support --xray (needs dch serve 1.55.0+)`,
 exit 6. A refusal by the host's gate exits 4, its own refusal of the
 request exits 1 (`dch: <host>: <why>`), and an unreachable host or a lost
 connection exits 7. Ctrl-C, SIGTERM or a closed standard output cancel the
-query on the host, as for the [remote control verbs](#remote-hosts). There
-is no `--host` form.
+query on the host, as for the [remote control verbs](#remote-hosts). A
+closed standard output shows at the next line the host sends. A `--follow`
+of a shell with no ring (dch-lite, `xray_ring 0`) sends nothing after its
+snapshot until an agent starts: it runs on until a signal or the session
+ends. There is no `--host` form.
 
 `dch --xray host:name --requests --json` holds one warm connection to the
 host for many requests, one at a time: it is how a client such as Prosper
