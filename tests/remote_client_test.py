@@ -1791,7 +1791,7 @@ def main():
             os._exit(127)
         fcntl.ioctl(fd, termios.TIOCSWINSZ,
                     struct.pack("HHHH", rows, cols, 0, 0))
-        clients.append(pid)
+        clients.append((pid, fd))
         return pid, fd
 
     def reap(pid, fd, secs):
@@ -1800,7 +1800,7 @@ def main():
         while time.time() < end:
             got, st = os.waitpid(pid, os.WNOHANG)
             if got:
-                clients.remove(pid)
+                clients.remove((pid, fd))
                 return st, out + read(fd, b"\0never", 0.2)
             out += read(fd, b"\0never", 0.05)
         return None, out
@@ -2275,9 +2275,10 @@ def main():
               "refusal)", r.returncode == 0 and "srv:" not in r.stdout
               and "dch: srv refused: this host serves only" in r.stderr, r)
     finally:
-        for pid in clients:
+        for pid, fd in clients:
             try:
                 os.kill(pid, signal.SIGKILL)
+                os.close(fd)
                 os.waitpid(pid, 0)
             except OSError:
                 pass

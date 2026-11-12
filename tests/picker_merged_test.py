@@ -65,6 +65,7 @@ def main():
             else:
                 if time.time() >= end:
                     os.kill(pid, 9)
+                    os.close(fd)
                     os.waitpid(pid, 0)
         subprocess.run([DCH, "-kl"], env=env, capture_output=True)
         shutil.rmtree(tmp, ignore_errors=True)

@@ -62,9 +62,12 @@ def run_client(name, argv_tail, drain_s=10.0, until=None):
         time.sleep(0.05)
     else:
         os.kill(pid, signal.SIGHUP)
+        os.close(fd)  # first: the client may be stuck on unread output
         _, status = os.waitpid(pid, 0)
+        fd = None
     try:
-        os.close(fd)
+        if fd is not None:
+            os.close(fd)
     except OSError:
         pass
     return status, out
@@ -190,8 +193,8 @@ def main():
             os._exit(127)
         out = drain(fd, 10.0, b"TRAP_OK")
         os.kill(pid, signal.SIGHUP)
-        os.waitpid(pid, 0)
         os.close(fd)
+        os.waitpid(pid, 0)
         shutil.rmtree(bindir, ignore_errors=True)
         shutil.rmtree(trap, ignore_errors=True)
         if "TRAP_OK" in out and "failed to spawn" not in out:
@@ -253,8 +256,8 @@ def main():
                 time.sleep(0.05)
             if attach:
                 os.kill(pid, signal.SIGHUP)
-                os.waitpid(pid, 0)
                 os.close(fd)
+                os.waitpid(pid, 0)
             return got or {}
 
         def no_agent(e):

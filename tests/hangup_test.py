@@ -79,10 +79,10 @@ def main():
         check("SIGHUP: the client exits within 3 s", gone)
         check("SIGHUP: its client marker is removed",
               had and not markers("calm", pid))
+        os.close(fd)
         if not gone:
             os.kill(pid, signal.SIGKILL)
             os.waitpid(pid, 0)
-        os.close(fd)
 
         # a live terminal: SIGTERM still sends the reset sequence
         pid, fd = attach("calm")

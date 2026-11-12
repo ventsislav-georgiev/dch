@@ -284,10 +284,10 @@ def kitty():
         while time.time() < end and not done:
             drain(fd, 0.2)
             done = os.waitpid(pid, os.WNOHANG)[0]
+        os.close(fd)
         if not done:
             os.kill(pid, signal.SIGKILL)
             os.waitpid(pid, 0)
-        os.close(fd)
         check("a kitty %s (%r) quits the picker" % (what, key), done, key)
 
     pid, fd = pty_picker()

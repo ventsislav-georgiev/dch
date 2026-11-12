@@ -121,6 +121,8 @@ class Pty:
     def pump(self, secs=0.05):
         end = time.time() + secs
         while True:
+            if time.time() >= end:
+                return
             r, _, _ = select.select([self.fd], [], [],
                                     max(0, end - time.time()))
             if not r:
@@ -165,10 +167,12 @@ class Pty:
         return self.rc
 
     def close(self):
+        # the fd first: on macOS a killed pty leader with output unread
+        # cannot finish exiting, so the waitpid would never return
+        os.close(self.fd)
         if self.reap() is None:
             os.kill(self.pid, signal.SIGKILL)
             os.waitpid(self.pid, 0)
-        os.close(self.fd)
 
 
 def kids(pid):

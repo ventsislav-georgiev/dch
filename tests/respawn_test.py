@@ -380,6 +380,7 @@ def main():
                     break
                 rep += chunk
         os.kill(mpid, signal.SIGHUP)
+        os.close(mfd)
         os.waitpid(mpid, 0)
         check("mode reset: attach after respawn re-arms none of the dead "
               "child's modes", (not MIRROR or b"fresh_mark" in rep) and
@@ -476,6 +477,7 @@ def main():
         if att_pid:
             try:
                 os.kill(att_pid, signal.SIGHUP)
+                os.close(fd)
                 os.waitpid(att_pid, 0)
             except OSError:
                 pass

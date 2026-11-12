@@ -40,6 +40,7 @@ def main():
             print("FAIL: dch injected alternate-screen mode:", repr(first))
             return 1
         os.kill(pid_a, signal.SIGHUP)
+        os.close(fd_a)
         os.waitpid(pid_a, 0)
         pid_a = None
 

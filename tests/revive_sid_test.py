@@ -244,8 +244,8 @@ def main():
         for pid, fd in kids:
             try:
                 os.kill(pid, signal.SIGKILL)
-                os.waitpid(pid, 0)
                 os.close(fd)
+                os.waitpid(pid, 0)
             except OSError:
                 pass
         for s in os.listdir(sockdir) if os.path.isdir(sockdir) else []:

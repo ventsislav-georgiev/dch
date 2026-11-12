@@ -215,9 +215,10 @@ def pty_read(fd, until, deadline):
     return out
 
 
-def stop(pid):
+def stop(pid, fd):
     try:
         os.kill(pid, signal.SIGKILL)
+        os.close(fd)
         os.waitpid(pid, 0)
     except OSError:
         pass
@@ -243,7 +244,7 @@ def main():
     os.write(fd, b"typed")
     wait_for(lambda: any(t == MSG_PUSH for t, _, _ in old.got),
              time.time() + DUE)
-    stop(pid)
+    stop(pid, fd)
     kinds = [(t, n, p) for t, n, p in old.got]
     expect(b"OLD-MASTER-SCREEN" in out, "old master: the client shows its "
            "screen", out)
