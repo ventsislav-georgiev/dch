@@ -781,6 +781,26 @@ Keys: \fBTab\fR, \fB\(<-\fR \fB\(->\fR
 \fBEsc\fR clears a typed label or the filter, else does the same;
 \fBCtrl\-C\fR and \fBCtrl\-D\fR quit.
 A window under 24x8 says it is too small.
+While attached, the detach character and then
+.B x
+within the double\-press window
+.RB ( DCH_DOUBLE_TAP_MS )
+open the view over the session, on On screen; the session keeps running
+and the attach is kept.
+Leaving the view returns to the session with its screen repainted as it is
+now, output that came in meanwhile included (dch\-lite: the program gets a
+SIGWINCH, as on any re\-attach).
+The
+.B x
+never reaches the session.
+The chord is off with
+.BR \-E ,
+with
+.B DCH_DOUBLE_TAP_MS=0
+and over a remote attach; the keys then reach the session as before.
+There is no
+.B xray_key
+setting.
 Local only: a remote
 .IB host : name
 exits 2 and says

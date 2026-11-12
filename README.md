@@ -908,6 +908,20 @@ X-ray; run `clear`".
 | `Esc` | clear the typed label or the filter, else quit | back |
 | `Ctrl-C` `Ctrl-D` | quit | quit |
 
+**While attached**, press the detach key (`Ctrl-\`) and then `x` within the
+double-press window (`DCH_DOUBLE_TAP_MS`, default 300 ms). The view opens
+over the session on its On screen tab, and the session keeps running
+underneath: the attach is kept, never retired. Leaving the view (`q`,
+`Esc`) returns to the session with its screen repainted as it is now,
+output that came in meanwhile included (dch-lite has no screen to repaint
+from: the program gets a SIGWINCH, as on any re-attach). The `x` is never
+typed into the session. The chord is off under `-E` (no detach key) and
+with `DCH_DOUBLE_TAP_MS=0` (one press acts at once); the keys then do what
+they did before. It is off over a remote attach (`dch -a host:name`) for
+now: there the keys reach the session as before. There is no `xray_key`
+setting: the chord takes no key from the program. In the picker, lowercase
+`x` is still kill, which asks first; `X` opens the view.
+
 A window smaller than 24x8 shows only "X-ray: the window is too small". A
 remote `host:name` has no view yet: it exits 2 and says `--json` is
 required. Exit codes are those of `--json` below: 0 when you quit, 1 for no

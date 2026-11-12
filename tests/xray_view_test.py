@@ -25,7 +25,15 @@ Covers:
      gets hint label `a`, typing it opens its card (full build); on dch-lite
      the label line says X-ray needs the full build;
   9. the picker: the X hint is shown, X on a session row opens the view, q
-     returns to the picker.
+     returns to the picker;
+ 10. the in-attach chord (#187, K10): the detach key then x in a later read,
+     in one burst, and in the kitty CSI form opens the view over the attach
+     on On screen; the x never reaches the session, the attach is never
+     retired (a key typed after reaches the session), and output written
+     while the view was up is on screen after it closes (full build: the
+     mirror's repaint); off under -E and with DCH_DOUBLE_TAP_MS=0, where the
+     session receives what it did before; under detach_key = switch a late
+     x reaches the picker's kill confirmation and never kills.
 
 Run:  python3 tests/xray_view_test.py      (uses ./dch)
 """
@@ -77,14 +85,14 @@ def until(fn, secs=10.0):
 class Pty:
     """A program on a pty: out holds every byte it wrote."""
 
-    def __init__(self, argv, rows=30, cols=100):
+    def __init__(self, argv, rows=30, cols=100, env=None):
         self.out = b""
         self.rc = None
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
             fcntl.ioctl(0, termios.TIOCSWINSZ,
                         struct.pack("HHHH", rows, cols, 0, 0))
-            os.execve(argv[0], argv, ENV)
+            os.execve(argv[0], argv, dict(ENV, **(env or {})))
 
     def pump(self, secs=0.05):
         end = time.time() + secs
@@ -407,6 +415,211 @@ def test_picker():
         v.close()
 
 
+# ---- the in-attach chord (#187) -------------------------------------------
+
+# The session prints each read it gets as RX:<hex> and appends the hex to a
+# file, so a test sees exactly the bytes that reached it (dch-lite too, where
+# --read has no mirror).
+RXF = os.path.join(T, "rx.hex")
+RX = ("import os, sys, tty\n"
+      "tty.setraw(0)\n"
+      "f = open(sys.argv[1], 'a')\n"
+      "os.write(1, b'READY\\r\\n')\n"
+      "while True:\n"
+      "    b = os.read(0, 256)\n"
+      "    if not b: break\n"
+      "    f.write(b.hex()); f.flush()\n"
+      "    os.write(1, b'RX:' + b.hex().encode() + b'\\r\\n')\n")
+
+
+def rx():
+    """Every byte the session has received, in order, as hex."""
+    try:
+        with open(RXF) as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
+def attach(env=None, extra=()):
+    a = Pty([DCH] + list(extra) + ["-a", "xv-rx"], env=env)
+    a.wait(b"READY")
+    a.pump(0.3)
+    return a
+
+
+def chord_case(what, keys, lite):
+    a = attach()
+    try:
+        got = rx()
+        mark = len(a.out)
+        for k in keys:
+            a.key(k, 0.05)
+        ok = a.wait(b"X-ray  xv-rx", start=mark) and \
+            a.wait(b"On screen", start=mark)
+        check("chord, %s: the view opens over the attach" % what, ok,
+              a.out[mark:][-600:])
+        check("chord, %s: the client is still running" % what,
+              a.reap() is None)
+        dch("--send", "xv-rx", "MARK187")
+        until(lambda: "4d41524b313837" in rx()[len(got):], 5)
+        a.pump(0.3)
+        check("chord, %s: the session got only the text sent while the "
+              "view was up (no detach key, no x)" % what,
+              rx()[len(got):] == "4d41524b313837", rx()[len(got):])
+        if not ok or a.reap() is not None:
+            return
+        mark = len(a.out)
+        a.key(b"q", 0.5)
+        check("chord, %s: q leaves the view's alternate screen" % what,
+              a.wait(RESTORE, start=mark), a.out[mark:][-300:])
+        if not lite:
+            # On screen may draw the line too: only what follows the
+            # view's exit counts
+            back = a.out.rfind(RESTORE)
+            check("chord, %s: back on the attach, the screen repainted "
+                  "with what came in meanwhile" % what,
+                  a.wait(b"RX:4d41524b313837", start=back),
+                  a.out[back:])
+        before = rx()
+        a.key(b"z", 0.3)
+        check("chord, %s: the attach was never retired (a key after "
+              "reaches the session)" % what,
+              until(lambda: rx()[len(before):] == "7a", 5) and
+              a.reap() is None, (rx()[len(before):], a.rc))
+    finally:
+        a.close()
+
+
+def test_chord():
+    o = json.loads(dch("--xray", "xv-sh", "--json").stdout)
+    lite = o["corpus"] == "none" and o["reason"] == "lite"
+    r = dch("--spawn", "xv-rx", "--size", "100x30", "python3", "-c", RX,
+            RXF)
+    check("chord: the probe session spawned", r.returncode == 0, r.stderr)
+    chord_case("x in a later read", [b"\x1c", b"x"], lite)
+    chord_case("x in the same burst", [b"\x1cx"], lite)
+    chord_case("the kitty CSI form", [b"\x1c", b"\033[120u"], lite)
+    chord_case("all kitty, one burst, the release between",
+               [b"\033[92;5u\033[92;5:3u\033[120;1:1u"], lite)
+    if lite:
+        print("  ok   lite: the repaint after the view is the master's "
+              "SIGWINCH (no mirror), the screen check is the full build's")
+
+    # -E: no detach key, no chord; the session gets both bytes
+    a = attach(extra=["-E"])
+    try:
+        got = rx()
+        mark = len(a.out)
+        a.key(b"\x1c", 0.05)
+        a.key(b"x", 0.5)
+        until(lambda: rx()[len(got):] == "1c78", 5)
+        check("-E: the session receives the detach key and x, no view",
+              rx()[len(got):] == "1c78" and b"X-ray" not in a.out[mark:]
+              and a.reap() is None, (rx()[len(got):], a.out[mark:]))
+    finally:
+        a.close()
+
+    # DCH_DOUBLE_TAP_MS=0: the press detaches at once, x after it or in
+    # its burst never reaches the session, no view
+    for keys in ([b"\x1c", b"x"], [b"\x1cx"]):
+        a = attach(env={"DCH_DOUBLE_TAP_MS": "0"})
+        try:
+            got = rx()
+            mark = len(a.out)
+            a.key(keys[0], 0.05)
+            rc = a.exit(5)
+            if len(keys) > 1:
+                try:
+                    os.write(a.fd, keys[1])
+                except OSError:
+                    pass
+            time.sleep(0.5)
+            check("DCH_DOUBLE_TAP_MS=0, %s: the detach key detaches at once "
+                  "(exit 0), the session receives nothing, no view" %
+                  ("x after" if len(keys) > 1 else "one burst"),
+                  rc == 0 and rx()[len(got):] == "" and
+                  b"X-ray" not in a.out[mark:],
+                  (rc, rx()[len(got):], a.out[mark:]))
+        finally:
+            a.close()
+
+    # detach_key = switch: one press opens the picker after the window; a
+    # late x there is kill, which asks first; n keeps the session
+    cfg = os.path.join(T, "config-switch")
+    with open(cfg, "w") as f:
+        f.write("detach_key = switch\n")
+    a = attach(env={"DCH_CONFIG": cfg})
+    try:
+        got = rx()
+        a.key(b"\x1c", 0.05)
+        check("detach_key = switch: one press opens the picker",
+              a.wait(b"switch to session:"), a.out[-600:])
+        a.pump(0.5)
+        mark = len(a.out)
+        a.key(b"x", 0.5)
+        check("detach_key = switch: a late x reaches the kill confirmation",
+              a.wait(b"Kill xv-rx? [y/N]", start=mark), a.out[mark:])
+        a.key(b"n", 0.5)
+        a.key(b"\033", 0.5)
+        a.exit(5)
+        late = rx()[len(got):]
+        dch("--send", "xv-rx", "alive")
+        check("detach_key = switch: the late x never ran -k (the session "
+              "lives, x never reached it)", late == "" and
+              until(lambda: rx()[len(got):] == "616c697665", 5),
+              (late, rx()[len(got):]))
+    finally:
+        a.close()
+
+
+def test_chord_end():
+    """The session ends while the view is up: leaving the view ends the
+    attach as a session's end does (exit 0, no frame to a closed master).
+    `dch -k` while the view is up: the client ends and takes the view with
+    it, no orphan left on the terminal (the client is not the pty's session
+    leader here, so no hangup does it for us)."""
+    r = dch("--spawn", "xv-end", "--size", "100x30", "sh", "-c",
+            "echo READY; read x; echo BYE")
+    check("chord, end: spawned", r.returncode == 0, r.stderr)
+    a = Pty([DCH, "-a", "xv-end"])
+    try:
+        a.wait(b"READY")
+        mark = len(a.out)
+        a.key(b"\x1cx", 0.5)
+        check("chord, end: the view opens", a.wait(b"X-ray  xv-end",
+              start=mark), a.out[mark:][-300:])
+        dch("--send", "xv-end", "go\n")
+        a.pump(1.0)
+        check("chord, end: the client waits for the view",
+              a.reap() is None, a.out[-200:])
+        a.key(b"q", 0.3)
+        rc = a.exit(5)
+        check("chord, end: the session ended under the view; leaving it "
+              "exits 0", rc == 0, (rc, a.out[-200:]))
+    finally:
+        a.close()
+    r = dch("--spawn", "xv-end", "--size", "100x30", "sh", "-c",
+            "echo READY; exec sleep 600")
+    a = Pty(["/bin/sh", "-c", "'%s' -a xv-end; echo CLIENT-GONE; "
+             "exec sleep 30" % DCH])
+    try:
+        a.wait(b"READY")
+        mark = len(a.out)
+        a.key(b"\x1cx", 0.5)
+        a.wait(b"X-ray  xv-end", start=mark)
+        client = kids(a.pid)
+        view = [k for c in client for k in kids(c)]
+        dch("-k", "xv-end")
+        check("chord, -k under the view: the client ends",
+              a.wait(b"CLIENT-GONE", start=mark), a.out[mark:][-300:])
+        check("chord, -k under the view: the view went with it",
+              view and until(lambda: not any(alive(k) for k in view), 5),
+              view)
+    finally:
+        a.close()
+
+
 def main():
     try:
         fixture()
@@ -417,7 +630,11 @@ def main():
         test_signals()
         test_on_screen()
         test_picker()
+        test_chord()
+        test_chord_end()
     finally:
+        dch("-k", "xv-rx")
+        dch("-k", "xv-end")
         dch("-k", "xv-sh")
         shutil.rmtree(T, ignore_errors=True)
     if fails[0]:

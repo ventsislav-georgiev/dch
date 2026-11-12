@@ -33,6 +33,7 @@ enum { XV_FK, XV_CK, XV_RK, XV_NKIDS };	/* follow, card, reader */
 
 static char xv_none[1];	/* "": a field absent, null, or out of memory */
 static volatile pid_t xv_pids[XV_NKIDS];	/* for xv_kill */
+int xv_tab;	/* the tab a view opens on (the in-attach chord's: On screen) */
 
 struct xv;
 struct xv_kid
@@ -1887,6 +1888,7 @@ xv_run(int fd, const char *n, char *err, size_t errsz)
 		return 3;
 	}
 	v->fd = fd;
+	v->tab = xv_tab;
 	v->color = pk_colors(0);
 	snprintf(v->n, sizeof v->n, "%s", n);
 	for (k = 0; k < XV_NKIDS; k++)

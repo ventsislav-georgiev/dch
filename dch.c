@@ -2952,6 +2952,8 @@ spawn_master(char *exe, const char *name, char *sockp,
 	return -1;
 }
 
+static int attach_xray_view(void);
+
 static int
 do_attach(char *exe, int forced_name, int force, char **inner_argv,
           int inner_argc)
@@ -3018,6 +3020,7 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 		}
 	}
 
+	attach_xray = attach_xray_view;	/* local only (#187) */
 	if (make_sock_path(session_name) < 0)
 		return 1;
 	if (!attach_only && (session_name[0] == '-' ||
@@ -13615,6 +13618,24 @@ xray_view(const char *n)
 	sigaction(SIGWINCH, &owinch, NULL);
 	if (rc)
 		fprintf(stderr, "%s\n", err);
+	return rc;
+}
+
+/* The in-attach X-ray chord's view (#187), in attach.c's child: this
+** session's, opened on On screen. A failure is said and waits for a key:
+** the attach's repaint on return would wipe it at once. */
+static int
+attach_xray_view(void)
+{
+	unsigned char c;
+	int rc;
+
+	xv_tab = 2;
+	if ((rc = xray_view(session_name)) != 0)
+	{
+		tw(STDERR_FILENO, "\r(any key: back to the session)");
+		(void)!read(STDIN_FILENO, &c, 1);
+	}
 	return rc;
 }
 

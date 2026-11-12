@@ -88,6 +88,7 @@ restore_term(void)
 int attach_sock = -1;
 int attach_end_back;
 const char *(*attach_lost)(int *code);
+int (*attach_xray)(void);
 
 /* A remote attach's socket closed: when the link (not the session) ended,
 ** say why on a restored terminal and exit with the hook's code. */
@@ -152,10 +153,17 @@ connect_socket(char *name)
 ** client_pidfile_unlink, done here by hand) ran restore_term's stdio
 ** and a TCSADRAIN that blocks forever while nobody reads the terminal, as
 ** after a hangup (#029). A hung-up terminal gets no reset sequence; a live
-** one gets it by write(), and its modes back at once (TCSANOW). */
+** one gets it by write(), and its modes back at once (TCSANOW). The X-ray
+** overlay's view (#187) goes first, waited for: its own restore would put
+** back the raw mode after ours, and an orphan would keep the terminal. */
+static volatile pid_t xray_pid;
+
 static RETSIGTYPE
 die(int sig)
 {
+	if (xray_pid > 0 && kill(xray_pid, SIGTERM) == 0)
+		while (waitpid(xray_pid, NULL, 0) < 0 && errno == EINTR)
+			;
 	if (sig != SIGHUP)
 		(void)!write(1, TERM_RESET, sizeof TERM_RESET - 1);
 	tcsetattr(0, TCSANOW, &orig_term);
@@ -192,6 +200,8 @@ on_sigusr2(ATTRIBUTE_UNUSED int sig)
 	want_redraw = 1;
 }
 
+static int detach_end;	/* where the last press counted ends (#187) */
+
 /* Counts detach-key presses in a keyboard buffer. Scans the WHOLE buffer
 ** (upstream only checked buf[0], which loses the keypress if it arrives
 ** bundled with other bytes — common when the terminal sends a burst, or when
@@ -227,6 +237,7 @@ detach_hits(struct packet *pkt)
 	{
 		hits++;
 		p++;
+		detach_end = (int)(p - pkt->u.buf);
 	}
 	if (hits < 2 && detach_char < 0x20)
 	{
@@ -275,7 +286,10 @@ detach_hits(struct packet *pkt)
 					ev = ev < 1000 ? ev * 10 + (b - '0') : ev;
 			}
 			if (closed && ev == 1)
+			{
 				hits++;
+				detach_end = (int)(q + 1 - pkt->u.buf);
+			}
 			p++;
 		}
 	}
@@ -528,6 +542,147 @@ detach_key_done(int s, int twice)
 	restore_term();
 	close(s);
 	return ATTACH_SWITCH;
+}
+
+/* The X-ray chord's second key (#187): is the first key in b[0..n) a plain
+** x press? The byte, or its kitty report CSI 120 [; 1 [:1]] [; text] u, the
+** Caps and Num Lock bits allowed. Kitty key releases before it (the detach
+** key's own, with event types on) are skipped. */
+static int
+xray_x(const unsigned char *b, int n)
+{
+	int i = 0;
+
+	while (i < n)
+	{
+		long key = -1, mod = 1, ev = 1, v = -1;
+		int fld = 0, sub = 0, j;
+
+		if (b[i] == 'x')
+			return 1;
+		if (n - i < 3 || b[i] != '\033' || b[i + 1] != '[')
+			return 0;
+		for (j = i + 2; ; j++)
+		{
+			unsigned char c;
+
+			if (j == n)
+				return 0;
+			c = b[j];
+			if (c >= '0' && c <= '9')
+			{
+				v = v < 0 ? c - '0'
+				  : v < 100000 ? v * 10 + (c - '0') : v;
+				continue;
+			}
+			if (c != ';' && c != ':' && c != 'u')
+				return 0;
+			if (v >= 0 && fld == 0 && sub == 0)
+				key = v;
+			else if (v >= 0 && fld == 1 && sub == 0)
+				mod = v;
+			else if (v >= 0 && fld == 1 && sub == 1)
+				ev = v;
+			v = -1;
+			if (c == 'u')
+				break;
+			if (c == ':')
+				sub++;
+			else
+			{
+				fld++;
+				sub = 0;
+			}
+		}
+		if (ev != 3)
+			return key == 'x' && ev == 1 && ((mod - 1) & ~0xc0L) == 0;
+		i = j + 1;
+	}
+	return 0;
+}
+
+/* The X-ray overlay (#187): the view over this attach, which is never
+** retired. The terminal is handed to the view as a detach leaves it (the
+** session's modes off, the main screen) and the view runs in a child, the
+** host's attach_xray. The master keeps this client attached meanwhile: what
+** it sends is read and dropped here, so its queue never fills. On the way
+** back, the two frames an attach starts with: the master re-arms the
+** session's modes and repaints its screen from the mirror, so what came in
+** while the view was up is on screen (dch-lite: a SIGWINCH, as on any
+** re-attach). A pipe the child holds tells its end; its children hold it
+** too, so a wait with a timeout covers one that outlives it. */
+static void
+xray_overlay(int s)
+{
+	struct packet pkt;
+	unsigned char buf[BUFSIZE];
+	int p[2], live = 1;
+	pid_t pid = -1;
+
+	dch_trace("client x-ray overlay");
+	fputs(TERM_RESET, stdout);
+	fflush(stdout);
+	if (pipe(p) < 0)
+		p[0] = -1;
+	else
+	{
+		if ((pid = fork()) == 0)
+		{
+			signal(SIGHUP, SIG_DFL);
+			signal(SIGTERM, SIG_DFL);
+			signal(SIGINT, SIG_DFL);
+			signal(SIGQUIT, SIG_DFL);
+			close(s);
+			close(p[0]);
+			_exit(attach_xray());
+		}
+		xray_pid = pid;
+		close(p[1]);
+	}
+	while (pid > 0)
+	{
+		struct timeval tv = {1, 0};
+		fd_set rs;
+		int n;
+
+		FD_ZERO(&rs);
+		FD_SET(p[0], &rs);
+		if (live)
+			FD_SET(s, &rs);
+		n = select((s > p[0] ? s : p[0]) + 1, &rs, NULL, NULL, &tv);
+		if (n > 0 && live && FD_ISSET(s, &rs))
+		{
+			ssize_t r = read(s, buf, sizeof buf);
+
+			/* the session ended: the loop's read says so after */
+			if (r == 0 || (r < 0 && errno != EINTR))
+				live = 0;
+		}
+		if (n > 0 && FD_ISSET(p[0], &rs) && read(p[0], buf, 1) == 0)
+		{
+			while (waitpid(pid, NULL, 0) < 0 && errno == EINTR)
+				;
+			break;
+		}
+		if (waitpid(pid, NULL, WNOHANG) != 0)
+			break;
+	}
+	xray_pid = 0;
+	if (p[0] >= 0)
+		close(p[0]);
+	tcsetattr(0, TCSADRAIN, &cur_term);
+	inner_focus = fo_st = fpend_n = dq_n = 0;
+	if (focus_on)
+		write_buf_or_fail(1, "\033[?1004h", 8);
+	if (!live)	/* nothing to attach to: the loop sees the end */
+		return;
+	memset(&pkt, 0, sizeof pkt);
+	pkt.type = MSG_ATTACH;
+	write_packet_or_fail(s, &pkt);
+	pkt.type = MSG_REDRAW;
+	pkt.len = redraw_method == REDRAW_UNSPEC ? REDRAW_WINCH : redraw_method;
+	ioctl(0, TIOCGWINSZ, &pkt.u.ws);
+	write_packet_or_fail(s, &pkt);
 }
 
 /* Handles input from the keyboard. Returns one of KBD_*; on anything but
@@ -871,6 +1026,15 @@ attach_main(int noerror)
 			}
 
 			pkt.len = len;
+			/* The X-ray chord (#187): x the next key in the window.
+			** The read is the chord's, swallowed whole. */
+			if (detach_pending && attach_xray && attach_sock < 0 &&
+			    xray_x(pkt.u.buf, (int)len))
+			{
+				detach_pending = 0;
+				xray_overlay(s);
+				goto keys_done;
+			}
 			int k = process_kbd(s, &pkt);
 			long w = detach_double_us();
 
@@ -882,6 +1046,14 @@ attach_main(int noerror)
 			{
 				if (w == 0)	/* no double press: one, at once */
 					return detach_key_done(s, 0);
+				/* the chord in one burst: x after the press */
+				if (attach_xray && attach_sock < 0 &&
+				    xray_x(pkt.u.buf + detach_end,
+				           (int)len - detach_end))
+				{
+					xray_overlay(s);
+					goto keys_done;
+				}
 				detach_pending = 1;
 				now_us(&detach_at);
 				detach_at.tv_usec += w;

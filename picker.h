@@ -151,6 +151,7 @@ const char *config_show(int k, char *v, size_t cap, int *set);
 ** signal handler too. */
 int xv_run(int fd, const char *n, char *err, size_t errsz);
 void xv_kill(void);
+extern int xv_tab;	/* the tab it opens on: 0 Chapters, 2 On screen */
 /* dch.c's, for it: xray_main(ac, av) in a forked child with stdout and
 ** stderr into *out and *err (never exec, never the terminal fd); its pid,
 ** or -1. A live session's visible screen, plain, into buf (cap bytes and a
