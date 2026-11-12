@@ -1380,9 +1380,19 @@ xr_codex_lookup(const char *home, const char *tid, char *path, size_t pathsz,
 
 /* ---- chapters ------------------------------------------------------------ */
 
+/* Every chapter's summary until an auto one gets its own (malloc'd). */
+static char nosum[1];
+
+/* A slot past n holds no summary of its own: only sh_orphan drops one, and a
+** shell chapter never has one. */
 void
 xr_chapters_free(struct xr_chapters *c)
 {
+	size_t i;
+
+	for (i = 0; c->v && i < c->n; i++)
+		if (c->v[(c->start + i) % XR_CHAPTERS].summary != nosum)
+			free(c->v[(c->start + i) % XR_CHAPTERS].summary);
 	free(c->v);
 	memset(c, 0, sizeof *c);
 }
@@ -1410,9 +1420,15 @@ ch_push(struct xr_chapters *c)
 	else
 		x = &c->v[(c->start + c->n++) % XR_CHAPTERS];
 	c->total++;
+	if (x->summary && x->summary != nosum)
+	{
+		c->sumheld -= strlen(x->summary) + 1;	/* the dropped oldest's */
+		free(x->summary);
+	}
 	memset(x, 0, sizeof *x);
 	x->at = -1;
 	x->kind = "prompt";
+	x->summary = nosum;
 	return x;
 }
 
@@ -4080,6 +4096,7 @@ static void
 main_block(struct xr_claude *d, int b, const char *kind, const char *title)
 {
 	struct xr_chapter *x;
+	char *sum;
 
 	if (!d->turn || (b == B_PROMPT && !d->lead))
 	{
@@ -4105,8 +4122,26 @@ main_block(struct xr_claude *d, int b, const char *kind, const char *title)
 		/* a partial first chapter takes the prompt riding in its lead */
 		x->kind = kind;
 		snprintf(x->title, sizeof x->title, "%s", title);
-		if ((x->harness = d->harness != NULL))
-			snprintf(x->summary, sizeof x->summary, "%s", d->harness);
+		/* past XR_SUMMARIES held the oldest give theirs up (3.8); no
+		** memory: an auto chapter with no summary */
+		if ((x->harness = d->harness != NULL) && d->harness[0] &&
+		    (sum = strdup(d->harness)))
+		{
+			while (d->ch.sumheld + strlen(sum) + 1 > XR_SUMMARIES &&
+			       d->ch.sumord + 1 < d->ch.total)
+			{
+				struct xr_chapter *o = ch_ord(&d->ch, d->ch.sumord++);
+
+				if (o && o->summary != nosum)
+				{
+					d->ch.sumheld -= strlen(o->summary) + 1;
+					free(o->summary);
+					o->summary = nosum;
+				}
+			}
+			x->summary = sum;
+			d->ch.sumheld += strlen(sum) + 1;
+		}
 		d->titled = 1;
 	}
 	if (b != B_PROMPT && b != B_IMAGE)
@@ -6449,7 +6484,7 @@ put_auto(FILE *m, const struct xr_chapter *c)
 	if (!c->harness)
 		return;
 	fputs(",\"auto\":true", m);
-	if (c->summary[0])
+	if (c->summary && c->summary[0])
 	{
 		fputs(",\"summary\":", m);
 		xr_put_str(m, c->summary);

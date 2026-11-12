@@ -835,6 +835,32 @@ def test_claude():
               out.startswith("{"), (rc, out[:200]))
         rss_ok("claude: near-cap lines (6000 chapters, 20 x 1 MiB pastes)",
                rss)
+        # #192: the same with every chapter auto and its summary at the
+        # cap (120 4-byte scalars, 480 bytes): summaries are held out of
+        # line, at most 512 KiB of them (XR_SUMMARIES), so only these
+        # chapters pay, and at most that
+        tn = ("<task-notification>\n<task-id>t</task-id>\n<summary>" +
+              "\U0001F600" * 130 + "</summary>\n</task-notification>")
+        with open(tp, "w") as f:
+            f.write((json.dumps({"type": "user", "message": {
+                "content": tn}}) + "\n" +
+                '{"type":"assistant","message":{"content":"s"}}\n') * 6000)
+            f.write((heavy + '\n{"type":"assistant","message":{"content":'
+                     '"s"}}\n') * 20)
+        rc, out, rss = maxrss([DCH, "--xray", n, "--json"], env)
+        try:
+            o = json.loads(out)
+        except ValueError:
+            o = None
+        check("claude: near-cap auto chapters answer, the newest summary at "
+              "480 bytes, the oldest given up (still auto)",
+              rc == 0 and o and len(o["chapters"]) > 21 and
+              o["chapters"][-21].get("auto") is True and
+              len(o["chapters"][-21].get("summary", "").encode()) == 480 and
+              o["chapters"][0].get("auto") is True and
+              "summary" not in o["chapters"][0], (rc, out[:200]))
+        rss_ok("claude: near-cap auto lines (6000 auto chapters with 480-byte "
+               "summaries, 20 x 1 MiB pastes)", rss)
         # the long ids still pair: a quiet Grep's failed result shows no
         # error; an orphan result (no pairing) would mark the chapter
         put([{"type": "assistant", "message": {"content": [

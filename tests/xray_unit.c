@@ -1761,6 +1761,57 @@ out:
 	xr_sent_free(s);
 }
 
+/* #192 round 2: summaries are held out of line, at most XR_SUMMARIES bytes
+** of them; past that the oldest give theirs up, and the ring's drops give
+** the room back (ASan: nothing leaks or is freed twice) */
+static void
+t_auto_cap(void)
+{
+	struct xr_chapters c;
+	char l[1200], s[500];
+	size_t k, per, fit;
+
+	for (k = 0; k < 120; k++)
+		memcpy(s + 4 * k, "\xf0\x9f\x98\x80", 4);
+	s[480] = '\0';
+	per = 481;
+	fit = XR_SUMMARIES / per;
+	snprintf(l, sizeof l, U(TN("<summary>%s</summary>")), s);
+	begin();
+	for (k = 0; k < fit + 10; k++)
+	{
+		line(l);
+		line(A("x"));
+	}
+	end(&c);
+	CHECK("auto cap: the newest auto chapters keep a 480-byte summary",
+	      c.n == fit + 10 && !strcmp(xr_chapter_at(&c, 10)->summary, s) &&
+	      !strcmp(xr_chapter_at(&c, fit + 9)->summary, s));
+	CHECK("auto cap: past XR_SUMMARIES the oldest are auto with none",
+	      xr_chapter_at(&c, 9)->harness && !xr_chapter_at(&c, 9)->summary[0]
+	      && !xr_chapter_at(&c, 0)->summary[0] &&
+	      c.sumheld == fit * per && c.sumheld <= XR_SUMMARIES);
+	xr_chapters_free(&c);
+	begin();
+	for (k = 0; k < fit + 10; k++)
+	{
+		line(l);
+		line(A("x"));
+	}
+	for (k = 0; k < XR_CHAPTERS; k++)
+	{
+		line(U("p"));
+		line(A("x"));
+	}
+	line(l);
+	end(&c);
+	CHECK("auto cap: the ring's drops free their summaries' room",
+	      c.n == XR_CHAPTERS && c.sumheld == per &&
+	      !strcmp(xr_chapter_at(&c, XR_CHAPTERS - 1)->summary, s) &&
+	      !xr_chapter_at(&c, 0)->harness && !xr_chapter_at(&c, 0)->summary[0]);
+	xr_chapters_free(&c);
+}
+
 /* ---- Codex (7.4, K9) ---------------------------------------------------- */
 
 struct cxkeys
@@ -3740,6 +3791,7 @@ main(int argc, char **argv)
 	t_caps();
 	t_follow_cut();
 	t_auto();
+	t_auto_cap();
 	t_excl();
 	t_cancel();
 	t_scan_caps();

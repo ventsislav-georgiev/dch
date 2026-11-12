@@ -18,6 +18,7 @@
 
 #define XR_TITLE_MAX   120		/* scalars (3.2, ruling R3) */
 #define XR_CHAPTERS    5000		/* 13.2 item 6: the newest kept */
+#define XR_SUMMARIES   (512u << 10)	/* #192: summary bytes held (3.8) */
 #define XR_HEAD_RANGE  (16ull << 20)	/* 3.8 per-file range: head ... */
 #define XR_TAIL_RANGE  (256ull << 20)	/* ... plus the newest 256 MB */
 #define XR_CHUNK       (1u << 20)	/* read size (QA 1.44 LOW-8: 4 MiB
@@ -54,7 +55,9 @@ struct xr_chapter
 	const char *kind;		/* "prompt", "command", "compact" */
 	int partial, error;
 	int harness;			/* "auto": the prompt is harness text (#192) */
-	char summary[XR_TITLE_MAX * 4 + 1];	/* its <summary>, else <event> */
+	char *summary;			/* its <summary>, else <event>: "" for none
+					** (never NULL from the engine); held out of
+					** line so the ring costs no more (3.8) */
 };
 
 /* The newest XR_CHAPTERS, oldest first from `start` (a ring). `total`
@@ -64,6 +67,9 @@ struct xr_chapters
 	struct xr_chapter *v;
 	size_t start, n;
 	uint64_t total;
+	size_t sumheld;			/* summary bytes held, <= XR_SUMMARIES:
+					** past it the oldest give theirs up */
+	uint64_t sumord;		/* no chapter before this ord has one */
 };
 void xr_chapters_free(struct xr_chapters *c);
 const struct xr_chapter *xr_chapter_at(const struct xr_chapters *c,
