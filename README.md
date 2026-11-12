@@ -881,7 +881,8 @@ The view has three tabs:
   `"auto"` in `--json`), is hidden until `n` shows it, faint and titled by
   its summary (by its title when it has none); the footer says how many are
   hidden, and `/` matches a summary too. A compaction (`= Conversation
-  compacted`) is hidden and counted the same way, and `n` shows it faint;
+  compacted`) is hidden and counted the same way, and `n` shows it faint
+  (the footer calls both kinds "auto rows");
   `Enter` on it reads its summary. The tab's count is the chapters
   shown without `n`. A host or an older dch that sends no `auto` shows
   every chapter. `o`, here and in a chapter, leaves the view (as `q` does)
@@ -930,7 +931,7 @@ X-ray; run `clear`".
 | `Enter` | read the chapter / open the card | card: read the mention's chapter |
 | `/` | filter | |
 | `t` | Refs: show / hide the temp files | |
-| `n` | Chapters: show / hide the auto chapters (task notifications) and compactions | |
+| `n` | Chapters: show / hide the auto rows (auto chapters, the task notifications, and compactions) | |
 | `o` | Chapters: attach to the session (in the chord: back to it) | reader: the same |
 | `f` `o` `y` | | card: full scan, other projects, copy |
 | `q` | quit | back |

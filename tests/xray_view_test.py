@@ -623,7 +623,7 @@ def test_auto():
               "Build finished" not in text and "task-notification" not in
               text and "Lint" not in text, text)
         check("Chapters: the footer shows n and how many are hidden",
-              "n notifications 3 hidden" in text, text)
+              "n auto rows 3 hidden" in text, text)
         check("Chapters: o is offered only for a live session (none here)",
               "open session" not in text, text)
         v.key(b"k", 0.3)  # the newest is selected; up to the first prompt
@@ -642,7 +642,7 @@ def test_auto():
               v.out[mark:][-800:])
         text = screen(v, 0)  # the rows n left as they were too
         check("Chapters: n shown, the footer says n hides them, the tab "
-              "count stays 2", "n hide notifications" in text and
+              "count stays 2", "n hide auto rows" in text and
               "hidden" not in text and "Chapters 2" in text, text)
         sel = [r for r in text.split("\n") if r.startswith("\u258c")]
         check("Chapters: n keeps the selection on its chapter",
@@ -660,7 +660,7 @@ def test_auto():
         text = screen(v, mark)
         check("Chapters: the filter matches a summary; only a hidden "
               "chapter matches: said, with the key",
-              "Only notifications: n shows them" in text, text)
+              "Only auto rows: n shows them" in text, text)
         mark = len(v.out)
         v.key(b"\r", 0.5)
         v.key(b"n", 1.0)
@@ -699,9 +699,9 @@ def test_auto():
         v.pump(0.8)
         text = screen(v, 0)
         check("Chapters: every chapter auto: the empty state says so and "
-              "names n; the tab count is 0", "Only notifications: n shows "
+              "names n; the tab count is 0", "Only auto rows: n shows "
               "them" in text and "Chapters 0" in text and
-              "n notifications 1 hidden" in text, text)
+              "n auto rows 1 hidden" in text, text)
         mark = len(v.out)
         v.key(b"n", 1.0)
         text = screen(v, mark)
@@ -731,7 +731,7 @@ def test_compact():
               "Conversation compacted" not in text and "Chapters 2" in text,
               text)
         check("Chapters: the footer counts a compaction with the auto rows",
-              "n notifications 2 hidden" in text, text)
+              "n auto rows 2 hidden" in text, text)
         mark = len(v.out)
         v.key(b"n", 1.0)
         text = screen(v, mark)
@@ -756,8 +756,8 @@ def test_compact():
         v.pump(0.8)
         text = screen(v, 0)
         check("Chapters: only a compaction and an auto chapter: the empty "
-              "state of xv-aa", "Only notifications: n shows them" in text
-              and "Chapters 0" in text and "n notifications 2 hidden" in text,
+              "state of xv-aa", "Only auto rows: n shows them" in text
+              and "Chapters 0" in text and "n auto rows 2 hidden" in text,
               text)
         v.key(b"q")
         v.exit()

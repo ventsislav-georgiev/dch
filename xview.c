@@ -1720,7 +1720,7 @@ xv_draw(struct xv *v, int force)
 			{
 				snprintf(tmp, sizeof tmp, "%d hidden", v->nauto);
 				keys[nk++] = (struct pkkey){ "n", v->allauto
-					? "hide notifications" : "notifications",
+					? "hide auto rows" : "auto rows",
 					v->allauto ? NULL : tmp, 2, 0 };
 			}
 			if (v->tab == 1 && (xv_vis(v), v->ntmp))
@@ -1858,7 +1858,7 @@ xv_draw(struct xv *v, int force)
 				pk_txt(!v->have ? "    Reading" : v->tab == 1 && v->ntmp &&
 				       !v->alltmp ? "    Only temp files: t shows them"
 				       : v->tab == 0 && v->nauto && !v->allauto
-				       ? "    Only notifications: n shows them"
+				       ? "    Only auto rows: n shows them"
 				       : v->filt[0] ? "    No match" : v->tab == 0
 				       ? "    No chapters" : "    No refs yet: the files, "
 				       "commits, pull requests, issues and URLs this session "
