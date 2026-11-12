@@ -1115,7 +1115,14 @@ def chord_fail(what, mode, line, close=False):
     try:
         ok = a.wait(b"FAKE-SCREEN") and h.attached.wait(5)
         if close:
-            h.sock.close()  # the attach is in; the view's dial is refused
+            # the attach is in; the view's dial is refused. Linux keeps a
+            # listener accepting while a thread sits in accept(): shutdown
+            # ends it there (macOS says ENOTCONN and close() is enough)
+            try:
+                h.sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            h.sock.close()
         a.pump(0.5)
         mark = len(a.out)
         a.key(b"\x1cx", 0.5)
