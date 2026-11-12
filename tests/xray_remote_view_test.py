@@ -1,0 +1,553 @@
+#!/usr/bin/env python3
+"""The X-ray view of a remote session (#188, XR5c): `dch --xray host:name`
+and the picker's X on a remote row.
+
+A real `dch serve` runs on 127.0.0.1 (DCH_SERVE_TEST_LOOPBACK=1, --bind
+127.0.0.1 --port 0, a fake `tailscale` first on PATH), its sessions in their
+own socket and state dirs. The client has others and names the host in
+remote_hosts (dch --xray takes no --hosts), without DCH_NO_REMOTE. Fake
+servers on loopback play a hostile host, one without "xray", one whose gate
+refuses us; a closed port is an unreachable one. Nothing else is dialled.
+Each view runs on a pty this test owns (pty.fork), so it needs no terminal
+mirror on the client.
+
+Covers:
+  1. srv:xv-cl, a History Claude record on the host with a hostile corpus:
+     the title names srv:, the tabs carry the host's counts, the chapter
+     list, the Refs list, the card (light, `f` full scan), the reader, q
+     exits 0; the corpus's ESC, BEL and bidi bytes never reach the
+     terminal; every query ran on the host as its own ctl (follow, ref,
+     ref --full, chapter);
+  2. On screen of srv:xv-sh, a live shell on the host: the screen read with
+     ctl --read xv-sh --ansi, o/r#41 gets hint a, typing it opens
+     its card (full build); on dch-lite "No screen: dch-lite keeps no
+     mirror";
+  3. a hostile host: raw ESC, BEL, C1 and bidi bytes in its snapshot and in
+     its --read screen are drawn as ?, its OSC and CSI dropped, and its
+     screen still gets its hint;
+  4. a host without "xray" (exit 6), a closed port (exit 7) and a gate that
+     refuses us (exit 4): the line in place of the tabs, the view open until
+     q, then the exit code and the line on stderr;
+  5. the picker: X on the remote Sessions row srv:xv-sh opens its view, q
+     returns to the picker; X on the remote History row srv:xv-cl opens
+     that record's view.
+
+Run:  python3 tests/xray_remote_view_test.py      (uses ./dch)
+"""
+import fcntl, json, os, pty, re, select, shutil, signal, socket, struct
+import subprocess, sys, tempfile, termios, threading, time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+from remote_client_test import (FAKE_TS, OWNER, REFUSAL, WHOIS, Fake,  # noqa
+                                frame)
+
+DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
+RSID = "11111111-2222-4333-8444-5555555555c8"
+RESTORE = b"\033[?1049l"
+fails = [0]
+
+
+def check(msg, cond, detail=""):
+    print("  %s %s" % ("ok  " if cond else "FAIL", msg))
+    if not cond:
+        fails[0] += 1
+        if detail:
+            print("       " + repr(detail)[-900:])
+
+
+T = os.path.realpath(tempfile.mkdtemp(prefix="xrv", dir="/tmp"))
+FAKE = os.path.join(T, "fake")
+os.makedirs(FAKE)
+with open(os.path.join(FAKE, "tailscale"), "w") as f:
+    f.write(FAKE_TS)
+os.chmod(os.path.join(FAKE, "tailscale"), 0o755)
+for nm, o in (("status.json", OWNER), ("whois.json", WHOIS)):
+    with open(os.path.join(FAKE, nm), "w") as f:
+        f.write(json.dumps(o))
+BASE = {k: v for k, v in os.environ.items()
+        if not k.startswith(("DCH_", "Malloc", "CLAUDE", "NO_COLOR",
+                             "COLORTERM"))}
+
+
+def side(name, **kw):
+    d = os.path.join(T, name)
+    os.makedirs(os.path.join(d, "home"))
+    e = dict(BASE, XDG_RUNTIME_DIR=d, XDG_STATE_HOME=os.path.join(d, "st"),
+             HOME=os.path.join(d, "home"), DCH_LOGIN_ENV="0",
+             DCH_CONFIG=os.path.join(d, "config"), SHELL="/bin/sh",
+             PATH=FAKE + ":/usr/bin:/bin", TERM="xterm-256color",
+             NO_COLOR="1")
+    e.update(kw)
+    return e
+
+
+SENV = side("srv")
+CENV = side("cli")
+# the picker probes the host once inside --ls's box (300 ms): a loaded
+# machine or a sanitizer build misses it and the picker says "no sessions"
+CENV["DCH_REMOTE_BOX_MS"] = "5000"
+SLOG = os.path.join(T, "serve.log")
+
+
+def hosts(line):
+    with open(CENV["DCH_CONFIG"], "w") as f:
+        f.write("remote_hosts = %s\n" % line)
+
+
+def dch(env, *a):
+    return subprocess.run([DCH] + list(a), capture_output=True, text=True,
+                          timeout=30, env=env, stdin=subprocess.DEVNULL)
+
+
+class Pty:
+    """A program on a pty: out holds every byte it wrote."""
+
+    def __init__(self, argv, rows=30, cols=100):
+        self.out = b""
+        self.rc = None
+        self.pid, self.fd = pty.fork()
+        if self.pid == 0:
+            fcntl.ioctl(0, termios.TIOCSWINSZ,
+                        struct.pack("HHHH", rows, cols, 0, 0))
+            os.execve(argv[0], argv, CENV)
+
+    def pump(self, secs=0.05):
+        end = time.time() + secs
+        while True:
+            r, _, _ = select.select([self.fd], [], [],
+                                    max(0, end - time.time()))
+            if not r:
+                return
+            try:
+                b = os.read(self.fd, 65536)
+            except OSError:
+                b = b""
+            if not b:
+                self.reap()
+                return
+            self.out += b
+
+    def reap(self):
+        if self.rc is None:
+            p, st = os.waitpid(self.pid, os.WNOHANG)
+            if p:
+                self.rc = os.waitstatus_to_exitcode(st)
+        return self.rc
+
+    def wait(self, what, secs=10.0, start=0):
+        end = time.time() + secs
+        while what not in self.out[start:] and time.time() < end:
+            self.pump(0.1)
+            if self.rc is not None:
+                break
+        return what in self.out[start:]
+
+    def key(self, b, settle=0.3):
+        try:
+            os.write(self.fd, b)
+        except OSError:
+            pass    # it has exited: the checks say so
+        self.pump(settle)
+
+    def exit(self, secs=10.0):
+        end = time.time() + secs
+        while self.reap() is None and time.time() < end:
+            self.pump(0.1)
+        self.pump(0.1)
+        return self.rc
+
+    def close(self):
+        if self.reap() is None:
+            os.kill(self.pid, signal.SIGKILL)
+            os.waitpid(self.pid, 0)
+        os.close(self.fd)
+
+
+def ctls(what):
+    with open(SLOG) as f:
+        return f.read().count(" ctl %s " % what)
+
+
+def serve():
+    with open(SLOG, "w") as lf:
+        sp = subprocess.Popen([DCH, "serve", "--bind", "127.0.0.1",
+                               "--port", "0"],
+                              env=dict(SENV, DCH_SERVE_TEST_LOOPBACK="1"),
+                              stdin=subprocess.DEVNULL,
+                              stdout=subprocess.DEVNULL, stderr=lf)
+    end = time.time() + 10
+    while time.time() < end and sp.poll() is None:
+        m = re.search(r"listening on 127\.0\.0\.1:(\d+)", open(SLOG).read())
+        if m:
+            return sp, int(m.group(1))
+        time.sleep(0.05)
+    return sp, None
+
+
+# ---- the host's corpus: a History Claude record, hostile text -------------
+
+TITLE = ("look at #831 and o/r#7 \033]0;pwned\007 evil‮title "
+         "al؜m ls ep")
+
+
+def fixture():
+    cfg = os.path.join(SENV["HOME"], ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    out = ("# #831 Canary \033[31mred\033[0m passage\n"
+           "See #831 again and؜ PROJ-5")
+    lines = [
+        {"type": "user", "cwd": "/home/demo/proj",
+         "timestamp": "2026-11-10T10:00:00Z", "message": {"content": TITLE}},
+        {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "b1", "name": "Bash",
+             "input": {"command": "gh issue view 831"}}]}},
+        {"type": "user", "toolUseResult": {"stdout": out},
+         "message": {"content": [{"type": "tool_result",
+                                  "tool_use_id": "b1", "content": out}]}},
+        {"type": "user", "cwd": "/home/demo/proj",
+         "timestamp": "2026-11-10T11:00:00Z",
+         "message": {"content": "second prompt about PROJ-5"}},
+        {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "noted"}]}}]
+    with open(os.path.join(pdir, RSID + ".jsonl"), "w") as f:
+        for o in lines:
+            f.write(json.dumps(o) + "\n")
+    sockdir = os.path.join(SENV["XDG_RUNTIME_DIR"], "dch-%d" % os.getuid())
+    hdir = os.path.join(SENV["XDG_STATE_HOME"], "dch", "sessions",
+                        sockdir.replace("/", "-"))
+    os.makedirs(hdir, exist_ok=True)
+    rec = {"name": "xv-cl", "cwd": "/home/demo/proj", "end": "exited",
+           "argv": ["claude"], "started": 1794299400, "updated": 1794300000,
+           "ended": 1794300000, "sock_dir": sockdir,
+           "agent": {"session_id": RSID, "cwd": "/home/demo/proj",
+                     "config_dir": cfg}}
+    with open(os.path.join(hdir, "xv-cl.json"), "w") as f:
+        f.write(json.dumps(rec) + "\n")
+
+
+def shell():
+    with open(SENV["DCH_CONFIG"], "w") as f:
+        f.write("xray_ring = 64K\n")
+    prog = ("while :; do printf '\\033]133;A\\007$ \\033]133;B\\007'; "
+            "read -r cmd || exit; printf '\\033]133;C\\007'; eval \"$cmd\"; "
+            "printf '\\033]133;D;0\\007'; done")
+    r = dch(SENV, "--spawn", "xv-sh", "--size", "80x24", "sh", "-c", prog)
+    check("host: the shell spawned", r.returncode == 0, r.stderr)
+    for _ in range(2):
+        time.sleep(0.4)
+        dch(SENV, "--send", "xv-sh", "echo 'see o/r#41'\n")
+    time.sleep(0.5)
+
+
+# ---- 1: the view on the host's record --------------------------------------
+
+def test_view():
+    n0 = {w: ctls(w) for w in ("--xray", "--read")}
+    v = Pty([DCH, "--xray", "srv:xv-cl"])
+    try:
+        check("view: the title names the host's session as srv:xv-cl",
+              v.wait(b"X-ray  srv:xv-cl"), v.out[-600:])
+        check("view: the tabs carry the host's counts",
+              v.wait(b"Chapters 2") and v.wait(b"Refs 3"), v.out[-600:])
+        check("view: the chapter list shows both titles",
+              v.wait(b"second prompt about PROJ-5") and
+              v.wait(b"look at #831"), v.out[-600:])
+        check("hostile host text: the chapter title's OSC, BEL, U+202E and "
+              "U+061C show as ?", v.wait(b"o/r#7 ?]0;pwned? evil?title al?m"),
+              v.out[-600:])
+        v.key(b"\t")
+        check("Refs: the host's keys", v.wait(b"#831") and
+              v.wait(b"PROJ-5") and v.wait(b"o/r#7"), v.out[-600:])
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        check("card: #831 opens light with its definition and counts",
+              v.wait(b"light", start=mark) and
+              v.wait(b"Definition", start=mark) and
+              v.wait(b"Mentions: this session ", start=mark), v.out[mark:])
+        check("card: the definition title's SGR shows as ?",
+              v.wait(b"Canary ?[31mred?[0m passage", start=mark),
+              v.out[mark:])
+        mark = len(v.out)
+        v.key(b"f", 1.0)
+        check("card: f runs the full scan on the host",
+              v.wait(b"full scan", start=mark), v.out[mark:])
+        v.key(b"\033", 0.5)
+        v.key(b"\t\t")
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        check("reader: Enter reads the newest chapter from the host",
+              v.wait(b"You", start=mark) and v.wait(b"noted", start=mark),
+              v.out[mark:])
+        mark = len(v.out)
+        v.key(b"q")
+        check("reader: q goes back to the list",
+              v.wait(b"Chapters 2", start=mark), v.out[mark:])
+        v.key(b"q")
+        rc = v.exit()
+        check("quit: q exits 0 and leaves the alternate screen",
+              rc == 0 and RESTORE in v.out[-60:], (rc, v.out[-80:]))
+        bad = [b for b in (b"\033]0;pwned", b"\007 evil", b"\xe2\x80\xae",
+                           b"\033[31mred", b"\xd8\x9c", b"\xe2\x80\xa8")
+               if b in v.out]
+        check("hostile host text: no corpus ESC, BEL or bidi byte reached "
+              "the terminal", not bad, bad)
+    finally:
+        v.close()
+    time.sleep(0.3)
+    # follow, ref (light), ref --full, chapter: four, each its own ctl
+    check("every query ran on the host as its own ctl --xray (4), no --read "
+          "for an ended session", ctls("--xray") - n0["--xray"] == 4 and
+          ctls("--read") == n0["--read"],
+          (ctls("--xray") - n0["--xray"], ctls("--read") - n0["--read"]))
+
+
+# ---- 2: On screen of a live shell on the host -------------------------------
+
+def test_on_screen():
+    o = json.loads(dch(SENV, "--xray", "xv-sh", "--json").stdout)
+    lite = o["corpus"] == "none" and o["reason"] == "lite"
+    n0 = ctls("--read")
+    v = Pty([DCH, "--xray", "srv:xv-sh"])
+    try:
+        check("On screen: the view of srv:xv-sh opens",
+              v.wait(b"X-ray  srv:xv-sh") and v.wait(b"Chapters"),
+              v.out[-600:])
+        mark = len(v.out)
+        v.key(b"\t\t", 2.0)
+        if lite:
+            check("lite: On screen says dch-lite keeps no mirror",
+                  v.wait(b"No screen: dch-lite keeps no mirror", start=mark),
+                  v.out[mark:])
+        else:
+            check("On screen: the host's screen, o/r#41 with hint a",
+                  v.wait(b"On screen 1", start=mark) and
+                  v.wait(b"see [a]o/r#41", start=mark), v.out[mark:])
+            mark = len(v.out)
+            v.key(b"a", 1.5)
+            check("On screen: typing a opens the card of o/r#41",
+                  v.wait(b"o/r#41  light", start=mark) and
+                  v.wait(b"Mentions", start=mark), v.out[mark:])
+        v.key(b"\003")
+        check("On screen: Ctrl-C quits with 0", v.exit() == 0, v.out[-80:])
+    finally:
+        v.close()
+    with open(SLOG) as f:
+        log = f.read()
+    check("On screen: read on the host with ctl --read xv-sh --ansi",
+          ctls("--read") > n0 and " ctl --read xv-sh " in log,
+          ctls("--read") - n0)
+
+
+# ---- 3: a hostile host -------------------------------------------------------
+
+HOSTILE_TITLE = "t\x1b]0;pwned\x07 a\u009bb c‮d e⁦f"
+HOSTILE_SCREEN = (b"$ echo hi\x1b]0;pwned\x07\r\n"
+                  b"see o/r#41 \x1b[31mred\x1b[0m\x1b[5Cgap\x07bel"
+                  b" c1\xc2\x9b2J bidi\xe2\x80\xaex \x1b[2J\r\n")
+
+
+class Hostile(Fake):
+    """A host with ctl, ctl-cancel and xray: --follow answers a snapshot
+    with raw control and bidi bytes and holds the stream; --read answers a
+    screen with OSC, CSI, BEL, C1 and bidi bytes; anything else ends 0."""
+
+    def __init__(self):
+        super().__init__("ok", ops=["ctl", "ctl-cancel", "xray"])
+
+    def serve(self, c):
+        buf = b""
+        try:
+            while True:
+                d = c.recv(65536)
+                if not d:
+                    return
+                buf += d
+                while len(buf) >= 5:
+                    t, n = struct.unpack(">BI", buf[:5])
+                    if len(buf) < 5 + n:
+                        break
+                    body, buf = buf[5:5 + n], buf[5 + n:]
+                    if t == 0x08:
+                        c.sendall(frame(0x18, {"proto": "1.0",
+                                               "server": "fake",
+                                               "ops": self.ops}))
+                    elif t == 0x30:
+                        argv = json.loads(body)["argv"]
+                        self.bodies.append(argv)
+                        if "--follow" in argv:
+                            snap = ('{"schema":1,"snapshot":{"session":"fk",'
+                                    '"session_id":"m0000000000000001",'
+                                    '"corpus":"shell","live":true,'
+                                    '"lines":3,"project_label":"/x",'
+                                    '"chapters":[{"anchor":"s1","title":"'
+                                    + HOSTILE_TITLE + '","kind":"shell",'
+                                    '"at":1794300000,"offset":0}],'
+                                    '"refs":[{"key":"pull:o/r#41",'
+                                    '"shape":"pull","text":"o/r#41",'
+                                    '"title":"' + HOSTILE_TITLE + '",'
+                                    '"count":2,"underline":true}]}}\n')
+                            c.sendall(frame(0x31, snap.encode()))
+                            continue    # a stream: held until the close
+                        if argv[0] == "--read":
+                            c.sendall(frame(0x31, HOSTILE_SCREEN) +
+                                      frame(0x32, b"cursor 2 1 1 0\n"))
+                        c.sendall(frame(0x33, {"exit": 0}))
+        except OSError:
+            return
+
+
+def test_hostile():
+    h = Hostile()
+    hosts("q=127.0.0.1:%d" % h.port)
+    v = Pty([DCH, "--xray", "q:fk"])
+    try:
+        check("hostile: the view opens on the snapshot",
+              v.wait(b"X-ray  q:fk") and v.wait(b"Chapters 1"),
+              v.out[-600:])
+        check("hostile: the snapshot's ESC, BEL, C1 and bidi bytes show as ?",
+              v.wait(b"t?]0;pwned? a?b c?d e?f"), v.out[-600:])
+        mark = len(v.out)
+        v.key(b"\t\t", 2.0)
+        check("hostile: On screen draws the host's screen, its OSC and CSI "
+              "dropped, CSI 5 C as five blanks, BEL, C1 and bidi as ?",
+              v.wait(b"$ echo hi", start=mark) and
+              v.wait(b"red     gap?bel c1?2J bidi?x", start=mark),
+              v.out[mark:])
+        check("hostile: its o/r#41 gets hint a",
+              v.wait(b"On screen 1", start=mark), v.out[mark:])
+        v.key(b"q")
+        rc = v.exit()
+        check("hostile: q exits 0", rc == 0, (rc, v.out[-80:]))
+        bad = [b for b in (b"\x1b]0;pwned", b"\x07 a", b"\x07bel",
+                           b"\xc2\x9b", b"\xe2\x80\xae", b"\xe2\x81\xa6")
+               if b in v.out]
+        check("hostile: none of the host's control or bidi bytes reached the "
+              "terminal", not bad, bad)
+        check("hostile: the screen was asked as --read fk --ansi (no "
+              "--cursor)", ["--read", "fk", "--ansi"] in h.bodies, h.bodies)
+    finally:
+        v.close()
+        h.close()
+
+
+# ---- 4: the three failure lines ----------------------------------------------
+
+def fail_case(what, port, want, line, prefix=False):
+    hosts("q=127.0.0.1:%d" % port)
+    v = Pty([DCH, "--xray", "q:x"])
+    try:
+        ok = v.wait(line.encode())
+        v.pump(1.0)
+        i = v.out.find(line.encode())
+        check("%s: the line in place of the tabs, the view kept open" % what,
+              ok and v.reap() is None and b"Chapters" not in v.out[i:] and
+              v.out.rfind(b"\033[2;1H", 0, i) == i - 6 and
+              v.out.rfind(b"\033[?1049h", 0, i) >= 0, v.out[-600:])
+        mark = len(v.out)
+        v.key(b"\t")
+        check("%s: other keys do nothing" % what, v.reap() is None and
+              b"Chapters" not in v.out[mark:], v.out[mark:])
+        v.key(b"q")
+        rc = v.exit()
+        i = v.out.rfind(line.encode())
+        check("%s: q leaves it with exit %d, the line on stderr after the "
+              "terminal is restored" % (what, want),
+              rc == want and v.out.rfind(RESTORE, 0, i) >= 0,
+              (rc, v.out[-300:]))
+    finally:
+        v.close()
+
+
+def test_failures():
+    nox = Fake("ctlerr", ops=["ctl", "ctl-cancel", "watch"])
+    fail_case("a host without xray (exit 6)", nox.port, 6,
+              "dch: q: does not support --xray (needs dch serve 1.55.0+)")
+    check("a host without xray: nothing sent", not nox.bodies, nox.bodies)
+    nox.close()
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    dead = s.getsockname()[1]
+    s.close()
+    fail_case("an unreachable host (exit 7)", dead, 7,
+              "dch: q: unreachable: ")
+    ref = Fake("refuse")
+    fail_case("a gate that refuses us (exit 4)", ref.port, 4,
+              "dch: q refused: " + REFUSAL["message"])
+    ref.close()
+
+
+# ---- 5: the picker's X on a remote row --------------------------------------
+
+def test_picker(port):
+    hosts("srv=127.0.0.1:%d" % port)
+    v = Pty([DCH, "-l"], cols=140)
+    try:
+        check("picker: the remote row srv:xv-sh is listed",
+              v.wait(b"xv-sh", 15), v.out[-600:])
+        v.pump(1.0)
+        mark = len(v.out)
+        v.key(b"X", 1.0)
+        check("picker: X on the remote row opens its view",
+              v.wait(b"X-ray  srv:xv-sh", start=mark) and
+              v.wait(b"Chapters", start=mark), v.out[mark:][-600:])
+        mark = len(v.out)
+        v.key(b"q", 1.0)
+        check("picker: q in the view returns to the picker",
+              v.reap() is None and v.wait(b"Sessions", start=mark),
+              v.out[mark:][-600:])
+        # History: the host's record srv:xv-cl, its only row
+        for _ in range(3):
+            mark = len(v.out)
+            v.key(b"\t", 0.8)
+            if v.wait(b"[History", 1, start=mark):
+                break
+        check("picker: History lists the host's record srv:xv-cl",
+              v.wait(b"xv-cl", 15, start=mark), v.out[mark:][-600:])
+        v.pump(0.5)
+        mark = len(v.out)
+        v.key(b"X", 1.0)
+        check("picker: X on the remote History row opens its record's view",
+              v.wait(b"X-ray  srv:xv-cl", start=mark) and
+              v.wait(b"Chapters 2", start=mark), v.out[mark:][-600:])
+        v.key(b"q", 1.0)
+        v.key(b"\033")
+        check("picker: Esc quits it", v.exit() is not None, v.out[-80:])
+    finally:
+        v.close()
+
+
+def main():
+    sp = None
+    try:
+        sp, port = serve()
+        check("dch serve listens on a loopback test port", port is not None,
+              open(SLOG).read())
+        if port is None:
+            return
+        fixture()
+        shell()
+        hosts("srv=127.0.0.1:%d" % port)
+        test_view()
+        test_on_screen()
+        test_picker(port)
+        test_hostile()
+        test_failures()
+    finally:
+        dch(SENV, "-k", "xv-sh")
+        if sp:
+            sp.terminate()
+            try:
+                sp.wait(10)
+            except subprocess.TimeoutExpired:
+                sp.kill()
+                sp.wait()
+        shutil.rmtree(T, ignore_errors=True)
+    if fails[0]:
+        print("%d failed" % fails[0])
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

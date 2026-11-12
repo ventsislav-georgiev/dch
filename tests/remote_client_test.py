@@ -287,6 +287,12 @@ def ctl_checks(dch, check, senv, cenv, serve_at, procs, fakes, tmp, hosts):
     same("--read --recent 5", "--read", "@", "--recent", "5")
     same("--read --recent --cursor (dch refuses)", "--read", "@",
          "--recent", "--cursor")
+    # "working" lasts a moment past the last output: both idle before the pair
+    for _ in range(100):
+        if (dch(senv, "--status", "ctl-qa").stdout,
+                dch(senv, "--status", "ctl-qb").stdout) == ("idle\n",) * 2:
+            break
+        time.sleep(0.1)
     same("--status", "--status", "@")
     same("-m", "-m", "@", "nick")
     same("--pin --json", "--pin", "@", "--json")
@@ -632,6 +638,33 @@ def xray_checks(dch, check, senv, cenv, port, fakes, tmp, slog):
               (want, got))
     rq.end()
 
+    # #184: a project in <repo>/.claude/worktrees/<name> (a Claude Code
+    # worktree, its .git a file) reads its own a.txt and refuses its .env,
+    # on the host and as srv:xrs4
+    wt = os.path.join(tmp, "wrepo", ".claude", "worktrees", "w")
+    os.makedirs(os.path.join(tmp, "wrepo", ".git"))
+    os.makedirs(wt)
+    for name, body in ((".git", "gitdir: ../../../.git/wt/w\n"),
+                       ("a.txt", "FAKE A\n"), (".env", "FAKE=1\n")):
+        with open(os.path.join(wt, name), "w") as f:
+            f.write(body)
+    hist(4, wt, ["read a.txt:1"])
+    for key, state in (("a.txt:1", "ok"),
+                       (os.path.join(wt, ".env") + ":1", "secret_name")):
+        loc = dch(senv, "--xray", "xrs4", "--ref", key, "--scope",
+                  "session", "--full", "--json")
+        rv = [json.loads(l)["resolved"] for l in loc.stdout.splitlines()
+              if '"resolved"' in l]
+        check("xray --ref %s --full in a .claude/worktrees project on the "
+              "host: %s" % (os.path.basename(key), state),
+              loc.returncode == 0 and len(rv) == 1 and
+              rv[0]["state"] == state and (rv[0].get("lines") == ["FAKE A"]
+              if state == "ok" else not rv[0].get("lines") and
+              "FAKE" not in loc.stdout), (rv, loc.stderr))
+        same("--ref <file> --full in a .claude/worktrees project (%s)"
+             % state, "@", "--ref", key, "--scope", "session", "--full",
+             "--json", n="xrs4", mask=True)
+
     # 3.1's value rules, here first: the local run's line, nothing sent
     n0 = ctls()
     for a, line in ((["--ref", "#1\x01"], "dch: bad ref"),
@@ -646,8 +679,10 @@ def xray_checks(dch, check, senv, cenv, port, fakes, tmp, slog):
         check("xray value rule %r: %s, exit 2, nothing sent" % (a, line),
               r.returncode == 2 and r.stderr == line + "\n", r)
     r = dch(xenv, "--xray", "srv:xr1")
-    check("xray view form on srv:xr1: not sent (the view comes later)",
-          r.returncode == 2 and "--json is required" in r.stderr, r)
+    check("xray view form on srv:xr1 with no terminal: exit 2, nothing sent "
+          "(the view itself: xray_remote_view_test.py)",
+          r.returncode == 2 and r.stderr == "dch: the --xray view needs a "
+          "terminal (--json prints the object)\n", r)
     check("xray: no value-rule case reached the host", ctls() == n0)
 
     # --follow: the snapshot as the host's own; Ctrl-C and SIGTERM cancel

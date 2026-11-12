@@ -9,7 +9,9 @@ real git can give; light streams carry none; the line sits just before
 `done`; an ended session never runs git; and the sentinel test: a hostile
 repo (fsmonitor, pager, aliases, hooks, textconv, filters, gpg.program with
 log.showSignature, a promisor remote over ext::, trace2) runs nothing,
-fetches nothing and writes nothing. Timeouts, no_git, ambiguous and the
+fetches nothing and writes nothing. QA 1.55.0: a commit URL answers only
+in a clone of its repo (LOW-1); a git error other than an unknown revision
+is no block (LOW-4); a binary file shows no lines (NIT-2). Timeouts, no_git, ambiguous and the
 probe order run against a fake git in tests/xray_unit.c, since the probe
 takes fixed paths only.
 
@@ -186,10 +188,52 @@ def test_shell():
               len(rv) == 1 and rv[0]["state"] == "not_commit" and
               rv[0]["title"] == "Not a commit in repo" and
               rv[0]["subtitle"] == "abcdef1" and rv[0]["lines"] == [], rv)
-        url = "https://github.com/o/r/commit/" + sha
+        tree = git(repo, "rev-parse", "HEAD^{tree}")
+        r, ls, rv = ref(n, tree[:12])
+        check("shell commit: a tree SHA: not_commit (\"expected commit "
+              "type\")", len(rv) == 1 and rv[0]["state"] == "not_commit" and
+              rv[0]["title"] == "Not a commit in repo", rv)
+        # a commit URL with a short SHA answers only in a clone of its repo
+        # (QA 1.55.0 LOW-1); a full 40-hex SHA is that commit anywhere
+        url = "https://github.com/o/r/commit/" + sha[:10]
         r, ls, rv = ref(n, url)
-        check("shell commit: a commit URL resolves its full SHA",
-              len(rv) == 1 and rv[0]["state"] == "ok", rv)
+        check("shell commit: a short-SHA commit URL, no remote: not_commit",
+              len(rv) == 1 and rv[0]["state"] == "not_commit", rv)
+        open(TRACE, "w").close()
+        r, ls, rv = ref(n, "https://github.com/o/r/commit/" + sha)
+        check("shell commit: a full-SHA commit URL, no remote: ok, no config "
+              "run (2 spawns)", len(rv) == 1 and rv[0]["state"] == "ok" and
+              "kind=commit state=ok spawned=2" in trace_tail(), rv)
+        git(repo, "remote", "add", "origin", "git@github.com:O/R.git")
+        open(TRACE, "w").close()
+        r, ls, rv = ref(n, url)
+        check("shell commit: a short-SHA commit URL whose repo is a remote "
+              "resolves (3 spawns)", len(rv) == 1 and
+              rv[0]["state"] == "ok" and
+              "kind=commit state=ok spawned=3" in trace_tail(), rv)
+        open(TRACE, "w").close()
+        r, ls, rv = ref(n, "https://github.com/someone/else/commit/" +
+                        sha[:10])
+        check("shell commit: a short-SHA commit URL of another repo: "
+              "not_commit, show never runs (2 spawns)", len(rv) == 1 and
+              rv[0]["state"] == "not_commit" and
+              rv[0]["title"] == "Not a commit in repo" and
+              "kind=commit state=not_commit spawned=2" in trace_tail(), rv)
+        # a remote URL with a token: it matches, and no byte of it leaks
+        tok = "ghp_FAKE179TOKEN"
+        git(repo, "remote", "set-url", "origin",
+            "https://x-access-token:%s@github.com/o/r.git" % tok)
+        open(TRACE, "w").close()
+        r1, ls, rv = ref(n, url)
+        r2, ls2, rv2 = ref(n, "https://github.com/o/x/commit/" + sha[:10])
+        tr = trace_tail()
+        check("shell commit: a remote with userinfo matches; the token is in "
+              "no stdout, stderr or trace", len(rv) == 1 and
+              rv[0]["state"] == "ok" and len(rv2) == 1 and
+              rv2[0]["state"] == "not_commit" and
+              not any(x in t for t in (r1.stdout, r1.stderr, r2.stdout,
+                                       r2.stderr, tr)
+                      for x in (tok, "x-access-token")), (rv, rv2))
         if git(plain, "rev-parse", "--is-inside-work-tree") == "true":
             print("  skip not_repo: %s is inside a git work tree" % plain)
         else:
@@ -246,6 +290,14 @@ def test_shell():
         check("shell file: a missing file: no resolved line, done",
               r.returncode == 0 and not rv and ls and
               ls[-1].get("done") is True, r.stdout[-300:])
+        # a NUL early: binary, said, no lines of U+FFFD (QA 1.55.0 NIT-2)
+        with open(os.path.join(repo, "blob.dat"), "wb") as f:
+            f.write(b"PK\x03\x04\x00\x00\xff\xfe\n" * 4)
+        r, ls, rv = ref(n, "blob.dat:1")
+        check("shell file: a binary file: ok, \"blob.dat · binary\", "
+              "no lines", len(rv) == 1 and rv[0]["state"] == "ok" and
+              rv[0]["subtitle"] == "blob.dat · binary" and
+              rv[0]["lines"] == [] and "\ufffd" not in r.stdout, rv)
         with open(os.path.join(repo, "esc.txt"), "w") as f:
             f.write("a\x1b[31mred\x07 ‮evil\n")
         r, ls, rv = ref(n, "esc.txt:1")
@@ -441,8 +493,10 @@ def test_hostile():
         check("hostile: the signed commit still resolves (ok), its "
               "signature unchecked", len(rv1) == 1 and rv1[0]["state"] == "ok"
               and rv1[0]["title"] == "Signed subject", (rv1, r1.stderr))
-        check("hostile: the lazy commit gives a block, nothing fetched",
-              len(rv2) == 1 and rv2[0]["kind"] == "commit", rv2)
+        # git fails on the missing blob: no line, never not_commit (LOW-4)
+        check("hostile: the lazy commit, nothing fetched: no block, never "
+              "\"Not a commit\"", r2.returncode == 0 and not rv2 and
+              ls2 and ls2[-1].get("done") is True, rv2)
         check("hostile: a file ref reads the file, no filter runs",
               len(rv3) == 1 and rv3[0]["state"] == "ok" and
               rv3[0]["lines"][0] == "int w1;", rv3)
@@ -465,6 +519,45 @@ def test_hostile():
                   "(exit 2), nothing run" % bad[:16], r.returncode == 2 and
                   r.stderr.startswith("dch: ") and not r.stdout and
                   not os.path.exists(SENT), (r.returncode, r.stderr))
+    finally:
+        dch("-k", n)
+
+
+def test_git_error():
+    """A git that fails for another reason is no block, never "Not a commit"
+    (QA 1.55.0 LOW-4): an invalid submodule.<name>.update in .gitmodules
+    makes git show die on a commit that changes the gitlink."""
+    sr = os.path.join(T, "badmods")
+    first = make_repo(sr, "Before the submodule")
+    git(sr, "update-index", "--add", "--cacheinfo", "160000,%s,subm" % first)
+    with open(os.path.join(sr, ".gitmodules"), "w") as f:
+        f.write('[submodule "subm"]\n\tpath = subm\n\turl = ./x\n'
+                "\tupdate = !touch '%s'\n" % SENT)
+    git(sr, "add", ".gitmodules")
+    git(sr, "commit", "-qm", "Add the submodule")
+    sha = git(sr, "rev-parse", "HEAD")
+    n = "xres-mods"
+    spawn_shell(n, sr)
+    try:
+        r, ls, rv = ref(n, sha[:10])
+        check("git error: show dies on the bad .gitmodules: no block, never "
+              "\"Not a commit\"", r.returncode == 0 and not rv and ls and
+              ls[-1].get("done") is True, (rv, r.stdout[-300:]))
+        bad = (r.returncode, ls[-1] if ls else None)
+        r, ls, rv = ref(n, first[:10])
+        check("git error: a commit that does not touch the gitlink: ok",
+              len(rv) == 1 and rv[0]["state"] == "ok" and
+              rv[0]["title"] == "Before the submodule", rv)
+        check("git error: the --ref exit code and end line are those of an "
+              "ok resolve (exit 0, done, partial false, why null)",
+              ls and bad == (r.returncode, ls[-1]) and bad[0] == 0 and
+              bad[1]["partial"] is False and bad[1]["why"] is None,
+              (bad, r.returncode, ls[-1:]))
+        r, ls, rv = ref(n, "abcdef1234")
+        check("git error: a SHA not in the repo is still not_commit",
+              len(rv) == 1 and rv[0]["state"] == "not_commit", rv)
+        check("git error: the update command never ran",
+              not os.path.exists(SENT))
     finally:
         dch("-k", n)
 
@@ -497,6 +590,7 @@ def main():
             test_ended()
             test_live_claude()
             test_hostile()
+            test_git_error()
     finally:
         shutil.rmtree(T, ignore_errors=True)
     if fails[0]:

@@ -173,7 +173,7 @@ hint.
 | `R` | restart the agent (`--restart <n> --include-agents -f`), asks first | |
 | `S` | stop (`--stop`), asks first | |
 | `x` | kill (`-k`), asks first | |
-| `X` | open the session's [X-ray view](#x-ray-view-dch---xray-n); `q` comes back (a remote row: not yet) | the same, for the row's record |
+| `X` | open the session's [X-ray view](#x-ray-view-dch---xray-n); `q` comes back (a remote row's runs on its host) | the same, for the row's record |
 | `a` | allow a plain Yes/No permission prompt (presses `1`, Yes), asks first; a question form or any other prompt is refused: attach to answer it | |
 | `b` / `B` | restart stale agents / restart all agents (force), asks first | |
 | `s` | sort by activity (blocked, working, done, idle, newest first) or by name (`a2` before `a10`); saved as `picker_sort`, so the next picker starts in it | |
@@ -278,7 +278,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.56.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.57.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -421,7 +421,7 @@ someone is watching is invisible to them.
 | Verb | Does | Exit codes |
 | --- | --- | --- |
 | `--spawn <n> [--size CxR] [--env K=V]... [cmd...]` | Start headless session (default: `$SHELL`, 80x24 or `$COLUMNS`/`$LINES`). `--env` (max 32, first `=` splits) adds variables to the child; reserved keys (`DCH_SESSION`, `TERM` fixup) always win. Like `--revive` (and a plain `dch <new>`), it drops the calling Claude Code session's identity (`CLAUDECODE`, `CLAUDE_CODE_*` session vars), plus `GIT_EDITOR` and the other harness vars when `CLAUDECODE` is set, and sets `LC_TERMINAL=ghostty` unless the caller has it (dch keeps OSC 8 links, but under `TERM=xterm-256color` with no `TERM_PROGRAM` Claude Code would strip its statusline's, and `LC_TERMINAL` is the one signal its check reads that supports-hyperlinks and other Node CLIs ignore; ssh sends it on, by macOS's default `SendEnv LC_*`). Like any session variable it reaches every program in the session, not only Claude Code; a tool that keys on `ghostty` may assume Ghostty-only features (kitty graphics, for one) that the terminal you attach from may lack. dch sets no `FORCE_HYPERLINK`: those CLIs honour it before they check for a terminal, so it put OSC 8 into pipes and files (`stylelint t.css > out`, an agent's Bash tool); a caller's own value still reaches the session. An explicit `--env` (`--env LC_TERMINAL=` included) still wins. Prints the name. A program that cannot be executed is an error (`dch: <n>: <cmd>: <reason>`); one that runs and exits at once is not. | 0 ok, 1 exists/failed/not executable/bad --env |
-| `--xray <n> --json` | One JSON object: the session's corpus, chapters and refs (see [X-ray queries](#x-ray-queries---xray)). Without `--json` or any other flag: the full-screen [X-ray view](#x-ray-view-dch---xray-n) (local only; a non-terminal stdout exits 2). `--clear` empties a shell's ring instead; `--ref` streams one ref's lines; `--follow` streams the object and then its changes; `--chapter` prints one chapter's entries. `<n>` as `host:name` runs it on that host (dch serve 1.55.0+); `host:name --requests --json` holds one connection there for many requests read off standard input. Must be the first argument. | 0 ok, 1 no such session/ambiguous/no corpus, 2 usage, 3 read failure; remote: 4 gate, 6 host lacks `xray`, 7 unreachable |
+| `--xray <n> --json` | One JSON object: the session's corpus, chapters and refs (see [X-ray queries](#x-ray-queries---xray)). Without `--json` or any other flag: the full-screen [X-ray view](#x-ray-view-dch---xray-n) (`host:name` too; a non-terminal stdout exits 2). `--clear` empties a shell's ring instead; `--ref` streams one ref's lines; `--follow` streams the object and then its changes; `--chapter` prints one chapter's entries. `<n>` as `host:name` runs it on that host (dch serve 1.55.0+); `host:name --requests --json` holds one connection there for many requests read off standard input. Must be the first argument. | 0 ok, 1 no such session/ambiguous/no corpus, 2 usage, 3 read failure; remote: 4 gate, 6 host lacks `xray`, 7 unreachable |
 | `--send <n> <text...>` | Type text (joined with spaces), no enter. | 0 ok |
 | `--run <n> <text...>` | `--send` + enter. Into a session whose Claude Code runs — as its command or typed into its shell — the text goes through `--say`'s composer gate instead: typed only over an empty composer, Enter pressed once it shows and again while it stays (Claude Code folds an Enter sent with the text into the paste). A `/command` is typed raw, a message pasted. A shell or any other program, a master without a mirror (`DCH_NO_VT`), dch-lite and your own session (`$DCH_SESSION`) keep the plain burst. A gate failure prints `dch: <n>: <reason> — <why>` on stderr: `prompt` and `draft` (nothing typed), `not_typed` (the text never showed in the composer, no Enter), `not_submitted` (it stayed there through every Enter); `no_screen` when the composer is not on screen; `interrupted`, `withdrawn` or `draft_left` on a SIGINT, SIGTERM or SIGHUP, as for `--say`. | 0 ok, 1 gate failure |
 | `--keys <n> <key...>` | Encode+send keys mode-aware: `ctrl+c`, `alt+x`, `shift+tab`, `up`, `f5`, `enter`, `esc`, single chars. | 0 ok, 1 unknown key |
@@ -922,10 +922,20 @@ now: there the keys reach the session as before. There is no `xray_key`
 setting: the chord takes no key from the program. In the picker, lowercase
 `x` is still kill, which asks first; `X` opens the view.
 
-A window smaller than 24x8 shows only "X-ray: the window is too small". A
-remote `host:name` has no view yet: it exits 2 and says `--json` is
-required. Exit codes are those of `--json` below: 0 when you quit, 1 for no
-such session, 2 for a flag or a stdout that is not a terminal.
+A window smaller than 24x8 shows only "X-ray: the window is too small".
+
+`dch --xray host:name` opens the view of a session on another host (dch
+serve 1.55.0+), and so does `X` on a remote row in the picker. Every query
+runs on the host, each over its own ctl connection. On screen reads the
+host's screen with `--read <name> --ansi`. The host's text is drawn
+as a local session's is, every control and bidi character as `?`. A host
+that refuses us, lacks `--xray` or cannot be reached shows its line in place
+of the tabs (`dch: <host>: does not support --xray (needs dch serve
+1.55.0+)`, ...); `q` leaves with that exit code.
+
+Exit codes are those of `--json` below: 0 when you quit, 1 for no such
+session, 2 for a flag or a stdout that is not a terminal; for a remote host
+also 4 (its gate refused us), 6 (it lacks `--xray`) and 7 (unreachable).
 
 ### X-ray queries (`--xray`)
 
@@ -949,8 +959,7 @@ A `<n>` with a `:` is resolved locally first: a live session or a History
 record of that name. Only when nothing local matches and the part before the
 `:` is a known host (`--hosts`, `remote_hosts`, or a cached remote row) is it
 `host:name`. With `--json`, dch first checks the flags and values by its
-own rules (exit 2 and nothing sent on a bad one; the view form, without
-`--json`, stays local and exits 2), then runs `--xray <name>` and the other
+own rules (exit 2 and nothing sent on a bad one), then runs `--xray <name>` and the other
 flags as typed on that host's `dch serve` over [ctl](#control-verbs-ctl). It
 writes the host's output and standard error line by line as they come (the
 `--follow` and `--ref` streams included) and exits with the host's exit
@@ -1046,8 +1055,9 @@ The corpus:
   - `CODEX_HOME` is the Codex process's own, else its `HOME`'s `.codex`. It
     must be absolute with no `..` component, or nothing under it is read.
   - The rollout is found by names only: `sessions/YYYY/MM/DD`, newest first,
-    at most 400 day directories, a file whose name ends `-<id>.jsonl`. It
-    must be the only one, a regular file, under real directories (a
+    at most 400 day directories and 400 year and month directories, a file
+    whose name ends `-<id>.jsonl`. It must be the only one, a regular file
+    that is yours and not group- or world-writable, under real directories (a
     symlinked day directory or file is not followed); otherwise the answer is
     `corpus: "none"` with the id. It is opened and read like a Claude Code
     transcript, with the same limits.
@@ -1083,7 +1093,9 @@ The corpus:
   - A query also reads the current primary screen, after the ring: its rows
     (soft wraps joined, blank ones dropped) count as output, so a ref still
     on screen is found by `--json`, `--ref` and `--follow`. They carry no
-    marks yet, so they give no chapter and no definition. While the alternate
+    marks yet, so they give no chapter and no definition. Their `at` is the
+    time of the read, not the time the row was written: two queries a
+    second apart can give the same row different `at` values. While the alternate
     screen is active (vim, less), neither screen is read: the answer is the
     ring's alone, with no error and no `why`, and the screen's rows come back
     once it exits. A master started by an older dch answers from its ring
@@ -1292,19 +1304,39 @@ Codex `<n>` gets it too.
   the shim that can prompt to install them); elsewhere `/usr/bin/git`, then
   `/usr/local/bin/git`; none is `no_git`. The argv is
   `git --no-pager -c core.fsmonitor= -c core.hooksPath=/dev/null -c protocol.allow=never -c diff.external= -c color.ui=never -c log.showSignature=false -C <cwd>`,
-  then `rev-parse --is-inside-work-tree` (not `true`: `not_repo`), then
+  then `rev-parse --is-inside-work-tree` (not `true`: `not_repo`), then,
+  for a commit URL with a short SHA only,
+  `config --get-regexp ^remote\..*\.url$`, then
   `show --no-color --no-ext-diff --no-textconv --stat=80 --stat-count=14 --format=%H%x00%an%x00%at%x00%s --end-of-options <sha>^{commit}`.
   The environment is only `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`,
   `GIT_OPTIONAL_LOCKS=0`, `GIT_TERMINAL_PROMPT=0`, `GIT_NO_LAZY_FETCH=1`,
   `PATH=/usr/bin:/bin`, `HOME` and `LANG=en_US.UTF-8`; stdin is
   `/dev/null`, and no other fd of dch's reaches git.
-  Both runs share one 3 s deadline (`timeout`: git's process group gets
-  SIGTERM, then SIGKILL a second later); dch keeps 64 KiB of
+  All runs share one 3 s deadline (`timeout`: git's process group gets
+  SIGTERM, then SIGKILL a second later; a git that even SIGKILL cannot end,
+  such as one stuck on a stalled network mount, is left behind a second
+  after that); dch keeps 64 KiB of
   its output and 4 KiB of its errors and drains the rest. `ok` gives the
   subject as `title`, `author · 3h ago · abc1234` as `subtitle` and the
   stat as `lines` (past 14: the first 13 and the summary); a short SHA
-  matching several objects is `ambiguous`, anything else git refuses
-  `not_commit`. A repo's `objects/info/alternates` can make git read
+  matching several objects is `ambiguous`; one git does not know
+  (`unknown revision`) or that names a tree, a blob or a tag of one
+  (`expected commit type`) is `not_commit`. git's own "not a git repository"
+  (or a cwd that is gone) is `not_repo`. Any other git failure gives no
+  `resolved` line, never a wrong state: for example a `.gitmodules` with
+  an invalid `update` value, or a blob missing from a partial clone.
+  A commit URL (`https://github.com/<owner>/<repo>/commit/<sha>`) with a
+  full 40-hex SHA resolves as a bare SHA does. With a shorter SHA, it
+  resolves only when one of the repo's remote URLs names that owner and
+  repo on github.com (any case; `https://`, `ssh://` or `git@github.com:`,
+  with or without `.git`). Otherwise it is `not_commit` and `show` never
+  runs. A remote reached only through `url.<base>.insteadOf` does not
+  match, and hosts other than github.com never match. If the `config` run
+  fails or times out, there is no `resolved` line. The remote URLs are only
+  compared, never printed or traced (they can hold a token). This only
+  stops a short link to another repo from showing an unrelated local
+  commit; the repo's own config decides its remotes. A repo's
+  `objects/info/alternates` can make git read
   objects from outside the project: the stat may then name another repo's
   files. No code runs and nothing is written, and the lines go to the same
   user who can read that repo.
@@ -1313,24 +1345,42 @@ Codex `<n>` gets it too.
   project: the cwd's git root (the nearest parent holding `.git`), else the
   cwd. A root that is `/`, `$HOME` or a directory above `$HOME` (by real
   path; `HOME` and the passwd entry's home both count) is no project: every
-  file is then `outside_project`. Outside the project is `outside_project`
-  and nothing is touched. A path on the deny list is `secret_name` and is
-  not opened. The list is matched without regard to case against every part
-  of the whole path, as given and again as its real path:
+  file is then `outside_project`. So is `~/.config` or `~/Library`, and a
+  root inside either that is not a git root below it (a shell in
+  `~/.config/rclone`): apps keep tokens there under any name. A git root
+  below them (`~/.config/nvim` as its own repo) is a project. Outside the
+  project is `outside_project` and nothing is touched. A path on the deny
+  list is `secret_name` and is not opened. The list is matched without
+  regard to case against every part of the whole path, as given and again
+  as its real path:
   - a part that starts with `.env`, `.ssh`, `.gnupg`, `.aws`, `.netrc`,
     `.npmrc`, `.pypirc` or `.git-credentials`;
   - a directory `.git`, `.kube`, `.docker`, `.azure`, `.oci`, `.claude`,
-    `.codex`, `.gcloud`, `.password-store`, `.config/gh` or
-    `.config/gcloud`, and everything under it;
+    `.codex`, `.gcloud`, `.password-store`, `.m2`, `.bash_sessions`,
+    `.config/gh`, `.config/gcloud`, `.config/hub` or `.config/op`, and
+    everything under it;
   - the name `.claude.json`, `.pgpass`, `.my.cnf`, `.vault-token`,
     `.htpasswd`, `.s3cfg`, `credentials`, `credentials.json`,
     `credentials.toml`, `credentials.db`,
-    `application_default_credentials.json`, `secrets.yaml`, `secrets.yml`
-    or `secrets.json`;
+    `application_default_credentials.json`, `secrets.yaml`, `secrets.yml`,
+    `secrets.json`, `credentials.tfrc.json`, `.yarnrc.yml`,
+    `gradle.properties`, `rclone.conf`, `.boto`, `.dockercfg` or
+    `.Xauthority`;
   - a name that ends in `.pem`, `.key`, `.p12`, `.pfx`, `.p8`, `.ppk`,
-    `.jks`, `.keystore`, `.keychain`, `.keychain-db`, `.tfstate`,
-    `.tfstate.backup` or `history` (shell and REPL history);
+    `.jks`, `.keystore`, `.keychain`, `.keychain-db`, `.keyring`,
+    `.tfstate`, `.tfstate.backup` or `history` (shell and REPL history);
   - an `id_` name with no dot (`id_rsa`, never `id_rsa.pub`).
+
+  One exception for the directories: when the project is a git root whose
+  own path, as given, lies in one of them (a Claude Code worktree in
+  `<repo>/.claude/worktrees/<name>`), they are matched only on the part of
+  the path below that root, as given and as real path. The worktree reads
+  its own `a.txt` and still refuses its `.env`, its own `.claude/` and the
+  like. A root reached through a symlink that hides the directory, or a
+  shell in one with no git root, gets no exception. Whatever the root, a
+  path whose real path (or path as given) enters one of these directories
+  of the home (`~/.claude`, `~/.codex`, `~/.config/gh`, ...) is
+  `secret_name`, so a git repo inside `~/.claude` shows nothing.
 
   This guards the common credential files by name. It is not a guarantee:
   a secret in a file with any other name (a `config.yml`, a script, a log)
@@ -1340,7 +1390,9 @@ Codex `<n>` gets it too.
   `outside_project` too: its other names can lie outside. Over 2 MB is
   `too_large`. `ok` reads it, the file itself never a symlink, and
   gives the name as `title`, the path from the cwd (`· line N`
-  with one) as `subtitle`, and up to 14 lines with line N the seventh, CRs
+  with one) as `subtitle`. A file with a NUL byte in its first 8000 bytes
+  (git's own test) is binary: `ok` with `· binary` in the subtitle and no
+  lines. Otherwise it gives up to 14 lines with line N the seventh, CRs
   dropped, kept whole at either end of the file; `first`, only here, is the
   1-based number of `lines[0]` (1 for a ref with no line), so a consumer
   can tell which row is line N at the end of the file. A path
@@ -2279,7 +2331,8 @@ host: any file inside that session's project (its cwd's git root, else its
 cwd; none when that is `/`, `$HOME` or above it) that is a regular file of
 at most 2 MB with one link, not itself a symlink and not on the deny list
 (`.env*`, `.ssh`, `.git/`, `.claude/`, `.config/gh/`, `*.pem`, `id_rsa`,
-`*history`, ...: the File resolver's full list). The list catches the
+`*history`, ...: the File resolver's full list; nothing under `~/.config` or
+`~/Library` but a git root below them). The list catches the
 common credential files by name, not every file that holds a secret. A commit
 ref returns that commit's `git show --stat` from the session's repo.
 `--scope all` returns lines (and with `--full`, definition passages) from

@@ -1305,7 +1305,7 @@ xr_codex_lookup(const char *home, const char *tid, char *path, size_t pathsz,
 	DIR *sd, *yd, *md, *dd;
 	struct dirent *de;
 	struct stat s;
-	int y, m, day, days = 0, hits = 0;
+	int y, m, day, days = 0, ups = 0, hits = 0;
 	size_t tl = strlen(tid);
 
 	if (!xr_config_ok(home) || !xr_uuid_shaped(tid) ||
@@ -1313,21 +1313,27 @@ xr_codex_lookup(const char *home, const char *tid, char *path, size_t pathsz,
 	    !(sd = cx_dir(AT_FDCWD, dir)))
 		return -1;
 	cx_names(sd, 4, yb);
-	for (y = 9999; y >= 0 && days < XR_CODEX_DAYS && hits < 2; y--)
+	/* year and month dirs opened count too, against a bound of their own:
+	** empty ones open no day dir (QA 1.55.0 LOW-11) */
+	for (y = 9999; y >= 0 && days < XR_CODEX_DAYS && ups < XR_CODEX_DAYS &&
+	     hits < 2; y--)
 	{
 		unsigned char mb[13] = {0};
 
 		snprintf(ys, sizeof ys, "%04d", y);
 		if (!CX_HAS(yb, (unsigned)y) || !(yd = cx_dir(dirfd(sd), ys)))
 			continue;
+		ups++;
 		cx_names(yd, 2, mb);
-		for (m = 99; m >= 0 && days < XR_CODEX_DAYS && hits < 2; m--)
+		for (m = 99; m >= 0 && days < XR_CODEX_DAYS && ups < XR_CODEX_DAYS &&
+		     hits < 2; m--)
 		{
 			unsigned char db[13] = {0};
 
 			snprintf(ms, sizeof ms, "%02d", m);
 			if (!CX_HAS(mb, (unsigned)m) || !(md = cx_dir(dirfd(yd), ms)))
 				continue;
+			ups++;
 			cx_names(md, 2, db);
 			for (day = 99; day >= 0 && days < XR_CODEX_DAYS && hits < 2;
 			     day--)
@@ -1337,7 +1343,9 @@ xr_codex_lookup(const char *home, const char *tid, char *path, size_t pathsz,
 				    !(dd = cx_dir(dirfd(md), ds)))
 					continue;
 				days++;
-				/* "<any>-<tid>.jsonl", a regular file, not a link */
+				/* "<any>-<tid>.jsonl", a regular file, not a link; ours and
+				** not group- or world-writable, as a snapshot (QA 1.55.0
+				** NIT-6) */
 				while ((de = readdir(dd)) && hits < 2)
 				{
 					size_t n = strlen(de->d_name);
@@ -1349,7 +1357,8 @@ xr_codex_lookup(const char *home, const char *tid, char *path, size_t pathsz,
 					    strcmp(de->d_name + n - 6, ".jsonl") || dfd < 0 ||
 					    fstatat(dfd, de->d_name, &s,
 					            AT_SYMLINK_NOFOLLOW) < 0 ||
-					    !S_ISREG(s.st_mode))
+					    !S_ISREG(s.st_mode) || s.st_uid != getuid() ||
+					    (s.st_mode & 022))
 						continue;
 					if (hits++ == 0 &&
 					    snprintf(path, pathsz, "%s/%s/%s/%s/%s", dir, ys,
@@ -6994,23 +7003,40 @@ res_under(const char *p, const char *root)
 }
 
 /* root is "/", $HOME or an ancestor of it, by real path (HOME and the
-** passwd entry's): too wide to be a project, so none (#178) */
+** passwd entry's): too wide to be a project, so none (#178). So is
+** ~/.config or ~/Library, or a root inside one that is no git root below
+** it: their apps keep tokens under any name (QA 1.55.0 LOW-14, #184). */
 static int
-res_wide(const char *root)
+res_wide(const char *root, int git)
 {
 	const struct passwd *pw = getpwuid(getuid());
 	const char *h[2] = { getenv("HOME"), pw ? pw->pw_dir : NULL };
-	char rr[PATH_MAX], hr[PATH_MAX];
-	int k;
+	static const char *const app[2] = { ".config", "Library" };
+	char rr[PATH_MAX], hr[PATH_MAX], d[PATH_MAX + 16];
+	size_t l;
+	int k, a;
 
 	if (!realpath(root, rr))
 		snprintf(rr, sizeof rr, "%s", root);
 	if (!strcmp(rr, "/"))
 		return 1;
 	for (k = 0; k < 2; k++)
-		if (h[k] && h[k][0] == '/' &&
-		    res_under(realpath(h[k], hr) ? hr : h[k], rr))
-			return 1;
+		if (h[k] && h[k][0] == '/')
+		{
+			const char *hb = realpath(h[k], hr) ? hr : h[k];
+
+			if (res_under(hb, rr))
+				return 1;
+			for (a = 0; a < 2; a++)
+			{
+				l = (size_t)snprintf(d, sizeof d, "%s%s%s", hb,
+				                     hb[strlen(hb) - 1] == '/' ? "" : "/",
+				                     app[a]);
+				if (!strncasecmp(rr, d, l) && (!rr[l] ||
+				    (rr[l] == '/' && (!git || !rr[l + 1]))))
+					return 1;
+			}
+		}
 	return 0;
 }
 
@@ -7131,7 +7157,7 @@ res_keep(char *b, size_t *bn, size_t cap, const char *s, ssize_t n)
 }
 
 /* Reap pid, by `until` (ms), else end its group: SIGTERM, a 1 s grace,
-** SIGKILL (#833). 0 exited (*st), 1 timed out. */
+** SIGKILL, at most 1 s more (#833). 0 exited (*st), 1 timed out. */
 static int
 res_reap(pid_t pid, long long until, int *st)
 {
@@ -7147,8 +7173,12 @@ res_reap(pid_t pid, long long until, int *st)
 	     (w = waitpid(pid, st, WNOHANG)) == 0 && xr_now_ms() < grace;)
 		poll(NULL, 0, 20);
 	kill(-pid, SIGKILL);	/* what ignored SIGTERM, the leader's kids */
-	if (w == 0)
-		(void)waitpid(pid, st, 0);
+	/* a git in uninterruptible I/O (a stalled mount) outlives SIGKILL: it is
+	** left unreaped, to init when this one-shot process ends (QA 1.55.0
+	** LOW-3) */
+	for (grace = xr_now_ms() + 1000; w == 0 &&
+	     (w = waitpid(pid, st, WNOHANG)) == 0 && xr_now_ms() < grace;)
+		poll(NULL, 0, 20);
 	return 1;
 }
 
@@ -7363,9 +7393,48 @@ xr_git_parse(const char *s, size_t n, long long now, struct xr_resolved *r)
 	return 1;
 }
 
-/* GitCommitResolver (8.3): rev-parse, then show, under one 3 s deadline. */
+int
+xr_git_remote(const char *s, size_t n, const char *want)
+{
+	static const char host[] = "github.com";
+	size_t wl = strlen(want), hl = sizeof host - 1, i, e, k, l;
+	const char *t;
+
+	for (i = 0; i < n; i = e + 1)
+	{
+		for (e = i; e < n && s[e] != '\n'; e++)
+			;
+		for (k = i; k < e && s[k] != ' '; k++)	/* the key, then the url */
+			;
+		for (k++; k + hl < e; k++)
+		{
+			/* "@github.com:" or "//github.com/", then exactly o/r */
+			if ((s[k - 1] != '@' &&
+			     (k < i + 2 || s[k - 2] != '/' || s[k - 1] != '/')) ||
+			    strncasecmp(s + k, host, hl) ||
+			    (s[k + hl] != ':' && s[k + hl] != '/'))
+				continue;
+			t = s + k + hl + 1;
+			l = (size_t)(s + e - t);
+			if (l < wl || strncasecmp(t, want, wl))
+				continue;
+			t += wl;
+			l -= wl;
+			if (l >= 4 && !strncasecmp(t, ".git", 4))
+				t += 4, l -= 4;
+			if (!l || (l == 1 && *t == '/'))
+				return 1;
+		}
+	}
+	return 0;
+}
+
+/* GitCommitResolver (8.3): rev-parse, then show, under one 3 s deadline.
+** gh, a commit URL's "<owner>/<repo>" when its SHA is short: config's
+** remote URLs run between, and a repo none of them names is not that
+** commit's (QA 1.55.0 LOW-1). */
 static int
-res_commit(const char *sha, const char *cwd, int live,
+res_commit(const char *sha, const char *cwd, int live, const char *gh,
            struct xr_resolved *r)
 {
 	static struct res_run run;	/* 68 KB: off the stack */
@@ -7374,7 +7443,7 @@ res_commit(const char *sha, const char *cwd, int live,
 	const char *h = getenv("HOME"), *b;
 	size_t n = strlen(sha), k, e = 0, a = 0;
 	long long until;
-	int rc;
+	int rc, foreign = 0;
 
 	/* 8.3: checked again, 7-40 lowercase hex, so it is never an option */
 	if (n < 7 || n > 40 || !res_hex(sha, n))
@@ -7443,10 +7512,32 @@ res_commit(const char *sha, const char *cwd, int live,
 		return 0;
 	if (rc == 0 && (run.status != 0 || strcmp(run.out, "true\n")))
 	{
+		/* only git's own "not a git repository" (or a cwd gone) says so;
+		** any other git error gives no line (QA 1.55.0 LOW-4) */
+		if (run.status != 0 && !strstr(run.err, "not a git repository") &&
+		    !strstr(run.err, "cannot change to"))
+			return 0;
 		res_set(r, "not_repo", "Not in a git repository");
 		return 1;
 	}
-	if (rc == 0)
+	if (rc == 0 && gh)
+	{
+		static char s0[] = "config", s1[] = "--get-regexp",
+		            s2[] = "^remote\\..*\\.url$";
+
+		av[a] = s0;
+		av[a + 1] = s1;
+		av[a + 2] = s2;
+		av[a + 3] = NULL;
+		/* 1: no remote at all; a git error or the deadline: no line, never
+		** not_commit or timeout. run.out (remote URLs can carry a token)
+		** is only matched, never written anywhere. */
+		if (res_run(av, env, until, &run) != 0 ||
+		    (run.status != 0 && run.status != 1))
+			return 0;
+		foreign = !xr_git_remote(run.out, run.on, gh);
+	}
+	if (rc == 0 && !foreign)
 	{
 		static char s0[] = "show", s1[] = "--no-color", s2[] = "--no-ext-diff",
 		            s3[] = "--no-textconv", s4[] = "--stat=80",
@@ -7467,13 +7558,22 @@ res_commit(const char *sha, const char *cwd, int live,
 		res_set(r, "timeout", "git timed out after 3 s");
 		return 1;
 	}
-	if (run.status == 0 &&
-	    xr_git_parse(run.out, run.on, (long long)time(NULL), r))
-		return 1;
-	if (strstr(run.err, " is ambiguous"))
+	if (!foreign)
 	{
-		res_set(r, "ambiguous", "Ambiguous short SHA");
-		return 1;
+		if (run.status == 0 &&
+		    xr_git_parse(run.out, run.on, (long long)time(NULL), r))
+			return 1;
+		if (strstr(run.err, " is ambiguous"))
+		{
+			res_set(r, "ambiguous", "Ambiguous short SHA");
+			return 1;
+		}
+		/* git's own "unknown revision" or "expected commit type" (a tree,
+		** a blob, a tag of one) only; a git that failed otherwise (a bad
+		** .gitmodules, a missing blob) gives no line (LOW-4) */
+		if (!strstr(run.err, "unknown revision") &&
+		    !strstr(run.err, "expected commit type"))
+			return 0;
 	}
 	(void)res_root(dir, root, sizeof root);
 	b = strrchr(root, '/');
@@ -7507,7 +7607,9 @@ xr_ref_line(const char *text)
 /* The deny list (#178), ASCII case-insensitive. 'p': a part of the path
 ** starts with it; 'd': a part (or parts, "a/b") equals it; on the name
 ** only, 'n': equals it, 's': ends in it, 'i': starts with it and has no
-** dot. A guard against the common credential files, not a guarantee. */
+** dot. A guard against the common credential files, not a guarantee.
+** res_file matches 'd' only below a git root whose own path lies in such
+** a directory, and the home's own always (#184). */
 static const struct { char how; const char *s; } xr_deny[] = {
 	/* env files, ssh, gpg, aws, the package managers' tokens (.env*) */
 	{ 'p', ".env" }, { 'p', ".ssh" }, { 'p', ".gnupg" }, { 'p', ".aws" },
@@ -7520,6 +7622,9 @@ static const struct { char how; const char *s; } xr_deny[] = {
 	{ 'd', ".claude" }, { 'd', ".codex" }, { 'd', ".config/gh" },
 	{ 'd', ".config/gcloud" }, { 'd', ".gcloud" },
 	{ 'd', ".password-store" },
+	/* QA 1.55.0 LOW-14: maven, hub, 1Password, macOS shell sessions */
+	{ 'd', ".m2" }, { 'd', ".config/hub" }, { 'd', ".config/op" },
+	{ 'd', ".bash_sessions" },
 	/* single token and password files */
 	{ 'n', ".claude.json" }, { 'n', ".pgpass" }, { 'n', ".my.cnf" },
 	{ 'n', ".vault-token" }, { 'n', ".htpasswd" }, { 'n', ".s3cfg" },
@@ -7527,19 +7632,25 @@ static const struct { char how; const char *s; } xr_deny[] = {
 	{ 'n', "credentials.toml" }, { 'n', "credentials.db" },
 	{ 'n', "application_default_credentials.json" },
 	{ 'n', "secrets.yaml" }, { 'n', "secrets.yml" }, { 'n', "secrets.json" },
+	/* LOW-14: terraform, yarn, gradle, rclone, boto, docker, X11 */
+	{ 'n', "credentials.tfrc.json" }, { 'n', ".yarnrc.yml" },
+	{ 'n', "gradle.properties" }, { 'n', "rclone.conf" }, { 'n', ".boto" },
+	{ 'n', ".dockercfg" }, { 'n', ".Xauthority" },
 	/* keys, certificates, keystores, keychains, terraform state */
 	{ 's', ".pem" }, { 's', ".key" }, { 's', ".p12" }, { 's', ".pfx" },
 	{ 's', ".p8" }, { 's', ".ppk" }, { 's', ".jks" }, { 's', ".keystore" },
 	{ 's', ".keychain" }, { 's', ".keychain-db" }, { 's', ".tfstate" },
-	{ 's', ".tfstate.backup" },
+	{ 's', ".tfstate.backup" }, { 's', ".keyring" },
 	/* shell and REPL history: .zsh_history, .psql_history, fish_history */
 	{ 's', "history" },
 	/* ssh keys: id_rsa, id_ed25519, never id_rsa.pub */
 	{ 'i', "id_" },
 };
 
-int
-xr_secret_name(const char *path)
+/* path on the deny list, its 'd' entries only on the parts from dirs on
+** (a pointer into path; path itself for the whole of it) */
+static int
+xr_secret_at(const char *path, const char *dirs)
 {
 	const char *c = path, *e, *s;
 	size_t l, k, n;
@@ -7553,14 +7664,63 @@ xr_secret_name(const char *path)
 			s = xr_deny[k].s;
 			n = strlen(s);
 			if (xr_deny[k].how == 'p' ? l >= n && !strncasecmp(c, s, n)
-			    : xr_deny[k].how == 'd' ? !strncasecmp(c, s, n) &&
-			      (!c[n] || c[n] == '/')
+			    : xr_deny[k].how == 'd' ? c >= dirs &&
+			      !strncasecmp(c, s, n) && (!c[n] || c[n] == '/')
 			    : *e ? 0	/* the rest: the name only */
 			    : xr_deny[k].how == 'n' ? l == n && !strncasecmp(c, s, n)
 			    : xr_deny[k].how == 's' ? l >= n && !strncasecmp(e - n, s, n)
 			    : l > n && !strncasecmp(c, s, n) && !memchr(c, '.', l))
 				return 1;
 		}
+	}
+	return 0;
+}
+
+int
+xr_secret_name(const char *path)
+{
+	return xr_secret_at(path, path);
+}
+
+/* a 'd' entry starts at c, or with every at any part of it */
+static int
+xr_deny_dir(const char *c, int every)
+{
+	size_t k, n;
+
+	for (; c; c = every && (c = strchr(c, '/')) ? c + 1 : NULL)
+		for (k = 0; k < sizeof xr_deny / sizeof *xr_deny; k++)
+		{
+			n = strlen(xr_deny[k].s);
+			if (xr_deny[k].how == 'd' &&
+			    !strncasecmp(c, xr_deny[k].s, n) && (!c[n] || c[n] == '/'))
+				return 1;
+		}
+	return 0;
+}
+
+/* path in a denied directory of the home (~/.claude, ~/.config/gh, ...),
+** whatever the project root: HOME and the passwd entry's home, each as
+** given and as its real path, without regard to case (#184) */
+static int
+res_home_deny(const char *path)
+{
+	const struct passwd *pw = getpwuid(getuid());
+	const char *h[2] = { getenv("HOME"), pw ? pw->pw_dir : NULL }, *c;
+	char hr[PATH_MAX];
+	size_t l;
+	int k;
+
+	for (k = 0; k < 4; k++)
+	{
+		c = h[k / 2];
+		if (!c || c[0] != '/' || ((k & 1) && !(c = realpath(c, hr))))
+			continue;
+		for (l = strlen(c); l && c[l - 1] == '/'; l--)
+			;
+		if (!strncasecmp(path, c, l) && path[l] == '/' &&
+		    xr_deny_dir(path + l + 1, 0))
+			return 1;
 	}
 	return 0;
 }
@@ -7596,11 +7756,14 @@ xr_file_lines(const char *s, size_t n, long line, struct xr_resolved *r)
 }
 
 /* FileResolver: the key's path, inside the project (the cwd's git root,
-** else the cwd; none when that is /, $HOME or above) by its text and again
-** by realpath; never a denied name, on either whole path; lstat a regular
-** file with one link, at most 2 MB, opened through the seam. Outside the
+** else the cwd; none when that is /, $HOME or above, or ~/.config or
+** ~/Library) by its text and again by realpath; never a denied name, on
+** either whole path, nor a denied dir of the home; lstat a regular file
+** with one link, at most 2 MB, opened through the seam. Outside the
 ** project nothing is touched, so no TCC prompt (QA D), unless a symlinked
-** dir inside points out: realpath follows it, then refuses. */
+** dir inside points out: realpath follows it, then refuses. A git root
+** whose typed path lies in a denied dir (a worktree in .claude/worktrees)
+** has the denied dirs matched below it only (#184). */
 static int
 res_file(const char *key, const char *text, const char *cwd,
          struct xr_resolved *r)
@@ -7612,7 +7775,7 @@ res_file(const char *key, const char *text, const char *cwd,
 	struct stat st;
 	ssize_t got;
 	size_t n = 0;
-	int fd;
+	int fd, git, below;
 
 	if (cwd[0] != '/' || strlen(cwd) >= PATH_MAX)
 		return 0;
@@ -7626,18 +7789,19 @@ res_file(const char *key, const char *text, const char *cwd,
 	         >= (int)sizeof p)
 		return 0;
 	r->kind = "file";
-	(void)res_root(cwd, root, sizeof root);
+	git = res_root(cwd, root, sizeof root);
+	below = git && xr_deny_dir(root, 1);
 	/* shown: relative to the cwd, else the root, else whole */
 	rel = res_under(p, cwd);
 	snprintf(shown, sizeof shown, "%s", rel && *rel ? rel
 	         : (rel = res_under(p, root)) && *rel ? rel : p);
 	res_text(r->subtitle, shown, strlen(shown), XR_RES_LINE);
-	if (res_wide(root) || !res_under(p, root))
+	if (res_wide(root, git) || !res_under(p, root))
 	{
 		res_set(r, "outside_project", "Outside this session's project");
 		return 1;
 	}
-	if (xr_secret_name(p))
+	if (xr_secret_at(p, below ? res_under(p, root) : p) || res_home_deny(p))
 	{
 		res_set(r, "secret_name", "Not previewed: may hold secrets");
 		return 1;
@@ -7652,7 +7816,8 @@ res_file(const char *key, const char *text, const char *cwd,
 		res_set(r, "outside_project", "Outside this session's project");
 		return 1;
 	}
-	if (xr_secret_name(rp))
+	if (xr_secret_at(rp, below ? res_under(rp, rr) : rp) ||
+	    res_home_deny(rp))
 	{
 		res_set(r, "secret_name", "Not previewed: may hold secrets");
 		return 1;
@@ -7679,16 +7844,25 @@ res_file(const char *key, const char *text, const char *cwd,
 		res_set(r, "too_large", "Not previewed: over 2 MB");
 	else
 	{
+		/* a NUL in the first 8000 bytes (git's test): binary, said in the
+		** subtitle, no lines of U+FFFD (QA 1.55.0 NIT-2) */
+		int bin = memchr(buf, '\0', n < 8000 ? n : 8000) != NULL;
+
 		base = strrchr(p, '/') + 1;
 		r->state = "ok";
 		res_text(r->title, base, strlen(base), XR_TITLE_MAX);
-		if (line > 0)
-		{
+		if (bin)
+			snprintf(shown + strlen(shown), sizeof shown - strlen(shown),
+			         " \xc2\xb7 binary");
+		else if (line > 0)
 			snprintf(shown + strlen(shown), sizeof shown - strlen(shown),
 			         " \xc2\xb7 line %ld", line);
+		if (bin || line > 0)
 			res_text(r->subtitle, shown, strlen(shown), XR_RES_LINE);
-		}
-		xr_file_lines(buf, n, line, r);
+		if (bin)
+			r->first = 1;
+		else
+			xr_file_lines(buf, n, line, r);
 	}
 	free(buf);
 	return 1;
@@ -7700,7 +7874,22 @@ xr_res_ref(const struct xr_span *sp, const char *text, const char *cwd,
 {
 	memset(r, 0, sizeof *r);
 	if (sp->shape == XR_COMMIT)
-		return res_commit(sp->full, cwd ? cwd : "", live, r);
+	{
+		/* url_kind made it: https://github.com/<o>/<r>/commit/<sha>. A full
+		** 40-hex name is that commit in any repo: only a short one can
+		** match an unrelated local commit, so only it is checked (LOW-1
+		** ruling). */
+		const char *u = strstr(text, "https://github.com/");
+		const char *o = u ? u + 19 : "", *e = strchr(o, '/');
+		char gh[160];
+
+		e = e ? strchr(e + 1, '/') : NULL;
+		if (u && (!e || snprintf(gh, sizeof gh, "%.*s", (int)(e - o), o)
+		          >= (int)sizeof gh))
+			return 0;
+		return res_commit(sp->full, cwd ? cwd : "", live,
+		                  u && strlen(sp->full) < 40 ? gh : NULL, r);
+	}
 	if (sp->shape == XR_FILE)
 		return res_file(xr_span_text(sp), text, cwd ? cwd : "", r);
 	return 0;

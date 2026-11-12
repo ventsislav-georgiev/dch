@@ -528,7 +528,7 @@ kills,
 opens the row's X\-ray view
 .RB ( "dch \-\-xray" ;
 .B q
-returns to the picker; on History too; not yet for a remote row),
+returns to the picker; on History too; a remote row's runs on its host),
 .B a
 allows a plain Yes/No permission prompt (presses 1, Yes; any other prompt is refused),
 .B b
@@ -801,13 +801,28 @@ and over a remote attach; the keys then reach the session as before.
 There is no
 .B xray_key
 setting.
-Local only: a remote
-.IB host : name
-exits 2 and says
-.B \-\-json
-is required.
+.BI "dch \-\-xray " host : name
+opens the view of a session on another host
+.RB ( "dch serve"
+1.55.0+), as does
+.B X
+on a remote row in the picker.
+Every query runs on the host, each over its own ctl connection; On screen
+reads the host's screen with
+.BR "\-\-read " \fIname\fB " \-\-ansi" .
+The host's text is drawn as a local session's, every control and bidi
+character as
+.BR ? .
+A host that refuses us, lacks
+.B \-\-xray
+or cannot be reached shows its line in place of the tabs;
+.B q
+leaves with that exit code.
 Exit 0 when quit, 1 no such session, 2 with any other flag or when stdout
-is not a terminal.
+is not a terminal; for a remote host also 4 (its gate refused us), 6 (it
+lacks
+.BR \-\-xray )
+and 7 (unreachable).
 .TP
 .BI \-\-xray " name " "" \fR[\fB\-\-clear\fR|\fB\-\-follow\fR]\fP " \-\-json"
 X\-ray: print one JSON object
@@ -928,6 +943,8 @@ as
 .B \-c log.showSignature=false \-C
 .I cwd
 .B rev\-parse \-\-is\-inside\-work\-tree
+(for a commit URL with a short SHA also
+.BR "config \-\-get\-regexp ^remote\e..*\e.url$" )
 and then
 .B show \-\-no\-color \-\-no\-ext\-diff \-\-no\-textconv \-\-stat=80
 .B \-\-stat\-count=14 \-\-format=%H%x00%an%x00%at%x00%s \-\-end\-of\-options
@@ -942,7 +959,8 @@ with only
 .B HOME
 and
 .B LANG=en_US.UTF\-8
-in its environment, 3 s for both runs (then its process group is ended),
+in its environment, 3 s for all runs (then its process group is ended;
+a git that outlives SIGKILL is left behind a second later),
 64 KiB of output kept (a repo's
 .I objects/info/alternates
 can make git read objects outside the project: nothing runs, nothing is
@@ -954,11 +972,30 @@ written); states
 .BR ambiguous ,
 .BR timeout ,
 .BR ended .
+Only git's own \(lqunknown revision\(rq or \(lqexpected commit type\(rq
+(a tree, a blob or a tag of one) is
+.BR not_commit ,
+only its \(lqnot a git repository\(rq or a missing cwd
+.BR not_repo ;
+any other git failure gives no line.
+A commit URL with a full 40\-hex SHA resolves as a bare SHA.
+With a shorter SHA it resolves only when a remote URL of the repo names its
+github.com owner and repo, else it is
+.BR not_commit ;
+a remote reached only through
+.BI url. base .insteadOf
+does not match, other hosts never match, a failed or timed\-out
+.B config
+run gives no line, and the remote URLs are never printed.
 A file is read only inside the project (the cwd's git root, else the cwd;
 none when that is
 .BR / ,
 .B $HOME
-or a directory above it, by real path), checked by its text and again by
+or a directory above it, by real path; none at
+.I ~/.config
+or
+.I ~/Library
+either, nor inside them unless at a git root below them), checked by its text and again by
 its real path (a symlinked directory is followed only while it stays
 inside), the file itself never a symlink, a file with more than one hard
 link
@@ -986,9 +1023,13 @@ anything under a directory
 .BR .codex ,
 .BR .gcloud ,
 .BR .password\-store ,
-.B .config/gh
+.BR .m2 ,
+.BR .bash_sessions ,
+.BR .config/gh ,
+.BR .config/gcloud ,
+.B .config/hub
 or
-.BR .config/gcloud ;
+.BR .config/op ;
 the names
 .BR .claude.json ,
 .BR .pgpass ,
@@ -1002,9 +1043,16 @@ the names
 .BR credentials.db ,
 .BR application_default_credentials.json ,
 .BR secrets.yaml ,
-.B secrets.yml
+.BR secrets.yml ,
+.BR secrets.json ,
+.BR credentials.tfrc.json ,
+.BR .yarnrc.yml ,
+.BR gradle.properties ,
+.BR rclone.conf ,
+.BR .boto ,
+.B .dockercfg
 and
-.BR secrets.json ;
+.BR .Xauthority ;
 names ending in
 .BR .pem ,
 .BR .key ,
@@ -1016,16 +1064,31 @@ names ending in
 .BR .keystore ,
 .BR .keychain ,
 .BR .keychain\-db ,
+.BR .keyring ,
 .BR .tfstate ,
 .B .tfstate.backup
 or
 .BR history ;
 .B id_
 names with no dot.
+A git root whose own path, as given, lies in one of those directories (a
+Claude Code worktree in
+.IR <repo>/.claude/worktrees/<name> )
+has them matched only below the root; a root reached through a symlink
+that hides the directory, or a cwd in one with no git root, has no such
+exception.
+Whatever the root, a path that enters one of them in the home
+.RI ( ~/.claude ,
+.IR ~/.codex ,
+.IR ~/.config/gh ,
+\&...), as given or by its real path, is
+.BR secret_name .
 The list guards the common credential files by name; a secret in a file
 with any other name is shown.
 At most 2 MB, as 14 lines with the ref's line the
-seventh; states
+seventh; a NUL in the first 8000 bytes makes it binary: no lines and
+\(lq\[u00B7] binary\(rq
+in the subtitle; states
 .BR ok ,
 .BR outside_project ,
 .BR secret_name ,
@@ -1198,9 +1261,7 @@ remote
 with
 .B \-\-json
 dch checks the flags and values by its own rules above (exit 2, nothing
-sent; the view form, without
-.BR \-\-json ,
-stays local and exits 2), then runs
+sent), then runs
 .B "\-\-xray"
 .I name
 and the other flags as typed on that host's
@@ -1279,7 +1340,8 @@ The rollout is the only regular file named
 .BI \- id .jsonl
 under
 .IR sessions/YYYY/MM/DD ,
-newest first, at most 400 day directories, no symlink followed.
+newest first, at most 400 day directories and 400 year and month
+directories, no symlink followed, yours and not group\- or world\-writable.
 Assistant text uses the prose rules, tool calls and outputs the code rules;
 reasoning, developer messages and
 .B event_msg
@@ -1292,7 +1354,9 @@ once its rows scroll off the screen (commands still on it have none yet;
 commands typed ahead in one burst give only the first one a chapter, the
 others having had no client input inside their own B..C).
 A query also reads the current primary screen after the ring: its rows count
-as output (refs only, no chapter, no definition), and
+as output (refs only, no chapter, no definition; their
+.B at
+is the time of the read, not of the write), and
 .B lines
 counts the rows read; while the alternate screen is active, or from a master
 started by an older dch (until

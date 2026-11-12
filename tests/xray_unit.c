@@ -1582,6 +1582,19 @@ mkfile(const char *p)
 	close(open(p, O_WRONLY | O_CREAT, 0600));
 }
 
+static void
+mkdirp(char *p)
+{
+	char *s;
+
+	for (s = p + 1; (s = strchr(s, '/')); *s++ = '/')
+	{
+		*s = '\0';
+		mkdir(p, 0700);
+	}
+	mkdir(p, 0700);
+}
+
 /* the lookup (7.4, mutant 36): names only, depth 3, newest first, at most
 ** XR_CODEX_DAYS day dirs; exactly one regular file, never a link */
 static void
@@ -1662,6 +1675,55 @@ t_codex_lookup(void)
 	unlink(p);
 	unlink(path);
 	rmdir(q);
+	/* NIT-6: a rollout as a snapshot, ours and not group/world-writable */
+	snprintf(p, sizeof p, "%s/sessions/2000/01/02/rollout-2000-01-02T00-00"
+	         "-00-%s.jsonl", d, tid);
+	mkfile(p);
+	chmod(p, 0664);
+	CHECK("codex lookup: a group-writable rollout is refused",
+	      xr_codex_lookup(d, tid, path, sizeof path, &st) < 0);
+	chmod(p, 0646);
+	CHECK("codex lookup: a world-writable rollout is refused",
+	      xr_codex_lookup(d, tid, path, sizeof path, &st) < 0);
+	chmod(p, 0644);
+	CHECK("codex lookup: a 0644 rollout of ours is read",
+	      xr_codex_lookup(d, tid, path, sizeof path, &st) == 0);
+	snprintf(p, sizeof p, "rm -rf '%s'", d);
+	(void)!system(p);
+	/* LOW-11: empty year and month dirs count against a bound of their own */
+	if (!mkdtemp(strcpy(d, "/tmp/xray_cx.XXXXXX")))
+		return;
+	snprintf(p, sizeof p, "%s/sessions/2000/01/01", d);
+	mkdirp(p);
+	snprintf(p, sizeof p, "%s/sessions/2000/01/01/rollout-x-%s.jsonl", d, tid);
+	mkfile(p);
+	for (m = 0; m < 10; m++)
+	{
+		snprintf(p, sizeof p, "%s/sessions/%04d", d, 9999 - m);
+		mkdir(p, 0700);
+	}
+	CHECK("codex lookup: 10 empty newer year dirs, the rollout is found",
+	      xr_codex_lookup(d, tid, path, sizeof path, &st) == 0);
+	for (; m < 400; m++)
+	{
+		snprintf(p, sizeof p, "%s/sessions/%04d", d, 9999 - m);
+		mkdir(p, 0700);
+	}
+	CHECK("codex lookup: 400 empty newer year dirs: past the bound, none",
+	      xr_codex_lookup(d, tid, path, sizeof path, &st) < 0);
+	for (m = 0; m < 400; m++)
+	{
+		snprintf(p, sizeof p, "%s/sessions/%04d", d, 9999 - m);
+		rmdir(p);
+	}
+	for (m = 0; m < 5 * 90; m++)
+	{
+		snprintf(p, sizeof p, "%s/sessions/%04d/%02d", d, 9999 - m / 90,
+		         99 - m % 90);
+		mkdirp(p);
+	}
+	CHECK("codex lookup: 5 newer years of 90 empty month dirs: none",
+	      xr_codex_lookup(d, tid, path, sizeof path, &st) < 0);
 	snprintf(p, sizeof p, "rm -rf '%s'", d);
 	(void)!system(p);
 }
@@ -2234,11 +2296,46 @@ t_res_file(void)
 		      res("big.c:1", "proj", 1, &r) == 1 && is(&r, "file", "ok"));
 		free(buf);
 	}
-	put("proj/u.c", "ok \xff\xfe end\r\nnul\0here\n", 20);
-	CHECK("file: invalid UTF-8 and NUL as U+FFFD, CR dropped",
+	put("proj/u.c", "ok \xff\xfe end\r\nno nul\n", 18);
+	CHECK("file: invalid UTF-8 as U+FFFD, CR dropped",
 	      res("u.c:1", "proj", 1, &r) == 1 && r.nlines == 2 &&
 	      !strcmp(r.line[0], "ok \xef\xbf\xbd\xef\xbf\xbd end") &&
-	      !strcmp(r.line[1], "nul\xef\xbf\xbdhere"));
+	      !strcmp(r.line[1], "no nul"));
+	/* NIT-2: a NUL in the first 8000 bytes is binary: said, no lines */
+	put("proj/bin.dat", "A\0B\xff\xfe\0C\n", 8);
+	CHECK("file: a NUL early: ok, \"bin.dat \xc2\xb7 binary\", no lines",
+	      res("bin.dat:1", "proj", 1, &r) == 1 && is(&r, "file", "ok") &&
+	      r.nlines == 0 && r.first == 1 && !strcmp(r.title, "bin.dat") &&
+	      !strcmp(r.subtitle, "bin.dat \xc2\xb7 binary"));
+	/* the refusals keep their order before the binary test */
+	put("out/b.bin", "A\0B\n", 4);
+	put("proj/k.p12", "A\0B\n", 4);
+	CHECK("file: a binary file outside: outside_project; with a secret "
+	      "name: secret_name",
+	      res("../out/b.bin:1", "proj", 1, &r) == 1 &&
+	      is(&r, "file", "outside_project") &&
+	      res("k.p12:1", "proj", 1, &r) == 1 &&
+	      is(&r, "file", "secret_name"));
+	if ((buf = malloc(XR_RES_FILE + 1)))
+	{
+		memset(buf, 0, XR_RES_FILE + 1);
+		put("proj/big.bin", buf, XR_RES_FILE + 1);
+		CHECK("file: a binary file over 2 MB: too_large",
+		      res("big.bin:1", "proj", 1, &r) == 1 &&
+		      is(&r, "file", "too_large") && r.nlines == 0);
+		free(buf);
+	}
+	{
+		static char late[8009];
+
+		for (k = 0; k < 4000; k++)
+			memcpy(late + 2 * k, "x\n", 2);
+		memcpy(late + 8000, "nul\0here\n", 9);
+		put("proj/late.c", late, sizeof late);
+		CHECK("file: a NUL past 8000 bytes is text, the NUL as U+FFFD",
+		      res("late.c:4001", "proj", 1, &r) == 1 && r.nlines == 14 &&
+		      !strcmp(r.line[13], "nul\xef\xbf\xbdhere"));
+	}
 	memset(b, 'w', 900);
 	b[900] = '\n';
 	put("proj/w.c", b, 901);
@@ -2386,6 +2483,187 @@ t_res_deny(void)
 	      is(&r, "file", "outside_project") && r.nlines == 0);
 }
 
+/* #184: a git root whose typed path lies in a denied directory (a Claude
+** Code worktree in <repo>/.claude/worktrees/<name>) reads its own files;
+** the denied dirs are matched below that root only, the home's always;
+** ~/.config and ~/Library are no project but a git root below them; QA
+** 1.55.0 LOW-14's names. Every file holds FAKE. */
+static void
+t_res_tree(void)
+{
+	static const char *const mkd[] = {
+		"wr", "wr/.git", "wr/.claude", "wr/.claude/worktrees",
+		"wr/.claude/worktrees/w", "wr/.claude/worktrees/w/.claude",
+		"wr/.claude/worktrees/w/.ssh", "wr/.claude/worktrees/w/.kube",
+		"wr/.claude/worktrees/w/.Claude", "wr/.claude/worktrees/w/sub",
+		"wr/.claude/worktrees/w/sub/.codex", "nog", "nog/.claude",
+		"nog/.claude/plain", "th", "th/.claude", "th/.claude/projects",
+		"th/.claude/projects/x", "th/.claude/plugins",
+		"th/.claude/plugins/m", "th/.claude/plugins/m/.git", "th/.config",
+		"th/.config/rclone", "th/.config/x", "th/.config/nvim",
+		"th/.config/nvim/.git", "th/.config/gh", "th/.config/gh/r",
+		"th/.config/gh/r/.git", "th/Library", "th/Library/App", "lq",
+		"lq/.git", "lq/.terraform.d", "lq/.config", "lq/.config/rclone",
+		"lq/.config/op", "lq/.m2", "lq/.bash_sessions", "lq/.local",
+		"lq/.local/share", "lq/.local/share/keyrings", "cfg", "cfg/.git",
+		NULL
+	};
+	static const char *const in[] = {	/* inside w: refused */
+		".env", ".claude/settings.json", ".ssh/config", ".kube/config",
+		".Claude/s.json", "sub/.codex/auth.json", NULL
+	};
+	static const char *const low14[] = {
+		".terraform.d/credentials.tfrc.json", ".config/hub", ".yarnrc.yml",
+		".m2/settings.xml", "gradle.properties",
+		".config/rclone/rclone.conf", ".boto", ".dockercfg",
+		".config/op/config", ".Xauthority", ".bash_sessions/x.session",
+		".local/share/keyrings/login.keyring", NULL
+	};
+	const char *h = getenv("HOME"), *w = "wr/.claude/worktrees/w";
+	char b[PATH_MAX + 64], l[PATH_MAX + 64], sv[PATH_MAX];
+	struct xr_resolved r;
+	size_t k;
+	int ok;
+
+	for (k = 0; mkd[k]; k++)
+		dir(mkd[k]);
+	put("wr/.claude/worktrees/w/.git", "gitdir: ../../../.git/wt/w\n", 27);
+	put("wr/.claude/worktrees/w/a.txt", "FAKE A\n", 7);
+	put("wr/.claude/x.txt", "FAKE\n", 5);
+	CHECK("tree: a worktree in .claude/worktrees reads its own a.txt",
+	      res("a.txt:1", w, 1, &r) == 1 && is(&r, "file", "ok") &&
+	      r.nlines == 1 && !strcmp(r.line[0], "FAKE A"));
+	for (k = 0; in[k]; k++)
+	{
+		snprintf(b, sizeof b, "%s/%s", w, in[k]);
+		put(b, "FAKE\n", 5);
+		snprintf(b, sizeof b, "%s/%s/%s:1", rd, w, in[k]);
+		snprintf(l, sizeof l, "tree: the worktree's own %s: secret_name, "
+		         "unread", in[k]);
+		CHECK(l, res(b, w, 1, &r) == 1 && is(&r, "file", "secret_name") &&
+		      r.nlines == 0);
+	}
+	snprintf(b, sizeof b, "%s/%s/.env:1", rd, w);
+	CHECK("tree: a trailing slash on the cwd: a.txt ok, .env secret_name",
+	      res("a.txt:1", "wr/.claude/worktrees/w/", 1, &r) == 1 &&
+	      is(&r, "file", "ok") &&
+	      res(b, "wr/.claude/worktrees/w/", 1, &r) == 1 &&
+	      is(&r, "file", "secret_name"));
+	CHECK("tree: .. up into the repo's .claude: outside_project, unread",
+	      res("../../x.txt:1", w, 1, &r) == 1 &&
+	      is(&r, "file", "outside_project") && r.nlines == 0);
+	snprintf(b, sizeof b, "%s/%s/sub/../.kube/config:1", rd, w);
+	CHECK("tree: sub/../.kube/config folds to .kube/config: secret_name",
+	      res(b, w, 1, &r) == 1 &&
+	      is(&r, "file", "secret_name"));
+	CHECK("tree: the repo's own root still refuses .claude/ below it",
+	      res(".claude/x.txt:1", "wr", 1, &r) == 1 &&
+	      is(&r, "file", "secret_name") &&
+	      res(".claude/worktrees/w/a.txt:1", "wr", 1, &r) == 1 &&
+	      is(&r, "file", "secret_name"));
+	/* symlinks: a dir out of the root, a name into a denied dir below it */
+	snprintf(b, sizeof b, "%s/wr/.claude", rd);
+	snprintf(l, sizeof l, "%s/%s/up", rd, w);
+	ok = symlink(b, l) == 0;
+	snprintf(l, sizeof l, "%s/%s/k", rd, w);
+	ok = ok && symlink(".kube", l) == 0;
+	CHECK("tree: a symlinked dir up to the repo's .claude: outside_project",
+	      ok && res("up/x.txt:1", w, 1, &r) == 1 &&
+	      is(&r, "file", "outside_project") && r.nlines == 0);
+	snprintf(b, sizeof b, "%s/%s/k/config:1", rd, w);
+	CHECK("tree: a symlinked dir onto the worktree's .kube: secret_name "
+	      "(real path below the root)",
+	      res(b, w, 1, &r) == 1 &&
+	      is(&r, "file", "secret_name") && r.nlines == 0);
+	/* a root reached through a symlink that hides the denied dir */
+	snprintf(b, sizeof b, "%s/%s", rd, w);
+	snprintf(l, sizeof l, "%s/wl", rd);
+	CHECK("tree: the worktree reached through a symlink (wl): secret_name, "
+	      "the whole real path",
+	      symlink(b, l) == 0 && res("a.txt:1", "wl", 1, &r) == 1 &&
+	      is(&r, "file", "secret_name") && r.nlines == 0);
+	/* a hard link to the repo's .claude/x.txt */
+	snprintf(b, sizeof b, "%s/wr/.claude/x.txt", rd);
+	snprintf(l, sizeof l, "%s/%s/h.txt", rd, w);
+	CHECK("tree: a hard link out of the worktree: outside_project, unread",
+	      link(b, l) == 0 && res("h.txt:1", w, 1, &r) == 1 &&
+	      is(&r, "file", "outside_project") && r.nlines == 0);
+	put("nog/.claude/plain/a.txt", "FAKE\n", 5);
+	CHECK("tree: a cwd in a denied dir with no git root: secret_name",
+	      res("a.txt:1", "nog/.claude/plain", 1, &r) == 1 &&
+	      is(&r, "file", "secret_name"));
+	/* the home's denied dirs, whatever the root; ~/.config, ~/Library */
+	snprintf(sv, sizeof sv, "%s", h ? h : "");
+	snprintf(b, sizeof b, "%s/th", rd);
+	setenv("HOME", b, 1);
+	put("th/.claude/projects/x/a.txt", "FAKE\n", 5);
+	put("th/.claude/plugins/m/a.txt", "FAKE\n", 5);
+	put("th/.config/gh/r/a.txt", "FAKE\n", 5);
+	put("th/.config/rclone/r.conf", "FAKE\n", 5);
+	put("th/.config/x/token.json", "FAKE\n", 5);
+	put("th/.config/nvim/init.lua", "FAKE\n", 5);
+	put("th/Library/App/s.json", "FAKE\n", 5);
+	CHECK("home: a cwd in ~/.claude, no git root: secret_name",
+	      res("a.txt:1", "th/.claude/projects/x", 1, &r) == 1 &&
+	      is(&r, "file", "secret_name") && r.nlines == 0);
+	CHECK("home: a git root in ~/.claude: secret_name (the home's dir, "
+	      "whatever the root)",
+	      res("a.txt:1", "th/.claude/plugins/m", 1, &r) == 1 &&
+	      is(&r, "file", "secret_name") && r.nlines == 0);
+	CHECK("home: a git root in ~/.config/gh: secret_name",
+	      res("a.txt:1", "th/.config/gh/r", 1, &r) == 1 &&
+	      is(&r, "file", "secret_name") && r.nlines == 0);
+	CHECK("home: cwd ~/.config, no git root: outside_project, unread",
+	      res("x/token.json:1", "th/.config", 1, &r) == 1 &&
+	      is(&r, "file", "outside_project") && r.nlines == 0);
+	CHECK("home: cwd ~/.config/rclone, no git root: outside_project",
+	      res("r.conf:1", "th/.config/rclone", 1, &r) == 1 &&
+	      is(&r, "file", "outside_project") && r.nlines == 0);
+	CHECK("home: cwd ~/Library/App, no git root: outside_project",
+	      res("s.json:1", "th/Library/App", 1, &r) == 1 &&
+	      is(&r, "file", "outside_project") && r.nlines == 0);
+	CHECK("home: a git root below ~/.config (nvim) is a project: ok",
+	      res("init.lua:1", "th/.config/nvim", 1, &r) == 1 &&
+	      is(&r, "file", "ok"));
+	snprintf(l, sizeof l, "%s/th/.config/.git", rd);
+	CHECK("home: a git root at ~/.config itself: outside_project",
+	      mkdir(l, 0700) == 0 &&
+	      res("x/token.json:1", "th/.config", 1, &r) == 1 &&
+	      is(&r, "file", "outside_project"));
+	snprintf(b, sizeof b, "%s/TH", rd);
+	setenv("HOME", b, 1);
+	CHECK("home: HOME given in another case still guards ~/.claude",
+	      res("a.txt:1", "th/.claude/plugins/m", 1, &r) == 1 &&
+	      is(&r, "file", "secret_name"));
+	if (h)
+		setenv("HOME", sv, 1);
+	else
+		unsetenv("HOME");
+	CHECK("home: the same git root, HOME elsewhere: an ordinary project, ok",
+	      res("a.txt:1", "th/.claude/plugins/m", 1, &r) == 1 &&
+	      is(&r, "file", "ok"));
+	/* LOW-14: each name, in a project and by name */
+	for (k = 0; low14[k]; k++)
+	{
+		snprintf(b, sizeof b, "lq/%s", low14[k]);
+		put(b, "FAKE\n", 5);
+		snprintf(b, sizeof b, "%s/lq/%s:1", rd, low14[k]);
+		snprintf(l, sizeof l, "LOW-14: %s: secret_name, unread", low14[k]);
+		CHECK(l, xr_secret_name(low14[k]) && res(b, "lq", 1, &r) == 1 &&
+		      is(&r, "file", "secret_name") && r.nlines == 0);
+	}
+	CHECK("LOW-14: settings.xml, properties, hubble.c, op.c, a.keyrings "
+	      "are not denied",
+	      !xr_secret_name("src/settings.xml") &&
+	      !xr_secret_name("app.properties") &&
+	      !xr_secret_name(".config/hubble.c") &&
+	      !xr_secret_name("op/config") && !xr_secret_name("a.keyrings"));
+	dir("cfg/.config");
+	put("cfg/.config/x.txt", "FAKE\n", 5);
+	CHECK("LOW-14: a project's own .config dir (not the home's) is read",
+	      res(".config/x.txt:1", "cfg", 1, &r) == 1 && is(&r, "file", "ok"));
+}
+
 /* A fake git: records its argv and env, then acts as $D/mode says. */
 static void
 fake_git(void)
@@ -2399,17 +2677,31 @@ fake_git(void)
 	    "m=$(/bin/cat \"$D/mode\")\n"
 	    "case \"$*\" in *rev-parse*)\n"
 	    "  [ \"$m\" = notrepo ] && { echo false; exit 0; }\n"
-	    "  [ \"$m\" = slowrev ] || { echo true; exit 0; } ;; esac\n"
+	    "  [ \"$m\" = notgit ] && { echo 'fatal: not a git repository (or any"
+	    " of the parent directories): .git' >&2; exit 128; }\n"
+	    "  [ \"$m\" = dubious ] && { echo 'fatal: detected dubious ownership"
+	    " in repository at /x' >&2; exit 128; }\n"
+	    "  [ \"$m\" = slowrev ] || { echo true; exit 0; } ;;\n"
+	    "*--get-regexp*)\n"
+	    "  [ \"$m\" = cfgerr ] && { echo 'fatal: bad config' >&2; exit 3; }\n"
+	    "  [ \"$m\" = cfgslow ] && { /bin/sleep 30; exit 0; }\n"
+	    "  [ -s \"$D/remotes\" ] || exit 1; /bin/cat \"$D/remotes\"; exit 0 ;;\n"
+	    "esac\n"
 	    "case \"$m\" in\n"
 	    "ok) printf '0123456789abcdef0123456789abcdef01234567\\000Ann B\\0001700000000"
 	    "\\000a subject\\n\\n f | 1 +\\n 1 file changed\\n'; exit 0 ;;\n"
 	    "amb) echo 'error: short object ID abcdef1 is ambiguous' >&2; exit 128 ;;\n"
 	    "bad) echo \"fatal: bad object\" >&2; exit 128 ;;\n"
+	    "unknown) echo \"fatal: ambiguous argument 'abcdef1^{commit}': unknown"
+	    " revision or path not in the working tree.\" >&2; exit 128 ;;\n"
+	    "tree) echo \"error: abcdef1^{commit}: expected commit type, but the"
+	    " object dereferences to tree type\" >&2; exit 128 ;;\n"
 	    "flood) /usr/bin/yes | /usr/bin/head -c 10000000; "
 	    "/usr/bin/yes e | /usr/bin/head -c 10000000 >&2; exit 0 ;;\n"
 	    "slow|slowrev) echo $$ > \"$D/pid\"; /bin/sleep 30 & /bin/sleep 30 ;;\n"
 	    "fds) '%s' --fds > \"$D/fds\"; exit 1 ;;\n"
-	    "esac\n", rd, self);
+	    "stuck) echo $$ > \"$D/pid\"; exec '%s' --stuck ;;\n"
+	    "esac\n", rd, self, self);
 
 	put("git", s, (size_t)n);
 	snprintf(s, sizeof s, "%s/git", rd);
@@ -2548,11 +2840,92 @@ t_res_git(void)
 	CHECK("git: \"is ambiguous\": ambiguous",
 	      res("abcdef1", "proj", 1, &r) == 1 && is(&r, "commit", "ambiguous") &&
 	      !strcmp(r.title, "Ambiguous short SHA"));
-	mode("bad");
-	CHECK("git: anything else: not_commit, named by the git root",
+	mode("unknown");
+	CHECK("git: \"unknown revision\": not_commit, named by the git root",
 	      res("abcdef1", "proj/src", 1, &r) == 1 &&
 	      is(&r, "commit", "not_commit") &&
 	      !strcmp(r.title, "Not a commit in proj"));
+	mode("tree");
+	CHECK("git: \"expected commit type\" (a tree SHA): not_commit",
+	      res("abcdef1", "proj", 1, &r) == 1 &&
+	      is(&r, "commit", "not_commit") &&
+	      !strcmp(r.title, "Not a commit in proj"));
+	/* LOW-4: a git that failed otherwise is no line, never a wrong state */
+	mode("bad");
+	CHECK("git: show fails otherwise (\"bad object\"): no line",
+	      res("abcdef1", "proj/src", 1, &r) == 0);
+	mode("notgit");
+	CHECK("git: rev-parse's \"not a git repository\": not_repo",
+	      res("abcdef1", "proj", 1, &r) == 1 && is(&r, "commit", "not_repo"));
+	mode("dubious");
+	CHECK("git: rev-parse fails otherwise (dubious ownership): no line, "
+	      "show never runs", res("abcdef1", "proj", 1, &r) == 0 &&
+	      !strstr(slurp("argv"), "show\n"));
+	/* LOW-1: a commit URL answers only in a clone of its repo */
+	mode("ok");
+	put("remotes", "", 0);
+	s0 = xr_res_spawned;
+	CHECK("git: a commit URL, no remote: not_commit, show never runs",
+	      res("https://github.com/o/r/commit/abcdef1234", "proj", 1, &r) == 1
+	      && is(&r, "commit", "not_commit") &&
+	      !strcmp(r.title, "Not a commit in proj") &&
+	      xr_res_spawned == s0 + 2 && !strstr(slurp("argv"), "show\n"));
+	snprintf(want, sizeof want, "-C\n%s\nconfig\n--get-regexp\n"
+	         "^remote\\..*\\.url$\n--\n", cwd);
+	CHECK("git: the URL's remotes: config --get-regexp, same flags",
+	      strstr(slurp("argv"), want) != NULL);
+	{
+		static const char rm[] = "remote.up.url https://github.com/o/r2\n"
+			"remote.origin.url https://github.com/x/r.git\n";
+
+		put("remotes", rm, sizeof rm - 1);
+	}
+	put("argv", "", 0);
+	s0 = xr_res_spawned;
+	CHECK("git: a commit URL, other repos' remotes: not_commit, show never "
+	      "runs", res("https://github.com/o/r/commit/abcdef1234", "proj", 1,
+	                  &r) == 1 && is(&r, "commit", "not_commit") &&
+	      xr_res_spawned == s0 + 2 && !strstr(slurp("argv"), "show\n"));
+	put("argv", "", 0);
+	s0 = xr_res_spawned;
+	CHECK("git: a commit URL with a full 40-hex SHA, no matching remote: "
+	      "resolves as a bare SHA, config never runs",
+	      res("https://github.com/o/r/commit/"
+	          "0123456789abcdef0123456789abcdef01234567", "proj", 1, &r) == 1
+	      && is(&r, "commit", "ok") && xr_res_spawned == s0 + 2 &&
+	      !strstr(slurp("argv"), "--get-regexp"));
+	{
+		static const char rm[] = "remote.up.url https://github.com/o/r2\n"
+			"remote.origin.url git@github.com:O/R.git\n";
+
+		put("remotes", rm, sizeof rm - 1);
+	}
+	s0 = xr_res_spawned;
+	CHECK("git: a commit URL, a remote names it: ok, 3 spawns",
+	      res("https://github.com/o/r/commit/abcdef1234", "proj", 1, &r) == 1
+	      && is(&r, "commit", "ok") && xr_res_spawned == s0 + 3 &&
+	      strstr(slurp("argv"), "abcdef1234^{commit}\n"));
+	{
+		static const char rm[] = "remote.origin.url "
+			"https://x-access-token:ghp_FAKE179SECRET@github.com/o/r.git\n";
+
+		put("remotes", rm, sizeof rm - 1);
+	}
+	CHECK("git: a remote with userinfo matches; no byte of it in the block",
+	      res("https://github.com/o/r/commit/abcdef1234", "proj", 1, &r) == 1
+	      && is(&r, "commit", "ok") && !strstr(r.title, "FAKE179") &&
+	      !strstr(r.subtitle, "FAKE179") && !strstr(r.subtitle, "x-access") &&
+	      (r.nlines < 1 || !strstr(r.line[0], "FAKE179")) &&
+	      (r.nlines < 2 || !strstr(r.line[1], "FAKE179")));
+	mode("cfgerr");
+	CHECK("git: config fails: no line",
+	      res("https://github.com/o/r/commit/abcdef1234", "proj", 1, &r) == 0);
+	mode("cfgslow");
+	t0 = xr_now_ms();
+	CHECK("git: config times out: no line, never the timeout state",
+	      res("https://github.com/o/r/commit/abcdef1234", "proj", 1, &r) == 0
+	      && xr_now_ms() - t0 >= XR_GIT_MS - 50);
+	put("remotes", "", 0);
 	CHECK("git: a relative or empty cwd: not_repo, no spawn",
 	      (s0 = xr_res_spawned, 1) &&
 	      xr_ref_parse("abcdef1", NULL, &sp) &&
@@ -2567,7 +2940,7 @@ t_res_git(void)
 
 		CHECK("git: no fd of the querying process reaches git (one without "
 		      "CLOEXEC open), only 0 1 2",
-		      x >= 3 && self[0] && res("abcdef1", "proj", 1, &r) == 1 &&
+		      x >= 3 && self[0] && res("abcdef1", "proj", 1, &r) == 0 &&
 		      !strcmp(slurp("fds"), "0 1 2\n"));
 		if (strcmp(slurp("fds"), "0 1 2\n"))
 			printf("  fds: [%s] fd %d\n", slurp("fds"), x);
@@ -2576,9 +2949,9 @@ t_res_git(void)
 	}
 	mode("flood");
 	t0 = xr_now_ms();
-	CHECK("git: a 10 MB flood on both pipes is drained, git exits",
-	      res("abcdef1", "proj", 1, &r) == 1 &&
-	      is(&r, "commit", "not_commit") && xr_now_ms() - t0 < XR_GIT_MS);
+	CHECK("git: a 10 MB flood on both pipes is drained, git exits, no "
+	      "block from it", res("abcdef1", "proj", 1, &r) == 0 &&
+	      xr_now_ms() - t0 < XR_GIT_MS);
 	for (k = 0; k < 2; k++)
 	{
 		mode(k ? "slowrev" : "slow");
@@ -2599,6 +2972,19 @@ t_res_git(void)
 			usleep(10000);
 		CHECK("git: the timeout ends git's whole group (kill(-pgid, 0): ESRCH)",
 		      pid > 0 && kill(-pid, 0) == -1 && errno == ESRCH);
+	}
+	/* LOW-3: a git that outlives SIGKILL holds dch at most 1 s past the
+	** grace, then is left (here reaped by the test) */
+	mode("stuck");
+	put("pid", "", 0);
+	t0 = xr_now_ms();
+	CHECK("git: a git SIGKILL cannot end: timeout, by 3 s + 1 s grace + 1 s",
+	      res("abcdef1", "proj", 1, &r) == 1 && is(&r, "commit", "timeout") &&
+	      xr_now_ms() - t0 < XR_GIT_MS + 2500);
+	if ((pid = (pid_t)atoi(slurp("pid"))) > 0)
+	{
+		kill(pid, SIGKILL);
+		(void)waitpid(pid, NULL, 0);
 	}
 	/* 3.7: SIGTERM to the querying process takes git's group with it */
 	mode("slow");
@@ -2658,11 +3044,115 @@ t_res_parse(void)
 	      xr_git_parse(b, n, 100 + 300, &r) && strstr(r.subtitle, "5m ago") &&
 	      xr_git_parse(b, n, 100 + 3 * 86400, &r) &&
 	      strstr(r.subtitle, "3d ago"));
+#define GR(s) xr_git_remote(s, strlen(s), "o/r")
+	CHECK("git remote: https, /, ssh, scp form, a token, case, 2nd line",
+	      GR("remote.o.url https://github.com/o/r.git\n") &&
+	      GR("remote.o.url https://github.com/o/r/") &&
+	      GR("remote.o.url ssh://git@github.com/O/R") &&
+	      GR("remote.o.url git@github.com:o/r.git") &&
+	      GR("remote.o.url https://u:t@github.com/o/r") &&
+	      GR("remote.a.url x\nremote.b.url https://github.com/o/r"));
+	CHECK("git remote: another repo, owner, host, a path, a cut: no",
+	      !GR("remote.o.url https://github.com/o/r2") &&
+	      !GR("remote.o.url https://github.com/x/r") &&
+	      !GR("remote.o.url https://github.com/o/r.git2") &&
+	      !GR("remote.o.url https://notgithub.com/o/r") &&
+	      !GR("remote.o.url https://e.com/github.com/o/r") &&
+	      !GR("remote.o.url https://github.com.e/o/r") &&
+	      !xr_git_remote("remote.o.url https://github.com/o/r", 34, "o/r") &&
+	      !GR("github.com/o/r") && !GR(""));
+#undef GR
 	CHECK("git parse: a short hash, a missing field, a non-digit time: no",
 	      !xr_git_parse("abc\0A\0" "1\0s\n", 10, 0, &r) &&
 	      !xr_git_parse(b, 45, 0, &r) &&
 	      !xr_git_parse("0123456789abcdef0123456789abcdef01234567\0A\0x\0s",
 	                    46, 0, &r));
+}
+
+/* The git messages res_commit keys on, pinned against every git the probe
+** can pick on this host (QA 1.55.0 LOW-4 ruling): a later wording change
+** must show here, and in dch it degrades to no line, never a wrong state. */
+static void
+t_res_git_pin(void)
+{
+#ifdef __APPLE__
+	static const char *const cand[] = {
+		"/Library/Developer/CommandLineTools/usr/bin/git",
+		"/var/db/xcode_select_link",
+		"/Applications/Xcode.app/Contents/Developer/usr/bin/git",
+		"/opt/homebrew/bin/git", "/usr/local/bin/git"
+	};
+#else
+	static const char *const cand[] = {"/usr/bin/git", "/usr/local/bin/git"};
+#endif
+	static char seen[5][PATH_MAX], cmd[4 * PATH_MAX];
+	char gb[PATH_MAX], rp[PATH_MAX], name[PATH_MAX + 200], head[64] = "";
+	char tree[64] = "", pin[32], plain[32];
+	const char *probe[2] = {NULL, NULL};
+	struct xr_resolved r;
+	size_t k, j, ns = 0;
+	int inside;
+	FILE *f;
+
+	for (k = 0; k < sizeof cand / sizeof *cand; k++)
+	{
+		probe[0] = cand[k];
+		xr_git_probe = probe;
+		if (!xr_git_bin(gb, sizeof gb) || !realpath(gb, rp))
+		{
+			printf("  skip git pin: %s (none here)\n", cand[k]);
+			continue;
+		}
+		for (j = 0; j < ns && strcmp(seen[j], rp); j++)
+			;
+		if (j < ns)
+		{
+			printf("  skip git pin: %s (the same git as %s)\n", cand[k], rp);
+			continue;
+		}
+		snprintf(seen[ns++], sizeof *seen, "%s", rp);
+		snprintf(pin, sizeof pin, "pin%zu", k);
+		snprintf(plain, sizeof plain, "plain%zu", k);
+		snprintf(cmd, sizeof cmd,
+		         "cd '%s' && mkdir -p %s %s && cd %s && G='%s' && "
+		         "export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null "
+		         "GIT_AUTHOR_NAME=A GIT_AUTHOR_EMAIL=a@b GIT_COMMITTER_NAME=A "
+		         "GIT_COMMITTER_EMAIL=a@b && \"$G\" init -q . && echo x > f && "
+		         "\"$G\" add f && \"$G\" commit -qm pinned && "
+		         "\"$G\" rev-parse HEAD 'HEAD^{tree}' > ../%s.out && "
+		         "{ \"$G\" -C ../%s rev-parse --git-dir >/dev/null 2>&1 && "
+		         "echo inside >> ../%s.out; true; }",
+		         rd, pin, plain, pin, gb, pin, plain, pin);
+		snprintf(name, sizeof name, "%s/%s.out", rd, pin);
+		head[0] = tree[0] = '\0';
+		inside = 0;
+		if (system(cmd) == 0 && (f = fopen(name, "r")))
+		{
+			if (fscanf(f, "%40s %40s", head, tree) != 2)
+				head[0] = '\0';
+			inside = fscanf(f, "%8s", name) == 1;
+			fclose(f);
+		}
+		snprintf(name, sizeof name, "git pin %s: ok; \"unknown revision\" "
+		         "and \"expected commit type\" (a tree): not_commit", rp);
+		CHECK(name, strlen(head) == 40 && strlen(tree) == 40 &&
+		      res(head, pin, 1, &r) == 1 && is(&r, "commit", "ok") &&
+		      !strcmp(r.title, "pinned") &&
+		      res("abcdef1234", pin, 1, &r) == 1 &&
+		      is(&r, "commit", "not_commit") &&
+		      res(tree, pin, 1, &r) == 1 && is(&r, "commit", "not_commit"));
+		if (inside)
+		{
+			printf("  skip git pin not_repo: %s/%s is in a work tree\n", rd,
+			       plain);
+			continue;
+		}
+		snprintf(name, sizeof name, "git pin %s: \"not a git repository\": "
+		         "not_repo", rp);
+		CHECK(name, res("abcdef1234", plain, 1, &r) == 1 &&
+		      is(&r, "commit", "not_repo"));
+	}
+	xr_git_probe = NULL;
 }
 
 static void
@@ -2679,7 +3169,9 @@ t_resolve(void)
 	t_res_parse();
 	t_res_file();
 	t_res_deny();
+	t_res_tree();
 	t_res_git();
+	t_res_git_pin();
 	snprintf(cmd, sizeof cmd, "rm -rf '%s'", rd);
 	(void)!system(cmd);
 }
@@ -2936,6 +3428,15 @@ main(int argc, char **argv)
 			if (fcntl(fd, F_GETFD) != -1)
 				printf("%s%d", n++ ? " " : "", fd);
 		printf("\n");
+		return 0;
+	}
+	/* the fake git SIGKILL cannot end: out of its group, as a git stuck in
+	** uninterruptible I/O is to waitpid (QA 1.55.0 LOW-3) */
+	if (argc == 2 && !strcmp(argv[1], "--stuck"))
+	{
+		(void)setpgid(0, getpgid(getppid()));
+		signal(SIGTERM, SIG_IGN);
+		sleep(20);
 		return 0;
 	}
 	if (!realpath(argv[0], self))

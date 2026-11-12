@@ -6389,6 +6389,11 @@ struct agent
 	const char *res, *code;	/* the result, when not by failed/step */
 };
 
+#endif /* HAVE_LIBGHOSTTY_VT */
+
+/* esc_len, sgr_dim and faint_text serve dch-lite too: the X-ray view reads
+** a remote session's screen with them (#188, xv_plain) */
+
 /* Length of the escape sequence at p (p[0] == ESC): CSI up to its final
 ** byte, OSC up to BEL or ST, else ESC + intermediates + one final byte. */
 static size_t
@@ -6505,6 +6510,38 @@ faint_text(const char *raw, size_t n, char *txt, char *dim)
 	}
 	return k;
 }
+
+/* A remote session's screen, ctl `--read <name> --ansi`'s stdout
+** (the host's bytes, hostile), as plain text the way faint_text reads a
+** local one: escapes dropped, CSI n C as n blanks, CRs dropped. Its tail
+** as fetch_screen keeps one, the text within 8 times that. malloc'd, NULL
+** when too big or out of memory (the X-ray view's On screen, #188). */
+char *
+xv_plain(const char *raw, size_t n)
+{
+	char *txt, *dim;
+	size_t k;
+
+	if (n > DET_CAP)
+	{
+		raw += n - DET_CAP;
+		n = DET_CAP;
+	}
+	k = faint_text(raw, n, NULL, NULL);
+	if (k > 8 * DET_CAP || !(txt = malloc(k + 1)))
+		return NULL;
+	if (!(dim = malloc(k + 1)))
+	{
+		free(txt);
+		return NULL;
+	}
+	(void)faint_text(raw, n, txt, dim);
+	free(dim);
+	txt[k] = '\0';
+	return txt;
+}
+
+#ifdef HAVE_LIBGHOSTTY_VT
 
 /* The screen at `path` as plain text plus a per-byte faint flag in *dimp
 ** (both malloc'd), CRs dropped. NULL on failure, *err = CG_NOVT when the
@@ -9472,12 +9509,8 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 	if (c == 'X')
 	{
 		/* the X-ray view (#175): a live session by name, a History row
-		** by its record; a remote session's comes later */
-		if (w->remote)
-			snprintf(p->status, sizeof p->status, "%s: X-ray of a "
-			         "remote session is not here yet", w->title);
-		else
-			pk_xray(p, fd, w->name, t == 2);
+		** by its record; a remote one's on its host (#188) */
+		pk_xray(p, fd, w->name, t == 2);
 		return 0;
 	}
 	/* ponytail: a remote row only attaches; kill, rename, restart and
@@ -9638,9 +9671,11 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 /* ---- the X-ray view's host (#175; xview.c) ------------------------- */
 
 static int xray_main(int argc, char **argv);
+static int name_routes_remote(const char *n);
 
 /* xview.c's engine call: xray_main in a forked child, as `dch --xray <av>
-** --json` runs it, stdout and stderr into pipes. No exec: the same image,
+** --json` runs it (av[0] "--read": `dch --read host:name ...` over ctl),
+** stdout and stderr into pipes. No exec: the same image,
 ** so the view and --json share every line of the engine. The child keeps
 ** no handler of the view's and lets go of the terminal. */
 pid_t
@@ -9675,7 +9710,10 @@ xv_spawn(int fd, int ac, char **av, int *out, int *err)
 		close(po[1]);
 		close(pe[0]);
 		close(pe[1]);
-		rc = xray_main(ac, av);
+		/* a remote On screen (#188): ctl --read host:name --ansi,
+		** its own connection, as the view's queries */
+		rc = !strcmp(av[0], "--read") ? dch_remote_ctl(NULL, ac, av, NULL)
+		     : xray_main(ac, av);
 		fflush(stdout);
 		_exit(rc);
 	}
@@ -9690,6 +9728,14 @@ xv_spawn(int fd, int ac, char **av, int *out, int *err)
 	*out = po[0];
 	*err = pe[0];
 	return pid;
+}
+
+/* n names a remote session (host:name, #188): the view reads its screen
+** over ctl. */
+int
+xv_remote(const char *n)
+{
+	return name_routes_remote(n);
 }
 
 /* A live session's visible screen, plain (the On screen tab). sock_path
@@ -13645,8 +13691,8 @@ attach_xray_view(void)
 /* `dch --xray <n> [--json] [--clear|--follow]`, `--ref <text> [--scope
 ** session|project|all] [--full] [--budget-ms <ms>] --json` and `--chapter
 ** <anchor> --json` (spec 3.1, 3.3-3.5): flags in any order, each once;
-** `dch --xray <n>` alone is the view (#175, xray_view; a host:name's comes
-** later and exits 2 here). A
+** `dch --xray <n>` alone is the view (#175, xray_view; a host:name's too,
+** #188, each query over its own ctl connection). A
 ** host:name with --json (#157, spec 4.1) runs on the host over ctl once
 ** 3.1's rules pass here, whatever this dch runs locally: the host answers.
 ** --requests (#158, spec 4.3) holds a warm connection for requests read off
@@ -13821,19 +13867,14 @@ xray_main(int argc, char **argv)
 	/* 3.4: project unless asked; a remote caller too (XR4) */
 	q.scope = !scope || !strcmp(scope, "project") ? 1
 	          : !strcmp(scope, "all") ? 2 : 0;
-	/* the view (#175): `--xray <n>` alone; a remote one comes later */
+	/* the view (#175): `--xray <n>` alone */
 	if (!json && (ref || chapter || clear || follow))
 	{
 		fputs("dch: bad usage: --json is required (the --xray view takes "
 		      "no flag)\n", stderr);
 		return 2;
 	}
-	if (!json && name_routes_remote(n))
-	{
-		fputs("dch: bad usage: --json is required (the --xray view "
-		      "comes later)\n", stderr);
-		return 2;
-	}
+	/* a host:name's view too (#188): its queries run on the host */
 	if (!json)
 		return xray_view(argv[ni]);
 	/* SIGPIPE ignored: a failed socket write to the master exits 1 with
