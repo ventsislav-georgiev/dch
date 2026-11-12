@@ -961,11 +961,19 @@ A window smaller than 24x8 shows only "X-ray: the window is too small".
 `dch --xray host:name` opens the view of a session on another host (dch
 serve 1.55.0+), and so does `X` on a remote row in the picker. Every query
 runs on the host, each over its own ctl connection. On screen reads the
-host's screen with `--read <name> --ansi`. The host's text is drawn
-as a local session's is, every control and bidi character as `?`. A host
-that refuses us, lacks `--xray` or cannot be reached shows its line in place
-of the tabs (`dch: <host>: does not support --xray (needs dch serve
-1.55.0+)`, ...); `q` leaves with that exit code.
+host's screen with `--read <name> --ansi`, once a second while it shows: on
+the host that is one dch and two serve log lines (`ctl --read`, `ctl done`)
+a second. The host's text is drawn
+as a local session's is, every control and bidi character, every byte of
+an invalid UTF-8 sequence and a NUL as `?`. `X` opens the session of the
+row it is on, also next to a local session literally named `host:name`. A
+host that refuses us, lacks `--xray` or cannot be reached shows its line in
+place of the tabs (`dch: <host>: does not support --xray (needs dch serve
+1.55.0+)`, ...); `q` leaves with that exit code. When the link drops later,
+the status says `live updates stopped (reopen the view for them): ...` and
+keeps saying it: Chapters and Refs stay as they were until you open the view
+again. On screen says its failed read in place of the screen and shows the
+host's screen again once the host answers.
 
 Exit codes are those of `--json` below: 0 when you quit, 1 for no such
 session, 2 for a flag or a stdout that is not a terminal; for a remote host
@@ -2520,6 +2528,8 @@ nothing `dch serve` starts inherits it; never set it on a real host.
 escapes control characters (C0, DEL, C1, bidi overrides, isolates and
 marks, U+2028 and U+2029) as
 `\xNN` or `\u{NNNN}`, and a session name containing one is refused.
+A remote [X-ray view](#x-ray-view-dch---xray-n) on its On screen tab reads the screen
+once a second: two log lines a second while it shows.
 
 **Limits.** At most 64 connections, 16 per peer, and 4 live-list streams per
 phone. A connection past the first two gets `busy` (see

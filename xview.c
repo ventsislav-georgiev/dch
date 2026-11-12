@@ -104,6 +104,8 @@ struct xv
 	char n[700];		/* the session as given */
 	char fail[400];		/* the host's refusal, in place of the tabs */
 	char status[400], filt[256];
+	char stop[400];		/* the follow's end: the status row when it is
+				** empty, never replaced (QA 1.57.0 LOW-R3) */
 	/* the index: --follow's snapshot and its deltas */
 	int have, ended, live, mentions_only;
 	long long lines;
@@ -135,6 +137,7 @@ struct xv
 	/* On screen */
 	char *scr;
 	int scr_rc, nh, ah, nlab;
+	char scr_err[320];	/* a remote read's failure, its line */
 	long long scr_at;
 	struct xv_hint *h;
 	char typed[3];
@@ -1122,7 +1125,9 @@ xv_screen_load(struct xv *v)
 }
 
 /* A remote screen's child has ended: its bytes as plain text, or why not
-** (a dch-lite host's "no terminal mirror", else its line on the status). */
+** (a dch-lite host's "no terminal mirror", else its line in place of the
+** screen, until the next answer: never left on the status, QA 1.57.0
+** LOW-R3). */
 static void
 xv_screen_done(struct xv *v)
 {
@@ -1133,6 +1138,7 @@ xv_screen_done(struct xv *v)
 	xv_hints_free(v);
 	free(v->scr);
 	v->scr = s;
+	v->scr_err[0] = '\0';
 	if (s)
 	{
 		v->scr_rc = (int)strlen(s);
@@ -1142,8 +1148,8 @@ xv_screen_done(struct xv *v)
 	v->scr_rc = k->rc == 3 && !strncmp(k->err, lite, sizeof lite - 1) ? -2
 	            : -1;
 	if (v->scr_rc == -1 && (!k->rc || k->err[0]))
-		snprintf(v->status, sizeof v->status, "%s", k->rc ? k->err
-		         : "X-ray: the screen is too big");
+		snprintf(v->scr_err, sizeof v->scr_err, "    No screen: %s",
+		         k->rc ? k->err : "X-ray: the screen is too big");
 }
 
 /* ---- drawing --------------------------------------------------------- */
@@ -1872,7 +1878,9 @@ xv_draw(struct xv *v, int force)
 			}
 			else if (k == 0 && !s)
 			{
-				int rd = !v->have || v->kid[XV_SK].pid > 0;
+				/* a failed read's line stays over the next read */
+				int rd = !v->have ||
+				         (v->kid[XV_SK].pid > 0 && !v->scr_err[0]);
 
 				pk_set("2");
 				if (rd)
@@ -1881,7 +1889,7 @@ xv_draw(struct xv *v, int force)
 				       ? "    No screen: the session has ended"
 				       : v->scr_rc == -2
 				       ? "    No screen: dch-lite keeps no mirror"
-				       : "    No screen");
+				       : v->scr_err[0] ? v->scr_err : "    No screen");
 			}
 			pk_eol();
 		}
@@ -1917,7 +1925,7 @@ xv_draw(struct xv *v, int force)
 		pk_txt("  ");
 	}
 	pk_set("");
-	pk_txt(v->status);
+	pk_txt(v->status[0] ? v->status : v->stop);
 	pk_eol();
 	pk_keys(keys, nk, drop, cap, 1);
 	pk_fend(v->fd, force);
@@ -2327,10 +2335,11 @@ xv_run(int fd, const char *n, char *err, size_t errsz)
 			{
 				v->ended = 1;
 				if (f->rc)
-					snprintf(v->status, sizeof v->status, "live "
-					         "updates stopped: %s", f->err);
+					snprintf(v->stop, sizeof v->stop, "live updates "
+					         "stopped (reopen the view for them): %s",
+					         f->err);
 				else if (v->live)
-					snprintf(v->status, sizeof v->status, "the "
+					snprintf(v->stop, sizeof v->stop, "the "
 					         "session ended; this is its last state");
 			}
 		}
