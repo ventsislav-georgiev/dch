@@ -31,7 +31,19 @@ Covers:
      q, then the exit code and the line on stderr;
   5. the picker: X on the remote Sessions row srv:xv-sh opens its view, q
      returns to the picker; X on the remote History row srv:xv-cl opens
-     that record's view.
+     that record's view;
+  6. the in-attach chord over `dch -a srv:xv-rx` (#189): the detach key then
+     x (a later read, one burst, the kitty CSI form, --host srv -a xv-rx,
+     detach_key = switch) opens the view of srv:xv-rx over the attach, On
+     screen read with its own ctl --read; the session never gets the detach
+     key or the x; q goes back, the host is asked to redraw (the program's
+     SIGWINCH), a key after reaches the session, and the host saw one attach
+     (never retired). Off under -E and DCH_DOUBLE_TAP_MS=0, as the local
+     chord;
+  7. the view's failure lines over an attach to a fake host without "xray"
+     (exit 6), whose gate refuses the view's connection (exit 4), or whose
+     port closes once the attach is in (exit 7): the line, q, any key, and
+     the attach goes on (the host gets the redraw, then only the next key).
 
 Run:  python3 tests/xray_remote_view_test.py      (uses ./dch)
 """
@@ -104,14 +116,14 @@ def dch(env, *a):
 class Pty:
     """A program on a pty: out holds every byte it wrote."""
 
-    def __init__(self, argv, rows=30, cols=100):
+    def __init__(self, argv, rows=30, cols=100, env=None):
         self.out = b""
         self.rc = None
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
             fcntl.ioctl(0, termios.TIOCSWINSZ,
                         struct.pack("HHHH", rows, cols, 0, 0))
-            os.execve(argv[0], argv, CENV)
+            os.execve(argv[0], argv, env or CENV)
 
     def pump(self, secs=0.05):
         end = time.time() + secs
@@ -521,6 +533,246 @@ def test_picker(port):
         v.close()
 
 
+# ---- 6: the in-attach chord over a remote attach (#189) ---------------------
+
+# The host's probe session prints each read it gets as RX:<hex>, appends the
+# hex to a file and says WINCH on a SIGWINCH (the host's redraw), so a test
+# sees exactly the bytes that reached it, dch-lite too.
+RXF = os.path.join(T, "rx.hex")
+RX = ("import os, signal, sys, tty\n"
+      "tty.setraw(0)\n"
+      "signal.signal(signal.SIGWINCH,\n"
+      "              lambda *a: os.write(1, b'WINCH\\r\\n'))\n"
+      "f = open(sys.argv[1], 'a')\n"
+      "os.write(1, b'READY\\r\\n')\n"
+      "while True:\n"
+      "    b = os.read(0, 256)\n"
+      "    if not b: break\n"
+      "    f.write(b.hex()); f.flush()\n"
+      "    os.write(1, b'RX:' + b.hex().encode() + b'\\r\\n')\n")
+
+
+def rx():
+    """Every byte the host's session has received, in order, as hex."""
+    try:
+        with open(RXF) as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
+def until(fn, secs=10.0):
+    end = time.time() + secs
+    while time.time() < end:
+        if fn():
+            return True
+        time.sleep(0.05)
+    return fn()
+
+
+def attaches():
+    with open(SLOG) as f:
+        return f.read().count(" attach xv-rx (")
+
+
+def rattach(env=None, extra=(), tail=("-a", "srv:xv-rx")):
+    n0 = attaches()
+    a = Pty([DCH] + list(extra) + list(tail), env=env)
+    until(lambda: attaches() > n0)
+    a.wait(b"READY", 3)
+    a.pump(0.5)
+    return a, n0
+
+
+def chord_case(what, keys, env=None, tail=("-a", "srv:xv-rx")):
+    a, n0 = rattach(env, tail=tail)
+    try:
+        got = rx()
+        r0 = ctls("--read")
+        mark = len(a.out)
+        for k in keys:
+            a.key(k, 0.05)
+        ok = a.wait(b"X-ray  srv:xv-rx", start=mark) and \
+            a.wait(b"On screen", start=mark)
+        check("remote chord, %s: the view of srv:xv-rx opens over the attach"
+              % what, ok, a.out[mark:][-600:])
+        check("remote chord, %s: the client is still running" % what,
+              a.reap() is None)
+        check("remote chord, %s: On screen read over its own ctl --read"
+              % what, until(lambda: ctls("--read") > r0, 5),
+              ctls("--read") - r0)
+        dch(SENV, "--send", "xv-rx", "MARK189")
+        until(lambda: "4d41524b313839" in rx()[len(got):], 5)
+        a.pump(0.3)
+        check("remote chord, %s: the session got only the text sent while "
+              "the view was up (no detach key, no x)" % what,
+              rx()[len(got):] == "4d41524b313839", rx()[len(got):])
+        if not ok or a.reap() is not None:
+            return
+        mark = len(a.out)
+        a.key(b"q", 0.5)
+        check("remote chord, %s: q leaves the view's alternate screen" % what,
+              a.wait(RESTORE, start=mark), a.out[mark:][-300:])
+        back = a.out.rfind(RESTORE)
+        check("remote chord, %s: back on the attach, the host was asked to "
+              "redraw (the program got its SIGWINCH)" % what,
+              a.wait(b"WINCH", start=back), a.out[back:])
+        before = rx()
+        a.key(b"z", 0.3)
+        check("remote chord, %s: the attach was never retired (a key after "
+              "reaches the session, the host saw one attach)" % what,
+              until(lambda: rx()[len(before):] == "7a", 5) and
+              a.reap() is None and attaches() == n0 + 1,
+              (rx()[len(before):], a.rc, attaches() - n0))
+    finally:
+        a.close()
+    time.sleep(0.5)
+
+
+def test_chord(port):
+    hosts("srv=127.0.0.1:%d" % port)
+    r = dch(SENV, "--spawn", "xv-rx", "--size", "100x30", sys.executable,
+            "-c", RX, RXF)
+    check("remote chord: the probe session spawned on the host",
+          r.returncode == 0, r.stderr)
+    chord_case("x in a later read", [b"\x1c", b"x"])
+    chord_case("x in the same burst", [b"\x1cx"])
+    chord_case("the kitty CSI form", [b"\x1c", b"\033[120u"])
+    chord_case("--host srv -a xv-rx", [b"\x1cx"],
+               tail=("--host", "srv", "-a", "xv-rx"))
+    cfg = os.path.join(T, "config-switch")
+    with open(cfg, "w") as f:
+        f.write("remote_hosts = srv=127.0.0.1:%d\ndetach_key = switch\n"
+                % port)
+    chord_case("detach_key = switch", [b"\x1c", b"x"],
+               dict(CENV, DCH_CONFIG=cfg))
+
+    # -E: no detach key, no chord; the session gets both bytes
+    a, _ = rattach(extra=["-E"])
+    try:
+        got = rx()
+        mark = len(a.out)
+        a.key(b"\x1c", 0.05)
+        a.key(b"x", 0.5)
+        until(lambda: rx()[len(got):] == "1c78", 5)
+        check("remote chord, -E: the session receives the detach key and x, "
+              "no view", rx()[len(got):] == "1c78" and
+              b"X-ray" not in a.out[mark:] and a.reap() is None,
+              (rx()[len(got):], a.out[mark:]))
+    finally:
+        a.close()
+    time.sleep(0.5)
+
+    # DCH_DOUBLE_TAP_MS=0: the press detaches at once, no view, nothing
+    # reaches the session
+    for keys in ([b"\x1c", b"x"], [b"\x1cx"]):
+        a, _ = rattach(dict(CENV, DCH_DOUBLE_TAP_MS="0"))
+        try:
+            got = rx()
+            mark = len(a.out)
+            a.key(keys[0], 0.05)
+            rc = a.exit(5)
+            if len(keys) > 1:
+                try:
+                    os.write(a.fd, keys[1])
+                except OSError:
+                    pass
+            time.sleep(0.5)
+            check("remote chord, DCH_DOUBLE_TAP_MS=0, %s: the detach key "
+                  "detaches at once (exit 0), the session receives nothing, "
+                  "no view" % ("x after" if len(keys) > 1 else "one burst"),
+                  rc == 0 and rx()[len(got):] == "" and
+                  b"X-ray" not in a.out[mark:],
+                  (rc, rx()[len(got):], a.out[mark:]))
+        finally:
+            a.close()
+        time.sleep(0.5)
+
+
+# ---- 7: the view's failure lines over a remote attach ----------------------
+
+class Attachable(Fake):
+    """A host without "xray": its first connection is the attach, its 0x10
+    keys kept in keys and its 0x07 redraws counted; a later one (the view's)
+    is Fake's, `mode` "ok" (a hello without "xray") or "refuse" (the gate's
+    0x13)."""
+
+    def __init__(self, mode):
+        self.keys, self.redraws = b"", 0
+        super().__init__(mode, rows=[{"name": "fk"}],
+                         ops=["ctl", "ctl-cancel"])
+
+    def serve(self, c):
+        if c is not self.conns[0]:
+            return Fake.serve(self, c)
+        buf = b""
+        try:
+            while True:
+                d = c.recv(65536)
+                if not d:
+                    return
+                buf += d
+                while len(buf) >= 5:
+                    t, n = struct.unpack(">BI", buf[:5])
+                    if len(buf) < 5 + n:
+                        break
+                    body, buf = buf[5:5 + n], buf[5 + n:]
+                    if t == 0x08:
+                        c.sendall(frame(0x18, {"proto": "1.0",
+                                               "server": "fake",
+                                               "ops": self.ops}))
+                    elif t == 0x03:
+                        c.sendall(frame(0x11, self.rows))
+                    elif t == 0x01:
+                        self.attached.set()
+                        c.sendall(frame(0x10, b"FAKE-SCREEN\r\n"))
+                    elif t == 0x10:
+                        self.keys += body
+                    elif t == 0x07:
+                        self.redraws += 1
+        except OSError:
+            return
+
+
+def chord_fail(what, mode, line, close=False):
+    h = Attachable(mode)
+    hosts("q=127.0.0.1:%d" % h.port)
+    a = Pty([DCH, "-a", "q:fk"])
+    try:
+        ok = a.wait(b"FAKE-SCREEN") and h.attached.wait(5)
+        if close:
+            h.sock.close()  # the attach is in; the view's dial is refused
+        a.pump(0.5)
+        mark = len(a.out)
+        a.key(b"\x1cx", 0.5)
+        check("remote chord, %s: the view opens with its line" % what,
+              ok and a.wait(line.encode(), start=mark), a.out[mark:][-600:])
+        mark = len(a.out)
+        a.key(b"q", 0.5)
+        check("remote chord, %s: q says the line and waits for a key" % what,
+              a.wait(b"(any key: back to the session)", start=mark) and
+              a.reap() is None, a.out[mark:][-300:])
+        a.key(b" ", 0.5)
+        a.key(b"z", 0.3)
+        until(lambda: h.keys == b"z", 5)
+        check("remote chord, %s: a key goes back to the attach: the host got "
+              "the redraw, then only the next key (no detach key, x or the "
+              "key that left)" % what, h.keys == b"z" and h.redraws == 1 and
+              a.reap() is None, (h.keys, h.redraws, a.rc))
+    finally:
+        a.close()
+        h.close()
+
+
+def test_chord_fail():
+    chord_fail("a host without xray (exit 6)", "ok",
+               "dch: q: does not support --xray (needs dch serve 1.55.0+)")
+    chord_fail("a gate that refuses the view (exit 4)", "refuse",
+               "dch: q refused: " + REFUSAL["message"])
+    chord_fail("an unreachable host (exit 7)", "ok", "dch: q: unreachable: ",
+               close=True)
+
+
 def main():
     sp = None
     try:
@@ -537,8 +789,11 @@ def main():
         test_picker(port)
         test_hostile()
         test_failures()
+        test_chord(port)
+        test_chord_fail()
     finally:
         dch(SENV, "-k", "xv-sh")
+        dch(SENV, "-k", "xv-rx")
         if sp:
             sp.terminate()
             try:

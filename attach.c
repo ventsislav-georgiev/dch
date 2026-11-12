@@ -616,7 +616,10 @@ xray_x(const unsigned char *b, int n)
 ** back, the two frames an attach starts with: the master re-arms the
 ** session's modes and repaints its screen from the mirror, so what came in
 ** while the view was up is on screen (dch-lite: a SIGWINCH, as on any
-** re-attach). A pipe the child holds tells its end; its children hold it
+** re-attach). A remote attach (#189): s is the relay's, which keeps the one
+** attach connection and turns the redraw into the host's 0x05 and 0x07 (the
+** program repaints on its SIGWINCH); the view's queries dial their own ctl
+** connections. A pipe the child holds tells its end; its children hold it
 ** too, so a wait with a timeout covers one that outlives it. */
 static void
 xray_overlay(int s)
@@ -1034,9 +1037,10 @@ attach_main(int noerror)
 			}
 
 			pkt.len = len;
-			/* The X-ray chord (#187): x the next key in the window.
-			** The read is the chord's, swallowed whole. */
-			if (detach_pending && attach_xray && attach_sock < 0 &&
+			/* The X-ray chord (#187; over a remote attach too, #189):
+			** x the next key in the window. The read is the chord's,
+			** swallowed whole. */
+			if (detach_pending && attach_xray &&
 			    xray_x(pkt.u.buf, (int)len))
 			{
 				detach_pending = 0;
@@ -1055,7 +1059,7 @@ attach_main(int noerror)
 				if (w == 0)	/* no double press: one, at once */
 					return detach_key_done(s, 0);
 				/* the chord in one burst: x after the press */
-				if (attach_xray && attach_sock < 0 &&
+				if (attach_xray &&
 				    xray_x(pkt.u.buf + detach_end,
 				           (int)len - detach_end))
 				{

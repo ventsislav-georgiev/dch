@@ -931,10 +931,12 @@ output that came in meanwhile included (dch-lite has no screen to repaint
 from: the program gets a SIGWINCH, as on any re-attach). The `x` is never
 typed into the session. The chord is off under `-E` (no detach key) and
 with `DCH_DOUBLE_TAP_MS=0` (one press acts at once); the keys then do what
-they did before. It is off over a remote attach (`dch -a host:name`) for
-now: there the keys reach the session as before. There is no `xray_key`
-setting: the chord takes no key from the program. In the picker, lowercase
-`x` is still kill, which asks first; `X` opens the view.
+they did before. Over a remote attach (`dch -a host:name`) the chord opens
+the view of `host:name`, as `dch --xray host:name` does: its queries dial
+their own ctl connections, and the attach connection is kept. Leaving it,
+the host resizes the program for a beat so it repaints. There is no
+`xray_key` setting: the chord takes no key from the program. In the picker,
+lowercase `x` is still kill, which asks first; `X` opens the view.
 
 A window smaller than 24x8 shows only "X-ray: the window is too small".
 

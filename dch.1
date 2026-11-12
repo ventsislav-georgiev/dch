@@ -807,10 +807,16 @@ The
 .B x
 never reaches the session.
 The chord is off with
-.BR \-E ,
-with
-.B DCH_DOUBLE_TAP_MS=0
-and over a remote attach; the keys then reach the session as before.
+.B \-E
+and with
+.BR DCH_DOUBLE_TAP_MS=0 ;
+the keys then reach the session as before.
+Over a remote attach
+.RB ( "dch \-a " \fIhost\fB:\fIname\fR)
+it opens the view of
+.IR host : name ,
+its queries over their own ctl connections, the attach kept; leaving it, the
+host resizes the program for a beat so it repaints.
 There is no
 .B xray_key
 setting.

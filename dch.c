@@ -2971,6 +2971,7 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 		return 1;
 	}
 
+	attach_xray = attach_xray_view;	/* local and remote (#187, #189) */
 	/* Remote (#087): --host names the host; else an exact local name
 	** wins, and host:name is remote. */
 	if (remote_host)
@@ -3023,7 +3024,6 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 		}
 	}
 
-	attach_xray = attach_xray_view;	/* local only (#187) */
 	if (make_sock_path(session_name) < 0)
 		return 1;
 	if (!attach_only && (session_name[0] == '-' ||
@@ -13694,16 +13694,20 @@ xray_view(const char *n)
 }
 
 /* The in-attach X-ray chord's view (#187), in attach.c's child: this
-** session's, opened on On screen. A failure is said and waits for a key:
-** the attach's repaint on return would wipe it at once. */
+** session's, opened on On screen; a remote attach's is host:name's (#189),
+** --host's host put in front. A failure is said and waits for a key: the
+** attach's repaint on return would wipe it at once. */
 static int
 attach_xray_view(void)
 {
+	char n[DCH_RHOST_MAX + sizeof session_name];
 	unsigned char c;
 	int rc;
 
 	xv_tab = 2;
-	if ((rc = xray_view(session_name)) != 0)
+	snprintf(n, sizeof n, "%s%s%s", remote_host ? remote_host : "",
+	         remote_host ? ":" : "", session_name);
+	if ((rc = xray_view(n)) != 0)
 	{
 		tw(STDERR_FILENO, "\r(any key: back to the session)");
 		(void)!read(STDIN_FILENO, &c, 1);

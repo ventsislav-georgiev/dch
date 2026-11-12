@@ -960,8 +960,13 @@ dch_remote_on(void)
 	return remote_on();
 }
 
+/* The host this process is attached to (#189): the in-attach X-ray chord's
+** view routes its host:name by it, a host only discovery found too. */
+static char g_attached[DCH_RHOST_MAX];
+
 /* host is one dch knows without a probe: a named host (--hosts,
-** remote_hosts) or a cached row's; never discovery (no tailscale run). */
+** remote_hosts), a cached row's or the attach's; never discovery (no
+** tailscale run). */
 int
 dch_remote_known(const char *host)
 {
@@ -971,6 +976,8 @@ dch_remote_known(const char *host)
 
 	if (!remote_on())
 		return 0;
+	if (g_attached[0] && !strcasecmp(g_attached, host))
+		return 1;
 	n = named_hosts(v, RM_HOSTS, 0);
 	for (k = 0; k < n && !hit; k++)
 		hit = !strcasecmp(v[k].label, host);	/* as host_find */
@@ -2837,10 +2844,12 @@ dch_remote_attach(const char *host, const char *name)
 	why_fd = wp[0];
 	attach_sock = sp[0];
 	attach_lost = remote_lost;
+	snprintf(g_attached, sizeof g_attached, "%s", h.label);
 	dch_trace("remote attach %s relay=%d", h.label, (int)relay_pid);
 	rc = attach_main(0);	/* returns only to switch sessions */
 	attach_sock = -1;
 	attach_lost = NULL;
+	g_attached[0] = '\0';
 	if (relay_pid > 0)
 		while (waitpid(relay_pid, NULL, 0) < 0 && errno == EINTR)
 			;

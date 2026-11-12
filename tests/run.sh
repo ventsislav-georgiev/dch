@@ -1007,7 +1007,7 @@ else
 fi
 pyrun "xray goldens: chapters, identity, corpus labels, MANIFEST" xray_golden.py
 pyrun "the --xray view: tabs, card, reader, hostile text, signals, picker X" xray_view_test.py
-pyrun "the --xray view of host:name over a loopback dch serve, picker X" xray_remote_view_test.py
+pyrun "the --xray view of host:name over a loopback dch serve, picker X, the chord over dch -a host:name" xray_remote_view_test.py
 # xray_cli_test.py's RSS budget: a fork()+exec+wait4 helper, because a child
 # spawned by Python inherits Python's RSS high-water mark on Linux (maxrss.c)
 # shellcheck disable=SC2086 # xcc is a word list
