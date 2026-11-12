@@ -2202,7 +2202,8 @@ def test_follow_agent(off=False):
     """A shell's follower across an agent's start and exit, on the default
     60 s record tick: while a follower is subscribed the master probes for
     an agent every second and wakes it on a change, ring or no ring. The
-    start: reset rotated, then a snapshot of corpus claude. The exit, on an
+    start: reset rotated, then a snapshot of corpus claude (one of corpus
+    none may come first, while the transcript is not written). The exit, on an
     idle shell (no row pushed): reset rotated, then a snapshot of corpus
     shell (none with xray_ring 0). Each within 10 s: the probe is 1 s,
     the bound leaves room for a loaded runner."""
@@ -2246,20 +2247,31 @@ def test_follow_agent(off=False):
                        if os.path.isdir(sdir) else None, 10)
         if rec:
             sid = json.load(open(os.path.join(sdir, rec[0])))["sessionId"]
-            pdir = os.path.join(HOME, ".claude", "projects", key(proj))
+            # the key of the real path, as Claude Code names it and as the
+            # follower watches for a transcript that is not there yet
+            pdir = os.path.join(HOME, ".claude", "projects",
+                                key(os.path.realpath(proj)))
             os.makedirs(pdir, exist_ok=True)
             with open(os.path.join(pdir, sid + ".jsonl"), "w") as f:
                 f.write(json.dumps({"type": "user", "cwd": proj, "message": {
                     "content": "ask #11"}}) + "\n")
 
-        def rotated_then(k0):
+        def rotated_then(k0, want):
+            # the object after a reset rotated. A snapshot of corpus none
+            # on the way to `want` is passed over: the probe can see the
+            # Claude before its transcript is on disk (written above, after
+            # its session record), and a second reset rotated follows
             ob = fl.objs(k0)
-            i = next((j for j, o in enumerate(ob)
-                      if is_reset("rotated")(o)), None)
-            return ob[i + 1] if i is not None and i + 1 < len(ob) else None
-        wait_for(lambda: rotated_then(k0), 15)
+            for j, o in enumerate(ob[:-1]):
+                nx = ob[j + 1]
+                if is_reset("rotated")(o) and (
+                        want == "none" or "snapshot" not in nx or
+                        nx["snapshot"]["corpus"] != "none"):
+                    return nx
+            return None
+        wait_for(lambda: rotated_then(k0, "claude"), 15)
         secs = time.time() - t0
-        nxt = rotated_then(k0)
+        nxt = rotated_then(k0, "claude")
         check(tag + "the agent's start sends reset rotated, then a "
               "snapshot of corpus claude (%.1f s)" % secs,
               nxt is not None and "snapshot" in nxt and
@@ -2268,9 +2280,9 @@ def test_follow_agent(off=False):
         k1 = len(fl.got)
         t1 = time.time()
         dch("--send", n, "/exit\r", env=env)
-        wait_for(lambda: rotated_then(k1), 15)
+        wait_for(lambda: rotated_then(k1, base), 15)
         secs = time.time() - t1
-        nxt = rotated_then(k1)
+        nxt = rotated_then(k1, base)
         check(tag + "the agent's exit on an idle shell sends reset "
               "rotated, then a snapshot of corpus %s (%.1f s)" % (base, secs),
               nxt is not None and "snapshot" in nxt and
