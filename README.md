@@ -467,7 +467,9 @@ error (`--history` and `--agent-list` take their own).
   `session_id` the Claude conversation id when there is one (`--stop`: once
   read, right before `/exit`), else `""`. `--say` prints `{"name","result","reason","detail"}`
   (no `session_id`, never `interrupted`). `--revive` adds `"as"` after
-  `"name"`: the name the session came back under. `--pin`, `--unpin` and
+  `"name"`: the name the session came back under, and `"running"` last:
+  `true` when the session's agent process is alive as the line is written,
+  on every result and reason, else `false`. `--pin`, `--unpin` and
   `--forget` print one per name (`--forget --all`: per record, `skipped`
   `live` or `pinned` for the ones it keeps), `session_id` the record's
   Claude conversation id.

@@ -2178,10 +2178,13 @@ no
 with
 .BR \-\-no\-message )
 and one
-.RI { name ", " as ", " result ", " reason ", " detail ", " session_id }
+.RI { name ", " as ", " result ", " reason ", " detail ", " session_id ", " running }
 per session, where
 .I as
 is the name it came back under.
+.I running
+is true when the session's agent process is alive as the line is written,
+on every result and reason, else false.
 A record stores a byte that is not UTF\-8 as U+FFFD; one whose command,
 cwd or Claude launch holds U+FFFD is not revived
 .RB ( not_utf8 ,

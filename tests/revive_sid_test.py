@@ -128,6 +128,7 @@ def main():
               "[rc=%d %r]" % (r.returncode, r.stdout),
               r.returncode == 0 and len(f) == 2 and len(oks) == 1 and
               oks[0]["as"] == "w" and oks[0]["session_id"] == X and
+              oks[0]["running"] is True and
               len(dup) == 1 and dup[0]["reason"] == "dup_sid" and
               dup[0]["session_id"] == X and
               "w.1793635888" in dup[0]["detail"])
@@ -154,7 +155,7 @@ def main():
               "[%r]" % r.stdout,
               r.returncode == 0 and len(f) == 1 and
               f[0]["result"] == "skipped" and f[0]["reason"] == "live_sid" and
-              f[0]["session_id"] == X and
+              f[0]["session_id"] == X and f[0]["running"] is True and
               "live session w" in f[0]["detail"])
         check("...still one claude on the id", len(claudes(X)) == 1)
 
@@ -172,7 +173,8 @@ def main():
               "naming live session w, with the id, exit 1 [%r]" % r.stdout,
               r.returncode == 1 and len(f) == 1 and
               f[0]["result"] == "failed" and f[0]["reason"] == "live_sid" and
-              f[0]["session_id"] == X and "live session w" in f[0]["detail"])
+              f[0]["session_id"] == X and "live session w" in f[0]["detail"]
+              and f[0]["running"] is False)
         check("...no session z started and still one claude on the id",
               not os.path.exists(os.path.join(sockdir, "z.sock")) and
               len(claudes(X)) == 1)

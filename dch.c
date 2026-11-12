@@ -6101,11 +6101,12 @@ json_phase(const char *name, const char *phase, int json)
 }
 
 /* --json's result object; xk/xv (when xk) one more string field after
-** "name": --revive's "as", the master pass's "phase":"master". */
+** "name": --revive's "as", the master pass's "phase":"master". Left open
+** for a caller that appends keys (--revive's "running"). */
 static void
-json_final(const char *name, const char *xk, const char *xv,
-           const char *res, const char *code, const char *detail,
-           const char *sid)
+json_final_open(const char *name, const char *xk, const char *xv,
+                const char *res, const char *code, const char *detail,
+                const char *sid)
 {
 	fputs("{\"name\":", stdout);
 	put_json_str(name);
@@ -6118,6 +6119,14 @@ json_final(const char *name, const char *xk, const char *xv,
 	put_json_str(detail);
 	fputs(",\"session_id\":", stdout);
 	put_json_str(sid);
+}
+
+static void
+json_final(const char *name, const char *xk, const char *xv,
+           const char *res, const char *code, const char *detail,
+           const char *sid)
+{
+	json_final_open(name, xk, xv, res, code, detail, sid);
 	fputs("}\n", stdout);
 	fflush(stdout);
 }
@@ -9989,8 +9998,39 @@ login_env(void)
 static int do_spawn_verb(char *exe, const char *name, int cols, int rows,
                          char **inner_argv, int inner_argc, int quiet);
 
+/* --revive --json's "running" (#182): does session `as` run its agent
+** now? Its master answers and a live Claude record sits under its child,
+** as revive_message and the #064 guard probe it. A child started as the
+** agent itself (argv) counts before Claude has written that record. */
+static int
+rv_running(const char *as, int argv)
+{
+	char path[1100];
+	struct cmd_info ci;
+	struct crec c;
+	int on;
+
+	session_sock_path(as, path, sizeof path);
+	if (cmd_query(path, &ci) != 0)
+		return 0;
+	on = ci.pid > 0 && (argv || claude_find(ci.pid, 1, &c) > 0);
+	cmd_info_free(&ci);
+	return on;
+}
+
+/* --revive's final --json line without a record to revive (#182). */
+static void
+rv_json_final(const char *name, const char *as, const char *res,
+              const char *code, const char *detail, const char *sid,
+              int argv)
+{
+	json_final_open(name, "as", as, res, code, detail, sid);
+	printf(",\"running\":%s}\n", rv_running(as, argv) ? "true" : "false");
+	fflush(stdout);
+}
+
 /* --revive's line for one record: `<name>: <detail>`, or under --json
-** {"name","as","result","reason","detail","session_id"}. */
+** {"name","as","result","reason","detail","session_id","running"}. */
 static DCH_PRINTF(5, 6) void
 rv_say(const struct hrec *r, int json, const char *res, const char *code,
        const char *fmt, ...)
@@ -10002,7 +10042,8 @@ rv_say(const struct hrec *r, int json, const char *res, const char *code,
 	vsnprintf(d, sizeof d, fmt, ap);
 	va_end(ap);
 	if (json)
-		json_final(r->name, "as", r->as, res, code, d, r->sid);
+		rv_json_final(r->name, r->as, res, code, d, r->sid,
+		              r->mode == RV_ARGV);
 	else
 		printf("%s: %s\n", r->name, d);
 	fflush(stdout);
@@ -10468,8 +10509,8 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 			snprintf(d, sizeof d, "no history for session %s", name);
 		fprintf(stderr, "dch: %s\n", d);
 		if (json)
-			json_final(name, "as", as ? as : name, "failed", *why == 'a'
-			           ? "ambiguous" : "no_history", d, "");
+			rv_json_final(name, as ? as : name, "failed", *why == 'a'
+			              ? "ambiguous" : "no_history", d, "", 0);
 		hrec_free(r, n);
 		return 1;
 	}
@@ -10619,10 +10660,10 @@ do_revive_verb(char *exe, const char *name, const char *as, int all,
 		else if (!all)
 			fprintf(stderr, "dch: no history for session %s\n", name);
 		if (!all && json)
-			json_final(name, "as", as ? as : name, "failed",
-			           seenlive ? "live" : "no_history", seenlive
-			           ? "session is live" : "no history for this session",
-			           "");
+			rv_json_final(name, as ? as : name, "failed",
+			              seenlive ? "live" : "no_history", seenlive
+			              ? "session is live"
+			              : "no history for this session", "", 0);
 		hrec_free(r, n);
 		free(held.v);
 		return all ? 0 : 1;

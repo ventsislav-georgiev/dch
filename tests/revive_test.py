@@ -765,7 +765,8 @@ def main():
               r.returncode == 1 and ndjson(r.stdout) == [
                   {"name": "nosuch", "as": "nosuch", "result": "failed",
                    "reason": "no_history", "detail":
-                   "no history for this session", "session_id": ""}])
+                   "no history for this session", "session_id": "",
+                   "running": False}])
         r = run("--revive", "jplain", "--as", "jnew", "--json", env=jenv)
         names.append(("jnew", jenv))
         check("--revive <n> --as <new> --json: starting, then ok with \"as\"",
@@ -773,7 +774,7 @@ def main():
                   {"name": "jplain", "phase": "starting"},
                   {"name": "jplain", "as": "jnew", "result": "ok",
                    "reason": "", "detail": "revived as jnew in %s" % proj,
-                   "session_id": ""}])
+                   "session_id": "", "running": False}])
         r = run("--revive", "--all", "--json", env=jenv, timeout=120)
         names.extend([("jbad", jenv), ("jcl", jenv)])
         print("     | " + r.stdout.rstrip().replace("\n", "\n     | "))
@@ -798,6 +799,11 @@ def main():
               fin["jcl"]["result"] == "ok" and
               fin["jcl"]["reason"] == ("no_screen" if lite else "") and
               ("resume message sent" in fin["jcl"]["detail"]) != lite)
+        check("...\"running\" (#182), the last key: true for the agent, "
+              "false for the program that never started",
+              all(list(fin.get(n, {}))[-1:] == ["running"] for n in fin) and
+              fin.get("jcl", {}).get("running") is True and
+              fin.get("jbad", {}).get("running") is False)
         os.unlink(os.path.join(recdir4, "jbad.json"))
         r = run("--revive", "--all", "--json", env=jenv)
         check("--revive --all --json, nothing to revive: empty stdout",
@@ -851,7 +857,7 @@ def main():
                   {"name": "nmcl", "phase": "starting"},
                   {"name": "nmcl", "as": "nmcl2", "result": "ok",
                    "reason": "", "detail": nm_detail("nmcl2", nids["nmcl"]),
-                   "session_id": nids["nmcl"]}])
+                   "session_id": nids["nmcl"], "running": True}])
         check("...its record has the agent at once (#056)",
               ((rec("nmcl2", recdir5) or {}).get("agent") or {})
               .get("session_id") == nids["nmcl"])
@@ -874,6 +880,8 @@ def main():
         check("...shell claude: --resume typed into the shell, nothing typed "
               "into claude; argv claude likewise",
               quiet("nmsh", nids["nmsh"]) and quiet("nmcl3", nids["nmcl3"]))
+        check("...\"running\" true for the argv claude at once (#182)",
+              fin.get("nmcl3", {}).get("running") is True)
         nplant("nmtx", True)
         r = run("--revive", "nmtx", "--no-message", env=nenv, timeout=120)
         names.append(("nmtx", nenv))
@@ -962,6 +970,63 @@ def main():
               until(lambda: starts("cfold"), 20) and
               cstart("cfold") is None and
               starts("cfold")[-1]["argv"][:2] == ["--resume", cids["cfold"]])
+
+        # --- #182: "running" on every final line, last key, per reason ----
+        # true when the session's agent is alive as the line is written.
+        rt8 = os.path.join(tmp, "rt8")
+        sockdir8 = os.path.join(rt8, "dch-%d" % os.getuid())
+        recdir8 = os.path.join(recroot, sockdir8.replace("/", "-"))
+        os.makedirs(rt8)
+        os.makedirs(recdir8, 0o700)
+        renv = dict(os.environ, XDG_RUNTIME_DIR=rt8, DCH_AGENT_STEP_MS="4000",
+                    DCH_AGENT_LAND_MS="1500")
+
+        def rfinal(n, launch=True, argv=None, **ctl):
+            sid = "18218218-0000-4000-8000-%012d" % len(names)
+            ag = dict(kind="claude", session_id=sid, name="", cwd=proj)
+            if launch:
+                ag["launch"] = [cl]
+            os.rename(plant(n, sock_dir=sockdir8, argv=argv or [cl],
+                            agent=ag), os.path.join(recdir8, n + ".json"))
+            if ctl:
+                setctl(n, **ctl)
+            r = run("--revive", n, "--json", env=renv, timeout=120)
+            names.append((n, renv))
+            f = [o for o in ndjson(r.stdout) or [] if "result" in o]
+            o = f[0] if len(f) == 1 else {}
+            return (o.get("result"), o.get("reason"), o.get("running"),
+                    list(o)[-1:] == ["running"])
+
+        for n, kw, want in (
+                ("rlu", dict(launch=False, argv=["sleep", "60"]),
+                 ("failed", "launch_unknown", False, True)),
+                ("rrf", dict(argv=[sh_, "-c", "echo up"]),
+                 ("failed", "relaunch_failed", False, True))):
+            got = rfinal(n, **kw)
+            check("--revive --json %s: running %s, the last key [%r]"
+                  % (want[1], want[2], got), got == want)
+        for n, kw, why in (
+                ("rbusy", dict(busy=True), "no_screen"),
+                ("rdlg", dict(dialog=True), "prompt"),
+                ("rsdlg", dict(argv=[sh_], dialog=True), "prompt"),
+                ("rdrf", dict(draft="half a thought"), "draft"),
+                ("reat", dict(eat_enters=99), "not_submitted"),
+                ("rlag", dict(lag_ms=4000), "not_typed")):
+            # lite writes a shell's line as its claude is typed, before it
+            # is up: false or true by timing, so only the full build asserts
+            if lite and n == "rsdlg":
+                continue
+            got = rfinal(n, **kw)
+            want = (("ok", "no_screen") if lite else ("failed", why)) + (
+                True, True)
+            check("--revive --json, claude up but %s: running true, the "
+                  "last key [%r]" % (why, got), got == want)
+        r = run("--revive", "rdlg", "--json", env=renv)
+        o = (ndjson(r.stdout) or [{}])[-1]
+        check("--revive --json of a live session with claude in it: failed "
+              "live, running true [%r]" % r.stdout,
+              r.returncode == 1 and o.get("reason") == "live" and
+              o.get("running") is True)
     except Exception:
         traceback.print_exc()
         fails[0] += 1
