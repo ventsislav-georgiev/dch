@@ -768,9 +768,12 @@ process_kbd(int s, struct packet *pkt)
 		** the screen the reset left: drop it, the redraw repaints. */
 		{
 			unsigned char junk[BUFSIZE];
+			ssize_t r;
 
-			while (recv(s, junk, sizeof junk, MSG_DONTWAIT) > 0)
+			while ((r = recv(s, junk, sizeof junk, MSG_DONTWAIT)) > 0)
 				;
+			if (r == 0)	/* it ended meanwhile: the loop sees the end */
+				return KBD_OK;
 		}
 
 		/* Tell the master that we are returning. */

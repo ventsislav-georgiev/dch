@@ -1461,6 +1461,84 @@ def test_rearm():
     time.sleep(0.5)
 
 
+# ---- 12: a ctrl-z suspend over the attach drops the host's output (#211) ---
+
+BZ = ("import os, select, sys, time, tty\n"
+      "tty.setraw(0)\n"
+      "os.write(1, b'\\033[?1049hBUSY\\r\\n')\n"
+      "while True:\n"
+      "    if select.select([0], [], [], 0.0005)[0]:\n"
+      "        b = os.read(0, 256)\n"
+      "        if not b: break\n"
+      "        os.write(1, b'GOT:' + b.hex().encode() + b'\\r\\n')\n"
+      "    os.write(1, b'\\033[5;1HT%.4f ' % time.time())\n")
+# the client as a shell runs a job: its own foreground process group, so
+# its ctrl-z SIGTSTP really stops it; STOPPED is written then, and it is
+# continued a second later; exits with the client's exit code
+JOB = ("import os, signal, sys, time\n"
+       "job = os.fork()\n"
+       "if job == 0:\n"
+       "    os.setpgid(0, 0)\n"
+       "    signal.signal(signal.SIGTTOU, signal.SIG_IGN)\n"
+       "    os.tcsetpgrp(0, os.getpgrp())\n"
+       "    signal.signal(signal.SIGTTOU, signal.SIG_DFL)\n"
+       "    os.execv(sys.argv[1], sys.argv[1:])\n"
+       "while True:\n"
+       "    _, st = os.waitpid(job, os.WUNTRACED)\n"
+       "    if not os.WIFSTOPPED(st):\n"
+       "        sys.exit(os.waitstatus_to_exitcode(st))\n"
+       "    os.write(1, b'<<stopped>>')\n"
+       "    time.sleep(1)\n"
+       "    os.kill(job, signal.SIGCONT)\n")
+STOPPED = b"<<stopped>>"
+
+
+def test_suspend():
+    r = dch(SENV, "--spawn", "xv-bz", "--size", "100x30", sys.executable,
+            "-c", BZ)
+    check("suspend: the busy session spawned on the host", r.returncode == 0,
+          r.stderr)
+    a = Pty([sys.executable, "-c", JOB, DCH, "-a", "srv:xv-bz"])
+    try:
+        a.wait(b"BUSY" if dch(SENV, "--build").stdout.strip() == "full"
+               else b"\033[?1049h")
+        a.pump(0.5)
+        for i in range(1, 4):
+            mark = len(a.out)
+            a.key(b"\x1a", 0)
+            ok = a.wait(STOPPED, start=mark)
+            t0 = time.time()
+            stop = a.out.find(STOPPED, mark) + len(STOPPED)
+            a.wait(b"\033[?1049h", start=stop)
+            alt = a.out.find(b"\033[?1049h", stop)
+            late = [t for t in re.findall(rb"T(\d+\.\d+) ",
+                                          a.out[stop:alt]) if
+                    t0 + 0.05 < float(t) < t0 + 0.85]
+            check("suspend: ctrl-z %d over the attach: no output the host "
+                  "sent while it was stopped before the resume's 1049h" % i,
+                  ok and alt > stop and not late,
+                  (ok, len(late), a.out[stop:stop + 200]))
+            a.pump(0.3)
+        mark = len(a.out)
+        a.key(b"z", 0.3)
+        check("suspend: the attach goes on (a key after reaches the session)",
+              a.wait(b"GOT:7a", start=mark, secs=5) and a.reap() is None,
+              (a.rc, a.out[mark:][-300:]))
+        mark = len(a.out)
+        a.key(b"\x1a", 0)
+        ok = a.wait(STOPPED, start=mark)
+        dch(SENV, "-k", "xv-bz")
+        rc = a.exit()
+        check("suspend: the session ending while the attach is stopped ends "
+              "it at the resume, exit 0, no lost-link line",
+              ok and rc == 0 and b"lost the connection" not in a.out[mark:],
+              (ok, rc, a.out[mark:][-300:]))
+    finally:
+        a.close()
+        dch(SENV, "-k", "xv-bz")
+    time.sleep(0.5)
+
+
 def main():
     sp = None
     try:
@@ -1486,6 +1564,7 @@ def main():
         test_chord_fail()
         hosts("srv=127.0.0.1:%d" % port)
         test_rearm()
+        test_suspend()
     finally:
         dch(SENV, "-k", "xv-sh")
         dch(SENV, "-k", "xv-rx")

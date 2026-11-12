@@ -2278,7 +2278,7 @@ relay(int tcp, int sp, int why, const char *label, struct sb tin,
 	struct sb to_tcp = {0}, to_sp = {0};
 	unsigned char pin[PKT_HDR + PKT_MAX], buf[RM_READ];
 	size_t pn = 0, toff = 0, soff = 0;
-	int redraws = 0, eof = 0, exited = 0, code = 1;
+	int redraws = 0, eof = 0, exited = 0, code = 1, held = 0;
 	long long drain = 0;
 	char msg[400] = "";
 
@@ -2336,6 +2336,14 @@ relay(int tcp, int sp, int why, const char *label, struct sb tin,
 				pn += (size_t)k;
 			while ((r = pkt_next(pin + off, pn - off, &pk, &used)) > 0)
 			{
+				/* a ctrl-z suspend (#211): the client reset its
+				** terminal off the session's screen, so the host's
+				** output until the resume is dropped (the link is
+				** still read); the resume's 0x07 repaints */
+				if (pk.type == MSG_DETACH || pk.type == MSG_ATTACH)
+					held = pk.type == MSG_DETACH;
+				if (held)
+					to_sp.n = soff = 0;
 				pkt_frames(&pk, &redraws, &to_tcp);
 				off += used;
 			}
@@ -2380,6 +2388,8 @@ relay(int tcp, int sp, int why, const char *label, struct sb tin,
 				if (relay_in(&rs, &tin, &to_sp, &exited, &code,
 				             msg, sizeof msg) < 0)
 					eof = 1;
+				if (held)
+					to_sp.n = soff = 0;
 			}
 			if (tin.bad || to_sp.bad || to_tcp.bad)
 			{
