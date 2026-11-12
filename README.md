@@ -1015,7 +1015,9 @@ the same JSON, and the host cannot drive your terminal. A host that sends
 nothing for 65 s (its own 60 s timeout, plus 5 s; time spent waiting on a
 slow reader of dch's output does not count) is a lost connection, exit 7;
 `--follow` has no such limit. A partial line the host was writing is dropped
-when the link is lost, on a cancel and when the host cuts the answer short.
+when the link is lost, on a cancel, when the host cuts the answer short and
+when the host's dch dies of a signal (`dch: <host>: --xray on the host ended
+by signal <N>`, exit 128 + N).
 A host line over 16 MiB once escaped ends it: `dch: <host>: unreachable: it
 sent a line over 16 MiB escaped`, exit 7. The
 host answers by its own release: `--scope`, `--chapter` and the corpus are
@@ -2706,6 +2708,7 @@ any connection (exit 2).
 | 4 | Refused: the host's gate sent a coded `0x13` (`dch: <host> refused: <message>`). |
 | 6 | The host lacks the op: `dch: <host>: does not support <verb> (needs dch serve 1.41+)`, or `(needs dch serve --allow-create)` for `--spawn` and `--revive`, or `(needs dch serve 1.55.0+)` for `--xray` when the hello lacks `xray`; nothing is sent. |
 | 7 | Unreachable: `dch: <host>: unreachable: <why>` (down, `busy`, or the connection lost before the exit status). |
+| 128+N | The host's dch died of signal N: `dch: <host>: <verb> on the host ended by signal <N>`. |
 
 `-a`'s codes are unchanged.
 

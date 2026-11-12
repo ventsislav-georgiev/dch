@@ -1355,7 +1355,9 @@ class XFake:
     line that escapes past 16 MiB (3 MiB of 0x01 in a string); "crlf" CR
     as JSON space and in a string; "capcut" whole lines, a partial line,
     then a 0x33 "cap"; "holdcut" whole lines and a partial line, its 0x33
-    only for a 0x34."""
+    only for a 0x34; "crash" whole lines, a partial line, then the 0x33 of
+    a host dch SIGKILLed (exit 137, no why); "raw" a 17 MiB line with no
+    control, in serve's 64 KiB frames."""
 
     def __init__(self, mode, out=b""):
         self.mode, self.n, self.out = mode, 0, out
@@ -1404,7 +1406,13 @@ class XFake:
             + frame(0x33, {"exit": 0}),
             "capcut": frame(0x31, b'{"ok":1}\n{"cut":"aaaa')
             + frame(0x33, {"exit": 2, "why": "cap"}),
-            "holdcut": frame(0x31, b'{"ok":1}\n{"cut":')}
+            "holdcut": frame(0x31, b'{"ok":1}\n{"cut":'),
+            "crash": frame(0x31, b'{"ok":1}\n{"half":')
+            + frame(0x32, b"e-half") + frame(0x33, {"exit": 137}),
+            "raw": b"".join(frame(0x31, x[i:i + 65536]) for x in
+                            [b'{"s":"' + b"a" * (17 << 20) + b'"}\n']
+                            for i in range(0, len(x), 65536))
+            + frame(0x33, {"exit": 0})}
         try:
             while True:
                 d = c.recv(65536)
@@ -1713,6 +1721,29 @@ def robust_checks(dch, check, cenv, fakes, tmp):
           first == b'{"ok":1}\n' and out == b""
           and p.returncode == -signal.SIGINT, (first, out, err,
                                                p.returncode))
+
+    # QA 1.58.0 LOW-R7: the host's dch killed by a signal mid-line: the
+    # partial stdout line dropped, as for a cut; said; exit 128 + N
+    f = fake("crash")
+    r = subprocess.run([DCH, "--xray", "q:x", "--json"], env=side(f.port),
+                       capture_output=True, stdin=subprocess.DEVNULL,
+                       timeout=20)
+    check("LOW-R7: a host dch killed mid-line: the whole lines, the partial "
+          "line dropped, said, exit 137", r.returncode == 137
+          and r.stdout == b'{"ok":1}\n' and r.stderr == b"e-halfdch: q: "
+          b"--xray on the host ended by signal 9\n", r)
+
+    # QA 1.58.0 NIT-R3: a raw host line over 16 MiB (no control in it) is
+    # a line over 16 MiB, not "out of memory": exit 7, nothing written
+    f = fake("raw")
+    r = subprocess.run([DCH, "--xray", "q:x", "--json"], env=side(f.port),
+                       capture_output=True, stdin=subprocess.DEVNULL,
+                       timeout=60)
+    check("NIT-R3: a raw host line over 16 MiB: exit 7, the line's size "
+          "said, nothing written", r.returncode == UNREACHABLE_EXIT
+          and r.stdout == b"" and r.stderr == b"dch: q: unreachable: it "
+          b"sent a line over 16 MiB escaped\n",
+          (r.returncode, r.stdout[:40], r.stderr[:200]))
 
 
 def main():

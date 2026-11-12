@@ -2257,6 +2257,8 @@ struct kid
 	char dev[DEV_CAP + 1];		/* watching for */
 	char follow[NAME_CAP + 1];	/* --xray --follow of, since fseq */
 	long long fseq;
+	dev_t fdev;	/* follow's <sockdir>/<name>.sock, fino 0 when none */
+	ino_t fino;
 };
 
 static struct kid kids[MAX_CONN];
@@ -2382,7 +2384,8 @@ static void
 kids_note(const char *line)
 {
 	struct kid *k = NULL, *old;
-	char *end;
+	struct stat ss;
+	char *end, sp[PATH_MAX];
 	long pid = strtol(line + 1, &end, 10);
 	int i, n;
 
@@ -2396,12 +2399,20 @@ kids_note(const char *line)
 	{
 		copy_str(k->follow, sizeof k->follow, end + 1);
 		k->fseq = ++kid_seq;
+		/* the session the name opens: on a case-insensitive volume
+		** svf and SVF are one session, one count (QA 1.58.0 LOW-R6) */
+		k->fino = k->follow[0] && snprintf(sp, sizeof sp, "%s/%s.sock",
+		          dch_sock_dir(), k->follow) < (int)sizeof sp &&
+		          stat(sp, &ss) == 0 ? ss.st_ino : 0;
+		k->fdev = k->fino ? ss.st_dev : 0;
 		for (;;)
 		{
 			for (old = NULL, n = 0, i = 0; k->follow[0] && i < nkids;
 			     i++)
-				if (kids[i].ip == k->ip &&
-				    !strcmp(kids[i].follow, k->follow))
+				if (kids[i].ip == k->ip && kids[i].follow[0] &&
+				    (!strcmp(kids[i].follow, k->follow) ||
+				     (k->fino && kids[i].fino == k->fino &&
+				      kids[i].fdev == k->fdev)))
 				{
 					n++;
 					if (&kids[i] != k &&

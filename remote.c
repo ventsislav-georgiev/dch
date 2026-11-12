@@ -3204,14 +3204,22 @@ ctl_run(int fd, const char *sh, const char *verb, struct sb *rq,
 		           sizeof msg, &code, 0);
 		if (tin.bad || out.bad || err.bad)
 		{
-			snprintf(msg, sizeof msg, "out of memory");
+			/* out, err hold at most one partial line: past
+			** SB_LIMIT raw, so past it escaped (QA 1.58.0 NIT-R3) */
+			if (tin.bad)
+				snprintf(msg, sizeof msg, "out of memory");
+			else
+				snprintf(msg, sizeof msg, "it sent a line over "
+				         "%u MiB escaped", SB_LIMIT >> 20);
 			r = -1;
 		}
 		if (cx < 0)
 			out.n = 0;	/* our reader is gone */
 		t = now_ms();
-		/* last: only a plain end's; a cut's partial line is no line */
-		if ((w = ctl_put(&out, &err, esc, r > 0 && !why[0] && !cx)) ==
+		/* last: only a plain end's; a cut's partial line is no line,
+		** nor is one of a host dch a signal ended (QA 1.58.0 LOW-R7) */
+		if ((w = ctl_put(&out, &err, esc, r > 0 && !why[0] && !cx &&
+		                 xit < 128)) ==
 		    -2)
 		{
 			snprintf(msg, sizeof msg, "it sent a line over %u MiB "
@@ -3275,7 +3283,7 @@ ctl_run(int fd, const char *sh, const char *verb, struct sb *rq,
 	/* a lost link, a cancel or the host's cut (a why) drops the stdout
 	** line esc held: a cut JSON line is no line (QA 1.55.0 NIT-5,
 	** Prosper's ruling; QA 1.56.0 NIT-R-B) */
-	if (cx || r < 0 || why[0])
+	if (cx || r < 0 || why[0] || xit >= 128)
 		out.n = 0;
 	(void)ctl_put(&out, &err, esc, 1);	/* a line esc held, cut short */
 	free(tin.p);
@@ -3300,6 +3308,9 @@ ctl_run(int fd, const char *sh, const char *verb, struct sb *rq,
 	if (why[0])
 		fprintf(stderr, "dch: %s: %s stopped by the host (%s)\n", sh,
 		        verb, why);
+	else if (xit >= 128)
+		fprintf(stderr, "dch: %s: %s on the host ended by signal %d\n",
+		        sh, verb, xit - 128);
 	return xit;
 }
 

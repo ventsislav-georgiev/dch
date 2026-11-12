@@ -1403,7 +1403,10 @@ connection, exit 7;
 .B \-\-follow
 has no such limit.
 A partial line the host was writing is dropped when the link is lost, on a
-cancel and when the host cuts the answer short.
+cancel, when the host cuts the answer short and when the host's dch dies of
+a signal
+.RI ( "dch: host: \-\-xray on the host ended by signal N" ,
+exit 128 + N).
 A host line over 16 MiB once escaped ends it with
 .IR "dch: host: unreachable: it sent a line over 16 MiB escaped" ,
 exit 7.
@@ -3126,6 +3129,8 @@ and exits 7. The host's own refusal of the request prints
 and exits 1; a refusal by its gate exits 4. A verb the host cut short exits
 2 and prints
 .IR "dch: host: verb stopped by the host (cap|timeout)" .
+One whose dch on the host died of signal N exits 128 + N and prints
+.IR "dch: host: verb on the host ended by signal N" .
 SIGINT (Ctrl-C), SIGTERM or a closed standard output cancel the verb on the
 host: a 0x34 when its hello lists
 .BR ctl\-cancel ,

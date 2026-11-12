@@ -587,6 +587,47 @@ def main():
         for s in (a, b, c, g1, g2):
             s.close()
         time.sleep(1)
+        # QA 1.58.0 LOW-R6: counted by the session the name opens. On a
+        # case-insensitive volume SVF opens svf: svf x2 then SVF x2 close
+        # both svf; on a case-sensitive one SVF is a session of its own and
+        # nothing is closed
+        sd = os.path.join(tmp, "dch-%d" % os.getuid())
+        alias = os.path.exists(os.path.join(sd, "SVF.sock"))
+        if not alias:
+            subprocess.run([DCH, "--spawn", "SVF", "--size", "40x5", "--",
+                            "/bin/sh"], env=env, capture_output=True,
+                           timeout=15)
+            time.sleep(0.5)
+        print("#202 LOW-R6: the socket dir is case-%s" %
+              ("insensitive" if alias else "sensitive"))
+        k = text(log).count("--follow of SVF")
+        a, b = fl(), fl()
+        c, d = fl("SVF"), fl("SVF")
+        if alias:
+            check("#202 LOW-R6: svf x2 then SVF x2 from one device (one "
+                  "session, case-insensitive): both svf closed, the SVF "
+                  "run", end_of(a, 5) == timeout and end_of(b, 5) == timeout
+                  and end_of(c, 0.5) is None and end_of(d, 0.2) is None
+                  and text(log).count("--follow of SVF") == k + 2)
+            if mirror:
+                check("#202 LOW-R6: ... and a local --xray --follow finds a "
+                      "slot", local() == ("following", want))
+        else:
+            check("#202 LOW-R6: svf x2 and SVF x2 from one device (two "
+                  "sessions, case-sensitive): none closed",
+                  all(end_of(s, 1 if s is a else 0.2) is None
+                      for s in (a, b, c, d))
+                  and text(log).count("--follow of SVF") == k)
+        for s in (a, b, c, d):
+            s.close()
+        for lp in locs:
+            lp.terminate()
+            lp.wait(5)
+        del locs[:]
+        if not alias:
+            subprocess.run([DCH, "-k", "SVF"], env=env, capture_output=True,
+                           timeout=15)
+        time.sleep(1.5)
         # another device: its own 2, never closing this device's
         try:
             with socket.socket() as t:
