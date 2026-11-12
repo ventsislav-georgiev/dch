@@ -123,6 +123,7 @@ struct xv
 	int nd, ad, nm, am;
 	long long cnt[5];	/* session, project, project_sessions, all,
 				** all_sessions; -1 null */
+	char *vkind, *vtitle, *vsub;	/* --full's resolved line */
 	/* the reader */
 	char *rtitle, *rwant;
 	long long rat;
@@ -664,6 +665,10 @@ xv_card_free(struct xv *v)
 		xv_sfree(v->m[k].chapter);
 	}
 	v->nd = v->nm = 0;
+	xv_sfree(v->vkind);
+	xv_sfree(v->vtitle);
+	xv_sfree(v->vsub);
+	v->vkind = v->vtitle = v->vsub = NULL;
 }
 
 /* A shell session's light card shows titles and counts only (S18), and a
@@ -727,6 +732,13 @@ xv_cline(struct xv *v, const struct json_parser *p)
 		m.chapter = xv_str(p, o, "chapter");
 		m.at = xv_num(p, o, "at", -1);
 		v->m[v->nm++] = m;
+	}
+	else if ((o = xv_obj(p, 0, "resolved", JSON_OBJECT)) >= 0 &&
+	         !v->vkind)
+	{
+		v->vkind = xv_str(p, o, "kind");
+		v->vtitle = xv_str(p, o, "title");
+		v->vsub = xv_str(p, o, "subtitle");
 	}
 	else if ((o = xv_obj(p, 0, "progress", JSON_OBJECT)) >= 0)
 		xv_counts(v, p, o);
@@ -1465,6 +1477,21 @@ xv_draw_card(struct xv *v, int win)
 			}
 		}
 	}
+	/* the resolver's one line (f): the commit or file, or why not */
+	if (v->vkind)
+	{
+		pk_line();
+		pk_set(pk_p(PK_ACC));
+		pk_txt(v->vkind);
+		pk_set("");
+		pk_txt(" ");
+		pk_txt(v->vtitle);
+		pk_set("2");
+		pk_txt("  ");
+		pk_txt(v->vsub);
+		pk_eol();
+		rows++;
+	}
 	/* the counts by scope */
 	pk_line();
 	snprintf(b, sizeof b, "Mentions: this session %s%lld", ge,
@@ -1613,7 +1640,8 @@ xv_draw(struct xv *v, int force)
 	if (pk_w < 24 || pk_h < 8)
 	{
 		pk_line();
-		pk_txt("X-ray: the window is too small");
+		pk_fit(pk_w >= 30 ? "X-ray: the window is too small" : pk_w >= 16
+		       ? "X-ray: too small" : "too small", pk_w);
 		pk_eol();
 		pk_fend(v->fd, force);
 		return;
@@ -2034,8 +2062,14 @@ xv_key(struct xv *v, int c)
 	}
 	if (v->mode == XV_CARD)
 	{
-		const struct xv_men *m = v->csel < v->nm ? &v->m[v->csel] : NULL;
+		const struct xv_men *m;
 
+		/* xv_draw_card clamps too, but a too-small window skips it */
+		if (v->csel >= v->nm)
+			v->csel = v->nm - 1;
+		if (v->csel < 0)
+			v->csel = 0;
+		m = v->csel < v->nm ? &v->m[v->csel] : NULL;
 		switch (c)
 		{
 		case 'j': case PK_DOWN: v->csel++; break;

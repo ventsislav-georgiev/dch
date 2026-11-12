@@ -18,7 +18,10 @@ Covers:
   4. mutant 11: no corpus ESC, BEL or bidi byte (U+202E, U+061C, U+2028)
      reaches the terminal, the strings show with `?` in their place;
   5. nothing written: no file under the test root changes;
-  6. a resize to a narrow window says so, a resize back redraws;
+  6. a resize to a narrow window says so, a resize back redraws; the
+     message fits down to 5 columns, and k, Up, PgUp and Enter in a card
+     under a too-small window neither crash nor read outside the mentions
+     (QA 1.56.0 MED-V1, NIT-V3);
   7. SIGTERM and SIGINT: the terminal is restored and the view's children
      are gone;
   8. On screen on a live shell: the ref printed in two blocks (underline)
@@ -33,7 +36,8 @@ Covers:
      /tmp, /private/tmp, /var/folders and $TMPDIR hidden, t toggling them,
      the footer saying how many, the tab count the engine's; the filter
      matching the full key (and taking t as text), Enter opening the full
-     key's card; the faint line saying what a ref is, the empty state when
+     key's card, f there showing the resolver's line (QA 1.56.0 NIT-V2);
+     the faint line saying what a ref is, the empty state when
      there are none; On screen with no number until its screen is read,
      then its count, 0 included (on dch-lite: no number, no mirror);
  11. the Chapters tab (#194): a chapter the harness wrote ("auto") hidden,
@@ -467,6 +471,11 @@ def test_refs():
         check("Refs: Enter on the shown temp row opens its card",
               v.wait(b"/tmp/scratch-one.txt  light", start=mark),
               v.out[mark:])
+        mark = len(v.out)
+        v.key(b"f")
+        check("card: f shows the resolver's line (QA 1.56.0 NIT-V2)",
+              v.wait(b"file Outside this session's project  "
+                     b"/tmp/scratch-one.txt", start=mark), v.out[mark:])
         v.key(b"\033", 0.5)
         v.key(b"\033", 0.5)
         v.key(b"t", 0.5)
@@ -841,6 +850,48 @@ def test_resize():
               v.wait(b"Chapters 2", start=mark), v.out[mark:])
         v.key(b"\003")
         check("Ctrl-C quits with 0", v.exit() == 0, v.out[-80:])
+    finally:
+        v.close()
+
+
+def test_small_card():
+    """QA 1.56.0 MED-V1: k, Up and PgUp in a too-small window took the
+    card's selection below 0 and Enter read v->m[-1] (SIGSEGV)."""
+    v = Pty([DCH, "--xray", "xv-cl"])
+    try:
+        v.wait(b"Chapters 2")
+        v.key(b"\t")
+        v.wait(b"#831")
+        mark = len(v.out)
+        v.key(b"\r")
+        check("small card: #831's card opens with its mentions",
+              v.wait(b"Mentions: this session ", start=mark), v.out[mark:])
+        mark = len(v.out)
+        v.resize(6, 20)
+        check("small card: 20 columns says it whole (NIT-V3)",
+              v.wait(b"X-ray: too small", start=mark) and
+              b"the window is" not in v.out[mark:], v.out[mark:])
+        for k in (b"k", b"k", b"k", b"\033[A", b"\033[5~", b"\r"):
+            v.key(k, 0.1)
+        mark = len(v.out)
+        v.resize(30, 100)
+        v.wait(b"You", start=mark)
+        check("small card: k, Up, PgUp then Enter: no crash, Enter reads "
+              "the first mention's chapter", v.reap() is None and
+              b"You" in v.out[mark:],
+              (v.rc, v.out[mark:][-600:]))
+        if v.reap() is not None:
+            return
+        for cols, want in ((12, b"too small"), (5, b"too")):
+            mark = len(v.out)
+            v.resize(6, cols)
+            v.wait(want, start=mark)
+            got = [r for r in rows(v.out[mark:]).values() if r.strip()]
+            check("too small at %d columns: one row, within the width"
+                  % cols, len(got) == 1 and cells(got[0]) <= cols and
+                  want.decode() in got[0], got)
+        v.key(b"qqq")
+        check("small card: q, q, q exits 0", v.exit() == 0, v.out[-80:])
     finally:
         v.close()
 
@@ -1290,6 +1341,7 @@ def main():
         fixture_auto()
         test_auto()
         test_resize()
+        test_small_card()
         shell()
         test_signals()
         test_on_screen()

@@ -17,7 +17,9 @@ Covers:
      list, the Refs list, the card (light, `f` full scan), the reader, q
      exits 0; the corpus's ESC, BEL and bidi bytes never reach the
      terminal; every query ran on the host as its own ctl (follow, ref,
-     ref --full, chapter);
+     ref --full, chapter); k, Up, PgUp and Enter in its card under a
+     too-small window neither crash nor read outside the mentions (QA
+     1.56.0 MED-V1);
   2. On screen of srv:xv-sh, a live shell on the host: no number on its tab
      before the screen is read (#193), the screen read with
      ctl --read xv-sh --ansi, o/r#41 gets hint a, typing it opens
@@ -177,6 +179,10 @@ class Pty:
             pass    # it has exited: the checks say so
         self.pump(settle)
 
+    def resize(self, rows, cols):
+        fcntl.ioctl(self.fd, termios.TIOCSWINSZ,
+                    struct.pack("HHHH", rows, cols, 0, 0))
+
     def exit(self, secs=10.0):
         end = time.time() + secs
         while self.reap() is None and time.time() < end:
@@ -333,6 +339,37 @@ def test_view():
           "for an ended session", ctls("--xray") - n0["--xray"] == 4 and
           ctls("--read") == n0["--read"],
           (ctls("--xray") - n0["--xray"], ctls("--read") - n0["--read"]))
+
+
+def test_small_card():
+    """QA 1.56.0 MED-V1 over a host:name view: k, Up and PgUp in a
+    too-small window took the card's selection below 0 and Enter read
+    v->m[-1] (SIGSEGV)."""
+    v = Pty([DCH, "--xray", "srv:xv-cl"])
+    try:
+        v.wait(b"Chapters 2")
+        v.key(b"\t")
+        v.wait(b"#831")
+        mark = len(v.out)
+        v.key(b"\r")
+        check("small card: srv:xv-cl's #831 card opens with its mentions",
+              v.wait(b"Mentions: this session ", start=mark), v.out[mark:])
+        mark = len(v.out)
+        v.resize(6, 20)
+        v.wait(b"too small", start=mark)
+        for k in (b"k", b"k", b"k", b"\033[A", b"\033[5~", b"\r"):
+            v.key(k, 0.1)
+        mark = len(v.out)
+        v.resize(30, 100)
+        v.wait(b"You", start=mark)
+        check("small card: k, Up, PgUp then Enter on srv:xv-cl: no crash, "
+              "Enter reads the first mention's chapter from the host",
+              v.reap() is None and b"You" in v.out[mark:],
+              (v.rc, v.out[mark:][-600:]))
+        v.key(b"qqq")
+        check("small card: q, q, q exits 0", v.exit() == 0, v.out[-80:])
+    finally:
+        v.close()
 
 
 # ---- 2: On screen of a live shell on the host -------------------------------
@@ -948,6 +985,7 @@ def main():
         shell()
         hosts("srv=127.0.0.1:%d" % port)
         test_view()
+        test_small_card()
         test_on_screen()
         test_picker(port)
         test_open()
