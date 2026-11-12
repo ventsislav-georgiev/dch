@@ -898,11 +898,13 @@ The view has three tabs:
   rows). A ref with a definition or two or more mentions is bold. A file
   under the session's directory (top right) shows relative to it, else one
   under your home starts with `~`. A path too long for the row keeps its
-  end, the `…` in front; a long URL drops its `https://` and keeps its host
-  and its end. Files under `/tmp`, `/private/tmp`, `/var/folders` and
-  `$TMPDIR` (a remote view: not `$TMPDIR`, which is this machine's) are
-  scratch: hidden until `t` shows them, and the footer says how many are
-  hidden. The tab's count is every ref, hidden ones included. `/` filters on
+  end, the `…` in front; a long URL drops its `https://` and always starts
+  with its host: the host, or its first half-row if longer, then the `…` and
+  the URL's end (a host wider than the row is cut at its end). Files under
+  `/tmp`, `/private/tmp`, `/var/folders` and `$TMPDIR` (a remote view: not
+  `$TMPDIR`, which is this machine's) are scratch, except the session's own
+  project files: hidden until `t` shows them, and the footer says how many
+  are hidden. The tab's count is every ref, hidden ones included. `/` filters on
   the full ref. `Enter` opens its card.
 - **On screen**: the session's screen as it is now, with a hint label (`a`,
   `s`, `d`, …) on each ref the Refs tab shows bold. Typing a label opens that

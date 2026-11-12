@@ -1224,20 +1224,30 @@ xv_under(const char *s, const char *d)
 }
 
 /* A file under a temp directory: a scratch file, hidden by default. A
-** remote view's $TMPDIR is this machine's, not its host's: not asked. */
+** remote view's $TMPDIR is this machine's, not its host's: not asked. A
+** file of the session's own project is never scratch (#220): by text, and
+** in a local view by realpath too (/tmp is /private/tmp on macOS). */
 static int
 xv_temp(const struct xv *v, const struct xv_ref *r)
 {
 	static const char *const d[] = { "/tmp", "/private/tmp", "/var/folders",
 		"/private/var/folders" };
+	char lr[PATH_MAX], rr[PATH_MAX];
 	size_t k;
+	int t = 0;
 
 	if (strcmp(r->shape, "file"))
 		return 0;
-	for (k = 0; k < sizeof d / sizeof *d; k++)
-		if (xv_under(r->text, d[k]))
-			return 1;
-	return !v->hl && xv_under(r->text, getenv("TMPDIR"));
+	for (k = 0; k < sizeof d / sizeof *d && !t; k++)
+		t = xv_under(r->text, d[k]) != 0;
+	if (!t && (v->hl || !xv_under(r->text, getenv("TMPDIR"))))
+		return 0;
+	if (xv_under(r->text, v->label))
+		return 0;
+	return v->hl || !v->label || v->label[0] != '/' ||
+	       !realpath(v->label, lr) ||
+	       !(xv_under(r->text, lr) ||
+	         (realpath(r->text, rr) && xv_under(rr, lr)));
 }
 
 static const struct xv_ref *xv_sort_rf;
@@ -1366,7 +1376,8 @@ xv_tail(const char *s, size_t keep, int w)
 }
 
 /* A ref's text in w cells: a file under the project relative to it, else
-** under HOME from ~; a URL cut keeps its host and its end, not its scheme. */
+** under HOME from ~; a URL cut keeps its host's start and its end, not its
+** scheme. */
 static void
 xv_reftext(const struct xv *v, const struct xv_ref *r, int w)
 {
@@ -1387,8 +1398,16 @@ xv_reftext(const struct xv *v, const struct xv_ref *r, int w)
 	{
 		s = u + 3;
 		keep = strcspn(s, "/");
-		if (xv_fitlen(s, keep, w / 2) < keep)
-			keep = 0;
+		/* #220: the first cells are always the host's start, so a path
+		** can never pose as the host. A host wider than the row is cut
+		** at its end; one wider than half keeps its first w/2 cells;
+		** either way the ellipsis then the URL's tail. */
+		if (xv_fitlen(s, keep, w) < keep)
+		{
+			pk_fit(s, w);
+			return;
+		}
+		keep = xv_fitlen(s, keep, w / 2);
 	}
 	xv_tail(s, keep, w);
 }

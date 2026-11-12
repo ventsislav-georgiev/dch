@@ -523,6 +523,96 @@ def test_refs():
         v.close()
 
 
+# ---- Refs: a project under $TMPDIR, a URL's host (#220) ---------------------
+
+TPD = os.path.join(T, "tmpd")      # the view's $TMPDIR
+TPP = os.path.join(TPD, "proj")    # a project inside it
+TPL = os.path.join(T, "plink")     # a symlink to it, another session's cwd
+HOSTILE = "https://github.com." + "a" * 50 + ".example/github.com/o/r/pull/1"
+HUGE = "https://" + "z" * 120 + ".example/x/y/end"
+IDN = "https://x" + "\u4f8b" * 25 + "e\u0301" * 6 + ".jp/" + "p/" * 30 + "fin"
+
+
+def fixture_tmp():
+    os.makedirs(os.path.join(TPP, "src"))
+    for f in ("main.c", "real.c"):
+        open(os.path.join(TPP, "src", f), "w").close()
+    os.symlink(TPP, TPL)
+    cfg = os.path.join(HOME, ".claude")
+    sockdir = os.path.join(T, "dch-%d" % os.getuid())
+    hdir = os.path.join(T, "state", "dch", "sessions",
+                        sockdir.replace("/", "-"))
+    for name, sid, cwd, said in (
+            ("xv-tp", "11111111-2222-4333-8444-5555555555c1", TPP,
+             "edit %s/src/main.c, scratch in %s/other.txt; see %s, %s "
+             "and %s" % (TPP, TPD, HOSTILE, HUGE, IDN)),
+            ("xv-tl", "11111111-2222-4333-8444-5555555555c2", TPL,
+             "edit %s/src/real.c, scratch in %s/other.txt" % (TPP, TPD))):
+        pdir = os.path.join(cfg, "projects", cwd.replace("/", "-"))
+        os.makedirs(pdir, exist_ok=True)
+        with open(os.path.join(pdir, sid + ".jsonl"), "w") as f:
+            f.write(json.dumps({"type": "user", "cwd": cwd,
+                                "timestamp": "2026-11-10T10:00:00Z",
+                                "message": {"content": "tmp"}}) + "\n")
+            f.write(json.dumps({"type": "assistant", "message": {
+                "content": [{"type": "text", "text": said}]}}) + "\n")
+        rec = {"name": name, "cwd": cwd, "end": "exited",
+               "argv": ["claude"], "started": 1794299400,
+               "updated": 1794300000, "ended": 1794300000,
+               "sock_dir": sockdir,
+               "agent": {"session_id": sid, "cwd": cwd, "config_dir": cfg}}
+        with open(os.path.join(hdir, name + ".json"), "w") as f:
+            f.write(json.dumps(rec) + "\n")
+
+
+def refs_tab(name):
+    v = Pty([DCH, "--xray", name], env={"TMPDIR": TPD + "/"})
+    v.wait(b"Chapters 1")
+    v.pump(0.5)
+    mark = len(v.out)
+    v.key(b"\t", 1.0)
+    scr = rows(v.out[mark:])
+    return v, scr, "\n".join(scr[k] for k in sorted(scr))
+
+
+def test_tmp():
+    v, scr, text = refs_tab("xv-tp")
+    try:
+        check("Refs #220: a project under $TMPDIR shows its own file, only "
+              "the scratch file outside it is hidden",
+              "file    src/main.c" in text and "other.txt" not in text and
+              "t temp files 1 hidden" in text, text)
+        url = [r.rstrip() for r in scr.values() if "url     " in r]
+        hit = [r for r in url if ".example/github.com/o/r/pull/1" in r]
+        check("Refs #220: a host wider than half the row keeps its start, "
+              "then the ellipsis and the URL's end",
+              hit and re.search("url     github\\.com\\.a+" + ELL +
+                                "a*\\.example/github\\.com/o/r/pull/1$",
+                                hit[0]), url)
+        big = [r for r in url if "zzzz" in r]
+        check("Refs #220: a host wider than the row is cut at its end",
+              big and re.search("url     z+" + ELL + "$", big[0]) and
+              "/end" not in big[0] and cells(big[0]) <= 100,
+              (big, [cells(r) for r in big]))
+        idn = [r for r in url if "fin" in r]
+        check("Refs #220: a wide-character host keeps its start within the "
+              "width", idn and "url     x\u4f8b" in idn[0] and
+              re.search(ELL, idn[0]) and cells(idn[0]) <= 100,
+              (url, [cells(r) for r in url]))
+        v.key(b"q")
+    finally:
+        v.close()
+    v, scr, text = refs_tab("xv-tl")
+    try:
+        check("Refs #220: a project's file is not scratch by realpath either "
+              "(the session's cwd is a symlink to it)",
+              re.search(r"file    \S*src/real\.c", text) and
+              "t temp files 1 hidden" in text, text)
+        v.key(b"q")
+    finally:
+        v.close()
+
+
 # ---- the Chapters tab: auto chapters, o (#194) ------------------------------
 
 ASID = "11111111-2222-4333-8444-5555555555a4"
@@ -1438,6 +1528,8 @@ def main():
         test_view()
         fixture_refs()
         test_refs()
+        fixture_tmp()
+        test_tmp()
         fixture_auto()
         test_auto()
         test_compact()

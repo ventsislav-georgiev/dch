@@ -779,11 +779,12 @@ a ref with a definition or two or more mentions is bold;
 a file under the session's directory shows relative to it, else one under
 HOME from
 .BR ~ ;
-a path too long keeps its end, the ellipsis in front, a long URL its host
-and its end;
+a path too long keeps its end, the ellipsis in front, a long URL always
+starts with its host (the first half of the row of a long one, cut at its
+end when wider than the row) and keeps its end;
 files under /tmp, /private/tmp, /var/folders and
 .B $TMPDIR
-(not on a remote view) are hidden until
+(not on a remote view), except the session's own project files, are hidden until
 .B t
 shows them, the footer saying how many; the tab counts every ref;
 \fB/\fR filters on the full ref, \fBEnter\fR opens its card) and
