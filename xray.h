@@ -53,6 +53,8 @@ struct xr_chapter
 	char title[XR_TITLE_MAX * 4 + 1];
 	const char *kind;		/* "prompt", "command", "compact" */
 	int partial, error;
+	int harness;			/* "auto": the prompt is harness text (#192) */
+	char summary[XR_TITLE_MAX * 4 + 1];	/* its <summary>, else <event> */
 };
 
 /* The newest XR_CHAPTERS, oldest first from `start` (a ring). `total`

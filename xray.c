@@ -1749,6 +1749,58 @@ command(const char *s, size_t n, char *title, size_t titlesz)
 	return 1;
 }
 
+/* harness(): `<task-notification>…</task-notification>` and
+** `<system-reminder>…</system-reminder>` blocks and nothing else, the text
+** Claude Code writes as a user record (#192). 1 with the first notification's
+** <summary>, else its <event>, as a title in sum[] ("" for neither), else 0. */
+static int
+harness(const char *s, size_t n, char *sum, size_t sumsz)
+{
+	static const char *const H[] = { "task-notification", "system-reminder" };
+	const char *t, *e, *v = NULL;
+	size_t tl = n, i, a, k, ol = 0, vl = 0;
+	char o[24], c[24];
+	int first = 1;
+
+	sum[0] = '\0';
+	t = trim(s, &tl);
+	if (!tl)
+		return 0;
+	for (i = 0; i < tl; i += a)
+	{
+		for (k = 0; k < 2; k++)
+		{
+			ol = (size_t)snprintf(o, sizeof o, "<%s>", H[k]);
+			if (i + ol <= tl && !memcmp(t + i, o, ol))
+				break;
+		}
+		if (k < 2)
+		{
+			snprintf(c, sizeof c, "</%s>", H[k]);
+			if (!(e = find(t, tl, c, i + ol)))
+				return 0;
+			if (!k && first)
+			{
+				first = 0;
+				if (!(v = tag(t + i + ol, (size_t)(e - t) - i - ol,
+				              "summary", &vl)) || !vl)
+					v = tag(t + i + ol, (size_t)(e - t) - i - ol, "event",
+					        &vl);
+				if (v && !vl)
+					v = NULL;
+			}
+			i = (size_t)(e - t) + strlen(c);
+			a = 0;
+			continue;
+		}
+		if (!u_space(u8_next((const unsigned char *)t + i, tl - i, &a)))
+			return 0;
+	}
+	if (v)
+		xr_title(v, vl | XR_WHOLE, sum, sumsz);
+	return 1;
+}
+
 /* The title (xr_title) is settled once the first non-blank line has ended or
 ** holds XR_TITLE_MAX non-blank scalars: each of those is one title scalar. */
 static int
@@ -3952,6 +4004,8 @@ struct xr_claude
 	int turn, lead, bare;	/* bare: the last main block is a compaction
 				** with no summary (mergeSummary's target) */
 	int titled;		/* the open chapter has its prompt */
+	const char *harness;	/* the prompt being blocked is harness text:
+				** its summary ("" for none), else NULL */
 	struct pend pend[XR_PENDING + 1];
 	int npend;
 	char *order[XR_PENDING + 2];	/* pendingOrder, ids may repeat */
@@ -4051,6 +4105,8 @@ main_block(struct xr_claude *d, int b, const char *kind, const char *title)
 		/* a partial first chapter takes the prompt riding in its lead */
 		x->kind = kind;
 		snprintf(x->title, sizeof x->title, "%s", title);
+		if ((x->harness = d->harness != NULL))
+			snprintf(x->summary, sizeof x->summary, "%s", d->harness);
 		d->titled = 1;
 	}
 	if (b != B_PROMPT && b != B_IMAGE)
@@ -4958,9 +5014,10 @@ ent_command(struct xr_entries *e, const char *t, size_t tl)
 static void
 user_text(struct xr_claude *d, const char *agent, char *s, size_t n)
 {
-	char title[XR_TITLE_MAX * 4 + 1], *u = NULL;
+	char title[XR_TITLE_MAX * 4 + 1], sum[XR_TITLE_MAX * 4 + 1], *u = NULL;
 	size_t ul = 0, tl = n;
 	const char *t, *args;
+	int h;
 
 	if (command(s, n, title, sizeof title))
 	{
@@ -4975,13 +5032,16 @@ user_text(struct xr_claude *d, const char *agent, char *s, size_t n)
 	}
 	if (blank(s, n))
 		return;
+	h = harness(s, n, sum, sizeof sum);
 	if ((d->rk.hit || d->want) && (u = malloc(n + 1)))
 	{
 		memcpy(u, s, n);
 		ul = unwrap(u, n, XR_TEXT_CAP);
 	}
 	xr_title(s, unwrap(s, n, 0), title, sizeof title);	/* s is spent */
+	d->harness = h ? sum : NULL;
 	block(d, agent, B_PROMPT, "prompt", title);
+	d->harness = NULL;
 	refs_text(d, u, ul, XR_TEXT_CAP, XR_PROSE);
 	if (ent_here(d, agent))
 	{
@@ -6382,6 +6442,20 @@ put_or_null(FILE *f, const char *s)
 		fputs("null", f);
 }
 
+/* #192: additive, so a chapter that is not auto prints neither key. */
+static void
+put_auto(FILE *m, const struct xr_chapter *c)
+{
+	if (!c->harness)
+		return;
+	fputs(",\"auto\":true", m);
+	if (c->summary[0])
+	{
+		fputs(",\"summary\":", m);
+		xr_put_str(m, c->summary);
+	}
+}
+
 static void
 put_chapter(FILE *m, const struct xr_chapter *c, uint64_t i, int comma)
 {
@@ -6395,9 +6469,11 @@ put_chapter(FILE *m, const struct xr_chapter *c, uint64_t i, int comma)
 		fputs("null", m);
 	fputs(",\"title\":", m);
 	xr_put_str(m, c->title);
-	fprintf(m, ",\"kind\":\"%s\",\"partial\":%s,\"error\":%s}",
+	fprintf(m, ",\"kind\":\"%s\",\"partial\":%s,\"error\":%s",
 	        c->kind, c->partial ? "true" : "false",
 	        c->error ? "true" : "false");
+	put_auto(m, c);
+	fputc('}', m);
 }
 
 static const struct xr_index *ref_sort_x;
@@ -6903,7 +6979,7 @@ xr_entries_begin(struct xr_entries *e, const char *anchor,
                  const char *session, size_t out)
 {
 	/* the head's room: the session and its id escaped (6 bytes a byte at
-	** worst), a 128-byte anchor, a 120-scalar title, the fixed keys */
+	** worst), a 128-byte anchor, a 120-scalar title and summary, the keys */
 	size_t head = 6 * (strlen(session) + 64) + 2048;
 
 	memset(e, 0, sizeof *e);
@@ -6950,7 +7026,9 @@ xr_chapter_print(FILE *f, const char *session, const char *session_id,
 		fprintf(f, "%lld", c->at);
 	else
 		fputs("null", f);
-	fprintf(f, ",\"kind\":\"%s\",\"entries\":[", c->kind);
+	fprintf(f, ",\"kind\":\"%s\"", c->kind);
+	put_auto(f, c);
+	fputs(",\"entries\":[", f);
 	if (e->len)
 		fwrite(e->buf, 1, e->len, f);
 	fprintf(f, "],\"truncated\":%s}\n", e->truncated ? "true" : "false");

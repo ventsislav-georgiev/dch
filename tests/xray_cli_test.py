@@ -2372,6 +2372,44 @@ def test_screen_agent():
             fl.stop()
 
 
+def test_auto():
+    """#192: a harness-written prompt (a task-notification) is auto and
+    carries its summary in --json and --follow's snapshot; a prompt is
+    neither."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, RSID + ".jsonl")
+    tn = ("<task-notification>\n<task-id>b1</task-id>\n<summary>Background "
+          "job done</summary>\n</task-notification>")
+    with open(tp, "w") as f:
+        for o in ({"type": "user", "cwd": "/home/demo/proj",
+                   "message": {"content": "start the job"}},
+                  {"type": "assistant", "message": {"content": [
+                      {"type": "text", "text": "ok"}]}},
+                  {"type": "user", "origin": {"kind": "task-notification"},
+                   "message": {"content": tn}}):
+            f.write(json.dumps(o) + "\n")
+    history("xr-auto", RSID, cfg)
+    try:
+        rc, o, err = xray("xr-auto", "--json")
+        ch = (o or {}).get("chapters", [])
+        check("auto: --json marks the notification auto with its summary, "
+              "the prompt neither",
+              rc == 0 and len(ch) == 2 and "auto" not in ch[0] and
+              "summary" not in ch[0] and ch[1].get("auto") is True and
+              ch[1].get("summary") == "Background job done" and
+              ch[1]["title"] == "<task-notification>", (rc, o, err))
+        r = dch("--xray", "xr-auto", "--follow", "--json")
+        ls = ref_lines(r.stdout) or []
+        check("auto: --follow's snapshot carries the same",
+              r.returncode == 0 and len(ls) == 1 and
+              ls[0] == {"schema": 1, "snapshot": o},
+              (r.returncode, r.stdout[-400:], r.stderr))
+    finally:
+        os.unlink(tp)
+
+
 def test_follow_history():
     cfg = os.path.join(HOME, ".claude")
     pdir = os.path.join(cfg, "projects", "-home-demo-proj")
@@ -3196,6 +3234,7 @@ def main():
         test_claude_caps()
         test_shell_caps()
         test_follow_history()
+        test_auto()
         test_follow_claude()
         test_follow_late()
         test_follow_cap()

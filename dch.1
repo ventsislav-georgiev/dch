@@ -852,6 +852,21 @@ or
 .B partial
 and
 .BR error ;
+a Claude Code prompt the harness wrote (wholly
+.B <task\-notification>
+and
+.B <system\-reminder>
+blocks) also has
+.B auto
+.RB ( true )
+and, from the first notification's
+.B <summary>
+or else its
+.BR <event> ,
+a
+.B summary
+made as a title is; its title is unchanged, and no other chapter has
+either key;
 .B other_projects
 counts the other sessions with a transcript or a live Codex rollout in
 another project directory
@@ -1137,7 +1152,12 @@ prints one chapter's entries as one object
 .BR at ,
 .BR kind ,
 .BR entries ,
-.BR truncated ).
+.BR truncated ,
+and
+.B auto
+and
+.B summary
+when the chapter has them).
 .I anchor
 is a chapter's
 .B anchor

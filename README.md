@@ -1154,6 +1154,13 @@ The corpus:
     `s<seq of the prompt record>` for a shell.
   - `kind` is `prompt`, `command` or `compact`.
   - `title` is at most 120 Unicode scalars.
+  - `auto` (`true`) and `summary` are there only on a Claude Code prompt that
+    the harness wrote, not the user: one made wholly of
+    `<task-notification>` and `<system-reminder>` blocks. `summary` is the
+    first notification's `<summary>`, else its `<event>`, made as a `title`
+    is (whitespace collapsed, at most 120 scalars); it is left out when
+    there is neither. The `title` stays as it was. Any other chapter has
+    neither key.
 - **`refs`.** The refs the corpus mentions (see [Refs](#refs)), at most 2000
   keys. The rest are counted in `dropped_keys`, exactly up to 32768 distinct
   keys and as a lower bound past that. `[]` for corpus `none`.
@@ -1487,7 +1494,8 @@ Rules for shells and endings:
   `--restart`), or when the reader closes the pipe, idle or not.
 
 `dch --xray <n> --chapter <anchor> --json` prints one chapter's entries as
-one object: `{"schema":1,"session","session_id","anchor","title","at","kind","entries":[…],"truncated":bool}`.
+one object: `{"schema":1,"session","session_id","anchor","title","at","kind","entries":[…],"truncated":bool}`,
+with `auto` and `summary` after `kind` when the chapter list has them.
 `<anchor>` is a chapter's `anchor` from `--json`: 1 to 128 bytes of
 `A-Z`, `a-z`, `0-9`, `:`, `_`, `.` and `-`, else exit 2 with `dch: bad
 anchor`. dch reads the session's chapters again and answers only when one of

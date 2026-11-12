@@ -1583,6 +1583,184 @@ out:
 	xr_sent_free(s);
 }
 
+/* #192: a prompt that is wholly harness text (<task-notification>,
+** <system-reminder>) is auto and carries its <summary>, else its <event>,
+** made as a title is; the title stays; JSON adds "auto"/"summary" only then */
+#define TN(b) "<task-notification>\\n<task-id>b1</task-id>\\n" b \
+              "\\n</task-notification>"
+
+static void
+t_auto(void)
+{
+	struct xr_chapters c, c1;
+	struct xr_answer a;
+	struct xr_entries e;
+	struct xr_index *ix = xr_index_new();
+	struct xr_sent *s = xr_sent_new();
+	char big[600], want[200], *b = NULL, *d;
+	size_t bl = 0;
+	FILE *f;
+
+	memset(want, 'x', 130);
+	want[130] = '\0';
+	snprintf(big, sizeof big, U(TN("<summary>%s</summary>")), want);
+	begin();
+	line(U(TN("<status>completed</status>\\n<summary>Build finished:  3 "
+	          "passed</summary>")));
+	line(A("x"));
+	line(U(TN("<event>[monitor] CI went green</event>")));
+	line(A("x"));
+	line(U(TN("<summary> \\t </summary>\\n<event>only the event</event>")));
+	line(A("x"));
+	line(U(TN("<status>killed</status>")));
+	line(A("x"));
+	line(U("why did this fail?\\n" TN("<summary>quoted</summary>")));
+	line(A("x"));
+	line(U(TN("<summary>s</summary>") "\\nplease retry"));
+	line(A("x"));
+	line(U(TN("<summary>\\u001b[31mred\\u0007\\u0000 \\u202eevil\\tx\\ny"
+	          "</summary>")));
+	line(A("x"));
+	line(big);
+	line(A("x"));
+	line("{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"text\","
+	     "\"text\":\"" TN("<summary>from an array</summary>") "\"}]}}");
+	line(A("x"));
+	line(U(TN("<summary>with a reminder</summary>")
+	       "\\n<system-reminder>r</system-reminder>\\n"));
+	line(A("x"));
+	line(U("<task-notification><summary>unclosed</summary>"));
+	line(A("x"));
+	line(U("a real prompt"));
+	line(U(TN("<summary>rides in the prompt's lead</summary>")));
+	line(A("x"));
+	line(U(" <system-reminder>r</system-reminder>\\n"));
+	line(A("x"));
+	line(U(TN("<status>killed</status>") TN("<summary>second</summary>")));
+	line(A("x"));
+	end(&c);
+	CHECK("auto: 14 chapters", c.n == 14);
+	if (c.n != 14)
+	{
+		xr_chapters_free(&c);
+		goto out;
+	}
+	CHECK("auto: a notification with a summary: auto, the summary made as "
+	      "a title, the title and kind unchanged",
+	      xr_chapter_at(&c, 0)->harness &&
+	      !strcmp(xr_chapter_at(&c, 0)->summary, "Build finished: 3 passed") &&
+	      !strcmp(xr_chapter_at(&c, 0)->title, "<task-notification>") &&
+	      !strcmp(xr_chapter_at(&c, 0)->kind, "prompt"));
+	CHECK("auto: an event only: the event",
+	      xr_chapter_at(&c, 1)->harness &&
+	      !strcmp(xr_chapter_at(&c, 1)->summary, "[monitor] CI went green"));
+	CHECK("auto: a blank summary falls to the event",
+	      xr_chapter_at(&c, 2)->harness &&
+	      !strcmp(xr_chapter_at(&c, 2)->summary, "only the event"));
+	CHECK("auto: neither: auto, no summary",
+	      xr_chapter_at(&c, 3)->harness && !xr_chapter_at(&c, 3)->summary[0]);
+	CHECK("auto: a user prompt quoting a notification is not auto",
+	      !xr_chapter_at(&c, 4)->harness &&
+	      !strcmp(xr_chapter_at(&c, 4)->title, "why did this fail?") &&
+	      !xr_chapter_at(&c, 4)->summary[0]);
+	CHECK("auto: a notification followed by user text is not auto",
+	      !xr_chapter_at(&c, 5)->harness);
+	CHECK("auto: a hostile summary: whitespace collapsed, NUL to U+FFFD, "
+	      "as a title",
+	      xr_chapter_at(&c, 6)->harness &&
+	      !strcmp(xr_chapter_at(&c, 6)->summary,
+	              "\x1b[31mred\x07\xef\xbf\xbd \xe2\x80\xae" "evil x y"));
+	want[XR_TITLE_MAX] = '\0';
+	CHECK("auto: a summary over 120 scalars is cut at 120",
+	      xr_chapter_at(&c, 7)->harness &&
+	      !strcmp(xr_chapter_at(&c, 7)->summary, want));
+	CHECK("auto: a content array's text block",
+	      xr_chapter_at(&c, 8)->harness &&
+	      !strcmp(xr_chapter_at(&c, 8)->summary, "from an array"));
+	CHECK("auto: a notification and a system-reminder are harness text",
+	      xr_chapter_at(&c, 9)->harness &&
+	      !strcmp(xr_chapter_at(&c, 9)->summary, "with a reminder"));
+	CHECK("auto: an unclosed notification is not auto",
+	      !xr_chapter_at(&c, 10)->harness);
+	CHECK("auto: a notification in a prompt's lead leaves it the prompt's",
+	      !xr_chapter_at(&c, 11)->harness &&
+	      !strcmp(xr_chapter_at(&c, 11)->title, "a real prompt"));
+	CHECK("auto: a system-reminder alone (not isMeta): auto, no summary",
+	      xr_chapter_at(&c, 12)->harness && !xr_chapter_at(&c, 12)->summary[0]);
+	CHECK("auto: only the first notification's summary or event counts",
+	      xr_chapter_at(&c, 13)->harness && !xr_chapter_at(&c, 13)->summary[0]);
+
+	/* the snapshot row, the --chapter head and a --follow chapter line */
+	memset(&a, 0, sizeof a);
+	a.session = a.session_id = "s";
+	a.corpus = "claude";
+	a.project = a.project_label = "";
+	a.available = a.complete = 1;
+	a.lines = -1;
+	a.ch = &c;
+	if ((f = open_memstream(&b, &bl)))
+	{
+		CHECK("auto: printed", xr_print(f, &a) == 0);
+		fclose(f);
+	}
+	CHECK("auto: the row carries auto and the summary after error",
+	      b && strstr(b, "\"title\":\"<task-notification>\",\"kind\":"
+	                  "\"prompt\",\"partial\":false,\"error\":false,"
+	                  "\"auto\":true,\"summary\":\"Build finished: 3 "
+	                  "passed\"}"));
+	CHECK("auto: no summary key when there is none",
+	      b && strstr(b, "\"error\":false,\"auto\":true},"));
+	CHECK("auto: a chapter that is not auto prints neither key",
+	      b && strstr(b, "\"title\":\"why did this fail?\",\"kind\":"
+	                  "\"prompt\",\"partial\":false,\"error\":false},"));
+	CHECK("auto: the hostile summary is quoted as a title (no raw ESC, "
+	      "BEL or U+202E)",
+	      b && strstr(b, "\"summary\":\"\\u001b[31mred\\u0007\xef\xbf\xbd "
+	                  "\\u202eevil x y\"") && !strchr(b, 0x1b) &&
+	      !strchr(b, 0x07) && !strstr(b, "\xe2\x80\xae"));
+	free(b);
+	b = NULL;
+	memset(&e, 0, sizeof e);
+	if ((f = open_memstream(&b, &bl)))
+	{
+		CHECK("auto: --chapter head printed",
+		      xr_chapter_print(f, "s", "i", xr_chapter_at(&c, 1), &e) == 0);
+		fclose(f);
+	}
+	CHECK("auto: --chapter's head carries them after kind",
+	      b && strstr(b, "\"kind\":\"prompt\",\"auto\":true,\"summary\":"
+	                  "\"[monitor] CI went green\",\"entries\":["));
+	free(b);
+	b = NULL;
+	if ((f = open_memstream(&b, &bl)))
+	{
+		xr_chapter_print(f, "s", "i", xr_chapter_at(&c, 4), &e);
+		fclose(f);
+	}
+	CHECK("auto: --chapter's head of a prompt has neither",
+	      b && strstr(b, "\"kind\":\"prompt\",\"entries\":[") &&
+	      !strstr(b, "\"auto\""));
+	free(b);
+	if (ix && s)
+	{
+		/* the first four as the snapshot, then all: delta lines */
+		c1 = c;
+		c1.n = c1.total = 4;
+		a.ch = &c1;
+		free(follow_cut_out(ix, s, &a, 1));
+		a.ch = &c;
+		d = follow_cut_out(ix, s, &a, 0);
+		CHECK("auto: a --follow chapter line carries them",
+		      d && strstr(d, "{\"schema\":1,\"chapter\":") &&
+		      strstr(d, "\"auto\":true,\"summary\":\"from an array\"}}"));
+		free(d);
+	}
+	xr_chapters_free(&c);
+out:
+	xr_index_free(ix);
+	xr_sent_free(s);
+}
+
 /* ---- Codex (7.4, K9) ---------------------------------------------------- */
 
 struct cxkeys
@@ -3561,6 +3739,7 @@ main(int argc, char **argv)
 	t_index();
 	t_caps();
 	t_follow_cut();
+	t_auto();
 	t_excl();
 	t_cancel();
 	t_scan_caps();
