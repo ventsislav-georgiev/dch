@@ -173,6 +173,7 @@ hint.
 | `R` | restart the agent (`--restart <n> --include-agents -f`), asks first | |
 | `S` | stop (`--stop`), asks first | |
 | `x` | kill (`-k`), asks first | |
+| `X` | open the session's [X-ray view](#x-ray-view-dch---xray-n); `q` comes back (a remote row: not yet) | the same, for the row's record |
 | `a` | allow a plain Yes/No permission prompt (presses `1`, Yes), asks first; a question form or any other prompt is refused: attach to answer it | |
 | `b` / `B` | restart stale agents / restart all agents (force), asks first | |
 | `s` | sort by activity (blocked, working, done, idle, newest first) or by name (`a2` before `a10`); saved as `picker_sort`, so the next picker starts in it | |
@@ -373,6 +374,7 @@ dch --say <name>...|--all [--json] -- <text...>  # message each Claude Code, bus
 dch --stop <name>...|--all [--json]             # pause Claude, end the session; --revive wakes it
 dch --config [<key> [<value>|--unset]]          # show, read or set the config file
 dch --shell-init zsh|bash|fish                 # OSC 133 prompt marks for your rc file (X-ray)
+dch --xray <n>                                  # the X-ray view: chapters, refs, on-screen hints (full screen)
 dch --xray <n> --json                           # a session's chapters (prompts / commands) as one JSON object
 dch --xray <n> --clear --json                   # empty a shell session's X-ray ring
 dch --xray <n> --follow --json                  # the same object, then its deltas as NDJSON until the session ends
@@ -419,7 +421,7 @@ someone is watching is invisible to them.
 | Verb | Does | Exit codes |
 | --- | --- | --- |
 | `--spawn <n> [--size CxR] [--env K=V]... [cmd...]` | Start headless session (default: `$SHELL`, 80x24 or `$COLUMNS`/`$LINES`). `--env` (max 32, first `=` splits) adds variables to the child; reserved keys (`DCH_SESSION`, `TERM` fixup) always win. Like `--revive` (and a plain `dch <new>`), it drops the calling Claude Code session's identity (`CLAUDECODE`, `CLAUDE_CODE_*` session vars), plus `GIT_EDITOR` and the other harness vars when `CLAUDECODE` is set, and sets `LC_TERMINAL=ghostty` unless the caller has it (dch keeps OSC 8 links, but under `TERM=xterm-256color` with no `TERM_PROGRAM` Claude Code would strip its statusline's, and `LC_TERMINAL` is the one signal its check reads that supports-hyperlinks and other Node CLIs ignore; ssh sends it on, by macOS's default `SendEnv LC_*`). Like any session variable it reaches every program in the session, not only Claude Code; a tool that keys on `ghostty` may assume Ghostty-only features (kitty graphics, for one) that the terminal you attach from may lack. dch sets no `FORCE_HYPERLINK`: those CLIs honour it before they check for a terminal, so it put OSC 8 into pipes and files (`stylelint t.css > out`, an agent's Bash tool); a caller's own value still reaches the session. An explicit `--env` (`--env LC_TERMINAL=` included) still wins. Prints the name. A program that cannot be executed is an error (`dch: <n>: <cmd>: <reason>`); one that runs and exits at once is not. | 0 ok, 1 exists/failed/not executable/bad --env |
-| `--xray <n> --json` | One JSON object: the session's corpus, chapters and refs (see [X-ray queries](#x-ray-queries---xray)). `--clear` empties a shell's ring instead; `--ref` streams one ref's lines; `--follow` streams the object and then its changes; `--chapter` prints one chapter's entries. `<n>` as `host:name` runs it on that host (dch serve 1.55.0+); `host:name --requests --json` holds one connection there for many requests read off standard input. Must be the first argument. | 0 ok, 1 no such session/ambiguous/no corpus, 2 usage, 3 read failure; remote: 4 gate, 6 host lacks `xray`, 7 unreachable |
+| `--xray <n> --json` | One JSON object: the session's corpus, chapters and refs (see [X-ray queries](#x-ray-queries---xray)). Without `--json` or any other flag: the full-screen [X-ray view](#x-ray-view-dch---xray-n) (local only; a non-terminal stdout exits 2). `--clear` empties a shell's ring instead; `--ref` streams one ref's lines; `--follow` streams the object and then its changes; `--chapter` prints one chapter's entries. `<n>` as `host:name` runs it on that host (dch serve 1.55.0+); `host:name --requests --json` holds one connection there for many requests read off standard input. Must be the first argument. | 0 ok, 1 no such session/ambiguous/no corpus, 2 usage, 3 read failure; remote: 4 gate, 6 host lacks `xray`, 7 unreachable |
 | `--send <n> <text...>` | Type text (joined with spaces), no enter. | 0 ok |
 | `--run <n> <text...>` | `--send` + enter. Into a session whose Claude Code runs — as its command or typed into its shell — the text goes through `--say`'s composer gate instead: typed only over an empty composer, Enter pressed once it shows and again while it stays (Claude Code folds an Enter sent with the text into the paste). A `/command` is typed raw, a message pasted. A shell or any other program, a master without a mirror (`DCH_NO_VT`), dch-lite and your own session (`$DCH_SESSION`) keep the plain burst. A gate failure prints `dch: <n>: <reason> — <why>` on stderr: `prompt` and `draft` (nothing typed), `not_typed` (the text never showed in the composer, no Enter), `not_submitted` (it stayed there through every Enter); `no_screen` when the composer is not on screen; `interrupted`, `withdrawn` or `draft_left` on a SIGINT, SIGTERM or SIGHUP, as for `--say`. | 0 ok, 1 gate failure |
 | `--keys <n> <key...>` | Encode+send keys mode-aware: `ctrl+c`, `alt+x`, `shift+tab`, `up`, `f5`, `enter`, `esc`, single chars. | 0 ok, 1 unknown key |
@@ -819,8 +821,10 @@ the plain text of the shell's output in memory, in a ring of `xray_ring` bytes
   primary screen. The text is ANSI-free, with trailing blanks trimmed and soft
   wraps joined. The alternate screen (vim, less, full-screen TUIs) is never
   captured.
-- **Clearing.** Erasing the scrollback (`clear`, `ESC[3J`, `reset`/`ESC c`,
-  Cmd-K) empties the ring.
+- **Clearing.** Erasing the scrollback (`clear`, `ESC[3J`, `reset`/`ESC c`)
+  empties the ring; `--restart` keeps it. A terminal's own clear-screen key
+  (Cmd-K) may not clear X-ray: it clears the terminal's window and sends
+  nothing to the shell. Run `clear`.
 - **Agents.** The ring pauses while an agent (Claude Code, Codex) runs in the
   shell, because the agent's own transcript (a Codex's rollout) is its record.
   The master looks for one on its record tick (once a minute), every second
@@ -858,6 +862,54 @@ OSC 133 needs none of this. A command block counts as typed only if client
 input (keystrokes, `--send`, `--keys`) reached the pty between its `B` and its
 `C`. A program that prints a fake prompt and command in one burst gets no
 credit for it.
+
+### X-ray view (`dch --xray <n>`)
+
+`dch --xray <n>` with no other flag opens a full-screen view of session
+`<n>`'s X-ray. `X` on a picker row opens the same view, and `q` returns to
+the picker. The view asks the same engine as `--json` and holds its index as
+`--follow` does, so a live session's new chapters and refs appear while it is
+open. It writes nothing to disk. Text from the session (titles, lines,
+passages) is drawn with every control and bidi character shown as `?`.
+
+The view has three tabs:
+- **Chapters**: one row per prompt or command. `/` filters. `Enter` opens
+  the chapter read-only (prompt, replies, tool calls, output), scrollable.
+- **Refs**: the session's refs by count. A ref with a definition or two or
+  more mentions is bold. `/` filters. `Enter` opens its card.
+- **On screen**: the session's screen as it is now, with a hint label (`a`,
+  `s`, `d`, …) on each ref the Refs tab shows bold. Typing a label opens that
+  ref's card. An ended session and dch-lite have no screen to show.
+
+A ref's card shows its definitions (two or more as "N definitions"), its
+first and latest mention, its counts (this session, this project, all
+projects) and its mentions. It opens light, as `--ref` does without `--full`.
+`f` runs the full scan, `o` scans other projects too, `y` copies the ref to
+the clipboard (OSC 52). `Enter` on a mention in this session opens its
+chapter. A shell session's light card shows titles and counts only; `f`
+shows its lines.
+
+The line under the tabs names the corpus: `Shell · last N rows`, `Shell · no
+shell integration · mentions only`, `Codex · mentions only`, `X-ray needs the
+full dch build` (dch-lite), `X-ray is off for shells (xray_ring = 0)`, and so
+on. A shell's line adds "a terminal's own clear-screen key may not clear
+X-ray; run `clear`".
+
+| Key | List | Card / reader |
+| --- | --- | --- |
+| `Tab` `→` `l` / `Shift-Tab` `←` `h` | next / previous tab (`h` `l` are labels on On screen) | `←` `h`: back |
+| `↑` `↓` / `j` `k`, `PgUp` `PgDn`, `g` `G` | move | move / scroll |
+| `Enter` | read the chapter / open the card | card: read the mention's chapter |
+| `/` | filter | |
+| `f` `o` `y` | | card: full scan, other projects, copy |
+| `q` | quit | back |
+| `Esc` | clear the typed label or the filter, else quit | back |
+| `Ctrl-C` `Ctrl-D` | quit | quit |
+
+A window smaller than 24x8 shows only "X-ray: the window is too small". A
+remote `host:name` has no view yet: it exits 2 and says `--json` is
+required. Exit codes are those of `--json` below: 0 when you quit, 1 for no
+such session, 2 for a flag or a stdout that is not a terminal.
 
 ### X-ray queries (`--xray`)
 
@@ -1383,9 +1435,9 @@ system, like any name.
 
 | Exit | Meaning |
 | --- | --- |
-| 0 | the object was printed; a `--follow` ended with its session, its connection, or its reader |
+| 0 | the object was printed (the view: quit); a `--follow` ended with its session, its connection, or its reader |
 | 1 | `dch: no such session` (also a master that hangs up after the connect, before its answer is complete, in every form: nothing more is written; `--ref` keeps the lines already out and writes no `done`; `--follow` once its snapshot is out exits 0 instead), `dch: ambiguous session`, `dch: no x-ray corpus` (`--clear`, `--ref`, `--chapter`), `dch: chapter gone` (`--chapter`: no chapter has that anchor now), `dch: busy` (a fifth `--follow` on one shell; also after the snapshot, when a stalled follower's slot went to a fifth: the stream stopped, the session did not end) |
-| 2 | bad usage: `--json` missing, a flag twice, `--follow` with `--ref` or `--clear`, `--chapter` with `--ref`, `--follow` or `--clear`, a flag of a later release, `--xray` not first, a bad `<n>`, a bad `--ref`, `--chapter` anchor, `--scope` or `--budget-ms` |
+| 2 | bad usage: `--json` missing (the view: any other flag, or a stdout that is not a terminal), a flag twice, `--follow` with `--ref` or `--clear`, `--chapter` with `--ref`, `--follow` or `--clear`, a flag of a later release, `--xray` not first, a bad `<n>`, a bad `--ref`, `--chapter` anchor, `--scope` or `--budget-ms` |
 | 4, 6, 7 | a remote `host:name` only: refused by the host's gate; the host lacks `xray`; the host is unreachable or the connection was lost |
 | 3 | `dch: X-ray failed on this session`: the session answered garbage, the transcript could not be read (it is there, but opening or reading it failed), memory ran out, or a write failed with an error other than a closed pipe |
 

@@ -2133,6 +2133,7 @@ static void
 picker_sigint(int sig)
 {
 	(void)sig;
+	xv_kill();	/* the X-ray view's children (#175) end with it */
 	picker_restore();
 	_exit(130);
 }
@@ -2737,6 +2738,8 @@ usage(void)
 	    "  dch --shell-init zsh|bash|fish             print OSC 133 prompt\n"
 	    "                                             hooks for your rc file\n"
 	    "                                             (X-ray's command marks)\n"
+	    "  dch --xray <n>                             the X-ray view: chapters,\n"
+	    "                                             refs, on-screen hints\n"
 	    "  dch --xray <n> [--clear] --json            a session's chapters as\n"
 	    "                                             one JSON object; --clear\n"
 	    "                                             empties a shell's ring\n"
@@ -9349,6 +9352,8 @@ pk_rrevive(struct pk *p, const struct pkrow *w, int c)
 	pk_start(p, a);
 }
 
+static void pk_xray(struct pk *p, int fd, const char *name, int record);
+
 /* One key. 1: out holds the session to attach; -1: quit; 0: go on. */
 int
 pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
@@ -9435,7 +9440,7 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 		}
 		return 0;
 	}
-	if (!w || (c > 0 && c < 256 && !strchr("\r\nrRSxapmdo", c)))
+	if (!w || (c > 0 && c < 256 && !strchr("\r\nrRSxXapmdo", c)))
 		return 0;
 	/* dch would read a name that starts with '-' as a flag: Enter, x, p
 	** and d pass it after `--` or need no flag; no such name is made or
@@ -9447,6 +9452,17 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 		         "starting with '-' can't be resumed; p pins, d removes"
 		         : "%s: a name starting with '-'; Enter attaches, x "
 		         "kills", w->name);
+		return 0;
+	}
+	if (c == 'X')
+	{
+		/* the X-ray view (#175): a live session by name, a History row
+		** by its record; a remote session's comes later */
+		if (w->remote)
+			snprintf(p->status, sizeof p->status, "%s: X-ray of a "
+			         "remote session is not here yet", w->title);
+		else
+			pk_xray(p, fd, w->name, t == 2);
 		return 0;
 	}
 	/* ponytail: a remote row only attaches; kill, rename, restart and
@@ -9602,6 +9618,98 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 		return 0;
 	}
 	return 0;
+}
+
+/* ---- the X-ray view's host (#175; xview.c) ------------------------- */
+
+static int xray_main(int argc, char **argv);
+
+/* xview.c's engine call: xray_main in a forked child, as `dch --xray <av>
+** --json` runs it, stdout and stderr into pipes. No exec: the same image,
+** so the view and --json share every line of the engine. The child keeps
+** no handler of the view's and lets go of the terminal. */
+pid_t
+xv_spawn(int fd, int ac, char **av, int *out, int *err)
+{
+	int po[2], pe[2];
+	pid_t pid;
+
+	if (pipe(po) < 0)
+		return -1;
+	if (pipe(pe) < 0)
+	{
+		close(po[0]);
+		close(po[1]);
+		return -1;
+	}
+	fflush(stdout);
+	fflush(stderr);
+	if ((pid = fork()) == 0)
+	{
+		int rc;
+
+		signal(SIGINT, SIG_DFL);
+		signal(SIGTERM, SIG_DFL);
+		signal(SIGHUP, SIG_DFL);
+		signal(SIGWINCH, SIG_DFL);
+		picker_tty_fd = -1;
+		close(fd);
+		if (dup2(po[1], STDOUT_FILENO) < 0 || dup2(pe[1], STDERR_FILENO) < 0)
+			_exit(3);
+		close(po[0]);
+		close(po[1]);
+		close(pe[0]);
+		close(pe[1]);
+		rc = xray_main(ac, av);
+		fflush(stdout);
+		_exit(rc);
+	}
+	close(po[1]);
+	close(pe[1]);
+	if (pid < 0)
+	{
+		close(po[0]);
+		close(pe[0]);
+		return -1;
+	}
+	*out = po[0];
+	*err = pe[0];
+	return pid;
+}
+
+/* A live session's visible screen, plain (the On screen tab). sock_path
+** is kept: the switch's picker runs inside an attach. */
+int
+xv_screen(const char *name, char *buf, size_t cap)
+{
+	char keep[sizeof sock_path];
+	int n = -1;
+
+	if (cap < DET_CAP + 1 || !name_ok(name))
+		return -1;
+	memcpy(keep, sock_path, sizeof keep);
+	if (make_sock_path(name) == 0)
+		n = fetch_screen(sock_path, buf, DET_CAP, DET_DEADLINE_MS, 0, 0);
+	memcpy(sock_path, keep, sizeof keep);
+	if (n >= 0)
+		buf[n] = '\0';
+	return n;
+}
+
+/* The picker's X: the view on its terminal, as it is (raw, alternate
+** screen); the picker drawn whole after. */
+static void
+pk_xray(struct pk *p, int fd, const char *name, int record)
+{
+	char n[620], err[400];
+
+	if (record)
+		snprintf(n, sizeof n, "%s.json", name);
+	else
+		snprintf(n, sizeof n, "%s", name);
+	if (xv_run(fd, n, err, sizeof err) != 0)
+		snprintf(p->status, sizeof p->status, "%s", err);
+	pk_pn = 0;
 }
 
 /* Input on fd within ms? select, not poll: macOS poll() answers POLLNVAL
@@ -13426,10 +13534,54 @@ name_routes_remote(const char *n)
 	return hit && known;
 }
 
+/* The X-ray view (#175): `dch --xray <n>`, no --json, on this terminal as
+** the picker runs (the alternate screen, raw), restored on every way out,
+** a signal's too (picker_sigint). stdout not a terminal: refused, exit 2. */
+static int
+xray_view(const char *n)
+{
+	struct sigaction sa, owinch;
+	char err[400];
+	int fd = isatty(STDOUT_FILENO) ? open("/dev/tty", O_RDWR | O_CLOEXEC)
+	         : -1, rc;
+
+	if (fd < 0 || tcgetattr(fd, &picker_saved_term) < 0)
+	{
+		if (fd >= 0)
+			close(fd);
+		fputs("dch: the --xray view needs a terminal (--json prints the "
+		      "object)\n", stderr);
+		return 2;
+	}
+	picker_tty_fd = fd;
+	picker_term_saved = 1;
+	signal(SIGINT, picker_sigint);
+	signal(SIGTERM, picker_sigint);
+	signal(SIGHUP, picker_sigint);
+	/* no SA_RESTART: a resize wakes the view's wait at once */
+	memset(&sa, 0, sizeof sa);
+	sa.sa_handler = pk_on_winch;
+	sigemptyset(&sa.sa_mask);
+	sigaction(SIGWINCH, &sa, &owinch);
+	picker_raw_on(fd);
+	picker_alt = 1;
+	tw(fd, "\033[?1049h\033[?7l\033[H\033[2J\033[>1u");
+	rc = xv_run(fd, n, err, sizeof err);
+	picker_restore();
+	signal(SIGINT, SIG_DFL);
+	signal(SIGTERM, SIG_DFL);
+	signal(SIGHUP, SIG_DFL);
+	sigaction(SIGWINCH, &owinch, NULL);
+	if (rc)
+		fprintf(stderr, "%s\n", err);
+	return rc;
+}
+
 /* `dch --xray <n> [--json] [--clear|--follow]`, `--ref <text> [--scope
 ** session|project|all] [--full] [--budget-ms <ms>] --json` and `--chapter
-** <anchor> --json` (spec 3.1, 3.3-3.5): flags in any order, each once; the
-** rest of the family (the view) comes with XR3-XR5 and exits 2 here. A
+** <anchor> --json` (spec 3.1, 3.3-3.5): flags in any order, each once;
+** `dch --xray <n>` alone is the view (#175, xray_view; a host:name's comes
+** later and exits 2 here). A
 ** host:name with --json (#157, spec 4.1) runs on the host over ctl once
 ** 3.1's rules pass here, whatever this dch runs locally: the host answers.
 ** --requests (#158, spec 4.3) holds a warm connection for requests read off
@@ -13604,12 +13756,21 @@ xray_main(int argc, char **argv)
 	/* 3.4: project unless asked; a remote caller too (XR4) */
 	q.scope = !scope || !strcmp(scope, "project") ? 1
 	          : !strcmp(scope, "all") ? 2 : 0;
-	if (!json)
+	/* the view (#175): `--xray <n>` alone; a remote one comes later */
+	if (!json && (ref || chapter || clear || follow))
+	{
+		fputs("dch: bad usage: --json is required (the --xray view takes "
+		      "no flag)\n", stderr);
+		return 2;
+	}
+	if (!json && name_routes_remote(n))
 	{
 		fputs("dch: bad usage: --json is required (the --xray view "
 		      "comes later)\n", stderr);
 		return 2;
 	}
+	if (!json)
+		return xray_view(argv[ni]);
 	/* SIGPIPE ignored: a failed socket write to the master exits 1 with
 	** write_fail_line; stdout writes are checked apart (EPIPE is a
 	** cancel, 3.4: exit 0, no done) */

@@ -1558,7 +1558,7 @@ def test_chapter():
               r.stderr == "dch: bad usage: %s\n" % msg and not r.stdout,
               (r.returncode, r.stderr))
     for a, e in ((["--chapter", "s1"], "dch: bad usage: --json is required "
-                  "(the --xray view comes later)\n"),
+                  "(the --xray view takes no flag)\n"),
                  (["--chapter"], "dch: bad usage: --chapter needs a value\n"),
                  (["--chapter", "s1", "--chapter", "s2", "--json"],
                   "dch: bad usage: --chapter twice\n"),

@@ -334,11 +334,10 @@ static size_t pk_fn;
 size_t pk_pn;
 static size_t pk_lo[PK_LINES + 1], pk_plo[PK_LINES + 1];	/* line starts */
 static int pk_nl, pk_pnl;
-static int pk_col, pk_w, pk_h, pk_y, pk_off, pk_color, pk_utf, pk_light;
-static const char *pk_bg = "";	/* the background under what is drawn */
+int pk_col, pk_w, pk_h, pk_utf;
+static int pk_y, pk_off, pk_color, pk_light;
+const char *pk_bg = "";	/* the background under what is drawn */
 static char pk_cur[112];	/* the SGR the frame last wrote */
-
-enum { PK_ACC, PK_ACCB, PK_RED, PK_GRN, PK_WARN, PK_SEL, PK_CHIP, PK_NPAL };
 
 /* [color level][light terminal][entry] */
 static const char *const pk_pal[4][2][PK_NPAL] = {
@@ -358,7 +357,14 @@ static const char *const pk_pal[4][2][PK_NPAL] = {
 };
 #define PK_P(i) pk_pal[pk_color][pk_light][i]
 
-static void
+/* A palette entry at this frame's colour level (the X-ray view's, #175). */
+const char *
+pk_p(int i)
+{
+	return PK_P(i);
+}
+
+void
 pk_rawn(const char *s, size_t n)
 {
 	if (!pk_off && pk_fn + n < sizeof pk_fb)
@@ -368,7 +374,7 @@ pk_rawn(const char *s, size_t n)
 	}
 }
 
-static void
+void
 pk_raw(const char *s)
 {
 	pk_rawn(s, strlen(s));
@@ -394,7 +400,7 @@ pk_sgr(const char *s)
 /* Draw on in a ("2" faint, a palette entry, "" the plain foreground) over
 ** pk_bg. On the basic bar, reverse video, a colour would read as a block:
 ** there only bold stays. */
-static void
+void
 pk_set(const char *a)
 {
 	char b[112];
@@ -406,18 +412,29 @@ pk_set(const char *a)
 	pk_sgr(b);
 }
 
+/* A bidi control (U+200E, U+200F, U+202A-U+202E, U+2066-U+2069): drawn as
+** '?', as a control is (K10.6, #175: titles are hostile). */
+static int
+pk_bidi(unsigned u)
+{
+	return u == 0x200E || u == 0x200F || (u >= 0x202A && u <= 0x202E) ||
+	       (u >= 0x2066 && u <= 0x2069);
+}
+
 /* Cells of code point u: two for the wide (ap_cells), none for a combining
-** mark, a joiner or a variation selector. */
+** mark, a joiner or a variation selector; one for a bidi control's '?'. */
 static int
 pk_cw(unsigned u)
 {
-	return (u >= 0x300 && u <= 0x36F) || (u >= 0x200B && u <= 0x200F) ||
-	       (u >= 0xFE00 && u <= 0xFE0F) ? 0 : ap_cells(u);
+	return pk_bidi(u) ? 1 : (u >= 0x300 && u <= 0x36F) ||
+	       (u >= 0x200B && u <= 0x200F) || (u >= 0xFE00 && u <= 0xFE0F)
+	       ? 0 : ap_cells(u);
 }
 
 /* Characters (UTF-8), each as wide as it draws, up to column lim and the
-** edge. A control (C0 or C1) or a broken sequence shows as '?'. */
-static void
+** edge. A control (C0, DEL or C1), a bidi control or a broken sequence
+** shows as '?'. */
+void
 pk_txtto(const char *s, int lim)
 {
 	unsigned u;
@@ -433,7 +450,8 @@ pk_txtto(const char *s, int lim)
 		w = pk_cw(u);
 		if (pk_col + w > lim)
 			break;
-		if (u < 0x20 || (u >= 0x7f && u < 0xa0) || (c >= 0xc0 && l == 1))
+		if (u < 0x20 || (u >= 0x7f && u < 0xa0) || (c >= 0x80 && l == 1) ||
+		    pk_bidi(u))
 			pk_rawn("?", 1);
 		else
 			pk_rawn(s, (size_t)l);
@@ -441,14 +459,14 @@ pk_txtto(const char *s, int lim)
 	}
 }
 
-static void
+void
 pk_txt(const char *s)
 {
 	pk_txtto(s, pk_w);
 }
 
 /* Display width: the cells s takes. */
-static int
+int
 pk_cps(const char *s)
 {
 	int n = 0, l;
@@ -459,7 +477,7 @@ pk_cps(const char *s)
 }
 
 /* Blanks up to column end. */
-static void
+void
 pk_pad(int end)
 {
 	while (pk_col < end && pk_col < pk_w)
@@ -476,7 +494,7 @@ pk_ell(void)
 }
 
 /* s in exactly w columns: cut with an ellipsis, or padded. */
-static void
+void
 pk_fit(const char *s, int w)
 {
 	int end = pk_col + w;
@@ -521,7 +539,7 @@ pk_tail(const char *s, int w)
 }
 
 /* The next screen line; lines past the bottom are dropped. */
-static void
+void
 pk_line(void)
 {
 	char b[32];
@@ -542,7 +560,7 @@ pk_line(void)
 
 /* The rest of the line cleared; not at the edge, where the cursor sits on
 ** the last cell drawn and an erase would take it. */
-static void
+void
 pk_eol(void)
 {
 	pk_bg = "";
@@ -552,7 +570,7 @@ pk_eol(void)
 }
 
 /* A faint rule across the screen: the list above, the controls below. */
-static void
+void
 pk_rule(void)
 {
 	pk_line();
@@ -562,15 +580,7 @@ pk_rule(void)
 	pk_eol();
 }
 
-/* A key hint: the key, what it does, and a value in the accent ("sort
-** name"). group: 0 the actions, 1 the agents', 2 the view, 3 moving about;
-** warn: the key is a destructive one's. */
-struct pkkey
-{
-	const char *key, *label, *val;
-	int group, warn;
-};
-
+/* A key hint's width (struct pkkey: picker.h) */
 static int
 pk_kw(const struct pkkey *k)
 {
@@ -609,7 +619,7 @@ pk_chip(const struct pkkey *k)
 ** fits, " │ " between two groups on a line, two spaces between hints; the
 ** groups in drop (bits) left out. The lines used, or -1 when a hint did not
 ** fit: it is never cut, only left for a wider window. draw 0 only counts. */
-static int
+int
 pk_keys(const struct pkkey *it, int n, unsigned drop, int cap, int draw)
 {
 	int lines = 0, col = 0, g = -1, k, j;
@@ -1109,7 +1119,7 @@ pk_cfrow(int k, int sel)
 
 /* A segment of the tab bar: the active one in the accent on a tint (in
 ** brackets without colour), its count faint. */
-static void
+void
 pk_tab(const char *name, int n, int on)
 {
 	char b[24];
@@ -1136,7 +1146,7 @@ pk_tab(const char *name, int n, int on)
 ** placing itself and ending in the plain attributes, in one write; all of
 ** it when forced, after a prompt drew over it (pk_pn 0), or when the lines
 ** moved. Nothing when nothing changed. */
-static void
+void
 pk_flush(int fd, int force)
 {
 	size_t o, n = 0;
@@ -1175,6 +1185,39 @@ pk_flush(int fd, int force)
 	pk_pnl = pk_nl;
 }
 
+/* A new frame on fd's terminal, at colour level color: the picker's and
+** the X-ray view's (#175). */
+void
+pk_begin(int fd, int color)
+{
+	int cols = 0, rows = 0;
+
+	pk_size(fd, &cols, &rows);
+	if (cols <= 0 || rows <= 0)
+	{
+		cols = 80;
+		rows = 24;
+	}
+	pk_w = cols > 1000 ? 1000 : cols;
+	pk_h = rows;
+	pk_y = pk_fn = 0;
+	pk_off = pk_nl = 0;
+	pk_color = color;
+	pk_bg = "";
+	snprintf(pk_cur, sizeof pk_cur, "0");
+	if (pk_color)
+		pk_raw("\033[0m");
+}
+
+/* The frame done: below it cleared, written (pk_flush). */
+void
+pk_fend(int fd, int force)
+{
+	pk_off = 0;
+	pk_raw("\033[J");
+	pk_flush(fd, force);
+}
+
 static void
 pk_draw(struct pk *p, int fd, const char *header, int force)
 {
@@ -1185,7 +1228,7 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 	struct pkkey keys[24];
 	char b[96];
 	const char *ret;
-	int nk = 0, k, t, cols = 0, rows = 0, kl, cap, tabs = 0, pos, ri;
+	int nk = 0, k, t, rows, kl, cap, tabs = 0, pos, ri;
 	/* the rows drawn: the kept ones (pk_pos), or the settings */
 #ifdef _WIN32
 	int n = pk_pos(p, p->tab, p->n[p->tab]);
@@ -1198,21 +1241,8 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 	int *top = p->settings ? &p->cftop : &p->top[p->tab];
 	unsigned drop;
 
-	pk_size(fd, &cols, &rows);
-	if (cols <= 0 || rows <= 0)
-	{
-		cols = 80;
-		rows = 24;
-	}
-	pk_w = cols > 1000 ? 1000 : cols;
-	pk_h = rows;
-	pk_y = pk_fn = 0;
-	pk_off = pk_nl = 0;
-	pk_color = p->color;
-	pk_bg = "";
-	snprintf(pk_cur, sizeof pk_cur, "0");
-	if (pk_color)
-		pk_raw("\033[0m");
+	pk_begin(fd, p->color);
+	rows = pk_h;
 	if (!p->settings)
 		pk_fix(p, p->tab);
 #ifndef _WIN32
@@ -1248,6 +1278,7 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 		PK_K(0, ret, "attach", NULL, 0);
 		PK_K(0, "r", "rename", NULL, 0);
 		PK_K(0, "x", "kill", NULL, 1);
+		PK_K(0, "X", "x-ray", NULL, 0);
 		PK_K(1, "R", "restart", NULL, 0);
 		PK_K(1, "S", "stop", NULL, 1);
 		if (cur && !strcmp(cur->state, "blocked"))
@@ -1270,6 +1301,7 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 		}
 		PK_K(0, "p", cur && cur->pinned ? "unpin" : "pin", NULL, 0);
 		PK_K(0, "d", "remove", NULL, 1);
+		PK_K(0, "X", "x-ray", NULL, 0);
 	}
 	if (!p->settings && !p->filtering)
 		PK_K(2, ",", "settings", NULL, 0);
@@ -1399,9 +1431,7 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 	}
 	pk_eol();
 	pk_keys(keys, nk, drop, cap, 1);
-	pk_off = 0;
-	pk_raw("\033[J");
-	pk_flush(fd, force);
+	pk_fend(fd, force);
 }
 
 /* Is another byte of an escape sequence there within 50ms? */
@@ -1413,7 +1443,7 @@ pk_more(int fd)
 
 /* The next key: a byte, PK_* for a sequence we know, 0 for one we do not,
 ** -1 at the end of input. */
-static int
+int
 pk_key(int fd)
 {
 	unsigned char c, s[16];
@@ -1664,6 +1694,26 @@ pk_keep(const struct pk *p)
 	pk_selnames(p, pk_mem.sel);
 }
 
+/* The color level from the environment, pk_utf and pk_light set (vt: a VT
+** console whatever TERM says, Windows'): none, the basic eight, the 256
+** cube, truecolor; TERM=dumb draws ASCII too. A Windows console has no
+** TERM, and since Windows 10 does truecolor. The picker's and the X-ray
+** view's (#175). */
+int
+pk_colors(int vt)
+{
+	const char *nc = getenv("NO_COLOR"), *term = getenv("TERM");
+	const char *ct = getenv("COLORTERM"), *fgbg = getenv("COLORFGBG");
+
+	pk_utf = term && *term ? strcmp(term, "dumb") != 0 : vt;
+	/* COLORFGBG "fg;bg": a white or light grey background */
+	pk_light = fgbg && (fgbg = strrchr(fgbg, ';')) &&
+	           (atoi(fgbg + 1) == 7 || atoi(fgbg + 1) == 15);
+	return !pk_utf || (nc && *nc) ? 0 : ct && (!strcmp(ct, "truecolor") ||
+	       !strcmp(ct, "24bit")) ? 3 : term && strstr(term, "256color")
+	       ? 2 : vt ? 3 : 1;
+}
+
 /* A new picker in p, its colours from the environment (vt: a VT console
 ** whatever TERM says, Windows'), its rows loaded; with remote set and none
 ** here nor cached, the remote hosts probed once, in the box. In the last
@@ -1673,22 +1723,11 @@ pk_keep(const struct pk *p)
 int
 pk_open(struct pk *p, int remote, int vt)
 {
-	const char *nc = getenv("NO_COLOR"), *term = getenv("TERM");
-	const char *ct = getenv("COLORTERM"), *fgbg = getenv("COLORFGBG");
 	int t, k, j;
 
 	memset(p, 0, sizeof *p);
 	p->pid = -1;
-	/* the color level: none, the basic eight, the 256 cube, truecolor;
-	** TERM=dumb draws ASCII too. A Windows console has no TERM, and since
-	** Windows 10 does truecolor. */
-	pk_utf = term && *term ? strcmp(term, "dumb") != 0 : vt;
-	p->color = !pk_utf || (nc && *nc) ? 0 : ct && (!strcmp(ct, "truecolor") ||
-	           !strcmp(ct, "24bit")) ? 3 : term && strstr(term, "256color")
-	           ? 2 : vt ? 3 : 1;
-	/* COLORFGBG "fg;bg": a white or light grey background */
-	pk_light = fgbg && (fgbg = strrchr(fgbg, ';')) &&
-	           (atoi(fgbg + 1) == 7 || atoi(fgbg + 1) == 15);
+	p->color = pk_colors(vt);
 	p->byname = pk_mem.set ? pk_mem.byname : pk_cfbyname();
 	snprintf(p->filt, sizeof p->filt, "%s", pk_mem.filt);
 	pk_load(p);

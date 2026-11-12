@@ -95,6 +95,9 @@ dch \- detachable terminal sessions with a headless agent API
 .br
 .B dch \-\-xray
 .I name
+.br
+.B dch \-\-xray
+.I name
 .RB [ \-\-clear | \-\-follow ]
 .B \-\-json
 .br
@@ -521,6 +524,11 @@ restarts the agent
 stops,
 .B x
 kills,
+.B X
+opens the row's X\-ray view
+.RB ( "dch \-\-xray" ;
+.B q
+returns to the picker; on History too; not yet for a remote row),
 .B a
 allows a plain Yes/No permission prompt (presses 1, Yes; any other prompt is refused),
 .B b
@@ -728,6 +736,58 @@ may assume Ghostty\-only features the attaching terminal lacks.
 dch sets no
 .BR FORCE_HYPERLINK ;
 a caller's own value reaches the session.
+.TP
+.BI \-\-xray " name"
+The X\-ray view: a full\-screen view of session
+.IR name ,
+from the same engine as
+.B \-\-json
+and kept current as
+.B \-\-follow
+keeps its index. It writes nothing to disk.
+Session text is drawn with every control and bidi character as
+.BR ? .
+Three tabs:
+.B Chapters
+(\fB/\fR filters, \fBEnter\fR reads the chapter, read\-only),
+.B Refs
+(by count; a ref with a definition or two or more mentions is bold;
+\fB/\fR filters, \fBEnter\fR opens its card) and
+.B On screen
+(the session's screen with a hint label, \fBa\fR, \fBs\fR, \fBd\fR, ...,
+on each bold ref; typing a label opens its card; none for an ended
+session or on dch\-lite).
+A card shows the ref's definitions, first and latest mention, counts by
+scope and mentions; it opens light (as
+.B \-\-ref
+without
+.BR \-\-full );
+.B f
+runs the full scan,
+.B o
+scans other projects,
+.B y
+copies the ref (OSC 52),
+.B Enter
+on a mention in this session reads its chapter; a shell's light card shows
+titles and counts only.
+The line under the tabs names the corpus
+(\(lqShell \[u00B7] last N rows\(rq, \(lqCodex \[u00B7] mentions only\(rq,
+\(lqX\-ray needs the full dch build\(rq, ...).
+Keys: \fBTab\fR, \fB\(<-\fR \fB\(->\fR
+(and \fBh\fR \fBl\fR off On screen) switch tabs;
+\fBj\fR \fBk\fR, arrows, \fBPgUp\fR \fBPgDn\fR, \fBg\fR \fBG\fR move;
+\fBq\fR quits the list and goes back from a card or chapter;
+\fBEsc\fR clears a typed label or the filter, else does the same;
+\fBCtrl\-C\fR and \fBCtrl\-D\fR quit.
+A window under 24x8 says it is too small.
+Local only: a remote
+.IB host : name
+exits 2 and says
+.B \-\-json
+is required.
+Exit 0 when quit, 1 no such session, 2 with any other flag or when stdout
+is not a terminal.
 .TP
 .BI \-\-xray " name " "" \fR[\fB\-\-clear\fR|\fB\-\-follow\fR]\fP " \-\-json"
 X\-ray: print one JSON object
@@ -2934,6 +2994,11 @@ marks). Kept across
 (a restart asked by an older dch, which may predate the ring, starts empty
 and gets the core\-dump limit back);
 never on disk, never in core dumps.
+.B clear
+(ED 3) and RIS empty it.
+A terminal's own clear\-screen key may not clear X\-ray: it clears the
+window and sends nothing to the shell; run
+.BR clear .
 .SH EXIT STATUS
 0 on success. Control verbs: 1 generic error, 2
 .B \-\-wait
