@@ -57,6 +57,7 @@ static char sock_dir[1024];
 static char sock_path[1100];
 static char session_name[512];
 static char client_pidfile[1200];
+static pid_t client_pid;	/* the process that file names */
 /* Remote hosts (#087), remote.c. remote_ok: an attach may name host:name
 ** (-a, and a pick from the attach pickers); attach_only: -a, which never
 ** creates; remote_host: --host; pk_remote: the picker lists remote rows. */
@@ -889,11 +890,12 @@ auto_name(char *out, size_t outsz)
 ** + not orphaned (PPID=1 with no TTY = VSCode-helper-closed).
 */
 
-/* Also from attach.c's die(), in a signal handler: unlink only. */
+/* Also from attach.c's die(), in a signal handler: unlink only. Not in a
+** fork that exit()s (the file is its parent's). */
 void
 client_pidfile_unlink(void)
 {
-	if (client_pidfile[0])
+	if (client_pidfile[0] && getpid() == client_pid)
 		unlink(client_pidfile);
 }
 
@@ -907,6 +909,7 @@ client_pidfile_create(const char *sockp)
 	** attached there forever. */
 	if (client_pidfile[0])
 		unlink(client_pidfile);
+	client_pid = getpid();
 	if ((size_t)snprintf(client_pidfile, sizeof(client_pidfile),
 	                     "%s/%s.client.%d", sock_dir, bn, (int)getpid()) >=
 	    sizeof(client_pidfile))
