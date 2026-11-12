@@ -275,22 +275,28 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		free(to_sp.p);
 		break;
 	}
-	case 8:		/* #114: a ctl's frames, in reads of c; a hello's ops */
+	case 8:		/* #114: a ctl's frames, in reads of c; a hello's ops;
+			** a host's --xray --json bytes through ctl_esc */
 	{
 		struct rf_state rs = { 0, 0, 1 };
-		struct sb tin = {0}, out = {0}, err = {0};
+		struct sb tin = {0}, out = {0}, err = {0}, e = {0};
+		struct json_parser jp;
 		size_t c = n > 1 ? (size_t)d[1] % 64 + 1 : 1, off, got = 0;
 		char msg[400] = "", why[100] = "";
-		int r = 0, xit = 1, code = 1;
+		int r = 0, xit = 1, code = 1, split = n > 1 && d[1] & 0x40;
 
-		for (off = 2; off < n && r == 0; off += c)
+		for (off = 2; off < n && (r == 0 || r == 2); off += c)
 		{
 			size_t k = n - off < c ? n - off : c;
 
 			sb_add(&tin, d + off, k);
 			got += k;
-			r = ctl_in(&rs, &tin, &out, &err, &xit, why,
-			           sizeof why, msg, sizeof msg, &code);
+			/* split (NIT-4): 2 until the other stream's bytes are
+			** taken, each call taking some */
+			while ((r = ctl_in(&rs, &tin, &out, &err, &xit, why,
+			                   sizeof why, msg, sizeof msg, &code,
+			                   split)) == 2 && !split)
+				abort();
 		}
 		inert(msg);
 		inert(why);
@@ -301,6 +307,31 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 			abort();	/* bytes out came from bytes in */
 		if (tin.n >= RF_HDR + RF_CTRL_MAX && r == 0)
 			abort();	/* a held frame past its cap closes */
+		/* QA 1.55.0 LOW-6: escaped, a host's bytes hold nothing a
+		** terminal acts on but newlines and tabs, and JSON text (no
+		** raw CR, which is JSON space) stays JSON */
+		ctl_esc(&e, out.p ? out.p : "", out.n);
+		ctl_esc(&e, err.p ? err.p : "", err.n);
+		ctl_esc(&e, t, strlen(t));
+		if (e.bad)
+			abort();
+		k = dch_json_parse(&jp, t) == 0 && !strchr(t, '\r');
+		dch_json_free(&jp);
+		if (k)
+		{
+			struct sb j = {0};
+
+			ctl_esc(&j, t, strlen(t));
+			if (dch_json_parse(&jp, j.p ? j.p : "") != 0)
+				abort();
+			dch_json_free(&jp);
+			free(j.p);
+		}
+		for (off = 0; off < e.n; off++)
+			if (e.p[off] == '\n' || e.p[off] == '\t')
+				e.p[off] = ' ';
+		inert(e.p ? e.p : "");
+		free(e.p);
 		free(tin.p);
 		free(out.p);
 		free(err.p);

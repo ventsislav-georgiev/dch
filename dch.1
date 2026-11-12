@@ -1187,11 +1187,22 @@ and the other flags as typed on that host's
 .B dch serve
 over ctl (see
 .BR "REMOTE SERVER" ),
-and writes its output, standard error and exit status as its own, the
+and writes its output, standard error and exit status as its own, line by
+line, the
 .B \-\-follow
 and
 .B \-\-ref
 streams as they come.
+A control character, DEL, C1, bidi control or U+2028/U+2029 the host sends
+raw is written as a
+.B \eu
+escape, a byte that is not UTF\-8 as
+.BR \eufffd ,
+so a JSON line stays the same JSON and the host cannot drive the terminal.
+A host that sends nothing for 65 s (its 60 s timeout plus 5 s) is a lost
+connection, exit 7;
+.B \-\-follow
+has no such limit.
 The host answers by its own release:
 .BR \-\-scope ,
 .B \-\-chapter
@@ -1388,6 +1399,10 @@ Exit 1
 .I busy
 can come after the snapshot: then the stream stopped; the session did not
 end.
+A remote follower whose peer is gone without a close lets its slot go in
+about 30 s
+.RB ( "dch serve"
+sets TCP keepalive).
 An ended session or a History record writes its snapshot and exits 0;
 a live one exits 0 when the session ends, its connection drops, or the
 reader closes the pipe, idle or not.
@@ -1489,10 +1504,12 @@ and
 .BR {"req":\fIN\fP,"exit":2,"why":"refused"} .
 Each host output line comes back as
 .BR {"req":\fIN\fP,"line":\fIline\fP} ,
-byte for byte (a line that is not one JSON object as a JSON string), each
-standard\-error line as
+byte for byte (a line that is not one JSON object as a JSON string, a NUL
+in it as
+.BR \eu0000 ),
+each standard\-error line as
 .BR {"req":\fIN\fP,"stderr":"..."} ,
-escaped, and every request ends with exactly one
+escaped, in the host's order, and every request ends with exactly one
 .BR {"req":\fIN\fP,"exit":\fIE\fP,"why":\fIW\fP} :
 .I E
 the host's exit status;
@@ -1504,11 +1521,15 @@ or
 .B timeout
 (the host cut it short),
 .B busy
-(exit 1: one was running, and goes on),
+(exit 1: one was running, and goes on; one that reuses its
+.I N
+gets it as
+.BR \(dqreq\(dq:null ),
 .B refused
 (exit 2 as above; 1, or 4 by its gate, when the host refused it) or
 .B lost
-(exit 7: the connection dropped while it ran).
+(exit 7: the connection dropped while it ran, or the host sent nothing for
+65 s).
 A line that is no request gets the same refused pair with
 .BR \(dqreq\(dq:null ;
 blank lines are skipped, a line over 64 KiB is refused.
@@ -1516,6 +1537,9 @@ Without
 .B ctl\-cancel
 on the host a cancel closes the connection and dch dials again; after the
 host's idle close or a lost connection the next request dials again.
+A dial that fails stands for 5 s: the requests queued behind it end
+.B lost
+at once with its message.
 End of standard input closes the connection and exits 0 (a request still
 running ends
 .BR why:\(dqcancel\(dq ).
@@ -2675,7 +2699,12 @@ too),
 lowers the cap and
 .B DCH_CTL_IDLE_MS
 the warm connection's 300 s; all are read at startup and removed from the
-environment.
+environment. A remote
+.B \-\-xray
+reads
+.B DCH_CTL_TIMEOUT_MS
+too, in place of the host's 60 s, for its own wait on a silent host (that
+plus 5 s).
 .PP
 .B DCH_SERVE_TEST_LOOPBACK=1
 with a loopback
@@ -2756,21 +2785,9 @@ or
 key of its own, or no
 .IR name ,
 is dropped, as is one a strict JSON reader would reject (a lone surrogate
-escape, a number past a double's range, nesting over 64 deep, a key
-counting as a level) and one that gives a key dch reads twice
-.RI ( file ,
-.IR alias ,
-.IR end ,
-.IR cwd ,
-.IR argv ,
-.I agent
-and its
-.I session_id
-and
-.IR name ,
-.IR ended ,
-.IR updated ,
-.IR pinned );
+escape, a number past a double's range, objects and arrays nested over 64
+deep in it, keys not counted) and one that gives any key twice in one
+object, decoded;
 at most 500 records and 2 MiB per host. A host that does not
 answer in time shows its last records, stale
 .RB ( [stale] ),

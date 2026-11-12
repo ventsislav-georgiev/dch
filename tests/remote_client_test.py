@@ -1274,6 +1274,261 @@ def requests_checks(dch, check, senv, cenv, serve_at, fakes, tmp, slog):
     dch(senv, "-k", "xq1")
 
 
+# --- #180 (QA 1.55.0 LOW-6, LOW-8, LOW-9, LOW-10, NIT-4, NIT-8, NIT-9) -------
+
+class XFake:
+    """#180: a loopback host whose hello has ctl, ctl-cancel and xray, and
+    whose 0x30 answer is `mode`'s: "silent" never answers; "nul" a NUL in
+    a stdout and a stderr line; "order" stdout, stderr, stdout in one
+    write; "osc" OSC 52 and title escapes on both streams; "hold" answers
+    only a 0x34 (its 0x33 cancel); "dark" answers the first connection's
+    0x30 and closes it, and every later connection gets no hello; "hist"
+    answers `out` as stdout, exit 0 (a --history --json)."""
+
+    def __init__(self, mode, out=b""):
+        self.mode, self.n, self.out = mode, 0, out
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(16)
+        self.port = self.sock.getsockname()[1]
+        self.conns = []
+        threading.Thread(target=self.loop, daemon=True).start()
+
+    def loop(self):
+        while True:
+            try:
+                c, _ = self.sock.accept()
+            except OSError:
+                return
+            self.n += 1
+            self.conns.append(c)
+            if self.mode != "dark" or self.n == 1:
+                threading.Thread(target=self.serve, args=(c,),
+                                 daemon=True).start()
+
+    def serve(self, c):
+        buf = b""
+        answers = {
+            "nul": frame(0x31, b'{"a":1}\x00junk\n')
+            + frame(0x32, b"e\x00rr\n") + frame(0x33, {"exit": 0}),
+            "order": frame(0x31, b'{"o":1}\n') + frame(0x32, b"e1\n")
+            + frame(0x31, b'{"o":2}\n') + frame(0x32, b"e2\n")
+            + frame(0x33, {"exit": 0}),
+            "osc": frame(0x31, b'{"schema":1}\x1b]52;c;cHduZWQ=\x07\x1b[2J'
+                         b'\n{"t":"a\xc2\x9bb\xe2\x80\xaec"}\n')
+            + frame(0x32, b"dch: \x1b]0;PWNED\x07x\n")
+            + frame(0x33, {"exit": 0}),
+            "dark": frame(0x33, {"exit": 0}),
+            "hist": frame(0x31, self.out) + frame(0x33, {"exit": 0})}
+        try:
+            while True:
+                d = c.recv(65536)
+                if not d:
+                    return
+                buf += d
+                while len(buf) >= 5:
+                    t, n = struct.unpack(">BI", buf[:5])
+                    if len(buf) < 5 + n:
+                        break
+                    buf = buf[5 + n:]
+                    if t == 0x08:
+                        c.sendall(frame(0x18, {
+                            "proto": "1.1", "server": "fake",
+                            "ops": ["ctl", "ctl-cancel", "xray"]}))
+                    elif t == 0x34 and self.mode == "hold":
+                        c.sendall(frame(0x33, {"exit": 2, "why": "cancel"}))
+                    elif t == 0x30 and self.mode in answers:
+                        c.sendall(answers[self.mode])
+                        if self.mode == "dark":
+                            time.sleep(0.2)
+                            c.close()
+                            return
+        except OSError:
+            return
+
+    def close(self):
+        self.sock.close()
+        for c in self.conns:
+            try:
+                c.close()
+            except OSError:
+                pass
+
+
+def robust_checks(dch, check, cenv, fakes, tmp):
+    """#180: remote History's depth and duplicate rules (NIT-8, NIT-9); the
+    one-shot remote --xray --json escapes a host's controls
+    (LOW-6) and gives up on a host that never answers (LOW-10); --requests
+    ends a request once even when its id is reused (LOW-8), keeps a NUL
+    (LOW-9), the host's stdout/stderr order (NIT-4), bounds a silent host
+    (LOW-10) and a dark host's dial once for the requests queued behind it
+    (LOW-10). The host's ctl timeout is lowered to 1 ms on the client
+    (DCH_CTL_TIMEOUT_MS, the test knob dch serve reads), so a silent host
+    is lost after RM_ATTACH_MS, 5 s."""
+    n = [0]
+
+    def side(port, **kw):
+        n[0] += 1
+        cfg = os.path.join(tmp, "rbcfg-%d" % n[0])
+        with open(cfg, "w") as f:
+            f.write("remote_hosts = q=127.0.0.1:%d\n" % port)
+        e = dict(cenv, DCH_CONFIG=cfg, **kw)
+        e.pop("DCH_NO_REMOTE", None)
+        return e
+
+    def fake(mode, out=b""):
+        f = XFake(mode, out)
+        fakes.append(f)
+        return f
+
+    # NIT-8, NIT-9: remote History keeps what a strict reader takes (objects
+    # and arrays to 64 deep in a record, keys not counted) and drops a
+    # record with any key twice in one object, read by dch or not
+    def deep(d, o="{", c="}", k='"a":'):
+        return (o + k) * (d - 1) + o + c + c * (d - 1) if o == "{" \
+            else o * d + c * d
+    f = fake("hist", (
+        '[{"name":"k33","d":%s},{"name":"k64","d":%s},'
+        '{"name":"k65","d":%s},{"name":"a64","d":%s},{"name":"a65","d":%s},'
+        '{"name":"u1","x":1,"x":2},{"name":"u2","n":{"y":1,"y":2}},'
+        '{"name":"u3","z":1,"\\u007a":2},{"name":"u4","l":[{"w":1,"w":1}]},'
+        '{"name":"ok","x":1,"n":{"x":1},"l":[{"x":1},{"x":2}]}]'
+        % (deep(33), deep(64), deep(65), deep(64, "[", "]"),
+           deep(65, "[", "]"))).encode())
+
+    def nodup(kv):
+        if len({k for k, _ in kv}) != len(kv):
+            raise ValueError("duplicate key")
+        return dict(kv)
+    r = dch(cenv, "--history", "--json", "--remote", "--hosts",
+            "q=127.0.0.1:%d" % f.port)
+    try:
+        got = [x["name"] for x in json.loads(r.stdout, object_pairs_hook=nodup)
+               if x.get("host") == "q"]
+    except (ValueError, RecursionError) as e:
+        got = [str(e)]
+    check("NIT-8, NIT-9: remote History: 33 and 64 deep kept, 65 dropped; "
+          "a key twice anywhere dropped; the document strict",
+          r.returncode == 0 and got == ["k33", "k64", "a64", "ok"],
+          (got, r.stderr))
+
+    # LOW-6: one-shot --xray --json, every control a \u escape
+    f = fake("osc")
+    r = subprocess.run([DCH, "--xray", "q:x", "--json"], env=side(f.port),
+                       capture_output=True, stdin=subprocess.DEVNULL,
+                       timeout=20)
+    check("LOW-6: one-shot --xray --json escapes a host's OSC 52, C1 and "
+          "bidi, exit 0", r.returncode == 0
+          and r.stdout == b'{"schema":1}\\u001b]52;c;cHduZWQ=\\u0007'
+          b'\\u001b[2J\n{"t":"a\\u009bb\\u202ec"}\n'
+          and r.stderr == b"dch: \\u001b]0;PWNED\\u0007x\n"
+          and json.loads(r.stdout.splitlines()[1]) == {"t": "a\x9bb\u202ec"},
+          r)
+
+    # LOW-10: one-shot, a host that never answers: exit 7 after 5 s
+    f = fake("silent")
+    t0 = time.time()
+    r = subprocess.run([DCH, "--xray", "q:x", "--json"],
+                       env=side(f.port, DCH_CTL_TIMEOUT_MS="1"),
+                       capture_output=True, stdin=subprocess.DEVNULL,
+                       timeout=60)
+    took = time.time() - t0
+    check("LOW-10: one-shot --xray on a silent host: exit 7, no answer "
+          "within 5001 ms", r.returncode == UNREACHABLE_EXIT
+          and r.stderr == b"dch: q: unreachable: no answer within 5001 ms\n"
+          and r.stdout == b"" and 4.5 < took < 40, (r, took))
+
+    # LOW-10: --requests, the same silent host: exit 7 lost, once
+    rq = Requests(side(f.port, DCH_CTL_TIMEOUT_MS="1"), "q:x")
+    rq.line()
+    t0 = time.time()
+    rq.send({"req": 1, "argv": ["--json"]})
+    got = [json.loads(g) for g in rq.until(1, 60)]
+    took = time.time() - t0
+    rc, rest, err = rq.end()
+    check("LOW-10: --requests on a silent host: exit 7 lost after 5 s",
+          got == [{"req": 1, "stderr": "dch: q: unreachable: no answer "
+                   "within 5001 ms"},
+                  {"req": 1, "exit": UNREACHABLE_EXIT, "why": "lost"}]
+          and 4.5 < took < 40 and rc == 0 and rest == b"",
+          (got, took, rc, rest, err))
+
+    # LOW-10: a dark host: one dial for the requests queued behind it
+    f = fake("dark")
+    rq = Requests(side(f.port), "q:x")
+    rq.line()
+    rq.send({"req": 1, "argv": ["--json"]})
+    got = [json.loads(g) for g in rq.until(1)]
+    end = time.time() + 10
+    while f.n < 1 and time.time() < end:
+        time.sleep(0.05)
+    time.sleep(0.5)	# the host's close reaches dch, quietly
+    rq.send({"req": 2, "argv": ["--json"]}, {"req": 3, "argv": ["--json"]},
+            {"cancel": 3})
+    got2 = [json.loads(g) for g in rq.until(2, 30)]
+    t2 = time.time()
+    got3 = [json.loads(g) for g in rq.until(3, 30)]
+    t3 = time.time()
+    dark = "dch: q: unreachable: no answer within 5000 ms"
+    check("LOW-10: a dark host's dial: its request exit 7 lost, the one "
+          "queued behind it at once, with no dial of its own",
+          got == [{"req": 1, "exit": 0, "why": None}]
+          and got2 == [{"req": 2, "stderr": dark},
+                       {"req": 2, "exit": UNREACHABLE_EXIT, "why": "lost"}]
+          and got3 == [{"req": 3, "stderr": dark},
+                       {"req": 3, "exit": UNREACHABLE_EXIT, "why": "lost"}]
+          and t3 - t2 < 2 and f.n == 2 and rq.quiet(0.3),
+          (got, got2, got3, t3 - t2, f.n))
+    time.sleep(5.2)
+    rq.send({"req": 4, "argv": ["--json"]})
+    end = time.time() + 10
+    while f.n < 3 and time.time() < end:
+        time.sleep(0.05)
+    check("LOW-10: past RM_ATTACH_MS the next request dials again",
+          f.n == 3, f.n)
+    rq.end(30)
+
+    # LOW-8: a reused id while it runs: busy as req null, one end for it
+    f = fake("hold")
+    rq = Requests(side(f.port), "q:x")
+    rq.line()
+    rq.send({"req": 1, "argv": ["--json"]}, {"req": 1, "argv": ["--json"]})
+    a = rq.line()
+    rq.send({"cancel": 1})
+    got = rq.until(1)
+    rc, rest, err = rq.end()
+    check("LOW-8: a reused running id: busy with req null, then its one "
+          "end line", json.loads(a) == {"req": None, "exit": 1,
+                                        "why": "busy"}
+          and [json.loads(g) for g in got]
+          == [{"req": 1, "exit": 2, "why": "cancel"}]
+          and rc == 0 and rest == b"", (a, got, rc, rest))
+
+    # LOW-9: a NUL in a host line, stdout and stderr: kept as \u0000
+    f = fake("nul")
+    rq = Requests(side(f.port), "q:x")
+    rq.line()
+    rq.send({"req": 1, "argv": ["--json"]})
+    got = rq.until(1)
+    rq.end()
+    check("LOW-9: a NUL in a host line: the whole line, \\u0000 for it",
+          got == [b'{"req":1,"line":"{\\"a\\":1}\\u0000junk"}',
+                  b'{"req":1,"stderr":"e\\u0000rr"}',
+                  b'{"req":1,"exit":0,"why":null}'], got)
+
+    # NIT-4: the host's order of stdout and stderr lines, in one read
+    f = fake("order")
+    rq = Requests(side(f.port), "q:x")
+    rq.line()
+    rq.send({"req": 1, "argv": ["--json"]})
+    got = [json.loads(g) for g in rq.until(1)]
+    rq.end()
+    check("NIT-4: stdout and stderr lines in the host's order",
+          got == [{"req": 1, "line": {"o": 1}}, {"req": 1, "stderr": "e1"},
+                  {"req": 1, "line": {"o": 2}}, {"req": 1, "stderr": "e2"},
+                  {"req": 1, "exit": 0, "why": None}], got)
+
+
 def main():
     # POSIX only, so windows_client_test.py can import Fake and frame
     import fcntl, pty, termios
@@ -1544,6 +1799,7 @@ def main():
                    hosts)
         xray_checks(dch, check, senv, cenv, port, fakes, tmp, log)
         requests_checks(dch, check, senv, cenv, serve_at, fakes, tmp, log)
+        robust_checks(dch, check, cenv, fakes, tmp)	# #180
 
         # --- precedence -----------------------------------------------
         # (--spawn srv:rs1 is remote now, #114: -n makes the local one)

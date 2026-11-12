@@ -66,6 +66,7 @@ int dch_remote_ctl(const char *host, int argc, char **argv, const char *cwd);
 ** 6 or 7, said on stderr and as one {"schema":1,"exit":N,...} line. */
 int dch_remote_requests(char *n);
 void dch_remote_esc(char *out, size_t cap, const char *s);
+void keepalive(int fd);	/* TCP keepalive (about 30 s) and no Nagle */
 
 /* Attach replay scrollback (#101): rows of the session's history sent above
 ** the screen. --scrollback sets dch_replay_sb (-1: not given, then

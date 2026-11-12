@@ -938,8 +938,13 @@ record of that name. Only when nothing local matches and the part before the
 own rules (exit 2 and nothing sent on a bad one; the view form, without
 `--json`, stays local and exits 2), then runs `--xray <name>` and the other
 flags as typed on that host's `dch serve` over [ctl](#control-verbs-ctl). It
-writes the host's output and standard error as they come (the `--follow`
-and `--ref` streams included) and exits with the host's exit status. The
+writes the host's output and standard error line by line as they come (the
+`--follow` and `--ref` streams included) and exits with the host's exit
+status. A control character, DEL, C1, bidi control or U+2028/U+2029 the host
+sends raw is written as a `\u` escape, and a byte that is not UTF-8 as
+`\ufffd`: a JSON line stays the same JSON, and the host cannot drive your
+terminal. A host that sends nothing for 65 s (its own 60 s timeout, plus 5 s)
+is a lost connection, exit 7; `--follow` has no such limit. The
 host answers by its own release: `--scope`, `--chapter` and the corpus are
 the host's. A host whose hello lacks the `xray` token gets nothing and dch
 prints `dch: <host>: does not support --xray (needs dch serve 1.55.0+)`,
@@ -971,20 +976,25 @@ standard input is a request, as NDJSON:
 
 Each line the host writes comes back as `{"req":N,"line":<the line>}`, the
 line byte for byte (a line that is not one JSON object comes as a JSON
-string); each standard-error line as `{"req":N,"stderr":"..."}`, escaped.
+string, a NUL in it as `\u0000`); each standard-error line as
+`{"req":N,"stderr":"..."}`, escaped. Output and standard-error lines come
+in the order the host sent them.
 Every request ends with exactly one `{"req":N,"exit":E,"why":W}`: `E` is
 the host's exit status, `W` is `null`, `"cancel"`, `"cap"` or `"timeout"`
 (the host cut it short; `"cap"` with exit 2 also when one host line is more
 than dch carries: over 8 MiB, or over about 2.67 MiB as a standard-error
 line or a line that comes as a string; dch then closes the connection and
 dials again, unseen), `"busy"` (exit 1: a request was already running;
-the running one goes on), `"refused"` (exit 2 as above, or the host refused
-it: 1, or 4 by its gate) or `"lost"` (exit 7: the connection dropped while
-it ran). A line that is no request gets the same `refused` pair with
+the running one goes on; one that reuses the running one's `N` gets it as
+`"req":null`), `"refused"` (exit 2 as above, or the host refused it: 1, or
+4 by its gate) or `"lost"` (exit 7: the connection dropped while it ran, or
+the host sent nothing for 65 s). A line that is no request gets the same `refused` pair with
 `"req":null`; a blank line is skipped, a line over 64 KiB refused. On a host
 without `ctl-cancel` a cancel closes the connection and dch dials again,
 unseen. After the host's idle close (5 minutes) or a lost connection, the
-next request dials again. End of standard input closes the connection and
+next request dials again. A dial that fails stands for 5 s: the requests
+queued behind it end `"lost"` at once with its message, without a dial
+each. End of standard input closes the connection and
 exits 0; a request still running then ends `"why":"cancel"`. With no
 connection at the start, dch writes one `{"schema":1,"exit":E,"stderr":...}`
 line, prints the message on standard error and exits `E`: 6 for a host
@@ -1378,6 +1388,9 @@ Rules for shells and endings:
   stdout. Exit 1 with `busy` can come after the snapshot: then it means the
   stream stopped, not that the session ended. Run `--follow` again for a
   new snapshot.
+  A remote follower whose phone or host is gone without closing the
+  connection lets its slot go in about 30 s: `dch serve` sets TCP keepalive
+  on every connection.
 - An ended session or a History record writes its one snapshot and exits 0.
 - A live one exits 0 when the session ends, when its connection drops (a
   `--restart`), or when the reader closes the pipe, idle or not.
@@ -2270,7 +2283,9 @@ as attach: only peers the [trust model](#dch-serve-prosper-remote-hosts)
 lets in. For tests, `DCH_CTL_TIMEOUT_MS` replaces every timeout (`--follow`
 included), `DCH_CTL_CAP` lowers the cap and `DCH_CTL_IDLE_MS` the warm
 connection's 300 s; `dch serve` reads them at startup and removes them from
-the environment.
+the environment. A remote `dch --xray` (one-shot or `--requests`) reads
+`DCH_CTL_TIMEOUT_MS` too, in place of the host's 60 s, for its own wait on a
+silent host (that plus 5 s).
 
 **The dch client.** `dch --read host:api` and the other verbs open one
 connection per verb. Ctrl-C (SIGINT), SIGTERM, or a reader that closes its
@@ -2343,7 +2358,8 @@ marks, U+2028 and U+2029) as
 phone. A connection past the first two gets `busy` (see
 [Refusals](#refusals)) and the close. A connection that is not attached or watching closes after 30 s
 without a whole frame, and any connection closes when its output goes untaken
-for 20 s. Control frames over 64 KiB, and any frame over the protocol's
+for 20 s. A peer gone without a close (no answer to TCP keepalive) is
+closed in about 30 s. Control frames over 64 KiB, and any frame over the protocol's
 256 MiB guard, close the connection. Sent frames are at most 8 MiB. A
 control verb has its own cap and timeouts ([above](#control-verbs-ctl)).
 
@@ -2424,11 +2440,10 @@ each host's ended sessions, fetched as its own `dch --history --json` over
   already holds a `"host"` or `"stale"` key, or has no `"name"`, is dropped,
   so a host cannot pass for another. So is one a strict JSON reader would
   reject (a lone surrogate `\u` escape, a number past a double's range,
-  nesting over 64 deep, a key counting as a level), and one that gives a
-  key dch reads
-  (`file`, `alias`, `end`, `cwd`, `argv`, `agent` and its `session_id` and
-  `name`, `ended`, `updated`, `pinned`) twice, so text, the picker and JSON
-  show the same records. At most 500 records and 2 MiB per host.
+  objects and arrays nested over 64 deep in it, keys not counted), and one
+  that gives any key twice in one object (decoded, so `"a"` and `"\u0061"`
+  are the same key), so text, the picker and JSON show the same records
+  and a reader that refuses duplicate keys takes the document. At most 500 records and 2 MiB per host.
   Without `--remote` nothing is dialled and the output is unchanged.
 - *An old or odd host.* One whose hello lacks `ctl` (before dch serve 1.41,
   or an older Prosper) gets one stderr line, `dch: <host>: does not support remote
