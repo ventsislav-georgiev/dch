@@ -1017,6 +1017,9 @@ fi
 # a live Codex's rollout (#160, 7.4): the one-UUID mapping, the seam, --ref,
 # --follow; its ring-pause part skips itself without the mirror
 pyrun "xray: a live Codex's rollout, the mapping, the seam, --follow" xray_codex_test.py
+# the file window's guard (#178): QA's repro with FAKE files, local and over
+# a loopback dch serve, through ended sessions so lite runs it too
+pyrun "xray file windows: no wide root, the deny list, hard links" xray_deny_test.py
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

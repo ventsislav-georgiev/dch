@@ -1209,13 +1209,35 @@ invalid UTF-8 and NUL as U+FFFD, the controls JSON-escaped.
 - **File.** The ref's path (a relative one against the session's cwd, a
   `~/` one against `HOME`), in an ended session too, must lie inside the
   project: the cwd's git root (the nearest parent holding `.git`), else the
-  cwd. Outside it is `outside_project` and nothing is touched; a path any of
-  whose parts under the root starts with `.env`, `.ssh`, `.gnupg`, `.aws`,
-  `.netrc`, `.npmrc`, `.pypirc` or `.git-credentials`, or whose name ends in
-  `.pem`, `.key`, `.p12`, `.keychain` or `.keychain-db`, or is an `id_` name
-  with no dot, is `secret_name` and is not opened. Both checks run again on
-  the real path. Over 2 MB is `too_large`. `ok` reads it with no symlink
-  followed and gives the name as `title`, the path from the cwd (`· line N`
+  cwd. A root that is `/`, `$HOME` or a directory above `$HOME` (by real
+  path; `HOME` and the passwd entry's home both count) is no project: every
+  file is then `outside_project`. Outside the project is `outside_project`
+  and nothing is touched. A path on the deny list is `secret_name` and is
+  not opened. The list is matched without regard to case against every part
+  of the whole path, as given and again as its real path:
+  - a part that starts with `.env`, `.ssh`, `.gnupg`, `.aws`, `.netrc`,
+    `.npmrc`, `.pypirc` or `.git-credentials`;
+  - a directory `.git`, `.kube`, `.docker`, `.azure`, `.oci`, `.claude`,
+    `.codex`, `.gcloud`, `.password-store`, `.config/gh` or
+    `.config/gcloud`, and everything under it;
+  - the name `.claude.json`, `.pgpass`, `.my.cnf`, `.vault-token`,
+    `.htpasswd`, `.s3cfg`, `credentials`, `credentials.json`,
+    `credentials.toml`, `credentials.db`,
+    `application_default_credentials.json`, `secrets.yaml`, `secrets.yml`
+    or `secrets.json`;
+  - a name that ends in `.pem`, `.key`, `.p12`, `.pfx`, `.p8`, `.ppk`,
+    `.jks`, `.keystore`, `.keychain`, `.keychain-db`, `.tfstate`,
+    `.tfstate.backup` or `history` (shell and REPL history);
+  - an `id_` name with no dot (`id_rsa`, never `id_rsa.pub`).
+
+  This guards the common credential files by name. It is not a guarantee:
+  a secret in a file with any other name (a `config.yml`, a script, a log)
+  is shown. The real path must also lie inside the project's real path, so
+  a symlinked directory on the way is followed only while it stays inside;
+  else it is `outside_project`. A file with more than one hard link is
+  `outside_project` too: its other names can lie outside. Over 2 MB is
+  `too_large`. `ok` reads it, the file itself never a symlink, and
+  gives the name as `title`, the path from the cwd (`· line N`
   with one) as `subtitle`, and up to 14 lines with line N the seventh, CRs
   dropped, kept whole at either end of the file; `first`, only here, is the
   1-based number of `lines[0]` (1 for a ref with no line), so a consumer
@@ -2126,13 +2148,17 @@ project` for one, is the host's dch's to answer.
 **What `xray` lets a peer read.** More than the chapters of the session it
 names. `--ref <file ref> --full` returns 14-line windows of files on this
 host: any file inside that session's project (its cwd's git root, else its
-cwd) that is a regular file of at most 2 MB, not a symlink and not
-secret-looking by name (`.env*`, `.ssh`, `*.pem`, `id_rsa`, ...). A commit
+cwd; none when that is `/`, `$HOME` or above it) that is a regular file of
+at most 2 MB with one link, not itself a symlink and not on the deny list
+(`.env*`, `.ssh`, `.git/`, `.claude/`, `.config/gh/`, `*.pem`, `id_rsa`,
+`*history`, ...: the File resolver's full list). The list catches the
+common credential files by name, not every file that holds a secret. A commit
 ref returns that commit's `git show --stat` from the session's repo.
 `--scope all` returns lines (and with `--full`, definition passages) from
 every other session's Claude Code transcript of this store, in every project
 dir; `--scope project`, the default, from those in the session's own project
-dir. Nothing is written. Let in only peers you would let read those files and
+dir. Nothing is written to disk; `--clear` empties a shell session's X-ray
+ring. Let in only peers you would let read those files and
 transcripts.
 
 **Its limits.** Stdout and stderr together get 8 MiB (`--xray --follow`:

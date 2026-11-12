@@ -869,25 +869,77 @@ written); states
 .BR ambiguous ,
 .BR timeout ,
 .BR ended .
-A file is read only inside the project (the cwd's git root, else the cwd),
-checked by its text and again by its real path, never through a symlink,
-never a secret name
-.RB ( .env* ,
+A file is read only inside the project (the cwd's git root, else the cwd;
+none when that is
+.BR / ,
+.B $HOME
+or a directory above it, by real path), checked by its text and again by
+its real path (a symlinked directory is followed only while it stays
+inside), the file itself never a symlink, a file with more than one hard
+link
+.BR outside_project ,
+never on the deny list
+.RB ( secret_name ),
+matched without regard to case against every part of the whole path, as
+given and as its real path: a part starting with
+.BR .env ,
 .BR .ssh ,
 .BR .gnupg ,
 .BR .aws ,
 .BR .netrc ,
 .BR .npmrc ,
-.BR .pypirc ,
-.B .git\-credentials
-in any part,
-.BR *.pem ,
-.BR *.key ,
-.BR *.p12 ,
-.BR *.keychain ,
-.BR *.keychain\-db ,
+.BR .pypirc
+or
+.BR .git\-credentials ;
+anything under a directory
+.BR .git ,
+.BR .kube ,
+.BR .docker ,
+.BR .azure ,
+.BR .oci ,
+.BR .claude ,
+.BR .codex ,
+.BR .gcloud ,
+.BR .password\-store ,
+.B .config/gh
+or
+.BR .config/gcloud ;
+the names
+.BR .claude.json ,
+.BR .pgpass ,
+.BR .my.cnf ,
+.BR .vault\-token ,
+.BR .htpasswd ,
+.BR .s3cfg ,
+.BR credentials ,
+.BR credentials.json ,
+.BR credentials.toml ,
+.BR credentials.db ,
+.BR application_default_credentials.json ,
+.BR secrets.yaml ,
+.B secrets.yml
+and
+.BR secrets.json ;
+names ending in
+.BR .pem ,
+.BR .key ,
+.BR .p12 ,
+.BR .pfx ,
+.BR .p8 ,
+.BR .ppk ,
+.BR .jks ,
+.BR .keystore ,
+.BR .keychain ,
+.BR .keychain\-db ,
+.BR .tfstate ,
+.B .tfstate.backup
+or
+.BR history ;
 .B id_
-names with no dot), at most 2 MB, as 14 lines with the ref's line the
+names with no dot.
+The list guards the common credential files by name; a secret in a file
+with any other name is shown.
+At most 2 MB, as 14 lines with the ref's line the
 seventh; states
 .BR ok ,
 .BR outside_project ,

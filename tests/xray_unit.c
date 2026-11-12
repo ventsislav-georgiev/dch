@@ -2056,10 +2056,11 @@ t_res_file(void)
 		char hb[PATH_MAX], sv[PATH_MAX];
 
 		snprintf(sv, sizeof sv, "%s", h ? h : "");
-		snprintf(hb, sizeof hb, "%s/proj", rd);
+		snprintf(hb, sizeof hb, "%s", rd);	/* not the project (#178) */
 		setenv("HOME", hb, 1);
 		CHECK("file: ~/ is the querying process's HOME",
-		      res("~/src/a.c:3", "proj", 1, &r) == 1 && is(&r, "file", "ok") &&
+		      res("~/proj/src/a.c:3", "proj", 1, &r) == 1 &&
+		      is(&r, "file", "ok") &&
 		      !strcmp(r.line[2], "line 3"));
 		if (h)
 			setenv("HOME", sv, 1);
@@ -2071,6 +2072,125 @@ t_res_file(void)
 	CHECK("ref line: :12, :12:3, #L7, none",
 	      xr_ref_line("a.c:12") == 12 && xr_ref_line("a.c:12:3") == 12 &&
 	      xr_ref_line(" a.c#L7 ") == 7 && xr_ref_line("a/b.c") == 0);
+}
+
+/* #178 (QA 1.55.0 MED-1, LOW-2, NIT-1): a wide root is no project; the deny
+** list, case-insensitive, on the typed and the real path; one link only.
+** Every file below holds FAKE and would be read ("ok") on 1.55.0's base. */
+static void
+t_res_deny(void)
+{
+	static const char *const deny[] = {
+		/* (b): the credential stores QA read in full */
+		".claude/.credentials.json", ".codex/auth.json",
+		".config/gh/hosts.yml",
+		".config/gcloud/application_default_credentials.json",
+		".kube/config", ".docker/config.json", ".pgpass", "credentials",
+		"secrets.yaml", "c.pfx", "terraform.tfstate", ".vault-token",
+		".htpasswd", ".zsh_history", ".bash_history", "fish_history",
+		".git/config", ".claude.json", "a/.password-store/x.gpg",
+		/* (c): real upper-case names */
+		"up/.ENV.production", "up/ID_ED25519", "up/SERVER.PEM",
+		"up/.SSH/config", "up/.Npmrc", NULL
+	};
+	static const char *const mkd[] = {
+		"dp", "dp/.git", "dp/.claude", "dp/.codex", "dp/.config",
+		"dp/.config/gh", "dp/.config/gcloud", "dp/.kube", "dp/.docker",
+		"dp/a", "dp/a/.password-store", "dp/up", "dp/up/.SSH", "dp/src",
+		"dp/out", "home", "home/proj", "home2", "home2/.git", "home2/sub",
+		"x", "x/.claude", "x/.claude/p", "x/.claude/p/.git", NULL
+	};
+	const char *h = getenv("HOME");
+	char b[PATH_MAX + 64], l[PATH_MAX + 64], sv[PATH_MAX];
+	struct xr_resolved r;
+	struct xr_span sp;
+	size_t k;
+	int ok;
+
+	for (k = 0; mkd[k]; k++)
+		dir(mkd[k]);
+	for (k = 0; deny[k]; k++)
+	{
+		snprintf(b, sizeof b, "dp/%s", deny[k]);
+		put(b, "FAKE\n", 5);
+		snprintf(b, sizeof b, "%s/dp/%s:1", rd, deny[k]);
+		snprintf(l, sizeof l, "deny: %s: secret_name, unread", deny[k]);
+		CHECK(l, xr_secret_name(deny[k]) && res(b, "dp", 1, &r) == 1 &&
+		      is(&r, "file", "secret_name") && r.nlines == 0);
+	}
+	CHECK("deny: .github, .gitignore, credentials.ts, history.c, init.lua, "
+	      "id_rsa.pub, a.key.c are not denied",
+	      !xr_secret_name(".github/workflows/ci.yml") &&
+	      !xr_secret_name(".gitignore") && !xr_secret_name(".gitattributes") &&
+	      !xr_secret_name("src/credentials.ts") &&
+	      !xr_secret_name("src/history.c") &&
+	      !xr_secret_name(".config/nvim/init.lua") &&
+	      !xr_secret_name("ID_RSA.pub") && !xr_secret_name("a.key.c"));
+	/* symlinks: as the name, into a denied dir, a project inside one */
+	snprintf(b, sizeof b, "%s/dp/notes.txt", rd);
+	ok = symlink(".claude/.credentials.json", b) == 0;
+	snprintf(b, sizeof b, "%s/dp/cfg", rd);
+	ok = ok && symlink(".git", b) == 0;
+	snprintf(b, sizeof b, "%s/dp/src/me", rd);
+	ok = ok && symlink("../.claude", b) == 0;
+	snprintf(b, sizeof b, "%s/x/.claude/p", rd);
+	snprintf(l, sizeof l, "%s/xl", rd);
+	ok = ok && symlink(b, l) == 0;
+	put("x/.claude/p/a.txt", "FAKE\n", 5);
+	CHECK("deny: a symlink to a credential file is no block, never read",
+	      ok && res("notes.txt:1", "dp", 1, &r) == 0);
+	snprintf(b, sizeof b, "%s/dp/cfg/config:1", rd);
+	CHECK("deny: a symlinked dir into .git: secret_name (real path)",
+	      res(b, "dp", 1, &r) == 1 &&
+	      is(&r, "file", "secret_name") && r.nlines == 0);
+	CHECK("deny: a nested symlinked dir into .claude: secret_name",
+	      res("src/me/.credentials.json:1", "dp", 1, &r) == 1 &&
+	      is(&r, "file", "secret_name") && r.nlines == 0);
+	CHECK("deny: a project reached through a symlink, really in .claude: "
+	      "secret_name (the whole real path)",
+	      res("a.txt:1", "xl", 1, &r) == 1 &&
+	      is(&r, "file", "secret_name") && r.nlines == 0);
+	/* LOW-2: a hard link inside to a file outside */
+	put("dp/out/o.txt", "FAKE OUT\n", 9);
+	snprintf(b, sizeof b, "%s/dp/out/o.txt", rd);
+	snprintf(l, sizeof l, "%s/dp/src/hard.txt", rd);
+	ok = link(b, l) == 0;
+	CHECK("deny: a hard link (nlink 2): outside_project, unread",
+	      ok && res("src/hard.txt:1", "dp", 1, &r) == 1 &&
+	      is(&r, "file", "outside_project") && r.nlines == 0);
+	CHECK("deny: the same file with one link again is read",
+	      unlink(b) == 0 && res("src/hard.txt:1", "dp", 1, &r) == 1 &&
+	      is(&r, "file", "ok"));
+	/* (a): $HOME, an ancestor of it, and / are no project */
+	snprintf(sv, sizeof sv, "%s", h ? h : "");
+	snprintf(b, sizeof b, "%s/home", rd);
+	setenv("HOME", b, 1);
+	put("home/notes.txt", "FAKE\n", 5);
+	put("home/proj/n.txt", "FAKE\n", 5);
+	put("top.txt", "FAKE\n", 5);
+	CHECK("root: cwd $HOME, no git: outside_project, unread",
+	      res("~/notes.txt:1", "home", 1, &r) == 1 &&
+	      is(&r, "file", "outside_project") && r.nlines == 0);
+	CHECK("root: cwd an ancestor of $HOME: outside_project",
+	      res("top.txt:1", "", 1, &r) == 1 &&
+	      is(&r, "file", "outside_project"));
+	CHECK("root: cwd below $HOME, no git: the cwd is still the project",
+	      res("n.txt:1", "home/proj", 1, &r) == 1 && is(&r, "file", "ok"));
+	snprintf(b, sizeof b, "%s/home2", rd);
+	setenv("HOME", b, 1);
+	put("home2/sub/s.txt", "FAKE\n", 5);
+	CHECK("root: a git root at $HOME: outside_project",
+	      res("s.txt:1", "home2/sub", 1, &r) == 1 &&
+	      is(&r, "file", "outside_project"));
+	if (h)
+		setenv("HOME", sv, 1);
+	else
+		unsetenv("HOME");
+	snprintf(b, sizeof b, "%s/top.txt:1", rd);
+	memset(&r, 0, sizeof r);
+	CHECK("root: cwd /: outside_project, unread",
+	      xr_ref_parse(b, "/", &sp) && xr_res_ref(&sp, b, "/", 1, &r) == 1 &&
+	      is(&r, "file", "outside_project") && r.nlines == 0);
 }
 
 /* A fake git: records its argv and env, then acts as $D/mode says. */
@@ -2365,6 +2485,7 @@ t_resolve(void)
 	}
 	t_res_parse();
 	t_res_file();
+	t_res_deny();
 	t_res_git();
 	snprintf(cmd, sizeof cmd, "rm -rf '%s'", rd);
 	(void)!system(cmd);

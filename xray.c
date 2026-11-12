@@ -16,6 +16,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <poll.h>
+#include <pwd.h>
 #include <signal.h>
 #include <spawn.h>
 #include <stdlib.h>
@@ -6781,6 +6782,27 @@ res_under(const char *p, const char *root)
 	return p[rl] ? p + rl + 1 : p + rl;
 }
 
+/* root is "/", $HOME or an ancestor of it, by real path (HOME and the
+** passwd entry's): too wide to be a project, so none (#178) */
+static int
+res_wide(const char *root)
+{
+	const struct passwd *pw = getpwuid(getuid());
+	const char *h[2] = { getenv("HOME"), pw ? pw->pw_dir : NULL };
+	char rr[PATH_MAX], hr[PATH_MAX];
+	int k;
+
+	if (!realpath(root, rr))
+		snprintf(rr, sizeof rr, "%s", root);
+	if (!strcmp(rr, "/"))
+		return 1;
+	for (k = 0; k < 2; k++)
+		if (h[k] && h[k][0] == '/' &&
+		    res_under(realpath(h[k], hr) ? hr : h[k], rr))
+			return 1;
+	return 0;
+}
+
 /* ---- git (8.3) ---- */
 
 static int
@@ -7271,36 +7293,63 @@ xr_ref_line(const char *text)
 	return v;
 }
 
+/* The deny list (#178), ASCII case-insensitive. 'p': a part of the path
+** starts with it; 'd': a part (or parts, "a/b") equals it; on the name
+** only, 'n': equals it, 's': ends in it, 'i': starts with it and has no
+** dot. A guard against the common credential files, not a guarantee. */
+static const struct { char how; const char *s; } xr_deny[] = {
+	/* env files, ssh, gpg, aws, the package managers' tokens (.env*) */
+	{ 'p', ".env" }, { 'p', ".ssh" }, { 'p', ".gnupg" }, { 'p', ".aws" },
+	{ 'p', ".netrc" }, { 'p', ".npmrc" }, { 'p', ".pypirc" },
+	{ 'p', ".git-credentials" },
+	/* git internals: .git/config can hold https://user:token@ remotes */
+	{ 'd', ".git" },
+	/* cloud, container, agent and password stores, whole directories */
+	{ 'd', ".kube" }, { 'd', ".docker" }, { 'd', ".azure" }, { 'd', ".oci" },
+	{ 'd', ".claude" }, { 'd', ".codex" }, { 'd', ".config/gh" },
+	{ 'd', ".config/gcloud" }, { 'd', ".gcloud" },
+	{ 'd', ".password-store" },
+	/* single token and password files */
+	{ 'n', ".claude.json" }, { 'n', ".pgpass" }, { 'n', ".my.cnf" },
+	{ 'n', ".vault-token" }, { 'n', ".htpasswd" }, { 'n', ".s3cfg" },
+	{ 'n', "credentials" }, { 'n', "credentials.json" },
+	{ 'n', "credentials.toml" }, { 'n', "credentials.db" },
+	{ 'n', "application_default_credentials.json" },
+	{ 'n', "secrets.yaml" }, { 'n', "secrets.yml" }, { 'n', "secrets.json" },
+	/* keys, certificates, keystores, keychains, terraform state */
+	{ 's', ".pem" }, { 's', ".key" }, { 's', ".p12" }, { 's', ".pfx" },
+	{ 's', ".p8" }, { 's', ".ppk" }, { 's', ".jks" }, { 's', ".keystore" },
+	{ 's', ".keychain" }, { 's', ".keychain-db" }, { 's', ".tfstate" },
+	{ 's', ".tfstate.backup" },
+	/* shell and REPL history: .zsh_history, .psql_history, fish_history */
+	{ 's', "history" },
+	/* ssh keys: id_rsa, id_ed25519, never id_rsa.pub */
+	{ 'i', "id_" },
+};
+
 int
-xr_secret_name(const char *rel)
+xr_secret_name(const char *path)
 {
-	static const char *const pre[] = {
-		".env", ".ssh", ".gnupg", ".aws", ".netrc", ".npmrc", ".pypirc",
-		".git-credentials", NULL
-	};
-	static const char *const suf[] = {
-		".pem", ".key", ".p12", ".keychain", ".keychain-db", NULL
-	};
-	const char *c = rel, *e;
-	size_t l, k;
+	const char *c = path, *e, *s;
+	size_t l, k, n;
 
 	for (; *c; c = *e ? e + 1 : e)
 	{
 		e = c + strcspn(c, "/");
 		l = (size_t)(e - c);
-		for (k = 0; pre[k]; k++)
-			if (l >= strlen(pre[k]) && !memcmp(c, pre[k], strlen(pre[k])))
+		for (k = 0; k < sizeof xr_deny / sizeof *xr_deny; k++)
+		{
+			s = xr_deny[k].s;
+			n = strlen(s);
+			if (xr_deny[k].how == 'p' ? l >= n && !strncasecmp(c, s, n)
+			    : xr_deny[k].how == 'd' ? !strncasecmp(c, s, n) &&
+			      (!c[n] || c[n] == '/')
+			    : *e ? 0	/* the rest: the name only */
+			    : xr_deny[k].how == 'n' ? l == n && !strncasecmp(c, s, n)
+			    : xr_deny[k].how == 's' ? l >= n && !strncasecmp(e - n, s, n)
+			    : l > n && !strncasecmp(c, s, n) && !memchr(c, '.', l))
 				return 1;
-		if (*e)
-			continue;
-		/* the name itself */
-		for (k = 0; suf[k]; k++)
-			if (l > strlen(suf[k]) &&
-			    !memcmp(e - strlen(suf[k]), suf[k], strlen(suf[k])))
-				return 1;
-		/* id_rsa, id_ed25519: no extension (so never id_rsa.pub) */
-		if (l > 3 && !memcmp(c, "id_", 3) && !memchr(c, '.', l))
-			return 1;
+		}
 	}
 	return 0;
 }
@@ -7336,9 +7385,11 @@ xr_file_lines(const char *s, size_t n, long line, struct xr_resolved *r)
 }
 
 /* FileResolver: the key's path, inside the project (the cwd's git root,
-** else the cwd) by its text and again by realpath; never a secret name;
-** lstat a regular file, at most 2 MB, opened through the seam. Outside the
-** project nothing is touched, so no TCC prompt (QA D). */
+** else the cwd; none when that is /, $HOME or above) by its text and again
+** by realpath; never a denied name, on either whole path; lstat a regular
+** file with one link, at most 2 MB, opened through the seam. Outside the
+** project nothing is touched, so no TCC prompt (QA D), unless a symlinked
+** dir inside points out: realpath follows it, then refuses. */
 static int
 res_file(const char *key, const char *text, const char *cwd,
          struct xr_resolved *r)
@@ -7370,12 +7421,12 @@ res_file(const char *key, const char *text, const char *cwd,
 	snprintf(shown, sizeof shown, "%s", rel && *rel ? rel
 	         : (rel = res_under(p, root)) && *rel ? rel : p);
 	res_text(r->subtitle, shown, strlen(shown), XR_RES_LINE);
-	if (!(rel = res_under(p, root)))
+	if (res_wide(root) || !res_under(p, root))
 	{
 		res_set(r, "outside_project", "Outside this session's project");
 		return 1;
 	}
-	if (xr_secret_name(rel))
+	if (xr_secret_name(p))
 	{
 		res_set(r, "secret_name", "Not previewed: may hold secrets");
 		return 1;
@@ -7384,12 +7435,13 @@ res_file(const char *key, const char *text, const char *cwd,
 		return 0;	/* gone, a symlink, a FIFO, a dir: no block */
 	if (!realpath(p, rp) || !realpath(root, rr))
 		return 0;
-	if (!(rel = res_under(rp, rr)))
+	/* a hard link's other names can lie outside: the boundary's answer */
+	if (!res_under(rp, rr) || st.st_nlink > 1)
 	{
 		res_set(r, "outside_project", "Outside this session's project");
 		return 1;
 	}
-	if (xr_secret_name(rel))
+	if (xr_secret_name(rp))
 	{
 		res_set(r, "secret_name", "Not previewed: may hold secrets");
 		return 1;

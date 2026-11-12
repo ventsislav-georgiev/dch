@@ -423,13 +423,13 @@ void xr_scan_resolved(struct xr_scan *x, const struct xr_span *sp,
 /* The parsers, for the units and fuzz_xref: git show's output as a commit
 ** block (1, else 0); a file's 14-line window around line (0: the first);
 ** --ref's line suffix (:line, :line:col, #L<line>; 0 for none); the
-** secret-name list over a relative path (1: never read). */
+** deny list over every part of a path (1: never read). */
 int xr_git_parse(const char *s, size_t n, long long now,
                  struct xr_resolved *r);
 void xr_file_lines(const char *s, size_t n, long line,
                    struct xr_resolved *r);
 long xr_ref_line(const char *text);
-int xr_secret_name(const char *rel);
+int xr_secret_name(const char *path);
 /* Test seams: the probe list (NULL: 8.3's for this OS), the probe's pick
 ** (NULL: none), and the git spawns so far. */
 extern const char *const *xr_git_probe;
