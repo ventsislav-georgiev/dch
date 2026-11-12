@@ -412,13 +412,14 @@ pk_set(const char *a)
 	pk_sgr(b);
 }
 
-/* A bidi control (U+200E, U+200F, U+202A-U+202E, U+2066-U+2069): drawn as
+/* A bidi control (U+061C, U+200E, U+200F, U+2028-U+202E, U+2066-U+2069,
+** the set dch's JSON quoting escapes): drawn as
 ** '?', as a control is (K10.6, #175: titles are hostile). */
 static int
 pk_bidi(unsigned u)
 {
-	return u == 0x200E || u == 0x200F || (u >= 0x202A && u <= 0x202E) ||
-	       (u >= 0x2066 && u <= 0x2069);
+	return u == 0x061C || u == 0x200E || u == 0x200F ||
+	       (u >= 0x2028 && u <= 0x202E) || (u >= 0x2066 && u <= 0x2069);
 }
 
 /* Cells of code point u: two for the wide (ap_cells), none for a combining

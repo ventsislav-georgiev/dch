@@ -21,8 +21,10 @@
 
 #include <ctype.h>
 
+#ifndef XV_LINE_MAX
 #define XV_LINE_MAX  (8u << 20)	/* an NDJSON line past it is dropped (the
 				** engine's are under 4 MiB) */
+#endif
 #define XV_MENTIONS  10000	/* a card keeps at most these */
 #define XV_ALPHA     "asdfghjklzxcvbnmwertyuiop"	/* hint labels: no q */
 
@@ -356,10 +358,15 @@ xv_lines(struct xv *v, struct xv_kid *k, int eof)
 			*nl = '\0';
 		else
 			k->buf[k->len] = '\0';
-		if (!k->skip && dch_json_parse(&p, k->buf + at) == 0 &&
-		    p.tok[0].kind == JSON_OBJECT)
-			k->line(v, &p);
-		dch_json_free(&p);
+		/* the tail of a dropped over-long line: nothing parsed, nothing
+		** to free */
+		if (!k->skip)
+		{
+			if (dch_json_parse(&p, k->buf + at) == 0 &&
+			    p.tok[0].kind == JSON_OBJECT)
+				k->line(v, &p);
+			dch_json_free(&p);
+		}
 		k->skip = 0;
 		at = nl ? (size_t)(nl - k->buf) + 1 : k->len;
 	}
@@ -1036,6 +1043,12 @@ xv_dot(void)
 	return pk_utf ? " \xc2\xb7 " : " - ";
 }
 
+static const char *
+xv_ell(void)
+{
+	return pk_utf ? "\xe2\x80\xa6" : "...";
+}
+
 /* Spec 3.9's label for the corpus, "" for none. */
 static void
 xv_label(const struct xv *v, char *b, size_t n)
@@ -1283,9 +1296,10 @@ xv_draw_card(struct xv *v, int win)
 		         v->cnt[4] > 0 ? v->cnt[4] : 0);
 	pk_txt(b);
 	pk_set("2");
-	pk_txt(running ? (v->full ? "  searching more\xe2\x80\xa6"
-	                  : "  searching\xe2\x80\xa6")
+	pk_txt(running ? (v->full ? "  searching more" : "  searching")
 	       : v->cdone && v->cpartial && !v->full ? "  (f for more)" : "");
+	if (running)
+		pk_txt(xv_ell());
 	pk_eol();
 	rows++;
 	for (k = 0; k < v->nm; k++)
@@ -1384,8 +1398,9 @@ xv_draw_read(struct xv *v, int win)
 		else if (k == 0)
 		{
 			pk_set("2");
-			pk_txt(v->kid[XV_RK].pid > 0 ? "  Reading\xe2\x80\xa6"
-			       : "  No entries");
+			pk_txt(v->kid[XV_RK].pid > 0 ? "  Reading" : "  No entries");
+			if (v->kid[XV_RK].pid > 0)
+				pk_txt(xv_ell());
 		}
 		pk_eol();
 	}
@@ -1480,8 +1495,9 @@ xv_draw(struct xv *v, int force)
 		pk_set(pk_p(PK_ACCB));
 		pk_txt(v->ctext);
 		pk_set("2");
-		snprintf(b, sizeof b, "  %s%s", v->full ? "full scan" : "light",
-		         v->scope == 2 ? " \xc2\xb7 other projects" : "");
+		snprintf(b, sizeof b, "  %s%s%s", v->full ? "full scan" : "light",
+		         v->scope == 2 ? xv_dot() : "",
+		         v->scope == 2 ? "other projects" : "");
 		pk_txt(b);
 	}
 	else if (v->mode == XV_READ)
@@ -1528,9 +1544,11 @@ xv_draw(struct xv *v, int force)
 			else if (k == 0)
 			{
 				pk_set("2");
-				pk_txt(!v->have ? "    Reading\xe2\x80\xa6" : v->filt[0]
+				pk_txt(!v->have ? "    Reading" : v->filt[0]
 				       ? "    No match" : v->tab == 0 ? "    No chapters"
 				       : "    No refs");
+				if (!v->have)
+					pk_txt(xv_ell());
 			}
 			pk_eol();
 		}
@@ -1553,7 +1571,9 @@ xv_draw(struct xv *v, int force)
 			else if (k == 0 && !s)
 			{
 				pk_set("2");
-				pk_txt(!v->have ? "    Reading\xe2\x80\xa6" : !v->live
+				if (!v->have)
+					pk_txt("    Reading");
+				pk_txt(!v->have ? xv_ell() : !v->live
 				       ? "    No screen: the session has ended"
 				       : v->scr_rc == -2
 				       ? "    No screen: dch-lite keeps no mirror"

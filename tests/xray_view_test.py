@@ -9,12 +9,14 @@ carries an SGR, is the hostile corpus.
 Covers:
   1. a non-tty stdout is refused, exit 2 (a remote name's refusal is
      remote_client_test.py's);
-  2. no such session: exit 1, the message after the terminal is restored;
+  2. --scope, --full or --budget-ms with no --json and no --ref on a
+     terminal: exit 2, a usage message, the view not opened; no such
+     session: exit 1, the message after the terminal is restored;
   3. the three tabs, the chapter list, the Refs list, the card (light, `f`
      full scan, `y` OSC 52 copy), the chapter reader, back, quit (exit 0,
      terminal restored);
-  4. mutant 11: no corpus ESC, BEL or bidi byte reaches the terminal, the
-     strings show with `?` in their place;
+  4. mutant 11: no corpus ESC, BEL or bidi byte (U+202E, U+061C, U+2028)
+     reaches the terminal, the strings show with `?` in their place;
   5. nothing written: no file under the test root changes;
   6. a resize to a narrow window says so, a resize back redraws;
   7. SIGTERM and SIGINT: the terminal is restored and the view's children
@@ -165,14 +167,16 @@ def files(root):
 
 # ---- the fixture: a History Claude record with a hostile corpus -----------
 
-TITLE = "look at #831 and o/r#7 \033]0;pwned\007 evil‮title"
+TITLE = ("look at #831 and o/r#7 \033]0;pwned\007 evil\u202etitle "
+         "al\u061cm ls\u2028ep")
 
 
 def fixture():
     cfg = os.path.join(HOME, ".claude")
     pdir = os.path.join(cfg, "projects", "-home-demo-proj")
     os.makedirs(pdir, exist_ok=True)
-    out = "# #831 Canary \033[31mred\033[0m passage\nSee #831 again and PROJ-5"
+    out = ("# #831 Canary \033[31mred\033[0m passage\n"
+           "See #831 again\u2028and\u061c PROJ-5")
     lines = [
         {"type": "user", "cwd": "/home/demo/proj",
          "timestamp": "2026-11-10T10:00:00Z", "message": {"content": TITLE}},
@@ -209,6 +213,16 @@ def test_refusals():
           r.returncode == 2 and r.stdout == "" and r.stderr ==
           "dch: the --xray view needs a terminal (--json prints the "
           "object)\n", (r.returncode, r.stdout, r.stderr))
+    for a in (["--scope", "all"], ["--full"], ["--budget-ms", "5"]):
+        v = Pty([DCH, "--xray", "xv-cl"] + a)
+        try:
+            rc = v.exit()
+            check("%s with no --json and no --ref on a terminal: exit 2, "
+                  "usage, no view" % a[0], rc == 2 and
+                  b"--scope, --full and --budget-ms come with --ref" in v.out
+                  and b"\033[?1049h" not in v.out, (rc, v.out))
+        finally:
+            v.close()
     v = Pty([DCH, "--xray", "nosuch"])
     try:
         rc = v.exit()
@@ -229,8 +243,9 @@ def test_view():
         check("open: the chapter list shows both titles",
               v.wait(b"second prompt about PROJ-5") and
               v.wait(b"look at #831"), v.out[-600:])
-        check("mutant 11: the chapter title's OSC, BEL and U+202E show as ?",
-              v.wait(b"o/r#7 ?]0;pwned? evil?title"), v.out[-600:])
+        check("mutant 11: the chapter title's OSC, BEL, U+202E and U+061C "
+              "show as ?", v.wait(b"o/r#7 ?]0;pwned? evil?title al?m"),
+              v.out[-600:])
         v.key(b"\t")
         check("Refs: the keys by count", v.wait(b"#831") and
               v.wait(b"PROJ-5") and v.wait(b"o/r#7"), v.out[-600:])
@@ -243,6 +258,9 @@ def test_view():
               v.out[mark:])
         check("mutant 11: the definition title's SGR shows as ?",
               v.wait(b"Canary ?[31mred?[0m passage", start=mark),
+              v.out[mark:])
+        check("mutant 11: a mention line's U+2028 and U+061C show as ?",
+              v.wait(b"See #831 again?and? PROJ-5", start=mark),
               v.out[mark:])
         mark = len(v.out)
         v.key(b"f", 1.0)
@@ -269,7 +287,8 @@ def test_view():
         check("quit: q exits 0 and leaves the alternate screen",
               rc == 0 and RESTORE in v.out[-60:], (rc, v.out[-80:]))
         bad = [b for b in (b"\033]0;pwned", b"\007 evil", b"\xe2\x80\xae",
-                           b"\033[31mred") if b in v.out]
+                           b"\033[31mred", b"\xd8\x9c", b"\xe2\x80\xa8")
+               if b in v.out]
         check("mutant 11: no corpus ESC, BEL or bidi byte in the output",
               not bad, bad)
     finally:
