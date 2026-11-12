@@ -54,7 +54,10 @@ Covers:
      them) re-arm again, each with one kitty pop before its one push, so the
      flag stack does not grow (a per-screen stack model of the whole attach
      ends at 1 on the alternate screen, 0 on the main one); the first attach
-     pops nothing. A key after still reaches the session.
+     pops nothing. A key after still reaches the session;
+  9. o (#194): on srv:xv-sh's Chapters the view is left as q leaves it and
+     the client attaches to xv-sh on the host (the host's log says so);
+     on the ended srv:xv-cl it says the session has ended and stays.
 
 Run:  python3 tests/xray_remote_view_test.py      (uses ./dch)
 """
@@ -308,6 +311,11 @@ def test_view():
         v.key(b"q")
         check("reader: q goes back to the list",
               v.wait(b"Chapters 2", start=mark), v.out[mark:])
+        mark = len(v.out)
+        v.key(b"o", 0.5)
+        check("o on the ended srv:xv-cl: said, the view stays",
+              v.wait(b"xv-cl has ended: no session to open", start=mark) and
+              v.reap() is None, v.out[mark:])
         v.key(b"q")
         rc = v.exit()
         check("quit: q exits 0 and leaves the alternate screen",
@@ -364,6 +372,35 @@ def test_on_screen():
     check("On screen: read on the host with ctl --read xv-sh --ansi",
           ctls("--read") > n0 and " ctl --read xv-sh " in log,
           ctls("--read") - n0)
+
+
+# ---- 6: o attaches to the host's session (#194) ----------------------------
+
+def test_open():
+    with open(SLOG) as f:
+        n0 = f.read().count(" attach xv-sh (")
+    CENV["DCH_DOUBLE_TAP_MS"] = "0"  # one Ctrl-\ detaches at once
+    v = Pty([DCH, "--xray", "srv:xv-sh"])
+    try:
+        v.wait(b"Chapters")
+        v.pump(0.5)
+        check("o: srv:xv-sh's footer offers it", v.wait(b"o open session"),
+              v.out[-600:])
+        mark = len(v.out)
+        v.key(b"o", 0.3)
+        attached = lambda: open(SLOG).read().count(" attach xv-sh (") > n0
+        end = time.time() + 10
+        while not attached() and time.time() < end:
+            v.pump(0.1)
+        check("o: the view left as q leaves it, then the host attaches "
+              "xv-sh for us", attached() and RESTORE in v.out[mark:] and
+              v.reap() is None, (v.out[mark:][-400:], open(SLOG).read()[-400:]))
+        v.key(b"\x1c", 0.5)
+        check("o: a real attach, the detach key ends it", v.exit(5) == 0,
+              v.out[-200:])
+    finally:
+        del CENV["DCH_DOUBLE_TAP_MS"]
+        v.close()
 
 
 # ---- 3: a hostile host -------------------------------------------------------
@@ -913,6 +950,7 @@ def main():
         test_view()
         test_on_screen()
         test_picker(port)
+        test_open()
         test_hostile()
         test_failures()
         test_chord(port)

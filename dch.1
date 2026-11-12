@@ -749,7 +749,18 @@ Session text is drawn with every control and bidi character as
 .BR ? .
 Three tabs:
 .B Chapters
-(\fB/\fR filters, \fBEnter\fR reads the chapter, read\-only),
+(\fB/\fR filters, \fBEnter\fR reads the chapter, read\-only;
+a chapter the harness wrote, a task notification
+.RB ( \(dqauto\(dq ),
+is hidden until
+.B n
+shows it, faint and titled by its summary, the footer saying how many;
+the tab counts the chapters shown without
+.BR n ;
+.B o
+here and in a chapter leaves the view and attaches to the session, as
+.B \-a
+does, a remote one's too; on an ended session it says so and stays),
 .B Refs
 (the files, commits, pull requests, issues and URLs the session touched,
 a faint line over them saying so; by count, then the most recent first;
@@ -808,6 +819,9 @@ The
 never reaches the session; keys that arrive in the same read as the
 .B x
 (a paste, a fast burst) reach neither the view nor the session.
+There
+.B o
+leaves the view back to the session.
 The chord is off with
 .B \-E
 and with

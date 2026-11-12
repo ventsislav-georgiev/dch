@@ -877,6 +877,17 @@ passages) is drawn with every control and bidi character shown as `?`.
 The view has three tabs:
 - **Chapters**: one row per prompt or command. `/` filters. `Enter` opens
   the chapter read-only (prompt, replies, tool calls, output), scrollable.
+  A chapter whose prompt the harness wrote, not you (a task notification,
+  `"auto"` in `--json`), is hidden until `n` shows it, faint and titled by
+  its summary (by its title when it has none); the footer says how many are
+  hidden, and `/` matches a summary too. The tab's count is the chapters
+  shown without `n`. A host or an older dch that sends no `auto` shows
+  every chapter. `o`, here and in a chapter, leaves the view (as `q` does)
+  and attaches to the live session, as `dch -a <n>` does (`host:name` too;
+  from the picker's `X`, as the picker's `Enter`; the `-k` and `-d` pickers
+  say it is not theirs). On an ended session `o` says so and the view
+  stays. The attach opens at the session's live screen, not at the
+  chapter.
 - **Refs**: what the session touched: the files, commits, pull requests,
   issues and URLs it mentions, one row each, a faint line over them saying
   so. Rows are by count, highest first, then the most recent first (later in
@@ -917,6 +928,8 @@ X-ray; run `clear`".
 | `Enter` | read the chapter / open the card | card: read the mention's chapter |
 | `/` | filter | |
 | `t` | Refs: show / hide the temp files | |
+| `n` | Chapters: show / hide the auto chapters (task notifications) | |
+| `o` | Chapters: attach to the session (in the chord: back to it) | reader: the same |
 | `f` `o` `y` | | card: full scan, other projects, copy |
 | `q` | quit | back |
 | `Esc` | clear the typed label or the filter, else quit | back |
@@ -926,7 +939,7 @@ X-ray; run `clear`".
 double-press window (`DCH_DOUBLE_TAP_MS`, default 300 ms). The view opens
 over the session on its On screen tab, and the session keeps running
 underneath: the attach is kept, never retired. Leaving the view (`q`,
-`Esc`) returns to the session with its screen repainted as it is now,
+`Esc`, or `o` on Chapters or in a chapter) returns to the session with its screen repainted as it is now,
 output that came in meanwhile included (dch-lite has no screen to repaint
 from: the program gets a SIGWINCH, as on any re-attach). The `x` is never
 typed into the session; keys that arrive in the same read as the `x` (a

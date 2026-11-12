@@ -9410,7 +9410,8 @@ pk_rrevive(struct pk *p, const struct pkrow *w, int c)
 	pk_start(p, a);
 }
 
-static void pk_xray(struct pk *p, int fd, const char *name, int record);
+static int pk_xray(struct pk *p, int fd, const char *name, int record,
+                   char *out, size_t outsz);
 
 /* One key. 1: out holds the session to attach; -1: quit; 0: go on. */
 int
@@ -9516,8 +9517,7 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 	{
 		/* the X-ray view (#175): a live session by name, a History row
 		** by its record; a remote one's on its host (#188) */
-		pk_xray(p, fd, w->name, t == 2);
-		return 0;
+		return pk_xray(p, fd, w->name, t == 2, out, outsz);
 	}
 	/* ponytail: a remote row only attaches; kill, rename, restart and
 	** the rest need ops-gated frames and the same confirmation (#087).
@@ -9764,19 +9764,30 @@ xv_screen(const char *name, char *buf, size_t cap)
 }
 
 /* The picker's X: the view on its terminal, as it is (raw, alternate
-** screen); the picker drawn whole after. */
-static void
-pk_xray(struct pk *p, int fd, const char *name, int record)
+** screen); the picker drawn whole after. The view's o (#194): 1, out
+** holds the session to attach, as Enter's; not in the -k and -d pickers. */
+static int
+pk_xray(struct pk *p, int fd, const char *name, int record, char *out,
+        size_t outsz)
 {
 	char n[620], err[400];
+	int rc;
 
 	if (record)
 		snprintf(n, sizeof n, "%s.json", name);
 	else
 		snprintf(n, sizeof n, "%s", name);
-	if (xv_run(fd, n, err, sizeof err) != 0)
-		snprintf(p->status, sizeof p->status, "%s", err);
+	rc = xv_run(fd, n, err, sizeof err);
 	pk_pn = 0;
+	if (rc != 0)
+		snprintf(p->status, sizeof p->status, "%s", err);
+	else if (xv_go[0] && !p->opens)
+		snprintf(p->status, sizeof p->status, "o opens a session: from "
+		         "dch -l or the switch");
+	else if (xv_go[0] &&
+	         (size_t)snprintf(out, outsz, "%s", xv_go) < outsz)
+		return 1;
+	return 0;
 }
 
 /* Input on fd within ms? select, not poll: macOS poll() answers POLLNVAL
@@ -13903,9 +13914,16 @@ xray_main(int argc, char **argv)
 		      "no flag)\n", stderr);
 		return 2;
 	}
-	/* a host:name's view too (#188): its queries run on the host */
+	/* a host:name's view too (#188): its queries run on the host; its o
+	** (#194) attaches to the session as `dch -a` does */
 	if (!json)
-		return xray_view(argv[ni]);
+	{
+		if ((rc = xray_view(argv[ni])) != 0 || !xv_go[0])
+			return rc;
+		snprintf(session_name, sizeof session_name, "%s", xv_go);
+		attach_only = remote_ok = 1;
+		return attach_with_switch(dch_exe, 1, 1, NULL, 0, 0);
+	}
 	/* SIGPIPE ignored: a failed socket write to the master exits 1 with
 	** write_fail_line; stdout writes are checked apart (EPIPE is a
 	** cancel, 3.4: exit 0, no done) */
