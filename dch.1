@@ -389,6 +389,14 @@ and exits 2
 exit 1); an auto-name from a directory named so starts with
 .B _
 instead.
+.B \-\-spawn
+and
+.B "\-\-revive \-\-as"
+also refuse a name holding
+.B /
+or a control character, or over 255 bytes
+.RB ( "dch: bad session name" ,
+exit 2, nothing started).
 .TP
 .B \-f
 Force-attach even if another client is connected.

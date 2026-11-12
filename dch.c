@@ -2063,6 +2063,20 @@ refuse_id_name(const char *name)
 	return 1;
 }
 
+/* #203: a name the caller gives a new session (--spawn, --revive --as) is
+** one the store can hold: no '/' (a socket outside the socket dir), no
+** control, at most NAME_CAP bytes. A leading '-' is refuse_id_name's. 1,
+** the line printed, when refused. */
+static int
+refuse_path_name(const char *name)
+{
+	if (name[0] == '-' || name_ok(name))
+		return 0;
+	fputs("dch: bad session name (no '/' or control characters, at most "
+	      "255 bytes)\n", stderr);
+	return 1;
+}
+
 /* Write (or clear, when alias is empty) the sidecar for `name`. At most
 ** the 599 bytes the master reads into its record, cut on a character
 ** boundary (callers cut by bytes). */
@@ -14372,6 +14386,9 @@ main_run(int argc, char **argv)
 				        "dch: %s needs a session name\n", a);
 				return 1;
 			}
+			if (action == A_SPAWN && (refuse_id_name(argv[i]) ||
+			                          refuse_path_name(argv[i])))
+				return 2;
 			snprintf(session_name, sizeof(session_name),
 			         "%s", argv[i]);
 			i++;
@@ -14548,7 +14565,7 @@ main_run(int argc, char **argv)
 				fprintf(stderr, "dch: --as needs a session name\n");
 				return 1;
 			}
-			if (refuse_id_name(argv[i]))
+			if (refuse_id_name(argv[i]) || refuse_path_name(argv[i]))
 				return 2;
 			snprintf(opt_as, sizeof(opt_as), "%s", argv[i]);
 			i++;
