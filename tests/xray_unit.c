@@ -3687,6 +3687,29 @@ t_excl(void)
 		"cat <<- EOF\n\tdon't\n\tEOF\ncat /etc/x", "cat << -X\nb\n-X\ncat /etc/x",
 		"cat <<'-X'\nb\n-X\ncat /etc/x", "cat <<EOF\n\tEOF\ndon't\nEOF\ncat /etc/x",
 		"cat <<EOF\n$(cat /etc/x)\nEOF",
+		/* #181: >&, <&, &>, >| are one redirect (no & split) */
+		"cat 2>&1 /etc/x", "cat 2>&1 ../x", ">&2 cat /etc/x", "cat >&2 ../x",
+		"cat <&3 3< /etc/x", "cat &>/dev/null ../x", "cat >| o ../x",
+		/* #181: a wrap's long option or option cluster takes a value */
+		"sudo --user root cat ../x", "sudo -iu root cat ../x",
+		"timeout --signal KILL 5 cat ../x", "timeout --kill-after 1 5 cat ../x",
+		"echo a | xargs --max-args 1 rg x", "env --unset FOO cat ../x",
+		"env -iu FOO cat ../x", "nice --adjustment 5 cat ../x",
+		"stdbuf --output L cat ../x", "watch --interval 1 cat ../x",
+		"doas -nu root cat ../x",
+		/* #181: GNU names on macOS; coproc, builtin, function */
+		"gtimeout 5 cat ../x", "gstdbuf -oL cat ../x", "ggrep x", "gcat ../x",
+		"gsed 's/a/b/' ../x", "echo /etc/x | gxargs cat", "coproc cat ../x",
+		"coproc N { cat ../x; }", "builtin cd /etc; cat notes.md",
+		"function f { cat ../x; }",
+		/* #181: << in (( )) is a shift, no here-doc */
+		"echo $((1<<2))\ncat ../x", "(( 1<<2 ))\ncat ../x",
+		"x=$((1<<2)) y=$((3<<1))\ncat ../x",
+		/* #181: $'…', $\"…\"; sh -c with options or -- after -c */
+		"$'cat' ../x", "$\"cat\" ../x", "echo $'it\\'s'; cat ../x",
+		"echo $'it\\'s' \"$(cat ../x)\"", "sh -c -- 'cat ../x'",
+		"bash -c -e 'cat /etc/x'", "bash -c -o pipefail 'cat ../x'",
+		"bash -c - 'cat ../x'",
 		0
 	};
 	static const char *const keep[] = {
@@ -3717,6 +3740,13 @@ t_excl(void)
 		/* #177: a body with no delimiter line ends at its slice; the `
 		** that closes the substitution is not the body's */
 		"cat notes.md; echo \"`cat <<E\nx`\"",
+		/* #181: the same shapes with a file inside the cwd */
+		"cat 2>&1 notes.md", ">&2 cat notes.md", "cat <&3 3< notes.md",
+		"sudo --user root cat notes.md", "sudo --preserve-env cat notes.md",
+		"gcat notes.md", "function f { cat notes.md; }",
+		"echo $((1<<2))\ncat notes.md", "$'cat' notes.md",
+		"sh -c -- 'cat notes.md'", "echo $'it\\'s'; cat notes.md",
+		"gh issue view 831 2>&1 | head -5", "todo.py get dch 831 2>&1",
 		0
 	};
 	/* change (a): a reader or search only inside $(…) or backquotes
