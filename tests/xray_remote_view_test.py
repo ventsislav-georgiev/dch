@@ -43,7 +43,15 @@ Covers:
   7. the view's failure lines over an attach to a fake host without "xray"
      (exit 6), whose gate refuses the view's connection (exit 4), or whose
      port closes once the attach is in (exit 7): the line, q, any key, and
-     the attach goes on (the host gets the redraw, then only the next key).
+     the attach goes on (the host gets the redraw, then only the next key);
+  8. the host re-arms on its redraw (#189 round 2): a program on the
+     alternate screen with bracketed paste, mouse reporting and kitty flags
+     on, over `dch -a srv:xv-md`; after the chord's view the client's output
+     past the view's ESC[?1049l holds ESC[?1049h, then the kitty push (on the
+     alternate screen), ESC[?2004h, ESC[?1000h and ESC[?1006h; the full build
+     repaints the screen from its mirror, dch-lite has none and the program
+     repaints on its SIGWINCH. A SIGUSR2 redraw (0x07, no reset before it)
+     re-arms again, and a key after still reaches the session.
 
 Run:  python3 tests/xray_remote_view_test.py      (uses ./dch)
 """
@@ -773,6 +781,90 @@ def test_chord_fail():
                close=True)
 
 
+# ---- 8: the host re-arms the session's modes on 0x07 (#189 round 2) --------
+
+MD = ("import os, signal, sys, tty\n"
+      "tty.setraw(0)\n"
+      "signal.signal(signal.SIGWINCH,\n"
+      "              lambda *a: os.write(1, b'WINCH\\r\\n'))\n"
+      "os.write(1, b'\\033[?1049h\\033[?2004h\\033[?1000h\\033[?1006h'\n"
+      "         b'\\033[>1uALTSCREEN\\r\\n')\n"
+      "while True:\n"
+      "    b = os.read(0, 256)\n"
+      "    if not b: break\n"
+      "    os.write(1, b'GOT:' + b.hex().encode() + b'\\r\\n')\n")
+MODES = (b"\033[?2004h", b"\033[?1000h", b"\033[?1006h", b"\033[>1u")
+
+
+def rearmed(out, at):
+    """The modes missing from out past at."""
+    return [m for m in MODES + (b"\033[?1049h",) if m not in out[at:]]
+
+
+def test_rearm():
+    lite = dch(SENV, "--build").stdout.strip() == "lite"
+    r = dch(SENV, "--spawn", "xv-md", "--size", "100x30", sys.executable,
+            "-c", MD)
+    check("re-arm: the probe session spawned on the host", r.returncode == 0,
+          r.stderr)
+    a = Pty([DCH, "-a", "srv:xv-md"])
+    try:
+        # dch-lite keeps no screen: the attach re-arms the modes only
+        ok = a.wait(b"\033[>1u" if lite else b"ALTSCREEN")
+        a.pump(0.5)
+        check("re-arm: the attach shows the program's modes%s"
+              % ("" if lite else " and screen"),
+              ok and not rearmed(a.out, 0), a.out[-300:])
+        mark = len(a.out)
+        a.key(b"\x1cx", 0.5)
+        ok = a.wait(b"X-ray  srv:xv-md", start=mark)
+        check("re-arm: the chord opens the view over the attach", ok,
+              a.out[mark:][-600:])
+        if not ok:
+            return
+        mark = len(a.out)
+        a.key(b"q", 0.5)
+        a.wait(RESTORE, start=mark)
+        back = a.out.find(RESTORE, mark)
+        until(lambda: (a.pump(0.1), not rearmed(a.out, back))[1], 5)
+        a.pump(0.5)
+        out = a.out
+        check("re-arm: after the view's ESC[?1049l the host re-armed "
+              "bracketed paste, mouse reporting, kitty flags and 1049h",
+              back >= 0 and not rearmed(out, back),
+              (rearmed(out, back), out[back:][-600:]))
+        alt = out.find(b"\033[?1049h", back)
+        check("re-arm: the program is back on the alternate screen, the "
+              "kitty push after its 1049h (on that screen)",
+              alt > back and out.find(b"\033[>1u", alt) > alt,
+              out[back:][-600:])
+        if lite:
+            # no mirror to replay: the program repaints on its SIGWINCH
+            check("re-arm, dch-lite: no screen replay, the program got its "
+                  "SIGWINCH after the 1049h", alt > back and
+                  b"ALTSCREEN" not in out[alt:] and
+                  a.wait(b"WINCH", start=alt), out[back:][-600:])
+        else:
+            check("re-arm: the screen is replayed from the mirror after the "
+                  "1049h", alt > back and b"ALTSCREEN" in out[alt:],
+                  out[back:][-600:])
+        # a redraw with no reset before it (SIGUSR2: 0x07) re-arms again
+        mark = len(a.out)
+        os.kill(a.pid, signal.SIGUSR2)
+        until(lambda: (a.pump(0.1), not rearmed(a.out, mark))[1], 5)
+        check("re-arm: a SIGUSR2 redraw over the attach re-arms again",
+              not rearmed(a.out, mark), (rearmed(a.out, mark),
+                                         a.out[mark:][-400:]))
+        mark = len(a.out)
+        a.key(b"z", 0.3)
+        check("re-arm: the attach goes on (a key after reaches the session)",
+              a.wait(b"GOT:7a", start=mark, secs=5) and a.reap() is None,
+              (a.rc, a.out[mark:][-300:]))
+    finally:
+        a.close()
+    time.sleep(0.5)
+
+
 def main():
     sp = None
     try:
@@ -791,9 +883,12 @@ def main():
         test_failures()
         test_chord(port)
         test_chord_fail()
+        hosts("srv=127.0.0.1:%d" % port)
+        test_rearm()
     finally:
         dch(SENV, "-k", "xv-sh")
         dch(SENV, "-k", "xv-rx")
+        dch(SENV, "-k", "xv-md")
         if sp:
             sp.terminate()
             try:

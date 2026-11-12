@@ -934,7 +934,11 @@ with `DCH_DOUBLE_TAP_MS=0` (one press acts at once); the keys then do what
 they did before. Over a remote attach (`dch -a host:name`) the chord opens
 the view of `host:name`, as `dch --xray host:name` does: its queries dial
 their own ctl connections, and the attach connection is kept. Leaving it,
-the host resizes the program for a beat so it repaints. There is no
+the host resizes the program for a beat so it repaints, and dch serve
+1.57.0+ also re-arms the modes the view turned off (bracketed paste, mouse
+reporting, the kitty keyboard flags, the alternate screen). An older dch
+serve or the Prosper server only resizes: those modes stay off on your
+terminal until you attach again. There is no
 `xray_key` setting: the chord takes no key from the program. In the picker,
 lowercase `x` is still kill, which asks first; `X` opens the view.
 

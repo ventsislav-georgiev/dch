@@ -1733,6 +1733,11 @@ on_frame(struct conn *c, unsigned int type, const unsigned char *p,
 			set_ws(c, c->rows - 1);
 			c->jiggle_at = now_ms() + 120;
 		}
+		/* and re-arm (#189): our dch client re-attaches on SIGURG, so
+		** the master replays the session's modes (bracketed paste,
+		** mouse, 1049, kitty flags) that the remote X-ray view reset */
+		if (c->kid > 0 && !c->kid_done)
+			kill(c->kid, SIGURG);
 		break;
 	default:
 		break;

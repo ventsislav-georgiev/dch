@@ -816,7 +816,11 @@ Over a remote attach
 it opens the view of
 .IR host : name ,
 its queries over their own ctl connections, the attach kept; leaving it, the
-host resizes the program for a beat so it repaints.
+host resizes the program for a beat so it repaints, and
+.B dch serve
+1.57.0+ also re\-arms the modes the view turned off (bracketed paste, mouse
+reporting, the kitty keyboard flags, the alternate screen).
+An older host only resizes: those modes stay off until the next attach.
 There is no
 .B xray_key
 setting.

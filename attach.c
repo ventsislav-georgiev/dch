@@ -37,6 +37,9 @@ static int win_changed;
 static volatile sig_atomic_t want_detach;
 /* SIGUSR2 → force a redraw (MSG_REDRAW). Set by handler, checked in main loop. */
 static volatile sig_atomic_t want_redraw;
+/* SIGURG → re-attach (MSG_ATTACH + MSG_REDRAW). Set by handler, checked in
+** main loop. */
+static volatile sig_atomic_t want_rearm;
 
 /*
 ** Restore terminal + reset modes inner program may have left on (mouse
@@ -205,6 +208,19 @@ on_sigusr2(ATTRIBUTE_UNUSED int sig)
 {
 	signal(SIGUSR2, on_sigusr2);
 	want_redraw = 1;
+}
+
+/* SIGURG → re-attach on the same connection: MSG_ATTACH makes the master
+** re-arm the session's modes (mouse, bracketed paste, 1049, kitty flags),
+** then MSG_REDRAW repaints. dch serve sends it to its pty client on a
+** remote 0x07 (#189): the remote X-ray view reset those modes on the
+** user's terminal. SIGURG because its default is ignore: an older client
+** drops it. */
+static RETSIGTYPE
+on_sigurg(ATTRIBUTE_UNUSED int sig)
+{
+	signal(SIGURG, on_sigurg);
+	want_rearm = 1;
 }
 
 static int detach_end;	/* where the last press counted ends (#187) */
@@ -859,6 +875,7 @@ attach_main(int noerror)
 	signal(SIGWINCH, win_change);
 	signal(SIGUSR1, on_sigusr1);
 	signal(SIGUSR2, on_sigusr2);
+	signal(SIGURG, on_sigurg);
 
 	/* Set raw mode. */
 	cur_term.c_iflag &= ~(IGNBRK|BRKINT|PARMRK|ISTRIP|INLCR|IGNCR|ICRNL);
@@ -1091,9 +1108,16 @@ keys_done:
 
 		/* Redraw requested (SIGUSR2)? Force the program to repaint via an
 		** unconditional WINCH at the master, regardless of size change. */
-		if (want_redraw)
+		if (want_redraw || want_rearm)
 		{
-			want_redraw = 0;
+			/* SIGURG: re-arm the modes first, the redraw repaints */
+			if (want_rearm)
+			{
+				pkt.type = MSG_ATTACH;
+				pkt.len = 0;
+				write_packet_or_fail(s, &pkt);
+			}
+			want_redraw = want_rearm = 0;
 
 			pkt.type = MSG_REDRAW;
 			pkt.len = REDRAW_WINCH;
