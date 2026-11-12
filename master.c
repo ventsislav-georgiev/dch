@@ -62,8 +62,9 @@ struct client
 	/* Whether or not the client is attached. */
 	int attached;
 	/* An attach on this connection armed its terminal: a later MSG_ATTACH
-	** pops before it pushes again. A suspend's MSG_DETACH resets nothing
-	** on the terminal, so it does not clear this (#200). */
+	** pops before it pushes again. A suspend's MSG_DETACH does not clear
+	** it (#200): a client before #211 resets nothing on a suspend, and
+	** after one that does the pop meets an empty stack, a no-op. */
 	int armed;
 
 	/* Connection role latch. A control connection (MSG_KEYS/READ/WAIT)
@@ -3869,7 +3870,7 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 		int k, bad;
 		int rearm = dch_vt_enabled() || !pty_gated;
 		/* a re-attach on a live connection (#189), or a resume after a
-		** suspend's MSG_DETACH (#200): the terminal was not reset */
+		** suspend's MSG_DETACH (#200): the terminal may not be reset */
 		int again = p->armed;
 
 		/* Someone showed up: open the --spawn pty gate and pull what the
@@ -3944,6 +3945,9 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 		** no one to land on any more. */
 		p->want_replay = 0;
 		p->replay_sb = 0;
+		/* A suspend reset the terminal off the screen this output
+		** was for (#211): drop it, the resume's redraw repaints. */
+		p->outoff = p->outlen = 0;
 	}
 
 	/* Window size change request, without a forced redraw. */

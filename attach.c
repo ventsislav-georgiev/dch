@@ -755,15 +755,23 @@ process_kbd(int s, struct packet *pkt)
 		pkt->len = 0;
 		write_packet_or_fail(s, pkt);
 
-		/* And suspend... with our focus reporting off meanwhile, so
-		** the shell does not read [I/[O on focus changes. */
-		if (focus_on)
-			write_buf_or_fail(1, "\033[?1004l", 8);
-		tcsetattr(0, TCSADRAIN, &orig_term);
+		/* And suspend... on the terminal a detach leaves (#211): the
+		** shell must not get the session's alt screen, mouse or focus
+		** reports, bracketed paste or kitty keys. The MSG_ATTACH below
+		** has the master re-arm them. */
+		restore_term();
 		kill(getpid(), SIGTSTP);
 		tcsetattr(0, TCSADRAIN, &cur_term);
 		if (focus_on)
 			write_buf_or_fail(1, "\033[?1004h", 8);
+		/* What the master sent before it read the MSG_DETACH was for
+		** the screen the reset left: drop it, the redraw repaints. */
+		{
+			unsigned char junk[BUFSIZE];
+
+			while (recv(s, junk, sizeof junk, MSG_DONTWAIT) > 0)
+				;
+		}
 
 		/* Tell the master that we are returning. */
 		pkt->type = MSG_ATTACH;
