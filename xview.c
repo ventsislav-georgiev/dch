@@ -57,7 +57,7 @@ struct xv_ch
 struct xv_ref
 {
 	char *key, *shape, *text, *title;
-	long long count;
+	long long count, seen;	/* seen: later is more recent */
 	int defined, underline;
 };
 
@@ -108,6 +108,8 @@ struct xv
 	struct xv_ch *ch;
 	struct xv_ref *rf;
 	int nch, ach, nrf, arf;
+	int alltmp, ntmp;	/* Refs: temp files shown; their rows */
+	long long rseq;
 	struct xv_kid kid[XV_NKIDS];
 	int sel[3], top[3], *vis, nvis, avis;
 	/* the card */
@@ -532,6 +534,9 @@ xv_ref(struct xv *v, const struct json_parser *p, int o)
 	r.count = xv_num(p, o, "count", 0);
 	r.defined = xv_bool(p, o, "defined");
 	r.underline = xv_bool(p, o, "underline");
+	/* no recency in a ref line: its arrival (a snapshot's rows in their
+	** order, a delta now) */
+	r.seen = ++v->rseq;
 	for (k = 0; k < v->nrf && strcmp(v->rf[k].key, r.key); k++)
 		;
 	if (k < v->nrf)
@@ -1156,13 +1161,56 @@ xv_label(const struct xv *v, char *b, size_t n)
 		snprintf(b, n, "X-ray corpus not supported by this dch");
 }
 
+/* s under directory d (absolute, not "/"): d's length without a trailing
+** '/', else 0. */
+static size_t
+xv_under(const char *s, const char *d)
+{
+	size_t l = d && d[0] == '/' ? strlen(d) : 0;
+
+	while (l > 1 && d[l - 1] == '/')
+		l--;
+	return l > 1 && !strncmp(s, d, l) && s[l] == '/' ? l : 0;
+}
+
+/* A file under a temp directory: a scratch file, hidden by default. A
+** remote view's $TMPDIR is this machine's, not its host's: not asked. */
+static int
+xv_temp(const struct xv *v, const struct xv_ref *r)
+{
+	static const char *const d[] = { "/tmp", "/private/tmp", "/var/folders",
+		"/private/var/folders" };
+	size_t k;
+
+	if (strcmp(r->shape, "file"))
+		return 0;
+	for (k = 0; k < sizeof d / sizeof *d; k++)
+		if (xv_under(r->text, d[k]))
+			return 1;
+	return !v->hl && xv_under(r->text, getenv("TMPDIR"));
+}
+
+static const struct xv_ref *xv_sort_rf;
+
+/* Refs: the highest count first, then the most recently seen. */
+static int
+xv_ref_cmp(const void *pa, const void *pb)
+{
+	const struct xv_ref *a = &xv_sort_rf[*(const int *)pa];
+	const struct xv_ref *b = &xv_sort_rf[*(const int *)pb];
+
+	if (a->count != b->count)
+		return a->count > b->count ? -1 : 1;
+	return a->seen < b->seen ? 1 : a->seen > b->seen ? -1 : 0;
+}
+
 /* The rows a list tab shows (Chapters, Refs): their indexes, filtered. */
 static void
 xv_vis(struct xv *v)
 {
 	int k, n = v->tab == 0 ? v->nch : v->nrf;
 
-	v->nvis = 0;
+	v->nvis = v->ntmp = 0;
 	for (k = 0; k < n; k++)
 	{
 		if (v->filt[0] &&
@@ -1170,9 +1218,16 @@ xv_vis(struct xv *v)
 		      : xv_has(v->rf[k].text, v->filt) ||
 		      xv_has(v->rf[k].title, v->filt)))
 			continue;
+		if (v->tab == 1 && xv_temp(v, &v->rf[k]) && (v->ntmp++, !v->alltmp))
+			continue;
 		if (xv_grow(&v->vis, &v->avis, v->nvis, sizeof *v->vis) < 0)
 			return;
 		v->vis[v->nvis++] = k;
+	}
+	if (v->tab == 1 && v->nvis > 1)
+	{
+		xv_sort_rf = v->rf;
+		qsort(v->vis, (size_t)v->nvis, sizeof *v->vis, xv_ref_cmp);
 	}
 }
 
@@ -1222,8 +1277,62 @@ xv_row_ch(const struct xv_ch *c, int i, int on)
 		pk_pad(pk_w);
 }
 
+/* s in w cells; one that does not fit keeps its first keep bytes, then an
+** ellipsis and the tail that fits: a path's end tells it apart. */
 static void
-xv_row_ref(const struct xv_ref *r, int on)
+xv_tail(const char *s, size_t keep, int w)
+{
+	const char *e = xv_ell();
+	int end = pk_col + w, n, l;
+	char c[5];
+
+	if (pk_cps(s) <= w || w <= pk_cps(e))
+	{
+		pk_fit(s, w);
+		return;
+	}
+	xv_txtn(s, keep);
+	for (s += keep, n = pk_cps(s); *s && n > end - pk_col - pk_cps(e); s += l)
+	{
+		(void)ap_cp(s, &l);
+		memset(c, 0, sizeof c);
+		memcpy(c, s, (size_t)l);
+		n -= pk_cps(c);
+	}
+	pk_txt(e);
+	pk_fit(s, end - pk_col);
+}
+
+/* A ref's text in w cells: a file under the project relative to it, else
+** under HOME from ~; a URL cut keeps its host and its end, not its scheme. */
+static void
+xv_reftext(const struct xv *v, const struct xv_ref *r, int w)
+{
+	const char *s = r->text, *u;
+	char b[4200];
+	size_t l, keep = 0;
+	int file = !strcmp(r->shape, "file");
+
+	if (file && (l = xv_under(s, v->label)))
+		s += l + 1;
+	else if (file && !v->hl && (l = xv_under(s, getenv("HOME"))))
+	{
+		snprintf(b, sizeof b, "~%s", s + l);
+		s = b;
+	}
+	else if (!strcmp(r->shape, "url") && pk_cps(s) > w &&
+	         (u = strstr(s, "://")))
+	{
+		s = u + 3;
+		keep = strcspn(s, "/");
+		if (xv_fitlen(s, keep, w / 2) < keep)
+			keep = 0;
+	}
+	xv_tail(s, keep, w);
+}
+
+static void
+xv_row_ref(const struct xv *v, const struct xv_ref *r, int on)
 {
 	char b[40];
 	int tw = pk_w / 3 > 20 ? pk_w / 3 : 20;
@@ -1238,7 +1347,8 @@ xv_row_ref(const struct xv_ref *r, int on)
 	pk_fit(r->shape, 7);
 	pk_txt(" ");
 	pk_set(r->underline ? "1" : "");
-	pk_fit(r->text, tw);
+	/* no title: the whole row's rest */
+	xv_reftext(v, r, r->title[0] ? tw : pk_w - pk_col - 1);
 	pk_txt("  ");
 	pk_set("2");
 	pk_txt(r->title);
@@ -1477,7 +1587,7 @@ xv_draw(struct xv *v, int force)
 		"\xe2\xa0\x87\xe2\xa0\x8f", ascii[] = "|/-\\";
 	struct pkkey keys[12];
 	const char *ret = pk_utf ? "\xe2\x86\xb5" : "enter";
-	char b[1200];
+	char b[1200], tmp[32];
 	int nk = 0, kl, cap, k, n, busy;
 	unsigned drop;
 
@@ -1517,6 +1627,13 @@ xv_draw(struct xv *v, int force)
 		{
 			XV_K(0, ret, v->tab == 0 ? "read" : "card");
 			XV_K(3, "/", "filter");
+			if (v->tab == 1 && (xv_vis(v), v->ntmp))
+			{
+				snprintf(tmp, sizeof tmp, "%d hidden", v->ntmp);
+				keys[nk++] = (struct pkkey){ "t", v->alltmp
+					? "hide temp files" : "temp files",
+					v->alltmp ? NULL : tmp, 2, 0 };
+			}
 		}
 		else
 			XV_K(0, "a-z", "label: card");
@@ -1586,10 +1703,10 @@ xv_draw(struct xv *v, int force)
 		pk_set(pk_p(PK_RED));
 		pk_txt(v->fail);
 	}
-	else
+	else	/* On screen: no number before its screen is read */
 		for (k = 0; k < 3; k++)
-			pk_tab(tabn[k], k == 0 ? v->nch : k == 1 ? v->nrf : v->nlab,
-			       k == v->tab);
+			pk_tab(tabn[k], k == 0 ? v->nch : k == 1 ? v->nrf
+			       : v->scr ? v->nlab : -1, k == v->tab);
 	pk_eol();
 
 	pk_line();
@@ -1610,24 +1727,38 @@ xv_draw(struct xv *v, int force)
 		}
 	else if (v->tab < 2)
 	{
-		int *sel = &v->sel[v->tab], *top = &v->top[v->tab];
+		int *sel = &v->sel[v->tab], *top = &v->top[v->tab], win = v->win;
 
 		xv_vis(v);
 		n = v->nvis;
-		xv_clamp(sel, top, n, v->win);
-		for (k = *top; k < *top + v->win; k++)
+		/* Refs: what a ref is, one faint line over the rows */
+		if (v->tab == 1 && v->nrf && win > 1)
+		{
+			pk_line();
+			pk_set("2");
+			snprintf(b, sizeof b, "  Files, commits, pull requests, issues "
+			         "and URLs this session touched; %s opens a card", ret);
+			pk_txt(b);
+			pk_eol();
+			win--;
+		}
+		xv_clamp(sel, top, n, win);
+		for (k = *top; k < *top + win; k++)
 		{
 			pk_line();
 			if (k < n && v->tab == 0)
 				xv_row_ch(&v->ch[v->vis[k]], v->vis[k], k == *sel);
 			else if (k < n)
-				xv_row_ref(&v->rf[v->vis[k]], k == *sel);
+				xv_row_ref(v, &v->rf[v->vis[k]], k == *sel);
 			else if (k == 0)
 			{
 				pk_set("2");
-				pk_txt(!v->have ? "    Reading" : v->filt[0]
-				       ? "    No match" : v->tab == 0 ? "    No chapters"
-				       : "    No refs");
+				pk_txt(!v->have ? "    Reading" : v->tab == 1 && v->ntmp &&
+				       !v->alltmp ? "    Only temp files: t shows them"
+				       : v->filt[0] ? "    No match" : v->tab == 0
+				       ? "    No chapters" : "    No refs yet: the files, "
+				       "commits, pull requests, issues and URLs this session "
+				       "touches show here");
 				if (!v->have)
 					pk_txt(xv_ell());
 			}
@@ -1899,6 +2030,11 @@ xv_key(struct xv *v, int c)
 			xv_hint_key(v, c);
 		else if (c == PK_DOWN || c == PK_UP)
 			v->status[0] = '\0';
+		return 0;
+	}
+	if (v->tab == 1 && c == 't')
+	{
+		v->alltmp = !v->alltmp;
 		return 0;
 	}
 	sel = &v->sel[v->tab];

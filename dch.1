@@ -751,12 +751,25 @@ Three tabs:
 .B Chapters
 (\fB/\fR filters, \fBEnter\fR reads the chapter, read\-only),
 .B Refs
-(by count; a ref with a definition or two or more mentions is bold;
-\fB/\fR filters, \fBEnter\fR opens its card) and
+(the files, commits, pull requests, issues and URLs the session touched,
+a faint line over them saying so; by count, then the most recent first;
+a ref with a definition or two or more mentions is bold;
+a file under the session's directory shows relative to it, else one under
+HOME from
+.BR ~ ;
+a path too long keeps its end, the ellipsis in front, a long URL its host
+and its end;
+files under /tmp, /private/tmp, /var/folders and
+.B $TMPDIR
+(not on a remote view) are hidden until
+.B t
+shows them, the footer saying how many; the tab counts every ref;
+\fB/\fR filters on the full ref, \fBEnter\fR opens its card) and
 .B On screen
 (the session's screen with a hint label, \fBa\fR, \fBs\fR, \fBd\fR, ...,
 on each bold ref; typing a label opens its card; none for an ended
-session or on dch\-lite).
+session or on dch\-lite; its tab shows the labels' count once the screen
+is read, 0 included, and no number before or without one).
 A card shows the ref's definitions, first and latest mention, counts by
 scope and mentions; it opens light (as
 .B \-\-ref

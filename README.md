@@ -877,11 +877,24 @@ passages) is drawn with every control and bidi character shown as `?`.
 The view has three tabs:
 - **Chapters**: one row per prompt or command. `/` filters. `Enter` opens
   the chapter read-only (prompt, replies, tool calls, output), scrollable.
-- **Refs**: the session's refs by count. A ref with a definition or two or
-  more mentions is bold. `/` filters. `Enter` opens its card.
+- **Refs**: what the session touched: the files, commits, pull requests,
+  issues and URLs it mentions, one row each, a faint line over them saying
+  so. Rows are by count, highest first, then the most recent first (later in
+  the index; a ref seen again while the view is open moves up its count's
+  rows). A ref with a definition or two or more mentions is bold. A file
+  under the session's directory (top right) shows relative to it, else one
+  under your home starts with `~`. A path too long for the row keeps its
+  end, the `…` in front; a long URL drops its `https://` and keeps its host
+  and its end. Files under `/tmp`, `/private/tmp`, `/var/folders` and
+  `$TMPDIR` (a remote view: not `$TMPDIR`, which is this machine's) are
+  scratch: hidden until `t` shows them, and the footer says how many are
+  hidden. The tab's count is every ref, hidden ones included. `/` filters on
+  the full ref. `Enter` opens its card.
 - **On screen**: the session's screen as it is now, with a hint label (`a`,
   `s`, `d`, …) on each ref the Refs tab shows bold. Typing a label opens that
-  ref's card. An ended session and dch-lite have no screen to show.
+  ref's card. The tab's count is the labels on the screen, shown once the
+  screen has been read (0 included); before that, and when there is no
+  screen, no number. An ended session and dch-lite have no screen to show.
 
 A ref's card shows its definitions (two or more as "N definitions"), its
 first and latest mention, its counts (this session, this project, all
@@ -903,6 +916,7 @@ X-ray; run `clear`".
 | `↑` `↓` / `j` `k`, `PgUp` `PgDn`, `g` `G` | move | move / scroll |
 | `Enter` | read the chapter / open the card | card: read the mention's chapter |
 | `/` | filter | |
+| `t` | Refs: show / hide the temp files | |
 | `f` `o` `y` | | card: full scan, other projects, copy |
 | `q` | quit | back |
 | `Esc` | clear the typed label or the filter, else quit | back |

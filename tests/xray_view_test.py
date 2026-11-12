@@ -26,7 +26,17 @@ Covers:
      the label line says X-ray needs the full build;
   9. the picker: the X hint is shown, X on a session row opens the view, q
      returns to the picker;
- 10. the in-attach chord (#187, K10): the detach key then x in a later read,
+ 10. the Refs tab (#193): a file under the project shown relative to it,
+     one under HOME from ~, one too long cut at the front (its tail kept,
+     a wide-character one within the width), a long URL keeping its host
+     and its end; rows by count then the most recent first; files under
+     /tmp, /private/tmp, /var/folders and $TMPDIR hidden, t toggling them,
+     the footer saying how many, the tab count the engine's; the filter
+     matching the full key (and taking t as text), Enter opening the full
+     key's card; the faint line saying what a ref is, the empty state when
+     there are none; On screen with no number until its screen is read,
+     then its count, 0 included (on dch-lite: no number, no mirror);
+ 11. the in-attach chord (#187, K10): the detach key then x in a later read,
      in one burst, and in the kitty CSI form opens the view over the attach
      on On screen; the x never reaches the session, the attach is never
      retired (a key typed after reaches the session), and output written
@@ -37,8 +47,8 @@ Covers:
 
 Run:  python3 tests/xray_view_test.py      (uses ./dch)
 """
-import base64, fcntl, json, os, pty, select, shutil, signal, struct
-import subprocess, sys, tempfile, termios, time
+import base64, fcntl, json, os, pty, re, select, shutil, signal, struct
+import subprocess, sys, tempfile, termios, time, unicodedata
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
@@ -160,6 +170,24 @@ def alive(pid):
         return True
     except ProcessLookupError:
         return False
+
+
+CUP = re.compile(rb"\033\[(\d+);1H")
+
+
+def rows(out):
+    """The text last drawn on each row in out, its escapes removed."""
+    got = {}
+    parts = CUP.split(out)
+    for i in range(1, len(parts) - 1, 2):
+        got[int(parts[i])] = re.sub(rb"\033\[[0-9;?]*[A-Za-z]", b"",
+                                    parts[i + 1]).decode("utf-8", "replace")
+    return got
+
+
+def cells(s):
+    return sum(0 if unicodedata.combining(c) else
+               2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in s)
 
 
 def files(root):
@@ -304,6 +332,207 @@ def test_view():
     after = files(T)
     check("nothing written: no file under the test root changed",
           before == after, set(before.items()) ^ set(after.items()))
+
+
+# ---- the Refs tab (#193) ---------------------------------------------------
+
+FSID = "11111111-2222-4333-8444-5555555555f3"
+P = "/home/demo/proj"
+DEEP = P + "/src/very/deep/module/"
+LONG = DEEP + "with/many/more/levels/of/nesting/made/for/the/view/test/" \
+    "zeta_handler.c"
+WIDE = P + "/docs/\u8a2d\u8a08\u66f8/\u8a73\u7d30\u8a2d\u8a08\u306e" \
+    "\u8aac\u660e\u8cc7\u6599/\u4ed5\u69d8\u4e00\u89a7\u8868\u306e" \
+    "\u6700\u7d42\u7248/\u753b\u9762\u9077\u79fb.md"
+URL = "https://example.com/org/repo/pull/12/files#diff-0123456789abcdef"
+# the view's HOME and TMPDIR: fake, outside the test root
+RENV = {"HOME": "/home/demo", "TMPDIR": "/home/demo/tmpx/"}
+
+
+def fixture_refs():
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    said = ("edit %salpha_handler.c and %sbeta_handler.c, then %s and %s; "
+            "scratch in /tmp/scratch-one.txt, "
+            "/private/tmp/demo-502/tasks/out.log, /var/folders/xx/abc/T/t.1 "
+            "and /home/demo/tmpx/note.txt; see /home/demo/notes/todo.md, "
+            "%s, o/r#7, %s/src/main.c and %s/README.md; again "
+            "%salpha_handler.c" % (DEEP, DEEP, LONG, WIDE, URL, P, P, DEEP))
+    lines = [
+        {"type": "user", "cwd": P, "timestamp": "2026-11-10T10:00:00Z",
+         "message": {"content": "the refs fixture"}},
+        {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": said}]}}]
+    with open(os.path.join(pdir, FSID + ".jsonl"), "w") as f:
+        for o in lines:
+            f.write(json.dumps(o) + "\n")
+    sockdir = os.path.join(T, "dch-%d" % os.getuid())
+    hdir = os.path.join(T, "state", "dch", "sessions",
+                        sockdir.replace("/", "-"))
+    rec = {"name": "xv-rf", "cwd": P, "end": "exited", "argv": ["claude"],
+           "started": 1794299400, "updated": 1794300000,
+           "ended": 1794300000, "sock_dir": sockdir,
+           "agent": {"session_id": FSID, "cwd": P, "config_dir": cfg}}
+    with open(os.path.join(hdir, "xv-rf.json"), "w") as f:
+        f.write(json.dumps(rec) + "\n")
+
+
+ELL = "(?:\u2026|\\.\\.\\.)"
+
+
+def test_refs():
+    o = json.loads(dch("--xray", "xv-rf", "--json").stdout)
+    keys = [x["key"] for x in o["refs"]]
+    check("refs fixture: the engine lists every ref (13)",
+          len(keys) == 13 and "file:" + LONG in keys and
+          "file:" + WIDE in keys, keys)
+    v = Pty([DCH, "--xray", "xv-rf"], env=RENV)
+    try:
+        v.wait(b"Chapters 1")
+        v.pump(0.5)
+        check("On screen: no number before its screen is read (an ended "
+              "session has none)", b"On screen" in v.out and
+              not re.search(rb"On screen \d", v.out), v.out[-600:])
+        mark = len(v.out)
+        v.key(b"\t", 1.0)
+        scr = rows(v.out[mark:])
+        text = "\n".join(scr[k] for k in sorted(scr))
+        check("Refs: the tab count stays the engine's total (13)",
+              "Refs 13" in text, text)
+        check("Refs: one faint line says what a ref is and that Enter "
+              "opens its card", re.search("Files, commits, pull requests, "
+                                          "issues and URLs this session "
+                                          "touched; (\u21b5|enter) opens a "
+                                          "card", text), text)
+        check("Refs: a file under the project shows relative to it",
+              "file    src/very/deep/module/alpha_handler.c" in text and
+              "file    src/main.c" in text and P + "/src" not in text, text)
+        check("Refs: a file under HOME starts with ~",
+              "file    ~/notes/todo.md" in text, text)
+        check("Refs: a path too long keeps its tail, the ellipsis in front",
+              re.search(ELL + "[^\n]*/for/the/view/test/zeta_handler\\.c",
+                        text) and "src/very/deep/module/with" not in text,
+              text)
+        order = ["alpha_handler.c", "README.md", "src/main.c", "o/r#7",
+                 "example.com", "~/notes/todo.md", "zeta_handler.c",
+                 "beta_handler.c"]
+        at = [text.find(x) for x in order]
+        check("Refs: by count, then the most recent first (later in the "
+              "snapshot)", -1 not in at and at == sorted(at), (at, text))
+        tmp = ["/tmp/scratch-one.txt", "/private/tmp/demo-502/tasks/out.log",
+               "/var/folders/xx/abc/T/t.1", "/home/demo/tmpx/note.txt",
+               "~/tmpx/note.txt"]
+        check("Refs: files under /tmp, /private/tmp, /var/folders and "
+              "$TMPDIR are hidden", not any(x in text for x in tmp), text)
+        check("Refs: the footer shows t and how many are hidden",
+              "t temp files 4 hidden" in text, text)
+        mark = len(v.out)
+        v.key(b"t", 1.0)
+        scr = rows(v.out[mark:])
+        text = "\n".join(scr[k] for k in sorted(scr))
+        check("Refs: t shows the temp files, the footer says t hides them",
+              all(x in text for x in tmp[:3]) and "t hide temp files" in text
+              and "hidden" not in text, text)
+        mark = len(v.out)
+        v.key(b"t", 1.0)
+        scr = rows(v.out[mark:])
+        text = "\n".join(scr[k] for k in sorted(scr))
+        check("Refs: t again hides them", "t temp files 4 hidden" in text and
+              "/tmp/scratch-one.txt" not in text, text)
+        mark = len(v.out)
+        v.key(b"/")
+        v.key(b"scratch-one", 1.0)
+        scr = rows(v.out[mark:])
+        text = "\n".join(scr[k] for k in sorted(scr))
+        check("Refs: the filter takes t as text; only a hidden row matches: "
+              "said", "/scratch-one" in text and
+              "Only temp files: t shows them" in text, text)
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        check("Refs: the filter done, the footer counts the hidden match",
+              v.wait(b"t temp files 1 hidden", start=mark), v.out[mark:])
+        mark = len(v.out)
+        v.key(b"t", 1.0)
+        v.key(b"\r", 1.0)
+        check("Refs: Enter on the shown temp row opens its card",
+              v.wait(b"/tmp/scratch-one.txt  light", start=mark),
+              v.out[mark:])
+        v.key(b"\033", 0.5)
+        v.key(b"\033", 0.5)
+        v.key(b"t", 0.5)
+        mark = len(v.out)
+        v.key(b"/")
+        v.key(P.encode() + b"/src/main", 1.0)
+        scr = rows(v.out[mark:])
+        text = "\n".join(scr[k] for k in sorted(scr))
+        check("Refs: the filter matches the full key, the row shows it "
+              "relative", "file    src/main.c" in text and
+              "alpha_handler" not in text, text)
+        mark = len(v.out)
+        v.key(b"\r", 1.0)  # done, and Enter on the row, as the picker's
+        check("Refs: Enter opens the card of the full key",
+              v.wait(P.encode() + b"/src/main.c  light", start=mark),
+              v.out[mark:])
+        v.key(b"\033", 0.5)
+        v.key(b"\033", 0.5)
+        mark = len(v.out)
+        v.resize(30, 60)
+        v.pump(1.0)
+        scr = rows(v.out[mark:])
+        text = "\n".join(scr[k] for k in sorted(scr))
+        check("Refs, 60 columns: a long URL keeps its host and its end",
+              re.search("url     example\\.com" + ELL +
+                        "[^\n]*#diff-0123456789abcdef", text) and
+              "https://" not in text, text)
+        wide = [r.rstrip() for r in scr.values()
+                if r.rstrip().endswith(WIDE[-7:])]
+        check("Refs, 60 columns: a wide-character path keeps its tail within "
+              "the width", wide and re.search(ELL, wide[0]) and
+              cells(wide[0]) <= 60 and "docs/" not in wide[0],
+              (wide, [cells(r) for r in wide]))
+        v.key(b"q")
+        check("Refs: q exits 0", v.exit() == 0, v.out[-80:])
+    finally:
+        v.close()
+
+
+def test_screen_count(lite):
+    """A live shell with nothing on its screen to label: no number on On
+    screen until it is read, then 0; no refs: the empty state."""
+    r = dch("--spawn", "xv-0", "--size", "80x24", "sh", "-c",
+            "echo READY0; exec sleep 600")
+    check("screen count: spawned", r.returncode == 0, r.stderr)
+    time.sleep(0.5)
+    v = Pty([DCH, "--xray", "xv-0"])
+    try:
+        v.wait(b"Chapters")
+        v.pump(0.5)
+        check("On screen: no number before it is opened",
+              b"On screen" in v.out and
+              not re.search(rb"On screen \d", v.out), v.out[-600:])
+        mark = len(v.out)
+        v.key(b"\t", 1.0)
+        check("Refs: no refs, the empty state says what would show",
+              v.wait(b"No refs yet: the files, commits, pull requests, "
+                     b"issues and URLs this session touches show here",
+                     start=mark), v.out[mark:])
+        mark = len(v.out)
+        v.key(b"\t", 1.5)
+        if lite:
+            check("lite: On screen says no mirror and shows no number",
+                  v.wait(b"No screen: dch-lite keeps no mirror", start=mark)
+                  and not re.search(rb"On screen \d", v.out), v.out[mark:])
+        else:
+            check("On screen: read, its count shows, 0 included",
+                  v.wait(b"On screen 0", start=mark) and
+                  v.wait(b"READY0", start=mark), v.out[mark:])
+        v.key(b"\003")
+        check("screen count: Ctrl-C quits with 0", v.exit() == 0,
+              v.out[-80:])
+    finally:
+        v.close()
+        dch("-k", "xv-0")  # the picker test's first row is xv-sh
 
 
 def test_resize():
@@ -625,10 +854,14 @@ def main():
         fixture()
         test_refusals()
         test_view()
+        fixture_refs()
+        test_refs()
         test_resize()
         shell()
         test_signals()
         test_on_screen()
+        o = json.loads(dch("--xray", "xv-sh", "--json").stdout)
+        test_screen_count(o["corpus"] == "none" and o["reason"] == "lite")
         test_picker()
         test_chord()
         test_chord_end()
@@ -636,6 +869,7 @@ def main():
         dch("-k", "xv-rx")
         dch("-k", "xv-end")
         dch("-k", "xv-sh")
+        dch("-k", "xv-0")
         shutil.rmtree(T, ignore_errors=True)
     if fails[0]:
         print("%d failed" % fails[0])

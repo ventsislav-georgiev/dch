@@ -18,10 +18,11 @@ Covers:
      exits 0; the corpus's ESC, BEL and bidi bytes never reach the
      terminal; every query ran on the host as its own ctl (follow, ref,
      ref --full, chapter);
-  2. On screen of srv:xv-sh, a live shell on the host: the screen read with
+  2. On screen of srv:xv-sh, a live shell on the host: no number on its tab
+     before the screen is read (#193), the screen read with
      ctl --read xv-sh --ansi, o/r#41 gets hint a, typing it opens
      its card (full build); on dch-lite "No screen: dch-lite keeps no
-     mirror";
+     mirror" and still no number;
   3. a hostile host: raw ESC, BEL, C1 and bidi bytes in its snapshot and in
      its --read screen are drawn as ?, its OSC and CSI dropped, and its
      screen still gets its hint;
@@ -314,12 +315,14 @@ def test_on_screen():
         check("On screen: the view of srv:xv-sh opens",
               v.wait(b"X-ray  srv:xv-sh") and v.wait(b"Chapters"),
               v.out[-600:])
+        check("On screen: no number on its tab before its screen is read",
+              not re.search(rb"On screen \d", v.out), v.out[-600:])
         mark = len(v.out)
         v.key(b"\t\t", 2.0)
         if lite:
-            check("lite: On screen says dch-lite keeps no mirror",
-                  v.wait(b"No screen: dch-lite keeps no mirror", start=mark),
-                  v.out[mark:])
+            check("lite: On screen says dch-lite keeps no mirror, no number",
+                  v.wait(b"No screen: dch-lite keeps no mirror", start=mark)
+                  and not re.search(rb"On screen \d", v.out), v.out[mark:])
         else:
             check("On screen: the host's screen, o/r#41 with hint a",
                   v.wait(b"On screen 1", start=mark) and
