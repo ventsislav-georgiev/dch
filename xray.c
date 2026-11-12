@@ -1581,6 +1581,8 @@ static const char *const A_PATTERN[] = { "pattern", 0 };
 static const char *const A_ATTACH[] = { "attachment", 0 };
 static const char *const A_PROMPT[] = { "prompt", 0 };
 static const char *const A_TS[] = { "timestamp", 0 };
+static const char *const A_ORIGIN[] = { "origin", 0 };
+static const char *const A_KIND[] = { "kind", 0 };
 
 /* K.str: a string value or NULL (malloc'd). */
 static char *
@@ -1767,7 +1769,8 @@ command(const char *s, size_t n, char *title, size_t titlesz)
 
 /* harness(): `<task-notification>…</task-notification>` and
 ** `<system-reminder>…</system-reminder>` blocks and nothing else, the text
-** Claude Code writes as a user record (#192). 1 with the first notification's
+** Claude Code writes as a user record (#192; only on a record injected()
+** says it wrote, LOW-V5). 1 with the first notification's
 ** <summary>, else its <event>, as a title in sum[] ("" for neither), else 0. */
 static int
 harness(const char *s, size_t n, char *sum, size_t sumsz)
@@ -3182,7 +3185,7 @@ d3(const struct dsrc *s, struct dset *ds)
 	size_t k;
 	int cr = 0;
 	struct dres *d;
-	char title[XR_TITLE_MAX * 4 + 1];
+	char title[XR_TITLE_MAX * 4 + 1] = "";	/* whole: copied by size */
 
 	shell_words(s->cmd, s->cl, &w);
 	if (!w.b)
@@ -5122,9 +5125,21 @@ ent_command(struct xr_entries *e, const char *t, size_t tl)
 	free(b);
 }
 
-/* A user text block: a slash command, else a prompt; blank is hidden. */
+/* The record says Claude Code wrote it: "origin":{"kind":
+** "task-notification"} (QA 1.58.0 LOW-V5). A typed prompt has no origin,
+** so text alone never makes a prompt auto. */
+static int
+injected(const struct json_parser *p)
+{
+	int o = k_obj(p, 0, A_ORIGIN);
+
+	return o >= 0 && k_streq(p, o, A_KIND, "task-notification");
+}
+
+/* A user text block: a slash command, else a prompt; blank is hidden. inj:
+** the record is the harness's (injected), so harness text in it is auto. */
 static void
-user_text(struct xr_claude *d, const char *agent, char *s, size_t n)
+user_text(struct xr_claude *d, const char *agent, char *s, size_t n, int inj)
 {
 	char title[XR_TITLE_MAX * 4 + 1], sum[XR_TITLE_MAX * 4 + 1], *u = NULL;
 	size_t ul = 0, tl = n;
@@ -5144,7 +5159,7 @@ user_text(struct xr_claude *d, const char *agent, char *s, size_t n)
 	}
 	if (blank(s, n))
 		return;
-	h = harness(s, n, sum, sizeof sum);
+	h = inj && harness(s, n, sum, sizeof sum);
 	if ((d->rk.hit || d->want) && (u = malloc(n + 1)))
 	{
 		memcpy(u, s, n);
@@ -5203,7 +5218,7 @@ entry_user(struct xr_claude *d, const struct json_parser *p, const char *ag)
 	if (c >= 0 && p->tok[c].kind == JSON_STRING)
 	{
 		if ((s = j_str(p, c, &n)))
-			user_text(d, ag, s, n);
+			user_text(d, ag, s, n, injected(p));
 		free(s);
 		return;
 	}
@@ -5239,7 +5254,7 @@ entry_user(struct xr_claude *d, const struct json_parser *p, const char *ag)
 			free(t);
 		}
 		if (text)
-			user_text(d, ag, text, tl);
+			user_text(d, ag, text, tl, injected(p));
 		free(text);
 	}
 	for (i = c + 1; i < p->tok[c].next; i = p->tok[i].next)
@@ -5467,7 +5482,7 @@ cx_user(struct xr_claude *d, const struct json_parser *p, int pl)
 		}
 	}
 	if (text)
-		user_text(d, NULL, text, tl);
+		user_text(d, NULL, text, tl, 0);
 	if (img)
 		main_block(d, B_IMAGE, NULL, NULL);
 	free(text);
@@ -5730,7 +5745,7 @@ xr_claude_line(struct xr_claude *d, const char *line, size_t len,
 		    (s = k_str(&p, a, A_PROMPT, &n)))
 		{
 			if (!blank(s, n))
-				user_text(d, ag, s, n);
+				user_text(d, ag, s, n, injected(&p));
 			free(s);
 		}
 	}
@@ -6358,6 +6373,22 @@ sh_defs(struct xr_shell *s, const struct xr_rec *x)
 	free(c.cov);
 }
 
+/* t[0..n) inside the block's command. shortcut: a row past 256 bytes is
+** never looked up (it starts a unit as before), so the cost stays at most
+** 4096 x 256 compares a row */
+static int
+sh_in_cmd(const struct xr_shref *r, const char *t, size_t n)
+{
+	size_t i;
+
+	if (n > sizeof r->prompt)
+		return 0;
+	for (i = 0; i + n <= r->cl; i++)
+		if (!memcmp(r->cmd + i, t, n))
+			return 1;
+	return 0;
+}
+
 /* Before the state machine: rows to lines, marks and gaps flush; after it
 ** (post), the block's bookkeeping. */
 static void
@@ -6373,13 +6404,20 @@ sh_refs_pre(struct xr_shell *s, const struct xr_rec *x)
 			memcpy(r->prompt, x->text, r->pl);
 	}
 	/* a screen row has no marks: one that starts with the prompt is the
-	** next block's, as its A would make it */
+	** next block's, as its A would make it, unless the block's command
+	** holds the whole row (echo 'zp% x': its output, QA 1.58.0 LOW-V7) */
 	if (r->screen && r->pl && !(x->flags & RING_F_CONT) && x->len >= r->pl &&
 	    !memcmp(x->text, r->prompt, r->pl) &&
-	    (x->len == r->pl || x->text[r->pl] == ' '))
+	    (x->len == r->pl || x->text[r->pl] == ' ') &&
+	    !sh_in_cmd(r, x->text, x->len))
 	{
 		sh_flush(s);
 		r->unit++;
+		/* this row's command, for the rows after it */
+		r->cl = x->len > r->pl ? x->len - r->pl - 1 : 0;
+		if (r->cl > XR_CMD_MAX)
+			r->cl = u8_cut(x->text + r->pl + 1, XR_CMD_MAX);
+		memcpy(r->cmd, x->text + r->pl + (r->cl != 0), r->cl);
 	}
 	if (x->kind == RING_K_PROMPT || x->kind == RING_K_INPUT ||
 	    x->kind == RING_K_OUTPUT)
@@ -6443,6 +6481,9 @@ xr_shell_screen(struct xr_shell *s)
 	{
 		sh_flush(s);	/* the ring's last line, in its own block */
 		s->refs->screen = 1;
+		if (s->st != S_OUTPUT || s->ord < 0)
+			s->refs->cl = 0;	/* only an open block's command
+						** holds its rows on screen */
 	}
 	s->st = S_NONE;
 	s->ord = -1;
@@ -7186,17 +7227,22 @@ xr_gitfile(const char *s, size_t n)
 	       s[8] != '\r';
 }
 
+static const char *res_under(const char *p, const char *root);
+
 /* The .git at path as git takes it (QA 1.57.0 LOW-D1): 1 for a directory
 ** (a symlink to one too) or a regular file starting "gitdir: " and a path;
 ** 0 for none, a dangling symlink, a FIFO or a socket (git looks further
-** up); -1 for any other file, which git refuses, and for a symlink to a
-** file. Only a regular file is opened, through the seam (no symlink, no
-** FIFO, never blocks). */
+** up); -1 for any other file, which git refuses. A symlink to a git file
+** counts as git takes it, but only one whose real path lies in the dir
+** that holds the .git (QA 1.58.0 NIT-D3): one out of it is -1, no root,
+** never read. Only a regular file is opened, by its real path through the
+** seam (no symlink, the inode stat saw, no FIFO, never blocks). */
 static int
 res_gitent(const char *path)
 {
-	struct stat st;
-	char b[16];
+	struct stat st, ls;
+	char b[16], rp[PATH_MAX], d[PATH_MAX], rd[PATH_MAX], *e;
+	const char *o = path;
 	ssize_t n = -1;
 	int fd;
 
@@ -7206,7 +7252,20 @@ res_gitent(const char *path)
 		return 1;
 	if (!S_ISREG(st.st_mode))
 		return 0;
-	if ((fd = xr_seam_open(path, &st)) >= 0)
+	if (lstat(path, &ls) != 0)
+		return -1;
+	if (S_ISLNK(ls.st_mode))
+	{
+		if (snprintf(d, sizeof d, "%s", path) >= (int)sizeof d ||
+		    !(e = strrchr(d, '/')))
+			return -1;
+		e[e == d] = '\0';	/* the dir; "/" for "/.git" */
+		if (!realpath(path, rp) || !realpath(d, rd) ||
+		    !res_under(rp, rd))
+			return -1;
+		o = rp;
+	}
+	if ((fd = xr_seam_open(o, &st)) >= 0)
 	{
 		n = read(fd, b, sizeof b);
 		close(fd);
@@ -7353,6 +7412,21 @@ res_wide(const char *root, int git)
 			    res_home_ino(rr, (size_t)(s - rr)))
 				return 1;
 		}
+	return 0;
+}
+
+/* A dir of rp below the root's real path (rl bytes) is a home by inode: the
+** root holds the home under a spelling res_wide's tails miss, a bind mount
+** that renames a dir on the way (/home at /mnt/users, QA 1.58.0 LOW-D5).
+** Only the file's own dirs are looked at, so it answers per file. */
+static int
+res_home_below(const char *rp, size_t rl)
+{
+	const char *s;
+
+	for (s = rp + rl; (s = strchr(s + 1, '/')); )
+		if (res_home_ino(rp, (size_t)(s - rp)))
+			return 1;
 	return 0;
 }
 
@@ -8050,11 +8124,85 @@ xr_deny_dir(const char *c)
 	return 0;
 }
 
+/* The git file g (lstat as *st) of the worktree rr[0..e) as git writes it
+** (QA 1.58.0 NIT-D2): "gitdir: " and a path into "<P>/.git/<x>", P the
+** dir that holds the ".claude" at c or any dir above it (a nested
+** worktree's is its main repo's), whole or as "../" up to P
+** (worktree.useRelativePaths); <x> no empty, "." or ".." part; and
+** <P>/.git a directory (lstat). The target is never followed: only P, a
+** part of rr, is looked at. */
+static int
+res_wtgit(const char *g, const struct stat *st, const char *rr,
+          const char *c, const char *e)
+{
+	char b[PATH_MAX + 16], d[PATH_MAX + 8];
+	const char *t, *q;
+	size_t pl, k = 0, l;
+	ssize_t n = -1;
+	struct stat ds;
+	int fd;
+
+	if ((fd = xr_seam_open(g, st)) >= 0)
+	{
+		n = read(fd, b, sizeof b);
+		close(fd);
+	}
+	if (n <= 8 || (size_t)n >= sizeof b || !xr_gitfile(b, (size_t)n))
+		return 0;
+	while (n > 8 && (b[n - 1] == '\n' || b[n - 1] == '\r'))
+		n--;	/* git trims CR and LF only: a space stays in the path */
+	b[n] = '\0';
+	t = b + 8;
+	if (!*t || strlen(t) != (size_t)n - 8 || strpbrk(t, "\n\r") ||
+	    b[n - 1] == ' ' || b[n - 1] == '\t')
+		return 0;	/* a NUL, a second line, a blank end: git's dir
+				** would not be the one checked below */
+	if (t[0] == '/')
+	{
+		/* P: rr up to a '/' at or above the one before ".claude" */
+		for (pl = (size_t)(c - rr); ; pl--)
+		{
+			if (rr[pl] == '/' && !strncmp(t, rr, pl) &&
+			    !strncmp(t + pl, "/.git/", 6))
+				break;
+			if (!pl)
+				return 0;
+		}
+		q = t + pl + 6;
+	}
+	else
+	{
+		/* k "../" from the worktree: 3 is its ".claude"'s dir */
+		for (q = t; !strncmp(q, "../", 3); q += 3)
+			k++;
+		if (k < 3 || strncmp(q, ".git/", 5))
+			return 0;
+		q += 5;
+		for (pl = (size_t)(e - rr); k && pl; )
+			if (rr[--pl] == '/')
+				k--;
+		if (k)
+			return 0;	/* above "/" */
+	}
+	if (!*q)
+		return 0;
+	for (; *q; q += l + (q[l] == '/'))
+	{
+		l = strcspn(q, "/");
+		if (!l || (q[0] == '.' && (l == 1 || (l == 2 && q[1] == '.'))))
+			return 0;
+	}
+	if (snprintf(d, sizeof d, "%.*s/.git", (int)pl, rr) >= (int)sizeof d)
+		return 0;
+	return lstat(d, &ds) == 0 && S_ISDIR(ds.st_mode);
+}
+
 /* The worktree exception (#184, narrowed by QA 1.57.0 MED-D1). A part
 ** ".claude" of rr (the root's real path) is no denied dir when it is
 ** followed by "worktrees/<name>", that "<...>/.claude/worktrees/<name>" is
 ** the root or a parent of it, its ".git" is a regular file (no symlink)
-** starting "gitdir: " (a git worktree, what Claude Code makes there), and
+** that points into the .git dir of a repo above it (res_wtgit: a git
+** worktree, what Claude Code makes there), and
 ** the typed root ends in the same parts from that ".claude" on. Only those
 ** parts are lifted; every other part, above the root, the root itself and
 ** below it, keeps the whole list, and res_home_deny still refuses a
@@ -8085,7 +8233,7 @@ res_lift(const char *root, const char *rr, uint64_t *lr)
 		    strncasecmp(root + tl - l, c + 1, l) ||
 		    snprintf(g, sizeof g, "%.*s/.git", (int)(e - rr), rr)
 		    >= (int)sizeof g || lstat(g, &st) != 0 ||
-		    !S_ISREG(st.st_mode) || res_gitent(g) != 1)
+		    !S_ISREG(st.st_mode) || !res_wtgit(g, &st, rr, c, e))
 			continue;
 		for (j = 0, e = root; e < root + tl - l; e++)
 			j += *e == '/';
@@ -8221,8 +8369,10 @@ res_file(const char *key, const char *text, const char *cwd,
 		return 0;	/* gone, a symlink, a FIFO, a dir: no block */
 	if (!realpath(p, rp) || !rr[0])
 		return 0;
-	/* a hard link's other names can lie outside: the boundary's answer */
-	if (!res_under(rp, rr) || st.st_nlink > 1)
+	/* a hard link's other names can lie outside: the boundary's answer;
+	** so is a home below the root in another spelling (LOW-D5) */
+	if (!res_under(rp, rr) || st.st_nlink > 1 ||
+	    res_home_below(rp, strlen(rr)))
 	{
 		res_set(r, "outside_project", "Outside this session's project");
 		return 1;

@@ -1,0 +1,1 @@
+{"schema":1,"about":"QA 1.58.0 LOW-V5: \"auto\" needs the record's \"origin\":{\"kind\":\"task-notification\"}, which Claude Code writes on the prompts it injects; the same text typed or pasted by the user (no origin, or another kind) is a plain chapter: shown, counted, its own title, no summary","session":"demo","argv":[["--xray","demo","--json"]],"display_only":[]}

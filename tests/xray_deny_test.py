@@ -22,6 +22,10 @@ dangling, FIFO, not "gitdir: ", a symlink, a clone's dir) refuse; the
 firmlink alias /System/Volumes/Data$HOME is the home; the new names refuse;
 a worktree, a nested one and ~/.config/nvim still read their lines.
 
+QA 1.58.0 NIT-D2: a worktree's git file pointing nowhere (no repo's .git
+above it) lifts nothing; NIT-D3: a .git symlinked to a git file in its own
+dir makes a root, one out of that dir does not.
+
 Run:  python3 tests/xray_deny_test.py        (uses ./dch)
 """
 import json, os, re, shutil, signal, subprocess, sys, tempfile, time
@@ -146,6 +150,8 @@ def main():
         elif kind == "symlink":   # to a valid git file
             put(path + "-target", "gitdir: /nonexistent/wt\n")
             os.symlink(path + "-target", path)
+        elif kind == "nowhere":   # QA 1.58.0 NIT-D2: no repo's .git
+            put(path, "gitdir: /nonexistent/wt\n")
         else:
             os.makedirs(path)
     for kind in ("empty", "dangling", "fifo", "notgitdir"):
@@ -159,7 +165,8 @@ def main():
             cases.append(("a %s .git in <proj>/%s: %s" % (kind, d, f),
                           "xd-fg-%s%s" % (kind, d),
                           os.path.join(c, f) + ":1", "secret_name"))
-    for kind in ("empty", "dangling", "fifo", "notgitdir", "symlink", "dir"):
+    for kind in ("empty", "dangling", "fifo", "notgitdir", "symlink", "dir",
+                 "nowhere"):
         w = os.path.join(tmp, "fw-" + kind, ".claude", "worktrees", "w")
         os.makedirs(w)
         os.makedirs(os.path.join(tmp, "fw-" + kind, ".git"))
@@ -203,6 +210,24 @@ def main():
           os.path.join(ww, f) + ":1", "secret_name")
          for f in (".env", ".claude/settings.json", ".ssh/config",
                    ".credentials.json", ".kube/config")]
+
+    # QA 1.58.0 NIT-D3: a .git that is a symlink to a git file in its own
+    # dir makes a root, as git takes it; one to a git file out of it does not
+    for k, inside in ((0, True), (1, False)):
+        r = os.path.join(tmp, "gl%d" % k)
+        os.makedirs(os.path.join(r, "sub"))
+        put(os.path.join(tmp, "gs%d" % k, "gf"), "gitdir: /nonexistent/gd\n")
+        put(os.path.join(r, "store", "gf"), "gitdir: /nonexistent/gd\n")
+        os.symlink(os.path.join("store", "gf") if inside else
+                   os.path.join(tmp, "gs%d" % k, "gf"), os.path.join(r, ".git"))
+        put(os.path.join(r, "a.txt"), "symlinked gitfile line\n"
+            if inside else "FAKE\n")
+        ss["xd-gl%d" % k] = os.path.join(r, "sub")
+        cases.append(("a .git symlink to a git file %s its dir: the root's "
+                      "a.txt from sub" % ("in" if inside else "out of"),
+                      "xd-gl%d" % k, os.path.join(r, "a.txt") + ":1",
+                      "ok:symlinked gitfile line" if inside
+                      else "outside_project"))
 
     # LOW-D2: the firmlink alias /System/Volumes/Data$HOME as a session's
     # cwd (an ended Claude's record holds it as written)

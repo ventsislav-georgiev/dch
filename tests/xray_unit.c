@@ -153,6 +153,8 @@ end(struct xr_chapters *c)
 }
 
 #define U(t) "{\"type\":\"user\",\"message\":{\"content\":\"" t "\"}}"
+#define O(t) "{\"type\":\"user\",\"origin\":{\"kind\":" \
+             "\"task-notification\"},\"message\":{\"content\":\"" t "\"}}"
 #define A(t) "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":" \
              "\"text\",\"text\":\"" t "\"}]}}"
 
@@ -692,6 +694,80 @@ t_screen_seam(void)
 	seam_feed(&m, cut, "/w");
 	CHECK("screen seam: a prompt past 255 bytes starts no unit on screen",
 	      m.n == 8 && m.unit[7] == m.unit[0] && !strcmp(m.chapter[2], "-"));
+
+	/* QA 1.58.0 LOW-V7: an output row that starts with the prompt and is
+	** held whole by its block's command is that block's (echo 'zp% x'):
+	** the same units on screen as once the rows scroll into the ring */
+	RN = 0;
+	rec(RING_K_MARK, 0, "A");
+	rec(RING_K_PROMPT, 0, "zp%");
+	rec(RING_K_MARK, 0, "B");
+	rec(RING_K_INPUT, 0, "seq 1 30");
+	rec(RING_K_MARK, RING_F_INPUT, "C");
+	rec(RING_K_OUTPUT, 0, "1 x/y#1 above");
+	cut = RN;
+	rec(RING_K_OUTPUT, 0, "zp% echo 'zp% x/y#1 c'");
+	rec(RING_K_OUTPUT, 0, "zp% x/y#1 c");
+	rec(RING_K_OUTPUT, 0, "zp% echo x/y#1 d");
+	rec(RING_K_OUTPUT, 0, "x/y#1 d");
+	seam_feed(&m, cut, "/w");
+	CHECK("screen seam (LOW-V7): echo 'zp% x/y#1 c''s output row stays in "
+	      "its block", m.n == 5 && m.unit[1] != m.unit[0] &&
+	      m.unit[2] == m.unit[1] && m.unit[3] != m.unit[2] &&
+	      m.unit[4] == m.unit[3]);
+	RN = 0;	/* the same rows scrolled: the ring's marks decide */
+	rec(RING_K_MARK, 0, "A");
+	rec(RING_K_PROMPT, 0, "zp%");
+	rec(RING_K_MARK, 0, "B");
+	rec(RING_K_INPUT, 0, "seq 1 30");
+	rec(RING_K_MARK, RING_F_INPUT, "C");
+	rec(RING_K_OUTPUT, 0, "1 x/y#1 above");
+	rec(RING_K_MARK, RING_F_EXIT, "D;0");
+	rec(RING_K_MARK, 0, "A");
+	rec(RING_K_PROMPT, 0, "zp%");
+	rec(RING_K_MARK, 0, "B");
+	rec(RING_K_INPUT, 0, "echo 'zp% x/y#1 c'");
+	rec(RING_K_MARK, RING_F_INPUT, "C");
+	rec(RING_K_OUTPUT, 0, "zp% x/y#1 c");
+	rec(RING_K_MARK, RING_F_EXIT, "D;0");
+	rec(RING_K_MARK, 0, "A");
+	rec(RING_K_PROMPT, 0, "zp%");
+	rec(RING_K_MARK, 0, "B");
+	rec(RING_K_INPUT, 0, "echo x/y#1 d");
+	rec(RING_K_MARK, RING_F_INPUT, "C");
+	rec(RING_K_OUTPUT, 0, "x/y#1 d");
+	seam_feed(&m, (size_t)-1, "/w");
+	CHECK("screen seam (LOW-V7): the ring's reading of the same rows: the "
+	      "same units", m.n == 5 && m.unit[1] != m.unit[0] &&
+	      m.unit[2] == m.unit[1] && m.unit[3] != m.unit[2] &&
+	      m.unit[4] == m.unit[3]);
+	/* the ring's open block's own command holds its first screen row */
+	RN = 0;
+	rec(RING_K_MARK, 0, "A");
+	rec(RING_K_PROMPT, 0, "zp%");
+	rec(RING_K_MARK, 0, "B");
+	rec(RING_K_INPUT, 0, "echo 'zp% x/y#1 c'");
+	rec(RING_K_MARK, RING_F_INPUT, "C");
+	cut = RN;
+	rec(RING_K_OUTPUT, 0, "zp% x/y#1 c");
+	rec(RING_K_OUTPUT, 0, "zp% cat x/y#1");
+	seam_feed(&m, cut, "/w");
+	CHECK("screen seam (LOW-V7): the open block's command holds its output "
+	      "row on screen; a row it does not hold is the next prompt",
+	      m.n == 3 && m.unit[1] == m.unit[0] && m.unit[2] != m.unit[1]);
+	/* a block the ring closed (D) holds nothing: the row is a prompt */
+	RN = 0;
+	rec(RING_K_MARK, 0, "A");
+	rec(RING_K_PROMPT, 0, "zp%");
+	rec(RING_K_MARK, 0, "B");
+	rec(RING_K_INPUT, 0, "echo 'zp% x/y#1 c'");
+	rec(RING_K_MARK, RING_F_INPUT, "C");
+	rec(RING_K_MARK, RING_F_EXIT, "D;0");
+	cut = RN;
+	rec(RING_K_OUTPUT, 0, "zp% x/y#1 c");
+	seam_feed(&m, cut, "/w");
+	CHECK("screen seam (LOW-V7): after the ring's D the row is the next "
+	      "block's", m.n == 2 && m.unit[1] != m.unit[0]);
 }
 
 
@@ -1603,44 +1679,56 @@ t_auto(void)
 
 	memset(want, 'x', 130);
 	want[130] = '\0';
-	snprintf(big, sizeof big, U(TN("<summary>%s</summary>")), want);
+	snprintf(big, sizeof big, O(TN("<summary>%s</summary>")), want);
 	begin();
-	line(U(TN("<status>completed</status>\\n<summary>Build finished:  3 "
+	line(O(TN("<status>completed</status>\\n<summary>Build finished:  3 "
 	          "passed</summary>")));
 	line(A("x"));
-	line(U(TN("<event>[monitor] CI went green</event>")));
+	line(O(TN("<event>[monitor] CI went green</event>")));
 	line(A("x"));
-	line(U(TN("<summary> \\t </summary>\\n<event>only the event</event>")));
+	line(O(TN("<summary> \\t </summary>\\n<event>only the event</event>")));
 	line(A("x"));
-	line(U(TN("<status>killed</status>")));
+	line(O(TN("<status>killed</status>")));
 	line(A("x"));
 	line(U("why did this fail?\\n" TN("<summary>quoted</summary>")));
 	line(A("x"));
-	line(U(TN("<summary>s</summary>") "\\nplease retry"));
+	line(O(TN("<summary>s</summary>") "\\nplease retry"));
 	line(A("x"));
-	line(U(TN("<summary>\\u001b[31mred\\u0007\\u0000 \\u202eevil\\tx\\ny"
+	line(O(TN("<summary>\\u001b[31mred\\u0007\\u0000 \\u202eevil\\tx\\ny"
 	          "</summary>")));
 	line(A("x"));
 	line(big);
 	line(A("x"));
-	line("{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"text\","
+	line("{\"type\":\"user\",\"origin\":{\"kind\":\"task-notification\"},"
+	     "\"message\":{\"content\":[{\"type\":\"text\","
 	     "\"text\":\"" TN("<summary>from an array</summary>") "\"}]}}");
 	line(A("x"));
-	line(U(TN("<summary>with a reminder</summary>")
+	line(O(TN("<summary>with a reminder</summary>")
 	       "\\n<system-reminder>r</system-reminder>\\n"));
 	line(A("x"));
-	line(U("<task-notification><summary>unclosed</summary>"));
+	line(O("<task-notification><summary>unclosed</summary>"));
 	line(A("x"));
 	line(U("a real prompt"));
-	line(U(TN("<summary>rides in the prompt's lead</summary>")));
+	line(O(TN("<summary>rides in the prompt's lead</summary>")));
 	line(A("x"));
-	line(U(" <system-reminder>r</system-reminder>\\n"));
+	line(O(" <system-reminder>r</system-reminder>\\n"));
 	line(A("x"));
-	line(U(TN("<status>killed</status>") TN("<summary>second</summary>")));
+	line(O(TN("<status>killed</status>") TN("<summary>second</summary>")));
+	line(A("x"));
+	/* QA 1.58.0 LOW-V5: the shape alone, typed: no origin, no auto */
+	line(U(TN("<summary>Background job done</summary>")));
+	line(A("x"));
+	line(U("<system-reminder>anything I type</system-reminder>"));
+	line(A("x"));
+	line("{\"type\":\"user\",\"origin\":{\"kind\":\"user\"},\"message\":"
+	     "{\"content\":\"" TN("<summary>other kind</summary>") "\"}}");
+	line(A("x"));
+	line("{\"type\":\"user\",\"origin\":\"task-notification\",\"message\":"
+	     "{\"content\":\"" TN("<summary>a string origin</summary>") "\"}}");
 	line(A("x"));
 	end(&c);
-	CHECK("auto: 14 chapters", c.n == 14);
-	if (c.n != 14)
+	CHECK("auto: 18 chapters", c.n == 18);
+	if (c.n != 18)
 	{
 		xr_chapters_free(&c);
 		goto out;
@@ -1689,6 +1777,17 @@ t_auto(void)
 	      xr_chapter_at(&c, 12)->harness && !xr_chapter_at(&c, 12)->summary[0]);
 	CHECK("auto: only the first notification's summary or event counts",
 	      xr_chapter_at(&c, 13)->harness && !xr_chapter_at(&c, 13)->summary[0]);
+	CHECK("auto (LOW-V5): a typed notification (no origin) is a plain "
+	      "prompt, its title kept, no summary",
+	      !xr_chapter_at(&c, 14)->harness &&
+	      !xr_chapter_at(&c, 14)->summary[0] &&
+	      !strcmp(xr_chapter_at(&c, 14)->title, "<task-notification>"));
+	CHECK("auto (LOW-V5): a typed system-reminder is a plain prompt",
+	      !xr_chapter_at(&c, 15)->harness);
+	CHECK("auto (LOW-V5): an origin of another kind, or not an object: "
+	      "plain", !xr_chapter_at(&c, 16)->harness &&
+	      !xr_chapter_at(&c, 17)->harness &&
+	      !xr_chapter_at(&c, 17)->summary[0]);
 
 	/* the snapshot row, the --chapter head and a --follow chapter line */
 	memset(&a, 0, sizeof a);
@@ -1776,7 +1875,7 @@ t_auto_cap(void)
 	s[480] = '\0';
 	per = 481;
 	fit = XR_SUMMARIES / per;
-	snprintf(l, sizeof l, U(TN("<summary>%s</summary>")), s);
+	snprintf(l, sizeof l, O(TN("<summary>%s</summary>")), s);
 	begin();
 	for (k = 0; k < fit + 10; k++)
 	{
@@ -3016,6 +3115,136 @@ t_res_tree(void)
 	      !xr_gitfile("", 0) && !xr_gitfile("ref: refs/heads/m", 17));
 }
 
+/* QA 1.58.0 NIT-D2: the worktree exception takes a git file only as git
+** writes it for a worktree of a repo above it: "gitdir: " into <P>/.git/,
+** P the .claude's dir or above, whole or as ../ (no "." or ".." part after
+** .git/), and <P>/.git a directory. NIT-D3: a .git that is a symlink to a
+** git file in the dir that holds it makes a root, as git takes it; one out
+** of that dir, dangling, or to a FIFO does not. Every file holds FAKE. */
+static void
+t_res_wt(void)
+{
+	static const char *const mkd[] = {
+		"wg", "wg/.git", "wg/.claude", "wg/.claude/worktrees",
+		"wg/.claude/worktrees/w", "wg/.claude/worktrees/w/.claude",
+		"wg/.claude/worktrees/w/.claude/worktrees",
+		"wg/.claude/worktrees/w/.claude/worktrees/y", "wo", "wo/.git",
+		"wn", "wn/.claude", "wn/.claude/worktrees", "wn/.claude/worktrees/w",
+		"sl", "sl/store", "sl/sub", "so", "so/sub", "sd", "sd/sub", "sf",
+		"sf/sub", "sp", "sp/sub", NULL
+	};
+	static const struct { const char *body, *state, *why; } g[] = {
+		{ "gitdir: @/wg/.git/worktrees/w\n", "ok", "whole, into P/.git" },
+		{ "gitdir: ../../../.git/worktrees/w\n", "ok", "relative" },
+		{ "gitdir: @/wg/.git/worktrees/w\r\n", "ok", "a CR before the LF" },
+		{ "gitdir: @/wg/.git/wt/w", "ok", "any dir in .git, no LF" },
+		{ "gitdir: /nonexistent/x\n", "secret_name", "pointing nowhere" },
+		{ "gitdir: @/wo/.git/worktrees/w\n", "secret_name",
+		  "into another repo's .git" },
+		{ "gitdir: @/wg/.claude/.git/w\n", "secret_name",
+		  "into the .claude" },
+		{ "gitdir: ../../.git/w\n", "secret_name", "2 up: in the .claude" },
+		{ "gitdir: ../../../.git/../../x\n", "secret_name", "a .. part" },
+		{ "gitdir: @/wg/.git/./w\n", "secret_name", "a . part" },
+		{ "gitdir: @/wg/.git//w\n", "secret_name", "an empty part" },
+		{ "gitdir: @/wg/.git/\n", "secret_name", "the repo's own .git" },
+		{ "gitdir: @/wg/.git\n", "secret_name", "no part after .git" },
+		{ "gitdir: @/wg/.git/worktrees/w\nx\n", "secret_name",
+		  "a second line" },
+		{ "gitdir: @/wg/.gitx/w\n", "secret_name", "not .git" },
+		{ "gitdir: @/wg/.git/worktrees/w \n", "secret_name",
+		  "a space at the end (git keeps it: another dir)" },
+		{ NULL, NULL, NULL }
+	};
+	const char *w = "wg/.claude/worktrees/w";
+	char b[PATH_MAX + 64], l[PATH_MAX + 256], body[PATH_MAX + 64];
+	struct xr_resolved r;
+	const char *at;
+	size_t k;
+	int ok;
+
+	for (k = 0; mkd[k]; k++)
+		dir(mkd[k]);
+	put("wg/.claude/worktrees/w/a.txt", "FAKE W\n", 7);
+	put("wg/.claude/worktrees/w/.claude/worktrees/y/a.txt", "FAKE Y\n", 7);
+	for (k = 0; g[k].body; k++)
+	{
+		at = strchr(g[k].body, '@');
+		snprintf(body, sizeof body, "%.*s%s%s", at ? (int)(at - g[k].body)
+		         : (int)strlen(g[k].body), g[k].body, at ? rd : "",
+		         at ? at + 1 : "");
+		put("wg/.claude/worktrees/w/.git", body, strlen(body));
+		snprintf(l, sizeof l, "NIT-D2: a worktree's git file %s: a.txt %s",
+		         g[k].why, g[k].state);
+		CHECK(l, res("a.txt:1", w, 1, &r) == 1 &&
+		      is(&r, "file", g[k].state) &&
+		      (strcmp(g[k].state, "ok") ? r.nlines == 0 :
+		       r.nlines == 1 && !strcmp(r.line[0], "FAKE W")));
+	}
+	snprintf(body, sizeof body, "gitdir: %s/wg/.git/worktrees/w\n", rd);
+	put("wg/.claude/worktrees/w/.git", body, strlen(body));
+	snprintf(body, sizeof body, "gitdir: %s/wg/.git/worktrees/y\n", rd);
+	put("wg/.claude/worktrees/w/.claude/worktrees/y/.git", body,
+	    strlen(body));
+	CHECK("NIT-D2: a nested worktree into its main repo's .git: a.txt ok",
+	      res("a.txt:1", "wg/.claude/worktrees/w/.claude/worktrees/y", 1,
+	          &r) == 1 && is(&r, "file", "ok"));
+	put("wg/.claude/worktrees/w/.claude/worktrees/y/.git",
+	    "gitdir: ../../../../../../.git/worktrees/y\n", 42);
+	CHECK("NIT-D2: the same, relative (6 up): a.txt ok",
+	      res("a.txt:1", "wg/.claude/worktrees/w/.claude/worktrees/y", 1,
+	          &r) == 1 && is(&r, "file", "ok"));
+	snprintf(body, sizeof body, "gitdir: %s/wn/.git/worktrees/w\n", rd);
+	put("wn/.claude/worktrees/w/.git", body, strlen(body));
+	put("wn/.claude/worktrees/w/a.txt", "FAKE\n", 5);
+	CHECK("NIT-D2: a repo with no .git dir: secret_name",
+	      res("a.txt:1", "wn/.claude/worktrees/w", 1, &r) == 1 &&
+	      is(&r, "file", "secret_name") && r.nlines == 0);
+
+	/* NIT-D3: .git a symlink to a git file */
+	put("sl/store/gf", "gitdir: /x/.git\n", 16);
+	put("sl/a.c", "FAKE SL\n", 8);
+	snprintf(b, sizeof b, "%s/sl/.git", rd);
+	ok = symlink("store/gf", b) == 0;
+	snprintf(b, sizeof b, "%s/sl/a.c:1", rd);
+	CHECK("NIT-D3: .git a symlink to a git file in its dir: a root (a.c "
+	      "from sub ok)", ok && res(b, "sl/sub", 1, &r) == 1 &&
+	      is(&r, "file", "ok") && r.nlines == 1 &&
+	      !strcmp(r.line[0], "FAKE SL"));
+	put("so/a.c", "FAKE\n", 5);
+	snprintf(b, sizeof b, "%s/so/.git", rd);
+	snprintf(l, sizeof l, "%s/sl/store/gf", rd);
+	ok = symlink(l, b) == 0;
+	snprintf(b, sizeof b, "%s/so/a.c:1", rd);
+	CHECK("NIT-D3: a symlink to a git file out of its dir: no root "
+	      "(outside_project)", ok && res(b, "so/sub", 1, &r) == 1 &&
+	      is(&r, "file", "outside_project") && r.nlines == 0);
+	put("sd/a.c", "FAKE\n", 5);
+	snprintf(b, sizeof b, "%s/sd/.git", rd);
+	ok = symlink("nonexistent", b) == 0;
+	snprintf(b, sizeof b, "%s/sd/a.c:1", rd);
+	CHECK("NIT-D3: a dangling .git symlink: no root", ok &&
+	      res(b, "sd/sub", 1, &r) == 1 &&
+	      is(&r, "file", "outside_project"));
+	put("sf/a.c", "FAKE\n", 5);
+	snprintf(b, sizeof b, "%s/sf/f", rd);
+	ok = mkfifo(b, 0600) == 0;
+	snprintf(b, sizeof b, "%s/sf/.git", rd);
+	ok = ok && symlink("f", b) == 0;
+	snprintf(b, sizeof b, "%s/sf/a.c:1", rd);
+	CHECK("NIT-D3: a .git symlink to a FIFO: no root, never opened", ok &&
+	      res(b, "sf/sub", 1, &r) == 1 &&
+	      is(&r, "file", "outside_project"));
+	put("sp/a.c", "FAKE\n", 5);
+	put("sp/plain", "ref: refs/heads/m\n", 18);
+	snprintf(b, sizeof b, "%s/sp/.git", rd);
+	ok = symlink("plain", b) == 0;
+	snprintf(b, sizeof b, "%s/sp/a.c:1", rd);
+	CHECK("NIT-D3: a .git symlink to a file that is no git file: no root",
+	      ok && res(b, "sp/sub", 1, &r) == 1 &&
+	      is(&r, "file", "outside_project"));
+}
+
 /* A fake git: records its argv and env, then acts as $D/mode says. */
 static void
 fake_git(void)
@@ -3565,6 +3794,7 @@ t_resolve(void)
 	t_res_file();
 	t_res_deny();
 	t_res_tree();
+	t_res_wt();
 	t_res_git();
 	t_res_git_pin();
 	snprintf(cmd, sizeof cmd, "rm -rf '%s'", rd);
