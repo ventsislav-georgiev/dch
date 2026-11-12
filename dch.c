@@ -6511,7 +6511,7 @@ faint_text(const char *raw, size_t n, char *txt, char *dim)
 	return k;
 }
 
-/* A remote session's screen, ctl `--read <name> --ansi --cursor`'s stdout
+/* A remote session's screen, ctl `--read <name> --ansi`'s stdout
 ** (the host's bytes, hostile), as plain text the way faint_text reads a
 ** local one: escapes dropped, CSI n C as n blanks, CRs dropped. Its tail
 ** as fetch_screen keeps one, the text within 8 times that. malloc'd, NULL
@@ -9710,8 +9710,8 @@ xv_spawn(int fd, int ac, char **av, int *out, int *err)
 		close(po[1]);
 		close(pe[0]);
 		close(pe[1]);
-		/* a remote On screen (#188): ctl --read host:name --ansi
-		** --cursor, its own connection, as the view's queries */
+		/* a remote On screen (#188): ctl --read host:name --ansi,
+		** its own connection, as the view's queries */
 		rc = !strcmp(av[0], "--read") ? dch_remote_ctl(NULL, ac, av, NULL)
 		     : xray_main(ac, av);
 		fflush(stdout);

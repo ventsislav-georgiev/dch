@@ -927,7 +927,7 @@ A window smaller than 24x8 shows only "X-ray: the window is too small".
 `dch --xray host:name` opens the view of a session on another host (dch
 serve 1.55.0+), and so does `X` on a remote row in the picker. Every query
 runs on the host, each over its own ctl connection. On screen reads the
-host's screen with `--read <name> --ansi --cursor`. The host's text is drawn
+host's screen with `--read <name> --ansi`. The host's text is drawn
 as a local session's is, every control and bidi character as `?`. A host
 that refuses us, lacks `--xray` or cannot be reached shows its line in place
 of the tabs (`dch: <host>: does not support --xray (needs dch serve

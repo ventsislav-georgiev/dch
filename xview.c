@@ -1028,15 +1028,16 @@ xv_screen_scan(struct xv *v)
 }
 
 /* The session's screen from its mirror, then its hints. A remote one's
-** (#188) is ctl's `--read host:name --ansi --cursor` in a child, on its own
-** connection; xv_screen_done takes its answer. */
+** (#188) is ctl's `--read host:name --ansi` in a child, on its own
+** connection; xv_screen_done takes its answer. No --cursor: the view draws
+** none, and it fails a screen over 2 MB or an older master. */
 static void
 xv_screen_load(struct xv *v)
 {
 	v->scr_at = now_ms();
 	if (v->hl && v->have && v->live)
 	{
-		char hn[sizeof v->n + 300], *av[5];
+		char hn[sizeof v->n + 300], *av[4];
 
 		if (v->kid[XV_SK].pid > 0)
 			return;
@@ -1044,9 +1045,8 @@ xv_screen_load(struct xv *v)
 		av[0] = "--read";
 		av[1] = hn;
 		av[2] = "--ansi";
-		av[3] = "--cursor";
-		av[4] = NULL;
-		(void)xv_start(v, XV_SK, av, 4, NULL);
+		av[3] = NULL;
+		(void)xv_start(v, XV_SK, av, 3, NULL);
 		return;
 	}
 	xv_hints_free(v);

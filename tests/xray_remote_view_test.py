@@ -19,7 +19,7 @@ Covers:
      terminal; every query ran on the host as its own ctl (follow, ref,
      ref --full, chapter);
   2. On screen of srv:xv-sh, a live shell on the host: the screen read with
-     ctl --read xv-sh --ansi --cursor, o/r#41 gets hint a, typing it opens
+     ctl --read xv-sh --ansi, o/r#41 gets hint a, typing it opens
      its card (full build); on dch-lite "No screen: dch-lite keeps no
      mirror";
   3. a hostile host: raw ESC, BEL, C1 and bidi bytes in its snapshot and in
@@ -332,7 +332,7 @@ def test_on_screen():
         v.close()
     with open(SLOG) as f:
         log = f.read()
-    check("On screen: read on the host with ctl --read xv-sh --ansi --cursor",
+    check("On screen: read on the host with ctl --read xv-sh --ansi",
           ctls("--read") > n0 and " ctl --read xv-sh " in log,
           ctls("--read") - n0)
 
@@ -422,8 +422,8 @@ def test_hostile():
                if b in v.out]
         check("hostile: none of the host's control or bidi bytes reached the "
               "terminal", not bad, bad)
-        check("hostile: the screen was asked as --read fk --ansi --cursor",
-              ["--read", "fk", "--ansi", "--cursor"] in h.bodies, h.bodies)
+        check("hostile: the screen was asked as --read fk --ansi (no "
+              "--cursor)", ["--read", "fk", "--ansi"] in h.bodies, h.bodies)
     finally:
         v.close()
         h.close()
