@@ -1021,8 +1021,17 @@ def main():
                 True, True)
             check("--revive --json, claude up but %s: running true, the "
                   "last key [%r]" % (why, got), got == want)
-        r = run("--revive", "rdlg", "--json", env=renv)
-        o = (ndjson(r.stdout) or [{}])[-1]
+        # lite's revive returns before its claude has written its record:
+        # running is true once it has
+        live = []
+
+        def rlive():
+            r = run("--revive", "rdlg", "--json", env=renv)
+            live[:] = [r, (ndjson(r.stdout) or [{}])[-1]]
+            return live[1].get("running") is True
+
+        until(rlive, 20)
+        r, o = live
         check("--revive --json of a live session with claude in it: failed "
               "live, running true [%r]" % r.stdout,
               r.returncode == 1 and o.get("reason") == "live" and

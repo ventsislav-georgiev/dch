@@ -55,9 +55,16 @@ static volatile sig_atomic_t want_redraw;
 	"\033[?1049l" \
 	"\033[<8u"
 
+static pid_t term_pid;	/* the client: attach_main's process */
+
 static void
 restore_term(void)
 {
+	/* a fork of the client that exit()s (a query child of the X-ray view,
+	** on a master that died under it) is not the client: the terminal
+	** stays the view's */
+	if (getpid() != term_pid)
+		return;
 	tcsetattr(0, TCSADRAIN, &orig_term);
 
 	/* \e[?25h cursor on; \e[?100[0236]l + \e[?101[56]l mouse tracking off;
@@ -818,6 +825,7 @@ attach_main(int noerror)
 	/* The current terminal settings are equal to the original terminal
 	** settings at this point. */
 	cur_term = orig_term;
+	term_pid = getpid();
 	{
 		char v[16];
 
