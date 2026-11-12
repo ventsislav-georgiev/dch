@@ -842,7 +842,8 @@ def test_claude():
         tn = ("<task-notification>\n<task-id>t</task-id>\n<summary>" +
               "\U0001F600" * 130 + "</summary>\n</task-notification>")
         with open(tp, "w") as f:
-            f.write((json.dumps({"type": "user", "message": {
+            f.write((json.dumps({"type": "user", "origin": {
+                "kind": "task-notification"}, "message": {
                 "content": tn}}) + "\n" +
                 '{"type":"assistant","message":{"content":"s"}}\n') * 6000)
             f.write((heavy + '\n{"type":"assistant","message":{"content":'
