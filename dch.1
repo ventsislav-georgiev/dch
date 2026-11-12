@@ -818,7 +818,7 @@ it opens the view of
 its queries over their own ctl connections, the attach kept; leaving it, the
 host resizes the program for a beat so it repaints, and
 .B dch serve
-1.57.0+ also re\-arms the modes the view turned off (bracketed paste, mouse
+1.58.0+ also re\-arms the modes the view turned off (bracketed paste, mouse
 reporting, the kitty keyboard flags, the alternate screen).
 An older host only resizes: those modes stay off until the next attach.
 There is no
@@ -2664,6 +2664,14 @@ client it starts as
 (clamped to 0..10000; missing, 0, negative or not an integer is none). A
 server that does not know the key ignores it, so it needed no new protocol
 version.
+.PP
+On a redraw
+.RB ( 0x07 )
+the server resizes the program one row down and back 120 ms later.
+.B dch serve
+1.58.0+ also re\-attaches its client: the attach stream then carries the
+session's DEC modes, for the kitty keyboard flags a pop and then the push,
+and on the full build the screen replayed from the mirror.
 .PP
 Protocol 1.1 adds the
 .B ctl

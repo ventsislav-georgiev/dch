@@ -935,7 +935,7 @@ they did before. Over a remote attach (`dch -a host:name`) the chord opens
 the view of `host:name`, as `dch --xray host:name` does: its queries dial
 their own ctl connections, and the attach connection is kept. Leaving it,
 the host resizes the program for a beat so it repaints, and dch serve
-1.57.0+ also re-arms the modes the view turned off (bracketed paste, mouse
+1.58.0+ also re-arms the modes the view turned off (bracketed paste, mouse
 reporting, the kitty keyboard flags, the alternate screen). An older dch
 serve or the Prosper server only resizes: those modes stay off on your
 terminal until you attach again. There is no
@@ -2272,6 +2272,13 @@ spawns as `--scrollback N`, clamped to 0..10000; missing, `0`, negative or
 not an integer means none. It is additive: a server that does not know it
 ignores it (an unknown key in a JSON object), so it needed no new protocol
 version. Commands run as argument vectors, never through a shell.
+
+**Redraw.** On a `0x07`, dch serve resizes the program one row down and back
+120 ms later, so it repaints. A dch serve 1.58.0+ also re-attaches its
+client, and the attach stream then carries the session's DEC modes (mouse,
+bracketed paste, focus, the alternate screen), for the kitty keyboard flags
+a pop and then the push (so the flag stack does not grow), and on the full
+build the screen replayed from the mirror.
 
 #### Control verbs (ctl)
 

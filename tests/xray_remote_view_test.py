@@ -50,8 +50,11 @@ Covers:
      past the view's ESC[?1049l holds ESC[?1049h, then the kitty push (on the
      alternate screen), ESC[?2004h, ESC[?1000h and ESC[?1006h; the full build
      repaints the screen from its mirror, dch-lite has none and the program
-     repaints on its SIGWINCH. A SIGUSR2 redraw (0x07, no reset before it)
-     re-arms again, and a key after still reaches the session.
+     repaints on its SIGWINCH. Three SIGUSR2 redraws (0x07, no reset before
+     them) re-arm again, each with one kitty pop before its one push, so the
+     flag stack does not grow (a per-screen stack model of the whole attach
+     ends at 1 on the alternate screen, 0 on the main one); the first attach
+     pops nothing. A key after still reaches the session.
 
 Run:  python3 tests/xray_remote_view_test.py      (uses ./dch)
 """
@@ -794,6 +797,22 @@ MD = ("import os, signal, sys, tty\n"
       "    if not b: break\n"
       "    os.write(1, b'GOT:' + b.hex().encode() + b'\\r\\n')\n")
 MODES = (b"\033[?2004h", b"\033[?1000h", b"\033[?1006h", b"\033[>1u")
+KSEQ = re.compile(rb"\033\[(\?1049[hl]|>\d*u|<\d*u)")
+
+
+def kitty_stacks(out):
+    """The kitty flag stack depths (main, alt) a terminal ends with after
+    out: a stack per screen, 1049h/l switch, ESC[<Nu pops N (default 1)."""
+    st, alt = [0, 0], 0
+    for m in KSEQ.finditer(out):
+        t = m.group(1)
+        if t[:1] == b"?":
+            alt = int(t[-1:] == b"h")
+        elif t[:1] == b">":
+            st[alt] += 1
+        else:
+            st[alt] = max(0, st[alt] - int(t[1:-1] or 1))
+    return tuple(st)
 
 
 def rearmed(out, at):
@@ -815,6 +834,9 @@ def test_rearm():
         check("re-arm: the attach shows the program's modes%s"
               % ("" if lite else " and screen"),
               ok and not rearmed(a.out, 0), a.out[-300:])
+        check("re-arm: the first attach pops no kitty flags (push only)",
+              b"\033[<" not in a.out and a.out.count(b"\033[>1u") == 1,
+              a.out[-300:])
         mark = len(a.out)
         a.key(b"\x1cx", 0.5)
         ok = a.wait(b"X-ray  srv:xv-md", start=mark)
@@ -848,13 +870,25 @@ def test_rearm():
             check("re-arm: the screen is replayed from the mirror after the "
                   "1049h", alt > back and b"ALTSCREEN" in out[alt:],
                   out[back:][-600:])
-        # a redraw with no reset before it (SIGUSR2: 0x07) re-arms again
-        mark = len(a.out)
-        os.kill(a.pid, signal.SIGUSR2)
-        until(lambda: (a.pump(0.1), not rearmed(a.out, mark))[1], 5)
-        check("re-arm: a SIGUSR2 redraw over the attach re-arms again",
-              not rearmed(a.out, mark), (rearmed(a.out, mark),
-                                         a.out[mark:][-400:]))
+        # redraws with no reset before them (SIGUSR2: 0x07) re-arm again,
+        # one pop before each push: the stack stays as it was
+        for i in range(1, 4):
+            mark = len(a.out)
+            os.kill(a.pid, signal.SIGUSR2)
+            until(lambda: (a.pump(0.1), not rearmed(a.out, mark))[1], 5)
+            a.pump(0.5)
+            got = a.out[mark:]
+            check("re-arm: SIGUSR2 redraw %d over the attach re-arms again"
+                  % i, not rearmed(a.out, mark),
+                  (rearmed(a.out, mark), got[-400:]))
+            check("re-arm: SIGUSR2 redraw %d: one kitty pop, before its one "
+                  "push" % i, got.count(b"\033[<u") == 1 and
+                  len(re.findall(rb"\033\[<\d*u", got)) == 1 and
+                  got.count(b"\033[>1u") == 1 and
+                  got.find(b"\033[<u") < got.find(b"\033[>1u"), got[-400:])
+        check("re-arm: over the whole attach pushes minus pops is 1 (the "
+              "stacks end at main 0, alternate 1)",
+              kitty_stacks(a.out) == (0, 1), kitty_stacks(a.out))
         mark = len(a.out)
         a.key(b"z", 0.3)
         check("re-arm: the attach goes on (a key after reaches the session)",
