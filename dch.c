@@ -9701,6 +9701,7 @@ pid_t
 xv_spawn(int fd, int ac, char **av, int *out, int *err)
 {
 	int po[2], pe[2];
+	sigset_t s, o;
 	pid_t pid;
 
 	if (pipe(po) < 0)
@@ -9713,6 +9714,15 @@ xv_spawn(int fd, int ac, char **av, int *out, int *err)
 	}
 	fflush(stdout);
 	fflush(stderr);
+	/* blocked over the fork: a SIGTERM from xv_stop before the resets
+	** would run picker_sigint here, which restores the view's terminal
+	** and xv_kills its siblings (QA 1.58.0 MED-V4); after them, one
+	** pending kills the child by its default action */
+	sigemptyset(&s);
+	sigaddset(&s, SIGINT);
+	sigaddset(&s, SIGTERM);
+	sigaddset(&s, SIGHUP);
+	sigprocmask(SIG_BLOCK, &s, &o);
 	if ((pid = fork()) == 0)
 	{
 		int rc;
@@ -9721,6 +9731,7 @@ xv_spawn(int fd, int ac, char **av, int *out, int *err)
 		signal(SIGTERM, SIG_DFL);
 		signal(SIGHUP, SIG_DFL);
 		signal(SIGWINCH, SIG_DFL);
+		sigprocmask(SIG_SETMASK, &o, NULL);
 		picker_tty_fd = -1;
 		close(fd);
 		if (dup2(po[1], STDOUT_FILENO) < 0 || dup2(pe[1], STDERR_FILENO) < 0)
@@ -9736,6 +9747,7 @@ xv_spawn(int fd, int ac, char **av, int *out, int *err)
 		fflush(stdout);
 		_exit(rc);
 	}
+	sigprocmask(SIG_SETMASK, &o, NULL);
 	close(po[1]);
 	close(pe[1]);
 	if (pid < 0)

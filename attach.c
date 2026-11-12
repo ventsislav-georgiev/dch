@@ -653,17 +653,29 @@ xray_overlay(int s)
 		p[0] = -1;
 	else
 	{
+		sigset_t ss, os;
+
+		/* blocked over the fork: die() must not run in the child before
+		** its resets, and one for the client finds xray_pid set */
+		sigemptyset(&ss);
+		sigaddset(&ss, SIGHUP);
+		sigaddset(&ss, SIGTERM);
+		sigaddset(&ss, SIGINT);
+		sigaddset(&ss, SIGQUIT);
+		sigprocmask(SIG_BLOCK, &ss, &os);
 		if ((pid = fork()) == 0)
 		{
 			signal(SIGHUP, SIG_DFL);
 			signal(SIGTERM, SIG_DFL);
 			signal(SIGINT, SIG_DFL);
 			signal(SIGQUIT, SIG_DFL);
+			sigprocmask(SIG_SETMASK, &os, NULL);
 			close(s);
 			close(p[0]);
 			_exit(attach_xray());
 		}
 		xray_pid = pid;
+		sigprocmask(SIG_SETMASK, &os, NULL);
 		close(p[1]);
 	}
 	while (pid > 0)
