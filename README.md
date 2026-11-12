@@ -1181,19 +1181,25 @@ or in the output. An orphan result, a forged or orphaned shell block, an error,
 a fence, a diff, a listing command (`rg`, `grep`, `ls`, ...), a file printed
 from outside the cwd, a heading with an empty title, and more than 3 headings
 of one shape never define. The command counts in every simple command of it
-(split at `;`, `&`, `&&`, `|`, `||`, parentheses and newlines; a here-doc's
-body is not a command), past env assignments, `{`, `!`, `if`, `then`, `elif`,
+(split at `;`, `&`, `&&`, `|`, `||`, parentheses and newlines; a `#` comment
+and each here-doc's body are not a command, and a command with a body the
+shell expands, `$(…)` under an unquoted delimiter, never defines), past env
+assignments, redirects, `{`, `!`, `if`, `then`, `elif`,
 `else`, `do`, `while`, `until`, and `sudo`, `doas`, `env`, `command`, `exec`,
 `xargs`, `nice`, `nohup`, `stdbuf`, `time` and `timeout`, by name or by path
 (`/usr/bin/env`). It counts inside `sh -c '…'` (`sh`, `bash`, `zsh`, `dash`,
-`ksh`; `-lc` too), `eval`, `watch` and `env -S`, and inside `$(…)` and
+`ksh`, `fish`; `-lc` too), `eval`, `watch` and `env -S` (`-S'…'` and
+`--split-string` too), and inside `$(…)` and
 backquotes, quoted or not. A search or a printed file found only inside
 `$(…)` or backquotes still leaves the command's `--title` to define: its text
 feeds the command, it is not the output. A command of more than 256 words
 never defines. The file printers are `cat`, `head`, `tail`, `bat`, `batcat`,
 `less`, `more`, `nl`, `awk`, `sed`, `jq`, `yq`, `tac`, `sort`, `cut`, `uniq`,
 `rev`, `column`, `fold`, `fmt`, `glow`, `zcat` and `gzcat`; with no file
-argument (`… | jq .`) they print their input and define. A printed file is
+argument (`… | jq .`) they print their input and define, but under `xargs`
+they print files named by their input and never define. A `<` source is a
+printed file of a printer, of a compound command (`done < f`, `} < f`) and
+of a redirect with no command (`$(< f)`). A printed file is
 outside the cwd when its path, made absolute against the cwd or the directory
 an earlier `cd` or `pushd` went to, leaves the cwd (`/etc/x`, `../x`, a `~/`
 path read against `HOME`), when it holds `$` or a backquote, or after a `cd`

@@ -2773,6 +2773,33 @@ t_excl(void)
 		"zcat /etc/x.gz", "gzcat ../x.gz", "batcat /etc/x",
 		"glow ../README.md", "yq '.a' /etc/x.yaml", "uniq ../x", "rev ../x",
 		"column -t /etc/x", "fold -w 80 ../x", "fmt ../x",
+		/* #183 1: a < before the command word, or with none */
+		"echo \"$(< /etc/x)\"", "echo $(< /etc/x)", "< /etc/x cat", "< /etc/x",
+		"2</dev/null cat /etc/x", "jq < /etc/x.json",
+		/* #183 2: a < on a compound command */
+		"while read l; do echo \"$l\"; done < /etc/x", "{ cat; } < /etc/x",
+		"(cat) < /etc/x", "if true; then cat; fi < /etc/x",
+		/* #183 3: a printer under xargs reads files from its input */
+		"echo /etc/x | xargs cat", "xargs cat < list.txt",
+		"printf /etc/x | xargs -I{} sh -c 'cat {}'",
+		"xargs -I{} sh -c 'cd /home/demo/proj && cat {}'",
+		/* #183 4: a here-doc delimiter line ending in CR closes */
+		"cat <<EOF\r\nx\r\nEOF\r\nrg x", "cat <<EOF\r\nx\r\nEOF\r\ncat /etc/x",
+		/* #183 5: a quote in a comment hides nothing */
+		"# don't\ncat /etc/x", "cat notes.md # it's\ncat /etc/x",
+		"cat notes.md\r# ; cat /etc/x",
+		/* #183 6: two here-docs on one line, each body in order */
+		"cat <<A <<B\nB\ndon't\nA\nb\nB\ncat /etc/x",
+		"cat <<'A' <<-B\nx\nA\n\ty\n\tB\ncat /etc/x",
+		/* #183 7: fish -c, env -S'…', env --split-string */
+		"fish -c 'cat /etc/x'", "env -S'cat /etc/x'", "env -iS'cat /etc/x'",
+		"env --split-string='cat /etc/x'", "env --split-string 'cat /etc/x'",
+		/* #183: \ newline joins a word; <<- by adjacency, tabs only for it;
+		** a body sh expands is not read */
+		"ca\\\nt /etc/x", "\"ca\\\nt\" /etc/x",
+		"cat <<- EOF\n\tdon't\n\tEOF\ncat /etc/x", "cat << -X\nb\n-X\ncat /etc/x",
+		"cat <<'-X'\nb\n-X\ncat /etc/x", "cat <<EOF\n\tEOF\ndon't\nEOF\ncat /etc/x",
+		"cat <<EOF\n$(cat /etc/x)\nEOF",
 		0
 	};
 	static const char *const keep[] = {
@@ -2792,6 +2819,14 @@ t_excl(void)
 		"timeout 5", "eval", "env -S", "cat <<< \"x\"",
 		/* ruling 1: a printer of a file inside the cwd still defines */
 		"sed 's/a/b/' notes.md", "jq . x.json", "sort notes.md",
+		/* #183: the same shapes with a file inside the cwd; a comment and a
+		** here-doc body are no command */
+		"< notes.md cat", "2>/dev/null cat notes.md",
+		"while read l; do echo \"$l\"; done < notes.md",
+		"cat <<EOF\r\nx\r\nEOF\r\ncat notes.md", "cat notes.md # ; rg x",
+		"cat notes.md # /etc/x", "cat <<A <<B\nB\nrg q\nA\nb\nB",
+		"env -S'cat notes.md'", "cat <<- EOF\n\tx\n\tEOF\ncat notes.md",
+		"cat <<'EOF'\n$(cat /etc/x)\nEOF", "cat <<EOF\n$HOME ${x}\nEOF\ncat notes.md",
 		0
 	};
 	/* change (a): a reader or search only inside $(…) or backquotes
@@ -2801,6 +2836,8 @@ t_excl(void)
 		"gh pr create --title \"T\" --body \"`cat /etc/body.md`\"",
 		"gh pr create --title \"T\" --body \"$(rg -l x)\"",
 		"gh pr create --title T --body \"$(git diff)\"",
+		"gh pr create --title T --body \"$(< /etc/b.md)\"",
+		"gh pr create --title T --body \"$(cat <<EOF\n$(git log)\nEOF\n)\"",
 		0
 	};
 	static const char *const d3no[] = {
