@@ -646,8 +646,10 @@ def xray_checks(dch, check, senv, cenv, port, fakes, tmp, slog):
         check("xray value rule %r: %s, exit 2, nothing sent" % (a, line),
               r.returncode == 2 and r.stderr == line + "\n", r)
     r = dch(xenv, "--xray", "srv:xr1")
-    check("xray view form on srv:xr1: not sent (the view comes later)",
-          r.returncode == 2 and "--json is required" in r.stderr, r)
+    check("xray view form on srv:xr1 with no terminal: exit 2, nothing sent "
+          "(the view itself: xray_remote_view_test.py)",
+          r.returncode == 2 and r.stderr == "dch: the --xray view needs a "
+          "terminal (--json prints the object)\n", r)
     check("xray: no value-rule case reached the host", ctls() == n0)
 
     # --follow: the snapshot as the host's own; Ctrl-C and SIGTERM cancel

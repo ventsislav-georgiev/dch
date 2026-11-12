@@ -29,7 +29,8 @@
 #define XV_ALPHA     "asdfghjklzxcvbnmwertyuiop"	/* hint labels: no q */
 
 enum { XV_LIST, XV_CARD, XV_READ };
-enum { XV_FK, XV_CK, XV_RK, XV_NKIDS };	/* follow, card, reader */
+enum { XV_FK, XV_CK, XV_RK, XV_SK, XV_NKIDS };	/* follow, card, reader,
+						** a remote screen (#188) */
 
 static char xv_none[1];	/* "": a field absent, null, or out of memory */
 static volatile pid_t xv_pids[XV_NKIDS];	/* for xv_kill */
@@ -96,7 +97,9 @@ struct xv_hint
 struct xv
 {
 	int fd, color, mode, back, tab, win, filtering;
+	int hl;			/* a remote one's "host:" length, else 0 */
 	char n[700];		/* the session as given */
+	char fail[400];		/* the host's refusal, in place of the tabs */
 	char status[400], filt[256];
 	/* the index: --follow's snapshot and its deltas */
 	int have, ended, live, mentions_only;
@@ -348,6 +351,16 @@ xv_lines(struct xv *v, struct xv_kid *k, int eof)
 	size_t at = 0;
 	char *nl;
 
+	if (!k->line)
+	{
+		/* a remote screen's bytes, whole: the tail xv_plain keeps */
+		if (k->len > 128 * 1024)
+		{
+			memmove(k->buf, k->buf + k->len - 128 * 1024, 128 * 1024);
+			k->len = 128 * 1024;
+		}
+		return;
+	}
 	while (at < k->len)
 	{
 		struct json_parser p;
@@ -962,10 +975,9 @@ xv_span(void *ctx, const struct xr_span *sp)
 	return 0;
 }
 
-/* The session's screen from its mirror, its spans found by the engine's
-** grammar, one label per key. */
+/* v->scr's spans found by the engine's grammar, one label per key. */
 static void
-xv_screen_load(struct xv *v)
+xv_screen_scan(struct xv *v)
 {
 	struct xv_scan c;
 	char *s, *nl;
@@ -973,27 +985,6 @@ xv_screen_load(struct xv *v)
 	int code = v->corpus && !strcmp(v->corpus, "shell");
 	const char *cwd = v->label && v->label[0] == '/' ? v->label : NULL;
 
-	v->scr_at = now_ms();
-	xv_hints_free(v);
-	free(v->scr);
-	v->scr = NULL;
-	if (!v->have || !v->live)
-	{
-		v->scr_rc = -1;
-		return;
-	}
-	if (!(v->scr = malloc(128 * 1024 + 1)))
-	{
-		v->scr_rc = -1;
-		return;
-	}
-	v->scr_rc = xv_screen(v->session, v->scr, 128 * 1024 + 1);
-	if (v->scr_rc < 0)
-	{
-		free(v->scr);
-		v->scr = NULL;
-		return;
-	}
 	c.v = v;
 	for (s = v->scr; *s; s = nl + 1, row++)
 	{
@@ -1034,6 +1025,76 @@ xv_screen_load(struct xv *v)
 			if (!strcmp(v->h[i].key, v->h[k].key))
 				memcpy(v->h[i].label, v->h[k].label, 3);
 	}
+}
+
+/* The session's screen from its mirror, then its hints. A remote one's
+** (#188) is ctl's `--read host:name --ansi --cursor` in a child, on its own
+** connection; xv_screen_done takes its answer. */
+static void
+xv_screen_load(struct xv *v)
+{
+	v->scr_at = now_ms();
+	if (v->hl && v->have && v->live)
+	{
+		char hn[sizeof v->n + 300], *av[5];
+
+		if (v->kid[XV_SK].pid > 0)
+			return;
+		snprintf(hn, sizeof hn, "%.*s%s", v->hl, v->n, v->session);
+		av[0] = "--read";
+		av[1] = hn;
+		av[2] = "--ansi";
+		av[3] = "--cursor";
+		av[4] = NULL;
+		(void)xv_start(v, XV_SK, av, 4, NULL);
+		return;
+	}
+	xv_hints_free(v);
+	free(v->scr);
+	v->scr = NULL;
+	if (!v->have || !v->live)
+	{
+		v->scr_rc = -1;
+		return;
+	}
+	if (!(v->scr = malloc(128 * 1024 + 1)))
+	{
+		v->scr_rc = -1;
+		return;
+	}
+	v->scr_rc = xv_screen(v->session, v->scr, 128 * 1024 + 1);
+	if (v->scr_rc < 0)
+	{
+		free(v->scr);
+		v->scr = NULL;
+		return;
+	}
+	xv_screen_scan(v);
+}
+
+/* A remote screen's child has ended: its bytes as plain text, or why not
+** (a dch-lite host's "no terminal mirror", else its line on the status). */
+static void
+xv_screen_done(struct xv *v)
+{
+	static const char lite[] = "dch: this session has no terminal mirror";
+	struct xv_kid *k = &v->kid[XV_SK];
+	char *s = k->rc ? NULL : xv_plain(k->buf ? k->buf : "", k->len);
+
+	xv_hints_free(v);
+	free(v->scr);
+	v->scr = s;
+	if (s)
+	{
+		v->scr_rc = (int)strlen(s);
+		xv_screen_scan(v);
+		return;
+	}
+	v->scr_rc = k->rc == 3 && !strncmp(k->err, lite, sizeof lite - 1) ? -2
+	            : -1;
+	if (v->scr_rc == -1 && (!k->rc || k->err[0]))
+		snprintf(v->status, sizeof v->status, "%s", k->rc ? k->err
+		         : "X-ray: the screen is too big");
 }
 
 /* ---- drawing --------------------------------------------------------- */
@@ -1448,6 +1509,8 @@ xv_draw(struct xv *v, int force)
 		XV_K(3, pk_utf ? "\xe2\x86\x91\xe2\x86\x93" : "up/down", "scroll");
 		XV_K(3, "esc", "back");
 	}
+	else if (v->fail[0])
+		XV_K(3, "q", "quit");
 	else
 	{
 		if (v->tab < 2)
@@ -1476,6 +1539,11 @@ xv_draw(struct xv *v, int force)
 	pk_set("1");
 	pk_txt("X-ray  ");
 	pk_set("");
+	if (v->have && v->hl)
+	{
+		snprintf(b, sizeof b, "%.*s", v->hl, v->n);	/* "host:" */
+		pk_txt(b);
+	}
 	pk_txt(v->have ? v->session : v->n);
 	if (v->have && !v->live)
 	{
@@ -1512,6 +1580,12 @@ xv_draw(struct xv *v, int force)
 		if (v->rtrunc)
 			pk_txt("  (truncated)");
 	}
+	else if (v->fail[0])
+	{
+		/* a host that refused us, lacks --xray or is gone (#188) */
+		pk_set(pk_p(PK_RED));
+		pk_txt(v->fail);
+	}
 	else
 		for (k = 0; k < 3; k++)
 			pk_tab(tabn[k], k == 0 ? v->nch : k == 1 ? v->nrf : v->nlab,
@@ -1528,6 +1602,12 @@ xv_draw(struct xv *v, int force)
 		xv_draw_card(v, v->win);
 	else if (v->mode == XV_READ)
 		xv_draw_read(v, v->win);
+	else if (v->fail[0])
+		for (k = 0; k < v->win; k++)
+		{
+			pk_line();
+			pk_eol();
+		}
 	else if (v->tab < 2)
 	{
 		int *sel = &v->sel[v->tab], *top = &v->top[v->tab];
@@ -1571,10 +1651,12 @@ xv_draw(struct xv *v, int force)
 			}
 			else if (k == 0 && !s)
 			{
+				int rd = !v->have || v->kid[XV_SK].pid > 0;
+
 				pk_set("2");
-				if (!v->have)
+				if (rd)
 					pk_txt("    Reading");
-				pk_txt(!v->have ? xv_ell() : !v->live
+				pk_txt(rd ? xv_ell() : !v->live
 				       ? "    No screen: the session has ended"
 				       : v->scr_rc == -2
 				       ? "    No screen: dch-lite keeps no mirror"
@@ -1596,7 +1678,8 @@ xv_draw(struct xv *v, int force)
 			pk_txt(pk_utf ? "\xe2\x96\x88" : "_");
 		pk_txt("  ");
 	}
-	busy = v->kid[XV_CK].pid > 0 || v->kid[XV_RK].pid > 0 || !v->have;
+	busy = v->kid[XV_CK].pid > 0 || v->kid[XV_RK].pid > 0 ||
+	       (!v->have && !v->fail[0]);
 	if (busy)
 	{
 		int f = (int)(now_ms() / 100 % (pk_utf ? 10 : 4));
@@ -1731,6 +1814,8 @@ xv_key(struct xv *v, int c)
 
 	if (c == 3 || c == 4)
 		return 1;
+	if (v->fail[0])
+		return c == 'q' || c == PK_ESC;
 	if (v->mode == XV_LIST && xv_filt(v, c))
 		return 0;
 	v->status[0] = '\0';
@@ -1891,6 +1976,7 @@ xv_run(int fd, const char *n, char *err, size_t errsz)
 	v->tab = xv_tab;
 	v->color = pk_colors(0);
 	snprintf(v->n, sizeof v->n, "%s", n);
+	v->hl = xv_remote(n) ? (int)strcspn(n, ":") + 1 : 0;
 	for (k = 0; k < XV_NKIDS; k++)
 	{
 		v->kid[k].fd = v->kid[k].efd = -1;
@@ -1919,7 +2005,7 @@ xv_run(int fd, const char *n, char *err, size_t errsz)
 		xv_draw(v, force);
 		FD_ZERO(&rs);
 		FD_SET(fd, &rs);
-		busy = !v->have;
+		busy = !v->have && !v->fail[0];
 		for (k = 0; k < XV_NKIDS; k++)
 		{
 			if (v->kid[k].fd >= 0)
@@ -1952,20 +2038,31 @@ xv_run(int fd, const char *n, char *err, size_t errsz)
 				snprintf(err, errsz, "%s", f->err[0] ? f->err
 				         : "dch: X-ray failed on this session");
 				rc = f->rc ? f->rc : 3;
-				break;
+				/* ctl's own exits, a remote view's only: the host's
+				** gate refused us, it lacks --xray, it is gone. Said
+				** in place of the tabs until the user leaves (#188) */
+				if (rc != DCH_EXIT_REFUSED && rc != DCH_EXIT_UNSUPPORTED &&
+				    rc != DCH_EXIT_UNREACHABLE)
+					break;
+				snprintf(v->fail, sizeof v->fail, "%s", err);
 			}
-			v->ended = 1;
-			if (f->rc)
-				snprintf(v->status, sizeof v->status, "live updates "
-				         "stopped: %s", f->err);
-			else if (v->live)
-				snprintf(v->status, sizeof v->status, "the session "
-				         "ended; this is its last state");
+			else
+			{
+				v->ended = 1;
+				if (f->rc)
+					snprintf(v->status, sizeof v->status, "live "
+					         "updates stopped: %s", f->err);
+				else if (v->live)
+					snprintf(v->status, sizeof v->status, "the "
+					         "session ended; this is its last state");
+			}
 		}
 		if (xv_pump(v, XV_CK, &rs) && v->kid[XV_CK].rc)
 			snprintf(v->status, sizeof v->status, "%s",
 			         v->kid[XV_CK].err[0] ? v->kid[XV_CK].err
 			         : "X-ray: the scan failed");
+		if (xv_pump(v, XV_SK, &rs))
+			xv_screen_done(v);
 		if (xv_pump(v, XV_RK, &rs) && !v->rloaded && v->mode == XV_READ)
 		{
 			snprintf(v->status, sizeof v->status, "%s",

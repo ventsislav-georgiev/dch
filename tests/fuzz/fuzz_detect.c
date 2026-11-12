@@ -2,7 +2,8 @@
 ** controls. The input is a fetched screen as the master returns it: plain
 ** text for --status/--ls-json (tail_fold, det_blocker, composer_find), with
 ** SGR for the Claude composer gate (faint_text, gate_screen), and the
-** auto-allow parse (dch_allow_prompt). Built with -Dmain=dch_main so dch.c's
+** auto-allow parse (dch_allow_prompt), and a remote screen's text for the
+** X-ray view (xv_plain, #188). Built with -Dmain=dch_main so dch.c's
 ** statics are reachable. */
 #include "../../dch.c"
 #include <stdint.h>
@@ -60,6 +61,14 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 			free(ident);
 			free(title);
 		}
+		free(z);
+	}
+	/* the X-ray view's remote On screen (#188): a host's --read --ansi
+	** bytes to plain text, on dch-lite too; within its cap, NUL-ended */
+	if ((z = xv_plain(raw, n)))
+	{
+		if (strlen(z) > 8 * DET_CAP)
+			abort();
 		free(z);
 	}
 	return 0;

@@ -173,7 +173,7 @@ hint.
 | `R` | restart the agent (`--restart <n> --include-agents -f`), asks first | |
 | `S` | stop (`--stop`), asks first | |
 | `x` | kill (`-k`), asks first | |
-| `X` | open the session's [X-ray view](#x-ray-view-dch---xray-n); `q` comes back (a remote row: not yet) | the same, for the row's record |
+| `X` | open the session's [X-ray view](#x-ray-view-dch---xray-n); `q` comes back (a remote row's runs on its host) | the same, for the row's record |
 | `a` | allow a plain Yes/No permission prompt (presses `1`, Yes), asks first; a question form or any other prompt is refused: attach to answer it | |
 | `b` / `B` | restart stale agents / restart all agents (force), asks first | |
 | `s` | sort by activity (blocked, working, done, idle, newest first) or by name (`a2` before `a10`); saved as `picker_sort`, so the next picker starts in it | |
@@ -421,7 +421,7 @@ someone is watching is invisible to them.
 | Verb | Does | Exit codes |
 | --- | --- | --- |
 | `--spawn <n> [--size CxR] [--env K=V]... [cmd...]` | Start headless session (default: `$SHELL`, 80x24 or `$COLUMNS`/`$LINES`). `--env` (max 32, first `=` splits) adds variables to the child; reserved keys (`DCH_SESSION`, `TERM` fixup) always win. Like `--revive` (and a plain `dch <new>`), it drops the calling Claude Code session's identity (`CLAUDECODE`, `CLAUDE_CODE_*` session vars), plus `GIT_EDITOR` and the other harness vars when `CLAUDECODE` is set, and sets `LC_TERMINAL=ghostty` unless the caller has it (dch keeps OSC 8 links, but under `TERM=xterm-256color` with no `TERM_PROGRAM` Claude Code would strip its statusline's, and `LC_TERMINAL` is the one signal its check reads that supports-hyperlinks and other Node CLIs ignore; ssh sends it on, by macOS's default `SendEnv LC_*`). Like any session variable it reaches every program in the session, not only Claude Code; a tool that keys on `ghostty` may assume Ghostty-only features (kitty graphics, for one) that the terminal you attach from may lack. dch sets no `FORCE_HYPERLINK`: those CLIs honour it before they check for a terminal, so it put OSC 8 into pipes and files (`stylelint t.css > out`, an agent's Bash tool); a caller's own value still reaches the session. An explicit `--env` (`--env LC_TERMINAL=` included) still wins. Prints the name. A program that cannot be executed is an error (`dch: <n>: <cmd>: <reason>`); one that runs and exits at once is not. | 0 ok, 1 exists/failed/not executable/bad --env |
-| `--xray <n> --json` | One JSON object: the session's corpus, chapters and refs (see [X-ray queries](#x-ray-queries---xray)). Without `--json` or any other flag: the full-screen [X-ray view](#x-ray-view-dch---xray-n) (local only; a non-terminal stdout exits 2). `--clear` empties a shell's ring instead; `--ref` streams one ref's lines; `--follow` streams the object and then its changes; `--chapter` prints one chapter's entries. `<n>` as `host:name` runs it on that host (dch serve 1.55.0+); `host:name --requests --json` holds one connection there for many requests read off standard input. Must be the first argument. | 0 ok, 1 no such session/ambiguous/no corpus, 2 usage, 3 read failure; remote: 4 gate, 6 host lacks `xray`, 7 unreachable |
+| `--xray <n> --json` | One JSON object: the session's corpus, chapters and refs (see [X-ray queries](#x-ray-queries---xray)). Without `--json` or any other flag: the full-screen [X-ray view](#x-ray-view-dch---xray-n) (`host:name` too; a non-terminal stdout exits 2). `--clear` empties a shell's ring instead; `--ref` streams one ref's lines; `--follow` streams the object and then its changes; `--chapter` prints one chapter's entries. `<n>` as `host:name` runs it on that host (dch serve 1.55.0+); `host:name --requests --json` holds one connection there for many requests read off standard input. Must be the first argument. | 0 ok, 1 no such session/ambiguous/no corpus, 2 usage, 3 read failure; remote: 4 gate, 6 host lacks `xray`, 7 unreachable |
 | `--send <n> <text...>` | Type text (joined with spaces), no enter. | 0 ok |
 | `--run <n> <text...>` | `--send` + enter. Into a session whose Claude Code runs — as its command or typed into its shell — the text goes through `--say`'s composer gate instead: typed only over an empty composer, Enter pressed once it shows and again while it stays (Claude Code folds an Enter sent with the text into the paste). A `/command` is typed raw, a message pasted. A shell or any other program, a master without a mirror (`DCH_NO_VT`), dch-lite and your own session (`$DCH_SESSION`) keep the plain burst. A gate failure prints `dch: <n>: <reason> — <why>` on stderr: `prompt` and `draft` (nothing typed), `not_typed` (the text never showed in the composer, no Enter), `not_submitted` (it stayed there through every Enter); `no_screen` when the composer is not on screen; `interrupted`, `withdrawn` or `draft_left` on a SIGINT, SIGTERM or SIGHUP, as for `--say`. | 0 ok, 1 gate failure |
 | `--keys <n> <key...>` | Encode+send keys mode-aware: `ctrl+c`, `alt+x`, `shift+tab`, `up`, `f5`, `enter`, `esc`, single chars. | 0 ok, 1 unknown key |
@@ -922,10 +922,20 @@ now: there the keys reach the session as before. There is no `xray_key`
 setting: the chord takes no key from the program. In the picker, lowercase
 `x` is still kill, which asks first; `X` opens the view.
 
-A window smaller than 24x8 shows only "X-ray: the window is too small". A
-remote `host:name` has no view yet: it exits 2 and says `--json` is
-required. Exit codes are those of `--json` below: 0 when you quit, 1 for no
-such session, 2 for a flag or a stdout that is not a terminal.
+A window smaller than 24x8 shows only "X-ray: the window is too small".
+
+`dch --xray host:name` opens the view of a session on another host (dch
+serve 1.55.0+), and so does `X` on a remote row in the picker. Every query
+runs on the host, each over its own ctl connection. On screen reads the
+host's screen with `--read <name> --ansi --cursor`. The host's text is drawn
+as a local session's is, every control and bidi character as `?`. A host
+that refuses us, lacks `--xray` or cannot be reached shows its line in place
+of the tabs (`dch: <host>: does not support --xray (needs dch serve
+1.55.0+)`, ...); `q` leaves with that exit code.
+
+Exit codes are those of `--json` below: 0 when you quit, 1 for no such
+session, 2 for a flag or a stdout that is not a terminal; for a remote host
+also 4 (its gate refused us), 6 (it lacks `--xray`) and 7 (unreachable).
 
 ### X-ray queries (`--xray`)
 
@@ -949,8 +959,7 @@ A `<n>` with a `:` is resolved locally first: a live session or a History
 record of that name. Only when nothing local matches and the part before the
 `:` is a known host (`--hosts`, `remote_hosts`, or a cached remote row) is it
 `host:name`. With `--json`, dch first checks the flags and values by its
-own rules (exit 2 and nothing sent on a bad one; the view form, without
-`--json`, stays local and exits 2), then runs `--xray <name>` and the other
+own rules (exit 2 and nothing sent on a bad one), then runs `--xray <name>` and the other
 flags as typed on that host's `dch serve` over [ctl](#control-verbs-ctl). It
 writes the host's output and standard error line by line as they come (the
 `--follow` and `--ref` streams included) and exits with the host's exit

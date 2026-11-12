@@ -528,7 +528,7 @@ kills,
 opens the row's X\-ray view
 .RB ( "dch \-\-xray" ;
 .B q
-returns to the picker; on History too; not yet for a remote row),
+returns to the picker; on History too; a remote row's runs on its host),
 .B a
 allows a plain Yes/No permission prompt (presses 1, Yes; any other prompt is refused),
 .B b
@@ -801,13 +801,28 @@ and over a remote attach; the keys then reach the session as before.
 There is no
 .B xray_key
 setting.
-Local only: a remote
-.IB host : name
-exits 2 and says
-.B \-\-json
-is required.
+.BI "dch \-\-xray " host : name
+opens the view of a session on another host
+.RB ( "dch serve"
+1.55.0+), as does
+.B X
+on a remote row in the picker.
+Every query runs on the host, each over its own ctl connection; On screen
+reads the host's screen with
+.BR "\-\-read " \fIname\fB " \-\-ansi \-\-cursor" .
+The host's text is drawn as a local session's, every control and bidi
+character as
+.BR ? .
+A host that refuses us, lacks
+.B \-\-xray
+or cannot be reached shows its line in place of the tabs;
+.B q
+leaves with that exit code.
 Exit 0 when quit, 1 no such session, 2 with any other flag or when stdout
-is not a terminal.
+is not a terminal; for a remote host also 4 (its gate refused us), 6 (it
+lacks
+.BR \-\-xray )
+and 7 (unreachable).
 .TP
 .BI \-\-xray " name " "" \fR[\fB\-\-clear\fR|\fB\-\-follow\fR]\fP " \-\-json"
 X\-ray: print one JSON object
@@ -1218,9 +1233,7 @@ remote
 with
 .B \-\-json
 dch checks the flags and values by its own rules above (exit 2, nothing
-sent; the view form, without
-.BR \-\-json ,
-stays local and exits 2), then runs
+sent), then runs
 .B "\-\-xray"
 .I name
 and the other flags as typed on that host's
