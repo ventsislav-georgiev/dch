@@ -1028,7 +1028,8 @@ The corpus:
 
 (Printed on one line.)
 - **`other_projects`.** How many other sessions of this store have a
-  transcript in another project dir: what `--ref --scope all` would add.
+  transcript or a live Codex rollout in another project dir: what `--ref
+  --scope all` would add.
   Counted from names only; nothing is opened.
 - **`session_id`.** The agent UUID for Claude Code, the thread id for Codex
   (`""` while it has none), the ring's id (`m` + 16 hex) for a live shell,
@@ -1138,17 +1139,18 @@ U+202E and U+2066 to U+2069 (`dch: bad ref`), and must parse as exactly one
 ref (`dch: not a ref`), relative paths against the session's cwd.
 - **Scope.** `--scope session` reads `<n>`'s own transcript, or its ring and
   screen. `--scope project`, the default (also for a remote caller), reads
-  that first, then the Claude Code transcript of every other session of this
-  store in `<n>`'s project dir, newest `lastSeen` first. `--scope all` then
+  that first, then the Claude Code transcript or Codex rollout of every other
+  session of this store in `<n>`'s project dir, newest `lastSeen` first. `--scope all` then
   adds the other project dirs, the dir with the newest session first. The
   other sessions are the live ones (each master is asked for its command,
   never for its ring or screen) and the History records, one per agent id.
   Each transcript is found and opened as `<n>`'s is (a uuid, a valid
   `config_dir`, one regular file in the store's project dirs, no symlink);
-  one that cannot be found is skipped and never opened. A shell `<n>`'s
-  project dir is its cwd's. Another session's lines carry `chapter: null`.
-  A live Codex `<n>` is read alone, whatever the scope: its rollout only,
-  with `first.scope` `"session"`.
+  one that cannot be found is skipped and never opened. A live Codex's
+  rollout is found as `<n>`'s is (its thread id, then its rollout by name);
+  its project dir is the Codex's cwd's, its `lastSeen` the rollout's last
+  write, and History records hold none. A shell `<n>`'s project dir is its
+  cwd's. Another session's lines carry `chapter: null`.
 - **Light.** The default stops at its first result, or after `--budget-ms`
   (50 to 300, default 300, across all files) with `why: "budget"`. With
   `--scope project` or `all`, `<n>`'s own file is read to its end and only
@@ -1333,6 +1335,14 @@ Each entry is `{"role","tool","text","error"}`:
   name (`null` for a result with no call); `error` is the result's error flag,
   never set for a Grep or Glob that found nothing. Thinking, images, notices
   and subagent turns are left out.
+- A live Codex: `user` is the turn's prompt (a compaction's summary too),
+  `assistant` its text. `tool` is a call with its name: a `function_call`'s
+  arguments as `key: value` lines as above (the arguments string itself
+  when it is not a JSON object), a `custom_tool_call`'s input, a
+  `local_shell_call`'s action. `output` is a call's output where it lands,
+  named by its `call_id`'s call in the chapter (else `null`); `error` is
+  never set, as a rollout has no error flag. Reasoning and events are left
+  out.
 - A shell: one `tool` entry with the typed command and one `output` entry
   with the block's output rows, soft-wrapped rows joined; `error` is a
   non-zero exit. Only rows that scrolled into the ring count: rows still on
@@ -1341,9 +1351,9 @@ Each entry is `{"role","tool","text","error"}`:
 `text` is cut at 6000 Unicode scalars (3000 for an `output`) and escaped like
 `--ls-json`. The whole object is capped at 1 MiB: entries past the cap are
 left out and `truncated` is `true`. An ended or History Claude Code session is
-read from its transcript. An ended shell, a ring that is off or paused, a
-session with no transcript, and a live Codex (its rollout has no chapter
-reader yet) exit 1 with `dch: no x-ray corpus`. Nothing is
+read from its transcript, a live Codex from its rollout. An ended shell, a
+ring that is off or paused, a session with no transcript, and a Codex with
+no thread id or no rollout exit 1 with `dch: no x-ray corpus`. Nothing is
 written to disk. A reader that closes the pipe gets exit 0 and no message;
 SIGTERM ends it at once.
 

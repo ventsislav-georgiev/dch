@@ -1968,6 +1968,102 @@ t_chapter(void)
 	}
 }
 
+/* --chapter over a Codex rollout (3.5, #169): the turn's prompt, each call
+** as its tool entry (a function_call its arguments' card, a non-object
+** arguments string as is, a custom tool its input, a local shell call its
+** action's card), each output named by its call_id's call (an unknown id:
+** tool null), the assistant text; error never set; the compact chapter
+** its summary; reasoning nothing */
+static void
+t_codex_chapter(void)
+{
+	static const char *const L[] = {
+		CXI("{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":"
+		    "\"input_text\",\"text\":\"go\"}]}"),
+		CXI("{\"type\":\"function_call\",\"name\":\"exec_command\","
+		    "\"arguments\":\"{\\\"cmd\\\":\\\"ls\\\"}\",\"call_id\":\"c1\"}"),
+		CXI("{\"type\":\"local_shell_call\",\"call_id\":\"c2\",\"action\":"
+		    "{\"type\":\"exec\",\"command\":[\"ls\"]}}"),
+		CXI("{\"type\":\"custom_tool_call\",\"name\":\"exec\",\"input\":"
+		    "\"make\",\"call_id\":\"c3\"}"),
+		CXI("{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\","
+		    "\"text\":\"hm\"}]}"),
+		CXI("{\"type\":\"function_call_output\",\"call_id\":\"c1\","
+		    "\"output\":\"out1\"}"),
+		CXI("{\"type\":\"custom_tool_call_output\",\"call_id\":\"c3\","
+		    "\"output\":[{\"type\":\"input_text\",\"text\":\"out3\"}]}"),
+		CXI("{\"type\":\"function_call_output\",\"call_id\":\"zz\","
+		    "\"output\":\"orphan\"}"),
+		CXI("{\"type\":\"function_call\",\"name\":\"f\",\"arguments\":"
+		    "\"not json\"}"),
+		CXI("{\"type\":\"message\",\"role\":\"assistant\",\"content\":["
+		    "{\"type\":\"output_text\",\"text\":\"ok\"}]}"),
+		"{\"type\":\"compacted\",\"payload\":{\"message\":\"sum\"}}",
+		CXI("{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":"
+		    "\"input_text\",\"text\":\"next\"}]}"),
+		CXI("{\"type\":\"message\",\"role\":\"assistant\",\"content\":["
+		    "{\"type\":\"output_text\",\"text\":\"two\"}]}"),
+	};
+	struct xr_chapters c;
+	struct xr_entries e;
+	char a[3][48];
+	int k, i;
+
+	for (i = 0; i < 4; i++)
+	{
+		xr_entries_begin(&e, i ? a[i - 1] : "-", "s", 1 << 20);
+		begin();
+		xr_claude_codex(D);
+		xr_claude_entries(D, &e, 0xabc);
+		for (k = 0; k < (int)(sizeof L / sizeof *L); k++)
+			line(L[k]);
+		end(&c);
+		if (!i)
+		{
+			CHECK("codex chapter: three chapters", c.n == 3);
+			for (k = 0; k < 3; k++)
+				snprintf(a[k], sizeof a[k], "%s", (size_t)k < c.n
+				         ? xr_chapter_at(&c, (size_t)k)->anchor : "");
+		}
+		else if (i == 1)
+			CHECK("codex chapter: the turn, its calls, their outputs by "
+			      "call_id, the text",
+			      e.hit && e.ord == 0 && !strcmp(ch_buf(&e),
+			      "{\"role\":\"user\",\"tool\":null,\"text\":\"go\","
+			      "\"error\":false},"
+			      "{\"role\":\"tool\",\"tool\":\"exec_command\",\"text\":"
+			      "\"cmd: ls\",\"error\":false},"
+			      "{\"role\":\"tool\",\"tool\":null,\"text\":\"command: "
+			      "[\\\"ls\\\"]\\ntype: exec\",\"error\":false},"
+			      "{\"role\":\"tool\",\"tool\":\"exec\",\"text\":\"make\","
+			      "\"error\":false},"
+			      "{\"role\":\"output\",\"tool\":\"exec_command\",\"text\":"
+			      "\"out1\",\"error\":false},"
+			      "{\"role\":\"output\",\"tool\":\"exec\",\"text\":\"out3\","
+			      "\"error\":false},"
+			      "{\"role\":\"output\",\"tool\":null,\"text\":\"orphan\","
+			      "\"error\":false},"
+			      "{\"role\":\"tool\",\"tool\":\"f\",\"text\":\"not json\","
+			      "\"error\":false},"
+			      "{\"role\":\"assistant\",\"tool\":null,\"text\":\"ok\","
+			      "\"error\":false}"));
+		else if (i == 2)
+			CHECK("codex chapter: the compaction, its summary",
+			      e.hit && e.ord == 1 && !strcmp(ch_buf(&e),
+			      "{\"role\":\"user\",\"tool\":null,\"text\":\"sum\","
+			      "\"error\":false}"));
+		else
+			CHECK("codex chapter: the next turn, its own entries only",
+			      e.hit && e.ord == 2 && !strcmp(ch_buf(&e),
+			      "{\"role\":\"user\",\"tool\":null,\"text\":\"next\","
+			      "\"error\":false},"
+			      "{\"role\":\"assistant\",\"tool\":null,\"text\":\"two\","
+			      "\"error\":false}"));
+		xr_chapters_free(&c);
+		xr_entries_free(&e);
+	}
+}
+
 /* ---- resolvers (#159, XR6) ---------------------------------------------- */
 
 static char self[PATH_MAX];	/* this binary, for the fake git's fd probe */
@@ -2827,6 +2923,7 @@ main(int argc, char **argv)
 	t_chapter();
 	t_resolve();
 	t_codex();
+	t_codex_chapter();
 	t_codex_lookup();
 	t_quote();
 	printf("%s: %d failed\n", fails ? "FAIL" : "ok", fails);

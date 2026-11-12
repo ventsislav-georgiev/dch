@@ -4737,31 +4737,13 @@ card_text(const struct json_parser *p, int in, size_t *n)
 	return o;
 }
 
-/* A call's tool entry: Bash its command, an edit or a read its path,
-** anything else its card's fields; the call is kept so that its result
-** names its tool. */
+/* A call of the wanted chapter, kept so that its result names its tool. */
 static void
-ent_call(struct xr_claude *d, const struct json_parser *p, int i,
-         const char *id, const char *name)
+ent_keep(struct xr_entries *e, const char *id, const char *name)
 {
-	struct xr_entries *e = d->want;
 	struct xr_ent_call *c;
-	int in = k_obj(p, i, A_INPUT), v = -1;
-	char kb[XR_ID_MAX + 1], *s;
-	size_t l = 0;
+	char kb[XR_ID_MAX + 1];
 
-	if (name && !strcmp(name, "Bash"))
-		v = j_field(p, in, "command");
-	else if (name && (!strcmp(name, "Edit") || !strcmp(name, "MultiEdit") ||
-	                  !strcmp(name, "Write") || !strcmp(name, "Read")))
-		v = j_field(p, in, "file_path");
-	if (!(s = j_str(p, v, &l)) || blank(s, l))
-	{
-		free(s);
-		s = card_text(p, in, &l);
-	}
-	ent_put(e, "tool", name, s, l, XR_TEXT_CAP, 0);
-	free(s);
 	if (!id)
 		return;
 	if (!e->calls && !(e->calls = calloc(XR_PENDING, sizeof *e->calls)))
@@ -4778,6 +4760,46 @@ ent_call(struct xr_claude *d, const struct json_parser *p, int i,
 	c = &e->calls[e->ncalls++];
 	snprintf(c->id, sizeof c->id, "%s", id_key(id, kb));
 	c->name = name ? strdup(name) : NULL;
+}
+
+/* The tool name of the kept call with this id, else NULL. */
+static const char *
+ent_tool(const struct xr_entries *e, const char *id)
+{
+	char kb[XR_ID_MAX + 1];
+	int k;
+
+	for (k = e->ncalls - 1; id && k >= 0; k--)
+		if (!strcmp(e->calls[k].id, id_key(id, kb)))
+			return e->calls[k].name;
+	return NULL;
+}
+
+/* A call's tool entry: Bash its command, an edit or a read its path,
+** anything else its card's fields; the call is kept so that its result
+** names its tool. */
+static void
+ent_call(struct xr_claude *d, const struct json_parser *p, int i,
+         const char *id, const char *name)
+{
+	struct xr_entries *e = d->want;
+	int in = k_obj(p, i, A_INPUT), v = -1;
+	char *s;
+	size_t l = 0;
+
+	if (name && !strcmp(name, "Bash"))
+		v = j_field(p, in, "command");
+	else if (name && (!strcmp(name, "Edit") || !strcmp(name, "MultiEdit") ||
+	                  !strcmp(name, "Write") || !strcmp(name, "Read")))
+		v = j_field(p, in, "file_path");
+	if (!(s = j_str(p, v, &l)) || blank(s, l))
+	{
+		free(s);
+		s = card_text(p, in, &l);
+	}
+	ent_put(e, "tool", name, s, l, XR_TEXT_CAP, 0);
+	free(s);
+	ent_keep(e, id, name);
 }
 
 /* A result's chapter, before tool_result() closes its pairing: its call's
@@ -4801,15 +4823,13 @@ ent_result(struct xr_claude *d, const struct json_parser *p, int i,
 {
 	struct xr_entries *e = d->want;
 	const char *name = NULL;
-	char kb[XR_ID_MAX + 1], *t;
+	char *t;
 	size_t n;
-	int k;
 
 	if (ord == -2 ? !ent_here(d, agent) : !e->hit || ord != (long long)e->ord)
 		return;
-	for (k = e->ncalls - 1; ord != -2 && k >= 0 && !name; k--)
-		if (!strcmp(e->calls[k].id, id_key(id, kb)))
-			name = e->calls[k].name;
+	if (ord != -2)
+		name = ent_tool(e, id);
 	t = output_text(p, i, k_obj(p, 0, (const char *const[]){
 	                    "toolUseResult", 0 }), &n);
 	ent_put(e, "output", name, t, n, XR_OUTPUT_CAP, err);
@@ -5127,6 +5147,7 @@ static const char *const A_ROLE[] = { "role", 0 };
 static const char *const A_ARGS[] = { "arguments", 0 };
 static const char *const A_OUTPUT[] = { "output", 0 };
 static const char *const A_ACTION[] = { "action", 0 };
+static const char *const A_CALLID[] = { "call_id", 0 };
 
 void
 xr_claude_codex(struct xr_claude *d)
@@ -5208,6 +5229,65 @@ cx_args(struct xr_claude *d, const struct json_parser *p, int pl)
 	free(s);
 }
 
+/* --chapter's entry for one Codex step of the wanted chapter (3.5): a call's
+** tool entry (function_call its arguments' card, else their text; a custom
+** tool its input; a local shell call its action's card), or an output entry
+** named by its call_id's call. error is false: a rollout has no error flag
+** of its own (7.4: never a guess). */
+static void
+cx_ent(struct xr_claude *d, const struct json_parser *p, int pl,
+       const char *t)
+{
+	struct xr_entries *e = d->want;
+	struct json_parser q;
+	char *id = k_str(p, pl, A_CALLID, NULL), *name = NULL, *s = NULL, *a;
+	size_t n = 0, al;
+	int c;
+
+	if (!strcmp(t, "function_call_output") ||
+	    !strcmp(t, "custom_tool_call_output"))
+	{
+		c = j_get(p, pl, A_OUTPUT);
+		s = c >= 0 && p->tok[c].kind == JSON_STRING ? j_str(p, c, &n)
+		    : c >= 0 && p->tok[c].kind == JSON_ARRAY ? texts(p, c, &n)
+		    : NULL;
+		ent_put(e, "output", ent_tool(e, id), s, n, XR_OUTPUT_CAP, 0);
+	}
+	else if (!strcmp(t, "function_call") || !strcmp(t, "custom_tool_call") ||
+	         !strcmp(t, "local_shell_call"))
+	{
+		name = k_str(p, pl, A_NAME, NULL);
+		if (!strcmp(t, "function_call"))
+		{
+			if ((a = k_str(p, pl, A_ARGS, &al)))
+			{
+				memset(&q, 0, sizeof q);
+				if (tokens_max(a, al) <= XR_LINE_TOKENS &&
+				    dch_json_parse(&q, a) >= 0 &&
+				    q.tok[0].kind == JSON_OBJECT)
+					s = card_text(&q, 0, &n);
+				dch_json_free(&q);
+				if (!s)
+				{
+					s = a;
+					n = al;
+				}
+				else
+					free(a);
+			}
+		}
+		else if (!strcmp(t, "custom_tool_call"))
+			s = k_str(p, pl, A_INPUT, &n);
+		else
+			s = card_text(p, k_obj(p, pl, A_ACTION), &n);
+		ent_put(e, "tool", name, s, n, XR_TEXT_CAP, 0);
+		ent_keep(e, id, name);
+	}
+	free(s);
+	free(name);
+	free(id);
+}
+
 /* One response_item: a user or assistant message, else a step whose tool
 ** fields are scanned under the Claude tool-field rules (code context; a
 ** command-like input 6000 scalars, an output 3000, a card's fields 240). */
@@ -5234,6 +5314,9 @@ cx_item(struct xr_claude *d, const struct json_parser *p, int pl)
 				{
 					main_block(d, B_STEP, NULL, NULL);
 					refs_text(d, s, n, XR_TEXT_CAP, XR_MD);
+					if (ent_here(d, NULL))
+						ent_put(d->want, "assistant", NULL, s, n,
+						        XR_TEXT_CAP, 0);
 				}
 				free(s);
 			}
@@ -5266,6 +5349,8 @@ cx_item(struct xr_claude *d, const struct json_parser *p, int pl)
 		free(s);
 	}
 	/* reasoning, and any type not listed: a step, no ref (7.4) */
+	if (t && ent_here(d, NULL))
+		cx_ent(d, p, pl, t);
 	free(t);
 }
 
@@ -5286,6 +5371,9 @@ cx_line(struct xr_claude *d, const struct json_parser *p)
 		main_block(d, B_PROMPT, "compact", "Conversation compacted");
 		if ((s = k_str(p, pl, A_MESSAGE, &n)))
 			refs_text(d, s, n, XR_TEXT_CAP, XR_PROSE);
+		/* as a Claude compact summary's user entry */
+		if (s && ent_here(d, NULL))
+			ent_put(d->want, "user", NULL, s, n, XR_TEXT_CAP, 0);
 		free(s);
 		/* its lead ends here: the prompt after it is a turn of its own */
 		main_block(d, B_STEP, NULL, NULL);

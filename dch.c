@@ -11367,11 +11367,13 @@ xr_ref_exit(struct xr_scan *sc, int rc)
 	return c || rc ? xr_failed() : 0;
 }
 
-/* One transcript through --ref's scan (3.4), the per-file reader for <n>'s
-** file and every other session's: its lines and its tally. 0; -1 a read
-** failure; -2 not opened (gone, or not the file looked up). */
+/* One transcript (codex: a Codex rollout, 7.4) through --ref's scan (3.4),
+** the per-file reader for <n>'s file and every other session's: its lines
+** and its tally. 0; -1 a read failure; -2 not opened (gone, or not the file
+** looked up). */
 static int
-xr_ref_file(struct xr_scan *sc, const char *path, const struct stat *st)
+xr_ref_file(struct xr_scan *sc, const char *path, const struct stat *st,
+            int codex)
 {
 	struct xr_chapters ch = {0};
 	struct xr_claude *d;
@@ -11386,6 +11388,8 @@ xr_ref_file(struct xr_scan *sc, const char *path, const struct stat *st)
 		close(fd);
 		return -1;
 	}
+	if (codex)
+		xr_claude_codex(d);
 	xr_scan_sink(sc, &k);
 	xr_claude_refs(d, &k, (uint64_t)st->st_ino, xr_scan_tick, sc);
 	rc = xr_claude_read(d, fd, span, &capped);
@@ -11400,19 +11404,22 @@ xr_ref_file(struct xr_scan *sc, const char *path, const struct stat *st)
 }
 
 /* A Claude session of this store other than <n> (7.6): a live row's (its
-** master's MSG_CMD, never its ring) or a History record's. */
+** master's MSG_CMD, never its ring) or a History record's; or a live
+** Codex's (codex: sid its thread, cfg its CODEX_HOME, project its cwd's key;
+** History records only Claude, 7.4). */
 struct xr_cand
 {
 	char name[600], sid[64], cfg[1400];
 	long long seen, dseen;	/* lastSeen; its project dir's newest */
-	int live, same;
+	int live, same, codex;
 	char path[2048], project[1200];	/* the lookup's */
 	struct stat st;
 };
 
-/* This store's Claude sessions but self (<n>'s id, or ""), one per id: the
-** live rows first, then the History records, newest first. Names only:
-** nothing is opened. The count, *out to free; 0 with *out NULL. */
+/* This store's Claude and live Codex sessions but self (<n>'s id, or ""),
+** one per id: the live rows first, then the History records, newest first.
+** Names only: nothing is opened. The count, *out to free; 0 with *out
+** NULL. */
 static int
 xr_corpus(const char *self, struct xr_cand **out)
 {
@@ -11430,6 +11437,7 @@ xr_corpus(const char *self, struct xr_cand **out)
 		{
 			struct cmd_info ci;
 			struct crec cr;
+			struct xr_cx xc;
 			char sock[1100];
 			int ok;
 
@@ -11437,15 +11445,28 @@ xr_corpus(const char *self, struct xr_cand **out)
 			if (cmd_query(sock, &ci) != 0)
 				continue;
 			ok = xr_live_claude(&ci, &cr);
+			/* else a live Codex, keyed by its cwd as for <n> (7.4) */
+			c.codex = !ok && xr_live_codex(&ci, &xc) > 0;
+			if (c.codex && !xc.cwd[0])
+				(void)proc_cwd(ci.pid, xc.cwd, sizeof xc.cwd);
 			cmd_info_free(&ci);
-			if (!ok)
+			if (!ok && !c.codex)
 				continue;
 			snprintf(c.name, sizeof c.name, "%s", sl.v[k]);
-			snprintf(c.sid, sizeof c.sid, "%s", cr.sid);
-			xr_crec_cfg(&cr, c.cfg, sizeof c.cfg);
-			if (!c.cfg[0])
-				continue;	/* no corpus, as for <n> */
-			c.seen = cr.upd / 1000;
+			if (c.codex)
+			{
+				snprintf(c.sid, sizeof c.sid, "%s", xc.tid);
+				snprintf(c.cfg, sizeof c.cfg, "%s", xc.home);
+				xr_project_key(xc.cwd, c.project, sizeof c.project);
+			}
+			else
+			{
+				snprintf(c.sid, sizeof c.sid, "%s", cr.sid);
+				xr_crec_cfg(&cr, c.cfg, sizeof c.cfg);
+				if (!c.cfg[0])
+					continue;	/* no corpus, as for <n> */
+				c.seen = cr.upd / 1000;
+			}
 			c.live = 1;
 		}
 		else
@@ -11500,11 +11521,11 @@ xr_cand_cmp(const void *a, const void *b)
 	return (c = strcmp(x->name, y->name)) ? c : strcmp(x->sid, y->sid);
 }
 
-/* The other sessions' Claude files (7.6), each mapped like <n>'s by names
-** only (xr_claude_lookup: a uuid, a valid config_dir, one regular
-** <sid>.jsonl, no symlink; nothing opened), in 3.4's order: <n>'s project
-** dir newest lastSeen first, then (all) the other dirs, newest first. The
-** count, *out to free. */
+/* The other sessions' Claude and Codex files (7.6), each mapped like <n>'s
+** by names only (xr_claude_lookup: a uuid, a valid config_dir, one regular
+** <sid>.jsonl, no symlink; xr_codex_lookup for a Codex; nothing opened), in
+** 3.4's order: <n>'s project dir newest lastSeen first, then (all) the
+** other dirs, newest first. The count, *out to free. */
 static int
 xr_mapped(const char *self, const char *project, int all,
           struct xr_cand **out)
@@ -11514,9 +11535,14 @@ xr_mapped(const char *self, const char *project, int all,
 
 	for (k = 0; k < n; k++)
 	{
-		if (xr_claude_lookup(v[k].cfg, v[k].sid, v[k].path, sizeof v[k].path,
-		                     &v[k].st, v[k].project, sizeof v[k].project) < 0)
+		if (v[k].codex ? xr_codex_lookup(v[k].cfg, v[k].sid, v[k].path,
+		                                 sizeof v[k].path, &v[k].st) < 0
+		    : xr_claude_lookup(v[k].cfg, v[k].sid, v[k].path,
+		                       sizeof v[k].path, &v[k].st, v[k].project,
+		                       sizeof v[k].project) < 0)
 			continue;	/* unmapped: never opened */
+		if (v[k].codex)	/* lastSeen: the rollout's last write */
+			v[k].seen = (long long)v[k].st.st_mtime;
 		v[k].same = !strcmp(v[k].project, project);
 		if (!v[k].same && !all)
 			continue;
@@ -11551,8 +11577,8 @@ xr_other_projects(const char *self, const char *project)
 }
 
 /* --scope project|all after <n>'s own file or ring (3.4, 7.6): the other
-** sessions' Claude files in xr_mapped's order, never a ring. 0, or -1 a
-** read failure. */
+** sessions' Claude and Codex files in xr_mapped's order, never a ring. 0,
+** or -1 a read failure. */
 static int
 xr_ref_others(struct xr_scan *sc, int scope, const char *self,
               const char *project)
@@ -11567,7 +11593,7 @@ xr_ref_others(struct xr_scan *sc, int scope, const char *self,
 	{
 		if (xr_scan_next(sc, v[k].name, v[k].project, v[k].live, v[k].same))
 			break;
-		if ((rc = xr_ref_file(sc, v[k].path, &v[k].st)) == -2)
+		if ((rc = xr_ref_file(sc, v[k].path, &v[k].st, v[k].codex)) == -2)
 			rc = 0;	/* gone since the lookup: not read */
 	}
 	/* sc's session names point into v: only done (no names) follows */
@@ -11609,7 +11635,7 @@ xr_claude_ref(const char *cfg, const char *sid, const char *session,
 	xr_scan_scope(sc, q->scope);
 	if (xr_scan_first(sc, sid, sp.shape, xr_span_text(&sp)) != 0)
 		return xr_ref_exit(sc, -1);
-	rc = xr_ref_file(sc, path, &st);
+	rc = xr_ref_file(sc, path, &st, 0);
 	if (rc == 0)
 		rc = xr_ref_others(sc, q->scope, sid, project);
 	/* XR6, --full: after every file; reads no session name, so it may
@@ -11685,20 +11711,17 @@ xr_codex_answer(const struct xr_cx *x, struct xr_answer *a,
 	return 0;
 }
 
-/* --ref over a live Codex's rollout (3.4, 7.4): as over a transcript. */
+/* --ref over a live Codex's rollout (3.4, 7.4): as over a transcript, then
+** (--scope project|all) the other sessions' Claude and Codex files. */
 static int
 xr_codex_ref(const struct xr_cx *x, const char *session, const char *label,
              const struct xr_refq *q)
 {
 	char path[2048], project[1200];
-	struct xr_claude *d;
-	struct xr_chapters ch = {0};
 	struct xr_scan *sc;
 	struct xr_span sp;
-	struct xr_sink k;
 	struct stat st;
-	int capped = 0, rc;
-	uint64_t span;
+	int rc;
 
 	if (xr_codex_lookup(x->home, x->tid, path, sizeof path, &st) < 0)
 		return xr_no_corpus();
@@ -11708,20 +11731,13 @@ xr_codex_ref(const struct xr_cx *x, const char *session, const char *label,
 	if (!(sc = xr_scan_new(stdout, sp.key, session, project, 1, q->full,
 	                       0, q->budget, xr_t0)))
 		return xr_failed();
+	xr_scan_scope(sc, q->scope);
 	if (xr_scan_first(sc, x->tid, sp.shape, xr_span_text(&sp)) != 0)
 		return xr_ref_exit(sc, -1);
-	xr_scan_sink(sc, &k);
-	rc = xr_codex_read(x, &d, &st, &k, xr_scan_tick, sc, &capped);
-	if (!d)
-		return xr_ref_exit(sc, -1);
-	xr_claude_end(d, (uint64_t)st.st_ino, &ch);
-	xr_chapters_free(&ch);
-	span = (uint64_t)st.st_size;
-	if (capped && span > xr_lim.head + xr_lim.tail)
-		span = xr_lim.head + xr_lim.tail;
-	xr_scan_file(sc, span, xr_claude_too_long(d), capped, 0);
-	xr_claude_free(d);
-	return xr_ref_exit(sc, rc < 0 || xr_scan_done(sc) != 0);
+	rc = xr_ref_file(sc, path, &st, 1);
+	if (rc == 0)
+		rc = xr_ref_others(sc, q->scope, x->tid, project);
+	return xr_ref_exit(sc, rc != 0 || xr_scan_done(sc) != 0);
 }
 
 /* The shell answer, built as the records stream past. */
@@ -12080,18 +12096,47 @@ xr_chapter_out(const char *session, const char *sid,
 	return 1;
 }
 
-/* One pass over (cfg, sid)'s transcript: the chapters-only index, and the
-** wanted chapter's entries as it goes. Never a seek (K14.2). */
+/* One pass over a looked-up transcript (codex: a Codex rollout, 7.4): the
+** chapters-only index, and the wanted chapter's entries as it goes. Never a
+** seek (K14.2). */
+static int
+xr_chapter_file(const char *path, const struct stat *st, int codex,
+                const char *sid, const char *session, const char *anchor)
+{
+	struct xr_chapters ch = {0};
+	struct xr_entries e;
+	struct xr_claude *d;
+	int fd, capped, rc;
+
+	if ((fd = xr_seam_open(path, st)) < 0)	/* there but unreadable: 3 */
+		return errno == EACCES || errno == EPERM || errno == EIO
+		       ? xr_failed() : xr_no_corpus();
+	if (!(d = xr_claude_new()))
+	{
+		close(fd);
+		return xr_failed();
+	}
+	if (codex)
+		xr_claude_codex(d);
+	xr_entries_begin(&e, anchor, session, XR_CH_OUT);
+	xr_claude_entries(d, &e, (uint64_t)st->st_ino);
+	rc = xr_claude_read(d, fd, (uint64_t)st->st_size, &capped);
+	close(fd);
+	xr_claude_end(d, (uint64_t)st->st_ino, &ch);
+	xr_claude_free(d);
+	rc = rc < 0 ? xr_failed() : xr_chapter_out(session, sid, &ch, &e);
+	xr_chapters_free(&ch);
+	xr_entries_free(&e);
+	return rc;
+}
+
+/* --chapter over (cfg, sid)'s transcript. */
 static int
 xr_chapter_claude(const char *cfg, const char *sid, const char *session,
                   const char *anchor)
 {
 	char path[2048], home[1400], project[1200];
-	struct xr_chapters ch = {0};
-	struct xr_entries e;
-	struct xr_claude *d;
 	struct stat st;
-	int fd, capped, rc;
 
 	if (!cfg[0])
 	{
@@ -12105,30 +12150,14 @@ xr_chapter_claude(const char *cfg, const char *sid, const char *session,
 	if (xr_claude_lookup(cfg, sid, path, sizeof path, &st, project,
 	                     sizeof project) < 0)
 		return xr_no_corpus();
-	if ((fd = xr_seam_open(path, &st)) < 0)	/* there but unreadable: 3 */
-		return errno == EACCES || errno == EPERM || errno == EIO
-		       ? xr_failed() : xr_no_corpus();
-	if (!(d = xr_claude_new()))
-	{
-		close(fd);
-		return xr_failed();
-	}
-	xr_entries_begin(&e, anchor, session, XR_CH_OUT);
-	xr_claude_entries(d, &e, (uint64_t)st.st_ino);
-	rc = xr_claude_read(d, fd, (uint64_t)st.st_size, &capped);
-	close(fd);
-	xr_claude_end(d, (uint64_t)st.st_ino, &ch);
-	xr_claude_free(d);
-	rc = rc < 0 ? xr_failed() : xr_chapter_out(session, sid, &ch, &e);
-	xr_chapters_free(&ch);
-	xr_entries_free(&e);
-	return rc;
+	return xr_chapter_file(path, &st, 0, sid, session, anchor);
 }
 
-/* --chapter: a Claude session's transcript (live, ended or History: K8),
-** else a live shell's ring, one read of it (the screen holds no marks, so
-** no chapter). An ended shell, dch-lite, a ring that is off or paused: no
-** corpus. A ring cleared mid-read took the anchor with it. */
+/* --chapter: a Claude session's transcript (live, ended or History: K8), a
+** live Codex's rollout (7.4), else a live shell's ring, one read of it (the
+** screen holds no marks, so no chapter). An ended shell, dch-lite, a ring
+** that is off or paused: no corpus. A ring cleared mid-read took the anchor
+** with it. */
 static int
 xr_chapter(const struct xr_target *t, const char *anchor)
 {
@@ -12140,7 +12169,7 @@ xr_chapter(const struct xr_target *t, const char *anchor)
 	struct crec c;
 	struct xr_cx xc;
 	char cfg[1400];
-	int qc, fr, rc;
+	int qc, fr, rc, cx;
 
 	if (t->kind == XR_ENDED)
 		return t->rec->sid[0] ? xr_chapter_claude(t->rec->acfg, t->rec->sid,
@@ -12155,12 +12184,18 @@ xr_chapter(const struct xr_target *t, const char *anchor)
 		return cfg[0] ? xr_chapter_claude(cfg, c.sid, t->name, anchor)
 		              : xr_no_corpus();
 	}
-	/* a live Codex: its rollout has no chapter reader yet (#169), and the
-	** ring under it is not its corpus (7.4): no corpus, never the ring */
-	if (qc == 0 && xr_live_codex(&ci, &xc) != 0)
+	/* a live Codex: its rollout, never the ring under it (7.4); no
+	** mapped thread or no rollout is no corpus */
+	if (qc == 0 && (cx = xr_live_codex(&ci, &xc)) != 0)
 	{
+		char path[2048];
+		struct stat st;
+
 		cmd_info_free(&ci);
-		return xr_no_corpus();
+		return cx > 0 && xr_codex_lookup(xc.home, xc.tid, path, sizeof path,
+		                                 &st) == 0
+		       ? xr_chapter_file(path, &st, 1, xc.tid, t->name, anchor)
+		       : xr_no_corpus();
 	}
 	if (qc == 0)
 		cmd_info_free(&ci);

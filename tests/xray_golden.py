@@ -25,7 +25,9 @@ Each case is a directory:
                    <uuid>.jsonl; a real dch master runs tests/fake_codex.c
                    as `codex` in session <setup codex.session>, and the
                    first rollout's id is its thread (a shell snapshot that
-                   carries the session, as Codex writes one)
+                   carries the session, as Codex writes one); an argv
+                   element f*:<offset> is f<that rollout's inode>:<offset>
+                   (#169)
   setup.json       what the case needs around the corpus: History records,
                    the fake masters' ring status, config lines. A live
                    shell's pane runs in <tmp>/work/<name> (MSG_CMD answers
@@ -255,6 +257,8 @@ def codex_live(t, home, env, cx, xdir, spawned):
         shutil.copy(os.path.join(xdir, tid + ".jsonl"), os.path.join(
             sess, "rollout-%sT10-00-00-%s.jsonl" % (day.replace("/", "-"),
                                                     tid)))
+    ino = os.stat(os.path.join(sess, "rollout-%sT10-00-00-%s.jsonl" % (
+        day.replace("/", "-"), tids[0]))).st_ino
     bindir = os.path.join(t, "bin")
     os.makedirs(bindir)
     fake = os.path.join(bindir, "codex")
@@ -285,6 +289,7 @@ def codex_live(t, home, env, cx, xdir, spawned):
             n, "export DCH_NATIVE_BRIDGE_ID=%s\n" % marker if marker
             else ""))
     os.chmod(p, 0o600)
+    return ino
 
 
 def run_case(name):
@@ -357,7 +362,8 @@ def run_case(name):
             del env["DCH_NO_REMOTE"]     # named hosts only, on loopback
         xdir = os.path.join(d, "codex")
         if os.path.isdir(xdir):
-            codex_live(t, home, env, setup.get("codex", {}), xdir, spawned)
+            ino = codex_live(t, home, env, setup.get("codex", {}), xdir,
+                             spawned)
         for k, argv in enumerate(case["argv"], 1):
             argv = ["f%x:" % ino + a[3:] if a.startswith("f*:") else a
                     for a in argv]

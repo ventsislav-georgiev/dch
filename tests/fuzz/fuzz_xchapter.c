@@ -3,7 +3,8 @@
 ** session controls, so every byte here is hostile.
 **
 ** Input: byte 0's bit 0 picks the corpus, bit 1 a small object cap (4 KiB
-** of entries) so a small input reaches the cut; byte 1 picks the chapter
+** of entries) so a small input reaches the cut, bit 2 a JSONL corpus read
+** as a Codex rollout (#169); byte 1 picks the chapter
 ** (bit 7: an anchor no chapter has); bytes 2..33 are a candidate anchor
 ** (up to its first NUL); the rest is the corpus:
 **   0: a Claude JSONL transcript, cut at '\n' here;
@@ -37,8 +38,8 @@ anchor_ref(const char *s)
 }
 
 static void
-decode(const uint8_t *d, size_t n, int shell, struct xr_entries *e,
-       struct xr_chapters *c)
+decode(const uint8_t *d, size_t n, int shell, int codex,
+       struct xr_entries *e, struct xr_chapters *c)
 {
 	size_t i, s;
 
@@ -48,6 +49,8 @@ decode(const uint8_t *d, size_t n, int shell, struct xr_entries *e,
 
 		if (!x)
 			return;
+		if (codex)
+			xr_claude_codex(x);
 		if (e)
 			xr_claude_entries(x, e, 0x1234);
 		for (i = s = 0; i <= n; i++)
@@ -120,7 +123,7 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		abort();
 	shell = d[0] & 1;
 	out = d[0] & 2 ? 6 * (4 + 64) + 2048 + 4096 : XR_CH_OUT;
-	decode(d + 34, n - 34, shell, NULL, &c1);
+	decode(d + 34, n - 34, shell, d[0] & 4, NULL, &c1);
 	if (c1.n && !(d[1] & 0x80))
 	{
 		k = d[1] % c1.n;
@@ -130,7 +133,7 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		snprintf(want, sizeof want, "x%s", c1.n ?
 		         xr_chapter_at(&c1, 0)->anchor : cand);
 	xr_entries_begin(&e, want, "fuzz", out);
-	decode(d + 34, n - 34, shell, &e, &c2);
+	decode(d + 34, n - 34, shell, d[0] & 4, &e, &c2);
 	if (c2.n != c1.n || c2.total != c1.total)
 		abort();	/* wanting a chapter never changes the index */
 	for (i = 0; i < c1.n; i++)

@@ -758,7 +758,8 @@ or
 and
 .BR error ;
 .B other_projects
-counts the other sessions with a transcript in another project directory
+counts the other sessions with a transcript or a live Codex rollout in
+another project directory
 (what
 .B \-\-scope all
 would add; from names only, nothing opened).
@@ -954,7 +955,8 @@ reads
 own transcript, or its ring and screen;
 .BR project ,
 the default (a remote caller's too), then reads every other session's
-Claude Code transcript in its project directory (a shell's: its cwd's),
+Claude Code transcript or Codex rollout in its project directory (a
+shell's: its cwd's),
 newest first, and
 .B all
 then the other project directories, the newest first.
@@ -975,11 +977,10 @@ has
 .BR all_sessions ;
 the last two null unless
 .BR \-\-scope\ all ).
-A live Codex
-.I name
-is read alone, whatever the scope: its rollout only, with
-.B first.scope
-.BR session .
+A live Codex's rollout is among the other sessions' files too, found as
+.IR name 's
+would be; its project directory is the Codex's cwd's, its last seen time
+the rollout's last write.
 .B \-\-chapter
 .I anchor
 prints one chapter's entries as one object
@@ -1037,6 +1038,23 @@ for a result with no call;
 .B error
 is the result's error flag, never for a Grep or Glob that found nothing);
 thinking, images, notices and subagent turns are left out.
+A live Codex:
+.B user
+(the turn's prompt, a compaction's summary),
+.B assistant
+(its text),
+.B tool
+(a call, with its name: a function call's arguments as
+.I "key: value"
+lines as above, or the arguments string when it is not a JSON object; a
+custom tool's input; a local shell call's action) and
+.B output
+(a call's output where it lands, with the name of its call_id's call in the
+chapter, else
+.BR null ;
+.B error
+is never set);
+reasoning and events are left out.
 A shell: one
 .B tool
 entry with the typed command and one
@@ -1053,9 +1071,10 @@ and escaped like
 the object is capped at 1 MiB, entries past it left out and
 .B truncated
 true.
-An ended or History Claude Code session is read from its transcript; an
-ended shell, a ring that is off or paused, a session with no transcript, and
-a live Codex (its rollout has no chapter reader yet) exit 1 with
+An ended or History Claude Code session is read from its transcript, a live
+Codex from its rollout; an ended shell, a ring that is off or paused, a
+session with no transcript, and a Codex with no thread id or no rollout exit
+1 with
 .IR "no x\-ray corpus" .
 .B \-\-chapter
 takes no
