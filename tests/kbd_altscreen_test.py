@@ -253,7 +253,14 @@ def main():
                  " sys.stdout.write('\\x1b[5;1HTICK ');sys.stdout.flush()")
         pid_d, fd_d = spawn_job(["-n", SESS + "-busy", sys.executable, "-c",
                                  flood])
-        drain(fd_d, 1.0)
+        # the attach is up (raw mode, output relayed) before the first key:
+        # a ctrl-z sent earlier is dropped by the cooked tty and nothing stops
+        up = drain(fd_d, 20.0, b"TICK")
+        if b"TICK" not in up:
+            print("FAIL: the busy attach never showed the session:",
+                  repr(up[-200:]))
+            return 1
+        drain(fd_d, 0.5)
         for i in range(1, 4):
             time.sleep(0.1)     # not read: the master queues output
             os.write(fd_d, b"\x1a")
@@ -264,7 +271,9 @@ def main():
             post = got.partition(STOPPED)[2]
             if ALT_ON not in post or b"TICK" in post[:post.find(ALT_ON)]:
                 print("FAIL: busy ctrl-z resume %d writes output on the main "
-                      "screen before its 1049h:" % i, repr(post[:200]))
+                      "screen before its 1049h:" % i, repr(post[:200]),
+                      "stopped:", STOPPED in got, "read:", len(got),
+                      repr(got[-120:]))
                 return 1
         print("PASS: kitty push follows 1049h on attach; detach pops on both "
               "screens; ctrl-z resets as a detach does, a resume re-arms once and "
