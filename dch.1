@@ -805,7 +805,9 @@ now, output that came in meanwhile included (dch\-lite: the program gets a
 SIGWINCH, as on any re\-attach).
 The
 .B x
-never reaches the session.
+never reaches the session; keys that arrive in the same read as the
+.B x
+(a paste, a fast burst) reach neither the view nor the session.
 The chord is off with
 .B \-E
 and with

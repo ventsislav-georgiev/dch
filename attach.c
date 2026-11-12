@@ -570,7 +570,8 @@ detach_key_done(int s, int twice)
 /* The X-ray chord's second key (#187): is the first key in b[0..n) a plain
 ** x press? The byte, or its kitty report CSI 120 [; 1 [:1]] [; text] u, the
 ** Caps and Num Lock bits allowed. Kitty key releases before it (the detach
-** key's own, with event types on) are skipped. */
+** key's own, with event types on) are skipped. 1: an x; -1: b holds key
+** releases and nothing else; 0: anything else. */
 static int
 xray_x(const unsigned char *b, int n)
 {
@@ -621,7 +622,7 @@ xray_x(const unsigned char *b, int n)
 			return key == 'x' && ev == 1 && ((mod - 1) & ~0xc0L) == 0;
 		i = j + 1;
 	}
-	return 0;
+	return n > 0 ? -1 : 0;
 }
 
 /* The X-ray overlay (#187): the view over this attach, which is never
@@ -692,6 +693,16 @@ xray_overlay(int s)
 		}
 		if (waitpid(pid, NULL, WNOHANG) != 0)
 			break;
+		/* dch -d (SIGUSR1): the view goes first, as in die(), then
+		** the client leaves as the main loop does */
+		if (want_detach)
+		{
+			kill(pid, SIGTERM);
+			while (waitpid(pid, NULL, 0) < 0 && errno == EINTR)
+				;
+			xray_pid = 0;
+			exit(0);
+		}
 	}
 	xray_pid = 0;
 	if (p[0] >= 0)
@@ -1054,15 +1065,27 @@ attach_main(int noerror)
 			}
 
 			pkt.len = len;
-			/* The X-ray chord (#187; over a remote attach too, #189):
-			** x the next key in the window. The read is the chord's,
-			** swallowed whole. */
-			if (detach_pending && attach_xray &&
-			    xray_x(pkt.u.buf, (int)len))
+			if (detach_pending)
 			{
-				detach_pending = 0;
-				xray_overlay(s);
-				goto keys_done;
+				int x = xray_x(pkt.u.buf, (int)len);
+
+				/* key releases only (kitty event types: the
+				** detach key's own, in a read of its own) are no
+				** key: the window stays open */
+				if (x < 0)
+					goto keys_done;
+				/* The X-ray chord (#187; over a remote attach too,
+				** #189): x the next key in the window. The read is
+				** the chord's, swallowed whole: what follows the x
+				** in it (its own release, the rest of a paste) was
+				** typed before the view was drawn, so it reaches
+				** neither. */
+				if (x && attach_xray)
+				{
+					detach_pending = 0;
+					xray_overlay(s);
+					goto keys_done;
+				}
 			}
 			int k = process_kbd(s, &pkt);
 			long w = detach_double_us();
@@ -1078,7 +1101,7 @@ attach_main(int noerror)
 				/* the chord in one burst: x after the press */
 				if (attach_xray &&
 				    xray_x(pkt.u.buf + detach_end,
-				           (int)len - detach_end))
+				           (int)len - detach_end) > 0)
 				{
 					xray_overlay(s);
 					goto keys_done;

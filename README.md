@@ -929,7 +929,8 @@ underneath: the attach is kept, never retired. Leaving the view (`q`,
 `Esc`) returns to the session with its screen repainted as it is now,
 output that came in meanwhile included (dch-lite has no screen to repaint
 from: the program gets a SIGWINCH, as on any re-attach). The `x` is never
-typed into the session. The chord is off under `-E` (no detach key) and
+typed into the session; keys that arrive in the same read as the `x` (a
+paste, a fast burst) reach neither the view nor the session. The chord is off under `-E` (no detach key) and
 with `DCH_DOUBLE_TAP_MS=0` (one press acts at once); the keys then do what
 they did before. Over a remote attach (`dch -a host:name`) the chord opens
 the view of `host:name`, as `dch --xray host:name` does: its queries dial

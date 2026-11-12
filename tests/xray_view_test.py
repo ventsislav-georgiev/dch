@@ -849,6 +849,124 @@ def test_chord_end():
         a.close()
 
 
+def test_chord_detach():
+    """#196. dch -d (and SIGTERM, SIGHUP) with the chord's view up: the
+    client leaves at once as a plain detach does (exit 0, the terminal's
+    stty as before the attach, the reset sequence last, the client pidfile
+    gone, the view gone). With kitty event types on, the detach key's
+    release in a read of its own neither ends the window nor reaches the
+    session: press, release, x opens the view; press, release, press opens
+    the switch picker. What follows the x in its read reaches neither the
+    view nor the session (a q there leaves the view up)."""
+    import re
+    reset = b"\033[?1049l\033[<8u"
+    for how in ("-d", signal.SIGTERM, signal.SIGHUP):
+        what = how if how == "-d" else signal.Signals(how).name
+        a = Pty(["/bin/sh", "-c", "stty -g; '%s' -a xv-rx; echo RC=$?; "
+                 "stty -g; echo GONE; exec sleep 30" % DCH])
+        try:
+            a.wait(b"READY")
+            a.pump(0.3)
+            before = a.out.split(b"\r\n")[0]
+            got = rx()
+            mark = len(a.out)
+            a.key(b"\x1c", 0.05)
+            a.key(b"x", 0.3)
+            ok = a.wait(b"X-ray  xv-rx", start=mark)
+            check("chord, %s: the view opens" % what, ok,
+                  a.out[mark:][-300:])
+            client = kids(a.pid)
+            view = [k for c in client for k in kids(c)]
+            pidf = [os.path.join(d, f) for d, _, fs in os.walk(T)
+                    for f in fs for c in client
+                    if f.endswith(".client.%d" % c)]
+            mark = len(a.out)
+            t0 = time.time()
+            if how == "-d":
+                r = dch("-d", "xv-rx")
+                check("chord, -d: dch -d says it detached one client",
+                      r.returncode == 0 and "detached 1 client" in r.stdout,
+                      (r.returncode, r.stdout, r.stderr))
+            else:
+                for c in client:
+                    os.kill(c, how)
+            gone = a.wait(b"GONE", secs=5, start=mark)
+            tail = a.out[mark:]
+            check("chord, %s: the client leaves within 5 s, the view still "
+                  "up (%.1f s)" % (what, time.time() - t0), gone,
+                  tail[-300:])
+            if not gone:
+                continue
+            lines = tail.split(b"RC=")[-1].split(b"\r\n")
+            # PENDIN (macOS 0x20000000): the kernel sets it on any switch
+            # back to canonical mode, until the next read
+            pend = lambda g: re.sub(
+                rb"lflag=([0-9a-f]+)", lambda m: b"lflag=%x" %
+                (int(m.group(1), 16) & ~0x20000000), g)
+            check("chord, %s: exit 0, the terminal's stty as before the "
+                  "attach" % what, lines[0] == b"0" and
+                  pend(lines[1]) == pend(before), (lines[:2], before))
+            if how != signal.SIGHUP:
+                check("chord, %s: the reset sequence comes last" % what,
+                      tail.split(b"RC=")[0].endswith(reset),
+                      tail.split(b"RC=")[0][-120:])
+            check("chord, %s: the client pidfile and the view are gone" %
+                  what, pidf and not any(os.path.exists(f) for f in pidf)
+                  and view and until(lambda: not any(alive(k)
+                                                    for k in view), 5),
+                  (pidf, view))
+            check("chord, %s: the session got nothing" % what,
+                  rx()[len(got):] == "", rx()[len(got):])
+        finally:
+            a.close()
+
+    # kitty event types on: each report in a read of its own
+    for keys, want, what in (
+            ([b"\033[92;5u", b"\033[92;5:3u", b"\033[120u"],
+             b"X-ray  xv-rx", "press, release, x"),
+            ([b"\033[92;5u", b"\033[92;5:3u", b"\033[92;5u"],
+             b"switch to session:", "press, release, press")):
+        a = attach(env={"DCH_DOUBLE_TAP_MS": "2000"})
+        try:
+            got = rx()
+            mark = len(a.out)
+            for k in keys:
+                try:
+                    a.key(k, 0.15)
+                except OSError:	# the client left: the pty is gone
+                    break
+            check("kitty events, %s, three reads: %s opens, the client "
+                  "stays" % (what, want.decode()),
+                  a.wait(want, start=mark) and a.reap() is None,
+                  (a.rc, a.out[mark:][-300:]))
+            check("kitty events, %s: the session got nothing" % what,
+                  rx()[len(got):] == "", rx()[len(got):])
+        finally:
+            a.close()
+
+    # the rest of the x's read is dropped: a q in it never closes the view
+    a = attach(env={"DCH_DOUBLE_TAP_MS": "2000"})
+    try:
+        got = rx()
+        mark = len(a.out)
+        a.key(b"\x1c", 0.05)
+        a.key(b"xq", 0.3)
+        ok = a.wait(b"X-ray  xv-rx", start=mark)
+        a.pump(1.0)
+        # the overlay's own reset leaves the alternate screen first
+        up = a.out.find(b"X-ray  xv-rx", mark)
+        check("chord, x then q in one read: the view opens and stays up, "
+              "the session got nothing", ok and
+              RESTORE not in a.out[up:] and a.reap() is None and
+              rx()[len(got):] == "", (a.out[mark:][-200:], rx()[len(got):]))
+        mark = len(a.out)
+        a.key(b"q", 0.5)
+        check("chord, x then q in one read: a q of its own closes it",
+              a.wait(RESTORE, start=mark), a.out[mark:][-200:])
+    finally:
+        a.close()
+
+
 def main():
     try:
         fixture()
@@ -865,6 +983,7 @@ def main():
         test_picker()
         test_chord()
         test_chord_end()
+        test_chord_detach()
     finally:
         dch("-k", "xv-rx")
         dch("-k", "xv-end")
