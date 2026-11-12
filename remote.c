@@ -3130,7 +3130,7 @@ ctl_run(int fd, const char *sh, const char *verb, struct sb *rq,
 		}
 		if (cx < 0)
 			out.n = 0;	/* our reader is gone */
-		if (ctl_put(&out, &err, esc, r != 0) < 0 && !cx)
+		if (ctl_put(&out, &err, esc, r > 0) < 0 && !cx)
 			cx = -1;
 		if (!cx && g_ctl_sig)
 			cx = g_ctl_sig;
@@ -3181,7 +3181,9 @@ ctl_run(int fd, const char *sh, const char *verb, struct sb *rq,
 			heard = now_ms();
 		}
 	}
-	if (cx < 0)
+	/* a lost link (r < 0, not a cancel) drops the stdout line esc held: a
+	** cut JSON line is no line (QA 1.55.0 NIT-5, Prosper's ruling) */
+	if (cx < 0 || (r < 0 && !cx))
 		out.n = 0;
 	(void)ctl_put(&out, &err, esc, 1);	/* a line esc held, cut short */
 	free(tin.p);

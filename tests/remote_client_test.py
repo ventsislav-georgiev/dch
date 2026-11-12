@@ -1278,7 +1278,9 @@ def requests_checks(dch, check, senv, cenv, serve_at, fakes, tmp, slog):
 
 class XFake:
     """#180: a loopback host whose hello has ctl, ctl-cancel and xray, and
-    whose 0x30 answer is `mode`'s: "silent" never answers; "nul" a NUL in
+    whose 0x30 answer is `mode`'s: "silent" a partial stdout line, then
+    nothing; "cut" whole lines, a partial stdout and stderr line, then the
+    close with no 0x33; "nul" a NUL in
     a stdout and a stderr line; "order" stdout, stderr, stdout in one
     write; "osc" OSC 52 and title escapes on both streams; "hold" answers
     only a 0x34 (its 0x33 cancel); "dark" answers the first connection's
@@ -1319,6 +1321,9 @@ class XFake:
             + frame(0x32, b"dch: \x1b]0;PWNED\x07x\n")
             + frame(0x33, {"exit": 0}),
             "dark": frame(0x33, {"exit": 0}),
+            "silent": frame(0x31, b'{"cut":'),
+            "cut": frame(0x31, b'{"a":1}\n{"b":2}\n{"cut":')
+            + frame(0x32, b"e-cut"),
             "hist": frame(0x31, self.out) + frame(0x33, {"exit": 0})}
         try:
             while True:
@@ -1339,7 +1344,7 @@ class XFake:
                         c.sendall(frame(0x33, {"exit": 2, "why": "cancel"}))
                     elif t == 0x30 and self.mode in answers:
                         c.sendall(answers[self.mode])
-                        if self.mode == "dark":
+                        if self.mode in ("dark", "cut"):
                             time.sleep(0.2)
                             c.close()
                             return
@@ -1425,7 +1430,21 @@ def robust_checks(dch, check, cenv, fakes, tmp):
           and json.loads(r.stdout.splitlines()[1]) == {"t": "a\x9bb\u202ec"},
           r)
 
-    # LOW-10: one-shot, a host that never answers: exit 7 after 5 s
+    # NIT-5 (Prosper's ruling): one-shot, the link lost mid-line: the whole
+    # lines, the partial stdout line dropped, stderr's kept, exit 7
+    f = fake("cut")
+    r = subprocess.run([DCH, "--xray", "q:x", "--json"], env=side(f.port),
+                       capture_output=True, stdin=subprocess.DEVNULL,
+                       timeout=20)
+    check("NIT-5: one-shot --xray, the link lost mid-line: whole lines out, "
+          "the partial stdout line dropped, exit 7",
+          r.returncode == UNREACHABLE_EXIT
+          and r.stdout == b'{"a":1}\n{"b":2}\n'
+          and r.stderr == b"e-cutdch: q: unreachable: the connection was "
+          b"lost\n", r)
+
+    # LOW-10: one-shot, a host that stops mid-line and never ends: exit 7
+    # after 5 s, the partial line dropped (NIT-5)
     f = fake("silent")
     t0 = time.time()
     r = subprocess.run([DCH, "--xray", "q:x", "--json"],
@@ -1434,7 +1453,7 @@ def robust_checks(dch, check, cenv, fakes, tmp):
                        timeout=60)
     took = time.time() - t0
     check("LOW-10: one-shot --xray on a silent host: exit 7, no answer "
-          "within 5001 ms", r.returncode == UNREACHABLE_EXIT
+          "within 5001 ms, its partial line dropped", r.returncode == UNREACHABLE_EXIT
           and r.stderr == b"dch: q: unreachable: no answer within 5001 ms\n"
           and r.stdout == b"" and 4.5 < took < 40, (r, took))
 
