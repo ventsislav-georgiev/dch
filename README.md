@@ -2429,7 +2429,12 @@ transcripts.
 no cap). At that cap the server
 stops forwarding, sends the dch SIGTERM (SIGKILL 2 s later) and ends with
 `{"exit":2,"why":"cap"}`. Past its timeout (the table) it does the same with
-`"why":"timeout"`. A device (its tailnet address) runs at most 2
+`"why":"timeout"`. Output the client leaves unread is held, not cut, until
+20 s past the timeout: `dch --xray host:x --json | less` left on a page gets
+the whole answer if it reads on before the 60 s are up, `"why":"timeout"` if
+it reads on within 20 s after that, and a closed connection later.
+`--follow` and `--xray --follow` have no timeout: theirs closes after 20 s
+untaken, as any connection's does. A device (its tailnet address) runs at most 2
 `--xray --follow` of one session: a third ends the oldest the same way, with
 `"why":"timeout"`, and is run once more 1 s later if it met `busy` first. A
 client that closes the connection (or half-closes it)
@@ -2520,8 +2525,8 @@ marks, U+2028 and U+2029) as
 phone. A connection past the first two gets `busy` (see
 [Refusals](#refusals)) and the close. A connection that is not attached or watching closes after 30 s
 without a whole frame, and any connection closes when its output goes untaken
-for 20 s. A peer gone without a close (no answer to TCP keepalive) is
-closed in about 30 s. Control frames over 64 KiB, and any frame over the protocol's
+for 20 s (a control verb with a timeout: 20 s past that timeout). A peer
+gone without a close (no answer to TCP keepalive) is closed in about 30 s. Control frames over 64 KiB, and any frame over the protocol's
 256 MiB guard, close the connection. Sent frames are at most 8 MiB. A
 control verb has its own cap and timeouts ([above](#control-verbs-ctl)).
 

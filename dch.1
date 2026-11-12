@@ -2913,6 +2913,10 @@ and
 .BR "\-\-xray \-\-follow" ,
 60 s for the rest; past it, the same with
 .BR \(dqwhy\(dq:\(dqtimeout\(dq .
+Output the client leaves unread is held, not cut, until 20 s past the
+timeout, so a reader paused within it gets the whole answer; any other
+connection, a follow's included, closes once its output goes untaken for
+20 s.
 A device (its tailnet address) runs at most 2
 .B "\-\-xray \-\-follow"
 of one session: a third ends the oldest the same way, with
