@@ -3138,14 +3138,16 @@ d3_cmd(void *ctx, const struct xr_span *sp)
 
 	/* R2: only a word that is the ref alone, after no option; one inside a
 	** longer word (--body "Fixes #9", --opt=#9, the --title value), after
-	** an option (--title #9) or in no word (a comment, a here-doc body)
-	** neither defines nor counts */
+	** an option (--title #9, -R o/r#9) or in no word (a comment, a here-doc
+	** body) neither defines nor counts. An option word with = carries its
+	** own value (R2a): --title=T o/r#9 counts */
 	for (; k < w->n && w->re[k] < sp->e; k++)
 		;	/* spans and words come in order */
 	m->k = k;
 	if (k == w->n || w->rs[k] > sp->s || w->op[k] || strlen(SWD(w, k)) != l ||
 	    memcmp(SWD(w, k), m->cmd + sp->s, l) ||
-	    (k && !w->op[k - 1] && SWD(w, k - 1)[0] == '-'))
+	    (k && !w->op[k - 1] && SWD(w, k - 1)[0] == '-' &&
+	     !strchr(SWD(w, k - 1), '=')))
 		return 0;
 	if (!m->n++)
 		m->sp = *sp;

@@ -3907,12 +3907,17 @@ t_d3(void)
 		{ "dch meta PROJ-71 --title=\"Own title\"", "ok", 0,
 		  "ticket:PROJ-71=Own title;" },
 		{ "gh pr edit o/r#12 o/r#13 --title New", PR, 0, "" },
+		/* R2a: an option word with = carries its own value */
+		{ "dch meta --title=\"Own title\" PROJ-71", "ok", 0,
+		  "ticket:PROJ-71=Own title;" },
+		{ "gh pr edit --opt=x o/r#9 --title T", "", 0, "pull:o/r#9=T;" },
+		{ "gh pr edit -R o/r#9 --title T", "", 0, "" },
+		{ "gh pr edit 12 --title T --opt=#99", "", 0, "" },
 		/* R2: after an option, inside a word, in a comment or a here-doc
 		** body: not counted */
 		{ "gh pr edit -R o/r#12 --title New", "", 0, "" },
 		{ "gh pr edit 12 --title New --opt=#99", "", 0, "" },
 		{ "gh pr edit 12 --title \"#99\"", "", 0, "" },
-		{ "dch meta --title=\"Own title\" PROJ-71", "ok", 0, "" },
 		{ "gh pr edit 12 --title New # see #77", "", 0, "" },
 		{ "gh pr edit 12 --title New --body-file - <<EOF\nFixes #999\nEOF",
 		  PR, 0, "pull:o/r#12=New;" },
