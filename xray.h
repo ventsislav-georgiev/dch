@@ -18,7 +18,7 @@
 
 #define XR_TITLE_MAX   120		/* scalars (3.2, ruling R3) */
 #define XR_CHAPTERS    5000		/* 13.2 item 6: the newest kept */
-#define XR_SUMMARIES   (512u << 10)	/* #192: summary bytes held (3.8) */
+#define XR_SUMMARIES   (256u << 10)	/* #192: summary bytes held (3.8) */
 #define XR_HEAD_RANGE  (16ull << 20)	/* 3.8 per-file range: head ... */
 #define XR_TAIL_RANGE  (256ull << 20)	/* ... plus the newest 256 MB */
 #define XR_CHUNK       (1u << 20)	/* read size (QA 1.44 LOW-8: 4 MiB

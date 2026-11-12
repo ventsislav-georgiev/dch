@@ -837,7 +837,7 @@ def test_claude():
                rss)
         # #192: the same with every chapter auto and its summary at the
         # cap (120 4-byte scalars, 480 bytes): summaries are held out of
-        # line, at most 512 KiB of them (XR_SUMMARIES), so only these
+        # line, at most 256 KiB of them (XR_SUMMARIES), so only these
         # chapters pay, and at most that
         tn = ("<task-notification>\n<task-id>t</task-id>\n<summary>" +
               "\U0001F600" * 130 + "</summary>\n</task-notification>")

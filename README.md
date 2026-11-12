@@ -1198,7 +1198,7 @@ The corpus:
     first notification's `<summary>`, else its `<event>`, made as a `title`
     is (whitespace collapsed, at most 120 scalars); it is left out when
     there is neither. The `title` stays as it was. Any other chapter has
-    neither key. At most 512 KiB of summaries is held at a time: past that,
+    neither key. At most 256 KiB of summaries is held at a time: past that,
     the oldest auto chapters give theirs up (they keep `auto`).
 - **`refs`.** The refs the corpus mentions (see [Refs](#refs)), at most 2000
   keys. The rest are counted in `dropped_keys`, exactly up to 32768 distinct
