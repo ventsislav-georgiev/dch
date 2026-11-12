@@ -7185,14 +7185,28 @@ res_under(const char *p, const char *root)
 	return p[rl] ? p + rl + 1 : p + rl;
 }
 
+/* The passwd entry's home, as a copy: a later getpwuid frees what the one
+** before returned (macOS), and the callers nest (res_wide and res_home_deny
+** call res_home_ino): a use after free since #205, found by CI's ASan. */
+static const char *
+res_pw_home(void)
+{
+	static char b[PATH_MAX];
+	const struct passwd *pw = getpwuid(getuid());
+
+	if (!pw || !pw->pw_dir ||
+	    snprintf(b, sizeof b, "%s", pw->pw_dir) >= (int)sizeof b)
+		return NULL;
+	return b;
+}
+
 /* path[0..l) is a home (HOME's or the passwd entry's) by (st_dev, st_ino),
 ** lstat: any other spelling of it too, which text and realpath miss: the
 ** firmlink /System/Volumes/Data$HOME, a bind mount (QA 1.57.0 LOW-D2) */
 static int
 res_home_ino(const char *path, size_t l)
 {
-	const struct passwd *pw = getpwuid(getuid());
-	const char *h[2] = { getenv("HOME"), pw ? pw->pw_dir : NULL };
+	const char *h[2] = { getenv("HOME"), res_pw_home() };
 	char b[PATH_MAX];
 	struct stat a, st;
 	int k;
@@ -7218,8 +7232,7 @@ res_home_ino(const char *path, size_t l)
 static int
 res_wide(const char *root, int git)
 {
-	const struct passwd *pw = getpwuid(getuid());
-	const char *h[2] = { getenv("HOME"), pw ? pw->pw_dir : NULL }, *s;
+	const char *h[2] = { getenv("HOME"), res_pw_home() }, *s;
 	static const char *const app[2] = { ".config", "Library" };
 	char rr[PATH_MAX], hr[PATH_MAX], d[PATH_MAX + 16];
 	size_t l;
@@ -7988,8 +8001,7 @@ res_lift(const char *root, const char *rr, uint64_t *lr)
 static int
 res_home_deny(const char *path)
 {
-	const struct passwd *pw = getpwuid(getuid());
-	const char *h[2] = { getenv("HOME"), pw ? pw->pw_dir : NULL }, *c;
+	const char *h[2] = { getenv("HOME"), res_pw_home() }, *c;
 	char hr[PATH_MAX];
 	size_t l;
 	int k;
