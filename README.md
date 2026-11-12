@@ -988,13 +988,15 @@ dials again, unseen), `"busy"` (exit 1: a request was already running;
 the running one goes on; one that reuses the running one's `N` gets it as
 `"req":null`), `"refused"` (exit 2 as above, or the host refused it: 1, or
 4 by its gate) or `"lost"` (exit 7: the connection dropped while it ran, or
-the host sent nothing for 65 s). A line that is no request gets the same `refused` pair with
-`"req":null`; a blank line is skipped, a line over 64 KiB refused. On a host
+the host sent nothing for 65 s; a partial line the host was writing is
+dropped). A line that is no request gets the same `refused` pair with
+`"req":null`; an end line with `"req":null` ends no request. A blank line is skipped, a line over 64 KiB refused. On a host
 without `ctl-cancel` a cancel closes the connection and dch dials again,
 unseen. After the host's idle close (5 minutes) or a lost connection, the
-next request dials again. A dial that fails stands for 5 s: the requests
-queued behind it end `"lost"` at once with its message, without a dial
-each. End of standard input closes the connection and
+next request dials again. A dial that fails stands for 5 s from its end:
+a request in that time ends at once, without a dial, with the same
+standard-error line and end line (`"lost"`, or `"refused"` with 4, 6 or 1);
+the first request after it dials again. End of standard input closes the connection and
 exits 0; a request still running then ends `"why":"cancel"`. With no
 connection at the start, dch writes one `{"schema":1,"exit":E,"stderr":...}`
 line, prints the message on standard error and exits `E`: 6 for a host

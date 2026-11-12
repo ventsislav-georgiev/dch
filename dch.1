@@ -1529,17 +1529,23 @@ gets it as
 (exit 2 as above; 1, or 4 by its gate, when the host refused it) or
 .B lost
 (exit 7: the connection dropped while it ran, or the host sent nothing for
-65 s).
+65 s; a partial line the host was writing is dropped).
 A line that is no request gets the same refused pair with
 .BR \(dqreq\(dq:null ;
-blank lines are skipped, a line over 64 KiB is refused.
+an end line with
+.B \(dqreq\(dq:null
+ends no request.
+Blank lines are skipped, a line over 64 KiB is refused.
 Without
 .B ctl\-cancel
 on the host a cancel closes the connection and dch dials again; after the
 host's idle close or a lost connection the next request dials again.
-A dial that fails stands for 5 s: the requests queued behind it end
-.B lost
-at once with its message.
+A dial that fails stands for 5 s from its end: a request in that time ends
+at once, without a dial, with the same standard\-error line and end line
+.RB ( lost ,
+or
+.B refused
+with 4, 6 or 1); the first request after it dials again.
 End of standard input closes the connection and exits 0 (a request still
 running ends
 .BR why:\(dqcancel\(dq ).
