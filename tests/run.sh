@@ -1007,6 +1007,11 @@ else
 fi
 pyrun "xray goldens: chapters, identity, corpus labels, MANIFEST" xray_golden.py
 pyrun "the --xray view: tabs, card, reader, hostile text, signals, picker X" xray_view_test.py
+# #25: a socket-write interposer (tests/sockfail.c) makes every query child
+# of the chord's view exit(1); pyrun shows a passing test's skip line only here
+pyrun "the chord's query child exit()s: the client's terminal and marker stay" \
+    chord_fork_exit_test.py
+printf '%s\n' "$pyout" | grep '^  skip '
 pyrun "the --xray view of host:name over a loopback dch serve, picker X, the chord over dch -a host:name" xray_remote_view_test.py
 # xray_cli_test.py's RSS budget: a fork()+exec+wait4 helper, because a child
 # spawned by Python inherits Python's RSS high-water mark on Linux (maxrss.c)
