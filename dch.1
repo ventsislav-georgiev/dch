@@ -522,9 +522,9 @@ restarts the agent
 .RB ( "\-\-restart \-\-include\-agents \-f" ),
 .B S
 stops,
-.B x
-kills,
 .B X
+kills,
+.B x
 opens the row's X\-ray view
 .RB ( "dch \-\-xray" ;
 .B q
@@ -844,19 +844,30 @@ setting.
 opens the view of a session on another host
 .RB ( "dch serve"
 1.55.0+), as does
-.B X
+.B x
 on a remote row in the picker.
 Every query runs on the host, each over its own ctl connection; On screen
 reads the host's screen with
-.BR "\-\-read " \fIname\fB " \-\-ansi" .
+.BR "\-\-read " \fIname\fB " \-\-ansi" ,
+once a second while it shows (one dch and two serve log lines a second on
+the host).
 The host's text is drawn as a local session's, every control and bidi
-character as
+character, every byte of an invalid UTF\-8 sequence and a NUL as
 .BR ? .
+.B x
+opens the session of the row it is on, also next to a local session
+literally named
+.IR host : name .
 A host that refuses us, lacks
 .B \-\-xray
 or cannot be reached shows its line in place of the tabs;
 .B q
 leaves with that exit code.
+When the link drops later, the status says
+.I "live updates stopped (reopen the view for them)"
+and keeps saying it: Chapters and Refs stay as they were until the view is
+opened again; On screen says its failed read in place of the screen and
+shows the host's screen again once the host answers.
 Exit 0 when quit, 1 no such session, 2 with any other flag or when stdout
 is not a terminal; for a remote host also 4 (its gate refused us), 6 (it
 lacks
@@ -1000,7 +1011,7 @@ as
 .I cwd
 .B rev\-parse \-\-is\-inside\-work\-tree
 (for a commit URL with a short SHA also
-.BR "config \-\-get\-regexp ^remote\e..*\e.url$" )
+.BR "config \-z \-\-get\-regexp ^remote\e..*\e.url$" )
 and then
 .B show \-\-no\-color \-\-no\-ext\-diff \-\-no\-textconv \-\-stat=80
 .B \-\-stat\-count=14 \-\-format=%H%x00%an%x00%at%x00%s \-\-end\-of\-options
@@ -2913,6 +2924,10 @@ and
 .BR "\-\-xray \-\-follow" ,
 60 s for the rest; past it, the same with
 .BR \(dqwhy\(dq:\(dqtimeout\(dq .
+Output the client leaves unread is held, not cut, until 20 s past the
+timeout, so a reader paused within it gets the whole answer; any other
+connection, a follow's included, closes once its output goes untaken for
+20 s.
 A device (its tailnet address) runs at most 2
 .B "\-\-xray \-\-follow"
 of one session: a third ends the oldest the same way, with

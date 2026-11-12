@@ -17,7 +17,8 @@
 **   3: xr_ref_ok and xr_ref_parse over the bytes as a C string; with byte
 **      0's bit 2 set, the resolvers' parsers instead (#159): git show's
 **      output, a file's 14-line window around the bytes' own :line, the
-**      secret-name list, a .git file's "gitdir: " test (#205); every
+**      secret-name list, a .git file's "gitdir: " test (#205), the remote
+**      URL matcher against its rule read from the other end (#206); every
 **      block line valid UTF-8 within 200 scalars.
 ** Path 1's scan: bit 3 reads the transcript twice, the second time as
 ** another session's (#155), bit 4 makes it light.
@@ -34,6 +35,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include "../../ring.h"
 #include "../../xray.h"
 #include "../../bridge.h"
@@ -393,6 +395,49 @@ check_res(const struct xr_resolved *r)
 	}
 }
 
+/* xr_git_remote's rule, read from the end: a NUL-ended entry whose value
+** (past the key's '\n') is [https:// | ssh://][user@]github.com then '/'
+** (':' with no scheme), o/r, then "", "/", ".git" or ".git/"; user has no
+** '/', '@' or byte <= ' ' (QA 1.57.0 NIT-D1) */
+static int
+remote_rule(const char *s, size_t n)
+{
+	static const char *const tail[4] = {"", "/", ".git", ".git/"};
+	const char *z, *v;
+	char suf[32];
+	size_t i, l, k, j, m, p;
+
+	for (i = 0; i < n && (z = memchr(s + i, '\0', n - i)) != NULL;
+	     i = (size_t)(z - s) + 1)
+	{
+		if (!(v = memchr(s + i, '\n', (size_t)(z - s) - i)))
+			continue;
+		v++;
+		l = (size_t)(z - v);
+		for (k = 0; k < 8; k++)
+		{
+			m = (size_t)snprintf(suf, sizeof suf, "github.com%co/r%s",
+			                     k < 4 ? '/' : ':', tail[k % 4]);
+			if (l < m || strncasecmp(v + l - m, suf, m))
+				continue;
+			p = !strncasecmp(v, "https://", 8) ? 8
+			    : !strncasecmp(v, "ssh://", 6) ? 6 : 0;
+			if ((p != 0) != (k < 4) || p > l - m)
+				continue;
+			if (p == l - m)
+				return 1;
+			if (v[l - m - 1] != '@')
+				continue;
+			for (j = p; j < l - m - 1 && v[j] != '/' && v[j] != '@' &&
+			     (unsigned char)v[j] > ' '; j++)
+				;
+			if (j == l - m - 1)
+				return 1;
+		}
+	}
+	return 0;
+}
+
 /* s[0..n) (s[n] == '\0') as git's output, a file and a path */
 static void
 resolvers(const char *s, size_t n)
@@ -427,6 +472,8 @@ resolvers(const char *s, size_t n)
 	(void)xr_secret_name(s);
 	if (xr_gitfile(s, n) != (n > 8 && !memcmp(s, "gitdir: ", 8) &&
 	    !strchr("\r\n", s[8])))
+		abort();
+	if (xr_git_remote(s, n, "o/r") != remote_rule(s, n))
 		abort();
 }
 

@@ -653,17 +653,29 @@ xray_overlay(int s)
 		p[0] = -1;
 	else
 	{
+		sigset_t ss, os;
+
+		/* blocked over the fork: die() must not run in the child before
+		** its resets, and one for the client finds xray_pid set */
+		sigemptyset(&ss);
+		sigaddset(&ss, SIGHUP);
+		sigaddset(&ss, SIGTERM);
+		sigaddset(&ss, SIGINT);
+		sigaddset(&ss, SIGQUIT);
+		sigprocmask(SIG_BLOCK, &ss, &os);
 		if ((pid = fork()) == 0)
 		{
 			signal(SIGHUP, SIG_DFL);
 			signal(SIGTERM, SIG_DFL);
 			signal(SIGINT, SIG_DFL);
 			signal(SIGQUIT, SIG_DFL);
+			sigprocmask(SIG_SETMASK, &os, NULL);
 			close(s);
 			close(p[0]);
 			_exit(attach_xray());
 		}
 		xray_pid = pid;
+		sigprocmask(SIG_SETMASK, &os, NULL);
 		close(p[1]);
 	}
 	while (pid > 0)
@@ -755,15 +767,26 @@ process_kbd(int s, struct packet *pkt)
 		pkt->len = 0;
 		write_packet_or_fail(s, pkt);
 
-		/* And suspend... with our focus reporting off meanwhile, so
-		** the shell does not read [I/[O on focus changes. */
-		if (focus_on)
-			write_buf_or_fail(1, "\033[?1004l", 8);
-		tcsetattr(0, TCSADRAIN, &orig_term);
+		/* And suspend... on the terminal a detach leaves (#211): the
+		** shell must not get the session's alt screen, mouse or focus
+		** reports, bracketed paste or kitty keys. The MSG_ATTACH below
+		** has the master re-arm them. */
+		restore_term();
 		kill(getpid(), SIGTSTP);
 		tcsetattr(0, TCSADRAIN, &cur_term);
 		if (focus_on)
 			write_buf_or_fail(1, "\033[?1004h", 8);
+		/* What the master sent before it read the MSG_DETACH was for
+		** the screen the reset left: drop it, the redraw repaints. */
+		{
+			unsigned char junk[BUFSIZE];
+			ssize_t r;
+
+			while ((r = recv(s, junk, sizeof junk, MSG_DONTWAIT)) > 0)
+				;
+			if (r == 0)	/* it ended meanwhile: the loop sees the end */
+				return KBD_OK;
+		}
 
 		/* Tell the master that we are returning. */
 		pkt->type = MSG_ATTACH;

@@ -2956,6 +2956,7 @@ spawn_master(char *exe, const char *name, char *sockp,
 }
 
 static int attach_xray_view(void);
+static int attach_remote;	/* this attach is a host's: so is its chord's view */
 
 static int
 do_attach(char *exe, int forced_name, int force, char **inner_argv,
@@ -2974,6 +2975,7 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 	attach_xray = attach_xray_view;	/* local and remote (#187, #189) */
 	/* Remote (#087): --host names the host; else an exact local name
 	** wins, and host:name is remote. */
+	attach_remote = 1;	/* until the name turns out local, below */
 	if (remote_host)
 		return dch_remote_attach(remote_host, session_name);
 	/* never with remote hosts off (#122); discovery still names hosts */
@@ -2986,6 +2988,7 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 		         session_name);
 		return dch_remote_attach(host, colon + 1);
 	}
+	attach_remote = 0;
 
 	/* If auto-attaching and base is busy, advance to next free slot. */
 	if (!forced_name && !force)
@@ -6519,14 +6522,15 @@ faint_text(const char *raw, size_t n, char *txt, char *dim)
 
 /* A remote session's screen, ctl `--read <name> --ansi`'s stdout
 ** (the host's bytes, hostile), as plain text the way faint_text reads a
-** local one: escapes dropped, CSI n C as n blanks, CRs dropped. Its tail
+** local one: escapes dropped, CSI n C as n blanks, CRs dropped, a NUL as
+** '?'. Its tail
 ** as fetch_screen keeps one, the text within 8 times that. malloc'd, NULL
 ** when too big or out of memory (the X-ray view's On screen, #188). */
 char *
 xv_plain(const char *raw, size_t n)
 {
 	char *txt, *dim;
-	size_t k;
+	size_t k, i;
 
 	if (n > DET_CAP)
 	{
@@ -6543,6 +6547,10 @@ xv_plain(const char *raw, size_t n)
 	}
 	(void)faint_text(raw, n, txt, dim);
 	free(dim);
+	/* a NUL is an invalid byte, '?': the rows after it still show (NIT-R1) */
+	for (i = 0; i < k; i++)
+		if (!txt[i])
+			txt[i] = '?';
 	txt[k] = '\0';
 	return txt;
 }
@@ -9411,6 +9419,7 @@ pk_rrevive(struct pk *p, const struct pkrow *w, int c)
 }
 
 static int pk_xray(struct pk *p, int fd, const char *name, int record,
+                   int remote,
                    char *out, size_t outsz);
 
 /* One key. 1: out holds the session to attach; -1: quit; 0: go on. */
@@ -9470,7 +9479,7 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 		return 0;
 	}
 	if (c != '\r' && c != '\n' && c != 'r' && c > 0 && c < 256 &&
-	    strchr("RSxabBmIpdo", c) && p->pid > 0)
+	    strchr("RSXabBmIpdo", c) && p->pid > 0)
 	{
 		snprintf(p->status, sizeof p->status, "busy, one at a time");
 		return 0;
@@ -9501,23 +9510,23 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 	}
 	if (!w || (c > 0 && c < 256 && !strchr("\r\nrRSxXapmdo", c)))
 		return 0;
-	/* dch would read a name that starts with '-' as a flag: Enter, x, p
+	/* dch would read a name that starts with '-' as a flag: Enter, X, p
 	** and d pass it after `--` or need no flag; no such name is made or
 	** resumed (#162) */
-	if (w->name[0] == '-' && !(t == 2 ? c == 'p' || c == 'd' : c == 'x' ||
+	if (w->name[0] == '-' && !(t == 2 ? c == 'p' || c == 'd' : c == 'X' ||
 	                           c == '\r' || c == '\n'))
 	{
 		snprintf(p->status, sizeof p->status, t == 2 ? "%s: a name "
 		         "starting with '-' can't be resumed; p pins, d removes"
-		         : "%s: a name starting with '-'; Enter attaches, x "
+		         : "%s: a name starting with '-'; Enter attaches, X "
 		         "kills", w->name);
 		return 0;
 	}
-	if (c == 'X')
+	if (c == 'x')
 	{
 		/* the X-ray view (#175): a live session by name, a History row
 		** by its record; a remote one's on its host (#188) */
-		return pk_xray(p, fd, w->name, t == 2, out, outsz);
+		return pk_xray(p, fd, w->name, t == 2, w->remote, out, outsz);
 	}
 	/* ponytail: a remote row only attaches; kill, rename, restart and
 	** the rest need ops-gated frames and the same confirmation (#087).
@@ -9567,7 +9576,7 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 			pk_ask(p, "Stop %s? Claude Code exits; resume it from "
 			       "History.", w->title);
 			return 0;
-		case 'x':
+		case 'X':
 			snprintf(d, sizeof d, "killing %s", w->title);
 			pk_act(&p->ask, t, w->name, d, "-k", "--", w->name, NULL);
 			pk_ask(p, "Kill %s?", w->title);
@@ -9678,6 +9687,10 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 
 static int xray_main(int argc, char **argv);
 static int name_routes_remote(const char *n);
+/* An X-ray view of a picker row or an attach: 1 remote, -1 local, as the
+** row is, not as its name routes (a local name may be host:name; QA 1.57.0
+** LOW-R2). The view's children inherit it. 0: by the name. */
+static int xv_route;
 
 /* xview.c's engine call: xray_main in a forked child, as `dch --xray <av>
 ** --json` runs it (av[0] "--read": `dch --read host:name ...` over ctl),
@@ -9688,6 +9701,7 @@ pid_t
 xv_spawn(int fd, int ac, char **av, int *out, int *err)
 {
 	int po[2], pe[2];
+	sigset_t s, o;
 	pid_t pid;
 
 	if (pipe(po) < 0)
@@ -9700,6 +9714,15 @@ xv_spawn(int fd, int ac, char **av, int *out, int *err)
 	}
 	fflush(stdout);
 	fflush(stderr);
+	/* blocked over the fork: a SIGTERM from xv_stop before the resets
+	** would run picker_sigint here, which restores the view's terminal
+	** and xv_kills its siblings (QA 1.58.0 MED-V4); after them, one
+	** pending kills the child by its default action */
+	sigemptyset(&s);
+	sigaddset(&s, SIGINT);
+	sigaddset(&s, SIGTERM);
+	sigaddset(&s, SIGHUP);
+	sigprocmask(SIG_BLOCK, &s, &o);
 	if ((pid = fork()) == 0)
 	{
 		int rc;
@@ -9708,6 +9731,7 @@ xv_spawn(int fd, int ac, char **av, int *out, int *err)
 		signal(SIGTERM, SIG_DFL);
 		signal(SIGHUP, SIG_DFL);
 		signal(SIGWINCH, SIG_DFL);
+		sigprocmask(SIG_SETMASK, &o, NULL);
 		picker_tty_fd = -1;
 		close(fd);
 		if (dup2(po[1], STDOUT_FILENO) < 0 || dup2(pe[1], STDERR_FILENO) < 0)
@@ -9723,6 +9747,7 @@ xv_spawn(int fd, int ac, char **av, int *out, int *err)
 		fflush(stdout);
 		_exit(rc);
 	}
+	sigprocmask(SIG_SETMASK, &o, NULL);
 	close(po[1]);
 	close(pe[1]);
 	if (pid < 0)
@@ -9763,12 +9788,12 @@ xv_screen(const char *name, char *buf, size_t cap)
 	return n;
 }
 
-/* The picker's X: the view on its terminal, as it is (raw, alternate
+/* The picker's x: the view on its terminal, as it is (raw, alternate
 ** screen); the picker drawn whole after. The view's o (#194): 1, out
 ** holds the session to attach, as Enter's; not in the -k and -d pickers. */
 static int
-pk_xray(struct pk *p, int fd, const char *name, int record, char *out,
-        size_t outsz)
+pk_xray(struct pk *p, int fd, const char *name, int record, int remote,
+        char *out, size_t outsz)
 {
 	char n[620], err[400];
 	int rc;
@@ -9777,7 +9802,9 @@ pk_xray(struct pk *p, int fd, const char *name, int record, char *out,
 		snprintf(n, sizeof n, "%s.json", name);
 	else
 		snprintf(n, sizeof n, "%s", name);
+	xv_route = remote ? 1 : -1;
 	rc = xv_run(fd, n, err, sizeof err);
+	xv_route = 0;
 	pk_pn = 0;
 	if (rc != 0)
 		snprintf(p->status, sizeof p->status, "%s", err);
@@ -13640,7 +13667,8 @@ xr_local(const char *n, const struct hrec *r, int nr)
 /* host:name is a remote session's (#087, #122): no local session or History
 ** record of that exact name, and the part before the ':' a known host
 ** (--hosts, remote_hosts or a cached remote row; none while remote hosts
-** are off). --xray and the control verbs both route by it. */
+** are off). --xray and the control verbs both route by it. Under xv_route
+** the view's row or attach decides instead. */
 static int
 name_routes_remote(const char *n)
 {
@@ -13649,6 +13677,8 @@ name_routes_remote(const char *n)
 	size_t hl = strcspn(n, ":");
 	int nr, hit, known;
 
+	if (xv_route)
+		return xv_route > 0 && hl < sizeof host && n[hl] == ':';
 	if (!name_is_remote(n) || hl >= sizeof host)
 		return 0;
 	snprintf(host, sizeof host, "%.*s", (int)hl, n);
@@ -13720,7 +13750,10 @@ attach_xray_view(void)
 	xv_tab = 2;
 	snprintf(n, sizeof n, "%s%s%s", remote_host ? remote_host : "",
 	         remote_host ? ":" : "", session_name);
-	if ((rc = xray_view(n)) != 0)
+	xv_route = attach_remote ? 1 : -1;
+	rc = xray_view(n);
+	xv_route = 0;
+	if (rc != 0)
 	{
 		tw(STDERR_FILENO, "\r(any key: back to the session)");
 		(void)!read(STDIN_FILENO, &c, 1);

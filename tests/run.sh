@@ -12,10 +12,24 @@ bad()  { fail=$((fail + 1)); printf '  FAIL %s\n' "$1"; }
 check(){ if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (want [$3] got [$2])"; fi; }
 # Run a python test script; on failure print its output so CI logs show
 # which sub-check died instead of a bare FAIL line.
+# A test still running after DCH_TEST_TIMEOUT seconds (default 600; the
+# slowest python test takes a few minutes on a macOS runner under ASan) gets
+# every thread's traceback printed by faulthandler's in-process watchdog
+# thread (no sleeper process to reap), exits 1, and the dch processes left
+# are listed. Output goes to a file, not $(...): a leftover child holding
+# that pipe open would hang the suite.
 pyrun(){
-    pyout=$(DCH="$DCH" python3 "$(dirname "$0")/$2" 2>&1) \
+    DCH="$DCH" python3 -c 'import faulthandler, os, runpy, sys
+faulthandler.dump_traceback_later(float(sys.argv[1]), exit=True)
+sys.argv = sys.argv[2:]
+sys.path[0] = os.path.dirname(os.path.abspath(sys.argv[0]))
+runpy.run_path(sys.argv[0], run_name="__main__")' \
+        "${DCH_TEST_TIMEOUT:-600}" "$(dirname "$0")/$2" >"$TMP/pyout" 2>&1 \
         && ok "$1" \
-        || { bad "$1"; printf '%s\n' "$pyout" | sed 's/^/       /'; }
+        || { bad "$1"; sed 's/^/       /' "$TMP/pyout"
+             grep -q '^Timeout (' "$TMP/pyout" &&
+                 ps -A -o pid,ppid,stat,etime,command |
+                 awk 'NR == 1 || $5 ~ /(^|\/)dch$/ { print "       " $0 }'; }
 }
 
 # Isolate session dir: dch uses $XDG_RUNTIME_DIR/dch-$UID.
@@ -1007,11 +1021,12 @@ else
 fi
 pyrun "xray goldens: chapters, identity, corpus labels, MANIFEST" xray_golden.py
 pyrun "the --xray view: tabs, card, reader, hostile text, signals, picker X" xray_view_test.py
+pyrun "the --xray view: a query child stopped right after its fork leaves the terminal alone, direct and chord" xray_fork_sig_test.py
 # #25: a socket-write interposer (tests/sockfail.c) makes every query child
 # of the chord's view exit(1); pyrun shows a passing test's skip line only here
 pyrun "the chord's query child exit()s: the client's terminal and marker stay" \
     chord_fork_exit_test.py
-printf '%s\n' "$pyout" | grep '^  skip '
+grep '^  skip ' "$TMP/pyout"
 pyrun "the --xray view of host:name over a loopback dch serve, picker X, the chord over dch -a host:name" xray_remote_view_test.py
 # xray_cli_test.py's RSS budget: a fork()+exec+wait4 helper, because a child
 # spawned by Python inherits Python's RSS high-water mark on Linux (maxrss.c)

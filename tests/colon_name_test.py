@@ -122,8 +122,11 @@ def new_attached(env, name):
         time.sleep(0.05)
     else:
         os.kill(pid, signal.SIGKILL)
+        os.close(fd)
         os.waitpid(pid, 0)
-    os.close(fd)
+        fd = None
+    if fd is not None:
+        os.close(fd)
     return up and st is not None and os.WIFEXITED(st) and \
         os.WEXITSTATUS(st) == 0
 

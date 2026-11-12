@@ -2145,7 +2145,10 @@ serve_conn(int fd, uint32_t ip)
 			graceful = 1;
 			break;
 		}
-		if (pending(c) && now - c->last_write >= STALL_MS)
+		/* A ctl with a timeout (not a follow) is bounded by it, so its
+		** output may sit untaken until STALL_MS past it (#201) */
+		if (pending(c) && now - (c->ctl_end > c->last_write ? c->ctl_end
+		                         : c->last_write) >= STALL_MS)
 		{
 			slog("%s: output not taken for %d s; closing",
 			     c->ipstr, STALL_MS / 1000);

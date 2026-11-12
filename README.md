@@ -172,8 +172,8 @@ hint.
 | `r` | rename (set the alias; empty clears) | |
 | `R` | restart the agent (`--restart <n> --include-agents -f`), asks first | |
 | `S` | stop (`--stop`), asks first | |
-| `x` | kill (`-k`), asks first | |
-| `X` | open the session's [X-ray view](#x-ray-view-dch---xray-n); `q` comes back (a remote row's runs on its host) | the same, for the row's record |
+| `x` | open the session's [X-ray view](#x-ray-view-dch---xray-n); `q` comes back (a remote row's runs on its host) | the same, for the row's record |
+| `X` | kill (`-k`), asks first | |
 | `a` | allow a plain Yes/No permission prompt (presses `1`, Yes), asks first; a question form or any other prompt is refused: attach to answer it | |
 | `b` / `B` | restart stale agents / restart all agents (force), asks first | |
 | `s` | sort by activity (blocked, working, done, idle, newest first) or by name (`a2` before `a10`); saved as `picker_sort`, so the next picker starts in it | |
@@ -193,7 +193,7 @@ and the filter stays across tab switches and reloads, with `No match` for an
 empty result. While typing, every printable key goes to the filter (no letter
 binding fires; `j` `k` type too), `Tab` switches tabs, `Backspace` edits (on
 an empty filter it closes the prompt), `Ctrl-U` clears the text, `↑` `↓`
-close the prompt and move, keeping the filter, so the letter actions (`x`,
+close the prompt and move, keeping the filter, so the letter actions (`X`,
 `S`, `R`, ...) work on the filtered rows, and `Enter` closes the prompt and
 acts on the selected row as it always does. `/` reopens the prompt on the
 kept text; the filter stays until `Esc`, which clears it, and a later `Esc`
@@ -278,7 +278,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.58.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.59.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -868,7 +868,7 @@ credit for it.
 ### X-ray view (`dch --xray <n>`)
 
 `dch --xray <n>` with no other flag opens a full-screen view of session
-`<n>`'s X-ray. `X` on a picker row opens the same view, and `q` returns to
+`<n>`'s X-ray. `x` on a picker row opens the same view, and `q` returns to
 the picker. The view asks the same engine as `--json` and holds its index as
 `--follow` does, so a live session's new chapters and refs appear while it is
 open. It writes nothing to disk. Text from the session (titles, lines,
@@ -884,7 +884,7 @@ The view has three tabs:
   shown without `n`. A host or an older dch that sends no `auto` shows
   every chapter. `o`, here and in a chapter, leaves the view (as `q` does)
   and attaches to the live session, as `dch -a <n>` does (`host:name` too;
-  from the picker's `X`, as the picker's `Enter`; the `-k` and `-d` pickers
+  from the picker's `x`, as the picker's `Enter`; the `-k` and `-d` pickers
   say it is not theirs). On an ended session `o` says so and the view
   stays. The attach opens at the session's live screen, not at the
   chapter.
@@ -954,18 +954,26 @@ reporting, the kitty keyboard flags, the alternate screen). An older dch
 serve or the Prosper server only resizes: those modes stay off on your
 terminal until you attach again. There is no
 `xray_key` setting: the chord takes no key from the program. In the picker,
-lowercase `x` is still kill, which asks first; `X` opens the view.
+`x` opens the view too; `X` is kill, which asks first.
 
 A window smaller than 24x8 shows only "X-ray: the window is too small".
 
 `dch --xray host:name` opens the view of a session on another host (dch
-serve 1.55.0+), and so does `X` on a remote row in the picker. Every query
+serve 1.55.0+), and so does `x` on a remote row in the picker. Every query
 runs on the host, each over its own ctl connection. On screen reads the
-host's screen with `--read <name> --ansi`. The host's text is drawn
-as a local session's is, every control and bidi character as `?`. A host
-that refuses us, lacks `--xray` or cannot be reached shows its line in place
-of the tabs (`dch: <host>: does not support --xray (needs dch serve
-1.55.0+)`, ...); `q` leaves with that exit code.
+host's screen with `--read <name> --ansi`, once a second while it shows: on
+the host that is one dch and two serve log lines (`ctl --read`, `ctl done`)
+a second. The host's text is drawn
+as a local session's is, every control and bidi character, every byte of
+an invalid UTF-8 sequence and a NUL as `?`. `x` opens the session of the
+row it is on, also next to a local session literally named `host:name`. A
+host that refuses us, lacks `--xray` or cannot be reached shows its line in
+place of the tabs (`dch: <host>: does not support --xray (needs dch serve
+1.55.0+)`, ...); `q` leaves with that exit code. When the link drops later,
+the status says `live updates stopped (reopen the view for them): ...` and
+keeps saying it: Chapters and Refs stay as they were until you open the view
+again. On screen says its failed read in place of the screen and shows the
+host's screen again once the host answers.
 
 Exit codes are those of `--json` below: 0 when you quit, 1 for no such
 session, 2 for a flag or a stdout that is not a terminal; for a remote host
@@ -1267,26 +1275,36 @@ and per row without. A definition comes only from a paired tool result or a fini
 typed shell block that did not fail: a heading (`# #831 Agent panes`), a
 `#831` line with `title:` within 3 lines, a JSON object or array with a number
 or id and a title (the whole tool result, up to 256 KiB, not the 3000-scalar
-clip), or a `--title` on the command with its ref on the command
-or in the output. An orphan result, a forged or orphaned shell block, an error,
+clip), or a `--title` on the command with its ref on the command line or in
+the output. On the command line the ref is a word by itself that does not
+follow an option (a word starting with `-`; one with `=`, like `--title=T`,
+carries its own value and does not count); a ref inside a longer word
+(`--body "Fixes #9"`, `--opt=#9`) does not count, and with none left the
+output defines. A create command (`gh pr create`, `gh pr new`,
+`gh issue create`, `gh issue new`) takes its ref from its output only: what it
+creates has no number until it prints one. An orphan result, a forged or orphaned shell block, an error,
 a fence, a diff, a listing command (`rg`, `grep`, `ls`, ...), a file printed
 from outside the cwd, a heading with an empty title, and more than 3 headings
 of one shape never define. The command counts in every simple command of it
-(split at `;`, `&`, `&&`, `|`, `||`, parentheses and newlines; a `#` comment
+(split at `;`, `&`, `&&`, `|`, `||`, parentheses and newlines, not at the `&`
+of `2>&1`, `<&3` or `&>`; a `<<` inside `$(( ))` is a shift; a `#` comment
 and each here-doc's body are not a command, and a command with a body the
 shell expands, `$(…)` under an unquoted delimiter, never defines), past env
 assignments, redirects, `{`, `!`, `if`, `then`, `elif`,
-`else`, `do`, `while`, `until`, and `sudo`, `doas`, `env`, `command`, `exec`,
-`xargs`, `nice`, `nohup`, `stdbuf`, `time` and `timeout`, by name or by path
-(`/usr/bin/env`). It counts inside `sh -c '…'` (`sh`, `bash`, `zsh`, `dash`,
-`ksh`, `fish`; `-lc` too), `eval`, `watch` and `env -S` (`-S'…'` and
+`else`, `do`, `while`, `until`, `coproc`, `function f`, and `sudo`, `doas`,
+`env`, `command`, `exec`, `builtin`, `xargs`, `nice`, `nohup`, `stdbuf`,
+`time` and `timeout` with their options (`sudo -iu root`,
+`timeout --signal KILL 5`), by name, by path (`/usr/bin/env`) or by GNU name
+(`gtimeout`). It counts inside `sh -c '…'` (`sh`, `bash`, `zsh`, `dash`,
+`ksh`, `fish`; `-lc`, `-c --` and `-c -e` too), `eval`, `watch` and `env -S` (`-S'…'` and
 `--split-string` too), and inside `$(…)` and
 backquotes, quoted or not. A search or a printed file found only inside
 `$(…)` or backquotes still leaves the command's `--title` to define: its text
 feeds the command, it is not the output. A command of more than 256 words
 never defines. The file printers are `cat`, `head`, `tail`, `bat`, `batcat`,
 `less`, `more`, `nl`, `awk`, `sed`, `jq`, `yq`, `tac`, `sort`, `cut`, `uniq`,
-`rev`, `column`, `fold`, `fmt`, `glow`, `zcat` and `gzcat`; with no file
+`rev`, `column`, `fold`, `fmt`, `glow`, `zcat` and `gzcat` (also by GNU name:
+`gcat`, `gsed`); with no file
 argument (`… | jq .`) they print their input and define, but under `xargs`
 they print files named by their input and never define. A `<` source is a
 printed file of a printer, of a compound command (`done < f`, `} < f`) and
@@ -1368,7 +1386,7 @@ Codex `<n>` gets it too.
   `git --no-pager -c core.fsmonitor= -c core.hooksPath=/dev/null -c protocol.allow=never -c diff.external= -c color.ui=never -c log.showSignature=false -C <cwd>`,
   then `rev-parse --is-inside-work-tree` (not `true`: `not_repo`), then,
   for a commit URL with a short SHA only,
-  `config --get-regexp ^remote\..*\.url$`, then
+  `config -z --get-regexp ^remote\..*\.url$`, then
   `show --no-color --no-ext-diff --no-textconv --stat=80 --stat-count=14 --format=%H%x00%an%x00%at%x00%s --end-of-options <sha>^{commit}`.
   The environment is only `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`,
   `GIT_OPTIONAL_LOCKS=0`, `GIT_TERMINAL_PROMPT=0`, `GIT_NO_LAZY_FETCH=1`,
@@ -2429,7 +2447,12 @@ transcripts.
 no cap). At that cap the server
 stops forwarding, sends the dch SIGTERM (SIGKILL 2 s later) and ends with
 `{"exit":2,"why":"cap"}`. Past its timeout (the table) it does the same with
-`"why":"timeout"`. A device (its tailnet address) runs at most 2
+`"why":"timeout"`. Output the client leaves unread is held, not cut, until
+20 s past the timeout: `dch --xray host:x --json | less` left on a page gets
+the whole answer if it reads on before the 60 s are up, `"why":"timeout"` if
+it reads on within 20 s after that, and a closed connection later.
+`--follow` and `--xray --follow` have no timeout: theirs closes after 20 s
+untaken, as any connection's does. A device (its tailnet address) runs at most 2
 `--xray --follow` of one session: a third ends the oldest the same way, with
 `"why":"timeout"`, and is run once more 1 s later if it met `busy` first. A
 client that closes the connection (or half-closes it)
@@ -2515,13 +2538,15 @@ nothing `dch serve` starts inherits it; never set it on a real host.
 escapes control characters (C0, DEL, C1, bidi overrides, isolates and
 marks, U+2028 and U+2029) as
 `\xNN` or `\u{NNNN}`, and a session name containing one is refused.
+A remote [X-ray view](#x-ray-view-dch---xray-n) on its On screen tab reads the screen
+once a second: two log lines a second while it shows.
 
 **Limits.** At most 64 connections, 16 per peer, and 4 live-list streams per
 phone. A connection past the first two gets `busy` (see
 [Refusals](#refusals)) and the close. A connection that is not attached or watching closes after 30 s
 without a whole frame, and any connection closes when its output goes untaken
-for 20 s. A peer gone without a close (no answer to TCP keepalive) is
-closed in about 30 s. Control frames over 64 KiB, and any frame over the protocol's
+for 20 s (a control verb with a timeout: 20 s past that timeout). A peer
+gone without a close (no answer to TCP keepalive) is closed in about 30 s. Control frames over 64 KiB, and any frame over the protocol's
 256 MiB guard, close the connection. Sent frames are at most 8 MiB. A
 control verb has its own cap and timeouts ([above](#control-verbs-ctl)).
 

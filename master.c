@@ -61,6 +61,11 @@ struct client
 	int fd;
 	/* Whether or not the client is attached. */
 	int attached;
+	/* An attach on this connection armed its terminal: a later MSG_ATTACH
+	** pops before it pushes again. A suspend's MSG_DETACH does not clear
+	** it (#200): a client before #211 resets nothing on a suspend, and
+	** after one that does the pop meets an empty stack, a no-op. */
+	int armed;
 
 	/* Connection role latch. A control connection (MSG_KEYS/READ/WAIT)
 	** receives framed responses on the same socket attached clients
@@ -3864,8 +3869,9 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 	{
 		int k, bad;
 		int rearm = dch_vt_enabled() || !pty_gated;
-		/* a re-attach on a live connection (#189): no detach before it */
-		int again = p->attached;
+		/* a re-attach on a live connection (#189), or a resume after a
+		** suspend's MSG_DETACH (#200): the terminal may not be reset */
+		int again = p->armed;
 
 		/* Someone showed up: open the --spawn pty gate and pull what the
 		** child already printed into the mirror, exactly as a control
@@ -3880,7 +3886,7 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 			p->attached = 1;
 		drain_pty();
 
-		p->attached = 1;
+		p->attached = p->armed = 1;
 		dch_trace("attach client fd=%d", p->fd);
 
 		/* Everything below goes through the client's ORDERED out-queue,
@@ -3939,6 +3945,9 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 		** no one to land on any more. */
 		p->want_replay = 0;
 		p->replay_sb = 0;
+		/* A suspend reset the terminal off the screen this output
+		** was for (#211): drop it, the resume's redraw repaints. */
+		p->outoff = p->outlen = 0;
 	}
 
 	/* Window size change request, without a forced redraw. */
@@ -4238,7 +4247,7 @@ master_adopt(void)
 		p = link_client(resume.cfd[i]);
 		if (!p)
 			continue;
-		p->attached = 1;
+		p->attached = p->armed = 1;
 		p->role = ROLE_ATTACHED;
 		/* Half-read frame from before the exec. Without it the next
 		** read() lands mid-packet and the stream desyncs for good. */

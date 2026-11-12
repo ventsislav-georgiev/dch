@@ -3053,6 +3053,11 @@ fake_git(void)
 	    "slow|slowrev) echo $$ > \"$D/pid\"; /bin/sleep 30 & /bin/sleep 30 ;;\n"
 	    "fds) '%s' --fds > \"$D/fds\"; exit 1 ;;\n"
 	    "stuck) echo $$ > \"$D/pid\"; exec '%s' --stuck ;;\n"
+	    "kidholds) (trap '' TERM; exec /bin/sleep 30) & echo $! > \"$D/kid\";"
+	    " exit 0 ;;\n"
+	    "kidbg) (exec /bin/sleep 30) > /dev/null 2>&1 & echo $! > \"$D/kid\";"
+	    " printf '0123456789abcdef0123456789abcdef01234567\\000A\\0001700000000"
+	    "\\000s\\n'; exit 0 ;;\n"
 	    "esac\n", rd, self, self);
 
 	put("git", s, (size_t)n);
@@ -3222,13 +3227,13 @@ t_res_git(void)
 	      && is(&r, "commit", "not_commit") &&
 	      !strcmp(r.title, "Not a commit in proj") &&
 	      xr_res_spawned == s0 + 2 && !strstr(slurp("argv"), "show\n"));
-	snprintf(want, sizeof want, "-C\n%s\nconfig\n--get-regexp\n"
+	snprintf(want, sizeof want, "-C\n%s\nconfig\n-z\n--get-regexp\n"
 	         "^remote\\..*\\.url$\n--\n", cwd);
-	CHECK("git: the URL's remotes: config --get-regexp, same flags",
+	CHECK("git: the URL's remotes: config -z --get-regexp, same flags",
 	      strstr(slurp("argv"), want) != NULL);
 	{
-		static const char rm[] = "remote.up.url https://github.com/o/r2\n"
-			"remote.origin.url https://github.com/x/r.git\n";
+		static const char rm[] = "remote.up.url\nhttps://github.com/o/r2\0"
+			"remote.origin.url\nhttps://github.com/x/r.git\0";
 
 		put("remotes", rm, sizeof rm - 1);
 	}
@@ -3247,8 +3252,8 @@ t_res_git(void)
 	      && is(&r, "commit", "ok") && xr_res_spawned == s0 + 2 &&
 	      !strstr(slurp("argv"), "--get-regexp"));
 	{
-		static const char rm[] = "remote.up.url https://github.com/o/r2\n"
-			"remote.origin.url git@github.com:O/R.git\n";
+		static const char rm[] = "remote.up.url\nhttps://github.com/o/r2\0"
+			"remote.origin.url\ngit@github.com:O/R.git\0";
 
 		put("remotes", rm, sizeof rm - 1);
 	}
@@ -3258,8 +3263,8 @@ t_res_git(void)
 	      && is(&r, "commit", "ok") && xr_res_spawned == s0 + 3 &&
 	      strstr(slurp("argv"), "abcdef1234^{commit}\n"));
 	{
-		static const char rm[] = "remote.origin.url "
-			"https://x-access-token:ghp_FAKE179SECRET@github.com/o/r.git\n";
+		static const char rm[] = "remote.origin.url\n"
+			"https://x-access-token:ghp_FAKE179SECRET@github.com/o/r.git\0";
 
 		put("remotes", rm, sizeof rm - 1);
 	}
@@ -3338,6 +3343,27 @@ t_res_git(void)
 		kill(pid, SIGKILL);
 		(void)waitpid(pid, NULL, 0);
 	}
+	/* QA 1.57.0 LOW-D4: what git leaves in its group, holding a pipe (the
+	** timeout) or not (git exited 0), ends with it */
+	for (k = 0; k < 2; k++)
+	{
+		mode(k ? "kidbg" : "kidholds");
+		put("kid", "", 0);
+		CHECK(k ? "git: a kid git left behind, its pipes closed: ok" :
+		      "git: the leader exits, its kid holds the pipe: timeout",
+		      res("abcdef1", "proj", 1, &r) == 1 &&
+		      is(&r, "commit", k ? "ok" : "timeout"));
+		pid = (pid_t)atoi(slurp("kid"));
+		t0 = xr_now_ms();
+		while (pid > 0 && !(kill(pid, 0) == -1 && errno == ESRCH) &&
+		       xr_now_ms() - t0 < 2000)
+			usleep(10000);
+		CHECK(k ? "git: ... and that kid is ended with git's group" :
+		      "git: ... and that kid (it ignores SIGTERM) is ended",
+		      pid > 0 && kill(pid, 0) == -1 && errno == ESRCH);
+		if (pid > 0)
+			kill(pid, SIGKILL);	/* base: the sleep this test started */
+	}
 	/* 3.7: SIGTERM to the querying process takes git's group with it */
 	mode("slow");
 	put("pid", "", 0);
@@ -3396,23 +3422,40 @@ t_res_parse(void)
 	      xr_git_parse(b, n, 100 + 300, &r) && strstr(r.subtitle, "5m ago") &&
 	      xr_git_parse(b, n, 100 + 3 * 86400, &r) &&
 	      strstr(r.subtitle, "3d ago"));
-#define GR(s) xr_git_remote(s, strlen(s), "o/r")
-	CHECK("git remote: https, /, ssh, scp form, a token, case, 2nd line",
-	      GR("remote.o.url https://github.com/o/r.git\n") &&
-	      GR("remote.o.url https://github.com/o/r/") &&
-	      GR("remote.o.url ssh://git@github.com/O/R") &&
-	      GR("remote.o.url git@github.com:o/r.git") &&
-	      GR("remote.o.url https://u:t@github.com/o/r") &&
-	      GR("remote.a.url x\nremote.b.url https://github.com/o/r"));
+	/* git config -z: "<key>\n<value>\0" (QA 1.57.0 NIT-D1) */
+#define GR(s) xr_git_remote(s, sizeof s - 1, "o/r")
+	CHECK("git remote: https, /, ssh, scp form, a token, case, 2nd entry",
+	      GR("remote.o.url\nhttps://github.com/o/r.git\0") &&
+	      GR("remote.o.url\nhttps://github.com/o/r/\0") &&
+	      GR("remote.o.url\nhttps://github.com/o/r.git/\0") &&
+	      GR("remote.o.url\nSSH://git@GitHub.com/O/R\0") &&
+	      GR("remote.o.url\ngit@github.com:o/r.git\0") &&
+	      GR("remote.o.url\nhttps://u:t@github.com/o/r\0") &&
+	      GR("remote.a.url\nx\0remote.b.url\nhttps://github.com/o/r\0") &&
+	      GR("remote.a b.url\nhttps://github.com/o/r\0"));
 	CHECK("git remote: another repo, owner, host, a path, a cut: no",
-	      !GR("remote.o.url https://github.com/o/r2") &&
-	      !GR("remote.o.url https://github.com/x/r") &&
-	      !GR("remote.o.url https://github.com/o/r.git2") &&
-	      !GR("remote.o.url https://notgithub.com/o/r") &&
-	      !GR("remote.o.url https://e.com/github.com/o/r") &&
-	      !GR("remote.o.url https://github.com.e/o/r") &&
-	      !xr_git_remote("remote.o.url https://github.com/o/r", 34, "o/r") &&
-	      !GR("github.com/o/r") && !GR(""));
+	      !GR("remote.o.url\nhttps://github.com/o/r2\0") &&
+	      !GR("remote.o.url\nhttps://github.com/x/r\0") &&
+	      !GR("remote.o.url\nhttps://github.com/o/r.git2\0") &&
+	      !GR("remote.o.url\nhttps://github.com/o/r/x\0") &&
+	      !GR("remote.o.url\nhttps://notgithub.com/o/r\0") &&
+	      !GR("remote.o.url\nhttps://e.com/github.com/o/r\0") &&
+	      !GR("remote.o.url\nhttps://github.com.e/o/r\0") &&
+	      !GR("remote.o.url\nhttps://github.com:o/r\0") &&
+	      !GR("remote.o.url\nhttps://github.com/o/r") &&
+	      !GR("remote.o.url\0") && !GR("github.com/o/r") && !GR(""));
+	CHECK("git remote: github.com further in than the host: no (NIT-D1)",
+	      !GR("remote.o.url\nhttps://evil.com//github.com/o/r\0") &&
+	      !GR("remote.o.url\nhttps://evil.com/x@github.com/o/r\0") &&
+	      !GR("remote.o.url\nhttps://evil.com/?u=//github.com/o/r\0") &&
+	      !GR("remote.o.url\nhttps://evil.com/x git@github.com:o/r\0") &&
+	      !GR("remote.o.url\n\ngit@github.com:o/r\0") &&
+	      !GR("remote.//github.com/o/r.url\nhttps://e.com/\0"));
+	CHECK("git remote: a value with an escaped newline is one URL: no",
+	      !GR("remote.x.url\nhttps://evil/x\nremote.y.url "
+	          "https://github.com/o/r\0") &&
+	      !GR("remote.x.url\nhttps://evil/x\nhttps://github.com/o/r\0") &&
+	      !GR("remote.o.url https://github.com/o/r\n"));
 #undef GR
 	CHECK("git parse: a short hash, a missing field, a non-digit time: no",
 	      !xr_git_parse("abc\0A\0" "1\0s\n", 10, 0, &r) &&
@@ -3537,22 +3580,20 @@ rule_hit(void *ctx, const struct xr_hit *h)
 		*(int *)ctx |= 1 << (h->rule[1] - '1');
 }
 
-/* The rules (D1 1, D2 2, D3 4, D4 8) a paired Bash call of cmd in
-** /home/demo/proj defines by, its output out (JSON-escaped; NULL: the
-** heading "# #831 Title") */
+/* A paired Bash call of cmd in /home/demo/proj into k, its output out
+** (JSON-escaped; NULL: the heading "# #831 Title"), failed: is_error */
 static int
-defines_out(const char *cmd, const char *out)
+paired(const char *cmd, const char *out, int failed, struct xr_sink *k)
 {
 	char res[400], *b = malloc(strlen(cmd) * 2 + 200), *o;
-	int rules = 0;
-	struct xr_sink k = { rule_hit, &rules };
 	struct xr_chapters ch;
 
 	if (!b)
 		return -1;
 	snprintf(res, sizeof res, "{\"type\":\"user\",\"cwd\":\"/home/demo/proj\","
 	         "\"message\":{\"content\":[{\"type\":\"tool_result\","
-	         "\"tool_use_id\":\"b1\",\"content\":\"%s\"}]}}",
+	         "\"tool_use_id\":\"b1\",%s\"content\":\"%s\"}]}}",
+	         failed ? "\"is_error\":true," : "",
 	         out ? out : "# #831 Title\\nbody");
 	o = b + sprintf(b, "{\"type\":\"assistant\",\"cwd\":\"/home/demo/proj\","
 	                "\"message\":{\"content\":[{\"type\":\"tool_use\","
@@ -3566,13 +3607,23 @@ defines_out(const char *cmd, const char *out)
 	}
 	strcpy(o, "\"}}]}}");
 	begin();
-	xr_claude_refs(D, &k, 1, NULL, NULL);
+	xr_claude_refs(D, k, 1, NULL, NULL);
 	line(b);
 	line(res);
 	end(&ch);
 	xr_chapters_free(&ch);
 	free(b);
-	return rules;
+	return 0;
+}
+
+/* The rules (D1 1, D2 2, D3 4, D4 8) a paired Bash call defines by */
+static int
+defines_out(const char *cmd, const char *out)
+{
+	int rules = 0;
+	struct xr_sink k = { rule_hit, &rules };
+
+	return paired(cmd, out, 0, &k) ? -1 : rules;
 }
 
 static int
@@ -3644,6 +3695,29 @@ t_excl(void)
 		"cat <<- EOF\n\tdon't\n\tEOF\ncat /etc/x", "cat << -X\nb\n-X\ncat /etc/x",
 		"cat <<'-X'\nb\n-X\ncat /etc/x", "cat <<EOF\n\tEOF\ndon't\nEOF\ncat /etc/x",
 		"cat <<EOF\n$(cat /etc/x)\nEOF",
+		/* #181: >&, <&, &>, >| are one redirect (no & split) */
+		"cat 2>&1 /etc/x", "cat 2>&1 ../x", ">&2 cat /etc/x", "cat >&2 ../x",
+		"cat <&3 3< /etc/x", "cat &>/dev/null ../x", "cat >| o ../x",
+		/* #181: a wrap's long option or option cluster takes a value */
+		"sudo --user root cat ../x", "sudo -iu root cat ../x",
+		"timeout --signal KILL 5 cat ../x", "timeout --kill-after 1 5 cat ../x",
+		"echo a | xargs --max-args 1 rg x", "env --unset FOO cat ../x",
+		"env -iu FOO cat ../x", "nice --adjustment 5 cat ../x",
+		"stdbuf --output L cat ../x", "watch --interval 1 cat ../x",
+		"doas -nu root cat ../x",
+		/* #181: GNU names on macOS; coproc, builtin, function */
+		"gtimeout 5 cat ../x", "gstdbuf -oL cat ../x", "ggrep x", "gcat ../x",
+		"gsed 's/a/b/' ../x", "echo /etc/x | gxargs cat", "coproc cat ../x",
+		"coproc N { cat ../x; }", "builtin cd /etc; cat notes.md",
+		"function f { cat ../x; }",
+		/* #181: << in (( )) is a shift, no here-doc */
+		"echo $((1<<2))\ncat ../x", "(( 1<<2 ))\ncat ../x",
+		"x=$((1<<2)) y=$((3<<1))\ncat ../x",
+		/* #181: $'…', $\"…\"; sh -c with options or -- after -c */
+		"$'cat' ../x", "$\"cat\" ../x", "echo $'it\\'s'; cat ../x",
+		"echo $'it\\'s' \"$(cat ../x)\"", "sh -c -- 'cat ../x'",
+		"bash -c -e 'cat /etc/x'", "bash -c -o pipefail 'cat ../x'",
+		"bash -c - 'cat ../x'",
 		0
 	};
 	static const char *const keep[] = {
@@ -3674,6 +3748,13 @@ t_excl(void)
 		/* #177: a body with no delimiter line ends at its slice; the `
 		** that closes the substitution is not the body's */
 		"cat notes.md; echo \"`cat <<E\nx`\"",
+		/* #181: the same shapes with a file inside the cwd */
+		"cat 2>&1 notes.md", ">&2 cat notes.md", "cat <&3 3< notes.md",
+		"sudo --user root cat notes.md", "sudo --preserve-env cat notes.md",
+		"gcat notes.md", "function f { cat notes.md; }",
+		"echo $((1<<2))\ncat notes.md", "$'cat' notes.md",
+		"sh -c -- 'cat notes.md'", "echo $'it\\'s'; cat notes.md",
+		"gh issue view 831 2>&1 | head -5", "todo.py get dch 831 2>&1",
 		0
 	};
 	/* change (a): a reader or search only inside $(…) or backquotes
@@ -3740,6 +3821,129 @@ t_excl(void)
 		strcat(big, " a");
 		CHECK("excl: 257 words exclude the command whole", defines(big) == 0);
 		free(big);
+	}
+}
+
+/* #214: every D-rule definition of a paired Bash call, "key=title;" each */
+static void
+def_hit(void *ctx, const struct xr_hit *h)
+{
+	char *b = ctx;
+	size_t l = strlen(b);
+
+	if (h->rule)
+		snprintf(b + l, 512 - l, "%s=%s;", h->sp->key, h->title);
+}
+
+/* #214 (QA 1.55.0 LOW-13, ruling R1/R2): a create command defines from its
+** output only; elsewhere a command-line ref is a word by itself after no
+** option. The ruling's rows 1-12, then the forms. */
+static void
+t_d3(void)
+{
+	static const struct { const char *cmd, *out; int failed; const char *want; }
+	row[] = {
+#define PR "https://github.com/o/r/pull/12"
+		/* 1-5: the new PR's URL, never the body's or the title's ref */
+		{ "gh pr create --title \"Real\" --body \"Fixes #999\"", PR, 0,
+		  "pull:o/r#12=Real;" },
+		{ "gh pr create --body \"Fixes #999\" --title \"Real\"", PR, 0,
+		  "pull:o/r#12=Real;" },
+		{ "gh pr create --title \"Real\" --body \"Some text. Fixes #999 and "
+		  "#998.\"", PR, 0, "pull:o/r#12=Real;" },
+		{ "gh pr create --title \"Real\" --body \"no refs\"", PR, 0,
+		  "pull:o/r#12=Real;" },
+		{ "gh pr create --title \"Fix #999 crash\"", PR, 0,
+		  "pull:o/r#12=Fix #999 crash;" },
+		/* 6, 7: the printed issue; nothing printed, nothing defined */
+		{ "gh issue create --title T --body \"dup of #7\"",
+		  "https://github.com/o/r/issues/13", 0, "pull:o/r#13=T;" },
+		{ "gh issue create --title T --body \"dup of #77\"",
+		  "https://github.com/o/r/issues/13", 0, "pull:o/r#13=T;" },
+		{ "gh pr create --title T --web",
+		  "Opening github.com/o/r/compare in your browser.", 0, "" },
+		/* 8, 9: an edit's whole-word URL, the body's ref not counted */
+		{ "gh pr edit " PR " --title New", PR, 0, "pull:o/r#12=New;" },
+		{ "gh pr edit " PR " --title New", "", 0, "pull:o/r#12=New;" },
+		{ "gh pr edit " PR " --title New --body \"Fixes #999\"", PR, 0,
+		  "pull:o/r#12=New;" },
+		/* 10: --notes' #12 neither defines nor counts; the output rule
+		** (a release URL; the PR URL the rows assume) is unchanged */
+		{ "gh release create v1.2 --title \"Release 1.2\" --notes \"Fixes "
+		  "#12\"", "https://github.com/o/r/releases/tag/v1.2", 0,
+		  "url:https://github.com/o/r/releases/tag/v1.2=Release 1.2;" },
+		{ "gh release create v1.2 --title \"Release 1.2\" --notes \"Fixes "
+		  "#12\"", "", 0, "" },
+		{ "gh release create v1.2 --title \"Release 1.2\" --notes \"Fixes "
+		  "#12\"", PR, 0, "pull:o/r#12=Release 1.2;" },
+		/* 11: a failed command */
+		{ "gh pr create --title Real --body \"Fixes #999\"", PR, 1, "" },
+		{ "gh pr edit " PR " --title New", PR, 1, "" },
+		/* 12: a reader only in $(…) leaves D3 (D1 off: #831's heading
+		** gets T); an outer reader stops it */
+		{ "gh pr create --title T --body \"$(cat /etc/b.md) Fixes #999\"", PR,
+		  0, "pull:o/r#12=T;" },
+		{ "gh pr create --title T --body \"$(cat /etc/b.md)\"", NULL, 0,
+		  "issue:#831=T;" },
+		{ "cat /etc/x; gh pr create --title T --body \"Fixes #999\"", PR, 0,
+		  "" },
+		/* R1: new, issue, a path or a prefix to gh; a whole word too */
+		{ "gh pr new --title Real --body \"Fixes #999\"", PR, 0,
+		  "pull:o/r#12=Real;" },
+		{ "gh issue new --title T -b \"Fixes #999\"",
+		  "https://github.com/o/r/issues/13", 0, "pull:o/r#13=T;" },
+		{ "gh pr create --title T --body x o/r#5", PR, 0, "pull:o/r#12=T;" },
+		{ "/usr/local/bin/gh pr create --title T --body x o/r#5", PR, 0,
+		  "pull:o/r#12=T;" },
+		{ "GH_REPO=o/r gh issue create --title T --body x o/r#5", PR, 0,
+		  "pull:o/r#12=T;" },
+		{ "gh pr create --title T --body-file - <<EOF\nFixes #999\nEOF", PR,
+		  0, "pull:o/r#12=T;" },
+		/* R2: a whole word after no option, quoted or not (a bare number is
+		** no ref: the output rule) */
+		{ "gh pr edit o/r#12 --title New", "", 0, "pull:o/r#12=New;" },
+		{ "gh pr edit \"#12\" --title New", "", 0, "issue:#12=New;" },
+		{ "gh pr edit 12 --title New", PR, 0, "pull:o/r#12=New;" },
+		{ "dch meta PROJ-71 --title=\"Own title\"", "ok", 0,
+		  "ticket:PROJ-71=Own title;" },
+		{ "gh pr edit o/r#12 o/r#13 --title New", PR, 0, "" },
+		/* R2a: an option word with = carries its own value */
+		{ "dch meta --title=\"Own title\" PROJ-71", "ok", 0,
+		  "ticket:PROJ-71=Own title;" },
+		{ "gh pr edit --opt=x o/r#9 --title T", "", 0, "pull:o/r#9=T;" },
+		{ "gh pr edit -R o/r#9 --title T", "", 0, "" },
+		{ "gh pr edit 12 --title T --opt=#99", "", 0, "" },
+		/* R2: after an option, inside a word, in a comment or a here-doc
+		** body: not counted */
+		{ "gh pr edit -R o/r#12 --title New", "", 0, "" },
+		{ "gh pr edit 12 --title New --opt=#99", "", 0, "" },
+		{ "gh pr edit 12 --title \"#99\"", "", 0, "" },
+		{ "gh pr edit 12 --title New # see #77", "", 0, "" },
+		{ "gh pr edit 12 --title New --body-file - <<EOF\nFixes #999\nEOF",
+		  PR, 0, "pull:o/r#12=New;" },
+		{ "gh pr edit " PR " --title New --body \"see "
+		  "https://github.com/o/r/pull/13\"", PR, 0, "pull:o/r#12=New;" },
+		/* a gh alias is no create: R2 */
+		{ "gh alias-create --title T --body \"Fixes #999\"", PR, 0,
+		  "pull:o/r#12=T;" },
+#undef PR
+	};
+	char got[512], m[300], *p;
+	size_t i;
+
+	for (i = 0; i < sizeof row / sizeof *row; i++)
+	{
+		struct xr_sink k = { def_hit, got };
+
+		got[0] = '\0';
+		snprintf(m, sizeof m, "d3: %s%s -> %s", row[i].cmd,
+		         row[i].failed ? " (failed)" : "", row[i].want);
+		for (p = m; (p = strpbrk(p, "\n\t\r")); )
+			*p = '|';
+		CHECK(m, !paired(row[i].cmd, row[i].out, row[i].failed, &k) &&
+		      !strcmp(got, row[i].want));
+		if (strcmp(got, row[i].want))
+			fprintf(stderr, "  got: %s\n", got);
 	}
 }
 
@@ -3812,6 +4016,7 @@ main(int argc, char **argv)
 	t_auto();
 	t_auto_cap();
 	t_excl();
+	t_d3();
 	t_cancel();
 	t_scan_caps();
 	t_scan_scope();

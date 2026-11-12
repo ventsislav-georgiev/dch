@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """The X-ray view of a remote session (#188, XR5c): `dch --xray host:name`
-and the picker's X on a remote row.
+and the picker's x on a remote row.
 
 A real `dch serve` runs on 127.0.0.1 (DCH_SERVE_TEST_LOOPBACK=1, --bind
 127.0.0.1 --port 0, a fake `tailscale` first on PATH), its sessions in their
@@ -27,21 +27,25 @@ Covers:
      mirror" and still no number;
   3. a hostile host: raw ESC, BEL, C1 and bidi bytes in its snapshot and in
      its --read screen are drawn as ?, its OSC and CSI dropped, and its
-     screen still gets its hint;
+     screen still gets its hint; invalid UTF-8 a ? per byte and a NUL a ?
+     with the rest after it; a later failed read's stderr said in place of
+     the screen, as clean (QA 1.57.0 LOW-R1, NIT-R1);
   4. a host without "xray" (exit 6), a closed port (exit 7) and a gate that
      refuses us (exit 4): the line in place of the tabs, the view open until
      q, then the exit code and the line on stderr;
-  5. the picker: X on the remote Sessions row srv:xv-sh opens its view, q
-     returns to the picker; X on the remote History row srv:xv-cl opens
-     that record's view;
+  5. the picker: x on the remote Sessions row srv:xv-sh opens its view, q
+     returns to the picker, X (kill) there opens no view (OQ-6); x on the
+     remote History row srv:xv-cl opens that record's view; next to a local
+     session literally named srv:xv-sh, x on each row opens that row's
+     session (QA 1.57.0 LOW-R2);
   6. the in-attach chord over `dch -a srv:xv-rx` (#189): the detach key then
      x (a later read, one burst, the kitty CSI form, --host srv -a xv-rx,
      detach_key = switch) opens the view of srv:xv-rx over the attach, On
      screen read with its own ctl --read; the session never gets the detach
      key or the x; q goes back, the host is asked to redraw (the program's
      SIGWINCH), a key after reaches the session, and the host saw one attach
-     (never retired). Off under -E and DCH_DOUBLE_TAP_MS=0, as the local
-     chord;
+     (never retired); next to a local srv:xv-rx too (LOW-R2). Off under -E
+     and DCH_DOUBLE_TAP_MS=0, as the local chord;
   7. the view's failure lines over an attach to a fake host without "xray"
      (exit 6), whose gate refuses the view's connection (exit 4), or whose
      port closes once the attach is in (exit 7): the line, q, any key, and
@@ -69,6 +73,10 @@ Covers:
       to hang for good, or wait 3 s per child), only the follow child after
       each card, no zombie, the view's fd count flat over the 20 cards, the
       terminal restored, exit 0, and no child the test saw left running.
+  11. a link that drops and comes back (QA 1.57.0 LOW-R3): the status says
+      live updates stopped and how to get them back, and no failed read
+      replaces it; a failed read shows in place of the screen; once the
+      host answers On screen reads again and no unreachable line is left.
 
 Run:  python3 tests/xray_remote_view_test.py      (uses ./dch)
 """
@@ -153,6 +161,8 @@ class Pty:
     def pump(self, secs=0.05):
         end = time.time() + secs
         while True:
+            if time.time() >= end:
+                return
             r, _, _ = select.select([self.fd], [], [],
                                     max(0, end - time.time()))
             if not r:
@@ -200,10 +210,12 @@ class Pty:
         return self.rc
 
     def close(self):
+        # the fd first: on macOS a killed pty leader with output unread
+        # cannot finish exiting, so the waitpid would never return
+        os.close(self.fd)
         if self.reap() is None:
             os.kill(self.pid, signal.SIGKILL)
             os.waitpid(self.pid, 0)
-        os.close(self.fd)
 
 
 def ctls(what):
@@ -454,16 +466,24 @@ def test_open():
 HOSTILE_TITLE = "t\x1b]0;pwned\x07 a\u009bb c‮d e⁦f"
 HOSTILE_SCREEN = (b"$ echo hi\x1b]0;pwned\x07\r\n"
                   b"see o/r#41 \x1b[31mred\x1b[0m\x1b[5Cgap\x07bel"
-                  b" c1\xc2\x9b2J bidi\xe2\x80\xaex \x1b[2J\r\n")
+                  b" c1\xc2\x9b2J bidi\xe2\x80\xaex \x1b[2J\r\n"
+                  b"sur[\xed\xa0\x80] f8[\xf8\x88\x80\x80] "
+                  b"trunc[\xe4\xb8A] f4[\xf4\x90\x80\x80] nul[\x00]after\r\n")
+# a later --read fails: the host's stderr, raw, is the line said
+HOSTILE_ERR = b"err\x1b]0;pwned\x07 sur\xed\xa0\x80 tr\xe4\xb8\n"
+BAD_UTF8 = (b"\xed\xa0\x80", b"\xf8\x88", b"\xe4\xb8", b"\xf4\x90", b"\x00")
 
 
 class Hostile(Fake):
     """A host with ctl, ctl-cancel and xray: --follow answers a snapshot
-    with raw control and bidi bytes and holds the stream; --read answers a
-    screen with OSC, CSI, BEL, C1 and bidi bytes; anything else ends 0."""
+    with raw control and bidi bytes and holds the stream; the first --read
+    answers a screen with OSC, CSI, BEL, C1, bidi, invalid UTF-8 and NUL
+    bytes, every later one fails (exit 1) with such a stderr; anything else
+    ends 0."""
 
     def __init__(self):
         super().__init__("ok", ops=["ctl", "ctl-cancel", "xray"])
+        self.reads = 0
 
     def serve(self, c):
         buf = b""
@@ -500,6 +520,11 @@ class Hostile(Fake):
                             c.sendall(frame(0x31, snap.encode()))
                             continue    # a stream: held until the close
                         if argv[0] == "--read":
+                            self.reads += 1
+                            if self.reads > 1:
+                                c.sendall(frame(0x32, HOSTILE_ERR) +
+                                          frame(0x33, {"exit": 1}))
+                                continue
                             c.sendall(frame(0x31, HOSTILE_SCREEN) +
                                       frame(0x32, b"cursor 2 1 1 0\n"))
                         c.sendall(frame(0x33, {"exit": 0}))
@@ -526,16 +551,132 @@ def test_hostile():
               v.out[mark:])
         check("hostile: its o/r#41 gets hint a",
               v.wait(b"On screen 1", start=mark), v.out[mark:])
+        check("hostile: the screen's invalid UTF-8 (surrogate, F8 lead, "
+              "truncated, past U+10FFFF) shows as ?, a byte each, and a NUL "
+              "as ? with the rest after it (QA 1.57.0 LOW-R1, NIT-R1)",
+              v.wait(b"sur[???] f8[????] trunc[??A] f4[????] nul[?]after",
+                     start=mark), v.out[mark:])
+        check("hostile: a failed read's stderr is said in place of the screen,"
+              " its OSC, BEL and invalid UTF-8 as ?",
+              v.wait(b"No screen: err?]0;pwned? sur??? tr??", start=mark),
+              v.out[mark:][-600:])
         v.key(b"q")
         rc = v.exit()
         check("hostile: q exits 0", rc == 0, (rc, v.out[-80:]))
         bad = [b for b in (b"\x1b]0;pwned", b"\x07 a", b"\x07bel",
                            b"\xc2\x9b", b"\xe2\x80\xae", b"\xe2\x81\xa6")
-               if b in v.out]
-        check("hostile: none of the host's control or bidi bytes reached the "
-              "terminal", not bad, bad)
+               + BAD_UTF8 if b in v.out]
+        check("hostile: none of the host's control, bidi or invalid UTF-8 "
+              "bytes reached the terminal", not bad, bad)
         check("hostile: the screen was asked as --read fk --ansi (no "
               "--cursor)", ["--read", "fk", "--ansi"] in h.bodies, h.bodies)
+    finally:
+        v.close()
+        h.close()
+
+
+# ---- 11: a link that drops and comes back (QA 1.57.0 LOW-R3) ---------------
+
+class Flaky(Fake):
+    """A host with ctl, ctl-cancel and xray whose link drops: --follow
+    answers a live snapshot and holds the stream, --read a screen with
+    self.word; down() cuts every connection and each new one at once, up()
+    answers again."""
+
+    def __init__(self):
+        super().__init__("ok", ops=["ctl", "ctl-cancel", "xray"])
+        self.up, self.word = True, b"LINK-UP"
+
+    def down(self):
+        self.up = False
+        for c in list(self.conns):
+            try:
+                c.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    def serve(self, c):
+        if not self.up:
+            c.close()
+            return
+        buf = b""
+        try:
+            while True:
+                d = c.recv(65536)
+                if not d:
+                    return
+                buf += d
+                while len(buf) >= 5:
+                    t, n = struct.unpack(">BI", buf[:5])
+                    if len(buf) < 5 + n:
+                        break
+                    body, buf = buf[5:5 + n], buf[5 + n:]
+                    if t == 0x08:
+                        c.sendall(frame(0x18, {"proto": "1.0",
+                                               "server": "fake",
+                                               "ops": self.ops}))
+                    elif t == 0x30:
+                        argv = json.loads(body)["argv"]
+                        if "--follow" in argv:
+                            c.sendall(frame(0x31, SNAP))
+                            continue    # a stream: held until the close
+                        if argv[0] == "--read":
+                            c.sendall(frame(0x31, b"$ echo hi\r\n" +
+                                            self.word + b"\r\n"))
+                        c.sendall(frame(0x33, {"exit": 0}))
+        except OSError:
+            return
+
+
+def redraw(v, cols):
+    """The whole frame, drawn again after a resize."""
+    v.resize(30, cols)
+    mark = len(v.out)
+    v.pump(1.0)
+    return v.out[mark:]
+
+
+def test_link_drop():
+    h = Flaky()
+    hosts("q=127.0.0.1:%d" % h.port)
+    v = Pty([DCH, "--xray", "q:fk"])
+    stop = b"live updates stopped (reopen the view for them): dch: q: "
+    try:
+        check("link drop: the view opens on the snapshot",
+              v.wait(b"X-ray  q:fk") and v.wait(b"Chapters 1"),
+              v.out[-600:])
+        mark = len(v.out)
+        v.key(b"\t\t", 1.5)
+        check("link drop: On screen shows the host's screen",
+              v.wait(b"LINK-UP", start=mark), v.out[mark:])
+        mark = len(v.out)
+        h.down()
+        v.pump(3.5)
+        down = v.out[mark:]
+        frame_ = redraw(v, 101)
+        # lines are drawn whole: each host line in the bytes is one drawn
+        check("link drop: the status says live updates stopped and how to "
+              "get them back, and no failed read replaces it over 3 s",
+              stop in frame_ and
+              all(down[:m.start()].endswith((b"No screen: ", stop[:-8]))
+                  for m in re.finditer(b"dch: q: ", down)),
+              (frame_[-400:], down[-600:]))
+        check("link drop: a failed read is said in place of the screen",
+              b"No screen: dch: q: unreachable" in frame_, frame_[-600:])
+        h.word = b"LINK-BACK"
+        h.up = True
+        mark = len(v.out)
+        v.pump(2.5)
+        frame_ = redraw(v, 100)
+        check("link drop, host back: On screen reads again",
+              v.wait(b"LINK-BACK", start=mark), v.out[mark:][-600:])
+        check("link drop, host back: no line says the host is unreachable "
+              "but the stop's own, which stays",
+              stop in frame_ and b"No screen" not in frame_ and
+              frame_.count(b"unreachable") ==
+              frame_.count(stop + b"unreachable"), frame_[-600:])
+        v.key(b"q")
+        check("link drop: q exits 0", v.exit() == 0, v.out[-80:])
     finally:
         v.close()
         h.close()
@@ -867,7 +1008,7 @@ def test_stop():
         h.close()
 
 
-# ---- 5: the picker's X on a remote row --------------------------------------
+# ---- 5: the picker's x on a remote row --------------------------------------
 
 def test_picker(port):
     hosts("srv=127.0.0.1:%d" % port)
@@ -877,8 +1018,8 @@ def test_picker(port):
               v.wait(b"xv-sh", 15), v.out[-600:])
         v.pump(1.0)
         mark = len(v.out)
-        v.key(b"X", 1.0)
-        check("picker: X on the remote row opens its view",
+        v.key(b"x", 1.0)
+        check("picker: x on the remote row opens its view",
               v.wait(b"X-ray  srv:xv-sh", start=mark) and
               v.wait(b"Chapters", start=mark), v.out[mark:][-600:])
         mark = len(v.out)
@@ -886,6 +1027,13 @@ def test_picker(port):
         check("picker: q in the view returns to the picker",
               v.reap() is None and v.wait(b"Sessions", start=mark),
               v.out[mark:][-600:])
+        n0 = ctls("--xray")
+        mark = len(v.out)
+        v.key(b"X", 1.0)
+        check("picker: X on the remote row opens no view and kills nothing "
+              "(OQ-6)", v.wait(b"Enter attaches, nothing else", start=mark)
+              and b"X-ray  srv:xv-sh" not in v.out[mark:] and
+              ctls("--xray") == n0, v.out[mark:][-600:])
         # History: the host's record srv:xv-cl, its only row
         for _ in range(3):
             mark = len(v.out)
@@ -896,8 +1044,8 @@ def test_picker(port):
               v.wait(b"xv-cl", 15, start=mark), v.out[mark:][-600:])
         v.pump(0.5)
         mark = len(v.out)
-        v.key(b"X", 1.0)
-        check("picker: X on the remote History row opens its record's view",
+        v.key(b"x", 1.0)
+        check("picker: x on the remote History row opens its record's view",
               v.wait(b"X-ray  srv:xv-cl", start=mark) and
               v.wait(b"Chapters 2", start=mark), v.out[mark:][-600:])
         v.key(b"q", 1.0)
@@ -905,6 +1053,44 @@ def test_picker(port):
         check("picker: Esc quits it", v.exit() is not None, v.out[-80:])
     finally:
         v.close()
+
+
+def test_same_name():
+    """QA 1.57.0 LOW-R2: a local session literally named srv:xv-sh next to
+    the host's xv-sh; x on each row opens that row's session (only the
+    remote one asks the host)."""
+    # its own client dirs, the same remote_hosts: the History record the
+    # local srv:xv-sh leaves would route srv:xv-sh here for the next tests
+    lenv = side("same", DCH_CONFIG=CENV["DCH_CONFIG"],
+                DCH_REMOTE_BOX_MS="5000")
+    r = dch(dict(lenv, DCH_NO_REMOTE="1"), "--spawn", "srv:xv-sh", "--size",
+            "80x24", "sh", "-c", "while :; do sleep 1; done")
+    check("same name: a local session named srv:xv-sh spawned",
+          r.returncode == 0, r.stderr)
+    v = Pty([DCH, "-l"], cols=140, env=lenv)
+    try:
+        v.wait(b"srv:xv-sh", 15)
+        v.pump(2.0)     # the host's row comes with its probe
+        asked = []
+        # the top row, then the bottom one: the two srv:xv-sh rows
+        for keys in (b"kkk", b"jjj"):
+            n0 = ctls("--xray")
+            mark = len(v.out)
+            v.key(keys + b"x", 1.0)
+            ok = v.wait(b"X-ray  srv:xv-sh", start=mark) and \
+                v.wait(b"Chapters", start=mark)
+            v.pump(0.5)
+            asked.append((ok, ctls("--xray") - n0))
+            v.key(b"q", 1.0)
+        check("same name: x on the remote row opens the host's session, x "
+              "on the local row the local one",
+              all(a[0] for a in asked) and
+              sorted(a[1] > 0 for a in asked) == [False, True], asked)
+        v.key(b"\033")
+        v.exit()
+    finally:
+        v.close()
+        dch(dict(lenv, DCH_NO_REMOTE="1"), "-k", "srv:xv-sh")
 
 
 # ---- 6: the in-attach chord over a remote attach (#189) ---------------------
@@ -1014,6 +1200,16 @@ def test_chord(port):
     chord_case("the kitty CSI form", [b"\x1c", b"\033[120u"])
     chord_case("--host srv -a xv-rx", [b"\x1cx"],
                tail=("--host", "srv", "-a", "xv-rx"))
+    # a local session named srv:xv-rx, in its own client dirs: the
+    # attach's own view still opens (QA 1.57.0 LOW-R2)
+    lenv = side("same-rx", DCH_CONFIG=CENV["DCH_CONFIG"])
+    r = dch(dict(lenv, DCH_NO_REMOTE="1"), "--spawn", "srv:xv-rx", "--size",
+            "80x24", "sh", "-c", "while :; do sleep 1; done")
+    check("remote chord: a local session named srv:xv-rx spawned",
+          r.returncode == 0, r.stderr)
+    chord_case("--host srv -a xv-rx, a local srv:xv-rx too", [b"\x1cx"],
+               lenv, tail=("--host", "srv", "-a", "xv-rx"))
+    dch(dict(lenv, DCH_NO_REMOTE="1"), "-k", "srv:xv-rx")
     cfg = os.path.join(T, "config-switch")
     with open(cfg, "w") as f:
         f.write("remote_hosts = srv=127.0.0.1:%d\ndetach_key = switch\n"
@@ -1269,6 +1465,87 @@ def test_rearm():
     time.sleep(0.5)
 
 
+# ---- 12: a ctrl-z suspend over the attach drops the host's output (#211) ---
+
+BZ = ("import os, select, sys, time, tty\n"
+      "tty.setraw(0)\n"
+      "os.write(1, b'\\033[?1049hBUSY\\r\\n')\n"
+      "while True:\n"
+      "    if select.select([0], [], [], 0.0005)[0]:\n"
+      "        b = os.read(0, 256)\n"
+      "        if not b: break\n"
+      "        os.write(1, b'GOT:' + b.hex().encode() + b'\\r\\n')\n"
+      "    os.write(1, b'\\033[5;1HT%.4f ' % time.time())\n")
+# the client as a shell runs a job: its own foreground process group, so
+# its ctrl-z SIGTSTP really stops it; STOPPED is written then, after its
+# own clock's time (the resume is a full second after that time, however
+# late the test reads the marker), and it is continued a second later;
+# exits with the client's exit code
+JOB = ("import os, signal, sys, time\n"
+       "job = os.fork()\n"
+       "if job == 0:\n"
+       "    os.setpgid(0, 0)\n"
+       "    signal.signal(signal.SIGTTOU, signal.SIG_IGN)\n"
+       "    os.tcsetpgrp(0, os.getpgrp())\n"
+       "    signal.signal(signal.SIGTTOU, signal.SIG_DFL)\n"
+       "    os.execv(sys.argv[1], sys.argv[1:])\n"
+       "while True:\n"
+       "    _, st = os.waitpid(job, os.WUNTRACED)\n"
+       "    if not os.WIFSTOPPED(st):\n"
+       "        sys.exit(os.waitstatus_to_exitcode(st))\n"
+       "    os.write(1, b'<<at %.4f>><<stopped>>' % time.time())\n"
+       "    time.sleep(1)\n"
+       "    os.kill(job, signal.SIGCONT)\n")
+STOPPED = b"<<stopped>>"
+
+
+def test_suspend():
+    r = dch(SENV, "--spawn", "xv-bz", "--size", "100x30", sys.executable,
+            "-c", BZ)
+    check("suspend: the busy session spawned on the host", r.returncode == 0,
+          r.stderr)
+    a = Pty([sys.executable, "-c", JOB, DCH, "-a", "srv:xv-bz"])
+    try:
+        a.wait(b"BUSY" if dch(SENV, "--build").stdout.strip() == "full"
+               else b"\033[?1049h")
+        a.pump(0.5)
+        for i in range(1, 4):
+            mark = len(a.out)
+            a.key(b"\x1a", 0)
+            ok = a.wait(STOPPED, start=mark)
+            stop = a.out.find(STOPPED, mark) + len(STOPPED)
+            at = re.findall(rb"<<at (\d+\.\d+)>>", a.out[mark:stop])
+            t0 = float(at[-1]) if at else time.time()
+            a.wait(b"\033[?1049h", start=stop)
+            alt = a.out.find(b"\033[?1049h", stop)
+            late = [t for t in re.findall(rb"T(\d+\.\d+) ",
+                                          a.out[stop:alt]) if
+                    t0 + 0.05 < float(t) < t0 + 0.85]
+            check("suspend: ctrl-z %d over the attach: no output the host "
+                  "sent while it was stopped before the resume's 1049h" % i,
+                  ok and alt > stop and not late,
+                  (ok, len(late), a.out[stop:stop + 200]))
+            a.pump(0.3)
+        mark = len(a.out)
+        a.key(b"z", 0.3)
+        check("suspend: the attach goes on (a key after reaches the session)",
+              a.wait(b"GOT:7a", start=mark, secs=5) and a.reap() is None,
+              (a.rc, a.out[mark:][-300:]))
+        mark = len(a.out)
+        a.key(b"\x1a", 0)
+        ok = a.wait(STOPPED, start=mark)
+        dch(SENV, "-k", "xv-bz")
+        rc = a.exit()
+        check("suspend: the session ending while the attach is stopped ends "
+              "it at the resume, exit 0, no lost-link line",
+              ok and rc == 0 and b"lost the connection" not in a.out[mark:],
+              (ok, rc, a.out[mark:][-300:]))
+    finally:
+        a.close()
+        dch(SENV, "-k", "xv-bz")
+    time.sleep(0.5)
+
+
 def main():
     sp = None
     try:
@@ -1284,14 +1561,17 @@ def main():
         test_small_card()
         test_on_screen()
         test_picker(port)
+        test_same_name()
         test_open()
         test_hostile()
         test_failures()
+        test_link_drop()
         test_stop()
         test_chord(port)
         test_chord_fail()
         hosts("srv=127.0.0.1:%d" % port)
         test_rearm()
+        test_suspend()
     finally:
         dch(SENV, "-k", "xv-sh")
         dch(SENV, "-k", "xv-rx")

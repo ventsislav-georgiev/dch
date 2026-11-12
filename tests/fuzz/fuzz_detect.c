@@ -3,8 +3,8 @@
 ** text for --status/--ls-json (tail_fold, det_blocker, composer_find), with
 ** SGR for the Claude composer gate (faint_text, gate_screen), and the
 ** auto-allow parse (dch_allow_prompt), and a remote screen's text for the
-** X-ray view (xv_plain, #188). Built with -Dmain=dch_main so dch.c's
-** statics are reachable. */
+** X-ray view (xv_plain, #188) as its decoder (ap_cp) reads it. Built with
+** -Dmain=dch_main so dch.c's statics are reachable. */
 #include "../../dch.c"
 #include <stdint.h>
 
@@ -67,8 +67,21 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 	** bytes to plain text, on dch-lite too; within its cap, NUL-ended */
 	if ((z = xv_plain(raw, n)))
 	{
+		const char *s;
+		unsigned cp;
+		int l;
+
 		if (strlen(z) > 8 * DET_CAP)
 			abort();
+		/* pk_txtto's decoder on it: a sequence of 2+ bytes is valid
+		** UTF-8, a broken one a byte alone, drawn as '?' (LOW-R1) */
+		for (s = z; *s; s += l)
+		{
+			(void)ap_cp(s, &l);
+			if (l < 1 ||
+			    (l > 1 && utf8_at((const unsigned char *)s, &cp) != l))
+				abort();
+		}
 		free(z);
 	}
 	return 0;

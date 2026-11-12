@@ -1,0 +1,45 @@
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": "go"}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d0", "name": "Bash", "input": {"command": "gh pr create --title \"Real\" --body \"Fixes #999\""}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d0", "is_error": false, "content": "https://github.com/o/r/pull/12"}]}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d1", "name": "Bash", "input": {"command": "gh pr create --body \"Fixes #999\" --title \"Real\""}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d1", "is_error": false, "content": "https://github.com/o/r/pull/12"}]}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d2", "name": "Bash", "input": {"command": "gh pr create --title \"Real\" --body \"Some text. Fixes #999 and #998.\""}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d2", "is_error": false, "content": "https://github.com/o/r/pull/12"}]}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d3", "name": "Bash", "input": {"command": "gh pr create --title \"Fix #999 crash\""}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d3", "is_error": false, "content": "https://github.com/o/r/pull/12"}]}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d4", "name": "Bash", "input": {"command": "gh issue create --title T --body \"dup of #77\""}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d4", "is_error": false, "content": "https://github.com/o/r/issues/13"}]}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d5", "name": "Bash", "input": {"command": "gh pr create --title T --web"}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d5", "is_error": false, "content": "Opening github.com/o/r/compare in your browser."}]}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d6", "name": "Bash", "input": {"command": "gh pr edit https://github.com/o/r/pull/12 --title New --body \"Fixes #999\""}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d6", "is_error": false, "content": "https://github.com/o/r/pull/12"}]}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d7", "name": "Bash", "input": {"command": "gh release create v1.2 --title \"Release 1.2\" --notes \"Fixes #12\""}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d7", "is_error": false, "content": "https://github.com/o/r/releases/tag/v1.2"}]}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d8", "name": "Bash", "input": {"command": "gh pr create --title Real --body \"Fixes #999\""}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d8", "is_error": true, "content": "https://github.com/o/r/pull/12"}]}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d9", "name": "Bash", "input": {"command": "gh pr create --title T --body \"$(cat /etc/b.md) Fixes #999\""}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d9", "is_error": false, "content": "https://github.com/o/r/pull/12"}]}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d10", "name": "Bash", "input": {"command": "/usr/local/bin/gh pr new --title T --body x o/r#5"}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d10", "is_error": false, "content": "https://github.com/o/r/pull/12"}]}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d11", "name": "Bash", "input": {"command": "GH_REPO=o/r gh issue new --title T --body x o/r#5"}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d11", "is_error": false, "content": "https://github.com/o/r/pull/12"}]}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d12", "name": "Bash", "input": {"command": "gh pr create --title T --body-file - <<EOF\nFixes #999\nEOF"}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d12", "is_error": false, "content": "https://github.com/o/r/pull/12"}]}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d13", "name": "Bash", "input": {"command": "gh pr edit \"#12\" --title New"}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d13", "is_error": false, "content": ""}]}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d14", "name": "Bash", "input": {"command": "gh pr edit o/r#12 o/r#13 --title New"}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d14", "is_error": false, "content": "https://github.com/o/r/pull/12"}]}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d15", "name": "Bash", "input": {"command": "gh pr edit -R o/r#12 --title New"}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d15", "is_error": false, "content": ""}]}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d16", "name": "Bash", "input": {"command": "gh pr edit 12 --title New --opt=#99 a'#12' #12'' \\#12"}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d16", "is_error": false, "content": ""}]}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d17", "name": "Bash", "input": {"command": "dch meta --title=\"Own title\" PROJ-71"}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d17", "is_error": false, "content": "ok"}]}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d18", "name": "Bash", "input": {"command": "gh pr edit 12 --title New # see #77"}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d18", "is_error": false, "content": ""}]}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d19", "name": "Bash", "input": {"command": "gh alias-create --title T --body \"Fixes #999\""}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d19", "is_error": false, "content": "https://github.com/o/r/pull/12"}]}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d20", "name": "Bash", "input": {"command": "gh pr create"}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d20", "is_error": false, "content": ""}]}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d21", "name": "Bash", "input": {"command": "gh pr"}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d21", "is_error": false, "content": "https://github.com/o/r/pull/12"}]}}

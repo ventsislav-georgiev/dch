@@ -33,21 +33,20 @@
 volatile sig_atomic_t pk_winch;
 static int pk_sortname;
 
-/* Code point at p (UTF-8, lenient), its byte length in *len. */
+/* Code point at p (UTF-8), its byte length in *len. A broken sequence (a
+** stray, overlong, surrogate, truncated or past U+10FFFF one) is its first
+** byte alone, a code point >= 0x80 of length 1, which pk_txtto draws as '?':
+** a remote host's screen is raw bytes (QA 1.57.0 LOW-R1). */
 unsigned
 ap_cp(const char *p, int *len)
 {
-	const unsigned char *u = (const unsigned char *)p;
-	int k, n = u[0] >= 0xF0 ? 4 : u[0] >= 0xE0 ? 3 : u[0] >= 0xC0 ? 2 : 1;
-	unsigned c = n == 1 ? u[0] : u[0] & (0x3F >> (n - 1));
+	unsigned c;
 
-	for (k = 1; k < n; k++)
+	if (!(*len = utf8_at((const unsigned char *)p, &c)))
 	{
-		if ((u[k] & 0xC0) != 0x80)
-			break;
-		c = c << 6 | (u[k] & 0x3F);
+		*len = 1;
+		c = (unsigned char)*p;
 	}
-	*len = k;
 	return c;
 }
 
@@ -1278,8 +1277,8 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 	{
 		PK_K(0, ret, "attach", NULL, 0);
 		PK_K(0, "r", "rename", NULL, 0);
-		PK_K(0, "x", "kill", NULL, 1);
-		PK_K(0, "X", "x-ray", NULL, 0);
+		PK_K(0, "X", "kill", NULL, 1);
+		PK_K(0, "x", "x-ray", NULL, 0);
 		PK_K(1, "R", "restart", NULL, 0);
 		PK_K(1, "S", "stop", NULL, 1);
 		if (cur && !strcmp(cur->state, "blocked"))
@@ -1302,7 +1301,7 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 		}
 		PK_K(0, "p", cur && cur->pinned ? "unpin" : "pin", NULL, 0);
 		PK_K(0, "d", "remove", NULL, 1);
-		PK_K(0, "X", "x-ray", NULL, 0);
+		PK_K(0, "x", "x-ray", NULL, 0);
 	}
 	if (!p->settings && !p->filtering)
 		PK_K(2, ",", "settings", NULL, 0);

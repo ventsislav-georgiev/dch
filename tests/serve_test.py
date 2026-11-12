@@ -30,7 +30,9 @@ cached one too); an address off the tailnet gets no byte. #095: past the
 per-peer limit, the transient {"code":"busy"} then the close, never cached.
 #202: a device runs at most 2 --xray --follow of one session; a third ends
 the oldest as a timeout cut, never busy for it; 4 stalled follows of one
-device leave 2 master slots free.
+device leave 2 master slots free. #201: a one-shot ctl's 6 MiB answer comes
+whole to a reader that stalls 30 s; 16 peers that never read free their
+slots 20 s past their ctl timeout.
 
 Run:  python3 tests/serve_test.py        (uses ./dch)
 """
@@ -851,9 +853,13 @@ case "$1 $2" in
     echo $$ > "$W/$v.pid"
     echo started
     while :; do sleep 0.1; done ;;
+"--status big")
+    exec %s -c 'import sys
+for i in range(96): sys.stdout.buffer.write(b"x" * 65535 + b"\\n")
+sys.stdout.buffer.write(b"END\\n")' ;;
 esac
 exec %s "$@"
-""" % (wrap, DCH))
+""" % (wrap, sys.executable, DCH))
         os.chmod(os.path.join(wrap, "dch"), 0o755)
 
         def slow_cut(port, verb, cancel):
@@ -909,6 +915,63 @@ exec %s "$@"
                       ok and secs is not None and 1.5 <= secs <= 3.5
                       and not done)
             stop(p)
+
+        # --- #201: a one-shot ctl's answer past the socket and pipe buffers
+        # (6 MiB of the stand-in's --status big) comes whole to a reader
+        # that stalls 30 s, past STALL_MS's 20 s: a ctl with a timeout is
+        # bounded by it, its output may sit untaken until 20 s past it. A
+        # peer that never reads still frees its 16 slots by then: here a
+        # serve of its own with DCH_CTL_TIMEOUT_MS 3 s, so by about 23 s.
+        # Both run at once, to keep the wall time near 31 s.
+        wenv = dict(benv, PATH="%s:%s:/usr/bin:/bin" % (wrap, fake))
+        p, sport, slog_ = serve(argv0="dch", e=wenv)
+        q, qport, qlog = serve(argv0="dch", e=dict(
+            wenv, DCH_CTL_TIMEOUT_MS="3000"))
+        check("#201: two serves whose ctls run the stand-in dch start",
+              sport is not None and qport is not None)
+        if sport is not None and qport is not None:
+            big = ["--status", "big"]
+            s = conn(sport)
+            send(s, 0x30, {"argv": big})
+            t, pl = frame(s)
+            out = bytearray(pl if t == 0x31 else b"")
+            never = []
+            for _ in range(16):
+                never.append(conn(qport))
+                send(never[-1], 0x30, {"argv": big})
+            time.sleep(1)
+            full = reply(qport)
+            time.sleep(29)
+            end = None
+            s.settimeout(30)
+            try:
+                while True:
+                    t, pl = frame(s)
+                    if t == 0x31:
+                        out += pl
+                    elif t == 0x33:
+                        end = json.loads(pl)
+                        break
+            except (EOFError, OSError):
+                pass
+            s.close()
+            check("#201: a 6 MiB answer whose reader stalls 30 s comes whole "
+                  "(%d bytes), then 0x33 exit 0" % len(out),
+                  len(out) == 96 * 65536 + 4 and out.endswith(b"x\nEND\n")
+                  and end == {"exit": 0}
+                  and "not taken" not in text(slog_))
+            ql = text(qlog)
+            check("#201: 16 peers that never read hold the peer's 16 slots "
+                  "(a 17th busy), then all are free 20 s past their timeout: "
+                  "16 timeout cuts, 16 closes",
+                  isinstance(full, bytes) and b'"busy"' in full
+                  and ql.count("ctl cut short: timeout") == 16
+                  and ql.count("output not taken for 20 s") == 16
+                  and reply(qport) == "accept")
+            for n in never:
+                n.close()
+            stop(p)
+            stop(q)
 
         # --- #126: the real dch --run and --say, cut by the close or a 0x34
         # with their text in a fake Claude's composer (every Enter eaten,

@@ -300,6 +300,7 @@ def main():
         finally:
             try:
                 os.kill(pid, signal.SIGHUP)
+                os.close(fd)
                 os.waitpid(pid, 0)
             except OSError:
                 pass

@@ -10,6 +10,17 @@ copy it across 1049h/l. Two consequences dch has to respect:
   2. On detach the client must pop on BOTH screens: once before leaving the
      alt screen and once after, so neither screen keeps stale flags. This is
      the "ctrl-d types 0;5u in the bare shell after detach" bug.
+  3. A local ctrl-z suspend restores the terminal as a detach does, before
+     the client stops (#211): the main screen, mouse and bracketed paste off,
+     the kitty stacks empty. The resume re-arms each mode once and pops once
+     before its one push (#200): over three suspend/resume cycles a
+     per-screen stack model of the whole attach ends at 1 on the alternate
+     screen, 0 on the main one. The first attach pops nothing.
+  4. A busy alternate-screen child and a terminal that stalls before the
+     ctrl-z: what the master queued or sent before it read the suspend's
+     MSG_DETACH is dropped (the master's queue there, the socket's by the
+     client on the resume), so none of it lands on the main screen the
+     suspend left before the resume's 1049h (#211).
 
 Run:  python3 tests/kbd_altscreen_test.py            (uses ./dch)
 """
@@ -21,6 +32,26 @@ SESS = "kbdaltscreen-%d" % os.getpid()
 POP = re.compile(rb"\x1b\[<\d*u")
 PUSH = b"\x1b[>1u"
 ALT_ON, ALT_OFF = b"\x1b[?1049h", b"\x1b[?1049l"
+KSEQ = re.compile(rb"\033\[(\?1049[hl]|>\d*u|<\d*u)")
+MODES = (b"\x1b[?1000h", b"\x1b[?2004h", ALT_ON)   # the child's, re-armed
+RESET = (b"\x1b[?25h", b"\x1b[?1000l", b"\x1b[?2004l", b"\x1b[?1004l")
+STOPPED = b"<<stopped>>"
+
+
+def kitty_stacks(out):
+    """The kitty flag stack depths (main, alt) a terminal ends with after
+    out: a stack per screen, 1049h/l switch, ESC[<Nu pops N (default 1).
+    The model of tests/xray_remote_view_test.py."""
+    st, alt = [0, 0], 0
+    for m in KSEQ.finditer(out):
+        t = m.group(1)
+        if t[:1] == b"?":
+            alt = int(t[-1:] == b"h")
+        elif t[:1] == b">":
+            st[alt] += 1
+        else:
+            st[alt] = max(0, st[alt] - int(t[1:-1] or 1))
+    return tuple(st)
 
 
 def spawn(args):
@@ -30,6 +61,31 @@ def spawn(args):
         os.environ.pop("DCH_SESSION", None)
         os.execv(DCH, [DCH] + args)
         os._exit(127)
+    return pid, fd
+
+
+def spawn_job(args):
+    """spawn, but as a shell runs a job: dch in its own foreground process
+    group under a parent in its session, so its ctrl-z SIGTSTP really stops
+    it. The parent writes STOPPED to the terminal then, and continues it."""
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.environ.pop("DCH_SESSION", None)
+        job = os.fork()
+        if job == 0:
+            os.setpgid(0, 0)
+            signal.signal(signal.SIGTTOU, signal.SIG_IGN)
+            os.tcsetpgrp(0, os.getpgrp())
+            signal.signal(signal.SIGTTOU, signal.SIG_DFL)
+            os.execv(DCH, [DCH] + args)
+            os._exit(127)
+        while True:
+            _, st = os.waitpid(job, os.WUNTRACED)
+            if not os.WIFSTOPPED(st):
+                os._exit(0)
+            os.write(1, STOPPED)
+            time.sleep(0.3)
+            os.kill(job, signal.SIGCONT)
     return pid, fd
 
 
@@ -62,6 +118,17 @@ def detach(pid, fd):
     return out
 
 
+def suspend(fd):
+    """Ctrl-z under spawn_job: the client sends MSG_DETACH and SIGTSTPs
+    itself, its parent continues it, then MSG_ATTACH and a redraw on the same
+    connection. Returns (bytes before the stop, bytes of the resume)."""
+    os.write(fd, b"\x1a")
+    out = drain(fd, 5.0, STOPPED)
+    out += drain(fd, 5.0, PUSH)
+    pre, _, post = (out + drain(fd, 0.5)).partition(STOPPED)
+    return pre, post
+
+
 def check_detach(who, out):
     off = out.rfind(ALT_OFF)
     if off < 0:
@@ -89,7 +156,8 @@ def main():
     pending = os.path.join(tmp, "ready")
     os.environ["DCH_SOCKET_DIR"] = tmp
     sock = os.path.join(tmp, SESS + ".sock")
-    child = ("import sys,time;sys.stdout.write('\\x1b[?1049h\\x1b[>1uREADY\\n');"
+    child = ("import sys,time;sys.stdout.write('\\x1b[?1049h\\x1b[?1000h"
+             "\\x1b[?2004h\\x1b[>1uREADY\\n');"
              "sys.stdout.flush();open(%r,'w').close();time.sleep(60)" % pending)
     env = dict(os.environ, DCH_NO_VT="1")
     master = subprocess.Popen([DCH, "--master-of", sock, "--",
@@ -115,7 +183,7 @@ def main():
         shutil.rmtree(tmp, ignore_errors=True)
         print("FAIL: inner program did not queue startup output"); return 1
     pid_a, fd_a = spawn(["-f", "-n", SESS])
-    pid_b = None
+    pid_b = pid_c = pid_d = None
     try:
         first = drain(fd_a, 15.0, b"READY")
         if b"READY" not in first:
@@ -140,16 +208,86 @@ def main():
         if check_detach("reattach", detach(pid_b, fd_b)):
             return 1
         pid_b = None
-        print("PASS: kitty push follows 1049h on attach; detach pops on both screens.")
+
+        pid_c, fd_c = spawn_job(["-f", "-n", SESS])
+        out = drain(fd_c, 10.0, PUSH) + drain(fd_c, 0.5)
+        if POP.search(out) or out.count(PUSH) != 1:
+            print("FAIL: the attach before the suspends is not push-only:",
+                  repr(out))
+            return 1
+        bad = 0
+        for i in range(1, 4):
+            pre, got = suspend(fd_c)
+            out += pre
+            if not got:
+                print("FAIL: ctrl-z %d never stopped the client:" % i,
+                      repr(pre))
+                return 1
+            if kitty_stacks(out) != (0, 0) or out.rfind(ALT_OFF) < \
+               out.rfind(ALT_ON) or any(r not in pre for r in RESET):
+                print("FAIL: ctrl-z %d stopped without a detach's reset "
+                      "(kitty stacks %r):" % (i, kitty_stacks(out)), repr(pre))
+                bad = 1
+            out += got
+            pops = [m.start() for m in POP.finditer(got)]
+            if got.count(PUSH) != 1 or len(pops) != 1 \
+               or pops[0] > got.find(PUSH):
+                print("FAIL: ctrl-z resume %d is not one kitty pop before "
+                      "its one push:" % i, repr(got))
+                bad = 1
+            if any(got.count(m) != 1 for m in MODES):
+                print("FAIL: ctrl-z resume %d does not re-arm each mode "
+                      "once:" % i, repr(got))
+                bad = 1
+        if kitty_stacks(out) != (0, 1):
+            print("FAIL: three ctrl-z resumes leave the kitty stacks at "
+                  "(main, alt) =", kitty_stacks(out), "not (0, 1)")
+            bad = 1
+        if bad:
+            return 1
+        if check_detach("suspended", detach(pid_c, fd_c)):
+            return 1
+        pid_c = None
+
+        flood = ("import sys\nsys.stdout.write('\\x1b[?1049h')\nwhile 1:\n"
+                 " sys.stdout.write('\\x1b[5;1HTICK ');sys.stdout.flush()")
+        pid_d, fd_d = spawn_job(["-n", SESS + "-busy", sys.executable, "-c",
+                                 flood])
+        # the attach is up (raw mode, output relayed) before the first key:
+        # a ctrl-z sent earlier is dropped by the cooked tty and nothing stops
+        up = drain(fd_d, 20.0, b"TICK")
+        if b"TICK" not in up:
+            print("FAIL: the busy attach never showed the session:",
+                  repr(up[-200:]))
+            return 1
+        drain(fd_d, 0.5)
+        for i in range(1, 4):
+            time.sleep(0.1)     # not read: the master queues output
+            os.write(fd_d, b"\x1a")
+            got, end = b"", time.time() + 10
+            while ALT_ON not in got.partition(STOPPED)[2] and \
+                  time.time() < end:
+                got += drain(fd_d, 0.2)
+            post = got.partition(STOPPED)[2]
+            if ALT_ON not in post or b"TICK" in post[:post.find(ALT_ON)]:
+                print("FAIL: busy ctrl-z resume %d writes output on the main "
+                      "screen before its 1049h:" % i, repr(post[:200]),
+                      "stopped:", STOPPED in got, "read:", len(got),
+                      repr(got[-120:]))
+                return 1
+        print("PASS: kitty push follows 1049h on attach; detach pops on both "
+              "screens; ctrl-z resets as a detach does, a resume re-arms once and "
+              "drops the output sent before the suspend.")
         return 0
     finally:
-        for pid in (pid_b, pid_a):
+        for pid in (pid_d, pid_c, pid_b, pid_a):
             if pid:
                 try:
                     os.kill(pid, signal.SIGHUP)
                 except OSError:
                     pass
         os.system("'%s' -k %s >/dev/null 2>&1" % (DCH, SESS))
+        os.system("'%s' -k %s-busy >/dev/null 2>&1" % (DCH, SESS))
         if master.poll() is None:
             master.terminate()
             master.wait()

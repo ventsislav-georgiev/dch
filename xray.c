@@ -2100,8 +2100,9 @@ rm_scan(struct remit *r, const char *text, size_t n, int mode)
 ** their raw byte range; operators (| ; & < > ( ) and an unquoted newline)
 ** are words of their own. \ newline is a blank, or nothing inside a word;
 ** a # starting a word is a comment to the line's end; each here-doc's body,
-** in order, is skipped to its delimiter line (a trailing CR ignored). hx:
-** a body sh expands ($(…) or ` under an unquoted delimiter). */
+** in order, is skipped to its delimiter line (a trailing CR ignored); a <<
+** inside (( )) or $(( )) is two < (a shift). hx: a body sh expands ($(…)
+** or ` under an unquoted delimiter). */
 #define SW_MAX 256	/* one word more marks a command past the cap */
 struct sw
 {
@@ -2117,7 +2118,7 @@ shell_words(const char *c, size_t cl, struct sw *w)
 {
 	size_t i = 0, o = 0, hd = 0, j, dl, b0, k, dk;
 	const char *d;
-	int bl, dash, uq;
+	int bl, dash, uq, ar = 0, an;
 
 	w->n = 0;
 	w->hx = 0;
@@ -2181,7 +2182,7 @@ shell_words(const char *c, size_t cl, struct sw *w)
 					w->hx |= c[b0] == '`' ||
 					         (c[b0] == '$' && b0 + 1 < i && c[b0 + 1] == '(');
 			}
-			hd = 0;
+			hd = ar = 0;
 			for (j = i; j < cl && strchr(" \t\r\n", c[j]); j++)
 				;
 			if (j >= cl)
@@ -2201,9 +2202,25 @@ shell_words(const char *c, size_t cl, struct sw *w)
 		w->op[w->n] = strchr("|;&<>()", c[i]) != NULL && c[i];
 		if (w->op[w->n])
 		{
+			/* (( and $((: arithmetic, where 1<<2 is no here-doc */
+			if (strchr("()", c[i]) && w->n && w->op[w->n - 1] &&
+			    w->re[w->n - 1] == i && c[i - 1] == c[i])
+				ar += c[i] == '(' ? 1 : -(ar > 0);
 			w->b[o++] = c[i++];
-			if (i < cl && c[i] == c[i - 1] && strchr("&|<>", c[i]))
+			if (i < cl && c[i] == c[i - 1] && strchr("&|<>", c[i]) &&
+			    (c[i] != '<' || !ar))
 				w->b[o++] = c[i++];
+			/* >&, <&, >|, &>, &>>: one redirect operator */
+			if (i < cl && strchr("<>", c[i - 1]) &&
+			    (c[i] == '&' || (c[i] == '|' && c[i - 1] == '>')))
+				w->b[o++] = c[i++];
+			else if (i < cl && c[i] == '>' && c[i - 1] == '&' &&
+			         o - w->off[w->n] == 1)
+			{
+				w->b[o++] = c[i++];
+				if (i < cl && c[i] == '>')
+					w->b[o++] = c[i++];
+			}
 		}
 		else
 			while (i < cl && c[i] != ' ' && c[i] != '\t' && c[i] != '\n' &&
@@ -2211,12 +2228,17 @@ shell_words(const char *c, size_t cl, struct sw *w)
 			{
 				char q = c[i];
 
+				/* $'…' and $"…": quotes; in $'…' a \ escapes the next byte
+				** (its value is not read) */
+				an = q == '$' && i + 1 < cl && c[i + 1] == '\'';
+				if (q == '$' && i + 1 < cl && (an || c[i + 1] == '"'))
+					q = c[++i];
 				if (q == '\'' || q == '"')
 				{
 					for (i++; i < cl && c[i] != q; i++)
 					{
-						if (q == '"' && c[i] == '\\' && i + 1 < cl &&
-						    c[++i] == '\n')
+						if ((q == '"' || an) && c[i] == '\\' && i + 1 < cl &&
+						    c[++i] == '\n' && !an)
 							continue;	/* \ newline: nothing */
 						w->b[o++] = c[i];
 					}
@@ -2253,16 +2275,24 @@ is_assign(const char *s)
 	return *p == '=';
 }
 
-/* Words that only run the command after them, the letters of their
-** options that take a value (`sudo -u root cat`, `xargs -n 1 rg`), and
-** the words they take before it (timeout's duration); -1: they run the
-** rest as one shell line (`eval`, `watch`). */
-static const struct { const char *w, *argopt; int pos; } wraps[] = {
-	{ "sudo", "ugCDhprTt", 0 }, { "env", "uSCP", 0 }, { "command", "", 0 },
-	{ "xargs", "IJLnPsEdaR", 0 }, { "nice", "n", 0 }, { "time", "", 0 },
-	{ "nohup", "", 0 }, { "doas", "auC", 0 }, { "exec", "a", 0 },
-	{ "stdbuf", "ioe", 0 }, { "timeout", "sk", 1 }, { "eval", "", -1 },
-	{ "watch", "nq", -1 }, { 0, 0, 0 }
+/* Words that only run the command after them (also by GNU's g name on
+** macOS: gtimeout), the letters of their options that take a value (`sudo
+** -u root cat`, `sudo -iu root cat`, `xargs -n 1 rg`), the long ones
+** (`sudo --user root cat`), and the words they take before it (timeout's
+** duration); -1: they run the rest as one shell line (`eval`, `watch`). */
+static const struct { const char *w, *argopt; int pos; const char *argl; }
+wraps[] = {
+	{ "sudo", "ugCDhprTtUR", 0, " user group close-from chdir host prompt role"
+	  " type command-timeout other-user chroot " },
+	{ "env", "uSCP", 0, " unset chdir " }, { "command", "", 0, "" },
+	{ "xargs", "IJLnPsEdaR", 0, " arg-file delimiter max-args max-procs"
+	  " max-chars process-slot-var " },
+	{ "nice", "n", 0, " adjustment " }, { "time", "", 0, "" },
+	{ "nohup", "", 0, "" }, { "doas", "auC", 0, "" }, { "exec", "a", 0, "" },
+	{ "stdbuf", "ioe", 0, " input output error " },
+	{ "timeout", "sk", 1, " signal kill-after " }, { "eval", "", -1, "" },
+	{ "watch", "nq", -1, " interval equexit " }, { "builtin", "", 0, "" },
+	{ 0, 0, 0, 0 }
 };
 
 static const char *base(const char *s);
@@ -2277,8 +2307,10 @@ static size_t
 cmd_head(const struct sw *w, size_t k, size_t e, int *line)
 {
 	static const char *const resv[] = { "{", "!", "if", "then", "elif",
-	                                    "else", "do", "while", "until", 0 };
+	                                    "else", "do", "while", "until",
+	                                    "coproc", "function", 0 };
 	const char *o, *a;
+	char lb[40];
 	size_t j;
 	int p;
 
@@ -2295,12 +2327,17 @@ cmd_head(const struct sw *w, size_t k, size_t e, int *line)
 			k += k < e && !w->op[k];
 			continue;
 		}
-		if (is_assign(SWD(w, k)) || in_list(SWD(w, k), resv))
+		if (is_assign(o) || in_list(o, resv))
 		{
+			/* function f { …; }, coproc N { …; }: the name runs nothing */
 			k++;
+			k += !strcmp(o, "function") ||
+			     (!strcmp(o, "coproc") && k + 1 < e && !w->op[k + 1] &&
+			      in_list(SWD(w, k + 1), resv));
 			continue;
 		}
-		for (j = 0; wraps[j].w && strcmp(base(SWD(w, k)), wraps[j].w); j++)
+		for (o = base(o), j = 0; wraps[j].w && strcmp(o, wraps[j].w) &&
+		     (o[0] != 'g' || strcmp(o + 1, wraps[j].w)); j++)
 			;
 		if (!wraps[j].w)
 			return k;
@@ -2327,7 +2364,11 @@ cmd_head(const struct sw *w, size_t k, size_t e, int *line)
 				*line = k + 1 < e;
 				return k + 1;
 			}
-			if (o[1] && !o[2] && strchr(wraps[j].argopt, o[1]))
+			/* -u root, -iu root (not -uroot); --user root (not --user=) */
+			a = o[1] == '-' ? NULL : o + 1 + strcspn(o + 1, wraps[j].argopt);
+			if ((a && *a && !a[1]) ||
+			    (!a && snprintf(lb, sizeof lb, " %s ", o + 2) < (int)sizeof lb &&
+			     strstr(wraps[j].argl, lb)))
 				k++;
 		}
 		for (p = wraps[j].pos; p > 0 && k < e; p--)
@@ -2440,7 +2481,7 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 	/* every simple command: split on ; & && | || ( ) and newlines */
 	for (s = 0; s < w.n && !r; s = e + 1)
 	{
-		for (e = s; e < w.n && !(w.op[e] && !strchr("<>", SWD(&w, e)[0]));
+		for (e = s; e < w.n && !(w.op[e] && !strpbrk(SWD(&w, e), "<>"));
 		     e++)
 			;
 		/* $(…) and `…` in quotes or a word run too: their commands,
@@ -2449,10 +2490,12 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 		for (i = e > s ? w.rs[s] : 0, q = 0; i < end && !sr; i++)
 			if (cmd[i] == '\\' && q != '\'')
 				i++;
+			else if (!q && cmd[i] == '$' && i + 1 < end && cmd[i + 1] == '\'')
+				q = cmd[i++];	/* $'…': a \ escapes, ' ends it */
 			else if ((cmd[i] == '\'' && q != '"') ||
-			         (cmd[i] == '"' && q != '\''))
+			         (cmd[i] == '"' && (!q || q == '"')))
 				q = q ? 0 : cmd[i];
-			else if (q != '\'' && (cmd[i] == '`' ||
+			else if ((!q || q == '"') && (cmd[i] == '`' ||
 			         (cmd[i] == '$' && i + 1 < end && cmd[i + 1] == '(')))
 			{
 				t = i + 1 + (cmd[i] == '$');
@@ -2478,8 +2521,11 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 			continue;
 		}
 		for (k = s, xa = lost & 2; k < h; k++)
-			if (!strcmp(base(SWD(&w, k)), "xargs"))
+		{
+			a = base(SWD(&w, k));
+			if (!strcmp(a + (a[0] == 'g'), "xargs"))
 				xa = 2;
+		}
 		if (line)
 		{
 			/* eval/watch/env -S: the words from h on, re-read as a line */
@@ -2495,6 +2541,7 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 			continue;
 		}
 		c0 = base(SWD(&w, h));
+		c0 += c0[0] == 'g' && (in_list(c0 + 1, list) || in_list(c0 + 1, print));
 		if (!strcmp(c0, "cd") || !strcmp(c0, "pushd"))
 		{
 			/* later relative arguments resolve where cd went */
@@ -2516,8 +2563,20 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 				if (SWD(&w, k)[0] == '-' && SWD(&w, k)[1] != '-' &&
 				    strchr(SWD(&w, k), 'c'))
 				{
-					x = depth >= 3 || w.op[k + 1] ? X_LIST :
-					    excl_in(SWD(&w, k + 1), strlen(SWD(&w, k + 1)), cwd,
+					/* options may follow -c: the command is the first
+					** word past them (and past -- or -; -o takes a value) */
+					for (k++; k < e && !w.op[k] && SWD(&w, k)[0] &&
+					     strchr("-+", SWD(&w, k)[0]); k++)
+						if (!SWD(&w, k)[1] || !strcmp(SWD(&w, k), "--"))
+						{
+							k++;
+							break;
+						}
+						else
+							k += SWD(&w, k)[1] != '-' &&
+							     strpbrk(SWD(&w, k), "oO") != NULL;
+					x = depth >= 3 || k >= e || w.op[k] ? X_LIST :
+					    excl_in(SWD(&w, k), strlen(SWD(&w, k)), cwd,
 					            cur, lost | xa, depth + 1);
 					if (x & X_SUB)
 						sr = sr ? sr : x & ~X_SUB;
@@ -2563,7 +2622,7 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 			{
 				a = SWD(&w, k);
 				if (w.op[k])
-					k += a[0] == '>' || !strcmp(a, "<<");
+					k += strchr(a, '>') || !strcmp(a, "<<");
 				else if (a[0] == '-' && a[1])
 					;
 				else if (skip)
@@ -3061,7 +3120,9 @@ struct dsrc
 
 struct d3m
 {
-	size_t xs, xe;		/* the --title word: skipped */
+	const struct sw *w;	/* the command's words */
+	const char *cmd;
+	size_t k;		/* the first word not ending before the last span */
 	struct xr_span sp;
 	int n, multi;
 	struct xr_span one[6];
@@ -3072,8 +3133,21 @@ static int
 d3_cmd(void *ctx, const struct xr_span *sp)
 {
 	struct d3m *m = ctx;
+	const struct sw *w = m->w;
+	size_t k = m->k, l = sp->e - sp->s;
 
-	if (sp->e > m->xs && sp->s < m->xe)
+	/* R2: only a word that is the ref alone, after no option; one inside a
+	** longer word (--body "Fixes #9", --opt=#9, the --title value), after
+	** an option (--title #9, -R o/r#9) or in no word (a comment, a here-doc
+	** body) neither defines nor counts. An option word with = carries its
+	** own value (R2a): --title=T o/r#9 counts */
+	for (; k < w->n && w->re[k] < sp->e; k++)
+		;	/* spans and words come in order */
+	m->k = k;
+	if (k == w->n || w->rs[k] > sp->s || w->op[k] || strlen(SWD(w, k)) != l ||
+	    memcmp(SWD(w, k), m->cmd + sp->s, l) ||
+	    (k && !w->op[k - 1] && SWD(w, k - 1)[0] == '-' &&
+	     !strchr(SWD(w, k - 1), '=')))
 		return 0;
 	if (!m->n++)
 		m->sp = *sp;
@@ -3094,14 +3168,19 @@ d3_out(void *ctx, const struct xr_span *sp)
 	return 0;
 }
 
-/* D3: --title on a bash command that did not fail. */
+/* D3: --title on a bash command that did not fail. A create command (gh pr
+** create|new, gh issue create|new) takes its ref from its output only (R1):
+** what it creates has no number until it prints one. */
 static void
 d3(const struct dsrc *s, struct dset *ds)
 {
+	static const char *const kind[] = { "pr", "issue", 0 };
+	static const char *const verb[] = { "create", "new", 0 };
 	struct sw w;
 	struct d3m m;
 	const char *val = NULL;
 	size_t k;
+	int cr = 0;
 	struct dres *d;
 	char title[XR_TITLE_MAX * 4 + 1];
 
@@ -3114,23 +3193,21 @@ d3(const struct dsrc *s, struct dset *ds)
 			continue;
 		else if (!strcmp(SWD(&w, k), "--title") && k + 1 < w.n &&
 		         !w.op[k + 1])
-		{
 			val = SWD(&w, k + 1);
-			m.xs = w.rs[k];
-			m.xe = w.re[k + 1];
-		}
 		else if (!strncmp(SWD(&w, k), "--title=", 8))
-		{
 			val = SWD(&w, k) + 8;
-			m.xs = w.rs[k];
-			m.xe = w.re[k];
-		}
+	for (k = 0; k + 2 < w.n && !cr; k++)
+		cr = !strcmp(base(SWD(&w, k)), "gh") && in_list(SWD(&w, k + 1), kind) &&
+		     in_list(SWD(&w, k + 2), verb);
 	if (val)
 		title_of(val, strlen(val), title);
+	m.w = &w;
+	m.cmd = s->cmd;
+	if (val && title[0] && !cr)
+		(void)grammar(s->cmd, s->cl, XR_PLAIN, R_D3, s->cwd, d3_cmd, &m);
 	free(w.b);
 	if (!val || !title[0])
 		return;
-	(void)grammar(s->cmd, s->cl, XR_PLAIN, R_D3, s->cwd, d3_cmd, &m);
 	if (m.n && !m.multi)
 	{
 		if ((d = dpush(ds)))
@@ -7395,30 +7472,48 @@ res_keep(char *b, size_t *bn, size_t cap, const char *s, ssize_t n)
 	b[*bn] = '\0';
 }
 
-/* Reap pid, by `until` (ms), else end its group: SIGTERM, a 1 s grace,
-** SIGKILL, at most 1 s more (#833). 0 exited (*st), 1 timed out. */
+/* 1 pid has exited, 0 not yet, -1 not ours to wait for; never reaps it: an
+** unreaped leader keeps its group id from being reused */
+static int
+res_done(pid_t pid)
+{
+	siginfo_t si;
+
+	memset(&si, 0, sizeof si);
+	if (waitid(P_PID, (id_t)pid, &si, WEXITED | WNOHANG | WNOWAIT) != 0)
+		return -1;
+	return si.si_pid == pid;
+}
+
+/* Wait for pid by `until` (ms), else SIGTERM its group and give it 1 s;
+** then SIGKILL the group, which also ends what the leader left behind
+** (QA 1.57.0 LOW-D4), and only then reap it, at most 1 s more (#833).
+** 0 exited (*st), 1 timed out. */
 static int
 res_reap(pid_t pid, long long until, int *st)
 {
 	long long grace;
-	pid_t w;
+	int d;
 
-	while ((w = waitpid(pid, st, WNOHANG)) == 0 && xr_now_ms() < until)
+	while (!(d = res_done(pid)) && xr_now_ms() < until)
 		poll(NULL, 0, 10);
-	if (w == pid)
-		return 0;
-	kill(-pid, SIGTERM);
-	for (grace = xr_now_ms() + 1000;
-	     (w = waitpid(pid, st, WNOHANG)) == 0 && xr_now_ms() < grace;)
-		poll(NULL, 0, 20);
-	kill(-pid, SIGKILL);	/* what ignored SIGTERM, the leader's kids */
+	if (!d)
+	{
+		kill(-pid, SIGTERM);
+		for (grace = xr_now_ms() + 1000;
+		     !res_done(pid) && xr_now_ms() < grace;)
+			poll(NULL, 0, 20);
+	}
+	if (d >= 0)
+		kill(-pid, SIGKILL);
+	res_pg = 0;	/* the group is ended: from the reap on its id is free */
 	/* a git in uninterruptible I/O (a stalled mount) outlives SIGKILL: it is
 	** left unreaped, to init when this one-shot process ends (QA 1.55.0
 	** LOW-3) */
-	for (grace = xr_now_ms() + 1000; w == 0 &&
-	     (w = waitpid(pid, st, WNOHANG)) == 0 && xr_now_ms() < grace;)
+	for (grace = xr_now_ms() + 1000;
+	     waitpid(pid, st, WNOHANG) == 0 && xr_now_ms() < grace;)
 		poll(NULL, 0, 20);
-	return 1;
+	return d != 1;
 }
 
 /* One git run: argv as built, env exactly envp, stdin /dev/null, its own
@@ -7542,7 +7637,6 @@ res_run(char *const argv[], char *const envp[], long long until,
 		return -1;
 	timed = res_reap(pid, timed ? 0 : until, &st) || timed;
 	sigprocmask(SIG_BLOCK, &set, &omask);
-	res_pg = 0;
 	for (k = 0; k < 3; k++)
 		if (old[k].sa_handler != SIG_IGN)
 			sigaction(res_sigs[k], &old[k], NULL);
@@ -7632,39 +7726,47 @@ xr_git_parse(const char *s, size_t n, long long now, struct xr_resolved *r)
 	return 1;
 }
 
+/* One URL, s[0..n): github.com is its host, want its whole path (QA 1.57.0
+** NIT-D1: never "//github.com/" or "@github.com" further in) */
+static int
+res_gh_url(const char *s, size_t n, const char *want)
+{
+	size_t wl = strlen(want), i = 0, u;
+	char sep = ':';	/* scp form: [user@]github.com:o/r */
+
+	if (n > 8 && !strncasecmp(s, "https://", 8))
+		i = 8, sep = '/';
+	else if (n > 6 && !strncasecmp(s, "ssh://", 6))
+		i = 6, sep = '/';
+	for (u = i; u < n && s[u] != '@' && s[u] != '/' &&
+	     (unsigned char)s[u] > ' '; u++)
+		;
+	if (u < n && s[u] == '@')	/* userinfo: no '/', space or control */
+		i = u + 1;
+	if (n - i < 11 || strncasecmp(s + i, "github.com", 10) ||
+	    s[i + 10] != sep)
+		return 0;
+	i += 11;
+	if (n - i < wl || strncasecmp(s + i, want, wl))
+		return 0;
+	i += wl;
+	if (n - i >= 4 && !strncasecmp(s + i, ".git", 4))
+		i += 4;
+	return i == n || (i + 1 == n && s[i] == '/');
+}
+
 int
 xr_git_remote(const char *s, size_t n, const char *want)
 {
-	static const char host[] = "github.com";
-	size_t wl = strlen(want), hl = sizeof host - 1, i, e, k, l;
-	const char *t;
+	const char *z, *v;
+	size_t i;
 
-	for (i = 0; i < n; i = e + 1)
-	{
-		for (e = i; e < n && s[e] != '\n'; e++)
-			;
-		for (k = i; k < e && s[k] != ' '; k++)	/* the key, then the url */
-			;
-		for (k++; k + hl < e; k++)
-		{
-			/* "@github.com:" or "//github.com/", then exactly o/r */
-			if ((s[k - 1] != '@' &&
-			     (k < i + 2 || s[k - 2] != '/' || s[k - 1] != '/')) ||
-			    strncasecmp(s + k, host, hl) ||
-			    (s[k + hl] != ':' && s[k + hl] != '/'))
-				continue;
-			t = s + k + hl + 1;
-			l = (size_t)(s + e - t);
-			if (l < wl || strncasecmp(t, want, wl))
-				continue;
-			t += wl;
-			l -= wl;
-			if (l >= 4 && !strncasecmp(t, ".git", 4))
-				t += 4, l -= 4;
-			if (!l || (l == 1 && *t == '/'))
-				return 1;
-		}
-	}
+	/* "<key>\n<value>\0" entries; a key has no newline, a value may */
+	for (i = 0; i < n && (z = memchr(s + i, '\0', n - i)) != NULL;
+	     i = (size_t)(z - s) + 1)
+		if ((v = memchr(s + i, '\n', (size_t)(z - s) - i)) != NULL &&
+		    res_gh_url(v + 1, (size_t)(z - v - 1), want))
+			return 1;
 	return 0;
 }
 
@@ -7761,13 +7863,15 @@ res_commit(const char *sha, const char *cwd, int live, const char *gh,
 	}
 	if (rc == 0 && gh)
 	{
-		static char s0[] = "config", s1[] = "--get-regexp",
-		            s2[] = "^remote\\..*\\.url$";
+		/* -z: a value's escaped newline cannot forge an entry (NIT-D1) */
+		static char s0[] = "config", s1[] = "-z", s2[] = "--get-regexp",
+		            s3[] = "^remote\\..*\\.url$";
 
 		av[a] = s0;
 		av[a + 1] = s1;
 		av[a + 2] = s2;
-		av[a + 3] = NULL;
+		av[a + 3] = s3;
+		av[a + 4] = NULL;
 		/* 1: no remote at all; a git error or the deadline: no line, never
 		** not_commit or timeout. run.out (remote URLs can carry a token)
 		** is only matched, never written anywhere. */
@@ -8109,6 +8213,10 @@ res_file(const char *key, const char *text, const char *cwd,
 		res_set(r, "secret_name", "Not previewed: may hold secrets");
 		return 1;
 	}
+	/* no deadline on lstat, realpath or read (QA 1.55.0 LOW-3, #206): only
+	** a helper process could bound an uninterruptible wait, and it would be
+	** left stuck instead; an interruptible one ends with the caller's
+	** SIGTERM, and res_root has already walked the same mount */
 	if (lstat(p, &st) != 0 || !S_ISREG(st.st_mode))
 		return 0;	/* gone, a symlink, a FIFO, a dir: no block */
 	if (!realpath(p, rp) || !rr[0])

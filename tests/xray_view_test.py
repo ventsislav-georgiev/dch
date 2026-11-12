@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The `dch --xray <n>` view and the picker's X (#175, XR5a).
+"""The `dch --xray <n>` view and the picker's x (#175, XR5a).
 
 The view runs on a pty this test owns (pty.fork), so it needs no terminal
 mirror and runs the same on dch-lite. A History Claude record whose chapter
@@ -27,8 +27,8 @@ Covers:
   8. On screen on a live shell: the ref printed in two blocks (underline)
      gets hint label `a`, typing it opens its card (full build); on dch-lite
      the label line says X-ray needs the full build;
-  9. the picker: the X hint is shown, X on a session row opens the view, q
-     returns to the picker;
+  9. the picker: the x hint is shown, x on a session row opens the view, q
+     returns to the picker; X asks to kill and never opens the view (OQ-6);
  10. the Refs tab (#193): a file under the project shown relative to it,
      one under HOME from ~, one too long cut at the front (its tail kept,
      a wide-character one within the width), a long URL keeping its host
@@ -46,7 +46,7 @@ Covers:
      the selection kept on its chapter, the filter matching a summary, the
      empty state when every chapter is one; o on the Chapters list and in
      the reader leaves the view (the terminal restored as q does) and
-     attaches as dch -a, from the picker's X too (the -k picker refuses);
+     attaches as dch -a, from the picker's x too (the -k picker refuses);
      an ended session's o says so and stays; in the chord o goes back to the
      session;
  12. the in-attach chord (#187, K10): the detach key then x in a later read,
@@ -56,7 +56,8 @@ Covers:
      while the view was up is on screen after it closes (full build: the
      mirror's repaint); off under -E and with DCH_DOUBLE_TAP_MS=0, where the
      session receives what it did before; under detach_key = switch a late
-     x reaches the picker's kill confirmation and never kills.
+     x is the picker's (OQ-6): it opens the row's view, q returns to the
+     picker, X reaches the kill confirmation, and nothing kills.
 
 Run:  python3 tests/xray_view_test.py      (uses ./dch)
 """
@@ -120,6 +121,8 @@ class Pty:
     def pump(self, secs=0.05):
         end = time.time() + secs
         while True:
+            if time.time() >= end:
+                return
             r, _, _ = select.select([self.fd], [], [],
                                     max(0, end - time.time()))
             if not r:
@@ -164,10 +167,12 @@ class Pty:
         return self.rc
 
     def close(self):
+        # the fd first: on macOS a killed pty leader with output unread
+        # cannot finish exiting, so the waitpid would never return
+        os.close(self.fd)
         if self.reap() is None:
             os.kill(self.pid, signal.SIGKILL)
             os.waitpid(self.pid, 0)
-        os.close(self.fd)
 
 
 def kids(pid):
@@ -760,17 +765,17 @@ def test_open(lite):
     v = Pty([DCH, "-l"], env=DTAP)
     try:
         v.wait(b"x-ray")
-        v.key(b"X", 1.0)
+        v.key(b"x", 1.0)
         v.wait(b"X-ray  xv-sh")
         mark = len(v.out)
         v.key(b"o", 0.3)
-        opened(v, mark, "picker's X")
+        opened(v, mark, "picker's x")
     finally:
         v.close()
     v = Pty([DCH, "-k"], env=DTAP)
     try:
         v.wait(b"x-ray")
-        v.key(b"X", 1.0)
+        v.key(b"x", 1.0)
         v.wait(b"X-ray  xv-sh")
         mark = len(v.out)
         v.key(b"o", 1.0)
@@ -969,17 +974,27 @@ def test_on_screen():
 def test_picker():
     v = Pty([DCH, "-l"])
     try:
-        check("picker: the X hint is shown",
+        check("picker: the x hint is shown",
               v.wait(b"x-ray"), v.out[-600:])
         mark = len(v.out)
-        v.key(b"X", 1.0)
-        check("picker: X opens the view of the row's session",
+        v.key(b"x", 1.0)
+        check("picker: x opens the view of the row's session",
               v.wait(b"X-ray  xv-sh", start=mark) and
               v.wait(b"Chapters", start=mark), v.out[mark:])
         mark = len(v.out)
         v.key(b"q", 1.0)
         check("picker: q in the view returns to the picker",
               v.reap() is None and v.wait(b"Sessions", start=mark),
+              v.out[mark:])
+        mark = len(v.out)
+        v.key(b"X", 1.0)
+        check("picker: X asks to kill and never opens the view (OQ-6)",
+              v.wait(b"Kill xv-sh? [y/N]", start=mark) and
+              b"X-ray  xv-sh" not in v.out[mark:], v.out[mark:])
+        mark = len(v.out)
+        v.key(b"n", 1.0)
+        check("picker: n keeps the session",
+              v.wait(b"cancelled", start=mark) and clients("xv-sh") == 0,
               v.out[mark:])
         v.key(b"\033")
         check("picker: Esc quits it", v.exit() is not None, v.out[-80:])
@@ -1138,7 +1153,8 @@ def test_chord():
             a.close()
 
     # detach_key = switch: one press opens the picker after the window; a
-    # late x there is kill, which asks first; n keeps the session
+    # late x there is the picker's view (OQ-6), q comes back to it, X is
+    # kill, which asks first; n keeps the session
     cfg = os.path.join(T, "config-switch")
     with open(cfg, "w") as f:
         f.write("detach_key = switch\n")
@@ -1151,7 +1167,15 @@ def test_chord():
         a.pump(0.5)
         mark = len(a.out)
         a.key(b"x", 0.5)
-        check("detach_key = switch: a late x reaches the kill confirmation",
+        check("detach_key = switch: a late x opens the picker's view",
+              a.wait(b"X-ray  xv-rx", start=mark), a.out[mark:][-600:])
+        mark = len(a.out)
+        a.key(b"q", 0.5)
+        check("detach_key = switch: q in that view returns to the picker",
+              a.wait(b"switch to session:", start=mark), a.out[mark:][-600:])
+        mark = len(a.out)
+        a.key(b"X", 0.5)
+        check("detach_key = switch: X reaches the kill confirmation",
               a.wait(b"Kill xv-rx? [y/N]", start=mark), a.out[mark:])
         a.key(b"n", 0.5)
         a.key(b"\033", 0.5)
