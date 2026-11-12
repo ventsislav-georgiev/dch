@@ -3120,7 +3120,9 @@ struct dsrc
 
 struct d3m
 {
-	size_t xs, xe;		/* the --title word: skipped */
+	const struct sw *w;	/* the command's words */
+	const char *cmd;
+	size_t k;		/* the first word not ending before the last span */
 	struct xr_span sp;
 	int n, multi;
 	struct xr_span one[6];
@@ -3131,8 +3133,19 @@ static int
 d3_cmd(void *ctx, const struct xr_span *sp)
 {
 	struct d3m *m = ctx;
+	const struct sw *w = m->w;
+	size_t k = m->k, l = sp->e - sp->s;
 
-	if (sp->e > m->xs && sp->s < m->xe)
+	/* R2: only a word that is the ref alone, after no option; one inside a
+	** longer word (--body "Fixes #9", --opt=#9, the --title value), after
+	** an option (--title #9) or in no word (a comment, a here-doc body)
+	** neither defines nor counts */
+	for (; k < w->n && w->re[k] < sp->e; k++)
+		;	/* spans and words come in order */
+	m->k = k;
+	if (k == w->n || w->rs[k] > sp->s || w->op[k] || strlen(SWD(w, k)) != l ||
+	    memcmp(SWD(w, k), m->cmd + sp->s, l) ||
+	    (k && !w->op[k - 1] && SWD(w, k - 1)[0] == '-'))
 		return 0;
 	if (!m->n++)
 		m->sp = *sp;
@@ -3153,14 +3166,19 @@ d3_out(void *ctx, const struct xr_span *sp)
 	return 0;
 }
 
-/* D3: --title on a bash command that did not fail. */
+/* D3: --title on a bash command that did not fail. A create command (gh pr
+** create|new, gh issue create|new) takes its ref from its output only (R1):
+** what it creates has no number until it prints one. */
 static void
 d3(const struct dsrc *s, struct dset *ds)
 {
+	static const char *const kind[] = { "pr", "issue", 0 };
+	static const char *const verb[] = { "create", "new", 0 };
 	struct sw w;
 	struct d3m m;
 	const char *val = NULL;
 	size_t k;
+	int cr = 0;
 	struct dres *d;
 	char title[XR_TITLE_MAX * 4 + 1];
 
@@ -3173,23 +3191,21 @@ d3(const struct dsrc *s, struct dset *ds)
 			continue;
 		else if (!strcmp(SWD(&w, k), "--title") && k + 1 < w.n &&
 		         !w.op[k + 1])
-		{
 			val = SWD(&w, k + 1);
-			m.xs = w.rs[k];
-			m.xe = w.re[k + 1];
-		}
 		else if (!strncmp(SWD(&w, k), "--title=", 8))
-		{
 			val = SWD(&w, k) + 8;
-			m.xs = w.rs[k];
-			m.xe = w.re[k];
-		}
+	for (k = 0; k + 2 < w.n && !cr; k++)
+		cr = !strcmp(base(SWD(&w, k)), "gh") && in_list(SWD(&w, k + 1), kind) &&
+		     in_list(SWD(&w, k + 2), verb);
 	if (val)
 		title_of(val, strlen(val), title);
+	m.w = &w;
+	m.cmd = s->cmd;
+	if (val && title[0] && !cr)
+		(void)grammar(s->cmd, s->cl, XR_PLAIN, R_D3, s->cwd, d3_cmd, &m);
 	free(w.b);
 	if (!val || !title[0])
 		return;
-	(void)grammar(s->cmd, s->cl, XR_PLAIN, R_D3, s->cwd, d3_cmd, &m);
 	if (m.n && !m.multi)
 	{
 		if ((d = dpush(ds)))

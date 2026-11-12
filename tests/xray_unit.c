@@ -3580,22 +3580,20 @@ rule_hit(void *ctx, const struct xr_hit *h)
 		*(int *)ctx |= 1 << (h->rule[1] - '1');
 }
 
-/* The rules (D1 1, D2 2, D3 4, D4 8) a paired Bash call of cmd in
-** /home/demo/proj defines by, its output out (JSON-escaped; NULL: the
-** heading "# #831 Title") */
+/* A paired Bash call of cmd in /home/demo/proj into k, its output out
+** (JSON-escaped; NULL: the heading "# #831 Title"), failed: is_error */
 static int
-defines_out(const char *cmd, const char *out)
+paired(const char *cmd, const char *out, int failed, struct xr_sink *k)
 {
 	char res[400], *b = malloc(strlen(cmd) * 2 + 200), *o;
-	int rules = 0;
-	struct xr_sink k = { rule_hit, &rules };
 	struct xr_chapters ch;
 
 	if (!b)
 		return -1;
 	snprintf(res, sizeof res, "{\"type\":\"user\",\"cwd\":\"/home/demo/proj\","
 	         "\"message\":{\"content\":[{\"type\":\"tool_result\","
-	         "\"tool_use_id\":\"b1\",\"content\":\"%s\"}]}}",
+	         "\"tool_use_id\":\"b1\",%s\"content\":\"%s\"}]}}",
+	         failed ? "\"is_error\":true," : "",
 	         out ? out : "# #831 Title\\nbody");
 	o = b + sprintf(b, "{\"type\":\"assistant\",\"cwd\":\"/home/demo/proj\","
 	                "\"message\":{\"content\":[{\"type\":\"tool_use\","
@@ -3609,13 +3607,23 @@ defines_out(const char *cmd, const char *out)
 	}
 	strcpy(o, "\"}}]}}");
 	begin();
-	xr_claude_refs(D, &k, 1, NULL, NULL);
+	xr_claude_refs(D, k, 1, NULL, NULL);
 	line(b);
 	line(res);
 	end(&ch);
 	xr_chapters_free(&ch);
 	free(b);
-	return rules;
+	return 0;
+}
+
+/* The rules (D1 1, D2 2, D3 4, D4 8) a paired Bash call defines by */
+static int
+defines_out(const char *cmd, const char *out)
+{
+	int rules = 0;
+	struct xr_sink k = { rule_hit, &rules };
+
+	return paired(cmd, out, 0, &k) ? -1 : rules;
 }
 
 static int
@@ -3816,6 +3824,124 @@ t_excl(void)
 	}
 }
 
+/* #214: every D-rule definition of a paired Bash call, "key=title;" each */
+static void
+def_hit(void *ctx, const struct xr_hit *h)
+{
+	char *b = ctx;
+	size_t l = strlen(b);
+
+	if (h->rule)
+		snprintf(b + l, 512 - l, "%s=%s;", h->sp->key, h->title);
+}
+
+/* #214 (QA 1.55.0 LOW-13, ruling R1/R2): a create command defines from its
+** output only; elsewhere a command-line ref is a word by itself after no
+** option. The ruling's rows 1-12, then the forms. */
+static void
+t_d3(void)
+{
+	static const struct { const char *cmd, *out; int failed; const char *want; }
+	row[] = {
+#define PR "https://github.com/o/r/pull/12"
+		/* 1-5: the new PR's URL, never the body's or the title's ref */
+		{ "gh pr create --title \"Real\" --body \"Fixes #999\"", PR, 0,
+		  "pull:o/r#12=Real;" },
+		{ "gh pr create --body \"Fixes #999\" --title \"Real\"", PR, 0,
+		  "pull:o/r#12=Real;" },
+		{ "gh pr create --title \"Real\" --body \"Some text. Fixes #999 and "
+		  "#998.\"", PR, 0, "pull:o/r#12=Real;" },
+		{ "gh pr create --title \"Real\" --body \"no refs\"", PR, 0,
+		  "pull:o/r#12=Real;" },
+		{ "gh pr create --title \"Fix #999 crash\"", PR, 0,
+		  "pull:o/r#12=Fix #999 crash;" },
+		/* 6, 7: the printed issue; nothing printed, nothing defined */
+		{ "gh issue create --title T --body \"dup of #7\"",
+		  "https://github.com/o/r/issues/13", 0, "pull:o/r#13=T;" },
+		{ "gh issue create --title T --body \"dup of #77\"",
+		  "https://github.com/o/r/issues/13", 0, "pull:o/r#13=T;" },
+		{ "gh pr create --title T --web",
+		  "Opening github.com/o/r/compare in your browser.", 0, "" },
+		/* 8, 9: an edit's whole-word URL, the body's ref not counted */
+		{ "gh pr edit " PR " --title New", PR, 0, "pull:o/r#12=New;" },
+		{ "gh pr edit " PR " --title New", "", 0, "pull:o/r#12=New;" },
+		{ "gh pr edit " PR " --title New --body \"Fixes #999\"", PR, 0,
+		  "pull:o/r#12=New;" },
+		/* 10: --notes' #12 neither defines nor counts; the output rule
+		** (a release URL; the PR URL the rows assume) is unchanged */
+		{ "gh release create v1.2 --title \"Release 1.2\" --notes \"Fixes "
+		  "#12\"", "https://github.com/o/r/releases/tag/v1.2", 0,
+		  "url:https://github.com/o/r/releases/tag/v1.2=Release 1.2;" },
+		{ "gh release create v1.2 --title \"Release 1.2\" --notes \"Fixes "
+		  "#12\"", "", 0, "" },
+		{ "gh release create v1.2 --title \"Release 1.2\" --notes \"Fixes "
+		  "#12\"", PR, 0, "pull:o/r#12=Release 1.2;" },
+		/* 11: a failed command */
+		{ "gh pr create --title Real --body \"Fixes #999\"", PR, 1, "" },
+		{ "gh pr edit " PR " --title New", PR, 1, "" },
+		/* 12: a reader only in $(…) leaves D3 (D1 off: #831's heading
+		** gets T); an outer reader stops it */
+		{ "gh pr create --title T --body \"$(cat /etc/b.md) Fixes #999\"", PR,
+		  0, "pull:o/r#12=T;" },
+		{ "gh pr create --title T --body \"$(cat /etc/b.md)\"", NULL, 0,
+		  "issue:#831=T;" },
+		{ "cat /etc/x; gh pr create --title T --body \"Fixes #999\"", PR, 0,
+		  "" },
+		/* R1: new, issue, a path or a prefix to gh; a whole word too */
+		{ "gh pr new --title Real --body \"Fixes #999\"", PR, 0,
+		  "pull:o/r#12=Real;" },
+		{ "gh issue new --title T -b \"Fixes #999\"",
+		  "https://github.com/o/r/issues/13", 0, "pull:o/r#13=T;" },
+		{ "gh pr create --title T --body x o/r#5", PR, 0, "pull:o/r#12=T;" },
+		{ "/usr/local/bin/gh pr create --title T --body x o/r#5", PR, 0,
+		  "pull:o/r#12=T;" },
+		{ "GH_REPO=o/r gh issue create --title T --body x o/r#5", PR, 0,
+		  "pull:o/r#12=T;" },
+		{ "gh pr create --title T --body-file - <<EOF\nFixes #999\nEOF", PR,
+		  0, "pull:o/r#12=T;" },
+		/* R2: a whole word after no option, quoted or not (a bare number is
+		** no ref: the output rule) */
+		{ "gh pr edit o/r#12 --title New", "", 0, "pull:o/r#12=New;" },
+		{ "gh pr edit \"#12\" --title New", "", 0, "issue:#12=New;" },
+		{ "gh pr edit 12 --title New", PR, 0, "pull:o/r#12=New;" },
+		{ "dch meta PROJ-71 --title=\"Own title\"", "ok", 0,
+		  "ticket:PROJ-71=Own title;" },
+		{ "gh pr edit o/r#12 o/r#13 --title New", PR, 0, "" },
+		/* R2: after an option, inside a word, in a comment or a here-doc
+		** body: not counted */
+		{ "gh pr edit -R o/r#12 --title New", "", 0, "" },
+		{ "gh pr edit 12 --title New --opt=#99", "", 0, "" },
+		{ "gh pr edit 12 --title \"#99\"", "", 0, "" },
+		{ "dch meta --title=\"Own title\" PROJ-71", "ok", 0, "" },
+		{ "gh pr edit 12 --title New # see #77", "", 0, "" },
+		{ "gh pr edit 12 --title New --body-file - <<EOF\nFixes #999\nEOF",
+		  PR, 0, "pull:o/r#12=New;" },
+		{ "gh pr edit " PR " --title New --body \"see "
+		  "https://github.com/o/r/pull/13\"", PR, 0, "pull:o/r#12=New;" },
+		/* a gh alias is no create: R2 */
+		{ "gh alias-create --title T --body \"Fixes #999\"", PR, 0,
+		  "pull:o/r#12=T;" },
+#undef PR
+	};
+	char got[512], m[300], *p;
+	size_t i;
+
+	for (i = 0; i < sizeof row / sizeof *row; i++)
+	{
+		struct xr_sink k = { def_hit, got };
+
+		got[0] = '\0';
+		snprintf(m, sizeof m, "d3: %s%s -> %s", row[i].cmd,
+		         row[i].failed ? " (failed)" : "", row[i].want);
+		for (p = m; (p = strpbrk(p, "\n\t\r")); )
+			*p = '|';
+		CHECK(m, !paired(row[i].cmd, row[i].out, row[i].failed, &k) &&
+		      !strcmp(got, row[i].want));
+		if (strcmp(got, row[i].want))
+			fprintf(stderr, "  got: %s\n", got);
+	}
+}
+
 /* json.c's dch_json_quote (QA 1.55.0 LOW-7): every code point a terminal
 ** acts on as \u, its neighbours raw */
 static int
@@ -3885,6 +4011,7 @@ main(int argc, char **argv)
 	t_auto();
 	t_auto_cap();
 	t_excl();
+	t_d3();
 	t_cancel();
 	t_scan_caps();
 	t_scan_scope();
