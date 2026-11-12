@@ -1350,7 +1350,12 @@ class XFake:
     write; "osc" OSC 52 and title escapes on both streams; "hold" answers
     only a 0x34 (its 0x33 cancel); "dark" answers the first connection's
     0x30 and closes it, and every later connection gets no hello; "hist"
-    answers `out` as stdout, exit 0 (a --history --json)."""
+    answers `out` as stdout, exit 0 (a --history --json); #197: "slow"
+    1025 KiB of 1 KiB lines, then 1 s later one more and its 0x33; "esc" a
+    line that escapes past 16 MiB (3 MiB of 0x01 in a string); "crlf" CR
+    as JSON space and in a string; "capcut" whole lines, a partial line,
+    then a 0x33 "cap"; "holdcut" whole lines and a partial line, its 0x33
+    only for a 0x34."""
 
     def __init__(self, mode, out=b""):
         self.mode, self.n, self.out = mode, 0, out
@@ -1389,7 +1394,17 @@ class XFake:
             "silent": frame(0x31, b'{"cut":'),
             "cut": frame(0x31, b'{"a":1}\n{"b":2}\n{"cut":')
             + frame(0x32, b"e-cut"),
-            "hist": frame(0x31, self.out) + frame(0x33, {"exit": 0})}
+            "hist": frame(0x31, self.out) + frame(0x33, {"exit": 0}),
+            "esc": b"".join(frame(0x31, x[i:i + 60000]) for x in
+                            [b'{"s":"' + b"\x01" * (3 << 20)
+                             + b'"}\n{"after":1}\n'] for i in
+                            range(0, len(x), 60000))
+            + frame(0x33, {"exit": 0}),
+            "crlf": frame(0x31, b'{"f":1}\r\n{"g":"a\rb"}\n{"h":\r2}\r\n')
+            + frame(0x33, {"exit": 0}),
+            "capcut": frame(0x31, b'{"ok":1}\n{"cut":"aaaa')
+            + frame(0x33, {"exit": 2, "why": "cap"}),
+            "holdcut": frame(0x31, b'{"ok":1}\n{"cut":')}
         try:
             while True:
                 d = c.recv(65536)
@@ -1405,8 +1420,16 @@ class XFake:
                         c.sendall(frame(0x18, {
                             "proto": "1.1", "server": "fake",
                             "ops": ["ctl", "ctl-cancel", "xray"]}))
-                    elif t == 0x34 and self.mode == "hold":
+                    elif t == 0x34 and self.mode in ("hold", "holdcut"):
                         c.sendall(frame(0x33, {"exit": 2, "why": "cancel"}))
+                    elif t == 0x30 and self.mode == "slow":
+                        pad = b"x" * 1000
+                        c.sendall(b"".join(frame(0x31, b"".join(
+                            b'{"n":%d,"p":"%s"}\n' % (i + j, pad)
+                            for j in range(32))) for i in range(0, 1024, 32)))
+                        time.sleep(1)
+                        c.sendall(frame(0x31, b'{"last":1}\n')
+                                  + frame(0x33, {"exit": 0}))
                     elif t == 0x30 and self.mode in answers:
                         c.sendall(answers[self.mode])
                         if self.mode in ("dark", "cut"):
@@ -1611,6 +1634,85 @@ def robust_checks(dch, check, cenv, fakes, tmp):
           got == [{"req": 1, "line": {"o": 1}}, {"req": 1, "stderr": "e1"},
                   {"req": 1, "line": {"o": 2}}, {"req": 1, "stderr": "e2"},
                   {"req": 1, "exit": 0, "why": None}], got)
+
+    # #197 (QA 1.56.0 MED-R1): one-shot, a reader that stalls past the
+    # quiet bound (5001 ms here) is not the host's silence: every line,
+    # exit 0
+    f = fake("slow")
+    p = subprocess.Popen([DCH, "--xray", "q:x", "--json"],
+                         env=side(f.port, DCH_CTL_TIMEOUT_MS="1"),
+                         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE)
+    time.sleep(8)
+    out, err = p.communicate(timeout=60)
+    lines = out.splitlines()
+    check("MED-R1: one-shot --xray, its reader stalled 8 s: all 1025 "
+          "lines, exit 0", p.returncode == 0 and err == b""
+          and len(lines) == 1025 and lines[-1] == b'{"last":1}',
+          (p.returncode, len(lines), err))
+
+    # ... and a reader that goes away still ends it at once (EPIPE: 0)
+    p = subprocess.Popen([DCH, "--xray", "q:x", "--json"],
+                         env=side(f.port, DCH_CTL_TIMEOUT_MS="1"),
+                         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE)
+    first = p.stdout.readline()
+    t0 = time.time()
+    p.stdout.close()
+    rc = p.wait(timeout=30)
+    took = time.time() - t0
+    check("MED-R1: one-shot --xray, its reader gone: exit 0 within the "
+          "cancel's 3 s", rc == 0 and first.startswith(b'{"n":0,')
+          and took < 4.5 and p.stderr.read() == b"", (rc, first[:20], took))
+    p.stderr.close()
+
+    # #197 (LOW-R2): a host line past 16 MiB once escaped is an error, not
+    # a quiet exit 0 taken for a closed stdout
+    f = fake("esc")
+    r = subprocess.run([DCH, "--xray", "q:x", "--json"], env=side(f.port),
+                       capture_output=True, stdin=subprocess.DEVNULL,
+                       timeout=60)
+    check("LOW-R2: a host line over 16 MiB escaped: exit 7, said, nothing "
+          "of it written", r.returncode == UNREACHABLE_EXIT
+          and r.stdout == b"" and r.stderr == b"dch: q: unreachable: it "
+          b"sent a line over 16 MiB escaped\n",
+          (r.returncode, r.stdout[:40], r.stderr[:200]))
+
+    # #197 (NIT-R-A): a CR outside a string is JSON space and is dropped,
+    # one in a string a \u escape: every line still JSON
+    f = fake("crlf")
+    r = subprocess.run([DCH, "--xray", "q:x", "--json"], env=side(f.port),
+                       capture_output=True, stdin=subprocess.DEVNULL,
+                       timeout=20)
+    try:
+        js = [json.loads(x) for x in r.stdout.splitlines()]
+    except ValueError as e:
+        js = [str(e)]
+    check("NIT-R-A: CRLF and a CR between tokens dropped, a CR in a string "
+          "\\u000d: each line JSON", r.returncode == 0
+          and r.stdout == b'{"f":1}\n{"g":"a\\u000db"}\n{"h":2}\n'
+          and js == [{"f": 1}, {"g": "a\rb"}, {"h": 2}], (r, js))
+
+    # #197 (NIT-R-B): a host's cap and a cancel drop the partial line, as
+    # a lost link does (NIT-5): whole lines or nothing
+    f = fake("capcut")
+    r = subprocess.run([DCH, "--xray", "q:x", "--json"], env=side(f.port),
+                       capture_output=True, stdin=subprocess.DEVNULL,
+                       timeout=20)
+    check("NIT-R-B: a host's cap: the whole lines, the partial line "
+          "dropped", r.returncode == 2 and r.stdout == b'{"ok":1}\n'
+          and r.stderr == b"dch: q: --xray stopped by the host (cap)\n", r)
+    f = fake("holdcut")
+    p = subprocess.Popen([DCH, "--xray", "q:x", "--json"],
+                         env=side(f.port), stdin=subprocess.DEVNULL,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    first = p.stdout.readline()
+    p.send_signal(signal.SIGINT)
+    out, err = p.communicate(timeout=20)
+    check("NIT-R-B: Ctrl-C: the whole lines, the partial line dropped",
+          first == b'{"ok":1}\n' and out == b""
+          and p.returncode == -signal.SIGINT, (first, out, err,
+                                               p.returncode))
 
 
 def main():

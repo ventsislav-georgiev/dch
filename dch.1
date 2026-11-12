@@ -1323,13 +1323,19 @@ A control character, DEL, C1, bidi control or U+2028/U+2029 the host sends
 raw is written as a
 .B \eu
 escape, a byte that is not UTF\-8 as
-.BR \eufffd ,
+.B \eufffd
+(a CR outside a string, JSON space, is dropped),
 so a JSON line stays the same JSON and the host cannot drive the terminal.
-A host that sends nothing for 65 s (its 60 s timeout plus 5 s) is a lost
+A host that sends nothing for 65 s (its 60 s timeout plus 5 s; time spent
+waiting on a slow reader of dch's output does not count) is a lost
 connection, exit 7;
 .B \-\-follow
 has no such limit.
-A partial line the host was writing is dropped when the link is lost.
+A partial line the host was writing is dropped when the link is lost, on a
+cancel and when the host cuts the answer short.
+A host line over 16 MiB once escaped ends it with
+.IR "dch: host: unreachable: it sent a line over 16 MiB escaped" ,
+exit 7.
 The host answers by its own release:
 .BR \-\-scope ,
 .B \-\-chapter

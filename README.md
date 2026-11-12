@@ -986,10 +986,14 @@ writes the host's output and standard error line by line as they come (the
 `--follow` and `--ref` streams included) and exits with the host's exit
 status. A control character, DEL, C1, bidi control or U+2028/U+2029 the host
 sends raw is written as a `\u` escape, and a byte that is not UTF-8 as
-`\ufffd`: a JSON line stays the same JSON, and the host cannot drive your
-terminal. A host that sends nothing for 65 s (its own 60 s timeout, plus 5 s)
-is a lost connection, exit 7; `--follow` has no such limit. A partial line
-the host was writing is dropped when the link is lost. The
+`\ufffd` (a CR outside a string, JSON space, is dropped): a JSON line stays
+the same JSON, and the host cannot drive your terminal. A host that sends
+nothing for 65 s (its own 60 s timeout, plus 5 s; time spent waiting on a
+slow reader of dch's output does not count) is a lost connection, exit 7;
+`--follow` has no such limit. A partial line the host was writing is dropped
+when the link is lost, on a cancel and when the host cuts the answer short.
+A host line over 16 MiB once escaped ends it: `dch: <host>: unreachable: it
+sent a line over 16 MiB escaped`, exit 7. The
 host answers by its own release: `--scope`, `--chapter` and the corpus are
 the host's. A host whose hello lacks the `xray` token gets nothing and dch
 prints `dch: <host>: does not support --xray (needs dch serve 1.55.0+)`,
