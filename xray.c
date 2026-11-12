@@ -7549,9 +7549,11 @@ res_commit(const char *sha, const char *cwd, int live, const char *gh,
 			res_set(r, "ambiguous", "Ambiguous short SHA");
 			return 1;
 		}
-		/* git's own "unknown revision" only; a git that failed otherwise
-		** (a bad .gitmodules, a missing blob) gives no line (LOW-4) */
-		if (!strstr(run.err, "unknown revision"))
+		/* git's own "unknown revision" or "expected commit type" (a tree,
+		** a blob, a tag of one) only; a git that failed otherwise (a bad
+		** .gitmodules, a missing blob) gives no line (LOW-4) */
+		if (!strstr(run.err, "unknown revision") &&
+		    !strstr(run.err, "expected commit type"))
 			return 0;
 	}
 	(void)res_root(dir, root, sizeof root);

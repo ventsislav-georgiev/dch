@@ -1307,8 +1307,9 @@ Codex `<n>` gets it too.
   its output and 4 KiB of its errors and drains the rest. `ok` gives the
   subject as `title`, `author · 3h ago · abc1234` as `subtitle` and the
   stat as `lines` (past 14: the first 13 and the summary); a short SHA
-  matching several objects is `ambiguous`, one git does not know
-  (`unknown revision`) `not_commit`. git's own "not a git repository"
+  matching several objects is `ambiguous`; one git does not know
+  (`unknown revision`) or that names a tree, a blob or a tag of one
+  (`expected commit type`) is `not_commit`. git's own "not a git repository"
   (or a cwd that is gone) is `not_repo`. Any other git failure gives no
   `resolved` line, never a wrong state: for example a `.gitmodules` with
   an invalid `update` value, or a blob missing from a partial clone.

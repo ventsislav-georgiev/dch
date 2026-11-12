@@ -2494,6 +2494,8 @@ fake_git(void)
 	    "bad) echo \"fatal: bad object\" >&2; exit 128 ;;\n"
 	    "unknown) echo \"fatal: ambiguous argument 'abcdef1^{commit}': unknown"
 	    " revision or path not in the working tree.\" >&2; exit 128 ;;\n"
+	    "tree) echo \"error: abcdef1^{commit}: expected commit type, but the"
+	    " object dereferences to tree type\" >&2; exit 128 ;;\n"
 	    "flood) /usr/bin/yes | /usr/bin/head -c 10000000; "
 	    "/usr/bin/yes e | /usr/bin/head -c 10000000 >&2; exit 0 ;;\n"
 	    "slow|slowrev) echo $$ > \"$D/pid\"; /bin/sleep 30 & /bin/sleep 30 ;;\n"
@@ -2641,6 +2643,11 @@ t_res_git(void)
 	mode("unknown");
 	CHECK("git: \"unknown revision\": not_commit, named by the git root",
 	      res("abcdef1", "proj/src", 1, &r) == 1 &&
+	      is(&r, "commit", "not_commit") &&
+	      !strcmp(r.title, "Not a commit in proj"));
+	mode("tree");
+	CHECK("git: \"expected commit type\" (a tree SHA): not_commit",
+	      res("abcdef1", "proj", 1, &r) == 1 &&
 	      is(&r, "commit", "not_commit") &&
 	      !strcmp(r.title, "Not a commit in proj"));
 	/* LOW-4: a git that failed otherwise is no line, never a wrong state */

@@ -188,6 +188,11 @@ def test_shell():
               len(rv) == 1 and rv[0]["state"] == "not_commit" and
               rv[0]["title"] == "Not a commit in repo" and
               rv[0]["subtitle"] == "abcdef1" and rv[0]["lines"] == [], rv)
+        tree = git(repo, "rev-parse", "HEAD^{tree}")
+        r, ls, rv = ref(n, tree[:12])
+        check("shell commit: a tree SHA: not_commit (\"expected commit "
+              "type\")", len(rv) == 1 and rv[0]["state"] == "not_commit" and
+              rv[0]["title"] == "Not a commit in repo", rv)
         # a commit URL answers only in a clone of its repo (QA 1.55.0 LOW-1)
         url = "https://github.com/o/r/commit/" + sha
         r, ls, rv = ref(n, url)
