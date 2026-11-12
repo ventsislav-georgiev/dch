@@ -90,6 +90,28 @@ BUSY = {"code": "busy",
         "message": "this host is at its connection limit: try again shortly"}
 
 
+def read_clock_at(want, got, secs):
+    """want, got: lines (str or bytes) of two runs. A live shell's screen
+    rows carry the clock at read time as their "at" (dch.c ring_screen:
+    time(NULL)), so a run a second later says a second later. got's mention
+    "at" takes want's where it is later by 0 to secs (the seconds between
+    the runs), never earlier; every other byte still has to match."""
+    if len(want) != len(got):
+        return got
+    out = []
+    for w, g in zip(want, got):
+        p = MENTION_AT[isinstance(w, bytes)]
+        mw, mg = p.search(w), p.search(g)
+        if mw and mg and 0 <= int(mg[2]) - int(mw[2]) <= secs:
+            g = g[:mg.start(2)] + mw[2] + g[mg.end(2):]
+        out.append(g)
+    return out
+
+
+MENTION_AT = {False: re.compile(r'("mention":\{.*?"at":)(\d+)'),
+              True: re.compile(rb'("mention":\{.*?"at":)(\d+)')}
+
+
 def frame(t, payload=b""):
     if isinstance(payload, (dict, list)):
         payload = json.dumps(payload).encode()
@@ -435,9 +457,11 @@ def xray_checks(dch, check, senv, cenv, port, fakes, tmp, slog):
 
     def same(label, *args, n="xr1", mask=False):
         """args with "@" for the name: n there, srv:n here."""
+        t0 = int(time.time())
         loc = dch(senv, "--xray", *[n if a == "@" else a for a in args])
         rem = dch(xenv, "--xray", *["srv:" + n if a == "@" else a
                                     for a in args])
+        secs = int(time.time()) - t0
         got = (rem.stdout, rem.stderr, rem.returncode)
         want = (loc.stdout, loc.stderr, loc.returncode)
         if mask:
@@ -447,6 +471,9 @@ def xray_checks(dch, check, senv, cenv, port, fakes, tmp, slog):
                               '"elapsed_ms":0', o).splitlines(True)
                               if not x.startswith('{"schema":1,"progress":')),)
                          + g[1:] for o, g in ((got[0], got), (want[0], want))]
+            got = ("".join(read_clock_at(want[0].splitlines(True),
+                                         got[0].splitlines(True), secs)),
+                   ) + got[1:]
         check("xray %s: byte for byte the host's own run (exit %d)"
               % (label, loc.returncode), got == want, (want, got))
 
@@ -900,10 +927,12 @@ def requests_checks(dch, check, senv, cenv, serve_at, fakes, tmp, slog):
 
     def same(req, argv, mask=False):
         """argv on the warm connection, as the host's own run of it"""
+        t0 = int(time.time())
         loc = subprocess.run([DCH, "--xray", "xq1"] + argv, env=senv,
                              capture_output=True, stdin=subprocess.DEVNULL)
         rq.send({"req": req, "argv": argv})
         got = rq.until(req)
+        secs = int(time.time()) - t0
         lines = [g for g in got if g.startswith(b'{"req":%d,"line":' % req)]
         errs = [json.loads(g)["stderr"] for g in got if b'"stderr":' in g]
         want = [b'{"req":%d,"line":%s}' % (req, x)
@@ -916,6 +945,7 @@ def requests_checks(dch, check, senv, cenv, serve_at, fakes, tmp, slog):
                    if not x.startswith(prog)]
             want = [elapsed.sub(b'"elapsed_ms":0', x) for x in want
                     if not x.startswith(prog)]
+            cmp = read_clock_at(want, cmp, secs)
         end = json.loads(got[-1]) if got else None
         check("requests %s: each host line byte for byte, its stderr, one "
               "end line (exit %d)" % (" ".join(argv), loc.returncode),
@@ -1686,7 +1716,18 @@ def main():
         check("-ls --remote: it connects and lists q:q1",
               "q:q1" in r.stdout.splitlines() and len(quiet.conns) == 1,
               (r.stdout, len(quiet.conns)))
-        r = dch(cenv, "--ls", "--remote", "--hosts", hosts)
+        def listed(ok, *args):
+            """args run until ok(r): under load the host's answer can miss
+            the 300 ms --ls box; 10 s, as the other waits here"""
+            end = time.time() + 10
+            r = dch(cenv, *args)
+            while not ok(r) and time.time() < end:
+                time.sleep(0.2)
+                r = dch(cenv, *args)
+            return r
+
+        r = listed(lambda r: "srv:rs1" in r.stdout.splitlines(),
+                   "--ls", "--remote", "--hosts", hosts)
         lines = r.stdout.splitlines()
         check("--ls --remote: the local session, then srv:rs1",
               r.returncode == 0 and "loc1" in lines and "srv:rs1" in lines
@@ -1696,7 +1737,8 @@ def main():
         check("--ls-json without --remote: local rows only",
               [x["name"] for x in rows] == ["loc1"]
               and all("host" not in x for x in rows), r.stdout)
-        r = dch(cenv, "--ls-json", "--remote", "--hosts", hosts)
+        r = listed(lambda r: '"stale":false' in r.stdout,
+                   "--ls-json", "--remote", "--hosts", hosts)
         rows = json.loads(r.stdout)
         rem = [x for x in rows if "host" in x]
         check("--ls-json --remote: a row with host srv and name rs1",
@@ -1706,7 +1748,8 @@ def main():
         r = dch(cenv, "-lj", "--hosts", hosts)
         check("-lj without --remote: no remote rows",
               "srv:" not in r.stdout and "loc1\t" in r.stdout, r.stdout)
-        r = dch(cenv, "-lj", "--remote", "--hosts", hosts)
+        r = listed(lambda r: "srv:rs1\t\t0" in r.stdout.splitlines(),
+                   "-lj", "--remote", "--hosts", hosts)
         check("-lj --remote: srv:rs1<TAB>alias<TAB>0",
               "srv:rs1\t\t0" in r.stdout.splitlines(), r.stdout)
         r = dch(cenv, "--remote", "-kl")
