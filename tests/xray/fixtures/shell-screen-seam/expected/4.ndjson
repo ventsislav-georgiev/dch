@@ -1,0 +1,9 @@
+{"schema":1,"first":{"session":"scrolled","session_id":"m6a7b8c9d0e1f2a41","key":"pull:x/y#1","shape":"pull","text":"x/y#1","project":"-T-work-scrolled","mode":"full","scope":"session","budget_ms":null,"elapsed_ms":0}}
+{"schema":1,"mention":{"session":"scrolled","chapter":"s281474976750001","at":1794300000,"line":"28 x/y#1 above","offset":281474976750005,"live":true,"project":"-T-work-scrolled"}}
+{"schema":1,"mention":{"session":"scrolled","chapter":"s281474976750001","at":1794300000,"line":"29 x/y#1 below","offset":281474976750006,"live":true,"project":"-T-work-scrolled"}}
+{"schema":1,"mention":{"session":"scrolled","chapter":null,"at":1794300000,"line":"echo x/y#1 a","offset":281474976750011,"live":true,"project":"-T-work-scrolled"}}
+{"schema":1,"mention":{"session":"scrolled","chapter":"s281474976750009","at":1794300000,"line":"x/y#1 a","offset":281474976750013,"live":true,"project":"-T-work-scrolled"}}
+{"schema":1,"mention":{"session":"scrolled","chapter":null,"at":1794300000,"line":"echo x/y#1 b","offset":281474976750018,"live":true,"project":"-T-work-scrolled"}}
+{"schema":1,"mention":{"session":"scrolled","chapter":"s281474976750016","at":1794300000,"line":"x/y#1 b","offset":281474976750020,"live":true,"project":"-T-work-scrolled"}}
+{"schema":1,"tally":{"session":"scrolled","live":true,"project":"-T-work-scrolled","count":3,"definitions":0,"partial":false,"mentions_dropped":0}}
+{"schema":1,"done":true,"partial":false,"counts":{"session":3,"project":0,"project_sessions":0,"all":null,"all_sessions":null},"why":null,"files":1,"bytes":105,"lines_too_long":0}

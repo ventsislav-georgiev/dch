@@ -301,6 +301,11 @@ void xr_shell_feed(struct xr_shell *s, const struct xr_rec *x);
 ** xr_shell_end flushes the last line and frees what refs held. */
 int xr_shell_refs(struct xr_shell *s, const struct xr_sink *k,
                   const char *cwd);
+/* The seam between the ring and the primary screen's rows (#140, #171):
+** the open line goes out, the open block closes, so a screen row has no
+** chapter. For the count, the rows stay in the block's unit until one starts
+** with the block's prompt, which starts the next unit. */
+void xr_shell_screen(struct xr_shell *s);
 void xr_shell_end(struct xr_shell *s);
 /* One MSG_RING_READ reply's records ({u16 len, u8 kind, u8 flags, u32 time,
 ** text}, seqs from first), bounds-checked, to fn one at a time (x and its

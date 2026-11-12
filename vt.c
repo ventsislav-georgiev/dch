@@ -1216,7 +1216,7 @@ int
 dch_vt_snapshot(int format, int lines, char **out, size_t *outlen)
 {
 	GhosttySelection sel;
-	size_t total, first, written;
+	size_t total, first, written, y;
 	char *buf;
 
 	*out = NULL;
@@ -1255,7 +1255,17 @@ dch_vt_snapshot(int format, int lines, char **out, size_t *outlen)
 		    &total) != GHOSTTY_SUCCESS || total == 0)
 			return -1;
 		first = total > (size_t)cur_rows ? total - (size_t)cur_rows : 0;
-		if (select_rows(first, total - 1, &sel) < 0 ||
+		/* X-ray's rows (#171): not the ones a grow pulled back on
+		** screen, in the ring already */
+		if (format == FMT_UNWRAP && ref_pos(xref, NULL, &y) == 0 &&
+		    y >= first)
+			first = y + 1;
+		if (first >= total) {
+			if (!(buf = malloc(1)))
+				return -1;
+			buf[0] = '\0';
+			written = 0;
+		} else if (select_rows(first, total - 1, &sel) < 0 ||
 		    format_sel(format, &sel, &buf, &written) < 0)
 			return -1;
 	}

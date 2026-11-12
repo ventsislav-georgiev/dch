@@ -1,0 +1,4 @@
+{"schema":1,"first":{"session":"trunc","session_id":"m6a7b8c9d0e1f2a51","key":"pull:x/y#77","shape":"pull","text":"x/y#77","project":"-T-work-trunc","mode":"full","scope":"session","budget_ms":null,"elapsed_ms":0}}
+{"schema":1,"mention":{"session":"trunc","chapter":null,"at":0,"line":"x/y#77 on the screen","offset":281474976760001,"live":true,"project":"-T-work-trunc"}}
+{"schema":1,"tally":{"session":"trunc","live":true,"project":"-T-work-trunc","count":1,"definitions":0,"partial":true,"mentions_dropped":0}}
+{"schema":1,"done":true,"partial":true,"counts":{"session":1,"project":0,"project_sessions":0,"all":null,"all_sessions":null},"why":"range","files":1,"bytes":39,"lines_too_long":0}

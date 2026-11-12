@@ -1093,7 +1093,23 @@ The corpus:
   - A query also reads the current primary screen, after the ring: its rows
     (soft wraps joined, blank ones dropped) count as output, so a ref still
     on screen is found by `--json`, `--ref` and `--follow`. They carry no
-    marks yet, so they give no chapter and no definition. Their `at` is the
+    marks yet, so they give no chapter and no definition, not even the
+    chapter of the command whose output ends the ring. For the count they
+    stay with that command until a row that starts with its prompt (then a
+    space, or the row's end), which starts the next command, so a ref counts
+    the same before and after its rows scroll. A prompt that changes between
+    commands (a new directory in it) or is longer than 255 bytes starts no
+    command there. A row a grow pulled back on screen is in the ring
+    already and is not read again. A line soft-wrapped across the screen's
+    top edge is read as two, its head from the ring, until it scrolls: a ref
+    across that wrap is missed until then. A screen read that fails (no answer
+    within 2 s, a busy or vanished master) or comes back cut (a screen over
+    2 MB keeps its tail; its first row is dropped) makes the answer
+    `complete: false` with `why: "range"`, and `--ref`'s `partial: true`.
+    `--ref`'s light mode waits for the screen only as long as its budget
+    lasts (`why: "budget"`). A screen row's `offset` is a provisional seq:
+    the row gets another one when it scrolls into the ring, and a later
+    ring row can take this one. Their `at` is the
     time of the read, not the time the row was written: two queries a
     second apart can give the same row different `at` values. While the alternate
     screen is active (vim, less), neither screen is read: the answer is the

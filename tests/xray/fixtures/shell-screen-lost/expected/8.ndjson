@@ -1,0 +1,4 @@
+{"schema":1,"first":{"session":"slow","session_id":"m6a7b8c9d0e1f2a53","key":"pull:x/y#77","shape":"pull","text":"x/y#77","project":"-T-work-slow","mode":"full","scope":"session","budget_ms":null,"elapsed_ms":0}}
+{"schema":1,"mention":{"session":"slow","chapter":null,"at":0,"line":"x/y#77 on the screen","offset":281474976760002,"live":true,"project":"-T-work-slow"}}
+{"schema":1,"tally":{"session":"slow","live":true,"project":"-T-work-slow","count":1,"definitions":0,"partial":false,"mentions_dropped":0}}
+{"schema":1,"done":true,"partial":false,"counts":{"session":1,"project":0,"project_sessions":0,"all":null,"all_sessions":null},"why":null,"files":1,"bytes":53,"lines_too_long":0}

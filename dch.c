@@ -3362,10 +3362,11 @@ ctl_dead_exit(struct ctl_reader *r, const char *verb)
 ** reads bottom lines (the master itself tail-caps at 2MB). The deadline is wall-clock:
 ** ctl_next_frame's timeout is inactivity-based, and a master trickling
 ** bytes must not stall --ls-json. flags: DCH_READ_F_* (0: a 4-byte request).
+** st, when set: the reply's DCH_ST_*, -1 when none came (timeout, hang-up).
 ** Returns content length, -1 on any failure, -2 no mirror. */
 static int
 fetch_screen(const char *path, char *buf, size_t cap, int deadline_ms,
-             int ansi, unsigned int flags)
+             int ansi, unsigned int flags, int *st)
 {
 	unsigned char req[5], payload[PKT_MAX], type;
 	struct ctl_reader r = {0};
@@ -3374,6 +3375,8 @@ fetch_screen(const char *path, char *buf, size_t cap, int deadline_ms,
 	size_t used = 0;
 	int s, rc;
 
+	if (st)
+		*st = -1;
 	if (cap < PKT_MAX)
 		return -1;
 	s = control_connect_path(path);
@@ -3413,6 +3416,8 @@ fetch_screen(const char *path, char *buf, size_t cap, int deadline_ms,
 		else if (type == MSG_READ_END)
 		{
 			close(s);
+			if (st)
+				*st = (int)len;
 			if (len == DCH_ST_NOVT)
 				return -2;
 			if (len != DCH_ST_OK && len != DCH_ST_TRUNC)
@@ -3627,7 +3632,7 @@ screen_tail(const char *path, int *novt)
 	raw = malloc(DET_CAP + 1);
 	if (!raw)
 		return NULL;
-	n = fetch_screen(path, raw, DET_CAP, DET_DEADLINE_MS, 0, 0);
+	n = fetch_screen(path, raw, DET_CAP, DET_DEADLINE_MS, 0, 0, NULL);
 	if (n <= 0)
 	{
 		*novt = n == -2;
@@ -4640,7 +4645,8 @@ follow_refused(unsigned int status)
 	static char probe[PKT_MAX + 1];
 
 	if ((status == DCH_ST_ERR &&
-	     fetch_screen(sock_path, probe, PKT_MAX, CTL_IDLE_MS, 0, 0) >= 0) ||
+	     fetch_screen(sock_path, probe, PKT_MAX, CTL_IDLE_MS, 0, 0,
+	                  NULL) >= 0) ||
 	    status == DCH_ST_UNSUP)
 	{
 		fputs("dch: session master predates --follow; restart the "
@@ -6562,7 +6568,7 @@ screen_faint(const char *path, char **dimp, int *err)
 	raw = malloc(DET_CAP + 1);
 	if (!raw)
 		return NULL;
-	n = fetch_screen(path, raw, DET_CAP, DET_DEADLINE_MS, 1, 0);
+	n = fetch_screen(path, raw, DET_CAP, DET_DEADLINE_MS, 1, 0, NULL);
 	if (n <= 0)
 	{
 		free(raw);
@@ -6864,7 +6870,7 @@ exit_prompt(const char *path, char *out, size_t outsz)
 	out[0] = '\0';
 	if (!raw)
 		return 0;
-	n = fetch_screen(path, raw, DET_CAP, DET_DEADLINE_MS, 0, 0);
+	n = fetch_screen(path, raw, DET_CAP, DET_DEADLINE_MS, 0, 0, NULL);
 	raw[n > 0 ? n : 0] = '\0';
 	for (l = raw; l && !ok; l = nx)
 	{
@@ -9581,7 +9587,7 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 				     *pt = NULL;
 				int n = raw && make_sock_path(w->name) == 0 ?
 				        fetch_screen(sock_path, raw, DET_CAP,
-				                     DET_DEADLINE_MS, 0, 0) : -1;
+				                     DET_DEADLINE_MS, 0, 0, NULL) : -1;
 				int ok = n > 0 &&
 				         (raw[n] = '\0', dch_allow_prompt(raw,
 				                                            &id,
@@ -9750,7 +9756,7 @@ xv_screen(const char *name, char *buf, size_t cap)
 		return -1;
 	memcpy(keep, sock_path, sizeof keep);
 	if (make_sock_path(name) == 0)
-		n = fetch_screen(sock_path, buf, DET_CAP, DET_DEADLINE_MS, 0, 0);
+		n = fetch_screen(sock_path, buf, DET_CAP, DET_DEADLINE_MS, 0, 0, NULL);
 	memcpy(sock_path, keep, sizeof keep);
 	if (n >= 0)
 		buf[n] = '\0';
@@ -11194,29 +11200,37 @@ ring_fetch(const char *path, struct ring_snap *rs, ring_rec_fn fn,
 }
 
 /* After a ring read, the current primary screen (7.3, #140): its rows, soft
-** wraps joined, to fn as output records with seqs from the ring's tail on.
-** The alt screen (DCH_ST_ALT), a master before #140 (DCH_ST_ERR) and any
-** failure give nothing: the answer is the ring's alone, never an error. */
+** wraps joined, to fn as output records with seqs from the ring's tail on,
+** past the seam xr_shell_screen draws in sh (#171). The alt screen
+** (DCH_ST_ALT) and a master before #140 (DCH_ST_ERR) give nothing: the
+** answer is the ring's alone, never an error. 1 when screen rows were lost:
+** no answer within ms, a hang-up, busy, or a reply past the master's cap,
+** whose kept tail starts inside a row (maybe inside a character): that row
+** is dropped. */
 #define XR_SCREEN_CAP (2u << 20)	/* the master's MSG_READ cap */
-static void
-ring_screen(const char *path, const struct ring_snap *rs, ring_rec_fn fn,
-            void *ctx)
+static int
+ring_screen(const char *path, const struct ring_snap *rs, struct xr_shell *sh,
+            ring_rec_fn fn, void *ctx, int ms)
 {
 	struct xr_rec x;
 	char *buf, *l, *nl;
-	int n;
+	int n, st;
 
-	if ((rs->status & (DCH_RING_S_OFF | DCH_RING_S_PAUSED)) ||
-	    !(buf = malloc(XR_SCREEN_CAP + 1)))
-		return;
-	/* shortcut: a screen past the cap keeps its tail, the first row cut */
-	n = fetch_screen(path, buf, XR_SCREEN_CAP, CTL_IDLE_MS, 0,
-	                 DCH_READ_F_PRIMARY);
+	if (rs->status & (DCH_RING_S_OFF | DCH_RING_S_PAUSED))
+		return 0;
+	if (ms <= 0 || !(buf = malloc(XR_SCREEN_CAP + 1)))
+		return 1;
+	n = fetch_screen(path, buf, XR_SCREEN_CAP, ms, 0, DCH_READ_F_PRIMARY,
+	                 &st);
+	xr_shell_screen(sh);
 	memset(&x, 0, sizeof x);
 	x.seq = rs->tail;
 	x.kind = RING_K_OUTPUT;
 	x.t = (uint32_t)time(NULL);
-	for (l = buf; n > 0 && l < buf + n; l = nl + 1)
+	l = buf;
+	if (st == DCH_ST_TRUNC && n > 0)
+		l = (nl = memchr(buf, '\n', (size_t)n)) ? nl + 1 : buf + n;
+	for (; n > 0 && l < buf + n; l = nl + 1)
 	{
 		if (!(nl = memchr(l, '\n', (size_t)(buf + n - l))))
 			nl = buf + n;
@@ -11228,6 +11242,7 @@ ring_screen(const char *path, const struct ring_snap *rs, ring_rec_fn fn,
 		x.seq++;
 	}
 	free(buf);
+	return st < 0 || st == DCH_ST_BUSY || st == DCH_ST_TRUNC;
 }
 
 /* The live Claude under a session's child, as --ls-json joins it: exactly
@@ -11950,6 +11965,7 @@ struct xr_ring_acc
 	long long rows;
 	uint64_t bytes;		/* record text, for --ref's done */
 	int gap, cont, seen;
+	int lost;		/* ring_screen's: screen rows lost */
 };
 
 static void
@@ -11989,7 +12005,7 @@ xr_shell_fill(struct xr_answer *a, const struct ring_snap *rs,
 		;	/* another agent's corpus (Codex: XR3c) */
 	else
 	{
-		int gap = rs->seqgap || acc->gap;
+		int gap = rs->seqgap || acc->gap || acc->lost;
 
 		if (refs)
 			xr_index_per_row(refs, !acc->sh.npaired);
@@ -12072,8 +12088,12 @@ xr_shell_ref(const struct xr_target *t, const struct xr_refq *q,
 	if (rc == 0 && xr_shell_refs(&f.acc->sh, &k, label) == 0)
 	{
 		fr = ring_fetch(t->sock, &rs, xr_ref_rec, &f);
-		if (fr == 0)
-			ring_screen(t->sock, &rs, xr_ref_rec, &f);
+		/* light: the screen read gets what is left of the budget, +2 ms
+		** so a read it cut ends past it and the tick says "budget" */
+		if (fr == 0 && (f.acc->lost = ring_screen(t->sock, &rs, &f.acc->sh,
+		    xr_ref_rec, &f, q->full ? CTL_IDLE_MS
+		    : (int)(q->budget + 2 - (xr_now_ms() - xr_t0)))))
+			(void)xr_scan_tick(f.sc, f.acc->bytes);
 		xr_shell_end(&f.acc->sh);
 		rc = fr != 0 && fr != -4 && fr != -1;
 	}
@@ -12082,6 +12102,7 @@ xr_shell_ref(const struct xr_target *t, const struct xr_refq *q,
 	if (rc == 0 && fr != -1)
 	{
 		int partial = fr == -4 || rs.seqgap || f.acc->gap || f.acc->cont ||
+		              f.acc->lost ||
 		              (rs.status & (DCH_RING_S_EVICTED | DCH_RING_S_OFF |
 		                            DCH_RING_S_PAUSED));
 
@@ -12228,7 +12249,8 @@ xr_json(const struct xr_target *t, const struct xr_refq *q, int snap)
 					break;
 				fr = ring_fetch(t->sock, &rs, xr_ring_rec, acc);
 				if (fr == 0)
-					ring_screen(t->sock, &rs, xr_ring_rec, acc);
+					acc->lost = ring_screen(t->sock, &rs, &acc->sh,
+					                        xr_ring_rec, acc, CTL_IDLE_MS);
 				xr_shell_end(&acc->sh);
 				if (fr != -4)
 					break;
@@ -13324,7 +13346,8 @@ xf_sb_build(struct xf *f, struct xf_sb *b, const char *label)
 		fr = ring_fetch_rd(f->conn, &f->rd, DCH_RING_F_SUB |
 		                   DCH_RING_F_SCREEN, &b->rs, xr_ring_rec, &b->acc);
 		if (fr == 0)
-			ring_screen(f->t->sock, &b->rs, xr_ring_rec, &b->acc);
+			b->acc.lost = ring_screen(f->t->sock, &b->rs, &b->acc.sh,
+			                          xr_ring_rec, &b->acc, CTL_IDLE_MS);
 		xr_shell_end(&b->acc.sh);
 	}
 	/* moved while we read, or a wake behind the reply (kqueue says

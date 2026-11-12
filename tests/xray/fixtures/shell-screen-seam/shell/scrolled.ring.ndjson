@@ -1,0 +1,24 @@
+{"seq":281474976750000,"kind":"mark","flags":0,"t":1794300000,"text":"A"}
+{"seq":281474976750001,"kind":"prompt","flags":0,"t":1794300000,"text":"zp%"}
+{"seq":281474976750002,"kind":"mark","flags":0,"t":1794300000,"text":"B"}
+{"seq":281474976750003,"kind":"input","flags":0,"t":1794300000,"text":"seq 1 30"}
+{"seq":281474976750004,"kind":"mark","flags":8,"t":1794300000,"text":"C"}
+{"seq":281474976750005,"kind":"output","flags":0,"t":1794300000,"text":"28 x/y#1 above"}
+{"seq":281474976750006,"kind":"output","flags":0,"t":1794300000,"text":"29 x/y#1 below"}
+{"seq":281474976750007,"kind":"mark","flags":2,"t":1794300000,"text":"D;0","exit":0}
+{"seq":281474976750008,"kind":"mark","flags":0,"t":1794300000,"text":"A"}
+{"seq":281474976750009,"kind":"prompt","flags":0,"t":1794300000,"text":"zp%"}
+{"seq":281474976750010,"kind":"mark","flags":0,"t":1794300000,"text":"B"}
+{"seq":281474976750011,"kind":"input","flags":0,"t":1794300000,"text":"echo x/y#1 a"}
+{"seq":281474976750012,"kind":"mark","flags":8,"t":1794300000,"text":"C"}
+{"seq":281474976750013,"kind":"output","flags":0,"t":1794300000,"text":"x/y#1 a"}
+{"seq":281474976750014,"kind":"mark","flags":2,"t":1794300000,"text":"D;0","exit":0}
+{"seq":281474976750015,"kind":"mark","flags":0,"t":1794300000,"text":"A"}
+{"seq":281474976750016,"kind":"prompt","flags":0,"t":1794300000,"text":"zp%"}
+{"seq":281474976750017,"kind":"mark","flags":0,"t":1794300000,"text":"B"}
+{"seq":281474976750018,"kind":"input","flags":0,"t":1794300000,"text":"echo x/y#1 b"}
+{"seq":281474976750019,"kind":"mark","flags":8,"t":1794300000,"text":"C"}
+{"seq":281474976750020,"kind":"output","flags":0,"t":1794300000,"text":"x/y#1 b"}
+{"seq":281474976750021,"kind":"mark","flags":2,"t":1794300000,"text":"D;0","exit":0}
+{"seq":281474976750022,"kind":"mark","flags":0,"t":1794300000,"text":"A"}
+{"seq":281474976750023,"kind":"prompt","flags":0,"t":1794300000,"text":"zp%"}

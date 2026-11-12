@@ -2890,6 +2890,117 @@ def test_screen():
         dch("-k", n)
 
 
+def test_screen_seam():
+    """#171 (QA 1.54.0 MED-1), QA's repro: zsh with --shell-init, 80x10,
+    `seq 1 30`, `echo x/y#1 a`, `echo x/y#1 b`. The ring ends inside
+    `seq`'s open block (its D waits on the prompt row, on screen): no screen
+    row takes that block's chapter, and the count is the same while the rows
+    are on screen and after they scroll, so a follower reports nothing on a
+    pure scroll."""
+    zsh = shutil.which("zsh")
+    if not zsh:
+        print("  skip screen seam: no zsh installed")
+        return
+    n = "xc-seam"
+    fl = None
+    d = os.path.join(T, "seam-zdot")
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, ".zshrc"), "w") as f:
+        f.write("PS1='zp%% '\n" + dch("--shell-init", "zsh").stdout)
+    r = dch("--spawn", n, "--size", "80x10", zsh, "-i",
+            env=dict(ENV, ZDOTDIR=d))
+    check("screen seam: spawned", r.returncode == 0, r.stderr)
+
+    def count(o):
+        return {x["key"]: x["count"] for x in (o or {}).get("refs", [])}.get(
+            "pull:x/y#1")
+
+    def mentions():
+        r = dch("--xray", n, "--ref", "x/y#1", "--scope", "session",
+                "--full", "--json")
+        return [m["mention"] for m in ref_lines(r.stdout) if "mention" in m]
+
+    try:
+        wait_for(lambda: "zp%" in screen(n), 5)
+        for cmd, out in (("seq 1 30", "\n30\n"), ("echo x/y#1 a", "1 a\n"),
+                         ("echo x/y#1 b", "1 b\n")):
+            dch("--send", n, cmd + "\n")
+            wait_for(lambda: out in screen(n) and
+                     screen(n).rstrip().endswith("zp%"), 5)
+        rc, o, err = xray(n, "--json")
+        seq = [c["anchor"] for c in (o or {}).get("chapters", [])
+               if c["title"] == "seq 1 30"]
+        men = mentions()
+        check("screen seam: on screen, count 2 (one per command, as the "
+              "ring will count them)", rc == 0 and count(o) == 2 and seq,
+              (rc, o, err))
+        check("screen seam: no screen row takes the open block's chapter",
+              len(men) == 4 and not [m for m in men if m["chapter"]],
+              (seq, men))
+        fl = Follow(n)
+        fl.wait(lambda x: "snapshot" in x)
+        k = len(fl.got)
+        dch("--send", n, "seq 1 12\n")
+        wait_for(lambda: "\n12\n" in screen(n) and
+                 screen(n).rstrip().endswith("zp%"), 5)
+        time.sleep(1.0)             # four follower batches
+        rc, b, err = xray(n, "--json")
+        men = mentions()
+        check("screen seam: scrolled into the ring, still count 2", rc == 0
+              and count(b) == 2 and "echo x/y#1 b" in
+              [c["title"] for c in b["chapters"]], (rc, b, err))
+        check("screen seam: ... each output row now in its own command's "
+              "chapter, never seq's", len(men) == 4 and
+              all(m["chapter"] not in seq for m in men) and
+              [bool(m["chapter"]) for m in men] == [False, True, False, True],
+              men)
+        check("screen seam: the follower reports no count change on the "
+              "scroll", not [x for x in fl.objs(k)
+                             if is_ref("pull:x/y#1")(x)], fl.objs(k))
+    finally:
+        if fl:
+            fl.stop()
+        dch("-k", n)
+
+
+def test_screen_resize():
+    """#171 (QA 1.54.0 LOW-3): a grow pulls ring rows back on screen; the
+    screen read starts after the newest captured row, so they are not read
+    twice: the count and `lines` stay as they were."""
+    n = "xc-grow"
+    r = dch("--spawn", n, "--size", "80x10", "sh")
+    check("screen grow: spawned", r.returncode == 0, r.stderr)
+
+    def answer():
+        rc, o, err = xray(n, "--json")
+        return (rc, {x["key"]: x["count"] for x in (o or {}).get("refs", [])},
+                o and o["lines"], o and o["complete"])
+
+    try:
+        wait_for(lambda: screen(n).strip(), 5)
+        # \043 is #: the typed line holds no ref, only row 12 of the output
+        dch("--send", n, "i=0; while [ $i -lt 30 ]; do i=$((i+1)); "
+            "if [ $i = 12 ]; then printf 'x/y\\0439\\n'; else echo l$i; fi; "
+            "done; echo end\n")
+        wait_for(lambda: "\nend\n" in screen(n), 5)
+        before = answer()
+        c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        c.connect(sock(n))
+        # [MSG_WINCH][len][struct winsize 30x80]: the pane grows
+        c.sendall(bytes([3, 8, 0]) + struct.pack("=HHHH", 30, 80, 0, 0))
+        time.sleep(0.5)
+        c.close()
+        wait_for(lambda: "x/y#9" in screen(n), 5)
+        after = answer()
+        check("screen grow: x/y#9 pulled back on screen, counted once",
+              before[0] == 0 and before[1].get("pull:x/y#9") == 1 and
+              after[1] == before[1], (before, after))
+        check("screen grow: lines unchanged (no pulled-back row read twice)",
+              after[2] == before[2] and after[3], (before, after))
+    finally:
+        dch("-k", n)
+
+
 # ---- --ref across sessions (#155, XR3a): scope, order, the 3.8 caps -------
 
 def test_scope():
@@ -3094,6 +3205,8 @@ def main():
         test_follow_agent(off=True)
         test_screen_agent()
         test_screen()
+        test_screen_seam()
+        test_screen_resize()
         test_ref_shell_caps()
         test_ref_shell_tick()
         test_scope()

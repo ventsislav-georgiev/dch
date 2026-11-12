@@ -6024,6 +6024,10 @@ struct xr_shref
 	size_t cl;
 	uint64_t cseq;
 	char chapter[32];
+	/* the newest block's first prompt row, for the screen's rows */
+	char prompt[256];
+	size_t pl;
+	int screen;		/* past xr_shell_screen */
 };
 
 int
@@ -6189,6 +6193,22 @@ sh_refs_pre(struct xr_shell *s, const struct xr_rec *x)
 {
 	struct xr_shref *r = s->refs;
 
+	/* shortcut: a prompt past 255 bytes is not kept, so the screen's rows
+	** after it stay in one unit (a count that can only be lower) */
+	if (x->kind == RING_K_PROMPT && s->st == S_PROMPT && !s->havep)
+	{
+		if ((r->pl = x->len < sizeof r->prompt ? x->len : 0))
+			memcpy(r->prompt, x->text, r->pl);
+	}
+	/* a screen row has no marks: one that starts with the prompt is the
+	** next block's, as its A would make it */
+	if (r->screen && r->pl && !(x->flags & RING_F_CONT) && x->len >= r->pl &&
+	    !memcmp(x->text, r->prompt, r->pl) &&
+	    (x->len == r->pl || x->text[r->pl] == ' '))
+	{
+		sh_flush(s);
+		r->unit++;
+	}
 	if (x->kind == RING_K_PROMPT || x->kind == RING_K_INPUT ||
 	    x->kind == RING_K_OUTPUT)
 	{
@@ -6242,6 +6262,18 @@ sh_refs_post(struct xr_shell *s, const struct xr_rec *x)
 	}
 	else if (s->st == S_NONE)
 		sh_block_reset(r);	/* an orphan, a forged C, a D: nothing held */
+}
+
+void
+xr_shell_screen(struct xr_shell *s)
+{
+	if (s->refs)
+	{
+		sh_flush(s);	/* the ring's last line, in its own block */
+		s->refs->screen = 1;
+	}
+	s->st = S_NONE;
+	s->ord = -1;
 }
 
 void

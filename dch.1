@@ -1369,6 +1369,28 @@ changed since its last look, else at most every 100 ms.
 Only what Claude Code draws before it writes its session record can still
 be read, until the first look after that record.
 Rows that scroll off before the master's first look go into the ring.
+For the count, screen rows stay with the command whose output ends the ring
+until a row that starts with its prompt (then a space or the row's end)
+starts the next command; a prompt that changes between commands, or one past
+255 bytes, starts none.
+Rows a grow pulled back on screen are in the ring already and are not read
+again.
+A line soft\-wrapped across the screen's top edge is read as two (its head
+in the ring) until it scrolls, so a ref across that wrap is missed until then.
+A screen read that fails (no answer within 2 s, a busy or vanished master) or
+comes back cut (over 2 MB: its first row is dropped) makes
+.B complete
+false with
+.BR why:\(dqrange\(dq ,
+and
+.BR \-\-ref 's
+.B partial
+true; light
+.B \-\-ref
+waits for the screen only as long as its budget lasts.
+A screen row's
+.B offset
+is provisional: it gets another seq when it scrolls into the ring.
 In a shell's ring,
 evicted rows (the master's own status bit, reset by a clear; a dch 1.43.0
 master has none, and there only a gap, a lost range or a cut first row

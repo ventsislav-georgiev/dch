@@ -591,6 +591,110 @@ t_shell(void)
 	xr_chapters_free(&c);
 }
 
+/* The ring/screen seam (#171, QA 1.54.0 MED-1): the screen's rows after the
+** ring's open block carry no chapter, and count as the ring will count them
+** once they scroll: the open block's own rows in its unit, then one unit per
+** row that starts with the block's prompt. */
+struct seam
+{
+	int n;
+	uint64_t unit[16];
+	char chapter[16][32], line[16][64];
+};
+
+static void
+seam_hit(void *ctx, const struct xr_hit *h)
+{
+	struct seam *s = ctx;
+
+	if (s->n >= 16 || h->title)
+		return;
+	s->unit[s->n] = h->unit;
+	snprintf(s->chapter[s->n], sizeof s->chapter[0], "%s",
+	         h->chapter ? h->chapter : "-");
+	snprintf(s->line[s->n], sizeof s->line[0], "%.*s", (int)h->ll, h->line);
+	s->n++;
+}
+
+static void
+seam_feed(struct seam *m, size_t cut, const char *cwd)
+{
+	struct xr_chapters c;
+	struct xr_shell s;
+	struct xr_sink k = { seam_hit, m };
+	size_t i;
+
+	memset(m, 0, sizeof *m);
+	xr_shell_begin(&s, &c);
+	if (xr_shell_refs(&s, &k, cwd) == 0)
+		for (i = 0; i < RN; i++)
+		{
+			if (i == cut)
+				xr_shell_screen(&s);
+			xr_shell_feed(&s, &R[i]);
+		}
+	xr_shell_end(&s);
+	xr_chapters_free(&c);
+}
+
+static void
+t_screen_seam(void)
+{
+	static char longp[300];
+	struct seam m;
+	size_t cut;
+
+	RN = 0;
+	rec(RING_K_MARK, 0, "A");
+	rec(RING_K_PROMPT, 0, "zp%");
+	rec(RING_K_MARK, 0, "B");
+	rec(RING_K_INPUT, 0, "seq 1 30");
+	rec(RING_K_MARK, RING_F_INPUT, "C");
+	rec(RING_K_OUTPUT, 0, "1 x/y#1 above");
+	cut = RN;
+	rec(RING_K_OUTPUT, 0, "2 x/y#1 below");
+	rec(RING_K_OUTPUT, 0, "zp% echo x/y#1 a");
+	rec(RING_K_OUTPUT, 0, "x/y#1 a");
+	rec(RING_K_OUTPUT, 0, "zp%echo x/y#1 glued");
+	rec(RING_K_OUTPUT, 0, "zp% echo x/y#1 b");
+	rec(RING_K_OUTPUT, 0, "x/y#1 b");
+	rec(RING_K_OUTPUT, 0, "zp% x/y#1 typed");
+	seam_feed(&m, cut, "/w");
+	CHECK("screen seam: the ring's own row keeps its block's chapter",
+	      m.n == 8 && !strcmp(m.chapter[0], "s101"));
+	CHECK("screen seam: no screen row has a chapter (the open block "
+	      "closes at the seam)", m.n == 8 &&
+	      !strcmp(m.chapter[1], "-") && !strcmp(m.chapter[2], "-") &&
+	      !strcmp(m.chapter[3], "-") && !strcmp(m.chapter[5], "-") &&
+	      !strcmp(m.chapter[6], "-") && !strcmp(m.chapter[7], "-"));
+	CHECK("screen seam: the open block's rows on screen stay in its unit "
+	      "(counted once, as after they scroll)",
+	      m.n == 8 && m.unit[1] == m.unit[0]);
+	CHECK("screen seam: a row starting with the prompt starts the next "
+	      "unit, its output row in it", m.n == 8 && m.unit[2] != m.unit[0] &&
+	      m.unit[3] == m.unit[2]);
+	CHECK("screen seam: the prompt with no space after it is no prompt row",
+	      m.n == 8 && m.unit[4] == m.unit[3]);
+	CHECK("screen seam: the next prompt row, the next unit",
+	      m.n == 8 && m.unit[5] != m.unit[4] && m.unit[6] == m.unit[5] &&
+	      m.unit[7] != m.unit[6]);
+
+	/* no seam: the rows are the ring's, with its marks */
+	seam_feed(&m, (size_t)-1, "/w");
+	CHECK("screen seam: without the seam the same rows are the open "
+	      "block's (the ring's reading)", m.n == 8 &&
+	      !strcmp(m.chapter[2], "s101") && m.unit[7] == m.unit[0]);
+
+	/* a prompt past 255 bytes is not kept: no unit starts on screen */
+	memset(longp, 'p', sizeof longp - 1);
+	R[1].text = longp;
+	R[1].len = strlen(longp);
+	seam_feed(&m, cut, "/w");
+	CHECK("screen seam: a prompt past 255 bytes starts no unit on screen",
+	      m.n == 8 && m.unit[7] == m.unit[0] && !strcmp(m.chapter[2], "-"));
+}
+
+
 /* ---- the output cap ------------------------------------------------------- */
 
 static void
@@ -3449,6 +3553,7 @@ main(int argc, char **argv)
 	t_time();
 	t_read();
 	t_shell();
+	t_screen_seam();
 	t_walk();
 	t_print();
 	t_grammar();
