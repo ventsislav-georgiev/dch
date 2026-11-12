@@ -1054,19 +1054,26 @@ def test_two_claudes():
                        timeout=30, env=env)
     check("two claudes: spawned", r.returncode == 0, r.stderr)
     try:
+        if dch("--read", n).returncode == 3:
+            print("  skip two claudes: dch-lite keeps no ring")
+            return
         wait_for(lambda: len([f for f in os.listdir(sdir) if f not in had
                               and f.endswith(".json")]) >= 2
                  if os.path.isdir(sdir) else None, 10)
-        _, o0, _ = xray(n, "--json")
+        _, r0 = X.read_all(n, 0)
         rc, c, err = xray(n, "--clear", "--json")
         check("two claudes: --clear says ring_cleared false",
               rc == 0 and c and c["ring_cleared"] is False, (rc, c, err))
+        h, r1 = X.read_all(n, 0)
+        # at least seq's rows that scrolled off the 24-row pane
+        check("two claudes: the ring keeps its rows",
+              len(r1) == len(r0) and len(r1) >= 276, (len(r0), len(r1)))
+        # the read probes for the agent (QA 1.54.0 MED-2): paused, so the
+        # client, which maps no one Claude here, answers no shell corpus
         _, o, _ = xray(n, "--json")
-        # lines counts the rows read (#140): at least seq's rows that
-        # scrolled off the 24-row pane, whatever the screen holds now
-        check("two claudes: the ring keeps its lines",
-              o0 and o and o["lines"] == o0["lines"] and o["lines"] >= 276,
-              (o0 and o0.get("lines"), o and o.get("lines")))
+        check("two claudes: the ring reads paused, no shell answer",
+              h["status"] & X.S_PAUSED and o and o["corpus"] == "none",
+              (h, o))
     finally:
         dch("-k", n)
 
@@ -2279,6 +2286,80 @@ def test_follow_agent(off=False):
             check(tag + "the session's end exits 0", rc == 0,
                   (rc, fl.p.stderr.read() if fl.p.stderr else ""))
 
+def test_screen_agent():
+    """QA 1.54.0 MED-2: an agent's TUI, on the primary screen, never enters
+    a shell answer, on the default 60 s record tick. The master probes for
+    an agent before it answers a ring or a screen read. A follower: no ref
+    from the TUI, then off corpus shell. A one-shot --ref with no follower:
+    no count, both for a Claude the client maps itself and for one it
+    cannot (a sessionId that is no UUID), where the master's pause alone
+    keeps the TUI out."""
+    bindir = os.path.join(T, "bin-sa")
+    fdir = os.path.join(T, "fake-sa")
+    for d in (bindir, fdir):
+        os.makedirs(d, exist_ok=True)
+    shutil.copy(os.path.join(HERE, "fake_claude.py"),
+                os.path.join(bindir, "claude"))
+    os.chmod(os.path.join(bindir, "claude"), 0o755)
+    env = dict(ENV, PATH=bindir + ":" + ENV.get("PATH", "/usr/bin:/bin"),
+               FAKE_CLAUDE_DIR=fdir)
+    env.pop("DCH_RECORD_MS", None)
+
+    def start(n):
+        with open(os.path.join(fdir, n + ".ctl"), "w") as f:
+            json.dump({"above": ["see q/z#909 in the agent TUI"]}, f)
+        r = dch("--spawn", n, "--size", "80x24", "sh", env=env)
+        check("screen agent: %s spawned" % n, r.returncode == 0, r.stderr)
+        wait_for(lambda: "$" in screen(n) or "#" in screen(n), 5)
+
+    fl = None
+    names = ["xc-saf", "xc-sao", "xc-sau"]
+    try:
+        n = names[0]
+        start(n)
+        if dch("--read", n).returncode == 3:
+            print("  skip screen agent: dch-lite reads no screen")
+            return
+        fl = Follow(n, env=env)
+        s0 = fl.wait(lambda o: "snapshot" in o)
+        check("screen agent: the follower starts on corpus shell",
+              s0 and s0[0]["snapshot"]["corpus"] == "shell", fl.objs())
+        k0 = len(fl.got)
+        dch("--send", n, "claude\r", env=env)
+        up = wait_for(lambda: "q/z#909" in screen(n), 10)
+        # no transcript here: the agent's corpus is claude or none
+        snap = fl.wait(lambda o: "snapshot" in o and
+                       o["snapshot"]["corpus"] != "shell", 10, frm=k0)
+        time.sleep(0.5)
+        leak = [o for o in fl.objs(k0) if "q/z#909" in json.dumps(o)]
+        check("screen agent: the follower emits nothing from the agent's TUI",
+              up and not leak, (bool(up), leak))
+        check("screen agent: ... and leaves corpus shell", snap,
+              fl.objs(k0))
+
+        for n, cmd, what in ((names[1], "claude\r", "a Claude the client "
+                              "maps"),
+                             (names[2], "claude --resume not-a-uuid\r",
+                              "a Claude with no UUID sessionId")):
+            start(n)
+            dch("--send", n, cmd, env=env)
+            up = wait_for(lambda: "q/z#909" in screen(n), 10)
+            r = dch("--xray", n, "--ref", "q/z#909", "--scope", "session",
+                    "--full", "--json", env=env)
+            ls = ref_lines(r.stdout) or []
+            leak = [l for l in ls if "mention" in l or
+                    l.get("tally", {}).get("count")]
+            check("screen agent: a one-shot --ref, %s: no mention, no count "
+                  "(no corpus, or count 0)" % what, up and not leak and
+                  (r.returncode == 0 or "no x-ray corpus" in r.stderr),
+                  (bool(up), r.returncode, r.stdout[-600:], r.stderr))
+    finally:
+        for n in names:
+            dch("-k", n)
+        if fl:
+            fl.stop()
+
+
 def test_follow_history():
     cfg = os.path.join(HOME, ".claude")
     pdir = os.path.join(cfg, "projects", "-home-demo-proj")
@@ -2999,6 +3080,7 @@ def main():
         test_follow_stale()
         test_follow_agent()
         test_follow_agent(off=True)
+        test_screen_agent()
         test_screen()
         test_ref_shell_caps()
         test_ref_shell_tick()

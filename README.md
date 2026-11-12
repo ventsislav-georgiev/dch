@@ -823,8 +823,14 @@ the plain text of the shell's output in memory, in a ring of `xray_ring` bytes
   Cmd-K) empties the ring.
 - **Agents.** The ring pauses while an agent (Claude Code, Codex) runs in the
   shell, because the agent's own transcript (a Codex's rollout) is its record.
-  The master looks for one on its record tick (once a minute) and on a clear.
-  It resumes at the shell's next prompt.
+  The master looks for one on its record tick (once a minute), every second
+  while a `--follow` is subscribed, on a clear, and before it answers an
+  X-ray read (when the screen changed since its last look, else at most
+  every 100 ms). So an agent's screen is not read into a shell answer. Only
+  what Claude Code draws before it writes its session record can be, until
+  the first look after that record (100 ms at most). Rows that scroll off
+  before the first look go into the ring. It resumes at the shell's next
+  prompt.
 - **`--restart`.** The ring survives `dch --restart`: it is handed to the new
   image in memory and never written to disk. A `dch --restart` from a client
   older than this release starts the session on an empty ring: such a client

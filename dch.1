@@ -1207,6 +1207,12 @@ started by an older dch (until
 .BR \-\-restart ),
 the answer is the ring's alone, with no error and no
 .BR why .
+While an agent runs in the shell, neither is read (the ring is paused).
+The master looks for an agent before it answers a read: when the screen
+changed since its last look, else at most every 100 ms.
+Only what Claude Code draws before it writes its session record can still
+be read, until the first look after that record.
+Rows that scroll off before the master's first look go into the ring.
 In a shell's ring,
 evicted rows (the master's own status bit, reset by a clear; a dch 1.43.0
 master has none, and there only a gap, a lost range or a cut first row
