@@ -1341,11 +1341,13 @@ xr_codex_lookup(const char *home, const char *tid, char *path, size_t pathsz,
 				while ((de = readdir(dd)) && hits < 2)
 				{
 					size_t n = strlen(de->d_name);
+					int dfd = dirfd(dd);
 
+					/* dfd < 0: dirfd() failing, as in cx_dir */
 					if (n < tl + 7 || de->d_name[n - tl - 7] != '-' ||
 					    memcmp(de->d_name + n - tl - 6, tid, tl) ||
-					    strcmp(de->d_name + n - 6, ".jsonl") ||
-					    fstatat(dirfd(dd), de->d_name, &s,
+					    strcmp(de->d_name + n - 6, ".jsonl") || dfd < 0 ||
+					    fstatat(dfd, de->d_name, &s,
 					            AT_SYMLINK_NOFOLLOW) < 0 ||
 					    !S_ISREG(s.st_mode))
 						continue;
