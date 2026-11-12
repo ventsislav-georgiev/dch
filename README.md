@@ -278,7 +278,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.57.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.58.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -877,11 +877,35 @@ passages) is drawn with every control and bidi character shown as `?`.
 The view has three tabs:
 - **Chapters**: one row per prompt or command. `/` filters. `Enter` opens
   the chapter read-only (prompt, replies, tool calls, output), scrollable.
-- **Refs**: the session's refs by count. A ref with a definition or two or
-  more mentions is bold. `/` filters. `Enter` opens its card.
+  A chapter whose prompt the harness wrote, not you (a task notification,
+  `"auto"` in `--json`), is hidden until `n` shows it, faint and titled by
+  its summary (by its title when it has none); the footer says how many are
+  hidden, and `/` matches a summary too. The tab's count is the chapters
+  shown without `n`. A host or an older dch that sends no `auto` shows
+  every chapter. `o`, here and in a chapter, leaves the view (as `q` does)
+  and attaches to the live session, as `dch -a <n>` does (`host:name` too;
+  from the picker's `X`, as the picker's `Enter`; the `-k` and `-d` pickers
+  say it is not theirs). On an ended session `o` says so and the view
+  stays. The attach opens at the session's live screen, not at the
+  chapter.
+- **Refs**: what the session touched: the files, commits, pull requests,
+  issues and URLs it mentions, one row each, a faint line over them saying
+  so. Rows are by count, highest first, then the most recent first (later in
+  the index; a ref seen again while the view is open moves up its count's
+  rows). A ref with a definition or two or more mentions is bold. A file
+  under the session's directory (top right) shows relative to it, else one
+  under your home starts with `~`. A path too long for the row keeps its
+  end, the `…` in front; a long URL drops its `https://` and keeps its host
+  and its end. Files under `/tmp`, `/private/tmp`, `/var/folders` and
+  `$TMPDIR` (a remote view: not `$TMPDIR`, which is this machine's) are
+  scratch: hidden until `t` shows them, and the footer says how many are
+  hidden. The tab's count is every ref, hidden ones included. `/` filters on
+  the full ref. `Enter` opens its card.
 - **On screen**: the session's screen as it is now, with a hint label (`a`,
   `s`, `d`, …) on each ref the Refs tab shows bold. Typing a label opens that
-  ref's card. An ended session and dch-lite have no screen to show.
+  ref's card. The tab's count is the labels on the screen, shown once the
+  screen has been read (0 included); before that, and when there is no
+  screen, no number. An ended session and dch-lite have no screen to show.
 
 A ref's card shows its definitions (two or more as "N definitions"), its
 first and latest mention, its counts (this session, this project, all
@@ -903,6 +927,9 @@ X-ray; run `clear`".
 | `↑` `↓` / `j` `k`, `PgUp` `PgDn`, `g` `G` | move | move / scroll |
 | `Enter` | read the chapter / open the card | card: read the mention's chapter |
 | `/` | filter | |
+| `t` | Refs: show / hide the temp files | |
+| `n` | Chapters: show / hide the auto chapters (task notifications) | |
+| `o` | Chapters: attach to the session (in the chord: back to it) | reader: the same |
 | `f` `o` `y` | | card: full scan, other projects, copy |
 | `q` | quit | back |
 | `Esc` | clear the typed label or the filter, else quit | back |
@@ -912,15 +939,22 @@ X-ray; run `clear`".
 double-press window (`DCH_DOUBLE_TAP_MS`, default 300 ms). The view opens
 over the session on its On screen tab, and the session keeps running
 underneath: the attach is kept, never retired. Leaving the view (`q`,
-`Esc`) returns to the session with its screen repainted as it is now,
+`Esc`, or `o` on Chapters or in a chapter) returns to the session with its screen repainted as it is now,
 output that came in meanwhile included (dch-lite has no screen to repaint
 from: the program gets a SIGWINCH, as on any re-attach). The `x` is never
-typed into the session. The chord is off under `-E` (no detach key) and
+typed into the session; keys that arrive in the same read as the `x` (a
+paste, a fast burst) reach neither the view nor the session. The chord is off under `-E` (no detach key) and
 with `DCH_DOUBLE_TAP_MS=0` (one press acts at once); the keys then do what
-they did before. It is off over a remote attach (`dch -a host:name`) for
-now: there the keys reach the session as before. There is no `xray_key`
-setting: the chord takes no key from the program. In the picker, lowercase
-`x` is still kill, which asks first; `X` opens the view.
+they did before. Over a remote attach (`dch -a host:name`) the chord opens
+the view of `host:name`, as `dch --xray host:name` does: its queries dial
+their own ctl connections, and the attach connection is kept. Leaving it,
+the host resizes the program for a beat so it repaints, and dch serve
+1.58.0+ also re-arms the modes the view turned off (bracketed paste, mouse
+reporting, the kitty keyboard flags, the alternate screen). An older dch
+serve or the Prosper server only resizes: those modes stay off on your
+terminal until you attach again. There is no
+`xray_key` setting: the chord takes no key from the program. In the picker,
+lowercase `x` is still kill, which asks first; `X` opens the view.
 
 A window smaller than 24x8 shows only "X-ray: the window is too small".
 
@@ -965,10 +999,14 @@ writes the host's output and standard error line by line as they come (the
 `--follow` and `--ref` streams included) and exits with the host's exit
 status. A control character, DEL, C1, bidi control or U+2028/U+2029 the host
 sends raw is written as a `\u` escape, and a byte that is not UTF-8 as
-`\ufffd`: a JSON line stays the same JSON, and the host cannot drive your
-terminal. A host that sends nothing for 65 s (its own 60 s timeout, plus 5 s)
-is a lost connection, exit 7; `--follow` has no such limit. A partial line
-the host was writing is dropped when the link is lost. The
+`\ufffd` (a CR outside a string, JSON space, is dropped): a JSON line stays
+the same JSON, and the host cannot drive your terminal. A host that sends
+nothing for 65 s (its own 60 s timeout, plus 5 s; time spent waiting on a
+slow reader of dch's output does not count) is a lost connection, exit 7;
+`--follow` has no such limit. A partial line the host was writing is dropped
+when the link is lost, on a cancel and when the host cuts the answer short.
+A host line over 16 MiB once escaped ends it: `dch: <host>: unreachable: it
+sent a line over 16 MiB escaped`, exit 7. The
 host answers by its own release: `--scope`, `--chapter` and the corpus are
 the host's. A host whose hello lacks the `xray` token gets nothing and dch
 prints `dch: <host>: does not support --xray (needs dch serve 1.55.0+)`,
@@ -1093,7 +1131,23 @@ The corpus:
   - A query also reads the current primary screen, after the ring: its rows
     (soft wraps joined, blank ones dropped) count as output, so a ref still
     on screen is found by `--json`, `--ref` and `--follow`. They carry no
-    marks yet, so they give no chapter and no definition. Their `at` is the
+    marks yet, so they give no chapter and no definition, not even the
+    chapter of the command whose output ends the ring. For the count they
+    stay with that command until a row that starts with its prompt (then a
+    space, or the row's end), which starts the next command, so a ref counts
+    the same before and after its rows scroll. A prompt that changes between
+    commands (a new directory in it) or is longer than 255 bytes starts no
+    command there. A row a grow pulled back on screen is in the ring
+    already and is not read again. A line soft-wrapped across the screen's
+    top edge is read as two, its head from the ring, until it scrolls: a ref
+    across that wrap is missed until then. A screen read that fails (no answer
+    within 2 s, a busy or vanished master) or comes back cut (a screen over
+    2 MB keeps its tail; its first row is dropped) makes the answer
+    `complete: false` with `why: "range"`, and `--ref`'s `partial: true`.
+    `--ref`'s light mode waits for the screen only as long as its budget
+    lasts (`why: "budget"`). A screen row's `offset` is a provisional seq:
+    the row gets another one when it scrolls into the ring, and a later
+    ring row can take this one. Their `at` is the
     time of the read, not the time the row was written: two queries a
     second apart can give the same row different `at` values. While the alternate
     screen is active (vim, less), neither screen is read: the answer is the
@@ -1138,6 +1192,14 @@ The corpus:
     `s<seq of the prompt record>` for a shell.
   - `kind` is `prompt`, `command` or `compact`.
   - `title` is at most 120 Unicode scalars.
+  - `auto` (`true`) and `summary` are there only on a Claude Code prompt that
+    the harness wrote, not the user: one made wholly of
+    `<task-notification>` and `<system-reminder>` blocks. `summary` is the
+    first notification's `<summary>`, else its `<event>`, made as a `title`
+    is (whitespace collapsed, at most 120 scalars); it is left out when
+    there is neither. The `title` stays as it was. Any other chapter has
+    neither key. At most 256 KiB of summaries is held at a time: past that,
+    the oldest auto chapters give theirs up (they keep `auto`).
 - **`refs`.** The refs the corpus mentions (see [Refs](#refs)), at most 2000
   keys. The rest are counted in `dropped_keys`, exactly up to 32768 distinct
   keys and as a lower bound past that. `[]` for corpus `none`.
@@ -1342,9 +1404,12 @@ Codex `<n>` gets it too.
   user who can read that repo.
 - **File.** The ref's path (a relative one against the session's cwd, a
   `~/` one against `HOME`), in an ended session too, must lie inside the
-  project: the cwd's git root (the nearest parent holding `.git`), else the
-  cwd. A root that is `/`, `$HOME` or a directory above `$HOME` (by real
-  path; `HOME` and the passwd entry's home both count) is no project: every
+  project: the cwd's git root (the nearest parent holding a `.git`
+  directory, or a `.git` file starting `gitdir: `; any other `.git` file
+  ends the search with no git root), else the cwd. A root that is `/`,
+  `$HOME` or a directory above `$HOME` (by real path, and by device and
+  inode, so `/System/Volumes/Data$HOME` is the home too; `HOME` and the
+  passwd entry's home both count) is no project: every
   file is then `outside_project`. So is `~/.config` or `~/Library`, and a
   root inside either that is not a git root below it (a shell in
   `~/.config/rclone`): apps keep tokens there under any name. A git root
@@ -1357,30 +1422,40 @@ Codex `<n>` gets it too.
     `.npmrc`, `.pypirc` or `.git-credentials`;
   - a directory `.git`, `.kube`, `.docker`, `.azure`, `.oci`, `.claude`,
     `.codex`, `.gcloud`, `.password-store`, `.m2`, `.bash_sessions`,
-    `.config/gh`, `.config/gcloud`, `.config/hub` or `.config/op`, and
+    `.zsh_sessions`, `.config/gh`, `.config/gcloud`, `.config/hub`,
+    `.config/op`, `.config/github-copilot` or `.composer/auth.json`, and
     everything under it;
   - the name `.claude.json`, `.pgpass`, `.my.cnf`, `.vault-token`,
     `.htpasswd`, `.s3cfg`, `credentials`, `credentials.json`,
     `credentials.toml`, `credentials.db`,
     `application_default_credentials.json`, `secrets.yaml`, `secrets.yml`,
     `secrets.json`, `credentials.tfrc.json`, `.yarnrc.yml`,
-    `gradle.properties`, `rclone.conf`, `.boto`, `.dockercfg` or
-    `.Xauthority`;
+    `gradle.properties`, `rclone.conf`, `.boto`, `.dockercfg`,
+    `.Xauthority`, `Xauthority`, `.ICEauthority`, `.credentials.json`,
+    `.terraformrc`, `terraform.rc` or `.databrickscfg`;
   - a name that ends in `.pem`, `.key`, `.p12`, `.pfx`, `.p8`, `.ppk`,
     `.jks`, `.keystore`, `.keychain`, `.keychain-db`, `.keyring`,
     `.tfstate`, `.tfstate.backup` or `history` (shell and REPL history);
   - an `id_` name with no dot (`id_rsa`, never `id_rsa.pub`).
 
-  One exception for the directories: when the project is a git root whose
-  own path, as given, lies in one of them (a Claude Code worktree in
-  `<repo>/.claude/worktrees/<name>`), they are matched only on the part of
-  the path below that root, as given and as real path. The worktree reads
-  its own `a.txt` and still refuses its `.env`, its own `.claude/` and the
-  like. A root reached through a symlink that hides the directory, or a
-  shell in one with no git root, gets no exception. Whatever the root, a
-  path whose real path (or path as given) enters one of these directories
-  of the home (`~/.claude`, `~/.codex`, `~/.config/gh`, ...) is
-  `secret_name`, so a git repo inside `~/.claude` shows nothing.
+  One exception, for a Claude Code worktree: a part `.claude` is no denied
+  directory when it is followed by `worktrees/<name>`, that
+  `<repo>/.claude/worktrees/<name>` is the project root or a directory
+  above it, its `.git` is a regular file (not a symlink) starting
+  `gitdir: ` (what `git worktree add` writes), and the root as given and
+  its real path both end in the same `.claude/worktrees/<name>...` parts.
+  Only that one part is lifted. Every other part of the path, above the
+  root, the root itself and below it, keeps the whole list: the worktree
+  reads its own `a.txt` and still refuses its `.env`, its own `.claude/`
+  and the like, and a `.claude`, `.codex` or `.kube` directory that is
+  itself a git repo (a config dir kept in git) refuses every file. A root
+  reached through a symlink that hides the `.claude`, a clone (a `.git`
+  directory) in `worktrees/`, or a shell there with no git root gets no
+  exception. Whatever the root, a path that enters one of these
+  directories of the home (`~/.claude`, `~/.codex`, `~/.config/gh`, ...)
+  is `secret_name`, so a worktree or a git repo inside `~/.claude` shows
+  nothing. The home is matched as given, by real path and by device and
+  inode, so `/System/Volumes/Data$HOME` is the home too.
 
   This guards the common credential files by name. It is not a guarantee:
   a secret in a file with any other name (a `config.yml`, a script, a log)
@@ -1471,7 +1546,8 @@ Rules for shells and endings:
   `--restart`), or when the reader closes the pipe, idle or not.
 
 `dch --xray <n> --chapter <anchor> --json` prints one chapter's entries as
-one object: `{"schema":1,"session","session_id","anchor","title","at","kind","entries":[…],"truncated":bool}`.
+one object: `{"schema":1,"session","session_id","anchor","title","at","kind","entries":[…],"truncated":bool}`,
+with `auto` and `summary` after `kind` when the chapter list has them.
 `<anchor>` is a chapter's `anchor` from `--json`: 1 to 128 bytes of
 `A-Z`, `a-z`, `0-9`, `:`, `_`, `.` and `-`, else exit 2 with `dch: bad
 anchor`. dch reads the session's chapters again and answers only when one of
@@ -2229,6 +2305,13 @@ not an integer means none. It is additive: a server that does not know it
 ignores it (an unknown key in a JSON object), so it needed no new protocol
 version. Commands run as argument vectors, never through a shell.
 
+**Redraw.** On a `0x07`, dch serve resizes the program one row down and back
+120 ms later, so it repaints. A dch serve 1.58.0+ also re-attaches its
+client, and the attach stream then carries the session's DEC modes (mouse,
+bracketed paste, focus, the alternate screen), for the kitty keyboard flags
+a pop and then the push (so the flag stack does not grow), and on the full
+build the screen replayed from the mirror.
+
 #### Control verbs (ctl)
 
 Remote frames 1.1 adds one op, `ctl`: a client runs one of dch's own verbs
@@ -2346,7 +2429,10 @@ transcripts.
 no cap). At that cap the server
 stops forwarding, sends the dch SIGTERM (SIGKILL 2 s later) and ends with
 `{"exit":2,"why":"cap"}`. Past its timeout (the table) it does the same with
-`"why":"timeout"`. A client that closes the connection (or half-closes it)
+`"why":"timeout"`. A device (its tailnet address) runs at most 2
+`--xray --follow` of one session: a third ends the oldest the same way, with
+`"why":"timeout"`, and is run once more 1 s later if it met `busy` first. A
+client that closes the connection (or half-closes it)
 while the verb runs ends it as a `0x34` does (the same 2 s or 660 s grace),
 with no `0x33` (the log line reads `ctl done after the close: dch exit 1`);
 the handler then holds its connection slot, one of the peer's 16, until the

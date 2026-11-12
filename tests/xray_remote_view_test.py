@@ -17,11 +17,14 @@ Covers:
      list, the Refs list, the card (light, `f` full scan), the reader, q
      exits 0; the corpus's ESC, BEL and bidi bytes never reach the
      terminal; every query ran on the host as its own ctl (follow, ref,
-     ref --full, chapter);
-  2. On screen of srv:xv-sh, a live shell on the host: the screen read with
+     ref --full, chapter); k, Up, PgUp and Enter in its card under a
+     too-small window neither crash nor read outside the mentions (QA
+     1.56.0 MED-V1);
+  2. On screen of srv:xv-sh, a live shell on the host: no number on its tab
+     before the screen is read (#193), the screen read with
      ctl --read xv-sh --ansi, o/r#41 gets hint a, typing it opens
      its card (full build); on dch-lite "No screen: dch-lite keeps no
-     mirror";
+     mirror" and still no number;
   3. a hostile host: raw ESC, BEL, C1 and bidi bytes in its snapshot and in
      its --read screen are drawn as ?, its OSC and CSI dropped, and its
      screen still gets its hint;
@@ -30,7 +33,42 @@ Covers:
      q, then the exit code and the line on stderr;
   5. the picker: X on the remote Sessions row srv:xv-sh opens its view, q
      returns to the picker; X on the remote History row srv:xv-cl opens
-     that record's view.
+     that record's view;
+  6. the in-attach chord over `dch -a srv:xv-rx` (#189): the detach key then
+     x (a later read, one burst, the kitty CSI form, --host srv -a xv-rx,
+     detach_key = switch) opens the view of srv:xv-rx over the attach, On
+     screen read with its own ctl --read; the session never gets the detach
+     key or the x; q goes back, the host is asked to redraw (the program's
+     SIGWINCH), a key after reaches the session, and the host saw one attach
+     (never retired). Off under -E and DCH_DOUBLE_TAP_MS=0, as the local
+     chord;
+  7. the view's failure lines over an attach to a fake host without "xray"
+     (exit 6), whose gate refuses the view's connection (exit 4), or whose
+     port closes once the attach is in (exit 7): the line, q, any key, and
+     the attach goes on (the host gets the redraw, then only the next key);
+  8. the host re-arms on its redraw (#189 round 2): a program on the
+     alternate screen with bracketed paste, mouse reporting and kitty flags
+     on, over `dch -a srv:xv-md`; after the chord's view the client's output
+     past the view's ESC[?1049l holds ESC[?1049h, then the kitty push (on the
+     alternate screen), ESC[?2004h, ESC[?1000h and ESC[?1006h; the full build
+     repaints the screen from its mirror, dch-lite has none and the program
+     repaints on its SIGWINCH. Three SIGUSR2 redraws (0x07, no reset before
+     them) re-arm again, each with one kitty pop before its one push, so the
+     flag stack does not grow (a per-screen stack model of the whole attach
+     ends at 1 on the alternate screen, 0 on the main one); the first attach
+     pops nothing. A key after still reaches the session;
+  9. o (#194): on srv:xv-sh's Chapters the view is left as q leaves it and
+     the client attaches to xv-sh on the host (the host's log says so);
+     on the ended srv:xv-cl it says the session has ended and stays;
+  10. stopping a remote child (#204): a fake host whose answers stream
+      without end (more than a pipe holds) and never take a 0x34: q while
+      the follow streams (3 times), 20 cards each left with Esc while its
+      lines stream (every other one after f replaced the light card), Esc
+      then q; a silent host: Esc from a pending card, f over a pending
+      card, Esc then q, q with no snapshot. Each within STOP_S (1 s; it used
+      to hang for good, or wait 3 s per child), only the follow child after
+      each card, no zombie, the view's fd count flat over the 20 cards, the
+      terminal restored, exit 0, and no child the test saw left running.
 
 Run:  python3 tests/xray_remote_view_test.py      (uses ./dch)
 """
@@ -103,14 +141,14 @@ def dch(env, *a):
 class Pty:
     """A program on a pty: out holds every byte it wrote."""
 
-    def __init__(self, argv, rows=30, cols=100):
+    def __init__(self, argv, rows=30, cols=100, env=None):
         self.out = b""
         self.rc = None
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
             fcntl.ioctl(0, termios.TIOCSWINSZ,
                         struct.pack("HHHH", rows, cols, 0, 0))
-            os.execve(argv[0], argv, CENV)
+            os.execve(argv[0], argv, env or CENV)
 
     def pump(self, secs=0.05):
         end = time.time() + secs
@@ -149,6 +187,10 @@ class Pty:
         except OSError:
             pass    # it has exited: the checks say so
         self.pump(settle)
+
+    def resize(self, rows, cols):
+        fcntl.ioctl(self.fd, termios.TIOCSWINSZ,
+                    struct.pack("HHHH", rows, cols, 0, 0))
 
     def exit(self, secs=10.0):
         end = time.time() + secs
@@ -284,6 +326,11 @@ def test_view():
         v.key(b"q")
         check("reader: q goes back to the list",
               v.wait(b"Chapters 2", start=mark), v.out[mark:])
+        mark = len(v.out)
+        v.key(b"o", 0.5)
+        check("o on the ended srv:xv-cl: said, the view stays",
+              v.wait(b"xv-cl has ended: no session to open", start=mark) and
+              v.reap() is None, v.out[mark:])
         v.key(b"q")
         rc = v.exit()
         check("quit: q exits 0 and leaves the alternate screen",
@@ -303,6 +350,37 @@ def test_view():
           (ctls("--xray") - n0["--xray"], ctls("--read") - n0["--read"]))
 
 
+def test_small_card():
+    """QA 1.56.0 MED-V1 over a host:name view: k, Up and PgUp in a
+    too-small window took the card's selection below 0 and Enter read
+    v->m[-1] (SIGSEGV)."""
+    v = Pty([DCH, "--xray", "srv:xv-cl"])
+    try:
+        v.wait(b"Chapters 2")
+        v.key(b"\t")
+        v.wait(b"#831")
+        mark = len(v.out)
+        v.key(b"\r")
+        check("small card: srv:xv-cl's #831 card opens with its mentions",
+              v.wait(b"Mentions: this session ", start=mark), v.out[mark:])
+        mark = len(v.out)
+        v.resize(6, 20)
+        v.wait(b"too small", start=mark)
+        for k in (b"k", b"k", b"k", b"\033[A", b"\033[5~", b"\r"):
+            v.key(k, 0.1)
+        mark = len(v.out)
+        v.resize(30, 100)
+        v.wait(b"You", start=mark)
+        check("small card: k, Up, PgUp then Enter on srv:xv-cl: no crash, "
+              "Enter reads the first mention's chapter from the host",
+              v.reap() is None and b"You" in v.out[mark:],
+              (v.rc, v.out[mark:][-600:]))
+        v.key(b"qqq")
+        check("small card: q, q, q exits 0", v.exit() == 0, v.out[-80:])
+    finally:
+        v.close()
+
+
 # ---- 2: On screen of a live shell on the host -------------------------------
 
 def test_on_screen():
@@ -314,12 +392,14 @@ def test_on_screen():
         check("On screen: the view of srv:xv-sh opens",
               v.wait(b"X-ray  srv:xv-sh") and v.wait(b"Chapters"),
               v.out[-600:])
+        check("On screen: no number on its tab before its screen is read",
+              not re.search(rb"On screen \d", v.out), v.out[-600:])
         mark = len(v.out)
         v.key(b"\t\t", 2.0)
         if lite:
-            check("lite: On screen says dch-lite keeps no mirror",
-                  v.wait(b"No screen: dch-lite keeps no mirror", start=mark),
-                  v.out[mark:])
+            check("lite: On screen says dch-lite keeps no mirror, no number",
+                  v.wait(b"No screen: dch-lite keeps no mirror", start=mark)
+                  and not re.search(rb"On screen \d", v.out), v.out[mark:])
         else:
             check("On screen: the host's screen, o/r#41 with hint a",
                   v.wait(b"On screen 1", start=mark) and
@@ -338,6 +418,35 @@ def test_on_screen():
     check("On screen: read on the host with ctl --read xv-sh --ansi",
           ctls("--read") > n0 and " ctl --read xv-sh " in log,
           ctls("--read") - n0)
+
+
+# ---- 6: o attaches to the host's session (#194) ----------------------------
+
+def test_open():
+    with open(SLOG) as f:
+        n0 = f.read().count(" attach xv-sh (")
+    CENV["DCH_DOUBLE_TAP_MS"] = "0"  # one Ctrl-\ detaches at once
+    v = Pty([DCH, "--xray", "srv:xv-sh"])
+    try:
+        v.wait(b"Chapters")
+        v.pump(0.5)
+        check("o: srv:xv-sh's footer offers it", v.wait(b"o open session"),
+              v.out[-600:])
+        mark = len(v.out)
+        v.key(b"o", 0.3)
+        attached = lambda: open(SLOG).read().count(" attach xv-sh (") > n0
+        end = time.time() + 10
+        while not attached() and time.time() < end:
+            v.pump(0.1)
+        check("o: the view left as q leaves it, then the host attaches "
+              "xv-sh for us", attached() and RESTORE in v.out[mark:] and
+              v.reap() is None, (v.out[mark:][-400:], open(SLOG).read()[-400:]))
+        v.key(b"\x1c", 0.5)
+        check("o: a real attach, the detach key ends it", v.exit(5) == 0,
+              v.out[-200:])
+    finally:
+        del CENV["DCH_DOUBLE_TAP_MS"]
+        v.close()
 
 
 # ---- 3: a hostile host -------------------------------------------------------
@@ -478,6 +587,286 @@ def test_failures():
     ref.close()
 
 
+# ---- 10: stopping a remote child (#204) --------------------------------------
+
+STOP_S = 1.0    # the bug is a hang or RM_CANCEL_MS (3 s) per child
+SNAP = ('{"schema":1,"snapshot":{"session":"fk","session_id":'
+        '"m0000000000000001","corpus":"claude","live":true,"lines":3,'
+        '"project_label":"/x","chapters":[{"anchor":"s1","title":"first",'
+        '"kind":"prompt","at":1794300000,"offset":0}],"refs":[{"key":'
+        '"pull:o/r#41","shape":"pull","text":"o/r#41","title":"a ref",'
+        '"count":2,"underline":true}]}}\n').encode()
+PAD = b"".join(b'{"pad":"%s"}\n' % (b"p" * 240) for _ in range(128))
+MENTIONS = b"".join(json.dumps({"mention": {
+    "session": "fk", "line": "mention %d " % k + "m" * 200, "chapter": "s1",
+    "at": k}}).encode() + b"\n" for k in range(128))
+
+
+class Stopper(Fake):
+    """A host with ctl, ctl-cancel and xray that never answers a 0x34.
+    stream: --follow's snapshot then pad lines without end (follow=1, else
+    held), --ref's mention lines without end, both until the close. silent:
+    the snapshot (snap=1), then nothing at all."""
+
+    def __init__(self, mode, follow=0, snap=1):
+        super().__init__("ok", ops=["ctl", "ctl-cancel", "xray"])
+        self.smode, self.follow, self.snap = mode, follow, snap
+
+    def flood(self, c, data):
+        while True:
+            c.sendall(frame(0x31, data))
+            time.sleep(0.01)    # ~3 MB/s: a pipe's worth in ~20 ms
+
+    def run(self, c, argv):
+        try:
+            if "--follow" in argv:
+                if self.snap:
+                    c.sendall(frame(0x31, SNAP))
+                if self.smode == "stream" and self.follow:
+                    self.flood(c, PAD)
+            elif "--ref" in argv and self.smode == "stream":
+                self.flood(c, MENTIONS)
+            elif self.smode == "stream":
+                c.sendall(frame(0x33, {"exit": 0}))
+        except OSError:
+            pass
+
+    def serve(self, c):
+        buf = b""
+        try:
+            while True:
+                d = c.recv(65536)
+                if not d:
+                    return
+                buf += d
+                while len(buf) >= 5:
+                    t, n = struct.unpack(">BI", buf[:5])
+                    if len(buf) < 5 + n:
+                        break
+                    body, buf = buf[5:5 + n], buf[5 + n:]
+                    if t == 0x08:
+                        c.sendall(frame(0x18, {"proto": "1.0",
+                                               "server": "fake",
+                                               "ops": self.ops}))
+                    elif t == 0x30:
+                        argv = json.loads(body)["argv"]
+                        self.bodies.append(argv)
+                        threading.Thread(target=self.run, args=(c, argv),
+                                         daemon=True).start()
+        except OSError:
+            return
+
+
+def kids_of(pid):
+    """The view's children: {pid: ps state}."""
+    o = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,stat="],
+                       capture_output=True, text=True).stdout
+    return {int(p[0]): p[2] for p in (ln.split() for ln in o.splitlines())
+            if len(p) == 3 and p[1] == str(pid)}
+
+
+def alive(pids):
+    """Which of pids still run as a dch (pid reuse aside)."""
+    if not pids:
+        return []
+    o = subprocess.run(["ps", "-o", "pid=,comm=", "-p",
+                        ",".join(str(p) for p in pids)],
+                       capture_output=True, text=True).stdout
+    return [ln.strip() for ln in o.splitlines() if "dch" in ln]
+
+
+def nfds(pid):
+    """The view's open fds, or None when neither /proc nor lsof says."""
+    if os.path.isdir("/proc/%d/fd" % pid):
+        return len(os.listdir("/proc/%d/fd" % pid))
+    if not os.path.exists("/usr/sbin/lsof"):
+        return None
+    o = subprocess.run(["/usr/sbin/lsof", "-p", str(pid)],
+                       capture_output=True, text=True).stdout
+    return len(o.splitlines()) - 1
+
+
+def gone(what, v, rc, seen):
+    check("%s: the terminal restored, exit 0" % what,
+          rc == 0 and RESTORE in v.out[-60:], (rc, v.out[-80:]))
+    time.sleep(0.2)
+    left = alive(sorted(seen))
+    check("%s: no child of the view left running" % what, not left, left)
+
+
+def card(v, tab=False):
+    if tab:
+        v.key(b"\t", 0.3)  # to Refs; Esc from a card keeps the tab
+    mark = len(v.out)
+    v.key(b"\r", 0.1)
+    return v.wait(b"light", start=mark, secs=5)
+
+
+def esc_q(v):
+    """Esc, the list back, then q (one write would be Alt-q): the exit
+    code or None, and the seconds both took."""
+    mark = len(v.out)
+    t0 = time.time()
+    v.key(b"\033", 0)
+    if not v.wait(b"Chapters 1", start=mark, secs=STOP_S):
+        return None, time.time() - t0
+    v.key(b"q", 0)
+    return v.exit(STOP_S), time.time() - t0
+
+
+def shut(v):
+    """Pty.close, reading the pty meanwhile: a hung view's output fills it,
+    and its exit then waits for the drain."""
+    if v.reap() is None:
+        os.kill(v.pid, signal.SIGKILL)
+        end = time.time() + 10
+        while v.reap() is None and time.time() < end:
+            v.pump(0.1)
+    os.close(v.fd)
+    if v.rc is None:
+        os.waitpid(v.pid, 0)
+
+
+def test_stop():
+    # (a) an answer larger than a pipe still streaming
+    for i in range(3):
+        h = Stopper("stream", follow=1)
+        seen = set()
+        hosts("q=127.0.0.1:%d" % h.port)
+        v = Pty([DCH, "--xray", "q:fk"])
+        try:
+            v.wait(b"Chapters 1")
+            v.pump(0.5)
+            seen.update(kids_of(v.pid))
+            t0 = time.time()
+            v.key(b"q", 0)
+            rc = v.exit(STOP_S)
+            dt = time.time() - t0
+            check("stream %d: q while the follow streams exits within %.1f s "
+                  "(%.2f s)" % (i, STOP_S, dt), rc is not None, v.out[-200:])
+            v.exit(10)
+            gone("stream %d" % i, v, v.rc, seen)
+        finally:
+            shut(v)
+            h.close()
+    h = Stopper("stream")
+    seen = set()
+    hosts("q=127.0.0.1:%d" % h.port)
+    v = Pty([DCH, "--xray", "q:fk"])
+    try:
+        check("stream: the view opens", v.wait(b"Chapters 1"), v.out[-300:])
+        seen.update(kids_of(v.pid))
+        n0 = None
+        worst = [0.0, 0.0]
+        bad = []
+        for i in range(20):
+            ok = card(v, i == 0)
+            v.pump(0.2)     # the mention lines stream
+            seen.update(kids_of(v.pid))
+            if i % 2:
+                # f: the full card stops the light one still streaming
+                mark = len(v.out)
+                t0 = time.time()
+                v.key(b"f", 0)
+                ok = v.wait(b"full scan", start=mark, secs=STOP_S) and ok
+                worst[1] = max(worst[1], time.time() - t0)
+                v.pump(0.2)
+                seen.update(kids_of(v.pid))
+            mark = len(v.out)
+            t0 = time.time()
+            v.key(b"\033", 0)
+            ok = v.wait(b"Chapters 1", start=mark, secs=STOP_S) and ok
+            worst[0] = max(worst[0], time.time() - t0)
+            v.pump(0.1)
+            k = kids_of(v.pid)
+            if not ok or len(k) != 1 or "Z" in "".join(k.values()):
+                bad.append((i, ok, k))
+            if v.reap() is not None or len(bad) > 2:
+                break
+            if i == 0:
+                n0 = nfds(v.pid)
+        n1 = nfds(v.pid)
+        check("stream: 20 cards, each left with Esc while its lines stream "
+              "(odd ones after f replaced the light card) within %.1f s "
+              "(worst Esc %.2f s, f %.2f s), only the follow child after "
+              "each, no zombie" % (STOP_S, worst[0], worst[1]),
+              not bad and i == 19, bad)
+        if n0 is None or n1 is None:
+            print("  skip the view's fd count (no /proc, no lsof)")
+        else:
+            check("stream: the view's fds do not grow over 20 cards "
+                  "(%s, %s)" % (n0, n1), n1 <= n0, (n0, n1))
+        ok = card(v)
+        v.pump(0.2)
+        seen.update(kids_of(v.pid))
+        rc, dt = esc_q(v)
+        check("stream: Esc then q while a card streams exits within %.1f s "
+              "(%.2f s)" % (STOP_S, dt), ok and rc is not None and dt < STOP_S,
+              v.out[-200:])
+        v.exit(10)
+        gone("stream", v, v.rc, seen)
+    finally:
+        shut(v)
+        h.close()
+    # (b) a silent host: each stop used to wait RM_CANCEL_MS
+    h = Stopper("silent")
+    seen = set()
+    hosts("q=127.0.0.1:%d" % h.port)
+    v = Pty([DCH, "--xray", "q:fk"])
+    try:
+        check("silent: the view opens", v.wait(b"Chapters 1"), v.out[-300:])
+        seen.update(kids_of(v.pid))
+        ok = card(v, True)
+        seen.update(kids_of(v.pid))
+        mark = len(v.out)
+        t0 = time.time()
+        v.key(b"\033", 0)
+        ok = v.wait(b"Chapters 1", start=mark, secs=STOP_S) and ok
+        check("silent: Esc from a pending card within %.1f s (%.2f s)" % (
+            STOP_S, time.time() - t0), ok, v.out[mark:][-300:])
+        ok = card(v)
+        seen.update(kids_of(v.pid))
+        mark = len(v.out)
+        t0 = time.time()
+        v.key(b"f", 0)
+        ok = v.wait(b"full scan", start=mark, secs=STOP_S) and ok
+        check("silent: f (a new card) over a pending one within %.1f s "
+              "(%.2f s)" % (STOP_S, time.time() - t0), ok,
+              v.out[mark:][-300:])
+        seen.update(kids_of(v.pid))
+        k = kids_of(v.pid)
+        check("silent: only the follow and the new card's child run, no "
+              "zombie", len(k) == 2 and "Z" not in "".join(k.values()), k)
+        rc, dt = esc_q(v)
+        check("silent: Esc then q (card and follow pending) exits within "
+              "%.1f s (%.2f s)" % (STOP_S, dt), rc is not None and dt < STOP_S,
+              v.out[-200:])
+        v.exit(10)
+        gone("silent", v, v.rc, seen)
+    finally:
+        shut(v)
+        h.close()
+    h = Stopper("silent", snap=0)
+    seen = set()
+    hosts("q=127.0.0.1:%d" % h.port)
+    v = Pty([DCH, "--xray", "q:fk"])
+    try:
+        v.pump(1.0)
+        seen.update(kids_of(v.pid))
+        t0 = time.time()
+        v.key(b"q", 0)
+        rc = v.exit(STOP_S)
+        dt = time.time() - t0
+        check("silent, no snapshot: q exits within %.1f s (%.2f s)" % (
+            STOP_S, dt), len(seen) == 1 and rc is not None,
+            (seen, v.out[-200:]))
+        v.exit(10)
+        gone("silent, no snapshot", v, v.rc, seen)
+    finally:
+        shut(v)
+        h.close()
+
+
 # ---- 5: the picker's X on a remote row --------------------------------------
 
 def test_picker(port):
@@ -518,6 +907,368 @@ def test_picker(port):
         v.close()
 
 
+# ---- 6: the in-attach chord over a remote attach (#189) ---------------------
+
+# The host's probe session prints each read it gets as RX:<hex>, appends the
+# hex to a file and says WINCH on a SIGWINCH (the host's redraw), so a test
+# sees exactly the bytes that reached it, dch-lite too.
+RXF = os.path.join(T, "rx.hex")
+RX = ("import os, signal, sys, tty\n"
+      "tty.setraw(0)\n"
+      "signal.signal(signal.SIGWINCH,\n"
+      "              lambda *a: os.write(1, b'WINCH\\r\\n'))\n"
+      "f = open(sys.argv[1], 'a')\n"
+      "os.write(1, b'READY\\r\\n')\n"
+      "while True:\n"
+      "    b = os.read(0, 256)\n"
+      "    if not b: break\n"
+      "    f.write(b.hex()); f.flush()\n"
+      "    os.write(1, b'RX:' + b.hex().encode() + b'\\r\\n')\n")
+
+
+def rx():
+    """Every byte the host's session has received, in order, as hex."""
+    try:
+        with open(RXF) as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
+def until(fn, secs=10.0):
+    end = time.time() + secs
+    while time.time() < end:
+        if fn():
+            return True
+        time.sleep(0.05)
+    return fn()
+
+
+def attaches():
+    with open(SLOG) as f:
+        return f.read().count(" attach xv-rx (")
+
+
+def rattach(env=None, extra=(), tail=("-a", "srv:xv-rx")):
+    n0 = attaches()
+    a = Pty([DCH] + list(extra) + list(tail), env=env)
+    until(lambda: attaches() > n0)
+    a.wait(b"READY", 3)
+    a.pump(0.5)
+    return a, n0
+
+
+def chord_case(what, keys, env=None, tail=("-a", "srv:xv-rx")):
+    a, n0 = rattach(env, tail=tail)
+    try:
+        got = rx()
+        r0 = ctls("--read")
+        mark = len(a.out)
+        for k in keys:
+            a.key(k, 0.05)
+        ok = a.wait(b"X-ray  srv:xv-rx", start=mark) and \
+            a.wait(b"On screen", start=mark)
+        check("remote chord, %s: the view of srv:xv-rx opens over the attach"
+              % what, ok, a.out[mark:][-600:])
+        check("remote chord, %s: the client is still running" % what,
+              a.reap() is None)
+        check("remote chord, %s: On screen read over its own ctl --read"
+              % what, until(lambda: ctls("--read") > r0, 5),
+              ctls("--read") - r0)
+        dch(SENV, "--send", "xv-rx", "MARK189")
+        until(lambda: "4d41524b313839" in rx()[len(got):], 5)
+        a.pump(0.3)
+        check("remote chord, %s: the session got only the text sent while "
+              "the view was up (no detach key, no x)" % what,
+              rx()[len(got):] == "4d41524b313839", rx()[len(got):])
+        if not ok or a.reap() is not None:
+            return
+        mark = len(a.out)
+        a.key(b"q", 0.5)
+        check("remote chord, %s: q leaves the view's alternate screen" % what,
+              a.wait(RESTORE, start=mark), a.out[mark:][-300:])
+        back = a.out.rfind(RESTORE)
+        check("remote chord, %s: back on the attach, the host was asked to "
+              "redraw (the program got its SIGWINCH)" % what,
+              a.wait(b"WINCH", start=back), a.out[back:])
+        before = rx()
+        a.key(b"z", 0.3)
+        check("remote chord, %s: the attach was never retired (a key after "
+              "reaches the session, the host saw one attach)" % what,
+              until(lambda: rx()[len(before):] == "7a", 5) and
+              a.reap() is None and attaches() == n0 + 1,
+              (rx()[len(before):], a.rc, attaches() - n0))
+    finally:
+        a.close()
+    time.sleep(0.5)
+
+
+def test_chord(port):
+    hosts("srv=127.0.0.1:%d" % port)
+    r = dch(SENV, "--spawn", "xv-rx", "--size", "100x30", sys.executable,
+            "-c", RX, RXF)
+    check("remote chord: the probe session spawned on the host",
+          r.returncode == 0, r.stderr)
+    chord_case("x in a later read", [b"\x1c", b"x"])
+    chord_case("x in the same burst", [b"\x1cx"])
+    chord_case("the kitty CSI form", [b"\x1c", b"\033[120u"])
+    chord_case("--host srv -a xv-rx", [b"\x1cx"],
+               tail=("--host", "srv", "-a", "xv-rx"))
+    cfg = os.path.join(T, "config-switch")
+    with open(cfg, "w") as f:
+        f.write("remote_hosts = srv=127.0.0.1:%d\ndetach_key = switch\n"
+                % port)
+    chord_case("detach_key = switch", [b"\x1c", b"x"],
+               dict(CENV, DCH_CONFIG=cfg))
+
+    # -E: no detach key, no chord; the session gets both bytes
+    a, _ = rattach(extra=["-E"])
+    try:
+        got = rx()
+        mark = len(a.out)
+        a.key(b"\x1c", 0.05)
+        a.key(b"x", 0.5)
+        until(lambda: rx()[len(got):] == "1c78", 5)
+        check("remote chord, -E: the session receives the detach key and x, "
+              "no view", rx()[len(got):] == "1c78" and
+              b"X-ray" not in a.out[mark:] and a.reap() is None,
+              (rx()[len(got):], a.out[mark:]))
+    finally:
+        a.close()
+    time.sleep(0.5)
+
+    # DCH_DOUBLE_TAP_MS=0: the press detaches at once, no view, nothing
+    # reaches the session
+    for keys in ([b"\x1c", b"x"], [b"\x1cx"]):
+        a, _ = rattach(dict(CENV, DCH_DOUBLE_TAP_MS="0"))
+        try:
+            got = rx()
+            mark = len(a.out)
+            a.key(keys[0], 0.05)
+            rc = a.exit(5)
+            if len(keys) > 1:
+                try:
+                    os.write(a.fd, keys[1])
+                except OSError:
+                    pass
+            time.sleep(0.5)
+            check("remote chord, DCH_DOUBLE_TAP_MS=0, %s: the detach key "
+                  "detaches at once (exit 0), the session receives nothing, "
+                  "no view" % ("x after" if len(keys) > 1 else "one burst"),
+                  rc == 0 and rx()[len(got):] == "" and
+                  b"X-ray" not in a.out[mark:],
+                  (rc, rx()[len(got):], a.out[mark:]))
+        finally:
+            a.close()
+        time.sleep(0.5)
+
+
+# ---- 7: the view's failure lines over a remote attach ----------------------
+
+class Attachable(Fake):
+    """A host without "xray": its first connection is the attach, its 0x10
+    keys kept in keys and its 0x07 redraws counted; a later one (the view's)
+    is Fake's, `mode` "ok" (a hello without "xray") or "refuse" (the gate's
+    0x13)."""
+
+    def __init__(self, mode):
+        self.keys, self.redraws = b"", 0
+        super().__init__(mode, rows=[{"name": "fk"}],
+                         ops=["ctl", "ctl-cancel"])
+
+    def serve(self, c):
+        if c is not self.conns[0]:
+            return Fake.serve(self, c)
+        buf = b""
+        try:
+            while True:
+                d = c.recv(65536)
+                if not d:
+                    return
+                buf += d
+                while len(buf) >= 5:
+                    t, n = struct.unpack(">BI", buf[:5])
+                    if len(buf) < 5 + n:
+                        break
+                    body, buf = buf[5:5 + n], buf[5 + n:]
+                    if t == 0x08:
+                        c.sendall(frame(0x18, {"proto": "1.0",
+                                               "server": "fake",
+                                               "ops": self.ops}))
+                    elif t == 0x03:
+                        c.sendall(frame(0x11, self.rows))
+                    elif t == 0x01:
+                        self.attached.set()
+                        c.sendall(frame(0x10, b"FAKE-SCREEN\r\n"))
+                    elif t == 0x10:
+                        self.keys += body
+                    elif t == 0x07:
+                        self.redraws += 1
+        except OSError:
+            return
+
+
+def chord_fail(what, mode, line, close=False):
+    h = Attachable(mode)
+    hosts("q=127.0.0.1:%d" % h.port)
+    a = Pty([DCH, "-a", "q:fk"])
+    try:
+        ok = a.wait(b"FAKE-SCREEN") and h.attached.wait(5)
+        if close:
+            # the attach is in; the view's dial is refused. Linux keeps a
+            # listener accepting while a thread sits in accept(): shutdown
+            # ends it there (macOS says ENOTCONN and close() is enough)
+            try:
+                h.sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            h.sock.close()
+        a.pump(0.5)
+        mark = len(a.out)
+        a.key(b"\x1cx", 0.5)
+        check("remote chord, %s: the view opens with its line" % what,
+              ok and a.wait(line.encode(), start=mark), a.out[mark:][-600:])
+        mark = len(a.out)
+        a.key(b"q", 0.5)
+        check("remote chord, %s: q says the line and waits for a key" % what,
+              a.wait(b"(any key: back to the session)", start=mark) and
+              a.reap() is None, a.out[mark:][-300:])
+        a.key(b" ", 0.5)
+        a.key(b"z", 0.3)
+        until(lambda: h.keys == b"z", 5)
+        check("remote chord, %s: a key goes back to the attach: the host got "
+              "the redraw, then only the next key (no detach key, x or the "
+              "key that left)" % what, h.keys == b"z" and h.redraws == 1 and
+              a.reap() is None, (h.keys, h.redraws, a.rc))
+    finally:
+        a.close()
+        h.close()
+
+
+def test_chord_fail():
+    chord_fail("a host without xray (exit 6)", "ok",
+               "dch: q: does not support --xray (needs dch serve 1.55.0+)")
+    chord_fail("a gate that refuses the view (exit 4)", "refuse",
+               "dch: q refused: " + REFUSAL["message"])
+    chord_fail("an unreachable host (exit 7)", "ok", "dch: q: unreachable: ",
+               close=True)
+
+
+# ---- 8: the host re-arms the session's modes on 0x07 (#189 round 2) --------
+
+MD = ("import os, signal, sys, tty\n"
+      "tty.setraw(0)\n"
+      "signal.signal(signal.SIGWINCH,\n"
+      "              lambda *a: os.write(1, b'WINCH\\r\\n'))\n"
+      "os.write(1, b'\\033[?1049h\\033[?2004h\\033[?1000h\\033[?1006h'\n"
+      "         b'\\033[>1uALTSCREEN\\r\\n')\n"
+      "while True:\n"
+      "    b = os.read(0, 256)\n"
+      "    if not b: break\n"
+      "    os.write(1, b'GOT:' + b.hex().encode() + b'\\r\\n')\n")
+MODES = (b"\033[?2004h", b"\033[?1000h", b"\033[?1006h", b"\033[>1u")
+KSEQ = re.compile(rb"\033\[(\?1049[hl]|>\d*u|<\d*u)")
+
+
+def kitty_stacks(out):
+    """The kitty flag stack depths (main, alt) a terminal ends with after
+    out: a stack per screen, 1049h/l switch, ESC[<Nu pops N (default 1)."""
+    st, alt = [0, 0], 0
+    for m in KSEQ.finditer(out):
+        t = m.group(1)
+        if t[:1] == b"?":
+            alt = int(t[-1:] == b"h")
+        elif t[:1] == b">":
+            st[alt] += 1
+        else:
+            st[alt] = max(0, st[alt] - int(t[1:-1] or 1))
+    return tuple(st)
+
+
+def rearmed(out, at):
+    """The modes missing from out past at."""
+    return [m for m in MODES + (b"\033[?1049h",) if m not in out[at:]]
+
+
+def test_rearm():
+    lite = dch(SENV, "--build").stdout.strip() == "lite"
+    r = dch(SENV, "--spawn", "xv-md", "--size", "100x30", sys.executable,
+            "-c", MD)
+    check("re-arm: the probe session spawned on the host", r.returncode == 0,
+          r.stderr)
+    a = Pty([DCH, "-a", "srv:xv-md"])
+    try:
+        # dch-lite keeps no screen: the attach re-arms the modes only
+        ok = a.wait(b"\033[>1u" if lite else b"ALTSCREEN")
+        a.pump(0.5)
+        check("re-arm: the attach shows the program's modes%s"
+              % ("" if lite else " and screen"),
+              ok and not rearmed(a.out, 0), a.out[-300:])
+        check("re-arm: the first attach pops no kitty flags (push only)",
+              b"\033[<" not in a.out and a.out.count(b"\033[>1u") == 1,
+              a.out[-300:])
+        mark = len(a.out)
+        a.key(b"\x1cx", 0.5)
+        ok = a.wait(b"X-ray  srv:xv-md", start=mark)
+        check("re-arm: the chord opens the view over the attach", ok,
+              a.out[mark:][-600:])
+        if not ok:
+            return
+        mark = len(a.out)
+        a.key(b"q", 0.5)
+        a.wait(RESTORE, start=mark)
+        back = a.out.find(RESTORE, mark)
+        until(lambda: (a.pump(0.1), not rearmed(a.out, back))[1], 5)
+        a.pump(0.5)
+        out = a.out
+        check("re-arm: after the view's ESC[?1049l the host re-armed "
+              "bracketed paste, mouse reporting, kitty flags and 1049h",
+              back >= 0 and not rearmed(out, back),
+              (rearmed(out, back), out[back:][-600:]))
+        alt = out.find(b"\033[?1049h", back)
+        check("re-arm: the program is back on the alternate screen, the "
+              "kitty push after its 1049h (on that screen)",
+              alt > back and out.find(b"\033[>1u", alt) > alt,
+              out[back:][-600:])
+        if lite:
+            # no mirror to replay: the program repaints on its SIGWINCH
+            check("re-arm, dch-lite: no screen replay, the program got its "
+                  "SIGWINCH after the 1049h", alt > back and
+                  b"ALTSCREEN" not in out[alt:] and
+                  a.wait(b"WINCH", start=alt), out[back:][-600:])
+        else:
+            check("re-arm: the screen is replayed from the mirror after the "
+                  "1049h", alt > back and b"ALTSCREEN" in out[alt:],
+                  out[back:][-600:])
+        # redraws with no reset before them (SIGUSR2: 0x07) re-arm again,
+        # one pop before each push: the stack stays as it was
+        for i in range(1, 4):
+            mark = len(a.out)
+            os.kill(a.pid, signal.SIGUSR2)
+            until(lambda: (a.pump(0.1), not rearmed(a.out, mark))[1], 5)
+            a.pump(0.5)
+            got = a.out[mark:]
+            check("re-arm: SIGUSR2 redraw %d over the attach re-arms again"
+                  % i, not rearmed(a.out, mark),
+                  (rearmed(a.out, mark), got[-400:]))
+            check("re-arm: SIGUSR2 redraw %d: one kitty pop, before its one "
+                  "push" % i, got.count(b"\033[<u") == 1 and
+                  len(re.findall(rb"\033\[<\d*u", got)) == 1 and
+                  got.count(b"\033[>1u") == 1 and
+                  got.find(b"\033[<u") < got.find(b"\033[>1u"), got[-400:])
+        check("re-arm: over the whole attach pushes minus pops is 1 (the "
+              "stacks end at main 0, alternate 1)",
+              kitty_stacks(a.out) == (0, 1), kitty_stacks(a.out))
+        mark = len(a.out)
+        a.key(b"z", 0.3)
+        check("re-arm: the attach goes on (a key after reaches the session)",
+              a.wait(b"GOT:7a", start=mark, secs=5) and a.reap() is None,
+              (a.rc, a.out[mark:][-300:]))
+    finally:
+        a.close()
+    time.sleep(0.5)
+
+
 def main():
     sp = None
     try:
@@ -530,12 +1281,21 @@ def main():
         shell()
         hosts("srv=127.0.0.1:%d" % port)
         test_view()
+        test_small_card()
         test_on_screen()
         test_picker(port)
+        test_open()
         test_hostile()
         test_failures()
+        test_stop()
+        test_chord(port)
+        test_chord_fail()
+        hosts("srv=127.0.0.1:%d" % port)
+        test_rearm()
     finally:
         dch(SENV, "-k", "xv-sh")
+        dch(SENV, "-k", "xv-rx")
+        dch(SENV, "-k", "xv-md")
         if sp:
             sp.terminate()
             try:

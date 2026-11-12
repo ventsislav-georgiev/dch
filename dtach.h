@@ -407,7 +407,7 @@ extern int attach_sock;
 extern const char *(*attach_lost)(int *code);
 /* The in-attach X-ray chord (#187), the detach key then x: the host's view
 ** of the attached session, run in a child attach_main forks; its exit code.
-** NULL, or a remote attach: no chord, the bytes go on as before. */
+** A remote attach's too (#189). NULL: no chord, the bytes go on as before. */
 extern int (*attach_xray)(void);
 
 #include "remote.h"

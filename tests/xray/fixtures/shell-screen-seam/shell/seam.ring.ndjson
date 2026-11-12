@@ -1,0 +1,6 @@
+{"seq":281474976740000,"kind":"mark","flags":0,"t":1794300000,"text":"A"}
+{"seq":281474976740001,"kind":"prompt","flags":0,"t":1794300000,"text":"zp%"}
+{"seq":281474976740002,"kind":"mark","flags":0,"t":1794300000,"text":"B"}
+{"seq":281474976740003,"kind":"input","flags":0,"t":1794300000,"text":"seq 1 30"}
+{"seq":281474976740004,"kind":"mark","flags":8,"t":1794300000,"text":"C"}
+{"seq":281474976740005,"kind":"output","flags":0,"t":1794300000,"text":"28 x/y#1 above"}

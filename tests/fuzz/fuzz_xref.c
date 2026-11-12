@@ -10,11 +10,15 @@
 **   1: a Claude JSONL transcript (cut at '\n') into an index and a --ref
 **      scan for the first key the index met, then xr_print with the refs;
 **   2: ring records ({u16 len, u8 kind, u8 flags, u32 time, text}) through
-**      xr_shell_feed with xr_shell_refs into an index, then xr_print;
+**      xr_shell_feed with xr_shell_refs into an index, then xr_print; a
+**      record of kind 0xFE draws the ring/screen seam (#171), and every
+**      record after it goes in as a screen row (output, no flags): none of
+**      their hits may carry a chapter;
 **   3: xr_ref_ok and xr_ref_parse over the bytes as a C string; with byte
 **      0's bit 2 set, the resolvers' parsers instead (#159): git show's
 **      output, a file's 14-line window around the bytes' own :line, the
-**      secret-name list; every block line valid UTF-8 within 200 scalars.
+**      secret-name list, a .git file's "gitdir: " test (#205); every
+**      block line valid UTF-8 within 200 scalars.
 ** Path 1's scan: bit 3 reads the transcript twice, the second time as
 ** another session's (#155), bit 4 makes it light.
 ** Path 1 with byte 0's bit 2 set is --follow's instead (#136): the transcript
@@ -30,6 +34,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "../../ring.h"
 #include "../../xray.h"
 #include "../../bridge.h"
 
@@ -106,6 +111,7 @@ struct tee
 {
 	struct xr_sink ix, sc;
 	char key[XR_KEY_MAX + 16];
+	int screen;		/* past the seam: no chapter (#171) */
 };
 
 static void
@@ -118,6 +124,8 @@ tee_hit(void *ctx, const struct xr_hit *h)
 	check_key(h->sp);
 	if (cx && (h->title || h->passage || h->rule))
 		abort();	/* a Codex corpus defines nothing (7.4) */
+	if (t->screen && h->chapter)
+		abort();	/* a screen row has no marks, so no block */
 	if (h->title)
 		check_utf8(h->title, strlen(h->title));
 	/* a passage is the corpus's own bytes: xr_put_str writes U+FFFD */
@@ -417,6 +425,9 @@ resolvers(const char *s, size_t n)
 	if (xr_ref_line(s) < 0 || xr_ref_line(s) > 9999999)
 		abort();
 	(void)xr_secret_name(s);
+	if (xr_gitfile(s, n) != (n > 8 && !memcmp(s, "gitdir: ", 8) &&
+	    !strchr("\r\n", s[8])))
+		abort();
 }
 
 int
@@ -525,9 +536,14 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 				if (!(tx = malloc(l ? l : 1)))
 					break;
 				memcpy(tx, d + off + 8, l);
+				if (d[off + 2] == 0xFE && !t.screen)
+				{
+					xr_shell_screen(&sh);
+					t.screen = 1;
+				}
 				r.seq = seq++;
-				r.kind = d[off + 2] % 7;
-				r.flags = d[off + 3];
+				r.kind = t.screen ? RING_K_OUTPUT : d[off + 2] % 7;
+				r.flags = t.screen ? 0 : d[off + 3];
 				r.t = (uint32_t)d[off + 4] | (uint32_t)d[off + 5] << 8;
 				r.text = tx;
 				r.len = l;

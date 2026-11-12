@@ -308,14 +308,14 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		if (tin.n >= RF_HDR + RF_CTRL_MAX && r == 0)
 			abort();	/* a held frame past its cap closes */
 		/* QA 1.55.0 LOW-6: escaped, a host's bytes hold nothing a
-		** terminal acts on but newlines and tabs, and JSON text (no
-		** raw CR, which is JSON space) stays JSON */
+		** terminal acts on but newlines and tabs, and JSON text stays
+		** JSON, a raw CR (JSON space) too (QA 1.56.0 NIT-R-A) */
 		ctl_esc(&e, out.p ? out.p : "", out.n);
 		ctl_esc(&e, err.p ? err.p : "", err.n);
 		ctl_esc(&e, t, strlen(t));
 		if (e.bad)
 			abort();
-		k = dch_json_parse(&jp, t) == 0 && !strchr(t, '\r');
+		k = dch_json_parse(&jp, t) == 0;
 		dch_json_free(&jp);
 		if (k)
 		{

@@ -960,8 +960,13 @@ dch_remote_on(void)
 	return remote_on();
 }
 
+/* The host this process is attached to (#189): the in-attach X-ray chord's
+** view routes its host:name by it, a host only discovery found too. */
+static char g_attached[DCH_RHOST_MAX];
+
 /* host is one dch knows without a probe: a named host (--hosts,
-** remote_hosts) or a cached row's; never discovery (no tailscale run). */
+** remote_hosts), a cached row's or the attach's; never discovery (no
+** tailscale run). */
 int
 dch_remote_known(const char *host)
 {
@@ -971,6 +976,8 @@ dch_remote_known(const char *host)
 
 	if (!remote_on())
 		return 0;
+	if (g_attached[0] && !strcasecmp(g_attached, host))
+		return 1;
 	n = named_hosts(v, RM_HOSTS, 0);
 	for (k = 0; k < n && !hit; k++)
 		hit = !strcasecmp(v[k].label, host);	/* as host_find */
@@ -2837,10 +2844,12 @@ dch_remote_attach(const char *host, const char *name)
 	why_fd = wp[0];
 	attach_sock = sp[0];
 	attach_lost = remote_lost;
+	snprintf(g_attached, sizeof g_attached, "%s", h.label);
 	dch_trace("remote attach %s relay=%d", h.label, (int)relay_pid);
 	rc = attach_main(0);	/* returns only to switch sessions */
 	attach_sock = -1;
 	attach_lost = NULL;
+	g_attached[0] = '\0';
 	if (relay_pid > 0)
 		while (waitpid(relay_pid, NULL, 0) < 0 && errno == EINTR)
 			;
@@ -2964,7 +2973,8 @@ ctl_in(struct rf_state *rs, struct sb *tin, struct sb *out, struct sb *err,
 ** newline or a tab as a \u escape, a byte that is not UTF-8 as \ufffd: a
 ** JSON line stays the same JSON (a valid one holds them raw only inside a
 ** string), and a host's bytes cannot drive the terminal (QA 1.55.0 LOW-6).
-** Pure. */
+** A CR outside a string is JSON space and is dropped, so a CRLF line stays
+** JSON too (QA 1.56.0 NIT-R-A). Pure. */
 static void
 ctl_esc(struct sb *b, const char *s, size_t n)
 {
@@ -2972,14 +2982,18 @@ ctl_esc(struct sb *b, const char *s, size_t n)
 	char e[8];
 	unsigned cp;
 	size_t i;
-	int k;
+	int k, q = 0;	/* in a string: 1, 2 just after its backslash */
 
 	for (i = 0; i < n; i += (size_t)k)
+	{
 		if (!(k = utf8_at(u + i, &cp)) || (size_t)k > n - i)
 		{
 			k = 1;
+			cp = 0xfffd;
 			sb_s(b, "\\ufffd");
 		}
+		else if (cp == '\r' && !q)
+			;
 		else if (cp_ctl(cp) && cp != '\n' && cp != '\t')
 		{
 			snprintf(e, sizeof e, "\\u%04x", cp);
@@ -2987,11 +3001,15 @@ ctl_esc(struct sb *b, const char *s, size_t n)
 		}
 		else
 			sb_add(b, s + i, (size_t)k);
+		q = cp == '\n' ? 0 : q == 2 ? 1 : cp == '"' ? !q
+		    : cp == '\\' && q ? 2 : q;
+	}
 }
 
 /* One stream ctl_in gathered onto f: all of b as it comes, or with esc (a
 ** host's --xray --json) its whole lines, all of it when last, through
-** ctl_esc; the rest stays in b. 0, or -1 when the write failed. */
+** ctl_esc; the rest stays in b. 0, -1 when the write failed, or -2 (none
+** of it written) when the lines escaped are past SB_LIMIT. */
 static int
 ctl_out(FILE *f, struct sb *b, int esc, int last)
 {
@@ -3005,8 +3023,10 @@ ctl_out(FILE *f, struct sb *b, int esc, int last)
 		return 0;
 	if (esc)
 		ctl_esc(&e, b->p, k);
-	if (e.bad || fwrite(esc ? e.p : b->p, 1, esc ? e.n : k, f) !=
-	             (esc ? e.n : k) || fflush(f))
+	if (e.bad)
+		rc = -2;
+	else if (fwrite(esc ? e.p : b->p, 1, esc ? e.n : k, f) !=
+	         (esc ? e.n : k) || fflush(f))
 		rc = -1;
 	free(e.p);
 	memmove(b->p, b->p + k, b->n - k);
@@ -3016,13 +3036,15 @@ ctl_out(FILE *f, struct sb *b, int esc, int last)
 }
 
 /* What ctl_in gathered, onto stdout and stderr as it comes (esc, last: as
-** ctl_out's): 0, or -1 when stdout is gone (a reader that closed the
-** pipe). */
+** ctl_out's): 0, -1 when stdout is gone (a reader that closed the pipe),
+** or -2 when a line on either is past SB_LIMIT escaped (QA 1.56.0 LOW-R2). */
 static int
 ctl_put(struct sb *out, struct sb *err, int esc, int last)
 {
-	(void)ctl_out(stderr, err, esc, last);
-	return ctl_out(stdout, out, esc, last);
+	int e = ctl_out(stderr, err, esc, last), o = ctl_out(stdout, out, esc,
+	                                                    last);
+
+	return e == -2 && !o ? -2 : o;
 }
 
 /* argv as a 0x30 request (cwd's too when set) into *b. */
@@ -3088,8 +3110,8 @@ ctl_run(int fd, const char *sh, const char *verb, struct sb *rq,
 	unsigned char buf[RM_READ];
 	char msg[400] = "", why[100] = "";
 	size_t off = 0;
-	long long end = now_ms() + RM_ATTACH_MS, cend = 0, heard;
-	int r = 0, xit = 1, code = 1, cx = 0;	/* cx: the signal, -1 EPIPE */
+	long long end = now_ms() + RM_ATTACH_MS, cend = 0, heard, t;
+	int r = 0, xit = 1, code = 1, cx = 0, w;	/* cx: the signal, -1 EPIPE */
 	ssize_t k;
 
 	while (off < rq->n)
@@ -3130,8 +3152,20 @@ ctl_run(int fd, const char *sh, const char *verb, struct sb *rq,
 		}
 		if (cx < 0)
 			out.n = 0;	/* our reader is gone */
-		if (ctl_put(&out, &err, esc, r > 0) < 0 && !cx)
+		t = now_ms();
+		/* last: only a plain end's; a cut's partial line is no line */
+		if ((w = ctl_put(&out, &err, esc, r > 0 && !why[0] && !cx)) ==
+		    -2)
+		{
+			snprintf(msg, sizeof msg, "it sent a line over %u MiB "
+			         "escaped", SB_LIMIT >> 20);
+			r = -1;
+		}
+		else if (w < 0 && !cx)
 			cx = -1;
+		/* time blocked on our stdout is not the host's silence (QA
+		** 1.56.0 MED-R1) */
+		heard += now_ms() - t;
 		if (!cx && g_ctl_sig)
 			cx = g_ctl_sig;
 		if (r)
@@ -3181,9 +3215,10 @@ ctl_run(int fd, const char *sh, const char *verb, struct sb *rq,
 			heard = now_ms();
 		}
 	}
-	/* a lost link (r < 0, not a cancel) drops the stdout line esc held: a
-	** cut JSON line is no line (QA 1.55.0 NIT-5, Prosper's ruling) */
-	if (cx < 0 || (r < 0 && !cx))
+	/* a lost link, a cancel or the host's cut (a why) drops the stdout
+	** line esc held: a cut JSON line is no line (QA 1.55.0 NIT-5,
+	** Prosper's ruling; QA 1.56.0 NIT-R-B) */
+	if (cx || r < 0 || why[0])
 		out.n = 0;
 	(void)ctl_put(&out, &err, esc, 1);	/* a line esc held, cut short */
 	free(tin.p);

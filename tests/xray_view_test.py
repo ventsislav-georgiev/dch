@@ -18,7 +18,10 @@ Covers:
   4. mutant 11: no corpus ESC, BEL or bidi byte (U+202E, U+061C, U+2028)
      reaches the terminal, the strings show with `?` in their place;
   5. nothing written: no file under the test root changes;
-  6. a resize to a narrow window says so, a resize back redraws;
+  6. a resize to a narrow window says so, a resize back redraws; the
+     message fits down to 5 columns, and k, Up, PgUp and Enter in a card
+     under a too-small window neither crash nor read outside the mentions
+     (QA 1.56.0 MED-V1, NIT-V3);
   7. SIGTERM and SIGINT: the terminal is restored and the view's children
      are gone;
   8. On screen on a live shell: the ref printed in two blocks (underline)
@@ -26,7 +29,27 @@ Covers:
      the label line says X-ray needs the full build;
   9. the picker: the X hint is shown, X on a session row opens the view, q
      returns to the picker;
- 10. the in-attach chord (#187, K10): the detach key then x in a later read,
+ 10. the Refs tab (#193): a file under the project shown relative to it,
+     one under HOME from ~, one too long cut at the front (its tail kept,
+     a wide-character one within the width), a long URL keeping its host
+     and its end; rows by count then the most recent first; files under
+     /tmp, /private/tmp, /var/folders and $TMPDIR hidden, t toggling them,
+     the footer saying how many, the tab count the engine's; the filter
+     matching the full key (and taking t as text), Enter opening the full
+     key's card, f there showing the resolver's line (QA 1.56.0 NIT-V2);
+     the faint line saying what a ref is, the empty state when
+     there are none; On screen with no number until its screen is read,
+     then its count, 0 included (on dch-lite: no number, no mirror);
+ 11. the Chapters tab (#194): a chapter the harness wrote ("auto") hidden,
+     n showing it faint and titled by its summary (its title without one),
+     the footer saying how many, the tab count the shown-by-default ones,
+     the selection kept on its chapter, the filter matching a summary, the
+     empty state when every chapter is one; o on the Chapters list and in
+     the reader leaves the view (the terminal restored as q does) and
+     attaches as dch -a, from the picker's X too (the -k picker refuses);
+     an ended session's o says so and stays; in the chord o goes back to the
+     session;
+ 12. the in-attach chord (#187, K10): the detach key then x in a later read,
      in one burst, and in the kitty CSI form opens the view over the attach
      on On screen; the x never reaches the session, the attach is never
      retired (a key typed after reaches the session), and output written
@@ -37,8 +60,8 @@ Covers:
 
 Run:  python3 tests/xray_view_test.py      (uses ./dch)
 """
-import base64, fcntl, json, os, pty, select, shutil, signal, struct
-import subprocess, sys, tempfile, termios, time
+import base64, fcntl, json, os, pty, re, select, shutil, signal, struct
+import subprocess, sys, tempfile, termios, time, unicodedata
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
@@ -160,6 +183,24 @@ def alive(pid):
         return True
     except ProcessLookupError:
         return False
+
+
+CUP = re.compile(rb"\033\[(\d+);1H")
+
+
+def rows(out):
+    """The text last drawn on each row in out, its escapes removed."""
+    got = {}
+    parts = CUP.split(out)
+    for i in range(1, len(parts) - 1, 2):
+        got[int(parts[i])] = re.sub(rb"\033\[[0-9;?]*[A-Za-z]", b"",
+                                    parts[i + 1]).decode("utf-8", "replace")
+    return got
+
+
+def cells(s):
+    return sum(0 if unicodedata.combining(c) else
+               2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in s)
 
 
 def files(root):
@@ -306,6 +347,495 @@ def test_view():
           before == after, set(before.items()) ^ set(after.items()))
 
 
+# ---- the Refs tab (#193) ---------------------------------------------------
+
+FSID = "11111111-2222-4333-8444-5555555555f3"
+P = "/home/demo/proj"
+DEEP = P + "/src/very/deep/module/"
+LONG = DEEP + "with/many/more/levels/of/nesting/made/for/the/view/test/" \
+    "zeta_handler.c"
+WIDE = P + "/docs/\u8a2d\u8a08\u66f8/\u8a73\u7d30\u8a2d\u8a08\u306e" \
+    "\u8aac\u660e\u8cc7\u6599/\u4ed5\u69d8\u4e00\u89a7\u8868\u306e" \
+    "\u6700\u7d42\u7248/\u753b\u9762\u9077\u79fb.md"
+URL = "https://example.com/org/repo/pull/12/files#diff-0123456789abcdef"
+# the view's HOME and TMPDIR: fake, outside the test root
+RENV = {"HOME": "/home/demo", "TMPDIR": "/home/demo/tmpx/"}
+
+
+def fixture_refs():
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    said = ("edit %salpha_handler.c and %sbeta_handler.c, then %s and %s; "
+            "scratch in /tmp/scratch-one.txt, "
+            "/private/tmp/demo-502/tasks/out.log, /var/folders/xx/abc/T/t.1 "
+            "and /home/demo/tmpx/note.txt; see /home/demo/notes/todo.md, "
+            "%s, o/r#7, %s/src/main.c and %s/README.md; again "
+            "%salpha_handler.c" % (DEEP, DEEP, LONG, WIDE, URL, P, P, DEEP))
+    lines = [
+        {"type": "user", "cwd": P, "timestamp": "2026-11-10T10:00:00Z",
+         "message": {"content": "the refs fixture"}},
+        {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": said}]}}]
+    with open(os.path.join(pdir, FSID + ".jsonl"), "w") as f:
+        for o in lines:
+            f.write(json.dumps(o) + "\n")
+    sockdir = os.path.join(T, "dch-%d" % os.getuid())
+    hdir = os.path.join(T, "state", "dch", "sessions",
+                        sockdir.replace("/", "-"))
+    rec = {"name": "xv-rf", "cwd": P, "end": "exited", "argv": ["claude"],
+           "started": 1794299400, "updated": 1794300000,
+           "ended": 1794300000, "sock_dir": sockdir,
+           "agent": {"session_id": FSID, "cwd": P, "config_dir": cfg}}
+    with open(os.path.join(hdir, "xv-rf.json"), "w") as f:
+        f.write(json.dumps(rec) + "\n")
+
+
+ELL = "(?:\u2026|\\.\\.\\.)"
+
+
+def test_refs():
+    o = json.loads(dch("--xray", "xv-rf", "--json").stdout)
+    keys = [x["key"] for x in o["refs"]]
+    check("refs fixture: the engine lists every ref (13)",
+          len(keys) == 13 and "file:" + LONG in keys and
+          "file:" + WIDE in keys, keys)
+    v = Pty([DCH, "--xray", "xv-rf"], env=RENV)
+    try:
+        v.wait(b"Chapters 1")
+        v.pump(0.5)
+        check("On screen: no number before its screen is read (an ended "
+              "session has none)", b"On screen" in v.out and
+              not re.search(rb"On screen \d", v.out), v.out[-600:])
+        mark = len(v.out)
+        v.key(b"\t", 1.0)
+        scr = rows(v.out[mark:])
+        text = "\n".join(scr[k] for k in sorted(scr))
+        check("Refs: the tab count stays the engine's total (13)",
+              "Refs 13" in text, text)
+        check("Refs: one faint line says what a ref is and that Enter "
+              "opens its card", re.search("Files, commits, pull requests, "
+                                          "issues and URLs this session "
+                                          "touched; (\u21b5|enter) opens a "
+                                          "card", text), text)
+        check("Refs: a file under the project shows relative to it",
+              "file    src/very/deep/module/alpha_handler.c" in text and
+              "file    src/main.c" in text and P + "/src" not in text, text)
+        check("Refs: a file under HOME starts with ~",
+              "file    ~/notes/todo.md" in text, text)
+        check("Refs: a path too long keeps its tail, the ellipsis in front",
+              re.search(ELL + "[^\n]*/for/the/view/test/zeta_handler\\.c",
+                        text) and "src/very/deep/module/with" not in text,
+              text)
+        order = ["alpha_handler.c", "README.md", "src/main.c", "o/r#7",
+                 "example.com", "~/notes/todo.md", "zeta_handler.c",
+                 "beta_handler.c"]
+        at = [text.find(x) for x in order]
+        check("Refs: by count, then the most recent first (later in the "
+              "snapshot)", -1 not in at and at == sorted(at), (at, text))
+        tmp = ["/tmp/scratch-one.txt", "/private/tmp/demo-502/tasks/out.log",
+               "/var/folders/xx/abc/T/t.1", "/home/demo/tmpx/note.txt",
+               "~/tmpx/note.txt"]
+        check("Refs: files under /tmp, /private/tmp, /var/folders and "
+              "$TMPDIR are hidden", not any(x in text for x in tmp), text)
+        check("Refs: the footer shows t and how many are hidden",
+              "t temp files 4 hidden" in text, text)
+        mark = len(v.out)
+        v.key(b"t", 1.0)
+        scr = rows(v.out[mark:])
+        text = "\n".join(scr[k] for k in sorted(scr))
+        check("Refs: t shows the temp files, the footer says t hides them",
+              all(x in text for x in tmp[:3]) and "t hide temp files" in text
+              and "hidden" not in text, text)
+        mark = len(v.out)
+        v.key(b"t", 1.0)
+        scr = rows(v.out[mark:])
+        text = "\n".join(scr[k] for k in sorted(scr))
+        check("Refs: t again hides them", "t temp files 4 hidden" in text and
+              "/tmp/scratch-one.txt" not in text, text)
+        mark = len(v.out)
+        v.key(b"/")
+        v.key(b"scratch-one", 1.0)
+        scr = rows(v.out[mark:])
+        text = "\n".join(scr[k] for k in sorted(scr))
+        check("Refs: the filter takes t as text; only a hidden row matches: "
+              "said", "/scratch-one" in text and
+              "Only temp files: t shows them" in text, text)
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        check("Refs: the filter done, the footer counts the hidden match",
+              v.wait(b"t temp files 1 hidden", start=mark), v.out[mark:])
+        mark = len(v.out)
+        v.key(b"t", 1.0)
+        v.key(b"\r", 1.0)
+        check("Refs: Enter on the shown temp row opens its card",
+              v.wait(b"/tmp/scratch-one.txt  light", start=mark),
+              v.out[mark:])
+        mark = len(v.out)
+        v.key(b"f")
+        check("card: f shows the resolver's line (QA 1.56.0 NIT-V2)",
+              v.wait(b"file Outside this session's project  "
+                     b"/tmp/scratch-one.txt", start=mark), v.out[mark:])
+        v.key(b"\033", 0.5)
+        v.key(b"\033", 0.5)
+        v.key(b"t", 0.5)
+        mark = len(v.out)
+        v.key(b"/")
+        v.key(P.encode() + b"/src/main", 1.0)
+        scr = rows(v.out[mark:])
+        text = "\n".join(scr[k] for k in sorted(scr))
+        check("Refs: the filter matches the full key, the row shows it "
+              "relative", "file    src/main.c" in text and
+              "alpha_handler" not in text, text)
+        mark = len(v.out)
+        v.key(b"\r", 1.0)  # done, and Enter on the row, as the picker's
+        check("Refs: Enter opens the card of the full key",
+              v.wait(P.encode() + b"/src/main.c  light", start=mark),
+              v.out[mark:])
+        v.key(b"\033", 0.5)
+        v.key(b"\033", 0.5)
+        mark = len(v.out)
+        v.resize(30, 60)
+        v.pump(1.0)
+        scr = rows(v.out[mark:])
+        text = "\n".join(scr[k] for k in sorted(scr))
+        check("Refs, 60 columns: a long URL keeps its host and its end",
+              re.search("url     example\\.com" + ELL +
+                        "[^\n]*#diff-0123456789abcdef", text) and
+              "https://" not in text, text)
+        wide = [r.rstrip() for r in scr.values()
+                if r.rstrip().endswith(WIDE[-7:])]
+        check("Refs, 60 columns: a wide-character path keeps its tail within "
+              "the width", wide and re.search(ELL, wide[0]) and
+              cells(wide[0]) <= 60 and "docs/" not in wide[0],
+              (wide, [cells(r) for r in wide]))
+        v.key(b"q")
+        check("Refs: q exits 0", v.exit() == 0, v.out[-80:])
+    finally:
+        v.close()
+
+
+# ---- the Chapters tab: auto chapters, o (#194) ------------------------------
+
+ASID = "11111111-2222-4333-8444-5555555555a4"
+BSID = "11111111-2222-4333-8444-5555555555a5"
+
+
+def note(inner):
+    return "<task-notification>\n" + inner + "\n</task-notification>"
+
+
+def fixture_auto():
+    """xv-au: two prompts, three notifications between them (one with a
+    summary, one with a hostile summary, one with none); xv-aa: only
+    notifications."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    sockdir = os.path.join(T, "dch-%d" % os.getuid())
+    hdir = os.path.join(T, "state", "dch", "sessions",
+                        sockdir.replace("/", "-"))
+    os.makedirs(hdir, exist_ok=True)
+    au = ["fix the login bug",
+          note("<task-id>t1</task-id>\n<status>completed</status>\n"
+               "<summary>Build finished: 3 passed</summary>"),
+          note("<task-id>t2</task-id>\n<status>failed</status>"),
+          note("<task-id>t3</task-id>\n<summary>Lint \033]0;pwned\007 "
+               "evil\u202edone</summary>"),
+          "deploy it"]
+    aa = [note("<task-id>t9</task-id>\n<summary>Only a notice</summary>")]
+    for sid, name, prompts in ((ASID, "xv-au", au), (BSID, "xv-aa", aa)):
+        lines = []
+        for i, t in enumerate(prompts):
+            lines += [{"type": "user", "cwd": P,
+                       "timestamp": "2026-11-10T1%d:00:00Z" % i,
+                       "message": {"content": t}},
+                      {"type": "assistant", "message": {"content": [
+                          {"type": "text", "text": "reply %d" % i}]}}]
+        with open(os.path.join(pdir, sid + ".jsonl"), "w") as f:
+            for o in lines:
+                f.write(json.dumps(o) + "\n")
+        rec = {"name": name, "cwd": P, "end": "exited", "argv": ["claude"],
+               "started": 1794299400, "updated": 1794300000,
+               "ended": 1794300000, "sock_dir": sockdir,
+               "agent": {"session_id": sid, "cwd": P, "config_dir": cfg}}
+        with open(os.path.join(hdir, name + ".json"), "w") as f:
+            f.write(json.dumps(rec) + "\n")
+
+
+def screen(v, mark):
+    """The rows drawn since mark, runs of blanks as one (a colour key chip
+    pads its key)."""
+    scr = rows(v.out[mark:])
+    return re.sub(" +", " ", "\n".join(scr[k] for k in sorted(scr)))
+
+
+def test_auto():
+    o = json.loads(dch("--xray", "xv-au", "--json").stdout)
+    ch = o["chapters"]
+    check("auto fixture: five chapters, the three notifications auto, two "
+          "with a summary", len(ch) == 5 and
+          [c.get("auto", False) for c in ch] ==
+          [False, True, True, True, False] and
+          [("summary" in c) for c in ch] == [False, True, False, True, False],
+          ch)
+    bare = ch[2]["title"]
+    # colours on: faint is an SGR
+    v = Pty([DCH, "--xray", "xv-au"], env={"NO_COLOR": ""})
+    try:
+        v.wait(b"deploy it")
+        v.pump(0.5)
+        text = screen(v, 0)
+        check("Chapters: the tab counts the prompts shown by default (2)",
+              "Chapters 2" in text, text)
+        check("Chapters: auto chapters are hidden",
+              "fix the login bug" in text and "deploy it" in text and
+              "Build finished" not in text and "task-notification" not in
+              text and "Lint" not in text, text)
+        check("Chapters: the footer shows n and how many are hidden",
+              "n notifications 3 hidden" in text, text)
+        check("Chapters: o is offered only for a live session (none here)",
+              "open session" not in text, text)
+        v.key(b"k", 0.3)  # the newest is selected; up to the first prompt
+        mark = len(v.out)
+        v.key(b"n", 1.0)
+        text = screen(v, mark)
+        check("Chapters: n shows them, titled by their summary",
+              "Build finished: 3 passed" in text and
+              "Lint ?]0;pwned? evil?done" in text, text)
+        check("Chapters: an auto chapter with no summary keeps its title",
+              bare[:30] in text, (bare, text))
+        check("Chapters: shown, an auto chapter is faint, a prompt is not",
+              re.search(rb"\033\[0;2m[^\033]*Build finished: 3 passed",
+                        v.out[mark:]) and
+              re.search(rb"\033\[0m[^\033]*deploy it", v.out[mark:]),
+              v.out[mark:][-800:])
+        text = screen(v, 0)  # the rows n left as they were too
+        check("Chapters: n shown, the footer says n hides them, the tab "
+              "count stays 2", "n hide notifications" in text and
+              "hidden" not in text and "Chapters 2" in text, text)
+        sel = [r for r in text.split("\n") if r.startswith("\u258c")]
+        check("Chapters: n keeps the selection on its chapter",
+              sel and "fix the login bug" in sel[0], (sel, text))
+        mark = len(v.out)
+        v.key(b"j", 0.3)
+        v.key(b"\r", 1.0)
+        check("Chapters: Enter on a shown auto chapter reads it",
+              v.wait(b"reply 1", start=mark), v.out[mark:])
+        v.key(b"\033", 0.5)
+        mark = len(v.out)
+        v.key(b"n", 1.0)
+        v.key(b"/")
+        v.key(b"Build", 1.0)
+        text = screen(v, mark)
+        check("Chapters: the filter matches a summary; only a hidden "
+              "chapter matches: said, with the key",
+              "Only notifications: n shows them" in text, text)
+        mark = len(v.out)
+        v.key(b"\r", 0.5)
+        v.key(b"n", 1.0)
+        text = screen(v, mark)
+        check("Chapters: n shows the one that matched the filter",
+              "Build finished: 3 passed" in text and
+              "fix the login bug" not in text, text)
+        v.key(b"\033", 0.5)
+        mark = len(v.out)
+        v.key(b"o", 1.0)
+        text = screen(v, mark)
+        check("Chapters: o on an ended session says so and stays",
+              "xv-au has ended: no session to open" in text and
+              v.reap() is None, text)
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        v.wait(b"reply", start=mark)
+        mark = len(v.out)
+        v.key(b"o", 1.0)
+        text = screen(v, mark)
+        check("reader: o on an ended session says so and stays",
+              "xv-au has ended: no session to open" in text and
+              v.reap() is None, text)
+        v.key(b"q", 0.3)
+        v.key(b"q")
+        check("Chapters: q exits 0", v.exit() == 0, v.out[-80:])
+        bad = [b for b in (b"\033]0;pwned", b"\007 evil", b"\xe2\x80\xae")
+               if b in v.out]
+        check("mutant 11: no summary ESC, BEL or bidi byte in the output",
+              not bad, bad)
+    finally:
+        v.close()
+    v = Pty([DCH, "--xray", "xv-aa"])
+    try:
+        v.wait(b"Chapters")
+        v.pump(0.8)
+        text = screen(v, 0)
+        check("Chapters: every chapter auto: the empty state says so and "
+              "names n; the tab count is 0", "Only notifications: n shows "
+              "them" in text and "Chapters 0" in text and
+              "n notifications 1 hidden" in text, text)
+        mark = len(v.out)
+        v.key(b"n", 1.0)
+        text = screen(v, mark)
+        check("Chapters: n shows it, selected", any(
+            r.startswith("\u258c") and "Only a notice" in r
+            for r in text.split("\n")), text)
+        v.key(b"q")
+        v.exit()
+    finally:
+        v.close()
+
+
+def clients(name):
+    for r in json.loads(dch("--ls-json").stdout):
+        if r["name"] == name:
+            return r.get("clients")
+    return None
+
+
+# what q leaves the view with (picker_restore), byte for byte: the attach
+# comes after it
+LEAVE = (b"\033[?25h\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?1015l"
+         b"\033[?2004l\033[?7h\033[<u\033[0m\033[?1049l")
+DTAP = {"DCH_DOUBLE_TAP_MS": "0"}  # one Ctrl-\ detaches at once
+
+
+def opened(v, mark, what, name="xv-sh"):
+    """o pressed at mark: the view left as q leaves it, then attached to
+    name; one Ctrl-\\ detaches."""
+    ok = until(lambda: (v.pump(0.1), clients(name) == 1)[1], 10)
+    i = v.out.find(LEAVE, mark)
+    check("%s: o leaves the view as q does (terminal restored), then "
+          "attaches to the session" % what, ok and i >= 0, v.out[mark:][-400:])
+    v.key(b"\x1c", 0.5)
+    rc = v.exit(5)
+    check("%s: the attach is a real one: the detach key ends it" % what,
+          rc == 0 and until(lambda: clients(name) == 0, 5), rc)
+
+
+def test_open(lite):
+    # one typed shell block, scrolled into the ring: a chapter (full build)
+    prog = ("printf '\\033]133;A\\007$ \\033]133;B\\007'; read cmd; "
+            "printf '\\033]133;C\\007'; echo \"ran:$cmd\"; "
+            "printf '\\033]133;D;0\\007'; seq 1 40; "
+            "printf '\\033]133;A\\007$ '; exec sleep 600")
+    r = dch("--spawn", "xv-op", "--size", "80x24", "sh", "-c", prog)
+    check("open: spawned", r.returncode == 0, r.stderr)
+    until(lambda: "$" in dch("--read", "xv-op").stdout, 5)
+    dch("--send", "xv-op", "make the build\n")
+    until(lambda: "40" in dch("--read", "xv-op").stdout, 5)
+    time.sleep(0.5)  # dch-lite: no --read; the block's time
+    v = Pty([DCH, "--xray", "xv-op"], env=DTAP)
+    try:
+        v.wait(b"Chapters")
+        v.pump(0.5)
+        text = screen(v, 0)
+        check("Chapters: a live session's footer offers o", "o open session"
+              in text, text)
+        mark = len(v.out)
+        v.key(b"o", 0.3)
+        opened(v, mark, "Chapters", "xv-op")
+    finally:
+        v.close()
+    if lite:
+        print("  ok   lite: a shell has no chapters to read (no corpus): o "
+              "in the reader is the full build's")
+    else:
+        v = Pty([DCH, "--xray", "xv-op"], env=DTAP)
+        try:
+            v.wait(b"make the build")
+            v.pump(0.3)
+            mark = len(v.out)
+            v.key(b"\r", 1.0)
+            v.wait(b"ran:make the build", start=mark)
+            v.pump(0.3)
+            text = screen(v, mark)
+            check("reader: a live session's footer offers o",
+                  "o open session" in text and "ran:make the build" in text,
+                  text)
+            mark = len(v.out)
+            v.key(b"o", 0.3)
+            opened(v, mark, "reader", "xv-op")
+        finally:
+            v.close()
+    dch("-k", "xv-op")  # the pickers below take their first row: xv-sh
+    v = Pty([DCH, "-l"], env=DTAP)
+    try:
+        v.wait(b"x-ray")
+        v.key(b"X", 1.0)
+        v.wait(b"X-ray  xv-sh")
+        mark = len(v.out)
+        v.key(b"o", 0.3)
+        opened(v, mark, "picker's X")
+    finally:
+        v.close()
+    v = Pty([DCH, "-k"], env=DTAP)
+    try:
+        v.wait(b"x-ray")
+        v.key(b"X", 1.0)
+        v.wait(b"X-ray  xv-sh")
+        mark = len(v.out)
+        v.key(b"o", 1.0)
+        check("-k picker: the view's o attaches nothing and kills nothing, "
+              "said", v.wait(b"o opens a session: from dch -l or the switch",
+                             start=mark) and clients("xv-sh") == 0 and
+              v.reap() is None, v.out[mark:])
+        v.key(b"\033")
+        v.exit()
+    finally:
+        v.close()
+    check("-k picker: xv-sh still runs", clients("xv-sh") == 0, clients("xv-sh"))
+    v = Pty([DCH, "--xray", "xv-sh"], env=dict(DTAP, DCH_SESSION="outer"))
+    try:
+        v.wait(b"Chapters")
+        mark = len(v.out)
+        v.key(b"o", 1.0)
+        check("o inside a dch session: refused as -a refuses it, the view "
+              "stays", v.wait(b"already inside session outer; nesting "
+                              b"disabled", start=mark) and
+              v.reap() is None and clients("xv-sh") == 0, v.out[mark:])
+        v.key(b"q")
+        v.exit()
+    finally:
+        v.close()
+
+
+def test_screen_count(lite):
+    """A live shell with nothing on its screen to label: no number on On
+    screen until it is read, then 0; no refs: the empty state."""
+    r = dch("--spawn", "xv-0", "--size", "80x24", "sh", "-c",
+            "echo READY0; exec sleep 600")
+    check("screen count: spawned", r.returncode == 0, r.stderr)
+    time.sleep(0.5)
+    v = Pty([DCH, "--xray", "xv-0"])
+    try:
+        v.wait(b"Chapters")
+        v.pump(0.5)
+        check("On screen: no number before it is opened",
+              b"On screen" in v.out and
+              not re.search(rb"On screen \d", v.out), v.out[-600:])
+        mark = len(v.out)
+        v.key(b"\t", 1.0)
+        check("Refs: no refs, the empty state says what would show",
+              v.wait(b"No refs yet: the files, commits, pull requests, "
+                     b"issues and URLs this session touches show here",
+                     start=mark), v.out[mark:])
+        mark = len(v.out)
+        v.key(b"\t", 1.5)
+        if lite:
+            check("lite: On screen says no mirror and shows no number",
+                  v.wait(b"No screen: dch-lite keeps no mirror", start=mark)
+                  and not re.search(rb"On screen \d", v.out), v.out[mark:])
+        else:
+            check("On screen: read, its count shows, 0 included",
+                  v.wait(b"On screen 0", start=mark) and
+                  v.wait(b"READY0", start=mark), v.out[mark:])
+        v.key(b"\003")
+        check("screen count: Ctrl-C quits with 0", v.exit() == 0,
+              v.out[-80:])
+    finally:
+        v.close()
+        dch("-k", "xv-0")  # the picker test's first row is xv-sh
+
+
 def test_resize():
     v = Pty([DCH, "--xray", "xv-cl"])
     try:
@@ -320,6 +850,48 @@ def test_resize():
               v.wait(b"Chapters 2", start=mark), v.out[mark:])
         v.key(b"\003")
         check("Ctrl-C quits with 0", v.exit() == 0, v.out[-80:])
+    finally:
+        v.close()
+
+
+def test_small_card():
+    """QA 1.56.0 MED-V1: k, Up and PgUp in a too-small window took the
+    card's selection below 0 and Enter read v->m[-1] (SIGSEGV)."""
+    v = Pty([DCH, "--xray", "xv-cl"])
+    try:
+        v.wait(b"Chapters 2")
+        v.key(b"\t")
+        v.wait(b"#831")
+        mark = len(v.out)
+        v.key(b"\r")
+        check("small card: #831's card opens with its mentions",
+              v.wait(b"Mentions: this session ", start=mark), v.out[mark:])
+        mark = len(v.out)
+        v.resize(6, 20)
+        check("small card: 20 columns says it whole (NIT-V3)",
+              v.wait(b"X-ray: too small", start=mark) and
+              b"the window is" not in v.out[mark:], v.out[mark:])
+        for k in (b"k", b"k", b"k", b"\033[A", b"\033[5~", b"\r"):
+            v.key(k, 0.1)
+        mark = len(v.out)
+        v.resize(30, 100)
+        v.wait(b"You", start=mark)
+        check("small card: k, Up, PgUp then Enter: no crash, Enter reads "
+              "the first mention's chapter", v.reap() is None and
+              b"You" in v.out[mark:],
+              (v.rc, v.out[mark:][-600:]))
+        if v.reap() is not None:
+            return
+        for cols, want in ((12, b"too small"), (5, b"too")):
+            mark = len(v.out)
+            v.resize(6, cols)
+            v.wait(want, start=mark)
+            got = [r for r in rows(v.out[mark:]).values() if r.strip()]
+            check("too small at %d columns: one row, within the width"
+                  % cols, len(got) == 1 and cells(got[0]) <= cols and
+                  want.decode() in got[0], got)
+        v.key(b"qqq")
+        check("small card: q, q, q exits 0", v.exit() == 0, v.out[-80:])
     finally:
         v.close()
 
@@ -506,6 +1078,27 @@ def test_chord():
         print("  ok   lite: the repaint after the view is the master's "
               "SIGWINCH (no mirror), the screen check is the full build's")
 
+    # o on Chapters (#194): the client is on the session already; o goes
+    # back to it, the attach kept
+    a = attach()
+    try:
+        got = rx()
+        a.key(b"\x1cx", 0.5)
+        a.wait(b"X-ray  xv-rx")
+        a.key(b"\t", 0.5)
+        mark = len(a.out)
+        a.key(b"o", 0.5)
+        check("chord, o: the view closes, back to the session",
+              a.wait(RESTORE, start=mark) and a.reap() is None,
+              a.out[mark:][-300:])
+        a.key(b"z", 0.3)
+        check("chord, o: the attach was kept, neither Tab nor o reached "
+              "the session, a key after does",
+              until(lambda: rx()[len(got):] == "7a", 5) and a.reap() is None,
+              (rx()[len(got):], a.rc))
+    finally:
+        a.close()
+
     # -E: no detach key, no chord; the session gets both bytes
     a = attach(extra=["-E"])
     try:
@@ -620,22 +1213,150 @@ def test_chord_end():
         a.close()
 
 
+def test_chord_detach():
+    """#196. dch -d (and SIGTERM, SIGHUP) with the chord's view up: the
+    client leaves at once as a plain detach does (exit 0, the terminal's
+    stty as before the attach, the reset sequence last, the client pidfile
+    gone, the view gone). With kitty event types on, the detach key's
+    release in a read of its own neither ends the window nor reaches the
+    session: press, release, x opens the view; press, release, press opens
+    the switch picker. What follows the x in its read reaches neither the
+    view nor the session (a q there leaves the view up)."""
+    import re
+    reset = b"\033[?1049l\033[<8u"
+    for how in ("-d", signal.SIGTERM, signal.SIGHUP):
+        what = how if how == "-d" else signal.Signals(how).name
+        a = Pty(["/bin/sh", "-c", "stty -g; '%s' -a xv-rx; echo RC=$?; "
+                 "stty -g; echo GONE; exec sleep 30" % DCH])
+        try:
+            a.wait(b"READY")
+            a.pump(0.3)
+            before = a.out.split(b"\r\n")[0]
+            got = rx()
+            mark = len(a.out)
+            a.key(b"\x1c", 0.05)
+            a.key(b"x", 0.3)
+            ok = a.wait(b"X-ray  xv-rx", start=mark)
+            check("chord, %s: the view opens" % what, ok,
+                  a.out[mark:][-300:])
+            client = kids(a.pid)
+            view = [k for c in client for k in kids(c)]
+            pidf = [os.path.join(d, f) for d, _, fs in os.walk(T)
+                    for f in fs for c in client
+                    if f.endswith(".client.%d" % c)]
+            mark = len(a.out)
+            t0 = time.time()
+            if how == "-d":
+                r = dch("-d", "xv-rx")
+                check("chord, -d: dch -d says it detached one client",
+                      r.returncode == 0 and "detached 1 client" in r.stdout,
+                      (r.returncode, r.stdout, r.stderr))
+            else:
+                for c in client:
+                    os.kill(c, how)
+            gone = a.wait(b"GONE", secs=5, start=mark)
+            tail = a.out[mark:]
+            check("chord, %s: the client leaves within 5 s, the view still "
+                  "up (%.1f s)" % (what, time.time() - t0), gone,
+                  tail[-300:])
+            if not gone:
+                continue
+            lines = tail.split(b"RC=")[-1].split(b"\r\n")
+            # PENDIN (macOS 0x20000000): the kernel sets it on any switch
+            # back to canonical mode, until the next read
+            pend = lambda g: re.sub(
+                rb"lflag=([0-9a-f]+)", lambda m: b"lflag=%x" %
+                (int(m.group(1), 16) & ~0x20000000), g)
+            check("chord, %s: exit 0, the terminal's stty as before the "
+                  "attach" % what, lines[0] == b"0" and
+                  pend(lines[1]) == pend(before), (lines[:2], before))
+            if how != signal.SIGHUP:
+                check("chord, %s: the reset sequence comes last" % what,
+                      tail.split(b"RC=")[0].endswith(reset),
+                      tail.split(b"RC=")[0][-120:])
+            check("chord, %s: the client pidfile and the view are gone" %
+                  what, pidf and not any(os.path.exists(f) for f in pidf)
+                  and view and until(lambda: not any(alive(k)
+                                                    for k in view), 5),
+                  (pidf, view))
+            check("chord, %s: the session got nothing" % what,
+                  rx()[len(got):] == "", rx()[len(got):])
+        finally:
+            a.close()
+
+    # kitty event types on: each report in a read of its own
+    for keys, want, what in (
+            ([b"\033[92;5u", b"\033[92;5:3u", b"\033[120u"],
+             b"X-ray  xv-rx", "press, release, x"),
+            ([b"\033[92;5u", b"\033[92;5:3u", b"\033[92;5u"],
+             b"switch to session:", "press, release, press")):
+        a = attach(env={"DCH_DOUBLE_TAP_MS": "2000"})
+        try:
+            got = rx()
+            mark = len(a.out)
+            for k in keys:
+                try:
+                    a.key(k, 0.15)
+                except OSError:	# the client left: the pty is gone
+                    break
+            check("kitty events, %s, three reads: %s opens, the client "
+                  "stays" % (what, want.decode()),
+                  a.wait(want, start=mark) and a.reap() is None,
+                  (a.rc, a.out[mark:][-300:]))
+            check("kitty events, %s: the session got nothing" % what,
+                  rx()[len(got):] == "", rx()[len(got):])
+        finally:
+            a.close()
+
+    # the rest of the x's read is dropped: a q in it never closes the view
+    a = attach(env={"DCH_DOUBLE_TAP_MS": "2000"})
+    try:
+        got = rx()
+        mark = len(a.out)
+        a.key(b"\x1c", 0.05)
+        a.key(b"xq", 0.3)
+        ok = a.wait(b"X-ray  xv-rx", start=mark)
+        a.pump(1.0)
+        # the overlay's own reset leaves the alternate screen first
+        up = a.out.find(b"X-ray  xv-rx", mark)
+        check("chord, x then q in one read: the view opens and stays up, "
+              "the session got nothing", ok and
+              RESTORE not in a.out[up:] and a.reap() is None and
+              rx()[len(got):] == "", (a.out[mark:][-200:], rx()[len(got):]))
+        mark = len(a.out)
+        a.key(b"q", 0.5)
+        check("chord, x then q in one read: a q of its own closes it",
+              a.wait(RESTORE, start=mark), a.out[mark:][-200:])
+    finally:
+        a.close()
+
+
 def main():
     try:
         fixture()
         test_refusals()
         test_view()
+        fixture_refs()
+        test_refs()
+        fixture_auto()
+        test_auto()
         test_resize()
+        test_small_card()
         shell()
         test_signals()
         test_on_screen()
+        o = json.loads(dch("--xray", "xv-sh", "--json").stdout)
+        test_screen_count(o["corpus"] == "none" and o["reason"] == "lite")
         test_picker()
+        test_open(o["corpus"] == "none" and o["reason"] == "lite")
         test_chord()
         test_chord_end()
+        test_chord_detach()
     finally:
         dch("-k", "xv-rx")
         dch("-k", "xv-end")
         dch("-k", "xv-sh")
+        dch("-k", "xv-0")
         shutil.rmtree(T, ignore_errors=True)
     if fails[0]:
         print("%d failed" % fails[0])

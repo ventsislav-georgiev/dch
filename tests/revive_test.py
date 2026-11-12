@@ -1036,6 +1036,28 @@ def main():
               "live, running true [%r]" % r.stdout,
               r.returncode == 1 and o.get("reason") == "live" and
               o.get("running") is True)
+
+        # QA 1.56.0 NIT-R-C: a path-like name or --as is refused by
+        # name_ok before "running" builds a socket path from it, so a
+        # listening socket where the path points records no connection
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        probe.bind(os.path.join(rt8, "probe.sock"))
+        probe.listen(4)
+        probe.setblocking(False)
+        for args in (("../probe",), ("nosuch", "--as", "../probe")):
+            r = run("--revive", *args, "--json", env=renv, timeout=60)
+            o = (ndjson(r.stdout) or [{}])[-1]
+            try:
+                probe.accept()[0].close()
+                hit = True
+            except BlockingIOError:
+                hit = False
+            check("--revive %s --json: no_history, running false, no "
+                  "connection outside the socket dir [%r]"
+                  % (" ".join(args), r.stdout),
+                  r.returncode == 1 and o.get("reason") == "no_history" and
+                  o.get("running") is False and not hit)
+        probe.close()
     except Exception:
         traceback.print_exc()
         fails[0] += 1

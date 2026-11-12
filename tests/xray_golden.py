@@ -10,7 +10,8 @@ Each case is a directory:
                    nonzero exit
   expected/<k>.ndjson  a --ref stream (3.4, #135): its lines with
                    elapsed_ms masked to 0 and progress lines left out (they
-                   are timing; checked to sit between first and done)
+                   are timing; checked to sit between first and done); an
+                   `at` within an hour of now (a screen row's, #171) is 0
   claude/<uuid>.jsonl  transcripts, placed at
                    <config>/projects/<setup "project_dir">/<uuid>.jsonl,
                    or at setup "project_dirs"[<uuid>] (#155: another
@@ -36,7 +37,12 @@ Each case is a directory:
                    (MSG_READ with DCH_READ_F_PRIMARY, #140) is "screen"
                    (default "screen row\n"); "primary":"alt" answers
                    DCH_ST_ALT (the alt screen is active), "primary":"old"
-                   DCH_ST_ERR (a master before #140). "isolated": true
+                   DCH_ST_ERR (a master before #140); rows lost (#171):
+                   "busy" DCH_ST_BUSY, "trunc" the screen after a lone
+                   UTF-8 continuation byte with DCH_ST_TRUNC (the master's
+                   kept tail), "hangup" closes with no answer, "slow"
+                   answers after 1 s (past --ref's light budget, inside
+                   --json's 2 s). "isolated": true
                    fails the case if any argv reads that master's ring or
                    screen (#155: no scope reads another session's ring,
                    S17). Ignored by Prosper.
@@ -72,6 +78,7 @@ MSG_CMD, MSG_RING_READ, MSG_RING_HDR, MSG_RING_CLEAR = 15, 18, 19, 21
 MSG_CMD_STAT = 17
 MSG_WINCH, MSG_REDRAW, MSG_ATTACH, MSG_DETACH = 4, 5, 1, 2
 ST_OK, ST_ERR, ST_NOVT, ST_UNSUP, ST_ALT = 0, 1, 2, 5, 7
+ST_TRUNC, ST_BUSY = 3, 4
 READ_F_PRIMARY = 0x08
 S_RANGE = 0x01
 PKT_MAX = 4096
@@ -144,7 +151,10 @@ class FakeMaster:
                         0 if t in (MSG_ATTACH, MSG_DETACH) else n)
                 p = self.recv(c, plen) if plen else b""
                 self.ops.append(t)
-                c.sendall(self.answer(t, p))
+                a = self.answer(t, p)
+                if a is None:
+                    return               # "hangup": the finally closes
+                c.sendall(a)
         except (EOFError, OSError):
             pass
         finally:
@@ -160,12 +170,19 @@ class FakeMaster:
         if t == MSG_READ:
             if self.screen is None:
                 return struct.pack("<BH", MSG_READ_END, ST_NOVT)
-            if len(p) > 4 and p[4] & READ_F_PRIMARY and self.primary:
-                return struct.pack("<BH", MSG_READ_END, ST_ALT
-                                   if self.primary == "alt" else ST_ERR)
-            b = self.screen.encode()
+            pr = (self.primary if len(p) > 4 and p[4] & READ_F_PRIMARY
+                  else None)
+            if pr in ("alt", "old", "busy"):
+                return struct.pack("<BH", MSG_READ_END, {
+                    "alt": ST_ALT, "old": ST_ERR, "busy": ST_BUSY}[pr])
+            if pr == "hangup":
+                return None
+            if pr == "slow":
+                time.sleep(1.0)
+            b = (b"\x83" if pr == "trunc" else b"") + self.screen.encode()
             return (struct.pack("<BH", MSG_READ_DATA, len(b)) + b +
-                    struct.pack("<BH", MSG_READ_END, ST_OK))
+                    struct.pack("<BH", MSG_READ_END,
+                                ST_TRUNC if pr == "trunc" else ST_OK))
         if t == MSG_CMD and self.child:
             b = b"\0".join(x.encode() for x in (
                 str(self.child.pid), "running", "-1", "0", "1", "sleep")) + b"\0"
@@ -221,6 +238,7 @@ def load_ring(path):
 ANCHOR = re.compile(r'"anchor":"f[0-9a-f]+:')
 CHAPTER = re.compile(r'"chapter":"f[0-9a-f]+:')
 ELAPSED = re.compile(r'"elapsed_ms":\d+')
+AT = re.compile(r'"at":(\d+)')
 
 
 def key(path):
@@ -231,6 +249,10 @@ def mask(s, root):
     s = ANCHOR.sub('"anchor":"f*:', s)
     s = CHAPTER.sub('"chapter":"f*:', s)
     s = ELAPSED.sub('"elapsed_ms":0', s)
+    # a screen row's time is the read's own clock (#171): fixture times are
+    # fixed and far from now
+    s = AT.sub(lambda m: '"at":0' if abs(int(m.group(1)) - time.time()) <
+               3600 else m.group(0), s)
     return s.replace(root, "/T").replace(key(root), "-T")
 
 
@@ -298,7 +320,8 @@ def run_case(name):
     setup_p = os.path.join(d, "setup.json")
     setup = json.load(open(setup_p)) if os.path.exists(setup_p) else {}
     check("%s: case.json carries schema 1" % name, case.get("schema") == 1)
-    t = tempfile.mkdtemp(prefix="xg")
+    # /tmp, as xray_deny_test: a .git above TMPDIR would be the project
+    t = tempfile.mkdtemp(prefix="xg", dir="/tmp")
     masters = []
     spawned = []
     try:

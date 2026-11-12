@@ -3864,6 +3864,8 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 	{
 		int k, bad;
 		int rearm = dch_vt_enabled() || !pty_gated;
+		/* a re-attach on a live connection (#189): no detach before it */
+		int again = p->attached;
 
 		/* Someone showed up: open the --spawn pty gate and pull what the
 		** child already printed into the mirror, exactly as a control
@@ -3904,6 +3906,12 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 			if (sl > 0 && (size_t)sl <= sizeof(s))
 				bad = queue_to_client(p, s, (size_t)sl) < 0;
 		}
+		/* Re-attaching, the terminal still holds the push this client
+		** got before (or a reset emptied the stack): pop one first, so a
+		** re-arm never grows the stack. Same screen as the push. */
+		if (rearm && !bad && kbd_u_len && again)
+			bad = queue_to_client(p, (const unsigned char *)"\033[<u",
+			                      4) < 0;
 		if (rearm && !bad && kbd_u_len)
 			bad = queue_to_client(p, kbd_u, kbd_u_len) < 0;
 		if (rearm && !bad && kbd_m_len)

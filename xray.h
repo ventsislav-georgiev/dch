@@ -18,6 +18,7 @@
 
 #define XR_TITLE_MAX   120		/* scalars (3.2, ruling R3) */
 #define XR_CHAPTERS    5000		/* 13.2 item 6: the newest kept */
+#define XR_SUMMARIES   (256u << 10)	/* #192: summary bytes held (3.8) */
 #define XR_HEAD_RANGE  (16ull << 20)	/* 3.8 per-file range: head ... */
 #define XR_TAIL_RANGE  (256ull << 20)	/* ... plus the newest 256 MB */
 #define XR_CHUNK       (1u << 20)	/* read size (QA 1.44 LOW-8: 4 MiB
@@ -53,6 +54,10 @@ struct xr_chapter
 	char title[XR_TITLE_MAX * 4 + 1];
 	const char *kind;		/* "prompt", "command", "compact" */
 	int partial, error;
+	int harness;			/* "auto": the prompt is harness text (#192) */
+	char *summary;			/* its <summary>, else <event>: "" for none
+					** (never NULL from the engine); held out of
+					** line so the ring costs no more (3.8) */
 };
 
 /* The newest XR_CHAPTERS, oldest first from `start` (a ring). `total`
@@ -62,6 +67,9 @@ struct xr_chapters
 	struct xr_chapter *v;
 	size_t start, n;
 	uint64_t total;
+	size_t sumheld;			/* summary bytes held, <= XR_SUMMARIES:
+					** past it the oldest give theirs up */
+	uint64_t sumord;		/* no chapter before this ord has one */
 };
 void xr_chapters_free(struct xr_chapters *c);
 const struct xr_chapter *xr_chapter_at(const struct xr_chapters *c,
@@ -301,6 +309,11 @@ void xr_shell_feed(struct xr_shell *s, const struct xr_rec *x);
 ** xr_shell_end flushes the last line and frees what refs held. */
 int xr_shell_refs(struct xr_shell *s, const struct xr_sink *k,
                   const char *cwd);
+/* The seam between the ring and the primary screen's rows (#140, #171):
+** the open line goes out, the open block closes, so a screen row has no
+** chapter. For the count, the rows stay in the block's unit until one starts
+** with the block's prompt, which starts the next unit. */
+void xr_shell_screen(struct xr_shell *s);
 void xr_shell_end(struct xr_shell *s);
 /* One MSG_RING_READ reply's records ({u16 len, u8 kind, u8 flags, u32 time,
 ** text}, seqs from first), bounds-checked, to fn one at a time (x and its
@@ -429,13 +442,15 @@ void xr_scan_resolved(struct xr_scan *x, const struct xr_span *sp,
 /* The parsers, for the units and fuzz_xref: git show's output as a commit
 ** block (1, else 0); a file's 14-line window around line (0: the first);
 ** --ref's line suffix (:line, :line:col, #L<line>; 0 for none); the
-** deny list over every part of a path (1: never read). */
+** deny list over every part of a path (1: never read); a .git file's
+** first n bytes as git takes a git file ("gitdir: " and a path: 1). */
 int xr_git_parse(const char *s, size_t n, long long now,
                  struct xr_resolved *r);
 void xr_file_lines(const char *s, size_t n, long line,
                    struct xr_resolved *r);
 long xr_ref_line(const char *text);
 int xr_secret_name(const char *path);
+int xr_gitfile(const char *s, size_t n);
 /* git config --get-regexp's "remote.<name>.url <url>" lines: 1 when a URL
 ** names github.com's want ("<owner>/<repo>"), ASCII case-insensitive, as
 ** https://, ssh:// or git@host:, a trailing .git or / allowed. */

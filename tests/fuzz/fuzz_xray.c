@@ -14,9 +14,10 @@
 ** Byte 0's high bits squeeze xr_lim (fuzz only): the output cap to 8-64K,
 ** the read chunk to 16 B or 4093 B, the line cap to 64 B, the ranges to a
 ** 128 B head and a 256 B tail, so a small input reaches every cap.
-** Then the chapters are printed through xr_print. Every chapter's title must
-** be valid UTF-8 of at most XR_TITLE_MAX scalars, and the printed object one
-** line, within the output cap. */
+** Then the chapters are printed through xr_print. Every chapter's title and
+** summary (#192, only on an auto chapter) must be valid UTF-8 of at most
+** XR_TITLE_MAX scalars, and the printed object one line, within the output
+** cap. */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -60,7 +61,13 @@ emit(struct xr_chapters *c, int shell)
 	FILE *f;
 
 	for (i = 0; i < c->n; i++)
+	{
 		check_title(xr_chapter_at(c, i)->title);
+		check_title(xr_chapter_at(c, i)->summary);	/* #192 */
+		if (xr_chapter_at(c, i)->summary[0] &&
+		    !xr_chapter_at(c, i)->harness)
+			abort();
+	}
 	memset(&a, 0, sizeof a);
 	a.session = "fuzz";
 	a.session_id = "m0123456789abcdef";

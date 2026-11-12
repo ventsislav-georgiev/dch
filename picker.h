@@ -152,6 +152,9 @@ const char *config_show(int k, char *v, size_t cap, int *set);
 int xv_run(int fd, const char *n, char *err, size_t errsz);
 void xv_kill(void);
 extern int xv_tab;	/* the tab it opens on: 0 Chapters, 2 On screen */
+/* Set when xv_run returns 0 and the user pressed o (#194): the session to
+** attach (a name, or host:name), as `dch -a` takes it; else "". */
+extern char xv_go[512];
 /* dch.c's, for it: xray_main(ac, av) in a forked child with stdout and
 ** stderr into *out and *err (never exec, never the terminal fd; av[0]
 ** "--read": ctl's --read host:name in its place, #188); its pid, or -1. A
@@ -160,7 +163,7 @@ extern int xv_tab;	/* the tab it opens on: 0 Chapters, 2 On screen */
 pid_t xv_spawn(int fd, int ac, char **av, int *out, int *err);
 int xv_screen(const char *name, char *buf, size_t cap);
 /* A remote view (#188): xv_remote, n is host:name; xv_plain, the host's
-** `--read <name> --ansi --cursor` bytes as plain text, malloc'd, or NULL. */
+** `--read <name> --ansi` bytes as plain text, malloc'd, or NULL. */
 int xv_remote(const char *n);
 char *xv_plain(const char *raw, size_t n);
 #endif

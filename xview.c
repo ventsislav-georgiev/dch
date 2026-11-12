@@ -26,6 +26,7 @@
 				** engine's are under 4 MiB) */
 #endif
 #define XV_MENTIONS  10000	/* a card keeps at most these */
+#define XV_STOP_MS   50	/* a child's grace after its SIGTERM (#204) */
 #define XV_ALPHA     "asdfghjklzxcvbnmwertyuiop"	/* hint labels: no q */
 
 enum { XV_LIST, XV_CARD, XV_READ };
@@ -35,6 +36,8 @@ enum { XV_FK, XV_CK, XV_RK, XV_SK, XV_NKIDS };	/* follow, card, reader,
 static char xv_none[1];	/* "": a field absent, null, or out of memory */
 static volatile pid_t xv_pids[XV_NKIDS];	/* for xv_kill */
 int xv_tab;	/* the tab a view opens on (the in-attach chord's: On screen) */
+char xv_go[512];	/* o (#194): the session the host attaches once the
+			** view is left, as session_name holds it; "" none */
 
 struct xv;
 struct xv_kid
@@ -49,15 +52,15 @@ struct xv_kid
 
 struct xv_ch
 {
-	char *anchor, *title, *kind;
+	char *anchor, *title, *kind, *summary;
 	long long at, offset;
-	int error;
+	int error, aut;	/* aut: "auto", a prompt the harness wrote (#192) */
 };
 
 struct xv_ref
 {
 	char *key, *shape, *text, *title;
-	long long count;
+	long long count, seen;	/* seen: later is more recent */
 	int defined, underline;
 };
 
@@ -108,6 +111,9 @@ struct xv
 	struct xv_ch *ch;
 	struct xv_ref *rf;
 	int nch, ach, nrf, arf;
+	int alltmp, ntmp;	/* Refs: temp files shown; their rows */
+	int allauto, nauto;	/* Chapters: auto chapters shown; their rows */
+	long long rseq;
 	struct xv_kid kid[XV_NKIDS];
 	int sel[3], top[3], *vis, nvis, avis;
 	/* the card */
@@ -118,6 +124,7 @@ struct xv
 	int nd, ad, nm, am;
 	long long cnt[5];	/* session, project, project_sessions, all,
 				** all_sessions; -1 null */
+	char *vkind, *vtitle, *vsub;	/* --full's resolved line */
 	/* the reader */
 	char *rtitle, *rwant;
 	long long rat;
@@ -301,20 +308,44 @@ xv_fitlen(const char *s, size_t n, int w)
 
 /* ---- the children ---------------------------------------------------- */
 
+/* A child ended. Its pipes close first: a write it is blocked in fails
+** (EPIPE) instead of waiting for a reader that is gone (QA 1.57.0 HIGH-R1).
+** SIGTERM lets a remote one send the host its 0x34; after XV_STOP_MS it is
+** SIGKILLed, so the view never sits out a silent host's RM_CANCEL_MS
+** (MED-R2): the host takes the closed connection as the cancel. The
+** signals that run xv_kill wait until the pid is reaped and its slot
+** cleared, so xv_kill never signals a reaped pid. */
 static void
 xv_stop(struct xv_kid *k, int slot)
 {
-	if (k->pid > 0)
-	{
-		kill(k->pid, SIGTERM);
-		xv_pids[slot] = 0;
-		while (waitpid(k->pid, NULL, 0) < 0 && errno == EINTR)
-			;
-	}
 	if (k->fd >= 0)
 		close(k->fd);
 	if (k->efd >= 0)
 		close(k->efd);
+	if (k->pid > 0)
+	{
+		struct timespec ts = { 0, 5000000 };
+		long long end = now_ms() + XV_STOP_MS;
+		sigset_t s, o;
+		pid_t w;
+
+		sigemptyset(&s);
+		sigaddset(&s, SIGINT);
+		sigaddset(&s, SIGTERM);
+		sigaddset(&s, SIGHUP);
+		sigprocmask(SIG_BLOCK, &s, &o);
+		kill(k->pid, SIGTERM);
+		while ((w = waitpid(k->pid, NULL, WNOHANG)) == 0 && now_ms() < end)
+			nanosleep(&ts, NULL);
+		if (w == 0)
+		{
+			kill(k->pid, SIGKILL);
+			while (waitpid(k->pid, NULL, 0) < 0 && errno == EINTR)
+				;
+		}
+		xv_pids[slot] = 0;
+		sigprocmask(SIG_SETMASK, &o, NULL);
+	}
 	free(k->buf);
 	memset(k, 0, sizeof *k);
 	k->fd = k->efd = -1;
@@ -469,6 +500,7 @@ xv_ch_free(struct xv_ch *c)
 	xv_sfree(c->anchor);
 	xv_sfree(c->title);
 	xv_sfree(c->kind);
+	xv_sfree(c->summary);
 }
 
 static void
@@ -504,6 +536,9 @@ xv_chapter(struct xv *v, const struct json_parser *p, int o)
 	c.at = xv_num(p, o, "at", -1);
 	c.offset = xv_num(p, o, "offset", 0);
 	c.error = xv_bool(p, o, "error");
+	/* absent from an older engine or host: every chapter shown */
+	c.aut = xv_bool(p, o, "auto");
+	c.summary = xv_str(p, o, "summary");
 	/* an anchor already held is replaced (3.3) */
 	for (k = 0; k < v->nch && strcmp(v->ch[k].anchor, c.anchor); k++)
 		;
@@ -532,6 +567,9 @@ xv_ref(struct xv *v, const struct json_parser *p, int o)
 	r.count = xv_num(p, o, "count", 0);
 	r.defined = xv_bool(p, o, "defined");
 	r.underline = xv_bool(p, o, "underline");
+	/* no recency in a ref line: its arrival (a snapshot's rows in their
+	** order, a delta now) */
+	r.seen = ++v->rseq;
 	for (k = 0; k < v->nrf && strcmp(v->rf[k].key, r.key); k++)
 		;
 	if (k < v->nrf)
@@ -652,6 +690,10 @@ xv_card_free(struct xv *v)
 		xv_sfree(v->m[k].chapter);
 	}
 	v->nd = v->nm = 0;
+	xv_sfree(v->vkind);
+	xv_sfree(v->vtitle);
+	xv_sfree(v->vsub);
+	v->vkind = v->vtitle = v->vsub = NULL;
 }
 
 /* A shell session's light card shows titles and counts only (S18), and a
@@ -715,6 +757,13 @@ xv_cline(struct xv *v, const struct json_parser *p)
 		m.chapter = xv_str(p, o, "chapter");
 		m.at = xv_num(p, o, "at", -1);
 		v->m[v->nm++] = m;
+	}
+	else if ((o = xv_obj(p, 0, "resolved", JSON_OBJECT)) >= 0 &&
+	         !v->vkind)
+	{
+		v->vkind = xv_str(p, o, "kind");
+		v->vtitle = xv_str(p, o, "title");
+		v->vsub = xv_str(p, o, "subtitle");
 	}
 	else if ((o = xv_obj(p, 0, "progress", JSON_OBJECT)) >= 0)
 		xv_counts(v, p, o);
@@ -1156,23 +1205,76 @@ xv_label(const struct xv *v, char *b, size_t n)
 		snprintf(b, n, "X-ray corpus not supported by this dch");
 }
 
+/* s under directory d (absolute, not "/"): d's length without a trailing
+** '/', else 0. */
+static size_t
+xv_under(const char *s, const char *d)
+{
+	size_t l = d && d[0] == '/' ? strlen(d) : 0;
+
+	while (l > 1 && d[l - 1] == '/')
+		l--;
+	return l > 1 && !strncmp(s, d, l) && s[l] == '/' ? l : 0;
+}
+
+/* A file under a temp directory: a scratch file, hidden by default. A
+** remote view's $TMPDIR is this machine's, not its host's: not asked. */
+static int
+xv_temp(const struct xv *v, const struct xv_ref *r)
+{
+	static const char *const d[] = { "/tmp", "/private/tmp", "/var/folders",
+		"/private/var/folders" };
+	size_t k;
+
+	if (strcmp(r->shape, "file"))
+		return 0;
+	for (k = 0; k < sizeof d / sizeof *d; k++)
+		if (xv_under(r->text, d[k]))
+			return 1;
+	return !v->hl && xv_under(r->text, getenv("TMPDIR"));
+}
+
+static const struct xv_ref *xv_sort_rf;
+
+/* Refs: the highest count first, then the most recently seen. */
+static int
+xv_ref_cmp(const void *pa, const void *pb)
+{
+	const struct xv_ref *a = &xv_sort_rf[*(const int *)pa];
+	const struct xv_ref *b = &xv_sort_rf[*(const int *)pb];
+
+	if (a->count != b->count)
+		return a->count > b->count ? -1 : 1;
+	return a->seen < b->seen ? 1 : a->seen > b->seen ? -1 : 0;
+}
+
 /* The rows a list tab shows (Chapters, Refs): their indexes, filtered. */
 static void
 xv_vis(struct xv *v)
 {
 	int k, n = v->tab == 0 ? v->nch : v->nrf;
 
-	v->nvis = 0;
+	v->nvis = v->ntmp = v->nauto = 0;
 	for (k = 0; k < n; k++)
 	{
 		if (v->filt[0] &&
-		    !(v->tab == 0 ? xv_has(v->ch[k].title, v->filt)
+		    !(v->tab == 0 ? xv_has(v->ch[k].title, v->filt) ||
+		      xv_has(v->ch[k].summary, v->filt)
 		      : xv_has(v->rf[k].text, v->filt) ||
 		      xv_has(v->rf[k].title, v->filt)))
+			continue;
+		if (v->tab == 1 && xv_temp(v, &v->rf[k]) && (v->ntmp++, !v->alltmp))
+			continue;
+		if (v->tab == 0 && v->ch[k].aut && (v->nauto++, !v->allauto))
 			continue;
 		if (xv_grow(&v->vis, &v->avis, v->nvis, sizeof *v->vis) < 0)
 			return;
 		v->vis[v->nvis++] = k;
+	}
+	if (v->tab == 1 && v->nvis > 1)
+	{
+		xv_sort_rf = v->rf;
+		qsort(v->vis, (size_t)v->nvis, sizeof *v->vis, xv_ref_cmp);
 	}
 }
 
@@ -1216,14 +1318,69 @@ xv_row_ch(const struct xv_ch *c, int i, int on)
 	pk_set(c->error ? pk_p(PK_RED) : "2");
 	pk_txt(c->error ? "! " : !strcmp(c->kind, "command") ? "/ "
 	       : !strcmp(c->kind, "compact") ? "= " : "  ");
-	pk_set(!strcmp(c->kind, "compact") ? "2" : "");
-	pk_txt(c->title);
+	/* an auto chapter, shown: faint, by what it says it is */
+	pk_set(c->aut || !strcmp(c->kind, "compact") ? "2" : "");
+	pk_txt(c->aut && c->summary[0] ? c->summary : c->title);
 	if (on)
 		pk_pad(pk_w);
 }
 
+/* s in w cells; one that does not fit keeps its first keep bytes, then an
+** ellipsis and the tail that fits: a path's end tells it apart. */
 static void
-xv_row_ref(const struct xv_ref *r, int on)
+xv_tail(const char *s, size_t keep, int w)
+{
+	const char *e = xv_ell();
+	int end = pk_col + w, n, l;
+	char c[5];
+
+	if (pk_cps(s) <= w || w <= pk_cps(e))
+	{
+		pk_fit(s, w);
+		return;
+	}
+	xv_txtn(s, keep);
+	for (s += keep, n = pk_cps(s); *s && n > end - pk_col - pk_cps(e); s += l)
+	{
+		(void)ap_cp(s, &l);
+		memset(c, 0, sizeof c);
+		memcpy(c, s, (size_t)l);
+		n -= pk_cps(c);
+	}
+	pk_txt(e);
+	pk_fit(s, end - pk_col);
+}
+
+/* A ref's text in w cells: a file under the project relative to it, else
+** under HOME from ~; a URL cut keeps its host and its end, not its scheme. */
+static void
+xv_reftext(const struct xv *v, const struct xv_ref *r, int w)
+{
+	const char *s = r->text, *u;
+	char b[4200];
+	size_t l, keep = 0;
+	int file = !strcmp(r->shape, "file");
+
+	if (file && (l = xv_under(s, v->label)))
+		s += l + 1;
+	else if (file && !v->hl && (l = xv_under(s, getenv("HOME"))))
+	{
+		snprintf(b, sizeof b, "~%s", s + l);
+		s = b;
+	}
+	else if (!strcmp(r->shape, "url") && pk_cps(s) > w &&
+	         (u = strstr(s, "://")))
+	{
+		s = u + 3;
+		keep = strcspn(s, "/");
+		if (xv_fitlen(s, keep, w / 2) < keep)
+			keep = 0;
+	}
+	xv_tail(s, keep, w);
+}
+
+static void
+xv_row_ref(const struct xv *v, const struct xv_ref *r, int on)
 {
 	char b[40];
 	int tw = pk_w / 3 > 20 ? pk_w / 3 : 20;
@@ -1238,7 +1395,8 @@ xv_row_ref(const struct xv_ref *r, int on)
 	pk_fit(r->shape, 7);
 	pk_txt(" ");
 	pk_set(r->underline ? "1" : "");
-	pk_fit(r->text, tw);
+	/* no title: the whole row's rest */
+	xv_reftext(v, r, r->title[0] ? tw : pk_w - pk_col - 1);
 	pk_txt("  ");
 	pk_set("2");
 	pk_txt(r->title);
@@ -1343,6 +1501,21 @@ xv_draw_card(struct xv *v, int win)
 				s += f;
 			}
 		}
+	}
+	/* the resolver's one line (f): the commit or file, or why not */
+	if (v->vkind)
+	{
+		pk_line();
+		pk_set(pk_p(PK_ACC));
+		pk_txt(v->vkind);
+		pk_set("");
+		pk_txt(" ");
+		pk_txt(v->vtitle);
+		pk_set("2");
+		pk_txt("  ");
+		pk_txt(v->vsub);
+		pk_eol();
+		rows++;
 	}
 	/* the counts by scope */
 	pk_line();
@@ -1468,6 +1641,13 @@ xv_draw_read(struct xv *v, int win)
 	}
 }
 
+/* The session runs: o has something to attach. */
+static int
+xv_live(const struct xv *v)
+{
+	return v->have && v->live && !(v->ended && !v->kid[XV_FK].rc);
+}
+
 static void
 xv_draw(struct xv *v, int force)
 {
@@ -1477,7 +1657,7 @@ xv_draw(struct xv *v, int force)
 		"\xe2\xa0\x87\xe2\xa0\x8f", ascii[] = "|/-\\";
 	struct pkkey keys[12];
 	const char *ret = pk_utf ? "\xe2\x86\xb5" : "enter";
-	char b[1200];
+	char b[1200], tmp[32];
 	int nk = 0, kl, cap, k, n, busy;
 	unsigned drop;
 
@@ -1485,7 +1665,8 @@ xv_draw(struct xv *v, int force)
 	if (pk_w < 24 || pk_h < 8)
 	{
 		pk_line();
-		pk_txt("X-ray: the window is too small");
+		pk_fit(pk_w >= 30 ? "X-ray: the window is too small" : pk_w >= 16
+		       ? "X-ray: too small" : "too small", pk_w);
 		pk_eol();
 		pk_fend(v->fd, force);
 		return;
@@ -1506,6 +1687,8 @@ xv_draw(struct xv *v, int force)
 	}
 	else if (v->mode == XV_READ)
 	{
+		if (xv_live(v))
+			XV_K(0, "o", "open session");
 		XV_K(3, pk_utf ? "\xe2\x86\x91\xe2\x86\x93" : "up/down", "scroll");
 		XV_K(3, "esc", "back");
 	}
@@ -1516,7 +1699,23 @@ xv_draw(struct xv *v, int force)
 		if (v->tab < 2)
 		{
 			XV_K(0, ret, v->tab == 0 ? "read" : "card");
+			if (v->tab == 0 && xv_live(v))
+				XV_K(0, "o", "open session");
 			XV_K(3, "/", "filter");
+			if (v->tab == 0 && (xv_vis(v), v->nauto))
+			{
+				snprintf(tmp, sizeof tmp, "%d hidden", v->nauto);
+				keys[nk++] = (struct pkkey){ "n", v->allauto
+					? "hide notifications" : "notifications",
+					v->allauto ? NULL : tmp, 2, 0 };
+			}
+			if (v->tab == 1 && (xv_vis(v), v->ntmp))
+			{
+				snprintf(tmp, sizeof tmp, "%d hidden", v->ntmp);
+				keys[nk++] = (struct pkkey){ "t", v->alltmp
+					? "hide temp files" : "temp files",
+					v->alltmp ? NULL : tmp, 2, 0 };
+			}
 		}
 		else
 			XV_K(0, "a-z", "label: card");
@@ -1587,9 +1786,15 @@ xv_draw(struct xv *v, int force)
 		pk_txt(v->fail);
 	}
 	else
+	{
+		/* Chapters: the ones shown by default; On screen: no number
+		** before its screen is read */
+		for (k = n = 0; k < v->nch; k++)
+			n += !v->ch[k].aut;
 		for (k = 0; k < 3; k++)
-			pk_tab(tabn[k], k == 0 ? v->nch : k == 1 ? v->nrf : v->nlab,
-			       k == v->tab);
+			pk_tab(tabn[k], k == 0 ? n : k == 1 ? v->nrf
+			       : v->scr ? v->nlab : -1, k == v->tab);
+	}
 	pk_eol();
 
 	pk_line();
@@ -1610,24 +1815,40 @@ xv_draw(struct xv *v, int force)
 		}
 	else if (v->tab < 2)
 	{
-		int *sel = &v->sel[v->tab], *top = &v->top[v->tab];
+		int *sel = &v->sel[v->tab], *top = &v->top[v->tab], win = v->win;
 
 		xv_vis(v);
 		n = v->nvis;
-		xv_clamp(sel, top, n, v->win);
-		for (k = *top; k < *top + v->win; k++)
+		/* Refs: what a ref is, one faint line over the rows */
+		if (v->tab == 1 && v->nrf && win > 1)
+		{
+			pk_line();
+			pk_set("2");
+			snprintf(b, sizeof b, "  Files, commits, pull requests, issues "
+			         "and URLs this session touched; %s opens a card", ret);
+			pk_txt(b);
+			pk_eol();
+			win--;
+		}
+		xv_clamp(sel, top, n, win);
+		for (k = *top; k < *top + win; k++)
 		{
 			pk_line();
 			if (k < n && v->tab == 0)
 				xv_row_ch(&v->ch[v->vis[k]], v->vis[k], k == *sel);
 			else if (k < n)
-				xv_row_ref(&v->rf[v->vis[k]], k == *sel);
+				xv_row_ref(v, &v->rf[v->vis[k]], k == *sel);
 			else if (k == 0)
 			{
 				pk_set("2");
-				pk_txt(!v->have ? "    Reading" : v->filt[0]
-				       ? "    No match" : v->tab == 0 ? "    No chapters"
-				       : "    No refs");
+				pk_txt(!v->have ? "    Reading" : v->tab == 1 && v->ntmp &&
+				       !v->alltmp ? "    Only temp files: t shows them"
+				       : v->tab == 0 && v->nauto && !v->allauto
+				       ? "    Only notifications: n shows them"
+				       : v->filt[0] ? "    No match" : v->tab == 0
+				       ? "    No chapters" : "    No refs yet: the files, "
+				       "commits, pull requests, issues and URLs this session "
+				       "touches show here");
 				if (!v->have)
 					pk_txt(xv_ell());
 			}
@@ -1806,6 +2027,33 @@ xv_copy(struct xv *v)
 	snprintf(v->status, sizeof v->status, "copied %s", v->ctext);
 }
 
+/* o: leave the view for an attach to the session, xv_go naming it for the
+** host (dch.c: dch --xray, the picker's X; the in-attach chord's view is
+** already on it, so leaving is all). 1: leave. Ended: said, kept. */
+static int
+xv_open(struct xv *v)
+{
+	const char *in = getenv("DCH_SESSION");
+
+	if (!v->have)
+		return 0;
+	if (!xv_live(v))
+		snprintf(v->status, sizeof v->status, "%s has ended: no session "
+		         "to open", v->session);
+	else if (in && *in)
+		snprintf(v->status, sizeof v->status, "already inside session "
+		         "%s; nesting disabled", in);
+	else if ((size_t)snprintf(xv_go, sizeof xv_go, "%.*s%s", v->hl, v->n,
+	                          v->session) >= sizeof xv_go)
+	{
+		xv_go[0] = '\0';
+		snprintf(v->status, sizeof v->status, "name too long");
+	}
+	else
+		return 1;
+	return 0;
+}
+
 /* One key. 1: leave the view. */
 static int
 xv_key(struct xv *v, int c)
@@ -1829,6 +2077,8 @@ xv_key(struct xv *v, int c)
 		case 'b': case PK_PGUP: v->rtop -= v->win; break;
 		case 'g': case PK_HOME: v->rtop = 0; break;
 		case 'G': case PK_END: v->rtop = v->nrl; break;
+		case 'o':
+			return xv_open(v);
 		case 'q': case PK_ESC: case 'h': case PK_LEFT: case 0x7f:
 			xv_back(v);
 			break;
@@ -1837,8 +2087,14 @@ xv_key(struct xv *v, int c)
 	}
 	if (v->mode == XV_CARD)
 	{
-		const struct xv_men *m = v->csel < v->nm ? &v->m[v->csel] : NULL;
+		const struct xv_men *m;
 
+		/* xv_draw_card clamps too, but a too-small window skips it */
+		if (v->csel >= v->nm)
+			v->csel = v->nm - 1;
+		if (v->csel < 0)
+			v->csel = 0;
+		m = v->csel < v->nm ? &v->m[v->csel] : NULL;
 		switch (c)
 		{
 		case 'j': case PK_DOWN: v->csel++; break;
@@ -1901,6 +2157,27 @@ xv_key(struct xv *v, int c)
 			v->status[0] = '\0';
 		return 0;
 	}
+	if (v->tab == 1 && c == 't')
+	{
+		v->alltmp = !v->alltmp;
+		return 0;
+	}
+	if (v->tab == 0 && c == 'n')
+	{
+		/* the selection stays on its chapter, or the next one shown;
+		** none shown before: the newest */
+		xv_vis(v);
+		k = v->sel[0] >= 0 && v->sel[0] < v->nvis ? v->vis[v->sel[0]]
+		    : v->nch;
+		v->allauto = !v->allauto;
+		xv_vis(v);
+		for (n = 0; n < v->nvis && v->vis[n] < k; n++)
+			;
+		v->sel[0] = n;
+		return 0;
+	}
+	if (v->tab == 0 && c == 'o')
+		return xv_open(v);
 	sel = &v->sel[v->tab];
 	xv_vis(v);
 	n = v->nvis;
@@ -1966,7 +2243,7 @@ xv_run(int fd, const char *n, char *err, size_t errsz)
 	char *av[4];
 	int k, rc = 0;
 
-	err[0] = '\0';
+	err[0] = xv_go[0] = '\0';
 	if (!v)
 	{
 		snprintf(err, errsz, "dch: X-ray failed on this session");

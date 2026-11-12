@@ -591,6 +591,110 @@ t_shell(void)
 	xr_chapters_free(&c);
 }
 
+/* The ring/screen seam (#171, QA 1.54.0 MED-1): the screen's rows after the
+** ring's open block carry no chapter, and count as the ring will count them
+** once they scroll: the open block's own rows in its unit, then one unit per
+** row that starts with the block's prompt. */
+struct seam
+{
+	int n;
+	uint64_t unit[16];
+	char chapter[16][32], line[16][64];
+};
+
+static void
+seam_hit(void *ctx, const struct xr_hit *h)
+{
+	struct seam *s = ctx;
+
+	if (s->n >= 16 || h->title)
+		return;
+	s->unit[s->n] = h->unit;
+	snprintf(s->chapter[s->n], sizeof s->chapter[0], "%s",
+	         h->chapter ? h->chapter : "-");
+	snprintf(s->line[s->n], sizeof s->line[0], "%.*s", (int)h->ll, h->line);
+	s->n++;
+}
+
+static void
+seam_feed(struct seam *m, size_t cut, const char *cwd)
+{
+	struct xr_chapters c;
+	struct xr_shell s;
+	struct xr_sink k = { seam_hit, m };
+	size_t i;
+
+	memset(m, 0, sizeof *m);
+	xr_shell_begin(&s, &c);
+	if (xr_shell_refs(&s, &k, cwd) == 0)
+		for (i = 0; i < RN; i++)
+		{
+			if (i == cut)
+				xr_shell_screen(&s);
+			xr_shell_feed(&s, &R[i]);
+		}
+	xr_shell_end(&s);
+	xr_chapters_free(&c);
+}
+
+static void
+t_screen_seam(void)
+{
+	static char longp[300];
+	struct seam m;
+	size_t cut;
+
+	RN = 0;
+	rec(RING_K_MARK, 0, "A");
+	rec(RING_K_PROMPT, 0, "zp%");
+	rec(RING_K_MARK, 0, "B");
+	rec(RING_K_INPUT, 0, "seq 1 30");
+	rec(RING_K_MARK, RING_F_INPUT, "C");
+	rec(RING_K_OUTPUT, 0, "1 x/y#1 above");
+	cut = RN;
+	rec(RING_K_OUTPUT, 0, "2 x/y#1 below");
+	rec(RING_K_OUTPUT, 0, "zp% echo x/y#1 a");
+	rec(RING_K_OUTPUT, 0, "x/y#1 a");
+	rec(RING_K_OUTPUT, 0, "zp%echo x/y#1 glued");
+	rec(RING_K_OUTPUT, 0, "zp% echo x/y#1 b");
+	rec(RING_K_OUTPUT, 0, "x/y#1 b");
+	rec(RING_K_OUTPUT, 0, "zp% x/y#1 typed");
+	seam_feed(&m, cut, "/w");
+	CHECK("screen seam: the ring's own row keeps its block's chapter",
+	      m.n == 8 && !strcmp(m.chapter[0], "s101"));
+	CHECK("screen seam: no screen row has a chapter (the open block "
+	      "closes at the seam)", m.n == 8 &&
+	      !strcmp(m.chapter[1], "-") && !strcmp(m.chapter[2], "-") &&
+	      !strcmp(m.chapter[3], "-") && !strcmp(m.chapter[5], "-") &&
+	      !strcmp(m.chapter[6], "-") && !strcmp(m.chapter[7], "-"));
+	CHECK("screen seam: the open block's rows on screen stay in its unit "
+	      "(counted once, as after they scroll)",
+	      m.n == 8 && m.unit[1] == m.unit[0]);
+	CHECK("screen seam: a row starting with the prompt starts the next "
+	      "unit, its output row in it", m.n == 8 && m.unit[2] != m.unit[0] &&
+	      m.unit[3] == m.unit[2]);
+	CHECK("screen seam: the prompt with no space after it is no prompt row",
+	      m.n == 8 && m.unit[4] == m.unit[3]);
+	CHECK("screen seam: the next prompt row, the next unit",
+	      m.n == 8 && m.unit[5] != m.unit[4] && m.unit[6] == m.unit[5] &&
+	      m.unit[7] != m.unit[6]);
+
+	/* no seam: the rows are the ring's, with its marks */
+	seam_feed(&m, (size_t)-1, "/w");
+	CHECK("screen seam: without the seam the same rows are the open "
+	      "block's (the ring's reading)", m.n == 8 &&
+	      !strcmp(m.chapter[2], "s101") && m.unit[7] == m.unit[0]);
+
+	/* a prompt past 255 bytes is not kept: no unit starts on screen */
+	memset(longp, 'p', sizeof longp - 1);
+	R[1].text = longp;
+	R[1].len = strlen(longp);
+	seam_feed(&m, cut, "/w");
+	CHECK("screen seam: a prompt past 255 bytes starts no unit on screen",
+	      m.n == 8 && m.unit[7] == m.unit[0] && !strcmp(m.chapter[2], "-"));
+}
+
+
 /* ---- the output cap ------------------------------------------------------- */
 
 static void
@@ -1477,6 +1581,235 @@ out:
 	xr_index_free(ix);
 	xr_index_free(ix2);
 	xr_sent_free(s);
+}
+
+/* #192: a prompt that is wholly harness text (<task-notification>,
+** <system-reminder>) is auto and carries its <summary>, else its <event>,
+** made as a title is; the title stays; JSON adds "auto"/"summary" only then */
+#define TN(b) "<task-notification>\\n<task-id>b1</task-id>\\n" b \
+              "\\n</task-notification>"
+
+static void
+t_auto(void)
+{
+	struct xr_chapters c, c1;
+	struct xr_answer a;
+	struct xr_entries e;
+	struct xr_index *ix = xr_index_new();
+	struct xr_sent *s = xr_sent_new();
+	char big[600], want[200], *b = NULL, *d;
+	size_t bl = 0;
+	FILE *f;
+
+	memset(want, 'x', 130);
+	want[130] = '\0';
+	snprintf(big, sizeof big, U(TN("<summary>%s</summary>")), want);
+	begin();
+	line(U(TN("<status>completed</status>\\n<summary>Build finished:  3 "
+	          "passed</summary>")));
+	line(A("x"));
+	line(U(TN("<event>[monitor] CI went green</event>")));
+	line(A("x"));
+	line(U(TN("<summary> \\t </summary>\\n<event>only the event</event>")));
+	line(A("x"));
+	line(U(TN("<status>killed</status>")));
+	line(A("x"));
+	line(U("why did this fail?\\n" TN("<summary>quoted</summary>")));
+	line(A("x"));
+	line(U(TN("<summary>s</summary>") "\\nplease retry"));
+	line(A("x"));
+	line(U(TN("<summary>\\u001b[31mred\\u0007\\u0000 \\u202eevil\\tx\\ny"
+	          "</summary>")));
+	line(A("x"));
+	line(big);
+	line(A("x"));
+	line("{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"text\","
+	     "\"text\":\"" TN("<summary>from an array</summary>") "\"}]}}");
+	line(A("x"));
+	line(U(TN("<summary>with a reminder</summary>")
+	       "\\n<system-reminder>r</system-reminder>\\n"));
+	line(A("x"));
+	line(U("<task-notification><summary>unclosed</summary>"));
+	line(A("x"));
+	line(U("a real prompt"));
+	line(U(TN("<summary>rides in the prompt's lead</summary>")));
+	line(A("x"));
+	line(U(" <system-reminder>r</system-reminder>\\n"));
+	line(A("x"));
+	line(U(TN("<status>killed</status>") TN("<summary>second</summary>")));
+	line(A("x"));
+	end(&c);
+	CHECK("auto: 14 chapters", c.n == 14);
+	if (c.n != 14)
+	{
+		xr_chapters_free(&c);
+		goto out;
+	}
+	CHECK("auto: a notification with a summary: auto, the summary made as "
+	      "a title, the title and kind unchanged",
+	      xr_chapter_at(&c, 0)->harness &&
+	      !strcmp(xr_chapter_at(&c, 0)->summary, "Build finished: 3 passed") &&
+	      !strcmp(xr_chapter_at(&c, 0)->title, "<task-notification>") &&
+	      !strcmp(xr_chapter_at(&c, 0)->kind, "prompt"));
+	CHECK("auto: an event only: the event",
+	      xr_chapter_at(&c, 1)->harness &&
+	      !strcmp(xr_chapter_at(&c, 1)->summary, "[monitor] CI went green"));
+	CHECK("auto: a blank summary falls to the event",
+	      xr_chapter_at(&c, 2)->harness &&
+	      !strcmp(xr_chapter_at(&c, 2)->summary, "only the event"));
+	CHECK("auto: neither: auto, no summary",
+	      xr_chapter_at(&c, 3)->harness && !xr_chapter_at(&c, 3)->summary[0]);
+	CHECK("auto: a user prompt quoting a notification is not auto",
+	      !xr_chapter_at(&c, 4)->harness &&
+	      !strcmp(xr_chapter_at(&c, 4)->title, "why did this fail?") &&
+	      !xr_chapter_at(&c, 4)->summary[0]);
+	CHECK("auto: a notification followed by user text is not auto",
+	      !xr_chapter_at(&c, 5)->harness);
+	CHECK("auto: a hostile summary: whitespace collapsed, NUL to U+FFFD, "
+	      "as a title",
+	      xr_chapter_at(&c, 6)->harness &&
+	      !strcmp(xr_chapter_at(&c, 6)->summary,
+	              "\x1b[31mred\x07\xef\xbf\xbd \xe2\x80\xae" "evil x y"));
+	want[XR_TITLE_MAX] = '\0';
+	CHECK("auto: a summary over 120 scalars is cut at 120",
+	      xr_chapter_at(&c, 7)->harness &&
+	      !strcmp(xr_chapter_at(&c, 7)->summary, want));
+	CHECK("auto: a content array's text block",
+	      xr_chapter_at(&c, 8)->harness &&
+	      !strcmp(xr_chapter_at(&c, 8)->summary, "from an array"));
+	CHECK("auto: a notification and a system-reminder are harness text",
+	      xr_chapter_at(&c, 9)->harness &&
+	      !strcmp(xr_chapter_at(&c, 9)->summary, "with a reminder"));
+	CHECK("auto: an unclosed notification is not auto",
+	      !xr_chapter_at(&c, 10)->harness);
+	CHECK("auto: a notification in a prompt's lead leaves it the prompt's",
+	      !xr_chapter_at(&c, 11)->harness &&
+	      !strcmp(xr_chapter_at(&c, 11)->title, "a real prompt"));
+	CHECK("auto: a system-reminder alone (not isMeta): auto, no summary",
+	      xr_chapter_at(&c, 12)->harness && !xr_chapter_at(&c, 12)->summary[0]);
+	CHECK("auto: only the first notification's summary or event counts",
+	      xr_chapter_at(&c, 13)->harness && !xr_chapter_at(&c, 13)->summary[0]);
+
+	/* the snapshot row, the --chapter head and a --follow chapter line */
+	memset(&a, 0, sizeof a);
+	a.session = a.session_id = "s";
+	a.corpus = "claude";
+	a.project = a.project_label = "";
+	a.available = a.complete = 1;
+	a.lines = -1;
+	a.ch = &c;
+	if ((f = open_memstream(&b, &bl)))
+	{
+		CHECK("auto: printed", xr_print(f, &a) == 0);
+		fclose(f);
+	}
+	CHECK("auto: the row carries auto and the summary after error",
+	      b && strstr(b, "\"title\":\"<task-notification>\",\"kind\":"
+	                  "\"prompt\",\"partial\":false,\"error\":false,"
+	                  "\"auto\":true,\"summary\":\"Build finished: 3 "
+	                  "passed\"}"));
+	CHECK("auto: no summary key when there is none",
+	      b && strstr(b, "\"error\":false,\"auto\":true},"));
+	CHECK("auto: a chapter that is not auto prints neither key",
+	      b && strstr(b, "\"title\":\"why did this fail?\",\"kind\":"
+	                  "\"prompt\",\"partial\":false,\"error\":false},"));
+	CHECK("auto: the hostile summary is quoted as a title (no raw ESC, "
+	      "BEL or U+202E)",
+	      b && strstr(b, "\"summary\":\"\\u001b[31mred\\u0007\xef\xbf\xbd "
+	                  "\\u202eevil x y\"") && !strchr(b, 0x1b) &&
+	      !strchr(b, 0x07) && !strstr(b, "\xe2\x80\xae"));
+	free(b);
+	b = NULL;
+	memset(&e, 0, sizeof e);
+	if ((f = open_memstream(&b, &bl)))
+	{
+		CHECK("auto: --chapter head printed",
+		      xr_chapter_print(f, "s", "i", xr_chapter_at(&c, 1), &e) == 0);
+		fclose(f);
+	}
+	CHECK("auto: --chapter's head carries them after kind",
+	      b && strstr(b, "\"kind\":\"prompt\",\"auto\":true,\"summary\":"
+	                  "\"[monitor] CI went green\",\"entries\":["));
+	free(b);
+	b = NULL;
+	if ((f = open_memstream(&b, &bl)))
+	{
+		xr_chapter_print(f, "s", "i", xr_chapter_at(&c, 4), &e);
+		fclose(f);
+	}
+	CHECK("auto: --chapter's head of a prompt has neither",
+	      b && strstr(b, "\"kind\":\"prompt\",\"entries\":[") &&
+	      !strstr(b, "\"auto\""));
+	free(b);
+	if (ix && s)
+	{
+		/* the first four as the snapshot, then all: delta lines */
+		c1 = c;
+		c1.n = c1.total = 4;
+		a.ch = &c1;
+		free(follow_cut_out(ix, s, &a, 1));
+		a.ch = &c;
+		d = follow_cut_out(ix, s, &a, 0);
+		CHECK("auto: a --follow chapter line carries them",
+		      d && strstr(d, "{\"schema\":1,\"chapter\":") &&
+		      strstr(d, "\"auto\":true,\"summary\":\"from an array\"}}"));
+		free(d);
+	}
+	xr_chapters_free(&c);
+out:
+	xr_index_free(ix);
+	xr_sent_free(s);
+}
+
+/* #192 round 2: summaries are held out of line, at most XR_SUMMARIES bytes
+** of them; past that the oldest give theirs up, and the ring's drops give
+** the room back (ASan: nothing leaks or is freed twice) */
+static void
+t_auto_cap(void)
+{
+	struct xr_chapters c;
+	char l[1200], s[500];
+	size_t k, per, fit;
+
+	for (k = 0; k < 120; k++)
+		memcpy(s + 4 * k, "\xf0\x9f\x98\x80", 4);
+	s[480] = '\0';
+	per = 481;
+	fit = XR_SUMMARIES / per;
+	snprintf(l, sizeof l, U(TN("<summary>%s</summary>")), s);
+	begin();
+	for (k = 0; k < fit + 10; k++)
+	{
+		line(l);
+		line(A("x"));
+	}
+	end(&c);
+	CHECK("auto cap: the newest auto chapters keep a 480-byte summary",
+	      c.n == fit + 10 && !strcmp(xr_chapter_at(&c, 10)->summary, s) &&
+	      !strcmp(xr_chapter_at(&c, fit + 9)->summary, s));
+	CHECK("auto cap: past XR_SUMMARIES the oldest are auto with none",
+	      xr_chapter_at(&c, 9)->harness && !xr_chapter_at(&c, 9)->summary[0]
+	      && !xr_chapter_at(&c, 0)->summary[0] &&
+	      c.sumheld == fit * per && c.sumheld <= XR_SUMMARIES);
+	xr_chapters_free(&c);
+	begin();
+	for (k = 0; k < fit + 10; k++)
+	{
+		line(l);
+		line(A("x"));
+	}
+	for (k = 0; k < XR_CHAPTERS; k++)
+	{
+		line(U("p"));
+		line(A("x"));
+	}
+	line(l);
+	end(&c);
+	CHECK("auto cap: the ring's drops free their summaries' room",
+	      c.n == XR_CHAPTERS && c.sumheld == per &&
+	      !strcmp(xr_chapter_at(&c, XR_CHAPTERS - 1)->summary, s) &&
+	      !xr_chapter_at(&c, 0)->harness && !xr_chapter_at(&c, 0)->summary[0]);
+	xr_chapters_free(&c);
 }
 
 /* ---- Codex (7.4, K9) ---------------------------------------------------- */
@@ -2639,9 +2972,10 @@ t_res_tree(void)
 		setenv("HOME", sv, 1);
 	else
 		unsetenv("HOME");
-	CHECK("home: the same git root, HOME elsewhere: an ordinary project, ok",
+	/* #205 (QA 1.57.0 MED-D1): only a worktree in .claude/worktrees lifts */
+	CHECK("home: the same git root, HOME elsewhere: no worktree, secret_name",
 	      res("a.txt:1", "th/.claude/plugins/m", 1, &r) == 1 &&
-	      is(&r, "file", "ok"));
+	      is(&r, "file", "secret_name") && r.nlines == 0);
 	/* LOW-14: each name, in a project and by name */
 	for (k = 0; low14[k]; k++)
 	{
@@ -2662,6 +2996,24 @@ t_res_tree(void)
 	put("cfg/.config/x.txt", "FAKE\n", 5);
 	CHECK("LOW-14: a project's own .config dir (not the home's) is read",
 	      res(".config/x.txt:1", "cfg", 1, &r) == 1 && is(&r, "file", "ok"));
+	/* #205 (QA 1.57.0 LOW-D3, LOW-D1) */
+	CHECK("LOW-D3: the new names are denied, their neighbours not",
+	      xr_secret_name(".zsh_sessions/x.session") &&
+	      xr_secret_name("a/.credentials.json") &&
+	      xr_secret_name(".TERRAFORMRC") && xr_secret_name("terraform.rc") &&
+	      xr_secret_name(".config/github-copilot/apps.json") &&
+	      xr_secret_name(".databrickscfg") &&
+	      xr_secret_name(".composer/auth.json") &&
+	      xr_secret_name("gdm/Xauthority") &&
+	      xr_secret_name(".ICEauthority") &&
+	      !xr_secret_name(".composer/composer.json") &&
+	      !xr_secret_name("src/auth.json") && !xr_secret_name("main.tf") &&
+	      !xr_secret_name(".zsh_sessions.c"));
+	CHECK("LOW-D1: a .git file counts only as \"gitdir: <path>\"",
+	      xr_gitfile("gitdir: x\n", 10) && xr_gitfile("gitdir: /a/b", 12) &&
+	      !xr_gitfile("gitdir: ", 8) && !xr_gitfile("gitdir: \n", 9) &&
+	      !xr_gitfile("gitdir:x", 8) && !xr_gitfile("GITDIR: x", 9) &&
+	      !xr_gitfile("", 0) && !xr_gitfile("ref: refs/heads/m", 17));
 }
 
 /* A fake git: records its argv and env, then acts as $D/mode says. */
@@ -3449,6 +3801,7 @@ main(int argc, char **argv)
 	t_time();
 	t_read();
 	t_shell();
+	t_screen_seam();
 	t_walk();
 	t_print();
 	t_grammar();
@@ -3456,6 +3809,8 @@ main(int argc, char **argv)
 	t_index();
 	t_caps();
 	t_follow_cut();
+	t_auto();
+	t_auto_cap();
 	t_excl();
 	t_cancel();
 	t_scan_caps();

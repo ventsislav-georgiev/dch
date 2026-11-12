@@ -5,7 +5,7 @@
 ** the output scan must survive anything. Linked with the rest of dch minus
 ** attach.o, and dch.c built with -Dmain=dch_main (detach_char is ^\).
 ** The X-ray chord's x decode (xray_x, #187) reads what follows a press
-** and a whole read. The picker's sequence reader (pk_csi, #132) gets the
+** and a whole read; a read of key releases only (#196) is -1. The picker's sequence reader (pk_csi, #132) gets the
 ** bytes after ESC [ as pk_key collects them, at most 16. */
 #include "../../attach.c"
 #include "../../picker.h"
@@ -33,7 +33,13 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 			abort();
 		if (h == 1)
 			(void)xray_x(pkt.u.buf + detach_end, (int)n - detach_end);
-		(void)xray_x(d, (int)n);
+		{
+			int x = xray_x(d, (int)n);
+
+			/* -1, releases only (#196): never for an empty read */
+			if (x < -1 || x > 1 || (x < 0 && n == 0))
+				abort();
+		}
 	}
 	{
 		int k = pk_csi(d, n < 16 ? (int)n : 16);

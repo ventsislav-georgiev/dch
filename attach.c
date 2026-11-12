@@ -37,6 +37,9 @@ static int win_changed;
 static volatile sig_atomic_t want_detach;
 /* SIGUSR2 → force a redraw (MSG_REDRAW). Set by handler, checked in main loop. */
 static volatile sig_atomic_t want_redraw;
+/* SIGURG → re-attach (MSG_ATTACH + MSG_REDRAW). Set by handler, checked in
+** main loop. */
+static volatile sig_atomic_t want_rearm;
 
 /*
 ** Restore terminal + reset modes inner program may have left on (mouse
@@ -205,6 +208,19 @@ on_sigusr2(ATTRIBUTE_UNUSED int sig)
 {
 	signal(SIGUSR2, on_sigusr2);
 	want_redraw = 1;
+}
+
+/* SIGURG → re-attach on the same connection: MSG_ATTACH makes the master
+** re-arm the session's modes (mouse, bracketed paste, 1049, kitty flags),
+** then MSG_REDRAW repaints. dch serve sends it to its pty client on a
+** remote 0x07 (#189): the remote X-ray view reset those modes on the
+** user's terminal. SIGURG because its default is ignore: an older client
+** drops it. */
+static RETSIGTYPE
+on_sigurg(ATTRIBUTE_UNUSED int sig)
+{
+	signal(SIGURG, on_sigurg);
+	want_rearm = 1;
 }
 
 static int detach_end;	/* where the last press counted ends (#187) */
@@ -554,7 +570,8 @@ detach_key_done(int s, int twice)
 /* The X-ray chord's second key (#187): is the first key in b[0..n) a plain
 ** x press? The byte, or its kitty report CSI 120 [; 1 [:1]] [; text] u, the
 ** Caps and Num Lock bits allowed. Kitty key releases before it (the detach
-** key's own, with event types on) are skipped. */
+** key's own, with event types on) are skipped. 1: an x; -1: b holds key
+** releases and nothing else; 0: anything else. */
 static int
 xray_x(const unsigned char *b, int n)
 {
@@ -605,7 +622,7 @@ xray_x(const unsigned char *b, int n)
 			return key == 'x' && ev == 1 && ((mod - 1) & ~0xc0L) == 0;
 		i = j + 1;
 	}
-	return 0;
+	return n > 0 ? -1 : 0;
 }
 
 /* The X-ray overlay (#187): the view over this attach, which is never
@@ -616,7 +633,10 @@ xray_x(const unsigned char *b, int n)
 ** back, the two frames an attach starts with: the master re-arms the
 ** session's modes and repaints its screen from the mirror, so what came in
 ** while the view was up is on screen (dch-lite: a SIGWINCH, as on any
-** re-attach). A pipe the child holds tells its end; its children hold it
+** re-attach). A remote attach (#189): s is the relay's, which keeps the one
+** attach connection and turns the redraw into the host's 0x05 and 0x07 (the
+** program repaints on its SIGWINCH); the view's queries dial their own ctl
+** connections. A pipe the child holds tells its end; its children hold it
 ** too, so a wait with a timeout covers one that outlives it. */
 static void
 xray_overlay(int s)
@@ -673,6 +693,16 @@ xray_overlay(int s)
 		}
 		if (waitpid(pid, NULL, WNOHANG) != 0)
 			break;
+		/* dch -d (SIGUSR1): the view goes first, as in die(), then
+		** the client leaves as the main loop does */
+		if (want_detach)
+		{
+			kill(pid, SIGTERM);
+			while (waitpid(pid, NULL, 0) < 0 && errno == EINTR)
+				;
+			xray_pid = 0;
+			exit(0);
+		}
 	}
 	xray_pid = 0;
 	if (p[0] >= 0)
@@ -856,6 +886,7 @@ attach_main(int noerror)
 	signal(SIGWINCH, win_change);
 	signal(SIGUSR1, on_sigusr1);
 	signal(SIGUSR2, on_sigusr2);
+	signal(SIGURG, on_sigurg);
 
 	/* Set raw mode. */
 	cur_term.c_iflag &= ~(IGNBRK|BRKINT|PARMRK|ISTRIP|INLCR|IGNCR|ICRNL);
@@ -1034,14 +1065,27 @@ attach_main(int noerror)
 			}
 
 			pkt.len = len;
-			/* The X-ray chord (#187): x the next key in the window.
-			** The read is the chord's, swallowed whole. */
-			if (detach_pending && attach_xray && attach_sock < 0 &&
-			    xray_x(pkt.u.buf, (int)len))
+			if (detach_pending)
 			{
-				detach_pending = 0;
-				xray_overlay(s);
-				goto keys_done;
+				int x = xray_x(pkt.u.buf, (int)len);
+
+				/* key releases only (kitty event types: the
+				** detach key's own, in a read of its own) are no
+				** key: the window stays open */
+				if (x < 0)
+					goto keys_done;
+				/* The X-ray chord (#187; over a remote attach too,
+				** #189): x the next key in the window. The read is
+				** the chord's, swallowed whole: what follows the x
+				** in it (its own release, the rest of a paste) was
+				** typed before the view was drawn, so it reaches
+				** neither. */
+				if (x && attach_xray)
+				{
+					detach_pending = 0;
+					xray_overlay(s);
+					goto keys_done;
+				}
 			}
 			int k = process_kbd(s, &pkt);
 			long w = detach_double_us();
@@ -1055,9 +1099,9 @@ attach_main(int noerror)
 				if (w == 0)	/* no double press: one, at once */
 					return detach_key_done(s, 0);
 				/* the chord in one burst: x after the press */
-				if (attach_xray && attach_sock < 0 &&
+				if (attach_xray &&
 				    xray_x(pkt.u.buf + detach_end,
-				           (int)len - detach_end))
+				           (int)len - detach_end) > 0)
 				{
 					xray_overlay(s);
 					goto keys_done;
@@ -1087,9 +1131,16 @@ keys_done:
 
 		/* Redraw requested (SIGUSR2)? Force the program to repaint via an
 		** unconditional WINCH at the master, regardless of size change. */
-		if (want_redraw)
+		if (want_redraw || want_rearm)
 		{
-			want_redraw = 0;
+			/* SIGURG: re-arm the modes first, the redraw repaints */
+			if (want_rearm)
+			{
+				pkt.type = MSG_ATTACH;
+				pkt.len = 0;
+				write_packet_or_fail(s, &pkt);
+			}
+			want_redraw = want_rearm = 0;
 
 			pkt.type = MSG_REDRAW;
 			pkt.len = REDRAW_WINCH;

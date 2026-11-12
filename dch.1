@@ -749,14 +749,38 @@ Session text is drawn with every control and bidi character as
 .BR ? .
 Three tabs:
 .B Chapters
-(\fB/\fR filters, \fBEnter\fR reads the chapter, read\-only),
+(\fB/\fR filters, \fBEnter\fR reads the chapter, read\-only;
+a chapter the harness wrote, a task notification
+.RB ( \(dqauto\(dq ),
+is hidden until
+.B n
+shows it, faint and titled by its summary, the footer saying how many;
+the tab counts the chapters shown without
+.BR n ;
+.B o
+here and in a chapter leaves the view and attaches to the session, as
+.B \-a
+does, a remote one's too; on an ended session it says so and stays),
 .B Refs
-(by count; a ref with a definition or two or more mentions is bold;
-\fB/\fR filters, \fBEnter\fR opens its card) and
+(the files, commits, pull requests, issues and URLs the session touched,
+a faint line over them saying so; by count, then the most recent first;
+a ref with a definition or two or more mentions is bold;
+a file under the session's directory shows relative to it, else one under
+HOME from
+.BR ~ ;
+a path too long keeps its end, the ellipsis in front, a long URL its host
+and its end;
+files under /tmp, /private/tmp, /var/folders and
+.B $TMPDIR
+(not on a remote view) are hidden until
+.B t
+shows them, the footer saying how many; the tab counts every ref;
+\fB/\fR filters on the full ref, \fBEnter\fR opens its card) and
 .B On screen
 (the session's screen with a hint label, \fBa\fR, \fBs\fR, \fBd\fR, ...,
 on each bold ref; typing a label opens its card; none for an ended
-session or on dch\-lite).
+session or on dch\-lite; its tab shows the labels' count once the screen
+is read, 0 included, and no number before or without one).
 A card shows the ref's definitions, first and latest mention, counts by
 scope and mentions; it opens light (as
 .B \-\-ref
@@ -792,12 +816,27 @@ now, output that came in meanwhile included (dch\-lite: the program gets a
 SIGWINCH, as on any re\-attach).
 The
 .B x
-never reaches the session.
+never reaches the session; keys that arrive in the same read as the
+.B x
+(a paste, a fast burst) reach neither the view nor the session.
+There
+.B o
+leaves the view back to the session.
 The chord is off with
-.BR \-E ,
-with
-.B DCH_DOUBLE_TAP_MS=0
-and over a remote attach; the keys then reach the session as before.
+.B \-E
+and with
+.BR DCH_DOUBLE_TAP_MS=0 ;
+the keys then reach the session as before.
+Over a remote attach
+.RB ( "dch \-a " \fIhost\fB:\fIname\fR)
+it opens the view of
+.IR host : name ,
+its queries over their own ctl connections, the attach kept; leaving it, the
+host resizes the program for a beat so it repaints, and
+.B dch serve
+1.58.0+ also re\-arms the modes the view turned off (bracketed paste, mouse
+reporting, the kitty keyboard flags, the alternate screen).
+An older host only resizes: those modes stay off until the next attach.
 There is no
 .B xray_key
 setting.
@@ -852,6 +891,23 @@ or
 .B partial
 and
 .BR error ;
+a Claude Code prompt the harness wrote (wholly
+.B <task\-notification>
+and
+.B <system\-reminder>
+blocks) also has
+.B auto
+.RB ( true )
+and, from the first notification's
+.B <summary>
+or else its
+.BR <event> ,
+a
+.B summary
+made as a title is (at most 256 KiB of summaries held; past that the
+oldest auto chapters give theirs up); its title is unchanged, and no other
+chapter has
+either key;
 .B other_projects
 counts the other sessions with a transcript or a live Codex rollout in
 another project directory
@@ -988,10 +1044,21 @@ does not match, other hosts never match, a failed or timed\-out
 .B config
 run gives no line, and the remote URLs are never printed.
 A file is read only inside the project (the cwd's git root, else the cwd;
+a git root holds a
+.B .git
+directory or a
+.B .git
+file starting
+.RB \(lq "gitdir: " \(rq,
+and any other
+.B .git
+file ends the search with none;
 none when that is
 .BR / ,
 .B $HOME
-or a directory above it, by real path; none at
+or a directory above it, by real path and by device and inode, so
+.I /System/Volumes/Data$HOME
+is the home too; none at
 .I ~/.config
 or
 .I ~/Library
@@ -1025,11 +1092,14 @@ anything under a directory
 .BR .password\-store ,
 .BR .m2 ,
 .BR .bash_sessions ,
+.BR .zsh_sessions ,
 .BR .config/gh ,
 .BR .config/gcloud ,
-.B .config/hub
+.BR .config/hub ,
+.BR .config/op ,
+.B .config/github\-copilot
 or
-.BR .config/op ;
+.BR .composer/auth.json ;
 the names
 .BR .claude.json ,
 .BR .pgpass ,
@@ -1050,9 +1120,15 @@ the names
 .BR gradle.properties ,
 .BR rclone.conf ,
 .BR .boto ,
-.B .dockercfg
+.BR .dockercfg ,
+.BR .Xauthority ,
+.BR Xauthority ,
+.BR .ICEauthority ,
+.BR .credentials.json ,
+.BR .terraformrc ,
+.B terraform.rc
 and
-.BR .Xauthority ;
+.BR .databrickscfg ;
 names ending in
 .BR .pem ,
 .BR .key ,
@@ -1071,17 +1147,37 @@ or
 .BR history ;
 .B id_
 names with no dot.
-A git root whose own path, as given, lies in one of those directories (a
-Claude Code worktree in
-.IR <repo>/.claude/worktrees/<name> )
-has them matched only below the root; a root reached through a symlink
-that hides the directory, or a cwd in one with no git root, has no such
-exception.
+One exception, for a Claude Code worktree: a part
+.B .claude
+is no denied directory when it is followed by
+.IR worktrees/<name> ,
+that
+.I <repo>/.claude/worktrees/<name>
+is the project root or a directory above it, its
+.B .git
+is a regular file (not a symlink) starting
+.RB \(lq "gitdir: " \(rq,
+and the root as given and its real path both end in the same parts from
+that
+.B .claude
+on.
+Only that part is lifted; every other part, above the root, the root
+itself and below it, keeps the whole list, so a
+.BR .claude ,
+.B .codex
+or
+.B .kube
+directory that is itself a git repo refuses every file.
+A root reached through a symlink that hides the
+.BR .claude ,
+a clone in
+.IR worktrees/ ,
+or a cwd there with no git root, has no exception.
 Whatever the root, a path that enters one of them in the home
 .RI ( ~/.claude ,
 .IR ~/.codex ,
 .IR ~/.config/gh ,
-\&...), as given or by its real path, is
+\&...), as given, by its real path or by the home's device and inode, is
 .BR secret_name .
 The list guards the common credential files by name; a secret in a file
 with any other name is shown.
@@ -1137,7 +1233,12 @@ prints one chapter's entries as one object
 .BR at ,
 .BR kind ,
 .BR entries ,
-.BR truncated ).
+.BR truncated ,
+and
+.B auto
+and
+.B summary
+when the chapter has them).
 .I anchor
 is a chapter's
 .B anchor
@@ -1278,13 +1379,19 @@ A control character, DEL, C1, bidi control or U+2028/U+2029 the host sends
 raw is written as a
 .B \eu
 escape, a byte that is not UTF\-8 as
-.BR \eufffd ,
+.B \eufffd
+(a CR outside a string, JSON space, is dropped),
 so a JSON line stays the same JSON and the host cannot drive the terminal.
-A host that sends nothing for 65 s (its 60 s timeout plus 5 s) is a lost
+A host that sends nothing for 65 s (its 60 s timeout plus 5 s; time spent
+waiting on a slow reader of dch's output does not count) is a lost
 connection, exit 7;
 .B \-\-follow
 has no such limit.
-A partial line the host was writing is dropped when the link is lost.
+A partial line the host was writing is dropped when the link is lost, on a
+cancel and when the host cuts the answer short.
+A host line over 16 MiB once escaped ends it with
+.IR "dch: host: unreachable: it sent a line over 16 MiB escaped" ,
+exit 7.
 The host answers by its own release:
 .BR \-\-scope ,
 .B \-\-chapter
@@ -1369,6 +1476,28 @@ changed since its last look, else at most every 100 ms.
 Only what Claude Code draws before it writes its session record can still
 be read, until the first look after that record.
 Rows that scroll off before the master's first look go into the ring.
+For the count, screen rows stay with the command whose output ends the ring
+until a row that starts with its prompt (then a space or the row's end)
+starts the next command; a prompt that changes between commands, or one past
+255 bytes, starts none.
+Rows a grow pulled back on screen are in the ring already and are not read
+again.
+A line soft\-wrapped across the screen's top edge is read as two (its head
+in the ring) until it scrolls, so a ref across that wrap is missed until then.
+A screen read that fails (no answer within 2 s, a busy or vanished master) or
+comes back cut (over 2 MB: its first row is dropped) makes
+.B complete
+false with
+.BR why:\(dqrange\(dq ,
+and
+.BR \-\-ref 's
+.B partial
+true; light
+.B \-\-ref
+waits for the screen only as long as its budget lasts.
+A screen row's
+.B offset
+is provisional: it gets another seq when it scrolls into the ring.
 In a shell's ring,
 evicted rows (the master's own status bit, reset by a clear; a dch 1.43.0
 master has none, and there only a gap, a lost range or a cut first row
@@ -2600,6 +2729,14 @@ client it starts as
 server that does not know the key ignores it, so it needed no new protocol
 version.
 .PP
+On a redraw
+.RB ( 0x07 )
+the server resizes the program one row down and back 120 ms later.
+.B dch serve
+1.58.0+ also re\-attaches its client: the attach stream then carries the
+session's DEC modes, for the kitty keyboard flags a pop and then the push,
+and on the full build the screen replayed from the mirror.
+.PP
 Protocol 1.1 adds the
 .B ctl
 op: one of dch's control verbs, run on this host for the client. The
@@ -2776,6 +2913,13 @@ and
 .BR "\-\-xray \-\-follow" ,
 60 s for the rest; past it, the same with
 .BR \(dqwhy\(dq:\(dqtimeout\(dq .
+A device (its tailnet address) runs at most 2
+.B "\-\-xray \-\-follow"
+of one session: a third ends the oldest the same way, with
+.BR \(dqwhy\(dq:\(dqtimeout\(dq ,
+and is run once more 1 s later if it met
+.I busy
+first.
 A client that closes the connection while its verb runs ends it as a 0x34
 does (the same 2 s or 660 s grace), with no 0x33 (one that sent a 0x34
 first still gets it); the handler holds its connection slot, one of the
