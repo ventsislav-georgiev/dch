@@ -335,7 +335,7 @@ def test_view():
         check("card: y copies the ref (OSC 52)",
               v.wait(b"\033]52;c;" + base64.b64encode(b"#831")),
               v.out[-300:])
-        # #227: p is the scope toggle (o until 1.60.0); o opens, as in the list
+        # #227: p is the scope toggle (o until 1.60.x); o opens, as in the list
         mark = len(v.out)
         v.key(b"p", 1.0)
         ok = until(lambda: (v.pump(0.1), re.search(

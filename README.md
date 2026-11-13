@@ -921,7 +921,7 @@ first and latest mention, its counts (this session, this project, all
 projects) and its mentions. It opens light, as `--ref` does without `--full`.
 `f` runs the full scan, `p` scans other projects too (again: this project
 only), `o` attaches to the session as in the list, `y` copies the ref to the
-clipboard (OSC 52). The card's other-projects key changed in 1.60.0: it was
+clipboard (OSC 52). The card's other-projects key changed in 1.61.0: it was
 `o`, which now opens the session everywhere in the view. `Enter` on a mention in this session opens its
 chapter. A shell session's light card shows titles and counts only; `f`
 shows its lines.
@@ -941,7 +941,7 @@ X-ray; run `clear`".
 | `t` | Refs: show / hide the temp files | |
 | `n` | Chapters: show / hide the auto rows (auto chapters, the task notifications, and compactions) | |
 | `o` | Chapters: attach to the session (in the chord: back to it) | card, reader: the same |
-| `f` `p` `y` | | card: full scan, other projects / this project (`p` was `o` before 1.60.0), copy |
+| `f` `p` `y` | | card: full scan, other projects / this project (`p` was `o` before 1.61.0), copy |
 | `q` | quit | back |
 | `Esc` | clear the typed label or the filter, else quit | back |
 | `Ctrl-C` `Ctrl-D` | quit | quit |

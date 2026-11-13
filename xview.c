@@ -2210,7 +2210,7 @@ xv_key(struct xv *v, int c)
 			break;
 		case 'o':
 			return xv_open(v);
-		case 'p':	/* o before 1.60 (#227); o opens, as everywhere */
+		case 'p':	/* o before 1.61 (#227); o opens, as everywhere */
 			xv_card(v, v->ckey, v->ctext, 1, v->scope == 2 ? 1 : 2);
 			break;
 		case 'y':

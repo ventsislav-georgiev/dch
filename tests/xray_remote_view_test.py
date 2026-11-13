@@ -343,7 +343,7 @@ def test_view():
         v.key(b"f", 1.0)
         check("card: f runs the full scan on the host",
               v.wait(b"full scan", start=mark), v.out[mark:])
-        # #227: p is the scope toggle (o until 1.60.0); o opens, as in the list
+        # #227: p is the scope toggle (o until 1.60.x); o opens, as in the list
         mark = len(v.out)
         v.key(b"p", 1.0)
         check("card: p scans other projects on the host",
