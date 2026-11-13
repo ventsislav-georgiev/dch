@@ -2466,9 +2466,14 @@ no cap). At that cap the server
 stops forwarding, sends the dch SIGTERM (SIGKILL 2 s later) and ends with
 `{"exit":2,"why":"cap"}`. Past its timeout (the table) it does the same with
 `"why":"timeout"`. Output the client leaves unread is held, not cut, until
-20 s past the timeout: `dch --xray host:x --json | less` left on a page gets
+20 s past the timeout (80 s after the request; 680 s for the 660 s verbs):
+`dch --xray host:x --json | less` left on a page gets
 the whole answer if it reads on before the 60 s are up, `"why":"timeout"` if
 it reads on within 20 s after that, and a closed connection later.
+An answer that fits whole in the socket buffers is never left untaken, so a
+client that never reads it holds its slot until the warm connection's idle
+close: 300 s after the `0x33`, 30 s once the peer has 8 connections open (or
+the server 32).
 `--follow` and `--xray --follow` have no timeout: theirs closes after 20 s
 untaken, as any connection's does. A device (its tailnet address) runs at most 2
 `--xray --follow` of one session: a third ends the oldest the same way, with

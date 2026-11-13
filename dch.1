@@ -2948,9 +2948,14 @@ and
 60 s for the rest; past it, the same with
 .BR \(dqwhy\(dq:\(dqtimeout\(dq .
 Output the client leaves unread is held, not cut, until 20 s past the
-timeout, so a reader paused within it gets the whole answer; any other
+timeout (80 s after the request; 680 s for the 660 s verbs), so a reader
+paused within it gets the whole answer; any other
 connection, a follow's included, closes once its output goes untaken for
 20 s.
+An answer that fits whole in the socket buffers is never left untaken, so a
+client that never reads it holds its slot until the warm connection's idle
+close: 300 s after the 0x33, 30 s once the peer has 8 connections open (or
+the server 32).
 A device (its tailnet address) runs at most 2
 .B "\-\-xray \-\-follow"
 of one session: a third ends the oldest the same way, with
