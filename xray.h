@@ -44,7 +44,7 @@ struct xr_limits
 	long long ms;			/* XR_WALL_MS */
 };
 extern struct xr_limits xr_lim;
-extern int xr_noclock;	/* tests only: DCH_XRAY_NOCLOCK, light --ref never cut by the clock */
+extern int xr_noclock;	/* tests only: DCH_XRAY_NOCLOCK, light --ref past its budget, held to --full's XR_WALL_MS */
 
 /* One chapter (3.2). at < 0 prints null. */
 struct xr_chapter

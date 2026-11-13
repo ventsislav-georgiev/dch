@@ -1122,6 +1122,8 @@ pyrun "xray: a live Codex's rollout, the mapping, the seam, --follow" xray_codex
 # the file window's guard (#178): QA's repro with FAKE files, local and over
 # a loopback dch serve, through ended sessions so lite runs it too
 pyrun "xray file windows: no wide root, the deny list, hard links" xray_deny_test.py
+# QA 1.60.0 LOW-T8: dch serve's ctls get no DCH_XRAY_NOCLOCK, DCH_XRAY_CAPS
+pyrun "dch serve keeps X-ray's test switches from its ctls" serve_xray_env_test.py
 
 # --- the watchdog ends a hung test, its child and its session, only them ----
 # watchdog_hang.py records its pid, a child's, a session master's and one

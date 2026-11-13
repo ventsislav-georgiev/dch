@@ -4302,7 +4302,8 @@ xr_scan_tick(void *ctx, uint64_t bytes)
 		x->stop = 1;
 		x->why = "budget";
 	}
-	else if (!x->stop && x->full && now - x->t0 - x->blocked >= xr_lim.ms)
+	else if (!x->stop && (x->full || xr_noclock) &&
+	         now - x->t0 - x->blocked >= xr_lim.ms)
 	{
 		x->stop = 1;
 		x->why = "time";

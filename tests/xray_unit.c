@@ -1056,6 +1056,20 @@ t_scan_caps(void)
 	CHECK("scan: a light shell scan past its budget stops",
 	      x && xr_scan_tick(x, 1) != 0);
 	xr_scan_free(x);
+	/* DCH_XRAY_NOCLOCK lifts the budget, not --full's 10 s (QA 1.60.0
+	** LOW-T8) */
+	xr_noclock = 1;
+	x = xr_scan_new(stdout, "issue:#831", "s", "", 1, 0, 0, 300,
+	                xr_now_ms() - 1000);
+	CHECK("scan: NOCLOCK, a light scan past its budget goes on",
+	      x && xr_scan_tick(x, 1) == 0);
+	xr_scan_free(x);
+	x = xr_scan_new(stdout, "issue:#831", "s", "", 1, 0, 0, 300,
+	                xr_now_ms() - 10001);
+	CHECK("scan: NOCLOCK, a light scan past 10 s stops",
+	      x && xr_scan_tick(x, 1) != 0);
+	xr_scan_free(x);
+	xr_noclock = 0;
 	(void)n;
 }
 
