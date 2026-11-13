@@ -9319,7 +9319,10 @@ pk_reap(struct pk *p)
 		dch_remote_esc(e, sizeof e, p->status);
 		memcpy(p->status, e, sizeof e);
 		if (res[0] && !strcmp(res, "ok") && p->run.go && as[0])
+		{
 			snprintf(p->go, sizeof p->go, "%s:%s", p->run.host, as);
+			attach_route = 1;	/* a local host:name too (#248) */
+		}
 	}
 	else if (res[0] && !strcmp(res, "ok") && p->run.go && as[0] &&
 	         name_live(as))
@@ -9534,6 +9537,7 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 	char d[800], f[620], as[600];
 	const char *nm;
 
+	attach_route = 0;	/* a revive's, its name cut by pk_run (#248) */
 	if (p->asking)
 	{
 		p->asking = 0;
