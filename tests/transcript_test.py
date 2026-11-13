@@ -92,9 +92,9 @@ def main():
     def field(name, key, env=None):
         return rows(env).get(name, {}).get(key, MISSING)
 
-    def spawn(name, *cmd):
+    def spawn(name, *cmd, env=None):
         names.append(name)
-        run("--spawn", name, *cmd)
+        run("--spawn", name, *cmd, env=env)
         return until(lambda: child(name))
 
     def child(name):
@@ -222,6 +222,20 @@ def main():
               field(a, "claude_session_id") == s1)
         check("two claudes: --xray --json joins no Claude either",
               xray_sid(c) is None)
+        # #274: one's record kept empty past the re-reads: still two, no
+        # id (base: the other's); a reused pid's stale empty one is no
+        # Claude: the other joins
+        if kids:
+            kp = os.path.join(sessdir, "%s.json" % kids[0])
+            open(kp, "w").close()
+            check("one of two claudes' record empty: still null",
+                  field(c, "claude_session_id") is None)
+            old = time.time() - 600
+            os.utime(kp, (old, old))
+            check("...its record a stale one instead: the other joins",
+                  field(c, "claude_session_id") ==
+                  "%08d-0000-0000-0000-000000000000" % 1)
+            record(int(kids[0]), "%08d-0000-0000-0000-000000000000" % 0)
         # #256: the answer says why: how many Claudes it found there
         o = xray_json(c)
         check("two claudes: --xray --json says corpus none, claudes 2",
@@ -241,10 +255,12 @@ def main():
         os.makedirs(os.path.join(nhome, ".claude", "sessions"))
         # not /bin/sh or /bin/sleep: macOS hides a platform binary's env,
         # and HOME there is what leads the scan to the nested records
+        # its master probes every 300ms: the history record's agent (#274)
         sn = spawn(n, "/bin/sh", "-c",
                    "HOME=%s '%s' -c 'import os,time; os.fork() or "
                    "time.sleep(120); time.sleep(120)' & wait"
-                   % (nhome, sys.executable))
+                   % (nhome, sys.executable),
+                   env=dict(os.environ, DCH_RECORD_MS="300"))
         sub = until(lambda: (lambda k: k if len(k) == 1 else None)(
             subprocess.run(["/usr/bin/pgrep", "-P", str(sn)],
                            capture_output=True, text=True).stdout.split()))
@@ -277,6 +293,28 @@ def main():
         check("nested through a non-Claude process: the ancestor joins",
               field(n, "claude_session_id") == s4
               and xray_sid(n) == s4)
+        # #274 (QA 1.60.0 LOW-X13): the ancestor's record kept empty past
+        # the re-reads (a stalled rewrite) is its Claude, id unknown: no
+        # id, never the one below's (base: s5 in all three)
+        hrec = os.path.join(tmp, "state", "dch", "sessions",
+                            os.path.join(tmp, "dch-%d" % os.getuid())
+                            .replace("/", "-"), n + ".json")
+
+        def hsid():
+            try:
+                return json.load(open(hrec))["agent"]["session_id"]
+            except (OSError, ValueError, KeyError, TypeError):
+                return None
+        until(lambda: hsid() == s4)
+        transcript(s5, top=os.path.join(nhome, ".claude", "projects"))
+        open(os.path.join(sessdir, "%d.json" % sn), "w").close()
+        check("ancestor's record empty: --ls-json gives no id, not the "
+              "one below's", field(n, "claude_session_id") is None)
+        check("...--xray --json joins none either", xray_sid(n) is None)
+        time.sleep(1.5)		# 5 record ticks
+        check("...the history record keeps the id it had (%s)"
+              % (hsid() or "")[:8], hsid() == s4)
+        record(sn, s4)
 
         # the ancestor's record read last: its config dir is the root's
         # own, ours (read first) holds two sibling Claudes below it

@@ -1630,7 +1630,8 @@ proc_started(long pid)
 ** Claude (#253). Empty, only a live <pid>.json's whose process started by
 ** the record's last write (2s for the clocks' rounding): one left empty by
 ** a Claude killed mid-write stays empty, and would cost every scan 50ms,
-** also once its pid is reused (#274). */
+** also once its pid is reused (#274). One still empty or changing after
+** the waits goes to visit() as "", len 0: a Claude there, id unknown. */
 static int
 visit_records_in(const char *dir, dch_claude_record_fn visit, void *arg)
 {
@@ -1667,9 +1668,10 @@ visit_records_in(const char *dir, dch_claude_record_fn visit, void *arg)
 			    (rp = strtol(de->d_name, &e, 10)) > 0 &&
 			    !strcmp(e, ".json") &&
 			    (kill((pid_t)rp, 0) == 0 || errno == EPERM) &&
-			    (t = proc_started(rp)) >= 0 && t <= before.st_mtime + 2 &&
-			    waits++ < 10)
+			    (t = proc_started(rp)) >= 0 && t <= before.st_mtime + 2)
 			{
+				if (waits++ >= 10)
+					goto found;
 				dch_trace("claude record %s: empty, read again", path);
 				usleep(5000);
 				goto again;
@@ -1689,8 +1691,13 @@ visit_records_in(const char *dir, dch_claude_record_fn visit, void *arg)
 		    memchr(body, '\0', len))
 		{
 			close(fd);
-			if (!memchr(body, '\0', len) && waits++ < 10)
+			if (!memchr(body, '\0', len))
 			{
+				if (waits++ >= 10)
+				{
+					len = 0;
+					goto found;
+				}
 				dch_trace("claude record %s: changed, read again", path);
 				usleep(5000);
 				goto again;
@@ -1698,6 +1705,11 @@ visit_records_in(const char *dir, dch_claude_record_fn visit, void *arg)
 			continue;
 		}
 		close(fd);
+	found:
+		/* len 0: still empty or changing after the waits. Visited, not
+		** skipped: skipped, another Claude would answer for it (#274) */
+		if (!len)
+			dch_trace("claude record %s: unread, id unknown", path);
 		body[len] = '\0';
 		if (visit(path, body, len, arg) < 0)
 		{
@@ -5830,18 +5842,22 @@ crec_visit(const char *path, const char *body, size_t len, void *arg)
 	long jpid;
 	int i, self, nested;
 
-	(void)len;
 	memset(&c, 0, sizeof c);
 	base = base ? base + 1 : path;
 	c.pid = strtol(base, &endp, 10);
+	/* len 0, a record caught mid-rewrite (visit_records_in): its live
+	** pid's Claude, sid "" (#274) */
 	if (c.pid <= 0 || strcmp(endp, ".json") ||
-	    dch_json_long(body, "pid", &jpid) < 0 || jpid != c.pid ||
-	    dch_json_string(body, "kind", kind, sizeof kind) < 0 ||
-	    strcmp(kind, "interactive") || kill((pid_t)c.pid, 0) < 0 ||
+	    (len && (dch_json_long(body, "pid", &jpid) < 0 || jpid != c.pid ||
+	             dch_json_string(body, "kind", kind, sizeof kind) < 0 ||
+	             strcmp(kind, "interactive"))) ||
+	    kill((pid_t)c.pid, 0) < 0 ||
 	    (c.depth = proc_depth(c.pid, cs->root)) < 0 ||
-	    dch_json_string(body, "sessionId", c.sid, sizeof c.sid) < 0 ||
-	    dch_json_string(body, "version", c.ver, sizeof c.ver) < 0 ||
-	    dch_json_string(body, "status", c.status, sizeof c.status) < 0)
+	    (len && (dch_json_string(body, "sessionId", c.sid,
+	                             sizeof c.sid) < 0 ||
+	             dch_json_string(body, "version", c.ver, sizeof c.ver) < 0 ||
+	             dch_json_string(body, "status", c.status,
+	                             sizeof c.status) < 0)))
 		return 0;
 	if (dch_json_string(body, "cwd", c.cwd, sizeof c.cwd) < 0)
 		c.cwd[0] = '\0';
@@ -5849,7 +5865,7 @@ crec_visit(const char *path, const char *body, size_t len, void *arg)
 		c.name[0] = '\0';
 	if (dch_json_long(body, "statusUpdatedAt", &c.upd) < 0)
 		c.upd = 0;
-	if (cs->verify &&
+	if (cs->verify && len &&
 	    (dch_json_string(body, "procStart", start, sizeof start) < 0 ||
 	     dch_process_start(c.pid, actual, sizeof actual) < 0 ||
 	     strcmp(start, actual)))
@@ -6211,7 +6227,9 @@ dch_agent_probe(long child, struct dch_agent *a)
 	int k;
 
 	memset(a, 0, sizeof *a);
-	if (child <= 0 || claude_find(child, 1, &r) == 0)
+	/* no sid: its record caught mid-rewrite, the caller keeps what it
+	** had (#274) */
+	if (child <= 0 || claude_find(child, 1, &r) == 0 || !r.sid[0])
 		return -1;
 	for (p = r.pid; p != child && (pp = proc_ppid(p)) > 1 && pp != child;
 	     p = pp)
