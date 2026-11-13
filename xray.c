@@ -6979,8 +6979,11 @@ fail:
 	xr_put_str(m, a->session);
 	fputs(",\"session_id\":", m);
 	xr_put_str(m, a->session_id);
-	fprintf(m, ",\"live\":%s,\"corpus\":\"%s\",\"reason\":",
-	        a->live ? "true" : "false", a->corpus);
+	fprintf(m, ",\"live\":%s,\"corpus\":\"%s\"", a->live ? "true" : "false",
+	        a->corpus);
+	if (a->agent)
+		fprintf(m, ",\"claudes\":%d", a->claudes);
+	fputs(",\"reason\":", m);
 	put_or_null(m, a->reason);
 	fprintf(m, ",\"available\":%s,\"mentions_only\":%s,\"lines\":",
 	        a->available ? "true" : "false",

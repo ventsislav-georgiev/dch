@@ -928,9 +928,10 @@ shows its lines.
 
 The line under the tabs names the corpus: `Shell · last N rows`, `Shell · no
 shell integration · mentions only`, `Codex · mentions only`, `X-ray needs the
-full dch build` (dch-lite), `X-ray is off for shells (xray_ring = 0)`, and so
-on. A shell's line adds "a terminal's own clear-screen key may not clear
-X-ray; run `clear`".
+full dch build` (dch-lite), `X-ray is off for shells (xray_ring = 0)`,
+`2 Claude sessions run here; X-ray reads one`, `No Claude session found
+here`, and so on. A shell's line adds "a terminal's own clear-screen key may
+not clear X-ray; run `clear`".
 
 | Key | List | Card / reader |
 | --- | --- | --- |
@@ -1194,6 +1195,11 @@ The corpus:
   gone, or a Codex with no thread id or rollout (`reason: null`). An ended
   Codex session has no corpus either: History records carry only a Claude
   agent, so it answers as an ended shell (`reason: "ended"`).
+  - **`claudes`.** Only while a shell's ring is paused for an agent: how many
+    live Claude Code sessions dch found under the session. X-ray reads one:
+    `2` or more means several unrelated ones run there; `0` means it found
+    none (its record is out of this process's `HOME` or `CLAUDE_CONFIG_DIR`).
+    Readers that do not know the field can ignore it.
 
 ```json
 {"schema":1,"session":"api","session_id":"0b1f6a52-4c1e-4d7a-9a51-2f6d8c3e7a10",

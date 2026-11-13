@@ -10,7 +10,9 @@ records for plain `sleep` children elsewhere, with HOME, the runtime dir
 and the state dir all temporary. Covers: id and path for a session running
 one Claude; the id following a rewritten record (/clear, resume); a missing
 .jsonl; two .jsonl under different project dirs; a session with no Claude;
-two Claudes in one session; a Claude with Claudes below it (the ancestor
+two Claudes in one session, the --xray --json answer's "claudes" count
+saying so, 0 for a client that cannot see their records (#256); a Claude
+with Claudes below it (the ancestor
 joins, --xray --json agreeing, #253); a record read while it is rewritten
 in place, and no wait for an empty one left by a dead Claude (#253); a
 record whose procStart does not match; a
@@ -107,6 +109,12 @@ def main():
         except ValueError:
             return None
         return o.get("session_id") if o.get("corpus") == "claude" else None
+
+    def xray_json(name, env=None):
+        try:
+            return json.loads(run("--xray", name, "--json", env=env).stdout)
+        except ValueError:
+            return {}
 
     def record(pid, sid, start=None, where=sessdir):
         rec = {"pid": pid, "sessionId": sid, "cwd": tmp,
@@ -211,6 +219,16 @@ def main():
               field(a, "claude_session_id") == s1)
         check("two claudes: --xray --json joins no Claude either",
               xray_sid(c) is None)
+        # #256: the answer says why: how many Claudes it found there
+        o = xray_json(c)
+        check("two claudes: --xray --json says corpus none, claudes 2",
+              o.get("corpus") == "none" and o.get("claudes") == 2)
+        # a client whose HOME holds no record finds none (the master did)
+        o = xray_json(c, dict(os.environ, HOME=tmp))
+        check("two claudes, records out of the client's sight: claudes 0",
+              o.get("corpus") == "none" and o.get("claudes") == 0)
+        check("a shell with no agent: no claudes field",
+              "claudes" not in xray_json(b))
 
         # --- a Claude with another Claude below it (#253) -----------------
         # a subagent's test suite runs a fake Claude, under its own temp

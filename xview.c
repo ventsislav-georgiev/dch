@@ -110,7 +110,7 @@ struct xv
 				** empty, never replaced (QA 1.57.0 LOW-R3) */
 	/* the index: --follow's snapshot and its deltas */
 	int have, ended, live, mentions_only;
-	long long lines;
+	long long lines, claudes;	/* claudes: -1 when not said (#256) */
 	char *session, *sid, *corpus, *reason, *why, *label;
 	struct xv_ch *ch;
 	struct xv_ref *rf;
@@ -659,6 +659,7 @@ xv_snapshot(struct xv *v, const struct json_parser *p, int o)
 	v->live = xv_bool(p, o, "live");
 	v->mentions_only = xv_bool(p, o, "mentions_only");
 	v->lines = xv_num(p, o, "lines", -1);
+	v->claudes = xv_num(p, o, "claudes", -1);
 	if ((a = xv_obj(p, o, "chapters", JSON_ARRAY)) >= 0)
 		for (t = a + 1; t < p->tok[a].next; t = p->tok[t].next)
 			if (p->tok[t].kind == JSON_OBJECT)
@@ -1241,8 +1242,15 @@ xv_label(const struct xv *v, char *b, size_t n)
 		         v->lines > 0 ? v->lines : 0, d);
 	else if (!strcmp(c, "none"))
 	{
-		if (!strcmp(r, "ended"))
+		/* several Claudes: so with the ring off too, a Claude's corpus
+		** is never the ring (#256) */
+		if (v->claudes > 1)
+			snprintf(b, n, "%lld Claude sessions run here; X-ray reads one",
+			         v->claudes);
+		else if (!strcmp(r, "ended"))
 			snprintf(b, n, "Shell%sended%snot kept", d, d);
+		else if (!r[0] && v->claudes == 0)
+			snprintf(b, n, "No Claude session found here");
 		else
 			snprintf(b, n, "%s", !strcmp(r, "lite")
 			         ? "X-ray needs the full dch build" : !strcmp(r, "off")

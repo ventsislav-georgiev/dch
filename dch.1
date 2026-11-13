@@ -833,7 +833,9 @@ on a mention in this session reads its chapter; a shell's light card shows
 titles and counts only.
 The line under the tabs names the corpus
 (\(lqShell \[u00B7] last N rows\(rq, \(lqCodex \[u00B7] mentions only\(rq,
-\(lqX\-ray needs the full dch build\(rq, ...).
+\(lqX\-ray needs the full dch build\(rq,
+\(lq2 Claude sessions run here; X\-ray reads one\(rq,
+\(lqNo Claude session found here\(rq, ...).
 Keys: \fBTab\fR, \fB\(<-\fR \fB\(->\fR
 (and \fBh\fR \fBl\fR off On screen) switch tabs;
 \fBj\fR \fBk\fR, arrows, \fBPgUp\fR \fBPgDn\fR, \fBg\fR \fBG\fR move;
@@ -920,7 +922,11 @@ its corpus (\fBclaude\fR, \fBcodex\fR, \fBshell\fR or \fBnone\fR, with a
 .BR ended ,
 .B lite
 or
-.BR off )
+.BR off ;
+while a shell's ring is paused for an agent, also
+.BR claudes ,
+the live Claude Code sessions found under it: 2 or more when several run
+there, 0 when none was found)
 and its chapters, one per prompt, oldest first, at most 5000.
 Each chapter has an opaque
 .BR anchor ,

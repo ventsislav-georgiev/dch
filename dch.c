@@ -12216,14 +12216,33 @@ xr_ring_rec(void *ctx, const struct xr_rec *x)
 	}
 }
 
+/* The live Claudes under a session's child, as xr_live_claude counts them;
+** -1 when the session does not answer (#256). */
+static int
+xr_claudes(const char *sock)
+{
+	struct cmd_info ci;
+	struct crec c;
+	int n;
+
+	if (cmd_query(sock, &ci) != 0)
+		return -1;
+	n = ci.pid > 0 ? claude_find(ci.pid, 1, &c) : 0;
+	cmd_info_free(&ci);
+	return n;
+}
+
 /* A shell's answer from one ring read and its screen rows (3.2, 7.3), as
 ** --json and every --follow batch give it: corpus none for a ring that is
-** off or paused. */
+** off or paused. Paused for an agent none joined: how many Claudes run
+** there, so the answer can say why (#256). */
 static void
 xr_shell_fill(struct xr_answer *a, const struct ring_snap *rs,
               const struct xr_ring_acc *acc, const struct xr_chapters *ch,
               struct xr_index *refs, const char *sock)
 {
+	if (rs->status & DCH_RING_S_PAUSED)
+		a->agent = (a->claudes = xr_claudes(sock)) >= 0;
 	if (rs->status & DCH_RING_S_OFF)
 	{
 		int novt = 0;

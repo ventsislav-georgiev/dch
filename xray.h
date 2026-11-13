@@ -341,6 +341,8 @@ struct xr_answer
 	const char *project, *project_label;
 	int live, available, mentions_only, complete, chapters_evicted;
 	int snapshot;			/* --follow: {"schema":1,"snapshot":{…}} */
+	int agent, claudes;		/* the ring paused for an agent: "claudes",
+					** the live Claudes found under it (#256) */
 	struct xr_sent *sent;		/* --follow: xr_print notes there the refs
 					** its cap left out, for xr_sent_take */
 	long long lines;		/* < 0 prints null */
