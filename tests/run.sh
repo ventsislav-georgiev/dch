@@ -300,6 +300,7 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "dch serve: remote frames goldens, peer gate, startup refusals" serve_test.py
     pyrun "remote hosts: -ls, --remote, -a host:name, hostile peers" remote_client_test.py
     pyrun "remote history: --history --remote, picker History rows, --ls-json cwd" remote_history_test.py
+    pyrun "--ls-json --remote --follow: the list as a stream, watch and polled hosts" ls_follow_test.py
     pyrun "the Windows client's checks, against this dch" windows_client_test.py
 fi
 

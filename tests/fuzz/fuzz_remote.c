@@ -9,7 +9,8 @@
 ** #118's ctl-cancel too); #115's history: a host's --history --json reply,
 ** the history cache, and a history probe's hello and ctl frames; #158's
 ** --requests: a stdin line (rq_parse, then rq_check's request forms), a
-** host's output and a hello wrapped as NDJSON. Every peer
+** host's output and a hello wrapped as NDJSON; #103's --ls-json --follow:
+** the server frames of case 5 again as a host's 0x2e stream (fh_frames). Every peer
 ** string, once escaped, must hold no
 ** control byte: C0, DEL, C1 or a bidi control. Linked with the rest of dch
 ** minus remote.o, and dch.c built with -Dmain=dch_main. */
@@ -251,6 +252,38 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		if (p->in.n > n)
 			abort();	/* what is held came from the input */
 		probes_free(p, 1);
+		{
+			/* #103: the same bytes as a host's 0x2e stream */
+			struct fhost *h = calloc(1, sizeof *h);
+
+			if (!h)
+				break;
+			h->p.fd = -1;
+			h->live = 1;
+			h->p.rs.from_server = 1;
+			copy_str(h->p.h.label, sizeof h->p.h.label, "h");
+			for (off = 2; off < n && h->live; off += c)
+			{
+				sb_add(&h->p.in, d + off, n - off < c ? n - off : c);
+				(void)fh_frames(h, 0, 1000);
+			}
+			inert(h->p.why);
+			if ((!h->live && !h->p.why[0]) || h->p.in.n > n ||
+			    h->rows.n > RM_ROWS)
+				abort();	/* an end says why; bounded */
+			for (i = 0; i < h->rows.n; i++)
+			{
+				if (!h->rows.v[i].name[0] ||
+				    strcmp(h->rows.v[i].host, "h"))
+					abort();
+				printable(h->rows.v[i].name);
+				printable(h->rows.v[i].alias);
+				printable(h->rows.v[i].cwd);
+			}
+			fh_close(h);
+			free(h->rows.v);
+			free(h);
+		}
 		break;
 	}
 	case 6:		/* the relay's server side, in reads of c */
