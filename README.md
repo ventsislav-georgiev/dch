@@ -1302,7 +1302,8 @@ of one shape never define. The command counts in every simple command of it
 of `2>&1`, `<&3` or `&>`; `<>` is one redirect; a `<<` inside `$(( ))`,
 `$[ ]`, `${a[ ]}` or `a[ ]=` is a shift; a `#` comment, which starts only at a
 `#` that begins a word (not `$(x)#y`), and each here-doc's body are not a command, and a command with a body the
-shell expands, `$(…)` under an unquoted delimiter, never defines), past env
+shell expands, `$(…)` under an unquoted delimiter, or a `${` or `$[` left open
+never defines), past env
 assignments, redirects, `{`, `!`, `if`, `then`, `elif`,
 `else`, `do`, `while`, `until`, `coproc`, `function f`, and `sudo`, `doas`,
 `env`, `command`, `exec`, `builtin`, `xargs`, `nice`, `nohup`, `stdbuf`,

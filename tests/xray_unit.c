@@ -4061,6 +4061,11 @@ t_excl(void)
 		/* #239 LOW-X5: << in $[…], ${a[…]}, a[…]= is a shift */
 		"echo $[1<<2]\ncat ../x", "echo $[ 1 << 2 ]\ncat ../x",
 		"a=(1 2 3); echo ${a[1<<1]}\ncat ../x", "a[1<<1]=5\ncat ../x",
+		/* #239 review: <(…) in ${…}; an unclosed ${ or $[; |& into sh */
+		"echo ${x:-<(cat ../x)}", "echo ${x:->(cat ../x)} y",
+		"echo $[1 + ${a[<(cat ../x)]}]", "echo ${x; cat ../x",
+		"echo $[1; cat ../x", "echo ${x:-a\ncat ../x",
+		"echo 'cat ../x' |& sh", "printf x |& bash -s",
 		0
 	};
 	static const char *const keep[] = {
@@ -4110,6 +4115,9 @@ t_excl(void)
 		"sudo -D /home/demo/proj cat notes.md", "(echo hi)#x; cat ../x",
 		"echo $(true) #; cat ../x", "echo $(echo a)#b; cat notes.md",
 		"cat a[<<EOF\ncat ../x\nEOF", "echo $[1<<2]\ncat notes.md",
+		"echo ${x/(#/y}; cat notes.md", "echo ${a[1<<1]}\ncat notes.md",
+		"echo ${x:-<} y; cat notes.md", "echo \"${x:-<(y)}\"; cat notes.md",
+		"cat notes.md & sh", "echo a & sh -c 'echo hi'; cat notes.md",
 		0
 	};
 	/* change (a): a reader or search only inside $(…) or backquotes

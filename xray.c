@@ -2107,7 +2107,8 @@ rm_scan(struct remit *r, const char *text, size_t n, int mode)
 ** in order, is skipped to its delimiter line (a trailing CR ignored); a <<
 ** inside (( )), $(( )), $[ ] or a[ ]= is two < (a shift); in ${…} and
 ** $[…] an operator or a blank is the word's. hx: a body sh expands ($(…)
-** or ` under an unquoted delimiter); hb/he: the body of the here-doc whose
+** or ` under an unquoted delimiter), or a ${ or $[ left open at a newline or
+** the end (it would hide the commands after it); hb/he: the body of the here-doc whose
 ** delimiter is that word. */
 #define SW_MAX 256	/* one word more marks a command past the cap */
 struct sw
@@ -2143,7 +2144,7 @@ shell_words(const char *c, size_t cl, struct sw *w)
 {
 	size_t i = 0, o = 0, hd = 0, j, dl, b0, k, dk;
 	const char *d;
-	int bl, dash, uq, ar = 0, an, sx = 0, bd, bk;
+	int bl, dash, uq, ar = 0, an, sx = 0, bd = 0, bk = 0;
 	unsigned long ps = 0;	/* open ('s, 1 for a $(: a bit each */
 
 	w->n = 0;
@@ -2304,6 +2305,7 @@ shell_words(const char *c, size_t cl, struct sw *w)
 					w->b[o++] = c[i++];
 				}
 			}
+		w->hx |= bd || bk;
 		w->b[o++] = '\0';
 		if (!hd && !w->op[w->n] && w->n && w->op[w->n - 1] &&
 		    !strcmp(w->b + w->off[w->n - 1], "<<"))
@@ -2562,7 +2564,7 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 		return X_LIST;	/* no memory, or words past SW_MAX unseen */
 	}
 	if (w.hx)
-		r = X_LIST;	/* $(…) in a here-doc body sh expands: not read */
+		r = X_LIST;	/* $(…) in a body sh expands, an open ${: not read */
 	/* every simple command: split on ; & && | || ( ) and newlines */
 	for (s = 0; s < w.n && !r; s = e + 1)
 	{
@@ -2575,8 +2577,9 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 		for (e = s; e < w.n && !(w.op[e] && !strpbrk(SWD(&w, e), "<>"));
 		     e++)
 			;
-		/* $(…) and `…` in quotes or a word run too: their commands,
-		** classified alike (an unquoted $( is split at the ( already) */
+		/* $(…) and `…` in quotes or a word run too, <(…) and >(…) in a
+		** ${…}: their commands, classified alike (an unquoted $( is split
+		** at the ( already) */
 		end = e > s ? w.re[e - 1] : 0;
 		for (i = e > s ? w.rs[s] : 0, q = 0; i < end && !sr; i++)
 			if (cmd[i] == '\\' && q != '\'')
@@ -2587,13 +2590,15 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 			         (cmd[i] == '"' && (!q || q == '"')))
 				q = q ? 0 : cmd[i];
 			else if ((!q || q == '"') && (cmd[i] == '`' ||
-			         (cmd[i] == '$' && i + 1 < end && cmd[i + 1] == '(')))
+			         ((cmd[i] == '$' || (!q && (cmd[i] == '<' ||
+			                                    cmd[i] == '>'))) &&
+			          i + 1 < end && cmd[i + 1] == '(')))
 			{
-				t = i + 1 + (cmd[i] == '$');
+				t = i + 1 + (cmd[i] != '`');
 				for (j = t; cmd[i] == '`' && j < end && cmd[j] != '`';
 				     j += 1 + (cmd[j] == '\\'))
 					;
-				j = cmd[i] == '$' || j > end ? end : j;
+				j = cmd[i] != '`' || j > end ? end : j;
 				x = depth >= 3 ? X_LIST :
 				    excl_in(cmd + t, j - t, cwd, cur, lost, depth + 1);
 				sr = x & ~X_SUB;
@@ -2690,9 +2695,12 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 					x = depth >= 3 ? X_LIST :
 					    excl_in(SWD(&w, k + 2), strlen(SWD(&w, k + 2)), cwd,
 					            cur, lost | xa, depth + 1);
-			if (x < 0 && s && SWD(&w, s - 1)[0] == '|' &&
-			    SWD(&w, s - 1)[1] != '|')
-				x = X_LIST;	/* … | sh */
+			if (x < 0 && s && ((SWD(&w, s - 1)[0] == '|' &&
+			                    SWD(&w, s - 1)[1] != '|') ||
+			                   (s > 1 && !strcmp(SWD(&w, s - 1), "&") &&
+			                    !strcmp(SWD(&w, s - 2), "|") &&
+			                    w.re[s - 2] == w.rs[s - 1])))
+				x = X_LIST;	/* … | sh, … |& sh */
 			if (x > 0 && (x & X_SUB))
 				sr = sr ? sr : x & ~X_SUB;
 			else if (x >= 0)
