@@ -14,7 +14,8 @@ two Claudes in one session, the --xray --json answer's "claudes" count
 saying so, 0 for a client that cannot see their records (#256); a Claude
 with Claudes below it (the ancestor
 joins, --xray --json agreeing, #253); a record read while it is rewritten
-in place, and no wait for an empty one left by a dead Claude (#253); a
+in place, and no wait for an empty one left by a dead Claude (#253),
+nor once its pid is reused (#274); a
 record whose procStart does not match; a
 sessionId that is no UUID; CLAUDE_CONFIG_DIR honoured; null once the
 program exits (its record removed, or left behind under a held session).
@@ -367,10 +368,15 @@ def main():
         # it, or every scan of the dir pays it for ever (10 waits of 5ms per
         # dir scan, two scans per --ls-json: 100ms; the bound leaves room
         # for load)
+        # ... nor once its pid is reused: the live process started after
+        # the record's last write is not its Claude (#274, QA 1.60.0
+        # LOW-X14; base: 20 re-reads, +100ms)
         dead = subprocess.Popen(["/usr/bin/true"])
         dead.wait()
+        reused = subprocess.Popen(["/bin/sleep", "60"])
         stale = [os.path.join(sessdir, "%d.json" % dead.pid),
-                 os.path.join(sessdir, "stale.json")]
+                 os.path.join(sessdir, "stale.json"),
+                 os.path.join(sessdir, "%d.json" % reused.pid)]
 
         def fastest():
             best = None
@@ -383,13 +389,17 @@ def main():
         clean = fastest()
         for f in stale:
             open(f, "w").close()
+        old = time.time() - 600
+        os.utime(stale[2], (old, old))
         open(trace, "w").close()
         slow = fastest()
         waited = traced("read again")
         for f in stale:
             os.unlink(f)
-        check("empty dead-pid and non-pid records: no re-read (%d)" % waited,
-              waited == 0)
+        reused.kill()
+        reused.wait()
+        check("empty dead-pid, non-pid and reused-pid records: no re-read "
+              "(%d)" % waited, waited == 0)
         check("... and no wait: fastest of 10 %.0fms vs %.0fms clean"
               % (slow * 1000, clean * 1000), slow - clean < 0.06)
 

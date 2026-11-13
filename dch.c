@@ -1602,12 +1602,35 @@ dch_claude_gone(const char *rec)
 	return !*rec || access(rec, F_OK) != 0;
 }
 
+/* When process pid started, from dch_process_start's "%a %b %e %T %Y" in
+** UTC; -1 when unknown. */
+static time_t
+proc_started(long pid)
+{
+	static const char mon[] = "JanFebMarAprMayJunJulAugSepOctNovDec";
+	char s[128], m[4];
+	const char *p;
+	struct tm tm;
+
+	memset(&tm, 0, sizeof tm);
+	if (dch_process_start(pid, s, sizeof s) < 0 ||
+	    sscanf(s, "%*s %3s %d %d:%d:%d %d", m, &tm.tm_mday, &tm.tm_hour,
+	           &tm.tm_min, &tm.tm_sec, &tm.tm_year) != 6 ||
+	    strlen(m) != 3 || !(p = strstr(mon, m)) || (p - mon) % 3)
+		return -1;
+	tm.tm_mon = (int)(p - mon) / 3;
+	tm.tm_year -= 1900;
+	return timegm(&tm);
+}
+
 /* Every regular record in one sessions dir, to visit(). Claude Code
 ** rewrites its record in place (writeFile: truncate, then write), so a read
 ** in between finds it empty or changing: such a record is read again, at
 ** most 10 waits of 5ms per dir, so one unlucky read never drops a live
-** Claude (#253). Empty, only a live <pid>.json's: one left empty by a
-** Claude killed mid-write stays empty, and would cost every scan 50ms. */
+** Claude (#253). Empty, only a live <pid>.json's whose process started by
+** the record's last write (2s for the clocks' rounding): one left empty by
+** a Claude killed mid-write stays empty, and would cost every scan 50ms,
+** also once its pid is reused (#274). */
 static int
 visit_records_in(const char *dir, dch_claude_record_fn visit, void *arg)
 {
@@ -1623,6 +1646,7 @@ visit_records_in(const char *dir, dch_claude_record_fn visit, void *arg)
 		struct stat before, after;
 		size_t len, n = strlen(de->d_name);
 		long rp;
+		time_t t;
 		int fd;
 		if (n < 6 || strcmp(de->d_name + n - 5, ".json") ||
 		    snprintf(path, sizeof path, "%s/%s", dir, de->d_name) >=
@@ -1643,6 +1667,7 @@ visit_records_in(const char *dir, dch_claude_record_fn visit, void *arg)
 			    (rp = strtol(de->d_name, &e, 10)) > 0 &&
 			    !strcmp(e, ".json") &&
 			    (kill((pid_t)rp, 0) == 0 || errno == EPERM) &&
+			    (t = proc_started(rp)) >= 0 && t <= before.st_mtime + 2 &&
 			    waits++ < 10)
 			{
 				dch_trace("claude record %s: empty, read again", path);
