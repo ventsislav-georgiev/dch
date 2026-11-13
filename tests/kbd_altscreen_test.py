@@ -161,10 +161,29 @@ def check_detach(who, out):
     return 0
 
 
+def end_session(name):
+    """dch -k name, bounded: run() kills it at the timeout (NIT-T4)."""
+    try:
+        subprocess.run([DCH, "-k", name], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=30)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def stop(master):
+    """End our --master-of: SIGTERM, 10 s, then SIGKILL (NIT-T4)."""
+    master.terminate()
+    try:
+        master.wait(10)
+    except subprocess.TimeoutExpired:
+        master.kill()
+        master.wait()
+
+
 def main():
     if not os.access(DCH, os.X_OK):
         print("FAIL: dch not executable at", DCH); return 1
-    os.system("'%s' -k %s >/dev/null 2>&1" % (DCH, SESS))
+    end_session(SESS)
 
     # Make the child write before its first client attaches. A no-mirror
     # master cannot replay this startup output, so first attach must forward it.
@@ -185,8 +204,7 @@ def main():
             break
         time.sleep(0.05)
     if not os.path.exists(sock):
-        master.terminate()
-        master.wait()
+        stop(master)
         shutil.rmtree(tmp, ignore_errors=True)
         print("FAIL: no master socket"); return 1
     for _ in range(100):
@@ -194,8 +212,8 @@ def main():
             break
         time.sleep(0.05)
     if not os.path.exists(pending):
-        os.system("'%s' -k %s >/dev/null 2>&1" % (DCH, SESS))
-        master.terminate()
+        end_session(SESS)
+        stop(master)
         shutil.rmtree(tmp, ignore_errors=True)
         print("FAIL: inner program did not queue startup output"); return 1
     pid_a, fd_a = spawn(["-f", "-n", SESS])
@@ -302,11 +320,10 @@ def main():
                     os.kill(pid, signal.SIGHUP)
                 except OSError:
                     pass
-        os.system("'%s' -k %s >/dev/null 2>&1" % (DCH, SESS))
-        os.system("'%s' -k %s-busy >/dev/null 2>&1" % (DCH, SESS))
+        end_session(SESS)
+        end_session(SESS + "-busy")
         if master.poll() is None:
-            master.terminate()
-            master.wait()
+            stop(master)
         shutil.rmtree(tmp, ignore_errors=True)
 
 
