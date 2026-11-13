@@ -8716,7 +8716,9 @@ hrec_load(int dfd, const char *fn, struct hrec *r)
 	    dch_json_string(r->body, "sock_dir", sd, sizeof sd) < 0 ||
 	    strcmp(sd, sock_dir) != 0 ||
 	    dch_json_string(r->body, "name", r->name, sizeof r->name) < 0 ||
-	    !r->name[0] || strchr(r->name, '/') ||	/* #203: in the store */
+	    /* #203's name_ok, a leading '-' apart as there: an older dch's
+	    ** -x is still listed, pinned and forgotten, never revived */
+	    !name_ok(r->name + strspn(r->name, "-")) ||
 	    dch_json_string(r->body, "cwd", r->cwd, sizeof r->cwd) < 0 ||
 	    dch_json_string(r->body, "end", r->end, sizeof r->end) < 0 ||
 	    !(r->argv = dch_json_strv(r->body, NULL, "argv", &r->argc)))
