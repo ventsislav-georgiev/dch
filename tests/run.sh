@@ -61,9 +61,10 @@ pyreap(){
     fi
     for s in "$SOCKDIR"/*.sock; do
         n=${s##*/}
-        [ -S "$s" ] && ! printf '%s\n' "$pyls" | grep -qxF "$n" || continue
+        # -e and --: a name starting with - is no option (QA 1.60.0 LOW-T10)
+        [ -S "$s" ] && ! printf '%s\n' "$pyls" | grep -qxF -e "$n" || continue
         printf '       ended its session %s with dch -k\n' "${n%.sock}"
-        "$DCH" -k "${n%.sock}" >/dev/null 2>&1
+        "$DCH" -k -- "${n%.sock}" >/dev/null 2>&1
     done
     runreap
 }
@@ -76,8 +77,7 @@ runreap(){
     find "$DCH_TEST_TMP" -type s -name '*.sock' 2>/dev/null |
     while IFS= read -r s; do
         n=${s##*/}
-        case $n in -*) continue ;; esac
-        DCH_SOCKET_DIR=${s%/*} "$DCH" -k "${n%.sock}" >/dev/null 2>&1
+        DCH_SOCKET_DIR=${s%/*} "$DCH" -k -- "${n%.sock}" >/dev/null 2>&1
     done
     # an ending master may still write its record: retry for up to 2 s
     rn=0
@@ -1127,21 +1127,30 @@ pyrun "dch serve keeps X-ray's test switches from its ctls" serve_xray_env_test.
 
 # --- the watchdog ends a hung test, its child and its session, only them ----
 # watchdog_hang.py records its pid, a child's, a session master's and one
-# in its own temp dir under $DCH_TEST_TMP (#250), then hangs past a 3 s
-# watchdog. The sleep is a bystander in run.sh's own group.
+# in its own temp dir under $DCH_TEST_TMP (#250), and a session named -x in
+# each (LOW-T10), then hangs past a 3 s watchdog. The sleep is a bystander in
+# run.sh's own group; session -kl, from before the test, is another (dch -k
+# -kl was "kill all").
 # The subshell keeps the hung test's FAIL out of the counts.
 if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
-    wdf=$fail wdpy='' wdkid='' wdm='' wdname='' wdm2='' wdtd=''
+    wdf=$fail wdpy='' wdkid='' wdm='' wdname='' wdm2='' wdtd='' wdx='' wdx2=''
     sleep 30 & wdby=$!
+    "$DCH" --master-of "$SOCKDIR/-kl.sock" -- sleep 30 </dev/null >/dev/null 2>&1 &
+    wdkl=$!
+    n=0
+    while [ "$n" -lt 50 ] && [ ! -S "$SOCKDIR/-kl.sock" ]; do
+        sleep 0.1; n=$((n + 1))
+    done
     (DCH_TEST_TIMEOUT=3 DCH_WD_PIDS="$TMP/wd.pids"; export DCH_WD_PIDS
      pyrun "hung" watchdog_hang.py) >"$TMP/wd.out" 2>&1
-    [ -f "$TMP/wd.pids" ] && read -r wdpy wdkid wdm wdname wdm2 wdtd <"$TMP/wd.pids"
+    [ -f "$TMP/wd.pids" ] &&
+        read -r wdpy wdkid wdm wdname wdm2 wdtd wdx wdx2 <"$TMP/wd.pids"
     wdgone(){ for p; do
         case $p in ''|*[!0-9]*) return 1 ;; esac
         ! kill -0 "$p" 2>/dev/null || return 1
     done; }
     n=0
-    while [ "$n" -lt 50 ] && ! wdgone "$wdpy" "$wdkid" "$wdm" "$wdm2"; do
+    while [ "$n" -lt 50 ] && ! wdgone "$wdpy" "$wdkid" "$wdm" "$wdm2" "$wdx" "$wdx2"; do
         sleep 0.1; n=$((n + 1))
     done
     grep -q '^  FAIL hung$' "$TMP/wd.out" && grep -q 'Timeout (' "$TMP/wd.out" \
@@ -1156,9 +1165,16 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
         wdgone "$wdm2" &&
         ok "watchdog: its temp dir in DCH_TEST_TMP goes, the session there ends" ||
         bad "watchdog: its temp dir in DCH_TEST_TMP goes, the session there ends"
+    wdgone "$wdx" "$wdx2" &&
+        ok "watchdog: its sessions named -x end, in the socket dir and its temp dir" ||
+        bad "watchdog: its sessions named -x end, in the socket dir and its temp dir"
+    kill -0 "$wdkl" 2>/dev/null && [ -S "$SOCKDIR/-kl.sock" ] &&
+        ok "watchdog: session -kl, from before the test, lives" ||
+        bad "watchdog: session -kl, from before the test, lives"
     kill -0 "$wdby" 2>/dev/null && ok "watchdog: a process outside its group lives" \
         || bad "watchdog: a process outside its group lives"
     kill "$wdby"
+    kill "$wdkl" 2>/dev/null
     [ "$fail" = "$wdf" ] || sed 's/^/       /' "$TMP/wd.out"
     [ -S "$SOCKDIR/$wdname.sock" ] && "$DCH" -k "$wdname" >/dev/null 2>&1
     # DCH_TEST_TIMEOUT 0 (no watchdog) and invalid values (600) pass a test
