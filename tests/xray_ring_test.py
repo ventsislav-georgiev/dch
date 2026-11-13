@@ -658,6 +658,41 @@ def test_shell_init(tmp):
             check("%s: A, B, C (input flag), D;1 for `false`" % sh,
                   i >= 3 and seqm[i - 3:i] == ["A", "B", "C"] and
                   m[i - 1][1] & X.F_INPUT and m[i][1] & X.F_EXIT, m[:12])
+            # --search (#297) over the ring: the typed commands as user,
+            # their rows as tool, each under its command's chapter, newest
+            # first; the prompt is not searched
+            r = dch("--xray", n, "--search", "SEQ 1 6", "--json")
+            o = json.loads(r.stdout) if r.returncode == 0 else {}
+            hs = o.get("hits", [])
+            cs = [h["chapter"] for h in hs]
+            check("%s: --search finds both typed commands, newest first, "
+                  "each its own chapter" % sh,
+                  o.get("corpus") == "shell" and
+                  [(h["who"], h["tool"], h["snippet"]) for h in hs] ==
+                  [("user", None, "seq 1 60")] * 2 and
+                  all(c and c[0] == "s" for c in cs) and
+                  int(cs[0][1:]) > int(cs[1][1:]) and
+                  hs[0]["offset"] > hs[1]["offset"] and
+                  o["more"] is False and o["partial"] is False, r.stdout +
+                  r.stderr)
+            r = dch("--xray", n, "--search", "58", "--json")
+            o = json.loads(r.stdout) if r.returncode == 0 else {}
+            hs = o.get("hits", [])
+            # a row still on the screen, not yet in the ring, has no
+            # chapter, as --ref's mentions there (xr_shell_screen)
+            check("%s: --search finds each command's output row, the ring's "
+                  "under its command's chapter" % sh,
+                  [(h["who"], h["snippet"]) for h in hs] == [("tool", "58")] * 2
+                  and hs[0]["chapter"] in (cs[0], None) and
+                  hs[1]["chapter"] == cs[1] and
+                  hs[0]["offset"] > hs[1]["offset"], r.stdout + r.stderr)
+            r = dch("--xray", n, "--search", "zp%" if sh == "zsh" else "bp$",
+                    "--json")
+            hs = json.loads(r.stdout)["hits"] if r.returncode == 0 else None
+            check("%s: the ring's prompt records are not searched (only the "
+                  "screen's last row may hold the prompt)" % sh,
+                  hs is not None and len(hs) <= 1 and
+                  all(h["chapter"] is None for h in hs), r.stdout + r.stderr)
             if sh == "bash":
                 bad = [r["text"] for r in recs if b"unbound" in r["text"]]
                 check("bash under set -u: no unbound-variable error",

@@ -3239,6 +3239,21 @@ ctl_payload(struct sb *b, int argc, char **argv, const char *cwd)
 	free(j.p);
 }
 
+/* A host's refusal as said: one of an X-ray flag this dch's own allowlist
+** took is an older dch's there (#297; #263 for a ref kind). */
+static const char *
+ctl_older(const char *msg, char *buf, size_t cap)
+{
+	static const char tail[] = " is not allowed with --xray";
+	size_t n = strlen(msg), t = sizeof tail - 1;
+
+	if (n <= t || msg[0] != '-' || strcmp(msg + n - t, tail))
+		return msg;
+	snprintf(buf, cap, "the host's dch does not know %.*s", (int)(n - t),
+	         msg);
+	return buf;
+}
+
 static volatile sig_atomic_t g_ctl_sig;	/* SIGINT or SIGTERM: cancel */
 
 static void
@@ -3273,7 +3288,7 @@ ctl_run(int fd, const char *sh, const char *verb, struct sb *rq,
 	static const unsigned char c34[] = { 0x34, 0, 0, 0, 0 };
 	struct sb out = {0}, err = {0};
 	unsigned char buf[RM_READ];
-	char msg[400] = "", why[100] = "";
+	char msg[400] = "", why[100] = "", old[450];
 	size_t off = 0;
 	long long end = now_ms() + RM_ATTACH_MS, cend = 0, heard, t;
 	int r = 0, xit = 1, code = 1, cx = 0, w;	/* cx: the signal, -1 EPIPE */
@@ -3410,7 +3425,8 @@ ctl_run(int fd, const char *sh, const char *verb, struct sb *rq,
 	{
 		/* a 0x13: the host refused this request, nothing ran */
 		if (code == 1)
-			fprintf(stderr, "dch: %s: %s\n", sh, msg);
+			fprintf(stderr, "dch: %s: %s\n", sh,
+			        ctl_older(msg, old, sizeof old));
 		else
 			fprintf(stderr, "dch: %s refused: %s\n", sh, msg);
 		return code == 1 ? 1 : DCH_EXIT_REFUSED;
@@ -4085,7 +4101,7 @@ static void
 rq_net(struct rq *q, struct sb *o)
 {
 	unsigned char buf[RM_READ];
-	char msg[400], why[100], m[800];
+	char msg[400], why[100], m[800], old[450];
 	int r, xit, code;
 	ssize_t k = read(q->p->fd, buf, sizeof buf);
 
@@ -4129,7 +4145,8 @@ rq_net(struct rq *q, struct sb *o)
 		{
 			/* a 0x13: the host refused it, nothing ran */
 			snprintf(m, sizeof m, code == 1 ? "dch: %s: %s"
-			         : "dch: %s refused: %s", q->sh, msg);
+			         : "dch: %s refused: %s", q->sh,
+			         code == 1 ? ctl_older(msg, old, sizeof old) : msg);
 			rq_err(o, q->req, m);
 			rq_exit(o, q->req, code == 1 ? 1 : DCH_EXIT_REFUSED,
 			        "refused");

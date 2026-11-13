@@ -97,21 +97,32 @@ def read_clock_at(want, got, secs):
     rows carry the clock at read time as their "at" (dch.c ring_screen:
     time(NULL)), so a run a second later says a second later. got's mention
     "at" takes want's where it is later by 0 to secs (the seconds between
-    the runs), never earlier; every other byte still has to match."""
+    the runs), never earlier; every other byte still has to match. A
+    --search object's hits (#297) each take want's "at" the same way."""
     if len(want) != len(got):
         return got
     out = []
     for w, g in zip(want, got):
-        p = MENTION_AT[isinstance(w, bytes)]
+        b = isinstance(w, bytes)
+        p = MENTION_AT[b]
         mw, mg = p.search(w), p.search(g)
         if mw and mg and 0 <= int(mg[2]) - int(mw[2]) <= secs:
             g = g[:mg.start(2)] + mw[2] + g[mg.end(2):]
+        hw = list(HIT_AT[b].finditer(w)) if (b'"hits":[' if b else
+                                             '"hits":[') in w else []
+        hg = list(HIT_AT[b].finditer(g))
+        if hw and len(hw) == len(hg):
+            for x, y in reversed(list(zip(hw, hg))):
+                if 0 <= int(y[1]) - int(x[1]) <= secs:
+                    g = g[:y.start(1)] + x[1] + g[y.end(1):]
         out.append(g)
     return out
 
 
 MENTION_AT = {False: re.compile(r'("mention":\{.*?"at":)(\d+)'),
               True: re.compile(rb'("mention":\{.*?"at":)(\d+)')}
+HIT_AT = {False: re.compile(r'"at":(\d+),"who"'),
+          True: re.compile(rb'"at":(\d+),"who"')}
 
 
 def frame(t, payload=b""):
@@ -195,6 +206,10 @@ class Fake:
                             "ctlwhynum": frame(0x33, {"exit": 2, "why": 7}),
                             "ctlbig": frame(0x33, {"exit": 2,
                                                    "why": "\x1b" * 100}),
+                            # #297: an older dch serve's allowlist
+                            "ctlold": frame(0x13, {
+                                "message": "--search is not allowed with "
+                                           "--xray"}),
                         }[self.mode])
                         c.shutdown(socket.SHUT_WR)
                     elif t == 0x03:
@@ -500,13 +515,19 @@ def xray_checks(dch, check, senv, cenv, port, fakes, tmp, slog):
     same("--ref --scope all", "@", "--ref", "#831", "--scope", "all",
          "--json", mask=True)
     same("--chapter", "@", "--chapter", "s1", "--json")
+    loc = dch(senv, "--xray", "xr1", "--search", "SEE #831", "--json")
+    check("xray --search on a shell on the host: the command and its row",
+          loc.returncode == 0 and len(json.loads(loc.stdout)["hits"]) >= 1,
+          (loc.stdout, loc.stderr))
+    same("--search on a shell", "@", "--search", "SEE #831", "--json",
+         mask=True)
     same("--clear", "@", "--clear", "--json")
     same("a Claude session UUID", "@", "--json",
          n="9f9f9f9f-0000-4000-8000-000000000000")
     same("a <file>.json record name", "@", "--json", n="nosuch.json")
     same("no such session", "@", "--json", n="xr-nope")
     check("xray: each remote form ran one ctl on the host",
-          ctls() - n0 == 11, ctls() - n0)
+          ctls() - n0 == 12, ctls() - n0)
 
     # #168: forms that answer with content on the host, not only errors.
     # The host's store gets History Claude sessions: xrs0 and xrs1 in one
@@ -575,6 +596,18 @@ def xray_checks(dch, check, senv, cenv, port, fakes, tmp, slog):
     same("--ref --scope all, light", "@", "--ref", "#931", "--scope", "all",
          "--json", n="xrs0", mask=True)
     # a dash-led anchor is --chapter's value on the host, never a flag
+    # #297: --search over the host's transcript, its hits newest first
+    loc = dch(senv, "--xray", "xrs0", "--search", "#931", "--json")
+    o = json.loads(loc.stdout) if loc.returncode == 0 else {}
+    check("xray --search on the host: the prompt's hit, under its chapter",
+          [(h["who"], h["snippet"], h["chapter"]) for h in
+           o.get("hits", [])] == [("user", "fix #931 in src/w.c:20",
+                                   anchors[0] if anchors else None)],
+          (loc.stdout, loc.stderr))
+    same("--search on a Claude session", "@", "--search", "#931", "--json",
+         n="xrs0")
+    same("--search, nothing found", "@", "--json", "--search", "absent",
+         n="xrs0")
     for a in ("-f", "--config", "--json"):
         loc = dch(senv, "--xray", "xrs0", "--chapter", a, "--json")
         check("xray --chapter %s on the host: read as the anchor (chapter "
@@ -612,7 +645,7 @@ def xray_checks(dch, check, senv, cenv, port, fakes, tmp, slog):
          "--ref", "src/w.c:20", "--scope", "all", "--full", "--json",
          n="xrs0", mask=True)
     check("xray parity: each remote form ran one ctl on the host",
-          ctls() - n0 == 9, ctls() - n0)
+          ctls() - n0 == 11, ctls() - n0)
 
     # QA 1.55.0 LOW-7: the host's JSON escapes U+061C, U+2028 and U+2029
     # as \u, so its lines pass --requests as objects, byte for byte. A
@@ -681,7 +714,13 @@ def xray_checks(dch, check, senv, cenv, port, fakes, tmp, slog):
                     (["--ref", "#831", "--scope", "none"], "dch: bad scope"),
                     (["--ref", "#831", "--budget-ms", "0x40"],
                      "dch: bad budget"),
-                    (["--json"], "dch: bad usage: --json twice")):
+                    (["--json"], "dch: bad usage: --json twice"),
+                    (["--search", "x"], "dch: bad search: 2 to 200 bytes, "
+                     "no control character"),
+                    (["--search", "a\x1bb"], "dch: bad search: 2 to 200 "
+                     "bytes, no control character"),
+                    (["--search", "ab", "--ref", "#1"],
+                     "dch: bad usage: --search and --ref")):
         r = dch(xenv, "--xray", "srv:xr1", "--json", *a)
         check("xray value rule %r: %s, exit 2, nothing sent" % (a, line),
               r.returncode == 2 and r.stderr == line + "\n", r)
@@ -764,6 +803,18 @@ def xray_checks(dch, check, senv, cenv, port, fakes, tmp, slog):
     body = json.loads(f.bodies[-1])
     check("xray: the 0x30 is --xray <name> first, the host: off",
           body == {"argv": ["--xray", "x", "--follow", "--json"]}, body)
+    # #297: a host whose dch serve predates --search refuses the flag
+    f = Fake("ctlold", ops=["ctl", "ctl-cancel", "watch", "xray"])
+    fakes.append(f)
+    r = dch(side("q=127.0.0.1:%d" % f.port), "--xray", "q:x", "--search",
+            "needle", "--json")
+    check("xray --search on an older host: its dch does not know --search, "
+          "exit 1", r.returncode == 1 and r.stdout == "" and
+          r.stderr == "dch: q: the host's dch does not know --search\n", r)
+    check("xray --search: the 0x30 carries the needle as typed",
+          json.loads(f.bodies[-1]) == {"argv": ["--xray", "x", "--search",
+                                                "needle", "--json"]},
+          f.bodies[-1])
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
     dead = s.getsockname()[1]

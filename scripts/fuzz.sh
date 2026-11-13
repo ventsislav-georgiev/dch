@@ -4,7 +4,7 @@
 #
 #   scripts/fuzz.sh [SECONDS] [TARGET...] [-- CONFIGURE-ARGS]
 #   TARGET: json meta history config detect frames keys serve remote ring
-#           xray xref xchapter modes
+#           xray xref xchapter xsearch modes
 #           (default: all)
 #
 # Needs a clang with the libFuzzer runtime: CC=clang on Linux; on macOS
@@ -20,7 +20,7 @@ secs=${1:-60}
 targets=
 while [ $# -gt 0 ] && [ "$1" != -- ]; do targets="$targets $1"; shift; done
 [ $# -gt 0 ] && shift
-targets=${targets:-json meta history config detect frames keys serve remote ring xray xref xchapter modes}
+targets=${targets:-json meta history config detect frames keys serve remote ring xray xref xchapter xsearch modes}
 CC=${CC:-clang}
 art=${FUZZ_ARTIFACTS:-$PWD/fuzz-artifacts}
 
@@ -62,7 +62,7 @@ for t in $targets; do
 	remote) objs="attach.o master.o dch.o serve.o" ;;  # includes remote.c
 	ring)  objs="attach.o master.o dch.o serve.o remote.o"  # the API
 	       ld=$ringld ;;
-	xray|xref|xchapter) objs="attach.o master.o dch.o serve.o remote.o" ;;  # the API
+	xray|xref|xchapter|xsearch) objs="attach.o master.o dch.o serve.o remote.o" ;;  # the API
 	*)     objs="attach.o master.o serve.o remote.o" ;; # includes dch.c
 	esac
 	$CC $CF -Dmain=dch_main -fsanitize=fuzzer -o "fuzz_$t" \

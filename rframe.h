@@ -112,6 +112,7 @@ int ctl_known(const char *verb);
 int xray_scope_ok(const char *s);
 int xray_anchor_ok(const char *s);
 int xray_budget(const char *s);
+int xray_search_ok(const char *s);
 int name_ok(const char *s);
 
 extern char g_ts[];	/* the tailscale CLI, after ts_find; "" none */

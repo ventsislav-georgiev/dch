@@ -1592,6 +1592,7 @@ def test_write_fail():
                  ("--ref", ["xr-wf", "--ref", "#831", "--scope", "session",
                             "--full", "--json"]),
                  ("--clear", [n, "--clear", "--json"]),
+                 ("--search", ["xr-wf", "--search", "#831", "--json"]),
                  ("--chapter", ["xr-wf", "--chapter", "f%x:0" %
                                 os.stat(tp).st_ino, "--json"])]
         for what, a in forms:
@@ -1605,6 +1606,182 @@ def test_write_fail():
     finally:
         dch("-k", n)
         os.unlink(tp)
+
+
+# ---- --search <text> --json (#297) ----------------------------------------
+
+SSID = "11111111-2222-4333-8444-5555555555b1"
+SSID2 = "11111111-2222-4333-8444-5555555555b2"
+S_KEYS = ["schema", "session", "session_id", "corpus", "text", "hits",
+          "more", "partial", "why", "bytes"]
+H_KEYS = ["chapter", "offset", "at", "who", "tool", "snippet"]
+
+
+def search(n, text, env=None):
+    r = dch("--xray", n, "--search", text, "--json", env=env)
+    try:
+        return r.returncode, json.loads(r.stdout), r.stderr
+    except ValueError:
+        return r.returncode, None, r.stdout + r.stderr
+
+
+def test_search():
+    """The places a word was said, newest first: typed prompts, answers,
+    tool inputs and results; never thinking, a sidechain, a meta record,
+    toolUseResult or a compaction summary. 50 hits, then more; a bytes cap
+    is partial; the needle's rules; nothing written."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, SSID + ".jsonl")
+    tp2 = os.path.join(pdir, SSID2 + ".jsonl")
+    ts = lambda s: "2026-11-10T10:%02d:%02d.000Z" % divmod(s, 60)
+    recs = [
+        {"type": "user", "cwd": "/home/demo/proj", "timestamp": ts(0),
+         "message": {"content": "where is the Needle?"}},
+        {"type": "assistant", "timestamp": ts(1), "message": {"content": [
+            {"type": "thinking", "thinking": "needle thought onlyinthink"},
+            {"type": "text", "text": "the NEEDLE is in a.c, \"quoted\" "
+             "back\\slash caf\u00e9"},
+            {"type": "tool_use", "id": "toolu_1", "name": "Bash",
+             "input": {"command": "grep -n needle a.c"}}]}},
+        {"type": "user", "timestamp": ts(2),
+         "toolUseResult": {"stdout": "needle onlyintur"},
+         "message": {"content": [{"type": "tool_result",
+                                  "tool_use_id": "toolu_1",
+                                  "content": "a.c:3: needle\nnext"}]}},
+        {"type": "user", "isSidechain": True, "timestamp": ts(3),
+         "message": {"content": "needle onlyinside"}},
+        {"type": "user", "isMeta": True, "timestamp": ts(3),
+         "message": {"content": "needle onlyinmeta"}},
+        {"type": "user", "isCompactSummary": True, "timestamp": ts(3),
+         "message": {"content": "needle onlyinsummary"}},
+        {"type": "user", "timestamp": ts(4),
+         "message": {"content": "next turn: thread the needle"}}]
+    with open(tp, "w") as f:
+        for o in recs:
+            f.write(json.dumps(o) + "\n")
+    history("xr-sr", SSID, cfg)
+    rc, o, err = xray("xr-sr", "--json")
+    anchors = [c["anchor"] for c in (o or {}).get("chapters", [])]
+    check("search: the fixture has its two chapters", len(anchors) == 2,
+          (o, err))
+    before = files(T)
+    rc, o, err = search("xr-sr", "needle")
+    hits = (o or {}).get("hits", [])
+    check("search: one object, its keys in order, each hit's keys in order",
+          rc == 0 and o and list(o) == S_KEYS and
+          all(list(h) == H_KEYS for h in hits) and o["schema"] == 1 and
+          o["session"] == "xr-sr" and o["session_id"] == SSID and
+          o["corpus"] == "claude" and o["text"] == "needle" and
+          o["bytes"] == os.path.getsize(tp), (rc, o, err))
+    check("search: newest first, one per record per kind: the turn, the "
+          "tool result (its call's name), the answer, the call's input, "
+          "the prompt",
+          [(h["who"], h["tool"], h["snippet"]) for h in hits] ==
+          [("user", None, "next turn: thread the needle"),
+           ("tool", "Bash", "a.c:3: needle next"),
+           ("assistant", None,
+            'the NEEDLE is in a.c, "quoted" back\\slash caf\u00e9'),
+           ("tool", "Bash", "grep -n needle a.c"),
+           ("user", None, "where is the Needle?")], hits)
+    check("search: each hit's chapter is its turn's anchor, at its "
+          "timestamp", len(anchors) == 2 and len(hits) == 5 and
+          [h["chapter"] for h in hits] == [anchors[1]] + [anchors[0]] * 4 and
+          [h["at"] for h in hits] == [1794304804, 1794304802, 1794304801,
+                                      1794304801, 1794304800] and
+          o["more"] is False and o["partial"] is False and o["why"] is None,
+          hits)
+    for word in ("onlyinthink", "onlyintur", "onlyinside", "onlyinmeta",
+                 "onlyinsummary", "absent word"):
+        rc, o, err = search("xr-sr", word)
+        check("search: %s gives no hit" % word,
+              rc == 0 and o and o["hits"] == [] and not o["more"], (o, err))
+    for text, want in (('"quoted"', 1), ("back\\slash", 1),
+                       ("CAF\u00e9", 1), ("caf\u00c9", 0),
+                       ("needle\nnext", 0), ("needle next", 0)):
+        r = dch("--xray", "xr-sr", "--search", text, "--json")
+        if "\n" in text:
+            check("search: a control character in the needle is bad search "
+                  "(exit 2)", r.returncode == 2 and r.stdout == "" and
+                  r.stderr == "dch: bad search: 2 to 200 bytes, no control "
+                  "character\n", (r.stdout, r.stderr))
+            continue
+        n = len(json.loads(r.stdout)["hits"]) if r.returncode == 0 else -1
+        check("search: %r gives %d hit(s) (escapes decoded; ASCII letters "
+              "fold, others not)" % (text, want), n == want, r.stdout)
+    for text in ("x", "", "y" * 201, "\t\t"):
+        r = dch("--xray", "xr-sr", "--search", text, "--json")
+        check("search: %d bytes %r is bad search (exit 2)" %
+              (len(text.encode()), text[:8]),
+              r.returncode == 2 and r.stdout == "" and
+              r.stderr == "dch: bad search: 2 to 200 bytes, no control "
+              "character\n", (r.returncode, r.stdout, r.stderr))
+    rc, o, err = search("xr-sr", "\u00e9")
+    check("search: 2 bytes of UTF-8 is a needle", rc == 0 and o and
+          len(o["hits"]) == 1, (rc, o, err))
+    rc, o, err = search("xr-sr", "n" * 200)
+    check("search: 200 bytes is a needle", rc == 0 and o and
+          o["hits"] == [], (rc, o, err))
+    for a, other in ((["--ref", "#1"], "--ref"),
+                     (["--chapter", anchors[0] if anchors else "f1:0"],
+                      "--chapter"), (["--clear"], "--clear"),
+                     (["--follow"], "--follow")):
+        r = dch("--xray", "xr-sr", "--search", "needle", *a, "--json")
+        check("search: with %s is bad usage (exit 2)" % other,
+              r.returncode == 2 and r.stdout == "" and
+              r.stderr == "dch: bad usage: --search and %s\n" % other,
+              (r.stdout, r.stderr))
+    trace = os.path.join(T, "trace-search")
+    open(trace, "w").close()
+    rc, o, err = search("xr-sr", "Needle", env=dict(ENV, DCH_DEBUG=trace))
+    tr = open(trace).read()
+    check("search: traced, one seam open, the needle never in a trace line",
+          rc == 0 and "xray seam: open" in tr and "needle" not in tr.lower(),
+          tr[-600:])
+    os.unlink(trace)
+    new = sorted(set(files(T)) - set(before))
+    check("search: nothing written", not new, new)
+
+    # 60 prompts, 2.5 MB of answers, then one more: 50 hits newest first,
+    # each prompt its own chapter across windows; a 51st is more
+    user = lambda t: json.dumps({"type": "user", "cwd": "/home/demo/proj",
+                                 "message": {"content": t}}) + "\n"
+    said = lambda t: json.dumps({"type": "assistant", "message": {
+        "content": [{"type": "text", "text": t}]}}) + "\n"
+    offs = []
+    with open(tp2, "w") as f:
+        for i in range(60):
+            offs.append(f.tell())
+            f.write(user("needle %d" % i))
+            f.write(said("ok"))
+        for i in range(2500):
+            f.write(said("pad %d %s" % (i, "y" * 1000)))
+        offs.append(f.tell())
+        f.write(user("last Needle"))
+    history("xr-sr2", SSID2, cfg)
+    ino = "%x" % os.stat(tp2).st_ino
+    rc, o, err = search("xr-sr2", "needle")
+    hits = (o or {}).get("hits", [])
+    want = offs[::-1][:50]
+    check("search: 61 hits: the newest 50, newest first, more, not partial",
+          rc == 0 and o and [h["offset"] for h in hits] == want and
+          hits[0]["snippet"] == "last Needle" and
+          hits[1]["snippet"] == "needle 59" and o["more"] is True and
+          o["partial"] is False and o["why"] is None, (rc, err, hits[:3]))
+    check("search: each prompt is its own chapter, past a window",
+          [h["chapter"] for h in hits] == ["f%s:%d" % (ino, x) for x in want],
+          [h["chapter"] for h in hits][:3])
+    caps = dict(ENV, DCH_XRAY_CAPS="0:1500000")
+    rc, o, err = search("xr-sr2", "needle", env=caps)
+    check("search: under a 1.5 MB bytes cap, the newest hit, partial, why "
+          "bytes, no more",
+          rc == 0 and o and [h["snippet"] for h in o["hits"]] ==
+          ["last Needle"] and o["partial"] is True and o["why"] == "bytes"
+          and o["more"] is False and o["bytes"] < os.path.getsize(tp2),
+          (rc, o, err))
+    os.unlink(tp)
+    os.unlink(tp2)
 
 
 # ---- 3.5: --chapter <anchor> --json (#156, XR3b) --------------------------
@@ -3529,6 +3706,7 @@ def main():
         test_refs()
         test_d2_whole()
         test_write_fail()
+        test_search()
         test_chapter()
         test_chapter_shell()
         test_cancel()

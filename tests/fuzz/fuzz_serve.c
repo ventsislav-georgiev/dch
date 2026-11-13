@@ -127,15 +127,15 @@ parse_pieces(const uint8_t *d, size_t n, size_t room, struct sb *out)
 
 /* An --xray ctl_check let through (#157, spec #832 4.4): the name right
 ** after the verb; 3.1's flags only, each once, --json among them, at most
-** one of --follow, --ref, --chapter, --clear; --scope, --full, --budget-ms
-** only with --ref; each value by its rule; no timeout and no cap for
-** --follow alone. */
+** one of --follow, --ref, --search (#297), --chapter, --clear; --scope,
+** --full, --budget-ms only with --ref; each value by its rule; no timeout
+** and no cap for --follow alone. */
 static void
 xray_inv(int ac, char **av, const unsigned char *kind, int fl)
 {
 	static const char *const opt[] = { "--json", "--follow", "--clear",
 	                                   "--full", "--ref", "--chapter",
-	                                   "--scope", "--budget-ms" };
+	                                   "--scope", "--budget-ms", "--search" };
 	unsigned seen = 0, k, one;
 	int i;
 
@@ -143,20 +143,21 @@ xray_inv(int ac, char **av, const unsigned char *kind, int fl)
 		abort();
 	for (i = 2; i < ac; i++)
 	{
-		for (k = 0; k < 8 && strcmp(av[i], opt[k]); k++)
+		for (k = 0; k < 9 && strcmp(av[i], opt[k]); k++)
 			;
-		if (k == 8 || kind[i] != CK_FLAG || seen & 1u << k)
+		if (k == 9 || kind[i] != CK_FLAG || seen & 1u << k)
 			abort();
 		seen |= 1u << k;
 		if (k < 4)
 			continue;
-		if (++i >= ac || kind[i] != (k >= 6 ? CK_VALUE : CK_TEXT) ||
+		if (++i >= ac || kind[i] != (k == 6 || k == 7 ? CK_VALUE : CK_TEXT) ||
 		    (k == 5 && !xray_anchor_ok(av[i])) ||
+		    (k == 8 && !xray_search_ok(av[i])) ||
 		    (k == 6 && !xray_scope_ok(av[i])) ||
 		    (k == 7 && xray_budget(av[i]) < 50))
 			abort();
 	}
-	one = seen & (2 | 4 | 16 | 32);
+	one = seen & (2 | 4 | 16 | 32 | 256);
 	if (!(seen & 1) || one & (one - 1) || (seen & (8 | 64 | 128) &&
 	                                       !(seen & 16)) ||
 	    fl != (seen & 2 ? CTL_FOREVER | CTL_NOCAP : 0))

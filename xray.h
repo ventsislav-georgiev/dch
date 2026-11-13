@@ -487,4 +487,44 @@ extern const char *const *xr_git_probe;
 const char *xr_git_bin(char *buf, size_t bufsz);
 extern unsigned long xr_res_spawned;
 
+/* ---- --search (#297): where a word or phrase was said ------------------- */
+#define XR_SEARCH_MIN  2		/* bytes of the text */
+#define XR_SEARCH_MAX  200
+#define XR_SEARCH_HITS 50		/* the newest; one more says more:true */
+#define XR_SNIPPET     160		/* bytes of decoded text around a hit */
+#define XR_LOOKBACK_MS 300		/* past the last hit, to find the prompt
+					** the oldest hits are under */
+
+/* needle[0..nl) in hay[0..n), ASCII letters folded, every other byte as is:
+** the first match's offset, SIZE_MAX for none (0 for an empty needle). */
+size_t xr_find(const char *hay, size_t n, const char *needle, size_t nl);
+
+/* One query's hits, newest first. NULL for a text outside 2..200 bytes or
+** out of memory. t0: the query's start (CLOCK_MONOTONIC ms), for the caps. */
+struct xr_search;
+struct xr_search *xr_search_new(const char *text, long long t0);
+void xr_search_free(struct xr_search *s);
+/* A transcript (codex: a Codex rollout) read from its end in windows cut at
+** line starts, under xr_lim's bytes and ms; lines that hold the text's raw
+** run are decoded, and a hit is a match in a typed prompt, assistant text, a
+** tool call's input values or a tool result's text (never thinking, a
+** sidechain record, metadata, toolUseResult or a compaction summary), one
+** per record and kind. ino: the file's, for the chapter anchors. 0, or -1 a
+** read error. */
+int xr_search_file(struct xr_search *s, int fd, uint64_t size, uint64_t ino,
+                   int codex);
+/* A shell ring's record, oldest first, right after xr_shell_feed(sh, x):
+** command rows (who "user") and output rows ("tool"), soft wraps joined;
+** xr_search_ring_end after the last. */
+void xr_search_rec(struct xr_search *s, const struct xr_shell *sh,
+                   const struct xr_rec *x);
+void xr_search_ring_end(struct xr_search *s);
+/* {"schema":1,"session","session_id","corpus","text","hits":[{"chapter",
+** "offset","at","who","tool","snippet"}…],"more","partial","why","bytes"}
+** and a newline; why (a shell's "range") when the caller knows the read was
+** not whole. 0, -1 the write failed. */
+int xr_search_print(FILE *f, const struct xr_search *s, const char *session,
+                    const char *session_id, const char *corpus,
+                    const char *why);
+
 #endif /* DCH_XRAY_H */

@@ -103,6 +103,12 @@ dch \- detachable terminal sessions with a headless agent API
 .br
 .B dch \-\-xray
 .I name
+.B \-\-search
+.I text
+.B \-\-json
+.br
+.B dch \-\-xray
+.I name
 .B \-\-ref
 .I ref
 .RB [ \-\-scope
@@ -1376,6 +1382,73 @@ A live Codex's rollout is among the other sessions' files too, found as
 .IR name 's
 would be; its project directory is the Codex's cwd's, its last seen time
 the rollout's last write.
+.B \-\-search
+.I text
+finds where a word or phrase was said in
+.IR name 's
+own corpus and prints one object, the newest places first
+.RB ( schema ,
+.BR session ,
+.BR session_id ,
+.BR corpus ,
+.BR text ,
+.B hits
+of
+.BR chapter ,
+.BR offset ,
+.BR at ,
+.BR who ,
+.B tool
+and
+.BR snippet ,
+then
+.BR more ,
+.BR partial ,
+.B why
+and
+.BR bytes ).
+.I text
+is literal, 2 to 200 bytes of UTF\-8 with no control character and no bidi
+control (else exit 2,
+.IR "bad search: 2 to 200 bytes, no control character" );
+ASCII letters match in either case, nothing else folds.
+It counts the typed prompts, the assistant's text, a tool call's input
+values and a tool result's text (Codex: the user's and assistant's
+messages, a call's arguments and its output; a shell: the typed commands
+and the output rows), never thinking, a sidechain, a meta record,
+.BR toolUseResult ,
+a compaction summary or a key; at most one hit per record and
+.B who
+.RB ( user ,
+.BR assistant ,
+.BR tool ).
+.B chapter
+is the chapter's anchor
+.RB ( null
+where
+.B \-\-json
+has none),
+.B offset
+the record's byte offset (a shell: its ring seq),
+.B snippet
+about 160 bytes around the match on character boundaries, controls and
+runs of spaces as one space.
+A transcript or rollout is read whole from its end in 1 MiB windows, up to
+1 GiB
+.RB ( why:\(dqbytes\(dq )
+and 10 s
+.RB ( why:\(dqtime\(dq );
+the newest 50 hits are kept and a 51st sets
+.BR more:true .
+It goes with no other flag but
+.B \-\-json
+and not in
+.BR \-\-requests ;
+the text is never logged or traced.
+On
+.IB host : name
+a host whose dch predates it says
+.IR "the host's dch does not know \-\-search" .
 .B \-\-chapter
 .I anchor
 prints one chapter's entries as one object
@@ -1803,6 +1876,9 @@ or, for
 .B \-\-clear
 in dch\-lite and for
 .BR \-\-chapter ,
+.B \-\-ref
+and
+.BR \-\-search ,
 .IR "no x\-ray corpus" ,
 or for
 .BR \-\-chapter ,
@@ -3007,6 +3083,7 @@ a session name that passes the attach name check and does not start with
 \-\-say \fIn\fP \-\-json \-\- \fItext\fP
 \-\-xray \fIn\fP \-\-json [\-\-follow|\-\-clear|\-\-chapter \fIanchor\fP]
 \-\-xray \fIn\fP \-\-ref \fIref\fP [\-\-scope \fIs\fP] [\-\-full] [\-\-budget\-ms \fIms\fP] \-\-json
+\-\-xray \fIn\fP \-\-search \fItext\fP \-\-json
 .fi
 .RE
 .PP
@@ -3047,6 +3124,7 @@ rules apply: no
 .RI ( "\-\-xray needs \-\-json (the view is client\-side only)" ),
 two of
 .BR \-\-ref ,
+.BR \-\-search ,
 .BR \-\-follow ,
 .B \-\-chapter
 and
@@ -3066,7 +3144,8 @@ and a value that fails
 .IR "not a ref" ,
 .IR "bad anchor" ,
 .IR "bad scope" ,
-.IR "bad budget" )
+.IR "bad budget" ,
+.IR "bad search: 2 to 200 bytes, no control character" )
 are refused.
 .B \-\-clear
 needs no

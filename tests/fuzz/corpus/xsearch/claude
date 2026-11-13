@@ -1,0 +1,5 @@
+ needle{"type":"user","timestamp":"2026-11-10T10:00:00Z","message":{"content":"where is the Needle?"}}
+{"type":"assistant","timestamp":"2026-11-10T10:00:01Z","message":{"content":[{"type":"thinking","thinking":"needle"},{"type":"text","text":"the NEEDLE \"q\" caf\u00e9"},{"type":"tool_use","id":"t1","name":"Grep","input":{"pattern":"needle"}}]}}
+{"type":"user","toolUseResult":{"stdout":"needle"},"message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"x:1 needle"}]}}
+{"type":"user","isSidechain":true,"message":{"content":"needle"}}
+{"type":"user","message":{"content":"next needle"}}

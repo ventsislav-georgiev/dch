@@ -325,7 +325,12 @@ def main():
               ["--chapter", "a", "--json"],
               ["--chapter", "Az09:_.-", "--json"],
               ["--chapter", "-f", "--json"],
-              ["--chapter", "c" * 128, "--json"]]
+              ["--chapter", "c" * 128, "--json"],
+              ["--search", "needle", "--json"],
+              ["--json", "--search", "two words"],
+              ["--search", "\u00e9", "--json"],
+              ["--search", "s" * 200, "--json"],
+              ["--search", "--json", "--json"]]
         names = ["9f9f9f9f-0000-4000-8000-000000000000", "rec.json",
                  "m0123456789abcdef"]
         no = [([], "--xray needs --json (the view is client-side only)"),
@@ -338,9 +343,11 @@ def main():
               (["--ref", "#1", "--ref", "#2", "--json"], "--ref twice"),
               (["--json", "--ref"], "--ref needs a value"),
               (["--follow", "--ref", "#1", "--json"],
-               "--ref, --follow, --chapter and --clear exclude each other"),
+               "--ref, --search, --follow, --chapter and --clear exclude "
+               "each other"),
               (["--clear", "--chapter", "a", "--json"],
-               "--ref, --follow, --chapter and --clear exclude each other"),
+               "--ref, --search, --follow, --chapter and --clear exclude "
+               "each other"),
               (["--clear", "--full", "--json"],
                "--scope, --full and --budget-ms come with --ref"),
               (["--scope", "session", "--json"],
@@ -365,7 +372,18 @@ def main():
               (["--chapter", "\u00e9", "--json"], "bad anchor"),
               (["--ref", "#1", "--scope", "Session", "--json"], "bad scope"),
               (["--ref", "#1", "--scope", "", "--json"], "bad scope"),
-              (["--ref", "#1", "--scope", "none", "--json"], "bad scope")]
+              (["--ref", "#1", "--scope", "none", "--json"], "bad scope"),
+              (["--search", "a", "--ref", "#1", "--json"],
+               "--ref, --search, --follow, --chapter and --clear exclude "
+               "each other"),
+              (["--search", "ab", "--search", "cd", "--json"],
+               "--search twice"),
+              (["--json", "--search"], "--search needs a value"),
+              (["--search", "ab", "--scope", "session", "--json"],
+               "--scope, --full and --budget-ms come with --ref")]
+        no += [(["--search", t, "--json"], "bad search: 2 to 200 bytes, no control character")
+               for t in ["", "x", "s" * 201, "a\x01b", "a\x1bb", "a\x7fb",
+                         "a\x85b", "a\nb"] + ["a" + b for b in bidi]]
         no += [(["--ref", "#1" + b, "--json"], "bad ref") for b in bidi]
         no += [(["--ref", "#1", "--budget-ms", b, "--json"], "bad budget")
                for b in ("49", "301", "+50", "0x40", "4294967346", "",

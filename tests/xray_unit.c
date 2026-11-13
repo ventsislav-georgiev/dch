@@ -6,7 +6,9 @@
 ** --chapter (#156): the anchor rule and a chapter's entries; resolvers
 ** (#159, XR6): the file rules and every state, git's argv, env, probe,
 ** states, timeout and group kill through a fake git; json.c's quoting of
-** the code points a terminal acts on (QA 1.55.0 LOW-7).
+** the code points a terminal acts on (QA 1.55.0 LOW-7); --search (#297):
+** the needle's rules, folding, escapes, what never counts, the backward
+** read's windows, the snippet, the 50 cap, Codex and the shell ring.
 **
 **   cc -I. -o xray_unit tests/xray_unit.c xray.c json.c && ./xray_unit
 */
@@ -4993,6 +4995,420 @@ t_d3(void)
 	}
 }
 
+/* ---- --search (#297) ------------------------------------------------------ */
+
+/* body into an unlinked temp file searched for text: the printed object
+** (malloc'd), NULL on a failure */
+static char *
+search_of(const char *body, size_t n, const char *text, int codex)
+{
+	char path[] = "/tmp/xray_unit.XXXXXX", *b = NULL;
+	struct xr_search *s;
+	size_t bl = 0;
+	int fd = mkstemp(path), rc = -1;
+	FILE *f;
+
+	if (fd < 0)
+		return NULL;
+	unlink(path);
+	if (write(fd, body, n) == (ssize_t)n &&
+	    (s = xr_search_new(text, xr_now_ms())))
+	{
+		if (xr_search_file(s, fd, n, 0x1f, codex) == 0 &&
+		    (f = open_memstream(&b, &bl)))
+		{
+			rc = xr_search_print(f, s, "s", "id", "claude", NULL);
+			fclose(f);
+		}
+		xr_search_free(s);
+	}
+	close(fd);
+	if (rc != 0)
+	{
+		free(b);
+		return NULL;
+	}
+	return b;
+}
+
+static int
+u8_ok(const unsigned char *p)
+{
+	int k;
+
+	for (; *p; p += k + 1)
+	{
+		k = *p < 0x80 ? 0 : (*p & 0xe0) == 0xc0 ? 1 : (*p & 0xf0) == 0xe0
+		    ? 2 : (*p & 0xf8) == 0xf0 ? 3 : -1;
+		if (k < 0)
+			return 0;
+		for (int i = 1; i <= k; i++)
+			if ((p[i] & 0xc0) != 0x80)
+				return 0;
+	}
+	return 1;
+}
+
+#define SU(t, ts) "{\"type\":\"user\",\"timestamp\":\"" ts "\"," \
+	"\"message\":{\"content\":\"" t "\"}}\n"
+
+static void
+t_search(void)
+{
+	char *o, big[40000], line[512];
+	size_t n = 0, k;
+	int f0;
+	struct xr_limits l0 = xr_lim;
+
+	/* the needle's length: 2 to 200 bytes */
+	{
+		char t[202];
+		struct xr_search *s;
+
+		memset(t, 'a', sizeof t - 1);
+		t[201] = '\0';
+		CHECK("search: 201 bytes is no needle", !xr_search_new(t, 0));
+		t[200] = '\0';
+		CHECK("search: 200 bytes is a needle", (s = xr_search_new(t, 0)));
+		xr_search_free(s);
+		CHECK("search: 2 bytes is a needle", (s = xr_search_new("ab", 0)));
+		xr_search_free(s);
+		CHECK("search: 1 byte and none are no needle",
+		      !xr_search_new("a", 0) && !xr_search_new("", 0));
+	}
+
+	/* xr_find: ASCII letters fold, nothing else */
+	CHECK("search: xr_find folds ASCII letters",
+	      xr_find("xx NeEdLe", 9, "needle", 6) == 3 &&
+	      xr_find("NEEDLE", 6, "nEEDLe", 6) == 0);
+	CHECK("search: xr_find does not fold past ASCII, nor [ and {",
+	      xr_find("\xc3\x89", 2, "\xc3\xa9", 2) == SIZE_MAX &&
+	      xr_find("a[", 2, "a{", 2) == SIZE_MAX &&
+	      xr_find("ab", 2, "abc", 3) == SIZE_MAX);
+
+	/* case folding through a transcript, newest first, one hit a record
+	** a kind, and what never counts */
+	{
+		static const char t[] =
+		    SU("where is the Needle?", "2026-11-10T10:00:00Z")
+		    "{\"type\":\"assistant\",\"timestamp\":\"2026-11-10T10:00:01Z\","
+		    "\"message\":{\"content\":[{\"type\":\"thinking\",\"thinking\":"
+		    "\"needle think1\"},{\"type\":\"text\",\"text\":\"NEEDLE one, "
+		    "needle two\"},{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":"
+		    "\"Grep\",\"input\":{\"pattern\":\"needle\",\"path\":\"x\"}}]}}\n"
+		    "{\"type\":\"user\",\"toolUseResult\":{\"stdout\":\"needle "
+		    "tur1\"},\"message\":{\"content\":[{\"type\":\"tool_result\","
+		    "\"tool_use_id\":\"t1\",\"content\":[{\"type\":\"text\","
+		    "\"text\":\"x:1 needle\"}]}]}}\n"
+		    "{\"type\":\"user\",\"isSidechain\":true,\"message\":"
+		    "{\"content\":\"needle side1\"}}\n"
+		    "{\"type\":\"user\",\"isCompactSummary\":true,\"message\":"
+		    "{\"content\":\"needle sum1\"}}\n"
+		    "{\"type\":\"summary\",\"summary\":\"needle sum2\"}\n"
+		    "{\"type\":\"user\",\"needle\":\"meta1\",\"message\":"
+		    "{\"content\":\"plain\"}}\n";
+
+		o = search_of(t, sizeof t - 1, "nEeDlE", 0);
+		f0 = fails;
+		CHECK("search: folded, newest first: the result (its call's name), "
+		      "the answer once, the call's input, the prompt",
+		      o && strstr(o, "\"hits\":[{\"chapter\":\"f1f:0\",\"offset\":"
+		                  "355,\"at\":null,\"who\":\"tool\",\"tool\":\"Grep\","
+		                  "\"snippet\":\"x:1 needle\"},{\"chapter\":\"f1f:0\","
+		                  "\"offset\":96,\"at\":1794304801,\"who\":"
+		                  "\"assistant\",\"tool\":null,\"snippet\":\"NEEDLE "
+		                  "one, needle two\"},{\"chapter\":\"f1f:0\",\"offset\":"
+		                  "96,\"at\":1794304801,\"who\":\"tool\",\"tool\":"
+		                  "\"Grep\",\"snippet\":\"needle\"},{\"chapter\":"
+		                  "\"f1f:0\",\"offset\":0,\"at\":1794304800,\"who\":"
+		                  "\"user\",\"tool\":null,\"snippet\":\"where is the "
+		                  "Needle?\"}],\"more\":false,\"partial\":false,"
+		                  "\"why\":null,\"bytes\":"));
+		if (fails > f0)
+			fprintf(stderr, "  got: %s", o ? o : "(null)\n");
+		free(o);
+		static const char *const never[] = {"think1", "tur1", "side1",
+		                                    "sum1", "sum2", "meta1"};
+		for (k = 0; k < sizeof never / sizeof never[0]; k++)
+		{
+			o = search_of(t, sizeof t - 1, never[k], 0);
+			snprintf(line, sizeof line, "search: a match only in %s is no "
+			         "hit", never[k]);
+			CHECK(line, o && strstr(o, "\"hits\":[],"));
+			free(o);
+		}
+	}
+
+	/* escaped forms: \" \\ \n \/ and é, as written and raw */
+	{
+		static const char t[] =
+		    SU("say \\\"hi\\\" a\\\\b c\\nd e\\/f caf\\u00e9", "x")
+		    SU("caf\xc3\xa9 raw", "x");
+		static const struct { const char *text; int hits; } row[] = {
+			{ "\"hi\"", 1 }, { "a\\b", 1 }, { "e/f", 1 },
+			{ "caf\xc3\xa9", 2 }, { "CAF\xc3\xa9", 2 },
+			{ "caf\xc3\x89", 0 }, { "\xc3\xa9", 2 },
+			{ "c\\nd", 0 }, { "c d", 0 }, { "\\u00e9", 0 },
+		};
+
+		for (k = 0; k < sizeof row / sizeof row[0]; k++)
+		{
+			o = search_of(t, sizeof t - 1, row[k].text, 0);
+			snprintf(line, sizeof line, "search: escapes decoded: %s gives "
+			         "%d hit(s)", row[k].text, row[k].hits);
+			CHECK(line, o && count_of(o, "\"who\":") == row[k].hits);
+			free(o);
+		}
+		o = search_of(t, sizeof t - 1, "say", 0);
+		f0 = fails;
+		CHECK("search: the snippet decoded, its newline a space",
+		      o && count_of(o, "\"who\":") == 1 &&
+		      strstr(o, "\"snippet\":\"say \\\"hi\\\" a\\\\b c d e/f caf"
+		             "\xc3\xa9\""));
+		if (fails > f0)
+			fprintf(stderr, "  got: %s", o ? o : "(null)\n");
+		free(o);
+	}
+
+	/* a needle across the backward read's windows: lines of ~100 bytes
+	** in windows of 258; each line is whole in one window */
+	xr_lim.line = 256;
+	n = 0;
+	for (k = 0; k < 40; k++)
+		n += (size_t)snprintf(big + n, sizeof big - n,
+		                      "{\"type\":\"user\",\"message\":{\"content\":"
+		                      "\"%.*sxyzzy turn %02zu\"}}\n" A("ok") "\n",
+		                      (int)(k * 7 % 60), "................................"
+		                      "............................", k);
+	o = search_of(big, n, "XYZZY TURN", 0);
+	f0 = fails;
+	{
+		const char *p = o;
+		long long last = -1, off, ch;
+		char *e;
+		size_t seen = 0;
+		int order = 1;
+
+		/* each hit: "chapter":"f1f:<ch>","offset":<off> */
+		while (p && (p = strstr(p, "\"chapter\":\"f1f:")))
+		{
+			ch = strtoll(p + 15, &e, 10);
+			off = strncmp(e, "\",\"offset\":", 11) ? -2
+			      : strtoll(e + 11, NULL, 10);
+			order &= (last < 0 || off < last) && ch == off;
+			last = off;
+			seen++;
+			p = e;
+		}
+		CHECK("search: every line found across 258-byte windows, newest "
+		      "first, each its own chapter", o && seen == 40 && order &&
+		      strstr(o, "xyzzy turn 39\"},{") &&
+		      strstr(o, "xyzzy turn 00\"}]") &&
+		      !strstr(o, "\"chapter\":null") &&
+		      strstr(o, "\"more\":false,\"partial\":false"));
+		if (fails > f0)
+			fprintf(stderr, "  got: %s", o ? o : "(null)\n");
+	}
+	free(o);
+	/* a line past xr_lim.line is skipped, the rest still found */
+	memset(big + n, 'z', 300);
+	memcpy(big + n, "{\"x\":\"xyzzy turn", 16);
+	big[n + 299] = '\n';
+	o = search_of(big, n + 300, "xyzzy turn", 0);
+	CHECK("search: a line over the cap is skipped, the older still found",
+	      o && count_of(o, "\"who\":") == 40);
+	free(o);
+	xr_lim = l0;
+
+	/* past the range (3.8): a head of 400 and a tail of 600 bytes; a hit
+	** in the middle --json never reads has no chapter, the others theirs */
+	xr_lim.head = 400;
+	xr_lim.tail = 600;
+	n = 0;
+	for (k = 0; k < 20; k++)
+		n += (size_t)snprintf(big + n, sizeof big - n,
+		                      "{\"type\":\"user\",\"message\":{\"content\":"
+		                      "\"mid %02zu\"}}\n" A("ok") "\n", k);
+	o = search_of(big, n, "mid ", 0);
+	{
+		const char *p = o;
+		long long ch, off;
+		char *e;
+		int good = 1, nulls = 0, seen = 0;
+
+		while (p && (p = strstr(p, "{\"chapter\":")))
+		{
+			p += 11;
+			if (!strncmp(p, "null,\"offset\":", 14))
+			{
+				off = strtoll(p + 14, NULL, 10);
+				good &= off >= 400 && (size_t)off < n - 600;
+				nulls++;
+			}
+			else
+			{
+				ch = strtoll(p + 5, &e, 10);
+				off = strtoll(e + 11, NULL, 10);
+				good &= ch == off && (off < 400 || (size_t)off >= n - 600);
+			}
+			seen++;
+		}
+		CHECK("search: past the range, a hit in the unread middle has a "
+		      "null chapter, the head's and the tail's their own",
+		      o && seen == 20 && good && nulls > 0 && nulls < 20 &&
+		      strstr(o, "\"partial\":false"));
+	}
+	free(o);
+	xr_lim = l0;
+
+	/* the cap: 60 hits keep the newest 50, more */
+	n = 0;
+	for (k = 0; k < 60; k++)
+		n += (size_t)snprintf(big + n, sizeof big - n,
+		                      "{\"type\":\"user\",\"message\":{\"content\":"
+		                      "\"hit %02zu\"}}\n", k);
+	o = search_of(big, n, "hit ", 0);
+	CHECK("search: 60 hits: the newest 50 (59 down to 10), more",
+	      o && count_of(o, "\"who\":") == 50 &&
+	      strstr(o, "\"hits\":[{") && strstr(o, "\"snippet\":\"hit 59\"") &&
+	      strstr(o, "\"snippet\":\"hit 10\"") &&
+	      !strstr(o, "\"snippet\":\"hit 09\"") &&
+	      strstr(o, "\"snippet\":\"hit 59\"") <
+	      strstr(o, "\"snippet\":\"hit 10\"") && strstr(o, "\"more\":true"));
+	free(o);
+
+	/* the snippet: about 160 bytes on UTF-8 boundaries, controls as one
+	** space */
+	n = (size_t)snprintf(big, sizeof big, "{\"type\":\"user\",\"message\":"
+	                     "{\"content\":\"");
+	for (k = 0; k < 150; k++)
+		n += (size_t)snprintf(big + n, sizeof big - n, "\xc3\xa9");
+	n += (size_t)snprintf(big + n, sizeof big - n,
+	                      "\\t\\u0001 \\u0085 FOUNDIT");
+	for (k = 0; k < 150; k++)
+		n += (size_t)snprintf(big + n, sizeof big - n, "\xe2\x82\xac");
+	n += (size_t)snprintf(big + n, sizeof big - n, "\"}}\n");
+	o = search_of(big, n, "foundit", 0);
+	{
+		const char *a = o ? strstr(o, "\"snippet\":\"") : NULL;
+		const char *z = a ? strstr(a + 11, "\"}") : NULL;
+
+		CHECK("search: the snippet is cut on characters, never more than "
+		      "160 bytes, controls as one space",
+		      a && z && z - (a + 11) <= 160 && z - (a + 11) >= 140 &&
+		      u8_ok((const unsigned char *)o) &&
+		      !strstr(o, "\xef\xbf\xbd") &&
+		      strstr(a, "\xc3\xa9 FOUNDIT\xe2\x82\xac"));
+	}
+	free(o);
+
+	/* Codex: a call's output names its call; the argument values */
+	{
+		static const char t[] =
+		    "{\"timestamp\":\"2026-11-10T10:00:00.000Z\",\"type\":"
+		    "\"response_item\",\"payload\":{\"type\":\"function_call\","
+		    "\"name\":\"shell\",\"call_id\":\"c9\",\"arguments\":"
+		    "\"{\\\"command\\\":[\\\"ls\\\",\\\"Quux\\\"]}\"}}\n"
+		    "{\"timestamp\":\"2026-11-10T10:00:01.000Z\",\"type\":"
+		    "\"response_item\",\"payload\":{\"type\":"
+		    "\"function_call_output\",\"call_id\":\"c9\",\"output\":"
+		    "\"quux.c\"}}\n"
+		    "{\"timestamp\":\"2026-11-10T10:00:02.000Z\",\"type\":"
+		    "\"response_item\",\"payload\":{\"type\":\"reasoning\","
+		    "\"summary\":[{\"type\":\"summary_text\",\"text\":\"quux\"}]}}\n";
+
+		o = search_of(t, sizeof t - 1, "QUUX", 1);
+		CHECK("search: Codex: the output under its call's name, then the "
+		      "call's argument; reasoning never",
+		      o && count_of(o, "\"who\":") == 2 &&
+		      strstr(o, "\"who\":\"tool\",\"tool\":\"shell\",\"snippet\":"
+		             "\"quux.c\"},{") &&
+		      strstr(o, "\"who\":\"tool\",\"tool\":\"shell\",\"snippet\":"
+		             "\"Quux\"}]"));
+		free(o);
+	}
+
+	/* the shell ring: commands as user, rows as tool under the block's
+	** chapter, newest first; a 51st is more, the newest 50 kept */
+	{
+		static struct xr_rec r[200];
+		static char rows[60][8];
+		struct xr_chapters c;
+		struct xr_shell sh;
+		struct xr_search *s = xr_search_new("ROW", 0);
+		char *b = NULL;
+		size_t bl = 0, rn = 0;
+		FILE *f;
+		static const struct { int kind, flags; const char *t; } h[] = {
+			{ RING_K_MARK, 0, "A" }, { RING_K_PROMPT, 0, "row$" },
+			{ RING_K_MARK, 0, "B" }, { RING_K_INPUT, 0, "seq row" },
+			{ RING_K_MARK, RING_F_INPUT, "C" },
+		};
+
+		for (int blk = 0; blk < 2; blk++)
+		{
+			for (k = 0; k < 5; k++, rn++)
+			{
+				r[rn].kind = h[k].kind;
+				r[rn].flags = h[k].flags;
+				r[rn].text = h[k].t;
+			}
+			for (k = 0; k < 30; k++, rn++)
+			{
+				snprintf(rows[blk * 30 + k], sizeof rows[0], "row %02zu",
+				         blk * 30 + k);
+				r[rn].kind = RING_K_OUTPUT;
+				r[rn].text = rows[blk * 30 + k];
+			}
+			r[rn].kind = RING_K_MARK;
+			r[rn].flags = RING_F_EXIT;
+			r[rn++].text = "D;0";
+		}
+		for (k = 0; k < rn; k++)
+		{
+			r[k].seq = 500 + k;
+			r[k].t = 2000 + (uint32_t)k;
+			r[k].len = strlen(r[k].text);
+		}
+		xr_shell_begin(&sh, &c);
+		for (k = 0; s && k < rn; k++)
+		{
+			xr_shell_feed(&sh, &r[k]);
+			xr_search_rec(s, &sh, &r[k]);
+		}
+		xr_shell_end(&sh);
+		xr_chapters_free(&c);
+		if (s)
+		{
+			xr_search_ring_end(s);
+			if ((f = open_memstream(&b, &bl)))
+			{
+				xr_search_print(f, s, "s", "m1", "shell", NULL);
+				fclose(f);
+			}
+		}
+		/* the second block's prompt record is r[37]: s537 */
+		CHECK("search: shell: 62 hits, the newest 50 (row 59 down), the "
+		      "rows under their block, the command under its own; the "
+		      "prompt never; more",
+		      b && count_of(b, "\"who\":") == 50 &&
+		      strstr(b, "\"hits\":[{\"chapter\":\"s537\",\"offset\":570,"
+		             "\"at\":2070,\"who\":\"tool\",\"tool\":null,"
+		             "\"snippet\":\"row 59\"}") &&
+		      strstr(b, "{\"chapter\":\"s537\",\"offset\":539,\"at\":2039,"
+		             "\"who\":\"user\",\"tool\":null,\"snippet\":"
+		             "\"seq row\"}") &&
+		      strstr(b, "{\"chapter\":\"s501\",\"offset\":534,\"at\":2034,"
+		             "\"who\":\"tool\",\"tool\":null,\"snippet\":"
+		             "\"row 29\"}") &&
+		      !strstr(b, "row$") && strstr(b, "\"more\":true"));
+		if (b && !strstr(b, "\"offset\":570,"))
+			fprintf(stderr, "  got: %.400s\n", b);
+		free(b);
+		xr_search_free(s);
+	}
+}
+
 /* json.c's dch_json_quote (QA 1.55.0 LOW-7): every code point a terminal
 ** acts on as \u, its neighbours raw */
 static int
@@ -5079,6 +5495,7 @@ main(int argc, char **argv)
 	t_codex_chapter();
 	t_codex_lookup();
 	t_quote();
+	t_search();
 	printf("%s: %d failed\n", fails ? "FAIL" : "ok", fails);
 	return fails != 0;
 }
