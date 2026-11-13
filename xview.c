@@ -27,6 +27,8 @@
 #endif
 #define XV_MENTIONS  10000	/* a card keeps at most these */
 #define XV_STOP_MS   50	/* a child's grace after its SIGTERM (#204) */
+#define XV_KILL_MS   250	/* after its SIGKILL, then kept (#212) */
+#define XV_LATE      16	/* kept: SIGKILLed, not dead yet */
 #define XV_ALPHA     "asdfghjklzxcvbnmwertyuiop"	/* hint labels: no q */
 
 enum { XV_LIST, XV_CARD, XV_READ };
@@ -311,13 +313,39 @@ xv_fitlen(const char *s, size_t n, int w)
 
 /* ---- the children ---------------------------------------------------- */
 
+/* Reap the children xv_stop kept (#212), then keep pid (> 0) too; 0 when
+** there is no room. Main context only: xv_kill never sees these, a
+** SIGKILLed child needs no SIGTERM, and a kept pid is never signalled. */
+static int
+xv_late(pid_t pid)
+{
+	static pid_t late[XV_LATE];
+	int i, room = -1;
+	pid_t w;
+
+	for (i = 0; i < XV_LATE; i++)
+	{
+		if (late[i] > 0 && ((w = waitpid(late[i], NULL, WNOHANG)) > 0 ||
+		                    (w < 0 && errno != EINTR)))
+			late[i] = 0;
+		if (!late[i] && room < 0)
+			room = i;
+	}
+	if (pid > 0 && room >= 0)
+		late[room] = pid;
+	return pid <= 0 || room >= 0;
+}
+
 /* A child ended. Its pipes close first: a write it is blocked in fails
 ** (EPIPE) instead of waiting for a reader that is gone (QA 1.57.0 HIGH-R1).
 ** SIGTERM lets a remote one send the host its 0x34; after XV_STOP_MS it is
 ** SIGKILLed, so the view never sits out a silent host's RM_CANCEL_MS
 ** (MED-R2): the host takes the closed connection as the cancel. The
-** signals that run xv_kill wait until the pid is reaped and its slot
-** cleared, so xv_kill never signals a reaped pid. */
+** signals that run xv_kill wait until the pid is reaped (or kept) and its
+** slot cleared, so xv_kill never signals a reaped pid. One still alive
+** XV_KILL_MS after its SIGKILL is in uninterruptible I/O (a hung mount):
+** SIGKILL waits for that call to return, so it is kept and reaped later,
+** and the view goes on (#212). */
 static void
 xv_stop(struct xv_kid *k, int slot)
 {
@@ -343,9 +371,15 @@ xv_stop(struct xv_kid *k, int slot)
 		if (w == 0)
 		{
 			kill(k->pid, SIGKILL);
+			end = now_ms() + XV_KILL_MS;
+			while ((w = waitpid(k->pid, NULL, WNOHANG)) == 0 &&
+			       now_ms() < end)
+				nanosleep(&ts, NULL);
+		}
+		/* no room to keep it: the wait for good, as before */
+		if (w == 0 && !xv_late(k->pid))
 			while (waitpid(k->pid, NULL, 0) < 0 && errno == EINTR)
 				;
-		}
 		xv_pids[slot] = 0;
 		sigprocmask(SIG_SETMASK, &o, NULL);
 	}
@@ -436,6 +470,7 @@ xv_pump(struct xv *v, int slot, fd_set *rs)
 	ssize_t r;
 	int st;
 	size_t el;
+	pid_t w;
 
 	if (k->efd >= 0 && FD_ISSET(k->efd, rs))
 	{
@@ -485,8 +520,15 @@ xv_pump(struct xv *v, int slot, fd_set *rs)
 	if (k->pid <= 0 || k->fd >= 0 || k->efd >= 0)
 		return 0;
 	xv_pids[slot] = 0;
-	while (waitpid(k->pid, &st, 0) < 0 && errno == EINTR)
+	while ((w = waitpid(k->pid, &st, WNOHANG)) < 0 && errno == EINTR)
 		;
+	if (w == 0)
+	{
+		/* its pipes closed as it exits, its exit not done: a later
+		** tick reaps it (#212) */
+		xv_pids[slot] = k->pid;
+		return 0;
+	}
 	k->pid = 0;
 	k->rc = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
 	/* its last line, without the newline */
@@ -2333,6 +2375,7 @@ xv_run(int fd, const char *n, char *err, size_t errsz)
 		fd_set rs;
 		int mx = fd, force = pk_winch, c, busy;
 
+		(void)xv_late(0);
 		pk_winch = 0;
 		if (v->mode == XV_LIST && v->tab == 2 && now_ms() - v->scr_at >= 1000)
 			xv_screen_load(v);
