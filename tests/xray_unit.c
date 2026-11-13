@@ -4245,6 +4245,28 @@ t_d3(void)
 		  PR, 0, "pull:o/r#12=New;" },
 		{ "gh pr edit " PR " --title New --body \"see "
 		  "https://github.com/o/r/pull/13\"", PR, 0, "pull:o/r#12=New;" },
+		/* #229: gh's repo flag before or after the kind is still a create
+		** (the URL names the repo); no value, or another flag, is not */
+		{ "gh -R o/r pr create --title T --body x o/r#5", PR, 0,
+		  "pull:o/r#12=T;" },
+		{ "gh --repo o/r issue create --title T --body x o/r#5",
+		  "https://github.com/o/r/issues/13", 0, "pull:o/r#13=T;" },
+		{ "gh --repo=o/r pr create --title T --body x o/r#5", PR, 0,
+		  "pull:o/r#12=T;" },
+		{ "gh -R=o/r pr new --title T --body x o/r#5", PR, 0,
+		  "pull:o/r#12=T;" },
+		{ "gh -Ro/r pr create --title T --body x o/r#5", PR, 0,
+		  "pull:o/r#12=T;" },
+		{ "gh pr -R o/r create --title T --body x o/r#5", PR, 0,
+		  "pull:o/r#12=T;" },
+		{ "gh -R o/r pr view --title T --body x o/r#5", PR, 0,
+		  "pull:o/r#5=T;" },
+		{ "gh -R pr create --title T --body x o/r#5", PR, 0,
+		  "pull:o/r#5=T;" },
+		{ "gh --hostname h pr create --title T --body x o/r#5", PR, 0,
+		  "pull:o/r#5=T;" },
+		{ "gh -R o/r; pr create --title T --body x o/r#5", PR, 0,
+		  "pull:o/r#5=T;" },
 		/* a gh alias is no create: R2 */
 		{ "gh alias-create --title T --body \"Fixes #999\"", PR, 0,
 		  "pull:o/r#12=T;" },

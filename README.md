@@ -1291,7 +1291,10 @@ carries its own value and does not count); a ref inside a longer word
 (`--body "Fixes #9"`, `--opt=#9`) does not count, and with none left the
 output defines. A create command (`gh pr create`, `gh pr new`,
 `gh issue create`, `gh issue new`) takes its ref from its output only: what it
-creates has no number until it prints one. An orphan result, a forged or orphaned shell block, an error,
+creates has no number until it prints one. gh's repo flag (`-R o/r`,
+`--repo o/r`, `--repo=o/r`) may come before or after `pr` or `issue`; any other
+word there makes it no create. A gh alias for a create is not recognised: dch
+does not run gh. An orphan result, a forged or orphaned shell block, an error,
 a fence, a diff, a listing command (`rg`, `grep`, `ls`, ...), a file printed
 from outside the cwd, a heading with an empty title, and more than 3 headings
 of one shape never define. The command counts in every simple command of it

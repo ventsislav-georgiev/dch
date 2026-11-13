@@ -3172,9 +3172,29 @@ d3_out(void *ctx, const struct xr_span *sp)
 	return 0;
 }
 
+/* Word k past gh's repo flag (-R o/r, -Ro/r, -R=o/r, --repo o/r,
+** --repo=o/r), the one flag gh takes before or after pr|issue; any other
+** word is not skipped, so an unknown flag leaves no create (#229). */
+static size_t
+gh_repo(const struct sw *w, size_t k)
+{
+	const char *s;
+
+	if (k >= w->n || w->op[k])
+		return k;
+	s = SWD(w, k);
+	if (!strncmp(s, "--repo=", 7) || (!strncmp(s, "-R", 2) && s[2]))
+		return k + 1;
+	if ((!strcmp(s, "-R") || !strcmp(s, "--repo")) && k + 1 < w->n &&
+	    !w->op[k + 1])
+		return k + 2;
+	return k;
+}
+
 /* D3: --title on a bash command that did not fail. A create command (gh pr
-** create|new, gh issue create|new) takes its ref from its output only (R1):
-** what it creates has no number until it prints one. */
+** create|new, gh issue create|new, gh's repo flag allowed after gh or the
+** kind) takes its ref from its output only (R1): what it creates has no
+** number until it prints one, and its URL names the repo. */
 static void
 d3(const struct dsrc *s, struct dset *ds)
 {
@@ -3183,7 +3203,7 @@ d3(const struct dsrc *s, struct dset *ds)
 	struct sw w;
 	struct d3m m;
 	const char *val = NULL;
-	size_t k;
+	size_t k, j;
 	int cr = 0;
 	struct dres *d;
 	char title[XR_TITLE_MAX * 4 + 1] = "";	/* whole: copied by size */
@@ -3201,8 +3221,10 @@ d3(const struct dsrc *s, struct dset *ds)
 		else if (!strncmp(SWD(&w, k), "--title=", 8))
 			val = SWD(&w, k) + 8;
 	for (k = 0; k + 2 < w.n && !cr; k++)
-		cr = !strcmp(base(SWD(&w, k)), "gh") && in_list(SWD(&w, k + 1), kind) &&
-		     in_list(SWD(&w, k + 2), verb);
+		cr = !w.op[k] && !strcmp(base(SWD(&w, k)), "gh") &&
+		     (j = gh_repo(&w, k + 1)) < w.n && !w.op[j] &&
+		     in_list(SWD(&w, j), kind) && (j = gh_repo(&w, j + 1)) < w.n &&
+		     !w.op[j] && in_list(SWD(&w, j), verb);
 	if (val)
 		title_of(val, strlen(val), title);
 	m.w = &w;
