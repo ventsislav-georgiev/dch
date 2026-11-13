@@ -20,6 +20,9 @@ Covers:
   6. n shows the auto rows: [ from the middle reads the notification (2);
   7. from a card: Enter on PROJ-9's mention reads the middle chapter, ]
      turns, Esc goes back to the card, not to the middle chapter.
+The view says prompt, never chapter (#295): the tab is Prompts, the footer
+"] next prompt", the lines "end; again for the next prompt (4 of 4): ...",
+"no next prompt", "top; again for the previous prompt (...)".
 
 Run:  python3 tests/xray_reader_next_test.py      (uses ./dch)
 """
@@ -198,8 +201,8 @@ def selected(v, text):
 def test_list():
     v = Pty([DCH, "--xray", "xv-nx"])
     try:
-        check("open: Chapters counts the three shown",
-              wait(v, lambda s: "Chapters 3" in s and "last prompt" in s),
+        check("open: Prompts (#295) counts the three shown",
+              wait(v, lambda s: "Prompts 3" in s and "last prompt" in s),
               screen(v)[-600:])
         v.key(b"k")
         check("the selection on the middle chapter",
@@ -208,13 +211,14 @@ def test_list():
                    and "middle line 01" in s)
         check("Enter: the header says 3 of 4 and the middle's title", ok,
               head(v))
-        check("the footer shows ] next chapter and [ previous",
-              "] next chapter" in screen(v) and "[ previous" in screen(v),
+        check("the footer shows ] next prompt and [ previous (#295)",
+              "] next prompt" in screen(v) and "[ previous" in screen(v)
+              and "chapter" not in screen(v),
               screen(v)[-400:])
         press(v, b"G", lambda s: "middle line 60" in s)
-        ok = press(v, b"j", lambda s: "end of chapter; again for the next "
+        ok = press(v, b"j", lambda s: "end; again for the next prompt "
                    "(4 of 4): last prompt" in s)
-        check("j at the end: one line says the next chapter", ok,
+        check("j at the end: one line says the next prompt (#295)", ok,
               screen(v)[-300:])
         check("... and the reader stays on the middle chapter",
               at(3, "middle prompt about PROJ-9")(screen(v)) and
@@ -228,23 +232,23 @@ def test_list():
               "middle line 60" not in screen(v), screen(v))
         ok = press(v, b"]", lambda s: at(4, "last prompt")(s))
         check("]: the next chapter, 4 of 4", ok, head(v))
-        ok = press(v, b"]", lambda s: "no next chapter" in s)
+        ok = press(v, b"]", lambda s: "no next prompt" in s)
         check("] on the last: said, the reader stays",
               ok and at(4, "last prompt")(screen(v)), screen(v)[-300:])
-        press(v, b"k", lambda s: "top of chapter" in s)
+        press(v, b"k", lambda s: "top; again for the previous prompt" in s)
         ok = press(v, b"k", lambda s: at(3, "middle prompt about PROJ-9")(s))
         check("k twice at the top of 4: the previous chapter, at its end",
               ok and "middle line 60" in screen(v) and
               "middle line 01" not in screen(v), screen(v))
         press(v, b"g", lambda s: "middle line 01" in s)
-        ok = press(v, b"k", lambda s: "top of chapter; again for the "
-                   "previous (1 of 4): first prompt" in s)
+        ok = press(v, b"k", lambda s: "top; again for the previous prompt "
+                   "(1 of 4): first prompt" in s)
         check("k at the top: says the previous shown chapter, the auto row "
               "skipped", ok, screen(v)[-300:])
         ok = press(v, b"k", lambda s: at(1, "first prompt")(s) and
                    "reply one" in s)
         check("k again: chapter 1 of 4 (not the hidden 2)", ok, screen(v))
-        ok = press(v, b"q", lambda s: "Chapters 3" in s and
+        ok = press(v, b"q", lambda s: "Prompts 3" in s and
                    selected(v, "middle prompt"))
         check("q after the turns: back on the list, on the row it was "
               "opened from", ok, screen(v))
@@ -255,7 +259,7 @@ def test_list():
         check("n, then [ from the middle: the auto row, 2 of 4", ok,
               screen(v))
         v.key(b"q")
-        wait(v, lambda s: "Chapters 3" in s)
+        wait(v, lambda s: "Prompts 3" in s)
         v.key(b"q")
         end = time.time() + 10
         while v.reap() is None and time.time() < end:
@@ -268,7 +272,7 @@ def test_list():
 def test_card():
     v = Pty([DCH, "--xray", "xv-nx"])
     try:
-        wait(v, lambda s: "Chapters 3" in s)
+        wait(v, lambda s: "Prompts 3" in s)
         v.key(b"\t")
         wait(v, lambda s: "PROJ-9" in s)
         ok = press(v, b"\r", lambda s: "Mentions: this session" in s)
@@ -283,7 +287,7 @@ def test_card():
         check("Esc: back to the card, not to the middle chapter", ok,
               screen(v))
         v.key(b"q")
-        wait(v, lambda s: "Chapters 3" in s)
+        wait(v, lambda s: "Prompts 3" in s)
         v.key(b"q")
         end = time.time() + 10
         while v.reap() is None and time.time() < end:

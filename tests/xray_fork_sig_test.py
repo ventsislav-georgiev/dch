@@ -164,7 +164,7 @@ def bursts(p):
 def test_direct():
     v = Pty([DCH, "--xray", "xfs-rec"])
     try:
-        ok = v.wait(b"Chapters", 20)
+        ok = v.wait(b"Prompts", 20)  # a Claude record (#295)
         v.pump(0.3)
         v.key(b"\t", 0.3)
         ok = ok and v.wait(b"#831", 10)

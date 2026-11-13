@@ -379,7 +379,7 @@ dch --say <name>...|--all [--json] -- <text...>  # message each Claude Code, bus
 dch --stop <name>...|--all [--json]             # pause Claude, end the session; --revive wakes it
 dch --config [<key> [<value>|--unset]]          # show, read or set the config file
 dch --shell-init zsh|bash|fish                 # OSC 133 prompt marks for your rc file (X-ray)
-dch --xray <n>                                  # the X-ray view: chapters, refs, on-screen hints (full screen)
+dch --xray <n>                                  # the X-ray view: prompts, refs (full screen)
 dch --xray <n> --json                           # a session's chapters (prompts / commands) as one JSON object
 dch --xray <n> --clear --json                   # empty a shell session's X-ray ring
 dch --xray <n> --follow --json                  # the same object, then its deltas as NDJSON until the session ends
@@ -879,39 +879,43 @@ credit for it.
 `dch --xray <n>` with no other flag opens a full-screen view of session
 `<n>`'s X-ray. `x` on a picker row opens the same view, and `q` returns to
 the picker. The view asks the same engine as `--json` and holds its index as
-`--follow` does, so a live session's new chapters and refs appear while it is
+`--follow` does, so a live session's new prompts and refs appear while it is
 open. It writes nothing to disk. Text from the session (titles, lines,
 passages) is drawn with every control and bidi character shown as `?`.
 
 The view has two tabs:
-- **Chapters**: one row per prompt or command. `/` filters. `Enter` opens
-  the chapter read-only (prompt, replies, tool calls, output), scrollable.
-  The reader reads on: its header says which chapter it is on (`3 of 12`,
-  the list's number) and its title. A scroll key at the chapter's end (or
-  top) first says on the status line which chapter comes next (or before);
-  the same direction again opens it, the next one at its top, the previous
-  one at its end. `]` and `[` open the next and the previous chapter at its
+- **Prompts** (**Commands** for a shell session): one row per thing you
+  typed, a prompt to Claude or Codex, a command to a shell. `/` filters.
+  `Enter` opens the prompt read-only with everything up to the next one
+  (prompt, replies, tool calls, output), scrollable.
+  The reader reads on: its header says which prompt it is on (`3 of 12`,
+  the list's number) and its title. A scroll key at the prompt's end (or
+  top) first says on the status line which prompt comes next (or before),
+  e.g. "end; again for the next prompt (4 of 12): title"; the same
+  direction again opens it, the next one at its top, the previous
+  one at its end. `]` and `[` open the next and the previous prompt at its
   top. Both follow the list's order and skip the auto rows while `n` hides
   them (a `/` filter does not narrow them). `q`, `Esc` or `←` goes back to
   where the reader was opened, the list row or the card, however many
-  chapters it moved. On a remote view each move is one more `--chapter`
+  prompts it moved. On a remote view each move is one more `--chapter`
   query on the host (any version); a host that cannot answer is said on the
-  status line and the reader stays. A shell's chapters (its typed blocks)
-  read on the same way.
-  A chapter whose prompt the harness wrote, not you (a task notification,
+  status line and the reader stays. A shell's commands (its typed blocks)
+  read on the same way, and the view says command where it says prompt.
+  The tab was called Chapters before 1.62.0.
+  A prompt the harness wrote, not you (a task notification,
   `"auto"` in `--json`), is hidden until `n` shows it, faint and titled by
   its summary (by its title when it has none); the footer says how many are
   hidden, and `/` matches a summary too. A compaction (`= Conversation
   compacted`) is hidden and counted the same way, and `n` shows it faint
   (the footer calls both kinds "auto rows");
-  `Enter` on it reads its summary. The tab's count is the chapters
+  `Enter` on it reads its summary. The tab's count is the prompts
   shown without `n`. A host or an older dch that sends no `auto` shows
-  every chapter. `o`, here and in a chapter, leaves the view (as `q` does)
+  every prompt. `o`, here and in the reader, leaves the view (as `q` does)
   and attaches to the live session, as `dch -a <n>` does (`host:name` too;
   from the picker's `x`, as the picker's `Enter`; the `-k` and `-d` pickers
   say it is not theirs). On an ended session `o` says so and the view
   stays. The attach opens at the session's live screen, not at the
-  chapter.
+  prompt.
 - **Refs**: what the session touched: the pull requests, issues and tickets
   it mentions, one row each, a faint line over them saying so; `a` shows its
   files, commits and URLs too, and the footer says how many are hidden. Rows
@@ -944,10 +948,10 @@ The view has two tabs:
   label on each ref.
 
 A ref typed after `/` (a ticket, issue, pull request, commit, file or URL,
-as `--ref` takes it) opens its card with `Ctrl-R`, on Chapters and Refs, while
+as `--ref` takes it) opens its card with `Ctrl-R`, on Prompts and Refs, while
 typing or after: also when no row has it, a row is not the one you want, or
 its kind is hidden until `a`. The footer shows `^R look up` while the filter
-holds one. The filter matches chapter titles and summaries and the refs held;
+holds one. The filter matches prompt titles and summaries and the refs held;
 words are not looked up, and the empty list says so. On a remote view a
 host whose dch takes no such ref says so in the status line.
 
@@ -957,8 +961,8 @@ projects) and its mentions. It opens light, as `--ref` does without `--full`.
 `f` runs the full scan, `p` scans other projects too (again: this project
 only), `o` attaches to the session as in the list, `y` copies the ref to the
 clipboard (OSC 52). The card's other-projects key changed in 1.61.0: it was
-`o`, which now opens the session everywhere in the view. `Enter` on a mention in this session opens its
-chapter. A shell session's light card shows titles and counts only; `f`
+`o`, which now opens the session everywhere in the view. `Enter` on a mention in this session reads
+its prompt. A shell session's light card shows titles and counts only; `f`
 shows its lines.
 
 The line under the tabs names the corpus: `Shell · last N rows`, `Shell · no
@@ -971,15 +975,15 @@ not clear X-ray; run `clear`".
 | Key | List | Card / reader |
 | --- | --- | --- |
 | `Tab` `→` `l` / `Shift-Tab` `←` `h` | the other tab | `←` `h`: back |
-| `↑` `↓` / `j` `k`, `PgUp` `PgDn`, `g` `G` | move | move / scroll; reader: at an end, again for the next / previous chapter |
-| `]` `[` | | reader: the next / previous chapter |
-| `Enter` | read the chapter / open the card | card: read the mention's chapter |
+| `↑` `↓` / `j` `k`, `PgUp` `PgDn`, `g` `G` | move | move / scroll; reader: at an end, again for the next / previous prompt |
+| `]` `[` | | reader: the next / previous prompt |
+| `Enter` | read the prompt / open the card | card: read the mention's prompt |
 | `/` | filter | |
 | `Ctrl-R` | with a ref typed after `/`: open its card, a row for it or not, its kind hidden or not | |
 | `a` | Refs: show / hide the files, commits and URLs | |
 | `t` | Refs: show / hide the temp files | |
-| `n` | Chapters: show / hide the auto rows (auto chapters, the task notifications, and compactions) | |
-| `o` | Chapters: attach to the session (in the chord: back to it) | card, reader: the same |
+| `n` | Prompts: show / hide the auto rows (auto prompts, the task notifications, and compactions) | |
+| `o` | Prompts: attach to the session (in the chord: back to it) | card, reader: the same |
 | `f` `p` `y` | | card: full scan, other projects / this project (`p` was `o` before 1.61.0), copy |
 | `q` | quit | back |
 | `Esc` | clear the filter, else quit | back |
@@ -989,7 +993,7 @@ not clear X-ray; run `clear`".
 double-press window (`DCH_DOUBLE_TAP_MS`, default 300 ms). The view opens
 over the session on its Refs tab, the refs on its screen on top, and the session keeps running
 underneath: the attach is kept, never retired. Leaving the view (`q`,
-`Esc`, or `o` on Chapters or in a chapter) returns to the session with its screen repainted as it is now,
+`Esc`, or `o` on Prompts or in the reader) returns to the session with its screen repainted as it is now,
 output that came in meanwhile included (dch-lite has no screen to repaint
 from: the program gets a SIGWINCH, as on any re-attach). The `x` is never
 typed into the session; keys that arrive in the same read as the `x` (a
@@ -1021,7 +1025,7 @@ host that refuses us, lacks `--xray` or cannot be reached shows its line in
 place of the tabs (`dch: <host>: does not support --xray (needs dch serve
 1.55.0+)`, ...); `q` leaves with that exit code. When the link drops later,
 the status says `live updates stopped (reopen the view for them): ...` and
-keeps saying it: Chapters and Refs stay as they were until you open the view
+keeps saying it: Prompts and Refs stay as they were until you open the view
 again. A failed screen read takes the "on screen now" group away, unsaid;
 it comes back once the host answers.
 
@@ -1032,7 +1036,9 @@ also 4 (its gate refused us), 6 (it lacks `--xray`) and 7 (unreachable).
 ### X-ray queries (`--xray`)
 
 `dch --xray <n> --json` prints one JSON object about session `<n>`: its
-corpus and a chapter per prompt. It runs entirely in the calling process. No
+corpus and a chapter per prompt. A chapter is one prompt (in a shell, one
+command) with what followed it, up to the next; the view lists them on its
+Prompts (Commands) tab. It runs entirely in the calling process. No
 master parses anything, nothing is written to disk and nothing is shelled out.
 
 `<n>` is one of these (checked in this order):

@@ -823,16 +823,19 @@ keeps its index. It writes nothing to disk.
 Session text is drawn with every control and bidi character as
 .BR ? .
 Two tabs:
-.B Chapters
-(\fB/\fR filters, \fBEnter\fR reads the chapter, read\-only;
-the reader's header says which chapter, \(lq3 of 12\(rq, and its title;
-a scroll key at its end or top says which chapter is next or before, and
+.B Prompts
+(\fBCommands\fR for a shell session, one row per command; Chapters before
+1.62.0;
+\fB/\fR filters, \fBEnter\fR reads the prompt and what followed it,
+read\-only;
+the reader's header says which prompt, \(lq3 of 12\(rq, and its title;
+a scroll key at its end or top says which prompt is next or before, and
 the same direction again opens it (the next at its top, the previous at
 its end);
 .B ]
 and
 .B [
-open the next and the previous chapter at its top; both follow the list's
+open the next and the previous prompt at its top; both follow the list's
 order, skipping the auto rows while
 .B n
 hides them;
@@ -840,17 +843,17 @@ hides them;
 opened, the list or the card; on a remote view each is one more
 .B \-\-chapter
 query, and a host that cannot answer is said while the reader stays;
-a chapter the harness wrote, a task notification
+a prompt the harness wrote, a task notification
 .RB ( \(dqauto\(dq ),
 is hidden until
 .B n
 shows it, faint and titled by its summary, the footer saying how many;
 a compaction is hidden, counted and shown faint the same way
 (the footer calls both kinds \(dqauto rows\(dq);
-the tab counts the chapters shown without
+the tab counts the prompts shown without
 .BR n ;
 .B o
-here and in a chapter leaves the view and attaches to the session, as
+here and in the reader leaves the view and attaches to the session, as
 .B \-a
 does, a remote one's too; on an ended session it says so and stays),
 .B Refs
@@ -899,7 +902,7 @@ attaches to the session as in the list,
 .B y
 copies the ref (OSC 52),
 .B Enter
-on a mention in this session reads its chapter; a shell's light card shows
+on a mention in this session reads its prompt; a shell's light card shows
 titles and counts only.
 The line under the tabs names the corpus
 (\(lqShell \[u00B7] last N rows\(rq, \(lqCodex \[u00B7] mentions only\(rq,
@@ -909,9 +912,9 @@ The line under the tabs names the corpus
 Keys: \fBTab\fR, \fB\(<-\fR \fB\(->\fR
 and \fBh\fR \fBl\fR switch tabs;
 \fBj\fR \fBk\fR, arrows, \fBPgUp\fR \fBPgDn\fR, \fBg\fR \fBG\fR move;
-\fBq\fR quits the list and goes back from a card or chapter;
+\fBq\fR quits the list and goes back from a card or the reader;
 \fBEsc\fR clears the filter, else does the same;
-\fBCtrl\-R\fR, on Chapters and Refs with a ref typed after \fB/\fR
+\fBCtrl\-R\fR, on Prompts and Refs with a ref typed after \fB/\fR
 (as
 .B \-\-ref
 takes it), opens its card, while typing or after, a row for it or not, its
@@ -984,7 +987,7 @@ or cannot be reached shows its line in place of the tabs;
 leaves with that exit code.
 When the link drops later, the status says
 .I "live updates stopped (reopen the view for them)"
-and keeps saying it: Chapters and Refs stay as they were until the view is
+and keeps saying it: Prompts and Refs stay as they were until the view is
 opened again; a failed screen read takes the \(lqon screen now\(rq group
 away, unsaid, until the host answers again.
 Exit 0 when quit, 1 no such session, 2 with any other flag or when stdout
@@ -1009,6 +1012,8 @@ while a shell's ring is paused for an agent, also
 the live Claude Code sessions found under it: 2 or more when several run
 there, 0 when none was found)
 and its chapters, one per prompt, oldest first, at most 5000.
+A chapter is one prompt (in a shell, one command) with what followed it,
+up to the next; the view lists them on its Prompts (Commands) tab.
 Each chapter has an opaque
 .BR anchor ,
 an

@@ -1,8 +1,8 @@
 /*
 ** The X-ray view (#175, XR5a): `dch --xray <n>` with no --json, and the
-** picker's x. Two tabs over one session, Chapters and Refs (the refs on
-** the session's screen now first, #294); a ref's card; a chapter's
-** reader. Drawn with the picker's renderer, on the terminal its host (dch.c) made raw and put on the alternate screen.
+** picker's x. Two tabs over one session, Prompts (Commands for a shell,
+** #295: the engine's chapters) and Refs (the refs on the session's screen
+** now first, #294); a ref's card; a chapter's reader. Drawn with the picker's renderer, on the terminal its host (dch.c) made raw and put on the alternate screen.
 **
 ** Every answer is the engine's own --json: dch.c's xv_spawn forks this
 ** process and runs xray_main in the child with --follow, --ref or --chapter
@@ -153,6 +153,18 @@ xv_kill(void)
 }
 
 /* ---- small things ---------------------------------------------------- */
+
+/* What the view calls a chapter (#295): one prompt with what followed it
+** in a Claude or Codex session (several Claudes too), else one command.
+** --json and --chapter keep "chapter". */
+static const char *
+xv_noun(const struct xv *v)
+{
+	const char *c = v->corpus ? v->corpus : "claude";
+
+	return strcmp(c, "claude") && strcmp(c, "codex") &&
+	       (strcmp(c, "none") || v->claudes < 2) ? "command" : "prompt";
+}
 
 static void
 xv_sfree(char *s)
@@ -1118,8 +1130,8 @@ xv_turn(struct xv *v, int d, int end)
 
 	if (k < 0)
 	{
-		snprintf(v->status, sizeof v->status, "%s", d > 0
-		         ? "no next chapter" : "no previous chapter");
+		snprintf(v->status, sizeof v->status, "no %s %s", d > 0
+		         ? "next" : "previous", xv_noun(v));
 		return;
 	}
 	if (!(a = strdup(v->ch[k].anchor)))
@@ -1153,15 +1165,15 @@ xv_scroll(struct xv *v, int d, int e)
 	}
 	if ((k = xv_next(v, d > 0 ? 1 : -1)) < 0)
 	{
-		snprintf(v->status, sizeof v->status, "%s", d > 0
-		         ? "end of the last chapter" : "top of the first chapter");
+		snprintf(v->status, sizeof v->status, "%s %s", d > 0
+		         ? "end of the last" : "top of the first", xv_noun(v));
 		return;
 	}
 	c = &v->ch[k];
 	v->redge = d > 0 ? 1 : -1;
-	snprintf(v->status, sizeof v->status, "%s of chapter; again for the %s "
+	snprintf(v->status, sizeof v->status, "%s; again for the %s %s "
 	         "(%d of %d): %s", d > 0 ? "end" : "top", d > 0 ? "next"
-	         : "previous", k + 1, v->nch,
+	         : "previous", xv_noun(v), k + 1, v->nch,
 	         c->aut && c->summary[0] ? c->summary : c->title);
 }
 
@@ -1869,7 +1881,7 @@ xv_live(const struct xv *v)
 static void
 xv_draw(struct xv *v, int force)
 {
-	static const char *const tabn[2] = { "Chapters", "Refs" };
+	const char *tabn[2] = { "Prompts", "Refs" };
 	static const char spin[] = "\xe2\xa0\x8b\xe2\xa0\x99\xe2\xa0\xb9"
 		"\xe2\xa0\xb8\xe2\xa0\xbc\xe2\xa0\xb4\xe2\xa0\xa6\xe2\xa0\xa7"
 		"\xe2\xa0\x87\xe2\xa0\x8f", ascii[] = "|/-\\";
@@ -1912,7 +1924,8 @@ xv_draw(struct xv *v, int force)
 	{
 		if (xv_live(v))
 			XV_K(0, "o", "open session");
-		XV_K(0, "]", "next chapter");
+		XV_K(0, "]", strcmp(xv_noun(v), "prompt") ? "next command"
+		     : "next prompt");
 		XV_K(0, "[", "previous");
 		XV_K(3, pk_utf ? "\xe2\x86\x91\xe2\x86\x93" : "up/down", "scroll");
 		XV_K(3, "esc", "back");
@@ -2022,9 +2035,12 @@ xv_draw(struct xv *v, int force)
 		pk_set(pk_p(PK_RED));
 		pk_txt(v->fail);
 	}
-	else
+	else if (v->have)
 	{
-		/* Chapters: the ones shown by default */
+		/* no tabs before the snapshot says Prompts or Commands (#295);
+		** Prompts: the ones shown by default */
+		if (strcmp(xv_noun(v), "prompt"))
+			tabn[0] = "Commands";
 		for (k = n = 0; k < v->nch; k++)
 			n += !xv_hid(&v->ch[k]);
 		for (k = 0; k < 2; k++)
@@ -2108,8 +2124,9 @@ xv_draw(struct xv *v, int force)
 				       : isref ? "    No match: ^R looks it up"
 				       : v->filt[0] ? "    No match; ^R looks up a "
 				       "ticket, issue, pull, commit, file or URL, not "
-				       "words" : v->tab == 0
-				       ? "    No chapters" : "    No refs yet: the files, "
+				       "words" : v->tab == 0 ? strcmp(xv_noun(v), "prompt")
+				       ? "    No commands" : "    No prompts"
+				       : "    No refs yet: the files, "
 				       "commits, pull requests, issues and URLs this session "
 				       "touches show here");
 				if (!v->have)
@@ -2323,8 +2340,8 @@ xv_key(struct xv *v, int c)
 				xv_read(v, m->chapter, v->ctext);
 			else if (m)
 				snprintf(v->status, sizeof v->status, "%s",
-				         m->chapter[0] ? "another session's chapter: "
-				         "open its X-ray" : "no chapter for that line");
+				         m->chapter[0] ? "another session's prompt: "
+				         "open its X-ray" : "no prompt for that line");
 			break;
 		case 'q': case PK_ESC: case 'h': case PK_LEFT: case 0x7f:
 			xv_back(v);
@@ -2587,16 +2604,21 @@ xv_run(int fd, const char *n, char *err, size_t errsz)
 			xv_screen_done(v);
 		if (xv_pump(v, XV_RK, &rs) && v->mode == XV_READ)
 		{
+			const char *e = v->kid[XV_RK].err, *w = xv_noun(v);
+
 			/* a turn that got no chapter: said, the reader stays */
 			if (v->rturn)
-				snprintf(v->status, sizeof v->status, "could not read "
-				         "that chapter: %s", v->kid[XV_RK].err[0]
-				         ? v->kid[XV_RK].err : "no such chapter");
+				snprintf(v->status, sizeof v->status, e[0]
+				         ? "could not read that %s: %s"
+				         : "could not read that %s: no such %s", w,
+				         e[0] ? e : w);
 			else if (!v->rloaded)
 			{
-				snprintf(v->status, sizeof v->status, "%s",
-				         v->kid[XV_RK].err[0] ? v->kid[XV_RK].err
-				         : "X-ray: no such chapter");
+				if (e[0])
+					snprintf(v->status, sizeof v->status, "%s", e);
+				else
+					snprintf(v->status, sizeof v->status,
+					         "X-ray: no such %s", w);
 				xv_back(v);
 			}
 			free(v->rturn);
