@@ -3205,6 +3205,7 @@ attach_with_switch(char *exe, int forced_name, int force, char **inner_argv,
 		                          remote_host, session_name) < sizeof chosen)
 			pk_focus(chosen);
 		pk_remote = 1;
+		attach_only = 0;	/* before the pick: a view's o sets it */
 		if (pick_session("", chosen,
 		                 sizeof(chosen), 1) != 0)
 			return 0;
@@ -3213,7 +3214,6 @@ attach_with_switch(char *exe, int forced_name, int force, char **inner_argv,
 		forced_name = 1;
 		force = 1;
 		remote_ok = 1;
-		attach_only = 0;
 		remote_host = NULL;
 	}
 }
@@ -8515,8 +8515,8 @@ hrec_free(struct hrec *r, int n)
 	free(r);
 }
 
-/* Does a master answer on `name`? */
-static int
+/* Does a master answer on `name`? The view's o asks it too (#232). */
+int
 name_live(const char *name)
 {
 	char sp[1100];
@@ -9957,6 +9957,7 @@ pk_xray(struct pk *p, int fd, const char *name, int record, int remote,
 	         (size_t)snprintf(out, outsz, "%s", xv_go) < outsz)
 	{
 		attach_route = remote ? 1 : -1;	/* the view's own (#210) */
+		attach_only = 1;	/* ended since o: refused, never a new one */
 		return 1;
 	}
 	return 0;

@@ -1066,6 +1066,7 @@ pyrun "the chord's query child exit()s: the client's terminal and marker stay" \
     chord_fork_exit_test.py
 grep '^  skip ' "$TMP/pyout"
 pyrun "the --xray view of host:name over a loopback dch serve, picker X, the chord over dch -a host:name" xray_remote_view_test.py
+pyrun "the --xray view's o: a local host:name that has ended, a host that answers another name (#232)" xray_view_o_test.py
 # xray_cli_test.py's RSS budget: a fork()+exec+wait4 helper, because a child
 # spawned by Python inherits Python's RSS high-water mark on Linux (maxrss.c)
 # shellcheck disable=SC2086 # xcc is a word list

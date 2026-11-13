@@ -2136,7 +2136,8 @@ xv_open(struct xv *v)
 
 	if (!v->have)
 		return 0;
-	if (!xv_live(v))
+	/* a local one asked again: its end may not have reached the view */
+	if (!xv_live(v) || (!v->hl && !name_live(v->session)))
 		snprintf(v->status, sizeof v->status, "%s has ended: no session "
 		         "to open", v->session);
 	else if (in && *in)
