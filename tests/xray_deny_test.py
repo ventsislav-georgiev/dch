@@ -35,7 +35,19 @@ import json, os, re, shutil, signal, subprocess, sys, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from remote_client_test import FAKE_TS, OWNER, WHOIS  # noqa: E402
+from remote_client_test import OWNER, WHOIS  # noqa: E402
+
+# Builtins only, as serve_test's (#246): serve gives whois 3 s, and a slower
+# fake is a whois_failed refusal cached 30 s, every serve case after it lost
+FAKE_TS = """#!/bin/sh
+d=${0%/*}
+case "$1" in
+status) f=status.json ;; whois) f=whois.json ;; ip) f=ip.txt ;; *) exit 1 ;;
+esac
+[ -f "$d/$f" ] || exit 1
+while IFS= read -r l; do printf '%s\\n' "$l"; done < "$d/$f"
+printf '%s' "$l"
+"""
 
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
 fails = []
@@ -368,22 +380,41 @@ def main():
                                   stdin=subprocess.DEVNULL,
                                   stdout=subprocess.DEVNULL, stderr=lf)
         procs.append(sp)
-        port, end = None, time.time() + 10
+
+        def down(why, left):
+            """The serve half lost: one failure, not one per case (#221)."""
+            check("the serve half: %s; serve log tail:" % why, False)
+            for l in open(log).read().splitlines()[-12:]:
+                print("       " + l)
+            print("  skip %d serve checks: they need that serve" % left)
+            return 1
+        port, end = None, time.time() + 30
         while time.time() < end and port is None and sp.poll() is None:
             m = re.search(r"listening on 127\.0\.0\.1:(\d+)", open(log).read())
             port = int(m.group(1)) if m else None
             time.sleep(0.05)
-        check("dch serve listens on a loopback test port", port is not None,
-              open(log).read())
         if port is None:
-            return 1
+            return down("dch serve %s" % (
+                "exited %d" % sp.returncode if sp.poll() is not None else
+                "printed no listening line in 30 s"), len(cases) + 1)
+        check("dch serve listens on a loopback test port", True)
         with open(cenv["DCH_CONFIG"], "w") as f:
             f.write("remote_hosts = srv=127.0.0.1:%d\n" % port)
         r, rv = resolved(cenv, "srv:xd-proj", "a.txt:1")
-        check("serve: the control is read (ok)",
-              len(rv) == 1 and rv[0]["state"] == "ok", (r.stderr, rv))
-        for label, n, ref, want in cases:
+        if not (len(rv) == 1 and rv[0]["state"] == "ok"):
+            return down("the control was not read (exit %d, %s)" % (
+                r.returncode, r.stderr.strip()[-300:]), len(cases))
+        check("serve: the control is read (ok)", True)
+        for k, (label, n, ref, want) in enumerate(cases):
             r, rv = resolved(cenv, "srv:" + n, ref)
+            # this test's peer is the owner: a gate refusal (a fake whois
+            # over 3 s, cached 30 s) or a dead serve is the setup's
+            if (not good(r, rv, want) and not rv and
+                    (sp.poll() is not None or ": refused" in open(log).read())):
+                return down("dch serve %s at %s (exit %d, %s)" % (
+                    "exited" if sp.poll() is not None else
+                    "refused its own owner", label, r.returncode,
+                    r.stderr.strip()[-300:]), len(cases) - k - 1)
             check("serve, %s: %s" % (label, want), good(r, rv, want),
                   (r.returncode, r.stderr, rv))
     finally:
