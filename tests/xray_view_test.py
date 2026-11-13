@@ -528,6 +528,9 @@ def test_refs():
 TPD = os.path.join(T, "tmpd")      # the view's $TMPDIR
 TPP = os.path.join(TPD, "proj")    # a project inside it
 TPL = os.path.join(T, "plink")     # a symlink to it, another session's cwd
+# a real project outside every temp dir (this checkout), and a symlink into it
+# from the temp dir: a row under it is never resolved, so it stays scratch
+REPO = os.path.realpath(os.path.join(HERE, ".."))
 HOSTILE = "https://github.com." + "a" * 50 + ".example/github.com/o/r/pull/1"
 HUGE = "https://" + "z" * 120 + ".example/x/y/end"
 IDN = "https://x" + "\u4f8b" * 25 + "e\u0301" * 6 + ".jp/" + "p/" * 30 + "fin"
@@ -538,6 +541,7 @@ def fixture_tmp():
     for f in ("main.c", "real.c"):
         open(os.path.join(TPP, "src", f), "w").close()
     os.symlink(TPP, TPL)
+    os.symlink(REPO, os.path.join(TPD, "rlink"))
     cfg = os.path.join(HOME, ".claude")
     sockdir = os.path.join(T, "dch-%d" % os.getuid())
     hdir = os.path.join(T, "state", "dch", "sessions",
@@ -547,7 +551,12 @@ def fixture_tmp():
              "edit %s/src/main.c, scratch in %s/other.txt; see %s, %s "
              "and %s" % (TPP, TPD, HOSTILE, HUGE, IDN)),
             ("xv-tl", "11111111-2222-4333-8444-5555555555c2", TPL,
-             "edit %s/src/real.c, scratch in %s/other.txt" % (TPP, TPD))):
+             "edit %s/src/real.c, scratch in %s/other.txt" % (TPP, TPD)),
+            ("xv-tx", "11111111-2222-4333-8444-5555555555c3", TPP,
+             "edit %s/src/main.c, then %s/../leak.txt and %s/../esc/x"
+             % (TPP, TPP, TPD)),
+            ("xv-tr", "11111111-2222-4333-8444-5555555555c4", REPO,
+             "see %s/rlink/README.md" % TPD)):
         pdir = os.path.join(cfg, "projects", cwd.replace("/", "-"))
         os.makedirs(pdir, exist_ok=True)
         with open(os.path.join(pdir, sid + ".jsonl"), "w") as f:
@@ -608,6 +617,26 @@ def test_tmp():
               "(the session's cwd is a symlink to it)",
               re.search(r"file    \S*src/real\.c", text) and
               "t temp files 1 hidden" in text, text)
+        v.key(b"q")
+    finally:
+        v.close()
+    v, scr, text = refs_tab("xv-tx")
+    try:
+        # the engine folds ".." (xray.c, 2.5) before the view sees the text;
+        # the view's own ".." rule is behind it
+        check("Refs #220: a temp path written with .. is scratch, also one "
+              "through the project dir",
+              "file    src/main.c" in text and "leak.txt" not in text and
+              "esc/x" not in text and "t temp files 2 hidden" in text, text)
+        v.key(b"q")
+    finally:
+        v.close()
+    v, scr, text = refs_tab("xv-tr")
+    try:
+        check("Refs #220: a project outside the temp dirs resolves no row: "
+              "a temp-dir symlink into it stays scratch",
+              "README.md" not in text and "t temp files 1 hidden" in text,
+              text)
         v.key(b"q")
     finally:
         v.close()

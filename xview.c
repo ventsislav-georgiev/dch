@@ -1223,40 +1223,53 @@ xv_under(const char *s, const char *d)
 	return l > 1 && !strncmp(s, d, l) && s[l] == '/' ? l : 0;
 }
 
-/* A file under a temp directory: a scratch file, hidden by default. A
-** remote view's $TMPDIR is this machine's, not its host's: not asked. A
-** file of the session's own project is never scratch (#220): by text, and
-** in a local view by realpath too (/tmp is /private/tmp on macOS). */
+/* s under a temp directory by its text; $TMPDIR only for a local view: a
+** remote view's $TMPDIR is this machine's, not its host's. */
 static int
-xv_temp(const struct xv *v, const struct xv_ref *r)
+xv_tmpdir(const char *s, int local)
 {
 	static const char *const d[] = { "/tmp", "/private/tmp", "/var/folders",
 		"/private/var/folders" };
+	size_t k;
+
+	for (k = 0; k < sizeof d / sizeof *d; k++)
+		if (xv_under(s, d[k]))
+			return 1;
+	return local && xv_under(s, getenv("TMPDIR"));
+}
+
+/* A file under a temp directory: a scratch file, hidden by default. A
+** file of the session's own project is never scratch (#220): by text, and
+** in a local view by realpath too (/tmp is /private/tmp on macOS), the
+** rows resolved only when the project's own realpath is in a temp dir. A
+** ".." component is scratch, never resolved: transcript text could walk it
+** into an autofs map (/net, /home), a lookup per row per filter pass. */
+static int
+xv_temp(const struct xv *v, const struct xv_ref *r)
+{
 	/* the label's realpath, once per label: under /home it is an autofs
 	** lookup, too slow for every row on every filter pass */
 	static char lk[PATH_MAX], lr[PATH_MAX];
 	static int lok;
 	char rr[PATH_MAX];
-	size_t k;
-	int t = 0;
+	const char *t = r->text;
+	size_t l = strlen(t);
 
-	if (strcmp(r->shape, "file"))
+	if (strcmp(r->shape, "file") || !xv_tmpdir(t, !v->hl))
 		return 0;
-	for (k = 0; k < sizeof d / sizeof *d && !t; k++)
-		t = xv_under(r->text, d[k]) != 0;
-	if (!t && (v->hl || !xv_under(r->text, getenv("TMPDIR"))))
-		return 0;
-	if (xv_under(r->text, v->label))
+	if (strstr(t, "/../") || (l >= 3 && !strcmp(t + l - 3, "/..")))
+		return 1;
+	if (xv_under(t, v->label))
 		return 0;
 	if (v->hl || !v->label || v->label[0] != '/')
 		return 1;
 	if (strcmp(lk, v->label))
 	{
 		snprintf(lk, sizeof lk, "%s", v->label);
-		lok = realpath(v->label, lr) != NULL;
+		lok = realpath(v->label, lr) && xv_tmpdir(lr, 1);
 	}
-	return !lok || !(xv_under(r->text, lr) ||
-	         (realpath(r->text, rr) && xv_under(rr, lr)));
+	return !lok || !(xv_under(t, lr) ||
+	         (realpath(t, rr) && xv_under(rr, lr)));
 }
 
 static const struct xv_ref *xv_sort_rf;
