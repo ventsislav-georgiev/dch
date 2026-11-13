@@ -37,6 +37,7 @@ enum { XV_FK, XV_CK, XV_RK, XV_SK, XV_NKIDS };	/* follow, card, reader,
 
 static char xv_none[1];	/* "": a field absent, null, or out of memory */
 static volatile pid_t xv_pids[XV_NKIDS];	/* for xv_kill */
+static volatile sig_atomic_t xv_cont;	/* SIGCONT: the shell had the tty */
 int xv_tab;	/* the tab a view opens on (the in-attach chord's: On screen) */
 char xv_go[512];	/* o (#194): the session the host attaches once the
 			** view is left, as session_name holds it; "" none */
@@ -2317,6 +2318,13 @@ xv_key(struct xv *v, int c)
 /* ---- the loop -------------------------------------------------------- */
 
 static void
+xv_on_cont(int sig)
+{
+	(void)sig;
+	xv_cont = 1;
+}
+
+static void
 xv_free(struct xv *v)
 {
 	int k;
@@ -2352,8 +2360,10 @@ int
 xv_run(int fd, const char *n, char *err, size_t errsz)
 {
 	struct xv *v = calloc(1, sizeof *v);
+	struct sigaction sa, ocont;
+	struct termios tio;
 	char *av[4];
-	int k, rc = 0;
+	int k, rc = 0, tio_ok;
 
 	err[0] = xv_go[0] = '\0';
 	if (!v)
@@ -2382,14 +2392,35 @@ xv_run(int fd, const char *n, char *err, size_t errsz)
 		return 3;
 	}
 	pk_pn = 0;
+	/* stopped and continued (#255): the view's modes back, a whole frame
+	** over the shell's lines. No SA_RESTART: the wait wakes at once */
+	tio_ok = tcgetattr(fd, &tio) == 0;
+	xv_cont = 0;
+	memset(&sa, 0, sizeof sa);
+	sa.sa_handler = xv_on_cont;
+	sigemptyset(&sa.sa_mask);
+	sigaction(SIGCONT, &sa, &ocont);
 	for (;;)
 	{
 		struct timeval tv;
 		fd_set rs;
-		int mx = fd, force = pk_winch, c, busy;
+		int mx = fd, force = pk_winch, c, busy, r;
 
 		(void)xv_late(0);
 		pk_winch = 0;
+		/* a stop in the tcsetattr returns EINTR on the fg (macOS); from
+		** the background it stops on SIGTTOU until the fg, so the frame
+		** waits for the terminal. In the chord's child the attach sets
+		** the same modes (attach.c xray_overlay) */
+		if (xv_cont)
+		{
+			force = 1;
+			do
+			{
+				xv_cont = 0;
+				r = tio_ok ? tcsetattr(fd, TCSADRAIN, &tio) : 0;
+			} while ((r < 0 && errno == EINTR) || xv_cont);
+		}
 		if (v->mode == XV_LIST && v->tab == 2 && now_ms() - v->scr_at >= 1000)
 			xv_screen_load(v);
 		xv_draw(v, force);
@@ -2466,6 +2497,7 @@ xv_run(int fd, const char *n, char *err, size_t errsz)
 		if ((c = pk_key(fd)) < 0 || xv_key(v, c))
 			break;
 	}
+	sigaction(SIGCONT, &ocont, NULL);
 	xv_free(v);
 	pk_pn = 0;
 	return rc;

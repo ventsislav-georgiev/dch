@@ -1061,6 +1061,7 @@ fi
 pyrun "xray goldens: chapters, identity, corpus labels, MANIFEST" xray_golden.py
 pyrun "the --xray view: tabs, card, reader, hostile text, signals, picker X" xray_view_test.py
 pyrun "the --xray view: a query child stopped right after its fork leaves the terminal alone, direct and chord" xray_fork_sig_test.py
+pyrun "the --xray view repaints after a stop and fg, direct and chord (#255)" xray_view_cont_test.py
 # #25: a socket-write interposer (tests/sockfail.c) makes every query child
 # of the chord's view exit(1); pyrun shows a passing test's skip line only here
 pyrun "the chord's query child exit()s: the client's terminal and marker stay" \
