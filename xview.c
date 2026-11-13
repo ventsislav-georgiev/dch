@@ -897,6 +897,41 @@ xv_card(struct xv *v, const char *key, const char *text, int full,
 	(void)xv_start(v, XV_CK, av, ac, xv_cline);
 }
 
+/* The filter's text is a ref (#263) by --ref's own value rules (3.1), so
+** what passes here passes there. 1 with t its text, outer blanks cut. */
+static int
+xv_fref(const struct xv *v, char *t, size_t sz)
+{
+	struct xr_span sp;
+	size_t n;
+
+	if (!v->filt[0] || !xr_ref_ok(v->filt) ||
+	    !xr_ref_parse(v->filt, NULL, &sp))
+		return 0;
+	snprintf(t, sz, "%s", v->filt + strspn(v->filt, " "));
+	for (n = strlen(t); n && t[n - 1] == ' ';)
+		t[--n] = '\0';
+	return 1;
+}
+
+/* ^R: the card of the ref typed in the filter, held or not, its kind shown
+** or hidden (#263) */
+static void
+xv_lookup(struct xv *v)
+{
+	char t[sizeof v->filt];
+
+	if (!xv_fref(v, t, sizeof t))
+	{
+		snprintf(v->status, sizeof v->status, "^R looks up the ref typed "
+		         "after /: a ticket, issue, pull, commit, file or URL, not "
+		         "words");
+		return;
+	}
+	v->filtering = 0;
+	xv_card(v, t, t, 0, 1);
+}
+
 /* ---- the reader (--chapter, spec 3.5) ------------------------------- */
 
 static void
@@ -1793,7 +1828,7 @@ xv_draw(struct xv *v, int force)
 	struct pkkey keys[12];
 	const char *ret = pk_utf ? "\xe2\x86\xb5" : "enter";
 	char b[1200], tmp[32], kt[32];
-	int nk = 0, kl, cap, k, n, busy;
+	int nk = 0, kl, cap, k, n, busy, isref;
 	unsigned drop;
 
 	pk_begin(v->fd, v->color);
@@ -1807,9 +1842,12 @@ xv_draw(struct xv *v, int force)
 		return;
 	}
 #define XV_K(g, k, l) (keys[nk++] = (struct pkkey){ (k), (l), NULL, (g), 0 })
+	isref = v->mode == XV_LIST && xv_fref(v, b, sizeof b);
 	if (v->filtering)
 	{
 		XV_K(0, ret, "done");
+		if (isref)
+			XV_K(0, "^R", "look up");
 		XV_K(3, "esc", "clear");
 	}
 	else if (v->mode == XV_CARD)
@@ -1839,6 +1877,8 @@ xv_draw(struct xv *v, int force)
 			if (v->tab == 0 && xv_live(v))
 				XV_K(0, "o", "open session");
 			XV_K(3, "/", "filter");
+			if (isref)
+				XV_K(0, "^R", "look up");
 			if (v->tab == 0 && (xv_vis(v), v->nauto))
 			{
 				snprintf(tmp, sizeof tmp, "%d hidden", v->nauto);
@@ -1994,7 +2034,10 @@ xv_draw(struct xv *v, int force)
 				       !v->alltmp ? "    Only temp files: t shows them"
 				       : v->tab == 0 && v->nauto && !v->allauto
 				       ? "    Only auto rows: n shows them"
-				       : v->filt[0] ? "    No match" : v->tab == 0
+				       : isref ? "    No match: ^R looks it up"
+				       : v->filt[0] ? "    No match; ^R looks up a "
+				       "ticket, issue, pull, commit, file or URL, not "
+				       "words" : v->tab == 0
 				       ? "    No chapters" : "    No refs yet: the files, "
 				       "commits, pull requests, issues and URLs this session "
 				       "touches show here");
@@ -2293,6 +2336,11 @@ xv_key(struct xv *v, int c)
 	}
 	if (c == 'q')
 		return 1;
+	if (c == 0x12 && v->tab < 2)	/* Ctrl-R */
+	{
+		xv_lookup(v);
+		return 0;
+	}
 	if (c == PK_ESC)
 	{
 		if (v->typed[0])
@@ -2525,8 +2573,12 @@ xv_run(int fd, const char *n, char *err, size_t errsz)
 					         "session ended; this is its last state");
 			}
 		}
+		/* a host's usage refusal: the view checked the ref with this
+		** dch's grammar, so the host's dch is another (#263) */
 		if (xv_pump(v, XV_CK, &rs) && v->kid[XV_CK].rc)
-			snprintf(v->status, sizeof v->status, "%s",
+			snprintf(v->status, sizeof v->status, "%s%s",
+			         v->hl && v->kid[XV_CK].rc == 2 ? "the host's dch "
+			         "takes no such ref (an older dch?): " : "",
 			         v->kid[XV_CK].err[0] ? v->kid[XV_CK].err
 			         : "X-ray: the scan failed");
 		if (xv_pump(v, XV_SK, &rs))

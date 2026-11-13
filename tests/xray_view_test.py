@@ -65,6 +65,13 @@ Covers:
      session receives what it did before; under detach_key = switch a late
      x is the picker's (OQ-6): it opens the row's view, q returns to the
      picker, X reaches the kill confirmation, and nothing kills.
+ 13. the lookup (#263): a ref typed in the filter that no row has (a
+     ticket, a full commit hash whose row is held short), whose row is
+     hidden (a file), or that a chapter title holds (not the wanted row):
+     the footer names ^R, the empty line says ^R looks it up, ^R opens its
+     card (outer blanks cut), Enter reads its mention's chapter, Esc goes
+     back with the filter kept; plain words: one faint line says ^R takes
+     refs, not words, and ^R says so with no card.
 
 Run:  python3 tests/xray_view_test.py      (uses ./dch)
 """
@@ -162,7 +169,10 @@ class Pty:
         return what in self.out[start:]
 
     def key(self, b, settle=0.3):
-        os.write(self.fd, b)
+        try:
+            os.write(self.fd, b)
+        except OSError:
+            pass    # it has exited: the checks say so
         self.pump(settle)
 
     def resize(self, rows, cols):
@@ -635,6 +645,106 @@ def test_latest():
               "a files, commits, URLs 3 hidden" in text, text)
         v.key(b"q")
         check("Refs #262: q exits 0", v.exit() == 0, v.out[-80:])
+    finally:
+        v.close()
+
+
+def shown(v, mark):
+    scr = rows(v.out[mark:])
+    return "\n".join(scr[k] for k in sorted(scr))
+
+
+def test_lookup():
+    """#263: a ref typed in the filter, matched by no row or not by the one
+    wanted, opens its card with ^R; plain words say ^R takes refs only."""
+    v = Pty([DCH, "--xray", "xv-lt"], env=RENV)
+    try:
+        v.wait(b"Chapters 1")
+        v.pump(0.5)
+        mark = len(v.out)
+        v.key(b"/PROJ-9", 1.0)
+        text = shown(v, mark)
+        check("lookup #263: a ref in the Chapters filter, no title has it: "
+              "the empty line and the footer name ^R",
+              "No match: ^R looks it up" in text and "^R look up" in text,
+              text)
+        mark = len(v.out)
+        v.key(b"\x12", 1.0)
+        check("lookup #263: ^R opens the typed ref's card with its mention",
+              v.wait(b"PROJ-9  light", start=mark) and
+              v.wait(b"now PROJ-9", start=mark), v.out[mark:])
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        check("lookup #263: Enter on its mention reads the chapter",
+              v.wait(b"the latest fixture", start=mark) and
+              v.wait(b"now PROJ-9", start=mark), v.out[mark:])
+        v.key(b"\033", 0.5)
+        mark = len(v.out)
+        v.key(b"\033", 1.0)
+        text = shown(v, mark)
+        check("lookup #263: Esc back to the list, the filter kept",
+              "/PROJ-9" in text and "Chapters 1" in text, text)
+        v.key(b"/\x15", 0.3)
+        mark = len(v.out)
+        v.key(b"just words", 1.0)
+        text = shown(v, mark)
+        check("lookup #263: plain words matching nothing: one faint line "
+              "says ^R takes refs, not words; no ^R in the footer",
+              "No match; ^R looks up a ticket, issue, pull, commit, file or "
+              "URL, not words" in text and "^R look up" not in text, text)
+        mark = len(v.out)
+        v.key(b"\x12", 1.0)
+        check("lookup #263: ^R on words says what it takes, no card",
+              v.wait(b"^R looks up the ref typed after /", start=mark) and
+              b"light" not in v.out[mark:], v.out[mark:])
+        v.key(b"\033", 0.3)
+        v.key(b"\t", 1.0)
+        mark = len(v.out)
+        v.key(b"/ deadbeef1 ", 1.0)
+        text = shown(v, mark)
+        check("lookup #263: a full commit hash, its row held short: no row, "
+              "^R named", "No match: ^R looks it up" in text and
+              "^R look up" in text, text)
+        mark = len(v.out)
+        v.key(b"\x12", 1.0)
+        check("lookup #263: ^R opens the hidden commit's card, outer blanks "
+              "cut", v.wait(b"deadbeef1  light", start=mark) and
+              v.wait(b"commit deadbeef1", start=mark), v.out[mark:])
+        v.key(b"\033", 0.5)
+        v.key(b"/\x15", 0.3)
+        mark = len(v.out)
+        v.key(P.encode() + b"/new.c", 1.0)
+        text = shown(v, mark)
+        check("lookup #263: a file, its kind hidden: a and ^R both named",
+              "Only files, commits and URLs: a shows them" in text and
+              "^R look up" in text, text)
+        mark = len(v.out)
+        v.key(b"\x12", 1.0)
+        check("lookup #263: ^R opens a hidden file's card",
+              v.wait(P.encode() + b"/new.c  light", start=mark) and
+              v.wait(b"commit deadbeef1 in", start=mark), v.out[mark:])
+        v.key(b"q", 0.5)
+        v.key(b"q")
+        v.exit()
+    finally:
+        v.close()
+    v = Pty([DCH, "--xray", "xv-cl"])
+    try:
+        v.wait(b"Chapters 2")
+        v.pump(0.5)
+        mark = len(v.out)
+        v.key(b"/o/r#7", 1.0)
+        text = shown(v, mark)
+        check("lookup #263: a ref a chapter title holds: the row stays, the "
+              "footer names ^R", "^R look up" in text and
+              "No match" not in text, text)
+        mark = len(v.out)
+        v.key(b"\x12", 1.0)
+        check("lookup #263: ^R opens the ref's card, not the row's chapter",
+              v.wait(b"o/r#7  light", start=mark), v.out[mark:])
+        v.key(b"\033", 0.5)
+        v.key(b"q")
+        v.exit()
     finally:
         v.close()
 
@@ -1729,6 +1839,7 @@ def main():
         test_refs()
         fixture_latest()
         test_latest()
+        test_lookup()
         fixture_tmp()
         test_tmp()
         fixture_auto()

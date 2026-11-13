@@ -924,6 +924,14 @@ The view has three tabs:
   screen has been read (0 included); before that, and when there is no
   screen, no number. An ended session and dch-lite have no screen to show.
 
+A ref typed after `/` (a ticket, issue, pull request, commit, file or URL,
+as `--ref` takes it) opens its card with `Ctrl-R`, on Chapters and Refs, while
+typing or after: also when no row has it, a row is not the one you want, or
+its kind is hidden until `a`. The footer shows `^R look up` while the filter
+holds one. The filter matches chapter titles and summaries and the refs held;
+words are not looked up, and the empty list says so. On a remote view a
+host whose dch takes no such ref says so in the status line.
+
 A ref's card shows its definitions (two or more as "N definitions"), its
 first and latest mention, its counts (this session, this project, all
 projects) and its mentions. It opens light, as `--ref` does without `--full`.
@@ -947,6 +955,7 @@ not clear X-ray; run `clear`".
 | `↑` `↓` / `j` `k`, `PgUp` `PgDn`, `g` `G` | move | move / scroll |
 | `Enter` | read the chapter / open the card | card: read the mention's chapter |
 | `/` | filter | |
+| `Ctrl-R` | with a ref typed after `/`: open its card, a row for it or not, its kind hidden or not | |
 | `a` | Refs: show / hide the files, commits and URLs (on On screen `a` is a label) | |
 | `t` | Refs: show / hide the temp files | |
 | `n` | Chapters: show / hide the auto rows (auto chapters, the task notifications, and compactions) | |

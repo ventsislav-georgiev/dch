@@ -88,6 +88,12 @@ Covers:
       live updates stopped and how to get them back, and no failed read
       replaces it; a failed read shows in place of the screen; once the
       host answers On screen reads again and no unreachable line is left.
+  12. the lookup (#263) on srv:xv-cl: OQ-32, which no row has, and #831,
+      which a chapter title holds, typed in the filter: ^R opens each card
+      from the host, Enter reads a mention's chapter there, Esc back to the
+      card; each a ctl --xray of its own. The hostile host refuses --ref
+      as an older dch's grammar would (exit 2): the status says the host's
+      dch takes no such ref, with its line, and the view stays.
 
 Run:  python3 tests/xray_remote_view_test.py      (uses ./dch)
 """
@@ -401,6 +407,59 @@ def test_view():
            refused()))
 
 
+def shown(v, mark):
+    """The text last drawn on each row since mark, its escapes removed."""
+    got, parts = {}, re.split(rb"\033\[(\d+);1H", v.out[mark:])
+    for i in range(1, len(parts) - 1, 2):
+        got[int(parts[i])] = re.sub(rb"\033\[[0-9;?]*[A-Za-z]", b"",
+                                    parts[i + 1]).decode("utf-8", "replace")
+    return "\n".join(got[k] for k in sorted(got))
+
+
+def test_lookup():
+    """#263: a ref typed in the filter opens its card on the host with ^R."""
+    n0 = ctls("--xray")
+    v = Pty([DCH, "--xray", "srv:xv-cl"])
+    try:
+        v.wait(b"Chapters 2")
+        v.pump(0.5)
+        mark = len(v.out)
+        v.key(b"/OQ-32", 1.0)
+        text = shown(v, mark)
+        check("lookup #263: a ref no row has: the empty line and the footer "
+              "name ^R", "No match: ^R looks it up" in text and
+              "^R look up" in text, text)
+        mark = len(v.out)
+        v.key(b"\x12", 1.0)
+        check("lookup #263: ^R opens its card from the host",
+              v.wait(b"OQ-32  light", start=mark) and
+              v.wait(b"Mentions: this session ", start=mark), v.out[mark:])
+        v.key(b"\033", 0.5)
+        v.key(b"/\x15", 0.3)
+        mark = len(v.out)
+        v.key(b"#831\x12", 1.0)
+        check("lookup #263: #831, a chapter title's: ^R opens its card, "
+              "not the chapter", v.wait(b"#831  light", start=mark) and
+              v.wait(b"Definition", start=mark), v.out[mark:])
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        rd = v.wait(b"You", start=mark)
+        mark = len(v.out)
+        v.key(b"\033", 1.0)
+        check("lookup #263: Enter on its mention reads the chapter from the "
+              "host, Esc back to the card", rd and
+              v.wait(b"#831  light", start=mark), v.out[mark:])
+        v.key(b"\033", 0.5)
+        v.key(b"q")
+        v.exit()
+    finally:
+        v.close()
+    until(lambda: ctls("--xray") - n0 >= 4, 5)
+    check("lookup #263: the cards and the chapter ran on the host, each its "
+          "own ctl --xray (follow, 2 refs, chapter)",
+          ctls("--xray") - n0 == 4, (ctls("--xray") - n0, refused()))
+
+
 def test_small_card():
     """QA 1.56.0 MED-V1 over a host:name view: k, Up and PgUp in a
     too-small window took the card's selection below 0 and Enter read
@@ -519,8 +578,8 @@ class Hostile(Fake):
     """A host with ctl, ctl-cancel and xray: --follow answers a snapshot
     with raw control and bidi bytes and holds the stream; the first --read
     answers a screen with OSC, CSI, BEL, C1, bidi, invalid UTF-8 and NUL
-    bytes, every later one fails (exit 1) with such a stderr; anything else
-    ends 0."""
+    bytes, every later one fails (exit 1) with such a stderr; --ref fails
+    (exit 2) as an older dch's grammar does; anything else ends 0."""
 
     def __init__(self):
         super().__init__("ok", ops=["ctl", "ctl-cancel", "xray"])
@@ -560,6 +619,11 @@ class Hostile(Fake):
                                     '"count":2,"underline":true}]}}\n')
                             c.sendall(frame(0x31, snap.encode()))
                             continue    # a stream: held until the close
+                        if "--ref" in argv:
+                            # an older dch whose grammar lacks the shape
+                            c.sendall(frame(0x32, b"dch: not a ref\n") +
+                                      frame(0x33, {"exit": 2}))
+                            continue
                         if argv[0] == "--read":
                             self.reads += 1
                             if self.reads > 1:
@@ -590,6 +654,15 @@ def test_hostile():
               v.wait(b"o/r#41", start=mark) and
               v.wait(b"issues and tickets this session touched;", start=mark),
               v.out[mark:])
+        mark = len(v.out)
+        v.key(b"/OQ-32\x12", 2.0)
+        check("hostile, an older host whose dch takes no such ref (#263): ^R "
+              "says its line, the view stays",
+              v.wait(b"the host's dch takes no such ref (an older dch?): "
+                     b"dch: not a ref", start=mark) and v.reap() is None,
+              v.out[mark:])
+        v.key(b"\033", 0.5)
+        v.key(b"\033", 0.5)
         mark = len(v.out)
         v.key(b"\t", 2.0)
         check("hostile: On screen draws the host's screen, its OSC and CSI "
@@ -1905,6 +1978,7 @@ def main():
         shell()
         hosts("srv=127.0.0.1:%d" % port)
         test_view()
+        test_lookup()
         test_small_card()
         test_on_screen()
         test_picker(port)
