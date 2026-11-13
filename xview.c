@@ -1232,7 +1232,11 @@ xv_temp(const struct xv *v, const struct xv_ref *r)
 {
 	static const char *const d[] = { "/tmp", "/private/tmp", "/var/folders",
 		"/private/var/folders" };
-	char lr[PATH_MAX], rr[PATH_MAX];
+	/* the label's realpath, once per label: under /home it is an autofs
+	** lookup, too slow for every row on every filter pass */
+	static char lk[PATH_MAX], lr[PATH_MAX];
+	static int lok;
+	char rr[PATH_MAX];
 	size_t k;
 	int t = 0;
 
@@ -1244,9 +1248,14 @@ xv_temp(const struct xv *v, const struct xv_ref *r)
 		return 0;
 	if (xv_under(r->text, v->label))
 		return 0;
-	return v->hl || !v->label || v->label[0] != '/' ||
-	       !realpath(v->label, lr) ||
-	       !(xv_under(r->text, lr) ||
+	if (v->hl || !v->label || v->label[0] != '/')
+		return 1;
+	if (strcmp(lk, v->label))
+	{
+		snprintf(lk, sizeof lk, "%s", v->label);
+		lok = realpath(v->label, lr) != NULL;
+	}
+	return !lok || !(xv_under(r->text, lr) ||
 	         (realpath(r->text, rr) && xv_under(rr, lr)));
 }
 
