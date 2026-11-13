@@ -1606,7 +1606,8 @@ dch_claude_gone(const char *rec)
 ** rewrites its record in place (writeFile: truncate, then write), so a read
 ** in between finds it empty or changing: such a record is read again, at
 ** most 10 waits of 5ms per dir, so one unlucky read never drops a live
-** Claude (#253). */
+** Claude (#253). Empty, only a live <pid>.json's: one left empty by a
+** Claude killed mid-write stays empty, and would cost every scan 50ms. */
 static int
 visit_records_in(const char *dir, dch_claude_record_fn visit, void *arg)
 {
@@ -1618,9 +1619,10 @@ visit_records_in(const char *dir, dch_claude_record_fn visit, void *arg)
 		return 0;
 	while ((de = readdir(d)))
 	{
-		char path[1400], body[8192], extra;
+		char path[1400], body[8192], extra, *e;
 		struct stat before, after;
 		size_t len, n = strlen(de->d_name);
+		long rp;
 		int fd;
 		if (n < 6 || strcmp(de->d_name + n - 5, ".json") ||
 		    snprintf(path, sizeof path, "%s/%s", dir, de->d_name) >=
@@ -1637,8 +1639,13 @@ visit_records_in(const char *dir, dch_claude_record_fn visit, void *arg)
 			if (fd >= 0) close(fd);
 			if (fd >= 0 && S_ISREG(before.st_mode) &&
 			    before.st_uid == getuid() && !(before.st_mode & 022) &&
-			    before.st_size == 0 && waits++ < 10)
+			    before.st_size == 0 &&
+			    (rp = strtol(de->d_name, &e, 10)) > 0 &&
+			    !strcmp(e, ".json") &&
+			    (kill((pid_t)rp, 0) == 0 || errno == EPERM) &&
+			    waits++ < 10)
 			{
+				dch_trace("claude record %s: empty, read again", path);
 				usleep(5000);
 				goto again;
 			}
@@ -1659,6 +1666,7 @@ visit_records_in(const char *dir, dch_claude_record_fn visit, void *arg)
 			close(fd);
 			if (!memchr(body, '\0', len) && waits++ < 10)
 			{
+				dch_trace("claude record %s: changed, read again", path);
 				usleep(5000);
 				goto again;
 			}

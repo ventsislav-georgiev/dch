@@ -12,7 +12,8 @@ one Claude; the id following a rewritten record (/clear, resume); a missing
 .jsonl; two .jsonl under different project dirs; a session with no Claude;
 two Claudes in one session; a Claude with Claudes below it (the ancestor
 joins, --xray --json agreeing, #253); a record read while it is rewritten
-in place (#253); a record whose procStart does not match; a
+in place, and no wait for an empty one left by a dead Claude (#253); a
+record whose procStart does not match; a
 sessionId that is no UUID; CLAUDE_CONFIG_DIR honoured; null once the
 program exits (its record removed, or left behind under a held session).
 
@@ -292,13 +293,55 @@ def main():
             "    time.sleep(0.003)\n"
             "    os.write(fd,b); os.close(fd)\n"
             "    time.sleep(0.007)\n", rp, body])
+        trace = os.path.join(tmp, "trace")
+        dbg = dict(os.environ, DCH_DEBUG=trace)
         try:
-            got = [field(a, "claude_session_id") for _ in range(60)]
+            got = [field(a, "claude_session_id", dbg) for _ in range(60)]
         finally:
             w.kill()
             w.wait()
+            record(pa, s1)	# killed mid-write, it may have left it empty
         check("record rewritten in place: no sample misses (%d of 60)"
               % sum(g != s1 for g in got), all(g == s1 for g in got))
+        def traced(what):
+            try:
+                return open(trace).read().count(what)
+            except OSError:
+                return 0
+        rereads = traced("empty, read again")
+        check("a live pid's empty record is read again (%d times)" % rereads,
+              rereads > 0)
+
+        # --- an empty record that stays empty (#253) ----------------------
+        # a Claude killed between its truncate and its write: no wait for
+        # it, or every scan of the dir pays it for ever (10 waits of 5ms per
+        # dir scan, two scans per --ls-json: 100ms; the bound leaves room
+        # for load)
+        dead = subprocess.Popen(["/usr/bin/true"])
+        dead.wait()
+        stale = [os.path.join(sessdir, "%d.json" % dead.pid),
+                 os.path.join(sessdir, "stale.json")]
+
+        def fastest():
+            best = None
+            for _ in range(10):
+                t0 = time.perf_counter()
+                rows(dbg)
+                t = time.perf_counter() - t0
+                best = t if best is None else min(best, t)
+            return best
+        clean = fastest()
+        for f in stale:
+            open(f, "w").close()
+        open(trace, "w").close()
+        slow = fastest()
+        waited = traced("read again")
+        for f in stale:
+            os.unlink(f)
+        check("empty dead-pid and non-pid records: no re-read (%d)" % waited,
+              waited == 0)
+        check("... and no wait: fastest of 10 %.0fms vs %.0fms clean"
+              % (slow * 1000, clean * 1000), slow - clean < 0.06)
 
         # --- CLAUDE_CONFIG_DIR is honoured --------------------------------
         e = "tt-cfg"
