@@ -8,7 +8,9 @@
 **   1: ring records ({u16 len, u8 kind, u8 flags, u32 time, text}), a short
 **      tail taken as what is left, through xr_shell_chapters;
 **   2: a Claude transcript as a file, through xr_claude_read (read_range:
-**      the chunking, the line cap, the head and tail ranges);
+**      the chunking, the line cap, the head and tail ranges); then through
+**      xr_claude_newest (#262: light --ref's windows, newest first), every
+**      ref hit's offset a line start inside the file;
 **   3: one MSG_RING_READ reply: u32 count LE, then its record bytes, through
 **      xr_ring_walk (dch.c's reply walker) into xr_shell_feed.
 ** Byte 0's high bits squeeze xr_lim (fuzz only): the output cap to 8-64K,
@@ -105,6 +107,22 @@ walk_rec(void *ctx, const struct xr_rec *x)
 	xr_shell_feed(&w->sh, x);
 }
 
+/* Mode 2's newest-first read: a hit is on a line of the file. */
+struct offs
+{
+	const uint8_t *d;
+	size_t n;
+};
+
+static void
+off_hit(void *ctx, const struct xr_hit *h)
+{
+	const struct offs *o = ctx;
+
+	if (h->off >= o->n || (h->off && o->d[h->off - 1] != '\n'))
+		abort();
+}
+
 /* The transcript file mode 2 reads: one per process, rewritten per input. */
 static int
 tfile(void)
@@ -146,6 +164,20 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 			abort();	/* capped is exactly "past the ranges" */
 		xr_claude_end(x, 0x1234, &c);
 		xr_claude_free(x);
+		if (fd >= 0 && (x = xr_claude_new()))
+		{
+			struct offs o = { d + 1, n - 1 };
+			struct xr_sink k = { off_hit, &o };
+			struct xr_chapters c2 = {0};
+
+			xr_claude_refs(x, &k, 0x1234, NULL, NULL);
+			if (xr_claude_newest(x, fd, n - 1, &capped) == 0 &&
+			    capped != (n - 1 > xr_lim.head + xr_lim.tail))
+				abort();	/* the same range as xr_claude_read */
+			xr_claude_end(x, 0x1234, &c2);
+			xr_chapters_free(&c2);
+			xr_claude_free(x);
+		}
 	}
 	else if ((d[0] & 3) == 3)
 	{

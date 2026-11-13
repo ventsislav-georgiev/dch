@@ -397,6 +397,9 @@ int dch_config_get(const char *key, char *out, size_t cap);
 int dch_config_bool(const char *key);
 int dch_env_on(const char *key);
 int dch_allow_prompt(const char *screen, char **ident, char **title);
+/* A connect to a master's socket (dch.c): the fd, or -1 with errno, EAGAIN
+** when its backlog stayed full for 500 ms: a live master, stuck (#265). */
+int control_connect_path(const char *path);
 
 int attach_main(int noerror);
 /* A remote attach (remote.c) hands attach_main an already connected

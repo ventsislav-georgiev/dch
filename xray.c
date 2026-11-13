@@ -3495,6 +3495,10 @@ struct xr_ent
 	int shape;
 	char full[41];
 	uint64_t nunit, lastunit, nrow, lastrow, first;
+	uint64_t last;		/* the newest mention's offset (#262) */
+	uint64_t h;		/* fnv of key: its slot's home */
+	uint32_t older, newer;	/* its kind's list, by latest mention: entry
+				** + 1, 0 none */
 	int ndefs;
 	uint64_t defh[XR_DEFS];
 	char *title;
@@ -3503,10 +3507,16 @@ struct xr_ent
 #define XR_HASH 4096		/* slots, > 2 x XR_KEYS */
 #define XR_DROPSET 65536
 
+/* Each kind its own room (#262): pulls, issues and tickets are never pushed
+** out by files, commits or URLs. In a full room the ref whose latest
+** mention is the oldest goes, counted in dropped_keys. */
+static const size_t xr_room[6] = XR_ROOMS;
+
 struct xr_index
 {
 	struct xr_ent *v;
-	size_t n;
+	size_t n, nk[6];	/* nk: entries per kind */
+	uint32_t oldest[6], newest[6];	/* each kind's list ends: entry + 1 */
 	uint32_t slot[XR_HASH];	/* entry + 1 */
 	uint64_t *drop;		/* dropped keys' hashes, open addressing */
 	uint64_t dropped;
@@ -3585,28 +3595,138 @@ ix_drop(struct xr_index *x, uint64_t h)
 	}
 }
 
+/* A key gone from the drop set (its ref is back in the index): the set's
+** later entries shifted back over the hole, as linear probing needs. */
+static void
+ix_undrop(struct xr_index *x, uint64_t h)
+{
+	size_t i, j, k;
+
+	if (!h)
+		h = 1;
+	if (!x->drop)
+		return;
+	for (i = h % XR_DROPSET; x->drop[i] != h; i = (i + 1) % XR_DROPSET)
+		if (!x->drop[i])
+			return;
+	for (j = i;;)
+	{
+		x->drop[i] = 0;
+		do
+		{
+			j = (j + 1) % XR_DROPSET;
+			if (!x->drop[j])
+			{
+				x->dropped--;
+				return;
+			}
+			k = x->drop[j] % XR_DROPSET;
+		} while (i <= j ? i < k && k <= j : i < k || k <= j);
+		x->drop[i] = x->drop[j];
+		i = j;
+	}
+}
+
+/* Entry k out of the hash slots, the same way. */
+static void
+ix_unslot(struct xr_index *x, size_t k)
+{
+	size_t i, j, home;
+
+	for (i = x->v[k].h % XR_HASH; x->slot[i] != k + 1; i = (i + 1) % XR_HASH)
+		;
+	for (j = i;;)
+	{
+		x->slot[i] = 0;
+		do
+		{
+			j = (j + 1) % XR_HASH;
+			if (!x->slot[j])
+				return;
+			home = x->v[x->slot[j] - 1].h % XR_HASH;
+		} while (i <= j ? i < home && home <= j : i < home || home <= j);
+		x->slot[i] = x->slot[j];
+		i = j;
+	}
+}
+
+/* Entry k out of its kind's list. */
+static void
+ix_unlink(struct xr_index *x, size_t k)
+{
+	struct xr_ent *e = &x->v[k];
+
+	if (e->older)
+		x->v[e->older - 1].newer = e->newer;
+	else
+		x->oldest[e->shape] = e->newer;
+	if (e->newer)
+		x->v[e->newer - 1].older = e->older;
+	else
+		x->newest[e->shape] = e->older;
+	e->older = e->newer = 0;
+}
+
+/* Entry k as its kind's latest mentioned. */
+static void
+ix_touch(struct xr_index *x, size_t k)
+{
+	struct xr_ent *e = &x->v[k];
+
+	if (x->newest[e->shape] == k + 1)
+		return;
+	if (e->older || e->newer || x->oldest[e->shape] == k + 1)
+		ix_unlink(x, k);
+	e->older = x->newest[e->shape];
+	if (e->older)
+		x->v[e->older - 1].newer = (uint32_t)(k + 1);
+	else
+		x->oldest[e->shape] = (uint32_t)(k + 1);
+	x->newest[e->shape] = (uint32_t)(k + 1);
+}
+
 static struct xr_ent *
 ix_get(struct xr_index *x, const struct xr_span *sp)
 {
 	uint64_t h = fnv(sp->key, strlen(sp->key));
-	size_t i;
+	size_t i, k;
 	struct xr_ent *e;
+	char *key;
+	int s = sp->shape;
 
 	for (i = h % XR_HASH; x->slot[i]; i = (i + 1) % XR_HASH)
 		if (!strcmp(x->v[x->slot[i] - 1].key, sp->key))
+		{
+			ix_touch(x, x->slot[i] - 1);
 			return &x->v[x->slot[i] - 1];
-	if (x->n == XR_KEYS)
+		}
+	if (s < 0 || s > XR_URL || !(key = strdup(sp->key)))
+		return NULL;
+	if (x->nk[s] == xr_room[s])
 	{
-		ix_drop(x, h);
-		return NULL;
+		/* the room is full: its ref mentioned longest ago goes */
+		k = x->oldest[s] - 1;
+		ix_drop(x, x->v[k].h);
+		ix_unslot(x, k);
+		ix_unlink(x, k);
+		free(x->v[k].key);
+		free(x->v[k].title);
+		x->nk[s]--;
+		for (i = h % XR_HASH; x->slot[i]; i = (i + 1) % XR_HASH)
+			;
 	}
-	e = &x->v[x->n];
+	else
+		k = x->n++;
+	ix_undrop(x, h);
+	e = &x->v[k];
 	memset(e, 0, sizeof *e);
-	if (!(e->key = strdup(sp->key)))
-		return NULL;
-	e->shape = sp->shape;
+	e->key = key;
+	e->h = h;
+	e->shape = s;
 	e->first = x->ord++;
-	x->slot[i] = (uint32_t)++x->n;
+	x->slot[i] = (uint32_t)(k + 1);
+	x->nk[s]++;
+	ix_touch(x, k);
 	return e;
 }
 
@@ -3619,6 +3739,8 @@ ix_hit(void *ctx, const struct xr_hit *h)
 
 	if (!e)
 		return;
+	if (h->off > e->last)
+		e->last = h->off;
 	if (strlen(h->sp->full) > strlen(e->full))
 		snprintf(e->full, sizeof e->full, "%s", h->sp->full);
 	if (h->title)
@@ -4005,6 +4127,11 @@ sc_hit(void *ctx, const struct xr_hit *h)
 				(void)sc_line(x, b, strlen(b));
 				free(b);
 			}
+			else if (x->hn == XR_HELD && !x->full)
+			{
+				free(b);	/* light reads newest first: */
+				x->dropped++;	/* the held are the newer */
+			}
 			else
 			{
 				if (x->hn == XR_HELD)
@@ -4218,6 +4345,12 @@ xr_scan_done(struct xr_scan *x)
 	        (unsigned long long)x->files, (unsigned long long)x->bytes,
 	        (unsigned long long)x->too_long);
 	return sc_flush(x);
+}
+
+int
+xr_scan_full(const struct xr_scan *x)
+{
+	return x->full;
 }
 
 int
@@ -6115,6 +6248,142 @@ xr_claude_read(struct xr_claude *d, int fd, uint64_t size, int *capped)
 	return rc;
 }
 
+/* The first line start in [from, to) (0, or a byte after a '\n'): 1 with
+** *at, 0 none, -1 a read error. */
+static int
+line_start(int fd, uint64_t from, uint64_t to, char *buf, uint64_t *at)
+{
+	uint64_t pos;
+
+	if (!from)
+	{
+		*at = 0;
+		return to > 0;
+	}
+	for (pos = from - 1; pos + 1 < to;)
+	{
+		size_t want = to - 1 - pos > xr_lim.chunk ? xr_lim.chunk
+		              : (size_t)(to - 1 - pos);
+		ssize_t got = pread(fd, buf, want, (off_t)pos);
+		char *nl;
+
+		if (got < 0 && errno == EINTR)
+			continue;
+		if (got <= 0)
+			return got < 0 ? -1 : 0;
+		if ((nl = memchr(buf, '\n', (size_t)got)))
+		{
+			*at = pos + (uint64_t)(nl - buf) + 1;
+			return 1;
+		}
+		pos += (uint64_t)got;
+	}
+	return 0;
+}
+
+/* xr_claude_newest's windows: the bytes of the ones before added, so the
+** --ref tick (budget, caps, progress) sees the whole read. */
+struct xr_win
+{
+	int (*tick)(void *ctx, uint64_t bytes);
+	void *tctx;
+	uint64_t base;
+};
+
+static int
+win_tick(void *ctx, uint64_t bytes)
+{
+	struct xr_win *w = ctx;
+
+	return w->tick(w->tctx, w->base + bytes);
+}
+
+/* Lines [a, b) by a fresh decoder (d's sink, inode and kind). */
+static int
+win_read(struct xr_claude *d, int fd, uint64_t a, uint64_t b,
+         struct xr_win *w, char *buf, char *acc)
+{
+	struct xr_claude *e = xr_claude_new();
+	struct xr_chapters ch;
+	int rc;
+
+	if (!e)
+		return -1;
+	e->codex = d->codex;
+	e->unit = d->unit;	/* a unit never repeats across windows */
+	xr_claude_refs(e, &d->rk, d->ino, w->tick ? win_tick : NULL, w);
+	rc = read_range(e, fd, a, b, 0, buf, acc);
+	xr_claude_end(e, d->ino, &ch);
+	xr_chapters_free(&ch);
+	d->halt = e->halt;
+	d->unit = e->unit;
+	d->too_long += e->too_long;
+	xr_claude_free(e);
+	w->base += b - a;
+	return rc;
+}
+
+int
+xr_claude_newest(struct xr_claude *d, int fd, uint64_t size, int *capped)
+{
+	char *buf = malloc(XR_CHUNK), *acc = malloc(XR_LINE_MAX + 1);
+	uint64_t r[2][2], end = size;
+	struct xr_win w;
+	int nr = 1, i, k, rc = buf && acc ? 0 : -1;
+
+	w.tick = d->tick;
+	w.tctx = d->tctx;
+	w.base = 0;
+	d->halt = 0;
+	r[0][0] = 0;
+	r[0][1] = size;
+	if (size > xr_lim.head + xr_lim.tail)
+	{
+		/* the tail first, then the head (3.8's range) */
+		*capped = 1;
+		r[0][0] = size - xr_lim.tail;
+		r[1][0] = 0;
+		r[1][1] = xr_lim.head;
+		nr = 2;
+	}
+	else
+		*capped = 0;
+	for (i = 0; i < nr && rc == 0 && !d->halt; i++)
+	{
+		uint64_t lo = 0, b = r[i][1], s, a;
+
+		/* the head ends past its last line, before the tail's first */
+		if (i && (k = line_start(fd, b, end, buf, &b)) <= 0)
+			b = end, rc = k;
+		/* the range starts at its first line (the tail: past its cut) */
+		if (rc == 0 && (k = line_start(fd, r[i][0], b, buf, &lo)) <= 0)
+			lo = b, rc = k;
+		end = lo;
+		for (s = b; s > lo && rc == 0 && !d->halt;)
+		{
+			uint64_t t = s;
+
+			/* the tick between windows too: a long line is all skip */
+			if (w.tick && (d->halt = w.tick(w.tctx, w.base)))
+				break;
+			s = s - lo > xr_lim.chunk ? s - xr_lim.chunk : lo;
+			/* [t, b) has no line start: the window's is in [s, t) */
+			if ((k = line_start(fd, s, t, buf, &a)) < 0)
+				rc = -1;
+			else if (k && (rc = win_read(d, fd, a, b, &w, buf, acc)) >= 0)
+				b = a;
+		}
+	}
+	if (rc == 1)	/* shrank: what was read stands */
+	{
+		*capped = 1;
+		rc = 0;
+	}
+	free(buf);
+	free(acc);
+	return rc;
+}
+
 void
 xr_claude_refs(struct xr_claude *d, const struct xr_sink *k, uint64_t ino,
                int (*tick)(void *ctx, uint64_t bytes), void *tctx)
@@ -6850,6 +7119,22 @@ ref_cmp(const void *pa, const void *pb)
 	return a->first < b->first ? -1 : a->first > b->first;
 }
 
+/* The cap's order (#272): files, commits and URLs before pulls, issues and
+** tickets, each the oldest latest mention first */
+static int
+ref_drop_cmp(const void *pa, const void *pb)
+{
+	const struct xr_ent *a = &ref_sort_x->v[*(const size_t *)pa];
+	const struct xr_ent *b = &ref_sort_x->v[*(const size_t *)pb];
+	int ga = a->shape < XR_COMMIT, gb = b->shape < XR_COMMIT;
+
+	if (ga != gb)
+		return ga - gb;
+	if (a->last != b->last)
+		return a->last < b->last ? -1 : 1;
+	return a->first < b->first ? -1 : a->first > b->first;
+}
+
 /* One ref (3.2): count descending, then first appearance. */
 /* count 0 with no definitions: the removal line of a follow (3.3) */
 static void
@@ -6867,8 +7152,9 @@ put_ref_n(FILE *m, const struct xr_ent *e, uint64_t c, const char *project,
 	}
 	fputs(",\"project\":", m);
 	xr_put_str(m, project);
-	fprintf(m, ",\"count\":%llu,\"defined\":%s,\"definitions\":%d,"
-	        "\"title\":", (unsigned long long)c, e->ndefs ? "true" : "false",
+	fprintf(m, ",\"count\":%llu,\"last_offset\":%llu,\"defined\":%s,"
+	        "\"definitions\":%d,\"title\":", (unsigned long long)c,
+	        (unsigned long long)e->last, e->ndefs ? "true" : "false",
 	        e->ndefs);
 	put_or_null(m, e->title);
 	fprintf(m, ",\"underline\":%s}",
@@ -6898,30 +7184,39 @@ xr_print(FILE *f, const struct xr_answer *a)
 	const char *why = a->why;
 	const char *proj = a->project ? a->project : "";
 	size_t nr = a->refs ? a->refs->n : 0, keep, *ord = NULL, *rat = NULL;
+	size_t *drop = NULL, rl, j;
 	uint64_t dropped = a->refs ? a->refs->dropped : 0;
+	char *gone = NULL;
 
+	/* rat: each ref's size by index, with its comma; drop: the cap's order */
 	if (!(rat = calloc(nr + 1, sizeof *rat)) ||
-	    (nr && !(ord = malloc(nr * sizeof *ord))))
+	    !(gone = calloc(nr + 1, 1)) ||
+	    (nr && (!(ord = malloc(nr * sizeof *ord)) ||
+	            !(drop = malloc(nr * sizeof *drop)))))
 	{
 		free(rat);
+		free(gone);
 		free(ord);
+		free(drop);
 		free(at);
 		return -1;
 	}
 	for (k = 0; k < nr; k++)
-		ord[k] = k;
+		ord[k] = drop[k] = k;
 	if (nr)
 	{
 		ref_sort_x = a->refs;
 		qsort(ord, nr, sizeof *ord, ref_cmp);
+		qsort(drop, nr, sizeof *drop, ref_drop_cmp);
 	}
 	/* each ref's size, as chapters' below */
 	if (nr && !(m = open_memstream(&body, &bl)))
 		goto fail;
-	for (k = 0; k < nr && fseek(m, 0, SEEK_SET) == 0; k++)
+	for (k = 0, rl = 0; k < nr && fseek(m, 0, SEEK_SET) == 0; k++)
 	{
-		put_ref(m, a->refs, &a->refs->v[ord[k]], proj, k > 0);
-		rat[k + 1] = rat[k] + (size_t)ftell(m);
+		put_ref(m, a->refs, &a->refs->v[k], proj, 1);
+		rat[k] = (size_t)ftell(m);
+		rl += rat[k];
 	}
 	if (nr && (fclose(m) != 0 || k < nr))
 		goto fail;
@@ -6932,6 +7227,8 @@ xr_print(FILE *f, const struct xr_answer *a)
 fail:
 		free(body);
 		free(ord);
+		free(drop);
+		free(gone);
 		free(rat);
 		free(at);
 		return -1;
@@ -6945,6 +7242,8 @@ fail:
 	{
 		free(body);
 		free(ord);
+		free(drop);
+		free(gone);
 		free(rat);
 		free(at);
 		return -1;
@@ -6952,14 +7251,19 @@ fail:
 	free(body);
 	body = NULL;
 	bl = at[n];
-	/* 4 MiB: refs go first, from the end (each a dropped key), then the
-	** oldest chapters */
+	/* 4 MiB: refs go first, in drop's order (each a dropped key; the first
+	** kept one has no comma), then the oldest chapters */
 	slack = 4096 + 6 * (strlen(a->session) + strlen(a->session_id) +
 	                    (a->project ? strlen(a->project) : 0) +
 	                    (a->project_label ? strlen(a->project_label) : 0));
-	for (keep = nr; keep && bl + rat[keep] + slack > xr_lim.out; keep--)
-		;
-	while (cut < n && bl - at[cut] + rat[keep] + slack > xr_lim.out)
+	rl -= nr > 0;
+	for (j = 0; j < nr && bl + rl + slack > xr_lim.out; j++)
+	{
+		rl -= rat[drop[j]] - (j + 1 == nr);
+		gone[drop[j]] = 1;
+	}
+	keep = nr - j;
+	while (cut < n && bl - at[cut] + rl + slack > xr_lim.out)
 		cut++;
 	if (cut || keep < nr)
 	{
@@ -6967,7 +7271,7 @@ fail:
 		why = "output";
 		dropped += nr - keep;
 	}
-	if (a->sent && sent_cut(a->sent, ord + keep, nr - keep) != 0)
+	if (a->sent && sent_cut(a->sent, drop, nr - keep) != 0)
 		goto fail;
 	if (!(m = open_memstream(&head, &hl)))
 	{
@@ -7009,8 +7313,10 @@ fail:
 			            k > cut);
 		fprintf(f, "],\"chapters_evicted\":%s,\"refs\":[",
 		        a->chapters_evicted ? "true" : "false");
-		for (k = 0; k < keep; k++)
-			put_ref(f, a->refs, &a->refs->v[ord[k]], proj, k > 0);
+		for (k = j = 0; k < nr; k++)	/* j: refs written */
+			if (!gone[ord[k]])
+				put_ref(f, a->refs, &a->refs->v[ord[k]], proj,
+				        j++ > 0);
 		fprintf(f, "],\"dropped_keys\":%llu}%s\n",
 		        (unsigned long long)dropped, a->snapshot ? "}" : "");
 		if (fflush(f) != 0 || ferror(f))
@@ -7019,6 +7325,8 @@ fail:
 	free(head);
 	free(at);
 	free(ord);
+	free(drop);
+	free(gone);
 	free(rat);
 	return rc;
 }

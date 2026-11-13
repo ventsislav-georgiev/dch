@@ -2447,8 +2447,6 @@ rename_sessions_interactive(void)
 ** realpath when argv[2] is absolute.
 */
 
-static int control_connect_path(const char *path);
-
 static int
 is_master_of(long pid, const char *sp)
 {
@@ -2761,7 +2759,8 @@ usage(void)
 	    "                                             \"stopped\"; dch --revive\n"
 	    "                                             <name> wakes it resumed\n"
 	    "  dch --ls-json    like -lj but JSON, adds \"state\"; --remote\n"
-	    "                   adds remote rows, each with a \"host\"\n"
+	    "                   adds remote rows, each with a \"host\";\n"
+	    "                   --follow: again, one line, on each change\n"
 	    "  dch --config [<key> [<value>|--unset]]     show the config file\n"
 	    "                                             (path, then each key),\n"
 	    "                                             one key, or set/remove\n"
@@ -2857,8 +2856,6 @@ run_master_of(int argc, char **argv)
 /* Build a daemon-launching command vector. We fork+setsid here so the
 ** master survives the originating terminal closing. Returns 0 on parent
 ** success. */
-static int control_connect_path(const char *path);
-
 static long long
 wall_ms(void)
 {
@@ -3000,6 +2997,12 @@ spawn_master(char *exe, const char *name, char *sockp,
 	return -1;
 }
 
+/* a control_connect_path EAGAIN: said by the verbs, the attach and the
+** picker's status line */
+#define STUCK_MSG "session %s is not accepting connections — its master " \
+                  "may be stopped or wedged"
+static const char stuck_fmt[] = "dch: " STUCK_MSG "\n";
+
 static int attach_xray_view(void);
 static int attach_remote;	/* this attach is a host's: so is its chord's view */
 /* The next attach's route as the picked row or the view is (#210), not as
@@ -3137,6 +3140,12 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 
 		if (rc == ATTACH_SWITCH || rc == ATTACH_ENDED)
 			return rc;
+		/* live but stuck: never respawned over (#269) */
+		if (rc == 1 && errno == EAGAIN)
+		{
+			fprintf(stderr, stuck_fmt, session_name);
+			return 1;
+		}
 		dch_trace("hot-path connect failed; dead socket, respawning");
 	}
 	}
@@ -3250,38 +3259,61 @@ static const char no_reply_msg[] =
     "     protocol. Check whether its process is alive or stuck (e.g. ps)\n"
     "     before recreating anything; try `dch --restart <session>` first\n";
 
-static int
+/* How long a connect waits on a full listen backlog: --ls-json's budget
+** for a whole screen fetch (DET_DEADLINE_MS). A pending connect to a master
+** that accepts, however loaded, connects at once; only a stopped or wedged
+** master's full backlog waits (#265). */
+#define CTL_CONNECT_MS 500
+
+/* -1 with errno EAGAIN: a listener is there, but its backlog stayed full
+** for CTL_CONNECT_MS (Linux; macOS refuses that connect at once). That is
+** a live, stuck master, never a dead socket to unlink or revive over. */
+int
 control_connect_path(const char *path)
 {
 	struct sockaddr_un sa;
-	int s;
+	/* Linux bounds a unix connect's wait for backlog room by SO_SNDTIMEO */
+	struct timeval tv = {0, CTL_CONNECT_MS * 1000}, t0 = {0, 0};
+	int s, e;
 
 	if (strlen(path) > sizeof(sa.sun_path) - 1)
+	{
+		errno = ENAMETOOLONG;	/* never a stale EAGAIN */
 		return -1;
+	}
 	s = socket(PF_UNIX, SOCK_STREAM, 0);
 	if (s < 0)
 		return -1;
 	memset(&sa, 0, sizeof(sa));
 	sa.sun_family = AF_UNIX;
 	strcpy(sa.sun_path, path);
+	(void)setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
 	if (connect(s, (struct sockaddr *)&sa, sizeof(sa)) < 0)
 	{
+		/* EINTR comes only from that wait: a full backlog too */
+		e = errno == EINTR ? EAGAIN : errno;
 		close(s);
+		errno = e;
 		return -1;
 	}
+	(void)setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &t0, sizeof t0);
 	return s;
 }
 
 static int
 control_connect(const char *name, int quiet)
 {
-	int s;
+	int s, e;
 
 	if (make_sock_path(name) < 0)
 		return -1;
 	s = control_connect_path(sock_path);
-	if (s < 0 && !quiet)
+	e = errno;
+	if (s < 0 && e == EAGAIN)
+		fprintf(stderr, stuck_fmt, name);
+	else if (s < 0 && !quiet)
 		fprintf(stderr, "dch: no session: %s\n", name);
+	errno = e;
 	return s;
 }
 
@@ -5098,7 +5130,8 @@ respawn_req(const char *path, int op, char **cmd, int ncmd)
 	close(s);
 	if (rc <= 0)
 		return r.got_any ? -1 : -2;
-	return type == MSG_ACK ? (int)len : DCH_ST_ERR;
+	/* the status is a 16-bit wire field: never one of the codes above */
+	return type == MSG_ACK && len <= 0xffff ? (int)len : DCH_ST_ERR;
 }
 
 /* Arm a respawn (or, on a held session, perform it now); no command = hold,
@@ -5124,6 +5157,11 @@ do_respawn_verb(const char *name, char **cmd, int ncmd, int cancel)
 			need += strlen(cmd[k]) + 1;
 		fprintf(stderr, "dch: --respawn: command is %zu bytes, the "
 		        "limit is %d\n", need - 1, PKT_MAX - 1);
+		return 1;
+	}
+	if (st == -4 && errno == EAGAIN)
+	{
+		fprintf(stderr, stuck_fmt, name);
 		return 1;
 	}
 	if (st == -4)
@@ -5338,6 +5376,11 @@ do_cmd_verb(const char *name)
 	if (make_sock_path(name) < 0)
 		return 1;
 	st = cmd_query(sock_path, &ci);
+	if (st == -4 && errno == EAGAIN)
+	{
+		fprintf(stderr, stuck_fmt, name);
+		return 1;
+	}
 	if (st == -4)
 	{
 		fprintf(stderr, "dch: no session: %s\n", name);
@@ -5526,6 +5569,8 @@ do_spawn_verb(char *exe, const char *name, int cols, int rows,
 		/* Live master answers a connect; refuse to clobber it. A
 		** stale socket (dead master) just gets unlinked below. */
 		int probe = control_connect(name, 1);
+		if (probe < 0 && errno == EAGAIN)
+			return 1;	/* stuck, not dead: never unlinked (#265) */
 		if (probe >= 0)
 		{
 			close(probe);
@@ -8515,7 +8560,8 @@ hrec_free(struct hrec *r, int n)
 	free(r);
 }
 
-/* Does a master answer on `name`? The view's o asks it too (#232). */
+/* Does a master answer on `name`? The view's o asks it too (#232). 1 with
+** errno EAGAIN: it is there but stuck (#265), else errno 0 (#269). */
 int
 name_live(const char *name)
 {
@@ -8524,8 +8570,9 @@ name_live(const char *name)
 
 	session_sock_path(name, sp, sizeof sp);
 	if ((s = control_connect_path(sp)) < 0)
-		return 0;
+		return errno == EAGAIN;	/* stuck is live (#265) */
 	close(s);
+	errno = 0;
 	return 1;
 }
 
@@ -9675,6 +9722,9 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 			         "running", w->title);
 			p->loaded = 0;
 		}
+		else if (go && errno == EAGAIN)	/* stuck: no attach (#269) */
+			snprintf(p->status, sizeof p->status, STUCK_MSG,
+			         w->title);
 		else if (go && (size_t)snprintf(out, outsz, "%s", w->sname) <
 		         outsz)
 		{
@@ -9697,6 +9747,13 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 				snprintf(p->status, sizeof p->status,
 				         "%s: no longer there", w->title);
 				p->loaded = 0;
+				return 0;
+			}
+			/* stuck: no attach; -k and -d still act (#269) */
+			if (p->opens && errno == EAGAIN)
+			{
+				snprintf(p->status, sizeof p->status, STUCK_MSG,
+				         w->title);
 				return 0;
 			}
 			/* a cut name is another session's */
@@ -11839,7 +11896,9 @@ xr_ref_file(struct xr_scan *sc, const char *path, const struct stat *st,
 		xr_claude_codex(d);
 	xr_scan_sink(sc, &k);
 	xr_claude_refs(d, &k, (uint64_t)st->st_ino, xr_scan_tick, sc);
-	rc = xr_claude_read(d, fd, span, &capped);
+	/* light reads newest first: a ref of the last turns inside the budget */
+	rc = xr_scan_full(sc) ? xr_claude_read(d, fd, span, &capped)
+	     : xr_claude_newest(d, fd, span, &capped);
 	close(fd);
 	xr_claude_end(d, (uint64_t)st->st_ino, &ch);
 	xr_chapters_free(&ch);
@@ -14267,6 +14326,7 @@ main_run(int argc, char **argv)
 	int opt_all = 0, opt_cancel = 0, opt_agents = 0, opt_nomsg = 0;
 	int opt_agent_json = 0, opt_hist_json = 0, opt_json = 0;
 	int opt_remote = 0;
+	int opt_lsfollow = 0;	/* --ls-json --follow (#103) */
 	int say_at = 0, say_n = 0;
 	char opt_as[512] = "";
 	int opt_cols = 0, opt_rows = 0;
@@ -14598,6 +14658,14 @@ main_run(int argc, char **argv)
 			}
 			snprintf(session_name, sizeof session_name, "%s", argv[i++]);
 			break;
+		}
+		else if (strcmp(a, "--follow") == 0 && action == A_LISTJSON2 &&
+		         !opt_lsfollow)
+		{
+			/* #103: the list as a stream; --follow <name> (below)
+			** streams a screen */
+			opt_lsfollow = 1;
+			i++;
 		}
 		else if (strcmp(a, "--spawn") == 0 ||
 		         strcmp(a, "--send") == 0 ||
@@ -15016,6 +15084,12 @@ main_run(int argc, char **argv)
 		fprintf(stderr, "dch: -a attaches; it runs no command\n");
 		return 1;
 	}
+	if (opt_lsfollow && (action != A_LISTJSON2 || inner_argc > 0))
+	{
+		fputs("dch: bad usage: dch --ls-json [--remote] --follow\n",
+		      stderr);
+		return 2;
+	}
 	if (opt_remote && action != A_LISTJSON && action != A_LISTJSON2 &&
 	    action != A_LISTRAW && action != A_HISTORY)
 	{
@@ -15200,6 +15274,14 @@ main_run(int argc, char **argv)
 		** quoted by json_quote, so bytes that are not UTF-8 read as
 		** U+FFFD instead of breaking the parse. */
 		struct slist sl = {0};
+		struct dch_rrow *frr = NULL;
+		int fn = -1;
+
+		/* --follow (#103): each array is printed here, in a child of
+		** the stream's, frr its remote rows */
+		if (opt_lsfollow &&
+		    (fn = dch_remote_follow(opt_remote, &frr)) < 0)
+			return fn == -1 ? 0 : 1;
 		list_sessions(&sl);
 		load_aliases(&sl);
 		load_harness_names(&sl);
@@ -15327,8 +15409,8 @@ main_run(int argc, char **argv)
 		{
 			/* the other hosts' (#087): name and alias as the peer
 			** sent them, JSON-quoted; "host" tells them apart */
-			struct dch_rrow *rr;
-			int n = dch_remote_rows(&rr, 1), r;
+			struct dch_rrow *rr = frr;
+			int n = fn >= 0 ? fn : dch_remote_rows(&rr, 1), r;
 
 			for (r = 0; r < n; r++)
 			{

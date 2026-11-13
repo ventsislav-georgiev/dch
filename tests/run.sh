@@ -219,6 +219,7 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "--meta stores session metadata for --ls-json" meta_test.py
     pyrun "--ls-json claude_session_id and transcript_path" transcript_test.py
     pyrun "--ls-json cols, rows and attached clients" ls_json_size_test.py
+    pyrun "a stopped master with a full backlog hangs no verb (#265)" stuck_master_test.py
     pyrun "master self-heals a deleted socket" socket_heal_test.py
     pyrun "native agent bridge public CLI and wire protocol" agent_bridge_test.py
     pyrun "shared Codex daemon never binds or names a session; --no-daemon" codex_daemon_test.py
@@ -234,8 +235,10 @@ fi
 if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "attach repaints via WINCH, types no ^L" attach_test.py
     pyrun "attach is raw again after bg/fg, a startup ^Z, an outside SIGTSTP (LOW-V9)" attach_cont_test.py
+    pyrun "a chord key waiting past the detach window still counts (#259)" attach_chord_late_test.py
     pyrun "size follows focus (DEC 1004, #100)" focus_test.py
     pyrun "attach replay with --scrollback (#101)" scrollback_test.py
+    pyrun "a paste into a program busy printing never blocks the master (#258)" send_busy_pty_test.py
 fi
 
 if [ "$MIRROR" = "1" ]; then
@@ -300,6 +303,7 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "dch serve: remote frames goldens, peer gate, startup refusals" serve_test.py
     pyrun "remote hosts: -ls, --remote, -a host:name, hostile peers" remote_client_test.py
     pyrun "remote history: --history --remote, picker History rows, --ls-json cwd" remote_history_test.py
+    pyrun "--ls-json --remote --follow: the list as a stream, watch and polled hosts" ls_follow_test.py
     pyrun "the Windows client's checks, against this dch" windows_client_test.py
 fi
 

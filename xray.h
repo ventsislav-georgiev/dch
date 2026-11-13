@@ -110,6 +110,8 @@ int xr_claude_lookup(const char *cfg, const char *sid, char *path,
 #define XR_KEY_MAX     1024		/* bytes of normalized text; a longer
 					** candidate is no ref */
 #define XR_KEYS        2000		/* index keys (3.2), the rest counted */
+/* ... in a room per kind, XR_TICKET..XR_URL, XR_KEYS in all (#262) */
+#define XR_ROOMS       { 300, 400, 500, 250, 350, 200 }
 #define XR_SPANS       128		/* mentions per entry (3.8) */
 #define XR_DEFS        8		/* definitions per entry (3.8) */
 #define XR_TEXT_CAP    6000		/* scalars: prose clips (v2.1 3.1) */
@@ -214,6 +216,8 @@ int xr_scan_tick(void *ctx, uint64_t bytes);
 void xr_scan_file(struct xr_scan *x, uint64_t bytes, uint64_t too_long,
                   int partial, int per_row);
 int xr_scan_done(struct xr_scan *x);
+/* 1 for --full (a file read oldest first), 0 light (newest first, #262) */
+int xr_scan_full(const struct xr_scan *x);
 /* a write failed (3.4's cancel: no more lines, no done): 1 EPIPE, the
 ** reader left; 2 any other error; 0 none */
 int xr_scan_cancelled(const struct xr_scan *x);
@@ -235,6 +239,12 @@ const char *xr_claude_cwd(const struct xr_claude *d);
 ** 1 MB lines): 0, *capped set when bytes were skipped or the file shrank
 ** mid-read; -1 on a read error. */
 int xr_claude_read(struct xr_claude *d, int fd, uint64_t size, int *capped);
+/* Light --ref's read (#262): the same range, newest first, in windows of
+** xr_lim.chunk bytes cut at line starts, each read oldest first by a fresh
+** decoder (no state crosses a window: a mention before its window's first
+** prompt has no chapter, a tool result before its call's no definition).
+** The tick sees the bytes of every window read so far. As xr_claude_read. */
+int xr_claude_newest(struct xr_claude *d, int fd, uint64_t size, int *capped);
 /* Refs too: every entry's mentions and definitions go to k (copied), with
 ** chapter anchors on inode ino. tick, when set, runs after each line with
 ** the bytes read so far; nonzero stops the read (a --ref budget or cap). */

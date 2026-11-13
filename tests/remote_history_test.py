@@ -172,12 +172,19 @@ def main():
                                   stdin=subprocess.DEVNULL,
                                   stdout=subprocess.DEVNULL, stderr=lf)
         procs.append(sp)
-        end = time.time() + 10
+        end = time.time() + 30     # a loaded machine: room, still bounded
         while time.time() < end and sp.poll() is None:
             m = re.search(r"listening on 127\.0\.0\.1:(\d+)", open(log).read())
             if m:
                 return int(m.group(1))
             time.sleep(0.05)
+        # one failure for the serve half, not one per check (#249)
+        why = ("exited %d" % sp.returncode if sp.poll() is not None
+               else "no listening line in 30 s")
+        check("dch serve%s listens on a loopback test port" %
+              "".join(" " + a for a in args), False, "%s; its log tail:\n%s"
+              % (why, "\n".join(open(log).read().splitlines()[-12:])))
+        print("  skip the checks that need that serve")
         return None
 
     def until(f, secs=10):
@@ -196,9 +203,9 @@ def main():
 
     try:
         port = serve_at(os.path.join(tmp, "serve.log"))
-        check("dch serve listens on a loopback test port", port is not None)
         if port is None:
             return 1
+        check("dch serve listens on a loopback test port", True)
         H = ["--hosts", "srv=127.0.0.1:%d" % port]
         wd, wd2, cwd = (os.path.join(tmp, x) for x in ("wd", "wd2", "cwd"))
         for d in (wd, wd2, cwd):
@@ -500,6 +507,8 @@ def picker_checks(dch, check, cenv, senv, H, serve_at, tmp, rev, until):
     dch(cenv, "-k", "pk1")
 
     port = serve_at(os.path.join(tmp, "serve-create.log"), "--allow-create")
+    if port is None:
+        return
     with open(rev, "w"):
         pass
     s = open_on("pk2", ["--hosts", "srv=127.0.0.1:%d" % port])

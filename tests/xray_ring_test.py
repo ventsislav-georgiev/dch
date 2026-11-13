@@ -529,30 +529,46 @@ def test_seam(tmp):
     in bursts while `--xray --json` runs in a loop; each row's ref is counted
     once, so rows 0..b all there give counts non-increasing in the residue,
     at most 1 apart. Asserted on the invariant only: no answer is both
-    complete and holed (partial is allowed)."""
-    M = 1000
+    complete and holed (partial is allowed). M stays under the pull room
+    (500 in XR_ROOMS, xray.h): past it the oldest refs are evicted and come
+    back with a fresh count (#262), which reads as a hole. Every 4000 rows
+    the shell holds until the test has a complete answer (#283): a slow
+    sanitized build re-reads past XR_SEAM_TRIES while rows scroll, so it
+    only ever answered complete:false; the answers read while rows scroll
+    are still counted, and checked, apart."""
+    M = 400
     cfg = os.path.join(tmp, "seam.config")
     with open(cfg, "w") as f:
         f.write("xray_ring = 8M\n")     # never evicts within the run
+    hold = os.path.join(tmp, "seam.hold")
     n = "xr-seam" + TAG
     spawn(n, "sh", env=dict(os.environ, DCH_CONFIG=cfg))
-    reads = comp = 0
+    reads = comp = moving = moving_comp = held = 0
     bad = []
     try:
         wait_for(lambda: screen(n).strip())
         send(n, 'i=0; while :; do echo "o/r#$((i%%%d))"; i=$((i+1)); '
-             '[ $((i%%50)) = 0 ] && sleep 0.002; done\n' % M)
+             '[ $((i%%50)) = 0 ] && sleep 0.002; [ $((i%%4000)) = 0 ] && '
+             '{ : > %s; while [ -e %s ]; do sleep 0.01; done; }; done\n'
+             % (M, hold, hold))
         wait_for(lambda: "o/r#" in screen(n))
         end = time.time() + 12
         while time.time() < end and reads < 400:
+            still = os.path.exists(hold)    # the shell holds: no new rows
             r = dch("--xray", n, "--json")
             if r.returncode != 0:
                 continue
             a = json.loads(r.stdout)
             reads += 1
+            moving += not still
+            held += still
+            if still and (a["complete"] or held >= 5):
+                os.unlink(hold)             # scroll again
+                held = 0
             if not a["complete"]:
                 continue
             comp += 1
+            moving_comp += not still
             c = [0] * M
             for e in a["refs"]:
                 m = re.fullmatch(r"o/r#(\d+)", e["text"])
@@ -565,6 +581,8 @@ def test_seam(tmp):
         kill(n)
     check("seam: complete answers were read (%d of %d)" % (comp, reads),
           comp > 0)
+    check("seam: answers were read while rows scrolled (%d, %d of them "
+          "complete)" % (moving, moving_comp), moving > 0)
     check("seam: no complete answer misses rows (%d of %d did)"
           % (len(bad), comp), not bad, bad[:5])
 

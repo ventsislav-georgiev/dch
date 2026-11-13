@@ -292,6 +292,14 @@ or
 .BR \-\-history :
 the remote rows or records too (the picker always shows them).
 .TP
+.BR "\-\-ls\-json " [ \-\-remote ] " \-\-follow"
+The
+.B \-\-ls\-json
+array, then the whole array again, one flushed line, each time it changes
+(nothing while it does not), until SIGINT, SIGTERM or the reader closes
+the pipe: exit 0. A name or another verb with it is exit 2. See
+.BR "REMOTE HOSTS" .
+.TP
 .B \-\-ls\-json
 List sessions as a JSON array of
 .BR {name,alias,harness,activity_epoch,state,version,agents,meta,meta_epoch,auto_allowed,claude_session_id,transcript_path,cols,rows,clients,cwd} .
@@ -692,6 +700,8 @@ detached. A single press still detaches; it simply waits out the window first.
 .B DCH_DOUBLE_TAP_MS
 sets that window in milliseconds (default
 .BR 300 ).
+A key already waiting when dch looks counts as inside the window, even if
+the client was stopped or slow past it.
 Setting it to
 .B 0
 disables switching and makes detach instant again.
@@ -793,8 +803,13 @@ here and in a chapter leaves the view and attaches to the session, as
 .B \-a
 does, a remote one's too; on an ended session it says so and stays),
 .B Refs
-(the files, commits, pull requests, issues and URLs the session touched,
-a faint line over them saying so; by count, then the most recent first;
+(the pull requests, issues and tickets the session touched, a faint line
+over them saying so;
+.B a
+shows its files, commits and URLs too, the footer saying how many are
+hidden; by latest mention, the one mentioned last on top, then by count,
+then the most recent first (a host before 1.62.0 sends no latest mention:
+by count);
 a ref with a definition or two or more mentions is bold;
 a file under the session's directory shows relative to it, else one under
 HOME from
@@ -809,8 +824,9 @@ files under /tmp, /private/tmp, /var/folders and
 shows them, the footer saying how many; the tab counts every ref;
 \fB/\fR filters on the full ref, \fBEnter\fR opens its card) and
 .B On screen
-(the session's screen with a hint label, \fBa\fR, \fBs\fR, \fBd\fR, ...,
-on each bold ref; typing a label opens its card; none for an ended
+(the session's screen with a hint label,
+\fBa\fR, \fBs\fR, \fBd\fR, ..., on each ref on it, held by the index
+or not; typing a label opens its card; none for an ended
 session or on dch\-lite; its tab shows the labels' count once the screen
 is read, 0 included, and no number before or without one).
 A card shows the ref's definitions, first and latest mention, counts by
@@ -841,6 +857,13 @@ Keys: \fBTab\fR, \fB\(<-\fR \fB\(->\fR
 \fBj\fR \fBk\fR, arrows, \fBPgUp\fR \fBPgDn\fR, \fBg\fR \fBG\fR move;
 \fBq\fR quits the list and goes back from a card or chapter;
 \fBEsc\fR clears a typed label or the filter, else does the same;
+\fBCtrl\-R\fR, on Chapters and Refs with a ref typed after \fB/\fR
+(as
+.B \-\-ref
+takes it), opens its card, while typing or after, a row for it or not, its
+kind hidden or not (the footer shows \fB^R\fR look up; words are not looked
+up, and an empty list says so; a remote host whose dch takes no such ref
+says so);
 \fBCtrl\-C\fR and \fBCtrl\-D\fR quit.
 A window under 24x8 says it is too small.
 While attached, the detach character and then
@@ -873,8 +896,12 @@ its queries over their own ctl connections, the attach kept; leaving it, the
 host resizes the program for a beat so it repaints, and
 .B dch serve
 1.58.0+ also re\-arms the modes the view turned off (bracketed paste, mouse
-reporting, the kitty keyboard flags, the alternate screen).
-An older host only resizes: those modes stay off until the next attach.
+reporting, the kitty keyboard flags, the alternate screen), as does the
+Prosper server from 2.175.0.
+An older
+.BR "dch serve" ,
+or the Prosper server before 2.175.0, only resizes: those modes stay off
+until the next attach.
 There is no
 .B xray_key
 setting.
@@ -969,9 +996,16 @@ another project directory
 would add; from names only, nothing opened).
 .B refs
 lists the issues, pull requests, tickets, commits, files and URLs the corpus
-mentions (at most 2000 keys), each with
+mentions (at most 2000 keys, a room per kind: 300 tickets, 400 issues,
+500 pull requests, 250 commits, 350 files, 200 URLs; in a full room the ref
+whose latest mention is the oldest goes, counted in
+.BR dropped_keys ,
+and one mentioned again comes back with the mentions since), each with
 .BR key ,
 .BR count ,
+.B last_offset
+(where its latest mention is: a transcript line's byte offset, a ring
+record's seq),
 .BR defined ,
 .B title
 and
@@ -998,7 +1032,12 @@ only another session's result stops it, and another session's lines, like
 a live shell's, carry no
 .B mention
 and no
-.BR passage ),
+.BR passage ;
+a transcript or rollout is read newest first, in 1 MiB windows from the
+end, each by a decoder that starts there, so a ref of the last turns is
+found inside the budget: lines come newest window first, and a mention
+before its window's first prompt has
+.BR chapter:null ),
 .B \-\-full
 to read it all up to 64 files
 .RB ( why:\(dqfiles\(dq ),
@@ -1013,7 +1052,8 @@ with it has no effect but is still checked: outside 50 to 300 it exits 2,
 .IR "bad budget" ;
 a file gives its first
 .B mention
-line and its newest 199, the rest counted in the tally's
+line and its newest 199 (light: the first 199 to arrive after it, the
+newest), the rest counted in the tally's
 .BR mentions_dropped ;
 one
 .B definition
@@ -2986,8 +3026,17 @@ and
 60 s for the rest; past it, the same with
 .BR \(dqwhy\(dq:\(dqtimeout\(dq .
 Output the client leaves unread is held, not cut, until 20 s past the
-timeout (80 s after the request; 680 s for the 660 s verbs), so a reader
-paused within it gets the whole answer; any other
+timeout (80 s after the request; 680 s for the 660 s verbs).
+A reader paused within it gets the whole answer if it reads on before the
+timeout, and
+.B \(dqwhy\(dq:\(dqtimeout\(dq
+after it, when the answer is more than the socket buffers, the pipe from dch
+and the 64 KiB
+.B dch serve
+holds unsent (plus the one read of up to 64 KiB that went past it) together; a
+smaller answer ends on its own, with dch's real exit code, and such a reader
+gets all of it.
+Any other
 connection, a follow's included, closes once its output goes untaken for
 20 s.
 An answer that fits whole in the socket buffers is never left untaken, so a
@@ -3081,6 +3130,25 @@ The picker lists remote rows in Sessions, the host faint, of the hosts that
 are candidates now, and re\-probes in the background; Enter attaches, on
 the connection that checked the name is listed, and no other action applies
 to them yet.
+.PP
+.B dch \-\-ls\-json \-\-remote \-\-follow
+prints the same array within the same box, then again, whole, on one line,
+each time it changes. A host whose hello lists
+.B watch
+is held on one connection (a 0x2e
+.I {"device_id":"dch\-<pid>"}
+after its list) and each 0x11 it pushes is a new look; any other host, and
+the local rows, are read again every 2 s. A host that fails (no answer
+within 2 s, a dropped link, a stream silent for 35 s, a frame over 1 MiB,
+not a list, or a 0x13) shows its rows stale for 2 minutes after it last
+answered, as above, and is dialled again after 2 s, doubling up to 32 s; a
+refusal is said once and shows none. Without
+.B \-\-remote
+it streams the local rows only and dials nothing.
+.B DCH_REMOTE_EVERY_MS
+and
+.B DCH_REMOTE_QUIET_MS
+(tests, 100\-600000) replace the 2 s and the 35 s.
 .PP
 .B dch \-\-history \-\-remote
 .RB ( \-\-json

@@ -1880,27 +1880,19 @@ parse_input(struct conn *c)
 ** file is left behind and refuses it (#230). Linux releases a dying
 ** master's listen socket after its client's connection, so the client can
 ** end and this connect still land, unaccepted; the release then resets it.
-** A live master accepts and waits for a packet: no event in 100 ms (#271). */
+** A live master accepts and waits for a packet: no event in 100 ms (#271).
+** A stuck one's full backlog is waited for 500 ms, then live (#269). */
 static int
 sock_live(const char *path)
 {
-	struct sockaddr_un sa;
 	struct pollfd pf;
-	size_t n = strlen(path);
-	int s, ok;
+	int s = control_connect_path(path), ok;
 
-	if (n >= sizeof sa.sun_path || (s = socket(PF_UNIX, SOCK_STREAM, 0)) < 0)
-		return 0;
-	memset(&sa, 0, sizeof sa);
-	sa.sun_family = AF_UNIX;
-	memcpy(sa.sun_path, path, n);
-	ok = connect(s, (struct sockaddr *)&sa, sizeof sa) == 0;
-	if (ok)
-	{
-		pf.fd = s;
-		pf.events = POLLIN;
-		ok = poll(&pf, 1, 100) <= 0;	/* an EINTR: as connected */
-	}
+	if (s < 0)
+		return errno == EAGAIN;
+	pf.fd = s;
+	pf.events = POLLIN;
+	ok = poll(&pf, 1, 100) <= 0;	/* an EINTR: as connected */
 	close(s);
 	return ok;
 }

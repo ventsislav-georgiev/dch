@@ -26,14 +26,17 @@ Covers:
   7. SIGTERM and SIGINT: the terminal is restored and the view's children
      are gone;
   8. On screen on a live shell: the ref printed in two blocks (underline)
-     gets hint label `a`, typing it opens its card (full build); on dch-lite
+     gets hint label `a`, typing it opens its card, one printed once (not
+     underlined) gets a hint too (#262) (full build); on dch-lite
      the label line says X-ray needs the full build;
   9. the picker: the x hint is shown, x on a session row opens the view, q
      returns to the picker; X asks to kill and never opens the view (OQ-6);
  10. the Refs tab (#193): a file under the project shown relative to it,
      one under HOME from ~, one too long cut at the front (its tail kept,
      a wide-character one within the width), a long URL keeping its host
-     and its end; rows by count then the most recent first; files under
+     and its end; rows by latest mention (#262), then count, then the most
+     recent first; pulls, issues and tickets only until a shows files,
+     commits and URLs, the footer counting them; files under
      /tmp, /private/tmp, /var/folders and $TMPDIR hidden, t toggling them,
      the footer saying how many, the tab count the engine's; the filter
      matching the full key (and taking t as text), Enter opening the full
@@ -62,6 +65,13 @@ Covers:
      session receives what it did before; under detach_key = switch a late
      x is the picker's (OQ-6): it opens the row's view, q returns to the
      picker, X reaches the kill confirmation, and nothing kills.
+ 13. the lookup (#263): a ref typed in the filter that no row has (a
+     ticket, a full commit hash whose row is held short), whose row is
+     hidden (a file), or that a chapter title holds (not the wanted row):
+     the footer names ^R, the empty line says ^R looks it up, ^R opens its
+     card (outer blanks cut), Enter reads its mention's chapter, Esc goes
+     back with the filter kept; plain words: one faint line says ^R takes
+     refs, not words, and ^R says so with no card.
 
 Run:  python3 tests/xray_view_test.py      (uses ./dch)
 """
@@ -159,7 +169,10 @@ class Pty:
         return what in self.out[start:]
 
     def key(self, b, settle=0.3):
-        os.write(self.fd, b)
+        try:
+            os.write(self.fd, b)
+        except OSError:
+            pass    # it has exited: the checks say so
         self.pump(settle)
 
     def resize(self, rows, cols):
@@ -311,9 +324,14 @@ def test_view():
         check("mutant 11: the chapter title's OSC, BEL, U+202E and U+061C "
               "show as ?", v.wait(b"o/r#7 ?]0;pwned? evil?title al?m"),
               v.out[-600:])
-        v.key(b"\t")
-        check("Refs: the keys by count", v.wait(b"#831") and
-              v.wait(b"PROJ-5") and v.wait(b"o/r#7"), v.out[-600:])
+        mark = len(v.out)
+        v.key(b"\t", 1.0)
+        scr = rows(v.out[mark:])
+        text = "\n".join(scr[k] for k in sorted(scr))
+        at = [text.find(x) for x in ("PROJ-5", "#831", "o/r#7")]
+        check("Refs: the latest mentioned first (#262)",
+              -1 not in at and at == sorted(at), (at, text))
+        v.key(b"\033[B", 0.3)
         mark = len(v.out)
         v.key(b"\r", 1.0)
         check("card: #831 opens light with its definition and counts",
@@ -451,11 +469,22 @@ def test_refs():
         text = "\n".join(scr[k] for k in sorted(scr))
         check("Refs: the tab count stays the engine's total (13)",
               "Refs 13" in text, text)
+        check("Refs #262: opens on pulls, issues and tickets only; the "
+              "footer names a and counts the other kinds",
+              "o/r#7" in text and "alpha_handler" not in text and
+              "example.com" not in text and
+              "a files, commits, URLs 12 hidden" in text, text)
+        mark = len(v.out)
+        v.key(b"a", 1.0)
+        scr = rows(v.out[mark:])
+        text = "\n".join(scr[k] for k in sorted(scr))
         check("Refs: one faint line says what a ref is and that Enter "
-              "opens its card", re.search("Files, commits, pull requests, "
-                                          "issues and URLs this session "
-                                          "touched; (\u21b5|enter) opens a "
-                                          "card", text), text)
+              "opens its card", re.search("Every ref this session touched, "
+                                          "latest first; (\u21b5|enter) "
+                                          "opens a card", text), text)
+        check("Refs #262: a shows the other kinds, the footer says a hides "
+              "them", "alpha_handler" in text and
+              "a hide files, commits, URLs" in text, text)
         check("Refs: a file under the project shows relative to it",
               "file    src/very/deep/module/alpha_handler.c" in text and
               "file    src/main.c" in text and P + "/src" not in text, text)
@@ -469,8 +498,8 @@ def test_refs():
                  "example.com", "~/notes/todo.md", "zeta_handler.c",
                  "beta_handler.c"]
         at = [text.find(x) for x in order]
-        check("Refs: by count, then the most recent first (later in the "
-              "snapshot)", -1 not in at and at == sorted(at), (at, text))
+        check("Refs: one line, so one latest mention: by count, then the most "
+              "recent first (later in the snapshot)", -1 not in at and at == sorted(at), (at, text))
         tmp = ["/tmp/scratch-one.txt", "/private/tmp/demo-502/tasks/out.log",
                "/var/folders/xx/abc/T/t.1", "/home/demo/tmpx/note.txt",
                "~/tmpx/note.txt"]
@@ -553,6 +582,173 @@ def test_refs():
         v.close()
 
 
+# ---- Refs: the latest mentioned first, the other kinds behind a (#262) ------
+
+LSID = "11111111-2222-4333-8444-5555555555f4"
+
+
+def fixture_latest():
+    """o/r#1 said three times first, then PROJ-9, then #77 and a commit and a
+    file last: the latest mentioned on top, not the most counted."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    said = ["o/r#1 and o/r#1 and o/r#1 in %s/old.c" % P, "now PROJ-9",
+            "last #77, commit deadbeef1 in %s/new.c" % P]
+    lines = [{"type": "user", "cwd": P, "timestamp": "2026-11-10T10:00:00Z",
+              "message": {"content": "the latest fixture"}}]
+    lines += [{"type": "assistant", "message": {"content": [
+        {"type": "text", "text": t}]}} for t in said]
+    with open(os.path.join(pdir, LSID + ".jsonl"), "w") as f:
+        for o in lines:
+            f.write(json.dumps(o) + "\n")
+    sockdir = os.path.join(T, "dch-%d" % os.getuid())
+    hdir = os.path.join(T, "state", "dch", "sessions",
+                        sockdir.replace("/", "-"))
+    rec = {"name": "xv-lt", "cwd": P, "end": "exited", "argv": ["claude"],
+           "started": 1794299400, "updated": 1794300000,
+           "ended": 1794300000, "sock_dir": sockdir,
+           "agent": {"session_id": LSID, "cwd": P, "config_dir": cfg}}
+    with open(os.path.join(hdir, "xv-lt.json"), "w") as f:
+        f.write(json.dumps(rec) + "\n")
+
+
+def test_latest():
+    v = Pty([DCH, "--xray", "xv-lt"], env=RENV)
+    try:
+        v.wait(b"Chapters 1")
+        v.pump(0.5)
+        mark = len(v.out)
+        v.key(b"\t", 1.0)
+        scr = rows(v.out[mark:])
+        text = "\n".join(scr[k] for k in sorted(scr))
+        at = [text.find(x) for x in ("#77", "PROJ-9", "o/r#1")]
+        check("Refs #262: the latest mentioned on top, not the most counted",
+              -1 not in at and at == sorted(at), (at, text))
+        check("Refs #262: commits and files hidden, the footer counts them",
+              "deadbee" not in text and "old.c" not in text and
+              "a files, commits, URLs 3 hidden" in text, text)
+        mark = len(v.out)
+        v.key(b"a", 1.0)
+        scr = rows(v.out[mark:])
+        text = "\n".join(scr[k] for k in sorted(scr))
+        at = [text.find(x) for x in ("new.c", "PROJ-9", "old.c")]
+        check("Refs #262: a shows them, in the same latest-first order",
+              "deadbee" in text and -1 not in at and at == sorted(at),
+              (at, text))
+        mark = len(v.out)
+        v.key(b"a", 1.0)
+        scr = rows(v.out[mark:])
+        text = "\n".join(scr[k] for k in sorted(scr))
+        check("Refs #262: a again hides them",
+              "deadbee" not in text and
+              "a files, commits, URLs 3 hidden" in text, text)
+        v.key(b"q")
+        check("Refs #262: q exits 0", v.exit() == 0, v.out[-80:])
+    finally:
+        v.close()
+
+
+def shown(v, mark):
+    scr = rows(v.out[mark:])
+    return "\n".join(scr[k] for k in sorted(scr))
+
+
+def test_lookup():
+    """#263: a ref typed in the filter, matched by no row or not by the one
+    wanted, opens its card with ^R; plain words say ^R takes refs only."""
+    v = Pty([DCH, "--xray", "xv-lt"], env=RENV)
+    try:
+        v.wait(b"Chapters 1")
+        v.pump(0.5)
+        mark = len(v.out)
+        v.key(b"/PROJ-9", 1.0)
+        text = shown(v, mark)
+        check("lookup #263: a ref in the Chapters filter, no title has it: "
+              "the empty line and the footer name ^R",
+              "No match: ^R looks it up" in text and "^R look up" in text,
+              text)
+        mark = len(v.out)
+        v.key(b"\x12", 1.0)
+        check("lookup #263: ^R opens the typed ref's card with its mention",
+              v.wait(b"PROJ-9  light", start=mark) and
+              v.wait(b"now PROJ-9", start=mark), v.out[mark:])
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        check("lookup #263: Enter on its mention reads the chapter",
+              v.wait(b"the latest fixture", start=mark) and
+              v.wait(b"now PROJ-9", start=mark), v.out[mark:])
+        v.key(b"\033", 0.5)
+        mark = len(v.out)
+        v.key(b"\033", 1.0)
+        text = shown(v, mark)
+        check("lookup #263: Esc back to the list, the filter kept",
+              "/PROJ-9" in text and "Chapters 1" in text, text)
+        v.key(b"/\x15", 0.3)
+        mark = len(v.out)
+        v.key(b"just words", 1.0)
+        text = shown(v, mark)
+        check("lookup #263: plain words matching nothing: one faint line "
+              "says ^R takes refs, not words; no ^R in the footer",
+              "No match; ^R looks up a ticket, issue, pull, commit, file or "
+              "URL, not words" in text and "^R look up" not in text, text)
+        mark = len(v.out)
+        v.key(b"\x12", 1.0)
+        check("lookup #263: ^R on words says what it takes, no card",
+              v.wait(b"^R looks up the ref typed after /", start=mark) and
+              b"light" not in v.out[mark:], v.out[mark:])
+        v.key(b"\033", 0.3)
+        v.key(b"\t", 1.0)
+        mark = len(v.out)
+        v.key(b"/ deadbeef1 ", 1.0)
+        text = shown(v, mark)
+        check("lookup #263: a full commit hash, its row held short: no row, "
+              "^R named", "No match: ^R looks it up" in text and
+              "^R look up" in text, text)
+        mark = len(v.out)
+        v.key(b"\x12", 1.0)
+        check("lookup #263: ^R opens the hidden commit's card, outer blanks "
+              "cut", v.wait(b"deadbeef1  light", start=mark) and
+              v.wait(b"commit deadbeef1", start=mark), v.out[mark:])
+        v.key(b"\033", 0.5)
+        v.key(b"/\x15", 0.3)
+        mark = len(v.out)
+        v.key(P.encode() + b"/new.c", 1.0)
+        text = shown(v, mark)
+        check("lookup #263: a file, its kind hidden: a and ^R both named",
+              "Only files, commits and URLs: a shows them" in text and
+              "^R look up" in text, text)
+        mark = len(v.out)
+        v.key(b"\x12", 1.0)
+        check("lookup #263: ^R opens a hidden file's card",
+              v.wait(P.encode() + b"/new.c  light", start=mark) and
+              v.wait(b"commit deadbeef1 in", start=mark), v.out[mark:])
+        v.key(b"q", 0.5)
+        v.key(b"q")
+        v.exit()
+    finally:
+        v.close()
+    v = Pty([DCH, "--xray", "xv-cl"])
+    try:
+        v.wait(b"Chapters 2")
+        v.pump(0.5)
+        mark = len(v.out)
+        v.key(b"/o/r#7", 1.0)
+        text = shown(v, mark)
+        check("lookup #263: a ref a chapter title holds: the row stays, the "
+              "footer names ^R", "^R look up" in text and
+              "No match" not in text, text)
+        mark = len(v.out)
+        v.key(b"\x12", 1.0)
+        check("lookup #263: ^R opens the ref's card, not the row's chapter",
+              v.wait(b"o/r#7  light", start=mark), v.out[mark:])
+        v.key(b"\033", 0.5)
+        v.key(b"q")
+        v.exit()
+    finally:
+        v.close()
+
+
 # ---- Refs: a project under $TMPDIR, a URL's host (#220) ---------------------
 
 TPD = os.path.join(T, "tmpd")      # the view's $TMPDIR
@@ -610,6 +806,8 @@ def refs_tab(name):
     v.pump(0.5)
     mark = len(v.out)
     v.key(b"\t", 1.0)
+    mark = len(v.out)
+    v.key(b"a", 1.0)  # files and URLs too (#262)
     scr = rows(v.out[mark:])
     return v, scr, "\n".join(scr[k] for k in sorted(scr))
 
@@ -1159,9 +1357,21 @@ def shell():
             "printf '\\033]133;D;0\\007'; done")
     r = dch("--spawn", "xv-sh", "--size", "80x24", "sh", "-c", prog)
     check("shell: spawned", r.returncode == 0, r.stderr)
-    for _ in range(2):
+
+    def ran(n):
+        """the n-th echo ran: its line and its output on the screen (#258:
+        a --send can land late on a loaded machine). dch-lite has no
+        --read (rc 3): nothing there reads what the echoes left"""
+        r = dch("--read", "xv-sh")
+        return r.returncode != 0 or r.stdout.count("see o/r#41") >= 2 * n
+
+    for n in (1, 2):
         time.sleep(0.4)
         dch("--send", "xv-sh", "echo 'see o/r#41'\n")
+        until(lambda: ran(n), 20)
+    time.sleep(0.4)
+    # printed once (the command line holds none): not underlined (#262)
+    dch("--send", "xv-sh", "printf 'once o/r#%d\\n' 77\n")
     time.sleep(0.5)
 
 
@@ -1207,9 +1417,15 @@ def test_on_screen():
                   u and u[0]["underline"], o["refs"])
             mark = len(v.out)
             v.key(b"\t\t", 1.5)
+            u = [x for x in o["refs"] if x["key"] == "pull:o/r#77"]
+            check("shell: o/r#77, printed once, is not underlined",
+                  u and not u[0]["underline"], o["refs"])
             check("On screen: o/r#41 gets hint a",
-                  v.wait(b"On screen 1", start=mark) and
+                  v.wait(b"On screen 2", start=mark) and
                   v.wait(b"o/r#41", start=mark), v.out[mark:])
+            check("On screen #262: a ref not underlined gets a hint too",
+                  re.search(rb"once \[.\]o/r#77", v.out[mark:]),
+                  v.out[mark:])
             mark = len(v.out)
             v.key(b"a", 1.0)
             check("On screen: typing a opens the card of o/r#41",
@@ -1298,12 +1514,19 @@ def chord_case(what, keys, lite):
               a.out[mark:][-600:])
         check("chord, %s: the client is still running" % what,
               a.reap() is None)
-        dch("--send", "xv-rx", "MARK187")
+        # two checks (#233): MARK187 goes dch --send -> master -> pty, not
+        # through the attach, so its absence is a stalled session, not the
+        # chord; a leak is any other byte. The details print even when empty
+        sent = dch("--send", "xv-rx", "MARK187").returncode
         until(lambda: "4d41524b313837" in rx()[len(got):], 5)
         a.pump(0.3)
-        check("chord, %s: the session got only the text sent while the "
-              "view was up (no detach key, no x)" % what,
-              rx()[len(got):] == "4d41524b313837", rx()[len(got):])
+        rxd = rx()[len(got):]
+        check("chord, %s: the text sent while the view was up reached the "
+              "session (dch --send, not the attach)" % what,
+              "4d41524b313837" in rxd, (rxd, sent))
+        check("chord, %s: nothing else reached the session (no detach key, "
+              "no x)" % what, rxd.replace("4d41524b313837", "", 1) == "",
+              (rxd, sent))
         if not ok or a.reap() is not None:
             return
         mark = len(a.out)
@@ -1614,6 +1837,9 @@ def main():
         test_view()
         fixture_refs()
         test_refs()
+        fixture_latest()
+        test_latest()
+        test_lookup()
         fixture_tmp()
         test_tmp()
         fixture_auto()

@@ -65,6 +65,12 @@ int dch_remote_ctl(const char *host, int argc, char **argv, const char *cwd);
 ** each answer wrapped on stdout. 0 at stdin EOF; else no connection: 1, 4,
 ** 6 or 7, said on stderr and as one {"schema":1,"exit":N,...} line. */
 int dch_remote_requests(char *n);
+/* dch --ls-json [--remote] --follow (#103): the list, then again on each
+** change, until SIGINT, SIGTERM or our stdout closes: -1 then (exit 0), -2
+** out of memory (exit 1). Each array is printed by a forked child, in
+** which this returns the remote rows' count and *out the rows (with
+** remote): print the --ls-json array to stdout and exit. POSIX only. */
+int dch_remote_follow(int remote, struct dch_rrow **out);
 void dch_remote_esc(char *out, size_t cap, const char *s);
 void keepalive(int fd);	/* TCP keepalive (about 30 s) and no Nagle */
 

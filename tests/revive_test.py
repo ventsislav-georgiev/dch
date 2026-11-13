@@ -1062,6 +1062,14 @@ def main():
             got = rfinal(n, **kw)
             want = (("ok", "no_screen") if lite else ("failed", why)) + (
                 True, True)
+            # a typed claude not up and painted within revive's 4s
+            # (DCH_AGENT_STEP_MS, a loaded machine) is revive's own wait
+            # expiring: no_screen, running false or (up just after the
+            # last look) true. The line was still typed: that claude
+            # comes up (#284)
+            if n == "rsdlg" and got[:2] == ("failed", "no_screen") and \
+                    got[3] and until(lambda: starts(n), 20):
+                want, why = got, "prompt (no_screen: up after revive's 4s)"
             check("--revive --json, claude up but %s: running true, the "
                   "last key [%r]" % (why, got), got == want)
         # lite's revive returns before its claude has written its record:

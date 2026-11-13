@@ -222,6 +222,7 @@ static int cur_argv_owned, dch_argv_owned;
 ** restart. 0 = could not tell, so a restart reverts to the launch argv. */
 static int argv_prefix;
 static int respawn_live(void);
+static int pty_input(const void *buf, size_t len);
 static long ms_since(const struct timespec *t);
 
 #ifndef HAVE_FORKPTY
@@ -472,7 +473,8 @@ auto_allow(void)
 	else if (dch_agent_probe(the_pty.pid, &a) == 0)
 	{
 		free(a.launch);
-		if (write(the_pty.fd, "1", 1) == 1)
+		/* behind any input still waiting, never a blocking write */
+		if (pty_input("1", 1) == 0)
 		{
 			free(aa_ident);
 			aa_ident = id;
@@ -1791,6 +1793,54 @@ flush_client(struct client *p)
 	return 0;
 }
 
+/* Input the program has not read yet (#258), in a client's output queue
+** (only its out* fields are used). The pty fd blocks: a write the program
+** was not reading stopped the whole master, and a paste into a program busy
+** printing deadlocked it (the program waits for us to read its output, we
+** waited for it to read its input). Written as the pty takes it, in order. */
+static struct client pty_in;
+
+/* Write the waiting input as far as the pty takes it, without blocking. A
+** hard error (EIO: the program is gone) drops it: the program's end is
+** pty_activity's to handle (its exit status, the record, a respawn). */
+static void
+pty_flush(void)
+{
+	int fl;
+
+	if (the_pty.fd < 0 || pty_in.outoff == pty_in.outlen)
+		return;
+	/* nonblocking for this write only: every read of the pty expects
+	** it blocking (if the flag cannot be set, it blocks as before) */
+	fl = fcntl(the_pty.fd, F_GETFL);
+	if (fl >= 0)
+		(void)fcntl(the_pty.fd, F_SETFL, fl | O_NONBLOCK);
+	pty_in.fd = the_pty.fd;
+	if (flush_client(&pty_in) < 0)
+	{
+		dch_trace("pty input: write: %s, %zu bytes dropped",
+		          strerror(errno), pty_in.outlen - pty_in.outoff);
+		pty_in.outoff = pty_in.outlen = 0;
+	}
+	if (fl >= 0)
+		(void)fcntl(the_pty.fd, F_SETFL, fl);
+}
+
+/* Input for the program: behind whatever already waits, then flushed. 0
+** queued (or written), -1 dropped (over OUT_CAP waiting). */
+static int
+pty_input(const void *buf, size_t len)
+{
+	if (queue_to_client(&pty_in, buf, len) < 0)
+	{
+		dch_trace("pty input: %zu bytes waiting, %zu dropped",
+		          pty_in.outlen - pty_in.outoff, len);
+		return -1;
+	}
+	pty_flush();
+	return 0;
+}
+
 /* One pty output buffer: track modes, queue to attached clients, feed the
 ** mirror. Shared by pty_activity (select wake) and drain_pty (gate-open /
 ** pre-read sync). */
@@ -2861,7 +2911,7 @@ do_keys(struct client *p, const unsigned char *payload, unsigned int len)
 	/* Held (no child): dropped, like any other input. */
 	if (the_pty.fd >= 0)
 	{
-		write_buf_or_fail(the_pty.fd, bytes, nbytes);
+		pty_input(bytes, nbytes);
 		dch_vt_input_seen();	/* OSC 133 B..C (§11.5) */
 	}
 	dch_vt_buf_free(bytes);
@@ -3559,6 +3609,7 @@ respawn_consume(int status)
 	respawn_argv = NULL;
 	respawn_armed = 0;
 	close(the_pty.fd);
+	pty_in.outoff = pty_in.outlen = 0;	/* input for the program gone */
 #ifdef BROKEN_MASTER
 	close(the_pty.slave);
 	the_pty.slave = -1;
@@ -3859,7 +3910,7 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 		/* Held (no child): input has nowhere to go; drop it. */
 		if (the_pty.fd >= 0)
 		{
-			write_buf_or_fail(the_pty.fd, payload, len);
+			pty_input(payload, len);
 			dch_vt_input_seen();	/* OSC 133 B..C (§11.5) */
 		}
 	}
@@ -4067,7 +4118,7 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 			if (((the_pty.term.c_lflag & (ECHO|ICANON)) == 0) &&
 			    (the_pty.term.c_cc[VMIN] == 1))
 			{
-				write_buf_or_fail(the_pty.fd, &c, 1);
+				pty_input(&c, 1);
 			}
 		}
 		/* Send a WINCH signal to the program. */
@@ -4641,6 +4692,14 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 			if (p->attached)
 				new_has_attached_client = 1;
 		}
+		/* input the program has not read: wake when it can take more */
+		if (pfd >= 0 && pty_in.outoff < pty_in.outlen)
+		{
+			FD_SET(pfd, &writefds);
+			have_writes = 1;
+			if (pfd > highest_fd)
+				highest_fd = pfd;
+		}
 
 		/* chmod the socket if necessary. */
 		if (has_attached_client != new_has_attached_client)
@@ -4706,6 +4765,8 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 		** replaced it this pass, and the new fd was never in the set. */
 		if (pfd >= 0 && the_pty.fd == pfd && FD_ISSET(pfd, &readfds))
 			pty_activity();
+		if (pfd >= 0 && the_pty.fd == pfd && FD_ISSET(pfd, &writefds))
+			pty_flush();
 		/* Flush queued output. Attempt every client with a backlog (the
 		** write() just EAGAINs if its socket isn't ready); drop on a hard
 		** error so one dead client can't wedge the master. */
