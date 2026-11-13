@@ -496,7 +496,7 @@ def main():
             s = conn(cport)
             send(s, 0x30, {"argv": ["--xray", "svc", "--follow", "--json"]})
             out, t = b"", None
-            s.settimeout(3)
+            s.settimeout(30)    # first frame waits on a loaded machine (LOW-T12)
             try:
                 while len(out) < 200:
                     t, pl = frame(s)
