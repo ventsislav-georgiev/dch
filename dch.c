@@ -12276,9 +12276,10 @@ xr_shell_ref(const struct xr_target *t, const struct xr_refq *q,
 	{
 		fr = ring_fetch(t->sock, &rs, xr_ref_rec, &f);
 		/* light: the screen read gets what is left of the budget, +2 ms
-		** so a read it cut ends past it and the tick says "budget" */
+		** so a read it cut ends past it and the tick says "budget";
+		** DCH_XRAY_NOCLOCK (tests): --full's 2 s, as the clock is off */
 		if (fr == 0 && (f.acc->lost = ring_screen(t->sock, &rs, &f.acc->sh,
-		    xr_ref_rec, &f, q->full ? CTL_IDLE_MS
+		    xr_ref_rec, &f, q->full || xr_noclock ? CTL_IDLE_MS
 		    : (int)(q->budget + 2 - (xr_now_ms() - xr_t0)))))
 			(void)xr_scan_tick(f.sc, f.acc->bytes);
 		xr_shell_end(&f.acc->sh);
