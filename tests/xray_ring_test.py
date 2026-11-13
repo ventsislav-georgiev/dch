@@ -529,8 +529,10 @@ def test_seam(tmp):
     in bursts while `--xray --json` runs in a loop; each row's ref is counted
     once, so rows 0..b all there give counts non-increasing in the residue,
     at most 1 apart. Asserted on the invariant only: no answer is both
-    complete and holed (partial is allowed)."""
-    M = 1000
+    complete and holed (partial is allowed). M stays under the pull room
+    (500 in XR_ROOMS, xray.h): past it the oldest refs are evicted and come
+    back with a fresh count (#262), which reads as a hole."""
+    M = 400
     cfg = os.path.join(tmp, "seam.config")
     with open(cfg, "w") as f:
         f.write("xray_ring = 8M\n")     # never evicts within the run
