@@ -255,7 +255,10 @@ def main():
         for env, name in ((senv, "rs1"), (cenv, "loc1")):
             r = dch(env, "--spawn", name, "--size", "80x24", "--", "/bin/sh")
             check("session %s" % name, r.returncode == 0, r.stderr)
-        time.sleep(1.5)  # both shells settle: --ls-json's state holds still
+            # a reported state holds still; a detected one can flip under
+            # load, and that is a change the stream rightly prints
+            dch(env, "--report", name, "idle")
+        time.sleep(1.5)
 
         # --- usage ---------------------------------------------------------
         for args in (["--ls-json", "--follow", "x"],
