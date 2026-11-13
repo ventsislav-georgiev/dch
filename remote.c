@@ -1525,17 +1525,12 @@ pr_read(struct probe *p)
 		pr_feed(p, buf, (size_t)k);
 }
 
-/* Every probe at once, all done within ms, name lookups included. Each
-** ends PR_OK (hello and list), PR_NEWER or PR_FAIL, its socket closed (but
-** a kept PR_OK's). */
+/* Each probe's address (names by end) and its non-blocking connect:
+** PR_CONN, else PR_FAIL. */
 static void
-probe_all(struct probe *v, int n, int ms)
+pr_start(struct probe *v, int n, long long end)
 {
-	static const unsigned char rq[] = { 0x08, 0, 0, 0, 0, 0x03, 0, 0, 0, 0 };
-	size_t rqn = v[0].hello_only ? RF_HDR : sizeof rq;	/* one or all */
-	long long end = now_ms() + ms;
-	struct pollfd pf[RM_HOSTS];
-	int map[RM_HOSTS], i, np;
+	int i;
 
 	resolve_all(v, n, end);
 	for (i = 0; i < n; i++)
@@ -1547,6 +1542,65 @@ probe_all(struct probe *v, int n, int ms)
 		else
 			v[i].st = PR_CONN;
 	}
+}
+
+/* p's socket is ready: PR_CONN connected (its hello asked), PR_WAIT its
+** reply. */
+static void
+pr_io(struct probe *p)
+{
+	static const unsigned char rq[] = { 0x08, 0, 0, 0, 0, 0x03, 0, 0, 0, 0 };
+	size_t rqn = p->hello_only ? RF_HDR : sizeof rq;	/* one or all */
+	socklen_t l = sizeof(int);
+	int e = 0;
+
+	if (p->st == PR_WAIT)
+		pr_read(p);
+	else if (getsockopt(p->fd, SOL_SOCKET, SO_ERROR, (void *)&e, &l) < 0
+	         || e)
+		pr_end(p, PR_FAIL, sock_str(e ? e : sock_err()));
+	else if (send(p->fd, (const void *)rq, rqn, MSG_NOSIGNAL) !=
+	         (ssize_t)rqn)
+		pr_end(p, PR_FAIL, sock_str(sock_err()));
+	else
+		p->st = PR_WAIT;
+}
+
+/* The probes still going after ms: PR_FAIL; what each not kept read,
+** freed. */
+static void
+pr_finish(struct probe *v, int n, int ms)
+{
+	int i;
+
+	for (i = 0; i < n; i++)
+	{
+		if (v[i].st == PR_CONN || v[i].st == PR_WAIT)
+		{
+			char why[64];
+
+			snprintf(why, sizeof why, "no answer within %d ms", ms);
+			pr_end(&v[i], PR_FAIL, why);
+		}
+		if (v[i].st != PR_OK || !v[i].keep)
+		{
+			free(v[i].in.p);
+			memset(&v[i].in, 0, sizeof v[i].in);
+		}
+	}
+}
+
+/* Every probe at once, all done within ms, name lookups included. Each
+** ends PR_OK (hello and list), PR_NEWER or PR_FAIL, its socket closed (but
+** a kept PR_OK's). */
+static void
+probe_all(struct probe *v, int n, int ms)
+{
+	long long end = now_ms() + ms;
+	struct pollfd pf[RM_HOSTS];
+	int map[RM_HOSTS], i, np;
+
+	pr_start(v, n, end);
 	for (;;)
 	{
 		long long left = end - now_ms();
@@ -1570,40 +1624,10 @@ probe_all(struct probe *v, int n, int ms)
 			break;
 		}
 		for (i = 0; i < np; i++)
-		{
-			struct probe *p = &v[map[i]];
-			socklen_t l = sizeof(int);
-			int e = 0;
-
-			if (!pf[i].revents)
-				continue;
-			if (p->st == PR_WAIT)
-				pr_read(p);
-			else if (getsockopt(p->fd, SOL_SOCKET, SO_ERROR,
-			                    (void *)&e, &l) < 0 || e)
-				pr_end(p, PR_FAIL, sock_str(e ? e : sock_err()));
-			else if (send(p->fd, (const void *)rq, rqn,
-			              MSG_NOSIGNAL) != (ssize_t)rqn)
-				pr_end(p, PR_FAIL, sock_str(sock_err()));
-			else
-				p->st = PR_WAIT;
-		}
+			if (pf[i].revents)
+				pr_io(&v[map[i]]);
 	}
-	for (i = 0; i < n; i++)
-	{
-		if (v[i].st == PR_CONN || v[i].st == PR_WAIT)
-		{
-			char why[64];
-
-			snprintf(why, sizeof why, "no answer within %d ms", ms);
-			pr_end(&v[i], PR_FAIL, why);
-		}
-		if (v[i].st != PR_OK || !v[i].keep)
-		{
-			free(v[i].in.p);
-			memset(&v[i].in, 0, sizeof v[i].in);
-		}
-	}
+	pr_finish(v, n, ms);
 }
 
 static void
@@ -3743,6 +3767,10 @@ struct rq
 	struct rhost h;
 	char sh[300], *name;	/* the host, printable; the host-local name */
 	struct probe *p;	/* the warm connection, NULL: none */
+	struct probe *dp;	/* else a dial on the way (#226), until dend */
+	long long dend;
+	struct sb pend;		/* the 0x30 of the request waiting on it */
+	struct sb wait;		/* stdin lines queued behind that request */
 	int cancel_ok;		/* its hello lists "ctl-cancel" */
 	struct rf_state rs;
 	struct sb tin, lo, le;	/* frames in; stdout, stderr to a newline */
@@ -3758,40 +3786,29 @@ rq_close(struct rq *q)
 {
 	if (q->p)
 		probes_free(q->p, 1);
-	q->p = NULL;
+	if (q->dp)
+		probes_free(q->dp, 1);
+	q->p = q->dp = NULL;
 	free(q->tin.p);
 	free(q->lo.p);
 	free(q->le.p);
+	free(q->pend.p);
 	memset(&q->tin, 0, sizeof q->tin);
 	memset(&q->lo, 0, sizeof q->lo);
 	memset(&q->le, 0, sizeof q->le);
+	memset(&q->pend, 0, sizeof q->pend);
 }
 
-/* A new connection to q's host, its hello in: 0, else the exit status (4
-** refused, 6 no "ctl" or "xray", 7 unreachable, 1 a newer protocol) and its
-** stderr line in msg[cap]. A failure stands for RM_ATTACH_MS: the requests
-** queued behind a dark host's dial get it at once, not a dial each (QA
-** 1.55.0 LOW-10). */
+/* q's dial p is over: 0 and p q's warm connection, else (p freed) the
+** exit status (4 refused, 6 no "ctl" or "xray", 7 unreachable, 1 a newer
+** protocol) and its stderr line in msg[cap]. A failure stands for
+** RM_ATTACH_MS: the requests queued behind a dark host's dial get it at
+** once, not a dial each (QA 1.55.0 LOW-10). */
 static int
-rq_dial(struct rq *q, char *msg, size_t cap)
+rq_hello(struct rq *q, struct probe *p, char *msg, size_t cap)
 {
-	struct probe *p;
 	int rc = 0;
 
-	rq_close(q);
-	if (now_ms() < q->dark)
-	{
-		snprintf(msg, cap, "%s", q->dmsg);
-		return q->dcode;
-	}
-	if (!(p = calloc(1, sizeof *p)))
-	{
-		snprintf(msg, cap, "dch: out of memory");
-		return 1;
-	}
-	p->h = q->h;
-	p->keep = p->hello_only = 1;
-	probe_all(p, 1, RM_ATTACH_MS);
 	if (p->st == PR_REFUSED)
 	{
 		snprintf(msg, cap, "dch: %s refused: %s", q->sh, p->why);
@@ -3828,6 +3845,50 @@ rq_dial(struct rq *q, char *msg, size_t cap)
 	q->rs = p->rs;
 	q->cancel_ok = hello_op(p->hello_js, "ctl-cancel");
 	return 0;
+}
+
+/* A new connection to q's host: as rq_hello says; with wait 0 the dial
+** goes on in q->dp (0), driven by dch_remote_requests's poll, so stdin is
+** read while it dials (#226). */
+static int
+rq_dial(struct rq *q, char *msg, size_t cap, int wait)
+{
+	struct probe *p;
+
+	rq_close(q);
+	if (now_ms() < q->dark)
+	{
+		snprintf(msg, cap, "%s", q->dmsg);
+		return q->dcode;
+	}
+	if (!(p = calloc(1, sizeof *p)))
+	{
+		snprintf(msg, cap, "dch: out of memory");
+		return 1;
+	}
+	p->h = q->h;
+	p->keep = p->hello_only = 1;
+	if (wait)
+		probe_all(p, 1, RM_ATTACH_MS);
+	else
+	{
+		q->dend = now_ms() + RM_ATTACH_MS;
+		pr_start(p, 1, q->dend);
+		if (p->st == PR_CONN)
+		{
+			q->dp = p;
+			return 0;
+		}
+	}
+	return rq_hello(q, p, msg, cap);
+}
+
+/* req's dial failed (e, msg): its stderr line and its end */
+static void
+rq_undialled(struct sb *o, long long req, int e, const char *msg)
+{
+	rq_err(o, req, msg);
+	rq_exit(o, req, e, e == DCH_EXIT_UNREACHABLE ? "lost" : "refused");
 }
 
 /* n bytes out on fd within RM_ATTACH_MS: 0, else -1 and why in msg. */
@@ -3892,7 +3953,45 @@ rq_drop(struct rq *q, struct sb *o, const char *why)
 	rq_exit(o, q->req, 2, why);
 	q->req = q->cend = 0;
 	rq_close(q);
-	(void)rq_dial(q, m, sizeof m);
+	(void)rq_dial(q, m, sizeof m, 0);
+}
+
+/* The request waiting on q's dial ends "cancel": nothing of it was sent;
+** the dial goes on, quietly (#226). */
+static void
+rq_unsent(struct rq *q, struct sb *o)
+{
+	rq_exit(o, q->req, 2, "cancel");
+	q->req = 0;
+	free(q->pend.p);
+	memset(&q->pend, 0, sizeof q->pend);
+}
+
+/* q's dial, once over or past dend: the request waiting on it sent, or
+** ended as the dial failed. */
+static void
+rq_dialled(struct rq *q, struct sb *o)
+{
+	struct probe *p = q->dp;
+	char m[800];
+	int e;
+
+	if ((p->st == PR_CONN || p->st == PR_WAIT) && now_ms() < q->dend)
+		return;
+	q->dp = NULL;
+	pr_finish(p, 1, RM_ATTACH_MS);
+	if ((e = rq_hello(q, p, m, sizeof m)) && q->req)
+		rq_undialled(o, q->req, e, m);
+	if (e)
+		q->req = 0;
+	else if (q->req)
+	{
+		q->heard = now_ms();
+		if (rq_send(q->p->fd, q->pend.p, q->pend.n, m, sizeof m) < 0)
+			rq_lost(q, o, m);
+	}
+	free(q->pend.p);
+	memset(&q->pend, 0, sizeof q->pend);
 }
 
 /* q's socket is readable: its frames, the request's lines onto o. */
@@ -3969,7 +4068,9 @@ rq_cancel(struct rq *q, struct sb *o, long long req)
 
 	if (!q->req || req != q->req || q->cend)
 		return;
-	if (q->cancel_ok &&
+	if (q->dp)
+		rq_unsent(q, o);
+	else if (q->cancel_ok &&
 	    rq_send(q->p->fd, c34, sizeof c34, m, sizeof m) == 0)
 		q->cend = now_ms() + RM_CANCEL_MS;
 	else
@@ -3977,7 +4078,7 @@ rq_cancel(struct rq *q, struct sb *o, long long req)
 }
 
 /* A checked request out as a 0x30 on the warm connection, dialled first
-** when there is none. */
+** when there is none; while a dial is on the way it waits on it. */
 static void
 rq_start(struct rq *q, struct sb *o, long long req, int ac, char **av)
 {
@@ -3985,11 +4086,9 @@ rq_start(struct rq *q, struct sb *o, long long req, int ac, char **av)
 	char **xv, m[800];
 	int e;
 
-	if (!q->p && (e = rq_dial(q, m, sizeof m)))
+	if (!q->p && !q->dp && (e = rq_dial(q, m, sizeof m, 0)))
 	{
-		rq_err(o, req, m);
-		rq_exit(o, req, e, e == DCH_EXIT_UNREACHABLE ? "lost"
-		                                              : "refused");
+		rq_undialled(o, req, e, m);
 		return;
 	}
 	if ((xv = rq_argv(q->name, ac, av)))
@@ -4006,6 +4105,11 @@ rq_start(struct rq *q, struct sb *o, long long req, int ac, char **av)
 	{
 		q->req = req;
 		q->heard = now_ms();
+		if (q->dp)
+		{
+			q->pend = b;	/* sent once dialled */
+			return;
+		}
 		if (rq_send(q->p->fd, b.p, b.n, m, sizeof m) < 0)
 			rq_lost(q, o, m);
 	}
@@ -4049,6 +4153,47 @@ rq_line(struct rq *q, struct sb *o, const char *s, size_t k)
 	else
 		rq_start(q, o, req, ac, av);
 	free(av);
+}
+
+/* The lines queued behind a request that was dialling, in order, while
+** none is. */
+static void
+rq_drain(struct rq *q, struct sb *o)
+{
+	while (q->wait.n && !(q->req && q->dp))
+	{
+		char *nl = memchr(q->wait.p, '\n', q->wait.n);
+		size_t k = (size_t)(nl - q->wait.p);
+
+		*nl = '\0';
+		rq_line(q, o, q->wait.p, k);
+		memmove(q->wait.p, nl + 1, q->wait.n - k - 1);
+		q->wait.n -= k + 1;
+	}
+}
+
+/* One stdin line s[0..k): a {"cancel":N} at once; any other behind a
+** request still dialling waits, after what is queued, as when the dial
+** blocked (#226). */
+static void
+rq_take(struct rq *q, struct sb *o, const char *s, size_t k)
+{
+	long long req;
+	char **av = NULL;
+	int ac;
+
+	rq_drain(q, o);
+	if (q->req && q->dp && (k > RQ_LINE_MAX || strlen(s) != k ||
+	                        rq_parse(s, &req, &av, &ac) != RQ_CANCEL))
+	{
+		free(av);
+		sb_add(&q->wait, s, k);
+		sb_add(&q->wait, "\n", 1);
+		return;
+	}
+	free(av);
+	rq_line(q, o, s, k);
+	rq_drain(q, o);
 }
 
 /* stdout gets o, flushed: 0, else -1 (our reader is gone). */
@@ -4109,7 +4254,7 @@ dch_remote_requests(char *n)
 	signal(SIGPIPE, SIG_IGN);
 	if (host_pick(hb, &q.h) < 0)
 		return rq_fail(1, NULL);
-	if ((rc = rq_dial(&q, msg, sizeof msg)))
+	if ((rc = rq_dial(&q, msg, sizeof msg, 1)))
 		return rq_fail(rc, msg);
 	rq_ready(&o, q.p->hello_js);
 	while (rq_put(&o) == 0)
@@ -4118,19 +4263,23 @@ dch_remote_requests(char *n)
 		long long due = 0;
 		int np = 1, tmo = -1;
 
-		pf[0].fd = 0;
+		/* past 64 KiB queued behind a dial, stdin waits for it */
+		pf[0].fd = q.wait.n > RQ_LINE_MAX ? -1 : 0;
 		pf[0].events = POLLIN;
 		pf[0].revents = 0;
-		if (q.p)
+		if (q.p || q.dp)
 		{
-			pf[1].fd = q.p->fd;
-			pf[1].events = POLLIN;
+			pf[1].fd = q.p ? q.p->fd : q.dp->fd;
+			pf[1].events = q.dp && q.dp->st == PR_CONN ? POLLOUT
+			                                           : POLLIN;
 			pf[1].revents = 0;
 			np = 2;
 		}
 		/* a 0x34's 0x33, else the host's answer within ctl_quiet */
 		if (q.req && q.p)
 			due = q.cend ? q.cend : q.heard + quiet;
+		if (q.dp)
+			due = q.dend;
 		if (due)
 			tmo = due > now_ms() ? (int)(due - now_ms()) : 0;
 		if (poll(pf, (nfds_t)np, tmo) < 0)
@@ -4139,8 +4288,15 @@ dch_remote_requests(char *n)
 				continue;
 			break;
 		}
-		if (np > 1 && pf[1].revents && q.p)
+		if (np > 1 && pf[1].revents && q.dp)
+			pr_io(q.dp);
+		else if (np > 1 && pf[1].revents && q.p)
 			rq_net(&q, &o);
+		if (q.dp)
+		{
+			rq_dialled(&q, &o);
+			rq_drain(&q, &o);
+		}
 		if (q.cend && now_ms() >= q.cend)
 			rq_drop(&q, &o, "cancel");	/* its 0x33 never came */
 		else if (q.req && q.p && !q.cend && now_ms() - q.heard >= quiet)
@@ -4155,15 +4311,21 @@ dch_remote_requests(char *n)
 			continue;
 		if (k <= 0)
 		{
-			/* the close cancels a request in flight on the host;
-			** an unterminated last line is no request */
+			/* the close cancels a request in flight on the host,
+			** and one dialling, and those queued behind it; an
+			** unterminated last line is no request */
+			while (q.req && q.dp)
+			{
+				rq_unsent(&q, &o);
+				rq_drain(&q, &o);
+			}
 			if (q.req)
 				rq_exit(&o, q.req, 2, "cancel");
 			(void)rq_put(&o);
 			break;
 		}
 		sb_add(&in, buf, (size_t)k);
-		if (in.bad)
+		if (in.bad || q.wait.bad)
 			break;
 		for (off = 0;;)
 		{
@@ -4173,7 +4335,7 @@ dch_remote_requests(char *n)
 				break;
 			*nl = '\0';
 			if (!skip)
-				rq_line(&q, &o, s, (size_t)(nl - s));
+				rq_take(&q, &o, s, (size_t)(nl - s));
 			skip = 0;
 			off += (size_t)(nl - s) + 1;
 		}
@@ -4189,11 +4351,13 @@ dch_remote_requests(char *n)
 		in.n -= off;
 	}
 	rq_close(&q);
-	rc = in.bad || o.bad;	/* never a silent end: only a failed alloc */
+	rc = in.bad || o.bad || q.wait.bad;	/* never a silent end: only a
+						** failed alloc */
 	if (rc)
 		fprintf(stderr, "dch: out of memory\n");
 	free(in.p);
 	free(o.p);
+	free(q.wait.p);
 	return rc;
 }
 #endif

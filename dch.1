@@ -1791,6 +1791,10 @@ with 4, 6 or 1); the first request after it dials again.
 End of standard input closes the connection and exits 0 (a request still
 running ends
 .BR why:\(dqcancel\(dq ).
+A cancel, or the end of standard input, while dch is still dialling for
+a request ends it at once with exit 2 and
+.B why:\(dqcancel\(dq
+(at the end of input, any request sent after it too).
 With no connection at the start it writes one
 .B {"schema":1,"exit":\fIE\fP,"stderr":...}
 line, the message on standard error too, and exits

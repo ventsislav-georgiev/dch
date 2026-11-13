@@ -1049,7 +1049,9 @@ standard input is a request, as NDJSON:
   value is answered `{"req":N,"stderr":"dch: ..."}` and
   `{"req":N,"exit":2,"why":"refused"}`, and nothing is sent.
 - `{"cancel":N}`: stops request `N` on the host. Nothing is written when
-  `N` is not running.
+  `N` is not running. While dch is still dialling for `N`, the cancel ends
+  it at once with exit 2 and `"why":"cancel"`, and so does the end of
+  standard input, for `N` and any request sent after it.
 
 Each line the host writes comes back as `{"req":N,"line":<the line>}`, the
 line byte for byte (a line that is not one JSON object comes as a JSON

@@ -1134,10 +1134,13 @@ def requests_checks(dch, check, senv, cenv, serve_at, fakes, tmp, slog):
     rq.send({"req": 1, "argv": ["--json"]}, {"cancel": 1})
     t0 = time.time()
     got = [json.loads(g) for g in rq.until(1)]
+    took = time.time() - t0
+    end = time.time() + 10
+    while px.n < 2 and time.time() < end:
+        time.sleep(0.05)	# the quiet re-dial, after the end line (#226)
     check("requests: a 0x34 with no 0x33 in 3 s: the close cancels it",
           got == [{"req": 1, "exit": 2, "why": "cancel"}]
-          and time.time() - t0 > 2.5 and px.n == 2,
-          (got, time.time() - t0, px.n))
+          and took > 2.5 and px.n == 2, (got, took, px.n))
     px.n = 0	# the next connection is "first" again: it holds
     time.sleep(0.2)
     rq2 = Requests(side("q=127.0.0.1:%d" % px.port), "q:xq1")
@@ -1357,7 +1360,8 @@ class XFake:
     then a 0x33 "cap"; "holdcut" whole lines and a partial line, its 0x33
     only for a 0x34; "crash" whole lines, a partial line, then the 0x33 of
     a host dch SIGKILLed (exit 137, no why); "raw" a 17 MiB line with no
-    control, in serve's 64 KiB frames."""
+    control, in serve's 64 KiB frames; #226: "late" its hello 0.4 s late,
+    then `{"ok":1}`, exit 0 and the close."""
 
     def __init__(self, mode, out=b""):
         self.mode, self.n, self.out = mode, 0, out
@@ -1393,6 +1397,7 @@ class XFake:
             + frame(0x32, b"dch: \x1b]0;PWNED\x07x\n")
             + frame(0x33, {"exit": 0}),
             "dark": frame(0x33, {"exit": 0}),
+            "late": frame(0x31, b'{"ok":1}\n') + frame(0x33, {"exit": 0}),
             "silent": frame(0x31, b'{"cut":'),
             "cut": frame(0x31, b'{"a":1}\n{"b":2}\n{"cut":')
             + frame(0x32, b"e-cut"),
@@ -1425,6 +1430,8 @@ class XFake:
                         break
                     buf = buf[5 + n:]
                     if t == 0x08:
+                        if self.mode == "late":
+                            time.sleep(0.4)
                         c.sendall(frame(0x18, {
                             "proto": "1.1", "server": "fake",
                             "ops": ["ctl", "ctl-cancel", "xray"]}))
@@ -1440,7 +1447,7 @@ class XFake:
                                   + frame(0x33, {"exit": 0}))
                     elif t == 0x30 and self.mode in answers:
                         c.sendall(answers[self.mode])
-                        if self.mode in ("dark", "cut"):
+                        if self.mode in ("dark", "cut", "late"):
                             time.sleep(0.2)
                             c.close()
                             return
@@ -1454,6 +1461,132 @@ class XFake:
                 c.close()
             except OSError:
                 pass
+
+
+def nfds(pid):
+    """pid's open descriptors, counted"""
+    if os.path.isdir("/proc/%d/fd" % pid):
+        return len(os.listdir("/proc/%d/fd" % pid))
+    lsof = "/usr/sbin/lsof" if os.path.exists("/usr/sbin/lsof") else "lsof"
+    return len(subprocess.run([lsof, "-p", str(pid)], capture_output=True,
+                              text=True).stdout.splitlines())
+
+
+def dial_cancel_checks(check, side, fake):
+    """#226 (QA 1.56.0 LOW-10 residual): --requests reads stdin while it
+    dials, so a {"cancel":N} for the request still dialling, or stdin's
+    end, ends it "cancel" at once, not "lost" once the dial gives up. The
+    host is dark (XFake "dark": the first connection answers, later ones
+    get no hello), so a dial takes RM_ATTACH_MS, 5 s: the bounds are
+    against that, with room for a loaded machine."""
+    dark = "dch: q: unreachable: no answer within 5000 ms"
+    cancel = [{"req": n, "exit": 2, "why": "cancel"} for n in range(4)]
+
+    def dialling():
+        """a --requests whose warm connection the dark host has closed:
+        the next request dials"""
+        f = fake("dark")
+        rq = Requests(side(f.port), "q:x")
+        rq.line()
+        rq.send({"req": 1, "argv": ["--json"]})
+        rq.until(1)
+        time.sleep(0.5)	# the host's close reaches dch, quietly
+        return f, rq
+
+    # the dialling request's cancel; one for an id not running: nothing
+    f, rq = dialling()
+    t0 = time.time()
+    rq.send({"req": 2, "argv": ["--json"]})
+    time.sleep(0.3)
+    rq.send({"cancel": 9}, {"cancel": 2})
+    got = [json.loads(g) for g in rq.until(2, 30)]
+    took = time.time() - t0
+    check("#226: a cancel while its request dials ends it cancel, exit 2, "
+          "at once, not lost when the 5 s dial gives up; a cancel for an id "
+          "not running writes nothing", got == cancel[2:3] and took < 4,
+          (got, took))
+    # the same dark host after the cancel: the dial goes on, quietly; the
+    # next request waits on it and is cancelled the same way; the one
+    # after that ends lost when that one dial gives up
+    rq.send({"req": 3, "argv": ["--json"]})
+    time.sleep(0.3)
+    t0 = time.time()
+    rq.send({"cancel": 3})
+    got = [json.loads(g) for g in rq.until(3, 30)]
+    took = time.time() - t0
+    rq.send({"req": 4, "argv": ["--json"]})
+    got4 = [json.loads(g) for g in rq.until(4, 30)]
+    rc, rest, err = rq.end()
+    check("#226: the next request to the dark host after the cancel: its "
+          "cancel too ends it at once; the one after ends lost when the one "
+          "dial gives up, no dial of its own",
+          got == cancel[3:4] and took < 3
+          and got4 == [{"req": 4, "stderr": dark},
+                       {"req": 4, "exit": UNREACHABLE_EXIT, "why": "lost"}]
+          and f.n == 2 and rc == 0 and rest == b"",
+          (got, took, got4, f.n, rc, rest, err))
+
+    # a request queued behind the dialling one waits; the dialling one's
+    # cancel ends it, the queued one then waits on the same dial, and its
+    # cancel ends it too
+    f, rq = dialling()
+    t0 = time.time()
+    rq.send({"req": 2, "argv": ["--json"]}, {"req": 3, "argv": ["--json"]})
+    time.sleep(0.3)
+    rq.send({"cancel": 2})
+    got = [json.loads(g) for g in rq.until(2, 30)]
+    rq.send({"cancel": 3})
+    got += [json.loads(g) for g in rq.until(3, 30)]
+    took = time.time() - t0
+    rc, rest, err = rq.end()
+    check("#226: a request queued behind the dialling one: the dialling "
+          "one's cancel ends it at once, then the queued one's ends it",
+          got == cancel[2:4] and took < 4 and f.n == 2 and rc == 0
+          and rest == b"", (got, took, f.n, rc, rest, err))
+
+    # stdin's end while a request dials, one queued behind it
+    f, rq = dialling()
+    rq.send({"req": 2, "argv": ["--json"]}, {"req": 3, "argv": ["--json"]})
+    time.sleep(0.3)
+    t0 = time.time()
+    rc, rest, err = rq.end(30)
+    took = time.time() - t0
+    check("#226: stdin EOF while a request dials: it and the one queued "
+          "behind it end cancel, exit 0, at once",
+          rc == 0 and [json.loads(x) for x in rest.splitlines()]
+          == cancel[2:4] and took < 4, (rc, rest, err, took))
+
+    # a dial that ends as the cancel arrives, either side of it: each
+    # request ends once, cancel or the host's exit 0, and no socket stays
+    f = fake("late")
+    rq = Requests(side(f.port), "q:x")
+    rq.line()
+    rq.send({"req": 1, "argv": ["--json"]})
+    rq.until(1)
+    time.sleep(0.5)
+    n0 = nfds(rq.p.pid)
+    got = []
+    for i, d in enumerate((0.1, 0.2, 0.3, 0.4, 0.5, 0.6)):
+        rq.send({"req": 10 + i, "argv": ["--json"]})
+        time.sleep(d)
+        rq.send({"cancel": 10 + i})
+        got.append([json.loads(g) for g in rq.until(10 + i, 30)])
+        time.sleep(0.3)
+    rq.send({"req": 20, "argv": ["--json"]})
+    last = [json.loads(g) for g in rq.until(20, 30)]
+    time.sleep(0.5)	# the host's close reaches dch
+    n1 = nfds(rq.p.pid)
+    rc, rest, err = rq.end()
+    ends = [g[-1] for g in got if g]
+    check("#226: a dial ending as its cancel arrives: one end line each, "
+          "cancel or the host's exit 0, no descriptor left behind",
+          all(len([x for x in g if "exit" in x]) == 1 for g in got)
+          and all(e in ({"req": e["req"], "exit": 2, "why": "cancel"},
+                        {"req": e["req"], "exit": 0, "why": None})
+                  for e in ends) and len(ends) == 6
+          and last[-1:] == [{"req": 20, "exit": 0, "why": None}]
+          and n1 == n0 and rc == 0 and rest == b"",
+          (got, last, n0, n1, rc, rest, err))
 
 
 def robust_checks(dch, check, cenv, fakes, tmp):
@@ -1602,6 +1735,7 @@ def robust_checks(dch, check, cenv, fakes, tmp):
     check("LOW-10: past RM_ATTACH_MS the next request dials again",
           f.n == 3, f.n)
     rq.end(30)
+    dial_cancel_checks(check, side, fake)	# #226
 
     # LOW-8: a reused id while it runs: busy as req null, one end for it
     f = fake("hold")
