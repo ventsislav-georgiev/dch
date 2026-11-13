@@ -24,9 +24,11 @@ SESS = "xvcont-%d" % os.getpid()
 HEAD = b"X-ray  "
 STOPPED = b"\r\n[1]  + suspended  dch\r\n$ fg\r\n"
 COOKED = termios.ICANON | termios.ECHO | termios.ISIG
-# the session: quiet after its first line, so the view's screen settles
+# the session: a line at its start and on each SIGWINCH (an attach's; dch-lite
+# replays no screen), else quiet, so the view's screen settles
 CHILD = r"""
-import os, tty
+import os, signal, tty
+signal.signal(signal.SIGWINCH, lambda *a: os.write(1, b"READY\r\n"))
 tty.setraw(0)
 os.write(1, b"READY\r\n")
 while os.read(0, 64):
