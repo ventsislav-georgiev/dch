@@ -842,7 +842,8 @@ def test_claude():
         tn = ("<task-notification>\n<task-id>t</task-id>\n<summary>" +
               "\U0001F600" * 130 + "</summary>\n</task-notification>")
         with open(tp, "w") as f:
-            f.write((json.dumps({"type": "user", "message": {
+            f.write((json.dumps({"type": "user", "origin": {
+                "kind": "task-notification"}, "message": {
                 "content": tn}}) + "\n" +
                 '{"type":"assistant","message":{"content":"s"}}\n') * 6000)
             f.write((heavy + '\n{"type":"assistant","message":{"content":'
@@ -3200,6 +3201,40 @@ def test_scope():
           rc == 0 and ls[-1]["partial"] and ls[-1]["why"] == "time",
           (ls[-1], err))
     os.unlink(os.path.join(hdir, "s5.json"))
+
+    # #236: a reader paused past --full's time cap (lowered to 3 s) or the
+    # light budget gets the whole answer, each file's ~160 KB far past the
+    # pipe's buffer: time blocked writing to it is not the scan's
+    for k in range(6, 10):
+        put(k, P, ["#934 line %d %s" % (j, "\U0001f600" * 200)
+                   for j in range(300)], 1794300050 + k)
+    caps = dict(env, DCH_XRAY_CAPS="0:0:3000")
+
+    def paused(n, secs, *a):
+        p = subprocess.Popen([DCH, "--xray", n, "--ref", "#934", "--scope",
+                              "all", *a, "--json"], stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, env=caps)
+        time.sleep(secs)
+        out, err = p.communicate(timeout=60)
+        return p.returncode, len(out), ref_lines(out.decode()) or [{}], err
+
+    whole = ref("#934", "--scope", "all", "--full", env=caps)[1]
+    rc, n, ls, err = paused("s0", 6, "--full")
+    same = lambda ls: [l for l in ls if "progress" not in l and
+                       "first" not in l]
+    check("#236: a reader paused 6 s, past --full's 3 s cap, gets the whole "
+          "answer (%d bytes), no why time" % n,
+          rc == 0 and n > 300000 and ls[-1].get("done") and
+          not ls[-1]["partial"] and ls[-1]["why"] is None and
+          same(ls) == same(whole), (rc, n, ls[-1], err[:200]))
+    rc, n, ls, err = paused("s6", 2)
+    check("#236: light: a reader paused 2 s, past the 300 ms budget, behind "
+          "s6's own lines (%d bytes) still gets s9's result, why first" % n,
+          rc == 0 and n > 100000 and ls[-1].get("why") == "first" and
+          ls[-1]["files"] == 2 and ls[-1]["counts"]["project"] > 0,
+          (rc, n, ls[-1], err[:200]))
+    for k in range(6, 10):
+        os.unlink(os.path.join(hdir, "s%d.json" % k))
 
     # 65 files scan 64 (3.8, 9.5); light over 1 MB files stops at its budget
     big = "".join(json.dumps({"type": "user", "cwd": P, "message": {

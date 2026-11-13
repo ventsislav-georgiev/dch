@@ -22,13 +22,32 @@ dangling, FIFO, not "gitdir: ", a symlink, a clone's dir) refuse; the
 firmlink alias /System/Volumes/Data$HOME is the home; the new names refuse;
 a worktree, a nested one and ~/.config/nvim still read their lines.
 
+QA 1.58.0 NIT-D2: a worktree's git file pointing nowhere (no repo's .git
+above it) lifts nothing; NIT-D3: a .git symlinked to a git file in its own
+dir makes a root, one out of that dir does not.
+
+#228 (QA 1.57.0 LOW-D3): .yarnrc and a bare auth.json refuse, in a project,
+its subdir and a project under the HOME.
+
 Run:  python3 tests/xray_deny_test.py        (uses ./dch)
 """
 import json, os, re, shutil, signal, subprocess, sys, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from remote_client_test import FAKE_TS, OWNER, WHOIS  # noqa: E402
+from remote_client_test import OWNER, WHOIS  # noqa: E402
+
+# Builtins only, as serve_test's (#246): serve gives whois 3 s, and a slower
+# fake is a whois_failed refusal cached 30 s, every serve case after it lost
+FAKE_TS = """#!/bin/sh
+d=${0%/*}
+case "$1" in
+status) f=status.json ;; whois) f=whois.json ;; ip) f=ip.txt ;; *) exit 1 ;;
+esac
+[ -f "$d/$f" ] || exit 1
+while IFS= read -r l; do printf '%s\\n' "$l"; done < "$d/$f"
+printf '%s' "$l"
+"""
 
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
 fails = []
@@ -146,6 +165,8 @@ def main():
         elif kind == "symlink":   # to a valid git file
             put(path + "-target", "gitdir: /nonexistent/wt\n")
             os.symlink(path + "-target", path)
+        elif kind == "nowhere":   # QA 1.58.0 NIT-D2: no repo's .git
+            put(path, "gitdir: /nonexistent/wt\n")
         else:
             os.makedirs(path)
     for kind in ("empty", "dangling", "fifo", "notgitdir"):
@@ -159,7 +180,8 @@ def main():
             cases.append(("a %s .git in <proj>/%s: %s" % (kind, d, f),
                           "xd-fg-%s%s" % (kind, d),
                           os.path.join(c, f) + ":1", "secret_name"))
-    for kind in ("empty", "dangling", "fifo", "notgitdir", "symlink", "dir"):
+    for kind in ("empty", "dangling", "fifo", "notgitdir", "symlink", "dir",
+                 "nowhere"):
         w = os.path.join(tmp, "fw-" + kind, ".claude", "worktrees", "w")
         os.makedirs(w)
         os.makedirs(os.path.join(tmp, "fw-" + kind, ".git"))
@@ -204,6 +226,24 @@ def main():
          for f in (".env", ".claude/settings.json", ".ssh/config",
                    ".credentials.json", ".kube/config")]
 
+    # QA 1.58.0 NIT-D3: a .git that is a symlink to a git file in its own
+    # dir makes a root, as git takes it; one to a git file out of it does not
+    for k, inside in ((0, True), (1, False)):
+        r = os.path.join(tmp, "gl%d" % k)
+        os.makedirs(os.path.join(r, "sub"))
+        put(os.path.join(tmp, "gs%d" % k, "gf"), "gitdir: /nonexistent/gd\n")
+        put(os.path.join(r, "store", "gf"), "gitdir: /nonexistent/gd\n")
+        os.symlink(os.path.join("store", "gf") if inside else
+                   os.path.join(tmp, "gs%d" % k, "gf"), os.path.join(r, ".git"))
+        put(os.path.join(r, "a.txt"), "symlinked gitfile line\n"
+            if inside else "FAKE\n")
+        ss["xd-gl%d" % k] = os.path.join(r, "sub")
+        cases.append(("a .git symlink to a git file %s its dir: the root's "
+                      "a.txt from sub" % ("in" if inside else "out of"),
+                      "xd-gl%d" % k, os.path.join(r, "a.txt") + ":1",
+                      "ok:symlinked gitfile line" if inside
+                      else "outside_project"))
+
     # LOW-D2: the firmlink alias /System/Volumes/Data$HOME as a session's
     # cwd (an ended Claude's record holds it as written)
     hw = os.path.join(home, ".claude", "worktrees", "w")
@@ -239,6 +279,20 @@ def main():
         put(os.path.join(proj, f), "token=FAKE\n")
         cases.append(("a project: " + f, "xd-proj",
                       os.path.join(proj, f) + ":1", "secret_name"))
+    # #228 (LOW-D3's last two): classic yarn's .yarnrc (npmAuthToken) and a
+    # bare auth.json, in a project, a subdir and a project under the HOME
+    hp = os.path.join(home, "src", "hp")
+    put(os.path.join(hp, ".git", "HEAD"), "ref: refs/heads/main\n")
+    put(os.path.join(hp, "b.txt"), "home line\n")
+    ss["xd-hproj"] = hp
+    cases.append(("a project under ~: a plain b.txt", "xd-hproj", "b.txt:1",
+                  "ok:home line"))
+    for d, n in ((proj, "xd-proj"), (os.path.join(proj, "sub"), "xd-proj"),
+                 (hp, "xd-hproj")):
+        for f in (".yarnrc", "auth.json"):
+            put(os.path.join(d, f), "npmAuthToken FAKE\n")
+            cases.append(("%s: %s" % (os.path.relpath(d, tmp), f), n,
+                          os.path.join(d, f) + ":1", "secret_name"))
     # ended Claude sessions (History records and transcripts): files resolve
     # against the record's cwd, on a lite build too (no shell ring there)
     sockdir = os.path.join(tmp, "srv", "dch-%d" % os.getuid())
@@ -326,22 +380,41 @@ def main():
                                   stdin=subprocess.DEVNULL,
                                   stdout=subprocess.DEVNULL, stderr=lf)
         procs.append(sp)
-        port, end = None, time.time() + 10
+
+        def down(why, left):
+            """The serve half lost: one failure, not one per case (#221)."""
+            check("the serve half: %s; serve log tail:" % why, False)
+            for l in open(log).read().splitlines()[-12:]:
+                print("       " + l)
+            print("  skip %d serve checks: they need that serve" % left)
+            return 1
+        port, end = None, time.time() + 30
         while time.time() < end and port is None and sp.poll() is None:
             m = re.search(r"listening on 127\.0\.0\.1:(\d+)", open(log).read())
             port = int(m.group(1)) if m else None
             time.sleep(0.05)
-        check("dch serve listens on a loopback test port", port is not None,
-              open(log).read())
         if port is None:
-            return 1
+            return down("dch serve %s" % (
+                "exited %d" % sp.returncode if sp.poll() is not None else
+                "printed no listening line in 30 s"), len(cases) + 1)
+        check("dch serve listens on a loopback test port", True)
         with open(cenv["DCH_CONFIG"], "w") as f:
             f.write("remote_hosts = srv=127.0.0.1:%d\n" % port)
         r, rv = resolved(cenv, "srv:xd-proj", "a.txt:1")
-        check("serve: the control is read (ok)",
-              len(rv) == 1 and rv[0]["state"] == "ok", (r.stderr, rv))
-        for label, n, ref, want in cases:
+        if not (len(rv) == 1 and rv[0]["state"] == "ok"):
+            return down("the control was not read (exit %d, %s)" % (
+                r.returncode, r.stderr.strip()[-300:]), len(cases))
+        check("serve: the control is read (ok)", True)
+        for k, (label, n, ref, want) in enumerate(cases):
             r, rv = resolved(cenv, "srv:" + n, ref)
+            # this test's peer is the owner: a gate refusal (a fake whois
+            # over 3 s, cached 30 s) or a dead serve is the setup's
+            if (not good(r, rv, want) and not rv and
+                    (sp.poll() is not None or ": refused" in open(log).read())):
+                return down("dch serve %s at %s (exit %d, %s)" % (
+                    "exited" if sp.poll() is not None else
+                    "refused its own owner", label, r.returncode,
+                    r.stderr.strip()[-300:]), len(cases) - k - 1)
             check("serve, %s: %s" % (label, want), good(r, rv, want),
                   (r.returncode, r.stderr, rv))
     finally:

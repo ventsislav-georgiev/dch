@@ -10,7 +10,10 @@ records for plain `sleep` children elsewhere, with HOME, the runtime dir
 and the state dir all temporary. Covers: id and path for a session running
 one Claude; the id following a rewritten record (/clear, resume); a missing
 .jsonl; two .jsonl under different project dirs; a session with no Claude;
-two Claudes in one session; a record whose procStart does not match; a
+two Claudes in one session; a Claude with Claudes below it (the ancestor
+joins, --xray --json agreeing, #253); a record read while it is rewritten
+in place, and no wait for an empty one left by a dead Claude (#253); a
+record whose procStart does not match; a
 sessionId that is no UUID; CLAUDE_CONFIG_DIR honoured; null once the
 program exits (its record removed, or left behind under a held session).
 
@@ -96,6 +99,14 @@ def main():
             return json.loads(run("--cmd", name).stdout)["pid"]
         except (ValueError, KeyError, TypeError):
             return None
+
+    def xray_sid(name):
+        # the sid --xray --json joins, None for any corpus but a Claude's
+        try:
+            o = json.loads(run("--xray", name, "--json").stdout)
+        except ValueError:
+            return None
+        return o.get("session_id") if o.get("corpus") == "claude" else None
 
     def record(pid, sid, start=None, where=sessdir):
         rec = {"pid": pid, "sessionId": sid, "cwd": tmp,
@@ -198,6 +209,162 @@ def main():
               and field(c, "transcript_path") is None)
         check("the other sessions keep theirs",
               field(a, "claude_session_id") == s1)
+        check("two claudes: --xray --json joins no Claude either",
+              xray_sid(c) is None)
+
+        # --- a Claude with another Claude below it (#253) -----------------
+        # a subagent's test suite runs a fake Claude, under its own temp
+        # HOME, inside the session's tree: the ancestor is still the answer
+        n = "tt-nest"
+        nhome = os.path.join(tmp, "nesthome")
+        os.makedirs(os.path.join(nhome, ".claude", "sessions"))
+        # not /bin/sh or /bin/sleep: macOS hides a platform binary's env,
+        # and HOME there is what leads the scan to the nested records
+        sn = spawn(n, "/bin/sh", "-c",
+                   "HOME=%s '%s' -c 'import os,time; os.fork() or "
+                   "time.sleep(120); time.sleep(120)' & wait"
+                   % (nhome, sys.executable))
+        sub = until(lambda: (lambda k: k if len(k) == 1 else None)(
+            subprocess.run(["/usr/bin/pgrep", "-P", str(sn)],
+                           capture_output=True, text=True).stdout.split()))
+        leaf = sub and until(lambda: (lambda k: k if len(k) == 1 else None)(
+            subprocess.run(["/usr/bin/pgrep", "-P", sub[0]],
+                           capture_output=True, text=True).stdout.split()))
+        s4 = "44444444-4444-4444-4444-444444444444"
+        s5 = "55555555-5555-5555-5555-555555555555"
+        transcript(s4)
+        record(sn, s4)
+        if leaf:
+            record(int(leaf[0]), s5,
+                   where=os.path.join(nhome, ".claude", "sessions"))
+            record(int(sub[0]), "%s-0000-0000-0000-000000000000" % ("7" * 8),
+                   where=os.path.join(nhome, ".claude", "sessions"))
+        check("nested claudes: --ls-json joins the ancestor",
+              leaf and field(n, "claude_session_id") == s4)
+        check("nested claudes: --xray --json agrees",
+              leaf and xray_sid(n) == s4)
+        # the ancestor gone: two Claudes left, one under the other
+        os.unlink(os.path.join(sessdir, "%d.json" % sn))
+        check("ancestor's record gone: the next one down joins",
+              field(n, "claude_session_id") == "7" * 8 +
+              "-0000-0000-0000-000000000000")
+        # the middle one gone instead: the ancestor two generations up
+        record(sn, s4)
+        if leaf:
+            os.unlink(os.path.join(nhome, ".claude", "sessions",
+                                   "%s.json" % sub[0]))
+        check("nested through a non-Claude process: the ancestor joins",
+              field(n, "claude_session_id") == s4
+              and xray_sid(n) == s4)
+
+        # the ancestor's record read last: its config dir is the root's
+        # own, ours (read first) holds two sibling Claudes below it
+        m = "tt-nest2"
+        mhome = os.path.join(tmp, "nesthome2")
+        os.makedirs(os.path.join(mhome, ".claude", "sessions"))
+        sm = spawn(m, "/usr/bin/env", "HOME=" + mhome, sys.executable, "-c",
+                   "import os,time\n"
+                   "for _ in (1, 2):\n"
+                   "    os.fork() or time.sleep(120)\n"
+                   "time.sleep(120)\n")
+        twins = until(lambda: (lambda k: k if len(k) == 2 else None)(
+            subprocess.run(["/usr/bin/pgrep", "-P", str(sm)],
+                           capture_output=True, text=True).stdout.split()))
+        s6 = "66666666-0000-0000-0000-000000000006"
+        record(sm, s6, where=os.path.join(mhome, ".claude", "sessions"))
+        for i, k in enumerate(twins or []):
+            record(int(k), "%08d-1111-1111-1111-111111111111" % i)
+        check("siblings below a Claude read before it: the ancestor joins",
+              twins and field(m, "claude_session_id") == s6)
+        os.unlink(os.path.join(mhome, ".claude", "sessions", "%d.json" % sm))
+        check("the same siblings without it: none",
+              twins and field(m, "claude_session_id") is None)
+        # done with: their four live records would cost every later
+        # --ls-json four procStart reads (a forked ps each, a /proc walk
+        # on Linux), over the budget's own records below (#261)
+        run("-k", n)
+        run("-k", m)
+
+        # --- a record read while Claude rewrites it in place (#253) -------
+        # Claude Code updates its record with fs.writeFile: O_TRUNC, then
+        # the write, so a read in between sees an empty file. Empty 5ms of
+        # every 30, not 3 of 10: on a slow runner a re-read stretched to the
+        # writer's own period kept landing in its empty phase (#261). A
+        # rewrite the writer took over 45ms to finish (a runner that did
+        # not schedule it) outlasts the reader's 10 waits of 5ms: only a
+        # sample such a stall overlaps may miss.
+        rp = os.path.join(sessdir, "%d.json" % pa)
+        body = open(rp).read()
+        stalls = os.path.join(tmp, "stalls")
+        w = subprocess.Popen([sys.executable, "-c",
+            "import os,sys,time\n"
+            "p,b,s=sys.argv[1],sys.argv[2].encode(),sys.argv[3]\n"
+            "while True:\n"
+            "    fd=os.open(p,os.O_WRONLY|os.O_TRUNC); t=time.monotonic()\n"
+            "    time.sleep(0.005)\n"
+            "    os.write(fd,b); os.close(fd); u=time.monotonic()\n"
+            "    if u-t>0.045: open(s,'a').write('%f %f\\n'%(t,u))\n"
+            "    time.sleep(0.025)\n", rp, body, stalls])
+        trace = os.path.join(tmp, "trace")
+        dbg = dict(os.environ, DCH_DEBUG=trace)
+        got = []
+        try:
+            for _ in range(60):
+                t0 = time.monotonic()
+                g = field(a, "claude_session_id", dbg)
+                got.append((g, t0, time.monotonic()))
+        finally:
+            w.kill()
+            w.wait()
+            record(pa, s1)	# killed mid-write, it may have left it empty
+        try:
+            st = [tuple(map(float, l.split())) for l in open(stalls)]
+        except OSError:
+            st = []
+        miss = [(t0, t1) for g, t0, t1 in got if g != s1]
+        stalled = [any(t < t1 and u > t0 for t, u in st) for t0, t1 in miss]
+        check("record rewritten in place: no sample misses (%d of 60, %d "
+              "beside a writer stalled past the re-reads)"
+              % (len(miss), sum(stalled)), all(stalled))
+        def traced(what):
+            try:
+                return open(trace).read().count(what)
+            except OSError:
+                return 0
+        rereads = traced("empty, read again")
+        check("a live pid's empty record is read again (%d times)" % rereads,
+              rereads > 0)
+
+        # --- an empty record that stays empty (#253) ----------------------
+        # a Claude killed between its truncate and its write: no wait for
+        # it, or every scan of the dir pays it for ever (10 waits of 5ms per
+        # dir scan, two scans per --ls-json: 100ms; the bound leaves room
+        # for load)
+        dead = subprocess.Popen(["/usr/bin/true"])
+        dead.wait()
+        stale = [os.path.join(sessdir, "%d.json" % dead.pid),
+                 os.path.join(sessdir, "stale.json")]
+
+        def fastest():
+            best = None
+            for _ in range(10):
+                t0 = time.perf_counter()
+                rows(dbg)
+                t = time.perf_counter() - t0
+                best = t if best is None else min(best, t)
+            return best
+        clean = fastest()
+        for f in stale:
+            open(f, "w").close()
+        open(trace, "w").close()
+        slow = fastest()
+        waited = traced("read again")
+        for f in stale:
+            os.unlink(f)
+        check("empty dead-pid and non-pid records: no re-read (%d)" % waited,
+              waited == 0)
+        check("... and no wait: fastest of 10 %.0fms vs %.0fms clean"
+              % (slow * 1000, clean * 1000), slow - clean < 0.06)
 
         # --- CLAUDE_CONFIG_DIR is honoured --------------------------------
         e = "tt-cfg"

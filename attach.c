@@ -40,6 +40,10 @@ static volatile sig_atomic_t want_redraw;
 /* SIGURG → re-attach (MSG_ATTACH + MSG_REDRAW). Set by handler, checked in
 ** main loop. */
 static volatile sig_atomic_t want_rearm;
+/* SIGCONT → raw mode back (QA 1.59.0 LOW-V9): a stop the client did not make
+** itself (bg then fg, a ^Z while it starts, a kill -TSTP) leaves the
+** terminal in the shell's modes. Set by handler, checked in the loops. */
+static volatile sig_atomic_t want_cont;
 
 /*
 ** Restore terminal + reset modes inner program may have left on (mouse
@@ -98,6 +102,7 @@ restore_term(void)
 int attach_sock = -1;
 int attach_end_back;
 const char *(*attach_lost)(int *code);
+int (*attach_detached)(void);
 int (*attach_xray)(void);
 
 /* A remote attach's socket closed: when the link (not the session) ended,
@@ -221,6 +226,30 @@ on_sigurg(ATTRIBUTE_UNUSED int sig)
 {
 	signal(SIGURG, on_sigurg);
 	want_rearm = 1;
+}
+
+static RETSIGTYPE
+on_sigcont(ATTRIBUTE_UNUSED int sig)
+{
+	signal(SIGCONT, on_sigcont);
+	want_cont = 1;
+}
+
+/* Puts the attach's raw mode on the terminal (LOW-V9). A stop inside the
+** tcsetattr returns EINTR on the fg (macOS); a SIGCONT during or after it
+** means the shell had the terminal meanwhile: set it again. From the
+** background the tcsetattr stops on SIGTTOU (SIG_DFL, attach_main) until
+** the fg, as any tty program's does: the shell's modes stay until then. */
+static void
+term_raw(void)
+{
+	int r;
+
+	do
+	{
+		want_cont = 0;
+		r = tcsetattr(0, TCSADRAIN, &cur_term);
+	} while ((r < 0 && errno == EINTR) || want_cont);
 }
 
 static int detach_end;	/* where the last press counted ends (#187) */
@@ -649,6 +678,15 @@ xray_overlay(int s)
 	dch_trace("client x-ray overlay");
 	fputs(TERM_RESET, stdout);
 	fflush(stdout);
+	/* a remote attach (#231): the relay drops the host's output from here
+	** to the MSG_ATTACH below, as for a suspend (the host never sees it),
+	** so nothing it passed late lands on the screen the view returns to */
+	memset(&pkt, 0, sizeof pkt);
+	if (attach_detached)
+	{
+		pkt.type = MSG_DETACH;
+		write_packet_or_fail(s, &pkt);
+	}
 	if (pipe(p) < 0)
 		p[0] = -1;
 	else
@@ -669,6 +707,7 @@ xray_overlay(int s)
 			signal(SIGTERM, SIG_DFL);
 			signal(SIGINT, SIG_DFL);
 			signal(SIGQUIT, SIG_DFL);
+			signal(SIGCONT, SIG_DFL);
 			sigprocmask(SIG_SETMASK, &os, NULL);
 			close(s);
 			close(p[0]);
@@ -689,13 +728,22 @@ xray_overlay(int s)
 		if (live)
 			FD_SET(s, &rs);
 		n = select((s > p[0] ? s : p[0]) + 1, &rs, NULL, NULL, &tv);
+		/* stopped and continued under the view: its raw mode is this
+		** one (picker_raw_on clears bits cur_term has clear already) */
+		if (want_cont)
+			term_raw();
 		if (n > 0 && live && FD_ISSET(s, &rs))
 		{
 			ssize_t r = read(s, buf, sizeof buf);
 
-			/* the session ended: the loop's read says so after */
+			/* the session ended: the loop's read says so after;
+			** a remote dch -d (#217) leaves as a local one does */
 			if (r == 0 || (r < 0 && errno != EINTR))
+			{
 				live = 0;
+				if (!r && attach_detached && attach_detached())
+					want_detach = 1;
+			}
 		}
 		if (n > 0 && FD_ISSET(p[0], &rs) && read(p[0], buf, 1) == 0)
 		{
@@ -719,10 +767,20 @@ xray_overlay(int s)
 	xray_pid = 0;
 	if (p[0] >= 0)
 		close(p[0]);
-	tcsetattr(0, TCSADRAIN, &cur_term);
+	term_raw();
 	inner_focus = fo_st = fpend_n = dq_n = 0;
 	if (focus_on)
 		write_buf_or_fail(1, "\033[?1004h", 8);
+	/* what the relay passed before it read the MSG_DETACH (#231) */
+	while (live && attach_detached)
+	{
+		ssize_t r = recv(s, buf, sizeof buf, MSG_DONTWAIT);
+
+		if (r == 0)
+			live = 0;
+		if (r <= 0)
+			break;
+	}
 	if (!live)	/* nothing to attach to: the loop sees the end */
 		return;
 	memset(&pkt, 0, sizeof pkt);
@@ -773,7 +831,7 @@ process_kbd(int s, struct packet *pkt)
 		** has the master re-arm them. */
 		restore_term();
 		kill(getpid(), SIGTSTP);
-		tcsetattr(0, TCSADRAIN, &cur_term);
+		term_raw();	/* bg: stops on SIGTTOU here until the fg */
 		if (focus_on)
 			write_buf_or_fail(1, "\033[?1004h", 8);
 		/* What the master sent before it read the MSG_DETACH was for
@@ -836,6 +894,7 @@ attach_main(int noerror)
 	fd_set readfds;
 	int s;
 	int detach_pending = 0;
+	int cont_redraw = 0;	/* a SIGCONT's repaint, out once s is drained */
 	struct timeval detach_at = {0, 0};
 
 	/* Attempt to open the socket. Don't display an error if noerror is
@@ -910,6 +969,8 @@ attach_main(int noerror)
 	signal(SIGUSR1, on_sigusr1);
 	signal(SIGUSR2, on_sigusr2);
 	signal(SIGURG, on_sigurg);
+	signal(SIGCONT, on_sigcont);
+	signal(SIGTTOU, SIG_DFL);	/* term_raw never sets modes from the bg */
 
 	/* Set raw mode. */
 	cur_term.c_iflag &= ~(IGNBRK|BRKINT|PARMRK|ISTRIP|INLCR|IGNCR|ICRNL);
@@ -921,7 +982,7 @@ attach_main(int noerror)
 	cur_term.c_cc[VLNEXT] = VDISABLE;
 	cur_term.c_cc[VMIN] = 1;
 	cur_term.c_cc[VTIME] = 0;
-	tcsetattr(0, TCSADRAIN, &cur_term);
+	term_raw();
 
 	/* Focus reporting on, before the attach: the master's mode re-arm
 	** (ESC[?1004h when the inner program has it) arrives in the replay
@@ -1000,6 +1061,25 @@ attach_main(int noerror)
 			if (wait_us < 0 || us < wait_us)
 				wait_us = us;
 		}
+		/* Continued after a stop it did not make (LOW-V9): raw mode back,
+		** then a repaint over what the shell wrote meanwhile. No
+		** MSG_ATTACH: nothing was reset, so nothing is re-armed. The
+		** repaint waits for a poll that finds s drained: a master that
+		** dropped the client while it was stopped left its output (on
+		** Linux more than one read) and then the end in s, read before
+		** a redraw is written to the closed socket (EPIPE, exit 1, no
+		** picker). A quiet session's redraw goes out at the first poll.
+		** After the timers, which would set their own wait. shortcut: a
+		** SIGCONT landing between this check and the select is handled
+		** at the next wake (session output, a key); a self-pipe would
+		** make it exact. */
+		if (want_cont)
+		{
+			term_raw();
+			cont_redraw = 1;
+		}
+		if (cont_redraw)
+			wait_us = 0;
 		if (wait_us >= 0)
 		{
 			tv.tv_sec = wait_us / 1000000;
@@ -1015,6 +1095,11 @@ attach_main(int noerror)
 		n = select(s + 1, &readfds, NULL, NULL, tvp);
 		if (n < 0 && errno != EINTR && errno != EAGAIN)
 			exit(1);
+		if (cont_redraw && (n == 0 || (n > 0 && !FD_ISSET(s, &readfds))))
+		{
+			cont_redraw = 0;
+			want_redraw = 1;
+		}
 
 		/* Pty activity */
 		if (n > 0 && FD_ISSET(s, &readfds))

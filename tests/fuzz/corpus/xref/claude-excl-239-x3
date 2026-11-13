@@ -1,0 +1,25 @@
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": "go"}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d0", "name": "Bash", "input": {"command": "setsid -w cat ../x"}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d0", "is_error": false, "content": "# #831 Title\nbody"}]}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d1", "name": "Bash", "input": {"command": "flock -w 5 /tmp/l cat ../x"}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d1", "is_error": false, "content": "# #831 Title\nbody"}]}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d2", "name": "Bash", "input": {"command": "flock /tmp/l -c 'cat ../x'"}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d2", "is_error": false, "content": "# #831 Title\nbody"}]}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d3", "name": "Bash", "input": {"command": "ionice -c 3 cat ../x"}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d3", "is_error": false, "content": "# #831 Title\nbody"}]}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d4", "name": "Bash", "input": {"command": "chrt -f 10 cat ../x"}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d4", "is_error": false, "content": "# #831 Title\nbody"}]}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d5", "name": "Bash", "input": {"command": "taskset -c 0 cat ../x"}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d5", "is_error": false, "content": "# #831 Title\nbody"}]}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d6", "name": "Bash", "input": {"command": "busybox sh -c 'cat ../x'"}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d6", "is_error": false, "content": "# #831 Title\nbody"}]}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d7", "name": "Bash", "input": {"command": "env -C /etc cat notes.md"}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d7", "is_error": false, "content": "# #831 Title\nbody"}]}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d8", "name": "Bash", "input": {"command": "env --chdir=/etc cat notes.md"}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d8", "is_error": false, "content": "# #831 Title\nbody"}]}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d9", "name": "Bash", "input": {"command": "sudo -D /etc cat notes.md"}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d9", "is_error": false, "content": "# #831 Title\nbody"}]}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d10", "name": "Bash", "input": {"command": "env -C sub sudo -D x cat ../x; cat notes.md"}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d10", "is_error": false, "content": "# #831 Title\nbody"}]}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d11", "name": "Bash", "input": {"command": "flock -c"}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d11", "is_error": false, "content": "# #831 Title\nbody"}]}}

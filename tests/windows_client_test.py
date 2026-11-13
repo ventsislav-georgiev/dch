@@ -177,7 +177,7 @@ def console_picker(qh):
     try:
         p = start()
         ok, s = until(lambda s: "q:q1" in s and "q:q2" in s)
-        out["picker"], out["screen"] = ok and "attach session" in s, s
+        out["picker"], out["screen"] = ok and "Sessions" in s, s
         # the second row, as drawn
         out["second"] = "q1" if s.find("q:q1") > s.find("q:q2") else "q2"
         out["first"] = "q2" if out["second"] == "q1" else "q1"
@@ -185,12 +185,12 @@ def console_picker(qh):
         out["attached"], out["screen"] = until(lambda s: "FAKE-SCREEN" in s)
         keys("\x1c", "\x1c")
         out["switch"], out["screen"] = until(
-            lambda s: "switch to session:" in s and "q:q2" in s)
+            lambda s: "Sessions" in s and "q:q2" in s)
         # the reopened picker selects the session just left (#098)
         out["focus"] = any("\u258c" in l and "q:" + out["second"] in l
                            for l in out["screen"].split("\n"))
         keys("k", "\r")
-        ok, out["screen"] = until(lambda s: "switch to session:" not in s)
+        ok, out["screen"] = until(lambda s: "Sessions" not in s)
         time.sleep(1)  # the attach under way: its relay reads the key
         keys("\x1c")
         p.wait(15)

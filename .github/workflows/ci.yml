@@ -9,9 +9,10 @@ on:
 permissions:
   contents: read
 
-# timeout-minutes: about 3x each job's slowest green run (sanitizers 32 min,
-# vendor-verify 29, build-test 22, fuzz 15), so a hang fails the job instead
-# of holding the runner for hours. pyrun in tests/run.sh bounds each test.
+# timeout-minutes: 2-3x each job's slowest green run (sanitizers took 38.2
+# min on 2026-11-13; gh run list has the current ones), so a hang fails the
+# job instead of holding the runner for hours. pyrun in tests/run.sh bounds
+# each test.
 jobs:
   build-test:
     strategy:

@@ -14,7 +14,8 @@ collisions (named: refused; --all: next free -N), a missing cwd (others
 carry on), the caller's Claude env stripped, the message typed only once the
 composer is up and re-Entered when an Enter does not take, the lite path,
 pruning, two runtime dirs sharing one state dir (records apart, same names
-not clobbered, --history/--all blind to the other dir), and what --all
+not clobbered, --history/--all blind to the other dir), a path-like
+--as or --spawn name refused before anything starts (#203), and what --all
 takes (abnormal, seen in the last 3 days, ran 5+ minutes; the rest by
 name), DCH_NO_HISTORY (no record, nothing under the state dir), records
 the loader must refuse (0664, a symlink, a g+w records dir), a typed launch
@@ -402,6 +403,16 @@ def main():
         lsock.bind(os.path.join(sockdir, "rcol.sock"))
         lsock.listen(8)
         held.append(lsock)
+        # a live master accepts: on Linux an unaccepted backlog of 8 makes
+        # the 9th connect of any later verb block for ever (macOS refuses
+        # it); held, never read or answered, like a wedged one
+        def hold():
+            try:
+                while True:
+                    held.append(lsock.accept()[0])
+            except OSError:	# closed by finish()
+                pass
+        threading.Thread(target=hold, daemon=True).start()
         r = run("--revive", "rcol")
         check("ended record, name taken by a live session: named refused",
               r.returncode == 1 and "is live" in r.stderr)
@@ -588,6 +599,38 @@ def main():
         check("...and *.tmp older than a day, a fresh one kept",
               until(lambda: not os.path.exists(tmps[0])) and
               os.path.exists(tmps[1]))
+
+        # --- #203: a path-like name for a new session, refused up front --
+        # (base: --as ../x revived into $tmp/x.sock and a record outside
+        # the store, consuming the record; --spawn ../x the same socket)
+        pr = os.path.join(recdir, "rpath.json")
+        os.rename(plant("rpath", argv=["sleep", "2"]), pr)
+        for bad in ("../rpx", "rpa/b", os.path.join(tmp, "rpabs"), "rp\x01c"):
+            for js in ([], ["--json"]):
+                r = run("--revive", "rpath", "--as", bad, *js)
+                check("--revive --as %r %s: exit 2, bad session name, no "
+                      "output" % (bad, " ".join(js)),
+                      r.returncode == 2 and r.stdout == "" and
+                      "bad session name" in r.stderr)
+            r = run("--spawn", bad, "--", "sh", "-c", "sleep 2")
+            check("--spawn %r: exit 2, bad session name" % bad,
+                  r.returncode == 2 and "bad session name" in r.stderr)
+        check("...no socket outside the socket dir, the record untouched",
+              not [f for f in os.listdir(tmp) if f.startswith("rp")] and
+              not os.path.exists(recdir + "-..") and os.path.exists(pr))
+        if os.path.exists(pr):	# base: the revive consumed it
+            os.unlink(pr)
+        # a record whose own name holds a '/' is not loaded (base: --revive
+        # rpq revived it as ../rpq, its socket beside the socket dir)
+        os.rename(plant("rpq", name="../rpq", argv=["sleep", "2"]),
+                  os.path.join(recdir, "rpq.json"))
+        r = run("--revive", "rpq")
+        check("a record named ../rpq: not in --history, not revived, no "
+              "socket outside", r.returncode == 1 and
+              "../rpq" not in (history() or {}) and
+              not os.path.exists(os.path.join(tmp, "rpq.sock")))
+        if os.path.exists(os.path.join(recdir, "rpq.json")):
+            os.unlink(os.path.join(recdir, "rpq.json"))
 
         # --- records the loader refuses -----------------------------------
         os.rename(plant("rgood"), os.path.join(recdir, "rgood.json"))
@@ -1044,6 +1087,8 @@ def main():
         probe.bind(os.path.join(rt8, "probe.sock"))
         probe.listen(4)
         probe.setblocking(False)
+        # (#203: a path-like --as is refused before that, exit 2, no JSON,
+        # as an id-shaped --as is)
         for args in (("../probe",), ("nosuch", "--as", "../probe")):
             r = run("--revive", *args, "--json", env=renv, timeout=60)
             o = (ndjson(r.stdout) or [{}])[-1]
@@ -1052,11 +1097,14 @@ def main():
                 hit = True
             except BlockingIOError:
                 hit = False
-            check("--revive %s --json: no_history, running false, no "
-                  "connection outside the socket dir [%r]"
+            check("--revive %s --json: no_history, running false (--as: "
+                  "refused, exit 2), no connection outside the socket dir "
+                  "[%r]"
                   % (" ".join(args), r.stdout),
-                  r.returncode == 1 and o.get("reason") == "no_history" and
-                  o.get("running") is False and not hit)
+                  (r.returncode == 2 and r.stdout == "" if len(args) > 1
+                   else r.returncode == 1 and
+                   o.get("reason") == "no_history" and
+                   o.get("running") is False) and not hit)
         probe.close()
     except Exception:
         traceback.print_exc()

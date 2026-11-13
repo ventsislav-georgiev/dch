@@ -29,6 +29,7 @@ permissions:
 jobs:
   dch-exe:
     runs-on: windows-latest
+    timeout-minutes: 5 # about 3x the slowest green run (1.4 min)
     permissions:
       contents: write
     env:
@@ -86,6 +87,7 @@ jobs:
           - target: linux-aarch64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15 # about 3x the slowest green leg (4.2 min)
     permissions:
       contents: write
     env:

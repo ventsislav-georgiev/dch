@@ -150,10 +150,10 @@ def main():
         os.write(fd, DETACH)
         time.sleep(0.05)
         os.write(fd, DETACH)
-        # Drain the whole picker frame, not just up to the header — the rows
+        # Drain the whole picker frame, not just up to the tabs row (#252: no header) — the rows
         # arrive in the same write but `until` would stop us at the first one.
-        out = drain(fd, 5.0, b"switch to session:") + drain(fd, 0.5)
-        if "switch to session:" not in out:
+        out = drain(fd, 5.0, b"Sessions") + drain(fd, 0.5)
+        if "Sessions" not in out:
             return fail("double tap did not open the picker", out)
         rows = picker_rows(out)
         if B not in rows:
@@ -210,8 +210,8 @@ def main():
         pid, fd = spawn_client(["-f", "-n", B], env=swap)
         drain(fd, 10.0, b"BBB_BRAVO")
         os.write(fd, DETACH)
-        out = drain(fd, 5.0, b"switch to session:")
-        if "switch to session:" not in out:
+        out = drain(fd, 5.0, b"Sessions")
+        if "Sessions" not in out:
             return fail("detach_key=switch: one press did not open the "
                         "picker", out)
         os.write(fd, b"q")
@@ -232,8 +232,8 @@ def main():
                                env=dict(swap, DCH_DOUBLE_TAP_MS="0"))
         drain(fd, 10.0, b"BBB_BRAVO")
         os.write(fd, DETACH)
-        out = drain(fd, 5.0, b"switch to session:")
-        if "switch to session:" not in out:
+        out = drain(fd, 5.0, b"Sessions")
+        if "Sessions" not in out:
             return fail("detach_key=switch, DCH_DOUBLE_TAP_MS=0: one press "
                         "did not open the picker", out)
         os.write(fd, b"q")
@@ -251,7 +251,7 @@ def main():
         os.write(fd, DETACH)
         time.sleep(0.05)
         os.write(fd, DETACH)
-        out = drain(fd, 5.0, b"switch to session:") + drain(fd, 0.5)
+        out = drain(fd, 5.0, b"Sessions") + drain(fd, 0.5)
         rows = picker_rows(out)
         if B not in rows:
             return fail("#109: picker did not list B", rows, out)

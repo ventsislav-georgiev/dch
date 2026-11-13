@@ -37,7 +37,10 @@ Covers:
      returns to the picker, X (kill) there opens no view (OQ-6); x on the
      remote History row srv:xv-cl opens that record's view; next to a local
      session literally named srv:xv-sh, x on each row opens that row's
-     session (QA 1.57.0 LOW-R2);
+     session (QA 1.57.0 LOW-R2), and Enter on the remote row, o in its
+     view and o in a dch --xray srv:xv-sh view opened before the local
+     one came attach the host's, o in the local row's view the local one
+     (#210);
   6. the in-attach chord over `dch -a srv:xv-rx` (#189): the detach key then
      x (a later read, one burst, the kitty CSI form, --host srv -a xv-rx,
      detach_key = switch) opens the view of srv:xv-rx over the attach, On
@@ -45,11 +48,17 @@ Covers:
      key or the x; q goes back, the host is asked to redraw (the program's
      SIGWINCH), a key after reaches the session, and the host saw one attach
      (never retired); next to a local srv:xv-rx too (LOW-R2). Off under -E
-     and DCH_DOUBLE_TAP_MS=0, as the local chord;
+     and DCH_DOUBLE_TAP_MS=0, as the local chord. dch -d xv-rx on the
+     host, or dch -d srv:xv-rx from the client, with the view up: the
+     client leaves at once, exit 0, the view and the relay gone, the
+     session untouched (QA 1.58.0 MED-R6); a session that ends under the
+     view leaves it up until q, as before;
   7. the view's failure lines over an attach to a fake host without "xray"
      (exit 6), whose gate refuses the view's connection (exit 4), or whose
      port closes once the attach is in (exit 7): the line, q, any key, and
      the attach goes on (the host gets the redraw, then only the next key);
+     an arrow key, a UTF-8 character or a paste as the any key is all
+     swallowed (QA 1.58.0 LOW-R8);
   8. the host re-arms on its redraw (#189 round 2): a program on the
      alternate screen with bracketed paste, mouse reporting and kitty flags
      on, over `dch -a srv:xv-md`; after the chord's view the client's output
@@ -1031,7 +1040,8 @@ def test_picker(port):
         mark = len(v.out)
         v.key(b"X", 1.0)
         check("picker: X on the remote row opens no view and kills nothing "
-              "(OQ-6)", v.wait(b"Enter attaches, nothing else", start=mark)
+              "(OQ-6)", v.wait(b"Enter attaches and x opens its X-ray",
+                                start=mark)
               and b"X-ray  srv:xv-sh" not in v.out[mark:] and
               ctls("--xray") == n0, v.out[mark:][-600:])
         # History: the host's record srv:xv-cl, its only row
@@ -1055,41 +1065,109 @@ def test_picker(port):
         v.close()
 
 
+def host_attaches():
+    with open(SLOG) as f:
+        return f.read().count(" attach xv-sh (")
+
+
+def same_attach(what, v, keys, remote):
+    """keys on the picker or view v attach a srv:xv-sh: the host's when
+    remote (the host logs an attach), else the local one (its LOCAL-MARK
+    drawn, the host asked nothing); the detach key ends it, exit 0."""
+    n0 = host_attaches()
+    mark = len(v.out)
+    v.key(keys, 0.3)
+    if remote:
+        ok = until(lambda: host_attaches() > n0)
+        v.pump(0.5)
+    else:
+        ok = v.wait(b"LOCAL-MARK", start=mark) and \
+            (v.pump(1.5) or host_attaches() == n0)
+    check("same name: %s attaches the %s srv:xv-sh" %
+          (what, "host's" if remote else "local"), ok and v.reap() is None,
+          (host_attaches() - n0, v.rc, v.out[mark:][-300:]))
+    v.key(b"\x1c", 0.5)
+    check("same name: %s: a real attach, the detach key ends it" % what,
+          v.exit(5) == 0, v.out[-200:])
+
+
+def row_view(v, remote):
+    """In the picker v, x on the srv:xv-sh row that is remote (or not):
+    the view is left open on it. False when neither row is."""
+    for keys in (b"kkk", b"jjj"):
+        n0 = ctls("--xray")
+        mark = len(v.out)
+        v.key(keys + b"x", 1.0)
+        v.wait(b"Chapters", start=mark)
+        v.pump(0.5)
+        if (ctls("--xray") > n0) == remote:
+            return True
+        v.key(b"q", 1.0)
+    return False
+
+
 def test_same_name():
     """QA 1.57.0 LOW-R2: a local session literally named srv:xv-sh next to
     the host's xv-sh; x on each row opens that row's session (only the
-    remote one asks the host)."""
+    remote one asks the host). #210: Enter on the remote row, o in the
+    remote view (dch --xray srv:xv-sh opened before the local one came,
+    the picker's x) attach the host's; o in the local row's view the
+    local one."""
     # its own client dirs, the same remote_hosts: the History record the
     # local srv:xv-sh leaves would route srv:xv-sh here for the next tests
     lenv = side("same", DCH_CONFIG=CENV["DCH_CONFIG"],
-                DCH_REMOTE_BOX_MS="5000")
-    r = dch(dict(lenv, DCH_NO_REMOTE="1"), "--spawn", "srv:xv-sh", "--size",
-            "80x24", "sh", "-c", "while :; do sleep 1; done")
-    check("same name: a local session named srv:xv-sh spawned",
-          r.returncode == 0, r.stderr)
-    v = Pty([DCH, "-l"], cols=140, env=lenv)
+                DCH_REMOTE_BOX_MS="5000", DCH_DOUBLE_TAP_MS="0")
     try:
-        v.wait(b"srv:xv-sh", 15)
-        v.pump(2.0)     # the host's row comes with its probe
-        asked = []
-        # the top row, then the bottom one: the two srv:xv-sh rows
-        for keys in (b"kkk", b"jjj"):
-            n0 = ctls("--xray")
-            mark = len(v.out)
-            v.key(keys + b"x", 1.0)
-            ok = v.wait(b"X-ray  srv:xv-sh", start=mark) and \
-                v.wait(b"Chapters", start=mark)
+        v = Pty([DCH, "--xray", "srv:xv-sh"], env=lenv)
+        try:
+            ok = v.wait(b"Chapters")
+            r = dch(dict(lenv, DCH_NO_REMOTE="1"), "--spawn", "srv:xv-sh",
+                    "--size", "80x24", "sh", "-c",
+                    "while :; do echo LOCAL-MARK; sleep 1; done")
+            check("same name: a local session named srv:xv-sh spawned "
+                  "under the view of the host's", ok and r.returncode == 0,
+                  r.stderr)
             v.pump(0.5)
-            asked.append((ok, ctls("--xray") - n0))
+            same_attach("o in dch --xray srv:xv-sh's view", v, b"o", True)
+        finally:
+            v.close()
+        v = Pty([DCH, "-l"], cols=140, env=lenv)
+        try:
+            v.wait(b"srv:xv-sh", 15)
+            v.pump(2.0)     # the host's row comes with its probe
+            asked = []
+            # the top row, then the bottom one: the two srv:xv-sh rows
+            for keys in (b"kkk", b"jjj"):
+                n0 = ctls("--xray")
+                mark = len(v.out)
+                v.key(keys + b"x", 1.0)
+                ok = v.wait(b"X-ray  srv:xv-sh", start=mark) and \
+                    v.wait(b"Chapters", start=mark)
+                v.pump(0.5)
+                asked.append((ok, ctls("--xray") - n0, keys))
+                v.key(b"q", 1.0)
+            check("same name: x on the remote row opens the host's "
+                  "session, x on the local row the local one",
+                  all(a[0] for a in asked) and
+                  sorted(a[1] > 0 for a in asked) == [False, True], asked)
+            check("same name: the remote row found for Enter",
+                  row_view(v, True))
             v.key(b"q", 1.0)
-        check("same name: x on the remote row opens the host's session, x "
-              "on the local row the local one",
-              all(a[0] for a in asked) and
-              sorted(a[1] > 0 for a in asked) == [False, True], asked)
-        v.key(b"\033")
-        v.exit()
+            same_attach("Enter on the remote row", v, b"\r", True)
+        finally:
+            v.close()
+        for what, remote in (("o in the remote row's view", True),
+                             ("o in the local row's view", False)):
+            v = Pty([DCH, "-l"], cols=140, env=lenv)
+            try:
+                v.wait(b"srv:xv-sh", 15)
+                v.pump(2.0)
+                check("same name: x on the %s row opens its view" %
+                      ("remote" if remote else "local"), row_view(v, remote))
+                same_attach(what, v, b"o", remote)
+            finally:
+                v.close()
     finally:
-        v.close()
         dch(dict(lenv, DCH_NO_REMOTE="1"), "-k", "srv:xv-sh")
 
 
@@ -1259,6 +1337,83 @@ def test_chord(port):
         time.sleep(0.5)
 
 
+def test_chord_detach():
+    """QA 1.58.0 MED-R6: dch -d xv-rx on the host, or dch -d srv:xv-rx from
+    the client, with the chord's view up: the client leaves as a local
+    dch -d makes it (#196): the view goes, exit 0, no line, and the session
+    gets nothing and lives on. A session that ends under the view leaves
+    the view up as before (#217: serve's 0x12 tells the two apart), then q
+    exits 0."""
+    for how in ("on the host", "-d srv:xv-rx from the client"):
+        a, _ = rattach()
+        try:
+            got = rx()
+            mark = len(a.out)
+            a.key(b"\x1cx", 0.05)
+            ok = a.wait(b"X-ray  srv:xv-rx", start=mark)
+            check("remote -d, %s: the view opens" % how, ok,
+                  a.out[mark:][-300:])
+            kids = list(kids_of(a.pid))
+            mark = len(a.out)
+            r = dch(SENV, "-d", "xv-rx") if how == "on the host" else \
+                dch(CENV, "-d", "srv:xv-rx")
+            check("remote -d, %s: it says it detached one client" % how,
+                  r.returncode == 0 and "detached 1 client" in r.stdout,
+                  (r.returncode, r.stdout, r.stderr))
+            # the bug keeps the view up until q: 15 s is far past a detach
+            rc = a.exit(15)
+            tail = a.out[mark:]
+            check("remote -d, %s: the client leaves without q, exit 0, no "
+                  "line" % how, rc == 0 and b"lost the connection" not in
+                  tail, (rc, tail[-300:]))
+            check("remote -d, %s: the view's alternate screen was left" % how,
+                  RESTORE in tail, tail[-300:])
+            check("remote -d, %s: the view and the relay are gone" % how,
+                  kids and until(lambda: not alive(kids), 5), kids)
+            dch(SENV, "--send", "xv-rx", "alive")
+            check("remote -d, %s: the session got nothing and lives on" % how,
+                  until(lambda: rx()[len(got):] == "616c697665", 5),
+                  rx()[len(got):])
+        finally:
+            a.close()
+        time.sleep(0.5)
+
+    # the session ends under the view: the view stays up, as before
+    r = dch(SENV, "--spawn", "xv-re", "--size", "100x30", "sh", "-c",
+            "echo READY; read x; echo BYE")
+    check("remote end: the session spawned on the host", r.returncode == 0,
+          r.stderr)
+    a = Pty([DCH, "-a", "srv:xv-re"])
+    try:
+        a.wait(b"READY")
+        a.pump(0.5)
+        mark = len(a.out)
+        a.key(b"\x1cx", 0.05)
+        # its screen read before the end (dch-lite: read, no mirror): a
+        # view slower than that (ASan) says "no such session" itself
+        a.wait(b"X-ray  srv:xv-re", start=mark)
+        check("remote end: the view opens and reads the screen",
+              until(lambda: a.pump(0.1) or re.search(
+                  rb" READY\033\[K|No screen: ", a.out[mark:])),
+              a.out[mark:][-300:])
+        mark = len(a.out)
+        dch(SENV, "--send", "xv-re", "go\n")
+        ended = until(lambda: " xv-re exited" in open(SLOG).read())
+        a.pump(3)
+        check("remote end: the session ended under the view; the view stays",
+              ended and a.reap() is None and RESTORE not in a.out[mark:],
+              (ended, a.rc, a.out[mark:][-300:]))
+        a.key(b"q", 0.3)
+        rc = a.exit(10)
+        check("remote end: q leaves, exit 0, no line", rc == 0 and
+              b"lost the connection" not in a.out[mark:],
+              (rc, a.out[mark:][-300:]))
+    finally:
+        a.close()
+        dch(SENV, "-k", "xv-re")
+    time.sleep(0.5)
+
+
 # ---- 7: the view's failure lines over a remote attach ----------------------
 
 class Attachable(Fake):
@@ -1304,7 +1459,7 @@ class Attachable(Fake):
             return
 
 
-def chord_fail(what, mode, line, close=False):
+def chord_fail(what, mode, line, close=False, anykey=b" "):
     h = Attachable(mode)
     hosts("q=127.0.0.1:%d" % h.port)
     a = Pty([DCH, "-a", "q:fk"])
@@ -1329,7 +1484,7 @@ def chord_fail(what, mode, line, close=False):
         check("remote chord, %s: q says the line and waits for a key" % what,
               a.wait(b"(any key: back to the session)", start=mark) and
               a.reap() is None, a.out[mark:][-300:])
-        a.key(b" ", 0.5)
+        a.key(anykey, 0.5)
         a.key(b"z", 0.3)
         until(lambda: h.keys == b"z", 5)
         check("remote chord, %s: a key goes back to the attach: the host got "
@@ -1348,6 +1503,14 @@ def test_chord_fail():
                "dch: q refused: " + REFUSAL["message"])
     chord_fail("an unreachable host (exit 7)", "ok", "dch: q: unreachable: ",
                close=True)
+    # QA 1.58.0 LOW-R8: the any key is the whole read, none of it for the
+    # session
+    for what, k in (("an arrow key", b"\033[A"),
+                    ("a UTF-8 character", "\u00a9".encode()),
+                    ("a paste", b"\033[200~pasted text\033[201~")):
+        chord_fail("%s as the any key" % what, "ok",
+                   "dch: q: does not support --xray (needs dch serve "
+                   "1.55.0+)", anykey=k)
 
 
 # ---- 8: the host re-arms the session's modes on 0x07 (#189 round 2) --------
@@ -1546,6 +1709,87 @@ def test_suspend():
     time.sleep(0.5)
 
 
+# #231: the host's re-arm after a resume (or the X-ray overlay's return) is
+# an RTT away; a proxy passes the 0x07 SLOW s late so that window is wide.
+# What the busy session sent in it is for the main screen the reset left.
+SLOW = 0.25    # well inside the relay's 1 s hold (RM_REARM_MS)
+TICK = re.compile(rb"T\d+\.\d+ ")
+
+
+def test_suspend_rtt(port):
+    from remote_client_test import Proxy
+    r = dch(SENV, "--spawn", "xv-bw", "--size", "100x30", sys.executable,
+            "-c", BZ)
+    check("suspend rtt: the busy session spawned on the host",
+          r.returncode == 0, r.stderr)
+    full = dch(SENV, "--build").stdout.strip() == "full"
+    px = Proxy(port, "slow07", delay=SLOW)
+    hosts("srv=127.0.0.1:%d" % px.port)
+    a = Pty([sys.executable, "-c", JOB, DCH, "-a", "srv:xv-bw"])
+    try:
+        a.wait(b"BUSY" if full else b"\033[?1049h")
+        a.pump(0.5)
+        for i in range(1, 4):
+            mark = len(a.out)
+            a.key(b"\x1a", 0)
+            ok = a.wait(STOPPED, start=mark)
+            stop = a.out.find(STOPPED, mark) + len(STOPPED)
+            a.wait(b"\033[?1049h", start=stop)
+            alt = a.out.find(b"\033[?1049h", stop)
+            got = TICK.findall(a.out[stop:alt])
+            check("suspend rtt: ctrl-z %d, the host's re-arm %.2f s late: "
+                  "no session output on the main screen before the "
+                  "resume's 1049h" % (i, SLOW),
+                  ok and alt > stop and not got,
+                  (ok, len(got), a.out[stop:stop + 200]))
+            a.pump(0.3)
+        mark = len(a.out)
+        a.key(b"\x1cx", 0.5)
+        ok = a.wait(b"X-ray  srv:xv-bw", start=mark)
+        mark = len(a.out)
+        a.key(b"q", 0.5)
+        a.wait(RESTORE, start=mark)
+        back = a.out.find(RESTORE, mark)
+        a.wait(b"\033[?1049h", start=back)
+        alt = a.out.find(b"\033[?1049h", back)
+        got = TICK.findall(a.out[back:alt])
+        check("suspend rtt: the X-ray overlay's return, the re-arm %.2f s "
+              "late: no session output on the main screen before its 1049h"
+              % SLOW, ok and back >= mark and alt > back and not got,
+              (ok, len(got), a.out[back:back + 200]))
+        mark = len(a.out)
+        a.key(b"z", 0.3)
+        check("suspend rtt: the attach goes on (a key after reaches the "
+              "session)", a.wait(b"GOT:7a", start=mark, secs=5) and
+              a.reap() is None, (a.rc, a.out[mark:][-300:]))
+    finally:
+        a.close()
+        px.close()
+    # a host that never re-arms (its 0x07 lost, as a host before 1.58.0
+    # never re-arms): the client must not hold the session's output forever
+    px = Proxy(port, "no07")
+    hosts("srv=127.0.0.1:%d" % px.port)
+    a = Pty([sys.executable, "-c", JOB, DCH, "-a", "srv:xv-bw"])
+    try:
+        a.wait(b"BUSY" if full else b"\033[?1049h")
+        a.pump(0.5)
+        mark = len(a.out)
+        a.key(b"\x1a", 0)
+        ok = a.wait(STOPPED, start=mark)
+        stop = a.out.find(STOPPED, mark) + len(STOPPED)
+        until(lambda: (a.pump(0.1), TICK.search(a.out, stop))[1], 6)
+        check("suspend rtt: a host that never re-arms: the session's output "
+              "still comes back after the resume",
+              ok and TICK.search(a.out, stop) is not None and
+              a.reap() is None, (ok, a.rc, a.out[stop:stop + 200]))
+    finally:
+        a.close()
+        px.close()
+        dch(SENV, "-k", "xv-bw")
+        hosts("srv=127.0.0.1:%d" % port)
+    time.sleep(0.5)
+
+
 def main():
     sp = None
     try:
@@ -1568,10 +1812,12 @@ def main():
         test_link_drop()
         test_stop()
         test_chord(port)
+        test_chord_detach()
         test_chord_fail()
         hosts("srv=127.0.0.1:%d" % port)
         test_rearm()
         test_suspend()
+        test_suspend_rtt(port)
     finally:
         dch(SENV, "-k", "xv-sh")
         dch(SENV, "-k", "xv-rx")

@@ -119,6 +119,7 @@
 #define RM_HIST_EVERY_MS 10000	/* the picker re-fetches history this often */
 #define RM_HIST_FRESH_S 30	/* the picker: older history shows as stale */
 #define RM_HIGH 262144		/* relay: past this unsent, stop reading */
+#define RM_REARM_MS 1000	/* relay: a re-arm awaited this long (#231) */
 #define RM_READ 65536
 
 struct rhost
@@ -1525,17 +1526,12 @@ pr_read(struct probe *p)
 		pr_feed(p, buf, (size_t)k);
 }
 
-/* Every probe at once, all done within ms, name lookups included. Each
-** ends PR_OK (hello and list), PR_NEWER or PR_FAIL, its socket closed (but
-** a kept PR_OK's). */
+/* Each probe's address (names by end) and its non-blocking connect:
+** PR_CONN, else PR_FAIL. */
 static void
-probe_all(struct probe *v, int n, int ms)
+pr_start(struct probe *v, int n, long long end)
 {
-	static const unsigned char rq[] = { 0x08, 0, 0, 0, 0, 0x03, 0, 0, 0, 0 };
-	size_t rqn = v[0].hello_only ? RF_HDR : sizeof rq;	/* one or all */
-	long long end = now_ms() + ms;
-	struct pollfd pf[RM_HOSTS];
-	int map[RM_HOSTS], i, np;
+	int i;
 
 	resolve_all(v, n, end);
 	for (i = 0; i < n; i++)
@@ -1547,6 +1543,65 @@ probe_all(struct probe *v, int n, int ms)
 		else
 			v[i].st = PR_CONN;
 	}
+}
+
+/* p's socket is ready: PR_CONN connected (its hello asked), PR_WAIT its
+** reply. */
+static void
+pr_io(struct probe *p)
+{
+	static const unsigned char rq[] = { 0x08, 0, 0, 0, 0, 0x03, 0, 0, 0, 0 };
+	size_t rqn = p->hello_only ? RF_HDR : sizeof rq;	/* one or all */
+	socklen_t l = sizeof(int);
+	int e = 0;
+
+	if (p->st == PR_WAIT)
+		pr_read(p);
+	else if (getsockopt(p->fd, SOL_SOCKET, SO_ERROR, (void *)&e, &l) < 0
+	         || e)
+		pr_end(p, PR_FAIL, sock_str(e ? e : sock_err()));
+	else if (send(p->fd, (const void *)rq, rqn, MSG_NOSIGNAL) !=
+	         (ssize_t)rqn)
+		pr_end(p, PR_FAIL, sock_str(sock_err()));
+	else
+		p->st = PR_WAIT;
+}
+
+/* The probes still going after ms: PR_FAIL; what each not kept read,
+** freed. */
+static void
+pr_finish(struct probe *v, int n, int ms)
+{
+	int i;
+
+	for (i = 0; i < n; i++)
+	{
+		if (v[i].st == PR_CONN || v[i].st == PR_WAIT)
+		{
+			char why[64];
+
+			snprintf(why, sizeof why, "no answer within %d ms", ms);
+			pr_end(&v[i], PR_FAIL, why);
+		}
+		if (v[i].st != PR_OK || !v[i].keep)
+		{
+			free(v[i].in.p);
+			memset(&v[i].in, 0, sizeof v[i].in);
+		}
+	}
+}
+
+/* Every probe at once, all done within ms, name lookups included. Each
+** ends PR_OK (hello and list), PR_NEWER or PR_FAIL, its socket closed (but
+** a kept PR_OK's). */
+static void
+probe_all(struct probe *v, int n, int ms)
+{
+	long long end = now_ms() + ms;
+	struct pollfd pf[RM_HOSTS];
+	int map[RM_HOSTS], i, np;
+
+	pr_start(v, n, end);
 	for (;;)
 	{
 		long long left = end - now_ms();
@@ -1570,40 +1625,10 @@ probe_all(struct probe *v, int n, int ms)
 			break;
 		}
 		for (i = 0; i < np; i++)
-		{
-			struct probe *p = &v[map[i]];
-			socklen_t l = sizeof(int);
-			int e = 0;
-
-			if (!pf[i].revents)
-				continue;
-			if (p->st == PR_WAIT)
-				pr_read(p);
-			else if (getsockopt(p->fd, SOL_SOCKET, SO_ERROR,
-			                    (void *)&e, &l) < 0 || e)
-				pr_end(p, PR_FAIL, sock_str(e ? e : sock_err()));
-			else if (send(p->fd, (const void *)rq, rqn,
-			              MSG_NOSIGNAL) != (ssize_t)rqn)
-				pr_end(p, PR_FAIL, sock_str(sock_err()));
-			else
-				p->st = PR_WAIT;
-		}
+			if (pf[i].revents)
+				pr_io(&v[map[i]]);
 	}
-	for (i = 0; i < n; i++)
-	{
-		if (v[i].st == PR_CONN || v[i].st == PR_WAIT)
-		{
-			char why[64];
-
-			snprintf(why, sizeof why, "no answer within %d ms", ms);
-			pr_end(&v[i], PR_FAIL, why);
-		}
-		if (v[i].st != PR_OK || !v[i].keep)
-		{
-			free(v[i].in.p);
-			memset(&v[i].in, 0, sizeof v[i].in);
-		}
-	}
+	pr_finish(v, n, ms);
 }
 
 static void
@@ -2202,8 +2227,29 @@ sb_drop(struct sb *b, size_t *off)
 	}
 }
 
+/* A 0x12's payload: 1 when it says "why":"detach" (#217: the host's dch -d
+** detached its attach client, the session lives on), else 0. Pure. */
+static int
+end_detach(const unsigned char *d, size_t n)
+{
+	struct json_parser jp;
+	char t[256], why[16];
+	int k = 0;
+
+	if (n >= sizeof t || memchr(d, 0, n))
+		return 0;
+	memcpy(t, d, n);
+	t[n] = '\0';
+	if (dch_json_parse(&jp, t) == 0 && jp.ntok > 0 &&
+	    jp.tok[0].kind == JSON_OBJECT)
+		k = jstr(&jp, 0, "why", why, sizeof why) == 1 &&
+		    !strcmp(why, "detach");
+	dch_json_free(&jp);
+	return k;
+}
+
 /* The server's frames in tin as the relay takes them: 0x10 onto to_sp,
-** 0x12 sets *exited, the first 0x13's message into msg[cap] (escaped, kept
+** 0x12 sets *exited (2 when it says "why":"detach", #217), the first 0x13's message into msg[cap] (escaped, kept
 ** whatever ends the link after it) and what its code makes the exit status
 ** into *code (err_text). What it parsed leaves tin. -1 when the link must
 ** end: a frame over the limit. Pure. */
@@ -2229,7 +2275,7 @@ relay_in(struct rf_state *rs, struct sb *tin, struct sb *to_sp, int *exited,
 		if (f.type == 0x10 && f.len)
 			sb_add(to_sp, f.data, f.len);
 		else if (f.type == 0x12 && r == RF_FRAME)
-			*exited = 1;
+			*exited = 1 + end_detach(f.data, f.len);
 		else if (f.type == 0x13 && r == RF_FRAME && !msg[0])
 		{
 			char m[300];
@@ -2266,11 +2312,58 @@ end_line(char *line, size_t cap, int code, const char *label, const char *msg)
 }
 
 #ifndef _WIN32
+#define RELAY_DETACHED 3	/* not a dch -a status: the relay's own */
+
+/* The session's screen as the host's stream sets it (#231): b's bytes from
+** n0 on go through *st (how much of ESC[?1049 matched so far) into *alt (1
+** on the alternate screen). Where the first ESC[?1049h starts, backed over
+** the ESC[?<n>h sets right before it (a re-arm's modes, master.c dec_modes
+** order), or (size_t)-1 when there is none. Pure. */
+static size_t
+alt_scan(const struct sb *b, size_t n0, int *st, int *alt)
+{
+	static const char pre[] = "\033[?1049";
+	size_t i, at = (size_t)-1;
+
+	for (i = n0; i < b->n; i++)
+	{
+		unsigned char c = (unsigned char)b->p[i];
+
+		if (*st == 7 && (c == 'h' || c == 'l'))
+		{
+			*st = 0;
+			*alt = c == 'h';
+			if (*alt && at == (size_t)-1)
+			{
+				size_t k;
+
+				at = i >= 7 ? i - 7 : 0;
+				while (at > 0 && b->p[at - 1] == 'h')
+				{
+					for (k = at - 1; k > 0 &&
+					     isdigit((unsigned char)b->p[k - 1]); k--)
+						;
+					if (k == at - 1 || k < 3 ||
+					    memcmp(b->p + k - 3, "\033[?", 3))
+						break;
+					at = k - 3;
+				}
+			}
+		}
+		else if (*st < 7 && c == (unsigned char)pre[*st])
+			(*st)++;
+		else
+			*st = c == '\033';
+	}
+	return at;
+}
+
 /* The relay child: the attach client's packets on sp as frames on tcp,
 ** 0x10 back raw; tin and rs hold what followed the list on tcp. 0 when the
 ** session ended (0x12) or the attach side closed (a detach: the TCP close
-** is all, nothing is killed); else dch -a's exit status (remote.h), with
-** why the connection ended written to `why`. */
+** is all, nothing is killed); RELAY_DETACHED when the host detached its
+** client (a 0x12 with "why":"detach"); else dch -a's exit status
+** (remote.h), with why the connection ended written to `why`. */
 static int
 relay(int tcp, int sp, int why, const char *label, struct sb tin,
       struct rf_state rs)
@@ -2279,7 +2372,8 @@ relay(int tcp, int sp, int why, const char *label, struct sb tin,
 	unsigned char pin[PKT_HDR + PKT_MAX], buf[RM_READ];
 	size_t pn = 0, toff = 0, soff = 0;
 	int redraws = 0, eof = 0, exited = 0, code = 1, held = 0;
-	long long drain = 0;
+	int st = 0, alt = 0, attaches = 0;
+	long long drain = 0, rearm = 0;
 	char msg[400] = "";
 
 	nonblock(tcp);
@@ -2289,22 +2383,32 @@ relay(int tcp, int sp, int why, const char *label, struct sb tin,
 		eof = 1;
 		drain = now_ms() + 2000;
 	}
+	(void)alt_scan(&to_sp, 0, &st, &alt);
 	for (;;)
 	{
 		size_t qt = to_tcp.n - toff, qs = to_sp.n - soff;
 		struct pollfd pf[2];
 		ssize_t k;
+		long long now = now_ms();
+		int hold, tmo = -1;
 
-		if (eof && (!qs || now_ms() >= drain))
+		if (eof && (!qs || now >= drain))
 			break;
+		/* a host that never re-arms (before 1.58.0, or the 0x07
+		** lost): what it sent meanwhile goes out after all (#231) */
+		if (rearm && now >= rearm)
+			rearm = 0;
+		hold = rearm && !eof;
+		if (hold)
+			tmo = (int)(rearm - now);
 		pf[0].fd = eof ? -1 : tcp;
 		pf[0].events = (short)((qs < RM_HIGH ? POLLIN : 0) |
 		                       (qt ? POLLOUT : 0));
 		pf[1].fd = sp;
 		pf[1].events = (short)((qt < RM_HIGH && !eof ? POLLIN : 0) |
-		                       (qs ? POLLOUT : 0));
+		                       (qs && !hold ? POLLOUT : 0));
 		pf[0].revents = pf[1].revents = 0;
-		if (poll(pf, 2, eof ? 100 : -1) < 0)
+		if (poll(pf, 2, eof ? 100 : tmo) < 0)
 		{
 			if (errno == EINTR)
 				continue;
@@ -2312,7 +2416,7 @@ relay(int tcp, int sp, int why, const char *label, struct sb tin,
 			break;
 		}
 		/* to the terminal */
-		if (qs && pf[1].revents & (POLLOUT | POLLHUP | POLLERR))
+		if (qs && !hold && pf[1].revents & (POLLOUT | POLLHUP | POLLERR))
 		{
 			k = write(sp, to_sp.p + soff, qs);
 			if (k < 0 && errno != EINTR && errno != EAGAIN)
@@ -2344,6 +2448,13 @@ relay(int tcp, int sp, int why, const char *label, struct sb tin,
 					held = pk.type == MSG_DETACH;
 				if (held)
 					to_sp.n = soff = 0;
+				/* a resume, or the X-ray overlay's return (not the
+				** first attach): until the host's re-arm comes back
+				** an RTT later, what it sends is for the screen the
+				** client's reset left: hold it, the re-arm's 1049h
+				** drops it (#231) */
+				if (pk.type == MSG_ATTACH && attaches++ && alt)
+					rearm = now_ms() + RM_REARM_MS;
 				pkt_frames(&pk, &redraws, &to_tcp);
 				off += used;
 			}
@@ -2384,12 +2495,28 @@ relay(int tcp, int sp, int why, const char *label, struct sb tin,
 			}
 			else
 			{
+				size_t n0 = to_sp.n, at;
+
 				sb_add(&tin, buf, (size_t)k);
 				if (relay_in(&rs, &tin, &to_sp, &exited, &code,
 				             msg, sizeof msg) < 0)
 					eof = 1;
+				at = alt_scan(&to_sp, n0, &st, &alt);
 				if (held)
 					to_sp.n = soff = 0;
+				else if (rearm && at != (size_t)-1)
+				{
+					rearm = 0;	/* the re-arm: from it on */
+					if (at > soff)
+						soff = at;
+				}
+				else if (rearm && to_sp.n - soff > RM_HIGH / 2)
+				{
+					/* stale either way: keep a tail a
+					** re-arm's start may be in */
+					soff = to_sp.n - 128;
+					sb_drop(&to_sp, &soff);
+				}
 			}
 			if (tin.bad || to_sp.bad || to_tcp.bad)
 			{
@@ -2400,8 +2527,8 @@ relay(int tcp, int sp, int why, const char *label, struct sb tin,
 				drain = now_ms() + 2000;
 		}
 	}
-	if (exited)
-		return 0;	/* the session ended, whatever came after */
+	if (exited)	/* the session ended, whatever came after */
+		return exited == 2 ? RELAY_DETACHED : 0;
 	{
 		char line[800];
 
@@ -2412,24 +2539,44 @@ relay(int tcp, int sp, int why, const char *label, struct sb tin,
 }
 
 static pid_t relay_pid = -1;
-static int why_fd = -1;
+static int why_fd = -1, relay_st = -1;
+
+/* The relay's wait status once it closed the session socket, reaped once
+** (the X-ray overlay may ask before the main loop does); -1: none. */
+static int
+relay_status(void)
+{
+	if (relay_pid > 0)
+	{
+		while (waitpid(relay_pid, &relay_st, 0) < 0 && errno == EINTR)
+			;
+		relay_pid = -1;
+	}
+	return relay_st;
+}
+
+/* attach.c's hook, when the relay closed the session socket: whether the
+** host detached its client (#217), so the X-ray overlay leaves too. */
+static int
+remote_detached(void)
+{
+	int st = relay_status();
+
+	return st != -1 && WIFEXITED(st) && WEXITSTATUS(st) == RELAY_DETACHED;
+}
 
 /* attach.c's hook, when the relay closed the session socket: NULL for a
-** session that ended, else what to say once the terminal is back, with the
-** exit status in *code (the relay's; 1 for one that died). */
+** session that ended or a detach, else what to say once the terminal is
+** back, with the exit status in *code (the relay's; 1 for one that died). */
 static const char *
 remote_lost(int *code)
 {
 	static char msg[900];
 	ssize_t k = -1;
-	int st = 0;
+	int st = relay_status();
 
-	if (relay_pid <= 0)
-		return NULL;
-	while (waitpid(relay_pid, &st, 0) < 0 && errno == EINTR)
-		;
-	relay_pid = -1;
-	if (WIFEXITED(st) && WEXITSTATUS(st) == 0)
+	if (st == -1 || (WIFEXITED(st) && (WEXITSTATUS(st) == 0 ||
+	                                   WEXITSTATUS(st) == RELAY_DETACHED)))
 		return NULL;
 	*code = WIFEXITED(st) ? WEXITSTATUS(st) : 1;
 	if (why_fd >= 0)
@@ -2839,6 +2986,7 @@ dch_remote_attach(const char *host, const char *name)
 		return 1;
 	}
 	free(out.p);
+	relay_st = -1;
 	if (relay_pid == 0)
 	{
 		child_signals();
@@ -2854,11 +3002,13 @@ dch_remote_attach(const char *host, const char *name)
 	why_fd = wp[0];
 	attach_sock = sp[0];
 	attach_lost = remote_lost;
+	attach_detached = remote_detached;
 	snprintf(g_attached, sizeof g_attached, "%s", h.label);
 	dch_trace("remote attach %s relay=%d", h.label, (int)relay_pid);
 	rc = attach_main(0);	/* returns only to switch sessions */
 	attach_sock = -1;
 	attach_lost = NULL;
+	attach_detached = NULL;
 	g_attached[0] = '\0';
 	if (relay_pid > 0)
 		while (waitpid(relay_pid, NULL, 0) < 0 && errno == EINTR)
@@ -3157,14 +3307,22 @@ ctl_run(int fd, const char *sh, const char *verb, struct sb *rq,
 		           sizeof msg, &code, 0);
 		if (tin.bad || out.bad || err.bad)
 		{
-			snprintf(msg, sizeof msg, "out of memory");
+			/* out, err hold at most one partial line: past
+			** SB_LIMIT raw, so past it escaped (QA 1.58.0 NIT-R3) */
+			if (tin.bad)
+				snprintf(msg, sizeof msg, "out of memory");
+			else
+				snprintf(msg, sizeof msg, "it sent a line over "
+				         "%u MiB escaped", SB_LIMIT >> 20);
 			r = -1;
 		}
 		if (cx < 0)
 			out.n = 0;	/* our reader is gone */
 		t = now_ms();
-		/* last: only a plain end's; a cut's partial line is no line */
-		if ((w = ctl_put(&out, &err, esc, r > 0 && !why[0] && !cx)) ==
+		/* last: only a plain end's; a cut's partial line is no line,
+		** nor is one of a host dch a signal ended (QA 1.58.0 LOW-R7) */
+		if ((w = ctl_put(&out, &err, esc, r > 0 && !why[0] && !cx &&
+		                 xit < 128)) ==
 		    -2)
 		{
 			snprintf(msg, sizeof msg, "it sent a line over %u MiB "
@@ -3228,7 +3386,7 @@ ctl_run(int fd, const char *sh, const char *verb, struct sb *rq,
 	/* a lost link, a cancel or the host's cut (a why) drops the stdout
 	** line esc held: a cut JSON line is no line (QA 1.55.0 NIT-5,
 	** Prosper's ruling; QA 1.56.0 NIT-R-B) */
-	if (cx || r < 0 || why[0])
+	if (cx || r < 0 || why[0] || xit >= 128)
 		out.n = 0;
 	(void)ctl_put(&out, &err, esc, 1);	/* a line esc held, cut short */
 	free(tin.p);
@@ -3253,6 +3411,9 @@ ctl_run(int fd, const char *sh, const char *verb, struct sb *rq,
 	if (why[0])
 		fprintf(stderr, "dch: %s: %s stopped by the host (%s)\n", sh,
 		        verb, why);
+	else if (xit >= 128)
+		fprintf(stderr, "dch: %s: %s on the host ended by signal %d\n",
+		        sh, verb, xit - 128);
 	return xit;
 }
 
@@ -3685,6 +3846,10 @@ struct rq
 	struct rhost h;
 	char sh[300], *name;	/* the host, printable; the host-local name */
 	struct probe *p;	/* the warm connection, NULL: none */
+	struct probe *dp;	/* else a dial on the way (#226), until dend */
+	long long dend;
+	struct sb pend;		/* the 0x30 of the request waiting on it */
+	struct sb wait;		/* stdin lines queued behind that request */
 	int cancel_ok;		/* its hello lists "ctl-cancel" */
 	struct rf_state rs;
 	struct sb tin, lo, le;	/* frames in; stdout, stderr to a newline */
@@ -3700,40 +3865,29 @@ rq_close(struct rq *q)
 {
 	if (q->p)
 		probes_free(q->p, 1);
-	q->p = NULL;
+	if (q->dp)
+		probes_free(q->dp, 1);
+	q->p = q->dp = NULL;
 	free(q->tin.p);
 	free(q->lo.p);
 	free(q->le.p);
+	free(q->pend.p);
 	memset(&q->tin, 0, sizeof q->tin);
 	memset(&q->lo, 0, sizeof q->lo);
 	memset(&q->le, 0, sizeof q->le);
+	memset(&q->pend, 0, sizeof q->pend);
 }
 
-/* A new connection to q's host, its hello in: 0, else the exit status (4
-** refused, 6 no "ctl" or "xray", 7 unreachable, 1 a newer protocol) and its
-** stderr line in msg[cap]. A failure stands for RM_ATTACH_MS: the requests
-** queued behind a dark host's dial get it at once, not a dial each (QA
-** 1.55.0 LOW-10). */
+/* q's dial p is over: 0 and p q's warm connection, else (p freed) the
+** exit status (4 refused, 6 no "ctl" or "xray", 7 unreachable, 1 a newer
+** protocol) and its stderr line in msg[cap]. A failure stands for
+** RM_ATTACH_MS: the requests queued behind a dark host's dial get it at
+** once, not a dial each (QA 1.55.0 LOW-10). */
 static int
-rq_dial(struct rq *q, char *msg, size_t cap)
+rq_hello(struct rq *q, struct probe *p, char *msg, size_t cap)
 {
-	struct probe *p;
 	int rc = 0;
 
-	rq_close(q);
-	if (now_ms() < q->dark)
-	{
-		snprintf(msg, cap, "%s", q->dmsg);
-		return q->dcode;
-	}
-	if (!(p = calloc(1, sizeof *p)))
-	{
-		snprintf(msg, cap, "dch: out of memory");
-		return 1;
-	}
-	p->h = q->h;
-	p->keep = p->hello_only = 1;
-	probe_all(p, 1, RM_ATTACH_MS);
 	if (p->st == PR_REFUSED)
 	{
 		snprintf(msg, cap, "dch: %s refused: %s", q->sh, p->why);
@@ -3770,6 +3924,50 @@ rq_dial(struct rq *q, char *msg, size_t cap)
 	q->rs = p->rs;
 	q->cancel_ok = hello_op(p->hello_js, "ctl-cancel");
 	return 0;
+}
+
+/* A new connection to q's host: as rq_hello says; with wait 0 the dial
+** goes on in q->dp (0), driven by dch_remote_requests's poll, so stdin is
+** read while it dials (#226). */
+static int
+rq_dial(struct rq *q, char *msg, size_t cap, int wait)
+{
+	struct probe *p;
+
+	rq_close(q);
+	if (now_ms() < q->dark)
+	{
+		snprintf(msg, cap, "%s", q->dmsg);
+		return q->dcode;
+	}
+	if (!(p = calloc(1, sizeof *p)))
+	{
+		snprintf(msg, cap, "dch: out of memory");
+		return 1;
+	}
+	p->h = q->h;
+	p->keep = p->hello_only = 1;
+	if (wait)
+		probe_all(p, 1, RM_ATTACH_MS);
+	else
+	{
+		q->dend = now_ms() + RM_ATTACH_MS;
+		pr_start(p, 1, q->dend);
+		if (p->st == PR_CONN)
+		{
+			q->dp = p;
+			return 0;
+		}
+	}
+	return rq_hello(q, p, msg, cap);
+}
+
+/* req's dial failed (e, msg): its stderr line and its end */
+static void
+rq_undialled(struct sb *o, long long req, int e, const char *msg)
+{
+	rq_err(o, req, msg);
+	rq_exit(o, req, e, e == DCH_EXIT_UNREACHABLE ? "lost" : "refused");
 }
 
 /* n bytes out on fd within RM_ATTACH_MS: 0, else -1 and why in msg. */
@@ -3834,7 +4032,45 @@ rq_drop(struct rq *q, struct sb *o, const char *why)
 	rq_exit(o, q->req, 2, why);
 	q->req = q->cend = 0;
 	rq_close(q);
-	(void)rq_dial(q, m, sizeof m);
+	(void)rq_dial(q, m, sizeof m, 0);
+}
+
+/* The request waiting on q's dial ends "cancel": nothing of it was sent;
+** the dial goes on, quietly (#226). */
+static void
+rq_unsent(struct rq *q, struct sb *o)
+{
+	rq_exit(o, q->req, 2, "cancel");
+	q->req = 0;
+	free(q->pend.p);
+	memset(&q->pend, 0, sizeof q->pend);
+}
+
+/* q's dial, once over or past dend: the request waiting on it sent, or
+** ended as the dial failed. */
+static void
+rq_dialled(struct rq *q, struct sb *o)
+{
+	struct probe *p = q->dp;
+	char m[800];
+	int e;
+
+	if ((p->st == PR_CONN || p->st == PR_WAIT) && now_ms() < q->dend)
+		return;
+	q->dp = NULL;
+	pr_finish(p, 1, RM_ATTACH_MS);
+	if ((e = rq_hello(q, p, m, sizeof m)) && q->req)
+		rq_undialled(o, q->req, e, m);
+	if (e)
+		q->req = 0;
+	else if (q->req)
+	{
+		q->heard = now_ms();
+		if (rq_send(q->p->fd, q->pend.p, q->pend.n, m, sizeof m) < 0)
+			rq_lost(q, o, m);
+	}
+	free(q->pend.p);
+	memset(&q->pend, 0, sizeof q->pend);
 }
 
 /* q's socket is readable: its frames, the request's lines onto o. */
@@ -3911,7 +4147,9 @@ rq_cancel(struct rq *q, struct sb *o, long long req)
 
 	if (!q->req || req != q->req || q->cend)
 		return;
-	if (q->cancel_ok &&
+	if (q->dp)
+		rq_unsent(q, o);
+	else if (q->cancel_ok &&
 	    rq_send(q->p->fd, c34, sizeof c34, m, sizeof m) == 0)
 		q->cend = now_ms() + RM_CANCEL_MS;
 	else
@@ -3919,7 +4157,7 @@ rq_cancel(struct rq *q, struct sb *o, long long req)
 }
 
 /* A checked request out as a 0x30 on the warm connection, dialled first
-** when there is none. */
+** when there is none; while a dial is on the way it waits on it. */
 static void
 rq_start(struct rq *q, struct sb *o, long long req, int ac, char **av)
 {
@@ -3927,11 +4165,9 @@ rq_start(struct rq *q, struct sb *o, long long req, int ac, char **av)
 	char **xv, m[800];
 	int e;
 
-	if (!q->p && (e = rq_dial(q, m, sizeof m)))
+	if (!q->p && !q->dp && (e = rq_dial(q, m, sizeof m, 0)))
 	{
-		rq_err(o, req, m);
-		rq_exit(o, req, e, e == DCH_EXIT_UNREACHABLE ? "lost"
-		                                              : "refused");
+		rq_undialled(o, req, e, m);
 		return;
 	}
 	if ((xv = rq_argv(q->name, ac, av)))
@@ -3948,6 +4184,11 @@ rq_start(struct rq *q, struct sb *o, long long req, int ac, char **av)
 	{
 		q->req = req;
 		q->heard = now_ms();
+		if (q->dp)
+		{
+			q->pend = b;	/* sent once dialled */
+			return;
+		}
 		if (rq_send(q->p->fd, b.p, b.n, m, sizeof m) < 0)
 			rq_lost(q, o, m);
 	}
@@ -3991,6 +4232,49 @@ rq_line(struct rq *q, struct sb *o, const char *s, size_t k)
 	else
 		rq_start(q, o, req, ac, av);
 	free(av);
+}
+
+/* The lines queued behind a request that was dialling, in order, while
+** none is; a failed alloc's buffer is left for the caller's exit. */
+static void
+rq_drain(struct rq *q, struct sb *o)
+{
+	char *nl;
+
+	while (q->wait.n && !q->wait.bad && !(q->req && q->dp) &&
+	       (nl = memchr(q->wait.p, '\n', q->wait.n)))
+	{
+		size_t k = (size_t)(nl - q->wait.p);
+
+		*nl = '\0';
+		rq_line(q, o, q->wait.p, k);
+		memmove(q->wait.p, nl + 1, q->wait.n - k - 1);
+		q->wait.n -= k + 1;
+	}
+}
+
+/* One stdin line s[0..k): a {"cancel":N} at once; any other behind a
+** request still dialling waits, after what is queued, as when the dial
+** blocked (#226). */
+static void
+rq_take(struct rq *q, struct sb *o, const char *s, size_t k)
+{
+	long long req;
+	char **av = NULL;
+	int ac;
+
+	rq_drain(q, o);
+	if (q->req && q->dp && (k > RQ_LINE_MAX || strlen(s) != k ||
+	                        rq_parse(s, &req, &av, &ac) != RQ_CANCEL))
+	{
+		free(av);
+		sb_add(&q->wait, s, k);
+		sb_add(&q->wait, "\n", 1);
+		return;
+	}
+	free(av);
+	rq_line(q, o, s, k);
+	rq_drain(q, o);
 }
 
 /* stdout gets o, flushed: 0, else -1 (our reader is gone). */
@@ -4051,7 +4335,7 @@ dch_remote_requests(char *n)
 	signal(SIGPIPE, SIG_IGN);
 	if (host_pick(hb, &q.h) < 0)
 		return rq_fail(1, NULL);
-	if ((rc = rq_dial(&q, msg, sizeof msg)))
+	if ((rc = rq_dial(&q, msg, sizeof msg, 1)))
 		return rq_fail(rc, msg);
 	rq_ready(&o, q.p->hello_js);
 	while (rq_put(&o) == 0)
@@ -4060,19 +4344,23 @@ dch_remote_requests(char *n)
 		long long due = 0;
 		int np = 1, tmo = -1;
 
-		pf[0].fd = 0;
+		/* past 64 KiB queued behind a dial, stdin waits for it */
+		pf[0].fd = q.wait.n > RQ_LINE_MAX ? -1 : 0;
 		pf[0].events = POLLIN;
 		pf[0].revents = 0;
-		if (q.p)
+		if (q.p || q.dp)
 		{
-			pf[1].fd = q.p->fd;
-			pf[1].events = POLLIN;
+			pf[1].fd = q.p ? q.p->fd : q.dp->fd;
+			pf[1].events = q.dp && q.dp->st == PR_CONN ? POLLOUT
+			                                           : POLLIN;
 			pf[1].revents = 0;
 			np = 2;
 		}
 		/* a 0x34's 0x33, else the host's answer within ctl_quiet */
 		if (q.req && q.p)
 			due = q.cend ? q.cend : q.heard + quiet;
+		if (q.dp)
+			due = q.dend;
 		if (due)
 			tmo = due > now_ms() ? (int)(due - now_ms()) : 0;
 		if (poll(pf, (nfds_t)np, tmo) < 0)
@@ -4081,8 +4369,15 @@ dch_remote_requests(char *n)
 				continue;
 			break;
 		}
-		if (np > 1 && pf[1].revents && q.p)
+		if (np > 1 && pf[1].revents && q.dp)
+			pr_io(q.dp);
+		else if (np > 1 && pf[1].revents && q.p)
 			rq_net(&q, &o);
+		if (q.dp)
+		{
+			rq_dialled(&q, &o);
+			rq_drain(&q, &o);
+		}
 		if (q.cend && now_ms() >= q.cend)
 			rq_drop(&q, &o, "cancel");	/* its 0x33 never came */
 		else if (q.req && q.p && !q.cend && now_ms() - q.heard >= quiet)
@@ -4097,8 +4392,14 @@ dch_remote_requests(char *n)
 			continue;
 		if (k <= 0)
 		{
-			/* the close cancels a request in flight on the host;
-			** an unterminated last line is no request */
+			/* the close cancels a request in flight on the host,
+			** and one dialling, and those queued behind it; an
+			** unterminated last line is no request */
+			while (q.req && q.dp)
+			{
+				rq_unsent(&q, &o);
+				rq_drain(&q, &o);
+			}
 			if (q.req)
 				rq_exit(&o, q.req, 2, "cancel");
 			(void)rq_put(&o);
@@ -4115,10 +4416,12 @@ dch_remote_requests(char *n)
 				break;
 			*nl = '\0';
 			if (!skip)
-				rq_line(&q, &o, s, (size_t)(nl - s));
+				rq_take(&q, &o, s, (size_t)(nl - s));
 			skip = 0;
 			off += (size_t)(nl - s) + 1;
 		}
+		if (q.wait.bad)
+			break;	/* rq_take's failed alloc */
 		if (!skip && in.n - off > RQ_LINE_MAX)
 		{
 			rq_err(&o, 0, "dch: bad request: a line over 64 KiB");
@@ -4131,11 +4434,13 @@ dch_remote_requests(char *n)
 		in.n -= off;
 	}
 	rq_close(&q);
-	rc = in.bad || o.bad;	/* never a silent end: only a failed alloc */
+	rc = in.bad || o.bad || q.wait.bad;	/* never a silent end: only a
+						** failed alloc */
 	if (rc)
 		fprintf(stderr, "dch: out of memory\n");
 	free(in.p);
 	free(o.p);
+	free(q.wait.p);
 	return rc;
 }
 #endif

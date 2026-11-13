@@ -63,6 +63,9 @@ static pid_t client_pid;	/* the process that file names */
 ** creates; remote_host: --host; pk_remote: the picker lists remote rows. */
 static int remote_ok, attach_only, pk_remote;
 static const char *remote_host;
+/* the picker's header: "kill session:" or "detach session:" where it does
+** not attach (opens 0), what its Enter does there */
+static const char *pk_header = "";
 /* the host of an a:b name that stayed local only because the host is not
 ** known (#122): a failed verb names it in one hint line */
 static char g_rhint[DCH_RHOST_MAX];
@@ -1599,31 +1602,53 @@ dch_claude_gone(const char *rec)
 	return !*rec || access(rec, F_OK) != 0;
 }
 
-/* Every regular record in one sessions dir, to visit(). */
+/* Every regular record in one sessions dir, to visit(). Claude Code
+** rewrites its record in place (writeFile: truncate, then write), so a read
+** in between finds it empty or changing: such a record is read again, at
+** most 10 waits of 5ms per dir, so one unlucky read never drops a live
+** Claude (#253). Empty, only a live <pid>.json's: one left empty by a
+** Claude killed mid-write stays empty, and would cost every scan 50ms. */
 static int
 visit_records_in(const char *dir, dch_claude_record_fn visit, void *arg)
 {
 	DIR *d;
 	struct dirent *de;
+	int waits = 0;
 
 	if (!(d = opendir(dir)))
 		return 0;
 	while ((de = readdir(d)))
 	{
-		char path[1400], body[8192], extra;
+		char path[1400], body[8192], extra, *e;
 		struct stat before, after;
-		size_t len = 0, n = strlen(de->d_name);
+		size_t len, n = strlen(de->d_name);
+		long rp;
 		int fd;
 		if (n < 6 || strcmp(de->d_name + n - 5, ".json") ||
 		    snprintf(path, sizeof path, "%s/%s", dir, de->d_name) >=
 		        (int)sizeof path)
 			continue;
+	again:
+		len = 0;
+		memset(&before, 0, sizeof before);
 		fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
 		if (fd < 0 || fstat(fd, &before) < 0 || !S_ISREG(before.st_mode) ||
 		    before.st_uid != getuid() || (before.st_mode & 022) ||
 		    before.st_size <= 0 || before.st_size >= (off_t)sizeof body)
 		{
 			if (fd >= 0) close(fd);
+			if (fd >= 0 && S_ISREG(before.st_mode) &&
+			    before.st_uid == getuid() && !(before.st_mode & 022) &&
+			    before.st_size == 0 &&
+			    (rp = strtol(de->d_name, &e, 10)) > 0 &&
+			    !strcmp(e, ".json") &&
+			    (kill((pid_t)rp, 0) == 0 || errno == EPERM) &&
+			    waits++ < 10)
+			{
+				dch_trace("claude record %s: empty, read again", path);
+				usleep(5000);
+				goto again;
+			}
 			continue;
 		}
 		while (len < (size_t)before.st_size)
@@ -1639,6 +1664,12 @@ visit_records_in(const char *dir, dch_claude_record_fn visit, void *arg)
 		    memchr(body, '\0', len))
 		{
 			close(fd);
+			if (!memchr(body, '\0', len) && waits++ < 10)
+			{
+				dch_trace("claude record %s: changed, read again", path);
+				usleep(5000);
+				goto again;
+			}
 			continue;
 		}
 		close(fd);
@@ -2060,6 +2091,20 @@ refuse_id_name(const char *name)
 	if (!xr_label_id_shaped(name, strlen(name)))	/* the listing trims */
 		return 0;
 	fputs("dch: name looks like a session_id\n", stderr);
+	return 1;
+}
+
+/* #203: a name the caller gives a new session (--spawn, --revive --as, -n) is
+** one the store can hold: no '/' (a socket outside the socket dir), no
+** control, at most NAME_CAP bytes. A leading '-' is refuse_id_name's. 1,
+** the line printed, when refused. */
+static int
+refuse_path_name(const char *name)
+{
+	if (name[0] == '-' || name_ok(name))
+		return 0;
+	fputs("dch: bad session name (no '/' or control characters, at most "
+	      "255 bytes)\n", stderr);
 	return 1;
 }
 
@@ -2957,6 +3002,9 @@ spawn_master(char *exe, const char *name, char *sockp,
 
 static int attach_xray_view(void);
 static int attach_remote;	/* this attach is a host's: so is its chord's view */
+/* The next attach's route as the picked row or the view is (#210), not as
+** its name routes: 1 the host's, -1 local, 0 by the name. One attach. */
+static int attach_route;
 
 static int
 do_attach(char *exe, int forced_name, int force, char **inner_argv,
@@ -2964,6 +3012,9 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 {
 	/* Nesting refuse. */
 	const char *nested = getenv("DCH_SESSION");
+	int route = attach_route;
+
+	attach_route = 0;
 	if (nested && *nested)
 	{
 		fprintf(stderr,
@@ -2979,7 +3030,9 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 	if (remote_host)
 		return dch_remote_attach(remote_host, session_name);
 	/* never with remote hosts off (#122); discovery still names hosts */
-	if (remote_ok && dch_remote_on() && name_is_remote(session_name))
+	if (remote_ok && dch_remote_on() &&
+	    (route ? route > 0 && strchr(session_name, ':')
+	     : name_is_remote(session_name)))
 	{
 		char host[512];
 		char *colon = strchr(session_name, ':');
@@ -3029,15 +3082,19 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 
 	if (make_sock_path(session_name) < 0)
 		return 1;
+	/* #203: a given name (-n, a pick) that fails name_ok creates
+	** nothing; an auto-name is the caller's own and stays as it is */
 	if (!attach_only && (session_name[0] == '-' ||
 	                     xr_label_id_shaped(session_name,
-	                                        strlen(session_name))))
+	                                        strlen(session_name)) ||
+	                     (forced_name && !name_ok(session_name))))
 	{
 		int probe = control_connect_path(sock_path);
 
 		/* a session already named so is attached, by its exact name */
 		if ((probe < 0 || !name_listed(session_name)) &&
-		    refuse_id_name(session_name))
+		    (refuse_id_name(session_name) ||
+		     refuse_path_name(session_name)))
 			exit(2);	/* not 2 returned: that is ATTACH_SWITCH */
 		close(probe);
 	}
@@ -3148,7 +3205,8 @@ attach_with_switch(char *exe, int forced_name, int force, char **inner_argv,
 		                          remote_host, session_name) < sizeof chosen)
 			pk_focus(chosen);
 		pk_remote = 1;
-		if (pick_session("switch to session:", chosen,
+		attach_only = 0;	/* before the pick: a view's o sets it */
+		if (pick_session("", chosen,
 		                 sizeof(chosen), 1) != 0)
 			return 0;
 		snprintf(session_name, sizeof(session_name), "%s", chosen);
@@ -3156,7 +3214,6 @@ attach_with_switch(char *exe, int forced_name, int force, char **inner_argv,
 		forced_name = 1;
 		force = 1;
 		remote_ok = 1;
-		attach_only = 0;
 		remote_host = NULL;
 	}
 }
@@ -5598,7 +5655,9 @@ struct crec
 struct crec_scan
 {
 	long root;
-	int verify, n;		/* n = live records under root */
+	int verify, n;		/* n = live Claudes under root, as joined */
+	int all;		/* every live record under root */
+	long pid[16];		/* the first 16 of them */
 	struct crec best;	/* the shallowest of them */
 };
 
@@ -5659,7 +5718,9 @@ proc_depth(long pid, long anc)
 /* dch_visit_claude_records callback: count the live interactive records
 ** whose pid descends from cs->root, keep the shallowest. With verify, the
 ** record's procStart must match the process's start time, so a record left
-** by a dead Claude whose pid was recycled never joins. */
+** by a dead Claude whose pid was recycled never joins. Claudes below
+** another (a test's fake Claude under a supervisor's tool call, #253) count
+** as that one: n is 1 while the shallowest is the ancestor of all. */
 static int
 crec_visit(const char *path, const char *body, size_t len, void *arg)
 {
@@ -5668,6 +5729,7 @@ crec_visit(const char *path, const char *body, size_t len, void *arg)
 	const char *base = strrchr(path, '/');
 	char kind[32], start[128], actual[128], *endp;
 	long jpid;
+	int i, self, nested;
 
 	(void)len;
 	memset(&c, 0, sizeof c);
@@ -5694,8 +5756,17 @@ crec_visit(const char *path, const char *body, size_t len, void *arg)
 	     strcmp(start, actual)))
 		return 0;
 	snprintf(c.rec, sizeof c.rec, "%s", path);
-	if (cs->n++ == 0 || c.depth < cs->best.depth)
+	if (cs->all < 16)
+		cs->pid[cs->all] = c.pid;
+	if (cs->all++ == 0 || c.depth < cs->best.depth)
 		cs->best = c;
+	/* over all of them, every time: records come in readdir order. The
+	** best's pid twice (two config dirs) is two answers, not a nesting. */
+	for (i = self = 0, nested = cs->all <= 16; nested && i < cs->all &&
+	     i < 16; i++)
+		nested = cs->pid[i] == cs->best.pid ? ++self == 1
+		         : proc_depth(cs->pid[i], cs->best.pid) > 0;
+	cs->n = nested ? 1 : cs->all;
 	return 0;
 }
 
@@ -5784,7 +5855,8 @@ claude_dirs(long root, char (*dirs)[1100], int nd, int max)
 	return nd;
 }
 
-/* Live Claude records at or below `root`; *best = the shallowest. */
+/* Live Claudes at or below `root`, those below another counted as it (see
+** crec_visit); *best = the shallowest. */
 static int
 claude_find(long root, int verify, struct crec *best)
 {
@@ -8443,8 +8515,8 @@ hrec_free(struct hrec *r, int n)
 	free(r);
 }
 
-/* Does a master answer on `name`? */
-static int
+/* Does a master answer on `name`? The view's o asks it too (#232). */
+int
 name_live(const char *name)
 {
 	char sp[1100];
@@ -8568,7 +8640,7 @@ hrec_load(int dfd, const char *fn, struct hrec *r)
 	    dch_json_string(r->body, "sock_dir", sd, sizeof sd) < 0 ||
 	    strcmp(sd, sock_dir) != 0 ||
 	    dch_json_string(r->body, "name", r->name, sizeof r->name) < 0 ||
-	    !r->name[0] ||
+	    !r->name[0] || strchr(r->name, '/') ||	/* #203: in the store */
 	    dch_json_string(r->body, "cwd", r->cwd, sizeof r->cwd) < 0 ||
 	    dch_json_string(r->body, "end", r->end, sizeof r->end) < 0 ||
 	    !(r->argv = dch_json_strv(r->body, NULL, "argv", &r->argc)))
@@ -8880,6 +8952,22 @@ pk_sidekick(int mode, regex_t *re, const char *pat, const char *s)
 	return 0;
 }
 
+/* The session named `name` on Sessions or Sidekicks, this host's; NULL
+** when none runs. Their rows are named as the sockets are: canon_name's. */
+static const struct pkrow *
+pk_running(const struct pk *p, const char *name)
+{
+	char cb[256];
+	const char *f = canon_name(name, cb, sizeof cb);
+	int t, k;
+
+	for (t = 0; t < 2; t++)
+		for (k = 0; k < p->n[t]; k++)
+			if (!p->r[t][k].remote && !strcmp(p->r[t][k].name, f))
+				return &p->r[t][k];
+	return NULL;
+}
+
 /* Every tab's rows afresh: the live sessions as --ls-json reads them, the
 ** ended records as --history does. */
 void
@@ -8959,19 +9047,18 @@ pk_load(struct pk *p)
 	for (k = 0; k < nh; k++)
 		p->interrupted += rv_all_takes(&h[k]);
 	/* one row per name (#144): its newest record, pinned when any of
-	** the name's is; h is newest first */
+	** the name's is, live when any of the name's is; h is newest first */
 	for (k = 0; p->r[2] && k < nh; k++)
 	{
 		struct pkrow *w;
 
-		if (h[k].live)
-			continue;
 		for (j = 0; j < p->n[2] && strcmp(p->r[2][j].sname,
 		     h[k].name); j++)
 			;
 		if (j < p->n[2])
 		{
 			p->r[2][j].pinned |= h[k].pinned;
+			p->r[2][j].live |= h[k].live;
 			continue;
 		}
 		w = &p->r[2][p->n[2]++];
@@ -8990,13 +9077,29 @@ pk_load(struct pk *p)
 			snprintf(w->cwd, sizeof w->cwd, "%s", h[k].cwd);
 		w->when = hrec_when(&h[k]);
 		w->pinned = h[k].pinned;
+		w->live = h[k].live;
+	}
+	/* a name decides (#254): one with a session running (its row on
+	** Sessions or Sidekicks, or a live record) says "running" and when
+	** that session last had output; shown only when pinned, else it is
+	** that session's tab's */
+	for (k = pin = 0; k < p->n[2]; k++)
+	{
+		struct pkrow *w = &p->r[2][k];
+		const struct pkrow *s = pk_running(p, w->sname);
+
+		if (s || w->live)
+		{
+			w->live = 1;
+			snprintf(w->state, sizeof w->state, "running");
+			w->when = s ? s->when : w->when;
+		}
+		pin += w->pinned;
 	}
 	/* every pinned name, then the newest of the rest while the total is
 	** under the cap */
-	for (k = pin = 0; k < p->n[2]; k++)
-		pin += p->r[2][k].pinned;
 	for (k = j = 0; k < p->n[2]; k++)
-		if (p->r[2][k].pinned || pin < PK_HIST_MAX)
+		if (p->r[2][k].pinned || (!p->r[2][k].live && pin < PK_HIST_MAX))
 		{
 			pin += !p->r[2][k].pinned;
 			p->r[2][j++] = p->r[2][k];
@@ -9516,17 +9619,24 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 	if (w->name[0] == '-' && !(t == 2 ? c == 'p' || c == 'd' : c == 'X' ||
 	                           c == '\r' || c == '\n'))
 	{
-		snprintf(p->status, sizeof p->status, t == 2 ? "%s: a name "
-		         "starting with '-' can't be resumed; p pins, d removes"
-		         : "%s: a name starting with '-'; Enter attaches, X "
-		         "kills", w->name);
+		if (t == 2)
+			snprintf(p->status, sizeof p->status, "%s: a name "
+			         "starting with '-' can't be resumed; p pins, d "
+			         "removes", w->name);
+		else
+			snprintf(p->status, sizeof p->status, "%s: a name "
+			         "starting with '-'; Enter %s", w->name, p->opens
+			         ? "attaches, X kills" : *pk_header == 'k' ?
+			         "kills, X asks first" : "detaches, X kills");
 		return 0;
 	}
 	if (c == 'x')
 	{
 		/* the X-ray view (#175): a live session by name, a History row
-		** by its record; a remote one's on its host (#188) */
-		return pk_xray(p, fd, w->name, t == 2, w->remote, out, outsz);
+		** by its record, a running one's (#254) by the session; a remote
+		** one's on its host (#188) */
+		return pk_xray(p, fd, t == 2 && w->live ? w->sname : w->name,
+		               t == 2 && !w->live, w->remote, out, outsz);
 	}
 	/* ponytail: a remote row only attaches; kill, rename, restart and
 	** the rest need ops-gated frames and the same confirmation (#087).
@@ -9535,14 +9645,43 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 	{
 		if (t < 2 && (c == '\r' || c == '\n') &&
 		    (size_t)snprintf(out, outsz, "%s", w->name) < outsz)
+		{
+			attach_route = 1;	/* a local host:name too (#210) */
 			return 1;
+		}
 		if (t == 2 && (c == '\r' || c == '\n' || c == 'm' || c == 'o'))
 			pk_rrevive(p, w, c);
 		else
 			snprintf(p->status, sizeof p->status, t == 2 ? "%s: on "
 			         "another host; Enter resumes it there, p and d "
 			         "are for this host's" : "%s: a remote session; "
-			         "Enter attaches, nothing else here yet", w->title);
+			         "Enter attaches and x opens its X-ray, nothing "
+			         "else", w->title);
+		return 0;
+	}
+	/* a running name's History row (#254): Enter and o attach the
+	** session, as its Sessions row does; nothing resumes or removes it */
+	if (t == 2 && w->live && c > 0 && c < 256 && strchr("\r\nomd", c))
+	{
+		int go = c != 'm' && c != 'd' && p->opens;
+
+		if (go && !name_live(w->sname))
+		{
+			snprintf(p->status, sizeof p->status, "%s: no longer "
+			         "running", w->title);
+			p->loaded = 0;
+		}
+		else if (go && (size_t)snprintf(out, outsz, "%s", w->sname) <
+		         outsz)
+		{
+			attach_route = -1;	/* this host's, as the row is */
+			return 1;
+		}
+		else
+			snprintf(p->status, sizeof p->status, "%s is running; %s",
+			         w->title, c == 'd' ? "d removes it once it has "
+			         "ended" : p->opens ? "Enter attaches it" : "attach "
+			         "it from dch -l or the switch");
 		return 0;
 	}
 	if (t < 2)
@@ -9609,10 +9748,13 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 				free(pt);
 				if (!ok)
 				{
+					/* -k and -d: their Enter kills or
+					** detaches, it answers nothing */
 					snprintf(p->status, sizeof p->status,
 					         "%s: not a plain Yes/No permission "
-					         "prompt; attach (Enter) to answer",
-					         w->title);
+					         "prompt; %s", w->title, p->opens ?
+					         "attach (Enter) to answer" :
+					         "answer it from dch -l");
 					return 0;
 				}
 			}
@@ -9813,7 +9955,11 @@ pk_xray(struct pk *p, int fd, const char *name, int record, int remote,
 		         "dch -l or the switch");
 	else if (xv_go[0] &&
 	         (size_t)snprintf(out, outsz, "%s", xv_go) < outsz)
+	{
+		attach_route = remote ? 1 : -1;	/* the view's own (#210) */
+		attach_only = 1;	/* ended since o: refused, never a new one */
 		return 1;
+	}
 	return 0;
 }
 
@@ -9898,6 +10044,7 @@ pick_session(const char *header, char *out, size_t outsz, int opens)
 		goto done;
 	}
 	p.opens = opens;
+	pk_header = header;
 	picker_tty_fd = fd;
 	picker_term_saved = 1;
 	signal(SIGINT, picker_sigint);
@@ -12129,9 +12276,10 @@ xr_shell_ref(const struct xr_target *t, const struct xr_refq *q,
 	{
 		fr = ring_fetch(t->sock, &rs, xr_ref_rec, &f);
 		/* light: the screen read gets what is left of the budget, +2 ms
-		** so a read it cut ends past it and the tick says "budget" */
+		** so a read it cut ends past it and the tick says "budget";
+		** DCH_XRAY_NOCLOCK (tests): --full's 2 s, as the clock is off */
 		if (fr == 0 && (f.acc->lost = ring_screen(t->sock, &rs, &f.acc->sh,
-		    xr_ref_rec, &f, q->full ? CTL_IDLE_MS
+		    xr_ref_rec, &f, q->full || xr_noclock ? CTL_IDLE_MS
 		    : (int)(q->budget + 2 - (xr_now_ms() - xr_t0)))))
 			(void)xr_scan_tick(f.sc, f.acc->bytes);
 		xr_shell_end(&f.acc->sh);
@@ -13744,7 +13892,7 @@ static int
 attach_xray_view(void)
 {
 	char n[DCH_RHOST_MAX + sizeof session_name];
-	unsigned char c;
+	unsigned char c[4096];
 	int rc;
 
 	xv_tab = 2;
@@ -13756,7 +13904,9 @@ attach_xray_view(void)
 	if (rc != 0)
 	{
 		tw(STDERR_FILENO, "\r(any key: back to the session)");
-		(void)!read(STDIN_FILENO, &c, 1);
+		/* the whole read: an arrow key, a UTF-8 character or a paste
+		** is one key here, none of it for the session (LOW-R8) */
+		(void)!read(STDIN_FILENO, c, sizeof c);
 	}
 	return rc;
 }
@@ -13783,6 +13933,7 @@ xray_main(int argc, char **argv)
 	struct xr_span sp;
 
 	xr_t0 = xr_now_ms();
+	xr_noclock = getenv("DCH_XRAY_NOCLOCK") != NULL;	/* tests only */
 	/* tests only: 3.8's --ref caps lowered, never raised (files, bytes,
 	** ms, the per-file head and tail) */
 	if ((e = getenv("DCH_XRAY_CAPS")))
@@ -13951,8 +14102,16 @@ xray_main(int argc, char **argv)
 	** (#194) attaches to the session as `dch -a` does */
 	if (!json)
 	{
-		if ((rc = xray_view(argv[ni])) != 0 || !xv_go[0])
+		/* routed once, as it opens: the view, its queries and its o
+		** stay on that session when a same-named one comes (#210) */
+		int route = name_routes_remote(n) ? 1 : -1;
+
+		xv_route = route;
+		rc = xray_view(argv[ni]);
+		xv_route = 0;
+		if (rc != 0 || !xv_go[0])
 			return rc;
+		attach_route = route;
 		snprintf(session_name, sizeof session_name, "%s", xv_go);
 		attach_only = remote_ok = 1;
 		return attach_with_switch(dch_exe, 1, 1, NULL, 0, 0);
@@ -14370,6 +14529,9 @@ main_run(int argc, char **argv)
 				        "dch: %s needs a session name\n", a);
 				return 1;
 			}
+			if (action == A_SPAWN && (refuse_id_name(argv[i]) ||
+			                          refuse_path_name(argv[i])))
+				return 2;
 			snprintf(session_name, sizeof(session_name),
 			         "%s", argv[i]);
 			i++;
@@ -14546,7 +14708,7 @@ main_run(int argc, char **argv)
 				fprintf(stderr, "dch: --as needs a session name\n");
 				return 1;
 			}
-			if (refuse_id_name(argv[i]))
+			if (refuse_id_name(argv[i]) || refuse_path_name(argv[i]))
 				return 2;
 			snprintf(opt_as, sizeof(opt_as), "%s", argv[i]);
 			i++;
@@ -15018,8 +15180,9 @@ main_run(int argc, char **argv)
 			}
 			else
 				fputs("null", stdout);
-			/* Exactly one Claude, or no answer: a wrong transcript is
-			** worse than none. */
+			/* Exactly one Claude (others below it count as it,
+			** #253), or no answer: a wrong transcript is worse
+			** than none. */
 			const struct crec *c = cr.v && cr.v[k].n == 1 &&
 			                       uuid_shaped(cr.v[k].best.sid)
 			                       ? &cr.v[k].best : NULL;
@@ -15159,7 +15322,7 @@ main_run(int argc, char **argv)
 		int rc;
 
 		pk_remote = 1;
-		rc = pick_session("attach session (mirror):", chosen,
+		rc = pick_session("", chosen,
 		                  sizeof(chosen), 1);
 		if (rc == 0)
 		{

@@ -390,8 +390,14 @@ def run_case(name):
         for k, argv in enumerate(case["argv"], 1):
             argv = ["f%x:" % ino + a[3:] if a.startswith("f*:") else a
                     for a in argv]
-            r = subprocess.run([DCH] + argv, capture_output=True, text=True,
-                               timeout=30, env=env)
+            # a light --ref's 300 ms is off (QA 1.59.0 LOW-T3, #251) but
+            # where its golden is that budget: a "slow" shell's screen read
+            e = dict(env)
+            if not any(live.get(a, {}).get("primary") == "slow"
+                       for a in argv):
+                e["DCH_XRAY_NOCLOCK"] = "1"
+            r = subprocess.run([DCH] + argv, capture_output=True,
+                               text=True, timeout=30, env=e)
             ref = "--ref" in argv and r.returncode == 0
             if r.returncode == 0:
                 got = mask(r.stdout, os.path.realpath(t))

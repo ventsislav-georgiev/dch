@@ -3,7 +3,8 @@
 ** `tailscale status --json` (discovery's peer filter), a 0x18 hello, a 0x11
 ** list or the cache, attach.c's packet stream (as frames, which must parse
 ** back as a client's), a server's frame stream into the probe and into the
-** relay (each cut into reads of a size the input picks), and logsafe at a
+** relay (each cut into reads of a size the input picks; #231's alt_scan on
+** what the relay holds), and logsafe at a
 ** small cap; #114's ctl stream (ctl_in) and a hello's ops (hello_op,
 ** #118's ctl-cancel too); #115's history: a host's --history --json reply,
 ** the history cache, and a history probe's hello and ctl frames; #158's
@@ -258,17 +259,39 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		struct sb tin = {0}, to_sp = {0};
 		size_t c = n > 1 ? (size_t)d[1] % 64 + 1 : 1, off;
 		char msg[400] = "";
-		int exited = 0, r = 0, code = 1;
+		int exited = 0, r = 0, code = 1, st = 0, alt = 0;
 
 		for (off = 2; off < n && r == 0; off += c)
 		{
+			size_t n0 = to_sp.n, at;
+
 			sb_add(&tin, d + off, n - off < c ? n - off : c);
 			r = relay_in(&rs, &tin, &to_sp, &exited, &code, msg,
 			             sizeof msg);
+			/* #231: a re-arm's start is a mode set, whole in
+			** what the relay holds, its ESC[?1049h after it */
+			at = alt_scan(&to_sp, n0, &st, &alt);
+			if (st < 0 || st > 7 || (alt & ~1) ||
+			    (at != (size_t)-1 && (to_sp.n < at + 8 ||
+			                          memcmp(to_sp.p + at, "\033[?",
+			                                 3))))
+				abort();
 		}
 		inert(msg);
 		if (code != 1 && code != DCH_EXIT_REFUSED && code != DCH_EXIT_TAKEN)
 			abort();	/* only dch -a's documented codes (#102) */
+		{
+			/* #217: a 0x12 says a detach only by "why":"detach" */
+			static const char det[] = "{\"code\":0,\"why\":\"detach\"}",
+			    end[] = "{\"code\":0,\"why\":\"detached\"}";
+
+			if (exited < 0 || exited > 2 ||
+			    end_detach((const unsigned char *)det,
+			               sizeof det - 1) != 1 ||
+			    end_detach((const unsigned char *)end,
+			               sizeof end - 1) != 0)
+				abort();
+		}
 		if (tin.n >= RF_HDR + RF_LIST_MAX && r == 0)
 			abort();	/* a held frame past its cap closes */
 		free(tin.p);

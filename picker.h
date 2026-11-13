@@ -24,6 +24,7 @@ struct pkrow
 	long when, merged;	/* last output; History: when it ended */
 	int agents, pinned;
 	int remote;		/* host:name (#087): 1, 2 when stale */
+	int live;		/* History: a session of the name runs (#254) */
 };
 
 struct pkact
@@ -162,6 +163,8 @@ extern char xv_go[512];
 ** NUL): its length, -1 none, -2 no mirror (dch-lite). */
 pid_t xv_spawn(int fd, int ac, char **av, int *out, int *err);
 int xv_screen(const char *name, char *buf, size_t cap);
+/* A master answers on this local name (o asks before it leaves, #232). */
+int name_live(const char *name);
 /* A remote view (#188): xv_remote, n is host:name; xv_plain, the host's
 ** `--read <name> --ansi` bytes as plain text, malloc'd, or NULL. */
 int xv_remote(const char *n);

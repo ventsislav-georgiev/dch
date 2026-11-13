@@ -44,7 +44,10 @@ Covers:
      n showing it faint and titled by its summary (its title without one),
      the footer saying how many, the tab count the shown-by-default ones,
      the selection kept on its chapter, the filter matching a summary, the
-     empty state when every chapter is one; o on the Chapters list and in
+     empty state when every chapter is one; a compaction (#223) hidden
+     and counted with them, n showing it faint with its = marker, Enter
+     reading its summary, compactions and auto chapters alone the same
+     empty state; o on the Chapters list and in
      the reader leaves the view (the terminal restored as q does) and
      attaches as dch -a, from the picker's x too (the -k picker refuses);
      an ended session's o says so and stays; in the chord o goes back to the
@@ -520,10 +523,131 @@ def test_refs():
         v.close()
 
 
+# ---- Refs: a project under $TMPDIR, a URL's host (#220) ---------------------
+
+TPD = os.path.join(T, "tmpd")      # the view's $TMPDIR
+TPP = os.path.join(TPD, "proj")    # a project inside it
+TPL = os.path.join(T, "plink")     # a symlink to it, another session's cwd
+# a real project outside every temp dir (this checkout), and a symlink into it
+# from the temp dir: a row under it is never resolved, so it stays scratch
+REPO = os.path.realpath(os.path.join(HERE, ".."))
+HOSTILE = "https://github.com." + "a" * 50 + ".example/github.com/o/r/pull/1"
+HUGE = "https://" + "z" * 120 + ".example/x/y/end"
+IDN = "https://x" + "\u4f8b" * 25 + "e\u0301" * 6 + ".jp/" + "p/" * 30 + "fin"
+
+
+def fixture_tmp():
+    os.makedirs(os.path.join(TPP, "src"))
+    for f in ("main.c", "real.c"):
+        open(os.path.join(TPP, "src", f), "w").close()
+    os.symlink(TPP, TPL)
+    os.symlink(REPO, os.path.join(TPD, "rlink"))
+    cfg = os.path.join(HOME, ".claude")
+    sockdir = os.path.join(T, "dch-%d" % os.getuid())
+    hdir = os.path.join(T, "state", "dch", "sessions",
+                        sockdir.replace("/", "-"))
+    for name, sid, cwd, said in (
+            ("xv-tp", "11111111-2222-4333-8444-5555555555c1", TPP,
+             "edit %s/src/main.c, scratch in %s/other.txt; see %s, %s "
+             "and %s" % (TPP, TPD, HOSTILE, HUGE, IDN)),
+            ("xv-tl", "11111111-2222-4333-8444-5555555555c2", TPL,
+             "edit %s/src/real.c, scratch in %s/other.txt" % (TPP, TPD)),
+            ("xv-tx", "11111111-2222-4333-8444-5555555555c3", TPP,
+             "edit %s/src/main.c, then %s/../leak.txt and %s/../esc/x"
+             % (TPP, TPP, TPD)),
+            ("xv-tr", "11111111-2222-4333-8444-5555555555c4", REPO,
+             "see %s/rlink/README.md" % TPD)):
+        pdir = os.path.join(cfg, "projects", cwd.replace("/", "-"))
+        os.makedirs(pdir, exist_ok=True)
+        with open(os.path.join(pdir, sid + ".jsonl"), "w") as f:
+            f.write(json.dumps({"type": "user", "cwd": cwd,
+                                "timestamp": "2026-11-10T10:00:00Z",
+                                "message": {"content": "tmp"}}) + "\n")
+            f.write(json.dumps({"type": "assistant", "message": {
+                "content": [{"type": "text", "text": said}]}}) + "\n")
+        rec = {"name": name, "cwd": cwd, "end": "exited",
+               "argv": ["claude"], "started": 1794299400,
+               "updated": 1794300000, "ended": 1794300000,
+               "sock_dir": sockdir,
+               "agent": {"session_id": sid, "cwd": cwd, "config_dir": cfg}}
+        with open(os.path.join(hdir, name + ".json"), "w") as f:
+            f.write(json.dumps(rec) + "\n")
+
+
+def refs_tab(name):
+    v = Pty([DCH, "--xray", name], env={"TMPDIR": TPD + "/"})
+    v.wait(b"Chapters 1")
+    v.pump(0.5)
+    mark = len(v.out)
+    v.key(b"\t", 1.0)
+    scr = rows(v.out[mark:])
+    return v, scr, "\n".join(scr[k] for k in sorted(scr))
+
+
+def test_tmp():
+    v, scr, text = refs_tab("xv-tp")
+    try:
+        check("Refs #220: a project under $TMPDIR shows its own file, only "
+              "the scratch file outside it is hidden",
+              "file    src/main.c" in text and "other.txt" not in text and
+              "t temp files 1 hidden" in text, text)
+        url = [r.rstrip() for r in scr.values() if "url     " in r]
+        hit = [r for r in url if ".example/github.com/o/r/pull/1" in r]
+        check("Refs #220: a host wider than half the row keeps its start, "
+              "then the ellipsis and the URL's end",
+              hit and re.search("url     github\\.com\\.a+" + ELL +
+                                "a*\\.example/github\\.com/o/r/pull/1$",
+                                hit[0]), url)
+        big = [r for r in url if "zzzz" in r]
+        check("Refs #220: a host wider than the row is cut at its end",
+              big and re.search("url     z+" + ELL + "$", big[0]) and
+              "/end" not in big[0] and cells(big[0]) <= 100,
+              (big, [cells(r) for r in big]))
+        idn = [r for r in url if "fin" in r]
+        check("Refs #220: a wide-character host keeps its start within the "
+              "width", idn and "url     x\u4f8b" in idn[0] and
+              re.search(ELL, idn[0]) and cells(idn[0]) <= 100,
+              (url, [cells(r) for r in url]))
+        v.key(b"q")
+    finally:
+        v.close()
+    v, scr, text = refs_tab("xv-tl")
+    try:
+        check("Refs #220: a project's file is not scratch by realpath either "
+              "(the session's cwd is a symlink to it)",
+              re.search(r"file    \S*src/real\.c", text) and
+              "t temp files 1 hidden" in text, text)
+        v.key(b"q")
+    finally:
+        v.close()
+    v, scr, text = refs_tab("xv-tx")
+    try:
+        # the engine folds ".." (xray.c, 2.5) before the view sees the text;
+        # the view's own ".." rule is behind it
+        check("Refs #220: a temp path written with .. is scratch, also one "
+              "through the project dir",
+              "file    src/main.c" in text and "leak.txt" not in text and
+              "esc/x" not in text and "t temp files 2 hidden" in text, text)
+        v.key(b"q")
+    finally:
+        v.close()
+    v, scr, text = refs_tab("xv-tr")
+    try:
+        check("Refs #220: a project outside the temp dirs resolves no row: "
+              "a temp-dir symlink into it stays scratch",
+              "README.md" not in text and "t temp files 1 hidden" in text,
+              text)
+        v.key(b"q")
+    finally:
+        v.close()
+
+
 # ---- the Chapters tab: auto chapters, o (#194) ------------------------------
 
 ASID = "11111111-2222-4333-8444-5555555555a4"
 BSID = "11111111-2222-4333-8444-5555555555a5"
+CSID = "11111111-2222-4333-8444-5555555555a6"
+DSID = "11111111-2222-4333-8444-5555555555a7"
 
 
 def note(inner):
@@ -533,7 +657,11 @@ def note(inner):
 def fixture_auto():
     """xv-au: two prompts, three notifications between them (one with a
     summary, one with a hostile summary, one with none); xv-aa: only
-    notifications."""
+    notifications. Each in a shape Claude Code writes: a user record with
+    "origin", or a queued_command attachment with commandMode (and, newer,
+    its own origin). xv-ac: two prompts, a compaction (a compact_boundary,
+    then its isCompactSummary user record) and a notification between
+    them; xv-ca: only a compaction and a notification (#223)."""
     cfg = os.path.join(HOME, ".claude")
     pdir = os.path.join(cfg, "projects", "-home-demo-proj")
     os.makedirs(pdir, exist_ok=True)
@@ -544,17 +672,33 @@ def fixture_auto():
     au = ["fix the login bug",
           note("<task-id>t1</task-id>\n<status>completed</status>\n"
                "<summary>Build finished: 3 passed</summary>"),
-          note("<task-id>t2</task-id>\n<status>failed</status>"),
-          note("<task-id>t3</task-id>\n<summary>Lint \033]0;pwned\007 "
-               "evil\u202edone</summary>"),
+          ("q", note("<task-id>t2</task-id>\n<status>failed</status>")),
+          ("qo", note("<task-id>t3</task-id>\n<summary>Lint \033]0;pwned"
+                      "\007 evil\u202edone</summary>")),
           "deploy it"]
     aa = [note("<task-id>t9</task-id>\n<summary>Only a notice</summary>")]
-    for sid, name, prompts in ((ASID, "xv-au", au), (BSID, "xv-aa", aa)):
+    cp = ("c", "This session is being continued: the compact summary")
+    ac = ["start the work", cp, aa[0], "finish the work"]
+    for sid, name, prompts in ((ASID, "xv-au", au), (BSID, "xv-aa", aa),
+                               (CSID, "xv-ac", ac), (DSID, "xv-ca", [cp, aa[0]])):
         lines = []
         for i, t in enumerate(prompts):
-            lines += [{"type": "user", "cwd": P,
-                       "timestamp": "2026-11-10T1%d:00:00Z" % i,
-                       "message": {"content": t}},
+            o = {"cwd": P, "timestamp": "2026-11-10T1%d:00:00Z" % i}
+            if isinstance(t, tuple) and t[0] == "c":
+                lines.append(dict(o, type="system", subtype="compact_boundary"))
+                o.update(type="user", isCompactSummary=True,
+                         message={"content": t[1]})
+            elif isinstance(t, tuple):
+                a = {"type": "queued_command", "prompt": t[1],
+                     "commandMode": "task-notification"}
+                if t[0] == "qo":
+                    a["origin"] = {"kind": "task-notification"}
+                o.update(type="attachment", attachment=a)
+            else:
+                o.update(type="user", message={"content": t})
+                if t.startswith("<task-notification>"):
+                    o["origin"] = {"kind": "task-notification"}
+            lines += [o,
                       {"type": "assistant", "message": {"content": [
                           {"type": "text", "text": "reply %d" % i}]}}]
         with open(os.path.join(pdir, sid + ".jsonl"), "w") as f:
@@ -598,7 +742,7 @@ def test_auto():
               "Build finished" not in text and "task-notification" not in
               text and "Lint" not in text, text)
         check("Chapters: the footer shows n and how many are hidden",
-              "n notifications 3 hidden" in text, text)
+              "n auto rows 3 hidden" in text, text)
         check("Chapters: o is offered only for a live session (none here)",
               "open session" not in text, text)
         v.key(b"k", 0.3)  # the newest is selected; up to the first prompt
@@ -617,7 +761,7 @@ def test_auto():
               v.out[mark:][-800:])
         text = screen(v, 0)  # the rows n left as they were too
         check("Chapters: n shown, the footer says n hides them, the tab "
-              "count stays 2", "n hide notifications" in text and
+              "count stays 2", "n hide auto rows" in text and
               "hidden" not in text and "Chapters 2" in text, text)
         sel = [r for r in text.split("\n") if r.startswith("\u258c")]
         check("Chapters: n keeps the selection on its chapter",
@@ -635,7 +779,7 @@ def test_auto():
         text = screen(v, mark)
         check("Chapters: the filter matches a summary; only a hidden "
               "chapter matches: said, with the key",
-              "Only notifications: n shows them" in text, text)
+              "Only auto rows: n shows them" in text, text)
         mark = len(v.out)
         v.key(b"\r", 0.5)
         v.key(b"n", 1.0)
@@ -674,15 +818,66 @@ def test_auto():
         v.pump(0.8)
         text = screen(v, 0)
         check("Chapters: every chapter auto: the empty state says so and "
-              "names n; the tab count is 0", "Only notifications: n shows "
+              "names n; the tab count is 0", "Only auto rows: n shows "
               "them" in text and "Chapters 0" in text and
-              "n notifications 1 hidden" in text, text)
+              "n auto rows 1 hidden" in text, text)
         mark = len(v.out)
         v.key(b"n", 1.0)
         text = screen(v, mark)
         check("Chapters: n shows it, selected", any(
             r.startswith("\u258c") and "Only a notice" in r
             for r in text.split("\n")), text)
+        v.key(b"q")
+        v.exit()
+    finally:
+        v.close()
+
+
+def test_compact():
+    o = json.loads(dch("--xray", "xv-ac", "--json").stdout)
+    ch = o["chapters"]
+    check("compact fixture: the engine reads one compaction, not auto",
+          [c["kind"] for c in ch] == ["prompt", "compact", "prompt", "prompt"] and
+          [c.get("auto", False) for c in ch] == [False, False, True, False],
+          ch)
+    v = Pty([DCH, "--xray", "xv-ac"], env={"NO_COLOR": ""})
+    try:
+        v.wait(b"finish the work")
+        v.pump(0.5)
+        text = screen(v, 0)
+        check("Chapters: a compaction is hidden by default, the tab count "
+              "the prompts (2)", "start the work" in text and
+              "Conversation compacted" not in text and "Chapters 2" in text,
+              text)
+        check("Chapters: the footer counts a compaction with the auto rows",
+              "n auto rows 2 hidden" in text, text)
+        mark = len(v.out)
+        v.key(b"n", 1.0)
+        text = screen(v, mark)
+        check("Chapters: n shows the compaction, its = marker, faint",
+              "= Conversation compacted" in text and
+              re.search(rb"\033\[0;2m[^\033]*Conversation compacted",
+                        v.out[mark:]), v.out[mark:][-800:])
+        v.key(b"k", 0.3)  # the newest is selected; up past the notification
+        v.key(b"k", 0.3)
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        check("Chapters: Enter on a shown compaction reads its summary",
+              v.wait(b"the compact summary", start=mark), v.out[mark:])
+        v.key(b"\033", 0.5)
+        v.key(b"q")
+        check("Chapters: q exits 0", v.exit() == 0, v.out[-80:])
+    finally:
+        v.close()
+    v = Pty([DCH, "--xray", "xv-ca"])
+    try:
+        v.wait(b"Chapters")
+        v.pump(0.8)
+        text = screen(v, 0)
+        check("Chapters: only a compaction and an auto chapter: the empty "
+              "state of xv-aa", "Only auto rows: n shows them" in text
+              and "Chapters 0" in text and "n auto rows 2 hidden" in text,
+              text)
         v.key(b"q")
         v.exit()
     finally:
@@ -701,6 +896,14 @@ def clients(name):
 LEAVE = (b"\033[?25h\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?1015l"
          b"\033[?2004l\033[?7h\033[<u\033[0m\033[?1049l")
 DTAP = {"DCH_DOUBLE_TAP_MS": "0"}  # one Ctrl-\ detaches at once
+
+
+def ready(v, mark=0):
+    """The view holds the session's answer: its footer offers o. The first
+    paint (tabs, "Reading") comes before it, and an o read then does
+    nothing (QA 1.58.0 LOW-T2)."""
+    return until(lambda: (v.pump(0.1), "o open session" in
+                          screen(v, mark))[1], 10)
 
 
 def opened(v, mark, what, name="xv-sh"):
@@ -730,11 +933,9 @@ def test_open(lite):
     time.sleep(0.5)  # dch-lite: no --read; the block's time
     v = Pty([DCH, "--xray", "xv-op"], env=DTAP)
     try:
-        v.wait(b"Chapters")
-        v.pump(0.5)
+        ok = ready(v)
         text = screen(v, 0)
-        check("Chapters: a live session's footer offers o", "o open session"
-              in text, text)
+        check("Chapters: a live session's footer offers o", ok, text)
         mark = len(v.out)
         v.key(b"o", 0.3)
         opened(v, mark, "Chapters", "xv-op")
@@ -767,6 +968,7 @@ def test_open(lite):
         v.wait(b"x-ray")
         v.key(b"x", 1.0)
         v.wait(b"X-ray  xv-sh")
+        ready(v)
         mark = len(v.out)
         v.key(b"o", 0.3)
         opened(v, mark, "picker's x")
@@ -777,6 +979,7 @@ def test_open(lite):
         v.wait(b"x-ray")
         v.key(b"x", 1.0)
         v.wait(b"X-ray  xv-sh")
+        ready(v)
         mark = len(v.out)
         v.key(b"o", 1.0)
         check("-k picker: the view's o attaches nothing and kills nothing, "
@@ -790,7 +993,7 @@ def test_open(lite):
     check("-k picker: xv-sh still runs", clients("xv-sh") == 0, clients("xv-sh"))
     v = Pty([DCH, "--xray", "xv-sh"], env=dict(DTAP, DCH_SESSION="outer"))
     try:
-        v.wait(b"Chapters")
+        ready(v)
         mark = len(v.out)
         v.key(b"o", 1.0)
         check("o inside a dch session: refused as -a refuses it, the view "
@@ -1100,7 +1303,9 @@ def test_chord():
         got = rx()
         a.key(b"\x1cx", 0.5)
         a.wait(b"X-ray  xv-rx")
+        mark = len(a.out)
         a.key(b"\t", 0.5)
+        ready(a, mark)
         mark = len(a.out)
         a.key(b"o", 0.5)
         check("chord, o: the view closes, back to the session",
@@ -1163,7 +1368,7 @@ def test_chord():
         got = rx()
         a.key(b"\x1c", 0.05)
         check("detach_key = switch: one press opens the picker",
-              a.wait(b"switch to session:"), a.out[-600:])
+              a.wait(b"Sessions"), a.out[-600:])
         a.pump(0.5)
         mark = len(a.out)
         a.key(b"x", 0.5)
@@ -1172,7 +1377,7 @@ def test_chord():
         mark = len(a.out)
         a.key(b"q", 0.5)
         check("detach_key = switch: q in that view returns to the picker",
-              a.wait(b"switch to session:", start=mark), a.out[mark:][-600:])
+              a.wait(b"Sessions", start=mark), a.out[mark:][-600:])
         mark = len(a.out)
         a.key(b"X", 0.5)
         check("detach_key = switch: X reaches the kill confirmation",
@@ -1313,7 +1518,7 @@ def test_chord_detach():
             ([b"\033[92;5u", b"\033[92;5:3u", b"\033[120u"],
              b"X-ray  xv-rx", "press, release, x"),
             ([b"\033[92;5u", b"\033[92;5:3u", b"\033[92;5u"],
-             b"switch to session:", "press, release, press")):
+             b"Sessions", "press, release, press")):
         a = attach(env={"DCH_DOUBLE_TAP_MS": "2000"})
         try:
             got = rx()
@@ -1362,8 +1567,11 @@ def main():
         test_view()
         fixture_refs()
         test_refs()
+        fixture_tmp()
+        test_tmp()
         fixture_auto()
         test_auto()
+        test_compact()
         test_resize()
         test_small_card()
         shell()

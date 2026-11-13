@@ -25,7 +25,8 @@ works. #167: a record a strict JSON reader rejects (lone surrogate, 1e999,
 1000 deep) or with a key given twice is dropped from text, JSON and the
 picker; bidi marks and U+2028/9 escaped; with a local twin tw:gone the
 cursor stays on host tw's row and p pins nothing; remote rows sort among
-the local ones.
+the local ones. #254: local sessions running under the names of host tw's
+records leave its rows as they were.
 
 Run:  python3 tests/remote_history_test.py      (uses ./dch)
 """
@@ -429,16 +430,26 @@ def main():
 ROW_RE = re.compile("^([>▌ ]) . (\\S+)")
 
 
+def below_tabs(s):
+    """The lines under the tabs row and the column headers: the tabs row
+    is the first on dch -l and the switch picker (#252), the second under
+    -k's and -d's title."""
+    ls = s.split("\n")
+    i = next((k for k, l in enumerate(ls[:2])
+              if re.match(r"[\[ ]?(Sessions|Settings)\b", l)), 1)
+    return ls[i + 2:]
+
+
 def picker_checks(dch, check, cenv, senv, H, serve_at, tmp, rev, until):
     def screen(n):
         return dch(cenv, "--read", n).stdout
 
     def rows(s):
-        return [m.group(2) for m in map(ROW_RE.match, s.split("\n")[3:])
+        return [m.group(2) for m in map(ROW_RE.match, below_tabs(s))
                 if m]
 
     def cur(s):
-        for m in map(ROW_RE.match, s.split("\n")[3:]):
+        for m in map(ROW_RE.match, below_tabs(s)):
             if m and m.group(1) != " ":
                 return m.group(2)
 
@@ -533,7 +544,7 @@ def twin_checks(dch, check, cenv, fake, until):
         return dch(cenv, "--read", pk).stdout
 
     def lines(s):
-        return [x for x in s.split("\n")[3:] if ROW_RE.match(x)]
+        return [x for x in below_tabs(s) if ROW_RE.match(x)]
 
     def cur(s):
         return next((x for x in lines(s) if ROW_RE.match(x).group(1) != " "),
@@ -546,6 +557,13 @@ def twin_checks(dch, check, cenv, fake, until):
     dch(cenv, "--spawn", "zz", "--", "/bin/sh", "-c", "exit 0")
     until(lambda: "tw:gone  " in dch(cenv, "--history").stdout
           and "zz  " in dch(cenv, "--history").stdout)
+    # local sessions running under the names host tw's records have (#254):
+    # gone not pinned, aaa pinned; the host's rows stay as they were
+    for n in ("gone", "aaa"):
+        dch(cenv, "--spawn", n, "--", "/bin/sh", "-c", "sleep 600")
+    until(lambda: all(x in dch(cenv, "-ls").stdout.split()
+                      for x in ("gone", "aaa")))
+    until(lambda: dch(cenv, "--pin", "aaa").returncode == 0)
     hf = fake(b'[{"name":"gone","end":"exit 3","ended":1700000000},'
               b'{"name":"aaa","end":"exit 0","ended":1700000000},'
               b'{"name":"tdup","file":"a","file":"b"}]')
@@ -566,6 +584,14 @@ def twin_checks(dch, check, cenv, fake, until):
           rows.count("tw:gone") == 2 and "tw:aaa" in rows and "zz" in rows
           and rows.index("tw:aaa") < rows.index("zz")
           and not any(x.startswith("tw:tdup") for x in rows), s)
+    ls = lines(s or "")
+    check("a local session running as gone (not pinned) and as aaa "
+          "(pinned): host tw's rows unchanged, local gone no row, local aaa "
+          "running (#254)",
+          rows.count("gone") == 0 and rows.count("aaa") == 1 and
+          any(re.match("^. . aaa +running", x) for x in ls) and
+          any(re.match("^. . tw:aaa +exited ", x) for x in ls) and
+          any(map(remote_row, ls)), s)
     for _ in range(10):
         s = screen()
         ls = lines(s)

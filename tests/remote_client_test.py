@@ -774,11 +774,13 @@ class Proxy:
     connection's 0x30s and 0x34s (a request that never ends); "lines" sends
     `lines` in place of the first connection's first 0x31, as frames of
     type `lt` of 1 MiB at most, and drops its other 0x31s (a host's own
-    stdout or stderr bytes)."""
+    stdout or stderr bytes). #231: "slow07" passes each 0x07 (a redraw's
+    re-arm) `delay` seconds late, a slow link; "no07" drops them, a host
+    that never re-arms."""
 
-    def __init__(self, up, mode, lines=b"", lt=0x31):
+    def __init__(self, up, mode, lines=b"", lt=0x31, delay=0.0):
         self.up, self.mode, self.n, self.lines = up, mode, 0, lines
-        self.lt = lt
+        self.lt, self.delay = lt, delay
         self.sock = socket.socket()
         self.sock.bind(("127.0.0.1", 0))
         self.sock.listen(16)
@@ -821,6 +823,10 @@ class Proxy:
                     if up and first and t in (0x30, 0x34) \
                             and self.mode == "hold":
                         continue
+                    if up and t == 0x07 and self.mode == "no07":
+                        continue
+                    if up and t == 0x07 and self.mode == "slow07":
+                        time.sleep(self.delay)
                     if not up and t == 0x18 and self.mode == "nocancel":
                         h = json.loads(body)
                         h["ops"] = [o for o in h["ops"] if o != "ctl-cancel"]
@@ -1134,10 +1140,13 @@ def requests_checks(dch, check, senv, cenv, serve_at, fakes, tmp, slog):
     rq.send({"req": 1, "argv": ["--json"]}, {"cancel": 1})
     t0 = time.time()
     got = [json.loads(g) for g in rq.until(1)]
+    took = time.time() - t0
+    end = time.time() + 10
+    while px.n < 2 and time.time() < end:
+        time.sleep(0.05)	# the quiet re-dial, after the end line (#226)
     check("requests: a 0x34 with no 0x33 in 3 s: the close cancels it",
           got == [{"req": 1, "exit": 2, "why": "cancel"}]
-          and time.time() - t0 > 2.5 and px.n == 2,
-          (got, time.time() - t0, px.n))
+          and took > 2.5 and px.n == 2, (got, took, px.n))
     px.n = 0	# the next connection is "first" again: it holds
     time.sleep(0.2)
     rq2 = Requests(side("q=127.0.0.1:%d" % px.port), "q:xq1")
@@ -1355,7 +1364,10 @@ class XFake:
     line that escapes past 16 MiB (3 MiB of 0x01 in a string); "crlf" CR
     as JSON space and in a string; "capcut" whole lines, a partial line,
     then a 0x33 "cap"; "holdcut" whole lines and a partial line, its 0x33
-    only for a 0x34."""
+    only for a 0x34; "crash" whole lines, a partial line, then the 0x33 of
+    a host dch SIGKILLed (exit 137, no why); "raw" a 17 MiB line with no
+    control, in serve's 64 KiB frames; #226: "late" its hello 0.4 s late,
+    then `{"ok":1}`, exit 0 and the close."""
 
     def __init__(self, mode, out=b""):
         self.mode, self.n, self.out = mode, 0, out
@@ -1391,6 +1403,7 @@ class XFake:
             + frame(0x32, b"dch: \x1b]0;PWNED\x07x\n")
             + frame(0x33, {"exit": 0}),
             "dark": frame(0x33, {"exit": 0}),
+            "late": frame(0x31, b'{"ok":1}\n') + frame(0x33, {"exit": 0}),
             "silent": frame(0x31, b'{"cut":'),
             "cut": frame(0x31, b'{"a":1}\n{"b":2}\n{"cut":')
             + frame(0x32, b"e-cut"),
@@ -1404,7 +1417,13 @@ class XFake:
             + frame(0x33, {"exit": 0}),
             "capcut": frame(0x31, b'{"ok":1}\n{"cut":"aaaa')
             + frame(0x33, {"exit": 2, "why": "cap"}),
-            "holdcut": frame(0x31, b'{"ok":1}\n{"cut":')}
+            "holdcut": frame(0x31, b'{"ok":1}\n{"cut":'),
+            "crash": frame(0x31, b'{"ok":1}\n{"half":')
+            + frame(0x32, b"e-half") + frame(0x33, {"exit": 137}),
+            "raw": b"".join(frame(0x31, x[i:i + 65536]) for x in
+                            [b'{"s":"' + b"a" * (17 << 20) + b'"}\n']
+                            for i in range(0, len(x), 65536))
+            + frame(0x33, {"exit": 0})}
         try:
             while True:
                 d = c.recv(65536)
@@ -1417,6 +1436,8 @@ class XFake:
                         break
                     buf = buf[5 + n:]
                     if t == 0x08:
+                        if self.mode == "late":
+                            time.sleep(0.4)
                         c.sendall(frame(0x18, {
                             "proto": "1.1", "server": "fake",
                             "ops": ["ctl", "ctl-cancel", "xray"]}))
@@ -1432,7 +1453,7 @@ class XFake:
                                   + frame(0x33, {"exit": 0}))
                     elif t == 0x30 and self.mode in answers:
                         c.sendall(answers[self.mode])
-                        if self.mode in ("dark", "cut"):
+                        if self.mode in ("dark", "cut", "late"):
                             time.sleep(0.2)
                             c.close()
                             return
@@ -1446,6 +1467,132 @@ class XFake:
                 c.close()
             except OSError:
                 pass
+
+
+def nfds(pid):
+    """pid's open descriptors, counted"""
+    if os.path.isdir("/proc/%d/fd" % pid):
+        return len(os.listdir("/proc/%d/fd" % pid))
+    lsof = "/usr/sbin/lsof" if os.path.exists("/usr/sbin/lsof") else "lsof"
+    return len(subprocess.run([lsof, "-p", str(pid)], capture_output=True,
+                              text=True).stdout.splitlines())
+
+
+def dial_cancel_checks(check, side, fake):
+    """#226 (QA 1.56.0 LOW-10 residual): --requests reads stdin while it
+    dials, so a {"cancel":N} for the request still dialling, or stdin's
+    end, ends it "cancel" at once, not "lost" once the dial gives up. The
+    host is dark (XFake "dark": the first connection answers, later ones
+    get no hello), so a dial takes RM_ATTACH_MS, 5 s: the bounds are
+    against that, with room for a loaded machine."""
+    dark = "dch: q: unreachable: no answer within 5000 ms"
+    cancel = [{"req": n, "exit": 2, "why": "cancel"} for n in range(4)]
+
+    def dialling():
+        """a --requests whose warm connection the dark host has closed:
+        the next request dials"""
+        f = fake("dark")
+        rq = Requests(side(f.port), "q:x")
+        rq.line()
+        rq.send({"req": 1, "argv": ["--json"]})
+        rq.until(1)
+        time.sleep(0.5)	# the host's close reaches dch, quietly
+        return f, rq
+
+    # the dialling request's cancel; one for an id not running: nothing
+    f, rq = dialling()
+    t0 = time.time()
+    rq.send({"req": 2, "argv": ["--json"]})
+    time.sleep(0.3)
+    rq.send({"cancel": 9}, {"cancel": 2})
+    got = [json.loads(g) for g in rq.until(2, 30)]
+    took = time.time() - t0
+    check("#226: a cancel while its request dials ends it cancel, exit 2, "
+          "at once, not lost when the 5 s dial gives up; a cancel for an id "
+          "not running writes nothing", got == cancel[2:3] and took < 4,
+          (got, took))
+    # the same dark host after the cancel: the dial goes on, quietly; the
+    # next request waits on it and is cancelled the same way; the one
+    # after that ends lost when that one dial gives up
+    rq.send({"req": 3, "argv": ["--json"]})
+    time.sleep(0.3)
+    t0 = time.time()
+    rq.send({"cancel": 3})
+    got = [json.loads(g) for g in rq.until(3, 30)]
+    took = time.time() - t0
+    rq.send({"req": 4, "argv": ["--json"]})
+    got4 = [json.loads(g) for g in rq.until(4, 30)]
+    rc, rest, err = rq.end()
+    check("#226: the next request to the dark host after the cancel: its "
+          "cancel too ends it at once; the one after ends lost when the one "
+          "dial gives up, no dial of its own",
+          got == cancel[3:4] and took < 3
+          and got4 == [{"req": 4, "stderr": dark},
+                       {"req": 4, "exit": UNREACHABLE_EXIT, "why": "lost"}]
+          and f.n == 2 and rc == 0 and rest == b"",
+          (got, took, got4, f.n, rc, rest, err))
+
+    # a request queued behind the dialling one waits; the dialling one's
+    # cancel ends it, the queued one then waits on the same dial, and its
+    # cancel ends it too
+    f, rq = dialling()
+    t0 = time.time()
+    rq.send({"req": 2, "argv": ["--json"]}, {"req": 3, "argv": ["--json"]})
+    time.sleep(0.3)
+    rq.send({"cancel": 2})
+    got = [json.loads(g) for g in rq.until(2, 30)]
+    rq.send({"cancel": 3})
+    got += [json.loads(g) for g in rq.until(3, 30)]
+    took = time.time() - t0
+    rc, rest, err = rq.end()
+    check("#226: a request queued behind the dialling one: the dialling "
+          "one's cancel ends it at once, then the queued one's ends it",
+          got == cancel[2:4] and took < 4 and f.n == 2 and rc == 0
+          and rest == b"", (got, took, f.n, rc, rest, err))
+
+    # stdin's end while a request dials, one queued behind it
+    f, rq = dialling()
+    rq.send({"req": 2, "argv": ["--json"]}, {"req": 3, "argv": ["--json"]})
+    time.sleep(0.3)
+    t0 = time.time()
+    rc, rest, err = rq.end(30)
+    took = time.time() - t0
+    check("#226: stdin EOF while a request dials: it and the one queued "
+          "behind it end cancel, exit 0, at once",
+          rc == 0 and [json.loads(x) for x in rest.splitlines()]
+          == cancel[2:4] and took < 4, (rc, rest, err, took))
+
+    # a dial that ends as the cancel arrives, either side of it: each
+    # request ends once, cancel or the host's exit 0, and no socket stays
+    f = fake("late")
+    rq = Requests(side(f.port), "q:x")
+    rq.line()
+    rq.send({"req": 1, "argv": ["--json"]})
+    rq.until(1)
+    time.sleep(0.5)
+    n0 = nfds(rq.p.pid)
+    got = []
+    for i, d in enumerate((0.1, 0.2, 0.3, 0.4, 0.5, 0.6)):
+        rq.send({"req": 10 + i, "argv": ["--json"]})
+        time.sleep(d)
+        rq.send({"cancel": 10 + i})
+        got.append([json.loads(g) for g in rq.until(10 + i, 30)])
+        time.sleep(0.3)
+    rq.send({"req": 20, "argv": ["--json"]})
+    last = [json.loads(g) for g in rq.until(20, 30)]
+    time.sleep(0.5)	# the host's close reaches dch
+    n1 = nfds(rq.p.pid)
+    rc, rest, err = rq.end()
+    ends = [g[-1] for g in got if g]
+    check("#226: a dial ending as its cancel arrives: one end line each, "
+          "cancel or the host's exit 0, no descriptor left behind",
+          all(len([x for x in g if "exit" in x]) == 1 for g in got)
+          and all(e in ({"req": e["req"], "exit": 2, "why": "cancel"},
+                        {"req": e["req"], "exit": 0, "why": None})
+                  for e in ends) and len(ends) == 6
+          and last[-1:] == [{"req": 20, "exit": 0, "why": None}]
+          and n1 == n0 and rc == 0 and rest == b"",
+          (got, last, n0, n1, rc, rest, err))
 
 
 def robust_checks(dch, check, cenv, fakes, tmp):
@@ -1594,6 +1741,7 @@ def robust_checks(dch, check, cenv, fakes, tmp):
     check("LOW-10: past RM_ATTACH_MS the next request dials again",
           f.n == 3, f.n)
     rq.end(30)
+    dial_cancel_checks(check, side, fake)	# #226
 
     # LOW-8: a reused id while it runs: busy as req null, one end for it
     f = fake("hold")
@@ -1714,6 +1862,29 @@ def robust_checks(dch, check, cenv, fakes, tmp):
           and p.returncode == -signal.SIGINT, (first, out, err,
                                                p.returncode))
 
+    # QA 1.58.0 LOW-R7: the host's dch killed by a signal mid-line: the
+    # partial stdout line dropped, as for a cut; said; exit 128 + N
+    f = fake("crash")
+    r = subprocess.run([DCH, "--xray", "q:x", "--json"], env=side(f.port),
+                       capture_output=True, stdin=subprocess.DEVNULL,
+                       timeout=20)
+    check("LOW-R7: a host dch killed mid-line: the whole lines, the partial "
+          "line dropped, said, exit 137", r.returncode == 137
+          and r.stdout == b'{"ok":1}\n' and r.stderr == b"e-halfdch: q: "
+          b"--xray on the host ended by signal 9\n", r)
+
+    # QA 1.58.0 NIT-R3: a raw host line over 16 MiB (no control in it) is
+    # a line over 16 MiB, not "out of memory": exit 7, nothing written
+    f = fake("raw")
+    r = subprocess.run([DCH, "--xray", "q:x", "--json"], env=side(f.port),
+                       capture_output=True, stdin=subprocess.DEVNULL,
+                       timeout=60)
+    check("NIT-R3: a raw host line over 16 MiB: exit 7, the line's size "
+          "said, nothing written", r.returncode == UNREACHABLE_EXIT
+          and r.stdout == b"" and r.stderr == b"dch: q: unreachable: it "
+          b"sent a line over 16 MiB escaped\n",
+          (r.returncode, r.stdout[:40], r.stderr[:200]))
+
 
 def main():
     # POSIX only, so windows_client_test.py can import Fake and frame
@@ -1789,6 +1960,9 @@ def main():
         if pid == 0:
             os.execve(DCH, [DCH] + args, cenv)
             os._exit(127)
+        # pty.fork()'s master is inheritable: a later client would hold it,
+        # and closing ours would not hang this pty up (QA 1.59.0 MED-T2)
+        os.set_inheritable(fd, False)
         fcntl.ioctl(fd, termios.TIOCSWINSZ,
                     struct.pack("HHHH", rows, cols, 0, 0))
         clients.append((pid, fd))
@@ -2279,7 +2453,12 @@ def main():
             try:
                 os.kill(pid, signal.SIGKILL)
                 os.close(fd)
-                os.waitpid(pid, 0)
+                end = time.time() + 10
+                while not os.waitpid(pid, os.WNOHANG)[0]:
+                    if time.time() > end:
+                        print("  leaving client %d unreaped" % pid)
+                        break
+                    time.sleep(0.05)
             except OSError:
                 pass
         for f in fakes:

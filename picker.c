@@ -422,12 +422,14 @@ pk_bidi(unsigned u)
 }
 
 /* Cells of code point u: two for the wide (ap_cells), none for a combining
-** mark, a joiner or a variation selector; one for a bidi control's '?'. */
+** mark, a joiner, an invisible operator, a BOM or a variation selector; one
+** for a bidi control's '?'. */
 static int
 pk_cw(unsigned u)
 {
 	return pk_bidi(u) ? 1 : (u >= 0x300 && u <= 0x36F) ||
-	       (u >= 0x200B && u <= 0x200F) || (u >= 0xFE00 && u <= 0xFE0F)
+	       (u >= 0x200B && u <= 0x200F) || (u >= 0x2060 && u <= 0x2064) ||
+	       (u >= 0xFE00 && u <= 0xFE0F) || u == 0xFEFF
 	       ? 0 : ap_cells(u);
 }
 
@@ -1052,7 +1054,9 @@ pk_row(const struct pk *p, const struct pkrow *w, int sel)
 	{
 		const char *e = pk_end(w->state, b, sizeof b);
 
-		pk_set(!strncmp(e, "crashed", 7) ? PK_P(PK_RED) : "2");
+		/* running (#254): the accent, as a working session is */
+		pk_set(w->live ? PK_P(PK_ACC) : !strncmp(e, "crashed", 7)
+		       ? PK_P(PK_RED) : "2");
 		pk_fit(e, pk_c.state);
 	}
 	else
@@ -1218,6 +1222,19 @@ pk_fend(int fd, int force)
 	pk_flush(fd, force);
 }
 
+/* s right-aligned and faint, when it fits with room to spare: the
+** picker's first row gives it up first at narrow widths. */
+static void
+pk_aside(const char *s)
+{
+	if (pk_w - pk_col >= pk_cps(s) + 4)
+	{
+		pk_pad(pk_w - pk_cps(s));
+		pk_set("2");
+		pk_txt(s);
+	}
+}
+
 static void
 pk_draw(struct pk *p, int fd, const char *header, int force)
 {
@@ -1226,7 +1243,7 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 		"\xe2\xa0\xb4\xe2\xa0\xa6\xe2\xa0\xa7\xe2\xa0\x87\xe2\xa0\x8f" };
 	static const char *const tabn[3] = { "Sessions", "Sidekicks", "History" };
 	struct pkkey keys[24];
-	char b[96];
+	char b[96], go[16];
 	const char *ret;
 	int nk = 0, k, t, rows, kl, cap, tabs = 0, pos, ri;
 	/* the rows drawn: the kept ones (pk_pos), or the settings */
@@ -1249,6 +1266,10 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 	cur = !p->settings && *sel < p->n[p->tab] ? &p->r[p->tab][*sel] : NULL;
 #endif
 	ret = pk_utf ? "\xe2\x86\xb5" : "enter";
+	/* what Enter does to a live row: attach, or the verb of the -k and
+	** -d pickers, the first word of their header ("kill session:") */
+	snprintf(go, sizeof go, "%s", p->opens ? "attach" : header);
+	go[strcspn(go, " ")] = '\0';
 	for (t = 0; t < 3; t++)
 		tabs += pk_shown(p, t);
 
@@ -1258,7 +1279,7 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 	(keys[nk++] = (struct pkkey){ (k), (l), (v), (g), (x) })
 	if (p->filtering)
 	{
-		PK_K(0, ret, p->tab == 2 ? "resume" : "attach", NULL, 0);
+		PK_K(0, ret, p->tab == 2 ? "resume" : go, NULL, 0);
 		PK_K(3, pk_utf ? "\xe2\x86\x91\xe2\x86\x93" : "up/down", "keep",
 		     NULL, 0);
 		PK_K(3, "esc", "clear", NULL, 0);
@@ -1275,7 +1296,7 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 #else
 	else if (p->tab < 2)
 	{
-		PK_K(0, ret, "attach", NULL, 0);
+		PK_K(0, ret, go, NULL, 0);
 		PK_K(0, "r", "rename", NULL, 0);
 		PK_K(0, "X", "kill", NULL, 1);
 		PK_K(0, "x", "x-ray", NULL, 0);
@@ -1289,18 +1310,25 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 	}
 	else
 	{
-		PK_K(0, ret, "resume", NULL, 0);
-		if (p->opens)
+		/* a running name's row (#254): it attaches, nothing resumes
+		** or removes it */
+		int run = cur && cur->live;
+
+		if (!run || p->opens)
+			PK_K(0, ret, run ? "attach" : "resume", NULL, 0);
+		if (p->opens && !run)
 			PK_K(0, pk_utf ? "\xe2\x87\xa7\xe2\x86\xb5/o"
 			     : "S-enter/o", "open", NULL, 0);
-		PK_K(0, "m", "no message", NULL, 0);
+		if (!run)
+			PK_K(0, "m", "no message", NULL, 0);
 		if (p->interrupted)
 		{
 			snprintf(intr, sizeof intr, "%d", p->interrupted);
 			PK_K(0, "I", "interrupted", intr, 0);
 		}
 		PK_K(0, "p", cur && cur->pinned ? "unpin" : "pin", NULL, 0);
-		PK_K(0, "d", "remove", NULL, 1);
+		if (!run)
+			PK_K(0, "d", "remove", NULL, 1);
 		PK_K(0, "x", "x-ray", NULL, 0);
 	}
 	if (!p->settings && !p->filtering)
@@ -1324,8 +1352,9 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 	if (kl < 0)
 		kl = cap;
 
-	/* the title, tabs, column headers, rule and status around the list */
-	p->win = rows - 5 - kl;
+	/* the title (the -k and -d pickers' only, #252), tabs, column headers,
+	** rule and status around the list */
+	p->win = rows - (*header ? 5 : 4) - kl;
 	if (p->win < 1)
 		p->win = 1;
 	if (p->settings && *sel >= n)
@@ -1343,20 +1372,19 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 	ri = p->settings ? *top : pk_nth(p, p->tab, *top);
 	pk_cols(p, ri, (*top + p->win < n ? *top + p->win : n) - *top);
 
-	/* the title, quiet, and what there is on the right, faint */
-	pk_line();
-	pk_set("1");
-	pk_txt(header);
+	/* the title, quiet, and what there is on the right, faint: on the
+	** tabs row when there is no title (the switch picker's, #252) */
 	k = p->n[0] + p->n[1];
 	snprintf(b, sizeof b, "%d session%s %s dch %s", k, k == 1 ? "" : "s",
 	         pk_utf ? "\xc2\xb7" : "-", DCH_VERSION);
-	if (pk_w - pk_col >= pk_cps(b) + 4)
+	if (*header)
 	{
-		pk_pad(pk_w - pk_cps(b));
-		pk_set("2");
-		pk_txt(b);
+		pk_line();
+		pk_set("1");
+		pk_txt(header);
+		pk_aside(b);
+		pk_eol();
 	}
-	pk_eol();
 
 	pk_line();
 	if (p->settings)
@@ -1364,6 +1392,8 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 	for (t = 0; t < 3 && !p->settings; t++)
 		if (pk_shown(p, t))
 			pk_tab(tabn[t], pk_pos(p, t, p->n[t]), t == p->tab);
+	if (!*header)
+		pk_aside(b);
 	pk_eol();
 
 	pk_heads(p);

@@ -12,29 +12,66 @@ bad()  { fail=$((fail + 1)); printf '  FAIL %s\n' "$1"; }
 check(){ if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (want [$3] got [$2])"; fi; }
 # Run a python test script; on failure print its output so CI logs show
 # which sub-check died instead of a bare FAIL line.
-# A test still running after DCH_TEST_TIMEOUT seconds (default 600; the
-# slowest python test takes a few minutes on a macOS runner under ASan) gets
-# every thread's traceback printed by faulthandler's in-process watchdog
-# thread (no sleeper process to reap), exits 1, and the dch processes left
-# are listed. Output goes to a file, not $(...): a leftover child holding
+# A test still running after DCH_TEST_TIMEOUT seconds (whole seconds, default
+# 600: the slowest python test takes a few minutes on a macOS runner under
+# ASan; 0 = no watchdog; empty, negative or not a number = 600) gets every
+# thread's traceback printed by faulthandler's in-process watchdog thread (no
+# sleeper process to reap), exits 1, and pyreap ends what it left. The test
+# runs in its own session (os.setsid), in the background so that a trapped ^C
+# ends it too. Output goes to a file, not $(...): a leftover child holding
 # that pipe open would hang the suite.
+pypid=
 pyrun(){
-    DCH="$DCH" python3 -c 'import faulthandler, os, runpy, sys
-faulthandler.dump_traceback_later(float(sys.argv[1]), exit=True)
+    pyt=${DCH_TEST_TIMEOUT:-600}
+    case $pyt in *[!0-9]*|??????????*) pyt=600 ;; esac
+    pyls=$(ls "$SOCKDIR")
+    # An async list starts with SIGINT and SIGQUIT ignored: restore them.
+    DCH="$DCH" python3 -c 'import faulthandler, os, runpy, signal, sys
+os.setsid()
+signal.signal(signal.SIGINT, signal.default_int_handler)
+signal.signal(signal.SIGQUIT, signal.SIG_DFL)
+if int(sys.argv[1]):
+    faulthandler.dump_traceback_later(int(sys.argv[1]), exit=True)
 sys.argv = sys.argv[2:]
 sys.path[0] = os.path.dirname(os.path.abspath(sys.argv[0]))
 runpy.run_path(sys.argv[0], run_name="__main__")' \
-        "${DCH_TEST_TIMEOUT:-600}" "$(dirname "$0")/$2" >"$TMP/pyout" 2>&1 \
-        && ok "$1" \
+        "$pyt" "$(dirname "$0")/$2" </dev/null >"$TMP/pyout" 2>&1 &
+    pypid=$!
+    wait "$pypid" && ok "$1" \
         || { bad "$1"; sed 's/^/       /' "$TMP/pyout"
-             grep -q '^Timeout (' "$TMP/pyout" &&
-                 ps -A -o pid,ppid,stat,etime,command |
-                 awk 'NR == 1 || $5 ~ /(^|\/)dch$/ { print "       " $0 }'; }
+             grep -q '^Timeout (' "$TMP/pyout" && pyreap; }
+    pypid=
+}
+# End what test $pypid left: its process group, then the sessions it started
+# in this run's socket dir. setsid made the group id its pid, and a group id
+# is never reused while a member lives, so group $pypid is the test's. Masters
+# setsid themselves: dch -k ends each by the pid on its socket. Sessions and
+# dirs a test made under /tmp itself are left: no safe rule finds them from
+# here. Only these rows print, never another process's argv.
+pyreap(){
+    me=$(ps -o pgid= -p $$ | tr -d ' ')
+    # never kill -- -'', -0, -1 or our own group: $! is none of them
+    case $pypid in ''|0*|1|*[!0-9]*) return ;; esac
+    case $me in ''|0*|*[!0-9]*) return ;; esac
+    [ "$pypid" != "$me" ] || return
+    left=$(ps -A -o pid= -o pgid= -o stat= -o etime= -o command= |
+           awk -v g="$pypid" '$2 == g { print "       " $0 }')
+    if [ -n "$left" ]; then
+        printf '       killed, left in its process group:\n%s\n' "$left"
+        kill -s KILL -- "-$pypid"
+    fi
+    for s in "$SOCKDIR"/*.sock; do
+        n=${s##*/}
+        [ -S "$s" ] && ! printf '%s\n' "$pyls" | grep -qxF "$n" || continue
+        printf '       ended its session %s with dch -k\n' "${n%.sock}"
+        "$DCH" -k "${n%.sock}" >/dev/null 2>&1
+    done
 }
 
 # Isolate session dir: dch uses $XDG_RUNTIME_DIR/dch-$UID.
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
+trap 'pyreap; exit 130' INT TERM HUP
 export XDG_RUNTIME_DIR="$TMP"
 # DCH_SOCKET_DIR wins over XDG_RUNTIME_DIR: an inherited one would point the
 # suite at the caller's live sessions.
@@ -171,6 +208,7 @@ sys.exit(0 if min(one() for _ in range(20)) < 0.1 else 1)
 if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
 	pyrun "child owns alternate-screen mode" alt_screen_test.py
 	pyrun "kitty keyboard pop reaches both screens" kbd_altscreen_test.py
+	pyrun "mode sequences split across pty reads are re-armed" mode_split_test.py
 	pyrun "spawn over leftover socket + hot-path attach" spawn_test.py
 fi
 
@@ -195,6 +233,7 @@ fi
 # --- attach: WINCH repaint, and NEVER a typed ^L ----------------------------
 if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "attach repaints via WINCH, types no ^L" attach_test.py
+    pyrun "attach is raw again after bg/fg, a startup ^Z, an outside SIGTSTP (LOW-V9)" attach_cont_test.py
     pyrun "size follows focus (DEC 1004, #100)" focus_test.py
     pyrun "attach replay with --scrollback (#101)" scrollback_test.py
 fi
@@ -1028,6 +1067,7 @@ pyrun "the chord's query child exit()s: the client's terminal and marker stay" \
     chord_fork_exit_test.py
 grep '^  skip ' "$TMP/pyout"
 pyrun "the --xray view of host:name over a loopback dch serve, picker X, the chord over dch -a host:name" xray_remote_view_test.py
+pyrun "the --xray view's o: a local host:name that has ended, a host that answers another name (#232)" xray_view_o_test.py
 # xray_cli_test.py's RSS budget: a fork()+exec+wait4 helper, because a child
 # spawned by Python inherits Python's RSS high-water mark on Linux (maxrss.c)
 # shellcheck disable=SC2086 # xcc is a word list
@@ -1052,6 +1092,46 @@ pyrun "xray: a live Codex's rollout, the mapping, the seam, --follow" xray_codex
 # the file window's guard (#178): QA's repro with FAKE files, local and over
 # a loopback dch serve, through ended sessions so lite runs it too
 pyrun "xray file windows: no wide root, the deny list, hard links" xray_deny_test.py
+
+# --- the watchdog ends a hung test, its child and its session, only them ----
+# watchdog_hang.py records its pid, a child's and a session master's, then
+# hangs past a 3 s watchdog. The sleep is a bystander in run.sh's own group.
+# The subshell keeps the hung test's FAIL out of the counts.
+if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
+    wdf=$fail wdpy='' wdkid='' wdm='' wdname=''
+    sleep 30 & wdby=$!
+    (DCH_TEST_TIMEOUT=3 DCH_WD_PIDS="$TMP/wd.pids"; export DCH_WD_PIDS
+     pyrun "hung" watchdog_hang.py) >"$TMP/wd.out" 2>&1
+    [ -f "$TMP/wd.pids" ] && read -r wdpy wdkid wdm wdname <"$TMP/wd.pids"
+    wdgone(){ for p; do
+        case $p in ''|*[!0-9]*) return 1 ;; esac
+        ! kill -0 "$p" 2>/dev/null || return 1
+    done; }
+    n=0
+    while [ "$n" -lt 50 ] && ! wdgone "$wdpy" "$wdkid" "$wdm"; do
+        sleep 0.1; n=$((n + 1))
+    done
+    grep -q '^  FAIL hung$' "$TMP/wd.out" && grep -q 'Timeout (' "$TMP/wd.out" \
+        && ok "watchdog: a hung test fails, with its traceback" \
+        || bad "watchdog: a hung test fails, with its traceback"
+    wdgone "$wdpy" "$wdkid" && ok "watchdog: the hung test and its child end" \
+        || bad "watchdog: the hung test and its child end"
+    wdgone "$wdm" && [ -n "$wdname" ] && [ ! -e "$SOCKDIR/$wdname.sock" ] \
+        && ok "watchdog: the session it started in the socket dir ends" \
+        || bad "watchdog: the session it started in the socket dir ends"
+    kill -0 "$wdby" 2>/dev/null && ok "watchdog: a process outside its group lives" \
+        || bad "watchdog: a process outside its group lives"
+    kill "$wdby"
+    [ "$fail" = "$wdf" ] || sed 's/^/       /' "$TMP/wd.out"
+    [ -S "$SOCKDIR/$wdname.sock" ] && "$DCH" -k "$wdname" >/dev/null 2>&1
+    # DCH_TEST_TIMEOUT 0 (no watchdog) and invalid values (600) pass a test
+    n=0
+    for v in 0 '' -1 abc; do
+        (DCH_TEST_TIMEOUT=$v; pyrun "t" watchdog_hang.py) | grep -q '^  ok   t$' &&
+            n=$((n + 1))
+    done
+    check "DCH_TEST_TIMEOUT 0, empty, -1 or abc: a test still passes" "$n" "4"
+fi
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

@@ -129,7 +129,11 @@ there are some; and **History**, the ended sessions of `--history`, one row
 per session name (its newest record, pinned when any record of the name is):
 every pinned name, then the newest other names while there are fewer than 50
 rows, so pinned names alone can make more (`--history` itself still lists
-every record, newest first). With remote hosts on, History also lists the
+every record, newest first). A name with a session running is decided by the
+name, not by its records: pinned, it stays on History, its ENDED `running` in
+the accent and WHEN its last output, and `Enter` attaches that session; not
+pinned, it is not on History (it is on Sessions or Sidekicks), and its older
+records come back when it ends. With remote hosts on, History also lists the
 other hosts' ended sessions as `host:name`, the host faint, at most 50 names
 per host on top of the local rows, so a full local History never hides them
 (see [Remote hosts](#remote-hosts)). Rows sort pinned first (a remote row
@@ -146,7 +150,7 @@ loudest; Working, in the accent; Done, green; Idle, faint), ACTIVE (how long
 ago it last printed: `now`, `22m`, `3h`, `2d`), AGENTS, MERGED (`✓ 251`) and
 PULL REQUESTS (from `--meta`'s `prs`: `solution#22330`, the repo said once
 when they share it, `+N` for those that do not fit). A History row shows its
-pin (`◆`), NAME, ENDED (closed, stopped, exited, crashed …), WHEN and the
+pin (`◆`), NAME, ENDED (closed, stopped, exited, crashed …, or running), WHEN and the
 DIRECTORY, cut from the left. As the window narrows the last column goes
 first, then merged, agents and the age; the name shrinks last, cut with `…`,
 and nothing wraps. The list reloads about once a second and keeps the
@@ -167,20 +171,20 @@ hint.
 | --- | --- | --- |
 | `↑` `↓` / `j` `k`, `PgUp` `PgDn`, `g` `G` | move | move |
 | `Tab` `→` `l` / `Shift-Tab` `←` `h` | next / previous tab | next / previous tab |
-| `Enter` | attach (`-k`: kill, `-d`: detach) | resume (`--revive`, with the carry-on message) |
-| `Shift-Enter` / `o` | attach (`Shift-Enter`; as `Enter`) | resume, then attach to it once it is up (open); `dch -l` and the switch only, the `-k` / `-d` pickers say so and do nothing |
+| `Enter` | attach (`-k`: kill, `-d`: detach) | resume (`--revive`, with the carry-on message); a running row attaches its session (`dch -l` and the switch; the `-k` / `-d` pickers say it is running and do nothing) |
+| `Shift-Enter` / `o` | attach (`Shift-Enter`; as `Enter`) | resume, then attach to it once it is up (open); a running row attaches its session; `dch -l` and the switch only, the `-k` / `-d` pickers say so and do nothing |
 | `r` | rename (set the alias; empty clears) | |
 | `R` | restart the agent (`--restart <n> --include-agents -f`), asks first | |
 | `S` | stop (`--stop`), asks first | |
-| `x` | open the session's [X-ray view](#x-ray-view-dch---xray-n); `q` comes back (a remote row's runs on its host) | the same, for the row's record |
+| `x` | open the session's [X-ray view](#x-ray-view-dch---xray-n); `q` comes back (a remote row's runs on its host) | the same, for the row's record (a running row's: its session's) |
 | `X` | kill (`-k`), asks first | |
 | `a` | allow a plain Yes/No permission prompt (presses `1`, Yes), asks first; a question form or any other prompt is refused: attach to answer it | |
 | `b` / `B` | restart stale agents / restart all agents (force), asks first | |
 | `s` | sort by activity (blocked, working, done, idle, newest first) or by name (`a2` before `a10`); saved as `picker_sort`, so the next picker starts in it | |
-| `m` | | resume without the message (`--no-message`) |
+| `m` | | resume without the message (`--no-message`); a running row says it is running |
 | `I` | | resume interrupted (n) (`--revive --all`), asks first |
 | `p` | | pin / unpin every record of the row's name |
-| `d` | | remove every ended record of the row's name (`--forget`), asks first; a pinned name must be unpinned first. While a session of that name is live, one press removes at most 8 of its ended records (the rest stay a row: press `d` again) |
+| `d` | | remove every ended record of the row's name (`--forget`), asks first; a pinned name must be unpinned first; a running row says it is running and removes nothing |
 | `/` | filter (below) | filter (below) |
 | `,` | settings | settings |
 | `q` `Esc` `Ctrl-C` `Ctrl-D` | quit (`Esc` clears a filter first) | quit (`Esc` clears a filter first) |
@@ -278,7 +282,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.59.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.60.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -432,7 +436,7 @@ someone is watching is invisible to them.
 | `--report <n> <state>` | Push a semantic state: `working`, `idle`, `blocked`, or `done` (closed set, unknown tokens rejected); `clear` reverts to auto (detection + heuristic). Last write wins; cleared automatically when the session ends. | 0 ok, 1 no session / bad state |
 | `--meta <n> '<json>'` | Attach one JSON object of metadata to the session (see [Optional: session metadata](#optional-session-metadata)); `clear` removes it. Replaced atomically, last write wins, never interpreted; a byte-identical push is a no-op; rejected input leaves the stored object unchanged. Removed automatically when the session's program exits. | 0 ok, 1 no session / not a single-line JSON object ≤ 16 KB |
 | `--wait <n> --state <s[,s...]> [--timeout ms]` | Block until the state matches any of the comma list (e.g. `idle,blocked,done` = "turn over"); prints the matched state. `active` is accepted as an alias for `working`. Polls every 100 ms. | 0 hit, 2 timeout, 1 no session |
-| `--ls-json` | All sessions as JSON: `[{"name","alias","harness","activity_epoch","state","version","agents","meta","meta_epoch","auto_allowed","claude_session_id","transcript_path","cols","rows","clients"}]`. `cols` and `rows` are the pty size the session's master holds (set by the attached clients' windows, or `--spawn --size`), `clients` how many clients are attached right now; read in the same control round trip as the rest, never by attaching or resizing, and left out (not `0`) for a master too old to report them and for `--remote` rows. Every row ends with `"cwd"`, after every other key: the directory the session started in, from its live history record, `null` when it has none (a master from before history records) or the record already says it ended; a `--remote` row's is the host's, from its `dch serve` list, `null` from a server that does not send one. `harness` is the name of the Claude Code or Codex session running inside, or `""`; the real `name` remains separate. `state` follows the same resolution rule as `--status`. `version` is the dch version of the master serving that session, or `""` for a master old enough not to report one. `agents` is the number of live subagents on Claude Code's agent panel (the `⏺ main` block under the prompt), `0` when no panel is on screen — including while a prompt covers it — or `DCH_NO_DETECT=1` is set. `meta` is the object last pushed with `--meta`, verbatim, or `null`; `meta_epoch` is when that content last changed (epoch seconds, like `activity_epoch`), `0` with no meta. `auto_allowed` is the permission prompt the master answered last with [auto-allow](#auto-allow), `{"at":<epoch seconds>,"title":"<the dialog's first line, e.g. Bash command>"}`, or `null`; cleared when the session's program exits, like `meta`. `claude_session_id` is the `sessionId` of the one live interactive Claude Code under the session's program, read fresh from its own `<config>/sessions/<pid>.json` (pid descending from the program, `procStart` matching the process; `CLAUDE_CONFIG_DIR` honoured), so it follows `/clear` and resume; `null` when no Claude runs there, when more than one does, once it exits, or when the id is not a UUID. `transcript_path` is that conversation's absolute `<config>/projects/<dir>/<sessionId>.jsonl` when exactly one such file exists, else `null` (also right after `/clear`, until the new conversation writes its first line). | 0 |
+| `--ls-json` | All sessions as JSON: `[{"name","alias","harness","activity_epoch","state","version","agents","meta","meta_epoch","auto_allowed","claude_session_id","transcript_path","cols","rows","clients"}]`. `cols` and `rows` are the pty size the session's master holds (set by the attached clients' windows, or `--spawn --size`), `clients` how many clients are attached right now; read in the same control round trip as the rest, never by attaching or resizing, and left out (not `0`) for a master too old to report them and for `--remote` rows. Every row ends with `"cwd"`, after every other key: the directory the session started in, from its live history record, `null` when it has none (a master from before history records) or the record already says it ended; a `--remote` row's is the host's, from its `dch serve` list, `null` from a server that does not send one. `harness` is the name of the Claude Code or Codex session running inside, or `""`; the real `name` remains separate. `state` follows the same resolution rule as `--status`. `version` is the dch version of the master serving that session, or `""` for a master old enough not to report one. `agents` is the number of live subagents on Claude Code's agent panel (the `⏺ main` block under the prompt), `0` when no panel is on screen — including while a prompt covers it — or `DCH_NO_DETECT=1` is set. `meta` is the object last pushed with `--meta`, verbatim, or `null`; `meta_epoch` is when that content last changed (epoch seconds, like `activity_epoch`), `0` with no meta. `auto_allowed` is the permission prompt the master answered last with [auto-allow](#auto-allow), `{"at":<epoch seconds>,"title":"<the dialog's first line, e.g. Bash command>"}`, or `null`; cleared when the session's program exits, like `meta`. `claude_session_id` is the `sessionId` of the one live interactive Claude Code under the session's program, read fresh from its own `<config>/sessions/<pid>.json` (pid descending from the program, `procStart` matching the process; `CLAUDE_CONFIG_DIR` honoured), so it follows `/clear` and resume; `null` when no Claude runs there, when more than one does (Claudes below another one, such as a test's fake Claude under one of its tool calls, count as that one), once it exits, or when the id is not a UUID. `transcript_path` is that conversation's absolute `<config>/projects/<dir>/<sessionId>.jsonl` when exactly one such file exists, else `null` (also right after `/clear`, until the new conversation writes its first line). | 0 |
 | `--restart <n>` \| `--restart --all` `[--include-agents] [-f] [--json]` | Re-exec the session's master onto the current `dch` binary, in place — the program inside keeps running (see [Upgrading a live session](#upgrading-a-live-session)). `--all` restarts only sessions whose `version` differs from this binary's; `-f` restarts all of them. With `--include-agents`, it then restarts the stale Claude Code agents of those sessions — Claude as the session's command; one typed into its shell is skipped (`in_shell`); every session with `--all`, only `<n>` otherwise; `-f` forces current agents too (see [Restarting Claude Code agents](#restarting-claude-code-agents)). Without the flag no agent is touched, `--all` included. `--include-agents` without `--restart` is a usage error. `--json`: stdout is NDJSON, the master pass included, with or without `--include-agents` (see [Machine-readable output](#machine-readable-output)). | 0 ok, 1 failed / master too old / an agent restart failed |
 | `--respawn <n> [-- cmd...]` | Arm a one-shot respawn: when the session's program next exits, the master keeps the session (same socket, pty size, attached clients) and starts `cmd` in its place. No `cmd` arms a *hold*: the session stays up childless until a second `--respawn <n> -- cmd` starts one, or until `DCH_HOLD_MS` (default 120000) ends it. An arm that nothing consumes expires after `DCH_RESPAWN_TTL_MS` (default 300000); both are read from the master's environment. `--restart` refuses while a respawn is armed or held. | 0 ok, 1 no session / refused / master too old |
 | `--respawn <n> --cancel` | Drop a pending arm. On a held (childless) session it ends the session. | 0 ok, 1 no session |
@@ -880,7 +884,10 @@ The view has three tabs:
   A chapter whose prompt the harness wrote, not you (a task notification,
   `"auto"` in `--json`), is hidden until `n` shows it, faint and titled by
   its summary (by its title when it has none); the footer says how many are
-  hidden, and `/` matches a summary too. The tab's count is the chapters
+  hidden, and `/` matches a summary too. A compaction (`= Conversation
+  compacted`) is hidden and counted the same way, and `n` shows it faint
+  (the footer calls both kinds "auto rows");
+  `Enter` on it reads its summary. The tab's count is the chapters
   shown without `n`. A host or an older dch that sends no `auto` shows
   every chapter. `o`, here and in a chapter, leaves the view (as `q` does)
   and attaches to the live session, as `dch -a <n>` does (`host:name` too;
@@ -895,11 +902,13 @@ The view has three tabs:
   rows). A ref with a definition or two or more mentions is bold. A file
   under the session's directory (top right) shows relative to it, else one
   under your home starts with `~`. A path too long for the row keeps its
-  end, the `…` in front; a long URL drops its `https://` and keeps its host
-  and its end. Files under `/tmp`, `/private/tmp`, `/var/folders` and
-  `$TMPDIR` (a remote view: not `$TMPDIR`, which is this machine's) are
-  scratch: hidden until `t` shows them, and the footer says how many are
-  hidden. The tab's count is every ref, hidden ones included. `/` filters on
+  end, the `…` in front; a long URL drops its `https://` and always starts
+  with its host: the host, or its first half-row if longer, then the `…` and
+  the URL's end (a host wider than the row is cut at its end). Files under
+  `/tmp`, `/private/tmp`, `/var/folders` and `$TMPDIR` (a remote view: not
+  `$TMPDIR`, which is this machine's) are scratch, except the session's own
+  project files: hidden until `t` shows them, and the footer says how many
+  are hidden. The tab's count is every ref, hidden ones included. `/` filters on
   the full ref. `Enter` opens its card.
 - **On screen**: the session's screen as it is now, with a hint label (`a`,
   `s`, `d`, …) on each ref the Refs tab shows bold. Typing a label opens that
@@ -928,7 +937,7 @@ X-ray; run `clear`".
 | `Enter` | read the chapter / open the card | card: read the mention's chapter |
 | `/` | filter | |
 | `t` | Refs: show / hide the temp files | |
-| `n` | Chapters: show / hide the auto chapters (task notifications) | |
+| `n` | Chapters: show / hide the auto rows (auto chapters, the task notifications, and compactions) | |
 | `o` | Chapters: attach to the session (in the chord: back to it) | reader: the same |
 | `f` `o` `y` | | card: full scan, other projects, copy |
 | `q` | quit | back |
@@ -1012,7 +1021,9 @@ the same JSON, and the host cannot drive your terminal. A host that sends
 nothing for 65 s (its own 60 s timeout, plus 5 s; time spent waiting on a
 slow reader of dch's output does not count) is a lost connection, exit 7;
 `--follow` has no such limit. A partial line the host was writing is dropped
-when the link is lost, on a cancel and when the host cuts the answer short.
+when the link is lost, on a cancel, when the host cuts the answer short and
+when the host's dch dies of a signal (`dch: <host>: --xray on the host ended
+by signal <N>`, exit 128 + N).
 A host line over 16 MiB once escaped ends it: `dch: <host>: unreachable: it
 sent a line over 16 MiB escaped`, exit 7. The
 host answers by its own release: `--scope`, `--chapter` and the corpus are
@@ -1042,7 +1053,9 @@ standard input is a request, as NDJSON:
   value is answered `{"req":N,"stderr":"dch: ..."}` and
   `{"req":N,"exit":2,"why":"refused"}`, and nothing is sent.
 - `{"cancel":N}`: stops request `N` on the host. Nothing is written when
-  `N` is not running.
+  `N` is not running. While dch is still dialling for `N`, the cancel ends
+  it at once with exit 2 and `"why":"cancel"`, and so does the end of
+  standard input, for `N` and any request sent after it.
 
 Each line the host writes comes back as `{"req":N,"line":<the line>}`, the
 line byte for byte (a line that is not one JSON object comes as a JSON
@@ -1282,22 +1295,30 @@ carries its own value and does not count); a ref inside a longer word
 (`--body "Fixes #9"`, `--opt=#9`) does not count, and with none left the
 output defines. A create command (`gh pr create`, `gh pr new`,
 `gh issue create`, `gh issue new`) takes its ref from its output only: what it
-creates has no number until it prints one. An orphan result, a forged or orphaned shell block, an error,
+creates has no number until it prints one. gh's repo flag (`-R o/r`,
+`--repo o/r`, `--repo=o/r`) may come before or after `pr` or `issue`; any other
+word there makes it no create. A gh alias for a create is not recognised: dch
+does not run gh. An orphan result, a forged or orphaned shell block, an error,
 a fence, a diff, a listing command (`rg`, `grep`, `ls`, ...), a file printed
 from outside the cwd, a heading with an empty title, and more than 3 headings
 of one shape never define. The command counts in every simple command of it
 (split at `;`, `&`, `&&`, `|`, `||`, parentheses and newlines, not at the `&`
-of `2>&1`, `<&3` or `&>`; a `<<` inside `$(( ))` is a shift; a `#` comment
-and each here-doc's body are not a command, and a command with a body the
-shell expands, `$(…)` under an unquoted delimiter, never defines), past env
+of `2>&1`, `<&3` or `&>`; `<>` is one redirect; a `<<` inside `$(( ))`,
+`$[ ]`, `${a[ ]}` or `a[ ]=` is a shift; a `#` comment, which starts only at a
+`#` that begins a word (not `$(x)#y`), and each here-doc's body are not a command, and a command with a body the
+shell expands, `$(…)` under an unquoted delimiter, or a `${` or `$[` left open
+never defines), past env
 assignments, redirects, `{`, `!`, `if`, `then`, `elif`,
 `else`, `do`, `while`, `until`, `coproc`, `function f`, and `sudo`, `doas`,
 `env`, `command`, `exec`, `builtin`, `xargs`, `nice`, `nohup`, `stdbuf`,
-`time` and `timeout` with their options (`sudo -iu root`,
-`timeout --signal KILL 5`), by name, by path (`/usr/bin/env`) or by GNU name
+`time`, `timeout`, `setsid`, `flock`, `ionice`, `chrt`, `taskset` and
+`busybox` with their options (`sudo -iu root`,
+`timeout --signal KILL 5`; `env -C d` and `sudo -D d` run it in `d`), by name, by path (`/usr/bin/env`) or by GNU name
 (`gtimeout`). It counts inside `sh -c '…'` (`sh`, `bash`, `zsh`, `dash`,
 `ksh`, `fish`; `-lc`, `-c --` and `-c -e` too), `eval`, `watch` and `env -S` (`-S'…'` and
-`--split-string` too), and inside `$(…)` and
+`--split-string` too), `flock f -c '…'`, a shell's script from a here-doc or a
+here-string (`bash <<'EOF'`, `bash <<< '…'`; a shell fed by a pipe never
+defines), and inside `$(…)` and
 backquotes, quoted or not. A search or a printed file found only inside
 `$(…)` or backquotes still leaves the command's `--title` to define: its text
 feeds the command, it is not the output. A command of more than 256 words
@@ -1306,7 +1327,7 @@ never defines. The file printers are `cat`, `head`, `tail`, `bat`, `batcat`,
 `rev`, `column`, `fold`, `fmt`, `glow`, `zcat` and `gzcat` (also by GNU name:
 `gcat`, `gsed`); with no file
 argument (`… | jq .`) they print their input and define, but under `xargs`
-they print files named by their input and never define. A `<` source is a
+they print files named by their input and never define. A `<` or `<>` source is a
 printed file of a printer, of a compound command (`done < f`, `} < f`) and
 of a redirect with no command (`$(< f)`). A printed file is
 outside the cwd when its path, made absolute against the cwd or the directory
@@ -1337,14 +1358,16 @@ ref (`dch: not a ref`), relative paths against the session's cwd.
   write, and History records hold none. A shell `<n>`'s project dir is its
   cwd's. Another session's lines carry `chapter: null`.
 - **Light.** The default stops at its first result, or after `--budget-ms`
-  (50 to 300, default 300, across all files) with `why: "budget"`. With
+  (50 to 300, default 300, across all files, not counting time spent waiting
+  on a reader that pauses) with `why: "budget"`. With
   `--scope project` or `all`, `<n>`'s own file is read to its end and only
   another session's result stops the scan. A live shell's lines and another
   session's give titles and counts only: no `mention`, no `passage`.
 - **Full.** `--full` reads the whole corpus up to its caps: 64 files
-  (`why: "files"`), 1 GiB (`why: "bytes"`) and 10 s (`why: "time"`). A
-  `--budget-ms` with it has no effect, but it is still checked: outside 50
-  to 300 it exits 2 (`dch: bad budget`).
+  (`why: "files"`), 1 GiB (`why: "bytes"`) and 10 s (`why: "time"`). The
+  10 s count the scan's own time: time spent waiting on a reader that pauses
+  is not counted. A `--budget-ms` with it has no effect, but it is still
+  checked: outside 50 to 300 it exits 2 (`dch: bad budget`).
 - **Counts.** `done.counts` has `session` (`<n>`'s mentions), `project` and
   `project_sessions` (the other sessions of its project dir: their mentions,
   and how many mention it), and `all` and `all_sessions` for the other dirs
@@ -1437,7 +1460,7 @@ Codex `<n>` gets it too.
   regard to case against every part of the whole path, as given and again
   as its real path:
   - a part that starts with `.env`, `.ssh`, `.gnupg`, `.aws`, `.netrc`,
-    `.npmrc`, `.pypirc` or `.git-credentials`;
+    `.npmrc`, `.pypirc`, `.git-credentials` or `.yarnrc`;
   - a directory `.git`, `.kube`, `.docker`, `.azure`, `.oci`, `.claude`,
     `.codex`, `.gcloud`, `.password-store`, `.m2`, `.bash_sessions`,
     `.zsh_sessions`, `.config/gh`, `.config/gcloud`, `.config/hub`,
@@ -1450,7 +1473,7 @@ Codex `<n>` gets it too.
     `secrets.json`, `credentials.tfrc.json`, `.yarnrc.yml`,
     `gradle.properties`, `rclone.conf`, `.boto`, `.dockercfg`,
     `.Xauthority`, `Xauthority`, `.ICEauthority`, `.credentials.json`,
-    `.terraformrc`, `terraform.rc` or `.databrickscfg`;
+    `.terraformrc`, `terraform.rc`, `.databrickscfg` or `auth.json`;
   - a name that ends in `.pem`, `.key`, `.p12`, `.pfx`, `.p8`, `.ppk`,
     `.jks`, `.keystore`, `.keychain`, `.keychain-db`, `.keyring`,
     `.tfstate`, `.tfstate.backup` or `history` (shell and REPL history);
@@ -1733,6 +1756,9 @@ visible screen does), and a master too old to know the verb at all — those
 sessions have to be recreated once, and only once. `--restart --all` reports
 those separately and does not count them as failures, since on the first
 upgrade to a `dch` that has live restart, that is every session you have.
+An attached client is not restarted: one started before the upgrade keeps the
+old ctrl-z behaviour (what it resets on the terminal before it stops) until it
+re-attaches.
 
 ### Restarting Claude Code agents
 
@@ -2037,6 +2063,13 @@ dch could make one; `--` reaches it: `--pin`, `--unpin`, `--forget` and
 (`dch --forget -- -h`), and `dch -k -- -x` kills it. In the picker such a
 row attaches and kills (live), pins and removes (History, `p` and `d`); any
 other key says so.
+
+`-n`, `--spawn` and `--revive <n> --as` also refuse a name holding `/` or a
+control character, or over 255 bytes (`dch: bad session name …`, exit 2,
+nothing started and the record left as it was): such a name would put the
+socket outside the socket directory. `-n` still attaches a live session that
+is listed under that exact name, and an auto-name is never refused. A History
+record whose name holds `/` is not loaded.
 
 The record is one line of JSON, mode 0600 in a 0700 directory:
 
@@ -2448,9 +2481,14 @@ no cap). At that cap the server
 stops forwarding, sends the dch SIGTERM (SIGKILL 2 s later) and ends with
 `{"exit":2,"why":"cap"}`. Past its timeout (the table) it does the same with
 `"why":"timeout"`. Output the client leaves unread is held, not cut, until
-20 s past the timeout: `dch --xray host:x --json | less` left on a page gets
+20 s past the timeout (80 s after the request; 680 s for the 660 s verbs):
+`dch --xray host:x --json | less` left on a page gets
 the whole answer if it reads on before the 60 s are up, `"why":"timeout"` if
 it reads on within 20 s after that, and a closed connection later.
+An answer that fits whole in the socket buffers is never left untaken, so a
+client that never reads it holds its slot until the warm connection's idle
+close: 300 s after the `0x33`, 30 s once the peer has 8 connections open (or
+the server 32).
 `--follow` and `--xray --follow` have no timeout: theirs closes after 20 s
 untaken, as any connection's does. A device (its tailnet address) runs at most 2
 `--xray --follow` of one session: a third ends the oldest the same way, with
@@ -2703,6 +2741,7 @@ any connection (exit 2).
 | 4 | Refused: the host's gate sent a coded `0x13` (`dch: <host> refused: <message>`). |
 | 6 | The host lacks the op: `dch: <host>: does not support <verb> (needs dch serve 1.41+)`, or `(needs dch serve --allow-create)` for `--spawn` and `--revive`, or `(needs dch serve 1.55.0+)` for `--xray` when the hello lacks `xray`; nothing is sent. |
 | 7 | Unreachable: `dch: <host>: unreachable: <why>` (down, `busy`, or the connection lost before the exit status). |
+| 128+N | The host's dch died of signal N: `dch: <host>: <verb> on the host ended by signal <N>`. |
 
 `-a`'s codes are unchanged.
 

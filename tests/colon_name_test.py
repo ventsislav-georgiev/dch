@@ -16,13 +16,15 @@ a:b name:
            goes remote (exit 7, unreachable) - routing is not lost.
 A missing proj:zz is a local "no session" for the control verbs; only with
 remote on (unknown) is it followed by one hint line naming --host. -a keeps
-discovery while remote is on, and is local with remote off.
+discovery while remote is on, and is local with remote off. And (#203) -n
+with a '/' or a control character in the name creates nothing (exit 2).
 No host is ever dialled but loopback port 1, and no tailscale runs (the
 configs name hosts, so there is no discovery; PATH has no tailscale).
 
 Run:  python3 tests/colon_name_test.py            (uses ./dch)
 """
-import json, os, pty, re, shutil, signal, subprocess, sys, tempfile, time
+import json, os, pty, re, select, shutil, signal, subprocess, sys, tempfile
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
@@ -146,9 +148,19 @@ def wait_screen(env, pk, pred, timeout=10.0):
     return s
 
 
+
+def below_tabs(s):
+    """The lines under the tabs row and the column headers: the tabs row
+    is the first on dch -l and the switch picker (#252), the second under
+    -k's and -d's title."""
+    ls = s.split("\n")
+    i = next((k for k, l in enumerate(ls[:2])
+              if re.match(r"[\[ ]?(Sessions|Settings)\b", l)), 1)
+    return ls[i + 2:]
+
 def body(s):
     out = []
-    for l in s.split("\n")[3:]:
+    for l in below_tabs(s):
         if RULE_RE.match(l):
             break
         out.append(l)
@@ -193,10 +205,49 @@ def picker_revive(env, name):
     return "Resumed as %s" % name in s, s
 
 
+def path_names(env):
+    """#203: -n with a name that fails name_ok ('/', a control character)
+    creates nothing: exit 2 before the attach, no socket outside the socket
+    dir (base: -n ../x attached with <dir>/x.sock beside the socket dir).
+    -a of such a name stays a plain "no session"."""
+    sdir = env["DCH_SOCKET_DIR"]
+    up = os.path.dirname(sdir)
+    for bad in ("../px", "pa/b", os.path.join(up, "pabs"), "pc\x01d"):
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.execve(DCH, [DCH, "-n", bad, "/bin/sh"], env)
+        st, end = None, time.time() + 10
+        while time.time() < end:
+            if select.select([fd], [], [], 0.05)[0]:
+                try:
+                    os.read(fd, 65536)
+                except OSError:
+                    pass
+            p, w = os.waitpid(pid, os.WNOHANG)
+            if p:
+                st = w
+                break
+        if st is None:
+            os.kill(pid, signal.SIGHUP)
+            os.waitpid(pid, 0)
+        os.close(fd)
+        made = sorted(f for d in (up, sdir) for f in os.listdir(d)
+                      if f.startswith("p") and ".sock" in f)
+        check("-n %r: exit 2, creates nothing" % bad,
+              st is not None and os.WIFEXITED(st) and
+              os.WEXITSTATUS(st) == 2 and not made, st, made)
+        run(env, "-k", bad)
+        r = run(env, "-a", bad)
+        check("-a %r: no session (exit 1)" % bad,
+              r.returncode == 1 and r.stderr == "no session: %s\n" % bad, r)
+
+
 def one_mode(mode):
     env = mkenv(mode)
     t = "[%s] " % mode
     a = "proj:a"
+    if mode == "off":
+        path_names(env)
     check(t + "dch -n proj:a makes a local session", new_attached(env, a))
     r = run(env, "-k", a)
     check(t + "-k proj:a", r.returncode == 0 and wait_live(env, a, False), r)

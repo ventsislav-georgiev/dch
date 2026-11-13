@@ -1,0 +1,9 @@
+{"type": "user", "cwd": "/home/demo", "message": {"content": "<task-notification>\n<task-id>b</task-id>\n<summary>injected x/y#1</summary>\n</task-notification>"}, "origin": {"kind": "task-notification"}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "ok"}]}}
+{"type": "user", "message": {"content": "<task-notification>\n<task-id>b</task-id>\n<summary>typed x/y#2</summary>\n</task-notification>"}}
+{"type": "user", "message": {"content": [{"type": "text", "text": "<task-notification>\n<task-id>b</task-id>\n<summary>typed array</summary>\n</task-notification>"}]}, "origin": {"kind": "user"}}
+{"type": "user", "message": {"content": "<system-reminder>r</system-reminder>"}, "origin": "task-notification"}
+{"type": "attachment", "attachment": {"type": "queued_command", "prompt": "<task-notification>\n<task-id>b</task-id>\n<summary>queued mode</summary>\n</task-notification>", "commandMode": "task-notification"}}
+{"type": "attachment", "attachment": {"type": "queued_command", "prompt": "<task-notification>\n<task-id>b</task-id>\n<summary>queued origin</summary>\n</task-notification>", "commandMode": "task-notification", "origin": {"kind": "task-notification"}}}
+{"type": "attachment", "attachment": {"type": "queued_command", "prompt": "<task-notification>\n<task-id>b</task-id>\n<summary>queued typed</summary>\n</task-notification>", "commandMode": "prompt", "origin": {"kind": "human"}}}
+{"type": "attachment", "attachment": {"type": "queued_command", "prompt": "<task-notification>\n<task-id>b</task-id>\n<summary>queued top</summary>\n</task-notification>"}, "origin": {"kind": "task-notification"}}

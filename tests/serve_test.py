@@ -36,22 +36,24 @@ slots 20 s past their ctl timeout.
 
 Run:  python3 tests/serve_test.py        (uses ./dch)
 """
-import json, os, re, shutil, signal, socket, struct, subprocess, sys
+import calendar, json, os, re, shutil, signal, socket, struct, subprocess, sys
 import tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
 RUNPY = os.path.join(HERE, "remote-frames", "golden", "run.py")
 
+# Builtins only, no fork: serve gives each call 3 s (TS_MS), and under load
+# a slower fake turns into a whois_failed refusal cached 30 s (#246).
 FAKE_TS = """#!/bin/sh
-d=$(dirname "$0")
+d=${0%/*}
 echo "$1 ${DCH_SERVE_TEST_LOOPBACK:-unset}" >> "$d/calls"
 case "$1" in
-status) [ -f "$d/status.json" ] && exec cat "$d/status.json"; exit 1 ;;
-whois) [ -f "$d/whois.json" ] && exec cat "$d/whois.json"; exit 1 ;;
-ip) [ -f "$d/ip.txt" ] && exec cat "$d/ip.txt"; exit 1 ;;
+status) f=status.json ;; whois) f=whois.json ;; ip) f=ip.txt ;; *) exit 1 ;;
 esac
-exit 1
+[ -f "$d/$f" ] || exit 1
+while IFS= read -r l; do printf '%s\\n' "$l"; done < "$d/$f"
+printf '%s' "$l"
 """
 
 # Headscale-shaped: status Self.ID is the host's StableNodeID, digits in a
@@ -110,11 +112,25 @@ def main():
     benv = dict(env, DCH_SERVE_TEST_LOOPBACK="1")
     procs = []
     fails = []
+    whois_fail_ok = set()	# serve logs whose whois_failed is the case
+    slow_whois = []
 
     def check(msg, cond):
         print("  %s %s" % ("ok  " if cond else "FAIL", msg))
         if not cond:
             fails.append(msg)
+            if not slow_whois:
+                slow_whois.extend(
+                    n for n in sorted(os.listdir(tmp))
+                    if n.startswith("serve") and n.endswith(".log")
+                    and os.path.join(tmp, n) not in whois_fail_ok
+                    and "refused: tailscale whois failed while" in
+                    text(os.path.join(tmp, n)))
+                if slow_whois:
+                    print("  setup: whois_failed, the fake whois was too "
+                          "slow (over serve's 3 s, refusal cached 30 s; "
+                          "%s): checks failing on it are not serve bugs"
+                          % ", ".join(slow_whois))
 
     def put(name, obj):
         p = os.path.join(fake, name)
@@ -587,6 +603,47 @@ def main():
         for s in (a, b, c, g1, g2):
             s.close()
         time.sleep(1)
+        # QA 1.58.0 LOW-R6: counted by the session the name opens. On a
+        # case-insensitive volume SVF opens svf: svf x2 then SVF x2 close
+        # both svf; on a case-sensitive one SVF is a session of its own and
+        # nothing is closed
+        sd = os.path.join(tmp, "dch-%d" % os.getuid())
+        alias = os.path.exists(os.path.join(sd, "SVF.sock"))
+        if not alias:
+            subprocess.run([DCH, "--spawn", "SVF", "--size", "40x5", "--",
+                            "/bin/sh"], env=env, capture_output=True,
+                           timeout=15)
+            time.sleep(0.5)
+        print("#202 LOW-R6: the socket dir is case-%s" %
+              ("insensitive" if alias else "sensitive"))
+        k = text(log).count("--follow of SVF")
+        a, b = fl(), fl()
+        c, d = fl("SVF"), fl("SVF")
+        if alias:
+            check("#202 LOW-R6: svf x2 then SVF x2 from one device (one "
+                  "session, case-insensitive): both svf closed, the SVF "
+                  "run", end_of(a, 5) == timeout and end_of(b, 5) == timeout
+                  and end_of(c, 0.5) is None and end_of(d, 0.2) is None
+                  and text(log).count("--follow of SVF") == k + 2)
+            if mirror:
+                check("#202 LOW-R6: ... and a local --xray --follow finds a "
+                      "slot", local() == ("following", want))
+        else:
+            check("#202 LOW-R6: svf x2 and SVF x2 from one device (two "
+                  "sessions, case-sensitive): none closed",
+                  all(end_of(s, 1 if s is a else 0.2) is None
+                      for s in (a, b, c, d))
+                  and text(log).count("--follow of SVF") == k)
+        for s in (a, b, c, d):
+            s.close()
+        for lp in locs:
+            lp.terminate()
+            lp.wait(5)
+        del locs[:]
+        if not alias:
+            subprocess.run([DCH, "-k", "SVF"], env=env, capture_output=True,
+                           timeout=15)
+        time.sleep(1.5)
         # another device: its own 2, never closing this device's
         try:
             with socket.socket() as t:
@@ -935,10 +992,23 @@ exec %s "$@"
             send(s, 0x30, {"argv": big})
             t, pl = frame(s)
             out = bytearray(pl if t == 0x31 else b"")
+            # An 8 KiB receive buffer, set before the connect so it caps
+            # the window: macOS otherwise grows both loopback buffers until
+            # they hold all serve had left after the cut, nothing stays
+            # pending, and the idle close (30 s) decides, not the stall
+            # rule (#246). Linux doubles it to 16 KiB and grows serve's
+            # send buffer with cwnd only, which a shut window holds at its
+            # start (about 1.4 MiB at most on lo). Either way the 6 MiB
+            # answer leaves serve over OUT_HIGH (64 KiB) pending at the cut.
             never = []
             for _ in range(16):
-                never.append(conn(qport))
-                send(never[-1], 0x30, {"argv": big})
+                n = socket.socket()
+                n.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8192)
+                n.settimeout(5)
+                n.connect(("127.0.0.1", qport))
+                never.append(n)
+                send(n, 0x30, {"argv": big})
+            t_end = time.time() + 3	# their ctl end, DCH_CTL_TIMEOUT_MS
             time.sleep(1)
             full = reply(qport)
             time.sleep(29)
@@ -961,13 +1031,44 @@ exec %s "$@"
                   and end == {"exit": 0}
                   and "not taken" not in text(slog_))
             ql = text(qlog)
+            ok = isinstance(full, bytes) and b'"busy"' in full \
+                and ql.count("ctl cut short: timeout") == 16 \
+                and ql.count("output not taken for 20 s") == 16
+            r17 = reply(qport)
             check("#201: 16 peers that never read hold the peer's 16 slots "
                   "(a 17th busy), then all are free 20 s past their timeout: "
                   "16 timeout cuts, 16 closes",
-                  isinstance(full, bytes) and b'"busy"' in full
-                  and ql.count("ctl cut short: timeout") == 16
-                  and ql.count("output not taken for 20 s") == 16
-                  and reply(qport) == "accept")
+                  ok and r17 == "accept")
+            if not (ok and r17 == "accept"):
+                # what it saw: each event's time from the ctl end, and
+                # what every never-reader still had queued
+                ev = {}
+                for m in re.finditer(r"^(\S+)\.(\d+)Z dch serve\[\d+\]: "
+                                     r"127\.0\.0\.1: (ctl cut short: timeout"
+                                     r"|output not taken|idle; closing)",
+                                     ql, re.M):
+                    t = calendar.timegm(time.strptime(
+                        m.group(1), "%Y-%m-%dT%H:%M:%S")) \
+                        + int(m.group(2)) / 1000
+                    ev.setdefault(m.group(3), []).append(
+                        "%+.1f" % (t - t_end))
+                print("       17th: %r; %s" % (full, "; ".join(
+                    "%d %s at %s s" % (len(v), k, " ".join(v))
+                    for k, v in ev.items()) or "no cut or close logged"))
+                for i, n in enumerate(never):
+                    got, eof = 0, False
+                    n.settimeout(0.5)
+                    try:
+                        while True:
+                            b = n.recv(65536)
+                            if not b:
+                                eof = True
+                                break
+                            got += len(b)
+                    except OSError:
+                        pass
+                    print("       never-reader %d: %s, %d bytes unread"
+                          % (i, "closed" if eof else "OPEN", got))
             for n in never:
                 n.close()
             stop(p)
@@ -1326,6 +1427,8 @@ exec %s "$@"
         def gate_case(msg, why, code, *args, start=OWNER, **kw):
             ts(status=start)
             p, port, log = serve(*args)
+            if code == "whois_failed":
+                whois_fail_ok.add(log)
             ts(**kw)
             got = [reply(port, hello) for hello in (True, False)]
             time.sleep(0.1)
@@ -1717,7 +1820,9 @@ exec %s "$@"
                            timeout=15)
         shutil.rmtree(tmp, ignore_errors=True)
     if fails:
-        print("FAILED: %d" % len(fails))
+        print("FAILED: %d%s" % (len(fails), slow_whois and
+                                " (setup: whois_failed, the fake whois was "
+                                "too slow, see above)" or ""))
         sys.exit(1)
     print("all ok")
 

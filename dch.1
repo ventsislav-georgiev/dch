@@ -313,8 +313,9 @@ is the sessionId of the one live interactive Claude Code under the session's
 program, read fresh from its \fI<config>/sessions/<pid>.json\fP record (its
 pid descends from the program and its procStart matches the process), or
 .B null
-when none runs there, more than one does, it has exited, or the id is not a
-UUID.
+when none runs there, more than one does (Claudes below another one, such as
+a test's fake Claude under a tool call, count as that one), it has exited, or
+the id is not a UUID.
 .I transcript_path
 is the absolute \fI<config>/projects/*/<sessionId>.jsonl\fP when exactly one
 such file exists, else
@@ -389,6 +390,15 @@ and exits 2
 exit 1); an auto-name from a directory named so starts with
 .B _
 instead.
+.BR \-n ,
+.B \-\-spawn
+and
+.B "\-\-revive \-\-as"
+also refuse a name holding
+.B /
+or a control character, or over 255 bytes
+.RB ( "dch: bad session name" ,
+exit 2, nothing started).
 .TP
 .B \-f
 Force-attach even if another client is connected.
@@ -420,8 +430,13 @@ the ended sessions of
 .BR \-\-history ,
 one row per session name (its newest record, pinned when any record of
 the name is): every pinned name, then the newest other names while there
-are fewer than 50 rows, so pinned names alone can make more; with remote
-hosts on, also the other hosts' (see
+are fewer than 50 rows, so pinned names alone can make more.
+A name with a session running is decided by the name, not by its records:
+pinned, it stays on History with ENDED
+.B running
+(in the accent) and WHEN its last output; not pinned, it is not on History
+(it is on Sessions or Sidekicks) until it ends.
+With remote hosts on, History also lists the other hosts' (see
 .BR "REMOTE HOSTS" ),
 as \fIhost\fP:\fIname\fP with the host faint, at most 50 names per host
 on top of the local rows.
@@ -451,7 +466,8 @@ MERGED and PULL REQUESTS (from
 .BR prs :
 .IR repo#N ,
 the repo once when they share it, +N for those that do not fit).
-A History row shows a pin mark, NAME, ENDED, WHEN and the DIRECTORY.
+A History row shows a pin mark, NAME, ENDED (or running), WHEN and the
+DIRECTORY.
 As the window narrows the last column goes first, the name shrinks last, and
 nothing wraps.
 The selection is a tinted bar the width of the screen, each cell keeping its
@@ -566,10 +582,23 @@ pins or unpins,
 .B d
 removes
 .RB ( \-\-forget ),
-every record of the row's name; while a session of that name is live, at
-most 8 of its ended records per press (the rest stay a row: press
+every record of the row's name.
+On a running row
+.BR Enter ,
+.B Shift\-Enter
+and
+.B o
+attach its session (in
+.B dch \-l
+and the switch),
+.B x
+opens the session's X\-ray view,
+.B p
+unpins, and
+.B m
+and
 .B d
-again).
+say it is running and do nothing.
 On a row whose name starts with
 .B \-
 (an older dch made it) only attach and kill work live, only
@@ -755,6 +784,8 @@ a chapter the harness wrote, a task notification
 is hidden until
 .B n
 shows it, faint and titled by its summary, the footer saying how many;
+a compaction is hidden, counted and shown faint the same way
+(the footer calls both kinds \(dqauto rows\(dq);
 the tab counts the chapters shown without
 .BR n ;
 .B o
@@ -768,11 +799,12 @@ a ref with a definition or two or more mentions is bold;
 a file under the session's directory shows relative to it, else one under
 HOME from
 .BR ~ ;
-a path too long keeps its end, the ellipsis in front, a long URL its host
-and its end;
+a path too long keeps its end, the ellipsis in front, a long URL always
+starts with its host (the first half of the row of a long one, cut at its
+end when wider than the row) and keeps its end;
 files under /tmp, /private/tmp, /var/folders and
 .B $TMPDIR
-(not on a remote view) are hidden until
+(not on a remote view), except the session's own project files, are hidden until
 .B t
 shows them, the footer saying how many; the tab counts every ref;
 \fB/\fR filters on the full ref, \fBEnter\fR opens its card) and
@@ -947,7 +979,8 @@ then
 light by default (stops at the first result or after
 .B \-\-budget\-ms
 .IR ms ,
-50 to 300, default 300, across all files; with
+50 to 300, default 300, across all files, not counting time spent waiting
+on a reader that pauses; with
 .B \-\-scope project
 or
 .B all
@@ -962,7 +995,8 @@ to read it all up to 64 files
 1 GiB
 .RB ( why:\(dqbytes\(dq )
 and 10 s
-.RB ( why:\(dqtime\(dq )
+.RB ( why:\(dqtime\(dq ;
+the scan's own time, not time spent waiting on a reader that pauses)
 (a
 .B \-\-budget\-ms
 with it has no effect but is still checked: outside 50 to 300 it exits 2,
@@ -1088,9 +1122,10 @@ given and as its real path: a part starting with
 .BR .aws ,
 .BR .netrc ,
 .BR .npmrc ,
-.BR .pypirc
+.BR .pypirc ,
+.B .git\-credentials
 or
-.BR .git\-credentials ;
+.BR .yarnrc ;
 anything under a directory
 .BR .git ,
 .BR .kube ,
@@ -1137,9 +1172,10 @@ the names
 .BR .ICEauthority ,
 .BR .credentials.json ,
 .BR .terraformrc ,
-.B terraform.rc
+.BR terraform.rc ,
+.B .databrickscfg
 and
-.BR .databrickscfg ;
+.BR auth.json ;
 names ending in
 .BR .pem ,
 .BR .key ,
@@ -1399,7 +1435,10 @@ connection, exit 7;
 .B \-\-follow
 has no such limit.
 A partial line the host was writing is dropped when the link is lost, on a
-cancel and when the host cuts the answer short.
+cancel, when the host cuts the answer short and when the host's dch dies of
+a signal
+.RI ( "dch: host: \-\-xray on the host ended by signal N" ,
+exit 128 + N).
 A host line over 16 MiB once escaped ends it with
 .IR "dch: host: unreachable: it sent a line over 16 MiB escaped" ,
 exit 7.
@@ -1774,6 +1813,10 @@ with 4, 6 or 1); the first request after it dials again.
 End of standard input closes the connection and exits 0 (a request still
 running ends
 .BR why:\(dqcancel\(dq ).
+A cancel, or the end of standard input, while dch is still dialling for
+a request ends it at once with exit 2 and
+.B why:\(dqcancel\(dq
+(at the end of input, any request sent after it too).
 With no connection at the start it writes one
 .B {"schema":1,"exit":\fIE\fP,"stderr":...}
 line, the message on standard error too, and exits
@@ -1952,6 +1995,9 @@ re\-exec failed (the old master rolls back and keeps serving) or if the master
 is too old to know the verb, in which case the session must be recreated.
 Scrollback held only in the mirror is not carried across a restart; the
 visible screen is.
+An attached client is not restarted: one started before the upgrade keeps the
+old ctrl\-z behaviour (what it resets on the terminal before it stops) until it
+re\-attaches.
 .IP
 With
 .BR \-\-include\-agents ,
@@ -2925,9 +2971,14 @@ and
 60 s for the rest; past it, the same with
 .BR \(dqwhy\(dq:\(dqtimeout\(dq .
 Output the client leaves unread is held, not cut, until 20 s past the
-timeout, so a reader paused within it gets the whole answer; any other
+timeout (80 s after the request; 680 s for the 660 s verbs), so a reader
+paused within it gets the whole answer; any other
 connection, a follow's included, closes once its output goes untaken for
 20 s.
+An answer that fits whole in the socket buffers is never left untaken, so a
+client that never reads it holds its slot until the warm connection's idle
+close: 300 s after the 0x33, 30 s once the peer has 8 connections open (or
+the server 32).
 A device (its tailnet address) runs at most 2
 .B "\-\-xray \-\-follow"
 of one session: a third ends the oldest the same way, with
@@ -3122,6 +3173,8 @@ and exits 7. The host's own refusal of the request prints
 and exits 1; a refusal by its gate exits 4. A verb the host cut short exits
 2 and prints
 .IR "dch: host: verb stopped by the host (cap|timeout)" .
+One whose dch on the host died of signal N exits 128 + N and prints
+.IR "dch: host: verb on the host ended by signal N" .
 SIGINT (Ctrl-C), SIGTERM or a closed standard output cancel the verb on the
 host: a 0x34 when its hello lists
 .BR ctl\-cancel ,

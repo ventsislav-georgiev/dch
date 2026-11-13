@@ -42,7 +42,16 @@ and --keys types into it. Covers:
  14. a name starting with '-' (#162), as an older dch made it: on a live
      row X kills (`-k -- <name>`) and r says what works; on a History row
      p pins and unpins, d removes (`--` before the name), Enter says it is
-     not resumed.
+     not resumed;
+ 15. the -k and -d pickers' hints name what Enter does there, kill or
+     detach, never attach (QA 1.59.0 LOW-V8), the filter's too; so do their
+     status lines: r on a '-' name says what Enter does there, a on a
+     question form sends the user to dch -l, never to Enter (#247);
+ 16. dch -l has no title row (#252): the tabs row is the first, the
+     session count and dch version at its right edge, the frame fills the
+     screen; at 40 columns that text gives way, the tabs stay whole; the -k
+     and -d pickers keep "kill session:" / "detach session:" with the count
+     on that row.
 
 Run:  python3 tests/picker_test.py            (uses ./dch)
       DCH=/path/to/dch python3 tests/picker_test.py
@@ -126,11 +135,21 @@ ROW_RE = re.compile("^([>\u258c ]) . (\\S+)")  # marker, glyph or pin, title
 RULE_RE = re.compile("^[\u2500-]{20,}$")
 
 
+
+def below_tabs(s):
+    """The lines under the tabs row and the column headers: the tabs row
+    is the first on dch -l and the switch picker (#252), the second under
+    -k's and -d's title."""
+    ls = s.split("\n")
+    i = next((k for k, l in enumerate(ls[:2])
+              if re.match(r"[\[ ]?(Sessions|Settings)\b", l)), 1)
+    return ls[i + 2:]
+
 def body(s):
     """The list's lines: below the title, tabs and column headers, above
     the rule."""
     out = []
-    for l in s.split("\n")[3:]:
+    for l in below_tabs(s):
         if RULE_RE.match(l):
             break
         out.append(l)
@@ -249,7 +268,23 @@ def pty_picker():
                  DCH_DOUBLE_TAP_MS="0")
         os.execve(DCH, [DCH, "-l"], e)
         os._exit(127)
+    # inheritable by default: the next pty_picker's child would hold it open
+    os.set_inheritable(fd, False)
     return pid, fd
+
+
+def reap(pid, fd, secs=5):
+    """Drain fd until pid exits or secs pass, close fd, then SIGKILL and
+    reap a pid still running (the fd first, #215). True if it exited."""
+    end, done = time.time() + secs, 0
+    while time.time() < end and not done:
+        drain(fd, 0.2)
+        done = os.waitpid(pid, os.WNOHANG)[0]
+    os.close(fd)
+    if not done:
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+    return bool(done)
 
 
 def kitty():
@@ -267,7 +302,7 @@ def kitty():
           on >= 0 and out.find(PUSH, on) > on, out[:200])
     os.write(fd, b"\x1b[27u")  # kitty's Esc: quit
     out += drain(fd, 5)
-    os.waitpid(pid, 0)
+    reap(pid, fd)
     off = out.rfind(ALT_OFF)
     check("a kitty Esc quits; the flag is popped before 1049l",
           off > 0 and out.rfind(POP, 0, off) > out.rfind(PUSH),
@@ -280,14 +315,7 @@ def kitty():
         pid, fd = pty_picker()
         drain(fd, 10, b"q quit")
         os.write(fd, key)
-        end, done = time.time() + 5, 0
-        while time.time() < end and not done:
-            drain(fd, 0.2)
-            done = os.waitpid(pid, os.WNOHANG)[0]
-        os.close(fd)
-        if not done:
-            os.kill(pid, signal.SIGKILL)
-            os.waitpid(pid, 0)
+        done = reap(pid, fd)
         check("a kitty %s (%r) quits the picker" % (what, key), done, key)
 
     pid, fd = pty_picker()
@@ -299,7 +327,7 @@ def kitty():
     out += drain(fd, 1)
     os.write(fd, b"\x1c")  # DCH_DOUBLE_TAP_MS=0: one tap detaches
     drain(fd, 5)
-    os.waitpid(pid, 0)
+    reap(pid, fd)
     off = out.find(ALT_OFF, out.find(PUSH))
     after = out[off:] if off > 0 else b""
     check("on attach the flag is popped before the picker leaves 1049h",
@@ -371,6 +399,89 @@ def dashname():
     wait_live("pk9", False)
 
 
+ZW_RE = re.compile("[\u200b-\u200d\u2060-\u2064\ufeff]")
+
+
+def zerowidth():
+    """15. A name holding a zero-width format character (U+FEFF, U+2060)
+    takes no cell, so its row pads to the same columns as any other
+    (#225): the state starts under STATE."""
+    names = {"zwbom": "zw\ufeffbom", "zwj": "zw\u2060wj"}
+    for n, alias in names.items():
+        dch("--spawn", n, "--size", "80x24", "sh", "-c", "sleep 600")
+        dch("-m", n, alias)
+    picker("pk10", "100x30", "NO_COLOR=1", "TERM=xterm-256color")
+    s = wait_screen("pk10", lambda s: all(a in rows(s)
+                                          for a in names.values()))
+    cell = lambda l, i: i - len(ZW_RE.findall(l[:i]))
+    hdr = [l for l in s.split("\n") if re.match(r"^ {4}NAME +STATE", l)]
+    col = cell(hdr[0], hdr[0].find("STATE")) if hdr else -1
+    for n, alias in names.items():
+        rl = [l for l in body(s) if alias in l]
+        check("U+%04X in a name: the row's state starts under STATE"
+              % ord(ZW_RE.search(alias).group()),
+              len(rl) == 1 and cell(rl[0], rl[0].find("Idle")) == col,
+              col, rl)
+    dch("--keys", "pk10", "q")
+    wait_live("pk10", False)
+
+
+def verbs():
+    """15. dch -k and dch -d with no name: Enter kills or detaches the
+    row, and the hints say so (QA 1.59.0 LOW-V8); the status lines never
+    say Enter attaches (#247)."""
+    f = os.path.join(ROOT, "vform.txt")
+    with open(f, "w") as fh:
+        fh.write("\n".join(FORM) + "\n")
+    dch("--spawn", "vform", "--size", "100x30", "sh", "-c",
+        "cat '%s'; sleep 600" % f)
+    procs.append(subprocess.Popen(
+        [DCH, "--master-of", os.path.join(SOCKDIR, "-v.sock"), "--",
+         "sleep", "600"], env=ENV, stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True))
+    check("a live session named -v is up", wait_live("-v", True), live())
+    for pk, flag, verb, dash in (
+            ("pk11", "-k", "kill", "Enter kills, X asks first"),
+            ("pk12", "-d", "detach", "Enter detaches, X kills")):
+        dch("--spawn", pk, "--size", "200x30", "env", "NO_COLOR=1",
+            "TERM=xterm-256color", DCH, flag)
+        s = wait_screen(pk, lambda s: "q quit" in s)
+        l = s.split("\n")
+        check("dch %s: keeps its title row, the count and version on it, "
+              "the tabs below (#252)" % flag,
+              l[0].startswith(verb + " session:") and
+              " dch " in l[0] and l[1].startswith("[Sessions "), l[:3])
+        dch("--keys", pk, "/")
+        f = wait_screen(pk, lambda s: "esc clear" in s)
+        k, fk = " ".join(footer(s)), " ".join(footer(f))
+        check("dch %s: the hints say \u21b5 %s, not attach, the filter's "
+              "too" % (flag, verb), "\u21b5 %s " % verb in k and "\u21b5 %s "
+              % verb in fk and "attach" not in k + fk, k, fk)
+        dch("--keys", pk, "esc")
+        wait_screen(pk, lambda s: "q quit" in s)
+        check("dch %s: select -v" % flag, select(pk, "-v"), screen(pk))
+        dch("--keys", pk, "r")
+        s = wait_screen(pk, lambda s: "-v: a name starting" in s)
+        check("dch %s: r on -v says %s" % (flag, dash),
+              "-v: a name starting with '-'; " + dash in s and
+              "Enter attaches" not in s, s)
+        wait_screen(pk, lambda s: any("vform" in l and "Needs input" in l
+                                      for l in body(s)))
+        check("dch %s: select vform" % flag, select(pk, "vform"), screen(pk))
+        dch("--keys", pk, "a")
+        s = wait_screen(pk, lambda s: "not a plain Yes/No" in s)
+        check("dch %s: a on a question form sends to dch -l, not Enter"
+              % flag, "vform: not a plain Yes/No permission prompt; answer "
+              "it from dch -l" in s and "(Enter)" not in s, s)
+        dch("--keys", pk, "q")
+        wait_live(pk, False)
+    check("-v and vform outlive both pickers",
+          wait_live("-v", True) and wait_live("vform", True), live())
+    dch("-k", "vform")
+    dch("-k", "--", "-v")
+
+
 def main():
     if not os.access(DCH, os.X_OK):
         print("FAIL dch not executable at " + DCH)
@@ -385,9 +496,23 @@ def main():
     # 1. tabs: no Sidekicks tab until a "-qa" session exists
     picker("pk1", "100x30", "NO_COLOR=1", "TERM=xterm-256color")
     s = wait_screen("pk1", lambda s: "s10" in s and "s2" in s)
-    check("picker opens with the caller's header and a Sessions tab",
-          "attach session (mirror):" in s and
+    check("picker opens with a Sessions tab",
           re.search(r"\[Sessions \d+\]", s), s)
+    # 16. no title row on dch -l (#252): the tabs row is the first and
+    # carries the count and version at its right edge; the frame still
+    # fills the screen (one list row more)
+    ver = dch("--version").stdout.split()[-1]
+    lines = s.split("\n")
+    check("#252: no 'attach session'/'switch to session' title",
+          "attach session" not in s and "switch to session" not in s, s)
+    check("#252: the first row is the tabs, the count and dch version "
+          "at its right edge",
+          lines[0].startswith("[Sessions ") and re.search(
+              r"\d+ sessions? \u00b7 dch " + re.escape(ver) + "$",
+              lines[0].rstrip()) and lines[0].rstrip().endswith(ver) and
+          len(lines[0].rstrip()) == 100, lines[:2])
+    check("#252: the frame fills all 30 rows, the hints on the last",
+          len(lines) >= 30 and "q quit" in lines[29], s)
     check("no Sidekicks tab without a matching session",
           "Sidekicks" not in s, s)
     dch("--spawn", "helper-qa", "--size", "80x24", "sh", "-c", "sleep 600")
@@ -521,9 +646,9 @@ def main():
     check("select form", select("pk1", "form"), screen("pk1"))
     dch("--keys", "pk1", "a")
     s = wait_screen("pk1", lambda s: "not a plain Yes/No" in s)
-    check("a on a question form refuses to press 1",
-          "form: not a plain Yes/No permission prompt" in s and
-          "[y/N]" not in s, s)
+    check("a on a question form refuses to press 1, attach (Enter) answers",
+          "form: not a plain Yes/No permission prompt; attach (Enter) to "
+          "answer" in s and "[y/N]" not in s, s)
     check("select perm", select("pk1", "perm"), screen("pk1"))
     dch("--keys", "pk1", "a")
     s = wait_screen("pk1", lambda s: "[y/N]" in s)
@@ -584,6 +709,11 @@ def main():
           "forty-cols" not in s, s)
     check("narrow: the state still shows on that row",
           long_rows and re.search(r"Working|Idle", long_rows[0]), s)
+    check("narrow: the tabs row leads, whole; the count and version give "
+          "way, never overlap (#252)", re.match(
+              r"\[Sessions \d+\]( +Sidekicks \d+)?( +History \d+)?"
+              r"( {4,}\d+ sessions? - dch \S+)?$", s.split("\n")[0].rstrip()),
+          s.split("\n")[:2])
     check("narrow: no line wider than 40",
           all(len(l) <= 40 for l in s.split("\n")), s)
     a = screen("pk3", ansi=True)
@@ -789,6 +919,8 @@ def main():
     check("q quits the picker", wait_live("pk3", False), live())
     kitty()
     dashname()
+    zerowidth()
+    verbs()
     return 1 if failures else 0
 
 
@@ -797,7 +929,7 @@ if __name__ == "__main__":
         rc = main()
     finally:
         for n in ("pk1", "pk2", "pk3", "pk4", "pk5", "pk6", "pk7", "pk8",
-                  "pk9", "s2", "s10",
+                  "pk9", "pk10", "pk11", "pk12", "s2", "s10", "zwbom", "zwj",
                   "helper-qa", "a4k-2", "perm", "form", "zkbd"):
             dch("-k", n)
         for pr in procs:

@@ -27,6 +27,8 @@
 #endif
 #define XV_MENTIONS  10000	/* a card keeps at most these */
 #define XV_STOP_MS   50	/* a child's grace after its SIGTERM (#204) */
+#define XV_KILL_MS   250	/* after its SIGKILL, then kept (#212) */
+#define XV_LATE      16	/* kept: SIGKILLed, not dead yet */
 #define XV_ALPHA     "asdfghjklzxcvbnmwertyuiop"	/* hint labels: no q */
 
 enum { XV_LIST, XV_CARD, XV_READ };
@@ -311,13 +313,39 @@ xv_fitlen(const char *s, size_t n, int w)
 
 /* ---- the children ---------------------------------------------------- */
 
+/* Reap the children xv_stop kept (#212), then keep pid (> 0) too; 0 when
+** there is no room. Main context only: xv_kill never sees these, a
+** SIGKILLed child needs no SIGTERM, and a kept pid is never signalled. */
+static int
+xv_late(pid_t pid)
+{
+	static pid_t late[XV_LATE];
+	int i, room = -1;
+	pid_t w;
+
+	for (i = 0; i < XV_LATE; i++)
+	{
+		if (late[i] > 0 && ((w = waitpid(late[i], NULL, WNOHANG)) > 0 ||
+		                    (w < 0 && errno != EINTR)))
+			late[i] = 0;
+		if (!late[i] && room < 0)
+			room = i;
+	}
+	if (pid > 0 && room >= 0)
+		late[room] = pid;
+	return pid <= 0 || room >= 0;
+}
+
 /* A child ended. Its pipes close first: a write it is blocked in fails
 ** (EPIPE) instead of waiting for a reader that is gone (QA 1.57.0 HIGH-R1).
 ** SIGTERM lets a remote one send the host its 0x34; after XV_STOP_MS it is
 ** SIGKILLed, so the view never sits out a silent host's RM_CANCEL_MS
 ** (MED-R2): the host takes the closed connection as the cancel. The
-** signals that run xv_kill wait until the pid is reaped and its slot
-** cleared, so xv_kill never signals a reaped pid. */
+** signals that run xv_kill wait until the pid is reaped (or kept) and its
+** slot cleared, so xv_kill never signals a reaped pid. One still alive
+** XV_KILL_MS after its SIGKILL is in uninterruptible I/O (a hung mount):
+** SIGKILL waits for that call to return, so it is kept and reaped later,
+** and the view goes on (#212). */
 static void
 xv_stop(struct xv_kid *k, int slot)
 {
@@ -343,9 +371,15 @@ xv_stop(struct xv_kid *k, int slot)
 		if (w == 0)
 		{
 			kill(k->pid, SIGKILL);
+			end = now_ms() + XV_KILL_MS;
+			while ((w = waitpid(k->pid, NULL, WNOHANG)) == 0 &&
+			       now_ms() < end)
+				nanosleep(&ts, NULL);
+		}
+		/* no room to keep it: the wait for good, as before */
+		if (w == 0 && !xv_late(k->pid))
 			while (waitpid(k->pid, NULL, 0) < 0 && errno == EINTR)
 				;
-		}
 		xv_pids[slot] = 0;
 		sigprocmask(SIG_SETMASK, &o, NULL);
 	}
@@ -436,6 +470,7 @@ xv_pump(struct xv *v, int slot, fd_set *rs)
 	ssize_t r;
 	int st;
 	size_t el;
+	pid_t w;
 
 	if (k->efd >= 0 && FD_ISSET(k->efd, rs))
 	{
@@ -485,8 +520,15 @@ xv_pump(struct xv *v, int slot, fd_set *rs)
 	if (k->pid <= 0 || k->fd >= 0 || k->efd >= 0)
 		return 0;
 	xv_pids[slot] = 0;
-	while (waitpid(k->pid, &st, 0) < 0 && errno == EINTR)
+	while ((w = waitpid(k->pid, &st, WNOHANG)) < 0 && errno == EINTR)
 		;
+	if (w == 0)
+	{
+		/* its pipes closed as it exits, its exit not done: a later
+		** tick reaps it (#212) */
+		xv_pids[slot] = k->pid;
+		return 0;
+	}
 	k->pid = 0;
 	k->rc = WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st);
 	/* its last line, without the newline */
@@ -1223,21 +1265,53 @@ xv_under(const char *s, const char *d)
 	return l > 1 && !strncmp(s, d, l) && s[l] == '/' ? l : 0;
 }
 
-/* A file under a temp directory: a scratch file, hidden by default. A
-** remote view's $TMPDIR is this machine's, not its host's: not asked. */
+/* s under a temp directory by its text; $TMPDIR only for a local view: a
+** remote view's $TMPDIR is this machine's, not its host's. */
 static int
-xv_temp(const struct xv *v, const struct xv_ref *r)
+xv_tmpdir(const char *s, int local)
 {
 	static const char *const d[] = { "/tmp", "/private/tmp", "/var/folders",
 		"/private/var/folders" };
 	size_t k;
 
-	if (strcmp(r->shape, "file"))
-		return 0;
 	for (k = 0; k < sizeof d / sizeof *d; k++)
-		if (xv_under(r->text, d[k]))
+		if (xv_under(s, d[k]))
 			return 1;
-	return !v->hl && xv_under(r->text, getenv("TMPDIR"));
+	return local && xv_under(s, getenv("TMPDIR"));
+}
+
+/* A file under a temp directory: a scratch file, hidden by default. A
+** file of the session's own project is never scratch (#220): by text, and
+** in a local view by realpath too (/tmp is /private/tmp on macOS), the
+** rows resolved only when the project's own realpath is in a temp dir. A
+** ".." component is scratch, never resolved: transcript text could walk it
+** into an autofs map (/net, /home), a lookup per row per filter pass. */
+static int
+xv_temp(const struct xv *v, const struct xv_ref *r)
+{
+	/* the label's realpath, once per label: under /home it is an autofs
+	** lookup, too slow for every row on every filter pass */
+	static char lk[PATH_MAX], lr[PATH_MAX];
+	static int lok;
+	char rr[PATH_MAX];
+	const char *t = r->text;
+	size_t l = strlen(t);
+
+	if (strcmp(r->shape, "file") || !xv_tmpdir(t, !v->hl))
+		return 0;
+	if (strstr(t, "/../") || (l >= 3 && !strcmp(t + l - 3, "/..")))
+		return 1;
+	if (xv_under(t, v->label))
+		return 0;
+	if (v->hl || !v->label || v->label[0] != '/')
+		return 1;
+	if (strcmp(lk, v->label))
+	{
+		snprintf(lk, sizeof lk, "%s", v->label);
+		lok = realpath(v->label, lr) && xv_tmpdir(lr, 1);
+	}
+	return !lok || !(xv_under(t, lr) ||
+	         (realpath(t, rr) && xv_under(rr, lr)));
 }
 
 static const struct xv_ref *xv_sort_rf;
@@ -1252,6 +1326,14 @@ xv_ref_cmp(const void *pa, const void *pb)
 	if (a->count != b->count)
 		return a->count > b->count ? -1 : 1;
 	return a->seen < b->seen ? 1 : a->seen > b->seen ? -1 : 0;
+}
+
+/* A chapter hidden by default, n shows it: one the harness wrote (#192) or
+** a compaction (#223) */
+static int
+xv_hid(const struct xv_ch *c)
+{
+	return c->aut || !strcmp(c->kind, "compact");
 }
 
 /* The rows a list tab shows (Chapters, Refs): their indexes, filtered. */
@@ -1271,7 +1353,7 @@ xv_vis(struct xv *v)
 			continue;
 		if (v->tab == 1 && xv_temp(v, &v->rf[k]) && (v->ntmp++, !v->alltmp))
 			continue;
-		if (v->tab == 0 && v->ch[k].aut && (v->nauto++, !v->allauto))
+		if (v->tab == 0 && xv_hid(&v->ch[k]) && (v->nauto++, !v->allauto))
 			continue;
 		if (xv_grow(&v->vis, &v->avis, v->nvis, sizeof *v->vis) < 0)
 			return;
@@ -1325,7 +1407,7 @@ xv_row_ch(const struct xv_ch *c, int i, int on)
 	pk_txt(c->error ? "! " : !strcmp(c->kind, "command") ? "/ "
 	       : !strcmp(c->kind, "compact") ? "= " : "  ");
 	/* an auto chapter, shown: faint, by what it says it is */
-	pk_set(c->aut || !strcmp(c->kind, "compact") ? "2" : "");
+	pk_set(xv_hid(c) ? "2" : "");
 	pk_txt(c->aut && c->summary[0] ? c->summary : c->title);
 	if (on)
 		pk_pad(pk_w);
@@ -1358,7 +1440,8 @@ xv_tail(const char *s, size_t keep, int w)
 }
 
 /* A ref's text in w cells: a file under the project relative to it, else
-** under HOME from ~; a URL cut keeps its host and its end, not its scheme. */
+** under HOME from ~; a URL cut keeps its host's start and its end, not its
+** scheme. */
 static void
 xv_reftext(const struct xv *v, const struct xv_ref *r, int w)
 {
@@ -1379,8 +1462,16 @@ xv_reftext(const struct xv *v, const struct xv_ref *r, int w)
 	{
 		s = u + 3;
 		keep = strcspn(s, "/");
-		if (xv_fitlen(s, keep, w / 2) < keep)
-			keep = 0;
+		/* #220: the first cells are always the host's start, so a path
+		** can never pose as the host. A host wider than the row is cut
+		** at its end; one wider than half keeps its first w/2 cells;
+		** either way the ellipsis then the URL's tail. */
+		if (xv_fitlen(s, keep, w) < keep)
+		{
+			pk_fit(s, w);
+			return;
+		}
+		keep = xv_fitlen(s, keep, w / 2);
 	}
 	xv_tail(s, keep, w);
 }
@@ -1712,7 +1803,7 @@ xv_draw(struct xv *v, int force)
 			{
 				snprintf(tmp, sizeof tmp, "%d hidden", v->nauto);
 				keys[nk++] = (struct pkkey){ "n", v->allauto
-					? "hide notifications" : "notifications",
+					? "hide auto rows" : "auto rows",
 					v->allauto ? NULL : tmp, 2, 0 };
 			}
 			if (v->tab == 1 && (xv_vis(v), v->ntmp))
@@ -1796,7 +1887,7 @@ xv_draw(struct xv *v, int force)
 		/* Chapters: the ones shown by default; On screen: no number
 		** before its screen is read */
 		for (k = n = 0; k < v->nch; k++)
-			n += !v->ch[k].aut;
+			n += !xv_hid(&v->ch[k]);
 		for (k = 0; k < 3; k++)
 			pk_tab(tabn[k], k == 0 ? n : k == 1 ? v->nrf
 			       : v->scr ? v->nlab : -1, k == v->tab);
@@ -1850,7 +1941,7 @@ xv_draw(struct xv *v, int force)
 				pk_txt(!v->have ? "    Reading" : v->tab == 1 && v->ntmp &&
 				       !v->alltmp ? "    Only temp files: t shows them"
 				       : v->tab == 0 && v->nauto && !v->allauto
-				       ? "    Only notifications: n shows them"
+				       ? "    Only auto rows: n shows them"
 				       : v->filt[0] ? "    No match" : v->tab == 0
 				       ? "    No chapters" : "    No refs yet: the files, "
 				       "commits, pull requests, issues and URLs this session "
@@ -2045,7 +2136,8 @@ xv_open(struct xv *v)
 
 	if (!v->have)
 		return 0;
-	if (!xv_live(v))
+	/* a local one asked again: its end may not have reached the view */
+	if (!xv_live(v) || (!v->hl && !name_live(v->session)))
 		snprintf(v->status, sizeof v->status, "%s has ended: no session "
 		         "to open", v->session);
 	else if (in && *in)
@@ -2284,6 +2376,7 @@ xv_run(int fd, const char *n, char *err, size_t errsz)
 		fd_set rs;
 		int mx = fd, force = pk_winch, c, busy;
 
+		(void)xv_late(0);
 		pk_winch = 0;
 		if (v->mode == XV_LIST && v->tab == 2 && now_ms() - v->scr_at >= 1000)
 			xv_screen_load(v);
