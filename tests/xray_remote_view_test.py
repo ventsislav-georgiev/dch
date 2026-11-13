@@ -37,7 +37,10 @@ Covers:
      returns to the picker, X (kill) there opens no view (OQ-6); x on the
      remote History row srv:xv-cl opens that record's view; next to a local
      session literally named srv:xv-sh, x on each row opens that row's
-     session (QA 1.57.0 LOW-R2);
+     session (QA 1.57.0 LOW-R2), and Enter on the remote row, o in its
+     view and o in a dch --xray srv:xv-sh view opened before the local
+     one came attach the host's, o in the local row's view the local one
+     (#210);
   6. the in-attach chord over `dch -a srv:xv-rx` (#189): the detach key then
      x (a later read, one burst, the kitty CSI form, --host srv -a xv-rx,
      detach_key = switch) opens the view of srv:xv-rx over the attach, On
@@ -1037,7 +1040,8 @@ def test_picker(port):
         mark = len(v.out)
         v.key(b"X", 1.0)
         check("picker: X on the remote row opens no view and kills nothing "
-              "(OQ-6)", v.wait(b"Enter attaches, nothing else", start=mark)
+              "(OQ-6)", v.wait(b"Enter attaches and x opens its X-ray",
+                                start=mark)
               and b"X-ray  srv:xv-sh" not in v.out[mark:] and
               ctls("--xray") == n0, v.out[mark:][-600:])
         # History: the host's record srv:xv-cl, its only row
@@ -1061,41 +1065,109 @@ def test_picker(port):
         v.close()
 
 
+def host_attaches():
+    with open(SLOG) as f:
+        return f.read().count(" attach xv-sh (")
+
+
+def same_attach(what, v, keys, remote):
+    """keys on the picker or view v attach a srv:xv-sh: the host's when
+    remote (the host logs an attach), else the local one (its LOCAL-MARK
+    drawn, the host asked nothing); the detach key ends it, exit 0."""
+    n0 = host_attaches()
+    mark = len(v.out)
+    v.key(keys, 0.3)
+    if remote:
+        ok = until(lambda: host_attaches() > n0)
+        v.pump(0.5)
+    else:
+        ok = v.wait(b"LOCAL-MARK", start=mark) and \
+            (v.pump(1.5) or host_attaches() == n0)
+    check("same name: %s attaches the %s srv:xv-sh" %
+          (what, "host's" if remote else "local"), ok and v.reap() is None,
+          (host_attaches() - n0, v.rc, v.out[mark:][-300:]))
+    v.key(b"\x1c", 0.5)
+    check("same name: %s: a real attach, the detach key ends it" % what,
+          v.exit(5) == 0, v.out[-200:])
+
+
+def row_view(v, remote):
+    """In the picker v, x on the srv:xv-sh row that is remote (or not):
+    the view is left open on it. False when neither row is."""
+    for keys in (b"kkk", b"jjj"):
+        n0 = ctls("--xray")
+        mark = len(v.out)
+        v.key(keys + b"x", 1.0)
+        v.wait(b"Chapters", start=mark)
+        v.pump(0.5)
+        if (ctls("--xray") > n0) == remote:
+            return True
+        v.key(b"q", 1.0)
+    return False
+
+
 def test_same_name():
     """QA 1.57.0 LOW-R2: a local session literally named srv:xv-sh next to
     the host's xv-sh; x on each row opens that row's session (only the
-    remote one asks the host)."""
+    remote one asks the host). #210: Enter on the remote row, o in the
+    remote view (dch --xray srv:xv-sh opened before the local one came,
+    the picker's x) attach the host's; o in the local row's view the
+    local one."""
     # its own client dirs, the same remote_hosts: the History record the
     # local srv:xv-sh leaves would route srv:xv-sh here for the next tests
     lenv = side("same", DCH_CONFIG=CENV["DCH_CONFIG"],
-                DCH_REMOTE_BOX_MS="5000")
-    r = dch(dict(lenv, DCH_NO_REMOTE="1"), "--spawn", "srv:xv-sh", "--size",
-            "80x24", "sh", "-c", "while :; do sleep 1; done")
-    check("same name: a local session named srv:xv-sh spawned",
-          r.returncode == 0, r.stderr)
-    v = Pty([DCH, "-l"], cols=140, env=lenv)
+                DCH_REMOTE_BOX_MS="5000", DCH_DOUBLE_TAP_MS="0")
     try:
-        v.wait(b"srv:xv-sh", 15)
-        v.pump(2.0)     # the host's row comes with its probe
-        asked = []
-        # the top row, then the bottom one: the two srv:xv-sh rows
-        for keys in (b"kkk", b"jjj"):
-            n0 = ctls("--xray")
-            mark = len(v.out)
-            v.key(keys + b"x", 1.0)
-            ok = v.wait(b"X-ray  srv:xv-sh", start=mark) and \
-                v.wait(b"Chapters", start=mark)
+        v = Pty([DCH, "--xray", "srv:xv-sh"], env=lenv)
+        try:
+            ok = v.wait(b"Chapters")
+            r = dch(dict(lenv, DCH_NO_REMOTE="1"), "--spawn", "srv:xv-sh",
+                    "--size", "80x24", "sh", "-c",
+                    "while :; do echo LOCAL-MARK; sleep 1; done")
+            check("same name: a local session named srv:xv-sh spawned "
+                  "under the view of the host's", ok and r.returncode == 0,
+                  r.stderr)
             v.pump(0.5)
-            asked.append((ok, ctls("--xray") - n0))
+            same_attach("o in dch --xray srv:xv-sh's view", v, b"o", True)
+        finally:
+            v.close()
+        v = Pty([DCH, "-l"], cols=140, env=lenv)
+        try:
+            v.wait(b"srv:xv-sh", 15)
+            v.pump(2.0)     # the host's row comes with its probe
+            asked = []
+            # the top row, then the bottom one: the two srv:xv-sh rows
+            for keys in (b"kkk", b"jjj"):
+                n0 = ctls("--xray")
+                mark = len(v.out)
+                v.key(keys + b"x", 1.0)
+                ok = v.wait(b"X-ray  srv:xv-sh", start=mark) and \
+                    v.wait(b"Chapters", start=mark)
+                v.pump(0.5)
+                asked.append((ok, ctls("--xray") - n0, keys))
+                v.key(b"q", 1.0)
+            check("same name: x on the remote row opens the host's "
+                  "session, x on the local row the local one",
+                  all(a[0] for a in asked) and
+                  sorted(a[1] > 0 for a in asked) == [False, True], asked)
+            check("same name: the remote row found for Enter",
+                  row_view(v, True))
             v.key(b"q", 1.0)
-        check("same name: x on the remote row opens the host's session, x "
-              "on the local row the local one",
-              all(a[0] for a in asked) and
-              sorted(a[1] > 0 for a in asked) == [False, True], asked)
-        v.key(b"\033")
-        v.exit()
+            same_attach("Enter on the remote row", v, b"\r", True)
+        finally:
+            v.close()
+        for what, remote in (("o in the remote row's view", True),
+                             ("o in the local row's view", False)):
+            v = Pty([DCH, "-l"], cols=140, env=lenv)
+            try:
+                v.wait(b"srv:xv-sh", 15)
+                v.pump(2.0)
+                check("same name: x on the %s row opens its view" %
+                      ("remote" if remote else "local"), row_view(v, remote))
+                same_attach(what, v, b"o", remote)
+            finally:
+                v.close()
     finally:
-        v.close()
         dch(dict(lenv, DCH_NO_REMOTE="1"), "-k", "srv:xv-sh")
 
 

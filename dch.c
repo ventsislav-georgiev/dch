@@ -2971,6 +2971,9 @@ spawn_master(char *exe, const char *name, char *sockp,
 
 static int attach_xray_view(void);
 static int attach_remote;	/* this attach is a host's: so is its chord's view */
+/* The next attach's route as the picked row or the view is (#210), not as
+** its name routes: 1 the host's, -1 local, 0 by the name. One attach. */
+static int attach_route;
 
 static int
 do_attach(char *exe, int forced_name, int force, char **inner_argv,
@@ -2978,6 +2981,9 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 {
 	/* Nesting refuse. */
 	const char *nested = getenv("DCH_SESSION");
+	int route = attach_route;
+
+	attach_route = 0;
 	if (nested && *nested)
 	{
 		fprintf(stderr,
@@ -2993,7 +2999,9 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 	if (remote_host)
 		return dch_remote_attach(remote_host, session_name);
 	/* never with remote hosts off (#122); discovery still names hosts */
-	if (remote_ok && dch_remote_on() && name_is_remote(session_name))
+	if (remote_ok && dch_remote_on() &&
+	    (route ? route > 0 && strchr(session_name, ':')
+	     : name_is_remote(session_name)))
 	{
 		char host[512];
 		char *colon = strchr(session_name, ':');
@@ -9553,14 +9561,18 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 	{
 		if (t < 2 && (c == '\r' || c == '\n') &&
 		    (size_t)snprintf(out, outsz, "%s", w->name) < outsz)
+		{
+			attach_route = 1;	/* a local host:name too (#210) */
 			return 1;
+		}
 		if (t == 2 && (c == '\r' || c == '\n' || c == 'm' || c == 'o'))
 			pk_rrevive(p, w, c);
 		else
 			snprintf(p->status, sizeof p->status, t == 2 ? "%s: on "
 			         "another host; Enter resumes it there, p and d "
 			         "are for this host's" : "%s: a remote session; "
-			         "Enter attaches, nothing else here yet", w->title);
+			         "Enter attaches and x opens its X-ray, nothing "
+			         "else", w->title);
 		return 0;
 	}
 	if (t < 2)
@@ -9831,7 +9843,10 @@ pk_xray(struct pk *p, int fd, const char *name, int record, int remote,
 		         "dch -l or the switch");
 	else if (xv_go[0] &&
 	         (size_t)snprintf(out, outsz, "%s", xv_go) < outsz)
+	{
+		attach_route = remote ? 1 : -1;	/* the view's own (#210) */
 		return 1;
+	}
 	return 0;
 }
 
@@ -13971,8 +13986,16 @@ xray_main(int argc, char **argv)
 	** (#194) attaches to the session as `dch -a` does */
 	if (!json)
 	{
-		if ((rc = xray_view(argv[ni])) != 0 || !xv_go[0])
+		/* routed once, as it opens: the view, its queries and its o
+		** stay on that session when a same-named one comes (#210) */
+		int route = name_routes_remote(n) ? 1 : -1;
+
+		xv_route = route;
+		rc = xray_view(argv[ni]);
+		xv_route = 0;
+		if (rc != 0 || !xv_go[0])
 			return rc;
+		attach_route = route;
 		snprintf(session_name, sizeof session_name, "%s", xv_go);
 		attach_only = remote_ok = 1;
 		return attach_with_switch(dch_exe, 1, 1, NULL, 0, 0);
