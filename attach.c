@@ -16,6 +16,7 @@
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 #include "dtach.h"
+#include <poll.h>
 #include <strings.h>
 
 #ifndef VDISABLE
@@ -1035,8 +1036,21 @@ attach_main(int noerror)
 			now_us(&now);
 			us = (detach_at.tv_sec - now.tv_sec) * 1000000L
 			   + (detach_at.tv_usec - now.tv_usec);
-			if (us <= 0)	/* window expired — one press */
-				return detach_key_done(s, 0);
+			/* Window expired: one press, unless a key is already
+			** waiting. dch cannot tell when a byte arrived; what is
+			** readable when it gets to look counts as inside the
+			** window (#259: a client stopped or descheduled past it).
+			** The select below only polls and reads it. A full delay
+			** line would not read it: one press, as before. */
+			if (us <= 0)
+			{
+				struct pollfd p = { 0, POLLIN, 0 };
+
+				if (dq_n > (int)sizeof(dq) - 3 ||
+				    poll(&p, 1, 0) != 1 || !(p.revents & POLLIN))
+					return detach_key_done(s, 0);
+				us = 0;
+			}
 			wait_us = us;
 		}
 		/* A held ESC prefix: wake when it is due to go out as typed;

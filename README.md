@@ -401,7 +401,8 @@ too, and so does a session opened from History with `Shift-Enter`. Quitting
 the picker (`q` / `Esc`) just leaves you detached. A single press still detaches
 — it waits out the double-press window first. `DCH_DOUBLE_TAP_MS` sets that
 window in milliseconds (default `300`); `DCH_DOUBLE_TAP_MS=0` turns switching
-off and makes detach instant again.
+off and makes detach instant again. A key already waiting when dch looks counts
+as inside the window, even if the client was stopped or slow past it.
 
 `detach_key = switch` in the [config file](#config-file) swaps the two: one
 press opens the picker, two detach. With `DCH_DOUBLE_TAP_MS=0` one press then

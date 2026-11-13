@@ -700,6 +700,8 @@ detached. A single press still detaches; it simply waits out the window first.
 .B DCH_DOUBLE_TAP_MS
 sets that window in milliseconds (default
 .BR 300 ).
+A key already waiting when dch looks counts as inside the window, even if
+the client was stopped or slow past it.
 Setting it to
 .B 0
 disables switching and makes detach instant again.
