@@ -1369,7 +1369,7 @@ class XFake:
     only for a 0x34; "crash" whole lines, a partial line, then the 0x33 of
     a host dch SIGKILLed (exit 137, no why); "raw" a 17 MiB line with no
     control, in serve's 64 KiB frames; #226: "late" its hello 0.4 s late,
-    then `{"ok":1}`, exit 0 and the close."""
+    then `{"ok":1}`, exit 0 and the close (shut() waits for it)."""
 
     def __init__(self, mode, out=b""):
         self.mode, self.n, self.out = mode, 0, out
@@ -1377,7 +1377,7 @@ class XFake:
         self.sock.bind(("127.0.0.1", 0))
         self.sock.listen(16)
         self.port = self.sock.getsockname()[1]
-        self.conns = []
+        self.conns, self.said = [], []
         threading.Thread(target=self.loop, daemon=True).start()
 
     def loop(self):
@@ -1454,6 +1454,8 @@ class XFake:
                         c.sendall(frame(0x31, b'{"last":1}\n')
                                   + frame(0x33, {"exit": 0}))
                     elif t == 0x30 and self.mode in answers:
+                        if self.mode in ("dark", "cut", "late"):
+                            self.said.append(c)
                         c.sendall(answers[self.mode])
                         if self.mode in ("dark", "cut", "late"):
                             time.sleep(0.2)
@@ -1461,6 +1463,15 @@ class XFake:
                             return
         except OSError:
             return
+
+    def shut(self, secs=10):
+        """#279: until each connection it answered and closes is closed: a
+        request sent before that goes to a socket closing with it unread
+        (a reset, exit 7 lost), which dch serve never does 0.2 s after an
+        answer (it keeps the connection warm for CTL_IDLE_MS)"""
+        end = time.time() + secs
+        while any(c.fileno() >= 0 for c in self.said) and time.time() < end:
+            time.sleep(0.01)
 
     def close(self):
         self.sock.close()
@@ -1571,6 +1582,7 @@ def dial_cancel_checks(check, side, fake):
     rq.line()
     rq.send({"req": 1, "argv": ["--json"]})
     rq.until(1)
+    f.shut()
     time.sleep(0.5)
     n0 = nfds(rq.p.pid)
     got = []
@@ -1579,9 +1591,11 @@ def dial_cancel_checks(check, side, fake):
         time.sleep(d)
         rq.send({"cancel": 10 + i})
         got.append([json.loads(g) for g in rq.until(10 + i, 30)])
+        f.shut()	# #279: the host's close, then the next request dials
         time.sleep(0.3)
     rq.send({"req": 20, "argv": ["--json"]})
     last = [json.loads(g) for g in rq.until(20, 30)]
+    f.shut()
     time.sleep(0.5)	# the host's close reaches dch
     n1 = nfds(rq.p.pid)
     rc, rest, err = rq.end()
