@@ -1877,11 +1877,15 @@ parse_input(struct conn *c)
 }
 
 /* A live master answers a connect on its socket; a SIGKILLed one's socket
-** file is left behind and refuses it (#230). */
+** file is left behind and refuses it (#230). Linux releases a dying
+** master's listen socket after its client's connection, so the client can
+** end and this connect still land, unaccepted; the release then resets it.
+** A live master accepts and waits for a packet: no event in 100 ms (#271). */
 static int
 sock_live(const char *path)
 {
 	struct sockaddr_un sa;
+	struct pollfd pf;
 	size_t n = strlen(path);
 	int s, ok;
 
@@ -1891,6 +1895,12 @@ sock_live(const char *path)
 	sa.sun_family = AF_UNIX;
 	memcpy(sa.sun_path, path, n);
 	ok = connect(s, (struct sockaddr *)&sa, sizeof sa) == 0;
+	if (ok)
+	{
+		pf.fd = s;
+		pf.events = POLLIN;
+		ok = poll(&pf, 1, 100) <= 0;	/* an EINTR: as connected */
+	}
 	close(s);
 	return ok;
 }
