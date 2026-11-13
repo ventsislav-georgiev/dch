@@ -980,9 +980,10 @@ the view of `host:name`, as `dch --xray host:name` does: its queries dial
 their own ctl connections, and the attach connection is kept. Leaving it,
 the host resizes the program for a beat so it repaints, and dch serve
 1.58.0+ also re-arms the modes the view turned off (bracketed paste, mouse
-reporting, the kitty keyboard flags, the alternate screen). An older dch
-serve or the Prosper server only resizes: those modes stay off on your
-terminal until you attach again. There is no
+reporting, the kitty keyboard flags, the alternate screen), as does the
+Prosper server from 2.175.0. An older dch serve, or the Prosper server before
+2.175.0, only resizes: those modes stay off on your terminal until you attach
+again. There is no
 `xray_key` setting: the chord takes no key from the program. In the picker,
 `x` opens the view too; `X` is kill, which asks first.
 
@@ -2537,7 +2538,12 @@ stops forwarding, sends the dch SIGTERM (SIGKILL 2 s later) and ends with
 20 s past the timeout (80 s after the request; 680 s for the 660 s verbs):
 `dch --xray host:x --json | less` left on a page gets
 the whole answer if it reads on before the 60 s are up, `"why":"timeout"` if
-it reads on within 20 s after that, and a closed connection later.
+it reads on within 20 s after that, and a closed connection later. That is
+for an answer the host's dch cannot finish writing while nobody reads: more
+than the socket buffers, the pipe from dch and the 64 KiB dch serve holds
+unsent (plus the one read of up to 64 KiB that went past it) together. A
+smaller answer ends on its own, with dch's real exit code: a reader that reads
+on within the 80 s gets all of it, a later one a closed connection.
 An answer that fits whole in the socket buffers is never left untaken, so a
 client that never reads it holds its slot until the warm connection's idle
 close: 300 s after the `0x33`, 30 s once the peer has 8 connections open (or

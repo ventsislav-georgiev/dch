@@ -896,8 +896,12 @@ its queries over their own ctl connections, the attach kept; leaving it, the
 host resizes the program for a beat so it repaints, and
 .B dch serve
 1.58.0+ also re\-arms the modes the view turned off (bracketed paste, mouse
-reporting, the kitty keyboard flags, the alternate screen).
-An older host only resizes: those modes stay off until the next attach.
+reporting, the kitty keyboard flags, the alternate screen), as does the
+Prosper server from 2.175.0.
+An older
+.BR "dch serve" ,
+or the Prosper server before 2.175.0, only resizes: those modes stay off
+until the next attach.
 There is no
 .B xray_key
 setting.
@@ -3022,8 +3026,17 @@ and
 60 s for the rest; past it, the same with
 .BR \(dqwhy\(dq:\(dqtimeout\(dq .
 Output the client leaves unread is held, not cut, until 20 s past the
-timeout (80 s after the request; 680 s for the 660 s verbs), so a reader
-paused within it gets the whole answer; any other
+timeout (80 s after the request; 680 s for the 660 s verbs).
+A reader paused within it gets the whole answer if it reads on before the
+timeout, and
+.B \(dqwhy\(dq:\(dqtimeout\(dq
+after it, when the answer is more than the socket buffers, the pipe from dch
+and the 64 KiB
+.B dch serve
+holds unsent (plus the one read of up to 64 KiB that went past it) together; a
+smaller answer ends on its own, with dch's real exit code, and such a reader
+gets all of it.
+Any other
 connection, a follow's included, closes once its output goes untaken for
 20 s.
 An answer that fits whole in the socket buffers is never left untaken, so a
