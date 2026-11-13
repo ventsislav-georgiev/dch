@@ -371,6 +371,33 @@ def dashname():
     wait_live("pk9", False)
 
 
+ZW_RE = re.compile("[\u200b-\u200d\u2060-\u2064\ufeff]")
+
+
+def zerowidth():
+    """15. A name holding a zero-width format character (U+FEFF, U+2060)
+    takes no cell, so its row pads to the same columns as any other
+    (#225): the state starts under STATE."""
+    names = {"zwbom": "zw\ufeffbom", "zwj": "zw\u2060wj"}
+    for n, alias in names.items():
+        dch("--spawn", n, "--size", "80x24", "sh", "-c", "sleep 600")
+        dch("-m", n, alias)
+    picker("pk10", "100x30", "NO_COLOR=1", "TERM=xterm-256color")
+    s = wait_screen("pk10", lambda s: all(a in rows(s)
+                                          for a in names.values()))
+    cell = lambda l, i: i - len(ZW_RE.findall(l[:i]))
+    hdr = [l for l in s.split("\n") if re.match(r"^ {4}NAME +STATE", l)]
+    col = cell(hdr[0], hdr[0].find("STATE")) if hdr else -1
+    for n, alias in names.items():
+        rl = [l for l in body(s) if alias in l]
+        check("U+%04X in a name: the row's state starts under STATE"
+              % ord(ZW_RE.search(alias).group()),
+              len(rl) == 1 and cell(rl[0], rl[0].find("Idle")) == col,
+              col, rl)
+    dch("--keys", "pk10", "q")
+    wait_live("pk10", False)
+
+
 def main():
     if not os.access(DCH, os.X_OK):
         print("FAIL dch not executable at " + DCH)
@@ -789,6 +816,7 @@ def main():
     check("q quits the picker", wait_live("pk3", False), live())
     kitty()
     dashname()
+    zerowidth()
     return 1 if failures else 0
 
 
@@ -797,7 +825,7 @@ if __name__ == "__main__":
         rc = main()
     finally:
         for n in ("pk1", "pk2", "pk3", "pk4", "pk5", "pk6", "pk7", "pk8",
-                  "pk9", "s2", "s10",
+                  "pk9", "pk10", "s2", "s10", "zwbom", "zwj",
                   "helper-qa", "a4k-2", "perm", "form", "zkbd"):
             dch("-k", n)
         for pr in procs:

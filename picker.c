@@ -422,12 +422,14 @@ pk_bidi(unsigned u)
 }
 
 /* Cells of code point u: two for the wide (ap_cells), none for a combining
-** mark, a joiner or a variation selector; one for a bidi control's '?'. */
+** mark, a joiner, an invisible operator, a BOM or a variation selector; one
+** for a bidi control's '?'. */
 static int
 pk_cw(unsigned u)
 {
 	return pk_bidi(u) ? 1 : (u >= 0x300 && u <= 0x36F) ||
-	       (u >= 0x200B && u <= 0x200F) || (u >= 0xFE00 && u <= 0xFE0F)
+	       (u >= 0x200B && u <= 0x200F) || (u >= 0x2060 && u <= 0x2064) ||
+	       (u >= 0xFE00 && u <= 0xFE0F) || u == 0xFEFF
 	       ? 0 : ap_cells(u);
 }
 
