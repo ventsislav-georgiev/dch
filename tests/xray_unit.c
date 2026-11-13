@@ -3723,7 +3723,7 @@ t_res_git(void)
 	      !strcmp(r.title, "Not a commit in proj") &&
 	      xr_res_spawned == s0 + 2 && !strstr(slurp("argv"), "show\n"));
 	snprintf(want, sizeof want, "-C\n%s\nconfig\n-z\n--get-regexp\n"
-	         "^remote\\..*\\.url$\n--\n", cwd);
+	         "^(remote\\..*\\.url|url\\..*\\.insteadof)$\n--\n", cwd);
 	CHECK("git: the URL's remotes: config -z --get-regexp, same flags",
 	      strstr(slurp("argv"), want) != NULL);
 	{
@@ -3957,7 +3957,6 @@ t_res_parse(void)
 	      !GR("remote.o.url\nevilgithub.com:o/r\0") &&
 	      !GR("remote.o.url\nhttps://github.com.evil.com/o/r\0") &&
 	      !GR("remote.o.url\ngit@github.com.evil.com:o/r\0") &&
-	      !GR("remote.o.url\nhttps://github.com:/o/r\0") &&
 	      !GR("remote.o.url\nhttps://github.com:44x/o/r\0") &&
 	      !GR("remote.o.url\nx/y@github.com:o/r\0"));
 	CHECK("git remote: http, git, a port, any host case: yes (NIT-X1)",
@@ -3968,6 +3967,39 @@ t_res_parse(void)
 	      GR("remote.o.url\nssh://git@github.com:22/o/r.git\0") &&
 	      GR("remote.o.url\nssh://git@github.com/o/r\0") &&
 	      GR("remote.o.url\ngithub.com:o/r.git/\0"));
+	CHECK("git remote: an empty port, git+ssh, ssh+git: yes (NIT-X2)",
+	      GR("remote.o.url\nhttps://github.com:/o/r\0") &&
+	      GR("remote.o.url\nssh://github.com:/o/r\0") &&
+	      GR("remote.o.url\ngit+ssh://git@github.com/o/r\0") &&
+	      GR("remote.o.url\nSSH+GIT://github.com:22/o/r.git\0") &&
+	      !GR("remote.o.url\ngit+ssh://evil.com?@github.com/o/r\0") &&
+	      !GR("remote.o.url\nhttps://github.com::/o/r\0") &&
+	      !GR("remote.o.url\ngit+https://github.com/o/r\0"));
+	CHECK("git remote: url.<base>.insteadOf, the longest prefix, once: "
+	      "git's URL (LOW-X15)",
+	      !GR("remote.o.url\nhttps://github.com/o/r\0"
+	          "url.https://evil.com/.insteadof\nhttps://github.com/\0") &&
+	      !GR("url.https://evil.com/.insteadof\nhttps://github.com/\0"
+	          "remote.o.url\nhttps://github.com/o/r\0") &&
+	      GR("url.https://github.com/.insteadof\ngh:\0"
+	         "remote.o.url\ngh:o/r\0") &&
+	      !GR("url.https://github.com/.insteadof\nhttps://\0"
+	          "url.https://evil.com/.insteadof\nhttps://github.com/\0"
+	          "remote.o.url\nhttps://github.com/o/r\0") &&
+	      GR("url.https://evil.com/.insteadof\nhttps://\0"
+	         "url.https://github.com/.insteadof\nhttps://github.com/\0"
+	         "remote.o.url\nhttps://github.com/o/r\0") &&
+	      GR("url.https://evil.com/.insteadof\nhttps://github.com/o/r2\0"
+	         "remote.o.url\nhttps://github.com/o/r\0") &&
+	      !GR("url.https://github.com/.insteadof\ngh:\0"
+	          "url.gh:.insteadof\nhttps://github.com/\0"
+	          "remote.o.url\nhttps://github.com/o/r\0") &&
+	      !GR("url..insteadof\nhttps://\0"
+	          "remote.o.url\nhttps://github.com/o/r\0") &&
+	      GR("url.https://evil.com/.insteadof\n\0"
+	         "remote.o.url\nhttps://github.com/o/r\0") &&
+	      GR("url.https://evil.com/.pushinsteadof\nhttps://github.com/\0"
+	         "remote.o.url\nhttps://github.com/o/r\0"));
 	CHECK("git remote: scp path with ':' or '@', empty owner or repo, "
 	      "3 segments: no",
 	      !GR("remote.o.url\ngit@github.com:o/r:x\0") &&
