@@ -4258,6 +4258,29 @@ t_excl(void)
 		"echo $[1 + ${a[<(cat ../x)]}]", "echo ${x; cat ../x",
 		"echo $[1; cat ../x", "echo ${x:-a\ncat ../x",
 		"echo 'cat ../x' |& sh", "printf x |& bash -s",
+		/* #276 LOW-X8: a shell's script from a file, a substitution, a
+		** grouped pipe, /dev/stdin, an xargs input or a $ word */
+		"echo 'cat ../x' | (sh)", "echo 'cat ../x' | (cd sub && sh)",
+		"sh < s.sh", "< s.sh bash -o pipefail", "sh < <(echo 'cat ../x')",
+		"bash <(echo 'cat ../x')", "source <(echo 'cat ../x')",
+		". <(echo 'cat ../x')", "source /dev/stdin <<< 'cat ../x'",
+		". /dev/stdin <<'EOF'\ncat ../x\nEOF",
+		"echo 'cat ../x' | source /dev/stdin",
+		"echo 'cat ../x' | xargs -I{} sh -c '{}'",
+		"echo 'cat ../x' | while read l; do eval \"$l\"; done",
+		"x='cat ../x'; sh -c \"$x\"", "sh -c '$0' 'cat ../x'",
+		"echo 'cat ../x' | sh -c 'sh'", "xargs -a ../x echo",
+		"xargs -0a ../x echo", "xargs --arg-file=../x echo",
+		"xargs --arg-file ../x", "env -C .. xargs -a proj/../x echo",
+		/* #276 LOW-X9: sudo -i, --login run it in the target's home */
+		"sudo -i cat notes.md", "sudo --login cat notes.md",
+		"sudo -iu bob cat notes.md",
+		/* #276 LOW-X10: <(…)#x is one word; x=1 a[1<<1]=5 a shift; bash
+		** 5.3's ${ cmd; } runs cmd */
+		"cat <(echo a)#x; cat ../x", "tee >(cat)#x; cat ../x",
+		"x=1 a[1<<1]=5\ncat ../x", "x=1 y=2 a[1<<1]=5\ncat ../x",
+		"echo ${ cat ../x; }", "echo \"${ cat ../x; }\"",
+		"echo ${| cat ../x; }",
 		0
 	};
 	static const char *const keep[] = {
@@ -4310,6 +4333,13 @@ t_excl(void)
 		"echo ${x/(#/y}; cat notes.md", "echo ${a[1<<1]}\ncat notes.md",
 		"echo ${x:-<} y; cat notes.md", "echo \"${x:-<(y)}\"; cat notes.md",
 		"cat notes.md & sh", "echo a & sh -c 'echo hi'; cat notes.md",
+		/* #276: the same shapes inside the cwd; a script by name; sudo
+		** without -i; a here-doc after an argument a[ */
+		"source env.sh; cat notes.md", ". ./env.sh && cat notes.md",
+		"source /dev/stdin <<< 'cat notes.md'", "xargs -a list.txt echo",
+		"sudo -u root cat notes.md", "sudo -i gh issue view 831",
+		"cat <(echo a) notes.md", "x=1 echo a[1<<EOF]\nx\nEOF\ncat notes.md",
+		"bash script.sh; cat notes.md", "echo ${x}; cat notes.md",
 		0
 	};
 	/* change (a): a reader or search only inside $(…) or backquotes
@@ -4545,6 +4575,21 @@ t_d3(void)
 		  "pull:o/r#9=New;" },
 		{ "sh -c 'gh pr edit o/r#9 --title Old; gh pr create --title New'",
 		  PR, 0, "" },
+		/* #276 LOW-X11: a backquote ends a command, as $( does; a title
+		** sh expands is no title, and the output goes to nobody */
+		{ "gh pr edit 12 --title New --body `gh pr view o/r#9 --json body`",
+		  PR, 0, "pull:o/r#12=New;" },
+		{ "echo `gh pr edit o/r#9 --title Old`; gh pr create --title New", PR,
+		  0, "pull:o/r#9=Old;pull:o/r#12=New;" },
+		{ "echo `gh pr create --title A`; gh pr create --title B", PR, 0, "" },
+		{ "gh pr create --title 'Fix `x` crash'", PR, 0,
+		  "pull:o/r#12=Fix `x` crash;" },
+		{ "gh pr create --title \"Fix `x` crash\"", PR, 0, "" },
+		{ "gh pr create --title \"$T\"", PR, 0, "" },
+		{ "gh pr create --title 'Fix $x'", PR, 0,
+		  "pull:o/r#12=Fix $x;" },
+		{ "gh pr create --title \"Fix $'x'\"", PR, 0, "pull:o/r#12=Fix $'x';" },
+		{ "gh pr edit o/r#9 --title \"$(cat t)\"", PR, 0, "" },
 #undef PR
 	};
 	char got[512], m[300], *p;

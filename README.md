@@ -1340,28 +1340,35 @@ output defines. A create command (`gh pr create`, `gh pr new`,
 creates has no number until it prints one. gh's repo flag (`-R o/r`,
 `--repo o/r`, `--repo=o/r`) may come before or after `pr` or `issue`; any other
 word there makes it no create. A gh alias for a create is not recognised: dch
-does not run gh. An orphan result, a forged or orphaned shell block, an error,
+does not run gh. A backquote ends a command here as `$(` does, and a
+`--title` the shell expands (`--title "$T"`, a backquote in it) is no title,
+nor does the output define by it. An orphan result, a forged or orphaned shell block, an error,
 a fence, a diff, a listing command (`rg`, `grep`, `ls`, ...), a file printed
 from outside the cwd, a heading with an empty title, and more than 3 headings
 of one shape never define. The command counts in every simple command of it
 (split at `;`, `&`, `&&`, `|`, `||`, parentheses and newlines, not at the `&`
 of `2>&1`, `<&3` or `&>`; `<>` is one redirect; a `<<` inside `$(( ))`,
-`$[ ]`, `${a[ ]}` or `a[ ]=` is a shift; a `#` comment, which starts only at a
-`#` that begins a word (not `$(x)#y`), and each here-doc's body are not a command, and a command with a body the
+`$[ ]`, `${a[ ]}` or `a[ ]=` (also after assignments, `x=1 a[ ]=`) is a shift; a `#` comment, which starts only at a
+`#` that begins a word (not `$(x)#y` or `<(x)#y`), and each here-doc's body are not a command, and a command with a body the
 shell expands, `$(…)` under an unquoted delimiter, or a `${` or `$[` left open
 never defines), past env
 assignments, redirects, `{`, `!`, `if`, `then`, `elif`,
 `else`, `do`, `while`, `until`, `coproc`, `function f`, and `sudo`, `doas`,
 `env`, `command`, `exec`, `builtin`, `xargs`, `nice`, `nohup`, `stdbuf`,
 `time`, `timeout`, `setsid`, `flock`, `ionice`, `chrt`, `taskset` and
-`busybox` with their options (`sudo -iu root`,
-`timeout --signal KILL 5`; `env -C d` and `sudo -D d` run it in `d`), by name, by path (`/usr/bin/env`) or by GNU name
+`busybox` with their options (`sudo -u root`,
+`timeout --signal KILL 5`; `env -C d` and `sudo -D d` run it in `d`, `sudo -i`
+and `sudo --login` in the target's home), by name, by path (`/usr/bin/env`) or by GNU name
 (`gtimeout`). It counts inside `sh -c '…'` (`sh`, `bash`, `zsh`, `dash`,
 `ksh`, `fish`; `-lc`, `-c --` and `-c -e` too), `eval`, `watch` and `env -S` (`-S'…'` and
-`--split-string` too), `flock f -c '…'`, a shell's script from a here-doc or a
-here-string (`bash <<'EOF'`, `bash <<< '…'`; a shell fed by a pipe never
-defines), and inside `$(…)` and
-backquotes, quoted or not. A search or a printed file found only inside
+`--split-string` too), `flock f -c '…'`, a shell's or `source`'s script from a
+here-doc or a here-string (`bash <<'EOF'`, `bash <<< '…'`,
+`source /dev/stdin <<< '…'`), and inside `$(…)`, backquotes and bash 5.3's
+`${ …; }`, quoted or not. A script dch cannot read never defines: a shell
+after a pipe on the line (`… | sh`, `… | (sh)`), a shell or `source` with a `<`
+or `<(…)` on it or a script under `/dev/` (`sh < f`, `bash <(…)`,
+`source /dev/stdin`), any shell under `xargs`, and inside `sh -c` or `eval` a
+bare `sh` or a command named by `$` or a backquote (`eval "$l"`). A search or a printed file found only inside
 `$(…)` or backquotes still leaves the command's `--title` to define: its text
 feeds the command, it is not the output. A command of more than 256 words
 never defines. The file printers are `cat`, `head`, `tail`, `bat`, `batcat`,
@@ -1369,7 +1376,8 @@ never defines. The file printers are `cat`, `head`, `tail`, `bat`, `batcat`,
 `rev`, `column`, `fold`, `fmt`, `glow`, `zcat` and `gzcat` (also by GNU name:
 `gcat`, `gsed`); with no file
 argument (`… | jq .`) they print their input and define, but under `xargs`
-they print files named by their input and never define. A `<` or `<>` source is a
+they print files named by their input and never define; `xargs -a f`
+(`--arg-file`) gives its command the text of `f`, a printed file. A `<` or `<>` source is a
 printed file of a printer, of a compound command (`done < f`, `} < f`) and
 of a redirect with no command (`$(< f)`). A printed file is
 outside the cwd when its path, made absolute against the cwd or the directory

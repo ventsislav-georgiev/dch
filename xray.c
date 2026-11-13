@@ -2110,7 +2110,7 @@ rm_scan(struct remit *r, const char *text, size_t n, int mode)
 ** $[…] an operator or a blank is the word's. hx: a body sh expands ($(…)
 ** or ` under an unquoted delimiter), or a ${ or $[ left open at a newline or
 ** the end (it would hide the commands after it); hb/he: the body of the here-doc whose
-** delimiter is that word. */
+** delimiter is that word. bq: an unquoted ` is an operator too. */
 #define SW_MAX 256	/* one word more marks a command past the cap */
 struct sw
 {
@@ -2122,15 +2122,23 @@ struct sw
 	int hx;
 };
 
+static int is_assign(const char *s);
+
 /* The word just before a < (no blank between) opens a subscript at a
-** command's start: a[1<<1]=5 is arithmetic, no here-doc (LOW-X5). */
+** command's start, past assignments: a[1<<1]=5 and x=1 a[1<<1]=5 are
+** arithmetic, no here-doc (LOW-X5, X10). */
 static int
 arr_open(const struct sw *w)
 {
 	const char *p;
+	size_t k;
 
-	if (!w->n || w->op[w->n - 1] || w->re[w->n - 1] != w->rs[w->n] ||
-	    (w->n > 1 && !w->op[w->n - 2]))
+	if (!w->n || w->op[w->n - 1] || w->re[w->n - 1] != w->rs[w->n])
+		return 0;
+	for (k = w->n - 1; k && !w->op[k - 1] && is_assign(w->b + w->off[k - 1]);
+	     k--)
+		;
+	if (k && !w->op[k - 1])
 		return 0;
 	p = w->b + w->off[w->n - 1];
 	if (!A_AL((unsigned char)*p) && *p != '_')
@@ -2141,10 +2149,10 @@ arr_open(const struct sw *w)
 }
 
 static void
-shell_words(const char *c, size_t cl, struct sw *w)
+shell_words(const char *c, size_t cl, struct sw *w, int bq)
 {
 	size_t i = 0, o = 0, hd = 0, j, dl, b0, k, dk;
-	const char *d;
+	const char *d, *ops = bq ? "|;&<>()`" : "|;&<>()";
 	int bl, dash, uq, ar = 0, an, sx = 0, bd = 0, bk = 0;
 	unsigned long ps = 0;	/* open ('s, 1 for a $(: a bit each */
 
@@ -2230,18 +2238,21 @@ shell_words(const char *c, size_t cl, struct sw *w)
 		w->rs[w->n] = i;
 		w->off[w->n] = o;
 		w->hb[w->n] = w->he[w->n] = 0;
-		w->op[w->n] = strchr("|;&<>()", c[i]) != NULL && c[i];
+		w->op[w->n] = strchr(ops, c[i]) != NULL && c[i];
 		if (w->op[w->n])
 		{
 			/* (( and $((: arithmetic, where 1<<2 is no here-doc */
 			if (strchr("()", c[i]) && w->n && w->op[w->n - 1] &&
 			    w->re[w->n - 1] == i && c[i - 1] == c[i])
 				ar += c[i] == '(' ? 1 : -(ar > 0);
-			/* a # right after the ) of a $( or $(( is the word's (LOW-X4) */
+			/* a # right after the ) of a $(, $((, <( or >( is the word's
+			** (LOW-X4, X10) */
 			sx = c[i] == ')' && (ps & 1);
 			if (c[i] == ')' || c[i] == '(')
-				ps = c[i] == ')' ? ps >> 1 : ps << 1 | (i && c[i - 1] == '$' &&
-				     w->n && !w->op[w->n - 1] && w->re[w->n - 1] == i);
+				ps = c[i] == ')' ? ps >> 1 : ps << 1 | (i && w->n &&
+				     w->re[w->n - 1] == i && (w->op[w->n - 1] ?
+				     strchr("<>", c[i - 1]) && !w->b[w->off[w->n - 1] + 1] :
+				     c[i - 1] == '$'));
 			w->b[o++] = c[i++];
 			if (i < cl && c[i] == c[i - 1] && strchr("&|<>", c[i]) &&
 			    (c[i] != '<' || (!ar && !arr_open(w))))
@@ -2262,7 +2273,7 @@ shell_words(const char *c, size_t cl, struct sw *w)
 		else
 			for (bd = bk = 0; i < cl && c[i] != '\n' && (bd || bk ||
 			     (c[i] != ' ' && c[i] != '\t' && c[i] != '\r' &&
-			      !strchr("|;&<>()", c[i])));)
+			      !strchr(ops, c[i])));)
 			{
 				char q = c[i];
 
@@ -2428,13 +2439,17 @@ cmd_head(const struct sw *w, size_t k, size_t e, int *line, const char **cd)
 			}
 			/* -u root, -iu root (not -uroot); --user root (not --user=) */
 			a = o[1] == '-' ? NULL : o + 1 + strcspn(o + 1, wraps[j].argopt);
-			/* env -C d, -Cd, --chdir d, --chdir=d; sudo -D d alike */
+			/* env -C d, -Cd, --chdir d, --chdir=d; sudo -D d alike; sudo
+			** -i, --login: in the target's home (LOW-X9) */
 			dl = !strcmp(wraps[j].w, "env") ? 'C' :
 			     !strcmp(wraps[j].w, "sudo") ? 'D' : 0;
 			v = !dl ? NULL : a && *a == dl ?
 			    (a[1] ? a + 1 : k + 1 < e ? SWD(w, k + 1) : NULL) :
 			    !strcmp(o, "--chdir") && k + 1 < e ? SWD(w, k + 1) :
-			    !strncmp(o, "--chdir=", 8) ? o + 8 : NULL;
+			    !strncmp(o, "--chdir=", 8) ? o + 8 :
+			    dl == 'D' && (!strcmp(o, "--login") ||
+			                  (a && memchr(o + 1, 'i', (size_t)(a - o - 1)))) ?
+			    "~" : NULL;
 			if (v)
 				*cd = *cd && v[0] != '/' ? "" : v;
 			if ((a && *a && !a[1]) ||
@@ -2555,10 +2570,10 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 	struct sw w;
 	char cdb[XR_KEY_MAX + 1], edb[XR_KEY_MAX + 1], q;
 	size_t s, e, h, k, sub, i, j, t, end;
-	int r = X_NONE, sr = X_NONE, x, skip, line, rd, xa, slost = -1;
+	int r = X_NONE, sr = X_NONE, x, skip, line, rd, xa, xw, slost = -1;
 	const char *c0, *a, *dir, *scur = NULL;
 
-	shell_words(cmd, cl, &w);
+	shell_words(cmd, cl, &w, 0);
 	if (!w.b || w.n > SW_MAX)
 	{
 		free(w.b);
@@ -2593,7 +2608,10 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 			else if ((!q || q == '"') && (cmd[i] == '`' ||
 			         ((cmd[i] == '$' || (!q && (cmd[i] == '<' ||
 			                                    cmd[i] == '>'))) &&
-			          i + 1 < end && cmd[i + 1] == '(')))
+			          i + 1 < end && cmd[i + 1] == '(') ||
+			         /* bash 5.3's ${ cmd; } and ${| cmd; } (LOW-X10) */
+			         (cmd[i] == '$' && i + 2 < end && cmd[i + 1] == '{' &&
+			          cmd[i + 2] && strchr(" \t\n|", cmd[i + 2]))))
 			{
 				t = i + 1 + (cmd[i] != '`');
 				for (j = t; cmd[i] == '`' && j < end && cmd[j] != '`';
@@ -2612,10 +2630,37 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 			                !strcmp(SWD(&w, k), "<>")) && !w.op[k + 1] &&
 			    arg_outside(SWD(&w, k + 1), cur, lost, cwd))
 				rd = 1;
-		if ((h = cmd_head(&w, s, e, &line, &dir)) >= e ||
-		    in_list(SWD(&w, h), closers))
+		h = cmd_head(&w, s, e, &line, &dir);
+		/* xargs -a f, -0a f, --arg-file[=]f: f's text is its command's
+		** arguments, a printed file, read after an env -C (LOW-X8) */
+		for (k = s, xw = 0; k < h && !r; k++)
+		{
+			a = base(SWD(&w, k));
+			if (!strcmp(a + (a[0] == 'g'), "xargs"))
+				xw = 1;
+			else if (xw && (a = SWD(&w, k))[0] == '-')
+			{
+				const char *p = a[1] == '-' ? "" :
+				                a + 1 + strcspn(a + 1, "IJLnPsEdaR");
+
+				a = *p == 'a' ?
+				    (p[1] ? p + 1 : k + 1 < h ? SWD(&w, k + 1) : "") :
+				    !strcmp(a, "--arg-file") && k + 1 < h ? SWD(&w, k + 1) :
+				    !strncmp(a, "--arg-file=", 11) ? a + 11 : NULL;
+				if (a && arg_outside(a, cur, lost | !!dir, cwd))
+					r = X_QUOTE;
+			}
+		}
+		if (r)
+			continue;
+		if (h >= e || in_list(SWD(&w, h), closers))
 		{
 			r = rd ? X_QUOTE : r;
+			continue;
+		}
+		if (depth && strpbrk(SWD(&w, h), "$`"))
+		{
+			r = X_LIST;	/* sh -c "$x", eval "$l": unseen (LOW-X8) */
 			continue;
 		}
 		if (dir)
@@ -2659,7 +2704,8 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 			cur = lost ? NULL : cdb;
 			continue;
 		}
-		if (in_list(c0, shells))
+		if (in_list(c0, shells) || !strcmp(c0, "source") ||
+		    !strcmp(c0, "."))
 		{
 			/* sh -c 'cmd' (or -lc, -ec): its command, classified alike */
 			for (k = h + 1, x = -1; k + 1 < e && !w.op[k]; k++)
@@ -2696,12 +2742,39 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 					x = depth >= 3 ? X_LIST :
 					    excl_in(SWD(&w, k + 2), strlen(SWD(&w, k + 2)), cwd,
 					            cur, lost | xa, depth + 1);
-			if (x < 0 && s && ((SWD(&w, s - 1)[0] == '|' &&
-			                    SWD(&w, s - 1)[1] != '|') ||
-			                   (s > 1 && !strcmp(SWD(&w, s - 1), "&") &&
-			                    !strcmp(SWD(&w, s - 2), "|") &&
-			                    w.re[s - 2] == w.rs[s - 1])))
-				x = X_LIST;	/* … | sh, … |& sh */
+			if (x < 0)
+			{
+				/* its script: past options (-o, -O, --rcfile take a value;
+				** - and -- end them; -s: stdin's, the words are its args) */
+				for (k = h + 1, t = 0; k < e && !w.op[k] && SWD(&w, k)[0] &&
+				     strchr("-+", SWD(&w, k)[0]); k++)
+				{
+					a = SWD(&w, k);
+					if (!a[1] || !strcmp(a, "--"))
+					{
+						k++;
+						break;
+					}
+					t |= a[0] == '-' && a[1] != '-' && strchr(a, 's');
+					k += (a[1] != '-' && strpbrk(a, "oO")) ||
+					     !strcmp(a, "--rcfile") || !strcmp(a, "--init-file");
+				}
+				a = k < e && !w.op[k] ? SWD(&w, k) : NULL;
+				for (k = s; k < e && !(w.op[k] && strchr(SWD(&w, k), '<'));
+				     k++)
+					;
+				for (j = 0; j < s && !(w.op[j] && !strcmp(SWD(&w, j), "|"));
+				     j++)
+					;
+				/* unseen (LOW-X8): sh < f, bash <(…), source /dev/stdin,
+				** … | sh, … |& sh, … | (sh), a bare sh inside sh -c */
+				if (k < e || (a && (!strncmp(a, "/dev/", 5) ||
+				                    !strncmp(a, "/proc/", 6))) ||
+				    (in_list(c0, shells) && (j < s || (depth && (!a || t)))))
+					x = X_LIST;
+			}
+			if (xa)
+				x = X_LIST;	/* xargs -I{} sh -c '{}': the script its input */
 			if (x > 0 && (x & X_SUB))
 				sr = sr ? sr : x & ~X_SUB;
 			else if (x >= 0)
@@ -3317,6 +3390,24 @@ gh_repo(const struct sw *w, size_t k)
 	return k;
 }
 
+/* The raw word c[i..e) holds a $ or ` sh expands (not in '…', not $'…',
+** $"…" or a lone $). */
+static int
+sh_expands(const char *c, size_t i, size_t e)
+{
+	char q = 0;
+
+	for (; i < e; i++)
+		if (c[i] == '\\' && q != '\'')
+			i++;
+		else if ((c[i] == '\'' && q != '"') || (c[i] == '"' && q != '\''))
+			q = q ? 0 : c[i];
+		else if (q != '\'' && (c[i] == '`' || (c[i] == '$' && i + 1 < e &&
+		         !strchr("'\" \t", c[i + 1]))))
+			return 1;
+	return 0;
+}
+
 /* D3: --title on a bash command that did not fail. A create command (gh pr
 ** create|new, gh issue create|new, gh's repo flag allowed after gh or the
 ** kind) takes its ref from its output only (R1): what it creates has no
@@ -3338,7 +3429,7 @@ d3(const struct dsrc *s, struct dset *ds)
 	char title[XR_TITLE_MAX * 4 + 1] = "";	/* whole: copied by size */
 	char ot[XR_TITLE_MAX * 4 + 1] = "";
 
-	shell_words(s->cmd, s->cl, &w);
+	shell_words(s->cmd, s->cl, &w, 1);
 	if (!w.b)
 		return;
 	memset(&m, 0, sizeof m);
@@ -3346,7 +3437,7 @@ d3(const struct dsrc *s, struct dset *ds)
 	m.cmd = s->cmd;
 	m.ds = ds;
 	m.n0 = ds->n;
-	/* every simple command: split on ; & && | || ( ) and newlines */
+	/* every simple command: split on ; & && | || ( ) ` and newlines */
 	for (c = 0; c < w.n; c = e + 1)
 	{
 		for (e = c; e < w.n && !(w.op[e] && !strpbrk(SWD(&w, e), "<>"));
@@ -3357,9 +3448,14 @@ d3(const struct dsrc *s, struct dset *ds)
 				continue;
 			else if (!strcmp(SWD(&w, k), "--title") && k + 1 < e &&
 			         !w.op[k + 1])
-				val = SWD(&w, k + 1);
+				val = SWD(&w, (j = k + 1));
 			else if (!strncmp(SWD(&w, k), "--title=", 8))
-				val = SWD(&w, k) + 8;
+				val = SWD(&w, (j = k)) + 8;
+		if (val && sh_expands(s->cmd, w.rs[j], w.re[j]))
+		{
+			no += 2;	/* --title "$T", "`x`": none, nor the output's */
+			continue;
+		}
 		if (!val || (title_of(val, strlen(val), title), !title[0]))
 			continue;
 		for (cr = 0, k = c; k + 2 < e && !cr; k++)
