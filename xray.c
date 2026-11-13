@@ -8007,27 +8007,42 @@ xr_git_parse(const char *s, size_t n, long long now, struct xr_resolved *r)
 	return 1;
 }
 
-/* One URL, s[0..n): github.com is its host, want its whole path (QA 1.57.0
-** NIT-D1: never "//github.com/" or "@github.com" further in) */
+/* One URL, s[0..n): github.com is its host, want its whole path. The host
+** is read from the authority only, as git and curl do: it ends at the first
+** '/', '?' or '#' (scp form: the first ':' or '/'), its userinfo at its
+** first '@' (QA 1.57.0 NIT-D1, 1.59.0 LOW-X7) */
 static int
 res_gh_url(const char *s, size_t n, const char *want)
 {
-	size_t wl = strlen(want), i = 0, u;
-	char sep = ':';	/* scp form: [user@]github.com:o/r */
+	static const char *const sch[4] = {"https://", "http://", "ssh://",
+	                                   "git://"};
+	const char *stop = ":/";	/* scp form: [user@]github.com:o/r */
+	size_t wl = strlen(want), i = 0, h, e, k;
 
-	if (n > 8 && !strncasecmp(s, "https://", 8))
-		i = 8, sep = '/';
-	else if (n > 6 && !strncasecmp(s, "ssh://", 6))
-		i = 6, sep = '/';
-	for (u = i; u < n && s[u] != '@' && s[u] != '/' &&
-	     (unsigned char)s[u] > ' '; u++)
-		;
-	if (u < n && s[u] == '@')	/* userinfo: no '/', space or control */
-		i = u + 1;
-	if (n - i < 11 || strncasecmp(s + i, "github.com", 10) ||
-	    s[i + 10] != sep)
+	for (k = 0; k < 4; k++)
+		if (n > strlen(sch[k]) && !strncasecmp(s, sch[k], strlen(sch[k])))
+		{
+			i = strlen(sch[k]);
+			stop = "/?#";
+			break;
+		}
+	for (h = e = i; e < n && !strchr(stop, s[e]); e++)
+		if ((unsigned char)s[e] <= ' ')
+			return 0;
+		else if (s[e] == '@' && h == i)
+			h = e + 1;
+	if (e == n || s[e] != stop[0] || e - h < 10 ||
+	    strncasecmp(s + h, "github.com", 10))
 		return 0;
-	i += 11;
+	if (h + 10 < e)	/* a port: ':' and digits */
+	{
+		if (s[h + 10] != ':' || h + 11 == e)
+			return 0;
+		for (h += 11; h < e; h++)
+			if (s[h] < '0' || s[h] > '9')
+				return 0;
+	}
+	i = e + 1;
 	if (n - i < wl || strncasecmp(s + i, want, wl))
 		return 0;
 	i += wl;

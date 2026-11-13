@@ -1434,8 +1434,10 @@ Codex `<n>` gets it too.
   A commit URL (`https://github.com/<owner>/<repo>/commit/<sha>`) with a
   full 40-hex SHA resolves as a bare SHA does. With a shorter SHA, it
   resolves only when one of the repo's remote URLs names that owner and
-  repo on github.com (any case; `https://`, `ssh://` or `git@github.com:`,
-  with or without `.git`). Otherwise it is `not_commit` and `show` never
+  repo on github.com (any case; `https://`, `http://`, `ssh://`, `git://`
+  or `git@github.com:`, with or without `.git` or a port). The host is read
+  from the URL's authority only, as git reads it: `github.com` in the
+  user name, query or fragment does not count. Otherwise it is `not_commit` and `show` never
   runs. A remote reached only through `url.<base>.insteadOf` does not
   match, and hosts other than github.com never match. If the `config` run
   fails or times out, there is no `resolved` line. The remote URLs are only

@@ -396,16 +396,20 @@ check_res(const struct xr_resolved *r)
 }
 
 /* xr_git_remote's rule, read from the end: a NUL-ended entry whose value
-** (past the key's '\n') is [https:// | ssh://][user@]github.com then '/'
-** (':' with no scheme), o/r, then "", "/", ".git" or ".git/"; user has no
-** '/', '@' or byte <= ' ' (QA 1.57.0 NIT-D1) */
+** (past the key's '\n') ends "o/r" then "", "/", ".git" or ".git/"; before
+** it "github.com" then '/' (after an optional ":<digits>") under a scheme
+** https/http/ssh/git://, ':' with none; before that, an optional "user@"
+** where user has no '@', byte <= ' ', '/', and '?', '#' (scheme) or ':'
+** (none) (QA 1.57.0 NIT-D1, 1.59.0 LOW-X7) */
 static int
 remote_rule(const char *s, size_t n)
 {
 	static const char *const tail[4] = {"", "/", ".git", ".git/"};
+	static const char *const sch[4] = {"https://", "http://", "ssh://",
+	                                   "git://"};
 	const char *z, *v;
 	char suf[32];
-	size_t i, l, k, j, m, p;
+	size_t i, l, k, j, m, p, q, c;
 
 	for (i = 0; i < n && (z = memchr(s + i, '\0', n - i)) != NULL;
 	     i = (size_t)(z - s) + 1)
@@ -416,22 +420,36 @@ remote_rule(const char *s, size_t n)
 		l = (size_t)(z - v);
 		for (k = 0; k < 8; k++)
 		{
-			m = (size_t)snprintf(suf, sizeof suf, "github.com%co/r%s",
+			m = (size_t)snprintf(suf, sizeof suf, "%co/r%s",
 			                     k < 4 ? '/' : ':', tail[k % 4]);
 			if (l < m || strncasecmp(v + l - m, suf, m))
 				continue;
-			p = !strncasecmp(v, "https://", 8) ? 8
-			    : !strncasecmp(v, "ssh://", 6) ? 6 : 0;
-			if ((p != 0) != (k < 4) || p > l - m)
-				continue;
-			if (p == l - m)
-				return 1;
-			if (v[l - m - 1] != '@')
-				continue;
-			for (j = p; j < l - m - 1 && v[j] != '/' && v[j] != '@' &&
-			     (unsigned char)v[j] > ' '; j++)
+			q = l - m;	/* v[0..q): ...github.com[:port] */
+			for (j = q; k < 4 && j > 0 && v[j - 1] >= '0' &&
+			     v[j - 1] <= '9'; j--)
 				;
-			if (j == l - m - 1)
+			if (j < q && j > 0 && v[j - 1] == ':')
+				q = j - 1;
+			if (q < 10 || strncasecmp(v + q - 10, "github.com", 10))
+				continue;
+			q -= 10;	/* v[0..q): [scheme][user@] */
+			for (p = 0, c = 0; k < 4 && c < 4; c++)
+				if (!strncasecmp(v, sch[c], strlen(sch[c])))
+				{
+					p = strlen(sch[c]);
+					break;
+				}
+			if ((k < 4 && !p) || p > q)
+				continue;
+			if (p == q)
+				return 1;
+			if (v[q - 1] != '@')
+				continue;
+			for (j = p; j < q - 1 && v[j] != '@' && v[j] != '/' &&
+			     (unsigned char)v[j] > ' ' &&
+			     !strchr(k < 4 ? "?#" : ":", v[j]); j++)
+				;
+			if (j == q - 1)
 				return 1;
 		}
 	}
