@@ -1602,12 +1602,17 @@ dch_claude_gone(const char *rec)
 	return !*rec || access(rec, F_OK) != 0;
 }
 
-/* Every regular record in one sessions dir, to visit(). */
+/* Every regular record in one sessions dir, to visit(). Claude Code
+** rewrites its record in place (writeFile: truncate, then write), so a read
+** in between finds it empty or changing: such a record is read again, at
+** most 10 waits of 5ms per dir, so one unlucky read never drops a live
+** Claude (#253). */
 static int
 visit_records_in(const char *dir, dch_claude_record_fn visit, void *arg)
 {
 	DIR *d;
 	struct dirent *de;
+	int waits = 0;
 
 	if (!(d = opendir(dir)))
 		return 0;
@@ -1615,18 +1620,28 @@ visit_records_in(const char *dir, dch_claude_record_fn visit, void *arg)
 	{
 		char path[1400], body[8192], extra;
 		struct stat before, after;
-		size_t len = 0, n = strlen(de->d_name);
+		size_t len, n = strlen(de->d_name);
 		int fd;
 		if (n < 6 || strcmp(de->d_name + n - 5, ".json") ||
 		    snprintf(path, sizeof path, "%s/%s", dir, de->d_name) >=
 		        (int)sizeof path)
 			continue;
+	again:
+		len = 0;
+		memset(&before, 0, sizeof before);
 		fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
 		if (fd < 0 || fstat(fd, &before) < 0 || !S_ISREG(before.st_mode) ||
 		    before.st_uid != getuid() || (before.st_mode & 022) ||
 		    before.st_size <= 0 || before.st_size >= (off_t)sizeof body)
 		{
 			if (fd >= 0) close(fd);
+			if (fd >= 0 && S_ISREG(before.st_mode) &&
+			    before.st_uid == getuid() && !(before.st_mode & 022) &&
+			    before.st_size == 0 && waits++ < 10)
+			{
+				usleep(5000);
+				goto again;
+			}
 			continue;
 		}
 		while (len < (size_t)before.st_size)
@@ -1642,6 +1657,11 @@ visit_records_in(const char *dir, dch_claude_record_fn visit, void *arg)
 		    memchr(body, '\0', len))
 		{
 			close(fd);
+			if (!memchr(body, '\0', len) && waits++ < 10)
+			{
+				usleep(5000);
+				goto again;
+			}
 			continue;
 		}
 		close(fd);
@@ -5627,7 +5647,9 @@ struct crec
 struct crec_scan
 {
 	long root;
-	int verify, n;		/* n = live records under root */
+	int verify, n;		/* n = live Claudes under root, as joined */
+	int all;		/* every live record under root */
+	long pid[16];		/* the first 16 of them */
 	struct crec best;	/* the shallowest of them */
 };
 
@@ -5688,7 +5710,9 @@ proc_depth(long pid, long anc)
 /* dch_visit_claude_records callback: count the live interactive records
 ** whose pid descends from cs->root, keep the shallowest. With verify, the
 ** record's procStart must match the process's start time, so a record left
-** by a dead Claude whose pid was recycled never joins. */
+** by a dead Claude whose pid was recycled never joins. Claudes below
+** another (a test's fake Claude under a supervisor's tool call, #253) count
+** as that one: n is 1 while the shallowest is the ancestor of all. */
 static int
 crec_visit(const char *path, const char *body, size_t len, void *arg)
 {
@@ -5697,6 +5721,7 @@ crec_visit(const char *path, const char *body, size_t len, void *arg)
 	const char *base = strrchr(path, '/');
 	char kind[32], start[128], actual[128], *endp;
 	long jpid;
+	int i, self, nested;
 
 	(void)len;
 	memset(&c, 0, sizeof c);
@@ -5723,8 +5748,17 @@ crec_visit(const char *path, const char *body, size_t len, void *arg)
 	     strcmp(start, actual)))
 		return 0;
 	snprintf(c.rec, sizeof c.rec, "%s", path);
-	if (cs->n++ == 0 || c.depth < cs->best.depth)
+	if (cs->all < 16)
+		cs->pid[cs->all] = c.pid;
+	if (cs->all++ == 0 || c.depth < cs->best.depth)
 		cs->best = c;
+	/* over all of them, every time: records come in readdir order. The
+	** best's pid twice (two config dirs) is two answers, not a nesting. */
+	for (i = self = 0, nested = cs->all <= 16; nested && i < cs->all &&
+	     i < 16; i++)
+		nested = cs->pid[i] == cs->best.pid ? ++self == 1
+		         : proc_depth(cs->pid[i], cs->best.pid) > 0;
+	cs->n = nested ? 1 : cs->all;
 	return 0;
 }
 
@@ -5813,7 +5847,8 @@ claude_dirs(long root, char (*dirs)[1100], int nd, int max)
 	return nd;
 }
 
-/* Live Claude records at or below `root`; *best = the shallowest. */
+/* Live Claudes at or below `root`, those below another counted as it (see
+** crec_visit); *best = the shallowest. */
 static int
 claude_find(long root, int verify, struct crec *best)
 {
@@ -15076,8 +15111,9 @@ main_run(int argc, char **argv)
 			}
 			else
 				fputs("null", stdout);
-			/* Exactly one Claude, or no answer: a wrong transcript is
-			** worse than none. */
+			/* Exactly one Claude (others below it count as it,
+			** #253), or no answer: a wrong transcript is worse
+			** than none. */
 			const struct crec *c = cr.v && cr.v[k].n == 1 &&
 			                       uuid_shaped(cr.v[k].best.sid)
 			                       ? &cr.v[k].best : NULL;

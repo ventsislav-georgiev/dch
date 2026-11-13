@@ -313,8 +313,9 @@ is the sessionId of the one live interactive Claude Code under the session's
 program, read fresh from its \fI<config>/sessions/<pid>.json\fP record (its
 pid descends from the program and its procStart matches the process), or
 .B null
-when none runs there, more than one does, it has exited, or the id is not a
-UUID.
+when none runs there, more than one does (Claudes below another one, such as
+a test's fake Claude under a tool call, count as that one), it has exited, or
+the id is not a UUID.
 .I transcript_path
 is the absolute \fI<config>/projects/*/<sessionId>.jsonl\fP when exactly one
 such file exists, else
