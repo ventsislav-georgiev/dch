@@ -13021,6 +13021,7 @@ xr_clear(const struct xr_target *t)
 ** a snapshot always follows it. Events only, never a timer (K3): the one
 ** finite wait is the coalescing deadline, armed only while an event waits. */
 #define XF_BATCH_MS 250		/* 3.3: at most one batch per 250 ms */
+#define XF_CLAUDES_MS 1000L	/* paused: the Claude count's poll (LOW-X16) */
 #define XF_EVICT_KEYS 256	/* proposal 11.6: past this, one reset ... */
 #define XF_EVICT_MS 1000	/* ... at most once a second */
 #define XF_SLICE (4u << 20)	/* the full pass: bytes between events */
@@ -13658,11 +13659,17 @@ read:
 	for (;;)
 	{
 		ms = xf_due(f);
+		if (!s.cx && (ms < 0 || ms > XF_CLAUDES_MS))
+			ms = XF_CLAUDES_MS;
 		/* the full pass runs between events; rot: the first question */
 		ev = xf_wait(f, s.d2 || rot ? 0 : ms) | rot;
 		rot = 0;
 		if (ev & XE_OUT)
 			break;
+		/* a second Claude writes no file we watch and wakes no master:
+		** asked on the poll (LOW-X16) */
+		if (!ev && !s.cx && !s.d2)
+			ev = XE_ROT;
 		if (ev & XE_CONN)
 		{
 			if ((r = xf_drain(f)) < 0)
@@ -13882,7 +13889,7 @@ xf_shell(struct xf *f, const char *label, int first)
 	struct xr_answer a;
 	struct ring_snap was;
 	char project[1200];
-	int rc = 0, ev, fr, r;
+	int rc = 0, ev, fr, r, wc;
 
 	xr_project_key(label, project, sizeof project);
 	if (!b)
@@ -13923,13 +13930,20 @@ xf_shell(struct xf *f, const char *label, int first)
 		goto out;
 	}
 	was = b->rs;
+	wc = a.agent ? a.claudes : -1;
 	for (;;)
 	{
 		long long t0, took;
 		size_t nref = 0;
 		int lost = 0, evict = 0;
+		long due = xf_due(f);
 
-		ev = xf_wait(f, xf_due(f));
+		/* paused: the master wakes us only when its agent pid changes,
+		** so the Claude count is polled; a change is a reset (LOW-X16) */
+		if ((was.status & DCH_RING_S_PAUSED) &&
+		    (due < 0 || due > XF_CLAUDES_MS))
+			due = XF_CLAUDES_MS;
+		ev = xf_wait(f, due);
 		if (ev & XE_OUT)
 			break;
 		if ((ev & XE_CONN) && (r = xf_drain(f)) != 0)
@@ -13938,6 +13952,9 @@ xf_shell(struct xf *f, const char *label, int first)
 				break;	/* the session ended, or --restart */
 			f->pending = 1;
 		}
+		if ((was.status & DCH_RING_S_PAUSED) && !f->pending &&
+		    (r = xr_claudes(t->sock)) >= 0 && r != wc)
+			f->pending = 1;
 		if (!f->pending || xf_due(f) != 0)
 			continue;
 		t0 = xr_now_ms();
@@ -13959,10 +13976,12 @@ xf_shell(struct xf *f, const char *label, int first)
 		}
 		xf_sb_answer(t, b, project, label, &a);
 		if (strcmp(b->rs.sid, was.sid) ||
-		    (b->rs.status & XF_MODE) != (was.status & XF_MODE))
+		    (b->rs.status & XF_MODE) != (was.status & XF_MODE) ||
+		    (a.agent && a.claudes != wc))
 		{
-			/* a new image (a failed handover), or the ring paused
-			** for an agent or resumed: what the session is now */
+			/* a new image (a failed handover), the ring paused for an
+			** agent or resumed, or a Claude more or fewer under the
+			** pause: what the session is now */
 			f->why = "rotated";
 			rc = XF_RESET;
 			break;
