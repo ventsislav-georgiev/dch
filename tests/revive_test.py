@@ -608,7 +608,19 @@ def main():
         check("...no socket outside the socket dir, the record untouched",
               not [f for f in os.listdir(tmp) if f.startswith("rp")] and
               not os.path.exists(recdir + "-..") and os.path.exists(pr))
-        os.unlink(pr)
+        if os.path.exists(pr):	# base: the revive consumed it
+            os.unlink(pr)
+        # a record whose own name holds a '/' is not loaded (base: --revive
+        # rpq revived it as ../rpq, its socket beside the socket dir)
+        os.rename(plant("rpq", name="../rpq", argv=["sleep", "2"]),
+                  os.path.join(recdir, "rpq.json"))
+        r = run("--revive", "rpq")
+        check("a record named ../rpq: not in --history, not revived, no "
+              "socket outside", r.returncode == 1 and
+              "../rpq" not in (history() or {}) and
+              not os.path.exists(os.path.join(tmp, "rpq.sock")))
+        if os.path.exists(os.path.join(recdir, "rpq.json")):
+            os.unlink(os.path.join(recdir, "rpq.json"))
 
         # --- records the loader refuses -----------------------------------
         os.rename(plant("rgood"), os.path.join(recdir, "rgood.json"))

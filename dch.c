@@ -2063,7 +2063,7 @@ refuse_id_name(const char *name)
 	return 1;
 }
 
-/* #203: a name the caller gives a new session (--spawn, --revive --as) is
+/* #203: a name the caller gives a new session (--spawn, --revive --as, -n) is
 ** one the store can hold: no '/' (a socket outside the socket dir), no
 ** control, at most NAME_CAP bytes. A leading '-' is refuse_id_name's. 1,
 ** the line printed, when refused. */
@@ -3043,15 +3043,19 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 
 	if (make_sock_path(session_name) < 0)
 		return 1;
+	/* #203: a given name (-n, a pick) that fails name_ok creates
+	** nothing; an auto-name is the caller's own and stays as it is */
 	if (!attach_only && (session_name[0] == '-' ||
 	                     xr_label_id_shaped(session_name,
-	                                        strlen(session_name))))
+	                                        strlen(session_name)) ||
+	                     (forced_name && !name_ok(session_name))))
 	{
 		int probe = control_connect_path(sock_path);
 
 		/* a session already named so is attached, by its exact name */
 		if ((probe < 0 || !name_listed(session_name)) &&
-		    refuse_id_name(session_name))
+		    (refuse_id_name(session_name) ||
+		     refuse_path_name(session_name)))
 			exit(2);	/* not 2 returned: that is ATTACH_SWITCH */
 		close(probe);
 	}
@@ -8582,7 +8586,7 @@ hrec_load(int dfd, const char *fn, struct hrec *r)
 	    dch_json_string(r->body, "sock_dir", sd, sizeof sd) < 0 ||
 	    strcmp(sd, sock_dir) != 0 ||
 	    dch_json_string(r->body, "name", r->name, sizeof r->name) < 0 ||
-	    !r->name[0] ||
+	    !r->name[0] || strchr(r->name, '/') ||	/* #203: in the store */
 	    dch_json_string(r->body, "cwd", r->cwd, sizeof r->cwd) < 0 ||
 	    dch_json_string(r->body, "end", r->end, sizeof r->end) < 0 ||
 	    !(r->argv = dch_json_strv(r->body, NULL, "argv", &r->argc)))

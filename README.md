@@ -2043,10 +2043,12 @@ dch could make one; `--` reaches it: `--pin`, `--unpin`, `--forget` and
 row attaches and kills (live), pins and removes (History, `p` and `d`); any
 other key says so.
 
-`--spawn` and `--revive <n> --as` also refuse a name holding `/` or a control
-character, or over 255 bytes (`dch: bad session name …`, exit 2, nothing
-started and the record left as it was): such a name would put the socket
-outside the socket directory.
+`-n`, `--spawn` and `--revive <n> --as` also refuse a name holding `/` or a
+control character, or over 255 bytes (`dch: bad session name …`, exit 2,
+nothing started and the record left as it was): such a name would put the
+socket outside the socket directory. `-n` still attaches a live session that
+is listed under that exact name, and an auto-name is never refused. A History
+record whose name holds `/` is not loaded.
 
 The record is one line of JSON, mode 0600 in a 0700 directory:
 
