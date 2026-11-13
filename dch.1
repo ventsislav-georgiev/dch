@@ -182,6 +182,23 @@ Each session also keeps an in-memory terminal mirror (embedded
 libghostty\-vt), which powers the control verbs below: scripts and coding
 agents can type into, read, and wait on a session without attaching and
 without disturbing an attached human.
+.PP
+A program whose output reaches no terminal (nothing attached, as after
+.B \-\-spawn
+or
+.BR \-\-revive )
+still gets answers to two start\-up queries, from the mirror: DECRQM for
+mode 2026, synchronized output
+.RB ( "CSI ? 2026 ; 2 $ y" ),
+and XTVERSION
+.RB ( "dch <version>" ).
+A program with no
+.B TERM_PROGRAM
+to go by then turns synchronized output on, as it does under an attach.
+Every other query (cursor position, device attributes, colours, the
+keyboard protocol) is left for the terminal that attaches. While a client
+is attached its terminal answers everything, as before. dch\-lite has no
+mirror and answers nothing.
 .SH OPTIONS
 .TP
 .B \-l

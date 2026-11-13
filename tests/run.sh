@@ -210,6 +210,7 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
 	pyrun "kitty keyboard pop reaches both screens" kbd_altscreen_test.py
 	pyrun "mode sequences split across pty reads are re-armed" mode_split_test.py
 	pyrun "spawn over leftover socket + hot-path attach" spawn_test.py
+	pyrun "a session nothing sees answers DECRQM 2026 and XTVERSION (#273)" query_answer_test.py
 fi
 
 # --- hot-path performance budget (spawn-vs-attach decision) ----------------

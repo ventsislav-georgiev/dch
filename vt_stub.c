@@ -136,3 +136,10 @@ void
 dch_vt_clear(void)
 {
 }
+
+size_t
+dch_vt_replies(const unsigned char **out)
+{
+	*out = NULL;
+	return 0;
+}

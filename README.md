@@ -2216,6 +2216,20 @@ or `focus_resize = false`
 in the [config file](#config-file), turns this off. The client then does not
 enable focus reporting and does not intercept any input.
 
+### A session nothing sees answers two queries
+
+A program often asks the terminal what it supports when it starts. When
+nothing is attached (`--spawn`, `--revive`, a detached session), no terminal
+sees the question. The master's mirror then answers two of them: DECRQM for
+mode 2026, synchronized output (`CSI ? 2026 ; 2 $ y`), and XTVERSION
+(`dch <version>`). A program with no `TERM_PROGRAM` to go by, such as an
+agent CLI started by a daemon, then turns synchronized output on, as it does
+under an attach. A terminal that attaches later without mode 2026 ignores
+the mode, as the mode's spec intends. Every other query (cursor position,
+device attributes, colours, the keyboard protocol) is left for the terminal
+that attaches. While a client is attached, its terminal answers everything,
+as before, and the mirror stays silent.
+
 ### dch-lite and `DCH_NO_VT`
 
 The mirror can be absent: the **dch-lite** build (`./configure
@@ -2231,6 +2245,7 @@ environment disables it at spawn.
 | `--read`, `--wait --match` | Exit 3 with a message pointing at the full build. |
 | [Auto-allow](#auto-allow) | Unavailable: the master reads the prompt off its mirror. Nothing is answered; `auto_allowed` stays `null`. |
 | `--keys` | Falls back to a fixed legacy xterm table client-side (exit 0 + stderr note). Mode-aware apps may misread modified keys. |
+| [Start-up queries](#a-session-nothing-sees-answers-two-queries) | Unanswered while nothing is attached. |
 
 The client side is protocol-only in both builds: a lite `dch` binary can
 drive every verb against a session spawned by a full `dch` master.

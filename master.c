@@ -1848,6 +1848,9 @@ static void
 process_pty_buf(const unsigned char *buf, size_t len)
 {
 	struct client *p, *next;
+	const unsigned char *rep;
+	size_t nrep;
+	int seen = 0;
 
 	/* Real output happened — refresh the activity stamp (throttled). */
 	touch_activity();
@@ -1905,11 +1908,18 @@ process_pty_buf(const unsigned char *buf, size_t len)
 		    queue_to_client(p, buf, len) < 0 ||
 		    flush_client(p) < 0)
 			remove_client(p);
+		else
+			seen = 1;
 	}
 
 	/* Feed the terminal mirror AFTER the flush loop: attached clients
 	** keep first claim on the wake's time budget. */
 	dch_vt_feed(buf, len);
+	/* No terminal got these bytes (nothing attached, or the first attach's
+	** drain): the mirror answers the program's DECRQM 2026 and XTVERSION,
+	** or a headless start never turns synchronized output on (#273). */
+	if (!seen && (nrep = dch_vt_replies(&rep)) > 0)
+		(void)pty_input(rep, nrep);
 	/* No xray_wake() here: this runs inside handle_packet (drain_pty),
 	** and a wake can drop the client being handled. The main loop wakes. */
 }
