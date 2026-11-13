@@ -1166,7 +1166,10 @@ The corpus:
     2 MB keeps its tail; its first row is dropped) makes the answer
     `complete: false` with `why: "range"`, and `--ref`'s `partial: true`.
     `--ref`'s light mode waits for the screen only as long as its budget
-    lasts (`why: "budget"`). A screen row's `offset` is a provisional seq:
+    lasts (`why: "budget"`). Rows that scroll into the ring between its read
+    and the screen's are read from the ring and the screen read again, up to
+    3 times; a shell that still scrolls then gives `why: "range"` too.
+    A screen row's `offset` is a provisional seq:
     the row gets another one when it scrolls into the ring, and a later
     ring row can take this one. Their `at` is the
     time of the read, not the time the row was written: two queries a

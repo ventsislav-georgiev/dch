@@ -1545,6 +1545,11 @@ and
 true; light
 .B \-\-ref
 waits for the screen only as long as its budget lasts.
+Rows that scroll into the ring between its read and the screen's are read
+from the ring and the screen read again, up to 3 times; a shell still
+scrolling then gives
+.BR why:\(dqrange\(dq
+too.
 A screen row's
 .B offset
 is provisional: it gets another seq when it scrolls into the ring.

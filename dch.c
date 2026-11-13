@@ -11184,6 +11184,7 @@ struct ring_snap
 	uint64_t bytes;		/* record bytes handed over, headers included */
 	uint64_t head;		/* the first reply's head_seq (#136) */
 	uint64_t tail;		/* and its tail_seq (#140) */
+	uint64_t end;		/* past the last record read (#173) */
 	int woke;		/* a MSG_RING_WAKE came in mid-read (#136) */
 };
 
@@ -11210,9 +11211,12 @@ le64(const unsigned char *p)
 ** later one that does not move past seq (a hostile master never holds the
 ** read); -4 the ring was cleared mid-read (the caller starts over).
 ** ring_fetch_rd: on the caller's reader, which keeps frames that came in
-** behind the reply (a follower's next wake), with DCH_RING_F_* flags. */
+** behind the reply (a follower's next wake), with DCH_RING_F_* flags.
+** at: NULL from the head; else on from at's end, every reply held to at's
+** epoch, one that does not start there a seqgap (#173). */
 static int
-ring_fetch_rd(int s, struct ctl_reader *rd, int flags, struct ring_snap *rs,
+ring_fetch_rd(int s, struct ctl_reader *rd, int flags,
+              const struct ring_snap *at, struct ring_snap *rs,
               ring_rec_fn fn, void *ctx)
 {
 	unsigned char req[13], payload[PKT_MAX], type, hdr[DCH_RING_HDR_LEN];
@@ -11225,6 +11229,11 @@ ring_fetch_rd(int s, struct ctl_reader *rd, int flags, struct ring_snap *rs,
 	int rc, k, tries = 0, replies = 0, have_hdr, ret = 0;
 
 	memset(rs, 0, sizeof *rs);
+	if (at)
+	{
+		seq = rs->end = at->end;
+		rs->epoch = at->epoch;
+	}
 	for (;;)
 	{
 		for (k = 0; k < 8; k++)
@@ -11313,13 +11322,14 @@ ring_fetch_rd(int s, struct ctl_reader *rd, int flags, struct ring_snap *rs,
 		        (uint32_t)hdr[27] << 16 | (uint32_t)hdr[28] << 24;
 		if (replies == 1)
 		{
-			rs->epoch = le64(hdr + 29) & 0xffffffffu;
+			if (!at)
+				rs->epoch = le64(hdr + 29) & 0xffffffffu;
 			memcpy(rs->sid, hdr + 33, 17);
 			rs->sid[17] = '\0';
 			rs->tail = tail0 = le64(hdr + 9);
 			rs->head = le64(hdr + 1);
 		}
-		else
+		if (replies > 1 || at)
 		{
 			if ((le64(hdr + 29) & 0xffffffffu) != rs->epoch)
 			{
@@ -11346,6 +11356,7 @@ ring_fetch_rd(int s, struct ctl_reader *rd, int flags, struct ring_snap *rs,
 			goto out;
 		}
 		rs->bytes += (uint64_t)wl;
+		rs->end = first + count;
 		if (rs->bytes > (uint64_t)RING_MAX + DCH_RING_READ_MAX)
 		{
 			ret = -3;	/* more than any ring holds, plus a reply */
@@ -11367,7 +11378,7 @@ ring_fetch_fd(int s, struct ring_snap *rs, ring_rec_fn fn, void *ctx)
 {
 	struct ctl_reader r = {0};
 
-	return ring_fetch_rd(s, &r, 0, rs, fn, ctx);
+	return ring_fetch_rd(s, &r, 0, NULL, rs, fn, ctx);
 }
 
 /* ring_fetch_fd on a connection of its own; -1 nothing listens, or the
@@ -11393,25 +11404,53 @@ ring_fetch(const char *path, struct ring_snap *rs, ring_rec_fn fn,
 ** answer is the ring's alone, never an error. 1 when screen rows were lost:
 ** no answer within ms, a hang-up, busy, or a reply past the master's cap,
 ** whose kept tail starts inside a row (maybe inside a character): that row
-** is dropped. */
+** is dropped. Rows that scroll into the ring between its read and the
+** screen's are on neither (QA 1.54.0 LOW-2): after each screen read the
+** ring is read on from where it ended, those rows to fn, and the screen
+** again, until the ring stood still across one; XR_SEAM_TRIES times, then
+** a header check alone, and rows lost when it moved still (#173). */
 #define XR_SCREEN_CAP (2u << 20)	/* the master's MSG_READ cap */
+#define XR_SEAM_TRIES 3
 static int
 ring_screen(const char *path, const struct ring_snap *rs, struct xr_shell *sh,
             ring_rec_fn fn, void *ctx, int ms)
 {
+	struct ring_snap at = *rs, cu;
+	struct ctl_reader r;
 	struct xr_rec x;
 	char *buf, *l, *nl;
-	int n, st;
+	int n, st, s, fr, tries, seam = 0;
 
 	if (rs->status & (DCH_RING_S_OFF | DCH_RING_S_PAUSED))
 		return 0;
 	if (ms <= 0 || !(buf = malloc(XR_SCREEN_CAP + 1)))
 		return 1;
-	n = fetch_screen(path, buf, XR_SCREEN_CAP, ms, 0, DCH_READ_F_PRIMARY,
-	                 &st);
+	for (tries = 0;; tries++)
+	{
+		n = fetch_screen(path, buf, XR_SCREEN_CAP, ms, 0,
+		                 DCH_READ_F_PRIMARY, &st);
+		if (st != DCH_ST_OK && st != DCH_ST_TRUNC)
+			break;	/* no rows (alt, a master before #140) or lost */
+		fr = -1;
+		if ((s = control_connect_path(path)) >= 0)
+		{
+			memset(&r, 0, sizeof r);
+			fr = ring_fetch_rd(s, &r, 0, &at, &cu,
+			                   tries < XR_SEAM_TRIES ? fn : NULL, ctx);
+			close(s);
+		}
+		if (fr == 0 && !cu.seqgap && cu.tail == at.end)
+			break;
+		if (fr != 0 || cu.seqgap || tries == XR_SEAM_TRIES)
+		{
+			seam = 1;
+			break;
+		}
+		at.end = cu.end;
+	}
 	xr_shell_screen(sh);
 	memset(&x, 0, sizeof x);
-	x.seq = rs->tail;
+	x.seq = at.end;
 	x.kind = RING_K_OUTPUT;
 	x.t = (uint32_t)time(NULL);
 	l = buf;
@@ -11429,7 +11468,7 @@ ring_screen(const char *path, const struct ring_snap *rs, struct xr_shell *sh,
 		x.seq++;
 	}
 	free(buf);
-	return st < 0 || st == DCH_ST_BUSY || st == DCH_ST_TRUNC;
+	return seam || st < 0 || st == DCH_ST_BUSY || st == DCH_ST_TRUNC;
 }
 
 /* The live Claude under a session's child, as --ls-json joins it: exactly
@@ -13346,7 +13385,8 @@ read:
 	** ring resuming after the agent left (no slot is no failure here) */
 	if ((r = control_connect_path(t->sock)) < 0 ||
 	    (xf_watch_conn(f, r),
-	     ring_fetch_rd(r, &f->rd, DCH_RING_F_SUB, &rs, NULL, NULL)) == -3 ||
+	     ring_fetch_rd(r, &f->rd, DCH_RING_F_SUB, NULL, &rs, NULL,
+	                   NULL)) == -3 ||
 	    xf_drain(f) < 0)
 	{
 		xf_cl_free(&s);
@@ -13376,8 +13416,8 @@ read:
 			if ((r = xf_drain(f)) < 0)
 				break;	/* the master exited */
 			/* a wake: re-armed by a header read, then the question */
-			if (r && (ring_fetch_rd(f->conn, &f->rd, DCH_RING_F_SUB, &rs,
-			                        NULL, NULL) == -3 || xf_drain(f) < 0))
+			if (r && (ring_fetch_rd(f->conn, &f->rd, DCH_RING_F_SUB, NULL,
+			                        &rs, NULL, NULL) == -3 || xf_drain(f) < 0))
 				break;
 			if (r)
 				ev |= XE_ROT;
@@ -13532,7 +13572,8 @@ xf_sb_build(struct xf *f, struct xf_sb *b, const char *label)
 		if (xr_shell_refs(&b->acc.sh, &k, label) != 0)
 			return -5;
 		fr = ring_fetch_rd(f->conn, &f->rd, DCH_RING_F_SUB |
-		                   DCH_RING_F_SCREEN, &b->rs, xr_ring_rec, &b->acc);
+		                   DCH_RING_F_SCREEN, NULL, &b->rs, xr_ring_rec,
+		                   &b->acc);
 		if (fr == 0)
 			b->acc.lost = ring_screen(f->t->sock, &b->rs, &b->acc.sh,
 			                          xr_ring_rec, &b->acc, CTL_IDLE_MS);
