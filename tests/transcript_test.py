@@ -312,17 +312,20 @@ def main():
         # writer's own period kept landing in its empty phase (#261). A
         # rewrite the writer took over 45ms to finish (a runner that did
         # not schedule it) outlasts the reader's 10 waits of 5ms: only a
-        # sample such a stall overlaps may miss.
+        # sample such a stall overlaps may miss. Timed from before the
+        # truncate to after the write, the whole empty span; and the writer
+        # is stopped between rewrites, not killed, so a stall still under
+        # way at the last sample is logged too (#270).
         rp = os.path.join(sessdir, "%d.json" % pa)
         body = open(rp).read()
         stalls = os.path.join(tmp, "stalls")
         w = subprocess.Popen([sys.executable, "-c",
             "import os,sys,time\n"
             "p,b,s=sys.argv[1],sys.argv[2].encode(),sys.argv[3]\n"
-            "while True:\n"
-            "    fd=os.open(p,os.O_WRONLY|os.O_TRUNC); t=time.monotonic()\n"
+            "while not os.path.exists(s+'.stop'):\n"
+            "    t=time.monotonic(); fd=os.open(p,os.O_WRONLY|os.O_TRUNC)\n"
             "    time.sleep(0.005)\n"
-            "    os.write(fd,b); os.close(fd); u=time.monotonic()\n"
+            "    os.write(fd,b); u=time.monotonic(); os.close(fd)\n"
             "    if u-t>0.045: open(s,'a').write('%f %f\\n'%(t,u))\n"
             "    time.sleep(0.025)\n", rp, body, stalls])
         trace = os.path.join(tmp, "trace")
@@ -334,8 +337,12 @@ def main():
                 g = field(a, "claude_session_id", dbg)
                 got.append((g, t0, time.monotonic()))
         finally:
-            w.kill()
-            w.wait()
+            open(stalls + ".stop", "w").close()
+            try:
+                w.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                w.kill()
+                w.wait()
             record(pa, s1)	# killed mid-write, it may have left it empty
         try:
             st = [tuple(map(float, l.split())) for l in open(stalls)]
