@@ -1219,13 +1219,15 @@ def test_refs():
           r.returncode == 0 and d.get("done") is True and d["partial"] and
           d["why"] == "budget" and d["bytes"] < os.path.getsize(tp) and
           not any("mention" in l for l in ls), r.stdout[-600:] + r.stderr)
-    # #262: the last line's ref is the newest window's, found at once
+    # #262: the last line's ref is the newest window's, found at once.
+    # 300 ms, the cap: a sanitized build on a shared runner parsed under
+    # 1 MiB in 50 ms (#283); bytes < 2 MiB is what says newest first
     r = dch("--xray", "xr-refs", "--ref", "#424242", "--scope", "session",
-            "--budget-ms", "50", "--json")
+            "--budget-ms", "300", "--json")
     ls = ref_lines(r.stdout) or [{}]
     d = ls[-1]
     check("ref: light reads newest first: the last line's ref is found under "
-          "a 50 ms budget, why first",
+          "a 300 ms budget, why first",
           r.returncode == 0 and d.get("done") is True and d["partial"] and
           d["why"] == "first" and d["bytes"] < 2 << 20 and
           [l["mention"]["line"] for l in ls if "mention" in l] ==
