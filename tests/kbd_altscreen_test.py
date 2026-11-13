@@ -61,6 +61,8 @@ def spawn(args):
         os.environ.pop("DCH_SESSION", None)
         os.execv(DCH, [DCH] + args)
         os._exit(127)
+    # inheritable by default: a later client would hold this pty open
+    os.set_inheritable(fd, False)
     return pid, fd
 
 
@@ -86,6 +88,7 @@ def spawn_job(args):
             os.write(1, STOPPED)
             time.sleep(0.3)
             os.kill(job, signal.SIGCONT)
+    os.set_inheritable(fd, False)
     return pid, fd
 
 
@@ -114,8 +117,21 @@ def detach(pid, fd):
     Returns everything the client wrote to the terminal on its way out."""
     os.write(fd, b"\x1c")
     out = drain(fd, 5.0)
-    os.waitpid(pid, 0)
+    reap(pid, fd)
     return out
+
+
+def reap(pid, fd, secs=5):
+    """Drain fd until pid exits or secs pass, close fd, then SIGKILL and
+    reap a pid still running (the fd first, #215)."""
+    end, done = time.time() + secs, 0
+    while time.time() < end and not done:
+        drain(fd, 0.2)
+        done = os.waitpid(pid, os.WNOHANG)[0]
+    os.close(fd)
+    if not done:
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
 
 
 def suspend(fd):

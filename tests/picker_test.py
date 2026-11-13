@@ -249,7 +249,23 @@ def pty_picker():
                  DCH_DOUBLE_TAP_MS="0")
         os.execve(DCH, [DCH, "-l"], e)
         os._exit(127)
+    # inheritable by default: the next pty_picker's child would hold it open
+    os.set_inheritable(fd, False)
     return pid, fd
+
+
+def reap(pid, fd, secs=5):
+    """Drain fd until pid exits or secs pass, close fd, then SIGKILL and
+    reap a pid still running (the fd first, #215). True if it exited."""
+    end, done = time.time() + secs, 0
+    while time.time() < end and not done:
+        drain(fd, 0.2)
+        done = os.waitpid(pid, os.WNOHANG)[0]
+    os.close(fd)
+    if not done:
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+    return bool(done)
 
 
 def kitty():
@@ -267,7 +283,7 @@ def kitty():
           on >= 0 and out.find(PUSH, on) > on, out[:200])
     os.write(fd, b"\x1b[27u")  # kitty's Esc: quit
     out += drain(fd, 5)
-    os.waitpid(pid, 0)
+    reap(pid, fd)
     off = out.rfind(ALT_OFF)
     check("a kitty Esc quits; the flag is popped before 1049l",
           off > 0 and out.rfind(POP, 0, off) > out.rfind(PUSH),
@@ -280,14 +296,7 @@ def kitty():
         pid, fd = pty_picker()
         drain(fd, 10, b"q quit")
         os.write(fd, key)
-        end, done = time.time() + 5, 0
-        while time.time() < end and not done:
-            drain(fd, 0.2)
-            done = os.waitpid(pid, os.WNOHANG)[0]
-        os.close(fd)
-        if not done:
-            os.kill(pid, signal.SIGKILL)
-            os.waitpid(pid, 0)
+        done = reap(pid, fd)
         check("a kitty %s (%r) quits the picker" % (what, key), done, key)
 
     pid, fd = pty_picker()
@@ -299,7 +308,7 @@ def kitty():
     out += drain(fd, 1)
     os.write(fd, b"\x1c")  # DCH_DOUBLE_TAP_MS=0: one tap detaches
     drain(fd, 5)
-    os.waitpid(pid, 0)
+    reap(pid, fd)
     off = out.find(ALT_OFF, out.find(PUSH))
     after = out[off:] if off > 0 else b""
     check("on attach the flag is popped before the picker leaves 1049h",

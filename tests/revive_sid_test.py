@@ -184,6 +184,9 @@ def main():
         if pid == 0:
             os.environ["DCH_SESSION"] = "gone"
             os.execv(claude, [claude, "--resume", Y])
+        # pty.fork()'s master is inheritable: the next kid would hold it,
+        # and closing ours would not hang this pty up (QA 1.59.0 MED-T2)
+        os.set_inheritable(fd, False)
         kids.append((pid, fd))
         until(lambda: os.path.exists(os.path.join(
             home, ".claude", "sessions", "%d.json" % pid)), 15)
@@ -202,6 +205,7 @@ def main():
         if pid == 0:
             os.environ.update(DCH_SESSION="gone2", CLAUDE_CONFIG_DIR=alt)
             os.execv(claude, [claude, "--resume", W])
+        os.set_inheritable(fd, False)
         kids.append((pid, fd))
         until(lambda: os.path.exists(os.path.join(
             alt, "sessions", "%d.json" % pid)), 15)
@@ -245,7 +249,12 @@ def main():
             try:
                 os.kill(pid, signal.SIGKILL)
                 os.close(fd)
-                os.waitpid(pid, 0)
+                end = time.time() + 10
+                while not os.waitpid(pid, os.WNOHANG)[0]:
+                    if time.time() > end:
+                        print("  leaving fake claude %d unreaped" % pid)
+                        break
+                    time.sleep(0.05)
             except OSError:
                 pass
         for s in os.listdir(sockdir) if os.path.isdir(sockdir) else []:
