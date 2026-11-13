@@ -1298,12 +1298,19 @@ def chord_case(what, keys, lite):
               a.out[mark:][-600:])
         check("chord, %s: the client is still running" % what,
               a.reap() is None)
-        dch("--send", "xv-rx", "MARK187")
+        # two checks (#233): MARK187 goes dch --send -> master -> pty, not
+        # through the attach, so its absence is a stalled session, not the
+        # chord; a leak is any other byte. The details print even when empty
+        sent = dch("--send", "xv-rx", "MARK187").returncode
         until(lambda: "4d41524b313837" in rx()[len(got):], 5)
         a.pump(0.3)
-        check("chord, %s: the session got only the text sent while the "
-              "view was up (no detach key, no x)" % what,
-              rx()[len(got):] == "4d41524b313837", rx()[len(got):])
+        rxd = rx()[len(got):]
+        check("chord, %s: the text sent while the view was up reached the "
+              "session (dch --send, not the attach)" % what,
+              "4d41524b313837" in rxd, (rxd, sent))
+        check("chord, %s: nothing else reached the session (no detach key, "
+              "no x)" % what, rxd.replace("4d41524b313837", "", 1) == "",
+              (rxd, sent))
         if not ok or a.reap() is not None:
             return
         mark = len(a.out)
