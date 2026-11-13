@@ -3244,6 +3244,7 @@ struct d3m
 	const struct sw *w;	/* the command's words */
 	const char *cmd;
 	size_t k;		/* the first word not ending before the last span */
+	size_t e;		/* the end of the command it reads (#240) */
 	struct xr_span sp;
 	int n, multi;
 	struct xr_span one[6];
@@ -3265,7 +3266,7 @@ d3_cmd(void *ctx, const struct xr_span *sp)
 	for (; k < w->n && w->re[k] < sp->e; k++)
 		;	/* spans and words come in order */
 	m->k = k;
-	if (k == w->n || w->rs[k] > sp->s || w->op[k] || strlen(SWD(w, k)) != l ||
+	if (k >= m->e || w->rs[k] > sp->s || w->op[k] || strlen(SWD(w, k)) != l ||
 	    memcmp(SWD(w, k), m->cmd + sp->s, l) ||
 	    (k && !w->op[k - 1] && SWD(w, k - 1)[0] == '-' &&
 	     !strchr(SWD(w, k - 1), '=')))
@@ -3311,7 +3312,10 @@ gh_repo(const struct sw *w, size_t k)
 /* D3: --title on a bash command that did not fail. A create command (gh pr
 ** create|new, gh issue create|new, gh's repo flag allowed after gh or the
 ** kind) takes its ref from its output only (R1): what it creates has no
-** number until it prints one, and its URL names the repo. */
+** number until it prints one, and its URL names the repo. Each simple
+** command's title goes with its own words only (#240): edit o/r#9 --title
+** A; create --title B gives the new PR B. The output is the line's, so only
+** one titled command left without a ref of its own reads it. */
 static void
 d3(const struct dsrc *s, struct dset *ds)
 {
@@ -3319,59 +3323,79 @@ d3(const struct dsrc *s, struct dset *ds)
 	static const char *const verb[] = { "create", "new", 0 };
 	struct sw w;
 	struct d3m m;
-	const char *val = NULL;
-	size_t k, j;
-	int cr = 0;
+	const char *val;
+	size_t k, j, c, e, i;
+	int cr, no = 0;
 	struct dres *d;
 	char title[XR_TITLE_MAX * 4 + 1] = "";	/* whole: copied by size */
+	char ot[XR_TITLE_MAX * 4 + 1] = "";
 
 	shell_words(s->cmd, s->cl, &w);
 	if (!w.b)
 		return;
 	memset(&m, 0, sizeof m);
-	for (k = 0; k < w.n && !val; k++)
-		if (w.op[k])
-			continue;
-		else if (!strcmp(SWD(&w, k), "--title") && k + 1 < w.n &&
-		         !w.op[k + 1])
-			val = SWD(&w, k + 1);
-		else if (!strncmp(SWD(&w, k), "--title=", 8))
-			val = SWD(&w, k) + 8;
-	for (k = 0; k + 2 < w.n && !cr; k++)
-		cr = !w.op[k] && !strcmp(base(SWD(&w, k)), "gh") &&
-		     (j = gh_repo(&w, k + 1)) < w.n && !w.op[j] &&
-		     in_list(SWD(&w, j), kind) && (j = gh_repo(&w, j + 1)) < w.n &&
-		     !w.op[j] && in_list(SWD(&w, j), verb);
-	if (val)
-		title_of(val, strlen(val), title);
 	m.w = &w;
 	m.cmd = s->cmd;
-	if (val && title[0] && !cr)
-		(void)grammar(s->cmd, s->cl, XR_PLAIN, R_D3, s->cwd, d3_cmd, &m);
-	free(w.b);
-	if (!val || !title[0])
-		return;
-	if (m.n && !m.multi)
+	/* every simple command: split on ; & && | || ( ) and newlines */
+	for (c = 0; c < w.n; c = e + 1)
 	{
-		if ((d = dpush(ds)))
+		for (e = c; e < w.n && !(w.op[e] && !strpbrk(SWD(&w, e), "<>"));
+		     e++)
+			;
+		for (val = NULL, k = c; k < e && !val; k++)
+			if (w.op[k])
+				continue;
+			else if (!strcmp(SWD(&w, k), "--title") && k + 1 < e &&
+			         !w.op[k + 1])
+				val = SWD(&w, k + 1);
+			else if (!strncmp(SWD(&w, k), "--title=", 8))
+				val = SWD(&w, k) + 8;
+		if (!val || (title_of(val, strlen(val), title), !title[0]))
+			continue;
+		for (cr = 0, k = c; k + 2 < e && !cr; k++)
+			cr = !w.op[k] && !strcmp(base(SWD(&w, k)), "gh") &&
+			     (j = gh_repo(&w, k + 1)) < e && !w.op[j] &&
+			     in_list(SWD(&w, j), kind) &&
+			     (j = gh_repo(&w, j + 1)) < e && !w.op[j] &&
+			     in_list(SWD(&w, j), verb);
+		m.k = c;
+		m.e = e;
+		m.n = m.multi = 0;
+		if (!cr)
+			(void)grammar(s->cmd, s->cl, XR_PLAIN, R_D3, s->cwd, d3_cmd,
+			              &m);
+		if (!m.n)
+		{
+			no++;
+			memcpy(ot, title, sizeof ot);
+		}
+		else if (!m.multi && ds->n < XR_DEFS && (d = dpush(ds)))
 		{
 			d->sp = m.sp;
 			d->incmd = 1;
 			d->rule = "D3";
 			memcpy(d->title, title, sizeof title);
 		}
-		return;
 	}
-	if (m.n)
-		return;
+	free(w.b);
+	if (no != 1)
+		return;		/* two titles, one output: whose is it */
 	(void)grammar(s->out, s->ol, XR_PLAIN, R_D3, s->cwd, d3_out, &m);
 	for (k = 0; k < 6; k++)
-		if (m.cnt[k] == 1 && ds->n < XR_DEFS && (d = dpush(ds)))
+	{
+		/* a ref a command named already keeps that command's title */
+		if (m.cnt[k] != 1)
+			continue;
+		for (i = 0; i < ds->n && (!ds->v[i].incmd ||
+		     strcmp(ds->v[i].sp.key, m.one[k].key)); i++)
+			;
+		if (i == ds->n && ds->n < XR_DEFS && (d = dpush(ds)))
 		{
 			d->sp = m.one[k];
 			d->rule = "D3";
-			memcpy(d->title, title, sizeof title);
+			memcpy(d->title, ot, sizeof ot);
 		}
+	}
 }
 
 /* Every definition of one paired block, at most XR_DEFS (v2.1 3.6). D1/D4

@@ -4311,6 +4311,34 @@ t_d3(void)
 		/* a gh alias is no create: R2 */
 		{ "gh alias-create --title T --body \"Fixes #999\"", PR, 0,
 		  "pull:o/r#12=T;" },
+		/* #240 (QA 1.59.0 LOW-X6): a title goes with its own command's
+		** words; the line's output only to the one titled command left
+		** without a ref of its own */
+		{ "gh pr edit o/r#9 --title Old; gh pr create --title New", PR, 0,
+		  "pull:o/r#9=Old;pull:o/r#12=New;" },
+		{ "gh pr edit o/r#9 --title Old; gh pr create --title New", "", 0,
+		  "pull:o/r#9=Old;" },
+		{ "gh issue close o/r#7; gh pr edit 12 --title New", PR, 0,
+		  "pull:o/r#12=New;" },
+		{ "gh pr create --title New && gh pr edit o/r#9 --title Old", PR, 0,
+		  "pull:o/r#9=Old;pull:o/r#12=New;" },
+		{ "gh pr edit o/r#9 --title Old | gh pr create --title New", PR, 0,
+		  "pull:o/r#9=Old;pull:o/r#12=New;" },
+		{ "gh pr edit o/r#9 --title Old\ngh pr create --title New", PR, 0,
+		  "pull:o/r#9=Old;pull:o/r#12=New;" },
+		{ "echo $(gh pr edit o/r#9 --title Old) && gh pr create --title New",
+		  PR, 0, "pull:o/r#9=Old;pull:o/r#12=New;" },
+		{ "gh pr edit o/r#9 --title=Old; gh pr create --title=New", PR, 0,
+		  "pull:o/r#9=Old;pull:o/r#12=New;" },
+		{ "gh pr create --title A; gh pr create --title B", PR, 0, "" },
+		{ "gh pr create --fill; gh pr edit o/r#9 --title X", PR, 0,
+		  "pull:o/r#9=X;" },
+		{ "gh pr edit o/r#12 --title Old; gh pr create --title New", PR, 0,
+		  "pull:o/r#12=Old;" },
+		{ "gh issue close o/r#7; gh pr edit o/r#9 --title New", "", 0,
+		  "pull:o/r#9=New;" },
+		{ "sh -c 'gh pr edit o/r#9 --title Old; gh pr create --title New'",
+		  PR, 0, "" },
 #undef PR
 	};
 	char got[512], m[300], *p;
