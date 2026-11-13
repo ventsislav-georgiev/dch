@@ -3512,6 +3512,8 @@ struct xr_scan
 	int scope, other, same;	/* --scope; this file another session's, in
 				** <n>'s project dir */
 	long long t0;
+	long long blocked;	/* ms blocked writing to the reader: not --full's
+				** 10 s (#236) */
 	uint64_t written;
 	size_t room;		/* kept under the cap for the tally and done */
 	/* this file */
@@ -3629,10 +3631,25 @@ sc_check(struct xr_scan *x, int ok)
 	return ok && !ferror(x->f) ? 0 : sc_fail(x, errno == EPIPE);
 }
 
+/* A flush; its wait for the reader goes to blocked. */
+static int
+sc_flush(struct xr_scan *x)
+{
+	long long t = xr_now_ms();
+	int ok = fflush(x->f) == 0;
+
+	x->blocked += xr_now_ms() - t;
+	return sc_check(x, ok);
+}
+
 static int
 sc_put(struct xr_scan *x, const char *l, size_t n)
 {
-	if (sc_check(x, fwrite(l, 1, n, x->f) == n) != 0)
+	long long t = xr_now_ms();
+	size_t w = fwrite(l, 1, n, x->f);
+
+	x->blocked += xr_now_ms() - t;
+	if (sc_check(x, w == n) != 0)
 		return -1;
 	x->written += n;
 	return 0;
@@ -3896,7 +3913,7 @@ xr_scan_tick(void *ctx, uint64_t bytes)
 		x->stop = 1;
 		x->why = "budget";
 	}
-	else if (!x->stop && x->full && now - x->t0 >= xr_lim.ms)
+	else if (!x->stop && x->full && now - x->t0 - x->blocked >= xr_lim.ms)
 	{
 		x->stop = 1;
 		x->why = "time";
@@ -3924,7 +3941,7 @@ xr_scan_tick(void *ctx, uint64_t bytes)
 			fputs("}}\n", m);
 			ln_send(x, m, &b, &bl);
 			if (!x->cancel)
-				(void)sc_check(x, fflush(x->f) == 0);
+				(void)sc_flush(x);
 		}
 	}
 	return x->stop;
@@ -4016,7 +4033,7 @@ xr_scan_first(struct xr_scan *x, const char *session_id, int shape,
 	}
 	rc = sc_line(x, b, strlen(b));
 	free(b);
-	return rc == 0 ? sc_check(x, fflush(x->f) == 0) : -1;
+	return rc == 0 ? sc_flush(x) : -1;
 }
 
 int
@@ -4034,7 +4051,7 @@ xr_scan_done(struct xr_scan *x)
 	fprintf(x->f, ",\"files\":%llu,\"bytes\":%llu,\"lines_too_long\":%llu}\n",
 	        (unsigned long long)x->files, (unsigned long long)x->bytes,
 	        (unsigned long long)x->too_long);
-	return sc_check(x, fflush(x->f) == 0);
+	return sc_flush(x);
 }
 
 int

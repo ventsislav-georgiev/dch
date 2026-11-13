@@ -974,7 +974,8 @@ to read it all up to 64 files
 1 GiB
 .RB ( why:\(dqbytes\(dq )
 and 10 s
-.RB ( why:\(dqtime\(dq )
+.RB ( why:\(dqtime\(dq ;
+the scan's own time, not time spent waiting on a reader that pauses)
 (a
 .B \-\-budget\-ms
 with it has no effect but is still checked: outside 50 to 300 it exits 2,

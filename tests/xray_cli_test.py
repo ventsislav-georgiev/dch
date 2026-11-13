@@ -3202,6 +3202,31 @@ def test_scope():
           (ls[-1], err))
     os.unlink(os.path.join(hdir, "s5.json"))
 
+    # #236: a reader paused past --full's time cap (lowered to 3 s) gets the
+    # whole answer, far past the pipe's buffer: time blocked writing to it
+    # is not the scan's
+    for k in range(6, 10):
+        put(k, P, ["#934 line %d %s" % (j, "pad " * 100) for j in range(300)],
+            1794300050 + k)
+    caps = dict(env, DCH_XRAY_CAPS="0:0:3000")
+    whole = ref("#934", "--scope", "all", "--full", env=caps)[1]
+    p = subprocess.Popen([DCH, "--xray", "s0", "--ref", "#934", "--scope",
+                          "all", "--full", "--json"], stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, env=caps)
+    time.sleep(6)
+    out, err = p.communicate(timeout=60)
+    ls = ref_lines(out.decode()) or [{}]
+    same = lambda ls: [l for l in ls if "progress" not in l and
+                       "first" not in l]
+    check("#236: a reader paused 6 s, past --full's 3 s cap, gets the whole "
+          "answer (%d bytes), no why time" % len(out),
+          p.returncode == 0 and len(out) > 100000 and
+          ls[-1].get("done") and not ls[-1]["partial"] and
+          ls[-1]["why"] is None and same(ls) == same(whole),
+          (p.returncode, len(out), ls[-1], err[:200]))
+    for k in range(6, 10):
+        os.unlink(os.path.join(hdir, "s%d.json" % k))
+
     # 65 files scan 64 (3.8, 9.5); light over 1 MB files stops at its budget
     big = "".join(json.dumps({"type": "user", "cwd": P, "message": {
         "content": "pad " + "y" * 1000}}) + "\n" for _ in range(1000))

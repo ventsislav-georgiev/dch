@@ -1351,9 +1351,10 @@ ref (`dch: not a ref`), relative paths against the session's cwd.
   another session's result stops the scan. A live shell's lines and another
   session's give titles and counts only: no `mention`, no `passage`.
 - **Full.** `--full` reads the whole corpus up to its caps: 64 files
-  (`why: "files"`), 1 GiB (`why: "bytes"`) and 10 s (`why: "time"`). A
-  `--budget-ms` with it has no effect, but it is still checked: outside 50
-  to 300 it exits 2 (`dch: bad budget`).
+  (`why: "files"`), 1 GiB (`why: "bytes"`) and 10 s (`why: "time"`). The
+  10 s count the scan's own time: time spent waiting on a reader that pauses
+  is not counted. A `--budget-ms` with it has no effect, but it is still
+  checked: outside 50 to 300 it exits 2 (`dch: bad budget`).
 - **Counts.** `done.counts` has `session` (`<n>`'s mentions), `project` and
   `project_sessions` (the other sessions of its project dir: their mentions,
   and how many mention it), and `all` and `all_sessions` for the other dirs
