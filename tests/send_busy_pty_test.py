@@ -36,6 +36,9 @@ BUSY = ("import os, sys, time, tty\n"
         "open(d + '/ready', 'w').close()\n"
         "while not os.path.exists(d + '/go'): time.sleep(0.02)\n"
         "os.write(1, b'x' * %d)\n"
+        # quiet before it reads: what flushes the rest of the input then is
+        # the pty's own wake that it can take more, nothing else
+        "time.sleep(1)\n"
         "got = b''\n"
         "while len(got) < %d:\n"
         "    got += os.read(0, 65536)\n"
@@ -52,6 +55,7 @@ DEAF = ("import os, sys, time, tty\n"
 RX = ("import os, sys, tty\n"
       "tty.setraw(0)\n"
       "f = open(sys.argv[1], 'ab', 0)\n"
+      "open(sys.argv[1] + '.ready', 'w').close()\n"
       "while True:\n"
       "    b = os.read(0, 65536)\n"
       "    if not b: break\n"
@@ -250,6 +254,8 @@ def main():
         rc = dch("--respawn", "held", "--", sys.executable, "-c", RX, rxf)
         c = until(lambda: (lambda c: c if c and c["pid"] else None)(cmd()),
                   10)
+        # raw first, or setraw's flush would drop NEW too
+        until(lambda: os.path.exists(rxf + ".ready"), 20)
         dch("--send", "held", "NEW")
         check("held: the program --respawn starts gets none of the old "
               "input, only what is sent to it",
