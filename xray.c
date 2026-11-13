@@ -8418,16 +8418,17 @@ xr_git_parse(const char *s, size_t n, long long now, struct xr_resolved *r)
 /* One URL, s[0..n): github.com is its host, want its whole path. The host
 ** is read from the authority only, as git and curl do: it ends at the first
 ** '/', '?' or '#' (scp form: the first ':' or '/'), its userinfo at its
-** first '@' (QA 1.57.0 NIT-D1, 1.59.0 LOW-X7) */
+** first '@' (QA 1.57.0 NIT-D1, 1.59.0 LOW-X7); an empty port is the default
+** one, git+ssh and ssh+git are ssh (QA 1.61.0 NIT-X2) */
 static int
 res_gh_url(const char *s, size_t n, const char *want)
 {
-	static const char *const sch[4] = {"https://", "http://", "ssh://",
-	                                   "git://"};
+	static const char *const sch[6] = {"https://", "http://", "ssh://",
+	                                   "git://", "git+ssh://", "ssh+git://"};
 	const char *stop = ":/";	/* scp form: [user@]github.com:o/r */
 	size_t wl = strlen(want), i = 0, h, e, k;
 
-	for (k = 0; k < 4; k++)
+	for (k = 0; k < 6; k++)
 		if (n > strlen(sch[k]) && !strncasecmp(s, sch[k], strlen(sch[k])))
 		{
 			i = strlen(sch[k]);
@@ -8442,9 +8443,9 @@ res_gh_url(const char *s, size_t n, const char *want)
 	if (e == n || s[e] != stop[0] || e - h < 10 ||
 	    strncasecmp(s + h, "github.com", 10))
 		return 0;
-	if (h + 10 < e)	/* a port: ':' and digits */
+	if (h + 10 < e)	/* a port: ':' and digits, or none */
 	{
-		if (s[h + 10] != ':' || h + 11 == e)
+		if (s[h + 10] != ':')
 			return 0;
 		for (h += 11; h < e; h++)
 			if (s[h] < '0' || s[h] > '9')
@@ -8459,18 +8460,52 @@ res_gh_url(const char *s, size_t n, const char *want)
 	return i == n || (i + 1 == n && s[i] == '/');
 }
 
+/* key s[0..n) is url.<base>.insteadof */
+static int
+res_insteadof(const char *s, size_t n)
+{
+	return n >= 14 && !memcmp(s, "url.", 4) &&
+	       !memcmp(s + n - 10, ".insteadof", 10);
+}
+
 int
 xr_git_remote(const char *s, size_t n, const char *want)
 {
-	const char *z, *v;
-	size_t i;
+	const char *z, *v, *y, *w, *b;
+	char u[4096];
+	size_t i, j, bl, kl, l;
 
 	/* "<key>\n<value>\0" entries; a key has no newline, a value may */
 	for (i = 0; i < n && (z = memchr(s + i, '\0', n - i)) != NULL;
 	     i = (size_t)(z - s) + 1)
-		if ((v = memchr(s + i, '\n', (size_t)(z - s) - i)) != NULL &&
-		    res_gh_url(v + 1, (size_t)(z - v - 1), want))
+	{
+		if ((v = memchr(s + i, '\n', (size_t)(z - s) - i)) == NULL ||
+		    res_insteadof(s + i, (size_t)(v - s) - i))
+			continue;
+		v++;
+		l = (size_t)(z - v);
+		/* git's URL: the longest url.<base>.insteadOf value that
+		** starts it (the first of equals), replaced by <base>, once
+		** (remote.c alias_url; QA 1.61.0 LOW-X15) */
+		for (b = NULL, bl = kl = 0, j = 0; j < n &&
+		     (y = memchr(s + j, '\0', n - j)) != NULL;
+		     j = (size_t)(y - s) + 1)
+			if ((w = memchr(s + j, '\n', (size_t)(y - s) - j)) != NULL &&
+			    res_insteadof(s + j, (size_t)(w - s) - j) &&
+			    (size_t)(y - w - 1) > bl && (size_t)(y - w - 1) <= l &&
+			    !memcmp(w + 1, v, (size_t)(y - w - 1)))
+			{
+				b = s + j + 4;
+				kl = (size_t)(w - s) - j - 14;
+				bl = (size_t)(y - w - 1);
+			}
+		/* shortcut: a rewritten URL over 4 KB is no match */
+		if (!b ? res_gh_url(v, l, want)
+		       : kl + l - bl <= sizeof u &&
+		         (memcpy(u, b, kl), memcpy(u + kl, v + bl, l - bl),
+		          res_gh_url(u, kl + l - bl, want)))
 			return 1;
+	}
 	return 0;
 }
 
@@ -8569,7 +8604,7 @@ res_commit(const char *sha, const char *cwd, int live, const char *gh,
 	{
 		/* -z: a value's escaped newline cannot forge an entry (NIT-D1) */
 		static char s0[] = "config", s1[] = "-z", s2[] = "--get-regexp",
-		            s3[] = "^remote\\..*\\.url$";
+		            s3[] = "^(remote\\..*\\.url|url\\..*\\.insteadof)$";
 
 		av[a] = s0;
 		av[a + 1] = s1;

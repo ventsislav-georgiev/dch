@@ -1481,7 +1481,7 @@ Codex `<n>` gets it too.
   `git --no-pager -c core.fsmonitor= -c core.hooksPath=/dev/null -c protocol.allow=never -c diff.external= -c color.ui=never -c log.showSignature=false -C <cwd>`,
   then `rev-parse --is-inside-work-tree` (not `true`: `not_repo`), then,
   for a commit URL with a short SHA only,
-  `config -z --get-regexp ^remote\..*\.url$`, then
+  `config -z --get-regexp ^(remote\..*\.url|url\..*\.insteadof)$`, then
   `show --no-color --no-ext-diff --no-textconv --stat=80 --stat-count=14 --format=%H%x00%an%x00%at%x00%s --end-of-options <sha>^{commit}`.
   The environment is only `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`,
   `GIT_OPTIONAL_LOCKS=0`, `GIT_TERMINAL_PROMPT=0`, `GIT_NO_LAZY_FETCH=1`,
@@ -1503,12 +1503,15 @@ Codex `<n>` gets it too.
   A commit URL (`https://github.com/<owner>/<repo>/commit/<sha>`) with a
   full 40-hex SHA resolves as a bare SHA does. With a shorter SHA, it
   resolves only when one of the repo's remote URLs names that owner and
-  repo on github.com (any case; `https://`, `http://`, `ssh://`, `git://`
-  or `git@github.com:`, with or without `.git` or a port). The host is read
+  repo on github.com (any case; `https://`, `http://`, `ssh://`, `git://`,
+  `git+ssh://`, `ssh+git://` or `git@github.com:`, with or without `.git`
+  or a port, an empty one too). The host is read
   from the URL's authority only, as git reads it: `github.com` in the
   user name, query or fragment does not count. Otherwise it is `not_commit` and `show` never
-  runs. A remote reached only through `url.<base>.insteadOf` does not
-  match, and hosts other than github.com never match. If the `config` run
+  runs. The URL is the one git fetches from: the repo's own
+  `url.<base>.insteadOf` rewrites apply (yours in `~/.gitconfig` do not,
+  as X-ray's git reads no global config), and hosts other than github.com
+  never match. If the `config` run
   fails or times out, there is no `resolved` line. The remote URLs are only
   compared, never printed or traced (they can hold a token). This only
   stops a short link to another repo from showing an unrelated local

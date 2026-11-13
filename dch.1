@@ -1140,7 +1140,7 @@ as
 .I cwd
 .B rev\-parse \-\-is\-inside\-work\-tree
 (for a commit URL with a short SHA also
-.BR "config \-z \-\-get\-regexp ^remote\e..*\e.url$" )
+.BR "config \-z \-\-get\-regexp ^(remote\e..*\e.url|url\e..*\e.insteadof)$" )
 and then
 .B show \-\-no\-color \-\-no\-ext\-diff \-\-no\-textconv \-\-stat=80
 .B \-\-stat\-count=14 \-\-format=%H%x00%an%x00%at%x00%s \-\-end\-of\-options
@@ -1178,9 +1178,9 @@ A commit URL with a full 40\-hex SHA resolves as a bare SHA.
 With a shorter SHA it resolves only when a remote URL of the repo names its
 github.com owner and repo, else it is
 .BR not_commit ;
-a remote reached only through
+the URL is the one git fetches from, after the repo's own
 .BI url. base .insteadOf
-does not match, other hosts never match, a failed or timed\-out
+rewrites (not the global config's), other hosts never match, a failed or timed\-out
 .B config
 run gives no line, and the remote URLs are never printed.
 A file is read only inside the project (the cwd's git root, else the cwd;

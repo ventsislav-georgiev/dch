@@ -395,29 +395,22 @@ check_res(const struct xr_resolved *r)
 	}
 }
 
-/* xr_git_remote's rule, read from the end: a NUL-ended entry whose value
-** (past the key's '\n') ends "o/r" then "", "/", ".git" or ".git/"; before
-** it "github.com" then '/' (after an optional ":<digits>") under a scheme
-** https/http/ssh/git://, ':' with none; before that, an optional "user@"
-** where user has no '@', byte <= ' ', '/', and '?', '#' (scheme) or ':'
-** (none) (QA 1.57.0 NIT-D1, 1.59.0 LOW-X7) */
+/* xr_git_remote's rule for one URL v[0..l), read from the end: it ends
+** "o/r" then "", "/", ".git" or ".git/"; before it "github.com" then '/'
+** (after an optional ":<digits>", digits maybe none) under a scheme
+** https/http/ssh/git/git+ssh/ssh+git://, ':' with none; before that, an
+** optional "user@" where user has no '@', byte <= ' ', '/', and '?', '#'
+** (scheme) or ':' (none) (QA 1.57.0 NIT-D1, 1.59.0 LOW-X7, 1.61.0 NIT-X2) */
 static int
-remote_rule(const char *s, size_t n)
+url_rule(const char *v, size_t l)
 {
 	static const char *const tail[4] = {"", "/", ".git", ".git/"};
-	static const char *const sch[4] = {"https://", "http://", "ssh://",
-	                                   "git://"};
-	const char *z, *v;
+	static const char *const sch[6] = {"https://", "http://", "ssh://",
+	                                   "git://", "git+ssh://", "ssh+git://"};
 	char suf[32];
-	size_t i, l, k, j, m, p, q, c;
+	size_t k, j, m, p, q, c;
 
-	for (i = 0; i < n && (z = memchr(s + i, '\0', n - i)) != NULL;
-	     i = (size_t)(z - s) + 1)
 	{
-		if (!(v = memchr(s + i, '\n', (size_t)(z - s) - i)))
-			continue;
-		v++;
-		l = (size_t)(z - v);
 		for (k = 0; k < 8; k++)
 		{
 			m = (size_t)snprintf(suf, sizeof suf, "%co/r%s",
@@ -428,12 +421,12 @@ remote_rule(const char *s, size_t n)
 			for (j = q; k < 4 && j > 0 && v[j - 1] >= '0' &&
 			     v[j - 1] <= '9'; j--)
 				;
-			if (j < q && j > 0 && v[j - 1] == ':')
+			if (k < 4 && j > 0 && v[j - 1] == ':')
 				q = j - 1;
 			if (q < 10 || strncasecmp(v + q - 10, "github.com", 10))
 				continue;
 			q -= 10;	/* v[0..q): [scheme][user@] */
-			for (p = 0, c = 0; k < 4 && c < 4; c++)
+			for (p = 0, c = 0; k < 4 && c < 6; c++)
 				if (!strncasecmp(v, sch[c], strlen(sch[c])))
 				{
 					p = strlen(sch[c]);
@@ -453,6 +446,53 @@ remote_rule(const char *s, size_t n)
 				return 1;
 		}
 	}
+	return 0;
+}
+
+/* xr_git_remote's rule: an entry "<key>\n<value>\0" whose key is not
+** url.<base>.insteadof has a value that, rewritten by the longest such
+** entry's value starting it (first of equals) into <base>, passes url_rule
+** (QA 1.61.0 LOW-X15) */
+static int
+remote_rule(const char *s, size_t n)
+{
+	static char u[1 << 17];
+	const char *z, *v, *y, *w, *b;
+	size_t i, j, l, bl, kl;
+
+#define INSTEADOF(k, kn) ((kn) >= 14 && !strncmp((k), "url.", 4) && \
+	                  !strncmp((k) + (kn) - 10, ".insteadof", 10))
+	for (i = 0; i < n && (z = memchr(s + i, '\0', n - i)) != NULL;
+	     i = (size_t)(z - s) + 1)
+	{
+		if (!(v = memchr(s + i, '\n', (size_t)(z - s) - i)) ||
+		    INSTEADOF(s + i, (size_t)(v - s) - i))
+			continue;
+		v++;
+		l = (size_t)(z - v);
+		b = NULL;
+		bl = kl = 0;
+		for (j = 0; j < n && (y = memchr(s + j, '\0', n - j)) != NULL;
+		     j = (size_t)(y - s) + 1)
+		{
+			if (!(w = memchr(s + j, '\n', (size_t)(y - s) - j)) ||
+			    !INSTEADOF(s + j, (size_t)(w - s) - j))
+				continue;
+			w++;
+			if ((size_t)(y - w) > bl && (size_t)(y - w) <= l &&
+			    !memcmp(w, v, (size_t)(y - w)))
+			{
+				bl = (size_t)(y - w);
+				b = s + j + 4;
+				kl = (size_t)(w - 1 - b) - 10;
+			}
+		}
+		if (!b ? url_rule(v, l) : kl + l - bl <= 4096 &&
+		    (memcpy(u, b, kl), memcpy(u + kl, v + bl, l - bl),
+		     url_rule(u, kl + l - bl)))
+			return 1;
+	}
+#undef INSTEADOF
 	return 0;
 }
 
