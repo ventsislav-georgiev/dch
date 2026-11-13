@@ -1288,8 +1288,8 @@ def test_screen_group(lite):
     with open(cfg, "w") as f:
         f.write("xray_ring = 0\n")
     r = subprocess.run([DCH, "--spawn", "xv-0", "--size", "80x24", "sh", "-c",
-                        'echo READY0; read -r x; '
-                        'echo "see $x https://example.com/p"; exec sleep 600'],
+                        'echo READY0; while read -r x; do '
+                        'echo "see $x https://example.com/p"; done'],
                        capture_output=True, text=True, timeout=30,
                        env=dict(ENV, DCH_CONFIG=cfg))
     check("screen group: spawned", r.returncode == 0, r.stderr)
@@ -1338,6 +1338,32 @@ def test_screen_group(lite):
             mark = len(v.out)
             v.key(b"\r", 1.0)
             check("Refs #294: Enter on the group's row opens its card",
+                  v.wait(b"o/r#5  light", start=mark), v.out[mark:])
+            # the rows change under the selection each second (#294)
+            v.key(b"\033", 0.5)
+            mark = len(v.out)
+            dch("--send", "xv-0", "o/r#6\n")
+            v.wait(b"o/r#6", start=mark)
+            v.pump(1.5)
+            mark = len(v.out)
+            v.key(b"\r", 1.0)
+            check("Refs #294: on the first row the selection stays there: "
+                  "o/r#6, new on the screen, is under it",
+                  v.wait(b"o/r#6  light", start=mark), v.out[mark:])
+            v.key(b"\033", 0.5)
+            v.key(b"j", 0.5)  # o/r#5, the second row
+            mark = len(v.out)
+            dch("--send", "xv-0", "o/r#7\n")
+            v.wait(b"o/r#7", start=mark)
+            v.pump(1.5)
+            text = screen(v, 0)
+            check("Refs #294: o/r#7 comes on the screen, first in the group",
+                  0 <= text.find("o/r#7") < text.find("o/r#6") <
+                  text.find("o/r#5"), text)
+            mark = len(v.out)
+            v.key(b"\r", 1.0)
+            check("Refs #294: the selection stays on its ref (o/r#5) when "
+                  "a new one comes above it; Enter opens o/r#5's card",
                   v.wait(b"o/r#5  light", start=mark), v.out[mark:])
         v.key(b"\003")
         check("screen group: Ctrl-C quits with 0", v.exit() == 0,

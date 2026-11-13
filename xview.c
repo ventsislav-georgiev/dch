@@ -2,7 +2,9 @@
 ** The X-ray view (#175, XR5a): `dch --xray <n>` with no --json, and the
 ** picker's x. Two tabs over one session, Prompts (Commands for a shell,
 ** #295: the engine's chapters) and Refs (the refs on the session's screen
-** now first, #294); a ref's card; a chapter's reader. Drawn with the picker's renderer, on the terminal its host (dch.c) made raw and put on the alternate screen.
+** now first, #294); a ref's card; a chapter's reader. Drawn with the
+** picker's renderer, on the terminal its host (dch.c) made raw and put on
+** the alternate screen.
 **
 ** Every answer is the engine's own --json: dch.c's xv_spawn forks this
 ** process and runs xray_main in the child with --follow, --ref or --chapter
@@ -117,6 +119,8 @@ struct xv
 	struct xv_kid kid[XV_NKIDS];
 	int sel[2], top[2], *vis, nvis, avis;
 	int ngrp;		/* Refs: vis's first ngrp rows are on screen */
+	char *selk;		/* Refs: the selected row's key, followed when
+				** the rows change */
 	/* the card */
 	char *ckey, *ctext;
 	int full, scope, cdone, cpartial, csel, ctop;
@@ -1529,6 +1533,27 @@ xv_vis(struct xv *v)
 		qsort(v->vis + v->ngrp, (size_t)(v->nvis - v->ngrp),
 		      sizeof *v->vis, xv_ref_cmp);
 	}
+	/* Refs: the selection stays on its ref while the rows change under
+	** it, the screen's each second; on the first row it stays there (the
+	** newest under it); a key gone keeps the index */
+	for (k = 0; v->tab == 1 && v->sel[1] > 0 && v->selk && k < v->nvis;
+	     k++)
+		if (!strcmp(xv_rfat(v, v->vis[k])->key, v->selk))
+		{
+			v->sel[1] = k;
+			break;
+		}
+}
+
+/* Refs: remember the selected row's key for xv_vis */
+static void
+xv_selk(struct xv *v)
+{
+	int s = v->sel[1];
+
+	free(v->selk);
+	v->selk = s >= 0 && s < v->nvis ? strdup(xv_rfat(v, v->vis[s])->key)
+	          : NULL;
 }
 
 /* sel and top inside n rows of a window of win */
@@ -2098,6 +2123,8 @@ xv_draw(struct xv *v, int force)
 		xv_clamp(&i, top, n + h1 + h2, win);
 		if (*top == i && *top && (*sel ? h2 && *sel == g : h1))
 			(*top)--;
+		if (v->tab == 1)
+			xv_selk(v);
 		for (k = *top; k < *top + win; k++)
 		{
 			i = k - h1 - (h2 && k > g + 1);
@@ -2424,6 +2451,8 @@ xv_key(struct xv *v, int c)
 		}
 		break;
 	}
+	if (v->tab == 1)
+		xv_selk(v);
 	return 0;
 }
 
@@ -2466,6 +2495,7 @@ xv_free(struct xv *v)
 	free(v->e);
 	free(v->rl);
 	free(v->sr);
+	free(v->selk);
 	free(v);
 }
 
