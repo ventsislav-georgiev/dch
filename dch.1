@@ -292,6 +292,14 @@ or
 .BR \-\-history :
 the remote rows or records too (the picker always shows them).
 .TP
+.BR "\-\-ls\-json " [ \-\-remote ] " \-\-follow"
+The
+.B \-\-ls\-json
+array, then the whole array again, one flushed line, each time it changes
+(nothing while it does not), until SIGINT, SIGTERM or the reader closes
+the pipe: exit 0. A name or another verb with it is exit 2. See
+.BR "REMOTE HOSTS" .
+.TP
 .B \-\-ls\-json
 List sessions as a JSON array of
 .BR {name,alias,harness,activity_epoch,state,version,agents,meta,meta_epoch,auto_allowed,claude_session_id,transcript_path,cols,rows,clients,cwd} .
@@ -3081,6 +3089,25 @@ The picker lists remote rows in Sessions, the host faint, of the hosts that
 are candidates now, and re\-probes in the background; Enter attaches, on
 the connection that checked the name is listed, and no other action applies
 to them yet.
+.PP
+.B dch \-\-ls\-json \-\-remote \-\-follow
+prints the same array within the same box, then again, whole, on one line,
+each time it changes. A host whose hello lists
+.B watch
+is held on one connection (a 0x2e
+.I {"device_id":"dch\-<pid>"}
+after its list) and each 0x11 it pushes is a new look; any other host, and
+the local rows, are read again every 2 s. A host that fails (no answer
+within 2 s, a dropped link, a stream silent for 35 s, a frame over 1 MiB,
+not a list, or a 0x13) shows its rows stale for 2 minutes after it last
+answered, as above, and is dialled again after 2 s, doubling up to 32 s; a
+refusal is said once and shows none. Without
+.B \-\-remote
+it streams the local rows only and dials nothing.
+.B DCH_REMOTE_EVERY_MS
+and
+.B DCH_REMOTE_QUIET_MS
+(tests, 100\-600000) replace the 2 s and the 35 s.
 .PP
 .B dch \-\-history \-\-remote
 .RB ( \-\-json

@@ -365,6 +365,7 @@ dch --status <name>                             # print session state
 dch --report <name> <state>                     # push state (harness hooks)
 dch --meta <name> '<json object>'|clear         # attach metadata (PRs, ...)
 dch --ls-json                                   # sessions as a JSON array
+dch --ls-json [--remote] --follow               # ...again, one line per change
 dch --restart <name>|--all [-f]                 # upgrade a live session in place
 dch --restart <name>|--all --include-agents [-f] [--json]  # ...then restart its stale Claude agents
 dch --respawn <name> [-- cmd...]                # on child exit, start cmd in its place
@@ -437,6 +438,7 @@ someone is watching is invisible to them.
 | `--meta <n> '<json>'` | Attach one JSON object of metadata to the session (see [Optional: session metadata](#optional-session-metadata)); `clear` removes it. Replaced atomically, last write wins, never interpreted; a byte-identical push is a no-op; rejected input leaves the stored object unchanged. Removed automatically when the session's program exits. | 0 ok, 1 no session / not a single-line JSON object ≤ 16 KB |
 | `--wait <n> --state <s[,s...]> [--timeout ms]` | Block until the state matches any of the comma list (e.g. `idle,blocked,done` = "turn over"); prints the matched state. `active` is accepted as an alias for `working`. Polls every 100 ms. | 0 hit, 2 timeout, 1 no session |
 | `--ls-json` | All sessions as JSON: `[{"name","alias","harness","activity_epoch","state","version","agents","meta","meta_epoch","auto_allowed","claude_session_id","transcript_path","cols","rows","clients"}]`. `cols` and `rows` are the pty size the session's master holds (set by the attached clients' windows, or `--spawn --size`), `clients` how many clients are attached right now; read in the same control round trip as the rest, never by attaching or resizing, and left out (not `0`) for a master too old to report them and for `--remote` rows. Every row ends with `"cwd"`, after every other key: the directory the session started in, from its live history record, `null` when it has none (a master from before history records) or the record already says it ended; a `--remote` row's is the host's, from its `dch serve` list, `null` from a server that does not send one. `harness` is the name of the Claude Code or Codex session running inside, or `""`; the real `name` remains separate. `state` follows the same resolution rule as `--status`. `version` is the dch version of the master serving that session, or `""` for a master old enough not to report one. `agents` is the number of live subagents on Claude Code's agent panel (the `⏺ main` block under the prompt), `0` when no panel is on screen — including while a prompt covers it — or `DCH_NO_DETECT=1` is set. `meta` is the object last pushed with `--meta`, verbatim, or `null`; `meta_epoch` is when that content last changed (epoch seconds, like `activity_epoch`), `0` with no meta. `auto_allowed` is the permission prompt the master answered last with [auto-allow](#auto-allow), `{"at":<epoch seconds>,"title":"<the dialog's first line, e.g. Bash command>"}`, or `null`; cleared when the session's program exits, like `meta`. `claude_session_id` is the `sessionId` of the one live interactive Claude Code under the session's program, read fresh from its own `<config>/sessions/<pid>.json` (pid descending from the program, `procStart` matching the process; `CLAUDE_CONFIG_DIR` honoured), so it follows `/clear` and resume; `null` when no Claude runs there, when more than one does (Claudes below another one, such as a test's fake Claude under one of its tool calls, count as that one), once it exits, or when the id is not a UUID. `transcript_path` is that conversation's absolute `<config>/projects/<dir>/<sessionId>.jsonl` when exactly one such file exists, else `null` (also right after `/clear`, until the new conversation writes its first line). | 0 |
+| `--ls-json [--remote] --follow` | The `--ls-json` array (with `--remote`, its remote rows too), then the whole array again, one line, each time it changes; nothing while it does not. See [Following the list](#following-the-list). Runs until SIGINT, SIGTERM or the reader closes the pipe. | 0 stopped / reader closed, 1 out of memory, 2 bad usage |
 | `--restart <n>` \| `--restart --all` `[--include-agents] [-f] [--json]` | Re-exec the session's master onto the current `dch` binary, in place — the program inside keeps running (see [Upgrading a live session](#upgrading-a-live-session)). `--all` restarts only sessions whose `version` differs from this binary's; `-f` restarts all of them. With `--include-agents`, it then restarts the stale Claude Code agents of those sessions — Claude as the session's command; one typed into its shell is skipped (`in_shell`); every session with `--all`, only `<n>` otherwise; `-f` forces current agents too (see [Restarting Claude Code agents](#restarting-claude-code-agents)). Without the flag no agent is touched, `--all` included. `--include-agents` without `--restart` is a usage error. `--json`: stdout is NDJSON, the master pass included, with or without `--include-agents` (see [Machine-readable output](#machine-readable-output)). | 0 ok, 1 failed / master too old / an agent restart failed |
 | `--respawn <n> [-- cmd...]` | Arm a one-shot respawn: when the session's program next exits, the master keeps the session (same socket, pty size, attached clients) and starts `cmd` in its place. No `cmd` arms a *hold*: the session stays up childless until a second `--respawn <n> -- cmd` starts one, or until `DCH_HOLD_MS` (default 120000) ends it. An arm that nothing consumes expires after `DCH_RESPAWN_TTL_MS` (default 300000); both are read from the master's environment. `--restart` refuses while a respawn is armed or held. | 0 ok, 1 no session / refused / master too old |
 | `--respawn <n> --cancel` | Drop a pending arm. On a held (childless) session it ends the session. | 0 ok, 1 no session |
@@ -2618,6 +2620,7 @@ dch -a mybox:api                  # attach to session api on mybox
 dch --host mybox -a api           # the same, for a name with a ':' in it
 dch -l                            # the picker lists remote rows too
 dch --ls-json --remote            # remote rows, each with a "host" field
+dch --ls-json --remote --follow   # the same, again on each change (one line each)
 dch --history --remote            # ended sessions here, then host:name (dch serve 1.41+)
 dch --hosts mini,pi=100.64.1.2:8771 --ls --remote   # these hosts, not your tailnet
 dch --read mybox:api              # a control verb on mybox (dch serve 1.41+)
@@ -2655,6 +2658,44 @@ skipped, with a note on stderr. A host whose `dch serve` refuses us (a
 `--ls-json` say `dch: <host> refused: <message>` on stderr and show none of
 its cached rows, and the picker drops them. A `busy` host is not a refusal:
 it is treated like a host that is down, its cached rows shown `[stale]`.
+
+#### Following the list
+
+`dch --ls-json --remote --follow` prints what `dch --ls-json --remote`
+prints, as one line, and then the whole array again, one complete line and
+flushed, each time anything in it changes: a session started, ended or
+renamed, a `state`, a `stale` mark, a local row's `activity_epoch` (so a
+local session that is printing makes one array per 2 s tick). An unchanged
+list prints nothing. It
+runs until SIGINT, SIGTERM or the reader closes the pipe, then exits 0;
+misuse (a name after it, another verb) is exit 2.
+
+- *The first array* comes within the same 300 ms box as `--ls-json
+  --remote`: a host that has not answered by then shows its cached rows,
+  `"stale":true`, and the array after it is the one that has them fresh.
+- *A host whose hello lists `watch`* (`dch serve` does) is held on one
+  connection: after the list, a `0x2e`
+  `{"device_id":"dch-<pid>"}`, and every `0x11` it pushes is a new look.
+  Nothing is polled there; dch serve itself looks every 2 s, so a change
+  there shows within about 2 s.
+- *Any other host* is probed again every 2 s, as the picker does, and the
+  local rows are read again on the same tick.
+- *A host that fails* (no answer within 2 s, a dropped link, a stream that
+  says nothing for 35 s where the spec's heartbeat is 25 s, a frame that is
+  over 1 MiB, not a list or a refusal) keeps its rows as `--ls-json
+  --remote` would show them: `"stale":true` for two minutes after it last
+  answered, then gone. It is dialled again 2 s later, doubling per failure
+  up to 32 s. A refusal (a `0x13` with a `code`) is said on stderr once and
+  shows none of its rows. One host never holds up another or the local
+  rows.
+- `dch --ls-json --follow`, without `--remote`, is the same stream of the
+  local rows only: no host is dialled and no `tailscale` call is made.
+- `--remote` lists hosts the same way here, so with discovery the
+  `tailscale status` call runs once per 2 s tick, and a host that leaves
+  the list leaves the array.
+
+`DCH_REMOTE_EVERY_MS` (the 2 s tick) and `DCH_REMOTE_QUIET_MS` (the 35 s
+silence) are for tests, `100`–`600000`.
 
 **Remote history.** `dch --history --remote` and `dch --history --json
 --remote` print the local records first, exactly as without `--remote`, then
