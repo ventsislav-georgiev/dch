@@ -17,10 +17,16 @@ Covers:
   6. open picks the record the row shows: Shift+Enter in the /alpha
      prompt alpha's newest (ALPHA_NEW), o on mix its newest (MIX_NEW),
      not the older pinned one;
-  7. d, y on a name that also has a live session removes the row and both
-     ended records, keeps the live one's, and says no failure;
-  8. the cap counts pinned names: 3 pinned and 60 others are 50 rows, the
-     47 newest of the 60.
+  7. a name with a session running is decided by the name (#254): pinned
+     with no ended record (rp) and pinned with two (rq) are one row each,
+     "running"; running and not pinned (lv, two older records) is no row;
+     pinned and ended (rn) shows its end; d and m on rq refuse, saying it
+     is running; /rp keeps the running row; rn started under the open
+     picker turns running, killed turns closed; p on rq unpins every record
+     and the row goes; Enter on rp in dch -k kills nothing, in dch -l
+     attaches it;
+  8. the cap counts pinned names, running ones too: 3 pinned, running
+     pinned rp and 60 others are 50 rows, the 46 newest of the 60.
 
 Run:  python3 tests/picker_history_test.py      (uses ./dch)
 """
@@ -124,8 +130,8 @@ def select(pk, name, timeout=10.0):
     return False
 
 
-def history(pk):
-    dch("--spawn", pk, "--size", "120x30", "env", *PKENV, DCH, "-l")
+def history(pk, flag="-l"):
+    dch("--spawn", pk, "--size", "120x30", "env", *PKENV, DCH, flag)
     wait_screen(pk, lambda s: "History " in s)
     for _ in range(4):
         if "[History" in screen(pk):
@@ -221,47 +227,130 @@ def main():
     check("o on mix opens the newest record the row shows (MIX_NEW)",
           "MIX_NEW" in s and "MIX_PIN" not in s, s)
 
-    # d on a name with a live session: its two ended records go, the live
-    # one's record stays, and no failure is said
-    dch("--spawn", "lv", "--size", "80x24", "sh", "-c", "sleep 600")
-    # ended "after" the live one's last update (a clock step back): the
-    # live record lists last, so a failure on it would be the line shown
-    lv = ["lv.%d" % (now + 100), "lv.%d" % (now + 200)]
-    for i, file in enumerate(lv):
-        record(file, "lv", -100 * (i + 1), "exit 0", "LV")
-    s = history("pd")
-    check("select lv", select("pd", "lv"), screen("pd"))
-    dch("--keys", "pd", "d")
-    wait_screen("pd", lambda s: "Remove lv from History?" in s)
-    dch("--keys", "pd", "y")
-    s = wait_screen("pd", lambda s: "lv" not in rows(s) and "forgotten" in s,
-                    15)
-    left = os.listdir(rec)
-    check("d, y on lv (live too): its row and both ended records gone, the "
-          "live record kept, no failure said",
-          "lv" not in rows(s) and "forgotten" in s and "failed" not in s and
-          not [f for f in left if f.startswith("lv.") and f != "lv.json"] and
-          "lv.json" in left,
-          s, left)
+    # a running name (#254): decided by the name, not by which record is
+    # live. rp pinned, running, no ended record; rq pinned, running, two
+    # ended records; lv running, not pinned, two ended records; rn pinned,
+    # ended, started and ended again while the picker is open
+    def run(name, word):
+        dch("--spawn", name, "--size", "80x24", "sh", "-c",
+            "echo %s; sleep 600" % word)
 
-    # the cap: 3 pinned and 60 more names, 50 rows; the 47 newest of the 60
+    run("rp", "RP_LIVE")
+    run("rq", "RQ_LIVE")
+    run("lv", "LV_LIVE")
+    end = time.time() + 10
+    while time.time() < end and not all(
+            os.path.exists(os.path.join(rec, n + ".json"))
+            for n in ("rp", "rq", "lv")):
+        time.sleep(0.1)
+    dch("--pin", "rp")
+    for i in (1, 2):
+        record("rq.%d" % (now - 900 * i), "rq", 900 * i, "signal 15", "RQ",
+               True)
+    # ended "after" the live one's last update (a clock step back): on the
+    # base the newest record of the name, the one its row showed
+    for i in (1, 2):
+        record("lv.%d" % (now + 100 * i), "lv", -100 * i, "exit 0", "LV")
+    record("rn.%d" % (now - 600), "rn", 600, "exit 0", "RN", True)
+    s = history("pr")
+    check("pinned and running with no ended record: rp is a row, ◆, "
+          "running", "running" in line(s, "rp") and
+          "\u25c6" in line(s, "rp"), s)
+    check("pinned and running with two ended records: one rq row, running, "
+          "not an old end",
+          rows(s).count("rq") == 1 and "running" in line(s, "rq") and
+          "ended" not in line(s, "rq"), s)
+    check("running and not pinned: lv is not on History (its older records "
+          "neither)", "lv" not in rows(s), s)
+    check("pinned and ended: rn unchanged, its end (exited)",
+          "exited" in line(s, "rn") and "running" not in line(s, "rn"), s)
+
+    check("select rq", select("pr", "rq"), screen("pr"))
+    s = screen("pr")
+    check("a running row's hints: attach, no resume, no remove",
+          "attach" in s and "resume" not in s and "remove" not in s, s)
+    dch("--keys", "pr", "d")
+    s = wait_screen("pr", lambda s: "rq is running" in s)
+    check("d on running rq refuses: says it is running, asks nothing",
+          "rq is running; d removes it once it has ended" in s and
+          "Remove" not in s, s)
+    dch("--keys", "pr", "m")
+    s = wait_screen("pr", lambda s: "Enter attaches it" in s)
+    check("m on running rq resumes nothing: says it is running",
+          "rq is running; Enter attaches it" in s, s)
+    time.sleep(1)
+    left = os.listdir(rec)
+    check("... and every rq record is still there",
+          len([f for f in left if f.startswith("rq") and
+               f.endswith(".json")]) == 3, left)
+
+    dch("--keys", "pr", "/")
+    wait_screen("pr", lambda s: "/█" in s)
+    dch("--send", "pr", "rp")
+    s = wait_screen("pr", lambda s: "/rp█" in s and rows(s) == ["rp"])
+    check("the filter keeps a running row: /rp is rp, running, [History 1]",
+          rows(s) == ["rp"] and "running" in line(s, "rp") and
+          "[History 1]" in s, s)
+    dch("--keys", "pr", "esc")
+    s = wait_screen("pr", lambda s: "/rp" not in s and "rn" in rows(s))
+
+    run("rn", "RN_LIVE")
+    s = wait_screen("pr", lambda s: "running" in line(s, "rn"), 15)
+    check("a session started while the picker is open: rn turns running",
+          "running" in line(s, "rn") and rows(s).count("rn") == 1, s)
+    dch("-k", "rn")
+    s = wait_screen("pr", lambda s: "closed" in line(s, "rn"), 15)
+    check("... and ended: rn is an ended row again (closed)",
+          "closed" in line(s, "rn") and "running" not in line(s, "rn"), s)
+
+    check("select rq again", select("pr", "rq"), screen("pr"))
+    dch("--keys", "pr", "p")
+    s = wait_screen("pr", lambda s: "rq" not in rows(s), 15)
+    check("p on running rq unpins every record of it: the row goes",
+          "rq" not in rows(s) and not [f for f in os.listdir(rec) if
+                                       f.startswith("rq") and
+                                       f.endswith(".pin")], s)
+
+    s = history("pkk", "-k")
+    check("dch -k: select rp", select("pkk", "rp"), screen("pkk"))
+    dch("--keys", "pkk", "enter")
+    s = wait_screen("pkk", lambda s: "rp is running" in s)
+    time.sleep(1)
+    check("dch -k: Enter on running rp kills nothing, says where it "
+          "attaches", "rp is running; attach it from dch -l or the switch"
+          in s and "rp" in dch("-ls").stdout.split(), s)
+    dch("-k", "pkk")
+
+    check("select rp", select("pr", "rp"), screen("pr"))
+    dch("--keys", "pr", "enter")
+    s = wait_screen("pr", lambda s: "RP_LIVE" in s, 15)
+    check("Enter on running rp attaches it (its screen), revives nothing",
+          "RP_LIVE" in s and not [f for f in os.listdir(rec)
+                                  if f.startswith("rp-")], s)
+
+    # the cap: 3 pinned and 60 more names and pinned running rp, 50 rows;
+    # the 46 newest of the 60
     for f in os.listdir(rec):        # every record but the live ones'
-        if f not in ("pk.json", "pm.json", "pd.json", "lv.json", "mix.json",
-                     "alpha.json"):
+        if f not in ("pk.json", "pm.json", "pr.json", "lv.json", "mix.json",
+                     "alpha.json", "rp.json", "rp.pin", "rq.json"):
             os.unlink(os.path.join(rec, f))
     for i in range(3):
         record("cp%d" % i, "cp%d" % i, 5000 + i, "exit 0", "CP", True)
     for i in range(60):
         record("cu%02d" % i, "cu%02d" % i, 1000 - i * 10, "exit 0", "CU")
     s = history("pc")
-    check("3 pinned and 60 other names: [History 50], pinned first",
-          "[History 50]" in s and rows(s)[:3] == ["cp0", "cp1", "cp2"], s)
+    check("3 pinned, running pinned rp and 60 other names: [History 50], "
+          "pinned first, rp running among them",
+          "[History 50]" in s and
+          rows(s)[:4] == ["cp0", "cp1", "cp2", "rp"] and
+          "running" in line(s, "rp"), s)
     dch("--keys", "pc", "/")
     wait_screen("pc", lambda s: "/█" in s)
     dch("--send", "pc", "cu")
-    s = wait_screen("pc", lambda s: "/cu█" in s and "[History 47]" in s)
-    check("... the 47 newest of the 60: /cu is [History 47], cu13 first",
-          "[History 47]" in s and rows(s)[:1] == ["cu13"], s)
+    s = wait_screen("pc", lambda s: "/cu█" in s and "[History 46]" in s)
+    check("... the 46 newest of the 60 (the running unpinned names take no "
+          "place): /cu is [History 46], cu14 first",
+          "[History 46]" in s and rows(s)[:1] == ["cu14"], s)
     return 1 if failures else 0
 
 
@@ -270,7 +359,8 @@ if __name__ == "__main__":
     try:
         rc = main()
     finally:
-        for n in ("pk", "pm", "pd", "pc", "lv", "probe", "mix", "alpha"):
+        for n in ("pk", "pm", "pr", "pkk", "pc", "lv", "rp", "rq", "rn",
+                  "probe", "mix", "alpha"):
             dch("-k", n)
         shutil.rmtree(ROOT, ignore_errors=True)
     print("PASS" if rc == 0 else "FAILED: %d" % len(failures))

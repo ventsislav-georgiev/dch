@@ -1054,7 +1054,9 @@ pk_row(const struct pk *p, const struct pkrow *w, int sel)
 	{
 		const char *e = pk_end(w->state, b, sizeof b);
 
-		pk_set(!strncmp(e, "crashed", 7) ? PK_P(PK_RED) : "2");
+		/* running (#254): the accent, as a working session is */
+		pk_set(w->live ? PK_P(PK_ACC) : !strncmp(e, "crashed", 7)
+		       ? PK_P(PK_RED) : "2");
 		pk_fit(e, pk_c.state);
 	}
 	else
@@ -1308,18 +1310,25 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 	}
 	else
 	{
-		PK_K(0, ret, "resume", NULL, 0);
-		if (p->opens)
+		/* a running name's row (#254): it attaches, nothing resumes
+		** or removes it */
+		int run = cur && cur->live;
+
+		if (!run || p->opens)
+			PK_K(0, ret, run ? "attach" : "resume", NULL, 0);
+		if (p->opens && !run)
 			PK_K(0, pk_utf ? "\xe2\x87\xa7\xe2\x86\xb5/o"
 			     : "S-enter/o", "open", NULL, 0);
-		PK_K(0, "m", "no message", NULL, 0);
+		if (!run)
+			PK_K(0, "m", "no message", NULL, 0);
 		if (p->interrupted)
 		{
 			snprintf(intr, sizeof intr, "%d", p->interrupted);
 			PK_K(0, "I", "interrupted", intr, 0);
 		}
 		PK_K(0, "p", cur && cur->pinned ? "unpin" : "pin", NULL, 0);
-		PK_K(0, "d", "remove", NULL, 1);
+		if (!run)
+			PK_K(0, "d", "remove", NULL, 1);
 		PK_K(0, "x", "x-ray", NULL, 0);
 	}
 	if (!p->settings && !p->filtering)

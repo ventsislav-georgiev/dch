@@ -24,6 +24,7 @@ struct pkrow
 	long when, merged;	/* last output; History: when it ended */
 	int agents, pinned;
 	int remote;		/* host:name (#087): 1, 2 when stale */
+	int live;		/* History: a session of the name runs (#254) */
 };
 
 struct pkact

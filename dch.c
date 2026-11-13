@@ -8952,6 +8952,22 @@ pk_sidekick(int mode, regex_t *re, const char *pat, const char *s)
 	return 0;
 }
 
+/* The session named `name` on Sessions or Sidekicks, this host's; NULL
+** when none runs. Their rows are named as the sockets are: canon_name's. */
+static const struct pkrow *
+pk_running(const struct pk *p, const char *name)
+{
+	char cb[256];
+	const char *f = canon_name(name, cb, sizeof cb);
+	int t, k;
+
+	for (t = 0; t < 2; t++)
+		for (k = 0; k < p->n[t]; k++)
+			if (!p->r[t][k].remote && !strcmp(p->r[t][k].name, f))
+				return &p->r[t][k];
+	return NULL;
+}
+
 /* Every tab's rows afresh: the live sessions as --ls-json reads them, the
 ** ended records as --history does. */
 void
@@ -9031,19 +9047,18 @@ pk_load(struct pk *p)
 	for (k = 0; k < nh; k++)
 		p->interrupted += rv_all_takes(&h[k]);
 	/* one row per name (#144): its newest record, pinned when any of
-	** the name's is; h is newest first */
+	** the name's is, live when any of the name's is; h is newest first */
 	for (k = 0; p->r[2] && k < nh; k++)
 	{
 		struct pkrow *w;
 
-		if (h[k].live)
-			continue;
 		for (j = 0; j < p->n[2] && strcmp(p->r[2][j].sname,
 		     h[k].name); j++)
 			;
 		if (j < p->n[2])
 		{
 			p->r[2][j].pinned |= h[k].pinned;
+			p->r[2][j].live |= h[k].live;
 			continue;
 		}
 		w = &p->r[2][p->n[2]++];
@@ -9062,13 +9077,29 @@ pk_load(struct pk *p)
 			snprintf(w->cwd, sizeof w->cwd, "%s", h[k].cwd);
 		w->when = hrec_when(&h[k]);
 		w->pinned = h[k].pinned;
+		w->live = h[k].live;
+	}
+	/* a name decides (#254): one with a session running (its row on
+	** Sessions or Sidekicks, or a live record) says "running" and when
+	** that session last had output; shown only when pinned, else it is
+	** that session's tab's */
+	for (k = pin = 0; k < p->n[2]; k++)
+	{
+		struct pkrow *w = &p->r[2][k];
+		const struct pkrow *s = pk_running(p, w->sname);
+
+		if (s || w->live)
+		{
+			w->live = 1;
+			snprintf(w->state, sizeof w->state, "running");
+			w->when = s ? s->when : w->when;
+		}
+		pin += w->pinned;
 	}
 	/* every pinned name, then the newest of the rest while the total is
 	** under the cap */
-	for (k = pin = 0; k < p->n[2]; k++)
-		pin += p->r[2][k].pinned;
 	for (k = j = 0; k < p->n[2]; k++)
-		if (p->r[2][k].pinned || pin < PK_HIST_MAX)
+		if (p->r[2][k].pinned || (!p->r[2][k].live && pin < PK_HIST_MAX))
 		{
 			pin += !p->r[2][k].pinned;
 			p->r[2][j++] = p->r[2][k];
@@ -9602,8 +9633,10 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 	if (c == 'x')
 	{
 		/* the X-ray view (#175): a live session by name, a History row
-		** by its record; a remote one's on its host (#188) */
-		return pk_xray(p, fd, w->name, t == 2, w->remote, out, outsz);
+		** by its record, a running one's (#254) by the session; a remote
+		** one's on its host (#188) */
+		return pk_xray(p, fd, t == 2 && w->live ? w->sname : w->name,
+		               t == 2 && !w->live, w->remote, out, outsz);
 	}
 	/* ponytail: a remote row only attaches; kill, rename, restart and
 	** the rest need ops-gated frames and the same confirmation (#087).
@@ -9624,6 +9657,31 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 			         "are for this host's" : "%s: a remote session; "
 			         "Enter attaches and x opens its X-ray, nothing "
 			         "else", w->title);
+		return 0;
+	}
+	/* a running name's History row (#254): Enter and o attach the
+	** session, as its Sessions row does; nothing resumes or removes it */
+	if (t == 2 && w->live && c > 0 && c < 256 && strchr("\r\nomd", c))
+	{
+		int go = c != 'm' && c != 'd' && p->opens;
+
+		if (go && !name_live(w->sname))
+		{
+			snprintf(p->status, sizeof p->status, "%s: no longer "
+			         "running", w->title);
+			p->loaded = 0;
+		}
+		else if (go && (size_t)snprintf(out, outsz, "%s", w->sname) <
+		         outsz)
+		{
+			attach_route = -1;	/* this host's, as the row is */
+			return 1;
+		}
+		else
+			snprintf(p->status, sizeof p->status, "%s is running; %s",
+			         w->title, c == 'd' ? "d removes it once it has "
+			         "ended" : p->opens ? "Enter attaches it" : "attach "
+			         "it from dch -l or the switch");
 		return 0;
 	}
 	if (t < 2)
