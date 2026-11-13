@@ -894,6 +894,7 @@ attach_main(int noerror)
 	fd_set readfds;
 	int s;
 	int detach_pending = 0;
+	int cont_redraw = 0;	/* a SIGCONT's repaint, out once s is drained */
 	struct timeval detach_at = {0, 0};
 
 	/* Attempt to open the socket. Don't display an error if noerror is
@@ -1062,20 +1063,23 @@ attach_main(int noerror)
 		}
 		/* Continued after a stop it did not make (LOW-V9): raw mode back,
 		** then a repaint over what the shell wrote meanwhile. No
-		** MSG_ATTACH: nothing was reset, so nothing is re-armed. Here,
-		** before the select, which this turn only polls: a master that
-		** dropped the client while it was stopped is read as an end
-		** before the redraw is written, and a quiet session's redraw
-		** goes out now, not at the next wake. After the timers, which
-		** would set their own wait. shortcut: a SIGCONT landing between
-		** this check and the select is handled at the next wake
-		** (session output, a key); a self-pipe would make it exact. */
+		** MSG_ATTACH: nothing was reset, so nothing is re-armed. The
+		** repaint waits for a poll that finds s drained: a master that
+		** dropped the client while it was stopped left its output (on
+		** Linux more than one read) and then the end in s, read before
+		** a redraw is written to the closed socket (EPIPE, exit 1, no
+		** picker). A quiet session's redraw goes out at the first poll.
+		** After the timers, which would set their own wait. shortcut: a
+		** SIGCONT landing between this check and the select is handled
+		** at the next wake (session output, a key); a self-pipe would
+		** make it exact. */
 		if (want_cont)
 		{
 			term_raw();
-			want_redraw = 1;
-			wait_us = 0;
+			cont_redraw = 1;
 		}
+		if (cont_redraw)
+			wait_us = 0;
 		if (wait_us >= 0)
 		{
 			tv.tv_sec = wait_us / 1000000;
@@ -1091,6 +1095,11 @@ attach_main(int noerror)
 		n = select(s + 1, &readfds, NULL, NULL, tvp);
 		if (n < 0 && errno != EINTR && errno != EAGAIN)
 			exit(1);
+		if (cont_redraw && (n == 0 || (n > 0 && !FD_ISSET(s, &readfds))))
+		{
+			cont_redraw = 0;
+			want_redraw = 1;
+		}
 
 		/* Pty activity */
 		if (n > 0 && FD_ISSET(s, &readfds))
