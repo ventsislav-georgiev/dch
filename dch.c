@@ -5130,7 +5130,8 @@ respawn_req(const char *path, int op, char **cmd, int ncmd)
 	close(s);
 	if (rc <= 0)
 		return r.got_any ? -1 : -2;
-	return type == MSG_ACK ? (int)len : DCH_ST_ERR;
+	/* the status is a 16-bit wire field: never one of the codes above */
+	return type == MSG_ACK && len <= 0xffff ? (int)len : DCH_ST_ERR;
 }
 
 /* Arm a respawn (or, on a held session, perform it now); no command = hold,
