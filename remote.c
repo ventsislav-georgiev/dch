@@ -51,8 +51,9 @@
 ** --xray host:name --requests --json (#158) holds one such connection warm
 ** for many requests, one at a time, each read off stdin (spec #832 4.3).
 **
-** ponytail: no 0x2e watch stream (the picker re-probes every RM_EVERY_MS),
-** and no remote kill, rename or create from the picker: those need a
+** dch --ls-json [--remote] --follow (#103) is the one client of the 0x2e
+** watch stream; the picker re-probes every RM_EVERY_MS.
+** ponytail: no remote kill, rename or create from the picker: those need a
 ** confirmation the way the local ones have one (the CLI verbs are ctl's).
 */
 #ifdef _WIN32
@@ -1121,7 +1122,7 @@ struct probe
 	struct rf_state rs;
 	struct sb in;
 	char *list;		/* the 0x11 payload, NUL-terminated */
-	char *hello_js;		/* hello_only: the 0x18 payload */
+	char *hello_js;		/* hello_only, keep: the 0x18 payload */
 	char why[300];		/* PR_FAIL, PR_NEWER, PR_REFUSED: printable */
 	/* hist (#115): once the hello lists "ctl", a 0x30 of --history --json,
 	** its 0x31 bytes into hout (RM_HIST_MAX at most); PR_OK on exit 0 */
@@ -1460,7 +1461,7 @@ pr_frame(struct probe *p, const struct rf_frame *f)
 		p->hello = 1;
 		if (p->hist)
 			hist_ask(p, t);
-		else if (p->hello_only)
+		else if (p->hello_only || p->keep)
 		{
 			p->hello_js = t;
 			t = NULL;
@@ -4442,5 +4443,513 @@ dch_remote_requests(char *n)
 	free(o.p);
 	free(q.wait.p);
 	return rc;
+}
+
+/* ---- dch --ls-json [--remote] --follow (#103) ------------------------ */
+
+/*
+** --ls-json's array, then the same again whenever it changes. Each host
+** keeps one probe: one whose hello lists "watch" is held on that
+** connection, a 0x2e sent after its list, and re-read off its 0x11s; any
+** other is probed again every RM_EVERY_MS, as the picker does, and the
+** local rows are re-read on the same tick. A host that fails (no answer in
+** RM_BG_MS, a drop, a stream silent RM_QUIET_MS, a frame it should not
+** send) keeps its rows, stale, for RM_TTL_S after it last answered, as
+** --ls-json --remote shows them, and is dialled again after RM_EVERY_MS,
+** doubled per failure up to 16 times that. The array is printed by
+** --ls-json's own code in a forked child, its stdout a pipe to us: it goes
+** out only when it differs from the last one.
+*/
+#define RM_QUIET_MS 35000	/* a watch stream's 0x14 comes after 25 s */
+
+struct fhost
+{
+	struct probe p;		/* the dial, then (live) its 0x2e stream */
+	int live;		/* p.fd is the stream */
+	int idle;		/* nothing in flight: dialled again at due */
+	int ok;			/* its rows are fresh */
+	int gone;		/* refused us or newer: no rows */
+	int fails;		/* in a row */
+	long long due, end;	/* the next dial; the dial's or stream's limit */
+	struct rlist rows;
+	long long at;		/* when it last answered, epoch seconds */
+};
+
+/* DCH_REMOTE_EVERY_MS, DCH_REMOTE_QUIET_MS (tests): 100..600000, else dflt */
+static long long
+env_ms(const char *k, long long dflt)
+{
+	const char *e = getenv(k);
+	long v = e ? atol(e) : 0;
+
+	return v >= 100 && v <= 600000 ? v : dflt;
+}
+
+/* h's probe closed and emptied, its host kept */
+static void
+fh_close(struct fhost *h)
+{
+	struct rhost hh = h->p.h;
+
+	if (h->p.fd >= 0)
+		sock_close(h->p.fd);
+	free(h->p.list);
+	free(h->p.hello_js);
+	free(h->p.in.p);
+	memset(&h->p, 0, sizeof h->p);
+	h->p.h = hh;
+	h->p.fd = -1;
+	h->live = 0;
+}
+
+/* The frames of h's 0x2e stream in h->p.in, as far as they have come: a
+** 0x11 is its rows, a 0x14 a beat, a streamed type skipped. A 0x13, a
+** frame over the limit or a list that is not an array ends the stream
+** (p.st PR_REFUSED for a coded 0x13, else PR_FAIL; why said). 1 when its
+** rows changed or it ended. */
+static int
+fh_frames(struct fhost *h, long long now, long long quiet)
+{
+	struct rf_frame f;
+	size_t off = 0, used;
+	char why[300];
+	int r, rc = 0, bad;
+
+	while (h->live && (r = rf_parse(&h->p.rs, (const unsigned char *)
+	       h->p.in.p + off, h->p.in.n - off, (size_t)-1, &f, &used)) !=
+	       RF_NEED)
+	{
+		struct rlist l = {0};
+		char *t = NULL;
+
+		off += used;
+		if (r == RF_CLOSE)
+			pr_end(&h->p, PR_FAIL, "sent a frame over the size limit");
+		else if (r != RF_FRAME || (f.type != 0x11 && f.type != 0x13 &&
+		                           f.type != 0x14))
+			continue;	/* 0x12, 0x18, a streamed type: not ours */
+		else if (f.type == 0x13)
+			pr_end(&h->p, err_text(f.data, f.len, why, sizeof why) ==
+			       DCH_EXIT_REFUSED ? PR_REFUSED : PR_FAIL, why);
+		else if (f.type == 0x11 && (memchr(f.data, 0, f.len) ||
+		         !(t = malloc(f.len + 1))))
+			pr_end(&h->p, PR_FAIL, "sent an unreadable list");
+		else
+		{
+			h->end = now + quiet;
+			h->at = (long long)time(NULL);
+			if (f.type == 0x14)
+				continue;
+			memcpy(t, f.data, f.len);
+			t[f.len] = '\0';
+			bad = rows_doc(t, h->p.h.label, h->at, &l) < 0;
+			free(t);
+			if (bad)
+			{
+				free(l.v);
+				pr_end(&h->p, PR_FAIL, "sent an unreadable list");
+			}
+			else
+			{
+				free(h->rows.v);
+				h->rows = l;
+				rc = 1;
+				continue;
+			}
+		}
+		h->live = 0;	/* ended: fh_settle's */
+		rc = 1;
+	}
+	if (off)
+	{
+		memmove(h->p.in.p, h->p.in.p + off, h->p.in.n - off);
+		h->p.in.n -= off;
+	}
+	return rc;
+}
+
+/* h's stream is readable. As fh_frames. */
+static int
+fh_read(struct fhost *h, long long now, long long quiet)
+{
+	unsigned char buf[RM_READ];
+	ssize_t k = sock_read(h->p.fd, buf, sizeof buf);
+	int e = sock_err();
+
+	if (k < 0 && (e == SE_INTR || e == SE_AGAIN))
+		return 0;
+	if (k > 0)
+		sb_add(&h->p.in, buf, (size_t)k);
+	if (k > 0 && !h->p.in.bad)
+		return fh_frames(h, now, quiet);
+	pr_end(&h->p, PR_FAIL, k > 0 ? "sent too much" : k ? sock_str(e)
+	       : "closed the connection");
+	h->live = 0;
+	return 1;
+}
+
+/* h's dial, once it is over: its rows (then its stream, when its hello
+** lists "watch"), else the failure, its next dial after the backoff. 1
+** when it changed what h shows. */
+static int
+fh_settle(struct fhost *h, long long now, long long every, long long quiet)
+{
+	struct rlist l = {0};
+	struct sb b = {0};
+	char dev[64];
+
+	if (h->live || h->idle || h->p.st == PR_CONN || h->p.st == PR_WAIT)
+		return 0;
+	h->idle = 1;
+	if (h->p.st == PR_OK && rows_doc(h->p.list, h->p.h.label,
+	                                 (long long)time(NULL), &l) == 0)
+	{
+		free(h->rows.v);
+		h->rows = l;
+		h->at = (long long)time(NULL);
+		h->ok = 1;
+		h->gone = h->fails = 0;
+		h->due = now + every;
+		if (!hello_op(h->p.hello_js, "watch"))
+		{
+			pr_end(&h->p, PR_OK, NULL);
+			return 1;
+		}
+		/* one per process: the host keeps 4 streams of a device */
+		snprintf(dev, sizeof dev, "{\"device_id\":\"dch-%ld\"}",
+		         (long)getpid());
+		put_frame(&b, 0x2e, dev, strlen(dev));
+		/* a few dozen bytes into an idle socket: sent whole */
+		if (!b.bad && send(h->p.fd, (const void *)b.p, b.n, MSG_NOSIGNAL)
+		    == (ssize_t)b.n)
+		{
+			h->live = 1;
+			h->idle = 0;
+			h->end = now + quiet;
+			(void)fh_frames(h, now, quiet);	/* what came after it */
+		}
+		else
+			pr_end(&h->p, PR_OK, NULL);	/* probed, as one without */
+		free(b.p);
+		return 1;
+	}
+	free(l.v);
+	if (h->p.st == PR_OK)
+		pr_end(&h->p, PR_FAIL, "sent an unreadable list");
+	if ((h->p.st == PR_NEWER || h->p.st == PR_REFUSED) && !h->gone)
+		fprintf(stderr, h->p.st == PR_NEWER ? "dch: %s %s; skipped\n"
+		        : "dch: %s refused: %s\n", h->p.h.label, h->p.why);
+	if (h->p.st == PR_NEWER || h->p.st == PR_REFUSED)
+	{
+		h->gone = 1;	/* as --ls-json --remote: none of its rows */
+		h->rows.n = 0;
+	}
+	h->ok = 0;
+	h->due = now + (every << (h->fails < 4 ? h->fails : 4));
+	h->fails++;
+	return 1;
+}
+
+/* h dialled again: its hello and list asked, RM_BG_MS for the answer */
+static void
+fh_dial(struct fhost *h, int box)
+{
+	fh_close(h);
+	h->p.keep = 1;
+	pr_start(&h->p, 1, now_ms() + box);
+	h->idle = 0;
+	h->end = now_ms() + RM_BG_MS;
+}
+
+/* The hosts --ls-json --remote would dial now (discovery's tailscale call
+** given ms): one no longer there closed and dropped, a new one dialled at
+** once, its cached rows (stale) shown until it answers. When discovery
+** cannot tell, they stand. 1 when they changed. */
+static int
+fl_hosts(struct fhost *v, int *n, long long now, int ms, int loud)
+{
+	struct rhost hv[RM_HOSTS];
+	struct rlist old = {0};
+	long long t = (long long)time(NULL);
+	int k = candidates(hv, RM_HOSTS, ms < RM_TS_MS ? ms : RM_TS_MS, loud);
+	int i, j, ch = 0, got = 0;
+
+#define FH_SAME(a, b) (!strcmp((a)->label, (b)->label) && \
+                       !strcmp((a)->addr, (b)->addr) && (a)->port == (b)->port)
+	for (i = 0; k >= 0 && i < *n;)
+	{
+		for (j = 0; j < k && !FH_SAME(&v[i].p.h, &hv[j]); j++)
+			;
+		if (j < k)
+		{
+			i++;
+			continue;
+		}
+		fh_close(&v[i]);
+		free(v[i].rows.v);
+		v[i] = v[--*n];
+		ch = 1;
+	}
+	for (j = 0; j < k && *n < RM_HOSTS; j++)
+	{
+		struct fhost *h = &v[*n];
+
+		for (i = 0; i < *n && !FH_SAME(&v[i].p.h, &hv[j]); i++)
+			;
+		if (i < *n)
+			continue;
+		if (!got++)
+			cache_load(&old, t);
+		memset(h, 0, sizeof *h);
+		h->p.h = hv[j];
+		h->p.fd = -1;
+		h->idle = 1;
+		h->due = now;
+		for (i = 0; i < old.n; i++)
+		{
+			struct dch_rrow *r;
+
+			/* 0 < at <= t + 60: no overflow */
+			if (strcmp(old.v[i].host, hv[j].label) ||
+			    old.v[i].at < t - RM_TTL_S || !(r = rl_new(&h->rows)))
+				continue;
+			*r = old.v[i];
+			h->rows.n++;
+			if (r->at > h->at)
+				h->at = r->at;
+		}
+		(*n)++;
+		ch = 1;
+	}
+#undef FH_SAME
+	free(old.v);
+	return ch;
+}
+
+/* What every host shows now: a fresh one's rows; else its last, stale,
+** for RM_TTL_S after it last answered; in dch_remote_rows' order. */
+static void
+fl_rows(const struct fhost *v, int n, struct rlist *l)
+{
+	long long t = (long long)time(NULL);
+	struct dch_rrow *r;
+	int i, k;
+
+	for (i = 0; i < n; i++)
+		for (k = 0; !v[i].gone && (v[i].ok || v[i].at >= t - RM_TTL_S) &&
+		     k < v[i].rows.n && (r = rl_new(l)); k++)
+		{
+			*r = v[i].rows.v[k];
+			r->stale = !v[i].ok;
+			l->n++;
+		}
+	if (l->n > 1)
+		qsort(l->v, (size_t)l->n, sizeof *l->v, row_cmp);
+}
+
+static void
+fl_free(struct fhost *v, int n)
+{
+	int i;
+
+	for (i = 0; i < n; i++)
+	{
+		fh_close(&v[i]);
+		free(v[i].rows.v);
+	}
+	free(v);
+}
+
+/* One look at the list: --ls-json's code prints it in a child, which
+** returns 1 here with the remote rows in *out, *nout. The parent reads it
+** (RM_ATTACH_MS at most, then SIGKILLs it) and prints it when it is whole
+** and not *last: 0, or -1 once our stdout is gone. save: the rows to the
+** cache too. */
+static int
+fl_look(const struct fhost *v, int n, struct sb *last, int save,
+        struct dch_rrow **out, int *nout)
+{
+	struct rlist l = {0};
+	struct sb b = {0};
+	long long end = now_ms() + RM_ATTACH_MS;
+	int p[2], st = 1, rc = 0;
+	pid_t pid;
+
+	fl_rows(v, n, &l);
+	if (save)
+		cache_save(&l);
+	fflush(stdout);
+	if (pipe_ce(p) < 0)
+	{
+		free(l.v);
+		return 0;
+	}
+	if ((pid = fork()) == 0)
+	{
+		child_signals();
+		dup2(p[1], 1);
+		close(p[0]);
+		close(p[1]);
+		*out = l.v;
+		*nout = l.n;
+		return 1;
+	}
+	close(p[1]);
+	free(l.v);
+	while (pid > 0)
+	{
+		unsigned char buf[RM_READ];
+		struct pollfd pf = { p[0], POLLIN, 0 };
+		long long left = end - now_ms();
+		ssize_t k;
+
+		if (left <= 0 || (poll(&pf, 1, (int)left) < 0 && errno != EINTR))
+		{
+			kill(pid, SIGKILL);	/* a wedged master: next tick */
+			break;
+		}
+		if (!pf.revents)
+			continue;
+		if ((k = read(p[0], buf, sizeof buf)) < 0 && errno == EINTR)
+			continue;
+		if (k <= 0)
+			break;
+		sb_add(&b, buf, (size_t)k);
+	}
+	close(p[0]);
+	while (pid > 0 && waitpid(pid, &st, 0) < 0 && errno == EINTR)
+		;
+	if (pid > 0 && !b.bad && WIFEXITED(st) && !WEXITSTATUS(st) &&
+	    b.n > 2 && b.p[0] == '[' && b.p[b.n - 1] == '\n' &&
+	    (b.n != last->n || memcmp(b.p, last->p, b.n)))
+	{
+		if (fwrite(b.p, 1, b.n, stdout) != b.n || fflush(stdout) != 0)
+			rc = -1;	/* the reader is gone */
+		free(last->p);
+		*last = b;
+		return rc;
+	}
+	free(b.p);
+	return 0;
+}
+
+int
+dch_remote_follow(int remote, struct dch_rrow **out)
+{
+	struct fhost *v = calloc(RM_HOSTS, sizeof *v);
+	struct sb last = {0};
+	long long every = env_ms("DCH_REMOTE_EVERY_MS", RM_EVERY_MS);
+	long long quiet = env_ms("DCH_REMOTE_QUIET_MS", RM_QUIET_MS);
+	long long start = now_ms(), tick = start, now;
+	int box = box_ms(), n = 0, i, dirty = 1, save = 0, first = 1, r;
+
+	*out = NULL;
+	if (!v)
+	{
+		fprintf(stderr, "dch: out of memory\n");
+		return -2;
+	}
+	/* a closed stdout is a write that fails, or a POLLERR/POLLHUP: exit 0 */
+	signal(SIGPIPE, SIG_IGN);
+	signal(SIGINT, ctl_sig);
+	signal(SIGTERM, ctl_sig);
+	while (!g_ctl_sig)
+	{
+		struct pollfd pf[RM_HOSTS + 1];
+		int map[RM_HOSTS + 1], np = 0, pend = 0;
+		long long wake;
+
+		now = now_ms();
+		if (now >= tick)
+		{
+			/* macOS answers POLLHUP to a POLLOUT poll only, which
+			** would spin on a writable pipe: once a tick */
+			struct pollfd o = { 1, POLLOUT, 0 };
+
+			if (poll(&o, 1, 0) > 0 &&
+			    (o.revents & (POLLERR | POLLHUP | POLLNVAL)))
+				break;
+			tick = now + every;
+			dirty = 1;
+			if (remote && fl_hosts(v, &n, now, box, first))
+				save = 1;
+			now = now_ms();
+		}
+		for (i = 0; i < n; i++)
+		{
+			struct fhost *h = &v[i];
+
+			if (h->idle && now >= h->due)
+				fh_dial(h, box);
+			else if (!h->idle && now >= h->end)
+			{
+				char why[64];
+
+				snprintf(why, sizeof why, h->live ? "silent for %lld "
+				         "ms" : "no answer within %lld ms", h->live
+				         ? quiet : (long long)RM_BG_MS);
+				pr_end(&h->p, PR_FAIL, why);
+				h->live = 0;
+			}
+			if (fh_settle(h, now_ms(), every, quiet))
+				dirty = save = 1;
+			pend |= !h->idle && !h->live;
+		}
+		/* the first array: every host answered, or --ls-json's box */
+		if (dirty && (!first || !pend || now_ms() >= start + box))
+		{
+			int nr = 0;
+
+			if ((r = fl_look(v, n, &last, save, out, &nr)) == 1)
+			{
+				fl_free(v, n);	/* the child: it prints */
+				free(last.p);
+				return nr;
+			}
+			if (r < 0)
+				break;
+			dirty = save = first = 0;
+		}
+		wake = first && start + box < tick ? start + box : tick;
+		for (i = 0; i < n; i++)
+		{
+			struct fhost *h = &v[i];
+			long long w = h->idle ? h->due : h->end;
+
+			if (w < wake)
+				wake = w;
+			if (h->idle || h->p.fd < 0)
+				continue;
+			pf[np].fd = h->p.fd;
+			pf[np].events = h->p.st == PR_CONN ? POLLOUT : POLLIN;
+			pf[np].revents = 0;
+			map[np++] = i;
+		}
+		/* Linux flags a reader-less pipe with POLLERR, asked or not */
+		pf[np].fd = 1;
+		pf[np].events = 0;
+		pf[np].revents = 0;
+		map[np++] = -1;
+		now = now_ms();
+		if (poll(pf, (nfds_t)np, wake > now ? (int)(wake - now) : 0) < 0)
+		{
+			if (errno == EINTR)
+				continue;
+			break;
+		}
+		if (pf[np - 1].revents & (POLLERR | POLLHUP | POLLNVAL))
+			break;
+		for (i = 0; i < np - 1; i++)
+			if (pf[i].revents && v[map[i]].live)
+			{
+				if (fh_read(&v[map[i]], now_ms(), quiet))
+					dirty = save = 1;
+			}
+			else if (pf[i].revents)
+				pr_io(&v[map[i]].p);
+	}
+	fl_free(v, n);
+	free(last.p);
+	return -1;
 }
 #endif

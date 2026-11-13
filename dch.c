@@ -2761,7 +2761,8 @@ usage(void)
 	    "                                             \"stopped\"; dch --revive\n"
 	    "                                             <name> wakes it resumed\n"
 	    "  dch --ls-json    like -lj but JSON, adds \"state\"; --remote\n"
-	    "                   adds remote rows, each with a \"host\"\n"
+	    "                   adds remote rows, each with a \"host\";\n"
+	    "                   --follow: again, one line, on each change\n"
 	    "  dch --config [<key> [<value>|--unset]]     show the config file\n"
 	    "                                             (path, then each key),\n"
 	    "                                             one key, or set/remove\n"
@@ -14267,6 +14268,7 @@ main_run(int argc, char **argv)
 	int opt_all = 0, opt_cancel = 0, opt_agents = 0, opt_nomsg = 0;
 	int opt_agent_json = 0, opt_hist_json = 0, opt_json = 0;
 	int opt_remote = 0;
+	int opt_lsfollow = 0;	/* --ls-json --follow (#103) */
 	int say_at = 0, say_n = 0;
 	char opt_as[512] = "";
 	int opt_cols = 0, opt_rows = 0;
@@ -14598,6 +14600,14 @@ main_run(int argc, char **argv)
 			}
 			snprintf(session_name, sizeof session_name, "%s", argv[i++]);
 			break;
+		}
+		else if (strcmp(a, "--follow") == 0 && action == A_LISTJSON2 &&
+		         !opt_lsfollow)
+		{
+			/* #103: the list as a stream; --follow <name> (below)
+			** streams a screen */
+			opt_lsfollow = 1;
+			i++;
 		}
 		else if (strcmp(a, "--spawn") == 0 ||
 		         strcmp(a, "--send") == 0 ||
@@ -15016,6 +15026,12 @@ main_run(int argc, char **argv)
 		fprintf(stderr, "dch: -a attaches; it runs no command\n");
 		return 1;
 	}
+	if (opt_lsfollow && (action != A_LISTJSON2 || inner_argc > 0))
+	{
+		fputs("dch: bad usage: dch --ls-json [--remote] --follow\n",
+		      stderr);
+		return 2;
+	}
 	if (opt_remote && action != A_LISTJSON && action != A_LISTJSON2 &&
 	    action != A_LISTRAW && action != A_HISTORY)
 	{
@@ -15200,6 +15216,14 @@ main_run(int argc, char **argv)
 		** quoted by json_quote, so bytes that are not UTF-8 read as
 		** U+FFFD instead of breaking the parse. */
 		struct slist sl = {0};
+		struct dch_rrow *frr = NULL;
+		int fn = -1;
+
+		/* --follow (#103): each array is printed here, in a child of
+		** the stream's, frr its remote rows */
+		if (opt_lsfollow &&
+		    (fn = dch_remote_follow(opt_remote, &frr)) < 0)
+			return fn == -1 ? 0 : 1;
 		list_sessions(&sl);
 		load_aliases(&sl);
 		load_harness_names(&sl);
@@ -15327,8 +15351,8 @@ main_run(int argc, char **argv)
 		{
 			/* the other hosts' (#087): name and alias as the peer
 			** sent them, JSON-quoted; "host" tells them apart */
-			struct dch_rrow *rr;
-			int n = dch_remote_rows(&rr, 1), r;
+			struct dch_rrow *rr = frr;
+			int n = fn >= 0 ? fn : dch_remote_rows(&rr, 1), r;
 
 			for (r = 0; r < n; r++)
 			{
