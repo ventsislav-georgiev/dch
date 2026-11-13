@@ -40,6 +40,10 @@ static volatile sig_atomic_t want_redraw;
 /* SIGURG → re-attach (MSG_ATTACH + MSG_REDRAW). Set by handler, checked in
 ** main loop. */
 static volatile sig_atomic_t want_rearm;
+/* SIGCONT → raw mode back (QA 1.59.0 LOW-V9): a stop the client did not make
+** itself (bg then fg, a ^Z while it starts, a kill -TSTP) leaves the
+** terminal in the shell's modes. Set by handler, checked in the loops. */
+static volatile sig_atomic_t want_cont;
 
 /*
 ** Restore terminal + reset modes inner program may have left on (mouse
@@ -222,6 +226,30 @@ on_sigurg(ATTRIBUTE_UNUSED int sig)
 {
 	signal(SIGURG, on_sigurg);
 	want_rearm = 1;
+}
+
+static RETSIGTYPE
+on_sigcont(ATTRIBUTE_UNUSED int sig)
+{
+	signal(SIGCONT, on_sigcont);
+	want_cont = 1;
+}
+
+/* Puts the attach's raw mode on the terminal (LOW-V9). A stop inside the
+** tcsetattr returns EINTR on the fg (macOS); a SIGCONT during or after it
+** means the shell had the terminal meanwhile: set it again. From the
+** background the tcsetattr stops on SIGTTOU (SIG_DFL, attach_main) until
+** the fg, as any tty program's does: the shell's modes stay until then. */
+static void
+term_raw(void)
+{
+	int r;
+
+	do
+	{
+		want_cont = 0;
+		r = tcsetattr(0, TCSADRAIN, &cur_term);
+	} while ((r < 0 && errno == EINTR) || want_cont);
 }
 
 static int detach_end;	/* where the last press counted ends (#187) */
@@ -679,6 +707,7 @@ xray_overlay(int s)
 			signal(SIGTERM, SIG_DFL);
 			signal(SIGINT, SIG_DFL);
 			signal(SIGQUIT, SIG_DFL);
+			signal(SIGCONT, SIG_DFL);
 			sigprocmask(SIG_SETMASK, &os, NULL);
 			close(s);
 			close(p[0]);
@@ -699,6 +728,10 @@ xray_overlay(int s)
 		if (live)
 			FD_SET(s, &rs);
 		n = select((s > p[0] ? s : p[0]) + 1, &rs, NULL, NULL, &tv);
+		/* stopped and continued under the view: its raw mode is this
+		** one (picker_raw_on clears bits cur_term has clear already) */
+		if (want_cont)
+			term_raw();
 		if (n > 0 && live && FD_ISSET(s, &rs))
 		{
 			ssize_t r = read(s, buf, sizeof buf);
@@ -734,7 +767,7 @@ xray_overlay(int s)
 	xray_pid = 0;
 	if (p[0] >= 0)
 		close(p[0]);
-	tcsetattr(0, TCSADRAIN, &cur_term);
+	term_raw();
 	inner_focus = fo_st = fpend_n = dq_n = 0;
 	if (focus_on)
 		write_buf_or_fail(1, "\033[?1004h", 8);
@@ -798,7 +831,7 @@ process_kbd(int s, struct packet *pkt)
 		** has the master re-arm them. */
 		restore_term();
 		kill(getpid(), SIGTSTP);
-		tcsetattr(0, TCSADRAIN, &cur_term);
+		term_raw();	/* bg: stops on SIGTTOU here until the fg */
 		if (focus_on)
 			write_buf_or_fail(1, "\033[?1004h", 8);
 		/* What the master sent before it read the MSG_DETACH was for
@@ -935,6 +968,8 @@ attach_main(int noerror)
 	signal(SIGUSR1, on_sigusr1);
 	signal(SIGUSR2, on_sigusr2);
 	signal(SIGURG, on_sigurg);
+	signal(SIGCONT, on_sigcont);
+	signal(SIGTTOU, SIG_DFL);	/* term_raw never sets modes from the bg */
 
 	/* Set raw mode. */
 	cur_term.c_iflag &= ~(IGNBRK|BRKINT|PARMRK|ISTRIP|INLCR|IGNCR|ICRNL);
@@ -946,7 +981,7 @@ attach_main(int noerror)
 	cur_term.c_cc[VLNEXT] = VDISABLE;
 	cur_term.c_cc[VMIN] = 1;
 	cur_term.c_cc[VTIME] = 0;
-	tcsetattr(0, TCSADRAIN, &cur_term);
+	term_raw();
 
 	/* Focus reporting on, before the attach: the master's mode re-arm
 	** (ESC[?1004h when the inner program has it) arrives in the replay
@@ -1175,6 +1210,18 @@ keys_done:
 			pkt.type = MSG_WINCH;
 			ioctl(0, TIOCGWINSZ, &pkt.u.ws);
 			write_packet_or_fail(s, &pkt);
+		}
+
+		/* Continued after a stop it did not make (LOW-V9): raw mode back,
+		** then a repaint over what the shell wrote meanwhile. No
+		** MSG_ATTACH: nothing was reset, so nothing is re-armed.
+		** shortcut: a SIGCONT landing between this check and the select
+		** is handled at the next wake (session output, a key); a
+		** self-pipe would make it exact. */
+		if (want_cont)
+		{
+			term_raw();
+			want_redraw = 1;
 		}
 
 		/* Redraw requested (SIGUSR2)? Force the program to repaint via an
