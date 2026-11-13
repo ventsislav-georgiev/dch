@@ -9877,6 +9877,7 @@ xv_spawn(int fd, int ac, char **av, int *out, int *err)
 		signal(SIGTERM, SIG_DFL);
 		signal(SIGHUP, SIG_DFL);
 		signal(SIGWINCH, SIG_DFL);
+		signal(SIGCONT, SIG_DFL);	/* xv_run's (#255) */
 		sigprocmask(SIG_SETMASK, &o, NULL);
 		picker_tty_fd = -1;
 		close(fd);
