@@ -241,6 +241,13 @@ def ctls(what):
         return f.read().count(" ctl %s " % what)
 
 
+def refused():
+    """The host's gate refusals: a whois past its 3 s is refused and cached
+    30 s, and no ctl of that window is logged (#249). For failure details."""
+    with open(SLOG) as f:
+        return [l for l in f.read().splitlines() if ": refused" in l][-3:]
+
+
 def serve():
     with open(SLOG, "w") as lf:
         sp = subprocess.Popen([DCH, "serve", "--bind", "127.0.0.1",
@@ -248,7 +255,7 @@ def serve():
                               env=dict(SENV, DCH_SERVE_TEST_LOOPBACK="1"),
                               stdin=subprocess.DEVNULL,
                               stdout=subprocess.DEVNULL, stderr=lf)
-    end = time.time() + 10
+    end = time.time() + 30     # a loaded machine: room, still bounded
     while time.time() < end and sp.poll() is None:
         m = re.search(r"listening on 127\.0\.0\.1:(\d+)", open(SLOG).read())
         if m:
@@ -383,13 +390,14 @@ def test_view():
               "the terminal", not bad, bad)
     finally:
         v.close()
-    time.sleep(0.3)
     # follow, ref (light), ref --full, p's ref --full --scope all, chapter:
     # five, each its own ctl
+    until(lambda: ctls("--xray") - n0["--xray"] >= 5, 5)
     check("every query ran on the host as its own ctl --xray (5), no --read "
           "for an ended session", ctls("--xray") - n0["--xray"] == 5 and
           ctls("--read") == n0["--read"],
-          (ctls("--xray") - n0["--xray"], ctls("--read") - n0["--read"]))
+          (ctls("--xray") - n0["--xray"], ctls("--read") - n0["--read"],
+           refused()))
 
 
 def test_small_card():
@@ -407,7 +415,8 @@ def test_small_card():
               v.wait(b"Mentions: this session ", start=mark), v.out[mark:])
         mark = len(v.out)
         v.resize(6, 20)
-        v.wait(b"too small", start=mark)
+        small = v.wait(b"too small", start=mark)
+        n0 = ctls("--xray")
         for k in (b"k", b"k", b"k", b"\033[A", b"\033[5~", b"\r"):
             v.key(k, 0.1)
         mark = len(v.out)
@@ -416,7 +425,8 @@ def test_small_card():
         check("small card: k, Up, PgUp then Enter on srv:xv-cl: no crash, "
               "Enter reads the first mention's chapter from the host",
               v.reap() is None and b"You" in v.out[mark:],
-              (v.rc, v.out[mark:][-600:]))
+              (v.rc, small, ctls("--xray") - n0, refused(),
+               v.out[mark:][-600:]))
         v.key(b"qqq")
         check("small card: q, q, q exits 0", v.exit() == 0, v.out[-80:])
     finally:
@@ -1099,6 +1109,13 @@ def same_attach(what, v, keys, remote):
     remote (the host logs an attach), else the local one (its LOCAL-MARK
     drawn, the host asked nothing); the detach key ends it, exit 0."""
     n0 = host_attaches()
+    if keys == b"o":
+        # the view drops o until its first answer: wait for the footer
+        # that offers it, past the view's newest title (#249)
+        check("same name: %s: the view offers o" % what,
+              v.wait(b"o open session",
+                     start=max(0, v.out.rfind(b"X-ray  srv:xv-sh"))),
+              (refused(), v.out[-300:]))
     mark = len(v.out)
     v.key(keys, 0.3)
     if remote:
@@ -1122,11 +1139,13 @@ def row_view(v, remote):
         n0 = ctls("--xray")
         mark = len(v.out)
         v.key(keys + b"x", 1.0)
-        v.wait(b"Chapters", start=mark)
-        v.pump(0.5)
+        # its first answer: a remote view's ctl is logged by then
+        v.wait(b"o open session", start=mark)
         if (ctls("--xray") > n0) == remote:
             return True
-        v.key(b"q", 1.0)
+        mark = len(v.out)
+        v.key(b"q", 0)
+        v.wait(b"[Sessions 2]", start=mark)     # the picker is back
     return False
 
 
@@ -1157,8 +1176,9 @@ def test_same_name():
             v.close()
         v = Pty([DCH, "-l"], cols=140, env=lenv)
         try:
-            v.wait(b"srv:xv-sh", 15)
-            v.pump(2.0)     # the host's row comes with its probe
+            # the host's row comes with its probe: both rows listed
+            check("same name: the picker lists both srv:xv-sh rows",
+                  v.wait(b"2 sessions", 15), (refused(), v.out[-300:]))
             asked = []
             # the top row, then the bottom one: the two srv:xv-sh rows
             for keys in (b"kkk", b"jjj"):
@@ -1166,17 +1186,20 @@ def test_same_name():
                 mark = len(v.out)
                 v.key(keys + b"x", 1.0)
                 ok = v.wait(b"X-ray  srv:xv-sh", start=mark) and \
-                    v.wait(b"Chapters", start=mark)
-                v.pump(0.5)
+                    v.wait(b"o open session", start=mark)
                 asked.append((ok, ctls("--xray") - n0, keys))
-                v.key(b"q", 1.0)
+                mark = len(v.out)
+                v.key(b"q", 0)
+                v.wait(b"[Sessions 2]", start=mark)     # the picker is back
             check("same name: x on the remote row opens the host's "
                   "session, x on the local row the local one",
                   all(a[0] for a in asked) and
                   sorted(a[1] > 0 for a in asked) == [False, True], asked)
             check("same name: the remote row found for Enter",
                   row_view(v, True))
-            v.key(b"q", 1.0)
+            mark = len(v.out)
+            v.key(b"q", 0)
+            v.wait(b"[Sessions 2]", start=mark)     # the picker is back
             same_attach("Enter on the remote row", v, b"\r", True)
         finally:
             v.close()
@@ -1184,8 +1207,7 @@ def test_same_name():
                              ("o in the local row's view", False)):
             v = Pty([DCH, "-l"], cols=140, env=lenv)
             try:
-                v.wait(b"srv:xv-sh", 15)
-                v.pump(2.0)
+                v.wait(b"2 sessions", 15)
                 check("same name: x on the %s row opens its view" %
                       ("remote" if remote else "local"), row_view(v, remote))
                 same_attach(what, v, b"o", remote)
@@ -1241,6 +1263,8 @@ def rattach(env=None, extra=(), tail=("-a", "srv:xv-rx")):
     n0 = attaches()
     a = Pty([DCH] + list(extra) + list(tail), env=env)
     until(lambda: attaches() > n0)
+    # the client reads keys once it put the terminal in raw mode (#249)
+    until(lambda: not termios.tcgetattr(a.fd)[3] & termios.ICANON)
     a.wait(b"READY", 3)
     a.pump(0.5)
     return a, n0
@@ -1260,15 +1284,25 @@ def chord_case(what, keys, env=None, tail=("-a", "srv:xv-rx")):
               % what, ok, a.out[mark:][-600:])
         check("remote chord, %s: the client is still running" % what,
               a.reap() is None)
+        # its answer: a number on the tab, or dch-lite's line (#249)
+        read = until(lambda: a.pump(0.1) or re.search(
+            rb"On screen \d|keeps no mirror", a.out[mark:]), 15)
         check("remote chord, %s: On screen read over its own ctl --read"
               % what, until(lambda: ctls("--read") > r0, 5),
-              ctls("--read") - r0)
-        dch(SENV, "--send", "xv-rx", "MARK189")
+              (ctls("--read") - r0, bool(read), refused()))
+        # two checks (#233, #249): MARK189 goes dch --send -> master -> pty,
+        # not through the attach, so its absence is a stalled session, not
+        # the chord; a leak is any other byte. The details print even empty
+        sent = dch(SENV, "--send", "xv-rx", "MARK189").returncode
         until(lambda: "4d41524b313839" in rx()[len(got):], 5)
         a.pump(0.3)
-        check("remote chord, %s: the session got only the text sent while "
-              "the view was up (no detach key, no x)" % what,
-              rx()[len(got):] == "4d41524b313839", rx()[len(got):])
+        rxd = rx()[len(got):]
+        check("remote chord, %s: the text sent while the view was up reached "
+              "the session (dch --send, not the attach)" % what,
+              "4d41524b313839" in rxd, (rxd, sent))
+        check("remote chord, %s: nothing else reached the session (no detach "
+              "key, no x)" % what,
+              rxd.replace("4d41524b313839", "", 1) == "", (rxd, sent))
         if not ok or a.reap() is not None:
             return
         mark = len(a.out)
@@ -1718,10 +1752,12 @@ def test_suspend():
     check("suspend: the busy session spawned on the host", r.returncode == 0,
           r.stderr)
     a = Pty([sys.executable, "-c", JOB, DCH, "-a", "srv:xv-bz"])
+    # the attach is live: the session's ticks reach us after `at` (#249)
+    live = lambda at: until(lambda: a.pump(0.1) or TICK.search(a.out, at), 10)
     try:
         a.wait(b"BUSY" if dch(SENV, "--build").stdout.strip() == "full"
                else b"\033[?1049h")
-        a.pump(0.5)
+        live(len(a.out))
         for i in range(1, 4):
             mark = len(a.out)
             a.key(b"\x1a", 0)
@@ -1737,8 +1773,10 @@ def test_suspend():
             check("suspend: ctrl-z %d over the attach: no output the host "
                   "sent while it was stopped before the resume's 1049h" % i,
                   ok and alt > stop and not late,
-                  (ok, len(late), a.out[stop:stop + 200]))
-            a.pump(0.3)
+                  (ok, alt - stop,
+                   ["+%.2f" % (float(t) - t0) for t in late][:5],
+                   a.out[stop:stop + 200]))
+            live(alt)    # the next ctrl-z over a live attach, not a resume
         mark = len(a.out)
         a.key(b"z", 0.3)
         check("suspend: the attach goes on (a key after reaches the session)",
@@ -1844,10 +1882,17 @@ def main():
     sp = None
     try:
         sp, port = serve()
-        check("dch serve listens on a loopback test port", port is not None,
-              open(SLOG).read())
         if port is None:
-            return
+            # one failure for the serve half, not one per check; a return
+            # here skipped the exit status below (#249)
+            check("dch serve listens on a loopback test port: %s; its log "
+                  "tail:" % ("exited %d" % sp.returncode if sp.poll() is not
+                             None else "no listening line in 30 s"), False)
+            for l in open(SLOG).read().splitlines()[-12:]:
+                print("       " + l)
+            print("  skip every other check: they need that serve")
+            return 1
+        check("dch serve listens on a loopback test port", True)
         fixture()
         shell()
         hosts("srv=127.0.0.1:%d" % port)
@@ -1886,4 +1931,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
