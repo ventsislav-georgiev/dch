@@ -617,11 +617,27 @@ def key(cwd):
     return "".join(c if c.isascii() and c.isalnum() else "-" for c in cwd)
 
 
+def is_master(pid):
+    """pid runs `dch --master-of ...`: /proc on Linux, ps elsewhere."""
+    try:
+        a = open("/proc/%d/cmdline" % pid, "rb").read()
+    except OSError:
+        a = subprocess.run(["ps", "-o", "args=", "-p", str(pid)],
+                           capture_output=True).stdout
+    return b"--master-of" in a
+
+
 def files(root):
+    """Less a live master's history record mid-write (master.c rec_write:
+    <name>.json.<its pid>.tmp, then a rename, every DCH_RECORD_MS; #283):
+    the pid is a `--master-of` process, so never the X-ray's own write."""
     out = {}
     for dp, dn, fn in os.walk(root):
         for f in dn + fn:
             p = os.path.join(dp, f)
+            m = re.search(r"\.json\.(\d+)\.tmp$", f)
+            if m and is_master(int(m.group(1))):
+                continue
             st = os.lstat(p)
             out[p] = (st.st_size, st.st_mtime_ns)
     return out
