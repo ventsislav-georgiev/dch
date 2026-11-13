@@ -50,8 +50,9 @@ failures = []
 
 
 def dch(*args):
+    # cwd="/": a --spawn's record keeps its cwd, and /cu, /rp match it (LOW-T11)
     return subprocess.run([DCH] + list(args), env=ENV, capture_output=True,
-                          text=True, timeout=60)
+                          text=True, timeout=60, cwd="/")
 
 
 def check(what, ok, *extra):
