@@ -39,6 +39,7 @@ void dch_trace(const char *fmt, ...)
 unsigned long xr_seam_opened, xr_seam_refused;
 struct xr_limits xr_lim = {XR_HEAD_RANGE, XR_TAIL_RANGE, XR_CHUNK, XR_LINE_MAX,
                            XR_OUT_MAX, XR_FILES, XR_BYTES, XR_WALL_MS};
+int xr_noclock;
 
 /* ---- UTF-8 and Unicode classes ----------------------------------------- */
 
@@ -4072,7 +4073,8 @@ xr_scan_tick(void *ctx, uint64_t bytes)
 			x->why = "first";
 		}
 	}
-	else if (!x->stop && !x->full && now - x->t0 - x->blocked >= x->budget)
+	else if (!x->stop && !x->full && !xr_noclock &&
+	         now - x->t0 - x->blocked >= x->budget)
 	{
 		x->stop = 1;
 		x->why = "budget";

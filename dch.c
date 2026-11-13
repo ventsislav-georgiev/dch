@@ -13932,6 +13932,7 @@ xray_main(int argc, char **argv)
 	struct xr_span sp;
 
 	xr_t0 = xr_now_ms();
+	xr_noclock = getenv("DCH_XRAY_NOCLOCK") != NULL;	/* tests only */
 	/* tests only: 3.8's --ref caps lowered, never raised (files, bytes,
 	** ms, the per-file head and tail) */
 	if ((e = getenv("DCH_XRAY_CAPS")))

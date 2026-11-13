@@ -390,20 +390,14 @@ def run_case(name):
         for k, argv in enumerate(case["argv"], 1):
             argv = ["f%x:" % ino + a[3:] if a.startswith("f*:") else a
                     for a in argv]
-            cut = os.path.join(d, "expected", "%d.ndjson" % k)
-            cut = (not UPDATE and "--full" not in argv and
-                   (not os.path.exists(cut) or
-                    '"why":"budget"' not in open(cut).read()))
-            for n in range(5):
-                r = subprocess.run([DCH] + argv, capture_output=True,
-                                   text=True, timeout=30, env=env)
-                # a light --ref on a loaded machine can run out of its 300
-                # ms (QA 1.59.0 LOW-T3) and no knob lifts it: a cut its
-                # golden does not hold is run again, said
-                if not cut or '"why":"budget"' not in r.stdout:
-                    break
-                print("  note %s/%d: light budget cut on run %d, again" %
-                      (name, k, n + 1))
+            # a light --ref's 300 ms is off (QA 1.59.0 LOW-T3, #251) but
+            # where its golden is that budget: a "slow" shell's screen read
+            e = dict(env)
+            if not any(live.get(a, {}).get("primary") == "slow"
+                       for a in argv):
+                e["DCH_XRAY_NOCLOCK"] = "1"
+            r = subprocess.run([DCH] + argv, capture_output=True,
+                               text=True, timeout=30, env=e)
             ref = "--ref" in argv and r.returncode == 0
             if r.returncode == 0:
                 got = mask(r.stdout, os.path.realpath(t))
