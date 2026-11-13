@@ -1954,6 +1954,9 @@ def main():
         if pid == 0:
             os.execve(DCH, [DCH] + args, cenv)
             os._exit(127)
+        # pty.fork()'s master is inheritable: a later client would hold it,
+        # and closing ours would not hang this pty up (QA 1.59.0 MED-T2)
+        os.set_inheritable(fd, False)
         fcntl.ioctl(fd, termios.TIOCSWINSZ,
                     struct.pack("HHHH", rows, cols, 0, 0))
         clients.append((pid, fd))
@@ -2444,7 +2447,12 @@ def main():
             try:
                 os.kill(pid, signal.SIGKILL)
                 os.close(fd)
-                os.waitpid(pid, 0)
+                end = time.time() + 10
+                while not os.waitpid(pid, os.WNOHANG)[0]:
+                    if time.time() > end:
+                        print("  leaving client %d unreaped" % pid)
+                        break
+                    time.sleep(0.05)
             except OSError:
                 pass
         for f in fakes:
