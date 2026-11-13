@@ -5,7 +5,8 @@ A cold start under a crashed session's name moves its record aside
 hand, two records carry one id. `--revive --all` takes the newest record of
 an id and skips the rest (`dup_sid`), and skips any record whose id a live
 Claude already runs (`live_sid`): one in a live session, found by probing
-that session, or one outside any (a Claude that outlived its master, or
+that session (its sessions record; before it has one, the `--resume` id in
+its argv, #281), or one outside any (a Claude that outlived its master, or
 runs in a plain terminal; looked for in our Claude sessions dir and in each
 record's config_dir, #065). `--revive <name> [--as <new>]` refuses such a
 record (`live_sid`), naming the holder and the id.
@@ -91,15 +92,15 @@ def main():
         except (OSError, ValueError):
             return None
 
-    def plant(f, name, sid, seen, end="", **cfg):
+    def plant(f, name, sid, seen, end="", cl=claude, **cfg):
         """A vanished record (a SIGKILLed master) --all takes, Claude as
         its command: what p13's two crashes leave behind. end: how it
         ended instead."""
         now = int(time.time())
         r = dict(name=name, sock_dir=sockdir, alias="", cwd=proj,
-                 argv=[claude], started=now - 900, updated=now - seen,
+                 argv=[cl], started=now - 900, updated=now - seen,
                  end=end, agent=dict(kind="claude", session_id=sid, name="",
-                                    cwd=proj, launch=[claude], **cfg))
+                                    cwd=proj, launch=[cl], **cfg))
         os.makedirs(recdir, mode=0o700, exist_ok=True)
         p = os.path.join(recdir, f + ".json")
         fd = os.open(p + ".t", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -247,6 +248,122 @@ def main():
         check("control: --revive of an id no claude runs is ok "
               "[rc=%d %r %r]" % (r.returncode, r.stdout, r.stderr),
               r.returncode == 0 and "claude resumed %s" % Z in r.stdout)
+
+        # --- #281: a Claude that has not written its record yet -----------
+        # `late` is a claude still starting: it writes no sessions record
+        # until it exits on <session>.quit, so while the revives below run
+        # the id is only in the live Claude's argv
+        late = os.path.join(tmp, "late", "claude")
+        os.makedirs(os.path.dirname(late))
+        with open(late, "w") as fh:
+            fh.write('#!/bin/sh\nuntil [ -e "$FAKE_CLAUDE_DIR/$DCH_SESSION'
+                     '.quit" ]; do sleep 0.05; done\n')
+        os.chmod(late, 0o755)
+
+        def on(sid):
+            out = subprocess.run(["/bin/ps", "-axo", "pid=,command="],
+                                 capture_output=True, text=True,
+                                 errors="replace").stdout
+            return [l for l in out.splitlines() if "--master-of" not in l
+                    and (claude in l or late in l) and sid in l]
+
+        def recs():
+            d = os.path.join(home, ".claude", "sessions")
+            return sorted(os.listdir(d)) if os.path.isdir(d) else []
+
+        def touch(f):
+            open(os.path.join(fc, f), "w").close()
+
+        L, H, R = (str(uuid.uuid4()) for _ in range(3))
+        plant("lw", "lw", L, 30, cl=late)
+        r = run("--revive", "lw", "--no-message")
+        check("--revive lw (claude held before its record): revived "
+              "[rc=%d %r %r]" % (r.returncode, r.stdout, r.stderr),
+              r.returncode == 0 and "claude resumed %s" % L in r.stdout)
+        check("...its claude runs on the id, no record written yet",
+              len(until(lambda: on(L), 15)) == 1 and
+              not any(l.split()[0] + ".json" in recs() for l in on(L)))
+        plant("lw.1793635888", "lw", L, 120)
+        r = run("--revive", "--all", "--no-message")
+        check("--revive --all, an aside of lw's id while lw's claude has no "
+              "record: 'lw: skipped — claude <id> already runs in live "
+              "session lw' [rc=%d %r]" % (r.returncode, r.stdout),
+              r.returncode == 0 and
+              "lw: skipped — claude %s already runs in live session lw "
+              "(record lw.1793635888)\n" % L in r.stdout)
+        r = run("--revive", "lw.1793635888", "--as", "lw2", "--no-message")
+        check("...--revive <aside> --as lw2: exit 1 naming live session lw "
+              "[rc=%d %r]" % (r.returncode, r.stderr),
+              r.returncode == 1 and "live session lw" in r.stderr and
+              L in r.stderr)
+        plant("lz", "lz", L, 30)
+        r = run("--revive", "lz", "--no-message")
+        check("...--revive lz (another name, same id): exit 1 "
+              "[rc=%d %r]" % (r.returncode, r.stderr),
+              r.returncode == 1 and "live session lw" in r.stderr)
+        # #274: an empty record of that Claude, its id unknown: argv holds
+        pids = [l.split()[0] for l in on(L)]
+        for p in pids:
+            open(os.path.join(home, ".claude", "sessions", p + ".json"),
+                 "w").close()
+        r = run("--revive", "lz", "--no-message")
+        check("...with an empty sessions record under it: still exit 1 "
+              "[rc=%d %r]" % (r.returncode, r.stderr),
+              r.returncode == 1 and "live session lw" in r.stderr)
+        for p in pids:
+            os.unlink(os.path.join(home, ".claude", "sessions", p + ".json"))
+        check("...still one claude on the id, no session lw2 or lz "
+              "[claudes on it: %d]" % len(on(L)), len(on(L)) == 1 and
+              not os.path.exists(os.path.join(sockdir, "lw2.sock")) and
+              not os.path.exists(os.path.join(sockdir, "lz.sock")))
+
+        # typed into a session's shell by hand: the session child is the
+        # shell, the claude its descendant
+        r = run("--spawn", "hs", "--size", "80x24", "--", "/bin/sh")
+        check("a shell session hs [rc=%d %r]" % (r.returncode, r.stderr),
+              r.returncode == 0)
+        until(lambda: run("--cmd", "hs").returncode == 0, 15)
+        run("--run", "hs", "%s --resume %s" % (late, H))
+        plant("hh", "hh", H, 30)
+        check("...'late --resume <id>' typed into it runs",
+              len(until(lambda: on(H), 15)) == 1)
+        r = run("--revive", "hh", "--no-message")
+        check("--revive hh, its id run by a claude typed into hs's shell "
+              "(no record yet): exit 1 naming live session hs "
+              "[rc=%d %r]" % (r.returncode, r.stderr),
+              r.returncode == 1 and "live session hs" in r.stderr and
+              H in r.stderr)
+        # no false hold: that claude exits, the shell is back in front
+        touch("hs.quit")
+        check("...its claude exits", until(lambda: not on(H), 15))
+        r = run("--revive", "hh", "--no-message")
+        check("...then --revive hh: revived, hs's old argv holds nothing "
+              "[rc=%d %r %r]" % (r.returncode, r.stdout, r.stderr),
+              r.returncode == 0 and "claude resumed %s" % H in r.stdout)
+        # nor a session whose child (claude itself) exited: the session
+        # goes, its record says the id
+        touch("lw.quit")
+        check("lw's claude exits and lw ends", until(
+            lambda: not on(L) and
+            not os.path.exists(os.path.join(sockdir, "lw.sock")), 15))
+        r = run("--revive", "lz", "--no-message")
+        check("...then --revive lz (lw's id): revived "
+              "[rc=%d %r %r]" % (r.returncode, r.stdout, r.stderr),
+              r.returncode == 0 and "claude resumed %s" % L in r.stdout)
+        # --resume=<id> and -r <id>, as Claude Code takes them
+        for sn, form in (("eq", "--resume=%s"), ("short", "-r %s")):
+            r = run("--spawn", sn, "--size", "80x24", "--", late,
+                    *(form % R).split())
+            check("a session %s running 'late %s' [rc=%d]" %
+                  (sn, form % "<id>", r.returncode), r.returncode == 0)
+            plant("r" + sn, "r" + sn, R, 30)
+            r = run("--revive", "r" + sn, "--no-message")
+            check("...--revive r%s of that id: exit 1 naming live session %s "
+                  "[rc=%d %r]" % (sn, sn, r.returncode, r.stderr),
+                  r.returncode == 1 and "live session %s" % sn in r.stderr)
+            touch(sn + ".quit")
+            until(lambda: not os.path.exists(
+                os.path.join(sockdir, sn + ".sock")), 15)
     except Exception:
         traceback.print_exc()
         fails[0] += 1
