@@ -2486,6 +2486,43 @@ sock_peer_pid(const char *sp)
 	return pid;
 }
 
+/* Every process whose argv says it is the master of sp gets sig (0: none);
+** how many there are. A zombie's argv is unreadable: it is not counted. */
+static int
+masters_of(const char *sp, int sig)
+{
+	int k = 0;
+#ifdef __APPLE__
+	int pids[4096], n, i;
+
+	n = proc_listpids(PROC_ALL_PIDS, 0, pids, sizeof(pids));
+	for (i = 0; i < n / (int)sizeof(pids[0]); i++)
+		if (is_master_of(pids[i], sp))
+		{
+			k++;
+			if (sig)
+				kill(pids[i], sig);
+		}
+#else
+	DIR *d = opendir("/proc");
+	struct dirent *de;
+	char *end;
+	long pid;
+
+	while (d && (de = readdir(d)))
+		if ((pid = strtol(de->d_name, &end, 10)) > 0 && !*end &&
+		    is_master_of(pid, sp))
+		{
+			k++;
+			if (sig)
+				kill((pid_t)pid, sig);
+		}
+	if (d)
+		closedir(d);
+#endif
+	return k;
+}
+
 /* SIGTERM the master of sp: the socket's listener, or, when that is not one
 ** (dead socket, unreachable path, a stranger on it), every process whose
 ** argv says it is. */
@@ -2499,25 +2536,7 @@ term_master(const char *sp)
 		kill((pid_t)pid, SIGTERM);
 		return;
 	}
-#ifdef __APPLE__
-	int pids[4096], n, i;
-
-	n = proc_listpids(PROC_ALL_PIDS, 0, pids, sizeof(pids));
-	for (i = 0; i < n / (int)sizeof(pids[0]); i++)
-		if (is_master_of(pids[i], sp))
-			kill(pids[i], SIGTERM);
-#else
-	DIR *d = opendir("/proc");
-	struct dirent *de;
-	char *end;
-
-	while (d && (de = readdir(d)))
-		if ((pid = strtol(de->d_name, &end, 10)) > 0 && !*end &&
-		    is_master_of(pid, sp))
-			kill((pid_t)pid, SIGTERM);
-	if (d)
-		closedir(d);
-#endif
+	(void)masters_of(sp, SIGTERM);
 }
 
 /* mark: ".killed" (-k) or ".stopped" (--stop, which wrote it already). */
@@ -3266,8 +3285,10 @@ static const char no_reply_msg[] =
 #define CTL_CONNECT_MS 500
 
 /* -1 with errno EAGAIN: a listener is there, but its backlog stayed full
-** for CTL_CONNECT_MS (Linux; macOS refuses that connect at once). That is
-** a live, stuck master, never a dead socket to unlink or revive over. */
+** for CTL_CONNECT_MS (Linux). macOS refuses that connect at once, as it
+** does a dead master's socket: there a refused socket node whose master's
+** argv still names it is the same stuck master (#268). That is a live,
+** stuck master, never a dead socket to unlink or revive over. */
 int
 control_connect_path(const char *path)
 {
@@ -3292,6 +3313,14 @@ control_connect_path(const char *path)
 	{
 		/* EINTR comes only from that wait: a full backlog too */
 		e = errno == EINTR ? EAGAIN : errno;
+#ifdef __APPLE__
+		struct stat st;
+
+		/* only after a refusal of a socket node: off the common path */
+		if (e == ECONNREFUSED && lstat(path, &st) == 0 &&
+		    S_ISSOCK(st.st_mode) && masters_of(path, 0) > 0)
+			e = EAGAIN;
+#endif
 		close(s);
 		errno = e;
 		return -1;
