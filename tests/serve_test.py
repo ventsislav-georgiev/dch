@@ -1283,6 +1283,43 @@ exec %s "$@"
         if not ok:
             print("       %r" % got)
 
+        # --- #230: 0x12 says "why":"detach" only while the session lives:
+        # a SIGKILLed master leaves its socket file, and that is no detach
+        for how in ("dch -d", "SIGKILL"):
+            nm = "svc-why-" + how[-1].lower()
+            r = subprocess.run([DCH, "--spawn", nm, "--size", "80x24", "sh"],
+                               env=env, capture_output=True, timeout=30)
+            a = conn(port)
+            send(a, 0x01, {"name": nm, "cols": 80, "rows": 24})
+            send(a, 0x10, b"\n")
+            up = r.returncode == 0 and frame(a)[0] == 0x10
+            sock = "%s.sock" % nm
+            ps = subprocess.run(["ps", "-eo", "pid,command"],
+                                capture_output=True, text=True).stdout
+            pids = [int(ln.split()[0]) for ln in ps.splitlines()
+                    if "--master-of" in ln and tmp in ln and
+                    "/%s -- " % sock in ln]
+            if how == "dch -d":
+                subprocess.run([DCH, "-d", nm], env=env, capture_output=True,
+                               timeout=10)
+            elif len(pids) == 1:
+                os.kill(pids[0], signal.SIGKILL)	# our session's master
+            try:
+                t, pl = frame_not(a)
+                end = json.loads(pl) if t == 0x12 else (t, pl)
+            except (EOFError, OSError) as e:
+                end = repr(e)
+            a.close()
+            want = {"code": 0, "why": "detach"} if how == "dch -d" else \
+                {"code": 0}
+            check("#230: the attach ended by %s: 0x12 %s" % (how, want),
+                  up and len(pids) == 1 and end == want)
+            if end != want:
+                print("       %r %r" % (pids, end))
+            if how == "dch -d":
+                subprocess.run([DCH, "-k", nm], env=env, capture_output=True,
+                               timeout=10)
+
         # --- list rows: meta allowlisted and re-encoded -------------------
         meta = {"prs": {"merged": 2, "open": [
             {"url": "https://github.com/o/r/pull/5", "title": "T"},

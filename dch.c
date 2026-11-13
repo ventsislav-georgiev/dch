@@ -13948,6 +13948,20 @@ xray_view(const char *n)
 	return rc;
 }
 
+/* Inside a bracketed paste after the n bytes at c (#230): in, then the last
+** ESC[200~ (1) or ESC[201~ (0) in them. Pure. */
+static int
+xv_paste_in(const unsigned char *c, size_t n, int in)
+{
+	size_t i;
+
+	for (i = 0; i + 6 <= n; i++)
+		if (!memcmp(c + i, "\033[20", 4) && c[i + 5] == '~' &&
+		    (c[i + 4] == '0' || c[i + 4] == '1'))
+			in = c[i + 4] == '0';
+	return in;
+}
+
 /* The in-attach X-ray chord's view (#187), in attach.c's child: this
 ** session's, opened on On screen; a remote attach's is host:name's (#189),
 ** --host's host put in front. A failure is said and waits for a key: the
@@ -13956,8 +13970,12 @@ static int
 attach_xray_view(void)
 {
 	char n[DCH_RHOST_MAX + sizeof session_name];
-	unsigned char c[4096];
-	int rc;
+	unsigned char c[4096 + 5];
+	struct pollfd p = { STDIN_FILENO, POLLIN, 0 };
+	long long t0 = 0;
+	size_t k = 0;
+	ssize_t r;
+	int rc, in = 0;
 
 	xv_tab = 2;
 	snprintf(n, sizeof n, "%s%s%s", remote_host ? remote_host : "",
@@ -13968,9 +13986,29 @@ attach_xray_view(void)
 	if (rc != 0)
 	{
 		tw(STDERR_FILENO, "\r(any key: back to the session)");
-		/* the whole read: an arrow key, a UTF-8 character or a paste
-		** is one key here, none of it for the session (LOW-R8) */
-		(void)!read(STDIN_FILENO, c, sizeof c);
+		/* the any key is the whole read and what follows it within
+		** 100 ms (1 s inside a bracketed paste, to its end): an arrow
+		** key, a UTF-8 character or a paste of any size, none of it
+		** for the session (LOW-R8, #230). The last 5 bytes carry over
+		** for a marker cut across two reads. shortcut: a paste
+		** paused longer than that, or still coming 2 s on, leaves its
+		** rest to the session; a clock-free end needs the paste's
+		** own end marker, which an unbracketed paste does not have */
+		while ((r = read(STDIN_FILENO, c + k, sizeof c - k)) > 0)
+		{
+			if (!t0)
+				t0 = xr_now_ms();
+			k += (size_t)r;
+			in = xv_paste_in(c, k, in);
+			if (k > 5)
+			{
+				memmove(c, c + k - 5, 5);
+				k = 5;
+			}
+			if (xr_now_ms() - t0 > 2000 ||
+			    poll(&p, 1, in ? 1000 : 100) <= 0)
+				break;
+		}
 	}
 	return rc;
 }

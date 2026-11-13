@@ -52,13 +52,15 @@ Covers:
      host, or dch -d srv:xv-rx from the client, with the view up: the
      client leaves at once, exit 0, the view and the relay gone, the
      session untouched (QA 1.58.0 MED-R6); a session that ends under the
-     view leaves it up until q, as before;
+     view, or whose master is SIGKILLed there (its socket file left, #230),
+     leaves it up until q, as before;
   7. the view's failure lines over an attach to a fake host without "xray"
      (exit 6), whose gate refuses the view's connection (exit 4), or whose
      port closes once the attach is in (exit 7): the line, q, any key, and
      the attach goes on (the host gets the redraw, then only the next key);
      an arrow key, a UTF-8 character or a paste as the any key is all
-     swallowed (QA 1.58.0 LOW-R8);
+     swallowed (QA 1.58.0 LOW-R8), and so is a paste over 4096 bytes,
+     bracketed or not, and one in several writes 0.3 s apart (#230);
   8. the host re-arms on its redraw (#189 round 2): a program on the
      alternate screen with bracketed paste, mouse reporting and kitty flags
      on, over `dch -a srv:xv-md`; after the chord's view the client's output
@@ -1365,7 +1367,8 @@ def test_chord_detach():
     dch -d makes it (#196): the view goes, exit 0, no line, and the session
     gets nothing and lives on. A session that ends under the view leaves
     the view up as before (#217: serve's 0x12 tells the two apart), then q
-    exits 0."""
+    exits 0. So does a master SIGKILLed under the view (#230): its socket
+    file is left behind, and that is no detach."""
     for how in ("on the host", "-d srv:xv-rx from the client"):
         a, _ = rattach()
         try:
@@ -1401,11 +1404,19 @@ def test_chord_detach():
         time.sleep(0.5)
 
     # the session ends under the view: the view stays up, as before
-    r = dch(SENV, "--spawn", "xv-re", "--size", "100x30", "sh", "-c",
+    for nm, how in (("xv-re", "end"), ("xv-rk", "SIGKILL")):
+        chord_end(nm, how)
+
+
+def chord_end(nm, how):
+    """The session nm ends under the chord's view: its program exits, or
+    (#230) its master is SIGKILLed, leaving its socket file."""
+    what = "remote end" if how == "end" else "remote SIGKILL"
+    r = dch(SENV, "--spawn", nm, "--size", "100x30", "sh", "-c",
             "echo READY; read x; echo BYE")
-    check("remote end: the session spawned on the host", r.returncode == 0,
+    check("%s: the session spawned on the host" % what, r.returncode == 0,
           r.stderr)
-    a = Pty([DCH, "-a", "srv:xv-re"])
+    a = Pty([DCH, "-a", "srv:" + nm])
     try:
         a.wait(b"READY")
         a.pump(0.5)
@@ -1413,26 +1424,34 @@ def test_chord_detach():
         a.key(b"\x1cx", 0.05)
         # its screen read before the end (dch-lite: read, no mirror): a
         # view slower than that (ASan) says "no such session" itself
-        a.wait(b"X-ray  srv:xv-re", start=mark)
-        check("remote end: the view opens and reads the screen",
+        a.wait(("X-ray  srv:" + nm).encode(), start=mark)
+        check("%s: the view opens and reads the screen" % what,
               until(lambda: a.pump(0.1) or re.search(
                   rb" READY\033\[K|No screen: ", a.out[mark:])),
               a.out[mark:][-300:])
         mark = len(a.out)
-        dch(SENV, "--send", "xv-re", "go\n")
-        ended = until(lambda: " xv-re exited" in open(SLOG).read())
+        sock = "/%s.sock -- " % nm
+        pids = [int(ln.split()[0]) for ln in subprocess.run(
+                ["ps", "-eo", "pid,command"], capture_output=True,
+                text=True).stdout.splitlines()
+                if "--master-of" in ln and T in ln and sock in ln]
+        if how == "end":
+            dch(SENV, "--send", nm, "go\n")
+        elif len(pids) == 1:
+            os.kill(pids[0], signal.SIGKILL)	# this test's session's master
+        ended = until(lambda: " %s exited" % nm in open(SLOG).read())
         a.pump(3)
-        check("remote end: the session ended under the view; the view stays",
+        check("%s: the session ended under the view; the view stays" % what,
               ended and a.reap() is None and RESTORE not in a.out[mark:],
-              (ended, a.rc, a.out[mark:][-300:]))
+              (ended, pids, a.rc, a.out[mark:][-300:]))
         a.key(b"q", 0.3)
         rc = a.exit(10)
-        check("remote end: q leaves, exit 0, no line", rc == 0 and
+        check("%s: q leaves, exit 0, no line" % what, rc == 0 and
               b"lost the connection" not in a.out[mark:],
               (rc, a.out[mark:][-300:]))
     finally:
         a.close()
-        dch(SENV, "-k", "xv-re")
+        dch(SENV, "-k", nm)
     time.sleep(0.5)
 
 
@@ -1506,7 +1525,9 @@ def chord_fail(what, mode, line, close=False, anykey=b" "):
         check("remote chord, %s: q says the line and waits for a key" % what,
               a.wait(b"(any key: back to the session)", start=mark) and
               a.reap() is None, a.out[mark:][-300:])
-        a.key(anykey, 0.5)
+        for k in anykey if isinstance(anykey, list) else [anykey]:
+            a.key(k, 0.3)
+        a.pump(0.2)
         a.key(b"z", 0.3)
         until(lambda: h.keys == b"z", 5)
         check("remote chord, %s: a key goes back to the attach: the host got "
@@ -1529,7 +1550,14 @@ def test_chord_fail():
     # session
     for what, k in (("an arrow key", b"\033[A"),
                     ("a UTF-8 character", "\u00a9".encode()),
-                    ("a paste", b"\033[200~pasted text\033[201~")):
+                    ("a paste", b"\033[200~pasted text\033[201~"),
+                    # #230: past the one 4096-byte read, and over several
+                    ("a bracketed paste of 10000 bytes",
+                     b"\033[200~" + b"p" * 10000 + b"\033[201~"),
+                    ("a plain paste of 10000 bytes", b"q" * 10000),
+                    ("a bracketed paste in three writes 0.3 s apart",
+                     [b"\033[200~" + b"a" * 3000, b"b" * 3000,
+                      b"c" * 3000 + b"\033[201~"])):
         chord_fail("%s as the any key" % what, "ok",
                    "dch: q: does not support --xray (needs dch serve "
                    "1.55.0+)", anykey=k)

@@ -3,7 +3,8 @@
 ** text for --status/--ls-json (tail_fold, det_blocker, composer_find), with
 ** SGR for the Claude composer gate (faint_text, gate_screen), and the
 ** auto-allow parse (dch_allow_prompt), and a remote screen's text for the
-** X-ray view (xv_plain, #188) as its decoder (ap_cp) reads it. Built with
+** X-ray view (xv_plain, #188) as its decoder (ap_cp) reads it, and what a
+** failed chord view's any key reads (xv_paste_in, #230). Built with
 ** -Dmain=dch_main so dch.c's statics are reachable. */
 #include "../../dch.c"
 #include <stdint.h>
@@ -84,5 +85,9 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		}
 		free(z);
 	}
+	/* the failed chord view's any key (#230): in a bracketed paste or
+	** not, whatever the bytes */
+	if (xv_paste_in(d, n, 0) & ~1 || xv_paste_in(d, n, 1) & ~1)
+		abort();
 	return 0;
 }
