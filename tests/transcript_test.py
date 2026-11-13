@@ -279,30 +279,53 @@ def main():
         os.unlink(os.path.join(mhome, ".claude", "sessions", "%d.json" % sm))
         check("the same siblings without it: none",
               twins and field(m, "claude_session_id") is None)
+        # done with: their four live records would cost every later
+        # --ls-json four procStart reads (a forked ps each, a /proc walk
+        # on Linux), over the budget's own records below (#261)
+        run("-k", n)
+        run("-k", m)
 
         # --- a record read while Claude rewrites it in place (#253) -------
         # Claude Code updates its record with fs.writeFile: O_TRUNC, then
-        # the write, so a read in between sees an empty file
+        # the write, so a read in between sees an empty file. Empty 5ms of
+        # every 30, not 3 of 10: on a slow runner a re-read stretched to the
+        # writer's own period kept landing in its empty phase (#261). A
+        # rewrite the writer took over 45ms to finish (a runner that did
+        # not schedule it) outlasts the reader's 10 waits of 5ms: only a
+        # sample such a stall overlaps may miss.
         rp = os.path.join(sessdir, "%d.json" % pa)
         body = open(rp).read()
+        stalls = os.path.join(tmp, "stalls")
         w = subprocess.Popen([sys.executable, "-c",
             "import os,sys,time\n"
-            "p,b=sys.argv[1],sys.argv[2].encode()\n"
+            "p,b,s=sys.argv[1],sys.argv[2].encode(),sys.argv[3]\n"
             "while True:\n"
-            "    fd=os.open(p,os.O_WRONLY|os.O_TRUNC)\n"
-            "    time.sleep(0.003)\n"
-            "    os.write(fd,b); os.close(fd)\n"
-            "    time.sleep(0.007)\n", rp, body])
+            "    fd=os.open(p,os.O_WRONLY|os.O_TRUNC); t=time.monotonic()\n"
+            "    time.sleep(0.005)\n"
+            "    os.write(fd,b); os.close(fd); u=time.monotonic()\n"
+            "    if u-t>0.045: open(s,'a').write('%f %f\\n'%(t,u))\n"
+            "    time.sleep(0.025)\n", rp, body, stalls])
         trace = os.path.join(tmp, "trace")
         dbg = dict(os.environ, DCH_DEBUG=trace)
+        got = []
         try:
-            got = [field(a, "claude_session_id", dbg) for _ in range(60)]
+            for _ in range(60):
+                t0 = time.monotonic()
+                g = field(a, "claude_session_id", dbg)
+                got.append((g, t0, time.monotonic()))
         finally:
             w.kill()
             w.wait()
             record(pa, s1)	# killed mid-write, it may have left it empty
-        check("record rewritten in place: no sample misses (%d of 60)"
-              % sum(g != s1 for g in got), all(g == s1 for g in got))
+        try:
+            st = [tuple(map(float, l.split())) for l in open(stalls)]
+        except OSError:
+            st = []
+        miss = [(t0, t1) for g, t0, t1 in got if g != s1]
+        stalled = [any(t < t1 and u > t0 for t, u in st) for t0, t1 in miss]
+        check("record rewritten in place: no sample misses (%d of 60, %d "
+              "beside a writer stalled past the re-reads)"
+              % (len(miss), sum(stalled)), all(stalled))
         def traced(what):
             try:
                 return open(trace).read().count(what)
