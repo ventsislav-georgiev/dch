@@ -1420,6 +1420,8 @@ class XFake:
             + frame(0x33, {"exit": 0}),
             "capcut": frame(0x31, b'{"ok":1}\n{"cut":"aaaa')
             + frame(0x33, {"exit": 2, "why": "cap"}),
+            "whycut": frame(0x32, b"e-why")
+            + frame(0x33, {"exit": 2, "why": "cap"}),
             "holdcut": frame(0x31, b'{"ok":1}\n{"cut":'),
             "crash": frame(0x31, b'{"ok":1}\n{"half":')
             + frame(0x32, b"e-half") + frame(0x33, {"exit": 137}),
@@ -1696,8 +1698,16 @@ def robust_checks(dch, check, cenv, fakes, tmp):
           "the partial stdout line dropped, exit 7",
           r.returncode == UNREACHABLE_EXIT
           and r.stdout == b'{"a":1}\n{"b":2}\n'
-          and r.stderr == b"e-cutdch: q: unreachable: the connection was "
+          and r.stderr == b"e-cut\ndch: q: unreachable: the connection was "
           b"lost\n", r)
+
+    f = fake("whycut")
+    r = subprocess.run([DCH, "--xray", "q:x", "--json"], env=side(f.port),
+                       capture_output=True, stdin=subprocess.DEVNULL,
+                       timeout=20)
+    check("#280: stopped by the host after an unfinished stderr line: "
+          "on its own line", r.returncode == 2 and r.stderr ==
+          b"e-why\ndch: q: --xray stopped by the host (cap)\n", r)
 
     # LOW-10: one-shot, a host that stops mid-line and never ends: exit 7
     # after 5 s, the partial line dropped (NIT-5)

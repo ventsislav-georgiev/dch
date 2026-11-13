@@ -3402,7 +3402,8 @@ ctl_run(int fd, const char *sh, const char *verb, struct sb *rq,
 		return cx < 0 ? 0 : 128 + cx;
 	if (r < 0)
 	{
-		fprintf(stderr, "dch: %s: unreachable: %s\n", sh, msg);
+		fprintf(stderr, "%sdch: %s: unreachable: %s\n",
+		        g_ctl_errmid ? "\n" : "", sh, msg);
 		return DCH_EXIT_UNREACHABLE;
 	}
 	if (msg[0])
@@ -3415,8 +3416,8 @@ ctl_run(int fd, const char *sh, const char *verb, struct sb *rq,
 		return code == 1 ? 1 : DCH_EXIT_REFUSED;
 	}
 	if (why[0])
-		fprintf(stderr, "dch: %s: %s stopped by the host (%s)\n", sh,
-		        verb, why);
+		fprintf(stderr, "%sdch: %s: %s stopped by the host (%s)\n",
+		        g_ctl_errmid ? "\n" : "", sh, verb, why);
 	else if (xit >= 128)	/* on its own line (QA 1.60.0 NIT-R5) */
 		fprintf(stderr, "%sdch: %s: %s on the host ended by signal "
 		        "%d\n", g_ctl_errmid ? "\n" : "", sh, verb, xit - 128);
