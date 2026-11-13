@@ -516,7 +516,11 @@ def xray_checks(dch, check, senv, cenv, port, fakes, tmp, slog):
          "--json", mask=True)
     same("--chapter", "@", "--chapter", "s1", "--json")
     loc = dch(senv, "--xray", "xr1", "--search", "SEE #831", "--json")
+    # lite: a shell has no corpus
+    lite = dch(cenv, "--build").stdout.strip() != "full"
     check("xray --search on a shell on the host: the command and its row",
+          (loc.returncode, loc.stderr) == (1, "dch: no x-ray corpus\n")
+          if lite else
           loc.returncode == 0 and len(json.loads(loc.stdout)["hits"]) >= 1,
           (loc.stdout, loc.stderr))
     same("--search on a shell", "@", "--search", "SEE #831", "--json",
