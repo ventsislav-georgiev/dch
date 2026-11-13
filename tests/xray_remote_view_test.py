@@ -166,6 +166,9 @@ class Pty:
             fcntl.ioctl(0, termios.TIOCSWINSZ,
                         struct.pack("HHHH", rows, cols, 0, 0))
             os.execve(argv[0], argv, env or CENV)
+        # pty.fork()'s master is inheritable: the next kid would hold it,
+        # and closing ours would not hang this pty up (QA 1.59.0 MED-T2)
+        os.set_inheritable(self.fd, False)
 
     def pump(self, secs=0.05):
         end = time.time() + secs
@@ -224,7 +227,11 @@ class Pty:
         os.close(self.fd)
         if self.reap() is None:
             os.kill(self.pid, signal.SIGKILL)
-            os.waitpid(self.pid, 0)
+            end = time.time() + 10
+            while self.reap() is None and time.time() < end:
+                time.sleep(0.05)
+            if self.rc is None:
+                print("  leaving pty child %d unreaped" % self.pid)
 
 
 def ctls(what):
@@ -873,8 +880,11 @@ def shut(v):
         while v.reap() is None and time.time() < end:
             v.pump(0.1)
     os.close(v.fd)
+    end = time.time() + 10
+    while v.reap() is None and time.time() < end:
+        time.sleep(0.05)
     if v.rc is None:
-        os.waitpid(v.pid, 0)
+        print("  leaving view %d unreaped" % v.pid)
 
 
 def test_stop():

@@ -50,6 +50,9 @@ def spawn_client(extra, env=None):
             os.environ.update(env)
         os.execv(DCH, [DCH, "-E"] + extra)
         os._exit(127)
+    # pty.fork()'s master is inheritable: the next kid would hold it,
+    # and closing ours would not hang this pty up (QA 1.59.0 MED-T2)
+    os.set_inheritable(fd, False)
     return pid, fd
 
 
