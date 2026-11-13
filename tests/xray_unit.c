@@ -4335,6 +4335,20 @@ t_d3(void)
 		  "pull:o/r#9=X;" },
 		{ "gh pr edit o/r#12 --title Old; gh pr create --title New", PR, 0,
 		  "pull:o/r#12=Old;" },
+		/* #240 review: gh pr edit prints the PR it edited; that ref is
+		** the edit's, so the one left is the create's */
+		{ "gh pr edit o/r#9 --title Old; gh pr create --title New",
+		  "https://github.com/o/r/pull/9\\n" PR, 0,
+		  "pull:o/r#9=Old;pull:o/r#12=New;" },
+		{ "gh pr edit o/r#9 --title Old; gh pr create --title New",
+		  PR "\\nhttps://github.com/o/r/pull/9", 0,
+		  "pull:o/r#9=Old;pull:o/r#12=New;" },
+		{ "gh pr edit o/r#9 --title Old; gh pr create --title New",
+		  "https://github.com/o/r/pull/9\\n" PR
+		  "\\nhttps://github.com/o/r/pull/30", 0, "pull:o/r#9=Old;" },
+		/* an untitled command defines nothing, so its ref still counts */
+		{ "gh pr view o/r#9; gh pr create --title New",
+		  "https://github.com/o/r/pull/9\\n" PR, 0, "" },
 		{ "gh issue close o/r#7; gh pr edit o/r#9 --title New", "", 0,
 		  "pull:o/r#9=New;" },
 		{ "sh -c 'gh pr edit o/r#9 --title Old; gh pr create --title New'",

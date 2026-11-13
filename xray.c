@@ -3245,6 +3245,8 @@ struct d3m
 	const char *cmd;
 	size_t k;		/* the first word not ending before the last span */
 	size_t e;		/* the end of the command it reads (#240) */
+	const struct dset *ds;	/* d3_out: ds->v[n0..] were named in a command */
+	size_t n0;
 	struct xr_span sp;
 	int n, multi;
 	struct xr_span one[6];
@@ -3282,7 +3284,12 @@ static int
 d3_out(void *ctx, const struct xr_span *sp)
 {
 	struct d3m *m = ctx;
+	size_t i;
 
+	/* a ref a titled command named keeps its title and is no candidate */
+	for (i = m->n0; i < m->ds->n; i++)
+		if (!strcmp(m->ds->v[i].sp.key, sp->key))
+			return 0;
 	if (!m->cnt[sp->shape]++)
 		m->one[sp->shape] = *sp;
 	else if (!strcmp(m->one[sp->shape].key, sp->key))
@@ -3324,7 +3331,7 @@ d3(const struct dsrc *s, struct dset *ds)
 	struct sw w;
 	struct d3m m;
 	const char *val;
-	size_t k, j, c, e, i;
+	size_t k, j, c, e;
 	int cr, no = 0;
 	struct dres *d;
 	char title[XR_TITLE_MAX * 4 + 1] = "";	/* whole: copied by size */
@@ -3336,6 +3343,8 @@ d3(const struct dsrc *s, struct dset *ds)
 	memset(&m, 0, sizeof m);
 	m.w = &w;
 	m.cmd = s->cmd;
+	m.ds = ds;
+	m.n0 = ds->n;
 	/* every simple command: split on ; & && | || ( ) and newlines */
 	for (c = 0; c < w.n; c = e + 1)
 	{
@@ -3382,20 +3391,12 @@ d3(const struct dsrc *s, struct dset *ds)
 		return;		/* two titles, one output: whose is it */
 	(void)grammar(s->out, s->ol, XR_PLAIN, R_D3, s->cwd, d3_out, &m);
 	for (k = 0; k < 6; k++)
-	{
-		/* a ref a command named already keeps that command's title */
-		if (m.cnt[k] != 1)
-			continue;
-		for (i = 0; i < ds->n && (!ds->v[i].incmd ||
-		     strcmp(ds->v[i].sp.key, m.one[k].key)); i++)
-			;
-		if (i == ds->n && ds->n < XR_DEFS && (d = dpush(ds)))
+		if (m.cnt[k] == 1 && ds->n < XR_DEFS && (d = dpush(ds)))
 		{
 			d->sp = m.one[k];
 			d->rule = "D3";
 			memcpy(d->title, ot, sizeof ot);
 		}
-	}
 }
 
 /* Every definition of one paired block, at most XR_DEFS (v2.1 3.6). D1/D4
