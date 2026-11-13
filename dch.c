@@ -3205,7 +3205,7 @@ attach_with_switch(char *exe, int forced_name, int force, char **inner_argv,
 		                          remote_host, session_name) < sizeof chosen)
 			pk_focus(chosen);
 		pk_remote = 1;
-		if (pick_session("switch to session:", chosen,
+		if (pick_session("", chosen,
 		                 sizeof(chosen), 1) != 0)
 			return 0;
 		snprintf(session_name, sizeof(session_name), "%s", chosen);
@@ -15261,7 +15261,7 @@ main_run(int argc, char **argv)
 		int rc;
 
 		pk_remote = 1;
-		rc = pick_session("attach session (mirror):", chosen,
+		rc = pick_session("", chosen,
 		                  sizeof(chosen), 1);
 		if (rc == 0)
 		{

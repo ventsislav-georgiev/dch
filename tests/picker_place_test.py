@@ -86,9 +86,19 @@ def wait_screen(name, pred, timeout=10.0):
     return s
 
 
+
+def below_tabs(s):
+    """The lines under the tabs row and the column headers: the tabs row
+    is the first on dch -l and the switch picker (#252), the second under
+    -k's and -d's title."""
+    ls = s.split("\n")
+    i = next((k for k, l in enumerate(ls[:2])
+              if re.match(r"[\[ ]?(Sessions|Settings)\b", l)), 1)
+    return ls[i + 2:]
+
 def body(s):
     out = []
-    for l in s.split("\n")[3:]:
+    for l in below_tabs(s):
         if RULE_RE.match(l):
             break
         out.append(l)
@@ -150,7 +160,7 @@ def switch(name):
     dch("--send", name, "\x1c")
     time.sleep(0.1)
     dch("--send", name, "\x1c")
-    return wait_screen(name, lambda s: "switch to session:" in s and
+    return wait_screen(name, lambda s: "Sessions " in s and
                        s != before and rows(s), 15)
 
 
@@ -324,7 +334,7 @@ def main():
     dch("--send", "pe", "\x04")
     time.sleep(0.3)
     dch("--send", "pe", "\x04")
-    s = wait_screen("pe", lambda s: "switch to session:" in s and rows(s),
+    s = wait_screen("pe", lambda s: "Sessions " in s and rows(s),
                     15)
     check("Claude's Ctrl-D twice: back to the picker, on History",
           "[History" in s and not live("c1"), s)
@@ -349,7 +359,7 @@ def main():
     check("Shift+Enter with Caps Lock (CSI 13;66u) revives e1 and "
           "attaches it", "E1_SCREEN" in s, s)
     dch("--keys", "pf", "enter")	# its read returns: e1 ends
-    s = wait_screen("pf", lambda s: "switch to session:" in s and rows(s),
+    s = wait_screen("pf", lambda s: "Sessions " in s and rows(s),
                     15)
     check("e1's end: back to the picker, on History",
           "[History" in s and not live("e1"), s)
@@ -369,7 +379,7 @@ def main():
     dch("--keys", "pg", "enter")
     s = wait_screen("pg", lambda s: "SHELL_BACK" in s, 15)
     check("g1's end under dch -a: the shell, no picker",
-          "SHELL_BACK" in s and "switch to session:" not in s, s)
+          "SHELL_BACK" in s and "Sessions " not in s, s)
 
     # 6. the kill picker never opens what it revives
     dch("--spawn", "k1", "--size", "100x30", "sh", "-c",
@@ -420,7 +430,7 @@ def main():
             wait_screen("dr1", lambda s: "FLOOD_DONE" in s, 30)
         finally:
             os.kill(pid, signal.SIGCONT)
-        s = wait_screen("pd", lambda s: "switch to session:" in s and
+        s = wait_screen("pd", lambda s: "Sessions " in s and
                         rows(s), 30)
         check("a dropped client: the picker, on Sessions, dr1 selected, "
               "dr1 still live",

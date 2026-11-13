@@ -1368,7 +1368,7 @@ def test_chord():
         got = rx()
         a.key(b"\x1c", 0.05)
         check("detach_key = switch: one press opens the picker",
-              a.wait(b"switch to session:"), a.out[-600:])
+              a.wait(b"Sessions"), a.out[-600:])
         a.pump(0.5)
         mark = len(a.out)
         a.key(b"x", 0.5)
@@ -1377,7 +1377,7 @@ def test_chord():
         mark = len(a.out)
         a.key(b"q", 0.5)
         check("detach_key = switch: q in that view returns to the picker",
-              a.wait(b"switch to session:", start=mark), a.out[mark:][-600:])
+              a.wait(b"Sessions", start=mark), a.out[mark:][-600:])
         mark = len(a.out)
         a.key(b"X", 0.5)
         check("detach_key = switch: X reaches the kill confirmation",
@@ -1518,7 +1518,7 @@ def test_chord_detach():
             ([b"\033[92;5u", b"\033[92;5:3u", b"\033[120u"],
              b"X-ray  xv-rx", "press, release, x"),
             ([b"\033[92;5u", b"\033[92;5:3u", b"\033[92;5u"],
-             b"switch to session:", "press, release, press")):
+             b"Sessions", "press, release, press")):
         a = attach(env={"DCH_DOUBLE_TAP_MS": "2000"})
         try:
             got = rx()

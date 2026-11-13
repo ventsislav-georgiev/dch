@@ -178,14 +178,13 @@ static int
 pick_attach(const char *host, const char *name)
 {
 	char chosen[1100], left[1200], *c;
-	const char *header = "attach session (mirror):";
 	int rc;
 
 	for (;;)
 	{
 		if (!host)
 		{
-			if ((rc = pick(header, chosen, sizeof chosen)))
+			if ((rc = pick("", chosen, sizeof chosen)))
 				return rc < 0;
 			/* pk_rrow's host:name; a host has no ':' */
 			if (!(c = strchr(chosen, ':')))
@@ -201,7 +200,6 @@ pick_attach(const char *host, const char *name)
 		    < sizeof left)
 			pk_focus(left);
 		host = NULL;
-		header = "switch to session:";
 	}
 }
 

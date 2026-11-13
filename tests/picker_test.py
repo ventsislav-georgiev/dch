@@ -46,7 +46,12 @@ and --keys types into it. Covers:
  15. the -k and -d pickers' hints name what Enter does there, kill or
      detach, never attach (QA 1.59.0 LOW-V8), the filter's too; so do their
      status lines: r on a '-' name says what Enter does there, a on a
-     question form sends the user to dch -l, never to Enter (#247).
+     question form sends the user to dch -l, never to Enter (#247);
+ 16. dch -l has no title row (#252): the tabs row is the first, the
+     session count and dch version at its right edge, the frame fills the
+     screen; at 40 columns that text gives way, the tabs stay whole; the -k
+     and -d pickers keep "kill session:" / "detach session:" with the count
+     on that row.
 
 Run:  python3 tests/picker_test.py            (uses ./dch)
       DCH=/path/to/dch python3 tests/picker_test.py
@@ -130,11 +135,21 @@ ROW_RE = re.compile("^([>\u258c ]) . (\\S+)")  # marker, glyph or pin, title
 RULE_RE = re.compile("^[\u2500-]{20,}$")
 
 
+
+def below_tabs(s):
+    """The lines under the tabs row and the column headers: the tabs row
+    is the first on dch -l and the switch picker (#252), the second under
+    -k's and -d's title."""
+    ls = s.split("\n")
+    i = next((k for k, l in enumerate(ls[:2])
+              if re.match(r"[\[ ]?(Sessions|Settings)\b", l)), 1)
+    return ls[i + 2:]
+
 def body(s):
     """The list's lines: below the title, tabs and column headers, above
     the rule."""
     out = []
-    for l in s.split("\n")[3:]:
+    for l in below_tabs(s):
         if RULE_RE.match(l):
             break
         out.append(l)
@@ -432,6 +447,11 @@ def verbs():
         dch("--spawn", pk, "--size", "200x30", "env", "NO_COLOR=1",
             "TERM=xterm-256color", DCH, flag)
         s = wait_screen(pk, lambda s: "q quit" in s)
+        l = s.split("\n")
+        check("dch %s: keeps its title row, the count and version on it, "
+              "the tabs below (#252)" % flag,
+              l[0].startswith(verb + " session:") and
+              " dch " in l[0] and l[1].startswith("[Sessions "), l[:3])
         dch("--keys", pk, "/")
         f = wait_screen(pk, lambda s: "esc clear" in s)
         k, fk = " ".join(footer(s)), " ".join(footer(f))
@@ -476,9 +496,23 @@ def main():
     # 1. tabs: no Sidekicks tab until a "-qa" session exists
     picker("pk1", "100x30", "NO_COLOR=1", "TERM=xterm-256color")
     s = wait_screen("pk1", lambda s: "s10" in s and "s2" in s)
-    check("picker opens with the caller's header and a Sessions tab",
-          "attach session (mirror):" in s and
+    check("picker opens with a Sessions tab",
           re.search(r"\[Sessions \d+\]", s), s)
+    # 16. no title row on dch -l (#252): the tabs row is the first and
+    # carries the count and version at its right edge; the frame still
+    # fills the screen (one list row more)
+    ver = dch("--version").stdout.split()[-1]
+    lines = s.split("\n")
+    check("#252: no 'attach session'/'switch to session' title",
+          "attach session" not in s and "switch to session" not in s, s)
+    check("#252: the first row is the tabs, the count and dch version "
+          "at its right edge",
+          lines[0].startswith("[Sessions ") and re.search(
+              r"\d+ sessions? \u00b7 dch " + re.escape(ver) + "$",
+              lines[0].rstrip()) and lines[0].rstrip().endswith(ver) and
+          len(lines[0].rstrip()) == 100, lines[:2])
+    check("#252: the frame fills all 30 rows, the hints on the last",
+          len(lines) >= 30 and "q quit" in lines[29], s)
     check("no Sidekicks tab without a matching session",
           "Sidekicks" not in s, s)
     dch("--spawn", "helper-qa", "--size", "80x24", "sh", "-c", "sleep 600")
@@ -675,6 +709,11 @@ def main():
           "forty-cols" not in s, s)
     check("narrow: the state still shows on that row",
           long_rows and re.search(r"Working|Idle", long_rows[0]), s)
+    check("narrow: the tabs row leads, whole; the count and version give "
+          "way, never overlap (#252)", re.match(
+              r"\[Sessions \d+\]( +Sidekicks \d+)?( +History \d+)?"
+              r"( {4,}\d+ sessions? - dch \S+)?$", s.split("\n")[0].rstrip()),
+          s.split("\n")[:2])
     check("narrow: no line wider than 40",
           all(len(l) <= 40 for l in s.split("\n")), s)
     a = screen("pk3", ansi=True)

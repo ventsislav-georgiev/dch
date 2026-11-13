@@ -148,9 +148,19 @@ def wait_screen(env, pk, pred, timeout=10.0):
     return s
 
 
+
+def below_tabs(s):
+    """The lines under the tabs row and the column headers: the tabs row
+    is the first on dch -l and the switch picker (#252), the second under
+    -k's and -d's title."""
+    ls = s.split("\n")
+    i = next((k for k, l in enumerate(ls[:2])
+              if re.match(r"[\[ ]?(Sessions|Settings)\b", l)), 1)
+    return ls[i + 2:]
+
 def body(s):
     out = []
-    for l in s.split("\n")[3:]:
+    for l in below_tabs(s):
         if RULE_RE.match(l):
             break
         out.append(l)
