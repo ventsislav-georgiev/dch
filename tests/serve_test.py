@@ -44,7 +44,8 @@ DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
 RUNPY = os.path.join(HERE, "remote-frames", "golden", "run.py")
 
 # Builtins only, no fork: serve gives each call 3 s (TS_MS), and under load
-# a slower fake turns into a whois_failed refusal cached 30 s (#246).
+# a slower fake turns into a whois_failed refusal cached 30 s (#246). The
+# fallback of tests/fake_tailscale.c, which keeps the same contract (#277).
 FAKE_TS = """#!/bin/sh
 d=${0%/*}
 echo "$1 ${DCH_SERVE_TEST_LOOPBACK:-unset}" >> "$d/calls"
@@ -98,9 +99,19 @@ def main():
     tmp = os.path.realpath(tempfile.mkdtemp(prefix="dchsv", dir=os.environ.get("DCH_TEST_TMP", "/tmp")))
     fake = os.path.join(tmp, "fake")
     os.makedirs(fake)
-    with open(os.path.join(fake, "tailscale"), "w") as f:
-        f.write(FAKE_TS)
-    os.chmod(os.path.join(fake, "tailscale"), 0o755)
+    # the compiled fake: one exec per call and no shell start (#277); the
+    # shell one only when no compiler builds it
+    try:
+        built = subprocess.call(os.environ.get("CC", "cc").split() + [
+            "-O1", "-o", os.path.join(fake, "tailscale"),
+            os.path.join(HERE, "fake_tailscale.c")]) == 0
+    except OSError:
+        built = False
+    if not built:
+        print("  note: tests/fake_tailscale.c did not build, the shell fake")
+        with open(os.path.join(fake, "tailscale"), "w") as f:
+            f.write(FAKE_TS)
+        os.chmod(os.path.join(fake, "tailscale"), 0o755)
     home = os.path.join(tmp, "home")
     os.makedirs(home)
     env = {k: v for k, v in os.environ.items()
