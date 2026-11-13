@@ -377,6 +377,13 @@ def test_view():
         check("reader: Enter reads the newest chapter from the host",
               v.wait(b"You", start=mark) and v.wait(b"noted", start=mark),
               v.out[mark:])
+        check("reader: the header says 2 of 2", v.wait(b"2 of 2", start=mark),
+              v.out[mark:])
+        mark = len(v.out)
+        v.key(b"[", 1.0)
+        check("reader: [ reads the previous chapter from the host, 1 of 2 "
+              "(#288)", v.wait(b"1 of 2", start=mark) and
+              v.wait(b"gh issue view 831", start=mark), v.out[mark:])
         mark = len(v.out)
         v.key(b"q")
         check("reader: q goes back to the list",
@@ -397,11 +404,11 @@ def test_view():
               "the terminal", not bad, bad)
     finally:
         v.close()
-    # follow, ref (light), ref --full, p's ref --full --scope all, chapter:
-    # five, each its own ctl
-    until(lambda: ctls("--xray") - n0["--xray"] >= 5, 5)
-    check("every query ran on the host as its own ctl --xray (5), no --read "
-          "for an ended session", ctls("--xray") - n0["--xray"] == 5 and
+    # follow, ref (light), ref --full, p's ref --full --scope all, chapter,
+    # ['s chapter: six, each its own ctl
+    until(lambda: ctls("--xray") - n0["--xray"] >= 6, 5)
+    check("every query ran on the host as its own ctl --xray (6), no --read "
+          "for an ended session", ctls("--xray") - n0["--xray"] == 6 and
           ctls("--read") == n0["--read"],
           (ctls("--xray") - n0["--xray"], ctls("--read") - n0["--read"],
            refused()))
@@ -704,9 +711,11 @@ class Flaky(Fake):
     self.word; down() cuts every connection and each new one at once, up()
     answers again."""
 
-    def __init__(self):
+    def __init__(self, snap=None, chapters=None):
         super().__init__("ok", ops=["ctl", "ctl-cancel", "xray"])
         self.up, self.word = True, b"LINK-UP"
+        # --chapter <anchor>'s answers (#288), and the snapshot
+        self.snap, self.chapters = snap or SNAP, chapters or {}
 
     def down(self):
         self.up = False
@@ -739,8 +748,12 @@ class Flaky(Fake):
                     elif t == 0x30:
                         argv = json.loads(body)["argv"]
                         if "--follow" in argv:
-                            c.sendall(frame(0x31, SNAP))
+                            c.sendall(frame(0x31, self.snap))
                             continue    # a stream: held until the close
+                        if "--chapter" in argv:
+                            a = argv[argv.index("--chapter") + 1]
+                            if a in self.chapters:
+                                c.sendall(frame(0x31, self.chapters[a]))
                         if argv[0] == "--read":
                             c.sendall(frame(0x31, b"$ echo hi\r\n" +
                                             self.word + b"\r\n"))
@@ -798,6 +811,43 @@ def test_link_drop():
               frame_.count(stop + b"unreachable"), frame_[-600:])
         v.key(b"q")
         check("link drop: q exits 0", v.exit() == 0, v.out[-80:])
+    finally:
+        v.close()
+        h.close()
+
+
+def test_turn_drop():
+    """#288: the reader's [ on a host that has gone: the status says so and
+    the reader stays on its chapter."""
+    snap2 = SNAP.replace(b'"offset":0}]', b'"offset":0},{"anchor":"s2",'
+                         b'"title":"second","kind":"prompt","at":1794300100,'
+                         b'"offset":9}]')
+    ch = {"s2": json.dumps({"title": "second", "at": 1794300100,
+                            "entries": [{"role": "user",
+                                         "text": "SECOND-TEXT"}]}).encode()
+          + b"\n"}
+    h = Flaky(snap2, ch)
+    hosts("q=127.0.0.1:%d" % h.port)
+    v = Pty([DCH, "--xray", "q:fk"])
+    try:
+        check("turn drop: the view opens on two chapters",
+              v.wait(b"Chapters 2"), v.out[-600:])
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        check("turn drop: Enter reads the newest, 2 of 2",
+              v.wait(b"2 of 2", start=mark) and
+              v.wait(b"SECOND-TEXT", start=mark), v.out[mark:])
+        h.down()
+        mark = len(v.out)
+        v.key(b"[", 1.0)
+        ok = v.wait(b"could not read that chapter: dch: q: ", 15, start=mark)
+        frame_ = redraw(v, 101)
+        check("turn drop: [ on a gone host says so, the reader stays on 2 "
+              "of 2", ok and b"2 of 2" in frame_ and b"SECOND-TEXT" in frame_,
+              (v.out[mark:][-600:], frame_[-600:]))
+        v.key(b"q")
+        v.key(b"q")
+        check("turn drop: q, q exits 0", v.exit() == 0, v.out[-80:])
     finally:
         v.close()
         h.close()
@@ -1987,6 +2037,7 @@ def main():
         test_hostile()
         test_failures()
         test_link_drop()
+        test_turn_drop()
         test_stop()
         test_chord(port)
         test_chord_detach()

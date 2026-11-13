@@ -135,8 +135,10 @@ struct xv
 	char *vkind, *vtitle, *vsub;	/* --full's resolved line */
 	/* the reader */
 	char *rtitle, *rwant;
+	char *ranchor, *rturn;	/* the chapter shown; one being turned to */
 	long long rat;
 	int rtrunc, rtop, rw, rloaded;
+	int rend, redge;	/* open at its end; the hint said at that end */
 	struct xv_ent *e;
 	struct xv_rl *rl;
 	int ne, ae, nrl, arl;
@@ -1005,6 +1007,8 @@ xv_wrap(struct xv *v, int w)
 				v->rtop = k > 2 ? k - 2 : 0;
 				break;
 			}
+	if (v->rend && !v->rloaded)
+		v->rtop = v->nrl;	/* xv_draw_read clamps */
 	v->rloaded = 1;
 }
 
@@ -1014,6 +1018,15 @@ xv_rline(struct xv *v, const struct json_parser *p)
 	int a, t;
 	char *c;
 
+	if (v->rturn)
+	{
+		/* a turn's chapter came: it is the one shown, from its edge */
+		free(v->ranchor);
+		v->ranchor = v->rturn;
+		v->rturn = NULL;
+		xv_sfree(v->rwant);
+		v->rwant = NULL;
+	}
 	xv_read_free(v);
 	v->rtitle = xv_str(p, 0, "title");
 	v->rat = xv_num(p, 0, "at", -1);
@@ -1040,24 +1053,124 @@ xv_rline(struct xv *v, const struct json_parser *p)
 	xv_wrap(v, pk_w - 2);
 }
 
-/* The reader on chapter anchor; want: the text to open at, or NULL. */
+/* --chapter anchor, its answer to xv_rline */
 static void
-xv_read(struct xv *v, const char *anchor, const char *want)
+xv_rquery(struct xv *v, const char *anchor)
 {
 	char *av[5], a[200];
 
 	snprintf(a, sizeof a, "%s", anchor);
-	xv_read_free(v);
-	xv_sfree(v->rwant);
-	v->rwant = want ? strdup(want) : NULL;
-	v->back = v->mode;
-	v->mode = XV_READ;
 	av[0] = v->n;
 	av[1] = "--chapter";
 	av[2] = a;
 	av[3] = "--json";
 	av[4] = NULL;
 	(void)xv_start(v, XV_RK, av, 4, xv_rline);
+}
+
+/* The reader on chapter anchor; want: the text to open at, or NULL. */
+static void
+xv_read(struct xv *v, const char *anchor, const char *want)
+{
+	xv_read_free(v);
+	xv_sfree(v->rwant);
+	v->rwant = want ? strdup(want) : NULL;
+	free(v->ranchor);
+	v->ranchor = strdup(anchor);
+	free(v->rturn);
+	v->rturn = NULL;
+	v->rend = v->redge = 0;
+	v->back = v->mode;
+	v->mode = XV_READ;
+	xv_rquery(v, anchor);
+}
+
+/* The index of the chapter with anchor a, or -1. */
+static int
+xv_rch(const struct xv *v, const char *a)
+{
+	int k;
+
+	for (k = 0; a && k < v->nch; k++)
+		if (!strcmp(v->ch[k].anchor, a))
+			return k;
+	return -1;
+}
+
+static int xv_hid(const struct xv_ch *c);
+
+/* The chapter d (1 next, -1 previous) from the reader's, or the one it is
+** turning to: the Chapters list's order, skipping the auto rows while n
+** hides them there. -1: none. */
+static int
+xv_next(const struct xv *v, int d)
+{
+	int k = xv_rch(v, v->rturn ? v->rturn : v->ranchor);
+
+	if (k < 0)
+		return -1;
+	for (k += d; k >= 0 && k < v->nch; k += d)
+		if (v->allauto || !xv_hid(&v->ch[k]))
+			return k;
+	return -1;
+}
+
+/* ] and [, and a scroll past an end: the reader to the next chapter, at
+** its top, or the previous one, at its top (end: at its end). The chapter
+** shown stays until the new one comes, and stays if it does not. */
+static void
+xv_turn(struct xv *v, int d, int end)
+{
+	int k = xv_next(v, d);
+	char *a;
+
+	if (k < 0)
+	{
+		snprintf(v->status, sizeof v->status, "%s", d > 0
+		         ? "no next chapter" : "no previous chapter");
+		return;
+	}
+	if (!(a = strdup(v->ch[k].anchor)))
+		return;
+	free(v->rturn);
+	v->rturn = a;
+	v->rend = end;
+	xv_rquery(v, a);
+}
+
+/* A scroll key, d rows (+ down, - up). At the chapter's end that way the
+** first press says what comes next, the same way again turns to it; e: the
+** end the last key said. */
+static void
+xv_scroll(struct xv *v, int d, int e)
+{
+	int max = v->nrl - v->win, k;
+	const struct xv_ch *c;
+
+	if (max < 0)
+		max = 0;
+	if (!v->rloaded || (d > 0 ? v->rtop < max : v->rtop > 0))
+	{
+		v->rtop += d;
+		return;
+	}
+	if (e == (d > 0 ? 1 : -1))
+	{
+		xv_turn(v, e, e < 0);
+		return;
+	}
+	if ((k = xv_next(v, d > 0 ? 1 : -1)) < 0)
+	{
+		snprintf(v->status, sizeof v->status, "%s", d > 0
+		         ? "end of the last chapter" : "top of the first chapter");
+		return;
+	}
+	c = &v->ch[k];
+	v->redge = d > 0 ? 1 : -1;
+	snprintf(v->status, sizeof v->status, "%s of chapter; again for the %s "
+	         "(%d of %d): %s", d > 0 ? "end" : "top", d > 0 ? "next"
+	         : "previous", k + 1, v->nch,
+	         c->aut && c->summary[0] ? c->summary : c->title);
 }
 
 /* Esc: the reader to where it came from, the card to the list. */
@@ -1068,6 +1181,8 @@ xv_back(struct xv *v)
 	{
 		xv_stop(&v->kid[XV_RK], XV_RK);
 		xv_read_free(v);
+		free(v->rturn);
+		v->rturn = NULL;
 		v->mode = v->back == XV_CARD ? XV_CARD : XV_LIST;
 	}
 	else if (v->mode == XV_CARD)
@@ -1864,6 +1979,8 @@ xv_draw(struct xv *v, int force)
 	{
 		if (xv_live(v))
 			XV_K(0, "o", "open session");
+		XV_K(0, "]", "next chapter");
+		XV_K(0, "[", "previous");
 		XV_K(3, pk_utf ? "\xe2\x86\x91\xe2\x86\x93" : "up/down", "scroll");
 		XV_K(3, "esc", "back");
 	}
@@ -1955,6 +2072,13 @@ xv_draw(struct xv *v, int force)
 	}
 	else if (v->mode == XV_READ)
 	{
+		/* where a turn has brought the reader: the list's number */
+		if ((k = xv_rch(v, v->ranchor)) >= 0)
+		{
+			snprintf(b, sizeof b, "%d of %d  ", k + 1, v->nch);
+			pk_set("2");
+			pk_txt(b);
+		}
 		pk_set(pk_p(PK_ACCB));
 		pk_txt(v->rtitle ? v->rtitle : "");
 		xv_when(v->rat, b, sizeof b);
@@ -2264,14 +2388,18 @@ xv_key(struct xv *v, int c)
 	v->status[0] = '\0';
 	if (v->mode == XV_READ)
 	{
+		k = v->redge;
+		v->redge = 0;
 		switch (c)
 		{
-		case 'j': case PK_DOWN: v->rtop++; break;
-		case 'k': case PK_UP: v->rtop--; break;
-		case ' ': case PK_PGDN: v->rtop += v->win; break;
-		case 'b': case PK_PGUP: v->rtop -= v->win; break;
-		case 'g': case PK_HOME: v->rtop = 0; break;
-		case 'G': case PK_END: v->rtop = v->nrl; break;
+		case 'j': case PK_DOWN: xv_scroll(v, 1, k); break;
+		case 'k': case PK_UP: xv_scroll(v, -1, k); break;
+		case ' ': case PK_PGDN: xv_scroll(v, v->win, k); break;
+		case 'b': case PK_PGUP: xv_scroll(v, -v->win, k); break;
+		case 'g': case PK_HOME: xv_scroll(v, -v->nrl - 1, k); break;
+		case 'G': case PK_END: xv_scroll(v, v->nrl + 1, k); break;
+		case ']': xv_turn(v, 1, 0); break;
+		case '[': xv_turn(v, -1, 0); break;
 		case 'o':
 			return xv_open(v);
 		case 'q': case PK_ESC: case 'h': case PK_LEFT: case 0x7f:
@@ -2438,6 +2566,8 @@ xv_free(struct xv *v)
 	xv_sfree(v->ckey);
 	xv_sfree(v->ctext);
 	xv_sfree(v->rwant);
+	free(v->ranchor);
+	free(v->rturn);
 	free(v->ch);
 	free(v->rf);
 	free(v->vis);
@@ -2583,12 +2713,22 @@ xv_run(int fd, const char *n, char *err, size_t errsz)
 			         : "X-ray: the scan failed");
 		if (xv_pump(v, XV_SK, &rs))
 			xv_screen_done(v);
-		if (xv_pump(v, XV_RK, &rs) && !v->rloaded && v->mode == XV_READ)
+		if (xv_pump(v, XV_RK, &rs) && v->mode == XV_READ)
 		{
-			snprintf(v->status, sizeof v->status, "%s",
-			         v->kid[XV_RK].err[0] ? v->kid[XV_RK].err
-			         : "X-ray: no such chapter");
-			xv_back(v);
+			/* a turn that got no chapter: said, the reader stays */
+			if (v->rturn)
+				snprintf(v->status, sizeof v->status, "could not read "
+				         "that chapter: %s", v->kid[XV_RK].err[0]
+				         ? v->kid[XV_RK].err : "no such chapter");
+			else if (!v->rloaded)
+			{
+				snprintf(v->status, sizeof v->status, "%s",
+				         v->kid[XV_RK].err[0] ? v->kid[XV_RK].err
+				         : "X-ray: no such chapter");
+				xv_back(v);
+			}
+			free(v->rturn);
+			v->rturn = NULL;
 		}
 		if (!FD_ISSET(fd, &rs))
 			continue;

@@ -819,6 +819,21 @@ Session text is drawn with every control and bidi character as
 Three tabs:
 .B Chapters
 (\fB/\fR filters, \fBEnter\fR reads the chapter, read\-only;
+the reader's header says which chapter, \(lq3 of 12\(rq, and its title;
+a scroll key at its end or top says which chapter is next or before, and
+the same direction again opens it (the next at its top, the previous at
+its end);
+.B ]
+and
+.B [
+open the next and the previous chapter at its top; both follow the list's
+order, skipping the auto rows while
+.B n
+hides them;
+\fBq\fR, \fBEsc\fR or \fB\(<-\fR goes back to where the reader was
+opened, the list or the card; on a remote view each is one more
+.B \-\-chapter
+query, and a host that cannot answer is said while the reader stays;
 a chapter the harness wrote, a task notification
 .RB ( \(dqauto\(dq ),
 is hidden until

@@ -885,6 +885,18 @@ passages) is drawn with every control and bidi character shown as `?`.
 The view has three tabs:
 - **Chapters**: one row per prompt or command. `/` filters. `Enter` opens
   the chapter read-only (prompt, replies, tool calls, output), scrollable.
+  The reader reads on: its header says which chapter it is on (`3 of 12`,
+  the list's number) and its title. A scroll key at the chapter's end (or
+  top) first says on the status line which chapter comes next (or before);
+  the same direction again opens it, the next one at its top, the previous
+  one at its end. `]` and `[` open the next and the previous chapter at its
+  top. Both follow the list's order and skip the auto rows while `n` hides
+  them (a `/` filter does not narrow them). `q`, `Esc` or `←` goes back to
+  where the reader was opened, the list row or the card, however many
+  chapters it moved. On a remote view each move is one more `--chapter`
+  query on the host (any version); a host that cannot answer is said on the
+  status line and the reader stays. A shell's chapters (its typed blocks)
+  read on the same way.
   A chapter whose prompt the harness wrote, not you (a task notification,
   `"auto"` in `--json`), is hidden until `n` shows it, faint and titled by
   its summary (by its title when it has none); the footer says how many are
@@ -953,7 +965,8 @@ not clear X-ray; run `clear`".
 | Key | List | Card / reader |
 | --- | --- | --- |
 | `Tab` `→` `l` / `Shift-Tab` `←` `h` | next / previous tab (`h` `l` are labels on On screen) | `←` `h`: back |
-| `↑` `↓` / `j` `k`, `PgUp` `PgDn`, `g` `G` | move | move / scroll |
+| `↑` `↓` / `j` `k`, `PgUp` `PgDn`, `g` `G` | move | move / scroll; reader: at an end, again for the next / previous chapter |
+| `]` `[` | | reader: the next / previous chapter |
 | `Enter` | read the chapter / open the card | card: read the mention's chapter |
 | `/` | filter | |
 | `Ctrl-R` | with a ref typed after `/`: open its card, a row for it or not, its kind hidden or not | |
