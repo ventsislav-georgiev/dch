@@ -3167,6 +3167,8 @@ ctl_esc(struct sb *b, const char *s, size_t n)
 	}
 }
 
+static int g_ctl_errmid;	/* the host's stderr written ends mid-line */
+
 /* One stream ctl_in gathered onto f: all of b as it comes, or with esc (a
 ** host's --xray --json) its whole lines, all of it when last, through
 ** ctl_esc; the rest stays in b. 0, -1 when the write failed, or -2 (none
@@ -3189,6 +3191,8 @@ ctl_out(FILE *f, struct sb *b, int esc, int last)
 	else if (fwrite(esc ? e.p : b->p, 1, esc ? e.n : k, f) !=
 	         (esc ? e.n : k) || fflush(f))
 		rc = -1;
+	else if (f == stderr && (esc ? e.n : k))
+		g_ctl_errmid = (esc ? e.p[e.n - 1] : b->p[k - 1]) != '\n';
 	free(e.p);
 	memmove(b->p, b->p + k, b->n - k);
 	b->n -= k;
@@ -3275,6 +3279,7 @@ ctl_run(int fd, const char *sh, const char *verb, struct sb *rq,
 	int r = 0, xit = 1, code = 1, cx = 0, w;	/* cx: the signal, -1 EPIPE */
 	ssize_t k;
 
+	g_ctl_errmid = 0;
 	while (off < rq->n)
 	{
 		struct pollfd pf;
@@ -3412,9 +3417,9 @@ ctl_run(int fd, const char *sh, const char *verb, struct sb *rq,
 	if (why[0])
 		fprintf(stderr, "dch: %s: %s stopped by the host (%s)\n", sh,
 		        verb, why);
-	else if (xit >= 128)
-		fprintf(stderr, "dch: %s: %s on the host ended by signal %d\n",
-		        sh, verb, xit - 128);
+	else if (xit >= 128)	/* on its own line (QA 1.60.0 NIT-R5) */
+		fprintf(stderr, "%sdch: %s: %s on the host ended by signal "
+		        "%d\n", g_ctl_errmid ? "\n" : "", sh, verb, xit - 128);
 	return xit;
 }
 

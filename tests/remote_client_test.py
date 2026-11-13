@@ -1367,7 +1367,8 @@ class XFake:
     as JSON space and in a string; "capcut" whole lines, a partial line,
     then a 0x33 "cap"; "holdcut" whole lines and a partial line, its 0x33
     only for a 0x34; "crash" whole lines, a partial line, then the 0x33 of
-    a host dch SIGKILLed (exit 137, no why); "raw" a 17 MiB line with no
+    a host dch SIGKILLed (exit 137, no why); "crashnl", "crashnone" the
+    same with a whole stderr line, with none; "raw" a 17 MiB line with no
     control, in serve's 64 KiB frames; #226: "late" its hello 0.4 s late,
     then `{"ok":1}`, exit 0 and the close (shut() waits for it)."""
 
@@ -1422,6 +1423,10 @@ class XFake:
             "holdcut": frame(0x31, b'{"ok":1}\n{"cut":'),
             "crash": frame(0x31, b'{"ok":1}\n{"half":')
             + frame(0x32, b"e-half") + frame(0x33, {"exit": 137}),
+            "crashnl": frame(0x31, b'{"ok":1}\n')
+            + frame(0x32, b"e-whole\n") + frame(0x33, {"exit": 137}),
+            "crashnone": frame(0x31, b'{"ok":1}\n')
+            + frame(0x33, {"exit": 137}),
             "raw": b"".join(frame(0x31, x[i:i + 65536]) for x in
                             [b'{"s":"' + b"a" * (17 << 20) + b'"}\n']
                             for i in range(0, len(x), 65536))
@@ -1886,8 +1891,16 @@ def robust_checks(dch, check, cenv, fakes, tmp):
                        timeout=20)
     check("LOW-R7: a host dch killed mid-line: the whole lines, the partial "
           "line dropped, said, exit 137", r.returncode == 137
-          and r.stdout == b'{"ok":1}\n' and r.stderr == b"e-halfdch: q: "
+          and r.stdout == b'{"ok":1}\n' and r.stderr == b"e-half\ndch: q: "
           b"--xray on the host ended by signal 9\n", r)
+    # QA 1.60.0 NIT-R5: the message on its own line, no blank line before
+    for m, e in (("crashnl", b"e-whole\n"), ("crashnone", b"")):
+        r = subprocess.run([DCH, "--xray", "q:x", "--json"],
+                           env=side(fake(m).port), capture_output=True,
+                           stdin=subprocess.DEVNULL, timeout=20)
+        check("NIT-R5: %s: the signal said on its own line, no blank line"
+              % m, r.returncode == 137 and r.stderr == e +
+              b"dch: q: --xray on the host ended by signal 9\n", r)
 
     # QA 1.58.0 NIT-R3: a raw host line over 16 MiB (no control in it) is
     # a line over 16 MiB, not "out of memory": exit 7, nothing written
