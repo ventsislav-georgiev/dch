@@ -43,17 +43,17 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
 RUNPY = os.path.join(HERE, "remote-frames", "golden", "run.py")
 
-# No fork but the one cat: serve gives each call 3 s (TS_MS), and under load
+# Builtins only, no fork: serve gives each call 3 s (TS_MS), and under load
 # a slower fake turns into a whois_failed refusal cached 30 s (#246).
 FAKE_TS = """#!/bin/sh
 d=${0%/*}
 echo "$1 ${DCH_SERVE_TEST_LOOPBACK:-unset}" >> "$d/calls"
 case "$1" in
-status) [ -f "$d/status.json" ] && exec cat "$d/status.json"; exit 1 ;;
-whois) [ -f "$d/whois.json" ] && exec cat "$d/whois.json"; exit 1 ;;
-ip) [ -f "$d/ip.txt" ] && exec cat "$d/ip.txt"; exit 1 ;;
+status) f=status.json ;; whois) f=whois.json ;; ip) f=ip.txt ;; *) exit 1 ;;
 esac
-exit 1
+[ -f "$d/$f" ] || exit 1
+while IFS= read -r l; do printf '%s\\n' "$l"; done < "$d/$f"
+printf '%s' "$l"
 """
 
 # Headscale-shaped: status Self.ID is the host's StableNodeID, digits in a
