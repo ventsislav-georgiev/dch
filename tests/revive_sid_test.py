@@ -142,6 +142,12 @@ def main():
         # --- the id is live: --all skips it, text and --json --------------
         until(lambda: ((rec("w") or {}).get("agent") or {})
               .get("session_id") == X, 15)
+        # and for that Claude's own record: --revive finds a live Claude
+        # only by it, and the fake writes it seconds late under load (QA
+        # 1.60.0 LOW-T9; dch's side of that window is #278's report)
+        until(lambda: any(os.path.exists(os.path.join(
+            home, ".claude", "sessions", l.split()[0] + ".json"))
+            for l in claudes(X)), 15)
         r = run("--revive", "--all", "--no-message")
         check("--revive --all with the id live in w: 'w: skipped — claude "
               "<id> already runs in live session w (record ...)', exit 0 "
