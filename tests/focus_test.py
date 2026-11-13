@@ -80,6 +80,9 @@ class Client:
             os.environ.update(env or {})
             os.execv(DCH, [DCH, "-E"] + args)
             os._exit(127)
+        # pty.fork()'s master is inheritable: the next kid would hold it,
+        # and closing ours would not hang this pty up (QA 1.59.0 MED-T2)
+        os.set_inheritable(self.fd, False)
         fcntl.ioctl(self.fd, termios.TIOCSWINSZ,
                     struct.pack("HHHH", rows, cols, 0, 0))
         threading.Thread(target=self._drain, daemon=True).start()
@@ -126,7 +129,17 @@ class Client:
     def kill(self):
         try:
             os.kill(self.pid, signal.SIGHUP)
-            os.waitpid(self.pid, 0)
+            for sig in (signal.SIGKILL, None):
+                end = time.time() + 10
+                while time.time() < end:
+                    if os.waitpid(self.pid, os.WNOHANG)[0]:
+                        return
+                    time.sleep(0.05)
+                if sig is None:
+                    print("  leaving client %d unreaped" % self.pid)
+                    return
+                print("  client %d outlived SIGHUP: SIGKILL" % self.pid)
+                os.kill(self.pid, sig)
         except OSError:
             pass
 

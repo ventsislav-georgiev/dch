@@ -10,7 +10,9 @@ records for plain `sleep` children elsewhere, with HOME, the runtime dir
 and the state dir all temporary. Covers: id and path for a session running
 one Claude; the id following a rewritten record (/clear, resume); a missing
 .jsonl; two .jsonl under different project dirs; a session with no Claude;
-two Claudes in one session; a Claude with Claudes below it (the ancestor
+two Claudes in one session, the --xray --json answer's "claudes" count
+saying so, 0 for a client that cannot see their records (#256); a Claude
+with Claudes below it (the ancestor
 joins, --xray --json agreeing, #253); a record read while it is rewritten
 in place, and no wait for an empty one left by a dead Claude (#253); a
 record whose procStart does not match; a
@@ -108,6 +110,12 @@ def main():
             return None
         return o.get("session_id") if o.get("corpus") == "claude" else None
 
+    def xray_json(name, env=None):
+        try:
+            return json.loads(run("--xray", name, "--json", env=env).stdout)
+        except ValueError:
+            return {}
+
     def record(pid, sid, start=None, where=sessdir):
         rec = {"pid": pid, "sessionId": sid, "cwd": tmp,
                "procStart": proc_start(pid) if start is None else start,
@@ -197,7 +205,9 @@ def main():
 
         # --- two Claudes under one session --------------------------------
         c = "tt-two"
-        sh = spawn(c, "/bin/sh", "-c",
+        # under a HOME without their records: a client follows a Claude's
+        # own HOME (#062), and Linux lets it read any env of its uid
+        sh = spawn(c, "/usr/bin/env", "HOME=" + tmp, "/bin/sh", "-c",
                    "/bin/sleep 120 & /bin/sleep 120 & wait")
         kids = until(lambda: (lambda k: k if len(k) == 2 else None)(
             subprocess.run(["/usr/bin/pgrep", "-P", str(sh)],
@@ -211,6 +221,16 @@ def main():
               field(a, "claude_session_id") == s1)
         check("two claudes: --xray --json joins no Claude either",
               xray_sid(c) is None)
+        # #256: the answer says why: how many Claudes it found there
+        o = xray_json(c)
+        check("two claudes: --xray --json says corpus none, claudes 2",
+              o.get("corpus") == "none" and o.get("claudes") == 2)
+        # a client whose HOME holds no record finds none (the master did)
+        o = xray_json(c, dict(os.environ, HOME=tmp))
+        check("two claudes, records out of the client's sight: claudes 0",
+              o.get("corpus") == "none" and o.get("claudes") == 0)
+        check("a shell with no agent: no claudes field",
+              "claudes" not in xray_json(b))
 
         # --- a Claude with another Claude below it (#253) -----------------
         # a subagent's test suite runs a fake Claude, under its own temp
@@ -292,17 +312,20 @@ def main():
         # writer's own period kept landing in its empty phase (#261). A
         # rewrite the writer took over 45ms to finish (a runner that did
         # not schedule it) outlasts the reader's 10 waits of 5ms: only a
-        # sample such a stall overlaps may miss.
+        # sample such a stall overlaps may miss. Timed from before the
+        # truncate to after the write, the whole empty span; and the writer
+        # is stopped between rewrites, not killed, so a stall still under
+        # way at the last sample is logged too (#270).
         rp = os.path.join(sessdir, "%d.json" % pa)
         body = open(rp).read()
         stalls = os.path.join(tmp, "stalls")
         w = subprocess.Popen([sys.executable, "-c",
             "import os,sys,time\n"
             "p,b,s=sys.argv[1],sys.argv[2].encode(),sys.argv[3]\n"
-            "while True:\n"
-            "    fd=os.open(p,os.O_WRONLY|os.O_TRUNC); t=time.monotonic()\n"
+            "while not os.path.exists(s+'.stop'):\n"
+            "    t=time.monotonic(); fd=os.open(p,os.O_WRONLY|os.O_TRUNC)\n"
             "    time.sleep(0.005)\n"
-            "    os.write(fd,b); os.close(fd); u=time.monotonic()\n"
+            "    os.write(fd,b); u=time.monotonic(); os.close(fd)\n"
             "    if u-t>0.045: open(s,'a').write('%f %f\\n'%(t,u))\n"
             "    time.sleep(0.025)\n", rp, body, stalls])
         trace = os.path.join(tmp, "trace")
@@ -314,8 +337,12 @@ def main():
                 g = field(a, "claude_session_id", dbg)
                 got.append((g, t0, time.monotonic()))
         finally:
-            w.kill()
-            w.wait()
+            open(stalls + ".stop", "w").close()
+            try:
+                w.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                w.kill()
+                w.wait()
             record(pa, s1)	# killed mid-write, it may have left it empty
         try:
             st = [tuple(map(float, l.split())) for l in open(stalls)]

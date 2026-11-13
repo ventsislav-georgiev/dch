@@ -41,7 +41,7 @@ Each case is a directory:
                    "busy" DCH_ST_BUSY, "trunc" the screen after a lone
                    UTF-8 continuation byte with DCH_ST_TRUNC (the master's
                    kept tail), "hangup" closes with no answer, "slow"
-                   answers after 1 s (past --ref's light budget, inside
+                   answers after 0.5 s (past --ref's light budget, inside
                    --json's 2 s). "isolated": true
                    fails the case if any argv reads that master's ring or
                    screen (#155: no scope reads another session's ring,
@@ -178,7 +178,9 @@ class FakeMaster:
             if pr == "hangup":
                 return None
             if pr == "slow":
-                time.sleep(1.0)
+                # > 302 ms cuts a light read every time (the sleep starts after
+                # dch's clock); 0.5 s leaves 1.5 s of load slack under 2 s (#257)
+                time.sleep(0.5)
             b = (b"\x83" if pr == "trunc" else b"") + self.screen.encode()
             return (struct.pack("<BH", MSG_READ_DATA, len(b)) + b +
                     struct.pack("<BH", MSG_READ_END,

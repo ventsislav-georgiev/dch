@@ -11,7 +11,9 @@ config (0 = off), the client-input flag on a C mark from real keystrokes,
 session_id survive, the resume blob carries no ring bytes, no shm object is
 left open; a failed handover rotates to an empty ring with a new seq base and
 session_id; a pre-1.43 client gets no handover and the core limit back), the trace canary (S3: no ring text in DCH_DEBUG traces) and the
-master's core-dump limit.
+master's core-dump limit. And a `--xray --json` answer never says complete
+while rows that scrolled between its ring read and its screen read are
+missing (#173).
 
 Run:  python3 tests/xray_ring_test.py       (uses ./dch; run.sh isolates it)
 """
@@ -521,6 +523,52 @@ def test_wake_at_cap(tmp):
         kill(n)
 
 
+def test_seam(tmp):
+    """#173 (QA 1.54.0 LOW-2): rows that scroll into the ring between its
+    read and the screen read are on neither. A shell prints o/r#<i mod 1000>
+    in bursts while `--xray --json` runs in a loop; each row's ref is counted
+    once, so rows 0..b all there give counts non-increasing in the residue,
+    at most 1 apart. Asserted on the invariant only: no answer is both
+    complete and holed (partial is allowed)."""
+    M = 1000
+    cfg = os.path.join(tmp, "seam.config")
+    with open(cfg, "w") as f:
+        f.write("xray_ring = 8M\n")     # never evicts within the run
+    n = "xr-seam" + TAG
+    spawn(n, "sh", env=dict(os.environ, DCH_CONFIG=cfg))
+    reads = comp = 0
+    bad = []
+    try:
+        wait_for(lambda: screen(n).strip())
+        send(n, 'i=0; while :; do echo "o/r#$((i%%%d))"; i=$((i+1)); '
+             '[ $((i%%50)) = 0 ] && sleep 0.002; done\n' % M)
+        wait_for(lambda: "o/r#" in screen(n))
+        end = time.time() + 12
+        while time.time() < end and reads < 400:
+            r = dch("--xray", n, "--json")
+            if r.returncode != 0:
+                continue
+            a = json.loads(r.stdout)
+            reads += 1
+            if not a["complete"]:
+                continue
+            comp += 1
+            c = [0] * M
+            for e in a["refs"]:
+                m = re.fullmatch(r"o/r#(\d+)", e["text"])
+                if m:
+                    c[int(m.group(1))] = e["count"]
+            if not (all(c[k] >= c[k + 1] for k in range(M - 1)) and
+                    max(c) - min(c) <= 1):
+                bad.append([k for k in range(M - 1) if c[k] < c[k + 1]][:3])
+    finally:
+        kill(n)
+    check("seam: complete answers were read (%d of %d)" % (comp, reads),
+          comp > 0)
+    check("seam: no complete answer misses rows (%d of %d did)"
+          % (len(bad), comp), not bad, bad[:5])
+
+
 def marks(recs):
     return [(r["text"].decode(), r["flags"]) for r in recs if r["kind"] == 4]
 
@@ -821,6 +869,7 @@ def main():
         test_clear_and_off()
         test_wake_at_cap(tmp)
         test_shell_init(tmp)
+        test_seam(tmp)
         test_forged_block()
         test_restart(tmp)
         test_restart_legacy(tmp)

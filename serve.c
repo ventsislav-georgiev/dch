@@ -1876,6 +1876,35 @@ parse_input(struct conn *c)
 	c->inlen -= off;
 }
 
+/* A live master answers a connect on its socket; a SIGKILLed one's socket
+** file is left behind and refuses it (#230). Linux releases a dying
+** master's listen socket after its client's connection, so the client can
+** end and this connect still land, unaccepted; the release then resets it.
+** A live master accepts and waits for a packet: no event in 100 ms (#271). */
+static int
+sock_live(const char *path)
+{
+	struct sockaddr_un sa;
+	struct pollfd pf;
+	size_t n = strlen(path);
+	int s, ok;
+
+	if (n >= sizeof sa.sun_path || (s = socket(PF_UNIX, SOCK_STREAM, 0)) < 0)
+		return 0;
+	memset(&sa, 0, sizeof sa);
+	sa.sun_family = AF_UNIX;
+	memcpy(sa.sun_path, path, n);
+	ok = connect(s, (struct sockaddr *)&sa, sizeof sa) == 0;
+	if (ok)
+	{
+		pf.fd = s;
+		pf.events = POLLIN;
+		ok = poll(&pf, 1, 100) <= 0;	/* an EINTR: as connected */
+	}
+	close(s);
+	return ok;
+}
+
 /* SIGHUP the dch client (its own detach: the session lives), SIGKILL after
 ** 300 ms: one stuck writing to an undrained pty ignores SIGHUP. */
 static void
@@ -2122,9 +2151,10 @@ serve_conn(int fd, uint32_t ip)
 			** 0x12 and the FIN. "why":"detach" when its session is
 			** still there (#217: a dch -d here, or -d host:name),
 			** as an ending master unlinks its socket before its
-			** clients see the close; an older client ignores it */
+			** clients see the close, and a killed one's socket
+			** refuses a connect (#230); an older client ignores
+			** it */
 			struct sb b = {0};
-			struct stat ss;
 			char sp[PATH_MAX];
 			int st = c->kid_status;
 
@@ -2135,7 +2165,7 @@ serve_conn(int fd, uint32_t ip)
 			if (c->name[0] && WIFEXITED(st) && !WEXITSTATUS(st) &&
 			    snprintf(sp, sizeof sp, "%s/%s.sock", dch_sock_dir(),
 			             c->name) < (int)sizeof sp &&
-			    stat(sp, &ss) == 0 && S_ISSOCK(ss.st_mode))
+			    sock_live(sp))
 				sb_s(&b, ",\"why\":\"detach\"");
 			sb_s(&b, "}");
 			out_frame(c, 0x12, b.p, b.n);

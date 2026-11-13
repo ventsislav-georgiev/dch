@@ -26,7 +26,10 @@ works. #167: a record a strict JSON reader rejects (lone surrogate, 1e999,
 picker; bidi marks and U+2028/9 escaped; with a local twin tw:gone the
 cursor stays on host tw's row and p pins nothing; remote rows sort among
 the local ones. #254: local sessions running under the names of host tw's
-records leave its rows as they were.
+records leave its rows as they were. #248: o on a remote History row
+revives it there and attaches the host's session, with a local session of
+that very host:name running; a revive whose name is too long to attach
+leaves no host route for the next pick.
 
 Run:  python3 tests/remote_history_test.py      (uses ./dch)
 """
@@ -50,8 +53,8 @@ LS_KEYS = ["name", "alias", "harness", "activity_epoch", "state", "version",
 
 class HFake:
     """A remote-frames server on loopback: a hello with `ops`, then a ctl
-    answered with `reply` (0x31s) and exit `xit`; or it hangs, or its gate
-    refuses."""
+    answered with `reply` (0x31s; a dict: by the ctl's argv[0]) and exit
+    `xit`; or it hangs, or its gate refuses."""
 
     def __init__(self, reply=b"[]", ops=("ctl",), mode="ok", xit=0):
         self.reply, self.ops, self.mode, self.xit = reply, list(ops), mode, xit
@@ -99,6 +102,8 @@ class HFake:
                     elif t == 0x30:
                         self.bodies.append(json.loads(body))
                         r = self.reply
+                        if isinstance(r, dict):
+                            r = r[self.bodies[-1]["argv"][0]]
                         for k in range(0, len(r), 60000):
                             c.sendall(frame(0x31, r[k:k + 60000]))
                         c.sendall(frame(0x33, {"exit": self.xit}))
@@ -407,6 +412,7 @@ def main():
                           until)
             refetch_checks(dch, check, cenv, fake, until)
             twin_checks(dch, check, cenv, fake, until)
+            stale_route_checks(dch, check, cenv, fake, until)
     finally:
         for c in ("srv", "cli"):
             e = senv if c == "srv" else cenv
@@ -453,7 +459,7 @@ def picker_checks(dch, check, cenv, senv, H, serve_at, tmp, rev, until):
             if m and m.group(1) != " ":
                 return m.group(2)
 
-    def open_on(pk, hosts):
+    def open_on(pk, hosts, row="srv:gone"):
         dch(cenv, "--spawn", pk, "--size", "140x30", "--", "env", "-u",
             "DCH_SESSION", "NO_COLOR=1", "TERM=xterm-256color", DCH,
             *hosts, "-l")
@@ -465,13 +471,13 @@ def picker_checks(dch, check, cenv, senv, H, serve_at, tmp, rev, until):
             time.sleep(0.3)
         # the background probe fetches the host's history, the next
         # reload shows it
-        s = until(lambda: "srv:gone" in rows(screen(pk)) and screen(pk), 15)
+        s = until(lambda: row in rows(screen(pk)) and screen(pk), 15)
         for _ in range(10):
             s = screen(pk)
             r, c = rows(s), cur(s)
-            if c == "srv:gone" or "srv:gone" not in r or c not in r:
+            if c == row or row not in r or c not in r:
                 break
-            d = r.index("srv:gone") - r.index(c)
+            d = r.index(row) - r.index(c)
             dch(cenv, "--keys", pk, *(["down"] * d if d > 0 else ["up"] * -d))
             time.sleep(0.3)
         return s
@@ -504,6 +510,42 @@ def picker_checks(dch, check, cenv, senv, H, serve_at, tmp, rev, until):
           "Resumed as srv:gone" in s and "gone" in
           dch(senv, "-ls").stdout.split(), (s, dch(senv, "-ls").stdout))
     dch(cenv, "-k", "pk2")
+
+    # #248: o on host srv's og, a local session literally named srv:og
+    # running: the revive there, then the host's og attached, not the local
+    rev2 = rev + "2"
+    dch(senv, "--spawn", "og", "--", "/bin/sh", "-c", "[ -f %s ] && while "
+        ":; do echo HOST-MARK; sleep 1; done; exit 3" % rev2)
+    check("the server's og is History",
+          until(lambda: "og  " in dch(senv, "--history").stdout))
+    with open(rev2, "w"):
+        pass
+    dch(cenv, "--spawn", "srv:og", "--", "/bin/sh", "-c",
+        "while :; do echo LOCAL-MARK; sleep 1; done")
+    slog = os.path.join(tmp, "serve-create.log")
+
+    def host_attaches():
+        with open(slog) as f:
+            return f.read().count(" attach og (")
+
+    def local_clients():
+        return [x.get("clients") for x in json.loads(
+            dch(cenv, "--ls-json").stdout) if x["name"] == "srv:og"]
+
+    s = open_on("pk5", ["--hosts", "srv=127.0.0.1:%d" % port], "srv:og")
+    check("o: srv:og selected in History, the local srv:og running",
+          cur(s) == "srv:og" and local_clients() == [0],
+          (s, local_clients()))
+    n0 = host_attaches()
+    dch(cenv, "--keys", "pk5", "o")
+    ok = until(lambda: host_attaches() > n0, 30)
+    s = until(lambda: "HOST-MARK" in screen("pk5") and screen("pk5"), 10)
+    check("o on host srv's og with a local srv:og running: revived there, "
+          "the host's og attached, the local srv:og no client (#248)",
+          ok and s and "LOCAL-MARK" not in s and local_clients() == [0],
+          (host_attaches() - n0, local_clients(), s or screen("pk5")))
+    dch(cenv, "-k", "pk5")
+    dch(cenv, "-k", "srv:og")
 
 
 def refetch_checks(dch, check, cenv, fake, until):
@@ -614,6 +656,69 @@ def twin_checks(dch, check, cenv, fake, until):
           "tw:gone: on another host" in (s or "") and len(h) == 1
           and "pinned" not in h[0], (s, h))
     dch(cenv, "-k", pk)
+
+
+def stale_route_checks(dch, check, cenv, fake, until):
+    """#248: o on host lh's lr, whose revive answers a name too long to
+    attach: the picker stays. Then Enter on the local Sessions row lh:loc
+    attaches it here; the revive's host route is not left for that pick."""
+    def screen():
+        return dch(cenv, "--read", pk).stdout
+
+    def rows(s):
+        return [m.group(2) for m in map(ROW_RE.match, below_tabs(s)) if m]
+
+    def cur(s):
+        for m in map(ROW_RE.match, below_tabs(s)):
+            if m and m.group(1) != " ":
+                return m.group(2)
+
+    def tab_to(name):
+        for _ in range(4):
+            if "[" + name in screen():
+                return True
+            dch(cenv, "--keys", pk, "tab")
+            time.sleep(0.3)
+        return "[" + name in screen()
+
+    def go_row(row):
+        until(lambda: row in rows(screen()), 15)
+        for _ in range(10):
+            s = screen()
+            r, c = rows(s), cur(s)
+            if c == row or row not in r or c not in r:
+                return c == row
+            d = r.index(row) - r.index(c)
+            dch(cenv, "--keys", pk, *(["down"] * d if d > 0 else ["up"] * -d))
+            time.sleep(0.3)
+        return cur(screen()) == row
+
+    hf = fake({"--history": b'[{"name":"lr","end":"exit 0","ended":1}]',
+               "--revive": b'{"result":"ok","as":"%s"}\n' % (b"x" * 560)},
+              ops=("ctl", "create"))
+    dch(cenv, "--spawn", "lh:loc", "--", "/bin/sh", "-c",
+        "while :; do echo LOCAL-MARK; sleep 1; done")
+    pk = "pk6"
+    dch(cenv, "--spawn", pk, "--size", "140x30", "--", "env", "-u",
+        "DCH_SESSION", "NO_COLOR=1", "TERM=xterm-256color", DCH,
+        "--hosts", "lh=127.0.0.1:%d" % hf.port, "-l")
+    until(lambda: "History" in screen())
+    ok = tab_to("History") and go_row("lh:lr")
+    dch(cenv, "--keys", pk, "o")
+    s = until(lambda: "Resumed as lh:xxx" in screen() and screen(), 15)
+    check("o on lh:lr, revived as a name too long to attach: said, the "
+          "picker stays", ok and s and "--revive" in
+          [b["argv"][0] for b in hf.bodies], (ok, hf.bodies, s or screen()))
+    ok = tab_to("Sessions") and go_row("lh:loc")
+    dch(cenv, "--keys", pk, "Enter")
+    s = until(lambda: "LOCAL-MARK" in screen() and screen(), 10)
+    check("... then Enter on the local lh:loc attaches it here, no host "
+          "route left by the revive (#248)", ok and s and [
+              x.get("clients") for x in json.loads(dch(cenv, "--ls-json")
+                                                   .stdout)
+              if x["name"] == "lh:loc"] == [1], (ok, s or screen()))
+    dch(cenv, "-k", pk)
+    dch(cenv, "-k", "lh:loc")
 
 
 if __name__ == "__main__":

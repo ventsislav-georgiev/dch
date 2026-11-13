@@ -13,7 +13,8 @@ Covers:
      terminal: exit 2, a usage message, the view not opened; no such
      session: exit 1, the message after the terminal is restored;
   3. the three tabs, the chapter list, the Refs list, the card (light, `f`
-     full scan, `y` OSC 52 copy), the chapter reader, back, quit (exit 0,
+     full scan, `y` OSC 52 copy, `p` other projects and back, `o` on the
+     ended session said), the chapter reader, back, quit (exit 0,
      terminal restored);
   4. mutant 11: no corpus ESC, BEL or bidi byte (U+202E, U+061C, U+2028)
      reaches the terminal, the strings show with `?` in their place;
@@ -47,8 +48,8 @@ Covers:
      empty state when every chapter is one; a compaction (#223) hidden
      and counted with them, n showing it faint with its = marker, Enter
      reading its summary, compactions and auto chapters alone the same
-     empty state; o on the Chapters list and in
-     the reader leaves the view (the terminal restored as q does) and
+     empty state; o on the Chapters list, in
+     the reader and on a card (full build; #227) leaves the view (the terminal restored as q does) and
      attaches as dch -a, from the picker's x too (the -k picker refuses);
      an ended session's o says so and stays; in the chord o goes back to the
      session;
@@ -120,6 +121,9 @@ class Pty:
             fcntl.ioctl(0, termios.TIOCSWINSZ,
                         struct.pack("HHHH", rows, cols, 0, 0))
             os.execve(argv[0], argv, dict(ENV, **(env or {})))
+        # pty.fork()'s master is inheritable: the next kid would hold it,
+        # and closing ours would not hang this pty up (QA 1.59.0 MED-T2)
+        os.set_inheritable(self.fd, False)
 
     def pump(self, secs=0.05):
         end = time.time() + secs
@@ -175,7 +179,11 @@ class Pty:
         os.close(self.fd)
         if self.reap() is None:
             os.kill(self.pid, signal.SIGKILL)
-            os.waitpid(self.pid, 0)
+            end = time.time() + 10
+            while self.reap() is None and time.time() < end:
+                time.sleep(0.05)
+            if self.rc is None:
+                print("  leaving pty child %d unreaped" % self.pid)
 
 
 def kids(pid):
@@ -327,6 +335,28 @@ def test_view():
         check("card: y copies the ref (OSC 52)",
               v.wait(b"\033]52;c;" + base64.b64encode(b"#831")),
               v.out[-300:])
+        # #227: p is the scope toggle (o until 1.60.x); o opens, as in the list
+        mark = len(v.out)
+        v.key(b"p", 1.0)
+        ok = until(lambda: (v.pump(0.1), re.search(
+            r"full scan (\u00b7|-) other projects", screen(v, mark)) and
+            "p this project" in screen(v, mark))[1], 5)
+        check("card: p scans other projects, its key then says this project",
+              ok, screen(v, mark))
+        mark = len(v.out)
+        v.key(b"p", 1.0)
+        ok = until(lambda: (v.pump(0.1), "p other projects" in
+                            screen(v, mark))[1], 5)
+        text = screen(v, mark)
+        check("card: p again scans this project only",
+              ok and "full scan" in text and not re.search(
+                  r"full scan (\u00b7|-) other projects", text), text[:800])
+        mark = len(v.out)
+        v.key(b"o", 1.0)
+        text = screen(v, mark)
+        check("card: o on the ended xv-cl says so and stays on the card",
+              "xv-cl has ended: no session to open" in text and
+              v.reap() is None, text)
         mark = len(v.out)
         v.key(b"\033", 0.5)
         v.key(b"\t\t")
@@ -928,7 +958,7 @@ def test_open(lite):
     r = dch("--spawn", "xv-op", "--size", "80x24", "sh", "-c", prog)
     check("open: spawned", r.returncode == 0, r.stderr)
     until(lambda: "$" in dch("--read", "xv-op").stdout, 5)
-    dch("--send", "xv-op", "make the build\n")
+    dch("--send", "xv-op", "make the build o/r#41\n")  # a ref: the card's o
     until(lambda: "40" in dch("--read", "xv-op").stdout, 5)
     time.sleep(0.5)  # dch-lite: no --read; the block's time
     v = Pty([DCH, "--xray", "xv-op"], env=DTAP)
@@ -943,7 +973,7 @@ def test_open(lite):
         v.close()
     if lite:
         print("  ok   lite: a shell has no chapters to read (no corpus): o "
-              "in the reader is the full build's")
+              "in the reader and on a card is the full build's")
     else:
         v = Pty([DCH, "--xray", "xv-op"], env=DTAP)
         try:
@@ -960,6 +990,23 @@ def test_open(lite):
             mark = len(v.out)
             v.key(b"o", 0.3)
             opened(v, mark, "reader", "xv-op")
+        finally:
+            v.close()
+        v = Pty([DCH, "--xray", "xv-op"], env=DTAP)
+        try:
+            ready(v)
+            v.key(b"\t", 0.3)
+            v.wait(b"o/r#41")
+            mark = len(v.out)
+            v.key(b"\r", 1.0)
+            ok = until(lambda: (v.pump(0.1), "o open session" in
+                                screen(v, mark) and "p other projects" in
+                                screen(v, mark))[1], 10)
+            check("card: a live session's footer offers o and p", ok,
+                  screen(v, mark))
+            mark = len(v.out)
+            v.key(b"o", 0.3)
+            opened(v, mark, "card", "xv-op")
         finally:
             v.close()
     dch("-k", "xv-op")  # the pickers below take their first row: xv-sh

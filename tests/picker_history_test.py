@@ -170,7 +170,7 @@ def main():
     def record(file, name, ago, end, word, pin=False):
         with open(os.path.join(rec, file + ".json"), "w") as f:
             json.dump(dict(name=name, sock_dir=ENV["DCH_SOCKET_DIR"],
-                           alias="", cwd=ROOT,
+                           alias="", cwd="/",  # a temp dir name could match a filter
                            argv=["sh", "-c", "echo %s; sleep 600" % word],
                            started=now - ago - 600, updated=now - ago,
                            ended=now - ago, end=end), f,

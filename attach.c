@@ -842,7 +842,9 @@ process_kbd(int s, struct packet *pkt)
 
 			while ((r = recv(s, junk, sizeof junk, MSG_DONTWAIT)) > 0)
 				;
-			if (r == 0)	/* it ended meanwhile: the loop sees the end */
+			/* it ended meanwhile (ECONNRESET: see the main loop's
+			** read): the loop sees the end */
+			if (r == 0 || (r < 0 && errno == ECONNRESET))
 				return KBD_OK;
 		}
 
@@ -1108,9 +1110,13 @@ attach_main(int noerror)
 
 			if (len <= 0 && attach_lost)
 				lost();
-			if (len == 0)
+			/* Linux: a master that ended with our keys unread in its
+			** socket (a SIGKILL) gives one ECONNRESET, then EOF. That is
+			** the session's end, as the EOF is on macOS (#271). */
+			if (len == 0 || (len < 0 && errno == ECONNRESET))
 			{
-				dch_trace("client exit: master closed socket");
+				dch_trace("client exit: master closed socket%s",
+				          len ? " (ECONNRESET)" : "");
 				if (attach_end_back && attach_sock < 0)
 				{
 					restore_term();

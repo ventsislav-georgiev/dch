@@ -282,7 +282,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.60.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.61.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -919,16 +919,19 @@ The view has three tabs:
 A ref's card shows its definitions (two or more as "N definitions"), its
 first and latest mention, its counts (this session, this project, all
 projects) and its mentions. It opens light, as `--ref` does without `--full`.
-`f` runs the full scan, `o` scans other projects too, `y` copies the ref to
-the clipboard (OSC 52). `Enter` on a mention in this session opens its
+`f` runs the full scan, `p` scans other projects too (again: this project
+only), `o` attaches to the session as in the list, `y` copies the ref to the
+clipboard (OSC 52). The card's other-projects key changed in 1.61.0: it was
+`o`, which now opens the session everywhere in the view. `Enter` on a mention in this session opens its
 chapter. A shell session's light card shows titles and counts only; `f`
 shows its lines.
 
 The line under the tabs names the corpus: `Shell · last N rows`, `Shell · no
 shell integration · mentions only`, `Codex · mentions only`, `X-ray needs the
-full dch build` (dch-lite), `X-ray is off for shells (xray_ring = 0)`, and so
-on. A shell's line adds "a terminal's own clear-screen key may not clear
-X-ray; run `clear`".
+full dch build` (dch-lite), `X-ray is off for shells (xray_ring = 0)`,
+`2 Claude sessions run here; X-ray reads one`, `No Claude session found
+here`, and so on. A shell's line adds "a terminal's own clear-screen key may
+not clear X-ray; run `clear`".
 
 | Key | List | Card / reader |
 | --- | --- | --- |
@@ -938,8 +941,8 @@ X-ray; run `clear`".
 | `/` | filter | |
 | `t` | Refs: show / hide the temp files | |
 | `n` | Chapters: show / hide the auto rows (auto chapters, the task notifications, and compactions) | |
-| `o` | Chapters: attach to the session (in the chord: back to it) | reader: the same |
-| `f` `o` `y` | | card: full scan, other projects, copy |
+| `o` | Chapters: attach to the session (in the chord: back to it) | card, reader: the same |
+| `f` `p` `y` | | card: full scan, other projects / this project (`p` was `o` before 1.61.0), copy |
 | `q` | quit | back |
 | `Esc` | clear the typed label or the filter, else quit | back |
 | `Ctrl-C` `Ctrl-D` | quit | quit |
@@ -1166,7 +1169,10 @@ The corpus:
     2 MB keeps its tail; its first row is dropped) makes the answer
     `complete: false` with `why: "range"`, and `--ref`'s `partial: true`.
     `--ref`'s light mode waits for the screen only as long as its budget
-    lasts (`why: "budget"`). A screen row's `offset` is a provisional seq:
+    lasts (`why: "budget"`). Rows that scroll into the ring between its read
+    and the screen's are read from the ring and the screen read again, up to
+    3 times; a shell that still scrolls then gives `why: "range"` too.
+    A screen row's `offset` is a provisional seq:
     the row gets another one when it scrolls into the ring, and a later
     ring row can take this one. Their `at` is the
     time of the read, not the time the row was written: two queries a
@@ -1189,6 +1195,11 @@ The corpus:
   gone, or a Codex with no thread id or rollout (`reason: null`). An ended
   Codex session has no corpus either: History records carry only a Claude
   agent, so it answers as an ended shell (`reason: "ended"`).
+  - **`claudes`.** Only while a shell's ring is paused for an agent: how many
+    live Claude Code sessions dch found under the session. X-ray reads one:
+    `2` or more means several unrelated ones run there; `0` means it found
+    none (its record is out of this process's `HOME` or `CLAUDE_CONFIG_DIR`).
+    Readers that do not know the field can ignore it.
 
 ```json
 {"schema":1,"session":"api","session_id":"0b1f6a52-4c1e-4d7a-9a51-2f6d8c3e7a10",
@@ -1431,8 +1442,10 @@ Codex `<n>` gets it too.
   A commit URL (`https://github.com/<owner>/<repo>/commit/<sha>`) with a
   full 40-hex SHA resolves as a bare SHA does. With a shorter SHA, it
   resolves only when one of the repo's remote URLs names that owner and
-  repo on github.com (any case; `https://`, `ssh://` or `git@github.com:`,
-  with or without `.git`). Otherwise it is `not_commit` and `show` never
+  repo on github.com (any case; `https://`, `http://`, `ssh://`, `git://`
+  or `git@github.com:`, with or without `.git` or a port). The host is read
+  from the URL's authority only, as git reads it: `github.com` in the
+  user name, query or fragment does not count. Otherwise it is `not_commit` and `show` never
   runs. A remote reached only through `url.<base>.insteadOf` does not
   match, and hosts other than github.com never match. If the `config` run
   fails or times out, there is no `resolved` line. The remote URLs are only

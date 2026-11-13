@@ -3772,6 +3772,38 @@ t_res_parse(void)
 	      !GR("remote.o.url\nhttps://evil.com/x git@github.com:o/r\0") &&
 	      !GR("remote.o.url\n\ngit@github.com:o/r\0") &&
 	      !GR("remote.//github.com/o/r.url\nhttps://e.com/\0"));
+	CHECK("git remote: github.com outside the authority: no (LOW-X7)",
+	      !GR("remote.o.url\nhttps://evil.com?@github.com/o/r\0") &&
+	      !GR("remote.o.url\nhttps://evil.com#@github.com/o/r\0") &&
+	      !GR("remote.o.url\nevil.com:x@github.com:o/r\0") &&
+	      !GR("remote.o.url\nhttps://github.com@evil.com/o/r\0") &&
+	      !GR("remote.o.url\nhttps://github.com:x@evil.com/o/r\0") &&
+	      !GR("remote.o.url\nhttps://a@b@github.com/o/r\0") &&
+	      !GR("remote.o.url\nhttps://evilgithub.com/o/r\0") &&
+	      !GR("remote.o.url\nevilgithub.com:o/r\0") &&
+	      !GR("remote.o.url\nhttps://github.com.evil.com/o/r\0") &&
+	      !GR("remote.o.url\ngit@github.com.evil.com:o/r\0") &&
+	      !GR("remote.o.url\nhttps://github.com:/o/r\0") &&
+	      !GR("remote.o.url\nhttps://github.com:44x/o/r\0") &&
+	      !GR("remote.o.url\nx/y@github.com:o/r\0"));
+	CHECK("git remote: http, git, a port, any host case: yes (NIT-X1)",
+	      GR("remote.o.url\nhttp://github.com/o/r\0") &&
+	      GR("remote.o.url\ngit://github.com/o/r.git\0") &&
+	      GR("remote.o.url\nHTTPS://GitHub.com/o/r\0") &&
+	      GR("remote.o.url\nhttps://github.com:443/o/r\0") &&
+	      GR("remote.o.url\nssh://git@github.com:22/o/r.git\0") &&
+	      GR("remote.o.url\nssh://git@github.com/o/r\0") &&
+	      GR("remote.o.url\ngithub.com:o/r.git/\0"));
+	CHECK("git remote: scp path with ':' or '@', empty owner or repo, "
+	      "3 segments: no",
+	      !GR("remote.o.url\ngit@github.com:o/r:x\0") &&
+	      !GR("remote.o.url\ngit@github.com:o@r\0") &&
+	      !GR("remote.o.url\ngit@github.com:x@github.com:o/r\0") &&
+	      !GR("remote.o.url\nhttps://github.com//r\0") &&
+	      !GR("remote.o.url\nhttps://github.com/o/\0") &&
+	      !GR("remote.o.url\ngit@github.com:/r\0") &&
+	      !GR("remote.o.url\nhttps://github.com/x/o/r\0") &&
+	      !GR("remote.o.url\nhttps://github.com/o/r/x.git\0"));
 	CHECK("git remote: a value with an escaped newline is one URL: no",
 	      !GR("remote.x.url\nhttps://evil/x\nremote.y.url "
 	          "https://github.com/o/r\0") &&
