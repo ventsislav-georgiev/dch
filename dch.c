@@ -11879,7 +11879,9 @@ xr_ref_file(struct xr_scan *sc, const char *path, const struct stat *st,
 		xr_claude_codex(d);
 	xr_scan_sink(sc, &k);
 	xr_claude_refs(d, &k, (uint64_t)st->st_ino, xr_scan_tick, sc);
-	rc = xr_claude_read(d, fd, span, &capped);
+	/* light reads newest first: a ref of the last turns inside the budget */
+	rc = xr_scan_full(sc) ? xr_claude_read(d, fd, span, &capped)
+	     : xr_claude_newest(d, fd, span, &capped);
 	close(fd);
 	xr_claude_end(d, (uint64_t)st->st_ino, &ch);
 	xr_chapters_free(&ch);

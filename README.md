@@ -1236,8 +1236,15 @@ The corpus:
     neither key. At most 256 KiB of summaries is held at a time: past that,
     the oldest auto chapters give theirs up (they keep `auto`).
 - **`refs`.** The refs the corpus mentions (see [Refs](#refs)), at most 2000
-  keys. The rest are counted in `dropped_keys`, exactly up to 32768 distinct
-  keys and as a lower bound past that. `[]` for corpus `none`.
+  keys, each kind in a room of its own: 300 tickets, 400 issues, 500 pull
+  requests, 250 commits, 350 files and 200 URLs, so files, commits and URLs
+  never push out a pull request, an issue or a ticket. In a full room the
+  ref whose latest mention is the oldest goes. A ref that went and is
+  mentioned again comes back with the mentions since (its `count` starts
+  again). The keys out of the index are counted in `dropped_keys`, exactly up
+  to 32768 distinct keys and as a lower bound past that. `[]` for corpus
+  `none`. Before 1.62.0 the first 2000 keys seen stayed and every later one
+  was dropped.
 - **Size.** The object is capped at 4 MiB: past that, `refs` go first, from
   the end of the list, each counted in `dropped_keys`; then the oldest
   chapters go. `why` is `"output"`.
@@ -1295,8 +1302,13 @@ field. A shell line (rows joined at soft wraps, at most 64 KiB) gives at most
 128 mentions.
 
 Each entry of `refs` carries `key` (`<shape>:<text>`), `shape`, `text`,
-`full` (a commit's hex as written), `project`, `count`, `defined`,
-`definitions`, `title` and `underline` (defined, or counted at least twice).
+`full` (a commit's hex as written), `project`, `count`, `last_offset`,
+`defined`, `definitions`, `title` and `underline` (defined, or counted at
+least twice). `last_offset` (1.62.0) is where the ref's latest mention is,
+as a chapter's `offset`: the byte offset of its line in a Claude Code
+transcript or a Codex rollout, the seq of its record in a shell's ring (on
+the screen, a provisional seq). A larger one is a later mention; the list
+keeps its order (by `count`, then the first seen).
 `count` is per Claude or Codex mention, per shell block with OSC 133 marks,
 and per row without. A definition comes only from a paired tool result or a finished,
 typed shell block that did not fail: a heading (`# #831 Agent panes`), a
@@ -1375,7 +1387,15 @@ ref (`dch: not a ref`), relative paths against the session's cwd.
   (50 to 300, default 300, across all files, not counting time spent waiting
   on a reader that pauses) with `why: "budget"`. With
   `--scope project` or `all`, `<n>`'s own file is read to its end and only
-  another session's result stops the scan. A live shell's lines and another
+  another session's result stops the scan. A Claude Code transcript or a
+  Codex rollout is read newest first (1.62.0), so a ref of the last turns is
+  found inside the budget: in windows of 1 MiB from the end, each read from
+  its first whole line on, by a decoder that starts there (a mention before
+  the window's first prompt has `chapter: null`, and a tool result whose
+  call is in an older window gives no definition). Its lines come newest
+  window first, in file order within a window, and the file's `mention`
+  lines are its first and the next 199 to arrive, the newest. `--full` reads
+  oldest first, as before. A live shell's lines and another
   session's give titles and counts only: no `mention`, no `passage`.
 - **Full.** `--full` reads the whole corpus up to its caps: 64 files
   (`why: "files"`), 1 GiB (`why: "bytes"`) and 10 s (`why: "time"`). The
@@ -1386,7 +1406,7 @@ ref (`dch: not a ref`), relative paths against the session's cwd.
   `project_sessions` (the other sessions of its project dir: their mentions,
   and how many mention it), and `all` and `all_sessions` for the other dirs
   (`null` unless `--scope all`). `progress` carries the counts so far. A file gives its first `mention` line
-and its newest 199; the `tally`'s `mentions_dropped` counts the mention lines
+and its newest 199 (light: see above); the `tally`'s `mentions_dropped` counts the mention lines
 left out, and its `count` stays exact. `definition` lines come once per title,
 at most 8 per file. The output is capped at 4 MiB with room kept for the
 `tally` and `done`; past the cap the scan stops and `done` says
@@ -1537,8 +1557,10 @@ every 250 ms:
 - `{"schema":1,"chapter":{…}}`: a new chapter. A known `anchor` replaces
   that chapter, for example when its `error` turns on.
 - `{"schema":1,"ref":{…}}`: the whole ref object for a key whose count,
-  definition, title or `underline` changed. For a shell, `count` can go down
-  and `underline` can turn off. `count:0` removes the key.
+  `last_offset`, definition, title or `underline` changed (a screen row's
+  ref gets one when the row scrolls into the ring: its seq changes). For a
+  shell, `count` can go down and `underline` can turn off. `count:0` removes
+  the key, also one its kind's room let go.
 - `{"schema":1,"evict":{"seq":S}}` (shell only): the ring's oldest records
   went, and its head is now `S`. It is the first line of its batch. Drop the
   chapters whose `offset` is below `S`, then apply the batch's refs.

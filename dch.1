@@ -979,9 +979,16 @@ another project directory
 would add; from names only, nothing opened).
 .B refs
 lists the issues, pull requests, tickets, commits, files and URLs the corpus
-mentions (at most 2000 keys), each with
+mentions (at most 2000 keys, a room per kind: 300 tickets, 400 issues,
+500 pull requests, 250 commits, 350 files, 200 URLs; in a full room the ref
+whose latest mention is the oldest goes, counted in
+.BR dropped_keys ,
+and one mentioned again comes back with the mentions since), each with
 .BR key ,
 .BR count ,
+.B last_offset
+(where its latest mention is: a transcript line's byte offset, a ring
+record's seq),
 .BR defined ,
 .B title
 and
@@ -1008,7 +1015,12 @@ only another session's result stops it, and another session's lines, like
 a live shell's, carry no
 .B mention
 and no
-.BR passage ),
+.BR passage ;
+a transcript or rollout is read newest first, in 1 MiB windows from the
+end, each by a decoder that starts there, so a ref of the last turns is
+found inside the budget: lines come newest window first, and a mention
+before its window's first prompt has
+.BR chapter:null ),
 .B \-\-full
 to read it all up to 64 files
 .RB ( why:\(dqfiles\(dq ),
@@ -1023,7 +1035,8 @@ with it has no effect but is still checked: outside 50 to 300 it exits 2,
 .IR "bad budget" ;
 a file gives its first
 .B mention
-line and its newest 199, the rest counted in the tally's
+line and its newest 199 (light: the first 199 to arrive after it, the
+newest), the rest counted in the tally's
 .BR mentions_dropped ;
 one
 .B definition

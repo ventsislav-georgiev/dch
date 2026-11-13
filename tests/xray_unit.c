@@ -1484,9 +1484,12 @@ t_caps(void)
 		a.refs = ix;
 		b = NULL;
 		f = open_memstream(&b, &bl);
-		CHECK("caps: 2100 distinct shas give 2000 keys, dropped_keys 100",
-		      xr_index_keys(ix) == XR_KEYS && f && xr_print(f, &a) == 0 &&
-		      fclose(f) == 0 && strstr(b, "\"dropped_keys\":100}"));
+		/* #262: commits have a room of their own, the newest kept */
+		CHECK("caps: 2100 distinct shas give the commit room's 250 keys, "
+		      "the newest, dropped_keys 1850",
+		      xr_index_keys(ix) == 250 && f && xr_print(f, &a) == 0 &&
+		      fclose(f) == 0 && strstr(b, "\"dropped_keys\":1850}") &&
+		      strstr(b, "a00073a") && !strstr(b, "a000739"));
 		free(b);
 		xr_chapters_free(&ch);
 		xr_index_free(ix);
@@ -1549,9 +1552,10 @@ t_caps(void)
 		a.refs = ix;
 		b = NULL;
 		f = open_memstream(&b, &bl);
-		snprintf(m, sizeof m, "caps: 40960 keys: 2000 kept, dropped_keys "
-		         "the lower bound 32768, %lld ms (< 1000)", ms);
-		CHECK(m, big && xr_index_keys(ix) == XR_KEYS && f &&
+		snprintf(m, sizeof m, "caps: 40960 keys: the commit room's 250 "
+		         "kept, dropped_keys the lower bound 32768, %lld ms "
+		         "(< 1000)", ms);
+		CHECK(m, big && xr_index_keys(ix) == 250 && f &&
 		      xr_print(f, &a) == 0 && fclose(f) == 0 &&
 		      strstr(b, "\"dropped_keys\":32768}") && (!timed || ms < 1000));
 		free(b);
@@ -1560,6 +1564,104 @@ t_caps(void)
 	}
 	xr_index_free(ix);
 	free(row);
+}
+
+/* #262: each kind its own room, so 2100 commits leave room for the pulls,
+** issues and tickets mentioned after them; in a full room the ref whose
+** latest mention is the oldest goes; last_offset is that mention's line */
+static void
+rooms_line(char *row, int pulls, size_t from, size_t n)
+{
+	size_t j, o = (size_t)sprintf(row, "{\"type\":\"user\",\"message\":"
+	                              "{\"content\":\"");
+
+	for (j = from; j < from + n; j++)
+		o += (size_t)(pulls ? sprintf(row + o, "o/r#%zu ", j)
+		              : sprintf(row + o, "b%06zx ", j));
+	strcpy(row + o, "\"}}");
+	line(row);
+}
+
+static void
+t_rooms(void)
+{
+	static const size_t room[6] = XR_ROOMS;
+	struct xr_index *ix = xr_index_new();
+	struct xr_sink k;
+	struct xr_chapters ch;
+	struct xr_answer a;
+	char *row = malloc(70000), *b = NULL, want[200];
+	size_t i, bl, sum = 0;
+	uint64_t later;
+	FILE *f;
+
+	for (i = 0; i < 6; i++)
+		sum += room[i];
+	CHECK("rooms: the kinds' rooms add up to XR_KEYS", sum == XR_KEYS);
+	if (!ix || !row)
+		goto out;
+	xr_index_sink(ix, &k);
+	begin();
+	xr_claude_refs(D, &k, 1, NULL, NULL);
+	line(U("PROJ-1 #101 o/r#1"));
+	for (i = 0; i < 21; i++)	/* 2100 commits fill theirs */
+		rooms_line(row, 0, i * 100, 100);
+	line(U("PROJ-2 #102 o/r#600"));
+	for (i = 2; i < 499; i += 100)	/* pulls o/r#2..o/r#498 */
+		rooms_line(row, 1, i, i + 100 > 499 ? 499 - i : 100);
+	later = OFF;
+	line(U("o/r#1 later"));
+	line(U("o/r#501"));		/* 500 pulls: the room is full */
+	line(U("o/r#502"));		/* o/r#600 goes, not the touched o/r#1 */
+	line(U("b000000 again"));	/* back in; b00073a goes */
+	end(&ch);
+	memset(&a, 0, sizeof a);
+	a.session = a.session_id = "s";
+	a.corpus = "claude";
+	a.project = a.project_label = "";
+	a.available = a.complete = 1;
+	a.lines = -1;
+	a.ch = &ch;
+	a.refs = ix;
+	f = open_memstream(&b, &bl);
+	if (!f || xr_print(f, &a) != 0 || fclose(f) != 0)
+	{
+		CHECK("rooms: printed", 0);
+		goto done;
+	}
+	CHECK("rooms: tickets and issues mentioned after 2100 commits are kept",
+	      strstr(b, "\"key\":\"ticket:PROJ-2\"") &&
+	      strstr(b, "\"key\":\"issue:#102\"") &&
+	      strstr(b, "\"key\":\"ticket:PROJ-1\"") &&
+	      strstr(b, "\"key\":\"issue:#101\""));
+	CHECK("rooms: 4 + 500 pulls + 250 commits held",
+	      xr_index_keys(ix) == 754);
+	CHECK("rooms: a full pull room lets the least recently mentioned go "
+	      "(o/r#600), the touched o/r#1 stays",
+	      strstr(b, "\"key\":\"pull:o/r#1\"") &&
+	      !strstr(b, "\"key\":\"pull:o/r#600\"") &&
+	      strstr(b, "\"key\":\"pull:o/r#502\"") &&
+	      strstr(b, "\"key\":\"pull:o/r#2\""));
+	snprintf(want, sizeof want, "\"key\":\"pull:o/r#1\",\"shape\":\"pull\","
+	         "\"text\":\"o/r#1\",\"project\":\"\",\"count\":2,"
+	         "\"last_offset\":%llu,", (unsigned long long)later);
+	CHECK("rooms: last_offset is the line of the newest mention",
+	      strstr(b, want) != NULL);
+	CHECK("rooms: an evicted commit mentioned again is back (count 1), the "
+	      "oldest kept one goes",
+	      strstr(b, "\"key\":\"commit:b000000\",\"shape\":\"commit\","
+	                "\"text\":\"b000000\",\"full\":\"b000000\","
+	                "\"project\":\"\",\"count\":1,") &&
+	      !strstr(b, "\"key\":\"commit:b00073a\"") &&
+	      strstr(b, "\"key\":\"commit:b00073b\""));
+	CHECK("rooms: dropped_keys counts the keys out, not the one back "
+	      "(1850 commits + o/r#600)", strstr(b, "\"dropped_keys\":1851}"));
+done:
+	free(b);
+	xr_chapters_free(&ch);
+out:
+	free(row);
+	xr_index_free(ix);
 }
 
 /* --follow past the 4 MiB cap (QA 1.52.0 LOW-9): a ref the snapshot left
@@ -4471,6 +4573,7 @@ main(int argc, char **argv)
 	t_ref();
 	t_index();
 	t_caps();
+	t_rooms();
 	t_follow_cut();
 	t_auto();
 	t_queued_list();

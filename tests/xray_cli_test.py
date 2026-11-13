@@ -1201,22 +1201,35 @@ def test_refs():
     with open(tp, "w") as f:
         f.write(json.dumps({"type": "user", "cwd": "/home/demo/proj",
                             "timestamp": "2026-11-10T10:00:00Z",
-                            "message": {"content": "start #1"}}) + "\n")
+                            "message": {"content": "start #1 #515151"}})
+                + "\n")
         line = json.dumps({"type": "assistant", "message": {"content": [
             {"type": "text", "text": "PROJ-5 o/r#3 " + pad}]}}) + "\n"
         f.write(line * 40000)
         f.write(json.dumps({"type": "user", "message": {
             "content": "the end #424242"}}) + "\n")
     t0 = time.time()
+    r = dch("--xray", "xr-refs", "--ref", "#515151", "--scope", "session",
+            "--budget-ms", "50", "--json")
+    ls = ref_lines(r.stdout) or [{}]
+    d = ls[-1]
+    check("ref: light past its budget stops, partial, why budget: the first "
+          "line's ref, read newest first, is not reached (%.2fs)" %
+          (time.time() - t0),
+          r.returncode == 0 and d.get("done") is True and d["partial"] and
+          d["why"] == "budget" and d["bytes"] < os.path.getsize(tp) and
+          not any("mention" in l for l in ls), r.stdout[-600:] + r.stderr)
+    # #262: the last line's ref is the newest window's, found at once
     r = dch("--xray", "xr-refs", "--ref", "#424242", "--scope", "session",
             "--budget-ms", "50", "--json")
     ls = ref_lines(r.stdout) or [{}]
     d = ls[-1]
-    check("ref: light past its budget stops, partial, why budget "
-          "(%.2fs)" % (time.time() - t0),
+    check("ref: light reads newest first: the last line's ref is found under "
+          "a 50 ms budget, why first",
           r.returncode == 0 and d.get("done") is True and d["partial"] and
-          d["why"] == "budget" and d["bytes"] < os.path.getsize(tp) and
-          not any("mention" in l for l in ls), r.stdout[-600:] + r.stderr)
+          d["why"] == "first" and d["bytes"] < 2 << 20 and
+          [l["mention"]["line"] for l in ls if "mention" in l] ==
+          ["the end #424242"], r.stdout[-600:] + r.stderr)
     t0 = time.time()
     r = dch("--xray", "xr-refs", "--ref", "#424242", "--scope", "session",
             "--full", "--json")
@@ -1287,10 +1300,22 @@ def test_shell_caps():
         os.unlink(cfg)
 
 
+def caps_ref(i):
+    """Key i of test_claude_caps: every kind's room filled (#262, XR_ROOMS
+    300 tickets, 400 issues, 500 pulls, 250 commits, 350 files, 200 URLs),
+    then 100 tickets past it."""
+    for n, f in ((300, "PROJ-%d"), (700, "#%d"), (1200, "o/r#%d"),
+                 (1450, "c%06x"), (1800, "/home/demo/proj/f%d.c:1"),
+                 (2000, "https://e.com/u/%d")):
+        if i < n:
+            return f % (i + 1000)
+    return "PROJ-%d" % (i + 1000)
+
+
 def test_claude_caps():
     """Retained memory at the index's caps (3.8, l.717): 5000 chapters of
-    120-scalar titles, 2000 keys each with 8 definitions of 120-scalar
-    titles, and 100 keys past the cap."""
+    120-scalar titles, 2000 keys (the 1200 tickets, issues and pulls each
+    with 8 definitions of 120-scalar titles), and 100 keys past the cap."""
     cfg = os.path.join(HOME, ".claude")
     pdir = os.path.join(cfg, "projects", "-home-demo-proj")
     os.makedirs(pdir, exist_ok=True)
@@ -1303,8 +1328,8 @@ def test_claude_caps():
                                             (i, pad)}}) + "\n")
             if i >= 2100:
                 continue
-            out = "\n".join("# PROJ-%d %s %d" % (i + 1, pad, j)
-                            for j in range(8 if i < 2000 else 1))
+            out = "\n".join("# %s %s %d" % (caps_ref(i), pad, j)
+                            for j in range(8))
             f.write(json.dumps({"type": "assistant", "message": {"content": [
                 {"type": "tool_use", "id": "b%d" % i, "name": "Bash",
                  "input": {"command": "gh issue view %d" % i}}]}}) + "\n")
@@ -1322,12 +1347,109 @@ def test_claude_caps():
         except ValueError:
             o = None
         refs = (o or {}).get("refs", [])
-        check("caps: 2000 keys of 8 definitions each, 100 dropped (%.2fs)" %
-              wall, rc == 0 and len(refs) == 2000 and
-              all(x["definitions"] == 8 for x in refs) and
-              o["dropped_keys"] == 100, (rc, len(refs), out[-300:]))
+        shapes = {}
+        for x in refs:
+            shapes[x["shape"]] = shapes.get(x["shape"], 0) + 1
+        # a heading defines a ticket, an issue or a pull, never the rest
+        check("caps: 2000 keys, every room full, the 1200 tickets, issues "
+              "and pulls of 8 definitions each, 100 dropped (%.2fs)" % wall,
+              rc == 0 and len(refs) == 2000 and
+              all(x["definitions"] == 8 for x in refs
+                  if x["shape"] in ("ticket", "issue", "pull")) and
+              shapes == {"ticket": 300, "issue": 400, "pull": 500,
+                         "commit": 250, "file": 350, "url": 200} and
+              o["dropped_keys"] == 100, (rc, shapes, set((x["shape"], x["definitions"]) for x in refs)))
         rss_ok("caps: --json with 5000 chapters and 2000 x 8 definitions",
                rss)
+    finally:
+        os.unlink(tp)
+
+
+# ---- #262: the latest first, as Kindle's X-ray ---------------------------------
+
+LSID = "11111111-2222-4333-8444-5555555555a9"
+
+
+def test_latest():
+    """A generated transcript past the index's cap: 2100 commits, about 4 MB
+    of turns, then a last turn naming OQ-32 and o/r#14383. The index keeps
+    them (each kind its own room) with the last turn's offset; light --ref
+    reads newest first, so a 2 MB bytes cap still finds OQ-32 in the last
+    turn, and the answer stays partial."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, LSID + ".jsonl")
+    user = lambda t: json.dumps({"type": "user", "cwd": "/home/demo/proj",
+                                 "message": {"content": t}}) + "\n"
+    said = lambda t: json.dumps({"type": "assistant", "message": {
+        "content": [{"type": "text", "text": t}]}}) + "\n"
+    with open(tp, "w") as f:
+        f.write(user("start with OQ-1"))
+        for i in range(21):
+            f.write(said(" ".join("a%06x" % (i * 100 + j)
+                                  for j in range(100))))
+        for i in range(4000):
+            if i % 400 == 0:
+                f.write(user("turn %d" % i))
+            f.write(said("pad %d %s" % (i, "y" * 1000)))
+        f.write(user("where are OQ-32 and o/r#14383?"))
+        last = f.tell()
+        f.write(said("OQ-32 is open; o/r#14383 is in flight"))
+    history("xr-latest", LSID, cfg)
+    try:
+        rc, o, err = xray("xr-latest", "--json")
+        refs = {x["key"]: x for x in (o or {}).get("refs", [])}
+        check("latest: past 2000 keys (2100 commits first), the last turn's "
+              "ticket and pull are in the index",
+              rc == 0 and "ticket:OQ-32" in refs and "pull:o/r#14383" in refs
+              and "ticket:OQ-1" in refs, (rc, len(refs), err))
+        check("latest: last_offset is the offset of the newest mention's line",
+              refs.get("ticket:OQ-32", {}).get("last_offset") == last and
+              refs.get("ticket:OQ-1", {}).get("last_offset") == 0,
+              (last, refs.get("ticket:OQ-32"), refs.get("ticket:OQ-1")))
+        ask = user("where are OQ-32 and o/r#14383?")
+        caps = dict(ENV, DCH_XRAY_CAPS="0:2000000")
+        r = dch("--xray", "xr-latest", "--ref", "OQ-32", "--json", env=caps)
+        ls = ref_lines(r.stdout) or [{}]
+        men = [l["mention"]["offset"] for l in ls if "mention" in l]
+        check("latest: light --ref reads newest first: under a 2 MB bytes cap "
+              "both mentions of the last turn are found, partial, why bytes",
+              r.returncode == 0 and men == [last - len(ask), last] and
+              ls[-1].get("done") and ls[-1]["partial"] and
+              ls[-1]["why"] == "bytes" and
+              ls[-1]["counts"]["session"] == 2, (r.returncode, ls[-4:]))
+        r = dch("--xray", "xr-latest", "--ref", "OQ-32", "--scope", "session",
+                "--json", env=caps)
+        ls = ref_lines(r.stdout) or [{}]
+        men = [l["mention"]["offset"] for l in ls if "mention" in l]
+        check("latest: light --scope session stops at the newest window's "
+              "first mention, why first",
+              r.returncode == 0 and men == [last - len(ask)] and
+              ls[-1]["partial"] and ls[-1]["why"] == "first",
+              (r.returncode, ls[-3:]))
+        r = dch("--xray", "xr-latest", "--ref", "OQ-1", "--json", env=caps)
+        ls = ref_lines(r.stdout) or [{}]
+        check("latest: light --ref of a ref only in the first turn, past the "
+              "bytes cap from the end: not found, partial, why bytes",
+              r.returncode == 0 and ls[-1].get("done") and
+              ls[-1]["partial"] and ls[-1]["why"] == "bytes" and
+              ls[-1]["counts"]["session"] == 0, (r.returncode, ls[-2:]))
+        r = dch("--xray", "xr-latest", "--ref", "OQ-1", "--json",
+                env=dict(ENV, DCH_XRAY_NOCLOCK="1"))
+        ls = ref_lines(r.stdout) or [{}]
+        men = [l["mention"]["offset"] for l in ls if "mention" in l]
+        check("latest: light --ref with no cap reads every window, down to "
+              "the first turn; not partial",
+              r.returncode == 0 and men == [0] and not ls[-1]["partial"] and
+              ls[-1]["bytes"] == os.path.getsize(tp), (ls[-2:],))
+        r = dch("--xray", "xr-latest", "--ref", "OQ-32", "--full", "--json")
+        ls = ref_lines(r.stdout) or [{}]
+        men = [l["mention"]["offset"] for l in ls if "mention" in l]
+        check("latest: --full still reads oldest first, both mentions, not "
+              "partial", r.returncode == 0 and
+              men == [last - len(ask), last] and not ls[-1]["partial"],
+              (ls[-3:],))
     finally:
         os.unlink(tp)
 
@@ -2131,17 +2253,19 @@ def test_follow_late():
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                              env=dbg)
         first = p.stdout.readline()
-        # 1200 ref lines (120 a line: under the 128 spans of a line)
+        # 1200 refs (120 a line: under the 128 spans of a line), 1120 ref
+        # lines: issues, pulls and tickets, each kind in its room (#262)
         put([{"type": "assistant", "message": {"content": [
-            {"type": "text", "text": " ".join("#%d" % (1000 + 120 * j + i)
-                                              for i in range(120))}]}}
+            {"type": "text", "text": " ".join(
+                ("#%d" if j < 4 else "o/r#%d" if j < 8 else "PROJ-%d") %
+                (1000 + 120 * j + i) for i in range(120))}]}}
              for j in range(10)])
         time.sleep(3.0)
         got = []
         th = threading.Thread(target=lambda: got.extend(p.stdout),
                               daemon=True)
         th.start()
-        wait_for(lambda: '"issue:#2199"'.encode() in b"".join(got), 15)
+        wait_for(lambda: '"ticket:PROJ-2199"'.encode() in b"".join(got), 15)
         wait_for(lambda: "xray follow: batch" in open(trace).read(), 5)
         off = os.path.getsize(trace)
         put([{"type": "assistant", "message": {"content": [
@@ -3019,9 +3143,12 @@ def test_screen_seam():
               all(m["chapter"] not in seq for m in men) and
               [bool(m["chapter"]) for m in men] == [False, True, False, True],
               men)
+        # #262: a ref line may come, its last_offset moved with the rows'
+        # provisional seqs; its count stays
         check("screen seam: the follower reports no count change on the "
               "scroll", not [x for x in fl.objs(k)
-                             if is_ref("pull:x/y#1")(x)], fl.objs(k))
+                             if is_ref("pull:x/y#1")(x) and
+                             x["ref"]["count"] != 2], fl.objs(k))
     finally:
         if fl:
             fl.stop()
@@ -3293,6 +3420,7 @@ def main():
         test_chapter_shell()
         test_cancel()
         test_claude_caps()
+        test_latest()
         test_shell_caps()
         test_follow_history()
         test_auto()

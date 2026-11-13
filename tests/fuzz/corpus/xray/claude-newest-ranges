@@ -1,0 +1,10 @@
+2{"type": "user", "cwd": "/w", "message": {"content": "look at #831 and o/r#7 PROJ-5"}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "see a1b2c3d and /w/x.c:3 zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b1", "name": "Bash", "input": {"command": "gh issue view 831"}}]}}
+{"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "b1", "content": "# #831 Title\nhttps://github.com/o/r/pull/9"}]}}
+{"type": "user", "cwd": "/w", "message": {"content": "again OQ-32 o/r#14383"}}
+{"type": "user", "cwd": "/w", "message": {"content": "look at #831 and o/r#7 PROJ-5"}}
+{"type": "assistant", "message": {"content": [{"type": "text", "text": "see a1b2c3d and /w/x.c:3 zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"}]}}
+{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b1", "name": "Bash", "input": {"command": "gh issue view 831"}}]}}
+{"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "b1", "content": "# #831 Title\nhttps://github.com/o/r/pull/9"}]}}
+{"type": "user", "cwd": "/w", "message": {"content": "again OQ-32 o/r#14383"}}
