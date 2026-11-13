@@ -859,6 +859,13 @@ def test_tmp():
         v.key(b"q")
     finally:
         v.close()
+    # the checkout stands for a project outside every temp dir; a checkout
+    # in one is scratch itself (QA 1.60.0 NIT-T5)
+    if REPO.startswith(("/tmp/", "/private/tmp/", "/var/folders/",
+                        "/private/var/folders/")):
+        print("  skip Refs #220: a project outside the temp dirs: this "
+              "checkout, %s, is in one" % REPO)
+        return
     v, scr, text = refs_tab("xv-tr")
     try:
         check("Refs #220: a project outside the temp dirs resolves no row: "
