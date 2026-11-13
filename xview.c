@@ -1,8 +1,9 @@
 /*
 ** The X-ray view (#175, XR5a): `dch --xray <n>` with no --json, and the
-** picker's x. Two tabs over one session, Prompts (Commands for a shell,
-** #295: the engine's chapters) and Refs (the refs on the session's screen
-** now first, #294); a ref's card; a chapter's reader. Drawn with the
+** picker's x. Tabs over one session: Prompts (Commands for a shell,
+** #295: the engine's chapters), Responses (each turn's answer, newest first,
+** #290; none for a shell) and Refs (the refs on the session's screen now
+** first, #294); a ref's card; a chapter's reader. Drawn with the
 ** picker's renderer, on the terminal its host (dch.c) made raw and put on
 ** the alternate screen.
 **
@@ -33,6 +34,11 @@
 #define XV_LATE      16	/* kept: SIGKILLed, not dead yet */
 
 enum { XV_LIST, XV_CARD, XV_READ };
+/* the tabs as drawn and cycled: 0 Prompts, 2 Responses (#290), 1 Refs (the
+** chord's xv_tab) */
+static const int xv_ord[] = { 0, 2, 1 };
+#define XV_NTAB  ((int)(sizeof xv_ord / sizeof *xv_ord))
+#define XV_ALINES 8	/* a response's lines on Responses; the reader has all */
 enum { XV_FK, XV_CK, XV_RK, XV_SK, XV_NKIDS };	/* follow, card, reader,
 						** a remote screen (#188) */
 
@@ -59,6 +65,11 @@ struct xv_ch
 	char *anchor, *title, *kind, *summary;
 	long long at, offset;
 	int error, aut;	/* aut: "auto", a prompt the harness wrote (#192) */
+	/* the turn's answer and tool line (#296), "" when absent (an older
+	** host's); roff -1 none, rcut: the engine cut it */
+	char *resp, *tools;
+	long long roff;
+	int rcut;
 };
 
 struct xv_ref
@@ -117,10 +128,12 @@ struct xv
 	int allauto, nauto;	/* Chapters: auto chapters shown; their rows */
 	long long rseq;
 	struct xv_kid kid[XV_NKIDS];
-	int sel[2], top[2], *vis, nvis, avis;
+	int sel[XV_NTAB], top[XV_NTAB], *vis, nvis, avis;	/* Responses: items */
 	int ngrp;		/* Refs: vis's first ngrp rows are on screen */
 	char *selk;		/* Refs: the selected row's key, followed when
 				** the rows change */
+	char *sela;		/* Responses: the selected item's anchor, so */
+	int old;		/* Responses: a host too old to send them */
 	/* the card */
 	char *ckey, *ctext;
 	int full, scope, cdone, cpartial, csel, ctop;
@@ -132,6 +145,7 @@ struct xv
 	char *vkind, *vtitle, *vsub;	/* --full's resolved line */
 	/* the reader */
 	char *rtitle, *rwant;
+	char *rans;		/* opened on an answer: its start (#290) */
 	char *ranchor, *rturn;	/* the chapter shown; one being turned to */
 	long long rat;
 	int rtrunc, rtop, rw, rloaded;
@@ -559,6 +573,8 @@ xv_ch_free(struct xv_ch *c)
 	xv_sfree(c->title);
 	xv_sfree(c->kind);
 	xv_sfree(c->summary);
+	xv_sfree(c->resp);
+	xv_sfree(c->tools);
 }
 
 static void
@@ -586,6 +602,7 @@ static void
 xv_chapter(struct xv *v, const struct json_parser *p, int o)
 {
 	struct xv_ch c;
+	char *s;
 	int k;
 
 	c.anchor = xv_str(p, o, "anchor");
@@ -597,6 +614,14 @@ xv_chapter(struct xv *v, const struct json_parser *p, int o)
 	/* absent from an older engine or host: every chapter shown */
 	c.aut = xv_bool(p, o, "auto");
 	c.summary = xv_str(p, o, "summary");
+	c.resp = xv_str(p, o, "response");
+	c.tools = xv_str(p, o, "tools");
+	c.roff = xv_num(p, o, "response_offset", -1);
+	c.rcut = xv_bool(p, o, "response_cut");
+	/* a tab or CR as a blank, as the reader's */
+	for (s = c.resp; *s; s++)
+		if (*s == '\t' || *s == '\r')
+			*s = ' ';
 	/* an anchor already held is replaced (3.3) */
 	for (k = 0; k < v->nch && strcmp(v->ch[k].anchor, c.anchor); k++)
 		;
@@ -1017,6 +1042,15 @@ xv_wrap(struct xv *v, int w)
 			}
 	if (v->rend && !v->rloaded)
 		v->rtop = v->nrl;	/* xv_draw_read clamps */
+	/* opened on an answer (#290): at the last reply holding its start
+	** (entries carry no offset), else at the end */
+	for (k = v->nrl - 1; v->rans && !v->rloaded && k >= 0; k--)
+		if (!v->rl[k].kind && !strcmp(v->e[v->rl[k].n].role, "assistant")
+		    && strstr(v->e[v->rl[k].n].text, v->rans))
+		{
+			v->rtop = k;
+			break;
+		}
 	v->rloaded = 1;
 }
 
@@ -1034,6 +1068,8 @@ xv_rline(struct xv *v, const struct json_parser *p)
 		v->rturn = NULL;
 		xv_sfree(v->rwant);
 		v->rwant = NULL;
+		free(v->rans);
+		v->rans = NULL;
 	}
 	xv_read_free(v);
 	v->rtitle = xv_str(p, 0, "title");
@@ -1083,6 +1119,8 @@ xv_read(struct xv *v, const char *anchor, const char *want)
 	xv_read_free(v);
 	xv_sfree(v->rwant);
 	v->rwant = want ? strdup(want) : NULL;
+	free(v->rans);
+	v->rans = NULL;
 	free(v->ranchor);
 	v->ranchor = strdup(anchor);
 	free(v->rturn);
@@ -1472,6 +1510,47 @@ xv_hid(const struct xv_ch *c)
 	return c->aut || !strcmp(c->kind, "compact");
 }
 
+static int xv_live(const struct xv *v);
+
+/* Chapter k's turn is still running (#290): the newest, no answer yet */
+static int
+xv_working(const struct xv *v, int k)
+{
+	return k == v->nch - 1 && !v->ch[k].resp[0] && xv_live(v);
+}
+
+/* Chapter k is an item of Responses: an answer, a tool line, an answer the
+** cap dropped (its offset), or a turn still running */
+static int
+xv_item(const struct xv *v, int k)
+{
+	const struct xv_ch *c = &v->ch[k];
+
+	return c->resp[0] || c->tools[0] || c->roff >= 0 || xv_working(v, k);
+}
+
+/* A remote view whose host sends no answers (a dch before 1.63.0): a turn
+** has ended and no chapter carries any of #296's fields */
+static int
+xv_old(const struct xv *v)
+{
+	int k;
+
+	if (!v->hl || v->nch - xv_live(v) < 1)
+		return 0;
+	for (k = 0; k < v->nch; k++)
+		if (v->ch[k].resp[0] || v->ch[k].tools[0] || v->ch[k].roff >= 0)
+			return 0;
+	return 1;
+}
+
+/* Responses is a tab: the snapshot says prompts, not commands */
+static int
+xv_rtab(const struct xv *v)
+{
+	return v->have && !strcmp(xv_noun(v), "prompt");
+}
+
 /* Refs row k of xv_vis: the index's, or past it the screen's. */
 static struct xv_ref *
 xv_rfat(struct xv *v, int k)
@@ -1485,9 +1564,12 @@ xv_vis1(struct xv *v, int k)
 {
 	const struct xv_ref *r = v->tab == 1 ? xv_rfat(v, k) : NULL;
 
+	if (v->tab == 2 && (v->old || !xv_item(v, k)))
+		return;
 	if (v->filt[0] &&
 	    !(!r ? xv_has(v->ch[k].title, v->filt) ||
-	      xv_has(v->ch[k].summary, v->filt)
+	      xv_has(v->ch[k].summary, v->filt) ||
+	      (v->tab == 2 && xv_has(v->ch[k].resp, v->filt))
 	      : xv_has(r->text, v->filt) || xv_has(r->title, v->filt)))
 		return;
 	/* Refs opens on pulls, issues and tickets; a shows the rest */
@@ -1503,15 +1585,18 @@ xv_vis1(struct xv *v, int k)
 	v->vis[v->nvis++] = k;
 }
 
-/* The rows a list tab shows (Chapters, Refs): their indexes, filtered.
-** Refs: the refs on the screen now first (#294), the index's own row when
-** it holds the key, then the rest, never one twice. */
+/* The rows a list tab shows (Prompts, Responses, Refs): their indexes,
+** filtered. Responses: the newest first (#290). Refs: the refs on the
+** screen now first (#294), the index's own row when it holds the key, then
+** the rest, never one twice. */
 static void
 xv_vis(struct xv *v)
 {
-	int k, j, n = v->tab == 0 ? v->nch : v->nrf;
+	int k, j, n = v->tab == 1 ? v->nrf : v->nch;
+	const char *sk = v->tab == 1 ? v->selk : v->sela;
 
 	v->nvis = v->ntmp = v->nauto = v->nk = 0;
+	v->old = xv_old(v);
 	for (k = 0; k < v->nrf; k++)
 		v->rf[k].onscr = 0;
 	for (j = 0; v->tab == 1 && j < v->nsr; j++)
@@ -1525,8 +1610,8 @@ xv_vis(struct xv *v)
 	}
 	v->ngrp = v->nvis;
 	for (k = 0; k < n; k++)
-		if (v->tab == 0 || !v->rf[k].onscr)
-			xv_vis1(v, k);
+		if (v->tab != 1 || !v->rf[k].onscr)
+			xv_vis1(v, v->tab == 2 ? n - 1 - k : k);
 	if (v->tab == 1 && v->nvis - v->ngrp > 1)
 	{
 		xv_sort_rf = v->rf;
@@ -1535,25 +1620,27 @@ xv_vis(struct xv *v)
 	}
 	/* Refs: the selection stays on its ref while the rows change under
 	** it, the screen's each second; on the first row it stays there (the
-	** newest under it); a key gone keeps the index */
-	for (k = 0; v->tab == 1 && v->sel[1] > 0 && v->selk && k < v->nvis;
-	     k++)
-		if (!strcmp(xv_rfat(v, v->vis[k])->key, v->selk))
+	** newest under it); a key gone keeps the index. Responses: on its
+	** prompt, as --follow re-sends them (#290) */
+	for (k = 0; v->tab && v->sel[v->tab] > 0 && sk && k < v->nvis; k++)
+		if (!strcmp(v->tab == 1 ? xv_rfat(v, v->vis[k])->key
+		            : v->ch[v->vis[k]].anchor, sk))
 		{
-			v->sel[1] = k;
+			v->sel[v->tab] = k;
 			break;
 		}
 }
 
-/* Refs: remember the selected row's key for xv_vis */
+/* Refs, Responses: remember the selected row's key for xv_vis */
 static void
 xv_selk(struct xv *v)
 {
-	int s = v->sel[1];
+	int s = v->sel[v->tab];
+	char **k = v->tab == 1 ? &v->selk : &v->sela;
 
-	free(v->selk);
-	v->selk = s >= 0 && s < v->nvis ? strdup(xv_rfat(v, v->vis[s])->key)
-	          : NULL;
+	free(*k);
+	*k = s < 0 || s >= v->nvis ? NULL : strdup(v->tab == 1
+	     ? xv_rfat(v, v->vis[s])->key : v->ch[v->vis[s]].anchor);
 }
 
 /* sel and top inside n rows of a window of win */
@@ -1601,6 +1688,133 @@ xv_row_ch(const struct xv_ch *c, int i, int on)
 	pk_txt(c->aut && c->summary[0] ? c->summary : c->title);
 	if (on)
 		pk_pad(pk_w);
+}
+
+/* The next line of s in w cells (a newline ends one, a long one wraps):
+** its n bytes; returns where the one after it starts. */
+static const char *
+xv_wline(const char *s, int w, size_t *n)
+{
+	size_t ll = strcspn(s, "\n"), f = xv_fitlen(s, ll, w);
+
+	if (!f && ll)
+		f = 1;
+	*n = f;
+	return s[f] == '\n' ? s + f + 1 : s + f;
+}
+
+/* One more line of an item: 1 when it is drawn (*h below room), begun
+** under the row's lead and faint when said */
+static int
+xv_fline1(int *h, int room, int faint)
+{
+	if ((*h)++ >= room)
+		return 0;
+	pk_line();
+	xv_lead(0);
+	pk_set(faint ? "2" : "");
+	pk_txt("      ");
+	return 1;
+}
+
+/* Responses item i of vis (#290), its lines drawn while fewer than room
+** (0: measured only): the prompt as its Prompts row, the tool line faint,
+** the answer wrapped to XV_ALINES lines (an ellipsis when there is more:
+** the reader has it), or what stands in for it, then a blank. Returns its
+** height, the blank included. */
+static int
+xv_feed1(struct xv *v, int i, int room)
+{
+	int k = v->vis[i], h = 0, w = pk_w - 8, l;
+	const struct xv_ch *c = &v->ch[k];
+	const char *s = c->resp;
+	size_t n;
+
+	if (h++ < room)
+	{
+		pk_line();
+		xv_row_ch(c, k, i == v->sel[2]);
+		pk_eol();
+	}
+	if (c->tools[0] && xv_fline1(&h, room, 1))
+	{
+		pk_txt(c->tools);
+		pk_eol();
+	}
+	for (l = 0; *s && l < XV_ALINES; l++)
+	{
+		const char *t = s;
+
+		s = xv_wline(t, w, &n);
+		if (xv_fline1(&h, room, 0))
+		{
+			xv_txtn(t, n);
+			pk_eol();
+		}
+	}
+	if ((*s || c->rcut || (!c->resp[0] && (xv_working(v, k) ||
+	     c->roff >= 0))) && xv_fline1(&h, room, 1))
+	{
+		pk_txt(c->resp[0] ? xv_ell() : xv_working(v, k) ? "working"
+		       : "Enter reads it");
+		if (!c->resp[0] && xv_working(v, k))
+			pk_txt(xv_ell());
+		pk_eol();
+	}
+	if (h++ < room)
+	{
+		pk_line();
+		pk_eol();
+	}
+	return h;
+}
+
+/* Responses (#290): the items from top[2] down, the selected one whole on
+** screen when it fits, else at the window's top; the window full when
+** items above the top fit in it. */
+static void
+xv_draw_feed(struct xv *v, int win)
+{
+	int *sel = &v->sel[2], *top = &v->top[2], n = v->nvis, t, h;
+
+	if (*sel >= n)
+		*sel = n - 1;
+	if (*sel < 0)
+		*sel = 0;
+	if (*top > *sel)
+		*top = *sel;
+	/* h: the lines from t to the selected one's last (its blank not) */
+	for (t = *sel, h = xv_feed1(v, t, 0) - 1;
+	     t > *top && h + xv_feed1(v, t - 1, 0) <= win;)
+		h += xv_feed1(v, --t, 0);
+	*top = t;
+	for (h = -1; t < n && h <= win; t++)
+		h += xv_feed1(v, t, 0);
+	while (t == n && *top > 0 && h + xv_feed1(v, *top - 1, 0) <= win)
+		h += xv_feed1(v, --*top, 0);
+	xv_selk(v);
+	for (t = *top, h = 0; t < n && h < win; t++)
+		h += xv_feed1(v, t, win - h);
+	for (; h < win; h++)
+	{
+		pk_line();
+		pk_eol();
+	}
+}
+
+/* PgDn (d 1), PgUp (-1) on Responses: the items a window holds from the
+** selected one that way, at least one */
+static int
+xv_page(struct xv *v, int d)
+{
+	int k = v->sel[2] < v->nvis ? v->sel[2] : v->nvis - 1, s = 0, k0;
+
+	if (k < 0)
+		return 0;
+	for (k0 = k; k + d >= 0 && k + d < v->nvis &&
+	     (s += xv_feed1(v, d > 0 ? k : k + d, 0)) <= v->win;)
+		k += d;
+	return k == k0 ? d : k - k0;
 }
 
 /* s in w cells; one that does not fit keeps its first keep bytes, then an
@@ -1906,14 +2120,14 @@ xv_live(const struct xv *v)
 static void
 xv_draw(struct xv *v, int force)
 {
-	const char *tabn[2] = { "Prompts", "Refs" };
+	const char *tabn[XV_NTAB] = { "Prompts", "Refs", "Responses" };
 	static const char spin[] = "\xe2\xa0\x8b\xe2\xa0\x99\xe2\xa0\xb9"
 		"\xe2\xa0\xb8\xe2\xa0\xbc\xe2\xa0\xb4\xe2\xa0\xa6\xe2\xa0\xa7"
 		"\xe2\xa0\x87\xe2\xa0\x8f", ascii[] = "|/-\\";
 	struct pkkey keys[12];
 	const char *ret = pk_utf ? "\xe2\x86\xb5" : "enter";
 	char b[1200], tmp[32], kt[32];
-	int nk = 0, kl, cap, k, n, busy, isref;
+	int nk = 0, kl, cap, k, n, busy, isref, cnt[XV_NTAB];
 	unsigned drop;
 
 	pk_begin(v->fd, v->color);
@@ -1959,13 +2173,13 @@ xv_draw(struct xv *v, int force)
 		XV_K(3, "q", "quit");
 	else
 	{
-		XV_K(0, ret, v->tab == 0 ? "read" : "card");
-		if (v->tab == 0 && xv_live(v))
+		XV_K(0, ret, v->tab != 1 ? "read" : "card");
+		if (v->tab != 1 && xv_live(v))
 			XV_K(0, "o", "open session");
 		XV_K(3, "/", "filter");
 		if (isref)
 			XV_K(0, "^R", "look up");
-		if (v->tab == 0 && (xv_vis(v), v->nauto))
+		if (v->tab != 1 && (xv_vis(v), v->nauto))
 		{
 			snprintf(tmp, sizeof tmp, "%d hidden", v->nauto);
 			keys[nk++] = (struct pkkey){ "n", v->allauto
@@ -2062,14 +2276,24 @@ xv_draw(struct xv *v, int force)
 	}
 	else if (v->have)
 	{
-		/* no tabs before the snapshot says Prompts or Commands (#295);
-		** Prompts: the ones shown by default */
+		/* no tabs before the snapshot says Prompts or Commands (#295),
+		** so with Responses or without (#290); Prompts, Responses: the
+		** ones shown by default */
 		if (strcmp(xv_noun(v), "prompt"))
 			tabn[0] = "Commands";
-		for (k = n = 0; k < v->nch; k++)
-			n += !xv_hid(&v->ch[k]);
-		for (k = 0; k < 2; k++)
-			pk_tab(tabn[k], k == 0 ? n : v->nrf, k == v->tab);
+		if (v->tab == 2 && !xv_rtab(v))
+			v->tab = 0;	/* a snapshot that says commands now */
+		n = xv_old(v);
+		for (k = cnt[0] = cnt[2] = 0; k < v->nch; k++)
+		{
+			cnt[0] += !xv_hid(&v->ch[k]);
+			cnt[2] += !n && !xv_hid(&v->ch[k]) && xv_item(v, k);
+		}
+		cnt[1] = v->nrf;
+		for (k = 0; k < XV_NTAB; k++)
+			if (xv_ord[k] != 2 || xv_rtab(v))
+				pk_tab(tabn[xv_ord[k]], cnt[xv_ord[k]],
+				       xv_ord[k] == v->tab);
 	}
 	pk_eol();
 
@@ -2089,6 +2313,8 @@ xv_draw(struct xv *v, int force)
 			pk_line();
 			pk_eol();
 		}
+	else if (v->tab == 2 && v->have && (xv_vis(v), v->nvis))
+		xv_draw_feed(v, v->win);
 	else
 	{
 		int *sel = &v->sel[v->tab], *top = &v->top[v->tab], win = v->win;
@@ -2142,17 +2368,21 @@ xv_draw(struct xv *v, int force)
 			else if (k == 0)
 			{
 				pk_set("2");
-				pk_txt(!v->have ? "    Reading" : v->tab == 1 && v->nk &&
+				pk_txt(!v->have ? "    Reading" : v->tab == 2 && v->old
+				       ? "    the host's dch is older than 1.63.0 "
+				       "and sends no responses" : v->tab == 1 && v->nk &&
 				       !v->allk ? "    Only files, commits and URLs: a "
 				       "shows them" : v->tab == 1 && v->ntmp &&
 				       !v->alltmp ? "    Only temp files: t shows them"
-				       : v->tab == 0 && v->nauto && !v->allauto
+				       : v->tab != 1 && v->nauto && !v->allauto
 				       ? "    Only auto rows: n shows them"
 				       : isref ? "    No match: ^R looks it up"
 				       : v->filt[0] ? "    No match; ^R looks up a "
 				       "ticket, issue, pull, commit, file or URL, not "
 				       "words" : v->tab == 0 ? strcmp(xv_noun(v), "prompt")
 				       ? "    No commands" : "    No prompts"
+				       : v->tab == 2 ? "    No responses yet: what the "
+				       "agent answers at the end of each turn shows here"
 				       : "    No refs yet: the files, "
 				       "commits, pull requests, issues and URLs this session "
 				       "touches show here");
@@ -2240,7 +2470,7 @@ xv_filt(struct xv *v, int c)
 			v->filt[l + 1] = '\0';
 		}
 	}
-	v->sel[0] = v->sel[1] = 0;
+	memset(v->sel, 0, sizeof v->sel);
 	return 1;
 }
 
@@ -2380,7 +2610,15 @@ xv_key(struct xv *v, int c)
 	if (c == '\t' || c == PK_RIGHT || c == PK_BTAB || c == PK_LEFT ||
 	    c == 'l' || c == 'h')
 	{
-		v->tab = !v->tab;
+		/* the next tab as drawn, or the previous one; Responses only
+		** where it is a tab (#290) */
+		n = c == '\t' || c == PK_RIGHT || c == 'l' ? 1 : XV_NTAB - 1;
+		for (k = 0; k < XV_NTAB - 1 && xv_ord[k] != v->tab; k++)
+			;
+		do
+			k = (k + n) % XV_NTAB;
+		while (xv_ord[k] == 2 && !xv_rtab(v));
+		v->tab = xv_ord[k];
 		if (v->tab == 1)
 			xv_screen_load(v);
 		return 0;
@@ -2424,7 +2662,12 @@ xv_key(struct xv *v, int c)
 		v->sel[0] = n;
 		return 0;
 	}
-	if (v->tab == 0 && c == 'o')
+	if (v->tab == 2 && c == 'n')
+	{
+		v->allauto = !v->allauto;	/* xv_vis keeps the selection */
+		return 0;
+	}
+	if (v->tab != 1 && c == 'o')
 		return xv_open(v);
 	sel = &v->sel[v->tab];
 	xv_vis(v);
@@ -2433,8 +2676,8 @@ xv_key(struct xv *v, int c)
 	{
 	case 'j': case PK_DOWN: (*sel)++; break;
 	case 'k': case PK_UP: (*sel)--; break;
-	case PK_PGDN: *sel += v->win; break;
-	case PK_PGUP: *sel -= v->win; break;
+	case PK_PGDN: *sel += v->tab == 2 ? xv_page(v, 1) : v->win; break;
+	case PK_PGUP: *sel += v->tab == 2 ? xv_page(v, -1) : -v->win; break;
 	case 'g': case PK_HOME: *sel = 0; break;
 	case 'G': case PK_END: *sel = n - 1; break;
 	case '\r': case '\n':
@@ -2443,6 +2686,16 @@ xv_key(struct xv *v, int c)
 		k = v->vis[*sel];
 		if (v->tab == 0)
 			xv_read(v, v->ch[k].anchor, NULL);
+		else if (v->tab == 2)
+		{
+			/* at the answer: its start (entries carry no offset); a
+			** dropped one, or none yet, at the turn's end */
+			n = (int)strcspn(v->ch[k].resp, "\n");
+			xv_read(v, v->ch[k].anchor, NULL);
+			v->rend = 1;
+			if (v->ch[k].resp[0])
+				v->rans = strndup(v->ch[k].resp, n < 60 ? (size_t)n : 60);
+		}
 		else
 		{
 			const struct xv_ref *r = xv_rfat(v, k);
@@ -2451,7 +2704,7 @@ xv_key(struct xv *v, int c)
 		}
 		break;
 	}
-	if (v->tab == 1)
+	if (v->tab)
 		xv_selk(v);
 	return 0;
 }
@@ -2496,6 +2749,8 @@ xv_free(struct xv *v)
 	free(v->rl);
 	free(v->sr);
 	free(v->selk);
+	free(v->sela);
+	free(v->rans);
 	free(v);
 }
 

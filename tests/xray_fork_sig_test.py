@@ -166,7 +166,7 @@ def test_direct():
     try:
         ok = v.wait(b"Prompts", 20)  # a Claude record (#295)
         v.pump(0.3)
-        v.key(b"\t", 0.3)
+        v.key(b"\033[Z", 0.3)  # Prompts back to Refs (#290)
         ok = ok and v.wait(b"#831", 10)
         check("direct view: the Refs tab lists #831", ok, v.out[-600:])
         if not ok:

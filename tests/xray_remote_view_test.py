@@ -98,6 +98,14 @@ Covers:
       card; each a ctl --xray of its own. The hostile host refuses --ref
       as an older dch's grammar would (exit 2): the status says the host's
       dch takes no such ref, with its line, and the view stays.
+  13. Responses (#290) of srv:xv-cl: the host's answers newest first (the
+      text, or the tool line of a turn that ended on its result), Enter
+      reads the item's prompt from the host at 2 of 2, q back to the item,
+      each a ctl --xray of its own. A fake host whose chapters lack #296's
+      fields (a dch before 1.63.0): the tab says so, keys do no harm. One
+      with them: the running turn working, an answer the cap dropped
+      (response_offset, no response) says Enter reads it, and Enter reads
+      it from the host. Every Prompts-to-Refs move is Shift-Tab now.
 
 Run:  python3 tests/xray_remote_view_test.py      (uses ./dch)
 """
@@ -348,7 +356,7 @@ def test_view():
         check("hostile host text: the chapter title's OSC, BEL, U+202E and "
               "U+061C show as ?", v.wait(b"o/r#7 ?]0;pwned? evil?title al?m"),
               v.out[-600:])
-        v.key(b"\t")
+        v.key(b"\033[Z")  # Shift-Tab: Prompts back to Refs (#290)
         check("Refs: the host's keys", v.wait(b"#831") and
               v.wait(b"PROJ-5") and v.wait(b"o/r#7"), v.out[-600:])
         v.key(b"\033[B", 0.3)  # #831: PROJ-5, said last, is on top (#262)
@@ -377,7 +385,7 @@ def test_view():
               v.wait(b"xv-cl has ended: no session to open", start=mark) and
               v.reap() is None, v.out[mark:])
         v.key(b"\033", 0.5)
-        v.key(b"\t")  # Refs, then Prompts: two tabs (#294)
+        v.key(b"\t")  # Refs, then Prompts: Tab wraps (#290)
         mark = len(v.out)
         v.key(b"\r", 1.0)
         check("reader: Enter reads the newest chapter from the host",
@@ -480,7 +488,7 @@ def test_small_card():
     v = Pty([DCH, "--xray", "srv:xv-cl"])
     try:
         v.wait(b"Prompts 2")
-        v.key(b"\t")
+        v.key(b"\033[Z")
         v.wait(b"#831")
         mark = len(v.out)
         v.key(b"\r")
@@ -788,7 +796,7 @@ def test_link_drop():
               v.wait(b"X-ray  q:fk") and v.wait(b"Prompts 1"),
               v.out[-600:])
         mark = len(v.out)
-        v.key(b"\t", 1.5)
+        v.key(b"\033[Z", 1.5)
         v.wait(b"o/r#5", start=mark)
         v.pump(0.3)
         text = shown(v, 0)
@@ -829,6 +837,132 @@ def test_link_drop():
               frame_.count(stop + b"unreachable"), frame_[-600:])
         v.key(b"q")
         check("link drop: q exits 0", v.exit() == 0, v.out[-80:])
+    finally:
+        v.close()
+        h.close()
+
+
+# ---- Responses (#290): the host's answers --------------------------------
+
+def screen_rows(v):
+    """The text last drawn on each row, its escapes removed."""
+    got, parts = {}, re.split(rb"\033\[(\d+);1H", v.out)
+    for i in range(1, len(parts) - 1, 2):
+        got[int(parts[i])] = re.sub(rb"\033\[[0-9;?]*[A-Za-z]", b"",
+                                    parts[i + 1]).decode("utf-8", "replace")
+    return got
+
+
+def items(v):
+    """Responses' items on screen, top down: (its title, [its lines])."""
+    out, scr = [], screen_rows(v)
+    for k in sorted(x for x in scr if x >= 4):
+        r = scr[k]
+        if r.startswith(("\u2500", "-")):
+            break
+        if re.match(r"^.\s{0,3}\d+  ", r):
+            out.append((r.rstrip().split("  ")[-1].strip(), []))
+        elif out and r.strip():
+            out[-1][1].append(r.strip())
+    return out
+
+
+def head(v):
+    sel = [r for r in screen_rows(v).values() if r.startswith("\u258c")]
+    return sel[0] if sel else ""
+
+
+def test_responses():
+    n0 = ctls("--xray")
+    v = Pty([DCH, "--xray", "srv:xv-cl"])
+    try:
+        v.wait(b"Prompts 2")
+        v.pump(0.5)
+        mark = len(v.out)
+        v.key(b"\t", 1.0)
+        ok = v.wait(b"Responses 2", start=mark)
+        it = items(v)
+        check("Responses, remote: the host's answers, newest first: its "
+              "text; a turn that ended on its tool result its tool line",
+              ok and len(it) == 2 and
+              it[0] == ("second prompt about PROJ-5", ["noted"]) and
+              it[1][1] == ["Bash 1"], (it, v.out[mark:][-600:]))
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        check("Responses, remote: Enter reads the item's prompt from the "
+              "host, 2 of 2, its Reply", v.wait(b"2 of 2", start=mark) and
+              v.wait(b"Reply", start=mark) and v.wait(b"noted", start=mark),
+              v.out[mark:][-600:])
+        mark = len(v.out)
+        v.key(b"q", 1.0)
+        check("Responses, remote: q back to the item",
+              v.wait(b"Responses 2", start=mark) and
+              "second prompt about PROJ-5" in head(v), head(v))
+        v.key(b"q")
+        check("Responses, remote: q exits 0", v.exit() == 0, v.out[-80:])
+    finally:
+        v.close()
+    until(lambda: ctls("--xray") - n0 >= 2, 5)
+    check("Responses, remote: the follow and the chapter, each its own ctl "
+          "--xray on the host", ctls("--xray") - n0 == 2,
+          ctls("--xray") - n0)
+
+
+def test_responses_fake():
+    """A host before 1.63.0 (chapters without #296's fields) says so on
+    Responses; one with the fields: a cut-dropped answer reads Enter reads
+    it, the running turn working."""
+    two = (b'"offset":0},{"anchor":"s2","title":"second","kind":"prompt",'
+           b'"at":1794300100,"offset":9}]')
+    h = Flaky(SNAP.replace(b'"offset":0}]', two))
+    hosts("q=127.0.0.1:%d" % h.port)
+    v = Pty([DCH, "--xray", "q:fk"])
+    try:
+        v.wait(b"Prompts 2")
+        mark = len(v.out)
+        v.key(b"\t", 1.0)
+        check("Responses, an older host: the tab says its dch sends none",
+              v.wait(b"Responses 0", start=mark) and
+              v.wait(b"the host's dch is older than 1.63.0 and sends no "
+                     b"responses", start=mark), v.out[mark:][-600:])
+        v.key(b"j\r", 0.5)
+        v.key(b"q")
+        check("Responses, an older host: keys do no harm, q exits 0",
+              v.exit() == 0, v.out[-80:])
+    finally:
+        v.close()
+        h.close()
+    two = (b'"offset":0,"response_offset":5,"tools":"Bash 2"},{"anchor":'
+           b'"s2","title":"second","kind":"prompt","at":1794300100,'
+           b'"offset":9,"tools":"Read 1"}]')
+    ch = {"s1": json.dumps({"title": "first", "at": 1794300000,
+                            "entries": [{"role": "user", "text": "FIRST"},
+                                        {"role": "assistant",
+                                         "text": "THE-DROPPED-ANSWER"}]})
+          .encode() + b"\n"}
+    h = Flaky(SNAP.replace(b'"offset":0}]', two), ch)
+    hosts("q=127.0.0.1:%d" % h.port)
+    v = Pty([DCH, "--xray", "q:fk"])
+    try:
+        v.wait(b"Prompts 2")
+        mark = len(v.out)
+        v.key(b"\t", 1.0)
+        v.wait(b"Responses 2", start=mark)
+        it = items(v)
+        check("Responses, a host with the fields: the running turn working, "
+              "an answer the cap dropped says Enter reads it",
+              it == [("second", ["Read 1", "working\u2026"]),
+                     ("first", ["Bash 2", "Enter reads it"])], it)
+        v.key(b"j", 0.3)
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        check("Responses: Enter on it reads it from the host",
+              v.wait(b"THE-DROPPED-ANSWER", start=mark) and
+              v.wait(b"1 of 2", start=mark), v.out[mark:][-600:])
+        v.key(b"q", 0.5)
+        v.key(b"q")
+        check("Responses, a host with the fields: q, q exits 0",
+              v.exit() == 0, v.out[-80:])
     finally:
         v.close()
         h.close()
@@ -1026,7 +1160,7 @@ def gone(what, v, rc, seen):
 
 def card(v, tab=False):
     if tab:
-        v.key(b"\t", 0.3)  # to Refs; Esc from a card keeps the tab
+        v.key(b"\033[Z", 0.3)  # to Refs; Esc from a card keeps the tab
     mark = len(v.out)
     v.key(b"\r", 0.1)
     return v.wait(b"light", start=mark, secs=5)
@@ -2049,6 +2183,7 @@ def main():
         hosts("srv=127.0.0.1:%d" % port)
         test_view()
         test_lookup()
+        test_responses()
         test_small_card()
         test_on_screen()
         test_picker(port)
@@ -2058,6 +2193,7 @@ def main():
         test_failures()
         test_link_drop()
         test_turn_drop()
+        test_responses_fake()
         test_stop()
         test_chord(port)
         test_chord_detach()

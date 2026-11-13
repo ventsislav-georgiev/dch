@@ -12,8 +12,9 @@ Covers:
   2. --scope, --full or --budget-ms with no --json and no --ref on a
      terminal: exit 2, a usage message, the view not opened; no such
      session: exit 1, the message after the terminal is restored;
-  3. the two tabs (no On screen, #294; Prompts for a Claude session,
-     Commands for a shell's, never Chapters, #295), the chapter list, the Refs list,
+  3. the tabs (no On screen, #294; Prompts for a Claude session,
+     Commands for a shell's, never Chapters, #295; Shift-Tab from Prompts
+     to Refs, #290), the chapter list, the Refs list,
      the card (light, `f` full scan, `y` OSC 52 copy, `p` other projects
      and back, `o` on the ended session said), the chapter reader, back,
      quit (exit 0, terminal restored);
@@ -78,6 +79,24 @@ Covers:
      card (outer blanks cut), Enter reads its mention's chapter, Esc goes
      back with the filter kept; plain words: one faint line says ^R takes
      refs, not words, and ^R says so with no card.
+ 14. Responses (#290): xv-rs, a History Claude record: Tab from Prompts
+     opens it, the tabs Prompts, Responses, Refs in that order with their
+     counts; newest first, the newest selected; a turn with tools and a
+     2-line answer: its tool line then the lines; a 12-line answer: 8 lines
+     then an ellipsis; an answer over 2 KB with ESC, BEL and U+202E: drawn
+     with ? (none reach the terminal), and at 300 columns, where its 2048
+     bytes fit in 8 lines, the ellipsis from response_cut alone; a turn
+     that ended on a tool call: its tool line, no working line; the auto
+     row hidden until n, the selection kept; j, Enter reads that prompt at
+     its Reply (the first row in a window shorter than the chapter), q back
+     to the item; / matches answer text; g, G; Tab on to Refs, Tab wraps to
+     Prompts, Shift-Tab back to Refs, h to Responses. xv-lv, a live Claude
+     (a sleep with a session record): the running turn says working under
+     its tool line, its answer replaces it when --follow re-sends the
+     chapter, a new turn on top keeps a selection on its prompt and one on
+     the first item on the first. xv-cx, a live fake Codex over the
+     codex-0167 rollout: its answer and tool line, its last turn working.
+     A shell (xv-0) has no Responses tab.
 
 Run:  python3 tests/xray_view_test.py      (uses ./dch)
 """
@@ -333,7 +352,7 @@ def test_view():
               "show as ?", v.wait(b"o/r#7 ?]0;pwned? evil?title al?m"),
               v.out[-600:])
         mark = len(v.out)
-        v.key(b"\t", 1.0)
+        v.key(b"\033[Z", 1.0)  # Shift-Tab: Prompts back to Refs (#290)
         scr = rows(v.out[mark:])
         text = "\n".join(scr[k] for k in sorted(scr))
         at = [text.find(x) for x in ("PROJ-5", "#831", "o/r#7")]
@@ -385,7 +404,7 @@ def test_view():
               v.reap() is None, text)
         mark = len(v.out)
         v.key(b"\033", 0.5)
-        v.key(b"\t")  # Refs, then Prompts: two tabs (#294)
+        v.key(b"\t")  # Refs, then Prompts: Tab wraps (#290)
         mark = len(v.out)
         v.key(b"\r", 1.0)
         check("reader: Enter opens the selected chapter (the newest)",
@@ -472,7 +491,7 @@ def test_refs():
               b"Refs 13" in v.out and b"On screen" not in v.out,
               v.out[-600:])
         mark = len(v.out)
-        v.key(b"\t", 1.0)
+        v.key(b"\033[Z", 1.0)
         scr = rows(v.out[mark:])
         text = "\n".join(scr[k] for k in sorted(scr))
         check("Refs: the tab count stays the engine's total (13)",
@@ -629,7 +648,7 @@ def test_latest():
         v.wait(b"Prompts 1")
         v.pump(0.5)
         mark = len(v.out)
-        v.key(b"\t", 1.0)
+        v.key(b"\033[Z", 1.0)
         scr = rows(v.out[mark:])
         text = "\n".join(scr[k] for k in sorted(scr))
         at = [text.find(x) for x in ("#77", "PROJ-9", "o/r#1")]
@@ -708,7 +727,7 @@ def test_lookup():
               v.wait(b"^R looks up the ref typed after /", start=mark) and
               b"light" not in v.out[mark:], v.out[mark:])
         v.key(b"\033", 0.3)
-        v.key(b"\t", 1.0)
+        v.key(b"\033[Z", 1.0)
         mark = len(v.out)
         v.key(b"/ deadbeef1 ", 1.0)
         text = shown(v, mark)
@@ -815,7 +834,7 @@ def refs_tab(name):
     v.wait(b"Prompts 1")
     v.pump(0.5)
     mark = len(v.out)
-    v.key(b"\t", 1.0)
+    v.key(b"\033[Z", 1.0)
     mark = len(v.out)
     v.key(b"a", 1.0)  # files and URLs too (#262)
     scr = rows(v.out[mark:])
@@ -1129,6 +1148,368 @@ def test_compact():
         v.close()
 
 
+# ---- Responses (#290): each turn's answer, newest first ---------------------
+
+ESID = "11111111-2222-4333-8444-5555555555e1"   # xv-rs, a History record
+VSID = "11111111-2222-4333-8444-5555555555e2"   # xv-lv, a live Claude
+LONGA = "\n".join("line %02d of the long answer" % i for i in range(1, 13))
+BIG = "BIG \033]0;pwned\007 evil\u202eend\n" + "y" * 3000
+
+
+def tl(sid):
+    return os.path.join(HOME, ".claude", "projects", "-home-demo-proj",
+                        sid + ".jsonl")
+
+
+def turn(prompt, ts, *after, auto=False):
+    """A prompt record, then what followed it."""
+    u = {"type": "user", "cwd": P, "timestamp": ts,
+         "message": {"content": prompt}}
+    if auto:
+        u["origin"] = {"kind": "task-notification"}
+    return [u] + list(after)
+
+
+def say(text):
+    return {"type": "assistant", "message": {"content": [
+        {"type": "text", "text": text}]}}
+
+
+def call(tid, name, inp):
+    return {"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "id": tid, "name": name, "input": inp}]}}
+
+
+def result(tid, out, extra=None):
+    o = {"type": "user", "message": {"content": [
+        {"type": "tool_result", "tool_use_id": tid, "content": out}]}}
+    o.update(extra or {})
+    return o
+
+
+def fixture_resp():
+    """xv-rs: a turn with tools and a 2-line answer, an auto row, a 12-line
+    answer, one over 2 KB with hostile bytes (cut), one that ended on a
+    tool call (no answer)."""
+    patch = {"filePath": P + "/src/parse.c", "structuredPatch": [{
+        "oldStart": 1, "oldLines": 1, "newStart": 1, "newLines": 1,
+        "lines": ["-a", "+b"]}]}
+    lines = (turn("fix the parser", "2026-11-10T10:00:00Z",
+                  call("e1", "Edit", {"file_path": P + "/src/parse.c",
+                                      "old_string": "a", "new_string": "b"}),
+                  result("e1", "edited", {"toolUseResult": patch}),
+                  call("b1", "Bash", {"command": "make test"}),
+                  result("b1", "12 passed"),
+                  say("Fixed the parser.\nAll 12 tests pass.")) +
+             turn(note("<task-id>t1</task-id>\n<summary>Build finished: 3 "
+                       "passed</summary>"), "2026-11-10T10:10:00Z",
+                  say("noticed the build"), auto=True) +
+             turn("explain at length", "2026-11-10T10:20:00Z", say(LONGA)) +
+             turn("write a big one", "2026-11-10T10:30:00Z", say(BIG)) +
+             turn("the last, ended mid-tool", "2026-11-10T10:40:00Z",
+                  call("r1", "Read", {"file_path": P + "/x.c"})))
+    os.makedirs(os.path.dirname(tl(ESID)), exist_ok=True)
+    with open(tl(ESID), "w") as f:
+        for o in lines:
+            f.write(json.dumps(o) + "\n")
+    sockdir = os.path.join(T, "dch-%d" % os.getuid())
+    hdir = os.path.join(T, "state", "dch", "sessions",
+                        sockdir.replace("/", "-"))
+    os.makedirs(hdir, exist_ok=True)
+    rec = {"name": "xv-rs", "cwd": P, "end": "exited", "argv": ["claude"],
+           "started": 1794299400, "updated": 1794300000,
+           "ended": 1794300000, "sock_dir": sockdir,
+           "agent": {"session_id": ESID, "cwd": P,
+                     "config_dir": os.path.join(HOME, ".claude")}}
+    with open(os.path.join(hdir, "xv-rs.json"), "w") as f:
+        f.write(json.dumps(rec) + "\n")
+
+
+def items(scr):
+    """Responses' items on screen, top down, over the rule: (its title,
+    [its lines])."""
+    out = []
+    for k in sorted(x for x in scr if x >= 4):
+        r = scr[k]
+        if r.startswith(("\u2500", "-")):
+            break
+        if re.match(r"^.\s{0,3}\d+  ", r):
+            out.append((r.rstrip().split("  ")[-1].strip(), []))
+        elif out and r.strip():
+            out[-1][1].append(r.strip())
+    return out
+
+
+def head(v):
+    """The selected item's header row."""
+    sel = [r for r in rows(v.out).values() if r.startswith("\u258c")]
+    return sel[0] if sel else ""
+
+
+def test_responses():
+    o = json.loads(dch("--xray", "xv-rs", "--json").stdout)
+    ch = o["chapters"]
+    check("Responses fixture: the engine's answers, the cut one, the tools, "
+          "none for the turn that ended on a call",
+          [bool(c.get("response")) for c in ch] ==
+          [True, True, True, True, False] and ch[3].get("response_cut") and
+          "Edit 1" in ch[0].get("tools", "") and
+          ch[4].get("tools") == "Read 1", ch)
+    v = Pty([DCH, "--xray", "xv-rs"], rows=44, cols=100)
+    try:
+        v.wait(b"Prompts 4")
+        v.pump(0.5)
+        mark = len(v.out)
+        v.key(b"\t", 1.0)
+        scr = rows(v.out)
+        tabs = scr.get(2, "")
+        check("Responses: Tab from Prompts opens it; the tabs Prompts, "
+              "Responses, Refs in that order, each with its count",
+              0 <= tabs.find("Prompts 4") < tabs.find("Responses 4") <
+              tabs.find("Refs"), tabs)
+        it = items(scr)
+        check("Responses: newest first, the auto row hidden",
+              [h for h, _ in it][:4] ==
+              ["the last, ended mid-tool", "write a big one",
+               "explain at length", "fix the parser"], it)
+        check("Responses: the newest item is selected",
+              "the last, ended mid-tool" in head(v), head(v))
+        d = dict(it)
+        check("Responses: a turn that ended on a call: its tool line, no "
+              "text, no working line (an ended session)",
+              d.get("the last, ended mid-tool") == ["Read 1"], d)
+        check("Responses: the tool line, then the answer's lines",
+              d.get("fix the parser", [""])[0].startswith("Edit 1 (1 file") and
+              d["fix the parser"][1:] == ["Fixed the parser.",
+                                          "All 12 tests pass."], d)
+        check("Responses: a long answer: 8 lines, then a faint ellipsis",
+              d.get("explain at length") ==
+              LONGA.split("\n")[:8] + ["\u2026"], d)
+        check("Responses: hostile bytes in an answer show as ?",
+              d.get("write a big one", [""])[0] == "BIG ?]0;pwned? evil?end",
+              d)
+        text = screen(v, 0)
+        check("Responses: the footer names Enter read, filter, n and tabs",
+              "read" in text and "/ filter" in text and
+              "n auto rows 1 hidden" in text and "tabs" in text, text)
+        v.key(b"n", 1.0)
+        it = items(rows(v.out))
+        check("Responses: n shows the auto row, its summary as the title, "
+              "the selection kept", any("Build finished" in h and
+                                        b == ["noticed the build"]
+                                        for h, b in it) and
+              "the last, ended mid-tool" in head(v), (it, head(v)))
+        v.key(b"n", 1.0)
+        v.key(b"j", 0.5)
+        check("Responses: j selects the next (older) item",
+              "write a big one" in head(v), head(v))
+        v.resize(20, 100)   # the chapter longer than the window
+        v.pump(0.5)
+        mark = len(v.out)
+        v.key(b"\r", 1.5)
+        v.wait(b"Reply", start=mark)
+        v.pump(0.5)
+        scr = rows(v.out[mark:])
+        check("Responses: Enter reads that prompt, at its answer (the "
+              "reader's first row is the Reply)",
+              scr.get(2, "").startswith("4 of 5") and
+              scr.get(4, "").startswith("Reply") and
+              "BIG ?]0;pwned" in scr.get(5, ""), scr)
+        mark = len(v.out)
+        v.key(b"q", 1.0)
+        v.resize(44, 100)
+        v.pump(0.5)
+        check("Responses: q goes back to the item it came from",
+              v.wait(b"Responses 4", start=mark) and
+              "write a big one" in head(v), head(v))
+        v.key(b"j", 0.5)
+        mark = len(v.out)
+        v.key(b"\r", 1.5)
+        v.wait(b"Reply", start=mark)
+        v.pump(0.5)
+        scr = rows(v.out[mark:])
+        r = [k for k in scr if scr[k].startswith("Reply")]
+        check("Responses: Enter on the long answer reads it, its first line "
+              "under its Reply", r and
+              "line 01 of the long answer" in scr.get(r[0] + 1, ""), scr)
+        v.key(b"\033", 1.0)
+        v.key(b"/line 05", 1.0)
+        it = items(rows(v.out))
+        check("Responses: / matches an answer's text",
+              [h for h, _ in it] ==
+              ["explain at length"], it)
+        v.key(b"\033", 0.5)
+        v.key(b"G", 0.5)
+        check("Responses: G selects the oldest", "fix the parser" in head(v),
+              head(v))
+        v.key(b"g", 0.5)
+        check("Responses: g the newest",
+              "the last, ended mid-tool" in head(v), head(v))
+        mark = len(v.out)
+        v.key(b"\t", 1.0)
+        check("Responses: Tab goes on to Refs", v.wait(b"[Refs", start=mark)
+              or b"Pull requests, issues" in v.out[mark:], v.out[mark:][-400:])
+        mark = len(v.out)
+        v.key(b"\t", 1.0)
+        check("Refs: Tab wraps to Prompts", v.wait(b"[Prompts", start=mark),
+              v.out[mark:][-400:])
+        mark = len(v.out)
+        v.key(b"\033[Z", 1.0)
+        v.key(b"h", 1.0)
+        check("Shift-Tab from Prompts to Refs, h back to Responses",
+              v.wait(b"[Responses", start=mark) and
+              "the last, ended mid-tool" in head(v), v.out[mark:][-400:])
+        v.key(b"q")
+        check("Responses: q exits 0", v.exit() == 0, v.out[-80:])
+        bad = [b for b in (b"\033]0;pwned", b"\007 evil", b"\xe2\x80\xae")
+               if b in v.out]
+        check("Responses: no answer ESC, BEL or bidi byte reached the "
+              "terminal", not bad, bad)
+    finally:
+        v.close()
+    # wide: the cut answer's 2048 bytes fit in 8 lines, so only
+    # response_cut puts the ellipsis there
+    v = Pty([DCH, "--xray", "xv-rs"], rows=50, cols=300)
+    try:
+        v.wait(b"Prompts 4")
+        v.pump(0.5)
+        v.key(b"\t", 1.0)
+        d = dict(items(rows(v.out)))
+        big = d.get("write a big one", [])
+        check("Responses: an answer the engine cut ends in an ellipsis "
+              "though its lines fit", len(big) == 9 and big[-1] == "\u2026"
+              and big[-2].startswith("y"), big)
+        check("Responses: a whole answer has none",
+              d.get("fix the parser", [""])[-1] == "All 12 tests pass.", d)
+        v.key(b"q")
+        v.exit()
+    finally:
+        v.close()
+
+
+def test_responses_live():
+    """xv-lv: a live Claude (a sleep with a session record): its running
+    turn says working; --follow's re-sent chapters keep the selection on
+    its prompt, the first item on the first."""
+    cwd = os.path.realpath(T)
+    path = os.path.join(HOME, ".claude", "projects", cwd.replace("/", "-"),
+                        VSID + ".jsonl")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        for o in (turn("first live prompt", "2026-11-10T10:00:00Z",
+                       say("answer one")) +
+                  turn("second, running", "2026-11-10T11:00:00Z",
+                       call("b1", "Bash", {"command": "sleep 1"}))):
+            f.write(json.dumps(dict(o, cwd=cwd) if "cwd" in o else o) + "\n")
+    dch("--spawn", "xv-lv", "/bin/sleep", "300")
+    pid = until(lambda: json.loads(dch("--cmd", "xv-lv").stdout or "{}")
+                .get("pid"), 5)
+    start = subprocess.run(["/bin/ps", "-o", "lstart=", "-p", str(pid)],
+                           capture_output=True, text=True,
+                           env={"LC_ALL": "C", "TZ": "UTC"}).stdout.strip()
+    sd = os.path.join(HOME, ".claude", "sessions")
+    os.makedirs(sd, exist_ok=True)
+    with open(os.path.join(sd, "%d.json" % pid), "w") as f:
+        json.dump({"pid": pid, "sessionId": VSID, "cwd": cwd,
+                   "procStart": start, "version": "2.1.0",
+                   "kind": "interactive", "status": "busy",
+                   "statusUpdatedAt": 1}, f)
+
+    def add(*recs):
+        with open(path, "a") as f:
+            for o in recs:
+                f.write(json.dumps(o) + "\n")
+
+    v = Pty([DCH, "--xray", "xv-lv"], rows=40, cols=100)
+    try:
+        v.wait(b"Prompts 2")
+        v.pump(0.5)
+        v.key(b"\t", 1.0)
+        it = items(rows(v.out))
+        check("Responses, live: the running turn says working, under its "
+              "tool line", it and it[0][0] == "second, running" and
+              it[0][1] == ["Bash 1", "working\u2026"], (it, screen(v, 0)))
+        check("Responses, live: the footer offers o", "o open session" in
+              screen(v, 0), screen(v, 0))
+        add(result("b1", "ok"), say("the second answer"))
+        ok = until(lambda: (v.pump(0.1), any(
+            h == "second, running" and "the second answer" in b
+            for h, b in items(rows(v.out))))[1], 10)
+        check("Responses, live: the answer replaces working when the turn "
+              "ends (--follow re-sends the chapter)", ok, items(rows(v.out)))
+        v.key(b"j", 0.5)
+        add(*turn("third prompt", "2026-11-10T12:00:00Z", say("answer 3")))
+        ok = until(lambda: (v.pump(0.1), any(
+            h == "third prompt" for h, b in items(rows(v.out))))[1], 10)
+        check("Responses, live: a new turn on top, the selection stays on "
+              "its prompt", ok and "first live prompt" in head(v),
+              (items(rows(v.out)), head(v)))
+        v.key(b"g", 0.5)
+        add(*turn("fourth prompt", "2026-11-10T13:00:00Z", say("answer 4")))
+        ok = until(lambda: (v.pump(0.1), any(
+            h == "fourth prompt" for h, b in items(rows(v.out))))[1], 10)
+        check("Responses, live: the first item selected stays the first",
+              ok and "fourth prompt" in head(v), head(v))
+        v.key(b"q")
+        v.exit()
+    finally:
+        v.close()
+        dch("-k", "xv-lv")
+
+
+def test_responses_codex():
+    """xv-cx: a live fake Codex over the codex-0167 rollout: its answer
+    and tool line on Responses, its last turn working."""
+    tid = "019a1111-2222-7333-8444-555566667702"
+    src = os.path.join(HERE, "xray", "fixtures", "codex-0167", "codex",
+                       tid + ".jsonl")
+    sess = os.path.join(HOME, ".codex", "sessions", "2026", "11", "10")
+    snaps = os.path.join(HOME, ".codex", "shell_snapshots")
+    os.makedirs(sess, mode=0o700, exist_ok=True)
+    os.makedirs(snaps, mode=0o700, exist_ok=True)
+    shutil.copy(src, os.path.join(
+        sess, "rollout-2026-11-10T10-00-00-%s.jsonl" % tid))
+    bindir = os.path.join(T, "bin")
+    os.makedirs(bindir, exist_ok=True)
+    fake = os.path.join(bindir, "codex")
+    b = subprocess.run(["cc", "-o", fake, os.path.join(HERE, "fake_codex.c")],
+                       capture_output=True, text=True, timeout=60)
+    check("codex: the fake codex builds", b.returncode == 0, b.stderr)
+    log = os.path.join(T, "codex.log")
+    cwd = os.path.join(T, "work", "xv-cx")
+    os.makedirs(cwd, exist_ok=True)
+    r = subprocess.run([DCH, "--spawn", "xv-cx", "--size", "80x24", "--cwd",
+                        cwd, fake], capture_output=True, text=True,
+                       timeout=30, env=dict(ENV, FAKE_CODEX_LOG=log))
+    got = until(lambda: os.path.exists(log) and
+                open(log).read().endswith("\n") and open(log).read().split(),
+                10)
+    check("codex: the fake codex runs", r.returncode == 0 and got, r.stderr)
+    marker = got[1] if got and got[1] != "-" else None
+    p = os.path.join(snaps, tid + ".1.sh")
+    with open(p, "w") as f:
+        f.write("# Snapshot file\nexport DCH_SESSION=xv-cx\n%s" % (
+            "export DCH_NATIVE_BRIDGE_ID=%s\n" % marker if marker else ""))
+    os.chmod(p, 0o600)
+    v = Pty([DCH, "--xray", "xv-cx"], rows=40, cols=100)
+    try:
+        ok = v.wait(b"Prompts 2", 15)
+        v.pump(0.5)
+        v.key(b"\t", 1.0)
+        it = items(rows(v.out))
+        check("Responses, Codex: the tab, the answer and the tool line, the "
+              "running turn working", ok and len(it) == 2 and
+              "Ship it" in it[0][0] and it[0][1] == ["working\u2026"] and
+              it[1][1] == ["exec 1, wait 1",
+                           "PR #78 fixes it (commit 9f8e7d6c)."], it)
+        v.key(b"q")
+        v.exit()
+    finally:
+        v.close()
+        subprocess.run([DCH, "-k", "xv-cx"], capture_output=True, timeout=30,
+                       env=ENV)
+
+
 def clients(name):
     for r in json.loads(dch("--ls-json").stdout):
         if r["name"] == name:
@@ -1300,6 +1681,8 @@ def test_screen_group(lite):
         v.pump(0.5)
         check("#294: no On screen tab", b"Refs 0" in v.out and
               b"On screen" not in v.out, v.out[-600:])
+        check("#290: a shell has no Responses tab, never drawn",
+              b"Responses" not in v.out, v.out[-600:])
         mark = len(v.out)
         v.key(b"\t", 1.5)  # over 1 s: the screen read at least once
         check("Refs: no refs, the empty state says what would show",
@@ -1397,7 +1780,7 @@ def test_small_card():
     v = Pty([DCH, "--xray", "xv-cl"])
     try:
         v.wait(b"Prompts 2")
-        v.key(b"\t")
+        v.key(b"\033[Z")
         v.wait(b"#831")
         mark = len(v.out)
         v.key(b"\r")
@@ -1936,6 +2319,10 @@ def main():
         fixture_auto()
         test_auto()
         test_compact()
+        fixture_resp()
+        test_responses()
+        test_responses_live()
+        test_responses_codex()
         test_resize()
         test_small_card()
         shell()

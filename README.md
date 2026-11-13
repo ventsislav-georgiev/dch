@@ -883,7 +883,7 @@ the picker. The view asks the same engine as `--json` and holds its index as
 open. It writes nothing to disk. Text from the session (titles, lines,
 passages) is drawn with every control and bidi character shown as `?`.
 
-The view has two tabs:
+The view has three tabs, two for a shell session (no Responses):
 - **Prompts** (**Commands** for a shell session): one row per thing you
   typed, a prompt to Claude or Codex, a command to a shell. `/` filters.
   `Enter` opens the prompt read-only with everything up to the next one
@@ -916,6 +916,20 @@ The view has two tabs:
   say it is not theirs). On an ended session `o` says so and the view
   stays. The attach opens at the session's live screen, not at the
   prompt.
+- **Responses** (Claude and Codex sessions): what the agent showed you at
+  the end of each turn, as Claude Code's Focus view does: its answer, or
+  its summary of the work. Newest first, so the latest answer is on top
+  when you switch to it. Each item is the prompt's row as on Prompts, the
+  turn's tools on one faint line (e.g. `Edit 3 (2 files, +40 -12), Bash 2,
+  Read 1`), then the answer wrapped to the width, at most 8 lines, Markdown
+  as written. A faint `…` says there is more: the reader has it (the
+  engine keeps the first 2 KB of an answer). A turn still running says
+  `working…`; an answer the size cap left out says `Enter reads it`. `j`
+  `k` move item by item. `Enter` reads the prompt in the reader, opened at
+  the answer (at the prompt's end when it cannot find it), and `q` comes
+  back to the item. `/` filters on the prompt and the answer; `n` and `o`
+  work as on Prompts. The tab's count is the items shown without `n`. A
+  host older than 1.63.0 sends no answers, and the tab says so.
 - **Refs**: what the session touched: the pull requests, issues and tickets
   it mentions, one row each, a faint line over them saying so; `a` shows its
   files, commits and URLs too, and the footer says how many are hidden. Rows
@@ -948,10 +962,11 @@ The view has two tabs:
   label on each ref.
 
 A ref typed after `/` (a ticket, issue, pull request, commit, file or URL,
-as `--ref` takes it) opens its card with `Ctrl-R`, on Prompts and Refs, while
+as `--ref` takes it) opens its card with `Ctrl-R`, on any tab, while
 typing or after: also when no row has it, a row is not the one you want, or
 its kind is hidden until `a`. The footer shows `^R look up` while the filter
-holds one. The filter matches prompt titles and summaries and the refs held;
+holds one. The filter matches prompt titles and summaries, answers on
+Responses, and the refs held;
 words are not looked up, and the empty list says so. On a remote view a
 host whose dch takes no such ref says so in the status line.
 
@@ -974,16 +989,16 @@ not clear X-ray; run `clear`".
 
 | Key | List | Card / reader |
 | --- | --- | --- |
-| `Tab` `→` `l` / `Shift-Tab` `←` `h` | the other tab | `←` `h`: back |
+| `Tab` `→` `l` / `Shift-Tab` `←` `h` | the next / previous tab (Prompts, Responses, Refs) | `←` `h`: back |
 | `↑` `↓` / `j` `k`, `PgUp` `PgDn`, `g` `G` | move | move / scroll; reader: at an end, again for the next / previous prompt |
 | `]` `[` | | reader: the next / previous prompt |
-| `Enter` | read the prompt / open the card | card: read the mention's prompt |
+| `Enter` | read the prompt (Responses: at its answer) / open the card | card: read the mention's prompt |
 | `/` | filter | |
 | `Ctrl-R` | with a ref typed after `/`: open its card, a row for it or not, its kind hidden or not | |
 | `a` | Refs: show / hide the files, commits and URLs | |
 | `t` | Refs: show / hide the temp files | |
-| `n` | Prompts: show / hide the auto rows (auto prompts, the task notifications, and compactions) | |
-| `o` | Prompts: attach to the session (in the chord: back to it) | card, reader: the same |
+| `n` | Prompts, Responses: show / hide the auto rows (auto prompts, the task notifications, and compactions) | |
+| `o` | Prompts, Responses: attach to the session (in the chord: back to it) | card, reader: the same |
 | `f` `p` `y` | | card: full scan, other projects / this project (`p` was `o` before 1.61.0), copy |
 | `q` | quit | back |
 | `Esc` | clear the filter, else quit | back |
@@ -993,7 +1008,7 @@ not clear X-ray; run `clear`".
 double-press window (`DCH_DOUBLE_TAP_MS`, default 300 ms). The view opens
 over the session on its Refs tab, the refs on its screen on top, and the session keeps running
 underneath: the attach is kept, never retired. Leaving the view (`q`,
-`Esc`, or `o` on Prompts or in the reader) returns to the session with its screen repainted as it is now,
+`Esc`, or `o` on Prompts, Responses or in the reader) returns to the session with its screen repainted as it is now,
 output that came in meanwhile included (dch-lite has no screen to repaint
 from: the program gets a SIGWINCH, as on any re-attach). The `x` is never
 typed into the session; keys that arrive in the same read as the `x` (a

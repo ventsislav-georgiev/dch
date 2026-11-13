@@ -822,7 +822,7 @@ and kept current as
 keeps its index. It writes nothing to disk.
 Session text is drawn with every control and bidi character as
 .BR ? .
-Two tabs:
+Three tabs, two for a shell session:
 .B Prompts
 (\fBCommands\fR for a shell session, one row per command; Chapters before
 1.63.0;
@@ -856,6 +856,21 @@ the tab counts the prompts shown without
 here and in the reader leaves the view and attaches to the session, as
 .B \-a
 does, a remote one's too; on an ended session it says so and stays),
+.B Responses
+(Claude and Codex sessions: what the agent showed at the end of each turn,
+its answer or its summary of the work, as Claude Code's Focus view does;
+newest first; each item the prompt's row, the turn's tools on one faint
+line, then the answer wrapped, at most 8 lines, Markdown as written, a
+faint ellipsis when there is more (the engine keeps 2 KB; the reader has
+it); a running turn says \(lqworking\(rq, an answer the size cap left out
+\(lqEnter reads it\(rq;
+\fBj\fR \fBk\fR move item by item;
+\fBEnter\fR reads the prompt at its answer (at its end when not found),
+\fBq\fR back to the item;
+\fB/\fR filters on the prompt and the answer;
+\fBn\fR and \fBo\fR as on Prompts; the tab counts the items shown without
+.BR n ;
+a host before 1.63.0 sends no answers, and the tab says so),
 .B Refs
 (the pull requests, issues and tickets the session touched, a faint line
 over them saying so;
@@ -909,12 +924,13 @@ The line under the tabs names the corpus
 \(lqX\-ray needs the full dch build\(rq,
 \(lq2 Claude sessions run here; X\-ray reads one\(rq,
 \(lqNo Claude session found here\(rq, ...).
-Keys: \fBTab\fR, \fB\(<-\fR \fB\(->\fR
-and \fBh\fR \fBl\fR switch tabs;
+Keys: \fBTab\fR and \fBShift\-Tab\fR, \fB\(<-\fR \fB\(->\fR
+and \fBh\fR \fBl\fR go to the next and previous tab, in the order
+Prompts, Responses, Refs;
 \fBj\fR \fBk\fR, arrows, \fBPgUp\fR \fBPgDn\fR, \fBg\fR \fBG\fR move;
 \fBq\fR quits the list and goes back from a card or the reader;
 \fBEsc\fR clears the filter, else does the same;
-\fBCtrl\-R\fR, on Prompts and Refs with a ref typed after \fB/\fR
+\fBCtrl\-R\fR, on any tab with a ref typed after \fB/\fR
 (as
 .B \-\-ref
 takes it), opens its card, while typing or after, a row for it or not, its
