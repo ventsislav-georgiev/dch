@@ -7119,6 +7119,22 @@ ref_cmp(const void *pa, const void *pb)
 	return a->first < b->first ? -1 : a->first > b->first;
 }
 
+/* The cap's order (#272): files, commits and URLs before pulls, issues and
+** tickets, each the oldest latest mention first */
+static int
+ref_drop_cmp(const void *pa, const void *pb)
+{
+	const struct xr_ent *a = &ref_sort_x->v[*(const size_t *)pa];
+	const struct xr_ent *b = &ref_sort_x->v[*(const size_t *)pb];
+	int ga = a->shape < XR_COMMIT, gb = b->shape < XR_COMMIT;
+
+	if (ga != gb)
+		return ga - gb;
+	if (a->last != b->last)
+		return a->last < b->last ? -1 : 1;
+	return a->first < b->first ? -1 : a->first > b->first;
+}
+
 /* One ref (3.2): count descending, then first appearance. */
 /* count 0 with no definitions: the removal line of a follow (3.3) */
 static void
@@ -7168,30 +7184,39 @@ xr_print(FILE *f, const struct xr_answer *a)
 	const char *why = a->why;
 	const char *proj = a->project ? a->project : "";
 	size_t nr = a->refs ? a->refs->n : 0, keep, *ord = NULL, *rat = NULL;
+	size_t *drop = NULL, rl, j;
 	uint64_t dropped = a->refs ? a->refs->dropped : 0;
+	char *gone = NULL;
 
+	/* rat: each ref's size by index, with its comma; drop: the cap's order */
 	if (!(rat = calloc(nr + 1, sizeof *rat)) ||
-	    (nr && !(ord = malloc(nr * sizeof *ord))))
+	    !(gone = calloc(nr + 1, 1)) ||
+	    (nr && (!(ord = malloc(nr * sizeof *ord)) ||
+	            !(drop = malloc(nr * sizeof *drop)))))
 	{
 		free(rat);
+		free(gone);
 		free(ord);
+		free(drop);
 		free(at);
 		return -1;
 	}
 	for (k = 0; k < nr; k++)
-		ord[k] = k;
+		ord[k] = drop[k] = k;
 	if (nr)
 	{
 		ref_sort_x = a->refs;
 		qsort(ord, nr, sizeof *ord, ref_cmp);
+		qsort(drop, nr, sizeof *drop, ref_drop_cmp);
 	}
 	/* each ref's size, as chapters' below */
 	if (nr && !(m = open_memstream(&body, &bl)))
 		goto fail;
-	for (k = 0; k < nr && fseek(m, 0, SEEK_SET) == 0; k++)
+	for (k = 0, rl = 0; k < nr && fseek(m, 0, SEEK_SET) == 0; k++)
 	{
-		put_ref(m, a->refs, &a->refs->v[ord[k]], proj, k > 0);
-		rat[k + 1] = rat[k] + (size_t)ftell(m);
+		put_ref(m, a->refs, &a->refs->v[k], proj, 1);
+		rat[k] = (size_t)ftell(m);
+		rl += rat[k];
 	}
 	if (nr && (fclose(m) != 0 || k < nr))
 		goto fail;
@@ -7202,6 +7227,8 @@ xr_print(FILE *f, const struct xr_answer *a)
 fail:
 		free(body);
 		free(ord);
+		free(drop);
+		free(gone);
 		free(rat);
 		free(at);
 		return -1;
@@ -7215,6 +7242,8 @@ fail:
 	{
 		free(body);
 		free(ord);
+		free(drop);
+		free(gone);
 		free(rat);
 		free(at);
 		return -1;
@@ -7222,14 +7251,19 @@ fail:
 	free(body);
 	body = NULL;
 	bl = at[n];
-	/* 4 MiB: refs go first, from the end (each a dropped key), then the
-	** oldest chapters */
+	/* 4 MiB: refs go first, in drop's order (each a dropped key; the first
+	** kept one has no comma), then the oldest chapters */
 	slack = 4096 + 6 * (strlen(a->session) + strlen(a->session_id) +
 	                    (a->project ? strlen(a->project) : 0) +
 	                    (a->project_label ? strlen(a->project_label) : 0));
-	for (keep = nr; keep && bl + rat[keep] + slack > xr_lim.out; keep--)
-		;
-	while (cut < n && bl - at[cut] + rat[keep] + slack > xr_lim.out)
+	rl -= nr > 0;
+	for (j = 0; j < nr && bl + rl + slack > xr_lim.out; j++)
+	{
+		rl -= rat[drop[j]] - (j + 1 == nr);
+		gone[drop[j]] = 1;
+	}
+	keep = nr - j;
+	while (cut < n && bl - at[cut] + rl + slack > xr_lim.out)
 		cut++;
 	if (cut || keep < nr)
 	{
@@ -7237,7 +7271,7 @@ fail:
 		why = "output";
 		dropped += nr - keep;
 	}
-	if (a->sent && sent_cut(a->sent, ord + keep, nr - keep) != 0)
+	if (a->sent && sent_cut(a->sent, drop, nr - keep) != 0)
 		goto fail;
 	if (!(m = open_memstream(&head, &hl)))
 	{
@@ -7279,8 +7313,10 @@ fail:
 			            k > cut);
 		fprintf(f, "],\"chapters_evicted\":%s,\"refs\":[",
 		        a->chapters_evicted ? "true" : "false");
-		for (k = 0; k < keep; k++)
-			put_ref(f, a->refs, &a->refs->v[ord[k]], proj, k > 0);
+		for (k = j = 0; k < nr; k++)	/* j: refs written */
+			if (!gone[ord[k]])
+				put_ref(f, a->refs, &a->refs->v[ord[k]], proj,
+				        j++ > 0);
 		fprintf(f, "],\"dropped_keys\":%llu}%s\n",
 		        (unsigned long long)dropped, a->snapshot ? "}" : "");
 		if (fflush(f) != 0 || ferror(f))
@@ -7289,6 +7325,8 @@ fail:
 	free(head);
 	free(at);
 	free(ord);
+	free(drop);
+	free(gone);
 	free(rat);
 	return rc;
 }

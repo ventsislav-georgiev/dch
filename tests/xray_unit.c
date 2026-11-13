@@ -1727,9 +1727,9 @@ t_follow_cut(void)
 	shell_refs(r, 1, &k);
 	xr_lim.out = 8192;
 	b = follow_cut_out(ix, s, &a, 1);
-	CHECK("follow cut: the snapshot leaves a000064 out (dropped_keys)",
-	      b && !strstr(b, "\"dropped_keys\":0}") && strstr(b, "a000001") &&
-	      !strstr(b, "a000064"));
+	CHECK("follow cut: the snapshot leaves a000001 out (dropped_keys)",
+	      b && !strstr(b, "\"dropped_keys\":0}") && strstr(b, "a000064") &&
+	      !strstr(b, "a000001"));
 	free(b);
 	/* a000064 and a000001 again, a0000ff new */
 	xr_index_free(ix);
@@ -1741,24 +1741,82 @@ t_follow_cut(void)
 	shell_refs(r, 2, &k);
 	d = follow_cut_out(ix, s, &a, 0);
 	CHECK("follow cut: a left-out ref that changes gets no line; a kept "
-	      "and a new one do", d && !strstr(d, "a000064") &&
-	      strstr(d, "\"key\":\"commit:a000001\"") && strstr(d, "a0000ff"));
+	      "and a new one do", d && !strstr(d, "a000001") &&
+	      strstr(d, "\"key\":\"commit:a000064\"") && strstr(d, "a0000ff"));
 	free(d);
-	/* a000064 gone: no count-0 line for it; a0000ff's goes */
+	/* a000001 gone: no count-0 line for it; a0000ff's goes */
 	xr_index_per_row(ix2, 1);
 	xr_index_sink(ix2, &k);
-	t[o - 8] = '\0';	/* the first row without "a000064 " */
+	r[0].text = t + 8;	/* the first row without "a000001 " */
 	r[0].len = o - 8;
 	shell_refs(r, 1, &k);
 	d = follow_cut_out(ix2, s, &a, 0);
 	CHECK("follow cut: a left-out ref that goes gets no count-0 line",
-	      d && !strstr(d, "a000064") && strstr(d, "a0000ff"));
+	      d && !strstr(d, "a000001") && strstr(d, "a0000ff"));
 	free(d);
 out:
 	xr_lim.out = out0;
 	xr_index_free(ix);
 	xr_index_free(ix2);
 	xr_sent_free(s);
+}
+
+/* #272: past the cap the refs whose latest mention is the oldest go,
+** files/commits/URLs before pulls; the kept keep the count order */
+static void
+t_out_cap_order(void)
+{
+	struct xr_index *ix = xr_index_new();
+	struct xr_answer a;
+	struct xr_sink k;
+	struct xr_rec r[4];
+	char t[512], *b = NULL, *p, *q;
+	size_t out0 = xr_lim.out, bl = 0, o, i, nk = 0;
+	FILE *f;
+
+	if (!ix)
+		return;
+	for (i = o = 0; i < 39; i++)	/* a000002..a000028, once each */
+		o += (size_t)sprintf(t + o, "a%06zx ", i + 2);
+	memset(r, 0, sizeof r);
+	for (i = 0; i < 4; i++)
+	{
+		r[i].seq = i + 1;
+		r[i].kind = RING_K_OUTPUT;
+		r[i].text = i == 0 ? "o/r#1 a000001" : i < 3 ? "a000001" : t;
+		r[i].len = strlen(r[i].text);
+	}
+	memset(&a, 0, sizeof a);
+	a.session = a.session_id = "s";
+	a.corpus = "shell";
+	a.project = a.project_label = "";
+	a.available = a.complete = 1;
+	a.lines = -1;
+	a.refs = ix;
+	xr_index_per_row(ix, 1);
+	xr_index_sink(ix, &k);
+	shell_refs(r, 4, &k);
+	xr_lim.out = 4096 + 6 * 2 + 1200;	/* xr_print's slack + a few refs */
+	f = open_memstream(&b, &bl);
+	if (!f || xr_print(f, &a) != 0 || fclose(f) != 0)
+		goto out;
+	for (p = b; (p = strstr(p, "\"key\":")); p++)
+		nk++;
+	p = strstr(b, "pull:o/r#1");
+	q = strstr(b, "commit:a000028");
+	CHECK("out cap: the latest commit and the pull kept, a000001 (count 3, "
+	      "older) cut", p && q && p < q && !strstr(b, "commit:a000001") &&
+	      !strstr(b, "commit:a000002") && bl <= xr_lim.out);
+	CHECK("out cap: what was kept is in count order",
+	      strstr(b, "commit:a000027") && strstr(b, "commit:a000027") < q);
+	snprintf(t, sizeof t, "\"dropped_keys\":%zu}", 41 - nk);
+	CHECK("out cap: dropped_keys counts the cut, why output",
+	      nk > 2 && nk < 41 && strstr(b, t) &&
+	      strstr(b, "\"complete\":false,\"why\":\"output\""));
+out:
+	xr_lim.out = out0;
+	free(b);
+	xr_index_free(ix);
 }
 
 /* #192: a prompt that is wholly harness text (<task-notification>,
@@ -4575,6 +4633,7 @@ main(int argc, char **argv)
 	t_caps();
 	t_rooms();
 	t_follow_cut();
+	t_out_cap_order();
 	t_auto();
 	t_queued_list();
 	t_auto_cap();
