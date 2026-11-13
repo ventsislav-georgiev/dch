@@ -1020,20 +1020,6 @@ attach_main(int noerror)
 		if (want_detach)
 			exit(0);
 
-		/* Continued after a stop it did not make (LOW-V9): raw mode back,
-		** then a repaint over what the shell wrote meanwhile. No
-		** MSG_ATTACH: nothing was reset, so nothing is re-armed. Here,
-		** before the select: a master that dropped the client while it
-		** was stopped is read as an end before the redraw is written.
-		** shortcut: a SIGCONT landing between this check and the select
-		** is handled at the next wake (session output, a key); a
-		** self-pipe would make it exact. */
-		if (want_cont)
-		{
-			term_raw();
-			want_redraw = 1;
-		}
-
 		/* One detach press seen: hold it for a beat so a second press
 		** can turn it into a session switch instead. A real deadline,
 		** not a select timeout — a chatty session would otherwise keep
@@ -1073,6 +1059,22 @@ attach_main(int noerror)
 				us = 0;
 			if (wait_us < 0 || us < wait_us)
 				wait_us = us;
+		}
+		/* Continued after a stop it did not make (LOW-V9): raw mode back,
+		** then a repaint over what the shell wrote meanwhile. No
+		** MSG_ATTACH: nothing was reset, so nothing is re-armed. Here,
+		** before the select, which this turn only polls: a master that
+		** dropped the client while it was stopped is read as an end
+		** before the redraw is written, and a quiet session's redraw
+		** goes out now, not at the next wake. After the timers, which
+		** would set their own wait. shortcut: a SIGCONT landing between
+		** this check and the select is handled at the next wake
+		** (session output, a key); a self-pipe would make it exact. */
+		if (want_cont)
+		{
+			term_raw();
+			want_redraw = 1;
+			wait_us = 0;
 		}
 		if (wait_us >= 0)
 		{

@@ -314,8 +314,13 @@ def case_c(env):
         check("(c) kill -TSTP stops the client (%s)" % j.lflag(),
               r == "S %d" % signal.SIGTSTP and not j.raw(), r)
         w, mark = repaints(j.out), len(j.out)
+        t0 = time.time()
         j.do(b"f")
-        j.pump(15, lambda: repaints(j.out[mark:]) > w)
+        # a quiet session, nothing typed: the repaint must not wait for a
+        # wake (bound loose for load; the miss is "never", not "late")
+        got = j.pump(5, lambda: repaints(j.out[mark:]) > w)
+        check("(c) after fg the repaint comes with nothing typed (%.2fs)" %
+              (time.time() - t0), got, j.out[mark:][-200:])
         ok = until(j.raw, 5)
         check("(c) after fg the terminal is raw (%s)" % j.lflag(), ok,
               j.out[mark:][-200:])
