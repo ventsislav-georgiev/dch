@@ -15,10 +15,14 @@ with no Enter.
   (b) a ctrl-z while `dch -a` is starting, the tty still cooked (the tty's
       SIGTSTP), at the job's start and inside the raw-mode tcsetattr, which
       waits while the terminal has not read what the shell wrote before it.
+      The shell's modes stay on once the stop is reported (QA 1.60.0 LOW-V1).
   (c) kill -TSTP from outside, while attached (fg: raw, one repaint, nothing
       re-armed: nothing was reset) and while the chord's X-ray view is up (the
       client alone, and the whole job): the view runs in the attach's raw
       mode, fg puts it back, and q closes the view.
+  (d) kill -TSTP inside the raw-mode tcsetattr after a fg, held the same
+      way as in (b): the shell's modes stay until the next fg (QA 1.60.0
+      LOW-V1).
 
 Run:  python3 tests/attach_cont_test.py            (uses ./dch)
 """
@@ -113,7 +117,9 @@ def shell(cmd, rep, argv, pre, env):
             else:
                 os.write(rep, b"X\n")
                 return
-        elif c == b"f":
+        elif c in b"fF":
+            if c == b"F":   # a shell's echo, left in the output queue
+                os.write(1, b"fg\r\n")
             os.tcsetpgrp(0, job)
             os.killpg(job, signal.SIGCONT)
             os.write(rep, b"ok\n")
@@ -294,12 +300,61 @@ def case_b(env, n, trace):
                 time.sleep(0.1)     # not a wait: a later point to stop at
         check("%s: the client starts" % what, ok, j.job)
         os.write(j.fd, b"\x1a")
-        r = j.do(b"w")
+        r = held_stop(j)
         check("%s: the tty's SIGTSTP stops the client" % what,
               r == "S %d" % signal.SIGTSTP, r)
+        kept(j, what)
         mark = len(j.out)
         j.do(b"f")
         resumed(j, what, mark)
+    finally:
+        j.close()
+
+
+def held_stop(j):
+    """The shell's wait for the stop, the terminal reading nothing for up to
+    1 s first: a stop that lands inside the held raw tcsetattr is reported
+    (and the shell's modes put on) before the drain lets the tcsetattr end."""
+    os.write(j.cw, b"w")
+    j.pump(1, lambda: b"\n" in j.rep, read_tty=False)
+    return j.reply()
+
+
+def kept(j, what):
+    """The shell's modes stay on its terminal once the stop is reported: a
+    raw tcsetattr the stop interrupted must not finish after them (QA 1.60.0
+    LOW-V1: a shell that does not set its own modes, bash --noediting, then
+    reads a raw terminal). The pump drains what held the tcsetattr."""
+    j.pump(0.5)
+    check("%s: the shell's terminal stays cooked (%s)" % (what, j.lflag()),
+          not j.raw())
+
+
+def case_d(env):
+    """kill -TSTP inside the raw tcsetattr of the repaint after a fg: the
+    shell's echo of `fg` unread holds it (TCSADRAIN)."""
+    what = "(d) kill -TSTP in the fg's raw-mode tcsetattr"
+    j = Job(["-a", SESS], env=env)
+    try:
+        if not attached(j, "(d)"):
+            return
+        os.kill(j.job, signal.SIGTSTP)
+        r = j.do(b"w")
+        check("(d) kill -TSTP stops the client", r == "S %d" % signal.SIGTSTP,
+              r)
+        j.do(b"F", read_tty=False)
+        time.sleep(1)   # not a wait: the client reaches the held tcsetattr
+        os.kill(j.job, signal.SIGTSTP)
+        r = held_stop(j)
+        check("%s: the client stops" % what, r == "S %d" % signal.SIGTSTP, r)
+        kept(j, what)
+        mark = len(j.out)
+        j.do(b"f")
+        ok = until(j.raw, 10)
+        check("%s: after fg the terminal is raw (%s)" % (what, j.lflag()), ok,
+              j.out[mark:][-200:])
+        check("%s: after fg a key reaches the session with no Enter" % what,
+              j.key(), j.out[mark:][-200:])
     finally:
         j.close()
 
@@ -395,6 +450,7 @@ def main():
         for n in range(3):
             case_b(env, n, os.path.join(tmp, "trace"))
         case_c(env)
+        case_d(env)
         case_view(env, False)
         case_view(env, True)
     finally:
