@@ -430,8 +430,13 @@ the ended sessions of
 .BR \-\-history ,
 one row per session name (its newest record, pinned when any record of
 the name is): every pinned name, then the newest other names while there
-are fewer than 50 rows, so pinned names alone can make more; with remote
-hosts on, also the other hosts' (see
+are fewer than 50 rows, so pinned names alone can make more.
+A name with a session running is decided by the name, not by its records:
+pinned, it stays on History with ENDED
+.B running
+(in the accent) and WHEN its last output; not pinned, it is not on History
+(it is on Sessions or Sidekicks) until it ends.
+With remote hosts on, History also lists the other hosts' (see
 .BR "REMOTE HOSTS" ),
 as \fIhost\fP:\fIname\fP with the host faint, at most 50 names per host
 on top of the local rows.
@@ -461,7 +466,8 @@ MERGED and PULL REQUESTS (from
 .BR prs :
 .IR repo#N ,
 the repo once when they share it, +N for those that do not fit).
-A History row shows a pin mark, NAME, ENDED, WHEN and the DIRECTORY.
+A History row shows a pin mark, NAME, ENDED (or running), WHEN and the
+DIRECTORY.
 As the window narrows the last column goes first, the name shrinks last, and
 nothing wraps.
 The selection is a tinted bar the width of the screen, each cell keeping its
@@ -576,10 +582,23 @@ pins or unpins,
 .B d
 removes
 .RB ( \-\-forget ),
-every record of the row's name; while a session of that name is live, at
-most 8 of its ended records per press (the rest stay a row: press
+every record of the row's name.
+On a running row
+.BR Enter ,
+.B Shift\-Enter
+and
+.B o
+attach its session (in
+.B dch \-l
+and the switch),
+.B x
+opens the session's X\-ray view,
+.B p
+unpins, and
+.B m
+and
 .B d
-again).
+say it is running and do nothing.
 On a row whose name starts with
 .B \-
 (an older dch made it) only attach and kill work live, only

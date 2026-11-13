@@ -129,7 +129,11 @@ there are some; and **History**, the ended sessions of `--history`, one row
 per session name (its newest record, pinned when any record of the name is):
 every pinned name, then the newest other names while there are fewer than 50
 rows, so pinned names alone can make more (`--history` itself still lists
-every record, newest first). With remote hosts on, History also lists the
+every record, newest first). A name with a session running is decided by the
+name, not by its records: pinned, it stays on History, its ENDED `running` in
+the accent and WHEN its last output, and `Enter` attaches that session; not
+pinned, it is not on History (it is on Sessions or Sidekicks), and its older
+records come back when it ends. With remote hosts on, History also lists the
 other hosts' ended sessions as `host:name`, the host faint, at most 50 names
 per host on top of the local rows, so a full local History never hides them
 (see [Remote hosts](#remote-hosts)). Rows sort pinned first (a remote row
@@ -146,7 +150,7 @@ loudest; Working, in the accent; Done, green; Idle, faint), ACTIVE (how long
 ago it last printed: `now`, `22m`, `3h`, `2d`), AGENTS, MERGED (`✓ 251`) and
 PULL REQUESTS (from `--meta`'s `prs`: `solution#22330`, the repo said once
 when they share it, `+N` for those that do not fit). A History row shows its
-pin (`◆`), NAME, ENDED (closed, stopped, exited, crashed …), WHEN and the
+pin (`◆`), NAME, ENDED (closed, stopped, exited, crashed …, or running), WHEN and the
 DIRECTORY, cut from the left. As the window narrows the last column goes
 first, then merged, agents and the age; the name shrinks last, cut with `…`,
 and nothing wraps. The list reloads about once a second and keeps the
@@ -167,20 +171,20 @@ hint.
 | --- | --- | --- |
 | `↑` `↓` / `j` `k`, `PgUp` `PgDn`, `g` `G` | move | move |
 | `Tab` `→` `l` / `Shift-Tab` `←` `h` | next / previous tab | next / previous tab |
-| `Enter` | attach (`-k`: kill, `-d`: detach) | resume (`--revive`, with the carry-on message) |
-| `Shift-Enter` / `o` | attach (`Shift-Enter`; as `Enter`) | resume, then attach to it once it is up (open); `dch -l` and the switch only, the `-k` / `-d` pickers say so and do nothing |
+| `Enter` | attach (`-k`: kill, `-d`: detach) | resume (`--revive`, with the carry-on message); a running row attaches its session (`dch -l` and the switch; the `-k` / `-d` pickers say it is running and do nothing) |
+| `Shift-Enter` / `o` | attach (`Shift-Enter`; as `Enter`) | resume, then attach to it once it is up (open); a running row attaches its session; `dch -l` and the switch only, the `-k` / `-d` pickers say so and do nothing |
 | `r` | rename (set the alias; empty clears) | |
 | `R` | restart the agent (`--restart <n> --include-agents -f`), asks first | |
 | `S` | stop (`--stop`), asks first | |
-| `x` | open the session's [X-ray view](#x-ray-view-dch---xray-n); `q` comes back (a remote row's runs on its host) | the same, for the row's record |
+| `x` | open the session's [X-ray view](#x-ray-view-dch---xray-n); `q` comes back (a remote row's runs on its host) | the same, for the row's record (a running row's: its session's) |
 | `X` | kill (`-k`), asks first | |
 | `a` | allow a plain Yes/No permission prompt (presses `1`, Yes), asks first; a question form or any other prompt is refused: attach to answer it | |
 | `b` / `B` | restart stale agents / restart all agents (force), asks first | |
 | `s` | sort by activity (blocked, working, done, idle, newest first) or by name (`a2` before `a10`); saved as `picker_sort`, so the next picker starts in it | |
-| `m` | | resume without the message (`--no-message`) |
+| `m` | | resume without the message (`--no-message`); a running row says it is running |
 | `I` | | resume interrupted (n) (`--revive --all`), asks first |
 | `p` | | pin / unpin every record of the row's name |
-| `d` | | remove every ended record of the row's name (`--forget`), asks first; a pinned name must be unpinned first. While a session of that name is live, one press removes at most 8 of its ended records (the rest stay a row: press `d` again) |
+| `d` | | remove every ended record of the row's name (`--forget`), asks first; a pinned name must be unpinned first; a running row says it is running and removes nothing |
 | `/` | filter (below) | filter (below) |
 | `,` | settings | settings |
 | `q` `Esc` `Ctrl-C` `Ctrl-D` | quit (`Esc` clears a filter first) | quit (`Esc` clears a filter first) |
