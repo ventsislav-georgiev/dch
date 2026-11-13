@@ -5154,6 +5154,11 @@ do_respawn_verb(const char *name, char **cmd, int ncmd, int cancel)
 		        "limit is %d\n", need - 1, PKT_MAX - 1);
 		return 1;
 	}
+	if (st == -4 && errno == EAGAIN)
+	{
+		fprintf(stderr, stuck_fmt, name);
+		return 1;
+	}
 	if (st == -4)
 	{
 		fprintf(stderr, "dch: no session: %s\n", name);
@@ -5366,6 +5371,11 @@ do_cmd_verb(const char *name)
 	if (make_sock_path(name) < 0)
 		return 1;
 	st = cmd_query(sock_path, &ci);
+	if (st == -4 && errno == EAGAIN)
+	{
+		fprintf(stderr, stuck_fmt, name);
+		return 1;
+	}
 	if (st == -4)
 	{
 		fprintf(stderr, "dch: no session: %s\n", name);

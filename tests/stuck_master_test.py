@@ -7,7 +7,7 @@ macOS refuses that connect at once, as before.
 Checks: a real master, SIGSTOPped, its backlog filled by connects it never
 accepts. --ls-json, -ls, --history, -f --restart --all and --revive --all each
 return within a bound and still list the healthy session beside it. --read
-of it fails at once. On Linux: the verbs name it as stuck; --spawn of its
+and --cmd of it fail at once. On Linux: the verbs name it as stuck; --spawn of its
 name, --revive of it and --history --forget of it refuse and its socket and
 record stay. Self-isolating (own XDG_RUNTIME_DIR).
 
@@ -137,6 +137,10 @@ def main():
         expect(r and r.returncode == 1 and
                (STUCK if LINUX else "no session") in r.stderr,
                "--read of it fails, says why: %r" % (r and r.stderr))
+        r = timed("--cmd of it", "--cmd", stk)
+        expect(r and r.returncode == 1 and
+               (STUCK if LINUX else "no session") in r.stderr,
+               "--cmd of it fails, says why: %r" % (r and r.stderr))
         r = timed("--history", "--history", "--json")
         h = {}
         try:
