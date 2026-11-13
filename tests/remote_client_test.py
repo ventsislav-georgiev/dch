@@ -774,11 +774,13 @@ class Proxy:
     connection's 0x30s and 0x34s (a request that never ends); "lines" sends
     `lines` in place of the first connection's first 0x31, as frames of
     type `lt` of 1 MiB at most, and drops its other 0x31s (a host's own
-    stdout or stderr bytes)."""
+    stdout or stderr bytes). #231: "slow07" passes each 0x07 (a redraw's
+    re-arm) `delay` seconds late, a slow link; "no07" drops them, a host
+    that never re-arms."""
 
-    def __init__(self, up, mode, lines=b"", lt=0x31):
+    def __init__(self, up, mode, lines=b"", lt=0x31, delay=0.0):
         self.up, self.mode, self.n, self.lines = up, mode, 0, lines
-        self.lt = lt
+        self.lt, self.delay = lt, delay
         self.sock = socket.socket()
         self.sock.bind(("127.0.0.1", 0))
         self.sock.listen(16)
@@ -821,6 +823,10 @@ class Proxy:
                     if up and first and t in (0x30, 0x34) \
                             and self.mode == "hold":
                         continue
+                    if up and t == 0x07 and self.mode == "no07":
+                        continue
+                    if up and t == 0x07 and self.mode == "slow07":
+                        time.sleep(self.delay)
                     if not up and t == 0x18 and self.mode == "nocancel":
                         h = json.loads(body)
                         h["ops"] = [o for o in h["ops"] if o != "ctl-cancel"]

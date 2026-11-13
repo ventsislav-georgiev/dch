@@ -119,6 +119,7 @@
 #define RM_HIST_EVERY_MS 10000	/* the picker re-fetches history this often */
 #define RM_HIST_FRESH_S 30	/* the picker: older history shows as stale */
 #define RM_HIGH 262144		/* relay: past this unsent, stop reading */
+#define RM_REARM_MS 1000	/* relay: a re-arm awaited this long (#231) */
 #define RM_READ 65536
 
 struct rhost
@@ -2313,6 +2314,50 @@ end_line(char *line, size_t cap, int code, const char *label, const char *msg)
 #ifndef _WIN32
 #define RELAY_DETACHED 3	/* not a dch -a status: the relay's own */
 
+/* The session's screen as the host's stream sets it (#231): b's bytes from
+** n0 on go through *st (how much of ESC[?1049 matched so far) into *alt (1
+** on the alternate screen). Where the first ESC[?1049h starts, backed over
+** the ESC[?<n>h sets right before it (a re-arm's modes, master.c dec_modes
+** order), or (size_t)-1 when there is none. Pure. */
+static size_t
+alt_scan(const struct sb *b, size_t n0, int *st, int *alt)
+{
+	static const char pre[] = "\033[?1049";
+	size_t i, at = (size_t)-1;
+
+	for (i = n0; i < b->n; i++)
+	{
+		unsigned char c = (unsigned char)b->p[i];
+
+		if (*st == 7 && (c == 'h' || c == 'l'))
+		{
+			*st = 0;
+			*alt = c == 'h';
+			if (*alt && at == (size_t)-1)
+			{
+				size_t k;
+
+				at = i >= 7 ? i - 7 : 0;
+				while (at > 0 && b->p[at - 1] == 'h')
+				{
+					for (k = at - 1; k > 0 &&
+					     isdigit((unsigned char)b->p[k - 1]); k--)
+						;
+					if (k == at - 1 || k < 3 ||
+					    memcmp(b->p + k - 3, "\033[?", 3))
+						break;
+					at = k - 3;
+				}
+			}
+		}
+		else if (*st < 7 && c == (unsigned char)pre[*st])
+			(*st)++;
+		else
+			*st = c == '\033';
+	}
+	return at;
+}
+
 /* The relay child: the attach client's packets on sp as frames on tcp,
 ** 0x10 back raw; tin and rs hold what followed the list on tcp. 0 when the
 ** session ended (0x12) or the attach side closed (a detach: the TCP close
@@ -2327,7 +2372,8 @@ relay(int tcp, int sp, int why, const char *label, struct sb tin,
 	unsigned char pin[PKT_HDR + PKT_MAX], buf[RM_READ];
 	size_t pn = 0, toff = 0, soff = 0;
 	int redraws = 0, eof = 0, exited = 0, code = 1, held = 0;
-	long long drain = 0;
+	int st = 0, alt = 0, attaches = 0;
+	long long drain = 0, rearm = 0;
 	char msg[400] = "";
 
 	nonblock(tcp);
@@ -2337,22 +2383,32 @@ relay(int tcp, int sp, int why, const char *label, struct sb tin,
 		eof = 1;
 		drain = now_ms() + 2000;
 	}
+	(void)alt_scan(&to_sp, 0, &st, &alt);
 	for (;;)
 	{
 		size_t qt = to_tcp.n - toff, qs = to_sp.n - soff;
 		struct pollfd pf[2];
 		ssize_t k;
+		long long now = now_ms();
+		int hold, tmo = -1;
 
-		if (eof && (!qs || now_ms() >= drain))
+		if (eof && (!qs || now >= drain))
 			break;
+		/* a host that never re-arms (before 1.58.0, or the 0x07
+		** lost): what it sent meanwhile goes out after all (#231) */
+		if (rearm && now >= rearm)
+			rearm = 0;
+		hold = rearm && !eof;
+		if (hold)
+			tmo = (int)(rearm - now);
 		pf[0].fd = eof ? -1 : tcp;
 		pf[0].events = (short)((qs < RM_HIGH ? POLLIN : 0) |
 		                       (qt ? POLLOUT : 0));
 		pf[1].fd = sp;
 		pf[1].events = (short)((qt < RM_HIGH && !eof ? POLLIN : 0) |
-		                       (qs ? POLLOUT : 0));
+		                       (qs && !hold ? POLLOUT : 0));
 		pf[0].revents = pf[1].revents = 0;
-		if (poll(pf, 2, eof ? 100 : -1) < 0)
+		if (poll(pf, 2, eof ? 100 : tmo) < 0)
 		{
 			if (errno == EINTR)
 				continue;
@@ -2360,7 +2416,7 @@ relay(int tcp, int sp, int why, const char *label, struct sb tin,
 			break;
 		}
 		/* to the terminal */
-		if (qs && pf[1].revents & (POLLOUT | POLLHUP | POLLERR))
+		if (qs && !hold && pf[1].revents & (POLLOUT | POLLHUP | POLLERR))
 		{
 			k = write(sp, to_sp.p + soff, qs);
 			if (k < 0 && errno != EINTR && errno != EAGAIN)
@@ -2392,6 +2448,13 @@ relay(int tcp, int sp, int why, const char *label, struct sb tin,
 					held = pk.type == MSG_DETACH;
 				if (held)
 					to_sp.n = soff = 0;
+				/* a resume, or the X-ray overlay's return (not the
+				** first attach): until the host's re-arm comes back
+				** an RTT later, what it sends is for the screen the
+				** client's reset left: hold it, the re-arm's 1049h
+				** drops it (#231) */
+				if (pk.type == MSG_ATTACH && attaches++ && alt)
+					rearm = now_ms() + RM_REARM_MS;
 				pkt_frames(&pk, &redraws, &to_tcp);
 				off += used;
 			}
@@ -2432,12 +2495,28 @@ relay(int tcp, int sp, int why, const char *label, struct sb tin,
 			}
 			else
 			{
+				size_t n0 = to_sp.n, at;
+
 				sb_add(&tin, buf, (size_t)k);
 				if (relay_in(&rs, &tin, &to_sp, &exited, &code,
 				             msg, sizeof msg) < 0)
 					eof = 1;
+				at = alt_scan(&to_sp, n0, &st, &alt);
 				if (held)
 					to_sp.n = soff = 0;
+				else if (rearm && at != (size_t)-1)
+				{
+					rearm = 0;	/* the re-arm: from it on */
+					if (at > soff)
+						soff = at;
+				}
+				else if (rearm && to_sp.n - soff > RM_HIGH / 2)
+				{
+					/* stale either way: keep a tail a
+					** re-arm's start may be in */
+					soff = to_sp.n - 128;
+					sb_drop(&to_sp, &soff);
+				}
 			}
 			if (tin.bad || to_sp.bad || to_tcp.bad)
 			{

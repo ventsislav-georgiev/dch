@@ -1747,6 +1747,9 @@ visible screen does), and a master too old to know the verb at all — those
 sessions have to be recreated once, and only once. `--restart --all` reports
 those separately and does not count them as failures, since on the first
 upgrade to a `dch` that has live restart, that is every session you have.
+An attached client is not restarted: one started before the upgrade keeps the
+old ctrl-z behaviour (what it resets on the terminal before it stops) until it
+re-attaches.
 
 ### Restarting Claude Code agents
 

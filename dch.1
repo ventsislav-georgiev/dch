@@ -1975,6 +1975,9 @@ re\-exec failed (the old master rolls back and keeps serving) or if the master
 is too old to know the verb, in which case the session must be recreated.
 Scrollback held only in the mirror is not carried across a restart; the
 visible screen is.
+An attached client is not restarted: one started before the upgrade keeps the
+old ctrl\-z behaviour (what it resets on the terminal before it stops) until it
+re\-attaches.
 .IP
 With
 .BR \-\-include\-agents ,

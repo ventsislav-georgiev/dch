@@ -1709,6 +1709,87 @@ def test_suspend():
     time.sleep(0.5)
 
 
+# #231: the host's re-arm after a resume (or the X-ray overlay's return) is
+# an RTT away; a proxy passes the 0x07 SLOW s late so that window is wide.
+# What the busy session sent in it is for the main screen the reset left.
+SLOW = 0.25    # well inside the relay's 1 s hold (RM_REARM_MS)
+TICK = re.compile(rb"T\d+\.\d+ ")
+
+
+def test_suspend_rtt(port):
+    from remote_client_test import Proxy
+    r = dch(SENV, "--spawn", "xv-bw", "--size", "100x30", sys.executable,
+            "-c", BZ)
+    check("suspend rtt: the busy session spawned on the host",
+          r.returncode == 0, r.stderr)
+    full = dch(SENV, "--build").stdout.strip() == "full"
+    px = Proxy(port, "slow07", delay=SLOW)
+    hosts("srv=127.0.0.1:%d" % px.port)
+    a = Pty([sys.executable, "-c", JOB, DCH, "-a", "srv:xv-bw"])
+    try:
+        a.wait(b"BUSY" if full else b"\033[?1049h")
+        a.pump(0.5)
+        for i in range(1, 4):
+            mark = len(a.out)
+            a.key(b"\x1a", 0)
+            ok = a.wait(STOPPED, start=mark)
+            stop = a.out.find(STOPPED, mark) + len(STOPPED)
+            a.wait(b"\033[?1049h", start=stop)
+            alt = a.out.find(b"\033[?1049h", stop)
+            got = TICK.findall(a.out[stop:alt])
+            check("suspend rtt: ctrl-z %d, the host's re-arm %.2f s late: "
+                  "no session output on the main screen before the "
+                  "resume's 1049h" % (i, SLOW),
+                  ok and alt > stop and not got,
+                  (ok, len(got), a.out[stop:stop + 200]))
+            a.pump(0.3)
+        mark = len(a.out)
+        a.key(b"\x1cx", 0.5)
+        ok = a.wait(b"X-ray  srv:xv-bw", start=mark)
+        mark = len(a.out)
+        a.key(b"q", 0.5)
+        a.wait(RESTORE, start=mark)
+        back = a.out.find(RESTORE, mark)
+        a.wait(b"\033[?1049h", start=back)
+        alt = a.out.find(b"\033[?1049h", back)
+        got = TICK.findall(a.out[back:alt])
+        check("suspend rtt: the X-ray overlay's return, the re-arm %.2f s "
+              "late: no session output on the main screen before its 1049h"
+              % SLOW, ok and back >= mark and alt > back and not got,
+              (ok, len(got), a.out[back:back + 200]))
+        mark = len(a.out)
+        a.key(b"z", 0.3)
+        check("suspend rtt: the attach goes on (a key after reaches the "
+              "session)", a.wait(b"GOT:7a", start=mark, secs=5) and
+              a.reap() is None, (a.rc, a.out[mark:][-300:]))
+    finally:
+        a.close()
+        px.close()
+    # a host that never re-arms (its 0x07 lost, as a host before 1.58.0
+    # never re-arms): the client must not hold the session's output forever
+    px = Proxy(port, "no07")
+    hosts("srv=127.0.0.1:%d" % px.port)
+    a = Pty([sys.executable, "-c", JOB, DCH, "-a", "srv:xv-bw"])
+    try:
+        a.wait(b"BUSY" if full else b"\033[?1049h")
+        a.pump(0.5)
+        mark = len(a.out)
+        a.key(b"\x1a", 0)
+        ok = a.wait(STOPPED, start=mark)
+        stop = a.out.find(STOPPED, mark) + len(STOPPED)
+        until(lambda: (a.pump(0.1), TICK.search(a.out, stop))[1], 6)
+        check("suspend rtt: a host that never re-arms: the session's output "
+              "still comes back after the resume",
+              ok and TICK.search(a.out, stop) is not None and
+              a.reap() is None, (ok, a.rc, a.out[stop:stop + 200]))
+    finally:
+        a.close()
+        px.close()
+        dch(SENV, "-k", "xv-bw")
+        hosts("srv=127.0.0.1:%d" % port)
+    time.sleep(0.5)
+
+
 def main():
     sp = None
     try:
@@ -1736,6 +1817,7 @@ def main():
         hosts("srv=127.0.0.1:%d" % port)
         test_rearm()
         test_suspend()
+        test_suspend_rtt(port)
     finally:
         dch(SENV, "-k", "xv-sh")
         dch(SENV, "-k", "xv-rx")
