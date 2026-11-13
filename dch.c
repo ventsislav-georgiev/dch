@@ -3251,38 +3251,65 @@ static const char no_reply_msg[] =
     "     protocol. Check whether its process is alive or stuck (e.g. ps)\n"
     "     before recreating anything; try `dch --restart <session>` first\n";
 
+/* How long a connect waits on a full listen backlog: --ls-json's budget
+** for a whole screen fetch (DET_DEADLINE_MS). A pending connect to a master
+** that accepts, however loaded, connects at once; only a stopped or wedged
+** master's full backlog waits (#265). */
+#define CTL_CONNECT_MS 500
+
+/* -1 with errno EAGAIN: a listener is there, but its backlog stayed full
+** for CTL_CONNECT_MS (Linux; macOS refuses that connect at once). That is
+** a live, stuck master, never a dead socket to unlink or revive over. */
 static int
 control_connect_path(const char *path)
 {
 	struct sockaddr_un sa;
-	int s;
+	/* Linux bounds a unix connect's wait for backlog room by SO_SNDTIMEO */
+	struct timeval tv = {0, CTL_CONNECT_MS * 1000}, t0 = {0, 0};
+	int s, e;
 
 	if (strlen(path) > sizeof(sa.sun_path) - 1)
+	{
+		errno = ENAMETOOLONG;	/* never a stale EAGAIN */
 		return -1;
+	}
 	s = socket(PF_UNIX, SOCK_STREAM, 0);
 	if (s < 0)
 		return -1;
 	memset(&sa, 0, sizeof(sa));
 	sa.sun_family = AF_UNIX;
 	strcpy(sa.sun_path, path);
+	(void)setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
 	if (connect(s, (struct sockaddr *)&sa, sizeof(sa)) < 0)
 	{
+		/* EINTR comes only from that wait: a full backlog too */
+		e = errno == EINTR ? EAGAIN : errno;
 		close(s);
+		errno = e;
 		return -1;
 	}
+	(void)setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &t0, sizeof t0);
 	return s;
 }
+
+static const char stuck_fmt[] =
+    "dch: session %s is not accepting connections — its master may be "
+    "stopped or wedged\n";
 
 static int
 control_connect(const char *name, int quiet)
 {
-	int s;
+	int s, e;
 
 	if (make_sock_path(name) < 0)
 		return -1;
 	s = control_connect_path(sock_path);
-	if (s < 0 && !quiet)
+	e = errno;
+	if (s < 0 && e == EAGAIN)
+		fprintf(stderr, stuck_fmt, name);
+	else if (s < 0 && !quiet)
 		fprintf(stderr, "dch: no session: %s\n", name);
+	errno = e;
 	return s;
 }
 
@@ -5527,6 +5554,8 @@ do_spawn_verb(char *exe, const char *name, int cols, int rows,
 		/* Live master answers a connect; refuse to clobber it. A
 		** stale socket (dead master) just gets unlinked below. */
 		int probe = control_connect(name, 1);
+		if (probe < 0 && errno == EAGAIN)
+			return 1;	/* stuck, not dead: never unlinked (#265) */
 		if (probe >= 0)
 		{
 			close(probe);
@@ -8525,7 +8554,7 @@ name_live(const char *name)
 
 	session_sock_path(name, sp, sizeof sp);
 	if ((s = control_connect_path(sp)) < 0)
-		return 0;
+		return errno == EAGAIN;	/* stuck is live (#265) */
 	close(s);
 	return 1;
 }
