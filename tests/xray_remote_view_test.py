@@ -343,6 +343,17 @@ def test_view():
         v.key(b"f", 1.0)
         check("card: f runs the full scan on the host",
               v.wait(b"full scan", start=mark), v.out[mark:])
+        # #227: p is the scope toggle (o until 1.60.0); o opens, as in the list
+        mark = len(v.out)
+        v.key(b"p", 1.0)
+        check("card: p scans other projects on the host",
+              v.wait("full scan \u00b7 other projects".encode(), start=mark)
+              and v.wait(b"p this project", start=mark), v.out[mark:])
+        mark = len(v.out)
+        v.key(b"o", 0.5)
+        check("card: o on the ended srv:xv-cl: said, the view stays",
+              v.wait(b"xv-cl has ended: no session to open", start=mark) and
+              v.reap() is None, v.out[mark:])
         v.key(b"\033", 0.5)
         v.key(b"\t\t")
         mark = len(v.out)
@@ -371,9 +382,10 @@ def test_view():
     finally:
         v.close()
     time.sleep(0.3)
-    # follow, ref (light), ref --full, chapter: four, each its own ctl
-    check("every query ran on the host as its own ctl --xray (4), no --read "
-          "for an ended session", ctls("--xray") - n0["--xray"] == 4 and
+    # follow, ref (light), ref --full, p's ref --full --scope all, chapter:
+    # five, each its own ctl
+    check("every query ran on the host as its own ctl --xray (5), no --read "
+          "for an ended session", ctls("--xray") - n0["--xray"] == 5 and
           ctls("--read") == n0["--read"],
           (ctls("--xray") - n0["--xray"], ctls("--read") - n0["--read"]))
 

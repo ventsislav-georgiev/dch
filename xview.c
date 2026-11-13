@@ -1778,7 +1778,9 @@ xv_draw(struct xv *v, int force)
 	{
 		XV_K(0, ret, "read");
 		XV_K(0, "f", "full scan");
-		XV_K(0, "o", "other projects");
+		if (xv_live(v))
+			XV_K(0, "o", "open session");
+		XV_K(0, "p", v->scope == 2 ? "this project" : "other projects");
 		XV_K(0, "y", "copy");
 		XV_K(3, "esc", "back");
 	}
@@ -2207,7 +2209,9 @@ xv_key(struct xv *v, int c)
 			xv_card(v, v->ckey, v->ctext, 1, v->scope);
 			break;
 		case 'o':
-			xv_card(v, v->ckey, v->ctext, 1, 2);
+			return xv_open(v);
+		case 'p':	/* o before 1.60 (#227); o opens, as everywhere */
+			xv_card(v, v->ckey, v->ctext, 1, v->scope == 2 ? 1 : 2);
 			break;
 		case 'y':
 			xv_copy(v);
