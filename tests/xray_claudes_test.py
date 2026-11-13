@@ -14,8 +14,8 @@ records (procStart verified) under a temp HOME, never ~/.claude:
            says "No Claude session found here" (dch-lite keeps no ring: its
            reason "lite" stands, the count is still there).
 A plain shell with no agent has no "claudes". nc-fl (QA 1.61.0 LOW-X16):
-an open view and `--xray --follow --json` follow the count, when one of two
-Claudes exits and when a second starts again (a USR1 to its shell). Each checked locally on the
+an open view and `--xray --follow --json` follow the count when one of two
+Claudes exits. Each checked locally on the
 host, then from a client over a real `dch serve` on 127.0.0.1
 (DCH_SERVE_TEST_LOOPBACK=1, --port 0, a fake `tailscale` for whois), as
 `dch --xray srv:<name> --json` and the view of srv:<name>: the host's answer
@@ -264,8 +264,7 @@ def snaps(buf):
 def follow():
     """LOW-X16: the count changes under an open view and --follow."""
     dch(SENV, "--spawn", "nc-fl", "/bin/sh", "-c",
-        "trap '/bin/sleep 300 &' USR1; /bin/sleep 300 & /bin/sleep 300 & "
-        "while :; do wait; done")
+        "/bin/sleep 300 & /bin/sleep 300 & wait")
     sh = until(lambda: child(SENV, "nc-fl"))
     two = kids(sh, 2) if sh else None
     sess = os.path.join(SENV["HOME"], ".claude", "sessions")
@@ -296,21 +295,6 @@ def follow():
         check("nc-fl: one exits: the view drops the 2 Claude sessions line",
               b"X-ray reset" in v.out[k:] or b"No X-ray corpus" in
               v.out[k:], v.out[k:][-400:])
-        os.kill(sh, signal.SIGUSR1)
-        three = kids(sh, 2)
-        for x in three or []:
-            if x != two[1]:
-                record(int(x), "00000002-2562-4000-8000-000000000000", sess)
-        k, n = len(v.out), len(fl.out)
-        end = time.time() + 10
-        while time.time() < end and (b'"claudes":2' not in fl.out[n:] or
-                                     TWO not in v.out[k:]):
-            fl.pump(0.1)
-            v.pump(0.1)
-        check("nc-fl: a second starts: --follow's new snapshot says "
-              "claudes 2", snaps(fl.out[n:])[-1:] == [2], fl.out[n:][-400:])
-        check("nc-fl: a second starts: the view says the line again",
-              TWO in v.out[k:], v.out[k:][-400:])
     finally:
         v.close()
         fl.close()

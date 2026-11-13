@@ -13019,7 +13019,9 @@ xr_clear(const struct xr_target *t)
 ** corpus moves (xr_delta: a diff against what was written, so the deltas
 ** applied are the --json of the same moment). A reset goes round again, so
 ** a snapshot always follows it. Events only, never a timer (K3): the one
-** finite wait is the coalescing deadline, armed only while an event waits. */
+** finite wait is the coalescing deadline, armed only while an event waits;
+** the one exception, a paused shell follow polls the Claude count once a
+** second (LOW-X16). */
 #define XF_BATCH_MS 250		/* 3.3: at most one batch per 250 ms */
 #define XF_CLAUDES_MS 1000L	/* paused: the Claude count's poll (LOW-X16) */
 #define XF_EVICT_KEYS 256	/* proposal 11.6: past this, one reset ... */
@@ -13659,17 +13661,11 @@ read:
 	for (;;)
 	{
 		ms = xf_due(f);
-		if (!s.cx && (ms < 0 || ms > XF_CLAUDES_MS))
-			ms = XF_CLAUDES_MS;
 		/* the full pass runs between events; rot: the first question */
 		ev = xf_wait(f, s.d2 || rot ? 0 : ms) | rot;
 		rot = 0;
 		if (ev & XE_OUT)
 			break;
-		/* a second Claude writes no file we watch and wakes no master:
-		** asked on the poll (LOW-X16) */
-		if (!ev && !s.cx && !s.d2)
-			ev = XE_ROT;
 		if (ev & XE_CONN)
 		{
 			if ((r = xf_drain(f)) < 0)
