@@ -1299,17 +1299,21 @@ a fence, a diff, a listing command (`rg`, `grep`, `ls`, ...), a file printed
 from outside the cwd, a heading with an empty title, and more than 3 headings
 of one shape never define. The command counts in every simple command of it
 (split at `;`, `&`, `&&`, `|`, `||`, parentheses and newlines, not at the `&`
-of `2>&1`, `<&3` or `&>`; a `<<` inside `$(( ))` is a shift; a `#` comment
-and each here-doc's body are not a command, and a command with a body the
+of `2>&1`, `<&3` or `&>`; `<>` is one redirect; a `<<` inside `$(( ))`,
+`$[ ]`, `${a[ ]}` or `a[ ]=` is a shift; a `#` comment, which starts only at a
+`#` that begins a word (not `$(x)#y`), and each here-doc's body are not a command, and a command with a body the
 shell expands, `$(…)` under an unquoted delimiter, never defines), past env
 assignments, redirects, `{`, `!`, `if`, `then`, `elif`,
 `else`, `do`, `while`, `until`, `coproc`, `function f`, and `sudo`, `doas`,
 `env`, `command`, `exec`, `builtin`, `xargs`, `nice`, `nohup`, `stdbuf`,
-`time` and `timeout` with their options (`sudo -iu root`,
-`timeout --signal KILL 5`), by name, by path (`/usr/bin/env`) or by GNU name
+`time`, `timeout`, `setsid`, `flock`, `ionice`, `chrt`, `taskset` and
+`busybox` with their options (`sudo -iu root`,
+`timeout --signal KILL 5`; `env -C d` and `sudo -D d` run it in `d`), by name, by path (`/usr/bin/env`) or by GNU name
 (`gtimeout`). It counts inside `sh -c '…'` (`sh`, `bash`, `zsh`, `dash`,
 `ksh`, `fish`; `-lc`, `-c --` and `-c -e` too), `eval`, `watch` and `env -S` (`-S'…'` and
-`--split-string` too), and inside `$(…)` and
+`--split-string` too), `flock f -c '…'`, a shell's script from a here-doc or a
+here-string (`bash <<'EOF'`, `bash <<< '…'`; a shell fed by a pipe never
+defines), and inside `$(…)` and
 backquotes, quoted or not. A search or a printed file found only inside
 `$(…)` or backquotes still leaves the command's `--title` to define: its text
 feeds the command, it is not the output. A command of more than 256 words
@@ -1318,7 +1322,7 @@ never defines. The file printers are `cat`, `head`, `tail`, `bat`, `batcat`,
 `rev`, `column`, `fold`, `fmt`, `glow`, `zcat` and `gzcat` (also by GNU name:
 `gcat`, `gsed`); with no file
 argument (`… | jq .`) they print their input and define, but under `xargs`
-they print files named by their input and never define. A `<` source is a
+they print files named by their input and never define. A `<` or `<>` source is a
 printed file of a printer, of a compound command (`done < f`, `} < f`) and
 of a redirect with no command (`$(< f)`). A printed file is
 outside the cwd when its path, made absolute against the cwd or the directory

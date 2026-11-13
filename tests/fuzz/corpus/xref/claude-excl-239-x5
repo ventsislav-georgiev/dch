@@ -1,0 +1,13 @@
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": "go"}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d0", "name": "Bash", "input": {"command": "echo $[1<<2]\ncat ../x"}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d0", "is_error": false, "content": "# #831 Title\nbody"}]}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d1", "name": "Bash", "input": {"command": "echo $[ 1 << 2 ]\ncat ../x"}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d1", "is_error": false, "content": "# #831 Title\nbody"}]}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d2", "name": "Bash", "input": {"command": "a=(1 2 3); echo ${a[1<<1]}\ncat ../x"}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d2", "is_error": false, "content": "# #831 Title\nbody"}]}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d3", "name": "Bash", "input": {"command": "a[1<<1]=5\ncat ../x"}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d3", "is_error": false, "content": "# #831 Title\nbody"}]}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d4", "name": "Bash", "input": {"command": "cat a[<<EOF\ncat ../x\nEOF"}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d4", "is_error": false, "content": "# #831 Title\nbody"}]}}
+{"type": "assistant", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_use", "id": "d5", "name": "Bash", "input": {"command": "echo $[1"}}]}}
+{"type": "user", "cwd": "/home/demo/proj", "message": {"content": [{"type": "tool_result", "tool_use_id": "d5", "is_error": false, "content": "# #831 Title\nbody"}]}}

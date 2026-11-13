@@ -4040,6 +4040,27 @@ t_excl(void)
 		"echo $'it\\'s' \"$(cat ../x)\"", "sh -c -- 'cat ../x'",
 		"bash -c -e 'cat /etc/x'", "bash -c -o pipefail 'cat ../x'",
 		"bash -c - 'cat ../x'",
+		/* #239 LOW-X1: <> opens its file to read */
+		"cat <> ../x", "cat 0<>../x", "head -n1 <>/etc/x",
+		/* #239 LOW-X2: a shell's script from a here-doc, a here-string or a
+		** pipe */
+		"sh <<'EOF'\ncat ../x\nEOF", "bash -s <<EOF\ncat ../x\nEOF",
+		"sh <<A <<B\nA\ncat ../x\nB", "bash <<< 'cat ../x'",
+		"echo 'cat ../x' | sh", "printf x | bash -s",
+		/* #239 LOW-X3: more wraps; env -C, sudo -D run it elsewhere */
+		"setsid -w cat ../x", "flock -w 5 /tmp/l cat ../x",
+		"flock /tmp/l -c 'cat ../x'", "ionice -c 3 cat ../x",
+		"chrt -f 10 cat ../x", "taskset -c 0 cat ../x", "taskset 1 rg x",
+		"busybox sh -c 'cat ../x'", "env -C /etc cat notes.md",
+		"env --chdir=/etc cat notes.md", "env -iC/etc cat notes.md",
+		"sudo -D /etc cat notes.md", "sudo --chdir /etc cat notes.md",
+		"env -C .. cat proj/../x",
+		/* #239 LOW-X4: a # in a word after $(…), $((…)), in ${…} */
+		"echo $(echo a)#b; cat ../x", "echo $((1))#; cat ../x",
+		"x=abc; echo ${x/(#/y}; cat ../x",
+		/* #239 LOW-X5: << in $[…], ${a[…]}, a[…]= is a shift */
+		"echo $[1<<2]\ncat ../x", "echo $[ 1 << 2 ]\ncat ../x",
+		"a=(1 2 3); echo ${a[1<<1]}\ncat ../x", "a[1<<1]=5\ncat ../x",
 		0
 	};
 	static const char *const keep[] = {
@@ -4077,6 +4098,18 @@ t_excl(void)
 		"echo $((1<<2))\ncat notes.md", "$'cat' notes.md",
 		"sh -c -- 'cat notes.md'", "echo $'it\\'s'; cat notes.md",
 		"gh issue view 831 2>&1 | head -5", "todo.py get dch 831 2>&1",
+		/* #239: the same shapes inside the cwd; < and > apart; a non-shell's
+		** body and sh -c's stdin are data; || is no pipe; a comment after a
+		** subshell's ) or a blank; a real here-doc after a[ */
+		"cat <> notes.md", "cat < notes.md > out", "cat <notes.md >o",
+		"sh <<'EOF'\ncat notes.md\nEOF", "bash <<< 'cat notes.md'",
+		"cat <<EOF\ncat ../x\nEOF", "sh -c 'cat notes.md' <<EOF\ncat ../x\nEOF",
+		"cat notes.md || sh", "setsid cat notes.md", "flock /tmp/l cat notes.md",
+		"taskset 1 cat notes.md", "ionice -c3 cat notes.md",
+		"env -C sub cat ../notes.md", "env -C /etc true; cat notes.md",
+		"sudo -D /home/demo/proj cat notes.md", "(echo hi)#x; cat ../x",
+		"echo $(true) #; cat ../x", "echo $(echo a)#b; cat notes.md",
+		"cat a[<<EOF\ncat ../x\nEOF", "echo $[1<<2]\ncat notes.md",
 		0
 	};
 	/* change (a): a reader or search only inside $(…) or backquotes
