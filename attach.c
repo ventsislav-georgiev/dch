@@ -122,30 +122,17 @@ lost(void)
 	}
 }
 
-/* Connects to a unix domain socket */
+/* Connects to a unix domain socket; EAGAIN: a stuck master's full
+** backlog, waited for 500 ms (#269) */
 static int
 connect_socket(char *name)
 {
-	int s;
-	struct sockaddr_un sockun;
+	int s = control_connect_path(name);
 
-	if (strlen(name) > sizeof(sockun.sun_path) - 1)
-	{
-		errno = ENAMETOOLONG;
-		return -1;
-	}
-
-	s = socket(PF_UNIX, SOCK_STREAM, 0);
 	if (s < 0)
-		return -1;
-	sockun.sun_family = AF_UNIX;
-	strcpy(sockun.sun_path, name);
-	if (connect(s, (struct sockaddr *)&sockun, sizeof(sockun)) < 0)
 	{
-		int e = errno;	/* connect's: close may overwrite it */
+		int e = errno;
 
-		close(s);
-		errno = e;
 		/* ECONNREFUSED is also returned for regular files, so make
 		** sure we are trying to connect to a socket. */
 		if (e == ECONNREFUSED)

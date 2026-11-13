@@ -2447,8 +2447,6 @@ rename_sessions_interactive(void)
 ** realpath when argv[2] is absolute.
 */
 
-static int control_connect_path(const char *path);
-
 static int
 is_master_of(long pid, const char *sp)
 {
@@ -2858,8 +2856,6 @@ run_master_of(int argc, char **argv)
 /* Build a daemon-launching command vector. We fork+setsid here so the
 ** master survives the originating terminal closing. Returns 0 on parent
 ** success. */
-static int control_connect_path(const char *path);
-
 static long long
 wall_ms(void)
 {
@@ -3001,6 +2997,12 @@ spawn_master(char *exe, const char *name, char *sockp,
 	return -1;
 }
 
+/* a control_connect_path EAGAIN: said by the verbs, the attach and the
+** picker's status line */
+#define STUCK_MSG "session %s is not accepting connections — its master " \
+                  "may be stopped or wedged"
+static const char stuck_fmt[] = "dch: " STUCK_MSG "\n";
+
 static int attach_xray_view(void);
 static int attach_remote;	/* this attach is a host's: so is its chord's view */
 /* The next attach's route as the picked row or the view is (#210), not as
@@ -3138,6 +3140,12 @@ do_attach(char *exe, int forced_name, int force, char **inner_argv,
 
 		if (rc == ATTACH_SWITCH || rc == ATTACH_ENDED)
 			return rc;
+		/* live but stuck: never respawned over (#269) */
+		if (rc == 1 && errno == EAGAIN)
+		{
+			fprintf(stderr, stuck_fmt, session_name);
+			return 1;
+		}
 		dch_trace("hot-path connect failed; dead socket, respawning");
 	}
 	}
@@ -3260,7 +3268,7 @@ static const char no_reply_msg[] =
 /* -1 with errno EAGAIN: a listener is there, but its backlog stayed full
 ** for CTL_CONNECT_MS (Linux; macOS refuses that connect at once). That is
 ** a live, stuck master, never a dead socket to unlink or revive over. */
-static int
+int
 control_connect_path(const char *path)
 {
 	struct sockaddr_un sa;
@@ -3291,10 +3299,6 @@ control_connect_path(const char *path)
 	(void)setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &t0, sizeof t0);
 	return s;
 }
-
-static const char stuck_fmt[] =
-    "dch: session %s is not accepting connections — its master may be "
-    "stopped or wedged\n";
 
 static int
 control_connect(const char *name, int quiet)
@@ -8555,7 +8559,8 @@ hrec_free(struct hrec *r, int n)
 	free(r);
 }
 
-/* Does a master answer on `name`? The view's o asks it too (#232). */
+/* Does a master answer on `name`? The view's o asks it too (#232). 1 with
+** errno EAGAIN: it is there but stuck (#265), else errno 0 (#269). */
 int
 name_live(const char *name)
 {
@@ -8566,6 +8571,7 @@ name_live(const char *name)
 	if ((s = control_connect_path(sp)) < 0)
 		return errno == EAGAIN;	/* stuck is live (#265) */
 	close(s);
+	errno = 0;
 	return 1;
 }
 
@@ -9715,6 +9721,9 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 			         "running", w->title);
 			p->loaded = 0;
 		}
+		else if (go && errno == EAGAIN)	/* stuck: no attach (#269) */
+			snprintf(p->status, sizeof p->status, STUCK_MSG,
+			         w->title);
 		else if (go && (size_t)snprintf(out, outsz, "%s", w->sname) <
 		         outsz)
 		{
@@ -9737,6 +9746,13 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 				snprintf(p->status, sizeof p->status,
 				         "%s: no longer there", w->title);
 				p->loaded = 0;
+				return 0;
+			}
+			/* stuck: no attach; -k and -d still act (#269) */
+			if (p->opens && errno == EAGAIN)
+			{
+				snprintf(p->status, sizeof p->status, STUCK_MSG,
+				         w->title);
 				return 0;
 			}
 			/* a cut name is another session's */
