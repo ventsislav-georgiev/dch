@@ -390,7 +390,8 @@ touch_activity(void)
 ** been quiet AA_QUIET_MS after output (AA_MAX_MS into output that never
 ** pauses), and again AA_VERIFY_MS after an answer; it reads the config
 ** fresh and, only for a prompt it would answer, looks for a Claude Code
-** under the child. The loop guard: the prompt answered last is never
+** under the child, answered only while that Claude is the pty's foreground
+** job (#282). The loop guard: the prompt answered last is never
 ** answered again while it stays up, nor within AA_LOOP_MS once gone and
 ** back; it is the human's. Each answer leaves <sock>.allowed (its title;
 ** the mtime is when), shown by --ls-json as "auto_allowed". */
@@ -472,9 +473,21 @@ auto_allow(void)
 		dch_trace("auto-allow: same prompt again, left to the human");
 	else if (dch_agent_probe(the_pty.pid, &a) == 0)
 	{
+		pid_t fg = tcgetpgrp(the_pty.fd);
+		int e = errno;
+		pid_t g = getpgid((pid_t)a.pid);
+
 		free(a.launch);
+		/* only the Claude in front: one suspended with Ctrl-Z reads
+		** nothing, the "1" would go to the shell that printed this
+		** (#282). Unreadable: fail closed */
+		if (fg <= 0 || g < 0 || fg != g)
+			dch_trace("auto-allow: claude %ld not in front (its group "
+			          "%ld, the pty's %ld%s%s), left alone", a.pid,
+			          (long)g, (long)fg, fg < 0 ? ": " : "",
+			          fg < 0 ? strerror(e) : "");
 		/* behind any input still waiting, never a blocking write */
-		if (pty_input("1", 1) == 0)
+		else if (pty_input("1", 1) == 0)
 		{
 			free(aa_ident);
 			aa_ident = id;

@@ -5782,9 +5782,11 @@ env_ms(const char *key, long dflt)
 }
 
 /* Parent pid from the kernel's process table — never the env, which macOS
-** redacts for platform binaries. -1 when the process is gone. */
+** redacts for platform binaries. -1 when the process is gone. With tpgid,
+** also the foreground process group of its controlling terminal (<= 0:
+** none). */
 static long
-proc_ppid(long pid)
+proc_stat(long pid, long *tpgid)
 {
 #ifdef __APPLE__
 	struct kinfo_proc kp;
@@ -5793,21 +5795,48 @@ proc_ppid(long pid)
 
 	if (sysctl(mib, 4, &kp, &len, NULL, 0) != 0 || len == 0)
 		return -1;
+	if (tpgid)
+		*tpgid = kp.kp_eproc.e_tpgid;
 	return kp.kp_eproc.e_ppid;
 #else
 	char p[64], buf[512], *rp;
 	FILE *f;
-	long pp = -1;
+	long pp = -1, tp = -1;
 
 	snprintf(p, sizeof p, "/proc/%ld/stat", pid);
 	if (!(f = fopen(p, "r")))
 		return -1;
 	/* the comm field may hold spaces and parens: parse after the last ')' */
 	if (fgets(buf, sizeof buf, f) && (rp = strrchr(buf, ')')))
-		sscanf(rp + 1, " %*c %ld", &pp);
+		sscanf(rp + 1, " %*c %ld %*d %*d %*d %ld", &pp, &tp);
 	fclose(f);
+	if (tpgid)
+		*tpgid = tp;
 	return pp;
 #endif
+}
+
+static long
+proc_ppid(long pid)
+{
+	return proc_stat(pid, NULL);
+}
+
+/* 1 when the Claude at `pid` is in the foreground process group of the
+** terminal that `root` (a session's child, which the master made that
+** pty's controlling process) controls, 0 when it is not — suspended with
+** Ctrl-Z or in the background, a shell or another job in front (#282) —
+** -1 when either cannot be read. The kernel's own view, so an old master
+** answers it as well as a new one. */
+static int
+proc_fg(long root, long pid)
+{
+	long fg = -1;
+	pid_t g = getpgid((pid_t)pid);
+
+	if (proc_stat(root, &fg) < 0 || fg <= 0 || g < 0)
+		return -1;
+	return g == (pid_t)fg;
 }
 
 /* Generations from `anc` down to `pid` (0 = the same process), -1 when pid
@@ -8191,11 +8220,11 @@ restart_agents(int force, const char *only, int json)
 enum { SAY_OK, SAY_NOT_CLAUDE, SAY_SELF, SAY_PROMPT, SAY_DRAFT,
        SAY_NO_SCREEN, SAY_NO_SESSION, SAY_NOT_SUBMITTED,
        SAY_NOT_TYPED, SAY_OLD_MASTER, SAY_INTERRUPTED, SAY_WITHDRAWN,
-       SAY_DRAFT_LEFT, SAY_N };
+       SAY_DRAFT_LEFT, SAY_NOT_FG, SAY_N };
 static const char *const say_code[] = {
 	"", "not_claude", "self", "prompt", "draft", "no_screen", "no_session",
 	"not_submitted", "not_typed", "old_master", "interrupted", "withdrawn",
-	"draft_left",
+	"draft_left", "not_foreground",
 };
 static const char *const say_why[] = {
 	"", "no claude runs in the session", "the session you are in",
@@ -8210,6 +8239,8 @@ static const char *const say_why[] = {
 	"not sent",
 	"a signal came once it was typed: it may still sit in the composer, "
 	"not sent",
+	"claude is not the terminal's foreground job (suspended with Ctrl-Z?): "
+	"fg it first",
 };
 /* A child's exit status carries its outcome past exit(1) and the like. */
 #define SAY_EXIT 100
@@ -8331,9 +8362,12 @@ do_say_verb(char **names, int nnames, char **words, int nwords, int json)
 			c = SAY_NO_SESSION;
 		else
 		{
-			/* any status: a busy Claude queues the message */
+			/* any status: a busy Claude queues the message. A
+			** suspended one reads nothing: the shell in front would
+			** (#282) */
 			c = ci.pid <= 0 || claude_find(ci.pid, 1, &r) == 0
-			    ? SAY_NOT_CLAUDE : -1;
+			    ? SAY_NOT_CLAUDE
+			    : proc_fg(ci.pid, r.pid) == 0 ? SAY_NOT_FG : -1;
 			cmd_info_free(&ci);
 		}
 #ifdef HAVE_LIBGHOSTTY_VT
@@ -8421,7 +8455,9 @@ do_run_verb(const char *name, char **words, int nwords)
 	session_sock_path(name, path, sizeof path);
 	if (nwords == 0 || cmd_query(path, &ci) != 0)
 		goto burst;
-	c = ci.pid > 0 && claude_find(ci.pid, 1, &r) != 0;
+	/* a suspended Claude (#282): what is in front gets the burst */
+	c = ci.pid > 0 && claude_find(ci.pid, 1, &r) != 0 &&
+	    proc_fg(ci.pid, r.pid) != 0;
 	cmd_info_free(&ci);
 	if (!c || claude_gate_q(path, 1) == CG_NOVT)
 		goto burst;
@@ -8555,6 +8591,16 @@ do_stop_verb(char **names, int nnames, int json)
 			           why ? "end_failed" : "", why ? why : "", "", "",
 			           json);
 			bad |= why != NULL;
+			continue;
+		}
+		if (proc_fg(ci.pid, r.pid) == 0)
+		{
+			/* the pause message and /exit would go to the shell in
+			** front (#282) */
+			cmd_info_free(&ci);
+			stop_print(names[k], "failed", say_code[SAY_NOT_FG],
+			           say_why[SAY_NOT_FG], "", "", json);
+			bad = 1;
 			continue;
 		}
 #ifdef HAVE_LIBGHOSTTY_VT
@@ -15456,6 +15502,12 @@ main_run(int argc, char **argv)
 				put_json_str(tp);
 			else
 				fputs("null", stdout);
+			/* left out with no Claude, or when it cannot be read */
+			int fg = c ? proc_fg(cr.v[k].root, c->pid) : -1;
+
+			if (fg >= 0)
+				printf(",\"claude_foreground\":%s",
+				       fg ? "true" : "false");
 			/* omitted, not 0, when the master can't answer */
 			if (sz && sz[k][0] >= 0)
 				printf(",\"cols\":%ld,\"rows\":%ld,\"clients\":%ld",

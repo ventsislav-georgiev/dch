@@ -315,6 +315,17 @@ else:
     set_status("idle")
 last = None
 buf = b""
+
+
+def resumed(*_):
+    """fg after Ctrl-Z: raw mode back and a repaint, as Claude Code's Ink
+    does on SIGCONT (the shell restored its own tty modes meanwhile)."""
+    global last
+    tty.setraw(0)
+    last = None
+
+
+signal.signal(signal.SIGCONT, resumed)
 while True:
     c = ctl()
     r, _, _ = select.select([0], [], [], 0.1)

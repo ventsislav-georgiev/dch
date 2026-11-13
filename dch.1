@@ -319,7 +319,7 @@ the pipe: exit 0. A name or another verb with it is exit 2. See
 .TP
 .B \-\-ls\-json
 List sessions as a JSON array of
-.BR {name,alias,harness,activity_epoch,state,version,agents,meta,meta_epoch,auto_allowed,claude_session_id,transcript_path,cols,rows,clients,cwd} .
+.BR {name,alias,harness,activity_epoch,state,version,agents,meta,meta_epoch,auto_allowed,claude_session_id,transcript_path,claude_foreground,cols,rows,clients,cwd} .
 .I cwd
 is last: the directory the session started in, from its live history
 record, or
@@ -345,6 +345,19 @@ the id is not a UUID.
 is the absolute \fI<config>/projects/*/<sessionId>.jsonl\fP when exactly one
 such file exists, else
 .BR null .
+.I claude_foreground
+is
+.B true
+while that Claude is the session terminal's foreground job,
+.B false
+while it is not (suspended with Ctrl\-Z or in the background: a shell or
+another program in front reads what is typed), and left out when
+.I claude_session_id
+is
+.B null
+or the process groups cannot be read; a suspended Claude keeps its
+.IR claude_session_id .
+Read from the kernel by the client, so a master of any version gets it.
 .I auto_allowed
 is the permission prompt the master answered last with auto\-allow (see
 .BR "CONFIG FILE" ),
@@ -1918,7 +1931,8 @@ shows and again while it stays. A failure exits 1 with
 .BR no_screen ,
 or on a signal
 .BR interrupted ", " withdrawn ", " draft_left )
-on stderr. Other programs, masters without a mirror, dch-lite and your own
+on stderr. Other programs (also one in front of a Claude suspended with
+Ctrl\-Z), masters without a mirror, dch-lite and your own
 session (\fB$DCH_SESSION\fR) keep the plain burst.
 .TP
 .BI \-\-keys " name key..."
@@ -2277,6 +2291,8 @@ prints one object per line instead:
 .RB ( not_claude ", " self ", " prompt ", " draft ,
 .BR no_screen ", " no_session ", " not_submitted ", " not_typed ,
 .BR old_master ", " interrupted ", " withdrawn ", " draft_left ,
+.B not_foreground
+(Claude suspended or in the background: nothing typed, \fBfg\fR it first),
 or empty) and
 .IR detail .
 A first SIGINT, SIGTERM or SIGHUP, once handled, types nothing more and
@@ -2355,7 +2371,7 @@ detail),
 .IB name ": skipped \(em " why
 .RB ( self ", " respawn_pending ", " no_screen ),
 .IB name ": failed \(em " why
-.RB ( no_session ", " old_master ", " claude_unreadable ", " prompt ,
+.RB ( no_session ", " old_master ", " claude_unreadable ", " not_foreground ", " prompt ,
 .BR draft ", " queued ", " not_typed ", " not_idle ", " exit_failed ", " claude_exited ,
 .BR end_failed )
 or
@@ -3359,12 +3375,14 @@ and the screen reading
 .BR blocked .
 Everything else is left to the human, and hook- or ask-rule-raised
 prompts ("Hook ... requires confirmation for this command", "Permission rule
-... requires confirmation for this ...", "Ask rule ... overrides auto mode for
+\&... requires confirmation for this ...", "Ask rule ... overrides auto mode for
 this ...") always are. Checked after 300 ms of quiet output and
 2 s after an answer, only when a Claude Code runs under the session's program;
 a prompt it answered is never answered again while it stays up, nor within
 30 s once gone and back (its ticking "will automatically block this request in
-M:SS" line aside). Needs the terminal mirror: unavailable in dch\-lite
+M:SS" line aside). A Claude suspended with Ctrl\-Z (or in the background) is
+never answered for: the program in front printed that prompt. Needs the
+terminal mirror: unavailable in dch\-lite
 and under
 .BR DCH_NO_VT .
 .TP
