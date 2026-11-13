@@ -192,6 +192,104 @@ t_time(void)
 	      at_of("2026-01-02T03:04:05+01:0") == -1 &&
 	      at_of("2026-01-02T03:04:05+01") == -1 &&
 	      at_of("2026-01-02T03:04:05-") == -1);
+
+	/* #292: the hand reader and the day sum answer as sscanf and timegm did */
+	CHECK("time: no zone, a fraction without one, 60 seconds carry",
+	      at_of("2026-01-02T03:04:05") == 1767323045 &&
+	      at_of("2026-01-02T03:04:05.5") == 1767323045 &&
+	      at_of("2026-01-02T03:04:60Z") == 1767323100);
+	CHECK("time: out of range is unparsed (month 0/13, day 0/32, 24h, "
+	      "60m, 61s)", at_of("2026-00-02T03:04:05Z") == -1 &&
+	      at_of("2026-13-02T03:04:05Z") == -1 &&
+	      at_of("2026-01-00T03:04:05Z") == -1 &&
+	      at_of("2026-01-32T03:04:05Z") == -1 &&
+	      at_of("2026-01-02T24:04:05Z") == -1 &&
+	      at_of("2026-01-02T03:60:05Z") == -1 &&
+	      at_of("2026-01-02T03:04:61Z") == -1);
+	CHECK("time: short, garbage, trailing junk and a 5-digit year are "
+	      "unparsed", at_of("") == -1 && at_of("x") == -1 &&
+	      at_of("2026-01-02") == -1 && at_of("2026-01-02T03:04") == -1 &&
+	      at_of("2026-01-02T03:04:05Zx") == -1 &&
+	      at_of("2026-01-02T03:04:05+01:00x") == -1 &&
+	      at_of("2026-01-02T03:04:05.x") == -1 &&
+	      at_of("20261-01-02T03:04:05Z") == -1 &&
+	      at_of(" 2026-01-02T03:04:05Z") == -1);
+	CHECK("time: days carry as timegm's (Feb 31, leap and 2100 days)",
+	      at_of("2026-02-31T00:00:00Z") == 1772496000 &&
+	      at_of("2024-02-29T00:00:00Z") == 1709251200 - 86400 &&
+	      at_of("2100-03-01T00:00:00Z") -
+	      at_of("2100-02-28T00:00:00Z") == 86400 &&
+	      at_of("9999-12-31T23:59:59Z") == 253402300799LL);
+	CHECK("time: sscanf's blanks and signs inside the 19 bytes still read",
+	      at_of("2026-  12-3T03:04:5") == 1796267045 &&
+	      at_of("2026-01-02T-1:04:05Z") == 1767308645);
+	CHECK("time: before 1970 is timegm's", at_of("1960-01-01T00:00:00Z") ==
+	      -315619200);
+}
+
+/* #292: tokens_max's string loop; the line counts 24 + m tokens at most:
+** a "\\" and a \" before commas at string ends, é and é with commas,
+** nested empty containers */
+static int
+tok_line(size_t m)
+{
+	static const char h[] = "{\"type\":\"user\",\"message\":{\"content\":"
+	    "\"hi\"},\"e\":\"\\\\\",\"q\":\"a\\\",b\\\\\\\",c\",\"u\":"
+	    "\"\xc3\xa9,\\u00e9,\",\"n\":[[],{},[{}]],\"a\":[";
+	struct xr_chapters c;
+	size_t k = sizeof h - 1, j;
+	char *b = malloc(k + 2 * m + 3);
+	int ok;
+
+	if (!b)
+		return -1;
+	memcpy(b, h, k);
+	for (j = 0; j < m; j++)
+		b[k++] = '0', b[k++] = ',';
+	memcpy(b + k - 1, "]}", 3);
+	begin();
+	line(b);
+	line(A("x"));
+	line(U("after"));
+	end(&c);
+	/* 1 read, 0 a failed step, -1 neither */
+	ok = c.n != 2 || strcmp(xr_chapter_at(&c, 1)->title, "after") ? -1 :
+	     !xr_chapter_at(&c, 0)->partial &&
+	     !strcmp(xr_chapter_at(&c, 0)->title, "hi") ? 1 :
+	     xr_chapter_at(&c, 0)->partial ? 0 : -1;
+	xr_chapters_free(&c);
+	free(b);
+	return ok;
+}
+
+/* a malformed line is one failed step, read to its last byte only (ASan) */
+static int
+tok_bad(const char *s)
+{
+	struct xr_chapters c;
+	int ok;
+
+	begin();
+	line(s);
+	line(U("after"));
+	end(&c);
+	ok = c.n == 2 && xr_chapter_at(&c, 0)->partial &&
+	     !strcmp(xr_chapter_at(&c, 1)->title, "after");
+	xr_chapters_free(&c);
+	return ok;
+}
+
+static void
+t_tokens(void)
+{
+	CHECK("tokens: a line at XR_LINE_TOKENS is read",
+	      tok_line(XR_LINE_TOKENS - 24) == 1);
+	CHECK("tokens: one over is a failed step",
+	      tok_line(XR_LINE_TOKENS - 23) == 0);
+	CHECK("tokens: unterminated string, lone backslash at the end",
+	      tok_bad("{\"type\":\"user\",\"message\":{\"content\":\"hi,,") &&
+	      tok_bad("{\"type\":\"user\",\"message\":{\"content\":\"hi\\") &&
+	      tok_bad("{\"type\":\"user\",\"message\":{\"content\":\"hi\\\""));
 }
 
 static void
@@ -5465,6 +5563,7 @@ main(int argc, char **argv)
 	t_ids();
 	t_claude();
 	t_time();
+	t_tokens();
 	t_read();
 	t_shell();
 	t_screen_seam();

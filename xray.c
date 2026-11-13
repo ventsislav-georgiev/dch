@@ -1479,8 +1479,7 @@ j_str(const struct json_parser *p, int t, size_t *n)
 	s = p->text;
 	i = p->tok[t].start;
 	e = p->tok[t].end;
-	/* calloc: the analyzer cannot see sscanf's %n bound in iso_time() */
-	if (!(o = calloc(1, (size_t)(e - i) + 1)))
+	if (!(o = malloc((size_t)(e - i) + 1)))
 		return NULL;
 	while (i < e)
 	{
@@ -1642,18 +1641,39 @@ k_streq(const struct json_parser *p, int obj, const char *const *alias,
 	return r;
 }
 
+/* sscanf's %<w>d, which iso_time read with before #292 (an sscanf a line
+** was 8% of --json): blanks, a sign, then at most w characters of sign and
+** digits; NULL without a digit. */
+static const char *
+iso_num(const char *p, int w, int *v)
+{
+	int neg = 0, k = 0;
+
+	while (isspace((unsigned char)*p))
+		p++;
+	if (*p == '+' || *p == '-')
+		neg = *p++ == '-', w--;
+	for (*v = 0; k < w && *p >= '0' && *p <= '9'; k++)
+		*v = *v * 10 + *p++ - '0';
+	*v = neg ? -*v : *v;
+	return k ? p : NULL;
+}
+
 /* ISO 8601 "2026-01-02T03:04:05.678Z" (or +hh:mm) to epoch seconds; -1. */
 static long long
 iso_time(const char *s)
 {
 	struct tm tm;
-	int y, mo, d, h, mi, se, n = 0, off = 0;
-	const char *p;
+	int v[6], k, off = 0, y;
+	const char *p = s;
 
-	if (!s || sscanf(s, "%4d-%2d-%2dT%2d:%2d:%2d%n", &y, &mo, &d, &h, &mi,
-	                 &se, &n) != 6 || n != 19)
+	/* "%4d-%2d-%2dT%2d:%2d:%2d" over exactly 19 bytes */
+	for (k = 0; k < 6; k++)
+		if (!p || (k && *p++ != "--T::"[k - 1]) ||
+		    !(p = iso_num(p, k ? 2 : 4, &v[k])))
+			return -1;
+	if (p - s != 19)
 		return -1;
-	p = s + 19;
 	if (*p == '.')
 		for (p++; *p >= '0' && *p <= '9'; p++)
 			;
@@ -1670,17 +1690,28 @@ iso_time(const char *s)
 	}
 	else if (*p == 'Z')
 		p++;
-	if (*p || mo < 1 || mo > 12 || d < 1 || d > 31 || h > 23 || mi > 59 ||
-	    se > 60)
+	if (*p || v[1] < 1 || v[1] > 12 || v[2] < 1 || v[2] > 31 || v[3] > 23 ||
+	    v[4] > 59 || v[5] > 60)
 		return -1;
-	memset(&tm, 0, sizeof tm);
-	tm.tm_year = y - 1900;
-	tm.tm_mon = mo - 1;
-	tm.tm_mday = d;
-	tm.tm_hour = h;
-	tm.tm_min = mi;
-	tm.tm_sec = se;
-	return (long long)timegm(&tm) - off;
+	if (v[0] < 1970)	/* timegm's own rules (macOS refuses before 1900) */
+	{
+		memset(&tm, 0, sizeof tm);
+		tm.tm_year = v[0] - 1900;
+		tm.tm_mon = v[1] - 1;
+		tm.tm_mday = v[2];
+		tm.tm_hour = v[3];
+		tm.tm_min = v[4];
+		tm.tm_sec = v[5];
+		return (long long)timegm(&tm) - off;
+	}
+	/* timegm's answer without its 2 us a call (macOS, #292): days since
+	** 1970 by Hinnant's days_from_civil, the year counted from March so a
+	** leap day comes last; a day or time past its range carries as in
+	** timegm */
+	y = v[0] - (v[1] <= 2);
+	return (365LL * y + y / 4 - y / 100 + y / 400 +
+	        (153 * (v[1] > 2 ? v[1] - 3 : v[1] + 9) + 2) / 5 + v[2] - 1 -
+	        719468) * 86400 + v[3] * 3600 + v[4] * 60 + v[5] - off;
 }
 
 /* ---- Claude: Prosper's text rules ----------------------------------------- */
@@ -6138,23 +6169,20 @@ listed(const char *const *v, const char *s)
 }
 
 /* An upper bound on the line's JSON tokens: one per value and key, each
-** after an opener, ',' or ':' outside strings. */
+** after an opener, ',' or ':' outside strings. A string's body is its own
+** tight loop: most of a line is string bytes (#292). */
 static size_t
 tokens_max(const char *s, size_t n)
 {
 	size_t k, c = 1;
-	int in = 0;
 
 	for (k = 0; k < n; k++)
-		if (in)
+		if (s[k] == '"')
 		{
-			if (s[k] == '\\')
-				k++;
-			else if (s[k] == '"')
-				in = 0;
+			for (k++; k < n && s[k] != '"'; k++)
+				if (s[k] == '\\')
+					k++;
 		}
-		else if (s[k] == '"')
-			in = 1;
 		else if (s[k] == ',' || s[k] == ':' || s[k] == '[' || s[k] == '{')
 			c++;
 	return c;
