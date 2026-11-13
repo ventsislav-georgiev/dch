@@ -583,23 +583,54 @@ static void terminate_child(pid_t pid) {
 }
 
 /* `ps -o lstart= -p <pid>` under LC_ALL=C TZ=UTC: what Claude Code's records
-   carry as procStart. On macOS read in-process from the same kernel field ps
-   formats (strftime %c in the C locale), sparing a fork of ps per record:
-   --ls-json verifies one per Claude-running session on every call (#079). */
+   carry as procStart. Read in-process from the same kernel fields ps formats
+   (ctime / strftime %c in the C locale), sparing a fork of ps per record:
+   --ls-json verifies one per Claude-running session on every call (#079), and
+   on Linux each ps read every /proc/N/stat to answer one pid (#264). */
 static int process_start(long pid, char *out, size_t cap) {
-#ifdef __APPLE__
   static const char *const wd[] = {"Sun", "Mon", "Tue", "Wed",
                                    "Thu", "Fri", "Sat"};
   static const char *const mo[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
                                    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+  struct tm tm;
+  time_t t;
+#ifdef __APPLE__
   struct kinfo_proc kp;
   size_t kl = sizeof kp;
   int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, (int)pid};
-  struct tm tm;
-  time_t t;
   if (pid <= 0 || pid > INT_MAX || sysctl(mib, 4, &kp, &kl, NULL, 0) != 0 ||
-      kl == 0 || (t = kp.kp_proc.p_starttime.tv_sec) <= 0 ||
-      !gmtime_r(&t, &tm) || tm.tm_wday < 0 || tm.tm_wday > 6 ||
+      kl == 0)
+    return -1;
+  t = kp.kp_proc.p_starttime.tv_sec;
+#else
+  /* procps: boot_time() (btime in /proc/stat) + starttime ticks / Hertz,
+     field 22 of /proc/PID/stat, counted after the last ')' of comm. */
+  char path[64], buf[1024], *s, *e;
+  unsigned long long ticks = 0, boot = 0;
+  long hz = sysconf(_SC_CLK_TCK);
+  FILE *f;
+  size_t n;
+  int i;
+  if (pid <= 0 || pid > INT_MAX || hz <= 0 ||
+      snprintf(path, sizeof path, "/proc/%ld/stat", pid) >= (int)sizeof path ||
+      !(f = fopen(path, "r")))
+    return -1;
+  n = fread(buf, 1, sizeof buf - 1, f);
+  fclose(f);
+  buf[n] = '\0';
+  for (i = 0, s = strrchr(buf, ')'); s && i < 20; i++)
+    s = strchr(s + 1, ' ');
+  if (!s || (errno = 0, ticks = strtoull(s + 1, &e, 10), e == s + 1) ||
+      errno || *e != ' ' || !(f = fopen("/proc/stat", "r")))
+    return -1;
+  while (fgets(buf, sizeof buf, f) && sscanf(buf, "btime %llu", &boot) != 1)
+    boot = 0;
+  fclose(f);
+  if (!boot)
+    return -1;
+  t = (time_t)(boot + ticks / (unsigned long long)hz);
+#endif
+  if (t <= 0 || !gmtime_r(&t, &tm) || tm.tm_wday < 0 || tm.tm_wday > 6 ||
       tm.tm_mon < 0 || tm.tm_mon > 11)
     return -1;
   return snprintf(out, cap, "%s %s %2d %02d:%02d:%02d %d", wd[tm.tm_wday],
@@ -607,109 +638,6 @@ static int process_start(long pid, char *out, size_t cap) {
                   tm.tm_sec, tm.tm_year + 1900) < (int)cap
              ? 0
              : -1;
-#else
-  int p[2], status, flags;
-  pid_t child;
-  size_t off = 0;
-  char id[32];
-  long long now, end;
-  if (snprintf(id, sizeof id, "%ld", pid) >= (int)sizeof id || pipe(p) < 0)
-    return -1;
-  child = fork();
-  if (child < 0) {
-    close(p[0]);
-    close(p[1]);
-    return -1;
-  }
-  if (child == 0) {
-    char *av[] = {"ps", "-o", "lstart=", "-p", id, NULL};
-    char *env[] = {"LC_ALL=C", "TZ=UTC", NULL};
-    long maxfd;
-    close(p[0]);
-    if (dup2(p[1], STDOUT_FILENO) < 0)
-      _exit(127);
-    close(p[1]);
-    maxfd = sysconf(_SC_OPEN_MAX);
-    if (maxfd < 0 || maxfd > 65536)
-      maxfd = 65536;
-    for (int fd = 3; fd < maxfd; fd++)
-      close(fd);
-    execve("/bin/ps", av, env);
-    _exit(127);
-  }
-  close(p[1]);
-  flags = fcntl(p[0], F_GETFL, 0);
-  if (flags < 0 || fcntl(p[0], F_SETFL, flags | O_NONBLOCK) < 0) {
-    close(p[0]);
-    terminate_child(child);
-    return -1;
-  }
-  end = deadline_after(10000);
-  if (end < 0) {
-    close(p[0]);
-    terminate_child(child);
-    return -1;
-  }
-  for (;;) {
-    ssize_t n;
-    if (wait_ready(p[0], POLLIN, end) < 0)
-      break;
-    if (off + 1 == cap) {
-      char extra;
-      n = read(p[0], &extra, 1);
-      if (n > 0) {
-        close(p[0]);
-        terminate_child(child);
-        return -1;
-      }
-    } else
-      n = read(p[0], out + off, cap - 1 - off);
-    if (n > 0)
-      off += (size_t)n;
-    else if (n == 0)
-      break;
-    else if (errno == EINTR || errno == EAGAIN)
-      continue;
-    else
-      break;
-  }
-  close(p[0]);
-  if (cancelled() || monotonic_ms(&now) < 0 || now >= end) {
-    terminate_child(child);
-    return -1;
-  }
-  for (;;) {
-    pid_t r = waitpid(child, &status, WNOHANG);
-    if (r == child)
-      break;
-    if (r < 0 && errno != EINTR) {
-      terminate_child(child);
-      return -1;
-    }
-    if (cancelled() || monotonic_ms(&now) < 0 || now >= end) {
-      terminate_child(child);
-      return -1;
-    }
-    /* ps has closed its stdout, so its exit is a moment away. A 20 ms nap
-       here cost --ls-json 20 ms per verified record (#079). */
-    poll(NULL, 0, 1);
-  }
-  if (!WIFEXITED(status) || WEXITSTATUS(status) || !off)
-    return -1;
-  out[off] = '\0';
-  while (off && isspace((unsigned char)out[off - 1]))
-    out[--off] = '\0';
-  {
-    size_t lead = 0;
-    while (lead < off && isspace((unsigned char)out[lead]))
-      lead++;
-    if (lead) {
-      memmove(out, out + lead, off - lead + 1);
-      off -= lead;
-    }
-  }
-  return off ? 0 : -1;
-#endif
 }
 
 /* Peek, then consume exactly up to and including the newline, so the next
