@@ -63,6 +63,9 @@ static pid_t client_pid;	/* the process that file names */
 ** creates; remote_host: --host; pk_remote: the picker lists remote rows. */
 static int remote_ok, attach_only, pk_remote;
 static const char *remote_host;
+/* the picker's header: "kill session:" or "detach session:" where it does
+** not attach (opens 0), what its Enter does there */
+static const char *pk_header = "";
 /* the host of an a:b name that stayed local only because the host is not
 ** known (#122): a failed verb names it in one hint line */
 static char g_rhint[DCH_RHOST_MAX];
@@ -9542,10 +9545,15 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 	if (w->name[0] == '-' && !(t == 2 ? c == 'p' || c == 'd' : c == 'X' ||
 	                           c == '\r' || c == '\n'))
 	{
-		snprintf(p->status, sizeof p->status, t == 2 ? "%s: a name "
-		         "starting with '-' can't be resumed; p pins, d removes"
-		         : "%s: a name starting with '-'; Enter attaches, X "
-		         "kills", w->name);
+		if (t == 2)
+			snprintf(p->status, sizeof p->status, "%s: a name "
+			         "starting with '-' can't be resumed; p pins, d "
+			         "removes", w->name);
+		else
+			snprintf(p->status, sizeof p->status, "%s: a name "
+			         "starting with '-'; Enter %s", w->name, p->opens
+			         ? "attaches, X kills" : *pk_header == 'k' ?
+			         "kills, X asks first" : "detaches, X kills");
 		return 0;
 	}
 	if (c == 'x')
@@ -9639,10 +9647,13 @@ pk_do(struct pk *p, int fd, int c, char *out, size_t outsz)
 				free(pt);
 				if (!ok)
 				{
+					/* -k and -d: their Enter kills or
+					** detaches, it answers nothing */
 					snprintf(p->status, sizeof p->status,
 					         "%s: not a plain Yes/No permission "
-					         "prompt; attach (Enter) to answer",
-					         w->title);
+					         "prompt; %s", w->title, p->opens ?
+					         "attach (Enter) to answer" :
+					         "answer it from dch -l");
 					return 0;
 				}
 			}
@@ -9931,6 +9942,7 @@ pick_session(const char *header, char *out, size_t outsz, int opens)
 		goto done;
 	}
 	p.opens = opens;
+	pk_header = header;
 	picker_tty_fd = fd;
 	picker_term_saved = 1;
 	signal(SIGINT, picker_sigint);

@@ -44,7 +44,9 @@ and --keys types into it. Covers:
      p pins and unpins, d removes (`--` before the name), Enter says it is
      not resumed;
  15. the -k and -d pickers' hints name what Enter does there, kill or
-     detach, never attach (QA 1.59.0 LOW-V8), the filter's too.
+     detach, never attach (QA 1.59.0 LOW-V8), the filter's too; so do their
+     status lines: r on a '-' name says what Enter does there, a on a
+     question form sends the user to dch -l, never to Enter (#247).
 
 Run:  python3 tests/picker_test.py            (uses ./dch)
       DCH=/path/to/dch python3 tests/picker_test.py
@@ -411,8 +413,22 @@ def zerowidth():
 
 def verbs():
     """15. dch -k and dch -d with no name: Enter kills or detaches the
-    row, and the hints say so (QA 1.59.0 LOW-V8)."""
-    for pk, flag, verb in (("pk11", "-k", "kill"), ("pk12", "-d", "detach")):
+    row, and the hints say so (QA 1.59.0 LOW-V8); the status lines never
+    say Enter attaches (#247)."""
+    f = os.path.join(ROOT, "vform.txt")
+    with open(f, "w") as fh:
+        fh.write("\n".join(FORM) + "\n")
+    dch("--spawn", "vform", "--size", "100x30", "sh", "-c",
+        "cat '%s'; sleep 600" % f)
+    procs.append(subprocess.Popen(
+        [DCH, "--master-of", os.path.join(SOCKDIR, "-v.sock"), "--",
+         "sleep", "600"], env=ENV, stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True))
+    check("a live session named -v is up", wait_live("-v", True), live())
+    for pk, flag, verb, dash in (
+            ("pk11", "-k", "kill", "Enter kills, X asks first"),
+            ("pk12", "-d", "detach", "Enter detaches, X kills")):
         dch("--spawn", pk, "--size", "200x30", "env", "NO_COLOR=1",
             "TERM=xterm-256color", DCH, flag)
         s = wait_screen(pk, lambda s: "q quit" in s)
@@ -424,8 +440,26 @@ def verbs():
               % verb in fk and "attach" not in k + fk, k, fk)
         dch("--keys", pk, "esc")
         wait_screen(pk, lambda s: "q quit" in s)
+        check("dch %s: select -v" % flag, select(pk, "-v"), screen(pk))
+        dch("--keys", pk, "r")
+        s = wait_screen(pk, lambda s: "-v: a name starting" in s)
+        check("dch %s: r on -v says %s" % (flag, dash),
+              "-v: a name starting with '-'; " + dash in s and
+              "Enter attaches" not in s, s)
+        wait_screen(pk, lambda s: any("vform" in l and "Needs input" in l
+                                      for l in body(s)))
+        check("dch %s: select vform" % flag, select(pk, "vform"), screen(pk))
+        dch("--keys", pk, "a")
+        s = wait_screen(pk, lambda s: "not a plain Yes/No" in s)
+        check("dch %s: a on a question form sends to dch -l, not Enter"
+              % flag, "vform: not a plain Yes/No permission prompt; answer "
+              "it from dch -l" in s and "(Enter)" not in s, s)
         dch("--keys", pk, "q")
         wait_live(pk, False)
+    check("-v and vform outlive both pickers",
+          wait_live("-v", True) and wait_live("vform", True), live())
+    dch("-k", "vform")
+    dch("-k", "--", "-v")
 
 
 def main():
@@ -578,9 +612,9 @@ def main():
     check("select form", select("pk1", "form"), screen("pk1"))
     dch("--keys", "pk1", "a")
     s = wait_screen("pk1", lambda s: "not a plain Yes/No" in s)
-    check("a on a question form refuses to press 1",
-          "form: not a plain Yes/No permission prompt" in s and
-          "[y/N]" not in s, s)
+    check("a on a question form refuses to press 1, attach (Enter) answers",
+          "form: not a plain Yes/No permission prompt; attach (Enter) to "
+          "answer" in s and "[y/N]" not in s, s)
     check("select perm", select("pk1", "perm"), screen("pk1"))
     dch("--keys", "pk1", "a")
     s = wait_screen("pk1", lambda s: "[y/N]" in s)
