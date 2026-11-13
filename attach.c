@@ -650,6 +650,15 @@ xray_overlay(int s)
 	dch_trace("client x-ray overlay");
 	fputs(TERM_RESET, stdout);
 	fflush(stdout);
+	/* a remote attach (#231): the relay drops the host's output from here
+	** to the MSG_ATTACH below, as for a suspend (the host never sees it),
+	** so nothing it passed late lands on the screen the view returns to */
+	memset(&pkt, 0, sizeof pkt);
+	if (attach_detached)
+	{
+		pkt.type = MSG_DETACH;
+		write_packet_or_fail(s, &pkt);
+	}
 	if (pipe(p) < 0)
 		p[0] = -1;
 	else
@@ -729,6 +738,16 @@ xray_overlay(int s)
 	inner_focus = fo_st = fpend_n = dq_n = 0;
 	if (focus_on)
 		write_buf_or_fail(1, "\033[?1004h", 8);
+	/* what the relay passed before it read the MSG_DETACH (#231) */
+	while (live && attach_detached)
+	{
+		ssize_t r = recv(s, buf, sizeof buf, MSG_DONTWAIT);
+
+		if (r == 0)
+			live = 0;
+		if (r <= 0)
+			break;
+	}
 	if (!live)	/* nothing to attach to: the loop sees the end */
 		return;
 	memset(&pkt, 0, sizeof pkt);
