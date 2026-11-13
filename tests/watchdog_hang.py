@@ -3,12 +3,14 @@
 With DCH_WD_PIDS set: starts a child, a dch session in this run's socket
 dir and one in a temp dir of its own under DCH_TEST_TMP (#250), and a
 session named -x in each (QA 1.60.0 LOW-T10: a name dch takes for a flag,
-its master started directly, as an older dch made one), writes
+its master started directly, as an older dch made one), stops the first
+two masters with SIGSTOP (LOW-T4: dch -k's SIGTERM waits for a SIGCONT),
+writes
 "<own pid> <child pid> <master pid> <session name> <master 2 pid> <temp dir>
 <-x master pid> <-x master 2 pid>"
 there and hangs until the watchdog ends it. Without: passes at once.
 """
-import os, socket, struct, subprocess, sys, tempfile, time
+import os, signal, socket, struct, subprocess, sys, tempfile, time
 
 out = os.environ.get("DCH_WD_PIDS")
 if not out:
@@ -50,6 +52,8 @@ master2 = spawn(os.path.join(td, "s"))
 dash = spawn(sockdir, "-x")
 os.makedirs(os.path.join(td, "d"))
 dash2 = spawn(os.path.join(td, "d"), "-x")
+os.kill(master, signal.SIGSTOP)
+os.kill(master2, signal.SIGSTOP)
 with open(out, "w") as f:
     f.write("%d %d %d %s %d %s %d %d\n" % (os.getpid(), kid.pid, master, name,
                                            master2, td, dash, dash2))

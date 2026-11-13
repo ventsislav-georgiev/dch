@@ -47,6 +47,11 @@ runpy.run_path(sys.argv[0], run_name="__main__")' \
 # is never reused while a member lives, so group $pypid is the test's. Masters
 # setsid themselves: dch -k ends each by the pid on its socket. Then runreap
 # empties $DCH_TEST_TMP. Only these rows print, never another process's argv.
+# Not reached (QA 1.60.0 LOW-T4, left on purpose): a child that left the
+# group and is no master, e.g. a pty child ignoring SIGHUP or a
+# start_new_session one. Finding it by an environment marker would mean
+# killing by a pattern over other processes' environments, and tests that
+# build their env from scratch or strip DCH_* would drop the marker anyway.
 pyreap(){
     me=$(ps -o pgid= -p $$ | tr -d ' ')
     # never kill -- -'', -0, -1 or our own group: $! is none of them
@@ -64,6 +69,7 @@ pyreap(){
         # -e and --: a name starting with - is no option (QA 1.60.0 LOW-T10)
         [ -S "$s" ] && ! printf '%s\n' "$pyls" | grep -qxF -e "$n" || continue
         printf '       ended its session %s with dch -k\n' "${n%.sock}"
+        contmaster "$s"
         "$DCH" -k -- "${n%.sock}" >/dev/null 2>&1
     done
     runreap
@@ -77,6 +83,7 @@ runreap(){
     find "$DCH_TEST_TMP" -type s -name '*.sock' 2>/dev/null |
     while IFS= read -r s; do
         n=${s##*/}
+        contmaster "$s"
         DCH_SOCKET_DIR=${s%/*} "$DCH" -k -- "${n%.sock}" >/dev/null 2>&1
     done
     # an ending master may still write its record: retry for up to 2 s
@@ -88,11 +95,35 @@ runreap(){
     done
 }
 
+# A master stopped with SIGSTOP holds dch -k's SIGTERM until it is
+# continued: SIGCONT the pid on socket $1 when its argv says it is that
+# socket's master (dch's is_master_of rule). A running one ignores it. One
+# whose backlog is full refuses the connect on macOS: not reached.
+contmaster(){
+    python3 -c 'import os, signal, socket, struct, subprocess, sys
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(2)
+s.connect(sys.argv[1])
+if sys.platform == "darwin":  # SOL_LOCAL, LOCAL_PEERPID
+    pid = struct.unpack("i", s.getsockopt(0, 2, 4))[0]
+else:
+    pid = struct.unpack("3i", s.getsockopt(socket.SOL_SOCKET,
+                                           socket.SO_PEERCRED, 12))[0]
+a = subprocess.run(["ps", "-o", "command=", "-p", str(pid)],
+                   capture_output=True, text=True).stdout.split()
+if pid > 1 and "--master-of" in a[:-1] and os.path.realpath(
+        a[a.index("--master-of") + 1]) == os.path.realpath(sys.argv[1]):
+    os.kill(pid, signal.SIGCONT)' "$1" >/dev/null 2>&1
+}
+
 # Isolate session dir: dch uses $XDG_RUNTIME_DIR/dch-$UID.
 TMP=$(mktemp -d)
 # The tests' own temp dirs: one short dir under /tmp per run (see runreap).
 DCH_TEST_TMP=$(mktemp -d /tmp/dchr.XXXXXX) || exit 1
 export DCH_TEST_TMP
+# and the ones made in the default TMPDIR (tempfile.mkdtemp() with no dir),
+# so runreap ends and removes theirs too (QA 1.60.0 LOW-T4)
+export TMPDIR="$DCH_TEST_TMP"
 trap 'runreap; rm -rf "$TMP" "$DCH_TEST_TMP"' EXIT
 trap 'pyreap; exit 130' INT TERM HUP
 export XDG_RUNTIME_DIR="$TMP"
@@ -1128,7 +1159,8 @@ pyrun "dch serve keeps X-ray's test switches from its ctls" serve_xray_env_test.
 # --- the watchdog ends a hung test, its child and its session, only them ----
 # watchdog_hang.py records its pid, a child's, a session master's and one
 # in its own temp dir under $DCH_TEST_TMP (#250), and a session named -x in
-# each (LOW-T10), then hangs past a 3 s watchdog. The sleep is a bystander in
+# each (LOW-T10), stops the first two (LOW-T4: a stopped master needs a
+# SIGCONT to act on dch -k), then hangs past a 3 s watchdog. The sleep is a bystander in
 # run.sh's own group; session -kl, from before the test, is another (dch -k
 # -kl was "kill all").
 # The subshell keeps the hung test's FAIL out of the counts.
