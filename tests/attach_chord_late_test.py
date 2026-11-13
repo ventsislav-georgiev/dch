@@ -143,7 +143,8 @@ def late(env, rxf, what, second):
     out, the client continued. Returns the client and the hex the session
     got from the detach key on."""
     c = Client(env)
-    c.wait(b"READY")
+    # attached: raw mode on (dch-lite replays no READY on a re-attach)
+    up = c.pump(10, lambda: not termios.tcgetattr(c.fd)[3] & termios.ICANON)
     c.pump(0.3)
     got = len(rx(rxf))
     mark = len(c.out)
@@ -163,8 +164,9 @@ def late(env, rxf, what, second):
         os.write(c.fd, second)
     check("%s: the client read the detach key, then stopped with the "
           "second key unread" % what,
-          read and stopped and until(lambda: c.unread() == len(second), 5),
-          (read, stopped, c.unread()))
+          up and read and stopped and
+          until(lambda: c.unread() == len(second), 5),
+          (up, read, stopped, c.unread()))
     os.kill(c.pid, signal.SIGCONT)
     return c, mark, got
 
