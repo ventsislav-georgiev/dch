@@ -323,7 +323,7 @@ def run_case(name):
     setup = json.load(open(setup_p)) if os.path.exists(setup_p) else {}
     check("%s: case.json carries schema 1" % name, case.get("schema") == 1)
     # /tmp, as xray_deny_test: a .git above TMPDIR would be the project
-    t = tempfile.mkdtemp(prefix="xg", dir="/tmp")
+    t = tempfile.mkdtemp(prefix="xg", dir=os.environ.get("DCH_TEST_TMP", "/tmp"))
     masters = []
     spawned = []
     try:

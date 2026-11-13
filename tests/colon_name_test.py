@@ -28,7 +28,7 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
-ROOT = tempfile.mkdtemp(prefix="dchcolon", dir="/tmp")
+ROOT = tempfile.mkdtemp(prefix="dchcolon", dir=os.environ.get("DCH_TEST_TMP", "/tmp"))
 failures = []
 ROW_RE = re.compile("^([>▌ ]) . (\\S+)")
 RULE_RE = re.compile("^[─-]{20,}$")

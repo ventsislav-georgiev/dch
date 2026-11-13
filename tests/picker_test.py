@@ -61,7 +61,7 @@ from select import select as fdselect
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
-ROOT = tempfile.mkdtemp(prefix="dchpk", dir="/tmp")
+ROOT = tempfile.mkdtemp(prefix="dchpk", dir=os.environ.get("DCH_TEST_TMP", "/tmp"))
 SOCKDIR = os.path.join(ROOT, "s")
 ENV = dict(os.environ, DCH_SOCKET_DIR=SOCKDIR,
            XDG_STATE_HOME=os.path.join(ROOT, "state"),

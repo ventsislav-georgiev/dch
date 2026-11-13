@@ -33,7 +33,7 @@ def check(msg, cond, detail=""):
 
 
 # /tmp, not TMPDIR: a per-user TMPDIR can sit inside some git work tree
-T = os.path.realpath(tempfile.mkdtemp(prefix="xres", dir="/tmp"))
+T = os.path.realpath(tempfile.mkdtemp(prefix="xres", dir=os.environ.get("DCH_TEST_TMP", "/tmp")))
 HOME = os.path.join(T, "home")
 os.makedirs(HOME)
 QTMP = os.path.join(T, "qtmp")

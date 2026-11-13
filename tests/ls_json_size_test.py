@@ -19,7 +19,7 @@ DCH = os.environ.get("DCH", os.path.join(HERE, "..", "dch"))
 DUE = 20.0 if os.environ.get("DCH_TEST_NO_BUDGET") else 5.0
 MSG_DETACH, MSG_READ_DATA, MSG_READ_END, MSG_ACK, MSG_CMD = 2, 8, 9, 11, 15
 
-TMP = tempfile.mkdtemp(dir="/tmp", prefix="dchls")
+TMP = tempfile.mkdtemp(dir=os.environ.get("DCH_TEST_TMP", "/tmp"), prefix="dchls")
 ENV = dict(os.environ, XDG_RUNTIME_DIR=TMP, XDG_STATE_HOME=TMP + "/state",
            HOME=TMP + "/home", DCH_CONFIG=TMP + "/config",
            DCH_LOGIN_ENV="0", DCH_NO_REMOTE="1")

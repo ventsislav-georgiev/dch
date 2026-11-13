@@ -43,7 +43,7 @@ def check(msg, cond, detail=""):
             print("       " + repr(detail)[-900:])
 
 
-T = os.path.realpath(tempfile.mkdtemp(prefix="xrc", dir="/tmp"))
+T = os.path.realpath(tempfile.mkdtemp(prefix="xrc", dir=os.environ.get("DCH_TEST_TMP", "/tmp")))
 FAKE = os.path.join(T, "fake")
 os.makedirs(FAKE)
 with open(os.path.join(FAKE, "tailscale"), "w") as f:

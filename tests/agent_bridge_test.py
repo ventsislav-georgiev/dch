@@ -432,7 +432,7 @@ def main():
         print("FAIL: dch not executable at " + DCH)
         return 1
     with tempfile.TemporaryDirectory(
-        prefix="dch-bridge-", dir=os.path.realpath("/tmp")
+        prefix="dch-bridge-", dir=os.path.realpath(os.environ.get("DCH_TEST_TMP", "/tmp"))
     ) as raw:
         root = Path(raw)
         check(

@@ -877,7 +877,7 @@ def main():
     if not os.access(DCH, os.X_OK):
         print("FAIL: dch not executable at", DCH)
         return 1
-    tmp = tempfile.mkdtemp(prefix="xr", dir="/tmp")
+    tmp = tempfile.mkdtemp(prefix="xr", dir=os.environ.get("DCH_TEST_TMP", "/tmp"))
     try:
         test_read_op()
         test_subscribers()

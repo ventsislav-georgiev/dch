@@ -44,7 +44,7 @@ def cmd(sockdir, name, reply):
 
 def main():
     # run.sh exports an isolated XDG_RUNTIME_DIR; standalone gets its own
-    env_dir = os.environ.get("XDG_RUNTIME_DIR") or tempfile.mkdtemp(dir="/tmp")
+    env_dir = os.environ.get("XDG_RUNTIME_DIR") or tempfile.mkdtemp(dir=os.environ.get("DCH_TEST_TMP", "/tmp"))
     os.environ["XDG_RUNTIME_DIR"] = env_dir
     os.environ.pop("DCH_SOCKET_DIR", None)
     sockdir = os.path.join(env_dir, "dch-%d" % os.getuid())

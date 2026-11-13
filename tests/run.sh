@@ -45,9 +45,8 @@ runpy.run_path(sys.argv[0], run_name="__main__")' \
 # End what test $pypid left: its process group, then the sessions it started
 # in this run's socket dir. setsid made the group id its pid, and a group id
 # is never reused while a member lives, so group $pypid is the test's. Masters
-# setsid themselves: dch -k ends each by the pid on its socket. Sessions and
-# dirs a test made under /tmp itself are left: no safe rule finds them from
-# here. Only these rows print, never another process's argv.
+# setsid themselves: dch -k ends each by the pid on its socket. Then runreap
+# empties $DCH_TEST_TMP. Only these rows print, never another process's argv.
 pyreap(){
     me=$(ps -o pgid= -p $$ | tr -d ' ')
     # never kill -- -'', -0, -1 or our own group: $! is none of them
@@ -66,11 +65,35 @@ pyreap(){
         printf '       ended its session %s with dch -k\n' "${n%.sock}"
         "$DCH" -k "${n%.sock}" >/dev/null 2>&1
     done
+    runreap
+}
+# Tests make their temp dirs in $DCH_TEST_TMP (short: socket paths stay far
+# under sun_path's 104 bytes). End every dch master listening on a socket in
+# it (dch -k checks the socket's own listener is that session's master), then
+# remove what is in it. Nothing else is signalled.
+runreap(){
+    [ -d "${DCH_TEST_TMP:-}" ] || return 0
+    find "$DCH_TEST_TMP" -type s -name '*.sock' 2>/dev/null |
+    while IFS= read -r s; do
+        n=${s##*/}
+        case $n in -*) continue ;; esac
+        DCH_SOCKET_DIR=${s%/*} "$DCH" -k "${n%.sock}" >/dev/null 2>&1
+    done
+    # an ending master may still write its record: retry for up to 2 s
+    rn=0
+    while [ "$rn" -lt 10 ]; do
+        rm -rf "${DCH_TEST_TMP:?}"/* 2>/dev/null
+        [ -z "$(ls -A "$DCH_TEST_TMP")" ] && return 0
+        sleep 0.2; rn=$((rn + 1))
+    done
 }
 
 # Isolate session dir: dch uses $XDG_RUNTIME_DIR/dch-$UID.
 TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+# The tests' own temp dirs: one short dir under /tmp per run (see runreap).
+DCH_TEST_TMP=$(mktemp -d /tmp/dchr.XXXXXX) || exit 1
+export DCH_TEST_TMP
+trap 'runreap; rm -rf "$TMP" "$DCH_TEST_TMP"' EXIT
 trap 'pyreap; exit 130' INT TERM HUP
 export XDG_RUNTIME_DIR="$TMP"
 # DCH_SOCKET_DIR wins over XDG_RUNTIME_DIR: an inherited one would point the
@@ -1101,21 +1124,22 @@ pyrun "xray: a live Codex's rollout, the mapping, the seam, --follow" xray_codex
 pyrun "xray file windows: no wide root, the deny list, hard links" xray_deny_test.py
 
 # --- the watchdog ends a hung test, its child and its session, only them ----
-# watchdog_hang.py records its pid, a child's and a session master's, then
-# hangs past a 3 s watchdog. The sleep is a bystander in run.sh's own group.
+# watchdog_hang.py records its pid, a child's, a session master's and one
+# in its own temp dir under $DCH_TEST_TMP (#250), then hangs past a 3 s
+# watchdog. The sleep is a bystander in run.sh's own group.
 # The subshell keeps the hung test's FAIL out of the counts.
 if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
-    wdf=$fail wdpy='' wdkid='' wdm='' wdname=''
+    wdf=$fail wdpy='' wdkid='' wdm='' wdname='' wdm2='' wdtd=''
     sleep 30 & wdby=$!
     (DCH_TEST_TIMEOUT=3 DCH_WD_PIDS="$TMP/wd.pids"; export DCH_WD_PIDS
      pyrun "hung" watchdog_hang.py) >"$TMP/wd.out" 2>&1
-    [ -f "$TMP/wd.pids" ] && read -r wdpy wdkid wdm wdname <"$TMP/wd.pids"
+    [ -f "$TMP/wd.pids" ] && read -r wdpy wdkid wdm wdname wdm2 wdtd <"$TMP/wd.pids"
     wdgone(){ for p; do
         case $p in ''|*[!0-9]*) return 1 ;; esac
         ! kill -0 "$p" 2>/dev/null || return 1
     done; }
     n=0
-    while [ "$n" -lt 50 ] && ! wdgone "$wdpy" "$wdkid" "$wdm"; do
+    while [ "$n" -lt 50 ] && ! wdgone "$wdpy" "$wdkid" "$wdm" "$wdm2"; do
         sleep 0.1; n=$((n + 1))
     done
     grep -q '^  FAIL hung$' "$TMP/wd.out" && grep -q 'Timeout (' "$TMP/wd.out" \
@@ -1126,6 +1150,10 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     wdgone "$wdm" && [ -n "$wdname" ] && [ ! -e "$SOCKDIR/$wdname.sock" ] \
         && ok "watchdog: the session it started in the socket dir ends" \
         || bad "watchdog: the session it started in the socket dir ends"
+    case $wdtd in "$DCH_TEST_TMP"/?*) [ ! -e "$wdtd" ] ;; *) false ;; esac &&
+        wdgone "$wdm2" &&
+        ok "watchdog: its temp dir in DCH_TEST_TMP goes, the session there ends" ||
+        bad "watchdog: its temp dir in DCH_TEST_TMP goes, the session there ends"
     kill -0 "$wdby" 2>/dev/null && ok "watchdog: a process outside its group lives" \
         || bad "watchdog: a process outside its group lives"
     kill "$wdby"

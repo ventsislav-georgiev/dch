@@ -63,7 +63,7 @@ def check(msg, cond, extra=""):
 
 def main():
     # /tmp, not TMPDIR: a per-user TMPDIR can sit inside some git work tree
-    tmp = os.path.realpath(tempfile.mkdtemp(prefix="xdeny", dir="/tmp"))
+    tmp = os.path.realpath(tempfile.mkdtemp(prefix="xdeny", dir=os.environ.get("DCH_TEST_TMP", "/tmp")))
     fake = os.path.join(tmp, "fake")
     os.makedirs(fake)
     with open(os.path.join(fake, "tailscale"), "w") as f:

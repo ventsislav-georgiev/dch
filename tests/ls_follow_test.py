@@ -186,7 +186,7 @@ def pgroup(pgid):
 
 
 def main():
-    tmp = os.path.realpath(tempfile.mkdtemp(prefix="dchlf", dir="/tmp"))
+    tmp = os.path.realpath(tempfile.mkdtemp(prefix="dchlf", dir=os.environ.get("DCH_TEST_TMP", "/tmp")))
     fake = os.path.join(tmp, "fake")
     os.makedirs(fake)
     with open(os.path.join(fake, "tailscale"), "w") as f:

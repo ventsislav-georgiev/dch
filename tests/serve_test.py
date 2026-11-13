@@ -95,7 +95,7 @@ def whois(uid, login="me@example.com", tags=(), node="2002", nid=2002):
 
 
 def main():
-    tmp = os.path.realpath(tempfile.mkdtemp(prefix="dchsv", dir="/tmp"))
+    tmp = os.path.realpath(tempfile.mkdtemp(prefix="dchsv", dir=os.environ.get("DCH_TEST_TMP", "/tmp")))
     fake = os.path.join(tmp, "fake")
     os.makedirs(fake)
     with open(os.path.join(fake, "tailscale"), "w") as f:

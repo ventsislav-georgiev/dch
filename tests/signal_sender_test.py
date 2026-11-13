@@ -33,7 +33,7 @@ def until(fn, timeout=10.0):
 
 
 def main():
-    tmp = os.path.realpath(tempfile.mkdtemp(prefix="dchsg", dir="/tmp"))
+    tmp = os.path.realpath(tempfile.mkdtemp(prefix="dchsg", dir=os.environ.get("DCH_TEST_TMP", "/tmp")))
     home, state = os.path.join(tmp, "home"), os.path.join(tmp, "state")
     os.makedirs(home)
     for k in list(os.environ):

@@ -29,7 +29,7 @@ LINUX = sys.platform.startswith("linux")
 BOUND = 8.0     # a verb's wall time with one stuck session; old Linux: never
 STUCK = "is not accepting connections"
 
-TMP = tempfile.mkdtemp(dir="/tmp", prefix="dchstk")
+TMP = tempfile.mkdtemp(dir=os.environ.get("DCH_TEST_TMP", "/tmp"), prefix="dchstk")
 ENV = dict(os.environ, XDG_RUNTIME_DIR=TMP, XDG_STATE_HOME=TMP + "/state",
            HOME=TMP + "/home", DCH_CONFIG=TMP + "/config",
            DCH_LOGIN_ENV="0", DCH_NO_REMOTE="1")

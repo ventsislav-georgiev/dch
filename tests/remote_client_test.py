@@ -1905,7 +1905,7 @@ def robust_checks(dch, check, cenv, fakes, tmp):
 def main():
     # POSIX only, so windows_client_test.py can import Fake and frame
     import fcntl, pty, termios
-    tmp = os.path.realpath(tempfile.mkdtemp(prefix="dchrc", dir="/tmp"))
+    tmp = os.path.realpath(tempfile.mkdtemp(prefix="dchrc", dir=os.environ.get("DCH_TEST_TMP", "/tmp")))
     fake = os.path.join(tmp, "fake")
     os.makedirs(fake)
     with open(os.path.join(fake, "tailscale"), "w") as f:

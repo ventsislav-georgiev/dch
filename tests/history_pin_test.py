@@ -87,7 +87,7 @@ def main():
     if not os.access(DCH, os.X_OK):
         print("FAIL: dch not executable at", DCH)
         return 1
-    tmp = os.path.realpath(tempfile.mkdtemp(prefix="dchpin", dir="/tmp"))
+    tmp = os.path.realpath(tempfile.mkdtemp(prefix="dchpin", dir=os.environ.get("DCH_TEST_TMP", "/tmp")))
     home, state = os.path.join(tmp, "home"), os.path.join(tmp, "state")
     os.makedirs(home)
     for k in list(os.environ):
