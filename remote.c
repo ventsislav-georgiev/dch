@@ -4156,13 +4156,15 @@ rq_line(struct rq *q, struct sb *o, const char *s, size_t k)
 }
 
 /* The lines queued behind a request that was dialling, in order, while
-** none is. */
+** none is; a failed alloc's buffer is left for the caller's exit. */
 static void
 rq_drain(struct rq *q, struct sb *o)
 {
-	while (q->wait.n && !(q->req && q->dp))
+	char *nl;
+
+	while (q->wait.n && !q->wait.bad && !(q->req && q->dp) &&
+	       (nl = memchr(q->wait.p, '\n', q->wait.n)))
 	{
-		char *nl = memchr(q->wait.p, '\n', q->wait.n);
 		size_t k = (size_t)(nl - q->wait.p);
 
 		*nl = '\0';
@@ -4325,7 +4327,7 @@ dch_remote_requests(char *n)
 			break;
 		}
 		sb_add(&in, buf, (size_t)k);
-		if (in.bad || q.wait.bad)
+		if (in.bad)
 			break;
 		for (off = 0;;)
 		{
@@ -4339,6 +4341,8 @@ dch_remote_requests(char *n)
 			skip = 0;
 			off += (size_t)(nl - s) + 1;
 		}
+		if (q.wait.bad)
+			break;	/* rq_take's failed alloc */
 		if (!skip && in.n - off > RQ_LINE_MAX)
 		{
 			rq_err(&o, 0, "dch: bad request: a line over 64 KiB");
