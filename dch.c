@@ -6745,7 +6745,7 @@ faint_text(const char *raw, size_t n, char *txt, char *dim)
 ** local one: escapes dropped, CSI n C as n blanks, CRs dropped, a NUL as
 ** '?'. Its tail
 ** as fetch_screen keeps one, the text within 8 times that. malloc'd, NULL
-** when too big or out of memory (the X-ray view's On screen, #188). */
+** when too big or out of memory (the X-ray view's screen refs, #188). */
 char *
 xv_plain(const char *raw, size_t n)
 {
@@ -10066,7 +10066,7 @@ xv_spawn(int fd, int ac, char **av, int *out, int *err)
 		close(po[1]);
 		close(pe[0]);
 		close(pe[1]);
-		/* a remote On screen (#188): ctl --read host:name --ansi,
+		/* a remote screen (#188, #294): ctl --read host:name --ansi,
 		** its own connection, as the view's queries */
 		rc = !strcmp(av[0], "--read") ? dch_remote_ctl(NULL, ac, av, NULL)
 		     : xray_main(ac, av);
@@ -10095,7 +10095,7 @@ xv_remote(const char *n)
 	return name_routes_remote(n);
 }
 
-/* A live session's visible screen, plain (the On screen tab). sock_path
+/* A live session's visible screen, plain (Refs' on screen now). sock_path
 ** is kept: the switch's picker runs inside an attach. */
 int
 xv_screen(const char *name, char *buf, size_t cap)
@@ -14299,7 +14299,7 @@ xv_paste_in(const unsigned char *c, size_t n, int in)
 }
 
 /* The in-attach X-ray chord's view (#187), in attach.c's child: this
-** session's, opened on On screen; a remote attach's is host:name's (#189),
+** session's, opened on Refs (#294); a remote attach's is host:name's (#189),
 ** --host's host put in front. A failure is said and waits for a key: the
 ** attach's repaint on return would wipe it at once. */
 static int
@@ -14313,7 +14313,7 @@ attach_xray_view(void)
 	ssize_t r;
 	int rc, in = 0;
 
-	xv_tab = 2;
+	xv_tab = 1;
 	snprintf(n, sizeof n, "%s%s%s", remote_host ? remote_host : "",
 	         remote_host ? ":" : "", session_name);
 	xv_route = attach_remote ? 1 : -1;

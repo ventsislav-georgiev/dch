@@ -152,7 +152,7 @@ const char *config_show(int k, char *v, size_t cap, int *set);
 ** signal handler too. */
 int xv_run(int fd, const char *n, char *err, size_t errsz);
 void xv_kill(void);
-extern int xv_tab;	/* the tab it opens on: 0 Chapters, 2 On screen */
+extern int xv_tab;	/* the tab it opens on: 0 Chapters, 1 Refs */
 /* Set when xv_run returns 0 and the user pressed o (#194): the session to
 ** attach (a name, or host:name), as `dch -a` takes it; else "". */
 extern char xv_go[512];

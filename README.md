@@ -883,7 +883,7 @@ the picker. The view asks the same engine as `--json` and holds its index as
 open. It writes nothing to disk. Text from the session (titles, lines,
 passages) is drawn with every control and bidi character shown as `?`.
 
-The view has three tabs:
+The view has two tabs:
 - **Chapters**: one row per prompt or command. `/` filters. `Enter` opens
   the chapter read-only (prompt, replies, tool calls, output), scrollable.
   The reader reads on: its header says which chapter it is on (`3 of 12`,
@@ -931,12 +931,17 @@ The view has three tabs:
   are hidden (`t` counts them once `a` shows files). The tab's count is
   every ref, hidden ones included. `/` filters on
   the full ref. `Enter` opens its card.
-- **On screen**: the session's screen as it is now, with a hint label (`a`,
-  `s`, `d`, …) on each ref on it, one the index does not hold or mentioned
-  once included (before 1.62.0: only the refs the Refs tab shows bold). Typing a label opens that
-  ref's card. The tab's count is the labels on the screen, shown once the
-  screen has been read (0 included); before that, and when there is no
-  screen, no number. An ended session and dch-lite have no screen to show.
+  The refs on the session's screen right now come first, under a faint
+  "on screen now" line, as Kindle's X-ray puts this page first: the lowest
+  on the screen on top, one row per ref, then a faint "the rest" line and
+  the other rows. A ref on the screen that the index does not hold is there
+  too, with no count. They follow `a`, `t` and `/` like every row (the
+  footer's hidden counts include them), and a ref in the group is not
+  repeated below it. Nothing on the screen is a ref: no group line. The
+  screen is read when Refs opens and once a second while it shows; it is
+  not drawn or kept. An ended session and dch-lite have no screen, so no
+  group. Up to 1.61.0 a third tab, On screen, drew the screen with a
+  label on each ref.
 
 A ref typed after `/` (a ticket, issue, pull request, commit, file or URL,
 as `--ref` takes it) opens its card with `Ctrl-R`, on Chapters and Refs, while
@@ -965,24 +970,24 @@ not clear X-ray; run `clear`".
 
 | Key | List | Card / reader |
 | --- | --- | --- |
-| `Tab` `→` `l` / `Shift-Tab` `←` `h` | next / previous tab (`h` `l` are labels on On screen) | `←` `h`: back |
+| `Tab` `→` `l` / `Shift-Tab` `←` `h` | the other tab | `←` `h`: back |
 | `↑` `↓` / `j` `k`, `PgUp` `PgDn`, `g` `G` | move | move / scroll; reader: at an end, again for the next / previous chapter |
 | `]` `[` | | reader: the next / previous chapter |
 | `Enter` | read the chapter / open the card | card: read the mention's chapter |
 | `/` | filter | |
 | `Ctrl-R` | with a ref typed after `/`: open its card, a row for it or not, its kind hidden or not | |
-| `a` | Refs: show / hide the files, commits and URLs (on On screen `a` is a label) | |
+| `a` | Refs: show / hide the files, commits and URLs | |
 | `t` | Refs: show / hide the temp files | |
 | `n` | Chapters: show / hide the auto rows (auto chapters, the task notifications, and compactions) | |
 | `o` | Chapters: attach to the session (in the chord: back to it) | card, reader: the same |
 | `f` `p` `y` | | card: full scan, other projects / this project (`p` was `o` before 1.61.0), copy |
 | `q` | quit | back |
-| `Esc` | clear the typed label or the filter, else quit | back |
+| `Esc` | clear the filter, else quit | back |
 | `Ctrl-C` `Ctrl-D` | quit | quit |
 
 **While attached**, press the detach key (`Ctrl-\`) and then `x` within the
 double-press window (`DCH_DOUBLE_TAP_MS`, default 300 ms). The view opens
-over the session on its On screen tab, and the session keeps running
+over the session on its Refs tab, the refs on its screen on top, and the session keeps running
 underneath: the attach is kept, never retired. Leaving the view (`q`,
 `Esc`, or `o` on Chapters or in a chapter) returns to the session with its screen repainted as it is now,
 output that came in meanwhile included (dch-lite has no screen to repaint
@@ -1006,20 +1011,19 @@ A window smaller than 24x8 shows only "X-ray: the window is too small".
 
 `dch --xray host:name` opens the view of a session on another host (dch
 serve 1.55.0+), and so does `x` on a remote row in the picker. Every query
-runs on the host, each over its own ctl connection. On screen reads the
+runs on the host, each over its own ctl connection. Refs reads the
 host's screen with `--read <name> --ansi`, once a second while it shows: on
 the host that is one dch and two serve log lines (`ctl --read`, `ctl done`)
 a second. The host's text is drawn
-as a local session's is, every control and bidi character, every byte of
-an invalid UTF-8 sequence and a NUL as `?`. `x` opens the session of the
+as a local session's is, every control and bidi character as `?`. `x` opens the session of the
 row it is on, also next to a local session literally named `host:name`. A
 host that refuses us, lacks `--xray` or cannot be reached shows its line in
 place of the tabs (`dch: <host>: does not support --xray (needs dch serve
 1.55.0+)`, ...); `q` leaves with that exit code. When the link drops later,
 the status says `live updates stopped (reopen the view for them): ...` and
 keeps saying it: Chapters and Refs stay as they were until you open the view
-again. On screen says its failed read in place of the screen and shows the
-host's screen again once the host answers.
+again. A failed screen read takes the "on screen now" group away, unsaid;
+it comes back once the host answers.
 
 Exit codes are those of `--json` below: 0 when you quit, 1 for no such
 session, 2 for a flag or a stdout that is not a terminal; for a remote host
@@ -2729,7 +2733,7 @@ nothing `dch serve` starts inherits it; never set it on a real host.
 escapes control characters (C0, DEL, C1, bidi overrides, isolates and
 marks, U+2028 and U+2029) as
 `\xNN` or `\u{NNNN}`, and a session name containing one is refused.
-A remote [X-ray view](#x-ray-view-dch---xray-n) on its On screen tab reads the screen
+A remote [X-ray view](#x-ray-view-dch---xray-n) on its Refs tab reads the screen
 once a second: two log lines a second while it shows.
 
 **Limits.** At most 64 connections, 16 per peer, and 4 live-list streams per

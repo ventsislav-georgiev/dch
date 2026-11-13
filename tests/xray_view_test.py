@@ -12,10 +12,10 @@ Covers:
   2. --scope, --full or --budget-ms with no --json and no --ref on a
      terminal: exit 2, a usage message, the view not opened; no such
      session: exit 1, the message after the terminal is restored;
-  3. the three tabs, the chapter list, the Refs list, the card (light, `f`
-     full scan, `y` OSC 52 copy, `p` other projects and back, `o` on the
-     ended session said), the chapter reader, back, quit (exit 0,
-     terminal restored);
+  3. the two tabs (no On screen, #294), the chapter list, the Refs list,
+     the card (light, `f` full scan, `y` OSC 52 copy, `p` other projects
+     and back, `o` on the ended session said), the chapter reader, back,
+     quit (exit 0, terminal restored);
   4. mutant 11: no corpus ESC, BEL or bidi byte (U+202E, U+061C, U+2028)
      reaches the terminal, the strings show with `?` in their place;
   5. nothing written: no file under the test root changes;
@@ -25,10 +25,11 @@ Covers:
      (QA 1.56.0 MED-V1, NIT-V3);
   7. SIGTERM and SIGINT: the terminal is restored and the view's children
      are gone;
-  8. On screen on a live shell: the ref printed in two blocks (underline)
-     gets hint label `a`, typing it opens its card, one printed once (not
-     underlined) gets a hint too (#262) (full build); on dch-lite
-     the label line says X-ray needs the full build;
+  8. Refs on a live shell (#294): the refs on its screen first, under a
+     faint "on screen now" line, the lowest row's first (o/r#77, then
+     o/r#41, one printed once and not underlined, #262), neither repeated
+     below; Enter on the first opens its card (full build); on dch-lite
+     the label line says X-ray needs the full build and there is no group;
   9. the picker: the x hint is shown, x on a session row opens the view, q
      returns to the picker; X asks to kill and never opens the view (OQ-6);
  10. the Refs tab (#193): a file under the project shown relative to it,
@@ -42,8 +43,12 @@ Covers:
      matching the full key (and taking t as text), Enter opening the full
      key's card, f there showing the resolver's line (QA 1.56.0 NIT-V2);
      the faint line saying what a ref is, the empty state when
-     there are none; On screen with no number until its screen is read,
-     then its count, 0 included (on dch-lite: no number, no mirror);
+     there are none; an ended session: no group line (#294). A live shell
+     whose master keeps no ring (the index holds nothing): no group line
+     while its screen has no ref; once o/r#5 and a URL are on it, the group
+     lists o/r#5 with no count, a hides the URL and the footer counts it,
+     Enter opens o/r#5's card
+     (dch-lite: no mirror, never a group);
  11. the Chapters tab (#194): a chapter the harness wrote ("auto") hidden,
      n showing it faint and titled by its summary (its title without one),
      the footer saying how many, the tab count the shown-by-default ones,
@@ -58,7 +63,7 @@ Covers:
      session;
  12. the in-attach chord (#187, K10): the detach key then x in a later read,
      in one burst, and in the kitty CSI form opens the view over the attach
-     on On screen; the x never reaches the session, the attach is never
+     on Refs (#294); the x never reaches the session, the attach is never
      retired (a key typed after reaches the session), and output written
      while the view was up is on screen after it closes (full build: the
      mirror's repaint); off under -E and with DCH_DOUBLE_TAP_MS=0, where the
@@ -377,7 +382,7 @@ def test_view():
               v.reap() is None, text)
         mark = len(v.out)
         v.key(b"\033", 0.5)
-        v.key(b"\t\t")
+        v.key(b"\t")  # Refs, then Chapters: two tabs (#294)
         mark = len(v.out)
         v.key(b"\r", 1.0)
         check("reader: Enter opens the selected chapter (the newest)",
@@ -460,15 +465,17 @@ def test_refs():
     try:
         v.wait(b"Chapters 1")
         v.pump(0.5)
-        check("On screen: no number before its screen is read (an ended "
-              "session has none)", b"On screen" in v.out and
-              not re.search(rb"On screen \d", v.out), v.out[-600:])
+        check("#294: two tabs, Chapters and Refs, no On screen",
+              b"Refs 13" in v.out and b"On screen" not in v.out,
+              v.out[-600:])
         mark = len(v.out)
         v.key(b"\t", 1.0)
         scr = rows(v.out[mark:])
         text = "\n".join(scr[k] for k in sorted(scr))
         check("Refs: the tab count stays the engine's total (13)",
               "Refs 13" in text, text)
+        check("Refs #294: an ended session has no screen, no group line",
+              "on screen now" not in text and "the rest" not in text, text)
         check("Refs #262: opens on pulls, issues and tickets only; the "
               "footer names a and counts the other kinds",
               "o/r#7" in text and "alpha_handler" not in text and
@@ -1258,38 +1265,67 @@ def test_open(lite):
         v.close()
 
 
-def test_screen_count(lite):
-    """A live shell with nothing on its screen to label: no number on On
-    screen until it is read, then 0; no refs: the empty state."""
-    r = dch("--spawn", "xv-0", "--size", "80x24", "sh", "-c",
-            "echo READY0; exec sleep 600")
-    check("screen count: spawned", r.returncode == 0, r.stderr)
+def test_screen_group(lite):
+    """#294: Refs' on-screen group on a live shell whose master keeps no
+    ring (xray_ring = 0): the index holds nothing, the screen is read all
+    the same."""
+    cfg = os.path.join(T, "config-noring")
+    with open(cfg, "w") as f:
+        f.write("xray_ring = 0\n")
+    r = subprocess.run([DCH, "--spawn", "xv-0", "--size", "80x24", "sh", "-c",
+                        'echo READY0; read -r x; '
+                        'echo "see $x https://example.com/p"; exec sleep 600'],
+                       capture_output=True, text=True, timeout=30,
+                       env=dict(ENV, DCH_CONFIG=cfg))
+    check("screen group: spawned", r.returncode == 0, r.stderr)
     time.sleep(0.5)
     v = Pty([DCH, "--xray", "xv-0"])
     try:
         v.wait(b"Chapters")
         v.pump(0.5)
-        check("On screen: no number before it is opened",
-              b"On screen" in v.out and
-              not re.search(rb"On screen \d", v.out), v.out[-600:])
+        check("#294: no On screen tab", b"Refs 0" in v.out and
+              b"On screen" not in v.out, v.out[-600:])
         mark = len(v.out)
-        v.key(b"\t", 1.0)
+        v.key(b"\t", 1.5)  # over 1 s: the screen read at least once
         check("Refs: no refs, the empty state says what would show",
               v.wait(b"No refs yet: the files, commits, pull requests, "
                      b"issues and URLs this session touches show here",
                      start=mark), v.out[mark:])
+        check("Refs #294: no ref on the screen (READY0), no group line",
+              b"on screen now" not in v.out[mark:], v.out[mark:])
         mark = len(v.out)
-        v.key(b"\t", 1.5)
+        dch("--send", "xv-0", "o/r#5\n")
         if lite:
-            check("lite: On screen says no mirror and shows no number",
-                  v.wait(b"No screen: dch-lite keeps no mirror", start=mark)
-                  and not re.search(rb"On screen \d", v.out), v.out[mark:])
+            v.pump(2.5)
+            check("lite: no mirror, never a group line",
+                  b"on screen now" not in v.out[mark:], v.out[mark:])
         else:
-            check("On screen: read, its count shows, 0 included",
-                  v.wait(b"On screen 0", start=mark) and
-                  v.wait(b"READY0", start=mark), v.out[mark:])
+            ok = v.wait(b"on screen now", start=mark) and \
+                v.wait(b"o/r#5", start=mark)
+            v.pump(0.5)
+            text = screen(v, 0)  # rows drawn last: the whole frame
+            check("Refs #294: o/r#5 on the screen, the index holding "
+                  "nothing, shows under the group line", ok, text)
+            check("Refs #294: its row has no count (not the index's)",
+                  re.search(r"(?m)^\W*pull o/r#5\b", text) and
+                  "Refs 0" in text, text)
+            check("Refs #294: the URL on the screen is hidden by the a "
+                  "filter, the footer counting it",
+                  "example.com" not in text and
+                  "a files, commits, URLs 1 hidden" in text, text)
+            mark = len(v.out)
+            v.key(b"a", 1.0)
+            text = screen(v, 0)
+            check("Refs #294: a shows the URL in the group, after o/r#5 "
+                  "on its row", 0 <= text.find("o/r#5") <
+                  text.find("example.com/p"), text)
+            v.key(b"a", 0.5)
+            mark = len(v.out)
+            v.key(b"\r", 1.0)
+            check("Refs #294: Enter on the group's row opens its card",
+                  v.wait(b"o/r#5  light", start=mark), v.out[mark:])
         v.key(b"\003")
-        check("screen count: Ctrl-C quits with 0", v.exit() == 0,
+        check("screen group: Ctrl-C quits with 0", v.exit() == 0,
               v.out[-80:])
     finally:
         v.close()
@@ -1403,6 +1439,7 @@ def test_signals():
 
 
 def test_on_screen():
+    """#294: Refs on the live xv-sh: the refs on its screen first."""
     rc = subprocess.run([DCH, "--xray", "xv-sh", "--json"], env=ENV,
                         capture_output=True, text=True, timeout=30)
     o = json.loads(rc.stdout)
@@ -1414,29 +1451,35 @@ def test_on_screen():
             check("lite: the label says X-ray needs the full dch build",
                   v.wait(b"X-ray needs the full dch build"), v.out[-600:])
             mark = len(v.out)
-            v.key(b"\t\t", 1.0)
-            check("lite: On screen says dch-lite keeps no mirror",
-                  v.wait(b"No screen: dch-lite keeps no mirror", start=mark),
-                  v.out[mark:])
+            v.key(b"\t", 1.5)
+            check("lite: Refs has no group line (no mirror)",
+                  v.wait(b"[Refs", start=mark) and
+                  b"on screen now" not in v.out[mark:], v.out[mark:])
         else:
             u = [x for x in o["refs"] if x["key"] == "pull:o/r#41"]
             check("shell: o/r#41 is underlined in the index (count 2)",
                   u and u[0]["underline"], o["refs"])
-            mark = len(v.out)
-            v.key(b"\t\t", 1.5)
             u = [x for x in o["refs"] if x["key"] == "pull:o/r#77"]
             check("shell: o/r#77, printed once, is not underlined",
                   u and not u[0]["underline"], o["refs"])
-            check("On screen: o/r#41 gets hint a",
-                  v.wait(b"On screen 2", start=mark) and
-                  v.wait(b"o/r#41", start=mark), v.out[mark:])
-            check("On screen #262: a ref not underlined gets a hint too",
-                  re.search(rb"once \[.\]o/r#77", v.out[mark:]),
-                  v.out[mark:])
             mark = len(v.out)
-            v.key(b"a", 1.0)
-            check("On screen: typing a opens the card of o/r#41",
-                  v.wait(b"o/r#41  light", start=mark) and
+            v.key(b"\t", 1.5)
+            ok = v.wait(b"on screen now", start=mark)
+            v.pump(0.5)
+            text = screen(v, mark)
+            g = text.find("on screen now")
+            check("Refs #294: the group line, then o/r#77 (the lowest row) "
+                  "and o/r#41, with their counts",
+                  ok and 0 <= g < text.find("o/r#77") < text.find("o/r#41")
+                  and re.search(r"\d pull o/r#41", text), text)
+            check("Refs #294: a ref in the group is not repeated below, "
+                  "and nothing else is held: no rest line",
+                  text.count("o/r#41") == 1 and text.count("o/r#77") == 1
+                  and "the rest" not in text, text)
+            mark = len(v.out)
+            v.key(b"\r", 1.0)
+            check("Refs #294: Enter on the first row opens o/r#77's card",
+                  v.wait(b"o/r#77  light", start=mark) and
                   v.wait(b"Mentions", start=mark), v.out[mark:])
         v.key(b"\003")
         check("on screen: Ctrl-C quits with 0", v.exit() == 0, v.out[-80:])
@@ -1516,8 +1559,9 @@ def chord_case(what, keys, lite):
         for k in keys:
             a.key(k, 0.05)
         ok = a.wait(b"X-ray  xv-rx", start=mark) and \
-            a.wait(b"On screen", start=mark)
-        check("chord, %s: the view opens over the attach" % what, ok,
+            a.wait(b"[Refs", start=mark)
+        check("chord, %s: the view opens over the attach, on Refs (#294)"
+              % what, ok,
               a.out[mark:][-600:])
         check("chord, %s: the client is still running" % what,
               a.reap() is None)
@@ -1541,8 +1585,7 @@ def chord_case(what, keys, lite):
         check("chord, %s: q leaves the view's alternate screen" % what,
               a.wait(RESTORE, start=mark), a.out[mark:][-300:])
         if not lite:
-            # On screen may draw the line too: only what follows the
-            # view's exit counts
+            # only what follows the view's exit counts
             back = a.out.rfind(RESTORE)
             check("chord, %s: back on the attach, the screen repainted "
                   "with what came in meanwhile" % what,
@@ -1858,7 +1901,7 @@ def main():
         test_signals()
         test_on_screen()
         o = json.loads(dch("--xray", "xv-sh", "--json").stdout)
-        test_screen_count(o["corpus"] == "none" and o["reason"] == "lite")
+        test_screen_group(o["corpus"] == "none" and o["reason"] == "lite")
         test_picker()
         test_open(o["corpus"] == "none" and o["reason"] == "lite")
         test_chord()

@@ -822,7 +822,7 @@ and kept current as
 keeps its index. It writes nothing to disk.
 Session text is drawn with every control and bidi character as
 .BR ? .
-Three tabs:
+Two tabs:
 .B Chapters
 (\fB/\fR filters, \fBEnter\fR reads the chapter, read\-only;
 the reader's header says which chapter, \(lq3 of 12\(rq, and its title;
@@ -873,13 +873,16 @@ files under /tmp, /private/tmp, /var/folders and
 (not on a remote view), except the session's own project files, are hidden until
 .B t
 shows them, the footer saying how many; the tab counts every ref;
-\fB/\fR filters on the full ref, \fBEnter\fR opens its card) and
-.B On screen
-(the session's screen with a hint label,
-\fBa\fR, \fBs\fR, \fBd\fR, ..., on each ref on it, held by the index
-or not; typing a label opens its card; none for an ended
-session or on dch\-lite; its tab shows the labels' count once the screen
-is read, 0 included, and no number before or without one).
+\fB/\fR filters on the full ref, \fBEnter\fR opens its card;
+the refs on the session's screen now come first, under a faint
+\(lqon screen now\(rq line, the lowest on the screen on top, then a faint
+\(lqthe rest\(rq line and the other rows; a ref on the screen the index does
+not hold is there too, with no count; they follow
+\fBa\fR, \fBt\fR and \fB/\fR like every row, and are not repeated below;
+no group line when nothing on the screen is a ref, and none for an ended
+session or on dch\-lite; the screen is read when Refs opens and once a
+second while it shows, never drawn; up to 1.61.0 a third tab, On screen,
+drew it with a label on each ref).
 A card shows the ref's definitions, first and latest mention, counts by
 scope and mentions; it opens light (as
 .B \-\-ref
@@ -904,10 +907,10 @@ The line under the tabs names the corpus
 \(lq2 Claude sessions run here; X\-ray reads one\(rq,
 \(lqNo Claude session found here\(rq, ...).
 Keys: \fBTab\fR, \fB\(<-\fR \fB\(->\fR
-(and \fBh\fR \fBl\fR off On screen) switch tabs;
+and \fBh\fR \fBl\fR switch tabs;
 \fBj\fR \fBk\fR, arrows, \fBPgUp\fR \fBPgDn\fR, \fBg\fR \fBG\fR move;
 \fBq\fR quits the list and goes back from a card or chapter;
-\fBEsc\fR clears a typed label or the filter, else does the same;
+\fBEsc\fR clears the filter, else does the same;
 \fBCtrl\-R\fR, on Chapters and Refs with a ref typed after \fB/\fR
 (as
 .B \-\-ref
@@ -921,7 +924,7 @@ While attached, the detach character and then
 .B x
 within the double\-press window
 .RB ( DCH_DOUBLE_TAP_MS )
-open the view over the session, on On screen; the session keeps running
+open the view over the session, on Refs; the session keeps running
 and the attach is kept.
 Leaving the view returns to the session with its screen repainted as it is
 now, output that came in meanwhile included (dch\-lite: the program gets a
@@ -962,13 +965,13 @@ opens the view of a session on another host
 1.55.0+), as does
 .B x
 on a remote row in the picker.
-Every query runs on the host, each over its own ctl connection; On screen
+Every query runs on the host, each over its own ctl connection; Refs
 reads the host's screen with
 .BR "\-\-read " \fIname\fB " \-\-ansi" ,
 once a second while it shows (one dch and two serve log lines a second on
 the host).
 The host's text is drawn as a local session's, every control and bidi
-character, every byte of an invalid UTF\-8 sequence and a NUL as
+character as
 .BR ? .
 .B x
 opens the session of the row it is on, also next to a local session
@@ -982,8 +985,8 @@ leaves with that exit code.
 When the link drops later, the status says
 .I "live updates stopped (reopen the view for them)"
 and keeps saying it: Chapters and Refs stay as they were until the view is
-opened again; On screen says its failed read in place of the screen and
-shows the host's screen again once the host answers.
+opened again; a failed screen read takes the \(lqon screen now\(rq group
+away, unsaid, until the host answers again.
 Exit 0 when quit, 1 no such session, 2 with any other flag or when stdout
 is not a terminal; for a remote host also 4 (its gate refused us), 6 (it
 lacks

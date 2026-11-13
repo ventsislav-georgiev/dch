@@ -1,8 +1,8 @@
 /*
 ** The X-ray view (#175, XR5a): `dch --xray <n>` with no --json, and the
-** picker's x. Three tabs over one session, Chapters, Refs and On screen; a
-** ref's card; a chapter's reader. Drawn with the picker's renderer, on the
-** terminal its host (dch.c) made raw and put on the alternate screen.
+** picker's x. Two tabs over one session, Chapters and Refs (the refs on
+** the session's screen now first, #294); a ref's card; a chapter's
+** reader. Drawn with the picker's renderer, on the terminal its host (dch.c) made raw and put on the alternate screen.
 **
 ** Every answer is the engine's own --json: dch.c's xv_spawn forks this
 ** process and runs xray_main in the child with --follow, --ref or --chapter
@@ -29,7 +29,6 @@
 #define XV_STOP_MS   50	/* a child's grace after its SIGTERM (#204) */
 #define XV_KILL_MS   250	/* after its SIGKILL, then kept (#212) */
 #define XV_LATE      16	/* kept: SIGKILLed, not dead yet */
-#define XV_ALPHA     "asdfghjklzxcvbnmwertyuiop"	/* hint labels: no q */
 
 enum { XV_LIST, XV_CARD, XV_READ };
 enum { XV_FK, XV_CK, XV_RK, XV_SK, XV_NKIDS };	/* follow, card, reader,
@@ -38,7 +37,7 @@ enum { XV_FK, XV_CK, XV_RK, XV_SK, XV_NKIDS };	/* follow, card, reader,
 static char xv_none[1];	/* "": a field absent, null, or out of memory */
 static volatile pid_t xv_pids[XV_NKIDS];	/* for xv_kill */
 static volatile sig_atomic_t xv_cont;	/* SIGCONT: the shell had the tty */
-int xv_tab;	/* the tab a view opens on (the in-attach chord's: On screen) */
+int xv_tab;	/* the tab a view opens on (the in-attach chord's: Refs) */
 char xv_go[512];	/* o (#194): the session the host attaches once the
 			** view is left, as session_name holds it; "" none */
 
@@ -66,6 +65,7 @@ struct xv_ref
 	long long count, seen;	/* seen: later is more recent */
 	long long last;		/* last_offset (#262): -1 from an older host */
 	int defined, underline;
+	int onscr;		/* in the on-screen group (xv_vis) */
 };
 
 struct xv_def
@@ -93,14 +93,6 @@ struct xv_rl		/* a reader line: bytes [s, s + n) of its text */
 	int kind;		/* 0 an entry's head, 1 text, 2 output */
 };
 
-struct xv_hint
-{
-	int row;
-	size_t s, e;		/* the span's bytes on its row */
-	char *key, *text;
-	char label[3];
-};
-
 struct xv
 {
 	int fd, color, mode, back, tab, win, filtering;
@@ -123,7 +115,8 @@ struct xv
 	int allauto, nauto;	/* Chapters: auto chapters shown; their rows */
 	long long rseq;
 	struct xv_kid kid[XV_NKIDS];
-	int sel[3], top[3], *vis, nvis, avis;
+	int sel[2], top[2], *vis, nvis, avis;
+	int ngrp;		/* Refs: vis's first ngrp rows are on screen */
 	/* the card */
 	char *ckey, *ctext;
 	int full, scope, cdone, cpartial, csel, ctop;
@@ -142,13 +135,11 @@ struct xv
 	struct xv_ent *e;
 	struct xv_rl *rl;
 	int ne, ae, nrl, arl;
-	/* On screen */
-	char *scr;
-	int scr_rc, nh, ah, nlab;
-	char scr_err[320];	/* a remote read's failure, its line */
+	/* the screen's refs (#294): one per key, the lowest row's first; not
+	** the index's, so count 0 and no title */
+	struct xv_ref *sr;
+	int nsr, asr;
 	long long scr_at;
-	struct xv_hint *h;
-	char typed[3];
 };
 
 void
@@ -619,6 +610,7 @@ xv_ref(struct xv *v, const struct json_parser *p, int o)
 	r.last = xv_num(p, o, "last_offset", -1);
 	r.defined = xv_bool(p, o, "defined");
 	r.underline = xv_bool(p, o, "underline");
+	r.onscr = 0;
 	/* no recency in a ref line: its arrival (a snapshot's rows in their
 	** order, a delta now) */
 	r.seen = ++v->rseq;
@@ -1193,114 +1185,88 @@ xv_back(struct xv *v)
 	}
 }
 
-/* ---- On screen (K6) -------------------------------------------------- */
+/* ---- the screen's refs (K6, #294) --------------------------------- */
 
 static void
-xv_hints_free(struct xv *v)
+xv_sr_free(struct xv *v)
 {
 	int k;
 
-	for (k = 0; k < v->nh; k++)
-	{
-		free(v->h[k].key);
-		free(v->h[k].text);
-	}
-	v->nh = v->nlab = 0;
+	for (k = 0; k < v->nsr; k++)
+		xv_ref_free(&v->sr[k]);
+	v->nsr = 0;
 }
 
 struct xv_scan
 {
 	struct xv *v;
 	const char *line;
-	int row;
 };
 
-/* A span on the screen: a hint, every one (#262: the index may not hold
-** its key, nor underline a ref of the last turns). */
+/* A span on the screen, its key once (#262: the index may not hold it,
+** nor underline a ref of the last turns). */
 static int
 xv_span(void *ctx, const struct xr_span *sp)
 {
 	struct xv_scan *c = ctx;
 	struct xv *v = c->v;
-	struct xv_hint h;
+	struct xv_ref r;
+	int k;
 
-	if (xv_grow(&v->h, &v->ah, v->nh, sizeof h) < 0)
+	for (k = 0; k < v->nsr && strcmp(v->sr[k].key, sp->key); k++)
+		;
+	if (k < v->nsr || xv_grow(&v->sr, &v->asr, v->nsr, sizeof r) < 0)
 		return 0;
-	memset(&h, 0, sizeof h);
-	h.row = c->row;
-	h.s = sp->s;
-	h.e = sp->e;
-	h.key = strdup(sp->key);
-	h.text = strndup(c->line + sp->s, sp->e - sp->s);
-	if (!h.key || !h.text)
+	memset(&r, 0, sizeof r);
+	r.key = strdup(sp->key);
+	r.shape = strdup(xr_shape_name[sp->shape]);
+	r.text = strndup(c->line + sp->s, sp->e - sp->s);
+	r.title = xv_none;
+	r.last = -1;
+	if (!r.key || !r.shape || !r.text)
 	{
-		free(h.key);
-		free(h.text);
+		free(r.key);
+		free(r.shape);
+		free(r.text);
 		return 0;
 	}
-	v->h[v->nh++] = h;
+	v->sr[v->nsr++] = r;
 	return 0;
 }
 
-/* v->scr's spans found by the engine's grammar, one label per key. */
+/* The screen's refs by the engine's grammar, from its lowest row up: the
+** latest first. The screen itself is not kept. */
 static void
-xv_screen_scan(struct xv *v)
+xv_screen_scan(struct xv *v, const char *scr)
 {
+	const char *s, *e = scr + strlen(scr);
 	struct xv_scan c;
-	char *s, *nl;
-	int k, j, row = 0;
 	int code = v->corpus && !strcmp(v->corpus, "shell");
 	const char *cwd = v->label && v->label[0] == '/' ? v->label : NULL;
 
+	xv_sr_free(v);
 	c.v = v;
-	for (s = v->scr; *s; s = nl + 1, row++)
+	for (;; e = s - 1)
 	{
-		if (!(nl = strchr(s, '\n')))
-			nl = s + strlen(s);
-		c.line = s;
-		c.row = row;
-		(void)xr_grammar(s, (size_t)(nl - s), code ? XR_CODE : XR_PROSE,
-		                 cwd, xv_span, &c);
-		if (!*nl)
-			break;
-	}
-	/* the labels, one per key, in screen order; two letters past 25 */
-	for (k = 0; k < v->nh; k++)
-	{
-		for (j = 0; j < k && strcmp(v->h[j].key, v->h[k].key); j++)
+		for (s = e; s > scr && s[-1] != '\n'; s--)
 			;
-		if (j < k)
-			memcpy(v->h[k].label, v->h[j].label, 3);
-		else
-			v->nlab++;
-	}
-	for (k = 0, j = 0; k < v->nh; k++)
-	{
-		int i;
-
-		if (v->h[k].label[0])
-			continue;
-		i = j++;
-		if (v->nlab <= 25)
-			v->h[k].label[0] = XV_ALPHA[i];
-		else if (i < 25 * 25)
-		{
-			v->h[k].label[0] = XV_ALPHA[i / 25];
-			v->h[k].label[1] = XV_ALPHA[i % 25];
-		}
-		for (i = k + 1; i < v->nh; i++)
-			if (!strcmp(v->h[i].key, v->h[k].key))
-				memcpy(v->h[i].label, v->h[k].label, 3);
+		c.line = s;
+		(void)xr_grammar(s, (size_t)(e - s), code ? XR_CODE : XR_PROSE,
+		                 cwd, xv_span, &c);
+		if (s == scr)
+			break;
 	}
 }
 
-/* The session's screen from its mirror, then its hints. A remote one's
+/* The session's screen from its mirror, then its refs. A remote one's
 ** (#188) is ctl's `--read host:name --ansi` in a child, on its own
 ** connection; xv_screen_done takes its answer. No --cursor: the view draws
 ** none, and it fails a screen over 2 MB or an older master. */
 static void
 xv_screen_load(struct xv *v)
 {
+	char *scr;
+
 	v->scr_at = now_ms();
 	if (v->hl && v->have && v->live)
 	{
@@ -1316,55 +1282,26 @@ xv_screen_load(struct xv *v)
 		(void)xv_start(v, XV_SK, av, 3, NULL);
 		return;
 	}
-	xv_hints_free(v);
-	free(v->scr);
-	v->scr = NULL;
-	if (!v->have || !v->live)
-	{
-		v->scr_rc = -1;
+	xv_sr_free(v);
+	if (!v->have || !v->live || !(scr = malloc(128 * 1024 + 1)))
 		return;
-	}
-	if (!(v->scr = malloc(128 * 1024 + 1)))
-	{
-		v->scr_rc = -1;
-		return;
-	}
-	v->scr_rc = xv_screen(v->session, v->scr, 128 * 1024 + 1);
-	if (v->scr_rc < 0)
-	{
-		free(v->scr);
-		v->scr = NULL;
-		return;
-	}
-	xv_screen_scan(v);
+	if (xv_screen(v->session, scr, 128 * 1024 + 1) >= 0)
+		xv_screen_scan(v, scr);
+	free(scr);
 }
 
-/* A remote screen's child has ended: its bytes as plain text, or why not
-** (a dch-lite host's "no terminal mirror", else its line in place of the
-** screen, until the next answer: never left on the status, QA 1.57.0
-** LOW-R3). */
+/* A remote screen's child has ended: its refs, or none (a dch-lite host
+** keeps no mirror; a failed read is not said: the group just goes). */
 static void
 xv_screen_done(struct xv *v)
 {
-	static const char lite[] = "dch: this session has no terminal mirror";
 	struct xv_kid *k = &v->kid[XV_SK];
 	char *s = k->rc ? NULL : xv_plain(k->buf ? k->buf : "", k->len);
 
-	xv_hints_free(v);
-	free(v->scr);
-	v->scr = s;
-	v->scr_err[0] = '\0';
+	xv_sr_free(v);
 	if (s)
-	{
-		v->scr_rc = (int)strlen(s);
-		xv_screen_scan(v);
-		return;
-	}
-	v->scr_rc = k->rc == 3 && !strncmp(k->err, lite, sizeof lite - 1) ? -2
-	            : -1;
-	if (v->scr_rc == -1 && (!k->rc || k->err[0]))
-		snprintf(v->scr_err, sizeof v->scr_err, "    No screen: %s",
-		         k->rc ? k->err : "X-ray: the screen is too big");
+		xv_screen_scan(v, s);
+	free(s);
 }
 
 /* ---- drawing --------------------------------------------------------- */
@@ -1519,38 +1456,66 @@ xv_hid(const struct xv_ch *c)
 	return c->aut || !strcmp(c->kind, "compact");
 }
 
-/* The rows a list tab shows (Chapters, Refs): their indexes, filtered. */
+/* Refs row k of xv_vis: the index's, or past it the screen's. */
+static struct xv_ref *
+xv_rfat(struct xv *v, int k)
+{
+	return k < v->nrf ? &v->rf[k] : &v->sr[k - v->nrf];
+}
+
+/* Row k when the filter and the hidden kinds show it (those counted). */
+static void
+xv_vis1(struct xv *v, int k)
+{
+	const struct xv_ref *r = v->tab == 1 ? xv_rfat(v, k) : NULL;
+
+	if (v->filt[0] &&
+	    !(!r ? xv_has(v->ch[k].title, v->filt) ||
+	      xv_has(v->ch[k].summary, v->filt)
+	      : xv_has(r->text, v->filt) || xv_has(r->title, v->filt)))
+		return;
+	/* Refs opens on pulls, issues and tickets; a shows the rest */
+	if (r && strcmp(r->shape, "pull") && strcmp(r->shape, "issue") &&
+	    strcmp(r->shape, "ticket") && (v->nk++, !v->allk))
+		return;
+	if (r && xv_temp(v, r) && (v->ntmp++, !v->alltmp))
+		return;
+	if (!r && xv_hid(&v->ch[k]) && (v->nauto++, !v->allauto))
+		return;
+	if (xv_grow(&v->vis, &v->avis, v->nvis, sizeof *v->vis) < 0)
+		return;
+	v->vis[v->nvis++] = k;
+}
+
+/* The rows a list tab shows (Chapters, Refs): their indexes, filtered.
+** Refs: the refs on the screen now first (#294), the index's own row when
+** it holds the key, then the rest, never one twice. */
 static void
 xv_vis(struct xv *v)
 {
-	int k, n = v->tab == 0 ? v->nch : v->nrf;
+	int k, j, n = v->tab == 0 ? v->nch : v->nrf;
 
 	v->nvis = v->ntmp = v->nauto = v->nk = 0;
-	for (k = 0; k < n; k++)
+	for (k = 0; k < v->nrf; k++)
+		v->rf[k].onscr = 0;
+	for (j = 0; v->tab == 1 && j < v->nsr; j++)
 	{
-		if (v->filt[0] &&
-		    !(v->tab == 0 ? xv_has(v->ch[k].title, v->filt) ||
-		      xv_has(v->ch[k].summary, v->filt)
-		      : xv_has(v->rf[k].text, v->filt) ||
-		      xv_has(v->rf[k].title, v->filt)))
-			continue;
-		/* Refs opens on pulls, issues and tickets; a shows the rest */
-		if (v->tab == 1 && strcmp(v->rf[k].shape, "pull") &&
-		    strcmp(v->rf[k].shape, "issue") &&
-		    strcmp(v->rf[k].shape, "ticket") && (v->nk++, !v->allk))
-			continue;
-		if (v->tab == 1 && xv_temp(v, &v->rf[k]) && (v->ntmp++, !v->alltmp))
-			continue;
-		if (v->tab == 0 && xv_hid(&v->ch[k]) && (v->nauto++, !v->allauto))
-			continue;
-		if (xv_grow(&v->vis, &v->avis, v->nvis, sizeof *v->vis) < 0)
-			return;
-		v->vis[v->nvis++] = k;
+		for (k = 0; k < v->nrf && strcmp(v->rf[k].key, v->sr[j].key);
+		     k++)
+			;
+		if (k < v->nrf)
+			v->rf[k].onscr = 1;
+		xv_vis1(v, k < v->nrf ? k : v->nrf + j);
 	}
-	if (v->tab == 1 && v->nvis > 1)
+	v->ngrp = v->nvis;
+	for (k = 0; k < n; k++)
+		if (v->tab == 0 || !v->rf[k].onscr)
+			xv_vis1(v, k);
+	if (v->tab == 1 && v->nvis - v->ngrp > 1)
 	{
 		xv_sort_rf = v->rf;
-		qsort(v->vis, (size_t)v->nvis, sizeof *v->vis, xv_ref_cmp);
+		qsort(v->vis + v->ngrp, (size_t)(v->nvis - v->ngrp),
+		      sizeof *v->vis, xv_ref_cmp);
 	}
 }
 
@@ -1672,6 +1637,8 @@ xv_row_ref(const struct xv *v, const struct xv_ref *r, int on)
 
 	xv_lead(on);
 	snprintf(b, sizeof b, "%5lld ", r->count);
+	if (!r->count)
+		b[4] = ' ';	/* only on the screen: no count (#294) */
 	pk_set("2");
 	pk_txt(b);
 	pk_set(pk_p(PK_ACC));
@@ -1687,40 +1654,6 @@ xv_row_ref(const struct xv *v, const struct xv_ref *r, int on)
 	pk_txt(r->title);
 	if (on)
 		pk_pad(pk_w);
-}
-
-static void
-xv_row_screen(const struct xv *v, const char *s, size_t n, int row)
-{
-	size_t at = 0;
-	int k;
-
-	pk_txt(" ");
-	for (k = 0; k < v->nh; k++)
-	{
-		const struct xv_hint *h = &v->h[k];
-
-		if (h->row != row || h->s < at || h->e > n)
-			continue;
-		pk_set("");
-		xv_txtn(s + at, h->s - at);
-		if (h->label[0])
-		{
-			int typed = v->typed[0] && v->typed[0] == h->label[0];
-
-			pk_bg = pk_p(PK_CHIP);
-			pk_set(pk_p(typed ? PK_WARN : PK_ACCB));
-			pk_txt(pk_p(PK_CHIP)[0] ? "" : "[");
-			pk_txt(h->label);
-			pk_txt(pk_p(PK_CHIP)[0] ? "" : "]");
-			pk_bg = "";
-		}
-		pk_set("1;4");
-		xv_txtn(s + h->s, h->e - h->s);
-		at = h->e;
-	}
-	pk_set("");
-	xv_txtn(s + at, n - at);
 }
 
 /* The card: what the ref is, its definitions, counts and mentions. */
@@ -1936,7 +1869,7 @@ xv_live(const struct xv *v)
 static void
 xv_draw(struct xv *v, int force)
 {
-	static const char *const tabn[3] = { "Chapters", "Refs", "On screen" };
+	static const char *const tabn[2] = { "Chapters", "Refs" };
 	static const char spin[] = "\xe2\xa0\x8b\xe2\xa0\x99\xe2\xa0\xb9"
 		"\xe2\xa0\xb8\xe2\xa0\xbc\xe2\xa0\xb4\xe2\xa0\xa6\xe2\xa0\xa7"
 		"\xe2\xa0\x87\xe2\xa0\x8f", ascii[] = "|/-\\";
@@ -1988,39 +1921,34 @@ xv_draw(struct xv *v, int force)
 		XV_K(3, "q", "quit");
 	else
 	{
-		if (v->tab < 2)
+		XV_K(0, ret, v->tab == 0 ? "read" : "card");
+		if (v->tab == 0 && xv_live(v))
+			XV_K(0, "o", "open session");
+		XV_K(3, "/", "filter");
+		if (isref)
+			XV_K(0, "^R", "look up");
+		if (v->tab == 0 && (xv_vis(v), v->nauto))
 		{
-			XV_K(0, ret, v->tab == 0 ? "read" : "card");
-			if (v->tab == 0 && xv_live(v))
-				XV_K(0, "o", "open session");
-			XV_K(3, "/", "filter");
-			if (isref)
-				XV_K(0, "^R", "look up");
-			if (v->tab == 0 && (xv_vis(v), v->nauto))
-			{
-				snprintf(tmp, sizeof tmp, "%d hidden", v->nauto);
-				keys[nk++] = (struct pkkey){ "n", v->allauto
-					? "hide auto rows" : "auto rows",
-					v->allauto ? NULL : tmp, 2, 0 };
-			}
-			if (v->tab == 1 && (xv_vis(v), v->nk))
-			{
-				snprintf(kt, sizeof kt, "%d hidden", v->nk);
-				keys[nk++] = (struct pkkey){ "a", v->allk
-					? "hide files, commits, URLs"
-					: "files, commits, URLs",
-					v->allk ? NULL : kt, 2, 0 };
-			}
-			if (v->tab == 1 && v->ntmp)
-			{
-				snprintf(tmp, sizeof tmp, "%d hidden", v->ntmp);
-				keys[nk++] = (struct pkkey){ "t", v->alltmp
-					? "hide temp files" : "temp files",
-					v->alltmp ? NULL : tmp, 2, 0 };
-			}
+			snprintf(tmp, sizeof tmp, "%d hidden", v->nauto);
+			keys[nk++] = (struct pkkey){ "n", v->allauto
+				? "hide auto rows" : "auto rows",
+				v->allauto ? NULL : tmp, 2, 0 };
 		}
-		else
-			XV_K(0, "a-z", "label: card");
+		if (v->tab == 1 && (xv_vis(v), v->nk))
+		{
+			snprintf(kt, sizeof kt, "%d hidden", v->nk);
+			keys[nk++] = (struct pkkey){ "a", v->allk
+				? "hide files, commits, URLs"
+				: "files, commits, URLs",
+				v->allk ? NULL : kt, 2, 0 };
+		}
+		if (v->tab == 1 && v->ntmp)
+		{
+			snprintf(tmp, sizeof tmp, "%d hidden", v->ntmp);
+			keys[nk++] = (struct pkkey){ "t", v->alltmp
+				? "hide temp files" : "temp files",
+				v->alltmp ? NULL : tmp, 2, 0 };
+		}
 		XV_K(3, pk_utf ? "\xe2\x87\xa5" : "tab", "tabs");
 		XV_K(3, "q", "quit");
 	}
@@ -2096,13 +2024,11 @@ xv_draw(struct xv *v, int force)
 	}
 	else
 	{
-		/* Chapters: the ones shown by default; On screen: no number
-		** before its screen is read */
+		/* Chapters: the ones shown by default */
 		for (k = n = 0; k < v->nch; k++)
 			n += !xv_hid(&v->ch[k]);
-		for (k = 0; k < 3; k++)
-			pk_tab(tabn[k], k == 0 ? n : k == 1 ? v->nrf
-			       : v->scr ? v->nlab : -1, k == v->tab);
+		for (k = 0; k < 2; k++)
+			pk_tab(tabn[k], k == 0 ? n : v->nrf, k == v->tab);
 	}
 	pk_eol();
 
@@ -2122,9 +2048,10 @@ xv_draw(struct xv *v, int force)
 			pk_line();
 			pk_eol();
 		}
-	else if (v->tab < 2)
+	else
 	{
 		int *sel = &v->sel[v->tab], *top = &v->top[v->tab], win = v->win;
+		int g, h1, h2, i;
 
 		xv_vis(v);
 		n = v->nvis;
@@ -2141,14 +2068,34 @@ xv_draw(struct xv *v, int force)
 			pk_eol();
 			win--;
 		}
-		xv_clamp(sel, top, n, win);
+		/* Refs: a faint line over the on-screen group, one over the
+		** rest under it (#294); the selection's row keeps its line in
+		** view */
+		g = v->tab == 1 ? v->ngrp : 0;
+		h1 = g > 0;
+		h2 = g > 0 && n > g;
+		if (*sel >= n)
+			*sel = n - 1;
+		if (*sel < 0)
+			*sel = 0;
+		i = *sel + h1 + (h2 && *sel >= g);
+		xv_clamp(&i, top, n + h1 + h2, win);
+		if (*top == i && *top && (*sel ? h2 && *sel == g : h1))
+			(*top)--;
 		for (k = *top; k < *top + win; k++)
 		{
+			i = k - h1 - (h2 && k > g + 1);
 			pk_line();
-			if (k < n && v->tab == 0)
-				xv_row_ch(&v->ch[v->vis[k]], v->vis[k], k == *sel);
-			else if (k < n)
-				xv_row_ref(v, &v->rf[v->vis[k]], k == *sel);
+			if ((h1 && !k) || (h2 && k == g + 1))
+			{
+				pk_set("2");
+				pk_txt(k ? "  the rest" : "  on screen now");
+			}
+			else if (i < n && v->tab == 0)
+				xv_row_ch(&v->ch[v->vis[i]], v->vis[i],
+				          i == *sel);
+			else if (i < n)
+				xv_row_ref(v, xv_rfat(v, v->vis[i]), i == *sel);
 			else if (k == 0)
 			{
 				pk_set("2");
@@ -2171,43 +2118,10 @@ xv_draw(struct xv *v, int force)
 			pk_eol();
 		}
 	}
-	else
-	{
-		const char *s = v->scr;
-		int row = 0;
-
-		for (k = 0; k < v->win; k++)
-		{
-			pk_line();
-			if (s && *s)
-			{
-				size_t l = strcspn(s, "\n");
-
-				xv_row_screen(v, s, l, row++);
-				s += l + (s[l] == '\n');
-			}
-			else if (k == 0 && !s)
-			{
-				/* a failed read's line stays over the next read */
-				int rd = !v->have ||
-				         (v->kid[XV_SK].pid > 0 && !v->scr_err[0]);
-
-				pk_set("2");
-				if (rd)
-					pk_txt("    Reading");
-				pk_txt(rd ? xv_ell() : !v->live
-				       ? "    No screen: the session has ended"
-				       : v->scr_rc == -2
-				       ? "    No screen: dch-lite keeps no mirror"
-				       : v->scr_err[0] ? v->scr_err : "    No screen");
-			}
-			pk_eol();
-		}
-	}
 
 	pk_rule();
 	pk_line();
-	if (v->filtering || (v->mode == XV_LIST && v->tab < 2 && v->filt[0]))
+	if (v->filtering || (v->mode == XV_LIST && v->filt[0]))
 	{
 		pk_set(pk_p(PK_ACC));
 		pk_txt("/");
@@ -2228,12 +2142,6 @@ xv_draw(struct xv *v, int force)
 		pk_set(pk_p(PK_ACC));
 		pk_txt(b);
 	}
-	if (v->typed[0])
-	{
-		pk_set(pk_p(PK_ACC));
-		pk_txt(v->typed);
-		pk_txt("  ");
-	}
 	pk_set("");
 	pk_txt(v->status[0] ? v->status : v->stop);
 	pk_eol();
@@ -2251,7 +2159,7 @@ xv_filt(struct xv *v, int c)
 
 	if (!v->filtering)
 	{
-		if (c != '/' || v->tab > 1)
+		if (c != '/')
 			return 0;
 		v->filtering = 1;
 		v->status[0] = '\0';
@@ -2290,33 +2198,6 @@ xv_filt(struct xv *v, int c)
 	}
 	v->sel[0] = v->sel[1] = 0;
 	return 1;
-}
-
-/* A hint label typed (On screen): its card when it names one. */
-static void
-xv_hint_key(struct xv *v, int c)
-{
-	size_t l = strlen(v->typed);
-	int k;
-
-	if (l >= 2)
-		l = 0;
-	v->typed[l] = (char)c;
-	v->typed[l + 1] = '\0';
-	for (k = 0; k < v->nh; k++)
-		if (!strcmp(v->h[k].label, v->typed))
-		{
-			v->typed[0] = '\0';
-			xv_card(v, v->h[k].key, v->h[k].text, 0, 1);
-			return;
-		}
-	for (k = 0; k < v->nh && strncmp(v->h[k].label, v->typed, l + 1); k++)
-		;
-	if (k == v->nh)
-	{
-		snprintf(v->status, sizeof v->status, "no label %s", v->typed);
-		v->typed[0] = '\0';
-	}
 }
 
 /* OSC 52: the ref's text to the terminal's clipboard. */
@@ -2453,38 +2334,26 @@ xv_key(struct xv *v, int c)
 	}
 	/* the list */
 	if (c == '\t' || c == PK_RIGHT || c == PK_BTAB || c == PK_LEFT ||
-	    (v->tab < 2 && (c == 'l' || c == 'h')))
+	    c == 'l' || c == 'h')
 	{
-		v->tab = (v->tab + (c == '\t' || c == PK_RIGHT || c == 'l' ? 1 : 2))
-		         % 3;
-		v->typed[0] = '\0';
-		if (v->tab == 2)
+		v->tab = !v->tab;
+		if (v->tab == 1)
 			xv_screen_load(v);
 		return 0;
 	}
 	if (c == 'q')
 		return 1;
-	if (c == 0x12 && v->tab < 2)	/* Ctrl-R */
+	if (c == 0x12)	/* Ctrl-R */
 	{
 		xv_lookup(v);
 		return 0;
 	}
 	if (c == PK_ESC)
 	{
-		if (v->typed[0])
-			v->typed[0] = '\0';
-		else if (v->filt[0] && v->tab < 2)
+		if (v->filt[0])
 			v->filt[0] = '\0';
 		else
 			return 1;
-		return 0;
-	}
-	if (v->tab == 2)
-	{
-		if (c > 0 && c < 128 && strchr(XV_ALPHA, c))
-			xv_hint_key(v, c);
-		else if (c == PK_DOWN || c == PK_UP)
-			v->status[0] = '\0';
 		return 0;
 	}
 	if (v->tab == 1 && c == 't')
@@ -2531,7 +2400,11 @@ xv_key(struct xv *v, int c)
 		if (v->tab == 0)
 			xv_read(v, v->ch[k].anchor, NULL);
 		else
-			xv_card(v, v->rf[k].key, v->rf[k].text, 0, 1);
+		{
+			const struct xv_ref *r = xv_rfat(v, k);
+
+			xv_card(v, r->key, r->text, 0, 1);
+		}
 		break;
 	}
 	return 0;
@@ -2556,7 +2429,7 @@ xv_free(struct xv *v)
 	xv_drop(v);
 	xv_card_free(v);
 	xv_read_free(v);
-	xv_hints_free(v);
+	xv_sr_free(v);
 	xv_sfree(v->session);
 	xv_sfree(v->sid);
 	xv_sfree(v->corpus);
@@ -2575,8 +2448,7 @@ xv_free(struct xv *v)
 	free(v->m);
 	free(v->e);
 	free(v->rl);
-	free(v->h);
-	free(v->scr);
+	free(v->sr);
 	free(v);
 }
 
@@ -2645,7 +2517,7 @@ xv_run(int fd, const char *n, char *err, size_t errsz)
 				r = tio_ok ? tcsetattr(fd, TCSADRAIN, &tio) : 0;
 			} while ((r < 0 && errno == EINTR) || xv_cont);
 		}
-		if (v->mode == XV_LIST && v->tab == 2 && now_ms() - v->scr_at >= 1000)
+		if (v->mode == XV_LIST && v->tab == 1 && now_ms() - v->scr_at >= 1000)
 			xv_screen_load(v);
 		xv_draw(v, force);
 		FD_ZERO(&rs);

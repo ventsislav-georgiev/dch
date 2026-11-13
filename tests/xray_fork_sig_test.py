@@ -202,7 +202,7 @@ def test_chord():
         ok = a.wait(b"owner/repo#831", 10)
         a.pump(0.3)
         a.key(b"\x1cx", 0.3)
-        ok = ok and a.wait(b"On screen", 10)
+        ok = ok and a.wait(b"[Refs", 10)  # the chord opens on Refs (#294)
         a.pump(1.0)
         mark = len(a.out)
         a.key(b"\t\t", 0.5)
