@@ -222,6 +222,7 @@ static int cur_argv_owned, dch_argv_owned;
 ** restart. 0 = could not tell, so a restart reverts to the launch argv. */
 static int argv_prefix;
 static int respawn_live(void);
+static int pty_input(const void *buf, size_t len);
 static long ms_since(const struct timespec *t);
 
 #ifndef HAVE_FORKPTY
@@ -472,7 +473,8 @@ auto_allow(void)
 	else if (dch_agent_probe(the_pty.pid, &a) == 0)
 	{
 		free(a.launch);
-		if (write(the_pty.fd, "1", 1) == 1)
+		/* behind any input still waiting, never a blocking write */
+		if (pty_input("1", 1) == 0)
 		{
 			free(aa_ident);
 			aa_ident = id;
@@ -1799,7 +1801,8 @@ flush_client(struct client *p)
 static struct client pty_in;
 
 /* Write the waiting input as far as the pty takes it, without blocking. A
-** hard error ends the master, as the blocking write did. */
+** hard error (EIO: the program is gone) drops it: the program's end is
+** pty_activity's to handle (its exit status, the record, a respawn). */
 static void
 pty_flush(void)
 {
@@ -1814,19 +1817,28 @@ pty_flush(void)
 		(void)fcntl(the_pty.fd, F_SETFL, fl | O_NONBLOCK);
 	pty_in.fd = the_pty.fd;
 	if (flush_client(&pty_in) < 0)
-		exit(1);
+	{
+		dch_trace("pty input: write: %s, %zu bytes dropped",
+		          strerror(errno), pty_in.outlen - pty_in.outoff);
+		pty_in.outoff = pty_in.outlen = 0;
+	}
 	if (fl >= 0)
 		(void)fcntl(the_pty.fd, F_SETFL, fl);
 }
 
-/* Input for the program: behind whatever already waits, then flushed. */
-static void
+/* Input for the program: behind whatever already waits, then flushed. 0
+** queued (or written), -1 dropped (over OUT_CAP waiting). */
+static int
 pty_input(const void *buf, size_t len)
 {
 	if (queue_to_client(&pty_in, buf, len) < 0)
+	{
 		dch_trace("pty input: %zu bytes waiting, %zu dropped",
 		          pty_in.outlen - pty_in.outoff, len);
+		return -1;
+	}
 	pty_flush();
+	return 0;
 }
 
 /* One pty output buffer: track modes, queue to attached clients, feed the
