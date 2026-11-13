@@ -1159,9 +1159,18 @@ def shell():
             "printf '\\033]133;D;0\\007'; done")
     r = dch("--spawn", "xv-sh", "--size", "80x24", "sh", "-c", prog)
     check("shell: spawned", r.returncode == 0, r.stderr)
-    for _ in range(2):
+
+    def ran(n):
+        """the n-th echo ran: its line and its output on the screen (#258:
+        a --send can land late on a loaded machine). dch-lite has no
+        --read (rc 3): nothing there reads what the echoes left"""
+        r = dch("--read", "xv-sh")
+        return r.returncode != 0 or r.stdout.count("see o/r#41") >= 2 * n
+
+    for n in (1, 2):
         time.sleep(0.4)
         dch("--send", "xv-sh", "echo 'see o/r#41'\n")
+        until(lambda: ran(n), 20)
     time.sleep(0.5)
 
 

@@ -237,6 +237,7 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "a chord key waiting past the detach window still counts (#259)" attach_chord_late_test.py
     pyrun "size follows focus (DEC 1004, #100)" focus_test.py
     pyrun "attach replay with --scrollback (#101)" scrollback_test.py
+    pyrun "a paste into a program busy printing never blocks the master (#258)" send_busy_pty_test.py
 fi
 
 if [ "$MIRROR" = "1" ]; then
