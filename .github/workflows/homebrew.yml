@@ -28,6 +28,9 @@ permissions:
 jobs:
   bump-formula:
     runs-on: ubuntu-latest
+    # slowest green run 0.3 min; 5 leaves room for the bottle fetches' retries.
+    # The caller's job (release-assets.yml) cannot set one: it uses a workflow.
+    timeout-minutes: 5
     steps:
       - name: Resolve tag and version
         id: ver
