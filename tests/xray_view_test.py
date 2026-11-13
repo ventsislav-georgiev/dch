@@ -898,6 +898,14 @@ LEAVE = (b"\033[?25h\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?1015l"
 DTAP = {"DCH_DOUBLE_TAP_MS": "0"}  # one Ctrl-\ detaches at once
 
 
+def ready(v, mark=0):
+    """The view holds the session's answer: its footer offers o. The first
+    paint (tabs, "Reading") comes before it, and an o read then does
+    nothing (QA 1.58.0 LOW-T2)."""
+    return until(lambda: (v.pump(0.1), "o open session" in
+                          screen(v, mark))[1], 10)
+
+
 def opened(v, mark, what, name="xv-sh"):
     """o pressed at mark: the view left as q leaves it, then attached to
     name; one Ctrl-\\ detaches."""
@@ -925,11 +933,9 @@ def test_open(lite):
     time.sleep(0.5)  # dch-lite: no --read; the block's time
     v = Pty([DCH, "--xray", "xv-op"], env=DTAP)
     try:
-        v.wait(b"Chapters")
-        v.pump(0.5)
+        ok = ready(v)
         text = screen(v, 0)
-        check("Chapters: a live session's footer offers o", "o open session"
-              in text, text)
+        check("Chapters: a live session's footer offers o", ok, text)
         mark = len(v.out)
         v.key(b"o", 0.3)
         opened(v, mark, "Chapters", "xv-op")
@@ -962,6 +968,7 @@ def test_open(lite):
         v.wait(b"x-ray")
         v.key(b"x", 1.0)
         v.wait(b"X-ray  xv-sh")
+        ready(v)
         mark = len(v.out)
         v.key(b"o", 0.3)
         opened(v, mark, "picker's x")
@@ -972,6 +979,7 @@ def test_open(lite):
         v.wait(b"x-ray")
         v.key(b"x", 1.0)
         v.wait(b"X-ray  xv-sh")
+        ready(v)
         mark = len(v.out)
         v.key(b"o", 1.0)
         check("-k picker: the view's o attaches nothing and kills nothing, "
@@ -985,7 +993,7 @@ def test_open(lite):
     check("-k picker: xv-sh still runs", clients("xv-sh") == 0, clients("xv-sh"))
     v = Pty([DCH, "--xray", "xv-sh"], env=dict(DTAP, DCH_SESSION="outer"))
     try:
-        v.wait(b"Chapters")
+        ready(v)
         mark = len(v.out)
         v.key(b"o", 1.0)
         check("o inside a dch session: refused as -a refuses it, the view "
@@ -1295,7 +1303,9 @@ def test_chord():
         got = rx()
         a.key(b"\x1cx", 0.5)
         a.wait(b"X-ray  xv-rx")
+        mark = len(a.out)
         a.key(b"\t", 0.5)
+        ready(a, mark)
         mark = len(a.out)
         a.key(b"o", 0.5)
         check("chord, o: the view closes, back to the session",
