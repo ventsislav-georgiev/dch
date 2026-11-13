@@ -10736,7 +10736,8 @@ revive_message(struct hrec *r, const char *msg, const char **code)
 /* --revive's guard against two Claudes on one conversation (#064): the
 ** Claude ids running now, and where. A live session is probed the way
 ** --say probes it (its child, then the live Claude records below it, each
-** read through that process's own config dir), not read from its history
+** read through that process's own config dir, or before a Claude there
+** has written one, the --resume id in its argv), not read from its history
 ** record: the record is up to DCH_RECORD_MS behind (it misses a Claude
 ** resumed by hand a moment ago) and keeps a killed Claude's id on purpose.
 ** Then our Claude sessions dir, for a Claude no session probe found: one
@@ -10815,6 +10816,49 @@ sid_visit(const char *path, const char *body, size_t len, void *arg)
 	return 0;
 }
 
+/* The conversation a Claude at or below `root` was started on, read from
+** its live argv (`--resume <id>`, `--resume=<id>`, `-r <id>`, the last one;
+** none with --fork-session, which writes a new id): until that Claude
+** writes its sessions record, the only sign of its id (#281). The kernel's
+** argv, not the master's MSG_CMD one, which outlives the child while held
+** and is the shell for a claude typed into it: a Claude that exited is out
+** of the tree and holds nothing. 0 and *sid, or -1. */
+static int
+claude_argv_sid(long root, char *sid, size_t sidsz)
+{
+	long tree[64];
+	int n = proc_tree(root, tree, 64), i, k, argc;
+	char **v;
+
+	for (i = 0; i < n; i++)
+	{
+		const char *id = NULL;
+
+		if (!(v = proc_argv(tree[i])))
+			continue;
+		for (argc = 0; v[argc]; argc++)
+			;
+		for (k = dch_claude_tok(v, argc) + 1; k < argc &&
+		     strcmp(v[k], "--"); k++)
+			if (!strcmp(v[k], "--fork-session"))
+				break;
+			else if ((!strcmp(v[k], "--resume") || !strcmp(v[k], "-r")) &&
+			         k + 1 < argc && xr_uuid_shaped(v[k + 1]))
+				id = v[++k];
+			else if (!strncmp(v[k], "--resume=", 9) &&
+			         xr_uuid_shaped(v[k] + 9))
+				id = v[k] + 9;
+		if (id && (k == argc || strcmp(v[k], "--fork-session")))
+		{
+			snprintf(sid, sidsz, "%s", id);
+			free(v);
+			return 0;
+		}
+		free(v);
+	}
+	return -1;
+}
+
 static void
 sid_live(struct sidset *s, const struct hrec *r, int n)
 {
@@ -10832,7 +10876,12 @@ sid_live(struct sidset *s, const struct hrec *r, int n)
 		session_sock_path(sl.v[k], sp, sizeof sp);
 		if (cmd_query(sp, &ci) != 0)
 			continue;
-		if (ci.pid > 0 && claude_find(ci.pid, 1, &c) > 0)
+		/* a record wins (a /resume switch moves it off the argv); none
+		** yet, or an empty one (#274): the id the Claude started on */
+		if (ci.pid > 0 && claude_find(ci.pid, 1, &c) > 0 && c.sid[0])
+			sid_add(s, c.sid, 0, "live session %s", sl.v[k]);
+		else if (ci.pid > 0 &&
+		         claude_argv_sid(ci.pid, c.sid, sizeof c.sid) == 0)
 			sid_add(s, c.sid, 0, "live session %s", sl.v[k]);
 		cmd_info_free(&ci);
 	}

@@ -2543,7 +2543,10 @@ a master that another process sent SIGTERM or SIGINT ends
 (the sender's command line made printable, cut at 120 bytes; without it
 when the sender was already gone), and counts as died.
 Never two Claudes on one conversation: a record whose Claude id a live
-Claude already runs (probed in each live session, else found in Claude's
+Claude already runs (probed in each live session, a Claude there that has
+not written its sessions record yet by the
+.B \-\-resume
+id on its command line; else found in Claude's
 sessions dir or the record's
 .IR config_dir )
 is skipped by

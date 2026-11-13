@@ -2083,7 +2083,10 @@ A record whose id a live Claude runs right now is skipped by `--all` (`<n>:
 skipped — claude <id> already runs in live session <s> (record <file>)`) and
 refused by name, `--as` or not (`live_sid`, exit 1). Live ids come from each
 live session's own probe (its Claude process and that Claude's session
-record, as `--say` finds it), not from the session's history record, which
+record, as `--say` finds it; a Claude that has not written that record yet,
+in its first seconds, by the `--resume <id>`, `--resume=<id>` or `-r <id>`
+on its command line, typed into the session's shell or not), not from the
+session's history record, which
 lags up to `DCH_RECORD_MS` behind; then from Claude's sessions dir, and the
 sessions dir of each record's `config_dir`, for a Claude running outside any
 live session (one that outlived its master, or one in a plain terminal:
