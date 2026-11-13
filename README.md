@@ -282,7 +282,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.62.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.63.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -901,7 +901,7 @@ The view has two tabs:
   query on the host (any version); a host that cannot answer is said on the
   status line and the reader stays. A shell's commands (its typed blocks)
   read on the same way, and the view says command where it says prompt.
-  The tab was called Chapters before 1.62.0.
+  The tab was called Chapters before 1.63.0.
   A prompt the harness wrote, not you (a task notification,
   `"auto"` in `--json`), is hidden until `n` shows it, faint and titled by
   its summary (by its title when it has none); the footer says how many are
