@@ -4930,6 +4930,11 @@ dch_remote_follow(int remote, struct dch_rrow **out)
 		pf[np].events = 0;
 		pf[np].revents = 0;
 		map[np++] = -1;
+		/* a SIGINT or SIGTERM during the refresh: not a tick late.
+		** shortcut: one landing between this test and the poll still
+		** waits for the wake, a pselect-style wait if it is ever seen */
+		if (g_ctl_sig)
+			break;
 		now = now_ms();
 		if (poll(pf, (nfds_t)np, wake > now ? (int)(wake - now) : 0) < 0)
 		{
