@@ -3512,8 +3512,8 @@ struct xr_scan
 	int scope, other, same;	/* --scope; this file another session's, in
 				** <n>'s project dir */
 	long long t0;
-	long long blocked;	/* ms blocked writing to the reader: not --full's
-				** 10 s (#236) */
+	long long blocked;	/* ms blocked writing to the reader: not the
+				** budget's, not --full's 10 s (#236) */
 	uint64_t written;
 	size_t room;		/* kept under the cap for the tally and done */
 	/* this file */
@@ -3908,7 +3908,7 @@ xr_scan_tick(void *ctx, uint64_t bytes)
 			x->why = "first";
 		}
 	}
-	else if (!x->stop && !x->full && now - x->t0 >= x->budget)
+	else if (!x->stop && !x->full && now - x->t0 - x->blocked >= x->budget)
 	{
 		x->stop = 1;
 		x->why = "budget";

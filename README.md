@@ -1346,7 +1346,8 @@ ref (`dch: not a ref`), relative paths against the session's cwd.
   write, and History records hold none. A shell `<n>`'s project dir is its
   cwd's. Another session's lines carry `chapter: null`.
 - **Light.** The default stops at its first result, or after `--budget-ms`
-  (50 to 300, default 300, across all files) with `why: "budget"`. With
+  (50 to 300, default 300, across all files, not counting time spent waiting
+  on a reader that pauses) with `why: "budget"`. With
   `--scope project` or `all`, `<n>`'s own file is read to its end and only
   another session's result stops the scan. A live shell's lines and another
   session's give titles and counts only: no `mention`, no `passage`.
