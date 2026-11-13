@@ -8,8 +8,9 @@ records (procStart verified) under a temp HOME, never ~/.claude:
   nc-two   two sibling sleeps, both with a record: "claudes": 2, the view
            says "2 Claude sessions run here; X-ray reads one";
   nc-none  one sleep whose record sits under the master's own HOME, which
-           the X-ray client's HOME does not hold: the master pauses its ring
-           for that Claude, the client finds none: "claudes": 0, the view
+           neither the X-ray client's HOME nor the sleep's own (its env,
+           which Linux lets the client read) holds: the master pauses its
+           ring for that Claude, the client finds none: "claudes": 0, the view
            says "No Claude session found here" (dch-lite keeps no ring: its
            reason "lite" stands, the count is still there).
 A plain shell with no agent has no "claudes". Each checked locally on the
@@ -192,9 +193,12 @@ def sessions():
     for i, k in enumerate(two or []):
         record(int(k), "%08d-2560-4000-8000-000000000000" % i,
                os.path.join(SENV["HOME"], ".claude", "sessions"))
-    # the master's HOME holds the record, the host's X-ray client's not
+    # the master's HOME holds the record, the host's X-ray client's not; the
+    # sleep's HOME is a third one, since a client follows a Claude's own
+    # HOME (#062), and Linux lets it read the env of any process of its uid
     os.makedirs(OTHER)
-    dch(dict(SENV, HOME=OTHER), "--spawn", "nc-none", "/bin/sleep", "300")
+    dch(dict(SENV, HOME=OTHER), "--spawn", "nc-none", "/usr/bin/env",
+        "HOME=" + T, "/bin/sleep", "300")
     one = until(lambda: child(SENV, "nc-none"))
     if one:
         record(one, "00000000-2561-4000-8000-000000000000",

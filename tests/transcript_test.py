@@ -205,7 +205,9 @@ def main():
 
         # --- two Claudes under one session --------------------------------
         c = "tt-two"
-        sh = spawn(c, "/bin/sh", "-c",
+        # under a HOME without their records: a client follows a Claude's
+        # own HOME (#062), and Linux lets it read any env of its uid
+        sh = spawn(c, "/usr/bin/env", "HOME=" + tmp, "/bin/sh", "-c",
                    "/bin/sleep 120 & /bin/sleep 120 & wait")
         kids = until(lambda: (lambda k: k if len(k) == 2 else None)(
             subprocess.run(["/usr/bin/pgrep", "-P", str(sh)],
