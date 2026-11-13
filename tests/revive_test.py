@@ -403,6 +403,16 @@ def main():
         lsock.bind(os.path.join(sockdir, "rcol.sock"))
         lsock.listen(8)
         held.append(lsock)
+        # a live master accepts: on Linux an unaccepted backlog of 8 makes
+        # the 9th connect of any later verb block for ever (macOS refuses
+        # it); held, never read or answered, like a wedged one
+        def hold():
+            try:
+                while True:
+                    held.append(lsock.accept()[0])
+            except OSError:	# closed by finish()
+                pass
+        threading.Thread(target=hold, daemon=True).start()
         r = run("--revive", "rcol")
         check("ended record, name taken by a live session: named refused",
               r.returncode == 1 and "is live" in r.stderr)
