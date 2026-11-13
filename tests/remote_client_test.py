@@ -549,6 +549,11 @@ def xray_checks(dch, check, senv, cenv, port, fakes, tmp, slog):
     anchors = [c["anchor"] for c in o.get("chapters", [])]
     check("xray parity setup: xrs0 has two chapters on the host",
           len(anchors) == 2, (loc.returncode, loc.stdout, loc.stderr))
+    # #296: the chapters' responses pass through as the host wrote them
+    check("xray parity setup: xrs0's chapters carry their response",
+          [c.get("response") for c in o.get("chapters", [])] ==
+          ["done", "done"], o)
+    same("--json, the chapters' responses", "@", "--json", n="xrs0")
     n0 = ctls()
     for a in anchors:
         loc = dch(senv, "--xray", "xrs0", "--chapter", a, "--json")

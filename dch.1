@@ -1033,6 +1033,18 @@ made as a title is (at most 256 KiB of summaries held; past that the
 oldest auto chapters give theirs up); its title is unchanged, and no other
 chapter has
 either key;
+a Claude Code or Codex chapter whose turn has ended has
+.B response
+(the last assistant text after the last tool result, as Claude Code's
+Focus view shows it; at most 2048 bytes, a cut one with
+.B response_cut
+true; at most 2 MiB held, past that the oldest give theirs up) and
+.B response_offset
+(the byte offset of its line), and one with tool calls has
+.B tools
+(one line: calls per tool, most used first, six then
+.BR "+N more" ;
+an edit tool with its files and added and removed lines);
 .B other_projects
 counts the other sessions with a transcript or a live Codex rollout in
 another project directory
@@ -1656,7 +1668,9 @@ counts) or a gap make
 false with
 .BR why:\(dqrange\(dq .
 The ring is read 1 MiB at a time, so a query stays under 16 MB.
-The object is capped at 4 MiB (refs go first, each counted in
+The object is capped at 4 MiB (the oldest chapters'
+.B response
+texts go first, then refs, each counted in
 .BR dropped_keys ,
 then the oldest chapters;
 .BR why:\(dqoutput\(dq ).

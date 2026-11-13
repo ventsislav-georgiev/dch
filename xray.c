@@ -1392,8 +1392,14 @@ xr_chapters_free(struct xr_chapters *c)
 	size_t i;
 
 	for (i = 0; c->v && i < c->n; i++)
-		if (c->v[(c->start + i) % XR_CHAPTERS].summary != nosum)
-			free(c->v[(c->start + i) % XR_CHAPTERS].summary);
+	{
+		struct xr_chapter *x = &c->v[(c->start + i) % XR_CHAPTERS];
+
+		if (x->summary != nosum)
+			free(x->summary);
+		free(x->response);
+		free(x->tools);
+	}
 	free(c->v);
 	memset(c, 0, sizeof *c);
 }
@@ -1426,6 +1432,10 @@ ch_push(struct xr_chapters *c)
 		c->sumheld -= strlen(x->summary) + 1;	/* the dropped oldest's */
 		free(x->summary);
 	}
+	if (x->response)
+		c->resheld -= strlen(x->response) + 1;
+	free(x->response);
+	free(x->tools);
 	memset(x, 0, sizeof *x);
 	x->at = -1;
 	x->kind = "prompt";
@@ -4506,6 +4516,30 @@ struct pend
 	long long ord;		/* the chapter its block is in; -1: a thread's */
 	int quiet;		/* Grep/Glob with a pattern: the search card
 				** shows no error (TranscriptVerbosity.isError) */
+	int tn;			/* #296: an edit's tool in its turn's tally, else
+				** -1; its input's diffstat and file */
+	unsigned long long add, del;
+	uint64_t fh;
+};
+
+/* #296: the open turn's tools, as Focus view's one line: calls per name,
+** and an edit tool's distinct files and lines added and removed */
+#define XR_TNAMES      64		/* names a turn counts */
+#define XR_TFILES      256		/* edited files a turn counts */
+#define XR_TNAME       40		/* a name's bytes in the line */
+struct tname
+{
+	char name[XR_TNAME + 1];
+	unsigned long calls, files;
+	unsigned long long add, del;
+	int edit;
+};
+struct tally
+{
+	long long ord;		/* its chapter */
+	int n, nf, dirty;
+	struct tname v[XR_TNAMES];
+	struct { uint64_t h; int tn; } f[XR_TFILES];
 };
 
 struct xr_claude
@@ -4539,6 +4573,7 @@ struct xr_claude
 				** the line it did not finish (#136) */
 	struct xr_entries *want;	/* --chapter (#156), else NULL */
 	int codex;		/* a Codex rollout (7.4) */
+	struct tally *tl;	/* #296: the open turn's tools, else NULL */
 };
 
 enum { B_PROMPT, B_IMAGE, B_STEP };
@@ -4566,6 +4601,7 @@ xr_claude_free(struct xr_claude *d)
 	for (k = 0; k < d->ncalls; k++)
 		free(d->calls[k].cmd);
 	free(d->calls);
+	free(d->tl);
 	xr_chapters_free(&d->ch);
 	free(d);
 }
@@ -4749,6 +4785,7 @@ tool_use(struct xr_claude *d, const char *agent, const char *id, int quiet)
 	}
 	d->pend[k].ord = agent ? -1 : (long long)d->ch.total - 1;
 	d->pend[k].quiet = quiet;
+	d->pend[k].tn = -1;
 	if (!(d->order[d->norder] = strdup(d->pend[k].id)))
 		return;
 	d->norder++;
@@ -4830,6 +4867,279 @@ texts(const struct json_parser *p, int arr, size_t *n)
 	}
 	*n = k;
 	return o;
+}
+
+/* ---- Claude and Codex: Focus view's response and tool line (#296) ----------- */
+
+static const char *const A_TUR[] = { "toolUseResult", 0 };
+static const char *const A_SPATCH[] = { "structuredPatch", 0 };
+static const char *const A_LINES[] = { "lines", 0 };
+static const char *const A_FPATH[] = { "file_path", 0 };
+static const char *const A_OLD[] = { "old_string", 0 };
+static const char *const A_NEW[] = { "new_string", 0 };
+static const char *const A_EDITS[] = { "edits", 0 };
+
+/* The open turn's response goes: a tool ran after it, or the turn is still
+** running. */
+static void
+resp_clear(struct xr_claude *d)
+{
+	struct xr_chapter *x = cur(d);
+
+	if (!x)
+		return;
+	if (x->response)
+		d->ch.resheld -= strlen(x->response) + 1;
+	free(x->response);
+	x->response = NULL;
+	x->responded = x->response_cut = 0;
+}
+
+/* The main thread's text s[0..n), trimmed, is the open turn's response
+** until a tool runs; past XR_RESPONSES held the oldest give theirs up. */
+static void
+resp_set(struct xr_claude *d, const char *s, size_t n)
+{
+	struct xr_chapter *x = cur(d), *o;
+	char *r;
+	int cut;
+
+	/* ASCII space only: trim() walks the whole text (its cost) */
+	for (; n && (s[n - 1] == ' ' || (s[n - 1] >= '\t' && s[n - 1] <= '\r'));
+	     n--)
+		;
+	for (; n && (*s == ' ' || (*s >= '\t' && *s <= '\r')); s++, n--)
+		;
+	if (!x || !n)
+		return;
+	if ((cut = n > XR_RESPONSE))
+		for (n = XR_RESPONSE; n && ((unsigned char)s[n] & 0xc0) == 0x80;
+		     n--)
+			;
+	if (x->response)
+		d->ch.resheld -= strlen(x->response) + 1;
+	if (!(r = realloc(x->response, n + 1)))
+	{
+		free(x->response);	/* its bytes are off resheld */
+		x->response = NULL;
+		x->responded = 0;
+		return;
+	}
+	x->response = NULL;
+	memcpy(r, s, n);
+	r[n] = '\0';
+	while (d->ch.resheld + n + 1 > XR_RESPONSES &&
+	       d->ch.resord + 1 < d->ch.total)
+		if ((o = ch_ord(&d->ch, d->ch.resord++)) && o->response)
+		{
+			d->ch.resheld -= strlen(o->response) + 1;
+			free(o->response);
+			o->response = NULL;
+		}
+	x->response = r;
+	x->response_offset = d->off;
+	x->responded = 1;
+	x->response_cut = cut;
+	d->ch.resheld += n + 1;
+}
+
+/* The tally as the chapter's line: calls per name, most first (ties: the
+** first used), at most 6 then "+N more"; an edit tool's files and lines. */
+static void
+tl_flush(struct xr_claude *d)
+{
+	struct tally *t = d->tl;
+	struct xr_chapter *x;
+	char b[6 * (XR_TNAME + 64) + 32];
+	unsigned char used[XR_TNAMES] = {0};
+	size_t l = 0;
+	int k, j, m;
+
+	if (!t || !t->dirty || !(x = ch_ord(&d->ch, (uint64_t)t->ord)))
+		return;
+	t->dirty = 0;
+	b[0] = '\0';
+	for (k = 0; k < t->n && k < 6; k++)
+	{
+		const struct tname *v;
+
+		for (m = -1, j = 0; j < t->n; j++)
+			if (!used[j] && (m < 0 || t->v[j].calls > t->v[m].calls))
+				m = j;
+		used[m] = 1;
+		v = &t->v[m];
+		l += (size_t)snprintf(b + l, sizeof b - l, "%s%s %lu", k ? ", " : "",
+		                      v->name, v->calls);
+		if (v->files)
+			l += (size_t)snprintf(b + l, sizeof b - l,
+			                      " (%lu file%s, +%llu -%llu)", v->files,
+			                      v->files == 1 ? "" : "s", v->add, v->del);
+	}
+	if (t->n > 6)
+		snprintf(b + l, sizeof b - l, ", +%d more", t->n - 6);
+	free(x->tools);
+	x->tools = b[0] ? strdup(b) : NULL;
+}
+
+/* The open turn's tally, a new one for a new turn (the last one's line
+** written first); NULL with no turn or no memory. */
+static struct tally *
+tl_get(struct xr_claude *d)
+{
+	long long ord = (long long)d->ch.total - 1;
+
+	if (!d->turn)
+		return NULL;
+	if (d->tl && d->tl->ord == ord)
+		return d->tl;
+	tl_flush(d);
+	if (!d->tl && !(d->tl = malloc(sizeof *d->tl)))
+		return NULL;
+	d->tl->ord = ord;
+	d->tl->n = d->tl->nf = d->tl->dirty = 0;
+	return d->tl;
+}
+
+/* A call of `name` counted: its index, -1 past XR_TNAMES names (shortcut:
+** a turn's 65th name and on go uncounted; real turns use a dozen). */
+static int
+tl_name(struct tally *t, const char *name)
+{
+	size_t l = strlen(name);
+	int k;
+
+	if (l > XR_TNAME)
+		for (l = XR_TNAME; l && ((unsigned char)name[l] & 0xc0) == 0x80; l--)
+			;
+	for (k = 0; k < t->n; k++)
+		if (!strncmp(t->v[k].name, name, l) && !t->v[k].name[l])
+			break;
+	if (k == XR_TNAMES)
+		return -1;
+	if (k == t->n)
+	{
+		memset(&t->v[k], 0, sizeof t->v[k]);
+		memcpy(t->v[k].name, name, l);
+		t->n++;
+	}
+	t->v[k].calls++;
+	t->dirty = 1;
+	return k;
+}
+
+/* File hash h edited by name tn: counted once (past XR_TFILES, no more). */
+static void
+tl_file(struct tally *t, int tn, uint64_t h)
+{
+	int k;
+
+	for (k = 0; k < t->nf; k++)
+		if (t->f[k].tn == tn && t->f[k].h == h)
+			return;
+	if (t->nf == XR_TFILES)
+		return;
+	t->f[t->nf].tn = tn;
+	t->f[t->nf++].h = h;
+	t->v[tn].files++;
+}
+
+/* String token t's lines, undecoded: its \n escapes, and one more for an
+** open last line (shortcut: a \u000a escape is no newline here). */
+static unsigned long long
+nlines(const struct json_parser *p, int t)
+{
+	unsigned long long k = 0;
+	int i, nl = 0;
+
+	if (t < 0 || p->tok[t].kind != JSON_STRING ||
+	    p->tok[t].end == p->tok[t].start)
+		return 0;
+	/* an escape's second byte is inside the token: a string never ends
+	** in a lone backslash */
+	for (i = p->tok[t].start; i < p->tok[t].end; i++)
+		k += nl = p->text[i] == '\\' && p->text[++i] == 'n';
+	return k + !nl;
+}
+
+/* An edit input's lines: old_string removed, new_string or content added. */
+static void
+ed_lines(const struct json_parser *p, int in, unsigned long long *add,
+         unsigned long long *del)
+{
+	*del += nlines(p, j_get(p, in, A_OLD));
+	*add += nlines(p, j_get(p, in, A_NEW)) +
+	        nlines(p, j_get(p, in, A_CONTENT));
+}
+
+/* A main-thread tool_use: counted; an edit's diffstat and file wait on its
+** result, held on its open call. */
+static void
+tl_call(struct xr_claude *d, const struct json_parser *p, int in,
+        const char *id, const char *name)
+{
+	char kb[XR_ID_MAX + 1], *f;
+	struct tally *t;
+	struct pend *e;
+	size_t n;
+	int tn, k, a, i;
+
+	resp_clear(d);
+	if (!name || !(t = tl_get(d)) || (tn = tl_name(t, name)) < 0)
+		return;
+	if ((strcmp(name, "Edit") && strcmp(name, "MultiEdit") &&
+	     strcmp(name, "Write")) || !id ||
+	    (k = pend_find(d, id_key(id, kb))) < 0 ||
+	    !(f = k_str(p, in, A_FPATH, &n)))
+		return;
+	e = &d->pend[k];
+	e->tn = tn;
+	e->fh = fnv(f, n);
+	free(f);
+	e->add = e->del = 0;
+	ed_lines(p, in, &e->add, &e->del);
+	if ((a = j_get(p, in, A_EDITS)) >= 0 && p->tok[a].kind == JSON_ARRAY)
+		for (i = a + 1; i < p->tok[a].next; i = p->tok[i].next)
+			if (p->tok[i].kind == JSON_OBJECT)
+				ed_lines(p, i, &e->add, &e->del);
+}
+
+/* A main-thread tool_result: an edit that did not fail counts its file and
+** its lines, from the record's toolUseResult.structuredPatch when it has a
+** hunk (its + and - lines), else from the call's input. */
+static void
+tl_result(struct xr_claude *d, const struct json_parser *p, const char *id,
+          int err)
+{
+	char kb[XR_ID_MAX + 1];
+	struct tally *t = d->tl;
+	struct pend *e;
+	unsigned long long add, del;
+	int k, a, h, ls, l;
+
+	resp_clear(d);
+	if (!id || (k = pend_find(d, id_key(id, kb))) < 0 ||
+	    (e = &d->pend[k])->tn < 0 || err || !t || t->ord != e->ord)
+		return;
+	add = e->add;
+	del = e->del;
+	if ((a = j_get(p, k_obj(p, 0, A_TUR), A_SPATCH)) >= 0 &&
+	    p->tok[a].kind == JSON_ARRAY && p->tok[a].next > a + 1)
+		for (add = del = 0, h = a + 1; h < p->tok[a].next;
+		     h = p->tok[h].next)
+			if ((ls = j_get(p, h, A_LINES)) >= 0 &&
+			    p->tok[ls].kind == JSON_ARRAY)
+				for (l = ls + 1; l < p->tok[ls].next; l = p->tok[l].next)
+					if (p->tok[l].kind == JSON_STRING &&
+					    p->tok[l].end > p->tok[l].start)
+					{
+						add += p->text[p->tok[l].start] == '+';
+						del += p->text[p->tok[l].start] == '-';
+					}
+	t->v[e->tn].add += add;
+	t->v[e->tn].del += del;
+	tl_file(t, e->tn, e->fh);
+	t->dirty = 1;
+	e->tn = -1;
 }
 
 /* ---- Claude: refs (v2.1 3.1, 3.6; spec 7.2) -------------------------------- */
@@ -5664,6 +5974,8 @@ user_parts(struct xr_claude *d, const struct json_parser *p, int c,
 			long long ord = d->want ? ent_paired(d, id, &quiet) : -2;
 
 			refs_pair(d, id, &rr);
+			if (!ag)
+				tl_result(d, p, id, k_bool(p, i, A_ERR));
 			tool_result(d, ag, id, k_bool(p, i, A_ERR));
 			if (d->rk.hit)
 				refs_result(d, p, i, k_bool(p, i, A_ERR), &rr);
@@ -5731,6 +6043,8 @@ entry_assistant(struct xr_claude *d, const struct json_parser *p,
 		if ((s = j_str(p, c, &n)) && !blank(s, n))
 		{
 			block(d, ag, B_STEP, NULL, NULL);
+			if (!ag)
+				resp_set(d, s, n);
 			refs_text(d, s, n, XR_TEXT_CAP, XR_MD);
 			if (ent_here(d, ag))
 				ent_put(d->want, "assistant", NULL, s, n, XR_TEXT_CAP, 0);
@@ -5756,6 +6070,8 @@ entry_assistant(struct xr_claude *d, const struct json_parser *p,
 			if ((s = k_str(p, i, A_TEXT, &n)) && !blank(s, n))
 			{
 				block(d, ag, B_STEP, NULL, NULL);
+				if (!ag)
+					resp_set(d, s, n);
 				refs_text(d, s, n, XR_TEXT_CAP, XR_MD);
 				if (ent_here(d, ag))
 					ent_put(d->want, "assistant", NULL, s, n, XR_TEXT_CAP,
@@ -5784,6 +6100,8 @@ entry_assistant(struct xr_claude *d, const struct json_parser *p,
 			    p->tok[pat].end > p->tok[pat].start)
 				quiet = 1;
 			tool_use(d, ag, id, quiet);
+			if (!ag)
+				tl_call(d, p, in, id, name);
 			if (d->rk.hit)
 				refs_call(d, p, i);
 			if (ent_here(d, ag))
@@ -5995,6 +6313,81 @@ cx_ent(struct xr_claude *d, const struct json_parser *p, int pl,
 	free(id);
 }
 
+/* A Codex call (7.4): counted by its name (a nameless one by its type), as
+** apply_patch when it carries a patch body (a custom tool's input, or any
+** string of a function call's arguments), with the patch's files and its
+** hunks' + and - lines. A rollout has no error flag: counted as called. */
+static void
+cx_tool(struct xr_claude *d, const struct json_parser *p, int pl,
+        const char *t)
+{
+	static const char bp[] = "*** Begin Patch";
+	char *name = k_str(p, pl, A_NAME, NULL), *s = NULL, nb[XR_TNAME + 1];
+	const char *nm = name, *b;
+	struct json_parser q;
+	struct tally *tt;
+	size_t n = 0, i, e, tl = strlen(t);
+	int tn, k, in = 0;
+
+	if (!strcmp(t, "custom_tool_call"))
+		s = k_str(p, pl, A_INPUT, &n);
+	else if (!strcmp(t, "function_call") && (s = k_str(p, pl, A_ARGS, &n)) &&
+	         find(s, n, bp, 0))
+	{
+		/* the body as a JSON string anywhere in the arguments */
+		char *a = s;
+
+		s = NULL;
+		memset(&q, 0, sizeof q);
+		if (tokens_max(a, n) <= XR_LINE_TOKENS && dch_json_parse(&q, a) >= 0)
+			for (k = 0; k < q.ntok && !s; k++)
+				if (q.tok[k].kind == JSON_STRING &&
+				    find(a + q.tok[k].start,
+				         (size_t)(q.tok[k].end - q.tok[k].start), bp, 0))
+					s = j_str(&q, k, &n);
+		dch_json_free(&q);
+		free(a);
+	}
+	e = n;
+	if (s && ((b = trim(s, &e)), e < sizeof bp - 1 ||
+	          memcmp(b, bp, sizeof bp - 1)))
+	{
+		free(s);
+		s = NULL;
+	}
+	if (s)
+		nm = "apply_patch";
+	else if (!nm)
+	{
+		/* local_shell_call as local_shell */
+		e = tl > 5 && !strcmp(t + tl - 5, "_call") ? tl - 5 : tl;
+		snprintf(nb, sizeof nb, "%.*s", (int)e, t);
+		nm = nb;
+	}
+	if ((tt = tl_get(d)) && (tn = tl_name(tt, nm)) >= 0 && s)
+		for (i = 0; i < n; i = e + 1)
+		{
+			size_t h = !strncmp(s + i, "*** Add File: ", 14) ? 14
+			           : !strncmp(s + i, "*** Update File: ", 17) ||
+			             !strncmp(s + i, "*** Delete File: ", 17) ? 17 : 0;
+
+			for (e = i; e < n && s[e] != '\n'; e++)
+				;
+			if (h && i + h <= e)
+			{
+				tl_file(tt, tn, fnv(s + i + h, e - i - h -
+				                    (e > i + h && s[e - 1] == '\r')));
+				in = 1;
+			}
+			else if (in && s[i] == '+')
+				tt->v[tn].add++;
+			else if (in && s[i] == '-')
+				tt->v[tn].del++;
+		}
+	free(s);
+	free(name);
+}
+
 /* One response_item: a user or assistant message, else a step whose tool
 ** fields are scanned under the Claude tool-field rules (code context; a
 ** command-like input 6000 scalars, an output 3000, a card's fields 240). */
@@ -6020,6 +6413,7 @@ cx_item(struct xr_claude *d, const struct json_parser *p, int pl)
 				if (s && !blank(s, n))
 				{
 					main_block(d, B_STEP, NULL, NULL);
+					resp_set(d, s, n);
 					refs_text(d, s, n, XR_TEXT_CAP, XR_MD);
 					if (ent_here(d, NULL))
 						ent_put(d->want, "assistant", NULL, s, n,
@@ -6033,6 +6427,10 @@ cx_item(struct xr_claude *d, const struct json_parser *p, int pl)
 		return;
 	}
 	main_block(d, B_STEP, NULL, NULL);
+	if (t && strstr(t, "_call"))	/* a call or its output (#296) */
+		resp_clear(d);
+	if (t && strstr(t, "_call") && !strstr(t, "_output"))
+		cx_tool(d, p, pl, t);
 	if (!d->rk.hit || !t)
 		;
 	else if (!strcmp(t, "function_call"))
@@ -6198,6 +6596,7 @@ ch_anchors(struct xr_claude *d, uint64_t ino)
 {
 	size_t k;
 
+	tl_flush(d);
 	for (k = 0; k < d->ch.n; k++)
 	{
 		struct xr_chapter *x = &d->ch.v[(d->ch.start + k) % XR_CHAPTERS];
@@ -6214,6 +6613,8 @@ xr_claude_end(struct xr_claude *d, uint64_t ino, struct xr_chapters *out)
 	*out = d->ch;
 	memset(&d->ch, 0, sizeof d->ch);
 	d->turn = 0;
+	free(d->tl);	/* its line is written */
+	d->tl = NULL;
 }
 
 const struct xr_chapters *
@@ -7182,8 +7583,23 @@ put_auto(FILE *m, const struct xr_chapter *c)
 	}
 }
 
+/* #296: additive too. The response text alone, so the cap can leave it
+** out (its offset and the tool line stay). */
 static void
-put_chapter(FILE *m, const struct xr_chapter *c, uint64_t i, int comma)
+put_response(FILE *m, const struct xr_chapter *c)
+{
+	if (!c->response)
+		return;
+	fputs(",\"response\":", m);
+	xr_put_str(m, c->response);
+	if (c->response_cut)
+		fputs(",\"response_cut\":true", m);
+}
+
+/* resp: with the response text (put_response) */
+static void
+put_chapter(FILE *m, const struct xr_chapter *c, uint64_t i, int comma,
+            int resp)
 {
 	fputs(comma ? ",{\"anchor\":" : "{\"anchor\":", m);
 	xr_put_str(m, c->anchor);
@@ -7199,6 +7615,16 @@ put_chapter(FILE *m, const struct xr_chapter *c, uint64_t i, int comma)
 	        c->kind, c->partial ? "true" : "false",
 	        c->error ? "true" : "false");
 	put_auto(m, c);
+	if (resp)
+		put_response(m, c);
+	if (c->responded)
+		fprintf(m, ",\"response_offset\":%llu",
+		        (unsigned long long)c->response_offset);
+	if (c->tools)
+	{
+		fputs(",\"tools\":", m);
+		xr_put_str(m, c->tools);
+	}
 	fputc('}', m);
 }
 
@@ -7274,7 +7700,8 @@ xr_print(FILE *f, const struct xr_answer *a)
 {
 	char *body = NULL, *head = NULL;
 	size_t bl = 0, hl = 0, k, cut = 0, n = a->ch ? a->ch->n : 0, slack;
-	size_t *at = calloc(n + 1, sizeof *at);
+	size_t *at = calloc(n + 1, sizeof *at), *rs = calloc(n + 1, sizeof *rs);
+	size_t r, rb = 0;	/* #296: each chapter's response, their sum */
 	uint64_t first = a->ch ? a->ch->total - a->ch->n : 0;
 	FILE *m;
 	int complete = a->complete, rc = 0;
@@ -7296,6 +7723,7 @@ xr_print(FILE *f, const struct xr_answer *a)
 		free(ord);
 		free(drop);
 		free(at);
+		free(rs);
 		return -1;
 	}
 	for (k = 0; k < nr; k++)
@@ -7319,7 +7747,7 @@ xr_print(FILE *f, const struct xr_answer *a)
 		goto fail;
 	free(body);
 	body = NULL;
-	if (!at || !(m = open_memstream(&body, &bl)))
+	if (!at || !rs || !(m = open_memstream(&body, &bl)))
 	{
 fail:
 		free(body);
@@ -7328,12 +7756,17 @@ fail:
 		free(gone);
 		free(rat);
 		free(at);
+		free(rs);
 		return -1;
 	}
 	for (k = 0; k < n && fseek(m, 0, SEEK_SET) == 0; k++)
 	{
-		put_chapter(m, xr_chapter_at(a->ch, k), first + k + 1, k > 0);
+		put_chapter(m, xr_chapter_at(a->ch, k), first + k + 1, k > 0, 0);
 		at[k + 1] = at[k] + (size_t)ftell(m);
+		if (fseek(m, 0, SEEK_SET) != 0)
+			break;
+		put_response(m, xr_chapter_at(a->ch, k));
+		rb += rs[k] = (size_t)ftell(m);
 	}
 	if (fclose(m) != 0 || k < n)
 	{
@@ -7343,17 +7776,23 @@ fail:
 		free(gone);
 		free(rat);
 		free(at);
+		free(rs);
 		return -1;
 	}
 	free(body);
 	body = NULL;
-	bl = at[n];
-	/* 4 MiB: refs go first, in drop's order (each a dropped key; the first
-	** kept one has no comma), then the oldest chapters */
+	bl = at[n] + rb;
+	/* 4 MiB: the oldest chapters' responses go first (#296: the offset and
+	** the tool line stay), then refs, in drop's order (each a dropped key;
+	** the first kept one has no comma), then the oldest chapters */
 	slack = 4096 + 6 * (strlen(a->session) + strlen(a->session_id) +
 	                    (a->project ? strlen(a->project) : 0) +
 	                    (a->project_label ? strlen(a->project_label) : 0));
 	rl -= nr > 0;
+	for (r = 0; r < n && bl + rl + slack > xr_lim.out; r++)
+		bl -= rs[r];
+	for (k = 0; k < r && !rs[k]; k++)
+		;
 	for (j = 0; j < nr && bl + rl + slack > xr_lim.out; j++)
 	{
 		rl -= rat[drop[j]] - (j + 1 == nr);
@@ -7362,7 +7801,7 @@ fail:
 	keep = nr - j;
 	while (cut < n && bl - at[cut] + rl + slack > xr_lim.out)
 		cut++;
-	if (cut || keep < nr)
+	if (cut || keep < nr || k < r)
 	{
 		complete = 0;
 		why = "output";
@@ -7407,7 +7846,7 @@ fail:
 		fputs(head, f);
 		for (k = cut; k < n; k++)	/* the first kept one: no comma */
 			put_chapter(f, xr_chapter_at(a->ch, k), first + k + 1,
-			            k > cut);
+			            k > cut, k >= r);
 		fprintf(f, "],\"chapters_evicted\":%s,\"refs\":[",
 		        a->chapters_evicted ? "true" : "false");
 		for (k = j = 0; k < nr; k++)	/* j: refs written */
@@ -7421,6 +7860,7 @@ fail:
 	}
 	free(head);
 	free(at);
+	free(rs);
 	free(ord);
 	free(drop);
 	free(gone);
@@ -7562,7 +8002,7 @@ stab_build(const struct xr_answer *a, struct stab *t)
 		const struct xr_chapter *x = xr_chapter_at(a->ch, k);
 		struct sch *c = &t->c[k];
 
-		put_chapter(m, x, 0, 0);	/* i is display only: not compared */
+		put_chapter(m, x, 0, 0, 1);	/* i is display only: not compared */
 		if (fflush(m) != 0)
 			break;
 		snprintf(c->anchor, sizeof c->anchor, "%s", x->anchor);
@@ -7700,7 +8140,7 @@ xr_delta_write(FILE *f, struct xr_sent *s, const struct xr_answer *a)
 		if (chg[nr + k])
 		{
 			fputs("{\"schema\":1,\"chapter\":", f);
-			put_chapter(f, xr_chapter_at(a->ch, k), first + k + 1, 0);
+			put_chapter(f, xr_chapter_at(a->ch, k), first + k + 1, 0, 1);
 			fputs("}\n", f);
 		}
 	for (k = 0; k < nr; k++)

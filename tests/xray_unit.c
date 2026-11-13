@@ -2011,12 +2011,13 @@ t_auto(void)
 	      b && strstr(b, "\"title\":\"<task-notification>\",\"kind\":"
 	                  "\"prompt\",\"partial\":false,\"error\":false,"
 	                  "\"auto\":true,\"summary\":\"Build finished: 3 "
-	                  "passed\"}"));
+	                  "passed\",\"response\":\"x\""));
 	CHECK("auto: no summary key when there is none",
-	      b && strstr(b, "\"error\":false,\"auto\":true},"));
+	      b && strstr(b, "\"error\":false,\"auto\":true,\"response\":"));
 	CHECK("auto: a chapter that is not auto prints neither key",
 	      b && strstr(b, "\"title\":\"why did this fail?\",\"kind\":"
-	                  "\"prompt\",\"partial\":false,\"error\":false},"));
+	                  "\"prompt\",\"partial\":false,\"error\":false,"
+	                  "\"response\":"));
 	CHECK("auto: the hostile summary is quoted as a title (no raw ESC, "
 	      "BEL or U+202E)",
 	      b && strstr(b, "\"summary\":\"\\u001b[31mred\\u0007\xef\xbf\xbd "
@@ -2056,7 +2057,8 @@ t_auto(void)
 		d = follow_cut_out(ix, s, &a, 0);
 		CHECK("auto: a --follow chapter line carries them",
 		      d && strstr(d, "{\"schema\":1,\"chapter\":") &&
-		      strstr(d, "\"auto\":true,\"summary\":\"from an array\"}}"));
+		      strstr(d, "\"auto\":true,\"summary\":\"from an array\","
+		             "\"response\":\"x\""));
 		free(d);
 	}
 	xr_chapters_free(&c);
@@ -2266,6 +2268,340 @@ t_codex(void)
 	      strstr(k.b, "main.c") && !strstr(strstr(k.b, "main.c") + 1,
 	                                       "main.c"));
 	CHECK("codex: mentions only, never a definition", k.d == 0);
+	xr_chapters_free(&c);
+}
+
+/* ---- #296: Focus view's response and tool line per chapter ----------------- */
+
+#define RTU(id, name, in) "{\"type\":\"assistant\",\"message\":{\"content\":[" \
+	"{\"type\":\"tool_use\",\"id\":\"" id "\",\"name\":\"" name "\"," \
+	"\"input\":" in "}]}}"
+#define RTR(id, top) "{\"type\":\"user\"" top ",\"message\":{\"content\":[" \
+	"{\"type\":\"tool_result\",\"tool_use_id\":\"" id "\"," \
+	"\"content\":\"ok\"}]}}"
+#define RSIDE(t) "{\"type\":\"assistant\",\"isSidechain\":true,\"agentId\":" \
+	"\"a1\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"" t "\"}]}}"
+
+static const char *
+resp_of(const struct xr_chapters *c, size_t i)
+{
+	const struct xr_chapter *x = xr_chapter_at(c, i);
+
+	return x && x->response ? x->response : "";
+}
+
+static const char *
+tools_of(const struct xr_chapters *c, size_t i)
+{
+	const struct xr_chapter *x = xr_chapter_at(c, i);
+
+	return x && x->tools ? x->tools : "";
+}
+
+static void
+t_responses(void)
+{
+	struct xr_chapters c;
+	char big[2600], l[2700];
+	uint64_t aoff = 0;
+	size_t k;
+	int ok;
+
+	big[0] = 'a';
+	for (k = 0; k < 600; k++)
+		memcpy(big + 1 + 4 * k, "\xf0\x9f\x98\x80", 4);
+	big[2401] = '\0';
+	snprintf(l, sizeof l, A("%s"), big);
+	begin();
+	line(U("no tools"));
+	aoff = OFF;
+	line(A("  the answer\\n"));					/* 0 */
+	line(U("tools then text"));
+	line(RTU("b1", "Bash", "{\"command\":\"make\"}"));
+	line(RTR("b1", ""));
+	line(A("after tools"));					/* 1 */
+	line(U("text tool text"));
+	line(A("first"));
+	line(RTU("b2", "Bash", "{}"));
+	line(RTR("b2", ""));
+	line(A("second"));					/* 2 */
+	line(U("sidechain"));
+	line(A("main says"));
+	line(RSIDE("a subagent says"));				/* 3 */
+	line(U("thinking"));
+	line("{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":"
+	     "\"text\",\"text\":\"shown\"},{\"type\":\"thinking\",\"thinking\":"
+	     "\"hidden\"}]}}");					/* 4 */
+	line(U("long"));
+	line(l);						/* 5 */
+	line(U("edits"));
+	line(RTU("e1", "Edit", "{\"file_path\":\"/p/a.c\",\"old_string\":"
+	        "\"a\\nb\",\"new_string\":\"c\"}"));
+	line(RTR("e1", ",\"toolUseResult\":{\"structuredPatch\":[{\"oldStart\":1,"
+	        "\"lines\":[\" a\",\"-b\",\"+c\",\"+d\",\"+e\"]},{\"lines\":"
+	        "[\"-f\"]}]}"));
+	line(RTU("e2", "Edit", "{\"file_path\":\"/p/a.c\",\"old_string\":"
+	        "\"x\\ny\\nz\\n\",\"new_string\":\"w\"}"));
+	line(RTR("e2", ",\"toolUseResult\":{\"structuredPatch\":[]}"));
+	line(RTU("e3", "Edit", "{\"file_path\":\"/p/b.c\",\"old_string\":\"q\","
+	        "\"new_string\":\"r\"}"));
+	line("{\"type\":\"user\",\"message\":{\"content\":[{\"type\":"
+	     "\"tool_result\",\"tool_use_id\":\"e3\",\"is_error\":true,"
+	     "\"content\":\"not found\"}]}}");
+	line(RTU("w1", "Write", "{\"file_path\":\"/p/n.c\",\"content\":"
+	        "\"1\\n2\\n3\"}"));
+	line(RTR("w1", ""));
+	line(RTU("m1", "MultiEdit", "{\"file_path\":\"/p/b.c\",\"edits\":[{"
+	        "\"old_string\":\"k\",\"new_string\":\"k1\\nk2\"},{\"old_string\":"
+	        "\"m\\nn\",\"new_string\":\"o\"}]}"));
+	line(RTR("m1", ""));
+	line(RTU("m2", "MultiEdit", "{\"file_path\":\"/p/b.c\",\"edits\":[{"
+	        "\"old_string\":\"s\",\"new_string\":\"t\"}]}"));
+	line(RTR("m2", ""));
+	line(A("edited"));					/* 6 */
+	line(U("names"));
+	{
+		static const char *const nm[] = { "R", "R", "R", "G", "G", "H",
+		                                   "I", "J", "K", "L", "M", "L" };
+		char t[200];
+
+		for (k = 0; k < sizeof nm / sizeof *nm; k++)
+		{
+			snprintf(t, sizeof t, "{\"type\":\"assistant\",\"message\":{"
+			         "\"content\":[{\"type\":\"tool_use\",\"id\":\"n%zu\","
+			         "\"name\":\"%s\",\"input\":{}}]}}", k, nm[k]);
+			line(t);
+		}
+	}
+	line(A("named"));					/* 7 */
+	line(U("running"));
+	line(A("starting"));
+	line(RTU("d1", "Bash", "{}"));				/* 8 */
+	end(&c);
+	CHECK("responses: 9 chapters", c.n == 9);
+	if (c.n != 9)
+	{
+		xr_chapters_free(&c);
+		return;
+	}
+	CHECK("responses: no tools: the last text, trimmed, its record's offset",
+	      !strcmp(resp_of(&c, 0), "the answer") &&
+	      xr_chapter_at(&c, 0)->responded &&
+	      xr_chapter_at(&c, 0)->response_offset == aoff &&
+	      !xr_chapter_at(&c, 0)->tools);
+	CHECK("responses: tools then text: the text, one tool line",
+	      !strcmp(resp_of(&c, 1), "after tools") &&
+	      !strcmp(tools_of(&c, 1), "Bash 1"));
+	CHECK("responses: text, tool, text: the last text wins",
+	      !strcmp(resp_of(&c, 2), "second"));
+	CHECK("responses: sidechain text is never the response",
+	      !strcmp(resp_of(&c, 3), "main says") && !xr_chapter_at(&c, 3)->tools);
+	CHECK("responses: thinking is never the response",
+	      !strcmp(resp_of(&c, 4), "shown"));
+	ok = strlen(resp_of(&c, 5)) == 2045 && xr_chapter_at(&c, 5)->response_cut &&
+	     !strncmp(resp_of(&c, 5), big, 2045);
+	CHECK("responses: cut at 2048 bytes on a character (2045), cut set", ok);
+	CHECK("responses: an uncut one has no cut", !xr_chapter_at(&c, 0)->response_cut);
+	CHECK("responses: diffstat from structuredPatch (+3 -2), else the input "
+	      "(+1 -3; an empty patch is no patch); a failed edit no file; Write "
+	      "from content; MultiEdit from each edit",
+	      !strcmp(tools_of(&c, 6), "Edit 3 (1 file, +4 -5), MultiEdit 2 "
+	              "(1 file, +4 -4), Write 1 (1 file, +3 -0)"));
+	CHECK("responses: the tool line: most used first, ties first used, 6 "
+	      "then +N more", !strcmp(tools_of(&c, 7), "R 3, G 2, L 2, H 1, I 1, "
+	                              "J 1, +2 more"));
+	CHECK("responses: a turn still running has none (its tools do)",
+	      !xr_chapter_at(&c, 8)->response && !xr_chapter_at(&c, 8)->responded &&
+	      !strcmp(tools_of(&c, 8), "Bash 1"));
+	xr_chapters_free(&c);
+
+	/* past XR_RESPONSES held, the oldest give theirs up, offset kept */
+	memset(big, 'r', 2000);
+	big[2000] = '\0';
+	snprintf(l, sizeof l, A("%s"), big);
+	begin();
+	for (k = 0; k < XR_RESPONSES / 2001 + 10; k++)
+	{
+		line(U("p"));
+		line(l);
+	}
+	end(&c);
+	CHECK("responses: past XR_RESPONSES the oldest give theirs up, their "
+	      "offset stays", c.n == XR_RESPONSES / 2001 + 10 &&
+	      c.resheld <= XR_RESPONSES && !xr_chapter_at(&c, 9)->response &&
+	      xr_chapter_at(&c, 9)->responded && xr_chapter_at(&c, 10)->response &&
+	      !strcmp(resp_of(&c, c.n - 1), big));
+	xr_chapters_free(&c);
+	begin();
+	for (k = 0; k < XR_RESPONSES / 2001 + XR_CHAPTERS; k++)
+	{
+		line(U("p"));
+		line(l);
+	}
+	end(&c);
+	CHECK("responses: the ring's drops give their room back",
+	      c.n == XR_CHAPTERS && c.resheld == (XR_RESPONSES / 2001) * 2001);
+	xr_chapters_free(&c);
+}
+
+/* the 4 MiB cap (#272): the oldest chapters' responses go first (offset and
+** tools stay), then refs, then chapters; a --follow line carries them */
+static void
+t_responses_cap(void)
+{
+	struct xr_index *ix = xr_index_new();
+	struct xr_sent *s = xr_sent_new();
+	struct xr_sink k;
+	struct xr_answer a;
+	struct xr_chapters c;
+	const struct xr_chapters *lc;
+	char l[1200], *b = NULL, *p;
+	size_t out0 = xr_lim.out, bl = 0, i, nr, nc, full;
+	FILE *f;
+
+	if (!ix || !s)
+		goto out;
+	memset(l, 0, sizeof l);
+	begin();
+	xr_index_sink(ix, &k);
+	xr_claude_refs(D, &k, 0xabc, NULL, NULL);
+	for (i = 0; i < 20; i++)
+	{
+		char t[1100];
+
+		snprintf(t, sizeof t, "{\"type\":\"user\",\"message\":{\"content\":"
+		         "\"see #%zu\"}}", i + 101);
+		line(t);
+		line(RTU("b", "Bash", "{}"));
+		line(RTR("b", ""));
+		memset(t, 'y', 1000);
+		t[1000] = '\0';
+		snprintf(l, sizeof l, A("%s"), t);
+		line(l);
+	}
+	end(&c);
+	memset(&a, 0, sizeof a);
+	a.session = a.session_id = "s";
+	a.corpus = "claude";
+	a.project = a.project_label = "";
+	a.available = a.complete = 1;
+	a.lines = -1;
+	a.ch = &c;
+	a.refs = ix;
+	if (!(f = open_memstream(&b, &bl)) || xr_print(f, &a) != 0 ||
+	    fclose(f) != 0)
+		goto out;
+	full = bl;
+	free(b);
+	b = NULL;
+	/* xr_print's slack (4096 + 6 x 2) on top: about 5 responses over */
+	xr_lim.out = full + 4108 - 5500;
+	if (!(f = open_memstream(&b, &bl)) || xr_print(f, &a) != 0 ||
+	    fclose(f) != 0)
+		goto out;
+	for (nr = 0, p = b; (p = strstr(p, "\"response\":")); p++)
+		nr++;
+	for (nc = 0, p = b; (p = strstr(p, "\"response_offset\":")); p++)
+		nc++;
+	CHECK("responses cap: the oldest responses go first, offsets and tools "
+	      "stay, every chapter and ref kept, why output",
+	      nr >= 13 && nr <= 16 && nc == 20 && bl <= xr_lim.out &&
+	      strstr(b, "\"i\":20,") && strstr(b, "\"key\":\"issue:#101\"") &&
+	      strstr(b, "\"dropped_keys\":0}") &&
+	      strstr(b, "\"complete\":false,\"why\":\"output\"") &&
+	      (p = strstr(b, "\"i\":1,")) && strstr(p, "\"tools\":\"Bash 1\"") &&
+	      strstr(p, "\"response_offset\":") < strstr(p, "\"response\":"));
+	free(b);
+	b = NULL;
+	xr_lim.out = full + 4108 - 21000;	/* every response and a ref */
+	if (!(f = open_memstream(&b, &bl)) || xr_print(f, &a) != 0 ||
+	    fclose(f) != 0)
+		goto out;
+	CHECK("responses cap: every response before the first ref",
+	      !strstr(b, "\"response\":") && strstr(b, "\"i\":1,") &&
+	      !strstr(b, "\"dropped_keys\":0}") && bl <= xr_lim.out);
+	free(b);
+	b = NULL;
+	xr_lim.out = out0;
+	xr_chapters_free(&c);
+
+	/* --follow: a running turn's chapter has none, its line once it ends */
+	begin();
+	line(U("deploy"));
+	line(A("starting"));
+	line(RTU("d", "Bash", "{}"));
+	lc = xr_claude_chapters(D);
+	a.ch = lc;
+	free(follow_cut_out(ix, s, &a, 1));
+	line(RTR("d", ""));
+	line(A("deployed"));
+	lc = xr_claude_chapters(D);
+	a.ch = lc;
+	b = follow_cut_out(ix, s, &a, 0);
+	CHECK("responses: --follow's chapter line carries the response once the "
+	      "turn ends", b && strstr(b, "{\"schema\":1,\"chapter\":") &&
+	      strstr(b, "\"response\":\"deployed\",\"response_offset\":") &&
+	      strstr(b, "\"tools\":\"Bash 1\"}}"));
+	end(&c);
+	xr_chapters_free(&c);
+out:
+	xr_lim.out = out0;
+	free(b);
+	xr_sent_free(s);
+	xr_index_free(ix);
+}
+
+/* Codex: the last assistant message after the last call or output; calls by
+** name, apply_patch's files and lines from its body */
+static void
+t_codex_responses(void)
+{
+	struct xr_chapters c;
+
+	begin();
+	xr_claude_codex(D);
+	line(CXI("{\"type\":\"message\",\"role\":\"user\",\"content\":["
+	         "{\"type\":\"input_text\",\"text\":\"patch it\"}]}"));
+	line(CXI("{\"type\":\"message\",\"role\":\"assistant\",\"content\":["
+	         "{\"type\":\"output_text\",\"text\":\"on it\"}]}"));
+	line(CXI("{\"type\":\"function_call\",\"name\":\"shell\",\"call_id\":"
+	         "\"c1\",\"arguments\":\"{\\\"command\\\":[\\\"apply_patch\\\","
+	         "\\\"*** Begin Patch\\\\n*** Update File: a.c\\\\n@@\\\\n-x\\\\n"
+	         "+y\\\\n+z\\\\n*** Add File: b.c\\\\n+1\\\\n+2\\\\n"
+	         "*** End Patch\\\\n\\\"]}\"}"));
+	line(CXI("{\"type\":\"function_call_output\",\"call_id\":\"c1\","
+	         "\"output\":\"Done\"}"));
+	line(CXI("{\"type\":\"custom_tool_call\",\"name\":\"apply_patch\","
+	         "\"call_id\":\"c2\",\"input\":\"*** Begin Patch\\n*** Delete "
+	         "File: c.c\\n*** Update File: a.c\\n-q\\n*** End Patch\"}"));
+	line(CXI("{\"type\":\"custom_tool_call_output\",\"call_id\":\"c2\","
+	         "\"output\":\"Done\"}"));
+	line(CXI("{\"type\":\"local_shell_call\",\"call_id\":\"c3\",\"action\":"
+	         "{\"type\":\"exec\",\"command\":[\"ls\"]}}"));
+	line(CXI("{\"type\":\"function_call\",\"name\":\"exec_command\","
+	         "\"call_id\":\"c4\",\"arguments\":\"{\\\"cmd\\\":\\\"ls\\\"}\"}"));
+	line(CXI("{\"type\":\"function_call_output\",\"call_id\":\"c4\","
+	         "\"output\":\"a.c\"}"));
+	line(CXI("{\"type\":\"message\",\"role\":\"assistant\",\"content\":["
+	         "{\"type\":\"output_text\",\"text\":\"all patched\"}]}"));
+	line(CXI("{\"type\":\"reasoning\",\"summary\":[]}"));
+	line(CXI("{\"type\":\"message\",\"role\":\"user\",\"content\":["
+	         "{\"type\":\"input_text\",\"text\":\"again\"}]}"));
+	line(CXI("{\"type\":\"message\",\"role\":\"assistant\",\"content\":["
+	         "{\"type\":\"output_text\",\"text\":\"running\"}]}"));
+	line(CXI("{\"type\":\"function_call\",\"name\":\"shell\",\"call_id\":"
+	         "\"c5\",\"arguments\":\"{}\"}"));
+	end(&c);
+	CHECK("codex responses: the last agent message after the last output "
+	      "(reasoning is none)", c.n == 2 && !strcmp(resp_of(&c, 0),
+	                                               "all patched"));
+	CHECK("codex responses: apply_patch from a shell call's command and a "
+	      "custom tool's input: files (add, update, delete) and +/- lines",
+	      c.n == 2 && !strcmp(tools_of(&c, 0), "apply_patch 2 (3 files, "
+	                          "+4 -2), local_shell 1, exec_command 1"));
+	CHECK("codex responses: a turn still running has none",
+	      c.n == 2 && !xr_chapter_at(&c, 1)->response &&
+	      !strcmp(tools_of(&c, 1), "shell 1"));
 	xr_chapters_free(&c);
 }
 
@@ -4728,6 +5064,8 @@ main(int argc, char **argv)
 	t_auto();
 	t_queued_list();
 	t_auto_cap();
+	t_responses();
+	t_responses_cap();
 	t_excl();
 	t_d3();
 	t_cancel();
@@ -4737,6 +5075,7 @@ main(int argc, char **argv)
 	t_chapter();
 	t_resolve();
 	t_codex();
+	t_codex_responses();
 	t_codex_chapter();
 	t_codex_lookup();
 	t_quote();

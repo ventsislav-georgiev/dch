@@ -575,7 +575,9 @@ def test_follow():
                                               "call_id": "c1",
                                               "output": "gh pr view 88"}))
             f.write(user(6, "next ask #44"))
-        ch = fl.wait(lambda o: "chapter" in o, frm=k)
+        # the late output re-sends chapter 1 first (its response is gone)
+        ch = fl.wait(lambda o: "chapter" in o and
+                     o["chapter"]["title"] == "next ask #44", frm=k)
         rf = fl.wait(lambda o: "ref" in o and o["ref"]["key"] == "issue:#44",
                      frm=k)
         check("follow: growth gives a chapter and a ref delta",

@@ -19,6 +19,8 @@
 #define XR_TITLE_MAX   120		/* scalars (3.2, ruling R3) */
 #define XR_CHAPTERS    5000		/* 13.2 item 6: the newest kept */
 #define XR_SUMMARIES   (256u << 10)	/* #192: summary bytes held (3.8) */
+#define XR_RESPONSE    2048		/* #296: a response's bytes */
+#define XR_RESPONSES   (2u << 20)	/* #296: response bytes held */
 #define XR_HEAD_RANGE  (16ull << 20)	/* 3.8 per-file range: head ... */
 #define XR_TAIL_RANGE  (256ull << 20)	/* ... plus the newest 256 MB */
 #define XR_CHUNK       (1u << 20)	/* read size (QA 1.44 LOW-8: 4 MiB
@@ -59,6 +61,14 @@ struct xr_chapter
 	char *summary;			/* its <summary>, else <event>: "" for none
 					** (never NULL from the engine); held out of
 					** line so the ring costs no more (3.8) */
+	/* #296, Claude Code's Focus view: the turn's last assistant text
+	** after its last tool result, at most XR_RESPONSE bytes (cut: cut on
+	** a character), from the record at response_offset; NULL while the
+	** turn runs, or given up past XR_RESPONSES held (responded stays) */
+	char *response;
+	uint64_t response_offset;
+	int responded, response_cut;
+	char *tools;			/* the turn's tool line, or NULL */
 };
 
 /* The newest XR_CHAPTERS, oldest first from `start` (a ring). `total`
@@ -71,6 +81,8 @@ struct xr_chapters
 	size_t sumheld;			/* summary bytes held, <= XR_SUMMARIES:
 					** past it the oldest give theirs up */
 	uint64_t sumord;		/* no chapter before this ord has one */
+	size_t resheld;			/* response bytes held, <= XR_RESPONSES */
+	uint64_t resord;		/* no chapter before this ord holds one */
 };
 void xr_chapters_free(struct xr_chapters *c);
 const struct xr_chapter *xr_chapter_at(const struct xr_chapters *c,

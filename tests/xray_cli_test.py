@@ -2579,6 +2579,101 @@ def test_auto():
         os.unlink(tp)
 
 
+def test_responses():
+    """#296: each chapter's response (the last assistant text after the
+    last tool result) with its record's offset and the tool line, in --json
+    and --follow's snapshot; none while the turn runs. Past 4 MiB the
+    oldest chapters' responses go first: their offset and tools stay,
+    every chapter and ref with them."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, RSID + ".jsonl")
+    lines = [
+        {"type": "user", "cwd": "/home/demo/proj",
+         "message": {"content": "fix #4242"}},
+        {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "Looking."},
+            {"type": "tool_use", "id": "e1", "name": "Edit", "input": {
+                "file_path": "/home/demo/proj/a.c", "old_string": "a",
+                "new_string": "b"}}]}},
+        {"type": "user", "toolUseResult": {"structuredPatch": [
+            {"lines": ["-a", "+b", "+c"]}]}, "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "e1",
+                 "content": "ok"}]}},
+        {"type": "assistant", "message": {"content": [
+            {"type": "thinking", "thinking": "done?"},
+            {"type": "text", "text": "Fixed #4242 in a.c."}]}},
+        {"type": "user", "message": {"content": "deploy it"}},
+        {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "Deploying."},
+            {"type": "tool_use", "id": "b1", "name": "Bash",
+             "input": {"command": "make deploy"}}]}}]
+    raw = "".join(json.dumps(o) + "\n" for o in lines)
+    with open(tp, "w") as f:
+        f.write(raw)
+    history("xr-resp", RSID, cfg)
+    try:
+        rc, o, err = xray("xr-resp", "--json")
+        ch = (o or {}).get("chapters", [])
+        off = len("".join(json.dumps(x) + "\n" for x in lines[:3]).encode())
+        check("responses: --json carries the response, its offset and the "
+              "tool line; a running turn its tools only",
+              rc == 0 and len(ch) == 2 and
+              ch[0].get("response") == "Fixed #4242 in a.c." and
+              ch[0].get("response_offset") == off and
+              "response_cut" not in ch[0] and
+              ch[0].get("tools") == "Edit 1 (1 file, +2 -1)" and
+              "response" not in ch[1] and "response_offset" not in ch[1] and
+              ch[1].get("tools") == "Bash 1", (rc, ch, err))
+        r = dch("--xray", "xr-resp", "--follow", "--json")
+        ls = ref_lines(r.stdout) or []
+        check("responses: --follow's snapshot carries the same",
+              r.returncode == 0 and len(ls) == 1 and
+              ls[0] == {"schema": 1, "snapshot": o},
+              (r.returncode, r.stdout[-400:], r.stderr))
+        # 600 responses of 2000 bytes that JSON writes 6 bytes each
+        with open(tp, "w") as f:
+            for i in range(600):
+                for x in ({"type": "user", "cwd": "/home/demo/proj",
+                           "message": {"content": "turn %d #4242" % i}},
+                          {"type": "assistant", "message": {"content": [
+                              {"type": "tool_use", "id": "r%d" % i,
+                               "name": "Read", "input": {}}]}},
+                          {"type": "user", "message": {"content": [
+                              {"type": "tool_result", "tool_use_id":
+                               "r%d" % i, "content": "ok"}]}},
+                          {"type": "assistant", "message": {"content": [
+                              {"type": "text", "text": "\x01" * 2000}]}}):
+                    f.write(json.dumps(x) + "\n")
+        r = dch("--xray", "xr-resp", "--json")
+        try:
+            o = json.loads(r.stdout)
+        except ValueError:
+            o = {}
+        ch = o.get("chapters", [])
+        has = [("response" in c) for c in ch]
+        k = has.index(True) if True in has else len(has)
+        check("responses: past 4 MiB the oldest responses go first, their "
+              "offset and tools stay; every chapter and the ref kept "
+              "(%d of 600 kept, %d bytes)" % (len(ch) - k, len(r.stdout)),
+              r.returncode == 0 and len(r.stdout.encode()) <= 4 << 20 and
+              o["complete"] is False and o["why"] == "output" and
+              len(ch) == 600 and 0 < k < 600 and all(has[k:]) and
+              all("response_offset" in c and c.get("tools") == "Read 1"
+                  for c in ch) and
+              [x["key"] for x in o["refs"]] == ["issue:#4242"] and
+              o["dropped_keys"] == 0,
+              (r.returncode, len(r.stdout), k, r.stderr))
+        f = dch("--xray", "xr-resp", "--follow", "--json")
+        ls = ref_lines(f.stdout) or []
+        check("responses: a capped --follow snapshot is the --json",
+              f.returncode == 0 and len(ls) == 1 and
+              ls[0] == {"schema": 1, "snapshot": o}, f.returncode)
+    finally:
+        os.unlink(tp)
+
+
 def test_follow_history():
     cfg = os.path.join(HOME, ".claude")
     pdir = os.path.join(cfg, "projects", "-home-demo-proj")
@@ -3442,6 +3537,7 @@ def main():
         test_shell_caps()
         test_follow_history()
         test_auto()
+        test_responses()
         test_follow_claude()
         test_follow_late()
         test_follow_cap()

@@ -1265,6 +1265,17 @@ The corpus:
     there is neither. The `title` stays as it was. Any other chapter has
     neither key. At most 256 KiB of summaries is held at a time: past that,
     the oldest auto chapters give theirs up (they keep `auto`).
+  - `response`, `response_offset` and `tools` are what Claude Code's Focus
+    view shows of a turn, on a Claude Code or Codex chapter. `response` is
+    the turn's last assistant text after its last tool result (thinking and
+    subagent text never), at most 2048 bytes; a cut one adds
+    `response_cut` (`true`). `response_offset` is the byte offset of the
+    line that holds it. A turn still running has neither; its `tools` is
+    there. `tools` is one line: the calls per tool, most used first, six
+    names then `+N more`; an edit tool (Edit, MultiEdit and Write; Codex's
+    apply_patch) adds its files and lines, as `Edit 3 (2 files, +40 -12),
+    Bash 5`. At most 2 MiB of responses is held: past that, the oldest
+    chapters give theirs up (they keep `response_offset`).
 - **`refs`.** The refs the corpus mentions (see [Refs](#refs)), at most 2000
   keys, each kind in a room of its own: 300 tickets, 400 issues, 500 pull
   requests, 250 commits, 350 files and 200 URLs, so files, commits and URLs
@@ -1275,9 +1286,10 @@ The corpus:
   to 32768 distinct keys and as a lower bound past that. `[]` for corpus
   `none`. Before 1.62.0 the first 2000 keys seen stayed and every later one
   was dropped.
-- **Size.** The object is capped at 4 MiB: past that, `refs` go first, from
-  the end of the list, each counted in `dropped_keys`; then the oldest
-  chapters go. `why` is `"output"`.
+- **Size.** The object is capped at 4 MiB: past that, the oldest chapters'
+  `response` texts go first (`response_offset` and `tools` stay); then
+  `refs`, from the end of the list, each counted in `dropped_keys`; then the
+  oldest chapters go. `why` is `"output"`.
 
 `dch --xray <n> --clear --json` empties a live shell session's ring through
 the master's control socket. Nothing is typed into the session. It prints
