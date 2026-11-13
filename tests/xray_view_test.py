@@ -26,14 +26,17 @@ Covers:
   7. SIGTERM and SIGINT: the terminal is restored and the view's children
      are gone;
   8. On screen on a live shell: the ref printed in two blocks (underline)
-     gets hint label `a`, typing it opens its card (full build); on dch-lite
+     gets hint label `a`, typing it opens its card, one printed once (not
+     underlined) gets a hint too (#262) (full build); on dch-lite
      the label line says X-ray needs the full build;
   9. the picker: the x hint is shown, x on a session row opens the view, q
      returns to the picker; X asks to kill and never opens the view (OQ-6);
  10. the Refs tab (#193): a file under the project shown relative to it,
      one under HOME from ~, one too long cut at the front (its tail kept,
      a wide-character one within the width), a long URL keeping its host
-     and its end; rows by count then the most recent first; files under
+     and its end; rows by latest mention (#262), then count, then the most
+     recent first; pulls, issues and tickets only until a shows files,
+     commits and URLs, the footer counting them; files under
      /tmp, /private/tmp, /var/folders and $TMPDIR hidden, t toggling them,
      the footer saying how many, the tab count the engine's; the filter
      matching the full key (and taking t as text), Enter opening the full
@@ -311,9 +314,14 @@ def test_view():
         check("mutant 11: the chapter title's OSC, BEL, U+202E and U+061C "
               "show as ?", v.wait(b"o/r#7 ?]0;pwned? evil?title al?m"),
               v.out[-600:])
-        v.key(b"\t")
-        check("Refs: the keys by count", v.wait(b"#831") and
-              v.wait(b"PROJ-5") and v.wait(b"o/r#7"), v.out[-600:])
+        mark = len(v.out)
+        v.key(b"\t", 1.0)
+        scr = rows(v.out[mark:])
+        text = "\n".join(scr[k] for k in sorted(scr))
+        at = [text.find(x) for x in ("PROJ-5", "#831", "o/r#7")]
+        check("Refs: the latest mentioned first (#262)",
+              -1 not in at and at == sorted(at), (at, text))
+        v.key(b"\033[B", 0.3)
         mark = len(v.out)
         v.key(b"\r", 1.0)
         check("card: #831 opens light with its definition and counts",
@@ -451,11 +459,22 @@ def test_refs():
         text = "\n".join(scr[k] for k in sorted(scr))
         check("Refs: the tab count stays the engine's total (13)",
               "Refs 13" in text, text)
+        check("Refs #262: opens on pulls, issues and tickets only; the "
+              "footer names a and counts the other kinds",
+              "o/r#7" in text and "alpha_handler" not in text and
+              "example.com" not in text and
+              "a files, commits, URLs 12 hidden" in text, text)
+        mark = len(v.out)
+        v.key(b"a", 1.0)
+        scr = rows(v.out[mark:])
+        text = "\n".join(scr[k] for k in sorted(scr))
         check("Refs: one faint line says what a ref is and that Enter "
-              "opens its card", re.search("Files, commits, pull requests, "
-                                          "issues and URLs this session "
-                                          "touched; (\u21b5|enter) opens a "
-                                          "card", text), text)
+              "opens its card", re.search("Every ref this session touched, "
+                                          "latest first; (\u21b5|enter) "
+                                          "opens a card", text), text)
+        check("Refs #262: a shows the other kinds, the footer says a hides "
+              "them", "alpha_handler" in text and
+              "a hide files, commits, URLs" in text, text)
         check("Refs: a file under the project shows relative to it",
               "file    src/very/deep/module/alpha_handler.c" in text and
               "file    src/main.c" in text and P + "/src" not in text, text)
@@ -469,8 +488,8 @@ def test_refs():
                  "example.com", "~/notes/todo.md", "zeta_handler.c",
                  "beta_handler.c"]
         at = [text.find(x) for x in order]
-        check("Refs: by count, then the most recent first (later in the "
-              "snapshot)", -1 not in at and at == sorted(at), (at, text))
+        check("Refs: one line, so one latest mention: by count, then the most "
+              "recent first (later in the snapshot)", -1 not in at and at == sorted(at), (at, text))
         tmp = ["/tmp/scratch-one.txt", "/private/tmp/demo-502/tasks/out.log",
                "/var/folders/xx/abc/T/t.1", "/home/demo/tmpx/note.txt",
                "~/tmpx/note.txt"]
@@ -553,6 +572,73 @@ def test_refs():
         v.close()
 
 
+# ---- Refs: the latest mentioned first, the other kinds behind a (#262) ------
+
+LSID = "11111111-2222-4333-8444-5555555555f4"
+
+
+def fixture_latest():
+    """o/r#1 said three times first, then PROJ-9, then #77 and a commit and a
+    file last: the latest mentioned on top, not the most counted."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    said = ["o/r#1 and o/r#1 and o/r#1 in %s/old.c" % P, "now PROJ-9",
+            "last #77, commit deadbeef1 in %s/new.c" % P]
+    lines = [{"type": "user", "cwd": P, "timestamp": "2026-11-10T10:00:00Z",
+              "message": {"content": "the latest fixture"}}]
+    lines += [{"type": "assistant", "message": {"content": [
+        {"type": "text", "text": t}]}} for t in said]
+    with open(os.path.join(pdir, LSID + ".jsonl"), "w") as f:
+        for o in lines:
+            f.write(json.dumps(o) + "\n")
+    sockdir = os.path.join(T, "dch-%d" % os.getuid())
+    hdir = os.path.join(T, "state", "dch", "sessions",
+                        sockdir.replace("/", "-"))
+    rec = {"name": "xv-lt", "cwd": P, "end": "exited", "argv": ["claude"],
+           "started": 1794299400, "updated": 1794300000,
+           "ended": 1794300000, "sock_dir": sockdir,
+           "agent": {"session_id": LSID, "cwd": P, "config_dir": cfg}}
+    with open(os.path.join(hdir, "xv-lt.json"), "w") as f:
+        f.write(json.dumps(rec) + "\n")
+
+
+def test_latest():
+    v = Pty([DCH, "--xray", "xv-lt"], env=RENV)
+    try:
+        v.wait(b"Chapters 1")
+        v.pump(0.5)
+        mark = len(v.out)
+        v.key(b"\t", 1.0)
+        scr = rows(v.out[mark:])
+        text = "\n".join(scr[k] for k in sorted(scr))
+        at = [text.find(x) for x in ("#77", "PROJ-9", "o/r#1")]
+        check("Refs #262: the latest mentioned on top, not the most counted",
+              -1 not in at and at == sorted(at), (at, text))
+        check("Refs #262: commits and files hidden, the footer counts them",
+              "deadbee" not in text and "old.c" not in text and
+              "a files, commits, URLs 3 hidden" in text, text)
+        mark = len(v.out)
+        v.key(b"a", 1.0)
+        scr = rows(v.out[mark:])
+        text = "\n".join(scr[k] for k in sorted(scr))
+        at = [text.find(x) for x in ("new.c", "PROJ-9", "old.c")]
+        check("Refs #262: a shows them, in the same latest-first order",
+              "deadbee" in text and -1 not in at and at == sorted(at),
+              (at, text))
+        mark = len(v.out)
+        v.key(b"a", 1.0)
+        scr = rows(v.out[mark:])
+        text = "\n".join(scr[k] for k in sorted(scr))
+        check("Refs #262: a again hides them",
+              "deadbee" not in text and
+              "a files, commits, URLs 3 hidden" in text, text)
+        v.key(b"q")
+        check("Refs #262: q exits 0", v.exit() == 0, v.out[-80:])
+    finally:
+        v.close()
+
+
 # ---- Refs: a project under $TMPDIR, a URL's host (#220) ---------------------
 
 TPD = os.path.join(T, "tmpd")      # the view's $TMPDIR
@@ -610,6 +696,8 @@ def refs_tab(name):
     v.pump(0.5)
     mark = len(v.out)
     v.key(b"\t", 1.0)
+    mark = len(v.out)
+    v.key(b"a", 1.0)  # files and URLs too (#262)
     scr = rows(v.out[mark:])
     return v, scr, "\n".join(scr[k] for k in sorted(scr))
 
@@ -1171,6 +1259,9 @@ def shell():
         time.sleep(0.4)
         dch("--send", "xv-sh", "echo 'see o/r#41'\n")
         until(lambda: ran(n), 20)
+    time.sleep(0.4)
+    # printed once (the command line holds none): not underlined (#262)
+    dch("--send", "xv-sh", "printf 'once o/r#%d\\n' 77\n")
     time.sleep(0.5)
 
 
@@ -1216,9 +1307,15 @@ def test_on_screen():
                   u and u[0]["underline"], o["refs"])
             mark = len(v.out)
             v.key(b"\t\t", 1.5)
+            u = [x for x in o["refs"] if x["key"] == "pull:o/r#77"]
+            check("shell: o/r#77, printed once, is not underlined",
+                  u and not u[0]["underline"], o["refs"])
             check("On screen: o/r#41 gets hint a",
-                  v.wait(b"On screen 1", start=mark) and
+                  v.wait(b"On screen 2", start=mark) and
                   v.wait(b"o/r#41", start=mark), v.out[mark:])
+            check("On screen #262: a ref not underlined gets a hint too",
+                  re.search(rb"once \[.\]o/r#77", v.out[mark:]),
+                  v.out[mark:])
             mark = len(v.out)
             v.key(b"a", 1.0)
             check("On screen: typing a opens the card of o/r#41",
@@ -1630,6 +1727,8 @@ def main():
         test_view()
         fixture_refs()
         test_refs()
+        fixture_latest()
+        test_latest()
         fixture_tmp()
         test_tmp()
         fixture_auto()

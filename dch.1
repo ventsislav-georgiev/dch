@@ -803,8 +803,13 @@ here and in a chapter leaves the view and attaches to the session, as
 .B \-a
 does, a remote one's too; on an ended session it says so and stays),
 .B Refs
-(the files, commits, pull requests, issues and URLs the session touched,
-a faint line over them saying so; by count, then the most recent first;
+(the pull requests, issues and tickets the session touched, a faint line
+over them saying so;
+.B a
+shows its files, commits and URLs too, the footer saying how many are
+hidden; by latest mention, the one mentioned last on top, then by count,
+then the most recent first (a host before 1.62.0 sends no latest mention:
+by count);
 a ref with a definition or two or more mentions is bold;
 a file under the session's directory shows relative to it, else one under
 HOME from
@@ -819,8 +824,9 @@ files under /tmp, /private/tmp, /var/folders and
 shows them, the footer saying how many; the tab counts every ref;
 \fB/\fR filters on the full ref, \fBEnter\fR opens its card) and
 .B On screen
-(the session's screen with a hint label, \fBa\fR, \fBs\fR, \fBd\fR, ...,
-on each bold ref; typing a label opens its card; none for an ended
+(the session's screen with a hint label,
+\fBa\fR, \fBs\fR, \fBd\fR, ..., on each ref on it, held by the index
+or not; typing a label opens its card; none for an ended
 session or on dch\-lite; its tab shows the labels' count once the screen
 is read, 0 included, and no number before or without one).
 A card shows the ref's definitions, first and latest mention, counts by

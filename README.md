@@ -898,11 +898,14 @@ The view has three tabs:
   say it is not theirs). On an ended session `o` says so and the view
   stays. The attach opens at the session's live screen, not at the
   chapter.
-- **Refs**: what the session touched: the files, commits, pull requests,
-  issues and URLs it mentions, one row each, a faint line over them saying
-  so. Rows are by count, highest first, then the most recent first (later in
-  the index; a ref seen again while the view is open moves up its count's
-  rows). A ref with a definition or two or more mentions is bold. A file
+- **Refs**: what the session touched: the pull requests, issues and tickets
+  it mentions, one row each, a faint line over them saying so; `a` shows its
+  files, commits and URLs too, and the footer says how many are hidden. Rows
+  are by latest mention, the one mentioned last on top, as Kindle's X-ray
+  does; then by count, highest first; then the most recent first (later in
+  the index; a ref seen again while the view is open moves up). A host older
+  than 1.62.0 sends no latest mention: its rows are by count, and the faint
+  line does not say "latest first". A ref with a definition or two or more mentions is bold. A file
   under the session's directory (top right) shows relative to it, else one
   under your home starts with `~`. A path too long for the row keeps its
   end, the `…` in front; a long URL drops its `https://` and always starts
@@ -911,10 +914,12 @@ The view has three tabs:
   `/tmp`, `/private/tmp`, `/var/folders` and `$TMPDIR` (a remote view: not
   `$TMPDIR`, which is this machine's) are scratch, except the session's own
   project files: hidden until `t` shows them, and the footer says how many
-  are hidden. The tab's count is every ref, hidden ones included. `/` filters on
+  are hidden (`t` counts them once `a` shows files). The tab's count is
+  every ref, hidden ones included. `/` filters on
   the full ref. `Enter` opens its card.
 - **On screen**: the session's screen as it is now, with a hint label (`a`,
-  `s`, `d`, …) on each ref the Refs tab shows bold. Typing a label opens that
+  `s`, `d`, …) on each ref on it, one the index does not hold or mentioned
+  once included (before 1.62.0: only the refs the Refs tab shows bold). Typing a label opens that
   ref's card. The tab's count is the labels on the screen, shown once the
   screen has been read (0 included); before that, and when there is no
   screen, no number. An ended session and dch-lite have no screen to show.
@@ -942,6 +947,7 @@ not clear X-ray; run `clear`".
 | `↑` `↓` / `j` `k`, `PgUp` `PgDn`, `g` `G` | move | move / scroll |
 | `Enter` | read the chapter / open the card | card: read the mention's chapter |
 | `/` | filter | |
+| `a` | Refs: show / hide the files, commits and URLs (on On screen `a` is a label) | |
 | `t` | Refs: show / hide the temp files | |
 | `n` | Chapters: show / hide the auto rows (auto chapters, the task notifications, and compactions) | |
 | `o` | Chapters: attach to the session (in the chord: back to it) | card, reader: the same |

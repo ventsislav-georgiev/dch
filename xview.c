@@ -64,6 +64,7 @@ struct xv_ref
 {
 	char *key, *shape, *text, *title;
 	long long count, seen;	/* seen: later is more recent */
+	long long last;		/* last_offset (#262): -1 from an older host */
 	int defined, underline;
 };
 
@@ -117,6 +118,8 @@ struct xv
 	struct xv_ref *rf;
 	int nch, ach, nrf, arf;
 	int alltmp, ntmp;	/* Refs: temp files shown; their rows */
+	int allk, nk;		/* Refs: files, commits and URLs shown; their
+				** rows (#262) */
 	int allauto, nauto;	/* Chapters: auto chapters shown; their rows */
 	long long rseq;
 	struct xv_kid kid[XV_NKIDS];
@@ -611,6 +614,7 @@ xv_ref(struct xv *v, const struct json_parser *p, int o)
 	r.text = xv_str(p, o, "text");
 	r.title = xv_str(p, o, "title");
 	r.count = xv_num(p, o, "count", 0);
+	r.last = xv_num(p, o, "last_offset", -1);
 	r.defined = xv_bool(p, o, "defined");
 	r.underline = xv_bool(p, o, "underline");
 	/* no recency in a ref line: its arrival (a snapshot's rows in their
@@ -802,6 +806,26 @@ xv_cline(struct xv *v, const struct json_parser *p)
 		}
 		m.line = xv_str(p, o, "line");
 		m.chapter = xv_str(p, o, "chapter");
+		/* light reads newest first, a window at a time (#262): a line
+		** before its window's first prompt has no chapter; this
+		** session's is the last one that starts before it */
+		if (!m.chapter[0] && v->session && !strcmp(m.session, v->session))
+		{
+			long long off = xv_num(p, o, "offset", -1);
+			int c, best = -1;
+			char *t;
+
+			for (c = 0; c < v->nch; c++)
+				if (v->ch[c].offset >= 0 &&
+				    v->ch[c].offset <= off && (best < 0 ||
+				    v->ch[c].offset > v->ch[best].offset))
+					best = c;
+			if (best >= 0 && (t = strdup(v->ch[best].anchor)))
+			{
+				xv_sfree(m.chapter);
+				m.chapter = t;
+			}
+		}
 		m.at = xv_num(p, o, "at", -1);
 		v->m[v->nm++] = m;
 	}
@@ -1041,19 +1065,16 @@ struct xv_scan
 	int row;
 };
 
-/* A span on the screen: a hint when the index underlines its key (K6). */
+/* A span on the screen: a hint, every one (#262: the index may not hold
+** its key, nor underline a ref of the last turns). */
 static int
 xv_span(void *ctx, const struct xr_span *sp)
 {
 	struct xv_scan *c = ctx;
 	struct xv *v = c->v;
 	struct xv_hint h;
-	int k;
 
-	for (k = 0; k < v->nrf && strcmp(v->rf[k].key, sp->key); k++)
-		;
-	if (k == v->nrf || !v->rf[k].underline ||
-	    xv_grow(&v->h, &v->ah, v->nh, sizeof h) < 0)
+	if (xv_grow(&v->h, &v->ah, v->nh, sizeof h) < 0)
 		return 0;
 	memset(&h, 0, sizeof h);
 	h.row = c->row;
@@ -1325,13 +1346,16 @@ xv_temp(const struct xv *v, const struct xv_ref *r)
 
 static const struct xv_ref *xv_sort_rf;
 
-/* Refs: the highest count first, then the most recently seen. */
+/* Refs: the latest mentioned first (#262; an older host sends no
+** last_offset), then the highest count, then the most recently seen. */
 static int
 xv_ref_cmp(const void *pa, const void *pb)
 {
 	const struct xv_ref *a = &xv_sort_rf[*(const int *)pa];
 	const struct xv_ref *b = &xv_sort_rf[*(const int *)pb];
 
+	if (a->last != b->last)
+		return a->last > b->last ? -1 : 1;
 	if (a->count != b->count)
 		return a->count > b->count ? -1 : 1;
 	return a->seen < b->seen ? 1 : a->seen > b->seen ? -1 : 0;
@@ -1351,7 +1375,7 @@ xv_vis(struct xv *v)
 {
 	int k, n = v->tab == 0 ? v->nch : v->nrf;
 
-	v->nvis = v->ntmp = v->nauto = 0;
+	v->nvis = v->ntmp = v->nauto = v->nk = 0;
 	for (k = 0; k < n; k++)
 	{
 		if (v->filt[0] &&
@@ -1359,6 +1383,11 @@ xv_vis(struct xv *v)
 		      xv_has(v->ch[k].summary, v->filt)
 		      : xv_has(v->rf[k].text, v->filt) ||
 		      xv_has(v->rf[k].title, v->filt)))
+			continue;
+		/* Refs opens on pulls, issues and tickets; a shows the rest */
+		if (v->tab == 1 && strcmp(v->rf[k].shape, "pull") &&
+		    strcmp(v->rf[k].shape, "issue") &&
+		    strcmp(v->rf[k].shape, "ticket") && (v->nk++, !v->allk))
 			continue;
 		if (v->tab == 1 && xv_temp(v, &v->rf[k]) && (v->ntmp++, !v->alltmp))
 			continue;
@@ -1763,7 +1792,7 @@ xv_draw(struct xv *v, int force)
 		"\xe2\xa0\x87\xe2\xa0\x8f", ascii[] = "|/-\\";
 	struct pkkey keys[12];
 	const char *ret = pk_utf ? "\xe2\x86\xb5" : "enter";
-	char b[1200], tmp[32];
+	char b[1200], tmp[32], kt[32];
 	int nk = 0, kl, cap, k, n, busy;
 	unsigned drop;
 
@@ -1817,7 +1846,15 @@ xv_draw(struct xv *v, int force)
 					? "hide auto rows" : "auto rows",
 					v->allauto ? NULL : tmp, 2, 0 };
 			}
-			if (v->tab == 1 && (xv_vis(v), v->ntmp))
+			if (v->tab == 1 && (xv_vis(v), v->nk))
+			{
+				snprintf(kt, sizeof kt, "%d hidden", v->nk);
+				keys[nk++] = (struct pkkey){ "a", v->allk
+					? "hide files, commits, URLs"
+					: "files, commits, URLs",
+					v->allk ? NULL : kt, 2, 0 };
+			}
+			if (v->tab == 1 && v->ntmp)
 			{
 				snprintf(tmp, sizeof tmp, "%d hidden", v->ntmp);
 				keys[nk++] = (struct pkkey){ "t", v->alltmp
@@ -1932,8 +1969,10 @@ xv_draw(struct xv *v, int force)
 		{
 			pk_line();
 			pk_set("2");
-			snprintf(b, sizeof b, "  Files, commits, pull requests, issues "
-			         "and URLs this session touched; %s opens a card", ret);
+			snprintf(b, sizeof b, "  %s this session touched%s; %s opens a "
+			         "card", v->allk ? "Every ref" : "Pull requests, issues "
+			         "and tickets", v->nrf && v->rf[0].last >= 0 ?
+			         ", latest first" : "", ret);
 			pk_txt(b);
 			pk_eol();
 			win--;
@@ -1949,7 +1988,9 @@ xv_draw(struct xv *v, int force)
 			else if (k == 0)
 			{
 				pk_set("2");
-				pk_txt(!v->have ? "    Reading" : v->tab == 1 && v->ntmp &&
+				pk_txt(!v->have ? "    Reading" : v->tab == 1 && v->nk &&
+				       !v->allk ? "    Only files, commits and URLs: a "
+				       "shows them" : v->tab == 1 && v->ntmp &&
 				       !v->alltmp ? "    Only temp files: t shows them"
 				       : v->tab == 0 && v->nauto && !v->allauto
 				       ? "    Only auto rows: n shows them"
@@ -2273,6 +2314,11 @@ xv_key(struct xv *v, int c)
 	if (v->tab == 1 && c == 't')
 	{
 		v->alltmp = !v->alltmp;
+		return 0;
+	}
+	if (v->tab == 1 && c == 'a')
+	{
+		v->allk = !v->allk;
 		return 0;
 	}
 	if (v->tab == 0 && c == 'n')

@@ -339,6 +339,7 @@ def test_view():
         v.key(b"\t")
         check("Refs: the host's keys", v.wait(b"#831") and
               v.wait(b"PROJ-5") and v.wait(b"o/r#7"), v.out[-600:])
+        v.key(b"\033[B", 0.3)  # #831: PROJ-5, said last, is on top (#262)
         mark = len(v.out)
         v.key(b"\r", 1.0)
         check("card: #831 opens light with its definition and counts",
@@ -583,7 +584,14 @@ def test_hostile():
         check("hostile: the snapshot's ESC, BEL, C1 and bidi bytes show as ?",
               v.wait(b"t?]0;pwned? a?b c?d e?f"), v.out[-600:])
         mark = len(v.out)
-        v.key(b"\t\t", 2.0)
+        v.key(b"\t", 1.0)
+        check("hostile, an older host (no last_offset, #262): Refs lists "
+              "its pull by count, the faint line claims no latest-first order",
+              v.wait(b"o/r#41", start=mark) and
+              v.wait(b"issues and tickets this session touched;", start=mark),
+              v.out[mark:])
+        mark = len(v.out)
+        v.key(b"\t", 2.0)
         check("hostile: On screen draws the host's screen, its OSC and CSI "
               "dropped, CSI 5 C as five blanks, BEL, C1 and bidi as ?",
               v.wait(b"$ echo hi", start=mark) and
