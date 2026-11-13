@@ -1228,7 +1228,7 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 		"\xe2\xa0\xb4\xe2\xa0\xa6\xe2\xa0\xa7\xe2\xa0\x87\xe2\xa0\x8f" };
 	static const char *const tabn[3] = { "Sessions", "Sidekicks", "History" };
 	struct pkkey keys[24];
-	char b[96];
+	char b[96], go[16];
 	const char *ret;
 	int nk = 0, k, t, rows, kl, cap, tabs = 0, pos, ri;
 	/* the rows drawn: the kept ones (pk_pos), or the settings */
@@ -1251,6 +1251,10 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 	cur = !p->settings && *sel < p->n[p->tab] ? &p->r[p->tab][*sel] : NULL;
 #endif
 	ret = pk_utf ? "\xe2\x86\xb5" : "enter";
+	/* what Enter does to a live row: attach, or the verb of the -k and
+	** -d pickers, the first word of their header ("kill session:") */
+	snprintf(go, sizeof go, "%s", p->opens ? "attach" : header);
+	go[strcspn(go, " ")] = '\0';
 	for (t = 0; t < 3; t++)
 		tabs += pk_shown(p, t);
 
@@ -1260,7 +1264,7 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 	(keys[nk++] = (struct pkkey){ (k), (l), (v), (g), (x) })
 	if (p->filtering)
 	{
-		PK_K(0, ret, p->tab == 2 ? "resume" : "attach", NULL, 0);
+		PK_K(0, ret, p->tab == 2 ? "resume" : go, NULL, 0);
 		PK_K(3, pk_utf ? "\xe2\x86\x91\xe2\x86\x93" : "up/down", "keep",
 		     NULL, 0);
 		PK_K(3, "esc", "clear", NULL, 0);
@@ -1277,7 +1281,7 @@ pk_draw(struct pk *p, int fd, const char *header, int force)
 #else
 	else if (p->tab < 2)
 	{
-		PK_K(0, ret, "attach", NULL, 0);
+		PK_K(0, ret, go, NULL, 0);
 		PK_K(0, "r", "rename", NULL, 0);
 		PK_K(0, "X", "kill", NULL, 1);
 		PK_K(0, "x", "x-ray", NULL, 0);

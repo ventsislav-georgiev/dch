@@ -42,7 +42,9 @@ and --keys types into it. Covers:
  14. a name starting with '-' (#162), as an older dch made it: on a live
      row X kills (`-k -- <name>`) and r says what works; on a History row
      p pins and unpins, d removes (`--` before the name), Enter says it is
-     not resumed.
+     not resumed;
+ 15. the -k and -d pickers' hints name what Enter does there, kill or
+     detach, never attach (QA 1.59.0 LOW-V8), the filter's too.
 
 Run:  python3 tests/picker_test.py            (uses ./dch)
       DCH=/path/to/dch python3 tests/picker_test.py
@@ -405,6 +407,25 @@ def zerowidth():
               col, rl)
     dch("--keys", "pk10", "q")
     wait_live("pk10", False)
+
+
+def verbs():
+    """15. dch -k and dch -d with no name: Enter kills or detaches the
+    row, and the hints say so (QA 1.59.0 LOW-V8)."""
+    for pk, flag, verb in (("pk11", "-k", "kill"), ("pk12", "-d", "detach")):
+        dch("--spawn", pk, "--size", "200x30", "env", "NO_COLOR=1",
+            "TERM=xterm-256color", DCH, flag)
+        s = wait_screen(pk, lambda s: "q quit" in s)
+        dch("--keys", pk, "/")
+        f = wait_screen(pk, lambda s: "esc clear" in s)
+        k, fk = " ".join(footer(s)), " ".join(footer(f))
+        check("dch %s: the hints say \u21b5 %s, not attach, the filter's "
+              "too" % (flag, verb), "\u21b5 %s " % verb in k and "\u21b5 %s "
+              % verb in fk and "attach" not in k + fk, k, fk)
+        dch("--keys", pk, "esc")
+        wait_screen(pk, lambda s: "q quit" in s)
+        dch("--keys", pk, "q")
+        wait_live(pk, False)
 
 
 def main():
@@ -826,6 +847,7 @@ def main():
     kitty()
     dashname()
     zerowidth()
+    verbs()
     return 1 if failures else 0
 
 
@@ -834,7 +856,7 @@ if __name__ == "__main__":
         rc = main()
     finally:
         for n in ("pk1", "pk2", "pk3", "pk4", "pk5", "pk6", "pk7", "pk8",
-                  "pk9", "pk10", "s2", "s10", "zwbom", "zwj",
+                  "pk9", "pk10", "pk11", "pk12", "s2", "s10", "zwbom", "zwj",
                   "helper-qa", "a4k-2", "perm", "form", "zkbd"):
             dch("-k", n)
         for pr in procs:
