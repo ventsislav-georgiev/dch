@@ -3274,5 +3274,9 @@ xv_run(int fd, const char *n, char *err, size_t errsz)
 	sigaction(SIGCONT, &ocont, NULL);
 	xv_free(v);
 	pk_pn = 0;
+	/* o (LOW-V12): what is still unread on the terminal (a second o, a
+	** held one, Enter) was typed at the view, never for the session */
+	if (xv_go[0])
+		tcflush(fd, TCIFLUSH);
 	return rc;
 }

@@ -62,7 +62,8 @@ Covers:
      the reader and on a card (full build; #227) leaves the view (the terminal restored as q does) and
      attaches as dch -a, from the picker's x too (the -k picker refuses);
      an ended session's o says so and stays; in the chord o goes back to the
-     session;
+     session; the rest of the o's write (oo, o Enter, a held o) never
+     reaches the session, from dch --xray and the chord (LOW-V12);
  12. the in-attach chord (#187, K10): the detach key then x in a later read,
      in one burst, and in the kitty CSI form opens the view over the attach
      on Refs (#294); the x never reaches the session, the attach is never
@@ -2466,27 +2467,49 @@ def test_chord():
               "SIGWINCH (no mirror), the screen check is the full build's")
 
     # o on Prompts (#194): the client is on the session already; o goes
-    # back to it, the attach kept
-    a = attach()
-    try:
-        got = rx()
-        a.key(b"\x1cx", 0.5)
-        a.wait(b"X-ray  xv-rx")
-        mark = len(a.out)
-        a.key(b"\t\t", 0.5)  # Refs, Search, then Commands (#291)
-        ready(a, mark)
-        mark = len(a.out)
-        a.key(b"o", 0.5)
-        check("chord, o: the view closes, back to the session",
-              a.wait(RESTORE, start=mark) and a.reap() is None,
-              a.out[mark:][-300:])
-        a.key(b"z", 0.3)
-        check("chord, o: the attach was kept, neither Tab nor o reached "
-              "the session, a key after does",
-              until(lambda: rx()[len(got):] == "7a", 5) and a.reap() is None,
-              (rx()[len(got):], a.rc))
-    finally:
-        a.close()
+    # back to it, the attach kept; what came in the o's write (a second
+    # o, Enter, a held o) is the view's, dropped (LOW-V12)
+    for burst in (b"o", b"oo", b"o\r", b"o" * 7):
+        a = attach()
+        try:
+            got = rx()
+            a.key(b"\x1cx", 0.5)
+            a.wait(b"X-ray  xv-rx")
+            mark = len(a.out)
+            a.key(b"\t\t", 0.5)  # Refs, Search, then Commands (#291)
+            ready(a, mark)
+            mark = len(a.out)
+            a.key(burst, 0.5)
+            check("chord, %r: the view closes, back to the session" % burst,
+                  a.wait(RESTORE, start=mark) and a.reap() is None,
+                  a.out[mark:][-300:])
+            a.key(b"z", 0.3)
+            check("chord, %r: the attach was kept, neither Tab nor the "
+                  "burst reached the session, a key after does" % burst,
+                  until(lambda: rx()[len(got):] == "7a", 5) and
+                  a.reap() is None, (rx()[len(got):], a.rc))
+        finally:
+            a.close()
+
+    # dch --xray's o (LOW-V12): the burst's rest never reaches the attach
+    # it opens; a key typed once the attach is up does
+    for burst in (b"oo", b"o\r", b"o" * 7):
+        v = Pty([DCH, "--xray", "xv-rx"], env=DTAP)
+        try:
+            got = rx()
+            ready(v)
+            v.key(burst, 0.3)
+            ok = until(lambda: (v.pump(0.1), clients("xv-rx") == 1)[1], 10)
+            v.pump(0.5)
+            v.key(b"z", 0.3)
+            check("dch --xray, %r: o attaches, the rest of the burst never "
+                  "reaches the session, a key after does" % burst,
+                  ok and until(lambda: rx()[len(got):] == "7a", 5),
+                  (ok, rx()[len(got):]))
+            v.key(b"\x1c", 0.5)
+            v.exit(5)
+        finally:
+            v.close()
 
     # -E: no detach key, no chord; the session gets both bytes
     a = attach(extra=["-E"])

@@ -861,7 +861,12 @@ the tab counts the prompts shown without
 .B o
 here and in the reader leaves the view and attaches to the session, as
 .B \-a
-does, a remote one's too; on an ended session it says so and stays),
+does, a remote one's too; on an ended session it says so and stays;
+keys typed with it that the view has not read yet (a second
+.BR o ,
+Enter, a held
+.BR o )
+are dropped, and a key typed once the attach is up reaches the session),
 .B Responses
 (Claude and Codex sessions: what the agent showed at the end of each turn,
 its answer or its summary of the work, as Claude Code's Focus view does;
@@ -979,7 +984,12 @@ never reaches the session; keys that arrive in the same read as the
 (a paste, a fast burst) reach neither the view nor the session.
 There
 .B o
-leaves the view back to the session.
+leaves the view back to the session; keys still unread with it are
+dropped, as from the list.
+When the view cannot open, it says why and waits for a key.
+That key is dropped, with what arrives after it until a 100 ms pause (1 s
+inside a bracketed paste), for at most 2 s: the rest of a paste paused
+longer, or still arriving 2 s on, reaches the session.
 The chord is off with
 .B \-E
 and with

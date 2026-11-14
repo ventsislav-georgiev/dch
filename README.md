@@ -926,7 +926,9 @@ The view has four tabs, three for a shell session (no Responses):
   and attaches to the live session, as `dch -a <n>` does (`host:name` too;
   from the picker's `x`, as the picker's `Enter`; the `-k` and `-d` pickers
   say it is not theirs). On an ended session `o` says so and the view
-  stays. The attach opens at the session's live screen, not at the
+  stays. Keys typed with `o` that the view has not read yet (a second `o`,
+  `Enter`, a held `o`) are dropped; a key typed once the attach is up
+  reaches the session. The attach opens at the session's live screen, not at the
   prompt.
 - **Responses** (Claude and Codex sessions): what the agent showed you at
   the end of each turn, as Claude Code's Focus view does: its answer, or
@@ -1050,7 +1052,9 @@ underneath: the attach is kept, never retired. Leaving the view (`q`,
 output that came in meanwhile included (dch-lite has no screen to repaint
 from: the program gets a SIGWINCH, as on any re-attach). The `x` is never
 typed into the session; keys that arrive in the same read as the `x` (a
-paste, a fast burst) reach neither the view nor the session. The chord is off under `-E` (no detach key) and
+paste, a fast burst) reach neither the view nor the session; nor do keys still unread when `o` leaves the view. When the view cannot
+open, it says why and waits for a key. That key is dropped, with what arrives after it until a 100 ms pause (1 s inside a
+bracketed paste), for at most 2 s: the rest of a paste paused longer, or still arriving 2 s on, reaches the session. The chord is off under `-E` (no detach key) and
 with `DCH_DOUBLE_TAP_MS=0` (one press acts at once); the keys then do what
 they did before. Over a remote attach (`dch -a host:name`) the chord opens
 the view of `host:name`, as `dch --xray host:name` does: its queries dial
