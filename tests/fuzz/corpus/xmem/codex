@@ -1,0 +1,8 @@
+
+@@
+plain
+@@
+{"type": "session_meta", "payload": {"id": "019a2222-3333-7444-8555-666677778801", "cwd": "@M", "cli_version": "0.167.0"}}
+{"type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "go"}]}}
+{"type": "response_item", "payload": {"type": "function_call", "name": "shell", "call_id": "c1", "arguments": "{\"command\": [\"bash\", \"-lc\", \"cat @M/AGENTS.md\"]}"}}
+{"type": "response_item", "payload": {"type": "custom_tool_call", "name": "apply_patch", "call_id": "c2", "input": "*** Begin Patch\n*** Update File: @M/AGENTS.md\n*** End Patch\n"}}

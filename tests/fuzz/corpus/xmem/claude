@@ -1,0 +1,13 @@
+- [A](a.md) — hook a
+- [B](b.md) - hook b
+@@
+---
+name: a
+type: user
+---
+body
+@@
+{"type": "user", "message": {"role": "user", "content": "q"}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": "@M/a.md"}}]}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "echo x >> @M/b.md"}}]}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Write", "input": {"file_path": "@M/a.md", "content": "x"}}]}}

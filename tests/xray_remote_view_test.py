@@ -102,7 +102,8 @@ Covers:
       text, or the tool line of a turn that ended on its result), Enter
       reads the item's prompt from the host at 2 of 2, q back to the item,
       each a ctl --xray of its own. A fake host whose chapters lack #296's
-      fields (a dch before 1.63.0): the tab says so, keys do no harm. One
+      fields (a dch before 1.63.0, or no answer yet): No responses yet,
+      never "older than 1.63.0" (LOW-V19), keys do no harm. One
       with them: the running turn working, an answer the cap dropped
       (response_offset, no response) says Enter reads it, and Enter reads
       it from the host. Every Prompts-to-Refs move is Shift-Tab now
@@ -122,6 +123,33 @@ Covers:
       windows (no zigzag), and after f (oldest first from the engine); the
       selected mention stays selected while f's lines arrive; Enter on a
       mention reads its prompt from the host.
+  16. Tasks (#320): srv:xv-tk, two tasks on the host: the tab last with
+      its open count, Pending then Done, Enter reads the turn that last
+      changed the task from the host at 2 of 2, q back to it; the follow,
+      the list and the chapter each a ctl --xray (every other count above
+      takes the list's query as one more ctl of a Claude session's view,
+      and a silent host's view holds it as one more child). A fake host
+      that refuses --tasks as a dch before it: no tab, nothing said. A fake
+      answer in two parts 1.5 s apart: the tab with the first part's rows,
+      a line over 64 KB dropped, the list's title, warning and partial line,
+      PARKED and blocked by 9, 12 on a row, ESC, BEL, C1, bidi and invalid
+      UTF-8 in a title drawn as ?; the second part's active row on top with
+      the selection still on its task; Enter on a task with no turn opens
+      its card (status and label, note, times, blocked by, group, URL), q
+      back to it; Enter on the active one reads its turn from the host.
+      50000 tasks from a fake host: listed, G to the last, the done
+      line's warn under the rows (#321), q.
+  17. Memory (#323): srv:xv-me, memories on the host: the tab last with
+      every row counted, This session (wrote) then Memories; Enter opens
+      the card with its text; Enter on the card reads the turn that wrote
+      it from the host, q back to the card, q back to the row; the follow,
+      the two lists and the chapter each a ctl --xray (every count above
+      takes the memory list's query as one more ctl, a silent host's view
+      one more child). A fake host that refuses --memory: no tab, nothing
+      said. A fake command answer: the list's title as the group's name,
+      its header warn and done-line warn, a kind of any word, a free-text
+      updated with no age, a row with no path; 1100 texts of 16 KB: the
+      rows past 16 MB keep no text and their card says so with the path.
 
 Run:  python3 tests/xray_remote_view_test.py      (uses ./dch)
 """
@@ -435,10 +463,11 @@ def test_view():
     finally:
         v.close()
     # follow, ref (light), ref --full, p's ref --full --scope all, chapter,
-    # ['s chapter: six, each its own ctl
-    until(lambda: ctls("--xray") - n0["--xray"] >= 6, 5)
-    check("every query ran on the host as its own ctl --xray (6), no --read "
-          "for an ended session", ctls("--xray") - n0["--xray"] == 6 and
+    # ['s chapter, the task list (#320), the memory list (#323): eight,
+    # each its own ctl
+    until(lambda: ctls("--xray") - n0["--xray"] >= 8, 5)
+    check("every query ran on the host as its own ctl --xray (8), no --read "
+          "for an ended session", ctls("--xray") - n0["--xray"] == 8 and
           ctls("--read") == n0["--read"],
           (ctls("--xray") - n0["--xray"], ctls("--read") - n0["--read"],
            refused()))
@@ -491,10 +520,10 @@ def test_lookup():
         v.exit()
     finally:
         v.close()
-    until(lambda: ctls("--xray") - n0 >= 4, 5)
+    until(lambda: ctls("--xray") - n0 >= 6, 5)
     check("lookup #263: the cards and the chapter ran on the host, each its "
-          "own ctl --xray (follow, 2 refs, chapter)",
-          ctls("--xray") - n0 == 4, (ctls("--xray") - n0, refused()))
+          "own ctl --xray (follow, task list, memory list, 2 refs, chapter)",
+          ctls("--xray") - n0 == 6, (ctls("--xray") - n0, refused()))
 
 
 def test_small_card():
@@ -899,6 +928,9 @@ class Flaky(Fake):
         self.snap, self.chapters = snap or SNAP, chapters or {}
         # --search's answer (#291): bytes, or "old", an older dch's refusal
         self.search = None
+        # --tasks' (#320), --memory's (#323): bytes, a list of parts sent
+        # 1.5 s apart, or "old"
+        self.tasks = self.memory = None
 
     def down(self):
         self.up = False
@@ -941,6 +973,22 @@ class Flaky(Fake):
                             continue
                         if "--search" in argv and self.search:
                             c.sendall(frame(0x31, self.search))
+                        fl = "--tasks" if "--tasks" in argv else "--memory"
+                        lst = self.tasks if fl == "--tasks" else self.memory
+                        if fl in argv and lst == "old":
+                            c.sendall(frame(0x13, {
+                                "message": fl + " is not allowed with "
+                                           "--xray"}))
+                            c.shutdown(socket.SHUT_WR)
+                            continue
+                        if fl in argv and lst:
+                            parts = lst if isinstance(lst, list) else [lst]
+                            for i, part in enumerate(parts):
+                                if i:
+                                    time.sleep(1.5)
+                                for o in range(0, len(part), 1 << 18):
+                                    c.sendall(frame(0x31,
+                                                    part[o:o + (1 << 18)]))
                         if "--chapter" in argv:
                             a = argv[argv.index("--chapter") + 1]
                             if a in self.chapters:
@@ -1078,16 +1126,19 @@ def test_responses():
         check("Responses, remote: q exits 0", v.exit() == 0, v.out[-80:])
     finally:
         v.close()
-    until(lambda: ctls("--xray") - n0 >= 2, 5)
-    check("Responses, remote: the follow and the chapter, each its own ctl "
-          "--xray on the host", ctls("--xray") - n0 == 2,
+    until(lambda: ctls("--xray") - n0 >= 4, 5)
+    check("Responses, remote: the follow, the task and memory lists and the "
+          "chapter, each its own ctl --xray on the host",
+          ctls("--xray") - n0 == 4,
           ctls("--xray") - n0)
 
 
 def test_responses_fake():
-    """A host before 1.63.0 (chapters without #296's fields) says so on
-    Responses; one with the fields: a cut-dropped answer reads Enter reads
-    it, the running turn working."""
+    """Chapters without #296's fields (a host before 1.63.0, or a current
+    one whose ended turns have no answer and no tool yet: the same bytes):
+    Responses says none yet, never that the host is older (LOW-V19); with
+    the fields: a cut-dropped answer reads Enter reads it, the running turn
+    working."""
     two = (b'"offset":0},{"anchor":"s2","title":"second","kind":"prompt",'
            b'"at":1794300100,"offset":9}]')
     h = Flaky(SNAP.replace(b'"offset":0}]', two))
@@ -1097,10 +1148,12 @@ def test_responses_fake():
         v.wait(b"Prompts 2")
         mark = len(v.out)
         v.key(b"\t", 1.0)
-        check("Responses, an older host: the tab says its dch sends none",
-              v.wait(b"Responses 0", start=mark) and
-              v.wait(b"the host's dch is older than 1.63.0 and sends no "
-                     b"responses", start=mark), v.out[mark:][-600:])
+        ok = v.wait(b"Responses 0", start=mark) and \
+            v.wait(b"No responses yet", start=mark)
+        v.pump(0.3)
+        check("Responses, no answer and no tool in any ended turn: No "
+              "responses yet, not an older host (LOW-V19)",
+              ok and b"older than" not in v.out[mark:], v.out[mark:][-600:])
         v.key(b"j\r", 0.5)
         v.key(b"q")
         check("Responses, an older host: keys do no harm, q exits 0",
@@ -1208,10 +1261,10 @@ def test_search():
               "terminal", not bad, bad)
     finally:
         v.close()
-    until(lambda: ctls("--xray") - n0 >= 3, 5)
-    check("Search, remote: the follow, the search and the chapter, each its "
-          "own ctl --xray on the host", ctls("--xray") - n0 == 3,
-          ctls("--xray") - n0)
+    until(lambda: ctls("--xray") - n0 >= 5, 5)
+    check("Search, remote: the follow, the task and memory lists, the search "
+          "and the chapter, each its own ctl --xray on the host",
+          ctls("--xray") - n0 == 5, ctls("--xray") - n0)
 
 
 def test_search_fake():
@@ -1294,6 +1347,436 @@ def test_search_fake():
     finally:
         v.close()
         h.close()
+
+# ---- Tasks (#320): the host's --tasks -----------------------------------------
+
+TKSID = "11111111-2222-4333-8444-5555555555ca"
+
+
+def fixture_tasks():
+    """srv:xv-tk: two tasks on the host, one done in the second prompt."""
+    ts = lambda m: "2026-11-10T10:%02d:00Z" % m
+    use = lambda tid, name, inp, m: {
+        "type": "assistant", "timestamp": ts(m), "message": {"content": [
+            {"type": "tool_use", "id": tid, "name": name, "input": inp}]}}
+    res = lambda tid, n, m: {
+        "type": "user", "timestamp": ts(m),
+        "toolUseResult": {"task": {"id": n}},
+        "message": {"content": [{"type": "tool_result", "tool_use_id": tid,
+                                 "content": "ok"}]}}
+    ask = lambda text, m: {"type": "user", "cwd": "/home/demo/proj",
+                           "timestamp": ts(m), "message": {"content": text}}
+    record_o("xv-tk", TKSID, [
+        ask("plan", 0),
+        use("c1", "TaskCreate", {"subject": "Ship the parser",
+                                 "description": ""}, 1), res("c1", "1", 1),
+        use("c2", "TaskCreate", {"subject": "Write the notes",
+                                 "description": ""}, 2), res("c2", "2", 2),
+        ask("go", 5),
+        use("u1", "TaskUpdate", {"taskId": "1", "status": "completed"}, 6)])
+
+
+def trows(v):
+    """Tasks' lines on screen over the rule, blanks folded."""
+    out, scr = [], screen_rows(v)
+    for k in sorted(x for x in scr if x >= 4):
+        r = scr[k]
+        if r.startswith(("\u2500", "-")):
+            break
+        if r.strip():
+            out.append(re.sub(" +", " ", r).strip())
+    return out
+
+
+def test_tasks(port):
+    """The host's task list: the tab, its rows, Enter reads the turn from
+    the host, q back; the follow, the list and the chapter each a ctl."""
+    hosts("srv=127.0.0.1:%d" % port)
+    n0 = ctls("--xray")
+    v = Pty([DCH, "--xray", "srv:xv-tk"])
+    try:
+        ok = tabbar(v, "Tasks 1")
+        v.key(b"\033[Z", 0.8)
+        r = trows(v)
+        check("Tasks, remote: the host's list, the tab last with its open "
+              "count; Pending, then Done, each row with its age",
+              ok and re.match(r"Pending 1\n\u258c\u25cb 2 Write the notes \d+d\n"
+                              r"Done 1\n\u2713 1 Ship the parser \d+d$",
+                              "\n".join(r)), r)
+        mark = len(v.out)
+        v.key(b"j\r", 1.0)
+        check("Tasks, remote: Enter reads the turn that last changed the "
+              "task from the host, 2 of 2", v.wait(b"2 of 2", start=mark) and
+              v.wait(b"TaskUpdate", start=mark), v.out[mark:][-600:])
+        v.key(b"q", 1.0)
+        check("Tasks, remote: q back to the same task",
+              "Ship the parser" in head(v), head(v))
+        v.key(b"q")
+        check("Tasks, remote: q exits 0", v.exit() == 0, v.out[-80:])
+    finally:
+        v.close()
+    until(lambda: ctls("--xray") - n0 >= 4, 5)
+    check("Tasks, remote: the follow, the task and memory lists and the "
+          "chapter, each its own ctl --xray on the host",
+          ctls("--xray") - n0 == 4,
+          ctls("--xray") - n0)
+
+
+def tk(id, title, status, **kw):
+    t = {"id": id, "title": title, "status": status, "label": None,
+         "active": None, "note": None, "created": None, "updated": None,
+         "chapter": None, "created_chapter": None, "blocked_by": [],
+         "url": None, "group": None}
+    t.update(kw)
+    return json.dumps({"task": t}).encode() + b"\n"
+
+
+def test_tasks_fake():
+    """An older host refuses --tasks: no tab. A host's answer streamed in
+    two parts: the tab as its first rows come, the selection kept on its
+    task as more arrive above it; the list's title, warning and partial
+    line; a label that says more, blocked by; a task with no turn opens its
+    card, q back; Enter on one with a turn reads it from the host; hostile
+    text drawn as ?; a line over 64 KB dropped, the next one kept. 50000
+    tasks: listed, G, q."""
+    h = Flaky()
+    h.tasks = "old"
+    hosts("q=127.0.0.1:%d" % h.port)
+    v = Pty([DCH, "--xray", "q:fk"])
+    try:
+        v.wait(b"Prompts 1")
+        v.pump(1.5)
+        tabs = []
+        for _ in range(4):
+            v.key(b"\t", 0.4)
+            tabs.append(screen_rows(v).get(2, ""))
+        check("Tasks, an older host: no Tasks tab, nothing said, Tab never "
+              "lands on one", all("Tasks" not in t for t in tabs) and
+              b"does not know --tasks" not in v.out, tabs)
+        v.key(b"q")
+        check("Tasks, an older host: q exits 0", v.exit() == 0, v.out[-80:])
+    finally:
+        v.close()
+        h.close()
+    now = time.time()
+    iso = lambda ago: time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                    time.gmtime(now - ago))
+    head1 = json.dumps({"schema": 1, "session": "fk", "source": "command",
+                        "title": "Sprint 12", "warn": "tasks_command "
+                        "failed: exit 3", "partial": True}).encode() + b"\n"
+    part1 = (head1 +
+             tk("d1", "Done thing", "done", label="completed",
+                updated=iso(7200)) +
+             tk("p1", "Parked thing", "pending", label="PARKED",
+                note="waits on the vendor", created=iso(90000),
+                updated=iso(3600), blocked_by=["9", "12"],
+                url="https://example.invalid/1", group="infra") +
+             tk("big", "B" * 70000, "pending") +
+             b'{"task":{"id":"p2","title":"bad \xff\xfe utf \\u001b]0;pwned'
+             b'\\u0007 \\u009b2J bi\\u202edi","status":"pending"}}\n')
+    part2 = (tk("a1", "Run the build", "active", active="Running the build",
+                chapter="s1", updated=iso(30)) +
+             b'{"done":true,"count":4,"dropped":0}\n')
+    ch = {"s1": json.dumps({"title": "first", "at": 1794300000,
+                            "entries": [{"role": "user", "text": "FIRST"},
+                                        {"role": "tool", "tool": "TaskUpdate",
+                                         "text": "status: in_progress"}]})
+          .encode() + b"\n"}
+    h = Flaky(chapters=ch)
+    h.tasks = [part1, part2]
+    hosts("q=127.0.0.1:%d" % h.port)
+    v = Pty([DCH, "--xray", "q:fk"])
+    try:
+        ok = tabbar(v, "Tasks 2")
+        v.key(b"\033[Z", 0.5)
+        v.key(b"j", 0.3)
+        r = trows(v)
+        check("Tasks, a host's answer: the tab with its first part's rows, "
+              "the line over 64 KB dropped", ok and "p2" in head(v) and
+              not any("BBBB" in x for x in r), (head(v), r))
+        check("Tasks, a host's answer: the list's title on top, its warning "
+              "and partial read faint under the rows",
+              r and r[0] == "Sprint 12" and "tasks_command failed: exit 3"
+              in r and "the history was too long to read whole; older tasks "
+              "may be missing" in r, r)
+        p1 = next((x for x in r if "Parked thing" in x), "")
+        check("Tasks, a host's answer: a label that says more and blocked by "
+              "on the row, its age", re.search(r"\u25cb p1 Parked thing "
+                                               r"PARKED blocked by 9, 12 1h$",
+                                               p1), p1)
+        p2 = next((x for x in r if "bad" in x), "")
+        bad = [b for b in (b"\033]0;pwned", b"\007", b"\xe2\x80\xae",
+                           b"\xc2\x9b", b"\xff") if b in v.out]
+        check("Tasks, a host's answer: ESC, BEL, C1, bidi and invalid UTF-8 "
+              "in a title drawn as ?, none reach the terminal",
+              "?]0;pwned?" in p2 and not bad, (p2, bad))
+        ok = tabbar(v, "Tasks 3", 5)
+        v.pump(0.3)
+        r = trows(v)
+        check("Tasks, a host's answer: the second part's active row on top, "
+              "the selection still on its task", ok and r[1:3] ==
+              ["In progress 1", "\u25b6 a1 Running the build now"] and
+              "p2" in head(v), (head(v), r))
+        mark = len(v.out)
+        v.key(b"k\r", 0.8)
+        text = "\n".join(trows(v))
+        check("Tasks, a host's answer: Enter on a task with no turn opens its "
+              "card: title, status and label, note, times, blocked by, "
+              "group, URL", "Task p1" in screen_rows(v).get(2, "") and
+              "Parked thing" in text and "Status Pending PARKED" in text and
+              "Note waits on the vendor" in text and
+              re.search(r"Created \d\d-\d\d \d\d:\d\d", text) and
+              "Blocked by 9, 12" in text and "Group infra" in text and
+              "URL https://example.invalid/1" in text and
+              "Turn none to read" in text, text)
+        v.key(b"q", 0.8)
+        check("Tasks, a host's answer: q back to the same task",
+              "Parked thing" in head(v), head(v))
+        mark = len(v.out)
+        v.key(b"g\r", 1.0)
+        check("Tasks, a host's answer: Enter on the active task reads its "
+              "turn from the host", v.wait(b"1 of 1", start=mark) and
+              v.wait(b"status: in_progress", start=mark), v.out[mark:][-600:])
+        v.key(b"q", 0.5)
+        v.key(b"q")
+        check("Tasks, a host's answer: q exits 0", v.exit() == 0,
+              v.out[-80:])
+    finally:
+        v.close()
+        h.close()
+    n = 50000
+    many = (b'{"schema":1,"session":"fk","source":"claude","title":null,'
+            b'"partial":false}\n' +
+            b"".join(tk(str(i), "many task %05d" % i, "pending")
+                     for i in range(1, n + 1)) +
+            b'{"done":true,"count":50000,"dropped":0,"warn":"tasks_command '
+            b'stopped early: 50000 rows"}\n')
+    h = Flaky()
+    h.tasks = many
+    hosts("q=127.0.0.1:%d" % h.port)
+    t0 = time.time()
+    v = Pty([DCH, "--xray", "q:fk"])
+    try:
+        ok = tabbar(v, "Tasks 50000", 30)
+        dt = time.time() - t0
+        v.key(b"\033[Z", 0.5)
+        mark = len(v.out)
+        s = time.time()
+        v.key(b"G", 0)
+        ok = v.wait(b"many task 50000", 5, start=mark) and ok
+        check("Tasks, 50000 from a host (%.1f MB): listed in %.2f s, G to "
+              "the last in %.3f s" % (len(many) / 1e6, dt, time.time() - s),
+              ok and "many task 50000" in head(v), head(v))
+        check("Tasks, 50000: the done line's warn under the rows (#321)",
+              "tasks_command stopped early: 50000 rows" in trows(v),
+              trows(v))
+        v.key(b"q")
+        check("Tasks, 50000: q exits 0", v.exit() == 0, v.out[-80:])
+    finally:
+        v.close()
+        h.close()
+
+
+# ---- Memory (#323): the host's --memory ---------------------------------------
+
+MESID = "11111111-2222-4333-8444-5555555555cb"
+
+
+def fixture_memory():
+    """srv:xv-me: two memories on the host, the first written in the
+    session's second prompt."""
+    cfg = os.path.join(SENV["HOME"], ".claude")
+    mdir = os.path.join(cfg, "projects", "-mem-proj", "memory")
+    os.makedirs(mdir, exist_ok=True)
+    for name, ago in (("alpha.md", 3600), ("beta.md", 7200)):
+        with open(os.path.join(mdir, name), "w") as f:
+            f.write("---\nname: %s\ndescription: %s hook\nmetadata:\n"
+                    "  type: feedback\n---\n%s text on the host\n" %
+                    ((name[:-3],) * 3))
+        os.utime(os.path.join(mdir, name), (time.time() - ago,) * 2)
+    ts = lambda m: "2026-11-10T10:%02d:00Z" % m
+    ask = lambda text, m: {"type": "user", "cwd": "/home/demo/proj",
+                           "timestamp": ts(m), "message": {"content": text}}
+    record_o("xv-me", MESID, [
+        ask("hello", 0), say_o("hi", ts(1)),
+        ask("remember it", 5),
+        {"type": "assistant", "timestamp": ts(6), "message": {"content": [
+            {"type": "tool_use", "id": "w1", "name": "Write",
+             "input": {"file_path": mdir + "/alpha.md", "content": "x"}}]}}])
+    # record_o writes under -home-demo-proj: the memory dir is the
+    # transcript's own project's
+    pdir = os.path.join(cfg, "projects")
+    os.replace(os.path.join(pdir, "-home-demo-proj", MESID + ".jsonl"),
+               os.path.join(pdir, "-mem-proj", MESID + ".jsonl"))
+
+
+def test_memory(port):
+    """The host's memory list: the tab, its groups, the card's text; Enter
+    on the card reads the turn from the host, q back; each query a ctl."""
+    hosts("srv=127.0.0.1:%d" % port)
+    n0 = ctls("--xray")
+    v = Pty([DCH, "--xray", "srv:xv-me"])
+    try:
+        ok = tabbar(v, "Memory 2")
+        v.key(b"\033[Z", 0.8)
+        r = [re.sub(r" \d+[mhd]$", "", x).lstrip("\u258c ") for x in
+             trows(v)]
+        check("Memory, remote: the host's list, the tab last; This session "
+              "(wrote), then Memories", ok and r ==
+              ["This session 1", "alpha feedback alpha hook wrote",
+               "Memories 1", "beta feedback beta hook"], r)
+        mark = len(v.out)
+        v.key(b"\r", 0.8)
+        check("Memory, remote: Enter opens the card with the host's text",
+              v.wait(b"alpha text on the host", start=mark) and
+              v.wait(b"this session wrote it", start=mark),
+              v.out[mark:][-600:])
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        check("Memory, remote: Enter on the card reads the turn that wrote "
+              "it from the host, 2 of 2", v.wait(b"2 of 2", start=mark) and
+              v.wait(b"remember it", start=mark), v.out[mark:][-600:])
+        mark = len(v.out)
+        v.key(b"q", 1.0)
+        check("Memory, remote: q back to the card", v.wait(b"Memory alpha",
+                                                           start=mark),
+              v.out[mark:][-600:])
+        v.key(b"q", 0.8)
+        check("Memory, remote: q back to the row", "alpha" in head(v),
+              head(v))
+        v.key(b"q")
+        check("Memory, remote: q exits 0", v.exit() == 0, v.out[-80:])
+    finally:
+        v.close()
+    until(lambda: ctls("--xray") - n0 >= 4, 5)
+    check("Memory, remote: the follow, the task and memory lists and the "
+          "chapter, each its own ctl --xray on the host",
+          ctls("--xray") - n0 == 4, ctls("--xray") - n0)
+
+
+def mem(id, title, **kw):
+    m = {"id": id, "title": title, "note": None, "kind": None,
+         "scope": None, "updated": None, "path": None, "session": None,
+         "chapter": None, "body": None}
+    m.update(kw)
+    return json.dumps({"memory": m}).encode() + b"\n"
+
+
+def test_memory_fake():
+    """An older host refuses --memory: no tab. A command's answer: the
+    title names the group, both warns shown, a kind of any word, a free
+    updated with no age, no path. Texts past 16 MB are not kept."""
+    h = Flaky()
+    h.memory = "old"
+    hosts("q=127.0.0.1:%d" % h.port)
+    v = Pty([DCH, "--xray", "q:fk"])
+    try:
+        v.wait(b"Prompts 1")
+        v.pump(1.5)
+        check("Memory, an older host: no Memory tab, nothing said",
+              "Memory" not in screen_rows(v).get(2, "") and
+              b"does not know --memory" not in v.out,
+              screen_rows(v).get(2, ""))
+        v.key(b"q")
+        check("Memory, an older host: q exits 0", v.exit() == 0, v.out[-80:])
+    finally:
+        v.close()
+        h.close()
+    ans = (json.dumps({"schema": 1, "source": "command", "title": "Team "
+                       "notes", "warn": "memory_command said: slow",
+                       "partial": False}).encode() + b"\n" +
+           mem("s1", "Decided thing", kind="decision", session="wrote",
+               chapter="s1", note="why we did it", updated="yesterday",
+               body="SESSION BODY") +
+           mem("n1", "Loose note", kind="two words", body="NOTE BODY") +
+           b'{"done":true,"count":2,"dropped":0,"warn":"memory_command '
+           b'stopped early"}\n')
+    ch = {"s1": json.dumps({"title": "first", "at": 1794300000,
+                            "entries": [{"role": "user", "text": "FIRST"}]})
+          .encode() + b"\n"}
+    h = Flaky(chapters=ch)
+    h.memory = ans
+    hosts("q=127.0.0.1:%d" % h.port)
+    v = Pty([DCH, "--xray", "q:fk"])
+    try:
+        ok = tabbar(v, "Memory 2")
+        v.key(b"\033[Z", 0.8)
+        r = [x.lstrip("\u258c ") for x in trows(v)]
+        check("Memory, a command's answer: This session, the list's title "
+              "as the group's name, a free updated with no age, a kind of "
+              "two words not shown; the done line's warn under the rows",
+              ok and r[:4] == ["This session 1",
+                               "Decided thing decision why we did it wrote",
+                               "Team notes 1", "Loose note"] and
+              "memory_command stopped early" in r, r)
+        mark = len(v.out)
+        v.key(b"\r", 0.8)
+        v.key(b"\r", 1.0)
+        check("Memory, a command's answer: Enter, Enter reads its turn from "
+              "the host", v.wait(b"1 of 1", start=mark) and
+              v.wait(b"FIRST", start=mark), v.out[mark:][-600:])
+        v.key(b"q", 0.5)
+        v.key(b"q", 0.5)
+        v.key(b"q")
+        v.exit()
+    finally:
+        v.close()
+        h.close()
+    head1 = json.dumps({"schema": 1, "source": "command", "title": None,
+                        "warn": "memory_command failed: exit 3",
+                        "partial": False}).encode() + b"\n"
+    h = Flaky()
+    h.memory = head1 + mem("m1", "Only one") + b'{"done":true}\n'
+    hosts("q=127.0.0.1:%d" % h.port)
+    v = Pty([DCH, "--xray", "q:fk"])
+    try:
+        ok = tabbar(v, "Memory 1")
+        v.key(b"\033[Z", 0.8)
+        r = trows(v)
+        check("Memory, a header's warn under the rows", ok and
+              "memory_command failed: exit 3" in r, r)
+        v.key(b"q")
+        v.exit()
+    finally:
+        v.close()
+        h.close()
+    n = 1100
+    many = (b'{"schema":1,"source":"claude","title":null,"partial":false}\n'
+            + b"".join(mem("b%04d" % i, "big %04d" % i, path="/m/b%04d.md" % i,
+                           body="%04d" % i + "z" * 16000)
+                       for i in range(n)) +
+            b'{"done":true,"count":1100,"dropped":0}\n')
+    h = Flaky()
+    h.memory = many
+    hosts("q=127.0.0.1:%d" % h.port)
+    v = Pty([DCH, "--xray", "q:fk"])
+    try:
+        ok = tabbar(v, "Memory 1100", 30)
+        v.key(b"\033[Z", 0.8)
+        mark = len(v.out)
+        v.key(b"G\r", 0.8)
+        text = "\n".join(trows(v))
+        check("Memory, 1100 texts of 16 KB: all listed, the last row's card "
+              "says its text was not kept and names the path", ok and
+              "not kept (the list keeps 16 MB of text): read /m/b1099.md"
+              in text, text)
+        v.key(b"q", 0.5)
+        v.key(b"g\r", 0.8)
+        text = "\n".join(trows(v))
+        check("Memory, 1100 texts: the first row's card shows its text",
+              "0000zzzz" in text and "not kept" not in text, text)
+        v.key(b"q", 0.5)
+        v.key(b"/1099z", 0.8)
+        check("Memory, 1100 texts: a text not kept is not filtered on",
+              not any("big 1099" in x for x in trows(v)), trows(v))
+        v.key(b"\033", 0.3)
+        v.key(b"\033", 0.3)
+        v.key(b"q")
+        check("Memory, 1100 texts: q exits 0", v.exit() == 0, v.out[-80:])
+    finally:
+        v.close()
+        h.close()
+
 
 def test_turn_drop():
     """#288: the reader's [ on a host that has gone: the status says so and
@@ -1630,10 +2113,12 @@ def test_stop():
         seen.update(kids_of(v.pid))
         k = kids_of(v.pid)
         # #294: Refs' screen read is a third, pending on the silent host
-        # since the Tab to Refs (one at a time; the view's end stops it)
-        check("silent: only the follow, the new card's child and Refs' "
-              "screen read run, no zombie",
-              len(k) == 3 and "Z" not in "".join(k.values()), k)
+        # since the Tab to Refs (one at a time; the view's end stops it);
+        # the task list's query (#320) a fourth, the memory list's (#323)
+        # a fifth, as silent
+        check("silent: only the follow, the new card's child, Refs' "
+              "screen read and the task and memory lists' queries run, no "
+              "zombie", len(k) == 5 and "Z" not in "".join(k.values()), k)
         rc, dt = esc_q(v)
         check("silent: Esc then q (card and follow pending) exits within "
               "%.1f s (%.2f s)" % (STOP_S, dt), rc is not None and dt < STOP_S,
@@ -2525,6 +3010,12 @@ def main():
         test_turn_drop()
         test_responses_fake()
         test_search_fake()
+        fixture_tasks()
+        test_tasks(port)
+        test_tasks_fake()
+        fixture_memory()
+        test_memory(port)
+        test_memory_fake()
         test_stop()
         test_chord(port)
         test_chord_detach()

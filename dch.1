@@ -109,6 +109,14 @@ dch \- detachable terminal sessions with a headless agent API
 .br
 .B dch \-\-xray
 .I name
+.B \-\-tasks \-\-json
+.br
+.B dch \-\-xray
+.I name
+.B \-\-memory \-\-json
+.br
+.B dch \-\-xray
+.I name
 .B \-\-ref
 .I ref
 .RB [ \-\-scope
@@ -320,7 +328,11 @@ The
 .B \-\-ls\-json
 array, then the whole array again, one flushed line, each time it changes
 (nothing while it does not), until SIGINT, SIGTERM or the reader closes
-the pipe: exit 0. A name or another verb with it is exit 2. See
+the pipe: exit 0. A stdout closed from the start
+.RB ( >&\- )
+is exit 0 at once; one on
+.I /dev/null
+keeps it running. A name or another verb with it is exit 2. See
 .BR "REMOTE HOSTS" .
 .TP
 .B \-\-ls\-json
@@ -862,11 +874,13 @@ the tab counts the prompts shown without
 here and in the reader leaves the view and attaches to the session, as
 .B \-a
 does, a remote one's too; on an ended session it says so and stays;
-keys typed with it that the view has not read yet (a second
+keys typed with it (a second
 .BR o ,
-Enter, a held
-.BR o )
-are dropped, and a key typed once the attach is up reaches the session),
+Enter)
+are dropped until the keyboard pauses for 100 ms (1 s inside a bracketed
+paste), for at most 2 s; a key typed after the pause reaches it; a key held
+down is not covered, its repeats start after a longer pause and reach the
+session),
 .B Responses
 (Claude and Codex sessions: what the agent showed at the end of each turn,
 its answer or its summary of the work, as Claude Code's Focus view does;
@@ -881,7 +895,8 @@ it); a running turn says \(lqworking\(rq, an answer the size cap left out
 \fB/\fR filters on the prompt and the answer;
 \fBn\fR and \fBo\fR as on Prompts; the tab counts the items shown without
 .BR n ;
-a host before 1.63.0 sends no answers, and the tab says so),
+a host before 1.63.0 sends no answers, and the tab says none yet, as for a
+session with none),
 .B Refs
 (the pull requests, issues and tickets the session touched, a faint line
 over them saying so;
@@ -924,9 +939,37 @@ search; the hits newest first, at most 50, each its time, who said it
 (\(lq(outside the prompts shown)\(rq when the view has none) and up to 3
 lines around it, the match in bold; faint lines say when the 50 newest are
 shown and when the search stopped early; the tab counts the hits, 50+ past
-the cap; \fBEnter\fR reads the hit's prompt at the text, \fBq\fR back to the
+the cap; \fBEnter\fR reads the hit's prompt at that hit, \fBq\fR back to the
 hit; a shell searches its ring, dch\-lite and xray_ring = 0 say no corpus;
-a host before 1.63.0 does not know \-\-search, and the list says so).
+a host before 1.63.0 does not know \-\-search, and the list says so)
+and, last and only when the session keeps a task list,
+.B Tasks
+(its tasks as
+.B \-\-tasks
+gives them, under faint group lines In progress, Pending, Done (newest
+first) and Dropped, each counted; a row is a mark, the id, the title (what
+a running task is doing), and at the right a label that says more than the
+status, \(lqblocked by\(rq ids and the age; the tab counts the open
+tasks; \fBEnter\fR reads the prompt that last changed the task, \fBq\fR
+back to it, or opens a card with what is known of a task with no prompt;
+\fB/\fR filters on id, title, note and label; asked once the prompts have
+shown, drawn as it comes, read again when the tab opens and every 5 s
+while it shows a running session; no tab for a shell, dch\-lite, an empty
+list or an older host)
+and, after it and only when there is one,
+.B Memory
+(the memories and instruction files
+.B \-\-memory
+lists, under faint group lines This session (wrote or loaded, newest
+first), Memories and Instructions, each counted; a row is the title, the
+kind and note faint, and at the right \(lqwrote\(rq or \(lqloaded\(rq and the
+age, an instruction file its short path; the tab counts every row;
+\fBEnter\fR opens a card with path, kind, scope, time and the text,
+scrollable, a text cut at 16 KB naming its file; on a card of a memory this
+session wrote or loaded, \fBEnter\fR reads that prompt and \fBq\fR comes back;
+\fB/\fR filters on id, title, note, kind, path and text; asked once the
+prompts have shown, read again every 30 s while it shows a running
+session; no tab for a shell, dch\-lite, no memory or an older host).
 A card shows the ref's definitions, first and latest mention, counts by
 scope and mentions (newest first within each file, this session's first,
 also after
@@ -955,7 +998,7 @@ The line under the tabs names the corpus
 \(lqNo Claude session found here\(rq, ...).
 Keys: \fBTab\fR and \fBShift\-Tab\fR, \fB\(<-\fR \fB\(->\fR
 and \fBh\fR \fBl\fR go to the next and previous tab, in the order
-Prompts, Responses, Refs, Search;
+Prompts, Responses, Refs, Search, Tasks, Memory;
 \fBj\fR \fBk\fR, arrows, \fBPgUp\fR \fBPgDn\fR, \fBg\fR \fBG\fR move;
 \fBq\fR quits the list and goes back from a card or the reader;
 \fBEsc\fR clears the filter, else does the same;
@@ -1161,7 +1204,9 @@ end, each by a decoder that starts there (with the cwd the full read has
 there; a window whose raw bytes cannot hold the ref is not decoded), so a
 ref of the last turns is
 found inside the budget: lines come newest window first, and a mention
-in the turn its window starts in (unless the window starts the file) has
+in the turn its window starts in (unless the window starts the file), or
+in a turn the window saw begin only after a subagent's first record there
+or a tool result whose call is older, has
 .BR chapter:null ),
 .B \-\-full
 to read it all up to 64 files
@@ -1511,6 +1556,178 @@ On
 .IB host : name
 a host whose dch predates it says
 .IR "the host's dch does not know \-\-search" .
+.B \-\-tasks
+prints the session's task list as JSON lines, as
+.B \-\-ref
+prints its lines: a header
+.RB ( schema ,
+.BR session ,
+.BR session_id ,
+.B source
+.RB ( claude ,
+.B codex
+or
+.BR none ),
+.BR title ,
+.BR partial ),
+one
+.B task
+line per task
+.RB ( id ,
+.BR title ,
+.B status
+.RB ( pending ,
+.BR active ,
+.BR done ,
+.BR dropped ),
+.B label
+(the source's own word),
+.BR active ,
+.BR note ,
+.B created
+and
+.B updated
+(ISO 8601 UTC),
+.B chapter
+and
+.B created_chapter
+(anchors),
+.BR blocked_by ,
+.B url
+and
+.BR group ,
+null),
+then
+.BR {"done":true,"count": N ,"dropped": M } .
+The sources are Claude Code's TaskCreate and TaskUpdate (the id from the
+create's result; one still waiting for it is
+.RI ? n ,
+pending), the older TodoWrite, and Codex's update_plan; TodoWrite and
+update_plan replace the whole list and their ids are 1\-based positions.
+The kind used last wins; sidechain records are skipped; a deleted task
+stays as
+.BR dropped .
+The transcript is read as
+.B \-\-json
+reads it
+.RB ( partial:true
+past that range); the newest 50000 tasks are kept, a line is at most
+64 KB.
+A shell, or a session with no task record, gives
+.B source:none
+and no task lines.
+It goes with no other flag but
+.B \-\-json
+and not in
+.BR \-\-requests ;
+on
+.IB host : name
+a host whose dch predates it says
+.IR "the host's dch does not know \-\-tasks" .
+.B \-\-memory
+lists what
+.IR name 's
+agent remembers and the instruction files in force as JSON lines: a header
+.RB ( schema ,
+.B source
+.RB ( claude ,
+.B codex
+or
+.BR none ),
+.B title
+null,
+.BR partial ),
+one
+.B memory
+object per file
+.RB ( id ,
+.BR title ,
+.BR note ,
+.BR kind ,
+.BR scope ,
+.BR updated ,
+.BR path ,
+.BR session ,
+.BR chapter ,
+.BR body ,
+and
+.B cut:true
+when the body was cut), then
+.RB { done:true ,
+.BR count ,
+.BR dropped }.
+Memories are the
+.B *.md
+files of the
+.B memory/
+directory beside a Claude Code transcript: one per file the
+.B MEMORY.md
+index names
+.RB ( "\- [Title](file.md) \(em hook" ),
+one per other file, never the index;
+.B title
+the index's, else the frontmatter's
+.BR name ,
+else the
+.BR id ;
+.B note
+the hook, else
+.BR description ;
+.B kind
+the frontmatter's
+.B type
+(top level or
+.BR metadata.type )
+when
+.BR user ,
+.BR feedback ,
+.B project
+or
+.BR reference .
+Instruction files
+.RB ( kind:\(dqinstructions\(dq ,
+.B id
+and
+.B title
+the path): Claude Code's managed, config dir
+.RB ( CLAUDE.md ,
+.BR rules/ )
+and per directory from
+.B /
+to the cwd (32 at most)
+.BR CLAUDE.md ,
+.BR .claude/CLAUDE.md ,
+.B CLAUDE.local.md
+and
+.BR .claude/rules/ ,
+.B AGENTS.md
+when none is found; Codex's
+.B $CODEX_HOME
+and per directory
+.B AGENTS.override.md
+else
+.BR AGENTS.md .
+.B session
+is
+.B wrote
+when a main\-thread tool call wrote the file (Write, Edit, a shell
+command naming its path with a redirect or an editing verb, apply_patch),
+.B loaded
+when one read it, else null;
+.B chapter
+the newest such turn's anchor.
+Session rows come first, newest first, then memories by mtime, newest
+first, then instruction files in load order.
+A body is cut at 16 KB; a file over 1 MB, a memory file that is a symlink
+or a non\-regular file has a null body and is never read (an instruction
+file's symlink to a regular file is read through, its path the link's);
+50000 rows at most.
+It goes with no other flag but
+.B \-\-json
+and not in
+.BR \-\-requests ;
+an older host says
+.IR "the host's dch does not know \-\-memory" .
 .B \-\-chapter
 .I anchor
 prints one chapter's entries as one object
@@ -1954,9 +2171,10 @@ or, for
 .B \-\-clear
 in dch\-lite and for
 .BR \-\-chapter ,
-.B \-\-ref
+.BR \-\-ref ,
+.B \-\-search
 and
-.BR \-\-search ,
+.BR \-\-tasks ,
 .IR "no x\-ray corpus" ,
 or for
 .BR \-\-chapter ,
@@ -2102,9 +2320,18 @@ Past that it is dropped, from that point to the end of the text: the text is
 cut at its tail, never in the middle, and a bracketed paste cut that way
 still gets its end
 .RB ( ESC[201~ ).
+A text none of which had gone in yet (it waited behind the 4 MB) is dropped
+whole.
 .B \-\-send
 then exits 1 with
-.RI "dch: " name ": input dropped: the program is not reading (4 MB held)" .
+.RI "dch: " name ": input dropped: the program is not reading (4 MB held); the text's start may still be in its input" .
+Do not send again blindly: a beginning that got in stays typed in the program
+and the next input continues it, so a retried
+.B \-\-run
+would run the cut text and the command as one line.
+Clear the program's line first, once it reads again; for a shell, a
+.B \-\-send
+of Ctrl-U or Ctrl-C.
 A paste typed on an attach past 4 MB is cut the same way, without a message;
 the attach takes keys again once the program has read what waited.
 .TP
@@ -3037,10 +3264,15 @@ One code is transient, and means try again later (with the client's own
 backoff; there is no retry\-after field):
 .TP
 .B busy
-the host is at its connection limit (64 in all, or 16 from this peer, its
+the host is at its connection limit (64 in all, or 16 from this peer besides
+its
 .B \-\-ls\-json \-\-follow
-watch streams aside, 32 with them):
-.I this host is at its connection limit: try again shortly
+watch streams, 32 with them):
+.IR "this host is at its connection limit: try again shortly" .
+Also the answer to a 0x2e when this peer has 16 watch streams already
+(counted apart, so its other 16 connections stay free), and that connection
+closes:
+.I this machine has 16 session list streams here already
 .PP
 .B busy
 is never cached as a refusal, and says nothing about other users or
@@ -3119,7 +3351,8 @@ stderr bytes as they come, then
 .B 0x33
 .BR {\(dqexit\(dq:\fIN\fP} ,
 exactly one per request that runs. Not on an attached or watching
-connection, and a ctl connection takes only hello, list, 0x30 and 0x34
+connection (a watching one only reads the list: kill and rename there get
+.IR "watch connections cannot kill or rename" ), and a ctl connection takes only hello, list, 0x30 and 0x34
 (anything else: a 0x13, then the close). After the 0x33 the connection stays open for the next 0x30 (one
 at a time); with no frame for 300 s it closes. A
 .B 0x34
@@ -3177,6 +3410,8 @@ a session name that passes the attach name check and does not start with
 \-\-xray \fIn\fP \-\-json [\-\-follow|\-\-clear|\-\-chapter \fIanchor\fP]
 \-\-xray \fIn\fP \-\-ref \fIref\fP [\-\-scope \fIs\fP] [\-\-full] [\-\-budget\-ms \fIms\fP] \-\-json
 \-\-xray \fIn\fP \-\-search \fItext\fP \-\-json
+\-\-xray \fIn\fP \-\-tasks \-\-json
+\-\-xray \fIn\fP \-\-memory \-\-json
 .fi
 .RE
 .PP
@@ -3218,6 +3453,8 @@ rules apply: no
 two of
 .BR \-\-ref ,
 .BR \-\-search ,
+.BR \-\-tasks ,
+.BR \-\-memory ,
 .BR \-\-follow ,
 .B \-\-chapter
 and
@@ -3375,14 +3612,19 @@ each time it changes. A host whose hello lists
 is held on one connection (a 0x2e
 .I {"device_id":"dch\-<pid>"}
 after its list) and each 0x11 it pushes is a new look (the same list again
-is not); any other host, and the local rows, are read again every 2 s.
+is not, and its bytes are only compared, not parsed); any other host, and
+the local rows, are read again every 2 s. dch serve takes 16 such streams
+from one machine, apart from its 16 other connections; a 17th follower is
+refused the stream (busy) and polls that host every 2 s instead.
 Arrays come at most one per 200 ms; faster changes fold into the next.
 SIGINT and SIGTERM end it with 0 even while its reader has stopped reading;
 the line it was writing then may be cut short, and nothing follows it.
 A host that fails (no answer within 2 s, a dropped link, a stream silent for 35 s, a frame over 1 MiB,
 not a list, or a 0x13) shows its rows stale for 2 minutes after it last
 answered, as above, and is dialled again after 2 s, doubling up to 32 s; a
-refusal is said once and shows none. Without
+refusal (a 0x13 with a code) is said once and shows none, and any other
+0x13 on the stream (busy, or one with no code) ends only the stream: the
+host is polled every 2 s instead. Without
 .B \-\-remote
 it streams the local rows only and dials nothing.
 .B DCH_REMOTE_EVERY_MS
@@ -3647,6 +3889,85 @@ never on disk, never in core dumps.
 A terminal's own clear\-screen key may not clear X\-ray: it clears the
 window and sends nothing to the shell; run
 .BR clear .
+.TP
+.B tasks_command
+A program and its arguments (split by dch: whitespace, single and double
+quotes, a leading
+.B \(ti/
+is HOME; no shell) that answers
+.B \-\-tasks
+instead of the agent's own list.
+Your own config only: through
+.B dch serve
+the host's config and command run, and the asker sends only the session
+name.
+It runs where the session lives, in the session's cwd (else HOME), stdin
+.IR /dev/null ,
+in its own process group, with
+.BR DCH_SESSION ,
+.BR DCH_SESSION_CWD ,
+.B DCH_AGENT
+.RB ( claude ,
+.B codex
+or empty),
+.B DCH_AGENT_SESSION_ID
+and
+.B DCH_ROWS_MAX
+added to its environment.
+It prints one JSON object per line: an optional first
+.B {"title":"..."}
+line, then rows with the
+.B \-\-tasks
+fields
+.RB ( title
+required), bare or wrapped as
+.BR {"task":{...}} ;
+a line that is not an object, has no title or is over 64 KB is skipped
+and counted in the
+.B done
+line's
+.BR dropped ,
+as is the row seen past the row cap.
+Limits: 5 s, 32 MB of output, 50000 rows; past one the process group is
+ended and the rows so far stay.
+At least one row:
+.B source:command
+and the rows as they arrive; a stop or a non\-zero exit after them puts
+.B warn
+on the
+.B done
+line.
+No row: the built\-in source answers as without it; a failure or timeout
+adds a one\-line
+.B warn
+to its header, an empty answer with exit 0 says nothing; with no built\-in
+list either (no x\-ray corpus), a failure still answers with
+.BR source:none ,
+the
+.B warn
+and no row.
+The two are never mixed.
+.TP
+.B memory_command
+The same for
+.BR \-\-memory :
+the same run, environment, limits, fallback (the built\-in memory answers
+when it gives no row) and
+.BR warn .
+Rows have the
+.B \-\-memory
+fields
+.RB ( title
+required;
+.B body
+cut at 16 KB, then
+.BR cut:true ),
+bare or wrapped as
+.BR {"memory":{...}} ;
+the header has
+.BR \-\-memory 's
+keys with
+.BR source:command .
 .SH EXIT STATUS
 0 on success. Control verbs: 1 generic error, 2
 .B \-\-wait

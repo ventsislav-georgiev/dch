@@ -73,6 +73,9 @@
 ** Ended by another client; do not auto-retry. */
 #define TAKEN_JSON "{\"code\":\"taken\",\"message\":\"another client " \
                    "attached to this session\"}"
+/* A 0x2e past the peer's MAX_PER_PEER watch streams (QA 1.64.0 LOW-R15) */
+#define WATCH_BUSY_JSON "{\"code\":\"busy\",\"message\":\"this machine " \
+                        "has 16 session list streams here already\"}"
 /* A 0x30 while this connection's ctl runs (#118): refused, nothing closes */
 #define BUSY_JSON "{\"code\":\"busy\",\"message\":\"a ctl is already " \
                   "running on this connection\"}"
@@ -805,6 +808,8 @@ static volatile sig_atomic_t g_taken;
 /* SIGUSR2 from the parent (or set at fork): slots are short, so a warm ctl
 ** connection idles a tenth of g_ctl_idle (30 s), not 5 min (#122). Sticky. */
 static volatile sig_atomic_t g_press;
+/* set at fork: the watch streams this peer had then (QA 1.64.0 LOW-R15) */
+static int g_peer_watch;
 static char rq_text[RF_CTRL_MAX + 3];
 static unsigned char ctl_rq[RF_CTRL_MAX];	/* a follow's 0x30, to rerun */
 static size_t ctl_rqn;
@@ -1167,6 +1172,11 @@ on_kill_rename(struct conn *c, int kill_, const unsigned char *p, size_t n)
 	char name[NAME_CAP + 2], alias[1024];
 	int r = -1, ra = 0;
 
+	if (c->watching)	/* reads the list, nothing else (QA 1.64.0 LOW-R15) */
+	{
+		out_err(c, "watch connections cannot kill or rename");
+		return;
+	}
 	if (rq_json(&jp, rq_text, p, n) == 0)
 	{
 		r = jstr(&jp, 0, "name", name, sizeof name);
@@ -1729,6 +1739,15 @@ on_watch(struct conn *c, const unsigned char *p, size_t n)
 	}
 	if (c->watching)
 		return;		/* a second 0x2e is ignored */
+	/* watch streams have a cap of their own: the peer's other 16
+	** connections stay free for attach and commands (QA 1.64.0 LOW-R15);
+	** kids_note closes one that a race let past this */
+	if (g_peer_watch >= MAX_PER_PEER)
+	{
+		out_frame(c, 0x13, WATCH_BUSY_JSON, sizeof WATCH_BUSY_JSON - 1);
+		c->closing = 1;
+		return;
+	}
 	if (list_payload(&b) < 0)
 	{
 		free(b.p);
@@ -2508,6 +2527,17 @@ kids_note(const char *line)
 		kill(old->pid, SIGTERM);
 		old->dev[0] = '\0';
 	}
+	/* the peer's watch cap, for streams that started together, each
+	** before it could see the others (on_watch has refused the rest) */
+	for (n = 0, i = 0; i < nkids; i++)
+		n += kids[i].ip == k->ip && kids[i].dev[0];
+	if (n > MAX_PER_PEER)
+	{
+		slog("closing pid %ld: its peer has %d watch streams already",
+		     (long)k->pid, MAX_PER_PEER);
+		kill(k->pid, SIGTERM);
+		k->dev[0] = '\0';
+	}
 }
 
 static void
@@ -2613,6 +2643,7 @@ accept_one(int lfd, int nr)
 	** and this one idle out sooner, so warm ctl connections cannot hold
 	** the slots for CTL_IDLE_MS. */
 	g_press = same + 1 >= MAX_PER_PEER / 2 || nkids + 1 >= MAX_CONN / 2;
+	g_peer_watch = all - same;
 	for (i = 0; g_press && i < nkids; i++)
 		if (kids[i].ip == ip || nkids + 1 >= MAX_CONN / 2)
 			kill(kids[i].pid, SIGUSR2);

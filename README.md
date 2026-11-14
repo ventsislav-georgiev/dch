@@ -282,7 +282,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.65.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.66.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -385,7 +385,9 @@ dch --xray <n> --clear --json                   # empty a shell session's X-ray 
 dch --xray <n> --follow --json                  # the same object, then its deltas as NDJSON until the session ends
 dch --xray <n> --ref <ref> [--scope session|project|all] [--full] [--budget-ms <ms>] --json  # one ref's mentions and definitions, NDJSON
 dch --xray <n> --search <text> --json           # the newest 50 places a word or phrase was said
+dch --xray <n> --memory --json                  # its memories and instruction files, JSON lines
 dch --xray <n> --chapter <anchor> --json        # one chapter's entries (prompt, replies, tool calls, output)
+dch --xray <n> --tasks --json                   # the session's task list (TaskCreate, TodoWrite, update_plan), JSON lines
 dch --agent-list [--json]                       # native Claude peers
 dch --agent-send <peer> <message...>            # message one (from a Codex session)
 ```
@@ -432,8 +434,8 @@ someone is watching is invisible to them.
 | Verb | Does | Exit codes |
 | --- | --- | --- |
 | `--spawn <n> [--size CxR] [--env K=V]... [cmd...]` | Start headless session (default: `$SHELL`, 80x24 or `$COLUMNS`/`$LINES`). `--env` (max 32, first `=` splits) adds variables to the child; reserved keys (`DCH_SESSION`, `TERM` fixup) always win. Like `--revive` (and a plain `dch <new>`), it drops the calling Claude Code session's identity (`CLAUDECODE`, `CLAUDE_CODE_*` session vars), plus `GIT_EDITOR` and the other harness vars when `CLAUDECODE` is set, and sets `LC_TERMINAL=ghostty` unless the caller has it (dch keeps OSC 8 links, but under `TERM=xterm-256color` with no `TERM_PROGRAM` Claude Code would strip its statusline's, and `LC_TERMINAL` is the one signal its check reads that supports-hyperlinks and other Node CLIs ignore; ssh sends it on, by macOS's default `SendEnv LC_*`). Like any session variable it reaches every program in the session, not only Claude Code; a tool that keys on `ghostty` may assume Ghostty-only features (kitty graphics, for one) that the terminal you attach from may lack. dch sets no `FORCE_HYPERLINK`: those CLIs honour it before they check for a terminal, so it put OSC 8 into pipes and files (`stylelint t.css > out`, an agent's Bash tool); a caller's own value still reaches the session. An explicit `--env` (`--env LC_TERMINAL=` included) still wins. Prints the name. A program that cannot be executed is an error (`dch: <n>: <cmd>: <reason>`); one that runs and exits at once is not. | 0 ok, 1 exists/failed/not executable/bad --env |
-| `--xray <n> --json` | One JSON object: the session's corpus, chapters and refs (see [X-ray queries](#x-ray-queries---xray)). Without `--json` or any other flag: the full-screen [X-ray view](#x-ray-view-dch---xray-n) (`host:name` too; a non-terminal stdout exits 2). `--clear` empties a shell's ring instead; `--ref` streams one ref's lines; `--search` finds a word or phrase; `--follow` streams the object and then its changes; `--chapter` prints one chapter's entries. `<n>` as `host:name` runs it on that host (dch serve 1.55.0+); `host:name --requests --json` holds one connection there for many requests read off standard input. Must be the first argument. | 0 ok, 1 no such session/ambiguous/no corpus, 2 usage, 3 read failure; remote: 4 gate, 6 host lacks `xray`, 7 unreachable |
-| `--send <n> <text...>` | Type text (joined with spaces), no enter. Input the program is not reading waits in the session, up to 4 MB (see [Honest caveats](#honest-caveats)); text past that is dropped to its end and `--send` says `dch: <n>: input dropped: the program is not reading (4 MB held)`. | 0 ok, 1 input dropped |
+| `--xray <n> --json` | One JSON object: the session's corpus, chapters and refs (see [X-ray queries](#x-ray-queries---xray)). Without `--json` or any other flag: the full-screen [X-ray view](#x-ray-view-dch---xray-n) (`host:name` too; a non-terminal stdout exits 2). `--clear` empties a shell's ring instead; `--ref` streams one ref's lines; `--search` finds a word or phrase; `--tasks` lists the session's task list; `--memory` lists its memories and instruction files; `--follow` streams the object and then its changes; `--chapter` prints one chapter's entries. `<n>` as `host:name` runs it on that host (dch serve 1.55.0+); `host:name --requests --json` holds one connection there for many requests read off standard input. Must be the first argument. | 0 ok, 1 no such session/ambiguous/no corpus, 2 usage, 3 read failure; remote: 4 gate, 6 host lacks `xray`, 7 unreachable |
+| `--send <n> <text...>` | Type text (joined with spaces), no enter. Input the program is not reading waits in the session, up to 4 MB (see [Honest caveats](#honest-caveats)); text past that is dropped to its end (all of it when none had gone in yet) and `--send` says `dch: <n>: input dropped: the program is not reading (4 MB held); the text's start may still be in its input`. | 0 ok, 1 input dropped |
 | `--run <n> <text...>` | `--send` + enter. Into a session whose Claude Code runs — as its command or typed into its shell — the text goes through `--say`'s composer gate instead: typed only over an empty composer, Enter pressed once it shows and again while it stays (Claude Code folds an Enter sent with the text into the paste). A `/command` is typed raw, a message pasted. A shell or any other program (also one in front of a Claude suspended with Ctrl-Z), a master without a mirror (`DCH_NO_VT`), dch-lite and your own session (`$DCH_SESSION`) keep the plain burst. A gate failure prints `dch: <n>: <reason> — <why>` on stderr: `prompt` and `draft` (nothing typed), `not_typed` (the text never showed in the composer, no Enter), `not_submitted` (it stayed there through every Enter); `no_screen` when the composer is not on screen; `interrupted`, `withdrawn` or `draft_left` on a SIGINT, SIGTERM or SIGHUP, as for `--say`. | 0 ok, 1 gate failure / input dropped (plain burst, as `--send`) |
 | `--keys <n> <key...>` | Encode+send keys mode-aware: `ctrl+c`, `alt+x`, `shift+tab`, `up`, `f5`, `enter`, `esc`, single chars. | 0 ok, 1 unknown key |
 | `--read <n> [--ansi] [--cursor] [--recent [N]]` | Print rendered screen. `--ansi` keeps colors and OSC 8 hyperlinks (each line opens and closes its own, so a `--recent` cut never splits one); `--recent [N]` = last N lines incl. scrollback (default 100; the mirror keeps at least `DCH_SCROLLBACK` lines of history, default 2000, max 100000, set when the session is spawned; at most about one page more, ~600 lines at 80 cols, ~240 at 200; 0 keeps only the screen); `--cursor` also prints `cursor <row> <col> <visible> <wrap>` on **stderr** (see below). Plain output drops all styling — to tell a TUI's own ghost text (placeholders, argument hints) from what the human typed, read with `--ansi --cursor`; see [docs/ghost-text.md](docs/ghost-text.md). | 0 ok, 1 error, 3 no mirror |
@@ -444,7 +446,7 @@ someone is watching is invisible to them.
 | `--meta <n> '<json>'` | Attach one JSON object of metadata to the session (see [Optional: session metadata](#optional-session-metadata)); `clear` removes it. Replaced atomically, last write wins, never interpreted; a byte-identical push is a no-op; rejected input leaves the stored object unchanged. Removed automatically when the session's program exits. | 0 ok, 1 no session / not a single-line JSON object ≤ 16 KB |
 | `--wait <n> --state <s[,s...]> [--timeout ms]` | Block until the state matches any of the comma list (e.g. `idle,blocked,done` = "turn over"); prints the matched state. `active` is accepted as an alias for `working`. Polls every 100 ms. | 0 hit, 2 timeout, 1 no session |
 | `--ls-json` | All sessions as JSON: `[{"name","alias","harness","activity_epoch","state","version","agents","meta","meta_epoch","auto_allowed","claude_session_id","transcript_path","claude_foreground","cols","rows","clients"}]`. `cols` and `rows` are the pty size the session's master holds (set by the attached clients' windows, or `--spawn --size`), `clients` how many clients are attached right now; read in the same control round trip as the rest, never by attaching or resizing, and left out (not `0`) for a master too old to report them and for `--remote` rows. Every row ends with `"cwd"`, after every other key: the directory the session started in, from its live history record, `null` when it has none (a master from before history records) or the record already says it ended; a `--remote` row's is the host's, from its `dch serve` list, `null` from a server that does not send one. `harness` is the name of the Claude Code or Codex session running inside, or `""`; the real `name` remains separate. `state` follows the same resolution rule as `--status`. `version` is the dch version of the master serving that session, or `""` for a master old enough not to report one. `agents` is the number of live subagents on Claude Code's agent panel (the `⏺ main` block under the prompt), `0` when no panel is on screen — including while a prompt covers it — or `DCH_NO_DETECT=1` is set. `meta` is the object last pushed with `--meta`, verbatim, or `null`; `meta_epoch` is when that content last changed (epoch seconds, like `activity_epoch`), `0` with no meta. `auto_allowed` is the permission prompt the master answered last with [auto-allow](#auto-allow), `{"at":<epoch seconds>,"title":"<the dialog's first line, e.g. Bash command>"}`, or `null`; cleared when the session's program exits, like `meta`. `claude_session_id` is the `sessionId` of the one live interactive Claude Code under the session's program, read fresh from its own `<config>/sessions/<pid>.json` (pid descending from the program, `procStart` matching the process; `CLAUDE_CONFIG_DIR` honoured), so it follows `/clear` and resume; `null` when no Claude runs there, when more than one does (Claudes below another one, such as a test's fake Claude under one of its tool calls, count as that one), once it exits, or when the id is not a UUID. `transcript_path` is that conversation's absolute `<config>/projects/<dir>/<sessionId>.jsonl` when exactly one such file exists, else `null` (also right after `/clear`, until the new conversation writes its first line). `claude_foreground` is `true` while that Claude is the session terminal's foreground job, `false` while it is not — suspended with Ctrl-Z or sent to the background, a shell or another program in front, which is what reads typed keys then; left out when `claude_session_id` is `null` or the process groups cannot be read. A suspended Claude keeps its `claude_session_id` and `transcript_path`. Read from the kernel by the client, so a master of any version gets it. | 0 |
-| `--ls-json [--remote] --follow` | The `--ls-json` array (with `--remote`, its remote rows too), then the whole array again, one line, each time it changes; nothing while it does not. See [Following the list](#following-the-list). Runs until SIGINT, SIGTERM or the reader closes the pipe. | 0 stopped / reader closed, 1 out of memory, 2 bad usage |
+| `--ls-json [--remote] --follow` | The `--ls-json` array (with `--remote`, its remote rows too), then the whole array again, one line, each time it changes; nothing while it does not. See [Following the list](#following-the-list). Runs until SIGINT, SIGTERM or the reader closes the pipe; a stdout closed from the start (`>&-`) exits 0 at once. | 0 stopped / reader closed, 1 out of memory, 2 bad usage |
 | `--restart <n>` \| `--restart --all` `[--include-agents] [-f] [--json]` | Re-exec the session's master onto the current `dch` binary, in place — the program inside keeps running (see [Upgrading a live session](#upgrading-a-live-session)). `--all` restarts only sessions whose `version` differs from this binary's; `-f` restarts all of them. With `--include-agents`, it then restarts the stale Claude Code agents of those sessions — Claude as the session's command; one typed into its shell is skipped (`in_shell`); every session with `--all`, only `<n>` otherwise; `-f` forces current agents too (see [Restarting Claude Code agents](#restarting-claude-code-agents)). Without the flag no agent is touched, `--all` included. `--include-agents` without `--restart` is a usage error. `--json`: stdout is NDJSON, the master pass included, with or without `--include-agents` (see [Machine-readable output](#machine-readable-output)). | 0 ok, 1 failed / master too old / an agent restart failed |
 | `--respawn <n> [-- cmd...]` | Arm a one-shot respawn: when the session's program next exits, the master keeps the session (same socket, pty size, attached clients) and starts `cmd` in its place. No `cmd` arms a *hold*: the session stays up childless until a second `--respawn <n> -- cmd` starts one, or until `DCH_HOLD_MS` (default 120000) ends it. An arm that nothing consumes expires after `DCH_RESPAWN_TTL_MS` (default 300000); both are read from the master's environment. `--restart` refuses while a respawn is armed or held. | 0 ok, 1 no session / refused / master too old |
 | `--respawn <n> --cancel` | Drop a pending arm. On a held (childless) session it ends the session. | 0 ok, 1 no session |
@@ -785,8 +787,15 @@ old and still current. Pair it with `state` and
   input is dropped, and from that point to its end: a `--send` or a paste is
   cut at its tail, never in the middle, and a bracketed paste cut that way
   still gets its end (`ESC[201~`), so the program sees a shorter paste, not an
-  open one. `--send` and `--run` then exit 1 with `dch: <n>: input dropped:
-  the program is not reading (4 MB held)`. An attach takes keys again once the
+  open one. A `--send` or `--run` none of whose text had gone in yet (it
+  waited behind the 4 MB) is dropped whole: nothing of it is typed.
+  `--send` and `--run` then exit 1 with `dch: <n>: input dropped: the program
+  is not reading (4 MB held); the text's start may still be in its input`.
+  Do not send again blindly: a beginning that got in stays typed in the
+  program and the next input continues it (a retried `--run` would run the
+  cut text and the command as one line). Clear the program's line first,
+  once it reads again: for a shell, `dch --send <n> $'\x15'` (Ctrl-U) or
+  `dch --keys <n> ctrl+c`. An attach takes keys again once the
   program has read what waited; there it is not reported (the trace,
   `DCH_DEBUG`, has one line). Input still waiting is lost on `--restart`.
 
@@ -807,6 +816,8 @@ running sessions.
 | `remote_hosts` | empty: your tailnet peers; `off`: none; else a `[label=]host[:port],...` list (see [Remote hosts](#remote-hosts)) | empty |
 | `focus_resize` | `true`/`false`: an attached client takes the session's size when its window gains focus (see [The focused client sets the size](#the-focused-client-sets-the-size)) | `true` |
 | `xray_ring` | `0` (off) to `16M` (`K`/`M` suffixes, rounded up to 64 KiB): the shell output each new session keeps in its master's memory for X-ray, the rows that scroll off its primary screen, as text, with OSC 133 prompt marks. Read when a session starts (see [Shell output ring](#shell-output-ring-x-ray)); kept across `--restart`; never on disk, never in core dumps. dch-lite keeps none | `2M` |
+| `tasks_command` | a program and its arguments, run with no shell: X-ray's task list (`--tasks`) from your own command; with no row the agent's own (see [Your own task or memory list](#your-own-task-or-memory-list-tasks_command-memory_command)). Your own config only; through `dch serve` the host's | empty |
+| `memory_command` | the same for X-ray's memory list (`--memory`) | empty |
 
 ```sh
 dch --config                         # the path, then every known key's effective value
@@ -895,7 +906,9 @@ the picker. The view asks the same engine as `--json` and holds its index as
 open. It writes nothing to disk. Text from the session (titles, lines,
 passages) is drawn with every control and bidi character shown as `?`.
 
-The view has four tabs, three for a shell session (no Responses):
+The view has four tabs, three for a shell session (no Responses), a
+fifth, Tasks, when the session keeps a task list, and a sixth, Memory, when
+it has memories or instruction files:
 - **Prompts** (**Commands** for a shell session): one row per thing you
   typed, a prompt to Claude or Codex, a command to a shell. `/` filters.
   `Enter` opens the prompt read-only with everything up to the next one
@@ -926,10 +939,12 @@ The view has four tabs, three for a shell session (no Responses):
   and attaches to the live session, as `dch -a <n>` does (`host:name` too;
   from the picker's `x`, as the picker's `Enter`; the `-k` and `-d` pickers
   say it is not theirs). On an ended session `o` says so and the view
-  stays. Keys typed with `o` that the view has not read yet (a second `o`,
-  `Enter`, a held `o`) are dropped; a key typed once the attach is up
-  reaches the session. The attach opens at the session's live screen, not at the
-  prompt.
+  stays. Keys typed with `o` (a second `o`, `Enter`) are dropped until the
+  keyboard pauses for 100 ms (1 s inside a bracketed paste), for at most
+  2 s; a key typed after the pause reaches the session. A key held down is
+  not covered: its repeats start after a longer pause and reach the
+  session. The attach
+  opens at the session's live screen, not at the prompt.
 - **Responses** (Claude and Codex sessions): what the agent showed you at
   the end of each turn, as Claude Code's Focus view does: its answer, or
   its summary of the work. Newest first, so the latest answer is on top
@@ -943,7 +958,9 @@ The view has four tabs, three for a shell session (no Responses):
   the answer (at the prompt's end when it cannot find it), and `q` comes
   back to the item. `/` filters on the prompt and the answer; `n` and `o`
   work as on Prompts. The tab's count is the items shown without `n`. A
-  host older than 1.63.0 sends no answers, and the tab says so.
+  host older than 1.63.0 sends no answers: the tab says `No responses yet`,
+  as it does for a session with none yet (nothing the host sends tells the
+  two apart).
 - **Refs**: what the session touched: the pull requests, issues and tickets
   it mentions, one row each, a faint line over them saying so; `a` shows its
   files, commits and URLs too, and the footer says how many are hidden. Rows
@@ -991,12 +1008,46 @@ The view has four tabs, three for a shell session (no Responses):
   the search stopped early (too long, too much to read, or the history
   changed as it read); the hits shown stand. The tab's count is the hits,
   `50+` past the cap, nothing before a search. `j` `k` move hit by hit;
-  `Enter` reads the hit's prompt, scrolled to the text, and `q` comes back
+  `Enter` reads the hit's prompt, scrolled to that hit (the reply or tool
+  output it is in, not the text's first place in the prompt), and `q` comes back
   to the hit; on a hit outside the prompts the status line says the view
   cannot open it. `o` works as on Prompts. A shell session searches its
   ring; dch-lite and `xray_ring = 0` have none, and the list says `no x-ray
   corpus`. A remote view searches on the host; a host older than 1.63.0
   does not know `--search`, and the list says so.
+- **Tasks** (the last tab, only when the session has a task list: Claude
+  Code's tasks or todos, Codex's plan): what was done, when, what is
+  pending and what is being worked on, from `--tasks`. Rows are under faint
+  group lines, each counted: In progress, Pending, Done (newest first),
+  and Dropped when there are any. Each row is a mark, the task's id, its
+  title (a task in progress shows what it is doing), and at the right a
+  label that says more than the status (a ledger's `PARKED`), what blocks
+  it (`blocked by 9, 12`) and its age (`5m`, `3h`, `2d`). The tab's count
+  is the open tasks, in progress and pending. `Enter` reads the prompt that
+  last changed the task, and `q` comes back to it; a task with no prompt
+  opens a card with what is known of it (title in full, status, note,
+  times, blocked by, group, URL). `/` filters on the id, title, note and
+  label; `o` works as on Prompts. The list is asked for after the prompts
+  have shown and is drawn as it comes; it is read again when you open the
+  tab and, while the session runs, at most every 5 seconds while the tab
+  shows. A faint line under the rows gives the list's warning, and says
+  when the history was too long to read whole. A shell session, dch-lite,
+  an empty list and a host older than this dch have no Tasks tab.
+- **Memory** (the last tab, only when `--memory` lists something): the
+  session's memories and the instruction files in force (CLAUDE.md,
+  AGENTS.md), under faint group lines, each counted: This session (what
+  this session wrote or loaded, newest first), Memories (newest first),
+  Instructions. Each row is the memory's title, its kind and note faint,
+  and at the right `wrote` or `loaded` and its age; an instruction file
+  shows its path, short. The tab's count is every row. `Enter` opens a card
+  with the memory's path, kind, scope and time, then its text, scrollable;
+  a text cut at 16 KB says so and names the file. On a card of a memory
+  this session wrote or loaded, `Enter` reads that prompt, and `q` comes
+  back to the card. `/` filters on the id, title, note, kind, path and
+  text; `o` works as on Prompts. The list is asked for after the prompts
+  have shown; while the session runs it is read again every 30 seconds
+  while the tab shows. A shell session, dch-lite, no memory and a host
+  older than this dch have no Memory tab.
 
 A ref typed after `/` (a ticket, issue, pull request, commit, file or URL,
 as `--ref` takes it) opens its card with `Ctrl-R`, on any tab, while
@@ -1029,16 +1080,16 @@ not clear X-ray; run `clear`".
 
 | Key | List | Card / reader |
 | --- | --- | --- |
-| `Tab` `→` `l` / `Shift-Tab` `←` `h` | the next / previous tab (Prompts, Responses, Refs, Search) | `←` `h`: back |
+| `Tab` `→` `l` / `Shift-Tab` `←` `h` | the next / previous tab (Prompts, Responses, Refs, Search, Tasks, Memory; a narrow window drops the counts, then shows the current tab and the whole neighbours that fit, `‹` `›` where more are) | `←` `h`: back |
 | `↑` `↓` / `j` `k`, `PgUp` `PgDn`, `g` `G` | move | move / scroll; reader: at an end, again for the next / previous prompt |
 | `]` `[` | | reader: the next / previous prompt |
-| `Enter` | read the prompt (Responses: at its answer; Search: at the hit) / open the card; Search, typing: search | card: read the mention's prompt |
+| `Enter` | read the prompt (Responses: at its answer; Search: at the hit; Tasks: the one that last changed the task, or its card) / open the card (Refs, Memory); Search, typing: search | card: read the mention's prompt; Memory: the prompt that wrote or loaded it |
 | `/` | filter; Search: type the text to search | |
 | `Ctrl-R` | with a ref typed after `/`: open its card, a row for it or not, its kind hidden or not; other words: search them on Search | |
 | `a` | Refs: show / hide the files, commits and URLs | |
 | `t` | Refs: show / hide the temp files | |
 | `n` | Prompts, Responses: show / hide the auto rows (auto prompts, the task notifications, and compactions) | |
-| `o` | Prompts, Responses, Search: attach to the session (in the chord: back to it) | card, reader: the same |
+| `o` | Prompts, Responses, Search, Tasks, Memory: attach to the session (in the chord: back to it) | card, reader: the same |
 | `f` `p` `y` | | card: full scan, other projects / this project (`p` was `o` before 1.61.0), copy |
 | `q` | quit | back |
 | `Esc` | clear the filter, else quit; Search, typing: stop typing, the last results kept | back |
@@ -1516,8 +1567,10 @@ ref (`dch: not a ref`), relative paths against the session's cwd.
   its first whole line on, by a decoder that starts there with the cwd the
   full read has there (a mention in the turn the window starts in has
   `chapter: null`, unless the window starts the file, since a prompt there
-  may continue an older turn; a tool result whose call is in an older window
-  gives no definition). A window whose raw bytes cannot hold the ref is not
+  may continue an older turn; so does one in a turn the window saw begin
+  only after a subagent's first record there or a tool result whose call is
+  in an older window, which the full read may not count as steps; such a
+  tool result gives no definition). A window whose raw bytes cannot hold the ref is not
   decoded (its bytes and long lines still count), so a ref only in old turns
   is found inside the budget too. Its lines come newest window first, in
   file order within a window, and the file's `mention` lines are its newest
@@ -1712,6 +1765,158 @@ traced. On `host:name` it runs on that host's `dch serve`; a host whose dch
 predates `--search` says `dch: <host>: the host's dch does not know --search`
 (exit 1).
 
+`dch --xray <n> --tasks --json` prints the session's task list as JSON lines,
+the way `--ref` prints its lines, and exits 0:
+```json
+{"schema":1,"session":"api","session_id":"…","source":"claude","title":null,"partial":false}
+{"task":{"id":"12","title":"Fix the login test","status":"active","label":"in_progress","active":"Fixing the login test","note":null,"created":"2026-11-14T07:01:02Z","updated":"2026-11-14T07:09:40Z","chapter":"f1a2:4096","created_chapter":"f1a2:0","blocked_by":["9"],"url":null,"group":null}}
+{"done":true,"count":1,"dropped":0}
+```
+- **Sources.** Claude Code: `TaskCreate` and `TaskUpdate` (the id is the
+  one the create's result gives; a create whose result has not arrived is
+  `?<n>`, pending), or the older `TodoWrite`. Codex: `update_plan`. A
+  session that used both Claude kinds shows the kind it used last.
+  `TodoWrite` and `update_plan` replace the whole list each call; their ids
+  are the 1-based positions, and a row keeps its `created` and
+  `created_chapter` while its text at that position stays. A subagent's
+  (sidechain) records are not the session's. `source` is `claude`, `codex`
+  or `none` (a shell, or no task record: no task lines).
+- **Fields.** `status` is `pending`, `active`, `done` or `dropped`
+  (`pending`, `in_progress`, `completed`, `deleted`); `label` is the
+  source's own word. A deleted task stays, `dropped`. `title`, `active`
+  (the text shown while it runs) and `note` (the description's first line)
+  are one line each, cut as chapter titles are. `created` and `updated` are
+  ISO 8601 UTC from the records' timestamps, or `null`. `chapter` is the
+  anchor of the chapter that last changed the task, `created_chapter` the
+  one that created it; both open with `--chapter`. `blocked_by` lists ids.
+  `url` and `group` are `null`. A `TaskUpdate` for an id the list does not
+  hold, or with an unknown status word, changes nothing.
+- **Caps.** The transcript is read as `--json` reads it (the 3.8 range):
+  `partial: true` when records may be past it. The newest 50000 tasks are
+  kept; `dropped` counts the ones left out. A line is at most 64 KB. A bad
+  or oversized transcript line is skipped. No `done` line means the answer
+  was cut.
+
+`--tasks` goes with no other flag but `--json` (`dch: bad usage: --tasks and
+--ref`, also with `--search`, `--chapter`, `--clear` or `--follow`), and not
+in `--requests`. Nothing is written to disk. A session whose transcript is
+gone says `dch: no x-ray corpus` (exit 1). On `host:name` it runs on that
+host's `dch serve`; a host whose dch predates `--tasks` says `dch: <host>:
+the host's dch does not know --tasks` (exit 1).
+
+`dch --xray <n> --memory --json` lists what `<n>`'s agent remembers and
+the instruction files in force, as JSON lines (#322):
+`{"schema":1,"source":"claude|codex|none","title":null,"partial":bool}`,
+then one `{"memory":{"id","title","note","kind","scope","updated","path","session","chapter","body"}}`
+per file (`"cut":true` after `body` when it was cut), then
+`{"done":true,"count":N,"dropped":M}`.
+- **Memories** (Claude Code): the files of the `memory/` directory beside
+  the session's transcript: one row per file the `MEMORY.md` index names
+  (`- [Title](file.md) — hook`; a target with a `/` or a leading dot is
+  not one), one per other `*.md` there; never the index itself, a dot file
+  or a directory. `id` is the name without `.md`; `title` the index's
+  title, else the frontmatter's `name`, else `id`; `note` the index's hook,
+  else `description`; `kind` the frontmatter's `type` (top level or
+  `metadata.type`) when it is `user`, `feedback`, `project` or
+  `reference`, else `null`. No transcript: no memory rows.
+- **Instruction files**, `kind: "instructions"`, `id` and `title` their
+  path. Claude Code: the managed `CLAUDE.md` (`scope: "managed"`), the
+  config dir's `CLAUDE.md` and `rules/**/*.md` (`user`), then for each
+  directory from `/` down to the cwd (32 at most, so `~/CLAUDE.md` above a
+  repo counts) its `CLAUDE.md`,
+  `.claude/CLAUDE.md`, `CLAUDE.local.md` and `.claude/rules/**/*.md`
+  (`project`); `AGENTS.md` and `.claude/AGENTS.md` instead when none of
+  those is found. Codex: `$CODEX_HOME` (else `~/.codex`) `AGENTS.override.md`,
+  else `AGENTS.md`, then the same per directory from the `.git` root (no
+  root: the cwd only).
+- **`session` and `chapter`.** `"wrote"` when a main-thread tool call wrote
+  the file (Write, Edit, MultiEdit; a shell command naming its full path
+  with a `>` redirect or `tee`, `rm`, `mv`, `touch`, `truncate`, `sd`,
+  `sed -i`, `perl -i`; a Codex `apply_patch`), `"loaded"` when one read it
+  (Read; any other shell command naming it), else `null`; wrote wins.
+  `chapter` is the newest such turn's `anchor` from `--json`. The
+  transcript is read in `--json`'s range; `partial: true` when that range
+  may have dropped records.
+- **Order and caps.** Rows touched this session first, the newest first;
+  then the other memories, newest `updated` (the file's mtime, UTC) first;
+  instruction files last, in load order. `body` is the file's text, cut at
+  16 KB (and further if its line would pass 64 KB); a file over 1 MB, a
+  memory file that is a symlink, or anything that is not a regular file has
+  `body: null` and is never followed or read. An instruction file may be a
+  symlink: one to a regular file is read through, `path` the link's own. 50000 rows at most (`dropped` counts the rest).
+  Nothing is written.
+
+`--memory` goes with no other flag but `--json` (`dch: bad usage: --memory
+and --follow`) and not in `--requests`. On `host:name` it runs on that host;
+a host whose dch predates it says `dch: <host>: the host's dch does not know
+--memory` (exit 1).
+
+#### Your own task or memory list (`tasks_command`, `memory_command`)
+
+X-ray shows the agent's own task list and memory. To show your own instead
+(a ledger, an issue tracker, a checklist, a notes folder), set a command in
+your dch config:
+```
+tasks_command = ~/bin/my-tasks --open
+memory_command = ~/bin/my-notes
+```
+- **Run.** dch splits the line into words, with no shell: single and
+  double quotes group words, a leading `~/` is your home, and `$VARS`, `;`,
+  `|`, globs and backticks are plain text. It runs on the machine where the
+  session lives (through `dch serve`: that host's config and command; the
+  asker sends only the session name), in the session's folder (else your
+  home), stdin `/dev/null`, in its own process group. Its environment adds
+  `DCH_SESSION` (the session name), `DCH_SESSION_CWD`, `DCH_AGENT`
+  (`claude`, `codex` or empty), `DCH_AGENT_SESSION_ID` (the agent's
+  conversation id, or empty) and `DCH_ROWS_MAX`.
+- **Lines.** One JSON object per line on stdout; rows show as they arrive.
+  An optional first line `{"title":"…"}` names the list (the header's
+  `title`). A row has `title` (required), `id`, `status` (`pending`,
+  `active`, `done`, `dropped`, or `in_progress`, `completed`, `deleted`; any
+  other word is pending with the word as its `label`), `label`, `active`,
+  `note`, `created`, `updated` (passed through as text: a reader treats a
+  value that is not ISO 8601 as `null`), `blocked_by` (ids), `url` and
+  `group`, bare or wrapped as `{"task":{…}}`. A line that is not a JSON
+  object, has no title or is over 64 KB is skipped; the `done` line's
+  `dropped` counts those, plus the row seen past the row cap.
+- **Limits.** 5 s in all, 32 MB of output, 50000 rows (the first kept).
+  Past a limit the process group is ended and the rows so far stay, so
+  print what matters first.
+- **Fallback.** At least one row: the command is the source
+  (`"source":"command"`), and the header comes with the first row. No row:
+  the built-in source answers exactly as without the command; a failure or
+  timeout adds a one-line `warn` to its header (with stderr's first line),
+  an empty answer with exit 0 says nothing. With no built-in list either
+  (no X-ray corpus), a failure still answers: `"source":"none"`, the
+  `warn`, no row. Rows and then a stop or a
+  non-zero exit put the `warn` on the `done` line. The two sources are
+  never mixed.
+
+A markdown checklist (`TODO.md` in the session's folder):
+```sh
+#!/bin/sh
+echo '{"title":"TODO.md"}'
+grep -E '^[[:space:]]*[-*] \[[ xX]\] ' TODO.md 2>/dev/null | while IFS= read -r l; do
+  case $l in *'[ ]'*) s=pending ;; *) s=done ;; esac
+  t=$(printf '%s' "${l#*] }" | sed 's/\\/\\\\/g; s/"/\\"/g')
+  printf '{"title":"%s","status":"%s"}\n' "$t" "$s"
+done
+```
+The open GitHub issues of the session's repository:
+```sh
+#!/bin/sh
+echo '{"title":"GitHub issues"}'
+exec gh issue list --limit 200 --json number,title,url,updatedAt \
+  --jq '.[] | {id: .number, title, url, updated: .updatedAt} | tojson'
+```
+`memory_command` answers `--memory` by the same rules: the same run,
+environment, limits, fallback (the built-in memory answers when it gives no
+row) and `warn`. A row has `title` (required), `id`, `note`, `kind`,
+`scope`, `updated`, `path`, `session`, `chapter` and `body` (cut at 16 KB,
+then `"cut":true`), bare or wrapped as `{"memory":{…}}`; a lone first
+`{"title":"…"}` line names the list. Its header has `--memory`'s keys, with
+`"source":"command"`.
+
 `dch --xray <n> --follow --json` streams NDJSON, each line with
 `schema:1`. The first line is `{"schema":1,"snapshot":{…}}`, holding the
 `--json` object. Then come deltas as the corpus grows, at most one batch
@@ -1854,8 +2059,8 @@ system, like any name.
 | Exit | Meaning |
 | --- | --- |
 | 0 | the object was printed (the view: quit); a `--follow` ended with its session, its connection, or its reader |
-| 1 | `dch: no such session` (also a master that hangs up after the connect, before its answer is complete, in every form: nothing more is written; `--ref` keeps the lines already out and writes no `done`; `--follow` once its snapshot is out exits 0 instead), `dch: ambiguous session`, `dch: no x-ray corpus` (`--clear`, `--ref`, `--search`, `--chapter`), `dch: chapter gone` (`--chapter`: no chapter has that anchor now), `dch: busy` (a fifth `--follow` on one shell; also after the snapshot, when a stalled follower's slot went to a fifth: the stream stopped, the session did not end) |
-| 2 | bad usage: `--json` missing (the view: any other flag, or a stdout that is not a terminal), a flag twice, `--follow` with `--ref` or `--clear`, `--chapter` with `--ref`, `--follow` or `--clear`, `--search` with any of them, a flag of a later release, `--xray` not first, a bad `<n>`, a bad `--ref`, `--chapter` anchor, `--scope`, `--budget-ms` or `--search` text |
+| 1 | `dch: no such session` (also a master that hangs up after the connect, before its answer is complete, in every form: nothing more is written; `--ref` keeps the lines already out and writes no `done`; `--follow` once its snapshot is out exits 0 instead), `dch: ambiguous session`, `dch: no x-ray corpus` (`--clear`, `--ref`, `--search`, `--tasks`, `--chapter`), `dch: chapter gone` (`--chapter`: no chapter has that anchor now), `dch: busy` (a fifth `--follow` on one shell; also after the snapshot, when a stalled follower's slot went to a fifth: the stream stopped, the session did not end) |
+| 2 | bad usage: `--json` missing (the view: any other flag, or a stdout that is not a terminal), a flag twice, `--follow` with `--ref` or `--clear`, `--chapter` with `--ref`, `--follow` or `--clear`, `--search`, `--tasks` or `--memory` with any of them, a flag of a later release, `--xray` not first, a bad `<n>`, a bad `--ref`, `--chapter` anchor, `--scope`, `--budget-ms` or `--search` text |
 | 4, 6, 7 | a remote `host:name` only: refused by the host's gate; the host lacks `xray`; the host is unreachable or the connection was lost |
 | 3 | `dch: X-ray failed on this session`: the session answered garbage, the transcript could not be read (it is there, but opening or reading it failed), memory ran out, or a write failed with an error other than a closed pipe |
 
@@ -2544,7 +2749,7 @@ do not retry. One code is transient and means "try again later":
 
 | `code` | When | `message` |
 | --- | --- | --- |
-| `busy` | The host is at its connection limit: 64 connections in total, or 16 from this peer (its `--ls-json --follow` watch streams aside, up to 32 with them). Nothing is wrong with the peer; retry with your own backoff (there is no retry-after field). | `this host is at its connection limit: try again shortly` |
+| `busy` | The host is at its connection limit: 64 connections in total, or 16 from this peer besides its `--ls-json --follow` watch streams (32 with them). Also the answer to a `0x2e` when this peer has 16 watch streams already; that connection then closes. Nothing is wrong with the peer; retry with your own backoff (there is no retry-after field). | `this host is at its connection limit: try again shortly`; for the `0x2e`: `this machine has 16 session list streams here already` |
 
 `busy` is never remembered by the repeat-refusal cache: the next connection
 once a slot frees is served as usual. Its message says nothing about other
@@ -2672,6 +2877,8 @@ for a local session named that way.
 | `--xray` | `--xray <n> --json --follow` (no cap either) | none |
 | `--xray` | `--xray <n> --ref <ref> [--scope <s>] [--full] [--budget-ms <ms>] --json` | 60 s |
 | `--xray` | `--xray <n> --search <text> --json` | 60 s |
+| `--xray` | `--xray <n> --tasks --json` | 60 s |
+| `--xray` | `--xray <n> --memory --json` | 60 s |
 
 Refused, before anything runs: an `argv` of fewer than 2 elements; a verb
 or flag not in the table; a bad name; `--config`, `serve`, `-h` or `-f`
@@ -2684,8 +2891,8 @@ on this host (dch serve --allow-create)`).
 `--xray` takes its name right after it, then its flags in any order, each
 once (`--json twice`). A flag's value is the next element even when it
 starts with `-`. Refused: no `--json` (`--xray needs --json (the view is
-client-side only)`); two of `--ref`, `--search`, `--follow`, `--chapter`
-and `--clear`;
+client-side only)`); two of `--ref`, `--search`, `--tasks`, `--memory`,
+`--follow`, `--chapter` and `--clear`;
 `--scope`, `--full` or `--budget-ms` without `--ref`; a flag not in the
 table (`--requests is not allowed with --xray`); a missing value (`--ref
 needs a value`); and a value that fails `dch --xray`'s rules (`bad ref`,
@@ -2707,7 +2914,9 @@ ref returns that commit's `git show --stat` from the session's repo.
 `--scope all` returns lines (and with `--full`, definition passages) from
 every other session's Claude Code transcript of this store, in every project
 dir; `--scope project`, the default, from those in the session's own project
-dir. Nothing is written to disk; `--clear` empties a shell session's X-ray
+dir. `--memory` returns the session's memory files and the instruction
+files in force (its config dir's, and those in every directory above its cwd),
+each body up to 16 KB. Nothing is written to disk; `--clear` empties a shell session's X-ray
 ring. Let in only peers you would let read those files and
 transcripts.
 
@@ -2821,7 +3030,12 @@ once a second: two log lines a second while it shows.
 
 **Limits.** At most 64 connections, 16 per peer, and 4 live-list streams per
 phone. A connection past the first two gets `busy` (see
-[Refusals](#refusals)) and the close. A connection that is not attached or watching closes after 30 s
+[Refusals](#refusals)) and the close. A peer's live-list (`0x2e`) streams
+are counted apart, at most 16, so its other 16 connections stay free for
+attach and commands; a 17th `0x2e` gets `busy` and the close. A watching
+connection only reads the list: kill and rename there get a `0x13`
+(`watch connections cannot kill or rename`), as attach, create and control
+verbs already did. A connection that is not attached or watching closes after 30 s
 without a whole frame, and any connection closes when its output goes untaken
 for 20 s (a control verb with a timeout: 20 s past that timeout). A peer
 gone without a close (no answer to TCP keepalive) is closed in about 30 s. Control frames over 64 KiB, and any frame over the protocol's
@@ -2893,7 +3107,9 @@ renamed, a `state`, a `stale` mark, a local row's `activity_epoch` (so a
 local session that is printing makes one array per 2 s tick). An unchanged
 list prints nothing, and arrays come at most one per 200 ms: changes faster
 than that are folded into the next one. It
-runs until SIGINT, SIGTERM or the reader closes the pipe, then exits 0;
+runs until SIGINT, SIGTERM or the reader closes the pipe, then exits 0
+(a stdout closed from the start, `>&-`, exits 0 at once; one on
+`/dev/null` keeps it running);
 misuse (a name after it, another verb) is exit 2. SIGINT and SIGTERM stop
 it even while its reader has stopped reading and the pipe is full; the line
 it was writing then may be cut short, and nothing comes after it.
@@ -2904,10 +3120,13 @@ it was writing then may be cut short, and nothing comes after it.
 - *A host whose hello lists `watch`* (`dch serve` does) is held on one
   connection: after the list, a `0x2e`
   `{"device_id":"dch-<pid>"}`, and every `0x11` it pushes is a new look
-  (the same list again is not). Nothing is polled there; dch serve itself
+  (the same list again is not, and its bytes are only compared, not
+  parsed). Nothing is polled there; dch serve itself
   looks every 2 s, so a change there shows within about 2 s. Each follower
-  holds that one connection to each such host; dch serve counts them apart
-  from the 16 other connections it takes from one machine (32 in all).
+  holds that one connection to each such host; dch serve takes 16 of them
+  from one machine, counted apart from its 16 other connections, so attach
+  and commands there always find a slot. A 17th follower is refused the
+  stream (`busy`) and polls that host every 2 s instead, its rows fresh.
 - *Any other host* is probed again every 2 s, as the picker does, and the
   local rows are read again on the same tick.
 - *A host that fails* (no answer within 2 s, a dropped link, a stream that
@@ -2916,8 +3135,9 @@ it was writing then may be cut short, and nothing comes after it.
   --remote` would show them: `"stale":true` for two minutes after it last
   answered, then gone. It is dialled again 2 s later, doubling per failure
   up to 32 s. A refusal (a `0x13` with a `code`) is said on stderr once and
-  shows none of its rows. One host never holds up another or the local
-  rows.
+  shows none of its rows. Any other `0x13` on the stream (`busy`, or none
+  with a code) ends only the stream: the host is polled every 2 s instead.
+  One host never holds up another or the local rows.
 - `dch --ls-json --follow`, without `--remote`, is the same stream of the
   local rows only: no host is dialled and no `tailscale` call is made.
 - `--remote` lists hosts the same way here, so with discovery the

@@ -110,6 +110,7 @@ void pk_txt(const char *s);
 int pk_cps(const char *s);
 void pk_pad(int end);
 void pk_fit(const char *s, int w);
+void pk_age(long when, char *b, size_t n);	/* now, 22m, 3h, 2d; "" none */
 void pk_line(void);
 void pk_eol(void);
 void pk_rule(void);
@@ -141,7 +142,7 @@ struct dch_conf
 	const char *choices;	/* "a|b": all it takes; NULL: any one line */
 	const char *desc;	/* the picker's settings view says it (#086) */
 };
-#define NCONF 7
+#define NCONF 9
 extern const struct dch_conf config_keys[];
 const char *config_show(int k, char *v, size_t cap, int *set);
 
@@ -156,6 +157,11 @@ extern int xv_tab;	/* the tab it opens on: 0 Chapters, 1 Refs */
 /* Set when xv_run returns 0 and the user pressed o (#194): the session to
 ** attach (a name, or host:name), as `dch -a` takes it; else "". */
 extern char xv_go[512];
+/* Keys typed at the view dropped: read until a 100 ms pause (1 s in a
+** bracketed paste), 2 s at most; any: the first read waits (#230,
+** MED-V20). xv_paste_in: in a paste after the n bytes at c. */
+void xv_drop_keys(int fd, int any);
+int xv_paste_in(const unsigned char *c, size_t n, int in);
 /* dch.c's, for it: xray_main(ac, av) in a forked child with stdout and
 ** stderr into *out and *err (never exec, never the terminal fd; av[0]
 ** "--read": ctl's --read host:name in its place, #188); its pid, or -1. A

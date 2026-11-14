@@ -97,7 +97,8 @@ Covers:
      chapter, a new turn on top keeps a selection on its prompt and one on
      the first item on the first. xv-cx, a live fake Codex over the
      codex-0167 rollout: its answer and tool line, its last turn working.
-     A shell (xv-0) has no Responses tab.
+     A shell (xv-0) has no Responses tab. xv-cxt, a live fake Codex with
+     two update_plan calls: Tasks from the newest plan (#320).
  15. Search (#291): xv-se, a History Claude record with the needle in a
      prompt, a tool call, its result and two answers: Tab cycles Prompts,
      Responses, Refs, Search (no count before a search) and wraps; Search
@@ -112,13 +113,49 @@ Covers:
      the Prompts filter: ^R search in the footer and on the empty line, ^R
      lands on Search with their hit. xv-sm, 55 prompts: 50+ in the tab,
      the faint "the 50 newest are shown", G the 50th. A shell (xv-sh):
-     Commands, Refs, Search; its ring searched (each line as Output); on
-     dch-lite the list says no x-ray corpus.
+     Commands, Refs, Search (no Responses, no Tasks); its ring searched
+     (each line as Output); on dch-lite the list says no x-ray corpus.
  16. the card's mentions newest first (#304, QA 1.62.0 MED-V13): a
      transcript under 1 MiB (one light window), one spanning several (no
      zigzag of the windows), and after f (oldest first from the engine);
      the selected mention stays selected while f's lines arrive; Enter on
      a mention reads its prompt.
+ 17. Tasks (#320): xv-nt, a Claude record with no task record: no Tasks
+     tab, Tab never lands on one. xv-tk, six tasks over three prompts: the
+     tab last, counting the open ones (Tasks 3); Shift-Tab opens it; group
+     lines In progress, Pending, Done (newest first), Dropped, each
+     counted; the active row by its active text with its age (2h), blocked
+     by 1 on a row, ages 5m and 3d; a title with ESC, BEL, U+202E drawn
+     with ? and cut to one line, none of them reaching the terminal; j
+     past the group lines; Enter reads the turn that last changed the task
+     (3 of 3), q back to the same task; / filters in any case, keeping
+     only the groups with a match, also over a note; no match said; Esc
+     clears it. xv-tb, 20000 tasks: counted within 5 s, G, g, PgDn, j each
+     painted within 0.5 s, a filter within 1 s.
+ 18. Memory (#323): xv-nt has no Memory tab. xv-me, four memories and the
+     project's CLAUDE.md: the tab last, counting every row (Memory 5);
+     This session (wrote, then loaded), Memories (newest first),
+     Instructions (the path short), kind and note on the rows, no
+     "chapter" on screen; Enter opens the card (note, path, kind, the
+     text), G scrolls the text to its end, Enter on a row this session did
+     not touch says so, q back to the row; a text over 16 KB says it was
+     cut and names the path; Enter on a session row's card reads the turn
+     that wrote it (2 of 2), q back to the card, q back to the row; / over
+     a memory's text. xv-cxt (Codex): its AGENTS.md under Instructions,
+     Enter shows its text. xv-mb, 20000 memories: the tab and the whole
+     count within 15 s (the time printed), G within 0.5 s.
+ 19. #325: xv-sp, one turn saying needle in its prompt (PLACE-A), in a
+     reply 60 lines on (PLACE-B) and in a Bash output 60 lines after that
+     (PLACE-C): Enter on each Search hit opens the reader with that hit's
+     line on screen, not the prompt's, q back to the same hit (MED-V21); a
+     good search after a refused one clears "bad search" (LOW-V18); the
+     word chapter on no screen. Its six tabs at widths 24, 30, 40 and 60,
+     each tab selected in turn: no word cut, the selected tab shown, a
+     < or > mark when tabs are left out (NIT-V9); at 20 the view says it
+     is too small, no tab drawn. A held o (MED-V20): a second o 10 ms and
+     50 ms after the first and 8 o's 33 ms apart (dch --xray), 8 o's from
+     the chord's view, the picker's x and Search: nothing reaches the
+     session, a z 300 ms after the last o does.
 
 Run:  python3 tests/xray_view_test.py      (uses ./dch)
 """
@@ -923,9 +960,12 @@ def test_order():
 TPD = os.path.join(T, "tmpd")      # the view's $TMPDIR
 TPP = os.path.join(TPD, "proj")    # a project inside it
 TPL = os.path.join(T, "plink")     # a symlink to it, another session's cwd
-# a real project outside every temp dir (this checkout), and a symlink into it
-# from the temp dir: a row under it is never resolved, so it stays scratch
-REPO = os.path.realpath(os.path.join(HERE, ".."))
+# a real project outside every temp dir, and a symlink into it from the temp
+# dir: a row under it is never resolved, so it stays scratch. A system
+# directory, not this checkout: the view's --memory walks up from the cwd and
+# would read the real CLAUDE.md files above a checkout (#325); nothing above
+# /usr/bin holds one, and the test dir itself is always in a temp dir
+SYSP = "/usr/bin"
 HOSTILE = "https://github.com." + "a" * 50 + ".example/github.com/o/r/pull/1"
 HUGE = "https://" + "z" * 120 + ".example/x/y/end"
 IDN = "https://x" + "\u4f8b" * 25 + "e\u0301" * 6 + ".jp/" + "p/" * 30 + "fin"
@@ -936,7 +976,7 @@ def fixture_tmp():
     for f in ("main.c", "real.c"):
         open(os.path.join(TPP, "src", f), "w").close()
     os.symlink(TPP, TPL)
-    os.symlink(REPO, os.path.join(TPD, "rlink"))
+    os.symlink(SYSP, os.path.join(TPD, "rlink"))
     cfg = os.path.join(HOME, ".claude")
     sockdir = os.path.join(T, "dch-%d" % os.getuid())
     hdir = os.path.join(T, "state", "dch", "sessions",
@@ -950,8 +990,8 @@ def fixture_tmp():
             ("xv-tx", "11111111-2222-4333-8444-5555555555c3", TPP,
              "edit %s/src/main.c, then %s/../leak.txt and %s/../esc/x"
              % (TPP, TPP, TPD)),
-            ("xv-tr", "11111111-2222-4333-8444-5555555555c4", REPO,
-             "see %s/rlink/README.md" % TPD)):
+            ("xv-tr", "11111111-2222-4333-8444-5555555555c4", SYSP,
+             "see %s/rlink/env" % TPD)):
         pdir = os.path.join(cfg, "projects", cwd.replace("/", "-"))
         os.makedirs(pdir, exist_ok=True)
         with open(os.path.join(pdir, sid + ".jsonl"), "w") as f:
@@ -974,7 +1014,9 @@ def refs_tab(name):
     v.wait(b"Prompts 1")
     v.pump(0.5)
     mark = len(v.out)
-    v.key(b"\033[Z\033[Z", 1.0)
+    # Tab twice, by Responses: a managed CLAUDE.md on this machine gives
+    # any Claude session a Memory tab (#323), last
+    v.key(b"\t\t", 1.0)
     mark = len(v.out)
     v.key(b"a", 1.0)  # files and URLs too (#262)
     scr = rows(v.out[mark:])
@@ -1028,19 +1070,15 @@ def test_tmp():
         v.key(b"q")
     finally:
         v.close()
-    # the checkout stands for a project outside every temp dir; a checkout
-    # in one is scratch itself (QA 1.60.0 NIT-T5)
-    if REPO.startswith(("/tmp/", "/private/tmp/", "/var/folders/",
-                        "/private/var/folders/")):
-        print("  skip Refs #220: a project outside the temp dirs: this "
-              "checkout, %s, is in one" % REPO)
-        return
+    # /usr/bin stands for a project outside every temp dir (QA 1.60.0
+    # NIT-T5: a checkout in one would be scratch itself)
     v, scr, text = refs_tab("xv-tr")
     try:
         check("Refs #220: a project outside the temp dirs resolves no row: "
               "a temp-dir symlink into it stays scratch",
-              "README.md" not in text and "t temp files 1 hidden" in text,
-              text)
+              "rlink/env" not in text and
+              not re.search(r"file +env\b", text) and
+              "t temp files 1 hidden" in text, text)
         v.key(b"q")
     finally:
         v.close()
@@ -1369,9 +1407,8 @@ LONGA = "\n".join("line %02d of the long answer" % i for i in range(1, 13))
 BIG = "BIG \033]0;pwned\007 evil\u202eend\n" + "y" * 3000
 
 
-def tl(sid):
-    return os.path.join(HOME, ".claude", "projects", "-home-demo-proj",
-                        sid + ".jsonl")
+def tl(sid, proj="-home-demo-proj"):
+    return os.path.join(HOME, ".claude", "projects", proj, sid + ".jsonl")
 
 
 def turn(prompt, ts, *after, auto=False):
@@ -1728,6 +1765,89 @@ def test_responses_codex():
                        env=ENV)
 
 
+def test_tasks_codex():
+    """#320: xv-cxt, a live fake Codex whose rollout has two update_plan
+    calls: the Tasks tab from the newest plan, Enter reads its turn. #323:
+    its AGENTS.md on Memory, the last tab; Enter shows its text."""
+    tid = "019a1111-2222-7333-8444-555566667720"
+    src = os.path.join(HERE, "xray", "fixtures", "codex-0167", "codex",
+                       "019a1111-2222-7333-8444-555566667702.jsonl")
+    sess = os.path.join(HOME, ".codex", "sessions", "2026", "11", "10")
+    snaps = os.path.join(HOME, ".codex", "shell_snapshots")
+    fake = os.path.join(T, "bin", "codex")
+
+    def plan(ts, cid, steps):
+        return json.dumps({"timestamp": ts, "type": "response_item",
+                           "payload": {"type": "function_call",
+                                       "name": "update_plan", "call_id": cid,
+                                       "arguments": json.dumps({"plan": [
+                                           {"step": a, "status": b}
+                                           for a, b in steps]})}}) + "\n"
+    with open(src) as f:
+        body = f.read().replace("019a1111-2222-7333-8444-555566667702", tid)
+    with open(os.path.join(
+            sess, "rollout-2026-11-10T10-00-00-%s.jsonl" % tid), "w") as f:
+        f.write(body + plan("2026-11-10T10:00:03.000Z", "pl1",
+                            [("read the spec", "in_progress"),
+                             ("port the parser", "pending")]) +
+                plan("2026-11-10T10:00:04.000Z", "pl2",
+                     [("read the spec", "completed"),
+                      ("port the parser", "in_progress"),
+                      ("test it", "pending")]))
+    log = os.path.join(T, "codex-t.log")
+    cwd = os.path.join(T, "work", "xv-cxt")
+    os.makedirs(cwd, exist_ok=True)
+    with open(os.path.join(cwd, "AGENTS.md"), "w") as f:
+        f.write("codex agents text\n")
+    r = subprocess.run([DCH, "--spawn", "xv-cxt", "--size", "80x24",
+                        "--cwd", cwd, fake], capture_output=True, text=True,
+                       timeout=30, env=dict(ENV, FAKE_CODEX_LOG=log))
+    got = until(lambda: os.path.exists(log) and
+                open(log).read().endswith("\n") and open(log).read().split(),
+                10)
+    check("Tasks, Codex: the fake codex runs", r.returncode == 0 and got,
+          r.stderr)
+    marker = got[1] if got and got[1] != "-" else None
+    p = os.path.join(snaps, tid + ".1.sh")
+    with open(p, "w") as f:
+        f.write("# Snapshot file\nexport DCH_SESSION=xv-cxt\n%s" % (
+            "export DCH_NATIVE_BRIDGE_ID=%s\n" % marker if marker else ""))
+    os.chmod(p, 0o600)
+    v = Pty([DCH, "--xray", "xv-cxt"], rows=30, cols=100)
+    try:
+        ok = tabbar(v, "Tasks 2", 15) and tabbar(v, "Memory 1", 15)
+        v.key(b"\033[Z\033[Z", 0.8)
+        r = tasks_rows(v)
+        check("Tasks, Codex: the newest plan, in progress, pending, done",
+              ok and [re.sub(r" (now|\d+[mhd])$", "", x).lstrip("▌")
+                     for x in r] ==
+              ["In progress 1", "▶ 2 port the parser", "Pending 1",
+               "○ 3 test it", "Done 1", "✓ 1 read the spec"], r)
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        check("Tasks, Codex: Enter reads the turn of the plan",
+              v.wait(b" of ", start=mark) and v.wait(b"update_plan",
+                                                     start=mark),
+              screen(v, mark))
+        v.key(b"q", 0.8)
+        v.key(b"\t", 0.8)
+        r = [re.sub(r" (now|\d+[mhd])$", "", x).lstrip("▌ ")
+             for x in tasks_rows(v)]
+        check("Memory, Codex: its AGENTS.md under Instructions, the last tab",
+              r == ["Instructions 1", "AGENTS.md"], r)
+        mark = len(v.out)
+        v.key(b"\r", 0.8)
+        check("Memory, Codex: Enter shows the file's text",
+              "codex agents text" in screen(v, mark), screen(v, mark))
+        v.key(b"q", 0.5)
+        v.key(b"q")
+        v.exit()
+    finally:
+        v.close()
+        subprocess.run([DCH, "-k", "xv-cxt"], capture_output=True,
+                       timeout=30, env=ENV)
+
+
 # ---- Search (#291): where a word or phrase was said ------------------------
 
 SSID = "11111111-2222-4333-8444-5555555555d1"   # xv-se (not c1/c2: xv-tp, xv-tl)
@@ -1739,18 +1859,18 @@ def at(rec, ts):
     return dict(rec, timestamp=ts)
 
 
-def record(name, sid, lines):
-    with open(tl(sid), "w") as f:
+def record(name, sid, lines, proj="-home-demo-proj", cwd=P):
+    with open(tl(sid, proj), "w") as f:
         for o in lines:
             f.write(json.dumps(o) + "\n")
     sockdir = os.path.join(T, "dch-%d" % os.getuid())
     hdir = os.path.join(T, "state", "dch", "sessions",
                         sockdir.replace("/", "-"))
     os.makedirs(hdir, exist_ok=True)
-    rec = {"name": name, "cwd": P, "end": "exited", "argv": ["claude"],
+    rec = {"name": name, "cwd": cwd, "end": "exited", "argv": ["claude"],
            "started": 1794299400, "updated": 1794300000,
            "ended": 1794300000, "sock_dir": sockdir,
-           "agent": {"session_id": sid, "cwd": P,
+           "agent": {"session_id": sid, "cwd": cwd,
                      "config_dir": os.path.join(HOME, ".claude")}}
     with open(os.path.join(hdir, name + ".json"), "w") as f:
         f.write(json.dumps(rec) + "\n")
@@ -1985,7 +2105,8 @@ def test_search_shell(lite):
               "no Responses", re.search(r"\[Refs", tabs[0]) and
               re.search(r"\[Search", tabs[1]) and
               re.search(r"\[Commands", tabs[2]) and
-              all("Responses" not in t for t in tabs), tabs)
+              all("Responses" not in t and "Tasks" not in t for t in tabs),
+              tabs)
         mark = len(v.out)
         v.key(b"\033[Z", 0.5)
         v.key(b"see o/r\r", 1.0)
@@ -2052,9 +2173,12 @@ def test_open(lite):
             "printf '\\033]133;A\\007$ '; exec sleep 600")
     r = dch("--spawn", "xv-op", "--size", "80x24", "sh", "-c", prog)
     check("open: spawned", r.returncode == 0, r.stderr)
-    until(lambda: "$" in dch("--read", "xv-op").stdout, 5)
+    # dch-lite: --read exits 3, nothing to wait for
+    until(lambda: (lambda r: r.returncode == 3 or "$" in r.stdout)(
+        dch("--read", "xv-op")), 5)
     dch("--send", "xv-op", "make the build o/r#41\n")  # a ref: the card's o
-    until(lambda: "40" in dch("--read", "xv-op").stdout, 5)
+    until(lambda: (lambda r: r.returncode == 3 or "40" in r.stdout)(
+        dch("--read", "xv-op")), 5)
     time.sleep(0.5)  # dch-lite: no --read; the block's time
     v = Pty([DCH, "--xray", "xv-op"], env=DTAP)
     try:
@@ -2253,6 +2377,509 @@ def test_screen_group(lite):
     finally:
         v.close()
         dch("-k", "xv-0")  # the picker test's first row is xv-sh
+
+
+# ---- Tasks (#320): the session's task list ----------------------------------
+
+KSID = "11111111-2222-4333-8444-5555555555f1"   # xv-tk: a task list
+NSID = "11111111-2222-4333-8444-5555555555f2"   # xv-nt: none
+BSID = "11111111-2222-4333-8444-5555555555f3"   # xv-tb: 20000 tasks
+KEVIL = "evil \033]0;pwned\007 bi‮di " + "w" * 300
+
+
+def iso(ago):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - ago))
+
+
+def made(ts, tid, n, subject, desc="", active=None):
+    """A TaskCreate and its result naming task n."""
+    inp = {"subject": subject, "description": desc}
+    if active:
+        inp["activeForm"] = active
+    return [at(call(tid, "TaskCreate", inp), ts),
+            at(result(tid, "ok", {"toolUseResult": {"task": {"id": n}}}), ts)]
+
+
+def upd(ts, tid, n, **kw):
+    return at(call(tid, "TaskUpdate", dict(taskId=n, **kw)), ts)
+
+
+def fixture_tasks():
+    """xv-tk: six tasks over two prompts, one hostile; xv-nt: none; xv-tb:
+    20000 pending tasks."""
+    os.makedirs(os.path.dirname(tl(KSID)), exist_ok=True)
+    record("xv-tk", KSID,
+           turn("plan the work", iso(4 * 86400),
+                *(made(iso(4 * 86400), "c1", "1", "Fix the login test",
+                       "the CI fails", "Fixing the login test") +
+                  made(iso(4 * 86400), "c2", "2", "Write docs") +
+                  made(iso(4 * 86400), "c3", "3", "Old done") +
+                  made(iso(4 * 86400), "c4", "4", "Recent done") +
+                  made(iso(4 * 86400), "c5", "5", "Dropped one") +
+                  made(iso(4 * 86400), "c6", "6", KEVIL))) +
+           turn("do the work", iso(3 * 86400 + 60),
+                upd(iso(3 * 86400), "u3", "3", status="completed")) +
+           turn("finish it", iso(3 * 3600),
+                upd(iso(2 * 3600), "u1", "1", status="in_progress"),
+                upd(iso(2 * 3600), "u2", "2", addBlockedBy=["1"]),
+                upd(iso(300), "u4", "4", status="completed"),
+                upd(iso(300), "u5", "5", status="deleted")))
+    record("xv-nt", NSID, turn("no tasks here", iso(60), say("fine")))
+    record("xv-tb", BSID, turn("many", iso(600)))
+    with open(tl(BSID), "a") as f:
+        for i in range(1, 20001):
+            f.write('{"type":"assistant","message":{"content":[{"type":'
+                    '"tool_use","id":"t%d","name":"TaskCreate","input":'
+                    '{"subject":"bulk task %05d","description":""}}]}}\n'
+                    '{"type":"user","toolUseResult":{"task":{"id":"%d"}},'
+                    '"message":{"content":[{"type":"tool_result",'
+                    '"tool_use_id":"t%d","content":"ok"}]}}\n' % (i, i, i, i))
+
+
+def tasks_rows(v):
+    """Tasks' lines on screen over the rule, top down, blanks folded."""
+    out, scr = [], rows(v.out)
+    for k in sorted(x for x in scr if x >= 4):
+        r = scr[k]
+        if r.startswith(("─", "-")):
+            break
+        if r.strip():
+            out.append(re.sub(" +", " ", r).strip())
+    return out
+
+
+def test_tasks():
+    """#320: no tab without a task list; the tab last, its open count; the
+    groups and their order, marks, ages, blocked by; Enter reads the turn
+    that last changed the task, q back to it; the filter; hostile text."""
+    v = Pty([DCH, "--xray", "xv-nt"], rows=30, cols=100)
+    try:
+        v.wait(b"Prompts 1")
+        v.pump(1.5)
+        tabs = []
+        for _ in range(4):
+            v.key(b"\t", 0.4)
+            tabs.append(rows(v.out).get(2, ""))
+        check("Tasks: a session with no task list has no Tasks tab, Tab "
+              "never lands on one", all("Tasks" not in t for t in tabs) and
+              re.search(r"\[Prompts", tabs[-1]), tabs)
+        v.key(b"q")
+        v.exit()
+    finally:
+        v.close()
+    v = Pty([DCH, "--xray", "xv-tk"], rows=30, cols=100)
+    try:
+        ok = tabbar(v, "Tasks 3")
+        t = rows(v.out).get(2, "")
+        check("Tasks: the last tab, its count the open tasks (1 in progress, "
+              "2 pending)", ok and 0 <= t.find("Prompts 3") <
+              t.find("Search") < t.find("Tasks 3") and
+              re.search(r"Tasks 3\s*$", t), t)
+        v.key(b"\033[Z", 0.8)
+        r = tasks_rows(v)
+        check("Tasks: Shift-Tab from Prompts opens it; In progress, Pending, "
+              "Done newest first, Dropped, each group counted",
+              [x for x in r if not x.startswith(("▌", "▶", "○",
+                                                 "✓", "✗"))
+               and not x[1:].lstrip().startswith(("▶", "○",
+                                                  "✓", "✗"))] ==
+              ["In progress 1", "Pending 2", "Done 2", "Dropped 1"] and
+              [x.split()[2] for x in r if re.match(r"^\W*[▶○✓"
+                                                    r"✗] \d ", x)]
+              == ["Fixing", "Write", "evil", "Recent", "Old", "Dropped"], r)
+        line = lambda w: next((x for x in r if w in x), "")
+        check("Tasks: the active row shows its active text, an age at the "
+              "right (2h), selected first",
+              re.search(r"^▌▶ 1 Fixing the login test 2h$",
+                        line("Fixing")), line("Fixing"))
+        check("Tasks: blocked by on the row (its age from the update that "
+              "said it); ages 5m and 3d on Done",
+              re.search(r"Write docs blocked by 1 2h$", line("Write")) and
+              line("Recent").endswith(" 5m") and
+              line("Old done").endswith(" 3d"), r)
+        check("Tasks: a hostile title shows with ?, cut to one line",
+              re.search(r"evil \?\]0;pwned\? bi\?di w+…", line("evil")),
+              line("evil"))
+        bad = [b for b in (b"\033]0;pwned", b"\007", b"\xe2\x80\xae")
+               if b in v.out]
+        check("Tasks: no ESC, BEL or bidi byte of a title reached the "
+              "terminal", not bad, bad)
+        v.key(b"jjj", 0.5)
+        check("Tasks: j by task, past the group lines", "Recent done" in
+              head(v), head(v))
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        check("Tasks: Enter reads the turn that last changed the task (3 of "
+              "3)", v.wait(b"3 of 3", start=mark) and
+              v.wait(b"TaskUpdate", start=mark), screen(v, mark))
+        mark = len(v.out)
+        v.key(b"q", 1.0)
+        check("Tasks: q back to the same task", tabbar(v, "Tasks 3") and
+              "Recent done" in head(v), head(v))
+        mark = len(v.out)
+        v.key(b"/DOCS", 0.8)
+        r = tasks_rows(v)
+        check("Tasks: / filters, any case, only the groups with a match",
+              r == ["Pending 1", "▌○ 2 Write docs blocked by 1 " +
+                    r[-1].split()[-1]] if len(r) == 2 else False, r)
+        v.key(b"\x15ci fails", 0.8)
+        r = tasks_rows(v)
+        check("Tasks: the filter matches a note", len(r) == 2 and
+              "Fixing the login test" in r[1], r)
+        v.key(b"\x15zzzq", 0.8)
+        check("Tasks: no match says so", "No match" in screen(v, mark),
+              screen(v, mark))
+        v.key(b"\033", 0.3)
+        v.key(b"\033", 0.5)
+        check("Tasks: Esc clears the filter, every row back",
+              len(tasks_rows(v)) == 10, tasks_rows(v))
+        v.key(b"q")
+        check("Tasks: q exits 0", v.exit() == 0, v.out[-80:])
+    finally:
+        v.close()
+
+
+def test_tasks_big():
+    """#320: 20000 tasks list fast and scroll without lag; Pending in the
+    answer's order (G the last created)."""
+    t0 = time.time()
+    v = Pty([DCH, "--xray", "xv-tb"], rows=30, cols=100)
+    try:
+        ok = tabbar(v, "Tasks 20000", 15)
+        dt = time.time() - t0
+        check("Tasks big: 20000 tasks counted in the tab in %.2f s (under 5)"
+              % dt, ok and dt < 5, rows(v.out).get(2))
+        v.key(b"\033[Z", 0.5)
+        lag = []
+        for k, want in ((b"G", "bulk task 20000"), (b"g", "bulk task 00001"),
+                        (b"\033[6~", None), (b"j", None)):
+            mark = len(v.out)
+            s = time.time()
+            v.key(k, 0)
+            v.wait(b"\xe2\x96\x8c", 5, start=mark)
+            lag.append(time.time() - s)
+            v.pump(0.2)
+            if want:
+                check("Tasks big: %s selects %s" % (k, want), want in head(v),
+                      head(v))
+        check("Tasks big: every key painted within 0.5 s (%s)" %
+              ", ".join("%.3f" % x for x in lag), max(lag) < 0.5, lag)
+        mark = len(v.out)
+        s = time.time()
+        v.key(b"/19999", 0)
+        ok = v.wait(b"bulk task 19999", 5, start=mark)
+        check("Tasks big: a filter over 20000 rows within 1 s (%.3f s)" %
+              (time.time() - s), ok and time.time() - s < 1,
+              screen(v, mark))
+        v.key(b"\033", 0.3)
+        v.key(b"q")
+        check("Tasks big: q exits 0", v.exit() == 0, v.out[-80:])
+    finally:
+        v.close()
+
+
+# ---- Memory (#323): the session's memories and instruction files ----------
+
+MESID = "11111111-2222-4333-8444-5555555555f6"   # xv-me: memories (not f4: xv-lt)
+MBSID = "11111111-2222-4333-8444-5555555555f5"   # xv-mb: 20000 of them
+MP = os.path.join(T, "mproj")       # xv-me's cwd: a CLAUDE.md, a .git
+MDIR = os.path.join(HOME, ".claude", "projects", "-mem-proj", "memory")
+
+
+def mfile(name, body, ago, kind=None):
+    with open(os.path.join(MDIR, name), "w") as f:
+        f.write(("---\nname: %s\ndescription: %s desc\nmetadata:\n  type: %s"
+                 "\n---\n" % (name[:-3], name[:-3], kind) if kind else "") +
+                body)
+    os.utime(os.path.join(MDIR, name), (time.time() - ago,) * 2)
+
+
+def fixture_memory():
+    """xv-me: four memories (one this session wrote, one it read, one with
+    a word only in its text and 40 lines, one over 16 KB) and the project's
+    CLAUDE.md. xv-mb: 20000 memories."""
+    os.makedirs(MDIR, exist_ok=True)
+    os.makedirs(os.path.join(MP, ".git"), exist_ok=True)
+    with open(os.path.join(MP, "CLAUDE.md"), "w") as f:
+        f.write("project rules here\n")
+    with open(os.path.join(MDIR, "MEMORY.md"), "w") as f:
+        f.write("- [Alpha rule](alpha.md) \u2014 alpha hook\n"
+                "- [Beta notes](beta.md) \u2014 beta hook\n"
+                "- [Gamma ref](gamma.md) \u2014 gamma hook\n")
+    mfile("alpha.md", "alpha body first line\n", 7200, "feedback")
+    mfile("beta.md", "beta body\n", 7200, "project")
+    mfile("gamma.md", "".join("gamma line %02d\n" % i for i in range(1, 41))
+          + "the zebrafish line\n", 3600, "reference")
+    mfile("long.md", "x" * 20000, 2 * 86400)
+    tsw = iso(3 * 3600)
+    um = lambda prompt, ts: {"type": "user", "cwd": MP, "timestamp": ts,
+                             "message": {"content": prompt}}
+    record("xv-me", MESID,
+           [um("read the notes", iso(5 * 3600)),
+            call("r1", "Read", {"file_path": MDIR + "/beta.md"}),
+            um("remember the rule", tsw),
+            call("w1", "Write", {"file_path": MDIR + "/alpha.md",
+                                 "content": "x"})],
+           proj="-mem-proj", cwd=MP)
+    bdir = os.path.join(HOME, ".claude", "projects", "-mem-big", "memory")
+    os.makedirs(bdir, exist_ok=True)
+    for i in range(1, 20001):
+        with open(os.path.join(bdir, "m%05d.md" % i), "w") as f:
+            f.write("bulk memory %05d\n" % i)
+    record("xv-mb", MBSID, [um("many", iso(600))], proj="-mem-big")
+
+
+def mem_tab(v):
+    """Memory, from Prompts: Shift-Tab (it is the last tab)."""
+    v.key(b"\033[Z", 0.8)
+    return tasks_rows(v)
+
+
+def test_memory():
+    """#323: no tab without a memory; the tab last, every row counted; This
+    session (wrote, loaded), Memories, Instructions; the card and its text,
+    cut; Enter on the card reads the turn, q back to it, q to the row; the
+    filter over the text."""
+    v = Pty([DCH, "--xray", "xv-nt"], rows=30, cols=100)
+    try:
+        v.wait(b"Prompts 1")
+        v.pump(1.5)
+        check("Memory: a session with no memory has no Memory tab",
+              "Memory" not in rows(v.out).get(2, ""), rows(v.out).get(2))
+        v.key(b"q")
+        v.exit()
+    finally:
+        v.close()
+    v = Pty([DCH, "--xray", "xv-me"], rows=30, cols=100)
+    try:
+        ok = tabbar(v, "Memory 5")
+        t = rows(v.out).get(2, "")
+        check("Memory: the last tab, counting every row", ok and
+              re.search(r"Search\s+Memory 5\s*$", t), t)
+        r = [re.sub(r" (now|\d+[mhd])$", "", x).lstrip("▌ ") for x in
+             mem_tab(v)]
+        check("Memory: This session (wrote, then loaded), Memories (newest "
+              "first), Instructions (the path short); kind and note faint",
+              r == ["This session 2", "Alpha rule feedback alpha hook wrote",
+                    "Beta notes project beta hook loaded", "Memories 2",
+                    "Gamma ref reference gamma hook", "long",
+                    "Instructions 1", "CLAUDE.md"], r)
+        check("Memory: no word chapter on the screen",
+              b"chapter" not in v.out.lower(), "")
+        v.key(b"jj", 0.5)
+        mark = len(v.out)
+        v.key(b"\r", 0.8)
+        scr = screen(v, mark)
+        check("Memory: Enter opens the card: its fields and its text",
+              "Memory gamma" in scr and "Kind reference" in scr and
+              "Note gamma hook" in scr and "Path " + MDIR + "/gamma.md" in
+              scr and "gamma line 01" in scr and "zebrafish" not in scr, scr)
+        mark = len(v.out)
+        v.key(b"G", 0.5)
+        check("Memory: the card's text scrolls to its end",
+              "the zebrafish line" in screen(v, mark), screen(v, mark))
+        v.key(b"\r", 0.5)
+        check("Memory: Enter on a row this session did not touch says so",
+              "did not write or load it" in rows(v.out).get(29, "") or
+              "did not write or load it" in screen(v, mark), screen(v, mark))
+        v.key(b"q", 0.5)
+        check("Memory: q from the card back to the same row",
+              "Gamma ref" in head(v), head(v))
+        v.key(b"j\r", 0.8)
+        scr = screen(v, mark)
+        check("Memory: a text over 16 KB says it was cut and names the path",
+              re.search(r"Text cut at 16 KB: the whole text is in \S*/long\.md",
+                        scr), scr)
+        v.key(b"q", 0.5)
+        v.key(b"gg", 0.3)
+        mark = len(v.out)
+        v.key(b"\r", 0.8)
+        check("Memory: a session row's card says this session wrote it",
+              "this session wrote it; enter reads that prompt" in
+              screen(v, mark), screen(v, mark))
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        check("Memory: Enter on the card reads the turn that wrote it (2 of "
+              "2)", v.wait(b"2 of 2", start=mark) and
+              v.wait(b"remember the rule", start=mark), screen(v, mark))
+        mark = len(v.out)
+        v.key(b"q", 0.8)
+        check("Memory: q from the reader back to the card",
+              "Memory alpha" in screen(v, mark), screen(v, mark))
+        v.key(b"q", 0.5)
+        check("Memory: q from the card back to the row",
+              "Alpha rule" in head(v), head(v))
+        v.key(b"/ZEBRA", 0.8)
+        r = tasks_rows(v)
+        check("Memory: / filters over a memory's text, any case",
+              len(r) == 2 and r[0] == "Memories 1" and "Gamma ref" in r[1],
+              r)
+        v.key(b"\033", 0.3)
+        v.key(b"\033", 0.5)
+        v.key(b"q")
+        check("Memory: q exits 0", v.exit() == 0, v.out[-80:])
+    finally:
+        v.close()
+
+
+def test_memory_big():
+    """#323: 20000 memories: the tab and the whole list fast."""
+    t0 = time.time()
+    v = Pty([DCH, "--xray", "xv-mb"], rows=30, cols=100)
+    try:
+        ok = tabbar(v, "Memory ", 15)
+        dt = time.time() - t0
+        ok2 = tabbar(v, "Memory 20000", 15)
+        dt2 = time.time() - t0
+        # a bound for a hang, not a speed target: 1.75 to 4.17 s measured,
+        # by the machine's load (#325)
+        check("Memory big: the tab in %.2f s, all 20000 rows in %.2f s "
+              "(under 15)" % (dt, dt2), ok and ok2 and dt2 < 15,
+              rows(v.out).get(2))
+        mem_tab(v)
+        mark = len(v.out)
+        s = time.time()
+        v.key(b"G", 0)
+        ok = v.wait(b"\xe2\x96\x8c m", 5, start=mark)
+        check("Memory big: G painted within 0.5 s (%.3f s)" %
+              (time.time() - s), ok and time.time() - s < 0.5 and
+              re.search(r"m\d{5}", head(v)), head(v))
+        v.key(b"q")
+        check("Memory big: q exits 0", v.exit() == 0, v.out[-80:])
+    finally:
+        v.close()
+
+
+# ---- #325: a Search hit opens at its place; the tab bar's width ------------
+
+PSID = "11111111-2222-4333-8444-5555555555f7"   # xv-sp
+TABS = ("Prompts", "Responses", "Refs", "Search", "Tasks", "Memory")
+
+
+def fixture_place():
+    """xv-sp, in xv-me's project (its memories: a Memory tab): one turn
+    with a task (a Tasks tab) saying needle in its prompt, in a reply 60
+    lines on and in a Bash output 60 lines after that."""
+    ts = "2026-11-10T12:0%d:00Z"
+    reply = "".join("reply filler %02d\n" % i for i in range(60))
+    out = "".join("output filler %02d\n" % i for i in range(60))
+    record("xv-sp", PSID,
+           turn("PLACE-A where is the needle?", ts % 0,
+                *made(ts % 1, "k1", "1", "Find it") +
+                [at(say(reply + "PLACE-B the needle in the reply\nreply "
+                        "tail"), ts % 2),
+                 at(call("b1", "Bash", {"command": "cat log"}), ts % 3),
+                 at(result("b1", out + "PLACE-C the needle in the output\n"
+                           "output tail"), ts % 4)]),
+           proj="-mem-proj", cwd=MP)
+
+
+def test_place():
+    """MED-V21: Enter on each hit opens the reader at that hit; LOW-V18: a
+    good search clears a refusal's status."""
+    v = Pty([DCH, "--xray", "xv-sp"], rows=30, cols=100)
+    try:
+        v.wait(b"Prompts 1")
+        v.pump(0.5)
+        for _ in range(3):  # Responses, Refs, Search
+            v.key(b"\t", 0.5)
+        v.key(b"needle\r", 0.5)
+        ok = tabbar(v, "Search 3")
+        v.pump(0.3)
+        h = [(w, t) for w, t, _ in hits(rows(v.out))]
+        check("place: 3 hits in one turn, the output, the reply, the prompt",
+              ok and [w for w, _ in h] == ["Bash", "Reply", "You"], h)
+        seen = []
+        for k, (who, want, not_) in enumerate((
+                ("Bash", "PLACE-C", ("PLACE-A", "PLACE-B")),
+                ("Reply", "PLACE-B", ("PLACE-A", "PLACE-C")),
+                ("You", "PLACE-A", ("PLACE-B", "PLACE-C")))):
+            if k:
+                v.key(b"j", 0.5)
+            mark = len(v.out)
+            v.key(b"\r", 1.0)
+            v.wait(want.encode(), start=mark)
+            v.pump(0.5)
+            text = screen(v, mark)
+            seen.append(text)
+            # the body, under the head (its title is PLACE-A's prompt)
+            scr = rows(v.out[mark:])
+            body = "\n".join(scr[r] for r in sorted(scr) if r > 2)
+            check("place: Enter on the %s hit opens the reader with its line "
+                  "(%s) on screen, not the others (MED-V21)" % (who, want),
+                  "1 of 1" in scr.get(2, "") and want + " " in body and
+                  not any(n in body for n in not_), text)
+            mark = len(v.out)
+            v.key(b"q", 1.0)
+            check("place: q back to the same hit, the %s one" % who,
+                  tabbar(v, "Search 3") and who in head(v), head(v))
+        mark = len(v.out)
+        v.key(b"/\x15x\r", 1.0)
+        check("place: a 1-byte text is refused in the status line",
+              "bad search" in screen(v, mark), screen(v, mark))
+        v.key(b"\x15needle\r", 1.0)
+        tabbar(v, "Search 3")
+        v.pump(0.3)
+        now = "\n".join(rows(v.out).values())
+        seen.append(now)
+        check("place: a good search after it clears the refusal's status "
+              "(LOW-V18)", "bad search" not in now and
+              len(hits(rows(v.out))) == 3, now)
+        check("place: the word chapter on no screen",
+              not any("chapter" in t.lower() for t in seen), seen)
+        v.key(b"q")
+        v.exit()
+    finally:
+        v.close()
+
+
+def bar_ok(bar, sel, w):
+    """The tab bar: whole tab names, counts and marks only, within w
+    cells, sel shown selected, a mark when a tab is left out."""
+    toks = bar.replace("[", " ").replace("]", " ").split()
+    marks = ("\u2039", "\u203a", "<", ">")
+    return (toks and all(t in TABS or t in marks or re.fullmatch(r"\d+\+?", t)
+                         for t in toks) and "[" + sel in bar and
+            cells(bar.rstrip()) <= w and
+            (set(TABS) <= set(toks) or any(m in toks for m in marks)))
+
+
+def test_tabbar():
+    """NIT-V9: six tabs at 24 (the view's least), 30, 40 and 60 columns,
+    each selected in turn: no word cut, the selected one shown; at 20 the
+    view says it is too small."""
+    v = Pty([DCH, "--xray", "xv-sp"], rows=24, cols=100)
+    try:
+        ok = tabbar(v, "Memory") and tabbar(v, "Tasks")
+        check("tab bar: xv-sp has six tabs", ok and all(
+            t in rows(v.out).get(2, "") for t in TABS), rows(v.out).get(2))
+        for w in (60, 40, 30, 24):
+            mark = len(v.out)
+            v.resize(24, w)
+            v.pump(0.5)
+            bars = []
+            for k in range(len(TABS)):
+                if k:
+                    mark = len(v.out)
+                    v.key(b"\t", 0.4)
+                bar = rows(v.out[mark:]).get(2, "") or rows(v.out).get(2, "")
+                bars.append((TABS[k], bar))
+            check("tab bar at %d columns: every tab selected in turn, no word "
+                  "cut, the selected one shown (NIT-V9)" % w,
+                  all(bar_ok(b, t, w) for t, b in bars), bars)
+            v.key(b"\t", 0.4)  # back to Prompts
+        mark = len(v.out)
+        v.resize(24, 20)
+        v.pump(0.5)
+        text = screen(v, mark)
+        check("tab bar at 20 columns: the view says it is too small, no tab "
+              "drawn", "too small" in text and "[" not in text and
+              not any(t[:3] in text for t in TABS), text)
+        v.resize(24, 100)
+        v.key(b"q", 0.3)
+        v.exit()
+    finally:
+        v.close()
 
 
 def test_resize():
@@ -2467,11 +3094,35 @@ def rx():
         return ""
 
 
+def attached(a):
+    """The client's raw mode is on its pty: it is attached. Not its
+    repaint: dch-lite has no mirror, so a line printed before the attach
+    never comes back and a wait for it runs out its 10 s."""
+    return until(lambda: (a.pump(0.05), not termios.tcgetattr(a.fd)[3] &
+                          termios.ICANON)[1], 10)
+
+
 def attach(env=None, extra=()):
     a = Pty([DCH] + list(extra) + ["-a", "xv-rx"], env=env)
-    a.wait(b"READY")
+    attached(a)
     a.pump(0.3)
     return a
+
+
+# o, then another after each gap (s), each its own write: a second o
+# typed later, a held o's repeats (macOS: about 30 a second); a z 300 ms
+# after the last
+HELD = (("a second o 10 ms later", [0.01]), ("a second o 50 ms later", [0.05]),
+        ("8 o's 33 ms apart", [0.033] * 7))
+
+
+def o_held(p, gaps):
+    os.write(p.fd, b"o")
+    for g in gaps:
+        time.sleep(g)
+        os.write(p.fd, b"o")
+    time.sleep(0.3)
+    os.write(p.fd, b"z")
 
 
 def chord_case(what, keys, lite):
@@ -2584,6 +3235,81 @@ def test_chord():
         finally:
             v.close()
 
+    # a held o (MED-V20): o's in reads of their own, still coming after the
+    # view's exit, dropped until a 100 ms pause; a z 300 ms on reaches it
+    for what, gaps in HELD:
+        v = Pty([DCH, "--xray", "xv-rx"], env=DTAP)
+        try:
+            got = rx()
+            ready(v)
+            o_held(v, gaps)
+            ok = until(lambda: (v.pump(0.1), clients("xv-rx") == 1)[1], 10)
+            check("dch --xray, %s: o attaches, no o reaches the session, a "
+                  "z 300 ms after the last does (MED-V20)" % what,
+                  ok and until(lambda: rx()[len(got):] == "7a", 5),
+                  (ok, rx()[len(got):]))
+            v.key(b"\x1c", 0.5)
+            v.exit(5)
+        finally:
+            v.close()
+    eight = HELD[-1][1]
+    a = attach()
+    try:
+        got = rx()
+        a.key(b"\x1cx", 0.5)
+        a.wait(b"X-ray  xv-rx")
+        mark = len(a.out)
+        a.key(b"\t\t", 0.5)  # Refs, Search, then Commands
+        ready(a, mark)
+        o_held(a, eight)
+        until(lambda: rx()[len(got):] != "", 5)
+        a.pump(0.3)
+        check("chord, 8 o's 33 ms apart: back to the session, no o reached "
+              "it, a z 300 ms after the last does (MED-V20)",
+              rx()[len(got):] == "7a" and a.reap() is None,
+              (rx()[len(got):], a.rc))
+    finally:
+        a.close()
+    v = Pty([DCH, "--xray", "xv-rx"], env=DTAP)
+    try:
+        got = rx()
+        ready(v)
+        v.key(b"\033[Z", 0.5)  # Search, typing
+        v.key(b"\033", 0.5)    # typing ended, the Search list
+        o_held(v, eight)
+        ok = until(lambda: (v.pump(0.1), clients("xv-rx") == 1)[1], 10)
+        check("dch --xray, Search, 8 o's 33 ms apart: no o reaches the "
+              "session, a z 300 ms after the last does (MED-V20)",
+              ok and until(lambda: rx()[len(got):] == "7a", 5),
+              (ok, rx()[len(got):]))
+        v.key(b"\x1c", 0.5)
+        v.exit(5)
+    finally:
+        v.close()
+    v = Pty([DCH, "-l"], env=DTAP)
+    try:
+        v.wait(b"x-ray")
+        for _ in range(4):  # the picker's row of xv-rx
+            mark = len(v.out)
+            v.key(b"x", 1.0)
+            v.wait(b"X-ray  ", start=mark)
+            if b"X-ray  xv-rx" in v.out[mark:]:
+                break
+            v.key(b"q", 1.0)
+            v.key(b"j", 0.5)
+        got = rx()
+        ready(v, mark)
+        o_held(v, eight)
+        ok = until(lambda: (v.pump(0.1), clients("xv-rx") == 1)[1], 10)
+        check("picker's x, 8 o's 33 ms apart: no o reaches the session, a z "
+              "300 ms after the last does (MED-V20)",
+              ok and until(lambda: rx()[len(got):] == "7a", 5),
+              (ok, rx()[len(got):]))
+        v.key(b"\x1c", 0.5)
+        v.exit(5)
+    finally:
+        v.close()
+
     # -E: no detach key, no chord; the session gets both bytes
     a = attach(extra=["-E"])
     try:
@@ -2671,7 +3397,7 @@ def test_chord_end():
     check("chord, end: spawned", r.returncode == 0, r.stderr)
     a = Pty([DCH, "-a", "xv-end"])
     try:
-        a.wait(b"READY")
+        attached(a)
         mark = len(a.out)
         a.key(b"\x1cx", 0.5)
         check("chord, end: the view opens", a.wait(b"X-ray  xv-end",
@@ -2691,7 +3417,7 @@ def test_chord_end():
     a = Pty(["/bin/sh", "-c", "'%s' -a xv-end; echo CLIENT-GONE; "
              "exec sleep 30" % DCH])
     try:
-        a.wait(b"READY")
+        attached(a)
         mark = len(a.out)
         a.key(b"\x1cx", 0.5)
         a.wait(b"X-ray  xv-end", start=mark)
@@ -2723,7 +3449,7 @@ def test_chord_detach():
         a = Pty(["/bin/sh", "-c", "stty -g; '%s' -a xv-rx; echo RC=$?; "
                  "stty -g; echo GONE; exec sleep 30" % DCH])
         try:
-            a.wait(b"READY")
+            attached(a)
             a.pump(0.3)
             before = a.out.split(b"\r\n")[0]
             got = rx()
@@ -2847,8 +3573,18 @@ def main():
         test_responses()
         test_responses_live()
         test_responses_codex()
+        test_tasks_codex()
         fixture_search()
         test_search()
+        fixture_tasks()
+        test_tasks()
+        test_tasks_big()
+        fixture_memory()
+        test_memory()
+        test_memory_big()
+        fixture_place()
+        test_place()
+        test_tabbar()
         test_resize()
         test_small_card()
         shell()

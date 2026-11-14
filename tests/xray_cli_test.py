@@ -16,7 +16,7 @@ the value rules, stale anchors, the 6000/3000 caps and the 1 MiB cap.
 
 Run:  python3 tests/xray_cli_test.py          (uses ./dch; run.sh isolates)
 """
-import json, os, re, shutil, socket, stat, struct, subprocess, sys
+import json, os, random, re, shutil, socket, stat, struct, subprocess, sys
 import tempfile, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -1237,15 +1237,17 @@ def test_refs():
           r.returncode == 0 and d.get("done") is True and d["partial"] and
           d["why"] == "budget" and d["bytes"] < os.path.getsize(tp) and
           not any("mention" in l for l in ls), r.stdout[-600:] + r.stderr)
-    # #262: the last line's ref is the newest window's, found at once.
-    # 300 ms, the cap: a sanitized build on a shared runner parsed under
-    # 1 MiB in 50 ms (#283); bytes < 2 MiB is what says newest first
+    # #262: the last line's ref is the newest window's, found at once;
+    # bytes < 2 MiB of 40 MB is what says newest first. The clock is off
+    # (#332): the newest window's cwd is line 1's, 40 MB back, and a slow
+    # CI runner spent all 300 ms on that walk, bytes 0, why budget; the row
+    # above already proves the budget stops a light scan
     r = dch("--xray", "xr-refs", "--ref", "#424242", "--scope", "session",
-            "--budget-ms", "300", "--json")
+            "--json", env=dict(ENV, DCH_XRAY_NOCLOCK="1"))
     ls = ref_lines(r.stdout) or [{}]
     d = ls[-1]
-    check("ref: light reads newest first: the last line's ref is found under "
-          "a 300 ms budget, why first",
+    check("ref: light reads newest first: the last line's ref is found in "
+          "the newest window, under 2 MiB of 40 MB read, why first",
           r.returncode == 0 and d.get("done") is True and d["partial"] and
           d["why"] == "first" and d["bytes"] < 2 << 20 and
           [l["mention"]["line"] for l in ls if "mention" in l] ==
@@ -1595,6 +1597,7 @@ def test_write_fail():
                             "--full", "--json"]),
                  ("--clear", [n, "--clear", "--json"]),
                  ("--search", ["xr-wf", "--search", "#831", "--json"]),
+                 ("--tasks", ["xr-wf", "--tasks", "--json"]),
                  ("--chapter", ["xr-wf", "--chapter", "f%x:0" %
                                 os.stat(tp).st_ino, "--json"])]
         for what, a in forms:
@@ -1784,6 +1787,296 @@ def test_search():
           (rc, o, err))
     os.unlink(tp)
     os.unlink(tp2)
+
+
+# ---- --tasks --json (#319) -------------------------------------------------
+
+TSID = "11111111-2222-4333-8444-5555555555c1"
+TSID2 = "11111111-2222-4333-8444-5555555555c2"
+TSID3 = "11111111-2222-4333-8444-5555555555c3"
+TK_HEAD = ["schema", "session", "session_id", "source", "title", "partial"]
+TK_KEYS = ["id", "title", "status", "label", "active", "note", "created",
+           "updated", "chapter", "created_chapter", "blocked_by", "url",
+           "group"]
+
+
+def tasks(n, env=None):
+    """(rc, header, [task], done, stderr) of --tasks --json's lines."""
+    r = dch("--xray", n, "--tasks", "--json", env=env)
+    ls = ref_lines(r.stdout) or [{}]
+    return (r.returncode, ls[0], [l.get("task") for l in ls[1:-1]], ls[-1],
+            r.stderr)
+
+
+def tk_use(id, name, inp):
+    return {"type": "tool_use", "id": id, "name": name, "input": inp}
+
+
+def tk_said(t, *parts, side=False):
+    o = {"type": "assistant", "timestamp": t,
+         "message": {"content": list(parts)}}
+    if side:
+        o["isSidechain"] = True
+    return o
+
+
+def tk_made(t, tuid, tid, side=False):
+    o = {"type": "user", "timestamp": t,
+         "toolUseResult": {"task": {"id": tid, "subject": "x"}},
+         "message": {"content": [{"type": "tool_result", "tool_use_id": tuid,
+                                  "content": "Task #%s created" % tid}]}}
+    if side:
+        o["isSidechain"] = True
+    return o
+
+
+def test_tasks():
+    """The session's task list (#319): TaskCreate/TaskUpdate rows with
+    their real ids from the results, times and chapters; a create still
+    waiting for its result is provisional; an unknown id, a sidechain, a
+    bad line change nothing; deleted stays as dropped; TodoWrite replaces
+    the list and keeps a row's times while its text stands; the kind used
+    last wins; a shell is source none; the read range is partial; nothing
+    written; the flag's exclusions."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, TSID + ".jsonl")
+    tp2 = os.path.join(pdir, TSID2 + ".jsonl")
+    ts = lambda s: "2026-11-14T07:%02d:%02d.000Z" % divmod(s, 60)
+    iso = lambda s: "2026-11-14T07:%02d:%02dZ" % divmod(s, 60)
+    ask = lambda s, t: {"type": "user", "cwd": "/home/demo/proj",
+                        "timestamp": ts(s), "message": {"content": t}}
+    recs = [
+        ask(0, "plan the fix"),
+        tk_said(ts(1), tk_use("toolu_a", "TaskCreate", {
+            "subject": "Fix the login test",
+            "description": "\nThe login test fails\nsecond line",
+            "activeForm": "Fixing the login test"})),
+        tk_made(ts(2), "toolu_a", "1"),
+        tk_said(ts(3), tk_use("toolu_b", "TaskCreate", {
+            "subject": "Write docs", "description": ""})),
+        tk_made(ts(4), "toolu_b", "2"),
+        tk_said(ts(5), tk_use("toolu_s", "TaskCreate", {
+            "subject": "a subagent's own", "description": ""}), side=True),
+        tk_made(ts(5), "toolu_s", "7", side=True),
+        ask(10, "go on"),
+        tk_said(ts(11),
+                tk_use("toolu_c", "TaskUpdate",
+                       {"taskId": "1", "status": "in_progress"}),
+                tk_use("toolu_d", "TaskUpdate",
+                       {"taskId": "2", "addBlockedBy": ["1"],
+                        "owner": "me"}),
+                tk_use("toolu_e", "TaskUpdate",
+                       {"taskId": "99", "status": "completed"}),
+                tk_use("toolu_f", "TaskUpdate",
+                       {"taskId": "1", "status": "bogus"})),
+        "{not json",
+        {"type": "system", "subtype": "compact_boundary",
+         "timestamp": ts(12)},
+        {"type": "user", "isCompactSummary": True, "timestamp": ts(12),
+         "message": {"content": "summary of the work"}},
+        ask(20, "finish"),
+        tk_said(ts(21),
+                tk_use("toolu_g", "TaskUpdate",
+                       {"taskId": "1", "status": "completed"}),
+                tk_use("toolu_h", "TaskUpdate",
+                       {"taskId": 2, "status": "deleted"}),
+                tk_use("toolu_i", "TaskCreate", {"subject": "Ship it",
+                                                 "description": "soon"})),
+        tk_said(ts(22), tk_use("toolu_s2", "TaskUpdate",
+                               {"taskId": "1", "status": "pending"}),
+                side=True)]
+    with open(tp, "w") as f:
+        for o in recs:
+            f.write((o if isinstance(o, str) else json.dumps(o)) + "\n")
+    history("xr-tk", TSID, cfg)
+    rc, o, err = xray("xr-tk", "--json")
+    anchors = [c["anchor"] for c in (o or {}).get("chapters", [])]
+    # the prompt after the compaction rides in its chapter
+    check("tasks: the fixture has its three chapters", len(anchors) == 3,
+          (o, err))
+    if len(anchors) != 3:
+        return
+    a0, a3 = anchors[0], anchors[2]
+    before = files(T)
+    rc, h, tk, done, err = tasks("xr-tk")
+    check("tasks: a header line, its keys in order, source claude",
+          rc == 0 and list(h) == TK_HEAD and h["schema"] == 1 and
+          h["session"] == "xr-tk" and h["session_id"] == TSID and
+          h["source"] == "claude" and h["title"] is None and
+          h["partial"] is False, (rc, h, err))
+    check("tasks: one task line per task, keys in order, then done",
+          all(t and list(t) == TK_KEYS for t in tk) and
+          done == {"done": True, "count": 3, "dropped": 0}, (tk, done))
+    want = [
+        {"id": "1", "title": "Fix the login test", "status": "done",
+         "label": "completed", "active": "Fixing the login test",
+         "note": "The login test fails", "created": iso(1),
+         "updated": iso(21), "chapter": a3, "created_chapter": a0,
+         "blocked_by": [], "url": None, "group": None},
+        {"id": "2", "title": "Write docs", "status": "dropped",
+         "label": "deleted", "active": None, "note": None,
+         "created": iso(3), "updated": iso(21), "chapter": a3,
+         "created_chapter": a0, "blocked_by": ["1"], "url": None,
+         "group": None},
+        {"id": "?3", "title": "Ship it", "status": "pending",
+         "label": "pending", "active": None, "note": "soon",
+         "created": iso(21), "updated": iso(21), "chapter": a3,
+         "created_chapter": a3, "blocked_by": [], "url": None,
+         "group": None}]
+    check("tasks: ids from the results, statuses mapped, deleted stays as "
+          "dropped, a create with no result yet provisional; the sidechain's "
+          "task, the unknown id, the unknown status and the bad line change "
+          "nothing; across a compaction",
+          tk == want, json.dumps(tk, indent=1))
+    new = sorted(set(files(T)) - set(before))
+    check("tasks: nothing written", not new, new)
+
+    # the 16 MB + 256 MB rule, lowered: a range that skipped bytes is partial
+    caps = dict(ENV, DCH_XRAY_CAPS="0:0:0:%d:%d" % (200, 600))
+    rc, h, tk, done, err = tasks("xr-tk", env=caps)
+    check("tasks: a read range that skipped bytes is partial",
+          rc == 0 and h.get("partial") is True and done.get("done"),
+          (rc, h, done, err))
+
+    # TodoWrite: the whole list each call, rows by position; a Task tool
+    # used before it loses to it (the kind used last)
+    todo = lambda s, items: tk_said(ts(s), tk_use(
+        "toolu_t%d" % s, "TodoWrite", {"todos": [
+            {"content": c, "status": st, "activeForm": c + "ing"}
+            for c, st in items]}))
+    with open(tp2, "w") as f:
+        for o in [ask(0, "one"),
+                  tk_said(ts(1), tk_use("toolu_x", "TaskCreate",
+                                        {"subject": "old kind",
+                                         "description": ""})),
+                  tk_made(ts(1), "toolu_x", "1"),
+                  todo(2, [("lint", "pending"), ("test", "pending")]),
+                  ask(10, "two"),
+                  todo(11, [("lint", "completed"), ("test", "pending")]),
+                  ask(20, "three"),
+                  todo(21, [("lint", "completed"), ("ship", "in_progress")])]:
+            f.write(json.dumps(o) + "\n")
+    history("xr-tk2", TSID2, cfg)
+    rc, o, err = xray("xr-tk2", "--json")
+    b = [c["anchor"] for c in (o or {}).get("chapters", [])]
+    rc, h, tk, done, err = tasks("xr-tk2")
+    check("tasks: TodoWrite, used last, wins over the Task tools; a row "
+          "keeps its created times while its text stands at its position, "
+          "its updated ones until its status changes; a new text there is "
+          "a new row",
+          rc == 0 and len(b) == 3 and h.get("source") == "claude" and
+          [(t["id"], t["title"], t["status"], t["label"], t["active"],
+            t["created"], t["created_chapter"], t["updated"], t["chapter"])
+           for t in tk] ==
+          [("1", "lint", "done", "completed", "linting", iso(2), b[0],
+            iso(11), b[1]),
+           ("2", "ship", "active", "in_progress", "shiping", iso(21), b[2],
+            iso(21), b[2])] and
+          done == {"done": True, "count": 2, "dropped": 0},
+          (rc, h, json.dumps(tk), done, err))
+
+    # no task record: source none, no task line
+    history("xr-tk-plain", SSID2, cfg)
+    with open(os.path.join(pdir, SSID2 + ".jsonl"), "w") as f:
+        f.write(json.dumps(ask(0, "no tasks here")) + "\n")
+    rc, h, tk, done, err = tasks("xr-tk-plain")
+    check("tasks: a transcript with no task record is source none, no task "
+          "line, done count 0", rc == 0 and h.get("source") == "none" and
+          tk == [] and done == {"done": True, "count": 0, "dropped": 0},
+          (rc, h, tk, done, err))
+    os.unlink(os.path.join(pdir, SSID2 + ".jsonl"))
+    # the transcript gone: no corpus, as --search and --chapter say
+    history("xr-tk-gone", TSID3, cfg)
+    r = dch("--xray", "xr-tk-gone", "--tasks", "--json")
+    check("tasks: no transcript is no x-ray corpus (exit 1)",
+          r.returncode == 1 and r.stdout == "" and
+          r.stderr == "dch: no x-ray corpus\n", (r.returncode, r.stderr))
+
+    # a live shell keeps no task list: source none, its ring's id
+    n = "xc-tk"
+    try:
+        r = dch("--spawn", n, "--size", "80x24", "sh", "-c",
+                "echo TK''UP; sleep 60")
+        check("tasks: shell spawned", r.returncode == 0 and
+              wait_for(lambda: "TKUP" in screen(n), 10), r.stderr)
+        rc, o, err = xray(n, "--json")
+        rc, h, tk, done, err = tasks(n)
+        check("tasks: a live shell is source none, no task line",
+              rc == 0 and h.get("source") == "none" and
+              h.get("session") == n and
+              h.get("session_id") == (o or {}).get("session_id") and
+              tk == [] and done == {"done": True, "count": 0, "dropped": 0},
+              (rc, h, tk, done, err))
+    finally:
+        dch("-k", n)
+
+    for a, other in ((["--ref", "#1"], "--ref"),
+                     (["--search", "needle"], "--search"),
+                     (["--chapter", a0], "--chapter"),
+                     (["--clear"], "--clear"), (["--follow"], "--follow")):
+        r = dch("--xray", "xr-tk", "--tasks", *a, "--json")
+        check("tasks: with %s is bad usage (exit 2)" % other,
+              r.returncode == 2 and r.stdout == "" and
+              r.stderr == "dch: bad usage: --tasks and %s\n" % other,
+              (r.stdout, r.stderr))
+    r = dch("--xray", "xr-tk", "--tasks", "--tasks", "--json")
+    check("tasks: twice is bad usage", r.returncode == 2 and
+          r.stderr == "dch: bad usage: --tasks twice\n", r.stderr)
+    r = dch("--xray", "xr-tk", "--tasks")
+    check("tasks: without --json refused as the other one-shot forms",
+          r.returncode == 2 and r.stdout == "" and
+          r.stderr == "dch: bad usage: --json is required (the --xray view "
+          "takes no flag)\n", (r.returncode, r.stderr))
+    os.unlink(tp)
+    os.unlink(tp2)
+
+
+def test_tasks_cap():
+    """XR_TASKS: 50005 TaskCreates, each updated twice, keep the newest
+    50000 (dropped 5), in time and memory linear in the count (ids found
+    through the hash, never a scan per update)."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, TSID3 + ".jsonl")
+    N = 50005
+    with open(tp, "w") as f:
+        f.write(json.dumps({"type": "user", "cwd": "/home/demo/proj",
+                            "timestamp": "2026-11-14T07:00:00Z",
+                            "message": {"content": "many"}}) + "\n")
+        for i in range(1, N + 1):
+            f.write('{"type":"assistant","message":{"content":[{"type":'
+                    '"tool_use","id":"tu%d","name":"TaskCreate","input":'
+                    '{"subject":"task %d","description":""}}]}}\n' % (i, i))
+            f.write('{"type":"user","toolUseResult":{"task":{"id":"%d"}},'
+                    '"message":{"content":[{"type":"tool_result",'
+                    '"tool_use_id":"tu%d","content":"ok"}]}}\n' % (i, i))
+        for st in ("in_progress", "completed"):
+            for i in range(1, N + 1):
+                f.write('{"type":"assistant","message":{"content":[{"type":'
+                        '"tool_use","id":"tv%d","name":"TaskUpdate","input":'
+                        '{"taskId":"%d","status":"%s"}}]}}\n' % (i, i, st))
+    history("xr-tk-cap", TSID3, cfg)
+    t0 = time.time()
+    rc, out, rss = maxrss([DCH, "--xray", "xr-tk-cap", "--tasks", "--json"],
+                          ENV)
+    secs = time.time() - t0
+    ls = ref_lines(out) or [{}]
+    tk = [l.get("task") for l in ls[1:-1]]
+    check("tasks cap: %.1f MB, 50005 tasks: the newest 50000, all done, "
+          "dropped 5, in %.2f s (under 10), %.1f MB RSS" %
+          (os.path.getsize(tp) / 1e6, secs, rss / 1e6),
+          rc == 0 and len(tk) == 50000 and tk[0]["id"] == "6" and
+          tk[-1]["id"] == str(N) and
+          all(t["status"] == "done" for t in tk) and
+          ls[-1] == {"done": True, "count": 50000, "dropped": 5} and
+          secs < 10, (rc, ls[:2], ls[-1:], secs))
+    if not SANITIZED and HELPER:
+        check("tasks cap: under 128 MB RSS: %.1f MB" % (rss / 1e6),
+              rss < 128 << 20, rss)
+    os.unlink(tp)
 
 
 # ---- 3.5: --chapter <anchor> --json (#156, XR3b) --------------------------
@@ -4111,6 +4404,198 @@ def test_light_303():
     os.unlink(tp)
 
 
+XSID = "11111111-2222-4333-8444-5555555555e6"
+
+
+def test_light_326():
+    """#326 (QA 1.64.0 MED-XF1, MED-XF2). XF1: a D2 definition whose
+    '{"number":' ends one JSON string and whose 12 begins the next (two
+    tool_result parts, or stdout and stderr, joined) is in a window the
+    prefilter now decodes: light --ref counts it as --full does. XF2: a
+    chapter a light window or a --search window opened only after a step
+    the full decode may not take (a sidechain thread's first block here, a
+    result whose call is older) is null; every chapter light --ref and
+    --search do give is --full's and opens with --chapter. 4096-byte lines,
+    so the windows start at lines 0, 256, 512 and 768."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-p326")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, XSID + ".jsonl")
+    env = dict(ENV, DCH_XRAY_NOCLOCK="1")
+    J = lambda o: json.dumps(o, separators=(",", ":"))
+
+    def pad(o, at, size=4095):
+        """o's JSON, the string at key path `at` padded to size bytes"""
+        n = size - len(J(o))
+        x = o
+        for k in at[:-1]:
+            x = x[k]
+        x[at[-1]] += " " + "z" * (n - 1)
+        return J(o) + "\n"
+
+    U = lambda t, **k: pad(dict({"type": "user", "message": {
+        "content": t}}, **k), ("message", "content"))
+    A = lambda t, **k: pad(dict({"type": "assistant", "message": {
+        "content": [{"type": "text", "text": t}]}}, **k),
+        ("message", "content", 0, "text"))
+
+    def call(i, n):
+        return pad({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "t%d" % i, "name": "Bash",
+             "input": {"command": "gh issue view %d" % n,
+                       "description": ""}}]}},
+            ("message", "content", 0, "input", "description"))
+
+    def result(i, parts=None, tur=None):
+        o = {"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "t%d" % i,
+             "content": parts or "x"}]}, "pad": ""}
+        if tur:
+            o["toolUseResult"] = tur
+        return pad(o, ("pad",))
+
+    def plant(lines):
+        with open(tp, "w") as f:
+            f.write("".join(lines))
+        history("xr-326", XSID, cfg, "/home/demo/p326")
+
+    def refs(r, *a):
+        x = dch("--xray", "xr-326", "--ref", r, "--json", *a, env=env)
+        ls = ref_lines(x.stdout) or []
+        return {"count": [l["tally"].get("count") for l in ls
+                          if "tally" in l],
+                "mentions": {l["mention"]["offset"]: l["mention"]["chapter"]
+                             for l in ls if "mention" in l},
+                "defs": [(l["definition"]["offset"] // 4096,
+                          l["definition"]["title"]) for l in ls
+                         if "definition" in l]}
+
+    # XF1: lines 300-305, in the second window; the rest no digit
+    t = lambda o: [{"type": "text", "text": s} for s in o]
+    mid = {300: call(1, 12),
+           301: result(1, t(['{"number":', '12,"title":"Fix it"}'])),
+           302: call(2, 13),
+           303: result(2, t(['{"number"', ':13,"title":"Fix it"}'])),
+           304: call(3, 14),
+           305: result(3, tur={"stdout": '{"id":',
+                               "stderr": '"14","title":"Fix it"}',
+                               "interrupted": False})}
+    plant([mid[i] if i in mid else U("start") if not i else A("pad")
+           for i in range(1024)])
+    for n, how in ((12, "two text parts, the ':' in the first"),
+                   (13, "two text parts, the ':' in the second"),
+                   (14, "stdout and stderr")):
+        lt = refs("#%d" % n, "--scope", "project")
+        fu = refs("#%d" % n, "--full")
+        check("326 joined: #%d split across %s: light --ref counts its D2 "
+              "definition and mention as --full does (QA: count 0)" % (n, how),
+              lt["count"] == fu["count"] == [1] and
+              lt["defs"] == fu["defs"] == [(n * 2 + 277, "Fix it")] and
+              list(lt["mentions"]) == list(fu["mentions"]) and
+              [o // 4096 for o in fu["mentions"]] == [n * 2 + 277],
+              (lt, fu))
+
+    # XF2: a sidechain thread first seen in an older window (lines 2 and
+    # 769); the older window ending past one (lines 510-511); a result whose
+    # call is in an older window (lines 255-257)
+    side = lambda s: A(s, isSidechain=True, agentId="ag1")
+    special = {0: U("P0"), 1: A("reply"), 2: side("sub starts"),
+               510: U("P5 one"), 511: side("sub goes on"),
+               512: U("P5 two"), 513: A("see o/r#6"),
+               255: call(9, 99), 256: U("P6 one"), 257: result(9),
+               258: U("P6 two"), 259: A("see o/r#8"),
+               768: U("P7 one"), 769: side("sub more"),
+               770: U("P7 two"), 771: A("see o/r#5"), 772: A("more o/r#5")}
+    plant([special.get(i) or A("pad") for i in range(1024)])
+    ino = "%x" % os.stat(tp).st_ino
+    at = lambda i: "f%s:%d" % (ino, i * 4096)
+
+    def audit(r):
+        lt = refs(r, "--scope", "project")["mentions"]
+        fu = refs(r, "--full")["mentions"]
+        rc, o, err = search("xr-326", r, env=env)
+        se = {h["offset"]: h["chapter"] for h in (o or {}).get("hits", [])}
+        bad = [(f, i, a, fu.get(i)) for f, g in (("light", lt), ("search", se))
+               for i, a in sorted(g.items()) if a and a != fu.get(i)]
+        gone = []
+        for a in sorted({a for g in (lt, se) for a in g.values() if a}):
+            rc, c, err, out = chapter("xr-326", a, env=env)
+            if rc != 0 or not c or c.get("anchor") != a:
+                gone.append((a, rc, err.strip()))
+        return lt, fu, se, bad, gone
+
+    for r, first, last, why in (
+            ("o/r#5", 771, 772, "a sidechain thread an older window began"),
+            ("o/r#6", 513, 513, "the older window ends past such a thread"),
+            ("o/r#8", 259, 259, "a result whose call is older")):
+        res = audit(r)
+        lt, fu, se = ({o // 4096: a for o, a in g.items()} for g in res[:3])
+        bad, gone = res[3:]
+        P1 = {"o/r#5": 768, "o/r#6": 510, "o/r#8": 256}[r]
+        check("326 side: %s: --full merges the second prompt into %d's "
+              "chapter; light and --search say null (QA: the second "
+              "prompt's, chapter gone)" % (why, P1),
+              all(fu.get(i) == at(P1) for i in (first, last)) and
+              all(i in lt and lt[i] is None for i in (first, last)) and
+              all(i in se and se[i] in (None, at(P1))
+                  for i in (first, last)), (lt, fu, se))
+        check("326 side: %s: every light and --search chapter is --full's "
+              "and opens with --chapter" % why, not bad and not gone,
+              (bad, gone))
+
+    # the QA generator (ch299.py, seed 299; its files 0 and 6 failed):
+    # prompts, steps, sidechains of four threads, images, compactions and
+    # mentions over 3 to 4 MiB
+    rnd = random.Random(299)
+    worst, seen = [], [0, 0]
+    for k in range(8):
+        ls = [J({"type": "user", "message": {"content": "start"}})]
+        size, end = len(ls[0]) + 1, (3 << 20) + rnd.randrange(1 << 20)
+        while size < end:
+            x = rnd.random()
+            m = lambda: "o/r#7" if rnd.random() < 0.3 else ""
+            if x < 0.12:
+                o = {"type": "user", "message": {
+                    "content": "prompt %d %s" % (len(ls), m())}}
+            elif x < 0.2:
+                o = {"type": "assistant", "isSidechain": True,
+                     "agentId": None, "message": {"content": [
+                         {"type": "text", "text": "side %d %s" % (
+                             len(ls), m())}]}}
+                o["agentId"] = "ag%d" % rnd.randrange(4)
+            elif x < 0.23:
+                o = {"type": "user", "message": {"content": [
+                    {"type": "image", "source": {"type": "base64",
+                                                 "data": "AAAA"}}]}}
+            elif x < 0.24:
+                o = {"type": "system", "subtype": "compact_boundary",
+                     "content": "Conversation compacted"}
+            elif x < 0.25:
+                o = {"type": "user", "isCompactSummary": True,
+                     "message": {"content": "summary o/r#7"}}
+            else:
+                t = ("step %d o/r#7" % len(ls) if x < 0.45 else
+                     "pad %d " % len(ls))
+                o = {"type": "assistant", "message": {"content": [
+                    {"type": "text", "text": t}]}}
+                if x >= 0.45:
+                    n = rnd.choice((800, 5000, 40000, 200000))
+                    t += "w" * max(0, n - len(J(o)))
+                    o["message"]["content"][0]["text"] = t
+            ls.append(J(o))
+            size += len(ls[-1]) + 1
+        plant([l + "\n" for l in ls])
+        lt, fu, se, bad, gone = audit("o/r#7")
+        seen[0] += len(lt) + len(se)
+        seen[1] += sum(1 for g in (lt, se) for a in g.values() if a)
+        if bad or gone:
+            worst.append((k, bad[:2], gone[:2]))
+    check("326 side: 8 random transcripts with sidechains, %d light and "
+          "--search mentions, %d with a chapter: each is --full's and opens "
+          "with --chapter" % tuple(seen), not worst and seen[1], worst)
+    os.unlink(tp)
+
+
 PSID = "11111111-2222-4333-8444-5555555555d4"
 
 
@@ -4118,11 +4603,16 @@ def test_prefilter_reach():
     """#293: light --ref does not decode a 1 MiB window whose raw bytes
     cannot hold the ref, so its 300 ms reach the whole of a 96 MB
     transcript: a ticket named only in the first line is found. Without the
-    prefilter light decodes about 40-95 MB in its budget on a fast idle
-    machine and stops, why budget. 96 MB, not more: a CI runner's raw scan
-    of 160 MB stopped at the budget 2 MB short, three tries in a row.
-    Asserts what was found, not how long it took; a run a stalled machine
-    stops at the budget is retried, twice."""
+    prefilter light decodes about 20-30 MB in its budget at load 10 and
+    40-95 MB on a fast idle machine. With the clock off (#332: a stalled CI
+    runner reached 6 MB of 96 in 300 ms, three tries in a row) this asserts
+    what was found and the CPU it cost, which a stall does not inflate: a
+    twin with a \\/ on every line, which the prefilter never skips
+    (pf_escape), gives the CPU per byte of decoding every window; the
+    prefilter's read costs under a quarter of that (30 times less on an
+    idle M-series)."""
+    import resource
+
     cfg = os.path.join(HOME, ".claude")
     pdir = os.path.join(cfg, "projects", "-home-demo-proj")
     os.makedirs(pdir, exist_ok=True)
@@ -4134,28 +4624,42 @@ def test_prefilter_reach():
                                           for j in range(20 + i % 300))}]}},
         separators=(",", ":")) + "\n"
     block = "".join(said(i) for i in range(400))
-    with open(tp, "w") as f:
-        f.write(json.dumps({"type": "user", "cwd": "/home/demo/proj",
-                            "message": {"content": "start on MARK-1"}},
-                           separators=(",", ":")) + "\n")
-        for _ in range((96 << 20) // len(block)):
-            f.write(block)
+
+    def plant(blk, mb):
+        with open(tp, "w") as f:
+            f.write(json.dumps({"type": "user", "cwd": "/home/demo/proj",
+                                "message": {"content": "start on MARK-1"}},
+                               separators=(",", ":")) + "\n")
+            for _ in range((mb << 20) // len(blk)):
+                f.write(blk)
+
+    def reach():
+        c = resource.getrusage(resource.RUSAGE_CHILDREN)
+        r = dch("--xray", "xr-reach", "--ref", "MARK-1", "--scope",
+                "session", "--json", env=dict(ENV, DCH_XRAY_NOCLOCK="1"))
+        e = resource.getrusage(resource.RUSAGE_CHILDREN)
+        ls = ref_lines(r.stdout) or [{}]
+        return (r, ls, e.ru_utime + e.ru_stime - c.ru_utime - c.ru_stime,
+                ls[-1].get("bytes") or 1)
+
     history("xr-reach", PSID, cfg)
     try:
-        for k in range(3):
-            r = dch("--xray", "xr-reach", "--ref", "MARK-1", "--scope",
-                    "session", "--json")
-            ls = ref_lines(r.stdout) or [{}]
-            if ls[-1].get("why") != "budget":
-                break
+        plant(block.replace('"text":"', '"text":"\\/'), 32)
+        tw = reach()
+        plant(block, 96)
+        r, ls, cpu, n = reach()
         men = [l["mention"]["offset"] for l in ls if "mention" in l]
         check("prefilter: light --ref finds a ref named only in the first "
-              "line of a 96 MB transcript inside its 300 ms budget: the "
-              "mention at offset 0, why first, all but its oldest window counted (%d tries)"
-              % (k + 1), r.returncode == 0 and men == [0] and
+              "line of a 96 MB transcript: the mention at offset 0, why "
+              "first, all but its oldest window counted, at under a quarter "
+              "of the CPU per byte of decoding every window (%.0f ms for "
+              "96 MB; decoded, %.0f ms for %d MB)"
+              % (cpu * 1000, tw[2] * 1000, tw[3] >> 20),
+              r.returncode == 0 and men == [0] and
               ls[-1].get("done") and ls[-1]["why"] == "first" and
-              ls[-1]["bytes"] >= os.path.getsize(tp) - (2 << 20),
-              (r.returncode, ls[-2:], r.stderr))
+              n >= os.path.getsize(tp) - (2 << 20) and
+              tw[3] > 16 << 20 and cpu / n * 4 < tw[2] / tw[3],
+              (r.returncode, ls[-2:], r.stderr, tw[1][-1:]))
     finally:
         os.unlink(tp)
 
@@ -4177,6 +4681,8 @@ def main():
         test_d2_whole()
         test_write_fail()
         test_search()
+        test_tasks()
+        test_tasks_cap()
         test_chapter()
         test_chapter_seek()
         test_chapter_shell()
@@ -4203,6 +4709,7 @@ def main():
         test_scope()
         test_light_anchors()
         test_light_303()
+        test_light_326()
         test_prefilter_reach()
     finally:
         shutil.rmtree(T, ignore_errors=True)

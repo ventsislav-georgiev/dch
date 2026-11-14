@@ -26,6 +26,12 @@ per 200 ms and its last rows still come, one that floods the same 0x11
 writes the cache not at all (LOW-R2); a stdout on /dev/null keeps it
 running (NIT-R1, macOS).
 
+QA 1.64.0: a stdout closed at exec (`>&-`) ends it with 0 at once, local
+and --remote (LOW-R14); with 16 followers up a 17th watch is refused busy,
+told why, while a plain connection still fits, and a 17th follower is
+polled, its rows never stale; a watch connection's rename is refused
+(LOW-R15).
+
 Run:  python3 tests/ls_follow_test.py        (uses ./dch)
 """
 import glob, json, os, re, select, signal, socket, struct, subprocess, sys
@@ -241,6 +247,32 @@ def main():
         streams.append(s)
         return s
 
+    def raw(port, *frs):
+        c = socket.create_connection(("127.0.0.1", port), 5)
+        c.settimeout(5)
+        c.sendall(b"".join(frs))
+        return c
+
+    def reply(c, types, secs=5):
+        """The first frame of one of types: (type, body), or None."""
+        buf, end = b"", time.time() + secs
+        while time.time() < end:
+            while len(buf) >= 5:
+                t, n = struct.unpack(">BI", buf[:5])
+                if len(buf) < 5 + n:
+                    break
+                body, buf = buf[5:5 + n], buf[5 + n:]
+                if t in types:
+                    return t, body
+            try:
+                d = c.recv(65536)
+            except OSError:
+                return None
+            if not d:
+                return None
+            buf += d
+        return None
+
     log = os.path.join(tmp, "serve.log")
     try:
         with open(log, "w") as lf:
@@ -329,6 +361,19 @@ def main():
             rc = None
         check("SIGTERM ends it with exit 0", rc == 0, rc)
 
+        # a watch connection reads the list, nothing else (QA 1.64.0 LOW-R15)
+        c = raw(port, frame(0x08, {"proto": "1.1"}),
+                frame(0x2e, {"device_id": "t-rename"}))
+        first = reply(c, (0x11, 0x13))
+        c.sendall(frame(0x06, {"name": "rs1", "alias": "by-watch"}))
+        got = reply(c, (0x13, 0x14))
+        c.close()
+        r = dch(senv, "--ls-json")
+        check("a watch connection's rename: refused (0x13), rs1 unrenamed",
+              first is not None and first[0] == 0x11 and got is not None
+              and got[0] == 0x13 and b"cannot kill or rename" in got[1]
+              and "by-watch" not in r.stdout, (first, got, r.stdout[:300]))
+
         # 16 followers from this machine: its --read still gets a slot
         nw = len(re.findall(r"watch \(device", open(log).read()))
         many = [follow("--remote", "--follow", "--hosts", hosts,
@@ -343,6 +388,32 @@ def main():
               "slot", '"stale":false' in got
               and all(f.p.poll() is None for f in many),
               (got, open(log).read()[-600:]))
+        # watch streams have a cap of their own (QA 1.64.0 LOW-R15)
+        c = raw(port, frame(0x08, {"proto": "1.1"}),
+                frame(0x2e, {"device_id": "t-17"}))
+        got = reply(c, (0x11, 0x13))
+        c.close()
+        msg = json.loads(got[1]) if got and got[0] == 0x13 else {}
+        check("16 followers here: a 17th watch is refused busy, told why",
+              msg.get("code") == "busy" and "16 session list streams"
+              in msg.get("message", ""), got)
+        s17 = follow("--remote", "--follow", "--hosts", hosts,
+                     DCH_REMOTE_EVERY_MS="300")
+        many.append(s17)
+        rows, _ = s17.until(lambda x: rem(x, "srv") == {"rs1": False},
+                            BUDGET + 2)
+        time.sleep(2.0)  # past the refusal, polled every 300 ms
+        while s17.line(0.1):
+            pass
+        stale = [ln for ln in s17.lines if rem(json.loads(ln), "srv")
+                 != {"rs1": False}]
+        check("a 17th follower: polled, srv:rs1 never stale over 2 s",
+              rows is not None and not stale and s17.p.poll() is None
+              and len(re.findall(r"watch \(device", open(log).read()))
+              == nw + 16, (s17.lines[-3:], stale[:2]))
+        got = ref()
+        check("and a plain connection still fits beside them",
+              '"stale":false' in got, got)
         for f in many:
             f.stop()
 
@@ -575,6 +646,22 @@ def main():
             rc = p.wait()
         check("stdout on /dev/null: it keeps running, SIGTERM exits 0",
               alive and rc == 0, (alive, rc))
+        # fd 1 closed at exec: nobody reads (QA 1.64.0 LOW-R14)
+        for args in (["--follow"], ["--remote", "--follow", "--hosts", fh]):
+            t0 = time.time()
+            p = subprocess.Popen(["/bin/sh", "-c", 'exec "$@" >&-', "sh",
+                                  DCH, "--ls-json"] + args,
+                                 env=dict(cenv, DCH_REMOTE_EVERY_MS="300"),
+                                 stdin=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+            try:
+                rc = p.wait(2)
+            except subprocess.TimeoutExpired:
+                p.kill()
+                p.wait()
+                rc = None
+            check("stdout closed at exec (>&-), %s: exit 0 within 2 s "
+                  "(%.2f s)" % (args[0], time.time() - t0), rc == 0, rc)
 
         # --- local only: --ls-json --follow --------------------------------
         q0 = len(q.conns)

@@ -210,6 +210,14 @@ class Fake:
                             "ctlold": frame(0x13, {
                                 "message": "--search is not allowed with "
                                            "--xray"}),
+                            # #319: one before --tasks
+                            "ctloldtasks": frame(0x13, {
+                                "message": "--tasks is not allowed with "
+                                           "--xray"}),
+                            # #322: one that predates --memory
+                            "ctloldmem": frame(0x13, {
+                                "message": "--memory is not allowed with "
+                                           "--xray"}),
                         }[self.mode])
                         c.shutdown(socket.SHUT_WR)
                     elif t == 0x03:
@@ -819,6 +827,28 @@ def xray_checks(dch, check, senv, cenv, port, fakes, tmp, slog):
           json.loads(f.bodies[-1]) == {"argv": ["--xray", "x", "--search",
                                                 "needle", "--json"]},
           f.bodies[-1])
+    # #319: and one whose dch serve predates --tasks, said the same way
+    f = Fake("ctloldtasks", ops=["ctl", "ctl-cancel", "watch", "xray"])
+    fakes.append(f)
+    r = dch(side("q=127.0.0.1:%d" % f.port), "--xray", "q:x", "--tasks",
+            "--json")
+    check("xray --tasks on an older host: its dch does not know --tasks, "
+          "exit 1, as --search says it", r.returncode == 1 and
+          r.stdout == "" and
+          r.stderr == "dch: q: the host's dch does not know --tasks\n" and
+          json.loads(f.bodies[-1]) == {"argv": ["--xray", "x", "--tasks",
+                                                "--json"]}, r)
+    # #322: a host whose dch serve predates --memory
+    f = Fake("ctloldmem", ops=["ctl", "ctl-cancel", "watch", "xray"])
+    fakes.append(f)
+    r = dch(side("q=127.0.0.1:%d" % f.port), "--xray", "q:x", "--memory",
+            "--json")
+    check("xray --memory on an older host: its dch does not know --memory, "
+          "exit 1", r.returncode == 1 and r.stdout == "" and
+          r.stderr == "dch: q: the host's dch does not know --memory\n", r)
+    check("xray --memory: the 0x30 carries the argv as typed",
+          json.loads(f.bodies[-1]) == {"argv": ["--xray", "x", "--memory",
+                                                "--json"]}, f.bodies[-1])
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
     dead = s.getsockname()[1]

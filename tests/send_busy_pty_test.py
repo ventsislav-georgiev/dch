@@ -179,10 +179,11 @@ class Attach:
                          termios.ICANON)
 
     def close(self):
-        try:
-            os.kill(self.pid, signal.SIGKILL)
-        except OSError:
-            pass
+        for sig in (signal.SIGCONT, signal.SIGKILL):	# it may be stopped
+            try:
+                os.kill(self.pid, sig)
+            except OSError:
+                pass
         os.close(self.fd)
         os.waitpid(self.pid, 0)
 
@@ -308,21 +309,19 @@ def main():
         w = paste_words("p")
         rc, err = dch_err("--send", "capsend", *w, timeout=30)
         check("capsend: --send of a 500 KB paste past the cap: exit 1, "
-              "one line says the input was dropped",
+              "one line says the input was dropped and its start may wait",
               rc == 1 and err == "dch: capsend: input dropped: the program "
-              "is not reading (4 MB held)\n", (rc, err))
+              "is not reading (4 MB held); the text's start may still be in "
+              "its input\n", (rc, err))
+        # #328: none of the paste had reached the pty: none of it is typed,
+        # so a script retrying --run does not submit a cut prefix with it
+        rc = dch("--run", "capsend", "END")
         open(d + "/go", "w").close()
-        data = drained(d, b"\033[201~")
-        check("capsend: the program read the 4 MB held before it, whole",
-              data.startswith(sent), (len(data), len(sent)))
-        why = cut_paste(data[len(sent):], " ".join(w).encode())
-        check("capsend: then the paste cut at its tail with its end marker, "
-              "no hole, nothing after", why is None, why)
-        rc = dch("--send", "capsend", "END")
-        check("capsend: once read, a --send exits 0 and goes in whole",
-              rc == 0 and until(lambda: readf(d + "/got", "rb") ==
-                                data + b"END", 10),
-              (rc, readf(d + "/got", "rb")[-30:]))
+        data = drained(d, b"END\r")
+        check("capsend: the program read the 4 MB held, then only the "
+              "next --run: the refused paste left nothing typed (#328)",
+              rc == 0 and data == sent + b"END\r",
+              (rc, len(data), len(sent), data[len(sent):len(sent) + 30]))
 
     def cap_attach():
         d = spawn("capatt", CAP, os.path.join(tmp, "capatt.d"))
@@ -330,11 +329,22 @@ def main():
         until(lambda: os.path.exists(d + "/ready"), 20)
         sent = fill("capatt")
         full = " ".join(paste_words("q")).encode()
-        off = 0
-        while off < len(full):
+        off, end = 0, time.time() + 30
+        # non-blocking: a client that stops reading must not hang a write
+        os.set_blocking(a.fd, False)
+        while off < len(full) and time.time() < end:
             if select.select([], [a.fd], [], 0.05)[1]:
-                off += os.write(a.fd, full[off:off + 4096])
+                try:
+                    off += os.write(a.fd, full[off:off + 4096])
+                except BlockingIOError:
+                    pass
             a.pump(0.001, lambda: False)
+        os.set_blocking(a.fd, True)
+        if off < len(full):
+            check("capatt: the attach took the 500 KB paste in 30 s", False,
+                  "%d of %d bytes typed: the client stopped reading its "
+                  "terminal" % (off, len(full)))
+            return
         a.pump(1, lambda: False)
         open(d + "/go", "w").close()
         data = drained(d, b"\033[201~")
@@ -349,6 +359,8 @@ def main():
               until(lambda: readf(d + "/got", "rb") == data + b"K", 10),
               readf(d + "/got", "rb")[-30:])
 
+    # SIGTERM ends the test through finally, so nothing it started is left
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     try:
         # --- cap: a paste past what the master holds (#307) ---------------
         cap_send()
@@ -421,6 +433,13 @@ def main():
             a.close()
         for n in names:
             dch("-k", n)
+            mp = master(n)	# a master -k did not end: its exact pid, by socket
+            if mp:
+                for sig in (signal.SIGCONT, signal.SIGKILL):
+                    try:
+                        os.kill(mp, sig)
+                    except OSError:
+                        pass
         shutil.rmtree(tmp, ignore_errors=True)
     print("%s: %d check(s) failed" % ("FAIL" if fails else "PASS", fails))
     return 1 if fails else 0

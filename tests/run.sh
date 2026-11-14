@@ -348,6 +348,11 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "--say/--run/--revive stop safely on a signal (#126)" verb_signal_test.py
     pyrun "auto-allow answers plain permission prompts; --config" auto_allow_test.py
     pyrun "a suspended Claude: claude_foreground false, nothing typed to the shell (#282)" claude_fg_test.py
+    # #330: pyrun hides a passing test's output; say whether the under-script
+    # rows ran or skipped (a failing run also shows them in its dump above)
+    grep "^  [a-zA-Z]* *under script, fg: the fake's screen is back" "$TMP/pyout"
+    sed -n '/^    keys=/,/^  SKIP under script/p' "$TMP/pyout" | grep -q SKIP \
+        && sed -n '/^    keys=/,/^  SKIP under script/p' "$TMP/pyout"
     # --stop's own 3 s deadlines expire on the ASan-slowed macOS CI runner
     # (a different check each run, no sanitizer report); ASan on Linux and
     # every plain build still run it.
@@ -1104,6 +1109,18 @@ if $xcc -O1 -I"$xsrc" -I. -o "$TMP/xray_unit" "$xsrc/tests/xray_unit.c" \
 else
     bad "xray_unit builds"; sed 's/^/       /' "$TMP/xray_unit.log"
 fi
+# --memory's parsers (#322): frontmatter, the index line, the shell rule
+# shellcheck disable=SC2086 # xcc is a word list
+if $xcc -O1 -I"$xsrc" -I. -o "$TMP/xmem_unit" "$xsrc/tests/xmem_unit.c" \
+    "$xsrc/xmem.c" "$xsrc/xray.c" "$xsrc/json.c" >"$TMP/xmem_unit.log" 2>&1; then
+    if "$TMP/xmem_unit" >"$TMP/xmem_unit.log" 2>&1; then
+        ok "xmem units: frontmatter, the MEMORY.md line, the shell rule"
+    else
+        bad "xmem units"; grep -v '^  ok' "$TMP/xmem_unit.log" | sed 's/^/       /'
+    fi
+else
+    bad "xmem_unit builds"; sed 's/^/       /' "$TMP/xmem_unit.log"
+fi
 # spec 2.1: the engine is client-only; the master never links an xr_ symbol
 if [ -f master.o ] && command -v nm >/dev/null 2>&1; then
     xrsym=$(nm master.o 2>/dev/null | grep -cE ' _?xr_')
@@ -1156,11 +1173,17 @@ fi
 # a live Codex's rollout (#160, 7.4): the one-UUID mapping, the seam, --ref,
 # --follow; its ring-pause part skips itself without the mirror
 pyrun "xray: a live Codex's rollout, the mapping, the seam, --follow" xray_codex_test.py
+# --memory (#322): memories and instruction files, Claude and Codex, serve
+pyrun "xray --memory: memories, instruction files, Claude, Codex, serve" xray_memory_test.py
 # the file window's guard (#178): QA's repro with FAKE files, local and over
 # a loopback dch serve, through ended sessions so lite runs it too
 pyrun "xray file windows: no wide root, the deny list, hard links" xray_deny_test.py
 # QA 1.60.0 LOW-T8: dch serve's ctls get no DCH_XRAY_NOCLOCK, DCH_XRAY_CAPS
 pyrun "dch serve keeps X-ray's test switches from its ctls" serve_xray_env_test.py
+# the command source's runner (#321): xcmd_unit's units, then its driver
+# against fake commands (clock, caps, group cleanup, no shell)
+pyrun "xray command source: argv split, row lines, the runner's limits" xcmd_test.py
+pyrun "--tasks/--memory with a tasks_command/memory_command: command first, the built-in on no row, warn" xcmd_tasks_test.py
 
 # --- the watchdog ends a hung test, its child and its session, only them ----
 # watchdog_hang.py records its pid, a child's, a session master's and one
