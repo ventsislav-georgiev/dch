@@ -5837,21 +5837,34 @@ proc_ppid(long pid)
 	return proc_stat(pid, NULL);
 }
 
-/* 1 when the Claude at `pid` is in the foreground process group of the
-** terminal that `root` (a session's child, which the master made that
-** pty's controlling process) controls, 0 when it is not — suspended with
-** Ctrl-Z or in the background, a shell or another job in front (#282) —
-** -1 when either cannot be read. The kernel's own view, so an old master
-** answers it as well as a new one. */
+/* 1 when the Claude at `pid` is in the foreground process group of its
+** own terminal, and so is each wrapper with a pty of its own (script,
+** unbuffer: #312) between it and `root` (a session's child, which the
+** master made that pty's controlling process) on the terminal around it;
+** 0 when one is not — suspended with Ctrl-Z or in the background, a shell
+** or another job in front (#282) — -1 when the chain cannot be read. The
+** kernel's own view, so an old master answers it as well as a new one. */
 static int
 proc_fg(long root, long pid)
 {
-	long fg = -1;
-	pid_t g = getpgid((pid_t)pid);
+	long fg = -1, below = 0, up;
+	pid_t g;
+	int d;
 
-	if (proc_stat(root, &fg) < 0 || fg <= 0 || g < 0)
-		return -1;
-	return g == (pid_t)fg;
+	for (d = 0; d < 64 && pid > 1; d++)
+	{
+		if ((up = proc_stat(pid, &fg)) < 0 || (g = getpgid((pid_t)pid)) < 0)
+			return -1;
+		/* a terminal's foreground group is the same for all its
+		** processes: a new one means a new terminal, checked once */
+		if ((d == 0 || fg != below) && (fg <= 0 || g != (pid_t)fg))
+			return 0;
+		if (pid == root)
+			return 1;
+		below = fg;
+		pid = up;
+	}
+	return -1;
 }
 
 /* Generations from `anc` down to `pid` (0 = the same process), -1 when pid

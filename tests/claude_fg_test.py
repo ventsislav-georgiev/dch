@@ -11,7 +11,10 @@ claude_foreground false; with auto_allow on, a permission prompt that the
 shell prints is not answered (no "1", no auto_allowed); --say and --stop
 fail not_foreground and type nothing; --run keeps the plain burst for the
 shell; after `fg`, claude_foreground is true and the fake's own prompt is
-answered. On dch-lite (no mirror) the auto-allow checks are skipped.
+answered. Then a second session runs the fake under script(1) (a pty and
+process group of its own, #312): claude_foreground true and --say reaches
+it; suspended inside script's bash, --say fails not_foreground; after fg,
+--stop is not refused. On dch-lite (no mirror) the auto-allow checks are skipped.
 
 Run:  python3 tests/claude_fg_test.py        (uses ./dch)
 """
@@ -79,7 +82,7 @@ def main():
                       PATH=bindir + os.pathsep + os.environ["PATH"])
     os.chdir(tmp)
     n = "fg" + TAG
-    fails, fpid = 0, None
+    fails, fpid, spid = 0, None, None
 
     def check(msg, cond):
         nonlocal fails
@@ -188,15 +191,65 @@ def main():
                   until(lambda: keys() == ["1"], 8) and
                   (row().get("auto_allowed") or {}).get("title") ==
                   "Bash command")
+
+        # --- under script(1), a pty of its own: in front, verbs reach it --
+        # (#312: 1.63.0 read script's group off the outer pty and refused)
+        SH = "bash --norc --noprofile -i"
+        if sys.platform == "darwin":
+            wrap = "script -q /dev/null " + SH
+        elif "util-linux" in subprocess.run(
+                ["script", "--version"], capture_output=True,
+                text=True).stdout:
+            wrap = "script -q -c '%s' /dev/null" % SH
+        else:
+            wrap = None
+            print("  skip under script(1): not util-linux or macOS script")
+        if wrap:
+            run("-k", n)
+            n = "fs" + TAG
+            setctl()
+            subprocess.run([DCH, "--spawn", n, "--size", "100x30", "bash",
+                            "--norc", "--noprofile", "-i"],
+                           capture_output=True, check=True)
+            until(lambda: "$" in screen(), 10)
+            send(wrap)
+            time.sleep(1)                   # the inner bash's prompt
+            send("claude")
+            st = until(lambda: [e for e in events() if e["ev"] == "start"],
+                       15)
+            spid = st[0]["pid"] if st else None
+            r = until(lambda: row().get("claude_session_id") and row(), 10)
+            until(lambda: lite or "auto mode on" in screen(), 10)
+            check("under script: claude_foreground true",
+                  spid and r and r.get("claude_foreground") is True)
+            r = run("--say", n, "--json", "--", "hello-under-script")
+            check("under script: --say reaches the running Claude",
+                  result(r).get("reason") != "not_foreground" and
+                  (lite or until(lambda: "hello-under-script"
+                  in [e.get("text") for e in events()
+                      if e["ev"] in ("line", "turn")], 5)))
+            os.killpg(os.getpgid(spid), signal.SIGTSTP)
+            r = until(lambda: row().get("claude_foreground") is False and
+                      row(), 5)
+            check("under script, suspended: claude_foreground false", r)
+            r = run("--say", n, "--json", "--", "hello")
+            check("under script, suspended: --say fails not_foreground",
+                  result(r).get("reason") == "not_foreground")
+            send("fg")
+            until(lambda: row().get("claude_foreground") is True, 10)
+            r = run("--stop", n, "--json", timeout=90)
+            check("under script: --stop is not refused not_foreground",
+                  result(r).get("reason") != "not_foreground")
     except Exception:
         import traceback
         traceback.print_exc()
         fails += 1
     run("-k", n)
     time.sleep(0.3)
-    if fpid:                # safety net: only the fake this test started
+    for p in (fpid, spid):  # safety net: only the fakes this test started
         try:
-            os.kill(fpid, signal.SIGKILL)
+            if p:
+                os.kill(p, signal.SIGKILL)
         except OSError:
             pass
     shutil.rmtree(tmp, ignore_errors=True)
