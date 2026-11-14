@@ -3926,6 +3926,7 @@ ix_count(const struct xr_index *x, const struct xr_ent *e)
 /* ---- refs: the --ref scan's lines (3.4) ------------------------------------ */
 
 #define XR_HELD 199		/* a file's newest mentions, after its first */
+#define XR_RING (XR_HELD + 1)	/* light keeps its newest 200 (#303) */
 
 struct xr_scan
 {
@@ -3944,7 +3945,8 @@ struct xr_scan
 	uint64_t nunit, lastunit, nrow, lastrow, lines, lastoff, lasth, foff;
 	int found, ndefs, mentioned;
 	uint64_t defh[XR_DEFS];
-	char *held[XR_HELD];
+	char *held[XR_RING];
+	uint64_t hoff[XR_RING];	/* light: each held line's offset */
 	size_t hn, h0;
 	uint64_t dropped;	/* mention lines the XR_HELD bound left out */
 	/* the scan */
@@ -3966,7 +3968,8 @@ xr_now_ms(void)
 }
 
 /* A file's tally line (3.4); mentions_dropped: the mention lines past the
-** first and the newest 199, counted in count but not written. */
+** first and the newest 199 (light: the newest 200), counted in count but
+** not written. */
 static char *
 tally_line(const struct xr_scan *x, uint64_t count, uint64_t dropped,
            int partial)
@@ -4032,7 +4035,7 @@ xr_scan_free(struct xr_scan *x)
 	if (!x)
 		return;
 	for (k = 0; k < x->hn; k++)
-		free(x->held[(x->h0 + k) % XR_HELD]);
+		free(x->held[(x->h0 + k) % XR_RING]);
 	free(x);
 }
 
@@ -4186,6 +4189,34 @@ mention_line(struct xr_scan *x, const struct xr_hit *h)
 	return b;
 }
 
+/* Light's mention lines (#303): its windows come newest first, a window's
+** lines oldest first, so the file's newest XR_RING are kept by offset, in
+** the order they came: a newer line puts out the oldest held one. */
+static void
+sc_hold(struct xr_scan *x, char *b, uint64_t off)
+{
+	size_t k, o = 0;
+
+	if (x->hn == XR_RING)
+	{
+		for (k = 1; k < x->hn; k++)
+			if (x->hoff[k] < x->hoff[o])
+				o = k;
+		x->dropped++;
+		if (x->hoff[o] > off)
+		{
+			free(b);
+			return;
+		}
+		free(x->held[o]);
+		x->hn--;
+		memmove(x->held + o, x->held + o + 1, (x->hn - o) * sizeof *x->held);
+		memmove(x->hoff + o, x->hoff + o + 1, (x->hn - o) * sizeof *x->hoff);
+	}
+	x->held[x->hn] = b;
+	x->hoff[x->hn++] = off;
+}
+
 static void
 sc_hit(void *ctx, const struct xr_hit *h)
 {
@@ -4259,26 +4290,23 @@ sc_hit(void *ctx, const struct xr_hit *h)
 		if (newline && (x->full || (!x->shell && !x->other)) &&
 		    (b = mention_line(x, h)))
 		{
-			if (!x->mentioned++)
+			if (!x->full)
+				sc_hold(x, b, h->off);
+			else if (!x->mentioned++)
 			{
 				(void)sc_line(x, b, strlen(b));
 				free(b);
-			}
-			else if (x->hn == XR_HELD && !x->full)
-			{
-				free(b);	/* light reads newest first: */
-				x->dropped++;	/* the held are the newer */
 			}
 			else
 			{
 				if (x->hn == XR_HELD)
 				{
 					free(x->held[x->h0]);
-					x->h0 = (x->h0 + 1) % XR_HELD;
+					x->h0 = (x->h0 + 1) % XR_RING;
 					x->hn--;
 					x->dropped++;
 				}
-				x->held[(x->h0 + x->hn++) % XR_HELD] = b;
+				x->held[(x->h0 + x->hn++) % XR_RING] = b;
 			}
 		}
 	}
@@ -4399,7 +4427,7 @@ xr_scan_file(struct xr_scan *x, uint64_t bytes, uint64_t too_long,
 	x->too_long += too_long;
 	for (k = 0; k < x->hn; k++)
 	{
-		char *l = x->held[(x->h0 + k) % XR_HELD];
+		char *l = x->held[(x->h0 + k) % XR_RING];
 
 		(void)sc_line(x, l, strlen(l));
 		free(l);
@@ -6832,10 +6860,11 @@ win_tick(void *ctx, uint64_t bytes)
 	return w->tick(w->tctx, w->base + bytes);
 }
 
-/* Lines [a, b) by a fresh decoder (d's sink, inode and kind). */
+/* Lines [a, b) by a fresh decoder (d's sink, inode and kind) that starts
+** with cwd, the one a full decode has at a (#303). */
 static int
 win_read(struct xr_claude *d, int fd, uint64_t a, uint64_t b,
-         struct xr_win *w, char *buf, char *acc)
+         struct xr_win *w, char *buf, char *acc, const char *cwd)
 {
 	struct xr_claude *e = xr_claude_new();
 	struct xr_chapters ch;
@@ -6844,6 +6873,7 @@ win_read(struct xr_claude *d, int fd, uint64_t a, uint64_t b,
 	if (!e)
 		return -1;
 	e->codex = d->codex;
+	memcpy(e->cwd, cwd, sizeof e->cwd);
 	e->unit = d->unit;	/* a unit never repeats across windows */
 	e->blind = a > 0;
 	xr_claude_refs(e, &d->rk, d->ino, w->tick ? win_tick : NULL, w);
@@ -6858,13 +6888,123 @@ win_read(struct xr_claude *d, int fd, uint64_t a, uint64_t b,
 	return rc;
 }
 
+/* A window's cwd (#303): a line can only name one with a key ending "cwd"
+** or "irectory", or one written with an escape (a superset, raw). */
+static int
+cwd_maybe(const char *s, size_t n)
+{
+	size_t i;
+
+	for (i = 0; i < n; i++)
+		if ((s[i] == '"' && ((i >= 3 && !memcmp(s + i - 3, "cwd", 3)) ||
+		                     (i >= 8 && !memcmp(s + i - 8, "irectory", 8)))) ||
+		    (s[i] == '\\' && n - i > 4 && !memcmp(s + i + 1, "u00", 3) &&
+		     s[i + 4] >= '4' && s[i + 4] <= '7'))
+			return 1;
+	return 0;
+}
+
+static int
+cwd_halt(void *ctx, uint64_t bytes)
+{
+	(void)ctx;
+	(void)bytes;
+	return 1;
+}
+
+/* The line at a (up to b) decoded alone, as the full read decodes it (a
+** decoder with no refs, stopped after it): 1 it names a cwd, copied to cwd;
+** 0 not; -1 a read error. */
+static int
+cwd_line(const struct xr_claude *d, int fd, uint64_t a, uint64_t b,
+         char *buf, char *acc, char *cwd)
+{
+	struct xr_claude *e = xr_claude_new();
+	int rc;
+
+	if (!e)
+		return -1;
+	e->codex = d->codex;
+	e->tick = cwd_halt;
+	if ((rc = read_range(e, fd, a, b, 0, buf, acc)) == 0 && e->cwd[0])
+	{
+		memcpy(cwd, e->cwd, sizeof e->cwd);
+		rc = 1;
+	}
+	xr_claude_free(e);
+	return rc < 0 ? -1 : rc;
+}
+
+/* The last line of [lo, hi) that names a cwd, read backwards a chunk at a
+** time (sb), hi a line start or the head's end: 1 with *at its start, 0
+** none (or the tick stopped it), -1 a read error. */
+static int
+cwd_back(struct xr_claude *d, int fd, uint64_t lo, uint64_t hi,
+         struct xr_win *w, char *sb, char *buf, char *acc, uint64_t *at,
+         char *cwd)
+{
+	uint64_t be = hi, le = 0;	/* le: a line longer than a chunk ends */
+
+	while (be > lo)
+	{
+		uint64_t bs = be - lo > xr_lim.chunk ? be - xr_lim.chunk : lo;
+		size_t n = (size_t)(be - bs), f = 0, e, j;
+		ssize_t got;
+		int k;
+
+		if (w->tick && (d->halt = w->tick(w->tctx, w->base)))
+			return 0;
+		while ((got = pread(fd, sb, n, (off_t)bs)) < 0 && errno == EINTR)
+			;
+		if (got != (ssize_t)n)
+			return got < 0 ? -1 : 0;	/* shrank */
+		if (le)	/* that line starts past the block's last '\n' (or lo) */
+		{
+			for (j = n; j > 0 && sb[j - 1] != '\n'; j--)
+				;
+			if (!j && bs > lo)
+			{
+				be = bs;
+				continue;
+			}
+			if ((k = cwd_line(d, fd, bs + j, le, buf, acc, cwd)))
+				return k < 0 ? k : (*at = bs + j, 1);
+			le = 0;
+			be = bs + j;
+			continue;
+		}
+		if (bs > lo)	/* the block's first line start */
+		{
+			for (f = 0; f < n && sb[f] != '\n'; f++)
+				;
+			if (++f >= n)	/* the line ending at be starts before bs */
+			{
+				le = be;
+				be = bs;
+				continue;
+			}
+		}
+		for (e = n; e > f; e = j)
+		{
+			for (j = e - 1; j > f && sb[j - 1] != '\n'; j--)
+				;
+			if (cwd_maybe(sb + j, e - j) &&
+			    (k = cwd_line(d, fd, bs + j, bs + e, buf, acc, cwd)))
+				return k < 0 ? k : (*at = bs + j, 1);
+		}
+		be = bs + f;
+	}
+	return 0;
+}
+
 int
 xr_claude_newest(struct xr_claude *d, int fd, uint64_t size, int *capped)
 {
 	char *buf = malloc(XR_CHUNK), *acc = malloc(XR_LINE_MAX + 1);
-	uint64_t r[2][2], end = size;
+	char *sb = malloc(XR_CHUNK), cwd[sizeof d->cwd] = "";
+	uint64_t r[2][2], cat = 0;
 	struct xr_win w;
-	int nr = 1, i, k, rc = buf && acc ? 0 : -1;
+	int nr = 1, i, k, rc = buf && acc && sb ? 0 : -1, known = 0;
 
 	w.tick = d->tick;
 	w.tctx = d->tctx;
@@ -6874,7 +7014,9 @@ xr_claude_newest(struct xr_claude *d, int fd, uint64_t size, int *capped)
 	r[0][1] = size;
 	if (size > xr_lim.head + xr_lim.tail)
 	{
-		/* the tail first, then the head (3.8's range) */
+		/* the tail first, then the head (3.8's range); the head's last
+		** window ends at its end, and read_range leaves the line it
+		** cuts there, as xr_claude_read does (#303) */
 		*capped = 1;
 		r[0][0] = size - xr_lim.tail;
 		r[1][0] = 0;
@@ -6887,13 +7029,9 @@ xr_claude_newest(struct xr_claude *d, int fd, uint64_t size, int *capped)
 	{
 		uint64_t lo = 0, b = r[i][1], s, a;
 
-		/* the head ends past its last line, before the tail's first */
-		if (i && (k = line_start(fd, b, end, buf, &b)) <= 0)
-			b = end, rc = k;
 		/* the range starts at its first line (the tail: past its cut) */
-		if (rc == 0 && (k = line_start(fd, r[i][0], b, buf, &lo)) <= 0)
+		if ((k = line_start(fd, r[i][0], b, buf, &lo)) <= 0)
 			lo = b, rc = k;
-		end = lo;
 		for (s = b; s > lo && rc == 0 && !d->halt;)
 		{
 			uint64_t t = s;
@@ -6904,8 +7042,30 @@ xr_claude_newest(struct xr_claude *d, int fd, uint64_t size, int *capped)
 			s = s - lo > xr_lim.chunk ? s - xr_lim.chunk : lo;
 			/* [t, b) has no line start: the window's is in [s, t) */
 			if ((k = line_start(fd, s, t, buf, &a)) < 0)
+			{
 				rc = -1;
-			else if (k && (rc = win_read(d, fd, a, b, &w, buf, acc)) >= 0)
+				break;
+			}
+			if (!k)
+				continue;
+			/* the cwd at a: the last line before it that names one, in
+			** this range, then the head; kept while that line is older
+			** than the window (a only falls) */
+			if (!known || cat >= a)
+			{
+				k = cwd_back(d, fd, lo, a, &w, sb, buf, acc, &cat, cwd);
+				if (!k && !d->halt && !i && nr == 2)
+					k = cwd_back(d, fd, 0, r[1][1], &w, sb, buf, acc,
+					             &cat, cwd);
+				if (k < 0)
+					rc = -1;
+				if (k <= 0)
+					cat = 0, cwd[0] = '\0';
+				if (k < 0 || d->halt)
+					break;
+				known = 1;
+			}
+			if ((rc = win_read(d, fd, a, b, &w, buf, acc, cwd)) >= 0)
 				b = a;
 		}
 	}
@@ -6916,6 +7076,7 @@ xr_claude_newest(struct xr_claude *d, int fd, uint64_t size, int *capped)
 	}
 	free(buf);
 	free(acc);
+	free(sb);
 	return rc;
 }
 

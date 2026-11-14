@@ -3794,6 +3794,101 @@ def test_light_anchors():
     os.unlink(tp)
 
 
+NSID = "11111111-2222-4333-8444-5555555555d3"
+
+
+def test_light_303():
+    """#303 (QA 1.62.0 MED-X1, MED-X2, NIT-X3), light --ref against --full
+    on 4 MiB transcripts of 1024 lines of 4096 bytes (windows start at lines
+    0, 256, 512 and 768): light keeps the file's newest 200 mention lines,
+    newest window first; a window resolves a relative path with the cwd the
+    full read has at its start; the line the head range's end cuts is read
+    by neither."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-p303")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, NSID + ".jsonl")
+    env = dict(ENV, DCH_XRAY_NOCLOCK="1")
+
+    def line(text, cwd=None):
+        def obj(t):
+            o = ({"type": "user", "cwd": cwd, "message": {"content": t}}
+                 if cwd else {"type": "assistant", "message": {"content": [
+                     {"type": "text", "text": t}]}})
+            return json.dumps(o, separators=(",", ":"))
+        return obj(text + " " + "z" * (4094 - len(obj(text)))) + "\n"
+
+    def plant(texts):
+        with open(tp, "w") as f:
+            for t in texts:
+                f.write(line(*t) if isinstance(t, tuple) else line(t))
+        history("xr-303", NSID, cfg, "/home/demo/p303")
+
+    def ref(r, *a, caps=None):
+        e = dict(env, DCH_XRAY_CAPS=caps) if caps else env
+        x = dch("--xray", "xr-303", "--ref", r, "--json", *a, env=e)
+        ls = ref_lines(x.stdout) or []
+        m = [l["mention"]["offset"] // 4096 for l in ls if "mention" in l]
+        t = [l["tally"] for l in ls if "tally" in l]
+        return x.returncode, m, (t[0] if t else {}), ls[-1:] or [{}]
+
+    # MED-X1: CT-12 on every 4th line (256), CT-34 on every line from 700
+    plant(["l%d%s%s" % (i, " CT-12" if i % 4 == 0 else "",
+                        " CT-34" if i >= 700 else "") for i in range(1024)])
+    rc, m, t, d = ref("CT-12", "--scope", "project")
+    want = [i for w in (768, 512, 256, 0) for i in range(w, w + 256, 4)
+            if i >= 224]
+    check("303 newest: light keeps CT-12's newest 200 of 256 mention lines, "
+          "the newest window first, file order within one; 56 dropped",
+          rc == 0 and m == want and t.get("count") == 256 and
+          t.get("mentions_dropped") == 56, (m[:3], m[-12:], t))
+    rc, m, t, d = ref("CT-34", "--scope", "project")
+    check("303 newest: 324 mention lines in the newest windows: light keeps "
+          "lines 824 to 1023, the last line too",
+          rc == 0 and m == list(range(824, 1024)) and
+          t.get("mentions_dropped") == 124, (m[:3], m[-3:], t))
+    rc, m, t, d = ref("CT-12", "--full")
+    check("303 newest: --full keeps the first and the newest 199, as before",
+          rc == 0 and sorted(m) == [0] + list(range(228, 1024, 4)), m[:3])
+
+    # MED-X2: the cwd on line 0 (/home/demo/p303), on line 600 /home/demo/q;
+    # src/main.c:12 on every 50th line
+    plant([("start", "/home/demo/p303")] +
+          [("moved", "/home/demo/q") if i == 600 else
+           "edit src/main.c:12 at %d" % i if i % 50 == 0 else "pad %d" % i
+           for i in range(1, 1024)])
+    got = {}
+    for k in ("src/main.c:12", "/home/demo/q/src/main.c"):
+        for form in ("light", "full"):
+            rc, m, t, d = ref(k, *(("--full",) if form == "full"
+                                   else ("--scope", "project")))
+            got[(k, form)] = (rc, t.get("count"), sorted(m),
+                              d[0].get("partial"))
+    check("303 cwd: light resolves src/main.c with the cwd in force at each "
+          "window's start, as --full: 11 under p303, 8 under q (QA: 17 of 80)",
+          got[("src/main.c:12", "light")] == got[("src/main.c:12", "full")]
+          and got[("src/main.c:12", "full")][1] == 11 and
+          got[("/home/demo/q/src/main.c", "light")] ==
+          got[("/home/demo/q/src/main.c", "full")] and
+          got[("/home/demo/q/src/main.c", "full")][1] == 8, got)
+
+    # NIT-X3: head 1 MiB + 2 KiB (line 256 straddles its end), tail 1 MiB;
+    # CT-56 on lines 100, 256 and 1000
+    plant(["l%d%s" % (i, " CT-56" if i in (100, 256, 1000) else "")
+           for i in range(1024)])
+    caps = "0:0:0:%d:%d" % ((1 << 20) + 2048, 1 << 20)
+    got = {form: ref("CT-56", *(("--full",) if form == "full"
+                                else ("--scope", "project")), caps=caps)
+           for form in ("light", "full")}
+    check("303 head end: light leaves the line the head's end cuts, as "
+          "--full: lines 1000 and 100, partial, no line too long",
+          sorted(got["light"][1]) == sorted(got["full"][1]) == [100, 1000]
+          and got["light"][3][0].get("lines_too_long") ==
+          got["full"][3][0].get("lines_too_long") == 0 and
+          got["light"][3][0].get("partial") is True, got)
+    os.unlink(tp)
+
+
 def main():
     try:
         test_names()
@@ -3835,6 +3930,7 @@ def main():
         test_ref_shell_tick()
         test_scope()
         test_light_anchors()
+        test_light_303()
     finally:
         shutil.rmtree(T, ignore_errors=True)
     if fails[0]:

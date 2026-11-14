@@ -253,9 +253,11 @@ const char *xr_claude_cwd(const struct xr_claude *d);
 int xr_claude_read(struct xr_claude *d, int fd, uint64_t size, int *capped);
 /* Light --ref's read (#262): the same range, newest first, in windows of
 ** xr_lim.chunk bytes cut at line starts, each read oldest first by a fresh
-** decoder (no state crosses a window: a mention in the turn its window
-** starts in has no chapter unless the window starts at offset 0, #299; a
-** tool result before its call's no definition).
+** decoder that starts with the cwd the full read has there (#303: the last
+** line before it that names one). No other state crosses a window: a
+** mention in the turn its window starts in has no chapter unless the
+** window starts at offset 0, #299; a tool result before its call's no
+** definition.
 ** The tick sees the bytes of every window read so far. As xr_claude_read. */
 int xr_claude_newest(struct xr_claude *d, int fd, uint64_t size, int *capped);
 /* Refs too: every entry's mentions and definitions go to k (copied), with

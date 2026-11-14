@@ -1139,7 +1139,8 @@ a live shell's, carry no
 and no
 .BR passage ;
 a transcript or rollout is read newest first, in 1 MiB windows from the
-end, each by a decoder that starts there, so a ref of the last turns is
+end, each by a decoder that starts there (with the cwd the full read has
+there), so a ref of the last turns is
 found inside the budget: lines come newest window first, and a mention
 in the turn its window starts in (unless the window starts the file) has
 .BR chapter:null ),
@@ -1157,8 +1158,8 @@ with it has no effect but is still checked: outside 50 to 300 it exits 2,
 .IR "bad budget" ;
 a file gives its first
 .B mention
-line and its newest 199 (light: the first 199 to arrive after it, the
-newest), the rest counted in the tally's
+line and its newest 199 (light: its newest 200), the rest counted in the
+tally's
 .BR mentions_dropped ;
 one
 .B definition

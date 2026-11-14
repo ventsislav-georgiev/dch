@@ -1492,13 +1492,13 @@ ref (`dch: not a ref`), relative paths against the session's cwd.
   another session's result stops the scan. A Claude Code transcript or a
   Codex rollout is read newest first (1.62.0), so a ref of the last turns is
   found inside the budget: in windows of 1 MiB from the end, each read from
-  its first whole line on, by a decoder that starts there (a mention in the
-  turn the window starts in has `chapter: null`, unless the window starts
-  the file, since a prompt there may continue an older turn; a tool result
-  whose call is in an older window gives no definition). Its lines come newest
-  window first, in file order within a window, and the file's `mention`
-  lines are its first and the next 199 to arrive, the newest. `--full` reads
-  oldest first, as before. A live shell's lines and another
+  its first whole line on, by a decoder that starts there with the cwd the
+  full read has there (a mention in the turn the window starts in has
+  `chapter: null`, unless the window starts the file, since a prompt there
+  may continue an older turn; a tool result whose call is in an older window
+  gives no definition). Its lines come newest window first, in file order
+  within a window, and the file's `mention` lines are its newest 200.
+  `--full` reads oldest first, as before. A live shell's lines and another
   session's give titles and counts only: no `mention`, no `passage`.
 - **Full.** `--full` reads the whole corpus up to its caps: 64 files
   (`why: "files"`), 1 GiB (`why: "bytes"`) and 10 s (`why: "time"`). The

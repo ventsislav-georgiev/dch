@@ -5759,6 +5759,315 @@ t_anchors(void)
 		fprintf(stderr, "  %d wrong anchors\n", bad);
 }
 
+/* ---- #303: light keeps the newest 200; a window's cwd; the head's end -- */
+
+/* key's --ref lines over body, scope project, no clock: light (full 0) or
+** --full; the first and progress lines out */
+static char *
+nw_scan(const char *body, size_t n, const char *key, int cx, int full)
+{
+	char path[] = "/tmp/xray_unit.XXXXXX", *o = NULL, *p, *q, *w;
+	size_t ol = 0;
+	FILE *f = open_memstream(&o, &ol);
+	int fd = mkstemp(path), capped = 0;
+	struct xr_scan *x = NULL;
+	struct xr_claude *d = NULL;
+	struct xr_chapters ch;
+	struct xr_sink k;
+
+	if (fd >= 0)
+		unlink(path);
+	xr_noclock = 1;
+	if (f && fd >= 0 && write(fd, body, n) == (ssize_t)n &&
+	    (x = xr_scan_new(f, key, "s", "", 1, full, 0, 300, xr_now_ms())))
+	{
+		xr_scan_scope(x, 1);
+		if (xr_scan_first(x, "11111111-2222-4333-8444-555555555555",
+		                  XR_TICKET, key) == 0 && (d = xr_claude_new()))
+		{
+			if (cx)
+				xr_claude_codex(d);
+			xr_scan_sink(x, &k);
+			xr_claude_refs(d, &k, 0x1f, xr_scan_tick, x);
+			if (full)
+				(void)xr_claude_read(d, fd, n, &capped);
+			else
+				(void)xr_claude_newest(d, fd, n, &capped);
+			xr_claude_end(d, 0x1f, &ch);
+			xr_chapters_free(&ch);
+			xr_scan_file(x, n, xr_claude_too_long(d), capped, 0);
+			(void)xr_scan_done(x);
+		}
+	}
+	xr_claude_free(d);
+	xr_scan_free(x);
+	if (fd >= 0)
+		close(fd);
+	if (f)
+		fclose(f);
+	xr_noclock = 0;
+	for (p = w = o; p && *p; p = q)
+	{
+		q = strchr(p, '\n');
+		q = q ? q + 1 : p + strlen(p);
+		if (strncmp(p, "{\"schema\":1,\"first\"", 19) &&
+		    strncmp(p, "{\"schema\":1,\"progress\"", 22))
+		{
+			memmove(w, p, (size_t)(q - p));
+			w += q - p;
+		}
+	}
+	if (w)
+		*w = '\0';
+	return o;
+}
+
+/* the mention lines' offsets in o, in order (at most max); how many */
+static int
+nw_offs(const char *o, uint64_t *v, int max)
+{
+	const char *p;
+	int m = 0;
+
+	for (p = o; p && (p = strstr(p, "{\"schema\":1,\"mention\"")); p++)
+	{
+		const char *e = strchr(p, '\n'), *q = strstr(p, "\"offset\":");
+
+		if (q && (!e || q < e) && m < max)
+			v[m++] = strtoull(q + 9, NULL, 10);
+	}
+	return m;
+}
+
+/* the tally's count, -1 none */
+static long long
+nw_count(const char *o)
+{
+	const char *p = o ? strstr(o, "\"tally\":") : NULL;
+
+	return p && (p = strstr(p, "\"count\":")) ? atoll(p + 8) : -1;
+}
+
+static int
+nw_cmp(const void *a, const void *b)
+{
+	uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+
+	return x < y ? -1 : x > y;
+}
+
+/* light and --full agree on key over body: the count, and the mention
+** lines (as sets) when both keep them all; *cnt the count */
+static int
+nw_same(const char *body, size_t n, const char *key, int cx, long long *cnt)
+{
+	static uint64_t a[256], b[256];
+	char *l = nw_scan(body, n, key, cx, 0), *f = nw_scan(body, n, key, cx, 1);
+	long long c = nw_count(f);
+	int na = nw_offs(l, a, 256), nb = nw_offs(f, b, 256), ok;
+
+	qsort(a, (size_t)na, sizeof *a, nw_cmp);
+	qsort(b, (size_t)nb, sizeof *b, nw_cmp);
+	ok = c >= 0 && nw_count(l) == c && na == nb &&
+	     (c > 200 || !memcmp(a, b, (size_t)na * sizeof *a));
+	if (!ok)
+		fprintf(stderr, "  %s: light %lld (%d lines), full %lld (%d)\n",
+		        key, nw_count(l), na, c, nb);
+	*cnt = c;
+	free(l);
+	free(f);
+	return ok;
+}
+
+/* a Claude line of exactly w bytes (with '\n', w >= 120): an answer with t,
+** or with cwd c (a user entry; esc: its key written "cwd") */
+static size_t
+nw_line(char *b, size_t w, const char *t, const char *c, int esc)
+{
+	int n = c ? snprintf(b, w + 1, "{\"type\":\"user\",\"%s\":\"%s\","
+	                     "\"message\":{\"content\":\"%s ",
+	                     esc ? "c\\u0077d" : "cwd", c, t)
+	        : snprintf(b, w + 1, "{\"type\":\"assistant\",\"message\":"
+	                   "{\"content\":[{\"type\":\"text\",\"text\":\"%s ", t);
+	const char *z = c ? "\"}}" : "\"}]}}";
+
+	memset(b + n, 'z', w - 1 - (size_t)n - strlen(z));
+	memcpy(b + w - 1 - strlen(z), z, strlen(z));
+	b[w - 1] = '\n';
+	return w;
+}
+
+static void
+t_newest(void)
+{
+	static char body[400000];
+	static uint64_t v[300];
+	struct xr_limits l0 = xr_lim;
+	size_t n = 0, k;
+	long long c = 0, c2 = 0;
+	unsigned seed = 303;
+	char *o;
+	int m, ok, bad;
+
+	/* MED-X1: 260 answers of 100 bytes naming CT-12 */
+	for (k = 0; k < 260; k++)
+		n += an_line(body + n, 0, "CT-12");
+	o = nw_scan(body, n, "ticket:CT-12", 0, 0);
+	m = nw_offs(o, v, 300);
+	for (ok = m == 200, k = 0; ok && k < 200; k++)
+		ok = v[k] == (60 + k) * 100;
+	CHECK("newest: light, 260 mention lines in one window: the newest 200, "
+	      "in file order, 60 dropped (#303)",
+	      ok && o && strstr(o, "\"count\":260,") &&
+	      strstr(o, "\"mentions_dropped\":60}"));
+	free(o);
+	/* windows of 30: lines 230-259 first, ..., 80-109, then 60-79 of the
+	** window 50-79 (its newest, not its oldest) */
+	xr_lim.chunk = 3000;
+	o = nw_scan(body, n, "ticket:CT-12", 0, 0);
+	m = nw_offs(o, v, 300);
+	for (ok = m == 200, k = 0; ok && k < 200; k++)
+		ok = v[k] == (k < 180 ? 230 - k / 30 * 30 + k % 30 : k - 120) * 100;
+	CHECK("newest: light, windows of 30 of them: the newest 200, the newest "
+	      "window first, file order within one (#303)", ok);
+	if (!ok && m > 0)
+		fprintf(stderr, "  %d lines, the first at %llu\n", m,
+		        (unsigned long long)v[0]);
+	free(o);
+	o = nw_scan(body, n, "ticket:CT-12", 0, 1);
+	m = nw_offs(o, v, 300);
+	for (ok = m == 200 && v[0] == 0, k = 1; ok && k < 200; k++)
+		ok = v[k] == (60 + k) * 100;
+	CHECK("newest: --full still gives the first and the newest 199", ok);
+	free(o);
+
+	/* MED-X2: a cwd only on the first line, src/main.c:12 every 10th line,
+	** windows of 10 lines */
+	n = nw_line(body, 200, "start", "/w/p", 0);
+	for (k = 1; k < 400; k++)
+		n += nw_line(body + n, 100, k % 10 ? "pad" : "edit src/main.c:12", NULL,
+		             0);
+	CHECK("cwd: a window with no cwd line resolves a relative path with the "
+	      "cwd the full read has there (39, as --full)",
+	      nw_same(body, n, "file:/w/p/src/main.c", 0, &c) && c == 39);
+	/* the key written with an escape: the full read takes it */
+	n = nw_line(body, 200, "start", "/w/p", 1);
+	for (k = 1; k < 400; k++)
+		n += nw_line(body + n, 100, k % 10 ? "pad" : "edit src/main.c:12", NULL,
+		             0);
+	CHECK("cwd: a cwd key written \"c\\u0077d\" is found too",
+	      nw_same(body, n, "file:/w/p/src/main.c", 0, &c) && c == 39);
+	/* the cwd line 3000 bytes long, past a window, then a long line with no
+	** cwd between it and the mentions */
+	n = nw_line(body, 3000, "start", "/w/p", 0);
+	n += nw_line(body + n, 2500, "long", NULL, 0);
+	for (k = 2; k < 400; k++)
+		n += nw_line(body + n, 100, k % 10 ? "pad" : "edit src/main.c:12", NULL,
+		             0);
+	CHECK("cwd: a cwd line longer than a window, a long line after it",
+	      nw_same(body, n, "file:/w/p/src/main.c", 0, &c) && c == 39);
+	/* the cwd changes: /w/a, then /w/p from line 200 on (19 each) */
+	n = nw_line(body, 200, "start", "/w/a", 0);
+	for (k = 1; k < 400; k++)
+		n += k == 200 ? nw_line(body + n, 200, "moved", "/w/p", 0)
+		     : nw_line(body + n, 100, k % 10 ? "pad" : "edit src/main.c:12",
+		               NULL, 0);
+	ok = nw_same(body, n, "file:/w/a/src/main.c", 0, &c);
+	ok &= nw_same(body, n, "file:/w/p/src/main.c", 0, &c2);
+	CHECK("cwd: after a change of cwd, each window has the one in force at "
+	      "its start (not the file's first, not a newer window's)",
+	      ok && c == 19 && c2 == 19);
+	/* past the range: the head (lines 0-9) has /w/a, the unread middle
+	** /w/p, the tail (lines 380-399, 2 mentions) none: --full reads on
+	** from the head's */
+	xr_lim.head = 1100;
+	xr_lim.tail = 2000;
+	ok = nw_same(body, n, "file:/w/a/src/main.c", 0, &c);
+	ok &= nw_same(body, n, "file:/w/p/src/main.c", 0, &c2);
+	CHECK("cwd: a tail window takes the head's cwd, never one from the "
+	      "unread middle", ok && c == 2 && c2 == 0);
+	xr_lim = l0;
+	xr_lim.chunk = 1000;
+	/* Codex: the cwd from session_meta and turn_context only; /w/p from
+	** line 250 (35 mentions before, 7 after) */
+	n = (size_t)snprintf(body, sizeof body, "{\"type\":\"session_meta\","
+	                     "\"payload\":{\"id\":\"x\",\"cwd\":\"/w/a\"}}\n");
+	for (k = 1; k < 300; k++)
+		n += (size_t)snprintf(body + n, sizeof body - n, k % 100 == 50
+		     ? "{\"type\":\"turn_context\",\"payload\":{\"cwd\":\"%s\"}}\n"
+		     : CXI("{\"type\":\"message\",\"role\":\"assistant\",\"content\":"
+		           "[{\"type\":\"output_text\",\"text\":\"%s\"}]}") "\n",
+		     k % 100 == 50 ? (k < 200 ? "/w/a" : "/w/p")
+		     : k % 7 ? "nothing to see in this line, padding it out"
+		     : "edit src/main.c:42");
+	ok = nw_same(body, n, "file:/w/a/src/main.c", 1, &c);
+	ok &= nw_same(body, n, "file:/w/p/src/main.c", 1, &c2);
+	CHECK("cwd: a Codex rollout, its cwd only in session_meta and "
+	      "turn_context: light counts as --full",
+	      ok && c == 35 && c2 == 7);
+	xr_lim = l0;
+
+	/* NIT-X3: 40 lines of 100 bytes, the head's end (1050) in line 10 */
+	n = 0;
+	for (k = 0; k < 40; k++)
+		n += an_line(body + n, 0, k == 2 || k == 10 || k == 39 ? "CT-12"
+		             : "x");
+	xr_lim.head = 1050;
+	xr_lim.tail = 1000;
+	xr_lim.chunk = 300;
+	o = nw_scan(body, n, "ticket:CT-12", 0, 0);
+	m = nw_offs(o, v, 300);
+	CHECK("head end: light leaves the line the head's end cuts, as --full "
+	      "does", nw_same(body, n, "ticket:CT-12", 0, &c) && c == 2 &&
+	      m == 2 && v[0] == 3900 && v[1] == 200);
+	free(o);
+	xr_lim = l0;
+
+	/* random transcripts, Claude and Codex: cwd lines (some escaped, some
+	** relative, some long), mentions, fillers of any length, windows and
+	** ranges of several sizes: light counts and lines as --full */
+	bad = 0;
+	for (int r = 0; r < 60; r++)
+	{
+		int cx = r % 3 == 2;
+		static const char *const keys[] = { "file:/w/a/src/main.c",
+		                                     "file:/w/b/src/main.c",
+		                                     "ticket:CT-12" };
+
+		n = 0;
+		for (k = 0; k < 300 && n < sizeof body - 9000; k++)
+		{
+			unsigned x = (seed = seed * 1103515245u + 12345u) >> 8;
+			const char *cw = x % 3 ? "/w/a" : x % 9 ? "/w/b" : "rel";
+			const char *t = x % 5 == 0 ? "src/main.c:3 and CT-12"
+			                : x % 5 == 1 ? "see main.c" : "pad";
+			size_t w = 120 + x / 16 % (x % 13 ? 300 : 4000);
+
+			if (cx)
+				n += (size_t)snprintf(body + n, sizeof body - n, x % 11 == 0
+				     ? "{\"type\":\"turn_context\",\"payload\":{\"cwd\":"
+				       "\"%s\"}}\n"
+				     : CXI("{\"type\":\"message\",\"role\":\"assistant\","
+				           "\"content\":[{\"type\":\"output_text\",\"text\":"
+				           "\"%s\"}]}") "\n", x % 11 == 0 ? cw : t);
+			else
+				n += nw_line(body + n, w, t, x % 11 == 0 ? cw : NULL,
+				             x % 4 == 0);
+		}
+		xr_lim.chunk = 64 + (size_t)r * 41;
+		xr_lim.line = r % 4 ? XR_LINE_MAX : 2000;
+		if (r % 5 == 4)
+			xr_lim.head = n / 3, xr_lim.tail = n / 3;
+		for (k = 0; k < 3; k++)
+			bad += !nw_same(body, n, keys[k], cx, &c);
+		xr_lim = l0;
+	}
+	CHECK("cwd: 60 random transcripts x 3 keys, windows of 64 to 2483 bytes: "
+	      "every light count and line as --full's", bad == 0);
+	if (bad)
+		fprintf(stderr, "  %d differ\n", bad);
+}
+
 /* json.c's dch_json_quote (QA 1.55.0 LOW-7): every code point a terminal
 ** acts on as \u, its neighbours raw */
 static int
@@ -5848,6 +6157,7 @@ main(int argc, char **argv)
 	t_quote();
 	t_search();
 	t_anchors();
+	t_newest();
 	printf("%s: %d failed\n", fails ? "FAIL" : "ok", fails);
 	return fails != 0;
 }
