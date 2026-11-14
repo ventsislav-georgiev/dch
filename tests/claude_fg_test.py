@@ -68,6 +68,7 @@ def main():
     p = os.path.join(bindir, "claude")
     shutil.copy(os.path.join(HERE, "fake_claude.py"), p)
     os.chmod(p, os.stat(p).st_mode | stat.S_IXUSR)
+    trace = os.path.join(tmp, "trace")  # the masters' DCH_DEBUG, for why()
     dlg = os.path.join(tmp, "dlg.txt")
     with open(dlg, "w") as f:
         f.write("\n".join(SHELL_DLG) + "\n")
@@ -147,6 +148,42 @@ def main():
               row().get("auto_allowed", 0) == before)
         until(lambda: screen().rstrip().endswith("$"), 6)
 
+    def why(pid):
+        """An answer row failed: what the fake, the row and the master saw."""
+        st = ps(pid, "stat") if pid else "?"
+        tt = ps(pid, "tt") if pid else ""
+        mac = sys.platform == "darwin"  # macOS ps prints ttys003 as s003
+        mode = subprocess.run(["stty", "-f" if mac else "-F",
+                               ("/dev/tty" if mac else "/dev/") + tt],
+                              capture_output=True, text=True).stdout.split()
+        r = row()
+        print("    keys=%r auto_allowed=%r claude_foreground=%r"
+              % (keys(), r.get("auto_allowed"), r.get("claude_foreground")))
+        print("    fake pid=%s stat=%s tty=%s %s" % (
+            pid, st, tt, "-icanon (raw)" if "-icanon" in mode
+            else "icanon (cooked)" if "icanon" in mode else "mode ?"))
+        print("    fake events: %r" % [(e["ev"], e.get("text"))
+                                       for e in events()[-4:]])
+        print("    screen (last 8):")
+        for l in screen().rstrip().split("\n")[-8:]:
+            print("      | " + l)
+        try:
+            with open(trace) as f:
+                aa = [l.strip() for l in f if "auto-allow" in l]
+        except OSError:
+            aa = []
+        print("    trace auto-allow (last 6 of %d):" % len(aa))
+        for l in aa[-6:]:
+            print("      " + l)
+
+    def answered(what, pid):
+        ok = (until(lambda: keys() == ["1"], 8) and
+              (row().get("auto_allowed") or {}).get("title") ==
+              "Bash command")
+        check(what, ok)
+        if not ok:
+            why(pid)
+
     def result(r):
         try:
             return json.loads(r.stdout.strip().splitlines()[-1])
@@ -157,8 +194,8 @@ def main():
         run("--config", "auto_allow", "true")
         setctl()
         subprocess.run([DCH, "--spawn", n, "--size", "100x30", "bash",
-                        "--norc", "--noprofile", "-i"],
-                       capture_output=True, check=True)
+                        "--norc", "--noprofile", "-i"], capture_output=True,
+                       check=True, env=dict(os.environ, DCH_DEBUG=trace))
         until(lambda: "$" in screen(), 10)
         lite = run("--read", n).returncode == 3
         send("claude")
@@ -204,12 +241,10 @@ def main():
         check("fg: claude_foreground true again",
               r and r.get("claude_session_id") == sid)
         if not lite:
-            until(lambda: "auto mode on" in screen(), 5)
+            check("fg: the fake's screen is back",
+                  until(lambda: "auto mode on" in screen(), 5))
             setctl(screen=FAKE_DLG)
-            check("fg: the fake Claude's prompt is answered with 1",
-                  until(lambda: keys() == ["1"], 8) and
-                  (row().get("auto_allowed") or {}).get("title") ==
-                  "Bash command")
+            answered("fg: the fake Claude's prompt is answered with 1", fpid)
 
         # --- under script(1), a pty of its own: in front, verbs reach it --
         # (#312: 1.63.0 read script's group off the outer pty and refused)
@@ -229,7 +264,8 @@ def main():
             setctl()
             subprocess.run([DCH, "--spawn", n, "--size", "100x30", "bash",
                             "--norc", "--noprofile", "-i"],
-                           capture_output=True, check=True)
+                           capture_output=True, check=True,
+                           env=dict(os.environ, DCH_DEBUG=trace))
             until(lambda: "$" in screen(), 10)
             send(wrap)
             time.sleep(1)                   # the inner bash's prompt
@@ -257,16 +293,15 @@ def main():
             if not lite:
                 shell_dlg_unanswered("under script, suspended")
             send("fg")
-            until(lambda: row().get("claude_foreground") is True, 10)
+            check("under script, fg: claude_foreground true again",
+                  until(lambda: row().get("claude_foreground") is True, 10))
             if not lite:
                 # #318: the master read script's group off the outer pty
-                until(lambda: "auto mode on" in screen(), 5)
+                check("under script, fg: the fake's screen is back",
+                      until(lambda: "auto mode on" in screen(), 5))
                 setctl(screen=FAKE_DLG)
-                check("under script: auto-allow answers the running "
-                      "Claude's prompt with 1",
-                      until(lambda: keys() == ["1"], 8) and
-                      (row().get("auto_allowed") or {}).get("title") ==
-                      "Bash command")
+                answered("under script: auto-allow answers the running "
+                         "Claude's prompt with 1", spid)
                 setctl()
                 # script itself stopped: the outer bash is in front
                 # (SIGSTOP: util-linux script blocks SIGTSTP)
