@@ -1146,7 +1146,8 @@ and no
 .BR passage ;
 a transcript or rollout is read newest first, in 1 MiB windows from the
 end, each by a decoder that starts there (with the cwd the full read has
-there), so a ref of the last turns is
+there; a window whose raw bytes cannot hold the ref is not decoded), so a
+ref of the last turns is
 found inside the budget: lines come newest window first, and a mention
 in the turn its window starts in (unless the window starts the file) has
 .BR chapter:null ),

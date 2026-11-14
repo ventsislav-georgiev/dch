@@ -5988,6 +5988,22 @@ t_newest(void)
 	      "unread middle", ok && c == 2 && c2 == 0);
 	xr_lim = l0;
 	xr_lim.chunk = 1000;
+	/* #293 meets #303: mentions only on lines 100 and 350, so the windows
+	** between them are skipped, the one with the change to /w/p too */
+	{
+		size_t n2 = nw_line(body, 200, "start", "/w/a", 0);
+		unsigned long sk = xr_skipped;
+
+		for (k = 1; k < 400; k++)
+			n2 += k == 200 ? nw_line(body + n2, 200, "moved", "/w/p", 0)
+			      : nw_line(body + n2, 100, k == 100 || k == 350 ?
+			                "edit src/main.c:12" : "pad", NULL, 0);
+		ok = nw_same(body, n2, "file:/w/a/src/main.c", 0, &c);
+		ok &= nw_same(body, n2, "file:/w/p/src/main.c", 0, &c2);
+		CHECK("cwd: a cwd line in a skipped window still seeds the decoded "
+		      "windows after it (#293 prefilter on)",
+		      ok && c == 1 && c2 == 1 && xr_skipped - sk >= 60);
+	}
 	/* Codex: the cwd from session_meta and turn_context only; /w/p from
 	** line 250 (35 mentions before, 7 after) */
 	n = (size_t)snprintf(body, sizeof body, "{\"type\":\"session_meta\","
@@ -6093,6 +6109,304 @@ t_quote(void)
 	             "\"\xd8\x9b\xe2\x80\xa7\xe2\x80\xaf\xc2\xa0\""));
 }
 
+/* #293: light --ref over body (a Codex rollout with cx) for key, its
+** prefilter off (noskip) or on, the clock off: the lines but first (its
+** elapsed_ms) and progress, malloc'd; *skipped the windows not decoded */
+static char *
+pf_scan(const char *body, size_t n, const char *key, int cx, int noskip,
+        unsigned long *skipped)
+{
+	char path[] = "/tmp/xray_unit.XXXXXX", *o = NULL, *p, *q, *w;
+	size_t ol = 0;
+	unsigned long s0 = xr_skipped;
+	FILE *f = open_memstream(&o, &ol);
+	int fd = mkstemp(path), capped = 0;
+	struct xr_scan *x = NULL;
+	struct xr_claude *d = NULL;
+	struct xr_chapters ch;
+	struct xr_sink k;
+
+	if (fd >= 0)
+		unlink(path);
+	xr_noclock = 1;
+	xr_noskip = noskip;
+	if (f && fd >= 0 && write(fd, body, n) == (ssize_t)n &&
+	    (x = xr_scan_new(f, key, "s", "", 1, 0, 0, 300, xr_now_ms())) &&
+	    xr_scan_first(x, "11111111-2222-4333-8444-555555555555", XR_TICKET,
+	                  key) == 0 && (d = xr_claude_new()))
+	{
+		if (cx)
+			xr_claude_codex(d);
+		xr_scan_sink(x, &k);
+		xr_claude_refs(d, &k, 0x1f, xr_scan_tick, x);
+		(void)xr_claude_newest(d, fd, n, &capped);
+		xr_claude_end(d, 0x1f, &ch);
+		xr_chapters_free(&ch);
+		xr_scan_file(x, n, xr_claude_too_long(d), capped, 0);
+		(void)xr_scan_done(x);
+	}
+	xr_claude_free(d);
+	xr_scan_free(x);
+	if (fd >= 0)
+		close(fd);
+	if (f)
+		fclose(f);
+	xr_noclock = xr_noskip = 0;
+	*skipped = xr_skipped - s0;
+	for (p = w = o; p && *p; p = q)
+	{
+		q = strchr(p, '\n');
+		q = q ? q + 1 : p + strlen(p);
+		if (strncmp(p, "{\"schema\":1,\"first\"", 19) &&
+		    strncmp(p, "{\"schema\":1,\"progress\"", 22))
+		{
+			memmove(w, p, (size_t)(q - p));
+			w += q - p;
+		}
+	}
+	if (w)
+		*w = '\0';
+	return o;
+}
+
+/* json (one object) padded to 255 bytes at out, and its '\n' */
+static void
+pf_pad(char *out, const char *json)
+{
+	size_t l = strlen(json);
+
+	if (l > 248)
+		abort();	/* a row's line must fit */
+	sprintf(out, "%.*s,\"x\":\"%.*s\"}\n", (int)(l - 1), json,
+	        (int)(248 - l), "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+	        "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+	        "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+	        "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz");
+}
+
+#define PF_FILL "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":" \
+                "\"text\",\"text\":\"filler %d: line 4242 of 7 in fa11\"}]}}"
+
+/* 40 lines of 256 bytes (xr_lim.chunk 512: a window is 2 lines), fillers
+** but lines 4 and 5 (window 2 of 20, so 17 newer): a and b, NULL a filler */
+static size_t
+pf_body(char *body, const char *a, const char *b)
+{
+	char t[300];
+	int k;
+
+	for (k = 0; k < 40; k++)
+	{
+		snprintf(t, sizeof t, PF_FILL, k);
+		pf_pad(body + k * 256, k == 4 && a ? a : k == 5 && b ? b : t);
+	}
+	return 40 * 256;
+}
+
+/* body's light --ref for key, on and off: the same lines, the on run's
+** skipped windows, and want in them */
+static int
+pf_same(const char *body, size_t n, const char *key, int cx, const char *want,
+        unsigned long skip)
+{
+	unsigned long on, off;
+	char *a = pf_scan(body, n, key, cx, 0, &on), *b = pf_scan(body, n, key,
+	                                                          cx, 1, &off);
+	int ok = a && b && !strcmp(a, b) && off == 0 && on == skip &&
+	         strstr(a, want);
+
+	if (!ok)
+		fprintf(stderr, "  %s: skipped %lu (want %lu), off %lu\n  on:  %s\n"
+		        "  off: %s\n", key, on, skip, off, a ? a : "", b ? b : "");
+	free(a);
+	free(b);
+	return ok;
+}
+
+/* the prefilter of light --ref (#293): a window whose raw bytes cannot
+** hold the key is not decoded, and every line is as with it off */
+static void
+t_prefilter(void)
+{
+	static char body[400 * 256];
+	struct xr_limits l0 = xr_lim;
+	size_t n;
+	unsigned long on, off, skips = 0;
+	unsigned seed = 293;
+	int bad = 0, r, k;
+	char *a, *b;
+
+#define PF_A(t) "{\"type\":\"assistant\",\"cwd\":\"/home/demo/proj\"," \
+                "\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"" t \
+                "\"}]}}"
+	xr_lim.chunk = 512;
+	/* one row per shape: the 17 newer windows skipped, the ref found */
+	n = pf_body(body, PF_A("see CT-12 now"), NULL);
+	CHECK("prefilter: ticket CT-12: 17 windows skipped, found, the same lines",
+	      pf_same(body, n, "ticket:CT-12", 0, "\"count\":1", 17));
+	n = pf_body(body, PF_A("fixes #4242 today"), NULL);
+	CHECK("prefilter: issue #4242 (a filler's \"line 4242\" is no id "
+	      "value): skipped, found, the same lines",
+	      pf_same(body, n, "issue:#4242", 0, "\"count\":1", 17));
+	n = pf_body(body, PF_A("see Prosper#12 here"), NULL);
+	CHECK("prefilter: issue repo#N, any case (prosper#12): skipped, found",
+	      pf_same(body, n, "issue:prosper#12", 0, "\"count\":1", 17));
+	n = pf_body(body, PF_A("see Payhawk/Solution#77 here"), NULL);
+	CHECK("prefilter: pull o/r#N, any case: skipped, found",
+	      pf_same(body, n, "pull:payhawk/solution#77", 0, "\"count\":1", 17));
+	n = pf_body(body, PF_A("see https://github.com/Payhawk/Solution/pull/77 "
+	                       "and https://github.com/payhawk/solution/issues/77"),
+	            NULL);
+	CHECK("prefilter: pull from its URLs (r/pull/N, r/issues/N): skipped, "
+	      "both found", pf_same(body, n, "pull:payhawk/solution#77", 0,
+	                            "\"count\":2", 17));
+	n = pf_body(body, PF_A("landed in fa11ba1c0de1 then"), NULL);
+	CHECK("prefilter: commit (its 7 hex in a longer SHA; a filler's fa11 "
+	      "is not): skipped, found",
+	      pf_same(body, n, "commit:fa11ba1", 0, "\"count\":1", 17));
+	n = pf_body(body, PF_A("edit src/parser.c now"), NULL);
+	CHECK("prefilter: file, relative to the line's cwd (its last part "
+	      "parser.c raw): skipped, found",
+	      pf_same(body, n, "file:/home/demo/proj/src/parser.c", 0,
+	              "\"count\":1", 17));
+	n = pf_body(body, PF_A("open https://example.com/a/b?x=1 now"), NULL);
+	CHECK("prefilter: url: skipped, found",
+	      pf_same(body, n, "url:https://example.com/a/b?x=1", 0,
+	              "\"count\":1", 17));
+	/* D2: #4242's definition is on a line with no raw #4242 */
+	n = pf_body(body, "{\"type\":\"assistant\",\"message\":{\"content\":[{"
+	            "\"type\":\"tool_use\",\"id\":\"b1\",\"name\":\"Bash\","
+	            "\"input\":{\"command\":\"todo.py get dch 4242 | jq .\"}}]}}",
+	            "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":"
+	            "\"tool_result\",\"tool_use_id\":\"b1\",\"content\":"
+	            "\"{\\\"number\\\": 4242, \\\"title\\\": \\\"Fix the "
+	            "parser\\\"}\"}]}}");
+	CHECK("prefilter: issue #4242 as D2's id value (\"number\": 4242, no raw "
+	      "#4242): decoded, defined, the same lines",
+	      pf_same(body, n, "issue:#4242", 0, "\"rule\":\"D2\"", 17));
+
+	/* the fallbacks: the key not raw in its window, which is decoded */
+	n = pf_body(body, PF_A("see C\\u0054-12 now"), NULL);
+	CHECK("prefilter: escape: C\\u0054-12 is decoded and found",
+	      pf_same(body, n, "ticket:CT-12", 0, "\"count\":1", 17));
+	n = pf_body(body, PF_A("see https:\\/\\/github.com\\/o\\/repo\\/pull\\/7"),
+	            NULL);
+	CHECK("prefilter: escape: \\/ in a pull URL is decoded and found",
+	      pf_same(body, n, "pull:o/repo#7", 0, "\"count\":1", 17));
+	n = pf_body(body, CXI("{\"type\":\"function_call\",\"name\":\"shell\","
+	                      "\"arguments\":\"{\\\"command\\\":\\\"git "
+	                      "log o/rep\\\\u006f#7\\\"}\",\"call_id\":\"c1\"}"),
+	            NULL);
+	CHECK("prefilter: escape: a Codex call's arguments decoded twice "
+	      "(o/rep\\\\u006f#7, an even run) is decoded and found",
+	      pf_same(body, n, "pull:o/repo#7", 1, "\"count\":1", 17));
+	n = pf_body(body, "{\"type\":\"user\",\"message\":{\"content\":\"C"
+	            "<pasted_content id=\\\"1\\\">T-12</pasted_content "
+	            "id=\\\"1\\\"> ok\"}}", NULL);
+	CHECK("prefilter: junction: a pasted content's unwrap is decoded and "
+	      "found", pf_same(body, n, "ticket:CT-12", 0, "\"count\":1", 17));
+	n = pf_body(body, "{\"type\":\"system\",\"content\":\"C<b>T-12</b> "
+	            "done\"}", NULL);
+	CHECK("prefilter: junction: a system notice's tags out is decoded and "
+	      "found", pf_same(body, n, "ticket:CT-12", 0, "\"count\":1", 17));
+	n = pf_body(body, CXI("{\"type\":\"message\",\"role\":\"user\","
+	                      "\"content\":[{\"type\":\"input_text\",\"text\":"
+	                      "\"C\"},{\"type\":\"input_text\",\"text\":"
+	                      "\"T-12 ok\"}]}"), NULL);
+	CHECK("prefilter: junction: a Codex message's two parts joined is "
+	      "decoded and found",
+	      pf_same(body, n, "ticket:CT-12", 1, "\"count\":1", 17));
+	/* a window's first line and its last: whole lines, nothing split */
+	n = pf_body(body, PF_A("CT-12 first"), NULL);
+	CHECK("prefilter: a ref on a window's first line is found",
+	      pf_same(body, n, "ticket:CT-12", 0, "\"offset\":1024", 17));
+	n = pf_body(body, NULL, PF_A("last CT-12"));
+	CHECK("prefilter: a ref on a window's last line is found",
+	      pf_same(body, n, "ticket:CT-12", 0, "\"offset\":1280", 17));
+
+	/* a skipped window's long line: one window of a 511-byte line */
+	xr_lim.line = 400;
+	n = pf_body(body, PF_A("see CT-12 now"), NULL);
+	memset(body + 30 * 256, 'z', 511);
+	CHECK("prefilter: a skipped window's line over xr_lim.line is in "
+	      "lines_too_long, as decoded",
+	      pf_same(body, n, "ticket:CT-12", 0, "\"lines_too_long\":1", 17));
+	xr_lim.line = l0.line;
+	/* the byte cap in a skipped window: its 11th line, mid-window 6 */
+	xr_lim.bytes = 2600;
+	CHECK("prefilter: the byte cap stops a skipped window at the line it "
+	      "stops a decoded one",
+	      pf_same(body, n, "ticket:CT-12", 0, "\"why\":\"bytes\",\"files\":1,"
+	              "\"bytes\":2816,", 6));
+	xr_lim.bytes = l0.bytes;
+
+	/* an old window: the ref at offset 0 of 200 windows */
+	n = 0;
+	for (k = 0; k < 400; k++)
+	{
+		char t[300];
+
+		snprintf(t, sizeof t, PF_FILL, k);
+		pf_pad(body + n, k ? t : PF_A("CT-12 at the start"));
+		n += 256;
+		if (n + 256 > sizeof body)
+			break;
+	}
+	CHECK("prefilter: a ref only in the oldest of 200 windows: the 199 "
+	      "newer skipped, found at offset 0",
+	      pf_same(body, n, "ticket:CT-12", 0, "\"offset\":0", n / 512 - 1));
+	xr_lim = l0;
+
+	/* random transcripts and windows: every shape the same on and off */
+	for (r = 0; r < 60; r++)
+	{
+		static const char *const keys[] = {
+			"ticket:CT-12", "issue:#4242", "pull:o/repo#7",
+			"commit:fa11ba1", "file:/w/src/parser.c",
+			"url:https://example.com/a",
+		};
+		static const char *const bits[] = {
+			"CT-12", "C\\u0054-12", "#4242", "\\\"number\\\":4242",
+			"o/repo#7", "https:\\/\\/github.com\\/o\\/repo\\/pull\\/7",
+			"fa11ba1c0", "src/parser.c", "parser.c",
+			"https://example.com/a", "C<b>T-12</b>", "zz",
+		};
+		n = 0;
+		for (k = 0; k < 120 && n + 600 < sizeof body; k++)
+		{
+			unsigned x = (seed = seed * 1103515245u + 12345u) >> 16;
+
+			n += (size_t)snprintf(body + n, sizeof body - n,
+			     x % 5 == 0 ? "{\"type\":\"system\",\"content\":\"%s %.*s\"}\n"
+			     : x % 5 == 1 ? "{\"type\":\"user\",\"cwd\":\"/w\",\"message\":"
+			                    "{\"content\":\"%s %.*s\"}}\n"
+			     : "{\"type\":\"assistant\",\"cwd\":\"/w\",\"message\":"
+			       "{\"content\":[{\"type\":\"text\",\"text\":\"%s %.*s\"}]}}\n",
+			     x / 8 % 3 ? "zz" : bits[x / 32 % 12], (int)(x / 512 % 200),
+			     "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+			     "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+			     "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+			     "zzzzzzzzzzzzzzzzzzzz");
+		}
+		xr_lim.chunk = 64 + (size_t)r * 41;
+		xr_lim.line = r % 3 ? XR_LINE_MAX : 180;
+		for (k = 0; k < 6; k++)
+		{
+			a = pf_scan(body, n, keys[k], 0, 0, &on);
+			b = pf_scan(body, n, keys[k], 0, 1, &off);
+			bad += !a || !b || strcmp(a, b) || off;
+			skips += on;
+			free(a);
+			free(b);
+		}
+	}
+	xr_lim = l0;
+	CHECK("prefilter: 60 random transcripts x 6 shapes, windows of 64 to "
+	      "2483 bytes: every line the same with it on and off",
+	      bad == 0 && skips > 0);
+#undef PF_A
+}
+
 int
 main(int argc, char **argv)
 {
@@ -6158,6 +6472,7 @@ main(int argc, char **argv)
 	t_search();
 	t_anchors();
 	t_newest();
+	t_prefilter();
 	printf("%s: %d failed\n", fails ? "FAIL" : "ok", fails);
 	return fails != 0;
 }

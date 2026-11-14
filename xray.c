@@ -40,6 +40,8 @@ unsigned long xr_seam_opened, xr_seam_refused;
 struct xr_limits xr_lim = {XR_HEAD_RANGE, XR_TAIL_RANGE, XR_CHUNK, XR_LINE_MAX,
                            XR_OUT_MAX, XR_FILES, XR_BYTES, XR_WALL_MS};
 int xr_noclock;
+int xr_noskip;
+unsigned long xr_skipped;
 
 /* ---- UTF-8 and Unicode classes ----------------------------------------- */
 
@@ -6843,6 +6845,216 @@ line_start(int fd, uint64_t from, uint64_t to, char *buf, uint64_t *at)
 	return 0;
 }
 
+/* ---- light --ref's window prefilter (#293) -------------------------------- */
+
+/* A key's needles, built from the key as the grammar builds it: a window
+** whose raw bytes hold none of them, no JSON escape that could hide one and
+** none of the decoder's junctions can give no hit of the key, so it is not
+** decoded. Needles are printable ASCII without '"' and '\\', so each byte
+** is raw unless escaped. */
+struct xr_pf
+{
+	char nd[3][XR_KEY_MAX + 16];
+	size_t nl[3], at[3];	/* its length, its anchor (rarest) byte */
+	int n, fold;		/* fold: the text's ASCII case folded */
+	const char *num;	/* issue #N: N, also as an id value (D2, D4) */
+};
+
+/* the anchor's rank, low first: '#', capitals, digits, other, lower case */
+static int
+pf_rank(unsigned char c, int fold)
+{
+	return c == '#' ? 0 : A_UP(c) ? 1 : A_DIG(c) ? 2 : !A_LO(c) ? 3
+	       : fold ? 9 : 4;
+}
+
+/* the longest run of t[0..l) a needle may hold; 0 when none fits */
+static int
+pf_add(struct xr_pf *f, const char *t, size_t l)
+{
+	size_t i, s = 0, best = 0, bs = 0, k;
+	int r = 9;
+
+	for (i = 0; i <= l; i++)
+		if (i == l || t[i] < 0x20 || t[i] > 0x7e || t[i] == '"' ||
+		    t[i] == '\\')
+		{
+			if (i - s > best)
+				best = i - s, bs = s;
+			s = i + 1;
+		}
+	if (!best || f->n == 3)
+		return 0;
+	for (k = 0; k < best; k++)
+	{
+		char c = t[bs + k];
+
+		f->nd[f->n][k] = f->fold && A_UP((unsigned char)c) ? c + 32 : c;
+		if (pf_rank((unsigned char)c, f->fold) < r)
+			r = pf_rank((unsigned char)c, f->fold), f->at[f->n] = k;
+	}
+	f->nl[f->n] = best;
+	return r < 9 && ++f->n;
+}
+
+/* key's needles (the grammar's rules, xr_ref_parse): 0 when it has none a
+** raw test can trust, so every window is decoded */
+static int
+pf_build(struct xr_pf *f, const char *key)
+{
+	const char *t = strchr(key, ':'), *h, *r;
+	char b[XR_KEY_MAX + 16];
+
+	memset(f, 0, sizeof *f);
+	if (!t++)
+		return 0;
+	if (!strncmp(key, "ticket:", 7) || !strncmp(key, "commit:", 7) ||
+	    !strncmp(key, "url:", 4))
+		return pf_add(f, t, strlen(t));
+	if (!strncmp(key, "file:", 5))
+	{
+		/* path_norm only drops components: the last is in the window, in
+		** the text or in a cwd field of a line of it */
+		r = strrchr(t, '/');
+		return pf_add(f, r ? r + 1 : t, strlen(r ? r + 1 : t));
+	}
+	if (!strncmp(key, "issue:", 6))
+	{
+		f->fold = t[0] != '#';	/* repo#N: lower case, the text any */
+		f->num = f->fold ? NULL : t + 1;	/* D2/D4: an id value N is
+						** #N (id_resolve) */
+		return pf_add(f, t, strlen(t));
+	}
+	f->fold = 1;
+	if (strncmp(key, "pull:", 5) || !(h = strrchr(t, '#')))
+		return 0;
+	/* o/r#N, or a github URL's r/pull/N or r/issues/N (url_kind) */
+	for (r = h; r > t && r[-1] != '/'; r--)
+		;
+	return pf_add(f, r, strlen(r)) &&
+	       pf_add(f, b, (size_t)snprintf(b, sizeof b, "%.*s/pull/%s",
+	                                     (int)(h - r), r, h + 1)) &&
+	       pf_add(f, b, (size_t)snprintf(b, sizeof b, "%.*s/issues/%s",
+	                                     (int)(h - r), r, h + 1));
+}
+
+/* nd (anchored at its byte a, the text folded or not) in s[from, n): its
+** start, or NULL */
+static const char *
+pf_find(const char *s, size_t n, size_t from, const char *nd, size_t l,
+        size_t a, int fold)
+{
+	const char *p = s + from + a, *e, *q;
+	size_t j;
+
+	if (from > n || l > n - from)
+		return NULL;
+	for (e = s + n - l + a + 1; p < e && (p = memchr(p, nd[a],
+	                                                  (size_t)(e - p))); p++)
+	{
+		for (q = p - a, j = 0; j < l && (fold && A_UP((unsigned char)q[j])
+		                                 ? q[j] + 32 : q[j]) == nd[j]; j++)
+			;
+		if (j == l)
+			return q;
+	}
+	return NULL;
+}
+
+/* back over blanks, quotes, backslashes and \b \f \n \r \t from s[p] */
+static size_t
+pf_back(const char *s, size_t p)
+{
+	for (;;)
+		if (p && memchr(" \t\"'\\", s[p - 1], 5))
+			p--;
+		else if (p > 1 && s[p - 2] == '\\' && memchr("bfnrt", s[p - 1], 5))
+			p -= 2;
+		else
+			return p;
+}
+
+/* N as an id value: back to a ':' after a word ending in id, number or
+** key, any case (D2's A_IDF, D4's number:/id: lines) */
+static int
+pf_num(const char *s, size_t n, const char *num)
+{
+	static const char *const w[] = { "id", "number", "key" };
+	size_t l = strlen(num), p, k, i = 0;
+	const char *m;
+
+	while ((m = pf_find(s, n, i, num, l, 0, 0)))
+	{
+		i = (size_t)(m - s) + 1;
+		if ((p = pf_back(s, (size_t)(m - s))) && s[p - 1] == ':')
+			for (p = pf_back(s, p - 1), k = 0; k < 3; k++)
+				if (p >= strlen(w[k]) &&
+				    !strncasecmp(s + p - strlen(w[k]), w[k], strlen(w[k])))
+					return 1;
+	}
+	return 0;
+}
+
+/* Text the decoder joins from bytes that are not adjacent raw: a pasted
+** content's unwrap, a system notice's strip_tags, a Codex message's parts
+** (cx_user). texts() and output_text join with '\n', which no key holds. */
+static int
+pf_junction(const char *s, size_t n)
+{
+	const char *p, *q, *b, *l = NULL;
+	size_t i;
+
+	if (pf_find(s, n, 0, "<pasted_content", 15, 0, 0))
+		return 1;
+	for (i = 0; (p = pf_find(s, n, i, "\"input_text\"", 12, 9, 0)); l = p)
+	{
+		if (l && !memchr(l, '\n', (size_t)(p - l)))
+			return 1;	/* two parts in one line */
+		i = (size_t)(p - s) + 12;
+	}
+	for (i = 0; (p = pf_find(s, n, i, "\"system\"", 8, 2, 0));
+	     i = (size_t)(q - s))
+	{
+		for (b = p; b > s && b[-1] != '\n'; b--)
+			;
+		if (!(q = memchr(p, '\n', (size_t)(s + n - p))))
+			q = s + n;
+		for (; b + 1 < q && (b = memchr(b, '<', (size_t)(q - b - 1))); b++)
+			if (A_LO((unsigned char)b[1]) || b[1] == '/')
+				return 1;	/* a tag strip_tags may drop */
+	}
+	return 0;
+}
+
+/* A JSON escape that writes printable ASCII (\/,  -\u007f), after any
+** run of backslashes: a nested string (a Codex call's arguments, D2's
+** output) is decoded twice. */
+static int
+pf_escape(const char *s, size_t n)
+{
+	const char *p = s, *e = s + n;
+
+	while (p < e && (p = memchr(p, '\\', (size_t)(e - p))) && ++p < e)
+		if (*p == '/' || (*p == 'u' && e - p > 4 && p[1] == '0' &&
+		                  p[2] == '0' && p[3] >= '2' && p[3] <= '7' &&
+		                  isxdigit((unsigned char)p[4])))
+			return 1;
+	return 0;
+}
+
+/* s[0, n) can hold no hit of f's key */
+static int
+pf_none(const struct xr_pf *f, const char *s, size_t n)
+{
+	int k;
+
+	for (k = 0; k < f->n; k++)
+		if (pf_find(s, n, 0, f->nd[k], f->nl[k], f->at[k], f->fold))
+			return 0;
+	return !(f->num && pf_num(s, n, f->num)) && !pf_junction(s, n) &&
+	       !pf_escape(s, n);
+}
+
 /* xr_claude_newest's windows: the bytes of the ones before added, so the
 ** --ref tick (budget, caps, progress) sees the whole read. */
 struct xr_win
@@ -6997,14 +7209,54 @@ cwd_back(struct xr_claude *d, int fd, uint64_t lo, uint64_t hi,
 	return 0;
 }
 
+/* Lines [a, b) not decoded when f says they cannot hold the key (#293): 1,
+** their ticks and lines_too_long as read_range gives them; 0 to decode them
+** (a hit possible, or a short read: read_range's to report). buf holds b - a. */
+static int
+win_skip(struct xr_claude *d, const struct xr_pf *f, int fd, uint64_t a,
+         uint64_t b, struct xr_win *w, char *buf)
+{
+	size_t n = (size_t)(b - a), got = 0, i = 0;
+	const char *nl;
+
+	while (got < n)
+	{
+		ssize_t r = pread(fd, buf + got, n - got, (off_t)(a + got));
+
+		if (r < 0 && errno == EINTR)
+			continue;
+		if (r <= 0)
+			return 0;
+		got += (size_t)r;
+	}
+	if (!pf_none(f, buf, n))
+		return 0;
+	xr_skipped++;
+	while ((nl = memchr(buf + i, '\n', n - i)))
+	{
+		if ((size_t)(nl - (buf + i)) > xr_lim.line)
+			d->too_long++;
+		i = (size_t)(nl - buf) + 1;
+		if ((d->halt = w->tick(w->tctx, w->base + i)))
+			break;
+	}
+	w->base += n;
+	return 1;
+}
+
 int
 xr_claude_newest(struct xr_claude *d, int fd, uint64_t size, int *capped)
 {
-	char *buf = malloc(XR_CHUNK), *acc = malloc(XR_LINE_MAX + 1);
+	/* a window of whole lines starts in its chunk and ends in the next */
+	char *buf = malloc(2 * XR_CHUNK), *acc = malloc(XR_LINE_MAX + 1);
 	char *sb = malloc(XR_CHUNK), cwd[sizeof d->cwd] = "";
 	uint64_t r[2][2], cat = 0;
 	struct xr_win w;
+	struct xr_pf f;
 	int nr = 1, i, k, rc = buf && acc && sb ? 0 : -1, known = 0;
+	/* --ref's scan: only its key's hits count (sc_hit) */
+	int pf = !xr_noskip && d->tick == xr_scan_tick &&
+	         pf_build(&f, ((const struct xr_scan *)d->tctx)->key);
 
 	w.tick = d->tick;
 	w.tctx = d->tctx;
@@ -7048,6 +7300,13 @@ xr_claude_newest(struct xr_claude *d, int fd, uint64_t size, int *capped)
 			}
 			if (!k)
 				continue;
+			/* before the cwd search: a skipped window needs none */
+			if (pf && b - a <= 2 * XR_CHUNK &&
+			    win_skip(d, &f, fd, a, b, &w, buf))
+			{
+				b = a;
+				continue;
+			}
 			/* the cwd at a: the last line before it that names one, in
 			** this range, then the head; kept while that line is older
 			** than the window (a only falls) */

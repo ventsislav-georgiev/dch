@@ -1,0 +1,9 @@
+I{"type":"assistant","message":{"content":[{"type":"text","text":"CT-12 first"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"filler 0 zz"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"filler 1 zz"}]}}
+{"type":"user","message":{"content":"C<pasted_content id=\"1\">T-12</pasted_content id=\"1\"> ok"}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"filler 2 zz"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"filler 3 zz"}]}}
+{"type":"system","content":"C<b>T-12</b> done"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"filler 4 zz"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"filler 5 zz"}]}}

@@ -1,0 +1,9 @@
+	{"type":"assistant","message":{"content":[{"type":"text","text":"fixes #4242"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"filler 0 zz"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"filler 1 zz"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"filler 2 zz"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"filler 3 zz"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"filler 4 zz"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"filler 5 zz"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"b1","name":"Bash","input":{"command":"todo.py get dch 4242 | jq ."}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"b1","content":"{\n  \"number\":\n 4242, \"title\": \"Fix\"}"}]}}

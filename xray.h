@@ -47,6 +47,8 @@ struct xr_limits
 };
 extern struct xr_limits xr_lim;
 extern int xr_noclock;	/* tests only: DCH_XRAY_NOCLOCK, light --ref past its budget, held to --full's XR_WALL_MS */
+extern int xr_noskip;	/* tests only: light --ref decodes every window (#293) */
+extern unsigned long xr_skipped;	/* light --ref windows not decoded (a test seam) */
 
 /* One chapter (3.2). at < 0 prints null. */
 struct xr_chapter

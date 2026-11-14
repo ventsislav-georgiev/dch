@@ -1508,10 +1508,12 @@ ref (`dch: not a ref`), relative paths against the session's cwd.
   full read has there (a mention in the turn the window starts in has
   `chapter: null`, unless the window starts the file, since a prompt there
   may continue an older turn; a tool result whose call is in an older window
-  gives no definition). Its lines come newest window first, in file order
-  within a window, and the file's `mention` lines are its newest 200.
-  `--full` reads oldest first, as before. A live shell's lines and another
-  session's give titles and counts only: no `mention`, no `passage`.
+  gives no definition). A window whose raw bytes cannot hold the ref is not
+  decoded (its bytes and long lines still count), so a ref only in old turns
+  is found inside the budget too. Its lines come newest window first, in
+  file order within a window, and the file's `mention` lines are its newest
+  200. `--full` reads oldest first, as before. A live shell's lines and
+  another session's give titles and counts only: no `mention`, no `passage`.
 - **Full.** `--full` reads the whole corpus up to its caps: 64 files
   (`why: "files"`), 1 GiB (`why: "bytes"`) and 10 s (`why: "time"`). The
   10 s count the scan's own time: time spent waiting on a reader that pauses

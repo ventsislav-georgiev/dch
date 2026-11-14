@@ -1212,7 +1212,9 @@ def test_refs():
           r.returncode == 2 and r.stderr == "dch: not a ref\n" and
           not r.stdout, (r.returncode, r.stderr, r.stdout[:200]))
 
-    # a big transcript: light stops at its budget, full reads it all
+    # a big transcript: light stops at its budget, full reads it all. Every
+    # line holds 515151 as an id value, no ref, so the prefilter (#293)
+    # decodes every window and the budget is what stops the read
     pad = "x" * 900
     with open(tp, "w") as f:
         f.write(json.dumps({"type": "user", "cwd": "/home/demo/proj",
@@ -1220,7 +1222,7 @@ def test_refs():
                             "message": {"content": "start #1 #515151"}})
                 + "\n")
         line = json.dumps({"type": "assistant", "message": {"content": [
-            {"type": "text", "text": "PROJ-5 o/r#3 " + pad}]}}) + "\n"
+            {"type": "text", "text": "PROJ-5 o/r#3 id: 515151 " + pad}]}}) + "\n"
         f.write(line * 40000)
         f.write(json.dumps({"type": "user", "message": {
             "content": "the end #424242"}}) + "\n")
@@ -3654,8 +3656,9 @@ def test_scope():
         os.unlink(os.path.join(hdir, "s%d.json" % k))
 
     # 65 files scan 64 (3.8, 9.5); light over 1 MB files stops at its budget
+    # (933 as an id value, no ref: the prefilter decodes every window, #293)
     big = "".join(json.dumps({"type": "user", "cwd": P, "message": {
-        "content": "pad " + "y" * 1000}}) + "\n" for _ in range(1000))
+        "content": "pad id: 933 " + "y" * 1000}}) + "\n" for _ in range(1000))
     for k in range(10, 71):
         put(k, P, ["#931 in %d" % k], 1794300100 + k)
         with open(os.path.join(cfg, "projects", key(P), sid(k) + ".jsonl"),
@@ -3889,6 +3892,53 @@ def test_light_303():
     os.unlink(tp)
 
 
+PSID = "11111111-2222-4333-8444-5555555555d4"
+
+
+def test_prefilter_reach():
+    """#293: light --ref does not decode a 1 MiB window whose raw bytes
+    cannot hold the ref, so its 300 ms reach the whole of a 160 MB
+    transcript: a ticket named only in the first line is found. Without the
+    prefilter light decodes about 40-95 MB in its budget here and stops,
+    why budget. Asserts what was found, not how long it took; a run a
+    stalled machine stops at the budget is retried, twice."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, PSID + ".jsonl")
+    words = ("the parser reads a line and then the decoder builds chapters "
+             "from turns while tools run").split()
+    said = lambda i: json.dumps({"type": "assistant", "message": {"content": [
+        {"type": "text", "text": " ".join(words[(i * 7 + j) % len(words)]
+                                          for j in range(20 + i % 300))}]}},
+        separators=(",", ":")) + "\n"
+    block = "".join(said(i) for i in range(400))
+    with open(tp, "w") as f:
+        f.write(json.dumps({"type": "user", "cwd": "/home/demo/proj",
+                            "message": {"content": "start on MARK-1"}},
+                           separators=(",", ":")) + "\n")
+        for _ in range((160 << 20) // len(block)):
+            f.write(block)
+    history("xr-reach", PSID, cfg)
+    try:
+        for k in range(3):
+            r = dch("--xray", "xr-reach", "--ref", "MARK-1", "--scope",
+                    "session", "--json")
+            ls = ref_lines(r.stdout) or [{}]
+            if ls[-1].get("why") != "budget":
+                break
+        men = [l["mention"]["offset"] for l in ls if "mention" in l]
+        check("prefilter: light --ref finds a ref named only in the first "
+              "line of a 160 MB transcript inside its 300 ms budget: the "
+              "mention at offset 0, why first, all but its oldest window counted (%d tries)"
+              % (k + 1), r.returncode == 0 and men == [0] and
+              ls[-1].get("done") and ls[-1]["why"] == "first" and
+              ls[-1]["bytes"] >= os.path.getsize(tp) - (2 << 20),
+              (r.returncode, ls[-2:], r.stderr))
+    finally:
+        os.unlink(tp)
+
+
 def main():
     try:
         test_names()
@@ -3931,6 +3981,7 @@ def main():
         test_scope()
         test_light_anchors()
         test_light_303()
+        test_prefilter_reach()
     finally:
         shutil.rmtree(T, ignore_errors=True)
     if fails[0]:
