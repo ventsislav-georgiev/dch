@@ -66,6 +66,10 @@ struct client
 	** it (#200): a client before #211 resets nothing on a suspend, and
 	** after one that does the pop meets an empty stack, a no-op. */
 	int armed;
+	/* Its X-ray view is up (MSG_DETACH len 1, #311): attached, but no
+	** terminal sees the output, so none goes to it and the mirror answers
+	** the program's queries. The next MSG_ATTACH clears it. */
+	int viewing;
 
 	/* Connection role latch. A control connection (MSG_KEYS/READ/WAIT)
 	** receives framed responses on the same socket attached clients
@@ -1983,7 +1987,7 @@ process_pty_buf(const unsigned char *buf, size_t len)
 	for (p = clients; p; p = next)
 	{
 		next = p->next;
-		if (!p->attached)
+		if (!p->attached || p->viewing)
 			continue;
 		/* Drain any existing backlog FIRST: a client momentarily at OUT_CAP
 		** but recovering would otherwise be dropped by queue_to_client before
@@ -4087,6 +4091,7 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 		** ordering. The first gated lite attach forwards startup output live, including its
 		** modes, so it must not re-arm those same modes below. */
 		pty_gated = 0;
+		p->viewing = 0;
 		if (!rearm)
 			p->attached = 1;
 		drain_pty();
@@ -4145,7 +4150,9 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 	}
 	else if (type == MSG_DETACH)
 	{
-		p->attached = 0;
+		/* len 1: the client's X-ray view went up over it (#311) */
+		p->viewing = len == 1 && p->attached;
+		p->attached = p->viewing;
 		/* Detaching before the sizing frame arrived: the repaint has
 		** no one to land on any more. */
 		p->want_replay = 0;

@@ -116,7 +116,10 @@ enum
 	MSG_ATTACH	= 1,	/* no payload; len = rows of scrollback the
 				** replay sends above the screen (#101, 0 =
 				** none; masters before it ignore len) */
-	MSG_DETACH	= 2,
+	MSG_DETACH	= 2,	/* no payload; len 1: the client's X-ray view
+				** is up, it stays attached (a restart carries
+				** it) and gets no output (#311; masters before
+				** it detach it) */
 	MSG_WINCH	= 3,
 	MSG_REDRAW	= 4,
 	/* Control verbs (client->master). A connection that sends one of
