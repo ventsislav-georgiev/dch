@@ -6228,7 +6228,7 @@ pf_same(const char *body, size_t n, const char *key, int cx, const char *want,
 static void
 t_prefilter(void)
 {
-	static char body[400 * 256];
+	static char body[400 * 256 + 1];	/* pf_pad ends each line with a NUL */
 	struct xr_limits l0 = xr_lim;
 	size_t n;
 	unsigned long on, off, skips = 0;
