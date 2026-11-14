@@ -4546,7 +4546,8 @@ rows_same(const struct rlist *a, const struct rlist *b)
 /* The frames of h's 0x2e stream in h->p.in, as far as they have come: a
 ** 0x11 is its rows, a 0x14 a beat, a streamed type skipped. A 0x13, a
 ** frame over the limit or a list that is not an array ends the stream
-** (p.st PR_REFUSED for a coded 0x13, else PR_FAIL; why said). 1 when its
+** (p.st PR_REFUSED for a coded 0x13, PR_OK for another, so the host is
+** polled, else PR_FAIL; why said). 1 when its
 ** rows changed (the same rows again are a beat) or it ended. */
 static int
 fh_frames(struct fhost *h, long long now, long long quiet)
@@ -4569,9 +4570,10 @@ fh_frames(struct fhost *h, long long now, long long quiet)
 		else if (r != RF_FRAME || (f.type != 0x11 && f.type != 0x13 &&
 		                           f.type != 0x14))
 			continue;	/* 0x12, 0x18, a streamed type: not ours */
-		else if (f.type == 0x13)
+		else if (f.type == 0x13)	/* busy (the host's 16 streams,
+			** QA 1.64.0 LOW-R15) or uncoded: polled, as one without */
 			pr_end(&h->p, err_text(f.data, f.len, why, sizeof why) ==
-			       DCH_EXIT_REFUSED ? PR_REFUSED : PR_FAIL, why);
+			       DCH_EXIT_REFUSED ? PR_REFUSED : PR_OK, why);
 		else if (f.type == 0x11 && (memchr(f.data, 0, f.len) ||
 		         !(t = malloc(f.len + 1))))
 			pr_end(&h->p, PR_FAIL, "sent an unreadable list");
@@ -4581,10 +4583,19 @@ fh_frames(struct fhost *h, long long now, long long quiet)
 			h->at = (long long)time(NULL);
 			if (f.type == 0x14)
 				continue;
+			/* the last list's bytes again: a beat, not parsed
+			** (QA 1.64.0 NIT-R7) */
+			if (h->p.list && strlen(h->p.list) == f.len &&
+			    !memcmp(h->p.list, f.data, f.len))
+			{
+				free(t);
+				continue;
+			}
 			memcpy(t, f.data, f.len);
 			t[f.len] = '\0';
 			bad = rows_doc(t, h->p.h.label, h->at, &l) < 0;
-			free(t);
+			free(h->p.list);
+			h->p.list = t;	/* the last list, for the test above */
 			if (bad)
 			{
 				free(l.v);
@@ -4651,7 +4662,7 @@ fh_settle(struct fhost *h, long long now, long long every, long long quiet)
 		h->ok = 1;
 		h->gone = h->fails = 0;
 		h->due = now + every;
-		if (!hello_op(h->p.hello_js, "watch"))
+		if (!hello_op(h->p.hello_js, "watch") || h->p.fd < 0)
 		{
 			pr_end(&h->p, PR_OK, NULL);
 			return 1;
@@ -4899,6 +4910,15 @@ dch_remote_follow(int remote, struct dch_rrow **out)
 	struct sigaction sa;
 
 	*out = NULL;
+	/* fd 1 closed at exec (>&-): nobody reads, exit 0. At start only:
+	** nothing outside can close our fd 1 later, and checked here no
+	** socket of ours can take its number (macOS polls a closed fd 1
+	** as nothing at all) */
+	if (fcntl(1, F_GETFD) == -1 && errno == EBADF)
+	{
+		free(v);
+		return -1;
+	}
 	if (!v)
 	{
 		fprintf(stderr, "dch: out of memory\n");
@@ -4926,7 +4946,7 @@ dch_remote_follow(int remote, struct dch_rrow **out)
 			struct pollfd o = { 1, POLLOUT, 0 };
 
 			/* not POLLNVAL: macOS says it of /dev/null (QA 1.62.0
-			** NIT-R1); a closed fd 1 shows in the poll below */
+			** NIT-R1); a fd 1 closed at exec ended us at start */
 			if (poll(&o, 1, 0) > 0 &&
 			    (o.revents & (POLLERR | POLLHUP)))
 				break;

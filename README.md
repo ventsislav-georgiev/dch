@@ -446,7 +446,7 @@ someone is watching is invisible to them.
 | `--meta <n> '<json>'` | Attach one JSON object of metadata to the session (see [Optional: session metadata](#optional-session-metadata)); `clear` removes it. Replaced atomically, last write wins, never interpreted; a byte-identical push is a no-op; rejected input leaves the stored object unchanged. Removed automatically when the session's program exits. | 0 ok, 1 no session / not a single-line JSON object ≤ 16 KB |
 | `--wait <n> --state <s[,s...]> [--timeout ms]` | Block until the state matches any of the comma list (e.g. `idle,blocked,done` = "turn over"); prints the matched state. `active` is accepted as an alias for `working`. Polls every 100 ms. | 0 hit, 2 timeout, 1 no session |
 | `--ls-json` | All sessions as JSON: `[{"name","alias","harness","activity_epoch","state","version","agents","meta","meta_epoch","auto_allowed","claude_session_id","transcript_path","claude_foreground","cols","rows","clients"}]`. `cols` and `rows` are the pty size the session's master holds (set by the attached clients' windows, or `--spawn --size`), `clients` how many clients are attached right now; read in the same control round trip as the rest, never by attaching or resizing, and left out (not `0`) for a master too old to report them and for `--remote` rows. Every row ends with `"cwd"`, after every other key: the directory the session started in, from its live history record, `null` when it has none (a master from before history records) or the record already says it ended; a `--remote` row's is the host's, from its `dch serve` list, `null` from a server that does not send one. `harness` is the name of the Claude Code or Codex session running inside, or `""`; the real `name` remains separate. `state` follows the same resolution rule as `--status`. `version` is the dch version of the master serving that session, or `""` for a master old enough not to report one. `agents` is the number of live subagents on Claude Code's agent panel (the `⏺ main` block under the prompt), `0` when no panel is on screen — including while a prompt covers it — or `DCH_NO_DETECT=1` is set. `meta` is the object last pushed with `--meta`, verbatim, or `null`; `meta_epoch` is when that content last changed (epoch seconds, like `activity_epoch`), `0` with no meta. `auto_allowed` is the permission prompt the master answered last with [auto-allow](#auto-allow), `{"at":<epoch seconds>,"title":"<the dialog's first line, e.g. Bash command>"}`, or `null`; cleared when the session's program exits, like `meta`. `claude_session_id` is the `sessionId` of the one live interactive Claude Code under the session's program, read fresh from its own `<config>/sessions/<pid>.json` (pid descending from the program, `procStart` matching the process; `CLAUDE_CONFIG_DIR` honoured), so it follows `/clear` and resume; `null` when no Claude runs there, when more than one does (Claudes below another one, such as a test's fake Claude under one of its tool calls, count as that one), once it exits, or when the id is not a UUID. `transcript_path` is that conversation's absolute `<config>/projects/<dir>/<sessionId>.jsonl` when exactly one such file exists, else `null` (also right after `/clear`, until the new conversation writes its first line). `claude_foreground` is `true` while that Claude is the session terminal's foreground job, `false` while it is not — suspended with Ctrl-Z or sent to the background, a shell or another program in front, which is what reads typed keys then; left out when `claude_session_id` is `null` or the process groups cannot be read. A suspended Claude keeps its `claude_session_id` and `transcript_path`. Read from the kernel by the client, so a master of any version gets it. | 0 |
-| `--ls-json [--remote] --follow` | The `--ls-json` array (with `--remote`, its remote rows too), then the whole array again, one line, each time it changes; nothing while it does not. See [Following the list](#following-the-list). Runs until SIGINT, SIGTERM or the reader closes the pipe. | 0 stopped / reader closed, 1 out of memory, 2 bad usage |
+| `--ls-json [--remote] --follow` | The `--ls-json` array (with `--remote`, its remote rows too), then the whole array again, one line, each time it changes; nothing while it does not. See [Following the list](#following-the-list). Runs until SIGINT, SIGTERM or the reader closes the pipe; a stdout closed from the start (`>&-`) exits 0 at once. | 0 stopped / reader closed, 1 out of memory, 2 bad usage |
 | `--restart <n>` \| `--restart --all` `[--include-agents] [-f] [--json]` | Re-exec the session's master onto the current `dch` binary, in place — the program inside keeps running (see [Upgrading a live session](#upgrading-a-live-session)). `--all` restarts only sessions whose `version` differs from this binary's; `-f` restarts all of them. With `--include-agents`, it then restarts the stale Claude Code agents of those sessions — Claude as the session's command; one typed into its shell is skipped (`in_shell`); every session with `--all`, only `<n>` otherwise; `-f` forces current agents too (see [Restarting Claude Code agents](#restarting-claude-code-agents)). Without the flag no agent is touched, `--all` included. `--include-agents` without `--restart` is a usage error. `--json`: stdout is NDJSON, the master pass included, with or without `--include-agents` (see [Machine-readable output](#machine-readable-output)). | 0 ok, 1 failed / master too old / an agent restart failed |
 | `--respawn <n> [-- cmd...]` | Arm a one-shot respawn: when the session's program next exits, the master keeps the session (same socket, pty size, attached clients) and starts `cmd` in its place. No `cmd` arms a *hold*: the session stays up childless until a second `--respawn <n> -- cmd` starts one, or until `DCH_HOLD_MS` (default 120000) ends it. An arm that nothing consumes expires after `DCH_RESPAWN_TTL_MS` (default 300000); both are read from the master's environment. `--restart` refuses while a respawn is armed or held. | 0 ok, 1 no session / refused / master too old |
 | `--respawn <n> --cancel` | Drop a pending arm. On a held (childless) session it ends the session. | 0 ok, 1 no session |
@@ -2723,7 +2723,7 @@ do not retry. One code is transient and means "try again later":
 
 | `code` | When | `message` |
 | --- | --- | --- |
-| `busy` | The host is at its connection limit: 64 connections in total, or 16 from this peer (its `--ls-json --follow` watch streams aside, up to 32 with them). Nothing is wrong with the peer; retry with your own backoff (there is no retry-after field). | `this host is at its connection limit: try again shortly` |
+| `busy` | The host is at its connection limit: 64 connections in total, or 16 from this peer besides its `--ls-json --follow` watch streams (32 with them). Also the answer to a `0x2e` when this peer has 16 watch streams already; that connection then closes. Nothing is wrong with the peer; retry with your own backoff (there is no retry-after field). | `this host is at its connection limit: try again shortly`; for the `0x2e`: `this machine has 16 session list streams here already` |
 
 `busy` is never remembered by the repeat-refusal cache: the next connection
 once a slot frees is served as usual. Its message says nothing about other
@@ -3004,7 +3004,12 @@ once a second: two log lines a second while it shows.
 
 **Limits.** At most 64 connections, 16 per peer, and 4 live-list streams per
 phone. A connection past the first two gets `busy` (see
-[Refusals](#refusals)) and the close. A connection that is not attached or watching closes after 30 s
+[Refusals](#refusals)) and the close. A peer's live-list (`0x2e`) streams
+are counted apart, at most 16, so its other 16 connections stay free for
+attach and commands; a 17th `0x2e` gets `busy` and the close. A watching
+connection only reads the list: kill and rename there get a `0x13`
+(`watch connections cannot kill or rename`), as attach, create and control
+verbs already did. A connection that is not attached or watching closes after 30 s
 without a whole frame, and any connection closes when its output goes untaken
 for 20 s (a control verb with a timeout: 20 s past that timeout). A peer
 gone without a close (no answer to TCP keepalive) is closed in about 30 s. Control frames over 64 KiB, and any frame over the protocol's
@@ -3076,7 +3081,9 @@ renamed, a `state`, a `stale` mark, a local row's `activity_epoch` (so a
 local session that is printing makes one array per 2 s tick). An unchanged
 list prints nothing, and arrays come at most one per 200 ms: changes faster
 than that are folded into the next one. It
-runs until SIGINT, SIGTERM or the reader closes the pipe, then exits 0;
+runs until SIGINT, SIGTERM or the reader closes the pipe, then exits 0
+(a stdout closed from the start, `>&-`, exits 0 at once; one on
+`/dev/null` keeps it running);
 misuse (a name after it, another verb) is exit 2. SIGINT and SIGTERM stop
 it even while its reader has stopped reading and the pipe is full; the line
 it was writing then may be cut short, and nothing comes after it.
@@ -3087,10 +3094,13 @@ it was writing then may be cut short, and nothing comes after it.
 - *A host whose hello lists `watch`* (`dch serve` does) is held on one
   connection: after the list, a `0x2e`
   `{"device_id":"dch-<pid>"}`, and every `0x11` it pushes is a new look
-  (the same list again is not). Nothing is polled there; dch serve itself
+  (the same list again is not, and its bytes are only compared, not
+  parsed). Nothing is polled there; dch serve itself
   looks every 2 s, so a change there shows within about 2 s. Each follower
-  holds that one connection to each such host; dch serve counts them apart
-  from the 16 other connections it takes from one machine (32 in all).
+  holds that one connection to each such host; dch serve takes 16 of them
+  from one machine, counted apart from its 16 other connections, so attach
+  and commands there always find a slot. A 17th follower is refused the
+  stream (`busy`) and polls that host every 2 s instead, its rows fresh.
 - *Any other host* is probed again every 2 s, as the picker does, and the
   local rows are read again on the same tick.
 - *A host that fails* (no answer within 2 s, a dropped link, a stream that
@@ -3099,8 +3109,9 @@ it was writing then may be cut short, and nothing comes after it.
   --remote` would show them: `"stale":true` for two minutes after it last
   answered, then gone. It is dialled again 2 s later, doubling per failure
   up to 32 s. A refusal (a `0x13` with a `code`) is said on stderr once and
-  shows none of its rows. One host never holds up another or the local
-  rows.
+  shows none of its rows. Any other `0x13` on the stream (`busy`, or none
+  with a code) ends only the stream: the host is polled every 2 s instead.
+  One host never holds up another or the local rows.
 - `dch --ls-json --follow`, without `--remote`, is the same stream of the
   local rows only: no host is dialled and no `tailscale` call is made.
 - `--remote` lists hosts the same way here, so with discovery the

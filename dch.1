@@ -328,7 +328,11 @@ The
 .B \-\-ls\-json
 array, then the whole array again, one flushed line, each time it changes
 (nothing while it does not), until SIGINT, SIGTERM or the reader closes
-the pipe: exit 0. A name or another verb with it is exit 2. See
+the pipe: exit 0. A stdout closed from the start
+.RB ( >&\- )
+is exit 0 at once; one on
+.I /dev/null
+keeps it running. A name or another verb with it is exit 2. See
 .BR "REMOTE HOSTS" .
 .TP
 .B \-\-ls\-json
@@ -3241,10 +3245,15 @@ One code is transient, and means try again later (with the client's own
 backoff; there is no retry\-after field):
 .TP
 .B busy
-the host is at its connection limit (64 in all, or 16 from this peer, its
+the host is at its connection limit (64 in all, or 16 from this peer besides
+its
 .B \-\-ls\-json \-\-follow
-watch streams aside, 32 with them):
-.I this host is at its connection limit: try again shortly
+watch streams, 32 with them):
+.IR "this host is at its connection limit: try again shortly" .
+Also the answer to a 0x2e when this peer has 16 watch streams already
+(counted apart, so its other 16 connections stay free), and that connection
+closes:
+.I this machine has 16 session list streams here already
 .PP
 .B busy
 is never cached as a refusal, and says nothing about other users or
@@ -3323,7 +3332,8 @@ stderr bytes as they come, then
 .B 0x33
 .BR {\(dqexit\(dq:\fIN\fP} ,
 exactly one per request that runs. Not on an attached or watching
-connection, and a ctl connection takes only hello, list, 0x30 and 0x34
+connection (a watching one only reads the list: kill and rename there get
+.IR "watch connections cannot kill or rename" ), and a ctl connection takes only hello, list, 0x30 and 0x34
 (anything else: a 0x13, then the close). After the 0x33 the connection stays open for the next 0x30 (one
 at a time); with no frame for 300 s it closes. A
 .B 0x34
@@ -3583,14 +3593,19 @@ each time it changes. A host whose hello lists
 is held on one connection (a 0x2e
 .I {"device_id":"dch\-<pid>"}
 after its list) and each 0x11 it pushes is a new look (the same list again
-is not); any other host, and the local rows, are read again every 2 s.
+is not, and its bytes are only compared, not parsed); any other host, and
+the local rows, are read again every 2 s. dch serve takes 16 such streams
+from one machine, apart from its 16 other connections; a 17th follower is
+refused the stream (busy) and polls that host every 2 s instead.
 Arrays come at most one per 200 ms; faster changes fold into the next.
 SIGINT and SIGTERM end it with 0 even while its reader has stopped reading;
 the line it was writing then may be cut short, and nothing follows it.
 A host that fails (no answer within 2 s, a dropped link, a stream silent for 35 s, a frame over 1 MiB,
 not a list, or a 0x13) shows its rows stale for 2 minutes after it last
 answered, as above, and is dialled again after 2 s, doubling up to 32 s; a
-refusal is said once and shows none. Without
+refusal (a 0x13 with a code) is said once and shows none, and any other
+0x13 on the stream (busy, or one with no code) ends only the stream: the
+host is polled every 2 s instead. Without
 .B \-\-remote
 it streams the local rows only and dials nothing.
 .B DCH_REMOTE_EVERY_MS
