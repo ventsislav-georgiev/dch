@@ -1129,28 +1129,33 @@ die(int sig)
 #endif
 		return;
 	}
-	/* Trace is opt-in and the sink fd is resolved at master startup, so this
-	** only does fprintf() here, not fopen() — good enough for a debug build to
-	** catch "who killed the master" (the bug this whole trace facility exists
-	** to diagnose). Not strictly async-signal-safe; debug-only. */
+	/* Trace is opt-in and the sink fd is resolved at master startup: the
+	** line is written to it here with write(2), as dch_trace's fprintf()
+	** may be what the signal interrupted, holding the FILE lock the
+	** handler would wait on for ever (QA 1.63.0 OOA-1). It catches "who
+	** killed the master", the bug this trace facility exists for. */
+	char cmd[121] = "", line[400];
+	struct timespec ts;
+	int n;
+
 	if (die_pid > 0)
 	{
 		/* "signal N from <pid> <cmd>": whoever sent it may exit any
 		** moment, so this is best effort — "from <pid>" alone if so.
 		** exit() below already runs the atexit writes in this handler. */
-		char cmd[121];
-
 		sender_cmd(die_pid, cmd, sizeof cmd);
 		snprintf(rec_end, sizeof rec_end, "signal %d from %ld%s%s", sig,
 		         (long)die_pid, cmd[0] ? " " : "", cmd);
-		dch_trace("master die sig=%d from pid=%ld uid=%ld cmd=%s", sig,
-		          (long)die_pid, (long)die_uid, cmd);
 	}
 	else
-	{
-		dch_trace("master die sig=%d", sig);
 		snprintf(rec_end, sizeof rec_end, "signal %d", sig);
-	}
+	if (dch_trace_fd >= 0 && clock_gettime(CLOCK_REALTIME, &ts) == 0 &&
+	    (n = snprintf(line, sizeof line, "%ld.%06ld pid=%d master die "
+	                  "sig=%d from pid=%ld uid=%ld cmd=%s\n",
+	                  (long)ts.tv_sec, ts.tv_nsec / 1000L, (int)getpid(),
+	                  sig, (long)die_pid, (long)die_uid, cmd)) > 0)
+		(void)!write(dch_trace_fd, line,
+		             n < (int)sizeof line ? (size_t)n : sizeof line - 1);
 	exit(1);
 }
 
@@ -4511,8 +4516,8 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 	** don't care what happens to it. */
 	setsid();
 
-	/* Resolve the trace sink now (before any signal handler can call
-	** dch_trace), so die() only ever fprintf()s, never fopen()s. */
+	/* Resolve the trace sink now, before any signal handler: die() writes
+	** to dch_trace_fd and never opens it. */
 	dch_trace("master start pid=%d waitattach=%d", (int)getpid(), waitattach);
 
 	listen_fd = s;

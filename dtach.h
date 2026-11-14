@@ -356,6 +356,9 @@ void dch_trace(const char *fmt, ...)
 	__attribute__((format(printf, 1, 2)))
 #endif
 	;
+/* the trace sink's fd once resolved, else -1: for a signal handler, which
+** must write(2) a line itself, never take stdio's lock (QA 1.63.0 OOA-1) */
+extern int dch_trace_fd;
 
 void write_buf_or_fail(int fd, const void *buf, size_t count);
 void write_packet_or_fail(int fd, const struct packet *pkt);

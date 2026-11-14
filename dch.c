@@ -636,6 +636,8 @@ compute_sock_dir(void)
 ** default: when DCH_DEBUG is unset, the first call caches trace_fp = NULL and
 ** every call is a cheap early return. Each line is prefixed with a wall-clock
 ** timestamp and the pid so client/master interleaving is readable. */
+int dch_trace_fd = -1;
+
 void
 dch_trace(const char *fmt, ...)
 {
@@ -667,6 +669,7 @@ dch_trace(const char *fmt, ...)
 				** mode is a GNU extension, unreliable on macOS.) */
 				fcntl(fileno(trace_fp), F_SETFD, FD_CLOEXEC);
 				setvbuf(trace_fp, NULL, _IOLBF, 0);
+				dch_trace_fd = fileno(trace_fp);
 			}
 		}
 	}
@@ -2523,6 +2526,23 @@ sock_peer_pid(const char *sp)
 	return pid;
 }
 
+#ifdef __APPLE__
+/* Every pid, in *out (malloc'd, NULL when out of memory): how many. Sized
+** by the kernel's count plus room for those born since, not a fixed 4096
+** that missed the rest (QA 1.63.0 NIT-R6). */
+static int
+all_pids(int **out)
+{
+	int n = proc_listpids(PROC_ALL_PIDS, 0, NULL, 0) +
+	        256 * (int)sizeof **out;
+
+	if (!(*out = malloc((size_t)n)))
+		return 0;
+	n = proc_listpids(PROC_ALL_PIDS, 0, *out, n);
+	return n > 0 ? n / (int)sizeof **out : 0;
+}
+#endif
+
 /* Every process whose argv says it is the master of sp gets sig (0: none);
 ** how many there are. A zombie's argv is unreadable: it is not counted. */
 static int
@@ -2530,16 +2550,16 @@ masters_of(const char *sp, int sig)
 {
 	int k = 0;
 #ifdef __APPLE__
-	int pids[4096], n, i;
+	int *pids, n = all_pids(&pids), i;
 
-	n = proc_listpids(PROC_ALL_PIDS, 0, pids, sizeof(pids));
-	for (i = 0; i < n / (int)sizeof(pids[0]); i++)
+	for (i = 0; i < n; i++)
 		if (is_master_of(pids[i], sp))
 		{
 			k++;
 			if (sig)
 				kill(pids[i], sig);
 		}
+	free(pids);
 #else
 	DIR *d = opendir("/proc");
 	struct dirent *de;
@@ -3323,10 +3343,84 @@ static const char no_reply_msg[] =
 ** master's full backlog waits (#265). */
 #define CTL_CONNECT_MS 500
 
+#ifdef __APPLE__
+/* 1 when a unix listener of pid's has every backlog slot taken: why macOS
+** refused a connect to it (#268). A master with room was refused at a node
+** not its own: its own was unlinked and a dead replacement's took the name
+** (QA 1.63.0 LOW-R12), which is a dead node. */
+static int
+backlog_full(int pid)
+{
+	struct socket_fdinfo si;
+	struct proc_fdinfo *fd;
+	int n = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, NULL, 0), i, full = 0;
+
+	if (n <= 0 || !(fd = malloc((size_t)n)))
+		return 0;
+	n = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, fd, n) / (int)sizeof *fd;
+	for (i = 0; i < n && !full; i++)
+		full = fd[i].proc_fdtype == PROX_FDTYPE_SOCKET &&
+		       proc_pidfdinfo(pid, fd[i].proc_fd, PROC_PIDFDSOCKETINFO,
+		                      &si, sizeof si) == (int)sizeof si &&
+		       si.psi.soi_kind == SOCKINFO_UN &&
+		       (si.psi.soi_options & SO_ACCEPTCONN) &&
+		       si.psi.soi_qlen >= si.psi.soi_qlimit;
+	free(fd);
+	return full;
+}
+
+/* A refused socket node is a stuck master's when a process whose argv says
+** it is that node's master has a full listener (#268). One pass over every
+** process's argv serves each node refused within CTL_CONNECT_MS: a pass per
+** node made --ls-json pay 60 ms for each dead one (QA 1.63.0 LOW-R13).
+** shortcut: a master born after the pass reads as dead until it expires;
+** only one between its bind() and listen() can be refused that young. */
+static int
+stuck_master(const char *path)
+{
+	static int *pid, n;
+	static char **arg;	/* each one's argv[2], by realpath when absolute */
+	static long long at;
+	long long now = wall_ms();
+	char **v, rp[PATH_MAX], ra[PATH_MAX];
+	const char *p = realpath(path, rp) ? rp : path;
+	int i, k;
+
+	if (!pid || now < at || now - at > CTL_CONNECT_MS)
+	{
+		for (i = 0; i < n; i++)
+			free(arg[i]);
+		free(arg);
+		free(pid);
+		n = all_pids(&pid);
+		arg = pid ? malloc((size_t)n * sizeof *arg + 1) : NULL;
+		for (i = k = 0; arg && i < n; i++)
+		{
+			v = pid[i] > 1 ? proc_argv(pid[i]) : NULL;
+			if (v && v[0] && v[1] && v[2] &&
+			    strcmp(v[1], "--master-of") == 0 &&
+			    (arg[k] = strdup(v[2][0] == '/' && realpath(v[2], ra)
+			                     ? ra : v[2])))
+				pid[k++] = pid[i];
+			free(v);
+		}
+		n = arg ? k : 0;
+		at = now;
+		dch_trace("master scan: %d masters", n);
+	}
+	for (i = 0; i < n; i++)
+		if ((strcmp(arg[i], path) == 0 || strcmp(arg[i], p) == 0) &&
+		    backlog_full(pid[i]))
+			return 1;
+	return 0;
+}
+#endif
+
 /* -1 with errno EAGAIN: a listener is there, but its backlog stayed full
 ** for CTL_CONNECT_MS (Linux). macOS refuses that connect at once, as it
 ** does a dead master's socket: there a refused socket node whose master's
-** argv still names it is the same stuck master (#268). That is a live,
+** argv still names it and whose listener is full is the same stuck master
+** (#268, stuck_master). That is a live,
 ** stuck master, never a dead socket to unlink or revive over. */
 int
 control_connect_path(const char *path)
@@ -3357,7 +3451,7 @@ control_connect_path(const char *path)
 
 		/* only after a refusal of a socket node: off the common path */
 		if (e == ECONNREFUSED && lstat(path, &st) == 0 &&
-		    S_ISSOCK(st.st_mode) && masters_of(path, 0) > 0)
+		    S_ISSOCK(st.st_mode) && stuck_master(path))
 			e = EAGAIN;
 #endif
 		close(s);

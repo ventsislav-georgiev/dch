@@ -16,7 +16,12 @@ Enter on it stays in the picker and says why; dch -n of it, and dch -E -f
 Linux, through dch serve, an attach to it ends with that line and a 0x12
 {"code":1} and leaves no client behind, and a client attached before the
 stop that detaches gets "why":"detach" (sock_live: stuck is live). Its master SIGKILLed, the same socket is dead
-and --spawn of the name starts a new one. Self-isolating (own
+and --spawn of the name starts a new one. QA 1.63.0: --ls-json over 200
+dead socket nodes reads every process's argv once, not once per node
+(LOW-R13); a healthy master whose node was unlinked does not hold its name
+once a replacement's node is dead (LOW-R12); a DCH_DEBUG master SIGTERMed
+traces who sent it, written from the handler without stdio (OOA-1).
+Self-isolating (own
 XDG_RUNTIME_DIR).
 
 Run:  python3 tests/stuck_master_test.py          (uses ./dch)
@@ -372,6 +377,9 @@ def main():
         expect(gone and r and r.returncode == 0 and master_pid(sock),
                "master SIGKILLed: its stale socket is dead, --spawn of the "
                "name starts a new one: %r" % (r and r.stderr))
+        dead_nodes()
+        orphan_name()
+        trace_sigterm()
     finally:
         if mpid:
             try:
@@ -392,6 +400,102 @@ def main():
         shutil.rmtree(TMP, ignore_errors=True)
     print("FAIL: %d check(s)" % len(fails) if fails else "all ok")
     return 1 if fails else 0
+
+
+def own_dir(tag):
+    """An XDG_RUNTIME_DIR of its own: (env, socket dir)."""
+    d = os.path.join(TMP, tag)
+    sd = os.path.join(d, "dch-%d" % os.getuid())
+    os.makedirs(sd, mode=0o700)
+    return dict(ENV, XDG_RUNTIME_DIR=d), sd
+
+
+def run(env, *args, timeout=60):
+    t0 = time.time()
+    r = subprocess.run([DCH] + list(args), env=env, capture_output=True,
+                       text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+    return r, time.time() - t0
+
+
+def dead_nodes():
+    """QA 1.63.0 LOW-R13: on macOS each refused node cost a pass over every
+    process's argv, so --ls-json took 12 s over 200 dead nodes."""
+    env, sd = own_dir("r13")
+    env["DCH_DEBUG"] = os.path.join(TMP, "r13.trace")
+    for i in range(200):
+        s = socket.socket(socket.AF_UNIX)
+        s.bind(os.path.join(sd, "d%d.sock" % i))
+        s.close()
+    r, dt = run(env, "--ls-json")
+    try:
+        n = len(json.loads(r.stdout))
+    except ValueError:
+        n = -1
+    expect(r.returncode == 0 and n == 200 and dt < 5.0,
+           "--ls-json over 200 dead nodes: %d rows in %.2fs (< 5s)" % (n, dt))
+    if not LINUX:
+        try:
+            with open(env["DCH_DEBUG"]) as f:
+                scans = f.read().count("master scan:")
+        except OSError:
+            scans = 0
+        # at most one pass per CTL_CONNECT_MS (500 ms), not one per node
+        expect(1 <= scans <= 1 + int(dt / 0.5),
+               "  ... with %d pass(es) over every process" % scans)
+
+
+def orphan_name():
+    """QA 1.63.0 LOW-R12: master A's node unlinked (a /tmp cleaner), B
+    started on the name and SIGKILLed: A, healthy, held the name for good."""
+    env, sd = own_dir("r12")
+    sock, pids = os.path.join(sd, "x.sock"), []
+    try:
+        r, _ = run(env, "--spawn", "x", "sleep", "300")
+        a = r.returncode == 0 and master_pid(sock)
+        pids.append(a)
+        os.unlink(sock)
+        r, _ = run(env, "--spawn", "x", "sleep", "300")
+        b = r.returncode == 0 and master_pid(sock)
+        pids.append(b)
+        os.kill(b, signal.SIGKILL)
+        until(lambda: not master_alive(b))
+        r, _ = run(env, "--spawn", "x", "sleep", "300")
+        c = r.returncode == 0 and master_pid(sock)
+        pids.append(c)
+        expect(c and c not in (a, b) and master_alive(a),
+               "a healthy orphan does not hold its name once its "
+               "replacement's node is dead: %r" % r.stderr)
+    except OSError as e:
+        expect(False, "orphan_name: %r" % e)
+    finally:
+        for p in pids:
+            if p and master_alive(p):
+                os.kill(p, signal.SIGKILL)
+
+
+def trace_sigterm():
+    """QA 1.63.0 OOA-1: die() traced with fprintf, which can wait for ever
+    on a lock the interrupted code holds; it now write(2)s its line. The
+    race itself is too rare to hit here: this checks the line still lands."""
+    env, sd = own_dir("ooa")
+    env["DCH_DEBUG"] = os.path.join(TMP, "ooa.trace")
+    pid = 0
+    try:
+        r, _ = run(env, "--spawn", "ooa", "sleep", "300")
+        pid = r.returncode == 0 and master_pid(os.path.join(sd, "ooa.sock"))
+        os.kill(pid, signal.SIGTERM)
+        gone = until(lambda: not master_alive(pid), 5)
+        with open(env["DCH_DEBUG"]) as f:
+            line = [l for l in f if " master die " in l]
+        want = (r"\d+\.\d{6} pid=%d master die sig=15 from pid=%d uid=%d "
+                r"cmd=\S*python.*\n\Z" % (pid, os.getpid(), os.getuid()))
+        expect(gone and len(line) == 1 and re.match(want, line[0]),
+               "a DCH_DEBUG master SIGTERMed traces who sent it: %r" % line)
+    except (OSError, TypeError) as e:
+        expect(False, "trace_sigterm: %r" % e)
+    finally:
+        if pid and master_alive(pid):
+            os.kill(pid, signal.SIGKILL)
 
 
 def master_alive(pid):
