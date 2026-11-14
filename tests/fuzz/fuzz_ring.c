@@ -7,8 +7,9 @@
 ** Input: byte 0 = geometry/size choice, then ops: 0xF0 next-byte = feed the
 ** next (byte) bytes as one slice, 0xF1 = resize, 0xF2 = ED 3 forms split at
 ** a fuzzer-chosen point, 0xF3 = clear message, 0xF4 = an agent's pause
-** toggled (its GAP record can sit in a ring with no history row, #125); any
-** other byte is fed one-by-one in runs. */
+** toggled (its GAP record can sit in a ring with no history row, #125),
+** 0xF5 next-byte = the next (byte) bytes as client input (a C's input flag,
+** a line typed ahead, #302); any other byte is fed one-by-one in runs. */
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -137,6 +138,13 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 			check();
 			dch_vt_feed((const unsigned char *)s + cut, l - cut);
 			i += 2;
+		}
+		else if (op == 0xF5 && i < n)
+		{
+			k = d[i++];
+			k = k > n - i ? n - i : k;
+			dch_vt_input_seen(d + i, k);
+			i += k;
 		}
 		else if (op == 0xF4)
 			dch_vt_capture_pause(!dch_vt_capture_paused());

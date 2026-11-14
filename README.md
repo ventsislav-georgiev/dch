@@ -1241,14 +1241,17 @@ The corpus:
   - Nothing in the Codex directory is run or written.
 - **Shell.** The chapters come from the [ring](#shell-output-ring-x-ray)'s
   OSC 133 marks: one per typed command block (`A`, `B`, then `C` with client
-  input before it and a non-blank command). A `B` or `C` inside an open
-  `C`..`D` orphans that block: it gets no chapter. Without marks there are no
-  chapters (`mentions_only: true`).
-  - Commands typed ahead in one burst (one `--send` holding three lines, a
-    pasted multi-line block) give only the first a chapter: the input all
-    arrives inside the first prompt's `B`..`C`, and a later command's `C` with
-    no client input since its own `B` is read as forged by output. Sent one at
-    a time, each gets its own.
+  input since that `B`, or a line typed ahead, and a non-blank command). A
+  `B` or `C` inside an open `C`..`D` orphans that block: it gets no chapter.
+  Without marks there are no chapters (`mentions_only: true`).
+  - A command typed ahead (sent while the one before it still runs, or one
+    `--send` holding several lines) gets its own chapter too. Its `C` has no
+    client input since its own `B`, so it counts only when the text between
+    its `B` and `C` on the screen is exactly a line the client sent that no
+    earlier block used. A line edited before its Enter (backspace, arrows,
+    tab completion) does not match and gets no chapter. A `C` with neither is
+    read as forged by output: a program that prints marks gets a chapter only
+    for a block whose text is a line the user typed, once per line.
   - Rows, and the marks on them, enter the ring only when they scroll off
     the primary screen. So the commands still on the visible screen (in a
     fresh shell or after a `clear`, up to a screen's worth) have no chapter

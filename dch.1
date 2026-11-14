@@ -1747,9 +1747,10 @@ Nothing in the Codex directory is run or written.
 An ended Codex session has no corpus.
 A shell's chapters come from its ring's OSC 133 marks: one per typed command
 block (\fBA\fR, \fBB\fR, client input, \fBC\fR, a non-blank command),
-once its rows scroll off the screen (commands still on it have none yet;
-commands typed ahead in one burst give only the first one a chapter, the
-others having had no client input inside their own B..C).
+once its rows scroll off the screen (commands still on it have none yet).
+A command typed ahead, with no client input inside its own B..C, gets one
+when the text between its B and C is exactly a line the client sent that no
+earlier block used; a line edited before its Enter gets none.
 A query also reads the current primary screen after the ring: its rows count
 as output (refs only, no chapter, no definition; their
 .B at

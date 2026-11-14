@@ -3002,7 +3002,7 @@ do_keys(struct client *p, const unsigned char *payload, unsigned int len)
 	if (the_pty.fd >= 0)
 	{
 		pty_input(bytes, nbytes);
-		dch_vt_input_seen();	/* OSC 133 B..C (§11.5) */
+		dch_vt_input_seen(bytes, nbytes);	/* §11.5, #302 */
 	}
 	dch_vt_buf_free(bytes);
 	return queue_status(p, MSG_ACK, DCH_ST_OK);
@@ -4001,7 +4001,7 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 		if (the_pty.fd >= 0)
 		{
 			push_input(p, payload, len);
-			dch_vt_input_seen();	/* OSC 133 B..C (§11.5) */
+			dch_vt_input_seen(payload, len);	/* §11.5, #302 */
 		}
 	}
 	/* the end of a dch --send (#307): did all of it go in */

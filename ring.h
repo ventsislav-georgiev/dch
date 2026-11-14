@@ -40,7 +40,8 @@ enum
 #define RING_F_EXIT  0x02	/* a D mark that carries an exit code */
 #define RING_F_TRUNC 0x04	/* text cut at the last UTF-8 boundary <= 64K */
 #define RING_F_INPUT 0x08	/* a C mark: client input reached the pty
-				** after this block's B */
+				** after this block's B, or its B..C is a line
+				** typed ahead (#302) */
 #define RING_F_ALT   0x10	/* a mark seen on the alternate screen */
 
 /* ring_read status bits */

@@ -714,8 +714,48 @@ def test_shell_init(tmp):
                   any(k == 2 and t.startswith("false") for k, t in kinds) and
                   any(k == 1 and t.startswith(("zp", "bp")) for k, t in kinds),
                   kinds[:6])
+            typed_ahead(n, sh, pr)
         finally:
             kill(n)
+
+
+def typed_ahead(n, sh, pr):
+    """#302: two lines in one write, the second typed ahead (queued before
+    its prompt's B, so no input reaches the pty inside its B..C): each gets
+    its own chapter. Then a running program that prints a whole A,B,C block
+    while a line is typed ahead: its block is no chapter (its text is not
+    the typed line), and the typed line keeps its own."""
+    send(n, "seq 1 71\nseq 1 82\n")
+    wait_for(lambda: screen(n).rstrip().endswith("\n82\n" + pr))
+    r = dch("--xray", n, "--json")
+    o = json.loads(r.stdout) if r.returncode == 0 else {}
+    t = [c["title"] for c in o.get("chapters", [])]
+    check("%s: a line typed ahead gets its own chapter (#302)" % sh,
+          t[-2:] == ["seq 1 71", "seq 1 82"], t)
+    r = dch("--xray", n, "--search", "SEQ 1 ", "--json")
+    o = json.loads(r.stdout) if r.returncode == 0 else {}
+    hs = [(h["who"], h["snippet"], h["chapter"]) for h in o.get("hits", [])]
+    cs = [c for w, s, c in hs[:2]]
+    check("%s: --search: the typed-ahead line and the one before it, newest "
+          "first, each under its own chapter (#302)" % sh,
+          [(w, s) for w, s, c in hs[:2]] ==
+          [("user", "seq 1 82"), ("user", "seq 1 71")] and
+          all(c and c[0] == "s" for c in cs) and cs[0] != cs[1], hs[:4])
+    # the forger prints its block after the line is typed ahead (it waits
+    # for the echo of it), with no input inside the forged B..C
+    send(n, "stty -echo; sleep 1; printf '\\033]133;A\\007$ \\033]133;B\\007"
+         "evil\\r\\n\\033]133;C\\007out\\r\\n\\033]133;D;0\\007'; stty echo; "
+         "seq 1 40\n")
+    time.sleep(0.3)
+    send(n, "seq 1 93\n")
+    wait_for(lambda: screen(n).rstrip().endswith("\n93\n" + pr))
+    r = dch("--xray", n, "--json")
+    o = json.loads(r.stdout) if r.returncode == 0 else {}
+    t = [c["title"] for c in o.get("chapters", [])]
+    check("%s: a block printed by a running program while a line is typed "
+          "ahead is no chapter; the typed line keeps its own (#302)" % sh,
+          "evil" not in t and t[-1:] == ["seq 1 93"] and
+          any(x.startswith("stty -echo") for x in t), t)
 
 
 def test_forged_block():
