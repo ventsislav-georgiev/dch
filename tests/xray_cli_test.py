@@ -1919,7 +1919,11 @@ def test_tasks():
                                                  "description": "soon"})),
         tk_said(ts(22), tk_use("toolu_s2", "TaskUpdate",
                                {"taskId": "1", "status": "pending"}),
-                side=True)]
+                side=True),
+        # a result whose id is no usable id: left out, counted (#344)
+        tk_said(ts(23), tk_use("toolu_n", "TaskCreate", {
+            "subject": "id 3.5", "description": ""})),
+        tk_made(ts(23), "toolu_n", 3.5)]
     with open(tp, "w") as f:
         for o in recs:
             f.write((o if isinstance(o, str) else json.dumps(o)) + "\n")
@@ -1941,7 +1945,7 @@ def test_tasks():
           h["partial"] is False, (rc, h, err))
     check("tasks: one task line per task, keys in order, then done",
           all(t and list(t) == TK_KEYS for t in tk) and
-          done == {"done": True, "count": 3, "dropped": 0}, (tk, done))
+          done == {"done": True, "count": 3, "dropped": 1}, (tk, done))
     want = [
         {"id": "1", "title": "Fix the login test", "status": "done",
          "label": "completed", "active": "Fixing the login test",

@@ -809,7 +809,8 @@ old and still current. Pair it with `state` and
 ## Config file
 
 dch runs without one. The optional config holds opt-in features: `key = value`
-lines, `#` comments, the last line for a key wins. It lives at `$DCH_CONFIG`,
+lines, `#` comments, the last line for a key wins; a line over 1023 bytes
+is read as an empty value, never cut. It lives at `$DCH_CONFIG`,
 else `$XDG_CONFIG_HOME/dch/config`, else `~/.config/dch/config`, and is read
 fresh every time it is needed, so an edit takes effect at once, also in
 running sessions.
@@ -1815,7 +1816,8 @@ the way `--ref` prints its lines, and exits 0:
   (`pending`, `in_progress`, `completed`, `deleted`); `label` is the
   source's own word. A deleted task stays, `dropped`. `title`, `active`
   (the text shown while it runs) and `note` (the description's first line)
-  are one line each, cut as chapter titles are. `created` and `updated` are
+  are one line each, cut as chapter titles are: 120 characters, and any
+  Unicode line break ends the line (U+000B and U+000C too). `created` and `updated` are
   ISO 8601 UTC from the records' timestamps, or `null`. `chapter` is the
   anchor of the chapter that last changed the task, `created_chapter` the
   one that created it; both open with `--chapter`. `blocked_by` lists ids.
@@ -1823,7 +1825,9 @@ the way `--ref` prints its lines, and exits 0:
   hold, or with an unknown status word, changes nothing.
 - **Caps.** The transcript is read as `--json` reads it (the 3.8 range):
   `partial: true` when records may be past it. The newest 50000 tasks are
-  kept; `dropped` counts the ones left out. A line is at most 64 KB. A bad
+  kept; `dropped` counts the ones left out, and the creates whose result
+  gives an id that is empty, too long, or neither text nor a whole number.
+  A line is at most 64 KB. A bad
   or oversized transcript line is skipped. No `done` line means the answer
   was cut.
 
@@ -1867,9 +1871,9 @@ per file (`"cut":true` after `body` when it was cut), then
   `chapter` is the newest such turn's `anchor` from `--json`. The
   transcript is read in `--json`'s range; `partial: true` when that range
   may have dropped records.
-- **Order and caps.** Rows touched this session first, the newest first;
-  then the other memories, newest `updated` (the file's mtime, UTC) first;
-  instruction files last, in load order. `body` is the file's text, cut at
+- **Order and caps.** Memories touched this session first, the newest
+  first; then the other memories, newest `updated` (the file's mtime, UTC)
+  first; instruction files last, in load order, touched or not. `body` is the file's text, cut at
   16 KB (and further if its line would pass 64 KB); a file over 1 MB, a
   memory file that is a symlink, or anything that is not a regular file has
   `body: null` and is never followed or read. An instruction file may be a
@@ -1898,20 +1902,28 @@ memory_command = ~/bin/my-notes
   home), stdin `/dev/null`, in its own process group. Its environment adds
   `DCH_SESSION` (the session name), `DCH_SESSION_CWD`, `DCH_AGENT`
   (`claude`, `codex` or empty), `DCH_AGENT_SESSION_ID` (the agent's
-  conversation id, or empty) and `DCH_ROWS_MAX`.
+  conversation id, or empty) and `DCH_ROWS_MAX`. A config line over 1023
+  bytes is never run cut: the built-in answer says `not a command line
+  (the config line is over 1023 bytes)`.
 - **Lines.** One JSON object per line on stdout; rows show as they arrive.
   An optional first line `{"title":"…"}` names the list (the header's
-  `title`). A row has `title` (required), `id`, `status` (`pending`,
+  `title`): a first line with `title` as its only key is always that, never
+  a row (both examples below start so), so give a first row a second key
+  such as `id`. A row has `title` (required), `id`, `status` (`pending`,
   `active`, `done`, `dropped`, or `in_progress`, `completed`, `deleted`; any
   other word is pending with the word as its `label`), `label`, `active`,
   `note`, `created`, `updated` (passed through as text: a reader treats a
   value that is not ISO 8601 as `null`), `blocked_by` (ids), `url` and
-  `group`, bare or wrapped as `{"task":{…}}`. A line that is not a JSON
+  `group`, bare or wrapped as `{"task":{…}}`. Text fields are cut as
+  chapter titles are (120 characters, the first line); `url` is kept whole.
+  `chapter` and `created_chapter` are `null`: a command's rows are not tied
+  to the transcript. A line that is not a JSON
   object, has no title or is over 64 KB is skipped; the `done` line's
   `dropped` counts those, plus the row seen past the row cap.
 - **Limits.** 5 s in all, 32 MB of output, 50000 rows (the first kept).
   Past a limit the process group is ended and the rows so far stay, so
-  print what matters first.
+  print what matters first. A program that leaves the group (`setsid`,
+  `setpgid`) is not followed and keeps running.
 - **Fallback.** At least one row: the command is the source
   (`"source":"command"`), and the header comes with the first row. No row:
   the built-in source answers exactly as without the command; a failure or
@@ -1942,8 +1954,8 @@ exec gh issue list --limit 200 --json number,title,url,updatedAt \
 `memory_command` answers `--memory` by the same rules: the same run,
 environment, limits, fallback (the built-in memory answers when it gives no
 row) and `warn`. A row has `title` (required), `id`, `note`, `kind`,
-`scope`, `updated`, `path`, `session`, `chapter` and `body` (cut at 16 KB,
-then `"cut":true`), bare or wrapped as `{"memory":{…}}`; a lone first
+`scope`, `updated`, `path`, `session` and `body` (cut at 16 KB, then
+`"cut":true`; `chapter` is `null`), bare or wrapped as `{"memory":{…}}`; a lone first
 `{"title":"…"}` line names the list. Its header has `--memory`'s keys, with
 `"source":"command"`.
 

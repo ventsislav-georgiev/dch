@@ -413,7 +413,7 @@ xm_memdir(struct xm_set *s, const char *transcript)
 
 /* dir/name when it exists and is no directory, a symlink by its target
 ** (a dangling one by itself): an instruction row under its own path, once
-** (the walk can reach the config dir again); 1 */
+** (the walk can reach the config dir again: xm_undup); 1 */
 static int
 xm_instr(struct xm_set *s, const char *dir, const char *name,
          const char *scope)
@@ -421,15 +421,11 @@ xm_instr(struct xm_set *s, const char *dir, const char *name,
 	struct xm_row *r;
 	struct stat st;
 	char p[PATH_MAX];
-	size_t k;
 
 	if (snprintf(p, sizeof p, "%s%s%s", dir, strcmp(dir, "/") ? "/" : "",
 	             name) >= (int)sizeof p ||
 	    (stat(p, &st) < 0 && lstat(p, &st) < 0) || S_ISDIR(st.st_mode))
 		return 0;
-	for (k = s->nmem; k < s->n; k++)
-		if (!strcmp(s->v[k].path, p))
-			return 1;
 	if (!(r = xm_add(s, p, strlen(p), p, scope)))
 		return 0;
 	r->instr = r->stok = 1;
@@ -441,6 +437,41 @@ static int
 xm_strcmp(const void *a, const void *b)
 {
 	return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+static int
+xm_pathord(const void *a, const void *b)
+{
+	const struct xm_row *x = *(struct xm_row *const *)a,
+	                    *y = *(struct xm_row *const *)b;
+	int c = strcmp(x->path, y->path);
+
+	return c ? c : x->ord < y->ord ? -1 : x->ord > y->ord;
+}
+
+/* each instruction path once, the first added kept, in place: n log n,
+** a rules tree can hold any number of files */
+static void
+xm_undup(struct xm_set *s)
+{
+	size_t n = s->n - s->nmem, k, j;
+	struct xm_row **p;
+
+	if (n < 2 || !(p = malloc(n * sizeof *p)))
+		return;
+	for (k = 0; k < n; k++)
+		p[k] = &s->v[s->nmem + k];
+	qsort(p, n, sizeof *p, xm_pathord);
+	for (k = 1; k < n; k++)
+		if (!strcmp(p[k]->path, p[k - 1]->path))
+			p[k]->instr = 2;	/* a repeat */
+	free(p);
+	for (j = k = s->nmem; k < s->n; k++)
+		if (s->v[k].instr == 2)
+			xm_free_row(&s->v[k]);
+		else
+			s->v[j++] = s->v[k];
+	s->n = j;
 }
 
 /* a rules directory's *.md, by name, its subdirectories 3 deep; no
@@ -582,6 +613,7 @@ xm_instrs(struct xm_set *s, const struct xm_req *q)
 		xm_instr(s, d, "AGENTS.md", "project");
 		xm_instr(s, d, ".claude/AGENTS.md", "project");
 	}
+	xm_undup(s);
 }
 
 /* ---- the transcript's tool calls ----------------------------------------- */

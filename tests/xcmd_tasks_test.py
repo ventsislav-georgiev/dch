@@ -275,6 +275,17 @@ def main():
           rc == 0 and ls and ls[0].get("warn") ==
           "tasks_command: no valid row (1 lines skipped)" and
           ls[1:] == bls[1:], out)
+    # a hand-edited line past the reader's 1023 bytes: refused, never cut
+    # and run (#344)
+    long = script("long.sh", "echo '{\"id\":1,\"title\":\"ran\"}'\n")
+    for key, what in (("tasks_command", "--tasks"),
+                      ("memory_command", "--memory")):
+        config("%s --x=%s-END" % (long, "A" * 1100), key)
+        rc, out, ls, err = tasks("xt-ended", what)
+        check("%s over 1023 bytes: no run, the built-in rows, a warn" % key,
+              rc == 0 and ls and ls[0].get("warn") == key +
+              ": not a command line (the config line is over 1023 bytes)"
+              and ls[0]["source"] != "command" and '"ran"' not in out, out)
 
     # --- rows, then the clock ----------------------------------------------
     config(script("hang.sh", "echo '{\"id\":1,\"title\":\"before the hang\"}'"

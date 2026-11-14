@@ -11456,6 +11456,7 @@ struct xr_tasks
 	** positions dropped by the cap */
 	struct tk_row *w;
 	size_t wn, wbase;
+	size_t badid;		/* creates whose result's id is unusable */
 	int last;		/* the kind used last: 1 the Task tools, 2 a list */
 	int codex;		/* the list is update_plan's */
 	uint64_t ino;
@@ -11759,6 +11760,8 @@ tk_result(struct xr_claude *d, const struct json_parser *p, int part)
 	if (!(id = task >= 0 ? tk_id(p, j_get(p, task, A_ID)) : NULL) ||
 	    !t->bucket)
 	{
+		/* an id given but empty, long or no string: left out, counted */
+		t->badid += task >= 0 && j_get(p, task, A_ID) >= 0;
 		free(id);
 		r->gone = 1;
 		return;
@@ -12052,7 +12055,8 @@ xr_tasks_print(FILE *f, const struct xr_tasks *t, const char *session,
 	if (last)
 	{
 		n = last == 1 ? t->n : t->wn;
-		dropped = last == 1 ? (size_t)(t->total - t->n) : t->wbase;
+		dropped = last == 1 ? (size_t)(t->total - t->n) + t->badid
+		                    : t->wbase;
 	}
 	for (k = 0; k < n && !ferror(f); k++)
 	{

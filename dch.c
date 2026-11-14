@@ -226,24 +226,34 @@ config_line(char *line, const char *key)
 }
 
 /* Value of `key` in the config ("key = value" lines, '#' comments, blanks
-** around both trimmed, last one wins) into out[cap]. 1 when set, else 0.
-** Read fresh on every call: the file is tiny, and an edit (by hand,
-** `dch --config`, or Prosper) takes effect on the next read. */
+** around both trimmed, last one wins) into out[cap]. 1 when set, else 0;
+** -1 when that line is over 1023 bytes or its value over cap - 1: out is
+** "", never a cut value (#344). Read fresh on every call: the file is
+** tiny, and an edit (by hand, `dch --config`, or Prosper) takes effect on
+** the next read. */
 int
 dch_config_get(const char *key, char *out, size_t cap)
 {
 	char path[1024], line[1024], *v;
-	int found = 0;
+	int found = 0, cut, c;
 	FILE *f;
 
 	if (!dch_config_path(path, sizeof(path)) || !(f = fopen(path, "r")))
 		return 0;
 	while (fgets(line, sizeof(line), f))
+	{
+		/* a line past the buffer: its rest skipped, never read as lines */
+		cut = 0;
+		if (!strchr(line, '\n') && (c = getc(f)) != EOF && c != '\n')
+			for (cut = 1; (c = getc(f)) != EOF && c != '\n';)
+				;
 		if ((v = config_line(line, key)))
 		{
-			snprintf(out, cap, "%s", v);
-			found = 1;
+			found = cut || snprintf(out, cap, "%s", v) >= (int)cap ? -1 : 1;
+			if (found < 0)
+				out[0] = '\0';
 		}
+	}
 	fclose(f);
 	return found;
 }
@@ -13380,14 +13390,18 @@ xr_cmd(enum xcmd_kind kind, const char *session, const char *sid,
 	struct xcmd_result res;
 	struct xr_tkc k = { kind, session, sid, &res, 0 };
 	char cmd[1024];
+	const char *what = kind == XCMD_TASK ? "tasks_command" : "memory_command";
+	int set;
 	/* a session cwd not known: HOME, never the querying process's (a
 	** dch serve ctl's is the peer's choice) */
 	struct xcmd_ctx c = { cmd, session, cwd[0] ? cwd : getenv("HOME"),
 	                      agent, asid };
 
 	warn[0] = '\0';
-	if (!dch_config_get(kind == XCMD_TASK ? "tasks_command"
-	                    : "memory_command", cmd, sizeof cmd) || !cmd[0])
+	if ((set = dch_config_get(what, cmd, sizeof cmd)) < 0)
+		snprintf(warn, cap, "%s: not a command line (the config line is "
+		         "over 1023 bytes)", what);
+	if (set <= 0 || !cmd[0])
 		return 0;
 	if (xcmd_rows(kind, &c, xr_tkc_row, &k, &res) == 0)
 	{

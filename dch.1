@@ -1676,8 +1676,10 @@ The transcript is read as
 .B \-\-json
 reads it
 .RB ( partial:true
-past that range); the newest 50000 tasks are kept, a line is at most
-64 KB.
+past that range); the newest 50000 tasks are kept,
+.B dropped
+counts the rest and the creates whose result gives no usable id, a line is
+at most 64 KB.
 A shell, or a session with no task record, gives
 .B source:none
 and no task lines.
@@ -1781,8 +1783,9 @@ command naming its path with a redirect or an editing verb, apply_patch),
 when one read it, else null;
 .B chapter
 the newest such turn's anchor.
-Session rows come first, newest first, then memories by mtime, newest
-first, then instruction files in load order.
+Memories touched this session come first, newest first, then the other
+memories by mtime, newest first, then instruction files in load order,
+touched or not.
 A body is cut at 16 KB; a file over 1 MB, a memory file that is a symlink
 or a non\-regular file has a null body and is never read (an instruction
 file's symlink to a regular file is read through, its path the link's);
@@ -3907,7 +3910,8 @@ else
 .I value
 lines,
 .B #
-comments, the last line for a key wins.
+comments, the last line for a key wins; a line over 1023 bytes reads as
+an empty value, never cut.
 .TP
 .B dch \-\-config
 Print the path, then every known key as
@@ -4040,13 +4044,21 @@ or empty),
 and
 .B DCH_ROWS_MAX
 added to its environment.
+A config line over 1023 bytes is never run cut: the built\-in answer
+says
+.IR "not a command line (the config line is over 1023 bytes)" .
 It prints one JSON object per line: an optional first
 .B {"title":"..."}
-line, then rows with the
+line (title its only key: always the list's name, never a row), then rows
+with the
 .B \-\-tasks
 fields
 .RB ( title
-required), bare or wrapped as
+required; text cut as chapter titles are;
+.B chapter
+and
+.B created_chapter
+null), bare or wrapped as
 .BR {"task":{...}} ;
 a line that is not an object, has no title or is over 64 KB is skipped
 and counted in the
@@ -4055,7 +4067,11 @@ line's
 .BR dropped ,
 as is the row seen past the row cap.
 Limits: 5 s, 32 MB of output, 50000 rows; past one the process group is
-ended and the rows so far stay.
+ended and the rows so far stay (a program that left the group with
+.BR setsid ()
+or
+.BR setpgid ()
+is not followed).
 At least one row:
 .B source:command
 and the rows as they arrive; a stop or a non\-zero exit after them puts
@@ -4087,7 +4103,9 @@ fields
 required;
 .B body
 cut at 16 KB, then
-.BR cut:true ),
+.BR cut:true ;
+.B chapter
+null),
 bare or wrapped as
 .BR {"memory":{...}} ;
 the header has
