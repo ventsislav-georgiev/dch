@@ -657,7 +657,8 @@ def test_refs():
         v.key(b"\033", 0.5)
         mark = len(v.out)
         v.resize(30, 60)
-        v.pump(1.0)
+        v.wait(b"#diff-0123456789abcdef", start=mark)
+        v.pump(0.3)
         scr = rows(v.out[mark:])
         text = "\n".join(scr[k] for k in sorted(scr))
         check("Refs, 60 columns: a long URL keeps its host and its end",
@@ -2876,10 +2877,15 @@ def test_tabbar():
             check("tab bar at %d columns: every tab selected in turn, no word "
                   "cut, the selected one shown (NIT-V9)" % w,
                   all(bar_ok(b, t, w) for t, b in bars), bars)
+            mark = len(v.out)
             v.key(b"\t", 0.4)  # back to Prompts
+            # its 24-column bar must land before the next mark: a late one
+            # would be taken for a tab drawn at 20 columns
+            until(lambda: (v.pump(0.1), rows(v.out[mark:]).get(2, ""))[1], 10)
         mark = len(v.out)
         v.resize(24, 20)
-        v.pump(0.5)
+        until(lambda: (v.pump(0.1), "too small" in screen(v, mark))[1], 10)
+        v.pump(0.3)  # the rest of that redraw
         text = screen(v, mark)
         check("tab bar at 20 columns: the view says it is too small, no tab "
               "drawn", "too small" in text and "[" not in text and
