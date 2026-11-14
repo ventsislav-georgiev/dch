@@ -84,6 +84,8 @@ def gone(pid, within=3.0):
                 os.kill(pid, 0)
             except ProcessLookupError:
                 return True
+        except PermissionError:
+            pass  # macOS answers EPERM for a group of only zombies until they are reaped
         time.sleep(0.05)
     return False
 
