@@ -1562,8 +1562,10 @@ ref (`dch: not a ref`), relative paths against the session's cwd.
   its first whole line on, by a decoder that starts there with the cwd the
   full read has there (a mention in the turn the window starts in has
   `chapter: null`, unless the window starts the file, since a prompt there
-  may continue an older turn; a tool result whose call is in an older window
-  gives no definition). A window whose raw bytes cannot hold the ref is not
+  may continue an older turn; so does one in a turn the window saw begin
+  only after a subagent's first record there or a tool result whose call is
+  in an older window, which the full read may not count as steps; such a
+  tool result gives no definition). A window whose raw bytes cannot hold the ref is not
   decoded (its bytes and long lines still count), so a ref only in old turns
   is found inside the budget too. Its lines come newest window first, in
   file order within a window, and the file's `mention` lines are its newest

@@ -1201,7 +1201,9 @@ end, each by a decoder that starts there (with the cwd the full read has
 there; a window whose raw bytes cannot hold the ref is not decoded), so a
 ref of the last turns is
 found inside the budget: lines come newest window first, and a mention
-in the turn its window starts in (unless the window starts the file) has
+in the turn its window starts in (unless the window starts the file), or
+in a turn the window saw begin only after a subagent's first record there
+or a tool result whose call is older, has
 .BR chapter:null ),
 .B \-\-full
 to read it all up to 64 files

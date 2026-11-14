@@ -1,0 +1,15 @@
+	{"type":"user","message":{"role":"user","content":"start"}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"b1","name":"Bash","input":{"command":"gh issue view 12"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"b1","content":"x"}]},"toolUseResult":{"stdout":"{\"id\":","stderr":"\"12\",\"title\":\"Fix it\"}","interrupted":false}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"filler words here and there 0"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"filler words here and there 1"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"filler words here and there 2"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"filler words here and there 3"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"filler words here and there 4"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"filler words here and there 5"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"filler words here and there 6"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"filler words here and there 7"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"filler words here and there 8"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"filler words here and there 9"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"filler words here and there 10"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"filler words here and there 11"}]}}

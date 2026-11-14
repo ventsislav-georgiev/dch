@@ -4808,6 +4808,7 @@ main_block(struct xr_claude *d, int b, const char *kind, const char *title)
 	{
 		if (!(x = ch_push(&d->ch)))
 			return;
+		x->guess = d->turn && !d->sure;
 		d->turn = 1;
 		d->lead = 1;
 		d->titled = 0;
@@ -5355,9 +5356,10 @@ ch_anchor(struct xr_claude *d, char out[48])
 	/* #299: a blind window's later chapters were opened by a prompt after a
 	** step of its own, as the full decode opens them; its first is null
 	** (also at the tail range's first line: the full decode reads on from
-	** the head there). Residual: a sidechain block of a thread an older
-	** window saw is a step here and none there (side_block). */
-	if (x && (!d->blind || d->ch.total > 1))
+	** the head there). A sidechain block of a thread an older window saw
+	** is a step here and none there (side_block): a chapter only such steps
+	** opened is null too (#326), but to --chapter's seek (#300's guess). */
+	if (x && (!d->blind || (d->ch.total > 1 && (d->want || !x->guess))))
 		snprintf(out, 48, "f%llx:%llu", (unsigned long long)d->ino,
 		         (unsigned long long)x->offset);
 }
@@ -7151,22 +7153,38 @@ pf_back(const char *s, size_t p)
 }
 
 /* N as an id value: back to a ':' after a word ending in id, number or
-** key, any case (D2's A_IDF, D4's number:/id: lines) */
+** key, any case (D2's A_IDF, D4's number:/id: lines). Or N at the start of
+** a JSON string, after blanks, a quote and a ':' of its own (#326): D2
+** reads a tool_result's parts, or stdout and stderr, joined, so the
+** '{"number":' before it may end the string before. */
 static int
 pf_num(const char *s, size_t n, const char *num)
 {
 	static const char *const w[] = { "id", "number", "key" };
-	size_t l = strlen(num), p, k, i = 0;
+	size_t l = strlen(num), p, c, k, i = 0;
 	const char *m;
 
 	while ((m = pf_find(s, n, i, num, l, 0, 0)))
 	{
 		i = (size_t)(m - s) + 1;
 		if ((p = pf_back(s, (size_t)(m - s))) && s[p - 1] == ':')
-			for (p = pf_back(s, p - 1), k = 0; k < 3; k++)
-				if (p >= strlen(w[k]) &&
-				    !strncasecmp(s + p - strlen(w[k]), w[k], strlen(w[k])))
+			for (c = pf_back(s, p - 1), k = 0; k < 3; k++)
+				if (c >= strlen(w[k]) &&
+				    !strncasecmp(s + c - strlen(w[k]), w[k], strlen(w[k])))
 					return 1;
+		/* the value ends at N: ',' '}' ']', a blank, an escape, the
+		** string's end or the window's */
+		if (i - 1 + l < n && !strchr(",}] \t\\\"", s[i - 1 + l]))
+			continue;
+		/* the colon's value a string that N begins */
+		for (k = 0; k < 2 && p && s[p - 1] == ':';
+		     k++, p = pf_back(s, p - 1))
+		{
+			for (c = p; s[c] == ' ' || s[c] == '\t'; c++)
+				;
+			if (s[c] == '"')
+				return 1;
+		}
 	}
 	return 0;
 }
@@ -11044,14 +11062,15 @@ sr_chapters(struct xr_search *s, const struct sr_win *w)
 		/* #299: a newer window's first chapter, a prompt's, stands when this
 		** window ends past a step; after a prompt the full decode merged it
 		** into this window's last chapter; else (no main block, or images
-		** only) it is not known */
+		** only, or past steps only this decoder may take, #326) it is
+		** not known */
 		if (h->pend == 2 && e->turn)
 		{
 			h->pend = 0;
-			if (!e->lead)
+			if (!e->lead && e->sure)
 				continue;
 			h->chapter[0] = '\0';
-			if (!e->titled)
+			if (!e->titled || !e->lead)
 				continue;
 			h->pend = 1;
 		}
@@ -11065,7 +11084,11 @@ sr_chapters(struct xr_search *s, const struct sr_win *w)
 		/* i: c's index now, so 0 is the window's first chapter */
 		if (c && sr_region(s, c->offset) != sr_region(s, h->off))
 			c = NULL;
-		if (h->pend == 1 && c && (i || !wa))
+		/* #326: begun after steps only this decoder may take: the full
+		** decode may have merged it into the one before */
+		if (h->pend == 1 && c && i && wa && c->guess)
+			h->pend = 0, h->chapter[0] = '\0';
+		else if (h->pend == 1 && c && (i || !wa))
 		{
 			snprintf(h->chapter, sizeof h->chapter, "%s", c->anchor);
 			h->pend = 0;

@@ -60,6 +60,11 @@ struct xr_chapter
 	const char *kind;		/* "prompt", "command", "compact" */
 	int partial, error;
 	int harness;			/* "auto": the prompt is harness text (#192) */
+	int guess;			/* #326: opened by a prompt after steps
+					** only a decoder that starts mid-file
+					** may take (a thread's first block, a
+					** result whose call is older): the full
+					** decode may have merged it */
 	char *summary;			/* its <summary>, else <event>: "" for none
 					** (never NULL from the engine); held out of
 					** line so the ring costs no more (3.8) */
