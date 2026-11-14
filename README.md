@@ -2158,7 +2158,7 @@ later does nothing to a running session.
 | `DCH_FOLLOW_MS` | `--follow` | `150` | Least time between two frames, `20`–`10000` ms ([Following a screen](#following-a-screen---follow)). |
 | `DCH_NO_HISTORY` | master | unset | Anything but empty or `0`: no history record ([Bringing sessions back](#bringing-sessions-back)). |
 | `DCH_NO_REMOTE` | `dch -l`, `-a`, `--remote` | unset | Anything but empty or `0`: no [remote hosts](#remote-hosts) in the picker, `-a` or `--remote` (`--hosts` still applies). |
-| `DCH_REMOTE_BOX_MS` | `--remote`, a picker opening empty | `300` | The time box for probing every remote host in the foreground, max `60000`, for a slow link. |
+| `DCH_REMOTE_BOX_MS` | `--remote`, a picker opening empty | `300` | The time box for probing every remote host in the foreground, max `60000`, for a slow link. Over 2 s, it is also a `--ls-json --remote --follow` dial's limit for its answer. |
 | `DCH_RECORD_MS` | master | `60000` | How often the history record is refreshed. |
 | `DCH_HEAL_MS` | master | `3600000` | The [self-heal](#socket-loss-and-self-heal) interval. |
 | `DCH_HOLD_MS`, `DCH_RESPAWN_TTL_MS` | master | `120000`, `300000` | How long a held session waits, and an unused `--respawn` arm lives ([Verbs](#verbs)). |
@@ -3180,7 +3180,8 @@ it was writing then may be cut short, and nothing comes after it.
   stream (`busy`) and polls that host every 2 s instead, its rows fresh.
 - *Any other host* is probed again every 2 s, as the picker does, and the
   local rows are read again on the same tick.
-- *A host that fails* (no answer within 2 s, a dropped link, a stream that
+- *A host that fails* (no answer within 2 s, or within `DCH_REMOTE_BOX_MS`
+  when that is longer, a dropped link, a stream that
   says nothing for 35 s where the spec's heartbeat is 25 s, a frame that is
   over 1 MiB, not a list or a refusal) keeps its rows as `--ls-json
   --remote` would show them: `"stale":true` for two minutes after it last

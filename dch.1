@@ -3694,7 +3694,9 @@ refused the stream (busy) and polls that host every 2 s instead.
 Arrays come at most one per 200 ms; faster changes fold into the next.
 SIGINT and SIGTERM end it with 0 even while its reader has stopped reading;
 the line it was writing then may be cut short, and nothing follows it.
-A host that fails (no answer within 2 s, a dropped link, a stream silent for 35 s, a frame over 1 MiB,
+A host that fails (no answer within 2 s, or within
+.B DCH_REMOTE_BOX_MS
+when that is longer, a dropped link, a stream silent for 35 s, a frame over 1 MiB,
 not a list, or a 0x13) shows its rows stale for 2 minutes after it last
 answered, as above, and is dialled again after 2 s, doubling up to 32 s; a
 refusal (a 0x13 with a code) is said once and shows none, and any other
@@ -4168,6 +4170,9 @@ history record for it.
 .B DCH_REMOTE_BOX_MS
 The time box, in ms, for probing every remote host in the foreground
 (default 300, max 60000), for a slow link.
+Over 2 s, it is also a
+.B \-\-ls\-json \-\-remote \-\-follow
+dial's limit for its answer.
 .TP
 .B DCH_NO_REMOTE
 Empty or 0 is off; anything else lists and discovers no remote hosts in
