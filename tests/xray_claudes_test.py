@@ -15,7 +15,12 @@ records (procStart verified) under a temp HOME, never ~/.claude:
            reason "lite" stands, the count is still there).
 A plain shell with no agent has no "claudes". nc-fl (QA 1.61.0 LOW-X16):
 an open view and `--xray --follow --json` follow the count when one of two
-Claudes exits. Each checked locally on the
+Claudes exits. nc-up (#314, QA 1.63.0 LOW-X21): an open view and --follow
+on one Claude's transcript when a second Claude starts below a subshell
+(deeper, so the master's agent pid stays the first's and only the count
+changes): they keep the first's transcript and say "2 Claude sessions";
+when the second exits, the count goes.
+Each checked locally on the
 host, then from a client over a real `dch serve` on 127.0.0.1
 (DCH_SERVE_TEST_LOOPBACK=1, --port 0, a fake `tailscale` for whois), as
 `dch --xray srv:<name> --json` and the view of srv:<name>: the host's answer
@@ -300,12 +305,96 @@ def follow():
         fl.close()
 
 
+def snapobjs(buf):
+    """Each --follow snapshot in buf."""
+    out = []
+    for ln in buf.decode(errors="replace").splitlines():
+        try:
+            o = json.loads(ln)
+        except ValueError:
+            continue
+        if "snapshot" in o:
+            out.append(o["snapshot"])
+    return out
+
+
+def up():
+    """#314: 1 -> 2 Claudes under a follow of the first one's transcript."""
+    a, b = ("%08d-2563-4000-8000-000000000000" % i for i in range(2))
+    sess = os.path.join(SENV["HOME"], ".claude", "sessions")
+    pdir = os.path.join(SENV["HOME"], ".claude", "projects", "-nc-up")
+    os.makedirs(pdir)
+    with open(os.path.join(pdir, a + ".jsonl"), "w") as f:
+        f.write(json.dumps({"type": "user", "message": {
+            "role": "user", "content": "nc-up first prompt"},
+            "timestamp": "2026-11-14T10:00:00.000Z", "cwd": T}) + "\n")
+    fifo = os.path.join(T, "nc-up.fifo")
+    os.mkfifo(fifo)
+    dch(SENV, "--spawn", "nc-up", "/bin/sh", "-c",
+        "/bin/sleep 300 & read x < %s; /bin/sh -c '/bin/sleep 300; :' & "
+        "wait" % fifo)
+    sh = until(lambda: child(SENV, "nc-up"))
+    one = kids(sh, 1) if sh else None
+    if not one:
+        check("nc-up: one Claude recorded", False, (sh, one))
+        return
+    record(int(one[0]), a, sess)
+    o = until(lambda: (lambda o: o if o.get("session_id") == a else None)(
+        answer(SENV, "nc-up")))
+    check("nc-up: one Claude: its transcript, no claudes",
+          o and o.get("corpus") == "claude" and "claudes" not in o, o)
+    fl = Pty([DCH, "--xray", "nc-up", "--follow", "--json"], SENV)
+    v = Pty([DCH, "--xray", "nc-up"], SENV)
+    try:
+        fl.wait(b"\n")
+        v.wait(b"nc-up first prompt")
+        with open(fifo, "w") as f:
+            f.write("\n")
+        two = kids(sh, 2)
+        sub = [k for k in two or [] if k != one[0]]
+        new = kids(int(sub[0]), 1) if sub else None
+        if new:
+            record(int(new[0]), b, sess)
+        k, n = len(v.out), len(fl.out)
+        end = time.time() + 10
+        while time.time() < end and not (
+                [x for x in snapobjs(fl.out[n:]) if x.get("claudes") == 2]
+                and TWO in v.out[k:]):
+            fl.pump(0.1)
+            v.pump(0.1)
+        s2 = snapobjs(fl.out[n:])
+        check("nc-up: a second starts: --follow resets to a snapshot of the "
+              "same transcript with claudes 2", new and s2 and
+              s2[-1].get("session_id") == a and
+              s2[-1].get("corpus") == "claude" and
+              s2[-1].get("claudes") == 2, fl.out[n:][-400:])
+        check("nc-up: a second starts: the view says %r" % TWO.decode(),
+              TWO in v.out[k:], v.out[k:][-400:])
+        if not new:
+            return
+        os.kill(int(new[0]), signal.SIGTERM)
+        n = len(fl.out)
+        end = time.time() + 10
+        while time.time() < end and not snapobjs(fl.out[n:]):
+            fl.pump(0.1)
+            v.pump(0.1)
+        s1 = snapobjs(fl.out[n:])
+        check("nc-up: it exits: a snapshot of the same transcript, no "
+              "claudes", s1 and s1[-1].get("session_id") == a and
+              s1[-1].get("corpus") == "claude" and
+              "claudes" not in s1[-1], fl.out[n:][-400:])
+    finally:
+        v.close()
+        fl.close()
+
+
 def main():
     sp = None
     try:
         sessions()
         checks(SENV, "", "local")
         follow()
+        up()
         sp, port = serve()
         check("dch serve listens on a loopback test port", port is not None,
               open(SLOG).read())
@@ -314,7 +403,7 @@ def main():
                 f.write("remote_hosts = srv=127.0.0.1:%d\n" % port)
             checks(CENV, "srv:", "remote")
     finally:
-        for n in ("nc-sh", "nc-two", "nc-none", "nc-fl"):
+        for n in ("nc-sh", "nc-two", "nc-none", "nc-fl", "nc-up"):
             dch(SENV, "-k", n)
         if sp:
             sp.terminate()

@@ -388,6 +388,7 @@ struct dch_agent
 	char rec[1400];		/* its Claude session record's path */
 	char cfg[1400];		/* its config dir, "" = our ~/.claude (#065) */
 	char **launch;		/* malloc'd block, NULL-terminated; may be NULL */
+	int n;			/* the live Claudes under the child (#314) */
 };
 int dch_history_dir(char *out, size_t outsz, const char *sockdir,
                     int create);

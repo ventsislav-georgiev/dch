@@ -1303,6 +1303,8 @@ The corpus:
     live Claude Code sessions dch found under the session. X-ray reads one:
     `2` or more means several unrelated ones run there; `0` means it found
     none (its record is out of this process's `HOME` or `CLAUDE_CONFIG_DIR`).
+    Also in a `--follow` snapshot of one Claude's transcript while other
+    Claudes run beside it (`2` or more): the follow keeps that transcript.
     Readers that do not know the field can ignore it.
 
 ```json
@@ -1764,7 +1766,10 @@ Nothing runs on a timer:
   screen changes (an alternate-screen switch included).
 
 An agent starting or ending in a followed session sends `reset` `rotated`
-within 2 s, with the ring on or with `xray_ring = 0`. While a follower holds
+within 2 s, with the ring on or with `xray_ring = 0`. So does a second Claude
+starting or ending beside the one a follow reads: the follow keeps that
+Claude's transcript, and the new snapshot says `claudes` (the view: `2 Claude
+sessions run here; X-ray reads one`). While a follower holds
 one of the master's 4 subscriber slots, the master looks for the agent once a
 second; with no follower it does not. A Claude Code follower past the 4 slots
 is not told when its agent exits.
@@ -2227,8 +2232,9 @@ skipped — claude <id> already runs in live session <s> (record <file>)`) and
 refused by name, `--as` or not (`live_sid`, exit 1). Live ids come from each
 live session's own probe (its Claude process and that Claude's session
 record, as `--say` finds it; a Claude that has not written that record yet,
-in its first seconds, by the `--resume <id>`, `--resume=<id>` or `-r <id>`
-on its command line, typed into the session's shell or not), not from the
+in its first seconds, by the `--resume <id>`, `--resume=<id>`, `-r <id>` or
+`-r<id>` on its command line, typed into the session's shell or not, each
+such Claude in the session), not from the
 session's history record, which
 lags up to `DCH_RECORD_MS` behind; then from Claude's sessions dir, and the
 sessions dir of each record's `config_dir`, for a Claude running outside any

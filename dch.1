@@ -1060,7 +1060,9 @@ or
 while a shell's ring is paused for an agent, also
 .BR claudes ,
 the live Claude Code sessions found under it: 2 or more when several run
-there, 0 when none was found)
+there, 0 when none was found; also in a
+.B \-\-follow
+snapshot of one Claude's transcript while others run beside it)
 and its chapters, one per prompt, oldest first, at most 5000.
 A chapter is one prompt (in a shell, one command) with what followed it,
 up to the next; the view lists them on its Prompts (Commands) tab.
@@ -1909,7 +1911,10 @@ An agent starting or ending in a followed session sends
 .B reset
 .B rotated
 within 2 s, ring on or
-.BR "xray_ring = 0" :
+.BR "xray_ring = 0" ;
+so does a second Claude starting or ending beside the one followed, whose
+transcript the follow keeps, its snapshot saying
+.BR claudes :
 while a follower holds one of the master's 4 subscriber slots, the master
 looks for the agent once a second; with no follower it does not.
 A Claude Code follower past the 4 slots is not told when its agent exits.

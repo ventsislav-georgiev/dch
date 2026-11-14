@@ -5879,6 +5879,8 @@ struct crec_scan
 	int all;		/* every live record under root */
 	long pid[16];		/* the first 16 of them */
 	struct crec best;	/* the shallowest of them */
+	const char *want;	/* held: one of them runs this id (#314) */
+	int held;
 };
 
 static long
@@ -6022,6 +6024,8 @@ crec_visit(const char *path, const char *body, size_t len, void *arg)
 	     strcmp(start, actual)))
 		return 0;
 	snprintf(c.rec, sizeof c.rec, "%s", path);
+	if (cs->want && !strcmp(c.sid, cs->want))
+		cs->held = 1;
 	if (cs->all < 16)
 		cs->pid[cs->all] = c.pid;
 	if (cs->all++ == 0 || c.depth < cs->best.depth)
@@ -6122,9 +6126,10 @@ claude_dirs(long root, char (*dirs)[1100], int nd, int max)
 }
 
 /* Live Claudes at or below `root`, those below another counted as it (see
-** crec_visit); *best = the shallowest. */
+** crec_visit); *best = the shallowest; *held: one of them runs sid. */
 static int
-claude_find(long root, int verify, struct crec *best)
+claude_find_sid(long root, int verify, const char *sid, struct crec *best,
+                int *held)
 {
 	struct crec_scan cs;
 	char dirs[8][1100];
@@ -6133,10 +6138,20 @@ claude_find(long root, int verify, struct crec *best)
 	memset(&cs, 0, sizeof cs);
 	cs.root = root;
 	cs.verify = verify;
+	cs.want = sid;
 	for (i = 0; i < nd; i++)
 		(void)visit_records_in(dirs[i], crec_visit, &cs);
 	*best = cs.best;
+	*held = cs.held;
 	return cs.n;
+}
+
+static int
+claude_find(long root, int verify, struct crec *best)
+{
+	int held;
+
+	return claude_find_sid(root, verify, NULL, best, &held);
 }
 
 /* --ls-json's Claude join (#079): one crec_scan per row, each record read
@@ -6380,7 +6395,7 @@ dch_agent_probe(long child, struct dch_agent *a)
 	memset(a, 0, sizeof *a);
 	/* no sid: its record caught mid-rewrite, the caller keeps what it
 	** had (#274) */
-	if (child <= 0 || claude_find(child, 1, &r) == 0 || !r.sid[0])
+	if (child <= 0 || (a->n = claude_find(child, 1, &r)) == 0 || !r.sid[0])
 		return -1;
 	for (p = r.pid; p != child && (pp = proc_ppid(p)) > 1 && pp != child;
 	     p = pp)
@@ -10938,19 +10953,25 @@ sid_visit(const char *path, const char *body, size_t len, void *arg)
 	return 0;
 }
 
-/* The conversation a Claude at or below `root` was started on, read from
-** its live argv (`--resume <id>`, `--resume=<id>`, `-r <id>`, the last one;
-** none with --fork-session, which writes a new id): until that Claude
-** writes its sessions record, the only sign of its id (#281). The kernel's
-** argv, not the master's MSG_CMD one, which outlives the child while held
-** and is the shell for a claude typed into it: a Claude that exited is out
-** of the tree and holds nothing. 0 and *sid, or -1. */
-static int
-claude_argv_sid(long root, char *sid, size_t sidsz)
+/* The conversation each Claude at or below `root` was started on, read
+** from its live argv (`--resume <id>`, `--resume=<id>`, `-r <id>`,
+** `-r<id>`, the last one; none with --fork-session, which writes a new id):
+** until that Claude writes its sessions record, the only sign of its id
+** (#281), so one with a record is skipped (a /resume switch moves it off
+** the argv; an empty record, #274, or one older than the process, a reused
+** pid's, is none). Every such Claude, not the first: a second one starting
+** beside a recorded one (#314). The kernel's argv, not the master's MSG_CMD
+** one, which outlives the child while held and is the shell for a claude
+** typed into it: a Claude that exited is out of the tree and holds nothing.
+** Each id goes to s as held by live session sn. */
+static void
+claude_argv_sid(long root, struct sidset *s, const char *sn)
 {
 	long tree[64];
 	int n = proc_tree(root, tree, 64), i, k, argc;
-	char **v;
+	char **v, rp[1100];
+	struct stat st;
+	time_t t;
 
 	for (i = 0; i < n; i++)
 	{
@@ -10970,15 +10991,16 @@ claude_argv_sid(long root, char *sid, size_t sidsz)
 			else if (!strncmp(v[k], "--resume=", 9) &&
 			         xr_uuid_shaped(v[k] + 9))
 				id = v[k] + 9;
-		if (id && (k == argc || strcmp(v[k], "--fork-session")))
-		{
-			snprintf(sid, sidsz, "%s", id);
-			free(v);
-			return 0;
-		}
+			else if (!strncmp(v[k], "-r", 2) && xr_uuid_shaped(v[k] + 2))
+				id = v[k] + 2;	/* commander's attached value */
+		if (id && (k == argc || strcmp(v[k], "--fork-session")) &&
+		    !(claude_sessions_dir(tree[i], rp, sizeof rp - 32) == 0 &&
+		      snprintf(rp + strlen(rp), 32, "/%ld.json", tree[i]) > 0 &&
+		      stat(rp, &st) == 0 && st.st_size > 0 &&
+		      (t = proc_started(tree[i])) >= 0 && t <= st.st_mtime + 2))
+			sid_add(s, id, 0, "live session %s", sn);
 		free(v);
 	}
-	return -1;
 }
 
 static void
@@ -10998,13 +11020,12 @@ sid_live(struct sidset *s, const struct hrec *r, int n)
 		session_sock_path(sl.v[k], sp, sizeof sp);
 		if (cmd_query(sp, &ci) != 0)
 			continue;
-		/* a record wins (a /resume switch moves it off the argv); none
-		** yet, or an empty one (#274): the id the Claude started on */
+		/* the shallowest Claude's record, and the id each Claude with
+		** none yet started on */
 		if (ci.pid > 0 && claude_find(ci.pid, 1, &c) > 0 && c.sid[0])
 			sid_add(s, c.sid, 0, "live session %s", sl.v[k]);
-		else if (ci.pid > 0 &&
-		         claude_argv_sid(ci.pid, c.sid, sizeof c.sid) == 0)
-			sid_add(s, c.sid, 0, "live session %s", sl.v[k]);
+		if (ci.pid > 0)
+			claude_argv_sid(ci.pid, s, sl.v[k]);
 		cmd_info_free(&ci);
 	}
 	slist_free(&sl);
@@ -13604,6 +13625,7 @@ struct xf_cl
 	const struct xr_cx *cx;		/* a Codex rollout (7.4), else NULL */
 	char watch[2048];		/* Codex, no rollout yet: the dir watched */
 	const char *rec;		/* a Claude's session record, else NULL */
+	int claudes;			/* the live Claudes it runs among (#314) */
 };
 
 static int
@@ -13652,6 +13674,9 @@ xf_cl_answer(const struct xr_target *t, struct xf_cl *s, struct xr_answer *a)
 	a->project = s->project;
 	a->project_label = s->label;
 	a->other_projects = xf_others(s->sid, s->project);
+	/* one of several followed on: the count, as a paused ring says it */
+	a->agent = s->claudes > 1;
+	a->claudes = s->claudes;
 	if (!s->d)
 		return;
 	if ((!s->cx || !s->label[0]) && xr_claude_cwd(s->d)[0])
@@ -13703,13 +13728,13 @@ xf_cl_dir(const struct xf_cl *s, char *dir, size_t dirsz)
 }
 
 static int
-xf_cl_same(const struct xr_target *t, const struct xf_cl *s)
+xf_cl_same(const struct xr_target *t, struct xf_cl *s)
 {
 	struct cmd_info ci;
 	struct crec c;
 	struct stat st;
 	char path[2048], project[1200];
-	int qc = cmd_query(t->sock, &ci), same;
+	int qc = cmd_query(t->sock, &ci), same, held = 0;
 
 	struct xr_cx x;
 
@@ -13721,7 +13746,14 @@ xf_cl_same(const struct xr_target *t, const struct xf_cl *s)
 		       xr_live_codex(&ci, &x) != 0 && !strcmp(x.tid, s->sid) &&
 		       !strcmp(x.home, s->cx->home);
 	else
-		same = qc == 0 && xr_live_claude(&ci, &c) && !strcmp(c.sid, s->sid);
+	{
+		/* ours still among several: followed on, s->claudes says how
+		** many (#314); one: the one xr_live_claude takes */
+		s->claudes = qc == 0 && ci.pid > 0 && strcmp(ci.state, "held")
+		             ? claude_find_sid(ci.pid, 1, s->sid, &c, &held) : 0;
+		same = s->claudes == 1 ? !strcmp(c.sid, s->sid)
+		       : s->claudes > 1 && held;
+	}
 	if (qc == 0)
 		cmd_info_free(&ci);
 	/* our record truncated and not yet written (Claude Code rewrites it in
@@ -13801,6 +13833,7 @@ xf_claude(struct xf *f, const struct crec *c, const struct xr_cx *x,
 	snprintf(s.sid, sizeof s.sid, "%s", c->sid);
 	snprintf(s.label, sizeof s.label, "%s", c->cwd[0] ? c->cwd : label);
 	s.rec = c->rec;
+	s.claudes = 1;
 	xr_crec_cfg(c, s.cfg, sizeof s.cfg);
 	if (!s.cfg[0] && (h = getenv("HOME")))
 		snprintf(s.cfg, sizeof s.cfg, "%s/.claude", h);
@@ -13911,6 +13944,8 @@ read:
 		}
 		if (ev & XE_ROT)
 		{
+			int was = s.claudes;
+
 			if ((r = xf_cl_same(t, &s)) < 0)
 				break;
 			if (r)
@@ -13918,6 +13953,17 @@ read:
 				f->why = "rotated";
 				rc = XF_RESET;
 				break;
+			}
+			/* a second Claude came or one of several left (the master
+			** wakes us on its count, #314): said, the transcript kept */
+			if (s.claudes != was)
+			{
+				xf_cl_answer(t, &s, &a);
+				if (xf_snapshot(f, &a, "rotated"))
+				{
+					rc = f->rc;
+					break;
+				}
 			}
 		}
 		if ((ev & XE_FILE) && s.fd >= 0)

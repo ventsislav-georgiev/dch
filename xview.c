@@ -1537,7 +1537,8 @@ xv_label(const struct xv *v, char *b, size_t n)
 	const char *c = v->corpus, *r = v->reason, *d = xv_dot();
 
 	b[0] = '\0';
-	if (!v->have || !strcmp(c, "claude"))
+	/* a Claude followed on while others run: the count (#314) */
+	if (!v->have || (!strcmp(c, "claude") && v->claudes < 2))
 		return;
 	if (!strcmp(c, "codex"))
 		snprintf(b, n, "Codex%smentions only", d);
@@ -1561,7 +1562,7 @@ xv_label(const struct xv *v, char *b, size_t n)
 	else if (!strcmp(c, "screen"))
 		snprintf(b, n, "Screen%slast %lld lines%smentions only", d,
 		         v->lines > 0 ? v->lines : 0, d);
-	else if (!strcmp(c, "none"))
+	else if (!strcmp(c, "none") || !strcmp(c, "claude"))
 	{
 		/* several Claudes: so with the ring off too, a Claude's corpus
 		** is never the ring (#256) */

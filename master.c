@@ -159,6 +159,7 @@ static struct dch_ring xring;
 static char xsid[18];
 static int n_xsubs;		/* subscribed clients, <= DCH_RING_SUBS */
 static pid_t xagent;		/* the agent pid capture is paused for */
+static int xclaudes;		/* the Claudes counted with it (#314) */
 /* While a follower is subscribed, the agent probe's interval (MED-2 QA
 ** 1.52.0): its start or exit reaches --follow in about a second, not on
 ** the record tick. No follower, no probe. */
@@ -172,7 +173,7 @@ static struct timespec xagent_at;	/* last probe */
 static unsigned long xagent_gen;	/* the mirror's gen at the last probe */
 static struct rlimit core_orig;	/* RLIMIT_CORE before core_off() */
 static int core_saved;
-static void xray_agent(pid_t agent);
+static void xray_agent(pid_t agent, int n);
 /* DCH_NO_REPLAY=1: don't repaint an attaching client from the mirror. Escape
 ** hatch for a program whose own WINCH repaint is enough and that dislikes
 ** seeing its screen handed back to it. Resolved once at master start. */
@@ -661,6 +662,7 @@ rec_probe(void)
 {
 	struct dch_agent a;
 	int stopped = rec_stopped() > 0;
+	pid_t ag;
 
 	if (!stopped && the_pty.fd >= 0 &&
 	    dch_agent_probe(the_pty.pid, &a) == 0)
@@ -678,9 +680,10 @@ rec_probe(void)
 	}
 	/* a stopped or gone agent no longer holds the ring's pause; a Codex
 	** holds it too (its corpus is its rollout: X-ray 7.4) */
-	xray_agent(stopped || the_pty.fd < 0 ? 0
-	           : rec_ag.pid > 0 && kill(rec_ag.pid, 0) == 0 ? rec_ag.pid
-	           : (pid_t)dch_codex_below(the_pty.pid));
+	ag = stopped || the_pty.fd < 0 ? 0
+	     : rec_ag.pid > 0 && kill(rec_ag.pid, 0) == 0 ? rec_ag.pid
+	     : (pid_t)dch_codex_below(the_pty.pid);
+	xray_agent(ag, ag && ag == rec_ag.pid ? rec_ag.n : 0);
 	return stopped;
 }
 
@@ -2176,14 +2179,15 @@ core_off(void)
 ** on the history record's refresh tick, every XRAY_AGENT_MS while a
 ** follower is subscribed and before an X-ray read (xray_probe). Ring or no
 ** ring, a change wakes the followers: theirs is a reset (with the ring off,
-** S_PAUSED still says an agent runs).
+** S_PAUSED still says an agent runs). So does a change of n, the Claudes
+** under the child: a second one leaves the agent pid as it was (#314).
 ** shortcut: agent output before the first probe after its start (rec_ms,
 ** 60 s, with no follower and no read) is captured; hook dch_agent_probe
 ** into the pty batch if it matters. */
 static void
-xray_agent(pid_t agent)
+xray_agent(pid_t agent, int n)
 {
-	if (agent != xagent)
+	if (agent != xagent || n != xclaudes)
 		ring_touch(&xring);
 	if (agent && agent != xagent)
 	{
@@ -2196,6 +2200,7 @@ xray_agent(pid_t agent)
 		dch_trace("xray: agent gone, resumed");
 	}
 	xagent = agent;
+	xclaudes = n;
 }
 
 /* What a screen follower's answer reads besides the ring (#140): the
@@ -2287,7 +2292,7 @@ static void
 xray_agent_gone(void)
 {
 	if (xagent && kill(xagent, 0) < 0 && errno == ESRCH)
-		xray_agent(0);
+		xray_agent(0, 0);
 }
 
 /* Serve MSG_RING_READ (dtach.h has the wire format). Returns -1 if the
