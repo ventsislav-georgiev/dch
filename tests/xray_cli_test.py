@@ -4683,8 +4683,31 @@ def test_prefilter_reach():
         os.unlink(tp)
 
 
+def test_local_dash():
+    """A user's own --search - / --ref - never reads stdin: an open pipe
+    that never closes gets exit 2 at once; both refs say "not a ref"."""
+    for flag in ("--search", "--ref"):
+        rd, wr = os.pipe()
+        try:
+            r = subprocess.run([DCH, "--xray", "nosuch", flag, "-"], stdin=rd,
+                               capture_output=True, text=True, timeout=10,
+                               env=ENV)
+            check("local %s - with an open pipe exits 2" % flag,
+                  r.returncode == 2, repr(r.stderr))
+            want = ("dch: not a ref" if flag == "--ref" else
+                    "dch: bad search: 2 to 200 bytes")
+            check("local %s - says the value rule's text" % flag,
+                  want in r.stderr, repr(r.stderr))
+        except subprocess.TimeoutExpired:
+            check("local %s - blocked on stdin" % flag, False)
+        finally:
+            os.close(rd)
+            os.close(wr)
+
+
 def main():
     try:
+        test_local_dash()
         test_names()
         test_shell()
         test_record()

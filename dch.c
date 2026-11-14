@@ -14959,14 +14959,17 @@ xray_main(int argc, char **argv)
 	}
 	/* "-": the text on stdin, as dch serve hands it to its ctl child, never
 	** in the host's ps (LOW-XN1). A terminal's "-" or a host:name's stays
-	** 3.1's error; a bad read is "" for it */
-	if (!isatty(STDIN_FILENO) && !name_is_remote(n))
+	** 3.1's error; a bad read is "" for it. Only serve's child (it sets
+	** DCH_XRAY_STDIN) reads: a user's own "-" never blocks on a pipe */
+	if (getenv("DCH_XRAY_STDIN"))
 	{
 		static char tb[257];
 		const char **v = search && !strcmp(search, "-") ? &search
 		                 : ref && !strcmp(ref, "-") ? &ref : NULL;
 
-		if (v && !(*v = ctl_text_read(STDIN_FILENO, tb)))
+		unsetenv("DCH_XRAY_STDIN");
+		if (v && !isatty(STDIN_FILENO) && !name_is_remote(n) &&
+		    !(*v = ctl_text_read(STDIN_FILENO, tb)))
 			*v = "";
 	}
 	/* the value rules (3.1), in the table's order */

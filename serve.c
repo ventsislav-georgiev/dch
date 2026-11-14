@@ -1465,6 +1465,8 @@ on_ctl(struct conn *c, const unsigned char *p, size_t n)
 			           : !home || chdir(home) < 0)
 				if (cwd[0] || chdir("/") < 0)
 					_exit(127);
+			if (sx >= 0)	/* the child reads it: xray_main */
+				setenv("DCH_XRAY_STDIN", "1", 1);
 			exec_prep();
 			execv(argv[0], argv);
 			_exit(127);
@@ -2836,6 +2838,7 @@ serve_main(int argc, char **argv)
 	unsetenv("DCH_CTL_IDLE_MS");
 	/* X-ray's test switches: a peer's --ref keeps its budget and caps */
 	unsetenv("DCH_XRAY_NOCLOCK");
+	unsetenv("DCH_XRAY_STDIN");
 	unsetenv("DCH_XRAY_CAPS");
 
 	/* The tailscale CLI, absolute, for execv. */
