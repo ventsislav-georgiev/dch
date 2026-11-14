@@ -5956,12 +5956,15 @@ proc_ppid(long pid)
 	return proc_stat(pid, NULL, NULL);
 }
 
-/* 1 when pid's controlling terminal (dev, from proc_stat) reads key by key
-** (ICANON off), as every wrapper that forwards the keyboard sets it (script,
-** unbuffer -p, ssh); 0 when it is line-buffered or cannot be read. A wrapper
-** in front of a line-buffered terminal does not read it (plain unbuffer:
-** expect never reads the keyboard), and what is typed there waits for the
-** shell that reads it once the wrapper exits (MED-AA1). */
+/* 1 when pid's controlling terminal (dev, from proc_stat) is raw with no
+** echo and no signal keys (ICANON, ISIG and ECHO off), as every wrapper
+** that forwards the keyboard sets it (script, unbuffer -p, ssh); 0 when it
+** is not or cannot be read. A wrapper in front of any other mode does not
+** read it (plain unbuffer: expect never reads the keyboard), and what is
+** typed there waits for the shell that reads it once the wrapper exits
+** (MED-AA1). shortcut: the kernel keeps no record of who set the mode or
+** who reads, so a terminal the user left in that exact mode (stty raw
+** -echo; macOS stty raw) still passes (LOW-CW2); stty -icanon does not. */
 static int
 tty_raw(long pid, long dev)
 {
@@ -5986,7 +5989,8 @@ tty_raw(long pid, long dev)
 		    (long)st.st_rdev == dev)
 			fd = open(p, O_RDONLY | O_NOCTTY | O_NONBLOCK);
 #endif
-	ok = fd >= 0 && tcgetattr(fd, &t) == 0 && !(t.c_lflag & ICANON);
+	ok = fd >= 0 && tcgetattr(fd, &t) == 0 &&
+	     !(t.c_lflag & (ICANON | ISIG | ECHO));
 	if (fd >= 0)
 		close(fd);
 	return ok;
@@ -8440,8 +8444,9 @@ static const char *const say_why[] = {
 	"not sent",
 	"a signal came once it was typed: it may still sit in the composer, "
 	"not sent",
-	"claude is not the terminal's foreground job (suspended with Ctrl-Z?): "
-	"fg it first",
+	"claude is not in front: fg it if suspended with Ctrl-Z; under a "
+	"wrapper that does not pass the keyboard on (plain unbuffer) nothing "
+	"reaches it",
 };
 /* A child's exit status carries its outcome past exit(1) and the like. */
 #define SAY_EXIT 100
@@ -8640,13 +8645,17 @@ do_say_verb(char **names, int nnames, char **words, int nwords, int json)
 static int
 do_run_verb(const char *name, char **words, int nwords)
 {
-#ifdef HAVE_LIBGHOSTTY_VT
 	struct cmd_info ci;
 	struct crec r;
 	const char *self = getenv("DCH_SESSION");
-	char selfb[256], cb[256], path[1100], *text;
+	char selfb[256], cb[256], path[1100];
+	long fg = -1;
+	int c = 0;
+#ifdef HAVE_LIBGHOSTTY_VT
+	char *text;
 	size_t len = 1;
-	int k, c;
+	int k;
+#endif
 
 	/* Your own session keeps the burst: the gate would wait on the composer
 	** of the agent that is running this very command. */
@@ -8656,10 +8665,21 @@ do_run_verb(const char *name, char **words, int nwords)
 	session_sock_path(name, path, sizeof path);
 	if (nwords == 0 || cmd_query(path, &ci) != 0)
 		goto burst;
-	/* a suspended Claude (#282): what is in front gets the burst */
-	c = ci.pid > 0 && claude_find(ci.pid, 1, &r) != 0 &&
-	    proc_fg(ci.pid, r.pid) != 0;
+	/* a suspended Claude (#282): the burst, only when what is in front of
+	** its terminal is in front up to the session's (a wrapper that does
+	** not read keeps it for the shell around it, MED-CW1) */
+	if (ci.pid > 0 && claude_find(ci.pid, 1, &r) != 0 &&
+	    (c = proc_fg(ci.pid, r.pid)) == 0 &&
+	    (proc_stat(r.pid, &fg, NULL) < 0 || fg <= 0 ||
+	     proc_fg(ci.pid, fg) != 1))
+	{
+		cmd_info_free(&ci);
+		fprintf(stderr, "dch: %s: %s — %s\n", name, say_code[SAY_NOT_FG],
+		        say_why[SAY_NOT_FG]);
+		return 1;
+	}
 	cmd_info_free(&ci);
+#ifdef HAVE_LIBGHOSTTY_VT
 	if (!c || claude_gate_q(path, 1) == CG_NOVT)
 		goto burst;
 	for (k = 0; k < nwords; k++)
@@ -8675,8 +8695,8 @@ do_run_verb(const char *name, char **words, int nwords)
 		return 0;
 	fprintf(stderr, "dch: %s: %s — %s\n", name, say_code[c], say_why[c]);
 	return 1;
-burst:
 #endif
+burst:
 	return do_send_verb(name, words, nwords, 1);
 }
 

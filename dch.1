@@ -396,15 +396,27 @@ or the process groups cannot be read; a suspended Claude keeps its
 Under a wrapper with a pty of its own
 .RB ( script ", " "unbuffer \-p" ),
 in front means Claude is the foreground job of its own terminal and each
-wrapper the foreground job of the terminal around it, that terminal reading
-key by key (raw mode, as a wrapper that forwards the keyboard sets it); plain
+wrapper the foreground job of the terminal around it, that terminal raw
+with no echo and no signal keys (as
+.BR script ", " "unbuffer \-p" " and " ssh
+set it to forward the keyboard); plain
 .B unbuffer
 (expect without
 .BR \-p )
-never reads the keyboard and the terminal stays line\-buffered, so it is not
-in front, nor is a wrapper resumed with
+never reads the keyboard and leaves the terminal in the shell's mode, so it
+is not in front, nor is a wrapper resumed with
 .B fg
-after the shell put its own line\-buffered mode back.
+after the shell put its own line\-buffered mode back, nor one on a terminal
+an earlier command left non\-canonical
+.RB ( "stty \-icanon" ).
+Limit: the kernel records neither who set a terminal's mode nor who reads
+it, so a terminal left in that exact raw no\-echo mode
+.RB ( "stty raw \-echo" ,
+or
+.B stty raw
+on macOS) makes plain
+.B unbuffer
+count as in front again.
 Read from the kernel by the client, so a master of any version gets it.
 .I auto_allowed
 is the permission prompt the master answered last with auto\-allow (see
@@ -2411,14 +2423,23 @@ shows and again while it stays. A failure exits 1 with
 .BR not_typed ,
 .BR not_submitted ,
 .BR no_screen ,
+.BR not_foreground ,
 or on a signal
 .BR interrupted ", " withdrawn ", " draft_left )
 on stderr. Other programs (also one in front of a Claude suspended with
-Ctrl\-Z), masters without a mirror, dch-lite and your own
+Ctrl\-Z, when that one is in front as
+.I claude_foreground
+defines it), masters without a mirror, dch-lite and your own
 session (\fB$DCH_SESSION\fR) keep the plain burst, which exits 1 when its
 input was dropped, as
 .B \-\-send
-does.
+does. A Claude that is not in front with nothing in front of it that is
+(under plain
+.BR unbuffer ,
+or a shell in front of it inside one) fails
+.B not_foreground
+and nothing is typed, dch-lite too: the shell around the wrapper would run
+the text once it exits.
 .TP
 .BI \-\-keys " name key..."
 Encode and send keys mode-aware (kitty keyboard protocol, application cursor
@@ -2780,7 +2801,8 @@ prints one object per line instead:
 (Claude not in front, as
 .I claude_foreground
 defines it: suspended, in the background or under a wrapper that does not
-read the keyboard; nothing typed, \fBfg\fR it first),
+read the keyboard; nothing typed: \fBfg\fR it if suspended, under plain
+\fBunbuffer\fR nothing reaches it),
 or empty) and
 .IR detail .
 A first SIGINT, SIGTERM or SIGHUP, once handled, types nothing more and
