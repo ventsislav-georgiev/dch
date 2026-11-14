@@ -996,7 +996,9 @@ host whose dch takes no such ref says so in the status line.
 
 A ref's card shows its definitions (two or more as "N definitions"), its
 first and latest mention, its counts (this session, this project, all
-projects) and its mentions. It opens light, as `--ref` does without `--full`.
+projects) and its mentions: this session's first, then each other session's
+as the scan finds them, newest first within each, also after `f`; the
+selected mention stays selected while lines arrive. It opens light, as `--ref` does without `--full`.
 `f` runs the full scan, `p` scans other projects too (again: this project
 only), `o` attaches to the session as in the list, `y` copies the ref to the
 clipboard (OSC 52). The card's other-projects key changed in 1.61.0: it was

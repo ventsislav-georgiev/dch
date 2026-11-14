@@ -91,7 +91,7 @@ struct xv_def
 struct xv_men
 {
 	char *session, *line, *chapter;
-	long long at;
+	long long at, off;	/* off: -1 from a host that sends none */
 };
 
 struct xv_ent
@@ -151,6 +151,10 @@ struct xv
 	/* the card */
 	char *ckey, *ctext;
 	int full, scope, cdone, cpartial, csel, ctop;
+	/* the selected mention's session and offset, followed as lines
+	** arrive (#304); cses NULL on the first row */
+	char *cses;
+	long long coff;
 	struct xv_def *d;
 	struct xv_men *m;
 	int nd, ad, nm, am;
@@ -856,6 +860,8 @@ xv_cline(struct xv *v, const struct json_parser *p)
 	else if ((o = xv_obj(p, 0, "mention", JSON_OBJECT)) >= 0)
 	{
 		struct xv_men m;
+		long long off = xv_num(p, o, "offset", -1);
+		int i;
 
 		if (v->nm >= XV_MENTIONS ||
 		    xv_grow(&v->m, &v->am, v->nm, sizeof m) < 0)
@@ -873,7 +879,6 @@ xv_cline(struct xv *v, const struct json_parser *p)
 		** session's is the last one that starts before it */
 		if (!m.chapter[0] && v->session && !strcmp(m.session, v->session))
 		{
-			long long off = xv_num(p, o, "offset", -1);
 			int c, best = -1;
 			char *t;
 
@@ -889,7 +894,22 @@ xv_cline(struct xv *v, const struct json_parser *p)
 			}
 		}
 		m.at = xv_num(p, o, "at", -1);
-		v->m[v->nm++] = m;
+		m.off = off;
+		/* newest first within a file (#304): above its file's older
+		** lines, so light's windows (newest first, each in file order)
+		** and --full (oldest first) both list newest first; files keep
+		** the order sent, a host that sends no offset arrival order */
+		for (i = v->nm; i > 0 && off >= 0 && v->m[i - 1].off >= 0 &&
+		     v->m[i - 1].off < off && !strcmp(v->m[i - 1].session,
+		     m.session); i--)
+			;
+		memmove(v->m + i + 1, v->m + i, (size_t)(v->nm - i) * sizeof m);
+		v->m[i] = m;
+		v->nm++;
+		if (v->cses && v->coff == off && !strcmp(v->cses, m.session))
+			v->csel = i;
+		else if (v->cses && i <= v->csel)
+			v->csel++;
 	}
 	else if ((o = xv_obj(p, 0, "resolved", JSON_OBJECT)) >= 0 &&
 	         !v->vkind)
@@ -906,6 +926,22 @@ xv_cline(struct xv *v, const struct json_parser *p)
 		v->cdone = 1;
 		v->cpartial = xv_bool(p, 0, "partial");
 	}
+}
+
+/* The card's selection follows its mention as lines arrive (#304), also
+** through f and p's new scan; on the first row it stays there (the newest
+** under it), as Refs' does. */
+static void
+xv_cpin(struct xv *v)
+{
+	if (v->csel >= v->nm)
+		v->csel = v->nm - 1;
+	if (v->csel < 0)
+		v->csel = 0;
+	free(v->cses);
+	v->cses = v->csel > 0 && v->m[v->csel].off >= 0
+	          ? strdup(v->m[v->csel].session) : NULL;
+	v->coff = v->cses ? v->m[v->csel].off : -1;
 }
 
 /* The card of ref text (key: its index key), scanned light for the
@@ -932,6 +968,8 @@ xv_card(struct xv *v, const char *key, const char *text, int full,
 			return;
 		}
 		v->csel = v->ctop = 0;
+		free(v->cses);
+		v->cses = NULL;
 	}
 	xv_card_free(v);
 	for (k = 0; k < 5; k++)
@@ -2877,12 +2915,12 @@ xv_key(struct xv *v, int c)
 		m = v->csel < v->nm ? &v->m[v->csel] : NULL;
 		switch (c)
 		{
-		case 'j': case PK_DOWN: v->csel++; break;
-		case 'k': case PK_UP: v->csel--; break;
-		case PK_PGDN: v->csel += v->win / 2; break;
-		case PK_PGUP: v->csel -= v->win / 2; break;
-		case 'g': case PK_HOME: v->csel = 0; break;
-		case 'G': case PK_END: v->csel = v->nm - 1; break;
+		case 'j': case PK_DOWN: v->csel++; xv_cpin(v); break;
+		case 'k': case PK_UP: v->csel--; xv_cpin(v); break;
+		case PK_PGDN: v->csel += v->win / 2; xv_cpin(v); break;
+		case PK_PGUP: v->csel -= v->win / 2; xv_cpin(v); break;
+		case 'g': case PK_HOME: v->csel = 0; xv_cpin(v); break;
+		case 'G': case PK_END: v->csel = v->nm - 1; xv_cpin(v); break;
 		case 'f':
 			xv_card(v, v->ckey, v->ctext, 1, v->scope);
 			break;
@@ -3066,6 +3104,7 @@ xv_free(struct xv *v)
 	free(v->sr);
 	free(v->selk);
 	free(v->sela);
+	free(v->cses);
 	free(v->rans);
 	free(v);
 }

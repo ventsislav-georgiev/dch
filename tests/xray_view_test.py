@@ -113,6 +113,11 @@ Covers:
      the faint "the 50 newest are shown", G the 50th. A shell (xv-sh):
      Commands, Refs, Search; its ring searched (each line as Output); on
      dch-lite the list says no x-ray corpus.
+ 16. the card's mentions newest first (#304, QA 1.62.0 MED-V13): a
+     transcript under 1 MiB (one light window), one spanning several (no
+     zigzag of the windows), and after f (oldest first from the engine);
+     the selected mention stays selected while f's lines arrive; Enter on
+     a mention reads its prompt.
 
 Run:  python3 tests/xray_view_test.py      (uses ./dch)
 """
@@ -792,6 +797,122 @@ def test_lookup():
         v.key(b"\033", 0.5)
         v.key(b"q")
         v.exit()
+    finally:
+        v.close()
+
+
+# ---- the card's mentions, newest first (#304, QA 1.62.0 MED-V13) -----------
+
+OSIDS = ["11111111-2222-4333-8444-5555555555%02x" % k for k in (0xa1, 0xa2, 0xa3)]
+
+
+def fixture_order():
+    """xv-o1: four turns ONE..FOUR, each saying PROJ-9, under 1 MiB; xv-o2:
+    the same with a second answer per turn and 1.2 MB after each, a window
+    each; xv-o3: one turn saying PROJ-9 in 250 lines, so light and full
+    keep different lines (a file gives 200)."""
+    os.makedirs(os.path.dirname(tl(OSIDS[0])), exist_ok=True)
+    for name, sid, big in (("xv-o1", OSIDS[0], 0), ("xv-o2", OSIDS[1], 1)):
+        lines = []
+        for k, w in enumerate(["ONE", "TWO", "THREE", "FOUR"]):
+            ts = "2026-11-10T1%d:00:" % k
+            lines += turn("prompt %s" % w, ts + "00Z",
+                          at(say("answer %s says PROJ-9" % w), ts + "05Z"))
+            if big:
+                lines += [at(say("answer %s2 says PROJ-9" % w), ts + "09Z")]
+                lines += [say("pad " * 50000)] * 6     # 1.2 MB
+        record(name, sid, lines)
+    record("xv-o3", OSIDS[2], turn("prompt PIN", "2026-11-10T10:00:00Z") +
+           [at(say("note %03d says PROJ-9" % k),
+               "2026-11-10T10:%02d:%02dZ" % (k // 60, k % 60))
+            for k in range(1, 251)])
+
+
+def card_rows(v):
+    """The card's mention words top down, and the selected one."""
+    scr = rows(v.out)
+    got = [(scr[k].startswith("\u258c"),
+            re.search(r"(?:answer|note) (\w+) says", scr[k]))
+           for k in sorted(scr)]
+    got = [(s, m.group(1)) for s, m in got if m]
+    return [w for _, w in got], [w for s, w in got if s]
+
+
+def order_card(name, keys, secs=20.0):
+    """name's view, PROJ-9's card opened by ^R, settled."""
+    v = Pty([DCH, "--xray", name], 40, 100)
+    v.wait(b"Prompts ", secs)
+    v.pump(0.5)
+    v.key(b"/PROJ-9", 0.5)
+    mark = len(v.out)
+    v.key(keys, 0.5)
+    v.wait(b"PROJ-9  light", secs, start=mark)
+    settle(v, secs)
+    return v
+
+
+def settle(v, secs=20.0):
+    """until the card's scan is done: no row says searching"""
+    until(lambda: v.pump(0.2) or not any(
+        "searching" in r for r in rows(v.out).values()), secs)
+    v.pump(0.5)
+
+
+def test_order():
+    v = order_card("xv-o1", b"\x12")
+    try:
+        got, _ = card_rows(v)
+        check("card #304: a transcript under 1 MiB lists PROJ-9's mentions "
+              "newest first", got == ["FOUR", "THREE", "TWO", "ONE"], got)
+        mark = len(v.out)
+        v.key(b"j\r", 1.0)
+        check("card #304: Enter on the second mention reads its prompt",
+              v.wait(b"prompt THREE", start=mark) and
+              b"prompt FOUR" not in v.out[mark:], v.out[mark:][-600:])
+        v.key(b"q")
+    finally:
+        v.close()
+    want = ["FOUR2", "FOUR", "THREE2", "THREE", "TWO2", "TWO", "ONE2", "ONE"]
+    v = order_card("xv-o2", b"\x12")
+    try:
+        got, _ = card_rows(v)
+        check("card #304: a transcript of several 1 MiB windows: newest "
+              "first, no zigzag", got == want, got)
+        v.key(b"jj", 0.5)
+        mark = len(v.out)
+        v.key(b"f", 0.5)
+        v.wait(b"full scan", 20, start=mark)
+        settle(v)
+        got, sel = card_rows(v)
+        # f reads the project: this session's lines first, then the others'
+        check("card #304: after f (the engine sends oldest first) still "
+              "newest first, the selection on its mention",
+              got[:8] == want and sel == ["THREE2"], (got, sel))
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        check("card #304: Enter on it reads its prompt",
+              v.wait(b"prompt THREE", start=mark) and
+              b"prompt FOUR" not in v.out[mark:], v.out[mark:][-600:])
+        v.key(b"q")
+    finally:
+        v.close()
+    v = order_card("xv-o3", b"\x12")
+    try:
+        got, _ = card_rows(v)
+        check("card #304: 250 mentions in one window: newest first",
+              len(got) > 20 and got == sorted(got, reverse=True), got)
+        v.key(b"jjjjj", 0.5)
+        _, before = card_rows(v)
+        mark = len(v.out)
+        v.key(b"f", 0.5)
+        v.wait(b"full scan", 20, start=mark)
+        settle(v)
+        got, sel = card_rows(v)
+        check("card #304: the selected mention stays selected while f's "
+              "lines arrive, newest first", len(before) == 1 and
+              sel == before and got == sorted(got, reverse=True),
+              (before, sel, got))
+        v.key(b"q")
     finally:
         v.close()
 
@@ -2618,6 +2739,8 @@ def main():
         fixture_latest()
         test_latest()
         test_lookup()
+        fixture_order()
+        test_order()
         fixture_tmp()
         test_tmp()
         fixture_auto()

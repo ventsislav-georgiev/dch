@@ -117,6 +117,11 @@ Covers:
       on it says so, a tool hit by its tool, partial with why time said,
       ESC and BEL in a snippet shown as ?; Enter on the tool hit reads its
       prompt from the host.
+  15. the card's mentions newest first (#304, QA 1.62.0 MED-V13), read
+      on the host: a transcript under 1 MiB, one spanning several 1 MiB
+      windows (no zigzag), and after f (oldest first from the engine); the
+      selected mention stays selected while f's lines arrive; Enter on a
+      mention reads its prompt from the host.
 
 Run:  python3 tests/xray_remote_view_test.py      (uses ./dch)
 """
@@ -521,6 +526,156 @@ def test_small_card():
                v.out[mark:][-600:]))
         v.key(b"qqq")
         check("small card: q, q, q exits 0", v.exit() == 0, v.out[-80:])
+    finally:
+        v.close()
+
+
+# ---- the card's mentions, newest first (#304, QA 1.62.0 MED-V13) -----------
+
+def record_o(name, sid, lines):
+    """A History Claude record of the host's, its transcript lines."""
+    cfg = os.path.join(SENV["HOME"], ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    with open(os.path.join(pdir, sid + ".jsonl"), "w") as f:
+        for o in lines:
+            f.write(json.dumps(o) + "\n")
+    sockdir = os.path.join(SENV["XDG_RUNTIME_DIR"], "dch-%d" % os.getuid())
+    hdir = os.path.join(SENV["XDG_STATE_HOME"], "dch", "sessions",
+                        sockdir.replace("/", "-"))
+    os.makedirs(hdir, exist_ok=True)
+    rec = {"name": name, "cwd": "/home/demo/proj", "end": "exited",
+           "argv": ["claude"], "started": 1794299400, "updated": 1794300000,
+           "ended": 1794300000, "sock_dir": sockdir,
+           "agent": {"session_id": sid, "cwd": "/home/demo/proj",
+                     "config_dir": cfg}}
+    with open(os.path.join(hdir, name + ".json"), "w") as f:
+        f.write(json.dumps(rec) + "\n")
+
+
+def say_o(text, ts=None):
+    o = {"type": "assistant", "message": {"content": [
+        {"type": "text", "text": text}]}}
+    if ts:
+        o["timestamp"] = ts
+    return o
+
+
+def fixture_order():
+    """srv:xv-o1: four turns ONE..FOUR, each saying PROJ-9, under 1 MiB;
+    srv:xv-o2: the same with a second answer per turn and 1.2 MB after
+    each, a window each; srv:xv-o3: one turn saying PROJ-9 in 250 lines,
+    so light and full keep different lines (a file gives 200)."""
+    sids = ["11111111-2222-4333-8444-5555555555%02x" % k
+            for k in (0xb1, 0xb2, 0xb3)]
+    for name, sid, big in (("xv-o1", sids[0], 0), ("xv-o2", sids[1], 1)):
+        lines = []
+        for k, w in enumerate(["ONE", "TWO", "THREE", "FOUR"]):
+            ts = "2026-11-10T1%d:00:" % k
+            lines += [{"type": "user", "cwd": "/home/demo/proj",
+                       "timestamp": ts + "00Z",
+                       "message": {"content": "prompt %s" % w}},
+                      say_o("answer %s says PROJ-9" % w, ts + "05Z")]
+            if big:
+                lines += [say_o("answer %s2 says PROJ-9" % w, ts + "09Z")]
+                lines += [say_o("pad " * 50000)] * 6     # 1.2 MB
+        record_o(name, sid, lines)
+    record_o("xv-o3", sids[2], [
+        {"type": "user", "cwd": "/home/demo/proj",
+         "timestamp": "2026-11-10T10:00:00Z",
+         "message": {"content": "prompt PIN"}}] +
+        [say_o("note %03d says PROJ-9" % k,
+               "2026-11-10T10:%02d:%02dZ" % (k // 60, k % 60))
+         for k in range(1, 251)])
+
+
+def card_rows(v):
+    """The card's mention words top down, and the selected one."""
+    scr = screen_rows(v)
+    got = [(scr[k].startswith("\u258c"),
+            re.search(r"(?:answer|note) (\w+) says", scr[k]))
+           for k in sorted(scr)]
+    got = [(s, m.group(1)) for s, m in got if m]
+    return [w for _, w in got], [w for s, w in got if s]
+
+
+def settle(v, secs=30.0):
+    """until the card's scan is done: no row says searching"""
+    until(lambda: v.pump(0.2) or not any(
+        "searching" in r for r in screen_rows(v).values()), secs)
+    v.pump(0.5)
+
+
+def order_card(name, secs=30.0):
+    """srv:name's view, PROJ-9's card opened by ^R, settled."""
+    v = Pty([DCH, "--xray", "srv:" + name], 40, 100)
+    v.wait(b"Prompts ", secs)
+    v.pump(0.5)
+    v.key(b"/PROJ-9", 0.5)
+    mark = len(v.out)
+    v.key(b"\x12", 0.5)
+    v.wait(b"PROJ-9  light", secs, start=mark)
+    settle(v, secs)
+    return v
+
+
+def full_scan(v):
+    mark = len(v.out)
+    v.key(b"f", 0.5)
+    v.wait(b"full scan", 30, start=mark)
+    settle(v)
+
+
+def test_order():
+    v = order_card("xv-o1")
+    try:
+        got, _ = card_rows(v)
+        check("card #304: srv:xv-o1, under 1 MiB: PROJ-9's mentions newest "
+              "first", got == ["FOUR", "THREE", "TWO", "ONE"], got)
+        mark = len(v.out)
+        v.key(b"j\r", 1.0)
+        check("card #304: Enter on the second mention reads its prompt "
+              "from the host", v.wait(b"prompt THREE", start=mark) and
+              b"prompt FOUR" not in v.out[mark:], v.out[mark:][-600:])
+        v.key(b"q")
+    finally:
+        v.close()
+    want = ["FOUR2", "FOUR", "THREE2", "THREE", "TWO2", "TWO", "ONE2", "ONE"]
+    v = order_card("xv-o2")
+    try:
+        got, _ = card_rows(v)
+        check("card #304: srv:xv-o2, several 1 MiB windows: newest first, "
+              "no zigzag", got == want, got)
+        v.key(b"jj", 0.5)
+        full_scan(v)
+        got, sel = card_rows(v)
+        # f reads the project: this session's lines first, then the others'
+        check("card #304: srv:xv-o2 after f (oldest first from the engine): "
+              "still newest first, the selection on its mention",
+              got[:8] == want and sel == ["THREE2"], (got, sel))
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        check("card #304: Enter on it reads its prompt from the host",
+              v.wait(b"prompt THREE", start=mark) and
+              b"prompt FOUR" not in v.out[mark:], v.out[mark:][-600:])
+        v.key(b"q")
+    finally:
+        v.close()
+    v = order_card("xv-o3")
+    try:
+        got, _ = card_rows(v)
+        check("card #304: srv:xv-o3, 250 mentions in one window: newest "
+              "first", len(got) > 20 and got == sorted(got, reverse=True),
+              got)
+        v.key(b"jjjjj", 0.5)
+        _, before = card_rows(v)
+        full_scan(v)
+        got, sel = card_rows(v)
+        check("card #304: srv:xv-o3, the selected mention stays selected "
+              "while f's lines arrive, newest first", len(before) == 1 and
+              sel == before and got == sorted(got, reverse=True),
+              (before, sel, got))
+        v.key(b"q")
     finally:
         v.close()
 
@@ -2358,6 +2513,8 @@ def main():
         test_responses()
         test_search()
         test_small_card()
+        fixture_order()
+        test_order()
         test_on_screen()
         test_picker(port)
         test_same_name()
