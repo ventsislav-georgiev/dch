@@ -4744,7 +4744,7 @@ struct xr_claude
 				** here (past XR_THREADS the full decode takes
 				** each as a step) */
 	int late;		/* #300: --chapter's late results: decode only
-				** the lines late_line picks */
+				** the lines late_line picks */	struct xr_tasks *tk;	/* --tasks (#319), else NULL */
 };
 
 /* B_GUESS (#300): a step a decoder that starts mid-file takes where the full
@@ -6697,6 +6697,8 @@ cx_line(struct xr_claude *d, const struct json_parser *p)
 	free(t);
 }
 
+static void tk_line(struct xr_claude *d, const struct json_parser *p);
+
 void
 xr_claude_line(struct xr_claude *d, const char *line, size_t len,
                uint64_t off, int oversized)
@@ -6725,6 +6727,8 @@ xr_claude_line(struct xr_claude *d, const char *line, size_t len,
 	if (d->codex)
 	{
 		cx_line(d, &p);
+		if (d->tk)
+			tk_line(d, &p);
 		dch_json_free(&p);
 		return;
 	}
@@ -6789,6 +6793,9 @@ xr_claude_line(struct xr_claude *d, const char *line, size_t len,
 	}
 	else
 		block(d, ag, B_STEP, NULL, NULL);	/* unrecognized entry */
+	/* after the decode: the line's own chapter is the open one */
+	if (d->tk && !ag)
+		tk_line(d, &p);
 	free(type);
 	free(agent);
 	dch_json_free(&p);
@@ -11281,5 +11288,685 @@ xr_search_print(FILE *f, const struct xr_search *s, const char *session,
 	        s->more ? "true" : "false", why ? "true" : "false");
 	put_or_null(f, why);
 	fprintf(f, ",\"bytes\":%llu}\n", (unsigned long long)s->bytes);
+	return fflush(f) == 0 && !ferror(f) ? 0 : -1;
+}
+
+/* ---- --tasks (#319): the session's task list -------------------------------- */
+
+/* The shapes, checked 2026-11-14: Claude Code's Agent SDK reference
+** (TaskCreateInput {subject, description, activeForm?}, TaskCreateOutput
+** {task: {id, subject}}, TaskUpdateInput {taskId, status?, subject?,
+** description?, activeForm?, addBlocks?, addBlockedBy?, ...}, TodoWriteInput
+** {todos: [{content, status, activeForm}]}); codex-rs (plan_tool.rs's
+** UpdatePlanArgs {explanation?, plan: [{step, status}]}, a function tool
+** named update_plan: the rollout keeps its function_call, never the
+** PlanUpdate event, rollout/src/policy.rs). */
+static const char *const A_TASK[] = { "task", 0 };
+static const char *const A_TASKID[] = { "taskId", 0 };
+static const char *const A_SUBJECT[] = { "subject", 0 };
+static const char *const A_DESC[] = { "description", 0 };
+static const char *const A_AFORM[] = { "activeForm", 0 };
+static const char *const A_STATUS[] = { "status", 0 };
+static const char *const A_TODOS[] = { "todos", 0 };
+static const char *const A_PLAN[] = { "plan", 0 };
+static const char *const A_STEP[] = { "step", 0 };
+static const char *const A_ADDBY[] = { "addBlockedBy", 0 };
+static const char *const A_ADDBL[] = { "addBlocks", 0 };
+
+#define TK_LABEL       24		/* scalars of a status word kept */
+#define TK_BUCKETS     65536		/* the id hash's chains (2^n) */
+#define TK_NOCH        UINT64_MAX	/* no chapter */
+
+enum { TS_PENDING, TS_ACTIVE, TS_DONE, TS_DROPPED };
+static const char *const ts_name[] = { "pending", "active", "done",
+                                       "dropped" };
+static const char *const ts_word[] = { "pending", "in_progress", "completed",
+                                       "deleted" };
+
+/* One task. Its line stays under 64 KB: three cut texts, a label, an id and
+** XR_TASK_DEPS ids of at most XR_ID_MAX bytes, each escaped at most 6x. */
+struct tk_row
+{
+	char *id, *title, *label;	/* never NULL in a row that is not gone */
+	char *active, *note;		/* NULL for none */
+	char **dep;
+	int ndep, status;
+	int gone;		/* a create that failed, an id created again */
+	int linked, hnext;	/* in the id hash; the next slot of its chain */
+	uint64_t th;		/* the full text's hash (TodoWrite, update_plan) */
+	long long created, updated;
+	uint64_t ch, cch;	/* the chapters' offsets, TK_NOCH */
+};
+
+struct tk_open
+{
+	char *tuid;		/* a TaskCreate's call id */
+	uint64_t ord;		/* its row, until the result names the id */
+};
+
+struct xr_tasks
+{
+	/* the Task tools' rows: a ring of cap slots (ord % cap), the newest
+	** XR_TASKS of total; ids hashed to slots */
+	struct tk_row *v;
+	size_t cap, n;
+	uint64_t total;
+	int *bucket;
+	struct tk_open open[XR_PENDING];
+	int nopen;
+	/* TodoWrite's or update_plan's latest list: wn rows, the first wbase
+	** positions dropped by the cap */
+	struct tk_row *w;
+	size_t wn, wbase;
+	int last;		/* the kind used last: 1 the Task tools, 2 a list */
+	int codex;		/* the list is update_plan's */
+	uint64_t ino;
+};
+
+struct xr_tasks *
+xr_tasks_new(void)
+{
+	return calloc(1, sizeof(struct xr_tasks));
+}
+
+static void
+tk_row_free(struct tk_row *r)
+{
+	int k;
+
+	free(r->id);
+	free(r->title);
+	free(r->label);
+	free(r->active);
+	free(r->note);
+	for (k = 0; k < r->ndep; k++)
+		free(r->dep[k]);
+	free(r->dep);
+	memset(r, 0, sizeof *r);
+}
+
+void
+xr_tasks_free(struct xr_tasks *t)
+{
+	size_t k;
+	int i;
+
+	if (!t)
+		return;
+	for (k = 0; k < t->n; k++)
+		tk_row_free(&t->v[(t->total - t->n + k) % t->cap]);
+	for (k = 0; k < t->wn; k++)
+		tk_row_free(&t->w[k]);
+	for (i = 0; i < t->nopen; i++)
+		free(t->open[i].tuid);
+	free(t->v);
+	free(t->w);
+	free(t->bucket);
+	free(t);
+}
+
+void
+xr_claude_tasks(struct xr_claude *d, struct xr_tasks *t, uint64_t ino)
+{
+	d->tk = t;
+	t->ino = ino;
+}
+
+static char *
+tk_dup(const char *s, size_t n)
+{
+	char *o = malloc(n + 1);
+
+	if (o)
+	{
+		memcpy(o, s, n);
+		o[n] = '\0';
+	}
+	return o;
+}
+
+/* key's string in obj as a title (xr_title); "" for none when keep, else
+** NULL; *th, when set, the whole text's hash */
+static char *
+tk_text(const struct json_parser *p, int obj, const char *const *key,
+        int keep, uint64_t *th)
+{
+	char b[XR_TITLE_MAX * 4 + 1], *s;
+	size_t n = 0;
+
+	s = k_str(p, obj, key, &n);
+	if (th)
+		*th = s ? fnv(s, n) : 0;
+	if (!s)
+		return keep ? tk_dup("", 0) : NULL;
+	xr_title(s, n, b, sizeof b);
+	free(s);
+	return b[0] || keep ? tk_dup(b, strlen(b)) : NULL;
+}
+
+/* An id: a string of 1..XR_ID_MAX bytes, or a whole number as written (a
+** model may send 3 for "3"). malloc'd, else NULL. */
+static char *
+tk_id(const struct json_parser *p, int v)
+{
+	const char *s;
+	size_t n = 0, k;
+	char *o;
+
+	if (v < 0)
+		return NULL;
+	if (p->tok[v].kind == JSON_PRIMITIVE)
+	{
+		s = p->text + p->tok[v].start;
+		n = (size_t)(p->tok[v].end - p->tok[v].start);
+		for (k = 0; k < n && s[k] >= '0' && s[k] <= '9'; k++)
+			;
+		return n && k == n && n <= 20 ? tk_dup(s, n) : NULL;
+	}
+	if ((o = j_str(p, v, &n)) && (!n || n > XR_ID_MAX))
+	{
+		free(o);
+		o = NULL;
+	}
+	return o;
+}
+
+static int
+tk_word(const char *w)
+{
+	int k;
+
+	for (k = 0; k < 4; k++)
+		if (!strcmp(w, ts_word[k]))
+			return k;
+	return -1;
+}
+
+static uint64_t
+tk_ch(struct xr_claude *d)
+{
+	struct xr_chapter *x = cur(d);
+
+	return x ? x->offset : TK_NOCH;
+}
+
+static size_t
+tk_hash(const char *id)
+{
+	return (size_t)(fnv(id, strlen(id)) & (TK_BUCKETS - 1));
+}
+
+/* the slot of the row with this id, -1 */
+static long
+tk_find(const struct xr_tasks *t, const char *id)
+{
+	int s;
+
+	for (s = t->bucket ? t->bucket[tk_hash(id)] : -1; s >= 0;
+	     s = t->v[s].hnext)
+		if (!strcmp(t->v[s].id, id))
+			return s;
+	return -1;
+}
+
+static void
+tk_unlink(struct xr_tasks *t, int s)
+{
+	int *pp = &t->bucket[tk_hash(t->v[s].id)];
+
+	while (*pp >= 0 && *pp != s)
+		pp = &t->v[*pp].hnext;
+	if (*pp == s)
+		*pp = t->v[s].hnext;
+	t->v[s].linked = 0;
+}
+
+/* A new row at the ring's end, zeroed; past XR_TASKS the oldest goes. NULL
+** out of memory. The ring grows only before it wraps, so a row's slot stays
+** ord % cap. */
+static struct tk_row *
+tk_push(struct xr_tasks *t)
+{
+	struct tk_row *r;
+	size_t s;
+
+	if (t->n == t->cap && t->cap < XR_TASKS)
+	{
+		size_t nc = t->cap ? t->cap * 2 : 64;
+		struct tk_row *nv;
+
+		if (nc > XR_TASKS)
+			nc = XR_TASKS;
+		if (!(nv = realloc(t->v, nc * sizeof *nv)))
+			return NULL;
+		t->v = nv;
+		t->cap = nc;
+	}
+	s = (size_t)(t->total % t->cap);
+	r = &t->v[s];
+	if (t->n == t->cap)
+	{
+		if (r->linked)
+			tk_unlink(t, (int)s);
+		tk_row_free(r);
+		t->n--;
+	}
+	memset(r, 0, sizeof *r);
+	r->hnext = -1;
+	t->n++;
+	t->total++;
+	return r;
+}
+
+/* id (taken) into r's blocked_by, once; 1 when added */
+static int
+tk_dep(struct tk_row *r, char *id)
+{
+	char **nd;
+	int k;
+
+	for (k = 0; id && k < r->ndep && strcmp(r->dep[k], id); k++)
+		;
+	if (!id || k < r->ndep || r->ndep == XR_TASK_DEPS ||
+	    !(nd = realloc(r->dep, (size_t)(r->ndep + 1) * sizeof *nd)))
+	{
+		free(id);
+		return 0;
+	}
+	r->dep = nd;
+	r->dep[r->ndep++] = id;
+	return 1;
+}
+
+/* *f = v (taken; NULL is none); 1 when it changed */
+static int
+tk_set(char **f, char *v)
+{
+	int c = !*f != !v || (v && strcmp(*f, v));
+
+	free(*f);
+	*f = v;
+	return c;
+}
+
+static void
+tk_mark(struct xr_claude *d, struct tk_row *r)
+{
+	r->updated = d->at;
+	r->ch = tk_ch(d);
+}
+
+static void
+tk_create(struct xr_claude *d, const struct json_parser *p, int use, int in)
+{
+	struct xr_tasks *t = d->tk;
+	struct tk_row *r = tk_push(t);
+	char pid[24], *tuid;
+
+	if (!r)
+		return;
+	/* provisional until the result names it (never a real id: those
+	** have no '?') */
+	snprintf(pid, sizeof pid, "?%llu", (unsigned long long)t->total);
+	r->id = tk_dup(pid, strlen(pid));
+	r->title = tk_text(p, in, A_SUBJECT, 1, NULL);
+	r->label = tk_dup("pending", 7);
+	r->active = tk_text(p, in, A_AFORM, 0, NULL);
+	r->note = tk_text(p, in, A_DESC, 0, NULL);
+	r->status = TS_PENDING;
+	r->gone = !r->id || !r->title || !r->label;
+	r->created = r->updated = d->at;
+	r->cch = r->ch = tk_ch(d);
+	if (r->gone || !(tuid = k_str(p, use, A_ID, NULL)))
+		return;
+	if (t->nopen == XR_PENDING)	/* the oldest stays provisional */
+	{
+		free(t->open[0].tuid);
+		memmove(t->open, t->open + 1, --t->nopen * sizeof *t->open);
+	}
+	t->open[t->nopen].tuid = tuid;
+	t->open[t->nopen++].ord = t->total - 1;
+}
+
+/* A tool_result part: a TaskCreate's names its task's id in the line's
+** toolUseResult; one without (the create failed) takes the row back. An id
+** made again (a resumed transcript's replay) replaces the older row, whose
+** times stand while the title does. */
+static void
+tk_result(struct xr_claude *d, const struct json_parser *p, int part)
+{
+	struct xr_tasks *t = d->tk;
+	char *tuid = k_str(p, part, A_TUID, NULL), *id;
+	struct tk_row *r, *x;
+	uint64_t ord;
+	int k, tur, task;
+	long o;
+
+	for (k = 0; tuid && k < t->nopen && strcmp(t->open[k].tuid, tuid); k++)
+		;
+	free(tuid);
+	if (!tuid || k == t->nopen)
+		return;
+	ord = t->open[k].ord;
+	free(t->open[k].tuid);
+	memmove(t->open + k, t->open + k + 1,
+	        (size_t)(t->nopen - k - 1) * sizeof *t->open);
+	t->nopen--;
+	if (ord < t->total - t->n || (r = &t->v[ord % t->cap])->gone)
+		return;	/* gone past the cap */
+	tur = k_obj(p, 0, A_TUR);
+	task = tur >= 0 ? k_obj(p, tur, A_TASK) : -1;
+	if (!t->bucket && (t->bucket = malloc(TK_BUCKETS * sizeof *t->bucket)))
+		memset(t->bucket, 0xff, TK_BUCKETS * sizeof *t->bucket);	/* -1 */
+	if (!(id = task >= 0 ? tk_id(p, j_get(p, task, A_ID)) : NULL) ||
+	    !t->bucket)
+	{
+		free(id);
+		r->gone = 1;
+		return;
+	}
+	if ((o = tk_find(t, id)) >= 0)
+	{
+		x = &t->v[o];
+		if (!strcmp(x->title, r->title))
+		{
+			r->created = x->created;
+			r->cch = x->cch;
+		}
+		tk_unlink(t, (int)o);
+		x->gone = 1;
+	}
+	free(r->id);
+	r->id = id;
+	k = (int)tk_hash(id);
+	r->hnext = t->bucket[k];
+	t->bucket[k] = (int)(ord % t->cap);
+	r->linked = 1;
+}
+
+static void
+tk_update(struct xr_claude *d, const struct json_parser *p, int in)
+{
+	struct xr_tasks *t = d->tk;
+	char *id = tk_id(p, j_get(p, in, A_TASKID)), *w, *s;
+	struct tk_row *r;
+	long o, x;
+	int c = 0, k, v, i;
+
+	/* an id this read has no row for (made before the read range, or
+	** never): nothing to change */
+	if ((o = id ? tk_find(t, id) : -1) < 0)
+	{
+		free(id);
+		return;
+	}
+	r = &t->v[o];
+	/* an unknown status word: Claude Code refuses the update's input */
+	if ((w = k_str(p, in, A_STATUS, NULL)) && (k = tk_word(w)) >= 0)
+	{
+		c |= r->status != k;
+		r->status = k;
+		c |= tk_set(&r->label, tk_dup(ts_word[k], strlen(ts_word[k])));
+	}
+	free(w);
+	if ((s = tk_text(p, in, A_SUBJECT, 0, NULL)))
+		c |= tk_set(&r->title, s);
+	if (j_get(p, in, A_AFORM) >= 0)
+		c |= tk_set(&r->active, tk_text(p, in, A_AFORM, 0, NULL));
+	if (j_get(p, in, A_DESC) >= 0)
+		c |= tk_set(&r->note, tk_text(p, in, A_DESC, 0, NULL));
+	if ((v = j_get(p, in, A_ADDBY)) >= 0 && p->tok[v].kind == JSON_ARRAY)
+		for (i = v + 1; i < p->tok[v].next; i = p->tok[i].next)
+			c |= tk_dep(r, tk_id(p, i));
+	/* addBlocks: this task blocks those, so they list it */
+	if ((v = j_get(p, in, A_ADDBL)) >= 0 && p->tok[v].kind == JSON_ARRAY)
+		for (i = v + 1; i < p->tok[v].next; i = p->tok[i].next)
+		{
+			char *b = tk_id(p, i);
+
+			if (b && (x = tk_find(t, b)) >= 0 && x != o &&
+			    tk_dep(&t->v[x], tk_dup(id, strlen(id))))
+				tk_mark(d, &t->v[x]);
+			free(b);
+		}
+	if (c)
+		tk_mark(d, r);
+	free(id);
+}
+
+/* TodoWrite's todos, update_plan's plan: the whole list again. A row whose
+** text is the one at its position before keeps its created times, and its
+** updated ones while its status and active text stand, so "when did this go
+** to done" holds across calls. Past XR_TASKS the first positions go. */
+static void
+tk_replace(struct xr_claude *d, const struct json_parser *p, int arr,
+           const char *const *text, const char *const *aform)
+{
+	struct xr_tasks *t = d->tk;
+	struct tk_row *nv, *r, *o;
+	size_t n = 0, skip, pos = 0, k = 0;
+	char pid[24], *w;
+	int i, st;
+
+	if (arr < 0 || p->tok[arr].kind != JSON_ARRAY)
+		return;
+	for (i = arr + 1; i < p->tok[arr].next; i = p->tok[i].next)
+		n += p->tok[i].kind == JSON_OBJECT;
+	skip = n > XR_TASKS ? n - XR_TASKS : 0;
+	if (!(nv = calloc(n > skip ? n - skip : 1, sizeof *nv)))
+		return;
+	for (i = arr + 1; i < p->tok[arr].next; i = p->tok[i].next)
+	{
+		if (p->tok[i].kind != JSON_OBJECT || pos++ < skip)
+			continue;
+		r = &nv[k];
+		snprintf(pid, sizeof pid, "%zu", pos);
+		r->id = tk_dup(pid, strlen(pid));
+		r->title = tk_text(p, i, text, 1, &r->th);
+		r->active = aform ? tk_text(p, i, aform, 0, NULL) : NULL;
+		w = k_str(p, i, A_STATUS, NULL);
+		st = w ? tk_word(w) : TS_PENDING;
+		r->status = st >= 0 ? st : TS_PENDING;
+		/* the source's own word, an unknown one cut */
+		r->label = !w ? tk_dup("pending", 7)
+		           : tk_dup(w, clip(w, strlen(w), TK_LABEL));
+		free(w);
+		if (!r->id || !r->title || !r->label)
+		{
+			tk_row_free(r);
+			continue;
+		}
+		o = pos - 1 >= t->wbase && pos - 1 - t->wbase < t->wn
+		    ? &t->w[pos - 1 - t->wbase] : NULL;
+		if (o && o->th == r->th && !strcmp(o->title, r->title))
+		{
+			r->created = o->created;
+			r->cch = o->cch;
+			if (o->status == r->status && !strcmp(o->label, r->label) &&
+			    !o->active == !r->active &&
+			    (!r->active || !strcmp(o->active, r->active)))
+			{
+				r->updated = o->updated;
+				r->ch = o->ch;
+			}
+			else
+				tk_mark(d, r);
+		}
+		else
+		{
+			r->created = d->at;
+			r->cch = tk_ch(d);
+			tk_mark(d, r);
+		}
+		k++;
+	}
+	for (n = 0; n < t->wn; n++)
+		tk_row_free(&t->w[n]);
+	free(t->w);
+	t->w = nv;
+	t->wn = k;
+	t->wbase = skip;
+	t->last = 2;
+	t->codex = d->codex;
+}
+
+static void
+tk_codex(struct xr_claude *d, const struct json_parser *p)
+{
+	int pl = k_obj(p, 0, A_PAYLOAD);
+	struct json_parser q;
+	char *a;
+	size_t n;
+
+	if (pl < 0 || !k_streq(p, 0, A_TYPE, "response_item") ||
+	    !k_streq(p, pl, A_TYPE, "function_call") ||
+	    !k_streq(p, pl, A_NAME, "update_plan") ||
+	    !(a = k_str(p, pl, A_ARGS, &n)))
+		return;
+	memset(&q, 0, sizeof q);
+	if (tokens_max(a, n) <= XR_LINE_TOKENS && dch_json_parse(&q, a) >= 0 &&
+	    q.tok[0].kind == JSON_OBJECT)
+		tk_replace(d, &q, j_get(&q, 0, A_PLAN), A_STEP, NULL);
+	dch_json_free(&q);
+	free(a);
+}
+
+/* A main-thread line, after its decode (xr_claude_line). */
+static void
+tk_line(struct xr_claude *d, const struct json_parser *p)
+{
+	char *t, *name;
+	int m, c, i, in;
+
+	if (d->codex)
+	{
+		tk_codex(d, p);
+		return;
+	}
+	t = k_str(p, 0, A_TYPE, NULL);
+	c = (m = k_obj(p, 0, A_MESSAGE)) >= 0 ? j_get(p, m, A_CONTENT) : -1;
+	for (i = c + 1; t && c >= 0 && p->tok[c].kind == JSON_ARRAY &&
+	     i < p->tok[c].next; i = p->tok[i].next)
+	{
+		if (p->tok[i].kind != JSON_OBJECT)
+			continue;
+		if (!strcmp(t, "user") && k_streq(p, i, A_TYPE, "tool_result"))
+			tk_result(d, p, i);
+		else if (!strcmp(t, "assistant") &&
+		         k_streq(p, i, A_TYPE, "tool_use") &&
+		         (in = k_obj(p, i, A_INPUT)) >= 0 &&
+		         (name = k_str(p, i, A_NAME, NULL)))
+		{
+			if (!strcmp(name, "TaskCreate") || !strcmp(name, "TaskUpdate"))
+			{
+				d->tk->last = 1;
+				if (name[4] == 'C')
+					tk_create(d, p, i, in);
+				else
+					tk_update(d, p, in);
+			}
+			else if (!strcmp(name, "TodoWrite"))
+				tk_replace(d, p, j_get(p, in, A_TODOS), A_CONTENT, A_AFORM);
+			free(name);
+		}
+	}
+	free(t);
+}
+
+static void
+tk_iso(FILE *f, long long at)
+{
+	time_t tt = (time_t)at;
+	struct tm tm;
+	char b[32];
+
+	if (at < 0 || !gmtime_r(&tt, &tm) ||
+	    !strftime(b, sizeof b, "%Y-%m-%dT%H:%M:%SZ", &tm))
+		fputs("null", f);
+	else
+		fprintf(f, "\"%s\"", b);
+}
+
+static void
+tk_anchor(FILE *f, const struct xr_tasks *t, uint64_t off)
+{
+	if (off == TK_NOCH)
+		fputs("null", f);
+	else
+		fprintf(f, "\"f%llx:%llu\"", (unsigned long long)t->ino,
+		        (unsigned long long)off);
+}
+
+static void
+tk_put(FILE *f, const struct xr_tasks *t, const struct tk_row *r)
+{
+	int k;
+
+	fputs("{\"task\":{\"id\":", f);
+	xr_put_str(f, r->id);
+	fputs(",\"title\":", f);
+	xr_put_str(f, r->title);
+	fprintf(f, ",\"status\":\"%s\",\"label\":", ts_name[r->status]);
+	xr_put_str(f, r->label);
+	fputs(",\"active\":", f);
+	put_or_null(f, r->active);
+	fputs(",\"note\":", f);
+	put_or_null(f, r->note);
+	fputs(",\"created\":", f);
+	tk_iso(f, r->created);
+	fputs(",\"updated\":", f);
+	tk_iso(f, r->updated);
+	fputs(",\"chapter\":", f);
+	tk_anchor(f, t, r->ch);
+	fputs(",\"created_chapter\":", f);
+	tk_anchor(f, t, r->cch);
+	fputs(",\"blocked_by\":[", f);
+	for (k = 0; k < r->ndep; k++)
+	{
+		if (k)
+			fputc(',', f);
+		xr_put_str(f, r->dep[k]);
+	}
+	fputs("],\"url\":null,\"group\":null}}\n", f);
+}
+
+int
+xr_tasks_print(FILE *f, const struct xr_tasks *t, const char *session,
+               const char *session_id, int partial, const char *warn)
+{
+	int last = t ? t->last : 0;
+	size_t k, count = 0, dropped = 0, n = 0;
+	const struct tk_row *r;
+
+	fputs("{\"schema\":1,\"session\":", f);
+	xr_put_str(f, session);
+	fputs(",\"session_id\":", f);
+	xr_put_str(f, session_id);
+	fprintf(f, ",\"source\":\"%s\",\"title\":null,\"partial\":%s",
+	        !last ? "none" : last == 2 && t->codex ? "codex" : "claude",
+	        partial ? "true" : "false");
+	if (warn && warn[0])
+	{
+		fputs(",\"warn\":", f);
+		xr_put_str(f, warn);
+	}
+	fputs("}\n", f);
+	if (last)
+	{
+		n = last == 1 ? t->n : t->wn;
+		dropped = last == 1 ? (size_t)(t->total - t->n) : t->wbase;
+	}
+	for (k = 0; k < n && !ferror(f); k++)
+	{
+		r = last == 1 ? &t->v[(t->total - t->n + k) % t->cap] : &t->w[k];
+		if (!r->gone)
+		{
+			tk_put(f, t, r);
+			count++;
+		}
+	}
+	if (!ferror(f))
+		fprintf(f, "{\"done\":true,\"count\":%zu,\"dropped\":%zu}\n", count,
+		        dropped);
 	return fflush(f) == 0 && !ferror(f) ? 0 : -1;
 }

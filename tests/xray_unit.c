@@ -8,7 +8,8 @@
 ** states, timeout and group kill through a fake git; json.c's quoting of
 ** the code points a terminal acts on (QA 1.55.0 LOW-7); --search (#297):
 ** the needle's rules, folding, escapes, what never counts, the backward
-** read's windows, the snippet, the 50 cap, Codex and the shell ring.
+** read's windows, the snippet, the 50 cap, Codex and the shell ring;
+** --tasks (#319): the Task tools, TodoWrite, update_plan and the cap.
 **
 **   cc -I. -o xray_unit tests/xray_unit.c xray.c json.c && ./xray_unit
 */
@@ -6765,6 +6766,333 @@ t_seek(void)
 	}
 }
 
+/* ---- --tasks (#319) ------------------------------------------------------ */
+
+struct tk_feed
+{
+	struct xr_claude *d;
+	struct xr_tasks *t;
+	uint64_t off;
+};
+
+static void
+tk_begin(struct tk_feed *f, int codex)
+{
+	f->d = xr_claude_new();
+	f->t = xr_tasks_new();
+	f->off = 0;
+	if (codex)
+		xr_claude_codex(f->d);
+	xr_claude_tasks(f->d, f->t, 0x1f);
+}
+
+static void tk_feed(struct tk_feed *f, const char *fmt, ...)
+	__attribute__((format(printf, 2, 3)));
+
+static void
+tk_feed(struct tk_feed *f, const char *fmt, ...)
+{
+	static char l[1 << 16];
+	va_list ap;
+	int n;
+
+	va_start(ap, fmt);
+	n = vsnprintf(l, sizeof l, fmt, ap);
+	va_end(ap);
+	xr_claude_line(f->d, l, (size_t)n, f->off, 0);
+	f->off += (uint64_t)n + 1;
+}
+
+/* the lines, malloc'd; f is ended */
+static char *
+tk_end(struct tk_feed *f, int partial)
+{
+	char *b = NULL;
+	size_t bl = 0;
+	FILE *m = open_memstream(&b, &bl);
+
+	if (m)
+	{
+		if (xr_tasks_print(m, f->t, "s", "id", partial, NULL) != 0)
+			fails++;
+		fclose(m);
+	}
+	xr_claude_free(f->d);
+	xr_tasks_free(f->t);
+	return b ? b : calloc(1, 1);
+}
+
+#define TK_USE "{\"type\":\"assistant\",\"timestamp\":\"2026-11-14T07:00:%02dZ\"," \
+	"\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"%s\"," \
+	"\"name\":\"%s\",\"input\":%s}]}}"
+#define TK_RES "{\"type\":\"user\",\"timestamp\":\"2026-11-14T07:00:%02dZ\"," \
+	"\"toolUseResult\":{\"task\":{\"id\":\"%s\",\"subject\":\"x\"}}," \
+	"\"message\":{\"content\":[{\"type\":\"tool_result\"," \
+	"\"tool_use_id\":\"%s\",\"content\":\"ok\"}]}}"
+#define TK_ASK "{\"type\":\"user\",\"timestamp\":\"2026-11-14T07:00:%02dZ\"," \
+	"\"message\":{\"content\":\"%s\"}}"
+
+static void
+t_tasks(void)
+{
+	struct tk_feed f;
+	char *o, todos[256];
+	struct timespec a, b;
+	double ms;
+	int k;
+
+	o = tk_end((tk_begin(&f, 0), &f), 0);
+	CHECK("tasks: none read: source none, no task line, done 0",
+	      !strcmp(o, "{\"schema\":1,\"session\":\"s\",\"session_id\":\"id\","
+	              "\"source\":\"none\",\"title\":null,\"partial\":false}\n"
+	              "{\"done\":true,\"count\":0,\"dropped\":0}\n"));
+	free(o);
+	{
+		char *w = NULL;
+		size_t bl = 0;
+		FILE *m = open_memstream(&w, &bl);
+
+		if (m)
+		{
+			xr_tasks_print(m, NULL, "s", "id", 0, "");
+			xr_tasks_print(m, NULL, "s", "id", 0, "tasks_command: \"x\"");
+			fclose(m);
+		}
+		CHECK("tasks: warn (#321): left out when empty, else a string "
+		      "after partial",
+		      w && strstr(w, "\"partial\":false}\n{\"done\"") &&
+		      strstr(w, "\"partial\":false,\"warn\":\"tasks_command: "
+		             "\\\"x\\\"\"}\n{\"done\":true,"));
+		free(w);
+	}
+
+	/* a create, its result, an update; a create still waiting */
+	tk_begin(&f, 0);
+	tk_feed(&f, TK_ASK, 0, "go");				/* chapter f1f:0 */
+	tk_feed(&f, TK_USE, 1, "tu1", "TaskCreate", "{\"subject\":\"Fix  it\","
+	        "\"description\":\"why\\nmore\",\"activeForm\":\"Fixing\"}");
+	tk_feed(&f, TK_RES, 2, "12", "tu1");
+	tk_feed(&f, TK_USE, 3, "tu2", "TaskCreate", "{\"subject\":\"Later\"}");
+	o = tk_end(&f, 1);
+	CHECK("tasks: the result's id, the subject's title, the description's "
+	      "first line; a create with no result yet: pending, ?2",
+	      strstr(o, "\"source\":\"claude\",\"title\":null,\"partial\":true}\n"
+	             "{\"task\":{\"id\":\"12\",\"title\":\"Fix it\",\"status\":"
+	             "\"pending\",\"label\":\"pending\",\"active\":\"Fixing\","
+	             "\"note\":\"why\",\"created\":\"2026-11-14T07:00:01Z\","
+	             "\"updated\":\"2026-11-14T07:00:01Z\",\"chapter\":\"f1f:0\","
+	             "\"created_chapter\":\"f1f:0\",\"blocked_by\":[],\"url\":null,"
+	             "\"group\":null}}\n{\"task\":{\"id\":\"?2\",\"title\":"
+	             "\"Later\",\"status\":\"pending\"") &&
+	      strstr(o, "{\"done\":true,\"count\":2,\"dropped\":0}\n"));
+	free(o);
+
+	/* updates: statuses, an unknown id, a number id, dependencies */
+	tk_begin(&f, 0);
+	tk_feed(&f, TK_ASK, 0, "go");
+	tk_feed(&f, TK_USE, 1, "tu1", "TaskCreate", "{\"subject\":\"A\"}");
+	tk_feed(&f, TK_RES, 1, "1", "tu1");
+	tk_feed(&f, TK_USE, 1, "tu2", "TaskCreate", "{\"subject\":\"B\"}");
+	tk_feed(&f, TK_RES, 1, "2", "tu2");
+	tk_feed(&f, TK_USE, 1, "tu3", "TaskCreate", "{\"subject\":\"C\"}");
+	tk_feed(&f, "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":"
+	        "\"tool_result\",\"tool_use_id\":\"tu3\",\"is_error\":true,"
+	        "\"content\":\"failed\"}]}}");
+	k = (int)f.off;
+	tk_feed(&f, TK_ASK, 5, "next");
+	tk_feed(&f, TK_USE, 6, "tu4", "TaskUpdate", "{\"taskId\":1,\"status\":"
+	        "\"in_progress\",\"addBlocks\":[\"2\",\"9\"]}");
+	tk_feed(&f, TK_USE, 7, "tu5", "TaskUpdate", "{\"taskId\":\"9\","
+	        "\"status\":\"completed\"}");
+	tk_feed(&f, TK_USE, 8, "tu6", "TaskUpdate", "{\"taskId\":\"2\","
+	        "\"addBlockedBy\":[\"1\",\"1\",5],\"owner\":\"x\"}");
+	tk_feed(&f, TK_USE, 9, "tu7", "TaskUpdate", "{\"taskId\":\"1\","
+	        "\"status\":\"deleted\",\"subject\":\"A2\",\"activeForm\":null}");
+	tk_feed(&f, TK_USE, 9, "tu8", "TaskUpdate", "{\"taskId\":\"2\","
+	        "\"status\":\"halfway\",\"metadata\":{}}");
+	o = tk_end(&f, 0);
+	{
+		char w1[400], w2[400];
+
+		snprintf(w1, sizeof w1, "{\"task\":{\"id\":\"1\",\"title\":\"A2\","
+		         "\"status\":\"dropped\",\"label\":\"deleted\",\"active\":null,"
+		         "\"note\":null,\"created\":\"2026-11-14T07:00:01Z\","
+		         "\"updated\":\"2026-11-14T07:00:09Z\",\"chapter\":\"f1f:%d\","
+		         "\"created_chapter\":\"f1f:0\",\"blocked_by\":[]", k);
+		snprintf(w2, sizeof w2, "{\"task\":{\"id\":\"2\",\"title\":\"B\","
+		         "\"status\":\"pending\",\"label\":\"pending\",\"active\":null,"
+		         "\"note\":null,\"created\":\"2026-11-14T07:00:01Z\","
+		         "\"updated\":\"2026-11-14T07:00:08Z\",\"chapter\":\"f1f:%d\","
+		         "\"created_chapter\":\"f1f:0\",\"blocked_by\":[\"1\",\"5\"]",
+		         k);
+		CHECK("tasks: deleted is dropped and stays; addBlocks lists the task "
+		      "on the other; addBlockedBy once each, a number id as written; "
+		      "an unknown id, an unknown status, owner and metadata change "
+		      "nothing; a failed create is no task",
+		      strstr(o, w1) && strstr(o, w2) && !strstr(o, "\"C\"") &&
+		      strstr(o, "{\"done\":true,\"count\":2,\"dropped\":0}\n"));
+	}
+	free(o);
+
+	/* a sidechain, a bad line, an oversized one; a resumed transcript's
+	** replayed create keeps one row and its first times */
+	tk_begin(&f, 0);
+	tk_feed(&f, TK_ASK, 0, "go");
+	tk_feed(&f, TK_USE, 1, "tu1", "TaskCreate", "{\"subject\":\"A\"}");
+	tk_feed(&f, TK_RES, 1, "1", "tu1");
+	tk_feed(&f, "{\"type\":\"assistant\",\"isSidechain\":true,\"message\":"
+	        "{\"content\":[{\"type\":\"tool_use\",\"id\":\"s1\",\"name\":"
+	        "\"TaskUpdate\",\"input\":{\"taskId\":\"1\",\"status\":"
+	        "\"completed\"}}]}}");
+	tk_feed(&f, "{\"type\":\"assistant\",\"isSidechain\":true,\"message\":"
+	        "{\"content\":[{\"type\":\"tool_use\",\"id\":\"s2\",\"name\":"
+	        "\"TaskCreate\",\"input\":{\"subject\":\"side\"}}]}}");
+	tk_feed(&f, "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":"
+	        "\"tool_use\",\"id\":\"tu9\",\"name\":\"TaskCreate\",\"input\":");
+	xr_claude_line(f.d, "", 0, f.off, 1);
+	tk_feed(&f, TK_USE, 30, "tu2", "TaskCreate", "{\"subject\":\"A\"}");
+	tk_feed(&f, TK_RES, 30, "1", "tu2");
+	tk_feed(&f, TK_USE, 31, "tu3", "TaskUpdate", "{\"taskId\":\"1\","
+	        "\"status\":\"in_progress\"}");
+	o = tk_end(&f, 0);
+	CHECK("tasks: a sidechain's create and update, a cut line and an "
+	      "oversized one change nothing; an id created again is one row, "
+	      "its first created time kept",
+	      strstr(o, "{\"task\":{\"id\":\"1\",\"title\":\"A\",\"status\":"
+	             "\"active\",\"label\":\"in_progress\",\"active\":null,"
+	             "\"note\":null,\"created\":\"2026-11-14T07:00:01Z\","
+	             "\"updated\":\"2026-11-14T07:00:31Z\"") &&
+	      !strstr(o, "side") &&
+	      strstr(o, "{\"done\":true,\"count\":1,\"dropped\":0}\n"));
+	free(o);
+
+	/* TodoWrite: the whole list each call; the kind used last wins */
+#define TODO(c1, s1, c2, s2) "{\"todos\":[{\"content\":\"" c1 "\",\"status\":\"" \
+	s1 "\",\"activeForm\":\"" c1 "ing\"},{\"content\":\"" c2 "\"," \
+	"\"status\":\"" s2 "\",\"activeForm\":\"" c2 "ing\"}]}"
+	tk_begin(&f, 0);
+	tk_feed(&f, TK_ASK, 0, "go");
+	tk_feed(&f, TK_USE, 1, "tw1", "TodoWrite", TODO("a", "pending", "b",
+	                                                "pending"));
+	k = (int)f.off;
+	tk_feed(&f, TK_ASK, 10, "next");
+	tk_feed(&f, TK_USE, 11, "tw2", "TodoWrite", TODO("a", "in_progress", "b",
+	                                                 "pending"));
+	tk_feed(&f, TK_USE, 12, "tw3", "TodoWrite", TODO("a", "in_progress", "c",
+	                                                 "odd_word"));
+	o = tk_end(&f, 0);
+	snprintf(todos, sizeof todos, "{\"task\":{\"id\":\"1\",\"title\":\"a\","
+	         "\"status\":\"active\",\"label\":\"in_progress\",\"active\":"
+	         "\"aing\",\"note\":null,\"created\":\"2026-11-14T07:00:01Z\","
+	         "\"updated\":\"2026-11-14T07:00:11Z\",\"chapter\":\"f1f:%d\","
+	         "\"created_chapter\":\"f1f:0\"", k);
+	CHECK("tasks: TodoWrite: rows by position; a row keeps created while its "
+	      "text stands, updated until its status changes; a new text is a "
+	      "new row; an unknown status word is pending, the word its label",
+	      strstr(o, todos) &&
+	      strstr(o, "{\"task\":{\"id\":\"2\",\"title\":\"c\",\"status\":"
+	             "\"pending\",\"label\":\"odd_word\",\"active\":\"cing\","
+	             "\"note\":null,\"created\":\"2026-11-14T07:00:12Z\"") &&
+	      strstr(o, "{\"done\":true,\"count\":2,\"dropped\":0}\n"));
+	free(o);
+	tk_begin(&f, 0);
+	tk_feed(&f, TK_USE, 1, "tw1", "TodoWrite", TODO("a", "pending", "b",
+	                                                "pending"));
+	tk_feed(&f, TK_USE, 2, "tu1", "TaskCreate", "{\"subject\":\"T\"}");
+	tk_feed(&f, TK_RES, 2, "1", "tu1");
+	o = tk_end(&f, 0);
+	CHECK("tasks: a Task tool after TodoWrite: the Task list wins",
+	      strstr(o, "\"title\":\"T\"") && !strstr(o, "\"title\":\"a\"") &&
+	      strstr(o, "\"count\":1,"));
+	free(o);
+	tk_begin(&f, 0);
+	tk_feed(&f, TK_USE, 1, "tu1", "TaskCreate", "{\"subject\":\"T\"}");
+	tk_feed(&f, TK_RES, 1, "1", "tu1");
+	tk_feed(&f, TK_USE, 2, "tw1", "TodoWrite", "{\"todos\":[]}");
+	o = tk_end(&f, 0);
+	CHECK("tasks: an empty TodoWrite after a Task tool: the empty list wins, "
+	      "source claude",
+	      strstr(o, "\"source\":\"claude\"") && !strstr(o, "\"title\":\"T\"") &&
+	      strstr(o, "{\"done\":true,\"count\":0,\"dropped\":0}\n"));
+	free(o);
+
+	/* Codex: update_plan's arguments, a JSON string */
+	tk_begin(&f, 1);
+	tk_feed(&f, "{\"timestamp\":\"2026-11-14T07:00:00Z\",\"type\":"
+	        "\"response_item\",\"payload\":{\"type\":\"message\",\"role\":"
+	        "\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"go\"}]}}");
+	tk_feed(&f, "{\"timestamp\":\"2026-11-14T07:00:01Z\",\"type\":"
+	        "\"response_item\",\"payload\":{\"type\":\"function_call\","
+	        "\"name\":\"update_plan\",\"call_id\":\"c1\",\"arguments\":"
+	        "\"{\\\"explanation\\\":\\\"e\\\",\\\"plan\\\":[{\\\"step\\\":"
+	        "\\\"read\\\",\\\"status\\\":\\\"completed\\\"},{\\\"step\\\":"
+	        "\\\"write\\\",\\\"status\\\":\\\"in_progress\\\"}]}\"}}");
+	tk_feed(&f, "{\"timestamp\":\"2026-11-14T07:00:02Z\",\"type\":"
+	        "\"response_item\",\"payload\":{\"type\":\"function_call\","
+	        "\"name\":\"update_plan\",\"call_id\":\"c2\",\"arguments\":"
+	        "\"{\\\"plan\\\":[\"}}");
+	tk_feed(&f, "{\"timestamp\":\"2026-11-14T07:00:03Z\",\"type\":"
+	        "\"response_item\",\"payload\":{\"type\":\"function_call\","
+	        "\"name\":\"shell\",\"call_id\":\"c3\",\"arguments\":"
+	        "\"{\\\"plan\\\":[{\\\"step\\\":\\\"x\\\"}]}\"}}");
+	tk_feed(&f, "{\"timestamp\":\"2026-11-14T07:00:04Z\",\"type\":"
+	        "\"event_msg\",\"payload\":{\"type\":\"plan_update\",\"plan\":[]}}");
+	o = tk_end(&f, 0);
+	CHECK("tasks: Codex update_plan: source codex, plan order, ids by "
+	      "position; bad arguments, another tool, an event change nothing",
+	      strstr(o, "\"source\":\"codex\"") &&
+	      strstr(o, "{\"task\":{\"id\":\"1\",\"title\":\"read\",\"status\":"
+	             "\"done\",\"label\":\"completed\",\"active\":null,\"note\":"
+	             "null,\"created\":\"2026-11-14T07:00:01Z\"") &&
+	      strstr(o, "{\"task\":{\"id\":\"2\",\"title\":\"write\",\"status\":"
+	             "\"active\",\"label\":\"in_progress\"") &&
+	      strstr(o, "{\"done\":true,\"count\":2,\"dropped\":0}\n"));
+	free(o);
+
+	/* the cap: 50003 creates, each updated: the newest 50000, through the
+	** hash (a scan per update would take minutes) */
+	clock_gettime(CLOCK_MONOTONIC, &a);
+	tk_begin(&f, 0);
+	for (k = 1; k <= XR_TASKS + 3; k++)
+	{
+		char id[16], tu[24];
+
+		snprintf(id, sizeof id, "%d", k);
+		snprintf(tu, sizeof tu, "tu%d", k);
+		tk_feed(&f, TK_USE, 1, tu, "TaskCreate", "{\"subject\":\"t\"}");
+		tk_feed(&f, TK_RES, 1, id, tu);
+	}
+	for (k = 1; k <= XR_TASKS + 3; k++)
+	{
+		char in[64];
+
+		snprintf(in, sizeof in, "{\"taskId\":\"%d\",\"status\":\"%s\"}",
+		         k, k % 2 ? "completed" : "in_progress");
+		tk_feed(&f, TK_USE, 2, "tv", "TaskUpdate", in);
+	}
+	o = tk_end(&f, 0);
+	clock_gettime(CLOCK_MONOTONIC, &b);
+	ms = (double)(b.tv_sec - a.tv_sec) * 1e3 +
+	     (double)(b.tv_nsec - a.tv_nsec) / 1e6;
+	{
+		char line[200];
+		size_t lines = 0;
+
+		for (k = 0; o[k]; k++)
+			lines += o[k] == '\n';
+		snprintf(line, sizeof line, "tasks: 50003 creates and updates: the "
+		         "newest 50000 (4 to 50003), dropped 3, in %.0f ms", ms);
+		CHECK(line, lines == XR_TASKS + 2 &&
+		      strstr(o, "}\n{\"task\":{\"id\":\"4\",") &&
+		      strstr(o, "{\"task\":{\"id\":\"50003\",\"title\":\"t\","
+		             "\"status\":\"done\"") &&
+		      strstr(o, "{\"task\":{\"id\":\"50002\",\"title\":\"t\","
+		             "\"status\":\"active\"") &&
+		      strstr(o, "{\"done\":true,\"count\":50000,\"dropped\":3}\n"));
+	}
+	free(o);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -6828,6 +7156,7 @@ main(int argc, char **argv)
 	t_codex_lookup();
 	t_quote();
 	t_search();
+	t_tasks();
 	t_anchors();
 	t_newest();
 	t_prefilter();

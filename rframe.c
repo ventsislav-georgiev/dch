@@ -617,7 +617,8 @@ xray_budget(const char *s)
 /* --xray (spec #832 v3.2.1 4.4): the name right after the verb, then 3.1's
 ** flags in any order, each once: --json, required (the view is the
 ** client's own, as --requests is); one of --follow, --ref <text>,
-** --search <text> (#297), --chapter <anchor> and --clear; --scope, --full
+** --search <text> (#297), --chapter <anchor>, --tasks (#319) and --clear;
+** --scope, --full
 ** and --budget-ms only with --ref. A value is the next element even when it
 ** starts with '-'. --ref's and --search's text and the anchor are CK_TEXT
 ** (an anchor may hold ':'). The --ref
@@ -630,9 +631,11 @@ ctl_xray(int argc, char *const argv[], unsigned char *kind, char *why,
 {
 	static const char *const opt[] = { "--json", "--follow", "--clear",
 	                                   "--full", "--ref", "--chapter",
-	                                   "--scope", "--budget-ms", "--search" };
+	                                   "--scope", "--budget-ms", "--search",
+	                                   "--tasks" };
 	enum { X_JSON = 1, X_FOLLOW = 2, X_CLEAR = 4, X_FULL = 8, X_REF = 16,
-	       X_CHAPTER = 32, X_SCOPE = 64, X_BUDGET = 128, X_SEARCH = 256 };
+	       X_CHAPTER = 32, X_SCOPE = 64, X_BUDGET = 128, X_SEARCH = 256,
+	       X_TASKS = 512 };
 	const char *val[9] = { NULL };
 	unsigned seen = 0, k, one;
 	int i;
@@ -645,9 +648,9 @@ ctl_xray(int argc, char *const argv[], unsigned char *kind, char *why,
 	{
 		const char *a = argv[i];
 
-		for (k = 0; k < 9 && strcmp(a, opt[k]); k++)
+		for (k = 0; k < 10 && strcmp(a, opt[k]); k++)
 			;
-		if (k == 9)
+		if (k == 10)
 			return ctl_never(a) || !strcmp(a, "--all")
 			       ? ctl_no(why, cap, "%.60s is not allowed", a)
 			       : a[0] == '-'
@@ -658,7 +661,7 @@ ctl_xray(int argc, char *const argv[], unsigned char *kind, char *why,
 			return ctl_no(why, cap, "%s twice", opt[k]);
 		seen |= 1u << k;
 		kind[i] = CK_FLAG;
-		if (k >= 4)
+		if (k >= 4 && k <= 8)
 		{
 			if (++i >= argc)
 				return ctl_no(why, cap, "%s needs a value", opt[k]);
@@ -666,13 +669,14 @@ ctl_xray(int argc, char *const argv[], unsigned char *kind, char *why,
 			kind[i] = k == 6 || k == 7 ? CK_VALUE : CK_TEXT;
 		}
 	}
-	one = seen & (X_FOLLOW | X_CLEAR | X_REF | X_CHAPTER | X_SEARCH);
+	one = seen & (X_FOLLOW | X_CLEAR | X_REF | X_CHAPTER | X_SEARCH |
+	              X_TASKS);
 	if (!(seen & X_JSON))
 		return ctl_no(why, cap, "--xray needs --json (the view is "
 		              "client-side only)");
 	if (one & (one - 1))
-		return ctl_no(why, cap, "--ref, --search, --follow, --chapter and "
-		              "--clear exclude each other");
+		return ctl_no(why, cap, "--ref, --search, --tasks, --follow, "
+		              "--chapter and --clear exclude each other");
 	if (seen & (X_FULL | X_SCOPE | X_BUDGET) && !(seen & X_REF))
 		return ctl_no(why, cap, "--scope, --full and --budget-ms come "
 		              "with --ref");

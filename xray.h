@@ -545,4 +545,25 @@ int xr_search_print(FILE *f, const struct xr_search *s, const char *session,
                     const char *session_id, const char *corpus,
                     const char *why);
 
+/* ---- --tasks (#319): the session's task list ---------------------------- */
+#define XR_TASKS       50000		/* tasks kept: the newest */
+#define XR_TASK_DEPS   64		/* blocked_by ids a task keeps */
+
+/* Claude Code's TaskCreate/TaskUpdate and TodoWrite, a Codex rollout's
+** update_plan calls (main thread only), gathered while the decoder reads.
+** Set before the read; ino is the file's, for the chapter anchors. */
+struct xr_tasks;
+struct xr_tasks *xr_tasks_new(void);
+void xr_tasks_free(struct xr_tasks *t);
+void xr_claude_tasks(struct xr_claude *d, struct xr_tasks *t, uint64_t ino);
+/* JSON lines: {"schema":1,"session","session_id","source","title",
+** "partial"[,"warn"]}, one {"task":{"id","title","status","label","active",
+** "note","created","updated","chapter","created_chapter","blocked_by","url",
+** "group"}} per task in the source's order, {"done":true,"count","dropped"}.
+** t NULL or empty: source "none", no task line. warn (#321: a command
+** source that failed) is one line, the field left out when NULL or "".
+** 0, -1 a write failed (the lines after it, done too, are not written). */
+int xr_tasks_print(FILE *f, const struct xr_tasks *t, const char *session,
+                   const char *session_id, int partial, const char *warn);
+
 #endif /* DCH_XRAY_H */

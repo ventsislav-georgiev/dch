@@ -8,7 +8,7 @@ execs the real dch. Loopback only, a fake tailscale, temp HOME.
 LOW-XN1 (QA 1.63.0): a peer's --search and --ref through serve answer as
 the host's own dch does, and the text is never in the ctl child's argv
 (the wrapper logs "$@", what the host's ps shows): "-" there, the text on
-its stdin.
+its stdin. #319: a peer's --tasks answers as the host's dch.
 
 Run:  python3 tests/serve_xray_env_test.py        (uses ./dch)
 """
@@ -82,6 +82,58 @@ def xn1(senv, cenv, logs, check):
                       for f in ("--search", "--ref") if f in a) and
           not any(SECRET in x or "pull/41" in x for a in argvs for x in a),
           ran)
+
+
+def tasks(senv, cenv, check):
+    """#319: a peer's --tasks through serve answers as the host's own dch:
+    the host's session xt, a Claude with one task."""
+    sid = "11111111-2222-4333-8444-5555555555f2"
+    cfg = os.path.join(senv["HOME"], ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    with open(os.path.join(pdir, sid + ".jsonl"), "w") as f:
+        for o in ({"type": "user", "cwd": "/home/demo/proj",
+                   "timestamp": "2026-11-14T07:00:00Z",
+                   "message": {"content": "plan it"}},
+                  {"type": "assistant", "timestamp": "2026-11-14T07:00:01Z",
+                   "message": {"content": [{
+                       "type": "tool_use", "id": "toolu_1",
+                       "name": "TaskCreate", "input": {
+                           "subject": "Port the parser",
+                           "description": "", "activeForm": "Porting"}}]}},
+                  {"type": "user", "timestamp": "2026-11-14T07:00:02Z",
+                   "toolUseResult": {"task": {"id": "1"}},
+                   "message": {"content": [{"type": "tool_result",
+                                            "tool_use_id": "toolu_1",
+                                            "content": "ok"}]}}):
+            f.write(json.dumps(o) + "\n")
+    sock = os.path.join(senv["XDG_RUNTIME_DIR"], "dch-%d" % os.getuid())
+    hdir = os.path.join(senv["XDG_STATE_HOME"], "dch", "sessions",
+                        sock.replace("/", "-"))
+    os.makedirs(hdir, exist_ok=True)
+    with open(os.path.join(hdir, "xt.json"), "w") as f:
+        json.dump({"name": "xt", "cwd": "/home/demo/proj", "end": "exited",
+                   "argv": ["claude"], "started": 1794299400,
+                   "updated": 1794300000, "ended": 1794300000,
+                   "sock_dir": sock,
+                   "agent": {"session_id": sid, "cwd": "/home/demo/proj",
+                             "config_dir": cfg}}, f)
+    henv = {k: v for k, v in senv.items() if not k.startswith("DCH_XRAY_")}
+    loc = subprocess.run([DCH, "--xray", "xt", "--tasks", "--json"],
+                         env=henv, capture_output=True, timeout=30,
+                         stdin=subprocess.DEVNULL)
+    rem = subprocess.run([DCH, "--xray", "srv:xt", "--tasks", "--json"],
+                         env=cenv, capture_output=True, timeout=60,
+                         stdin=subprocess.DEVNULL)
+    ls = loc.stdout.splitlines()
+    check("a peer's --tasks answers as the host's own dch: the header, "
+          "the task, done",
+          loc.returncode == 0 and len(ls) == 3 and
+          b'"source":"claude"' in ls[0] and b'"Port the parser"' in ls[1] and
+          ls[2] == b'{"done":true,"count":1,"dropped":0}' and
+          (rem.returncode, rem.stdout) == (0, loc.stdout),
+          (loc.returncode, loc.stdout[:300], loc.stderr[:200],
+           rem.returncode, rem.stdout[:300], rem.stderr[:300]))
 
 
 def main():
@@ -167,6 +219,7 @@ def main():
             check("...without DCH_XRAY_NOCLOCK or DCH_XRAY_CAPS in its "
                   "environment", got and not any(got.values()), got)
             xn1(senv, cenv, logs, check)
+            tasks(senv, cenv, check)
     finally:
         if sp.poll() is None:
             sp.send_signal(signal.SIGTERM)

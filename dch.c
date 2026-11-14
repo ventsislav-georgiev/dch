@@ -2875,6 +2875,8 @@ usage(void)
 	    "                                             word or phrase was said\n"
 	    "  dch --xray <n> --chapter <anchor> --json   one chapter's entries\n"
 	    "                                             as one JSON object;\n"
+	    "  dch --xray <n> --tasks --json              the session's task list\n"
+	    "                                             as JSON lines;\n"
 	    "                                             <n> as host:name runs\n"
 	    "                                             on that host's dch serve\n"
 	    "  dch --xray host:name --requests --json     one warm connection: X-ray\n"
@@ -13165,6 +13167,107 @@ xr_chapter(const struct xr_target *t, const char *anchor)
 	return rc;
 }
 
+/* ---- dch --xray <n> --tasks --json (#319) ------------------------------ */
+
+/* A looked-up transcript (codex: a rollout), read as --json reads it, its
+** task records gathered on the way. */
+static int
+xr_tasks_file(const char *path, const struct stat *st, int codex,
+              const char *sid, const char *session, const char *warn)
+{
+	struct xr_tasks *tk;
+	struct xr_claude *d = NULL;
+	int fd, capped = 0, rc = -1;
+
+	if ((fd = xr_seam_open(path, st)) < 0)	/* there but unreadable: 3 */
+		return errno == EACCES || errno == EPERM || errno == EIO
+		       ? xr_failed() : xr_no_corpus();
+	if ((tk = xr_tasks_new()) && (d = xr_claude_new()))
+	{
+		if (codex)
+			xr_claude_codex(d);
+		xr_claude_tasks(d, tk, (uint64_t)st->st_ino);
+		rc = xr_claude_read(d, fd, (uint64_t)st->st_size, &capped);
+	}
+	close(fd);
+	xr_claude_free(d);
+	rc = rc < 0 ? xr_failed()
+	     : xr_out_exit(xr_tasks_print(stdout, tk, session, sid, capped,
+	                                  warn) == 0);
+	xr_tasks_free(tk);
+	return rc;
+}
+
+static int
+xr_tasks_claude(const char *cfg, const char *sid, const char *session,
+                const char *warn)
+{
+	char path[2048], home[1400], project[1200];
+	struct stat st;
+
+	if (!cfg[0])
+	{
+		const char *h = getenv("HOME");
+
+		if (!h || snprintf(home, sizeof home, "%s/.claude", h)
+		    >= (int)sizeof home)
+			return xr_no_corpus();
+		cfg = home;
+	}
+	if (xr_claude_lookup(cfg, sid, path, sizeof path, &st, project,
+	                     sizeof project) < 0)
+		return xr_no_corpus();
+	return xr_tasks_file(path, &st, 0, sid, session, warn);
+}
+
+/* --tasks: a Claude session's transcript (live or ended), a live Codex's
+** rollout, as --chapter finds them (none found: no corpus); a shell, live
+** or ended, keeps no task list: source "none". */
+static int
+xr_tasks_q(const struct xr_target *t)
+{
+	struct ring_snap rs;
+	struct cmd_info ci;
+	struct crec c;
+	struct xr_cx xc;
+	char cfg[1400], path[2048];
+	struct stat st;
+	int qc, cx;
+	const char *warn = NULL;
+
+	/* #321 hooks in here: a command source goes first and answers when it
+	** gives a row; else the built-in source below, its failure in warn. */
+	if (t->kind == XR_ENDED)
+		return t->rec->sid[0] ? xr_tasks_claude(t->rec->acfg, t->rec->sid,
+		                                        t->name, warn)
+		       : xr_out_exit(xr_tasks_print(stdout, NULL, t->name, "",
+		                                    0, warn) == 0);
+	if ((qc = cmd_query(t->sock, &ci)) == -4)
+		return xr_no_session();
+	if (qc == 0 && xr_live_claude(&ci, &c))
+	{
+		cmd_info_free(&ci);
+		xr_crec_cfg(&c, cfg, sizeof cfg);
+		return cfg[0] ? xr_tasks_claude(cfg, c.sid, t->name, warn)
+		              : xr_no_corpus();
+	}
+	if (qc == 0 && (cx = xr_live_codex(&ci, &xc)) != 0)
+	{
+		cmd_info_free(&ci);
+		return cx > 0 && xr_codex_lookup(xc.home, xc.tid, path, sizeof path,
+		                                 &st) == 0
+		       ? xr_tasks_file(path, &st, 1, xc.tid, t->name, warn)
+		       : xr_no_corpus();
+	}
+	if (qc == 0)
+		cmd_info_free(&ci);
+	/* the ring's header for the session_id, as the other forms give it */
+	if (ring_fetch(t->sock, &rs, NULL, NULL) == -1)
+		return xr_no_session();
+	return xr_out_exit(xr_tasks_print(stdout, NULL, t->name, rs.sid, 0,
+	                                  warn) == 0);
+}
+
 /* --clear: MSG_RING_CLEAR to a live master; never the pty. The header and
 ** the clear go over one connection, so a session resolved by its ring
 ** session_id is cleared only while it still carries that id (shortcut: a
@@ -14537,7 +14640,7 @@ xray_main(int argc, char **argv)
 	const char *n = NULL, *ref = NULL, *scope = NULL, *budget = NULL, *e;
 	const char *chapter = NULL, *search = NULL;
 	int json = 0, clear = 0, full = 0, follow = 0, k, rc, nr, ni = 0;
-	int requests = 0;
+	int requests = 0, tasks = 0;
 	struct hrec *r = NULL;
 	struct xr_target t;
 	struct xr_refq q;
@@ -14584,6 +14687,8 @@ xray_main(int argc, char **argv)
 			follow = 1;
 		else if (!strcmp(argv[k], "--requests") && !requests)
 			requests = 1;
+		else if (!strcmp(argv[k], "--tasks") && !tasks)
+			tasks = 1;
 		else if (argv[k][0] == '-' && argv[k][1])
 		{
 			fprintf(stderr, "dch: bad usage: %s%s\n", argv[k],
@@ -14592,7 +14697,8 @@ xray_main(int argc, char **argv)
 			           !strcmp(argv[k], "--clear") ||
 			           !strcmp(argv[k], "--full") ||
 			           !strcmp(argv[k], "--follow") ||
-			           !strcmp(argv[k], "--requests")) ? " twice"
+			           !strcmp(argv[k], "--requests") ||
+			           !strcmp(argv[k], "--tasks")) ? " twice"
 			        : " is not an --xray flag of this dch");
 			return 2;
 		}
@@ -14624,6 +14730,13 @@ xray_main(int argc, char **argv)
 		        : "--follow");
 		return 2;
 	}
+	if (tasks && (ref || search || chapter || clear || follow))
+	{
+		fprintf(stderr, "dch: bad usage: --tasks and %s\n",
+		        ref ? "--ref" : search ? "--search" : chapter ? "--chapter"
+		        : clear ? "--clear" : "--follow");
+		return 2;
+	}
 	if (follow && (ref || clear))
 	{
 		fprintf(stderr, "dch: bad usage: --follow and %s\n",
@@ -14646,7 +14759,7 @@ xray_main(int argc, char **argv)
 		/* #158, spec 4.3: each request's flags come on stdin; a local
 		** session takes one dch --xray per request (K4.1) */
 		if (!json || ref || chapter || clear || follow || scope || full ||
-		    budget || search)
+		    budget || search || tasks)
 		{
 			fputs("dch: bad usage: --requests takes host:name and --json, "
 			      "nothing else\n", stderr);
@@ -14730,7 +14843,7 @@ xray_main(int argc, char **argv)
 	q.scope = !scope || !strcmp(scope, "project") ? 1
 	          : !strcmp(scope, "all") ? 2 : 0;
 	/* the view (#175): `--xray <n>` alone */
-	if (!json && (ref || chapter || clear || follow || search))
+	if (!json && (ref || chapter || clear || follow || search || tasks))
 	{
 		fputs("dch: bad usage: --json is required (the --xray view takes "
 		      "no flag)\n", stderr);
@@ -14764,6 +14877,7 @@ xray_main(int argc, char **argv)
 	if (rc == 0)
 		rc = clear ? xr_clear(&t) : follow ? xr_follow(&t)
 		     : chapter ? xr_chapter(&t, chapter)
+		     : tasks ? xr_tasks_q(&t)
 		     : xr_json(&t, ref || search ? &q : NULL, 0);
 	hrec_free(r, nr);
 	return rc;

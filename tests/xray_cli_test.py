@@ -1595,6 +1595,7 @@ def test_write_fail():
                             "--full", "--json"]),
                  ("--clear", [n, "--clear", "--json"]),
                  ("--search", ["xr-wf", "--search", "#831", "--json"]),
+                 ("--tasks", ["xr-wf", "--tasks", "--json"]),
                  ("--chapter", ["xr-wf", "--chapter", "f%x:0" %
                                 os.stat(tp).st_ino, "--json"])]
         for what, a in forms:
@@ -1784,6 +1785,296 @@ def test_search():
           (rc, o, err))
     os.unlink(tp)
     os.unlink(tp2)
+
+
+# ---- --tasks --json (#319) -------------------------------------------------
+
+TSID = "11111111-2222-4333-8444-5555555555c1"
+TSID2 = "11111111-2222-4333-8444-5555555555c2"
+TSID3 = "11111111-2222-4333-8444-5555555555c3"
+TK_HEAD = ["schema", "session", "session_id", "source", "title", "partial"]
+TK_KEYS = ["id", "title", "status", "label", "active", "note", "created",
+           "updated", "chapter", "created_chapter", "blocked_by", "url",
+           "group"]
+
+
+def tasks(n, env=None):
+    """(rc, header, [task], done, stderr) of --tasks --json's lines."""
+    r = dch("--xray", n, "--tasks", "--json", env=env)
+    ls = ref_lines(r.stdout) or [{}]
+    return (r.returncode, ls[0], [l.get("task") for l in ls[1:-1]], ls[-1],
+            r.stderr)
+
+
+def tk_use(id, name, inp):
+    return {"type": "tool_use", "id": id, "name": name, "input": inp}
+
+
+def tk_said(t, *parts, side=False):
+    o = {"type": "assistant", "timestamp": t,
+         "message": {"content": list(parts)}}
+    if side:
+        o["isSidechain"] = True
+    return o
+
+
+def tk_made(t, tuid, tid, side=False):
+    o = {"type": "user", "timestamp": t,
+         "toolUseResult": {"task": {"id": tid, "subject": "x"}},
+         "message": {"content": [{"type": "tool_result", "tool_use_id": tuid,
+                                  "content": "Task #%s created" % tid}]}}
+    if side:
+        o["isSidechain"] = True
+    return o
+
+
+def test_tasks():
+    """The session's task list (#319): TaskCreate/TaskUpdate rows with
+    their real ids from the results, times and chapters; a create still
+    waiting for its result is provisional; an unknown id, a sidechain, a
+    bad line change nothing; deleted stays as dropped; TodoWrite replaces
+    the list and keeps a row's times while its text stands; the kind used
+    last wins; a shell is source none; the read range is partial; nothing
+    written; the flag's exclusions."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, TSID + ".jsonl")
+    tp2 = os.path.join(pdir, TSID2 + ".jsonl")
+    ts = lambda s: "2026-11-14T07:%02d:%02d.000Z" % divmod(s, 60)
+    iso = lambda s: "2026-11-14T07:%02d:%02dZ" % divmod(s, 60)
+    ask = lambda s, t: {"type": "user", "cwd": "/home/demo/proj",
+                        "timestamp": ts(s), "message": {"content": t}}
+    recs = [
+        ask(0, "plan the fix"),
+        tk_said(ts(1), tk_use("toolu_a", "TaskCreate", {
+            "subject": "Fix the login test",
+            "description": "\nThe login test fails\nsecond line",
+            "activeForm": "Fixing the login test"})),
+        tk_made(ts(2), "toolu_a", "1"),
+        tk_said(ts(3), tk_use("toolu_b", "TaskCreate", {
+            "subject": "Write docs", "description": ""})),
+        tk_made(ts(4), "toolu_b", "2"),
+        tk_said(ts(5), tk_use("toolu_s", "TaskCreate", {
+            "subject": "a subagent's own", "description": ""}), side=True),
+        tk_made(ts(5), "toolu_s", "7", side=True),
+        ask(10, "go on"),
+        tk_said(ts(11),
+                tk_use("toolu_c", "TaskUpdate",
+                       {"taskId": "1", "status": "in_progress"}),
+                tk_use("toolu_d", "TaskUpdate",
+                       {"taskId": "2", "addBlockedBy": ["1"],
+                        "owner": "me"}),
+                tk_use("toolu_e", "TaskUpdate",
+                       {"taskId": "99", "status": "completed"}),
+                tk_use("toolu_f", "TaskUpdate",
+                       {"taskId": "1", "status": "bogus"})),
+        "{not json",
+        {"type": "system", "subtype": "compact_boundary",
+         "timestamp": ts(12)},
+        {"type": "user", "isCompactSummary": True, "timestamp": ts(12),
+         "message": {"content": "summary of the work"}},
+        ask(20, "finish"),
+        tk_said(ts(21),
+                tk_use("toolu_g", "TaskUpdate",
+                       {"taskId": "1", "status": "completed"}),
+                tk_use("toolu_h", "TaskUpdate",
+                       {"taskId": 2, "status": "deleted"}),
+                tk_use("toolu_i", "TaskCreate", {"subject": "Ship it",
+                                                 "description": "soon"})),
+        tk_said(ts(22), tk_use("toolu_s2", "TaskUpdate",
+                               {"taskId": "1", "status": "pending"}),
+                side=True)]
+    with open(tp, "w") as f:
+        for o in recs:
+            f.write((o if isinstance(o, str) else json.dumps(o)) + "\n")
+    history("xr-tk", TSID, cfg)
+    rc, o, err = xray("xr-tk", "--json")
+    anchors = [c["anchor"] for c in (o or {}).get("chapters", [])]
+    # the prompt after the compaction rides in its chapter
+    check("tasks: the fixture has its three chapters", len(anchors) == 3,
+          (o, err))
+    if len(anchors) != 3:
+        return
+    a0, a3 = anchors[0], anchors[2]
+    before = files(T)
+    rc, h, tk, done, err = tasks("xr-tk")
+    check("tasks: a header line, its keys in order, source claude",
+          rc == 0 and list(h) == TK_HEAD and h["schema"] == 1 and
+          h["session"] == "xr-tk" and h["session_id"] == TSID and
+          h["source"] == "claude" and h["title"] is None and
+          h["partial"] is False, (rc, h, err))
+    check("tasks: one task line per task, keys in order, then done",
+          all(t and list(t) == TK_KEYS for t in tk) and
+          done == {"done": True, "count": 3, "dropped": 0}, (tk, done))
+    want = [
+        {"id": "1", "title": "Fix the login test", "status": "done",
+         "label": "completed", "active": "Fixing the login test",
+         "note": "The login test fails", "created": iso(1),
+         "updated": iso(21), "chapter": a3, "created_chapter": a0,
+         "blocked_by": [], "url": None, "group": None},
+        {"id": "2", "title": "Write docs", "status": "dropped",
+         "label": "deleted", "active": None, "note": None,
+         "created": iso(3), "updated": iso(21), "chapter": a3,
+         "created_chapter": a0, "blocked_by": ["1"], "url": None,
+         "group": None},
+        {"id": "?3", "title": "Ship it", "status": "pending",
+         "label": "pending", "active": None, "note": "soon",
+         "created": iso(21), "updated": iso(21), "chapter": a3,
+         "created_chapter": a3, "blocked_by": [], "url": None,
+         "group": None}]
+    check("tasks: ids from the results, statuses mapped, deleted stays as "
+          "dropped, a create with no result yet provisional; the sidechain's "
+          "task, the unknown id, the unknown status and the bad line change "
+          "nothing; across a compaction",
+          tk == want, json.dumps(tk, indent=1))
+    new = sorted(set(files(T)) - set(before))
+    check("tasks: nothing written", not new, new)
+
+    # the 16 MB + 256 MB rule, lowered: a range that skipped bytes is partial
+    caps = dict(ENV, DCH_XRAY_CAPS="0:0:0:%d:%d" % (200, 600))
+    rc, h, tk, done, err = tasks("xr-tk", env=caps)
+    check("tasks: a read range that skipped bytes is partial",
+          rc == 0 and h.get("partial") is True and done.get("done"),
+          (rc, h, done, err))
+
+    # TodoWrite: the whole list each call, rows by position; a Task tool
+    # used before it loses to it (the kind used last)
+    todo = lambda s, items: tk_said(ts(s), tk_use(
+        "toolu_t%d" % s, "TodoWrite", {"todos": [
+            {"content": c, "status": st, "activeForm": c + "ing"}
+            for c, st in items]}))
+    with open(tp2, "w") as f:
+        for o in [ask(0, "one"),
+                  tk_said(ts(1), tk_use("toolu_x", "TaskCreate",
+                                        {"subject": "old kind",
+                                         "description": ""})),
+                  tk_made(ts(1), "toolu_x", "1"),
+                  todo(2, [("lint", "pending"), ("test", "pending")]),
+                  ask(10, "two"),
+                  todo(11, [("lint", "completed"), ("test", "pending")]),
+                  ask(20, "three"),
+                  todo(21, [("lint", "completed"), ("ship", "in_progress")])]:
+            f.write(json.dumps(o) + "\n")
+    history("xr-tk2", TSID2, cfg)
+    rc, o, err = xray("xr-tk2", "--json")
+    b = [c["anchor"] for c in (o or {}).get("chapters", [])]
+    rc, h, tk, done, err = tasks("xr-tk2")
+    check("tasks: TodoWrite, used last, wins over the Task tools; a row "
+          "keeps its created times while its text stands at its position, "
+          "its updated ones until its status changes; a new text there is "
+          "a new row",
+          rc == 0 and len(b) == 3 and h.get("source") == "claude" and
+          [(t["id"], t["title"], t["status"], t["label"], t["active"],
+            t["created"], t["created_chapter"], t["updated"], t["chapter"])
+           for t in tk] ==
+          [("1", "lint", "done", "completed", "linting", iso(2), b[0],
+            iso(11), b[1]),
+           ("2", "ship", "active", "in_progress", "shiping", iso(21), b[2],
+            iso(21), b[2])] and
+          done == {"done": True, "count": 2, "dropped": 0},
+          (rc, h, json.dumps(tk), done, err))
+
+    # no task record: source none, no task line
+    history("xr-tk-plain", SSID2, cfg)
+    with open(os.path.join(pdir, SSID2 + ".jsonl"), "w") as f:
+        f.write(json.dumps(ask(0, "no tasks here")) + "\n")
+    rc, h, tk, done, err = tasks("xr-tk-plain")
+    check("tasks: a transcript with no task record is source none, no task "
+          "line, done count 0", rc == 0 and h.get("source") == "none" and
+          tk == [] and done == {"done": True, "count": 0, "dropped": 0},
+          (rc, h, tk, done, err))
+    os.unlink(os.path.join(pdir, SSID2 + ".jsonl"))
+    # the transcript gone: no corpus, as --search and --chapter say
+    history("xr-tk-gone", TSID3, cfg)
+    r = dch("--xray", "xr-tk-gone", "--tasks", "--json")
+    check("tasks: no transcript is no x-ray corpus (exit 1)",
+          r.returncode == 1 and r.stdout == "" and
+          r.stderr == "dch: no x-ray corpus\n", (r.returncode, r.stderr))
+
+    # a live shell keeps no task list: source none, its ring's id
+    n = "xc-tk"
+    try:
+        r = dch("--spawn", n, "--size", "80x24", "sh", "-c",
+                "echo TK''UP; sleep 60")
+        check("tasks: shell spawned", r.returncode == 0 and
+              wait_for(lambda: "TKUP" in screen(n), 10), r.stderr)
+        rc, o, err = xray(n, "--json")
+        rc, h, tk, done, err = tasks(n)
+        check("tasks: a live shell is source none, no task line",
+              rc == 0 and h.get("source") == "none" and
+              h.get("session") == n and
+              h.get("session_id") == (o or {}).get("session_id") and
+              tk == [] and done == {"done": True, "count": 0, "dropped": 0},
+              (rc, h, tk, done, err))
+    finally:
+        dch("-k", n)
+
+    for a, other in ((["--ref", "#1"], "--ref"),
+                     (["--search", "needle"], "--search"),
+                     (["--chapter", a0], "--chapter"),
+                     (["--clear"], "--clear"), (["--follow"], "--follow")):
+        r = dch("--xray", "xr-tk", "--tasks", *a, "--json")
+        check("tasks: with %s is bad usage (exit 2)" % other,
+              r.returncode == 2 and r.stdout == "" and
+              r.stderr == "dch: bad usage: --tasks and %s\n" % other,
+              (r.stdout, r.stderr))
+    r = dch("--xray", "xr-tk", "--tasks", "--tasks", "--json")
+    check("tasks: twice is bad usage", r.returncode == 2 and
+          r.stderr == "dch: bad usage: --tasks twice\n", r.stderr)
+    r = dch("--xray", "xr-tk", "--tasks")
+    check("tasks: without --json refused as the other one-shot forms",
+          r.returncode == 2 and r.stdout == "" and
+          r.stderr == "dch: bad usage: --json is required (the --xray view "
+          "takes no flag)\n", (r.returncode, r.stderr))
+    os.unlink(tp)
+    os.unlink(tp2)
+
+
+def test_tasks_cap():
+    """XR_TASKS: 50005 TaskCreates, each updated twice, keep the newest
+    50000 (dropped 5), in time and memory linear in the count (ids found
+    through the hash, never a scan per update)."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, TSID3 + ".jsonl")
+    N = 50005
+    with open(tp, "w") as f:
+        f.write(json.dumps({"type": "user", "cwd": "/home/demo/proj",
+                            "timestamp": "2026-11-14T07:00:00Z",
+                            "message": {"content": "many"}}) + "\n")
+        for i in range(1, N + 1):
+            f.write('{"type":"assistant","message":{"content":[{"type":'
+                    '"tool_use","id":"tu%d","name":"TaskCreate","input":'
+                    '{"subject":"task %d","description":""}}]}}\n' % (i, i))
+            f.write('{"type":"user","toolUseResult":{"task":{"id":"%d"}},'
+                    '"message":{"content":[{"type":"tool_result",'
+                    '"tool_use_id":"tu%d","content":"ok"}]}}\n' % (i, i))
+        for st in ("in_progress", "completed"):
+            for i in range(1, N + 1):
+                f.write('{"type":"assistant","message":{"content":[{"type":'
+                        '"tool_use","id":"tv%d","name":"TaskUpdate","input":'
+                        '{"taskId":"%d","status":"%s"}}]}}\n' % (i, i, st))
+    history("xr-tk-cap", TSID3, cfg)
+    t0 = time.time()
+    rc, out, rss = maxrss([DCH, "--xray", "xr-tk-cap", "--tasks", "--json"],
+                          ENV)
+    secs = time.time() - t0
+    ls = ref_lines(out) or [{}]
+    tk = [l.get("task") for l in ls[1:-1]]
+    check("tasks cap: %.1f MB, 50005 tasks: the newest 50000, all done, "
+          "dropped 5, in %.2f s (under 10), %.1f MB RSS" %
+          (os.path.getsize(tp) / 1e6, secs, rss / 1e6),
+          rc == 0 and len(tk) == 50000 and tk[0]["id"] == "6" and
+          tk[-1]["id"] == str(N) and
+          all(t["status"] == "done" for t in tk) and
+          ls[-1] == {"done": True, "count": 50000, "dropped": 5} and
+          secs < 10, (rc, ls[:2], ls[-1:], secs))
+    if not SANITIZED and HELPER:
+        check("tasks cap: under 128 MB RSS: %.1f MB" % (rss / 1e6),
+              rss < 128 << 20, rss)
+    os.unlink(tp)
 
 
 # ---- 3.5: --chapter <anchor> --json (#156, XR3b) --------------------------
@@ -4177,6 +4468,8 @@ def main():
         test_d2_whole()
         test_write_fail()
         test_search()
+        test_tasks()
+        test_tasks_cap()
         test_chapter()
         test_chapter_seek()
         test_chapter_shell()

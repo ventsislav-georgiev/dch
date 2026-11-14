@@ -109,6 +109,10 @@ dch \- detachable terminal sessions with a headless agent API
 .br
 .B dch \-\-xray
 .I name
+.B \-\-tasks \-\-json
+.br
+.B dch \-\-xray
+.I name
 .B \-\-ref
 .I ref
 .RB [ \-\-scope
@@ -1511,6 +1515,74 @@ On
 .IB host : name
 a host whose dch predates it says
 .IR "the host's dch does not know \-\-search" .
+.B \-\-tasks
+prints the session's task list as JSON lines, as
+.B \-\-ref
+prints its lines: a header
+.RB ( schema ,
+.BR session ,
+.BR session_id ,
+.B source
+.RB ( claude ,
+.B codex
+or
+.BR none ),
+.BR title ,
+.BR partial ),
+one
+.B task
+line per task
+.RB ( id ,
+.BR title ,
+.B status
+.RB ( pending ,
+.BR active ,
+.BR done ,
+.BR dropped ),
+.B label
+(the source's own word),
+.BR active ,
+.BR note ,
+.B created
+and
+.B updated
+(ISO 8601 UTC),
+.B chapter
+and
+.B created_chapter
+(anchors),
+.BR blocked_by ,
+.B url
+and
+.BR group ,
+null),
+then
+.BR {"done":true,"count": N ,"dropped": M } .
+The sources are Claude Code's TaskCreate and TaskUpdate (the id from the
+create's result; one still waiting for it is
+.RI ? n ,
+pending), the older TodoWrite, and Codex's update_plan; TodoWrite and
+update_plan replace the whole list and their ids are 1\-based positions.
+The kind used last wins; sidechain records are skipped; a deleted task
+stays as
+.BR dropped .
+The transcript is read as
+.B \-\-json
+reads it
+.RB ( partial:true
+past that range); the newest 50000 tasks are kept, a line is at most
+64 KB.
+A shell, or a session with no task record, gives
+.B source:none
+and no task lines.
+It goes with no other flag but
+.B \-\-json
+and not in
+.BR \-\-requests ;
+on
+.IB host : name
+a host whose dch predates it says
+.IR "the host's dch does not know \-\-tasks" .
 .B \-\-chapter
 .I anchor
 prints one chapter's entries as one object
@@ -1954,9 +2026,10 @@ or, for
 .B \-\-clear
 in dch\-lite and for
 .BR \-\-chapter ,
-.B \-\-ref
+.BR \-\-ref ,
+.B \-\-search
 and
-.BR \-\-search ,
+.BR \-\-tasks ,
 .IR "no x\-ray corpus" ,
 or for
 .BR \-\-chapter ,
@@ -3177,6 +3250,7 @@ a session name that passes the attach name check and does not start with
 \-\-xray \fIn\fP \-\-json [\-\-follow|\-\-clear|\-\-chapter \fIanchor\fP]
 \-\-xray \fIn\fP \-\-ref \fIref\fP [\-\-scope \fIs\fP] [\-\-full] [\-\-budget\-ms \fIms\fP] \-\-json
 \-\-xray \fIn\fP \-\-search \fItext\fP \-\-json
+\-\-xray \fIn\fP \-\-tasks \-\-json
 .fi
 .RE
 .PP
@@ -3218,6 +3292,7 @@ rules apply: no
 two of
 .BR \-\-ref ,
 .BR \-\-search ,
+.BR \-\-tasks ,
 .BR \-\-follow ,
 .B \-\-chapter
 and

@@ -4,7 +4,10 @@
 **
 ** Input: byte 0's low 2 bits pick the decoder, the rest is its input.
 **   0: a Claude JSONL transcript, cut at '\n' here (a line past xr_lim.line
-**      goes in as oversized);
+**      goes in as oversized), its task list gathered (#319; a Codex
+**      rollout when the head-squeeze bit is set, which mode 0 has no use
+**      for) and printed: JSON lines of at most 64 KB, valid UTF-8, the
+**      last one done;
 **   1: ring records ({u16 len, u8 kind, u8 flags, u32 time, text}), a short
 **      tail taken as what is left, through xr_shell_chapters;
 **   2: a Claude transcript as a file, through xr_claude_read (read_range:
@@ -100,6 +103,32 @@ emit(struct xr_chapters *c, int shell)
 	if (!bl || buf[bl - 1] != '\n' || memchr(buf, '\n', bl - 1) ||
 	    bl > xr_lim.out)
 		abort();
+	free(buf);
+}
+
+/* #319: the task lines, each under 64 KB and valid UTF-8, the last done */
+static void
+tasks_out(const struct xr_tasks *tk)
+{
+	char *buf = NULL, *l, *e;
+	size_t bl = 0;
+	FILE *f;
+
+	if (!(f = open_memstream(&buf, &bl)))
+		return;
+	if (xr_tasks_print(f, tk, "fuzz", "s", 0, NULL) != 0)
+		abort();
+	fclose(f);
+	if (!bl || buf[bl - 1] != '\n' || memchr(buf, '\0', bl))
+		abort();
+	check_utf8(buf, SIZE_MAX);
+	for (l = buf; (e = memchr(l, '\n', bl - (size_t)(l - buf))); l = e + 1)
+	{
+		if ((size_t)(e - l) >= 65536 || l[0] != '{' || e[-1] != '}')
+			abort();
+		if (e + 1 == buf + bl && strncmp(l, "{\"done\":true,", 13))
+			abort();
+	}
 	free(buf);
 }
 
@@ -221,10 +250,18 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 	else if (!(d[0] & 1))
 	{
 		struct xr_claude *x = xr_claude_new();
+		struct xr_tasks *tk = xr_tasks_new();
 		size_t i = 1, s = 1;
 
-		if (!x)
+		if (!x || !tk)
+		{
+			xr_claude_free(x);
+			xr_tasks_free(tk);
 			return 0;
+		}
+		if (sq & 4)
+			xr_claude_codex(x);
+		xr_claude_tasks(x, tk, 0x1234);
 		for (; i <= n; i++)
 			if (i == n || d[i] == '\n')
 			{
@@ -246,6 +283,8 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 			}
 		xr_claude_end(x, 0x1234, &c);
 		xr_claude_free(x);
+		tasks_out(tk);
+		xr_tasks_free(tk);
 	}
 	else
 	{
