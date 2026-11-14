@@ -636,6 +636,8 @@ compute_sock_dir(void)
 ** default: when DCH_DEBUG is unset, the first call caches trace_fp = NULL and
 ** every call is a cheap early return. Each line is prefixed with a wall-clock
 ** timestamp and the pid so client/master interleaving is readable. */
+int dch_trace_fd = -1;
+
 void
 dch_trace(const char *fmt, ...)
 {
@@ -667,6 +669,7 @@ dch_trace(const char *fmt, ...)
 				** mode is a GNU extension, unreliable on macOS.) */
 				fcntl(fileno(trace_fp), F_SETFD, FD_CLOEXEC);
 				setvbuf(trace_fp, NULL, _IOLBF, 0);
+				dch_trace_fd = fileno(trace_fp);
 			}
 		}
 	}
@@ -2523,6 +2526,23 @@ sock_peer_pid(const char *sp)
 	return pid;
 }
 
+#ifdef __APPLE__
+/* Every pid, in *out (malloc'd, NULL when out of memory): how many. Sized
+** by the kernel's count plus room for those born since, not a fixed 4096
+** that missed the rest (QA 1.63.0 NIT-R6). */
+static int
+all_pids(int **out)
+{
+	int n = proc_listpids(PROC_ALL_PIDS, 0, NULL, 0) +
+	        256 * (int)sizeof **out;
+
+	if (!(*out = malloc((size_t)n)))
+		return 0;
+	n = proc_listpids(PROC_ALL_PIDS, 0, *out, n);
+	return n > 0 ? n / (int)sizeof **out : 0;
+}
+#endif
+
 /* Every process whose argv says it is the master of sp gets sig (0: none);
 ** how many there are. A zombie's argv is unreadable: it is not counted. */
 static int
@@ -2530,16 +2550,16 @@ masters_of(const char *sp, int sig)
 {
 	int k = 0;
 #ifdef __APPLE__
-	int pids[4096], n, i;
+	int *pids, n = all_pids(&pids), i;
 
-	n = proc_listpids(PROC_ALL_PIDS, 0, pids, sizeof(pids));
-	for (i = 0; i < n / (int)sizeof(pids[0]); i++)
+	for (i = 0; i < n; i++)
 		if (is_master_of(pids[i], sp))
 		{
 			k++;
 			if (sig)
 				kill(pids[i], sig);
 		}
+	free(pids);
 #else
 	DIR *d = opendir("/proc");
 	struct dirent *de;
@@ -3323,10 +3343,84 @@ static const char no_reply_msg[] =
 ** master's full backlog waits (#265). */
 #define CTL_CONNECT_MS 500
 
+#ifdef __APPLE__
+/* 1 when a unix listener of pid's has every backlog slot taken: why macOS
+** refused a connect to it (#268). A master with room was refused at a node
+** not its own: its own was unlinked and a dead replacement's took the name
+** (QA 1.63.0 LOW-R12), which is a dead node. */
+static int
+backlog_full(int pid)
+{
+	struct socket_fdinfo si;
+	struct proc_fdinfo *fd;
+	int n = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, NULL, 0), i, full = 0;
+
+	if (n <= 0 || !(fd = malloc((size_t)n)))
+		return 0;
+	n = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, fd, n) / (int)sizeof *fd;
+	for (i = 0; i < n && !full; i++)
+		full = fd[i].proc_fdtype == PROX_FDTYPE_SOCKET &&
+		       proc_pidfdinfo(pid, fd[i].proc_fd, PROC_PIDFDSOCKETINFO,
+		                      &si, sizeof si) == (int)sizeof si &&
+		       si.psi.soi_kind == SOCKINFO_UN &&
+		       (si.psi.soi_options & SO_ACCEPTCONN) &&
+		       si.psi.soi_qlen >= si.psi.soi_qlimit;
+	free(fd);
+	return full;
+}
+
+/* A refused socket node is a stuck master's when a process whose argv says
+** it is that node's master has a full listener (#268). One pass over every
+** process's argv serves each node refused within CTL_CONNECT_MS: a pass per
+** node made --ls-json pay 60 ms for each dead one (QA 1.63.0 LOW-R13).
+** shortcut: a master born after the pass reads as dead until it expires;
+** only one between its bind() and listen() can be refused that young. */
+static int
+stuck_master(const char *path)
+{
+	static int *pid, n;
+	static char **arg;	/* each one's argv[2], by realpath when absolute */
+	static long long at;
+	long long now = wall_ms();
+	char **v, rp[PATH_MAX], ra[PATH_MAX];
+	const char *p = realpath(path, rp) ? rp : path;
+	int i, k;
+
+	if (!pid || now < at || now - at > CTL_CONNECT_MS)
+	{
+		for (i = 0; i < n; i++)
+			free(arg[i]);
+		free(arg);
+		free(pid);
+		n = all_pids(&pid);
+		arg = pid ? malloc((size_t)n * sizeof *arg + 1) : NULL;
+		for (i = k = 0; arg && i < n; i++)
+		{
+			v = pid[i] > 1 ? proc_argv(pid[i]) : NULL;
+			if (v && v[0] && v[1] && v[2] &&
+			    strcmp(v[1], "--master-of") == 0 &&
+			    (arg[k] = strdup(v[2][0] == '/' && realpath(v[2], ra)
+			                     ? ra : v[2])))
+				pid[k++] = pid[i];
+			free(v);
+		}
+		n = arg ? k : 0;
+		at = now;
+		dch_trace("master scan: %d masters", n);
+	}
+	for (i = 0; i < n; i++)
+		if ((strcmp(arg[i], path) == 0 || strcmp(arg[i], p) == 0) &&
+		    backlog_full(pid[i]))
+			return 1;
+	return 0;
+}
+#endif
+
 /* -1 with errno EAGAIN: a listener is there, but its backlog stayed full
 ** for CTL_CONNECT_MS (Linux). macOS refuses that connect at once, as it
 ** does a dead master's socket: there a refused socket node whose master's
-** argv still names it is the same stuck master (#268). That is a live,
+** argv still names it and whose listener is full is the same stuck master
+** (#268, stuck_master). That is a live,
 ** stuck master, never a dead socket to unlink or revive over. */
 int
 control_connect_path(const char *path)
@@ -3357,7 +3451,7 @@ control_connect_path(const char *path)
 
 		/* only after a refusal of a socket node: off the common path */
 		if (e == ECONNREFUSED && lstat(path, &st) == 0 &&
-		    S_ISSOCK(st.st_mode) && masters_of(path, 0) > 0)
+		    S_ISSOCK(st.st_mode) && stuck_master(path))
 			e = EAGAIN;
 #endif
 		close(s);
@@ -5785,6 +5879,8 @@ struct crec_scan
 	int all;		/* every live record under root */
 	long pid[16];		/* the first 16 of them */
 	struct crec best;	/* the shallowest of them */
+	const char *want;	/* held: one of them runs this id (#314) */
+	int held;
 };
 
 static long
@@ -5837,21 +5933,34 @@ proc_ppid(long pid)
 	return proc_stat(pid, NULL);
 }
 
-/* 1 when the Claude at `pid` is in the foreground process group of the
-** terminal that `root` (a session's child, which the master made that
-** pty's controlling process) controls, 0 when it is not — suspended with
-** Ctrl-Z or in the background, a shell or another job in front (#282) —
-** -1 when either cannot be read. The kernel's own view, so an old master
-** answers it as well as a new one. */
-static int
+/* 1 when the Claude at `pid` is in the foreground process group of its
+** own terminal, and so is each wrapper with a pty of its own (script,
+** unbuffer: #312) between it and `root` (a session's child, which the
+** master made that pty's controlling process) on the terminal around it;
+** 0 when one is not — suspended with Ctrl-Z or in the background, a shell
+** or another job in front (#282) — -1 when the chain cannot be read. The
+** kernel's own view, so an old master answers it as well as a new one. */
+int
 proc_fg(long root, long pid)
 {
-	long fg = -1;
-	pid_t g = getpgid((pid_t)pid);
+	long fg = -1, below = 0, up;
+	pid_t g;
+	int d;
 
-	if (proc_stat(root, &fg) < 0 || fg <= 0 || g < 0)
-		return -1;
-	return g == (pid_t)fg;
+	for (d = 0; d < 64 && pid > 1; d++)
+	{
+		if ((up = proc_stat(pid, &fg)) < 0 || (g = getpgid((pid_t)pid)) < 0)
+			return -1;
+		/* a terminal's foreground group is the same for all its
+		** processes: a new one means a new terminal, checked once */
+		if ((d == 0 || fg != below) && (fg <= 0 || g != (pid_t)fg))
+			return 0;
+		if (pid == root)
+			return 1;
+		below = fg;
+		pid = up;
+	}
+	return -1;
 }
 
 /* Generations from `anc` down to `pid` (0 = the same process), -1 when pid
@@ -5915,6 +6024,8 @@ crec_visit(const char *path, const char *body, size_t len, void *arg)
 	     strcmp(start, actual)))
 		return 0;
 	snprintf(c.rec, sizeof c.rec, "%s", path);
+	if (cs->want && !strcmp(c.sid, cs->want))
+		cs->held = 1;
 	if (cs->all < 16)
 		cs->pid[cs->all] = c.pid;
 	if (cs->all++ == 0 || c.depth < cs->best.depth)
@@ -6015,9 +6126,10 @@ claude_dirs(long root, char (*dirs)[1100], int nd, int max)
 }
 
 /* Live Claudes at or below `root`, those below another counted as it (see
-** crec_visit); *best = the shallowest. */
+** crec_visit); *best = the shallowest; *held: one of them runs sid. */
 static int
-claude_find(long root, int verify, struct crec *best)
+claude_find_sid(long root, int verify, const char *sid, struct crec *best,
+                int *held)
 {
 	struct crec_scan cs;
 	char dirs[8][1100];
@@ -6026,10 +6138,20 @@ claude_find(long root, int verify, struct crec *best)
 	memset(&cs, 0, sizeof cs);
 	cs.root = root;
 	cs.verify = verify;
+	cs.want = sid;
 	for (i = 0; i < nd; i++)
 		(void)visit_records_in(dirs[i], crec_visit, &cs);
 	*best = cs.best;
+	*held = cs.held;
 	return cs.n;
+}
+
+static int
+claude_find(long root, int verify, struct crec *best)
+{
+	int held;
+
+	return claude_find_sid(root, verify, NULL, best, &held);
 }
 
 /* --ls-json's Claude join (#079): one crec_scan per row, each record read
@@ -6273,7 +6395,7 @@ dch_agent_probe(long child, struct dch_agent *a)
 	memset(a, 0, sizeof *a);
 	/* no sid: its record caught mid-rewrite, the caller keeps what it
 	** had (#274) */
-	if (child <= 0 || claude_find(child, 1, &r) == 0 || !r.sid[0])
+	if (child <= 0 || (a->n = claude_find(child, 1, &r)) == 0 || !r.sid[0])
 		return -1;
 	for (p = r.pid; p != child && (pp = proc_ppid(p)) > 1 && pp != child;
 	     p = pp)
@@ -10831,19 +10953,25 @@ sid_visit(const char *path, const char *body, size_t len, void *arg)
 	return 0;
 }
 
-/* The conversation a Claude at or below `root` was started on, read from
-** its live argv (`--resume <id>`, `--resume=<id>`, `-r <id>`, the last one;
-** none with --fork-session, which writes a new id): until that Claude
-** writes its sessions record, the only sign of its id (#281). The kernel's
-** argv, not the master's MSG_CMD one, which outlives the child while held
-** and is the shell for a claude typed into it: a Claude that exited is out
-** of the tree and holds nothing. 0 and *sid, or -1. */
-static int
-claude_argv_sid(long root, char *sid, size_t sidsz)
+/* The conversation each Claude at or below `root` was started on, read
+** from its live argv (`--resume <id>`, `--resume=<id>`, `-r <id>`,
+** `-r<id>`, the last one; none with --fork-session, which writes a new id):
+** until that Claude writes its sessions record, the only sign of its id
+** (#281), so one with a record is skipped (a /resume switch moves it off
+** the argv; an empty record, #274, or one older than the process, a reused
+** pid's, is none). Every such Claude, not the first: a second one starting
+** beside a recorded one (#314). The kernel's argv, not the master's MSG_CMD
+** one, which outlives the child while held and is the shell for a claude
+** typed into it: a Claude that exited is out of the tree and holds nothing.
+** Each id goes to s as held by live session sn. */
+static void
+claude_argv_sid(long root, struct sidset *s, const char *sn)
 {
 	long tree[64];
 	int n = proc_tree(root, tree, 64), i, k, argc;
-	char **v;
+	char **v, rp[1100];
+	struct stat st;
+	time_t t;
 
 	for (i = 0; i < n; i++)
 	{
@@ -10863,15 +10991,16 @@ claude_argv_sid(long root, char *sid, size_t sidsz)
 			else if (!strncmp(v[k], "--resume=", 9) &&
 			         xr_uuid_shaped(v[k] + 9))
 				id = v[k] + 9;
-		if (id && (k == argc || strcmp(v[k], "--fork-session")))
-		{
-			snprintf(sid, sidsz, "%s", id);
-			free(v);
-			return 0;
-		}
+			else if (!strncmp(v[k], "-r", 2) && xr_uuid_shaped(v[k] + 2))
+				id = v[k] + 2;	/* commander's attached value */
+		if (id && (k == argc || strcmp(v[k], "--fork-session")) &&
+		    !(claude_sessions_dir(tree[i], rp, sizeof rp - 32) == 0 &&
+		      snprintf(rp + strlen(rp), 32, "/%ld.json", tree[i]) > 0 &&
+		      stat(rp, &st) == 0 && st.st_size > 0 &&
+		      (t = proc_started(tree[i])) >= 0 && t <= st.st_mtime + 2))
+			sid_add(s, id, 0, "live session %s", sn);
 		free(v);
 	}
-	return -1;
 }
 
 static void
@@ -10891,13 +11020,12 @@ sid_live(struct sidset *s, const struct hrec *r, int n)
 		session_sock_path(sl.v[k], sp, sizeof sp);
 		if (cmd_query(sp, &ci) != 0)
 			continue;
-		/* a record wins (a /resume switch moves it off the argv); none
-		** yet, or an empty one (#274): the id the Claude started on */
+		/* the shallowest Claude's record, and the id each Claude with
+		** none yet started on */
 		if (ci.pid > 0 && claude_find(ci.pid, 1, &c) > 0 && c.sid[0])
 			sid_add(s, c.sid, 0, "live session %s", sl.v[k]);
-		else if (ci.pid > 0 &&
-		         claude_argv_sid(ci.pid, c.sid, sizeof c.sid) == 0)
-			sid_add(s, c.sid, 0, "live session %s", sl.v[k]);
+		if (ci.pid > 0)
+			claude_argv_sid(ci.pid, s, sl.v[k]);
 		cmd_info_free(&ci);
 	}
 	slist_free(&sl);
@@ -12884,8 +13012,8 @@ xr_json(const struct xr_target *t, const struct xr_refq *q, int snap)
 /* ---- dch --xray <n> --chapter <anchor> --json (#156, XR3b; spec 3.5) ---- */
 
 /* The answer once the decode is done: the wanted chapter only while the
-** index still holds its anchor, exactly, and the entries gathered are that
-** chapter's (K14.2); else it went stale (K14.3). */
+** decode's chapters still hold its anchor, exactly, and the entries
+** gathered are that chapter's (K14.2); else it went stale (K14.3). */
 static int
 xr_chapter_out(const char *session, const char *sid,
                const struct xr_chapters *ch, const struct xr_entries *e)
@@ -12903,9 +13031,11 @@ xr_chapter_out(const char *session, const char *sid,
 	return 1;
 }
 
-/* One pass over a looked-up transcript (codex: a Codex rollout, 7.4): the
-** chapters-only index, and the wanted chapter's entries as it goes. Never a
-** seek (K14.2). */
+/* A looked-up transcript (codex: a Codex rollout, 7.4): the anchor's
+** chapter read from a little before its offset (#300: K14.2 no longer says
+** "never a seek", and the newest-5000 ordinal check is gone), else, when
+** the seek cannot be sure, one pass over the range: the chapters-only index,
+** and the wanted chapter's entries as it goes. */
 static int
 xr_chapter_file(const char *path, const struct stat *st, int codex,
                 const char *sid, const char *session, const char *anchor)
@@ -12913,24 +13043,28 @@ xr_chapter_file(const char *path, const struct stat *st, int codex,
 	struct xr_chapters ch = {0};
 	struct xr_entries e;
 	struct xr_claude *d;
-	int fd, capped, rc;
+	int fd, capped, rc, seek;
 
 	if ((fd = xr_seam_open(path, st)) < 0)	/* there but unreadable: 3 */
 		return errno == EACCES || errno == EPERM || errno == EIO
 		       ? xr_failed() : xr_no_corpus();
-	if (!(d = xr_claude_new()))
-	{
-		close(fd);
-		return xr_failed();
-	}
-	if (codex)
-		xr_claude_codex(d);
 	xr_entries_begin(&e, anchor, session, XR_CH_OUT);
-	xr_claude_entries(d, &e, (uint64_t)st->st_ino);
-	rc = xr_claude_read(d, fd, (uint64_t)st->st_size, &capped);
+	if ((rc = seek = xr_chapter_seek(fd, st, codex, &e, &ch)) == 0)
+	{
+		if (!(d = xr_claude_new()))
+			rc = -1;
+		else
+		{
+			if (codex)
+				xr_claude_codex(d);
+			xr_claude_entries(d, &e, (uint64_t)st->st_ino);
+			rc = xr_claude_read(d, fd, (uint64_t)st->st_size, &capped);
+			xr_claude_end(d, (uint64_t)st->st_ino, &ch);
+			xr_claude_free(d);
+		}
+	}
 	close(fd);
-	xr_claude_end(d, (uint64_t)st->st_ino, &ch);
-	xr_claude_free(d);
+	dch_trace("xray chapter: seek=%d", seek);	/* 0: read whole */
 	rc = rc < 0 ? xr_failed() : xr_chapter_out(session, sid, &ch, &e);
 	xr_chapters_free(&ch);
 	xr_entries_free(&e);
@@ -13491,6 +13625,7 @@ struct xf_cl
 	const struct xr_cx *cx;		/* a Codex rollout (7.4), else NULL */
 	char watch[2048];		/* Codex, no rollout yet: the dir watched */
 	const char *rec;		/* a Claude's session record, else NULL */
+	int claudes;			/* the live Claudes it runs among (#314) */
 };
 
 static int
@@ -13539,6 +13674,9 @@ xf_cl_answer(const struct xr_target *t, struct xf_cl *s, struct xr_answer *a)
 	a->project = s->project;
 	a->project_label = s->label;
 	a->other_projects = xf_others(s->sid, s->project);
+	/* one of several followed on: the count, as a paused ring says it */
+	a->agent = s->claudes > 1;
+	a->claudes = s->claudes;
 	if (!s->d)
 		return;
 	if ((!s->cx || !s->label[0]) && xr_claude_cwd(s->d)[0])
@@ -13590,13 +13728,13 @@ xf_cl_dir(const struct xf_cl *s, char *dir, size_t dirsz)
 }
 
 static int
-xf_cl_same(const struct xr_target *t, const struct xf_cl *s)
+xf_cl_same(const struct xr_target *t, struct xf_cl *s)
 {
 	struct cmd_info ci;
 	struct crec c;
 	struct stat st;
 	char path[2048], project[1200];
-	int qc = cmd_query(t->sock, &ci), same;
+	int qc = cmd_query(t->sock, &ci), same, held = 0;
 
 	struct xr_cx x;
 
@@ -13608,7 +13746,14 @@ xf_cl_same(const struct xr_target *t, const struct xf_cl *s)
 		       xr_live_codex(&ci, &x) != 0 && !strcmp(x.tid, s->sid) &&
 		       !strcmp(x.home, s->cx->home);
 	else
-		same = qc == 0 && xr_live_claude(&ci, &c) && !strcmp(c.sid, s->sid);
+	{
+		/* ours still among several: followed on, s->claudes says how
+		** many (#314); one: the one xr_live_claude takes */
+		s->claudes = qc == 0 && ci.pid > 0 && strcmp(ci.state, "held")
+		             ? claude_find_sid(ci.pid, 1, s->sid, &c, &held) : 0;
+		same = s->claudes == 1 ? !strcmp(c.sid, s->sid)
+		       : s->claudes > 1 && held;
+	}
 	if (qc == 0)
 		cmd_info_free(&ci);
 	/* our record truncated and not yet written (Claude Code rewrites it in
@@ -13688,6 +13833,7 @@ xf_claude(struct xf *f, const struct crec *c, const struct xr_cx *x,
 	snprintf(s.sid, sizeof s.sid, "%s", c->sid);
 	snprintf(s.label, sizeof s.label, "%s", c->cwd[0] ? c->cwd : label);
 	s.rec = c->rec;
+	s.claudes = 1;
 	xr_crec_cfg(c, s.cfg, sizeof s.cfg);
 	if (!s.cfg[0] && (h = getenv("HOME")))
 		snprintf(s.cfg, sizeof s.cfg, "%s/.claude", h);
@@ -13798,6 +13944,8 @@ read:
 		}
 		if (ev & XE_ROT)
 		{
+			int was = s.claudes;
+
 			if ((r = xf_cl_same(t, &s)) < 0)
 				break;
 			if (r)
@@ -13805,6 +13953,17 @@ read:
 				f->why = "rotated";
 				rc = XF_RESET;
 				break;
+			}
+			/* a second Claude came or one of several left (the master
+			** wakes us on its count, #314): said, the transcript kept */
+			if (s.claudes != was)
+			{
+				xf_cl_answer(t, &s, &a);
+				if (xf_snapshot(f, &a, "rotated"))
+				{
+					rc = f->rc;
+					break;
+				}
 			}
 		}
 		if ((ev & XE_FILE) && s.fd >= 0)
@@ -14500,6 +14659,18 @@ xray_main(int argc, char **argv)
 			return 2;
 		}
 		return dch_remote_requests(argv[ni]);
+	}
+	/* "-": the text on stdin, as dch serve hands it to its ctl child, never
+	** in the host's ps (LOW-XN1). A terminal's "-" or a host:name's stays
+	** 3.1's error; a bad read is "" for it */
+	if (!isatty(STDIN_FILENO) && !name_is_remote(n))
+	{
+		static char tb[257];
+		const char **v = search && !strcmp(search, "-") ? &search
+		                 : ref && !strcmp(ref, "-") ? &ref : NULL;
+
+		if (v && !(*v = ctl_text_read(STDIN_FILENO, tb)))
+			*v = "";
 	}
 	/* the value rules (3.1), in the table's order */
 	if (ref && !xr_ref_ok(ref))

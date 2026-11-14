@@ -137,6 +137,7 @@ log(ev="start", argv=sys.argv[1:], cwd=os.getcwd(), sid=SID,
     cfg=os.environ.get("CLAUDE_CONFIG_DIR"))
 saved = termios.tcgetattr(0)
 tty.setraw(0)
+RAW = termios.tcgetattr(0)
 out = sys.stdout.buffer
 transcript, queue, draft = [], [], ""
 collapsed, prompt_up, pstart, eaten = False, False, 0, 0
@@ -187,10 +188,10 @@ def kill_row(d):
 def paint(c):
     rows = ["  Claude Code v%s (fake)" % VERSION, ""] + transcript[-8:]
     if screen_up(c):
-        out.write(("\033[H\033[2J" + "\r\n".join(rows + c["screen"]))
-                  .encode())
+        n = out.write(("\033[H\033[2J" + "\r\n".join(rows + c["screen"]))
+                      .encode())
         out.flush()
-        return
+        return n
     rows += c.get("above", [])
     if c.get("quote"):
         # a reply quoting a prompt above the composer (Prosper #757)
@@ -249,8 +250,9 @@ def paint(c):
     if c.get("subagents"):
         rows.append("⏺ main")
         rows += ["◯ general-purpose  digging"] * int(c["subagents"])
-    out.write(("\033[H\033[2J" + "\r\n".join(rows)).encode())
+    n = out.write(("\033[H\033[2J" + "\r\n".join(rows)).encode())
     out.flush()
+    return n
 
 
 def take(text):
@@ -315,18 +317,39 @@ else:
     set_status("idle")
 last = None
 buf = b""
+conted = False      # SIGCONT came: raw mode back and a repaint, in the loop
+cont_paints = 0     # paints after a SIGCONT still to log (#330)
+
+
+def stopped(*_):
+    """Ctrl-Z (SIGTSTP): log it, then stop as the default action would."""
+    log(ev="stop")
+    signal.signal(signal.SIGTSTP, signal.SIG_DFL)
+    os.kill(PID, signal.SIGTSTP)
+    signal.signal(signal.SIGTSTP, stopped)
 
 
 def resumed(*_):
     """fg after Ctrl-Z: raw mode back and a repaint, as Claude Code's Ink
-    does on SIGCONT (the shell restored its own tty modes meanwhile)."""
-    global last
-    tty.setraw(0)
-    last = None
+    does on SIGCONT (the shell restored its own tty modes meanwhile). The
+    handler only flags it: the loop sets raw with TCSANOW, never setraw's
+    TCSAFLUSH, which waits for output to drain (#330)."""
+    global conted
+    log(ev="cont")
+    conted = True
 
 
+signal.signal(signal.SIGTSTP, stopped)
 signal.signal(signal.SIGCONT, resumed)
 while True:
+    if conted:
+        conted = False
+        try:
+            termios.tcsetattr(0, termios.TCSANOW, RAW)
+            log(ev="raw")
+        except termios.error as e:
+            log(ev="raw", text="error: %s" % e)
+        last, cont_paints = None, 3
     c = ctl()
     r, _, _ = select.select([0], [], [], 0.1)
     if r:
@@ -425,5 +448,13 @@ while True:
     view = (status, len(transcript), len(queue), draft, json.dumps(c),
             prompt_up, collapsed, dismissed, kill_dialog, len(exit_up))
     if view != last:
-        paint(c)
+        if cont_paints:
+            cont_paints -= 1
+            try:
+                log(ev="paint", text="%s bytes" % paint(c))
+            except OSError as e:
+                log(ev="paint", text="OSError: %s" % e)
+                raise
+        else:
+            paint(c)
         last = view

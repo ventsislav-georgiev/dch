@@ -4432,10 +4432,46 @@ t_res_parse(void)
 	          "remote.o.url\nhttps://github.com/o/r\0") &&
 	      !GR("url..insteadof\nhttps://\0"
 	          "remote.o.url\nhttps://github.com/o/r\0") &&
-	      GR("url.https://evil.com/.insteadof\n\0"
-	         "remote.o.url\nhttps://github.com/o/r\0") &&
+	      !GR("url.https://evil.com/.insteadof\n\0"
+	          "remote.o.url\nhttps://github.com/o/r\0") &&
 	      GR("url.https://evil.com/.pushinsteadof\nhttps://github.com/\0"
 	         "remote.o.url\nhttps://github.com/o/r\0"));
+	CHECK("git remote: an empty insteadOf starts every URL, a tie goes to "
+	      "the base git read first, past 64 rules none (LOW-X20)",
+	      !GR("url.https://evil.com/.insteadof\n\0"
+	          "url.https://github.com/.insteadof\n\0"
+	          "remote.o.url\nhttps://github.com/o/r\0") &&
+	      GR("url..insteadof\n\0"
+	         "url.https://evil.com/.insteadof\n\0"
+	         "remote.o.url\nhttps://github.com/o/r\0") &&
+	      GR("url.https://evil.com/.insteadof\n\0"
+	         "url.https://github.com/.insteadof\nhttps://github.com/\0"
+	         "remote.o.url\nhttps://github.com/o/r\0") &&
+	      !GR("url.https://evil.com/.insteadof\ny:\0"
+	          "url.https://github.com/.insteadof\nx:\0"
+	          "url.https://evil.com/.insteadof\nx:\0"
+	          "remote.o.url\nx:o/r\0") &&
+	      GR("url.https://github.com/.insteadof\ny:\0"
+	         "url.https://evil.com/.insteadof\nx:\0"
+	         "url.https://github.com/.insteadof\nx:\0"
+	         "remote.o.url\nx:o/r\0") &&
+	      GR("url.https://github.com/.insteadof\nx:\0"
+	         "url.https://github.com/.insteadof\nx:\0"
+	         "remote.o.url\nx:o/r\0"));
+	{
+		char big[64 * 32 + 64];
+		int i, bn = 0;
+
+		for (i = 0; i < 65; i++)
+			bn += snprintf(big + bn, sizeof big - (size_t)bn,
+			               "url.u%d.insteadof\nq%d", i, i) + 1;
+		bn += snprintf(big + bn, sizeof big - (size_t)bn,
+		               "remote.o.url\nhttps://github.com/o/r") + 1;
+		CHECK("git remote: 64 insteadOf rules read, a 65th: no match",
+		      !xr_git_remote(big, (size_t)bn, "o/r") &&
+		      xr_git_remote(big + strlen(big) + 1,
+		                    (size_t)bn - strlen(big) - 1, "o/r"));
+	}
 	CHECK("git remote: scp path with ':' or '@', empty owner or repo, "
 	      "3 segments: no",
 	      !GR("remote.o.url\ngit@github.com:o/r:x\0") &&
@@ -4763,6 +4799,21 @@ t_excl(void)
 		"x=1 a[1<<1]=5\ncat ../x", "x=1 y=2 a[1<<1]=5\ncat ../x",
 		"echo ${ cat ../x; }", "echo \"${ cat ../x; }\"",
 		"echo ${| cat ../x; }",
+		/* #316 LOW-X17: more shells; a group's pipe or < ; su -c,
+		** script -c and su's login home */
+		"echo 'cat ../x' | tcsh", "echo 'cat ../x' | csh",
+		"echo 'cat ../x' | ash", "echo 'cat ../x' | busybox ash",
+		"echo 'cat ../x' | mksh", "echo 'cat ../x' | yash",
+		"echo 'cat ../x' | rbash", "tcsh -c 'cat ../x'",
+		"mksh <<< 'cat ../x'", "(sh) < s.sh", "{ sh; } < s.sh",
+		"( cd sub; sh ) < s.sh", "while true; do sh; done < s.sh",
+		"echo 'cat ../x' | if true; then sh; fi", "sh 0< s.sh",
+		"sh 2>/dev/null < s.sh", "su bob -c 'cat ../x'",
+		"su -c 'cat ../x' bob", "su --command='cat ../x'",
+		"sudo su -c 'cat ../x'", "su - bob -c 'cat notes.md'",
+		"su -lc 'cat notes.md' bob", "script -c 'cat ../x' /dev/null",
+		"script -q /dev/null sh -c 'cat ../x'",
+		"script -q /dev/null cat ../x",
 		0
 	};
 	static const char *const keep[] = {
@@ -4822,6 +4873,15 @@ t_excl(void)
 		"sudo -u root cat notes.md", "sudo -i gh issue view 831",
 		"cat <(echo a) notes.md", "x=1 echo a[1<<EOF]\nx\nEOF\ncat notes.md",
 		"bash script.sh; cat notes.md", "echo ${x}; cat notes.md",
+		/* #316 NIT-X4: a script named reads only its input from stdin; an
+		** earlier command's | is not this one's; su and script -c alike */
+		"bash scripts/build.sh < input.txt",
+		"make 2>&1 | tail -5; bash scripts/build.sh",
+		"npm test | tee out.log; sh scripts/x.sh",
+		"cat in.txt | bash scripts/build.sh", "a | b && sh scripts/x.sh",
+		"(cd sub && make) | tail; sh scripts/x.sh",
+		"su bob -c 'cat notes.md'", "script -c 'cat notes.md' /dev/null",
+		"flock f -c 'cat notes.md' extra",
 		0
 	};
 	/* change (a): a reader or search only inside $(…) or backquotes
@@ -5072,6 +5132,24 @@ t_d3(void)
 		  "pull:o/r#12=Fix $x;" },
 		{ "gh pr create --title \"Fix $'x'\"", PR, 0, "pull:o/r#12=Fix $'x';" },
 		{ "gh pr edit o/r#9 --title \"$(cat t)\"", PR, 0, "" },
+		/* #316 LOW-X18: an unquoted $(…), $((…)) is shell-filled too */
+		{ "gh pr create --title $(cat t)", PR, 0, "" },
+		{ "gh pr create --title=$(cat t)", PR, 0, "" },
+		{ "gh pr create --title x$(cat t)", PR, 0, "" },
+		{ "gh pr create --title $((1+1))", PR, 0, "" },
+		{ "gh pr edit o/r#9 --title $(cat t)", "", 0, "" },
+		/* #316 LOW-X19: the last --title, as gh's; -t is gh's --title */
+		{ "gh pr create --title Fine --title Other", PR, 0,
+		  "pull:o/r#12=Other;" },
+		{ "gh pr create --title Fine --title \"$T\"", PR, 0, "" },
+		{ "gh pr create --title \"$T\" --title Fine", PR, 0,
+		  "pull:o/r#12=Fine;" },
+		{ "gh pr create --title Fine -t \"$T\"", PR, 0, "" },
+		{ "gh pr edit o/r#9 --title Fine --title \"$T\"", "", 0, "" },
+		{ "gh pr create -t T -b \"Fixes #999\"", PR, 0, "pull:o/r#12=T;" },
+		{ "gh issue edit o/r#9 -tNew", "", 0, "pull:o/r#9=New;" },
+		{ "gh pr edit o/r#9 -t=New", "", 0, "pull:o/r#9=New;" },
+		{ "foo -t X o/r#9", "", 0, "" },
 #undef PR
 	};
 	char got[512], m[300], *p;
@@ -6407,6 +6485,286 @@ t_prefilter(void)
 #undef PF_A
 }
 
+/* ---- --chapter's seek (#300) ----------------------------------------------- */
+
+/* --chapter on fd as dch.c answers it: the seek first, the whole read when
+** it is not sure (seek 0: the whole read alone). The printed object, else
+** "gone" or "failed"; malloc'd. *how: the seek's return, -9 not tried. */
+static char *
+sk_answer(int fd, int codex, const char *anchor, int seek, int *how)
+{
+	struct xr_chapters ch = {0};
+	struct xr_entries e;
+	struct xr_claude *d;
+	struct stat st;
+	char *o = NULL;
+	size_t ol = 0, k;
+	int rc = 0, capped = 0, any = 0;
+	FILE *m;
+
+	*how = -9;
+	if (fstat(fd, &st) != 0)
+		return NULL;
+	xr_entries_begin(&e, anchor, "u", XR_CH_OUT);
+	if (seek)
+		rc = *how = xr_chapter_seek(fd, &st, codex, &e, &ch);
+	if (rc == 0 && (d = xr_claude_new()))
+	{
+		if (codex)
+			xr_claude_codex(d);
+		xr_claude_entries(d, &e, (uint64_t)st.st_ino);
+		rc = xr_claude_read(d, fd, (uint64_t)st.st_size, &capped);
+		xr_claude_end(d, (uint64_t)st.st_ino, &ch);
+		xr_claude_free(d);
+	}
+	if ((m = open_memstream(&o, &ol)))
+	{
+		for (k = 0; rc >= 0 && !e.failed && !any && k < ch.n; k++)
+			if (!strcmp(xr_chapter_at(&ch, k)->anchor, anchor) && e.hit &&
+			    e.ord == ch.total - ch.n + k)
+				any = xr_chapter_print(m, "u", "s", xr_chapter_at(&ch, k),
+				                       &e) == 0;
+		if (!any)
+			fputs(rc < 0 || e.failed ? "failed" : "gone", m);
+		fclose(m);
+	}
+	xr_chapters_free(&ch);
+	xr_entries_free(&e);
+	return o;
+}
+
+/* One random line of a small vocabulary (seed): prompts, replies, calls and
+** results with ids from small pools (so some pair late, some are orphans,
+** some repeat), subagent threads, compactions, images, auto prompts, pads,
+** long and escaped ids, junk. */
+static size_t
+sk_line(char *b, unsigned *seed, int codex)
+{
+	unsigned r = (unsigned)rand_r(seed), i = (r >> 8) % 12;
+	int pad = 100 + (int)((r >> 12) % 700);
+
+	if (codex)
+		switch (r % 9)
+		{
+		case 0: case 1:
+			return (size_t)sprintf(b, "{\"type\":\"response_item\",\"payload\":"
+			    "{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":"
+			    "\"input_text\",\"text\":\"ask %u\"}]}}\n", r % 1000);
+		case 2:
+			return (size_t)sprintf(b, "{\"type\":\"response_item\",\"payload\":"
+			    "{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{"
+			    "\"type\":\"output_text\",\"text\":\"%*s\"}]}}\n", pad, "r");
+		case 3: case 4:
+			return (size_t)sprintf(b, "{\"type\":\"response_item\",\"payload\":"
+			    "{\"type\":\"function_call\",\"name\":\"shell\",\"arguments\":"
+			    "\"{\\\"command\\\":[\\\"ls\\\"]}\",\"call_id\":\"c%u\"}}\n", i);
+		case 5: case 6:
+			return (size_t)sprintf(b, "{\"type\":\"response_item\",\"payload\":"
+			    "{\"type\":\"function_call_output\",\"call_id\":\"c%u\","
+			    "\"output\":\"out %u\"}}\n", i, r % 100);
+		case 7:
+			return (size_t)sprintf(b, "{\"type\":\"compacted\",\"payload\":"
+			    "{\"message\":\"sum %u\"}}\n", r % 100);
+		default:
+			return (size_t)sprintf(b, "{\"type\":\"turn_context\",\"payload\":"
+			    "{\"cwd\":\"/w/%u\"}}\n", i);
+		}
+	switch (r % 18)
+	{
+	case 0: case 1: case 2:
+		return (size_t)sprintf(b, "{\"type\":\"user\",\"message\":{\"content\":"
+		                       "\"p%u\"}}\n", r % 1000);
+	case 3:
+		return (size_t)sprintf(b, "{\"type\":\"assistant\",\"message\":{"
+		                       "\"content\":[{\"type\":\"text\",\"text\":\"a%u\"}]}}\n",
+		                       r % 100);
+	case 4: case 5:
+		return (size_t)sprintf(b, "{\"type\":\"assistant\",\"message\":{"
+		    "\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_%u\",\"name\":"
+		    "\"Bash\",\"input\":{\"command\":\"c%u\"}}]}}\n", i, r % 100);
+	case 6: case 7:
+		return (size_t)sprintf(b, "{\"type\":\"user\",\"message\":{\"content\":"
+		    "[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_%u\",\"is_error\""
+		    ":%s,\"content\":\"o%u\"}]}}\n", i, r & 1 << 20 ? "true" : "false",
+		    r % 100);
+	case 8:
+		return (size_t)sprintf(b, "{\"type\":\"assistant\",\"isSidechain\":true,"
+		    "\"agentId\":\"ag%u\",\"message\":{\"content\":[{\"type\":\"text\","
+		    "\"text\":\"t\"}]}}\n", i % 4);
+	case 9:
+		return (size_t)sprintf(b, "{\"type\":\"user\",\"isSidechain\":true,"
+		    "\"agentId\":\"ag%u\",\"message\":{\"content\":[{\"type\":"
+		    "\"tool_result\",\"tool_use_id\":\"toolu_%u\",\"content\":\"s\"}]}}\n",
+		    i % 4, i);
+	case 10:
+		return (size_t)sprintf(b, "{\"type\":\"system\",\"subtype\":"
+		                       "\"compact_boundary\"}\n");
+	case 11:
+		return (size_t)sprintf(b, "{\"type\":\"user\",\"isCompactSummary\":"
+		                       "true,\"message\":{\"content\":\"sum%u\"}}\n", i);
+	case 12:
+		return (size_t)sprintf(b, "{\"type\":\"user\",\"message\":{\"content\":"
+		                       "[{\"type\":\"image\"}]}}\n");
+	case 13:
+		return (size_t)sprintf(b, "{\"type\":\"user\",\"origin\":{\"kind\":"
+		    "\"task-notification\"},\"message\":{\"content\":\"<task-notification>"
+		    "<summary>job %u</summary></task-notification>\"}}\n", i);
+	case 14:
+		return (size_t)sprintf(b, "{\"type\":\"assistant\",\"message\":{"
+		    "\"content\":[{\"type\":\"text\",\"text\":\"%*s\"}]}}\n", pad, "x");
+	case 15:	/* a long id (its key is a hash) or an escaped one */
+		return (size_t)sprintf(b, r & 1 << 21
+		    ? "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":"
+		      "\"tool_result\",\"tool_use_id\":\"toolu_%u%070d\",\"content\":"
+		      "\"long\"}]}}\n"
+		    : "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":"
+		      "\"tool_result\",\"tool_use_id\":\"\\u0074oolu_%u\",\"content\":"
+		      "\"esc\"}]}}\n", i, 0);
+	case 16:
+		return (size_t)sprintf(b, "{\"type\":\"assistant\",\"message\":{"
+		    "\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_%u%070d\","
+		    "\"name\":\"Read\",\"input\":{\"file_path\":\"/f\"}}]}}\n", i, 0);
+	default:
+		return (size_t)sprintf(b, r & 1 << 22 ? "  \n" : "not json %u\n", i);
+	}
+}
+
+/* Every line start of body as an anchor (and a few that are not): the seek
+** answers exactly as the whole read. *seeks: answers the seek gave. */
+static int
+sk_same(const char *body, size_t n, int codex, int *seeks, int *tried)
+{
+	char path[] = "/tmp/xray_unit.XXXXXX", a[64], *x, *y;
+	struct stat st;
+	size_t i;
+	int fd = mkstemp(path), ok = 1, how, h2;
+
+	if (fd < 0)
+		return 0;
+	unlink(path);
+	if (write(fd, body, n) != (ssize_t)n || fstat(fd, &st) != 0)
+	{
+		close(fd);
+		return 0;
+	}
+	for (i = 0; i <= n && ok; i++)
+	{
+		if (i && i < n && body[i - 1] != '\n' && i % 97)
+			continue;	/* line starts, and every 97th byte */
+		snprintf(a, sizeof a, "f%llx:%zu", (unsigned long long)st.st_ino, i);
+		x = sk_answer(fd, codex, a, 1, &how);
+		y = sk_answer(fd, codex, a, 0, &h2);
+		ok = x && y && !strcmp(x, y);
+		*seeks += how == 1;
+		++*tried;
+		if (!ok)
+			fprintf(stderr, "  anchor %s (seek %d):\n   seek  %s\n   whole %s\n",
+			        a, how, x ? x : "-", y ? y : "-");
+		if (!ok && getenv("SK_DUMP"))
+			fprintf(stderr, "%.*s\n", (int)(i > 3000 ? 3000 : i), body + (i > 3000 ? i - 3000 : 0));
+		free(x);
+		free(y);
+	}
+	close(fd);
+	return ok;
+}
+
+static void
+t_seek(void)
+{
+	static char body[200000];
+	struct xr_limits l0 = xr_lim;
+	unsigned seed;
+	size_t n;
+	int k, ok = 1, seeks = 0, tried = 0, cx, capped;
+
+	/* random transcripts, windows of 400..1400 bytes, every line start;
+	** some past a lowered range (head and tail), so the read crosses it */
+	for (k = 0; k < 48 && ok; k++)
+	{
+		seed = 300u + (unsigned)k;
+		cx = k % 4 == 3;
+		capped = k % 3 == 2;
+		for (n = 0; n < 30000;)
+			n += sk_line(body + n, &seed, cx);
+		xr_lim.chunk = 400 + (size_t)(k % 5) * 250;
+		if (capped)
+		{
+			xr_lim.head = n / 4;
+			xr_lim.tail = n / 3;
+		}
+		ok = sk_same(body, n, cx, &seeks, &tried);
+		if (!ok)
+			fprintf(stderr, "  transcript %d (%zu bytes, chunk %zu%s)\n", k,
+			        n, xr_lim.chunk, capped ? ", capped" : "");
+		xr_lim = l0;
+	}
+	CHECK("seek: 48 random transcripts (Claude and Codex, some past a "
+	      "lowered range): every line start and every 97th byte answers as "
+	      "the whole read", ok);
+	CHECK("seek: and most answers come from the seek, not the fallback",
+	      seeks * 10 > tried * 8);
+	if (seeks * 10 <= tried * 8)
+		fprintf(stderr, "  %d of %d by the seek\n", seeks, tried);
+
+	/* past XR_THREADS (1024) the whole read takes every block of a thread
+	** it holds no more as a step; a seek that started after the first 1024
+	** knows that thread and merges the next prompt: not sure, read whole */
+	{
+		static const char *const tail[] = {
+			U("A"), A("x"), "{\"type\":\"assistant\",\"isSidechain\":true,"
+			"\"agentId\":\"ag1029\",\"message\":{\"content\":\"t\"}}",
+			U("B"), "{\"type\":\"assistant\",\"isSidechain\":true,"
+			"\"agentId\":\"ag1029\",\"message\":{\"content\":\"t\"}}",
+			U("C"), A("y"),
+		};
+		char path[] = "/tmp/xray_unit.XXXXXX", an[64], *x, *y;
+		uint64_t off[8];
+		int fd, how, h2, same = 1, whole = 1;
+
+		for (n = 0, k = 0; k < 1030; k++)
+			n += (size_t)sprintf(body + n, "{\"type\":\"assistant\","
+			    "\"isSidechain\":true,\"agentId\":\"ag%d\",\"message\":"
+			    "{\"content\":\"t\"}}\n", k);
+		for (k = 0; k < 40; k++)
+			n += (size_t)sprintf(body + n, A("pad %d") "\n", k);
+		for (k = 0; k < 7; k++)
+		{
+			off[k] = n;
+			n += (size_t)sprintf(body + n, "%s\n", tail[k]);
+		}
+		xr_lim.chunk = 400;
+		if ((fd = mkstemp(path)) >= 0)
+		{
+			struct stat st;
+
+			unlink(path);
+			if (write(fd, body, n) == (ssize_t)n && fstat(fd, &st) == 0)
+				for (k = 3; k <= 5; k += 2)	/* B, C */
+				{
+					snprintf(an, sizeof an, "f%llx:%llu",
+					         (unsigned long long)st.st_ino,
+					         (unsigned long long)off[k]);
+					x = sk_answer(fd, 0, an, 1, &how);
+					y = sk_answer(fd, 0, an, 0, &h2);
+					same &= x && y && !strcmp(x, y) && strcmp(y, "gone");
+					whole &= how == 0;
+					free(x);
+					free(y);
+				}
+			else
+				same = 0;
+			close(fd);
+		}
+		else
+			same = 0;
+		xr_lim = l0;
+		CHECK("seek: past 1024 subagents, a known thread's block between "
+		      "two prompts: B and C answer as the whole read (two chapters), "
+		      "by the whole read", same && whole);
+	}
+}
+
 int
 main(int argc, char **argv)
 {
@@ -6473,6 +6831,7 @@ main(int argc, char **argv)
 	t_anchors();
 	t_newest();
 	t_prefilter();
+	t_seek();
 	printf("%s: %d failed\n", fails ? "FAIL" : "ok", fails);
 	return fails != 0;
 }

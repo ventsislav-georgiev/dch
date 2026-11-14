@@ -6,7 +6,7 @@ hand, two records carry one id. `--revive --all` takes the newest record of
 an id and skips the rest (`dup_sid`), and skips any record whose id a live
 Claude already runs (`live_sid`): one in a live session, found by probing
 that session (its sessions record; before it has one, the `--resume` id in
-its argv, #281), or one outside any (a Claude that outlived its master, or
+its argv, #281, each such Claude's, #314), or one outside any (a Claude that outlived its master, or
 runs in a plain terminal; looked for in our Claude sessions dir and in each
 record's config_dir, #065). `--revive <name> [--as <new>]` refuses such a
 record (`live_sid`), naming the holder and the id.
@@ -350,8 +350,9 @@ def main():
         check("...then --revive lz (lw's id): revived "
               "[rc=%d %r %r]" % (r.returncode, r.stdout, r.stderr),
               r.returncode == 0 and "claude resumed %s" % L in r.stdout)
-        # --resume=<id> and -r <id>, as Claude Code takes them
-        for sn, form in (("eq", "--resume=%s"), ("short", "-r %s")):
+        # --resume=<id>, -r <id> and -r<id> (#314), as Claude Code takes them
+        for sn, form in (("eq", "--resume=%s"), ("short", "-r %s"),
+                         ("attach", "-r%s")):
             r = run("--spawn", sn, "--size", "80x24", "--", late,
                     *(form % R).split())
             check("a session %s running 'late %s' [rc=%d]" %
@@ -364,6 +365,53 @@ def main():
             touch(sn + ".quit")
             until(lambda: not os.path.exists(
                 os.path.join(sockdir, sn + ".sock")), 15)
+        # #314: a second Claude just started beside one with a record: the
+        # record holds the first one's id, the argv the second's (ons: not
+        # the sh -c that started it, whose argv carries the id too). The
+        # first started on A and moved to B (a /resume): its record wins
+        S, A, B = (str(uuid.uuid4()) for _ in range(3))
+
+        def ons():
+            return [l for l in on(S) if " -c " not in l]
+
+        r = run("--spawn", "two", "--size", "80x24", "--", "/bin/sh", "-c",
+                "exec 3<&0; %s --resume %s <&3 & %s --resume %s & wait" %
+                (claude, A, late, S))
+        sh = until(lambda: (lambda c: c.returncode == 0 and
+                            json.loads(c.stdout).get("pid"))(
+            run("--cmd", "two")), 15)
+        first = until(lambda: [p for p in subprocess.run(
+            ["/usr/bin/pgrep", "-P", str(sh)], capture_output=True,
+            text=True).stdout.split() if p + ".json" in recs()], 15)
+        check("a session two: a claude with its record, and 'late --resume "
+              "<id>' with none [rc=%d first=%r]" % (r.returncode, first),
+              r.returncode == 0 and first and len(until(lambda: ons(), 15))
+              == 1)
+        if first:
+            p = os.path.join(home, ".claude", "sessions", first[0] + ".json")
+            with open(p) as fh:
+                o = json.load(fh)
+            o["sessionId"] = B
+            with open(p + ".t", "w") as fh:
+                json.dump(o, fh)
+            os.rename(p + ".t", p)
+        plant("ptwo", "ptwo", S, 30)
+        r = run("--revive", "ptwo", "--no-message")
+        check("...--revive ptwo of the second one's id: exit 1 naming live "
+              "session two [rc=%d %r %r]" % (r.returncode, r.stdout,
+                                             r.stderr),
+              r.returncode == 1 and "live session two" in r.stderr and
+              S in r.stderr)
+        check("...still one claude on the id, no session ptwo [%d]" %
+              len(ons()), len(ons()) == 1 and
+              not os.path.exists(os.path.join(sockdir, "ptwo.sock")))
+        plant("pmv", "pmv", A, 30)
+        r = run("--revive", "pmv", "--no-message")
+        check("...--revive pmv of the id the first one's argv says, its "
+              "record another: revived, the argv holds nothing [rc=%d %r %r]"
+              % (r.returncode, r.stdout, r.stderr),
+              r.returncode == 0 and "claude resumed %s" % A in r.stdout)
+        run("-k", "two")
     except Exception:
         traceback.print_exc()
         fails[0] += 1

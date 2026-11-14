@@ -282,7 +282,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.64.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.65.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -1241,14 +1241,17 @@ The corpus:
   - Nothing in the Codex directory is run or written.
 - **Shell.** The chapters come from the [ring](#shell-output-ring-x-ray)'s
   OSC 133 marks: one per typed command block (`A`, `B`, then `C` with client
-  input before it and a non-blank command). A `B` or `C` inside an open
-  `C`..`D` orphans that block: it gets no chapter. Without marks there are no
-  chapters (`mentions_only: true`).
-  - Commands typed ahead in one burst (one `--send` holding three lines, a
-    pasted multi-line block) give only the first a chapter: the input all
-    arrives inside the first prompt's `B`..`C`, and a later command's `C` with
-    no client input since its own `B` is read as forged by output. Sent one at
-    a time, each gets its own.
+  input since that `B`, or a line typed ahead, and a non-blank command). A
+  `B` or `C` inside an open `C`..`D` orphans that block: it gets no chapter.
+  Without marks there are no chapters (`mentions_only: true`).
+  - A command typed ahead (sent while the one before it still runs, or one
+    `--send` holding several lines) gets its own chapter too. Its `C` has no
+    client input since its own `B`, so it counts only when the text between
+    its `B` and `C` on the screen is exactly a line the client sent that no
+    earlier block used. A line edited before its Enter (backspace, arrows,
+    tab completion) does not match and gets no chapter. A `C` with neither is
+    read as forged by output: a program that prints marks gets a chapter only
+    for a block whose text is a line the user typed, once per line.
   - Rows, and the marks on them, enter the ring only when they scroll off
     the primary screen. So the commands still on the visible screen (in a
     fresh shell or after a `clear`, up to a screen's worth) have no chapter
@@ -1300,6 +1303,8 @@ The corpus:
     live Claude Code sessions dch found under the session. X-ray reads one:
     `2` or more means several unrelated ones run there; `0` means it found
     none (its record is out of this process's `HOME` or `CLAUDE_CONFIG_DIR`).
+    Also in a `--follow` snapshot of one Claude's transcript while other
+    Claudes run beside it (`2` or more): the follow keeps that transcript.
     Readers that do not know the field can ignore it.
 
 ```json
@@ -1761,7 +1766,10 @@ Nothing runs on a timer:
   screen changes (an alternate-screen switch included).
 
 An agent starting or ending in a followed session sends `reset` `rotated`
-within 2 s, with the ring on or with `xray_ring = 0`. While a follower holds
+within 2 s, with the ring on or with `xray_ring = 0`. So does a second Claude
+starting or ending beside the one a follow reads: the follow keeps that
+Claude's transcript, and the new snapshot says `claudes` (the view: `2 Claude
+sessions run here; X-ray reads one`). While a follower holds
 one of the master's 4 subscriber slots, the master looks for the agent once a
 second; with no follower it does not. A Claude Code follower past the 4 slots
 is not told when its agent exits.
@@ -1786,8 +1794,16 @@ one object: `{"schema":1,"session","session_id","anchor","title","at","kind","en
 with `auto` and `summary` after `kind` when the chapter list has them.
 `<anchor>` is a chapter's `anchor` from `--json`: 1 to 128 bytes of
 `A-Z`, `a-z`, `0-9`, `:`, `_`, `.` and `-`, else exit 2 with `dch: bad
-anchor`. dch reads the session's chapters again and answers only when one of
-them has exactly that anchor; it never seeks to the offset in it. Otherwise it
+anchor`. On a transcript, dch reads from a little before the anchor's offset
+(at most 8 MiB before it) up to the next chapter, then only the lines that can
+hold a late result of one of its calls. It answers only when that read makes
+a chapter with exactly that anchor. When what came before the read could
+change where the chapter starts or ends, dch reads the whole range instead.
+This changed: `--chapter` used to never seek, and it used to check that the
+chapter was among the newest 5000. Now an anchor older than that opens,
+though `--json` no longer lists it. So does an auto chapter's `summary` that
+`--json` gave up (past 256 KiB of summaries), and, with more than 256 calls
+open at once, a late result that the whole read dropped. Otherwise it
 exits 1 with `dch: chapter gone` (the transcript was rewritten, or the ring
 evicted or cleared the block): read `--json` again. `--chapter` does not go
 with `--ref`, `--follow` or `--clear`.
@@ -2216,8 +2232,9 @@ skipped — claude <id> already runs in live session <s> (record <file>)`) and
 refused by name, `--as` or not (`live_sid`, exit 1). Live ids come from each
 live session's own probe (its Claude process and that Claude's session
 record, as `--say` finds it; a Claude that has not written that record yet,
-in its first seconds, by the `--resume <id>`, `--resume=<id>` or `-r <id>`
-on its command line, typed into the session's shell or not), not from the
+in its first seconds, by the `--resume <id>`, `--resume=<id>`, `-r <id>` or
+`-r<id>` on its command line, typed into the session's shell or not, each
+such Claude in the session), not from the
 session's history record, which
 lags up to `DCH_RECORD_MS` behind; then from Claude's sessions dir, and the
 sessions dir of each record's `config_dir`, for a Claude running outside any

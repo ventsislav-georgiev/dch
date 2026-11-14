@@ -14,7 +14,10 @@ the attached terminal's to answer, then reads its tty for 2 s.
   (c) --spawn, attached inside the probe's wait: the queries were read
       before the attach and went to no terminal, so the mirror's answers,
       and the attaching terminal is never asked.
-dch-lite has no mirror: (a) and (c) get nothing, as before.
+  (d) attached, the chord's X-ray view up over the attach (Ctrl-\\ x) when
+      the program asks: the view's terminal shows no session output, so the
+      mirror's answers and the terminal is never asked (QA 1.63.0 LOW-V15).
+dch-lite has no mirror: (a), (c) and (d) get nothing, as before.
 
 Run:  python3 tests/query_answer_test.py            (uses ./dch)
 """
@@ -57,10 +60,10 @@ def result(path, timeout=10.0):
     return None
 
 
-def client(args):
+def client(args, esc=False):
     pid, fd = pty.fork()
     if pid == 0:
-        os.execve(DCH, [DCH, "-E"] + args, ENV)
+        os.execve(DCH, [DCH] + ([] if esc else ["-E"]) + args, ENV)
         os._exit(127)
     os.set_inheritable(fd, False)
     return pid, fd
@@ -85,16 +88,16 @@ def outer_terminal(fd, done, timeout=10.0):
     return [q for q in OUTER if q in seen]
 
 
-def start(case, how, delay):
+def start(case, how, delay, go=None):
     out = os.path.join(ROOT, "out_" + case)
     name = "qa273%s-%d" % (case, os.getpid())
     names.append(name)
-    argv = [sys.executable, PROBE, out, str(delay)]
+    argv = [sys.executable, PROBE, out, str(delay)] + ([go] if go else [])
     if how == "spawn":
         subprocess.run([DCH, "--spawn", name] + argv, env=ENV,
                        capture_output=True, timeout=30)
         return out, name, None
-    return out, name, client(["-n", name] + argv)
+    return out, name, client(["-n", name] + argv, go is not None)
 
 
 def main():
@@ -103,6 +106,8 @@ def main():
 fd = os.open("/dev/tty", os.O_RDWR)
 tty.setraw(fd)
 time.sleep(float(sys.argv[2]))
+while len(sys.argv) > 3 and not os.path.exists(sys.argv[3]):
+    time.sleep(0.05)
 os.write(fd, %r)
 got, end = b"", time.time() + 2.0
 while time.time() < end:
@@ -143,6 +148,24 @@ time.sleep(5)
           asked == [], asked)
     check("(c) attached inside the wait: the mirror's answers, once",
           got == mirror, got)
+
+    go = os.path.join(ROOT, "go_d")
+    out, name, (pid, fd) = start("d", "attach", 0, go)
+    seen = b""
+    for keys in (b"", b"\034x"):
+        os.write(fd, keys)
+        end = time.time() + (1.0 if not keys else 20)
+        while time.time() < end and (not keys or b"X-ray  " not in seen):
+            if select.select([fd], [], [], 0.05)[0]:
+                seen += os.read(fd, 65536)
+    check("(d) the chord's X-ray view opens over the attach",
+          b"X-ray  " in seen, seen[-200:])
+    open(go, "w").close()
+    asked = outer_terminal(fd, out)
+    got = result(out)
+    check("(d) the view up: the terminal is not asked", asked == [], asked)
+    check("(d) the view up: the mirror's answers, once", got == mirror, got)
+    os.write(fd, b"q")
 
 
 try:

@@ -1060,7 +1060,9 @@ or
 while a shell's ring is paused for an agent, also
 .BR claudes ,
 the live Claude Code sessions found under it: 2 or more when several run
-there, 0 when none was found)
+there, 0 when none was found; also in a
+.B \-\-follow
+snapshot of one Claude's transcript while others run beside it)
 and its chapters, one per prompt, oldest first, at most 5000.
 A chapter is one prompt (in a shell, one command) with what followed it,
 up to the next; the view lists them on its Prompts (Commands) tab.
@@ -1542,8 +1544,20 @@ and
 .B \-
 (else exit 2,
 .IR "bad anchor" ).
-dch reads the chapters again and answers only when one has exactly that
-anchor, never seeking to the offset in it; otherwise it exits 1 with
+On a transcript, dch reads from a little before the anchor's offset (at most
+8 MiB before it) up to the next chapter, then only the lines that can hold a
+late result of one of its calls, and answers only when that read makes a
+chapter with exactly that anchor; when what came before the read could change
+where the chapter starts or ends, it reads the whole range instead.
+It no longer checks that the chapter is among the newest 5000: an older
+anchor opens, though
+.B \-\-json
+no longer lists it (so can an auto chapter's
+.B summary
+that
+.B \-\-json
+gave up, and, past 256 open calls, a late result the whole read dropped).
+Otherwise it exits 1 with
 .I "chapter gone"
 (the transcript was rewritten, or the ring evicted or cleared the block).
 Each entry is
@@ -1747,9 +1761,10 @@ Nothing in the Codex directory is run or written.
 An ended Codex session has no corpus.
 A shell's chapters come from its ring's OSC 133 marks: one per typed command
 block (\fBA\fR, \fBB\fR, client input, \fBC\fR, a non-blank command),
-once its rows scroll off the screen (commands still on it have none yet;
-commands typed ahead in one burst give only the first one a chapter, the
-others having had no client input inside their own B..C).
+once its rows scroll off the screen (commands still on it have none yet).
+A command typed ahead, with no client input inside its own B..C, gets one
+when the text between its B and C is exactly a line the client sent that no
+earlier block used; a line edited before its Enter gets none.
 A query also reads the current primary screen after the ring: its rows count
 as output (refs only, no chapter, no definition; their
 .B at
@@ -1896,7 +1911,10 @@ An agent starting or ending in a followed session sends
 .B reset
 .B rotated
 within 2 s, ring on or
-.BR "xray_ring = 0" :
+.BR "xray_ring = 0" ;
+so does a second Claude starting or ending beside the one followed, whose
+transcript the follow keeps, its snapshot saying
+.BR claudes :
 while a follower holds one of the master's 4 subscriber slots, the master
 looks for the agent once a second; with no follower it does not.
 A Claude Code follower past the 4 slots is not told when its agent exits.

@@ -116,15 +116,18 @@ if pid > 1 and "--master-of" in a[:-1] and os.path.realpath(
     os.kill(pid, signal.SIGCONT)' "$1" >/dev/null 2>&1
 }
 
-# Isolate session dir: dch uses $XDG_RUNTIME_DIR/dch-$UID.
-TMP=$(mktemp -d)
-# The tests' own temp dirs: one short dir under /tmp per run (see runreap).
-DCH_TEST_TMP=$(mktemp -d /tmp/dchr.XXXXXX) || exit 1
+# One short dir under /tmp per run: the tests' own temp dirs in t (see
+# runreap), the isolated session dir in r (dch uses $XDG_RUNTIME_DIR/dch-$UID).
+# Mid-run runreap walks t only; at exit it walks both, so a session a passing
+# test left in the socket dir ends too (QA 1.63.0 LOW-T15).
+RUN=$(mktemp -d /tmp/dchr.XXXXXX) || exit 1
+TMP=$RUN/r DCH_TEST_TMP=$RUN/t
+mkdir "$TMP" "$DCH_TEST_TMP" || exit 1
 export DCH_TEST_TMP
 # and the ones made in the default TMPDIR (tempfile.mkdtemp() with no dir),
 # so runreap ends and removes theirs too (QA 1.60.0 LOW-T4)
 export TMPDIR="$DCH_TEST_TMP"
-trap 'runreap; rm -rf "$TMP" "$DCH_TEST_TMP"' EXIT
+trap 'DCH_TEST_TMP=$RUN; runreap; rm -rf "${RUN:?}"' EXIT
 trap 'pyreap; exit 130' INT TERM HUP
 export XDG_RUNTIME_DIR="$TMP"
 # DCH_SOCKET_DIR wins over XDG_RUNTIME_DIR: an inherited one would point the
@@ -264,7 +267,7 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
 	pyrun "kitty keyboard pop reaches both screens" kbd_altscreen_test.py
 	pyrun "mode sequences split across pty reads are re-armed" mode_split_test.py
 	pyrun "spawn over leftover socket + hot-path attach" spawn_test.py
-	pyrun "a session nothing sees answers DECRQM 2026 and XTVERSION (#273)" query_answer_test.py
+	pyrun "a session nothing sees answers DECRQM 2026 and XTVERSION (#273, #311)" query_answer_test.py
 fi
 
 # --- hot-path performance budget (spawn-vs-attach decision) ----------------
@@ -291,6 +294,7 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "attach repaints via WINCH, types no ^L" attach_test.py
     pyrun "attach is raw again after bg/fg, a startup ^Z, an outside SIGTSTP (LOW-V9)" attach_cont_test.py
     pyrun "a chord key waiting past the detach window still counts (#259)" attach_chord_late_test.py
+    pyrun "a stop under dash leaves its terminal cooked (#311)" attach_dash_stop_test.py
     pyrun "size follows focus (DEC 1004, #100)" focus_test.py
     pyrun "attach replay with --scrollback (#101)" scrollback_test.py
     pyrun "a paste into a program busy printing never blocks the master (#258)" send_busy_pty_test.py

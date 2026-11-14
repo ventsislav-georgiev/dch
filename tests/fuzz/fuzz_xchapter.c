@@ -4,7 +4,9 @@
 **
 ** Input: byte 0's bit 0 picks the corpus, bit 1 a small object cap (4 KiB
 ** of entries) so a small input reaches the cut, bit 2 a JSONL corpus read
-** as a Codex rollout (#169); byte 1 picks the chapter
+** as a Codex rollout (#169), bits 3-4 the seek's window (#300: 16, 64, 509
+** or 4096 bytes) and bit 5 a range of a quarter head and a third tail;
+** byte 1 picks the chapter
 ** (bit 7: an anchor no chapter has); bytes 2..33 are a candidate anchor
 ** (up to its first NUL); the rest is the corpus:
 **   0: a Claude JSONL transcript, cut at '\n' here;
@@ -14,11 +16,17 @@
 ** decoded once for its chapters, then again with the picked anchor wanted,
 ** as dch.c does: the chapters must be the same both times; an anchor of the
 ** index is hit, one of no chapter keeps nothing; the entries stay within
-** their cap, and the printed object is one line of valid JSON within it. */
+** their cap, and the printed object is one line of valid JSON within it.
+** #300: a JSONL corpus is also written to a file and asked by the seek
+** (xr_chapter_seek, the whole read when it is not sure, as dch.c), for the
+** picked chapter's anchor on the file's inode and for an offset from
+** bytes 2-3: the answer must be the whole read's, byte for byte. */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include "../../xray.h"
 #include "../../bridge.h"
 
@@ -103,6 +111,91 @@ decode(const uint8_t *d, size_t n, int shell, int codex,
 	}
 }
 
+/* --chapter on fd as dch.c answers it (seek: the seek first), printed into
+** a malloc'd string: the object, else "gone" or "failed". */
+static char *
+answer(int fd, const struct stat *st, int codex, const char *anchor, int seek)
+{
+	struct xr_chapters ch = {0};
+	struct xr_entries e;
+	struct xr_claude *x;
+	char *o = NULL;
+	size_t ol = 0, k;
+	int rc = 0, capped, any = 0;
+	FILE *m;
+
+	xr_entries_begin(&e, anchor, "fuzz", XR_CH_OUT);
+	if (seek)
+		rc = xr_chapter_seek(fd, st, codex, &e, &ch);
+	if (rc == 0 && (x = xr_claude_new()))
+	{
+		if (codex)
+			xr_claude_codex(x);
+		xr_claude_entries(x, &e, (uint64_t)st->st_ino);
+		rc = xr_claude_read(x, fd, (uint64_t)st->st_size, &capped);
+		xr_claude_end(x, (uint64_t)st->st_ino, &ch);
+		xr_claude_free(x);
+	}
+	if ((m = open_memstream(&o, &ol)))
+	{
+		for (k = 0; rc >= 0 && !e.failed && !any && k < ch.n; k++)
+			if (!strcmp(xr_chapter_at(&ch, k)->anchor, anchor) && e.hit &&
+			    e.ord == ch.total - ch.n + k)
+				any = xr_chapter_print(m, "fuzz", "s",
+				                       xr_chapter_at(&ch, k), &e) == 0;
+		if (!any)
+			fputs(rc < 0 || e.failed ? "failed" : "gone", m);
+		fclose(m);
+	}
+	xr_chapters_free(&ch);
+	xr_entries_free(&e);
+	return o;
+}
+
+/* #300: the seek against the whole read, over the corpus as a file. */
+static void
+seek_same(const uint8_t *d, size_t n, int codex, const char *picked)
+{
+	static const size_t win[4] = { 16, 64, 509, 4096 };
+	static char path[] = "/tmp/fuzz_xchapter.XXXXXX";
+	static int fd = -1;
+	struct xr_limits l0 = xr_lim;
+	struct stat st;
+	char a[2][64];
+	const char *off;
+	int k;
+
+	if (fd < 0 && (fd = mkstemp(path)) >= 0)
+		unlink(path);
+	if (fd < 0 || ftruncate(fd, 0) != 0 ||
+	    pwrite(fd, d + 34, n - 34, 0) != (ssize_t)(n - 34) ||
+	    fstat(fd, &st) != 0)
+		return;
+	xr_lim.chunk = win[d[0] >> 3 & 3];
+	if (d[0] & 32)
+	{
+		xr_lim.head = (n - 34) / 4;
+		xr_lim.tail = (n - 34) / 3;
+	}
+	/* the picked chapter's offset (decode() anchors on inode 0x1234) */
+	off = picked[0] == 'f' ? strchr(picked, ':') : NULL;
+	snprintf(a[0], sizeof a[0], "f%llx:%s", (unsigned long long)st.st_ino,
+	         off ? off + 1 : "0");
+	snprintf(a[1], sizeof a[1], "f%llx:%zu", (unsigned long long)st.st_ino,
+	         ((size_t)d[2] | (size_t)d[3] << 8) % (n - 34 + 1));
+	for (k = 0; k < 2; k++)
+	{
+		char *x = answer(fd, &st, codex, a[k], 1);
+		char *y = answer(fd, &st, codex, a[k], 0);
+
+		if (!x || !y || strcmp(x, y))
+			abort();	/* the seek answers as the whole read */
+		free(x);
+		free(y);
+	}
+	xr_lim = l0;
+}
+
 int
 LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 {
@@ -168,6 +261,8 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		dch_json_free(&jp);
 		free(buf);
 	}
+	if (!shell)
+		seek_same(d, n, d[0] & 4, want);
 	xr_entries_free(&e);
 	xr_chapters_free(&c1);
 	xr_chapters_free(&c2);

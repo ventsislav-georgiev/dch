@@ -1045,7 +1045,7 @@ test_marks(void)
 
 	start(80, 24, 2000);
 	feed("\033]133;A\007$ \033]133;B\007");
-	dch_vt_input_seen();		/* the client typed */
+	dch_vt_input_seen("ls -l\r", 6);	/* the client typed */
 	feed("ls -l\r\n\033]133;C\007out-1\r\nout-2\r\n\033]133;D;3\007");
 	feed("\033]133;A\007$ \033]133;B\007forged\r\n\033]133;C\007x\r\n"
 	     "\033]133;D\007");
@@ -1073,6 +1073,81 @@ test_marks(void)
 	      strstr(sig, "4:C:0|") != NULL);
 	CHECK("5: the D exit code rides in the mark",
 	      count_kind(RING_K_MARK, "D;3") == 1);
+}
+
+/* The C marks' input flags, in order, as "01..." */
+static void
+c_flags(char *o, size_t cap)
+{
+	struct rec *v;
+	size_t n, i, w = 0;
+	int st;
+
+	v = recs(&R, R.head_seq, &n, &st);
+	for (i = 0; i < n && w + 1 < cap; i++)
+		if (v[i].kind == RING_K_MARK && v[i].text[0] == 'C')
+			o[w++] = v[i].flags & RING_F_INPUT ? '1' : '0';
+	o[w] = '\0';
+	recs_free(v, n);
+}
+
+#define BLOCK(cmd) "\033]133;A\007$ \033]133;B\007" cmd "\r\n\033]133;C\007" \
+	"out\r\n\033]133;D;0\007"
+
+/* #302: a line typed ahead (queued before its B) flags its C when its B..C
+** text is that line; output that prints marks gets a flag only for a block
+** whose text is a line the client sent and no C has used, once. */
+static void
+test_typed_ahead(void)
+{
+	char f[16];
+
+	start(80, 24, 2000);
+	feed("\033]133;A\007$ \033]133;B\007");
+	dch_vt_input_seen("ls\ncat x\n", 10);	/* both lines, one write */
+	feed("ls\r\n\033]133;C\007out\r\n\033]133;D;0\007");
+	feed(BLOCK("cat x"));			/* typed ahead: no input */
+	seq_feed(1, 30);
+	c_flags(f, sizeof f);
+	CHECK("302: a line typed ahead flags its C", !strcmp(f, "11") ||
+	      (printf("       got %s\n", f), 0));
+
+	/* while a program runs, `pwd` is typed ahead; the program prints a
+	** block of its own (another text), then the shell runs pwd */
+	start(80, 24, 2000);
+	feed("\033]133;A\007$ \033]133;B\007");
+	dch_vt_input_seen("prog\r", 5);
+	feed("prog\r\n\033]133;C\007");
+	dch_vt_input_seen("pwd\r", 4);
+	feed("\033]133;D;0\007" BLOCK("evil cmd") BLOCK("pwd"));
+	feed(BLOCK("pwd"));			/* nothing typed for it */
+	seq_feed(1, 30);
+	c_flags(f, sizeof f);
+	CHECK("302: a printed block whose text is not a typed line is not "
+	      "flagged; the typed-ahead line is, once", !strcmp(f, "1010") ||
+	      (printf("       got %s\n", f), 0));
+
+	/* what output can get: a block whose text IS the typed-ahead line
+	** takes that line's flag (the shell's own block then has none) */
+	start(80, 24, 2000);
+	feed("\033]133;A\007$ \033]133;B\007");
+	dch_vt_input_seen("prog\r", 5);
+	feed("prog\r\n\033]133;C\007");
+	dch_vt_input_seen("pwd\r", 4);
+	feed("\033]133;D;0\007" BLOCK("pwd") BLOCK("pwd"));
+	seq_feed(1, 30);
+	c_flags(f, sizeof f);
+	CHECK("302: the limit: a printed block equal to the typed line takes "
+	      "its one flag", !strcmp(f, "110") ||
+	      (printf("       got %s\n", f), 0));
+
+	/* no client input at all: a printed block is never flagged */
+	start(80, 24, 2000);
+	feed(BLOCK("ls") BLOCK("ls"));
+	seq_feed(1, 30);
+	c_flags(f, sizeof f);
+	CHECK("302: no input at all: no C is flagged", !strcmp(f, "00") ||
+	      (printf("       got %s\n", f), 0));
 }
 
 /* agent pause: a gap, nothing captured, resume on the next prompt */
@@ -1346,6 +1421,7 @@ main(int argc, char **argv)
 	test_alt();
 	test_resize();
 	test_marks();
+	test_typed_ahead();
 	test_pause();
 	test_zalgo();
 	test_extras();

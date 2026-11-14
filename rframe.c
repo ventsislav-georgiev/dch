@@ -852,6 +852,27 @@ exec_prep(void)
 		close((int)fd);
 }
 
+/* --search's or --ref's text as dch serve hands it to its ctl child, on
+** stdin with "-" in the argv (LOW-XN1): fd read to its end into b, at most
+** 256 bytes (--ref's limit, the larger of the two) and no NUL; b, or NULL
+** (overlong, a NUL, a read error). The flag's own rules come after. */
+char *
+ctl_text_read(int fd, char b[257])
+{
+	size_t n = 0;
+	ssize_t r;
+
+	while (n < 257 && (r = read(fd, b + n, 257 - n)) != 0)
+		if (r > 0)
+			n += (size_t)r;
+		else if (errno != EINTR)
+			return NULL;
+	if (n > 256 || memchr(b, '\0', n))
+		return NULL;
+	b[n] = '\0';
+	return b;
+}
+
 /* Run argv (argv[0] an absolute path; no shell) with stdin on /dev/null.
 ** Its stdout goes to *out (malloc'd, NUL-terminated, *outn bytes, at most
 ** cap) when out is set, else /dev/null; its stderr to err[errcap] when err

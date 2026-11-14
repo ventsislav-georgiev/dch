@@ -123,8 +123,10 @@ dch_vt_capture_paused(void)
 }
 
 void
-dch_vt_input_seen(void)
+dch_vt_input_seen(const void *b, size_t n)
 {
+	(void)b;
+	(void)n;
 }
 
 void

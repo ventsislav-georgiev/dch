@@ -41,6 +41,10 @@ def spawn(sockdir, n=name):
     else:
         pid = struct.unpack("3i", s.getsockopt(socket.SOL_SOCKET,
                                                socket.SO_PEERCRED, 12))[0]
+    # A MSG_READ opens the pty gate a master started directly holds until a
+    # first client: then it exits when sleep does, even if no reaper reaches
+    # it (two sat 10 hours, QA 1.63.0). --spawn sends one itself.
+    s.sendall(struct.pack("<BH", 6, 4) + bytes(4))
     s.close()
     return pid
 

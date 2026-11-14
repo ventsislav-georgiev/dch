@@ -94,6 +94,9 @@ static GhosttyTrackedGridRef xsent;
 static int xpaused, xresume, xreanchor;
 static int xris;			/* a full reset (RIS) came */
 static int xb_open, xinput;		/* inside OSC 133 B..C; input seen */
+static GhosttyTrackedGridRef xbref;	/* where the last B came */
+static char xtyped[4096];		/* client input no C has used (#302) */
+static size_t xtl, xtb;			/* its length; its length at B */
 static int xlast_kind = RING_K_OUTPUT;	/* what a CONT record continues */
 static size_t slice_b = 1;		/* row budget of one feed slice */
 
@@ -251,6 +254,71 @@ pm_emit(int i)
 	pm_drop(i);
 }
 
+/* Drop xtyped through the first Enter at or after `from` (all of it when
+** none): the line a C ran. */
+static void
+typed_drop(size_t from)
+{
+	while (from < xtl && xtyped[from] != '\r' && xtyped[from] != '\n')
+		from++;
+	if (from < xtl)
+		from++;
+	memmove(xtyped, xtyped + from, xtl - from);
+	xtl -= from;
+}
+
+/* A C with no input since its B: the shell ran a line typed ahead (queued
+** before B) when the screen from B to the cursor is a whole line the client
+** sent that no C has used; it is used up. Output that prints marks can so
+** title a block only with a line the user typed, once (#302). */
+static int
+typed_ahead(void)
+{
+	GhosttySelection sel;
+	GhosttyPoint p;
+	size_t bx, by, l, s, i;
+	uint16_t cx = 0, cy = 0;
+	char *t;
+
+	if (!memchr(xtyped, '\r', xtl) && !memchr(xtyped, '\n', xtl))
+		return 0;
+	ghostty_terminal_get(the_term, GHOSTTY_TERMINAL_DATA_CURSOR_X, &cx);
+	ghostty_terminal_get(the_term, GHOSTTY_TERMINAL_DATA_CURSOR_Y, &cy);
+	if (alt_active() || ref_pos(xbref, &bx, &by) < 0 ||
+	    by > hist_rows() + cy || (by == hist_rows() + cy && bx > cx))
+		return 0;
+	memset(&sel, 0, sizeof sel);
+	sel.size = sizeof sel;
+	sel.start.size = sel.end.size = sizeof sel.start;
+	memset(&p, 0, sizeof p);
+	p.tag = GHOSTTY_POINT_TAG_SCREEN;
+	p.value.coordinate.x = (uint16_t)bx;
+	p.value.coordinate.y = (uint32_t)by;
+	if (ghostty_terminal_grid_ref(the_term, p, &sel.start) !=
+	    GHOSTTY_SUCCESS)
+		return 0;
+	p.tag = GHOSTTY_POINT_TAG_ACTIVE;
+	p.value.coordinate.x = cx;
+	p.value.coordinate.y = cy;
+	if (ghostty_terminal_grid_ref(the_term, p, &sel.end) !=
+	    GHOSTTY_SUCCESS || format_unwrap(&sel, &t, &l) < 0)
+		return 0;
+	while (l && (t[l - 1] == '\n' || t[l - 1] == ' '))
+		l--;
+	for (s = i = 0; l && i < xtl; i++)
+	{
+		if (xtyped[i] != '\r' && xtyped[i] != '\n')
+			continue;
+		if (i - s == l && !memcmp(xtyped + s, t, l))
+		{
+			typed_drop(s);
+			return 1;
+		}
+		s = i + 1;
+	}
+	return 0;
+}
+
 /* GHOSTTY_TERMINAL_OPT_SEMANTIC_PROMPT: the mirror's own (fragment-safe)
 ** OSC 133 parse reports a step; record it as a mark (§11.7). */
 static void
@@ -288,10 +356,21 @@ on_prompt(GhosttyTerminal t, void *ud, const GhosttyTerminalSemanticPrompt *ev)
 		snprintf(head, sizeof head, "B");
 		xb_open = 1;
 		xinput = 0;
+		xtb = xtl;
+		ghostty_terminal_get(the_term, GHOSTTY_TERMINAL_DATA_CURSOR_X,
+		    &cx);
+		ghostty_terminal_get(the_term, GHOSTTY_TERMINAL_DATA_CURSOR_Y,
+		    &cy);
+		xbref = track(xbref, GHOSTTY_POINT_TAG_ACTIVE, cx, cy);
 		break;
 	case GHOSTTY_SEMANTIC_PROMPT_OUTPUT_START:
 		snprintf(head, sizeof head, "C");
 		if (xb_open && xinput)
+		{
+			flags |= RING_F_INPUT;
+			typed_drop(xtb);
+		}
+		else if (xb_open && typed_ahead())
 			flags |= RING_F_INPUT;
 		xb_open = 0;
 		cl = ev->command.ptr ? ev->command.len : 0;
@@ -847,10 +926,28 @@ dch_vt_capture_paused(void)
 }
 
 void
-dch_vt_input_seen(void)
+dch_vt_input_seen(const void *in, size_t n)
 {
+	const char *b = in;
+
 	if (xb_open)
 		xinput = 1;
+	if (n >= sizeof xtyped)
+	{
+		b += n - sizeof xtyped;	/* keep the newest */
+		n = sizeof xtyped;
+		xtl = xtb = 0;
+	}
+	else if (xtl + n > sizeof xtyped)
+	{
+		size_t cut = xtl + n - sizeof xtyped;
+
+		memmove(xtyped, xtyped + cut, xtl - cut);
+		xtl -= cut;
+		xtb = xtb > cut ? xtb - cut : 0;
+	}
+	memcpy(xtyped + xtl, b, n);
+	xtl += n;
 }
 
 void
@@ -913,6 +1010,9 @@ dch_vt_free(void)
 		pm_drop(0);
 	ghostty_tracked_grid_ref_free(xref);
 	xref = NULL;
+	ghostty_tracked_grid_ref_free(xbref);
+	xbref = NULL;
+	xtl = xtb = 0;
 	xpaused = xresume = xreanchor = xris = xb_open = xinput = 0;
 	free(wb);
 	wb = NULL;

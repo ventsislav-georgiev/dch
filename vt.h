@@ -114,8 +114,9 @@ void dch_vt_capture_rebase(void);
 ** off: resume (rows printed while paused never enter). */
 void dch_vt_capture_pause(int on);
 int dch_vt_capture_paused(void);
-/* The master forwarded client input to the pty (OSC 133 B..C fact). */
-void dch_vt_input_seen(void);
+/* The master forwarded client input b[n] to the pty (OSC 133 B..C fact;
+** a line typed ahead, #302). */
+void dch_vt_input_seen(const void *b, size_t n);
 /* Append marks still waiting for their row (before a --restart). */
 void dch_vt_capture_flush(void);
 /* Clear the mirror's history like ⌘K (ESC[H ESC[2J ESC[3J into the mirror

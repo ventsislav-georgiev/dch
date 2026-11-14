@@ -544,20 +544,28 @@ url_rule(const char *v, size_t l)
 }
 
 /* xr_git_remote's rule: an entry "<key>\n<value>\0" whose key is not
-** url.<base>.insteadof has a value that, rewritten by the longest such
-** entry's value starting it (first of equals) into <base>, passes url_rule
-** (QA 1.61.0 LOW-X15) */
+** url.<base>.insteadof has a value that, rewritten as git's remote.c
+** alias_url does, passes url_rule: walk the bases in the order each is
+** first named, each one's values in order, and keep the first value
+** strictly longer than the kept one (none kept: any, "" too) that starts
+** the URL; past 64 insteadof entries, none (QA 1.61.0 LOW-X15, 1.63.0
+** LOW-X20) */
 static int
 remote_rule(const char *s, size_t n)
 {
 	static char u[1 << 17];
-	const char *z, *v, *y, *w, *b;
-	size_t i, j, l, bl, kl;
+	const char *z, *v, *y, *w, *b, *y2, *w2;
+	size_t i, j, j2, p, l, bl, kl, ni = 0;
+	int first;
 
 #define INSTEADOF(k, kn) ((kn) >= 14 && !strncmp((k), "url.", 4) && \
 	                  !strncmp((k) + (kn) - 10, ".insteadof", 10))
-	for (i = 0; i < n && (z = memchr(s + i, '\0', n - i)) != NULL;
-	     i = (size_t)(z - s) + 1)
+#define NEXT(x, yy) ((yy) = memchr(s + (x), '\0', n - (x)))
+	for (j = 0; j < n && NEXT(j, y); j = (size_t)(y - s) + 1)
+		if ((w = memchr(s + j, '\n', (size_t)(y - s) - j)) &&
+		    INSTEADOF(s + j, (size_t)(w - s) - j) && ++ni > 64)
+			return 0;
+	for (i = 0; i < n && NEXT(i, z); i = (size_t)(z - s) + 1)
 	{
 		if (!(v = memchr(s + i, '\n', (size_t)(z - s) - i)) ||
 		    INSTEADOF(s + i, (size_t)(v - s) - i))
@@ -566,26 +574,39 @@ remote_rule(const char *s, size_t n)
 		l = (size_t)(z - v);
 		b = NULL;
 		bl = kl = 0;
-		for (j = 0; j < n && (y = memchr(s + j, '\0', n - j)) != NULL;
-		     j = (size_t)(y - s) + 1)
+		for (j = 0; j < n && NEXT(j, y); j = (size_t)(y - s) + 1)
 		{
 			if (!(w = memchr(s + j, '\n', (size_t)(y - s) - j)) ||
 			    !INSTEADOF(s + j, (size_t)(w - s) - j))
 				continue;
-			w++;
-			if ((size_t)(y - w) > bl && (size_t)(y - w) <= l &&
-			    !memcmp(w, v, (size_t)(y - w)))
-			{
-				bl = (size_t)(y - w);
-				b = s + j + 4;
-				kl = (size_t)(w - 1 - b) - 10;
-			}
+			for (first = 1, p = 0; first && p < j && NEXT(p, y2);
+			     p = (size_t)(y2 - s) + 1)
+				first = !((w2 = memchr(s + p, '\n',
+				                       (size_t)(y2 - s) - p)) &&
+				          w2 - (s + p) == w - (s + j) &&
+				          !memcmp(s + p, s + j, (size_t)(w - s) - j));
+			if (!first)
+				continue;	/* this base was walked already */
+			for (j2 = j; j2 < n && NEXT(j2, y2);
+			     j2 = (size_t)(y2 - s) + 1)
+				if ((w2 = memchr(s + j2, '\n', (size_t)(y2 - s) - j2)) &&
+				    w2 - (s + j2) == w - (s + j) &&
+				    !memcmp(s + j2, s + j, (size_t)(w - s) - j) &&
+				    (!b || (size_t)(y2 - w2 - 1) > bl) &&
+				    (size_t)(y2 - w2 - 1) <= l &&
+				    !memcmp(w2 + 1, v, (size_t)(y2 - w2 - 1)))
+				{
+					bl = (size_t)(y2 - w2 - 1);
+					b = s + j + 4;
+					kl = (size_t)(w - b) - 10;
+				}
 		}
 		if (!b ? url_rule(v, l) : kl + l - bl <= 4096 &&
 		    (memcpy(u, b, kl), memcpy(u + kl, v + bl, l - bl),
 		     url_rule(u, kl + l - bl)))
 			return 1;
 	}
+#undef NEXT
 #undef INSTEADOF
 	return 0;
 }

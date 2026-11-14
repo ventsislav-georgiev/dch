@@ -45,6 +45,10 @@ static volatile sig_atomic_t want_rearm;
 ** itself (bg then fg, a ^Z while it starts, a kill -TSTP) leaves the
 ** terminal in the shell's modes. Set by handler, checked in the loops. */
 static volatile sig_atomic_t want_cont;
+/* 1 while the attach's raw mode is on the terminal: term_raw sets it,
+** restore_term clears it. A SIGTSTP then puts the shell's modes back
+** (QA 1.63.0 MED-V14). */
+static volatile sig_atomic_t raw_on;
 
 /*
 ** Restore terminal + reset modes inner program may have left on (mouse
@@ -73,6 +77,7 @@ restore_term(void)
 	** stays the view's */
 	if (getpid() != term_pid)
 		return;
+	raw_on = 0;
 	tcsetattr(0, TCSADRAIN, &orig_term);
 
 	/* \e[?25h cursor on; \e[?100[0236]l + \e[?101[56]l mouse tracking off;
@@ -223,6 +228,31 @@ on_sigcont(ATTRIBUTE_UNUSED int sig)
 	want_cont = 1;
 }
 
+/* SIGTSTP: a stop the client did not make itself (a ^Z while it starts, a
+** kill -TSTP) puts the shell's modes back first, as the suspend key's
+** restore_term does: dash, unlike bash and zsh, sets none of its own on a
+** job's stop and reads its next line raw (QA 1.63.0 MED-V14). TCSANOW: a
+** drain waits on a terminal that reads nothing. Not from the background,
+** where the tcsetattr would stop on SIGTTOU and set them after the fg.
+** Then the default stop; the SIGCONT that ends it sets raw mode again
+** through want_cont. */
+static RETSIGTYPE
+on_sigtstp(ATTRIBUTE_UNUSED int sig)
+{
+	int e = errno;
+	sigset_t ss;
+
+	if (raw_on && tcgetpgrp(0) == getpgrp())
+		tcsetattr(0, TCSANOW, &orig_term);
+	signal(SIGTSTP, SIG_DFL);
+	sigemptyset(&ss);
+	sigaddset(&ss, SIGTSTP);
+	sigprocmask(SIG_UNBLOCK, &ss, NULL);
+	raise(SIGTSTP);
+	signal(SIGTSTP, on_sigtstp);
+	errno = e;
+}
+
 /* Puts the attach's raw mode on the terminal (LOW-V9). A stop inside the
 ** tcsetattr returns EINTR on the fg (macOS); a SIGCONT during or after it
 ** means the shell had the terminal meanwhile: set it again. From the
@@ -232,8 +262,8 @@ on_sigcont(ATTRIBUTE_UNUSED int sig)
 ** reported to the shell, which puts its modes on, and the tcsetattr then
 ** ends (XNU, once the drain wakes) and puts raw mode over them on a shell
 ** that sets none of its own (bash --noediting). Held, the stop comes after
-** the raw set, the shell's modes go on after it, and the fg's SIGCONT sets
-** raw again through want_cont. */
+** the raw set, on_sigtstp puts the shell's modes back, and the fg's
+** SIGCONT sets raw again through want_cont. */
 static void
 term_raw(void)
 {
@@ -248,6 +278,7 @@ term_raw(void)
 		want_cont = 0;
 		r = tcsetattr(0, TCSADRAIN, &cur_term);
 	} while ((r < 0 && errno == EINTR) || want_cont);
+	raw_on = 1;
 	sigprocmask(SIG_SETMASK, &os, NULL);
 }
 
@@ -656,8 +687,9 @@ xray_x(const unsigned char *b, int n)
 /* The X-ray overlay (#187): the view over this attach, which is never
 ** retired. The terminal is handed to the view as a detach leaves it (the
 ** session's modes off, the main screen) and the view runs in a child, the
-** host's attach_xray. The master keeps this client attached meanwhile: what
-** it sends is read and dropped here, so its queue never fills. On the way
+** host's attach_xray. The master keeps this client attached meanwhile and
+** sends it nothing (#311); what it sent before is read and dropped here,
+** as is all of an older master's output, so its queue never fills. On the way
 ** back, the two frames an attach starts with: the master re-arms the
 ** session's modes and repaints its screen from the mirror, so what came in
 ** while the view was up is on screen (dch-lite: a SIGWINCH, as on any
@@ -679,13 +711,13 @@ xray_overlay(int s)
 	fflush(stdout);
 	/* a remote attach (#231): the relay drops the host's output from here
 	** to the MSG_ATTACH below, as for a suspend (the host never sees it),
-	** so nothing it passed late lands on the screen the view returns to */
+	** so nothing it passed late lands on the screen the view returns to;
+	** a local one (#311): len 1 keeps it attached on the master, which
+	** sends it nothing and has the mirror answer the program's queries */
 	memset(&pkt, 0, sizeof pkt);
-	if (attach_detached)
-	{
-		pkt.type = MSG_DETACH;
-		write_packet_or_fail(s, &pkt);
-	}
+	pkt.type = MSG_DETACH;
+	pkt.len = attach_detached ? 0 : 1;
+	write_packet_or_fail(s, &pkt);
 	if (pipe(p) < 0)
 		p[0] = -1;
 	else
@@ -971,6 +1003,7 @@ attach_main(int noerror)
 	signal(SIGUSR2, on_sigusr2);
 	signal(SIGURG, on_sigurg);
 	signal(SIGCONT, on_sigcont);
+	signal(SIGTSTP, on_sigtstp);
 	signal(SIGTTOU, SIG_DFL);	/* term_raw never sets modes from the bg */
 
 	/* Set raw mode. */

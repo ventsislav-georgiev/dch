@@ -66,6 +66,10 @@ struct client
 	** it (#200): a client before #211 resets nothing on a suspend, and
 	** after one that does the pop meets an empty stack, a no-op. */
 	int armed;
+	/* Its X-ray view is up (MSG_DETACH len 1, #311): attached, but no
+	** terminal sees the output, so none goes to it and the mirror answers
+	** the program's queries. The next MSG_ATTACH clears it. */
+	int viewing;
 
 	/* Connection role latch. A control connection (MSG_KEYS/READ/WAIT)
 	** receives framed responses on the same socket attached clients
@@ -155,6 +159,7 @@ static struct dch_ring xring;
 static char xsid[18];
 static int n_xsubs;		/* subscribed clients, <= DCH_RING_SUBS */
 static pid_t xagent;		/* the agent pid capture is paused for */
+static int xclaudes;		/* the Claudes counted with it (#314) */
 /* While a follower is subscribed, the agent probe's interval (MED-2 QA
 ** 1.52.0): its start or exit reaches --follow in about a second, not on
 ** the record tick. No follower, no probe. */
@@ -168,7 +173,7 @@ static struct timespec xagent_at;	/* last probe */
 static unsigned long xagent_gen;	/* the mirror's gen at the last probe */
 static struct rlimit core_orig;	/* RLIMIT_CORE before core_off() */
 static int core_saved;
-static void xray_agent(pid_t agent);
+static void xray_agent(pid_t agent, int n);
 /* DCH_NO_REPLAY=1: don't repaint an attaching client from the mirror. Escape
 ** hatch for a program whose own WINCH repaint is enough and that dislikes
 ** seeing its screen handed back to it. Resolved once at master start. */
@@ -480,19 +485,17 @@ auto_allow(void)
 		dch_trace("auto-allow: same prompt again, left to the human");
 	else if (dch_agent_probe(the_pty.pid, &a) == 0)
 	{
-		pid_t fg = tcgetpgrp(the_pty.fd);
-		int e = errno;
-		pid_t g = getpgid((pid_t)a.pid);
+		int fg = proc_fg(the_pty.pid, a.pid);
 
 		free(a.launch);
-		/* only the Claude in front: one suspended with Ctrl-Z reads
-		** nothing, the "1" would go to the shell that printed this
-		** (#282). Unreadable: fail closed */
-		if (fg <= 0 || g < 0 || fg != g)
-			dch_trace("auto-allow: claude %ld not in front (its group "
-			          "%ld, the pty's %ld%s%s), left alone", a.pid,
-			          (long)g, (long)fg, fg < 0 ? ": " : "",
-			          fg < 0 ? strerror(e) : "");
+		/* only the Claude in front, also under script or unbuffer
+		** (#318): one suspended with Ctrl-Z reads nothing, the "1"
+		** would go to the shell that printed this (#282). Unreadable:
+		** fail closed */
+		if (fg != 1)
+			dch_trace("auto-allow: claude %ld not in front (%s), left "
+			          "alone", a.pid, fg ? "unreadable" : "suspended or "
+			          "behind a shell");
 		/* behind any input still waiting, never a blocking write */
 		else if (pty_input("1", 1) == 0)
 		{
@@ -657,6 +660,7 @@ rec_probe(void)
 {
 	struct dch_agent a;
 	int stopped = rec_stopped() > 0;
+	pid_t ag;
 
 	if (!stopped && the_pty.fd >= 0 &&
 	    dch_agent_probe(the_pty.pid, &a) == 0)
@@ -674,9 +678,10 @@ rec_probe(void)
 	}
 	/* a stopped or gone agent no longer holds the ring's pause; a Codex
 	** holds it too (its corpus is its rollout: X-ray 7.4) */
-	xray_agent(stopped || the_pty.fd < 0 ? 0
-	           : rec_ag.pid > 0 && kill(rec_ag.pid, 0) == 0 ? rec_ag.pid
-	           : (pid_t)dch_codex_below(the_pty.pid));
+	ag = stopped || the_pty.fd < 0 ? 0
+	     : rec_ag.pid > 0 && kill(rec_ag.pid, 0) == 0 ? rec_ag.pid
+	     : (pid_t)dch_codex_below(the_pty.pid);
+	xray_agent(ag, ag && ag == rec_ag.pid ? rec_ag.n : 0);
 	return stopped;
 }
 
@@ -1129,28 +1134,33 @@ die(int sig)
 #endif
 		return;
 	}
-	/* Trace is opt-in and the sink fd is resolved at master startup, so this
-	** only does fprintf() here, not fopen() — good enough for a debug build to
-	** catch "who killed the master" (the bug this whole trace facility exists
-	** to diagnose). Not strictly async-signal-safe; debug-only. */
+	/* Trace is opt-in and the sink fd is resolved at master startup: the
+	** line is written to it here with write(2), as dch_trace's fprintf()
+	** may be what the signal interrupted, holding the FILE lock the
+	** handler would wait on for ever (QA 1.63.0 OOA-1). It catches "who
+	** killed the master", the bug this trace facility exists for. */
+	char cmd[121] = "", line[400];
+	struct timespec ts;
+	int n;
+
 	if (die_pid > 0)
 	{
 		/* "signal N from <pid> <cmd>": whoever sent it may exit any
 		** moment, so this is best effort — "from <pid>" alone if so.
 		** exit() below already runs the atexit writes in this handler. */
-		char cmd[121];
-
 		sender_cmd(die_pid, cmd, sizeof cmd);
 		snprintf(rec_end, sizeof rec_end, "signal %d from %ld%s%s", sig,
 		         (long)die_pid, cmd[0] ? " " : "", cmd);
-		dch_trace("master die sig=%d from pid=%ld uid=%ld cmd=%s", sig,
-		          (long)die_pid, (long)die_uid, cmd);
 	}
 	else
-	{
-		dch_trace("master die sig=%d", sig);
 		snprintf(rec_end, sizeof rec_end, "signal %d", sig);
-	}
+	if (dch_trace_fd >= 0 && clock_gettime(CLOCK_REALTIME, &ts) == 0 &&
+	    (n = snprintf(line, sizeof line, "%ld.%06ld pid=%d master die "
+	                  "sig=%d from pid=%ld uid=%ld cmd=%s\n",
+	                  (long)ts.tv_sec, ts.tv_nsec / 1000L, (int)getpid(),
+	                  sig, (long)die_pid, (long)die_uid, cmd)) > 0)
+		(void)!write(dch_trace_fd, line,
+		             n < (int)sizeof line ? (size_t)n : sizeof line - 1);
 	exit(1);
 }
 
@@ -1978,7 +1988,7 @@ process_pty_buf(const unsigned char *buf, size_t len)
 	for (p = clients; p; p = next)
 	{
 		next = p->next;
-		if (!p->attached)
+		if (!p->attached || p->viewing)
 			continue;
 		/* Drain any existing backlog FIRST: a client momentarily at OUT_CAP
 		** but recovering would otherwise be dropped by queue_to_client before
@@ -2167,14 +2177,15 @@ core_off(void)
 ** on the history record's refresh tick, every XRAY_AGENT_MS while a
 ** follower is subscribed and before an X-ray read (xray_probe). Ring or no
 ** ring, a change wakes the followers: theirs is a reset (with the ring off,
-** S_PAUSED still says an agent runs).
+** S_PAUSED still says an agent runs). So does a change of n, the Claudes
+** under the child: a second one leaves the agent pid as it was (#314).
 ** shortcut: agent output before the first probe after its start (rec_ms,
 ** 60 s, with no follower and no read) is captured; hook dch_agent_probe
 ** into the pty batch if it matters. */
 static void
-xray_agent(pid_t agent)
+xray_agent(pid_t agent, int n)
 {
-	if (agent != xagent)
+	if (agent != xagent || n != xclaudes)
 		ring_touch(&xring);
 	if (agent && agent != xagent)
 	{
@@ -2187,6 +2198,7 @@ xray_agent(pid_t agent)
 		dch_trace("xray: agent gone, resumed");
 	}
 	xagent = agent;
+	xclaudes = n;
 }
 
 /* What a screen follower's answer reads besides the ring (#140): the
@@ -2278,7 +2290,7 @@ static void
 xray_agent_gone(void)
 {
 	if (xagent && kill(xagent, 0) < 0 && errno == ESRCH)
-		xray_agent(0);
+		xray_agent(0, 0);
 }
 
 /* Serve MSG_RING_READ (dtach.h has the wire format). Returns -1 if the
@@ -3002,7 +3014,7 @@ do_keys(struct client *p, const unsigned char *payload, unsigned int len)
 	if (the_pty.fd >= 0)
 	{
 		pty_input(bytes, nbytes);
-		dch_vt_input_seen();	/* OSC 133 B..C (§11.5) */
+		dch_vt_input_seen(bytes, nbytes);	/* §11.5, #302 */
 	}
 	dch_vt_buf_free(bytes);
 	return queue_status(p, MSG_ACK, DCH_ST_OK);
@@ -4001,7 +4013,7 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 		if (the_pty.fd >= 0)
 		{
 			push_input(p, payload, len);
-			dch_vt_input_seen();	/* OSC 133 B..C (§11.5) */
+			dch_vt_input_seen(payload, len);	/* §11.5, #302 */
 		}
 	}
 	/* the end of a dch --send (#307): did all of it go in */
@@ -4082,6 +4094,7 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 		** ordering. The first gated lite attach forwards startup output live, including its
 		** modes, so it must not re-arm those same modes below. */
 		pty_gated = 0;
+		p->viewing = 0;
 		if (!rearm)
 			p->attached = 1;
 		drain_pty();
@@ -4140,7 +4153,9 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 	}
 	else if (type == MSG_DETACH)
 	{
-		p->attached = 0;
+		/* len 1: the client's X-ray view went up over it (#311) */
+		p->viewing = len == 1 && p->attached;
+		p->attached = p->viewing;
 		/* Detaching before the sizing frame arrived: the repaint has
 		** no one to land on any more. */
 		p->want_replay = 0;
@@ -4511,8 +4526,8 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 	** don't care what happens to it. */
 	setsid();
 
-	/* Resolve the trace sink now (before any signal handler can call
-	** dch_trace), so die() only ever fprintf()s, never fopen()s. */
+	/* Resolve the trace sink now, before any signal handler: die() writes
+	** to dch_trace_fd and never opens it. */
 	dch_trace("master start pid=%d waitattach=%d", (int)getpid(), waitattach);
 
 	listen_fd = s;

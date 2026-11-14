@@ -1537,7 +1537,8 @@ xv_label(const struct xv *v, char *b, size_t n)
 	const char *c = v->corpus, *r = v->reason, *d = xv_dot();
 
 	b[0] = '\0';
-	if (!v->have || !strcmp(c, "claude"))
+	/* a Claude followed on while others run: the count (#314) */
+	if (!v->have || (!strcmp(c, "claude") && v->claudes < 2))
 		return;
 	if (!strcmp(c, "codex"))
 		snprintf(b, n, "Codex%smentions only", d);
@@ -1561,7 +1562,7 @@ xv_label(const struct xv *v, char *b, size_t n)
 	else if (!strcmp(c, "screen"))
 		snprintf(b, n, "Screen%slast %lld lines%smentions only", d,
 		         v->lines > 0 ? v->lines : 0, d);
-	else if (!strcmp(c, "none"))
+	else if (!strcmp(c, "none") || !strcmp(c, "claude"))
 	{
 		/* several Claudes: so with the ring off too, a Claude's corpus
 		** is never the ring (#256) */
@@ -3248,8 +3249,17 @@ xv_run(int fd, const char *n, char *err, size_t errsz)
 		{
 			const char *e = v->kid[XV_RK].err, *w = xv_noun(v);
 
+			/* the engine's "chapter gone" stays for --json clients;
+			** the view says it in its own word (#295) */
+			if (strstr(e, "chapter gone") && (v->rturn || !v->rloaded))
+			{
+				snprintf(v->status, sizeof v->status,
+				         "X-ray: that %s is gone", w);
+				if (!v->rturn)
+					xv_back(v);
+			}
 			/* a turn that got no chapter: said, the reader stays */
-			if (v->rturn)
+			else if (v->rturn)
 				snprintf(v->status, sizeof v->status, e[0]
 				         ? "could not read that %s: %s"
 				         : "could not read that %s: no such %s", w,

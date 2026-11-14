@@ -116,7 +116,10 @@ enum
 	MSG_ATTACH	= 1,	/* no payload; len = rows of scrollback the
 				** replay sends above the screen (#101, 0 =
 				** none; masters before it ignore len) */
-	MSG_DETACH	= 2,
+	MSG_DETACH	= 2,	/* no payload; len 1: the client's X-ray view
+				** is up, it stays attached (a restart carries
+				** it) and gets no output (#311; masters before
+				** it detach it) */
 	MSG_WINCH	= 3,
 	MSG_REDRAW	= 4,
 	/* Control verbs (client->master). A connection that sends one of
@@ -356,6 +359,9 @@ void dch_trace(const char *fmt, ...)
 	__attribute__((format(printf, 1, 2)))
 #endif
 	;
+/* the trace sink's fd once resolved, else -1: for a signal handler, which
+** must write(2) a line itself, never take stdio's lock (QA 1.63.0 OOA-1) */
+extern int dch_trace_fd;
 
 void write_buf_or_fail(int fd, const void *buf, size_t count);
 void write_packet_or_fail(int fd, const struct packet *pkt);
@@ -382,12 +388,16 @@ struct dch_agent
 	char rec[1400];		/* its Claude session record's path */
 	char cfg[1400];		/* its config dir, "" = our ~/.claude (#065) */
 	char **launch;		/* malloc'd block, NULL-terminated; may be NULL */
+	int n;			/* the live Claudes under the child (#314) */
 };
 int dch_history_dir(char *out, size_t outsz, const char *sockdir,
                     int create);
 /* The shallowest Codex at or below child (X-ray 7.3/7.4); 0 none. */
 long dch_codex_below(long child);
 int dch_agent_probe(long child, struct dch_agent *a);
+/* 1: the Claude at pid is in front of its terminal, through any wrapper
+** pty up to the session child root (#282, #312); 0 not; -1 unreadable. */
+int proc_fg(long root, long pid);
 void dch_agent_json(FILE *f, const struct dch_agent *a);
 int dch_claude_gone(const char *rec);
 int path_lookup(const char *name, const char *path, const char *cwd,

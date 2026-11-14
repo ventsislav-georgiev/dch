@@ -402,6 +402,7 @@ def dashname():
 ZW_RE = re.compile("[\u200b-\u200d\u2060-\u2064\ufeff\u05b8\u05b9\u05c1"
                    "\u094d\u0947\u20d0\u20d1\u180e\u206a\u206f\u115f"
                    "\u1160\u3164]")
+WIDE_RE = re.compile("[\U00016ff0\U00016ff1]")
 
 
 def zerowidth():
@@ -411,26 +412,28 @@ def zerowidth():
     U+036F (Hebrew points, Devanagari signs, U+20D0), the format
     characters U+180E and U+206A-206F, and the Hangul fillers U+115F,
     U+1160 and U+3164, none drawn in a cell by Ghostty (QA 1.60.0
-    LOW-V2)."""
+    LOW-V2). U+16FF0-16FF1 (wide Mc) take two (QA 1.63.0 NIT-V8)."""
     names = {"zwbom": "zw\ufeffbom", "zwj": "zw\u2060wj",
              "zwheb": "zw\u05e9\u05b8\u05c1\u05dc\u05d5\u05b9\u05dd",
              "zwdev": "zw\u0928\u092e\u0938\u094d\u0924\u0947",
              "zwsym": "zwa\u20d0\u20d1b",
              "zwfmt": "zw\u180ex\u206ay\u206fz",
-             "zwhf": "zw\u115fx\u1160y\u3164z"}
+             "zwhf": "zw\u115fx\u1160y\u3164z",
+             "zwmc": "zw\U00016ff0x\U00016ff1y"}
     for n, alias in names.items():
         dch("--spawn", n, "--size", "80x24", "sh", "-c", "sleep 600")
         dch("-m", n, alias)
     picker("pk10", "100x30", "NO_COLOR=1", "TERM=xterm-256color")
     s = wait_screen("pk10", lambda s: all(a in rows(s)
                                           for a in names.values()))
-    cell = lambda l, i: i - len(ZW_RE.findall(l[:i]))
+    cell = lambda l, i: (i - len(ZW_RE.findall(l[:i])) +
+                         len(WIDE_RE.findall(l[:i])))
     hdr = [l for l in s.split("\n") if re.match(r"^ {4}NAME +STATE", l)]
     col = cell(hdr[0], hdr[0].find("STATE")) if hdr else -1
     for n, alias in names.items():
         rl = [l for l in body(s) if alias in l]
         check("U+%04X in a name: the row's state starts under STATE"
-              % ord(ZW_RE.search(alias).group()),
+              % ord((ZW_RE.search(alias) or WIDE_RE.search(alias)).group()),
               len(rl) == 1 and cell(rl[0], rl[0].find("Idle")) == col,
               col, rl)
     dch("--keys", "pk10", "q")
@@ -941,7 +944,7 @@ if __name__ == "__main__":
     finally:
         for n in ("pk1", "pk2", "pk3", "pk4", "pk5", "pk6", "pk7", "pk8",
                   "pk9", "pk10", "pk11", "pk12", "s2", "s10", "zwbom", "zwj",
-                  "zwheb", "zwdev", "zwsym", "zwfmt", "zwhf", "helper-qa", "a4k-2", "perm", "form", "zkbd"):
+                  "zwheb", "zwdev", "zwsym", "zwfmt", "zwhf", "zwmc", "helper-qa", "a4k-2", "perm", "form", "zkbd"):
             dch("-k", n)
         for pr in procs:
             pr.kill()
