@@ -4,14 +4,16 @@
 ** #295: the engine's chapters), Responses (each turn's answer, newest first,
 ** #290; none for a shell), Refs (the refs on the session's screen now
 ** first, #294), Search (where a word or phrase was said, #291) and Tasks
-** (the session's task list, #320: only when it has one); a ref's card, a
-** task's card; a chapter's reader. Drawn with the picker's renderer, on the
-** terminal its host (dch.c) made raw and put on the alternate screen.
+** (the session's task list, #320: only when it has one), Memory (its
+** memories and instruction files, #323: the same); a ref's card, a task's
+** or memory's card; a chapter's reader. Drawn with the picker's renderer,
+** on the terminal its host (dch.c) made raw and put on the alternate
+** screen.
 **
 ** Every answer is the engine's own --json: dch.c's xv_spawn forks this
 ** process and runs xray_main in the child with --follow, --ref, --chapter
-** --search or --tasks and --json, stdout into a pipe, and the view reads the NDJSON
-** with json.c.
+** --search, --tasks or --memory and --json, stdout into a pipe, and the
+** view reads the NDJSON with json.c.
 ** No second parser of any corpus, no exec, nothing written to disk. The
 ** index lives as --follow's does (spec 3.1): a snapshot, then deltas, for as
 ** long as the view is open; every child is ended with it.
@@ -37,15 +39,18 @@
 
 enum { XV_LIST, XV_CARD, XV_READ, XV_TCARD };
 /* the tabs as drawn and cycled: 0 Prompts, 2 Responses (#290), 1 Refs (the
-** chord's xv_tab), 3 Search (#291), 4 Tasks (#320, last) */
-static const int xv_ord[] = { 0, 2, 1, 3, 4 };
+** chord's xv_tab), 3 Search (#291), 4 Tasks (#320), 5 Memory (#323) */
+static const int xv_ord[] = { 0, 2, 1, 3, 4, 5 };
 #define XV_NTAB  ((int)(sizeof xv_ord / sizeof *xv_ord))
 #define XV_ALINES 8	/* a response's lines on Responses; the reader has all */
 /* follow, card, reader, a remote screen (#188), a search (#291), the task
-** list (#320) */
-enum { XV_FK, XV_CK, XV_RK, XV_SK, XV_QK, XV_TK, XV_NKIDS };
-#define XV_TASKS   50000	/* the task rows kept (the engine's XR_TASKS) */
-#define XV_TLINE   (64u << 10)	/* a --tasks line past it is dropped */
+** list (#320), the memory list (#323: XV_TK + 1, as tq[1] is tq[0] + 1) */
+enum { XV_FK, XV_CK, XV_RK, XV_SK, XV_QK, XV_TK, XV_MK, XV_NKIDS };
+#define XV_TASKS   50000	/* the task or memory rows kept (XR_TASKS) */
+#define XV_TLINE   (64u << 10)	/* a --tasks or --memory line past it is
+				** dropped */
+#define XV_MBODY   (16u << 20)	/* the memory text kept in all (#323) */
+#define XV_MEVERY  30000	/* Memory's re-read, while shown */
 #define XV_TEVERY  5000		/* a live session's list re-read at most so
 				** often while shown (6 times that while not),
 				** when --follow said something */
@@ -113,13 +118,17 @@ struct xv_hit		/* a search's hit (#291) */
 	long long at;
 };
 
-struct xv_task		/* a --tasks row (#320) */
+struct xv_task		/* a --tasks row (#320), a --memory row (#323) */
 {
 	char *id, *title, *label, *active, *note, *created, *chapter, *url;
 	char *group, *blocked;	/* blocked: blocked_by's ids, ", " between */
+	char *path, *scope, *body;	/* a memory's; label is its kind */
 	long long updated;	/* -1 none */
 	int st, seq;		/* st: 0 active, 1 pending, 2 done, 3 dropped;
-				** seq: the answer's order */
+				** a memory's 0 this session's, 1 the rest, 2
+				** instructions; seq: the answer's order */
+	int ses, cut;		/* ses: 1 this session wrote it, 2 loaded it;
+				** cut: 1 the engine cut the text, 2 not kept */
 };
 
 /* One --tasks answer: its rows, their order (grouped, Done newest first),
@@ -130,6 +139,19 @@ struct xv_tl
 	int n, a, *ord, aord, nord, nst[4];	/* nst: the rows of each st */
 	char *title, *warn;
 	int partial, done, dropped;	/* done: its done line came */
+	size_t bytes;			/* a memory list's text kept */
+};
+
+/* A list's query: Tasks' (tq[0]) or Memory's (tq[1]). The list shown, a
+** re-read's until its end (re: the answer goes there); the order is made
+** again (sort) at most every 100 ms while rows stream; no: never asked
+** again; ci: the card's row; sel: the selected row's id */
+struct xv_tq
+{
+	struct xv_tl tl, tn;
+	int re, sort, gen, fol, no, ci;
+	long long at, sat;	/* the query's start, the last sort */
+	char *sel;
 };
 
 struct xv_rl		/* a reader line: bytes [s, s + n) of its text */
@@ -202,15 +224,11 @@ struct xv
 	struct xv_ref *sr;
 	int nsr, asr;
 	long long scr_at;
-	/* Tasks (#320): the list shown, a re-read's until its end (tre: the
-	** answer goes there); the order is made again (tsort) at most every
-	** 100 ms while rows stream; vis holds Tasks' rows while vtab is 4 and
-	** tgen and tvf say they are current */
-	struct xv_tl tl, tn;
-	int tre, tsort, tgen, tvgen, vtab, tfol, tno, tci;
-	long long tat, tsat;	/* the query's start, the last sort */
-	char tvf[256], *selt;	/* the filter vis was made with; the selected
-				** task's id */
+	/* Tasks (#320), Memory (#323): vis holds their rows while vtab is 4
+	** or 5 and the list's gen (tvgen) and tvf say they are current */
+	struct xv_tq tq[2];
+	int tvgen, vtab, mtop;	/* mtop: a memory card's text scrolled */
+	char tvf[256];		/* the filter vis was made with */
 	int tg[4];		/* vis's first row of each st, -1 none */
 };
 
@@ -612,8 +630,9 @@ xv_pump(struct xv *v, int slot, fd_set *rs)
 		}
 		k->len += (size_t)r;
 		xv_lines(v, k, 0);
-		/* a long task list: drawn as it comes (#320), the rest next tick */
-		if (slot == XV_TK && now_ms() - t0 >= 50)
+		/* a long task or memory list: drawn as it comes (#320), the rest
+		** next tick */
+		if (slot >= XV_TK && now_ms() - t0 >= 50)
 			break;
 	}
 	if (k->pid <= 0 || k->fd >= 0 || k->efd >= 0)
@@ -793,7 +812,8 @@ xv_fline(struct xv *v, const struct json_parser *p)
 {
 	int o, k, j;
 
-	v->tfol = 1;	/* Tasks' cue to re-read (#320) */
+	/* Tasks' and Memory's cue to re-read (#320, #323) */
+	v->tq[0].fol = v->tq[1].fol = 1;
 	if ((o = xv_obj(p, 0, "snapshot", JSON_OBJECT)) >= 0)
 		xv_snapshot(v, p, o);
 	else if ((o = xv_obj(p, 0, "chapter", JSON_OBJECT)) >= 0)
@@ -1188,6 +1208,9 @@ xv_tl_free(struct xv_tl *l)
 		xv_sfree(t->url);
 		xv_sfree(t->group);
 		xv_sfree(t->blocked);
+		xv_sfree(t->path);
+		xv_sfree(t->scope);
+		xv_sfree(t->body);
 	}
 	free(l->t);
 	free(l->ord);
@@ -1241,17 +1264,19 @@ xv_ids(const struct json_parser *p, int o)
 	return b[0] && (s = strdup(b)) ? s : xv_none;
 }
 
-/* One --tasks line: the header, a task, the end. Rows past XV_TASKS are
-** counted as dropped. */
+/* One --tasks (tq[0]) or --memory (tq[1]) line: the header, a row, the
+** end (its warn too, #321). Rows past XV_TASKS are counted as dropped; a
+** memory's text past XV_MBODY in all is not kept. */
 static void
-xv_tline(struct xv *v, const struct json_parser *p)
+xv_lline(struct xv *v, struct xv_tq *q, const struct json_parser *p)
 {
-	struct xv_tl *l = v->tre ? &v->tn : &v->tl;
+	struct xv_tl *l = q->re ? &q->tn : &q->tl;
+	int mem = q == &v->tq[1];
 	struct xv_task t;
 	char *s;
 	int o;
 
-	if ((o = xv_obj(p, 0, "task", JSON_OBJECT)) < 0)
+	if ((o = xv_obj(p, 0, mem ? "memory" : "task", JSON_OBJECT)) < 0)
 	{
 		if (xv_num(p, 0, "schema", -1) >= 0)
 		{
@@ -1265,6 +1290,13 @@ xv_tline(struct xv *v, const struct json_parser *p)
 		{
 			l->done = 1;
 			l->dropped += (int)xv_num(p, 0, "dropped", 0);
+			if ((s = xv_str(p, 0, "warn"))[0])
+			{
+				xv_sfree(l->warn);
+				l->warn = s;
+			}
+			else
+				xv_sfree(s);
 		}
 		return;
 	}
@@ -1277,32 +1309,70 @@ xv_tline(struct xv *v, const struct json_parser *p)
 		return;
 	t.id = xv_str(p, o, "id");
 	t.title = xv_str(p, o, "title");
-	t.label = xv_str(p, o, "label");
-	t.active = xv_str(p, o, "active");
 	t.note = xv_str(p, o, "note");
-	t.created = xv_str(p, o, "created");
 	t.chapter = xv_str(p, o, "chapter");
-	t.url = xv_str(p, o, "url");
-	t.group = xv_str(p, o, "group");
-	t.blocked = xv_ids(p, o);
-	s = xv_str(p, o, "status");
-	t.st = !strcmp(s, "active") ? 0 : !strcmp(s, "done") ? 2
-	       : !strcmp(s, "dropped") ? 3 : 1;
-	xv_sfree(s);
+	t.label = xv_str(p, o, mem ? "kind" : "label");
+	t.active = t.created = t.url = t.group = t.blocked = xv_none;
+	t.path = t.scope = t.body = xv_none;
+	t.ses = t.cut = 0;
+	if (mem)
+	{
+		t.path = xv_str(p, o, "path");
+		t.scope = xv_str(p, o, "scope");
+		t.body = xv_str(p, o, "body");
+		t.cut = xv_bool(p, o, "cut");
+		if (l->bytes + strlen(t.body) > XV_MBODY)
+		{
+			xv_sfree(t.body);
+			t.body = xv_none;
+			t.cut = 2;
+		}
+		l->bytes += strlen(t.body);
+		s = xv_str(p, o, "session");
+		t.ses = !strcmp(s, "wrote") ? 1 : !strcmp(s, "loaded") ? 2 : 0;
+		xv_sfree(s);
+		t.st = t.ses ? 0 : !strcmp(t.label, "instructions") ? 2 : 1;
+	}
+	else
+	{
+		t.active = xv_str(p, o, "active");
+		t.created = xv_str(p, o, "created");
+		t.url = xv_str(p, o, "url");
+		t.group = xv_str(p, o, "group");
+		t.blocked = xv_ids(p, o);
+		s = xv_str(p, o, "status");
+		t.st = !strcmp(s, "active") ? 0 : !strcmp(s, "done") ? 2
+		       : !strcmp(s, "dropped") ? 3 : 1;
+		xv_sfree(s);
+	}
 	s = xv_str(p, o, "updated");
 	t.updated = s[0] ? xv_iso(s) : -1;
 	xv_sfree(s);
 	t.seq = l->n;
 	l->t[l->n++] = t;
 	l->nst[t.st]++;
-	if (l == &v->tl)
-		v->tsort = 1;
+	if (l == &q->tl)
+		q->sort = 1;
+}
+
+static void
+xv_tline(struct xv *v, const struct json_parser *p)
+{
+	xv_lline(v, &v->tq[0], p);
+}
+
+static void
+xv_mline(struct xv *v, const struct json_parser *p)
+{
+	xv_lline(v, &v->tq[1], p);
 }
 
 static const struct xv_task *xv_sort_tk;
+static int xv_sort_mem;
 
 /* In progress, Pending, Done, Dropped; the first two as sent, the last two
-** newest first (a row with no time after the dated ones, as sent) */
+** newest first (a row with no time after the dated ones, as sent). A
+** memory list: its groups, each as sent (the engine's order) */
 static int
 xv_task_cmp(const void *pa, const void *pb)
 {
@@ -1311,7 +1381,7 @@ xv_task_cmp(const void *pa, const void *pb)
 
 	if (a->st != b->st)
 		return a->st - b->st;
-	if (a->st >= 2 && a->updated != b->updated)
+	if (!xv_sort_mem && a->st >= 2 && a->updated != b->updated)
 		return a->updated > b->updated ? -1 : 1;
 	return a->seq - b->seq;
 }
@@ -1319,7 +1389,7 @@ xv_task_cmp(const void *pa, const void *pb)
 /* l's order, made once per answer (and while it streams, every 100 ms):
 ** one sort. 0, -1 no memory (the last order kept). */
 static int
-xv_tord(struct xv_tl *l)
+xv_tord(struct xv_tl *l, int mem)
 {
 	int k, *o;
 
@@ -1333,96 +1403,109 @@ xv_tord(struct xv_tl *l)
 	for (k = 0; k < l->n; k++)
 		l->ord[k] = k;
 	xv_sort_tk = l->t;
+	xv_sort_mem = mem;
 	qsort(l->ord, (size_t)l->n, sizeof *l->ord, xv_task_cmp);
 	l->nord = l->n;
 	return 0;
 }
 
-/* Tasks is a tab: the list has a row */
+/* Tasks (i 0) or Memory (1) is a tab: its list has a row */
 static int
-xv_ttab(const struct xv *v)
+xv_ttab(const struct xv *v, int i)
 {
-	return v->tl.n > 0;
+	return v->tq[i].tl.n > 0;
 }
 
-/* `--tasks --json` in XV_TK: the first answer straight into the list shown
-** (rows drawn as they come), a re-read's into tn until its end */
+/* `--tasks --json` (i 0) or `--memory --json` (1) in XV_TK + i: the first
+** answer straight into the list shown (rows drawn as they come), a
+** re-read's into tn until its end */
 static void
-xv_tasks(struct xv *v)
+xv_tasks(struct xv *v, int i)
 {
+	struct xv_tq *q = &v->tq[i];
 	char *av[4];
 
-	if (v->kid[XV_TK].pid > 0 || v->tno)
+	if (v->kid[XV_TK + i].pid > 0 || q->no)
 		return;
-	xv_tl_free(&v->tn);
-	if (!(v->tre = xv_ttab(v)))
-		xv_tl_free(&v->tl);
-	v->tat = now_ms();
-	v->tfol = 0;
+	xv_tl_free(&q->tn);
+	if (!(q->re = xv_ttab(v, i)))
+		xv_tl_free(&q->tl);
+	q->at = now_ms();
+	q->fol = 0;
 	av[0] = v->n;
-	av[1] = "--tasks";
+	av[1] = i ? "--memory" : "--tasks";
 	av[2] = "--json";
 	av[3] = NULL;
-	if (xv_start(v, XV_TK, av, 3, xv_tline) == 0)
-		v->kid[XV_TK].lmax = XV_TLINE;
+	if (xv_start(v, XV_TK + i, av, 3, i ? xv_mline : xv_tline) == 0)
+		v->kid[XV_TK + i].lmax = XV_TLINE;
 }
 
-/* The task list's child ended. A dch or host that knows no --tasks (a
+/* List i's child ended. A dch or host that knows no --tasks or --memory (a
 ** usage refusal, an older host's): never asked again, and no tab; any
 ** other failure keeps what is shown. A re-read's whole answer replaces the
-** list; a card stays on its task, or goes when the task has. */
+** list; a card (or the reader opened from it) stays on its row, or goes
+** when the row has. */
 static void
-xv_tend(struct xv *v)
+xv_tend(struct xv *v, int i)
 {
-	const struct xv_kid *k = &v->kid[XV_TK];
-	int i;
+	const struct xv_kid *k = &v->kid[XV_TK + i];
+	struct xv_tq *q = &v->tq[i];
+	int j;
 
 	if (k->rc == 2 || strstr(k->err, "does not know"))
-		v->tno = 1;
-	v->tsort = 1;
-	if (!v->tre)
+		q->no = 1;
+	q->sort = 1;
+	if (!q->re)
 		return;
-	v->tre = 0;
-	if (k->rc || !v->tn.done)
+	q->re = 0;
+	if (k->rc || !q->tn.done)
 	{
-		xv_tl_free(&v->tn);
+		xv_tl_free(&q->tn);
 		return;
 	}
-	xv_tl_free(&v->tl);
-	v->tl = v->tn;
-	memset(&v->tn, 0, sizeof v->tn);
-	if (v->mode != XV_TCARD)
+	xv_tl_free(&q->tl);
+	q->tl = q->tn;
+	memset(&q->tn, 0, sizeof q->tn);
+	if (v->tab != 4 + i || (v->mode != XV_TCARD && v->back != XV_TCARD))
 		return;
-	for (i = 0; v->selt && i < v->tl.n && strcmp(v->tl.t[i].id, v->selt);
-	     i++)
+	for (j = 0; q->sel && j < q->tl.n && strcmp(q->tl.t[j].id, q->sel);
+	     j++)
 		;
-	if (!v->selt || i == v->tl.n)
-		v->mode = XV_LIST;
-	v->tci = i;
+	if (!q->sel || j == q->tl.n)
+	{
+		if (v->mode == XV_TCARD)
+			v->mode = XV_LIST;
+		else
+			v->back = XV_LIST;
+	}
+	q->ci = j;
 }
 
-/* Tasks' rows (vis), filtered over id, title, active text, note and label:
-** made again only when the order or the filter changed; the selection
-** kept on its task once a key has moved it. tg: each group's first row. */
+/* Tasks' or Memory's rows (vis), filtered over id, title, active text,
+** note, label, and a memory's path and text: made again only when the
+** order or the filter changed; the selection kept on its row once a key
+** has moved it. tg: each group's first row. */
 static void
 xv_tvis(struct xv *v)
 {
-	const struct xv_tl *l = &v->tl;
+	struct xv_tq *q = &v->tq[v->tab - 4];
+	const struct xv_tl *l = &q->tl;
 	const char *f = v->filt;
 	int k, g;
 
 	v->ntmp = v->nauto = v->nk = 0;
-	if (v->tsort && (v->kid[XV_TK].pid <= 0 || now_ms() - v->tsat >= 100)
-	    && !xv_tord(&v->tl))
+	if (q->sort && (v->kid[XV_TK + v->tab - 4].pid <= 0 ||
+	                now_ms() - q->sat >= 100) &&
+	    !xv_tord(&q->tl, v->tab - 4))
 	{
-		v->tsort = 0;
-		v->tsat = now_ms();
-		v->tgen++;
+		q->sort = 0;
+		q->sat = now_ms();
+		q->gen++;
 	}
-	if (v->vtab == 4 && v->tvgen == v->tgen && !strcmp(v->tvf, f))
+	if (v->vtab == v->tab && v->tvgen == q->gen && !strcmp(v->tvf, f))
 		return;
-	v->vtab = 4;
-	v->tvgen = v->tgen;
+	v->vtab = v->tab;
+	v->tvgen = q->gen;
 	snprintf(v->tvf, sizeof v->tvf, "%s", f);
 	v->nvis = 0;
 	for (g = 0; g < 4; g++)
@@ -1433,7 +1516,8 @@ xv_tvis(struct xv *v)
 
 		if (f[0] && !xv_has(t->id, f) && !xv_has(t->title, f) &&
 		    !xv_has(t->active, f) && !xv_has(t->note, f) &&
-		    !xv_has(t->label, f))
+		    !xv_has(t->label, f) && !xv_has(t->path, f) &&
+		    !xv_has(t->body, f))
 			continue;
 		if (xv_grow(&v->vis, &v->avis, v->nvis, sizeof *v->vis) < 0)
 			break;
@@ -1441,10 +1525,10 @@ xv_tvis(struct xv *v)
 			v->tg[t->st] = v->nvis;
 		v->vis[v->nvis++] = l->ord[k];
 	}
-	for (k = 0; v->selt && k < v->nvis; k++)
-		if (!strcmp(l->t[v->vis[k]].id, v->selt))
+	for (k = 0; q->sel && k < v->nvis; k++)
+		if (!strcmp(l->t[v->vis[k]].id, q->sel))
 		{
-			v->sel[4] = k;
+			v->sel[v->tab] = k;
 			break;
 		}
 }
@@ -1711,7 +1795,9 @@ xv_back(struct xv *v)
 		xv_read_free(v);
 		free(v->rturn);
 		v->rturn = NULL;
-		v->mode = v->back == XV_CARD ? XV_CARD : XV_LIST;
+		/* a memory's card opens the reader too (#323) */
+		v->mode = v->back == XV_CARD || v->back == XV_TCARD ? v->back
+		          : XV_LIST;
 	}
 	else if (v->mode == XV_CARD)
 	{
@@ -2080,12 +2166,12 @@ xv_vis(struct xv *v)
 	int k, j, n = v->tab == 1 ? v->nrf : v->nch;
 	const char *sk = v->tab == 1 ? v->selk : v->sela;
 
-	if (v->tab == 4)
+	if (v->tab >= 4)
 	{
 		xv_tvis(v);
 		return;
 	}
-	v->vtab = v->tab;	/* Tasks' rows are gone from vis */
+	v->vtab = v->tab;	/* Tasks' or Memory's rows are gone from vis */
 	v->nvis = v->ntmp = v->nauto = v->nk = 0;
 	v->old = xv_old(v);
 	/* Search: every hit, as sent (#291) */
@@ -2137,12 +2223,12 @@ xv_selk(struct xv *v)
 
 	if (v->tab == 3)
 		return;	/* Search's hits change only with a new search */
-	if (v->tab == 4)
-		k = &v->selt;	/* Tasks: by id (#320) */
+	if (v->tab >= 4)
+		k = &v->tq[v->tab - 4].sel;	/* Tasks, Memory: by id (#320) */
 	free(*k);
 	*k = s < 0 || s >= v->nvis ? NULL : strdup(v->tab == 1
-	     ? xv_rfat(v, v->vis[s])->key : v->tab == 4 ? v->tl.t[v->vis[s]].id
-	     : v->ch[v->vis[s]].anchor);
+	     ? xv_rfat(v, v->vis[s])->key : v->tab >= 4
+	     ? v->tq[v->tab - 4].tl.t[v->vis[s]].id : v->ch[v->vis[s]].anchor);
 }
 
 /* sel and top inside n rows of a window of win */
@@ -2763,6 +2849,8 @@ xv_draw_search(struct xv *v, int win)
 
 static const char *const xv_tgrp[4] = { "In progress", "Pending", "Done",
 	"Dropped" };
+static const char *const xv_mgrp[3] = { "This session", "Memories",
+	"Instructions" };
 
 /* A task's label says more than its status (a ledger's PARKED) */
 static int
@@ -2841,19 +2929,73 @@ xv_row_task(const struct xv_task *t, int on)
 		pk_pad(pk_w);
 }
 
-/* Tasks: a faint title line when the list has a name, the rows under their
-** group lines (the window only: nothing drawn or measured off it), faint
-** lines under them for a warning, a partial read and what was cut */
+/* A memory's row (#323): its title (an instruction file's path, short), a
+** kind that is one word and its note, faint, as room allows; at the right
+** whether this session wrote or loaded it and its age */
+static void
+xv_row_mem(const struct xv *v, const struct xv_task *t, int on)
+{
+	char x[40], age[16];
+	int xw, end;
+
+	xv_lead(on);
+	pk_txt(" ");
+	pk_age((long)t->updated, age, sizeof age);
+	snprintf(x, sizeof x, "%s%s%s", t->ses == 1 ? "wrote" : t->ses == 2
+	         ? "loaded" : "", t->ses && age[0] ? "  " : "", age);
+	xw = x[0] ? pk_cps(x) + 2 : 0;
+	end = pk_w - xw - 1;
+	if (!strcmp(t->label, "instructions"))
+	{
+		struct xv_ref r = { 0 };
+
+		r.shape = "file";
+		r.text = t->path[0] ? t->path : t->title;
+		xv_reftext(v, &r, end - pk_col);
+	}
+	else
+	{
+		xw = pk_cps(t->title);
+		pk_fit(t->title, xw < end - pk_col ? xw : end - pk_col);
+		pk_set("2");
+		if (t->label[0] && !strpbrk(t->label, " \t") &&
+		    end - pk_col > pk_cps(t->label) + 2)
+		{
+			pk_txt("  ");
+			pk_txt(t->label);
+		}
+		if (t->note[0] && end - pk_col > 8)
+		{
+			pk_txt("  ");
+			pk_fit(t->note, end - pk_col);
+		}
+		pk_pad(end);
+	}
+	pk_set("2");
+	if (x[0])
+	{
+		pk_txt("  ");
+		pk_txt(x);
+	}
+	if (on)
+		pk_pad(pk_w);
+}
+
+/* Tasks, Memory: a faint title line when a task list has a name (a memory
+** list's names its group), the rows under their group lines (the window
+** only: nothing drawn or measured off it), faint lines under them for a
+** warning, a partial read and what was cut */
 static void
 xv_draw_tasks(struct xv *v, int win)
 {
-	const struct xv_tl *l = &v->tl;
-	int *sel = &v->sel[4], *top = &v->top[4], n, ng = 0, g, k, i, nf = 0;
+	const struct xv_tl *l = &v->tq[v->tab - 4].tl;
+	int *sel = &v->sel[v->tab], *top = &v->top[v->tab], n, ng = 0, g, k, i;
+	int nf = 0, mem = v->tab == 5;
 	char b[300], f[3][300];
 
 	xv_vis(v);
 	n = v->nvis;
-	if (l->title && l->title[0] && win > 1)
+	if (!mem && l->title && l->title[0] && win > 1)
 	{
 		pk_line();
 		pk_set("2");
@@ -2866,12 +3008,14 @@ xv_draw_tasks(struct xv *v, int win)
 		snprintf(f[nf++], sizeof *f, "  %s", l->warn);
 	if (l->partial)
 		snprintf(f[nf++], sizeof *f, "  the history was too long to read "
-		         "whole; older tasks may be missing");
+		         "whole; %s may be missing", mem ? "what this session "
+		         "wrote or loaded" : "older tasks");
 	if (l->dropped)
-		snprintf(f[nf++], sizeof *f, "  the %d newest are shown", l->n);
-	else if (!l->done && v->kid[XV_TK].pid <= 0)
-		snprintf(f[nf++], sizeof *f, "  the list stopped early; the tasks "
-		         "shown stand");
+		snprintf(f[nf++], sizeof *f, "  the %d %s are shown", l->n,
+		         mem ? "first" : "newest");
+	else if (!l->done && v->kid[XV_TK + mem].pid <= 0)
+		snprintf(f[nf++], sizeof *f, "  the list stopped early; the %s "
+		         "shown stand", mem ? "memories" : "tasks");
 	while (nf && win - nf < 1)
 		nf--;
 	win -= nf;
@@ -2902,10 +3046,13 @@ xv_draw_tasks(struct xv *v, int win)
 					break;
 				}
 			pk_set("2");
-			snprintf(b, sizeof b, "  %s %d", xv_tgrp[-1 - i],
-			         e - v->tg[-1 - i]);
+			snprintf(b, sizeof b, "  %s %d", !mem ? xv_tgrp[-1 - i]
+			         : i == -2 && l->title && l->title[0] ? l->title
+			         : xv_mgrp[-1 - i], e - v->tg[-1 - i]);
 			pk_txt(b);
 		}
+		else if (k < n + ng && mem)
+			xv_row_mem(v, &l->t[v->vis[i]], i == *sel);
 		else if (k < n + ng)
 			xv_row_task(&l->t[v->vis[i]], i == *sel);
 		else if (k == 0)
@@ -2941,13 +3088,90 @@ xv_tfield(const char *k, const char *val, int *rows, int win)
 	return ++*rows;
 }
 
+/* A path line of a memory's card: its name faint, then lead and the path,
+** its tail kept */
+static void
+xv_tpath(const char *k, const char *lead, const char *path, int *rows,
+         int win)
+{
+	if (*rows >= win)
+		return;
+	pk_line();
+	pk_set("2");
+	pk_txt("  ");
+	pk_fit(k, 12);
+	pk_set("");
+	pk_txt(lead);
+	xv_tail(path, 0, pk_w - pk_col);
+	pk_eol();
+	++*rows;
+}
+
+/* A memory's card (#323): its title whole, a line per field (this
+** session's line says Enter reads that turn), then its text under them,
+** scrolled by mtop */
+static int
+xv_draw_mcard(struct xv *v, const struct xv_task *t, int win, int rows)
+{
+	const char *s, *w;
+	char x[300], u[40];
+	size_t nb;
+	int k, n;
+
+	xv_when(t->updated, u, sizeof u);
+	(void)xv_tfield("Note", t->note, &rows, win);
+	if (t->path[0])
+		xv_tpath("Path", "", t->path, &rows, win);
+	(void)xv_tfield("Kind", t->label, &rows, win);
+	(void)xv_tfield("Scope", t->scope, &rows, win);
+	(void)xv_tfield("Updated", u, &rows, win);
+	snprintf(x, sizeof x, "this session %s it%s%s", t->ses == 1 ? "wrote"
+	         : "loaded", t->chapter[0] ? "; enter reads that " : "",
+	         t->chapter[0] ? xv_noun(v) : "");
+	if (t->ses)
+		(void)xv_tfield("Session", x, &rows, win);
+	snprintf(x, sizeof x, "not kept (the list keeps %u MB of text): read ",
+	         XV_MBODY >> 20);
+	if (t->cut)
+		xv_tpath("Text", t->cut == 2 ? x : "cut at 16 KB: the whole "
+		         "text is in ", t->path, &rows, win);
+	else if (!t->body[0])
+		(void)xv_tfield("Text", "none", &rows, win);
+	if (!t->body[0] || rows + 1 >= win)
+		return rows;
+	pk_line();
+	pk_eol();
+	rows++;
+	/* the text's lines, wrapped; the window stops at its end */
+	for (n = 0, s = t->body; *s; n++)
+		s = xv_wline(s, pk_w - 4, &nb);
+	if (v->mtop > n - (win - rows))
+		v->mtop = n - (win - rows);
+	if (v->mtop < 0)
+		v->mtop = 0;
+	for (k = 0, s = t->body; *s && rows < win; k++)
+	{
+		s = xv_wline(w = s, pk_w - 4, &nb);
+		if (k < v->mtop)
+			continue;
+		pk_line();
+		pk_txt("  ");
+		xv_txtn(w, nb);
+		pk_eol();
+		rows++;
+	}
+	return rows;
+}
+
 /* A task's card (#320, one with no turn to read): what is known of it,
-** built as the ref's card: the title whole, then a line per field */
+** built as the ref's card: the title whole, then a line per field; a
+** memory's (#323) the same way */
 static void
 xv_draw_tcard(struct xv *v, int win)
 {
-	const struct xv_task *t = v->tci >= 0 && v->tci < v->tl.n
-	                          ? &v->tl.t[v->tci] : NULL;
+	const struct xv_tq *q = &v->tq[v->tab - 4];
+	const struct xv_task *t = q->ci >= 0 && q->ci < q->tl.n
+	                          ? &q->tl.t[q->ci] : NULL;
 	const char *s;
 	char st[300], c[40], u[40];
 	size_t nb;
@@ -2966,6 +3190,11 @@ xv_draw_tcard(struct xv *v, int win)
 			xv_txtn(w, nb);
 			pk_eol();
 		}
+	}
+	if (t && v->tab == 5)
+		rows = xv_draw_mcard(v, t, win, rows);
+	else if (t)
+	{
 		snprintf(st, sizeof st, "%s%s%s", xv_tgrp[t->st],
 		         xv_tlabel(t) ? "  " : "", xv_tlabel(t) ? t->label : "");
 		xv_when(xv_iso(t->created), c, sizeof c);
@@ -2999,7 +3228,7 @@ static void
 xv_draw(struct xv *v, int force)
 {
 	const char *tabn[XV_NTAB] = { "Prompts", "Refs", "Responses",
-		"Search", "Tasks" };
+		"Search", "Tasks", "Memory" };
 	static const char spin[] = "\xe2\xa0\x8b\xe2\xa0\x99\xe2\xa0\xb9"
 		"\xe2\xa0\xb8\xe2\xa0\xbc\xe2\xa0\xb4\xe2\xa0\xa6\xe2\xa0\xa7"
 		"\xe2\xa0\x87\xe2\xa0\x8f", ascii[] = "|/-\\";
@@ -3045,8 +3274,17 @@ xv_draw(struct xv *v, int force)
 	}
 	else if (v->mode == XV_TCARD)
 	{
+		const struct xv_tq *q = &v->tq[v->tab - 4];
+
+		/* a memory's: its text scrolls, Enter reads its turn */
+		if (v->tab == 5 && q->ci < q->tl.n && q->tl.t[q->ci].ses &&
+		    q->tl.t[q->ci].chapter[0])
+			XV_K(0, ret, "read");
 		if (xv_live(v))
 			XV_K(0, "o", "open session");
+		if (v->tab == 5)
+			XV_K(3, pk_utf ? "\xe2\x86\x91\xe2\x86\x93" : "up/down",
+			     "scroll");
 		XV_K(3, "esc", "back");
 	}
 	else if (v->mode == XV_READ)
@@ -3063,10 +3301,11 @@ xv_draw(struct xv *v, int force)
 		XV_K(3, "q", "quit");
 	else
 	{
-		/* Tasks: a task with no turn opens its card */
-		ent = v->tab == 1 ? "card" : "read";
+		/* Tasks: a task with no turn opens its card; Memory: a card */
+		ent = v->tab == 1 || v->tab == 5 ? "card" : "read";
 		if (v->tab == 4 && (xv_vis(v), v->sel[4] >= 0) &&
-		    v->sel[4] < v->nvis && !v->tl.t[v->vis[v->sel[4]]].chapter[0])
+		    v->sel[4] < v->nvis &&
+		    !v->tq[0].tl.t[v->vis[v->sel[4]]].chapter[0])
 			ent = "details";
 		XV_K(0, ret, ent);
 		if (v->tab != 1 && xv_live(v))
@@ -3147,9 +3386,11 @@ xv_draw(struct xv *v, int force)
 	}
 	else if (v->mode == XV_TCARD)
 	{
+		const struct xv_tq *q = &v->tq[v->tab - 4];
+
 		pk_set(pk_p(PK_ACCB));
-		pk_txt("Task ");
-		pk_txt(v->tci < v->tl.n ? v->tl.t[v->tci].id : "");
+		pk_txt(v->tab == 5 ? "Memory " : "Task ");
+		pk_txt(q->ci < q->tl.n ? q->tl.t[q->ci].id : "");
 	}
 	else if (v->mode == XV_READ)
 	{
@@ -3182,9 +3423,10 @@ xv_draw(struct xv *v, int force)
 		** ones shown by default */
 		if (strcmp(xv_noun(v), "prompt"))
 			tabn[0] = "Commands";
-		if ((v->tab == 2 && !xv_rtab(v)) || (v->tab == 4 && !xv_ttab(v)))
+		if ((v->tab == 2 && !xv_rtab(v)) ||
+		    (v->tab >= 4 && !xv_ttab(v, v->tab - 4)))
 			v->tab = 0;	/* a snapshot that says commands now; a
-					** re-read with no task (#320) */
+					** re-read with no row (#320) */
 		n = xv_old(v);
 		for (k = cnt[0] = cnt[2] = 0; k < v->nch; k++)
 		{
@@ -3201,10 +3443,11 @@ xv_draw(struct xv *v, int force)
 			tabn[3] = sn;
 		}
 		/* Tasks: the open ones, in progress and pending (#320) */
-		cnt[4] = v->tl.nst[0] + v->tl.nst[1];
+		cnt[4] = v->tq[0].tl.nst[0] + v->tq[0].tl.nst[1];
+		cnt[5] = v->tq[1].tl.n;	/* Memory: every row (#323) */
 		for (k = 0; k < XV_NTAB; k++)
 			if ((xv_ord[k] != 2 || xv_rtab(v)) &&
-			    (xv_ord[k] != 4 || xv_ttab(v)))
+			    (xv_ord[k] < 4 || xv_ttab(v, xv_ord[k] - 4)))
 				pk_tab(tabn[xv_ord[k]], cnt[xv_ord[k]],
 				       xv_ord[k] == v->tab);
 	}
@@ -3230,7 +3473,7 @@ xv_draw(struct xv *v, int force)
 		}
 	else if (v->tab == 3)
 		xv_draw_search(v, v->win);
-	else if (v->tab == 4)
+	else if (v->tab >= 4)
 		xv_draw_tasks(v, v->win);
 	else if (v->tab == 2 && v->have && (xv_vis(v), v->nvis))
 		xv_draw_feed(v, v->win);
@@ -3327,7 +3570,8 @@ xv_draw(struct xv *v, int force)
 	}
 	busy = v->kid[XV_CK].pid > 0 || v->kid[XV_RK].pid > 0 ||
 	       v->kid[XV_QK].pid > 0 ||
-	       (v->tab == 4 && v->kid[XV_TK].pid > 0 && !v->tre) ||
+	       (v->tab >= 4 && v->kid[XV_TK + v->tab - 4].pid > 0 &&
+	        !v->tq[v->tab - 4].re) ||
 	       (!v->have && !v->fail[0]);
 	if (busy)
 	{
@@ -3355,6 +3599,7 @@ xv_filt(struct xv *v, int c)
 {
 	char *f = v->tab == 3 ? v->q : v->filt;
 	size_t l = strlen(f);
+	int k;
 
 	if (!v->filtering)
 	{
@@ -3403,8 +3648,11 @@ xv_filt(struct xv *v, int c)
 	if (v->tab != 3)	/* Search's hits stay until it runs */
 	{
 		memset(v->sel, 0, sizeof v->sel);
-		free(v->selt);
-		v->selt = NULL;
+		for (k = 0; k < 2; k++)
+		{
+			free(v->tq[k].sel);
+			v->tq[k].sel = NULL;
+		}
 	}
 	return 1;
 }
@@ -3500,11 +3748,39 @@ xv_key(struct xv *v, int c)
 	}
 	if (v->mode == XV_TCARD)
 	{
+		struct xv_tq *q = &v->tq[v->tab - 4];
+		const struct xv_task *t = q->ci < q->tl.n ? &q->tl.t[q->ci]
+		                          : NULL;
+
 		if (c == 'o')
 			return xv_open(v);
 		if (c == 'q' || c == PK_ESC || c == 'h' || c == PK_LEFT ||
 		    c == 0x7f)
+		{
 			xv_back(v);
+			return 0;
+		}
+		if (v->tab != 5 || !t)
+			return 0;
+		/* a memory's (#323): its text scrolls (xv_draw_mcard clamps);
+		** Enter reads the turn this session wrote or loaded it in */
+		switch (c)
+		{
+		case 'j': case PK_DOWN: v->mtop++; break;
+		case 'k': case PK_UP: v->mtop--; break;
+		case ' ': case PK_PGDN: v->mtop += v->win; break;
+		case 'b': case PK_PGUP: v->mtop -= v->win; break;
+		case 'g': case PK_HOME: v->mtop = 0; break;
+		case 'G': case PK_END: v->mtop = 1 << 30; break;
+		case '\r': case '\n':
+			if (t->ses && t->chapter[0])
+				xv_read(v, t->chapter, NULL);
+			else
+				snprintf(v->status, sizeof v->status,
+				         "this session did not write or load "
+				         "it: no %s to read", xv_noun(v));
+			break;
+		}
 		return 0;
 	}
 	if (v->mode == XV_CARD)
@@ -3562,7 +3838,7 @@ xv_key(struct xv *v, int c)
 		do
 			k = (k + n) % XV_NTAB;
 		while ((xv_ord[k] == 2 && !xv_rtab(v)) ||
-		       (xv_ord[k] == 4 && !xv_ttab(v)));
+		       (xv_ord[k] >= 4 && !xv_ttab(v, xv_ord[k] - 4)));
 		/* Search opens typing until a search is made (#291); typing
 		** there ends on leaving it */
 		if (v->tab == 3 || xv_ord[k] == 3)
@@ -3571,7 +3847,7 @@ xv_key(struct xv *v, int c)
 		if (v->tab == 1)
 			xv_screen_load(v);
 		if (v->tab == 4 && xv_live(v))
-			xv_tasks(v);	/* a running session's list, re-read */
+			xv_tasks(v, 0);	/* a running session's list, re-read */
 		return 0;
 	}
 	if (c == 'q')
@@ -3647,12 +3923,15 @@ xv_key(struct xv *v, int c)
 			         "outside the %ss X-ray can open", xv_noun(v));
 		else if (v->tab == 0)
 			xv_read(v, v->ch[k].anchor, NULL);
-		else if (v->tab == 4 && v->tl.t[k].chapter[0])
+		else if (v->tab == 4 && v->tq[0].tl.t[k].chapter[0])
 			/* the turn that last changed it, at its title if said */
-			xv_read(v, v->tl.t[k].chapter, v->tl.t[k].title);
-		else if (v->tab == 4)
+			xv_read(v, v->tq[0].tl.t[k].chapter,
+			        v->tq[0].tl.t[k].title);
+		else if (v->tab >= 4)
 		{
-			v->tci = k;
+			/* a task with no turn, a memory (#323): its card */
+			v->tq[v->tab - 4].ci = k;
+			v->mtop = 0;
 			v->back = v->mode;
 			v->mode = XV_TCARD;
 		}
@@ -3701,9 +3980,12 @@ xv_free(struct xv *v)
 	xv_sr_free(v);
 	xv_hits_free(v);
 	free(v->hit);
-	xv_tl_free(&v->tl);
-	xv_tl_free(&v->tn);
-	free(v->selt);
+	for (k = 0; k < 2; k++)
+	{
+		xv_tl_free(&v->tq[k].tl);
+		xv_tl_free(&v->tq[k].tn);
+		free(v->tq[k].sel);
+	}
 	xv_sfree(v->session);
 	xv_sfree(v->sid);
 	xv_sfree(v->corpus);
@@ -3801,10 +4083,16 @@ xv_run(int fd, const char *n, char *err, size_t errsz)
 		** first paint never waits; a running session's again after
 		** --follow has said something, at most every XV_TEVERY while
 		** shown (a whole transcript read each time), else less often */
-		if (xv_rtab(v) && !v->tno && v->kid[XV_TK].pid <= 0 &&
-		    (!v->tat || (v->tfol && xv_live(v) && now_ms() - v->tat >=
-		                 (v->tab == 4 ? 1 : 6) * XV_TEVERY)))
-			xv_tasks(v);
+		if (xv_rtab(v) && !v->tq[0].no && v->kid[XV_TK].pid <= 0 &&
+		    (!v->tq[0].at || (v->tq[0].fol && xv_live(v) && now_ms() -
+		     v->tq[0].at >= (v->tab == 4 ? 1 : 6) * XV_TEVERY)))
+			xv_tasks(v, 0);
+		/* Memory (#323): the same start; again every XV_MEVERY while
+		** shown */
+		if (xv_rtab(v) && !v->tq[1].no && v->kid[XV_MK].pid <= 0 &&
+		    (!v->tq[1].at || (v->tq[1].fol && xv_live(v) &&
+		     v->tab == 5 && now_ms() - v->tq[1].at >= XV_MEVERY)))
+			xv_tasks(v, 1);
 		xv_draw(v, force);
 		FD_ZERO(&rs);
 		FD_SET(fd, &rs);
@@ -3874,7 +4162,9 @@ xv_run(int fd, const char *n, char *err, size_t errsz)
 		if (xv_pump(v, XV_QK, &rs))
 			xv_qend(v);
 		if (xv_pump(v, XV_TK, &rs))
-			xv_tend(v);
+			xv_tend(v, 0);
+		if (xv_pump(v, XV_MK, &rs))
+			xv_tend(v, 1);
 		if (xv_pump(v, XV_RK, &rs) && v->mode == XV_READ)
 		{
 			const char *e = v->kid[XV_RK].err, *w = xv_noun(v);

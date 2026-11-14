@@ -906,8 +906,9 @@ the picker. The view asks the same engine as `--json` and holds its index as
 open. It writes nothing to disk. Text from the session (titles, lines,
 passages) is drawn with every control and bidi character shown as `?`.
 
-The view has four tabs, three for a shell session (no Responses), and a
-fifth, Tasks, when the session keeps a task list:
+The view has four tabs, three for a shell session (no Responses), a
+fifth, Tasks, when the session keeps a task list, and a sixth, Memory, when
+it has memories or instruction files:
 - **Prompts** (**Commands** for a shell session): one row per thing you
   typed, a prompt to Claude or Codex, a command to a shell. `/` filters.
   `Enter` opens the prompt read-only with everything up to the next one
@@ -1027,6 +1028,21 @@ fifth, Tasks, when the session keeps a task list:
   shows. A faint line under the rows gives the list's warning, and says
   when the history was too long to read whole. A shell session, dch-lite,
   an empty list and a host older than this dch have no Tasks tab.
+- **Memory** (the last tab, only when `--memory` lists something): the
+  session's memories and the instruction files in force (CLAUDE.md,
+  AGENTS.md), under faint group lines, each counted: This session (what
+  this session wrote or loaded, newest first), Memories (newest first),
+  Instructions. Each row is the memory's title, its kind and note faint,
+  and at the right `wrote` or `loaded` and its age; an instruction file
+  shows its path, short. The tab's count is every row. `Enter` opens a card
+  with the memory's path, kind, scope and time, then its text, scrollable;
+  a text cut at 16 KB says so and names the file. On a card of a memory
+  this session wrote or loaded, `Enter` reads that prompt, and `q` comes
+  back to the card. `/` filters on the id, title, note, kind, path and
+  text; `o` works as on Prompts. The list is asked for after the prompts
+  have shown; while the session runs it is read again every 30 seconds
+  while the tab shows. A shell session, dch-lite, no memory and a host
+  older than this dch have no Memory tab.
 
 A ref typed after `/` (a ticket, issue, pull request, commit, file or URL,
 as `--ref` takes it) opens its card with `Ctrl-R`, on any tab, while
@@ -1059,16 +1075,16 @@ not clear X-ray; run `clear`".
 
 | Key | List | Card / reader |
 | --- | --- | --- |
-| `Tab` `→` `l` / `Shift-Tab` `←` `h` | the next / previous tab (Prompts, Responses, Refs, Search, Tasks) | `←` `h`: back |
+| `Tab` `→` `l` / `Shift-Tab` `←` `h` | the next / previous tab (Prompts, Responses, Refs, Search, Tasks, Memory) | `←` `h`: back |
 | `↑` `↓` / `j` `k`, `PgUp` `PgDn`, `g` `G` | move | move / scroll; reader: at an end, again for the next / previous prompt |
 | `]` `[` | | reader: the next / previous prompt |
-| `Enter` | read the prompt (Responses: at its answer; Search: at the hit; Tasks: the one that last changed the task, or its card) / open the card; Search, typing: search | card: read the mention's prompt |
+| `Enter` | read the prompt (Responses: at its answer; Search: at the hit; Tasks: the one that last changed the task, or its card) / open the card (Refs, Memory); Search, typing: search | card: read the mention's prompt; Memory: the prompt that wrote or loaded it |
 | `/` | filter; Search: type the text to search | |
 | `Ctrl-R` | with a ref typed after `/`: open its card, a row for it or not, its kind hidden or not; other words: search them on Search | |
 | `a` | Refs: show / hide the files, commits and URLs | |
 | `t` | Refs: show / hide the temp files | |
 | `n` | Prompts, Responses: show / hide the auto rows (auto prompts, the task notifications, and compactions) | |
-| `o` | Prompts, Responses, Search, Tasks: attach to the session (in the chord: back to it) | card, reader: the same |
+| `o` | Prompts, Responses, Search, Tasks, Memory: attach to the session (in the chord: back to it) | card, reader: the same |
 | `f` `p` `y` | | card: full scan, other projects / this project (`p` was `o` before 1.61.0), copy |
 | `q` | quit | back |
 | `Esc` | clear the filter, else quit; Search, typing: stop typing, the last results kept | back |

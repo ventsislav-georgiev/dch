@@ -132,6 +132,18 @@ Covers:
      only the groups with a match, also over a note; no match said; Esc
      clears it. xv-tb, 20000 tasks: counted within 5 s, G, g, PgDn, j each
      painted within 0.5 s, a filter within 1 s.
+ 18. Memory (#323): xv-nt has no Memory tab. xv-me, four memories and the
+     project's CLAUDE.md: the tab last, counting every row (Memory 5);
+     This session (wrote, then loaded), Memories (newest first),
+     Instructions (the path short), kind and note on the rows, no
+     "chapter" on screen; Enter opens the card (note, path, kind, the
+     text), G scrolls the text to its end, Enter on a row this session did
+     not touch says so, q back to the row; a text over 16 KB says it was
+     cut and names the path; Enter on a session row's card reads the turn
+     that wrote it (2 of 2), q back to the card, q back to the row; / over
+     a memory's text. xv-cxt (Codex): its AGENTS.md under Instructions,
+     Enter shows its text. xv-mb, 20000 memories: the tab and the whole
+     count within 5 s, G within 0.5 s.
 
 Run:  python3 tests/xray_view_test.py      (uses ./dch)
 """
@@ -987,7 +999,9 @@ def refs_tab(name):
     v.wait(b"Prompts 1")
     v.pump(0.5)
     mark = len(v.out)
-    v.key(b"\033[Z\033[Z", 1.0)
+    # Tab twice, by Responses: xv-tr's cwd (this checkout) may hold a
+    # CLAUDE.md, so a Memory tab (#323) may come last
+    v.key(b"\t\t", 1.0)
     mark = len(v.out)
     v.key(b"a", 1.0)  # files and URLs too (#262)
     scr = rows(v.out[mark:])
@@ -1382,9 +1396,8 @@ LONGA = "\n".join("line %02d of the long answer" % i for i in range(1, 13))
 BIG = "BIG \033]0;pwned\007 evil\u202eend\n" + "y" * 3000
 
 
-def tl(sid):
-    return os.path.join(HOME, ".claude", "projects", "-home-demo-proj",
-                        sid + ".jsonl")
+def tl(sid, proj="-home-demo-proj"):
+    return os.path.join(HOME, ".claude", "projects", proj, sid + ".jsonl")
 
 
 def turn(prompt, ts, *after, auto=False):
@@ -1743,7 +1756,8 @@ def test_responses_codex():
 
 def test_tasks_codex():
     """#320: xv-cxt, a live fake Codex whose rollout has two update_plan
-    calls: the Tasks tab from the newest plan, Enter reads its turn."""
+    calls: the Tasks tab from the newest plan, Enter reads its turn. #323:
+    its AGENTS.md on Memory, the last tab; Enter shows its text."""
     tid = "019a1111-2222-7333-8444-555566667720"
     src = os.path.join(HERE, "xray", "fixtures", "codex-0167", "codex",
                        "019a1111-2222-7333-8444-555566667702.jsonl")
@@ -1772,6 +1786,8 @@ def test_tasks_codex():
     log = os.path.join(T, "codex-t.log")
     cwd = os.path.join(T, "work", "xv-cxt")
     os.makedirs(cwd, exist_ok=True)
+    with open(os.path.join(cwd, "AGENTS.md"), "w") as f:
+        f.write("codex agents text\n")
     r = subprocess.run([DCH, "--spawn", "xv-cxt", "--size", "80x24",
                         "--cwd", cwd, fake], capture_output=True, text=True,
                        timeout=30, env=dict(ENV, FAKE_CODEX_LOG=log))
@@ -1788,8 +1804,8 @@ def test_tasks_codex():
     os.chmod(p, 0o600)
     v = Pty([DCH, "--xray", "xv-cxt"], rows=30, cols=100)
     try:
-        ok = tabbar(v, "Tasks 2", 15)
-        v.key(b"\033[Z", 0.8)
+        ok = tabbar(v, "Tasks 2", 15) and tabbar(v, "Memory 1", 15)
+        v.key(b"\033[Z\033[Z", 0.8)
         r = tasks_rows(v)
         check("Tasks, Codex: the newest plan, in progress, pending, done",
               ok and [re.sub(r" (now|\d+[mhd])$", "", x).lstrip("▌")
@@ -1803,6 +1819,16 @@ def test_tasks_codex():
                                                      start=mark),
               screen(v, mark))
         v.key(b"q", 0.8)
+        v.key(b"\t", 0.8)
+        r = [re.sub(r" (now|\d+[mhd])$", "", x).lstrip("▌ ")
+             for x in tasks_rows(v)]
+        check("Memory, Codex: its AGENTS.md under Instructions, the last tab",
+              r == ["Instructions 1", "AGENTS.md"], r)
+        mark = len(v.out)
+        v.key(b"\r", 0.8)
+        check("Memory, Codex: Enter shows the file's text",
+              "codex agents text" in screen(v, mark), screen(v, mark))
+        v.key(b"q", 0.5)
         v.key(b"q")
         v.exit()
     finally:
@@ -1822,18 +1848,18 @@ def at(rec, ts):
     return dict(rec, timestamp=ts)
 
 
-def record(name, sid, lines):
-    with open(tl(sid), "w") as f:
+def record(name, sid, lines, proj="-home-demo-proj", cwd=P):
+    with open(tl(sid, proj), "w") as f:
         for o in lines:
             f.write(json.dumps(o) + "\n")
     sockdir = os.path.join(T, "dch-%d" % os.getuid())
     hdir = os.path.join(T, "state", "dch", "sessions",
                         sockdir.replace("/", "-"))
     os.makedirs(hdir, exist_ok=True)
-    rec = {"name": name, "cwd": P, "end": "exited", "argv": ["claude"],
+    rec = {"name": name, "cwd": cwd, "end": "exited", "argv": ["claude"],
            "started": 1794299400, "updated": 1794300000,
            "ended": 1794300000, "sock_dir": sockdir,
-           "agent": {"session_id": sid, "cwd": P,
+           "agent": {"session_id": sid, "cwd": cwd,
                      "config_dir": os.path.join(HOME, ".claude")}}
     with open(os.path.join(hdir, name + ".json"), "w") as f:
         f.write(json.dumps(rec) + "\n")
@@ -2538,6 +2564,176 @@ def test_tasks_big():
         v.close()
 
 
+# ---- Memory (#323): the session's memories and instruction files ----------
+
+MESID = "11111111-2222-4333-8444-5555555555f6"   # xv-me: memories (not f4: xv-lt)
+MBSID = "11111111-2222-4333-8444-5555555555f5"   # xv-mb: 20000 of them
+MP = os.path.join(T, "mproj")       # xv-me's cwd: a CLAUDE.md, a .git
+MDIR = os.path.join(HOME, ".claude", "projects", "-mem-proj", "memory")
+
+
+def mfile(name, body, ago, kind=None):
+    with open(os.path.join(MDIR, name), "w") as f:
+        f.write(("---\nname: %s\ndescription: %s desc\nmetadata:\n  type: %s"
+                 "\n---\n" % (name[:-3], name[:-3], kind) if kind else "") +
+                body)
+    os.utime(os.path.join(MDIR, name), (time.time() - ago,) * 2)
+
+
+def fixture_memory():
+    """xv-me: four memories (one this session wrote, one it read, one with
+    a word only in its text and 40 lines, one over 16 KB) and the project's
+    CLAUDE.md. xv-mb: 20000 memories."""
+    os.makedirs(MDIR, exist_ok=True)
+    os.makedirs(os.path.join(MP, ".git"), exist_ok=True)
+    with open(os.path.join(MP, "CLAUDE.md"), "w") as f:
+        f.write("project rules here\n")
+    with open(os.path.join(MDIR, "MEMORY.md"), "w") as f:
+        f.write("- [Alpha rule](alpha.md) \u2014 alpha hook\n"
+                "- [Beta notes](beta.md) \u2014 beta hook\n"
+                "- [Gamma ref](gamma.md) \u2014 gamma hook\n")
+    mfile("alpha.md", "alpha body first line\n", 7200, "feedback")
+    mfile("beta.md", "beta body\n", 7200, "project")
+    mfile("gamma.md", "".join("gamma line %02d\n" % i for i in range(1, 41))
+          + "the zebrafish line\n", 3600, "reference")
+    mfile("long.md", "x" * 20000, 2 * 86400)
+    tsw = iso(3 * 3600)
+    um = lambda prompt, ts: {"type": "user", "cwd": MP, "timestamp": ts,
+                             "message": {"content": prompt}}
+    record("xv-me", MESID,
+           [um("read the notes", iso(5 * 3600)),
+            call("r1", "Read", {"file_path": MDIR + "/beta.md"}),
+            um("remember the rule", tsw),
+            call("w1", "Write", {"file_path": MDIR + "/alpha.md",
+                                 "content": "x"})],
+           proj="-mem-proj", cwd=MP)
+    bdir = os.path.join(HOME, ".claude", "projects", "-mem-big", "memory")
+    os.makedirs(bdir, exist_ok=True)
+    for i in range(1, 20001):
+        with open(os.path.join(bdir, "m%05d.md" % i), "w") as f:
+            f.write("bulk memory %05d\n" % i)
+    record("xv-mb", MBSID, [um("many", iso(600))], proj="-mem-big")
+
+
+def mem_tab(v):
+    """Memory, from Prompts: Shift-Tab (it is the last tab)."""
+    v.key(b"\033[Z", 0.8)
+    return tasks_rows(v)
+
+
+def test_memory():
+    """#323: no tab without a memory; the tab last, every row counted; This
+    session (wrote, loaded), Memories, Instructions; the card and its text,
+    cut; Enter on the card reads the turn, q back to it, q to the row; the
+    filter over the text."""
+    v = Pty([DCH, "--xray", "xv-nt"], rows=30, cols=100)
+    try:
+        v.wait(b"Prompts 1")
+        v.pump(1.5)
+        check("Memory: a session with no memory has no Memory tab",
+              "Memory" not in rows(v.out).get(2, ""), rows(v.out).get(2))
+        v.key(b"q")
+        v.exit()
+    finally:
+        v.close()
+    v = Pty([DCH, "--xray", "xv-me"], rows=30, cols=100)
+    try:
+        ok = tabbar(v, "Memory 5")
+        t = rows(v.out).get(2, "")
+        check("Memory: the last tab, counting every row", ok and
+              re.search(r"Search\s+Memory 5\s*$", t), t)
+        r = [re.sub(r" (now|\d+[mhd])$", "", x).lstrip("▌ ") for x in
+             mem_tab(v)]
+        check("Memory: This session (wrote, then loaded), Memories (newest "
+              "first), Instructions (the path short); kind and note faint",
+              r == ["This session 2", "Alpha rule feedback alpha hook wrote",
+                    "Beta notes project beta hook loaded", "Memories 2",
+                    "Gamma ref reference gamma hook", "long",
+                    "Instructions 1", "CLAUDE.md"], r)
+        check("Memory: no word chapter on the screen",
+              b"chapter" not in v.out.lower(), "")
+        v.key(b"jj", 0.5)
+        mark = len(v.out)
+        v.key(b"\r", 0.8)
+        scr = screen(v, mark)
+        check("Memory: Enter opens the card: its fields and its text",
+              "Memory gamma" in scr and "Kind reference" in scr and
+              "Note gamma hook" in scr and "Path " + MDIR + "/gamma.md" in
+              scr and "gamma line 01" in scr and "zebrafish" not in scr, scr)
+        mark = len(v.out)
+        v.key(b"G", 0.5)
+        check("Memory: the card's text scrolls to its end",
+              "the zebrafish line" in screen(v, mark), screen(v, mark))
+        v.key(b"\r", 0.5)
+        check("Memory: Enter on a row this session did not touch says so",
+              "did not write or load it" in rows(v.out).get(29, "") or
+              "did not write or load it" in screen(v, mark), screen(v, mark))
+        v.key(b"q", 0.5)
+        check("Memory: q from the card back to the same row",
+              "Gamma ref" in head(v), head(v))
+        v.key(b"j\r", 0.8)
+        scr = screen(v, mark)
+        check("Memory: a text over 16 KB says it was cut and names the path",
+              re.search(r"Text cut at 16 KB: the whole text is in \S*/long\.md",
+                        scr), scr)
+        v.key(b"q", 0.5)
+        v.key(b"gg", 0.3)
+        mark = len(v.out)
+        v.key(b"\r", 0.8)
+        check("Memory: a session row's card says this session wrote it",
+              "this session wrote it; enter reads that prompt" in
+              screen(v, mark), screen(v, mark))
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        check("Memory: Enter on the card reads the turn that wrote it (2 of "
+              "2)", v.wait(b"2 of 2", start=mark) and
+              v.wait(b"remember the rule", start=mark), screen(v, mark))
+        mark = len(v.out)
+        v.key(b"q", 0.8)
+        check("Memory: q from the reader back to the card",
+              "Memory alpha" in screen(v, mark), screen(v, mark))
+        v.key(b"q", 0.5)
+        check("Memory: q from the card back to the row",
+              "Alpha rule" in head(v), head(v))
+        v.key(b"/ZEBRA", 0.8)
+        r = tasks_rows(v)
+        check("Memory: / filters over a memory's text, any case",
+              len(r) == 2 and r[0] == "Memories 1" and "Gamma ref" in r[1],
+              r)
+        v.key(b"\033", 0.3)
+        v.key(b"\033", 0.5)
+        v.key(b"q")
+        check("Memory: q exits 0", v.exit() == 0, v.out[-80:])
+    finally:
+        v.close()
+
+
+def test_memory_big():
+    """#323: 20000 memories: the tab and the whole list fast."""
+    t0 = time.time()
+    v = Pty([DCH, "--xray", "xv-mb"], rows=30, cols=100)
+    try:
+        ok = tabbar(v, "Memory ", 15)
+        dt = time.time() - t0
+        ok2 = tabbar(v, "Memory 20000", 15)
+        dt2 = time.time() - t0
+        check("Memory big: the tab in %.2f s, all 20000 rows in %.2f s "
+              "(under 5)" % (dt, dt2), ok and ok2 and dt2 < 5,
+              rows(v.out).get(2))
+        mem_tab(v)
+        mark = len(v.out)
+        s = time.time()
+        v.key(b"G", 0)
+        ok = v.wait(b"\xe2\x96\x8c m", 5, start=mark)
+        check("Memory big: G painted within 0.5 s (%.3f s)" %
+              (time.time() - s), ok and time.time() - s < 0.5 and
+              re.search(r"m\d{5}", head(v)), head(v))
+        v.key(b"q")
+        check("Memory big: q exits 0", v.exit() == 0, v.out[-80:])
+    finally:
+        v.close()
+
+
 def test_resize():
     v = Pty([DCH, "--xray", "xv-cl"])
     try:
@@ -3136,6 +3332,9 @@ def main():
         fixture_tasks()
         test_tasks()
         test_tasks_big()
+        fixture_memory()
+        test_memory()
+        test_memory_big()
         test_resize()
         test_small_card()
         shell()
