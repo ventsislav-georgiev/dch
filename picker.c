@@ -849,7 +849,7 @@ pk_end(const char *e, char *b, size_t n)
 }
 
 /* An age, short: now, 22m, 3h, 2d. */
-static void
+void
 pk_age(long when, char *b, size_t n)
 {
 	long s = (long)time(NULL) - when;

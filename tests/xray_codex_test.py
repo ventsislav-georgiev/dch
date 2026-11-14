@@ -731,6 +731,78 @@ def test_follow_agent():
             fl.stop()
 
 
+# ---- --tasks (#319): update_plan's list ------------------------------------
+
+TIDT = "019a2222-3333-7444-8555-666677778807"
+
+
+def plan(sec, cid, steps, explanation=None):
+    a = {"plan": [{"step": st, "status": ss} for st, ss in steps]}
+    if explanation:
+        a["explanation"] = explanation
+    return line(sec, "response_item", {"type": "function_call",
+                                       "name": "update_plan", "call_id": cid,
+                                       "arguments": json.dumps(a)})
+
+
+def test_tasks():
+    """--tasks over a live Codex: its rollout's update_plan calls, each the
+    whole list, rows by position, a row's created times kept while its step
+    stands; a bad arguments string and another tool change nothing; no
+    mapped thread is no corpus."""
+    n = "xx-tk"
+    proj = os.path.join(T, "tkproj")
+    pid, marker = spawn(n, proj)
+    try:
+        r = dch("--xray", n, "--tasks", "--json")
+        check("--tasks, no mapped thread: no corpus (exit 1)",
+              r.returncode == 1 and r.stderr == "dch: no x-ray corpus\n",
+              (r.returncode, r.stdout, r.stderr))
+        p = rollout(TIDT, proj,
+                    user(1, "port the parser") +
+                    plan(2, "p1", [("read the spec", "in_progress"),
+                                   ("write the port", "pending")],
+                         "starting") +
+                    line(3, "response_item", {
+                        "type": "function_call", "name": "update_plan",
+                        "call_id": "p2", "arguments": "{not json"}) +
+                    line(3, "response_item", {
+                        "type": "function_call", "name": "shell",
+                        "call_id": "s1", "arguments": json.dumps(
+                            {"plan": [{"step": "x", "status": "pending"}]})}) +
+                    user(10, "go on") +
+                    plan(11, "p3", [("read the spec", "completed"),
+                                    ("write the port", "in_progress"),
+                                    ("test it", "pending")]))
+        snapshot(TIDT, n, marker)
+        rc, o, err = xray(n, "--json")
+        a = [c["anchor"] for c in (o or {}).get("chapters", [])]
+        r = dch("--xray", n, "--tasks", "--json")
+        ls = [json.loads(x) for x in r.stdout.splitlines()]
+        tk = [x.get("task") for x in ls[1:-1]]
+        iso = lambda s: "2026-11-10T10:%02d:%02dZ" % divmod(s, 60)
+        check("--tasks on a live Codex: source codex, the newest plan in "
+              "its order, rows by position, times kept while a step stands",
+              r.returncode == 0 and len(a) == 2 and ls and
+              ls[0] == {"schema": 1, "session": n, "session_id": TIDT,
+                        "source": "codex", "title": None,
+                        "partial": False} and
+              [(t["id"], t["title"], t["status"], t["label"], t["active"],
+                t["note"], t["created"], t["created_chapter"], t["updated"],
+                t["chapter"], t["blocked_by"]) for t in tk] ==
+              [("1", "read the spec", "done", "completed", None, None,
+                iso(2), a[0], iso(11), a[1], []),
+               ("2", "write the port", "active", "in_progress", None, None,
+                iso(2), a[0], iso(11), a[1], []),
+               ("3", "test it", "pending", "pending", None, None,
+                iso(11), a[1], iso(11), a[1], [])] and
+              ls[-1] == {"done": True, "count": 3, "dropped": 0},
+              (r.stdout, r.stderr))
+        os.unlink(p)
+    finally:
+        dch("-k", n)
+
+
 def main():
     os.makedirs(os.path.dirname(FAKE))
     b = subprocess.run(["cc", "-o", FAKE, os.path.join(HERE, "fake_codex.c")],
@@ -746,6 +818,7 @@ def main():
     try:
         test_live()
         test_relative_home()
+        test_tasks()
         test_scope()
         test_follow()
         test_follow_agent()

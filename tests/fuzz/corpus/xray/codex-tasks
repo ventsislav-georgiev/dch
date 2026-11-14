@@ -1,0 +1,5 @@
+{"timestamp":"2026-11-14T07:00:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"go"}]}}
+{"timestamp":"2026-11-14T07:00:01Z","type":"response_item","payload":{"type":"function_call","name":"update_plan","call_id":"c1","arguments":"{\"explanation\": \"e\", \"plan\": [{\"step\": \"read\", \"status\": \"completed\"}, {\"step\": \"write\", \"status\": \"in_progress\"}, {\"step\": \"ship\", \"status\": \"pending\"}]}"}}
+{"timestamp":"2026-11-14T07:00:02Z","type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"Plan updated"}}
+{"timestamp":"2026-11-14T07:00:03Z","type":"response_item","payload":{"type":"function_call","name":"update_plan","call_id":"c2","arguments":"{\"plan\":["}}
+{"timestamp":"2026-11-14T07:00:04Z","type":"response_item","payload":{"type":"function_call","name":"update_plan","call_id":"c3","arguments":"{\"plan\": [{\"step\": \"read\", \"status\": \"completed\"}, {\"step\": \"write\", \"status\": \"completed\"}]}"}}

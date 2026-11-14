@@ -68,7 +68,8 @@ struct client
 	int armed;
 	/* Its X-ray view is up (MSG_DETACH len 1, #311): attached, but no
 	** terminal sees the output, so none goes to it and the mirror answers
-	** the program's queries. The next MSG_ATTACH clears it. */
+	** the program's queries. The next MSG_ATTACH clears it; a --restart
+	** carries it (the blob's view line). */
 	int viewing;
 
 	/* Connection role latch. A control connection (MSG_KEYS/READ/WAIT)
@@ -120,6 +121,9 @@ struct client
 	** (paste_scan), so a paste cut there still gets its end. */
 	unsigned char in_drop, pm, paste;
 	size_t dropped;
+	/* #328: bytes of its input queued, from pty_in_total == in_from on */
+	size_t queued;
+	unsigned long long in_from;
 };
 
 /* ponytail: 4 MB per-client output backlog before we give up on a slow
@@ -1829,6 +1833,7 @@ flush_client(struct client *p)
 ** printing deadlocked it (the program waits for us to read its output, we
 ** waited for it to read its input). Written as the pty takes it, in order. */
 static struct client pty_in;
+static unsigned long long pty_in_total;	/* bytes ever queued: whose tail */
 
 /* Write the waiting input as far as the pty takes it, without blocking. A
 ** hard error (EIO: the program is gone) drops it: the program's end is
@@ -1870,6 +1875,7 @@ pty_input(const void *buf, size_t len)
 		          pty_in.outlen - pty_in.outoff, len);
 		return -1;
 	}
+	pty_in_total += len;
 	pty_flush();
 	return 0;
 }
@@ -1922,11 +1928,36 @@ push_input(struct client *p, const unsigned char *b, size_t n)
 		p->dropped = 0;
 	}
 	paste_scan(&p->pm, &p->paste, b, n);
-	if (!p->in_drop && pty_input(b, n) == 0)
-		return;
+	if (!p->in_drop)
+	{
+		unsigned long long at = pty_in_total;
+
+		if (pty_input(b, n) == 0)
+		{
+			if (!p->queued)
+				p->in_from = at;
+			p->queued += n;
+			return;
+		}
+	}
+	/* #328: a dch --send whose every byte is still the unwritten tail of
+	** pty_in is dropped whole: nothing of a refused text gets typed */
+	if (!p->in_drop && p->role != ROLE_ATTACHED &&
+	    pty_in_total - p->in_from == p->queued &&
+	    p->queued <= pty_in.outlen - pty_in.outoff)
+	{
+		pty_in.outlen -= p->queued;
+		pty_in_total -= p->queued;
+		p->dropped += p->queued;
+		p->queued = 0;
+		was = 0;	/* its ESC[200~ went too */
+	}
 	if (!p->in_drop && was &&
 	    queue_to_client(&pty_in, (const unsigned char *)"\033[201~", 6) == 0)
+	{
+		pty_in_total += 6;
 		pty_flush();
+	}
 	p->in_drop = 1;
 	p->dropped += n;
 }
@@ -3076,6 +3107,7 @@ struct resume_state
 	** socket, restored into the new image's reassembly buffer. */
 	unsigned char cin[RESUME_MAX_CLI][PKT_HDR + PKT_MAX];
 	size_t cinlen[RESUME_MAX_CLI];
+	unsigned char cview[RESUME_MAX_CLI];	/* its view was up */
 	int ncfd;
 	unsigned char *snap;
 	size_t snaplen;
@@ -3209,6 +3241,10 @@ restart_save(const char *path, int lfd, int ackfd, int ringfd, int core)
 		}
 		hex_encode(p->inbuf, p->inlen, hex);
 		fprintf(f, "cli %d %s\n", p->fd, hex);
+		/* its own line: an older image skips a line it does not know,
+		** where a field on the cli line would cost it the client */
+		if (p->viewing)
+			fprintf(f, "view %d\n", p->fd);
 	}
 
 	/* Drop the snapshot rather than write one the loader will reject: past
@@ -3362,6 +3398,16 @@ restart_load(void)
 			               sizeof resume.cin[0]);
 			resume.cinlen[resume.ncfd] = n > 0 ? (size_t)n : 0;
 			resume.cfd[resume.ncfd++] = cfd;
+			continue;
+		}
+		/* a carried client's X-ray view is up (#311): after its cli */
+		if (sscanf(line, "view %d", &cfd) == 1)
+		{
+			int i;
+
+			for (i = 0; i < resume.ncfd; i++)
+				if (resume.cfd[i] == cfd)
+					resume.cview[i] = 1;
 			continue;
 		}
 		if (strncmp(line, "dec ", 4) == 0)
@@ -4463,6 +4509,7 @@ master_adopt(void)
 		if (!p)
 			continue;
 		p->attached = p->armed = 1;
+		p->viewing = resume.cview[i];
 		p->role = ROLE_ATTACHED;
 		/* Half-read frame from before the exec. Without it the next
 		** read() lands mid-packet and the stream desyncs for good. */
@@ -4477,9 +4524,9 @@ master_adopt(void)
 		** everyone: nothing between iterations can change the mirror,
 		** and one render is a full-grid ANSI dump. */
 		p->want_replay = 0;
-		if (blob && (queue_to_client(p, (unsigned char *)blob,
-		                             bloblen) < 0 ||
-		             flush_client(p) < 0))
+		if (blob && !p->viewing &&
+		    (queue_to_client(p, (unsigned char *)blob, bloblen) < 0 ||
+		     flush_client(p) < 0))
 			remove_client(p);
 	}
 	free(blob);

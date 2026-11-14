@@ -1063,11 +1063,12 @@ test_marks(void)
 	}
 	recs_free(v, n);
 	CHECK("5: marks and kinds in row order, C flags client input",
-	      !strncmp(sig, "4:A:0|1:$:0|4:B:0|2:ls -l:0|4:C:8|3:out-1:0|"
-	               "3:out-2:0|4:D;3:2|4:A:0|1:$:0|4:B:0|2:forged:0|4:C:0|"
-	               "3:x:0|4:D:0|", strlen("4:A:0|1:$:0|4:B:0|2:ls -l:0|"
-	               "4:C:8|3:out-1:0|3:out-2:0|4:D;3:2|4:A:0|1:$:0|4:B:0|"
-	               "2:forged:0|4:C:0|3:x:0|4:D:0|"))
+	      !strncmp(sig, "4:A:0|1:$:0|4:B:0|2:ls -l:0|4:C;ls -l:8|"
+	               "3:out-1:0|3:out-2:0|4:D;3:2|4:A:0|1:$:0|4:B:0|"
+	               "2:forged:0|4:C:0|3:x:0|4:D:0|", strlen("4:A:0|1:$:0|"
+	               "4:B:0|2:ls -l:0|4:C;ls -l:8|3:out-1:0|3:out-2:0|"
+	               "4:D;3:2|4:A:0|1:$:0|4:B:0|2:forged:0|4:C:0|3:x:0|"
+	               "4:D:0|"))
 	      || (printf("       got %s\n", sig), 0));
 	CHECK("5: a forged B..C with no input between has no input flag",
 	      strstr(sig, "4:C:0|") != NULL);
@@ -1148,6 +1149,105 @@ test_typed_ahead(void)
 	c_flags(f, sizeof f);
 	CHECK("302: no input at all: no C is flagged", !strcmp(f, "00") ||
 	      (printf("       got %s\n", f), 0));
+}
+
+/* The C marks, in order, as "<flag><text>|" */
+static void
+c_marks(char *o, size_t cap)
+{
+	struct rec *v;
+	size_t n, i;
+	int st;
+
+	o[0] = '\0';
+	v = recs(&R, R.head_seq, &n, &st);
+	for (i = 0; i < n; i++)
+		if (v[i].kind == RING_K_MARK && v[i].text[0] == 'C' &&
+		    strlen(o) + v[i].len + 3 < cap)
+			snprintf(o + strlen(o), cap - strlen(o), "%d%s|",
+			         v[i].flags & RING_F_INPUT ? 1 : 0, v[i].text);
+	recs_free(v, n);
+}
+
+#define PRM "\033]133;A\007$ \033]133;B\007"
+
+/* #335: output never titles a command, and a program holding a B open
+** while the user types gets no flag and leaves the line to the shell */
+static void
+test_forged_335(void)
+{
+	char f[256];
+
+	/* MED-X3 (1): C;cmdline= on a block equal to the typed-ahead line */
+	start(80, 24, 2000);
+	feed(PRM);
+	dch_vt_input_seen("prog\r", 5);
+	feed("prog\r\n\033]133;C\007");
+	dch_vt_input_seen("echo V\r", 7);
+	feed("\033]133;A\007$ \033]133;B\007echo V\r\n"
+	     "\033]133;C;cmdline=FORGED-A\007out\r\n\033]133;D;0\007");
+	seq_feed(1, 30);
+	c_marks(f, sizeof f);
+	CHECK("335: a C's cmdline= never titles; the typed line does",
+	      !strcmp(f, "1C;prog|1C;echo V|") ||
+	      (printf("       got %s\n", f), 0));
+
+	/* MED-X3 (2): a B held open while the user types ls (tty echo) */
+	start(80, 24, 2000);
+	feed(PRM);
+	dch_vt_input_seen("prog\r", 5);
+	feed("prog\r\n\033]133;C\007" PRM "FORGED-NO-LINE\r\n");
+	dch_vt_input_seen("ls\r", 3);
+	feed("ls\r\n\033]133;C\007out\r\n\033]133;D;0\007"
+	     "\033]133;D;0\007" BLOCK("ls"));
+	seq_feed(1, 30);
+	c_marks(f, sizeof f);
+	CHECK("335: a B held open while the user types gets nothing; the "
+	      "line keeps its own block", !strcmp(f, "1C;prog|0C|1C;ls|") ||
+	      (printf("       got %s\n", f), 0));
+
+	/* lines typed at the prompt: plain, edited, two lines with a PS2 */
+	start(80, 24, 2000);
+	feed("\033]133;A\007$ \033]133;B\007");
+	dch_vt_input_seen("lx\177s\r", 5);
+	feed("ls\r\n\033]133;C\007\033]133;D;0\007"
+	     "\033]133;A\007$ \033]133;B\007");
+	dch_vt_input_seen("for i in 1\rdone\r", 16);
+	feed("for i in 1\r\n> done\r\n\033]133;C\007\033]133;D;0\007");
+	seq_feed(1, 30);
+	c_marks(f, sizeof f);
+	CHECK("335: an edited line flags untitled; a PS2 line is typed text",
+	      !strcmp(f, "1C|1C;for i in 1\ndone|") ||
+	      (printf("       got %s\n", f), 0));
+
+	/* LOW-X23: no B seen since the mirror started (a --restart) */
+	start(80, 24, 2000);
+	feed("zp% ");
+	dch_vt_input_seen("echo AFTER1\r", 12);
+	feed("echo AFTER1\r\n\033]133;C\007\033]133;D;0\007" BLOCK("x"));
+	seq_feed(1, 30);
+	c_marks(f, sizeof f);
+	CHECK("335: the first command after a restart is flagged",
+	      !strcmp(f, "1C;echo AFTER1|0C|") ||
+	      (printf("       got %s\n", f), 0));
+
+	/* LOW-X24 + NIT-X6: a right prompt after the line, typed ahead and
+	** typed; a typed-ahead line that ends in a space */
+	start(80, 24, 2000);
+	feed(PRM);
+	dch_vt_input_seen("prog\r", 5);
+	feed("prog\r\n\033]133;C\007");
+	dch_vt_input_seen("echo P1\recho T1 \r", 17);
+	feed("\033]133;D;0\007" PRM "echo P1"
+	     "\033[70G[rp]\r\n\033]133;C\007\033]133;D;0\007"
+	     BLOCK("echo T1") PRM);
+	dch_vt_input_seen("pwd\r", 4);
+	feed("pwd\033[70G[rp]\r\n\033]133;C\007\033]133;D;0\007");
+	seq_feed(1, 30);
+	c_marks(f, sizeof f);
+	CHECK("335: a right prompt or a trailing space keeps the chapter, "
+	      "titled without it", !strcmp(f, "1C;prog|1C;echo P1|"
+	      "1C;echo T1 |1C;pwd|") || (printf("       got %s\n", f), 0));
 }
 
 /* agent pause: a gap, nothing captured, resume on the next prompt */
@@ -1422,6 +1522,7 @@ main(int argc, char **argv)
 	test_resize();
 	test_marks();
 	test_typed_ahead();
+	test_forged_335();
 	test_pause();
 	test_zalgo();
 	test_extras();

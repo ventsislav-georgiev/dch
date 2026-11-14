@@ -431,6 +431,18 @@ extern int (*attach_detached)(void);
 ** of the attached session, run in a child attach_main forks; its exit code.
 ** A remote attach's too (#189). NULL: no chord, the bytes go on as before. */
 extern int (*attach_xray)(void);
+/* The view's o (#331): 1 set by the host for the attach a view's o opens,
+** taken by the next attach_main; ATTACH_XRAY_OPENED the chord view's exit
+** code when o left it. That attach drops a held o's repeats. */
+extern int attach_drop_o;
+#define ATTACH_XRAY_OPENED 64
+/* The attach's stop handling, the picker's too (QA 1.65.0 LOW-V24):
+** tty_stop_arm, the tty a raw mode is on and the modes a SIGTSTP puts back
+** on it first (-1: none); tty_stop_handlers installs the SIGTSTP and
+** SIGCONT handlers; tty_continued, 1 once after each SIGCONT. */
+void tty_stop_arm(int fd, const struct termios *t);
+void tty_stop_handlers(void);
+int tty_continued(void);
 
 #include "remote.h"
 void client_pidfile_unlink(void);

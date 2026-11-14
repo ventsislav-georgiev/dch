@@ -14,6 +14,8 @@
 #include "rframe.h"
 #include "ring.h"
 #include "xray.h"
+#include "xmem.h"
+#include "xcmd.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -272,6 +274,11 @@ const struct dch_conf config_keys[] = {
 	/* the X-ray shell ring's size (#119), read when a session starts */
 	{ "xray_ring", 0, "2M", NULL,
 	  "Shell output kept for X-ray: 0 (off) to 16M" },
+	/* X-ray's command sources (#321): run with no shell, read-only */
+	{ "tasks_command", 0, "", NULL,
+	  "X-ray's task list from a command; empty: the agent's own" },
+	{ "memory_command", 0, "", NULL,
+	  "X-ray's memory list from a command; empty: the agent's own" },
 };
 _Static_assert(sizeof config_keys / sizeof *config_keys == NCONF,
                "picker.h's NCONF counts config_keys");
@@ -2196,6 +2203,7 @@ picker_restore(void)
 	{
 		if (picker_term_saved)
 			tcsetattr(picker_tty_fd, TCSANOW, &picker_saved_term);
+		tty_stop_arm(-1, NULL);
 		/* Cursor on + disable mouse/bracketed-paste/alt-screen we may
 		** have inherited. dch itself never enables them but a previous
 		** in-shell app could've. Safe to send unconditionally. Autowrap
@@ -2306,6 +2314,11 @@ picker_raw_on(int fd)
 	raw.c_cc[VMIN] = 1;
 	raw.c_cc[VTIME] = 0;
 	tcsetattr(fd, TCSANOW, &raw);
+	/* a stop puts the shell's modes back first, as the attach's does
+	** (QA 1.65.0 LOW-V24: dash reads its next line raw); pk_wait sets
+	** raw mode again on the fg */
+	tty_stop_arm(fd, &picker_saved_term);
+	tty_stop_handlers();
 	tw(fd, "\033[?25l"
 	       "\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?1015l"
 	       "\033[?2004l");
@@ -2873,8 +2886,13 @@ usage(void)
 	    "                                             definitions as NDJSON\n"
 	    "  dch --xray <n> --search <text> --json      the newest 50 places a\n"
 	    "                                             word or phrase was said\n"
+	    "  dch --xray <n> --memory --json             its memories and\n"
+	    "                                             instruction files as\n"
+	    "                                             JSON lines\n"
 	    "  dch --xray <n> --chapter <anchor> --json   one chapter's entries\n"
 	    "                                             as one JSON object;\n"
+	    "  dch --xray <n> --tasks --json              the session's task list\n"
+	    "                                             as JSON lines;\n"
 	    "                                             <n> as host:name runs\n"
 	    "                                             on that host's dch serve\n"
 	    "  dch --xray host:name --requests --json     one warm connection: X-ray\n"
@@ -5710,7 +5728,8 @@ do_send_verb(const char *name, char **words, int nwords, int press_enter)
 	if (k > 0 && type == MSG_ACK && len == DCH_ST_BUSY)
 	{
 		fprintf(stderr, "dch: %s: input dropped: the program is not "
-		        "reading (4 MB held)\n", name);
+		        "reading (4 MB held); the text's start may still be in "
+		        "its input\n", name);
 		return 1;
 	}
 	return 0;
@@ -5895,9 +5914,9 @@ env_ms(const char *key, long dflt)
 /* Parent pid from the kernel's process table — never the env, which macOS
 ** redacts for platform binaries. -1 when the process is gone. With tpgid,
 ** also the foreground process group of its controlling terminal (<= 0:
-** none). */
+** none), and with tdev that terminal's device number. */
 static long
-proc_stat(long pid, long *tpgid)
+proc_stat(long pid, long *tpgid, long *tdev)
 {
 #ifdef __APPLE__
 	struct kinfo_proc kp;
@@ -5908,21 +5927,25 @@ proc_stat(long pid, long *tpgid)
 		return -1;
 	if (tpgid)
 		*tpgid = kp.kp_eproc.e_tpgid;
+	if (tdev)
+		*tdev = kp.kp_eproc.e_tdev;
 	return kp.kp_eproc.e_ppid;
 #else
 	char p[64], buf[512], *rp;
 	FILE *f;
-	long pp = -1, tp = -1;
+	long pp = -1, tp = -1, td = 0;
 
 	snprintf(p, sizeof p, "/proc/%ld/stat", pid);
 	if (!(f = fopen(p, "r")))
 		return -1;
 	/* the comm field may hold spaces and parens: parse after the last ')' */
 	if (fgets(buf, sizeof buf, f) && (rp = strrchr(buf, ')')))
-		sscanf(rp + 1, " %*c %ld %*d %*d %*d %ld", &pp, &tp);
+		sscanf(rp + 1, " %*c %ld %*d %*d %ld %ld", &pp, &td, &tp);
 	fclose(f);
 	if (tpgid)
 		*tpgid = tp;
+	if (tdev)
+		*tdev = td;
 	return pp;
 #endif
 }
@@ -5930,30 +5953,71 @@ proc_stat(long pid, long *tpgid)
 static long
 proc_ppid(long pid)
 {
-	return proc_stat(pid, NULL);
+	return proc_stat(pid, NULL, NULL);
+}
+
+/* 1 when pid's controlling terminal (dev, from proc_stat) reads key by key
+** (ICANON off), as every wrapper that forwards the keyboard sets it (script,
+** unbuffer -p, ssh); 0 when it is line-buffered or cannot be read. A wrapper
+** in front of a line-buffered terminal does not read it (plain unbuffer:
+** expect never reads the keyboard), and what is typed there waits for the
+** shell that reads it once the wrapper exits (MED-AA1). */
+static int
+tty_raw(long pid, long dev)
+{
+	struct termios t;
+	char p[64];
+	int fd = -1, ok;
+#ifdef __APPLE__
+	const char *nm = dev != (long)NODEV ? devname((dev_t)dev, S_IFCHR) : NULL;
+
+	(void)pid;
+	if (nm && snprintf(p, sizeof p, "/dev/%s", nm) < (int)sizeof p)
+		fd = open(p, O_RDONLY | O_NOCTTY | O_NONBLOCK);
+#else
+	struct stat st;
+	int k;
+
+	/* the terminal as the wrapper holds it: stat first, so no other
+	** device is ever opened */
+	for (k = 0; k < 3 && fd < 0 && dev > 0; k++)
+		if (snprintf(p, sizeof p, "/proc/%ld/fd/%d", pid, k) <
+		    (int)sizeof p && stat(p, &st) == 0 && S_ISCHR(st.st_mode) &&
+		    (long)st.st_rdev == dev)
+			fd = open(p, O_RDONLY | O_NOCTTY | O_NONBLOCK);
+#endif
+	ok = fd >= 0 && tcgetattr(fd, &t) == 0 && !(t.c_lflag & ICANON);
+	if (fd >= 0)
+		close(fd);
+	return ok;
 }
 
 /* 1 when the Claude at `pid` is in the foreground process group of its
 ** own terminal, and so is each wrapper with a pty of its own (script,
-** unbuffer: #312) between it and `root` (a session's child, which the
-** master made that pty's controlling process) on the terminal around it;
+** unbuffer -p: #312) between it and `root` (a session's child, which the
+** master made that pty's controlling process) on the terminal around it,
+** that terminal reading key by key (tty_raw: the wrapper forwards it);
 ** 0 when one is not — suspended with Ctrl-Z or in the background, a shell
-** or another job in front (#282) — -1 when the chain cannot be read. The
+** or another job in front (#282), a wrapper that does not read the keys
+** (plain unbuffer, MED-AA1) — -1 when the chain cannot be read. The
 ** kernel's own view, so an old master answers it as well as a new one. */
 int
 proc_fg(long root, long pid)
 {
-	long fg = -1, below = 0, up;
+	long fg = -1, below = 0, up, dev = -1;
 	pid_t g;
 	int d;
 
 	for (d = 0; d < 64 && pid > 1; d++)
 	{
-		if ((up = proc_stat(pid, &fg)) < 0 || (g = getpgid((pid_t)pid)) < 0)
+		if ((up = proc_stat(pid, &fg, &dev)) < 0 ||
+		    (g = getpgid((pid_t)pid)) < 0)
 			return -1;
 		/* a terminal's foreground group is the same for all its
 		** processes: a new one means a new terminal, checked once */
 		if ((d == 0 || fg != below) && (fg <= 0 || g != (pid_t)fg))
+			return 0;
+		if (d > 0 && fg != below && !tty_raw(pid, dev))
 			return 0;
 		if (pid == root)
 			return 1;
@@ -10277,22 +10341,35 @@ pk_xray(struct pk *p, int fd, const char *name, int record, int remote,
 	{
 		attach_route = remote ? 1 : -1;	/* the view's own (#210) */
 		attach_only = 1;	/* ended since o: refused, never a new one */
+		attach_drop_o = 1;	/* a held o's repeats (#331) */
 		return 1;
 	}
 	return 0;
 }
 
 /* Input on fd within ms? select, not poll: macOS poll() answers POLLNVAL
-** for a tty. -1 when a signal (a resize) cut it short. */
+** for a tty. -1 when a signal (a resize) cut it short, or after a stop
+** (LOW-V24): the shell had the tty, so raw mode again and a full repaint,
+** and no read now: on the shell's cooked modes it would wait for an Enter
+** where select said readable. shortcut: a SIGCONT that does not end the
+** select (macOS, after a SIGSTOP) is seen at the next tick, 1 s at most. */
 int
 pk_wait(int fd, long ms)
 {
 	struct timeval tv = { ms / 1000, (int)(ms % 1000) * 1000 };
 	fd_set rs;
+	int n;
 
 	FD_ZERO(&rs);
 	FD_SET(fd, &rs);
-	return select(fd + 1, &rs, NULL, NULL, &tv);
+	n = select(fd + 1, &rs, NULL, NULL, &tv);
+	if (tty_continued())
+	{
+		picker_raw_on(fd);
+		pk_winch = 1;
+		return -1;
+	}
+	return n;
 }
 
 int
@@ -13165,6 +13242,304 @@ xr_chapter(const struct xr_target *t, const char *anchor)
 	return rc;
 }
 
+/* ---- dch --xray <n> --tasks --json (#319) ------------------------------ */
+
+/* No corpus for --tasks: a configured command's failure (warn) is still
+** said, as a source "none" answer; no command or a silent one, as before. */
+static int
+xr_tasks_none(const char *session, const char *sid, const char *warn)
+{
+	if (!warn || !warn[0])
+		return xr_no_corpus();
+	return xr_out_exit(xr_tasks_print(stdout, NULL, session, sid, 0,
+	                                  warn) == 0);
+}
+
+/* A looked-up transcript (codex: a rollout), read as --json reads it, its
+** task records gathered on the way. */
+static int
+xr_tasks_file(const char *path, const struct stat *st, int codex,
+              const char *sid, const char *session, const char *warn)
+{
+	struct xr_tasks *tk;
+	struct xr_claude *d = NULL;
+	int fd, capped = 0, rc = -1;
+
+	if ((fd = xr_seam_open(path, st)) < 0)	/* there but unreadable: 3 */
+		return errno == EACCES || errno == EPERM || errno == EIO
+		       ? xr_failed() : xr_tasks_none(session, sid, warn);
+	if ((tk = xr_tasks_new()) && (d = xr_claude_new()))
+	{
+		if (codex)
+			xr_claude_codex(d);
+		xr_claude_tasks(d, tk, (uint64_t)st->st_ino);
+		rc = xr_claude_read(d, fd, (uint64_t)st->st_size, &capped);
+	}
+	close(fd);
+	xr_claude_free(d);
+	rc = rc < 0 ? xr_failed()
+	     : xr_out_exit(xr_tasks_print(stdout, tk, session, sid, capped,
+	                                  warn) == 0);
+	xr_tasks_free(tk);
+	return rc;
+}
+
+static int
+xr_tasks_claude(const char *cfg, const char *sid, const char *session,
+                const char *warn)
+{
+	char path[2048], home[1400], project[1200];
+	struct stat st;
+
+	if (!cfg[0])
+	{
+		const char *h = getenv("HOME");
+
+		if (!h || snprintf(home, sizeof home, "%s/.claude", h)
+		    >= (int)sizeof home)
+			return xr_tasks_none(session, sid, warn);
+		cfg = home;
+	}
+	if (xr_claude_lookup(cfg, sid, path, sizeof path, &st, project,
+	                     sizeof project) < 0)
+		return xr_tasks_none(session, sid, warn);
+	return xr_tasks_file(path, &st, 0, sid, session, warn);
+}
+
+/* #321: a tasks_command's or memory_command's answer, printed as it
+** arrives: the header at its first row (a title line can only come before
+** it), each row as the runner hands it on. Nonzero (a write failed) ends
+** the command. */
+struct xr_tkc
+{
+	enum xcmd_kind kind;
+	const char *session, *sid;
+	const struct xcmd_result *res;
+	unsigned long n;
+};
+
+static int
+xr_tkc_row(const char *line, void *arg)
+{
+	struct xr_tkc *k = arg;
+
+	if (!k->n++)
+	{
+		fputs("{\"schema\":1", stdout);
+		if (k->kind == XCMD_TASK)	/* --memory's header has neither */
+		{
+			fputs(",\"session\":", stdout);
+			xr_put_str(stdout, k->session);
+			fputs(",\"session_id\":", stdout);
+			xr_put_str(stdout, k->sid);
+		}
+		fputs(",\"source\":\"command\",\"title\":", stdout);
+		if (k->res->title[0])
+			xr_put_str(stdout, k->res->title);
+		else
+			fputs("null", stdout);
+		fputs(",\"partial\":false}\n", stdout);
+	}
+	fputs(line, stdout);
+	fputc('\n', stdout);
+	return fflush(stdout) != 0 || ferror(stdout);
+}
+
+/* The user's tasks_command or memory_command (their own dch config only),
+** before any built-in source. 1: it gave a row and answered, *rc its exit;
+** its stop or failure after rows is the done line's warn. 0: the built-in
+** source answers, warn its header's ("" for no command, an empty answer).
+** Never mixed. */
+static int
+xr_cmd(enum xcmd_kind kind, const char *session, const char *sid,
+       const char *cwd, const char *agent, const char *asid, char *warn,
+       size_t cap, int *rc)
+{
+	struct xcmd_result res;
+	struct xr_tkc k = { kind, session, sid, &res, 0 };
+	char cmd[1024];
+	/* a session cwd not known: HOME, never the querying process's (a
+	** dch serve ctl's is the peer's choice) */
+	struct xcmd_ctx c = { cmd, session, cwd[0] ? cwd : getenv("HOME"),
+	                      agent, asid };
+
+	warn[0] = '\0';
+	if (!dch_config_get(kind == XCMD_TASK ? "tasks_command"
+	                    : "memory_command", cmd, sizeof cmd) || !cmd[0])
+		return 0;
+	if (xcmd_rows(kind, &c, xr_tkc_row, &k, &res) == 0)
+	{
+		snprintf(warn, cap, "%s", res.warn);
+		return 0;
+	}
+	if (!ferror(stdout))
+	{
+		printf("{\"done\":true,\"count\":%lu,\"dropped\":%lu", res.rows,
+		       res.skipped);
+		if (res.warn[0])
+		{
+			fputs(",\"warn\":", stdout);
+			xr_put_str(stdout, res.warn);
+		}
+		fputs("}\n", stdout);
+	}
+	*rc = xr_out_exit(fflush(stdout) == 0 && !ferror(stdout));
+	return 1;
+}
+
+/* --tasks: the user's tasks_command first (#321), whatever the session;
+** else a Claude session's transcript (live or ended), a live Codex's
+** rollout, as --chapter finds them (none found: no corpus); a shell, live
+** or ended, keeps no task list: source "none". */
+static int
+xr_tasks_q(const struct xr_target *t)
+{
+	struct ring_snap rs;
+	struct cmd_info ci;
+	struct crec c;
+	struct xr_cx xc;
+	char cfg[1400], path[2048], warn[XCMD_WARN_MAX], cwd[PATH_MAX] = "";
+	struct stat st;
+	int qc, cx = 0, claude = 0, rc;
+
+	if (t->kind == XR_ENDED)
+	{
+		snprintf(cwd, sizeof cwd, "%s",
+		         t->rec->acwd[0] ? t->rec->acwd : t->rec->cwd);
+		if (xr_cmd(XCMD_TASK, t->name, t->rec->sid, cwd,
+		           t->rec->sid[0] ? "claude" : "", t->rec->sid, warn,
+		           sizeof warn, &rc))
+			return rc;
+		return t->rec->sid[0] ? xr_tasks_claude(t->rec->acfg, t->rec->sid,
+		                                        t->name, warn)
+		       : xr_out_exit(xr_tasks_print(stdout, NULL, t->name, "",
+		                                    0, warn) == 0);
+	}
+	if ((qc = cmd_query(t->sock, &ci)) == -4)
+		return xr_no_session();
+	if (qc == 0 && ci.pid > 0)
+		(void)proc_cwd(ci.pid, cwd, sizeof cwd);
+	claude = qc == 0 && xr_live_claude(&ci, &c);
+	if (!claude && qc == 0)
+		cx = xr_live_codex(&ci, &xc);
+	if (qc == 0)
+		cmd_info_free(&ci);
+	if (claude)
+	{
+		if (c.cwd[0])
+			snprintf(cwd, sizeof cwd, "%s", c.cwd);
+		if (xr_cmd(XCMD_TASK, t->name, c.sid, cwd, "claude", c.sid, warn,
+		           sizeof warn, &rc))
+			return rc;
+		xr_crec_cfg(&c, cfg, sizeof cfg);
+		return cfg[0] ? xr_tasks_claude(cfg, c.sid, t->name, warn)
+		              : xr_tasks_none(t->name, c.sid, warn);
+	}
+	if (cx)
+	{
+		if (xc.cwd[0])
+			snprintf(cwd, sizeof cwd, "%s", xc.cwd);
+		if (xr_cmd(XCMD_TASK, t->name, xc.tid, cwd, "codex", xc.tid, warn,
+		           sizeof warn, &rc))
+			return rc;
+		return cx > 0 && xr_codex_lookup(xc.home, xc.tid, path, sizeof path,
+		                                 &st) == 0
+		       ? xr_tasks_file(path, &st, 1, xc.tid, t->name, warn)
+		       : xr_tasks_none(t->name, xc.tid, warn);
+	}
+	/* the ring's header for the session_id, as the other forms give it */
+	if (ring_fetch(t->sock, &rs, NULL, NULL) == -1)
+		return xr_no_session();
+	if (xr_cmd(XCMD_TASK, t->name, rs.sid, cwd, "", "", warn, sizeof warn,
+	           &rc))
+		return rc;
+	return xr_out_exit(xr_tasks_print(stdout, NULL, t->name, rs.sid, 0,
+	                                  warn) == 0);
+}
+
+/* --memory (#322): a Claude session's memory directory (beside its
+** transcript, ended or live) and instruction files, a live Codex's AGENTS.md
+** files; the transcript or rollout read for the calls that touch them. A
+** shell is source none. */
+static int
+xr_memory(const struct xr_target *t)
+{
+	char cfg[1400] = "", cwd[PATH_MAX] = "", sid[64] = "", path[2048];
+	char project[1200], warn[XCMD_WARN_MAX];
+	struct xm_req q;
+	struct cmd_info ci;
+	struct stat st;
+	struct crec c;
+	struct xr_cx xc;
+	int qc, rc;
+
+	memset(&q, 0, sizeof q);
+	if (t->kind == XR_ENDED)
+	{
+		const struct hrec *h = t->rec;
+
+		snprintf(cwd, sizeof cwd, "%s", h->acwd[0] ? h->acwd : h->cwd);
+		if (h->sid[0])
+		{
+			q.agent = "claude";
+			snprintf(cfg, sizeof cfg, "%s", h->acfg);
+			snprintf(sid, sizeof sid, "%s", h->sid);
+		}
+	}
+	else
+	{
+		if ((qc = cmd_query(t->sock, &ci)) == -4)
+			return xr_no_session();
+		if (qc == 0 && ci.pid > 0)
+			(void)proc_cwd(ci.pid, cwd, sizeof cwd);
+		if (qc == 0 && xr_live_claude(&ci, &c))
+		{
+			q.agent = "claude";
+			if (c.cwd[0])
+				snprintf(cwd, sizeof cwd, "%s", c.cwd);
+			xr_crec_cfg(&c, cfg, sizeof cfg);
+			snprintf(sid, sizeof sid, "%s", c.sid);
+		}
+		else if (qc == 0 && xr_live_codex(&ci, &xc) != 0)
+		{
+			q.agent = "codex";
+			if (xc.cwd[0])
+				snprintf(cwd, sizeof cwd, "%s", xc.cwd);
+			snprintf(cfg, sizeof cfg, "%s", xc.home);
+			snprintf(sid, sizeof sid, "%s", xc.tid);	/* DCH_AGENT_SESSION_ID */
+			if (xc.tid[0] && xr_codex_lookup(xc.home, xc.tid, path,
+			                                 sizeof path, &st) == 0)
+			{
+				q.path = path;
+				q.st = &st;
+			}
+		}
+		if (qc == 0)
+			cmd_info_free(&ci);
+	}
+	if (q.agent && !strcmp(q.agent, "claude"))
+	{
+		const char *h = getenv("HOME");
+
+		if (!cfg[0] && h)	/* as xr_claude_ref */
+			snprintf(cfg, sizeof cfg, "%s/.claude", h);
+		if (xr_claude_lookup(cfg, sid, path, sizeof path, &st, project,
+		                     sizeof project) == 0)
+		{
+			q.path = path;
+			q.st = &st;
+		}
+	}
+	q.cfg = cfg;
+	q.cwd = cwd;
+	/* the user's memory_command first (#321), whatever the session */
+	if (xr_cmd(XCMD_MEMORY, t->name, NULL, cwd, q.agent ? q.agent : "", sid,
+	           warn, sizeof warn, &rc))
+		return rc;
+	q.warn = warn;
+	return xr_out_exit(xm_print(stdout, &q) == 0);
+}
+
 /* --clear: MSG_RING_CLEAR to a live master; never the pty. The header and
 ** the clear go over one connection, so a session resolved by its ring
 ** session_id is cleared only while it still carries that id (shortcut: a
@@ -13288,6 +13663,7 @@ struct xf
 	long gap;		/* the coalescing interval: 250 ms, or twice the
 				** last build when that is longer */
 	int pending, rc;
+	int relost;		/* a "restarted" reset, no frame drained since */
 	const char *why;	/* XF_RESET's reason, for the next snapshot */
 	unsigned long woke, timed;	/* 9.5's no-timer seam */
 };
@@ -13337,6 +13713,7 @@ static void
 xf_watch_conn(struct xf *f, int s)
 {
 	f->conn = s;
+	memset(&f->rd, 0, sizeof f->rd);	/* a new connection: no old EOF */
 #ifndef __linux__
 	{
 		struct kevent ev;
@@ -13526,8 +13903,30 @@ xf_drain(struct xf *f)
 		return 0;
 	while ((rc = ctl_next_frame(f->conn, &f->rd, 0, &type, payload,
 	                            &len)) == 1)
+	{
 		wake |= type == MSG_RING_WAKE;
+		f->relost = 0;	/* the master spoke after the snapshot */
+	}
 	return rc < 0 ? -1 : wake;
+}
+
+/* The master's connection dropped: a --restart when a master answers on
+** the socket again (its new image), so a reset and a new snapshot (QA
+** 1.65.0 LOW-V27); else the session ended, exit 0. A second loss with no
+** frame drained since the last such reset ends it too: a master that
+** answers but keeps hanging up (an old image, a refused subscription)
+** must not loop us through snapshots for ever. */
+static int
+xf_lost(struct xf *f)
+{
+	struct cmd_info ci;
+
+	if (f->relost || cmd_query(f->t->sock, &ci) != 0)
+		return 0;
+	cmd_info_free(&ci);
+	f->relost = 1;
+	f->why = "restarted";
+	return XF_RESET;
 }
 
 /* A write failed: the reader left (EPIPE, exit 0), else 3. */
@@ -13919,12 +14318,16 @@ read:
 			break;
 		if (ev & XE_CONN)
 		{
-			if ((r = xf_drain(f)) < 0)
-				break;	/* the master exited */
-			/* a wake: re-armed by a header read, then the question */
-			if (r && (ring_fetch_rd(f->conn, &f->rd, DCH_RING_F_SUB, NULL,
-			                        &rs, NULL, NULL) == -3 || xf_drain(f) < 0))
+			/* a wake: re-armed by a header read, then the question;
+			** a hang-up is the master exiting, or a --restart */
+			if ((r = xf_drain(f)) < 0 ||
+			    (r && (ring_fetch_rd(f->conn, &f->rd, DCH_RING_F_SUB,
+			                         NULL, &rs, NULL, NULL) == -3 ||
+			           xf_drain(f) < 0)))
+			{
+				rc = xf_lost(f);
 				break;
+			}
 			if (r)
 				ev |= XE_ROT;
 		}
@@ -14209,7 +14612,10 @@ xf_shell(struct xf *f, const char *label, int first)
 		if ((ev & XE_CONN) && (r = xf_drain(f)) != 0)
 		{
 			if (r < 0)
-				break;	/* the session ended, or --restart */
+			{
+				rc = xf_lost(f);	/* it ended, or --restart */
+				break;
+			}
 			f->pending = 1;
 		}
 		if ((was.status & DCH_RING_S_PAUSED) && !f->pending &&
@@ -14221,8 +14627,10 @@ xf_shell(struct xf *f, const char *label, int first)
 		f->pending = 0;
 		if ((fr = xf_sb_build(f, b, label)) != 0)
 		{
-			/* hung up mid-batch: the session ended (3.3: exit 0) */
-			rc = fr == -1 || (fr == -3 && xf_gone(t)) ? 0 : xr_failed();
+			/* hung up mid-batch: the session ended (3.3: exit 0),
+			** or a --restart */
+			rc = fr == -1 || (fr == -3 && xf_gone(t)) ? xf_lost(f)
+			     : xr_failed();
 			break;
 		}
 		if (!(b->rs.status & DCH_RING_S_SUB))
@@ -14456,20 +14864,6 @@ xray_view(const char *n)
 	return rc;
 }
 
-/* Inside a bracketed paste after the n bytes at c (#230): in, then the last
-** ESC[200~ (1) or ESC[201~ (0) in them. Pure. */
-static int
-xv_paste_in(const unsigned char *c, size_t n, int in)
-{
-	size_t i;
-
-	for (i = 0; i + 6 <= n; i++)
-		if (!memcmp(c + i, "\033[20", 4) && c[i + 5] == '~' &&
-		    (c[i + 4] == '0' || c[i + 4] == '1'))
-			in = c[i + 4] == '0';
-	return in;
-}
-
 /* The in-attach X-ray chord's view (#187), in attach.c's child: this
 ** session's, opened on Refs (#294); a remote attach's is host:name's (#189),
 ** --host's host put in front. A failure is said and waits for a key: the
@@ -14478,12 +14872,7 @@ static int
 attach_xray_view(void)
 {
 	char n[DCH_RHOST_MAX + sizeof session_name];
-	unsigned char c[4096 + 5];
-	struct pollfd p = { STDIN_FILENO, POLLIN, 0 };
-	long long t0 = 0;
-	size_t k = 0;
-	ssize_t r;
-	int rc, in = 0;
+	int rc;
 
 	xv_tab = 1;
 	snprintf(n, sizeof n, "%s%s%s", remote_host ? remote_host : "",
@@ -14494,36 +14883,18 @@ attach_xray_view(void)
 	if (rc != 0)
 	{
 		tw(STDERR_FILENO, "\r(any key: back to the session)");
-		/* the any key is the whole read and what follows it within
-		** 100 ms (1 s inside a bracketed paste, to its end): an arrow
-		** key, a UTF-8 character or a paste of any size, none of it
-		** for the session (LOW-R8, #230). The last 5 bytes carry over
-		** for a marker cut across two reads. shortcut: a paste
-		** paused longer than that, or still coming 2 s on, leaves its
-		** rest to the session; a clock-free end needs the paste's
-		** own end marker, which an unbracketed paste does not have */
-		while ((r = read(STDIN_FILENO, c + k, sizeof c - k)) > 0)
-		{
-			if (!t0)
-				t0 = xr_now_ms();
-			k += (size_t)r;
-			in = xv_paste_in(c, k, in);
-			if (k > 5)
-			{
-				memmove(c, c + k - 5, 5);
-				k = 5;
-			}
-			if (xr_now_ms() - t0 > 2000 ||
-			    poll(&p, 1, in ? 1000 : 100) <= 0)
-				break;
-		}
+		/* the any key and what follows it, none of it for the session
+		** (LOW-R8, #230) */
+		xv_drop_keys(STDIN_FILENO, 1);
 	}
-	return rc;
+	/* left with o: the attach drops a held o's repeats (#331) */
+	return rc == 0 && xv_go[0] ? ATTACH_XRAY_OPENED : rc;
 }
 
 /* `dch --xray <n> [--json] [--clear|--follow]`, `--ref <text> [--scope
 ** session|project|all] [--full] [--budget-ms <ms>] --json`, `--search <text>
-** --json` (#297) and `--chapter <anchor> --json` (spec 3.1, 3.3-3.5): flags
+** --json` (#297), `--memory --json` (#322) and `--chapter <anchor> --json`
+** (spec 3.1, 3.3-3.5): flags
 ** in any order, each once;
 ** `dch --xray <n>` alone is the view (#175, xray_view; a host:name's too,
 ** #188, each query over its own ctl connection). A
@@ -14537,7 +14908,7 @@ xray_main(int argc, char **argv)
 	const char *n = NULL, *ref = NULL, *scope = NULL, *budget = NULL, *e;
 	const char *chapter = NULL, *search = NULL;
 	int json = 0, clear = 0, full = 0, follow = 0, k, rc, nr, ni = 0;
-	int requests = 0;
+	int requests = 0, tasks = 0, memory = 0;
 	struct hrec *r = NULL;
 	struct xr_target t;
 	struct xr_refq q;
@@ -14546,13 +14917,13 @@ xray_main(int argc, char **argv)
 	xr_t0 = xr_now_ms();
 	xr_noclock = getenv("DCH_XRAY_NOCLOCK") != NULL;	/* tests only */
 	/* tests only: 3.8's --ref caps lowered, never raised (files, bytes,
-	** ms, the per-file head and tail) */
+	** ms, the per-file head and tail, light's cwd walk) */
 	if ((e = getenv("DCH_XRAY_CAPS")))
 	{
-		unsigned long long c[5] = {0};
+		unsigned long long c[6] = {0};
 
-		(void)sscanf(e, "%llu:%llu:%llu:%llu:%llu", &c[0], &c[1], &c[2],
-		             &c[3], &c[4]);
+		(void)sscanf(e, "%llu:%llu:%llu:%llu:%llu:%llu", &c[0], &c[1],
+		             &c[2], &c[3], &c[4], &c[5]);
 		if (c[0] && c[0] < xr_lim.files)
 			xr_lim.files = c[0];
 		if (c[1] && c[1] < xr_lim.bytes)
@@ -14563,6 +14934,8 @@ xray_main(int argc, char **argv)
 			xr_lim.head = c[3];
 		if (c[4] && c[4] < xr_lim.tail)
 			xr_lim.tail = c[4];
+		if (c[5] && c[5] < xr_lim.cwd)
+			xr_lim.cwd = c[5];
 	}
 	for (k = 0; k < argc; k++)
 	{
@@ -14584,6 +14957,10 @@ xray_main(int argc, char **argv)
 			follow = 1;
 		else if (!strcmp(argv[k], "--requests") && !requests)
 			requests = 1;
+		else if (!strcmp(argv[k], "--tasks") && !tasks)
+			tasks = 1;
+		else if (!strcmp(argv[k], "--memory") && !memory)
+			memory = 1;
 		else if (argv[k][0] == '-' && argv[k][1])
 		{
 			fprintf(stderr, "dch: bad usage: %s%s\n", argv[k],
@@ -14592,7 +14969,9 @@ xray_main(int argc, char **argv)
 			           !strcmp(argv[k], "--clear") ||
 			           !strcmp(argv[k], "--full") ||
 			           !strcmp(argv[k], "--follow") ||
-			           !strcmp(argv[k], "--requests")) ? " twice"
+			           !strcmp(argv[k], "--requests") ||
+			           !strcmp(argv[k], "--tasks") ||
+			           !strcmp(argv[k], "--memory")) ? " twice"
 			        : " is not an --xray flag of this dch");
 			return 2;
 		}
@@ -14624,6 +15003,20 @@ xray_main(int argc, char **argv)
 		        : "--follow");
 		return 2;
 	}
+	if (tasks && (ref || search || chapter || clear || follow))
+	{
+		fprintf(stderr, "dch: bad usage: --tasks and %s\n",
+		        ref ? "--ref" : search ? "--search" : chapter ? "--chapter"
+		        : clear ? "--clear" : "--follow");
+		return 2;
+	}
+	if (memory && (ref || chapter || clear || follow || search || tasks))
+	{
+		fprintf(stderr, "dch: bad usage: --memory and %s\n",
+		        ref ? "--ref" : chapter ? "--chapter" : clear ? "--clear"
+		        : follow ? "--follow" : search ? "--search" : "--tasks");
+		return 2;
+	}
 	if (follow && (ref || clear))
 	{
 		fprintf(stderr, "dch: bad usage: --follow and %s\n",
@@ -14646,7 +15039,7 @@ xray_main(int argc, char **argv)
 		/* #158, spec 4.3: each request's flags come on stdin; a local
 		** session takes one dch --xray per request (K4.1) */
 		if (!json || ref || chapter || clear || follow || scope || full ||
-		    budget || search)
+		    budget || search || tasks || memory)
 		{
 			fputs("dch: bad usage: --requests takes host:name and --json, "
 			      "nothing else\n", stderr);
@@ -14662,14 +15055,17 @@ xray_main(int argc, char **argv)
 	}
 	/* "-": the text on stdin, as dch serve hands it to its ctl child, never
 	** in the host's ps (LOW-XN1). A terminal's "-" or a host:name's stays
-	** 3.1's error; a bad read is "" for it */
-	if (!isatty(STDIN_FILENO) && !name_is_remote(n))
+	** 3.1's error; a bad read is "" for it. Only serve's child (it sets
+	** DCH_XRAY_STDIN) reads: a user's own "-" never blocks on a pipe */
+	if (getenv("DCH_XRAY_STDIN"))
 	{
 		static char tb[257];
 		const char **v = search && !strcmp(search, "-") ? &search
 		                 : ref && !strcmp(ref, "-") ? &ref : NULL;
 
-		if (v && !(*v = ctl_text_read(STDIN_FILENO, tb)))
+		unsetenv("DCH_XRAY_STDIN");
+		if (v && !isatty(STDIN_FILENO) && !name_is_remote(n) &&
+		    !(*v = ctl_text_read(STDIN_FILENO, tb)))
 			*v = "";
 	}
 	/* the value rules (3.1), in the table's order */
@@ -14730,7 +15126,8 @@ xray_main(int argc, char **argv)
 	q.scope = !scope || !strcmp(scope, "project") ? 1
 	          : !strcmp(scope, "all") ? 2 : 0;
 	/* the view (#175): `--xray <n>` alone */
-	if (!json && (ref || chapter || clear || follow || search))
+	if (!json && (ref || chapter || clear || follow || search || tasks ||
+	              memory))
 	{
 		fputs("dch: bad usage: --json is required (the --xray view takes "
 		      "no flag)\n", stderr);
@@ -14751,7 +15148,7 @@ xray_main(int argc, char **argv)
 			return rc;
 		attach_route = route;
 		snprintf(session_name, sizeof session_name, "%s", xv_go);
-		attach_only = remote_ok = 1;
+		attach_only = remote_ok = attach_drop_o = 1;	/* #331 */
 		return attach_with_switch(dch_exe, 1, 1, NULL, 0, 0);
 	}
 	/* SIGPIPE ignored: a failed socket write to the master exits 1 with
@@ -14764,6 +15161,8 @@ xray_main(int argc, char **argv)
 	if (rc == 0)
 		rc = clear ? xr_clear(&t) : follow ? xr_follow(&t)
 		     : chapter ? xr_chapter(&t, chapter)
+		     : tasks ? xr_tasks_q(&t)
+		     : memory ? xr_memory(&t)
 		     : xr_json(&t, ref || search ? &q : NULL, 0);
 	hrec_free(r, nr);
 	return rc;

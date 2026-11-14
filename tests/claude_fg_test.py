@@ -16,12 +16,19 @@ process group of its own, #312): claude_foreground true and --say reaches
 it; suspended inside script's bash, --say fails not_foreground and the
 shell's prompt-shaped text is not answered; after fg, auto-allow answers the
 fake's prompt (#318); with script itself stopped, claude_foreground is false
-and nothing is answered; after fg, --stop is not refused. On dch-lite (no
-mirror) the auto-allow checks are skipped.
+and nothing is answered; after fg claude_foreground follows its terminal's
+mode (macOS: bash put its line-buffered modes back and script does not set
+raw again, so false, and --stop is refused). Then a pty wrapper that never reads the
+keyboard (plain unbuffer's shape, MED-AA1): claude_foreground false, its
+prompt not answered, --say fails not_foreground, and once it exits the shell
+finds nothing typed; the same wrapper forwarding the keyboard (-p, raw) is
+in front, answered, and --stop is not refused. On dch-lite (no mirror) the
+auto-allow checks are skipped.
 
 Run:  python3 tests/claude_fg_test.py        (uses ./dch)
 """
-import json, os, shutil, signal, stat, subprocess, sys, tempfile, time
+import json, os, shutil, signal, stat, subprocess, sys, tempfile, termios
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
@@ -37,6 +44,38 @@ def dialog(body):
         " Esc to cancel · Tab to amend"]
 
 
+PTYWRAP = r'''#!/usr/bin/env python3
+"""ptywrap [-p] cmd...: cmd on a pty of its own, its output copied out.
+-p forwards the keyboard with the terminal raw, as script(1) and unbuffer -p
+do; without it nothing reads the keyboard, as plain unbuffer."""
+import fcntl, os, pty, select, sys, termios, tty
+fwd = sys.argv[1] == "-p"
+pid, fd = pty.fork()
+if pid == 0:
+    os.execvp(sys.argv[1 + fwd], sys.argv[1 + fwd:])
+fcntl.ioctl(fd, termios.TIOCSWINSZ,
+            fcntl.ioctl(0, termios.TIOCGWINSZ, b"\0" * 8))
+if fwd:
+    saved = termios.tcgetattr(0)
+    tty.setraw(0)
+try:
+    while True:
+        r = select.select([fd] + [0] * fwd, [], [])[0]
+        if fd in r:
+            try:
+                b = os.read(fd, 4096)
+            except OSError:
+                break
+            if not b:
+                break
+            os.write(1, b)
+        if 0 in r:
+            os.write(fd, os.read(0, 4096))
+finally:
+    if fwd:
+        termios.tcsetattr(0, termios.TCSAFLUSH, saved)
+    os.waitpid(pid, 0)
+'''
 SHELL_DLG = dialog(("   rm -rf build", "   Clean the build tree"))
 FAKE_DLG = dialog(("   swift build", "   Build it"))
 
@@ -86,7 +125,7 @@ def main():
                       PATH=bindir + os.pathsep + os.environ["PATH"])
     os.chdir(tmp)
     n = "fg" + TAG
-    fails, fpid, spid = 0, None, None
+    fails, fpid, spid, fakes, cooked = 0, None, None, [], False
 
     def check(msg, cond):
         nonlocal fails
@@ -125,6 +164,17 @@ def main():
     def ps(p, field):
         return subprocess.run(["ps", "-o", field + "=", "-p", str(p)],
                               capture_output=True, text=True).stdout.strip()
+
+    def line_buffered(p):
+        """p's terminal is in canonical mode: a wrapper there reads no key."""
+        tt = ps(p, "tt")
+        fd = os.open("/dev/" + ("tty" + tt if sys.platform == "darwin"
+                                else tt), os.O_RDONLY | os.O_NOCTTY |
+                     os.O_NONBLOCK)
+        try:
+            return bool(termios.tcgetattr(fd)[3] & termios.ICANON)
+        finally:
+            os.close(fd)
 
     def script_of(p):
         """The script(1) above p (Linux puts an sh -c in between)."""
@@ -341,18 +391,103 @@ def main():
                             5))
                 shell_dlg_unanswered("script suspended")
                 check("script suspended: the fake got no key", keys() == k)
+                # bash put its own line-buffered modes back when script
+                # stopped, and script does not set raw again on SIGCONT:
+                # a "1" would wait in that line for the shell (MED-AA1)
+                sc = script_of(spid)
                 send("fg")
-                until(lambda: row().get("claude_foreground") is True, 10)
+                until(lambda: "+" in ps(sc, "stat"), 10)
+                cooked = line_buffered(sc)
+                check("script resumed by fg: claude_foreground %s, its "
+                      "terminal %s" % (not cooked, "line-buffered" if cooked
+                                       else "raw"),
+                      "+" in ps(sc, "stat") and until(
+                          lambda: row().get("claude_foreground") is
+                          (not cooked), 5))
             r = run("--stop", n, "--json", timeout=90)
-            check("under script: --stop is not refused not_foreground",
-                  result(r).get("reason") != "not_foreground")
+            check("under script: --stop %s not_foreground" % (
+                  "is refused" if cooked else "is not refused"),
+                  (result(r).get("reason") == "not_foreground") == cooked)
+
+        # --- a pty wrapper that never reads the keyboard (MED-AA1: plain
+        # unbuffer, expect without interact): its terminal stays
+        # line-buffered and what is typed there waits for the shell ---
+        wrapper = os.path.join(bindir, "ptywrap")
+        with open(wrapper, "w") as f:
+            f.write(PTYWRAP)
+        os.chmod(wrapper, 0o755)
+        run("-k", n)
+        n = "fw" + TAG
+        setctl()
+        subprocess.run([DCH, "--spawn", n, "--size", "100x30", "bash",
+                        "--norc", "--noprofile", "-i"], capture_output=True,
+                       check=True, env=dict(os.environ, DCH_DEBUG=trace))
+        until(lambda: "$" in screen(), 10)
+        send("ptywrap claude")
+        st = until(lambda: [e for e in events() if e["ev"] == "start"], 15)
+        wpid = st[0]["pid"] if st else None
+        fakes.append(wpid)
+        until(lambda: lite or "auto mode on" in screen(), 10)
+        r = until(lambda: row().get("claude_session_id") and row(), 10)
+        check("plain wrapper: claude_foreground false",
+              wpid and r and r.get("claude_foreground") is False)
+        if not lite:
+            setctl(screen=FAKE_DLG)
+            gone = "auto-allow: claude %s not in front" % wpid
+
+            def refused():
+                try:
+                    with open(trace) as f:
+                        return gone in f.read()
+                except OSError:
+                    return False
+            check("plain wrapper: auto-allow leaves the fake's prompt alone "
+                  "(no \"1\" typed, auto_allowed null)",
+                  until(refused, 15) and row().get("auto_allowed") is None)
+        mark = os.path.join(tmp, "SAYRAN")
+        r = run("--say", n, "--json", "--", "say-%s\ntouch %s\n" % (TAG, mark))
+        check("plain wrapper: --say fails not_foreground, nothing typed",
+              result(r).get("reason") == "not_foreground" and
+              "say-" + TAG not in screen())
+        os.kill(wpid, signal.SIGTERM)    # the wrapper exits with it
+        until(lambda: lite or screen().rstrip().endswith("$"), 10)
+        run("--send", n, "echo END-$((6*7))\r")
+        check("plain wrapper: once it exits the shell ran nothing typed",
+              (lite or until(lambda: "END-42" in screen(), 10)) and
+              not os.path.exists(mark) and "say-" + TAG not in screen())
+
+        # --- the same wrapper forwarding the keyboard (-p: raw, as
+        # script and unbuffer -p): in front, verbs reach it ---
+        setctl()
+        send("ptywrap -p claude")
+        st = until(lambda: [e for e in events() if e["ev"] == "start"
+                            and e["pid"] != wpid], 15)
+        wpid = st[0]["pid"] if st else None
+        fakes.append(wpid)
+        until(lambda: lite or "auto mode on" in screen(), 10)
+        r = until(lambda: row().get("claude_foreground") is True and row(), 10)
+        check("forwarding wrapper: claude_foreground true", wpid and r)
+        r = run("--say", n, "--json", "--", "hello-fwd")
+        check("forwarding wrapper: --say reaches the running Claude",
+              result(r).get("reason") != "not_foreground" and
+              (lite or until(lambda: "hello-fwd"
+              in [e.get("text") for e in events()
+                  if e["ev"] in ("line", "turn")], 5)))
+        if not lite:
+            setctl(screen=FAKE_DLG)
+            answered("forwarding wrapper: auto-allow answers the running "
+                     "Claude's prompt with 1", wpid)
+            setctl()
+        r = run("--stop", n, "--json", timeout=90)
+        check("forwarding wrapper: --stop is not refused not_foreground",
+              result(r).get("reason") != "not_foreground")
     except Exception:
         import traceback
         traceback.print_exc()
         fails += 1
     run("-k", n)
     time.sleep(0.3)
-    for p in (fpid, spid):  # safety net: only the fakes this test started
+    for p in [fpid, spid] + fakes:  # safety net: only the fakes started here
         try:
             if p:
                 os.kill(p, signal.SIGKILL)

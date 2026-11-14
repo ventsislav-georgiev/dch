@@ -45,10 +45,27 @@ static volatile sig_atomic_t want_rearm;
 ** itself (bg then fg, a ^Z while it starts, a kill -TSTP) leaves the
 ** terminal in the shell's modes. Set by handler, checked in the loops. */
 static volatile sig_atomic_t want_cont;
-/* 1 while the attach's raw mode is on the terminal: term_raw sets it,
-** restore_term clears it. A SIGTSTP then puts the shell's modes back
-** (QA 1.63.0 MED-V14). */
-static volatile sig_atomic_t raw_on;
+/* on_sigcont writes a byte here: a SIGCONT after a SIGSTOP does not end
+** the select it stopped in (macOS), the fg left the shell's cooked modes
+** on, and no key would wake it (QA 1.65.0 LOW-V26) */
+static int cont_pipe[2] = {-1, -1};
+/* The terminal a raw mode is on, -1 while none is, and the modes a SIGTSTP
+** puts back on it first (QA 1.63.0 MED-V14): the attach's (term_raw arms
+** it, restore_term disarms it once its own restore is done, LOW-V22) or
+** the picker's (tty_stop_arm, LOW-V24). */
+static volatile sig_atomic_t stop_fd = -1;
+static const struct termios *volatile stop_term;
+
+/* fd off first, on last: a SIGTSTP in between sees no tty, never a tty
+** with the other one's modes or none */
+void
+tty_stop_arm(int fd, const struct termios *t)
+{
+	stop_fd = -1;
+	stop_term = t;
+	if (t)
+		stop_fd = fd;
+}
 
 /*
 ** Restore terminal + reset modes inner program may have left on (mouse
@@ -77,8 +94,11 @@ restore_term(void)
 	** stays the view's */
 	if (getpid() != term_pid)
 		return;
-	raw_on = 0;
+	/* disarmed after: a SIGTSTP that cuts the drain short (a terminal
+	** reading nothing) puts these modes on itself (QA 1.65.0 LOW-V22) */
+	dch_trace("client restore");
 	tcsetattr(0, TCSADRAIN, &orig_term);
+	stop_fd = -1;
 
 	/* \e[?25h cursor on; \e[?100[0236]l + \e[?101[56]l mouse tracking off;
 	** \e[?1004l focus-event reporting off; \e[?2004l bracketed paste off;
@@ -110,6 +130,8 @@ int attach_end_back;
 const char *(*attach_lost)(int *code);
 int (*attach_detached)(void);
 int (*attach_xray)(void);
+int attach_drop_o;
+static long long drop_till;	/* mono_us; 0: o's repeats not dropped */
 
 /* A remote attach's socket closed: when the link (not the session) ended,
 ** say why on a restored terminal and exit with the hook's code. */
@@ -224,8 +246,13 @@ on_sigurg(ATTRIBUTE_UNUSED int sig)
 static RETSIGTYPE
 on_sigcont(ATTRIBUTE_UNUSED int sig)
 {
+	int e = errno;
+
 	signal(SIGCONT, on_sigcont);
 	want_cont = 1;
+	if (cont_pipe[1] >= 0)
+		(void)!write(cont_pipe[1], "", 1);
+	errno = e;
 }
 
 /* SIGTSTP: a stop the client did not make itself (a ^Z while it starts, a
@@ -239,11 +266,12 @@ on_sigcont(ATTRIBUTE_UNUSED int sig)
 static RETSIGTYPE
 on_sigtstp(ATTRIBUTE_UNUSED int sig)
 {
-	int e = errno;
+	int e = errno, fd = stop_fd;
+	const struct termios *t = stop_term;
 	sigset_t ss;
 
-	if (raw_on && tcgetpgrp(0) == getpgrp())
-		tcsetattr(0, TCSANOW, &orig_term);
+	if (fd >= 0 && t && tcgetpgrp(fd) == getpgrp())
+		tcsetattr(fd, TCSANOW, t);
 	signal(SIGTSTP, SIG_DFL);
 	sigemptyset(&ss);
 	sigaddset(&ss, SIGTSTP);
@@ -251,6 +279,30 @@ on_sigtstp(ATTRIBUTE_UNUSED int sig)
 	raise(SIGTSTP);
 	signal(SIGTSTP, on_sigtstp);
 	errno = e;
+}
+
+void
+tty_stop_handlers(void)
+{
+	int k;
+
+	if (cont_pipe[0] < 0 && pipe(cont_pipe) == 0)
+		for (k = 0; k < 2; k++)
+		{
+			fcntl(cont_pipe[k], F_SETFL, O_NONBLOCK);
+			fcntl(cont_pipe[k], F_SETFD, FD_CLOEXEC);
+		}
+	signal(SIGCONT, on_sigcont);
+	signal(SIGTSTP, on_sigtstp);
+}
+
+int
+tty_continued(void)
+{
+	if (!want_cont)
+		return 0;
+	want_cont = 0;
+	return 1;
 }
 
 /* Puts the attach's raw mode on the terminal (LOW-V9). A stop inside the
@@ -278,7 +330,7 @@ term_raw(void)
 		want_cont = 0;
 		r = tcsetattr(0, TCSADRAIN, &cur_term);
 	} while ((r < 0 && errno == EINTR) || want_cont);
-	raw_on = 1;
+	tty_stop_arm(0, &orig_term);
 	sigprocmask(SIG_SETMASK, &os, NULL);
 }
 
@@ -466,6 +518,29 @@ mono_us(void)
 
 	now_us(&tv);
 	return tv.tv_sec * 1000000LL + tv.tv_usec;
+}
+
+/* The view's o (#331): a held o repeats 225 ms to 1 s after the press, past
+** the view's 100 ms pause, into the attach it opened. Leading o bytes are
+** dropped while each comes within 700 ms of the attach start or of the last
+** dropped one; any other byte, or an o after a longer gap, ends it for good
+** and goes on with the rest. Returns what is kept, moved to b's front. */
+static ssize_t
+drop_o(unsigned char *b, ssize_t n)
+{
+	long long now = mono_us();
+	ssize_t i = 0;
+
+	if (now > drop_till)
+		drop_till = 0;
+	while (drop_till && i < n && b[i] == 'o')
+		i++;
+	if (i < n)
+		drop_till = 0;
+	else if (drop_till)
+		drop_till = now + 700000;
+	memmove(b, b + i, (size_t)(n - i));
+	return n - i;
 }
 
 static int
@@ -703,7 +778,7 @@ xray_overlay(int s)
 {
 	struct packet pkt;
 	unsigned char buf[BUFSIZE];
-	int p[2], live = 1;
+	int p[2], live = 1, st = 0;
 	pid_t pid = -1;
 
 	dch_trace("client x-ray overlay");
@@ -778,11 +853,11 @@ xray_overlay(int s)
 		}
 		if (n > 0 && FD_ISSET(p[0], &rs) && read(p[0], buf, 1) == 0)
 		{
-			while (waitpid(pid, NULL, 0) < 0 && errno == EINTR)
+			while (waitpid(pid, &st, 0) < 0 && errno == EINTR)
 				;
 			break;
 		}
-		if (waitpid(pid, NULL, WNOHANG) != 0)
+		if (waitpid(pid, &st, WNOHANG) != 0)
 			break;
 		/* dch -d (SIGUSR1): the view goes first, as in die(), then
 		** the client leaves as the main loop does */
@@ -798,6 +873,8 @@ xray_overlay(int s)
 	xray_pid = 0;
 	if (p[0] >= 0)
 		close(p[0]);
+	if (WIFEXITED(st) && WEXITSTATUS(st) == ATTACH_XRAY_OPENED)
+		drop_till = mono_us() + 700000;	/* left with o (#331) */
 	term_raw();
 	inner_focus = fo_st = fpend_n = dq_n = 0;
 	if (focus_on)
@@ -1002,8 +1079,7 @@ attach_main(int noerror)
 	signal(SIGUSR1, on_sigusr1);
 	signal(SIGUSR2, on_sigusr2);
 	signal(SIGURG, on_sigurg);
-	signal(SIGCONT, on_sigcont);
-	signal(SIGTSTP, on_sigtstp);
+	tty_stop_handlers();
 	signal(SIGTTOU, SIG_DFL);	/* term_raw never sets modes from the bg */
 
 	/* Set raw mode. */
@@ -1042,6 +1118,8 @@ attach_main(int noerror)
 	write_packet_or_fail(s, &pkt);
 	dch_trace("client attached fd=%d sock=%s", s,
 	          attach_sock >= 0 ? "(remote)" : sockname);
+	drop_till = attach_drop_o ? mono_us() + 700000 : 0;	/* #331 */
+	attach_drop_o = 0;
 
 	/* Wait for things to happen */
 	while (1)
@@ -1116,10 +1194,9 @@ attach_main(int noerror)
 		** Linux more than one read) and then the end in s, read before
 		** a redraw is written to the closed socket (EPIPE, exit 1, no
 		** picker). A quiet session's redraw goes out at the first poll.
-		** After the timers, which would set their own wait. shortcut: a
-		** SIGCONT landing between this check and the select is handled
-		** at the next wake (session output, a key); a self-pipe would
-		** make it exact. */
+		** After the timers, which would set their own wait. A SIGCONT
+		** landing between this check and the select, or ending a SIGSTOP
+		** inside it, wakes it through cont_pipe (LOW-V26). */
 		if (want_cont)
 		{
 			term_raw();
@@ -1139,9 +1216,19 @@ attach_main(int noerror)
 		if (dq_n <= (int)sizeof(dq) - 3)
 			FD_SET(0, &readfds);
 		FD_SET(s, &readfds);
-		n = select(s + 1, &readfds, NULL, NULL, tvp);
+		if (cont_pipe[0] >= 0)
+			FD_SET(cont_pipe[0], &readfds);
+		n = select((s > cont_pipe[0] ? s : cont_pipe[0]) + 1, &readfds,
+		           NULL, NULL, tvp);
 		if (n < 0 && errno != EINTR && errno != EAGAIN)
 			exit(1);
+		if (n > 0 && cont_pipe[0] >= 0 &&
+		    FD_ISSET(cont_pipe[0], &readfds))
+		{
+			while (read(cont_pipe[0], buf, sizeof buf) > 0)
+				;
+			n--;	/* want_cont, set with it, is the next turn's */
+		}
 		if (cont_redraw && (n == 0 || (n > 0 && !FD_ISSET(s, &readfds))))
 		{
 			cont_redraw = 0;
@@ -1185,8 +1272,10 @@ attach_main(int noerror)
 		/* stdin activity, or a held ESC prefix that nothing completed
 		** (flush: it was due before this select, and no byte came), or
 		** delayed keys whose time came (first: they are older; stdin
-		** stays readable for the next turn). */
-		in = n > 0 && FD_ISSET(0, &readfds) && !dq_due;
+		** stays readable for the next turn). Not after a SIGCONT: the
+		** shell's cooked modes are on and the read would wait for an
+		** Enter, though select said readable (LOW-V26): raw mode first. */
+		in = n > 0 && FD_ISSET(0, &readfds) && !dq_due && !want_cont;
 		if (in || (flush && fpend_n) || dq_due)
 		{
 			ssize_t len = 0;
@@ -1223,6 +1312,8 @@ attach_main(int noerror)
 				}
 			}
 
+			if (drop_till && (len = drop_o(pkt.u.buf, len)) == 0)
+				goto keys_done;
 			pkt.len = len;
 			if (detach_pending)
 			{

@@ -267,26 +267,24 @@ typed_drop(size_t from)
 	xtl -= from;
 }
 
-/* A C with no input since its B: the shell ran a line typed ahead (queued
-** before B) when the screen from B to the cursor is a whole line the client
-** sent that no C has used; it is used up. Output that prints marks can so
-** title a block only with a line the user typed, once (#302). */
+#define ENTER(c) ((c) == '\r' || (c) == '\n')
+
+/* The screen from (bx, by) (screen coordinates) to the cursor, soft wraps
+** joined, trailing newlines and spaces cut; -1 when it cannot be read. */
 static int
-typed_ahead(void)
+scr_text(size_t bx, size_t by, char **tp, size_t *lp)
 {
 	GhosttySelection sel;
 	GhosttyPoint p;
-	size_t bx, by, l, s, i;
+	size_t l;
 	uint16_t cx = 0, cy = 0;
 	char *t;
 
-	if (!memchr(xtyped, '\r', xtl) && !memchr(xtyped, '\n', xtl))
-		return 0;
 	ghostty_terminal_get(the_term, GHOSTTY_TERMINAL_DATA_CURSOR_X, &cx);
 	ghostty_terminal_get(the_term, GHOSTTY_TERMINAL_DATA_CURSOR_Y, &cy);
-	if (alt_active() || ref_pos(xbref, &bx, &by) < 0 ||
-	    by > hist_rows() + cy || (by == hist_rows() + cy && bx > cx))
-		return 0;
+	if (alt_active() || by > hist_rows() + cy ||
+	    (by == hist_rows() + cy && bx > cx))
+		return -1;
 	memset(&sel, 0, sizeof sel);
 	sel.size = sizeof sel;
 	sel.start.size = sel.end.size = sizeof sel.start;
@@ -296,27 +294,130 @@ typed_ahead(void)
 	p.value.coordinate.y = (uint32_t)by;
 	if (ghostty_terminal_grid_ref(the_term, p, &sel.start) !=
 	    GHOSTTY_SUCCESS)
-		return 0;
+		return -1;
 	p.tag = GHOSTTY_POINT_TAG_ACTIVE;
 	p.value.coordinate.x = cx;
 	p.value.coordinate.y = cy;
 	if (ghostty_terminal_grid_ref(the_term, p, &sel.end) !=
-	    GHOSTTY_SUCCESS || format_unwrap(&sel, &t, &l) < 0)
-		return 0;
+	    GHOSTTY_SUCCESS || format_unwrap(&sel, &t, &l) < 0 || !t)
+		return -1;
 	while (l && (t[l - 1] == '\n' || t[l - 1] == ' '))
 		l--;
-	for (s = i = 0; l && i < xtl; i++)
-	{
-		if (xtyped[i] != '\r' && xtyped[i] != '\n')
-			continue;
-		if (i - s == l && !memcmp(xtyped + s, t, l))
-		{
-			typed_drop(s);
+	*tp = t;
+	*lp = l;
+	return 0;
+}
+
+/* Is typed line xtyped[s, e) (trailing blanks cut) the screen line
+** t[0, tl)? A right prompt may follow it after a space (zsh RPROMPT,
+** #335); with `any`, a prompt may come before it too (PS2, a prompt the
+** mirror saw no B of). */
+static int
+line_is(const char *t, size_t tl, size_t s, size_t e, int any)
+{
+	size_t n, p;
+
+	while (e > s && xtyped[e - 1] == ' ')
+		e--;
+	n = e - s;
+	for (p = 0; n && p + n <= tl && (!p || any); p++)
+		if ((!p || t[p - 1] == ' ') && !memcmp(t + p, xtyped + s, n) &&
+		    (p + n == tl || t[p + n] == ' '))
 			return 1;
-		}
+	return 0;
+}
+
+/* The title a flagged C carries: the lines the user typed, never text from
+** output (#335). */
+static char xcmd[sizeof xtyped];
+
+/* Typed lines xtyped[s, e) are the block's command: title, use up. */
+static size_t
+typed_take(size_t s, size_t e)
+{
+	size_t i;
+
+	for (i = s; i < e; i++)
+		xcmd[i - s] = ENTER(xtyped[i]) ? '\n' : xtyped[i];
+	typed_drop(e);
+	return e - s;
+}
+
+/* A C with no input since its B: the shell ran a line typed ahead (queued
+** before B) when the screen from B to the cursor is a whole line the client
+** sent that no C has used; it is used up. Output that prints marks can so
+** take a block only with a line the user typed, once, titled with it
+** (#302). With no B seen since the mirror started (a --restart's first
+** command, #335) the line may follow any prompt on the row above the
+** cursor. Returns the title's length, 0 for none. */
+static size_t
+typed_ahead(void)
+{
+	size_t bx = 0, by, l, s, i;
+	uint16_t cy = 0;
+	char *t;
+
+	if (!memchr(xtyped, '\r', xtl) && !memchr(xtyped, '\n', xtl))
+		return 0;
+	ghostty_terminal_get(the_term, GHOSTTY_TERMINAL_DATA_CURSOR_Y, &cy);
+	if (xbref ? ref_pos(xbref, &bx, &by) < 0 : !(by = hist_rows() + cy))
+		return 0;
+	if (!xbref)
+		by--;
+	if (scr_text(bx, by, &t, &l) < 0 || memchr(t, '\n', l))
+		return 0;
+	for (s = i = 0; i < xtl; i++)
+	{
+		if (!ENTER(xtyped[i]))
+			continue;
+		if (line_is(t, l, s, i, !xbref))
+			return typed_take(s, i);
 		s = i + 1;
 	}
 	return 0;
+}
+
+/* A C with client input since its B: the shell ran the line typed at that
+** prompt. Typed with no editing key, those lines must be the screen from B
+** on (each later one after a PS2), and title the block; a program holding
+** a B open while the user types gets nothing, and the line stays for the
+** shell (#335). A line with an editing key (arrows, tab, backspace, a
+** control key) cannot be checked against the screen: it flags as before,
+** titled by the screen. Returns -1 not flagged, else the title's length. */
+static long
+typed_in(void)
+{
+	size_t ls = xtb, s, e, k, bx, by, l, st, n;
+	char *t;
+
+	while (ls && !ENTER(xtyped[ls - 1]))
+		ls--;
+	for (e = ls; e < xtl; e++)
+		if (((unsigned char)xtyped[e] < ' ' && !ENTER(xtyped[e])) ||
+		    xtyped[e] == 0x7f)
+		{
+			typed_drop(xtb);
+			return 0;
+		}
+	if (ref_pos(xbref, &bx, &by) < 0 || scr_text(bx, by, &t, &l) < 0)
+		return -1;
+	/* the line may start before B (typed ahead in part) or at it */
+	for (st = ls;; st = xtb)
+	{
+		for (s = st, k = 0; k <= l; s = e + 1)
+		{
+			n = memchr(t + k, '\n', l - k) ?
+			    (size_t)((char *)memchr(t + k, '\n', l - k) - t) : l;
+			for (e = s; e < xtl && !ENTER(xtyped[e]); e++)
+				;
+			if (e == xtl || !line_is(t + k, n - k, s, e, k > 0))
+				break;
+			if ((k = n + 1) > l)
+				return (long)typed_take(st, e);
+		}
+		if (st == xtb)
+			return -1;
+	}
 }
 
 /* GHOSTTY_TERMINAL_OPT_SEMANTIC_PROMPT: the mirror's own (fragment-safe)
@@ -365,15 +466,21 @@ on_prompt(GhosttyTerminal t, void *ud, const GhosttyTerminalSemanticPrompt *ev)
 		break;
 	case GHOSTTY_SEMANTIC_PROMPT_OUTPUT_START:
 		snprintf(head, sizeof head, "C");
+		/* the C's own cmdline= is output's to forge: the title is
+		** only ever what the user typed (#335) */
 		if (xb_open && xinput)
 		{
-			flags |= RING_F_INPUT;
-			typed_drop(xtb);
+			long r = typed_in();
+
+			if (r >= 0)
+			{
+				flags |= RING_F_INPUT;
+				cl = (size_t)r;
+			}
 		}
-		else if (xb_open && typed_ahead())
+		else if ((xb_open || !xbref) && (cl = typed_ahead()))
 			flags |= RING_F_INPUT;
 		xb_open = 0;
-		cl = ev->command.ptr ? ev->command.len : 0;
 		break;
 	case GHOSTTY_SEMANTIC_PROMPT_COMMAND_END:
 		if (ev->has_exit_code)
@@ -390,8 +497,6 @@ on_prompt(GhosttyTerminal t, void *ud, const GhosttyTerminalSemanticPrompt *ev)
 	}
 	if (xpaused && !xresume)
 		return;
-	if (cl > RING_TEXT_MAX)
-		cl = RING_TEXT_MAX;	/* ring_append cuts it on a boundary */
 	hl = strlen(head);
 	if (!(text = malloc(hl + 1 + cl)))
 		return;
@@ -399,7 +504,7 @@ on_prompt(GhosttyTerminal t, void *ud, const GhosttyTerminalSemanticPrompt *ev)
 	if (cl)
 	{
 		text[hl] = ';';
-		memcpy(text + hl + 1, ev->command.ptr, cl);
+		memcpy(text + hl + 1, xcmd, cl);
 		hl += 1 + cl;
 	}
 	/* No primary row to wait on: on the alt screen it lands now. */

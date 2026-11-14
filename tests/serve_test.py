@@ -330,7 +330,9 @@ def main():
               ["--json", "--search", "two words"],
               ["--search", "\u00e9", "--json"],
               ["--search", "s" * 200, "--json"],
-              ["--search", "--json", "--json"]]
+              ["--search", "--json", "--json"],
+              ["--memory", "--json"], ["--json", "--memory"],
+              ["--tasks", "--json"]]
         names = ["9f9f9f9f-0000-4000-8000-000000000000", "rec.json",
                  "m0123456789abcdef"]
         no = [([], "--xray needs --json (the view is client-side only)"),
@@ -343,11 +345,11 @@ def main():
               (["--ref", "#1", "--ref", "#2", "--json"], "--ref twice"),
               (["--json", "--ref"], "--ref needs a value"),
               (["--follow", "--ref", "#1", "--json"],
-               "--ref, --search, --follow, --chapter and --clear exclude "
-               "each other"),
+               "--ref, --search, --tasks, --memory, --follow, --chapter and "
+               "--clear exclude each other"),
               (["--clear", "--chapter", "a", "--json"],
-               "--ref, --search, --follow, --chapter and --clear exclude "
-               "each other"),
+               "--ref, --search, --tasks, --memory, --follow, --chapter and "
+               "--clear exclude each other"),
               (["--clear", "--full", "--json"],
                "--scope, --full and --budget-ms come with --ref"),
               (["--scope", "session", "--json"],
@@ -374,11 +376,25 @@ def main():
               (["--ref", "#1", "--scope", "", "--json"], "bad scope"),
               (["--ref", "#1", "--scope", "none", "--json"], "bad scope"),
               (["--search", "a", "--ref", "#1", "--json"],
-               "--ref, --search, --follow, --chapter and --clear exclude "
-               "each other"),
+               "--ref, --search, --tasks, --memory, --follow, --chapter and "
+               "--clear exclude each other"),
               (["--search", "ab", "--search", "cd", "--json"],
                "--search twice"),
               (["--json", "--search"], "--search needs a value"),
+              (["--memory", "--memory", "--json"], "--memory twice"),
+              (["--tasks", "--memory", "--json"],
+               "--ref, --search, --tasks, --memory, --follow, --chapter and "
+               "--clear exclude each other"),
+              (["--memory"], "--xray needs --json (the view is "
+               "client-side only)"),
+              (["--memory", "--follow", "--json"],
+               "--ref, --search, --tasks, --memory, --follow, --chapter and "
+               "--clear exclude each other"),
+              (["--memory", "--search", "ab", "--json"],
+               "--ref, --search, --tasks, --memory, --follow, --chapter and "
+               "--clear exclude each other"),
+              (["--memory", "--scope", "session", "--json"],
+               "--scope, --full and --budget-ms come with --ref"),
               (["--search", "ab", "--scope", "session", "--json"],
                "--scope, --full and --budget-ms come with --ref")]
         no += [(["--search", t, "--json"], "bad search: 2 to 200 bytes, no control character")

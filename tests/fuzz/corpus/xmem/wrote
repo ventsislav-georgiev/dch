@@ -1,0 +1,1 @@
+sed -i s/a/b/ /m/a.md 2>/dev/null > x

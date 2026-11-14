@@ -184,7 +184,8 @@ def main():
               [cfg, "auto_allow = false", "sidekick_pattern = -qa",
                "picker_sort = activity", "detach_key = detach",
                "remote_hosts = ", "focus_resize = true",
-               "xray_ring = 2M"])
+               "xray_ring = 2M", "tasks_command = ",
+               "memory_command = "])
         r = run("--config", "auto_allow")
         check("--config <key> unset: exit 1, nothing printed, no error",
               r.returncode == 1 and r.stdout == r.stderr == "")

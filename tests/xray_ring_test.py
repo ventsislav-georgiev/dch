@@ -666,8 +666,8 @@ def test_shell_init(tmp):
             m = marks(recs)
             seqm = [t for t, f in m]
             i = seqm.index("D;1") if "D;1" in seqm else -1
-            check("%s: A, B, C (input flag), D;1 for `false`" % sh,
-                  i >= 3 and seqm[i - 3:i] == ["A", "B", "C"] and
+            check("%s: A, B, C;false (input flag, titled with the typed line), D;1 for `false`" % sh,
+                  i >= 3 and seqm[i - 3:i] == ["A", "B", "C;false"] and
                   m[i - 1][1] & X.F_INPUT and m[i][1] & X.F_EXIT, m[:12])
             # --search (#297) over the ring: the typed commands as user,
             # their rows as tool, each under its command's chapter, newest

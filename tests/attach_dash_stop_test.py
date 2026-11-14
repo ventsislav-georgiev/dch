@@ -14,8 +14,17 @@ on a pty runs `dch -a`:
   (c) ^Z typed once attached: the client's own suspend (it passed before).
 
 After each stop dash's terminal is cooked (ICANON and ECHO on); after `fg` it
-is raw again and a key reaches the session with no Enter. Skipped, with the
-reason, where no dash exists.
+is raw again and a key reaches the session with no Enter. And (QA 1.65.0):
+
+  (d) kill -TSTP while the detach's restore drains output the terminal has
+      not read: the restore's modes are on before the stop (LOW-V22).
+  (e) kill -TSTP the `dch -l` picker, under dash and under bash: the shell
+      gets its modes back, and after `fg` the picker is raw and takes a q
+      with no Enter (LOW-V24).
+  (f) SIGSTOP the client under bash, which puts its own modes on: after
+      `fg` the attach is raw again and a key gets through (LOW-V26).
+
+Skipped, with the reason, where no dash exists.
 
 Run:  python3 tests/attach_dash_stop_test.py       (uses ./dch)
 """
@@ -36,7 +45,9 @@ CHILD = ("import os, tty\n"
          "while True:\n"
          "    b = os.read(0, 64)\n"
          "    if not b: break\n"
-         "    os.write(1, b'K' + b.hex().encode() + b'\\r\\n')\n")
+         "    if b == b'P': os.write(1, b'p' * 900 + b'\\r\\n')\n"
+         "    else: os.write(1, b'K' + b.hex().encode() + b'\\r\\n')\n")
+BASH = "/bin/bash" if os.access("/bin/bash", os.X_OK) else None
 KEYS = [bytes([c]) for c in b"abcdefghijklmnoprstuvwyz"]
 fails = 0
 
@@ -51,13 +62,14 @@ def check(name, ok, detail=""):
 
 
 class Dash:
-    def __init__(self, env):
+    def __init__(self, env, argv=None):
         pid, fd = pty.fork()
         if pid == 0:
             try:
                 fcntl.ioctl(0, termios.TIOCSWINSZ,
                             struct.pack("HHHH", 24, 80, 0, 0))
-                os.execve(DASH, [DASH, "-i"], env)
+                argv = argv or [DASH, "-i"]
+                os.execve(argv[0], argv, env)
             finally:
                 os._exit(127)
         os.set_inheritable(fd, False)
@@ -216,6 +228,105 @@ def case_c(env):
         sh.close()
 
 
+def case_d(env, trace):
+    what = "(d) kill -TSTP inside the detach's drain"
+    sh = Dash(env)
+    try:
+        sh.prompt(0)
+        n = sh.prompts()
+        pg = attach(sh, what)
+        if pg is None:
+            return
+        # the session's 900 bytes, left unread: the restore's TCSADRAIN
+        # waits on them until the stop
+        os.write(sh.fd, b"P")
+        out = select.select([sh.fd], [], [], 15)[0]
+        with open(trace, "rb") as f:
+            mark = len(f.read())
+        os.write(sh.fd, b"\x1c")
+        end = time.time() + 15
+        while time.time() < end:
+            with open(trace, "rb") as f:
+                if b"client restore" in f.read()[mark:]:
+                    break
+            time.sleep(0.02)
+        else:
+            out = []
+        check("%s: the detach's restore is draining" % what, out)
+        # Linux's TCSADRAIN on a pty slave does not wait for unread output:
+        # the client may be gone before the stop (#336). Strict rows run
+        # whenever the job is still there to stop.
+        try:
+            os.killpg(pg, signal.SIGTSTP)
+        except ProcessLookupError:
+            got = sh.prompt(n)
+            sh.pump(0.3)
+            check("%s: the detach ended before the stop could land, dash "
+                  "cooked (%s)" % (what, sh.modes()),
+                  got and sh.cooked(), sh.out[-200:])
+            print("skip: %s: the drain rows (this terminal's drain does not "
+                  "block)" % what)
+            return
+        got = sh.prompt(n)
+        sh.pump(0.3)
+        check("%s: the job stops, dash's terminal is cooked (%s)" %
+              (what, sh.modes()), got and sh.cooked(), sh.out[-200:])
+        n = sh.prompts()
+        os.write(sh.fd, b"fg\n")
+        got = sh.prompt(n)
+        check("%s: after fg the detach ends, dash cooked (%s)" %
+              (what, sh.modes()), got and sh.cooked(), sh.out[-200:])
+    finally:
+        sh.close()
+
+
+def case_e(env, argv, what):
+    sh = Dash(env, argv)
+    try:
+        sh.prompt(0)
+        n = sh.prompts()
+        mark = len(sh.out)
+        os.write(sh.fd, ("%s -l\n" % shlex.quote(DCH)).encode())
+        ok = sh.pump(15, lambda: sh.raw() and SESS.encode() in sh.out[mark:])
+        check("%s: the picker is up, raw" % what, ok, (sh.modes(),
+              sh.out[-200:]))
+        if not ok or sh.prompts() != n:
+            return
+        os.killpg(os.tcgetpgrp(sh.fd), signal.SIGTSTP)
+        got = sh.prompt(n)
+        sh.pump(0.3)
+        check("%s: the picker stops, the shell's terminal is cooked (%s)" %
+              (what, sh.modes()), got and sh.cooked(), sh.out[-200:])
+        n = sh.prompts()
+        os.write(sh.fd, b"fg\n")
+        ok = sh.pump(15, sh.raw)
+        check("%s: after fg the picker is raw (%s)" % (what, sh.modes()),
+              ok, sh.out[-200:])
+        os.write(sh.fd, b"q")
+        got = sh.prompt(n)
+        sh.pump(0.3)
+        check("%s: q with no Enter quits it, cooked (%s)" %
+              (what, sh.modes()), got and sh.cooked(), sh.out[-200:])
+    finally:
+        sh.close()
+
+
+def case_f(env):
+    what = "(f) SIGSTOP the client under bash"
+    sh = Dash(env, [BASH, "--norc", "--noprofile", "--noediting", "-i"])
+    try:
+        sh.prompt(0)
+        n = sh.prompts()
+        pg = attach(sh, what)
+        if pg is None:
+            return
+        os.killpg(pg, signal.SIGSTOP)
+        if stopped_then_fg(sh, n, what):
+            detach(sh, what)
+    finally:
+        sh.close()
+
+
 def main():
     if not DASH:
         print("skip: no dash on this system (/bin/dash, /usr/bin/dash)")
@@ -225,7 +336,7 @@ def main():
         return 1
     tmp = tempfile.mkdtemp(prefix="dch-dash-")
     env = dict(os.environ, DCH_SOCKET_DIR=tmp, PS1=PROMPT.decode(),
-               HOME=tmp)
+               HOME=tmp, XDG_STATE_HOME=os.path.join(tmp, "state"))
     for k in ("DCH_SESSION", "ENV"):
         env.pop(k, None)
     try:
@@ -240,6 +351,17 @@ def main():
             case_a(env, d)
         case_b(env)
         case_c(env)
+        # QA 1.65.0's rows: their own state dir (NIT-T11)
+        trace = os.path.join(tmp, "trace")
+        open(trace, "w").close()
+        env = dict(env, XDG_STATE_HOME=os.path.join(tmp, "state"),
+                   DCH_NO_REMOTE="1")
+        case_d(dict(env, DCH_DEBUG=trace, DCH_DOUBLE_TAP_MS="0"), trace)
+        case_e(env, None, "(e dash) kill -TSTP the dch -l picker")
+        if BASH:
+            case_e(env, [BASH, "--norc", "--noprofile", "--noediting",
+                         "-i"], "(e bash) kill -TSTP the dch -l picker")
+            case_f(env)
     finally:
         subprocess.run([DCH, "-k", SESS], env=env, stdin=subprocess.DEVNULL,
                        capture_output=True, timeout=30)
