@@ -2507,7 +2507,7 @@ do not retry. One code is transient and means "try again later":
 
 | `code` | When | `message` |
 | --- | --- | --- |
-| `busy` | The host is at its connection limit: 64 connections in total, or 16 from this peer. Nothing is wrong with the peer; retry with your own backoff (there is no retry-after field). | `this host is at its connection limit: try again shortly` |
+| `busy` | The host is at its connection limit: 64 connections in total, or 16 from this peer (its `--ls-json --follow` watch streams aside, up to 32 with them). Nothing is wrong with the peer; retry with your own backoff (there is no retry-after field). | `this host is at its connection limit: try again shortly` |
 
 `busy` is never remembered by the repeat-refusal cache: the next connection
 once a slot frees is served as usual. Its message says nothing about other
@@ -2854,18 +2854,23 @@ prints, as one line, and then the whole array again, one complete line and
 flushed, each time anything in it changes: a session started, ended or
 renamed, a `state`, a `stale` mark, a local row's `activity_epoch` (so a
 local session that is printing makes one array per 2 s tick). An unchanged
-list prints nothing. It
+list prints nothing, and arrays come at most one per 200 ms: changes faster
+than that are folded into the next one. It
 runs until SIGINT, SIGTERM or the reader closes the pipe, then exits 0;
-misuse (a name after it, another verb) is exit 2.
+misuse (a name after it, another verb) is exit 2. SIGINT and SIGTERM stop
+it even while its reader has stopped reading and the pipe is full; the line
+it was writing then may be cut short, and nothing comes after it.
 
 - *The first array* comes within the same 300 ms box as `--ls-json
   --remote`: a host that has not answered by then shows its cached rows,
   `"stale":true`, and the array after it is the one that has them fresh.
 - *A host whose hello lists `watch`* (`dch serve` does) is held on one
   connection: after the list, a `0x2e`
-  `{"device_id":"dch-<pid>"}`, and every `0x11` it pushes is a new look.
-  Nothing is polled there; dch serve itself looks every 2 s, so a change
-  there shows within about 2 s.
+  `{"device_id":"dch-<pid>"}`, and every `0x11` it pushes is a new look
+  (the same list again is not). Nothing is polled there; dch serve itself
+  looks every 2 s, so a change there shows within about 2 s. Each follower
+  holds that one connection to each such host; dch serve counts them apart
+  from the 16 other connections it takes from one machine (32 in all).
 - *Any other host* is probed again every 2 s, as the picker does, and the
   local rows are read again on the same tick.
 - *A host that fails* (no answer within 2 s, a dropped link, a stream that

@@ -11,11 +11,11 @@ return within a bound and still list the healthy session beside it. --read
 and --cmd of it fail at once. The verbs name it as stuck; --spawn of its
 name, --revive of it and --history --forget of it refuse and its socket and
 record stay. #269: dch -a of it fails within the bound as stuck; the picker's
-Enter on it stays in the picker and says why; dch -n of it says it is stuck
-and starts nothing over it. On Linux, through dch serve, an attach to it
-ends with that line and a 0x12 {"code":1} and leaves no client behind, and a
-client attached before the stop that detaches gets "why":"detach"
-(sock_live: stuck is live). Its master SIGKILLed, the same socket is dead
+Enter on it stays in the picker and says why; dch -n of it, and dch -E -f
+-n (dch serve's attach), say it is stuck and start nothing over it. On
+Linux, through dch serve, an attach to it ends with that line and a 0x12
+{"code":1} and leaves no client behind, and a client attached before the
+stop that detaches gets "why":"detach" (sock_live: stuck is live). Its master SIGKILLed, the same socket is dead
 and --spawn of the name starts a new one. Self-isolating (own
 XDG_RUNTIME_DIR).
 
@@ -334,12 +334,14 @@ def main():
         expect(st is not None and "not accepting connections" in out,
                "the picker's Enter on it stays in the picker, says why "
                "(%.1fs)%s" % (dt, "" if st is not None else ": HUNG"))
-        st, out, dt = on_pty(["-n", stk])
-        expect(st is not None and os.waitstatus_to_exitcode(st) == 1 and
-               STUCK in out,
-               "dch -n of it: says it is stuck in %.1fs, starts "
-               "nothing: %r%s" % (dt, out[-200:], "" if st is not None
-                                  else ": HUNG"))
+        # -E -f -n: dch serve's remote attach (QA 1.62.0 LOW-R4)
+        for args in (["-n", stk], ["-E", "-f", "-n", stk]):
+            st, out, dt = on_pty(args)
+            expect(st is not None and os.waitstatus_to_exitcode(st) == 1
+                   and STUCK in out,
+                   "dch %s of it: says it is stuck in %.1fs, starts "
+                   "nothing: %r%s" % (" ".join(args[:-1]), dt, out[-200:],
+                                      "" if st is not None else ": HUNG"))
         if LINUX:
             # the serve client attached before the stop detaches: its
             # session is stuck, not gone

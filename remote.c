@@ -4484,6 +4484,9 @@ dch_remote_requests(char *n)
 ** out only when it differs from the last one.
 */
 #define RM_QUIET_MS 35000	/* a watch stream's 0x14 comes after 25 s */
+#define FL_GAP_MS 200		/* least time between two looks: a host that
+				** floods 0x11s costs one per gap (QA 1.62.0
+				** LOW-R2) */
 
 struct fhost
 {
@@ -4525,11 +4528,26 @@ fh_close(struct fhost *h)
 	h->live = 0;
 }
 
+/* a and b list the same sessions, the same way: their at aside */
+static int
+rows_same(const struct rlist *a, const struct rlist *b)
+{
+	int i;
+
+	for (i = 0; a->n == b->n && i < a->n; i++)
+		if (strcmp(a->v[i].name, b->v[i].name) ||
+		    strcmp(a->v[i].alias, b->v[i].alias) ||
+		    strcmp(a->v[i].state, b->v[i].state) ||
+		    strcmp(a->v[i].cwd, b->v[i].cwd))
+			return 0;
+	return a->n == b->n;
+}
+
 /* The frames of h's 0x2e stream in h->p.in, as far as they have come: a
 ** 0x11 is its rows, a 0x14 a beat, a streamed type skipped. A 0x13, a
 ** frame over the limit or a list that is not an array ends the stream
 ** (p.st PR_REFUSED for a coded 0x13, else PR_FAIL; why said). 1 when its
-** rows changed or it ended. */
+** rows changed (the same rows again are a beat) or it ended. */
 static int
 fh_frames(struct fhost *h, long long now, long long quiet)
 {
@@ -4574,9 +4592,9 @@ fh_frames(struct fhost *h, long long now, long long quiet)
 			}
 			else
 			{
+				rc |= !rows_same(&l, &h->rows);
 				free(h->rows.v);
 				h->rows = l;
-				rc = 1;
 				continue;
 			}
 		}
@@ -4826,7 +4844,8 @@ fl_look(const struct fhost *v, int n, struct sb *last, int save,
 		long long left = end - now_ms();
 		ssize_t k;
 
-		if (left <= 0 || (poll(&pf, 1, (int)left) < 0 && errno != EINTR))
+		if (left <= 0 || g_ctl_sig ||
+		    (poll(&pf, 1, (int)left) < 0 && errno != EINTR))
 		{
 			kill(pid, SIGKILL);	/* a wedged master: next tick */
 			break;
@@ -4846,8 +4865,20 @@ fl_look(const struct fhost *v, int n, struct sb *last, int save,
 	    b.n > 2 && b.p[0] == '[' && b.p[b.n - 1] == '\n' &&
 	    (b.n != last->n || memcmp(b.p, last->p, b.n)))
 	{
-		if (fwrite(b.p, 1, b.n, stdout) != b.n || fflush(stdout) != 0)
-			rc = -1;	/* the reader is gone */
+		size_t off = 0;
+		ssize_t k;
+
+		/* write(2), not stdio: a SIGINT or SIGTERM while a reader that
+		** stopped reading holds the pipe full ends the write (no
+		** SA_RESTART) and leaves nothing buffered for exit to flush;
+		** a line cut there is the last output (QA 1.62.0 MED-R1) */
+		while (off < b.n && !g_ctl_sig)
+			if ((k = write(1, b.p + off, b.n - off)) > 0)
+				off += (size_t)k;
+			else if (k == 0 || errno != EINTR)
+				break;
+		if (off < b.n)
+			rc = -1;	/* the reader is gone, or a signal */
 		free(last->p);
 		*last = b;
 		return rc;
@@ -4863,8 +4894,9 @@ dch_remote_follow(int remote, struct dch_rrow **out)
 	struct sb last = {0};
 	long long every = env_ms("DCH_REMOTE_EVERY_MS", RM_EVERY_MS);
 	long long quiet = env_ms("DCH_REMOTE_QUIET_MS", RM_QUIET_MS);
-	long long start = now_ms(), tick = start, now;
+	long long start = now_ms(), tick = start, looked = 0, now;
 	int box = box_ms(), n = 0, i, dirty = 1, save = 0, first = 1, r;
+	struct sigaction sa;
 
 	*out = NULL;
 	if (!v)
@@ -4874,8 +4906,12 @@ dch_remote_follow(int remote, struct dch_rrow **out)
 	}
 	/* a closed stdout is a write that fails, or a POLLERR/POLLHUP: exit 0 */
 	signal(SIGPIPE, SIG_IGN);
-	signal(SIGINT, ctl_sig);
-	signal(SIGTERM, ctl_sig);
+	/* no SA_RESTART: a write blocked on a full pipe ends (fl_look) */
+	memset(&sa, 0, sizeof sa);
+	sa.sa_handler = ctl_sig;
+	sigemptyset(&sa.sa_mask);
+	sigaction(SIGINT, &sa, NULL);
+	sigaction(SIGTERM, &sa, NULL);
 	while (!g_ctl_sig)
 	{
 		struct pollfd pf[RM_HOSTS + 1];
@@ -4889,8 +4925,10 @@ dch_remote_follow(int remote, struct dch_rrow **out)
 			** would spin on a writable pipe: once a tick */
 			struct pollfd o = { 1, POLLOUT, 0 };
 
+			/* not POLLNVAL: macOS says it of /dev/null (QA 1.62.0
+			** NIT-R1); a closed fd 1 shows in the poll below */
 			if (poll(&o, 1, 0) > 0 &&
-			    (o.revents & (POLLERR | POLLHUP | POLLNVAL)))
+			    (o.revents & (POLLERR | POLLHUP)))
 				break;
 			tick = now + every;
 			dirty = 1;
@@ -4919,7 +4957,8 @@ dch_remote_follow(int remote, struct dch_rrow **out)
 			pend |= !h->idle && !h->live;
 		}
 		/* the first array: every host answered, or --ls-json's box */
-		if (dirty && (!first || !pend || now_ms() >= start + box))
+		if (dirty && (!first || !pend || now_ms() >= start + box) &&
+		    now_ms() >= looked + FL_GAP_MS)
 		{
 			int nr = 0;
 
@@ -4932,8 +4971,11 @@ dch_remote_follow(int remote, struct dch_rrow **out)
 			if (r < 0)
 				break;
 			dirty = save = first = 0;
+			looked = now_ms();
 		}
 		wake = first && start + box < tick ? start + box : tick;
+		if (dirty && !first && looked + FL_GAP_MS < wake)
+			wake = looked + FL_GAP_MS;	/* the look the gap held */
 		for (i = 0; i < n; i++)
 		{
 			struct fhost *h = &v[i];

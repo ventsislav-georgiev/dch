@@ -2985,7 +2985,9 @@ One code is transient, and means try again later (with the client's own
 backoff; there is no retry\-after field):
 .TP
 .B busy
-the host is at its connection limit (64 in all, or 16 from this peer):
+the host is at its connection limit (64 in all, or 16 from this peer, its
+.B \-\-ls\-json \-\-follow
+watch streams aside, 32 with them):
 .I this host is at its connection limit: try again shortly
 .PP
 .B busy
@@ -3320,9 +3322,12 @@ each time it changes. A host whose hello lists
 .B watch
 is held on one connection (a 0x2e
 .I {"device_id":"dch\-<pid>"}
-after its list) and each 0x11 it pushes is a new look; any other host, and
-the local rows, are read again every 2 s. A host that fails (no answer
-within 2 s, a dropped link, a stream silent for 35 s, a frame over 1 MiB,
+after its list) and each 0x11 it pushes is a new look (the same list again
+is not); any other host, and the local rows, are read again every 2 s.
+Arrays come at most one per 200 ms; faster changes fold into the next.
+SIGINT and SIGTERM end it with 0 even while its reader has stopped reading;
+the line it was writing then may be cut short, and nothing follows it.
+A host that fails (no answer within 2 s, a dropped link, a stream silent for 35 s, a frame over 1 MiB,
 not a list, or a 0x13) shows its rows stale for 2 minutes after it last
 answered, as above, and is dialled again after 2 s, doubling up to 32 s; a
 refusal is said once and shows none. Without

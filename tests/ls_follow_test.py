@@ -18,9 +18,17 @@ close); oversized, truncated, unreadable and wrong-type stream frames;
 SIGTERM ends it with 0; the usage errors (exit 2). --ls-json --follow
 without --remote streams the local rows and dials nothing.
 
+QA 1.62.0: 16 followers on one machine leave it a slot on dch serve for
+its next connection (LOW-R3); SIGTERM and SIGINT end it with 0 while its
+reader has stopped reading and the pipe is full, and a line cut there is
+the last output (MED-R1); a host that floods changed 0x11s makes at most one array
+per 200 ms and its last rows still come, one that floods the same 0x11
+writes the cache not at all (LOW-R2); a stdout on /dev/null keeps it
+running (NIT-R1, macOS).
+
 Run:  python3 tests/ls_follow_test.py        (uses ./dch)
 """
-import json, os, re, select, signal, socket, struct, subprocess, sys
+import glob, json, os, re, select, signal, socket, struct, subprocess, sys
 import tempfile, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -321,6 +329,23 @@ def main():
             rc = None
         check("SIGTERM ends it with exit 0", rc == 0, rc)
 
+        # 16 followers from this machine: its --read still gets a slot
+        nw = len(re.findall(r"watch \(device", open(log).read()))
+        many = [follow("--remote", "--follow", "--hosts", hosts,
+                       DCH_REMOTE_EVERY_MS="6000") for _ in range(16)]
+        end = time.time() + 20
+        while (len(re.findall(r"watch \(device", open(log).read())) < nw + 16
+               and time.time() < end):
+            time.sleep(0.2)
+        time.sleep(0.5)
+        got = ref()  # a one-shot --ls-json --remote: one more connection
+        check("16 followers here: one more connection there still gets a "
+              "slot", '"stale":false' in got
+              and all(f.p.poll() is None for f in many),
+              (got, open(log).read()[-600:]))
+        for f in many:
+            f.stop()
+
         # --- 2. a host without watch: polled --------------------------------
         q = Fake("list", rows=[{"name": "p1"}])
         fakes.append(q)
@@ -450,6 +475,106 @@ def main():
         err = s.p.stderr.read().decode(errors="replace")
         check("the coded 0x13 said once on stderr",
               err.count("dch: h refused: no") == 1, err)
+
+        # --- 6. a reader that stops reading; floods; /dev/null --------------
+        big = lambda k: [{"name": "b%d-%03d-%s" % (k, i, "x" * 120)}
+                         for i in range(300)]
+        f6 = WFake(big(0))
+        fakes.append(f6)
+        fh = "f=127.0.0.1:%d" % f6.port
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            s = follow("--remote", "--follow", "--hosts", fh,
+                       DCH_REMOTE_EVERY_MS="300")
+            time.sleep(BUDGET)
+            for k in range(1, 6):  # 60 KB arrays nobody reads: pipe full
+                f6.set_rows(big(k))
+                time.sleep(0.4)
+            alive = s.p.poll() is None
+            s.p.send_signal(sig)
+            try:
+                rc = s.p.wait(3)
+            except subprocess.TimeoutExpired:
+                rc = None
+                s.p.kill()  # it reads no more 0x11s: the pushes below
+                s.p.wait()  # would block on it
+            out = s.p.stdout.read() if rc is not None else b""
+            lines = out.split(b"\n")
+
+            def whole(ln):
+                try:
+                    return isinstance(json.loads(ln), list)
+                except ValueError:
+                    return False
+            check("%s with the pipe full and unread: exit 0 within 3 s"
+                  % sig.name, alive and rc == 0, (alive, rc))
+            check("%s: whole lines, then at most one cut one, then nothing"
+                  % sig.name, rc == 0 and len(lines) > 1
+                  and all(whole(x) for x in lines[:-1])
+                  and not whole(lines[-1]), (len(out), lines[-1][-80:]))
+        # a flood of changed lists: one array per 200 ms at most
+        s = follow("--remote", "--follow", "--hosts", fh,
+                   DCH_REMOTE_EVERY_MS="300")
+        rows, _ = s.until(lambda x: "f" in {r.get("host") for r in x}
+                          and not any(r["stale"] for r in x
+                                      if r.get("host")), BUDGET + 1)
+        f6.set_rows([{"name": "f0"}])
+        rows, _ = s.until(lambda x: rem(x, "f") == {"f0": False}, 3)
+        n0, t0 = len(s.lines), time.time()
+
+        def flood(same, secs):
+            i = 0
+            while time.time() - t0 < secs:
+                f6.push(b"".join(frame(0x11, [{"name": "fend" if same
+                                               else "f%d" % (i + j)}])
+                                 for j in range(50)))
+                i += 50
+        th = threading.Thread(target=flood, args=(False, 2.0), daemon=True)
+        th.start()
+        while th.is_alive():
+            s.line(0.2)
+        f6.set_rows([{"name": "fend"}])
+        nf = len(s.lines) - n0
+        rows, dt = s.until(lambda x: rem(x, "f") == {"fend": False}, 2)
+        check("a flood of changed lists for 2 s: %d arrays (at most one "
+              "per 200 ms)" % nf, rows is not None and 2 <= nf <= 16,
+              (nf, rows is not None))
+        check("and its last rows come after it (%.2f s)" % dt,
+              rows is not None and dt < 1.0, s.lines[-2:])
+        cache = glob.glob(os.path.join(cenv["XDG_STATE_HOME"], "**",
+                                       ".remote-cache"), recursive=True)
+        seen, t0 = set(), time.time()
+        th = threading.Thread(target=flood, args=(True, 2.0), daemon=True)
+        th.start()
+        while th.is_alive():
+            for c in cache:
+                try:
+                    st = os.stat(c)
+                    seen.add((st.st_ino, st.st_mtime_ns))
+                except OSError:
+                    pass
+            time.sleep(0.01)
+        check("a flood of the same list: the cache not rewritten "
+              "(%d versions seen)" % len(seen), len(cache) == 1
+              and len(seen) <= 2, (cache, len(seen)))
+        check("still running", s.p.poll() is None, s.p.returncode)
+        s.stop()
+        p = subprocess.Popen([DCH, "--ls-json", "--remote", "--follow",
+                              "--hosts", fh], env=dict(cenv,
+                             DCH_REMOTE_EVERY_MS="300"),
+                             stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+        time.sleep(2)
+        alive = p.poll() is None
+        if alive:
+            p.send_signal(signal.SIGTERM)
+        try:
+            rc = p.wait(3)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            rc = p.wait()
+        check("stdout on /dev/null: it keeps running, SIGTERM exits 0",
+              alive and rc == 0, (alive, rc))
 
         # --- local only: --ls-json --follow --------------------------------
         q0 = len(q.conns)
