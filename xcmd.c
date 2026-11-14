@@ -303,7 +303,7 @@ row_memory(struct xc_out *w, const struct json_parser *p, int r, char *tmp,
 	put(w, "null");
 	key(w, "body");
 	if ((s = text(p, dch_json_field(p, r, "body"), 0, tmp)) &&
-	    (l = strlen(s)) > XCMD_BODY_MAX)
+	    strlen(s) > XCMD_BODY_MAX)
 	{
 		/* decoded text is valid UTF-8: back off continuation bytes */
 		for (l = XCMD_BODY_MAX; ((unsigned char)tmp[l] & 0xc0) == 0x80; l--)
@@ -333,7 +333,7 @@ xcmd_line(enum xcmd_kind kind, const char *s, size_t n, int first,
 	const char *id, *title;
 	enum xcmd_line_kind k = XCMD_SKIP;
 	size_t i;
-	int r, t;
+	int r;
 
 	if (cap)
 		out[0] = '\0';
@@ -348,7 +348,7 @@ xcmd_line(enum xcmd_kind kind, const char *s, size_t n, int first,
 	if (dch_json_parse(&p, line) != 0 || p.tok[0].kind != JSON_OBJECT)
 		goto done;
 	/* {"title":"..."} alone, first: the list's title */
-	if (first && p.ntok == 3 && (t = dch_json_field(&p, 0, "title")) == 2 &&
+	if (first && p.ntok == 3 && dch_json_field(&p, 0, "title") == 2 &&
 	    p.tok[2].kind == JSON_STRING)
 	{
 		if (dch_json_decode(&p, 2, tmp, sizeof tmp) == 0 &&

@@ -3284,7 +3284,8 @@ xv_tabsw(const int *w, int nt, int lo, int hi)
 {
 	int k, s = lo > 0 ? 2 : 0;	/* the mark, the space after it */
 
-	for (k = lo; k <= hi; k++)
+	/* k < nt: hi is below nt already, said for the static analyzer */
+	for (k = lo; k <= hi && k < nt; k++)
 		s += w[k] + (k > lo);
 	return s + (hi < nt - 1 ? 2 : 0);
 }

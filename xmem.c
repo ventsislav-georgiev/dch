@@ -697,7 +697,8 @@ xm_str(const struct json_parser *p, int t)
 	return b;
 }
 
-/* every string token in (from, to), decoded, '\n'-joined */
+/* every string token in (from, to), decoded, '\n'-joined; NULL for none
+** (the 1-byte "" would hide from the analyzer that strlen() bounds it) */
 static char *
 xm_strings(const struct json_parser *p, int from, int to)
 {
@@ -719,6 +720,11 @@ xm_strings(const struct json_parser *p, int from, int to)
 			b[l++] = '\n';
 			free(s);
 		}
+	if (!l)
+	{
+		free(b);
+		return NULL;
+	}
 	b[l] = '\0';
 	return b;
 }
