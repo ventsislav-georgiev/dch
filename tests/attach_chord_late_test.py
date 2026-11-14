@@ -177,7 +177,12 @@ def main():
         return 1
     tmp = tempfile.mkdtemp(prefix="dch-chordlate-")
     rxf = os.path.join(tmp, "rx.hex")
+    # its own config, state and HOME: run alone it must not take the user's
+    # detach_key nor write under ~/.local/state
     env = dict(os.environ, DCH_SOCKET_DIR=tmp,
+               DCH_CONFIG=os.path.join(tmp, "config"),
+               XDG_STATE_HOME=os.path.join(tmp, "state"),
+               HOME=os.path.join(tmp, "home"),
                DCH_DOUBLE_TAP_MS=str(int(WINDOW * 1000)))
     env.pop("DCH_SESSION", None)
     try:

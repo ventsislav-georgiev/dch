@@ -98,6 +98,30 @@ Covers:
       card; each a ctl --xray of its own. The hostile host refuses --ref
       as an older dch's grammar would (exit 2): the status says the host's
       dch takes no such ref, with its line, and the view stays.
+  13. Responses (#290) of srv:xv-cl: the host's answers newest first (the
+      text, or the tool line of a turn that ended on its result), Enter
+      reads the item's prompt from the host at 2 of 2, q back to the item,
+      each a ctl --xray of its own. A fake host whose chapters lack #296's
+      fields (a dch before 1.63.0): the tab says so, keys do no harm. One
+      with them: the running turn working, an answer the cap dropped
+      (response_offset, no response) says Enter reads it, and Enter reads
+      it from the host. Every Prompts-to-Refs move is Shift-Tab now
+      (twice since #291: Search is the last tab).
+  14. Search (#291) of srv:xv-cl: PROJ-5 searched on the host, its hits
+      newest first (the prompt as You, the tool result as Bash under the
+      hostile title, with ?), Enter reads the hit's prompt from the host at
+      1 of 2, q back to the hit; the follow, the search and the chapter
+      each a ctl --xray. A fake host before 1.63.0 refuses --search (0x13):
+      the list says its dch does not know --search, no count. A fake answer:
+      a null chapter's hit says it is outside the prompts shown and Enter
+      on it says so, a tool hit by its tool, partial with why time said,
+      ESC and BEL in a snippet shown as ?; Enter on the tool hit reads its
+      prompt from the host.
+  15. the card's mentions newest first (#304, QA 1.62.0 MED-V13), read
+      on the host: a transcript under 1 MiB, one spanning several 1 MiB
+      windows (no zigzag), and after f (oldest first from the engine); the
+      selected mention stays selected while f's lines arrive; Enter on a
+      mention reads its prompt from the host.
 
 Run:  python3 tests/xray_remote_view_test.py      (uses ./dch)
 """
@@ -348,7 +372,7 @@ def test_view():
         check("hostile host text: the chapter title's OSC, BEL, U+202E and "
               "U+061C show as ?", v.wait(b"o/r#7 ?]0;pwned? evil?title al?m"),
               v.out[-600:])
-        v.key(b"\t")
+        v.key(b"\033[Z\033[Z")  # back to Search, then Refs (#291)
         check("Refs: the host's keys", v.wait(b"#831") and
               v.wait(b"PROJ-5") and v.wait(b"o/r#7"), v.out[-600:])
         v.key(b"\033[B", 0.3)  # #831: PROJ-5, said last, is on top (#262)
@@ -377,7 +401,7 @@ def test_view():
               v.wait(b"xv-cl has ended: no session to open", start=mark) and
               v.reap() is None, v.out[mark:])
         v.key(b"\033", 0.5)
-        v.key(b"\t")  # Refs, then Prompts: two tabs (#294)
+        v.key(b"\t\t")  # Refs, Search, then Prompts: Tab wraps (#291)
         mark = len(v.out)
         v.key(b"\r", 1.0)
         check("reader: Enter reads the newest chapter from the host",
@@ -480,7 +504,7 @@ def test_small_card():
     v = Pty([DCH, "--xray", "srv:xv-cl"])
     try:
         v.wait(b"Prompts 2")
-        v.key(b"\t")
+        v.key(b"\033[Z\033[Z")
         v.wait(b"#831")
         mark = len(v.out)
         v.key(b"\r")
@@ -502,6 +526,156 @@ def test_small_card():
                v.out[mark:][-600:]))
         v.key(b"qqq")
         check("small card: q, q, q exits 0", v.exit() == 0, v.out[-80:])
+    finally:
+        v.close()
+
+
+# ---- the card's mentions, newest first (#304, QA 1.62.0 MED-V13) -----------
+
+def record_o(name, sid, lines):
+    """A History Claude record of the host's, its transcript lines."""
+    cfg = os.path.join(SENV["HOME"], ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    with open(os.path.join(pdir, sid + ".jsonl"), "w") as f:
+        for o in lines:
+            f.write(json.dumps(o) + "\n")
+    sockdir = os.path.join(SENV["XDG_RUNTIME_DIR"], "dch-%d" % os.getuid())
+    hdir = os.path.join(SENV["XDG_STATE_HOME"], "dch", "sessions",
+                        sockdir.replace("/", "-"))
+    os.makedirs(hdir, exist_ok=True)
+    rec = {"name": name, "cwd": "/home/demo/proj", "end": "exited",
+           "argv": ["claude"], "started": 1794299400, "updated": 1794300000,
+           "ended": 1794300000, "sock_dir": sockdir,
+           "agent": {"session_id": sid, "cwd": "/home/demo/proj",
+                     "config_dir": cfg}}
+    with open(os.path.join(hdir, name + ".json"), "w") as f:
+        f.write(json.dumps(rec) + "\n")
+
+
+def say_o(text, ts=None):
+    o = {"type": "assistant", "message": {"content": [
+        {"type": "text", "text": text}]}}
+    if ts:
+        o["timestamp"] = ts
+    return o
+
+
+def fixture_order():
+    """srv:xv-o1: four turns ONE..FOUR, each saying PROJ-9, under 1 MiB;
+    srv:xv-o2: the same with a second answer per turn and 1.2 MB after
+    each, a window each; srv:xv-o3: one turn saying PROJ-9 in 250 lines,
+    so light and full keep different lines (a file gives 200)."""
+    sids = ["11111111-2222-4333-8444-5555555555%02x" % k
+            for k in (0xb1, 0xb2, 0xb3)]
+    for name, sid, big in (("xv-o1", sids[0], 0), ("xv-o2", sids[1], 1)):
+        lines = []
+        for k, w in enumerate(["ONE", "TWO", "THREE", "FOUR"]):
+            ts = "2026-11-10T1%d:00:" % k
+            lines += [{"type": "user", "cwd": "/home/demo/proj",
+                       "timestamp": ts + "00Z",
+                       "message": {"content": "prompt %s" % w}},
+                      say_o("answer %s says PROJ-9" % w, ts + "05Z")]
+            if big:
+                lines += [say_o("answer %s2 says PROJ-9" % w, ts + "09Z")]
+                lines += [say_o("pad " * 50000)] * 6     # 1.2 MB
+        record_o(name, sid, lines)
+    record_o("xv-o3", sids[2], [
+        {"type": "user", "cwd": "/home/demo/proj",
+         "timestamp": "2026-11-10T10:00:00Z",
+         "message": {"content": "prompt PIN"}}] +
+        [say_o("note %03d says PROJ-9" % k,
+               "2026-11-10T10:%02d:%02dZ" % (k // 60, k % 60))
+         for k in range(1, 251)])
+
+
+def card_rows(v):
+    """The card's mention words top down, and the selected one."""
+    scr = screen_rows(v)
+    got = [(scr[k].startswith("\u258c"),
+            re.search(r"(?:answer|note) (\w+) says", scr[k]))
+           for k in sorted(scr)]
+    got = [(s, m.group(1)) for s, m in got if m]
+    return [w for _, w in got], [w for s, w in got if s]
+
+
+def settle(v, secs=30.0):
+    """until the card's scan is done: no row says searching"""
+    until(lambda: v.pump(0.2) or not any(
+        "searching" in r for r in screen_rows(v).values()), secs)
+    v.pump(0.5)
+
+
+def order_card(name, secs=30.0):
+    """srv:name's view, PROJ-9's card opened by ^R, settled."""
+    v = Pty([DCH, "--xray", "srv:" + name], 40, 100)
+    v.wait(b"Prompts ", secs)
+    v.pump(0.5)
+    v.key(b"/PROJ-9", 0.5)
+    mark = len(v.out)
+    v.key(b"\x12", 0.5)
+    v.wait(b"PROJ-9  light", secs, start=mark)
+    settle(v, secs)
+    return v
+
+
+def full_scan(v):
+    mark = len(v.out)
+    v.key(b"f", 0.5)
+    v.wait(b"full scan", 30, start=mark)
+    settle(v)
+
+
+def test_order():
+    v = order_card("xv-o1")
+    try:
+        got, _ = card_rows(v)
+        check("card #304: srv:xv-o1, under 1 MiB: PROJ-9's mentions newest "
+              "first", got == ["FOUR", "THREE", "TWO", "ONE"], got)
+        mark = len(v.out)
+        v.key(b"j\r", 1.0)
+        check("card #304: Enter on the second mention reads its prompt "
+              "from the host", v.wait(b"prompt THREE", start=mark) and
+              b"prompt FOUR" not in v.out[mark:], v.out[mark:][-600:])
+        v.key(b"q")
+    finally:
+        v.close()
+    want = ["FOUR2", "FOUR", "THREE2", "THREE", "TWO2", "TWO", "ONE2", "ONE"]
+    v = order_card("xv-o2")
+    try:
+        got, _ = card_rows(v)
+        check("card #304: srv:xv-o2, several 1 MiB windows: newest first, "
+              "no zigzag", got == want, got)
+        v.key(b"jj", 0.5)
+        full_scan(v)
+        got, sel = card_rows(v)
+        # f reads the project: this session's lines first, then the others'
+        check("card #304: srv:xv-o2 after f (oldest first from the engine): "
+              "still newest first, the selection on its mention",
+              got[:8] == want and sel == ["THREE2"], (got, sel))
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        check("card #304: Enter on it reads its prompt from the host",
+              v.wait(b"prompt THREE", start=mark) and
+              b"prompt FOUR" not in v.out[mark:], v.out[mark:][-600:])
+        v.key(b"q")
+    finally:
+        v.close()
+    v = order_card("xv-o3")
+    try:
+        got, _ = card_rows(v)
+        check("card #304: srv:xv-o3, 250 mentions in one window: newest "
+              "first", len(got) > 20 and got == sorted(got, reverse=True),
+              got)
+        v.key(b"jjjjj", 0.5)
+        _, before = card_rows(v)
+        full_scan(v)
+        got, sel = card_rows(v)
+        check("card #304: srv:xv-o3, the selected mention stays selected "
+              "while f's lines arrive, newest first", len(before) == 1 and
+              sel == before and got == sorted(got, reverse=True),
+              (before, sel, got))
+        v.key(b"q")
     finally:
         v.close()
 
@@ -723,6 +897,8 @@ class Flaky(Fake):
         self.up, self.word = True, b"LINK-UP"
         # --chapter <anchor>'s answers (#288), and the snapshot
         self.snap, self.chapters = snap or SNAP, chapters or {}
+        # --search's answer (#291): bytes, or "old", an older dch's refusal
+        self.search = None
 
     def down(self):
         self.up = False
@@ -757,6 +933,14 @@ class Flaky(Fake):
                         if "--follow" in argv:
                             c.sendall(frame(0x31, self.snap))
                             continue    # a stream: held until the close
+                        if "--search" in argv and self.search == "old":
+                            c.sendall(frame(0x13, {
+                                "message": "--search is not allowed with "
+                                           "--xray"}))
+                            c.shutdown(socket.SHUT_WR)
+                            continue
+                        if "--search" in argv and self.search:
+                            c.sendall(frame(0x31, self.search))
                         if "--chapter" in argv:
                             a = argv[argv.index("--chapter") + 1]
                             if a in self.chapters:
@@ -788,7 +972,7 @@ def test_link_drop():
               v.wait(b"X-ray  q:fk") and v.wait(b"Prompts 1"),
               v.out[-600:])
         mark = len(v.out)
-        v.key(b"\t", 1.5)
+        v.key(b"\033[Z\033[Z", 1.5)
         v.wait(b"o/r#5", start=mark)
         v.pump(0.3)
         text = shown(v, 0)
@@ -833,6 +1017,283 @@ def test_link_drop():
         v.close()
         h.close()
 
+
+# ---- Responses (#290): the host's answers --------------------------------
+
+def screen_rows(v):
+    """The text last drawn on each row, its escapes removed."""
+    got, parts = {}, re.split(rb"\033\[(\d+);1H", v.out)
+    for i in range(1, len(parts) - 1, 2):
+        got[int(parts[i])] = re.sub(rb"\033\[[0-9;?]*[A-Za-z]", b"",
+                                    parts[i + 1]).decode("utf-8", "replace")
+    return got
+
+
+def items(v):
+    """Responses' items on screen, top down: (its title, [its lines])."""
+    out, scr = [], screen_rows(v)
+    for k in sorted(x for x in scr if x >= 4):
+        r = scr[k]
+        if r.startswith(("\u2500", "-")):
+            break
+        if re.match(r"^.\s{0,3}\d+  ", r):
+            out.append((r.rstrip().split("  ")[-1].strip(), []))
+        elif out and r.strip():
+            out[-1][1].append(r.strip())
+    return out
+
+
+def head(v):
+    sel = [r for r in screen_rows(v).values() if r.startswith("\u258c")]
+    return sel[0] if sel else ""
+
+
+def test_responses():
+    n0 = ctls("--xray")
+    v = Pty([DCH, "--xray", "srv:xv-cl"])
+    try:
+        v.wait(b"Prompts 2")
+        v.pump(0.5)
+        mark = len(v.out)
+        v.key(b"\t", 1.0)
+        ok = v.wait(b"Responses 2", start=mark)
+        it = items(v)
+        check("Responses, remote: the host's answers, newest first: its "
+              "text; a turn that ended on its tool result its tool line",
+              ok and len(it) == 2 and
+              it[0] == ("second prompt about PROJ-5", ["noted"]) and
+              it[1][1] == ["Bash 1"], (it, v.out[mark:][-600:]))
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        check("Responses, remote: Enter reads the item's prompt from the "
+              "host, 2 of 2, its Reply", v.wait(b"2 of 2", start=mark) and
+              v.wait(b"Reply", start=mark) and v.wait(b"noted", start=mark),
+              v.out[mark:][-600:])
+        mark = len(v.out)
+        v.key(b"q", 1.0)
+        check("Responses, remote: q back to the item",
+              v.wait(b"Responses 2", start=mark) and
+              "second prompt about PROJ-5" in head(v), head(v))
+        v.key(b"q")
+        check("Responses, remote: q exits 0", v.exit() == 0, v.out[-80:])
+    finally:
+        v.close()
+    until(lambda: ctls("--xray") - n0 >= 2, 5)
+    check("Responses, remote: the follow and the chapter, each its own ctl "
+          "--xray on the host", ctls("--xray") - n0 == 2,
+          ctls("--xray") - n0)
+
+
+def test_responses_fake():
+    """A host before 1.63.0 (chapters without #296's fields) says so on
+    Responses; one with the fields: a cut-dropped answer reads Enter reads
+    it, the running turn working."""
+    two = (b'"offset":0},{"anchor":"s2","title":"second","kind":"prompt",'
+           b'"at":1794300100,"offset":9}]')
+    h = Flaky(SNAP.replace(b'"offset":0}]', two))
+    hosts("q=127.0.0.1:%d" % h.port)
+    v = Pty([DCH, "--xray", "q:fk"])
+    try:
+        v.wait(b"Prompts 2")
+        mark = len(v.out)
+        v.key(b"\t", 1.0)
+        check("Responses, an older host: the tab says its dch sends none",
+              v.wait(b"Responses 0", start=mark) and
+              v.wait(b"the host's dch is older than 1.63.0 and sends no "
+                     b"responses", start=mark), v.out[mark:][-600:])
+        v.key(b"j\r", 0.5)
+        v.key(b"q")
+        check("Responses, an older host: keys do no harm, q exits 0",
+              v.exit() == 0, v.out[-80:])
+    finally:
+        v.close()
+        h.close()
+    two = (b'"offset":0,"response_offset":5,"tools":"Bash 2"},{"anchor":'
+           b'"s2","title":"second","kind":"prompt","at":1794300100,'
+           b'"offset":9,"tools":"Read 1"}]')
+    ch = {"s1": json.dumps({"title": "first", "at": 1794300000,
+                            "entries": [{"role": "user", "text": "FIRST"},
+                                        {"role": "assistant",
+                                         "text": "THE-DROPPED-ANSWER"}]})
+          .encode() + b"\n"}
+    h = Flaky(SNAP.replace(b'"offset":0}]', two), ch)
+    hosts("q=127.0.0.1:%d" % h.port)
+    v = Pty([DCH, "--xray", "q:fk"])
+    try:
+        v.wait(b"Prompts 2")
+        mark = len(v.out)
+        v.key(b"\t", 1.0)
+        v.wait(b"Responses 2", start=mark)
+        it = items(v)
+        check("Responses, a host with the fields: the running turn working, "
+              "an answer the cap dropped says Enter reads it",
+              it == [("second", ["Read 1", "working\u2026"]),
+                     ("first", ["Bash 2", "Enter reads it"])], it)
+        v.key(b"j", 0.3)
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        check("Responses: Enter on it reads it from the host",
+              v.wait(b"THE-DROPPED-ANSWER", start=mark) and
+              v.wait(b"1 of 2", start=mark), v.out[mark:][-600:])
+        v.key(b"q", 0.5)
+        v.key(b"q")
+        check("Responses, a host with the fields: q, q exits 0",
+              v.exit() == 0, v.out[-80:])
+    finally:
+        v.close()
+        h.close()
+
+
+# ---- Search (#291): the host's --search --------------------------------------
+
+def rows_now(v):
+    scr = screen_rows(v)
+    return "\n".join(scr[k] for k in sorted(scr))
+
+
+def tabbar(v, want, secs=10.0):
+    """The tab bar once it holds want (a count is faint: its own SGR)."""
+    return until(lambda: (v.pump(0.1), want in screen_rows(v).get(2, ""))[1],
+                 secs)
+
+
+def shits(v):
+    """Search's hits on screen, top down: (who, title, [snippet lines])."""
+    out, scr = [], screen_rows(v)
+    for k in sorted(x for x in scr if x >= 5):
+        r = scr[k]
+        if r.startswith(("\u2500", "-")):
+            break
+        if re.match(r"^.\s\d\d-\d\d \d\d:\d\d|^.\s{14}\S", r):
+            who, _, title = r[15:].rstrip().partition("  ")
+            out.append((who, title.strip(), []))
+        elif out and r.strip():
+            out[-1][2].append(r.strip())
+    return out
+
+
+def test_search():
+    n0 = ctls("--xray")
+    v = Pty([DCH, "--xray", "srv:xv-cl"])
+    try:
+        v.wait(b"Prompts 2")
+        v.pump(0.5)
+        mark = len(v.out)
+        v.key(b"\033[Z", 0.5)   # Shift-Tab: Prompts back to Search
+        v.key(b"PROJ-5\r", 1.0)
+        ok = tabbar(v, "Search 2")
+        v.pump(0.3)
+        h = shits(v)
+        check("Search, remote: the host's hits, newest first: the prompt as "
+              "You, the tool result under the first prompt by its tool",
+              ok and [(w, t[:12]) for w, t, _ in h] ==
+              [("You", "second promp"), ("Bash", "look at #831")],
+              (h, v.out[mark:][-600:]))
+        check("Search, remote: a hostile title under a hit shows with ?",
+              h and len(h) > 1 and "?]0;pwned?" in h[1][1], h)
+        mark = len(v.out)
+        v.key(b"j\r", 1.0)
+        check("Search, remote: Enter reads the hit's prompt from the host, "
+              "1 of 2, at the text", v.wait(b"1 of 2", start=mark) and
+              v.wait(b"PROJ-5", start=mark), v.out[mark:][-600:])
+        mark = len(v.out)
+        v.key(b"q", 1.0)
+        check("Search, remote: q back to the hit",
+              tabbar(v, "Search 2") and "Bash" in head(v), head(v))
+        v.key(b"q")
+        check("Search, remote: q exits 0", v.exit() == 0, v.out[-80:])
+        bad = [b for b in (b"\033]0;pwned", b"\007 evil", b"\xe2\x80\xae")
+               if b in v.out]
+        check("Search, remote: no host ESC, BEL or bidi byte reached the "
+              "terminal", not bad, bad)
+    finally:
+        v.close()
+    until(lambda: ctls("--xray") - n0 >= 3, 5)
+    check("Search, remote: the follow, the search and the chapter, each its "
+          "own ctl --xray on the host", ctls("--xray") - n0 == 3,
+          ctls("--xray") - n0)
+
+
+def test_search_fake():
+    """An older host refuses --search: its line in the list. A host's answer
+    with a null chapter, a tool hit and partial: said as such."""
+    h = Flaky()
+    h.search = "old"
+    hosts("q=127.0.0.1:%d" % h.port)
+    v = Pty([DCH, "--xray", "q:fk"])
+    try:
+        v.wait(b"Prompts 1")
+        v.pump(0.3)
+        mark = len(v.out)
+        v.key(b"\033[Z", 0.5)
+        v.key(b"needle\r", 1.0)
+        check("Search, an older host: the list says its dch does not know "
+              "--search", v.wait(b"dch: q: the host's dch does not know "
+                                 b"--search", start=mark) and
+              not re.search(r"Search \d", screen_rows(v).get(2, "")),
+              v.out[mark:][-600:])
+        v.key(b"j\r", 0.5)
+        v.key(b"q")
+        check("Search, an older host: keys do no harm, q exits 0",
+              v.exit() == 0, v.out[-80:])
+    finally:
+        v.close()
+        h.close()
+    ans = {"schema": 1, "session": "fk", "session_id": "m0000000000000001",
+           "corpus": "claude", "text": "needle", "hits": [
+               {"chapter": None, "offset": 900, "at": 1794300200,
+                "who": "assistant", "tool": None,
+                "snippet": "a needle \u001b]0;pwned\u0007 in the middle"},
+               {"chapter": "s1", "offset": 5, "at": 1794300100,
+                "who": "tool", "tool": "Grep", "snippet": "grep NEEDLE"}],
+           "more": False, "partial": True, "why": "time", "bytes": 99}
+    ch = {"s1": json.dumps({"title": "first", "at": 1794300000,
+                            "entries": [{"role": "user", "text": "FIRST"},
+                                        {"role": "tool", "tool": "Grep",
+                                         "text": "grep NEEDLE"}]})
+          .encode() + b"\n"}
+    h = Flaky(chapters=ch)
+    h.search = json.dumps(ans).encode() + b"\n"
+    hosts("q=127.0.0.1:%d" % h.port)
+    v = Pty([DCH, "--xray", "q:fk"])
+    try:
+        v.wait(b"Prompts 1")
+        v.pump(0.3)
+        v.key(b"\033[Z", 0.5)
+        v.key(b"needle\r", 1.0)
+        ok = tabbar(v, "Search 2")
+        v.pump(0.3)
+        hs, text = shits(v), rows_now(v)
+        check("Search, a host's answer: a null chapter's hit is outside the "
+              "prompts shown, a tool hit by its tool under its prompt",
+              ok and [(w, t) for w, t, _ in hs] ==
+              [("Reply", "(outside the prompts shown)"), ("Grep", "first")],
+              hs)
+        check("Search, a host's answer: partial: a faint line says it "
+              "stopped early, why, and the hits stand",
+              "the search stopped early (it took too long); the hits shown "
+              "stand" in text, text)
+        check("Search, a host's answer: its snippet's ESC and BEL show as ?",
+              hs and "a needle ?]0;pwned? in the middle" in " ".join(hs[0][2])
+              and b"\033]0;pwned" not in v.out, hs)
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        check("Search: Enter on a hit with no chapter says so, no reader",
+              v.wait(b"this place is outside the prompts X-ray can open",
+                     start=mark) and b"Reading" not in v.out[mark:],
+              v.out[mark:][-600:])
+        mark = len(v.out)
+        v.key(b"j\r", 1.0)
+        check("Search: Enter on the tool hit reads its prompt from the host",
+              v.wait(b"1 of 1", start=mark) and
+              v.wait(b"grep NEEDLE", start=mark), v.out[mark:][-600:])
+        v.key(b"q", 0.5)
+        v.key(b"q")
+        check("Search, a host's answer: q, q exits 0", v.exit() == 0,
+              v.out[-80:])
+    finally:
+        v.close()
+        h.close()
 
 def test_turn_drop():
     """#288: the reader's [ on a host that has gone: the status says so and
@@ -1026,7 +1487,7 @@ def gone(what, v, rc, seen):
 
 def card(v, tab=False):
     if tab:
-        v.key(b"\t", 0.3)  # to Refs; Esc from a card keeps the tab
+        v.key(b"\033[Z\033[Z", 0.3)  # to Refs; Esc from a card keeps the tab
     mark = len(v.out)
     v.key(b"\r", 0.1)
     return v.wait(b"light", start=mark, secs=5)
@@ -2049,7 +2510,11 @@ def main():
         hosts("srv=127.0.0.1:%d" % port)
         test_view()
         test_lookup()
+        test_responses()
+        test_search()
         test_small_card()
+        fixture_order()
+        test_order()
         test_on_screen()
         test_picker(port)
         test_same_name()
@@ -2058,6 +2523,8 @@ def main():
         test_failures()
         test_link_drop()
         test_turn_drop()
+        test_responses_fake()
+        test_search_fake()
         test_stop()
         test_chord(port)
         test_chord_detach()

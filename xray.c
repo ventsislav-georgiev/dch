@@ -40,6 +40,8 @@ unsigned long xr_seam_opened, xr_seam_refused;
 struct xr_limits xr_lim = {XR_HEAD_RANGE, XR_TAIL_RANGE, XR_CHUNK, XR_LINE_MAX,
                            XR_OUT_MAX, XR_FILES, XR_BYTES, XR_WALL_MS};
 int xr_noclock;
+int xr_noskip;
+unsigned long xr_skipped;
 
 /* ---- UTF-8 and Unicode classes ----------------------------------------- */
 
@@ -1479,8 +1481,7 @@ j_str(const struct json_parser *p, int t, size_t *n)
 	s = p->text;
 	i = p->tok[t].start;
 	e = p->tok[t].end;
-	/* calloc: the analyzer cannot see sscanf's %n bound in iso_time() */
-	if (!(o = calloc(1, (size_t)(e - i) + 1)))
+	if (!(o = malloc((size_t)(e - i) + 1)))
 		return NULL;
 	while (i < e)
 	{
@@ -1642,18 +1643,39 @@ k_streq(const struct json_parser *p, int obj, const char *const *alias,
 	return r;
 }
 
+/* sscanf's %<w>d, which iso_time read with before #292 (an sscanf a line
+** was 8% of --json): blanks, a sign, then at most w characters of sign and
+** digits; NULL without a digit. */
+static const char *
+iso_num(const char *p, int w, int *v)
+{
+	int neg = 0, k = 0;
+
+	while (isspace((unsigned char)*p))
+		p++;
+	if (*p == '+' || *p == '-')
+		neg = *p++ == '-', w--;
+	for (*v = 0; k < w && *p >= '0' && *p <= '9'; k++)
+		*v = *v * 10 + *p++ - '0';
+	*v = neg ? -*v : *v;
+	return k ? p : NULL;
+}
+
 /* ISO 8601 "2026-01-02T03:04:05.678Z" (or +hh:mm) to epoch seconds; -1. */
 static long long
 iso_time(const char *s)
 {
 	struct tm tm;
-	int y, mo, d, h, mi, se, n = 0, off = 0;
-	const char *p;
+	int v[6], k, off = 0, y;
+	const char *p = s;
 
-	if (!s || sscanf(s, "%4d-%2d-%2dT%2d:%2d:%2d%n", &y, &mo, &d, &h, &mi,
-	                 &se, &n) != 6 || n != 19)
+	/* "%4d-%2d-%2dT%2d:%2d:%2d" over exactly 19 bytes */
+	for (k = 0; k < 6; k++)
+		if (!p || (k && *p++ != "--T::"[k - 1]) ||
+		    !(p = iso_num(p, k ? 2 : 4, &v[k])))
+			return -1;
+	if (p - s != 19)
 		return -1;
-	p = s + 19;
 	if (*p == '.')
 		for (p++; *p >= '0' && *p <= '9'; p++)
 			;
@@ -1670,17 +1692,28 @@ iso_time(const char *s)
 	}
 	else if (*p == 'Z')
 		p++;
-	if (*p || mo < 1 || mo > 12 || d < 1 || d > 31 || h > 23 || mi > 59 ||
-	    se > 60)
+	if (*p || v[1] < 1 || v[1] > 12 || v[2] < 1 || v[2] > 31 || v[3] > 23 ||
+	    v[4] > 59 || v[5] > 60)
 		return -1;
-	memset(&tm, 0, sizeof tm);
-	tm.tm_year = y - 1900;
-	tm.tm_mon = mo - 1;
-	tm.tm_mday = d;
-	tm.tm_hour = h;
-	tm.tm_min = mi;
-	tm.tm_sec = se;
-	return (long long)timegm(&tm) - off;
+	if (v[0] < 1970)	/* timegm's own rules (macOS refuses before 1900) */
+	{
+		memset(&tm, 0, sizeof tm);
+		tm.tm_year = v[0] - 1900;
+		tm.tm_mon = v[1] - 1;
+		tm.tm_mday = v[2];
+		tm.tm_hour = v[3];
+		tm.tm_min = v[4];
+		tm.tm_sec = v[5];
+		return (long long)timegm(&tm) - off;
+	}
+	/* timegm's answer without its 2 us a call (macOS, #292): days since
+	** 1970 by Hinnant's days_from_civil, the year counted from March so a
+	** leap day comes last; a day or time past its range carries as in
+	** timegm */
+	y = v[0] - (v[1] <= 2);
+	return (365LL * y + y / 4 - y / 100 + y / 400 +
+	        (153 * (v[1] > 2 ? v[1] - 3 : v[1] + 9) + 2) / 5 + v[2] - 1 -
+	        719468) * 86400 + v[3] * 3600 + v[4] * 60 + v[5] - off;
 }
 
 /* ---- Claude: Prosper's text rules ----------------------------------------- */
@@ -3895,6 +3928,7 @@ ix_count(const struct xr_index *x, const struct xr_ent *e)
 /* ---- refs: the --ref scan's lines (3.4) ------------------------------------ */
 
 #define XR_HELD 199		/* a file's newest mentions, after its first */
+#define XR_RING (XR_HELD + 1)	/* light keeps its newest 200 (#303) */
 
 struct xr_scan
 {
@@ -3913,7 +3947,8 @@ struct xr_scan
 	uint64_t nunit, lastunit, nrow, lastrow, lines, lastoff, lasth, foff;
 	int found, ndefs, mentioned;
 	uint64_t defh[XR_DEFS];
-	char *held[XR_HELD];
+	char *held[XR_RING];
+	uint64_t hoff[XR_RING];	/* light: each held line's offset */
 	size_t hn, h0;
 	uint64_t dropped;	/* mention lines the XR_HELD bound left out */
 	/* the scan */
@@ -3935,7 +3970,8 @@ xr_now_ms(void)
 }
 
 /* A file's tally line (3.4); mentions_dropped: the mention lines past the
-** first and the newest 199, counted in count but not written. */
+** first and the newest 199 (light: the newest 200), counted in count but
+** not written. */
 static char *
 tally_line(const struct xr_scan *x, uint64_t count, uint64_t dropped,
            int partial)
@@ -4001,7 +4037,7 @@ xr_scan_free(struct xr_scan *x)
 	if (!x)
 		return;
 	for (k = 0; k < x->hn; k++)
-		free(x->held[(x->h0 + k) % XR_HELD]);
+		free(x->held[(x->h0 + k) % XR_RING]);
 	free(x);
 }
 
@@ -4155,6 +4191,34 @@ mention_line(struct xr_scan *x, const struct xr_hit *h)
 	return b;
 }
 
+/* Light's mention lines (#303): its windows come newest first, a window's
+** lines oldest first, so the file's newest XR_RING are kept by offset, in
+** the order they came: a newer line puts out the oldest held one. */
+static void
+sc_hold(struct xr_scan *x, char *b, uint64_t off)
+{
+	size_t k, o = 0;
+
+	if (x->hn == XR_RING)
+	{
+		for (k = 1; k < x->hn; k++)
+			if (x->hoff[k] < x->hoff[o])
+				o = k;
+		x->dropped++;
+		if (x->hoff[o] > off)
+		{
+			free(b);
+			return;
+		}
+		free(x->held[o]);
+		x->hn--;
+		memmove(x->held + o, x->held + o + 1, (x->hn - o) * sizeof *x->held);
+		memmove(x->hoff + o, x->hoff + o + 1, (x->hn - o) * sizeof *x->hoff);
+	}
+	x->held[x->hn] = b;
+	x->hoff[x->hn++] = off;
+}
+
 static void
 sc_hit(void *ctx, const struct xr_hit *h)
 {
@@ -4228,26 +4292,23 @@ sc_hit(void *ctx, const struct xr_hit *h)
 		if (newline && (x->full || (!x->shell && !x->other)) &&
 		    (b = mention_line(x, h)))
 		{
-			if (!x->mentioned++)
+			if (!x->full)
+				sc_hold(x, b, h->off);
+			else if (!x->mentioned++)
 			{
 				(void)sc_line(x, b, strlen(b));
 				free(b);
-			}
-			else if (x->hn == XR_HELD && !x->full)
-			{
-				free(b);	/* light reads newest first: */
-				x->dropped++;	/* the held are the newer */
 			}
 			else
 			{
 				if (x->hn == XR_HELD)
 				{
 					free(x->held[x->h0]);
-					x->h0 = (x->h0 + 1) % XR_HELD;
+					x->h0 = (x->h0 + 1) % XR_RING;
 					x->hn--;
 					x->dropped++;
 				}
-				x->held[(x->h0 + x->hn++) % XR_HELD] = b;
+				x->held[(x->h0 + x->hn++) % XR_RING] = b;
 			}
 		}
 	}
@@ -4368,7 +4429,7 @@ xr_scan_file(struct xr_scan *x, uint64_t bytes, uint64_t too_long,
 	x->too_long += too_long;
 	for (k = 0; k < x->hn; k++)
 	{
-		char *l = x->held[(x->h0 + k) % XR_HELD];
+		char *l = x->held[(x->h0 + k) % XR_RING];
 
 		(void)sc_line(x, l, strlen(l));
 		free(l);
@@ -4574,6 +4635,9 @@ struct xr_claude
 	struct xr_entries *want;	/* --chapter (#156), else NULL */
 	int codex;		/* a Codex rollout (7.4) */
 	struct tally *tl;	/* #296: the open turn's tools, else NULL */
+	int blind;		/* #299: a light window not at offset 0: its
+				** first chapter may be one the full decode
+				** has not (begun or merged in an older window) */
 };
 
 enum { B_PROMPT, B_IMAGE, B_STEP };
@@ -5151,7 +5215,12 @@ ch_anchor(struct xr_claude *d, char out[48])
 	struct xr_chapter *x = cur(d);
 
 	out[0] = '\0';
-	if (x)
+	/* #299: a blind window's later chapters were opened by a prompt after a
+	** step of its own, as the full decode opens them; its first is null
+	** (also at the tail range's first line: the full decode reads on from
+	** the head there). Residual: a sidechain block of a thread an older
+	** window saw is a step here and none there (side_block). */
+	if (x && (!d->blind || d->ch.total > 1))
 		snprintf(out, 48, "f%llx:%llu", (unsigned long long)d->ino,
 		         (unsigned long long)x->offset);
 }
@@ -6138,23 +6207,20 @@ listed(const char *const *v, const char *s)
 }
 
 /* An upper bound on the line's JSON tokens: one per value and key, each
-** after an opener, ',' or ':' outside strings. */
+** after an opener, ',' or ':' outside strings. A string's body is its own
+** tight loop: most of a line is string bytes (#292). */
 static size_t
 tokens_max(const char *s, size_t n)
 {
 	size_t k, c = 1;
-	int in = 0;
 
 	for (k = 0; k < n; k++)
-		if (in)
+		if (s[k] == '"')
 		{
-			if (s[k] == '\\')
-				k++;
-			else if (s[k] == '"')
-				in = 0;
+			for (k++; k < n && s[k] != '"'; k++)
+				if (s[k] == '\\')
+					k++;
 		}
-		else if (s[k] == '"')
-			in = 1;
 		else if (s[k] == ',' || s[k] == ':' || s[k] == '[' || s[k] == '{')
 			c++;
 	return c;
@@ -6779,6 +6845,216 @@ line_start(int fd, uint64_t from, uint64_t to, char *buf, uint64_t *at)
 	return 0;
 }
 
+/* ---- light --ref's window prefilter (#293) -------------------------------- */
+
+/* A key's needles, built from the key as the grammar builds it: a window
+** whose raw bytes hold none of them, no JSON escape that could hide one and
+** none of the decoder's junctions can give no hit of the key, so it is not
+** decoded. Needles are printable ASCII without '"' and '\\', so each byte
+** is raw unless escaped. */
+struct xr_pf
+{
+	char nd[3][XR_KEY_MAX + 16];
+	size_t nl[3], at[3];	/* its length, its anchor (rarest) byte */
+	int n, fold;		/* fold: the text's ASCII case folded */
+	const char *num;	/* issue #N: N, also as an id value (D2, D4) */
+};
+
+/* the anchor's rank, low first: '#', capitals, digits, other, lower case */
+static int
+pf_rank(unsigned char c, int fold)
+{
+	return c == '#' ? 0 : A_UP(c) ? 1 : A_DIG(c) ? 2 : !A_LO(c) ? 3
+	       : fold ? 9 : 4;
+}
+
+/* the longest run of t[0..l) a needle may hold; 0 when none fits */
+static int
+pf_add(struct xr_pf *f, const char *t, size_t l)
+{
+	size_t i, s = 0, best = 0, bs = 0, k;
+	int r = 9;
+
+	for (i = 0; i <= l; i++)
+		if (i == l || t[i] < 0x20 || t[i] > 0x7e || t[i] == '"' ||
+		    t[i] == '\\')
+		{
+			if (i - s > best)
+				best = i - s, bs = s;
+			s = i + 1;
+		}
+	if (!best || f->n == 3)
+		return 0;
+	for (k = 0; k < best; k++)
+	{
+		char c = t[bs + k];
+
+		f->nd[f->n][k] = f->fold && A_UP((unsigned char)c) ? c + 32 : c;
+		if (pf_rank((unsigned char)c, f->fold) < r)
+			r = pf_rank((unsigned char)c, f->fold), f->at[f->n] = k;
+	}
+	f->nl[f->n] = best;
+	return r < 9 && ++f->n;
+}
+
+/* key's needles (the grammar's rules, xr_ref_parse): 0 when it has none a
+** raw test can trust, so every window is decoded */
+static int
+pf_build(struct xr_pf *f, const char *key)
+{
+	const char *t = strchr(key, ':'), *h, *r;
+	char b[XR_KEY_MAX + 16];
+
+	memset(f, 0, sizeof *f);
+	if (!t++)
+		return 0;
+	if (!strncmp(key, "ticket:", 7) || !strncmp(key, "commit:", 7) ||
+	    !strncmp(key, "url:", 4))
+		return pf_add(f, t, strlen(t));
+	if (!strncmp(key, "file:", 5))
+	{
+		/* path_norm only drops components: the last is in the window, in
+		** the text or in a cwd field of a line of it */
+		r = strrchr(t, '/');
+		return pf_add(f, r ? r + 1 : t, strlen(r ? r + 1 : t));
+	}
+	if (!strncmp(key, "issue:", 6))
+	{
+		f->fold = t[0] != '#';	/* repo#N: lower case, the text any */
+		f->num = f->fold ? NULL : t + 1;	/* D2/D4: an id value N is
+						** #N (id_resolve) */
+		return pf_add(f, t, strlen(t));
+	}
+	f->fold = 1;
+	if (strncmp(key, "pull:", 5) || !(h = strrchr(t, '#')))
+		return 0;
+	/* o/r#N, or a github URL's r/pull/N or r/issues/N (url_kind) */
+	for (r = h; r > t && r[-1] != '/'; r--)
+		;
+	return pf_add(f, r, strlen(r)) &&
+	       pf_add(f, b, (size_t)snprintf(b, sizeof b, "%.*s/pull/%s",
+	                                     (int)(h - r), r, h + 1)) &&
+	       pf_add(f, b, (size_t)snprintf(b, sizeof b, "%.*s/issues/%s",
+	                                     (int)(h - r), r, h + 1));
+}
+
+/* nd (anchored at its byte a, the text folded or not) in s[from, n): its
+** start, or NULL */
+static const char *
+pf_find(const char *s, size_t n, size_t from, const char *nd, size_t l,
+        size_t a, int fold)
+{
+	const char *p = s + from + a, *e, *q;
+	size_t j;
+
+	if (from > n || l > n - from)
+		return NULL;
+	for (e = s + n - l + a + 1; p < e && (p = memchr(p, nd[a],
+	                                                  (size_t)(e - p))); p++)
+	{
+		for (q = p - a, j = 0; j < l && (fold && A_UP((unsigned char)q[j])
+		                                 ? q[j] + 32 : q[j]) == nd[j]; j++)
+			;
+		if (j == l)
+			return q;
+	}
+	return NULL;
+}
+
+/* back over blanks, quotes, backslashes and \b \f \n \r \t from s[p] */
+static size_t
+pf_back(const char *s, size_t p)
+{
+	for (;;)
+		if (p && memchr(" \t\"'\\", s[p - 1], 5))
+			p--;
+		else if (p > 1 && s[p - 2] == '\\' && memchr("bfnrt", s[p - 1], 5))
+			p -= 2;
+		else
+			return p;
+}
+
+/* N as an id value: back to a ':' after a word ending in id, number or
+** key, any case (D2's A_IDF, D4's number:/id: lines) */
+static int
+pf_num(const char *s, size_t n, const char *num)
+{
+	static const char *const w[] = { "id", "number", "key" };
+	size_t l = strlen(num), p, k, i = 0;
+	const char *m;
+
+	while ((m = pf_find(s, n, i, num, l, 0, 0)))
+	{
+		i = (size_t)(m - s) + 1;
+		if ((p = pf_back(s, (size_t)(m - s))) && s[p - 1] == ':')
+			for (p = pf_back(s, p - 1), k = 0; k < 3; k++)
+				if (p >= strlen(w[k]) &&
+				    !strncasecmp(s + p - strlen(w[k]), w[k], strlen(w[k])))
+					return 1;
+	}
+	return 0;
+}
+
+/* Text the decoder joins from bytes that are not adjacent raw: a pasted
+** content's unwrap, a system notice's strip_tags, a Codex message's parts
+** (cx_user). texts() and output_text join with '\n', which no key holds. */
+static int
+pf_junction(const char *s, size_t n)
+{
+	const char *p, *q, *b, *l = NULL;
+	size_t i;
+
+	if (pf_find(s, n, 0, "<pasted_content", 15, 0, 0))
+		return 1;
+	for (i = 0; (p = pf_find(s, n, i, "\"input_text\"", 12, 9, 0)); l = p)
+	{
+		if (l && !memchr(l, '\n', (size_t)(p - l)))
+			return 1;	/* two parts in one line */
+		i = (size_t)(p - s) + 12;
+	}
+	for (i = 0; (p = pf_find(s, n, i, "\"system\"", 8, 2, 0));
+	     i = (size_t)(q - s))
+	{
+		for (b = p; b > s && b[-1] != '\n'; b--)
+			;
+		if (!(q = memchr(p, '\n', (size_t)(s + n - p))))
+			q = s + n;
+		for (; b + 1 < q && (b = memchr(b, '<', (size_t)(q - b - 1))); b++)
+			if (A_LO((unsigned char)b[1]) || b[1] == '/')
+				return 1;	/* a tag strip_tags may drop */
+	}
+	return 0;
+}
+
+/* A JSON escape that writes printable ASCII (\/,  -\u007f), after any
+** run of backslashes: a nested string (a Codex call's arguments, D2's
+** output) is decoded twice. */
+static int
+pf_escape(const char *s, size_t n)
+{
+	const char *p = s, *e = s + n;
+
+	while (p < e && (p = memchr(p, '\\', (size_t)(e - p))) && ++p < e)
+		if (*p == '/' || (*p == 'u' && e - p > 4 && p[1] == '0' &&
+		                  p[2] == '0' && p[3] >= '2' && p[3] <= '7' &&
+		                  isxdigit((unsigned char)p[4])))
+			return 1;
+	return 0;
+}
+
+/* s[0, n) can hold no hit of f's key */
+static int
+pf_none(const struct xr_pf *f, const char *s, size_t n)
+{
+	int k;
+
+	for (k = 0; k < f->n; k++)
+		if (pf_find(s, n, 0, f->nd[k], f->nl[k], f->at[k], f->fold))
+			return 0;
+	return !(f->num && pf_num(s, n, f->num)) && !pf_junction(s, n) &&
+	       !pf_escape(s, n);
+}
+
 /* xr_claude_newest's windows: the bytes of the ones before added, so the
 ** --ref tick (budget, caps, progress) sees the whole read. */
 struct xr_win
@@ -6796,10 +7072,11 @@ win_tick(void *ctx, uint64_t bytes)
 	return w->tick(w->tctx, w->base + bytes);
 }
 
-/* Lines [a, b) by a fresh decoder (d's sink, inode and kind). */
+/* Lines [a, b) by a fresh decoder (d's sink, inode and kind) that starts
+** with cwd, the one a full decode has at a (#303). */
 static int
 win_read(struct xr_claude *d, int fd, uint64_t a, uint64_t b,
-         struct xr_win *w, char *buf, char *acc)
+         struct xr_win *w, char *buf, char *acc, const char *cwd)
 {
 	struct xr_claude *e = xr_claude_new();
 	struct xr_chapters ch;
@@ -6808,7 +7085,9 @@ win_read(struct xr_claude *d, int fd, uint64_t a, uint64_t b,
 	if (!e)
 		return -1;
 	e->codex = d->codex;
+	memcpy(e->cwd, cwd, sizeof e->cwd);
 	e->unit = d->unit;	/* a unit never repeats across windows */
+	e->blind = a > 0;
 	xr_claude_refs(e, &d->rk, d->ino, w->tick ? win_tick : NULL, w);
 	rc = read_range(e, fd, a, b, 0, buf, acc);
 	xr_claude_end(e, d->ino, &ch);
@@ -6821,13 +7100,163 @@ win_read(struct xr_claude *d, int fd, uint64_t a, uint64_t b,
 	return rc;
 }
 
+/* A window's cwd (#303): a line can only name one with a key ending "cwd"
+** or "irectory", or one written with an escape (a superset, raw). */
+static int
+cwd_maybe(const char *s, size_t n)
+{
+	size_t i;
+
+	for (i = 0; i < n; i++)
+		if ((s[i] == '"' && ((i >= 3 && !memcmp(s + i - 3, "cwd", 3)) ||
+		                     (i >= 8 && !memcmp(s + i - 8, "irectory", 8)))) ||
+		    (s[i] == '\\' && n - i > 4 && !memcmp(s + i + 1, "u00", 3) &&
+		     s[i + 4] >= '4' && s[i + 4] <= '7'))
+			return 1;
+	return 0;
+}
+
+static int
+cwd_halt(void *ctx, uint64_t bytes)
+{
+	(void)ctx;
+	(void)bytes;
+	return 1;
+}
+
+/* The line at a (up to b) decoded alone, as the full read decodes it (a
+** decoder with no refs, stopped after it): 1 it names a cwd, copied to cwd;
+** 0 not; -1 a read error. */
+static int
+cwd_line(const struct xr_claude *d, int fd, uint64_t a, uint64_t b,
+         char *buf, char *acc, char *cwd)
+{
+	struct xr_claude *e = xr_claude_new();
+	int rc;
+
+	if (!e)
+		return -1;
+	e->codex = d->codex;
+	e->tick = cwd_halt;
+	if ((rc = read_range(e, fd, a, b, 0, buf, acc)) == 0 && e->cwd[0])
+	{
+		memcpy(cwd, e->cwd, sizeof e->cwd);
+		rc = 1;
+	}
+	xr_claude_free(e);
+	return rc < 0 ? -1 : rc;
+}
+
+/* The last line of [lo, hi) that names a cwd, read backwards a chunk at a
+** time (sb), hi a line start or the head's end: 1 with *at its start, 0
+** none (or the tick stopped it), -1 a read error. */
+static int
+cwd_back(struct xr_claude *d, int fd, uint64_t lo, uint64_t hi,
+         struct xr_win *w, char *sb, char *buf, char *acc, uint64_t *at,
+         char *cwd)
+{
+	uint64_t be = hi, le = 0;	/* le: a line longer than a chunk ends */
+
+	while (be > lo)
+	{
+		uint64_t bs = be - lo > xr_lim.chunk ? be - xr_lim.chunk : lo;
+		size_t n = (size_t)(be - bs), f = 0, e, j;
+		ssize_t got;
+		int k;
+
+		if (w->tick && (d->halt = w->tick(w->tctx, w->base)))
+			return 0;
+		while ((got = pread(fd, sb, n, (off_t)bs)) < 0 && errno == EINTR)
+			;
+		if (got != (ssize_t)n)
+			return got < 0 ? -1 : 0;	/* shrank */
+		if (le)	/* that line starts past the block's last '\n' (or lo) */
+		{
+			for (j = n; j > 0 && sb[j - 1] != '\n'; j--)
+				;
+			if (!j && bs > lo)
+			{
+				be = bs;
+				continue;
+			}
+			if ((k = cwd_line(d, fd, bs + j, le, buf, acc, cwd)))
+				return k < 0 ? k : (*at = bs + j, 1);
+			le = 0;
+			be = bs + j;
+			continue;
+		}
+		if (bs > lo)	/* the block's first line start */
+		{
+			for (f = 0; f < n && sb[f] != '\n'; f++)
+				;
+			if (++f >= n)	/* the line ending at be starts before bs */
+			{
+				le = be;
+				be = bs;
+				continue;
+			}
+		}
+		for (e = n; e > f; e = j)
+		{
+			for (j = e - 1; j > f && sb[j - 1] != '\n'; j--)
+				;
+			if (cwd_maybe(sb + j, e - j) &&
+			    (k = cwd_line(d, fd, bs + j, bs + e, buf, acc, cwd)))
+				return k < 0 ? k : (*at = bs + j, 1);
+		}
+		be = bs + f;
+	}
+	return 0;
+}
+
+/* Lines [a, b) not decoded when f says they cannot hold the key (#293): 1,
+** their ticks and lines_too_long as read_range gives them; 0 to decode them
+** (a hit possible, or a short read: read_range's to report). buf holds b - a. */
+static int
+win_skip(struct xr_claude *d, const struct xr_pf *f, int fd, uint64_t a,
+         uint64_t b, struct xr_win *w, char *buf)
+{
+	size_t n = (size_t)(b - a), got = 0, i = 0;
+	const char *nl;
+
+	while (got < n)
+	{
+		ssize_t r = pread(fd, buf + got, n - got, (off_t)(a + got));
+
+		if (r < 0 && errno == EINTR)
+			continue;
+		if (r <= 0)
+			return 0;
+		got += (size_t)r;
+	}
+	if (!pf_none(f, buf, n))
+		return 0;
+	xr_skipped++;
+	while ((nl = memchr(buf + i, '\n', n - i)))
+	{
+		if ((size_t)(nl - (buf + i)) > xr_lim.line)
+			d->too_long++;
+		i = (size_t)(nl - buf) + 1;
+		if ((d->halt = w->tick(w->tctx, w->base + i)))
+			break;
+	}
+	w->base += n;
+	return 1;
+}
+
 int
 xr_claude_newest(struct xr_claude *d, int fd, uint64_t size, int *capped)
 {
-	char *buf = malloc(XR_CHUNK), *acc = malloc(XR_LINE_MAX + 1);
-	uint64_t r[2][2], end = size;
+	/* a window of whole lines starts in its chunk and ends in the next */
+	char *buf = malloc(2 * XR_CHUNK), *acc = malloc(XR_LINE_MAX + 1);
+	char *sb = malloc(XR_CHUNK), cwd[sizeof d->cwd] = "";
+	uint64_t r[2][2], cat = 0;
 	struct xr_win w;
-	int nr = 1, i, k, rc = buf && acc ? 0 : -1;
+	struct xr_pf f;
+	int nr = 1, i, k, rc = buf && acc && sb ? 0 : -1, known = 0;
+	/* --ref's scan: only its key's hits count (sc_hit) */
+	int pf = !xr_noskip && d->tick == xr_scan_tick &&
+	         pf_build(&f, ((const struct xr_scan *)d->tctx)->key);
 
 	w.tick = d->tick;
 	w.tctx = d->tctx;
@@ -6837,7 +7266,9 @@ xr_claude_newest(struct xr_claude *d, int fd, uint64_t size, int *capped)
 	r[0][1] = size;
 	if (size > xr_lim.head + xr_lim.tail)
 	{
-		/* the tail first, then the head (3.8's range) */
+		/* the tail first, then the head (3.8's range); the head's last
+		** window ends at its end, and read_range leaves the line it
+		** cuts there, as xr_claude_read does (#303) */
 		*capped = 1;
 		r[0][0] = size - xr_lim.tail;
 		r[1][0] = 0;
@@ -6850,13 +7281,9 @@ xr_claude_newest(struct xr_claude *d, int fd, uint64_t size, int *capped)
 	{
 		uint64_t lo = 0, b = r[i][1], s, a;
 
-		/* the head ends past its last line, before the tail's first */
-		if (i && (k = line_start(fd, b, end, buf, &b)) <= 0)
-			b = end, rc = k;
 		/* the range starts at its first line (the tail: past its cut) */
-		if (rc == 0 && (k = line_start(fd, r[i][0], b, buf, &lo)) <= 0)
+		if ((k = line_start(fd, r[i][0], b, buf, &lo)) <= 0)
 			lo = b, rc = k;
-		end = lo;
 		for (s = b; s > lo && rc == 0 && !d->halt;)
 		{
 			uint64_t t = s;
@@ -6867,8 +7294,37 @@ xr_claude_newest(struct xr_claude *d, int fd, uint64_t size, int *capped)
 			s = s - lo > xr_lim.chunk ? s - xr_lim.chunk : lo;
 			/* [t, b) has no line start: the window's is in [s, t) */
 			if ((k = line_start(fd, s, t, buf, &a)) < 0)
+			{
 				rc = -1;
-			else if (k && (rc = win_read(d, fd, a, b, &w, buf, acc)) >= 0)
+				break;
+			}
+			if (!k)
+				continue;
+			/* before the cwd search: a skipped window needs none */
+			if (pf && b - a <= 2 * XR_CHUNK &&
+			    win_skip(d, &f, fd, a, b, &w, buf))
+			{
+				b = a;
+				continue;
+			}
+			/* the cwd at a: the last line before it that names one, in
+			** this range, then the head; kept while that line is older
+			** than the window (a only falls) */
+			if (!known || cat >= a)
+			{
+				k = cwd_back(d, fd, lo, a, &w, sb, buf, acc, &cat, cwd);
+				if (!k && !d->halt && !i && nr == 2)
+					k = cwd_back(d, fd, 0, r[1][1], &w, sb, buf, acc,
+					             &cat, cwd);
+				if (k < 0)
+					rc = -1;
+				if (k <= 0)
+					cat = 0, cwd[0] = '\0';
+				if (k < 0 || d->halt)
+					break;
+				known = 1;
+			}
+			if ((rc = win_read(d, fd, a, b, &w, buf, acc, cwd)) >= 0)
 				b = a;
 		}
 	}
@@ -6879,6 +7335,7 @@ xr_claude_newest(struct xr_claude *d, int fd, uint64_t size, int *capped)
 	}
 	free(buf);
 	free(acc);
+	free(sb);
 	return rc;
 }
 
@@ -9653,7 +10110,9 @@ struct sr_hit
 {
 	uint64_t off, aseq;	/* aseq: a shell command row's block */
 	long long at;
-	int who, pend;		/* pend: its chapter is not known yet */
+	int who, pend;		/* pend: its chapter is not known yet (2:
+				** chapter holds one an older window may
+				** still merge away, #299) */
 	char *tool, *snip;
 	char chapter[40];
 };
@@ -10131,16 +10590,17 @@ sr_line(struct xr_search *s, const struct sr_win *w)
 
 /* The chapters of w's lines, by a fresh decoder (as light --ref's windows):
 ** a pending hit is under the newest chapter at or before it, unless that is
-** the window's first and started by no prompt (the turn began in an older
-** window), or lies in another region. A hit whose region this window leaves
-** is under no chapter --json knows. */
+** the window's first (the turn began in an older window; one a prompt began
+** is held as pend 2 for the older window to settle), or lies in another
+** region. A hit whose region this window leaves is under no chapter --json
+** knows. */
 static int
 sr_chapters(struct xr_search *s, const struct sr_win *w)
 {
 	struct xr_claude *e = xr_claude_new();
 	const struct xr_chapters *ch;
 	struct xr_sink none = { NULL, NULL };
-	uint64_t wa = w->base + (w->nln ? w->ln[0].i : 0);
+	uint64_t wa = w->base + (w->nln ? w->ln[0].i : 0), cut = UINT64_MAX;
 	size_t k, i;
 
 	if (!e)
@@ -10151,13 +10611,22 @@ sr_chapters(struct xr_search *s, const struct sr_win *w)
 	for (k = 0; k < w->nln; k++)
 	{
 		const char *l = w->buf + w->ln[k].i;
+		uint64_t o = w->base + w->ln[k].i;
 		size_t j;
 
+		/* #299: only the lines the full decode reads (not the middle, nor
+		** the line the head's end cuts), so at the tail's first line this
+		** decoder carries on from the head as that one does */
+		if (s->capped && o + w->ln[k].n >= s->head && o < s->lotail)
+		{
+			cut = o < s->head ? o : cut;
+			continue;
+		}
 		for (j = 0; j < w->ln[k].n && (l[j] == ' ' || l[j] == '\t' ||
 		                               l[j] == '\r'); j++)
 			;
 		if (j < w->ln[k].n)
-			xr_claude_line(e, l, w->ln[k].n, w->base + w->ln[k].i, 0);
+			xr_claude_line(e, l, w->ln[k].n, o, 0);
 	}
 	ch = xr_claude_chapters(e);
 	for (k = 0; k < s->n; k++)
@@ -10165,8 +10634,25 @@ sr_chapters(struct xr_search *s, const struct sr_win *w)
 		struct sr_hit *h = &s->hit[k];
 		const struct xr_chapter *c = NULL;
 
-		if (!h->pend)
+		if (!h->pend || h->off == cut)	/* cut: a line --json never reads */
+		{
+			h->pend = 0;
 			continue;
+		}
+		/* #299: a newer window's first chapter, a prompt's, stands when this
+		** window ends past a step; after a prompt the full decode merged it
+		** into this window's last chapter; else (no main block, or images
+		** only) it is not known */
+		if (h->pend == 2 && e->turn)
+		{
+			h->pend = 0;
+			if (!e->lead)
+				continue;
+			h->chapter[0] = '\0';
+			if (!e->titled)
+				continue;
+			h->pend = 1;
+		}
 		for (i = ch->n; i > 0 && !c; i--)
 		{
 			const struct xr_chapter *x = xr_chapter_at(ch, i - 1);
@@ -10175,14 +10661,25 @@ sr_chapters(struct xr_search *s, const struct sr_win *w)
 				c = x;
 		}
 		/* i: c's index now, so 0 is the window's first chapter */
-		if (c && (i || !c->partial || !wa) &&
-		    sr_region(s, c->offset) == sr_region(s, h->off))
+		if (c && sr_region(s, c->offset) != sr_region(s, h->off))
+			c = NULL;
+		if (h->pend == 1 && c && (i || !wa))
 		{
 			snprintf(h->chapter, sizeof h->chapter, "%s", c->anchor);
 			h->pend = 0;
 		}
-		else if (sr_region(s, wa) != sr_region(s, h->off))
+		/* #299: begun by a prompt, it may be merged into an older one */
+		else if (h->pend == 1 && c && !c->partial)
+		{
+			snprintf(h->chapter, sizeof h->chapter, "%s", c->anchor);
+			h->pend = 2;
+		}
+		/* begun by an image, a prompt then joined: the full decode's
+		** chapter may begin at that prompt, which this one did not keep */
+		else if (h->pend == 1 && c && c->title[0])
 			h->pend = 0;
+		else if (sr_region(s, wa) != sr_region(s, h->off))
+			h->pend = 0, h->chapter[0] = '\0';
 	}
 	xr_claude_free(e);
 	return 0;
@@ -10303,7 +10800,8 @@ xr_search_file(struct xr_search *s, int fd, uint64_t size, uint64_t ino,
 	if (end > 0 && !s->more && rc == 0)
 		s->partial = 1;		/* a cap, or the file shrank */
 	for (i = 0; i < s->n; i++)
-		s->hit[i].pend = 0;	/* not found in time: null */
+		if (s->hit[i].pend)	/* not found in time: null */
+			s->hit[i].pend = 0, s->hit[i].chapter[0] = '\0';
 	free(w.ln);
 	free(w.buf);
 	return rc;

@@ -19,6 +19,14 @@ until the pty takes it.
   held      the same under a hold (--respawn with no argv): the session is
             held with exit 7, and the program --respawn starts gets none of
             the old input.
+  cap       (#307) a program not reading, 4 MB minus 20 KB of --send held
+            (each send under the cap exits 0), then a 500 KB bracketed paste
+            past the cap: by --send (capsend), it exits 1 and says the input
+            was dropped; through an attach (capatt). Either way the program
+            then reads the paste cut at its tail with its ESC[201~ (before,
+            the middle went and a later small packet landed, or the end
+            marker was lost), and nothing of the rest; after it has read
+            all, a --send exits 0 and a key typed on the attach goes in.
 
 Run:  python3 tests/send_busy_pty_test.py      (uses ./dch)
 """
@@ -60,7 +68,61 @@ RX = ("import os, sys, tty\n"
       "    b = os.read(0, 65536)\n"
       "    if not b: break\n"
       "    f.write(b)\n")
+CAP = ("import os, sys, time, tty\n"
+       "tty.setraw(0)\n"
+       "d = sys.argv[1]\n"
+       "open(d + '/ready', 'w').close()\n"
+       "while not os.path.exists(d + '/go'): time.sleep(0.02)\n"
+       "f = open(d + '/got', 'ab', 0)\n"
+       "while True:\n"
+       "    f.write(os.read(0, 65536))\n")
+HELD = 4 * 1024 * 1024 - 4096	# what the master holds for a program (#307)
 fails = 0
+
+
+def fill_words():
+    """--send argument lists that add up to HELD - 20 KB (words of 100 KB:
+    Linux takes no single argument past 128 KB)."""
+    sends, left = [], HELD - 20 * 1024
+    while left > 0:
+        n = min(8, (left + 1) // 100001 or 1)
+        w = ["F" * 100000] * n
+        if len(" ".join(w)) > left:
+            w = ["F" * 100000] * (n - 1) if n > 1 else []
+            w.append("F" * (left - len(" ".join(w)) - (1 if w else 0)))
+        sends.append(w)
+        left -= len(" ".join(w))
+    return sends
+
+
+def paste_words(tag):
+    """A 500 KB bracketed paste as --send words, numbered so a hole shows:
+    its last 4 KB packet carries 100 bytes, the end marker among them."""
+    body = "".join("%s%07d|" % (tag, i) for i in range(70000))
+    words = [body[i:i + 100000] for i in range(0, 500000, 100000)]
+    full = "\033[200~" + " ".join(words) + "\033[201~"
+    words[-1] += tag * ((100 - len(full) % 4096) % 4096)
+    words[0], words[-1] = "\033[200~" + words[0], words[-1] + "\033[201~"
+    return words
+
+
+def cut_paste(data, full):
+    """None when data is the paste full cut at its tail, with its end
+    marker and nothing after it; else why not."""
+    s, e = b"\033[200~", b"\033[201~"
+    body = full[len(s):-len(e)]
+    if not data.startswith(s):
+        return "no start marker: %r" % data[:24]
+    if not data.endswith(e):
+        return "no end marker, the program is left inside a paste: " \
+            "%d bytes, ending %r" % (len(data), data[-24:])
+    mid = data[len(s):-len(e)]
+    if not mid or len(mid) >= len(body):
+        return "not cut (%d of %d bytes)" % (len(mid), len(body))
+    if not body.startswith(mid):
+        k = next(i for i in range(len(mid)) if mid[i] != body[i])
+        return "a hole at byte %d of %d: %r" % (k, len(mid), mid[k:k + 24])
+    return None
 
 
 def check(name, ok, detail=""):
@@ -139,7 +201,7 @@ def main():
     sockdir = os.path.join(tmp, "dch-%d" % os.getuid())
     recdir = os.path.join(state, "dch", "sessions",
                           sockdir.replace("/", "-"))
-    names, atts = [], []
+    names, atts, stopped = [], [], []
 
     def dch(*a, timeout=30):
         try:
@@ -149,6 +211,15 @@ def main():
                                   timeout=timeout).returncode
         except subprocess.TimeoutExpired:
             return "no answer in %d s" % timeout
+
+    def dch_err(*a, timeout=30):
+        try:
+            r = subprocess.run([DCH] + list(a), env=env,
+                               stdin=subprocess.DEVNULL, capture_output=True,
+                               text=True, timeout=timeout)
+            return r.returncode, r.stderr
+        except subprocess.TimeoutExpired:
+            return "no answer in %d s" % timeout, ""
 
     def spawn(name, prog, *args):
         d = os.path.join(tmp, name + ".d")
@@ -193,6 +264,11 @@ def main():
         check("%s: --send of 96 KB to a program not reading: exit 0" % name,
               rc == 0, rc)
         mp, cp = master(name), until(lambda: readf(d + "/pid"), 10)
+        # master() is 0 when no ps line matches: kill(0) would stop this test
+        check("%s: the master's pid found" % name, mp, mp)
+        if not mp:
+            return 0
+        stopped.append(mp)
         os.kill(mp, signal.SIGSTOP)
         open(d + "/die", "w").close()
         dead = until(lambda: zombie(int(cp)), 10)
@@ -203,7 +279,81 @@ def main():
         os.kill(mp, signal.SIGCONT)
         return mp
 
+    def fill(name):
+        rcs, sent = [], b""
+        for w in fill_words():
+            rcs.append(dch("--send", name, *w, timeout=30))
+            sent += " ".join(w).encode()
+        check("%s: --send of 4 MB less 20 KB in %d sends, each under the "
+              "cap: exit 0" % (name, len(rcs)), rcs == [0] * len(rcs), rcs)
+        return sent
+
+    def drained(d, tail):
+        """The program read until what it got stops growing and ends with
+        tail."""
+        last = [-1, time.time()]
+
+        def done():
+            data = readf(d + "/got", "rb")
+            if len(data) != last[0]:
+                last[:] = [len(data), time.time()]
+            return data.endswith(tail) and time.time() - last[1] > 0.3
+        until(done, 30)
+        return readf(d + "/got", "rb")
+
+    def cap_send():
+        d = spawn("capsend", CAP, os.path.join(tmp, "capsend.d"))
+        until(lambda: os.path.exists(d + "/ready"), 20)
+        sent = fill("capsend")
+        w = paste_words("p")
+        rc, err = dch_err("--send", "capsend", *w, timeout=30)
+        check("capsend: --send of a 500 KB paste past the cap: exit 1, "
+              "one line says the input was dropped",
+              rc == 1 and err == "dch: capsend: input dropped: the program "
+              "is not reading (4 MB held)\n", (rc, err))
+        open(d + "/go", "w").close()
+        data = drained(d, b"\033[201~")
+        check("capsend: the program read the 4 MB held before it, whole",
+              data.startswith(sent), (len(data), len(sent)))
+        why = cut_paste(data[len(sent):], " ".join(w).encode())
+        check("capsend: then the paste cut at its tail with its end marker, "
+              "no hole, nothing after", why is None, why)
+        rc = dch("--send", "capsend", "END")
+        check("capsend: once read, a --send exits 0 and goes in whole",
+              rc == 0 and until(lambda: readf(d + "/got", "rb") ==
+                                data + b"END", 10),
+              (rc, readf(d + "/got", "rb")[-30:]))
+
+    def cap_attach():
+        d = spawn("capatt", CAP, os.path.join(tmp, "capatt.d"))
+        a = attach("capatt")
+        until(lambda: os.path.exists(d + "/ready"), 20)
+        sent = fill("capatt")
+        full = " ".join(paste_words("q")).encode()
+        off = 0
+        while off < len(full):
+            if select.select([], [a.fd], [], 0.05)[1]:
+                off += os.write(a.fd, full[off:off + 4096])
+            a.pump(0.001, lambda: False)
+        a.pump(1, lambda: False)
+        open(d + "/go", "w").close()
+        data = drained(d, b"\033[201~")
+        check("capatt: the program read the 4 MB held before it, whole",
+              data.startswith(sent), (len(data), len(sent)))
+        why = cut_paste(data[len(sent):], full)
+        check("capatt: a paste typed on the attach past the cap: cut at its "
+              "tail with its end marker, no hole, nothing after",
+              why is None, why)
+        os.write(a.fd, b"K")
+        check("capatt: once read, a key typed on the attach goes in",
+              until(lambda: readf(d + "/got", "rb") == data + b"K", 10),
+              readf(d + "/got", "rb")[-30:])
+
     try:
+        # --- cap: a paste past what the master holds (#307) ---------------
+        cap_send()
+        cap_attach()
+
         # --- busy: a program printing before it reads ---------------------
         d = spawn("busy", BUSY, os.path.join(tmp, "busy.d"))
         a = attach("busy")
@@ -262,6 +412,11 @@ def main():
               rc == 0 and c and until(lambda: readf(rxf) == "NEW", 10),
               (rc, c and c["state"], readf(rxf)[:40]))
     finally:
+        for mp in stopped:
+            try:
+                os.kill(mp, signal.SIGCONT)
+            except OSError:
+                pass
         for a in atts:
             a.close()
         for n in names:

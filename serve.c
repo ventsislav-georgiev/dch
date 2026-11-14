@@ -2512,7 +2512,7 @@ accept_one(int lfd, int nr)
 	socklen_t sl = sizeof sa;
 	char ipstr[INET_ADDRSTRLEN];
 	uint32_t ip, local = 0;
-	int fd, i, same = 0;
+	int fd, i, same = 0, all = 0;
 	struct neg *n;
 	pid_t pid;
 
@@ -2562,9 +2562,17 @@ accept_one(int lfd, int nr)
 		refused_wait(fd);
 		return;
 	}
+	/* a peer's watch streams (one per `dch --ls-json --remote --follow`
+	** there) count apart: its 16 others stay free beside up to 16 of
+	** them (QA 1.62.0 LOW-R3) */
 	for (i = 0; i < nkids; i++)
-		same += kids[i].ip == ip;
-	if (nkids >= MAX_CONN || same >= MAX_PER_PEER)
+		if (kids[i].ip == ip)
+		{
+			all++;
+			same += !kids[i].dev[0];
+		}
+	if (nkids >= MAX_CONN || same >= MAX_PER_PEER ||
+	    all >= 2 * MAX_PER_PEER)
 	{
 		slog("%s: refused: %s", ipstr, nkids >= MAX_CONN
 		     ? "too many connections" : "too many connections from it");

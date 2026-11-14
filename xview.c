@@ -1,14 +1,16 @@
 /*
 ** The X-ray view (#175, XR5a): `dch --xray <n>` with no --json, and the
-** picker's x. Two tabs over one session, Prompts (Commands for a shell,
-** #295: the engine's chapters) and Refs (the refs on the session's screen
-** now first, #294); a ref's card; a chapter's reader. Drawn with the
-** picker's renderer, on the terminal its host (dch.c) made raw and put on
-** the alternate screen.
+** picker's x. Tabs over one session: Prompts (Commands for a shell,
+** #295: the engine's chapters), Responses (each turn's answer, newest first,
+** #290; none for a shell), Refs (the refs on the session's screen now
+** first, #294) and Search (where a word or phrase was said, #291); a ref's
+** card; a chapter's reader. Drawn with the picker's renderer, on the
+** terminal its host (dch.c) made raw and put on the alternate screen.
 **
 ** Every answer is the engine's own --json: dch.c's xv_spawn forks this
-** process and runs xray_main in the child with --follow, --ref or --chapter
-** and --json, stdout into a pipe, and the view reads the NDJSON with json.c.
+** process and runs xray_main in the child with --follow, --ref, --chapter
+** or --search and --json, stdout into a pipe, and the view reads the NDJSON
+** with json.c.
 ** No second parser of any corpus, no exec, nothing written to disk. The
 ** index lives as --follow's does (spec 3.1): a snapshot, then deltas, for as
 ** long as the view is open; every child is ended with it.
@@ -33,8 +35,13 @@
 #define XV_LATE      16	/* kept: SIGKILLed, not dead yet */
 
 enum { XV_LIST, XV_CARD, XV_READ };
-enum { XV_FK, XV_CK, XV_RK, XV_SK, XV_NKIDS };	/* follow, card, reader,
-						** a remote screen (#188) */
+/* the tabs as drawn and cycled: 0 Prompts, 2 Responses (#290), 1 Refs (the
+** chord's xv_tab), 3 Search (#291) */
+static const int xv_ord[] = { 0, 2, 1, 3 };
+#define XV_NTAB  ((int)(sizeof xv_ord / sizeof *xv_ord))
+#define XV_ALINES 8	/* a response's lines on Responses; the reader has all */
+/* follow, card, reader, a remote screen (#188), a search (#291) */
+enum { XV_FK, XV_CK, XV_RK, XV_SK, XV_QK, XV_NKIDS };
 
 static char xv_none[1];	/* "": a field absent, null, or out of memory */
 static volatile pid_t xv_pids[XV_NKIDS];	/* for xv_kill */
@@ -59,6 +66,11 @@ struct xv_ch
 	char *anchor, *title, *kind, *summary;
 	long long at, offset;
 	int error, aut;	/* aut: "auto", a prompt the harness wrote (#192) */
+	/* the turn's answer and tool line (#296), "" when absent (an older
+	** host's); roff -1 none, rcut: the engine cut it */
+	char *resp, *tools;
+	long long roff;
+	int rcut;
 };
 
 struct xv_ref
@@ -79,13 +91,19 @@ struct xv_def
 struct xv_men
 {
 	char *session, *line, *chapter;
-	long long at;
+	long long at, off;	/* off: -1 from a host that sends none */
 };
 
 struct xv_ent
 {
 	char *role, *tool, *text;
 	int error;
+};
+
+struct xv_hit		/* a search's hit (#291) */
+{
+	char *chapter, *who, *tool, *snippet;
+	long long at;
 };
 
 struct xv_rl		/* a reader line: bytes [s, s + n) of its text */
@@ -102,6 +120,13 @@ struct xv
 	char n[700];		/* the session as given */
 	char fail[400];		/* the host's refusal, in place of the tabs */
 	char status[400], filt[256];
+	/* Search (#291): the text typed, the one searched (as big as filt:
+	** xv_filt edits either); the list's one line in place of hits (an
+	** older host, no corpus) */
+	char q[256], sq[256], sline[400];
+	struct xv_hit *hit;
+	int nh, ah, sdone, smore, spart;	/* sdone: its answer came */
+	char *swhy;
 	char stop[400];		/* the follow's end: the status row when it is
 				** empty, never replaced (QA 1.57.0 LOW-R3) */
 	/* the index: --follow's snapshot and its deltas */
@@ -117,13 +142,19 @@ struct xv
 	int allauto, nauto;	/* Chapters: auto chapters shown; their rows */
 	long long rseq;
 	struct xv_kid kid[XV_NKIDS];
-	int sel[2], top[2], *vis, nvis, avis;
+	int sel[XV_NTAB], top[XV_NTAB], *vis, nvis, avis;	/* Responses: items */
 	int ngrp;		/* Refs: vis's first ngrp rows are on screen */
 	char *selk;		/* Refs: the selected row's key, followed when
 				** the rows change */
+	char *sela;		/* Responses: the selected item's anchor, so */
+	int old;		/* Responses: a host too old to send them */
 	/* the card */
 	char *ckey, *ctext;
 	int full, scope, cdone, cpartial, csel, ctop;
+	/* the selected mention's session and offset, followed as lines
+	** arrive (#304); cses NULL on the first row */
+	char *cses;
+	long long coff;
 	struct xv_def *d;
 	struct xv_men *m;
 	int nd, ad, nm, am;
@@ -132,6 +163,7 @@ struct xv
 	char *vkind, *vtitle, *vsub;	/* --full's resolved line */
 	/* the reader */
 	char *rtitle, *rwant;
+	char *rans;		/* opened on an answer: its start (#290) */
 	char *ranchor, *rturn;	/* the chapter shown; one being turned to */
 	long long rat;
 	int rtrunc, rtop, rw, rloaded;
@@ -274,14 +306,27 @@ xv_has(const char *s, const char *f)
 	return !fl;
 }
 
-/* Does s[0..n) hold w? */
+/* Does s start with w, ASCII letters folded as the engine's --search
+** (#291)? */
+static int
+xv_at(const char *s, const char *w)
+{
+	for (; *w; s++, w++)
+		if ((*s >= 'A' && *s <= 'Z' ? *s + 32 : *s) !=
+		    (*w >= 'A' && *w <= 'Z' ? *w + 32 : *w))
+			return 0;
+	return 1;
+}
+
+/* Does w start in s[0..n)? s goes on past n (a reader line's text), so a
+** match may end on a later line; ASCII letters folded (#291). */
 static int
 xv_in(const char *s, size_t n, const char *w)
 {
-	size_t l = strlen(w), k;
+	size_t k;
 
-	for (k = 0; l && k + l <= n; k++)
-		if (!memcmp(s + k, w, l))
+	for (k = 0; *w && k < n; k++)
+		if (xv_at(s + k, w))
 			return 1;
 	return 0;
 }
@@ -559,6 +604,8 @@ xv_ch_free(struct xv_ch *c)
 	xv_sfree(c->title);
 	xv_sfree(c->kind);
 	xv_sfree(c->summary);
+	xv_sfree(c->resp);
+	xv_sfree(c->tools);
 }
 
 static void
@@ -586,6 +633,7 @@ static void
 xv_chapter(struct xv *v, const struct json_parser *p, int o)
 {
 	struct xv_ch c;
+	char *s;
 	int k;
 
 	c.anchor = xv_str(p, o, "anchor");
@@ -597,6 +645,14 @@ xv_chapter(struct xv *v, const struct json_parser *p, int o)
 	/* absent from an older engine or host: every chapter shown */
 	c.aut = xv_bool(p, o, "auto");
 	c.summary = xv_str(p, o, "summary");
+	c.resp = xv_str(p, o, "response");
+	c.tools = xv_str(p, o, "tools");
+	c.roff = xv_num(p, o, "response_offset", -1);
+	c.rcut = xv_bool(p, o, "response_cut");
+	/* a tab or CR as a blank, as the reader's */
+	for (s = c.resp; *s; s++)
+		if (*s == '\t' || *s == '\r')
+			*s = ' ';
 	/* an anchor already held is replaced (3.3) */
 	for (k = 0; k < v->nch && strcmp(v->ch[k].anchor, c.anchor); k++)
 		;
@@ -804,6 +860,8 @@ xv_cline(struct xv *v, const struct json_parser *p)
 	else if ((o = xv_obj(p, 0, "mention", JSON_OBJECT)) >= 0)
 	{
 		struct xv_men m;
+		long long off = xv_num(p, o, "offset", -1);
+		int i;
 
 		if (v->nm >= XV_MENTIONS ||
 		    xv_grow(&v->m, &v->am, v->nm, sizeof m) < 0)
@@ -821,7 +879,6 @@ xv_cline(struct xv *v, const struct json_parser *p)
 		** session's is the last one that starts before it */
 		if (!m.chapter[0] && v->session && !strcmp(m.session, v->session))
 		{
-			long long off = xv_num(p, o, "offset", -1);
 			int c, best = -1;
 			char *t;
 
@@ -837,7 +894,22 @@ xv_cline(struct xv *v, const struct json_parser *p)
 			}
 		}
 		m.at = xv_num(p, o, "at", -1);
-		v->m[v->nm++] = m;
+		m.off = off;
+		/* newest first within a file (#304): above its file's older
+		** lines, so light's windows (newest first, each in file order)
+		** and --full (oldest first) both list newest first; files keep
+		** the order sent, a host that sends no offset arrival order */
+		for (i = v->nm; i > 0 && off >= 0 && v->m[i - 1].off >= 0 &&
+		     v->m[i - 1].off < off && !strcmp(v->m[i - 1].session,
+		     m.session); i--)
+			;
+		memmove(v->m + i + 1, v->m + i, (size_t)(v->nm - i) * sizeof m);
+		v->m[i] = m;
+		v->nm++;
+		if (v->cses && v->coff == off && !strcmp(v->cses, m.session))
+			v->csel = i;
+		else if (v->cses && i <= v->csel)
+			v->csel++;
 	}
 	else if ((o = xv_obj(p, 0, "resolved", JSON_OBJECT)) >= 0 &&
 	         !v->vkind)
@@ -854,6 +926,22 @@ xv_cline(struct xv *v, const struct json_parser *p)
 		v->cdone = 1;
 		v->cpartial = xv_bool(p, 0, "partial");
 	}
+}
+
+/* The card's selection follows its mention as lines arrive (#304), also
+** through f and p's new scan; on the first row it stays there (the newest
+** under it), as Refs' does. */
+static void
+xv_cpin(struct xv *v)
+{
+	if (v->csel >= v->nm)
+		v->csel = v->nm - 1;
+	if (v->csel < 0)
+		v->csel = 0;
+	free(v->cses);
+	v->cses = v->csel > 0 && v->m[v->csel].off >= 0
+	          ? strdup(v->m[v->csel].session) : NULL;
+	v->coff = v->cses ? v->m[v->csel].off : -1;
 }
 
 /* The card of ref text (key: its index key), scanned light for the
@@ -880,6 +968,8 @@ xv_card(struct xv *v, const char *key, const char *text, int full,
 			return;
 		}
 		v->csel = v->ctop = 0;
+		free(v->cses);
+		v->cses = NULL;
 	}
 	xv_card_free(v);
 	for (k = 0; k < 5; k++)
@@ -924,8 +1014,99 @@ xv_fref(const struct xv *v, char *t, size_t sz)
 	return 1;
 }
 
+/* ---- Search (--search, #291) --------------------------------------- */
+
+static void
+xv_hits_free(struct xv *v)
+{
+	int k;
+
+	for (k = 0; k < v->nh; k++)
+	{
+		xv_sfree(v->hit[k].chapter);
+		xv_sfree(v->hit[k].who);
+		xv_sfree(v->hit[k].tool);
+		xv_sfree(v->hit[k].snippet);
+	}
+	v->nh = v->sdone = v->smore = v->spart = 0;
+	xv_sfree(v->swhy);
+	v->swhy = NULL;
+	v->sline[0] = '\0';
+}
+
+/* The search's one answer: its hits, newest first as sent */
+static void
+xv_qline(struct xv *v, const struct json_parser *p)
+{
+	int a, t;
+
+	if (v->sdone || (a = xv_obj(p, 0, "hits", JSON_ARRAY)) < 0)
+		return;
+	for (t = a + 1; t < p->tok[a].next; t = p->tok[t].next)
+	{
+		struct xv_hit h;
+
+		if (p->tok[t].kind != JSON_OBJECT ||
+		    xv_grow(&v->hit, &v->ah, v->nh, sizeof h) < 0)
+			continue;
+		h.chapter = xv_str(p, t, "chapter");
+		h.who = xv_str(p, t, "who");
+		h.tool = xv_str(p, t, "tool");
+		h.snippet = xv_str(p, t, "snippet");
+		h.at = xv_num(p, t, "at", -1);
+		v->hit[v->nh++] = h;
+	}
+	v->smore = xv_bool(p, 0, "more");
+	v->spart = xv_bool(p, 0, "partial");
+	v->swhy = xv_str(p, 0, "why");
+	v->sdone = 1;
+}
+
+/* Search text t on the Search tab, the last hits gone; a text the engine
+** would refuse is said, nothing spawned */
+static void
+xv_search(struct xv *v, const char *t)
+{
+	char *av[5];
+
+	if (!xray_search_ok(t))
+	{
+		snprintf(v->status, sizeof v->status, "bad search: 2 to 200 "
+		         "bytes, no control character");
+		return;
+	}
+	snprintf(v->sq, sizeof v->sq, "%s", t);
+	snprintf(v->q, sizeof v->q, "%s", v->sq);
+	xv_hits_free(v);
+	v->sel[3] = v->top[3] = 0;
+	v->tab = 3;
+	v->filtering = 0;
+	av[0] = v->n;
+	av[1] = "--search";
+	av[2] = v->sq;
+	av[3] = "--json";
+	av[4] = NULL;
+	(void)xv_start(v, XV_QK, av, 4, xv_qline);
+}
+
+/* The search's child ended. An older host's refusal and a session with no
+** corpus are the list's line, any other failure the status's. */
+static void
+xv_qend(struct xv *v)
+{
+	const struct xv_kid *k = &v->kid[XV_QK];
+	const char *e = k->err[0] ? k->err : "X-ray: the search failed";
+
+	if (!k->rc && v->sdone)
+		return;
+	if (strstr(e, "does not know --search") || strstr(e, "no x-ray corpus"))
+		snprintf(v->sline, sizeof v->sline, "%s", e);
+	else
+		snprintf(v->status, sizeof v->status, "%s", e);
+}
+
 /* ^R: the card of the ref typed in the filter, held or not, its kind shown
-** or hidden (#263) */
+** or hidden (#263); words: Search for them (#291) */
 static void
 xv_lookup(struct xv *v)
 {
@@ -933,9 +1114,11 @@ xv_lookup(struct xv *v)
 
 	if (!xv_fref(v, t, sizeof t))
 	{
-		snprintf(v->status, sizeof v->status, "^R looks up the ref typed "
-		         "after /: a ticket, issue, pull, commit, file or URL, not "
-		         "words");
+		if (v->filt[0])
+			xv_search(v, v->filt);
+		else
+			snprintf(v->status, sizeof v->status, "^R looks up the "
+			         "ref or searches the words typed after /");
 		return;
 	}
 	v->filtering = 0;
@@ -1017,6 +1200,15 @@ xv_wrap(struct xv *v, int w)
 			}
 	if (v->rend && !v->rloaded)
 		v->rtop = v->nrl;	/* xv_draw_read clamps */
+	/* opened on an answer (#290): at the last reply holding its start
+	** (entries carry no offset), else at the end */
+	for (k = v->nrl - 1; v->rans && !v->rloaded && k >= 0; k--)
+		if (!v->rl[k].kind && !strcmp(v->e[v->rl[k].n].role, "assistant")
+		    && strstr(v->e[v->rl[k].n].text, v->rans))
+		{
+			v->rtop = k;
+			break;
+		}
 	v->rloaded = 1;
 }
 
@@ -1034,6 +1226,8 @@ xv_rline(struct xv *v, const struct json_parser *p)
 		v->rturn = NULL;
 		xv_sfree(v->rwant);
 		v->rwant = NULL;
+		free(v->rans);
+		v->rans = NULL;
 	}
 	xv_read_free(v);
 	v->rtitle = xv_str(p, 0, "title");
@@ -1083,6 +1277,8 @@ xv_read(struct xv *v, const char *anchor, const char *want)
 	xv_read_free(v);
 	xv_sfree(v->rwant);
 	v->rwant = want ? strdup(want) : NULL;
+	free(v->rans);
+	v->rans = NULL;
 	free(v->ranchor);
 	v->ranchor = strdup(anchor);
 	free(v->rturn);
@@ -1472,6 +1668,47 @@ xv_hid(const struct xv_ch *c)
 	return c->aut || !strcmp(c->kind, "compact");
 }
 
+static int xv_live(const struct xv *v);
+
+/* Chapter k's turn is still running (#290): the newest, no answer yet */
+static int
+xv_working(const struct xv *v, int k)
+{
+	return k == v->nch - 1 && !v->ch[k].resp[0] && xv_live(v);
+}
+
+/* Chapter k is an item of Responses: an answer, a tool line, an answer the
+** cap dropped (its offset), or a turn still running */
+static int
+xv_item(const struct xv *v, int k)
+{
+	const struct xv_ch *c = &v->ch[k];
+
+	return c->resp[0] || c->tools[0] || c->roff >= 0 || xv_working(v, k);
+}
+
+/* A remote view whose host sends no answers (a dch before 1.63.0): a turn
+** has ended and no chapter carries any of #296's fields */
+static int
+xv_old(const struct xv *v)
+{
+	int k;
+
+	if (!v->hl || v->nch - xv_live(v) < 1)
+		return 0;
+	for (k = 0; k < v->nch; k++)
+		if (v->ch[k].resp[0] || v->ch[k].tools[0] || v->ch[k].roff >= 0)
+			return 0;
+	return 1;
+}
+
+/* Responses is a tab: the snapshot says prompts, not commands */
+static int
+xv_rtab(const struct xv *v)
+{
+	return v->have && !strcmp(xv_noun(v), "prompt");
+}
+
 /* Refs row k of xv_vis: the index's, or past it the screen's. */
 static struct xv_ref *
 xv_rfat(struct xv *v, int k)
@@ -1485,9 +1722,12 @@ xv_vis1(struct xv *v, int k)
 {
 	const struct xv_ref *r = v->tab == 1 ? xv_rfat(v, k) : NULL;
 
+	if (v->tab == 2 && (v->old || !xv_item(v, k)))
+		return;
 	if (v->filt[0] &&
 	    !(!r ? xv_has(v->ch[k].title, v->filt) ||
-	      xv_has(v->ch[k].summary, v->filt)
+	      xv_has(v->ch[k].summary, v->filt) ||
+	      (v->tab == 2 && xv_has(v->ch[k].resp, v->filt))
 	      : xv_has(r->text, v->filt) || xv_has(r->title, v->filt)))
 		return;
 	/* Refs opens on pulls, issues and tickets; a shows the rest */
@@ -1503,15 +1743,24 @@ xv_vis1(struct xv *v, int k)
 	v->vis[v->nvis++] = k;
 }
 
-/* The rows a list tab shows (Chapters, Refs): their indexes, filtered.
-** Refs: the refs on the screen now first (#294), the index's own row when
-** it holds the key, then the rest, never one twice. */
+/* The rows a list tab shows (Prompts, Responses, Refs): their indexes,
+** filtered. Responses: the newest first (#290). Refs: the refs on the
+** screen now first (#294), the index's own row when it holds the key, then
+** the rest, never one twice. */
 static void
 xv_vis(struct xv *v)
 {
-	int k, j, n = v->tab == 0 ? v->nch : v->nrf;
+	int k, j, n = v->tab == 1 ? v->nrf : v->nch;
+	const char *sk = v->tab == 1 ? v->selk : v->sela;
 
 	v->nvis = v->ntmp = v->nauto = v->nk = 0;
+	v->old = xv_old(v);
+	/* Search: every hit, as sent (#291) */
+	for (k = 0; v->tab == 3 && k < v->nh &&
+	     !xv_grow(&v->vis, &v->avis, v->nvis, sizeof *v->vis); k++)
+		v->vis[v->nvis++] = k;
+	if (v->tab == 3)
+		return;
 	for (k = 0; k < v->nrf; k++)
 		v->rf[k].onscr = 0;
 	for (j = 0; v->tab == 1 && j < v->nsr; j++)
@@ -1525,8 +1774,8 @@ xv_vis(struct xv *v)
 	}
 	v->ngrp = v->nvis;
 	for (k = 0; k < n; k++)
-		if (v->tab == 0 || !v->rf[k].onscr)
-			xv_vis1(v, k);
+		if (v->tab != 1 || !v->rf[k].onscr)
+			xv_vis1(v, v->tab == 2 ? n - 1 - k : k);
 	if (v->tab == 1 && v->nvis - v->ngrp > 1)
 	{
 		xv_sort_rf = v->rf;
@@ -1535,25 +1784,29 @@ xv_vis(struct xv *v)
 	}
 	/* Refs: the selection stays on its ref while the rows change under
 	** it, the screen's each second; on the first row it stays there (the
-	** newest under it); a key gone keeps the index */
-	for (k = 0; v->tab == 1 && v->sel[1] > 0 && v->selk && k < v->nvis;
-	     k++)
-		if (!strcmp(xv_rfat(v, v->vis[k])->key, v->selk))
+	** newest under it); a key gone keeps the index. Responses: on its
+	** prompt, as --follow re-sends them (#290) */
+	for (k = 0; v->tab && v->sel[v->tab] > 0 && sk && k < v->nvis; k++)
+		if (!strcmp(v->tab == 1 ? xv_rfat(v, v->vis[k])->key
+		            : v->ch[v->vis[k]].anchor, sk))
 		{
-			v->sel[1] = k;
+			v->sel[v->tab] = k;
 			break;
 		}
 }
 
-/* Refs: remember the selected row's key for xv_vis */
+/* Refs, Responses: remember the selected row's key for xv_vis */
 static void
 xv_selk(struct xv *v)
 {
-	int s = v->sel[1];
+	int s = v->sel[v->tab];
+	char **k = v->tab == 1 ? &v->selk : &v->sela;
 
-	free(v->selk);
-	v->selk = s >= 0 && s < v->nvis ? strdup(xv_rfat(v, v->vis[s])->key)
-	          : NULL;
+	if (v->tab == 3)
+		return;	/* Search's hits change only with a new search */
+	free(*k);
+	*k = s < 0 || s >= v->nvis ? NULL : strdup(v->tab == 1
+	     ? xv_rfat(v, v->vis[s])->key : v->ch[v->vis[s]].anchor);
 }
 
 /* sel and top inside n rows of a window of win */
@@ -1601,6 +1854,208 @@ xv_row_ch(const struct xv_ch *c, int i, int on)
 	pk_txt(c->aut && c->summary[0] ? c->summary : c->title);
 	if (on)
 		pk_pad(pk_w);
+}
+
+/* The next line of s in w cells (a newline ends one, a long one wraps):
+** its n bytes; returns where the one after it starts. */
+static const char *
+xv_wline(const char *s, int w, size_t *n)
+{
+	size_t ll = strcspn(s, "\n"), f = xv_fitlen(s, ll, w);
+
+	if (!f && ll)
+		f = 1;
+	*n = f;
+	return s[f] == '\n' ? s + f + 1 : s + f;
+}
+
+/* One more line of an item: 1 when it is drawn (*h below room), begun
+** under the row's lead and faint when said */
+static int
+xv_fline1(int *h, int room, int faint)
+{
+	if ((*h)++ >= room)
+		return 0;
+	pk_line();
+	xv_lead(0);
+	pk_set(faint ? "2" : "");
+	pk_txt("      ");
+	return 1;
+}
+
+/* Search hit i (#291), drawn as xv_feed1 draws an item: a head with its
+** time, who said it and the prompt it is under, then its snippet in at
+** most 3 lines, the text searched standing out, then a blank */
+static int
+xv_hit1(struct xv *v, int i, int room)
+{
+	const struct xv_hit *t = &v->hit[v->vis[i]];
+	const char *s = t->snippet, *w;
+	int h = 0, l, on, c = xv_rch(v, t->chapter);
+	int you = !strcmp(t->who, "user");
+	unsigned char mk[1024] = { 0 };	/* a snippet's bytes in a match: 1 */
+	size_t n, a, e, j, ql = strlen(v->sq);
+	char b[300];
+
+	if (h++ < room)
+	{
+		pk_line();
+		xv_lead(i == v->sel[3]);
+		xv_when(t->at, b, sizeof b);
+		pk_set("2");
+		pk_txt(" ");
+		pk_fit(b, 13);
+		/* the reader's role names; a tool hit by its tool */
+		pk_set(you ? pk_p(PK_ACCB) : "1");
+		pk_txt(you ? "You" : !strcmp(t->who, "assistant") ? "Reply"
+		       : t->tool[0] ? t->tool : strcmp(xv_noun(v), "prompt")
+		       ? "Output" : "Tool");
+		pk_txt("  ");
+		pk_set(c < 0 ? "2" : "");
+		snprintf(b, sizeof b, "(outside the %ss shown)", xv_noun(v));
+		pk_txt(c < 0 ? b : v->ch[c].aut && v->ch[c].summary[0]
+		       ? v->ch[c].summary : v->ch[c].title);
+		if (i == v->sel[3])
+			pk_pad(pk_w);
+		pk_eol();
+	}
+	for (j = e = 0; s[j] && j < sizeof mk; j++)
+	{
+		if (ql && xv_at(s + j, v->sq))
+			e = j + ql;
+		mk[j] = j < e;
+	}
+	for (l = 0; *s && l < 3; l++)
+	{
+		w = s;
+		s = xv_wline(w, pk_w - 8, &n);
+		if (!xv_fline1(&h, room, 0))
+			continue;
+		/* runs in a match and out of one; a match ends on a character's
+		** end, the text searched being whole characters */
+		for (a = 0; a < n; a = e)
+		{
+			j = (size_t)(w - t->snippet) + a;
+			on = j < sizeof mk && mk[j];
+			for (e = a + 1; e < n && (j + e - a < sizeof mk &&
+			     mk[j + e - a]) == on; e++)
+				;
+			pk_set(on ? pk_p(PK_ACCB) : "");
+			xv_txtn(w + a, e - a);
+		}
+		pk_eol();
+	}
+	if (h++ < room)
+	{
+		pk_line();
+		pk_eol();
+	}
+	return h;
+}
+
+/* Responses item i of vis (#290), its lines drawn while fewer than room
+** (0: measured only): the prompt as its Prompts row, the tool line faint,
+** the answer wrapped to XV_ALINES lines (an ellipsis when there is more:
+** the reader has it), or what stands in for it, then a blank. Returns its
+** height, the blank included. */
+static int
+xv_feed1(struct xv *v, int i, int room)
+{
+	int k = v->vis[i], h = 0, w = pk_w - 8, l;
+	const struct xv_ch *c;
+	const char *s;
+	size_t n;
+
+	if (v->tab == 3)
+		return xv_hit1(v, i, room);
+	c = &v->ch[k];
+	s = c->resp;
+	if (h++ < room)
+	{
+		pk_line();
+		xv_row_ch(c, k, i == v->sel[2]);
+		pk_eol();
+	}
+	if (c->tools[0] && xv_fline1(&h, room, 1))
+	{
+		pk_txt(c->tools);
+		pk_eol();
+	}
+	for (l = 0; *s && l < XV_ALINES; l++)
+	{
+		const char *t = s;
+
+		s = xv_wline(t, w, &n);
+		if (xv_fline1(&h, room, 0))
+		{
+			xv_txtn(t, n);
+			pk_eol();
+		}
+	}
+	if ((*s || c->rcut || (!c->resp[0] && (xv_working(v, k) ||
+	     c->roff >= 0))) && xv_fline1(&h, room, 1))
+	{
+		pk_txt(c->resp[0] ? xv_ell() : xv_working(v, k) ? "working"
+		       : "Enter reads it");
+		if (!c->resp[0] && xv_working(v, k))
+			pk_txt(xv_ell());
+		pk_eol();
+	}
+	if (h++ < room)
+	{
+		pk_line();
+		pk_eol();
+	}
+	return h;
+}
+
+/* Responses (#290), Search (#291): the items from top down, the selected
+** one whole on screen when it fits, else at the window's top; the window
+** full when items above the top fit in it. */
+static void
+xv_draw_feed(struct xv *v, int win)
+{
+	int *sel = &v->sel[v->tab], *top = &v->top[v->tab], n = v->nvis, t, h;
+
+	if (*sel >= n)
+		*sel = n - 1;
+	if (*sel < 0)
+		*sel = 0;
+	if (*top > *sel)
+		*top = *sel;
+	/* h: the lines from t to the selected one's last (its blank not) */
+	for (t = *sel, h = xv_feed1(v, t, 0) - 1;
+	     t > *top && h + xv_feed1(v, t - 1, 0) <= win;)
+		h += xv_feed1(v, --t, 0);
+	*top = t;
+	for (h = -1; t < n && h <= win; t++)
+		h += xv_feed1(v, t, 0);
+	while (t == n && *top > 0 && h + xv_feed1(v, *top - 1, 0) <= win)
+		h += xv_feed1(v, --*top, 0);
+	xv_selk(v);
+	for (t = *top, h = 0; t < n && h < win; t++)
+		h += xv_feed1(v, t, win - h);
+	for (; h < win; h++)
+	{
+		pk_line();
+		pk_eol();
+	}
+}
+
+/* PgDn (d 1), PgUp (-1) on Responses and Search: the items a window holds
+** from the selected one that way, at least one */
+static int
+xv_page(struct xv *v, int d)
+{
+	int k = v->sel[v->tab] < v->nvis ? v->sel[v->tab] : v->nvis - 1, s = 0;
+	int k0;
+
+	if (k < 0)
+		return 0;
+	for (k0 = k; k + d >= 0 && k + d < v->nvis &&
+	     (s += xv_feed1(v, d > 0 ? k : k + d, 0)) <= v->win;)
+		k += d;
+	return k == k0 ? d : k - k0;
 }
 
 /* s in w cells; one that does not fit keeps its first keep bytes, then an
@@ -1896,6 +2351,78 @@ xv_draw_read(struct xv *v, int win)
 	}
 }
 
+/* Search (#291): the text's line, then the hits as a feed, or the one
+** line in their place; faint under them, more and partial */
+static void
+xv_draw_search(struct xv *v, int win)
+{
+	char b[600], m[60];
+	const char *y = v->swhy ? v->swhy : "";
+	int k, more = v->sdone && v->smore && v->nh;
+
+	pk_line();
+	pk_set(pk_p(PK_ACC));
+	pk_txt(" Search: ");
+	pk_set("");
+	pk_txt(v->q);
+	if (v->filtering)
+		pk_txt(pk_utf ? "\xe2\x96\x88" : "_");
+	pk_eol();
+	snprintf(b, sizeof b, "  the search stopped early (%s); the hits shown "
+	         "stand", !strcmp(y, "time") ? "it took too long"
+	         : !strcmp(y, "bytes") ? "too much to read"
+	         : !strcmp(y, "range") ? "the history changed or was cut as it "
+	         "read" : y);
+	win -= 1 + more + v->spart;
+	if (win < 1)
+		win = 1;
+	if ((xv_vis(v), v->nvis))
+		xv_draw_feed(v, win);
+	else
+	{
+		for (k = 0; k < win; k++)
+		{
+			pk_line();
+			pk_set("2");
+			if (k == 0 && v->kid[XV_QK].pid > 0)
+			{
+				pk_txt("  Searching");
+				pk_txt(xv_ell());
+			}
+			else if (k == 0 && v->sline[0])
+			{
+				pk_txt("  ");
+				pk_txt(v->sline);
+			}
+			else if (k == 0 && v->sdone)
+			{
+				pk_txt("  No match for \"");
+				pk_txt(v->sq);
+				pk_txt("\"");
+			}
+			else if (k == 0)
+				pk_txt("  Type a word or phrase; Enter finds "
+				       "where this session said it");
+			pk_eol();
+		}
+	}
+	if (more)
+	{
+		pk_line();
+		pk_set("2");
+		snprintf(m, sizeof m, "  the %d newest are shown", v->nh);
+		pk_txt(m);
+		pk_eol();
+	}
+	if (v->spart)
+	{
+		pk_line();
+		pk_set("2");
+		pk_txt(b);
+		pk_eol();
+	}
+}
+
 /* The session runs: o has something to attach. */
 static int
 xv_live(const struct xv *v)
@@ -1906,14 +2433,15 @@ xv_live(const struct xv *v)
 static void
 xv_draw(struct xv *v, int force)
 {
-	const char *tabn[2] = { "Prompts", "Refs" };
+	const char *tabn[XV_NTAB] = { "Prompts", "Refs", "Responses",
+		"Search" };
 	static const char spin[] = "\xe2\xa0\x8b\xe2\xa0\x99\xe2\xa0\xb9"
 		"\xe2\xa0\xb8\xe2\xa0\xbc\xe2\xa0\xb4\xe2\xa0\xa6\xe2\xa0\xa7"
 		"\xe2\xa0\x87\xe2\xa0\x8f", ascii[] = "|/-\\";
 	struct pkkey keys[12];
 	const char *ret = pk_utf ? "\xe2\x86\xb5" : "enter";
-	char b[1200], tmp[32], kt[32];
-	int nk = 0, kl, cap, k, n, busy, isref;
+	char b[1200], tmp[32], kt[32], sn[40];
+	int nk = 0, kl, cap, k, n, busy, isref, cnt[XV_NTAB];
 	unsigned drop;
 
 	pk_begin(v->fd, v->color);
@@ -1927,12 +2455,17 @@ xv_draw(struct xv *v, int force)
 		return;
 	}
 #define XV_K(g, k, l) (keys[nk++] = (struct pkkey){ (k), (l), NULL, (g), 0 })
-	isref = v->mode == XV_LIST && xv_fref(v, b, sizeof b);
-	if (v->filtering)
+	isref = v->mode == XV_LIST && v->tab != 3 && xv_fref(v, b, sizeof b);
+	if (v->filtering && v->tab == 3)
+	{
+		XV_K(0, ret, "search");
+		XV_K(3, "esc", "cancel");
+	}
+	else if (v->filtering)
 	{
 		XV_K(0, ret, "done");
-		if (isref)
-			XV_K(0, "^R", "look up");
+		if (isref || v->filt[0])
+			XV_K(0, "^R", isref ? "look up" : "search");
 		XV_K(3, "esc", "clear");
 	}
 	else if (v->mode == XV_CARD)
@@ -1959,13 +2492,13 @@ xv_draw(struct xv *v, int force)
 		XV_K(3, "q", "quit");
 	else
 	{
-		XV_K(0, ret, v->tab == 0 ? "read" : "card");
-		if (v->tab == 0 && xv_live(v))
+		XV_K(0, ret, v->tab != 1 ? "read" : "card");
+		if (v->tab != 1 && xv_live(v))
 			XV_K(0, "o", "open session");
-		XV_K(3, "/", "filter");
-		if (isref)
-			XV_K(0, "^R", "look up");
-		if (v->tab == 0 && (xv_vis(v), v->nauto))
+		XV_K(3, "/", v->tab == 3 ? "search" : "filter");
+		if (isref || (v->tab != 3 && v->filt[0]))
+			XV_K(0, "^R", isref ? "look up" : "search");
+		if (v->tab != 1 && (xv_vis(v), v->nauto))
 		{
 			snprintf(tmp, sizeof tmp, "%d hidden", v->nauto);
 			keys[nk++] = (struct pkkey){ "n", v->allauto
@@ -2062,14 +2595,32 @@ xv_draw(struct xv *v, int force)
 	}
 	else if (v->have)
 	{
-		/* no tabs before the snapshot says Prompts or Commands (#295);
-		** Prompts: the ones shown by default */
+		/* no tabs before the snapshot says Prompts or Commands (#295),
+		** so with Responses or without (#290); Prompts, Responses: the
+		** ones shown by default */
 		if (strcmp(xv_noun(v), "prompt"))
 			tabn[0] = "Commands";
-		for (k = n = 0; k < v->nch; k++)
-			n += !xv_hid(&v->ch[k]);
-		for (k = 0; k < 2; k++)
-			pk_tab(tabn[k], k == 0 ? n : v->nrf, k == v->tab);
+		if (v->tab == 2 && !xv_rtab(v))
+			v->tab = 0;	/* a snapshot that says commands now */
+		n = xv_old(v);
+		for (k = cnt[0] = cnt[2] = 0; k < v->nch; k++)
+		{
+			cnt[0] += !xv_hid(&v->ch[k]);
+			cnt[2] += !n && !xv_hid(&v->ch[k]) && xv_item(v, k);
+		}
+		cnt[1] = v->nrf;
+		/* Search: its hits once a search has answered, + past the cap
+		** (as a name: pk_tab counts with a number only) */
+		cnt[3] = v->sdone && !v->smore ? v->nh : -1;
+		if (v->sdone && v->smore)
+		{
+			snprintf(sn, sizeof sn, "Search %d+", v->nh);
+			tabn[3] = sn;
+		}
+		for (k = 0; k < XV_NTAB; k++)
+			if (xv_ord[k] != 2 || xv_rtab(v))
+				pk_tab(tabn[xv_ord[k]], cnt[xv_ord[k]],
+				       xv_ord[k] == v->tab);
 	}
 	pk_eol();
 
@@ -2089,6 +2640,10 @@ xv_draw(struct xv *v, int force)
 			pk_line();
 			pk_eol();
 		}
+	else if (v->tab == 3)
+		xv_draw_search(v, v->win);
+	else if (v->tab == 2 && v->have && (xv_vis(v), v->nvis))
+		xv_draw_feed(v, v->win);
 	else
 	{
 		int *sel = &v->sel[v->tab], *top = &v->top[v->tab], win = v->win;
@@ -2142,17 +2697,21 @@ xv_draw(struct xv *v, int force)
 			else if (k == 0)
 			{
 				pk_set("2");
-				pk_txt(!v->have ? "    Reading" : v->tab == 1 && v->nk &&
+				pk_txt(!v->have ? "    Reading" : v->tab == 2 && v->old
+				       ? "    the host's dch is older than 1.63.0 "
+				       "and sends no responses" : v->tab == 1 && v->nk &&
 				       !v->allk ? "    Only files, commits and URLs: a "
 				       "shows them" : v->tab == 1 && v->ntmp &&
 				       !v->alltmp ? "    Only temp files: t shows them"
-				       : v->tab == 0 && v->nauto && !v->allauto
+				       : v->tab != 1 && v->nauto && !v->allauto
 				       ? "    Only auto rows: n shows them"
 				       : isref ? "    No match: ^R looks it up"
-				       : v->filt[0] ? "    No match; ^R looks up a "
-				       "ticket, issue, pull, commit, file or URL, not "
-				       "words" : v->tab == 0 ? strcmp(xv_noun(v), "prompt")
+				       : v->filt[0] ? "    No match; ^R searches the "
+				       "session for it" : v->tab == 0
+				       ? strcmp(xv_noun(v), "prompt")
 				       ? "    No commands" : "    No prompts"
+				       : v->tab == 2 ? "    No responses yet: what the "
+				       "agent answers at the end of each turn shows here"
 				       : "    No refs yet: the files, "
 				       "commits, pull requests, issues and URLs this session "
 				       "touches show here");
@@ -2165,7 +2724,8 @@ xv_draw(struct xv *v, int force)
 
 	pk_rule();
 	pk_line();
-	if (v->filtering || (v->mode == XV_LIST && v->filt[0]))
+	/* Search's text has its own line (#291) */
+	if (v->tab != 3 && (v->filtering || (v->mode == XV_LIST && v->filt[0])))
 	{
 		pk_set(pk_p(PK_ACC));
 		pk_txt("/");
@@ -2176,6 +2736,7 @@ xv_draw(struct xv *v, int force)
 		pk_txt("  ");
 	}
 	busy = v->kid[XV_CK].pid > 0 || v->kid[XV_RK].pid > 0 ||
+	       v->kid[XV_QK].pid > 0 ||
 	       (!v->have && !v->fail[0]);
 	if (busy)
 	{
@@ -2195,11 +2756,14 @@ xv_draw(struct xv *v, int force)
 
 /* ---- keys ------------------------------------------------------------ */
 
-/* The filter's prompt, as the picker's (#096). 1: c was the filter's. */
+/* The filter's prompt, as the picker's (#096); on Search the text to
+** search, Enter searching it, Esc keeping the last one (#291). 1: c was
+** the filter's. */
 static int
 xv_filt(struct xv *v, int c)
 {
-	size_t l = strlen(v->filt);
+	char *f = v->tab == 3 ? v->q : v->filt;
+	size_t l = strlen(f);
 
 	if (!v->filtering)
 	{
@@ -2209,13 +2773,18 @@ xv_filt(struct xv *v, int c)
 		v->status[0] = '\0';
 		return 1;
 	}
+	if (v->tab == 3 && (c == '\r' || c == '\n'))
+	{
+		xv_search(v, v->q);
+		return 1;
+	}
 	switch (c)
 	{
 	case '\r': case '\n': case PK_UP: case PK_DOWN: case '\t': case PK_BTAB:
 		v->filtering = 0;	/* and on to the list, as the picker's */
 		return 0;
 	case PK_ESC:
-		v->filt[0] = '\0';
+		snprintf(f, sizeof v->q, "%s", v->tab == 3 ? v->sq : "");
 		v->filtering = 0;
 		break;
 	case 0x7f: case 8:
@@ -2224,23 +2793,24 @@ xv_filt(struct xv *v, int c)
 			v->filtering = 0;
 			return 1;
 		}
-		while (l && ((unsigned char)v->filt[--l] & 0xC0) == 0x80)
+		while (l && ((unsigned char)f[--l] & 0xC0) == 0x80)
 			;
-		v->filt[l] = '\0';
+		f[l] = '\0';
 		break;
 	case 0x15:	/* Ctrl-U */
-		v->filt[0] = '\0';
+		f[0] = '\0';
 		break;
 	default:
 		if (c < 0x20 || c > 0xff)
 			return 0;	/* the arrows: the list's */
 		if (l + 1 < sizeof v->filt)
 		{
-			v->filt[l] = (char)c;
-			v->filt[l + 1] = '\0';
+			f[l] = (char)c;
+			f[l + 1] = '\0';
 		}
 	}
-	v->sel[0] = v->sel[1] = 0;
+	if (v->tab != 3)	/* Search's hits stay until it runs */
+		memset(v->sel, 0, sizeof v->sel);
 	return 1;
 }
 
@@ -2345,12 +2915,12 @@ xv_key(struct xv *v, int c)
 		m = v->csel < v->nm ? &v->m[v->csel] : NULL;
 		switch (c)
 		{
-		case 'j': case PK_DOWN: v->csel++; break;
-		case 'k': case PK_UP: v->csel--; break;
-		case PK_PGDN: v->csel += v->win / 2; break;
-		case PK_PGUP: v->csel -= v->win / 2; break;
-		case 'g': case PK_HOME: v->csel = 0; break;
-		case 'G': case PK_END: v->csel = v->nm - 1; break;
+		case 'j': case PK_DOWN: v->csel++; xv_cpin(v); break;
+		case 'k': case PK_UP: v->csel--; xv_cpin(v); break;
+		case PK_PGDN: v->csel += v->win / 2; xv_cpin(v); break;
+		case PK_PGUP: v->csel -= v->win / 2; xv_cpin(v); break;
+		case 'g': case PK_HOME: v->csel = 0; xv_cpin(v); break;
+		case 'G': case PK_END: v->csel = v->nm - 1; xv_cpin(v); break;
 		case 'f':
 			xv_card(v, v->ckey, v->ctext, 1, v->scope);
 			break;
@@ -2380,7 +2950,19 @@ xv_key(struct xv *v, int c)
 	if (c == '\t' || c == PK_RIGHT || c == PK_BTAB || c == PK_LEFT ||
 	    c == 'l' || c == 'h')
 	{
-		v->tab = !v->tab;
+		/* the next tab as drawn, or the previous one; Responses only
+		** where it is a tab (#290) */
+		n = c == '\t' || c == PK_RIGHT || c == 'l' ? 1 : XV_NTAB - 1;
+		for (k = 0; k < XV_NTAB - 1 && xv_ord[k] != v->tab; k++)
+			;
+		do
+			k = (k + n) % XV_NTAB;
+		while (xv_ord[k] == 2 && !xv_rtab(v));
+		/* Search opens typing until a search is made (#291); typing
+		** there ends on leaving it */
+		if (v->tab == 3 || xv_ord[k] == 3)
+			v->filtering = xv_ord[k] == 3 && !v->sq[0];
+		v->tab = xv_ord[k];
 		if (v->tab == 1)
 			xv_screen_load(v);
 		return 0;
@@ -2389,12 +2971,15 @@ xv_key(struct xv *v, int c)
 		return 1;
 	if (c == 0x12)	/* Ctrl-R */
 	{
-		xv_lookup(v);
+		if (v->tab == 3)
+			xv_search(v, v->q);
+		else
+			xv_lookup(v);
 		return 0;
 	}
 	if (c == PK_ESC)
 	{
-		if (v->filt[0])
+		if (v->filt[0] && v->tab != 3)
 			v->filt[0] = '\0';
 		else
 			return 1;
@@ -2424,7 +3009,12 @@ xv_key(struct xv *v, int c)
 		v->sel[0] = n;
 		return 0;
 	}
-	if (v->tab == 0 && c == 'o')
+	if (v->tab == 2 && c == 'n')
+	{
+		v->allauto = !v->allauto;	/* xv_vis keeps the selection */
+		return 0;
+	}
+	if (v->tab != 1 && c == 'o')
 		return xv_open(v);
 	sel = &v->sel[v->tab];
 	xv_vis(v);
@@ -2433,16 +3023,31 @@ xv_key(struct xv *v, int c)
 	{
 	case 'j': case PK_DOWN: (*sel)++; break;
 	case 'k': case PK_UP: (*sel)--; break;
-	case PK_PGDN: *sel += v->win; break;
-	case PK_PGUP: *sel -= v->win; break;
+	case PK_PGDN: *sel += v->tab >= 2 ? xv_page(v, 1) : v->win; break;
+	case PK_PGUP: *sel += v->tab >= 2 ? xv_page(v, -1) : -v->win; break;
 	case 'g': case PK_HOME: *sel = 0; break;
 	case 'G': case PK_END: *sel = n - 1; break;
 	case '\r': case '\n':
 		if (*sel < 0 || *sel >= n)
 			break;
 		k = v->vis[*sel];
-		if (v->tab == 0)
+		if (v->tab == 3 && v->hit[k].chapter[0])
+			xv_read(v, v->hit[k].chapter, v->sq);	/* at it */
+		else if (v->tab == 3)
+			snprintf(v->status, sizeof v->status, "this place is "
+			         "outside the %ss X-ray can open", xv_noun(v));
+		else if (v->tab == 0)
 			xv_read(v, v->ch[k].anchor, NULL);
+		else if (v->tab == 2)
+		{
+			/* at the answer: its start (entries carry no offset); a
+			** dropped one, or none yet, at the turn's end */
+			n = (int)strcspn(v->ch[k].resp, "\n");
+			xv_read(v, v->ch[k].anchor, NULL);
+			v->rend = 1;
+			if (v->ch[k].resp[0])
+				v->rans = strndup(v->ch[k].resp, n < 60 ? (size_t)n : 60);
+		}
 		else
 		{
 			const struct xv_ref *r = xv_rfat(v, k);
@@ -2451,7 +3056,7 @@ xv_key(struct xv *v, int c)
 		}
 		break;
 	}
-	if (v->tab == 1)
+	if (v->tab)
 		xv_selk(v);
 	return 0;
 }
@@ -2476,6 +3081,8 @@ xv_free(struct xv *v)
 	xv_card_free(v);
 	xv_read_free(v);
 	xv_sr_free(v);
+	xv_hits_free(v);
+	free(v->hit);
 	xv_sfree(v->session);
 	xv_sfree(v->sid);
 	xv_sfree(v->corpus);
@@ -2496,6 +3103,9 @@ xv_free(struct xv *v)
 	free(v->rl);
 	free(v->sr);
 	free(v->selk);
+	free(v->sela);
+	free(v->cses);
+	free(v->rans);
 	free(v);
 }
 
@@ -2632,6 +3242,8 @@ xv_run(int fd, const char *n, char *err, size_t errsz)
 			         : "X-ray: the scan failed");
 		if (xv_pump(v, XV_SK, &rs))
 			xv_screen_done(v);
+		if (xv_pump(v, XV_QK, &rs))
+			xv_qend(v);
 		if (xv_pump(v, XV_RK, &rs) && v->mode == XV_READ)
 		{
 			const char *e = v->kid[XV_RK].err, *w = xv_noun(v);
@@ -2662,5 +3274,9 @@ xv_run(int fd, const char *n, char *err, size_t errsz)
 	sigaction(SIGCONT, &ocont, NULL);
 	xv_free(v);
 	pk_pn = 0;
+	/* o (LOW-V12): what is still unread on the terminal (a second o, a
+	** held one, Enter) was typed at the view, never for the session */
+	if (xv_go[0])
+		tcflush(fd, TCIFLUSH);
 	return rc;
 }

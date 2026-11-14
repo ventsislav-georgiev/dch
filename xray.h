@@ -47,6 +47,8 @@ struct xr_limits
 };
 extern struct xr_limits xr_lim;
 extern int xr_noclock;	/* tests only: DCH_XRAY_NOCLOCK, light --ref past its budget, held to --full's XR_WALL_MS */
+extern int xr_noskip;	/* tests only: light --ref decodes every window (#293) */
+extern unsigned long xr_skipped;	/* light --ref windows not decoded (a test seam) */
 
 /* One chapter (3.2). at < 0 prints null. */
 struct xr_chapter
@@ -253,8 +255,11 @@ const char *xr_claude_cwd(const struct xr_claude *d);
 int xr_claude_read(struct xr_claude *d, int fd, uint64_t size, int *capped);
 /* Light --ref's read (#262): the same range, newest first, in windows of
 ** xr_lim.chunk bytes cut at line starts, each read oldest first by a fresh
-** decoder (no state crosses a window: a mention before its window's first
-** prompt has no chapter, a tool result before its call's no definition).
+** decoder that starts with the cwd the full read has there (#303: the last
+** line before it that names one). No other state crosses a window: a
+** mention in the turn its window starts in has no chapter unless the
+** window starts at offset 0, #299; a tool result before its call's no
+** definition.
 ** The tick sees the bytes of every window read so far. As xr_claude_read. */
 int xr_claude_newest(struct xr_claude *d, int fd, uint64_t size, int *capped);
 /* Refs too: every entry's mentions and definitions go to k (copied), with

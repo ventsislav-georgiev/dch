@@ -29,6 +29,11 @@
 ** second diff of the last moment empty.
 ** Paths 1 and 5 with byte 0's bit 5 set read the bytes as a Codex rollout
 ** instead (#160, 7.4): mentions only, so no hit may carry a definition.
+** Path 1 also reads the transcript as a file through light --ref's windows,
+** newest first, with its prefilter on and off (#293): the same lines, first
+** and progress aside, or abort. Windows of 16 bytes (bit 6) or 509; bit 7 a
+** line cap of 64 and a byte cap of half the file; bit 3 --scope project, so
+** no first result ends the read.
 ** Every hit handed to a sink lies inside its line; a definition's title is
 ** valid UTF-8, its passage within XR_PASSAGE scalars' bytes; the printed object is one line within the cap. */
 #include <stdint.h>
@@ -36,6 +41,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <unistd.h>
 #include "../../ring.h"
 #include "../../xray.h"
 #include "../../bridge.h"
@@ -238,6 +244,94 @@ scan(const uint8_t *d, size_t n, const char *key)
 		     strstr(o, "\"passage\"") < strchr(o, '\n')))
 			abort();
 	free(buf);
+}
+
+/* light --ref over fd for key, the prefilter off (noskip) or on: its lines
+** but first and progress, malloc'd; NULL when out of memory */
+static char *
+light(int fd, size_t n, const char *key, int scope, int noskip)
+{
+	struct xr_scan *s = NULL;
+	struct xr_claude *x = NULL;
+	struct xr_chapters c = {0};
+	struct xr_sink k;
+	char *buf = NULL, *p, *q, *w;
+	size_t bl = 0;
+	int capped = 0, ok = 0;
+	FILE *f = open_memstream(&buf, &bl);
+
+	xr_noskip = noskip;
+	if (f && (s = xr_scan_new(f, key, "fuzz", "", 0, 0, 0, 300,
+	                          xr_now_ms())))
+		xr_scan_scope(s, scope);
+	if (s && xr_scan_first(s, "11111111-2222-4333-8444-555555555555",
+	                       XR_ISSUE, key) == 0 && (x = decoder()))
+	{
+		xr_scan_sink(s, &k);
+		xr_claude_refs(x, &k, 0x1234, xr_scan_tick, s);
+		(void)xr_claude_newest(x, fd, n, &capped);
+		xr_claude_end(x, 0x1234, &c);
+		xr_chapters_free(&c);
+		xr_scan_file(s, n, xr_claude_too_long(x), capped, 0);
+		ok = xr_scan_done(s) == 0;
+	}
+	xr_noskip = 0;
+	xr_claude_free(x);
+	xr_scan_free(s);
+	if (f)
+		fclose(f);
+	if (!ok)
+	{
+		free(buf);
+		return NULL;
+	}
+	for (p = w = buf; *p; p = q)
+	{
+		q = strchr(p, '\n');
+		q = q ? q + 1 : p + strlen(p);
+		if (strncmp(p, "{\"schema\":1,\"first\"", 19) &&
+		    strncmp(p, "{\"schema\":1,\"progress\"", 22))
+		{
+			memmove(w, p, (size_t)(q - p));
+			w += q - p;
+		}
+	}
+	*w = '\0';
+	return buf;
+}
+
+/* #293's differential: the transcript d[1..n) as a file, light --ref's
+** windows with the prefilter on and off must print the same */
+static void
+differ(const uint8_t *d, size_t n, const char *key)
+{
+	static int fd = -1;
+	char path[] = "/tmp/fuzz_xref.XXXXXX", *a, *b;
+	struct xr_limits l0 = xr_lim;
+
+	if (fd < 0 && (fd = mkstemp(path)) >= 0)
+		unlink(path);
+	if (fd < 0 || ftruncate(fd, 0) != 0 ||
+	    pwrite(fd, d + 1, n - 1, 0) != (ssize_t)(n - 1))
+		return;
+	xr_lim.chunk = d[0] & 64 ? 16 : 509;
+	if (d[0] & 128)
+	{
+		xr_lim.line = 64;
+		xr_lim.bytes = n / 2 + 1;
+	}
+	xr_noclock = 1;	/* only the bytes decide where a read stops */
+	a = light(fd, n - 1, key, d[0] & 8 ? 1 : 0, 0);
+	b = light(fd, n - 1, key, d[0] & 8 ? 1 : 0, 1);
+	xr_noclock = 0;
+	xr_lim = l0;
+	if (a && b && strcmp(a, b))
+	{
+		fprintf(stderr, "prefilter on:\n%s\noff:\n%s\n", a, b);
+		abort();
+	}
+	free(a);
+	free(b);
 }
 
 static void
@@ -617,7 +711,10 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		xr_claude_free(x);
 		emit(ix, 0);
 		if (t.key[0])
+		{
 			scan(d, n, t.key);
+			differ(d, n, t.key);
+		}
 	}
 	else
 	{

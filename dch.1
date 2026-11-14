@@ -737,7 +737,13 @@ detached. A single press still detaches; it simply waits out the window first.
 sets that window in milliseconds (default
 .BR 300 ).
 A key already waiting when dch looks counts as inside the window, even if
-the client was stopped or slow past it.
+the client was stopped or slow past it, as long as nothing else read the
+terminal meanwhile.
+An interactive shell with job control takes the terminal back whenever dch
+stops (Ctrl\-Z or a stop signal), and bash with job control off
+.RB ( "set +m" )
+goes on to its next command: either reads that key itself, and dch then does
+a plain detach.
 Setting it to
 .B 0
 disables switching and makes detach instant again.
@@ -822,7 +828,7 @@ and kept current as
 keeps its index. It writes nothing to disk.
 Session text is drawn with every control and bidi character as
 .BR ? .
-Two tabs:
+Four tabs, three for a shell session:
 .B Prompts
 (\fBCommands\fR for a shell session, one row per command; Chapters before
 1.63.0;
@@ -855,7 +861,27 @@ the tab counts the prompts shown without
 .B o
 here and in the reader leaves the view and attaches to the session, as
 .B \-a
-does, a remote one's too; on an ended session it says so and stays),
+does, a remote one's too; on an ended session it says so and stays;
+keys typed with it that the view has not read yet (a second
+.BR o ,
+Enter, a held
+.BR o )
+are dropped, and a key typed once the attach is up reaches the session),
+.B Responses
+(Claude and Codex sessions: what the agent showed at the end of each turn,
+its answer or its summary of the work, as Claude Code's Focus view does;
+newest first; each item the prompt's row, the turn's tools on one faint
+line, then the answer wrapped, at most 8 lines, Markdown as written, a
+faint ellipsis when there is more (the engine keeps 2 KB; the reader has
+it); a running turn says \(lqworking\(rq, an answer the size cap left out
+\(lqEnter reads it\(rq;
+\fBj\fR \fBk\fR move item by item;
+\fBEnter\fR reads the prompt at its answer (at its end when not found),
+\fBq\fR back to the item;
+\fB/\fR filters on the prompt and the answer;
+\fBn\fR and \fBo\fR as on Prompts; the tab counts the items shown without
+.BR n ;
+a host before 1.63.0 sends no answers, and the tab says so),
 .B Refs
 (the pull requests, issues and tickets the session touched, a faint line
 over them saying so;
@@ -885,9 +911,27 @@ not hold is there too, with no count; they follow
 no group line when nothing on the screen is a ref, and none for an ended
 session or on dch\-lite; the screen is read when Refs opens and once a
 second while it shows, never drawn; up to 1.61.0 a third tab, On screen,
-drew it with a label on each ref).
+drew it with a label on each ref) and
+.B Search
+(where a word or phrase was said in the session; it opens typing until a
+search is made, \fB/\fR types again with the filter's keys, \fBEnter\fR
+searches as
+.B \-\-search
+does (a text it refuses is said, not searched), \fBEsc\fR stops typing and
+keeps the last results; the text stays above the results until the next
+search; the hits newest first, at most 50, each its time, who said it
+(\(lqYou\(rq, \(lqReply\(rq or the tool's name), the prompt it is under
+(\(lq(outside the prompts shown)\(rq when the view has none) and up to 3
+lines around it, the match in bold; faint lines say when the 50 newest are
+shown and when the search stopped early; the tab counts the hits, 50+ past
+the cap; \fBEnter\fR reads the hit's prompt at the text, \fBq\fR back to the
+hit; a shell searches its ring, dch\-lite and xray_ring = 0 say no corpus;
+a host before 1.63.0 does not know \-\-search, and the list says so).
 A card shows the ref's definitions, first and latest mention, counts by
-scope and mentions; it opens light (as
+scope and mentions (newest first within each file, this session's first,
+also after
+.BR f );
+it opens light (as
 .B \-\-ref
 without
 .BR \-\-full );
@@ -909,18 +953,19 @@ The line under the tabs names the corpus
 \(lqX\-ray needs the full dch build\(rq,
 \(lq2 Claude sessions run here; X\-ray reads one\(rq,
 \(lqNo Claude session found here\(rq, ...).
-Keys: \fBTab\fR, \fB\(<-\fR \fB\(->\fR
-and \fBh\fR \fBl\fR switch tabs;
+Keys: \fBTab\fR and \fBShift\-Tab\fR, \fB\(<-\fR \fB\(->\fR
+and \fBh\fR \fBl\fR go to the next and previous tab, in the order
+Prompts, Responses, Refs, Search;
 \fBj\fR \fBk\fR, arrows, \fBPgUp\fR \fBPgDn\fR, \fBg\fR \fBG\fR move;
 \fBq\fR quits the list and goes back from a card or the reader;
 \fBEsc\fR clears the filter, else does the same;
-\fBCtrl\-R\fR, on Prompts and Refs with a ref typed after \fB/\fR
+\fBCtrl\-R\fR, on any tab with a ref typed after \fB/\fR
 (as
 .B \-\-ref
 takes it), opens its card, while typing or after, a row for it or not, its
-kind hidden or not (the footer shows \fB^R\fR look up; words are not looked
-up, and an empty list says so; a remote host whose dch takes no such ref
-says so);
+kind hidden or not (the footer shows \fB^R\fR look up; other words go to
+Search and are searched there, the footer showing \fB^R\fR search; a remote
+host whose dch takes no such ref says so);
 \fBCtrl\-C\fR and \fBCtrl\-D\fR quit.
 A window under 24x8 says it is too small.
 While attached, the detach character and then
@@ -939,7 +984,12 @@ never reaches the session; keys that arrive in the same read as the
 (a paste, a fast burst) reach neither the view nor the session.
 There
 .B o
-leaves the view back to the session.
+leaves the view back to the session; keys still unread with it are
+dropped, as from the list.
+When the view cannot open, it says why and waits for a key.
+That key is dropped, with what arrives after it until a 100 ms pause (1 s
+inside a bracketed paste), for at most 2 s: the rest of a paste paused
+longer, or still arriving 2 s on, reaches the session.
 The chord is off with
 .B \-E
 and with
@@ -1105,9 +1155,11 @@ a live shell's, carry no
 and no
 .BR passage ;
 a transcript or rollout is read newest first, in 1 MiB windows from the
-end, each by a decoder that starts there, so a ref of the last turns is
+end, each by a decoder that starts there (with the cwd the full read has
+there; a window whose raw bytes cannot hold the ref is not decoded), so a
+ref of the last turns is
 found inside the budget: lines come newest window first, and a mention
-before its window's first prompt has
+in the turn its window starts in (unless the window starts the file) has
 .BR chapter:null ),
 .B \-\-full
 to read it all up to 64 files
@@ -1123,8 +1175,8 @@ with it has no effect but is still checked: outside 50 to 300 it exits 2,
 .IR "bad budget" ;
 a file gives its first
 .B mention
-line and its newest 199 (light: the first 199 to arrive after it, the
-newest), the rest counted in the tally's
+line and its newest 199 (light: its newest 200), the rest counted in the
+tally's
 .BR mentions_dropped ;
 one
 .B definition
@@ -2027,6 +2079,16 @@ line, the message on standard error too, and exits
 Type
 .I text
 (arguments joined with spaces) into the session, no enter.
+Input the program is not reading waits in the session, up to 4 MB.
+Past that it is dropped, from that point to the end of the text: the text is
+cut at its tail, never in the middle, and a bracketed paste cut that way
+still gets its end
+.RB ( ESC[201~ ).
+.B \-\-send
+then exits 1 with
+.RI "dch: " name ": input dropped: the program is not reading (4 MB held)" .
+A paste typed on an attach past 4 MB is cut the same way, without a message;
+the attach takes keys again once the program has read what waited.
 .TP
 .BI \-\-run " name text..."
 Same as
@@ -2046,7 +2108,10 @@ or on a signal
 .BR interrupted ", " withdrawn ", " draft_left )
 on stderr. Other programs (also one in front of a Claude suspended with
 Ctrl\-Z), masters without a mirror, dch-lite and your own
-session (\fB$DCH_SESSION\fR) keep the plain burst.
+session (\fB$DCH_SESSION\fR) keep the plain burst, which exits 1 when its
+input was dropped, as
+.B \-\-send
+does.
 .TP
 .BI \-\-keys " name key..."
 Encode and send keys mode-aware (kitty keyboard protocol, application cursor
@@ -2954,7 +3019,9 @@ One code is transient, and means try again later (with the client's own
 backoff; there is no retry\-after field):
 .TP
 .B busy
-the host is at its connection limit (64 in all, or 16 from this peer):
+the host is at its connection limit (64 in all, or 16 from this peer, its
+.B \-\-ls\-json \-\-follow
+watch streams aside, 32 with them):
 .I this host is at its connection limit: try again shortly
 .PP
 .B busy
@@ -3289,9 +3356,12 @@ each time it changes. A host whose hello lists
 .B watch
 is held on one connection (a 0x2e
 .I {"device_id":"dch\-<pid>"}
-after its list) and each 0x11 it pushes is a new look; any other host, and
-the local rows, are read again every 2 s. A host that fails (no answer
-within 2 s, a dropped link, a stream silent for 35 s, a frame over 1 MiB,
+after its list) and each 0x11 it pushes is a new look (the same list again
+is not); any other host, and the local rows, are read again every 2 s.
+Arrays come at most one per 200 ms; faster changes fold into the next.
+SIGINT and SIGTERM end it with 0 even while its reader has stopped reading;
+the line it was writing then may be cut short, and nothing follows it.
+A host that fails (no answer within 2 s, a dropped link, a stream silent for 35 s, a frame over 1 MiB,
 not a list, or a 0x13) shows its rows stale for 2 minutes after it last
 answered, as above, and is dialled again after 2 s, doubling up to 32 s; a
 refusal is said once and shows none. Without

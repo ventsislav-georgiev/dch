@@ -273,7 +273,7 @@ def test_card():
     v = Pty([DCH, "--xray", "xv-nx"])
     try:
         wait(v, lambda s: "Prompts 3" in s)
-        v.key(b"\t")
+        v.key(b"\033[Z\033[Z")  # back to Search, then Refs (#291)
         wait(v, lambda s: "PROJ-9" in s)
         ok = press(v, b"\r", lambda s: "Mentions: this session" in s)
         check("card: PROJ-9 opens", ok, screen(v)[-600:])

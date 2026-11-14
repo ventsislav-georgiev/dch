@@ -1212,7 +1212,9 @@ def test_refs():
           r.returncode == 2 and r.stderr == "dch: not a ref\n" and
           not r.stdout, (r.returncode, r.stderr, r.stdout[:200]))
 
-    # a big transcript: light stops at its budget, full reads it all
+    # a big transcript: light stops at its budget, full reads it all. Every
+    # line holds 515151 as an id value, no ref, so the prefilter (#293)
+    # decodes every window and the budget is what stops the read
     pad = "x" * 900
     with open(tp, "w") as f:
         f.write(json.dumps({"type": "user", "cwd": "/home/demo/proj",
@@ -1220,7 +1222,7 @@ def test_refs():
                             "message": {"content": "start #1 #515151"}})
                 + "\n")
         line = json.dumps({"type": "assistant", "message": {"content": [
-            {"type": "text", "text": "PROJ-5 o/r#3 " + pad}]}}) + "\n"
+            {"type": "text", "text": "PROJ-5 o/r#3 id: 515151 " + pad}]}}) + "\n"
         f.write(line * 40000)
         f.write(json.dumps({"type": "user", "message": {
             "content": "the end #424242"}}) + "\n")
@@ -3654,8 +3656,9 @@ def test_scope():
         os.unlink(os.path.join(hdir, "s%d.json" % k))
 
     # 65 files scan 64 (3.8, 9.5); light over 1 MB files stops at its budget
+    # (933 as an id value, no ref: the prefilter decodes every window, #293)
     big = "".join(json.dumps({"type": "user", "cwd": P, "message": {
-        "content": "pad " + "y" * 1000}}) + "\n" for _ in range(1000))
+        "content": "pad id: 933 " + "y" * 1000}}) + "\n" for _ in range(1000))
     for k in range(10, 71):
         put(k, P, ["#931 in %d" % k], 1794300100 + k)
         with open(os.path.join(cfg, "projects", key(P), sid(k) + ".jsonl"),
@@ -3688,6 +3691,254 @@ def test_scope():
     check("scope: nothing written by a full and a light --scope all "
           "(names, sizes, mtimes)", after == before,
           sorted(set(after.items()) ^ set(before.items()))[:6])
+
+
+# ---- #299: light --ref's anchors in old windows ---------------------------
+
+ASID = "11111111-2222-4333-8444-5555555555c9"
+
+
+def test_light_anchors():
+    """Light --ref reads 1 MiB windows newest first, each by a fresh decoder:
+    a mention before its window's first prompt, or under a prompt the full
+    decode merges into an older one, has a null chapter; every anchor it
+    does give is --full's and opens with --chapter. --search gives the
+    older (right) anchor or null, never its window's own. 1024 lines of
+    4096 bytes, so the windows start at lines 0, 256, 512 and 768."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-p299")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, ASID + ".jsonl")
+    special = {0: (0, "a0 CT-12"), 255: (1, "q255"), 256: (0, "a256 CT-12"),
+               257: (1, "q257 CT-12"), 383: (0, "a383"),
+               384: (1, "q384 CT-12"), 385: (0, "a385 CT-12"),
+               386: (1, "q386 CT-12"), 448: (0, "a448 CT-12"),
+               510: (0, "a510"), 511: (1, "q511"), 512: (1, "q512 CT-12"),
+               513: (0, "a513 CT-12"), 767: (0, "a767"),
+               768: (1, "q768 CT-12")}
+
+    def line(prompt, text):
+        def obj(t):
+            return json.dumps({"type": "user", "message": {"content": t}}
+                              if prompt else
+                              {"type": "assistant", "message": {"content": [
+                                  {"type": "text", "text": t}]}},
+                              separators=(",", ":"))
+        return obj(text + " " + "z" * (4094 - len(obj(text)))) + "\n"
+
+    with open(tp, "w") as f:
+        for i in range(1024):
+            f.write(line(*special.get(i, (i % 3 == 0, "%s%d" % (
+                "q" if i % 3 == 0 else "a", i)))))
+    history("xr-anch", ASID, cfg, "/home/demo/p299")
+    ino = "%x" % os.stat(tp).st_ino
+    at = lambda i: "f%s:%d" % (ino, i * 4096)
+
+    def run(caps):
+        env = dict(ENV, DCH_XRAY_NOCLOCK="1")
+        if caps:
+            env["DCH_XRAY_CAPS"] = caps
+        got = {}
+        for form in ("light", "full"):
+            r = dch("--xray", "xr-anch", "--ref", "CT-12", "--json",
+                    *(["--full"] if form == "full" else []), env=env)
+            ls = ref_lines(r.stdout) or []
+            got[form] = {l["mention"]["offset"] // 4096: l["mention"]["chapter"]
+                         for l in ls if "mention" in l}
+        rc, o, err = search("xr-anch", "CT-12", env=env)
+        got["search"] = {h["offset"] // 4096: h["chapter"]
+                         for h in (o or {}).get("hits", [])}
+        bad = [(form, i, a, got["full"].get(i))
+               for form in ("light", "search")
+               for i, a in sorted(got[form].items())
+               if a is not None and a != got["full"].get(i)]
+        gone = []
+        for a in sorted({a for a in got["light"].values() if a}):
+            rc, c, err, out = chapter("xr-anch", a, env=env)
+            if rc != 0 or not c or c.get("anchor") != a:
+                gone.append((a, rc, err.strip()))
+        return got, bad, gone
+
+    got, bad, gone = run(None)
+    L, F, S = got["light"], got["full"], got["search"]
+    check("light anchors: --full has the 10 mentions, a512 and a513 merged "
+          "into q511's chapter, a256 in q255's",
+          len(F) == 10 and F.get(512) == at(511) and F.get(513) == at(511)
+          and F.get(256) == at(255), F)
+    check("light anchors: the window at offset 0 keeps its partial chapter; "
+          "a prompt its window opened past a step keeps its own (q257, q384, "
+          "q386)", L.get(0) == at(0) and L.get(257) == at(257) and
+          L.get(384) == at(384) and L.get(386) == at(386), L)
+    check("light anchors: a mention before its window's first prompt "
+          "(a256), a prompt merged across a window boundary and its answer "
+          "(q512, a513): chapter null",
+          256 in L and L[256] is None and 512 in L and L[512] is None and
+          513 in L and L[513] is None, L)
+    check("light anchors: --search gives q512 and a513 the older chapter or "
+          "null, never their window's own",
+          512 in S and S[512] in (None, at(511)) and 513 in S and
+          S[513] in (None, at(511)), S)
+    check("light anchors: every light and --search anchor is --full's", not bad,
+          bad)
+    check("light anchors: every light anchor opens with --chapter", not gone,
+          gone)
+    # past the range: head 1 MiB (lines 0-255, q255's lead open), the tail
+    # from q384, then from a448: --full reads on from the head there
+    for tail, first in ((640 * 4096, 384), (576 * 4096, 448)):
+        got, bad, gone = run("0:0:0:%d:%d" % (1 << 20, tail))
+        L, F, S = got["light"], got["full"], got["search"]
+        check("light anchors: a tail range from line %d: --full puts it in "
+              "q255's chapter; light null, --search null or that" % first,
+              F.get(first) == at(255) and first in L and L[first] is None
+              and first in S and S[first] in (None, at(255)), got)
+        check("light anchors: tail from line %d: every light and --search "
+              "anchor is --full's and opens with --chapter" % first,
+              not bad and not gone, (bad, gone))
+    os.unlink(tp)
+
+
+NSID = "11111111-2222-4333-8444-5555555555d3"
+
+
+def test_light_303():
+    """#303 (QA 1.62.0 MED-X1, MED-X2, NIT-X3), light --ref against --full
+    on 4 MiB transcripts of 1024 lines of 4096 bytes (windows start at lines
+    0, 256, 512 and 768): light keeps the file's newest 200 mention lines,
+    newest window first; a window resolves a relative path with the cwd the
+    full read has at its start; the line the head range's end cuts is read
+    by neither."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-p303")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, NSID + ".jsonl")
+    env = dict(ENV, DCH_XRAY_NOCLOCK="1")
+
+    def line(text, cwd=None):
+        def obj(t):
+            o = ({"type": "user", "cwd": cwd, "message": {"content": t}}
+                 if cwd else {"type": "assistant", "message": {"content": [
+                     {"type": "text", "text": t}]}})
+            return json.dumps(o, separators=(",", ":"))
+        return obj(text + " " + "z" * (4094 - len(obj(text)))) + "\n"
+
+    def plant(texts):
+        with open(tp, "w") as f:
+            for t in texts:
+                f.write(line(*t) if isinstance(t, tuple) else line(t))
+        history("xr-303", NSID, cfg, "/home/demo/p303")
+
+    def ref(r, *a, caps=None):
+        e = dict(env, DCH_XRAY_CAPS=caps) if caps else env
+        x = dch("--xray", "xr-303", "--ref", r, "--json", *a, env=e)
+        ls = ref_lines(x.stdout) or []
+        m = [l["mention"]["offset"] // 4096 for l in ls if "mention" in l]
+        t = [l["tally"] for l in ls if "tally" in l]
+        return x.returncode, m, (t[0] if t else {}), ls[-1:] or [{}]
+
+    # MED-X1: CT-12 on every 4th line (256), CT-34 on every line from 700
+    plant(["l%d%s%s" % (i, " CT-12" if i % 4 == 0 else "",
+                        " CT-34" if i >= 700 else "") for i in range(1024)])
+    rc, m, t, d = ref("CT-12", "--scope", "project")
+    want = [i for w in (768, 512, 256, 0) for i in range(w, w + 256, 4)
+            if i >= 224]
+    check("303 newest: light keeps CT-12's newest 200 of 256 mention lines, "
+          "the newest window first, file order within one; 56 dropped",
+          rc == 0 and m == want and t.get("count") == 256 and
+          t.get("mentions_dropped") == 56, (m[:3], m[-12:], t))
+    rc, m, t, d = ref("CT-34", "--scope", "project")
+    check("303 newest: 324 mention lines in the newest windows: light keeps "
+          "lines 824 to 1023, the last line too",
+          rc == 0 and m == list(range(824, 1024)) and
+          t.get("mentions_dropped") == 124, (m[:3], m[-3:], t))
+    rc, m, t, d = ref("CT-12", "--full")
+    check("303 newest: --full keeps the first and the newest 199, as before",
+          rc == 0 and sorted(m) == [0] + list(range(228, 1024, 4)), m[:3])
+
+    # MED-X2: the cwd on line 0 (/home/demo/p303), on line 600 /home/demo/q;
+    # src/main.c:12 on every 50th line
+    plant([("start", "/home/demo/p303")] +
+          [("moved", "/home/demo/q") if i == 600 else
+           "edit src/main.c:12 at %d" % i if i % 50 == 0 else "pad %d" % i
+           for i in range(1, 1024)])
+    got = {}
+    for k in ("src/main.c:12", "/home/demo/q/src/main.c"):
+        for form in ("light", "full"):
+            rc, m, t, d = ref(k, *(("--full",) if form == "full"
+                                   else ("--scope", "project")))
+            got[(k, form)] = (rc, t.get("count"), sorted(m),
+                              d[0].get("partial"))
+    check("303 cwd: light resolves src/main.c with the cwd in force at each "
+          "window's start, as --full: 11 under p303, 8 under q (QA: 17 of 80)",
+          got[("src/main.c:12", "light")] == got[("src/main.c:12", "full")]
+          and got[("src/main.c:12", "full")][1] == 11 and
+          got[("/home/demo/q/src/main.c", "light")] ==
+          got[("/home/demo/q/src/main.c", "full")] and
+          got[("/home/demo/q/src/main.c", "full")][1] == 8, got)
+
+    # NIT-X3: head 1 MiB + 2 KiB (line 256 straddles its end), tail 1 MiB;
+    # CT-56 on lines 100, 256 and 1000
+    plant(["l%d%s" % (i, " CT-56" if i in (100, 256, 1000) else "")
+           for i in range(1024)])
+    caps = "0:0:0:%d:%d" % ((1 << 20) + 2048, 1 << 20)
+    got = {form: ref("CT-56", *(("--full",) if form == "full"
+                                else ("--scope", "project")), caps=caps)
+           for form in ("light", "full")}
+    check("303 head end: light leaves the line the head's end cuts, as "
+          "--full: lines 1000 and 100, partial, no line too long",
+          sorted(got["light"][1]) == sorted(got["full"][1]) == [100, 1000]
+          and got["light"][3][0].get("lines_too_long") ==
+          got["full"][3][0].get("lines_too_long") == 0 and
+          got["light"][3][0].get("partial") is True, got)
+    os.unlink(tp)
+
+
+PSID = "11111111-2222-4333-8444-5555555555d4"
+
+
+def test_prefilter_reach():
+    """#293: light --ref does not decode a 1 MiB window whose raw bytes
+    cannot hold the ref, so its 300 ms reach the whole of a 96 MB
+    transcript: a ticket named only in the first line is found. Without the
+    prefilter light decodes about 40-95 MB in its budget on a fast idle
+    machine and stops, why budget. 96 MB, not more: a CI runner's raw scan
+    of 160 MB stopped at the budget 2 MB short, three tries in a row.
+    Asserts what was found, not how long it took; a run a stalled machine
+    stops at the budget is retried, twice."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, PSID + ".jsonl")
+    words = ("the parser reads a line and then the decoder builds chapters "
+             "from turns while tools run").split()
+    said = lambda i: json.dumps({"type": "assistant", "message": {"content": [
+        {"type": "text", "text": " ".join(words[(i * 7 + j) % len(words)]
+                                          for j in range(20 + i % 300))}]}},
+        separators=(",", ":")) + "\n"
+    block = "".join(said(i) for i in range(400))
+    with open(tp, "w") as f:
+        f.write(json.dumps({"type": "user", "cwd": "/home/demo/proj",
+                            "message": {"content": "start on MARK-1"}},
+                           separators=(",", ":")) + "\n")
+        for _ in range((96 << 20) // len(block)):
+            f.write(block)
+    history("xr-reach", PSID, cfg)
+    try:
+        for k in range(3):
+            r = dch("--xray", "xr-reach", "--ref", "MARK-1", "--scope",
+                    "session", "--json")
+            ls = ref_lines(r.stdout) or [{}]
+            if ls[-1].get("why") != "budget":
+                break
+        men = [l["mention"]["offset"] for l in ls if "mention" in l]
+        check("prefilter: light --ref finds a ref named only in the first "
+              "line of a 96 MB transcript inside its 300 ms budget: the "
+              "mention at offset 0, why first, all but its oldest window counted (%d tries)"
+              % (k + 1), r.returncode == 0 and men == [0] and
+              ls[-1].get("done") and ls[-1]["why"] == "first" and
+              ls[-1]["bytes"] >= os.path.getsize(tp) - (2 << 20),
+              (r.returncode, ls[-2:], r.stderr))
+    finally:
+        os.unlink(tp)
 
 
 def main():
@@ -3730,6 +3981,9 @@ def main():
         test_ref_shell_caps()
         test_ref_shell_tick()
         test_scope()
+        test_light_anchors()
+        test_light_303()
+        test_prefilter_reach()
     finally:
         shutil.rmtree(T, ignore_errors=True)
     if fails[0]:

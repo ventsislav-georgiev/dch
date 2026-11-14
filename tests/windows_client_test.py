@@ -68,11 +68,13 @@ int main(int argc, char **argv)
 	return 0;
 }
 """
+# builtins only, as serve_test's (#249): no fork outside the hang case
 FAKE_TS_SH = """#!/bin/sh
-d=$(dirname "$0")
+d=${0%/*}
 [ -f "$d/hang" ] && sleep 20
-[ -f "$d/$1.json" ] && exec cat "$d/$1.json"
-exit 1
+[ -f "$d/$1.json" ] || exit 1
+while IFS= read -r l; do printf '%s\\n' "$l"; done < "$d/$1.json"
+printf '%s' "$l"
 """
 
 

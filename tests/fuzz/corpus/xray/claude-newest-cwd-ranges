@@ -1,0 +1,7 @@
+2{"type":"user","cwd":"/w/a","message":{"content":"start src/main.c"}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"edit src/main.c:3 now"}]}}
+{"type":"user","c\u0077d":"/w/b","message":{"content":"moved"}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"edit src/main.c:4 later, a long tail xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}]}}
+{"type":"user","workingDirectory":"/w/c","message":{"content":"again src/x.c"}}
+{"type":"user","cwd":"rel","message":{"content":"not a cwd"}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"done src/main.c:5 and \"cwd\" said"}]}}

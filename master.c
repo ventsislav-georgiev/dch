@@ -109,6 +109,13 @@ struct client
 	struct timespec xwake_at;	/* when that wake went out */
 	/* MSG_RESTART_CAPS flags this connection sent (DCH_RESTART_F_*) */
 	unsigned int rcaps;
+
+	/* Its MSG_PUSH input (#307): in_drop since one was refused for want of
+	** room (the rest is dropped, so a send is cut at its tail, never with
+	** a hole); pm and paste follow ESC[200~ / ESC[201~ in what it sent
+	** (paste_scan), so a paste cut there still gets its end. */
+	unsigned char in_drop, pm, paste;
+	size_t dropped;
 };
 
 /* ponytail: 4 MB per-client output backlog before we give up on a slow
@@ -1840,11 +1847,14 @@ pty_flush(void)
 }
 
 /* Input for the program: behind whatever already waits, then flushed. 0
-** queued (or written), -1 dropped (over OUT_CAP waiting). */
+** queued (or written), -1 dropped (over PTY_IN_CAP waiting). The last
+** PKT_MAX of OUT_CAP is kept for the end markers push_input adds. */
+#define PTY_IN_CAP (OUT_CAP - PKT_MAX)
 static int
 pty_input(const void *buf, size_t len)
 {
-	if (queue_to_client(&pty_in, buf, len) < 0)
+	if (pty_in.outlen - pty_in.outoff + len > PTY_IN_CAP ||
+	    queue_to_client(&pty_in, buf, len) < 0)
 	{
 		dch_trace("pty input: %zu bytes waiting, %zu dropped",
 		          pty_in.outlen - pty_in.outoff, len);
@@ -1852,6 +1862,63 @@ pty_input(const void *buf, size_t len)
 	}
 	pty_flush();
 	return 0;
+}
+
+/* Follow ESC[200~ / ESC[201~ through one connection's input, across
+** packets: *pm is how much of a marker the last bytes matched (5 = up to
+** ESC[200, 6 = up to ESC[201), *paste is 1 after a start and 0 after an
+** end. Pure, for the fuzzer. */
+static void
+paste_scan(unsigned char *pm, unsigned char *paste, const unsigned char *b,
+           size_t n)
+{
+	size_t i;
+
+	for (i = 0; i < n; i++)
+	{
+		unsigned char c = b[i];
+
+		if (*pm < 4 && c == (unsigned char)"\033[20"[*pm])
+			++*pm;
+		else if (*pm == 4 && (c == '0' || c == '1'))
+			*pm = c == '0' ? 5 : 6;
+		else if (*pm >= 5 && c == '~')
+		{
+			*paste = *pm == 5;
+			*pm = 0;
+		}
+		else	/* ESC occurs in a marker only first */
+			*pm = c == '\033';
+	}
+}
+
+/* MSG_PUSH from p (#307). The first packet refused for want of room puts p
+** in in_drop: its later input is dropped too, so what the program gets is
+** a cut at the tail and never a hole, and a paste open at the cut gets its
+** ESC[201~ (room kept by PTY_IN_CAP). A control connection (dch --send)
+** stays there, MSG_PUSH_END reports it; an attached one takes input again
+** once everything held has gone in and its paste has ended. */
+static void
+push_input(struct client *p, const unsigned char *b, size_t n)
+{
+	unsigned char was = p->paste;
+
+	if (p->in_drop && p->role == ROLE_ATTACHED && !was &&
+	    pty_in.outoff == pty_in.outlen)
+	{
+		dch_trace("pty input: fd=%d takes input again, %zu bytes "
+		          "were dropped", p->fd, p->dropped);
+		p->in_drop = 0;
+		p->dropped = 0;
+	}
+	paste_scan(&p->pm, &p->paste, b, n);
+	if (!p->in_drop && pty_input(b, n) == 0)
+		return;
+	if (!p->in_drop && was &&
+	    queue_to_client(&pty_in, (const unsigned char *)"\033[201~", 6) == 0)
+		pty_flush();
+	p->in_drop = 1;
+	p->dropped += n;
 }
 
 /* One pty output buffer: track modes, queue to attached clients, feed the
@@ -3933,10 +4000,14 @@ handle_packet(struct client *p, unsigned int type, unsigned int len,
 		/* Held (no child): input has nowhere to go; drop it. */
 		if (the_pty.fd >= 0)
 		{
-			pty_input(payload, len);
+			push_input(p, payload, len);
 			dch_vt_input_seen();	/* OSC 133 B..C (§11.5) */
 		}
 	}
+	/* the end of a dch --send (#307): did all of it go in */
+	else if (type == MSG_PUSH_END && p->role != ROLE_ATTACHED)
+		return queue_status(p, MSG_ACK,
+		                    p->in_drop ? DCH_ST_BUSY : DCH_ST_OK);
 
 	else if (type == MSG_KEYS)
 		return do_keys(p, payload, len);

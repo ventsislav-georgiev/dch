@@ -166,7 +166,7 @@ def test_direct():
     try:
         ok = v.wait(b"Prompts", 20)  # a Claude record (#295)
         v.pump(0.3)
-        v.key(b"\t", 0.3)
+        v.key(b"\033[Z\033[Z", 0.3)  # back to Search, then Refs (#291)
         ok = ok and v.wait(b"#831", 10)
         check("direct view: the Refs tab lists #831", ok, v.out[-600:])
         if not ok:
@@ -205,7 +205,7 @@ def test_chord():
         ok = ok and a.wait(b"[Refs", 10)  # the chord opens on Refs (#294)
         a.pump(1.0)
         mark = len(a.out)
-        a.key(b"\t\t", 0.5)
+        a.key(b"\t\t\t", 0.5)  # Search, Commands, back to Refs (#291)
         ok = ok and a.wait(b"owner/repo#831", 10, mark)
         check("chord: the view's Refs tab lists owner/repo#831", ok,
               a.out[-600:])

@@ -282,7 +282,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.63.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.64.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -403,7 +403,11 @@ the picker (`q` / `Esc`) just leaves you detached. A single press still detaches
 — it waits out the double-press window first. `DCH_DOUBLE_TAP_MS` sets that
 window in milliseconds (default `300`); `DCH_DOUBLE_TAP_MS=0` turns switching
 off and makes detach instant again. A key already waiting when dch looks counts
-as inside the window, even if the client was stopped or slow past it.
+as inside the window, even if the client was stopped or slow past it, as long
+as nothing else read the terminal meanwhile. An interactive shell
+with job control takes the terminal back whenever dch stops (Ctrl-Z or a stop
+signal), and bash with job control off (`set +m`) goes on to its next command:
+either reads that key itself, and dch then does a plain detach.
 
 `detach_key = switch` in the [config file](#config-file) swaps the two: one
 press opens the picker, two detach. With `DCH_DOUBLE_TAP_MS=0` one press then
@@ -429,8 +433,8 @@ someone is watching is invisible to them.
 | --- | --- | --- |
 | `--spawn <n> [--size CxR] [--env K=V]... [cmd...]` | Start headless session (default: `$SHELL`, 80x24 or `$COLUMNS`/`$LINES`). `--env` (max 32, first `=` splits) adds variables to the child; reserved keys (`DCH_SESSION`, `TERM` fixup) always win. Like `--revive` (and a plain `dch <new>`), it drops the calling Claude Code session's identity (`CLAUDECODE`, `CLAUDE_CODE_*` session vars), plus `GIT_EDITOR` and the other harness vars when `CLAUDECODE` is set, and sets `LC_TERMINAL=ghostty` unless the caller has it (dch keeps OSC 8 links, but under `TERM=xterm-256color` with no `TERM_PROGRAM` Claude Code would strip its statusline's, and `LC_TERMINAL` is the one signal its check reads that supports-hyperlinks and other Node CLIs ignore; ssh sends it on, by macOS's default `SendEnv LC_*`). Like any session variable it reaches every program in the session, not only Claude Code; a tool that keys on `ghostty` may assume Ghostty-only features (kitty graphics, for one) that the terminal you attach from may lack. dch sets no `FORCE_HYPERLINK`: those CLIs honour it before they check for a terminal, so it put OSC 8 into pipes and files (`stylelint t.css > out`, an agent's Bash tool); a caller's own value still reaches the session. An explicit `--env` (`--env LC_TERMINAL=` included) still wins. Prints the name. A program that cannot be executed is an error (`dch: <n>: <cmd>: <reason>`); one that runs and exits at once is not. | 0 ok, 1 exists/failed/not executable/bad --env |
 | `--xray <n> --json` | One JSON object: the session's corpus, chapters and refs (see [X-ray queries](#x-ray-queries---xray)). Without `--json` or any other flag: the full-screen [X-ray view](#x-ray-view-dch---xray-n) (`host:name` too; a non-terminal stdout exits 2). `--clear` empties a shell's ring instead; `--ref` streams one ref's lines; `--search` finds a word or phrase; `--follow` streams the object and then its changes; `--chapter` prints one chapter's entries. `<n>` as `host:name` runs it on that host (dch serve 1.55.0+); `host:name --requests --json` holds one connection there for many requests read off standard input. Must be the first argument. | 0 ok, 1 no such session/ambiguous/no corpus, 2 usage, 3 read failure; remote: 4 gate, 6 host lacks `xray`, 7 unreachable |
-| `--send <n> <text...>` | Type text (joined with spaces), no enter. | 0 ok |
-| `--run <n> <text...>` | `--send` + enter. Into a session whose Claude Code runs — as its command or typed into its shell — the text goes through `--say`'s composer gate instead: typed only over an empty composer, Enter pressed once it shows and again while it stays (Claude Code folds an Enter sent with the text into the paste). A `/command` is typed raw, a message pasted. A shell or any other program (also one in front of a Claude suspended with Ctrl-Z), a master without a mirror (`DCH_NO_VT`), dch-lite and your own session (`$DCH_SESSION`) keep the plain burst. A gate failure prints `dch: <n>: <reason> — <why>` on stderr: `prompt` and `draft` (nothing typed), `not_typed` (the text never showed in the composer, no Enter), `not_submitted` (it stayed there through every Enter); `no_screen` when the composer is not on screen; `interrupted`, `withdrawn` or `draft_left` on a SIGINT, SIGTERM or SIGHUP, as for `--say`. | 0 ok, 1 gate failure |
+| `--send <n> <text...>` | Type text (joined with spaces), no enter. Input the program is not reading waits in the session, up to 4 MB (see [Honest caveats](#honest-caveats)); text past that is dropped to its end and `--send` says `dch: <n>: input dropped: the program is not reading (4 MB held)`. | 0 ok, 1 input dropped |
+| `--run <n> <text...>` | `--send` + enter. Into a session whose Claude Code runs — as its command or typed into its shell — the text goes through `--say`'s composer gate instead: typed only over an empty composer, Enter pressed once it shows and again while it stays (Claude Code folds an Enter sent with the text into the paste). A `/command` is typed raw, a message pasted. A shell or any other program (also one in front of a Claude suspended with Ctrl-Z), a master without a mirror (`DCH_NO_VT`), dch-lite and your own session (`$DCH_SESSION`) keep the plain burst. A gate failure prints `dch: <n>: <reason> — <why>` on stderr: `prompt` and `draft` (nothing typed), `not_typed` (the text never showed in the composer, no Enter), `not_submitted` (it stayed there through every Enter); `no_screen` when the composer is not on screen; `interrupted`, `withdrawn` or `draft_left` on a SIGINT, SIGTERM or SIGHUP, as for `--say`. | 0 ok, 1 gate failure / input dropped (plain burst, as `--send`) |
 | `--keys <n> <key...>` | Encode+send keys mode-aware: `ctrl+c`, `alt+x`, `shift+tab`, `up`, `f5`, `enter`, `esc`, single chars. | 0 ok, 1 unknown key |
 | `--read <n> [--ansi] [--cursor] [--recent [N]]` | Print rendered screen. `--ansi` keeps colors and OSC 8 hyperlinks (each line opens and closes its own, so a `--recent` cut never splits one); `--recent [N]` = last N lines incl. scrollback (default 100; the mirror keeps at least `DCH_SCROLLBACK` lines of history, default 2000, max 100000, set when the session is spawned; at most about one page more, ~600 lines at 80 cols, ~240 at 200; 0 keeps only the screen); `--cursor` also prints `cursor <row> <col> <visible> <wrap>` on **stderr** (see below). Plain output drops all styling — to tell a TUI's own ghost text (placeholders, argument hints) from what the human typed, read with `--ansi --cursor`; see [docs/ghost-text.md](docs/ghost-text.md). | 0 ok, 1 error, 3 no mirror |
 | `--follow <n>` | Stream the screen, read-only, as self-delimited frames: one at once, then one per change, at most one per 150 ms (`DCH_FOLLOW_MS`). Each frame is the full `--read --ansi` screen plus size and caret; see [Following a screen](#following-a-screen---follow). Runs until the session ends or the reader closes the pipe. | 0 session ended / reader closed, 1 no session / error / master predates `--follow`, 3 no mirror |
@@ -777,6 +781,14 @@ old and still current. Pair it with `state` and
   redraws in place produces one line, not hundreds.
 - **Timing is yours to handle.** `--send` types instantly; TUIs that debounce
   input may need a `--wait` between verbs, exactly like a human pausing.
+- **Input waits for a program that is not reading, up to 4 MB.** Past that,
+  input is dropped, and from that point to its end: a `--send` or a paste is
+  cut at its tail, never in the middle, and a bracketed paste cut that way
+  still gets its end (`ESC[201~`), so the program sees a shorter paste, not an
+  open one. `--send` and `--run` then exit 1 with `dch: <n>: input dropped:
+  the program is not reading (4 MB held)`. An attach takes keys again once the
+  program has read what waited; there it is not reported (the trace,
+  `DCH_DEBUG`, has one line). Input still waiting is lost on `--restart`.
 
 ## Config file
 
@@ -883,7 +895,7 @@ the picker. The view asks the same engine as `--json` and holds its index as
 open. It writes nothing to disk. Text from the session (titles, lines,
 passages) is drawn with every control and bidi character shown as `?`.
 
-The view has two tabs:
+The view has four tabs, three for a shell session (no Responses):
 - **Prompts** (**Commands** for a shell session): one row per thing you
   typed, a prompt to Claude or Codex, a command to a shell. `/` filters.
   `Enter` opens the prompt read-only with everything up to the next one
@@ -914,8 +926,24 @@ The view has two tabs:
   and attaches to the live session, as `dch -a <n>` does (`host:name` too;
   from the picker's `x`, as the picker's `Enter`; the `-k` and `-d` pickers
   say it is not theirs). On an ended session `o` says so and the view
-  stays. The attach opens at the session's live screen, not at the
+  stays. Keys typed with `o` that the view has not read yet (a second `o`,
+  `Enter`, a held `o`) are dropped; a key typed once the attach is up
+  reaches the session. The attach opens at the session's live screen, not at the
   prompt.
+- **Responses** (Claude and Codex sessions): what the agent showed you at
+  the end of each turn, as Claude Code's Focus view does: its answer, or
+  its summary of the work. Newest first, so the latest answer is on top
+  when you switch to it. Each item is the prompt's row as on Prompts, the
+  turn's tools on one faint line (e.g. `Edit 3 (2 files, +40 -12), Bash 2,
+  Read 1`), then the answer wrapped to the width, at most 8 lines, Markdown
+  as written. A faint `…` says there is more: the reader has it (the
+  engine keeps the first 2 KB of an answer). A turn still running says
+  `working…`; an answer the size cap left out says `Enter reads it`. `j`
+  `k` move item by item. `Enter` reads the prompt in the reader, opened at
+  the answer (at the prompt's end when it cannot find it), and `q` comes
+  back to the item. `/` filters on the prompt and the answer; `n` and `o`
+  work as on Prompts. The tab's count is the items shown without `n`. A
+  host older than 1.63.0 sends no answers, and the tab says so.
 - **Refs**: what the session touched: the pull requests, issues and tickets
   it mentions, one row each, a faint line over them saying so; `a` shows its
   files, commits and URLs too, and the footer says how many are hidden. Rows
@@ -946,18 +974,45 @@ The view has two tabs:
   not drawn or kept. An ended session and dch-lite have no screen, so no
   group. Up to 1.61.0 a third tab, On screen, drew the screen with a
   label on each ref.
+- **Search**: where a word or phrase was said in this session, for the
+  thing on your screen you do not remember, or a topic from earlier. It
+  opens typing (`Search: ` with a cursor) until you have searched; `/`
+  types again, with the filter's keys. `Enter` searches (`--search`, see
+  below: ASCII letters in either case, 2 to 200 bytes, no control
+  character; a text outside that is said on the status line and not
+  searched), `Esc` stops typing and keeps the last results. The text
+  searched stays on the line above the results, also when you switch tabs
+  and come back, until the next search. The hits are newest first, at most
+  50: each is its time, who said it (`You`, `Reply`, or the tool's name;
+  `Output` for a shell's output), the prompt it is under, and up to 3 lines
+  of the text around it, the match in bold accent colour. A hit the view
+  has no prompt for says `(outside the prompts shown)`. A faint last line
+  says `the 50 newest are shown` when there are more, and one says when
+  the search stopped early (too long, too much to read, or the history
+  changed as it read); the hits shown stand. The tab's count is the hits,
+  `50+` past the cap, nothing before a search. `j` `k` move hit by hit;
+  `Enter` reads the hit's prompt, scrolled to the text, and `q` comes back
+  to the hit; on a hit outside the prompts the status line says the view
+  cannot open it. `o` works as on Prompts. A shell session searches its
+  ring; dch-lite and `xray_ring = 0` have none, and the list says `no x-ray
+  corpus`. A remote view searches on the host; a host older than 1.63.0
+  does not know `--search`, and the list says so.
 
 A ref typed after `/` (a ticket, issue, pull request, commit, file or URL,
-as `--ref` takes it) opens its card with `Ctrl-R`, on Prompts and Refs, while
+as `--ref` takes it) opens its card with `Ctrl-R`, on any tab, while
 typing or after: also when no row has it, a row is not the one you want, or
 its kind is hidden until `a`. The footer shows `^R look up` while the filter
-holds one. The filter matches prompt titles and summaries and the refs held;
-words are not looked up, and the empty list says so. On a remote view a
+holds one. The filter matches prompt titles and summaries, answers on
+Responses, and the refs held. Words that are not a ref go to Search with
+`Ctrl-R`, which runs them there (the footer shows `^R search`, and an empty
+list says `^R searches the session for it`). On a remote view a
 host whose dch takes no such ref says so in the status line.
 
 A ref's card shows its definitions (two or more as "N definitions"), its
 first and latest mention, its counts (this session, this project, all
-projects) and its mentions. It opens light, as `--ref` does without `--full`.
+projects) and its mentions: this session's first, then each other session's
+as the scan finds them, newest first within each, also after `f`; the
+selected mention stays selected while lines arrive. It opens light, as `--ref` does without `--full`.
 `f` runs the full scan, `p` scans other projects too (again: this project
 only), `o` attaches to the session as in the list, `y` copies the ref to the
 clipboard (OSC 52). The card's other-projects key changed in 1.61.0: it was
@@ -974,30 +1029,32 @@ not clear X-ray; run `clear`".
 
 | Key | List | Card / reader |
 | --- | --- | --- |
-| `Tab` `→` `l` / `Shift-Tab` `←` `h` | the other tab | `←` `h`: back |
+| `Tab` `→` `l` / `Shift-Tab` `←` `h` | the next / previous tab (Prompts, Responses, Refs, Search) | `←` `h`: back |
 | `↑` `↓` / `j` `k`, `PgUp` `PgDn`, `g` `G` | move | move / scroll; reader: at an end, again for the next / previous prompt |
 | `]` `[` | | reader: the next / previous prompt |
-| `Enter` | read the prompt / open the card | card: read the mention's prompt |
-| `/` | filter | |
-| `Ctrl-R` | with a ref typed after `/`: open its card, a row for it or not, its kind hidden or not | |
+| `Enter` | read the prompt (Responses: at its answer; Search: at the hit) / open the card; Search, typing: search | card: read the mention's prompt |
+| `/` | filter; Search: type the text to search | |
+| `Ctrl-R` | with a ref typed after `/`: open its card, a row for it or not, its kind hidden or not; other words: search them on Search | |
 | `a` | Refs: show / hide the files, commits and URLs | |
 | `t` | Refs: show / hide the temp files | |
-| `n` | Prompts: show / hide the auto rows (auto prompts, the task notifications, and compactions) | |
-| `o` | Prompts: attach to the session (in the chord: back to it) | card, reader: the same |
+| `n` | Prompts, Responses: show / hide the auto rows (auto prompts, the task notifications, and compactions) | |
+| `o` | Prompts, Responses, Search: attach to the session (in the chord: back to it) | card, reader: the same |
 | `f` `p` `y` | | card: full scan, other projects / this project (`p` was `o` before 1.61.0), copy |
 | `q` | quit | back |
-| `Esc` | clear the filter, else quit | back |
+| `Esc` | clear the filter, else quit; Search, typing: stop typing, the last results kept | back |
 | `Ctrl-C` `Ctrl-D` | quit | quit |
 
 **While attached**, press the detach key (`Ctrl-\`) and then `x` within the
 double-press window (`DCH_DOUBLE_TAP_MS`, default 300 ms). The view opens
 over the session on its Refs tab, the refs on its screen on top, and the session keeps running
 underneath: the attach is kept, never retired. Leaving the view (`q`,
-`Esc`, or `o` on Prompts or in the reader) returns to the session with its screen repainted as it is now,
+`Esc`, or `o` on Prompts, Responses or in the reader) returns to the session with its screen repainted as it is now,
 output that came in meanwhile included (dch-lite has no screen to repaint
 from: the program gets a SIGWINCH, as on any re-attach). The `x` is never
 typed into the session; keys that arrive in the same read as the `x` (a
-paste, a fast burst) reach neither the view nor the session. The chord is off under `-E` (no detach key) and
+paste, a fast burst) reach neither the view nor the session; nor do keys still unread when `o` leaves the view. When the view cannot
+open, it says why and waits for a key. That key is dropped, with what arrives after it until a 100 ms pause (1 s inside a
+bracketed paste), for at most 2 s: the rest of a paste paused longer, or still arriving 2 s on, reaches the session. The chord is off under `-E` (no detach key) and
 with `DCH_DOUBLE_TAP_MS=0` (one press acts at once); the keys then do what
 they did before. Over a remote attach (`dch -a host:name`) the chord opens
 the view of `host:name`, as `dch --xray host:name` does: its queries dial
@@ -1451,13 +1508,16 @@ ref (`dch: not a ref`), relative paths against the session's cwd.
   another session's result stops the scan. A Claude Code transcript or a
   Codex rollout is read newest first (1.62.0), so a ref of the last turns is
   found inside the budget: in windows of 1 MiB from the end, each read from
-  its first whole line on, by a decoder that starts there (a mention before
-  the window's first prompt has `chapter: null`, and a tool result whose
-  call is in an older window gives no definition). Its lines come newest
-  window first, in file order within a window, and the file's `mention`
-  lines are its first and the next 199 to arrive, the newest. `--full` reads
-  oldest first, as before. A live shell's lines and another
-  session's give titles and counts only: no `mention`, no `passage`.
+  its first whole line on, by a decoder that starts there with the cwd the
+  full read has there (a mention in the turn the window starts in has
+  `chapter: null`, unless the window starts the file, since a prompt there
+  may continue an older turn; a tool result whose call is in an older window
+  gives no definition). A window whose raw bytes cannot hold the ref is not
+  decoded (its bytes and long lines still count), so a ref only in old turns
+  is found inside the budget too. Its lines come newest window first, in
+  file order within a window, and the file's `mention` lines are its newest
+  200. `--full` reads oldest first, as before. A live shell's lines and
+  another session's give titles and counts only: no `mention`, no `passage`.
 - **Full.** `--full` reads the whole corpus up to its caps: 64 files
   (`why: "files"`), 1 GiB (`why: "bytes"`) and 10 s (`why: "time"`). The
   10 s count the scan's own time: time spent waiting on a reader that pauses
@@ -2467,7 +2527,7 @@ do not retry. One code is transient and means "try again later":
 
 | `code` | When | `message` |
 | --- | --- | --- |
-| `busy` | The host is at its connection limit: 64 connections in total, or 16 from this peer. Nothing is wrong with the peer; retry with your own backoff (there is no retry-after field). | `this host is at its connection limit: try again shortly` |
+| `busy` | The host is at its connection limit: 64 connections in total, or 16 from this peer (its `--ls-json --follow` watch streams aside, up to 32 with them). Nothing is wrong with the peer; retry with your own backoff (there is no retry-after field). | `this host is at its connection limit: try again shortly` |
 
 `busy` is never remembered by the repeat-refusal cache: the next connection
 once a slot frees is served as usual. Its message says nothing about other
@@ -2814,18 +2874,23 @@ prints, as one line, and then the whole array again, one complete line and
 flushed, each time anything in it changes: a session started, ended or
 renamed, a `state`, a `stale` mark, a local row's `activity_epoch` (so a
 local session that is printing makes one array per 2 s tick). An unchanged
-list prints nothing. It
+list prints nothing, and arrays come at most one per 200 ms: changes faster
+than that are folded into the next one. It
 runs until SIGINT, SIGTERM or the reader closes the pipe, then exits 0;
-misuse (a name after it, another verb) is exit 2.
+misuse (a name after it, another verb) is exit 2. SIGINT and SIGTERM stop
+it even while its reader has stopped reading and the pipe is full; the line
+it was writing then may be cut short, and nothing comes after it.
 
 - *The first array* comes within the same 300 ms box as `--ls-json
   --remote`: a host that has not answered by then shows its cached rows,
   `"stale":true`, and the array after it is the one that has them fresh.
 - *A host whose hello lists `watch`* (`dch serve` does) is held on one
   connection: after the list, a `0x2e`
-  `{"device_id":"dch-<pid>"}`, and every `0x11` it pushes is a new look.
-  Nothing is polled there; dch serve itself looks every 2 s, so a change
-  there shows within about 2 s.
+  `{"device_id":"dch-<pid>"}`, and every `0x11` it pushes is a new look
+  (the same list again is not). Nothing is polled there; dch serve itself
+  looks every 2 s, so a change there shows within about 2 s. Each follower
+  holds that one connection to each such host; dch serve counts them apart
+  from the 16 other connections it takes from one machine (32 in all).
 - *Any other host* is probed again every 2 s, as the picker does, and the
   local rows are read again on the same tick.
 - *A host that fails* (no answer within 2 s, a dropped link, a stream that
