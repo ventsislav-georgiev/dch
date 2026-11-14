@@ -14,7 +14,11 @@
 ** runs gets exactly one 0x33, busy changes nothing, a 0x34 cancels only a
 ** running ctl not yet cut; each cut's grace (ctl_grace, #124/#126) is the
 ** long one only for a CTL_LONG verb cut by a 0x34 or the close, never
-** while the server stops. Linked with the rest of dch minus
+** while the server stops. LOW-XN1: an accepted --xray's --search or --ref
+** text is the one ctl_secret moves to the child's stdin, and it comes back
+** whole through a pipe and ctl_text_read; the input's own bytes through
+** that pipe come back exactly when 256 or fewer with no NUL, else NULL.
+** Linked with the rest of dch minus
 ** serve.o, and dch.c built with -Dmain=dch_main. */
 #include "../../serve.c"
 
@@ -162,6 +166,47 @@ xray_inv(int ac, char **av, const unsigned char *kind, int fl)
 	                                       !(seen & 16)) ||
 	    fl != (seen & 2 ? CTL_FOREVER | CTL_NOCAP : 0))
 		abort();
+}
+
+/* d[0..n) (n <= 512: a pipe takes it whole) through a pipe and
+** ctl_text_read, as a ctl child reads its --search or --ref text. */
+static void
+text_rt(const void *d, size_t n)
+{
+	char b[257], *r;
+	int p[2];
+
+	if (pipe(p) < 0)
+		abort();
+	if (write(p[1], d, n) != (ssize_t)n)
+		abort();
+	close(p[1]);
+	r = ctl_text_read(p[0], b);
+	close(p[0]);
+	if (!r != (n > 256 || memchr(d, '\0', n) != NULL) ||
+	    (r && (strlen(r) != n || memcmp(r, d, n))))
+		abort();
+}
+
+/* LOW-XN1: ctl_secret names the text of an --xray's --search or --ref
+** flag, the only text it names, and that text survives the pipe. */
+static void
+secret_inv(int ac, char **av, const unsigned char *kind)
+{
+	int s = ctl_secret(ac, av), i;
+
+	for (i = 1; i + 1 < ac; i++)
+		if (kind[i] == CK_FLAG && !strcmp(av[0], "--xray") &&
+		    (!strcmp(av[i], "--search") || !strcmp(av[i], "--ref")) &&
+		    s != i + 1)
+			abort();
+	if (s >= 0 && (s < 3 || s >= ac || kind[s] != CK_TEXT ||
+	               (strcmp(av[s - 1], "--search") &&
+	                strcmp(av[s - 1], "--ref")) ||
+	               strlen(av[s]) > 256))
+		abort();
+	if (s >= 0)
+		text_rt(av[s], strlen(av[s]));
 }
 
 /* What ctl_check let through (fl >= 0) is on the allowlist. */
@@ -323,8 +368,11 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 			     !xr_ref_parse(av[i + 1], NULL, &sp)))
 				abort();
 		}
+		if (fl >= 0)
+			secret_inv(ac, av, kind);
 		free(av);
 	}
+	text_rt(d, n < 512 ? n : 512);
 	{
 		/* the input's lines as an argv */
 		unsigned char kind[64];

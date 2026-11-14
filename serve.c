@@ -1372,8 +1372,28 @@ ctl_action(unsigned int type, pid_t ctl, const char *why)
 	return type == 0x34 && ctl > 0 && !why ? CA_CANCEL : CA_IGNORE;
 }
 
-/* 0x30: dch itself with the request's argv, no shell, stdin /dev/null, in
-** its cwd or else HOME. Refused (a 0x13, nothing runs): anything off the
+/* An allowlisted argv's --search or --ref text: its index in av, else -1.
+** on_ctl hands it to the child on stdin, "-" in its argv, so the host's
+** other users never see it in ps (LOW-XN1). Pure. */
+static int
+ctl_secret(int ac, char *const av[])
+{
+	unsigned char kind[CTL_ARGV_MAX];
+	char why[8];
+	int i;
+
+	if (strcmp(av[0], "--xray") || ctl_check(ac, av, kind, why, sizeof why) < 0)
+		return -1;
+	for (i = 2; i + 1 < ac; i++)
+		if (kind[i] == CK_FLAG &&
+		    (!strcmp(av[i], "--search") || !strcmp(av[i], "--ref")))
+			return i + 1;
+	return -1;
+}
+
+/* 0x30: dch itself with the request's argv, no shell, stdin /dev/null (an
+** --xray's --search or --ref text there, ctl_secret), in its cwd or else
+** HOME. Refused (a 0x13, nothing runs): anything off the
 ** allowlist, a create verb with create off, a cwd that is no directory;
 ** then the FIN. Not called while a ctl runs (ctl_action: a 0x13 "busy").
 ** After its 0x33 the connection takes the next 0x30 (#118). */
@@ -1383,6 +1403,7 @@ on_ctl(struct conn *c, const unsigned char *p, size_t n)
 	char why[200], cwd[PATH_MAX], **av = NULL, *argv[CTL_ARGV_MAX + 2];
 	struct stat st;
 	int ac, fl, po[2] = { -1, -1 }, pe[2] = { -1, -1 }, k;
+	int pi[2] = { -1, -1 }, sx;
 	int again = c->ctl_retry;
 	pid_t pid = -1;
 
@@ -1413,14 +1434,20 @@ on_ctl(struct conn *c, const unsigned char *p, size_t n)
 		argv[0] = dch_exe;
 		memcpy(argv + 1, av, (size_t)ac * sizeof *av);
 		argv[ac + 1] = NULL;
-		if (pipe_ce(po) == 0 && pipe_ce(pe) == 0 && (pid = fork()) == 0)
+		/* at most 256 bytes: the pipe holds it all before the fork */
+		if ((sx = ctl_secret(ac, av)) >= 0)
+			argv[sx + 1] = "-";
+		if ((sx < 0 || (pipe_ce(pi) == 0 &&
+		     write(pi[1], av[sx], strlen(av[sx])) ==
+		     (ssize_t)strlen(av[sx]))) &&
+		    pipe_ce(po) == 0 && pipe_ce(pe) == 0 && (pid = fork()) == 0)
 		{
 			const char *home = getenv("HOME");
 			int nul = open("/dev/null", O_RDWR);
 
 			if (nul < 0)
 				_exit(127);
-			dup2(nul, 0);
+			dup2(pi[0] >= 0 ? pi[0] : nul, 0);
 			dup2(po[1], 1);
 			dup2(pe[1], 2);
 			setpgid(0, 0);	/* its group: SIGKILLed whole */
@@ -1442,6 +1469,8 @@ on_ctl(struct conn *c, const unsigned char *p, size_t n)
 			close(po[k]);
 		if (pe[k] >= 0 && (pid < 0 || k))
 			close(pe[k]);
+		if (pi[k] >= 0)
+			close(pi[k]);
 	}
 	if (why[0])
 	{
