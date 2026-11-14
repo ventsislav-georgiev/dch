@@ -61,6 +61,7 @@ ap_cells(unsigned u)
 	       (u >= 0xA960 && u <= 0xA97F) || (u >= 0xAC00 && u <= 0xD7A3) ||
 	       (u >= 0xF900 && u <= 0xFAFF) || (u >= 0xFE30 && u <= 0xFE6F) ||
 	       (u >= 0xFF00 && u <= 0xFF60) || (u >= 0xFFE0 && u <= 0xFFE6) ||
+	       (u >= 0x16FF0 && u <= 0x16FF1) ||	/* wide Mc (QA 1.63.0 NIT-V8) */
 	       (u >= 0x1F200 && u <= 0x1FAFF) || (u >= 0x20000 && u <= 0x3FFFD)
 	       ? 2 : 1;
 }

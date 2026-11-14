@@ -1237,6 +1237,79 @@ def test_auto():
         v.close()
 
 
+GSID = "11111111-2222-4333-8444-5555555555a8"
+
+
+def gone_lines(prompts):
+    lines = []
+    for i, t in enumerate(prompts):
+        lines += [{"type": "user", "cwd": P, "message": {"content": t},
+                   "timestamp": "2026-11-10T1%d:00:00Z" % i},
+                  {"type": "assistant", "message": {"content": [
+                      {"type": "text", "text": "reply %d" % i}]}}]
+    return "".join(json.dumps(o) + "\n" for o in lines)
+
+
+def test_gone():
+    """A prompt the transcript no longer holds when it is read (a stale
+    anchor; for a shell, the ring evicted it): the engine says "chapter
+    gone" (kept for --json), the view says it in its own word, never
+    "chapter" (#295, QA 1.63.0 LOW-V17). Opening it goes back to the
+    list; turning to it with ] keeps the reader."""
+    cfg = os.path.join(HOME, ".claude")
+    tr = os.path.join(cfg, "projects", "-home-demo-proj", GSID + ".jsonl")
+    sockdir = os.path.join(T, "dch-%d" % os.getuid())
+    hdir = os.path.join(T, "state", "dch", "sessions",
+                        sockdir.replace("/", "-"))
+    os.makedirs(os.path.dirname(tr), exist_ok=True)
+    os.makedirs(hdir, exist_ok=True)
+    rec = {"name": "xv-gn", "cwd": P, "end": "exited", "argv": ["claude"],
+           "started": 1794299400, "updated": 1794300000,
+           "ended": 1794300000, "sock_dir": sockdir,
+           "agent": {"session_id": GSID, "cwd": P, "config_dir": cfg}}
+    with open(os.path.join(hdir, "xv-gn.json"), "w") as f:
+        f.write(json.dumps(rec) + "\n")
+    full = gone_lines(["the first ask", "the second ask"])
+    for what, keys in (("Enter on it", [b"\r"]),
+                       ("] to it", [b"k", b"\r", b"]"])):
+        with open(tr, "w") as f:
+            f.write(full)
+        v = Pty([DCH, "--xray", "xv-gn"])
+        try:
+            v.wait(b"the second ask")
+            v.pump(0.8)
+            for k in keys[:-1]:
+                v.key(k, 0.5)
+            if keys[:-1]:
+                v.wait(b"reply 0")
+            # the second prompt's anchor goes: a shorter transcript
+            with open(tr, "w") as f:
+                f.write(gone_lines(["other"]))
+            mark = len(v.out)
+            v.key(keys[-1], 1.0)
+            ok = until(lambda: (v.pump(0.1), "is gone" in
+                                screen(v, mark))[1], 5)
+            text = screen(v, mark)
+            check("LOW-V17: %s, a prompt gone: the view says \"X-ray: that "
+                  "prompt is gone\", never \"chapter\"" % what,
+                  ok and "X-ray: that prompt is gone" in text and
+                  "chapter" not in text, text)
+            v.key(b"q", 0.3)
+            v.key(b"q")
+            v.exit()
+        finally:
+            v.close()
+    with open(tr, "w") as f:
+        f.write(full)
+    a = json.loads(dch("--xray", "xv-gn", "--json").stdout)["chapters"]
+    with open(tr, "w") as f:
+        f.write(gone_lines(["other"]))
+    r = dch("--xray", "xv-gn", "--chapter", a[-1]["anchor"], "--json")
+    check("LOW-V17: --chapter's own text stays \"dch: chapter gone\" for "
+          "API clients", r.returncode == 1 and r.stderr ==
+          "dch: chapter gone\n", (r.returncode, r.stderr))
+
+
 def test_compact():
     o = json.loads(dch("--xray", "xv-ac", "--json").stdout)
     ch = o["chapters"]
@@ -2769,6 +2842,7 @@ def main():
         fixture_auto()
         test_auto()
         test_compact()
+        test_gone()
         fixture_resp()
         test_responses()
         test_responses_live()

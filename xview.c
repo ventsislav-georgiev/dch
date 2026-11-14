@@ -3248,8 +3248,17 @@ xv_run(int fd, const char *n, char *err, size_t errsz)
 		{
 			const char *e = v->kid[XV_RK].err, *w = xv_noun(v);
 
+			/* the engine's "chapter gone" stays for --json clients;
+			** the view says it in its own word (#295) */
+			if (strstr(e, "chapter gone") && (v->rturn || !v->rloaded))
+			{
+				snprintf(v->status, sizeof v->status,
+				         "X-ray: that %s is gone", w);
+				if (!v->rturn)
+					xv_back(v);
+			}
 			/* a turn that got no chapter: said, the reader stays */
-			if (v->rturn)
+			else if (v->rturn)
 				snprintf(v->status, sizeof v->status, e[0]
 				         ? "could not read that %s: %s"
 				         : "could not read that %s: no such %s", w,
