@@ -299,7 +299,7 @@ scr_text(size_t bx, size_t by, char **tp, size_t *lp)
 	p.value.coordinate.x = cx;
 	p.value.coordinate.y = cy;
 	if (ghostty_terminal_grid_ref(the_term, p, &sel.end) !=
-	    GHOSTTY_SUCCESS || format_unwrap(&sel, &t, &l) < 0)
+	    GHOSTTY_SUCCESS || format_unwrap(&sel, &t, &l) < 0 || !t)
 		return -1;
 	while (l && (t[l - 1] == '\n' || t[l - 1] == ' '))
 		l--;

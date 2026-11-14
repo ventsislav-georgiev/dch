@@ -253,7 +253,20 @@ def case_d(env, trace):
         else:
             out = []
         check("%s: the detach's restore is draining" % what, out)
-        os.killpg(pg, signal.SIGTSTP)
+        # Linux's TCSADRAIN on a pty slave does not wait for unread output:
+        # the client may be gone before the stop (#336). Strict rows run
+        # whenever the job is still there to stop.
+        try:
+            os.killpg(pg, signal.SIGTSTP)
+        except ProcessLookupError:
+            got = sh.prompt(n)
+            sh.pump(0.3)
+            check("%s: the detach ended before the stop could land, dash "
+                  "cooked (%s)" % (what, sh.modes()),
+                  got and sh.cooked(), sh.out[-200:])
+            print("skip: %s: the drain rows (this terminal's drain does not "
+                  "block)" % what)
+            return
         got = sh.prompt(n)
         sh.pump(0.3)
         check("%s: the job stops, dash's terminal is cooked (%s)" %
