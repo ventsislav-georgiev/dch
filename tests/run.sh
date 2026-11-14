@@ -116,15 +116,18 @@ if pid > 1 and "--master-of" in a[:-1] and os.path.realpath(
     os.kill(pid, signal.SIGCONT)' "$1" >/dev/null 2>&1
 }
 
-# Isolate session dir: dch uses $XDG_RUNTIME_DIR/dch-$UID.
-TMP=$(mktemp -d)
-# The tests' own temp dirs: one short dir under /tmp per run (see runreap).
-DCH_TEST_TMP=$(mktemp -d /tmp/dchr.XXXXXX) || exit 1
+# One short dir under /tmp per run: the tests' own temp dirs in t (see
+# runreap), the isolated session dir in r (dch uses $XDG_RUNTIME_DIR/dch-$UID).
+# Mid-run runreap walks t only; at exit it walks both, so a session a passing
+# test left in the socket dir ends too (QA 1.63.0 LOW-T15).
+RUN=$(mktemp -d /tmp/dchr.XXXXXX) || exit 1
+TMP=$RUN/r DCH_TEST_TMP=$RUN/t
+mkdir "$TMP" "$DCH_TEST_TMP" || exit 1
 export DCH_TEST_TMP
 # and the ones made in the default TMPDIR (tempfile.mkdtemp() with no dir),
 # so runreap ends and removes theirs too (QA 1.60.0 LOW-T4)
 export TMPDIR="$DCH_TEST_TMP"
-trap 'runreap; rm -rf "$TMP" "$DCH_TEST_TMP"' EXIT
+trap 'DCH_TEST_TMP=$RUN; runreap; rm -rf "${RUN:?}"' EXIT
 trap 'pyreap; exit 130' INT TERM HUP
 export XDG_RUNTIME_DIR="$TMP"
 # DCH_SOCKET_DIR wins over XDG_RUNTIME_DIR: an inherited one would point the
