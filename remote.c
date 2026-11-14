@@ -2202,7 +2202,7 @@ pkt_next(const unsigned char *b, size_t n, struct packet *pk, size_t *used)
 
 /* An attach packet as frames: keys as 0x10, a size as 0x05, a redraw as
 ** 0x05 then 0x07 (but the first: the attach itself paints), the X-ray
-** overlay's or a suspend's detach as RF_VIEW (#339): the host's master
+** overlay's detach (len 1; a suspend's is len 0) as RF_VIEW (#339): the host's master
 ** answers the program's queries until the resume's 0x07, as a local one
 ** does (a serve before it ignores the frame). */
 static void
@@ -2210,7 +2210,7 @@ pkt_frames(const struct packet *pk, int *redraws, struct sb *out)
 {
 	if (pk->type == MSG_PUSH && pk->len)
 		put_frame(out, 0x10, pk->u.buf, pk->len);
-	else if (pk->type == MSG_DETACH)
+	else if (pk->type == MSG_DETACH && pk->len == 1)
 		put_frame(out, RF_VIEW, "", 0);
 	else if (pk->type == MSG_WINCH || pk->type == MSG_REDRAW)
 		put_size(out, 0x05, NULL, &pk->u.ws);

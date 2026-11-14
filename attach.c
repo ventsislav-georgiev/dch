@@ -809,10 +809,11 @@ xray_overlay(int s)
 	** to the MSG_ATTACH below, as for a suspend (the host never sees it),
 	** so nothing it passed late lands on the screen the view returns to;
 	** a local one (#311): len 1 keeps it attached on the master, which
-	** sends it nothing and has the mirror answer the program's queries */
+	** sends it nothing and has the mirror answer the program's queries;
+	** len 1 to the relay too: only the view's becomes a 0x35 (#339) */
 	memset(&pkt, 0, sizeof pkt);
 	pkt.type = MSG_DETACH;
-	pkt.len = attach_detached ? 0 : 1;
+	pkt.len = 1;
 	write_packet_or_fail(s, &pkt);
 	if (pipe(p) < 0)
 		p[0] = -1;

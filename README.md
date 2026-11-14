@@ -2639,8 +2639,7 @@ the client tells the host's `dch serve` the view is up (a 0x35 frame), serve
 tells its own client, and the host's mirror answers until the view closes.
 Against an older host nothing answers them while the view is up: its `dch
 serve` ignores the frame and keeps its own client attached, so the host's
-master counts the question as seen. A suspend (`Ctrl-Z`) of a remote attach
-tells the host the same, as a local suspend's detach does.
+master counts the question as seen.
 
 ### dch-lite and `DCH_NO_VT`
 
@@ -2845,7 +2844,7 @@ a pop and then the push (so the flag stack does not grow), and on the full
 build the screen replayed from the mirror.
 
 **View up.** A `0x35` with an empty body says the user of this attach looks
-at a view over it (dch's X-ray view, or a suspend): dch serve tells its client,
+at a view over it (dch's X-ray view): dch serve tells its client,
 and the host's master answers the program's start-up queries as with nothing
 attached (see "A session nothing sees answers two queries") while the stream
 stays up. The next `0x07` ends it. There is no reply. Before an attach, on a

@@ -226,8 +226,7 @@ the same holds when the host's dch also has it (the release after 1.66.0
 on): the client tells the host's
 .B dch serve
 the view is up (a 0x35 frame), serve tells its own client, and the host's
-mirror answers until the view closes; a suspend of the remote attach tells
-it the same.
+mirror answers until the view closes.
 Against an older host nothing answers them while the view is up: its
 .B dch serve
 ignores the frame and keeps its own client attached.
