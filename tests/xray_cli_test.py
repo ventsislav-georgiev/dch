@@ -1237,15 +1237,17 @@ def test_refs():
           r.returncode == 0 and d.get("done") is True and d["partial"] and
           d["why"] == "budget" and d["bytes"] < os.path.getsize(tp) and
           not any("mention" in l for l in ls), r.stdout[-600:] + r.stderr)
-    # #262: the last line's ref is the newest window's, found at once.
-    # 300 ms, the cap: a sanitized build on a shared runner parsed under
-    # 1 MiB in 50 ms (#283); bytes < 2 MiB is what says newest first
+    # #262: the last line's ref is the newest window's, found at once;
+    # bytes < 2 MiB of 40 MB is what says newest first. The clock is off
+    # (#332): the newest window's cwd is line 1's, 40 MB back, and a slow
+    # CI runner spent all 300 ms on that walk, bytes 0, why budget; the row
+    # above already proves the budget stops a light scan
     r = dch("--xray", "xr-refs", "--ref", "#424242", "--scope", "session",
-            "--budget-ms", "300", "--json")
+            "--json", env=dict(ENV, DCH_XRAY_NOCLOCK="1"))
     ls = ref_lines(r.stdout) or [{}]
     d = ls[-1]
-    check("ref: light reads newest first: the last line's ref is found under "
-          "a 300 ms budget, why first",
+    check("ref: light reads newest first: the last line's ref is found in "
+          "the newest window, under 2 MiB of 40 MB read, why first",
           r.returncode == 0 and d.get("done") is True and d["partial"] and
           d["why"] == "first" and d["bytes"] < 2 << 20 and
           [l["mention"]["line"] for l in ls if "mention" in l] ==
@@ -4599,17 +4601,18 @@ PSID = "11111111-2222-4333-8444-5555555555d4"
 
 def test_prefilter_reach():
     """#293: light --ref does not decode a 1 MiB window whose raw bytes
-    cannot hold the ref, so its 300 ms reach the whole of a transcript of
-    96 MB or more: a ticket named only in the first line is found. Without
-    the prefilter light decodes about 20-30 MB in its budget at load 10 and
-    40-95 MB on a fast idle machine, and stops, why budget. So the size is
-    taken from this machine: first a twin with a \\/ on every line, which
-    the prefilter never skips (pf_escape), measures what light decodes in
-    its budget here and now; the file is 1.5 times that, 96 MB at least,
-    144 MB at most: a CI runner's raw scan of 160 MB stopped at the budget
-    2 MB short, three tries in a row. Asserts what was found, not how long
-    it took; a run a stalled machine stops at the budget is retried,
-    twice."""
+    cannot hold the ref, so its 300 ms reach the whole of a 96 MB
+    transcript: a ticket named only in the first line is found. Without the
+    prefilter light decodes about 20-30 MB in its budget at load 10 and
+    40-95 MB on a fast idle machine. With the clock off (#332: a stalled CI
+    runner reached 6 MB of 96 in 300 ms, three tries in a row) this asserts
+    what was found and the CPU it cost, which a stall does not inflate: a
+    twin with a \\/ on every line, which the prefilter never skips
+    (pf_escape), gives the CPU per byte of decoding every window; the
+    prefilter's read costs under a quarter of that (30 times less on an
+    idle M-series)."""
+    import resource
+
     cfg = os.path.join(HOME, ".claude")
     pdir = os.path.join(cfg, "projects", "-home-demo-proj")
     os.makedirs(pdir, exist_ok=True)
@@ -4631,30 +4634,32 @@ def test_prefilter_reach():
                 f.write(blk)
 
     def reach():
+        c = resource.getrusage(resource.RUSAGE_CHILDREN)
         r = dch("--xray", "xr-reach", "--ref", "MARK-1", "--scope",
-                "session", "--json")
-        return r, ref_lines(r.stdout) or [{}]
+                "session", "--json", env=dict(ENV, DCH_XRAY_NOCLOCK="1"))
+        e = resource.getrusage(resource.RUSAGE_CHILDREN)
+        ls = ref_lines(r.stdout) or [{}]
+        return (r, ls, e.ru_utime + e.ru_stime - c.ru_utime - c.ru_stime,
+                ls[-1].get("bytes") or 1)
 
     history("xr-reach", PSID, cfg)
     try:
-        plant(block.replace('"text":"', '"text":"\\/'), 96)
-        nopf = reach()[1][-1].get("bytes", 0)
-        mb = min(144, max(96, (nopf * 3 >> 21) + 1))
-        plant(block, mb)
-        for k in range(3):
-            r, ls = reach()
-            if ls[-1].get("why") != "budget":
-                break
+        plant(block.replace('"text":"', '"text":"\\/'), 32)
+        tw = reach()
+        plant(block, 96)
+        r, ls, cpu, n = reach()
         men = [l["mention"]["offset"] for l in ls if "mention" in l]
         check("prefilter: light --ref finds a ref named only in the first "
-              "line of a %d MB transcript inside its 300 ms budget (with "
-              "every window decoded it reached %d MB): the mention at "
-              "offset 0, why first, all but its oldest window counted "
-              "(%d tries)" % (mb, nopf >> 20, k + 1),
+              "line of a 96 MB transcript: the mention at offset 0, why "
+              "first, all but its oldest window counted, at under a quarter "
+              "of the CPU per byte of decoding every window (%.0f ms for "
+              "96 MB; decoded, %.0f ms for %d MB)"
+              % (cpu * 1000, tw[2] * 1000, tw[3] >> 20),
               r.returncode == 0 and men == [0] and
               ls[-1].get("done") and ls[-1]["why"] == "first" and
-              ls[-1]["bytes"] >= os.path.getsize(tp) - (2 << 20),
-              (r.returncode, ls[-2:], r.stderr))
+              n >= os.path.getsize(tp) - (2 << 20) and
+              tw[3] > 16 << 20 and cpu / n * 4 < tw[2] / tw[3],
+              (r.returncode, ls[-2:], r.stderr, tw[1][-1:]))
     finally:
         os.unlink(tp)
 
