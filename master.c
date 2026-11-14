@@ -485,19 +485,17 @@ auto_allow(void)
 		dch_trace("auto-allow: same prompt again, left to the human");
 	else if (dch_agent_probe(the_pty.pid, &a) == 0)
 	{
-		pid_t fg = tcgetpgrp(the_pty.fd);
-		int e = errno;
-		pid_t g = getpgid((pid_t)a.pid);
+		int fg = proc_fg(the_pty.pid, a.pid);
 
 		free(a.launch);
-		/* only the Claude in front: one suspended with Ctrl-Z reads
-		** nothing, the "1" would go to the shell that printed this
-		** (#282). Unreadable: fail closed */
-		if (fg <= 0 || g < 0 || fg != g)
-			dch_trace("auto-allow: claude %ld not in front (its group "
-			          "%ld, the pty's %ld%s%s), left alone", a.pid,
-			          (long)g, (long)fg, fg < 0 ? ": " : "",
-			          fg < 0 ? strerror(e) : "");
+		/* only the Claude in front, also under script or unbuffer
+		** (#318): one suspended with Ctrl-Z reads nothing, the "1"
+		** would go to the shell that printed this (#282). Unreadable:
+		** fail closed */
+		if (fg != 1)
+			dch_trace("auto-allow: claude %ld not in front (%s), left "
+			          "alone", a.pid, fg ? "unreadable" : "suspended or "
+			          "behind a shell");
 		/* behind any input still waiting, never a blocking write */
 		else if (pty_input("1", 1) == 0)
 		{

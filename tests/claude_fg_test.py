@@ -13,8 +13,11 @@ fail not_foreground and type nothing; --run keeps the plain burst for the
 shell; after `fg`, claude_foreground is true and the fake's own prompt is
 answered. Then a second session runs the fake under script(1) (a pty and
 process group of its own, #312): claude_foreground true and --say reaches
-it; suspended inside script's bash, --say fails not_foreground; after fg,
---stop is not refused. On dch-lite (no mirror) the auto-allow checks are skipped.
+it; suspended inside script's bash, --say fails not_foreground and the
+shell's prompt-shaped text is not answered; after fg, auto-allow answers the
+fake's prompt (#318); with script itself stopped, claude_foreground is false
+and nothing is answered; after fg, --stop is not refused. On dch-lite (no
+mirror) the auto-allow checks are skipped.
 
 Run:  python3 tests/claude_fg_test.py        (uses ./dch)
 """
@@ -118,6 +121,32 @@ def main():
     def send(text):
         run("--send", n, "\x15" + text + "\r")   # Ctrl-U: an empty line
 
+    def ps(p, field):
+        return subprocess.run(["ps", "-o", field + "=", "-p", str(p)],
+                              capture_output=True, text=True).stdout.strip()
+
+    def script_of(p):
+        """The script(1) above p (Linux puts an sh -c in between)."""
+        for _ in range(8):
+            p = int(ps(p, "ppid"))
+            if os.path.basename(ps(p, "comm")) == "script":
+                return p
+        raise RuntimeError("no script(1) above the fake")
+
+    def shell_dlg_unanswered(what):
+        """The shell prints a prompt-shaped text: not Claude's to answer."""
+        before = row().get("auto_allowed", 0)
+        send("clear; cat %s; sleep 4" % dlg)
+        until(lambda: "Tab to amend" in screen(), 5)
+        time.sleep(2.5)                  # past AA_QUIET_MS and a check
+        scr = screen()
+        check("%s: the shell's prompt-shaped text is not answered (no "
+              "\"1\", auto_allowed unchanged)" % what,
+              "Tab to amend" in scr and
+              "1" not in scr.rstrip().split("\n")[-1] and
+              row().get("auto_allowed", 0) == before)
+        until(lambda: screen().rstrip().endswith("$"), 6)
+
     def result(r):
         try:
             return json.loads(r.stdout.strip().splitlines()[-1])
@@ -157,17 +186,7 @@ def main():
               "hello" not in screen())
 
         if not lite:
-            # the shell prints a prompt-shaped text: not Claude's to answer
-            send("clear; cat %s; sleep 4" % dlg)
-            until(lambda: "Tab to amend" in screen(), 5)
-            time.sleep(2.5)                  # past AA_QUIET_MS and a check
-            scr = screen()
-            check("suspended: the shell's prompt-shaped text is not "
-                  "answered (no \"1\", no auto_allowed)",
-                  "Tab to amend" in scr and
-                  "1" not in scr.rstrip().split("\n")[-1] and
-                  row().get("auto_allowed", 0) is None)
-            until(lambda: screen().rstrip().endswith("$"), 6)
+            shell_dlg_unanswered("suspended")
 
         r = run("--stop", n, "--json", timeout=90)
         check("suspended: --stop fails not_foreground, the session kept",
@@ -235,8 +254,31 @@ def main():
             r = run("--say", n, "--json", "--", "hello")
             check("under script, suspended: --say fails not_foreground",
                   result(r).get("reason") == "not_foreground")
+            if not lite:
+                shell_dlg_unanswered("under script, suspended")
             send("fg")
             until(lambda: row().get("claude_foreground") is True, 10)
+            if not lite:
+                # #318: the master read script's group off the outer pty
+                until(lambda: "auto mode on" in screen(), 5)
+                setctl(screen=FAKE_DLG)
+                check("under script: auto-allow answers the running "
+                      "Claude's prompt with 1",
+                      until(lambda: keys() == ["1"], 8) and
+                      (row().get("auto_allowed") or {}).get("title") ==
+                      "Bash command")
+                setctl()
+                # script itself stopped: the outer bash is in front
+                # (SIGSTOP: util-linux script blocks SIGTSTP)
+                k = keys()
+                os.killpg(os.getpgid(script_of(spid)), signal.SIGSTOP)
+                check("script suspended: claude_foreground false",
+                      until(lambda: row().get("claude_foreground") is False,
+                            5))
+                shell_dlg_unanswered("script suspended")
+                check("script suspended: the fake got no key", keys() == k)
+                send("fg")
+                until(lambda: row().get("claude_foreground") is True, 10)
             r = run("--stop", n, "--json", timeout=90)
             check("under script: --stop is not refused not_foreground",
                   result(r).get("reason") != "not_foreground")

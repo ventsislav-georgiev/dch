@@ -5940,7 +5940,7 @@ proc_ppid(long pid)
 ** 0 when one is not — suspended with Ctrl-Z or in the background, a shell
 ** or another job in front (#282) — -1 when the chain cannot be read. The
 ** kernel's own view, so an old master answers it as well as a new one. */
-static int
+int
 proc_fg(long root, long pid)
 {
 	long fg = -1, below = 0, up;
