@@ -809,6 +809,7 @@ running sessions.
 | `remote_hosts` | empty: your tailnet peers; `off`: none; else a `[label=]host[:port],...` list (see [Remote hosts](#remote-hosts)) | empty |
 | `focus_resize` | `true`/`false`: an attached client takes the session's size when its window gains focus (see [The focused client sets the size](#the-focused-client-sets-the-size)) | `true` |
 | `xray_ring` | `0` (off) to `16M` (`K`/`M` suffixes, rounded up to 64 KiB): the shell output each new session keeps in its master's memory for X-ray, the rows that scroll off its primary screen, as text, with OSC 133 prompt marks. Read when a session starts (see [Shell output ring](#shell-output-ring-x-ray)); kept across `--restart`; never on disk, never in core dumps. dch-lite keeps none | `2M` |
+| `tasks_command` | a program and its arguments, run with no shell: X-ray's task list (`--tasks`) from your own command; with no row the agent's own (see [Your own task list](#your-own-task-list-tasks_command)). Your own config only; through `dch serve` the host's | empty |
 
 ```sh
 dch --config                         # the path, then every known key's effective value
@@ -1818,6 +1819,62 @@ per file (`"cut":true` after `body` when it was cut), then
 and --follow`) and not in `--requests`. On `host:name` it runs on that host;
 a host whose dch predates it says `dch: <host>: the host's dch does not know
 --memory` (exit 1).
+
+#### Your own task list (`tasks_command`)
+
+X-ray shows the agent's own task list. To show your own instead (a ledger,
+an issue tracker, a checklist), set a command in your dch config:
+```
+tasks_command = ~/bin/my-tasks --open
+```
+- **Run.** dch splits the line into words, with no shell: single and
+  double quotes group words, a leading `~/` is your home, and `$VARS`, `;`,
+  `|`, globs and backticks are plain text. It runs on the machine where the
+  session lives (through `dch serve`: that host's config and command; the
+  asker sends only the session name), in the session's folder (else your
+  home), stdin `/dev/null`, in its own process group. Its environment adds
+  `DCH_SESSION` (the session name), `DCH_SESSION_CWD`, `DCH_AGENT`
+  (`claude`, `codex` or empty), `DCH_AGENT_SESSION_ID` (the agent's
+  conversation id, or empty) and `DCH_ROWS_MAX`.
+- **Lines.** One JSON object per line on stdout; rows show as they arrive.
+  An optional first line `{"title":"…"}` names the list (the header's
+  `title`). A row has `title` (required), `id`, `status` (`pending`,
+  `active`, `done`, `dropped`, or `in_progress`, `completed`, `deleted`; any
+  other word is pending with the word as its `label`), `label`, `active`,
+  `note`, `created`, `updated` (passed through as text: a reader treats a
+  value that is not ISO 8601 as `null`), `blocked_by` (ids), `url` and
+  `group`, bare or wrapped as `{"task":{…}}`. A line that is not a JSON
+  object, has no title or is over 64 KB is skipped.
+- **Limits.** 5 s in all, 32 MB of output, 50000 rows (the first kept).
+  Past a limit the process group is ended and the rows so far stay, so
+  print what matters first.
+- **Fallback.** At least one row: the command is the source
+  (`"source":"command"`), and the header comes with the first row. No row:
+  the built-in source answers exactly as without the command; a failure or
+  timeout adds a one-line `warn` to its header (with stderr's first line),
+  an empty answer with exit 0 says nothing. Rows and then a stop or a
+  non-zero exit put the `warn` on the `done` line. The two sources are
+  never mixed.
+
+A markdown checklist (`TODO.md` in the session's folder):
+```sh
+#!/bin/sh
+echo '{"title":"TODO.md"}'
+grep -E '^[[:space:]]*[-*] \[[ xX]\] ' TODO.md 2>/dev/null | while IFS= read -r l; do
+  case $l in *'[ ]'*) s=pending ;; *) s=done ;; esac
+  t=$(printf '%s' "${l#*] }" | sed 's/\\/\\\\/g; s/"/\\"/g')
+  printf '{"title":"%s","status":"%s"}\n' "$t" "$s"
+done
+```
+The open GitHub issues of the session's repository:
+```sh
+#!/bin/sh
+echo '{"title":"GitHub issues"}'
+exec gh issue list --limit 200 --json number,title,url,updatedAt \
+  --jq '.[] | {id: .number, title, url, updated: .updatedAt} | tojson'
+```
+`memory_command` does the same for the memory list; it arrives with the
+Memory engine.
 
 `dch --xray <n> --follow --json` streams NDJSON, each line with
 `schema:1`. The first line is `{"schema":1,"snapshot":{…}}`, holding the

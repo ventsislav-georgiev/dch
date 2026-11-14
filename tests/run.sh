@@ -1178,6 +1178,7 @@ pyrun "dch serve keeps X-ray's test switches from its ctls" serve_xray_env_test.
 # the command source's runner (#321): xcmd_unit's units, then its driver
 # against fake commands (clock, caps, group cleanup, no shell)
 pyrun "xray command source: argv split, row lines, the runner's limits" xcmd_test.py
+pyrun "--tasks with a tasks_command: command first, the built-in on no row, warn" xcmd_tasks_test.py
 
 # --- the watchdog ends a hung test, its child and its session, only them ----
 # watchdog_hang.py records its pid, a child's, a session master's and one

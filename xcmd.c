@@ -130,7 +130,8 @@ putq(struct xc_out *w, const char *s)
 static void
 key(struct xc_out *w, const char *k)
 {
-	put(w, w->o[w->n - 1] == '{' ? "\"" : ",\"");
+	/* n is 0 when the first put did not fit: never o[-1] */
+	put(w, w->n && w->o[w->n - 1] == '{' ? "\"" : ",\"");
 	put(w, k);
 	put(w, "\":");
 }
@@ -259,7 +260,7 @@ row_task(struct xc_out *w, const struct json_parser *p, int r, char *tmp,
 		for (i = t + 1; i < p->tok[t].next; i = p->tok[i].next)
 			if (cut(p, i, 1, tmp, b))
 			{
-				if (w->o[w->n - 1] != '[')
+				if (w->n && w->o[w->n - 1] != '[')
 					put(w, ",");
 				putq(w, b);
 			}

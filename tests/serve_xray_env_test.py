@@ -8,7 +8,9 @@ execs the real dch. Loopback only, a fake tailscale, temp HOME.
 LOW-XN1 (QA 1.63.0): a peer's --search and --ref through serve answer as
 the host's own dch does, and the text is never in the ctl child's argv
 (the wrapper logs "$@", what the host's ps shows): "-" there, the text on
-its stdin. #319: a peer's --tasks answers as the host's dch.
+its stdin. #319: a peer's --tasks answers as the host's dch. #321: with a
+tasks_command, the host's config and the host's command answer it; the
+peer's own config, environment and cwd reach none of it.
 
 Run:  python3 tests/serve_xray_env_test.py        (uses ./dch)
 """
@@ -136,6 +138,94 @@ def tasks(senv, cenv, check):
            rem.returncode, rem.stdout[:300], rem.stderr[:300]))
 
 
+def tasks_command(senv, cenv, logs, check):
+    """#321: session xc on the host (a History Claude whose cwd exists),
+    the host's config naming a command, the peer's config naming another
+    one. A peer's --tasks runs the host's, with the host's argv and the
+    session's name and cwd; the peer's command never runs, its marked
+    environment and its cwd never reach the command."""
+    sid = "11111111-2222-4333-8444-5555555555f2"	# tasks()'s transcript
+    hcwd = os.path.join(senv["HOME"], "xc proj")
+    os.makedirs(hcwd)
+    sock = os.path.join(senv["XDG_RUNTIME_DIR"], "dch-%d" % os.getuid())
+    hdir = os.path.join(senv["XDG_STATE_HOME"], "dch", "sessions",
+                        sock.replace("/", "-"))
+    with open(os.path.join(hdir, "xc.json"), "w") as f:
+        json.dump({"name": "xc", "cwd": hcwd, "end": "exited",
+                   "argv": ["claude"], "started": 1794299400,
+                   "updated": 1794300000, "ended": 1794300000,
+                   "sock_dir": sock,
+                   "agent": {"session_id": sid, "cwd": hcwd,
+                             "config_dir": os.path.join(senv["HOME"],
+                                                        ".claude")}}, f)
+    host = os.path.join(senv["HOME"], "host-tasks")
+    peer = os.path.join(cenv["HOME"], "peer-tasks")
+    mark = os.path.join(cenv["HOME"], "peer-ran")
+    with open(host, "w") as f:
+        f.write("#!/bin/sh\necho '{\"title\":\"host list\"}'\n"
+                "for v in \"$@\" \"$DCH_SESSION\" \"$DCH_SESSION_CWD\" "
+                "\"$DCH_AGENT\" \"$DCH_AGENT_SESSION_ID\" \"$(pwd)\" "
+                "\"${XC_PEER_MARK-unset}\"; do\n"
+                "  printf '{\"title\":\"<%s>\"}\\n' \"$v\"\ndone\n")
+    with open(peer, "w") as f:
+        f.write("#!/bin/sh\ntouch '%s'\necho '{\"title\":\"peer\"}'\n"
+                % mark)
+    for p in (host, peer):
+        os.chmod(p, 0o755)
+    with open(senv["DCH_CONFIG"], "a") as f:
+        f.write("tasks_command = %s host-arg\n" % host)
+    with open(cenv["DCH_CONFIG"], "a") as f:
+        f.write("tasks_command = %s\n" % peer)
+    henv = {k: v for k, v in senv.items() if not k.startswith("DCH_XRAY_")}
+    loc = subprocess.run([DCH, "--xray", "xc", "--tasks", "--json"],
+                         env=henv, capture_output=True, timeout=30,
+                         stdin=subprocess.DEVNULL)
+    rem = subprocess.run([DCH, "--xray", "srv:xc", "--tasks", "--json"],
+                         env=dict(cenv, XC_PEER_MARK="1"), cwd=cenv["HOME"],
+                         capture_output=True, timeout=60,
+                         stdin=subprocess.DEVNULL)
+    try:
+        ls = [json.loads(l) for l in rem.stdout.splitlines()]
+    except ValueError:
+        ls = []
+    titles = [l["task"]["title"] for l in ls if "task" in l]
+    check("tasks_command through serve: the host's command answers, as "
+          "the host's own dch does",
+          rem.returncode == 0 and rem.stdout == loc.stdout and ls and
+          ls[0]["source"] == "command" and ls[0]["title"] == "host list",
+          (rem.returncode, rem.stdout[:400], rem.stderr[:300],
+           loc.stdout[:300]))
+    check("...with the host's argv, the session's name and cwd, no peer "
+          "environment",
+          titles == ["<host-arg>", "<xc>", "<%s>" % hcwd, "<claude>",
+                     "<%s>" % sid, "<%s>" % hcwd, "<unset>"], titles)
+    check("...and the peer's own tasks_command never ran",
+          not os.path.exists(mark))
+    ctl = []
+    for n in sorted(os.listdir(logs)):
+        if n.startswith("argv."):
+            with open(os.path.join(logs, n)) as f:
+                a = f.read().split("\n")[:-1]
+            if "--tasks" in a and "xc" in a:
+                ctl.append(a)
+    check("...its ctl child's argv is dch's own: --xray xc --tasks --json",
+          ctl == [["--xray", "xc", "--tasks", "--json"]], ctl)
+    # the host's command failing: the built-in source, its header's warn
+    with open(host, "w") as f:
+        f.write("#!/bin/sh\necho 'host ledger down' >&2\nexit 1\n")
+    rem = subprocess.run([DCH, "--xray", "srv:xc", "--tasks", "--json"],
+                         env=cenv, capture_output=True, timeout=60,
+                         stdin=subprocess.DEVNULL)
+    ls = rem.stdout.splitlines()
+    check("tasks_command through serve, failing: the built-in rows, the "
+          "header's warn",
+          rem.returncode == 0 and len(ls) == 3 and
+          b'"source":"claude"' in ls[0] and
+          b'"warn":"tasks_command: exit 1: host ledger down"' in ls[0] and
+          b'"Port the parser"' in ls[1], (rem.returncode, rem.stdout[:400],
+                                         rem.stderr[:300]))
+
+
 def main():
     tmp = os.path.realpath(tempfile.mkdtemp(prefix="dchsxe", dir=os.environ.get("DCH_TEST_TMP", "/tmp")))
     fake, wrap, logs = (os.path.join(tmp, d) for d in ("fake", "wrap", "logs"))
@@ -220,6 +310,7 @@ def main():
                   "environment", got and not any(got.values()), got)
             xn1(senv, cenv, logs, check)
             tasks(senv, cenv, check)
+            tasks_command(senv, cenv, logs, check)
     finally:
         if sp.poll() is None:
             sp.send_signal(signal.SIGTERM)

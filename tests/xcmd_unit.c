@@ -219,6 +219,22 @@ t_task(void)
 	strcpy(big + k, "1]}");
 	CHECK("task: a row line past XCMD_LINE_MAX is skipped",
 	      line(XCMD_TASK, big, 0) == XCMD_SKIP && !*out);
+	{
+		/* the row's first put cannot fit: key() must not read out[-1]
+		** (the ASan build of this unit catches that read) */
+		char *tiny = malloc(9);
+		size_t c;
+		int ok = tiny != NULL;
+
+		for (c = 2; ok && c <= 9; c++)
+			ok = xcmd_line(XCMD_TASK, "{\"title\":\"T\"}", 13, 0, 1,
+			               tiny, c) == XCMD_SKIP && !*tiny &&
+			     xcmd_line(XCMD_MEMORY, "{\"title\":\"T\"}", 13, 0, 1,
+			               tiny, c) == XCMD_SKIP && !*tiny;
+		CHECK("task: an out smaller than the wrapper: skipped, nothing read "
+		      "before it", ok);
+		free(tiny);
+	}
 	CHECK("task: a small out is refused, never overrun",
 	      xcmd_line(XCMD_TASK, "{\"title\":\"T\"}", 13, 0, 1, out, 40) ==
 	      XCMD_SKIP && !*out);

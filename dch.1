@@ -3846,6 +3846,56 @@ never on disk, never in core dumps.
 A terminal's own clear\-screen key may not clear X\-ray: it clears the
 window and sends nothing to the shell; run
 .BR clear .
+.TP
+.B tasks_command
+A program and its arguments (split by dch: whitespace, single and double
+quotes, a leading
+.B \(ti/
+is HOME; no shell) that answers
+.B \-\-tasks
+instead of the agent's own list.
+Your own config only: through
+.B dch serve
+the host's config and command run, and the asker sends only the session
+name.
+It runs where the session lives, in the session's cwd (else HOME), stdin
+.IR /dev/null ,
+in its own process group, with
+.BR DCH_SESSION ,
+.BR DCH_SESSION_CWD ,
+.B DCH_AGENT
+.RB ( claude ,
+.B codex
+or empty),
+.B DCH_AGENT_SESSION_ID
+and
+.B DCH_ROWS_MAX
+added to its environment.
+It prints one JSON object per line: an optional first
+.B {"title":"..."}
+line, then rows with the
+.B \-\-tasks
+fields
+.RB ( title
+required), bare or wrapped as
+.BR {"task":{...}} ;
+a line that is not an object, has no title or is over 64 KB is skipped.
+Limits: 5 s, 32 MB of output, 50000 rows; past one the process group is
+ended and the rows so far stay.
+At least one row:
+.B source:command
+and the rows as they arrive; a stop or a non\-zero exit after them puts
+.B warn
+on the
+.B done
+line.
+No row: the built\-in source answers as without it; a failure or timeout
+adds a one\-line
+.B warn
+to its header, an empty answer with exit 0 says nothing.
+The two are never mixed.
+.B memory_command
+does the same for the memory list; it arrives with the Memory engine.
 .SH EXIT STATUS
 0 on success. Control verbs: 1 generic error, 2
 .B \-\-wait

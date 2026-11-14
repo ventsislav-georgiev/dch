@@ -55,7 +55,7 @@ tar:
 
 attach.o: @srcdir@/attach.c @srcdir@/dtach.h @srcdir@/remote.h @srcdir@/bridge.h config.h
 master.o: @srcdir@/master.c @srcdir@/cargv.h @srcdir@/dtach.h @srcdir@/remote.h @srcdir@/bridge.h @srcdir@/vt.h @srcdir@/ring.h config.h
-dch.o: @srcdir@/dch.c @srcdir@/cargv.h @srcdir@/dtach.h @srcdir@/remote.h @srcdir@/bridge.h @srcdir@/picker.h @srcdir@/xray.h @srcdir@/xmem.h config.h
+dch.o: @srcdir@/dch.c @srcdir@/cargv.h @srcdir@/dtach.h @srcdir@/remote.h @srcdir@/bridge.h @srcdir@/picker.h @srcdir@/xray.h @srcdir@/xmem.h @srcdir@/xcmd.h config.h
 serve.o: @srcdir@/serve.c @srcdir@/dtach.h @srcdir@/remote.h @srcdir@/bridge.h @srcdir@/rframe.h @srcdir@/xray.h config.h
 rframe.o: @srcdir@/rframe.c @srcdir@/dtach.h @srcdir@/remote.h @srcdir@/bridge.h @srcdir@/rframe.h config.h
 remote.o: @srcdir@/remote.c @srcdir@/dtach.h @srcdir@/remote.h @srcdir@/bridge.h @srcdir@/rframe.h @srcdir@/xray.h config.h

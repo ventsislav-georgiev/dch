@@ -15,6 +15,7 @@
 #include "ring.h"
 #include "xray.h"
 #include "xmem.h"
+#include "xcmd.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -13229,7 +13230,80 @@ xr_tasks_claude(const char *cfg, const char *sid, const char *session,
 	return xr_tasks_file(path, &st, 0, sid, session, warn);
 }
 
-/* --tasks: a Claude session's transcript (live or ended), a live Codex's
+/* #321: a tasks_command's answer, printed as it arrives: the header at its
+** first row (a title line can only come before it), each row as the runner
+** hands it on. Nonzero (a write failed) ends the command. */
+struct xr_tkc
+{
+	const char *session, *sid;
+	const struct xcmd_result *res;
+	unsigned long n;
+};
+
+static int
+xr_tkc_row(const char *line, void *arg)
+{
+	struct xr_tkc *k = arg;
+
+	if (!k->n++)
+	{
+		fputs("{\"schema\":1,\"session\":", stdout);
+		xr_put_str(stdout, k->session);
+		fputs(",\"session_id\":", stdout);
+		xr_put_str(stdout, k->sid);
+		fputs(",\"source\":\"command\",\"title\":", stdout);
+		if (k->res->title[0])
+			xr_put_str(stdout, k->res->title);
+		else
+			fputs("null", stdout);
+		fputs(",\"partial\":false}\n", stdout);
+	}
+	fputs(line, stdout);
+	fputc('\n', stdout);
+	return fflush(stdout) != 0 || ferror(stdout);
+}
+
+/* The user's tasks_command (their own dch config only), before any built-in
+** source. 1: it gave a row and answered, *rc its exit; its stop or failure
+** after rows is the done line's warn. 0: the built-in source answers, warn
+** its header's ("" for no command, an empty answer). Never mixed. */
+static int
+xr_tasks_cmd(const char *session, const char *sid, const char *cwd,
+             const char *agent, const char *asid, char *warn, size_t cap,
+             int *rc)
+{
+	struct xcmd_result res;
+	struct xr_tkc k = { session, sid, &res, 0 };
+	char cmd[1024];
+	/* a session cwd not known: HOME, never the querying process's (a
+	** dch serve ctl's is the peer's choice) */
+	struct xcmd_ctx c = { cmd, session, cwd[0] ? cwd : getenv("HOME"),
+	                      agent, asid };
+
+	warn[0] = '\0';
+	if (!dch_config_get("tasks_command", cmd, sizeof cmd) || !cmd[0])
+		return 0;
+	if (xcmd_rows(XCMD_TASK, &c, xr_tkc_row, &k, &res) == 0)
+	{
+		snprintf(warn, cap, "%s", res.warn);
+		return 0;
+	}
+	if (!ferror(stdout))
+	{
+		printf("{\"done\":true,\"count\":%lu,\"dropped\":0", res.rows);
+		if (res.warn[0])
+		{
+			fputs(",\"warn\":", stdout);
+			xr_put_str(stdout, res.warn);
+		}
+		fputs("}\n", stdout);
+	}
+	*rc = xr_out_exit(fflush(stdout) == 0 && !ferror(stdout));
+	return 1;
+}
+
+/* --tasks: the user's tasks_command first (#321), whatever the session;
+** else a Claude session's transcript (live or ended), a live Codex's
 ** rollout, as --chapter finds them (none found: no corpus); a shell, live
 ** or ended, keeps no task list: source "none". */
 static int
@@ -13239,40 +13313,60 @@ xr_tasks_q(const struct xr_target *t)
 	struct cmd_info ci;
 	struct crec c;
 	struct xr_cx xc;
-	char cfg[1400], path[2048];
+	char cfg[1400], path[2048], warn[XCMD_WARN_MAX], cwd[PATH_MAX] = "";
 	struct stat st;
-	int qc, cx;
-	const char *warn = NULL;
+	int qc, cx = 0, claude = 0, rc;
 
-	/* #321 hooks in here: a command source goes first and answers when it
-	** gives a row; else the built-in source below, its failure in warn. */
 	if (t->kind == XR_ENDED)
+	{
+		snprintf(cwd, sizeof cwd, "%s",
+		         t->rec->acwd[0] ? t->rec->acwd : t->rec->cwd);
+		if (xr_tasks_cmd(t->name, t->rec->sid, cwd,
+		                 t->rec->sid[0] ? "claude" : "", t->rec->sid, warn,
+		                 sizeof warn, &rc))
+			return rc;
 		return t->rec->sid[0] ? xr_tasks_claude(t->rec->acfg, t->rec->sid,
 		                                        t->name, warn)
 		       : xr_out_exit(xr_tasks_print(stdout, NULL, t->name, "",
 		                                    0, warn) == 0);
+	}
 	if ((qc = cmd_query(t->sock, &ci)) == -4)
 		return xr_no_session();
-	if (qc == 0 && xr_live_claude(&ci, &c))
-	{
+	if (qc == 0 && ci.pid > 0)
+		(void)proc_cwd(ci.pid, cwd, sizeof cwd);
+	claude = qc == 0 && xr_live_claude(&ci, &c);
+	if (!claude && qc == 0)
+		cx = xr_live_codex(&ci, &xc);
+	if (qc == 0)
 		cmd_info_free(&ci);
+	if (claude)
+	{
+		if (c.cwd[0])
+			snprintf(cwd, sizeof cwd, "%s", c.cwd);
+		if (xr_tasks_cmd(t->name, c.sid, cwd, "claude", c.sid, warn,
+		                 sizeof warn, &rc))
+			return rc;
 		xr_crec_cfg(&c, cfg, sizeof cfg);
 		return cfg[0] ? xr_tasks_claude(cfg, c.sid, t->name, warn)
 		              : xr_no_corpus();
 	}
-	if (qc == 0 && (cx = xr_live_codex(&ci, &xc)) != 0)
+	if (cx)
 	{
-		cmd_info_free(&ci);
+		if (xc.cwd[0])
+			snprintf(cwd, sizeof cwd, "%s", xc.cwd);
+		if (xr_tasks_cmd(t->name, xc.tid, cwd, "codex", xc.tid, warn,
+		                 sizeof warn, &rc))
+			return rc;
 		return cx > 0 && xr_codex_lookup(xc.home, xc.tid, path, sizeof path,
 		                                 &st) == 0
 		       ? xr_tasks_file(path, &st, 1, xc.tid, t->name, warn)
 		       : xr_no_corpus();
 	}
-	if (qc == 0)
-		cmd_info_free(&ci);
 	/* the ring's header for the session_id, as the other forms give it */
 	if (ring_fetch(t->sock, &rs, NULL, NULL) == -1)
 		return xr_no_session();
+	if (xr_tasks_cmd(t->name, rs.sid, cwd, "", "", warn, sizeof warn, &rc))
+		return rc;
 	return xr_out_exit(xr_tasks_print(stdout, NULL, t->name, rs.sid, 0,
 	                                  warn) == 0);
 }
