@@ -1308,9 +1308,18 @@ The corpus:
     client input since its own `B`, so it counts only when the text between
     its `B` and `C` on the screen is exactly a line the client sent that no
     earlier block used. A line edited before its Enter (backspace, arrows,
-    tab completion) does not match and gets no chapter. A `C` with neither is
-    read as forged by output: a program that prints marks gets a chapter only
-    for a block whose text is a line the user typed, once per line.
+    tab completion) does not match and gets no chapter. A line typed at the
+    prompt (client input since its `B`) counts the same way: its `B`..`C`
+    text must be that line, and each later line of it must end a row (after
+    a `> ` prompt). A right prompt after the line and spaces at its end do
+    not count. Only a line with an editing key is taken as the screen shows
+    it, since history and completion change it. The first command after
+    `--restart` (no `B` seen yet) counts when the row above the cursor ends
+    with a typed line. A `C` with none of these is read as forged by output:
+    a program that prints marks gets a chapter only for a block whose text
+    is a line the user typed, once per line, or for a block it holds open
+    while the user types a line with an editing key. The title is the typed
+    line; a `C;cmdline=` in the mark is ignored.
   - Rows, and the marks on them, enter the ring only when they scroll off
     the primary screen. So the commands still on the visible screen (in a
     fresh shell or after a `clear`, up to a screen's worth) have no chapter
