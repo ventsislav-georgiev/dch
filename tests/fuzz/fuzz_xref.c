@@ -315,6 +315,8 @@ differ(const uint8_t *d, size_t n, const char *key)
 	    pwrite(fd, d + 1, n - 1, 0) != (ssize_t)(n - 1))
 		return;
 	xr_lim.chunk = d[0] & 64 ? 16 : 509;
+	if (d[0] & 16)	/* the cwd walk's bound (#333) */
+		xr_lim.cwd = 128;
 	if (d[0] & 128)
 	{
 		xr_lim.line = 64;

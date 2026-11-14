@@ -14821,13 +14821,13 @@ xray_main(int argc, char **argv)
 	xr_t0 = xr_now_ms();
 	xr_noclock = getenv("DCH_XRAY_NOCLOCK") != NULL;	/* tests only */
 	/* tests only: 3.8's --ref caps lowered, never raised (files, bytes,
-	** ms, the per-file head and tail) */
+	** ms, the per-file head and tail, light's cwd walk) */
 	if ((e = getenv("DCH_XRAY_CAPS")))
 	{
-		unsigned long long c[5] = {0};
+		unsigned long long c[6] = {0};
 
-		(void)sscanf(e, "%llu:%llu:%llu:%llu:%llu", &c[0], &c[1], &c[2],
-		             &c[3], &c[4]);
+		(void)sscanf(e, "%llu:%llu:%llu:%llu:%llu:%llu", &c[0], &c[1],
+		             &c[2], &c[3], &c[4], &c[5]);
 		if (c[0] && c[0] < xr_lim.files)
 			xr_lim.files = c[0];
 		if (c[1] && c[1] < xr_lim.bytes)
@@ -14838,6 +14838,8 @@ xray_main(int argc, char **argv)
 			xr_lim.head = c[3];
 		if (c[4] && c[4] < xr_lim.tail)
 			xr_lim.tail = c[4];
+		if (c[5] && c[5] < xr_lim.cwd)
+			xr_lim.cwd = c[5];
 	}
 	for (k = 0; k < argc; k++)
 	{

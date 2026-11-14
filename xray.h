@@ -34,6 +34,7 @@
 #define XR_FILES       64		/* 3.8: files per --ref */
 #define XR_BYTES       (1ull << 30)	/* 3.8: bytes read per --ref */
 #define XR_WALL_MS     10000		/* 3.8: --ref --full's wall time */
+#define XR_CWD_BACK    (16ull << 20)	/* #333: light's walk back to a cwd */
 
 /* The limits above as the code reads them. Only fuzz_xray and dch's
 ** DCH_XRAY_CAPS (tests) lower them, so a small input reaches every cap;
@@ -44,6 +45,7 @@ struct xr_limits
 	size_t chunk, line, out;	/* XR_CHUNK, XR_LINE_MAX, XR_OUT_MAX */
 	uint64_t files, bytes;		/* XR_FILES, XR_BYTES */
 	long long ms;			/* XR_WALL_MS */
+	uint64_t cwd;			/* XR_CWD_BACK */
 };
 extern struct xr_limits xr_lim;
 extern int xr_noclock;	/* tests only: DCH_XRAY_NOCLOCK, light --ref past its budget, held to --full's XR_WALL_MS */

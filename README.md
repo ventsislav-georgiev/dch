@@ -1566,7 +1566,8 @@ ref (`dch: not a ref`), relative paths against the session's cwd.
   Codex rollout is read newest first (1.62.0), so a ref of the last turns is
   found inside the budget: in windows of 1 MiB from the end, each read from
   its first whole line on, by a decoder that starts there with the cwd the
-  full read has there (a mention in the turn the window starts in has
+  full read has there when a line within 16 MB before the window names it,
+  else none, so a relative path there is no file ref (a mention in the turn the window starts in has
   `chapter: null`, unless the window starts the file, since a prompt there
   may continue an older turn; so does one in a turn the window saw begin
   only after a subagent's first record there or a tool result whose call is

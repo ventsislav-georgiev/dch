@@ -38,7 +38,8 @@ void dch_trace(const char *fmt, ...)
 
 unsigned long xr_seam_opened, xr_seam_refused;
 struct xr_limits xr_lim = {XR_HEAD_RANGE, XR_TAIL_RANGE, XR_CHUNK, XR_LINE_MAX,
-                           XR_OUT_MAX, XR_FILES, XR_BYTES, XR_WALL_MS};
+                           XR_OUT_MAX, XR_FILES, XR_BYTES, XR_WALL_MS,
+                           XR_CWD_BACK};
 int xr_noclock;
 int xr_noskip;
 unsigned long xr_skipped;
@@ -7503,20 +7504,29 @@ xr_claude_newest(struct xr_claude *d, int fd, uint64_t size, int *capped)
 			}
 			/* the cwd at a: the last line before it that names one, in
 			** this range, then the head; kept while that line is older
-			** than the window (a only falls) */
-			if (!known || cat >= a)
+			** than the window (a only falls). Only lines XR_CWD_BACK
+			** before a count (#333): a far cwd line spent the light
+			** budget before a window was read. known 2: none, and none
+			** in [cat, a) either, so only below cat is walked */
+			if (known != 1 || cat >= a)
 			{
-				k = cwd_back(d, fd, lo, a, &w, sb, buf, acc, &cat, cwd);
-				if (!k && !d->halt && !i && nr == 2)
+				uint64_t fl = lo, hi = known == 2 && cat < a ? cat : a;
+
+				if (a - lo > xr_lim.cwd &&
+				    line_start(fd, a - xr_lim.cwd, a, buf, &fl) <= 0)
+					fl = a;	/* one line longer than that: no walk */
+				k = fl < hi ? cwd_back(d, fd, fl, hi, &w, sb, buf, acc,
+				                       &cat, cwd) : 0;
+				if (!k && !d->halt && !i && nr == 2 && fl == lo && hi)
 					k = cwd_back(d, fd, 0, r[1][1], &w, sb, buf, acc,
-					             &cat, cwd);
+					             &cat, cwd), fl = 0;	/* cat 0: walked */
 				if (k < 0)
 					rc = -1;
 				if (k <= 0)
-					cat = 0, cwd[0] = '\0';
+					cat = fl < hi ? fl : hi, cwd[0] = '\0';
 				if (k < 0 || d->halt)
 					break;
-				known = 1;
+				known = k > 0 ? 1 : 2;
 			}
 			if ((rc = win_read(d, fd, a, b, &w, buf, acc, cwd)) >= 0)
 				b = a;

@@ -1262,6 +1262,25 @@ def test_refs():
           r.returncode == 0 and d.get("done") is True and not d["partial"] and
           d["bytes"] == os.path.getsize(tp) and
           sum("mention" in l for l in ls) == 1, r.stdout[-600:] + r.stderr)
+    # #333: light's walk back to a window's cwd reads at most 16 MB
+    # (1 MiB here), so a far cwd line no longer spends the budget before
+    # the newest window: that window has no cwd, and the last line's
+    # relative path does not resolve; --full does
+    head = dict(ENV, DCH_XRAY_NOCLOCK="1", DCH_XRAY_CAPS="0:0:0:0:0:1048576")
+    with open(tp, "a") as f:
+        f.write(json.dumps({"type": "user", "message": {
+            "content": "see src/far.c:3"}}) + "\n")
+    rl = dch("--xray", "xr-refs", "--ref", "src/far.c", "--scope", "session",
+             "--json", env=head)
+    rf = dch("--xray", "xr-refs", "--ref", "src/far.c", "--scope", "session",
+             "--full", "--json")
+    ml = [l for l in ref_lines(rl.stdout) if "mention" in l]
+    mf = [l for l in ref_lines(rf.stdout) if "mention" in l]
+    check("ref: light's cwd walk stops 16 MB back (1 MiB here): a "
+          "relative path past it is not resolved; --full resolves it",
+          rl.returncode == 0 and rf.returncode == 0 and not ml and
+          [l["mention"]["line"] for l in mf] == ["see src/far.c:3"],
+          rl.stdout[-600:] + rl.stderr + rf.stdout[-300:])
     prog = [l for l in ls if "progress" in l]
     check("ref: schema 1 on every line; a progress line per 250 ms "
           "(%d in %.2fs)" % (len(prog), wall),
