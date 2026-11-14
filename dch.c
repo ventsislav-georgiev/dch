@@ -5908,9 +5908,9 @@ env_ms(const char *key, long dflt)
 /* Parent pid from the kernel's process table — never the env, which macOS
 ** redacts for platform binaries. -1 when the process is gone. With tpgid,
 ** also the foreground process group of its controlling terminal (<= 0:
-** none). */
+** none), and with tdev that terminal's device number. */
 static long
-proc_stat(long pid, long *tpgid)
+proc_stat(long pid, long *tpgid, long *tdev)
 {
 #ifdef __APPLE__
 	struct kinfo_proc kp;
@@ -5921,21 +5921,25 @@ proc_stat(long pid, long *tpgid)
 		return -1;
 	if (tpgid)
 		*tpgid = kp.kp_eproc.e_tpgid;
+	if (tdev)
+		*tdev = kp.kp_eproc.e_tdev;
 	return kp.kp_eproc.e_ppid;
 #else
 	char p[64], buf[512], *rp;
 	FILE *f;
-	long pp = -1, tp = -1;
+	long pp = -1, tp = -1, td = 0;
 
 	snprintf(p, sizeof p, "/proc/%ld/stat", pid);
 	if (!(f = fopen(p, "r")))
 		return -1;
 	/* the comm field may hold spaces and parens: parse after the last ')' */
 	if (fgets(buf, sizeof buf, f) && (rp = strrchr(buf, ')')))
-		sscanf(rp + 1, " %*c %ld %*d %*d %*d %ld", &pp, &tp);
+		sscanf(rp + 1, " %*c %ld %*d %*d %ld %ld", &pp, &td, &tp);
 	fclose(f);
 	if (tpgid)
 		*tpgid = tp;
+	if (tdev)
+		*tdev = td;
 	return pp;
 #endif
 }
@@ -5943,30 +5947,71 @@ proc_stat(long pid, long *tpgid)
 static long
 proc_ppid(long pid)
 {
-	return proc_stat(pid, NULL);
+	return proc_stat(pid, NULL, NULL);
+}
+
+/* 1 when pid's controlling terminal (dev, from proc_stat) reads key by key
+** (ICANON off), as every wrapper that forwards the keyboard sets it (script,
+** unbuffer -p, ssh); 0 when it is line-buffered or cannot be read. A wrapper
+** in front of a line-buffered terminal does not read it (plain unbuffer:
+** expect never reads the keyboard), and what is typed there waits for the
+** shell that reads it once the wrapper exits (MED-AA1). */
+static int
+tty_raw(long pid, long dev)
+{
+	struct termios t;
+	char p[64];
+	int fd = -1, ok;
+#ifdef __APPLE__
+	const char *nm = dev != (long)NODEV ? devname((dev_t)dev, S_IFCHR) : NULL;
+
+	(void)pid;
+	if (nm && snprintf(p, sizeof p, "/dev/%s", nm) < (int)sizeof p)
+		fd = open(p, O_RDONLY | O_NOCTTY | O_NONBLOCK);
+#else
+	struct stat st;
+	int k;
+
+	/* the terminal as the wrapper holds it: stat first, so no other
+	** device is ever opened */
+	for (k = 0; k < 3 && fd < 0 && dev > 0; k++)
+		if (snprintf(p, sizeof p, "/proc/%ld/fd/%d", pid, k) <
+		    (int)sizeof p && stat(p, &st) == 0 && S_ISCHR(st.st_mode) &&
+		    (long)st.st_rdev == dev)
+			fd = open(p, O_RDONLY | O_NOCTTY | O_NONBLOCK);
+#endif
+	ok = fd >= 0 && tcgetattr(fd, &t) == 0 && !(t.c_lflag & ICANON);
+	if (fd >= 0)
+		close(fd);
+	return ok;
 }
 
 /* 1 when the Claude at `pid` is in the foreground process group of its
 ** own terminal, and so is each wrapper with a pty of its own (script,
-** unbuffer: #312) between it and `root` (a session's child, which the
-** master made that pty's controlling process) on the terminal around it;
+** unbuffer -p: #312) between it and `root` (a session's child, which the
+** master made that pty's controlling process) on the terminal around it,
+** that terminal reading key by key (tty_raw: the wrapper forwards it);
 ** 0 when one is not — suspended with Ctrl-Z or in the background, a shell
-** or another job in front (#282) — -1 when the chain cannot be read. The
+** or another job in front (#282), a wrapper that does not read the keys
+** (plain unbuffer, MED-AA1) — -1 when the chain cannot be read. The
 ** kernel's own view, so an old master answers it as well as a new one. */
 int
 proc_fg(long root, long pid)
 {
-	long fg = -1, below = 0, up;
+	long fg = -1, below = 0, up, dev = -1;
 	pid_t g;
 	int d;
 
 	for (d = 0; d < 64 && pid > 1; d++)
 	{
-		if ((up = proc_stat(pid, &fg)) < 0 || (g = getpgid((pid_t)pid)) < 0)
+		if ((up = proc_stat(pid, &fg, &dev)) < 0 ||
+		    (g = getpgid((pid_t)pid)) < 0)
 			return -1;
 		/* a terminal's foreground group is the same for all its
 		** processes: a new one means a new terminal, checked once */
 		if ((d == 0 || fg != below) && (fg <= 0 || g != (pid_t)fg))
+			return 0;
+		if (d > 0 && fg != below && !tty_raw(pid, dev))
 			return 0;
 		if (pid == root)
 			return 1;

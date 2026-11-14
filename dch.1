@@ -366,7 +366,7 @@ such file exists, else
 .I claude_foreground
 is
 .B true
-while that Claude is the session terminal's foreground job,
+while that Claude is in front (the session terminal's foreground job),
 .B false
 while it is not (suspended with Ctrl\-Z or in the background: a shell or
 another program in front reads what is typed), and left out when
@@ -375,6 +375,18 @@ is
 .B null
 or the process groups cannot be read; a suspended Claude keeps its
 .IR claude_session_id .
+Under a wrapper with a pty of its own
+.RB ( script ", " "unbuffer \-p" ),
+in front means Claude is the foreground job of its own terminal and each
+wrapper the foreground job of the terminal around it, that terminal reading
+key by key (raw mode, as a wrapper that forwards the keyboard sets it); plain
+.B unbuffer
+(expect without
+.BR \-p )
+never reads the keyboard and the terminal stays line\-buffered, so it is not
+in front, nor is a wrapper resumed with
+.B fg
+after the shell put its own line\-buffered mode back.
 Read from the kernel by the client, so a master of any version gets it.
 .I auto_allowed
 is the permission prompt the master answered last with auto\-allow (see
@@ -2720,7 +2732,10 @@ prints one object per line instead:
 .BR no_screen ", " no_session ", " not_submitted ", " not_typed ,
 .BR old_master ", " interrupted ", " withdrawn ", " draft_left ,
 .B not_foreground
-(Claude suspended or in the background: nothing typed, \fBfg\fR it first),
+(Claude not in front, as
+.I claude_foreground
+defines it: suspended, in the background or under a wrapper that does not
+read the keyboard; nothing typed, \fBfg\fR it first),
 or empty) and
 .IR detail .
 A first SIGINT, SIGTERM or SIGHUP, once handled, types nothing more and
@@ -3835,7 +3850,19 @@ this ...") always are. Checked after 300 ms of quiet output and
 a prompt it answered is never answered again while it stays up, nor within
 30 s once gone and back (its ticking "will automatically block this request in
 M:SS" line aside). A Claude suspended with Ctrl\-Z (or in the background) is
-never answered for: the program in front printed that prompt. Needs the
+never answered for: the program in front printed that prompt. Nor is one
+under a wrapper that does not read the keyboard (plain
+.BR unbuffer ;
+in front is defined under
+.I claude_foreground
+in
+.BR \-\-ls\-json ):
+the 1 would wait on the session terminal for the shell. The master decides
+this, so a master started by dch 1.65.0 still answers under plain
+.B unbuffer
+until
+.BR "dch \-\-restart" .
+Needs the
 terminal mirror: unavailable in dch\-lite
 and under
 .BR DCH_NO_VT .
