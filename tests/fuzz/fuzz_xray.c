@@ -18,7 +18,8 @@
 ** 128 B head and a 256 B tail, so a small input reaches every cap.
 ** Then the chapters are printed through xr_print. Every chapter's title and
 ** summary (#192, only on an auto chapter) must be valid UTF-8 of at most
-** XR_TITLE_MAX scalars, and the printed object one line, within the output
+** XR_TITLE_MAX scalars, its response (#296) valid UTF-8 of at most
+** XR_RESPONSE bytes, and the printed object one line, within the output
 ** cap. */
 #include <stdint.h>
 #include <stdio.h>
@@ -30,7 +31,7 @@
 int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n);
 
 static void
-check_title(const char *t)
+check_utf8(const char *t, size_t max)
 {
 	const unsigned char *u = (const unsigned char *)t;
 	size_t i = 0, sc = 0;
@@ -50,8 +51,14 @@ check_title(const char *t)
 		i += a;
 		sc++;
 	}
-	if (sc > XR_TITLE_MAX)
+	if (sc > max)
 		abort();
+}
+
+static void
+check_title(const char *t)
+{
+	check_utf8(t, XR_TITLE_MAX);
 }
 
 static void
@@ -69,6 +76,13 @@ emit(struct xr_chapters *c, int shell)
 		if (xr_chapter_at(c, i)->summary[0] &&
 		    !xr_chapter_at(c, i)->harness)
 			abort();
+		if (xr_chapter_at(c, i)->response)	/* #296 */
+		{
+			check_utf8(xr_chapter_at(c, i)->response, XR_RESPONSE);
+			if (strlen(xr_chapter_at(c, i)->response) > XR_RESPONSE ||
+			    !xr_chapter_at(c, i)->responded)
+				abort();
+		}
 	}
 	memset(&a, 0, sizeof a);
 	a.session = "fuzz";

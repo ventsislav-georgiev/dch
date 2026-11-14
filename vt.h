@@ -39,6 +39,12 @@ void dch_vt_free(void);
 /* Feed raw pty output bytes into the mirror. */
 void dch_vt_feed(const unsigned char *buf, size_t len);
 
+/* The mirror's answers to the program's DECRQM 2026 and XTVERSION queries in
+** the last dch_vt_feed, for the master to write back when no terminal saw
+** those bytes (#273). Returns their length, 0 for none; *out stays valid
+** until the next feed. */
+size_t dch_vt_replies(const unsigned char **out);
+
 /* Resize the mirror grid (call adjacent to TIOCSWINSZ). */
 void dch_vt_resize(int cols, int rows);
 

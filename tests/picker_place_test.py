@@ -41,7 +41,7 @@ import json, os, re, shutil, signal, subprocess, sys, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
-ROOT = tempfile.mkdtemp(prefix="dchpp", dir="/tmp")
+ROOT = tempfile.mkdtemp(prefix="dchpp", dir=os.environ.get("DCH_TEST_TMP", "/tmp"))
 CONF = os.path.join(ROOT, "config")
 ENV = dict(os.environ, DCH_SOCKET_DIR=os.path.join(ROOT, "s"),
            XDG_STATE_HOME=os.path.join(ROOT, "state"),

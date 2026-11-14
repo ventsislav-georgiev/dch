@@ -13,7 +13,7 @@ DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
 
 
 def main():
-    tmp = tempfile.mkdtemp(dir="/tmp", prefix="dpm")
+    tmp = tempfile.mkdtemp(dir=os.environ.get("DCH_TEST_TMP", "/tmp"), prefix="dpm")
     env = {k: v for k, v in os.environ.items()
            if k not in ("DCH_SESSION", "DCH_SOCKET_DIR")}
     env.update(XDG_RUNTIME_DIR=tmp, XDG_STATE_HOME=tmp, HOME=tmp,

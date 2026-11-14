@@ -61,7 +61,7 @@ from select import select as fdselect
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
-ROOT = tempfile.mkdtemp(prefix="dchpk", dir="/tmp")
+ROOT = tempfile.mkdtemp(prefix="dchpk", dir=os.environ.get("DCH_TEST_TMP", "/tmp"))
 SOCKDIR = os.path.join(ROOT, "s")
 ENV = dict(os.environ, DCH_SOCKET_DIR=SOCKDIR,
            XDG_STATE_HOME=os.path.join(ROOT, "state"),
@@ -399,14 +399,25 @@ def dashname():
     wait_live("pk9", False)
 
 
-ZW_RE = re.compile("[\u200b-\u200d\u2060-\u2064\ufeff]")
+ZW_RE = re.compile("[\u200b-\u200d\u2060-\u2064\ufeff\u05b8\u05b9\u05c1"
+                   "\u094d\u0947\u20d0\u20d1\u180e\u206a\u206f\u115f"
+                   "\u1160\u3164]")
 
 
 def zerowidth():
     """15. A name holding a zero-width format character (U+FEFF, U+2060)
     takes no cell, so its row pads to the same columns as any other
-    (#225): the state starts under STATE."""
-    names = {"zwbom": "zw\ufeffbom", "zwj": "zw\u2060wj"}
+    (#225): the state starts under STATE. So do combining marks past
+    U+036F (Hebrew points, Devanagari signs, U+20D0), the format
+    characters U+180E and U+206A-206F, and the Hangul fillers U+115F,
+    U+1160 and U+3164, none drawn in a cell by Ghostty (QA 1.60.0
+    LOW-V2)."""
+    names = {"zwbom": "zw\ufeffbom", "zwj": "zw\u2060wj",
+             "zwheb": "zw\u05e9\u05b8\u05c1\u05dc\u05d5\u05b9\u05dd",
+             "zwdev": "zw\u0928\u092e\u0938\u094d\u0924\u0947",
+             "zwsym": "zwa\u20d0\u20d1b",
+             "zwfmt": "zw\u180ex\u206ay\u206fz",
+             "zwhf": "zw\u115fx\u1160y\u3164z"}
     for n, alias in names.items():
         dch("--spawn", n, "--size", "80x24", "sh", "-c", "sleep 600")
         dch("-m", n, alias)
@@ -930,7 +941,7 @@ if __name__ == "__main__":
     finally:
         for n in ("pk1", "pk2", "pk3", "pk4", "pk5", "pk6", "pk7", "pk8",
                   "pk9", "pk10", "pk11", "pk12", "s2", "s10", "zwbom", "zwj",
-                  "helper-qa", "a4k-2", "perm", "form", "zkbd"):
+                  "zwheb", "zwdev", "zwsym", "zwfmt", "zwhf", "helper-qa", "a4k-2", "perm", "form", "zkbd"):
             dch("-k", n)
         for pr in procs:
             pr.kill()

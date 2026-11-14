@@ -69,7 +69,7 @@ def main():
     if not os.access(DCH, os.X_OK):
         print("FAIL: dch not executable at", DCH)
         return 1
-    tmp = os.path.realpath(tempfile.mkdtemp(prefix="dchrv", dir="/tmp"))
+    tmp = os.path.realpath(tempfile.mkdtemp(prefix="dchrv", dir=os.environ.get("DCH_TEST_TMP", "/tmp")))
     home, fc, bindir = (os.path.join(tmp, d) for d in ("home", "fc", "bin"))
     proj, state = os.path.join(tmp, "proj"), os.path.join(tmp, "state")
     for d in (home, fc, bindir, proj, os.path.join(proj, "sub")):
@@ -636,10 +636,26 @@ def main():
         os.rename(plant("rgood"), os.path.join(recdir, "rgood.json"))
         os.rename(plant("rmode", 0o664), os.path.join(recdir, "rmode.json"))
         os.symlink(plant("rlink"), os.path.join(recdir, "rlink.json"))
+        # #274 (QA 1.60.0 LOW-X12): a name no session can be given (#203's
+        # name_ok: here an ESC) is a bad record too (base: listed, revived
+        # under it, the ESC printed raw); after a leading '-' as well
+        os.rename(plant("rctl", name="rc\x1bd"),
+                  os.path.join(recdir, "rctl.json"))
+        os.rename(plant("rdctl", name="-rc\x1bd"),
+                  os.path.join(recdir, "rdctl.json"))
         h = history() or {}
         check("--history skips a 0664 record and a symlinked one "
               "(a valid twin is listed)",
               "rgood" in h and "rmode" not in h and "rlink" not in h)
+        hs = [run("--history", *a) for a in ([], ["--json"])]
+        check("records named rc<ESC>d, -rc<ESC>d: not in --history (text, "
+              "--json)", "rc\x1bd" not in h and "-rc\x1bd" not in h and
+              not any("\x1b" in x.stdout or "\\u001b" in x.stdout
+                      for x in hs))
+        r = run("--revive", "rc\x1bd")
+        check("...--revive rc<ESC>d: exit 1, no history, nothing started",
+              r.returncode == 1 and "no history" in r.stderr and
+              not os.path.exists(os.path.join(sockdir, "rc\x1bd.sock")))
         r = run("--revive", "--all", timeout=120)
         names.append("rgood")
         check("--all revives neither (the valid twin, yes), no crash",
@@ -647,6 +663,14 @@ def main():
               "rgood: revived as rgood in %s" % proj in r.stdout.splitlines()
               and "rmode" not in r.stdout and "rlink" not in r.stdout and
               not child("rmode") and not child("rlink"))
+        check("...nor rc<ESC>d: no ESC printed, no socket",
+              "\x1b" not in r.stdout + r.stderr and
+              not os.path.exists(os.path.join(sockdir, "rc\x1bd.sock")))
+        if os.path.exists(os.path.join(sockdir, "rc\x1bd.sock")):
+            names.append("rc\x1bd")	# base: revived, ended in finally
+        for f in ("rctl.json", "rdctl.json"):
+            if os.path.exists(os.path.join(recdir, f)):
+                os.unlink(os.path.join(recdir, f))
         os.rename(plant("rgw"), os.path.join(recdir, "rgw.json"))
         os.chmod(recdir, 0o770)
         try:

@@ -1602,12 +1602,36 @@ dch_claude_gone(const char *rec)
 	return !*rec || access(rec, F_OK) != 0;
 }
 
+/* When process pid started, from dch_process_start's "%a %b %e %T %Y" in
+** UTC; -1 when unknown. */
+static time_t
+proc_started(long pid)
+{
+	static const char mon[] = "JanFebMarAprMayJunJulAugSepOctNovDec";
+	char s[128], m[4];
+	const char *p;
+	struct tm tm;
+
+	memset(&tm, 0, sizeof tm);
+	if (dch_process_start(pid, s, sizeof s) < 0 ||
+	    sscanf(s, "%*s %3s %d %d:%d:%d %d", m, &tm.tm_mday, &tm.tm_hour,
+	           &tm.tm_min, &tm.tm_sec, &tm.tm_year) != 6 ||
+	    strlen(m) != 3 || !(p = strstr(mon, m)) || (p - mon) % 3)
+		return -1;
+	tm.tm_mon = (int)(p - mon) / 3;
+	tm.tm_year -= 1900;
+	return timegm(&tm);
+}
+
 /* Every regular record in one sessions dir, to visit(). Claude Code
 ** rewrites its record in place (writeFile: truncate, then write), so a read
 ** in between finds it empty or changing: such a record is read again, at
 ** most 10 waits of 5ms per dir, so one unlucky read never drops a live
-** Claude (#253). Empty, only a live <pid>.json's: one left empty by a
-** Claude killed mid-write stays empty, and would cost every scan 50ms. */
+** Claude (#253). Empty, only a live <pid>.json's whose process started by
+** the record's last write (2s for the clocks' rounding): one left empty by
+** a Claude killed mid-write stays empty, and would cost every scan 50ms,
+** also once its pid is reused (#274). One still empty or changing after
+** the waits goes to visit() as "", len 0: a Claude there, id unknown. */
 static int
 visit_records_in(const char *dir, dch_claude_record_fn visit, void *arg)
 {
@@ -1623,6 +1647,7 @@ visit_records_in(const char *dir, dch_claude_record_fn visit, void *arg)
 		struct stat before, after;
 		size_t len, n = strlen(de->d_name);
 		long rp;
+		time_t t;
 		int fd;
 		if (n < 6 || strcmp(de->d_name + n - 5, ".json") ||
 		    snprintf(path, sizeof path, "%s/%s", dir, de->d_name) >=
@@ -1643,8 +1668,10 @@ visit_records_in(const char *dir, dch_claude_record_fn visit, void *arg)
 			    (rp = strtol(de->d_name, &e, 10)) > 0 &&
 			    !strcmp(e, ".json") &&
 			    (kill((pid_t)rp, 0) == 0 || errno == EPERM) &&
-			    waits++ < 10)
+			    (t = proc_started(rp)) >= 0 && t <= before.st_mtime + 2)
 			{
+				if (waits++ >= 10)
+					goto found;
 				dch_trace("claude record %s: empty, read again", path);
 				usleep(5000);
 				goto again;
@@ -1664,8 +1691,13 @@ visit_records_in(const char *dir, dch_claude_record_fn visit, void *arg)
 		    memchr(body, '\0', len))
 		{
 			close(fd);
-			if (!memchr(body, '\0', len) && waits++ < 10)
+			if (!memchr(body, '\0', len))
 			{
+				if (waits++ >= 10)
+				{
+					len = 0;
+					goto found;
+				}
 				dch_trace("claude record %s: changed, read again", path);
 				usleep(5000);
 				goto again;
@@ -1673,6 +1705,11 @@ visit_records_in(const char *dir, dch_claude_record_fn visit, void *arg)
 			continue;
 		}
 		close(fd);
+	found:
+		/* len 0: still empty or changing after the waits. Visited, not
+		** skipped: skipped, another Claude would answer for it (#274) */
+		if (!len)
+			dch_trace("claude record %s: unread, id unknown", path);
 		body[len] = '\0';
 		if (visit(path, body, len, arg) < 0)
 		{
@@ -2486,6 +2523,43 @@ sock_peer_pid(const char *sp)
 	return pid;
 }
 
+/* Every process whose argv says it is the master of sp gets sig (0: none);
+** how many there are. A zombie's argv is unreadable: it is not counted. */
+static int
+masters_of(const char *sp, int sig)
+{
+	int k = 0;
+#ifdef __APPLE__
+	int pids[4096], n, i;
+
+	n = proc_listpids(PROC_ALL_PIDS, 0, pids, sizeof(pids));
+	for (i = 0; i < n / (int)sizeof(pids[0]); i++)
+		if (is_master_of(pids[i], sp))
+		{
+			k++;
+			if (sig)
+				kill(pids[i], sig);
+		}
+#else
+	DIR *d = opendir("/proc");
+	struct dirent *de;
+	char *end;
+	long pid;
+
+	while (d && (de = readdir(d)))
+		if ((pid = strtol(de->d_name, &end, 10)) > 0 && !*end &&
+		    is_master_of(pid, sp))
+		{
+			k++;
+			if (sig)
+				kill((pid_t)pid, sig);
+		}
+	if (d)
+		closedir(d);
+#endif
+	return k;
+}
+
 /* SIGTERM the master of sp: the socket's listener, or, when that is not one
 ** (dead socket, unreachable path, a stranger on it), every process whose
 ** argv says it is. */
@@ -2499,25 +2573,7 @@ term_master(const char *sp)
 		kill((pid_t)pid, SIGTERM);
 		return;
 	}
-#ifdef __APPLE__
-	int pids[4096], n, i;
-
-	n = proc_listpids(PROC_ALL_PIDS, 0, pids, sizeof(pids));
-	for (i = 0; i < n / (int)sizeof(pids[0]); i++)
-		if (is_master_of(pids[i], sp))
-			kill(pids[i], SIGTERM);
-#else
-	DIR *d = opendir("/proc");
-	struct dirent *de;
-	char *end;
-
-	while (d && (de = readdir(d)))
-		if ((pid = strtol(de->d_name, &end, 10)) > 0 && !*end &&
-		    is_master_of(pid, sp))
-			kill((pid_t)pid, SIGTERM);
-	if (d)
-		closedir(d);
-#endif
+	(void)masters_of(sp, SIGTERM);
 }
 
 /* mark: ".killed" (-k) or ".stopped" (--stop, which wrote it already). */
@@ -2795,6 +2851,8 @@ usage(void)
 	    "  dch --xray <n> --ref <ref> [--scope session|project|all] [--full]\n"
 	    "       [--budget-ms <ms>] --json             one ref's mentions and\n"
 	    "                                             definitions as NDJSON\n"
+	    "  dch --xray <n> --search <text> --json      the newest 50 places a\n"
+	    "                                             word or phrase was said\n"
 	    "  dch --xray <n> --chapter <anchor> --json   one chapter's entries\n"
 	    "                                             as one JSON object;\n"
 	    "                                             <n> as host:name runs\n"
@@ -3266,8 +3324,10 @@ static const char no_reply_msg[] =
 #define CTL_CONNECT_MS 500
 
 /* -1 with errno EAGAIN: a listener is there, but its backlog stayed full
-** for CTL_CONNECT_MS (Linux; macOS refuses that connect at once). That is
-** a live, stuck master, never a dead socket to unlink or revive over. */
+** for CTL_CONNECT_MS (Linux). macOS refuses that connect at once, as it
+** does a dead master's socket: there a refused socket node whose master's
+** argv still names it is the same stuck master (#268). That is a live,
+** stuck master, never a dead socket to unlink or revive over. */
 int
 control_connect_path(const char *path)
 {
@@ -3292,6 +3352,14 @@ control_connect_path(const char *path)
 	{
 		/* EINTR comes only from that wait: a full backlog too */
 		e = errno == EINTR ? EAGAIN : errno;
+#ifdef __APPLE__
+		struct stat st;
+
+		/* only after a refusal of a socket node: off the common path */
+		if (e == ECONNREFUSED && lstat(path, &st) == 0 &&
+		    S_ISSOCK(st.st_mode) && masters_of(path, 0) > 0)
+			e = EAGAIN;
+#endif
 		close(s);
 		errno = e;
 		return -1;
@@ -5716,9 +5784,11 @@ env_ms(const char *key, long dflt)
 }
 
 /* Parent pid from the kernel's process table — never the env, which macOS
-** redacts for platform binaries. -1 when the process is gone. */
+** redacts for platform binaries. -1 when the process is gone. With tpgid,
+** also the foreground process group of its controlling terminal (<= 0:
+** none). */
 static long
-proc_ppid(long pid)
+proc_stat(long pid, long *tpgid)
 {
 #ifdef __APPLE__
 	struct kinfo_proc kp;
@@ -5727,21 +5797,48 @@ proc_ppid(long pid)
 
 	if (sysctl(mib, 4, &kp, &len, NULL, 0) != 0 || len == 0)
 		return -1;
+	if (tpgid)
+		*tpgid = kp.kp_eproc.e_tpgid;
 	return kp.kp_eproc.e_ppid;
 #else
 	char p[64], buf[512], *rp;
 	FILE *f;
-	long pp = -1;
+	long pp = -1, tp = -1;
 
 	snprintf(p, sizeof p, "/proc/%ld/stat", pid);
 	if (!(f = fopen(p, "r")))
 		return -1;
 	/* the comm field may hold spaces and parens: parse after the last ')' */
 	if (fgets(buf, sizeof buf, f) && (rp = strrchr(buf, ')')))
-		sscanf(rp + 1, " %*c %ld", &pp);
+		sscanf(rp + 1, " %*c %ld %*d %*d %*d %ld", &pp, &tp);
 	fclose(f);
+	if (tpgid)
+		*tpgid = tp;
 	return pp;
 #endif
+}
+
+static long
+proc_ppid(long pid)
+{
+	return proc_stat(pid, NULL);
+}
+
+/* 1 when the Claude at `pid` is in the foreground process group of the
+** terminal that `root` (a session's child, which the master made that
+** pty's controlling process) controls, 0 when it is not — suspended with
+** Ctrl-Z or in the background, a shell or another job in front (#282) —
+** -1 when either cannot be read. The kernel's own view, so an old master
+** answers it as well as a new one. */
+static int
+proc_fg(long root, long pid)
+{
+	long fg = -1;
+	pid_t g = getpgid((pid_t)pid);
+
+	if (proc_stat(root, &fg) < 0 || fg <= 0 || g < 0)
+		return -1;
+	return g == (pid_t)fg;
 }
 
 /* Generations from `anc` down to `pid` (0 = the same process), -1 when pid
@@ -5776,18 +5873,22 @@ crec_visit(const char *path, const char *body, size_t len, void *arg)
 	long jpid;
 	int i, self, nested;
 
-	(void)len;
 	memset(&c, 0, sizeof c);
 	base = base ? base + 1 : path;
 	c.pid = strtol(base, &endp, 10);
+	/* len 0, a record caught mid-rewrite (visit_records_in): its live
+	** pid's Claude, sid "" (#274) */
 	if (c.pid <= 0 || strcmp(endp, ".json") ||
-	    dch_json_long(body, "pid", &jpid) < 0 || jpid != c.pid ||
-	    dch_json_string(body, "kind", kind, sizeof kind) < 0 ||
-	    strcmp(kind, "interactive") || kill((pid_t)c.pid, 0) < 0 ||
+	    (len && (dch_json_long(body, "pid", &jpid) < 0 || jpid != c.pid ||
+	             dch_json_string(body, "kind", kind, sizeof kind) < 0 ||
+	             strcmp(kind, "interactive"))) ||
+	    kill((pid_t)c.pid, 0) < 0 ||
 	    (c.depth = proc_depth(c.pid, cs->root)) < 0 ||
-	    dch_json_string(body, "sessionId", c.sid, sizeof c.sid) < 0 ||
-	    dch_json_string(body, "version", c.ver, sizeof c.ver) < 0 ||
-	    dch_json_string(body, "status", c.status, sizeof c.status) < 0)
+	    (len && (dch_json_string(body, "sessionId", c.sid,
+	                             sizeof c.sid) < 0 ||
+	             dch_json_string(body, "version", c.ver, sizeof c.ver) < 0 ||
+	             dch_json_string(body, "status", c.status,
+	                             sizeof c.status) < 0)))
 		return 0;
 	if (dch_json_string(body, "cwd", c.cwd, sizeof c.cwd) < 0)
 		c.cwd[0] = '\0';
@@ -5795,7 +5896,7 @@ crec_visit(const char *path, const char *body, size_t len, void *arg)
 		c.name[0] = '\0';
 	if (dch_json_long(body, "statusUpdatedAt", &c.upd) < 0)
 		c.upd = 0;
-	if (cs->verify &&
+	if (cs->verify && len &&
 	    (dch_json_string(body, "procStart", start, sizeof start) < 0 ||
 	     dch_process_start(c.pid, actual, sizeof actual) < 0 ||
 	     strcmp(start, actual)))
@@ -6157,7 +6258,9 @@ dch_agent_probe(long child, struct dch_agent *a)
 	int k;
 
 	memset(a, 0, sizeof *a);
-	if (child <= 0 || claude_find(child, 1, &r) == 0)
+	/* no sid: its record caught mid-rewrite, the caller keeps what it
+	** had (#274) */
+	if (child <= 0 || claude_find(child, 1, &r) == 0 || !r.sid[0])
 		return -1;
 	for (p = r.pid; p != child && (pp = proc_ppid(p)) > 1 && pp != child;
 	     p = pp)
@@ -6642,7 +6745,7 @@ faint_text(const char *raw, size_t n, char *txt, char *dim)
 ** local one: escapes dropped, CSI n C as n blanks, CRs dropped, a NUL as
 ** '?'. Its tail
 ** as fetch_screen keeps one, the text within 8 times that. malloc'd, NULL
-** when too big or out of memory (the X-ray view's On screen, #188). */
+** when too big or out of memory (the X-ray view's screen refs, #188). */
 char *
 xv_plain(const char *raw, size_t n)
 {
@@ -8119,11 +8222,11 @@ restart_agents(int force, const char *only, int json)
 enum { SAY_OK, SAY_NOT_CLAUDE, SAY_SELF, SAY_PROMPT, SAY_DRAFT,
        SAY_NO_SCREEN, SAY_NO_SESSION, SAY_NOT_SUBMITTED,
        SAY_NOT_TYPED, SAY_OLD_MASTER, SAY_INTERRUPTED, SAY_WITHDRAWN,
-       SAY_DRAFT_LEFT, SAY_N };
+       SAY_DRAFT_LEFT, SAY_NOT_FG, SAY_N };
 static const char *const say_code[] = {
 	"", "not_claude", "self", "prompt", "draft", "no_screen", "no_session",
 	"not_submitted", "not_typed", "old_master", "interrupted", "withdrawn",
-	"draft_left",
+	"draft_left", "not_foreground",
 };
 static const char *const say_why[] = {
 	"", "no claude runs in the session", "the session you are in",
@@ -8138,6 +8241,8 @@ static const char *const say_why[] = {
 	"not sent",
 	"a signal came once it was typed: it may still sit in the composer, "
 	"not sent",
+	"claude is not the terminal's foreground job (suspended with Ctrl-Z?): "
+	"fg it first",
 };
 /* A child's exit status carries its outcome past exit(1) and the like. */
 #define SAY_EXIT 100
@@ -8259,9 +8364,12 @@ do_say_verb(char **names, int nnames, char **words, int nwords, int json)
 			c = SAY_NO_SESSION;
 		else
 		{
-			/* any status: a busy Claude queues the message */
+			/* any status: a busy Claude queues the message. A
+			** suspended one reads nothing: the shell in front would
+			** (#282) */
 			c = ci.pid <= 0 || claude_find(ci.pid, 1, &r) == 0
-			    ? SAY_NOT_CLAUDE : -1;
+			    ? SAY_NOT_CLAUDE
+			    : proc_fg(ci.pid, r.pid) == 0 ? SAY_NOT_FG : -1;
 			cmd_info_free(&ci);
 		}
 #ifdef HAVE_LIBGHOSTTY_VT
@@ -8349,7 +8457,9 @@ do_run_verb(const char *name, char **words, int nwords)
 	session_sock_path(name, path, sizeof path);
 	if (nwords == 0 || cmd_query(path, &ci) != 0)
 		goto burst;
-	c = ci.pid > 0 && claude_find(ci.pid, 1, &r) != 0;
+	/* a suspended Claude (#282): what is in front gets the burst */
+	c = ci.pid > 0 && claude_find(ci.pid, 1, &r) != 0 &&
+	    proc_fg(ci.pid, r.pid) != 0;
 	cmd_info_free(&ci);
 	if (!c || claude_gate_q(path, 1) == CG_NOVT)
 		goto burst;
@@ -8483,6 +8593,16 @@ do_stop_verb(char **names, int nnames, int json)
 			           why ? "end_failed" : "", why ? why : "", "", "",
 			           json);
 			bad |= why != NULL;
+			continue;
+		}
+		if (proc_fg(ci.pid, r.pid) == 0)
+		{
+			/* the pause message and /exit would go to the shell in
+			** front (#282) */
+			cmd_info_free(&ci);
+			stop_print(names[k], "failed", say_code[SAY_NOT_FG],
+			           say_why[SAY_NOT_FG], "", "", json);
+			bad = 1;
 			continue;
 		}
 #ifdef HAVE_LIBGHOSTTY_VT
@@ -8687,7 +8807,9 @@ hrec_load(int dfd, const char *fn, struct hrec *r)
 	    dch_json_string(r->body, "sock_dir", sd, sizeof sd) < 0 ||
 	    strcmp(sd, sock_dir) != 0 ||
 	    dch_json_string(r->body, "name", r->name, sizeof r->name) < 0 ||
-	    !r->name[0] || strchr(r->name, '/') ||	/* #203: in the store */
+	    /* #203's name_ok, a leading '-' apart as there: an older dch's
+	    ** -x is still listed, pinned and forgotten, never revived */
+	    !name_ok(r->name + strspn(r->name, "-")) ||
 	    dch_json_string(r->body, "cwd", r->cwd, sizeof r->cwd) < 0 ||
 	    dch_json_string(r->body, "end", r->end, sizeof r->end) < 0 ||
 	    !(r->argv = dch_json_strv(r->body, NULL, "argv", &r->argc)))
@@ -9944,7 +10066,7 @@ xv_spawn(int fd, int ac, char **av, int *out, int *err)
 		close(po[1]);
 		close(pe[0]);
 		close(pe[1]);
-		/* a remote On screen (#188): ctl --read host:name --ansi,
+		/* a remote screen (#188, #294): ctl --read host:name --ansi,
 		** its own connection, as the view's queries */
 		rc = !strcmp(av[0], "--read") ? dch_remote_ctl(NULL, ac, av, NULL)
 		     : xray_main(ac, av);
@@ -9973,7 +10095,7 @@ xv_remote(const char *n)
 	return name_routes_remote(n);
 }
 
-/* A live session's visible screen, plain (the On screen tab). sock_path
+/* A live session's visible screen, plain (Refs' on screen now). sock_path
 ** is kept: the switch's picker runs inside an attach. */
 int
 xv_screen(const char *name, char *buf, size_t cap)
@@ -10616,7 +10738,8 @@ revive_message(struct hrec *r, const char *msg, const char **code)
 /* --revive's guard against two Claudes on one conversation (#064): the
 ** Claude ids running now, and where. A live session is probed the way
 ** --say probes it (its child, then the live Claude records below it, each
-** read through that process's own config dir), not read from its history
+** read through that process's own config dir, or before a Claude there
+** has written one, the --resume id in its argv), not read from its history
 ** record: the record is up to DCH_RECORD_MS behind (it misses a Claude
 ** resumed by hand a moment ago) and keeps a killed Claude's id on purpose.
 ** Then our Claude sessions dir, for a Claude no session probe found: one
@@ -10695,6 +10818,49 @@ sid_visit(const char *path, const char *body, size_t len, void *arg)
 	return 0;
 }
 
+/* The conversation a Claude at or below `root` was started on, read from
+** its live argv (`--resume <id>`, `--resume=<id>`, `-r <id>`, the last one;
+** none with --fork-session, which writes a new id): until that Claude
+** writes its sessions record, the only sign of its id (#281). The kernel's
+** argv, not the master's MSG_CMD one, which outlives the child while held
+** and is the shell for a claude typed into it: a Claude that exited is out
+** of the tree and holds nothing. 0 and *sid, or -1. */
+static int
+claude_argv_sid(long root, char *sid, size_t sidsz)
+{
+	long tree[64];
+	int n = proc_tree(root, tree, 64), i, k, argc;
+	char **v;
+
+	for (i = 0; i < n; i++)
+	{
+		const char *id = NULL;
+
+		if (!(v = proc_argv(tree[i])))
+			continue;
+		for (argc = 0; v[argc]; argc++)
+			;
+		for (k = dch_claude_tok(v, argc) + 1; k < argc &&
+		     strcmp(v[k], "--"); k++)
+			if (!strcmp(v[k], "--fork-session"))
+				break;
+			else if ((!strcmp(v[k], "--resume") || !strcmp(v[k], "-r")) &&
+			         k + 1 < argc && xr_uuid_shaped(v[k + 1]))
+				id = v[++k];
+			else if (!strncmp(v[k], "--resume=", 9) &&
+			         xr_uuid_shaped(v[k] + 9))
+				id = v[k] + 9;
+		if (id && (k == argc || strcmp(v[k], "--fork-session")))
+		{
+			snprintf(sid, sidsz, "%s", id);
+			free(v);
+			return 0;
+		}
+		free(v);
+	}
+	return -1;
+}
+
 static void
 sid_live(struct sidset *s, const struct hrec *r, int n)
 {
@@ -10712,7 +10878,12 @@ sid_live(struct sidset *s, const struct hrec *r, int n)
 		session_sock_path(sl.v[k], sp, sizeof sp);
 		if (cmd_query(sp, &ci) != 0)
 			continue;
-		if (ci.pid > 0 && claude_find(ci.pid, 1, &c) > 0)
+		/* a record wins (a /resume switch moves it off the argv); none
+		** yet, or an empty one (#274): the id the Claude started on */
+		if (ci.pid > 0 && claude_find(ci.pid, 1, &c) > 0 && c.sid[0])
+			sid_add(s, c.sid, 0, "live session %s", sl.v[k]);
+		else if (ci.pid > 0 &&
+		         claude_argv_sid(ci.pid, c.sid, sizeof c.sid) == 0)
 			sid_add(s, c.sid, 0, "live session %s", sl.v[k]);
 		cmd_info_free(&ci);
 	}
@@ -11822,6 +11993,7 @@ struct xr_refq
 {
 	const char *text;
 	int full, budget, scope;	/* scope: xr_scan_scope's */
+	int search;			/* text is --search's (#297) */
 };
 
 static int
@@ -12107,6 +12279,32 @@ xr_ref_others(struct xr_scan *sc, int scope, const char *self,
 	return rc;
 }
 
+/* --search over one transcript or rollout (#297): its newest hits, one
+** object. No other session's file is read. */
+static int
+xr_search_one(const char *path, const struct stat *st, int codex,
+              const char *session, const char *sid, const char *text)
+{
+	struct xr_search *s = xr_search_new(text, xr_t0);
+	int fd, rc;
+
+	if (!s)
+		return xr_failed();
+	if ((fd = xr_seam_open(path, st)) < 0)
+	{
+		xr_search_free(s);
+		return xr_failed();
+	}
+	rc = xr_search_file(s, fd, (uint64_t)st->st_size, (uint64_t)st->st_ino,
+	                    codex);
+	close(fd);
+	rc = rc < 0 ? xr_failed()
+	     : xr_out_exit(xr_search_print(stdout, s, session, sid,
+	                                   codex ? "codex" : "claude", NULL) == 0);
+	xr_search_free(s);
+	return rc;
+}
+
 /* --ref over (cfg, sid)'s transcript (3.4): `first` once the file is
 ** found, before it is opened; then its lines, its tally, `done`. */
 static int
@@ -12131,6 +12329,8 @@ xr_claude_ref(const char *cfg, const char *sid, const char *session,
 	if (xr_claude_lookup(cfg, sid, path, sizeof path, &st, project,
 	                     sizeof project) < 0)
 		return xr_no_corpus();
+	if (q->search)
+		return xr_search_one(path, &st, 0, session, sid, q->text);
 	if (!project[0])
 		xr_project_key(label, project, sizeof project);
 	if (!xr_ref_parse(q->text, label, &sp))
@@ -12231,6 +12431,8 @@ xr_codex_ref(const struct xr_cx *x, const char *session, const char *label,
 
 	if (xr_codex_lookup(x->home, x->tid, path, sizeof path, &st) < 0)
 		return xr_no_corpus();
+	if (q->search)
+		return xr_search_one(path, &st, 1, session, x->tid, q->text);
 	xr_project_key(label, project, sizeof project);
 	if (!xr_ref_parse(q->text, label, &sp))
 		return xr_not_ref();
@@ -12356,6 +12558,63 @@ xr_ref_rec(void *ctx, const struct xr_rec *x)
 		xr_ring_rec(f->acc, x);
 }
 
+/* --search over a live shell's ring and screen (#297), as --ref reads them:
+** the ring's newest hits, one object; partial when rows were lost. */
+struct xr_search_ring
+{
+	struct xr_ring_acc *acc;
+	struct xr_search *s;
+};
+
+static void
+xr_search_ring_rec(void *ctx, const struct xr_rec *x)
+{
+	struct xr_search_ring *f = ctx;
+
+	xr_ring_rec(f->acc, x);
+	xr_search_rec(f->s, &f->acc->sh, x);
+}
+
+static int
+xr_shell_search(const struct xr_target *t, const char *text)
+{
+	struct xr_chapters ch = {0};
+	struct xr_search_ring f;
+	struct ring_snap rs;
+	int fr = ring_fetch(t->sock, &rs, NULL, NULL), rc, partial;
+
+	if (fr == -3)
+		return xr_failed();
+	if (fr == -1)
+		return xr_no_session();
+	if (fr != 0 || (rs.status & (DCH_RING_S_OFF | DCH_RING_S_PAUSED)))
+		return xr_no_corpus();
+	f.acc = calloc(1, sizeof *f.acc);
+	f.s = xr_search_new(text, xr_t0);
+	if (!f.acc || !f.s)
+	{
+		free(f.acc);
+		xr_search_free(f.s);
+		return xr_failed();
+	}
+	xr_shell_begin(&f.acc->sh, &ch);
+	fr = ring_fetch(t->sock, &rs, xr_search_ring_rec, &f);
+	if (fr == 0)
+		f.acc->lost = ring_screen(t->sock, &rs, &f.acc->sh,
+		                          xr_search_ring_rec, &f, CTL_IDLE_MS);
+	xr_shell_end(&f.acc->sh);
+	xr_search_ring_end(f.s);
+	partial = fr == -4 || rs.seqgap || f.acc->gap || f.acc->cont ||
+	          f.acc->lost || (rs.status & DCH_RING_S_EVICTED);
+	rc = fr == -1 ? xr_no_session() : fr != 0 && fr != -4 ? xr_failed()
+	     : xr_out_exit(xr_search_print(stdout, f.s, t->name, rs.sid, "shell",
+	                                   partial ? "range" : NULL) == 0);
+	xr_chapters_free(&ch);
+	xr_search_free(f.s);
+	free(f.acc);
+	return rc;
+}
+
 /* --ref over a live shell's ring (3.4): the ring's header names it, so
 ** `first` is line 1 before a record is read; then its lines, its tally,
 ** `done`. A ring cleared mid-read ends it there, partial: the lines
@@ -12370,9 +12629,11 @@ xr_shell_ref(const struct xr_target *t, const struct xr_refq *q,
 	struct ring_snap rs;
 	struct xr_span sp;
 	struct xr_sink k;
-	int fr = ring_fetch(t->sock, &rs, NULL, NULL), rc;
+	int fr, rc;
 
-	if (fr == -3)
+	if (q->search)
+		return xr_shell_search(t, q->text);
+	if ((fr = ring_fetch(t->sock, &rs, NULL, NULL)) == -3)
 		return xr_failed();
 	if (fr == -1)
 		return xr_no_session();
@@ -12850,8 +13111,11 @@ xr_clear(const struct xr_target *t)
 ** corpus moves (xr_delta: a diff against what was written, so the deltas
 ** applied are the --json of the same moment). A reset goes round again, so
 ** a snapshot always follows it. Events only, never a timer (K3): the one
-** finite wait is the coalescing deadline, armed only while an event waits. */
+** finite wait is the coalescing deadline, armed only while an event waits;
+** the one exception, a paused shell follow polls the Claude count once a
+** second (LOW-X16). */
 #define XF_BATCH_MS 250		/* 3.3: at most one batch per 250 ms */
+#define XF_CLAUDES_MS 1000L	/* paused: the Claude count's poll (LOW-X16) */
 #define XF_EVICT_KEYS 256	/* proposal 11.6: past this, one reset ... */
 #define XF_EVICT_MS 1000	/* ... at most once a second */
 #define XF_SLICE (4u << 20)	/* the full pass: bytes between events */
@@ -13713,7 +13977,7 @@ xf_shell(struct xf *f, const char *label, int first)
 	struct xr_answer a;
 	struct ring_snap was;
 	char project[1200];
-	int rc = 0, ev, fr, r;
+	int rc = 0, ev, fr, r, wc;
 
 	xr_project_key(label, project, sizeof project);
 	if (!b)
@@ -13754,13 +14018,20 @@ xf_shell(struct xf *f, const char *label, int first)
 		goto out;
 	}
 	was = b->rs;
+	wc = a.agent ? a.claudes : -1;
 	for (;;)
 	{
 		long long t0, took;
 		size_t nref = 0;
 		int lost = 0, evict = 0;
+		long due = xf_due(f);
 
-		ev = xf_wait(f, xf_due(f));
+		/* paused: the master wakes us only when its agent pid changes,
+		** so the Claude count is polled; a change is a reset (LOW-X16) */
+		if ((was.status & DCH_RING_S_PAUSED) &&
+		    (due < 0 || due > XF_CLAUDES_MS))
+			due = XF_CLAUDES_MS;
+		ev = xf_wait(f, due);
 		if (ev & XE_OUT)
 			break;
 		if ((ev & XE_CONN) && (r = xf_drain(f)) != 0)
@@ -13769,6 +14040,9 @@ xf_shell(struct xf *f, const char *label, int first)
 				break;	/* the session ended, or --restart */
 			f->pending = 1;
 		}
+		if ((was.status & DCH_RING_S_PAUSED) && !f->pending &&
+		    (r = xr_claudes(t->sock)) >= 0 && r != wc)
+			f->pending = 1;
 		if (!f->pending || xf_due(f) != 0)
 			continue;
 		t0 = xr_now_ms();
@@ -13790,10 +14064,12 @@ xf_shell(struct xf *f, const char *label, int first)
 		}
 		xf_sb_answer(t, b, project, label, &a);
 		if (strcmp(b->rs.sid, was.sid) ||
-		    (b->rs.status & XF_MODE) != (was.status & XF_MODE))
+		    (b->rs.status & XF_MODE) != (was.status & XF_MODE) ||
+		    (a.agent && a.claudes != wc))
 		{
-			/* a new image (a failed handover), or the ring paused
-			** for an agent or resumed: what the session is now */
+			/* a new image (a failed handover), the ring paused for an
+			** agent or resumed, or a Claude more or fewer under the
+			** pause: what the session is now */
 			f->why = "rotated";
 			rc = XF_RESET;
 			break;
@@ -14023,7 +14299,7 @@ xv_paste_in(const unsigned char *c, size_t n, int in)
 }
 
 /* The in-attach X-ray chord's view (#187), in attach.c's child: this
-** session's, opened on On screen; a remote attach's is host:name's (#189),
+** session's, opened on Refs (#294); a remote attach's is host:name's (#189),
 ** --host's host put in front. A failure is said and waits for a key: the
 ** attach's repaint on return would wipe it at once. */
 static int
@@ -14037,7 +14313,7 @@ attach_xray_view(void)
 	ssize_t r;
 	int rc, in = 0;
 
-	xv_tab = 2;
+	xv_tab = 1;
 	snprintf(n, sizeof n, "%s%s%s", remote_host ? remote_host : "",
 	         remote_host ? ":" : "", session_name);
 	xv_route = attach_remote ? 1 : -1;
@@ -14074,8 +14350,9 @@ attach_xray_view(void)
 }
 
 /* `dch --xray <n> [--json] [--clear|--follow]`, `--ref <text> [--scope
-** session|project|all] [--full] [--budget-ms <ms>] --json` and `--chapter
-** <anchor> --json` (spec 3.1, 3.3-3.5): flags in any order, each once;
+** session|project|all] [--full] [--budget-ms <ms>] --json`, `--search <text>
+** --json` (#297) and `--chapter <anchor> --json` (spec 3.1, 3.3-3.5): flags
+** in any order, each once;
 ** `dch --xray <n>` alone is the view (#175, xray_view; a host:name's too,
 ** #188, each query over its own ctl connection). A
 ** host:name with --json (#157, spec 4.1) runs on the host over ctl once
@@ -14086,7 +14363,7 @@ static int
 xray_main(int argc, char **argv)
 {
 	const char *n = NULL, *ref = NULL, *scope = NULL, *budget = NULL, *e;
-	const char *chapter = NULL;
+	const char *chapter = NULL, *search = NULL;
 	int json = 0, clear = 0, full = 0, follow = 0, k, rc, nr, ni = 0;
 	int requests = 0;
 	struct hrec *r = NULL;
@@ -14120,7 +14397,8 @@ xray_main(int argc, char **argv)
 		const char **v = !strcmp(argv[k], "--ref") ? &ref
 		                 : !strcmp(argv[k], "--scope") ? &scope
 		                 : !strcmp(argv[k], "--budget-ms") ? &budget
-		                 : !strcmp(argv[k], "--chapter") ? &chapter : NULL;
+		                 : !strcmp(argv[k], "--chapter") ? &chapter
+		                 : !strcmp(argv[k], "--search") ? &search : NULL;
 
 		if (v && !*v && k + 1 < argc)
 			*v = argv[++k];	/* the next element, even "-x" (3.1) */
@@ -14167,6 +14445,13 @@ xray_main(int argc, char **argv)
 		fputs("dch: bad usage: --ref and --clear\n", stderr);
 		return 2;
 	}
+	if (search && (ref || chapter || clear || follow))
+	{
+		fprintf(stderr, "dch: bad usage: --search and %s\n",
+		        ref ? "--ref" : chapter ? "--chapter" : clear ? "--clear"
+		        : "--follow");
+		return 2;
+	}
 	if (follow && (ref || clear))
 	{
 		fprintf(stderr, "dch: bad usage: --follow and %s\n",
@@ -14189,7 +14474,7 @@ xray_main(int argc, char **argv)
 		/* #158, spec 4.3: each request's flags come on stdin; a local
 		** session takes one dch --xray per request (K4.1) */
 		if (!json || ref || chapter || clear || follow || scope || full ||
-		    budget)
+		    budget || search)
 		{
 			fputs("dch: bad usage: --requests takes host:name and --json, "
 			      "nothing else\n", stderr);
@@ -14224,7 +14509,14 @@ xray_main(int argc, char **argv)
 		fputs("dch: bad scope\n", stderr);
 		return 2;
 	}
-	q.text = ref;
+	if (search && !xray_search_ok(search))
+	{
+		fputs("dch: bad search: 2 to 200 bytes, no control character\n",
+		      stderr);
+		return 2;
+	}
+	q.text = search ? search : ref;
+	q.search = search != NULL;
 	q.full = full;
 	q.budget = 300;
 	if (budget && (q.budget = xray_budget(budget)) < 0)
@@ -14254,7 +14546,7 @@ xray_main(int argc, char **argv)
 	q.scope = !scope || !strcmp(scope, "project") ? 1
 	          : !strcmp(scope, "all") ? 2 : 0;
 	/* the view (#175): `--xray <n>` alone */
-	if (!json && (ref || chapter || clear || follow))
+	if (!json && (ref || chapter || clear || follow || search))
 	{
 		fputs("dch: bad usage: --json is required (the --xray view takes "
 		      "no flag)\n", stderr);
@@ -14288,7 +14580,7 @@ xray_main(int argc, char **argv)
 	if (rc == 0)
 		rc = clear ? xr_clear(&t) : follow ? xr_follow(&t)
 		     : chapter ? xr_chapter(&t, chapter)
-		     : xr_json(&t, ref ? &q : NULL, 0);
+		     : xr_json(&t, ref || search ? &q : NULL, 0);
 	hrec_free(r, nr);
 	return rc;
 }
@@ -15382,6 +15674,12 @@ main_run(int argc, char **argv)
 				put_json_str(tp);
 			else
 				fputs("null", stdout);
+			/* left out with no Claude, or when it cannot be read */
+			int fg = c ? proc_fg(cr.v[k].root, c->pid) : -1;
+
+			if (fg >= 0)
+				printf(",\"claude_foreground\":%s",
+				       fg ? "true" : "false");
 			/* omitted, not 0, when the master can't answer */
 			if (sz && sz[k][0] >= 0)
 				printf(",\"cols\":%ld,\"rows\":%ld,\"clients\":%ld",

@@ -33,7 +33,7 @@ def check(msg, cond, detail=""):
 
 
 # /tmp, not TMPDIR: a per-user TMPDIR can sit inside some git work tree
-T = os.path.realpath(tempfile.mkdtemp(prefix="xres", dir="/tmp"))
+T = os.path.realpath(tempfile.mkdtemp(prefix="xres", dir=os.environ.get("DCH_TEST_TMP", "/tmp")))
 HOME = os.path.join(T, "home")
 os.makedirs(HOME)
 QTMP = os.path.join(T, "qtmp")
@@ -253,6 +253,22 @@ def test_shell():
             r, ls, rv = ref(n, url)
             check("shell commit: a remote %r names another host: not_commit"
                   % u, len(rv) == 1 and rv[0]["state"] == "not_commit", rv)
+        # git's own URL: a url.<base>.insteadOf in the repo's config
+        # rewrites the remote before the match (QA 1.61.0 LOW-X15)
+        git(repo, "config", "remote.origin.url", "https://github.com/o/r")
+        git(repo, "config", "url.https://evil.com/.insteadOf",
+            "https://github.com/")
+        r, ls, rv = ref(n, url)
+        check("shell commit: insteadOf sends github.com/o/r to evil.com: "
+              "not_commit", len(rv) == 1 and
+              rv[0]["state"] == "not_commit", rv)
+        git(repo, "config", "--remove-section", "url.https://evil.com/")
+        git(repo, "config", "remote.origin.url", "gh:o/r")
+        git(repo, "config", "url.https://github.com/.insteadOf", "gh:")
+        r, ls, rv = ref(n, url)
+        check("shell commit: insteadOf makes gh:o/r github.com/o/r: ok",
+              len(rv) == 1 and rv[0]["state"] == "ok", rv)
+        git(repo, "config", "--remove-section", "url.https://github.com/")
         git(repo, "config", "remote.origin.url", "git@github.com:O/R.git")
         if git(plain, "rev-parse", "--is-inside-work-tree") == "true":
             print("  skip not_repo: %s is inside a git work tree" % plain)

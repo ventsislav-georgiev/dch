@@ -294,6 +294,38 @@ def test_live():
               r.stdout == "" and r.stderr == "dch: chapter gone\n",
               (r.stdout, r.stderr))
 
+        # --search (#297): turns, answers, tool calls and their output;
+        # never the developer text or Codex's own context
+        r = dch("--xray", n, "--search", "#41", "--json")
+        sr = json.loads(r.stdout) if r.returncode == 0 else {}
+        check("--search on a live Codex: corpus codex, the answer then the "
+              "turn, newest first; not the developer or context text",
+              sr.get("corpus") == "codex" and sr.get("session_id") == TID and
+              [(h["who"], h["snippet"]) for h in sr["hits"]] ==
+              [("assistant", "done, see #41"),
+               ("user", "fix the parser, see #41")] and
+              all(h["chapter"] == o["chapters"][0]["anchor"]
+                  for h in sr["hits"]) and
+              sr["more"] is False and sr["partial"] is False,
+              (r.stdout, r.stderr))
+        with open(p, "a") as f:
+            f.write(line(5, "response_item", {
+                "type": "function_call", "name": "shell", "call_id": "c2",
+                "arguments": json.dumps({"command": ["ls", "Zebra"]})}))
+            f.write(line(6, "response_item", {
+                "type": "function_call_output", "call_id": "c2",
+                "output": "zebra.txt"}))
+        r = dch("--xray", n, "--search", "ZEBRA", "--json")
+        sr = json.loads(r.stdout) if r.returncode == 0 else {}
+        check("--search on a live Codex: a call's output names its call, "
+              "then the call's arguments; case folded",
+              [(h["who"], h["tool"], h["snippet"]) for h in
+               sr.get("hits", [])] ==
+              [("tool", "shell", "zebra.txt"), ("tool", "shell", "Zebra")] and
+              sr["hits"][0]["at"] == sr["hits"][1]["at"] + 1,
+              (r.stdout, r.stderr))
+        rollout(TID, proj, BODY)
+
         # a malformed line, then a truncated last line (no newline)
         with open(p, "a") as f:
             f.write("not json #55\n")
@@ -575,7 +607,9 @@ def test_follow():
                                               "call_id": "c1",
                                               "output": "gh pr view 88"}))
             f.write(user(6, "next ask #44"))
-        ch = fl.wait(lambda o: "chapter" in o, frm=k)
+        # the late output re-sends chapter 1 first (its response is gone)
+        ch = fl.wait(lambda o: "chapter" in o and
+                     o["chapter"]["title"] == "next ask #44", frm=k)
         rf = fl.wait(lambda o: "ref" in o and o["ref"]["key"] == "issue:#44",
                      frm=k)
         check("follow: growth gives a chapter and a ref delta",

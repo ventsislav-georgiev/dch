@@ -44,7 +44,8 @@ DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
 RUNPY = os.path.join(HERE, "remote-frames", "golden", "run.py")
 
 # Builtins only, no fork: serve gives each call 3 s (TS_MS), and under load
-# a slower fake turns into a whois_failed refusal cached 30 s (#246).
+# a slower fake turns into a whois_failed refusal cached 30 s (#246). The
+# fallback of tests/fake_tailscale.c, which keeps the same contract (#277).
 FAKE_TS = """#!/bin/sh
 d=${0%/*}
 echo "$1 ${DCH_SERVE_TEST_LOOPBACK:-unset}" >> "$d/calls"
@@ -95,12 +96,22 @@ def whois(uid, login="me@example.com", tags=(), node="2002", nid=2002):
 
 
 def main():
-    tmp = os.path.realpath(tempfile.mkdtemp(prefix="dchsv", dir="/tmp"))
+    tmp = os.path.realpath(tempfile.mkdtemp(prefix="dchsv", dir=os.environ.get("DCH_TEST_TMP", "/tmp")))
     fake = os.path.join(tmp, "fake")
     os.makedirs(fake)
-    with open(os.path.join(fake, "tailscale"), "w") as f:
-        f.write(FAKE_TS)
-    os.chmod(os.path.join(fake, "tailscale"), 0o755)
+    # the compiled fake: one exec per call and no shell start (#277); the
+    # shell one only when no compiler builds it
+    try:
+        built = subprocess.call(os.environ.get("CC", "cc").split() + [
+            "-O1", "-o", os.path.join(fake, "tailscale"),
+            os.path.join(HERE, "fake_tailscale.c")]) == 0
+    except OSError:
+        built = False
+    if not built:
+        print("  note: tests/fake_tailscale.c did not build, the shell fake")
+        with open(os.path.join(fake, "tailscale"), "w") as f:
+            f.write(FAKE_TS)
+        os.chmod(os.path.join(fake, "tailscale"), 0o755)
     home = os.path.join(tmp, "home")
     os.makedirs(home)
     env = {k: v for k, v in os.environ.items()
@@ -314,7 +325,12 @@ def main():
               ["--chapter", "a", "--json"],
               ["--chapter", "Az09:_.-", "--json"],
               ["--chapter", "-f", "--json"],
-              ["--chapter", "c" * 128, "--json"]]
+              ["--chapter", "c" * 128, "--json"],
+              ["--search", "needle", "--json"],
+              ["--json", "--search", "two words"],
+              ["--search", "\u00e9", "--json"],
+              ["--search", "s" * 200, "--json"],
+              ["--search", "--json", "--json"]]
         names = ["9f9f9f9f-0000-4000-8000-000000000000", "rec.json",
                  "m0123456789abcdef"]
         no = [([], "--xray needs --json (the view is client-side only)"),
@@ -327,9 +343,11 @@ def main():
               (["--ref", "#1", "--ref", "#2", "--json"], "--ref twice"),
               (["--json", "--ref"], "--ref needs a value"),
               (["--follow", "--ref", "#1", "--json"],
-               "--ref, --follow, --chapter and --clear exclude each other"),
+               "--ref, --search, --follow, --chapter and --clear exclude "
+               "each other"),
               (["--clear", "--chapter", "a", "--json"],
-               "--ref, --follow, --chapter and --clear exclude each other"),
+               "--ref, --search, --follow, --chapter and --clear exclude "
+               "each other"),
               (["--clear", "--full", "--json"],
                "--scope, --full and --budget-ms come with --ref"),
               (["--scope", "session", "--json"],
@@ -354,7 +372,18 @@ def main():
               (["--chapter", "\u00e9", "--json"], "bad anchor"),
               (["--ref", "#1", "--scope", "Session", "--json"], "bad scope"),
               (["--ref", "#1", "--scope", "", "--json"], "bad scope"),
-              (["--ref", "#1", "--scope", "none", "--json"], "bad scope")]
+              (["--ref", "#1", "--scope", "none", "--json"], "bad scope"),
+              (["--search", "a", "--ref", "#1", "--json"],
+               "--ref, --search, --follow, --chapter and --clear exclude "
+               "each other"),
+              (["--search", "ab", "--search", "cd", "--json"],
+               "--search twice"),
+              (["--json", "--search"], "--search needs a value"),
+              (["--search", "ab", "--scope", "session", "--json"],
+               "--scope, --full and --budget-ms come with --ref")]
+        no += [(["--search", t, "--json"], "bad search: 2 to 200 bytes, no control character")
+               for t in ["", "x", "s" * 201, "a\x01b", "a\x1bb", "a\x7fb",
+                         "a\x85b", "a\nb"] + ["a" + b for b in bidi]]
         no += [(["--ref", "#1" + b, "--json"], "bad ref") for b in bidi]
         no += [(["--ref", "#1", "--budget-ms", b, "--json"], "bad budget")
                for b in ("49", "301", "+50", "0x40", "4294967346", "",
@@ -485,7 +514,7 @@ def main():
             s = conn(cport)
             send(s, 0x30, {"argv": ["--xray", "svc", "--follow", "--json"]})
             out, t = b"", None
-            s.settimeout(3)
+            s.settimeout(30)    # first frame waits on a loaded machine (LOW-T12)
             try:
                 while len(out) < 200:
                     t, pl = frame(s)

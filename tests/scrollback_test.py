@@ -35,7 +35,7 @@ HOME_ERASE = b"\x1b[H\x1b[J"
 MID = b"\x1b[0m\x1b[999H"
 OUT_CAP = 4 * 1024 * 1024
 
-TMP = tempfile.mkdtemp(dir="/tmp", prefix="dchsb")
+TMP = tempfile.mkdtemp(dir=os.environ.get("DCH_TEST_TMP", "/tmp"), prefix="dchsb")
 ENV = dict(os.environ, XDG_RUNTIME_DIR=TMP, XDG_STATE_HOME=TMP + "/state",
            HOME=TMP + "/home", DCH_CONFIG=TMP + "/config",
            DCH_LOGIN_ENV="0", DCH_NO_REMOTE="1", SHELL="/bin/sh")

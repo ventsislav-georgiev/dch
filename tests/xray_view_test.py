@@ -12,10 +12,11 @@ Covers:
   2. --scope, --full or --budget-ms with no --json and no --ref on a
      terminal: exit 2, a usage message, the view not opened; no such
      session: exit 1, the message after the terminal is restored;
-  3. the three tabs, the chapter list, the Refs list, the card (light, `f`
-     full scan, `y` OSC 52 copy, `p` other projects and back, `o` on the
-     ended session said), the chapter reader, back, quit (exit 0,
-     terminal restored);
+  3. the two tabs (no On screen, #294; Prompts for a Claude session,
+     Commands for a shell's, never Chapters, #295), the chapter list, the Refs list,
+     the card (light, `f` full scan, `y` OSC 52 copy, `p` other projects
+     and back, `o` on the ended session said), the chapter reader, back,
+     quit (exit 0, terminal restored);
   4. mutant 11: no corpus ESC, BEL or bidi byte (U+202E, U+061C, U+2028)
      reaches the terminal, the strings show with `?` in their place;
   5. nothing written: no file under the test root changes;
@@ -25,10 +26,11 @@ Covers:
      (QA 1.56.0 MED-V1, NIT-V3);
   7. SIGTERM and SIGINT: the terminal is restored and the view's children
      are gone;
-  8. On screen on a live shell: the ref printed in two blocks (underline)
-     gets hint label `a`, typing it opens its card, one printed once (not
-     underlined) gets a hint too (#262) (full build); on dch-lite
-     the label line says X-ray needs the full build;
+  8. Refs on a live shell (#294): the refs on its screen first, under a
+     faint "on screen now" line, the lowest row's first (o/r#77, then
+     o/r#41, one printed once and not underlined, #262), neither repeated
+     below; Enter on the first opens its card (full build); on dch-lite
+     the label line says X-ray needs the full build and there is no group;
   9. the picker: the x hint is shown, x on a session row opens the view, q
      returns to the picker; X asks to kill and never opens the view (OQ-6);
  10. the Refs tab (#193): a file under the project shown relative to it,
@@ -42,23 +44,27 @@ Covers:
      matching the full key (and taking t as text), Enter opening the full
      key's card, f there showing the resolver's line (QA 1.56.0 NIT-V2);
      the faint line saying what a ref is, the empty state when
-     there are none; On screen with no number until its screen is read,
-     then its count, 0 included (on dch-lite: no number, no mirror);
- 11. the Chapters tab (#194): a chapter the harness wrote ("auto") hidden,
+     there are none; an ended session: no group line (#294). A live shell
+     whose master keeps no ring (the index holds nothing): no group line
+     while its screen has no ref; once o/r#5 and a URL are on it, the group
+     lists o/r#5 with no count, a hides the URL and the footer counts it,
+     Enter opens o/r#5's card
+     (dch-lite: no mirror, never a group);
+ 11. the Prompts tab (#194; Chapters before #295): a chapter the harness wrote ("auto") hidden,
      n showing it faint and titled by its summary (its title without one),
      the footer saying how many, the tab count the shown-by-default ones,
      the selection kept on its chapter, the filter matching a summary, the
      empty state when every chapter is one; a compaction (#223) hidden
      and counted with them, n showing it faint with its = marker, Enter
      reading its summary, compactions and auto chapters alone the same
-     empty state; o on the Chapters list, in
+     empty state; o on the Prompts (a shell's Commands) list, in
      the reader and on a card (full build; #227) leaves the view (the terminal restored as q does) and
      attaches as dch -a, from the picker's x too (the -k picker refuses);
      an ended session's o says so and stays; in the chord o goes back to the
      session;
  12. the in-attach chord (#187, K10): the detach key then x in a later read,
      in one burst, and in the kitty CSI form opens the view over the attach
-     on On screen; the x never reaches the session, the attach is never
+     on Refs (#294); the x never reaches the session, the attach is never
      retired (a key typed after reaches the session), and output written
      while the view was up is on screen after it closes (full build: the
      mirror's repaint); off under -E and with DCH_DOUBLE_TAP_MS=0, where the
@@ -316,8 +322,10 @@ def test_view():
     before = files(T)
     v = Pty([DCH, "--xray", "xv-cl"])
     try:
-        ok = v.wait(b"Chapters 2") and v.wait(b"Refs 3")
+        ok = v.wait(b"Prompts 2") and v.wait(b"Refs 3")
         check("open: the tabs carry the index's counts", ok, v.out[-600:])
+        check("#295: a Claude session's first tab is Prompts, the word "
+              "Chapters gone", ok and b"Chapters" not in v.out, v.out[-600:])
         check("open: the chapter list shows both titles",
               v.wait(b"second prompt about PROJ-5") and
               v.wait(b"look at #831"), v.out[-600:])
@@ -377,7 +385,7 @@ def test_view():
               v.reap() is None, text)
         mark = len(v.out)
         v.key(b"\033", 0.5)
-        v.key(b"\t\t")
+        v.key(b"\t")  # Refs, then Prompts: two tabs (#294)
         mark = len(v.out)
         v.key(b"\r", 1.0)
         check("reader: Enter opens the selected chapter (the newest)",
@@ -386,7 +394,7 @@ def test_view():
         mark = len(v.out)
         v.key(b"q")
         check("reader: q goes back to the list",
-              v.wait(b"Chapters 2", start=mark), v.out[mark:])
+              v.wait(b"Prompts 2", start=mark), v.out[mark:])
         v.key(b"q")
         rc = v.exit()
         check("quit: q exits 0 and leaves the alternate screen",
@@ -458,17 +466,19 @@ def test_refs():
           "file:" + WIDE in keys, keys)
     v = Pty([DCH, "--xray", "xv-rf"], env=RENV)
     try:
-        v.wait(b"Chapters 1")
+        v.wait(b"Prompts 1")
         v.pump(0.5)
-        check("On screen: no number before its screen is read (an ended "
-              "session has none)", b"On screen" in v.out and
-              not re.search(rb"On screen \d", v.out), v.out[-600:])
+        check("#294: two tabs, Prompts and Refs, no On screen",
+              b"Refs 13" in v.out and b"On screen" not in v.out,
+              v.out[-600:])
         mark = len(v.out)
         v.key(b"\t", 1.0)
         scr = rows(v.out[mark:])
         text = "\n".join(scr[k] for k in sorted(scr))
         check("Refs: the tab count stays the engine's total (13)",
               "Refs 13" in text, text)
+        check("Refs #294: an ended session has no screen, no group line",
+              "on screen now" not in text and "the rest" not in text, text)
         check("Refs #262: opens on pulls, issues and tickets only; the "
               "footer names a and counts the other kinds",
               "o/r#7" in text and "alpha_handler" not in text and
@@ -616,7 +626,7 @@ def fixture_latest():
 def test_latest():
     v = Pty([DCH, "--xray", "xv-lt"], env=RENV)
     try:
-        v.wait(b"Chapters 1")
+        v.wait(b"Prompts 1")
         v.pump(0.5)
         mark = len(v.out)
         v.key(b"\t", 1.0)
@@ -659,12 +669,12 @@ def test_lookup():
     wanted, opens its card with ^R; plain words say ^R takes refs only."""
     v = Pty([DCH, "--xray", "xv-lt"], env=RENV)
     try:
-        v.wait(b"Chapters 1")
+        v.wait(b"Prompts 1")
         v.pump(0.5)
         mark = len(v.out)
         v.key(b"/PROJ-9", 1.0)
         text = shown(v, mark)
-        check("lookup #263: a ref in the Chapters filter, no title has it: "
+        check("lookup #263: a ref in the Prompts filter, no title has it: "
               "the empty line and the footer name ^R",
               "No match: ^R looks it up" in text and "^R look up" in text,
               text)
@@ -683,7 +693,7 @@ def test_lookup():
         v.key(b"\033", 1.0)
         text = shown(v, mark)
         check("lookup #263: Esc back to the list, the filter kept",
-              "/PROJ-9" in text and "Chapters 1" in text, text)
+              "/PROJ-9" in text and "Prompts 1" in text, text)
         v.key(b"/\x15", 0.3)
         mark = len(v.out)
         v.key(b"just words", 1.0)
@@ -730,7 +740,7 @@ def test_lookup():
         v.close()
     v = Pty([DCH, "--xray", "xv-cl"])
     try:
-        v.wait(b"Chapters 2")
+        v.wait(b"Prompts 2")
         v.pump(0.5)
         mark = len(v.out)
         v.key(b"/o/r#7", 1.0)
@@ -802,7 +812,7 @@ def fixture_tmp():
 
 def refs_tab(name):
     v = Pty([DCH, "--xray", name], env={"TMPDIR": TPD + "/"})
-    v.wait(b"Chapters 1")
+    v.wait(b"Prompts 1")
     v.pump(0.5)
     mark = len(v.out)
     v.key(b"\t", 1.0)
@@ -859,6 +869,13 @@ def test_tmp():
         v.key(b"q")
     finally:
         v.close()
+    # the checkout stands for a project outside every temp dir; a checkout
+    # in one is scratch itself (QA 1.60.0 NIT-T5)
+    if REPO.startswith(("/tmp/", "/private/tmp/", "/var/folders/",
+                        "/private/var/folders/")):
+        print("  skip Refs #220: a project outside the temp dirs: this "
+              "checkout, %s, is in one" % REPO)
+        return
     v, scr, text = refs_tab("xv-tr")
     try:
         check("Refs #220: a project outside the temp dirs resolves no row: "
@@ -870,7 +887,7 @@ def test_tmp():
         v.close()
 
 
-# ---- the Chapters tab: auto chapters, o (#194) ------------------------------
+# ---- the Prompts tab: auto chapters, o (#194) ------------------------------
 
 ASID = "11111111-2222-4333-8444-5555555555a4"
 BSID = "11111111-2222-4333-8444-5555555555a5"
@@ -963,41 +980,41 @@ def test_auto():
         v.wait(b"deploy it")
         v.pump(0.5)
         text = screen(v, 0)
-        check("Chapters: the tab counts the prompts shown by default (2)",
-              "Chapters 2" in text, text)
-        check("Chapters: auto chapters are hidden",
+        check("Prompts: the tab counts the prompts shown by default (2)",
+              "Prompts 2" in text, text)
+        check("Prompts: auto chapters are hidden",
               "fix the login bug" in text and "deploy it" in text and
               "Build finished" not in text and "task-notification" not in
               text and "Lint" not in text, text)
-        check("Chapters: the footer shows n and how many are hidden",
+        check("Prompts: the footer shows n and how many are hidden",
               "n auto rows 3 hidden" in text, text)
-        check("Chapters: o is offered only for a live session (none here)",
+        check("Prompts: o is offered only for a live session (none here)",
               "open session" not in text, text)
         v.key(b"k", 0.3)  # the newest is selected; up to the first prompt
         mark = len(v.out)
         v.key(b"n", 1.0)
         text = screen(v, mark)
-        check("Chapters: n shows them, titled by their summary",
+        check("Prompts: n shows them, titled by their summary",
               "Build finished: 3 passed" in text and
               "Lint ?]0;pwned? evil?done" in text, text)
-        check("Chapters: an auto chapter with no summary keeps its title",
+        check("Prompts: an auto chapter with no summary keeps its title",
               bare[:30] in text, (bare, text))
-        check("Chapters: shown, an auto chapter is faint, a prompt is not",
+        check("Prompts: shown, an auto chapter is faint, a prompt is not",
               re.search(rb"\033\[0;2m[^\033]*Build finished: 3 passed",
                         v.out[mark:]) and
               re.search(rb"\033\[0m[^\033]*deploy it", v.out[mark:]),
               v.out[mark:][-800:])
         text = screen(v, 0)  # the rows n left as they were too
-        check("Chapters: n shown, the footer says n hides them, the tab "
+        check("Prompts: n shown, the footer says n hides them, the tab "
               "count stays 2", "n hide auto rows" in text and
-              "hidden" not in text and "Chapters 2" in text, text)
+              "hidden" not in text and "Prompts 2" in text, text)
         sel = [r for r in text.split("\n") if r.startswith("\u258c")]
-        check("Chapters: n keeps the selection on its chapter",
+        check("Prompts: n keeps the selection on its chapter",
               sel and "fix the login bug" in sel[0], (sel, text))
         mark = len(v.out)
         v.key(b"j", 0.3)
         v.key(b"\r", 1.0)
-        check("Chapters: Enter on a shown auto chapter reads it",
+        check("Prompts: Enter on a shown auto chapter reads it",
               v.wait(b"reply 1", start=mark), v.out[mark:])
         v.key(b"\033", 0.5)
         mark = len(v.out)
@@ -1005,21 +1022,21 @@ def test_auto():
         v.key(b"/")
         v.key(b"Build", 1.0)
         text = screen(v, mark)
-        check("Chapters: the filter matches a summary; only a hidden "
+        check("Prompts: the filter matches a summary; only a hidden "
               "chapter matches: said, with the key",
               "Only auto rows: n shows them" in text, text)
         mark = len(v.out)
         v.key(b"\r", 0.5)
         v.key(b"n", 1.0)
         text = screen(v, mark)
-        check("Chapters: n shows the one that matched the filter",
+        check("Prompts: n shows the one that matched the filter",
               "Build finished: 3 passed" in text and
               "fix the login bug" not in text, text)
         v.key(b"\033", 0.5)
         mark = len(v.out)
         v.key(b"o", 1.0)
         text = screen(v, mark)
-        check("Chapters: o on an ended session says so and stays",
+        check("Prompts: o on an ended session says so and stays",
               "xv-au has ended: no session to open" in text and
               v.reap() is None, text)
         mark = len(v.out)
@@ -1033,7 +1050,7 @@ def test_auto():
               v.reap() is None, text)
         v.key(b"q", 0.3)
         v.key(b"q")
-        check("Chapters: q exits 0", v.exit() == 0, v.out[-80:])
+        check("Prompts: q exits 0", v.exit() == 0, v.out[-80:])
         bad = [b for b in (b"\033]0;pwned", b"\007 evil", b"\xe2\x80\xae")
                if b in v.out]
         check("mutant 11: no summary ESC, BEL or bidi byte in the output",
@@ -1042,17 +1059,17 @@ def test_auto():
         v.close()
     v = Pty([DCH, "--xray", "xv-aa"])
     try:
-        v.wait(b"Chapters")
+        v.wait(b"Prompts")
         v.pump(0.8)
         text = screen(v, 0)
-        check("Chapters: every chapter auto: the empty state says so and "
+        check("Prompts: every chapter auto: the empty state says so and "
               "names n; the tab count is 0", "Only auto rows: n shows "
-              "them" in text and "Chapters 0" in text and
+              "them" in text and "Prompts 0" in text and
               "n auto rows 1 hidden" in text, text)
         mark = len(v.out)
         v.key(b"n", 1.0)
         text = screen(v, mark)
-        check("Chapters: n shows it, selected", any(
+        check("Prompts: n shows it, selected", any(
             r.startswith("\u258c") and "Only a notice" in r
             for r in text.split("\n")), text)
         v.key(b"q")
@@ -1073,16 +1090,16 @@ def test_compact():
         v.wait(b"finish the work")
         v.pump(0.5)
         text = screen(v, 0)
-        check("Chapters: a compaction is hidden by default, the tab count "
+        check("Prompts: a compaction is hidden by default, the tab count "
               "the prompts (2)", "start the work" in text and
-              "Conversation compacted" not in text and "Chapters 2" in text,
+              "Conversation compacted" not in text and "Prompts 2" in text,
               text)
-        check("Chapters: the footer counts a compaction with the auto rows",
+        check("Prompts: the footer counts a compaction with the auto rows",
               "n auto rows 2 hidden" in text, text)
         mark = len(v.out)
         v.key(b"n", 1.0)
         text = screen(v, mark)
-        check("Chapters: n shows the compaction, its = marker, faint",
+        check("Prompts: n shows the compaction, its = marker, faint",
               "= Conversation compacted" in text and
               re.search(rb"\033\[0;2m[^\033]*Conversation compacted",
                         v.out[mark:]), v.out[mark:][-800:])
@@ -1090,21 +1107,21 @@ def test_compact():
         v.key(b"k", 0.3)
         mark = len(v.out)
         v.key(b"\r", 1.0)
-        check("Chapters: Enter on a shown compaction reads its summary",
+        check("Prompts: Enter on a shown compaction reads its summary",
               v.wait(b"the compact summary", start=mark), v.out[mark:])
         v.key(b"\033", 0.5)
         v.key(b"q")
-        check("Chapters: q exits 0", v.exit() == 0, v.out[-80:])
+        check("Prompts: q exits 0", v.exit() == 0, v.out[-80:])
     finally:
         v.close()
     v = Pty([DCH, "--xray", "xv-ca"])
     try:
-        v.wait(b"Chapters")
+        v.wait(b"Prompts")
         v.pump(0.8)
         text = screen(v, 0)
-        check("Chapters: only a compaction and an auto chapter: the empty "
+        check("Prompts: only a compaction and an auto chapter: the empty "
               "state of xv-aa", "Only auto rows: n shows them" in text
-              and "Chapters 0" in text and "n auto rows 2 hidden" in text,
+              and "Prompts 0" in text and "n auto rows 2 hidden" in text,
               text)
         v.key(b"q")
         v.exit()
@@ -1163,10 +1180,13 @@ def test_open(lite):
     try:
         ok = ready(v)
         text = screen(v, 0)
-        check("Chapters: a live session's footer offers o", ok, text)
+        check("Commands: a live session's footer offers o", ok, text)
+        check("#295: a shell session's first tab is Commands",
+              "Commands" in text and "Prompts" not in text and
+              "Chapters" not in text, text)
         mark = len(v.out)
         v.key(b"o", 0.3)
-        opened(v, mark, "Chapters", "xv-op")
+        opened(v, mark, "Commands", "xv-op")
     finally:
         v.close()
     if lite:
@@ -1182,9 +1202,18 @@ def test_open(lite):
             v.wait(b"ran:make the build", start=mark)
             v.pump(0.3)
             text = screen(v, mark)
+            check("#295: a shell's reader footer says ] next command",
+                  "] next command" in text and "chapter" not in text, text)
             check("reader: a live session's footer offers o",
                   "o open session" in text and "ran:make the build" in text,
                   text)
+            mark = len(v.out)
+            v.key(b"G", 0.3)
+            v.key(b"j", 0.5)
+            text = screen(v, mark)
+            check("#295: past its only command's end the status says the "
+                  "end of the last command", "end of the last command" in
+                  text, text)
             mark = len(v.out)
             v.key(b"o", 0.3)
             opened(v, mark, "reader", "xv-op")
@@ -1251,38 +1280,93 @@ def test_open(lite):
         v.close()
 
 
-def test_screen_count(lite):
-    """A live shell with nothing on its screen to label: no number on On
-    screen until it is read, then 0; no refs: the empty state."""
-    r = dch("--spawn", "xv-0", "--size", "80x24", "sh", "-c",
-            "echo READY0; exec sleep 600")
-    check("screen count: spawned", r.returncode == 0, r.stderr)
+def test_screen_group(lite):
+    """#294: Refs' on-screen group on a live shell whose master keeps no
+    ring (xray_ring = 0): the index holds nothing, the screen is read all
+    the same."""
+    cfg = os.path.join(T, "config-noring")
+    with open(cfg, "w") as f:
+        f.write("xray_ring = 0\n")
+    r = subprocess.run([DCH, "--spawn", "xv-0", "--size", "80x24", "sh", "-c",
+                        'echo READY0; while read -r x; do '
+                        'echo "see $x https://example.com/p"; done'],
+                       capture_output=True, text=True, timeout=30,
+                       env=dict(ENV, DCH_CONFIG=cfg))
+    check("screen group: spawned", r.returncode == 0, r.stderr)
     time.sleep(0.5)
     v = Pty([DCH, "--xray", "xv-0"])
     try:
-        v.wait(b"Chapters")
+        v.wait(b"Commands")
         v.pump(0.5)
-        check("On screen: no number before it is opened",
-              b"On screen" in v.out and
-              not re.search(rb"On screen \d", v.out), v.out[-600:])
+        check("#294: no On screen tab", b"Refs 0" in v.out and
+              b"On screen" not in v.out, v.out[-600:])
         mark = len(v.out)
-        v.key(b"\t", 1.0)
+        v.key(b"\t", 1.5)  # over 1 s: the screen read at least once
         check("Refs: no refs, the empty state says what would show",
               v.wait(b"No refs yet: the files, commits, pull requests, "
                      b"issues and URLs this session touches show here",
                      start=mark), v.out[mark:])
+        check("Refs #294: no ref on the screen (READY0), no group line",
+              b"on screen now" not in v.out[mark:], v.out[mark:])
         mark = len(v.out)
-        v.key(b"\t", 1.5)
+        dch("--send", "xv-0", "o/r#5\n")
         if lite:
-            check("lite: On screen says no mirror and shows no number",
-                  v.wait(b"No screen: dch-lite keeps no mirror", start=mark)
-                  and not re.search(rb"On screen \d", v.out), v.out[mark:])
+            v.pump(2.5)
+            check("lite: no mirror, never a group line",
+                  b"on screen now" not in v.out[mark:], v.out[mark:])
         else:
-            check("On screen: read, its count shows, 0 included",
-                  v.wait(b"On screen 0", start=mark) and
-                  v.wait(b"READY0", start=mark), v.out[mark:])
+            ok = v.wait(b"on screen now", start=mark) and \
+                v.wait(b"o/r#5", start=mark)
+            v.pump(0.5)
+            text = screen(v, 0)  # rows drawn last: the whole frame
+            check("Refs #294: o/r#5 on the screen, the index holding "
+                  "nothing, shows under the group line", ok, text)
+            check("Refs #294: its row has no count (not the index's)",
+                  re.search(r"(?m)^\W*pull o/r#5\b", text) and
+                  "Refs 0" in text, text)
+            check("Refs #294: the URL on the screen is hidden by the a "
+                  "filter, the footer counting it",
+                  "example.com" not in text and
+                  "a files, commits, URLs 1 hidden" in text, text)
+            mark = len(v.out)
+            v.key(b"a", 1.0)
+            text = screen(v, 0)
+            check("Refs #294: a shows the URL in the group, after o/r#5 "
+                  "on its row", 0 <= text.find("o/r#5") <
+                  text.find("example.com/p"), text)
+            v.key(b"a", 0.5)
+            mark = len(v.out)
+            v.key(b"\r", 1.0)
+            check("Refs #294: Enter on the group's row opens its card",
+                  v.wait(b"o/r#5  light", start=mark), v.out[mark:])
+            # the rows change under the selection each second (#294)
+            v.key(b"\033", 0.5)
+            mark = len(v.out)
+            dch("--send", "xv-0", "o/r#6\n")
+            v.wait(b"o/r#6", start=mark)
+            v.pump(1.5)
+            mark = len(v.out)
+            v.key(b"\r", 1.0)
+            check("Refs #294: on the first row the selection stays there: "
+                  "o/r#6, new on the screen, is under it",
+                  v.wait(b"o/r#6  light", start=mark), v.out[mark:])
+            v.key(b"\033", 0.5)
+            v.key(b"j", 0.5)  # o/r#5, the second row
+            mark = len(v.out)
+            dch("--send", "xv-0", "o/r#7\n")
+            v.wait(b"o/r#7", start=mark)
+            v.pump(1.5)
+            text = screen(v, 0)
+            check("Refs #294: o/r#7 comes on the screen, first in the group",
+                  0 <= text.find("o/r#7") < text.find("o/r#6") <
+                  text.find("o/r#5"), text)
+            mark = len(v.out)
+            v.key(b"\r", 1.0)
+            check("Refs #294: the selection stays on its ref (o/r#5) when "
+                  "a new one comes above it; Enter opens o/r#5's card",
+                  v.wait(b"o/r#5  light", start=mark), v.out[mark:])
         v.key(b"\003")
-        check("screen count: Ctrl-C quits with 0", v.exit() == 0,
+        check("screen group: Ctrl-C quits with 0", v.exit() == 0,
               v.out[-80:])
     finally:
         v.close()
@@ -1292,7 +1376,7 @@ def test_screen_count(lite):
 def test_resize():
     v = Pty([DCH, "--xray", "xv-cl"])
     try:
-        v.wait(b"Chapters 2")
+        v.wait(b"Prompts 2")
         mark = len(v.out)
         v.resize(6, 40)
         check("resize: a narrow window says it is too small",
@@ -1300,7 +1384,7 @@ def test_resize():
         mark = len(v.out)
         v.resize(30, 100)
         check("resize: back to 100x30 redraws the list",
-              v.wait(b"Chapters 2", start=mark), v.out[mark:])
+              v.wait(b"Prompts 2", start=mark), v.out[mark:])
         v.key(b"\003")
         check("Ctrl-C quits with 0", v.exit() == 0, v.out[-80:])
     finally:
@@ -1312,7 +1396,7 @@ def test_small_card():
     card's selection below 0 and Enter read v->m[-1] (SIGSEGV)."""
     v = Pty([DCH, "--xray", "xv-cl"])
     try:
-        v.wait(b"Chapters 2")
+        v.wait(b"Prompts 2")
         v.key(b"\t")
         v.wait(b"#831")
         mark = len(v.out)
@@ -1380,7 +1464,7 @@ def test_signals():
         name = signal.Signals(sig).name
         v = Pty([DCH, "--xray", "xv-sh"])
         try:
-            v.wait(b"Chapters")
+            v.wait(b"Commands")
             v.pump(0.5)
             ks = kids(v.pid)
             os.kill(v.pid, sig)
@@ -1396,40 +1480,47 @@ def test_signals():
 
 
 def test_on_screen():
+    """#294: Refs on the live xv-sh: the refs on its screen first."""
     rc = subprocess.run([DCH, "--xray", "xv-sh", "--json"], env=ENV,
                         capture_output=True, text=True, timeout=30)
     o = json.loads(rc.stdout)
     lite = o["corpus"] == "none" and o["reason"] == "lite"
     v = Pty([DCH, "--xray", "xv-sh"])
     try:
-        v.wait(b"Chapters")
+        v.wait(b"Commands")
         if lite:
             check("lite: the label says X-ray needs the full dch build",
                   v.wait(b"X-ray needs the full dch build"), v.out[-600:])
             mark = len(v.out)
-            v.key(b"\t\t", 1.0)
-            check("lite: On screen says dch-lite keeps no mirror",
-                  v.wait(b"No screen: dch-lite keeps no mirror", start=mark),
-                  v.out[mark:])
+            v.key(b"\t", 1.5)
+            check("lite: Refs has no group line (no mirror)",
+                  v.wait(b"[Refs", start=mark) and
+                  b"on screen now" not in v.out[mark:], v.out[mark:])
         else:
             u = [x for x in o["refs"] if x["key"] == "pull:o/r#41"]
             check("shell: o/r#41 is underlined in the index (count 2)",
                   u and u[0]["underline"], o["refs"])
-            mark = len(v.out)
-            v.key(b"\t\t", 1.5)
             u = [x for x in o["refs"] if x["key"] == "pull:o/r#77"]
             check("shell: o/r#77, printed once, is not underlined",
                   u and not u[0]["underline"], o["refs"])
-            check("On screen: o/r#41 gets hint a",
-                  v.wait(b"On screen 2", start=mark) and
-                  v.wait(b"o/r#41", start=mark), v.out[mark:])
-            check("On screen #262: a ref not underlined gets a hint too",
-                  re.search(rb"once \[.\]o/r#77", v.out[mark:]),
-                  v.out[mark:])
             mark = len(v.out)
-            v.key(b"a", 1.0)
-            check("On screen: typing a opens the card of o/r#41",
-                  v.wait(b"o/r#41  light", start=mark) and
+            v.key(b"\t", 1.5)
+            ok = v.wait(b"on screen now", start=mark)
+            v.pump(0.5)
+            text = screen(v, mark)
+            g = text.find("on screen now")
+            check("Refs #294: the group line, then o/r#77 (the lowest row) "
+                  "and o/r#41, with their counts",
+                  ok and 0 <= g < text.find("o/r#77") < text.find("o/r#41")
+                  and re.search(r"\d pull o/r#41", text), text)
+            check("Refs #294: a ref in the group is not repeated below, "
+                  "and nothing else is held: no rest line",
+                  text.count("o/r#41") == 1 and text.count("o/r#77") == 1
+                  and "the rest" not in text, text)
+            mark = len(v.out)
+            v.key(b"\r", 1.0)
+            check("Refs #294: Enter on the first row opens o/r#77's card",
+                  v.wait(b"o/r#77  light", start=mark) and
                   v.wait(b"Mentions", start=mark), v.out[mark:])
         v.key(b"\003")
         check("on screen: Ctrl-C quits with 0", v.exit() == 0, v.out[-80:])
@@ -1446,7 +1537,7 @@ def test_picker():
         v.key(b"x", 1.0)
         check("picker: x opens the view of the row's session",
               v.wait(b"X-ray  xv-sh", start=mark) and
-              v.wait(b"Chapters", start=mark), v.out[mark:])
+              v.wait(b"Commands", start=mark), v.out[mark:])
         mark = len(v.out)
         v.key(b"q", 1.0)
         check("picker: q in the view returns to the picker",
@@ -1509,8 +1600,9 @@ def chord_case(what, keys, lite):
         for k in keys:
             a.key(k, 0.05)
         ok = a.wait(b"X-ray  xv-rx", start=mark) and \
-            a.wait(b"On screen", start=mark)
-        check("chord, %s: the view opens over the attach" % what, ok,
+            a.wait(b"[Refs", start=mark)
+        check("chord, %s: the view opens over the attach, on Refs (#294)"
+              % what, ok,
               a.out[mark:][-600:])
         check("chord, %s: the client is still running" % what,
               a.reap() is None)
@@ -1534,8 +1626,7 @@ def chord_case(what, keys, lite):
         check("chord, %s: q leaves the view's alternate screen" % what,
               a.wait(RESTORE, start=mark), a.out[mark:][-300:])
         if not lite:
-            # On screen may draw the line too: only what follows the
-            # view's exit counts
+            # only what follows the view's exit counts
             back = a.out.rfind(RESTORE)
             check("chord, %s: back on the attach, the screen repainted "
                   "with what came in meanwhile" % what,
@@ -1566,7 +1657,7 @@ def test_chord():
         print("  ok   lite: the repaint after the view is the master's "
               "SIGWINCH (no mirror), the screen check is the full build's")
 
-    # o on Chapters (#194): the client is on the session already; o goes
+    # o on Prompts (#194): the client is on the session already; o goes
     # back to it, the attach kept
     a = attach()
     try:
@@ -1851,7 +1942,7 @@ def main():
         test_signals()
         test_on_screen()
         o = json.loads(dch("--xray", "xv-sh", "--json").stdout)
-        test_screen_count(o["corpus"] == "none" and o["reason"] == "lite")
+        test_screen_group(o["corpus"] == "none" and o["reason"] == "lite")
         test_picker()
         test_open(o["corpus"] == "none" and o["reason"] == "lite")
         test_chord()

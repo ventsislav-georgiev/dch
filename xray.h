@@ -19,6 +19,8 @@
 #define XR_TITLE_MAX   120		/* scalars (3.2, ruling R3) */
 #define XR_CHAPTERS    5000		/* 13.2 item 6: the newest kept */
 #define XR_SUMMARIES   (256u << 10)	/* #192: summary bytes held (3.8) */
+#define XR_RESPONSE    2048		/* #296: a response's bytes */
+#define XR_RESPONSES   (2u << 20)	/* #296: response bytes held */
 #define XR_HEAD_RANGE  (16ull << 20)	/* 3.8 per-file range: head ... */
 #define XR_TAIL_RANGE  (256ull << 20)	/* ... plus the newest 256 MB */
 #define XR_CHUNK       (1u << 20)	/* read size (QA 1.44 LOW-8: 4 MiB
@@ -44,7 +46,7 @@ struct xr_limits
 	long long ms;			/* XR_WALL_MS */
 };
 extern struct xr_limits xr_lim;
-extern int xr_noclock;	/* tests only: DCH_XRAY_NOCLOCK, light --ref never cut by the clock */
+extern int xr_noclock;	/* tests only: DCH_XRAY_NOCLOCK, light --ref past its budget, held to --full's XR_WALL_MS */
 
 /* One chapter (3.2). at < 0 prints null. */
 struct xr_chapter
@@ -59,6 +61,14 @@ struct xr_chapter
 	char *summary;			/* its <summary>, else <event>: "" for none
 					** (never NULL from the engine); held out of
 					** line so the ring costs no more (3.8) */
+	/* #296, Claude Code's Focus view: the turn's last assistant text
+	** after its last tool result, at most XR_RESPONSE bytes (cut: cut on
+	** a character), from the record at response_offset; NULL while the
+	** turn runs, or given up past XR_RESPONSES held (responded stays) */
+	char *response;
+	uint64_t response_offset;
+	int responded, response_cut;
+	char *tools;			/* the turn's tool line, or NULL */
 };
 
 /* The newest XR_CHAPTERS, oldest first from `start` (a ring). `total`
@@ -71,6 +81,8 @@ struct xr_chapters
 	size_t sumheld;			/* summary bytes held, <= XR_SUMMARIES:
 					** past it the oldest give theirs up */
 	uint64_t sumord;		/* no chapter before this ord has one */
+	size_t resheld;			/* response bytes held, <= XR_RESPONSES */
+	uint64_t resord;		/* no chapter before this ord holds one */
 };
 void xr_chapters_free(struct xr_chapters *c);
 const struct xr_chapter *xr_chapter_at(const struct xr_chapters *c,
@@ -474,5 +486,45 @@ int xr_git_remote(const char *s, size_t n, const char *want);
 extern const char *const *xr_git_probe;
 const char *xr_git_bin(char *buf, size_t bufsz);
 extern unsigned long xr_res_spawned;
+
+/* ---- --search (#297): where a word or phrase was said ------------------- */
+#define XR_SEARCH_MIN  2		/* bytes of the text */
+#define XR_SEARCH_MAX  200
+#define XR_SEARCH_HITS 50		/* the newest; one more says more:true */
+#define XR_SNIPPET     160		/* bytes of decoded text around a hit */
+#define XR_LOOKBACK_MS 300		/* past the last hit, to find the prompt
+					** the oldest hits are under */
+
+/* needle[0..nl) in hay[0..n), ASCII letters folded, every other byte as is:
+** the first match's offset, SIZE_MAX for none (0 for an empty needle). */
+size_t xr_find(const char *hay, size_t n, const char *needle, size_t nl);
+
+/* One query's hits, newest first. NULL for a text outside 2..200 bytes or
+** out of memory. t0: the query's start (CLOCK_MONOTONIC ms), for the caps. */
+struct xr_search;
+struct xr_search *xr_search_new(const char *text, long long t0);
+void xr_search_free(struct xr_search *s);
+/* A transcript (codex: a Codex rollout) read from its end in windows cut at
+** line starts, under xr_lim's bytes and ms; lines that hold the text's raw
+** run are decoded, and a hit is a match in a typed prompt, assistant text, a
+** tool call's input values or a tool result's text (never thinking, a
+** sidechain record, metadata, toolUseResult or a compaction summary), one
+** per record and kind. ino: the file's, for the chapter anchors. 0, or -1 a
+** read error. */
+int xr_search_file(struct xr_search *s, int fd, uint64_t size, uint64_t ino,
+                   int codex);
+/* A shell ring's record, oldest first, right after xr_shell_feed(sh, x):
+** command rows (who "user") and output rows ("tool"), soft wraps joined;
+** xr_search_ring_end after the last. */
+void xr_search_rec(struct xr_search *s, const struct xr_shell *sh,
+                   const struct xr_rec *x);
+void xr_search_ring_end(struct xr_search *s);
+/* {"schema":1,"session","session_id","corpus","text","hits":[{"chapter",
+** "offset","at","who","tool","snippet"}…],"more","partial","why","bytes"}
+** and a newline; why (a shell's "range") when the caller knows the read was
+** not whole. 0, -1 the write failed. */
+int xr_search_print(FILE *f, const struct xr_search *s, const char *session,
+                    const char *session_id, const char *corpus,
+                    const char *why);
 
 #endif /* DCH_XRAY_H */

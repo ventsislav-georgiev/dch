@@ -584,6 +584,24 @@ xray_anchor_ok(const char *s)
 	return n >= 1 && n <= 128 && !s[n];
 }
 
+/* --search's text (#297): 2 to 200 bytes of UTF-8 with no control
+** character (cp_ctl's), so one line a client typed. */
+int
+xray_search_ok(const char *s)
+{
+	const unsigned char *p = (const unsigned char *)s;
+	size_t n = strlen(s);
+	unsigned cp;
+	int k;
+
+	if (n < 2 || n > 200)
+		return 0;
+	for (; *p; p += k)
+		if (!(k = utf8_at(p, &cp)) || cp_ctl(cp))
+			return 0;
+	return 1;
+}
+
 int
 xray_budget(const char *s)
 {
@@ -599,9 +617,10 @@ xray_budget(const char *s)
 /* --xray (spec #832 v3.2.1 4.4): the name right after the verb, then 3.1's
 ** flags in any order, each once: --json, required (the view is the
 ** client's own, as --requests is); one of --follow, --ref <text>,
-** --chapter <anchor> and --clear; --scope, --full and --budget-ms only with
-** --ref. A value is the next element even when it starts with '-'. --ref's
-** text and the anchor are CK_TEXT (an anchor may hold ':'). The --ref
+** --search <text> (#297), --chapter <anchor> and --clear; --scope, --full
+** and --budget-ms only with --ref. A value is the next element even when it
+** starts with '-'. --ref's and --search's text and the anchor are CK_TEXT
+** (an anchor may hold ':'). The --ref
 ** text's byte and grammar rules are xray.c's, which the Windows client does
 ** not build: dch serve checks them (ctl_request), the dch client before
 ** it sends. --follow has no timeout and no cap. */
@@ -611,10 +630,10 @@ ctl_xray(int argc, char *const argv[], unsigned char *kind, char *why,
 {
 	static const char *const opt[] = { "--json", "--follow", "--clear",
 	                                   "--full", "--ref", "--chapter",
-	                                   "--scope", "--budget-ms" };
+	                                   "--scope", "--budget-ms", "--search" };
 	enum { X_JSON = 1, X_FOLLOW = 2, X_CLEAR = 4, X_FULL = 8, X_REF = 16,
-	       X_CHAPTER = 32, X_SCOPE = 64, X_BUDGET = 128 };
-	const char *val[8] = { NULL };
+	       X_CHAPTER = 32, X_SCOPE = 64, X_BUDGET = 128, X_SEARCH = 256 };
+	const char *val[9] = { NULL };
 	unsigned seen = 0, k, one;
 	int i;
 
@@ -626,9 +645,9 @@ ctl_xray(int argc, char *const argv[], unsigned char *kind, char *why,
 	{
 		const char *a = argv[i];
 
-		for (k = 0; k < 8 && strcmp(a, opt[k]); k++)
+		for (k = 0; k < 9 && strcmp(a, opt[k]); k++)
 			;
-		if (k == 8)
+		if (k == 9)
 			return ctl_never(a) || !strcmp(a, "--all")
 			       ? ctl_no(why, cap, "%.60s is not allowed", a)
 			       : a[0] == '-'
@@ -644,16 +663,16 @@ ctl_xray(int argc, char *const argv[], unsigned char *kind, char *why,
 			if (++i >= argc)
 				return ctl_no(why, cap, "%s needs a value", opt[k]);
 			val[k] = argv[i];
-			kind[i] = k >= 6 ? CK_VALUE : CK_TEXT;
+			kind[i] = k == 6 || k == 7 ? CK_VALUE : CK_TEXT;
 		}
 	}
-	one = seen & (X_FOLLOW | X_CLEAR | X_REF | X_CHAPTER);
+	one = seen & (X_FOLLOW | X_CLEAR | X_REF | X_CHAPTER | X_SEARCH);
 	if (!(seen & X_JSON))
 		return ctl_no(why, cap, "--xray needs --json (the view is "
 		              "client-side only)");
 	if (one & (one - 1))
-		return ctl_no(why, cap, "--ref, --follow, --chapter and --clear "
-		              "exclude each other");
+		return ctl_no(why, cap, "--ref, --search, --follow, --chapter and "
+		              "--clear exclude each other");
 	if (seen & (X_FULL | X_SCOPE | X_BUDGET) && !(seen & X_REF))
 		return ctl_no(why, cap, "--scope, --full and --budget-ms come "
 		              "with --ref");
@@ -663,6 +682,9 @@ ctl_xray(int argc, char *const argv[], unsigned char *kind, char *why,
 		return ctl_no(why, cap, "bad scope");
 	if (val[7] && xray_budget(val[7]) < 0)
 		return ctl_no(why, cap, "bad budget");
+	if (val[8] && !xray_search_ok(val[8]))
+		return ctl_no(why, cap, "bad search: 2 to 200 bytes, no control "
+		              "character");
 	return seen & X_FOLLOW ? CTL_FOREVER | CTL_NOCAP : 0;
 }
 

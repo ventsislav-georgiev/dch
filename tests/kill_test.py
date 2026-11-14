@@ -17,7 +17,7 @@ DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
 
 
 def main():
-    tmp = os.path.realpath(tempfile.mkdtemp(prefix="dchk", dir="/tmp"))
+    tmp = os.path.realpath(tempfile.mkdtemp(prefix="dchk", dir=os.environ.get("DCH_TEST_TMP", "/tmp")))
     for k in list(os.environ):
         if k.startswith("DCH_"):
             del os.environ[k]

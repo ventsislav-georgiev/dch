@@ -13,23 +13,24 @@ mirror on the client.
 
 Covers:
   1. srv:xv-cl, a History Claude record on the host with a hostile corpus:
-     the title names srv:, the tabs carry the host's counts, the chapter
+     the title names srv:, the tabs carry the host's counts (Prompts, not
+     Chapters, #295; a shell's is Commands), the chapter
      list, the Refs list, the card (light, `f` full scan), the reader, q
      exits 0; the corpus's ESC, BEL and bidi bytes never reach the
      terminal; every query ran on the host as its own ctl (follow, ref,
      ref --full, chapter); k, Up, PgUp and Enter in its card under a
      too-small window neither crash nor read outside the mentions (QA
      1.56.0 MED-V1);
-  2. On screen of srv:xv-sh, a live shell on the host: no number on its tab
-     before the screen is read (#193), the screen read with
-     ctl --read xv-sh --ansi, o/r#41 gets hint a, typing it opens
-     its card (full build); on dch-lite "No screen: dch-lite keeps no
-     mirror" and still no number;
-  3. a hostile host: raw ESC, BEL, C1 and bidi bytes in its snapshot and in
-     its --read screen are drawn as ?, its OSC and CSI dropped, and its
-     screen still gets its hint; invalid UTF-8 a ? per byte and a NUL a ?
-     with the rest after it; a later failed read's stderr said in place of
-     the screen, as clean (QA 1.57.0 LOW-R1, NIT-R1);
+  2. Refs of srv:xv-sh, a live shell on the host (#294): no On screen
+     tab; the screen read with ctl --read xv-sh --ansi, o/r#41 on it
+     under the faint "on screen now" line, not repeated below, Enter
+     opens its card (full build); on dch-lite no group line;
+  3. a hostile host: raw ESC, BEL, C1 and bidi bytes in its snapshot are
+     drawn as ?; its --read screen, with OSC, CSI, BEL, C1, bidi, invalid
+     UTF-8 and NUL bytes, still gives its o/r#41 to Refs' group (#294) and
+     none of those bytes reach the terminal; a later failed read takes
+     the group away and its stderr is never drawn (QA 1.57.0 LOW-R1,
+     NIT-R1);
   4. a host without "xray" (exit 6), a closed port (exit 7) and a gate that
      refuses us (exit 4): the line in place of the tabs, the view open until
      q, then the exit code and the line on stderr;
@@ -43,8 +44,8 @@ Covers:
      (#210);
   6. the in-attach chord over `dch -a srv:xv-rx` (#189): the detach key then
      x (a later read, one burst, the kitty CSI form, --host srv -a xv-rx,
-     detach_key = switch) opens the view of srv:xv-rx over the attach, On
-     screen read with its own ctl --read; the session never gets the detach
+     detach_key = switch) opens the view of srv:xv-rx over the attach, on
+     Refs (#294), the screen read with its own ctl --read; the session never gets the detach
      key or the x; q goes back, the host is asked to redraw (the program's
      SIGWINCH), a key after reaches the session, and the host saw one attach
      (never retired); next to a local srv:xv-rx too (LOW-R2). Off under -E
@@ -72,7 +73,7 @@ Covers:
      flag stack does not grow (a per-screen stack model of the whole attach
      ends at 1 on the alternate screen, 0 on the main one); the first attach
      pops nothing. A key after still reaches the session;
-  9. o (#194): on srv:xv-sh's Chapters the view is left as q leaves it and
+  9. o (#194): on srv:xv-sh's Commands the view is left as q leaves it and
      the client attaches to xv-sh on the host (the host's log says so);
      on the ended srv:xv-cl it says the session has ended and stays;
   10. stopping a remote child (#204): a fake host whose answers stream
@@ -84,10 +85,13 @@ Covers:
       to hang for good, or wait 3 s per child), only the follow child after
       each card, no zombie, the view's fd count flat over the 20 cards, the
       terminal restored, exit 0, and no child the test saw left running.
-  11. a link that drops and comes back (QA 1.57.0 LOW-R3): the status says
+  11. a link that drops and comes back (QA 1.57.0 LOW-R3): Refs shows the
+      host screen's o/r#5, which the index does not hold, under the group
+      line, the index's o/r#41 under the rest line (#294); the status says
       live updates stopped and how to get them back, and no failed read
-      replaces it; a failed read shows in place of the screen; once the
-      host answers On screen reads again and no unreachable line is left.
+      replaces it; a failed read takes the group away, never said; once
+      the host answers the group comes back (o/r#6) and no unreachable
+      line is left.
   12. the lookup (#263) on srv:xv-cl: OQ-32, which no row has, and #831,
       which a chapter title holds, typed in the filter: ^R opens each card
       from the host, Enter reads a mention's chapter there, Esc back to the
@@ -119,7 +123,7 @@ def check(msg, cond, detail=""):
             print("       " + repr(detail)[-900:])
 
 
-T = os.path.realpath(tempfile.mkdtemp(prefix="xrv", dir="/tmp"))
+T = os.path.realpath(tempfile.mkdtemp(prefix="xrv", dir=os.environ.get("DCH_TEST_TMP", "/tmp")))
 FAKE = os.path.join(T, "fake")
 os.makedirs(FAKE)
 with open(os.path.join(FAKE, "tailscale"), "w") as f:
@@ -335,7 +339,9 @@ def test_view():
         check("view: the title names the host's session as srv:xv-cl",
               v.wait(b"X-ray  srv:xv-cl"), v.out[-600:])
         check("view: the tabs carry the host's counts",
-              v.wait(b"Chapters 2") and v.wait(b"Refs 3"), v.out[-600:])
+              v.wait(b"Prompts 2") and v.wait(b"Refs 3"), v.out[-600:])
+        check("#295: a Claude record's first tab is Prompts, no Chapters",
+              b"Chapters" not in v.out, v.out[-600:])
         check("view: the chapter list shows both titles",
               v.wait(b"second prompt about PROJ-5") and
               v.wait(b"look at #831"), v.out[-600:])
@@ -371,16 +377,23 @@ def test_view():
               v.wait(b"xv-cl has ended: no session to open", start=mark) and
               v.reap() is None, v.out[mark:])
         v.key(b"\033", 0.5)
-        v.key(b"\t\t")
+        v.key(b"\t")  # Refs, then Prompts: two tabs (#294)
         mark = len(v.out)
         v.key(b"\r", 1.0)
         check("reader: Enter reads the newest chapter from the host",
               v.wait(b"You", start=mark) and v.wait(b"noted", start=mark),
               v.out[mark:])
+        check("reader: the header says 2 of 2", v.wait(b"2 of 2", start=mark),
+              v.out[mark:])
+        mark = len(v.out)
+        v.key(b"[", 1.0)
+        check("reader: [ reads the previous chapter from the host, 1 of 2 "
+              "(#288)", v.wait(b"1 of 2", start=mark) and
+              v.wait(b"gh issue view 831", start=mark), v.out[mark:])
         mark = len(v.out)
         v.key(b"q")
         check("reader: q goes back to the list",
-              v.wait(b"Chapters 2", start=mark), v.out[mark:])
+              v.wait(b"Prompts 2", start=mark), v.out[mark:])
         mark = len(v.out)
         v.key(b"o", 0.5)
         check("o on the ended srv:xv-cl: said, the view stays",
@@ -397,11 +410,11 @@ def test_view():
               "the terminal", not bad, bad)
     finally:
         v.close()
-    # follow, ref (light), ref --full, p's ref --full --scope all, chapter:
-    # five, each its own ctl
-    until(lambda: ctls("--xray") - n0["--xray"] >= 5, 5)
-    check("every query ran on the host as its own ctl --xray (5), no --read "
-          "for an ended session", ctls("--xray") - n0["--xray"] == 5 and
+    # follow, ref (light), ref --full, p's ref --full --scope all, chapter,
+    # ['s chapter: six, each its own ctl
+    until(lambda: ctls("--xray") - n0["--xray"] >= 6, 5)
+    check("every query ran on the host as its own ctl --xray (6), no --read "
+          "for an ended session", ctls("--xray") - n0["--xray"] == 6 and
           ctls("--read") == n0["--read"],
           (ctls("--xray") - n0["--xray"], ctls("--read") - n0["--read"],
            refused()))
@@ -421,7 +434,7 @@ def test_lookup():
     n0 = ctls("--xray")
     v = Pty([DCH, "--xray", "srv:xv-cl"])
     try:
-        v.wait(b"Chapters 2")
+        v.wait(b"Prompts 2")
         v.pump(0.5)
         mark = len(v.out)
         v.key(b"/OQ-32", 1.0)
@@ -466,7 +479,7 @@ def test_small_card():
     v->m[-1] (SIGSEGV)."""
     v = Pty([DCH, "--xray", "srv:xv-cl"])
     try:
-        v.wait(b"Chapters 2")
+        v.wait(b"Prompts 2")
         v.key(b"\t")
         v.wait(b"#831")
         mark = len(v.out)
@@ -493,7 +506,7 @@ def test_small_card():
         v.close()
 
 
-# ---- 2: On screen of a live shell on the host -------------------------------
+# ---- 2: Refs of a live shell on the host: its screen's refs (#294) ---------
 
 def test_on_screen():
     o = json.loads(dch(SENV, "--xray", "xv-sh", "--json").stdout)
@@ -501,33 +514,43 @@ def test_on_screen():
     n0 = ctls("--read")
     v = Pty([DCH, "--xray", "srv:xv-sh"])
     try:
-        check("On screen: the view of srv:xv-sh opens",
-              v.wait(b"X-ray  srv:xv-sh") and v.wait(b"Chapters"),
+        check("the view of srv:xv-sh opens",
+              v.wait(b"X-ray  srv:xv-sh") and v.wait(b"Commands"),
               v.out[-600:])
-        check("On screen: no number on its tab before its screen is read",
-              not re.search(rb"On screen \d", v.out), v.out[-600:])
+        check("#294: no On screen tab", b"On screen" not in v.out,
+              v.out[-600:])
+        check("#295: a shell's first tab is Commands, never Prompts or "
+              "Chapters", b"Prompts" not in v.out and
+              b"Chapters" not in v.out, v.out[-600:])
         mark = len(v.out)
-        v.key(b"\t\t", 2.0)
+        v.key(b"\t", 2.0)
         if lite:
-            check("lite: On screen says dch-lite keeps no mirror, no number",
-                  v.wait(b"No screen: dch-lite keeps no mirror", start=mark)
-                  and not re.search(rb"On screen \d", v.out), v.out[mark:])
+            check("lite: Refs has no group line (no mirror)",
+                  v.wait(b"[Refs", start=mark) and
+                  b"on screen now" not in v.out[mark:], v.out[mark:])
         else:
-            check("On screen: the host's screen, o/r#41 with hint a",
-                  v.wait(b"On screen 1", start=mark) and
-                  v.wait(b"see [a]o/r#41", start=mark), v.out[mark:])
+            ok = v.wait(b"on screen now", start=mark) and \
+                v.wait(b"o/r#41", start=mark)
+            v.pump(0.5)
+            text = shown(v, 0)  # rows drawn last: the whole frame
+            check("Refs #294: the host's screen's o/r#41 under the group "
+                  "line, with its count, not repeated below",
+                  ok and 0 <= text.find("on screen now") <
+                  text.find("o/r#41") and text.count("o/r#41") == 1 and
+                  re.search(r"\d +pull +o/r#41", text), text)
             mark = len(v.out)
-            v.key(b"a", 1.5)
-            check("On screen: typing a opens the card of o/r#41",
+            v.key(b"\r", 1.5)
+            check("Refs #294: Enter opens the card of o/r#41",
                   v.wait(b"o/r#41  light", start=mark) and
                   v.wait(b"Mentions", start=mark), v.out[mark:])
         v.key(b"\003")
-        check("On screen: Ctrl-C quits with 0", v.exit() == 0, v.out[-80:])
+        check("srv:xv-sh: Ctrl-C quits with 0", v.exit() == 0, v.out[-80:])
     finally:
         v.close()
     with open(SLOG) as f:
         log = f.read()
-    check("On screen: read on the host with ctl --read xv-sh --ansi",
+    check("Refs #294: the screen read on the host with ctl --read xv-sh "
+          "--ansi",
           ctls("--read") > n0 and " ctl --read xv-sh " in log,
           ctls("--read") - n0)
 
@@ -540,7 +563,7 @@ def test_open():
     CENV["DCH_DOUBLE_TAP_MS"] = "0"  # one Ctrl-\ detaches at once
     v = Pty([DCH, "--xray", "srv:xv-sh"])
     try:
-        v.wait(b"Chapters")
+        v.wait(b"Commands")
         v.pump(0.5)
         check("o: srv:xv-sh's footer offers it", v.wait(b"o open session"),
               v.out[-600:])
@@ -643,7 +666,7 @@ def test_hostile():
     v = Pty([DCH, "--xray", "q:fk"])
     try:
         check("hostile: the view opens on the snapshot",
-              v.wait(b"X-ray  q:fk") and v.wait(b"Chapters 1"),
+              v.wait(b"X-ray  q:fk") and v.wait(b"Commands 1"),
               v.out[-600:])
         check("hostile: the snapshot's ESC, BEL, C1 and bidi bytes show as ?",
               v.wait(b"t?]0;pwned? a?b c?d e?f"), v.out[-600:])
@@ -654,6 +677,9 @@ def test_hostile():
               v.wait(b"o/r#41", start=mark) and
               v.wait(b"issues and tickets this session touched;", start=mark),
               v.out[mark:])
+        check("hostile #294: its screen (OSC, CSI, BEL, C1, bidi, invalid "
+              "UTF-8, NUL) still gives its o/r#41 to the group",
+              v.wait(b"on screen now", start=mark), v.out[mark:])
         mark = len(v.out)
         v.key(b"/OQ-32\x12", 2.0)
         check("hostile, an older host whose dch takes no such ref (#263): ^R "
@@ -663,24 +689,12 @@ def test_hostile():
               v.out[mark:])
         v.key(b"\033", 0.5)
         v.key(b"\033", 0.5)
-        mark = len(v.out)
-        v.key(b"\t", 2.0)
-        check("hostile: On screen draws the host's screen, its OSC and CSI "
-              "dropped, CSI 5 C as five blanks, BEL, C1 and bidi as ?",
-              v.wait(b"$ echo hi", start=mark) and
-              v.wait(b"red     gap?bel c1?2J bidi?x", start=mark),
-              v.out[mark:])
-        check("hostile: its o/r#41 gets hint a",
-              v.wait(b"On screen 1", start=mark), v.out[mark:])
-        check("hostile: the screen's invalid UTF-8 (surrogate, F8 lead, "
-              "truncated, past U+10FFFF) shows as ?, a byte each, and a NUL "
-              "as ? with the rest after it (QA 1.57.0 LOW-R1, NIT-R1)",
-              v.wait(b"sur[???] f8[????] trunc[??A] f4[????] nul[?]after",
-                     start=mark), v.out[mark:])
-        check("hostile: a failed read's stderr is said in place of the screen,"
-              " its OSC, BEL and invalid UTF-8 as ?",
-              v.wait(b"No screen: err?]0;pwned? sur??? tr??", start=mark),
-              v.out[mark:][-600:])
+        v.pump(2.0)  # the next reads fail
+        text = shown(v, 0)
+        check("hostile #294: a later failed read takes the group away and "
+              "its stderr is never drawn", "on screen now" not in text and
+              b"pwned? sur" not in v.out and b"No screen" not in v.out,
+              text[-600:])
         v.key(b"q")
         rc = v.exit()
         check("hostile: q exits 0", rc == 0, (rc, v.out[-80:]))
@@ -704,9 +718,11 @@ class Flaky(Fake):
     self.word; down() cuts every connection and each new one at once, up()
     answers again."""
 
-    def __init__(self):
+    def __init__(self, snap=None, chapters=None):
         super().__init__("ok", ops=["ctl", "ctl-cancel", "xray"])
         self.up, self.word = True, b"LINK-UP"
+        # --chapter <anchor>'s answers (#288), and the snapshot
+        self.snap, self.chapters = snap or SNAP, chapters or {}
 
     def down(self):
         self.up = False
@@ -739,8 +755,12 @@ class Flaky(Fake):
                     elif t == 0x30:
                         argv = json.loads(body)["argv"]
                         if "--follow" in argv:
-                            c.sendall(frame(0x31, SNAP))
+                            c.sendall(frame(0x31, self.snap))
                             continue    # a stream: held until the close
+                        if "--chapter" in argv:
+                            a = argv[argv.index("--chapter") + 1]
+                            if a in self.chapters:
+                                c.sendall(frame(0x31, self.chapters[a]))
                         if argv[0] == "--read":
                             c.sendall(frame(0x31, b"$ echo hi\r\n" +
                                             self.word + b"\r\n"))
@@ -760,16 +780,25 @@ def redraw(v, cols):
 def test_link_drop():
     h = Flaky()
     hosts("q=127.0.0.1:%d" % h.port)
+    h.word = b"see o/r#5"
     v = Pty([DCH, "--xray", "q:fk"])
     stop = b"live updates stopped (reopen the view for them): dch: q: "
     try:
         check("link drop: the view opens on the snapshot",
-              v.wait(b"X-ray  q:fk") and v.wait(b"Chapters 1"),
+              v.wait(b"X-ray  q:fk") and v.wait(b"Prompts 1"),
               v.out[-600:])
         mark = len(v.out)
-        v.key(b"\t\t", 1.5)
-        check("link drop: On screen shows the host's screen",
-              v.wait(b"LINK-UP", start=mark), v.out[mark:])
+        v.key(b"\t", 1.5)
+        v.wait(b"o/r#5", start=mark)
+        v.pump(0.3)
+        text = shown(v, 0)
+        at = [text.find(x) for x in ("on screen now", "o/r#5", "the rest",
+                                     "o/r#41")]
+        check("link drop #294: Refs shows the host screen's o/r#5 (the "
+              "index holds none: no count) under the group line, the "
+              "index's o/r#41 under the rest line",
+              -1 not in at and at == sorted(at) and
+              re.search(r"(?m)^\W*pull +o/r#5\b", text), text)
         mark = len(v.out)
         h.down()
         v.pump(3.5)
@@ -779,18 +808,20 @@ def test_link_drop():
         check("link drop: the status says live updates stopped and how to "
               "get them back, and no failed read replaces it over 3 s",
               stop in frame_ and
-              all(down[:m.start()].endswith((b"No screen: ", stop[:-8]))
+              all(down[:m.start()].endswith(stop[:-8])
                   for m in re.finditer(b"dch: q: ", down)),
               (frame_[-400:], down[-600:]))
-        check("link drop: a failed read is said in place of the screen",
-              b"No screen: dch: q: unreachable" in frame_, frame_[-600:])
-        h.word = b"LINK-BACK"
+        check("link drop #294: a failed read takes the group away, unsaid",
+              b"on screen now" not in frame_ and b"No screen" not in frame_,
+              frame_[-600:])
+        h.word = b"see o/r#6"
         h.up = True
         mark = len(v.out)
         v.pump(2.5)
         frame_ = redraw(v, 100)
-        check("link drop, host back: On screen reads again",
-              v.wait(b"LINK-BACK", start=mark), v.out[mark:][-600:])
+        check("link drop, host back: Refs reads the screen again, o/r#6 "
+              "in the group", v.wait(b"o/r#6", start=mark) and
+              b"on screen now" in frame_, v.out[mark:][-600:])
         check("link drop, host back: no line says the host is unreachable "
               "but the stop's own, which stays",
               stop in frame_ and b"No screen" not in frame_ and
@@ -798,6 +829,43 @@ def test_link_drop():
               frame_.count(stop + b"unreachable"), frame_[-600:])
         v.key(b"q")
         check("link drop: q exits 0", v.exit() == 0, v.out[-80:])
+    finally:
+        v.close()
+        h.close()
+
+
+def test_turn_drop():
+    """#288: the reader's [ on a host that has gone: the status says so and
+    the reader stays on its chapter."""
+    snap2 = SNAP.replace(b'"offset":0}]', b'"offset":0},{"anchor":"s2",'
+                         b'"title":"second","kind":"prompt","at":1794300100,'
+                         b'"offset":9}]')
+    ch = {"s2": json.dumps({"title": "second", "at": 1794300100,
+                            "entries": [{"role": "user",
+                                         "text": "SECOND-TEXT"}]}).encode()
+          + b"\n"}
+    h = Flaky(snap2, ch)
+    hosts("q=127.0.0.1:%d" % h.port)
+    v = Pty([DCH, "--xray", "q:fk"])
+    try:
+        check("turn drop: the view opens on two chapters",
+              v.wait(b"Prompts 2"), v.out[-600:])
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        check("turn drop: Enter reads the newest, 2 of 2",
+              v.wait(b"2 of 2", start=mark) and
+              v.wait(b"SECOND-TEXT", start=mark), v.out[mark:])
+        h.down()
+        mark = len(v.out)
+        v.key(b"[", 1.0)
+        ok = v.wait(b"could not read that prompt: dch: q: ", 15, start=mark)
+        frame_ = redraw(v, 101)
+        check("turn drop: [ on a gone host says so, the reader stays on 2 "
+              "of 2", ok and b"2 of 2" in frame_ and b"SECOND-TEXT" in frame_,
+              (v.out[mark:][-600:], frame_[-600:]))
+        v.key(b"q")
+        v.key(b"q")
+        check("turn drop: q, q exits 0", v.exit() == 0, v.out[-80:])
     finally:
         v.close()
         h.close()
@@ -813,13 +881,13 @@ def fail_case(what, port, want, line, prefix=False):
         v.pump(1.0)
         i = v.out.find(line.encode())
         check("%s: the line in place of the tabs, the view kept open" % what,
-              ok and v.reap() is None and b"Chapters" not in v.out[i:] and
+              ok and v.reap() is None and b"Prompts" not in v.out[i:] and
               v.out.rfind(b"\033[2;1H", 0, i) == i - 6 and
               v.out.rfind(b"\033[?1049h", 0, i) >= 0, v.out[-600:])
         mark = len(v.out)
         v.key(b"\t")
         check("%s: other keys do nothing" % what, v.reap() is None and
-              b"Chapters" not in v.out[mark:], v.out[mark:])
+              b"Prompts" not in v.out[mark:], v.out[mark:])
         v.key(b"q")
         rc = v.exit()
         i = v.out.rfind(line.encode())
@@ -970,7 +1038,7 @@ def esc_q(v):
     mark = len(v.out)
     t0 = time.time()
     v.key(b"\033", 0)
-    if not v.wait(b"Chapters 1", start=mark, secs=STOP_S):
+    if not v.wait(b"Prompts 1", start=mark, secs=STOP_S):
         return None, time.time() - t0
     v.key(b"q", 0)
     return v.exit(STOP_S), time.time() - t0
@@ -1000,7 +1068,7 @@ def test_stop():
         hosts("q=127.0.0.1:%d" % h.port)
         v = Pty([DCH, "--xray", "q:fk"])
         try:
-            v.wait(b"Chapters 1")
+            v.wait(b"Prompts 1")
             v.pump(0.5)
             seen.update(kids_of(v.pid))
             t0 = time.time()
@@ -1019,7 +1087,7 @@ def test_stop():
     hosts("q=127.0.0.1:%d" % h.port)
     v = Pty([DCH, "--xray", "q:fk"])
     try:
-        check("stream: the view opens", v.wait(b"Chapters 1"), v.out[-300:])
+        check("stream: the view opens", v.wait(b"Prompts 1"), v.out[-300:])
         seen.update(kids_of(v.pid))
         n0 = None
         worst = [0.0, 0.0]
@@ -1040,7 +1108,7 @@ def test_stop():
             mark = len(v.out)
             t0 = time.time()
             v.key(b"\033", 0)
-            ok = v.wait(b"Chapters 1", start=mark, secs=STOP_S) and ok
+            ok = v.wait(b"Prompts 1", start=mark, secs=STOP_S) and ok
             worst[0] = max(worst[0], time.time() - t0)
             v.pump(0.1)
             k = kids_of(v.pid)
@@ -1079,14 +1147,14 @@ def test_stop():
     hosts("q=127.0.0.1:%d" % h.port)
     v = Pty([DCH, "--xray", "q:fk"])
     try:
-        check("silent: the view opens", v.wait(b"Chapters 1"), v.out[-300:])
+        check("silent: the view opens", v.wait(b"Prompts 1"), v.out[-300:])
         seen.update(kids_of(v.pid))
         ok = card(v, True)
         seen.update(kids_of(v.pid))
         mark = len(v.out)
         t0 = time.time()
         v.key(b"\033", 0)
-        ok = v.wait(b"Chapters 1", start=mark, secs=STOP_S) and ok
+        ok = v.wait(b"Prompts 1", start=mark, secs=STOP_S) and ok
         check("silent: Esc from a pending card within %.1f s (%.2f s)" % (
             STOP_S, time.time() - t0), ok, v.out[mark:][-300:])
         ok = card(v)
@@ -1100,8 +1168,11 @@ def test_stop():
               v.out[mark:][-300:])
         seen.update(kids_of(v.pid))
         k = kids_of(v.pid)
-        check("silent: only the follow and the new card's child run, no "
-              "zombie", len(k) == 2 and "Z" not in "".join(k.values()), k)
+        # #294: Refs' screen read is a third, pending on the silent host
+        # since the Tab to Refs (one at a time; the view's end stops it)
+        check("silent: only the follow, the new card's child and Refs' "
+              "screen read run, no zombie",
+              len(k) == 3 and "Z" not in "".join(k.values()), k)
         rc, dt = esc_q(v)
         check("silent: Esc then q (card and follow pending) exits within "
               "%.1f s (%.2f s)" % (STOP_S, dt), rc is not None and dt < STOP_S,
@@ -1145,7 +1216,7 @@ def test_picker(port):
         v.key(b"x", 1.0)
         check("picker: x on the remote row opens its view",
               v.wait(b"X-ray  srv:xv-sh", start=mark) and
-              v.wait(b"Chapters", start=mark), v.out[mark:][-600:])
+              v.wait(b"Commands", start=mark), v.out[mark:][-600:])
         mark = len(v.out)
         v.key(b"q", 1.0)
         check("picker: q in the view returns to the picker",
@@ -1172,7 +1243,7 @@ def test_picker(port):
         v.key(b"x", 1.0)
         check("picker: x on the remote History row opens its record's view",
               v.wait(b"X-ray  srv:xv-cl", start=mark) and
-              v.wait(b"Chapters 2", start=mark), v.out[mark:][-600:])
+              v.wait(b"Prompts 2", start=mark), v.out[mark:][-600:])
         v.key(b"q", 1.0)
         v.key(b"\033")
         check("picker: Esc quits it", v.exit() is not None, v.out[-80:])
@@ -1244,7 +1315,7 @@ def test_same_name():
     try:
         v = Pty([DCH, "--xray", "srv:xv-sh"], env=lenv)
         try:
-            ok = v.wait(b"Chapters")
+            ok = v.wait(b"Commands")
             r = dch(dict(lenv, DCH_NO_REMOTE="1"), "--spawn", "srv:xv-sh",
                     "--size", "80x24", "sh", "-c",
                     "while :; do echo LOCAL-MARK; sleep 1; done")
@@ -1360,17 +1431,15 @@ def chord_case(what, keys, env=None, tail=("-a", "srv:xv-rx")):
         for k in keys:
             a.key(k, 0.05)
         ok = a.wait(b"X-ray  srv:xv-rx", start=mark) and \
-            a.wait(b"On screen", start=mark)
+            a.wait(b"[Refs", start=mark)
         check("remote chord, %s: the view of srv:xv-rx opens over the attach"
               % what, ok, a.out[mark:][-600:])
         check("remote chord, %s: the client is still running" % what,
               a.reap() is None)
-        # its answer: a number on the tab, or dch-lite's line (#249)
-        read = until(lambda: a.pump(0.1) or re.search(
-            rb"On screen \d|keeps no mirror", a.out[mark:]), 15)
-        check("remote chord, %s: On screen read over its own ctl --read"
-              % what, until(lambda: ctls("--read") > r0, 5),
-              (ctls("--read") - r0, bool(read), refused()))
+        check("remote chord, %s: Refs (#294) reads the screen over its own "
+              "ctl --read" % what,
+              until(lambda: a.pump(0.1) or ctls("--read") > r0, 15),
+              (ctls("--read") - r0, refused()))
         # two checks (#233, #249): MARK189 goes dch --send -> master -> pty,
         # not through the attach, so its absence is a stalled session, not
         # the chord; a leak is any other byte. The details print even empty
@@ -1536,14 +1605,15 @@ def chord_end(nm, how):
         a.wait(b"READY")
         a.pump(0.5)
         mark = len(a.out)
+        r0 = ctls("--read")
         a.key(b"\x1cx", 0.05)
         # its screen read before the end (dch-lite: read, no mirror): a
-        # view slower than that (ASan) says "no such session" itself
+        # view slower than that (ASan) says "no such session" itself.
+        # Refs draws no screen (#294): the host's ctl --read says it read
         a.wait(("X-ray  srv:" + nm).encode(), start=mark)
         check("%s: the view opens and reads the screen" % what,
-              until(lambda: a.pump(0.1) or re.search(
-                  rb" READY\033\[K|No screen: ", a.out[mark:])),
-              a.out[mark:][-300:])
+              until(lambda: a.pump(0.1) or ctls("--read") > r0),
+              (ctls("--read") - r0, a.out[mark:][-300:]))
         mark = len(a.out)
         sock = "/%s.sock -- " % nm
         pids = [int(ln.split()[0]) for ln in subprocess.run(
@@ -1987,6 +2057,7 @@ def main():
         test_hostile()
         test_failures()
         test_link_drop()
+        test_turn_drop()
         test_stop()
         test_chord(port)
         test_chord_detach()

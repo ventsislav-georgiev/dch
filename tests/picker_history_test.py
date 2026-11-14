@@ -34,7 +34,7 @@ import json, os, re, shutil, subprocess, sys, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
-ROOT = tempfile.mkdtemp(prefix="dchph", dir="/tmp")
+ROOT = tempfile.mkdtemp(prefix="dchph", dir=os.environ.get("DCH_TEST_TMP", "/tmp"))
 ENV = dict(os.environ, DCH_SOCKET_DIR=os.path.join(ROOT, "s"),
            XDG_STATE_HOME=os.path.join(ROOT, "state"),
            HOME=os.path.join(ROOT, "home"),
@@ -50,8 +50,9 @@ failures = []
 
 
 def dch(*args):
+    # cwd="/": a --spawn's record keeps its cwd, and /cu, /rp match it (LOW-T11)
     return subprocess.run([DCH] + list(args), env=ENV, capture_output=True,
-                          text=True, timeout=60)
+                          text=True, timeout=60, cwd="/")
 
 
 def check(what, ok, *extra):

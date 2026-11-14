@@ -103,6 +103,12 @@ dch \- detachable terminal sessions with a headless agent API
 .br
 .B dch \-\-xray
 .I name
+.B \-\-search
+.I text
+.B \-\-json
+.br
+.B dch \-\-xray
+.I name
 .B \-\-ref
 .I ref
 .RB [ \-\-scope
@@ -182,6 +188,23 @@ Each session also keeps an in-memory terminal mirror (embedded
 libghostty\-vt), which powers the control verbs below: scripts and coding
 agents can type into, read, and wait on a session without attaching and
 without disturbing an attached human.
+.PP
+A program whose output reaches no terminal (nothing attached, as after
+.B \-\-spawn
+or
+.BR \-\-revive )
+still gets answers to two start\-up queries, from the mirror: DECRQM for
+mode 2026, synchronized output
+.RB ( "CSI ? 2026 ; 2 $ y" ),
+and XTVERSION
+.RB ( "dch <version>" ).
+A program with no
+.B TERM_PROGRAM
+to go by then turns synchronized output on, as it does under an attach.
+Every other query (cursor position, device attributes, colours, the
+keyboard protocol) is left for the terminal that attaches. While a client
+is attached its terminal answers everything, as before. dch\-lite has no
+mirror and answers nothing.
 .SH OPTIONS
 .TP
 .B \-l
@@ -302,7 +325,7 @@ the pipe: exit 0. A name or another verb with it is exit 2. See
 .TP
 .B \-\-ls\-json
 List sessions as a JSON array of
-.BR {name,alias,harness,activity_epoch,state,version,agents,meta,meta_epoch,auto_allowed,claude_session_id,transcript_path,cols,rows,clients,cwd} .
+.BR {name,alias,harness,activity_epoch,state,version,agents,meta,meta_epoch,auto_allowed,claude_session_id,transcript_path,claude_foreground,cols,rows,clients,cwd} .
 .I cwd
 is last: the directory the session started in, from its live history
 record, or
@@ -328,6 +351,19 @@ the id is not a UUID.
 is the absolute \fI<config>/projects/*/<sessionId>.jsonl\fP when exactly one
 such file exists, else
 .BR null .
+.I claude_foreground
+is
+.B true
+while that Claude is the session terminal's foreground job,
+.B false
+while it is not (suspended with Ctrl\-Z or in the background: a shell or
+another program in front reads what is typed), and left out when
+.I claude_session_id
+is
+.B null
+or the process groups cannot be read; a suspended Claude keeps its
+.IR claude_session_id .
+Read from the kernel by the client, so a master of any version gets it.
 .I auto_allowed
 is the permission prompt the master answered last with auto\-allow (see
 .BR "CONFIG FILE" ),
@@ -786,20 +822,38 @@ and kept current as
 keeps its index. It writes nothing to disk.
 Session text is drawn with every control and bidi character as
 .BR ? .
-Three tabs:
-.B Chapters
-(\fB/\fR filters, \fBEnter\fR reads the chapter, read\-only;
-a chapter the harness wrote, a task notification
+Two tabs:
+.B Prompts
+(\fBCommands\fR for a shell session, one row per command; Chapters before
+1.63.0;
+\fB/\fR filters, \fBEnter\fR reads the prompt and what followed it,
+read\-only;
+the reader's header says which prompt, \(lq3 of 12\(rq, and its title;
+a scroll key at its end or top says which prompt is next or before, and
+the same direction again opens it (the next at its top, the previous at
+its end);
+.B ]
+and
+.B [
+open the next and the previous prompt at its top; both follow the list's
+order, skipping the auto rows while
+.B n
+hides them;
+\fBq\fR, \fBEsc\fR or \fB\(<-\fR goes back to where the reader was
+opened, the list or the card; on a remote view each is one more
+.B \-\-chapter
+query, and a host that cannot answer is said while the reader stays;
+a prompt the harness wrote, a task notification
 .RB ( \(dqauto\(dq ),
 is hidden until
 .B n
 shows it, faint and titled by its summary, the footer saying how many;
 a compaction is hidden, counted and shown faint the same way
 (the footer calls both kinds \(dqauto rows\(dq);
-the tab counts the chapters shown without
+the tab counts the prompts shown without
 .BR n ;
 .B o
-here and in a chapter leaves the view and attaches to the session, as
+here and in the reader leaves the view and attaches to the session, as
 .B \-a
 does, a remote one's too; on an ended session it says so and stays),
 .B Refs
@@ -822,13 +876,16 @@ files under /tmp, /private/tmp, /var/folders and
 (not on a remote view), except the session's own project files, are hidden until
 .B t
 shows them, the footer saying how many; the tab counts every ref;
-\fB/\fR filters on the full ref, \fBEnter\fR opens its card) and
-.B On screen
-(the session's screen with a hint label,
-\fBa\fR, \fBs\fR, \fBd\fR, ..., on each ref on it, held by the index
-or not; typing a label opens its card; none for an ended
-session or on dch\-lite; its tab shows the labels' count once the screen
-is read, 0 included, and no number before or without one).
+\fB/\fR filters on the full ref, \fBEnter\fR opens its card;
+the refs on the session's screen now come first, under a faint
+\(lqon screen now\(rq line, the lowest on the screen on top, then a faint
+\(lqthe rest\(rq line and the other rows; a ref on the screen the index does
+not hold is there too, with no count; they follow
+\fBa\fR, \fBt\fR and \fB/\fR like every row, and are not repeated below;
+no group line when nothing on the screen is a ref, and none for an ended
+session or on dch\-lite; the screen is read when Refs opens and once a
+second while it shows, never drawn; up to 1.61.0 a third tab, On screen,
+drew it with a label on each ref).
 A card shows the ref's definitions, first and latest mention, counts by
 scope and mentions; it opens light (as
 .B \-\-ref
@@ -845,7 +902,7 @@ attaches to the session as in the list,
 .B y
 copies the ref (OSC 52),
 .B Enter
-on a mention in this session reads its chapter; a shell's light card shows
+on a mention in this session reads its prompt; a shell's light card shows
 titles and counts only.
 The line under the tabs names the corpus
 (\(lqShell \[u00B7] last N rows\(rq, \(lqCodex \[u00B7] mentions only\(rq,
@@ -853,11 +910,11 @@ The line under the tabs names the corpus
 \(lq2 Claude sessions run here; X\-ray reads one\(rq,
 \(lqNo Claude session found here\(rq, ...).
 Keys: \fBTab\fR, \fB\(<-\fR \fB\(->\fR
-(and \fBh\fR \fBl\fR off On screen) switch tabs;
+and \fBh\fR \fBl\fR switch tabs;
 \fBj\fR \fBk\fR, arrows, \fBPgUp\fR \fBPgDn\fR, \fBg\fR \fBG\fR move;
-\fBq\fR quits the list and goes back from a card or chapter;
-\fBEsc\fR clears a typed label or the filter, else does the same;
-\fBCtrl\-R\fR, on Chapters and Refs with a ref typed after \fB/\fR
+\fBq\fR quits the list and goes back from a card or the reader;
+\fBEsc\fR clears the filter, else does the same;
+\fBCtrl\-R\fR, on Prompts and Refs with a ref typed after \fB/\fR
 (as
 .B \-\-ref
 takes it), opens its card, while typing or after, a row for it or not, its
@@ -870,7 +927,7 @@ While attached, the detach character and then
 .B x
 within the double\-press window
 .RB ( DCH_DOUBLE_TAP_MS )
-open the view over the session, on On screen; the session keeps running
+open the view over the session, on Refs; the session keeps running
 and the attach is kept.
 Leaving the view returns to the session with its screen repainted as it is
 now, output that came in meanwhile included (dch\-lite: the program gets a
@@ -911,13 +968,13 @@ opens the view of a session on another host
 1.55.0+), as does
 .B x
 on a remote row in the picker.
-Every query runs on the host, each over its own ctl connection; On screen
+Every query runs on the host, each over its own ctl connection; Refs
 reads the host's screen with
 .BR "\-\-read " \fIname\fB " \-\-ansi" ,
 once a second while it shows (one dch and two serve log lines a second on
 the host).
 The host's text is drawn as a local session's, every control and bidi
-character, every byte of an invalid UTF\-8 sequence and a NUL as
+character as
 .BR ? .
 .B x
 opens the session of the row it is on, also next to a local session
@@ -930,9 +987,9 @@ or cannot be reached shows its line in place of the tabs;
 leaves with that exit code.
 When the link drops later, the status says
 .I "live updates stopped (reopen the view for them)"
-and keeps saying it: Chapters and Refs stay as they were until the view is
-opened again; On screen says its failed read in place of the screen and
-shows the host's screen again once the host answers.
+and keeps saying it: Prompts and Refs stay as they were until the view is
+opened again; a failed screen read takes the \(lqon screen now\(rq group
+away, unsaid, until the host answers again.
 Exit 0 when quit, 1 no such session, 2 with any other flag or when stdout
 is not a terminal; for a remote host also 4 (its gate refused us), 6 (it
 lacks
@@ -955,6 +1012,8 @@ while a shell's ring is paused for an agent, also
 the live Claude Code sessions found under it: 2 or more when several run
 there, 0 when none was found)
 and its chapters, one per prompt, oldest first, at most 5000.
+A chapter is one prompt (in a shell, one command) with what followed it,
+up to the next; the view lists them on its Prompts (Commands) tab.
 Each chapter has an opaque
 .BR anchor ,
 an
@@ -988,6 +1047,18 @@ made as a title is (at most 256 KiB of summaries held; past that the
 oldest auto chapters give theirs up); its title is unchanged, and no other
 chapter has
 either key;
+a Claude Code or Codex chapter whose turn has ended has
+.B response
+(the last assistant text after the last tool result, as Claude Code's
+Focus view shows it; at most 2048 bytes, a cut one with
+.B response_cut
+true; at most 2 MiB held, past that the oldest give theirs up) and
+.B response_offset
+(the byte offset of its line), and one with tool calls has
+.B tools
+(one line: calls per tool, most used first, six then
+.BR "+N more" ;
+an edit tool with its files and added and removed lines);
 .B other_projects
 counts the other sessions with a transcript or a live Codex rollout in
 another project directory
@@ -1095,7 +1166,7 @@ as
 .I cwd
 .B rev\-parse \-\-is\-inside\-work\-tree
 (for a commit URL with a short SHA also
-.BR "config \-z \-\-get\-regexp ^remote\e..*\e.url$" )
+.BR "config \-z \-\-get\-regexp ^(remote\e..*\e.url|url\e..*\e.insteadof)$" )
 and then
 .B show \-\-no\-color \-\-no\-ext\-diff \-\-no\-textconv \-\-stat=80
 .B \-\-stat\-count=14 \-\-format=%H%x00%an%x00%at%x00%s \-\-end\-of\-options
@@ -1133,9 +1204,9 @@ A commit URL with a full 40\-hex SHA resolves as a bare SHA.
 With a shorter SHA it resolves only when a remote URL of the repo names its
 github.com owner and repo, else it is
 .BR not_commit ;
-a remote reached only through
+the URL is the one git fetches from, after the repo's own
 .BI url. base .insteadOf
-does not match, other hosts never match, a failed or timed\-out
+rewrites (not the global config's), other hosts never match, a failed or timed\-out
 .B config
 run gives no line, and the remote URLs are never printed.
 A file is read only inside the project (the cwd's git root, else the cwd;
@@ -1319,6 +1390,73 @@ A live Codex's rollout is among the other sessions' files too, found as
 .IR name 's
 would be; its project directory is the Codex's cwd's, its last seen time
 the rollout's last write.
+.B \-\-search
+.I text
+finds where a word or phrase was said in
+.IR name 's
+own corpus and prints one object, the newest places first
+.RB ( schema ,
+.BR session ,
+.BR session_id ,
+.BR corpus ,
+.BR text ,
+.B hits
+of
+.BR chapter ,
+.BR offset ,
+.BR at ,
+.BR who ,
+.B tool
+and
+.BR snippet ,
+then
+.BR more ,
+.BR partial ,
+.B why
+and
+.BR bytes ).
+.I text
+is literal, 2 to 200 bytes of UTF\-8 with no control character and no bidi
+control (else exit 2,
+.IR "bad search: 2 to 200 bytes, no control character" );
+ASCII letters match in either case, nothing else folds.
+It counts the typed prompts, the assistant's text, a tool call's input
+values and a tool result's text (Codex: the user's and assistant's
+messages, a call's arguments and its output; a shell: the typed commands
+and the output rows), never thinking, a sidechain, a meta record,
+.BR toolUseResult ,
+a compaction summary or a key; at most one hit per record and
+.B who
+.RB ( user ,
+.BR assistant ,
+.BR tool ).
+.B chapter
+is the chapter's anchor
+.RB ( null
+where
+.B \-\-json
+has none),
+.B offset
+the record's byte offset (a shell: its ring seq),
+.B snippet
+about 160 bytes around the match on character boundaries, controls and
+runs of spaces as one space.
+A transcript or rollout is read whole from its end in 1 MiB windows, up to
+1 GiB
+.RB ( why:\(dqbytes\(dq )
+and 10 s
+.RB ( why:\(dqtime\(dq );
+the newest 50 hits are kept and a 51st sets
+.BR more:true .
+It goes with no other flag but
+.B \-\-json
+and not in
+.BR \-\-requests ;
+the text is never logged or traced.
+On
+.IB host : name
+a host whose dch predates it says
+.IR "the host's dch does not know \-\-search" .
 .B \-\-chapter
 .I anchor
 prints one chapter's entries as one object
@@ -1611,7 +1749,9 @@ counts) or a gap make
 false with
 .BR why:\(dqrange\(dq .
 The ring is read 1 MiB at a time, so a query stays under 16 MB.
-The object is capped at 4 MiB (refs go first, each counted in
+The object is capped at 4 MiB (the oldest chapters'
+.B response
+texts go first, then refs, each counted in
 .BR dropped_keys ,
 then the oldest chapters;
 .BR why:\(dqoutput\(dq ).
@@ -1744,6 +1884,9 @@ or, for
 .B \-\-clear
 in dch\-lite and for
 .BR \-\-chapter ,
+.B \-\-ref
+and
+.BR \-\-search ,
 .IR "no x\-ray corpus" ,
 or for
 .BR \-\-chapter ,
@@ -1901,7 +2044,8 @@ shows and again while it stays. A failure exits 1 with
 .BR no_screen ,
 or on a signal
 .BR interrupted ", " withdrawn ", " draft_left )
-on stderr. Other programs, masters without a mirror, dch-lite and your own
+on stderr. Other programs (also one in front of a Claude suspended with
+Ctrl\-Z), masters without a mirror, dch-lite and your own
 session (\fB$DCH_SESSION\fR) keep the plain burst.
 .TP
 .BI \-\-keys " name key..."
@@ -2260,6 +2404,8 @@ prints one object per line instead:
 .RB ( not_claude ", " self ", " prompt ", " draft ,
 .BR no_screen ", " no_session ", " not_submitted ", " not_typed ,
 .BR old_master ", " interrupted ", " withdrawn ", " draft_left ,
+.B not_foreground
+(Claude suspended or in the background: nothing typed, \fBfg\fR it first),
 or empty) and
 .IR detail .
 A first SIGINT, SIGTERM or SIGHUP, once handled, types nothing more and
@@ -2338,7 +2484,7 @@ detail),
 .IB name ": skipped \(em " why
 .RB ( self ", " respawn_pending ", " no_screen ),
 .IB name ": failed \(em " why
-.RB ( no_session ", " old_master ", " claude_unreadable ", " prompt ,
+.RB ( no_session ", " old_master ", " claude_unreadable ", " not_foreground ", " prompt ,
 .BR draft ", " queued ", " not_typed ", " not_idle ", " exit_failed ", " claude_exited ,
 .BR end_failed )
 or
@@ -2510,7 +2656,10 @@ a master that another process sent SIGTERM or SIGINT ends
 (the sender's command line made printable, cut at 120 bytes; without it
 when the sender was already gone), and counts as died.
 Never two Claudes on one conversation: a record whose Claude id a live
-Claude already runs (probed in each live session, else found in Claude's
+Claude already runs (probed in each live session, a Claude there that has
+not written its sessions record yet by the
+.B \-\-resume
+id on its command line; else found in Claude's
 sessions dir or the record's
 .IR config_dir )
 is skipped by
@@ -2942,6 +3091,7 @@ a session name that passes the attach name check and does not start with
 \-\-say \fIn\fP \-\-json \-\- \fItext\fP
 \-\-xray \fIn\fP \-\-json [\-\-follow|\-\-clear|\-\-chapter \fIanchor\fP]
 \-\-xray \fIn\fP \-\-ref \fIref\fP [\-\-scope \fIs\fP] [\-\-full] [\-\-budget\-ms \fIms\fP] \-\-json
+\-\-xray \fIn\fP \-\-search \fItext\fP \-\-json
 .fi
 .RE
 .PP
@@ -2982,6 +3132,7 @@ rules apply: no
 .RI ( "\-\-xray needs \-\-json (the view is client\-side only)" ),
 two of
 .BR \-\-ref ,
+.BR \-\-search ,
 .BR \-\-follow ,
 .B \-\-chapter
 and
@@ -3001,7 +3152,8 @@ and a value that fails
 .IR "not a ref" ,
 .IR "bad anchor" ,
 .IR "bad scope" ,
-.IR "bad budget" )
+.IR "bad budget" ,
+.IR "bad search: 2 to 200 bytes, no control character" )
 are refused.
 .B \-\-clear
 needs no
@@ -3342,12 +3494,14 @@ and the screen reading
 .BR blocked .
 Everything else is left to the human, and hook- or ask-rule-raised
 prompts ("Hook ... requires confirmation for this command", "Permission rule
-... requires confirmation for this ...", "Ask rule ... overrides auto mode for
+\&... requires confirmation for this ...", "Ask rule ... overrides auto mode for
 this ...") always are. Checked after 300 ms of quiet output and
 2 s after an answer, only when a Claude Code runs under the session's program;
 a prompt it answered is never answered again while it stays up, nor within
 30 s once gone and back (its ticking "will automatically block this request in
-M:SS" line aside). Needs the terminal mirror: unavailable in dch\-lite
+M:SS" line aside). A Claude suspended with Ctrl\-Z (or in the background) is
+never answered for: the program in front printed that prompt. Needs the
+terminal mirror: unavailable in dch\-lite
 and under
 .BR DCH_NO_VT .
 .TP

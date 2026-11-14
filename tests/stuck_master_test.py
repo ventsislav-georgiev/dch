@@ -2,19 +2,21 @@
 """A stopped master with a full listen backlog (#265). On Linux a connect to
 it waited for ever, so every verb that walks the socket dir hung; now it
 waits CTL_CONNECT_MS and the session reads as live but stuck, never as dead.
-macOS refuses that connect at once, as before.
+macOS refuses that connect at once, as it does a dead socket; a refused
+socket whose master's argv still names it reads as stuck too (#268).
 
 Checks: a real master, SIGSTOPped, its backlog filled by connects it never
 accepts. --ls-json, -ls, --history, -f --restart --all and --revive --all each
 return within a bound and still list the healthy session beside it. --read
-and --cmd of it fail at once. On Linux: the verbs name it as stuck; --spawn of its
+and --cmd of it fail at once. The verbs name it as stuck; --spawn of its
 name, --revive of it and --history --forget of it refuse and its socket and
-record stay. #269: dch -a of it fails within the bound (Linux: as stuck; macOS:
-"no session"); the picker's Enter on it stays in the picker and says why. On
-Linux dch -n of it says it is stuck and starts nothing over it; through dch
-serve, an attach to it ends with that line and a 0x12 {"code":1} and leaves
-no client behind, and a client attached before the stop that detaches gets
-"why":"detach" (sock_live: stuck is live). Self-isolating (own
+record stay. #269: dch -a of it fails within the bound as stuck; the picker's
+Enter on it stays in the picker and says why; dch -n of it says it is stuck
+and starts nothing over it. On Linux, through dch serve, an attach to it
+ends with that line and a 0x12 {"code":1} and leaves no client behind, and a
+client attached before the stop that detaches gets "why":"detach"
+(sock_live: stuck is live). Its master SIGKILLed, the same socket is dead
+and --spawn of the name starts a new one. Self-isolating (own
 XDG_RUNTIME_DIR).
 
 Run:  python3 tests/stuck_master_test.py          (uses ./dch)
@@ -29,7 +31,7 @@ LINUX = sys.platform.startswith("linux")
 BOUND = 8.0     # a verb's wall time with one stuck session; old Linux: never
 STUCK = "is not accepting connections"
 
-TMP = tempfile.mkdtemp(dir="/tmp", prefix="dchstk")
+TMP = tempfile.mkdtemp(dir=os.environ.get("DCH_TEST_TMP", "/tmp"), prefix="dchstk")
 ENV = dict(os.environ, XDG_RUNTIME_DIR=TMP, XDG_STATE_HOME=TMP + "/state",
            HOME=TMP + "/home", DCH_CONFIG=TMP + "/config",
            DCH_LOGIN_ENV="0", DCH_NO_REMOTE="1")
@@ -268,7 +270,7 @@ def main():
         expect(how == ("BlockingIOError" if LINUX
                        else "ConnectionRefusedError"),
                "backlog full after %d connects (%s)" % (len(held), how))
-        if LINUX and recs:
+        if recs:
             # long-lived and quiet for a while: --revive --all would take
             # it if it read as dead
             with open(recs[0]) as f:
@@ -289,11 +291,11 @@ def main():
         expect(r and {stk, ok} <= set(r.stdout.split()), "-ls lists both")
         r = timed("--read of it", "--read", stk)
         expect(r and r.returncode == 1 and
-               (STUCK if LINUX else "no session") in r.stderr,
+               STUCK in r.stderr,
                "--read of it fails, says why: %r" % (r and r.stderr))
         r = timed("--cmd of it", "--cmd", stk)
         expect(r and r.returncode == 1 and
-               (STUCK if LINUX else "no session") in r.stderr,
+               STUCK in r.stderr,
                "--cmd of it fails, says why: %r" % (r and r.stderr))
         r = timed("--history", "--history", "--json")
         h = {}
@@ -301,49 +303,44 @@ def main():
             h = {e["name"]: e for e in json.loads(r.stdout)} if r else {}
         except ValueError:
             pass
-        if LINUX:
-            expect(r and stk not in h, "--history: the stuck session is live, "
-                   "not an ended one: %r" % h.get(stk))
+        expect(r and stk not in h, "--history: the stuck session is live, "
+               "not an ended one: %r" % h.get(stk))
         # -f: a current master is otherwise skipped without a connect
         r = timed("-f --restart --all", "-f", "--restart", "--all")
-        if LINUX:
-            expect(r and STUCK in r.stderr and stk in r.stderr,
-                   "-f --restart --all names it: %r" % (r and r.stderr))
+        expect(r and STUCK in r.stderr and stk in r.stderr,
+               "-f --restart --all names it: %r" % (r and r.stderr))
         r = timed("--revive --all", "--revive", "--all")
-        if LINUX:
-            expect(r and stk not in r.stdout,
-                   "--revive --all leaves it: %r" % (r and r.stdout))
-            r = timed("--revive of it", "--revive", stk)
-            expect(r and r.returncode == 1 and "is live" in r.stderr,
-                   "--revive of it: refused as live: %r" % (r and r.stderr))
-            r = timed("--forget of it", "--history", "--forget", stk)
-            expect(r and r.returncode != 0 and recs and
-                   os.path.exists(recs[0]),
-                   "--history --forget of it: refused, record kept")
-            r = timed("--spawn of its name", "--spawn", stk, "sh")
-            expect(r and r.returncode == 1 and STUCK in r.stderr,
-                   "--spawn of its name: refused: %r" % (r and r.stderr))
+        expect(r and stk not in r.stdout,
+               "--revive --all leaves it: %r" % (r and r.stdout))
+        r = timed("--revive of it", "--revive", stk)
+        expect(r and r.returncode == 1 and "is live" in r.stderr,
+               "--revive of it: refused as live: %r" % (r and r.stderr))
+        r = timed("--forget of it", "--history", "--forget", stk)
+        expect(r and r.returncode != 0 and recs and
+               os.path.exists(recs[0]),
+               "--history --forget of it: refused, record kept")
+        r = timed("--spawn of its name", "--spawn", stk, "sh")
+        expect(r and r.returncode == 1 and STUCK in r.stderr,
+               "--spawn of its name: refused: %r" % (r and r.stderr))
         # #269: the attach paths
         st, out, dt = on_pty(["-a", stk])
         expect(st is not None and os.waitstatus_to_exitcode(st) == 1 and
-               (STUCK if LINUX else "no session") in out,
+               STUCK in out,
                "dch -a of it fails in %.1fs, says why: %r%s" %
                (dt, out[-200:], "" if st is not None else ": HUNG"))
         st, out, dt = on_pty(["-l"], keys=[(b"q quit", ("/" + stk).encode()),
                                            (stk.encode(), b"\r")],
-                             want=(b"not accepting connections" if LINUX
-                                   else b"no longer there"))
-        expect(st is not None and ("not accepting connections" if LINUX
-                                   else "no longer there") in out,
+                             want=b"not accepting connections")
+        expect(st is not None and "not accepting connections" in out,
                "the picker's Enter on it stays in the picker, says why "
                "(%.1fs)%s" % (dt, "" if st is not None else ": HUNG"))
+        st, out, dt = on_pty(["-n", stk])
+        expect(st is not None and os.waitstatus_to_exitcode(st) == 1 and
+               STUCK in out,
+               "dch -n of it: says it is stuck in %.1fs, starts "
+               "nothing: %r%s" % (dt, out[-200:], "" if st is not None
+                                  else ": HUNG"))
         if LINUX:
-            st, out, dt = on_pty(["-n", stk])
-            expect(st is not None and os.waitstatus_to_exitcode(st) == 1 and
-                   STUCK in out,
-                   "dch -n of it: says it is stuck in %.1fs, starts "
-                   "nothing: %r%s" % (dt, out[-200:], "" if st is not None
-                                      else ": HUNG"))
             # the serve client attached before the stop detaches: its
             # session is stuck, not gone
             k = kids(stk)
@@ -365,6 +362,14 @@ def main():
                        "serve: no client of it left behind")
         expect(os.path.exists(sock), "its socket is still there")
         expect(master_alive(mpid), "its master is still there")
+        # #268: once its master is gone the same refused socket is dead
+        os.kill(mpid, signal.SIGKILL)
+        gone = until(lambda: not master_alive(mpid))
+        mpid = 0
+        r, _ = dch("--spawn", stk, "sleep", "300")
+        expect(gone and r and r.returncode == 0 and master_pid(sock),
+               "master SIGKILLed: its stale socket is dead, --spawn of the "
+               "name starts a new one: %r" % (r and r.stderr))
     finally:
         if mpid:
             try:

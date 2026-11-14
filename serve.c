@@ -2766,6 +2766,9 @@ serve_main(int argc, char **argv)
 	unsetenv("DCH_CTL_TIMEOUT_MS");
 	unsetenv("DCH_CTL_CAP");
 	unsetenv("DCH_CTL_IDLE_MS");
+	/* X-ray's test switches: a peer's --ref keeps its budget and caps */
+	unsetenv("DCH_XRAY_NOCLOCK");
+	unsetenv("DCH_XRAY_CAPS");
 
 	/* The tailscale CLI, absolute, for execv. */
 	ts_find();

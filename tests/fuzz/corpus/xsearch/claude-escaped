@@ -1,0 +1,2 @@
+CAFé{"type": "user", "message": {"content": "caf\u00e9 escaped"}}
+{"type":"user","message":{"content":"café raw \"q\" a\\b"}}

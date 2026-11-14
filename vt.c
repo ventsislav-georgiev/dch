@@ -7,6 +7,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <time.h>
+#include <config.h>
 #include <ghostty/vt.h>
 #include "vt.h"
 #include "ring.h"
@@ -357,6 +358,48 @@ on_reset(GhosttyTerminal t, void *ud)
 	(void)t;
 	(void)ud;
 	xris = 1;
+}
+
+/* The mirror's answers to the program's DECRQM 2026 and XTVERSION queries in
+** the current feed (#273). Only those two: every other reply (CPR, colours,
+** the keyboard protocol) is the attached terminal's to give, not the
+** mirror's defaults. shortcut: a feed's answers past 256 bytes are dropped,
+** a program asks once at start-up. */
+static unsigned char qrep[256];
+static size_t qrep_len;
+
+static void
+on_write_pty(GhosttyTerminal t, void *ud, const uint8_t *data, size_t len)
+{
+	(void)t;
+	(void)ud;
+	if (((len > 8 && memcmp(data, "\033[?2026;", 8) == 0) ||
+	     (len > 4 && memcmp(data, "\033P>|", 4) == 0)) &&
+	    len <= sizeof qrep - qrep_len)
+	{
+		memcpy(qrep + qrep_len, data, len);
+		qrep_len += len;
+	}
+}
+
+/* XTVERSION names dch, as a multiplexer names itself: not a terminal whose
+** features the one attached later may lack. */
+static GhosttyString
+on_xtversion(GhosttyTerminal t, void *ud)
+{
+	static const char name[] = "dch " PACKAGE_VERSION;
+	GhosttyString s = { (const uint8_t *)name, sizeof name - 1 };
+
+	(void)t;
+	(void)ud;
+	return s;
+}
+
+size_t
+dch_vt_replies(const unsigned char **out)
+{
+	*out = qrep;
+	return qrep_len;
 }
 
 /* Emit marks queued at a row before y, or at row y up to column x. */
@@ -840,6 +883,10 @@ dch_vt_init(int cols, int rows, int scrollback)
 	    GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES,
 	    sb_lines ? NULL : &zero) != GHOSTTY_SUCCESS ||
 	    (sb_lines && set_scrollback_lines() < 0) ||
+	    ghostty_terminal_set(the_term, GHOSTTY_TERMINAL_OPT_WRITE_PTY,
+	    (const void *)on_write_pty) != GHOSTTY_SUCCESS ||
+	    ghostty_terminal_set(the_term, GHOSTTY_TERMINAL_OPT_XTVERSION,
+	    (const void *)on_xtversion) != GHOSTTY_SUCCESS ||
 	    (xr && xr->cap && (ghostty_terminal_set(the_term,
 	    GHOSTTY_TERMINAL_OPT_SEMANTIC_PROMPT,
 	    (const void *)on_prompt) != GHOSTTY_SUCCESS ||
@@ -881,6 +928,7 @@ dch_vt_free(void)
 void
 dch_vt_feed(const unsigned char *buf, size_t len)
 {
+	qrep_len = 0;
 	if (!the_term)
 		return;
 	if (!xon())

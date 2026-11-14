@@ -1392,8 +1392,14 @@ xr_chapters_free(struct xr_chapters *c)
 	size_t i;
 
 	for (i = 0; c->v && i < c->n; i++)
-		if (c->v[(c->start + i) % XR_CHAPTERS].summary != nosum)
-			free(c->v[(c->start + i) % XR_CHAPTERS].summary);
+	{
+		struct xr_chapter *x = &c->v[(c->start + i) % XR_CHAPTERS];
+
+		if (x->summary != nosum)
+			free(x->summary);
+		free(x->response);
+		free(x->tools);
+	}
 	free(c->v);
 	memset(c, 0, sizeof *c);
 }
@@ -1426,6 +1432,10 @@ ch_push(struct xr_chapters *c)
 		c->sumheld -= strlen(x->summary) + 1;	/* the dropped oldest's */
 		free(x->summary);
 	}
+	if (x->response)
+		c->resheld -= strlen(x->response) + 1;
+	free(x->response);
+	free(x->tools);
 	memset(x, 0, sizeof *x);
 	x->at = -1;
 	x->kind = "prompt";
@@ -2110,7 +2120,7 @@ rm_scan(struct remit *r, const char *text, size_t n, int mode)
 ** $[…] an operator or a blank is the word's. hx: a body sh expands ($(…)
 ** or ` under an unquoted delimiter), or a ${ or $[ left open at a newline or
 ** the end (it would hide the commands after it); hb/he: the body of the here-doc whose
-** delimiter is that word. */
+** delimiter is that word. bq: an unquoted ` is an operator too. */
 #define SW_MAX 256	/* one word more marks a command past the cap */
 struct sw
 {
@@ -2122,15 +2132,23 @@ struct sw
 	int hx;
 };
 
+static int is_assign(const char *s);
+
 /* The word just before a < (no blank between) opens a subscript at a
-** command's start: a[1<<1]=5 is arithmetic, no here-doc (LOW-X5). */
+** command's start, past assignments: a[1<<1]=5 and x=1 a[1<<1]=5 are
+** arithmetic, no here-doc (LOW-X5, X10). */
 static int
 arr_open(const struct sw *w)
 {
 	const char *p;
+	size_t k;
 
-	if (!w->n || w->op[w->n - 1] || w->re[w->n - 1] != w->rs[w->n] ||
-	    (w->n > 1 && !w->op[w->n - 2]))
+	if (!w->n || w->op[w->n - 1] || w->re[w->n - 1] != w->rs[w->n])
+		return 0;
+	for (k = w->n - 1; k && !w->op[k - 1] && is_assign(w->b + w->off[k - 1]);
+	     k--)
+		;
+	if (k && !w->op[k - 1])
 		return 0;
 	p = w->b + w->off[w->n - 1];
 	if (!A_AL((unsigned char)*p) && *p != '_')
@@ -2141,10 +2159,10 @@ arr_open(const struct sw *w)
 }
 
 static void
-shell_words(const char *c, size_t cl, struct sw *w)
+shell_words(const char *c, size_t cl, struct sw *w, int bq)
 {
 	size_t i = 0, o = 0, hd = 0, j, dl, b0, k, dk;
-	const char *d;
+	const char *d, *ops = bq ? "|;&<>()`" : "|;&<>()";
 	int bl, dash, uq, ar = 0, an, sx = 0, bd = 0, bk = 0;
 	unsigned long ps = 0;	/* open ('s, 1 for a $(: a bit each */
 
@@ -2230,18 +2248,21 @@ shell_words(const char *c, size_t cl, struct sw *w)
 		w->rs[w->n] = i;
 		w->off[w->n] = o;
 		w->hb[w->n] = w->he[w->n] = 0;
-		w->op[w->n] = strchr("|;&<>()", c[i]) != NULL && c[i];
+		w->op[w->n] = strchr(ops, c[i]) != NULL && c[i];
 		if (w->op[w->n])
 		{
 			/* (( and $((: arithmetic, where 1<<2 is no here-doc */
 			if (strchr("()", c[i]) && w->n && w->op[w->n - 1] &&
 			    w->re[w->n - 1] == i && c[i - 1] == c[i])
 				ar += c[i] == '(' ? 1 : -(ar > 0);
-			/* a # right after the ) of a $( or $(( is the word's (LOW-X4) */
+			/* a # right after the ) of a $(, $((, <( or >( is the word's
+			** (LOW-X4, X10) */
 			sx = c[i] == ')' && (ps & 1);
 			if (c[i] == ')' || c[i] == '(')
-				ps = c[i] == ')' ? ps >> 1 : ps << 1 | (i && c[i - 1] == '$' &&
-				     w->n && !w->op[w->n - 1] && w->re[w->n - 1] == i);
+				ps = c[i] == ')' ? ps >> 1 : ps << 1 | (i && w->n &&
+				     w->re[w->n - 1] == i && (w->op[w->n - 1] ?
+				     strchr("<>", c[i - 1]) && !w->b[w->off[w->n - 1] + 1] :
+				     c[i - 1] == '$'));
 			w->b[o++] = c[i++];
 			if (i < cl && c[i] == c[i - 1] && strchr("&|<>", c[i]) &&
 			    (c[i] != '<' || (!ar && !arr_open(w))))
@@ -2262,7 +2283,7 @@ shell_words(const char *c, size_t cl, struct sw *w)
 		else
 			for (bd = bk = 0; i < cl && c[i] != '\n' && (bd || bk ||
 			     (c[i] != ' ' && c[i] != '\t' && c[i] != '\r' &&
-			      !strchr("|;&<>()", c[i])));)
+			      !strchr(ops, c[i])));)
 			{
 				char q = c[i];
 
@@ -2428,13 +2449,17 @@ cmd_head(const struct sw *w, size_t k, size_t e, int *line, const char **cd)
 			}
 			/* -u root, -iu root (not -uroot); --user root (not --user=) */
 			a = o[1] == '-' ? NULL : o + 1 + strcspn(o + 1, wraps[j].argopt);
-			/* env -C d, -Cd, --chdir d, --chdir=d; sudo -D d alike */
+			/* env -C d, -Cd, --chdir d, --chdir=d; sudo -D d alike; sudo
+			** -i, --login: in the target's home (LOW-X9) */
 			dl = !strcmp(wraps[j].w, "env") ? 'C' :
 			     !strcmp(wraps[j].w, "sudo") ? 'D' : 0;
 			v = !dl ? NULL : a && *a == dl ?
 			    (a[1] ? a + 1 : k + 1 < e ? SWD(w, k + 1) : NULL) :
 			    !strcmp(o, "--chdir") && k + 1 < e ? SWD(w, k + 1) :
-			    !strncmp(o, "--chdir=", 8) ? o + 8 : NULL;
+			    !strncmp(o, "--chdir=", 8) ? o + 8 :
+			    dl == 'D' && (!strcmp(o, "--login") ||
+			                  (a && memchr(o + 1, 'i', (size_t)(a - o - 1)))) ?
+			    "~" : NULL;
 			if (v)
 				*cd = *cd && v[0] != '/' ? "" : v;
 			if ((a && *a && !a[1]) ||
@@ -2555,10 +2580,10 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 	struct sw w;
 	char cdb[XR_KEY_MAX + 1], edb[XR_KEY_MAX + 1], q;
 	size_t s, e, h, k, sub, i, j, t, end;
-	int r = X_NONE, sr = X_NONE, x, skip, line, rd, xa, slost = -1;
+	int r = X_NONE, sr = X_NONE, x, skip, line, rd, xa, xw, slost = -1;
 	const char *c0, *a, *dir, *scur = NULL;
 
-	shell_words(cmd, cl, &w);
+	shell_words(cmd, cl, &w, 0);
 	if (!w.b || w.n > SW_MAX)
 	{
 		free(w.b);
@@ -2593,7 +2618,10 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 			else if ((!q || q == '"') && (cmd[i] == '`' ||
 			         ((cmd[i] == '$' || (!q && (cmd[i] == '<' ||
 			                                    cmd[i] == '>'))) &&
-			          i + 1 < end && cmd[i + 1] == '(')))
+			          i + 1 < end && cmd[i + 1] == '(') ||
+			         /* bash 5.3's ${ cmd; } and ${| cmd; } (LOW-X10) */
+			         (cmd[i] == '$' && i + 2 < end && cmd[i + 1] == '{' &&
+			          cmd[i + 2] && strchr(" \t\n|", cmd[i + 2]))))
 			{
 				t = i + 1 + (cmd[i] != '`');
 				for (j = t; cmd[i] == '`' && j < end && cmd[j] != '`';
@@ -2612,10 +2640,37 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 			                !strcmp(SWD(&w, k), "<>")) && !w.op[k + 1] &&
 			    arg_outside(SWD(&w, k + 1), cur, lost, cwd))
 				rd = 1;
-		if ((h = cmd_head(&w, s, e, &line, &dir)) >= e ||
-		    in_list(SWD(&w, h), closers))
+		h = cmd_head(&w, s, e, &line, &dir);
+		/* xargs -a f, -0a f, --arg-file[=]f: f's text is its command's
+		** arguments, a printed file, read after an env -C (LOW-X8) */
+		for (k = s, xw = 0; k < h && !r; k++)
+		{
+			a = base(SWD(&w, k));
+			if (!strcmp(a + (a[0] == 'g'), "xargs"))
+				xw = 1;
+			else if (xw && (a = SWD(&w, k))[0] == '-')
+			{
+				const char *p = a[1] == '-' ? "" :
+				                a + 1 + strcspn(a + 1, "IJLnPsEdaR");
+
+				a = *p == 'a' ?
+				    (p[1] ? p + 1 : k + 1 < h ? SWD(&w, k + 1) : "") :
+				    !strcmp(a, "--arg-file") && k + 1 < h ? SWD(&w, k + 1) :
+				    !strncmp(a, "--arg-file=", 11) ? a + 11 : NULL;
+				if (a && arg_outside(a, cur, lost | !!dir, cwd))
+					r = X_QUOTE;
+			}
+		}
+		if (r)
+			continue;
+		if (h >= e || in_list(SWD(&w, h), closers))
 		{
 			r = rd ? X_QUOTE : r;
+			continue;
+		}
+		if (depth && strpbrk(SWD(&w, h), "$`"))
+		{
+			r = X_LIST;	/* sh -c "$x", eval "$l": unseen (LOW-X8) */
 			continue;
 		}
 		if (dir)
@@ -2659,7 +2714,8 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 			cur = lost ? NULL : cdb;
 			continue;
 		}
-		if (in_list(c0, shells))
+		if (in_list(c0, shells) || !strcmp(c0, "source") ||
+		    !strcmp(c0, "."))
 		{
 			/* sh -c 'cmd' (or -lc, -ec): its command, classified alike */
 			for (k = h + 1, x = -1; k + 1 < e && !w.op[k]; k++)
@@ -2696,12 +2752,39 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 					x = depth >= 3 ? X_LIST :
 					    excl_in(SWD(&w, k + 2), strlen(SWD(&w, k + 2)), cwd,
 					            cur, lost | xa, depth + 1);
-			if (x < 0 && s && ((SWD(&w, s - 1)[0] == '|' &&
-			                    SWD(&w, s - 1)[1] != '|') ||
-			                   (s > 1 && !strcmp(SWD(&w, s - 1), "&") &&
-			                    !strcmp(SWD(&w, s - 2), "|") &&
-			                    w.re[s - 2] == w.rs[s - 1])))
-				x = X_LIST;	/* … | sh, … |& sh */
+			if (x < 0)
+			{
+				/* its script: past options (-o, -O, --rcfile take a value;
+				** - and -- end them; -s: stdin's, the words are its args) */
+				for (k = h + 1, t = 0; k < e && !w.op[k] && SWD(&w, k)[0] &&
+				     strchr("-+", SWD(&w, k)[0]); k++)
+				{
+					a = SWD(&w, k);
+					if (!a[1] || !strcmp(a, "--"))
+					{
+						k++;
+						break;
+					}
+					t |= a[0] == '-' && a[1] != '-' && strchr(a, 's');
+					k += (a[1] != '-' && strpbrk(a, "oO")) ||
+					     !strcmp(a, "--rcfile") || !strcmp(a, "--init-file");
+				}
+				a = k < e && !w.op[k] ? SWD(&w, k) : NULL;
+				for (k = s; k < e && !(w.op[k] && strchr(SWD(&w, k), '<'));
+				     k++)
+					;
+				for (j = 0; j < s && !(w.op[j] && !strcmp(SWD(&w, j), "|"));
+				     j++)
+					;
+				/* unseen (LOW-X8): sh < f, bash <(…), source /dev/stdin,
+				** … | sh, … |& sh, … | (sh), a bare sh inside sh -c */
+				if (k < e || (a && (!strncmp(a, "/dev/", 5) ||
+				                    !strncmp(a, "/proc/", 6))) ||
+				    (in_list(c0, shells) && (j < s || (depth && (!a || t)))))
+					x = X_LIST;
+			}
+			if (xa)
+				x = X_LIST;	/* xargs -I{} sh -c '{}': the script its input */
 			if (x > 0 && (x & X_SUB))
 				sr = sr ? sr : x & ~X_SUB;
 			else if (x >= 0)
@@ -3317,6 +3400,24 @@ gh_repo(const struct sw *w, size_t k)
 	return k;
 }
 
+/* The raw word c[i..e) holds a $ or ` sh expands (not in '…', not $'…',
+** $"…" or a lone $). */
+static int
+sh_expands(const char *c, size_t i, size_t e)
+{
+	char q = 0;
+
+	for (; i < e; i++)
+		if (c[i] == '\\' && q != '\'')
+			i++;
+		else if ((c[i] == '\'' && q != '"') || (c[i] == '"' && q != '\''))
+			q = q ? 0 : c[i];
+		else if (q != '\'' && (c[i] == '`' || (c[i] == '$' && i + 1 < e &&
+		         !strchr("'\" \t", c[i + 1]))))
+			return 1;
+	return 0;
+}
+
 /* D3: --title on a bash command that did not fail. A create command (gh pr
 ** create|new, gh issue create|new, gh's repo flag allowed after gh or the
 ** kind) takes its ref from its output only (R1): what it creates has no
@@ -3338,7 +3439,7 @@ d3(const struct dsrc *s, struct dset *ds)
 	char title[XR_TITLE_MAX * 4 + 1] = "";	/* whole: copied by size */
 	char ot[XR_TITLE_MAX * 4 + 1] = "";
 
-	shell_words(s->cmd, s->cl, &w);
+	shell_words(s->cmd, s->cl, &w, 1);
 	if (!w.b)
 		return;
 	memset(&m, 0, sizeof m);
@@ -3346,7 +3447,7 @@ d3(const struct dsrc *s, struct dset *ds)
 	m.cmd = s->cmd;
 	m.ds = ds;
 	m.n0 = ds->n;
-	/* every simple command: split on ; & && | || ( ) and newlines */
+	/* every simple command: split on ; & && | || ( ) ` and newlines */
 	for (c = 0; c < w.n; c = e + 1)
 	{
 		for (e = c; e < w.n && !(w.op[e] && !strpbrk(SWD(&w, e), "<>"));
@@ -3357,9 +3458,14 @@ d3(const struct dsrc *s, struct dset *ds)
 				continue;
 			else if (!strcmp(SWD(&w, k), "--title") && k + 1 < e &&
 			         !w.op[k + 1])
-				val = SWD(&w, k + 1);
+				val = SWD(&w, (j = k + 1));
 			else if (!strncmp(SWD(&w, k), "--title=", 8))
-				val = SWD(&w, k) + 8;
+				val = SWD(&w, (j = k)) + 8;
+		if (val && sh_expands(s->cmd, w.rs[j], w.re[j]))
+		{
+			no += 2;	/* --title "$T", "`x`": none, nor the output's */
+			continue;
+		}
 		if (!val || (title_of(val, strlen(val), title), !title[0]))
 			continue;
 		for (cr = 0, k = c; k + 2 < e && !cr; k++)
@@ -4206,7 +4312,8 @@ xr_scan_tick(void *ctx, uint64_t bytes)
 		x->stop = 1;
 		x->why = "budget";
 	}
-	else if (!x->stop && x->full && now - x->t0 - x->blocked >= xr_lim.ms)
+	else if (!x->stop && (x->full || xr_noclock) &&
+	         now - x->t0 - x->blocked >= xr_lim.ms)
 	{
 		x->stop = 1;
 		x->why = "time";
@@ -4409,6 +4516,30 @@ struct pend
 	long long ord;		/* the chapter its block is in; -1: a thread's */
 	int quiet;		/* Grep/Glob with a pattern: the search card
 				** shows no error (TranscriptVerbosity.isError) */
+	int tn;			/* #296: an edit's tool in its turn's tally, else
+				** -1; its input's diffstat and file */
+	unsigned long long add, del;
+	uint64_t fh;
+};
+
+/* #296: the open turn's tools, as Focus view's one line: calls per name,
+** and an edit tool's distinct files and lines added and removed */
+#define XR_TNAMES      64		/* names a turn counts */
+#define XR_TFILES      256		/* edited files a turn counts */
+#define XR_TNAME       40		/* a name's bytes in the line */
+struct tname
+{
+	char name[XR_TNAME + 1];
+	unsigned long calls, files;
+	unsigned long long add, del;
+	int edit;
+};
+struct tally
+{
+	long long ord;		/* its chapter */
+	int n, nf, dirty;
+	struct tname v[XR_TNAMES];
+	struct { uint64_t h; int tn; } f[XR_TFILES];
 };
 
 struct xr_claude
@@ -4442,6 +4573,7 @@ struct xr_claude
 				** the line it did not finish (#136) */
 	struct xr_entries *want;	/* --chapter (#156), else NULL */
 	int codex;		/* a Codex rollout (7.4) */
+	struct tally *tl;	/* #296: the open turn's tools, else NULL */
 };
 
 enum { B_PROMPT, B_IMAGE, B_STEP };
@@ -4469,6 +4601,7 @@ xr_claude_free(struct xr_claude *d)
 	for (k = 0; k < d->ncalls; k++)
 		free(d->calls[k].cmd);
 	free(d->calls);
+	free(d->tl);
 	xr_chapters_free(&d->ch);
 	free(d);
 }
@@ -4652,6 +4785,7 @@ tool_use(struct xr_claude *d, const char *agent, const char *id, int quiet)
 	}
 	d->pend[k].ord = agent ? -1 : (long long)d->ch.total - 1;
 	d->pend[k].quiet = quiet;
+	d->pend[k].tn = -1;
 	if (!(d->order[d->norder] = strdup(d->pend[k].id)))
 		return;
 	d->norder++;
@@ -4733,6 +4867,279 @@ texts(const struct json_parser *p, int arr, size_t *n)
 	}
 	*n = k;
 	return o;
+}
+
+/* ---- Claude and Codex: Focus view's response and tool line (#296) ----------- */
+
+static const char *const A_TUR[] = { "toolUseResult", 0 };
+static const char *const A_SPATCH[] = { "structuredPatch", 0 };
+static const char *const A_LINES[] = { "lines", 0 };
+static const char *const A_FPATH[] = { "file_path", 0 };
+static const char *const A_OLD[] = { "old_string", 0 };
+static const char *const A_NEW[] = { "new_string", 0 };
+static const char *const A_EDITS[] = { "edits", 0 };
+
+/* The open turn's response goes: a tool ran after it, or the turn is still
+** running. */
+static void
+resp_clear(struct xr_claude *d)
+{
+	struct xr_chapter *x = cur(d);
+
+	if (!x)
+		return;
+	if (x->response)
+		d->ch.resheld -= strlen(x->response) + 1;
+	free(x->response);
+	x->response = NULL;
+	x->responded = x->response_cut = 0;
+}
+
+/* The main thread's text s[0..n), trimmed, is the open turn's response
+** until a tool runs; past XR_RESPONSES held the oldest give theirs up. */
+static void
+resp_set(struct xr_claude *d, const char *s, size_t n)
+{
+	struct xr_chapter *x = cur(d), *o;
+	char *r;
+	int cut;
+
+	/* ASCII space only: trim() walks the whole text (its cost) */
+	for (; n && (s[n - 1] == ' ' || (s[n - 1] >= '\t' && s[n - 1] <= '\r'));
+	     n--)
+		;
+	for (; n && (*s == ' ' || (*s >= '\t' && *s <= '\r')); s++, n--)
+		;
+	if (!x || !n)
+		return;
+	if ((cut = n > XR_RESPONSE))
+		for (n = XR_RESPONSE; n && ((unsigned char)s[n] & 0xc0) == 0x80;
+		     n--)
+			;
+	if (x->response)
+		d->ch.resheld -= strlen(x->response) + 1;
+	if (!(r = realloc(x->response, n + 1)))
+	{
+		free(x->response);	/* its bytes are off resheld */
+		x->response = NULL;
+		x->responded = 0;
+		return;
+	}
+	x->response = NULL;
+	memcpy(r, s, n);
+	r[n] = '\0';
+	while (d->ch.resheld + n + 1 > XR_RESPONSES &&
+	       d->ch.resord + 1 < d->ch.total)
+		if ((o = ch_ord(&d->ch, d->ch.resord++)) && o->response)
+		{
+			d->ch.resheld -= strlen(o->response) + 1;
+			free(o->response);
+			o->response = NULL;
+		}
+	x->response = r;
+	x->response_offset = d->off;
+	x->responded = 1;
+	x->response_cut = cut;
+	d->ch.resheld += n + 1;
+}
+
+/* The tally as the chapter's line: calls per name, most first (ties: the
+** first used), at most 6 then "+N more"; an edit tool's files and lines. */
+static void
+tl_flush(struct xr_claude *d)
+{
+	struct tally *t = d->tl;
+	struct xr_chapter *x;
+	char b[6 * (XR_TNAME + 64) + 32];
+	unsigned char used[XR_TNAMES] = {0};
+	size_t l = 0;
+	int k, j, m;
+
+	if (!t || !t->dirty || !(x = ch_ord(&d->ch, (uint64_t)t->ord)))
+		return;
+	t->dirty = 0;
+	b[0] = '\0';
+	for (k = 0; k < t->n && k < 6; k++)
+	{
+		const struct tname *v;
+
+		for (m = -1, j = 0; j < t->n; j++)
+			if (!used[j] && (m < 0 || t->v[j].calls > t->v[m].calls))
+				m = j;
+		used[m] = 1;
+		v = &t->v[m];
+		l += (size_t)snprintf(b + l, sizeof b - l, "%s%s %lu", k ? ", " : "",
+		                      v->name, v->calls);
+		if (v->files)
+			l += (size_t)snprintf(b + l, sizeof b - l,
+			                      " (%lu file%s, +%llu -%llu)", v->files,
+			                      v->files == 1 ? "" : "s", v->add, v->del);
+	}
+	if (t->n > 6)
+		snprintf(b + l, sizeof b - l, ", +%d more", t->n - 6);
+	free(x->tools);
+	x->tools = b[0] ? strdup(b) : NULL;
+}
+
+/* The open turn's tally, a new one for a new turn (the last one's line
+** written first); NULL with no turn or no memory. */
+static struct tally *
+tl_get(struct xr_claude *d)
+{
+	long long ord = (long long)d->ch.total - 1;
+
+	if (!d->turn)
+		return NULL;
+	if (d->tl && d->tl->ord == ord)
+		return d->tl;
+	tl_flush(d);
+	if (!d->tl && !(d->tl = malloc(sizeof *d->tl)))
+		return NULL;
+	d->tl->ord = ord;
+	d->tl->n = d->tl->nf = d->tl->dirty = 0;
+	return d->tl;
+}
+
+/* A call of `name` counted: its index, -1 past XR_TNAMES names (shortcut:
+** a turn's 65th name and on go uncounted; real turns use a dozen). */
+static int
+tl_name(struct tally *t, const char *name)
+{
+	size_t l = strlen(name);
+	int k;
+
+	if (l > XR_TNAME)
+		for (l = XR_TNAME; l && ((unsigned char)name[l] & 0xc0) == 0x80; l--)
+			;
+	for (k = 0; k < t->n; k++)
+		if (!strncmp(t->v[k].name, name, l) && !t->v[k].name[l])
+			break;
+	if (k == XR_TNAMES)
+		return -1;
+	if (k == t->n)
+	{
+		memset(&t->v[k], 0, sizeof t->v[k]);
+		memcpy(t->v[k].name, name, l);
+		t->n++;
+	}
+	t->v[k].calls++;
+	t->dirty = 1;
+	return k;
+}
+
+/* File hash h edited by name tn: counted once (past XR_TFILES, no more). */
+static void
+tl_file(struct tally *t, int tn, uint64_t h)
+{
+	int k;
+
+	for (k = 0; k < t->nf; k++)
+		if (t->f[k].tn == tn && t->f[k].h == h)
+			return;
+	if (t->nf == XR_TFILES)
+		return;
+	t->f[t->nf].tn = tn;
+	t->f[t->nf++].h = h;
+	t->v[tn].files++;
+}
+
+/* String token t's lines, undecoded: its \n escapes, and one more for an
+** open last line (shortcut: a \u000a escape is no newline here). */
+static unsigned long long
+nlines(const struct json_parser *p, int t)
+{
+	unsigned long long k = 0;
+	int i, nl = 0;
+
+	if (t < 0 || p->tok[t].kind != JSON_STRING ||
+	    p->tok[t].end == p->tok[t].start)
+		return 0;
+	/* an escape's second byte is inside the token: a string never ends
+	** in a lone backslash */
+	for (i = p->tok[t].start; i < p->tok[t].end; i++)
+		k += nl = p->text[i] == '\\' && p->text[++i] == 'n';
+	return k + !nl;
+}
+
+/* An edit input's lines: old_string removed, new_string or content added. */
+static void
+ed_lines(const struct json_parser *p, int in, unsigned long long *add,
+         unsigned long long *del)
+{
+	*del += nlines(p, j_get(p, in, A_OLD));
+	*add += nlines(p, j_get(p, in, A_NEW)) +
+	        nlines(p, j_get(p, in, A_CONTENT));
+}
+
+/* A main-thread tool_use: counted; an edit's diffstat and file wait on its
+** result, held on its open call. */
+static void
+tl_call(struct xr_claude *d, const struct json_parser *p, int in,
+        const char *id, const char *name)
+{
+	char kb[XR_ID_MAX + 1], *f;
+	struct tally *t;
+	struct pend *e;
+	size_t n;
+	int tn, k, a, i;
+
+	resp_clear(d);
+	if (!name || !(t = tl_get(d)) || (tn = tl_name(t, name)) < 0)
+		return;
+	if ((strcmp(name, "Edit") && strcmp(name, "MultiEdit") &&
+	     strcmp(name, "Write")) || !id ||
+	    (k = pend_find(d, id_key(id, kb))) < 0 ||
+	    !(f = k_str(p, in, A_FPATH, &n)))
+		return;
+	e = &d->pend[k];
+	e->tn = tn;
+	e->fh = fnv(f, n);
+	free(f);
+	e->add = e->del = 0;
+	ed_lines(p, in, &e->add, &e->del);
+	if ((a = j_get(p, in, A_EDITS)) >= 0 && p->tok[a].kind == JSON_ARRAY)
+		for (i = a + 1; i < p->tok[a].next; i = p->tok[i].next)
+			if (p->tok[i].kind == JSON_OBJECT)
+				ed_lines(p, i, &e->add, &e->del);
+}
+
+/* A main-thread tool_result: an edit that did not fail counts its file and
+** its lines, from the record's toolUseResult.structuredPatch when it has a
+** hunk (its + and - lines), else from the call's input. */
+static void
+tl_result(struct xr_claude *d, const struct json_parser *p, const char *id,
+          int err)
+{
+	char kb[XR_ID_MAX + 1];
+	struct tally *t = d->tl;
+	struct pend *e;
+	unsigned long long add, del;
+	int k, a, h, ls, l;
+
+	resp_clear(d);
+	if (!id || (k = pend_find(d, id_key(id, kb))) < 0 ||
+	    (e = &d->pend[k])->tn < 0 || err || !t || t->ord != e->ord)
+		return;
+	add = e->add;
+	del = e->del;
+	if ((a = j_get(p, k_obj(p, 0, A_TUR), A_SPATCH)) >= 0 &&
+	    p->tok[a].kind == JSON_ARRAY && p->tok[a].next > a + 1)
+		for (add = del = 0, h = a + 1; h < p->tok[a].next;
+		     h = p->tok[h].next)
+			if ((ls = j_get(p, h, A_LINES)) >= 0 &&
+			    p->tok[ls].kind == JSON_ARRAY)
+				for (l = ls + 1; l < p->tok[ls].next; l = p->tok[l].next)
+					if (p->tok[l].kind == JSON_STRING &&
+					    p->tok[l].end > p->tok[l].start)
+					{
+						add += p->text[p->tok[l].start] == '+';
+						del += p->text[p->tok[l].start] == '-';
+					}
+	t->v[e->tn].add += add;
+	t->v[e->tn].del += del;
+	tl_file(t, e->tn, e->fh);
+	t->dirty = 1;
+	e->tn = -1;
 }
 
 /* ---- Claude: refs (v2.1 3.1, 3.6; spec 7.2) -------------------------------- */
@@ -5567,6 +5974,8 @@ user_parts(struct xr_claude *d, const struct json_parser *p, int c,
 			long long ord = d->want ? ent_paired(d, id, &quiet) : -2;
 
 			refs_pair(d, id, &rr);
+			if (!ag)
+				tl_result(d, p, id, k_bool(p, i, A_ERR));
 			tool_result(d, ag, id, k_bool(p, i, A_ERR));
 			if (d->rk.hit)
 				refs_result(d, p, i, k_bool(p, i, A_ERR), &rr);
@@ -5634,6 +6043,8 @@ entry_assistant(struct xr_claude *d, const struct json_parser *p,
 		if ((s = j_str(p, c, &n)) && !blank(s, n))
 		{
 			block(d, ag, B_STEP, NULL, NULL);
+			if (!ag)
+				resp_set(d, s, n);
 			refs_text(d, s, n, XR_TEXT_CAP, XR_MD);
 			if (ent_here(d, ag))
 				ent_put(d->want, "assistant", NULL, s, n, XR_TEXT_CAP, 0);
@@ -5659,6 +6070,8 @@ entry_assistant(struct xr_claude *d, const struct json_parser *p,
 			if ((s = k_str(p, i, A_TEXT, &n)) && !blank(s, n))
 			{
 				block(d, ag, B_STEP, NULL, NULL);
+				if (!ag)
+					resp_set(d, s, n);
 				refs_text(d, s, n, XR_TEXT_CAP, XR_MD);
 				if (ent_here(d, ag))
 					ent_put(d->want, "assistant", NULL, s, n, XR_TEXT_CAP,
@@ -5687,6 +6100,8 @@ entry_assistant(struct xr_claude *d, const struct json_parser *p,
 			    p->tok[pat].end > p->tok[pat].start)
 				quiet = 1;
 			tool_use(d, ag, id, quiet);
+			if (!ag)
+				tl_call(d, p, in, id, name);
 			if (d->rk.hit)
 				refs_call(d, p, i);
 			if (ent_here(d, ag))
@@ -5898,6 +6313,81 @@ cx_ent(struct xr_claude *d, const struct json_parser *p, int pl,
 	free(id);
 }
 
+/* A Codex call (7.4): counted by its name (a nameless one by its type), as
+** apply_patch when it carries a patch body (a custom tool's input, or any
+** string of a function call's arguments), with the patch's files and its
+** hunks' + and - lines. A rollout has no error flag: counted as called. */
+static void
+cx_tool(struct xr_claude *d, const struct json_parser *p, int pl,
+        const char *t)
+{
+	static const char bp[] = "*** Begin Patch";
+	char *name = k_str(p, pl, A_NAME, NULL), *s = NULL, nb[XR_TNAME + 1];
+	const char *nm = name, *b;
+	struct json_parser q;
+	struct tally *tt;
+	size_t n = 0, i, e, tl = strlen(t);
+	int tn, k, in = 0;
+
+	if (!strcmp(t, "custom_tool_call"))
+		s = k_str(p, pl, A_INPUT, &n);
+	else if (!strcmp(t, "function_call") && (s = k_str(p, pl, A_ARGS, &n)) &&
+	         find(s, n, bp, 0))
+	{
+		/* the body as a JSON string anywhere in the arguments */
+		char *a = s;
+
+		s = NULL;
+		memset(&q, 0, sizeof q);
+		if (tokens_max(a, n) <= XR_LINE_TOKENS && dch_json_parse(&q, a) >= 0)
+			for (k = 0; k < q.ntok && !s; k++)
+				if (q.tok[k].kind == JSON_STRING &&
+				    find(a + q.tok[k].start,
+				         (size_t)(q.tok[k].end - q.tok[k].start), bp, 0))
+					s = j_str(&q, k, &n);
+		dch_json_free(&q);
+		free(a);
+	}
+	e = n;
+	if (s && ((b = trim(s, &e)), e < sizeof bp - 1 ||
+	          memcmp(b, bp, sizeof bp - 1)))
+	{
+		free(s);
+		s = NULL;
+	}
+	if (s)
+		nm = "apply_patch";
+	else if (!nm)
+	{
+		/* local_shell_call as local_shell */
+		e = tl > 5 && !strcmp(t + tl - 5, "_call") ? tl - 5 : tl;
+		snprintf(nb, sizeof nb, "%.*s", (int)e, t);
+		nm = nb;
+	}
+	if ((tt = tl_get(d)) && (tn = tl_name(tt, nm)) >= 0 && s)
+		for (i = 0; i < n; i = e + 1)
+		{
+			size_t h = !strncmp(s + i, "*** Add File: ", 14) ? 14
+			           : !strncmp(s + i, "*** Update File: ", 17) ||
+			             !strncmp(s + i, "*** Delete File: ", 17) ? 17 : 0;
+
+			for (e = i; e < n && s[e] != '\n'; e++)
+				;
+			if (h && i + h <= e)
+			{
+				tl_file(tt, tn, fnv(s + i + h, e - i - h -
+				                    (e > i + h && s[e - 1] == '\r')));
+				in = 1;
+			}
+			else if (in && s[i] == '+')
+				tt->v[tn].add++;
+			else if (in && s[i] == '-')
+				tt->v[tn].del++;
+		}
+	free(s);
+	free(name);
+}
+
 /* One response_item: a user or assistant message, else a step whose tool
 ** fields are scanned under the Claude tool-field rules (code context; a
 ** command-like input 6000 scalars, an output 3000, a card's fields 240). */
@@ -5923,6 +6413,7 @@ cx_item(struct xr_claude *d, const struct json_parser *p, int pl)
 				if (s && !blank(s, n))
 				{
 					main_block(d, B_STEP, NULL, NULL);
+					resp_set(d, s, n);
 					refs_text(d, s, n, XR_TEXT_CAP, XR_MD);
 					if (ent_here(d, NULL))
 						ent_put(d->want, "assistant", NULL, s, n,
@@ -5936,6 +6427,10 @@ cx_item(struct xr_claude *d, const struct json_parser *p, int pl)
 		return;
 	}
 	main_block(d, B_STEP, NULL, NULL);
+	if (t && strstr(t, "_call"))	/* a call or its output (#296) */
+		resp_clear(d);
+	if (t && strstr(t, "_call") && !strstr(t, "_output"))
+		cx_tool(d, p, pl, t);
 	if (!d->rk.hit || !t)
 		;
 	else if (!strcmp(t, "function_call"))
@@ -6101,6 +6596,7 @@ ch_anchors(struct xr_claude *d, uint64_t ino)
 {
 	size_t k;
 
+	tl_flush(d);
 	for (k = 0; k < d->ch.n; k++)
 	{
 		struct xr_chapter *x = &d->ch.v[(d->ch.start + k) % XR_CHAPTERS];
@@ -6117,6 +6613,8 @@ xr_claude_end(struct xr_claude *d, uint64_t ino, struct xr_chapters *out)
 	*out = d->ch;
 	memset(&d->ch, 0, sizeof d->ch);
 	d->turn = 0;
+	free(d->tl);	/* its line is written */
+	d->tl = NULL;
 }
 
 const struct xr_chapters *
@@ -7085,8 +7583,23 @@ put_auto(FILE *m, const struct xr_chapter *c)
 	}
 }
 
+/* #296: additive too. The response text alone, so the cap can leave it
+** out (its offset and the tool line stay). */
 static void
-put_chapter(FILE *m, const struct xr_chapter *c, uint64_t i, int comma)
+put_response(FILE *m, const struct xr_chapter *c)
+{
+	if (!c->response)
+		return;
+	fputs(",\"response\":", m);
+	xr_put_str(m, c->response);
+	if (c->response_cut)
+		fputs(",\"response_cut\":true", m);
+}
+
+/* resp: with the response text (put_response) */
+static void
+put_chapter(FILE *m, const struct xr_chapter *c, uint64_t i, int comma,
+            int resp)
 {
 	fputs(comma ? ",{\"anchor\":" : "{\"anchor\":", m);
 	xr_put_str(m, c->anchor);
@@ -7102,6 +7615,16 @@ put_chapter(FILE *m, const struct xr_chapter *c, uint64_t i, int comma)
 	        c->kind, c->partial ? "true" : "false",
 	        c->error ? "true" : "false");
 	put_auto(m, c);
+	if (resp)
+		put_response(m, c);
+	if (c->responded)
+		fprintf(m, ",\"response_offset\":%llu",
+		        (unsigned long long)c->response_offset);
+	if (c->tools)
+	{
+		fputs(",\"tools\":", m);
+		xr_put_str(m, c->tools);
+	}
 	fputc('}', m);
 }
 
@@ -7177,7 +7700,8 @@ xr_print(FILE *f, const struct xr_answer *a)
 {
 	char *body = NULL, *head = NULL;
 	size_t bl = 0, hl = 0, k, cut = 0, n = a->ch ? a->ch->n : 0, slack;
-	size_t *at = calloc(n + 1, sizeof *at);
+	size_t *at = calloc(n + 1, sizeof *at), *rs = calloc(n + 1, sizeof *rs);
+	size_t r, rb = 0;	/* #296: each chapter's response, their sum */
 	uint64_t first = a->ch ? a->ch->total - a->ch->n : 0;
 	FILE *m;
 	int complete = a->complete, rc = 0;
@@ -7199,6 +7723,7 @@ xr_print(FILE *f, const struct xr_answer *a)
 		free(ord);
 		free(drop);
 		free(at);
+		free(rs);
 		return -1;
 	}
 	for (k = 0; k < nr; k++)
@@ -7222,7 +7747,7 @@ xr_print(FILE *f, const struct xr_answer *a)
 		goto fail;
 	free(body);
 	body = NULL;
-	if (!at || !(m = open_memstream(&body, &bl)))
+	if (!at || !rs || !(m = open_memstream(&body, &bl)))
 	{
 fail:
 		free(body);
@@ -7231,12 +7756,17 @@ fail:
 		free(gone);
 		free(rat);
 		free(at);
+		free(rs);
 		return -1;
 	}
 	for (k = 0; k < n && fseek(m, 0, SEEK_SET) == 0; k++)
 	{
-		put_chapter(m, xr_chapter_at(a->ch, k), first + k + 1, k > 0);
+		put_chapter(m, xr_chapter_at(a->ch, k), first + k + 1, k > 0, 0);
 		at[k + 1] = at[k] + (size_t)ftell(m);
+		if (fseek(m, 0, SEEK_SET) != 0)
+			break;
+		put_response(m, xr_chapter_at(a->ch, k));
+		rb += rs[k] = (size_t)ftell(m);
 	}
 	if (fclose(m) != 0 || k < n)
 	{
@@ -7246,17 +7776,23 @@ fail:
 		free(gone);
 		free(rat);
 		free(at);
+		free(rs);
 		return -1;
 	}
 	free(body);
 	body = NULL;
-	bl = at[n];
-	/* 4 MiB: refs go first, in drop's order (each a dropped key; the first
-	** kept one has no comma), then the oldest chapters */
+	bl = at[n] + rb;
+	/* 4 MiB: the oldest chapters' responses go first (#296: the offset and
+	** the tool line stay), then refs, in drop's order (each a dropped key;
+	** the first kept one has no comma), then the oldest chapters */
 	slack = 4096 + 6 * (strlen(a->session) + strlen(a->session_id) +
 	                    (a->project ? strlen(a->project) : 0) +
 	                    (a->project_label ? strlen(a->project_label) : 0));
 	rl -= nr > 0;
+	for (r = 0; r < n && bl + rl + slack > xr_lim.out; r++)
+		bl -= rs[r];
+	for (k = 0; k < r && !rs[k]; k++)
+		;
 	for (j = 0; j < nr && bl + rl + slack > xr_lim.out; j++)
 	{
 		rl -= rat[drop[j]] - (j + 1 == nr);
@@ -7265,7 +7801,7 @@ fail:
 	keep = nr - j;
 	while (cut < n && bl - at[cut] + rl + slack > xr_lim.out)
 		cut++;
-	if (cut || keep < nr)
+	if (cut || keep < nr || k < r)
 	{
 		complete = 0;
 		why = "output";
@@ -7310,7 +7846,7 @@ fail:
 		fputs(head, f);
 		for (k = cut; k < n; k++)	/* the first kept one: no comma */
 			put_chapter(f, xr_chapter_at(a->ch, k), first + k + 1,
-			            k > cut);
+			            k > cut, k >= r);
 		fprintf(f, "],\"chapters_evicted\":%s,\"refs\":[",
 		        a->chapters_evicted ? "true" : "false");
 		for (k = j = 0; k < nr; k++)	/* j: refs written */
@@ -7324,6 +7860,7 @@ fail:
 	}
 	free(head);
 	free(at);
+	free(rs);
 	free(ord);
 	free(drop);
 	free(gone);
@@ -7465,7 +8002,7 @@ stab_build(const struct xr_answer *a, struct stab *t)
 		const struct xr_chapter *x = xr_chapter_at(a->ch, k);
 		struct sch *c = &t->c[k];
 
-		put_chapter(m, x, 0, 0);	/* i is display only: not compared */
+		put_chapter(m, x, 0, 0, 1);	/* i is display only: not compared */
 		if (fflush(m) != 0)
 			break;
 		snprintf(c->anchor, sizeof c->anchor, "%s", x->anchor);
@@ -7603,7 +8140,7 @@ xr_delta_write(FILE *f, struct xr_sent *s, const struct xr_answer *a)
 		if (chg[nr + k])
 		{
 			fputs("{\"schema\":1,\"chapter\":", f);
-			put_chapter(f, xr_chapter_at(a->ch, k), first + k + 1, 0);
+			put_chapter(f, xr_chapter_at(a->ch, k), first + k + 1, 0, 1);
 			fputs("}\n", f);
 		}
 	for (k = 0; k < nr; k++)
@@ -8321,16 +8858,17 @@ xr_git_parse(const char *s, size_t n, long long now, struct xr_resolved *r)
 /* One URL, s[0..n): github.com is its host, want its whole path. The host
 ** is read from the authority only, as git and curl do: it ends at the first
 ** '/', '?' or '#' (scp form: the first ':' or '/'), its userinfo at its
-** first '@' (QA 1.57.0 NIT-D1, 1.59.0 LOW-X7) */
+** first '@' (QA 1.57.0 NIT-D1, 1.59.0 LOW-X7); an empty port is the default
+** one, git+ssh and ssh+git are ssh (QA 1.61.0 NIT-X2) */
 static int
 res_gh_url(const char *s, size_t n, const char *want)
 {
-	static const char *const sch[4] = {"https://", "http://", "ssh://",
-	                                   "git://"};
+	static const char *const sch[6] = {"https://", "http://", "ssh://",
+	                                   "git://", "git+ssh://", "ssh+git://"};
 	const char *stop = ":/";	/* scp form: [user@]github.com:o/r */
 	size_t wl = strlen(want), i = 0, h, e, k;
 
-	for (k = 0; k < 4; k++)
+	for (k = 0; k < 6; k++)
 		if (n > strlen(sch[k]) && !strncasecmp(s, sch[k], strlen(sch[k])))
 		{
 			i = strlen(sch[k]);
@@ -8345,9 +8883,9 @@ res_gh_url(const char *s, size_t n, const char *want)
 	if (e == n || s[e] != stop[0] || e - h < 10 ||
 	    strncasecmp(s + h, "github.com", 10))
 		return 0;
-	if (h + 10 < e)	/* a port: ':' and digits */
+	if (h + 10 < e)	/* a port: ':' and digits, or none */
 	{
-		if (s[h + 10] != ':' || h + 11 == e)
+		if (s[h + 10] != ':')
 			return 0;
 		for (h += 11; h < e; h++)
 			if (s[h] < '0' || s[h] > '9')
@@ -8362,18 +8900,52 @@ res_gh_url(const char *s, size_t n, const char *want)
 	return i == n || (i + 1 == n && s[i] == '/');
 }
 
+/* key s[0..n) is url.<base>.insteadof */
+static int
+res_insteadof(const char *s, size_t n)
+{
+	return n >= 14 && !memcmp(s, "url.", 4) &&
+	       !memcmp(s + n - 10, ".insteadof", 10);
+}
+
 int
 xr_git_remote(const char *s, size_t n, const char *want)
 {
-	const char *z, *v;
-	size_t i;
+	const char *z, *v, *y, *w, *b;
+	char u[4096];
+	size_t i, j, bl, kl, l;
 
 	/* "<key>\n<value>\0" entries; a key has no newline, a value may */
 	for (i = 0; i < n && (z = memchr(s + i, '\0', n - i)) != NULL;
 	     i = (size_t)(z - s) + 1)
-		if ((v = memchr(s + i, '\n', (size_t)(z - s) - i)) != NULL &&
-		    res_gh_url(v + 1, (size_t)(z - v - 1), want))
+	{
+		if ((v = memchr(s + i, '\n', (size_t)(z - s) - i)) == NULL ||
+		    res_insteadof(s + i, (size_t)(v - s) - i))
+			continue;
+		v++;
+		l = (size_t)(z - v);
+		/* git's URL: the longest url.<base>.insteadOf value that
+		** starts it (the first of equals), replaced by <base>, once
+		** (remote.c alias_url; QA 1.61.0 LOW-X15) */
+		for (b = NULL, bl = kl = 0, j = 0; j < n &&
+		     (y = memchr(s + j, '\0', n - j)) != NULL;
+		     j = (size_t)(y - s) + 1)
+			if ((w = memchr(s + j, '\n', (size_t)(y - s) - j)) != NULL &&
+			    res_insteadof(s + j, (size_t)(w - s) - j) &&
+			    (size_t)(y - w - 1) > bl && (size_t)(y - w - 1) <= l &&
+			    !memcmp(w + 1, v, (size_t)(y - w - 1)))
+			{
+				b = s + j + 4;
+				kl = (size_t)(w - s) - j - 14;
+				bl = (size_t)(y - w - 1);
+			}
+		/* shortcut: a rewritten URL over 4 KB is no match */
+		if (!b ? res_gh_url(v, l, want)
+		       : kl + l - bl <= sizeof u &&
+		         (memcpy(u, b, kl), memcpy(u + kl, v + bl, l - bl),
+		          res_gh_url(u, kl + l - bl, want)))
 			return 1;
+	}
 	return 0;
 }
 
@@ -8472,7 +9044,7 @@ res_commit(const char *sha, const char *cwd, int live, const char *gh,
 	{
 		/* -z: a value's escaped newline cannot forge an entry (NIT-D1) */
 		static char s0[] = "config", s1[] = "-z", s2[] = "--get-regexp",
-		            s3[] = "^remote\\..*\\.url$";
+		            s3[] = "^(remote\\..*\\.url|url\\..*\\.insteadof)$";
 
 		av[a] = s0;
 		av[a + 1] = s1;
@@ -9031,4 +9603,820 @@ xr_scan_resolved(struct xr_scan *x, const struct xr_span *sp,
 		          r->kind, r->state, xr_res_spawned - sp0, xr_now_ms() - t);
 	}
 	free(r);
+}
+
+/* ---- --search (#297): where a word or phrase was said ---------------------- */
+
+static unsigned char
+fold(unsigned char c)
+{
+	return A_UP(c) ? (unsigned char)(c + 32) : c;
+}
+
+/* memchr on the first byte in both cases, then the rest folded */
+size_t
+xr_find(const char *hay, size_t n, const char *needle, size_t nl)
+{
+	const char *e, *lo, *up, *p;
+	unsigned char a, b;
+	size_t k;
+
+	if (!nl)
+		return 0;
+	if (nl > n)
+		return SIZE_MAX;
+	a = fold((unsigned char)needle[0]);
+	b = A_LO(a) ? (unsigned char)(a - 32) : a;
+	e = hay + n - nl + 1;	/* past the last start */
+	lo = memchr(hay, a, (size_t)(e - hay));
+	up = b != a ? memchr(hay, b, (size_t)(e - hay)) : NULL;
+	while (lo || up)
+	{
+		p = !up || (lo && lo < up) ? lo : up;
+		for (k = 1; k < nl && fold((unsigned char)p[k]) ==
+		     fold((unsigned char)needle[k]); k++)
+			;
+		if (k == nl)
+			return (size_t)(p - hay);
+		if (p == lo)
+			lo = memchr(p + 1, a, (size_t)(e - p - 1));
+		else
+			up = memchr(p + 1, b, (size_t)(e - p - 1));
+	}
+	return SIZE_MAX;
+}
+
+enum { SK_USER, SK_ASSISTANT, SK_TOOL };
+static const char *const sk_name[] = { "user", "assistant", "tool" };
+
+struct sr_hit
+{
+	uint64_t off, aseq;	/* aseq: a shell command row's block */
+	long long at;
+	int who, pend;		/* pend: its chapter is not known yet */
+	char *tool, *snip;
+	char chapter[40];
+};
+
+struct xr_search
+{
+	char text[XR_SEARCH_MAX + 1];
+	size_t tl;
+	/* the raw prefilter: the longest run JSON writes as is (no '"', '\\'
+	** or '/'), and for a text with non-ASCII, which a writer may escape as
+	** \uXXXX, its longest plain-ASCII run in a line that holds "\u" */
+	size_t run, runl, asc, ascl;
+	int nonascii;
+	struct sr_hit hit[XR_SEARCH_HITS];
+	size_t n, h0;		/* a shell's are a ring from h0, oldest first */
+	uint64_t total, bytes;
+	int more, partial, shell;
+	const char *why;
+	long long t0;
+	/* a transcript's: its range (3.8), where --json has chapters */
+	uint64_t ino, head, lotail;
+	int capped, codex;
+	/* a shell's open line: rows joined at soft wraps */
+	char *line;
+	size_t ll;
+	int lkind, lwho, lpend;
+	uint64_t lseq, laseq;
+	long long lat;
+	char lch[40];
+};
+
+struct xr_search *
+xr_search_new(const char *text, long long t0)
+{
+	size_t tl = strlen(text), i, j;
+	struct xr_search *s;
+
+	if (tl < XR_SEARCH_MIN || tl > XR_SEARCH_MAX ||
+	    !(s = calloc(1, sizeof *s)))
+		return NULL;
+	memcpy(s->text, text, tl + 1);
+	s->tl = tl;
+	s->t0 = t0;
+	for (i = 0; i < tl; i = j + 1)
+	{
+		for (j = i; j < tl && !strchr("\"\\/", text[j]); j++)
+			;
+		if (j - i > s->runl)
+			s->run = i, s->runl = j - i;
+	}
+	for (i = 0; i < tl; i = j + 1)
+	{
+		for (j = i; j < tl && text[j] >= 0x20 && text[j] < 0x7f &&
+		     !strchr("\"\\/", text[j]); j++)
+			;
+		if (j - i > s->ascl)
+			s->asc = i, s->ascl = j - i;
+		s->nonascii |= j < tl && (unsigned char)text[j] >= 0x80;
+	}
+	return s;
+}
+
+static void
+sr_hit_free(struct sr_hit *h)
+{
+	free(h->tool);
+	free(h->snip);
+	memset(h, 0, sizeof *h);
+}
+
+void
+xr_search_free(struct xr_search *s)
+{
+	size_t k;
+
+	if (!s)
+		return;
+	for (k = 0; k < XR_SEARCH_HITS; k++)
+		sr_hit_free(&s->hit[k]);
+	free(s->line);
+	free(s);
+}
+
+/* The snippet: about XR_SNIPPET bytes of t[0..n) around the match at m, cut
+** on character boundaries, controls and whitespace runs as one space,
+** invalid UTF-8 as U+FFFD. */
+static char *
+sr_snip(const char *t, size_t n, size_t m, size_t nl)
+{
+	size_t w = nl > XR_SNIPPET ? nl : XR_SNIPPET, a, b, i, adv;
+	char *o, *q;
+	int sp = 1;
+
+	a = m > (w - nl) / 2 ? m - (w - nl) / 2 : 0;
+	b = n - a > w ? a + w : n;
+	if (b - a < w)
+		a = b > w ? b - w : 0;
+	while (a < m && ((unsigned char)t[a] & 0xc0) == 0x80)
+		a++;
+	while (b > m + nl && b < n && ((unsigned char)t[b] & 0xc0) == 0x80)
+		b--;
+	if (!(q = o = malloc((b - a) * 3 + 1)))
+		return NULL;
+	for (i = a; i < b; i += adv)
+	{
+		uint32_t c = u8_next((const unsigned char *)t + i, b - i, &adv);
+
+		if (c <= 0x20 || c == 0x7f || (c >= 0x80 && c < 0xa0))
+		{
+			if (!sp)
+				*q++ = ' ';
+			sp = 1;
+			continue;
+		}
+		q += u8_put(q, c);
+		sp = 0;
+	}
+	if (q > o && q[-1] == ' ')
+		q--;
+	*q = '\0';
+	return o;
+}
+
+/* A transcript's region of offset o: 0 the head, 2 the tail, 1 the middle
+** --json does not read (3.8), where no chapter is known. */
+static int
+sr_region(const struct xr_search *s, uint64_t o)
+{
+	return !s->capped || o < s->head ? 0 : o >= s->lotail ? 2 : 1;
+}
+
+/* A hit of kind who at off, its text t[0..n) matched at m (tool: malloc'd,
+** taken). A transcript's 51st sets more and stops the search; a shell's ring
+** keeps the newest XR_SEARCH_HITS. */
+static void
+sr_add(struct xr_search *s, uint64_t off, long long at, int who, char *tool,
+       const char *t, size_t n, size_t m)
+{
+	struct sr_hit *h;
+
+	s->total++;
+	if (!s->shell && s->n == XR_SEARCH_HITS)
+	{
+		s->more = 1;
+		free(tool);
+		return;
+	}
+	if (s->n == XR_SEARCH_HITS)
+	{
+		h = &s->hit[s->h0];
+		s->h0 = (s->h0 + 1) % XR_SEARCH_HITS;
+		sr_hit_free(h);
+	}
+	else
+		h = &s->hit[(s->h0 + s->n++) % XR_SEARCH_HITS];
+	h->off = off;
+	h->at = at;
+	h->who = who;
+	h->tool = tool;
+	h->snip = sr_snip(t, n, m, s->tl);
+	/* a transcript's chapter: from its window's decoder (sr_chapters) */
+	h->pend = !s->shell && sr_region(s, off) != 1;
+}
+
+/* One record being read: its offset and time, the kinds it already hit. */
+struct sr_rec
+{
+	uint64_t off;
+	long long at;
+	unsigned done;
+};
+
+/* A window of the backward read: its lines, NUL-ended, oldest first. */
+struct sr_line
+{
+	size_t i, n;
+};
+struct sr_win
+{
+	char *buf;
+	uint64_t base;		/* buf[0]'s file offset */
+	struct sr_line *ln;
+	size_t nln, k;		/* k: the line being read */
+};
+
+static size_t
+sr_find(const struct xr_search *s, const struct sr_rec *r, int who,
+        const char *t, size_t n)
+{
+	return !t || r->done & 1u << who ? SIZE_MAX
+	       : xr_find(t, n, s->text, s->tl);
+}
+
+/* t a hit of kind who, unless one is in r already (t freed, tool taken). */
+static void
+sr_try(struct xr_search *s, struct sr_rec *r, int who, char *t, size_t n,
+       char *tool)
+{
+	size_t m = sr_find(s, r, who, t, n);
+
+	if (m != SIZE_MAX)
+	{
+		r->done |= 1u << who;
+		sr_add(s, r->off, r->at, who, tool, t, n, m);
+		tool = NULL;
+	}
+	free(tool);
+	free(t);
+}
+
+/* The first string value under token v (v itself, or inside it; never a
+** key) that holds the text, decoded (*n its length), else NULL. */
+static char *
+sr_values(const struct xr_search *s, const struct json_parser *p, int v,
+          size_t *n)
+{
+	int i, end;
+	char *t;
+
+	if (v < 0)
+		return NULL;
+	end = p->tok[v].kind == JSON_STRING ? v + 1 : p->tok[v].next;
+	for (i = v; i < end; i++)
+	{
+		int up = p->tok[i].parent;
+
+		if (p->tok[i].kind != JSON_STRING ||
+		    (i > v && up >= 0 && p->tok[up].kind == JSON_OBJECT))
+			continue;
+		if (!(t = j_str(p, i, n)))
+			continue;
+		if (xr_find(t, *n, s->text, s->tl) != SIZE_MAX)
+			return t;
+		free(t);
+	}
+	return NULL;
+}
+
+/* A content value c (a string, or blocks whose "text" counts): the first
+** text that holds the search's, decoded, else NULL. */
+static char *
+sr_texts(const struct xr_search *s, const struct json_parser *p, int c,
+         size_t *n)
+{
+	int i;
+	char *t;
+
+	if (c >= 0 && p->tok[c].kind == JSON_STRING)
+		return sr_values(s, p, c, n);
+	if (c < 0 || p->tok[c].kind != JSON_ARRAY)
+		return NULL;
+	for (i = c + 1; i < p->tok[c].next; i = p->tok[i].next)
+		if (p->tok[i].kind == JSON_OBJECT &&
+		    (t = sr_values(s, p, j_get(p, i, A_TEXT), n)))
+			return t;
+	return NULL;
+}
+
+/* The name of the call id (a Claude tool_use's "id", a Codex call's
+** "call_id") in a line of w older than the hit's, read newest first; NULL
+** when the call is in an older window. */
+static char *
+sr_tool(const struct sr_win *w, const char *id, int codex)
+{
+	char pat[XR_ID_MAX + 16];
+	size_t j, pl;
+	char *name = NULL;
+
+	if (!id || strlen(id) > XR_ID_MAX || strpbrk(id, "\"\\"))
+		return NULL;
+	/* the quoted id alone: a writer may space its colons */
+	pl = (size_t)snprintf(pat, sizeof pat, "\"%s\"", id);
+	for (j = w->k; j-- > 0 && !name;)
+	{
+		const char *l = w->buf + w->ln[j].i;
+		struct json_parser p;
+		int c, i, pl2;
+
+		if (xr_find(l, w->ln[j].n, pat, pl) == SIZE_MAX ||
+		    tokens_max(l, w->ln[j].n) > XR_LINE_TOKENS)
+			continue;
+		memset(&p, 0, sizeof p);
+		if (dch_json_parse(&p, l) >= 0 && p.tok[0].kind == JSON_OBJECT)
+		{
+			if (codex)
+			{
+				if ((pl2 = k_obj(&p, 0, A_PAYLOAD)) >= 0 &&
+				    k_streq(&p, pl2, A_CALLID, id))
+					name = k_str(&p, pl2, A_NAME, NULL);
+			}
+			else if ((c = k_obj(&p, 0, A_MESSAGE)) >= 0 &&
+			         (c = j_get(&p, c, A_CONTENT)) >= 0 &&
+			         p.tok[c].kind == JSON_ARRAY)
+				for (i = c + 1; i < p.tok[c].next && !name;
+				     i = p.tok[i].next)
+					if (p.tok[i].kind == JSON_OBJECT &&
+					    k_streq(&p, i, A_ID, id))
+						name = k_str(&p, i, A_NAME, NULL);
+		}
+		dch_json_free(&p);
+		if (name && strlen(name) > XR_ID_MAX)
+			name[XR_ID_MAX] = '\0';	/* a name, not a payload */
+	}
+	return name;
+}
+
+/* A Claude content value c of a main-thread user or assistant record (who
+** for its text): text blocks, tool_use inputs, tool_result content. */
+static void
+sr_parts(struct xr_search *s, const struct json_parser *p, int c, int who,
+         struct sr_rec *r, const struct sr_win *w)
+{
+	size_t n = 0;
+	char *x;
+	int i;
+
+	if (c >= 0 && p->tok[c].kind == JSON_STRING)
+	{
+		x = sr_values(s, p, c, &n);
+		sr_try(s, r, who, x, n, NULL);
+	}
+	if (c < 0 || p->tok[c].kind != JSON_ARRAY)
+		return;
+	for (i = c + 1; i < p->tok[c].next; i = p->tok[i].next)
+	{
+		char *t, *id;
+
+		if (p->tok[i].kind != JSON_OBJECT)
+			continue;
+		t = k_str(p, i, A_TYPE, NULL);
+		if (t && !strcmp(t, "text"))
+		{
+			x = sr_values(s, p, j_get(p, i, A_TEXT), &n);
+			sr_try(s, r, who, x, n, NULL);
+		}
+		else if (t && (!strcmp(t, "tool_use") ||
+		               !strcmp(t, "server_tool_use")) &&
+		         !(r->done & 1u << SK_TOOL))
+		{
+			x = sr_values(s, p, k_obj(p, i, A_INPUT), &n);
+			sr_try(s, r, SK_TOOL, x, n, x ? k_str(p, i, A_NAME, NULL) : NULL);
+		}
+		else if (t && !strcmp(t, "tool_result") &&
+		         !(r->done & 1u << SK_TOOL))
+		{
+			x = sr_texts(s, p, j_get(p, i, A_CONTENT), &n);
+			id = x ? k_str(p, i, A_TUID, NULL) : NULL;
+			sr_try(s, r, SK_TOOL, x, n, x ? sr_tool(w, id, 0) : NULL);
+			free(id);
+		}
+		free(t);
+	}
+}
+
+static void
+sr_claude(struct xr_search *s, const struct json_parser *p, struct sr_rec *r,
+          const struct sr_win *w)
+{
+	char *t;
+	int a;
+
+	/* a subagent's thread, harness metadata, a compaction summary */
+	if (k_bool(p, 0, A_SIDE) || k_bool(p, 0, A_META) ||
+	    k_bool(p, 0, A_SUMMARY))
+		return;
+	t = k_str(p, 0, A_TYPE, NULL);
+	if (t && (!strcmp(t, "user") || !strcmp(t, "assistant")))
+		sr_parts(s, p, (a = k_obj(p, 0, A_MESSAGE)) >= 0
+		         ? j_get(p, a, A_CONTENT) : -1,
+		         t[0] == 'u' ? SK_USER : SK_ASSISTANT, r, w);
+	else if (t && !strcmp(t, "attachment") &&
+	         (a = k_obj(p, 0, A_ATTACH)) >= 0 &&
+	         k_streq(p, a, A_TYPE, "queued_command"))
+		sr_parts(s, p, j_get(p, a, A_PROMPT), SK_USER, r, w);	/* typed */
+	free(t);
+}
+
+/* A Codex rollout line: response_item messages, calls and outputs (7.4);
+** reasoning, events, compactions and context are no text of the turns. */
+static void
+sr_codex(struct xr_search *s, const struct json_parser *p, struct sr_rec *r,
+         const struct sr_win *w)
+{
+	int pl = k_obj(p, 0, A_PAYLOAD), c, i;
+	char *t = pl >= 0 && k_streq(p, 0, A_TYPE, "response_item")
+	          ? k_str(p, pl, A_TYPE, NULL) : NULL, *x, *role, *a, *id;
+	struct json_parser q;
+	size_t n = 0;
+
+	if (!t)
+		return;
+	if (!strcmp(t, "message") && (role = k_str(p, pl, A_ROLE, NULL)))
+	{
+		int who = !strcmp(role, "user") ? SK_USER
+		          : !strcmp(role, "assistant") ? SK_ASSISTANT : -1;
+
+		c = j_get(p, pl, A_CONTENT);
+		for (i = c + 1; who >= 0 && c >= 0 && p->tok[c].kind == JSON_ARRAY &&
+		     i < p->tok[c].next; i = p->tok[i].next)
+		{
+			if (p->tok[i].kind != JSON_OBJECT ||
+			    !(x = sr_values(s, p, j_get(p, i, A_TEXT), &n)))
+				continue;
+			if (who == SK_USER && cx_context(x, n))
+				free(x);	/* Codex's own context, never typed */
+			else
+				sr_try(s, r, who, x, n, NULL);
+		}
+		free(role);
+	}
+	else if (!strcmp(t, "function_call") &&
+	         (a = k_str(p, pl, A_ARGS, &n)))
+	{
+		/* the arguments: a JSON object's values, else the string */
+		memset(&q, 0, sizeof q);
+		x = tokens_max(a, n) <= XR_LINE_TOKENS &&
+		    dch_json_parse(&q, a) >= 0 && q.tok[0].kind == JSON_OBJECT
+		    ? sr_values(s, &q, 0, &n)
+		    : xr_find(a, n, s->text, s->tl) != SIZE_MAX ? strdup(a) : NULL;
+		dch_json_free(&q);
+		free(a);
+		sr_try(s, r, SK_TOOL, x, x ? strlen(x) : 0,
+		       x ? k_str(p, pl, A_NAME, NULL) : NULL);
+	}
+	else if (!strcmp(t, "custom_tool_call") ||
+	         !strcmp(t, "local_shell_call"))
+	{
+		x = sr_values(s, p, t[0] == 'c' ? j_get(p, pl, A_INPUT)
+		              : k_obj(p, pl, A_ACTION), &n);
+		sr_try(s, r, SK_TOOL, x, n, x ? k_str(p, pl, A_NAME, NULL) : NULL);
+	}
+	else if (!strcmp(t, "function_call_output") ||
+	         !strcmp(t, "custom_tool_call_output"))
+	{
+		x = sr_texts(s, p, j_get(p, pl, A_OUTPUT), &n);
+		id = x ? k_str(p, pl, A_CALLID, NULL) : NULL;
+		sr_try(s, r, SK_TOOL, x, n, x ? sr_tool(w, id, 1) : NULL);
+		free(id);
+	}
+	free(t);
+}
+
+/* w's line k: its hits, if it holds the text once decoded */
+static void
+sr_line(struct xr_search *s, const struct sr_win *w)
+{
+	const char *l = w->buf + w->ln[w->k].i;
+	size_t n = w->ln[w->k].n;
+	struct json_parser p;
+	struct sr_rec r;
+	char *ts;
+
+	/* the raw prefilter (the decode alone decides) */
+	if (xr_find(l, n, s->text + s->run, s->runl) == SIZE_MAX &&
+	    (!s->nonascii || xr_find(l, n, "\\u", 2) == SIZE_MAX ||
+	     xr_find(l, n, s->text + s->asc, s->ascl) == SIZE_MAX))
+		return;
+	/* as the decoder takes a line (xr_claude_line) */
+	if (memchr(l, '\0', n) || tokens_max(l, n) > XR_LINE_TOKENS)
+		return;
+	memset(&p, 0, sizeof p);
+	if (dch_json_parse(&p, l) >= 0 && p.tok[0].kind == JSON_OBJECT)
+	{
+		r.off = w->base + w->ln[w->k].i;
+		r.done = 0;
+		r.at = (ts = k_str(&p, 0, A_TS, NULL)) ? iso_time(ts) : -1;
+		free(ts);
+		if (s->codex)
+			sr_codex(s, &p, &r, w);
+		else
+			sr_claude(s, &p, &r, w);
+	}
+	dch_json_free(&p);
+}
+
+/* The chapters of w's lines, by a fresh decoder (as light --ref's windows):
+** a pending hit is under the newest chapter at or before it, unless that is
+** the window's first and started by no prompt (the turn began in an older
+** window), or lies in another region. A hit whose region this window leaves
+** is under no chapter --json knows. */
+static int
+sr_chapters(struct xr_search *s, const struct sr_win *w)
+{
+	struct xr_claude *e = xr_claude_new();
+	const struct xr_chapters *ch;
+	struct xr_sink none = { NULL, NULL };
+	uint64_t wa = w->base + (w->nln ? w->ln[0].i : 0);
+	size_t k, i;
+
+	if (!e)
+		return -1;
+	if (s->codex)
+		xr_claude_codex(e);
+	xr_claude_refs(e, &none, s->ino, NULL, NULL);
+	for (k = 0; k < w->nln; k++)
+	{
+		const char *l = w->buf + w->ln[k].i;
+		size_t j;
+
+		for (j = 0; j < w->ln[k].n && (l[j] == ' ' || l[j] == '\t' ||
+		                               l[j] == '\r'); j++)
+			;
+		if (j < w->ln[k].n)
+			xr_claude_line(e, l, w->ln[k].n, w->base + w->ln[k].i, 0);
+	}
+	ch = xr_claude_chapters(e);
+	for (k = 0; k < s->n; k++)
+	{
+		struct sr_hit *h = &s->hit[k];
+		const struct xr_chapter *c = NULL;
+
+		if (!h->pend)
+			continue;
+		for (i = ch->n; i > 0 && !c; i--)
+		{
+			const struct xr_chapter *x = xr_chapter_at(ch, i - 1);
+
+			if (x && x->offset <= h->off)
+				c = x;
+		}
+		/* i: c's index now, so 0 is the window's first chapter */
+		if (c && (i || !c->partial || !wa) &&
+		    sr_region(s, c->offset) == sr_region(s, h->off))
+		{
+			snprintf(h->chapter, sizeof h->chapter, "%s", c->anchor);
+			h->pend = 0;
+		}
+		else if (sr_region(s, wa) != sr_region(s, h->off))
+			h->pend = 0;
+	}
+	xr_claude_free(e);
+	return 0;
+}
+
+static int
+sr_pending(const struct xr_search *s)
+{
+	size_t k;
+
+	for (k = 0; k < s->n; k++)
+		if (s->hit[k].pend)
+			return 1;
+	return 0;
+}
+
+/* buf[0..len) from off, whole: 0, 1 the file shrank, -1 an error */
+static int
+sr_pread(int fd, char *buf, size_t len, uint64_t off)
+{
+	size_t got = 0;
+
+	while (got < len)
+	{
+		ssize_t r = pread(fd, buf + got, len - got, (off_t)(off + got));
+
+		if (r < 0 && errno == EINTR)
+			continue;
+		if (r <= 0)
+			return r < 0 ? -1 : 1;
+		got += (size_t)r;
+	}
+	return 0;
+}
+
+int
+xr_search_file(struct xr_search *s, int fd, uint64_t size, uint64_t ino,
+               int codex)
+{
+	/* a window holds a whole line of xr_lim.line bytes and the '\n'
+	** before and after it: a longer line is one failed step, skipped */
+	size_t wsz = xr_lim.line + 2, cap = 0, i, z;
+	struct sr_win w;
+	uint64_t end = size, start;
+	long long stop = -1;	/* when the 51st hit came */
+	int rc = 0, k;
+
+	memset(&w, 0, sizeof w);
+	s->ino = ino;
+	s->codex = codex;
+	s->capped = size > xr_lim.head + xr_lim.tail;
+	s->head = xr_lim.head;
+	s->lotail = s->capped ? size - xr_lim.tail : 0;
+	if (!(w.buf = malloc(wsz + 1)))
+		return -1;
+	while (end > 0 && rc == 0)
+	{
+		long long now = xr_now_ms();
+
+		if (stop < 0 && s->more)
+			stop = now;
+		if (s->more && (!sr_pending(s) || now - stop >= XR_LOOKBACK_MS))
+			break;
+		if (s->bytes >= xr_lim.bytes || now - s->t0 >= xr_lim.ms)
+		{
+			s->why = s->bytes >= xr_lim.bytes ? "bytes" : "time";
+			break;
+		}
+		start = end > wsz ? end - wsz : 0;
+		if ((k = sr_pread(fd, w.buf, (size_t)(end - start), start)) != 0)
+		{
+			if (k > 0)
+				s->why = "range";	/* shrank: what was read stands */
+			rc = k < 0 ? -1 : 0;
+			break;
+		}
+		s->bytes += end - start;
+		w.base = start;
+		/* the window's lines: from its first line start, to its last
+		** '\n' (the newest line still open waits, as the decoder's) */
+		i = 0;
+		if (start > 0)
+		{
+			char *nl = memchr(w.buf, '\n', (size_t)(end - start));
+
+			i = nl ? (size_t)(nl - w.buf) + 1 : (size_t)(end - start);
+		}
+		w.nln = 0;
+		for (z = i; z < (size_t)(end - start);)
+		{
+			char *nl = memchr(w.buf + z, '\n', (size_t)(end - start) - z);
+			struct sr_line *nv;
+
+			if (!nl)
+				break;
+			if (w.nln == cap)
+			{
+				cap = cap ? cap * 2 : 256;
+				if (!(nv = realloc(w.ln, cap * sizeof *nv)))
+				{
+					rc = -1;
+					break;
+				}
+				w.ln = nv;
+			}
+			*nl = '\0';
+			w.ln[w.nln].i = z;
+			w.ln[w.nln++].n = (size_t)(nl - (w.buf + z));
+			z = (size_t)(nl - w.buf) + 1;
+		}
+		/* no whole line starts here: one over xr_lim.line, skipped */
+		end = i < (size_t)(end - start) ? start + i : start;
+		for (w.k = w.nln; !s->more && w.k-- > 0;)
+			sr_line(s, &w);
+		if (rc == 0 && sr_pending(s) && sr_chapters(s, &w) < 0)
+			rc = -1;
+	}
+	if (end > 0 && !s->more && rc == 0)
+		s->partial = 1;		/* a cap, or the file shrank */
+	for (i = 0; i < s->n; i++)
+		s->hit[i].pend = 0;	/* not found in time: null */
+	free(w.ln);
+	free(w.buf);
+	return rc;
+}
+
+/* The shell's open line as one hit at most. */
+static void
+sr_flush(struct xr_search *s)
+{
+	size_t m;
+
+	if (!s->ll)
+		return;
+	if ((m = xr_find(s->line, s->ll, s->text, s->tl)) != SIZE_MAX)
+	{
+		struct sr_hit *h;
+
+		sr_add(s, s->lseq, s->lat, s->lwho, NULL, s->line, s->ll, m);
+		h = &s->hit[(s->h0 + s->n - 1) % XR_SEARCH_HITS];
+		snprintf(h->chapter, sizeof h->chapter, "%s", s->lch);
+		h->aseq = s->laseq;
+		h->pend = s->lpend;
+	}
+	s->ll = 0;
+}
+
+void
+xr_search_rec(struct xr_search *s, const struct xr_shell *sh,
+              const struct xr_rec *x)
+{
+	int row = x->kind == RING_K_INPUT || x->kind == RING_K_OUTPUT;
+	size_t k, l;
+
+	s->shell = 1;
+	s->bytes += x->len;
+	if (!row || !(x->flags & RING_F_CONT) || x->kind != s->lkind || !s->ll)
+	{
+		sr_flush(s);
+		s->lkind = x->kind;
+		s->lseq = x->seq;
+		s->lat = x->t;
+		s->lch[0] = '\0';
+		s->lpend = 0;
+		s->lwho = x->kind == RING_K_INPUT ? SK_USER : SK_TOOL;
+		/* output under a command's chapter; a command row's chapter
+		** comes with its C (a forged or empty one makes none) */
+		if (x->kind == RING_K_OUTPUT && sh->st == S_OUTPUT && sh->ord >= 0)
+			snprintf(s->lch, sizeof s->lch, "s%llu",
+			         (unsigned long long)sh->aseq);
+		else if (x->kind == RING_K_INPUT && sh->st == S_INPUT)
+			s->lpend = 1, s->laseq = sh->aseq;
+	}
+	if (row && (s->line || (s->line = malloc(XR_SH_LINE))))
+	{
+		l = x->len < XR_SH_LINE - s->ll ? x->len : XR_SH_LINE - s->ll;
+		memcpy(s->line + s->ll, x->text, l);
+		s->ll += l;
+	}
+	if (x->kind == RING_K_MARK && sh->st == S_OUTPUT && sh->ord >= 0)
+		for (k = 0; k < s->n; k++)
+		{
+			struct sr_hit *h = &s->hit[(s->h0 + k) % XR_SEARCH_HITS];
+
+			if (h->pend && h->aseq == sh->aseq)
+			{
+				snprintf(h->chapter, sizeof h->chapter, "s%llu",
+				         (unsigned long long)h->aseq);
+				h->pend = 0;
+			}
+		}
+}
+
+void
+xr_search_ring_end(struct xr_search *s)
+{
+	sr_flush(s);
+	s->more = s->total > XR_SEARCH_HITS;
+}
+
+int
+xr_search_print(FILE *f, const struct xr_search *s, const char *session,
+                const char *session_id, const char *corpus, const char *why)
+{
+	size_t k;
+
+	if (!why && s->partial)
+		why = s->why;
+	fputs("{\"schema\":1,\"session\":", f);
+	xr_put_str(f, session);
+	fputs(",\"session_id\":", f);
+	xr_put_str(f, session_id);
+	fprintf(f, ",\"corpus\":\"%s\",\"text\":", corpus);
+	xr_put_str(f, s->text);
+	fputs(",\"hits\":[", f);
+	for (k = 0; k < s->n; k++)
+	{
+		/* newest first: a transcript's are, a shell's ring is oldest first */
+		const struct sr_hit *h = &s->hit[s->shell ? (s->h0 + s->n - 1 - k)
+		                                  % XR_SEARCH_HITS : k];
+
+		fputs(k ? ",{\"chapter\":" : "{\"chapter\":", f);
+		put_or_null(f, h->chapter[0] && !h->pend ? h->chapter : NULL);
+		fprintf(f, ",\"offset\":%llu,\"at\":", (unsigned long long)h->off);
+		put_at(f, h->at);
+		fprintf(f, ",\"who\":\"%s\",\"tool\":", sk_name[h->who]);
+		put_or_null(f, h->tool);
+		fputs(",\"snippet\":", f);
+		xr_put_str(f, h->snip ? h->snip : "");
+		fputc('}', f);
+	}
+	fprintf(f, "],\"more\":%s,\"partial\":%s,\"why\":",
+	        s->more ? "true" : "false", why ? "true" : "false");
+	put_or_null(f, why);
+	fprintf(f, ",\"bytes\":%llu}\n", (unsigned long long)s->bytes);
+	return fflush(f) == 0 && !ferror(f) ? 0 : -1;
 }

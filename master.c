@@ -390,7 +390,8 @@ touch_activity(void)
 ** been quiet AA_QUIET_MS after output (AA_MAX_MS into output that never
 ** pauses), and again AA_VERIFY_MS after an answer; it reads the config
 ** fresh and, only for a prompt it would answer, looks for a Claude Code
-** under the child. The loop guard: the prompt answered last is never
+** under the child, answered only while that Claude is the pty's foreground
+** job (#282). The loop guard: the prompt answered last is never
 ** answered again while it stays up, nor within AA_LOOP_MS once gone and
 ** back; it is the human's. Each answer leaves <sock>.allowed (its title;
 ** the mtime is when), shown by --ls-json as "auto_allowed". */
@@ -472,9 +473,21 @@ auto_allow(void)
 		dch_trace("auto-allow: same prompt again, left to the human");
 	else if (dch_agent_probe(the_pty.pid, &a) == 0)
 	{
+		pid_t fg = tcgetpgrp(the_pty.fd);
+		int e = errno;
+		pid_t g = getpgid((pid_t)a.pid);
+
 		free(a.launch);
+		/* only the Claude in front: one suspended with Ctrl-Z reads
+		** nothing, the "1" would go to the shell that printed this
+		** (#282). Unreadable: fail closed */
+		if (fg <= 0 || g < 0 || fg != g)
+			dch_trace("auto-allow: claude %ld not in front (its group "
+			          "%ld, the pty's %ld%s%s), left alone", a.pid,
+			          (long)g, (long)fg, fg < 0 ? ": " : "",
+			          fg < 0 ? strerror(e) : "");
 		/* behind any input still waiting, never a blocking write */
-		if (pty_input("1", 1) == 0)
+		else if (pty_input("1", 1) == 0)
 		{
 			free(aa_ident);
 			aa_ident = id;
@@ -1848,6 +1861,9 @@ static void
 process_pty_buf(const unsigned char *buf, size_t len)
 {
 	struct client *p, *next;
+	const unsigned char *rep;
+	size_t nrep;
+	int seen = 0;
 
 	/* Real output happened — refresh the activity stamp (throttled). */
 	touch_activity();
@@ -1905,11 +1921,18 @@ process_pty_buf(const unsigned char *buf, size_t len)
 		    queue_to_client(p, buf, len) < 0 ||
 		    flush_client(p) < 0)
 			remove_client(p);
+		else
+			seen = 1;
 	}
 
 	/* Feed the terminal mirror AFTER the flush loop: attached clients
 	** keep first claim on the wake's time budget. */
 	dch_vt_feed(buf, len);
+	/* No terminal got these bytes (nothing attached, or the first attach's
+	** drain): the mirror answers the program's DECRQM 2026 and XTVERSION,
+	** or a headless start never turns synchronized output on (#273). */
+	if (!seen && (nrep = dch_vt_replies(&rep)) > 0)
+		(void)pty_input(rep, nrep);
 	/* No xray_wake() here: this runs inside handle_packet (drain_pty),
 	** and a wake can drop the client being handled. The main loop wakes. */
 }

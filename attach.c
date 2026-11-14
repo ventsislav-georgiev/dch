@@ -227,17 +227,28 @@ on_sigcont(ATTRIBUTE_UNUSED int sig)
 ** tcsetattr returns EINTR on the fg (macOS); a SIGCONT during or after it
 ** means the shell had the terminal meanwhile: set it again. From the
 ** background the tcsetattr stops on SIGTTOU (SIG_DFL, attach_main) until
-** the fg, as any tty program's does: the shell's modes stay until then. */
+** the fg, as any tty program's does: the shell's modes stay until then.
+** SIGTSTP waits until it is done (QA 1.60.0 LOW-V1): a stop inside it is
+** reported to the shell, which puts its modes on, and the tcsetattr then
+** ends (XNU, once the drain wakes) and puts raw mode over them on a shell
+** that sets none of its own (bash --noediting). Held, the stop comes after
+** the raw set, the shell's modes go on after it, and the fg's SIGCONT sets
+** raw again through want_cont. */
 static void
 term_raw(void)
 {
+	sigset_t ss, os;
 	int r;
 
+	sigemptyset(&ss);
+	sigaddset(&ss, SIGTSTP);
+	sigprocmask(SIG_BLOCK, &ss, &os);
 	do
 	{
 		want_cont = 0;
 		r = tcsetattr(0, TCSADRAIN, &cur_term);
 	} while ((r < 0 && errno == EINTR) || want_cont);
+	sigprocmask(SIG_SETMASK, &os, NULL);
 }
 
 static int detach_end;	/* where the last press counted ends (#187) */

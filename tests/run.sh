@@ -45,9 +45,13 @@ runpy.run_path(sys.argv[0], run_name="__main__")' \
 # End what test $pypid left: its process group, then the sessions it started
 # in this run's socket dir. setsid made the group id its pid, and a group id
 # is never reused while a member lives, so group $pypid is the test's. Masters
-# setsid themselves: dch -k ends each by the pid on its socket. Sessions and
-# dirs a test made under /tmp itself are left: no safe rule finds them from
-# here. Only these rows print, never another process's argv.
+# setsid themselves: dch -k ends each by the pid on its socket. Then runreap
+# empties $DCH_TEST_TMP. Only these rows print, never another process's argv.
+# Not reached (QA 1.60.0 LOW-T4, left on purpose): a child that left the
+# group and is no master, e.g. a pty child ignoring SIGHUP or a
+# start_new_session one. Finding it by an environment marker would mean
+# killing by a pattern over other processes' environments, and tests that
+# build their env from scratch or strip DCH_* would drop the marker anyway.
 pyreap(){
     me=$(ps -o pgid= -p $$ | tr -d ' ')
     # never kill -- -'', -0, -1 or our own group: $! is none of them
@@ -62,15 +66,65 @@ pyreap(){
     fi
     for s in "$SOCKDIR"/*.sock; do
         n=${s##*/}
-        [ -S "$s" ] && ! printf '%s\n' "$pyls" | grep -qxF "$n" || continue
+        # -e and --: a name starting with - is no option (QA 1.60.0 LOW-T10)
+        [ -S "$s" ] && ! printf '%s\n' "$pyls" | grep -qxF -e "$n" || continue
         printf '       ended its session %s with dch -k\n' "${n%.sock}"
-        "$DCH" -k "${n%.sock}" >/dev/null 2>&1
+        contmaster "$s"
+        "$DCH" -k -- "${n%.sock}" >/dev/null 2>&1
     done
+    runreap
+}
+# Tests make their temp dirs in $DCH_TEST_TMP (short: socket paths stay far
+# under sun_path's 104 bytes). End every dch master listening on a socket in
+# it (dch -k checks the socket's own listener is that session's master), then
+# remove what is in it. Nothing else is signalled.
+runreap(){
+    [ -d "${DCH_TEST_TMP:-}" ] || return 0
+    find "$DCH_TEST_TMP" -type s -name '*.sock' 2>/dev/null |
+    while IFS= read -r s; do
+        n=${s##*/}
+        contmaster "$s"
+        DCH_SOCKET_DIR=${s%/*} "$DCH" -k -- "${n%.sock}" >/dev/null 2>&1
+    done
+    # an ending master may still write its record: retry for up to 2 s
+    rn=0
+    while [ "$rn" -lt 10 ]; do
+        rm -rf "${DCH_TEST_TMP:?}"/* 2>/dev/null
+        [ -z "$(ls -A "$DCH_TEST_TMP")" ] && return 0
+        sleep 0.2; rn=$((rn + 1))
+    done
+}
+
+# A master stopped with SIGSTOP holds dch -k's SIGTERM until it is
+# continued: SIGCONT the pid on socket $1 when its argv says it is that
+# socket's master (dch's is_master_of rule). A running one ignores it. One
+# whose backlog is full refuses the connect on macOS: not reached.
+contmaster(){
+    python3 -c 'import os, signal, socket, struct, subprocess, sys
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(2)
+s.connect(sys.argv[1])
+if sys.platform == "darwin":  # SOL_LOCAL, LOCAL_PEERPID
+    pid = struct.unpack("i", s.getsockopt(0, 2, 4))[0]
+else:
+    pid = struct.unpack("3i", s.getsockopt(socket.SOL_SOCKET,
+                                           socket.SO_PEERCRED, 12))[0]
+a = subprocess.run(["ps", "-o", "command=", "-p", str(pid)],
+                   capture_output=True, text=True).stdout.split()
+if pid > 1 and "--master-of" in a[:-1] and os.path.realpath(
+        a[a.index("--master-of") + 1]) == os.path.realpath(sys.argv[1]):
+    os.kill(pid, signal.SIGCONT)' "$1" >/dev/null 2>&1
 }
 
 # Isolate session dir: dch uses $XDG_RUNTIME_DIR/dch-$UID.
 TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+# The tests' own temp dirs: one short dir under /tmp per run (see runreap).
+DCH_TEST_TMP=$(mktemp -d /tmp/dchr.XXXXXX) || exit 1
+export DCH_TEST_TMP
+# and the ones made in the default TMPDIR (tempfile.mkdtemp() with no dir),
+# so runreap ends and removes theirs too (QA 1.60.0 LOW-T4)
+export TMPDIR="$DCH_TEST_TMP"
+trap 'runreap; rm -rf "$TMP" "$DCH_TEST_TMP"' EXIT
 trap 'pyreap; exit 130' INT TERM HUP
 export XDG_RUNTIME_DIR="$TMP"
 # DCH_SOCKET_DIR wins over XDG_RUNTIME_DIR: an inherited one would point the
@@ -210,6 +264,7 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
 	pyrun "kitty keyboard pop reaches both screens" kbd_altscreen_test.py
 	pyrun "mode sequences split across pty reads are re-armed" mode_split_test.py
 	pyrun "spawn over leftover socket + hot-path attach" spawn_test.py
+	pyrun "a session nothing sees answers DECRQM 2026 and XTVERSION (#273)" query_answer_test.py
 fi
 
 # --- hot-path performance budget (spawn-vs-attach decision) ----------------
@@ -288,6 +343,7 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "--run into a Claude session goes through the gate (#112)" run_agent_test.py
     pyrun "--say/--run/--revive stop safely on a signal (#126)" verb_signal_test.py
     pyrun "auto-allow answers plain permission prompts; --config" auto_allow_test.py
+    pyrun "a suspended Claude: claude_foreground false, nothing typed to the shell (#282)" claude_fg_test.py
     # --stop's own 3 s deadlines expire on the ASan-slowed macOS CI runner
     # (a different check each run, no sanitizer report); ASan on Linux and
     # every plain build still run it.
@@ -1064,6 +1120,7 @@ else
 fi
 pyrun "xray goldens: chapters, identity, corpus labels, MANIFEST" xray_golden.py
 pyrun "the --xray view: tabs, card, reader, hostile text, signals, picker X" xray_view_test.py
+pyrun "the --xray reader reads on: past an end, ] and [, the header, back to the origin (#288)" xray_reader_next_test.py
 pyrun "the --xray view: a query child stopped right after its fork leaves the terminal alone, direct and chord" xray_fork_sig_test.py
 pyrun "the --xray view repaints after a stop and fg, direct and chord (#255)" xray_view_cont_test.py
 # #25: a socket-write interposer (tests/sockfail.c) makes every query child
@@ -1098,23 +1155,36 @@ pyrun "xray: a live Codex's rollout, the mapping, the seam, --follow" xray_codex
 # the file window's guard (#178): QA's repro with FAKE files, local and over
 # a loopback dch serve, through ended sessions so lite runs it too
 pyrun "xray file windows: no wide root, the deny list, hard links" xray_deny_test.py
+# QA 1.60.0 LOW-T8: dch serve's ctls get no DCH_XRAY_NOCLOCK, DCH_XRAY_CAPS
+pyrun "dch serve keeps X-ray's test switches from its ctls" serve_xray_env_test.py
 
 # --- the watchdog ends a hung test, its child and its session, only them ----
-# watchdog_hang.py records its pid, a child's and a session master's, then
-# hangs past a 3 s watchdog. The sleep is a bystander in run.sh's own group.
+# watchdog_hang.py records its pid, a child's, a session master's and one
+# in its own temp dir under $DCH_TEST_TMP (#250), and a session named -x in
+# each (LOW-T10), stops the first two (LOW-T4: a stopped master needs a
+# SIGCONT to act on dch -k), then hangs past a 3 s watchdog. The sleep is a bystander in
+# run.sh's own group; session -kl, from before the test, is another (dch -k
+# -kl was "kill all").
 # The subshell keeps the hung test's FAIL out of the counts.
 if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
-    wdf=$fail wdpy='' wdkid='' wdm='' wdname=''
+    wdf=$fail wdpy='' wdkid='' wdm='' wdname='' wdm2='' wdtd='' wdx='' wdx2=''
     sleep 30 & wdby=$!
+    "$DCH" --master-of "$SOCKDIR/-kl.sock" -- sleep 30 </dev/null >/dev/null 2>&1 &
+    wdkl=$!
+    n=0
+    while [ "$n" -lt 50 ] && [ ! -S "$SOCKDIR/-kl.sock" ]; do
+        sleep 0.1; n=$((n + 1))
+    done
     (DCH_TEST_TIMEOUT=3 DCH_WD_PIDS="$TMP/wd.pids"; export DCH_WD_PIDS
      pyrun "hung" watchdog_hang.py) >"$TMP/wd.out" 2>&1
-    [ -f "$TMP/wd.pids" ] && read -r wdpy wdkid wdm wdname <"$TMP/wd.pids"
+    [ -f "$TMP/wd.pids" ] &&
+        read -r wdpy wdkid wdm wdname wdm2 wdtd wdx wdx2 <"$TMP/wd.pids"
     wdgone(){ for p; do
         case $p in ''|*[!0-9]*) return 1 ;; esac
         ! kill -0 "$p" 2>/dev/null || return 1
     done; }
     n=0
-    while [ "$n" -lt 50 ] && ! wdgone "$wdpy" "$wdkid" "$wdm"; do
+    while [ "$n" -lt 50 ] && ! wdgone "$wdpy" "$wdkid" "$wdm" "$wdm2" "$wdx" "$wdx2"; do
         sleep 0.1; n=$((n + 1))
     done
     grep -q '^  FAIL hung$' "$TMP/wd.out" && grep -q 'Timeout (' "$TMP/wd.out" \
@@ -1125,9 +1195,20 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     wdgone "$wdm" && [ -n "$wdname" ] && [ ! -e "$SOCKDIR/$wdname.sock" ] \
         && ok "watchdog: the session it started in the socket dir ends" \
         || bad "watchdog: the session it started in the socket dir ends"
+    case $wdtd in "$DCH_TEST_TMP"/?*) [ ! -e "$wdtd" ] ;; *) false ;; esac &&
+        wdgone "$wdm2" &&
+        ok "watchdog: its temp dir in DCH_TEST_TMP goes, the session there ends" ||
+        bad "watchdog: its temp dir in DCH_TEST_TMP goes, the session there ends"
+    wdgone "$wdx" "$wdx2" &&
+        ok "watchdog: its sessions named -x end, in the socket dir and its temp dir" ||
+        bad "watchdog: its sessions named -x end, in the socket dir and its temp dir"
+    kill -0 "$wdkl" 2>/dev/null && [ -S "$SOCKDIR/-kl.sock" ] &&
+        ok "watchdog: session -kl, from before the test, lives" ||
+        bad "watchdog: session -kl, from before the test, lives"
     kill -0 "$wdby" 2>/dev/null && ok "watchdog: a process outside its group lives" \
         || bad "watchdog: a process outside its group lives"
     kill "$wdby"
+    kill "$wdkl" 2>/dev/null
     [ "$fail" = "$wdf" ] || sed 's/^/       /' "$TMP/wd.out"
     [ -S "$SOCKDIR/$wdname.sock" ] && "$DCH" -k "$wdname" >/dev/null 2>&1
     # DCH_TEST_TIMEOUT 0 (no watchdog) and invalid values (600) pass a test

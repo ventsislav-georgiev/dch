@@ -161,7 +161,11 @@ def redraw_keeps_unread_output():
             "the redraw flushed the unread marker; --read: %r" % out)
     finally:
         master.terminate()
-        master.wait(10)
+        try:
+            master.wait(10)
+        except subprocess.TimeoutExpired:
+            master.kill()
+            master.wait()
         shutil.rmtree(tmp, ignore_errors=True)
 
 

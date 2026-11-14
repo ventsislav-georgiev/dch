@@ -3167,6 +3167,8 @@ ctl_esc(struct sb *b, const char *s, size_t n)
 	}
 }
 
+static int g_ctl_errmid;	/* the host's stderr written ends mid-line */
+
 /* One stream ctl_in gathered onto f: all of b as it comes, or with esc (a
 ** host's --xray --json) its whole lines, all of it when last, through
 ** ctl_esc; the rest stays in b. 0, -1 when the write failed, or -2 (none
@@ -3189,6 +3191,8 @@ ctl_out(FILE *f, struct sb *b, int esc, int last)
 	else if (fwrite(esc ? e.p : b->p, 1, esc ? e.n : k, f) !=
 	         (esc ? e.n : k) || fflush(f))
 		rc = -1;
+	else if (f == stderr && (esc ? e.n : k))
+		g_ctl_errmid = (esc ? e.p[e.n - 1] : b->p[k - 1]) != '\n';
 	free(e.p);
 	memmove(b->p, b->p + k, b->n - k);
 	b->n -= k;
@@ -3235,6 +3239,21 @@ ctl_payload(struct sb *b, int argc, char **argv, const char *cwd)
 	free(j.p);
 }
 
+/* A host's refusal as said: one of an X-ray flag this dch's own allowlist
+** took is an older dch's there (#297; #263 for a ref kind). */
+static const char *
+ctl_older(const char *msg, char *buf, size_t cap)
+{
+	static const char tail[] = " is not allowed with --xray";
+	size_t n = strlen(msg), t = sizeof tail - 1;
+
+	if (n <= t || msg[0] != '-' || strcmp(msg + n - t, tail))
+		return msg;
+	snprintf(buf, cap, "the host's dch does not know %.*s", (int)(n - t),
+	         msg);
+	return buf;
+}
+
 static volatile sig_atomic_t g_ctl_sig;	/* SIGINT or SIGTERM: cancel */
 
 static void
@@ -3269,12 +3288,13 @@ ctl_run(int fd, const char *sh, const char *verb, struct sb *rq,
 	static const unsigned char c34[] = { 0x34, 0, 0, 0, 0 };
 	struct sb out = {0}, err = {0};
 	unsigned char buf[RM_READ];
-	char msg[400] = "", why[100] = "";
+	char msg[400] = "", why[100] = "", old[450];
 	size_t off = 0;
 	long long end = now_ms() + RM_ATTACH_MS, cend = 0, heard, t;
 	int r = 0, xit = 1, code = 1, cx = 0, w;	/* cx: the signal, -1 EPIPE */
 	ssize_t k;
 
+	g_ctl_errmid = 0;
 	while (off < rq->n)
 	{
 		struct pollfd pf;
@@ -3397,24 +3417,26 @@ ctl_run(int fd, const char *sh, const char *verb, struct sb *rq,
 		return cx < 0 ? 0 : 128 + cx;
 	if (r < 0)
 	{
-		fprintf(stderr, "dch: %s: unreachable: %s\n", sh, msg);
+		fprintf(stderr, "%sdch: %s: unreachable: %s\n",
+		        g_ctl_errmid ? "\n" : "", sh, msg);
 		return DCH_EXIT_UNREACHABLE;
 	}
 	if (msg[0])
 	{
 		/* a 0x13: the host refused this request, nothing ran */
 		if (code == 1)
-			fprintf(stderr, "dch: %s: %s\n", sh, msg);
+			fprintf(stderr, "dch: %s: %s\n", sh,
+			        ctl_older(msg, old, sizeof old));
 		else
 			fprintf(stderr, "dch: %s refused: %s\n", sh, msg);
 		return code == 1 ? 1 : DCH_EXIT_REFUSED;
 	}
 	if (why[0])
-		fprintf(stderr, "dch: %s: %s stopped by the host (%s)\n", sh,
-		        verb, why);
-	else if (xit >= 128)
-		fprintf(stderr, "dch: %s: %s on the host ended by signal %d\n",
-		        sh, verb, xit - 128);
+		fprintf(stderr, "%sdch: %s: %s stopped by the host (%s)\n",
+		        g_ctl_errmid ? "\n" : "", sh, verb, why);
+	else if (xit >= 128)	/* on its own line (QA 1.60.0 NIT-R5) */
+		fprintf(stderr, "%sdch: %s: %s on the host ended by signal "
+		        "%d\n", g_ctl_errmid ? "\n" : "", sh, verb, xit - 128);
 	return xit;
 }
 
@@ -4079,7 +4101,7 @@ static void
 rq_net(struct rq *q, struct sb *o)
 {
 	unsigned char buf[RM_READ];
-	char msg[400], why[100], m[800];
+	char msg[400], why[100], m[800], old[450];
 	int r, xit, code;
 	ssize_t k = read(q->p->fd, buf, sizeof buf);
 
@@ -4123,7 +4145,8 @@ rq_net(struct rq *q, struct sb *o)
 		{
 			/* a 0x13: the host refused it, nothing ran */
 			snprintf(m, sizeof m, code == 1 ? "dch: %s: %s"
-			         : "dch: %s refused: %s", q->sh, msg);
+			         : "dch: %s refused: %s", q->sh,
+			         code == 1 ? ctl_older(msg, old, sizeof old) : msg);
 			rq_err(o, q->req, m);
 			rq_exit(o, q->req, code == 1 ? 1 : DCH_EXIT_REFUSED,
 			        "refused");
