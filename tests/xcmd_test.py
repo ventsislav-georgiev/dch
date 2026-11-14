@@ -12,7 +12,7 @@ SIGTERM, env and cwd, no shell expansion of the config line, EINTR.
 
 Run:  python3 tests/xcmd_test.py        (CC from ./Makefile, else cc)
 """
-import json, os, re, shutil, signal, subprocess, sys, tempfile, time
+import glob, json, os, re, shutil, signal, subprocess, sys, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.dirname(HERE)
@@ -401,5 +401,13 @@ if __name__ == "__main__":
     try:
         rc = main()
     finally:
+        # a failing row leaves its script's `sleep` in another group: end
+        # each pid the scripts recorded (exact pids, no pattern kill)
+        for f in glob.glob(os.path.join(T, "*.pid")):
+            try:
+                with open(f) as fh:
+                    os.kill(int(fh.read().split()[0]), signal.SIGKILL)
+            except (OSError, ValueError, IndexError):
+                pass
         shutil.rmtree(T, ignore_errors=True)
     sys.exit(rc)
