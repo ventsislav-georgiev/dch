@@ -348,6 +348,11 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "--say/--run/--revive stop safely on a signal (#126)" verb_signal_test.py
     pyrun "auto-allow answers plain permission prompts; --config" auto_allow_test.py
     pyrun "a suspended Claude: claude_foreground false, nothing typed to the shell (#282)" claude_fg_test.py
+    # #330: pyrun hides a passing test's output; say whether the under-script
+    # rows ran or skipped (a failing run also shows them in its dump above)
+    grep "^  [a-zA-Z]* *under script, fg: the fake's screen is back" "$TMP/pyout"
+    sed -n '/^    keys=/,/^  SKIP under script/p' "$TMP/pyout" | grep -q SKIP \
+        && sed -n '/^    keys=/,/^  SKIP under script/p' "$TMP/pyout"
     # --stop's own 3 s deadlines expire on the ASan-slowed macOS CI runner
     # (a different check each run, no sanitizer report); ASan on Linux and
     # every plain build still run it.
