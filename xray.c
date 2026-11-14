@@ -10168,8 +10168,12 @@ sr_chapters(struct xr_search *s, const struct sr_win *w)
 		if (!h->pend)
 			continue;
 		for (i = ch->n; i > 0 && !c; i--)
-			if (xr_chapter_at(ch, i - 1)->offset <= h->off)
-				c = xr_chapter_at(ch, i - 1);
+		{
+			const struct xr_chapter *x = xr_chapter_at(ch, i - 1);
+
+			if (x && x->offset <= h->off)
+				c = x;
+		}
 		/* i: c's index now, so 0 is the window's first chapter */
 		if (c && (i || !c->partial || !wa) &&
 		    sr_region(s, c->offset) == sr_region(s, h->off))
