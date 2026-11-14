@@ -157,6 +157,11 @@ extern int xv_tab;	/* the tab it opens on: 0 Chapters, 1 Refs */
 /* Set when xv_run returns 0 and the user pressed o (#194): the session to
 ** attach (a name, or host:name), as `dch -a` takes it; else "". */
 extern char xv_go[512];
+/* Keys typed at the view dropped: read until a 100 ms pause (1 s in a
+** bracketed paste), 2 s at most; any: the first read waits (#230,
+** MED-V20). xv_paste_in: in a paste after the n bytes at c. */
+void xv_drop_keys(int fd, int any);
+int xv_paste_in(const unsigned char *c, size_t n, int in);
 /* dch.c's, for it: xray_main(ac, av) in a forked child with stdout and
 ** stderr into *out and *err (never exec, never the terminal fd; av[0]
 ** "--read": ctl's --read host:name in its place, #188); its pid, or -1. A

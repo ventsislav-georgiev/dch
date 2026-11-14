@@ -195,7 +195,7 @@ struct xv
 	char *selk;		/* Refs: the selected row's key, followed when
 				** the rows change */
 	char *sela;		/* Responses: the selected item's anchor, so */
-	int old;		/* Responses: a host too old to send them */
+	int old;		/* Responses: no chapter with an answer field */
 	/* the card */
 	char *ckey, *ctext;
 	int full, scope, cdone, cpartial, csel, ctop;
@@ -212,6 +212,7 @@ struct xv
 	/* the reader */
 	char *rtitle, *rwant;
 	char *rans;		/* opened on an answer: its start (#290) */
+	char *rsnip;		/* opened on a Search hit: its snippet */
 	char *ranchor, *rturn;	/* the chapter shown; one being turned to */
 	long long rat;
 	int rtrunc, rtop, rw, rloaded;
@@ -383,6 +384,33 @@ xv_in(const char *s, size_t n, const char *w)
 		if (xv_at(s + k, w))
 			return 1;
 	return 0;
+}
+
+/* Where in s a search hit's snippet w starts (MED-V21), w as the engine
+** cuts it: a run of blanks and controls one space. NULL: not in s. */
+static const char *
+xv_snipat(const char *s, const char *w)
+{
+	const unsigned char *a, *b;
+
+	for (; *w && *s; s++)
+	{
+		for (a = (const unsigned char *)s, b = (const unsigned char *)w;
+		     *b; b++)
+			if (*b != ' ')
+			{
+				if (*a++ != *b)
+					break;
+			}
+			else if (*a > ' ' && *a != 0x7f)
+				break;
+			else
+				while (*a && (*a <= ' ' || *a == 0x7f))
+					a++;
+		if (!*b)
+			return s;
+	}
+	return NULL;
 }
 
 /* n bytes of s, drawn (hostile text: pk_txt). */
@@ -1137,6 +1165,7 @@ xv_search(struct xv *v, const char *t)
 		         "bytes, no control character");
 		return;
 	}
+	v->status[0] = '\0';	/* an earlier refusal's (LOW-V18) */
 	snprintf(v->sq, sizeof v->sq, "%s", t);
 	snprintf(v->q, sizeof v->q, "%s", v->sq);
 	xv_hits_free(v);
@@ -1557,7 +1586,8 @@ static void
 xv_wrap(struct xv *v, int w)
 {
 	struct xv_rl l;
-	int k;
+	const char *p;
+	int k, at = -1;
 
 	v->nrl = 0;
 	v->rw = w;
@@ -1598,8 +1628,25 @@ xv_wrap(struct xv *v, int w)
 			s++;
 		}
 	}
+	/* opened on a Search hit (MED-V21): in the entry holding its snippet
+	** (entries carry no offset), at the first line from there on holding
+	** the text, else the snippet's own line */
+	for (k = 0, p = NULL; v->rsnip && !v->rloaded && k < v->nrl; k++)
+		if (!v->rl[k].kind && at >= 0)
+			break;
+		else if (!v->rl[k].kind)
+			p = xv_snipat(v->e[v->rl[k].n].text, v->rsnip);
+		else if (p && v->rl[k].s + v->rl[k].n > p &&
+		         (at < 0 || xv_in(v->rl[k].s, v->rl[k].n, v->rwant)))
+		{
+			at = k;
+			if (xv_in(v->rl[k].s, v->rl[k].n, v->rwant))
+				break;
+		}
+	if (at >= 0)
+		v->rtop = at > 2 ? at - 2 : 0;
 	/* opened from a mention: at the ref's first line */
-	if (v->rwant && !v->rloaded)
+	else if (v->rwant && !v->rloaded)
 		for (k = 0; k < v->nrl; k++)
 			if (v->rl[k].kind && xv_in(v->rl[k].s, v->rl[k].n, v->rwant))
 			{
@@ -1636,6 +1683,8 @@ xv_rline(struct xv *v, const struct json_parser *p)
 		v->rwant = NULL;
 		free(v->rans);
 		v->rans = NULL;
+		free(v->rsnip);
+		v->rsnip = NULL;
 	}
 	xv_read_free(v);
 	v->rtitle = xv_str(p, 0, "title");
@@ -1687,6 +1736,8 @@ xv_read(struct xv *v, const char *anchor, const char *want)
 	v->rwant = want ? strdup(want) : NULL;
 	free(v->rans);
 	v->rans = NULL;
+	free(v->rsnip);
+	v->rsnip = NULL;
 	free(v->ranchor);
 	v->ranchor = strdup(anchor);
 	free(v->rturn);
@@ -2100,8 +2151,10 @@ xv_item(const struct xv *v, int k)
 	return c->resp[0] || c->tools[0] || c->roff >= 0 || xv_working(v, k);
 }
 
-/* A remote view whose host sends no answers (a dch before 1.63.0): a turn
-** has ended and no chapter carries any of #296's fields */
+/* No chapter carries any of #296's fields though a turn has ended: a remote
+** host before 1.63.0, or one whose turns have no answer and no tool yet.
+** Nothing the host sends tells the two apart (LOW-V19): Responses lists
+** nothing, a last turn's working line included, and says none yet. */
 static int
 xv_old(const struct xv *v)
 {
@@ -3224,6 +3277,69 @@ xv_live(const struct xv *v)
 	return v->have && v->live && !(v->ended && !v->kid[XV_FK].rc);
 }
 
+/* The bar's cells for tabs lo..hi of w's nt (each its cells, the space
+** before it not counted), a mark at the side with more. */
+static int
+xv_tabsw(const int *w, int nt, int lo, int hi)
+{
+	int k, s = lo > 0 ? 2 : 0;	/* the mark, the space after it */
+
+	for (k = lo; k <= hi; k++)
+		s += w[k] + (k > lo);
+	return s + (hi < nt - 1 ? 2 : 0);
+}
+
+/* The tab bar (NIT-V9): nt tabs, name[k] with count c[k] (-1 none), tab on
+** current, no word ever cut: all of them with their counts, else all
+** without (a "Search 50+" its first word), else tab on and as many whole
+** neighbours as fit, a < or > at the side that has more. */
+static void
+xv_tabs(const char *const *name, const int *c, int nt, int on)
+{
+	char b[XV_NTAB][24];
+	int w[XV_NTAB], lo = on, hi = on, k, cn;
+
+	for (cn = 1; cn >= 0; cn--)
+	{
+		for (k = 0; k < nt; k++)
+		{
+			if (cn)
+				w[k] = pk_cps(name[k]) + 2 +
+				       (c[k] >= 0 ? snprintf(b[k], sizeof b[k], " %d",
+				                             c[k]) : 0);
+			else
+				w[k] = snprintf(b[k], sizeof b[k], "%.*s",
+				                (int)strcspn(name[k], " "), name[k]) + 2;
+		}
+		if (xv_tabsw(w, nt, 0, nt - 1) <= pk_w)
+		{
+			lo = 0;
+			hi = nt - 1;
+			break;
+		}
+	}
+	/* cn -1: tab on, then a neighbour at a time, right and left in turn */
+	for (k = 0; cn < 0 && k < 2 * nt; k++)
+		if (k % 2 && lo > 0 && xv_tabsw(w, nt, lo - 1, hi) <= pk_w)
+			lo--;
+		else if (!(k % 2) && hi < nt - 1 &&
+		         xv_tabsw(w, nt, lo, hi + 1) <= pk_w)
+			hi++;
+	if (lo > 0)
+	{
+		pk_set("2");
+		pk_txt(pk_utf ? "\xe2\x80\xb9" : "<");
+	}
+	for (k = lo; k <= hi; k++)
+		pk_tab(cn > 0 ? name[k] : b[k], cn > 0 ? c[k] : -1, k == on);
+	if (hi < nt - 1)
+	{
+		pk_set("2");
+		pk_txt(pk_utf ? " \xe2\x80\xba" : " >");
+		pk_set("");
+	}
+}
+
 static void
 xv_draw(struct xv *v, int force)
 {
@@ -3235,7 +3351,8 @@ xv_draw(struct xv *v, int force)
 	struct pkkey keys[12];
 	const char *ret = pk_utf ? "\xe2\x86\xb5" : "enter", *ent;
 	char b[1200], tmp[32], kt[32], sn[40];
-	int nk = 0, kl, cap, k, n, busy, isref, cnt[XV_NTAB];
+	const char *tn[XV_NTAB];
+	int nk = 0, kl, cap, k, n, busy, isref, cnt[XV_NTAB], tc[XV_NTAB], on = 0;
 	unsigned drop;
 
 	pk_begin(v->fd, v->color);
@@ -3445,11 +3562,16 @@ xv_draw(struct xv *v, int force)
 		/* Tasks: the open ones, in progress and pending (#320) */
 		cnt[4] = v->tq[0].tl.nst[0] + v->tq[0].tl.nst[1];
 		cnt[5] = v->tq[1].tl.n;	/* Memory: every row (#323) */
-		for (k = 0; k < XV_NTAB; k++)
+		for (k = n = 0; k < XV_NTAB; k++)
 			if ((xv_ord[k] != 2 || xv_rtab(v)) &&
 			    (xv_ord[k] < 4 || xv_ttab(v, xv_ord[k] - 4)))
-				pk_tab(tabn[xv_ord[k]], cnt[xv_ord[k]],
-				       xv_ord[k] == v->tab);
+			{
+				if (xv_ord[k] == v->tab)
+					on = n;
+				tn[n] = tabn[xv_ord[k]];
+				tc[n++] = cnt[xv_ord[k]];
+			}
+		xv_tabs(tn, tc, n, on);
 	}
 	pk_eol();
 
@@ -3530,9 +3652,7 @@ xv_draw(struct xv *v, int force)
 			else if (k == 0)
 			{
 				pk_set("2");
-				pk_txt(!v->have ? "    Reading" : v->tab == 2 && v->old
-				       ? "    the host's dch is older than 1.63.0 "
-				       "and sends no responses" : v->tab == 1 && v->nk &&
+				pk_txt(!v->have ? "    Reading" : v->tab == 1 && v->nk &&
 				       !v->allk ? "    Only files, commits and URLs: a "
 				       "shows them" : v->tab == 1 && v->ntmp &&
 				       !v->alltmp ? "    Only temp files: t shows them"
@@ -3917,7 +4037,11 @@ xv_key(struct xv *v, int c)
 			break;
 		k = v->vis[*sel];
 		if (v->tab == 3 && v->hit[k].chapter[0])
+		{
 			xv_read(v, v->hit[k].chapter, v->sq);	/* at it */
+			if (v->hit[k].snippet[0])
+				v->rsnip = strdup(v->hit[k].snippet);
+		}
 		else if (v->tab == 3)
 			snprintf(v->status, sizeof v->status, "this place is "
 			         "outside the %ss X-ray can open", xv_noun(v));
@@ -4009,7 +4133,64 @@ xv_free(struct xv *v)
 	free(v->sela);
 	free(v->cses);
 	free(v->rans);
+	free(v->rsnip);
 	free(v);
+}
+
+/* Inside a bracketed paste after the n bytes at c (#230): in, then the last
+** ESC[200~ (1) or ESC[201~ (0) in them. Pure. */
+int
+xv_paste_in(const unsigned char *c, size_t n, int in)
+{
+	size_t i;
+
+	for (i = 0; i + 6 <= n; i++)
+		if (!memcmp(c + i, "\033[20", 4) && c[i + 5] == '~' &&
+		    (c[i + 4] == '0' || c[i + 4] == '1'))
+			in = c[i + 4] == '0';
+	return in;
+}
+
+/* Keys on fd typed at the view, never for the session (#230, MED-V20):
+** what comes until a 100 ms pause (1 s inside a bracketed paste, to its
+** end) is read and dropped: an arrow key, a UTF-8 character, a paste of any
+** size, a second or held o. any: the first read waits (the failed chord
+** view's any key). The last 5 bytes carry over for a marker cut across two
+** reads. select, not poll: macOS's poll says POLLNVAL on /dev/tty, the
+** view's fd. shortcut: input paused longer than that, or still coming 2 s
+** on, leaves its rest to the session; a clock-free end needs the paste's
+** own end marker, which an unbracketed paste does not have */
+void
+xv_drop_keys(int fd, int any)
+{
+	unsigned char c[4096 + 5];
+	long long t0 = any ? 0 : xr_now_ms();
+	size_t k = 0;
+	ssize_t r;
+	int in = 0;
+
+	for (;; any = 0)
+	{
+		fd_set rs;
+		struct timeval tv = { in, in ? 0 : 100000 };
+
+		FD_ZERO(&rs);
+		FD_SET(fd, &rs);
+		if ((!any && select(fd + 1, &rs, NULL, NULL, &tv) <= 0) ||
+		    (r = read(fd, c + k, sizeof c - k)) <= 0)
+			break;
+		if (!t0)
+			t0 = xr_now_ms();
+		k += (size_t)r;
+		in = xv_paste_in(c, k, in);
+		if (k > 5)
+		{
+			memmove(c, c + k - 5, 5);
+			k = 5;
+		}
+		if (xr_now_ms() - t0 > 2000)
+			break;
+	}
 }
 
 int
@@ -4204,9 +4385,9 @@ xv_run(int fd, const char *n, char *err, size_t errsz)
 	sigaction(SIGCONT, &ocont, NULL);
 	xv_free(v);
 	pk_pn = 0;
-	/* o (LOW-V12): what is still unread on the terminal (a second o, a
-	** held one, Enter) was typed at the view, never for the session */
+	/* o (LOW-V12, MED-V20): what is unread on the terminal or still coming
+	** (a second o, a held one, Enter) was typed at the view */
 	if (xv_go[0])
-		tcflush(fd, TCIFLUSH);
+		xv_drop_keys(fd, 0);
 	return rc;
 }

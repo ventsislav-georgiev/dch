@@ -939,10 +939,11 @@ it has memories or instruction files:
   and attaches to the live session, as `dch -a <n>` does (`host:name` too;
   from the picker's `x`, as the picker's `Enter`; the `-k` and `-d` pickers
   say it is not theirs). On an ended session `o` says so and the view
-  stays. Keys typed with `o` that the view has not read yet (a second `o`,
-  `Enter`, a held `o`) are dropped; a key typed once the attach is up
-  reaches the session. The attach opens at the session's live screen, not at the
-  prompt.
+  stays. Keys typed with `o` (a second `o`, `Enter`, a held `o`) are
+  dropped until the keyboard pauses for 100 ms (1 s inside a bracketed
+  paste), for at most 2 s: a key held longer than 2 s does reach the
+  session. A key typed after the pause reaches the session. The attach
+  opens at the session's live screen, not at the prompt.
 - **Responses** (Claude and Codex sessions): what the agent showed you at
   the end of each turn, as Claude Code's Focus view does: its answer, or
   its summary of the work. Newest first, so the latest answer is on top
@@ -956,7 +957,9 @@ it has memories or instruction files:
   the answer (at the prompt's end when it cannot find it), and `q` comes
   back to the item. `/` filters on the prompt and the answer; `n` and `o`
   work as on Prompts. The tab's count is the items shown without `n`. A
-  host older than 1.63.0 sends no answers, and the tab says so.
+  host older than 1.63.0 sends no answers: the tab says `No responses yet`,
+  as it does for a session with none yet (nothing the host sends tells the
+  two apart).
 - **Refs**: what the session touched: the pull requests, issues and tickets
   it mentions, one row each, a faint line over them saying so; `a` shows its
   files, commits and URLs too, and the footer says how many are hidden. Rows
@@ -1004,7 +1007,8 @@ it has memories or instruction files:
   the search stopped early (too long, too much to read, or the history
   changed as it read); the hits shown stand. The tab's count is the hits,
   `50+` past the cap, nothing before a search. `j` `k` move hit by hit;
-  `Enter` reads the hit's prompt, scrolled to the text, and `q` comes back
+  `Enter` reads the hit's prompt, scrolled to that hit (the reply or tool
+  output it is in, not the text's first place in the prompt), and `q` comes back
   to the hit; on a hit outside the prompts the status line says the view
   cannot open it. `o` works as on Prompts. A shell session searches its
   ring; dch-lite and `xray_ring = 0` have none, and the list says `no x-ray
@@ -1075,7 +1079,7 @@ not clear X-ray; run `clear`".
 
 | Key | List | Card / reader |
 | --- | --- | --- |
-| `Tab` `→` `l` / `Shift-Tab` `←` `h` | the next / previous tab (Prompts, Responses, Refs, Search, Tasks, Memory) | `←` `h`: back |
+| `Tab` `→` `l` / `Shift-Tab` `←` `h` | the next / previous tab (Prompts, Responses, Refs, Search, Tasks, Memory; a narrow window drops the counts, then shows the current tab and the whole neighbours that fit, `‹` `›` where more are) | `←` `h`: back |
 | `↑` `↓` / `j` `k`, `PgUp` `PgDn`, `g` `G` | move | move / scroll; reader: at an end, again for the next / previous prompt |
 | `]` `[` | | reader: the next / previous prompt |
 | `Enter` | read the prompt (Responses: at its answer; Search: at the hit; Tasks: the one that last changed the task, or its card) / open the card (Refs, Memory); Search, typing: search | card: read the mention's prompt; Memory: the prompt that wrote or loaded it |

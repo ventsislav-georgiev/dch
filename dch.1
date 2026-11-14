@@ -874,11 +874,13 @@ the tab counts the prompts shown without
 here and in the reader leaves the view and attaches to the session, as
 .B \-a
 does, a remote one's too; on an ended session it says so and stays;
-keys typed with it that the view has not read yet (a second
+keys typed with it (a second
 .BR o ,
 Enter, a held
 .BR o )
-are dropped, and a key typed once the attach is up reaches the session),
+are dropped until the keyboard pauses for 100 ms (1 s inside a bracketed
+paste), for at most 2 s, so a key held longer than 2 s does reach the
+session; a key typed after the pause reaches it),
 .B Responses
 (Claude and Codex sessions: what the agent showed at the end of each turn,
 its answer or its summary of the work, as Claude Code's Focus view does;
@@ -893,7 +895,8 @@ it); a running turn says \(lqworking\(rq, an answer the size cap left out
 \fB/\fR filters on the prompt and the answer;
 \fBn\fR and \fBo\fR as on Prompts; the tab counts the items shown without
 .BR n ;
-a host before 1.63.0 sends no answers, and the tab says so),
+a host before 1.63.0 sends no answers, and the tab says none yet, as for a
+session with none),
 .B Refs
 (the pull requests, issues and tickets the session touched, a faint line
 over them saying so;
@@ -936,7 +939,7 @@ search; the hits newest first, at most 50, each its time, who said it
 (\(lq(outside the prompts shown)\(rq when the view has none) and up to 3
 lines around it, the match in bold; faint lines say when the 50 newest are
 shown and when the search stopped early; the tab counts the hits, 50+ past
-the cap; \fBEnter\fR reads the hit's prompt at the text, \fBq\fR back to the
+the cap; \fBEnter\fR reads the hit's prompt at that hit, \fBq\fR back to the
 hit; a shell searches its ring, dch\-lite and xray_ring = 0 say no corpus;
 a host before 1.63.0 does not know \-\-search, and the list says so)
 and, last and only when the session keeps a task list,

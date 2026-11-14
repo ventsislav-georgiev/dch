@@ -144,6 +144,18 @@ Covers:
      a memory's text. xv-cxt (Codex): its AGENTS.md under Instructions,
      Enter shows its text. xv-mb, 20000 memories: the tab and the whole
      count within 15 s (the time printed), G within 0.5 s.
+ 19. #325: xv-sp, one turn saying needle in its prompt (PLACE-A), in a
+     reply 60 lines on (PLACE-B) and in a Bash output 60 lines after that
+     (PLACE-C): Enter on each Search hit opens the reader with that hit's
+     line on screen, not the prompt's, q back to the same hit (MED-V21); a
+     good search after a refused one clears "bad search" (LOW-V18); the
+     word chapter on no screen. Its six tabs at widths 24, 30, 40 and 60,
+     each tab selected in turn: no word cut, the selected tab shown, a
+     < or > mark when tabs are left out (NIT-V9); at 20 the view says it
+     is too small, no tab drawn. A held o (MED-V20): a second o 10 ms and
+     50 ms after the first and 8 o's 33 ms apart (dch --xray), 8 o's from
+     the chord's view, the picker's x and Search: nothing reaches the
+     session, a z 300 ms after the last o does.
 
 Run:  python3 tests/xray_view_test.py      (uses ./dch)
 """
@@ -2738,6 +2750,138 @@ def test_memory_big():
         v.close()
 
 
+# ---- #325: a Search hit opens at its place; the tab bar's width ------------
+
+PSID = "11111111-2222-4333-8444-5555555555f7"   # xv-sp
+TABS = ("Prompts", "Responses", "Refs", "Search", "Tasks", "Memory")
+
+
+def fixture_place():
+    """xv-sp, in xv-me's project (its memories: a Memory tab): one turn
+    with a task (a Tasks tab) saying needle in its prompt, in a reply 60
+    lines on and in a Bash output 60 lines after that."""
+    ts = "2026-11-10T12:0%d:00Z"
+    reply = "".join("reply filler %02d\n" % i for i in range(60))
+    out = "".join("output filler %02d\n" % i for i in range(60))
+    record("xv-sp", PSID,
+           turn("PLACE-A where is the needle?", ts % 0,
+                *made(ts % 1, "k1", "1", "Find it") +
+                [at(say(reply + "PLACE-B the needle in the reply\nreply "
+                        "tail"), ts % 2),
+                 at(call("b1", "Bash", {"command": "cat log"}), ts % 3),
+                 at(result("b1", out + "PLACE-C the needle in the output\n"
+                           "output tail"), ts % 4)]),
+           proj="-mem-proj", cwd=MP)
+
+
+def test_place():
+    """MED-V21: Enter on each hit opens the reader at that hit; LOW-V18: a
+    good search clears a refusal's status."""
+    v = Pty([DCH, "--xray", "xv-sp"], rows=30, cols=100)
+    try:
+        v.wait(b"Prompts 1")
+        v.pump(0.5)
+        for _ in range(3):  # Responses, Refs, Search
+            v.key(b"\t", 0.5)
+        v.key(b"needle\r", 0.5)
+        ok = tabbar(v, "Search 3")
+        v.pump(0.3)
+        h = [(w, t) for w, t, _ in hits(rows(v.out))]
+        check("place: 3 hits in one turn, the output, the reply, the prompt",
+              ok and [w for w, _ in h] == ["Bash", "Reply", "You"], h)
+        seen = []
+        for k, (who, want, not_) in enumerate((
+                ("Bash", "PLACE-C", ("PLACE-A", "PLACE-B")),
+                ("Reply", "PLACE-B", ("PLACE-A", "PLACE-C")),
+                ("You", "PLACE-A", ("PLACE-B", "PLACE-C")))):
+            if k:
+                v.key(b"j", 0.5)
+            mark = len(v.out)
+            v.key(b"\r", 1.0)
+            v.wait(want.encode(), start=mark)
+            v.pump(0.5)
+            text = screen(v, mark)
+            seen.append(text)
+            # the body, under the head (its title is PLACE-A's prompt)
+            scr = rows(v.out[mark:])
+            body = "\n".join(scr[r] for r in sorted(scr) if r > 2)
+            check("place: Enter on the %s hit opens the reader with its line "
+                  "(%s) on screen, not the others (MED-V21)" % (who, want),
+                  "1 of 1" in scr.get(2, "") and want + " " in body and
+                  not any(n in body for n in not_), text)
+            mark = len(v.out)
+            v.key(b"q", 1.0)
+            check("place: q back to the same hit, the %s one" % who,
+                  tabbar(v, "Search 3") and who in head(v), head(v))
+        mark = len(v.out)
+        v.key(b"/\x15x\r", 1.0)
+        check("place: a 1-byte text is refused in the status line",
+              "bad search" in screen(v, mark), screen(v, mark))
+        v.key(b"\x15needle\r", 1.0)
+        tabbar(v, "Search 3")
+        v.pump(0.3)
+        now = "\n".join(rows(v.out).values())
+        seen.append(now)
+        check("place: a good search after it clears the refusal's status "
+              "(LOW-V18)", "bad search" not in now and
+              len(hits(rows(v.out))) == 3, now)
+        check("place: the word chapter on no screen",
+              not any("chapter" in t.lower() for t in seen), seen)
+        v.key(b"q")
+        v.exit()
+    finally:
+        v.close()
+
+
+def bar_ok(bar, sel, w):
+    """The tab bar: whole tab names, counts and marks only, within w
+    cells, sel shown selected, a mark when a tab is left out."""
+    toks = bar.replace("[", " ").replace("]", " ").split()
+    marks = ("\u2039", "\u203a", "<", ">")
+    return (toks and all(t in TABS or t in marks or re.fullmatch(r"\d+\+?", t)
+                         for t in toks) and "[" + sel in bar and
+            cells(bar.rstrip()) <= w and
+            (set(TABS) <= set(toks) or any(m in toks for m in marks)))
+
+
+def test_tabbar():
+    """NIT-V9: six tabs at 24 (the view's least), 30, 40 and 60 columns,
+    each selected in turn: no word cut, the selected one shown; at 20 the
+    view says it is too small."""
+    v = Pty([DCH, "--xray", "xv-sp"], rows=24, cols=100)
+    try:
+        ok = tabbar(v, "Memory") and tabbar(v, "Tasks")
+        check("tab bar: xv-sp has six tabs", ok and all(
+            t in rows(v.out).get(2, "") for t in TABS), rows(v.out).get(2))
+        for w in (60, 40, 30, 24):
+            mark = len(v.out)
+            v.resize(24, w)
+            v.pump(0.5)
+            bars = []
+            for k in range(len(TABS)):
+                if k:
+                    mark = len(v.out)
+                    v.key(b"\t", 0.4)
+                bar = rows(v.out[mark:]).get(2, "") or rows(v.out).get(2, "")
+                bars.append((TABS[k], bar))
+            check("tab bar at %d columns: every tab selected in turn, no word "
+                  "cut, the selected one shown (NIT-V9)" % w,
+                  all(bar_ok(b, t, w) for t, b in bars), bars)
+            v.key(b"\t", 0.4)  # back to Prompts
+        mark = len(v.out)
+        v.resize(24, 20)
+        v.pump(0.5)
+        text = screen(v, mark)
+        check("tab bar at 20 columns: the view says it is too small, no tab "
+              "drawn", "too small" in text and "[" not in text and
+              not any(t[:3] in text for t in TABS), text)
+        v.resize(24, 100)
+        v.key(b"q", 0.3)
+        v.exit()
+    finally:
+        v.close()
+
+
 def test_resize():
     v = Pty([DCH, "--xray", "xv-cl"])
     try:
@@ -2965,6 +3109,22 @@ def attach(env=None, extra=()):
     return a
 
 
+# o, then another after each gap (s), each its own write: a second o
+# typed later, a held o's repeats (macOS: about 30 a second); a z 300 ms
+# after the last
+HELD = (("a second o 10 ms later", [0.01]), ("a second o 50 ms later", [0.05]),
+        ("8 o's 33 ms apart", [0.033] * 7))
+
+
+def o_held(p, gaps):
+    os.write(p.fd, b"o")
+    for g in gaps:
+        time.sleep(g)
+        os.write(p.fd, b"o")
+    time.sleep(0.3)
+    os.write(p.fd, b"z")
+
+
 def chord_case(what, keys, lite):
     a = attach()
     try:
@@ -3074,6 +3234,81 @@ def test_chord():
             v.exit(5)
         finally:
             v.close()
+
+    # a held o (MED-V20): o's in reads of their own, still coming after the
+    # view's exit, dropped until a 100 ms pause; a z 300 ms on reaches it
+    for what, gaps in HELD:
+        v = Pty([DCH, "--xray", "xv-rx"], env=DTAP)
+        try:
+            got = rx()
+            ready(v)
+            o_held(v, gaps)
+            ok = until(lambda: (v.pump(0.1), clients("xv-rx") == 1)[1], 10)
+            check("dch --xray, %s: o attaches, no o reaches the session, a "
+                  "z 300 ms after the last does (MED-V20)" % what,
+                  ok and until(lambda: rx()[len(got):] == "7a", 5),
+                  (ok, rx()[len(got):]))
+            v.key(b"\x1c", 0.5)
+            v.exit(5)
+        finally:
+            v.close()
+    eight = HELD[-1][1]
+    a = attach()
+    try:
+        got = rx()
+        a.key(b"\x1cx", 0.5)
+        a.wait(b"X-ray  xv-rx")
+        mark = len(a.out)
+        a.key(b"\t\t", 0.5)  # Refs, Search, then Commands
+        ready(a, mark)
+        o_held(a, eight)
+        until(lambda: rx()[len(got):] != "", 5)
+        a.pump(0.3)
+        check("chord, 8 o's 33 ms apart: back to the session, no o reached "
+              "it, a z 300 ms after the last does (MED-V20)",
+              rx()[len(got):] == "7a" and a.reap() is None,
+              (rx()[len(got):], a.rc))
+    finally:
+        a.close()
+    v = Pty([DCH, "--xray", "xv-rx"], env=DTAP)
+    try:
+        got = rx()
+        ready(v)
+        v.key(b"\033[Z", 0.5)  # Search, typing
+        v.key(b"\033", 0.5)    # typing ended, the Search list
+        o_held(v, eight)
+        ok = until(lambda: (v.pump(0.1), clients("xv-rx") == 1)[1], 10)
+        check("dch --xray, Search, 8 o's 33 ms apart: no o reaches the "
+              "session, a z 300 ms after the last does (MED-V20)",
+              ok and until(lambda: rx()[len(got):] == "7a", 5),
+              (ok, rx()[len(got):]))
+        v.key(b"\x1c", 0.5)
+        v.exit(5)
+    finally:
+        v.close()
+    v = Pty([DCH, "-l"], env=DTAP)
+    try:
+        v.wait(b"x-ray")
+        for _ in range(4):  # the picker's row of xv-rx
+            mark = len(v.out)
+            v.key(b"x", 1.0)
+            v.wait(b"X-ray  ", start=mark)
+            if b"X-ray  xv-rx" in v.out[mark:]:
+                break
+            v.key(b"q", 1.0)
+            v.key(b"j", 0.5)
+        got = rx()
+        ready(v, mark)
+        o_held(v, eight)
+        ok = until(lambda: (v.pump(0.1), clients("xv-rx") == 1)[1], 10)
+        check("picker's x, 8 o's 33 ms apart: no o reaches the session, a z "
+              "300 ms after the last does (MED-V20)",
+              ok and until(lambda: rx()[len(got):] == "7a", 5),
+              (ok, rx()[len(got):]))
+        v.key(b"\x1c", 0.5)
+        v.exit(5)
+    finally:
+        v.close()
 
     # -E: no detach key, no chord; the session gets both bytes
     a = attach(extra=["-E"])
@@ -3347,6 +3582,9 @@ def main():
         fixture_memory()
         test_memory()
         test_memory_big()
+        fixture_place()
+        test_place()
+        test_tabbar()
         test_resize()
         test_small_card()
         shell()

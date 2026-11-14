@@ -102,7 +102,8 @@ Covers:
       text, or the tool line of a turn that ended on its result), Enter
       reads the item's prompt from the host at 2 of 2, q back to the item,
       each a ctl --xray of its own. A fake host whose chapters lack #296's
-      fields (a dch before 1.63.0): the tab says so, keys do no harm. One
+      fields (a dch before 1.63.0, or no answer yet): No responses yet,
+      never "older than 1.63.0" (LOW-V19), keys do no harm. One
       with them: the running turn working, an answer the cap dropped
       (response_offset, no response) says Enter reads it, and Enter reads
       it from the host. Every Prompts-to-Refs move is Shift-Tab now
@@ -1133,9 +1134,11 @@ def test_responses():
 
 
 def test_responses_fake():
-    """A host before 1.63.0 (chapters without #296's fields) says so on
-    Responses; one with the fields: a cut-dropped answer reads Enter reads
-    it, the running turn working."""
+    """Chapters without #296's fields (a host before 1.63.0, or a current
+    one whose ended turns have no answer and no tool yet: the same bytes):
+    Responses says none yet, never that the host is older (LOW-V19); with
+    the fields: a cut-dropped answer reads Enter reads it, the running turn
+    working."""
     two = (b'"offset":0},{"anchor":"s2","title":"second","kind":"prompt",'
            b'"at":1794300100,"offset":9}]')
     h = Flaky(SNAP.replace(b'"offset":0}]', two))
@@ -1145,10 +1148,12 @@ def test_responses_fake():
         v.wait(b"Prompts 2")
         mark = len(v.out)
         v.key(b"\t", 1.0)
-        check("Responses, an older host: the tab says its dch sends none",
-              v.wait(b"Responses 0", start=mark) and
-              v.wait(b"the host's dch is older than 1.63.0 and sends no "
-                     b"responses", start=mark), v.out[mark:][-600:])
+        ok = v.wait(b"Responses 0", start=mark) and \
+            v.wait(b"No responses yet", start=mark)
+        v.pump(0.3)
+        check("Responses, no answer and no tool in any ended turn: No "
+              "responses yet, not an older host (LOW-V19)",
+              ok and b"older than" not in v.out[mark:], v.out[mark:][-600:])
         v.key(b"j\r", 0.5)
         v.key(b"q")
         check("Responses, an older host: keys do no harm, q exits 0",
