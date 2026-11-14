@@ -1170,6 +1170,8 @@ c_marks(char *o, size_t cap)
 }
 
 #define PRM "\033]133;A\007$ \033]133;B\007"
+#define W10 "WWWWWWWWWW"
+#define W90 W10 W10 W10 W10 W10 W10 W10 W10 W10
 
 /* #335: output never titles a command, and a program holding a B open
 ** while the user types gets no flag and leaves the line to the shell */
@@ -1229,6 +1231,17 @@ test_forged_335(void)
 	c_marks(f, sizeof f);
 	CHECK("335: the first command after a restart is flagged",
 	      !strcmp(f, "1C;echo AFTER1|0C|") ||
+	      (printf("       got %s\n", f), 0));
+
+	/* NIT-X7: that first line wraps (90 columns at 80) */
+	start(80, 24, 2000);
+	feed("zp% ");
+	dch_vt_input_seen("echo " W90 "\r", 96);
+	feed("echo " W90 "\r\n\033]133;C\007\033]133;D;0\007" BLOCK("x"));
+	seq_feed(1, 30);
+	c_marks(f, sizeof f);
+	CHECK("335: the first command after a restart is flagged when it wraps",
+	      !strcmp(f, "1C;echo " W90 "|0C|") ||
 	      (printf("       got %s\n", f), 0));
 
 	/* LOW-X24 + NIT-X6: a right prompt after the line, typed ahead and

@@ -1281,6 +1281,20 @@ def test_refs():
           rl.returncode == 0 and rf.returncode == 0 and not ml and
           [l["mention"]["line"] for l in mf] == ["see src/far.c:3"],
           rl.stdout[-600:] + rl.stderr + rf.stdout[-300:])
+    # LOW-X28: so light's answer says partial; one for a path no window
+    # can hold does not, nor does --full's
+    rn = dch("--xray", "xr-refs", "--ref", "src/none.c", "--scope",
+             "session", "--json", env=head)
+    dl, dn = (ref_lines(rl.stdout) or [{}])[-1], (ref_lines(rn.stdout) or
+                                                   [{}])[-1]
+    df = (ref_lines(rf.stdout) or [{}])[-1]
+    check("ref: light's cwd walk stopped at its cap before a window that "
+          "may hold the path: partial; a path no window holds, and --full: "
+          "not partial",
+          dl.get("done") is True and dl["partial"] is True and
+          dn.get("done") is True and dn["partial"] is False and
+          df.get("done") is True and df["partial"] is False,
+          (dl, dn, df))
     prog = [l for l in ls if "progress" in l]
     check("ref: schema 1 on every line; a progress line per 250 ms "
           "(%d in %.2fs)" % (len(prog), wall),

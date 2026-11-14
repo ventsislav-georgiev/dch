@@ -1264,7 +1264,9 @@ and no
 .BR passage ;
 a transcript or rollout is read newest first, in 1 MiB windows from the
 end, each by a decoder that starts there (with the cwd the full read has
-there when a line within 16 MB before the window names it, else none; a window whose raw bytes cannot hold the ref is not decoded), so a
+there when a line within 16 MB before the window names it, else none, and then
+.B partial
+is true when that window may hold the asked path; a window whose raw bytes cannot hold the ref is not decoded), so a
 ref of the last turns is
 found inside the budget: lines come newest window first, and a mention
 in the turn its window starts in (unless the window starts the file), or
@@ -2047,6 +2049,13 @@ when the text between its B and C is exactly a line the client sent that no
 earlier block used; a line edited before its Enter gets none.
 A line typed at the prompt must also be its B..C text, unless it holds an
 editing key; a right prompt after it does not count.
+The first command after
+.B \-\-restart
+counts when the row above the cursor ends with a typed line (its rows, when
+it wraps).
+A program that prints A and B and waits while the user types a line gets
+that line's chapter, and the shell's run of it gets none: the screen cannot
+tell the terminal's echo from a shell's line editor.
 The title is the typed line, never a
 .B C;cmdline=
 from the mark.

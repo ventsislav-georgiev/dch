@@ -1317,10 +1317,14 @@ The corpus:
     not count. Only a line with an editing key is taken as the screen shows
     it, since history and completion change it. The first command after
     `--restart` (no `B` seen yet) counts when the row above the cursor ends
-    with a typed line. A `C` with none of these is read as forged by output:
-    a program that prints marks gets a chapter only for a block whose text
-    is a line the user typed, once per line, or for a block it holds open
-    while the user types a line with an editing key. The title is the typed
+    with a typed line (the line's rows, when it wraps). A `C` with none of
+    these is read as forged by output: a program that prints marks gets a
+    chapter only for a block whose text is a line the user typed, once per
+    line, or for a block it holds open while the user types a line with an
+    editing key. So a program that prints `A` and `B` and then waits while
+    the user types a line gets that line's chapter (the terminal echoes the
+    line after its `B`), and the shell's own run of the line gets none: the
+    screen cannot tell a program's echo from a shell's line editor. The title is the typed
     line; a `C;cmdline=` in the mark is ignored.
   - Rows, and the marks on them, enter the ring only when they scroll off
     the primary screen. So the commands still on the visible screen (in a
@@ -1589,7 +1593,9 @@ ref (`dch: not a ref`), relative paths against the session's cwd.
   found inside the budget: in windows of 1 MiB from the end, each read from
   its first whole line on, by a decoder that starts there with the cwd the
   full read has there when a line within 16 MB before the window names it,
-  else none, so a relative path there is no file ref (a mention in the turn the window starts in has
+  else none, so a relative path there is no file ref; when such a window
+  may hold the asked path, the answer says `partial: true` with
+  `why: "range"` (a mention in the turn the window starts in has
   `chapter: null`, unless the window starts the file, since a prompt there
   may continue an older turn; so does one in a turn the window saw begin
   only after a subagent's first record there or a tool result whose call is

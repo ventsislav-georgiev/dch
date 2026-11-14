@@ -7462,6 +7462,8 @@ win_skip(struct xr_claude *d, const struct xr_pf *f, int fd, uint64_t a,
 	return 1;
 }
 
+static int sr_pread(int fd, char *buf, size_t len, uint64_t off);
+
 int
 xr_claude_newest(struct xr_claude *d, int fd, uint64_t size, int *capped)
 {
@@ -7473,8 +7475,10 @@ xr_claude_newest(struct xr_claude *d, int fd, uint64_t size, int *capped)
 	struct xr_pf f;
 	int nr = 1, i, k, rc = buf && acc && sb ? 0 : -1, known = 0;
 	/* --ref's scan: only its key's hits count (sc_hit) */
-	int pf = !xr_noskip && d->tick == xr_scan_tick &&
-	         pf_build(&f, ((const struct xr_scan *)d->tctx)->key);
+	const char *key = d->tick == xr_scan_tick ?
+	                  ((const struct xr_scan *)d->tctx)->key : NULL;
+	int fb = key && pf_build(&f, key), pf = !xr_noskip && fb;
+	int fk = fb && !strncmp(key, "file:", 5);
 
 	w.tick = d->tick;
 	w.tctx = d->tctx;
@@ -7549,6 +7553,14 @@ xr_claude_newest(struct xr_claude *d, int fd, uint64_t size, int *capped)
 					cat = fl < hi ? fl : hi, cwd[0] = '\0';
 				if (k < 0 || d->halt)
 					break;
+				/* no cwd within the cap, the range's start not reached: a
+				** relative path here may be the key's, not counted
+				** (LOW-X28); the same test, prefilter on or off */
+				if (!k && fk && cat > lo && !*capped &&
+				    (b - a > 2 * XR_CHUNK ||
+				     sr_pread(fd, buf, (size_t)(b - a), a) ||
+				     !pf_none(&f, buf, (size_t)(b - a))))
+					*capped = 1;
 				known = k > 0 ? 1 : 2;
 			}
 			if ((rc = win_read(d, fd, a, b, &w, buf, acc, cwd)) >= 0)
