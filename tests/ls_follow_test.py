@@ -375,42 +375,57 @@ def main():
               and "by-watch" not in r.stdout, (first, got, r.stdout[:300]))
 
         # 16 followers from this machine: its --read still gets a slot
+        mark = len(open(log).read())
         nw = len(re.findall(r"watch \(device", open(log).read()))
+        # a dial past its 2 s (16 at once, a slow runner) is retried after
+        # EVERY, doubled per failure: a short one keeps that inside the wait
         many = [follow("--remote", "--follow", "--hosts", hosts,
-                       DCH_REMOTE_EVERY_MS="6000") for _ in range(16)]
-        end = time.time() + 20
+                       DCH_REMOTE_EVERY_MS="1500") for _ in range(16)]
+        t0, end = time.time(), time.time() + 10 * BUDGET  # 20 s, ASan 100 s
         while (len(re.findall(r"watch \(device", open(log).read())) < nw + 16
                and time.time() < end):
             time.sleep(0.2)
         time.sleep(0.5)
+        # the 17th rows below need 16 live streams: say what came instead
+        tail = open(log).read()[mark:]
+        up = len(re.findall(r"watch \(device", tail))
+        check("16 followers here: 16 watch streams up (%d in %.1f s, %d "
+              "connections)" % (up, time.time() - t0,
+                                tail.count("loopback peer let in")),
+              up == 16, (tail[-1500:], [os.read(f.p.stderr.fileno(), 300)
+                                        for f in many if select.select(
+                                            [f.p.stderr], [], [], 0)[0]]))
         got = ref()  # a one-shot --ls-json --remote: one more connection
         check("16 followers here: one more connection there still gets a "
               "slot", '"stale":false' in got
               and all(f.p.poll() is None for f in many),
               (got, open(log).read()[-600:]))
-        # watch streams have a cap of their own (QA 1.64.0 LOW-R15)
-        c = raw(port, frame(0x08, {"proto": "1.1"}),
-                frame(0x2e, {"device_id": "t-17"}))
-        got = reply(c, (0x11, 0x13))
-        c.close()
-        msg = json.loads(got[1]) if got and got[0] == 0x13 else {}
-        check("16 followers here: a 17th watch is refused busy, told why",
-              msg.get("code") == "busy" and "16 session list streams"
-              in msg.get("message", ""), got)
-        s17 = follow("--remote", "--follow", "--hosts", hosts,
-                     DCH_REMOTE_EVERY_MS="300")
-        many.append(s17)
-        rows, _ = s17.until(lambda x: rem(x, "srv") == {"rs1": False},
-                            BUDGET + 2)
-        time.sleep(2.0)  # past the refusal, polled every 300 ms
-        while s17.line(0.1):
-            pass
-        stale = [ln for ln in s17.lines if rem(json.loads(ln), "srv")
-                 != {"rs1": False}]
-        check("a 17th follower: polled, srv:rs1 never stale over 2 s",
-              rows is not None and not stale and s17.p.poll() is None
-              and len(re.findall(r"watch \(device", open(log).read()))
-              == nw + 16, (s17.lines[-3:], stale[:2]))
+        if up == 16:  # never the 17th against fewer
+            # watch streams have a cap of their own (QA 1.64.0 LOW-R15)
+            c = raw(port, frame(0x08, {"proto": "1.1"}),
+                    frame(0x2e, {"device_id": "t-17"}))
+            got = reply(c, (0x11, 0x13))
+            c.close()
+            msg = json.loads(got[1]) if got and got[0] == 0x13 else {}
+            check("16 followers here: a 17th watch is refused busy, told why",
+                  msg.get("code") == "busy" and "16 session list streams"
+                  in msg.get("message", ""), (got, open(log).read()[mark:]
+                                              [-1500:]))
+            s17 = follow("--remote", "--follow", "--hosts", hosts,
+                         DCH_REMOTE_EVERY_MS="300")
+            many.append(s17)
+            rows, _ = s17.until(lambda x: rem(x, "srv") == {"rs1": False},
+                                BUDGET + 2)
+            time.sleep(2.0)  # past the refusal, polled every 300 ms
+            while s17.line(0.1):
+                pass
+            stale = [ln for ln in s17.lines if rem(json.loads(ln), "srv")
+                     != {"rs1": False}]
+            check("a 17th follower: polled, srv:rs1 never stale over 2 s",
+                  rows is not None and not stale and s17.p.poll() is None
+                  and len(re.findall(r"watch \(device", open(log).read()))
+                  == nw + 16, (s17.lines[-3:], stale[:2], s17.p.poll(),
+                               open(log).read()[mark:][-1500:]))
         got = ref()
         check("and a plain connection still fits beside them",
               '"stale":false' in got, got)
