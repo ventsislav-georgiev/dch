@@ -110,6 +110,7 @@ void pk_txt(const char *s);
 int pk_cps(const char *s);
 void pk_pad(int end);
 void pk_fit(const char *s, int w);
+void pk_age(long when, char *b, size_t n);	/* now, 22m, 3h, 2d; "" none */
 void pk_line(void);
 void pk_eol(void);
 void pk_rule(void);

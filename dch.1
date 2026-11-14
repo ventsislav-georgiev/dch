@@ -930,7 +930,21 @@ lines around it, the match in bold; faint lines say when the 50 newest are
 shown and when the search stopped early; the tab counts the hits, 50+ past
 the cap; \fBEnter\fR reads the hit's prompt at the text, \fBq\fR back to the
 hit; a shell searches its ring, dch\-lite and xray_ring = 0 say no corpus;
-a host before 1.63.0 does not know \-\-search, and the list says so).
+a host before 1.63.0 does not know \-\-search, and the list says so)
+and, last and only when the session keeps a task list,
+.B Tasks
+(its tasks as
+.B \-\-tasks
+gives them, under faint group lines In progress, Pending, Done (newest
+first) and Dropped, each counted; a row is a mark, the id, the title (what
+a running task is doing), and at the right a label that says more than the
+status, \(lqblocked by\(rq ids and the age; the tab counts the open
+tasks; \fBEnter\fR reads the prompt that last changed the task, \fBq\fR
+back to it, or opens a card with what is known of a task with no prompt;
+\fB/\fR filters on id, title, note and label; asked once the prompts have
+shown, drawn as it comes, read again when the tab opens and every 5 s
+while it shows a running session; no tab for a shell, dch\-lite, an empty
+list or an older host).
 A card shows the ref's definitions, first and latest mention, counts by
 scope and mentions (newest first within each file, this session's first,
 also after
@@ -959,7 +973,7 @@ The line under the tabs names the corpus
 \(lqNo Claude session found here\(rq, ...).
 Keys: \fBTab\fR and \fBShift\-Tab\fR, \fB\(<-\fR \fB\(->\fR
 and \fBh\fR \fBl\fR go to the next and previous tab, in the order
-Prompts, Responses, Refs, Search;
+Prompts, Responses, Refs, Search, Tasks;
 \fBj\fR \fBk\fR, arrows, \fBPgUp\fR \fBPgDn\fR, \fBg\fR \fBG\fR move;
 \fBq\fR quits the list and goes back from a card or the reader;
 \fBEsc\fR clears the filter, else does the same;

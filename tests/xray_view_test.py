@@ -97,7 +97,8 @@ Covers:
      chapter, a new turn on top keeps a selection on its prompt and one on
      the first item on the first. xv-cx, a live fake Codex over the
      codex-0167 rollout: its answer and tool line, its last turn working.
-     A shell (xv-0) has no Responses tab.
+     A shell (xv-0) has no Responses tab. xv-cxt, a live fake Codex with
+     two update_plan calls: Tasks from the newest plan (#320).
  15. Search (#291): xv-se, a History Claude record with the needle in a
      prompt, a tool call, its result and two answers: Tab cycles Prompts,
      Responses, Refs, Search (no count before a search) and wraps; Search
@@ -112,13 +113,25 @@ Covers:
      the Prompts filter: ^R search in the footer and on the empty line, ^R
      lands on Search with their hit. xv-sm, 55 prompts: 50+ in the tab,
      the faint "the 50 newest are shown", G the 50th. A shell (xv-sh):
-     Commands, Refs, Search; its ring searched (each line as Output); on
-     dch-lite the list says no x-ray corpus.
+     Commands, Refs, Search (no Responses, no Tasks); its ring searched
+     (each line as Output); on dch-lite the list says no x-ray corpus.
  16. the card's mentions newest first (#304, QA 1.62.0 MED-V13): a
      transcript under 1 MiB (one light window), one spanning several (no
      zigzag of the windows), and after f (oldest first from the engine);
      the selected mention stays selected while f's lines arrive; Enter on
      a mention reads its prompt.
+ 17. Tasks (#320): xv-nt, a Claude record with no task record: no Tasks
+     tab, Tab never lands on one. xv-tk, six tasks over three prompts: the
+     tab last, counting the open ones (Tasks 3); Shift-Tab opens it; group
+     lines In progress, Pending, Done (newest first), Dropped, each
+     counted; the active row by its active text with its age (2h), blocked
+     by 1 on a row, ages 5m and 3d; a title with ESC, BEL, U+202E drawn
+     with ? and cut to one line, none of them reaching the terminal; j
+     past the group lines; Enter reads the turn that last changed the task
+     (3 of 3), q back to the same task; / filters in any case, keeping
+     only the groups with a match, also over a note; no match said; Esc
+     clears it. xv-tb, 20000 tasks: counted within 5 s, G, g, PgDn, j each
+     painted within 0.5 s, a filter within 1 s.
 
 Run:  python3 tests/xray_view_test.py      (uses ./dch)
 """
@@ -1728,6 +1741,76 @@ def test_responses_codex():
                        env=ENV)
 
 
+def test_tasks_codex():
+    """#320: xv-cxt, a live fake Codex whose rollout has two update_plan
+    calls: the Tasks tab from the newest plan, Enter reads its turn."""
+    tid = "019a1111-2222-7333-8444-555566667720"
+    src = os.path.join(HERE, "xray", "fixtures", "codex-0167", "codex",
+                       "019a1111-2222-7333-8444-555566667702.jsonl")
+    sess = os.path.join(HOME, ".codex", "sessions", "2026", "11", "10")
+    snaps = os.path.join(HOME, ".codex", "shell_snapshots")
+    fake = os.path.join(T, "bin", "codex")
+
+    def plan(ts, cid, steps):
+        return json.dumps({"timestamp": ts, "type": "response_item",
+                           "payload": {"type": "function_call",
+                                       "name": "update_plan", "call_id": cid,
+                                       "arguments": json.dumps({"plan": [
+                                           {"step": a, "status": b}
+                                           for a, b in steps]})}}) + "\n"
+    with open(src) as f:
+        body = f.read().replace("019a1111-2222-7333-8444-555566667702", tid)
+    with open(os.path.join(
+            sess, "rollout-2026-11-10T10-00-00-%s.jsonl" % tid), "w") as f:
+        f.write(body + plan("2026-11-10T10:00:03.000Z", "pl1",
+                            [("read the spec", "in_progress"),
+                             ("port the parser", "pending")]) +
+                plan("2026-11-10T10:00:04.000Z", "pl2",
+                     [("read the spec", "completed"),
+                      ("port the parser", "in_progress"),
+                      ("test it", "pending")]))
+    log = os.path.join(T, "codex-t.log")
+    cwd = os.path.join(T, "work", "xv-cxt")
+    os.makedirs(cwd, exist_ok=True)
+    r = subprocess.run([DCH, "--spawn", "xv-cxt", "--size", "80x24",
+                        "--cwd", cwd, fake], capture_output=True, text=True,
+                       timeout=30, env=dict(ENV, FAKE_CODEX_LOG=log))
+    got = until(lambda: os.path.exists(log) and
+                open(log).read().endswith("\n") and open(log).read().split(),
+                10)
+    check("Tasks, Codex: the fake codex runs", r.returncode == 0 and got,
+          r.stderr)
+    marker = got[1] if got and got[1] != "-" else None
+    p = os.path.join(snaps, tid + ".1.sh")
+    with open(p, "w") as f:
+        f.write("# Snapshot file\nexport DCH_SESSION=xv-cxt\n%s" % (
+            "export DCH_NATIVE_BRIDGE_ID=%s\n" % marker if marker else ""))
+    os.chmod(p, 0o600)
+    v = Pty([DCH, "--xray", "xv-cxt"], rows=30, cols=100)
+    try:
+        ok = tabbar(v, "Tasks 2", 15)
+        v.key(b"\033[Z", 0.8)
+        r = tasks_rows(v)
+        check("Tasks, Codex: the newest plan, in progress, pending, done",
+              ok and [re.sub(r" (now|\d+[mhd])$", "", x).lstrip("▌")
+                     for x in r] ==
+              ["In progress 1", "▶ 2 port the parser", "Pending 1",
+               "○ 3 test it", "Done 1", "✓ 1 read the spec"], r)
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        check("Tasks, Codex: Enter reads the turn of the plan",
+              v.wait(b" of ", start=mark) and v.wait(b"update_plan",
+                                                     start=mark),
+              screen(v, mark))
+        v.key(b"q", 0.8)
+        v.key(b"q")
+        v.exit()
+    finally:
+        v.close()
+        subprocess.run([DCH, "-k", "xv-cxt"], capture_output=True,
+                       timeout=30, env=ENV)
+
+
 # ---- Search (#291): where a word or phrase was said ------------------------
 
 SSID = "11111111-2222-4333-8444-5555555555d1"   # xv-se (not c1/c2: xv-tp, xv-tl)
@@ -1985,7 +2068,8 @@ def test_search_shell(lite):
               "no Responses", re.search(r"\[Refs", tabs[0]) and
               re.search(r"\[Search", tabs[1]) and
               re.search(r"\[Commands", tabs[2]) and
-              all("Responses" not in t for t in tabs), tabs)
+              all("Responses" not in t and "Tasks" not in t for t in tabs),
+              tabs)
         mark = len(v.out)
         v.key(b"\033[Z", 0.5)
         v.key(b"see o/r\r", 1.0)
@@ -2253,6 +2337,205 @@ def test_screen_group(lite):
     finally:
         v.close()
         dch("-k", "xv-0")  # the picker test's first row is xv-sh
+
+
+# ---- Tasks (#320): the session's task list ----------------------------------
+
+KSID = "11111111-2222-4333-8444-5555555555f1"   # xv-tk: a task list
+NSID = "11111111-2222-4333-8444-5555555555f2"   # xv-nt: none
+BSID = "11111111-2222-4333-8444-5555555555f3"   # xv-tb: 20000 tasks
+KEVIL = "evil \033]0;pwned\007 bi‮di " + "w" * 300
+
+
+def iso(ago):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - ago))
+
+
+def made(ts, tid, n, subject, desc="", active=None):
+    """A TaskCreate and its result naming task n."""
+    inp = {"subject": subject, "description": desc}
+    if active:
+        inp["activeForm"] = active
+    return [at(call(tid, "TaskCreate", inp), ts),
+            at(result(tid, "ok", {"toolUseResult": {"task": {"id": n}}}), ts)]
+
+
+def upd(ts, tid, n, **kw):
+    return at(call(tid, "TaskUpdate", dict(taskId=n, **kw)), ts)
+
+
+def fixture_tasks():
+    """xv-tk: six tasks over two prompts, one hostile; xv-nt: none; xv-tb:
+    20000 pending tasks."""
+    os.makedirs(os.path.dirname(tl(KSID)), exist_ok=True)
+    record("xv-tk", KSID,
+           turn("plan the work", iso(4 * 86400),
+                *(made(iso(4 * 86400), "c1", "1", "Fix the login test",
+                       "the CI fails", "Fixing the login test") +
+                  made(iso(4 * 86400), "c2", "2", "Write docs") +
+                  made(iso(4 * 86400), "c3", "3", "Old done") +
+                  made(iso(4 * 86400), "c4", "4", "Recent done") +
+                  made(iso(4 * 86400), "c5", "5", "Dropped one") +
+                  made(iso(4 * 86400), "c6", "6", KEVIL))) +
+           turn("do the work", iso(3 * 86400 + 60),
+                upd(iso(3 * 86400), "u3", "3", status="completed")) +
+           turn("finish it", iso(3 * 3600),
+                upd(iso(2 * 3600), "u1", "1", status="in_progress"),
+                upd(iso(2 * 3600), "u2", "2", addBlockedBy=["1"]),
+                upd(iso(300), "u4", "4", status="completed"),
+                upd(iso(300), "u5", "5", status="deleted")))
+    record("xv-nt", NSID, turn("no tasks here", iso(60), say("fine")))
+    record("xv-tb", BSID, turn("many", iso(600)))
+    with open(tl(BSID), "a") as f:
+        for i in range(1, 20001):
+            f.write('{"type":"assistant","message":{"content":[{"type":'
+                    '"tool_use","id":"t%d","name":"TaskCreate","input":'
+                    '{"subject":"bulk task %05d","description":""}}]}}\n'
+                    '{"type":"user","toolUseResult":{"task":{"id":"%d"}},'
+                    '"message":{"content":[{"type":"tool_result",'
+                    '"tool_use_id":"t%d","content":"ok"}]}}\n' % (i, i, i, i))
+
+
+def tasks_rows(v):
+    """Tasks' lines on screen over the rule, top down, blanks folded."""
+    out, scr = [], rows(v.out)
+    for k in sorted(x for x in scr if x >= 4):
+        r = scr[k]
+        if r.startswith(("─", "-")):
+            break
+        if r.strip():
+            out.append(re.sub(" +", " ", r).strip())
+    return out
+
+
+def test_tasks():
+    """#320: no tab without a task list; the tab last, its open count; the
+    groups and their order, marks, ages, blocked by; Enter reads the turn
+    that last changed the task, q back to it; the filter; hostile text."""
+    v = Pty([DCH, "--xray", "xv-nt"], rows=30, cols=100)
+    try:
+        v.wait(b"Prompts 1")
+        v.pump(1.5)
+        tabs = []
+        for _ in range(4):
+            v.key(b"\t", 0.4)
+            tabs.append(rows(v.out).get(2, ""))
+        check("Tasks: a session with no task list has no Tasks tab, Tab "
+              "never lands on one", all("Tasks" not in t for t in tabs) and
+              re.search(r"\[Prompts", tabs[-1]), tabs)
+        v.key(b"q")
+        v.exit()
+    finally:
+        v.close()
+    v = Pty([DCH, "--xray", "xv-tk"], rows=30, cols=100)
+    try:
+        ok = tabbar(v, "Tasks 3")
+        t = rows(v.out).get(2, "")
+        check("Tasks: the last tab, its count the open tasks (1 in progress, "
+              "2 pending)", ok and 0 <= t.find("Prompts 3") <
+              t.find("Search") < t.find("Tasks 3") and
+              re.search(r"Tasks 3\s*$", t), t)
+        v.key(b"\033[Z", 0.8)
+        r = tasks_rows(v)
+        check("Tasks: Shift-Tab from Prompts opens it; In progress, Pending, "
+              "Done newest first, Dropped, each group counted",
+              [x for x in r if not x.startswith(("▌", "▶", "○",
+                                                 "✓", "✗"))
+               and not x[1:].lstrip().startswith(("▶", "○",
+                                                  "✓", "✗"))] ==
+              ["In progress 1", "Pending 2", "Done 2", "Dropped 1"] and
+              [x.split()[2] for x in r if re.match(r"^\W*[▶○✓"
+                                                    r"✗] \d ", x)]
+              == ["Fixing", "Write", "evil", "Recent", "Old", "Dropped"], r)
+        line = lambda w: next((x for x in r if w in x), "")
+        check("Tasks: the active row shows its active text, an age at the "
+              "right (2h), selected first",
+              re.search(r"^▌▶ 1 Fixing the login test 2h$",
+                        line("Fixing")), line("Fixing"))
+        check("Tasks: blocked by on the row (its age from the update that "
+              "said it); ages 5m and 3d on Done",
+              re.search(r"Write docs blocked by 1 2h$", line("Write")) and
+              line("Recent").endswith(" 5m") and
+              line("Old done").endswith(" 3d"), r)
+        check("Tasks: a hostile title shows with ?, cut to one line",
+              re.search(r"evil \?\]0;pwned\? bi\?di w+…", line("evil")),
+              line("evil"))
+        bad = [b for b in (b"\033]0;pwned", b"\007", b"\xe2\x80\xae")
+               if b in v.out]
+        check("Tasks: no ESC, BEL or bidi byte of a title reached the "
+              "terminal", not bad, bad)
+        v.key(b"jjj", 0.5)
+        check("Tasks: j by task, past the group lines", "Recent done" in
+              head(v), head(v))
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        check("Tasks: Enter reads the turn that last changed the task (3 of "
+              "3)", v.wait(b"3 of 3", start=mark) and
+              v.wait(b"TaskUpdate", start=mark), screen(v, mark))
+        mark = len(v.out)
+        v.key(b"q", 1.0)
+        check("Tasks: q back to the same task", tabbar(v, "Tasks 3") and
+              "Recent done" in head(v), head(v))
+        mark = len(v.out)
+        v.key(b"/DOCS", 0.8)
+        r = tasks_rows(v)
+        check("Tasks: / filters, any case, only the groups with a match",
+              r == ["Pending 1", "▌○ 2 Write docs blocked by 1 " +
+                    r[-1].split()[-1]] if len(r) == 2 else False, r)
+        v.key(b"\x15ci fails", 0.8)
+        r = tasks_rows(v)
+        check("Tasks: the filter matches a note", len(r) == 2 and
+              "Fixing the login test" in r[1], r)
+        v.key(b"\x15zzzq", 0.8)
+        check("Tasks: no match says so", "No match" in screen(v, mark),
+              screen(v, mark))
+        v.key(b"\033", 0.3)
+        v.key(b"\033", 0.5)
+        check("Tasks: Esc clears the filter, every row back",
+              len(tasks_rows(v)) == 10, tasks_rows(v))
+        v.key(b"q")
+        check("Tasks: q exits 0", v.exit() == 0, v.out[-80:])
+    finally:
+        v.close()
+
+
+def test_tasks_big():
+    """#320: 20000 tasks list fast and scroll without lag; Pending in the
+    answer's order (G the last created)."""
+    t0 = time.time()
+    v = Pty([DCH, "--xray", "xv-tb"], rows=30, cols=100)
+    try:
+        ok = tabbar(v, "Tasks 20000", 15)
+        dt = time.time() - t0
+        check("Tasks big: 20000 tasks counted in the tab in %.2f s (under 5)"
+              % dt, ok and dt < 5, rows(v.out).get(2))
+        v.key(b"\033[Z", 0.5)
+        lag = []
+        for k, want in ((b"G", "bulk task 20000"), (b"g", "bulk task 00001"),
+                        (b"\033[6~", None), (b"j", None)):
+            mark = len(v.out)
+            s = time.time()
+            v.key(k, 0)
+            v.wait(b"\xe2\x96\x8c", 5, start=mark)
+            lag.append(time.time() - s)
+            v.pump(0.2)
+            if want:
+                check("Tasks big: %s selects %s" % (k, want), want in head(v),
+                      head(v))
+        check("Tasks big: every key painted within 0.5 s (%s)" %
+              ", ".join("%.3f" % x for x in lag), max(lag) < 0.5, lag)
+        mark = len(v.out)
+        s = time.time()
+        v.key(b"/19999", 0)
+        ok = v.wait(b"bulk task 19999", 5, start=mark)
+        check("Tasks big: a filter over 20000 rows within 1 s (%.3f s)" %
+              (time.time() - s), ok and time.time() - s < 1,
+              screen(v, mark))
+        v.key(b"\033", 0.3)
+        v.key(b"q")
+        check("Tasks big: q exits 0", v.exit() == 0, v.out[-80:])
+    finally:
+        v.close()
 
 
 def test_resize():
@@ -2847,8 +3130,12 @@ def main():
         test_responses()
         test_responses_live()
         test_responses_codex()
+        test_tasks_codex()
         fixture_search()
         test_search()
+        fixture_tasks()
+        test_tasks()
+        test_tasks_big()
         test_resize()
         test_small_card()
         shell()

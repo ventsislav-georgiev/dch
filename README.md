@@ -896,7 +896,8 @@ the picker. The view asks the same engine as `--json` and holds its index as
 open. It writes nothing to disk. Text from the session (titles, lines,
 passages) is drawn with every control and bidi character shown as `?`.
 
-The view has four tabs, three for a shell session (no Responses):
+The view has four tabs, three for a shell session (no Responses), and a
+fifth, Tasks, when the session keeps a task list:
 - **Prompts** (**Commands** for a shell session): one row per thing you
   typed, a prompt to Claude or Codex, a command to a shell. `/` filters.
   `Enter` opens the prompt read-only with everything up to the next one
@@ -998,6 +999,24 @@ The view has four tabs, three for a shell session (no Responses):
   ring; dch-lite and `xray_ring = 0` have none, and the list says `no x-ray
   corpus`. A remote view searches on the host; a host older than 1.63.0
   does not know `--search`, and the list says so.
+- **Tasks** (the last tab, only when the session has a task list: Claude
+  Code's tasks or todos, Codex's plan): what was done, when, what is
+  pending and what is being worked on, from `--tasks`. Rows are under faint
+  group lines, each counted: In progress, Pending, Done (newest first),
+  and Dropped when there are any. Each row is a mark, the task's id, its
+  title (a task in progress shows what it is doing), and at the right a
+  label that says more than the status (a ledger's `PARKED`), what blocks
+  it (`blocked by 9, 12`) and its age (`5m`, `3h`, `2d`). The tab's count
+  is the open tasks, in progress and pending. `Enter` reads the prompt that
+  last changed the task, and `q` comes back to it; a task with no prompt
+  opens a card with what is known of it (title in full, status, note,
+  times, blocked by, group, URL). `/` filters on the id, title, note and
+  label; `o` works as on Prompts. The list is asked for after the prompts
+  have shown and is drawn as it comes; it is read again when you open the
+  tab and, while the session runs, at most every 5 seconds while the tab
+  shows. A faint line under the rows gives the list's warning, and says
+  when the history was too long to read whole. A shell session, dch-lite,
+  an empty list and a host older than this dch have no Tasks tab.
 
 A ref typed after `/` (a ticket, issue, pull request, commit, file or URL,
 as `--ref` takes it) opens its card with `Ctrl-R`, on any tab, while
@@ -1030,16 +1049,16 @@ not clear X-ray; run `clear`".
 
 | Key | List | Card / reader |
 | --- | --- | --- |
-| `Tab` `→` `l` / `Shift-Tab` `←` `h` | the next / previous tab (Prompts, Responses, Refs, Search) | `←` `h`: back |
+| `Tab` `→` `l` / `Shift-Tab` `←` `h` | the next / previous tab (Prompts, Responses, Refs, Search, Tasks) | `←` `h`: back |
 | `↑` `↓` / `j` `k`, `PgUp` `PgDn`, `g` `G` | move | move / scroll; reader: at an end, again for the next / previous prompt |
 | `]` `[` | | reader: the next / previous prompt |
-| `Enter` | read the prompt (Responses: at its answer; Search: at the hit) / open the card; Search, typing: search | card: read the mention's prompt |
+| `Enter` | read the prompt (Responses: at its answer; Search: at the hit; Tasks: the one that last changed the task, or its card) / open the card; Search, typing: search | card: read the mention's prompt |
 | `/` | filter; Search: type the text to search | |
 | `Ctrl-R` | with a ref typed after `/`: open its card, a row for it or not, its kind hidden or not; other words: search them on Search | |
 | `a` | Refs: show / hide the files, commits and URLs | |
 | `t` | Refs: show / hide the temp files | |
 | `n` | Prompts, Responses: show / hide the auto rows (auto prompts, the task notifications, and compactions) | |
-| `o` | Prompts, Responses, Search: attach to the session (in the chord: back to it) | card, reader: the same |
+| `o` | Prompts, Responses, Search, Tasks: attach to the session (in the chord: back to it) | card, reader: the same |
 | `f` `p` `y` | | card: full scan, other projects / this project (`p` was `o` before 1.61.0), copy |
 | `q` | quit | back |
 | `Esc` | clear the filter, else quit; Search, typing: stop typing, the last results kept | back |
