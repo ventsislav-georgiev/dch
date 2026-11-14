@@ -27,6 +27,10 @@
 #define SB_LIMIT (16u << 20)	/* any one growable buffer */
 #define NODE_ID_MAX 64		/* a tailcfg.StableNodeID; longer is junk */
 #define NAME_CAP 255		/* a session name a peer may send */
+/* 0x35 (#339), a client's: the user looks at a view over this attach, so
+** the master answers queries as with no client, the stream stays up. Empty;
+** the next 0x07 ends it. A serve before it streams it to nowhere. */
+#define RF_VIEW 0x35
 #define DASH_MSG "a session name starting with - can't be passed to dch"
 
 enum { RF_NEED, RF_FRAME, RF_CHUNK, RF_CLOSE };

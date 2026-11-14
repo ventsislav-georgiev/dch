@@ -10,7 +10,7 @@
 ** what passes starts with an allowlisted verb, its names pass name_ok and
 ** no forbidden word sits outside free text. #118: the input's frames as one
 ** connection's sequence through ctl_action (0x30, 0x34, and a streamed 0x33
-** or 0x35 standing for the running ctl's exit or timeout): each 0x30 that
+** or 0x3f standing for the running ctl's exit or timeout): each 0x30 that
 ** runs gets exactly one 0x33, busy changes nothing, a 0x34 cancels only a
 ** running ctl not yet cut; each cut's grace (ctl_grace, #124/#126) is the
 ** long one only for a CTL_LONG verb cut by a 0x34 or the close, never
@@ -409,9 +409,9 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		{
 			off += used;
 			if (r == RF_CHUNK && f.end && ctl > 0 &&
-			    (f.type == 0x33 || (f.type == 0x35 && !why)))
+			    (f.type == 0x33 || (f.type == 0x3f && !why)))
 			{
-				if (f.type == 0x35)
+				if (f.type == 0x3f)
 					why = "timeout";	/* ctl_cut */
 				else
 				{

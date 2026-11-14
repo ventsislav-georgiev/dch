@@ -2633,9 +2633,14 @@ output, so its terminal never sees the question. The client tells the master
 the view is up, the master sends that client nothing, and the mirror answers
 the two queries until the view closes, also across a `--restart` (a master
 before 1.65.0 takes that message as a detach: its mirror answers, and the
-view's close attaches again). Over a remote attach (`dch -a host:name`)
-nothing answers them while the view is up: the host's `dch serve` keeps its
-own client attached, so the host's master counts the question as seen.
+view's close attaches again). Over a remote attach (`dch -a host:name`) the
+same holds when the host's dch also has it (from the release after 1.66.0):
+the client tells the host's `dch serve` the view is up (a 0x35 frame), serve
+tells its own client, and the host's mirror answers until the view closes.
+Against an older host nothing answers them while the view is up: its `dch
+serve` ignores the frame and keeps its own client attached, so the host's
+master counts the question as seen. A suspend (`Ctrl-Z`) of a remote attach
+tells the host the same, as a local suspend's detach does.
 
 ### dch-lite and `DCH_NO_VT`
 
@@ -2838,6 +2843,14 @@ client, and the attach stream then carries the session's DEC modes (mouse,
 bracketed paste, focus, the alternate screen), for the kitty keyboard flags
 a pop and then the push (so the flag stack does not grow), and on the full
 build the screen replayed from the mirror.
+
+**View up.** A `0x35` with an empty body says the user of this attach looks
+at a view over it (dch's X-ray view, or a suspend): dch serve tells its client,
+and the host's master answers the program's start-up queries as with nothing
+attached (see "A session nothing sees answers two queries") while the stream
+stays up. The next `0x07` ends it. There is no reply. Before an attach, on a
+ctl or watch connection, or with a body, it is ignored; a serve that does
+not know the type ignores it too, so it needed no new protocol version.
 
 #### Control verbs (ctl)
 
