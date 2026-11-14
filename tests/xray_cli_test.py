@@ -3897,11 +3897,13 @@ PSID = "11111111-2222-4333-8444-5555555555d4"
 
 def test_prefilter_reach():
     """#293: light --ref does not decode a 1 MiB window whose raw bytes
-    cannot hold the ref, so its 300 ms reach the whole of a 160 MB
+    cannot hold the ref, so its 300 ms reach the whole of a 96 MB
     transcript: a ticket named only in the first line is found. Without the
-    prefilter light decodes about 40-95 MB in its budget here and stops,
-    why budget. Asserts what was found, not how long it took; a run a
-    stalled machine stops at the budget is retried, twice."""
+    prefilter light decodes about 40-95 MB in its budget on a fast idle
+    machine and stops, why budget. 96 MB, not more: a CI runner's raw scan
+    of 160 MB stopped at the budget 2 MB short, three tries in a row.
+    Asserts what was found, not how long it took; a run a stalled machine
+    stops at the budget is retried, twice."""
     cfg = os.path.join(HOME, ".claude")
     pdir = os.path.join(cfg, "projects", "-home-demo-proj")
     os.makedirs(pdir, exist_ok=True)
@@ -3917,7 +3919,7 @@ def test_prefilter_reach():
         f.write(json.dumps({"type": "user", "cwd": "/home/demo/proj",
                             "message": {"content": "start on MARK-1"}},
                            separators=(",", ":")) + "\n")
-        for _ in range((160 << 20) // len(block)):
+        for _ in range((96 << 20) // len(block)):
             f.write(block)
     history("xr-reach", PSID, cfg)
     try:
@@ -3929,7 +3931,7 @@ def test_prefilter_reach():
                 break
         men = [l["mention"]["offset"] for l in ls if "mention" in l]
         check("prefilter: light --ref finds a ref named only in the first "
-              "line of a 160 MB transcript inside its 300 ms budget: the "
+              "line of a 96 MB transcript inside its 300 ms budget: the "
               "mention at offset 0, why first, all but its oldest window counted (%d tries)"
               % (k + 1), r.returncode == 0 and men == [0] and
               ls[-1].get("done") and ls[-1]["why"] == "first" and
