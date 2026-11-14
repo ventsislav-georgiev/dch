@@ -216,6 +216,8 @@ def serve():
 # ---- (b) dch -a srv:name, the chord's view over it -----------------------
 
 def test_client(mirror):
+    # lite replays nothing on attach: wait on the focus mode it sets instead
+    ready = b"PROBE READY" if mirror else b"\033[?1004h"
     d = probe("rvq-b")
     a = Pty([DCH, "-a", "srv:rvq-b"])
     term = Term(lambda b: os.write(a.fd, b))
@@ -225,9 +227,10 @@ def test_client(mirror):
         a.pump(secs)
         term.show(a.out[n:])
     try:
-        until(lambda: (pump(0.1), b"PROBE READY" in a.out)[1], 15)
-        check("(b) the remote attach shows the probe", b"PROBE READY" in
-              a.out, a.out[-300:])
+        until(lambda: (pump(0.1), ready in a.out)[1], 15)
+        check("(b) the remote attach shows the probe" if mirror else
+              "(b) lite: the remote attach is up (no replay of the screen)",
+              ready in a.out, a.out[-300:])
         mark = len(term.seen)
         got = ask(d, 1, pump)
         check("(b) no view: the terminal is asked all four",
@@ -329,12 +332,14 @@ def test_wire(port, mirror):
         r.close()
 
     d = probe("rvq-w")
+    ready = b"PROBE READY" if mirror else b"\033[?1004h"
     r = Raw(port)
     try:
         r.s.sendall(frame(0x01, {"name": "rvq-w", "cols": 80, "rows": 24}))
-        until(lambda: (r.pump(0.1), b"PROBE READY" in r.term.seen)[1], 15)
-        check("(w) the raw attach shows the probe",
-              b"PROBE READY" in r.term.seen, r.term.seen[-300:])
+        until(lambda: (r.pump(0.1), ready in r.term.seen)[1], 15)
+        check("(w) the raw attach shows the probe" if mirror else
+              "(w) lite: the raw attach is up (no replay of the screen)",
+              ready in r.term.seen, r.term.seen[-300:])
         r.s.sendall(frame(0x36) + frame(0x36, b"x" * 100) +
                     frame(0x35, b"{}"))
         r.pump(1.0)
