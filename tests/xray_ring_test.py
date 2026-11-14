@@ -581,8 +581,11 @@ def test_seam(tmp):
         kill(n)
     check("seam: complete answers were read (%d of %d)" % (comp, reads),
           comp > 0)
+    # a sanitized build only answers complete:false while rows scroll (#283)
+    slow = bool(os.environ.get("DCH_TEST_NO_BUDGET"))
     check("seam: answers were read while rows scrolled (%d, %d of them "
-          "complete)" % (moving, moving_comp), moving > 0)
+          "complete)" % (moving, moving_comp),
+          moving > 0 and (slow or moving_comp > 0))
     check("seam: no complete answer misses rows (%d of %d did)"
           % (len(bad), comp), not bad, bad[:5])
 
@@ -644,13 +647,21 @@ def test_shell_init(tmp):
         spawn(n, *cmd, env=env)
         try:
             wait_for(lambda: "p" in screen(n), 5)
+            # each command ENDS before the next is sent (its prompt back;
+            # the echo of `seq 1 60` alone also ends in 60): a line typed
+            # ahead is not the case checked here (#302)
+            pr = "zp%" if sh == "zsh" else "bp$"
+            prompt = "\n60\n" + pr
             send(n, "false\n")
-            time.sleep(0.5)
+            wait_for(lambda: screen(n).rstrip().endswith("false\n" + pr))
             send(n, "seq 1 60\n")
-            wait_for(lambda: "\n60\n" in screen(n) or
-                     screen(n).rstrip().endswith("60"), 5)
+            wait_for(lambda: screen(n).rstrip().endswith(prompt))
             send(n, "seq 1 60\n")
-            time.sleep(1.0)
+            # the second's end: its rows scrolled the first's D into the
+            # ring, and the prompt is back after its 60
+            wait_for(lambda: "D;0" in [t for t, f in
+                                       marks(X.read_all(n, 0)[1])] and
+                     screen(n).rstrip().endswith(prompt))
             h, recs = X.read_all(n, 0)
             m = marks(recs)
             seqm = [t for t, f in m]
