@@ -243,7 +243,7 @@ dch_config_get(const char *key, char *out, size_t cap)
 	while (fgets(line, sizeof(line), f))
 	{
 		/* a line past the buffer: its rest skipped, never read as lines */
-		cut = 0;
+		cut = c = 0;
 		if (!strchr(line, '\n') && (c = getc(f)) != EOF && c != '\n')
 			for (cut = 1; (c = getc(f)) != EOF && c != '\n';)
 				;
@@ -253,6 +253,8 @@ dch_config_get(const char *key, char *out, size_t cap)
 			if (found < 0)
 				out[0] = '\0';
 		}
+		if (c == EOF)
+			break;	/* the file's end: no read after it */
 	}
 	fclose(f);
 	return found;
