@@ -8695,6 +8695,8 @@ do_run_verb(const char *name, char **words, int nwords)
 		return 0;
 	fprintf(stderr, "dch: %s: %s — %s\n", name, say_code[c], say_why[c]);
 	return 1;
+#else
+	(void)c;	/* lite: read only in the check above */
 #endif
 burst:
 	return do_send_verb(name, words, nwords, 1);
