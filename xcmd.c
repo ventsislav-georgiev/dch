@@ -584,7 +584,10 @@ xc_one(struct xc_run *r, const char *s, size_t n)
 	{
 		/* one more line past the cap: the command has more */
 		if (xcmd_line(r->kind, s, n, 0, 0, r->row, 0) != XCMD_BLANK)
+		{
 			r->stop = XC_ROWS;
+			r->res->skipped++;	/* left out: the done line's dropped */
+		}
 		return;
 	}
 	k = xcmd_line(r->kind, s, n, r->first, r->res->rows + 1, r->row,

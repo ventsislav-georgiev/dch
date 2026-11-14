@@ -3919,7 +3919,12 @@ fields
 .RB ( title
 required), bare or wrapped as
 .BR {"task":{...}} ;
-a line that is not an object, has no title or is over 64 KB is skipped.
+a line that is not an object, has no title or is over 64 KB is skipped
+and counted in the
+.B done
+line's
+.BR dropped ,
+as is the row seen past the row cap.
 Limits: 5 s, 32 MB of output, 50000 rows; past one the process group is
 ended and the rows so far stay.
 At least one row:
@@ -3932,7 +3937,12 @@ line.
 No row: the built\-in source answers as without it; a failure or timeout
 adds a one\-line
 .B warn
-to its header, an empty answer with exit 0 says nothing.
+to its header, an empty answer with exit 0 says nothing; with no built\-in
+list either (no x\-ray corpus), a failure still answers with
+.BR source:none ,
+the
+.B warn
+and no row.
 The two are never mixed.
 .TP
 .B memory_command

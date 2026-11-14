@@ -13180,6 +13180,17 @@ xr_chapter(const struct xr_target *t, const char *anchor)
 
 /* ---- dch --xray <n> --tasks --json (#319) ------------------------------ */
 
+/* No corpus for --tasks: a configured command's failure (warn) is still
+** said, as a source "none" answer; no command or a silent one, as before. */
+static int
+xr_tasks_none(const char *session, const char *sid, const char *warn)
+{
+	if (!warn || !warn[0])
+		return xr_no_corpus();
+	return xr_out_exit(xr_tasks_print(stdout, NULL, session, sid, 0,
+	                                  warn) == 0);
+}
+
 /* A looked-up transcript (codex: a rollout), read as --json reads it, its
 ** task records gathered on the way. */
 static int
@@ -13192,7 +13203,7 @@ xr_tasks_file(const char *path, const struct stat *st, int codex,
 
 	if ((fd = xr_seam_open(path, st)) < 0)	/* there but unreadable: 3 */
 		return errno == EACCES || errno == EPERM || errno == EIO
-		       ? xr_failed() : xr_no_corpus();
+		       ? xr_failed() : xr_tasks_none(session, sid, warn);
 	if ((tk = xr_tasks_new()) && (d = xr_claude_new()))
 	{
 		if (codex)
@@ -13222,12 +13233,12 @@ xr_tasks_claude(const char *cfg, const char *sid, const char *session,
 
 		if (!h || snprintf(home, sizeof home, "%s/.claude", h)
 		    >= (int)sizeof home)
-			return xr_no_corpus();
+			return xr_tasks_none(session, sid, warn);
 		cfg = home;
 	}
 	if (xr_claude_lookup(cfg, sid, path, sizeof path, &st, project,
 	                     sizeof project) < 0)
-		return xr_no_corpus();
+		return xr_tasks_none(session, sid, warn);
 	return xr_tasks_file(path, &st, 0, sid, session, warn);
 }
 
@@ -13299,7 +13310,8 @@ xr_cmd(enum xcmd_kind kind, const char *session, const char *sid,
 	}
 	if (!ferror(stdout))
 	{
-		printf("{\"done\":true,\"count\":%lu,\"dropped\":0", res.rows);
+		printf("{\"done\":true,\"count\":%lu,\"dropped\":%lu", res.rows,
+		       res.skipped);
 		if (res.warn[0])
 		{
 			fputs(",\"warn\":", stdout);
@@ -13357,7 +13369,7 @@ xr_tasks_q(const struct xr_target *t)
 			return rc;
 		xr_crec_cfg(&c, cfg, sizeof cfg);
 		return cfg[0] ? xr_tasks_claude(cfg, c.sid, t->name, warn)
-		              : xr_no_corpus();
+		              : xr_tasks_none(t->name, c.sid, warn);
 	}
 	if (cx)
 	{
@@ -13369,7 +13381,7 @@ xr_tasks_q(const struct xr_target *t)
 		return cx > 0 && xr_codex_lookup(xc.home, xc.tid, path, sizeof path,
 		                                 &st) == 0
 		       ? xr_tasks_file(path, &st, 1, xc.tid, t->name, warn)
-		       : xr_no_corpus();
+		       : xr_tasks_none(t->name, xc.tid, warn);
 	}
 	/* the ring's header for the session_id, as the other forms give it */
 	if (ring_fetch(t->sock, &rs, NULL, NULL) == -1)

@@ -13,6 +13,8 @@ the 5 s limit; a shell session -> source command too; the command's
 environment and cwd per session kind. --memory: rows -> source command, a
 body cut at 16 KB; no row -> the built-in answer byte for byte; exit 1 ->
 the built-in rows and a header warn; rows then a hang -> a done warn.
+The done line's dropped (invalid, over 64 KB, past the row cap); a
+session with no corpus: a failed command still says its warn.
 Temp HOME, DCH_CONFIG, runtime dir.
 
 Run:  python3 tests/xcmd_tasks_test.py        (uses ./dch; run.sh isolates)
@@ -293,6 +295,60 @@ def main():
     check("rows then exit 3: the rows, done carries the warn",
           rc == 0 and len(ls) == 3 and ls[0]["source"] == "command" and
           ls[2].get("warn") == "tasks_command: exit 3: half done", out)
+
+    # --- dropped: lines left out (#321 fix round) ------------------------
+    config(script("drop.py", r'''
+import json
+print("not json")
+print("{" + " " * 70000 + "}")
+for k in range(50001):
+    print(json.dumps({"id": k, "title": "r%d" % k}))
+''', py=True))
+    rc, out, ls, err = tasks("xt-ended")
+    check("dropped: an invalid line, a line over 64 KB and the one row "
+          "past the 50000 cap (count 50000, dropped 3)",
+          rc == 0 and ls and ls[0]["source"] == "command" and
+          len(ls) == 50002 and
+          ls[-1] == {"done": True, "count": 50000, "dropped": 3,
+                     "warn": "tasks_command: stopped early at 50000 rows"},
+          (rc, ls[-1:] if ls else out[-300:], err))
+    config(script("drop2.sh", "echo junk\necho '{\"id\":1,\"title\":\"a\"}'\n"))
+    rc, out, ls, err = tasks("xt-ended")
+    check("dropped: an invalid line beside a row, no warn",
+          rc == 0 and ls and
+          ls[-1] == {"done": True, "count": 1, "dropped": 1}, out)
+
+    # --- no corpus: a failed command is still said ------------------------
+    sock = os.path.join(T, "dch-%d" % os.getuid())
+    hdir = os.path.join(T, "state", "dch", "sessions", sock.replace("/", "-"))
+    with open(os.path.join(hdir, "xt-gone.json"), "w") as f:
+        json.dump({"name": "xt-gone", "cwd": PROJ, "end": "exited",
+                   "argv": ["claude"], "started": 1794299400,
+                   "updated": 1794300000, "ended": 1794300000,
+                   "sock_dir": sock,
+                   "agent": {"session_id": SID[:-2] + "ff", "cwd": PROJ,
+                             "config_dir": os.path.join(HOME, ".claude")}},
+                  f)
+    config(None)
+    r0 = dch("--xray", "xt-gone", "--tasks", "--json")
+    check("no corpus, no command: exit 1, the stderr message, no stdout",
+          r0.returncode == 1 and r0.stdout == "" and
+          r0.stderr == "dch: no x-ray corpus\n", (r0.returncode, r0.stdout,
+                                                  r0.stderr))
+    config(script("empty3.sh", "exit 0\n"))
+    r = dch("--xray", "xt-gone", "--tasks", "--json")
+    check("no corpus, an empty answer: the same, byte for byte",
+          (r.returncode, r.stdout, r.stderr) ==
+          (r0.returncode, r0.stdout, r0.stderr), (r.returncode, r.stdout,
+                                                  r.stderr))
+    config(script("fail3.sh", "echo 'ledger gone' >&2\nexit 1\n"))
+    rc, out, ls, err = tasks("xt-gone")
+    check("no corpus, the command failed: source none, the header's warn, "
+          "done, exit 0",
+          rc == 0 and len(ls) == 2 and ls[0]["source"] == "none" and
+          ls[0]["session"] == "xt-gone" and
+          ls[0].get("warn") == "tasks_command: exit 1: ledger gone" and
+          ls[1] == {"done": True, "count": 0, "dropped": 0}, (rc, out, err))
 
     memory()
 

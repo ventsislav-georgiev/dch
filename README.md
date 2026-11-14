@@ -1872,7 +1872,8 @@ memory_command = ~/bin/my-notes
   `note`, `created`, `updated` (passed through as text: a reader treats a
   value that is not ISO 8601 as `null`), `blocked_by` (ids), `url` and
   `group`, bare or wrapped as `{"task":{…}}`. A line that is not a JSON
-  object, has no title or is over 64 KB is skipped.
+  object, has no title or is over 64 KB is skipped; the `done` line's
+  `dropped` counts those, plus the row seen past the row cap.
 - **Limits.** 5 s in all, 32 MB of output, 50000 rows (the first kept).
   Past a limit the process group is ended and the rows so far stay, so
   print what matters first.
@@ -1880,7 +1881,9 @@ memory_command = ~/bin/my-notes
   (`"source":"command"`), and the header comes with the first row. No row:
   the built-in source answers exactly as without the command; a failure or
   timeout adds a one-line `warn` to its header (with stderr's first line),
-  an empty answer with exit 0 says nothing. Rows and then a stop or a
+  an empty answer with exit 0 says nothing. With no built-in list either
+  (no X-ray corpus), a failure still answers: `"source":"none"`, the
+  `warn`, no row. Rows and then a stop or a
   non-zero exit put the `warn` on the `done` line. The two sources are
   never mixed.
 

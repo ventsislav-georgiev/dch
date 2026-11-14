@@ -37,7 +37,9 @@ struct xcmd_ctx
 
 struct xcmd_result
 {
-	unsigned long rows, skipped;	/* rows handed over; lines skipped */
+	unsigned long rows, skipped;	/* rows handed over; lines left out
+				** (invalid, over 64 KB, the one seen past the
+				** row cap) */
 	int ran;		/* the program started */
 	int stopped;		/* ended early: the clock, a cap or the callback */
 	int code;		/* exit code, -1 when signalled or not run */
