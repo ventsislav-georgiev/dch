@@ -4815,6 +4815,15 @@ t_excl(void)
 		"su -lc 'cat notes.md' bob", "script -c 'cat ../x' /dev/null",
 		"script -q /dev/null sh -c 'cat ../x'",
 		"script -q /dev/null cat ../x",
+		/* #335 LOW-X26: su and script options after their word (getopt
+		** permutes); macOS script -t 0; case … esac < f */
+		"su bob -c'cat ../x'", "su bob -lc 'cat notes.md'",
+		"su bob --login -c 'cat notes.md'", "su bob -s /bin/sh -c 'cat ../x'",
+		"su bob --command='cat ../x'", "sudo su bob -l -c 'cat notes.md'",
+		"script -t 0 /dev/null sh -c 'cat ../x'",
+		"script -q -t 0 /dev/null sh -c 'cat ../x'",
+		"script -q /dev/null -qc 'cat ../x'",
+		"case x in x) sh;; esac < s.sh", "case x in (x) sh ;; esac <s.sh",
 		0
 	};
 	static const char *const keep[] = {
@@ -4883,6 +4892,10 @@ t_excl(void)
 		"(cd sub && make) | tail; sh scripts/x.sh",
 		"su bob -c 'cat notes.md'", "script -c 'cat notes.md' /dev/null",
 		"flock f -c 'cat notes.md' extra",
+		/* #335: the same shapes inside the cwd */
+		"su bob -s /bin/sh -c 'cat notes.md'", "su bob -c'cat notes.md'",
+		"script -t 0 /dev/null cat notes.md", "script -t log -c 'cat notes.md'",
+		"case x in x) cat notes.md;; esac", "case x in x) sh;; esac; cat notes.md",
 		0
 	};
 	/* change (a): a reader or search only inside $(…) or backquotes
@@ -5151,6 +5164,14 @@ t_d3(void)
 		{ "gh issue edit o/r#9 -tNew", "", 0, "pull:o/r#9=New;" },
 		{ "gh pr edit o/r#9 -t=New", "", 0, "pull:o/r#9=New;" },
 		{ "foo -t X o/r#9", "", 0, "" },
+		/* #335 LOW-X27: on gh pr merge -t is the commit subject; no flag
+		** past -- */
+		{ "gh pr merge o/r#9 -t 'Merge subject'", "", 0, "" },
+		{ "gh pr merge 12 -t 'Merge subject'", PR, 0, "" },
+		{ "gh pr merge o/r#9 --squash -tSubject -b body", "", 0, "" },
+		{ "gh pr create -t Fine -- -t x", PR, 0, "pull:o/r#12=Fine;" },
+		{ "gh pr create --title Fine -- --title x", PR, 0,
+		  "pull:o/r#12=Fine;" },
 #undef PR
 	};
 	char got[512], m[300], *p;

@@ -2434,7 +2434,7 @@ cmd_head(const struct sw *w, size_t k, size_t e, int *line, const char **cd)
 	const char *o, *a, *v, *ll;
 	char lb[40], dl;
 	size_t j, n;
-	int p, sl;
+	int p, sl, again;
 
 	*line = 0;
 	*cd = NULL;
@@ -2464,7 +2464,10 @@ cmd_head(const struct sw *w, size_t k, size_t e, int *line, const char **cd)
 			;
 		if (!wraps[j].w)
 			return k;
-		for (k++; k < e && (o = SWD(w, k))[0] == '-'; k++)
+		k++;
+		again = 0;
+	opts:
+		for (; k < e && (o = SWD(w, k))[0] == '-'; k++)
 		{
 			if (!strcmp(o, "--"))
 			{
@@ -2517,9 +2520,23 @@ cmd_head(const struct sw *w, size_t k, size_t e, int *line, const char **cd)
 			    (!a && snprintf(lb, sizeof lb, " %s ", o + 2) < (int)sizeof lb &&
 			     strstr(wraps[j].argl, lb)))
 				k++;
+			/* macOS script -t 0 f (util-linux -t takes none apart) */
+			else if (!strcmp(wraps[j].w, "script") && a && !*a &&
+			         a[-1] == 't' && k + 1 < e && !w->op[k + 1] &&
+			         SWD(w, k + 1)[0] &&
+			         !SWD(w, k + 1)[strspn(SWD(w, k + 1), "0123456789")])
+				k++;
 		}
-		for (p = wraps[j].pos; p > 0 && k < e; p--)
+		for (p = again ? 0 : wraps[j].pos; p > 0 && k < e; p--)
 			k++;
+		/* su u -lc '…', script f -qc '…': getopt permutes (LOW-X26) */
+		if (!again && (!strcmp(wraps[j].w, "su") ||
+		               !strcmp(wraps[j].w, "script")) &&
+		    k < e && !w->op[k] && SWD(w, k)[0] == '-')
+		{
+			again = 1;
+			goto opts;
+		}
 		if ((!strcmp(wraps[j].w, "flock") || !strcmp(wraps[j].w, "su") ||
 		     !strcmp(wraps[j].w, "script")) && k + 1 < e &&
 		    (!strcmp(SWD(w, k), "-c") || !strcmp(SWD(w, k), "--command")))
@@ -2598,15 +2615,15 @@ arg_outside(const char *a, const char *cur, int lost, const char *cwd)
 }
 
 /* Word k opens (1) or closes (-1) a group whose commands share its
-** stdin: ( ), { }, if … fi, while|until|for|select … done. */
+** stdin: ( ), { }, if … fi, while|until|for|select … done, case … esac. */
 static int
 sh_group(const struct sw *w, size_t k)
 {
 	static const char *const open[] = { "{", "if", "while", "until", "for",
-	                                    "select", 0 };
+	                                    "select", "case", 0 };
 	static const char *const pre[] = { "{", "!", "if", "then", "elif", "else",
 	                                   "do", "while", "until", 0 };
-	static const char *const shut[] = { "}", "fi", "done", 0 };
+	static const char *const shut[] = { "}", "fi", "done", "esac", 0 };
 	const char *o = SWD(w, k);
 
 	if (w->op[k])
@@ -3552,6 +3569,7 @@ d3(const struct dsrc *s, struct dset *ds)
 {
 	static const char *const kind[] = { "pr", "issue", 0 };
 	static const char *const verb[] = { "create", "new", 0 };
+	static const char *const tverb[] = { "create", "new", "edit", 0 };
 	struct sw w;
 	struct d3m m;
 	const char *val;
@@ -3575,15 +3593,20 @@ d3(const struct dsrc *s, struct dset *ds)
 		for (e = c; e < w.n && !(w.op[e] && !strpbrk(SWD(&w, e), "<>"));
 		     e++)
 			;
-		/* gh pr|issue: -t is --title too (LOW-X19) */
-		for (gk = 0, k = c; k + 1 < e && !gk; k++)
+		/* gh pr|issue create|new|edit: -t is --title too (LOW-X19);
+		** on gh pr merge it is the commit subject (LOW-X27) */
+		for (gk = 0, k = c; k + 2 < e && !gk; k++)
 			gk = !w.op[k] && !strcmp(base(SWD(&w, k)), "gh") &&
 			     (j = gh_repo(&w, k + 1)) < e && !w.op[j] &&
-			     in_list(SWD(&w, j), kind);
-		/* the last one, as gh's flags take (LOW-X19) */
+			     in_list(SWD(&w, j), kind) &&
+			     (j = gh_repo(&w, j + 1)) < e && !w.op[j] &&
+			     in_list(SWD(&w, j), tverb);
+		/* the last one, as gh's flags take (LOW-X19); none past -- */
 		for (val = NULL, k = c; k < e; k++)
 			if (w.op[k])
 				continue;
+			else if (!strcmp(SWD(&w, k), "--"))
+				break;
 			else if ((!strcmp(SWD(&w, k), "--title") ||
 			          (gk && !strcmp(SWD(&w, k), "-t"))) && k + 1 < e &&
 			         !w.op[k + 1])

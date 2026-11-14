@@ -1509,7 +1509,9 @@ creates has no number until it prints one. gh's repo flag (`-R o/r`,
 word there makes it no create. A gh alias for a create is not recognised: dch
 does not run gh. A backquote ends a command here as `$(` does, and a
 `--title` the shell expands (`--title "$T"`, a backquote in it) is no title,
-nor does the output define by it. An orphan result, a forged or orphaned shell block, an error,
+nor does the output define by it. gh's `-t` counts as `--title` only after
+`pr` or `issue` with `create`, `new` or `edit` (on `gh pr merge` it is the
+merge commit's subject), and no flag after `--` counts. An orphan result, a forged or orphaned shell block, an error,
 a fence, a diff, a listing command (`rg`, `grep`, `ls`, ...), a file printed
 from outside the cwd, a heading with an empty title, and more than 3 headings
 of one shape never define. The command counts in every simple command of it
@@ -1528,7 +1530,9 @@ assignments, redirects, `{`, `!`, `if`, `then`, `elif`,
 and `sudo --login` in the target's home), by name, by path (`/usr/bin/env`) or by GNU name
 (`gtimeout`). It counts inside `sh -c '…'` (`sh`, `bash`, `zsh`, `dash`,
 `ksh`, `fish`; `-lc`, `-c --` and `-c -e` too), `eval`, `watch` and `env -S` (`-S'…'` and
-`--split-string` too), `flock f -c '…'`, a shell's or `source`'s script from a
+`--split-string` too), `flock f -c '…'`, `su` and `script` with `-c` (options
+before or after the user or file: `su bob -lc '…'`, `script -q /dev/null -qc
+'…'`; macOS `script -t 0 f cmd`), a shell's or `source`'s script from a
 here-doc or a here-string (`bash <<'EOF'`, `bash <<< '…'`,
 `source /dev/stdin <<< '…'`), and inside `$(…)`, backquotes and bash 5.3's
 `${ …; }`, quoted or not. A script dch cannot read never defines: a shell
