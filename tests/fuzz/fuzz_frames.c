@@ -3,8 +3,9 @@
 ** does, and each frame's payload goes through the pure parsers that
 ** handle_packet hands it to (the RESPAWN argv, the WAIT pattern scan, the
 ** READ request incl. --follow's meta/since flags and X-ray's primary flag,
-** ATTACH's scrollback) plus the resume blob's hex decoder; the same bytes
-** as pty output go through track_decmode. Linked with the rest of dch minus
+** ATTACH's scrollback, the PUSH stream's bracketed-paste state checked
+** against a plain search, #307) plus the resume blob's hex decoder; the
+** same bytes as pty output go through track_decmode. Linked with the rest of dch minus
 ** master.o, and dch.c built with -Dmain=dch_main. */
 #include "../../master.c"
 #include <stdint.h>
@@ -18,8 +19,13 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 	unsigned char hex[PKT_MAX + 1], out[PKT_MAX / 2];
 	char pat[DCH_WAIT_MAX + 1];
 	const char *line;
-	size_t off = 0, linelen;
+	size_t off = 0, linelen, pushed = 0, i;
+	unsigned char pm = 0, paste = 0, last = 0;
+	unsigned char *push = malloc(n + 1);	/* the pushes, end to end */
 	long fs;
+
+	if (!push)
+		return 0;
 
 	/* the other direction: the child's pty output, scanned for DEC modes */
 	track_decmode(d, n);
@@ -34,7 +40,24 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		** buffered and fits the inbuf */
 		if ((size_t)fs > n - off || (size_t)fs > PKT_HDR + PKT_MAX)
 			abort();
-		if (type == MSG_READ)
+		if (type == MSG_PUSH)
+		{
+			/* #307: the pushes are one stream to paste_scan, frame
+			** boundaries or not: it is in a paste exactly when the
+			** last marker in the stream so far is ESC[200~ */
+			paste_scan(&pm, &paste, payload, len);
+			memcpy(push + pushed, payload, len);
+			i = pushed > 5 ? pushed - 5 : 0;	/* a marker new bytes end */
+			pushed += len;
+			for (; i + 6 <= pushed; i++)
+				if (memcmp(push + i, "\033[20", 4) == 0 &&
+				    (push[i + 4] == '0' || push[i + 4] == '1') &&
+				    push[i + 5] == '~')
+					last = push[i + 4] == '0';
+			if (paste != last || pm > 6)
+				abort();
+		}
+		else if (type == MSG_READ)
 		{
 			struct read_req q;
 
@@ -77,5 +100,6 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		}
 		off += (size_t)fs;
 	}
+	free(push);
 	return 0;
 }

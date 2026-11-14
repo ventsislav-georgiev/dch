@@ -203,6 +203,12 @@ enum
 				** answers DCH_ST_UNSUP). With no CAPS, the
 				** target is taken to be pre-1.43 (#121): no
 				** ring handover, core limit restored. */
+	MSG_PUSH_END	= 23,	/* no payload: the MSG_PUSHes before it on this
+				** connection are all there is (dch --send,
+				** #307). MSG_ACK reply: DCH_ST_OK, or
+				** DCH_ST_BUSY when some of them were dropped
+				** (the program is not reading and 4 MB wait).
+				** A master before it answers DCH_ST_UNSUP. */
 };
 #define DCH_RESTART_F_RING 0x01	/* adopts the blob's ringfd and core lines */
 

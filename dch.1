@@ -737,7 +737,13 @@ detached. A single press still detaches; it simply waits out the window first.
 sets that window in milliseconds (default
 .BR 300 ).
 A key already waiting when dch looks counts as inside the window, even if
-the client was stopped or slow past it.
+the client was stopped or slow past it, as long as nothing else read the
+terminal meanwhile.
+An interactive shell with job control takes the terminal back whenever dch
+stops (Ctrl\-Z or a stop signal), and bash with job control off
+.RB ( "set +m" )
+goes on to its next command: either reads that key itself, and dch then does
+a plain detach.
 Setting it to
 .B 0
 disables switching and makes detach instant again.
@@ -2062,6 +2068,16 @@ line, the message on standard error too, and exits
 Type
 .I text
 (arguments joined with spaces) into the session, no enter.
+Input the program is not reading waits in the session, up to 4 MB.
+Past that it is dropped, from that point to the end of the text: the text is
+cut at its tail, never in the middle, and a bracketed paste cut that way
+still gets its end
+.RB ( ESC[201~ ).
+.B \-\-send
+then exits 1 with
+.RI "dch: " name ": input dropped: the program is not reading (4 MB held)" .
+A paste typed on an attach past 4 MB is cut the same way, without a message;
+the attach takes keys again once the program has read what waited.
 .TP
 .BI \-\-run " name text..."
 Same as
@@ -2081,7 +2097,10 @@ or on a signal
 .BR interrupted ", " withdrawn ", " draft_left )
 on stderr. Other programs (also one in front of a Claude suspended with
 Ctrl\-Z), masters without a mirror, dch-lite and your own
-session (\fB$DCH_SESSION\fR) keep the plain burst.
+session (\fB$DCH_SESSION\fR) keep the plain burst, which exits 1 when its
+input was dropped, as
+.B \-\-send
+does.
 .TP
 .BI \-\-keys " name key..."
 Encode and send keys mode-aware (kitty keyboard protocol, application cursor

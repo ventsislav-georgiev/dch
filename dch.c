@@ -5580,6 +5580,9 @@ do_keys_verb(const char *name, char **combos, int ncombos)
 static int
 do_send_verb(const char *name, char **words, int nwords, int press_enter)
 {
+	unsigned char payload[PKT_MAX], type;
+	struct ctl_reader r = {0};
+	unsigned int len;
 	int s, k;
 
 	if (nwords == 0 && !press_enter)
@@ -5605,7 +5608,17 @@ do_send_verb(const char *name, char **words, int nwords, int press_enter)
 	}
 	if (press_enter)
 		send_ctl(s, MSG_PUSH, "\r", 1);
+	/* #307: did it all go in? A master before MSG_PUSH_END answers
+	** DCH_ST_UNSUP (before 1.45.2 nothing): taken as yes, as before. */
+	send_ctl(s, MSG_PUSH_END, NULL, 0);
+	k = ctl_next_frame(s, &r, CTL_IDLE_MS, &type, payload, &len);
 	close(s);
+	if (k > 0 && type == MSG_ACK && len == DCH_ST_BUSY)
+	{
+		fprintf(stderr, "dch: %s: input dropped: the program is not "
+		        "reading (4 MB held)\n", name);
+		return 1;
+	}
 	return 0;
 }
 
