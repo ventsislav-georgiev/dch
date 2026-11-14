@@ -180,6 +180,20 @@ def until(f, secs):
     return f()
 
 
+def up(d, write, pump):
+    """lite replays no screen, so what the attach prints at its start says
+    nothing about the session: the attach is up when a typed key reaches the
+    program. A key typed before that can be lost: one a second until the
+    first arrives, then the ones behind it are waited out."""
+    end, n = time.time() + 60, 0
+    while b"u" not in keys(d) and time.time() < end:
+        write(b"u")
+        n += 1
+        until(lambda: (pump(0.1), b"u" in keys(d))[1], 1.0)
+    until(lambda: (pump(0.1), keys(d).count(b"u") >= n)[1], 2.0)
+    return b"u" in keys(d)
+
+
 class Term:
     """Answers the four queries in what it is shown, each time once."""
 
@@ -230,7 +244,9 @@ def test_client(mirror):
         until(lambda: (pump(0.1), ready in a.out)[1], 15)
         check("(b) the remote attach shows the probe" if mirror else
               "(b) lite: the remote attach is up (no replay of the screen)",
-              ready in a.out, a.out[-300:])
+              ready in a.out and
+              (mirror or up(d, lambda k: os.write(a.fd, k), pump)),
+              a.out[-300:])
         mark = len(term.seen)
         got = ask(d, 1, pump)
         check("(b) no view: the terminal is asked all four",
@@ -339,7 +355,9 @@ def test_wire(port, mirror):
         until(lambda: (r.pump(0.1), ready in r.term.seen)[1], 15)
         check("(w) the raw attach shows the probe" if mirror else
               "(w) lite: the raw attach is up (no replay of the screen)",
-              ready in r.term.seen, r.term.seen[-300:])
+              ready in r.term.seen and
+              (mirror or up(d, lambda k: r.s.sendall(frame(0x10, k)),
+                            r.pump)), r.term.seen[-300:])
         r.s.sendall(frame(0x36) + frame(0x36, b"x" * 100) +
                     frame(0x35, b"{}"))
         r.pump(1.0)
