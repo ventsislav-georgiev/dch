@@ -282,7 +282,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.66.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.67.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -2634,7 +2634,7 @@ the view is up, the master sends that client nothing, and the mirror answers
 the two queries until the view closes, also across a `--restart` (a master
 before 1.65.0 takes that message as a detach: its mirror answers, and the
 view's close attaches again). Over a remote attach (`dch -a host:name`) the
-same holds when the host's dch also has it (from the release after 1.66.0):
+same holds when the host's dch also has it (from 1.67.0):
 the client tells the host's `dch serve` the view is up (a 0x35 frame), serve
 tells its own client, and the host's mirror answers until the view closes.
 Against an older host nothing answers them while the view is up: its `dch
