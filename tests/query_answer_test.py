@@ -17,6 +17,10 @@ the attached terminal's to answer, then reads its tty for 2 s.
   (d) attached, the chord's X-ray view up over the attach (Ctrl-\\ x) when
       the program asks: the view's terminal shows no session output, so the
       mirror's answers and the terminal is never asked (QA 1.63.0 LOW-V15).
+  (e) (d) with a `dch --restart` while the view is up: the new master image
+      keeps the view's state, so the mirror still answers (QA 1.65.0
+      LOW-V23), and the view does not take the restart for the session's
+      end (LOW-V27).
 dch-lite has no mirror: (a), (c) and (d) get nothing, as before.
 
 Run:  python3 tests/query_answer_test.py            (uses ./dch)
@@ -69,9 +73,9 @@ def client(args, esc=False):
     return pid, fd
 
 
-def outer_terminal(fd, done, timeout=10.0):
+def outer_terminal(fd, done, timeout=10.0, screen=None):
     """Answer what the client forwards, as a terminal would; return what it
-    was asked."""
+    was asked (and append what it showed to screen)."""
     seen, end = b"", time.time() + timeout
     while time.time() < end and not os.path.exists(done):
         if select.select([fd], [], [], 0.05)[0]:
@@ -85,6 +89,8 @@ def outer_terminal(fd, done, timeout=10.0):
             for q, a in OUTER.items():
                 if q in b:
                     os.write(fd, a)
+    if screen is not None:
+        screen.append(seen)
     return [q for q in OUTER if q in seen]
 
 
@@ -149,23 +155,40 @@ time.sleep(5)
     check("(c) attached inside the wait: the mirror's answers, once",
           got == mirror, got)
 
-    go = os.path.join(ROOT, "go_d")
-    out, name, (pid, fd) = start("d", "attach", 0, go)
-    seen = b""
-    for keys in (b"", b"\034x"):
-        os.write(fd, keys)
-        end = time.time() + (1.0 if not keys else 20)
-        while time.time() < end and (not keys or b"X-ray  " not in seen):
-            if select.select([fd], [], [], 0.05)[0]:
-                seen += os.read(fd, 65536)
-    check("(d) the chord's X-ray view opens over the attach",
-          b"X-ray  " in seen, seen[-200:])
-    open(go, "w").close()
-    asked = outer_terminal(fd, out)
-    got = result(out)
-    check("(d) the view up: the terminal is not asked", asked == [], asked)
-    check("(d) the view up: the mirror's answers, once", got == mirror, got)
-    os.write(fd, b"q")
+    for case in ("d", "e"):
+        go = os.path.join(ROOT, "go_" + case)
+        out, name, (pid, fd) = start(case, "attach", 0, go)
+        seen = b""
+        for keys in (b"", b"\034x"):
+            os.write(fd, keys)
+            end = time.time() + (1.0 if not keys else 20)
+            while time.time() < end and (not keys or b"X-ray  " not in seen):
+                if select.select([fd], [], [], 0.05)[0]:
+                    seen += os.read(fd, 65536)
+        check("(%s) the chord's X-ray view opens over the attach" % case,
+              b"X-ray  " in seen, seen[-200:])
+        up = "the view up"
+        if case == "e":
+            up += " across a --restart"
+            r = subprocess.run([DCH, "--restart", name], env=ENV,
+                               capture_output=True, text=True, timeout=60)
+            check("(e) --restart with the view up: exit 0", r.returncode == 0,
+                  r.stdout, r.stderr)
+        open(go, "w").close()
+        screen = [seen]
+        asked = outer_terminal(fd, out, screen=screen)
+        got = result(out)
+        check("(%s) %s: the terminal is not asked" % (case, up), asked == [],
+              asked)
+        check("(%s) %s: the mirror's answers, once" % (case, up),
+              got == mirror, got)
+        if case == "e":
+            # the restart dropped the view's follow connection before
+            # --restart returned, and the probe's 2 s read came after: the
+            # old view said it within that time, on its 500 ms tick
+            check("(e) the view does not say the session ended",
+                  b"session ended" not in b"".join(screen), screen[-1][-300:])
+        os.write(fd, b"q")
 
 
 try:

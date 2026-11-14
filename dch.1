@@ -211,8 +211,21 @@ A program with no
 to go by then turns synchronized output on, as it does under an attach.
 Every other query (cursor position, device attributes, colours, the
 keyboard protocol) is left for the terminal that attaches. While a client
-is attached its terminal answers everything, as before. dch\-lite has no
-mirror and answers nothing.
+is attached its terminal answers everything, as before, except while the
+X\-ray view
+.RB ( "Ctrl\-\e x" )
+is up over a local attach: the view shows no session output, so the client
+tells the master, which sends it nothing, and the mirror answers the two
+until the view closes, also across a
+.B \-\-restart
+(a master before 1.65.0 takes that as a detach: its mirror answers, and the
+view's close attaches again).
+Over a remote attach
+.RB ( "dch \-a host:name" )
+nothing answers them while the view is up: the host's
+.B dch serve
+keeps its own client attached.
+dch\-lite has no mirror and answers nothing.
 .SH OPTIONS
 .TP
 .B \-l
@@ -768,6 +781,17 @@ stops (Ctrl\-Z or a stop signal), and bash with job control off
 .RB ( "set +m" )
 goes on to its next command: either reads that key itself, and dch then does
 a plain detach.
+A stop of
+.B dch \-a
+(Ctrl\-Z while it starts, or
+.BR "kill \-TSTP" )
+puts the shell's terminal modes back before dch stops, so a shell that does
+not restore them itself (dash) is not left raw;
+.B fg
+brings the session back raw.
+A
+.B SIGSTOP
+cannot be caught: under dash the terminal stays raw until dch continues.
 Setting it to
 .B 0
 disables switching and makes detach instant again.
@@ -2111,8 +2135,11 @@ for a shell's clear, ED 3 or RIS, never with evict;
 past 256 keys in one eviction, at most once a second, or a shell chapter
 gone while its prompt record is still in the ring;
 .B full
-for the whole-file index after a capped transcript), each followed by a
-new snapshot.
+for the whole-file index after a capped transcript;
+.B restarted
+for a
+.B \-\-restart
+of the session), each followed by a new snapshot.
 The snapshot plus its deltas is the
 .B \-\-json
 answer of that moment; top\-level fields
@@ -2167,8 +2194,14 @@ about 30 s
 .RB ( "dch serve"
 sets TCP keepalive).
 An ended session or a History record writes its snapshot and exits 0;
-a live one exits 0 when the session ends, its connection drops, or the
-reader closes the pipe, idle or not.
+a live one exits 0 when the session ends or the reader closes the pipe,
+idle or not.
+A
+.B \-\-restart
+drops its connection: when the new master image answers, it sends
+.B reset
+.B restarted
+and a new snapshot and goes on (before 1.66.0 it exited 0).
 .B \-\-follow
 takes no
 .B \-\-ref

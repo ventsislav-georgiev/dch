@@ -13645,6 +13645,7 @@ struct xf
 	long gap;		/* the coalescing interval: 250 ms, or twice the
 				** last build when that is longer */
 	int pending, rc;
+	int relost;		/* a "restarted" reset, no frame drained since */
 	const char *why;	/* XF_RESET's reason, for the next snapshot */
 	unsigned long woke, timed;	/* 9.5's no-timer seam */
 };
@@ -13694,6 +13695,7 @@ static void
 xf_watch_conn(struct xf *f, int s)
 {
 	f->conn = s;
+	memset(&f->rd, 0, sizeof f->rd);	/* a new connection: no old EOF */
 #ifndef __linux__
 	{
 		struct kevent ev;
@@ -13883,8 +13885,30 @@ xf_drain(struct xf *f)
 		return 0;
 	while ((rc = ctl_next_frame(f->conn, &f->rd, 0, &type, payload,
 	                            &len)) == 1)
+	{
 		wake |= type == MSG_RING_WAKE;
+		f->relost = 0;	/* the master spoke after the snapshot */
+	}
 	return rc < 0 ? -1 : wake;
+}
+
+/* The master's connection dropped: a --restart when a master answers on
+** the socket again (its new image), so a reset and a new snapshot (QA
+** 1.65.0 LOW-V27); else the session ended, exit 0. A second loss with no
+** frame drained since the last such reset ends it too: a master that
+** answers but keeps hanging up (an old image, a refused subscription)
+** must not loop us through snapshots for ever. */
+static int
+xf_lost(struct xf *f)
+{
+	struct cmd_info ci;
+
+	if (f->relost || cmd_query(f->t->sock, &ci) != 0)
+		return 0;
+	cmd_info_free(&ci);
+	f->relost = 1;
+	f->why = "restarted";
+	return XF_RESET;
 }
 
 /* A write failed: the reader left (EPIPE, exit 0), else 3. */
@@ -14276,12 +14300,16 @@ read:
 			break;
 		if (ev & XE_CONN)
 		{
-			if ((r = xf_drain(f)) < 0)
-				break;	/* the master exited */
-			/* a wake: re-armed by a header read, then the question */
-			if (r && (ring_fetch_rd(f->conn, &f->rd, DCH_RING_F_SUB, NULL,
-			                        &rs, NULL, NULL) == -3 || xf_drain(f) < 0))
+			/* a wake: re-armed by a header read, then the question;
+			** a hang-up is the master exiting, or a --restart */
+			if ((r = xf_drain(f)) < 0 ||
+			    (r && (ring_fetch_rd(f->conn, &f->rd, DCH_RING_F_SUB,
+			                         NULL, &rs, NULL, NULL) == -3 ||
+			           xf_drain(f) < 0)))
+			{
+				rc = xf_lost(f);
 				break;
+			}
 			if (r)
 				ev |= XE_ROT;
 		}
@@ -14566,7 +14594,10 @@ xf_shell(struct xf *f, const char *label, int first)
 		if ((ev & XE_CONN) && (r = xf_drain(f)) != 0)
 		{
 			if (r < 0)
-				break;	/* the session ended, or --restart */
+			{
+				rc = xf_lost(f);	/* it ended, or --restart */
+				break;
+			}
 			f->pending = 1;
 		}
 		if ((was.status & DCH_RING_S_PAUSED) && !f->pending &&
@@ -14578,8 +14609,10 @@ xf_shell(struct xf *f, const char *label, int first)
 		f->pending = 0;
 		if ((fr = xf_sb_build(f, b, label)) != 0)
 		{
-			/* hung up mid-batch: the session ended (3.3: exit 0) */
-			rc = fr == -1 || (fr == -3 && xf_gone(t)) ? 0 : xr_failed();
+			/* hung up mid-batch: the session ended (3.3: exit 0),
+			** or a --restart */
+			rc = fr == -1 || (fr == -3 && xf_gone(t)) ? xf_lost(f)
+			     : xr_failed();
 			break;
 		}
 		if (!(b->rs.status & DCH_RING_S_SUB))

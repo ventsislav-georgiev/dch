@@ -864,8 +864,10 @@ xv_fline(struct xv *v, const struct json_parser *p)
 		char *why = xv_str(p, o, "why");
 
 		/* rotated, shrunk, cleared: everything held goes now, cards
-		** included; full and evicted: kept until the snapshot */
-		if (strcmp(why, "full") && strcmp(why, "evicted"))
+		** included; full, evicted and restarted (the same session
+		** under a new master image): kept until the snapshot */
+		if (strcmp(why, "full") && strcmp(why, "evicted") &&
+		    strcmp(why, "restarted"))
 		{
 			xv_drop(v);
 			while (v->mode != XV_LIST)

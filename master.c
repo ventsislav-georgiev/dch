@@ -68,7 +68,8 @@ struct client
 	int armed;
 	/* Its X-ray view is up (MSG_DETACH len 1, #311): attached, but no
 	** terminal sees the output, so none goes to it and the mirror answers
-	** the program's queries. The next MSG_ATTACH clears it. */
+	** the program's queries. The next MSG_ATTACH clears it; a --restart
+	** carries it (the blob's view line). */
 	int viewing;
 
 	/* Connection role latch. A control connection (MSG_KEYS/READ/WAIT)
@@ -3106,6 +3107,7 @@ struct resume_state
 	** socket, restored into the new image's reassembly buffer. */
 	unsigned char cin[RESUME_MAX_CLI][PKT_HDR + PKT_MAX];
 	size_t cinlen[RESUME_MAX_CLI];
+	unsigned char cview[RESUME_MAX_CLI];	/* its view was up */
 	int ncfd;
 	unsigned char *snap;
 	size_t snaplen;
@@ -3239,6 +3241,10 @@ restart_save(const char *path, int lfd, int ackfd, int ringfd, int core)
 		}
 		hex_encode(p->inbuf, p->inlen, hex);
 		fprintf(f, "cli %d %s\n", p->fd, hex);
+		/* its own line: an older image skips a line it does not know,
+		** where a field on the cli line would cost it the client */
+		if (p->viewing)
+			fprintf(f, "view %d\n", p->fd);
 	}
 
 	/* Drop the snapshot rather than write one the loader will reject: past
@@ -3392,6 +3398,16 @@ restart_load(void)
 			               sizeof resume.cin[0]);
 			resume.cinlen[resume.ncfd] = n > 0 ? (size_t)n : 0;
 			resume.cfd[resume.ncfd++] = cfd;
+			continue;
+		}
+		/* a carried client's X-ray view is up (#311): after its cli */
+		if (sscanf(line, "view %d", &cfd) == 1)
+		{
+			int i;
+
+			for (i = 0; i < resume.ncfd; i++)
+				if (resume.cfd[i] == cfd)
+					resume.cview[i] = 1;
 			continue;
 		}
 		if (strncmp(line, "dec ", 4) == 0)
@@ -4493,6 +4509,7 @@ master_adopt(void)
 		if (!p)
 			continue;
 		p->attached = p->armed = 1;
+		p->viewing = resume.cview[i];
 		p->role = ROLE_ATTACHED;
 		/* Half-read frame from before the exec. Without it the next
 		** read() lands mid-packet and the stream desyncs for good. */
@@ -4507,9 +4524,9 @@ master_adopt(void)
 		** everyone: nothing between iterations can change the mirror,
 		** and one render is a full-grid ANSI dump. */
 		p->want_replay = 0;
-		if (blob && (queue_to_client(p, (unsigned char *)blob,
-		                             bloblen) < 0 ||
-		             flush_client(p) < 0))
+		if (blob && !p->viewing &&
+		    (queue_to_client(p, (unsigned char *)blob, bloblen) < 0 ||
+		     flush_client(p) < 0))
 			remove_client(p);
 	}
 	free(blob);

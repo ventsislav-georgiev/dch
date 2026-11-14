@@ -411,6 +411,12 @@ with job control takes the terminal back whenever dch stops (Ctrl-Z or a stop
 signal), and bash with job control off (`set +m`) goes on to its next command:
 either reads that key itself, and dch then does a plain detach.
 
+A stop of `dch -a` (Ctrl-Z while it starts, or `kill -TSTP`) puts your shell's
+terminal modes back before dch stops, so a shell that does not restore them
+itself (dash, `/bin/sh` on Debian and Ubuntu) is not left raw; `fg` brings
+the session back raw. A `SIGSTOP` cannot be caught: under dash the terminal
+stays raw until dch continues.
+
 `detach_key = switch` in the [config file](#config-file) swaps the two: one
 press opens the picker, two detach. With `DCH_DOUBLE_TAP_MS=0` one press then
 opens the picker at once and the key never detaches; quit the picker (`q`) or
@@ -1947,6 +1953,8 @@ every 250 ms:
     in the ring, which no line could remove.
   - `"full"`: a transcript past the per-file range first sends the capped
     snapshot. Its whole-file snapshot follows, read in the background.
+  - `"restarted"` means a `--restart` of the session: the same session under
+    a new master image, reconnected.
 
 Applying the deltas to the snapshot gives the `--json` answer of that moment.
 Top-level fields (`lines`, `complete`, `why`, `mentions_only`,
@@ -1993,8 +2001,11 @@ Rules for shells and endings:
   connection lets its slot go in about 30 s: `dch serve` sets TCP keepalive
   on every connection.
 - An ended session or a History record writes its one snapshot and exits 0.
-- A live one exits 0 when the session ends, when its connection drops (a
-  `--restart`), or when the reader closes the pipe, idle or not.
+- A live one exits 0 when the session ends or when the reader closes the
+  pipe, idle or not. A `--restart` of the session drops its connection: the
+  follow asks the socket, and when the new master image answers it sends
+  `reset` `restarted` and a new snapshot and goes on (before 1.66.0 it
+  exited 0 there).
 
 `dch --xray <n> --chapter <anchor> --json` prints one chapter's entries as
 one object: `{"schema":1,"session","session_id","anchor","title","at","kind","entries":[…],"truncated":bool}`,
@@ -2602,7 +2613,15 @@ under an attach. A terminal that attaches later without mode 2026 ignores
 the mode, as the mode's spec intends. Every other query (cursor position,
 device attributes, colours, the keyboard protocol) is left for the terminal
 that attaches. While a client is attached, its terminal answers everything,
-as before, and the mirror stays silent.
+as before, and the mirror stays silent, with one exception: while the X-ray
+view (`Ctrl-\ x`) is up over a local attach, the view shows no session
+output, so its terminal never sees the question. The client tells the master
+the view is up, the master sends that client nothing, and the mirror answers
+the two queries until the view closes, also across a `--restart` (a master
+before 1.65.0 takes that message as a detach: its mirror answers, and the
+view's close attaches again). Over a remote attach (`dch -a host:name`)
+nothing answers them while the view is up: the host's `dch serve` keeps its
+own client attached, so the host's master counts the question as seen.
 
 ### dch-lite and `DCH_NO_VT`
 
@@ -2619,7 +2638,7 @@ environment disables it at spawn.
 | `--read`, `--wait --match` | Exit 3 with a message pointing at the full build. |
 | [Auto-allow](#auto-allow) | Unavailable: the master reads the prompt off its mirror. Nothing is answered; `auto_allowed` stays `null`. |
 | `--keys` | Falls back to a fixed legacy xterm table client-side (exit 0 + stderr note). Mode-aware apps may misread modified keys. |
-| [Start-up queries](#a-session-nothing-sees-answers-two-queries) | Unanswered while nothing is attached. |
+| [Start-up queries](#a-session-nothing-sees-answers-two-queries) | Unanswered while nothing is attached or the X-ray view is up. |
 
 The client side is protocol-only in both builds: a lite `dch` binary can
 drive every verb against a session spawned by a full `dch` master.
