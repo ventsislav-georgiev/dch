@@ -139,7 +139,7 @@ def main():
     sockdir = os.path.join(tmp, "dch-%d" % os.getuid())
     recdir = os.path.join(state, "dch", "sessions",
                           sockdir.replace("/", "-"))
-    names, atts = [], []
+    names, atts, stopped = [], [], []
 
     def dch(*a, timeout=30):
         try:
@@ -193,6 +193,11 @@ def main():
         check("%s: --send of 96 KB to a program not reading: exit 0" % name,
               rc == 0, rc)
         mp, cp = master(name), until(lambda: readf(d + "/pid"), 10)
+        # master() is 0 when no ps line matches: kill(0) would stop this test
+        check("%s: the master's pid found" % name, mp, mp)
+        if not mp:
+            return 0
+        stopped.append(mp)
         os.kill(mp, signal.SIGSTOP)
         open(d + "/die", "w").close()
         dead = until(lambda: zombie(int(cp)), 10)
@@ -262,6 +267,11 @@ def main():
               rc == 0 and c and until(lambda: readf(rxf) == "NEW", 10),
               (rc, c and c["state"], readf(rxf)[:40]))
     finally:
+        for mp in stopped:
+            try:
+                os.kill(mp, signal.SIGCONT)
+            except OSError:
+                pass
         for a in atts:
             a.close()
         for n in names:
