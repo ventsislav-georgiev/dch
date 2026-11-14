@@ -12884,8 +12884,8 @@ xr_json(const struct xr_target *t, const struct xr_refq *q, int snap)
 /* ---- dch --xray <n> --chapter <anchor> --json (#156, XR3b; spec 3.5) ---- */
 
 /* The answer once the decode is done: the wanted chapter only while the
-** index still holds its anchor, exactly, and the entries gathered are that
-** chapter's (K14.2); else it went stale (K14.3). */
+** decode's chapters still hold its anchor, exactly, and the entries
+** gathered are that chapter's (K14.2); else it went stale (K14.3). */
 static int
 xr_chapter_out(const char *session, const char *sid,
                const struct xr_chapters *ch, const struct xr_entries *e)
@@ -12903,9 +12903,11 @@ xr_chapter_out(const char *session, const char *sid,
 	return 1;
 }
 
-/* One pass over a looked-up transcript (codex: a Codex rollout, 7.4): the
-** chapters-only index, and the wanted chapter's entries as it goes. Never a
-** seek (K14.2). */
+/* A looked-up transcript (codex: a Codex rollout, 7.4): the anchor's
+** chapter read from a little before its offset (#300: K14.2 no longer says
+** "never a seek", and the newest-5000 ordinal check is gone), else, when
+** the seek cannot be sure, one pass over the range: the chapters-only index,
+** and the wanted chapter's entries as it goes. */
 static int
 xr_chapter_file(const char *path, const struct stat *st, int codex,
                 const char *sid, const char *session, const char *anchor)
@@ -12913,24 +12915,28 @@ xr_chapter_file(const char *path, const struct stat *st, int codex,
 	struct xr_chapters ch = {0};
 	struct xr_entries e;
 	struct xr_claude *d;
-	int fd, capped, rc;
+	int fd, capped, rc, seek;
 
 	if ((fd = xr_seam_open(path, st)) < 0)	/* there but unreadable: 3 */
 		return errno == EACCES || errno == EPERM || errno == EIO
 		       ? xr_failed() : xr_no_corpus();
-	if (!(d = xr_claude_new()))
-	{
-		close(fd);
-		return xr_failed();
-	}
-	if (codex)
-		xr_claude_codex(d);
 	xr_entries_begin(&e, anchor, session, XR_CH_OUT);
-	xr_claude_entries(d, &e, (uint64_t)st->st_ino);
-	rc = xr_claude_read(d, fd, (uint64_t)st->st_size, &capped);
+	if ((rc = seek = xr_chapter_seek(fd, st, codex, &e, &ch)) == 0)
+	{
+		if (!(d = xr_claude_new()))
+			rc = -1;
+		else
+		{
+			if (codex)
+				xr_claude_codex(d);
+			xr_claude_entries(d, &e, (uint64_t)st->st_ino);
+			rc = xr_claude_read(d, fd, (uint64_t)st->st_size, &capped);
+			xr_claude_end(d, (uint64_t)st->st_ino, &ch);
+			xr_claude_free(d);
+		}
+	}
 	close(fd);
-	xr_claude_end(d, (uint64_t)st->st_ino, &ch);
-	xr_claude_free(d);
+	dch_trace("xray chapter: seek=%d", seek);	/* 0: read whole */
 	rc = rc < 0 ? xr_failed() : xr_chapter_out(session, sid, &ch, &e);
 	xr_chapters_free(&ch);
 	xr_entries_free(&e);

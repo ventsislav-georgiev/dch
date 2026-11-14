@@ -412,9 +412,11 @@ int xr_anchor_ok(const char *s);
 
 /* One chapter's entries (3.5), gathered while a decoder builds the
 ** chapters-only index: those of the chapter whose anchor equals `anchor`
-** byte for byte, and nothing else (K14.2: no offset is ever taken on the
-** anchor's say). Each entry is a JSON object, comma-joined in buf, cut at an
-** entry once the whole object would pass its cap (truncated). */
+** byte for byte, and nothing else (K14.2; #300: the anchor's offset only
+** says where xr_chapter_seek starts reading, the chapter counts once a
+** decode makes one with exactly that anchor). Each entry is a JSON object,
+** comma-joined in buf, cut at an entry once the whole object would pass its
+** cap (truncated). */
 struct xr_ent_call;
 struct xr_entries
 {
@@ -424,6 +426,8 @@ struct xr_entries
 	size_t len;
 	uint64_t ord;			/* the chapter's, once hit */
 	int hit, truncated, done, failed;	/* failed: out of memory */
+	int guess;			/* #300: a seek's bounds or an entry rest on
+					** what came before its first line */
 	struct xr_ent_call *calls;	/* Claude: the chapter's calls */
 	int ncalls;
 	char *out;			/* shell: the block's C..D rows */
@@ -439,6 +443,15 @@ void xr_entries_free(struct xr_entries *e);
 ** closes, or at xr_shell_end. */
 void xr_claude_entries(struct xr_claude *d, struct xr_entries *e,
                        uint64_t ino);
+/* --chapter on a transcript (#300): fd, its stat, the anchor's chapter read
+** from a little before its offset (the anchor's own, after checks the whole
+** read would also fail: gone) on to the next chapter, then only the lines
+** that may hold its open calls' results. 1 the answer is in e and out (no
+** chapter with the anchor: gone), 0 not sure: read it whole, e as begun;
+** -1 a read error or out of memory. No ordinal check: a chapter past the
+** newest XR_CHAPTERS opens. */
+int xr_chapter_seek(int fd, const struct stat *st, int codex,
+                    struct xr_entries *e, struct xr_chapters *out);
 /* {"schema":1,"session","session_id","anchor","title","at","kind",
 ** "entries":[…],"truncated"} and a newline. 0, or -1 the write failed. */
 int xr_chapter_print(FILE *f, const char *session, const char *session_id,

@@ -1973,6 +1973,225 @@ def test_chapter():
           rc == 1 and err == "dch: no x-ray corpus\n", (rc, err))
 
 
+def test_chapter_seek():
+    """#300: --chapter reads from a little before the anchor's offset, not
+    the whole range: a 5.8 MB transcript (several 1 MiB windows) answers
+    as its whole read would (the expected entries are the generator's):
+    the newest chapter, one after a chapter longer than a window, prompts
+    merged across a window, a late result 2 MB after its call (in its
+    call's chapter, not the one it is read in), and stale anchors are
+    chapter gone (not a line start, another inode, past the end, the
+    unread middle of the range). The spec change: an anchor older than the
+    newest 5000 chapters opens."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    sid = "11111111-2222-4333-8444-5555555553a0"
+    tp = os.path.join(pdir, sid + ".jsonl")
+    history("xr-sk", sid, cfg)
+    trace = os.path.join(T, "sk.trace")
+    dbg = dict(ENV, DCH_DEBUG=trace)
+    rows, exp, at = [], {}, [0]
+
+    def put(o):
+        b = (json.dumps(o) + "\n").encode()
+        rows.append(b)
+        at[0] += len(b)
+        return at[0] - len(b)
+
+    def ask(t):
+        return put({"type": "user", "message": {"content": t}})
+
+    def say(t):
+        put({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": t}]}})
+
+    def use(id, cmd):
+        put({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": id, "name": "Bash",
+             "input": {"command": cmd}}]}})
+
+    def res(id, out):
+        put({"type": "user", "toolUseResult": {"stdout": out},
+             "message": {"content": [{"type": "tool_result",
+                                      "tool_use_id": id, "content": out}]}})
+
+    def turn(i, pad=3000):
+        o = ask("ask %d" % i)
+        say("p" * pad)
+        use("toolu_t%d" % i, "cmd %d" % i)
+        res("toolu_t%d" % i, "out %d" % i)
+        exp[o] = [ent("user", "ask %d" % i), ent("assistant", "p" * pad),
+                  ent("tool", "cmd %d" % i, "Bash"),
+                  ent("output", "out %d" % i, "Bash")]
+        return o
+
+    for i in range(60):
+        turn(i)
+    # a chapter of 15 outputs of 100 KB (longer than a window), then one
+    big = ask("big")
+    for k in range(15):
+        use("toolu_g%d" % k, "gen %d" % k)
+        res("toolu_g%d" % k, "%d" % k + "g" * 100000)
+    after_big = turn(150)
+    # a late call: its result comes 2 MB on, in another chapter
+    late = ask("late ask")
+    use("toolu_late", "sleep 9")
+    say("waiting")
+    exp[late] = [ent("user", "late ask"), ent("tool", "sleep 9", "Bash"),
+                 ent("assistant", "waiting")]
+    for i in range(151, 300):
+        turn(i)
+    # prompts merged across a window: 13 of 100 KB, one chapter
+    merged = ask("m0")
+    inner = [ask("m%d " % k + "y" * 100000) for k in range(1, 13)]
+    say("merged done")
+    after_merged = turn(300)
+    for i in range(301, 500):
+        turn(i)
+    exp[late].append(ent("output", "woke", "Bash"))
+    landed = turn(500)
+    res("toolu_late", "woke")    # in chapter 500, but its call's entry
+    for i in range(501, 540):
+        turn(i)
+    newest = turn(540)
+    with open(tp, "wb") as f:
+        f.write(b"".join(rows))
+    st = os.stat(tp)
+    size = st.st_size
+    an = lambda off, ino=st.st_ino: "f%x:%d" % (ino, off)
+
+    def seeks():
+        try:
+            with open(trace) as f:
+                t = f.read()
+        except OSError:
+            return []
+        os.unlink(trace)
+        return re.findall(r"xray chapter: seek=(-?\d)", t)
+
+    seeks()
+    for what, off in (("the newest chapter", newest),
+                      ("the first", 0),
+                      ("the one after a chapter longer than a window",
+                       after_big),
+                      ("a late call's: its result 2 MB on", late),
+                      ("the chapter the late result is read in "
+                       "(its call's, not this)", landed),
+                      ("the one after prompts merged across a window",
+                       after_merged)):
+        rc, c, err, out = chapter("xr-sk", an(off), env=dbg)
+        how = seeks()
+        check("chapter seek (%.1f MB): %s at %d: as the whole read, by the "
+              "seek" % (size / 1e6, what, off),
+              rc == 0 and c and c["entries"] == exp[off] and
+              c["anchor"] == an(off) and how == ["1"],
+              (rc, err, how, c and c["entries"][-2:], exp[off][-2:]))
+    rc, c, err, out = chapter("xr-sk", an(merged), env=dbg)
+    check("chapter seek: 13 prompts of 100 KB merged across a window: one "
+          "chapter, every prompt's entry",
+          rc == 0 and c and [e["role"] for e in c["entries"]] ==
+          ["user"] * 13 + ["assistant"] and
+          c["entries"][0]["text"] == "m0" and seeks() == ["1"],
+          (rc, err, c and len(c["entries"])))
+    rc, c, err, out = chapter("xr-sk", an(big), env=dbg)
+    check("chapter seek: the chapter longer than a window: its 15 calls "
+          "and outputs (each clipped to 3000)",
+          rc == 0 and c and len(c["entries"]) == 31 and
+          c["entries"][-1] == ent("output", "14" + "g" * 2998, "Bash") and
+          seeks() == ["1"], (rc, err, c and len(c["entries"])))
+    for what, a in (("a merged prompt (no chapter of its own)",
+                     an(inner[5])),
+                    ("not a line start", an(newest + 1)),
+                    ("the byte before a line start", an(newest - 1)),
+                    ("another inode", an(newest, st.st_ino + 1)),
+                    ("past the end", an(size + 10)),
+                    ("at the end", an(size))):
+        rc, c, err, out = chapter("xr-sk", a)
+        check("chapter seek: %s: chapter gone" % what, rc == 1 and
+              err == "dch: chapter gone\n" and out == "", (rc, err, out))
+    # past a lowered range (head 1 MiB, tail 2 MiB): the unread middle is
+    # gone, the head and the tail open (the tail read on from the head)
+    caps = dict(dbg, DCH_XRAY_CAPS="0:0:0:%d:%d" % (1 << 20, 2 << 20))
+    mid = max(o for o in exp if o < size - (2 << 20))
+    tail1 = min(o for o in exp if o >= size - (2 << 20))
+    rc, c, err, out = chapter("xr-sk", an(mid), env=caps)
+    check("chapter seek: past the range, a chapter in the unread middle: "
+          "chapter gone", rc == 1 and err == "dch: chapter gone\n",
+          (rc, err))
+    for what, off in (("the head's first", 0),
+                      ("the tail's first whole chapter", tail1),
+                      ("the newest", newest)):
+        rc, c, err, out = chapter("xr-sk", an(off), env=caps)
+        check("chapter seek: past the range, %s opens" % what,
+              rc == 0 and c and c["entries"] == exp[off], (rc, err))
+    seeks()
+    os.unlink(tp)
+
+    # the spec change: an anchor older than the newest 5000 chapters opens
+    # (the whole read's ring had dropped it: chapter gone before #300)
+    sid = "11111111-2222-4333-8444-5555555553a1"
+    tp = os.path.join(pdir, sid + ".jsonl")
+    history("xr-sk5k", sid, cfg)
+    rows[:], at[0] = [], 0
+    offs = [turn(i, pad=20) for i in range(5100)]
+    with open(tp, "wb") as f:
+        f.write(b"".join(rows))
+    st = os.stat(tp)
+    an = lambda off: "f%x:%d" % (st.st_ino, off)
+    rc, o, err = xray("xr-sk5k", "--json")
+    check("chapter seek: 5100 chapters, --json lists the newest 5000",
+          rc == 0 and o and len(o["chapters"]) == 5000 and
+          o["chapters"][0]["anchor"] == an(offs[100]), (rc, err))
+    for k in (0, 99, 100, 5099):
+        rc, c, err, out = chapter("xr-sk5k", an(offs[k]))
+        check("chapter seek: chapter %d of 5100 opens%s" %
+              (k + 1, " (older than the newest 5000)" if k < 100 else ""),
+              rc == 0 and c and c["entries"] == exp[offs[k]], (rc, err))
+    os.unlink(tp)
+
+    # the second: past 256 open calls the whole read forgets the oldest,
+    # and its result with it; the seek still pairs it in its call's chapter
+    rows[:], at[0] = [], 0
+    first = ask("first")
+    use("toolu_X", "x")
+    for k in range(300):
+        ask("p%d" % k)
+        use("toolu_o%d" % k, "o%d" % k)
+    res("toolu_X", "late x")
+    with open(tp, "wb") as f:
+        f.write(b"".join(rows))
+    st = os.stat(tp)
+    rc, c, err, _ = chapter("xr-sk5k", an(first))
+    check("chapter seek: past 256 open calls, a late result attaches where "
+          "the whole read dropped it", rc == 0 and c and c["entries"] == [
+              ent("user", "first"), ent("tool", "x", "Bash"),
+              ent("output", "late x", "Bash")], (rc, err, c))
+
+    # the third exception: past 256 KiB of summaries the whole read's
+    # oldest auto chapters give theirs up (--json shows none); --chapter
+    # reads the chapter alone and keeps it
+    rows[:], at[0] = [], 0
+    for k in range(2300):
+        put({"type": "user", "origin": {"kind": "task-notification"},
+             "message": {"content": "<task-notification><summary>%s"
+                         "</summary></task-notification>" %
+                         ("first" if not k else "%05d" % k + "s" * 115)}})
+        say("ok")
+    with open(tp, "wb") as f:
+        f.write(b"".join(rows))
+    st = os.stat(tp)
+    rc, o, err = xray("xr-sk5k", "--json")
+    rc2, c, err2, _ = chapter("xr-sk5k", an(0))
+    check("chapter seek: an auto chapter past 256 KiB of newer summaries: "
+          "--json lists it with no summary, --chapter gives it",
+          rc == 0 and o and o["chapters"][0]["anchor"] == an(0) and
+          o["chapters"][0].get("auto") is True and
+          "summary" not in o["chapters"][0] and rc2 == 0 and c and
+          c.get("auto") is True and c.get("summary") == "first",
+          (rc, err, o and o["chapters"][0], rc2, err2, c and list(c)))
+    os.unlink(tp)
+
 def test_chapter_shell():
     """A live shell chapter: one tool entry (the typed command), one output
     entry (C..D, WRAP-joined, error from D's exit); a stale seq and a
@@ -3959,6 +4178,7 @@ def main():
         test_write_fail()
         test_search()
         test_chapter()
+        test_chapter_seek()
         test_chapter_shell()
         test_cancel()
         test_claude_caps()

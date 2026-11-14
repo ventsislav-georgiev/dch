@@ -1789,8 +1789,16 @@ one object: `{"schema":1,"session","session_id","anchor","title","at","kind","en
 with `auto` and `summary` after `kind` when the chapter list has them.
 `<anchor>` is a chapter's `anchor` from `--json`: 1 to 128 bytes of
 `A-Z`, `a-z`, `0-9`, `:`, `_`, `.` and `-`, else exit 2 with `dch: bad
-anchor`. dch reads the session's chapters again and answers only when one of
-them has exactly that anchor; it never seeks to the offset in it. Otherwise it
+anchor`. On a transcript, dch reads from a little before the anchor's offset
+(at most 8 MiB before it) up to the next chapter, then only the lines that can
+hold a late result of one of its calls. It answers only when that read makes
+a chapter with exactly that anchor. When what came before the read could
+change where the chapter starts or ends, dch reads the whole range instead.
+This changed: `--chapter` used to never seek, and it used to check that the
+chapter was among the newest 5000. Now an anchor older than that opens,
+though `--json` no longer lists it. So does an auto chapter's `summary` that
+`--json` gave up (past 256 KiB of summaries), and, with more than 256 calls
+open at once, a late result that the whole read dropped. Otherwise it
 exits 1 with `dch: chapter gone` (the transcript was rewritten, or the ring
 evicted or cleared the block): read `--json` again. `--chapter` does not go
 with `--ref`, `--follow` or `--clear`.

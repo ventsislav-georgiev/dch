@@ -4638,9 +4638,18 @@ struct xr_claude
 	int blind;		/* #299: a light window not at offset 0: its
 				** first chapter may be one the full decode
 				** has not (begun or merged in an older window) */
+	int sure;		/* #300: a B_STEP since the open chapter began */
+	int maybe;		/* #300: in the lead, a block of a thread known
+				** here (past XR_THREADS the full decode takes
+				** each as a step) */
+	int late;		/* #300: --chapter's late results: decode only
+				** the lines late_line picks */
 };
 
-enum { B_PROMPT, B_IMAGE, B_STEP };
+/* B_GUESS (#300): a step a decoder that starts mid-file takes where the full
+** decode may not (a thread's first block here, a result whose call is
+** older than the first line) */
+enum { B_PROMPT, B_IMAGE, B_STEP, B_GUESS };
 
 struct xr_claude *
 xr_claude_new(void)
@@ -4707,8 +4716,25 @@ main_block(struct xr_claude *d, int b, const char *kind, const char *title)
 			char a[48];
 
 			ch_anchor(d, a);
-			(void)ent_hit(d->want, a, d->ch.total - 1);
+			/* #300: a seek trusts the wanted chapter's start and end
+			** only after a step the full decode takes too */
+			if (ent_hit(d->want, a, d->ch.total - 1) ||
+			    (d->want->hit && d->want->ord + 2 == d->ch.total))
+				d->want->guess |= d->blind && !d->sure;
 		}
+		d->sure = d->maybe = 0;
+	}
+	else if (b == B_PROMPT && d->maybe && d->blind && d->want)
+	{
+		char a[48];
+
+		/* #300: a merge the full decode may not make: the wanted
+		** chapter's end, or the anchor's line, is a guess */
+		snprintf(a, sizeof a, "f%llx:%llu", (unsigned long long)d->ino,
+		         (unsigned long long)d->off);
+		if ((d->want->hit && d->want->ord + 1 == d->ch.total) ||
+		    !strcmp(a, d->want->anchor))
+			d->want->guess = 1;
 	}
 	x = cur(d);
 	if (x && b == B_PROMPT && !d->titled)
@@ -4739,7 +4765,8 @@ main_block(struct xr_claude *d, int b, const char *kind, const char *title)
 		d->titled = 1;
 	}
 	if (b != B_PROMPT && b != B_IMAGE)
-		d->lead = 0;
+		d->lead = d->maybe = 0;
+	d->sure |= b == B_STEP;
 	d->bare = 0;
 }
 
@@ -4774,7 +4801,10 @@ side_block(struct xr_claude *d, const char *agent)
 
 	for (k = 0; k < d->nthreads; k++)
 		if (!strcmp(d->threads[k], agent))
+		{
+			d->maybe |= d->lead;
 			return;
+		}
 	if (d->nthreads < XR_THREADS)
 	{
 		char **nt = realloc(d->threads, (size_t)(d->nthreads + 1) *
@@ -4791,7 +4821,7 @@ side_block(struct xr_claude *d, const char *agent)
 	else
 		d->threads_full = 1;	/* shortcut: past 1024 subagents each
 					** sidechain block reads as a new thread */
-	main_block(d, B_STEP, NULL, NULL);
+	main_block(d, B_GUESS, NULL, NULL);
 }
 
 static void
@@ -4883,8 +4913,12 @@ tool_result(struct xr_claude *d, const char *agent, const char *id, int err)
 		d->norder = w;
 		return;
 	}
-	/* an orphan: a generic "Tool result" card, a step with its isError */
-	block(d, agent, B_STEP, NULL, NULL);
+	/* an orphan: a generic "Tool result" card, a step with its isError;
+	** #300: a seek leaves its thread unknown, the full decode may pair it */
+	if (agent && id && d->blind && d->want)
+		main_block(d, B_GUESS, NULL, NULL);
+	else
+		block(d, agent, id ? B_GUESS : B_STEP, NULL, NULL);
 	if (err && !agent)
 		mark_error(d, (long long)d->ch.total - 1);
 }
@@ -5885,6 +5919,8 @@ ent_result(struct xr_claude *d, const struct json_parser *p, int i,
 
 	if (ord == -2 ? !ent_here(d, agent) : !e->hit || ord != (long long)e->ord)
 		return;
+	if (ord == -2 && id)	/* #300: its call may be before a seek's start */
+		e->guess |= d->blind;
 	if (ord != -2)
 		name = ent_tool(e, id);
 	t = output_text(p, i, k_obj(p, 0, (const char *const[]){
@@ -6690,6 +6726,8 @@ xr_claude_chapters(struct xr_claude *d)
 	return &d->ch;
 }
 
+static int late_line(const struct xr_claude *d, const char *s, size_t n);
+
 /* One range [from, to) of fd through the line splitter (Prosper's
 ** LineBuffer, with 3.8's 1 MB line cap). `mid`: from is not a line start
 ** unless the byte before it is '\n', so the bytes up to the first '\n' go. */
@@ -6758,7 +6796,7 @@ read_range(struct xr_claude *d, int fd, uint64_t from, uint64_t to, int mid,
 				                         acc[k] == '\r'); k++)
 					;
 				acc[fill] = '\0';
-				if (k < fill)
+				if (k < fill && (!d->late || late_line(d, acc, fill)))
 					xr_claude_line(d, acc, fill, start, 0);
 			}
 			skipping = 0;
@@ -7374,6 +7412,211 @@ uint64_t
 xr_claude_next(const struct xr_claude *d)
 {
 	return d->next;
+}
+
+/* ---- --chapter's seek (#300; #293 design 5) -------------------------------- */
+
+#define SEEK_STEPS     8	/* windows of context before the whole read */
+
+struct xr_seek
+{
+	struct xr_claude *d;
+	uint64_t off;		/* the anchor's line */
+};
+
+/* After each line: stop once the wanted chapter is over (the next one began)
+** or the anchor's line went by without it; late, once none of its calls is
+** open. */
+static int
+seek_tick(void *ctx, uint64_t bytes)
+{
+	struct xr_seek *s = ctx;
+	struct xr_claude *d = s->d;
+	struct xr_entries *e = d->want;
+	int k;
+
+	(void)bytes;
+	if (e->failed || (d->late && e->truncated))	/* no entry can follow */
+		return 1;
+	if (!d->late)
+		return e->hit ? d->ch.total > e->ord + 1 : d->off >= s->off;
+	for (k = 0; k < d->npend; k++)
+		if (d->pend[k].ord == (long long)e->ord)
+			return 0;
+	return 1;
+}
+
+/* A line that may hold a result of a call of the wanted chapter still open:
+** its id raw, or an escape that could write it; any line while an id has no
+** raw form to look for (a long one's key, or bytes JSON escapes). */
+static int
+late_line(const struct xr_claude *d, const char *s, size_t n)
+{
+	int k;
+
+	for (k = 0; k < d->npend; k++)
+	{
+		const char *id = d->pend[k].id;
+		size_t l = strlen(id), j;
+
+		if (d->pend[k].ord != (long long)d->want->ord)
+			continue;
+		for (j = 0; j < l && id[j] >= ' ' && id[j] != 0x7f && id[j] != '"' &&
+		            id[j] != '\\'; j++)
+			;
+		if (j < l || !l || pf_find(s, n, 0, id, l, l - 1, 0))
+			return 1;
+	}
+	return pf_escape(s, n);
+}
+
+/* The lines from `from` on (a line start of the head, or of the tail from
+** its first line; the head's end for the tail's first) as xr_claude_read
+** gives them. */
+static int
+seek_read(struct xr_claude *d, int fd, uint64_t size, uint64_t from,
+          char *buf, char *acc)
+{
+	int rc;
+
+	if (size <= xr_lim.head + xr_lim.tail || from > xr_lim.head)
+		return read_range(d, fd, from, size, 0, buf, acc);
+	if ((rc = read_range(d, fd, from, xr_lim.head, 0, buf, acc)) || d->halt)
+		return rc;
+	return read_range(d, fd, size - xr_lim.tail, size, 1, buf, acc);
+}
+
+/* *at: the first line start `back` bytes of the read before off, off a line
+** start of it (past the tail's start, on into the head by what is left).
+** 0, -1 a read error. */
+static int
+seek_ctx(int fd, uint64_t size, uint64_t off, uint64_t back, char *buf,
+         uint64_t *at)
+{
+	uint64_t w = off > back ? off - back : 0, end = off + 1;
+	uint64_t t = size - xr_lim.tail;
+	int k;
+
+	if (size > xr_lim.head + xr_lim.tail && off > xr_lim.head && w < t)
+	{
+		w = xr_lim.head > t - w ? xr_lim.head - (t - w) : 0;
+		end = xr_lim.head;
+	}
+	if ((k = line_start(fd, w, end, buf, at)) < 0)
+		return -1;
+	if (!k)		/* none in the head's last bytes: the tail's first */
+		*at = xr_lim.head;
+	return 0;
+}
+
+static void
+ent_reset(struct xr_entries *e)
+{
+	const char *a = e->anchor;
+	size_t cap = e->cap;
+
+	xr_entries_free(e);
+	memset(e, 0, sizeof *e);
+	e->anchor = a;
+	e->cap = cap;
+}
+
+int
+xr_chapter_seek(int fd, const struct stat *st, int codex,
+                struct xr_entries *e, struct xr_chapters *out)
+{
+	uint64_t size = (uint64_t)st->st_size, ino = (uint64_t)st->st_ino;
+	uint64_t off, at, prev = UINT64_MAX;
+	unsigned long long ai = 0, ao = 0;
+	char canon[48], c = '\n', *buf, *acc;
+	struct xr_chapter *x;
+	struct xr_seek s;
+	ssize_t got;
+	int k, rc = 0, done = 0;
+
+	memset(out, 0, sizeof *out);
+	/* 1: stale is gone, as the whole read finds it: not this file's
+	** anchor as ch_anchors writes it, past its end, outside the range, or
+	** not a line start */
+	if (sscanf(e->anchor, "f%llx:%llu", &ai, &ao) != 2 ||
+	    snprintf(canon, sizeof canon, "f%llx:%llu", ai, ao) >= 48 ||
+	    strcmp(canon, e->anchor) || ai != ino || ao >= size)
+		return 1;
+	off = ao;
+	if (size > xr_lim.head + xr_lim.tail && off >= xr_lim.head &&
+	    off < size - xr_lim.tail)
+		return 1;
+	while (off && (got = pread(fd, &c, 1, (off_t)(off - 1))) != 1)
+		if (got == 0 || errno != EINTR)
+			return got < 0 ? -1 : 0;
+	if (off && c != '\n')
+		return 1;
+	buf = malloc(XR_CHUNK);
+	acc = malloc(XR_LINE_MAX + 1);
+	if (!buf || !acc)
+		rc = -1;
+	/* 2, 3: from a window before off by a fresh decoder, through the
+	** chapter; further back while its bounds rest on a guess */
+	for (k = 1; rc == 0 && !done && k <= SEEK_STEPS; k++)
+	{
+		struct xr_claude *d;
+		int r;
+
+		if (seek_ctx(fd, size, off, (uint64_t)k * xr_lim.chunk, buf, &at))
+		{
+			rc = -1;
+			break;
+		}
+		if (at == prev)	/* still inside one long line */
+			continue;
+		prev = at;
+		ent_reset(e);
+		if (!(d = xr_claude_new()))
+		{
+			rc = -1;
+			break;
+		}
+		d->codex = codex;
+		d->blind = at > 0;
+		xr_claude_entries(d, e, ino);
+		s.d = d;
+		s.off = off;
+		d->tick = seek_tick;
+		d->tctx = &s;
+		r = seek_read(d, fd, size, at, buf, acc);
+		if (r < 0 || e->failed)
+			rc = -1;
+		/* no chapter at off is sure unless it may have merged into the
+		** decode's first chapter, or is that chapter */
+		else if (r == 0 && !e->guess &&
+		         (e->hit || !(d->blind && (x = ch_ord(&d->ch, 0)) &&
+		                      (x->offset == off || (d->ch.total == 1 &&
+		                                            d->lead && x->partial)))))
+		{
+			/* 4: the late results of its calls still open */
+			d->late = 1;
+			if (e->hit && d->halt && !seek_tick(&s, 0))
+			{
+				d->halt = 0;
+				r = seek_read(d, fd, size, d->next, buf, acc);
+			}
+			if (r < 0 || e->failed)
+				rc = -1;
+			else if (r == 0)
+			{
+				xr_claude_end(d, ino, out);	/* 5 */
+				done = 1;
+			}
+		}
+		xr_claude_free(d);
+		if (r == 1)	/* shrank: the whole read's to tell */
+			break;
+	}
+	free(buf);
+	free(acc);
+	if (!done)
+		ent_reset(e);
+	return rc < 0 ? -1 : done;
 }
 
 /* ---- shell ring ------------------------------------------------------------ */
