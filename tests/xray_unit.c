@@ -4432,10 +4432,46 @@ t_res_parse(void)
 	          "remote.o.url\nhttps://github.com/o/r\0") &&
 	      !GR("url..insteadof\nhttps://\0"
 	          "remote.o.url\nhttps://github.com/o/r\0") &&
-	      GR("url.https://evil.com/.insteadof\n\0"
-	         "remote.o.url\nhttps://github.com/o/r\0") &&
+	      !GR("url.https://evil.com/.insteadof\n\0"
+	          "remote.o.url\nhttps://github.com/o/r\0") &&
 	      GR("url.https://evil.com/.pushinsteadof\nhttps://github.com/\0"
 	         "remote.o.url\nhttps://github.com/o/r\0"));
+	CHECK("git remote: an empty insteadOf starts every URL, a tie goes to "
+	      "the base git read first, past 64 rules none (LOW-X20)",
+	      !GR("url.https://evil.com/.insteadof\n\0"
+	          "url.https://github.com/.insteadof\n\0"
+	          "remote.o.url\nhttps://github.com/o/r\0") &&
+	      GR("url..insteadof\n\0"
+	         "url.https://evil.com/.insteadof\n\0"
+	         "remote.o.url\nhttps://github.com/o/r\0") &&
+	      GR("url.https://evil.com/.insteadof\n\0"
+	         "url.https://github.com/.insteadof\nhttps://github.com/\0"
+	         "remote.o.url\nhttps://github.com/o/r\0") &&
+	      !GR("url.https://evil.com/.insteadof\ny:\0"
+	          "url.https://github.com/.insteadof\nx:\0"
+	          "url.https://evil.com/.insteadof\nx:\0"
+	          "remote.o.url\nx:o/r\0") &&
+	      GR("url.https://github.com/.insteadof\ny:\0"
+	         "url.https://evil.com/.insteadof\nx:\0"
+	         "url.https://github.com/.insteadof\nx:\0"
+	         "remote.o.url\nx:o/r\0") &&
+	      GR("url.https://github.com/.insteadof\nx:\0"
+	         "url.https://github.com/.insteadof\nx:\0"
+	         "remote.o.url\nx:o/r\0"));
+	{
+		char big[64 * 32 + 64];
+		int i, bn = 0;
+
+		for (i = 0; i < 65; i++)
+			bn += snprintf(big + bn, sizeof big - (size_t)bn,
+			               "url.u%d.insteadof\nq%d", i, i) + 1;
+		bn += snprintf(big + bn, sizeof big - (size_t)bn,
+		               "remote.o.url\nhttps://github.com/o/r") + 1;
+		CHECK("git remote: 64 insteadOf rules read, a 65th: no match",
+		      !xr_git_remote(big, (size_t)bn, "o/r") &&
+		      xr_git_remote(big + strlen(big) + 1,
+		                    (size_t)bn - strlen(big) - 1, "o/r"));
+	}
 	CHECK("git remote: scp path with ':' or '@', empty owner or repo, "
 	      "3 segments: no",
 	      !GR("remote.o.url\ngit@github.com:o/r:x\0") &&
@@ -4763,6 +4799,21 @@ t_excl(void)
 		"x=1 a[1<<1]=5\ncat ../x", "x=1 y=2 a[1<<1]=5\ncat ../x",
 		"echo ${ cat ../x; }", "echo \"${ cat ../x; }\"",
 		"echo ${| cat ../x; }",
+		/* #316 LOW-X17: more shells; a group's pipe or < ; su -c,
+		** script -c and su's login home */
+		"echo 'cat ../x' | tcsh", "echo 'cat ../x' | csh",
+		"echo 'cat ../x' | ash", "echo 'cat ../x' | busybox ash",
+		"echo 'cat ../x' | mksh", "echo 'cat ../x' | yash",
+		"echo 'cat ../x' | rbash", "tcsh -c 'cat ../x'",
+		"mksh <<< 'cat ../x'", "(sh) < s.sh", "{ sh; } < s.sh",
+		"( cd sub; sh ) < s.sh", "while true; do sh; done < s.sh",
+		"echo 'cat ../x' | if true; then sh; fi", "sh 0< s.sh",
+		"sh 2>/dev/null < s.sh", "su bob -c 'cat ../x'",
+		"su -c 'cat ../x' bob", "su --command='cat ../x'",
+		"sudo su -c 'cat ../x'", "su - bob -c 'cat notes.md'",
+		"su -lc 'cat notes.md' bob", "script -c 'cat ../x' /dev/null",
+		"script -q /dev/null sh -c 'cat ../x'",
+		"script -q /dev/null cat ../x",
 		0
 	};
 	static const char *const keep[] = {
@@ -4822,6 +4873,15 @@ t_excl(void)
 		"sudo -u root cat notes.md", "sudo -i gh issue view 831",
 		"cat <(echo a) notes.md", "x=1 echo a[1<<EOF]\nx\nEOF\ncat notes.md",
 		"bash script.sh; cat notes.md", "echo ${x}; cat notes.md",
+		/* #316 NIT-X4: a script named reads only its input from stdin; an
+		** earlier command's | is not this one's; su and script -c alike */
+		"bash scripts/build.sh < input.txt",
+		"make 2>&1 | tail -5; bash scripts/build.sh",
+		"npm test | tee out.log; sh scripts/x.sh",
+		"cat in.txt | bash scripts/build.sh", "a | b && sh scripts/x.sh",
+		"(cd sub && make) | tail; sh scripts/x.sh",
+		"su bob -c 'cat notes.md'", "script -c 'cat notes.md' /dev/null",
+		"flock f -c 'cat notes.md' extra",
 		0
 	};
 	/* change (a): a reader or search only inside $(…) or backquotes
@@ -5072,6 +5132,24 @@ t_d3(void)
 		  "pull:o/r#12=Fix $x;" },
 		{ "gh pr create --title \"Fix $'x'\"", PR, 0, "pull:o/r#12=Fix $'x';" },
 		{ "gh pr edit o/r#9 --title \"$(cat t)\"", PR, 0, "" },
+		/* #316 LOW-X18: an unquoted $(…), $((…)) is shell-filled too */
+		{ "gh pr create --title $(cat t)", PR, 0, "" },
+		{ "gh pr create --title=$(cat t)", PR, 0, "" },
+		{ "gh pr create --title x$(cat t)", PR, 0, "" },
+		{ "gh pr create --title $((1+1))", PR, 0, "" },
+		{ "gh pr edit o/r#9 --title $(cat t)", "", 0, "" },
+		/* #316 LOW-X19: the last --title, as gh's; -t is gh's --title */
+		{ "gh pr create --title Fine --title Other", PR, 0,
+		  "pull:o/r#12=Other;" },
+		{ "gh pr create --title Fine --title \"$T\"", PR, 0, "" },
+		{ "gh pr create --title \"$T\" --title Fine", PR, 0,
+		  "pull:o/r#12=Fine;" },
+		{ "gh pr create --title Fine -t \"$T\"", PR, 0, "" },
+		{ "gh pr edit o/r#9 --title Fine --title \"$T\"", "", 0, "" },
+		{ "gh pr create -t T -b \"Fixes #999\"", PR, 0, "pull:o/r#12=T;" },
+		{ "gh issue edit o/r#9 -tNew", "", 0, "pull:o/r#9=New;" },
+		{ "gh pr edit o/r#9 -t=New", "", 0, "pull:o/r#9=New;" },
+		{ "foo -t X o/r#9", "", 0, "" },
 #undef PR
 	};
 	char got[512], m[300], *p;

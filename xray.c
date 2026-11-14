@@ -2387,8 +2387,9 @@ is_assign(const char *s)
 ** macOS: gtimeout), the letters of their options that take a value (`sudo
 ** -u root cat`, `sudo -iu root cat`, `xargs -n 1 rg`), the long ones
 ** (`sudo --user root cat`), and the words they take before it (timeout's
-** duration, flock's lock file, chrt's priority, taskset's mask); -1: they
-** run the rest as one shell line (`eval`, `watch`; `flock f -c '…'`). */
+** duration, flock's lock file, chrt's priority, taskset's mask, su's user,
+** script's file); -1: they run the rest as one shell line (`eval`,
+** `watch`; `flock f -c '…'`, `su u -c '…'`, `script -c '…' f`). */
 static const struct { const char *w, *argopt; int pos; const char *argl; }
 wraps[] = {
 	{ "sudo", "ugCDhprTtUR", 0, " user group close-from chdir host prompt role"
@@ -2406,6 +2407,9 @@ wraps[] = {
 	{ "ionice", "cnpPu", 0, " class classdata pid pgid uid " },
 	{ "chrt", "DPT", 1, " sched-runtime sched-period sched-deadline " },
 	{ "taskset", "", 1, "" },
+	{ "su", "cCgGsw", 1, " group supp-group shell whitelist-environment " },
+	{ "script", "cEIOBTmo", 1, " log-in log-out log-io log-timing echo"
+	  " logging-format output-limit " },
 	{ 0, 0, 0, 0 }
 };
 
@@ -2416,18 +2420,20 @@ static int in_list(const char *s, const char *const *v);
 ** assignments, redirects, reserved words and the wraps with their
 ** options. e when there is none. *line: the words from it on, *line - 1
 ** bytes into it, are one shell line (`eval …`, `watch …`, `env -S '…'`,
-** `env -S'…'`, `env --split-string=…`). *cd: the directory `env -C d`,
-** `sudo -D d` or their --chdir run it in ("" when a later one is relative). */
+** `env -S'…'`, `env --split-string=…`); negative: that word alone is
+** (`su -c '…' u`, `script -c '…' f`, `flock f -c '…'`). *cd: the directory
+** `env -C d`, `sudo -D d` or their --chdir run it in ("" when a later one is
+** relative; su -, -l, --login: "~"). */
 static size_t
 cmd_head(const struct sw *w, size_t k, size_t e, int *line, const char **cd)
 {
 	static const char *const resv[] = { "{", "!", "if", "then", "elif",
 	                                    "else", "do", "while", "until",
 	                                    "coproc", "function", 0 };
-	const char *o, *a, *v;
+	const char *o, *a, *v, *ll;
 	char lb[40], dl;
-	size_t j;
-	int p;
+	size_t j, n;
+	int p, sl;
 
 	*line = 0;
 	*cd = NULL;
@@ -2464,20 +2470,31 @@ cmd_head(const struct sw *w, size_t k, size_t e, int *line, const char **cd)
 				k++;
 				break;
 			}
-			/* env -S, -iS'…', --split-string[=…]: the rest is a line */
-			a = strcmp(wraps[j].w, "env") ? NULL :
-			    !strncmp(o, "--split-string", 14) && (!o[14] || o[14] == '=') ?
-			    o + 14 + !!o[14] :
-			    o[1] != '-' && o[1 + strcspn(o + 1, "uCPS")] == 'S' ?
-			    o + 2 + strcspn(o + 1, "uCPS") : NULL;
+			/* su -, -l, --login: in the target's home, as sudo -i */
+			if (!strcmp(wraps[j].w, "su") &&
+			    (!strcmp(o, "-") || !strcmp(o, "--login") ||
+			     (o[1] != '-' &&
+			      memchr(o + 1, 'l', strcspn(o + 1, wraps[j].argopt)))))
+				*cd = *cd ? "" : "~";
+			/* env -S, -iS'…', --split-string[=…]: the rest is a line; su
+			** -c, -lc'…', --command[=…] and script's alike: that word */
+			sl = !strcmp(wraps[j].w, "env") ? 1 :
+			     !strcmp(wraps[j].w, "su") || !strcmp(wraps[j].w, "script") ?
+			     -1 : 0;
+			ll = sl > 0 ? "--split-string" : "--command";
+			n = strlen(ll);
+			a = o[1] == '-' ? NULL : o + 1 + strcspn(o + 1, wraps[j].argopt);
+			a = !sl ? NULL :
+			    !strncmp(o, ll, n) && (!o[n] || o[n] == '=') ? o + n + !!o[n] :
+			    a && *a && strchr(sl > 0 ? "S" : "cC", *a) ? a + 1 : NULL;
 			if (a && *a)
 			{
-				*line = 1 + (int)(a - o);
+				*line = sl * (1 + (int)(a - o));
 				return k;
 			}
 			if (a)
 			{
-				*line = k + 1 < e;
+				*line = sl * (k + 1 < e);
 				return k + 1;
 			}
 			/* -u root, -iu root (not -uroot); --user root (not --user=) */
@@ -2502,10 +2519,11 @@ cmd_head(const struct sw *w, size_t k, size_t e, int *line, const char **cd)
 		}
 		for (p = wraps[j].pos; p > 0 && k < e; p--)
 			k++;
-		if (!strcmp(wraps[j].w, "flock") && k + 1 < e &&
+		if ((!strcmp(wraps[j].w, "flock") || !strcmp(wraps[j].w, "su") ||
+		     !strcmp(wraps[j].w, "script")) && k + 1 < e &&
 		    (!strcmp(SWD(w, k), "-c") || !strcmp(SWD(w, k), "--command")))
 		{
-			*line = 1;	/* flock f -c '…' */
+			*line = -1;	/* flock f -c '…', su u -c '…', script f -c '…' */
 			return k + 1;
 		}
 		if (wraps[j].pos < 0)
@@ -2578,6 +2596,65 @@ arg_outside(const char *a, const char *cur, int lost, const char *cwd)
 	return !strcmp(n, "..") || !strncmp(n, "../", 3);
 }
 
+/* Word k opens (1) or closes (-1) a group whose commands share its
+** stdin: ( ), { }, if … fi, while|until|for|select … done. */
+static int
+sh_group(const struct sw *w, size_t k)
+{
+	static const char *const open[] = { "{", "if", "while", "until", "for",
+	                                    "select", 0 };
+	static const char *const pre[] = { "{", "!", "if", "then", "elif", "else",
+	                                   "do", "while", "until", 0 };
+	static const char *const shut[] = { "}", "fi", "done", 0 };
+	const char *o = SWD(w, k);
+
+	if (w->op[k])
+		return !strcmp(o, "(") - !strcmp(o, ")");
+	if (k && (w->op[k - 1] ? strpbrk(SWD(w, k - 1), "<>") != NULL :
+	          !in_list(SWD(w, k - 1), pre)))
+		return 0;	/* not at a command's start */
+	return in_list(o, open) - in_list(o, shut);
+}
+
+/* The command whose first word is h, up to e, reads a pipe or a group's <
+** on stdin: … | sh, … | (sh), … | { cd d && sh; }, (sh) < f, { sh; } < f;
+** not the | of an earlier command (… | tail; sh: NIT-X4). */
+static int
+sh_fed(const struct sw *w, size_t h, size_t e)
+{
+	size_t k, j;
+	int d, l, g;
+
+	/* back to the operator before it, or before each group it is in */
+	for (k = h, d = l = 0; k-- > 0;)
+		if ((g = sh_group(w, k)) < 0)
+			d++;
+		else if (g > 0 && d)
+			d--;
+		else if (g > 0)
+			l = 0;	/* a group it is in: the operator before that */
+		else if (!d && !l && w->op[k] && !strpbrk(SWD(w, k), "<>"))
+		{
+			if (!strcmp(SWD(w, k), "|") ||
+			    (!strcmp(SWD(w, k), "&") && k && w->op[k - 1] &&
+			     !strcmp(SWD(w, k - 1), "|") && w->re[k - 1] == w->rs[k]))
+				return 1;	/* | or |& */
+			l = 1;	/* a ; && || & or newline: the group's stdin, if any */
+		}
+	/* on to each group's closer and its redirects */
+	for (k = e, d = 0; k < w->n; k++)
+		if (sh_group(w, k) > 0)
+			d++;
+		else if (sh_group(w, k) < 0 && d)
+			d--;
+		else if (sh_group(w, k) < 0)
+			for (j = k + 1; j < w->n &&
+			     (!w->op[j] || strpbrk(SWD(w, j), "<>")); j++)
+				if (w->op[j] && strchr(SWD(w, j), '<'))
+					return 1;
+	return 0;
+}
+
 /* X_SUB: found only inside $(…) or backquotes, whose output is the outer
 ** command's input: D3 (argv) still applies */
 enum { X_NONE, X_QUOTE = 1, X_DIFF = 3, X_LIST = 4, X_SUB = 8 };
@@ -2608,7 +2685,8 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 	                                     "uniq", "rev", "column", "fold",
 	                                     "fmt", 0 };
 	static const char *const shells[] = { "sh", "bash", "zsh", "dash", "ksh",
-	                                      "fish", 0 };
+	                                      "fish", "ash", "mksh", "csh", "tcsh",
+	                                      "yash", "rbash", "posh", 0 };
 	static const char *const closers[] = { "done", "fi", "esac", "}", 0 };
 	struct sw w;
 	char cdb[XR_KEY_MAX + 1], edb[XR_KEY_MAX + 1], q;
@@ -2722,10 +2800,11 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 		}
 		if (line)
 		{
-			/* eval/watch/env -S: the words from h on, re-read as a line */
-			for (k = h; k + 1 < e; k++)
+			/* eval/watch/env -S: the words from h on, re-read as a line;
+			** su/script/flock -c: the one word */
+			for (k = h; line > 0 && k + 1 < e; k++)
 				w.b[w.off[k + 1] - 1] = ' ';
-			a = SWD(&w, h) + line - 1;
+			a = SWD(&w, h) + (line < 0 ? -line : line) - 1;
 			x = depth >= 3 ? X_LIST :
 			    excl_in(a, strlen(a), cwd, cur, lost | xa, depth + 1);
 			if (x & X_SUB)
@@ -2788,11 +2867,21 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 			if (x < 0)
 			{
 				/* its script: past options (-o, -O, --rcfile take a value;
-				** - and -- end them; -s: stdin's, the words are its args) */
-				for (k = h + 1, t = 0; k < e && !w.op[k] && SWD(&w, k)[0] &&
-				     strchr("-+", SWD(&w, k)[0]); k++)
+				** - and -- end them; -s: stdin's, the words are its args)
+				** and redirects (sh 0< f, sh 2>/dev/null x.sh) */
+				for (k = h + 1, t = 0; k < e; k++)
 				{
 					a = SWD(&w, k);
+					if (w.op[k] || (k + 1 < e && w.op[k + 1] && a[0] &&
+					                !a[strspn(a, "0123456789")] &&
+					                w.re[k] == w.rs[k + 1]))
+					{
+						k += !w.op[k];
+						k += k + 1 < e && !w.op[k + 1];
+						continue;
+					}
+					if (!a[0] || !strchr("-+", a[0]))
+						break;
 					if (!a[1] || !strcmp(a, "--"))
 					{
 						k++;
@@ -2806,14 +2895,13 @@ excl_in(const char *cmd, size_t cl, const char *cwd, const char *cur,
 				for (k = s; k < e && !(w.op[k] && strchr(SWD(&w, k), '<'));
 				     k++)
 					;
-				for (j = 0; j < s && !(w.op[j] && !strcmp(SWD(&w, j), "|"));
-				     j++)
-					;
 				/* unseen (LOW-X8): sh < f, bash <(…), source /dev/stdin,
-				** … | sh, … |& sh, … | (sh), a bare sh inside sh -c */
-				if (k < e || (a && (!strncmp(a, "/dev/", 5) ||
-				                    !strncmp(a, "/proc/", 6))) ||
-				    (in_list(c0, shells) && (j < s || (depth && (!a || t)))))
+				** … | sh, … |& sh, … | (sh), (sh) < f, a bare sh inside sh
+				** -c; a script named reads only its own input (NIT-X4) */
+				if ((a && (!strncmp(a, "/dev/", 5) ||
+				           !strncmp(a, "/proc/", 6))) ||
+				    ((!a || t) && (k < e || (in_list(c0, shells) &&
+				                             (depth || sh_fed(&w, h, e))))))
 					x = X_LIST;
 			}
 			if (xa)
@@ -3467,7 +3555,7 @@ d3(const struct dsrc *s, struct dset *ds)
 	struct d3m m;
 	const char *val;
 	size_t k, j, c, e;
-	int cr, no = 0;
+	int cr, gk, no = 0;
 	struct dres *d;
 	char title[XR_TITLE_MAX * 4 + 1] = "";	/* whole: copied by size */
 	char ot[XR_TITLE_MAX * 4 + 1] = "";
@@ -3486,17 +3574,30 @@ d3(const struct dsrc *s, struct dset *ds)
 		for (e = c; e < w.n && !(w.op[e] && !strpbrk(SWD(&w, e), "<>"));
 		     e++)
 			;
-		for (val = NULL, k = c; k < e && !val; k++)
+		/* gh pr|issue: -t is --title too (LOW-X19) */
+		for (gk = 0, k = c; k + 1 < e && !gk; k++)
+			gk = !w.op[k] && !strcmp(base(SWD(&w, k)), "gh") &&
+			     (j = gh_repo(&w, k + 1)) < e && !w.op[j] &&
+			     in_list(SWD(&w, j), kind);
+		/* the last one, as gh's flags take (LOW-X19) */
+		for (val = NULL, k = c; k < e; k++)
 			if (w.op[k])
 				continue;
-			else if (!strcmp(SWD(&w, k), "--title") && k + 1 < e &&
+			else if ((!strcmp(SWD(&w, k), "--title") ||
+			          (gk && !strcmp(SWD(&w, k), "-t"))) && k + 1 < e &&
 			         !w.op[k + 1])
-				val = SWD(&w, (j = k + 1));
+				val = SWD(&w, (j = ++k));
 			else if (!strncmp(SWD(&w, k), "--title=", 8))
 				val = SWD(&w, (j = k)) + 8;
-		if (val && sh_expands(s->cmd, w.rs[j], w.re[j]))
+			else if (gk && !strncmp(SWD(&w, k), "-t", 2))
+				val = SWD(&w, (j = k)) + 2 + (SWD(&w, k)[2] == '=');
+		/* --title "$T", "`x`", $(x) (a word glued to a ( operator,
+		** LOW-X18): none, nor the output's */
+		if (val && (sh_expands(s->cmd, w.rs[j], w.re[j]) ||
+		            (j + 1 < w.n && w.op[j + 1] && w.re[j] == w.rs[j + 1] &&
+		             SWD(&w, j + 1)[0] == '(')))
 		{
-			no += 2;	/* --title "$T", "`x`": none, nor the output's */
+			no += 2;
 			continue;
 		}
 		if (!val || (title_of(val, strlen(val), title), !title[0]))
@@ -9608,13 +9709,36 @@ res_insteadof(const char *s, size_t n)
 	       !memcmp(s + n - 10, ".insteadof", 10);
 }
 
+#define RES_IO_MAX 64	/* url.<base>.insteadOf entries read */
+
 int
 xr_git_remote(const char *s, size_t n, const char *want)
 {
-	const char *z, *v, *y, *w, *b;
+	const char *z, *v, *y, *w, *b, *ik[RES_IO_MAX], *iv[RES_IO_MAX];
 	char u[4096];
-	size_t i, j, bl, kl, l;
+	size_t i, j, bl, kl, l, il[RES_IO_MAX], vl[RES_IO_MAX];
+	int ni = 0, fa[RES_IO_MAX], k, m;
 
+	/* the rewrites, and for each the first entry naming its base: git
+	** orders them so (remote.c make_rewrite) */
+	for (j = 0; j < n && (y = memchr(s + j, '\0', n - j)) != NULL;
+	     j = (size_t)(y - s) + 1)
+		if ((w = memchr(s + j, '\n', (size_t)(y - s) - j)) != NULL &&
+		    res_insteadof(s + j, (size_t)(w - s) - j))
+		{
+			/* shortcut: past RES_IO_MAX of them no remote is GitHub's
+			** (no spoofed match), raise it if a real config has more */
+			if (ni == RES_IO_MAX)
+				return 0;
+			ik[ni] = s + j;
+			il[ni] = (size_t)(w - s) - j;
+			iv[ni] = w + 1;
+			vl[ni] = (size_t)(y - w - 1);
+			for (m = 0; m < ni && (il[m] != il[ni] ||
+			     memcmp(ik[m], ik[ni], il[ni])); m++)
+				;
+			fa[ni++] = m;
+		}
 	/* "<key>\n<value>\0" entries; a key has no newline, a value may */
 	for (i = 0; i < n && (z = memchr(s + i, '\0', n - i)) != NULL;
 	     i = (size_t)(z - s) + 1)
@@ -9625,20 +9749,18 @@ xr_git_remote(const char *s, size_t n, const char *want)
 		v++;
 		l = (size_t)(z - v);
 		/* git's URL: the longest url.<base>.insteadOf value that
-		** starts it (the first of equals), replaced by <base>, once
-		** (remote.c alias_url; QA 1.61.0 LOW-X15) */
-		for (b = NULL, bl = kl = 0, j = 0; j < n &&
-		     (y = memchr(s + j, '\0', n - j)) != NULL;
-		     j = (size_t)(y - s) + 1)
-			if ((w = memchr(s + j, '\n', (size_t)(y - s) - j)) != NULL &&
-			    res_insteadof(s + j, (size_t)(w - s) - j) &&
-			    (size_t)(y - w - 1) > bl && (size_t)(y - w - 1) <= l &&
-			    !memcmp(w + 1, v, (size_t)(y - w - 1)))
-			{
-				b = s + j + 4;
-				kl = (size_t)(w - s) - j - 14;
-				bl = (size_t)(y - w - 1);
-			}
+		** starts it, replaced by <base>, once; an empty value starts
+		** every URL; of equals, the base first named wins, then its
+		** first value (remote.c alias_url; QA 1.61.0 LOW-X15, 1.63.0
+		** LOW-X20) */
+		for (m = -1, k = 0; k < ni; k++)
+			if (vl[k] <= l && !memcmp(iv[k], v, vl[k]) &&
+			    (m < 0 || vl[k] > vl[m] ||
+			     (vl[k] == vl[m] && fa[k] < fa[m])))
+				m = k;
+		b = m < 0 ? NULL : ik[m] + 4;
+		kl = m < 0 ? 0 : il[m] - 14;
+		bl = m < 0 ? 0 : vl[m];
 		/* shortcut: a rewritten URL over 4 KB is no match */
 		if (!b ? res_gh_url(v, l, want)
 		       : kl + l - bl <= sizeof u &&
