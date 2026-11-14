@@ -5722,7 +5722,8 @@ do_send_verb(const char *name, char **words, int nwords, int press_enter)
 	if (k > 0 && type == MSG_ACK && len == DCH_ST_BUSY)
 	{
 		fprintf(stderr, "dch: %s: input dropped: the program is not "
-		        "reading (4 MB held)\n", name);
+		        "reading (4 MB held); the text's start may still be in "
+		        "its input\n", name);
 		return 1;
 	}
 	return 0;

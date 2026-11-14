@@ -308,21 +308,19 @@ def main():
         w = paste_words("p")
         rc, err = dch_err("--send", "capsend", *w, timeout=30)
         check("capsend: --send of a 500 KB paste past the cap: exit 1, "
-              "one line says the input was dropped",
+              "one line says the input was dropped and its start may wait",
               rc == 1 and err == "dch: capsend: input dropped: the program "
-              "is not reading (4 MB held)\n", (rc, err))
+              "is not reading (4 MB held); the text's start may still be in "
+              "its input\n", (rc, err))
+        # #328: none of the paste had reached the pty: none of it is typed,
+        # so a script retrying --run does not submit a cut prefix with it
+        rc = dch("--run", "capsend", "END")
         open(d + "/go", "w").close()
-        data = drained(d, b"\033[201~")
-        check("capsend: the program read the 4 MB held before it, whole",
-              data.startswith(sent), (len(data), len(sent)))
-        why = cut_paste(data[len(sent):], " ".join(w).encode())
-        check("capsend: then the paste cut at its tail with its end marker, "
-              "no hole, nothing after", why is None, why)
-        rc = dch("--send", "capsend", "END")
-        check("capsend: once read, a --send exits 0 and goes in whole",
-              rc == 0 and until(lambda: readf(d + "/got", "rb") ==
-                                data + b"END", 10),
-              (rc, readf(d + "/got", "rb")[-30:]))
+        data = drained(d, b"END\r")
+        check("capsend: the program read the 4 MB held, then only the "
+              "next --run: the refused paste left nothing typed (#328)",
+              rc == 0 and data == sent + b"END\r",
+              (rc, len(data), len(sent), data[len(sent):len(sent) + 30]))
 
     def cap_attach():
         d = spawn("capatt", CAP, os.path.join(tmp, "capatt.d"))

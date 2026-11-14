@@ -2297,9 +2297,18 @@ Past that it is dropped, from that point to the end of the text: the text is
 cut at its tail, never in the middle, and a bracketed paste cut that way
 still gets its end
 .RB ( ESC[201~ ).
+A text none of which had gone in yet (it waited behind the 4 MB) is dropped
+whole.
 .B \-\-send
 then exits 1 with
-.RI "dch: " name ": input dropped: the program is not reading (4 MB held)" .
+.RI "dch: " name ": input dropped: the program is not reading (4 MB held); the text's start may still be in its input" .
+Do not send again blindly: a beginning that got in stays typed in the program
+and the next input continues it, so a retried
+.B \-\-run
+would run the cut text and the command as one line.
+Clear the program's line first, once it reads again; for a shell, a
+.B \-\-send
+of Ctrl-U or Ctrl-C.
 A paste typed on an attach past 4 MB is cut the same way, without a message;
 the attach takes keys again once the program has read what waited.
 .TP

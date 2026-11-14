@@ -120,6 +120,9 @@ struct client
 	** (paste_scan), so a paste cut there still gets its end. */
 	unsigned char in_drop, pm, paste;
 	size_t dropped;
+	/* #328: bytes of its input queued, from pty_in_total == in_from on */
+	size_t queued;
+	unsigned long long in_from;
 };
 
 /* ponytail: 4 MB per-client output backlog before we give up on a slow
@@ -1829,6 +1832,7 @@ flush_client(struct client *p)
 ** printing deadlocked it (the program waits for us to read its output, we
 ** waited for it to read its input). Written as the pty takes it, in order. */
 static struct client pty_in;
+static unsigned long long pty_in_total;	/* bytes ever queued: whose tail */
 
 /* Write the waiting input as far as the pty takes it, without blocking. A
 ** hard error (EIO: the program is gone) drops it: the program's end is
@@ -1870,6 +1874,7 @@ pty_input(const void *buf, size_t len)
 		          pty_in.outlen - pty_in.outoff, len);
 		return -1;
 	}
+	pty_in_total += len;
 	pty_flush();
 	return 0;
 }
@@ -1922,11 +1927,36 @@ push_input(struct client *p, const unsigned char *b, size_t n)
 		p->dropped = 0;
 	}
 	paste_scan(&p->pm, &p->paste, b, n);
-	if (!p->in_drop && pty_input(b, n) == 0)
-		return;
+	if (!p->in_drop)
+	{
+		unsigned long long at = pty_in_total;
+
+		if (pty_input(b, n) == 0)
+		{
+			if (!p->queued)
+				p->in_from = at;
+			p->queued += n;
+			return;
+		}
+	}
+	/* #328: a dch --send whose every byte is still the unwritten tail of
+	** pty_in is dropped whole: nothing of a refused text gets typed */
+	if (!p->in_drop && p->role != ROLE_ATTACHED &&
+	    pty_in_total - p->in_from == p->queued &&
+	    p->queued <= pty_in.outlen - pty_in.outoff)
+	{
+		pty_in.outlen -= p->queued;
+		pty_in_total -= p->queued;
+		p->dropped += p->queued;
+		p->queued = 0;
+		was = 0;	/* its ESC[200~ went too */
+	}
 	if (!p->in_drop && was &&
 	    queue_to_client(&pty_in, (const unsigned char *)"\033[201~", 6) == 0)
+	{
+		pty_in_total += 6;
 		pty_flush();
+	}
 	p->in_drop = 1;
 	p->dropped += n;
 }
