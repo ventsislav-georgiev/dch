@@ -2203,6 +2203,7 @@ picker_restore(void)
 	{
 		if (picker_term_saved)
 			tcsetattr(picker_tty_fd, TCSANOW, &picker_saved_term);
+		tty_stop_arm(-1, NULL);
 		/* Cursor on + disable mouse/bracketed-paste/alt-screen we may
 		** have inherited. dch itself never enables them but a previous
 		** in-shell app could've. Safe to send unconditionally. Autowrap
@@ -2313,6 +2314,11 @@ picker_raw_on(int fd)
 	raw.c_cc[VMIN] = 1;
 	raw.c_cc[VTIME] = 0;
 	tcsetattr(fd, TCSANOW, &raw);
+	/* a stop puts the shell's modes back first, as the attach's does
+	** (QA 1.65.0 LOW-V24: dash reads its next line raw); pk_wait sets
+	** raw mode again on the fg */
+	tty_stop_arm(fd, &picker_saved_term);
+	tty_stop_handlers();
 	tw(fd, "\033[?25l"
 	       "\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?1015l"
 	       "\033[?2004l");
@@ -10342,16 +10348,28 @@ pk_xray(struct pk *p, int fd, const char *name, int record, int remote,
 }
 
 /* Input on fd within ms? select, not poll: macOS poll() answers POLLNVAL
-** for a tty. -1 when a signal (a resize) cut it short. */
+** for a tty. -1 when a signal (a resize) cut it short, or after a stop
+** (LOW-V24): the shell had the tty, so raw mode again and a full repaint,
+** and no read now: on the shell's cooked modes it would wait for an Enter
+** where select said readable. shortcut: a SIGCONT that does not end the
+** select (macOS, after a SIGSTOP) is seen at the next tick, 1 s at most. */
 int
 pk_wait(int fd, long ms)
 {
 	struct timeval tv = { ms / 1000, (int)(ms % 1000) * 1000 };
 	fd_set rs;
+	int n;
 
 	FD_ZERO(&rs);
 	FD_SET(fd, &rs);
-	return select(fd + 1, &rs, NULL, NULL, &tv);
+	n = select(fd + 1, &rs, NULL, NULL, &tv);
+	if (tty_continued())
+	{
+		picker_raw_on(fd);
+		pk_winch = 1;
+		return -1;
+	}
+	return n;
 }
 
 int

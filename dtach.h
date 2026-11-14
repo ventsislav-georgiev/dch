@@ -436,6 +436,13 @@ extern int (*attach_xray)(void);
 ** code when o left it. That attach drops a held o's repeats. */
 extern int attach_drop_o;
 #define ATTACH_XRAY_OPENED 64
+/* The attach's stop handling, the picker's too (QA 1.65.0 LOW-V24):
+** tty_stop_arm, the tty a raw mode is on and the modes a SIGTSTP puts back
+** on it first (-1: none); tty_stop_handlers installs the SIGTSTP and
+** SIGCONT handlers; tty_continued, 1 once after each SIGCONT. */
+void tty_stop_arm(int fd, const struct termios *t);
+void tty_stop_handlers(void);
+int tty_continued(void);
 
 #include "remote.h"
 void client_pidfile_unlink(void);
