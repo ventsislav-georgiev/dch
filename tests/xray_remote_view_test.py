@@ -81,7 +81,7 @@ Covers:
       the follow streams (3 times), 20 cards each left with Esc while its
       lines stream (every other one after f replaced the light card), Esc
       then q; a silent host: Esc from a pending card, f over a pending
-      card, Esc then q, q with no snapshot. Each within STOP_S (1 s; it used
+      card, Esc then q, q with no snapshot. Each within STOP_S (2 s; it used
       to hang for good, or wait 3 s per child), only the follow child after
       each card, no zombie, the view's fd count flat over the 20 cards, the
       terminal restored, exit 0, and no child the test saw left running.
@@ -1863,7 +1863,11 @@ def test_failures():
 
 # ---- 10: stopping a remote child (#204) --------------------------------------
 
-STOP_S = 1.0    # the bug is a hang or RM_CANCEL_MS (3 s) per child
+# the bug is a hang or RM_CANCEL_MS (3 s) per child: under 3 s, one child
+# sitting out its cancel fails the row. The view's own stop is 50 ms after
+# SIGTERM and up to 250 ms after SIGKILL per child, up to 5 on Esc then q;
+# the ASan lite build on a macOS runner took 1.00 s there
+STOP_S = 2.0
 SNAP = ('{"schema":1,"snapshot":{"session":"fk","session_id":'
         '"m0000000000000001","corpus":"claude","live":true,"lines":3,'
         '"project_label":"/x","chapters":[{"anchor":"s1","title":"first",'

@@ -4386,11 +4386,13 @@ xv_run(int fd, const char *n, char *err, size_t errsz)
 			break;
 	}
 	sigaction(SIGCONT, &ocont, NULL);
-	xv_free(v);
-	pk_pn = 0;
 	/* o (LOW-V12, MED-V20): what is unread on the terminal or still coming
-	** (a second o, a held one, Enter) was typed at the view */
+	** (a second o, a held one, Enter) was typed at the view. Before
+	** xv_free: its children's stop can take 300 ms each, and the pause
+	** counts from the o, not from after it (a key typed then was lost) */
 	if (xv_go[0])
 		xv_drop_keys(fd, 0);
+	xv_free(v);
+	pk_pn = 0;
 	return rc;
 }

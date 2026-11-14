@@ -155,7 +155,8 @@ Covers:
      is too small, no tab drawn. A held o (MED-V20): a second o 10 ms and
      50 ms after the first and 8 o's 33 ms apart (dch --xray), 8 o's from
      the chord's view, the picker's x and Search: nothing reaches the
-     session, a z 300 ms after the last o does.
+     session, a z 300 ms after the last o does; a failed run whose own
+     o's came over 700 ms apart is run again (3 at most), the row says so.
  20. #331: the attach a view's o opens (dch --xray, the picker's x, the
      chord) drops o's that follow within 700 ms of each other: a held o's
      repeats from 300 ms on type nothing; an x 300 ms on, and the x of an
@@ -2867,7 +2868,10 @@ def test_tabbar():
                 if k:
                     mark = len(v.out)
                     v.key(b"\t", 0.4)
-                bar = rows(v.out[mark:]).get(2, "") or rows(v.out).get(2, "")
+                # the bar redrawn since the resize or Tab: on a slow runner
+                # the old bar, at the old width, was taken for it
+                bar = until(lambda: (v.pump(0.1),
+                                     rows(v.out[mark:]).get(2, ""))[1], 10)
                 bars.append((TABS[k], bar))
             check("tab bar at %d columns: every tab selected in turn, no word "
                   "cut, the selected one shown (NIT-V9)" % w,
@@ -3122,12 +3126,35 @@ HELD = (("a second o 10 ms later", [0.01]), ("a second o 50 ms later", [0.05]),
 
 
 def o_held(p, gaps):
+    """The o's and the z, the pty read meanwhile as a terminal does (see
+    o_then). Returns the longest gap between two o's as written."""
+    t = [time.monotonic()]
     os.write(p.fd, b"o")
     for g in gaps:
-        time.sleep(g)
+        p.pump(g)
+        t.append(time.monotonic())
         os.write(p.fd, b"o")
-    time.sleep(0.3)
+    p.pump(0.3)
     os.write(p.fd, b"z")
+    return max(b - a for a, b in zip(t, t[1:]))
+
+
+def held_check(name, run):
+    """run() -> (ok, detail, gap). The o's are dropped while each follows
+    the last within 700 ms (#331, past the view's 100 ms): a failed run
+    whose own o's came further apart, the test stalled, never had a held
+    o. It is run again, 3 runs at most, and the row says so; a failure
+    with the o's within 700 ms is a failure."""
+    for n in range(1, 4):
+        ok, detail, gap = run()
+        if ok or gap <= 0.7:
+            break
+    if not ok and gap > 0.7:
+        print("  skip %s: the test's own o's came %d ms apart in 3 runs, "
+              "past the 700 ms window" % (name, gap * 1000))
+        return
+    check(name + ("" if n == 1 else " (run %d: the test's own o's came "
+                  "over 700 ms apart before)" % n), ok, detail)
 
 
 def chord_case(what, keys, lite):
@@ -3241,79 +3268,64 @@ def test_chord():
             v.close()
 
     # a held o (MED-V20): o's in reads of their own, still coming after the
-    # view's exit, dropped until a 100 ms pause; a z 300 ms on reaches it
-    for what, gaps in HELD:
+    # view's exit, dropped until a 100 ms pause, then by the attach (#331);
+    # a z 300 ms on reaches it
+    def o_attaches(v, gaps):
+        got = rx()
+        gap = o_held(v, gaps)
+        ok = until(lambda: (v.pump(0.1), clients("xv-rx") == 1)[1], 10)
+        held = ok and until(lambda: rx()[len(got):] == "7a", 5)
+        detail = (ok, rx()[len(got):])
+        v.key(b"\x1c", 0.5)
+        v.exit(5)
+        return held, detail, gap
+
+    def xv(gaps, search=False):
         v = Pty([DCH, "--xray", "xv-rx"], env=DTAP)
         try:
-            got = rx()
             ready(v)
-            o_held(v, gaps)
-            ok = until(lambda: (v.pump(0.1), clients("xv-rx") == 1)[1], 10)
-            check("dch --xray, %s: o attaches, no o reaches the session, a "
-                  "z 300 ms after the last does (MED-V20)" % what,
-                  ok and until(lambda: rx()[len(got):] == "7a", 5),
-                  (ok, rx()[len(got):]))
-            v.key(b"\x1c", 0.5)
-            v.exit(5)
+            if search:
+                v.key(b"\033[Z", 0.5)  # Search, typing
+                v.key(b"\033", 0.5)    # typing ended, the Search list
+            return o_attaches(v, gaps)
         finally:
             v.close()
+    for what, gaps in HELD:
+        held_check("dch --xray, %s: o attaches, no o reaches the session, a "
+                   "z 300 ms after the last does (MED-V20)" % what,
+                   lambda: xv(gaps))
     eight = HELD[-1][1]
-    a = attach()
-    try:
-        got = rx()
-        a.key(b"\x1cx", 0.5)
-        a.wait(b"X-ray  xv-rx")
-        mark = len(a.out)
-        a.key(b"\t\t", 0.5)  # Refs, Search, then Commands
-        ready(a, mark)
-        o_held(a, eight)
-        until(lambda: rx()[len(got):] != "", 5)
-        a.pump(0.3)
-        check("chord, 8 o's 33 ms apart: back to the session, no o reached "
-              "it, a z 300 ms after the last does (MED-V20)",
-              rx()[len(got):] == "7a" and a.reap() is None,
-              (rx()[len(got):], a.rc))
-    finally:
-        a.close()
-    v = Pty([DCH, "--xray", "xv-rx"], env=DTAP)
-    try:
-        got = rx()
-        ready(v)
-        v.key(b"\033[Z", 0.5)  # Search, typing
-        v.key(b"\033", 0.5)    # typing ended, the Search list
-        o_held(v, eight)
-        ok = until(lambda: (v.pump(0.1), clients("xv-rx") == 1)[1], 10)
-        check("dch --xray, Search, 8 o's 33 ms apart: no o reaches the "
-              "session, a z 300 ms after the last does (MED-V20)",
-              ok and until(lambda: rx()[len(got):] == "7a", 5),
-              (ok, rx()[len(got):]))
-        v.key(b"\x1c", 0.5)
-        v.exit(5)
-    finally:
-        v.close()
-    v = Pty([DCH, "-l"], env=DTAP)
-    try:
-        v.wait(b"x-ray")
-        for _ in range(4):  # the picker's row of xv-rx
-            mark = len(v.out)
-            v.key(b"x", 1.0)
-            v.wait(b"X-ray  ", start=mark)
-            if b"X-ray  xv-rx" in v.out[mark:]:
-                break
-            v.key(b"q", 1.0)
-            v.key(b"j", 0.5)
-        got = rx()
-        ready(v, mark)
-        o_held(v, eight)
-        ok = until(lambda: (v.pump(0.1), clients("xv-rx") == 1)[1], 10)
-        check("picker's x, 8 o's 33 ms apart: no o reaches the session, a z "
-              "300 ms after the last does (MED-V20)",
-              ok and until(lambda: rx()[len(got):] == "7a", 5),
-              (ok, rx()[len(got):]))
-        v.key(b"\x1c", 0.5)
-        v.exit(5)
-    finally:
-        v.close()
+
+    def chord_held():
+        a = attach()
+        try:
+            got = rx()
+            a.key(b"\x1cx", 0.5)
+            a.wait(b"X-ray  xv-rx")
+            mark = len(a.out)
+            a.key(b"\t\t", 0.5)  # Refs, Search, then Commands
+            ready(a, mark)
+            gap = o_held(a, eight)
+            until(lambda: rx()[len(got):] != "", 5)
+            a.pump(0.3)
+            return (rx()[len(got):] == "7a" and a.reap() is None,
+                    (rx()[len(got):], a.rc), gap)
+        finally:
+            a.close()
+    held_check("chord, 8 o's 33 ms apart: back to the session, no o reached "
+               "it, a z 300 ms after the last does (MED-V20)", chord_held)
+    held_check("dch --xray, Search, 8 o's 33 ms apart: no o reaches the "
+               "session, a z 300 ms after the last does (MED-V20)",
+               lambda: xv(eight, True))
+
+    def picker_held():
+        v = picker_rx()
+        try:
+            return o_attaches(v, eight)
+        finally:
+            v.close()
+    held_check("picker's x, 8 o's 33 ms apart: no o reaches the session, a z "
+               "300 ms after the last does (MED-V20)", picker_held)
 
     # -E: no detach key, no chord; the session gets both bytes
     a = attach(extra=["-E"])

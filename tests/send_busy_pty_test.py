@@ -333,12 +333,16 @@ def main():
         # non-blocking: a client that stops reading must not hang a write
         os.set_blocking(a.fd, False)
         while off < len(full) and time.time() < end:
-            if select.select([], [a.fd], [], 0.05)[1]:
+            r, w, _ = select.select([a.fd], [a.fd], [], 0.05)
+            if w:
                 try:
                     off += os.write(a.fd, full[off:off + 4096])
                 except BlockingIOError:
                     pass
-            a.pump(0.001, lambda: False)
+            # its output read only when there is some: a pump each write
+            # waited 50 ms, 1 KB a write on macOS, 500 KB took 28 s
+            if r:
+                a.pump(0.001, lambda: False)
         os.set_blocking(a.fd, True)
         if off < len(full):
             check("capatt: the attach took the 500 KB paste in 30 s", False,
