@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""`dch --xray <n> --tasks --json` with a tasks_command (#321): the user's
-command answers first, the built-in source only when it gives no row.
+"""`dch --xray <n> --tasks --json` with a tasks_command, and `--memory` with
+a memory_command (#321): the user's command answers first, the built-in
+source only when it gives no row.
 
 An ended Claude session (a history record and a synthetic transcript with
 one task) and a live shell session. Covered: rows -> source command with
@@ -9,7 +10,10 @@ ends), the done line; no row and exit 0 -> the built-in answer byte for
 byte; exit 1 with no row -> the built-in rows and a header warn; a missing
 program -> the same; rows then a hang -> the rows and a done warn inside
 the 5 s limit; a shell session -> source command too; the command's
-environment and cwd per session kind. Temp HOME, DCH_CONFIG, runtime dir.
+environment and cwd per session kind. --memory: rows -> source command, a
+body cut at 16 KB; no row -> the built-in answer byte for byte; exit 1 ->
+the built-in rows and a header warn; rows then a hang -> a done warn.
+Temp HOME, DCH_CONFIG, runtime dir.
 
 Run:  python3 tests/xcmd_tasks_test.py        (uses ./dch; run.sh isolates)
 """
@@ -49,9 +53,9 @@ def dch(*a, timeout=30):
                           timeout=timeout, env=ENV, stdin=subprocess.DEVNULL)
 
 
-def tasks(n):
+def tasks(n, what="--tasks"):
     """(rc, raw stdout, [parsed lines], stderr)"""
-    r = dch("--xray", n, "--tasks", "--json")
+    r = dch("--xray", n, what, "--json")
     try:
         ls = [json.loads(l) for l in r.stdout.splitlines()]
     except ValueError:
@@ -59,10 +63,10 @@ def tasks(n):
     return r.returncode, r.stdout, ls, r.stderr
 
 
-def config(cmd):
+def config(cmd, key="tasks_command"):
     with open(CONFIG, "w") as f:
         if cmd is not None:
-            f.write("tasks_command = %s\n" % cmd)
+            f.write("%s = %s\n" % (key, cmd))
 
 
 def script(name, body, py=False):
@@ -94,6 +98,10 @@ def ended_claude():
                                             "tool_use_id": "toolu_1",
                                             "content": "ok"}]}}):
             f.write(json.dumps(o) + "\n")
+    mdir = os.path.join(pdir, "memory")	# the built-in --memory's one row
+    os.makedirs(mdir, exist_ok=True)
+    with open(os.path.join(mdir, "note.md"), "w") as f:
+        f.write("Built-in memory\n")
     sock = os.path.join(T, "dch-%d" % os.getuid())
     hdir = os.path.join(T, "state", "dch", "sessions", sock.replace("/", "-"))
     os.makedirs(hdir, exist_ok=True)
@@ -121,6 +129,66 @@ print(json.dumps({"id": "argv", "title": "<%s>" % " ".join(sys.argv[1:])}))
 
 def seen(ls):
     return {l["task"]["id"]: l["task"]["title"] for l in ls if "task" in l}
+
+
+def memory():
+    """--memory with a memory_command: the same rule as --tasks"""
+    config(None)
+    rc, base, bls, err = tasks("xt-ended", "--memory")
+    ids = [l["memory"]["id"] for l in bls if "memory" in l]
+    check("memory, no command: the built-in answer (source claude, note.md)",
+          rc == 0 and bls and bls[0]["source"] == "claude" and "note" in ids
+          and "warn" not in bls[0], (rc, base, err))
+    config(script("mem.py", r'''
+import json, os
+print(json.dumps({"title": "My notes"}))
+print(json.dumps({"memory": {"id": "a", "title": "Note A", "kind": "user",
+                             "body": "x" * 20000}}))
+print(json.dumps({"id": "env", "title": "<%s|%s|%s>" % (
+    os.environ.get("DCH_SESSION"), os.environ.get("DCH_AGENT"),
+    os.getcwd())}))
+''', py=True), "memory_command")
+    rc, out, ls, err = tasks("xt-ended", "--memory")
+    m = [l["memory"] for l in ls if "memory" in l]
+    check("memory rows: source command, the title, no session keys",
+          rc == 0 and ls and ls[0] == {"schema": 1, "source": "command",
+                                       "title": "My notes", "partial": False},
+          (out[:400], err))
+    check("memory rows: only the command's, the body cut at 16 KB, done",
+          len(m) == 2 and "Built-in memory" not in out and
+          m[0]["title"] == "Note A" and len(m[0]["body"]) == 16384 and
+          m[0].get("cut") is True and
+          m[1]["title"] == "<xt-ended|claude|%s>" % PROJ and
+          ls[-1] == {"done": True, "count": 2, "dropped": 0},
+          (out[-400:], err))
+    config(script("mempty.sh", "exit 0\n"), "memory_command")
+    rc, out, ls, err = tasks("xt-ended", "--memory")
+    check("memory, an empty answer: the built-in answer byte for byte",
+          rc == 0 and out == base, (out, base))
+    config(script("mfail.sh", "echo 'notes down' >&2\nexit 1\n"),
+           "memory_command")
+    rc, out, ls, err = tasks("xt-ended", "--memory")
+    check("memory, exit 1 with no row: the built-in rows, the header's warn",
+          rc == 0 and ls and
+          ls[0].get("warn") == "memory_command: exit 1: notes down" and
+          {k: v for k, v in ls[0].items() if k != "warn"} == bls[0] and
+          ls[1:] == bls[1:], (out, err))
+    config(script("mhang.sh", "echo '{\"id\":\"h\",\"title\":\"before the hang\"}'\n"
+                  "exec sleep 30\n"), "memory_command")
+    t0 = time.monotonic()
+    rc, out, ls, err = tasks("xt-ended", "--memory")
+    wall = time.monotonic() - t0
+    check("memory rows then a hang: the rows, done carries the warn (%.1f s)"
+          % wall,
+          rc == 0 and len(ls) == 3 and ls[0]["source"] == "command" and
+          ls[1]["memory"]["title"] == "before the hang" and
+          ls[2] == {"done": True, "count": 1, "dropped": 0,
+                    "warn": "memory_command: stopped early after 5 s"} and
+          wall < 7, (out, err))
+    config("%s" % ENVS, "memory_command")
+    rc, out, ls, err = tasks("xt-ended")
+    check("a memory_command does not answer --tasks",
+          rc == 0 and ls and ls[0]["source"] == "claude", out[:300])
 
 
 def main():
@@ -225,6 +293,8 @@ def main():
     check("rows then exit 3: the rows, done carries the warn",
           rc == 0 and len(ls) == 3 and ls[0]["source"] == "command" and
           ls[2].get("warn") == "tasks_command: exit 3: half done", out)
+
+    memory()
 
     # --- a live shell session ---------------------------------------------
     shcwd = os.path.join(T, "shell cwd")

@@ -3894,8 +3894,27 @@ adds a one\-line
 .B warn
 to its header, an empty answer with exit 0 says nothing.
 The two are never mixed.
+.TP
 .B memory_command
-does the same for the memory list; it arrives with the Memory engine.
+The same for
+.BR \-\-memory :
+the same run, environment, limits, fallback (the built\-in memory answers
+when it gives no row) and
+.BR warn .
+Rows have the
+.B \-\-memory
+fields
+.RB ( title
+required;
+.B body
+cut at 16 KB, then
+.BR cut:true ),
+bare or wrapped as
+.BR {"memory":{...}} ;
+the header has
+.BR \-\-memory 's
+keys with
+.BR source:command .
 .SH EXIT STATUS
 0 on success. Control verbs: 1 generic error, 2
 .B \-\-wait

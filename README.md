@@ -809,7 +809,8 @@ running sessions.
 | `remote_hosts` | empty: your tailnet peers; `off`: none; else a `[label=]host[:port],...` list (see [Remote hosts](#remote-hosts)) | empty |
 | `focus_resize` | `true`/`false`: an attached client takes the session's size when its window gains focus (see [The focused client sets the size](#the-focused-client-sets-the-size)) | `true` |
 | `xray_ring` | `0` (off) to `16M` (`K`/`M` suffixes, rounded up to 64 KiB): the shell output each new session keeps in its master's memory for X-ray, the rows that scroll off its primary screen, as text, with OSC 133 prompt marks. Read when a session starts (see [Shell output ring](#shell-output-ring-x-ray)); kept across `--restart`; never on disk, never in core dumps. dch-lite keeps none | `2M` |
-| `tasks_command` | a program and its arguments, run with no shell: X-ray's task list (`--tasks`) from your own command; with no row the agent's own (see [Your own task list](#your-own-task-list-tasks_command)). Your own config only; through `dch serve` the host's | empty |
+| `tasks_command` | a program and its arguments, run with no shell: X-ray's task list (`--tasks`) from your own command; with no row the agent's own (see [Your own task or memory list](#your-own-task-or-memory-list-tasks_command-memory_command)). Your own config only; through `dch serve` the host's | empty |
+| `memory_command` | the same for X-ray's memory list (`--memory`) | empty |
 
 ```sh
 dch --config                         # the path, then every known key's effective value
@@ -1820,12 +1821,14 @@ and --follow`) and not in `--requests`. On `host:name` it runs on that host;
 a host whose dch predates it says `dch: <host>: the host's dch does not know
 --memory` (exit 1).
 
-#### Your own task list (`tasks_command`)
+#### Your own task or memory list (`tasks_command`, `memory_command`)
 
-X-ray shows the agent's own task list. To show your own instead (a ledger,
-an issue tracker, a checklist), set a command in your dch config:
+X-ray shows the agent's own task list and memory. To show your own instead
+(a ledger, an issue tracker, a checklist, a notes folder), set a command in
+your dch config:
 ```
 tasks_command = ~/bin/my-tasks --open
+memory_command = ~/bin/my-notes
 ```
 - **Run.** dch splits the line into words, with no shell: single and
   double quotes group words, a leading `~/` is your home, and `$VARS`, `;`,
@@ -1873,8 +1876,13 @@ echo '{"title":"GitHub issues"}'
 exec gh issue list --limit 200 --json number,title,url,updatedAt \
   --jq '.[] | {id: .number, title, url, updated: .updatedAt} | tojson'
 ```
-`memory_command` does the same for the memory list; it arrives with the
-Memory engine.
+`memory_command` answers `--memory` by the same rules: the same run,
+environment, limits, fallback (the built-in memory answers when it gives no
+row) and `warn`. A row has `title` (required), `id`, `note`, `kind`,
+`scope`, `updated`, `path`, `session`, `chapter` and `body` (cut at 16 KB,
+then `"cut":true`), bare or wrapped as `{"memory":{…}}`; a lone first
+`{"title":"…"}` line names the list. Its header has `--memory`'s keys, with
+`"source":"command"`.
 
 `dch --xray <n> --follow --json` streams NDJSON, each line with
 `schema:1`. The first line is `{"schema":1,"snapshot":{…}}`, holding the

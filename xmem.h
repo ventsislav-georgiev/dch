@@ -26,6 +26,7 @@ struct xm_req
 	const char *path;	/* the transcript or rollout, NULL none */
 	const struct stat *st;	/* its lookup's stat */
 	const char *cwd;	/* the session's, "" unknown */
+	const char *warn;	/* the header's warn (#321), NULL or "" none */
 };
 
 /* The header, a {"memory":{…}} line per row, the done line. 0, or -1 a

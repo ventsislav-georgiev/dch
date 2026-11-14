@@ -996,8 +996,14 @@ xm_print(FILE *f, const struct xm_req *q)
 	if (s.nmem)
 		qsort(s.v, s.nmem, sizeof *s.v, xm_order);
 	fprintf(f, "{\"schema\":1,\"source\":\"%s\",\"title\":null,"
-	        "\"partial\":%s}\n", s.n ? q->agent : "none",
+	        "\"partial\":%s", s.n ? q->agent : "none",
 	        partial ? "true" : "false");
+	if (q->warn && q->warn[0])
+	{
+		fputs(",\"warn\":", f);
+		xr_put_str(f, q->warn);
+	}
+	fputs("}\n", f);
 	for (k = 0; k < s.n && k < XM_ROWS && rc == 0; k++, cnt++)
 		rc = xm_row_line(f, &s, &s.v[k]);
 	if (rc == 0)

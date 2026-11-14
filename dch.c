@@ -13230,11 +13230,13 @@ xr_tasks_claude(const char *cfg, const char *sid, const char *session,
 	return xr_tasks_file(path, &st, 0, sid, session, warn);
 }
 
-/* #321: a tasks_command's answer, printed as it arrives: the header at its
-** first row (a title line can only come before it), each row as the runner
-** hands it on. Nonzero (a write failed) ends the command. */
+/* #321: a tasks_command's or memory_command's answer, printed as it
+** arrives: the header at its first row (a title line can only come before
+** it), each row as the runner hands it on. Nonzero (a write failed) ends
+** the command. */
 struct xr_tkc
 {
+	enum xcmd_kind kind;
 	const char *session, *sid;
 	const struct xcmd_result *res;
 	unsigned long n;
@@ -13247,10 +13249,14 @@ xr_tkc_row(const char *line, void *arg)
 
 	if (!k->n++)
 	{
-		fputs("{\"schema\":1,\"session\":", stdout);
-		xr_put_str(stdout, k->session);
-		fputs(",\"session_id\":", stdout);
-		xr_put_str(stdout, k->sid);
+		fputs("{\"schema\":1", stdout);
+		if (k->kind == XCMD_TASK)	/* --memory's header has neither */
+		{
+			fputs(",\"session\":", stdout);
+			xr_put_str(stdout, k->session);
+			fputs(",\"session_id\":", stdout);
+			xr_put_str(stdout, k->sid);
+		}
 		fputs(",\"source\":\"command\",\"title\":", stdout);
 		if (k->res->title[0])
 			xr_put_str(stdout, k->res->title);
@@ -13263,17 +13269,18 @@ xr_tkc_row(const char *line, void *arg)
 	return fflush(stdout) != 0 || ferror(stdout);
 }
 
-/* The user's tasks_command (their own dch config only), before any built-in
-** source. 1: it gave a row and answered, *rc its exit; its stop or failure
-** after rows is the done line's warn. 0: the built-in source answers, warn
-** its header's ("" for no command, an empty answer). Never mixed. */
+/* The user's tasks_command or memory_command (their own dch config only),
+** before any built-in source. 1: it gave a row and answered, *rc its exit;
+** its stop or failure after rows is the done line's warn. 0: the built-in
+** source answers, warn its header's ("" for no command, an empty answer).
+** Never mixed. */
 static int
-xr_tasks_cmd(const char *session, const char *sid, const char *cwd,
-             const char *agent, const char *asid, char *warn, size_t cap,
-             int *rc)
+xr_cmd(enum xcmd_kind kind, const char *session, const char *sid,
+       const char *cwd, const char *agent, const char *asid, char *warn,
+       size_t cap, int *rc)
 {
 	struct xcmd_result res;
-	struct xr_tkc k = { session, sid, &res, 0 };
+	struct xr_tkc k = { kind, session, sid, &res, 0 };
 	char cmd[1024];
 	/* a session cwd not known: HOME, never the querying process's (a
 	** dch serve ctl's is the peer's choice) */
@@ -13281,9 +13288,10 @@ xr_tasks_cmd(const char *session, const char *sid, const char *cwd,
 	                      agent, asid };
 
 	warn[0] = '\0';
-	if (!dch_config_get("tasks_command", cmd, sizeof cmd) || !cmd[0])
+	if (!dch_config_get(kind == XCMD_TASK ? "tasks_command"
+	                    : "memory_command", cmd, sizeof cmd) || !cmd[0])
 		return 0;
-	if (xcmd_rows(XCMD_TASK, &c, xr_tkc_row, &k, &res) == 0)
+	if (xcmd_rows(kind, &c, xr_tkc_row, &k, &res) == 0)
 	{
 		snprintf(warn, cap, "%s", res.warn);
 		return 0;
@@ -13321,9 +13329,9 @@ xr_tasks_q(const struct xr_target *t)
 	{
 		snprintf(cwd, sizeof cwd, "%s",
 		         t->rec->acwd[0] ? t->rec->acwd : t->rec->cwd);
-		if (xr_tasks_cmd(t->name, t->rec->sid, cwd,
-		                 t->rec->sid[0] ? "claude" : "", t->rec->sid, warn,
-		                 sizeof warn, &rc))
+		if (xr_cmd(XCMD_TASK, t->name, t->rec->sid, cwd,
+		           t->rec->sid[0] ? "claude" : "", t->rec->sid, warn,
+		           sizeof warn, &rc))
 			return rc;
 		return t->rec->sid[0] ? xr_tasks_claude(t->rec->acfg, t->rec->sid,
 		                                        t->name, warn)
@@ -13343,8 +13351,8 @@ xr_tasks_q(const struct xr_target *t)
 	{
 		if (c.cwd[0])
 			snprintf(cwd, sizeof cwd, "%s", c.cwd);
-		if (xr_tasks_cmd(t->name, c.sid, cwd, "claude", c.sid, warn,
-		                 sizeof warn, &rc))
+		if (xr_cmd(XCMD_TASK, t->name, c.sid, cwd, "claude", c.sid, warn,
+		           sizeof warn, &rc))
 			return rc;
 		xr_crec_cfg(&c, cfg, sizeof cfg);
 		return cfg[0] ? xr_tasks_claude(cfg, c.sid, t->name, warn)
@@ -13354,8 +13362,8 @@ xr_tasks_q(const struct xr_target *t)
 	{
 		if (xc.cwd[0])
 			snprintf(cwd, sizeof cwd, "%s", xc.cwd);
-		if (xr_tasks_cmd(t->name, xc.tid, cwd, "codex", xc.tid, warn,
-		                 sizeof warn, &rc))
+		if (xr_cmd(XCMD_TASK, t->name, xc.tid, cwd, "codex", xc.tid, warn,
+		           sizeof warn, &rc))
 			return rc;
 		return cx > 0 && xr_codex_lookup(xc.home, xc.tid, path, sizeof path,
 		                                 &st) == 0
@@ -13365,7 +13373,8 @@ xr_tasks_q(const struct xr_target *t)
 	/* the ring's header for the session_id, as the other forms give it */
 	if (ring_fetch(t->sock, &rs, NULL, NULL) == -1)
 		return xr_no_session();
-	if (xr_tasks_cmd(t->name, rs.sid, cwd, "", "", warn, sizeof warn, &rc))
+	if (xr_cmd(XCMD_TASK, t->name, rs.sid, cwd, "", "", warn, sizeof warn,
+	           &rc))
 		return rc;
 	return xr_out_exit(xr_tasks_print(stdout, NULL, t->name, rs.sid, 0,
 	                                  warn) == 0);
@@ -13379,13 +13388,13 @@ static int
 xr_memory(const struct xr_target *t)
 {
 	char cfg[1400] = "", cwd[PATH_MAX] = "", sid[64] = "", path[2048];
-	char project[1200];
+	char project[1200], warn[XCMD_WARN_MAX];
 	struct xm_req q;
 	struct cmd_info ci;
 	struct stat st;
 	struct crec c;
 	struct xr_cx xc;
-	int qc;
+	int qc, rc;
 
 	memset(&q, 0, sizeof q);
 	if (t->kind == XR_ENDED)
@@ -13420,6 +13429,7 @@ xr_memory(const struct xr_target *t)
 			if (xc.cwd[0])
 				snprintf(cwd, sizeof cwd, "%s", xc.cwd);
 			snprintf(cfg, sizeof cfg, "%s", xc.home);
+			snprintf(sid, sizeof sid, "%s", xc.tid);	/* DCH_AGENT_SESSION_ID */
 			if (xc.tid[0] && xr_codex_lookup(xc.home, xc.tid, path,
 			                                 sizeof path, &st) == 0)
 			{
@@ -13445,6 +13455,11 @@ xr_memory(const struct xr_target *t)
 	}
 	q.cfg = cfg;
 	q.cwd = cwd;
+	/* the user's memory_command first (#321), whatever the session */
+	if (xr_cmd(XCMD_MEMORY, t->name, NULL, cwd, q.agent ? q.agent : "", sid,
+	           warn, sizeof warn, &rc))
+		return rc;
+	q.warn = warn;
 	return xr_out_exit(xm_print(stdout, &q) == 0);
 }
 
