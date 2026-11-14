@@ -225,7 +225,7 @@ def main():
         return 1
     tmp = tempfile.mkdtemp(prefix="dch-dash-")
     env = dict(os.environ, DCH_SOCKET_DIR=tmp, PS1=PROMPT.decode(),
-               HOME=tmp)
+               HOME=tmp, XDG_STATE_HOME=os.path.join(tmp, "state"))
     for k in ("DCH_SESSION", "ENV"):
         env.pop(k, None)
     try:

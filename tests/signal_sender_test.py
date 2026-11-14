@@ -74,6 +74,8 @@ def main():
         names.append(n)
         mpid = until(lambda: rec(n) and master(n))
         check("session up, master found", r.returncode == 0 and mpid)
+        if type(mpid) is not int or mpid <= 1:
+            return 1  # kill -TERM 0 below would signal the caller's group
 
         # the helper: SIGTERM the master, then wait to be resolved; its
         # script ends in a comment with the bytes the record must not trust.

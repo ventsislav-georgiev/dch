@@ -82,6 +82,8 @@ def master_pid(sock):
     else:
         pid = int.from_bytes(s.getsockopt(0, 2, 4), sys.byteorder)  # LOCAL_PEERPID
     s.close()
+    if pid <= 1:
+        raise OSError("no listener pid: %d" % pid)
     return pid
 
 
@@ -380,6 +382,7 @@ def main():
         dead_nodes()
         orphan_name()
         trace_sigterm()
+        kill_guard()
     finally:
         if mpid:
             try:
@@ -451,17 +454,17 @@ def orphan_name():
     sock, pids = os.path.join(sd, "x.sock"), []
     try:
         r, _ = run(env, "--spawn", "x", "sleep", "300")
-        a = r.returncode == 0 and master_pid(sock)
+        a = spawned_pid(r, sock)
         pids.append(a)
         os.unlink(sock)
         r, _ = run(env, "--spawn", "x", "sleep", "300")
-        b = r.returncode == 0 and master_pid(sock)
+        b = spawned_pid(r, sock)
         pids.append(b)
         os.kill(b, signal.SIGKILL)
         until(lambda: not master_alive(b))
         r, _ = run(env, "--spawn", "x", "sleep", "300")
-        c = r.returncode == 0 and master_pid(sock)
-        pids.append(c)
+        pids.append(spawned_pid(r, sock))
+        c = pids[-1]
         expect(c and c not in (a, b) and master_alive(a),
                "a healthy orphan does not hold its name once its "
                "replacement's node is dead: %r" % r.stderr)
@@ -473,6 +476,22 @@ def orphan_name():
                 os.kill(p, signal.SIGKILL)
 
 
+def kill_guard():
+    """QA 1.65.0 LOW-T18: a failed spawn gave False, and os.kill(False, sig)
+    is kill(0, sig): the caller's process group. It must raise instead."""
+    class Failed:
+        returncode, stderr = 1, "boom"
+    for bad in (Failed,):
+        try:
+            spawned_pid(bad, "/nonexistent.sock")
+            raised = False
+        except OSError:
+            raised = True
+        expect(raised, "a failed spawn raises, never yields a pid to kill")
+    expect(not master_alive(False) and not master_alive(0) and
+           not master_alive(None), "master_alive(False/0/None) never kills")
+
+
 def trace_sigterm():
     """QA 1.63.0 OOA-1: die() traced with fprintf, which can wait for ever
     on a lock the interrupted code holds; it now write(2)s its line. The
@@ -482,14 +501,18 @@ def trace_sigterm():
     pid = 0
     try:
         r, _ = run(env, "--spawn", "ooa", "sleep", "300")
-        pid = r.returncode == 0 and master_pid(os.path.join(sd, "ooa.sock"))
+        pid = spawned_pid(r, os.path.join(sd, "ooa.sock"))
         os.kill(pid, signal.SIGTERM)
         gone = until(lambda: not master_alive(pid), 5)
         with open(env["DCH_DEBUG"]) as f:
             line = [l for l in f if " master die " in l]
         want = (r"\d+\.\d{6} pid=%d master die sig=15 from pid=%d uid=%d "
-                r"cmd=\S*python.*\n\Z" % (pid, os.getpid(), os.getuid()))
-        expect(gone and len(line) == 1 and re.match(want, line[0]),
+                r"cmd=(\S*)" % (pid, os.getpid(), os.getuid()))
+        m = len(line) == 1 and re.match(want, line[0])
+        # the sender is this interpreter (pid= and uid= above); its path is
+        # cut at 120 bytes and Apple's is ".../Python3.framework/.../Python.app"
+        ok = bool(m) and "python" in m.group(1).lower()
+        expect(gone and ok,
                "a DCH_DEBUG master SIGTERMed traces who sent it: %r" % line)
     except (OSError, TypeError) as e:
         expect(False, "trace_sigterm: %r" % e)
@@ -498,7 +521,18 @@ def trace_sigterm():
             os.kill(pid, signal.SIGKILL)
 
 
+def spawned_pid(r, sock):
+    """The master's pid of a spawn that worked; a failed one raises, so a
+    False/0 can never reach os.kill (kill(0, sig) signals the whole group)."""
+    pid = master_pid(sock) if r.returncode == 0 else None
+    if type(pid) is not int or pid <= 1:
+        raise OSError("spawn failed: %r" % r.stderr)
+    return pid
+
+
 def master_alive(pid):
+    if type(pid) is not int or pid <= 1:
+        return False
     try:
         os.kill(pid, 0)
         return True
