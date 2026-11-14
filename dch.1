@@ -876,11 +876,11 @@ here and in the reader leaves the view and attaches to the session, as
 does, a remote one's too; on an ended session it says so and stays;
 keys typed with it (a second
 .BR o ,
-Enter, a held
-.BR o )
+Enter)
 are dropped until the keyboard pauses for 100 ms (1 s inside a bracketed
-paste), for at most 2 s, so a key held longer than 2 s does reach the
-session; a key typed after the pause reaches it),
+paste), for at most 2 s; a key typed after the pause reaches it; a key held
+down is not covered, its repeats start after a longer pause and reach the
+session),
 .B Responses
 (Claude and Codex sessions: what the agent showed at the end of each turn,
 its answer or its summary of the work, as Claude Code's Focus view does;

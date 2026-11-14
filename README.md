@@ -939,10 +939,11 @@ it has memories or instruction files:
   and attaches to the live session, as `dch -a <n>` does (`host:name` too;
   from the picker's `x`, as the picker's `Enter`; the `-k` and `-d` pickers
   say it is not theirs). On an ended session `o` says so and the view
-  stays. Keys typed with `o` (a second `o`, `Enter`, a held `o`) are
-  dropped until the keyboard pauses for 100 ms (1 s inside a bracketed
-  paste), for at most 2 s: a key held longer than 2 s does reach the
-  session. A key typed after the pause reaches the session. The attach
+  stays. Keys typed with `o` (a second `o`, `Enter`) are dropped until the
+  keyboard pauses for 100 ms (1 s inside a bracketed paste), for at most
+  2 s; a key typed after the pause reaches the session. A key held down is
+  not covered: its repeats start after a longer pause and reach the
+  session. The attach
   opens at the session's live screen, not at the prompt.
 - **Responses** (Claude and Codex sessions): what the agent showed you at
   the end of each turn, as Claude Code's Focus view does: its answer, or
