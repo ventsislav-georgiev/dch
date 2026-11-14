@@ -10290,6 +10290,7 @@ pk_xray(struct pk *p, int fd, const char *name, int record, int remote,
 	{
 		attach_route = remote ? 1 : -1;	/* the view's own (#210) */
 		attach_only = 1;	/* ended since o: refused, never a new one */
+		attach_drop_o = 1;	/* a held o's repeats (#331) */
 		return 1;
 	}
 	return 0;
@@ -14790,7 +14791,8 @@ attach_xray_view(void)
 		** (LOW-R8, #230) */
 		xv_drop_keys(STDIN_FILENO, 1);
 	}
-	return rc;
+	/* left with o: the attach drops a held o's repeats (#331) */
+	return rc == 0 && xv_go[0] ? ATTACH_XRAY_OPENED : rc;
 }
 
 /* `dch --xray <n> [--json] [--clear|--follow]`, `--ref <text> [--scope
@@ -15045,7 +15047,7 @@ xray_main(int argc, char **argv)
 			return rc;
 		attach_route = route;
 		snprintf(session_name, sizeof session_name, "%s", xv_go);
-		attach_only = remote_ok = 1;
+		attach_only = remote_ok = attach_drop_o = 1;	/* #331 */
 		return attach_with_switch(dch_exe, 1, 1, NULL, 0, 0);
 	}
 	/* SIGPIPE ignored: a failed socket write to the master exits 1 with

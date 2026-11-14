@@ -431,6 +431,11 @@ extern int (*attach_detached)(void);
 ** of the attached session, run in a child attach_main forks; its exit code.
 ** A remote attach's too (#189). NULL: no chord, the bytes go on as before. */
 extern int (*attach_xray)(void);
+/* The view's o (#331): 1 set by the host for the attach a view's o opens,
+** taken by the next attach_main; ATTACH_XRAY_OPENED the chord view's exit
+** code when o left it. That attach drops a held o's repeats. */
+extern int attach_drop_o;
+#define ATTACH_XRAY_OPENED 64
 
 #include "remote.h"
 void client_pidfile_unlink(void);

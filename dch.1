@@ -878,9 +878,14 @@ keys typed with it (a second
 .BR o ,
 Enter)
 are dropped until the keyboard pauses for 100 ms (1 s inside a bracketed
-paste), for at most 2 s; a key typed after the pause reaches it; a key held
-down is not covered, its repeats start after a longer pause and reach the
-session),
+paste), for at most 2 s; a key typed after the pause reaches it; the attach
+then drops repeats of
+.B o
+that follow within 700 ms of each other, so a held
+.B o
+types nothing, and an
+.B o
+typed on purpose within 700 ms of opening is dropped too),
 .B Responses
 (Claude and Codex sessions: what the agent showed at the end of each turn,
 its answer or its summary of the work, as Claude Code's Focus view does;

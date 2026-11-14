@@ -156,6 +156,11 @@ Covers:
      50 ms after the first and 8 o's 33 ms apart (dch --xray), 8 o's from
      the chord's view, the picker's x and Search: nothing reaches the
      session, a z 300 ms after the last o does.
+ 20. #331: the attach a view's o opens (dch --xray, the picker's x, the
+     chord) drops o's that follow within 700 ms of each other: a held o's
+     repeats from 300 ms on type nothing; an x 300 ms on, and the x of an
+     oox, reach the session; an o 1 s after the attach does; a plain -a's
+     o 100 ms after attaching does.
 
 Run:  python3 tests/xray_view_test.py      (uses ./dch)
 """
@@ -3386,6 +3391,99 @@ def test_chord():
         a.close()
 
 
+def o_then(p, steps):
+    """o, then each (gap s, bytes) in a write of its own. The pty is read
+    meanwhile, as a terminal does: an attach whose repaint finds the pty
+    full blocks on it and reads no key until it drains."""
+    os.write(p.fd, b"o")
+    for g, b in steps:
+        p.pump(g)
+        os.write(p.fd, b)
+
+
+def xv_rx():
+    v = Pty([DCH, "--xray", "xv-rx"], env=DTAP)
+    ready(v)
+    return v
+
+
+def picker_rx():
+    v = Pty([DCH, "-l"], env=DTAP)
+    v.wait(b"x-ray")
+    for _ in range(4):  # the picker's row of xv-rx
+        mark = len(v.out)
+        v.key(b"x", 1.0)
+        v.wait(b"X-ray  ", start=mark)
+        if b"X-ray  xv-rx" in v.out[mark:]:
+            break
+        v.key(b"q", 1.0)
+        v.key(b"j", 0.5)
+    ready(v, mark)
+    return v
+
+
+def chord_rx():
+    a = attach()
+    a.key(b"\x1cx", 0.5)
+    a.wait(b"X-ray  xv-rx")
+    mark = len(a.out)
+    a.key(b"\t\t", 0.5)  # Refs, Search, then Commands
+    ready(a, mark)
+    return a
+
+
+# o's repeats starting 300 ms on, one every 50 ms for 1 s, then a z
+REPEAT = [(0.3, b"o")] + [(0.05, b"o")] * 19 + [(0.3, b"z")]
+
+
+def test_held_o():
+    """#331: the attach a view's o opens drops the leading o's that follow
+    within 700 ms of its start or of the last one dropped (a held o's
+    repeats start 225 ms or more after the press, past the view's 100 ms
+    pause); the first other byte, or an o after a longer gap, goes on."""
+    cases = (
+        ("dch --xray", xv_rx, "a held o's repeats", REPEAT, "7a"),
+        ("dch --xray", xv_rx, "x 300 ms later", [(0.3, b"x")], "78"),
+        ("dch --xray", xv_rx, "oox in one write 300 ms later",
+         [(0.3, b"oox")], "78"),
+        ("dch --xray", xv_rx, "one o 1 s after the attach", None, "6f"),
+        ("picker's x", picker_rx, "a held o's repeats", REPEAT, "7a"),
+        ("picker's x", picker_rx, "x 300 ms later", [(0.3, b"x")], "78"),
+        ("chord", chord_rx, "a held o's repeats", REPEAT, "7a"),
+        ("chord", chord_rx, "x 300 ms later", [(0.3, b"x")], "78"),
+    )
+    for where, start, what, steps, want in cases:
+        v = start()
+        try:
+            got = rx()
+            if steps is None:
+                o_then(v, [])
+                until(lambda: (v.pump(0.1), clients("xv-rx") == 1)[1], 10)
+                v.pump(1.0)
+                os.write(v.fd, b"o")
+            else:
+                o_then(v, steps)
+            ok = until(lambda: (v.pump(0.1), clients("xv-rx") == 1)[1], 10)
+            until(lambda: (v.pump(0.1), rx()[len(got):] != "")[1], 5)
+            v.pump(0.3)
+            check("%s, o then %s: the session gets %s only (#331)"
+                  % (where, what, want), ok and rx()[len(got):] == want and
+                  v.reap() is None, (ok, rx()[len(got):], v.rc))
+        finally:
+            v.close()
+    a = Pty([DCH, "-a", "xv-rx"])
+    try:
+        attached(a)
+        got = rx()
+        time.sleep(0.1)
+        os.write(a.fd, b"o")
+        until(lambda: rx()[len(got):] != "", 5)
+        check("dch -a, no view: an o 100 ms after attaching reaches the "
+              "session (#331)", rx()[len(got):] == "6f", rx()[len(got):])
+    finally:
+        a.close()
+
+
 def test_chord_end():
     """The session ends while the view is up: leaving the view ends the
     attach as a session's end does (exit 0, no frame to a closed master).
@@ -3596,6 +3694,7 @@ def main():
         test_picker()
         test_open(o["corpus"] == "none" and o["reason"] == "lite")
         test_chord()
+        test_held_o()
         test_chord_end()
         test_chord_detach()
     finally:

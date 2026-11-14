@@ -110,6 +110,8 @@ int attach_end_back;
 const char *(*attach_lost)(int *code);
 int (*attach_detached)(void);
 int (*attach_xray)(void);
+int attach_drop_o;
+static long long drop_till;	/* mono_us; 0: o's repeats not dropped */
 
 /* A remote attach's socket closed: when the link (not the session) ended,
 ** say why on a restored terminal and exit with the hook's code. */
@@ -468,6 +470,29 @@ mono_us(void)
 	return tv.tv_sec * 1000000LL + tv.tv_usec;
 }
 
+/* The view's o (#331): a held o repeats 225 ms to 1 s after the press, past
+** the view's 100 ms pause, into the attach it opened. Leading o bytes are
+** dropped while each comes within 700 ms of the attach start or of the last
+** dropped one; any other byte, or an o after a longer gap, ends it for good
+** and goes on with the rest. Returns what is kept, moved to b's front. */
+static ssize_t
+drop_o(unsigned char *b, ssize_t n)
+{
+	long long now = mono_us();
+	ssize_t i = 0;
+
+	if (now > drop_till)
+		drop_till = 0;
+	while (drop_till && i < n && b[i] == 'o')
+		i++;
+	if (i < n)
+		drop_till = 0;
+	else if (drop_till)
+		drop_till = now + 700000;
+	memmove(b, b + i, (size_t)(n - i));
+	return n - i;
+}
+
 static int
 focus_wanted(void)
 {
@@ -703,7 +728,7 @@ xray_overlay(int s)
 {
 	struct packet pkt;
 	unsigned char buf[BUFSIZE];
-	int p[2], live = 1;
+	int p[2], live = 1, st = 0;
 	pid_t pid = -1;
 
 	dch_trace("client x-ray overlay");
@@ -778,11 +803,11 @@ xray_overlay(int s)
 		}
 		if (n > 0 && FD_ISSET(p[0], &rs) && read(p[0], buf, 1) == 0)
 		{
-			while (waitpid(pid, NULL, 0) < 0 && errno == EINTR)
+			while (waitpid(pid, &st, 0) < 0 && errno == EINTR)
 				;
 			break;
 		}
-		if (waitpid(pid, NULL, WNOHANG) != 0)
+		if (waitpid(pid, &st, WNOHANG) != 0)
 			break;
 		/* dch -d (SIGUSR1): the view goes first, as in die(), then
 		** the client leaves as the main loop does */
@@ -798,6 +823,8 @@ xray_overlay(int s)
 	xray_pid = 0;
 	if (p[0] >= 0)
 		close(p[0]);
+	if (WIFEXITED(st) && WEXITSTATUS(st) == ATTACH_XRAY_OPENED)
+		drop_till = mono_us() + 700000;	/* left with o (#331) */
 	term_raw();
 	inner_focus = fo_st = fpend_n = dq_n = 0;
 	if (focus_on)
@@ -1042,6 +1069,8 @@ attach_main(int noerror)
 	write_packet_or_fail(s, &pkt);
 	dch_trace("client attached fd=%d sock=%s", s,
 	          attach_sock >= 0 ? "(remote)" : sockname);
+	drop_till = attach_drop_o ? mono_us() + 700000 : 0;	/* #331 */
+	attach_drop_o = 0;
 
 	/* Wait for things to happen */
 	while (1)
@@ -1223,6 +1252,8 @@ attach_main(int noerror)
 				}
 			}
 
+			if (drop_till && (len = drop_o(pkt.u.buf, len)) == 0)
+				goto keys_done;
 			pkt.len = len;
 			if (detach_pending)
 			{
