@@ -940,7 +940,10 @@ that follow within 700 ms of each other, so a held
 .B o
 types nothing, and an
 .B o
-typed on purpose within 700 ms of opening is dropped too),
+typed on purpose within 700 ms of opening is dropped too;
+a key-repeat delay longer than about 0.8 s is past that window, and a held
+.B o
+then types its repeats),
 .B Responses
 (Claude and Codex sessions: what the agent showed at the end of each turn,
 its answer or its summary of the work, as Claude Code's Focus view does;
@@ -2225,7 +2228,10 @@ A
 drops its connection: when the new master image answers, it sends
 .B reset
 .B restarted
-and a new snapshot and goes on (before 1.66.0 it exited 0).
+and a new snapshot and goes on (before 1.66.0 it exited 0), at every
+restart; a hang-up within 1 s of that snapshot, with nothing from the
+master in between, ends it (exit 0), so a master that answers but keeps
+hanging up cannot loop it.
 .B \-\-follow
 takes no
 .B \-\-ref

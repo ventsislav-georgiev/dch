@@ -951,7 +951,9 @@ it has memories or instruction files:
   2 s; a key typed after the pause reaches the session. The attach then
   drops repeats of `o` that follow within 700 ms of each other, so a held
   `o` types nothing; an `o` you type on purpose within 700 ms of opening is
-  dropped too. The attach
+  dropped too. A key-repeat delay longer than about 0.8 s (macOS's slowest
+  three settings) is past that window: a held `o` then types its repeats
+  into the session. A longer window would drop more `o`s typed on purpose. The attach
   opens at the session's live screen, not at the prompt.
 - **Responses** (Claude and Codex sessions): what the agent showed you at
   the end of each turn, as Claude Code's Focus view does: its answer, or
@@ -2019,7 +2021,9 @@ Rules for shells and endings:
   pipe, idle or not. A `--restart` of the session drops its connection: the
   follow asks the socket, and when the new master image answers it sends
   `reset` `restarted` and a new snapshot and goes on (before 1.66.0 it
-  exited 0 there).
+  exited 0 there), at every restart. A hang-up within 1 s of that
+  snapshot, with nothing from the master in between, ends it (exit 0): a
+  master that answers but keeps hanging up must not loop it.
 
 `dch --xray <n> --chapter <anchor> --json` prints one chapter's entries as
 one object: `{"schema":1,"session","session_id","anchor","title","at","kind","entries":[…],"truncated":bool}`,

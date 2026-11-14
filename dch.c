@@ -13662,6 +13662,7 @@ xr_clear(const struct xr_target *t)
 #define XF_EVICT_MS 1000	/* ... at most once a second */
 #define XF_SLICE (4u << 20)	/* the full pass: bytes between events */
 #define XF_RESET (-1)
+#define XF_RELOST_MS 1000L	/* xf_lost: no --restart this soon */
 
 enum { XE_FILE = 1, XE_ROT = 2, XE_CONN = 4, XE_OUT = 8 };
 
@@ -13683,7 +13684,8 @@ struct xf
 	long gap;		/* the coalescing interval: 250 ms, or twice the
 				** last build when that is longer */
 	int pending, rc;
-	int relost;		/* a "restarted" reset, no frame drained since */
+	long long relost;	/* a "restarted" reset, no frame drained since:
+				** 1, then its snapshot's time; 0 none */
 	const char *why;	/* XF_RESET's reason, for the next snapshot */
 	unsigned long woke, timed;	/* 9.5's no-timer seam */
 };
@@ -13932,16 +13934,18 @@ xf_drain(struct xf *f)
 
 /* The master's connection dropped: a --restart when a master answers on
 ** the socket again (its new image), so a reset and a new snapshot (QA
-** 1.65.0 LOW-V27); else the session ended, exit 0. A second loss with no
-** frame drained since the last such reset ends it too: a master that
-** answers but keeps hanging up (an old image, a refused subscription)
-** must not loop us through snapshots for ever. */
+** 1.65.0 LOW-V27); else the session ended, exit 0. A loss within
+** XF_RELOST_MS of the last such reset's snapshot, no frame drained since,
+** ends it too: a master that answers but keeps hanging up (an old image, a
+** refused subscription) must not loop us through snapshots. A later one is
+** another --restart: an idle session sends no frame (QA 1.66.0 MED-A1). */
 static int
 xf_lost(struct xf *f)
 {
 	struct cmd_info ci;
 
-	if (f->relost || cmd_query(f->t->sock, &ci) != 0)
+	if ((f->relost && xr_now_ms() - f->relost < XF_RELOST_MS) ||
+	    cmd_query(f->t->sock, &ci) != 0)
 		return 0;
 	cmd_info_free(&ci);
 	f->relost = 1;
@@ -13993,6 +13997,8 @@ xf_snapshot(struct xf *f, struct xr_answer *a, const char *reset)
 		return 1;
 	}
 	f->last = xr_now_ms();
+	if (f->relost)
+		f->relost = f->last;	/* the guard's window starts here */
 	dch_trace("xray follow: snapshot%s%s keys=%zu", reset ? " after " : "",
 	          reset ? reset : "", a->refs ? xr_index_keys(a->refs) : 0);
 	return 0;

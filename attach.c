@@ -541,11 +541,13 @@ mono_us(void)
 	return tv.tv_sec * 1000000LL + tv.tv_usec;
 }
 
-/* The view's o (#331): a held o repeats 225 ms to 1 s after the press, past
+/* The view's o (#331): a held o repeats 225 ms to 1.8 s after the press, past
 ** the view's 100 ms pause, into the attach it opened. Leading o bytes are
 ** dropped while each comes within 700 ms of the attach start or of the last
 ** dropped one; any other byte, or an o after a longer gap, ends it for good
-** and goes on with the rest. Returns what is kept, moved to b's front. */
+** and goes on with the rest. Returns what is kept, moved to b's front.
+** A repeat delay past about 0.8 s (the window's end) types its o's: a
+** longer window would drop more o's typed on purpose (QA 1.66.0 LOW-A2). */
 static ssize_t
 drop_o(unsigned char *b, ssize_t n)
 {
