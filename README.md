@@ -411,11 +411,12 @@ with job control takes the terminal back whenever dch stops (Ctrl-Z or a stop
 signal), and bash with job control off (`set +m`) goes on to its next command:
 either reads that key itself, and dch then does a plain detach.
 
-A stop of `dch -a` (Ctrl-Z while it starts, or `kill -TSTP`) puts your shell's
-terminal modes back before dch stops, so a shell that does not restore them
-itself (dash, `/bin/sh` on Debian and Ubuntu) is not left raw; `fg` brings
-the session back raw. A `SIGSTOP` cannot be caught: under dash the terminal
-stays raw until dch continues.
+A stop of `dch -a` or of the session picker (`dch -l`) (Ctrl-Z while it
+starts, or `kill -TSTP`) puts your shell's terminal modes back before dch
+stops, so a shell that does not restore them itself (dash, `/bin/sh` on Debian
+and Ubuntu) is not left raw; `fg` brings the session or the picker back raw. A
+`SIGSTOP` cannot be caught: under dash the terminal stays raw until dch
+continues.
 
 `detach_key = switch` in the [config file](#config-file) swaps the two: one
 press opens the picker, two detach. With `DCH_DOUBLE_TAP_MS=0` one press then

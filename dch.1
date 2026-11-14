@@ -783,12 +783,14 @@ goes on to its next command: either reads that key itself, and dch then does
 a plain detach.
 A stop of
 .B dch \-a
+or of the session picker
+.RB ( "dch \-l" )
 (Ctrl\-Z while it starts, or
 .BR "kill \-TSTP" )
 puts the shell's terminal modes back before dch stops, so a shell that does
 not restore them itself (dash) is not left raw;
 .B fg
-brings the session back raw.
+brings the session or the picker back raw.
 A
 .B SIGSTOP
 cannot be caught: under dash the terminal stays raw until dch continues.
