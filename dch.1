@@ -822,7 +822,7 @@ and kept current as
 keeps its index. It writes nothing to disk.
 Session text is drawn with every control and bidi character as
 .BR ? .
-Three tabs, two for a shell session:
+Four tabs, three for a shell session:
 .B Prompts
 (\fBCommands\fR for a shell session, one row per command; Chapters before
 1.63.0;
@@ -900,7 +900,22 @@ not hold is there too, with no count; they follow
 no group line when nothing on the screen is a ref, and none for an ended
 session or on dch\-lite; the screen is read when Refs opens and once a
 second while it shows, never drawn; up to 1.61.0 a third tab, On screen,
-drew it with a label on each ref).
+drew it with a label on each ref) and
+.B Search
+(where a word or phrase was said in the session; it opens typing until a
+search is made, \fB/\fR types again with the filter's keys, \fBEnter\fR
+searches as
+.B \-\-search
+does (a text it refuses is said, not searched), \fBEsc\fR stops typing and
+keeps the last results; the text stays above the results until the next
+search; the hits newest first, at most 50, each its time, who said it
+(\(lqYou\(rq, \(lqReply\(rq or the tool's name), the prompt it is under
+(\(lq(outside the prompts shown)\(rq when the view has none) and up to 3
+lines around it, the match in bold; faint lines say when the 50 newest are
+shown and when the search stopped early; the tab counts the hits, 50+ past
+the cap; \fBEnter\fR reads the hit's prompt at the text, \fBq\fR back to the
+hit; a shell searches its ring, dch\-lite and xray_ring = 0 say no corpus;
+a host before 1.63.0 does not know \-\-search, and the list says so).
 A card shows the ref's definitions, first and latest mention, counts by
 scope and mentions; it opens light (as
 .B \-\-ref
@@ -926,7 +941,7 @@ The line under the tabs names the corpus
 \(lqNo Claude session found here\(rq, ...).
 Keys: \fBTab\fR and \fBShift\-Tab\fR, \fB\(<-\fR \fB\(->\fR
 and \fBh\fR \fBl\fR go to the next and previous tab, in the order
-Prompts, Responses, Refs;
+Prompts, Responses, Refs, Search;
 \fBj\fR \fBk\fR, arrows, \fBPgUp\fR \fBPgDn\fR, \fBg\fR \fBG\fR move;
 \fBq\fR quits the list and goes back from a card or the reader;
 \fBEsc\fR clears the filter, else does the same;
@@ -934,9 +949,9 @@ Prompts, Responses, Refs;
 (as
 .B \-\-ref
 takes it), opens its card, while typing or after, a row for it or not, its
-kind hidden or not (the footer shows \fB^R\fR look up; words are not looked
-up, and an empty list says so; a remote host whose dch takes no such ref
-says so);
+kind hidden or not (the footer shows \fB^R\fR look up; other words go to
+Search and are searched there, the footer showing \fB^R\fR search; a remote
+host whose dch takes no such ref says so);
 \fBCtrl\-C\fR and \fBCtrl\-D\fR quit.
 A window under 24x8 says it is too small.
 While attached, the detach character and then

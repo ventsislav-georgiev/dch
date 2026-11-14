@@ -883,7 +883,7 @@ the picker. The view asks the same engine as `--json` and holds its index as
 open. It writes nothing to disk. Text from the session (titles, lines,
 passages) is drawn with every control and bidi character shown as `?`.
 
-The view has three tabs, two for a shell session (no Responses):
+The view has four tabs, three for a shell session (no Responses):
 - **Prompts** (**Commands** for a shell session): one row per thing you
   typed, a prompt to Claude or Codex, a command to a shell. `/` filters.
   `Enter` opens the prompt read-only with everything up to the next one
@@ -960,14 +960,38 @@ The view has three tabs, two for a shell session (no Responses):
   not drawn or kept. An ended session and dch-lite have no screen, so no
   group. Up to 1.61.0 a third tab, On screen, drew the screen with a
   label on each ref.
+- **Search**: where a word or phrase was said in this session, for the
+  thing on your screen you do not remember, or a topic from earlier. It
+  opens typing (`Search: ` with a cursor) until you have searched; `/`
+  types again, with the filter's keys. `Enter` searches (`--search`, see
+  below: ASCII letters in either case, 2 to 200 bytes, no control
+  character; a text outside that is said on the status line and not
+  searched), `Esc` stops typing and keeps the last results. The text
+  searched stays on the line above the results, also when you switch tabs
+  and come back, until the next search. The hits are newest first, at most
+  50: each is its time, who said it (`You`, `Reply`, or the tool's name;
+  `Output` for a shell's output), the prompt it is under, and up to 3 lines
+  of the text around it, the match in bold accent colour. A hit the view
+  has no prompt for says `(outside the prompts shown)`. A faint last line
+  says `the 50 newest are shown` when there are more, and one says when
+  the search stopped early (too long, too much to read, or the history
+  changed as it read); the hits shown stand. The tab's count is the hits,
+  `50+` past the cap, nothing before a search. `j` `k` move hit by hit;
+  `Enter` reads the hit's prompt, scrolled to the text, and `q` comes back
+  to the hit; on a hit outside the prompts the status line says the view
+  cannot open it. `o` works as on Prompts. A shell session searches its
+  ring; dch-lite and `xray_ring = 0` have none, and the list says `no x-ray
+  corpus`. A remote view searches on the host; a host older than 1.63.0
+  does not know `--search`, and the list says so.
 
 A ref typed after `/` (a ticket, issue, pull request, commit, file or URL,
 as `--ref` takes it) opens its card with `Ctrl-R`, on any tab, while
 typing or after: also when no row has it, a row is not the one you want, or
 its kind is hidden until `a`. The footer shows `^R look up` while the filter
 holds one. The filter matches prompt titles and summaries, answers on
-Responses, and the refs held;
-words are not looked up, and the empty list says so. On a remote view a
+Responses, and the refs held. Words that are not a ref go to Search with
+`Ctrl-R`, which runs them there (the footer shows `^R search`, and an empty
+list says `^R searches the session for it`). On a remote view a
 host whose dch takes no such ref says so in the status line.
 
 A ref's card shows its definitions (two or more as "N definitions"), its
@@ -989,19 +1013,19 @@ not clear X-ray; run `clear`".
 
 | Key | List | Card / reader |
 | --- | --- | --- |
-| `Tab` `→` `l` / `Shift-Tab` `←` `h` | the next / previous tab (Prompts, Responses, Refs) | `←` `h`: back |
+| `Tab` `→` `l` / `Shift-Tab` `←` `h` | the next / previous tab (Prompts, Responses, Refs, Search) | `←` `h`: back |
 | `↑` `↓` / `j` `k`, `PgUp` `PgDn`, `g` `G` | move | move / scroll; reader: at an end, again for the next / previous prompt |
 | `]` `[` | | reader: the next / previous prompt |
-| `Enter` | read the prompt (Responses: at its answer) / open the card | card: read the mention's prompt |
-| `/` | filter | |
-| `Ctrl-R` | with a ref typed after `/`: open its card, a row for it or not, its kind hidden or not | |
+| `Enter` | read the prompt (Responses: at its answer; Search: at the hit) / open the card; Search, typing: search | card: read the mention's prompt |
+| `/` | filter; Search: type the text to search | |
+| `Ctrl-R` | with a ref typed after `/`: open its card, a row for it or not, its kind hidden or not; other words: search them on Search | |
 | `a` | Refs: show / hide the files, commits and URLs | |
 | `t` | Refs: show / hide the temp files | |
 | `n` | Prompts, Responses: show / hide the auto rows (auto prompts, the task notifications, and compactions) | |
-| `o` | Prompts, Responses: attach to the session (in the chord: back to it) | card, reader: the same |
+| `o` | Prompts, Responses, Search: attach to the session (in the chord: back to it) | card, reader: the same |
 | `f` `p` `y` | | card: full scan, other projects / this project (`p` was `o` before 1.61.0), copy |
 | `q` | quit | back |
-| `Esc` | clear the filter, else quit | back |
+| `Esc` | clear the filter, else quit; Search, typing: stop typing, the last results kept | back |
 | `Ctrl-C` `Ctrl-D` | quit | quit |
 
 **While attached**, press the detach key (`Ctrl-\`) and then `x` within the

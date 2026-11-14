@@ -13,8 +13,8 @@ Covers:
      terminal: exit 2, a usage message, the view not opened; no such
      session: exit 1, the message after the terminal is restored;
   3. the tabs (no On screen, #294; Prompts for a Claude session,
-     Commands for a shell's, never Chapters, #295; Shift-Tab from Prompts
-     to Refs, #290), the chapter list, the Refs list,
+     Commands for a shell's, never Chapters, #295; Shift-Tab twice from
+     Prompts to Refs, by Search, #291), the chapter list, the Refs list,
      the card (light, `f` full scan, `y` OSC 52 copy, `p` other projects
      and back, `o` on the ended session said), the chapter reader, back,
      quit (exit 0, terminal restored);
@@ -77,8 +77,8 @@ Covers:
      hidden (a file), or that a chapter title holds (not the wanted row):
      the footer names ^R, the empty line says ^R looks it up, ^R opens its
      card (outer blanks cut), Enter reads its mention's chapter, Esc goes
-     back with the filter kept; plain words: one faint line says ^R takes
-     refs, not words, and ^R says so with no card.
+     back with the filter kept; plain words: one faint line says ^R
+     searches for them, and ^R runs them on Search (#291), no card.
  14. Responses (#290): xv-rs, a History Claude record: Tab from Prompts
      opens it, the tabs Prompts, Responses, Refs in that order with their
      counts; newest first, the newest selected; a turn with tools and a
@@ -97,6 +97,22 @@ Covers:
      the first item on the first. xv-cx, a live fake Codex over the
      codex-0167 rollout: its answer and tool line, its last turn working.
      A shell (xv-0) has no Responses tab.
+ 15. Search (#291): xv-se, a History Claude record with the needle in a
+     prompt, a tool call, its result and two answers: Tab cycles Prompts,
+     Responses, Refs, Search (no count before a search) and wraps; Search
+     opens typing with its hint; Enter searches: the tab counts the hits,
+     the text's line stays above them, newest first, each with its time,
+     who said it (You, Reply, the tool's name) and its prompt's title; the
+     match in accent bold in either case; Enter reads the hit's prompt
+     scrolled to the text (deep in a long chapter), q back to the same
+     hit, also on the third; j, g, G; a 1-byte text refused in the status
+     line, the hits kept; Esc ends typing with the last text back; no
+     match; Shift-Tab back keeps the text and its answer; plain words in
+     the Prompts filter: ^R search in the footer and on the empty line, ^R
+     lands on Search with their hit. xv-sm, 55 prompts: 50+ in the tab,
+     the faint "the 50 newest are shown", G the 50th. A shell (xv-sh):
+     Commands, Refs, Search; its ring searched (each line as Output); on
+     dch-lite the list says no x-ray corpus.
 
 Run:  python3 tests/xray_view_test.py      (uses ./dch)
 """
@@ -352,7 +368,7 @@ def test_view():
               "show as ?", v.wait(b"o/r#7 ?]0;pwned? evil?title al?m"),
               v.out[-600:])
         mark = len(v.out)
-        v.key(b"\033[Z", 1.0)  # Shift-Tab: Prompts back to Refs (#290)
+        v.key(b"\033[Z\033[Z", 1.0)  # back to Search, then Refs (#291)
         scr = rows(v.out[mark:])
         text = "\n".join(scr[k] for k in sorted(scr))
         at = [text.find(x) for x in ("PROJ-5", "#831", "o/r#7")]
@@ -404,7 +420,7 @@ def test_view():
               v.reap() is None, text)
         mark = len(v.out)
         v.key(b"\033", 0.5)
-        v.key(b"\t")  # Refs, then Prompts: Tab wraps (#290)
+        v.key(b"\t\t")  # Refs, Search, then Prompts: Tab wraps (#291)
         mark = len(v.out)
         v.key(b"\r", 1.0)
         check("reader: Enter opens the selected chapter (the newest)",
@@ -491,7 +507,7 @@ def test_refs():
               b"Refs 13" in v.out and b"On screen" not in v.out,
               v.out[-600:])
         mark = len(v.out)
-        v.key(b"\033[Z", 1.0)
+        v.key(b"\033[Z\033[Z", 1.0)
         scr = rows(v.out[mark:])
         text = "\n".join(scr[k] for k in sorted(scr))
         check("Refs: the tab count stays the engine's total (13)",
@@ -648,7 +664,7 @@ def test_latest():
         v.wait(b"Prompts 1")
         v.pump(0.5)
         mark = len(v.out)
-        v.key(b"\033[Z", 1.0)
+        v.key(b"\033[Z\033[Z", 1.0)
         scr = rows(v.out[mark:])
         text = "\n".join(scr[k] for k in sorted(scr))
         at = [text.find(x) for x in ("#77", "PROJ-9", "o/r#1")]
@@ -718,16 +734,18 @@ def test_lookup():
         v.key(b"just words", 1.0)
         text = shown(v, mark)
         check("lookup #263: plain words matching nothing: one faint line "
-              "says ^R takes refs, not words; no ^R in the footer",
-              "No match; ^R looks up a ticket, issue, pull, commit, file or "
-              "URL, not words" in text and "^R look up" not in text, text)
+              "says ^R searches for them (#291); ^R search, not look up, in "
+              "the footer", "No match; ^R searches the session for it" in
+              text and "^R search" in text and "^R look up" not in text,
+              text)
         mark = len(v.out)
         v.key(b"\x12", 1.0)
-        check("lookup #263: ^R on words says what it takes, no card",
-              v.wait(b"^R looks up the ref typed after /", start=mark) and
+        check("lookup #263: ^R on words searches them on Search (#291), no "
+              "card", v.wait(b"Search: just words", start=mark) and
+              v.wait(b'No match for "just words"', start=mark) and
               b"light" not in v.out[mark:], v.out[mark:])
-        v.key(b"\033", 0.3)
-        v.key(b"\033[Z", 1.0)
+        v.key(b"\033[Z", 0.5)   # Search back to Refs
+        v.key(b"\033", 1.0)     # the filter cleared
         mark = len(v.out)
         v.key(b"/ deadbeef1 ", 1.0)
         text = shown(v, mark)
@@ -834,7 +852,7 @@ def refs_tab(name):
     v.wait(b"Prompts 1")
     v.pump(0.5)
     mark = len(v.out)
-    v.key(b"\033[Z", 1.0)
+    v.key(b"\033[Z\033[Z", 1.0)
     mark = len(v.out)
     v.key(b"a", 1.0)  # files and URLs too (#262)
     scr = rows(v.out[mark:])
@@ -1351,12 +1369,17 @@ def test_responses():
               or b"Pull requests, issues" in v.out[mark:], v.out[mark:][-400:])
         mark = len(v.out)
         v.key(b"\t", 1.0)
-        check("Refs: Tab wraps to Prompts", v.wait(b"[Prompts", start=mark),
+        check("Refs: Tab goes on to Search (#291)",
+              v.wait(b"[Search]", start=mark), v.out[mark:][-400:])
+        mark = len(v.out)
+        v.key(b"\t", 1.0)
+        check("Search: Tab wraps to Prompts", v.wait(b"[Prompts", start=mark),
               v.out[mark:][-400:])
         mark = len(v.out)
-        v.key(b"\033[Z", 1.0)
+        v.key(b"\033[Z\033[Z", 1.0)
         v.key(b"h", 1.0)
-        check("Shift-Tab from Prompts to Refs, h back to Responses",
+        check("Shift-Tab from Prompts to Search, again to Refs, h back to "
+              "Responses",
               v.wait(b"[Responses", start=mark) and
               "the last, ended mid-tool" in head(v), v.out[mark:][-400:])
         v.key(b"q")
@@ -1509,6 +1532,287 @@ def test_responses_codex():
         subprocess.run([DCH, "-k", "xv-cx"], capture_output=True, timeout=30,
                        env=ENV)
 
+
+# ---- Search (#291): where a word or phrase was said ------------------------
+
+SSID = "11111111-2222-4333-8444-5555555555d1"   # xv-se (not c1/c2: xv-tp, xv-tl)
+MSID = "11111111-2222-4333-8444-5555555555d2"   # xv-sm: over 50 hits
+DEEPL = "\n".join("filler line %02d" % i for i in range(60))
+
+
+def at(rec, ts):
+    return dict(rec, timestamp=ts)
+
+
+def record(name, sid, lines):
+    with open(tl(sid), "w") as f:
+        for o in lines:
+            f.write(json.dumps(o) + "\n")
+    sockdir = os.path.join(T, "dch-%d" % os.getuid())
+    hdir = os.path.join(T, "state", "dch", "sessions",
+                        sockdir.replace("/", "-"))
+    os.makedirs(hdir, exist_ok=True)
+    rec = {"name": name, "cwd": P, "end": "exited", "argv": ["claude"],
+           "started": 1794299400, "updated": 1794300000,
+           "ended": 1794300000, "sock_dir": sockdir,
+           "agent": {"session_id": sid, "cwd": P,
+                     "config_dir": os.path.join(HOME, ".claude")}}
+    with open(os.path.join(hdir, name + ".json"), "w") as f:
+        f.write(json.dumps(rec) + "\n")
+
+
+def fixture_search():
+    """xv-se: the needle in a prompt, a tool call, its result and two
+    answers, one deep in a long chapter; xv-sm: 55 prompts with zebra."""
+    os.makedirs(os.path.dirname(tl(SSID)), exist_ok=True)
+    ts = "2026-11-10T10:0%d:00Z"
+    record("xv-se", SSID,
+           turn("first: where is the Needle kept?", ts % 0,
+                at(call("n1", "Bash", {"command": "grep -r needle src"}),
+                   ts % 1),
+                at(result("n1", "src/a.c: needle here"), ts % 2),
+                at(say("The needle is in src/a.c."), ts % 3)) +
+           turn("an unrelated second prompt", ts % 4,
+                at(say("nothing to see"), ts % 5)) +
+           turn("a long chapter", ts % 6,
+                at(say(DEEPL + "\nthe deep NEEDLE line\nafter it"), ts % 7)))
+    record("xv-sm", MSID, sum((turn("zebra prompt %02d" % i,
+                                    "2026-11-10T11:%02d:00Z" % i,
+                                    say("ok %d" % i))
+                               for i in range(55)), []))
+
+
+def hits(scr):
+    """Search's hits on screen, top down, over the rule: (who, title,
+    [snippet lines])."""
+    out = []
+    for k in sorted(x for x in scr if x >= 5):
+        r = scr[k]
+        if r.startswith(("\u2500", "-")):
+            break
+        if re.match(r"^.\s\d\d-\d\d \d\d:\d\d", r):
+            who, _, title = r[15:].rstrip().partition("  ")
+            out.append((who, title.strip(), []))
+        elif out and r.strip():
+            out[-1][2].append(r.strip())
+    return out
+
+
+def tabbar(v, want, secs=10.0):
+    """The tab bar once it holds want (its count faint: its own SGR)."""
+    return until(lambda: (v.pump(0.1), want in rows(v.out).get(2, ""))[1],
+                 secs)
+
+
+def test_search():
+    """#291: the Search tab: type, Enter, the hits newest first with who
+    and the prompt; the match stands out; Enter reads there, q back to the
+    hit; a refused text; no match; ^R from the Prompts filter; more."""
+    v = Pty([DCH, "--xray", "xv-se"], rows=40, cols=100,
+            env={"NO_COLOR": ""})
+    try:
+        v.wait(b"Prompts 3")
+        v.pump(0.5)
+        tabs = []
+        for _ in range(3):
+            mark = len(v.out)
+            v.key(b"\t", 0.8)
+            tabs.append(rows(v.out).get(2, ""))
+        t = tabs[-1]
+        check("Search: Tab, Tab, Tab from Prompts: Responses, Refs, then "
+              "Search, the fourth tab, last and with no count before a "
+              "search", 0 <= t.find("Prompts 3") < t.find("Responses 3") <
+              t.find("Refs") < t.find("Search") and
+              re.search(r"Search\s*$", t), tabs)
+        text = screen(v, mark)
+        check("Search: opens typing (no search yet), the hint and the "
+              "footer's search and cancel", "Search: \u2588" in text and
+              "Type a word or phrase; Enter finds where this session said "
+              "it" in text and "search" in text and "cancel" in text, text)
+        mark = len(v.out)
+        v.key(b"needle", 0.3)
+        v.key(b"\r", 0.5)
+        ok = tabbar(v, "Search 5")
+        v.pump(0.5)
+        scr = rows(v.out)
+        h = hits(scr)
+        check("Search: Enter runs it; the tab counts 5 hits",
+              ok and "Search 5" in scr.get(2, ""), scr.get(2, ""))
+        check("Search: the text's line stays above the hits, typing ended",
+              scr.get(4, "").strip() == "Search: needle", scr.get(4))
+        check("Search: the hits newest first, each with who said it and the "
+              "prompt it is under", [(w, t) for w, t, _ in h] ==
+              [("Reply", "a long chapter"),
+               ("Reply", "first: where is the Needle kept?"),
+               ("Bash", "first: where is the Needle kept?"),
+               ("Bash", "first: where is the Needle kept?"),
+               ("You", "first: where is the Needle kept?")], h)
+        check("Search: each hit's snippet under it, the time on its head",
+              len(h) == 5 and "the deep NEEDLE line" in " ".join(h[0][2])
+              and "src/a.c: needle here" in " ".join(h[2][2]) and
+              re.search(r"11-10 \d\d:07", next((r for r in scr.values()
+                                               if "a long chapter" in r), "")),
+              (h, scr))
+        check("Search: the matched text stands out (accent bold), in any "
+              "case, the rest plain",
+              re.search(rb"the deep \033\[0;1;38;5;\d+mNEEDLE\033\[0m line",
+                        v.out) and
+              re.search(rb"where is the \033\[0;1;38;5;\d+mNeedle\033\[0m",
+                        v.out), v.out[-3000:])
+        check("Search: the newest hit is selected", "a long chapter" in
+              head(v), head(v))
+        text = screen(v, 0)
+        check("Search: the footer names Enter read, / search, o not "
+              "(ended), tabs", "read" in text and "/ search" in text and
+              "tabs" in text and "open session" not in text, text)
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        v.wait(b"NEEDLE", start=mark)
+        v.pump(0.5)
+        scr = rows(v.out[mark:])
+        text = "\n".join(scr[k] for k in sorted(scr))
+        check("Search: Enter reads the hit's prompt, scrolled to the text "
+              "(deep in the chapter)", scr.get(2, "").startswith("3 of 3")
+              and "the deep NEEDLE line" in text and
+              "filler line 00" not in text, text)
+        mark = len(v.out)
+        v.key(b"q", 1.0)
+        check("Search: q back to the same hit",
+              tabbar(v, "Search 5") and "a long chapter" in head(v)
+              and "Search: needle" in rows(v.out).get(4, ""), head(v))
+        v.key(b"jj", 0.5)
+        check("Search: j by hit", "Bash" in head(v) and
+              "first: where" in head(v), head(v))
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        check("Search: Enter on the tool result reads its prompt at it",
+              v.wait(b"1 of 3", start=mark) and
+              v.wait(b"src/a.c: needle here", start=mark), v.out[mark:])
+        mark = len(v.out)
+        v.key(b"q", 1.0)
+        v.pump(0.3)
+        check("Search: q back to that hit, the third",
+              [r for r in rows(v.out).values() if r.startswith("\u258c")] and
+              len(hits(rows(v.out))) > 2 and
+              hits(rows(v.out))[2][0] == "Bash" and "Bash" in head(v),
+              (head(v), hits(rows(v.out))))
+        v.key(b"G", 0.5)
+        check("Search: G the oldest", "You" in head(v), head(v))
+        v.key(b"g", 0.5)
+        check("Search: g the newest", "a long chapter" in head(v), head(v))
+        mark = len(v.out)
+        v.key(b"/\x15x\r", 1.0)
+        text = screen(v, mark)
+        check("Search: a refused text (1 byte) is said in the status line, "
+              "nothing run, the hits kept",
+              "bad search: 2 to 200 bytes, no control character" in text and
+              "Search 5" in rows(v.out).get(2, ""), text)
+        mark = len(v.out)
+        v.key(b"\033", 1.0)
+        check("Search: Esc leaves typing, the text back to the last search",
+              rows(v.out).get(4, "").strip() == "Search: needle" and
+              len(hits(rows(v.out))) == 5, rows(v.out).get(4))
+        mark = len(v.out)
+        v.key(b"/\x15qwertyzz\r", 1.0)
+        v.wait(b"No match", start=mark)
+        text = screen(v, mark)
+        check("Search: no hit: No match for the text, the tab 0",
+              'No match for "qwertyzz"' in text and
+              "Search 0" in rows(v.out).get(2, ""), text)
+        mark = len(v.out)
+        v.key(b"\t", 1.0)
+        check("Search: Tab wraps to Prompts", v.wait(b"[Prompts", start=mark)
+              or "Prompts" in head(v) or "a long chapter" in screen(v, mark),
+              screen(v, mark))
+        mark = len(v.out)
+        v.key(b"\033[Z", 1.0)
+        text = screen(v, mark)
+        check("Search: Shift-Tab back: the text and its answer kept, not "
+              "typing", "Search: qwertyzz" in text and
+              "Search: qwertyzz\u2588" not in text and
+              'No match for "qwertyzz"' in text, text)
+        v.key(b"\t", 1.0)
+        mark = len(v.out)
+        v.key(b"/filler line", 1.0)
+        text = screen(v, mark)
+        check("Search: words in the Prompts filter that no title has: the "
+              "empty line and the footer say ^R searches",
+              "No match; ^R searches the session for it" in text and
+              "^R search" in text, text)
+        mark = len(v.out)
+        v.key(b"\x12", 1.0)
+        ok = tabbar(v, "Search 1")
+        v.pump(0.3)
+        h = hits(rows(v.out))
+        check("Search: ^R lands on Search with the words and their hit",
+              ok and "Search: filler line" in screen(v, mark) and
+              [(w, t) for w, t, _ in h] == [("Reply", "a long chapter")], h)
+        v.key(b"q")
+        check("Search: q exits 0", v.exit() == 0, v.out[-80:])
+    finally:
+        v.close()
+    v = Pty([DCH, "--xray", "xv-sm"], rows=30, cols=100)
+    try:
+        v.wait(b"Prompts 55")
+        v.pump(0.3)
+        mark = len(v.out)
+        v.key(b"\033[Z", 0.5)
+        v.key(b"zebra\r", 1.0)
+        ok = v.wait(b"Search 50+", start=mark)
+        v.pump(0.5)
+        text = screen(v, mark)
+        h = hits(rows(v.out))
+        check("Search: over 50 hits: the tab says 50+, the newest first, a "
+              "faint last line says the 50 newest are shown", ok and
+              "the 50 newest are shown" in text and h and
+              h[0][1] == "zebra prompt 54", (h, text))
+        v.key(b"G", 0.5)
+        check("Search: G selects the 50th", "zebra prompt 05" in head(v),
+              head(v))
+        v.key(b"q")
+        v.exit()
+    finally:
+        v.close()
+
+
+def test_search_shell(lite):
+    """#291: a shell's Search searches its ring (Commands, Refs, Search);
+    dch-lite has no ring: the list's one line says no corpus."""
+    v = Pty([DCH, "--xray", "xv-sh"], rows=30, cols=100)
+    try:
+        v.wait(b"Commands")
+        v.pump(0.5)
+        tabs = []
+        for _ in range(3):
+            v.key(b"\t", 0.8)
+            tabs.append(rows(v.out).get(2, ""))
+        check("Search, shell: Tab cycles Commands, Refs, Search, Commands; "
+              "no Responses", re.search(r"\[Refs", tabs[0]) and
+              re.search(r"\[Search", tabs[1]) and
+              re.search(r"\[Commands", tabs[2]) and
+              all("Responses" not in t for t in tabs), tabs)
+        mark = len(v.out)
+        v.key(b"\033[Z", 0.5)
+        v.key(b"see o/r\r", 1.0)
+        if lite:
+            check("Search, shell on dch-lite: no corpus, said as the list's "
+                  "line", v.wait(b"dch: no x-ray corpus", start=mark),
+                  v.out[mark:][-600:])
+        else:
+            ok = v.wait(b"Search ", start=mark) and until(
+                lambda: (v.pump(0.1), hits(rows(v.out)))[1], 5)
+            h = hits(rows(v.out))
+            # the engine answers a ring's lines as "tool" with no chapter:
+            # the command line and its output alike
+            check("Search, shell: its ring searched, the command line and "
+                  "its output both found, each as Output",
+                  ok and len(h) == 4 and all(w == "Output" for w, _, _ in h)
+                  and any(s == ["$ echo 'see o/r#41'"] for _, _, s in h)
+                  and any(s == ["see o/r#41"] for _, _, s in h), h)
+        v.key(b"q")
+        check("Search, shell: q exits 0", v.exit() == 0, v.out[-80:])
+    finally:
+        v.close()
 
 def clients(name):
     for r in json.loads(dch("--ls-json").stdout):
@@ -1780,7 +2084,7 @@ def test_small_card():
     v = Pty([DCH, "--xray", "xv-cl"])
     try:
         v.wait(b"Prompts 2")
-        v.key(b"\033[Z")
+        v.key(b"\033[Z\033[Z")
         v.wait(b"#831")
         mark = len(v.out)
         v.key(b"\r")
@@ -2048,7 +2352,7 @@ def test_chord():
         a.key(b"\x1cx", 0.5)
         a.wait(b"X-ray  xv-rx")
         mark = len(a.out)
-        a.key(b"\t", 0.5)
+        a.key(b"\t\t", 0.5)  # Refs, Search, then Commands (#291)
         ready(a, mark)
         mark = len(a.out)
         a.key(b"o", 0.5)
@@ -2323,6 +2627,8 @@ def main():
         test_responses()
         test_responses_live()
         test_responses_codex()
+        fixture_search()
+        test_search()
         test_resize()
         test_small_card()
         shell()
@@ -2330,6 +2636,7 @@ def main():
         test_on_screen()
         o = json.loads(dch("--xray", "xv-sh", "--json").stdout)
         test_screen_group(o["corpus"] == "none" and o["reason"] == "lite")
+        test_search_shell(o["corpus"] == "none" and o["reason"] == "lite")
         test_picker()
         test_open(o["corpus"] == "none" and o["reason"] == "lite")
         test_chord()
