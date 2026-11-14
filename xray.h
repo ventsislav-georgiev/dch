@@ -268,6 +268,15 @@ int xr_claude_newest(struct xr_claude *d, int fd, uint64_t size, int *capped);
 void xr_claude_refs(struct xr_claude *d, const struct xr_sink *k,
                     uint64_t ino, int (*tick)(void *ctx, uint64_t bytes),
                     void *tctx);
+/* --memory (#322): each main-thread tool call to fn, set before the read:
+** Claude's tool_use (name its name, json its input object) or a Codex
+** *_call item (name its type, json the payload object), as raw JSON text
+** (not NUL-ended), with the open chapter's anchor ("" for none) and the
+** decoder's cwd. A sidechain's calls are not passed. ino: for anchors. */
+typedef void (*xr_call_fn)(void *ctx, const char *name, const char *json,
+                           size_t n, const char *chapter, const char *cwd);
+void xr_claude_calls(struct xr_claude *d, xr_call_fn fn, void *ctx,
+                     uint64_t ino);
 /* Lines over xr_lim.line seen so far (--ref's lines_too_long). */
 uint64_t xr_claude_too_long(const struct xr_claude *d);
 /* --follow (#136): the tail. Lines of fd in [from, to), from a line start;

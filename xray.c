@@ -4745,6 +4745,8 @@ struct xr_claude
 				** each as a step) */
 	int late;		/* #300: --chapter's late results: decode only
 				** the lines late_line picks */	struct xr_tasks *tk;	/* --tasks (#319), else NULL */
+	xr_call_fn call;	/* --memory (#322): each main-thread call */
+	void *cctx;
 };
 
 /* B_GUESS (#300): a step a decoder that starts mid-file takes where the full
@@ -5358,6 +5360,29 @@ ch_anchor(struct xr_claude *d, char out[48])
 	if (x && (!d->blind || d->ch.total > 1))
 		snprintf(out, 48, "f%llx:%llu", (unsigned long long)d->ino,
 		         (unsigned long long)x->offset);
+}
+
+/* --memory (#322): token t (a Claude call's input, a Codex call's payload)
+** as its raw JSON text, with the open chapter's anchor. */
+static void
+call_out(struct xr_claude *d, const char *name, const struct json_parser *p,
+         int t)
+{
+	char a[48];
+
+	if (!d->call || t < 0)
+		return;
+	ch_anchor(d, a);
+	d->call(d->cctx, name, p->text + p->tok[t].start,
+	        (size_t)(p->tok[t].end - p->tok[t].start), a, d->cwd);
+}
+
+void
+xr_claude_calls(struct xr_claude *d, xr_call_fn fn, void *ctx, uint64_t ino)
+{
+	d->call = fn;
+	d->cctx = ctx;
+	d->ino = ino;
 }
 
 static void
@@ -6308,6 +6333,8 @@ entry_assistant(struct xr_claude *d, const struct json_parser *p,
 			tool_use(d, ag, id, quiet);
 			if (!ag)
 				tl_call(d, p, in, id, name);
+			if (!ag)
+				call_out(d, name, p, in);
 			if (d->rk.hit)
 				refs_call(d, p, i);
 			if (ent_here(d, ag))
@@ -6633,7 +6660,10 @@ cx_item(struct xr_claude *d, const struct json_parser *p, int pl)
 	if (t && strstr(t, "_call"))	/* a call or its output (#296) */
 		resp_clear(d);
 	if (t && strstr(t, "_call") && !strstr(t, "_output"))
+	{
 		cx_tool(d, p, pl, t);
+		call_out(d, t, p, pl);
+	}
 	if (!d->rk.hit || !t)
 		;
 	else if (!strcmp(t, "function_call"))

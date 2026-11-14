@@ -162,10 +162,10 @@ jobs:
           for v in full lite; do
             if [ $v = lite ]; then
               ./configure --without-libghostty
-              srcs="attach.c master.c dch.c vt_stub.c bridge.c serve.c rframe.c remote.c json.c picker.c xview.c xray.c xcmd.c"
+              srcs="attach.c master.c dch.c vt_stub.c bridge.c serve.c rframe.c remote.c json.c picker.c xview.c xray.c xcmd.c xmem.c"
             else
               ./configure
-              srcs="attach.c master.c dch.c vt.c bridge.c serve.c rframe.c remote.c json.c picker.c xview.c xray.c xcmd.c"
+              srcs="attach.c master.c dch.c vt.c bridge.c serve.c rframe.c remote.c json.c picker.c xview.c xray.c xcmd.c xmem.c"
             fi
             for f in $srcs; do
               clang --analyze -Xanalyzer -analyzer-werror -I. \

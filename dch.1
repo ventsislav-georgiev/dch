@@ -113,6 +113,10 @@ dch \- detachable terminal sessions with a headless agent API
 .br
 .B dch \-\-xray
 .I name
+.B \-\-memory \-\-json
+.br
+.B dch \-\-xray
+.I name
 .B \-\-ref
 .I ref
 .RB [ \-\-scope
@@ -1597,6 +1601,110 @@ on
 .IB host : name
 a host whose dch predates it says
 .IR "the host's dch does not know \-\-tasks" .
+.B \-\-memory
+lists what
+.IR name 's
+agent remembers and the instruction files in force as JSON lines: a header
+.RB ( schema ,
+.B source
+.RB ( claude ,
+.B codex
+or
+.BR none ),
+.B title
+null,
+.BR partial ),
+one
+.B memory
+object per file
+.RB ( id ,
+.BR title ,
+.BR note ,
+.BR kind ,
+.BR scope ,
+.BR updated ,
+.BR path ,
+.BR session ,
+.BR chapter ,
+.BR body ,
+and
+.B cut:true
+when the body was cut), then
+.RB { done:true ,
+.BR count ,
+.BR dropped }.
+Memories are the
+.B *.md
+files of the
+.B memory/
+directory beside a Claude Code transcript: one per file the
+.B MEMORY.md
+index names
+.RB ( "\- [Title](file.md) \(em hook" ),
+one per other file, never the index;
+.B title
+the index's, else the frontmatter's
+.BR name ,
+else the
+.BR id ;
+.B note
+the hook, else
+.BR description ;
+.B kind
+the frontmatter's
+.B type
+(top level or
+.BR metadata.type )
+when
+.BR user ,
+.BR feedback ,
+.B project
+or
+.BR reference .
+Instruction files
+.RB ( kind:\(dqinstructions\(dq ,
+.B id
+and
+.B title
+the path): Claude Code's managed, config dir
+.RB ( CLAUDE.md ,
+.BR rules/ )
+and per directory from
+.B /
+to the cwd (32 at most)
+.BR CLAUDE.md ,
+.BR .claude/CLAUDE.md ,
+.B CLAUDE.local.md
+and
+.BR .claude/rules/ ,
+.B AGENTS.md
+when none is found; Codex's
+.B $CODEX_HOME
+and per directory
+.B AGENTS.override.md
+else
+.BR AGENTS.md .
+.B session
+is
+.B wrote
+when a main\-thread tool call wrote the file (Write, Edit, a shell
+command naming its path with a redirect or an editing verb, apply_patch),
+.B loaded
+when one read it, else null;
+.B chapter
+the newest such turn's anchor.
+Session rows come first, newest first, then memories by mtime, newest
+first, then instruction files in load order.
+A body is cut at 16 KB; a file over 1 MB, a memory file that is a symlink
+or a non\-regular file has a null body and is never read (an instruction
+file's symlink to a regular file is read through, its path the link's);
+50000 rows at most.
+It goes with no other flag but
+.B \-\-json
+and not in
+.BR \-\-requests ;
+an older host says
+.IR "the host's dch does not know \-\-memory" .
 .B \-\-chapter
 .I anchor
 prints one chapter's entries as one object
@@ -3265,6 +3373,7 @@ a session name that passes the attach name check and does not start with
 \-\-xray \fIn\fP \-\-ref \fIref\fP [\-\-scope \fIs\fP] [\-\-full] [\-\-budget\-ms \fIms\fP] \-\-json
 \-\-xray \fIn\fP \-\-search \fItext\fP \-\-json
 \-\-xray \fIn\fP \-\-tasks \-\-json
+\-\-xray \fIn\fP \-\-memory \-\-json
 .fi
 .RE
 .PP
@@ -3307,6 +3416,7 @@ two of
 .BR \-\-ref ,
 .BR \-\-search ,
 .BR \-\-tasks ,
+.BR \-\-memory ,
 .BR \-\-follow ,
 .B \-\-chapter
 and

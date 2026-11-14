@@ -617,8 +617,8 @@ xray_budget(const char *s)
 /* --xray (spec #832 v3.2.1 4.4): the name right after the verb, then 3.1's
 ** flags in any order, each once: --json, required (the view is the
 ** client's own, as --requests is); one of --follow, --ref <text>,
-** --search <text> (#297), --chapter <anchor>, --tasks (#319) and --clear;
-** --scope, --full
+** --search <text> (#297), --chapter <anchor>, --tasks (#319), --memory
+** (#322) and --clear; --scope, --full
 ** and --budget-ms only with --ref. A value is the next element even when it
 ** starts with '-'. --ref's and --search's text and the anchor are CK_TEXT
 ** (an anchor may hold ':'). The --ref
@@ -632,10 +632,10 @@ ctl_xray(int argc, char *const argv[], unsigned char *kind, char *why,
 	static const char *const opt[] = { "--json", "--follow", "--clear",
 	                                   "--full", "--ref", "--chapter",
 	                                   "--scope", "--budget-ms", "--search",
-	                                   "--tasks" };
+	                                   "--tasks", "--memory" };
 	enum { X_JSON = 1, X_FOLLOW = 2, X_CLEAR = 4, X_FULL = 8, X_REF = 16,
 	       X_CHAPTER = 32, X_SCOPE = 64, X_BUDGET = 128, X_SEARCH = 256,
-	       X_TASKS = 512 };
+	       X_TASKS = 512, X_MEMORY = 1024 };
 	const char *val[9] = { NULL };
 	unsigned seen = 0, k, one;
 	int i;
@@ -648,9 +648,9 @@ ctl_xray(int argc, char *const argv[], unsigned char *kind, char *why,
 	{
 		const char *a = argv[i];
 
-		for (k = 0; k < 10 && strcmp(a, opt[k]); k++)
+		for (k = 0; k < 11 && strcmp(a, opt[k]); k++)
 			;
-		if (k == 10)
+		if (k == 11)
 			return ctl_never(a) || !strcmp(a, "--all")
 			       ? ctl_no(why, cap, "%.60s is not allowed", a)
 			       : a[0] == '-'
@@ -670,13 +670,13 @@ ctl_xray(int argc, char *const argv[], unsigned char *kind, char *why,
 		}
 	}
 	one = seen & (X_FOLLOW | X_CLEAR | X_REF | X_CHAPTER | X_SEARCH |
-	              X_TASKS);
+	              X_TASKS | X_MEMORY);
 	if (!(seen & X_JSON))
 		return ctl_no(why, cap, "--xray needs --json (the view is "
 		              "client-side only)");
 	if (one & (one - 1))
-		return ctl_no(why, cap, "--ref, --search, --tasks, --follow, "
-		              "--chapter and --clear exclude each other");
+		return ctl_no(why, cap, "--ref, --search, --tasks, --memory, "
+		              "--follow, --chapter and --clear exclude each other");
 	if (seen & (X_FULL | X_SCOPE | X_BUDGET) && !(seen & X_REF))
 		return ctl_no(why, cap, "--scope, --full and --budget-ms come "
 		              "with --ref");

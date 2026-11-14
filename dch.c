@@ -14,6 +14,7 @@
 #include "rframe.h"
 #include "ring.h"
 #include "xray.h"
+#include "xmem.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -2878,6 +2879,9 @@ usage(void)
 	    "                                             definitions as NDJSON\n"
 	    "  dch --xray <n> --search <text> --json      the newest 50 places a\n"
 	    "                                             word or phrase was said\n"
+	    "  dch --xray <n> --memory --json             its memories and\n"
+	    "                                             instruction files as\n"
+	    "                                             JSON lines\n"
 	    "  dch --xray <n> --chapter <anchor> --json   one chapter's entries\n"
 	    "                                             as one JSON object;\n"
 	    "  dch --xray <n> --tasks --json              the session's task list\n"
@@ -13273,6 +13277,83 @@ xr_tasks_q(const struct xr_target *t)
 	                                  warn) == 0);
 }
 
+/* --memory (#322): a Claude session's memory directory (beside its
+** transcript, ended or live) and instruction files, a live Codex's AGENTS.md
+** files; the transcript or rollout read for the calls that touch them. A
+** shell is source none. */
+static int
+xr_memory(const struct xr_target *t)
+{
+	char cfg[1400] = "", cwd[PATH_MAX] = "", sid[64] = "", path[2048];
+	char project[1200];
+	struct xm_req q;
+	struct cmd_info ci;
+	struct stat st;
+	struct crec c;
+	struct xr_cx xc;
+	int qc;
+
+	memset(&q, 0, sizeof q);
+	if (t->kind == XR_ENDED)
+	{
+		const struct hrec *h = t->rec;
+
+		snprintf(cwd, sizeof cwd, "%s", h->acwd[0] ? h->acwd : h->cwd);
+		if (h->sid[0])
+		{
+			q.agent = "claude";
+			snprintf(cfg, sizeof cfg, "%s", h->acfg);
+			snprintf(sid, sizeof sid, "%s", h->sid);
+		}
+	}
+	else
+	{
+		if ((qc = cmd_query(t->sock, &ci)) == -4)
+			return xr_no_session();
+		if (qc == 0 && ci.pid > 0)
+			(void)proc_cwd(ci.pid, cwd, sizeof cwd);
+		if (qc == 0 && xr_live_claude(&ci, &c))
+		{
+			q.agent = "claude";
+			if (c.cwd[0])
+				snprintf(cwd, sizeof cwd, "%s", c.cwd);
+			xr_crec_cfg(&c, cfg, sizeof cfg);
+			snprintf(sid, sizeof sid, "%s", c.sid);
+		}
+		else if (qc == 0 && xr_live_codex(&ci, &xc) != 0)
+		{
+			q.agent = "codex";
+			if (xc.cwd[0])
+				snprintf(cwd, sizeof cwd, "%s", xc.cwd);
+			snprintf(cfg, sizeof cfg, "%s", xc.home);
+			if (xc.tid[0] && xr_codex_lookup(xc.home, xc.tid, path,
+			                                 sizeof path, &st) == 0)
+			{
+				q.path = path;
+				q.st = &st;
+			}
+		}
+		if (qc == 0)
+			cmd_info_free(&ci);
+	}
+	if (q.agent && !strcmp(q.agent, "claude"))
+	{
+		const char *h = getenv("HOME");
+
+		if (!cfg[0] && h)	/* as xr_claude_ref */
+			snprintf(cfg, sizeof cfg, "%s/.claude", h);
+		if (xr_claude_lookup(cfg, sid, path, sizeof path, &st, project,
+		                     sizeof project) == 0)
+		{
+			q.path = path;
+			q.st = &st;
+		}
+	}
+	q.cfg = cfg;
+	q.cwd = cwd;
+	return xr_out_exit(xm_print(stdout, &q) == 0);
+}
+
 /* --clear: MSG_RING_CLEAR to a live master; never the pty. The header and
 ** the clear go over one connection, so a session resolved by its ring
 ** session_id is cleared only while it still carries that id (shortcut: a
@@ -14631,7 +14712,8 @@ attach_xray_view(void)
 
 /* `dch --xray <n> [--json] [--clear|--follow]`, `--ref <text> [--scope
 ** session|project|all] [--full] [--budget-ms <ms>] --json`, `--search <text>
-** --json` (#297) and `--chapter <anchor> --json` (spec 3.1, 3.3-3.5): flags
+** --json` (#297), `--memory --json` (#322) and `--chapter <anchor> --json`
+** (spec 3.1, 3.3-3.5): flags
 ** in any order, each once;
 ** `dch --xray <n>` alone is the view (#175, xray_view; a host:name's too,
 ** #188, each query over its own ctl connection). A
@@ -14645,7 +14727,7 @@ xray_main(int argc, char **argv)
 	const char *n = NULL, *ref = NULL, *scope = NULL, *budget = NULL, *e;
 	const char *chapter = NULL, *search = NULL;
 	int json = 0, clear = 0, full = 0, follow = 0, k, rc, nr, ni = 0;
-	int requests = 0, tasks = 0;
+	int requests = 0, tasks = 0, memory = 0;
 	struct hrec *r = NULL;
 	struct xr_target t;
 	struct xr_refq q;
@@ -14694,6 +14776,8 @@ xray_main(int argc, char **argv)
 			requests = 1;
 		else if (!strcmp(argv[k], "--tasks") && !tasks)
 			tasks = 1;
+		else if (!strcmp(argv[k], "--memory") && !memory)
+			memory = 1;
 		else if (argv[k][0] == '-' && argv[k][1])
 		{
 			fprintf(stderr, "dch: bad usage: %s%s\n", argv[k],
@@ -14703,7 +14787,8 @@ xray_main(int argc, char **argv)
 			           !strcmp(argv[k], "--full") ||
 			           !strcmp(argv[k], "--follow") ||
 			           !strcmp(argv[k], "--requests") ||
-			           !strcmp(argv[k], "--tasks")) ? " twice"
+			           !strcmp(argv[k], "--tasks") ||
+			           !strcmp(argv[k], "--memory")) ? " twice"
 			        : " is not an --xray flag of this dch");
 			return 2;
 		}
@@ -14742,6 +14827,13 @@ xray_main(int argc, char **argv)
 		        : clear ? "--clear" : "--follow");
 		return 2;
 	}
+	if (memory && (ref || chapter || clear || follow || search || tasks))
+	{
+		fprintf(stderr, "dch: bad usage: --memory and %s\n",
+		        ref ? "--ref" : chapter ? "--chapter" : clear ? "--clear"
+		        : follow ? "--follow" : search ? "--search" : "--tasks");
+		return 2;
+	}
 	if (follow && (ref || clear))
 	{
 		fprintf(stderr, "dch: bad usage: --follow and %s\n",
@@ -14764,7 +14856,7 @@ xray_main(int argc, char **argv)
 		/* #158, spec 4.3: each request's flags come on stdin; a local
 		** session takes one dch --xray per request (K4.1) */
 		if (!json || ref || chapter || clear || follow || scope || full ||
-		    budget || search || tasks)
+		    budget || search || tasks || memory)
 		{
 			fputs("dch: bad usage: --requests takes host:name and --json, "
 			      "nothing else\n", stderr);
@@ -14848,7 +14940,8 @@ xray_main(int argc, char **argv)
 	q.scope = !scope || !strcmp(scope, "project") ? 1
 	          : !strcmp(scope, "all") ? 2 : 0;
 	/* the view (#175): `--xray <n>` alone */
-	if (!json && (ref || chapter || clear || follow || search || tasks))
+	if (!json && (ref || chapter || clear || follow || search || tasks ||
+	              memory))
 	{
 		fputs("dch: bad usage: --json is required (the --xray view takes "
 		      "no flag)\n", stderr);
@@ -14883,6 +14976,7 @@ xray_main(int argc, char **argv)
 		rc = clear ? xr_clear(&t) : follow ? xr_follow(&t)
 		     : chapter ? xr_chapter(&t, chapter)
 		     : tasks ? xr_tasks_q(&t)
+		     : memory ? xr_memory(&t)
 		     : xr_json(&t, ref || search ? &q : NULL, 0);
 	hrec_free(r, nr);
 	return rc;
