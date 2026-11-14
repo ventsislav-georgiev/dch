@@ -2840,6 +2840,158 @@ def test_place():
         v.close()
 
 
+QSID = "11111111-2222-4333-8444-5555555555f8"   # xv-sq: twin hits
+
+
+def test_twins():
+    """LOW-V29: two Bash outputs in one turn with the same text around the
+    word: each hit opens at its own output, not both at the first."""
+    ts = "2026-11-10T12:0%d:00Z"
+    out = "".join("filler one %03d\n" % i for i in range(100)) + \
+        "the needle is here\npad\npad\npad"
+    record("xv-sq", QSID,
+           turn("twins", ts % 0,
+                at(call("b1", "Bash", {"command": "cat a"}), ts % 1),
+                at(result("b1", out), ts % 1),
+                at(say("MARK-2 above"), ts % 1),
+                at(call("b2", "Bash", {"command": "cat b"}), ts % 2),
+                at(result("b2", out), ts % 2),
+                at(say("MARK-3 below"), ts % 2)),
+           proj="-mem-proj", cwd=MP)
+    v = Pty([DCH, "--xray", "xv-sq"], rows=30, cols=100)
+    try:
+        v.wait(b"Prompts 1")
+        for _ in range(3):  # Responses, Refs, Search
+            v.key(b"\t", 0.3)
+        v.key(b"needle\r", 0.3)
+        ok = tabbar(v, "Search 2")
+        for k, (want, not_) in enumerate((("MARK-3", "MARK-2"),
+                                          ("MARK-2", "MARK-3"))):
+            if k:
+                v.key(b"j", 0.3)
+            mark = len(v.out)
+            v.key(b"\r", 0)
+            v.wait(b"needle is here", start=mark)
+            v.wait(want.encode(), 3, start=mark)
+            v.pump(0.3)
+            scr = rows(v.out[mark:])
+            body = "\n".join(scr[r] for r in sorted(scr) if r > 2)
+            check("twins: hit %d opens at its own output (%s under the "
+                  "needle, not %s) (LOW-V29)" % (k, want, not_), ok and
+                  "the needle is here" in body and want in body and
+                  not_ not in body, body)
+            v.key(b"q", 0)
+            tabbar(v, "Search 2")
+        v.key(b"q")
+        v.exit()
+    finally:
+        v.close()
+
+
+def test_memory_cmd():
+    """memory_command rows on xv-me: a session row with no turn (LOW-V30),
+    a cut text with no path (LOW-V31), card fields cut with an ellipsis,
+    never in a wide character (NIT-V11)."""
+    rf = os.path.join(T, "mrows")
+    with open(rf, "w") as f:
+        for r in ({"title": "Cmd wrote", "id": "c1", "session": "wrote",
+                   "note": "n" * 84 + "設" * 10 + "/END"},
+                  {"title": "Cmd big", "id": "c2", "body": "y" * 20000}):
+            f.write(json.dumps(r) + "\n")
+    cfg = os.path.join(T, "config-mcmd")
+    with open(cfg, "w") as f:
+        f.write("memory_command = /bin/cat %s\n" % rf)
+    v = Pty([DCH, "--xray", "xv-me"], rows=30, cols=100,
+            env={"DCH_CONFIG": cfg})
+    try:
+        ok = tabbar(v, "Memory 2")
+        mem_tab(v)
+        mark = len(v.out)
+        v.key(b"\r", 0)
+        ok = v.wait(b"this session wrote it", start=mark) and ok
+        v.pump(0.3)
+        scr = rows(v.out[mark:])
+        ses = [r for r in scr.values() if "Session" in r]
+        note = [r for r in scr.values() if r.lstrip().startswith("Note")]
+        check("memory cmd: the card says this session wrote it, no turn to "
+              "read", ok and len(ses) == 1 and "wrote it" in ses[0] and
+              "enter reads" not in ses[0], ses)
+        check("memory cmd: a long Note cut with an ellipsis before a wide "
+              "character it cannot hold (NIT-V11)", len(note) == 1 and
+              note[0].rstrip().endswith("n…") and
+              "/END" not in note[0], note)
+        mark = len(v.out)
+        v.key(b"\r", 0)
+        v.wait(b"to read", 3, start=mark)
+        v.pump(0.3)
+        s = screen(v, mark)
+        check("memory cmd: Enter agrees with the card: no prompt to read, "
+              "not 'did not write' (LOW-V30)", "no prompt to read" in s and
+              "did not write" not in s, s)
+        v.key(b"q", 0.3)
+        mark = len(v.out)
+        v.key(b"j\r", 0)
+        v.wait(b"16 KB", start=mark)
+        v.pump(0.3)
+        txt = [r for r in rows(v.out[mark:]).values()
+               if r.lstrip().startswith("Text")]
+        check("memory cmd: a cut text with no path says only that it is "
+              "cut (LOW-V31)", len(txt) == 1 and
+              re.sub(" +", " ", txt[0]).strip() == "Text cut at 16 KB", txt)
+        v.key(b"q", 0.3)
+        v.key(b"q")
+        v.exit()
+    finally:
+        v.close()
+
+
+MLSID = "11111111-2222-4333-8444-5555555555f9"   # xv-ml: a live Claude
+
+
+def test_memory_live():
+    """LOW-V28: Memory shown on a running session is read again every 30 s
+    with no new transcript line (a memory file changes apart from it)."""
+    cwd = os.path.realpath(os.path.join(T, "mlive"))
+    os.makedirs(cwd, exist_ok=True)
+    proj = os.path.join(HOME, ".claude", "projects", cwd.replace("/", "-"))
+    os.makedirs(os.path.join(proj, "memory"), exist_ok=True)
+    with open(os.path.join(proj, MLSID + ".jsonl"), "w") as f:
+        for o in turn("live memory", "2026-11-10T10:00:00Z", say("ok")):
+            f.write(json.dumps(dict(o, cwd=cwd) if "cwd" in o else o) + "\n")
+    mem = lambda n: open(os.path.join(proj, "memory", n), "w").write(n)
+    mem("one.md")
+    dch("--spawn", "xv-ml", "/bin/sleep", "300")
+    pid = until(lambda: json.loads(dch("--cmd", "xv-ml").stdout or "{}")
+                .get("pid"), 5)
+    start = subprocess.run(["/bin/ps", "-o", "lstart=", "-p", str(pid)],
+                           capture_output=True, text=True,
+                           env={"LC_ALL": "C", "TZ": "UTC"}).stdout.strip()
+    sd = os.path.join(HOME, ".claude", "sessions")
+    os.makedirs(sd, exist_ok=True)
+    with open(os.path.join(sd, "%d.json" % pid), "w") as f:
+        json.dump({"pid": pid, "sessionId": MLSID, "cwd": cwd,
+                   "procStart": start, "version": "2.1.0",
+                   "kind": "interactive", "status": "idle",
+                   "statusUpdatedAt": 1}, f)
+    v = Pty([DCH, "--xray", "xv-ml"], rows=30, cols=100)
+    try:
+        tabbar(v, "Memory ")
+        m = re.search(r"Memory (\d+)", rows(v.out).get(2, ""))
+        n = int(m.group(1)) if m else -1
+        mem_tab(v)
+        mem("two.md")
+        # XV_MEVERY is 30 s; 120 s bounds a hang on a slow runner, not speed
+        ok = tabbar(v, "Memory %d" % (n + 1), 120)
+        check("memory live: a new memory file shows while the tab is shown, "
+              "no transcript line written (LOW-V28)", n > 0 and ok,
+              rows(v.out).get(2))
+        v.key(b"q")
+        v.exit()
+    finally:
+        v.close()
+        dch("-k", "xv-ml")
+
+
 def bar_ok(bar, sel, w):
     """The tab bar: whole tab names, counts and marks only, within w
     cells, sel shown selected, a mark when a tab is left out."""
@@ -3700,6 +3852,9 @@ def main():
         test_memory_big()
         fixture_place()
         test_place()
+        test_twins()
+        test_memory_cmd()
+        test_memory_live()
         test_tabbar()
         test_resize()
         test_small_card()

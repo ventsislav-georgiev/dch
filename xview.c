@@ -115,7 +115,7 @@ struct xv_ent
 struct xv_hit		/* a search's hit (#291) */
 {
 	char *chapter, *who, *tool, *snippet;
-	long long at;
+	long long at, off;
 };
 
 struct xv_task		/* a --tasks row (#320), a --memory row (#323) */
@@ -213,6 +213,7 @@ struct xv
 	char *rtitle, *rwant;
 	char *rans;		/* opened on an answer: its start (#290) */
 	char *rsnip;		/* opened on a Search hit: its snippet */
+	int rskip;		/* and the entries before it holding it */
 	char *ranchor, *rturn;	/* the chapter shown; one being turned to */
 	long long rat;
 	int rtrunc, rtop, rw, rloaded;
@@ -1146,6 +1147,7 @@ xv_qline(struct xv *v, const struct json_parser *p)
 		h.tool = xv_str(p, t, "tool");
 		h.snippet = xv_str(p, t, "snippet");
 		h.at = xv_num(p, t, "at", -1);
+		h.off = xv_num(p, t, "offset", -1);
 		v->hit[v->nh++] = h;
 	}
 	v->smore = xv_bool(p, 0, "more");
@@ -1589,7 +1591,7 @@ xv_wrap(struct xv *v, int w)
 {
 	struct xv_rl l;
 	const char *p;
-	int k, at = -1;
+	int k, at = -1, skip;
 
 	v->nrl = 0;
 	v->rw = w;
@@ -1633,11 +1635,16 @@ xv_wrap(struct xv *v, int w)
 	/* opened on a Search hit (MED-V21): in the entry holding its snippet
 	** (entries carry no offset), at the first line from there on holding
 	** the text, else the snippet's own line */
+	skip = v->rskip;
 	for (k = 0, p = NULL; v->rsnip && !v->rloaded && k < v->nrl; k++)
 		if (!v->rl[k].kind && at >= 0)
 			break;
 		else if (!v->rl[k].kind)
+		{
 			p = xv_snipat(v->e[v->rl[k].n].text, v->rsnip);
+			if (p && skip-- > 0)
+				p = NULL;	/* an earlier hit's (LOW-V29) */
+		}
 		else if (p && v->rl[k].s + v->rl[k].n > p &&
 		         (at < 0 || xv_in(v->rl[k].s, v->rl[k].n, v->rwant)))
 		{
@@ -3138,7 +3145,7 @@ xv_tfield(const char *k, const char *val, int *rows, int win)
 	pk_txt("  ");
 	pk_fit(k, 12);
 	pk_set("");
-	pk_txt(val);
+	pk_fit(val, pk_w - pk_col);	/* cut with an ellipsis (NIT-V11) */
 	pk_eol();
 	return ++*rows;
 }
@@ -3185,9 +3192,12 @@ xv_draw_mcard(struct xv *v, const struct xv_task *t, int win, int rows)
 	         t->chapter[0] ? xv_noun(v) : "");
 	if (t->ses)
 		(void)xv_tfield("Session", x, &rows, win);
-	snprintf(x, sizeof x, "not kept (the list keeps %u MB of text): read ",
-	         XV_MBODY >> 20);
-	if (t->cut)
+	snprintf(x, sizeof x, "not kept (the list keeps %u MB of text)%s",
+	         XV_MBODY >> 20, t->path[0] ? ": read " : "");
+	if (t->cut && !t->path[0])	/* no file to name (LOW-V31) */
+		(void)xv_tfield("Text", t->cut == 2 ? x : "cut at 16 KB", &rows,
+		                win);
+	else if (t->cut)
 		xv_tpath("Text", t->cut == 2 ? x : "cut at 16 KB: the whole "
 		         "text is in ", t->path, &rows, win);
 	else if (!t->body[0])
@@ -3838,7 +3848,7 @@ xv_open(struct xv *v)
 static int
 xv_key(struct xv *v, int c)
 {
-	int *sel, n, k;
+	int *sel, n, k, i;
 
 	if (c == 3 || c == 4)
 		return 1;
@@ -3900,8 +3910,9 @@ xv_key(struct xv *v, int c)
 				xv_read(v, t->chapter, NULL);
 			else
 				snprintf(v->status, sizeof v->status,
+				         "%sno %s to read", t->ses ? "" :	/* LOW-V30 */
 				         "this session did not write or load "
-				         "it: no %s to read", xv_noun(v));
+				         "it: ", xv_noun(v));
 			break;
 		}
 		return 0;
@@ -4044,6 +4055,14 @@ xv_key(struct xv *v, int c)
 			xv_read(v, v->hit[k].chapter, v->sq);	/* at it */
 			if (v->hit[k].snippet[0])
 				v->rsnip = strdup(v->hit[k].snippet);
+			/* an earlier hit of the turn with its snippet is in an
+			** entry before it (LOW-V29) */
+			for (v->rskip = 0, i = 0; i < v->nh; i++)
+				v->rskip += v->hit[i].off < v->hit[k].off &&
+				    !strcmp(v->hit[i].chapter,
+				            v->hit[k].chapter) &&
+				    !strcmp(v->hit[i].snippet,
+				            v->hit[k].snippet);
 		}
 		else if (v->tab == 3)
 			snprintf(v->status, sizeof v->status, "this place is "
@@ -4272,9 +4291,10 @@ xv_run(int fd, const char *n, char *err, size_t errsz)
 		     v->tq[0].at >= (v->tab == 4 ? 1 : 6) * XV_TEVERY)))
 			xv_tasks(v, 0);
 		/* Memory (#323): the same start; again every XV_MEVERY while
-		** shown */
+		** shown, a transcript line or not: memory files change apart
+		** from it (LOW-V28) */
 		if (xv_rtab(v) && !v->tq[1].no && v->kid[XV_MK].pid <= 0 &&
-		    (!v->tq[1].at || (v->tq[1].fol && xv_live(v) &&
+		    (!v->tq[1].at || (xv_live(v) &&
 		     v->tab == 5 && now_ms() - v->tq[1].at >= XV_MEVERY)))
 			xv_tasks(v, 1);
 		xv_draw(v, force);

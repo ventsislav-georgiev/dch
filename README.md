@@ -1042,8 +1042,8 @@ it has memories or instruction files:
   have shown and is drawn as it comes; it is read again when you open the
   tab and, while the session runs, at most every 5 seconds while the tab
   shows. A faint line under the rows gives the list's warning, and says
-  when the history was too long to read whole. A shell session, dch-lite,
-  an empty list and a host older than this dch have no Tasks tab.
+  when the history was too long to read whole. A shell session, an empty
+  list and a host older than this dch have no Tasks tab.
 - **Memory** (the last tab, only when `--memory` lists something): the
   session's memories and the instruction files in force (CLAUDE.md,
   AGENTS.md), under faint group lines, each counted: This session (what
@@ -1052,13 +1052,13 @@ it has memories or instruction files:
   and at the right `wrote` or `loaded` and its age; an instruction file
   shows its path, short. The tab's count is every row. `Enter` opens a card
   with the memory's path, kind, scope and time, then its text, scrollable;
-  a text cut at 16 KB says so and names the file. On a card of a memory
+  a text cut at 16 KB says so and names the file, when it has one. On a card of a memory
   this session wrote or loaded, `Enter` reads that prompt, and `q` comes
   back to the card. `/` filters on the id, title, note, kind, path and
   text; `o` works as on Prompts. The list is asked for after the prompts
   have shown; while the session runs it is read again every 30 seconds
-  while the tab shows. A shell session, dch-lite, no memory and a host
-  older than this dch have no Memory tab.
+  while the tab shows. A shell session, no memory and a host older
+  than this dch have no Memory tab; dch-lite has both tabs.
 
 A ref typed after `/` (a ticket, issue, pull request, commit, file or URL,
 as `--ref` takes it) opens its card with `Ctrl-R`, on any tab, while
