@@ -4605,6 +4605,9 @@ struct xr_claude
 	struct xr_entries *want;	/* --chapter (#156), else NULL */
 	int codex;		/* a Codex rollout (7.4) */
 	struct tally *tl;	/* #296: the open turn's tools, else NULL */
+	int blind;		/* #299: a light window not at offset 0: its
+				** first chapter may be one the full decode
+				** has not (begun or merged in an older window) */
 };
 
 enum { B_PROMPT, B_IMAGE, B_STEP };
@@ -5182,7 +5185,12 @@ ch_anchor(struct xr_claude *d, char out[48])
 	struct xr_chapter *x = cur(d);
 
 	out[0] = '\0';
-	if (x)
+	/* #299: a blind window's later chapters were opened by a prompt after a
+	** step of its own, as the full decode opens them; its first is null
+	** (also at the tail range's first line: the full decode reads on from
+	** the head there). Residual: a sidechain block of a thread an older
+	** window saw is a step here and none there (side_block). */
+	if (x && (!d->blind || d->ch.total > 1))
 		snprintf(out, 48, "f%llx:%llu", (unsigned long long)d->ino,
 		         (unsigned long long)x->offset);
 }
@@ -6837,6 +6845,7 @@ win_read(struct xr_claude *d, int fd, uint64_t a, uint64_t b,
 		return -1;
 	e->codex = d->codex;
 	e->unit = d->unit;	/* a unit never repeats across windows */
+	e->blind = a > 0;
 	xr_claude_refs(e, &d->rk, d->ino, w->tick ? win_tick : NULL, w);
 	rc = read_range(e, fd, a, b, 0, buf, acc);
 	xr_claude_end(e, d->ino, &ch);
@@ -9681,7 +9690,9 @@ struct sr_hit
 {
 	uint64_t off, aseq;	/* aseq: a shell command row's block */
 	long long at;
-	int who, pend;		/* pend: its chapter is not known yet */
+	int who, pend;		/* pend: its chapter is not known yet (2:
+				** chapter holds one an older window may
+				** still merge away, #299) */
 	char *tool, *snip;
 	char chapter[40];
 };
@@ -10159,16 +10170,17 @@ sr_line(struct xr_search *s, const struct sr_win *w)
 
 /* The chapters of w's lines, by a fresh decoder (as light --ref's windows):
 ** a pending hit is under the newest chapter at or before it, unless that is
-** the window's first and started by no prompt (the turn began in an older
-** window), or lies in another region. A hit whose region this window leaves
-** is under no chapter --json knows. */
+** the window's first (the turn began in an older window; one a prompt began
+** is held as pend 2 for the older window to settle), or lies in another
+** region. A hit whose region this window leaves is under no chapter --json
+** knows. */
 static int
 sr_chapters(struct xr_search *s, const struct sr_win *w)
 {
 	struct xr_claude *e = xr_claude_new();
 	const struct xr_chapters *ch;
 	struct xr_sink none = { NULL, NULL };
-	uint64_t wa = w->base + (w->nln ? w->ln[0].i : 0);
+	uint64_t wa = w->base + (w->nln ? w->ln[0].i : 0), cut = UINT64_MAX;
 	size_t k, i;
 
 	if (!e)
@@ -10179,13 +10191,22 @@ sr_chapters(struct xr_search *s, const struct sr_win *w)
 	for (k = 0; k < w->nln; k++)
 	{
 		const char *l = w->buf + w->ln[k].i;
+		uint64_t o = w->base + w->ln[k].i;
 		size_t j;
 
+		/* #299: only the lines the full decode reads (not the middle, nor
+		** the line the head's end cuts), so at the tail's first line this
+		** decoder carries on from the head as that one does */
+		if (s->capped && o + w->ln[k].n >= s->head && o < s->lotail)
+		{
+			cut = o < s->head ? o : cut;
+			continue;
+		}
 		for (j = 0; j < w->ln[k].n && (l[j] == ' ' || l[j] == '\t' ||
 		                               l[j] == '\r'); j++)
 			;
 		if (j < w->ln[k].n)
-			xr_claude_line(e, l, w->ln[k].n, w->base + w->ln[k].i, 0);
+			xr_claude_line(e, l, w->ln[k].n, o, 0);
 	}
 	ch = xr_claude_chapters(e);
 	for (k = 0; k < s->n; k++)
@@ -10193,8 +10214,25 @@ sr_chapters(struct xr_search *s, const struct sr_win *w)
 		struct sr_hit *h = &s->hit[k];
 		const struct xr_chapter *c = NULL;
 
-		if (!h->pend)
+		if (!h->pend || h->off == cut)	/* cut: a line --json never reads */
+		{
+			h->pend = 0;
 			continue;
+		}
+		/* #299: a newer window's first chapter, a prompt's, stands when this
+		** window ends past a step; after a prompt the full decode merged it
+		** into this window's last chapter; else (no main block, or images
+		** only) it is not known */
+		if (h->pend == 2 && e->turn)
+		{
+			h->pend = 0;
+			if (!e->lead)
+				continue;
+			h->chapter[0] = '\0';
+			if (!e->titled)
+				continue;
+			h->pend = 1;
+		}
 		for (i = ch->n; i > 0 && !c; i--)
 		{
 			const struct xr_chapter *x = xr_chapter_at(ch, i - 1);
@@ -10203,14 +10241,25 @@ sr_chapters(struct xr_search *s, const struct sr_win *w)
 				c = x;
 		}
 		/* i: c's index now, so 0 is the window's first chapter */
-		if (c && (i || !c->partial || !wa) &&
-		    sr_region(s, c->offset) == sr_region(s, h->off))
+		if (c && sr_region(s, c->offset) != sr_region(s, h->off))
+			c = NULL;
+		if (h->pend == 1 && c && (i || !wa))
 		{
 			snprintf(h->chapter, sizeof h->chapter, "%s", c->anchor);
 			h->pend = 0;
 		}
-		else if (sr_region(s, wa) != sr_region(s, h->off))
+		/* #299: begun by a prompt, it may be merged into an older one */
+		else if (h->pend == 1 && c && !c->partial)
+		{
+			snprintf(h->chapter, sizeof h->chapter, "%s", c->anchor);
+			h->pend = 2;
+		}
+		/* begun by an image, a prompt then joined: the full decode's
+		** chapter may begin at that prompt, which this one did not keep */
+		else if (h->pend == 1 && c && c->title[0])
 			h->pend = 0;
+		else if (sr_region(s, wa) != sr_region(s, h->off))
+			h->pend = 0, h->chapter[0] = '\0';
 	}
 	xr_claude_free(e);
 	return 0;
@@ -10331,7 +10380,8 @@ xr_search_file(struct xr_search *s, int fd, uint64_t size, uint64_t ino,
 	if (end > 0 && !s->more && rc == 0)
 		s->partial = 1;		/* a cap, or the file shrank */
 	for (i = 0; i < s->n; i++)
-		s->hit[i].pend = 0;	/* not found in time: null */
+		if (s->hit[i].pend)	/* not found in time: null */
+			s->hit[i].pend = 0, s->hit[i].chapter[0] = '\0';
 	free(w.ln);
 	free(w.buf);
 	return rc;

@@ -5319,7 +5319,8 @@ t_search(void)
 	xr_lim = l0;
 
 	/* past the range (3.8): a head of 400 and a tail of 600 bytes; a hit
-	** in the middle --json never reads has no chapter, the others theirs */
+	** in the middle --json never reads has no chapter, nor one on the line
+	** the head's end cuts (360, its '\n' at 406; #299), the others theirs */
 	xr_lim.head = 400;
 	xr_lim.tail = 600;
 	n = 0;
@@ -5340,14 +5341,15 @@ t_search(void)
 			if (!strncmp(p, "null,\"offset\":", 14))
 			{
 				off = strtoll(p + 14, NULL, 10);
-				good &= off >= 400 && (size_t)off < n - 600;
+				good &= off + 46 >= 400 && (size_t)off < n - 600;
 				nulls++;
 			}
 			else
 			{
 				ch = strtoll(p + 5, &e, 10);
 				off = strtoll(e + 11, NULL, 10);
-				good &= ch == off && (off < 400 || (size_t)off >= n - 600);
+				good &= ch == off &&
+				        (off + 46 < 400 || (size_t)off >= n - 600);
 			}
 			seen++;
 		}
@@ -5507,6 +5509,256 @@ t_search(void)
 	}
 }
 
+/* ---- #299: a light window's chapter anchors ----------------------------- */
+
+/* CT-12's hits as (offset, chapter) by a full read or light's windows */
+struct an_hit { uint64_t off; char ch[48]; };
+struct an_set { struct an_hit v[600]; int n; };
+
+static void
+an_sink(void *ctx, const struct xr_hit *h)
+{
+	struct an_set *a = ctx;
+
+	if (strcmp(h->sp->key, "ticket:CT-12") || a->n == 600)
+		return;
+	a->v[a->n].off = h->off;
+	snprintf(a->v[a->n++].ch, 48, "%s", h->chapter ? h->chapter : "");
+}
+
+/* body read by --full (light 0) or light (1): its hits in a; full also
+** gives its chapters in c (else NULL) */
+static void
+an_read(const char *body, size_t n, int light, struct an_set *a,
+        struct xr_chapters *c)
+{
+	char path[] = "/tmp/xray_unit.XXXXXX";
+	struct xr_sink k = { an_sink, a };
+	struct xr_chapters none;
+	int fd = mkstemp(path), capped;
+
+	a->n = 0;
+	if (fd < 0)
+		return;
+	unlink(path);
+	if (write(fd, body, n) == (ssize_t)n)
+	{
+		D = xr_claude_new();
+		xr_claude_refs(D, &k, 0x1f, NULL, NULL);
+		if (light)
+			(void)xr_claude_newest(D, fd, n, &capped);
+		else
+			(void)xr_claude_read(D, fd, n, &capped);
+		xr_claude_end(D, 0x1f, c ? c : &none);
+		xr_claude_free(D);
+		if (!c)
+			xr_chapters_free(&none);
+	}
+	close(fd);
+}
+
+static const char *
+an_at(const struct an_set *a, uint64_t off)
+{
+	for (int k = 0; k < a->n; k++)
+		if (a->v[k].off == off)
+			return a->v[k].ch;
+	return NULL;
+}
+
+/* search's hits: "chapter":<null|"a">,"offset":<o>; the one at off, "" null,
+** NULL none */
+static const char *
+an_sr(const char *o, uint64_t off, char out[48])
+{
+	char want[40];
+	const char *p, *e;
+
+	snprintf(want, sizeof want, ",\"offset\":%llu,", (unsigned long long)off);
+	for (p = o; p && (p = strstr(p, "{\"chapter\":")); p++)
+	{
+		p += 11;
+		e = *p == '"' ? strchr(p + 1, '"') + 1 : p + 4;
+		if (strncmp(e, want, strlen(want)))
+			continue;
+		snprintf(out, 48, "%.*s", *p == '"' ? (int)(e - p - 2) : 0, p + 1);
+		return out;
+	}
+	return NULL;
+}
+
+/* light's anchors and search's that differ from --full's at that offset or
+** name no chapter --full has (each must be null or the full read's) */
+static int
+an_wrong(const char *body, size_t n, int search)
+{
+	static struct an_set f, l;
+	struct xr_chapters c;
+	int k, bad = 0;
+	size_t i;
+	char s[48];
+	char *o = search ? search_of(body, n, "CT-12", 0) : NULL;
+
+	an_read(body, n, 0, &f, &c);
+	an_read(body, n, 1, &l, NULL);
+	for (k = 0; k < (search ? f.n : l.n); k++)
+	{
+		uint64_t off = search ? f.v[k].off : l.v[k].off;
+		const char *got = search ? an_sr(o, off, s) : l.v[k].ch;
+		const char *fc = an_at(&f, off);
+		int known = 0;
+
+		if (!got || !got[0])
+			continue;
+		for (i = 0; i < c.n; i++)
+			known |= !strcmp(xr_chapter_at(&c, i)->anchor, got);
+		bad += !known || !fc || strcmp(got, fc);
+	}
+	xr_chapters_free(&c);
+	free(o);
+	return bad;
+}
+
+/* a line of exactly 100 bytes with its '\n': a prompt or an answer */
+static size_t
+an_line(char *b, int prompt, const char *t)
+{
+	int n = prompt
+	        ? snprintf(b, 101, "{\"type\":\"user\",\"message\":{\"content\":"
+	                   "\"%s %s", t, "")
+	        : snprintf(b, 101, "{\"type\":\"assistant\",\"message\":{\"content"
+	                   "\":[{\"type\":\"text\",\"text\":\"%s %s", t, "");
+	const char *z = prompt ? "\"}}" : "\"}]}}";
+
+	memset(b + n, 'z', (size_t)(99 - n) - strlen(z));
+	memcpy(b + 99 - strlen(z), z, strlen(z));
+	b[99] = '\n';
+	return 100;
+}
+
+static void
+t_anchors(void)
+{
+	/* 16 lines of 100 bytes; light windows of 200 bytes and --search's of
+	** 300 (xr_lim.line 298) both hold lines 2k and 2k+1 */
+	static const struct { int prompt; const char *t; } L[] = {
+		{ 0, "a0 CT-12" }, { 1, "q1" }, { 0, "a2 CT-12" },
+		{ 1, "q3 CT-12" }, { 1, "q4 CT-12" }, { 0, "a5 CT-12" },
+		{ 0, "a6" }, { 1, "q7 CT-12" }, { 0, "a8" }, { 1, "q9" },
+		{ 1, "q10 CT-12" }, { 0, "a11 CT-12" }, { 0, "a12" },
+		{ 0, "a13" }, { 1, "q14 CT-12" }, { 0, "a15" },
+	};
+	static struct an_set f, l;
+	static char body[40000];
+	char s[48];
+	size_t n = 0, k;
+	struct xr_limits l0 = xr_lim;
+	struct xr_chapters c;
+	const char *o;
+	char *sr;
+	unsigned seed = 299;
+	int bad;
+
+	for (k = 0; k < 16; k++)
+		n += an_line(body + n, L[k].prompt, L[k].t);
+	xr_lim.chunk = 200;
+	xr_lim.line = 298;
+	an_read(body, n, 0, &f, &c);
+	xr_chapters_free(&c);
+	an_read(body, n, 1, &l, NULL);
+	CHECK("anchors: --full: a0 f1f:0, a2 under q1, q4 and a5 merged into "
+	      "q3's, q10 into q9's, q14 its own",
+	      f.n == 9 && !strcmp(an_at(&f, 0), "f1f:0") &&
+	      !strcmp(an_at(&f, 200), "f1f:100") &&
+	      !strcmp(an_at(&f, 400), "f1f:300") &&
+	      !strcmp(an_at(&f, 500), "f1f:300") &&
+	      !strcmp(an_at(&f, 1000), "f1f:900") &&
+	      !strcmp(an_at(&f, 1400), "f1f:1400"));
+	CHECK("anchors: light, the window at offset 0 keeps its partial "
+	      "chapter", l.n == 9 && (o = an_at(&l, 0)) && !strcmp(o, "f1f:0"));
+	CHECK("anchors: light, a mention before its window's first prompt has "
+	      "no chapter", (o = an_at(&l, 200)) && !o[0]);
+	CHECK("anchors: light, a mention after a prompt its window opened past "
+	      "a step keeps the anchor (q3, q7)",
+	      (o = an_at(&l, 300)) && !strcmp(o, "f1f:300") &&
+	      (o = an_at(&l, 700)) && !strcmp(o, "f1f:700"));
+	CHECK("anchors: light, a prompt merged across a window boundary has no "
+	      "chapter, nor the line after it (q4, a5, q10, a11)",
+	      (o = an_at(&l, 400)) && !o[0] && (o = an_at(&l, 500)) && !o[0] &&
+	      (o = an_at(&l, 1000)) && !o[0] && (o = an_at(&l, 1100)) && !o[0]);
+	CHECK("anchors: light, a window's first prompt after a step is null too "
+	      "(its window cannot tell)", (o = an_at(&l, 1400)) && !o[0]);
+	sr = search_of(body, n, "CT-12", 0);
+	CHECK("anchors: --search, a prompt merged across a window boundary: the "
+	      "older chapter, never its window's own (q4, a5, q10)",
+	      an_sr(sr, 400, s) && !strcmp(s, "f1f:300") &&
+	      an_sr(sr, 500, s) && !strcmp(s, "f1f:300") &&
+	      an_sr(sr, 1000, s) && !strcmp(s, "f1f:900"));
+	CHECK("anchors: --search, a window's first prompt after a step in the "
+	      "older window keeps its own (q14)",
+	      an_sr(sr, 1400, s) && !strcmp(s, "f1f:1400"));
+	free(sr);
+	CHECK("anchors: every light and --search anchor is --full's",
+	      !an_wrong(body, n, 0) && !an_wrong(body, n, 1));
+
+	/* past the range: head 400 (lines 0-3, q3's lead open), tail 600 from
+	** q10 (light's window there starts at the tail range's first line):
+	** --full reads on from the head, so q10 and a11 are q3's */
+	xr_lim.head = 400;
+	xr_lim.tail = 600;
+	an_read(body, n, 0, &f, &c);
+	xr_chapters_free(&c);
+	an_read(body, n, 1, &l, NULL);
+	sr = search_of(body, n, "CT-12", 0);
+	CHECK("anchors: a window at the tail range's first line: --full gives "
+	      "the head's chapter, light none, --search none",
+	      (o = an_at(&f, 1000)) && !strcmp(o, "f1f:300") &&
+	      (o = an_at(&l, 1000)) && !o[0] &&
+	      (o = an_at(&l, 1100)) && !o[0] &&
+	      an_sr(sr, 1000, s) && !s[0]);
+	free(sr);
+	CHECK("anchors: past the range, every light and --search anchor is "
+	      "--full's", !an_wrong(body, n, 0) && !an_wrong(body, n, 1));
+	/* a tail from a11 (a step): --search's window holds q10 in the
+	** middle, which the full read never sees */
+	xr_lim.tail = 500;
+	CHECK("anchors: a tail from a step, light's and --search's anchors are "
+	      "--full's", !an_wrong(body, n, 0) && !an_wrong(body, n, 1));
+	xr_lim = l0;
+
+	/* random turns (prompts, back-to-back prompts, images, answers) under
+	** windows of several sizes: no anchor --full does not give */
+	bad = 0;
+	for (int r = 0; r < 40; r++)
+	{
+		n = 0;
+		for (k = 0; k < 150; k++)
+		{
+			unsigned x = (seed = seed * 1103515245u + 12345u) >> 16;
+			const char *m = x % 7 < 1 ? " CT-12" : "";
+
+			if (n > sizeof body - 200)
+				break;
+			n += (size_t)snprintf(body + n, sizeof body - n,
+			     x % 10 < 3 ? "{\"type\":\"user\",\"message\":{\"content\":"
+			                  "\"q%zu%s %.*s\"}}\n"
+			     : x % 10 < 4 ? "{\"type\":\"user\",\"message\":{\"content\":"
+			                    "[{\"type\":\"image\"}]},\"x\":\"%zu%s%.*s\"}\n"
+			     : "{\"type\":\"assistant\",\"message\":{\"content\":[{"
+			       "\"type\":\"text\",\"text\":\"a%zu%s %.*s\"}]}}\n",
+			     k, m, (int)(x / 10 % 40), "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz");
+		}
+		xr_lim.chunk = 150 + (size_t)r * 37;
+		xr_lim.line = 200 + (size_t)r * 37;
+		bad += an_wrong(body, n, 0) + an_wrong(body, n, 1);
+	}
+	xr_lim = l0;
+	CHECK("anchors: 40 random transcripts, windows of 150 to 1643 bytes: "
+	      "every light and --search anchor is --full's", bad == 0);
+	if (bad)
+		fprintf(stderr, "  %d wrong anchors\n", bad);
+}
+
 /* json.c's dch_json_quote (QA 1.55.0 LOW-7): every code point a terminal
 ** acts on as \u, its neighbours raw */
 static int
@@ -5595,6 +5847,7 @@ main(int argc, char **argv)
 	t_codex_lookup();
 	t_quote();
 	t_search();
+	t_anchors();
 	printf("%s: %d failed\n", fails ? "FAIL" : "ok", fails);
 	return fails != 0;
 }

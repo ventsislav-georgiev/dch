@@ -1107,7 +1107,7 @@ and no
 a transcript or rollout is read newest first, in 1 MiB windows from the
 end, each by a decoder that starts there, so a ref of the last turns is
 found inside the budget: lines come newest window first, and a mention
-before its window's first prompt has
+in the turn its window starts in (unless the window starts the file) has
 .BR chapter:null ),
 .B \-\-full
 to read it all up to 64 files

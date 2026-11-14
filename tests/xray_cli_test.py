@@ -3690,6 +3690,110 @@ def test_scope():
           sorted(set(after.items()) ^ set(before.items()))[:6])
 
 
+# ---- #299: light --ref's anchors in old windows ---------------------------
+
+ASID = "11111111-2222-4333-8444-5555555555c9"
+
+
+def test_light_anchors():
+    """Light --ref reads 1 MiB windows newest first, each by a fresh decoder:
+    a mention before its window's first prompt, or under a prompt the full
+    decode merges into an older one, has a null chapter; every anchor it
+    does give is --full's and opens with --chapter. --search gives the
+    older (right) anchor or null, never its window's own. 1024 lines of
+    4096 bytes, so the windows start at lines 0, 256, 512 and 768."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-p299")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, ASID + ".jsonl")
+    special = {0: (0, "a0 CT-12"), 255: (1, "q255"), 256: (0, "a256 CT-12"),
+               257: (1, "q257 CT-12"), 383: (0, "a383"),
+               384: (1, "q384 CT-12"), 385: (0, "a385 CT-12"),
+               386: (1, "q386 CT-12"), 448: (0, "a448 CT-12"),
+               510: (0, "a510"), 511: (1, "q511"), 512: (1, "q512 CT-12"),
+               513: (0, "a513 CT-12"), 767: (0, "a767"),
+               768: (1, "q768 CT-12")}
+
+    def line(prompt, text):
+        def obj(t):
+            return json.dumps({"type": "user", "message": {"content": t}}
+                              if prompt else
+                              {"type": "assistant", "message": {"content": [
+                                  {"type": "text", "text": t}]}},
+                              separators=(",", ":"))
+        return obj(text + " " + "z" * (4094 - len(obj(text)))) + "\n"
+
+    with open(tp, "w") as f:
+        for i in range(1024):
+            f.write(line(*special.get(i, (i % 3 == 0, "%s%d" % (
+                "q" if i % 3 == 0 else "a", i)))))
+    history("xr-anch", ASID, cfg, "/home/demo/p299")
+    ino = "%x" % os.stat(tp).st_ino
+    at = lambda i: "f%s:%d" % (ino, i * 4096)
+
+    def run(caps):
+        env = dict(ENV, DCH_XRAY_NOCLOCK="1")
+        if caps:
+            env["DCH_XRAY_CAPS"] = caps
+        got = {}
+        for form in ("light", "full"):
+            r = dch("--xray", "xr-anch", "--ref", "CT-12", "--json",
+                    *(["--full"] if form == "full" else []), env=env)
+            ls = ref_lines(r.stdout) or []
+            got[form] = {l["mention"]["offset"] // 4096: l["mention"]["chapter"]
+                         for l in ls if "mention" in l}
+        rc, o, err = search("xr-anch", "CT-12", env=env)
+        got["search"] = {h["offset"] // 4096: h["chapter"]
+                         for h in (o or {}).get("hits", [])}
+        bad = [(form, i, a, got["full"].get(i))
+               for form in ("light", "search")
+               for i, a in sorted(got[form].items())
+               if a is not None and a != got["full"].get(i)]
+        gone = []
+        for a in sorted({a for a in got["light"].values() if a}):
+            rc, c, err, out = chapter("xr-anch", a, env=env)
+            if rc != 0 or not c or c.get("anchor") != a:
+                gone.append((a, rc, err.strip()))
+        return got, bad, gone
+
+    got, bad, gone = run(None)
+    L, F, S = got["light"], got["full"], got["search"]
+    check("light anchors: --full has the 10 mentions, a512 and a513 merged "
+          "into q511's chapter, a256 in q255's",
+          len(F) == 10 and F.get(512) == at(511) and F.get(513) == at(511)
+          and F.get(256) == at(255), F)
+    check("light anchors: the window at offset 0 keeps its partial chapter; "
+          "a prompt its window opened past a step keeps its own (q257, q384, "
+          "q386)", L.get(0) == at(0) and L.get(257) == at(257) and
+          L.get(384) == at(384) and L.get(386) == at(386), L)
+    check("light anchors: a mention before its window's first prompt "
+          "(a256), a prompt merged across a window boundary and its answer "
+          "(q512, a513): chapter null",
+          256 in L and L[256] is None and 512 in L and L[512] is None and
+          513 in L and L[513] is None, L)
+    check("light anchors: --search gives q512 and a513 the older chapter or "
+          "null, never their window's own",
+          512 in S and S[512] in (None, at(511)) and 513 in S and
+          S[513] in (None, at(511)), S)
+    check("light anchors: every light and --search anchor is --full's", not bad,
+          bad)
+    check("light anchors: every light anchor opens with --chapter", not gone,
+          gone)
+    # past the range: head 1 MiB (lines 0-255, q255's lead open), the tail
+    # from q384, then from a448: --full reads on from the head there
+    for tail, first in ((640 * 4096, 384), (576 * 4096, 448)):
+        got, bad, gone = run("0:0:0:%d:%d" % (1 << 20, tail))
+        L, F, S = got["light"], got["full"], got["search"]
+        check("light anchors: a tail range from line %d: --full puts it in "
+              "q255's chapter; light null, --search null or that" % first,
+              F.get(first) == at(255) and first in L and L[first] is None
+              and first in S and S[first] in (None, at(255)), got)
+        check("light anchors: tail from line %d: every light and --search "
+              "anchor is --full's and opens with --chapter" % first,
+              not bad and not gone, (bad, gone))
+    os.unlink(tp)
+
+
 def main():
     try:
         test_names()
@@ -3730,6 +3834,7 @@ def main():
         test_ref_shell_caps()
         test_ref_shell_tick()
         test_scope()
+        test_light_anchors()
     finally:
         shutil.rmtree(T, ignore_errors=True)
     if fails[0]:
