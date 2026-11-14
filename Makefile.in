@@ -9,17 +9,17 @@ VERSION = @PACKAGE_VERSION@
 VPATH = $(srcdir)
 
 OBJ = attach.o master.o dch.o serve.o rframe.o remote.o $(VT_OBJS) bridge.o \
-      json.o picker.o xview.o ring.o xray.o cargv.o
+      json.o picker.o xview.o ring.o xray.o xcmd.o cargv.o
 SRC = $(srcdir)/attach.c $(srcdir)/master.c $(srcdir)/dch.c \
       $(srcdir)/vt.c $(srcdir)/vt_stub.c $(srcdir)/bridge.c \
       $(srcdir)/serve.c $(srcdir)/rframe.c $(srcdir)/remote.c \
       $(srcdir)/json.c $(srcdir)/picker.c $(srcdir)/xview.c \
       $(srcdir)/ring.c \
-      $(srcdir)/xray.c $(srcdir)/cargv.c
+      $(srcdir)/xray.c $(srcdir)/xcmd.c $(srcdir)/cargv.c
 
 TARFILES = $(srcdir)/README $(srcdir)/COPYING $(srcdir)/Makefile.in \
 	   $(srcdir)/config.h.in $(srcdir)/bridge.h $(srcdir)/rframe.h $(SRC) \
-	   $(srcdir)/remote.h $(srcdir)/picker.h $(srcdir)/ring.h $(srcdir)/xray.h $(srcdir)/xray_uni.h $(srcdir)/cargv.h $(srcdir)/dtach.h $(srcdir)/dtach.spec \
+	   $(srcdir)/remote.h $(srcdir)/picker.h $(srcdir)/ring.h $(srcdir)/xray.h $(srcdir)/xcmd.h $(srcdir)/xray_uni.h $(srcdir)/cargv.h $(srcdir)/dtach.h $(srcdir)/dtach.spec \
 	   $(srcdir)/configure $(srcdir)/configure.ac $(srcdir)/dch.1
 
 dch: $(OBJ)
@@ -66,5 +66,6 @@ json.o: @srcdir@/json.c @srcdir@/bridge.h
 ring.o: @srcdir@/ring.c @srcdir@/ring.h
 cargv.o: @srcdir@/cargv.c @srcdir@/cargv.h
 xray.o: @srcdir@/xray.c @srcdir@/xray.h @srcdir@/xray_uni.h @srcdir@/ring.h @srcdir@/bridge.h config.h
+xcmd.o: @srcdir@/xcmd.c @srcdir@/xcmd.h @srcdir@/xray.h @srcdir@/bridge.h
 picker.o: @srcdir@/picker.c @srcdir@/picker.h @srcdir@/dtach.h @srcdir@/remote.h @srcdir@/rframe.h config.h
 xview.o: @srcdir@/xview.c @srcdir@/picker.h @srcdir@/dtach.h @srcdir@/remote.h @srcdir@/rframe.h @srcdir@/xray.h config.h

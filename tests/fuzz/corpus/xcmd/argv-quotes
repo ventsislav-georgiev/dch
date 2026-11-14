@@ -1,0 +1,1 @@
+~/bin/tasks --json "a b" 'c d' $HOME ; `id` *

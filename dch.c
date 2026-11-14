@@ -272,6 +272,11 @@ const struct dch_conf config_keys[] = {
 	/* the X-ray shell ring's size (#119), read when a session starts */
 	{ "xray_ring", 0, "2M", NULL,
 	  "Shell output kept for X-ray: 0 (off) to 16M" },
+	/* X-ray's command sources (#321): run with no shell, read-only */
+	{ "tasks_command", 0, "", NULL,
+	  "X-ray's task list from a command; empty: the agent's own" },
+	{ "memory_command", 0, "", NULL,
+	  "X-ray's memory list from a command; empty: the agent's own" },
 };
 _Static_assert(sizeof config_keys / sizeof *config_keys == NCONF,
                "picker.h's NCONF counts config_keys");
