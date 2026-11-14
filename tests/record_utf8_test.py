@@ -129,11 +129,14 @@ def main():
         # --- an older master's raw bytes in argv and cwd -----------------------
         sid = "22222222-2222-4222-8222-222222222222"
         now = int(time.time())
+        # \udcfe encodes as the raw byte 0xfe; a replace() of a marker also
+        # hit a temp path that held it (mktemp's dchr.XXXXXX can) (#309)
         raw = json.dumps(dict(
-            name="old", sock_dir=sockdir, alias="", cwd=tmp + "/dXd",
-            argv=["/bin/echo", "aXb"], started=now - 660, updated=now - 60,
-            ended=now - 60, end="exit 3", agent=agent(sid)),
-            separators=(",", ":")).encode().replace(b"X", b"\xfe") + b"\n"
+            name="old", sock_dir=sockdir, alias="", cwd=tmp + "/d\udcfed",
+            argv=["/bin/echo", "a\udcfeb"], started=now - 660,
+            updated=now - 60, ended=now - 60, end="exit 3", agent=agent(sid)),
+            separators=(",", ":"), ensure_ascii=False).encode(
+            "utf-8", "surrogateescape") + b"\n"
         os.makedirs(recdir, mode=0o700, exist_ok=True)
         fd = os.open(path("old"), os.O_WRONLY | os.O_CREAT, 0o600)
         os.write(fd, raw)
