@@ -143,7 +143,7 @@ Covers:
      that wrote it (2 of 2), q back to the card, q back to the row; / over
      a memory's text. xv-cxt (Codex): its AGENTS.md under Instructions,
      Enter shows its text. xv-mb, 20000 memories: the tab and the whole
-     count within 5 s, G within 0.5 s.
+     count within 15 s (the time printed), G within 0.5 s.
 
 Run:  python3 tests/xray_view_test.py      (uses ./dch)
 """
@@ -948,9 +948,12 @@ def test_order():
 TPD = os.path.join(T, "tmpd")      # the view's $TMPDIR
 TPP = os.path.join(TPD, "proj")    # a project inside it
 TPL = os.path.join(T, "plink")     # a symlink to it, another session's cwd
-# a real project outside every temp dir (this checkout), and a symlink into it
-# from the temp dir: a row under it is never resolved, so it stays scratch
-REPO = os.path.realpath(os.path.join(HERE, ".."))
+# a real project outside every temp dir, and a symlink into it from the temp
+# dir: a row under it is never resolved, so it stays scratch. A system
+# directory, not this checkout: the view's --memory walks up from the cwd and
+# would read the real CLAUDE.md files above a checkout (#325); nothing above
+# /usr/bin holds one, and the test dir itself is always in a temp dir
+SYSP = "/usr/bin"
 HOSTILE = "https://github.com." + "a" * 50 + ".example/github.com/o/r/pull/1"
 HUGE = "https://" + "z" * 120 + ".example/x/y/end"
 IDN = "https://x" + "\u4f8b" * 25 + "e\u0301" * 6 + ".jp/" + "p/" * 30 + "fin"
@@ -961,7 +964,7 @@ def fixture_tmp():
     for f in ("main.c", "real.c"):
         open(os.path.join(TPP, "src", f), "w").close()
     os.symlink(TPP, TPL)
-    os.symlink(REPO, os.path.join(TPD, "rlink"))
+    os.symlink(SYSP, os.path.join(TPD, "rlink"))
     cfg = os.path.join(HOME, ".claude")
     sockdir = os.path.join(T, "dch-%d" % os.getuid())
     hdir = os.path.join(T, "state", "dch", "sessions",
@@ -975,8 +978,8 @@ def fixture_tmp():
             ("xv-tx", "11111111-2222-4333-8444-5555555555c3", TPP,
              "edit %s/src/main.c, then %s/../leak.txt and %s/../esc/x"
              % (TPP, TPP, TPD)),
-            ("xv-tr", "11111111-2222-4333-8444-5555555555c4", REPO,
-             "see %s/rlink/README.md" % TPD)):
+            ("xv-tr", "11111111-2222-4333-8444-5555555555c4", SYSP,
+             "see %s/rlink/env" % TPD)):
         pdir = os.path.join(cfg, "projects", cwd.replace("/", "-"))
         os.makedirs(pdir, exist_ok=True)
         with open(os.path.join(pdir, sid + ".jsonl"), "w") as f:
@@ -999,8 +1002,8 @@ def refs_tab(name):
     v.wait(b"Prompts 1")
     v.pump(0.5)
     mark = len(v.out)
-    # Tab twice, by Responses: xv-tr's cwd (this checkout) may hold a
-    # CLAUDE.md, so a Memory tab (#323) may come last
+    # Tab twice, by Responses: a managed CLAUDE.md on this machine gives
+    # any Claude session a Memory tab (#323), last
     v.key(b"\t\t", 1.0)
     mark = len(v.out)
     v.key(b"a", 1.0)  # files and URLs too (#262)
@@ -1055,19 +1058,15 @@ def test_tmp():
         v.key(b"q")
     finally:
         v.close()
-    # the checkout stands for a project outside every temp dir; a checkout
-    # in one is scratch itself (QA 1.60.0 NIT-T5)
-    if REPO.startswith(("/tmp/", "/private/tmp/", "/var/folders/",
-                        "/private/var/folders/")):
-        print("  skip Refs #220: a project outside the temp dirs: this "
-              "checkout, %s, is in one" % REPO)
-        return
+    # /usr/bin stands for a project outside every temp dir (QA 1.60.0
+    # NIT-T5: a checkout in one would be scratch itself)
     v, scr, text = refs_tab("xv-tr")
     try:
         check("Refs #220: a project outside the temp dirs resolves no row: "
               "a temp-dir symlink into it stays scratch",
-              "README.md" not in text and "t temp files 1 hidden" in text,
-              text)
+              "rlink/env" not in text and
+              not re.search(r"file +env\b", text) and
+              "t temp files 1 hidden" in text, text)
         v.key(b"q")
     finally:
         v.close()
@@ -2162,9 +2161,12 @@ def test_open(lite):
             "printf '\\033]133;A\\007$ '; exec sleep 600")
     r = dch("--spawn", "xv-op", "--size", "80x24", "sh", "-c", prog)
     check("open: spawned", r.returncode == 0, r.stderr)
-    until(lambda: "$" in dch("--read", "xv-op").stdout, 5)
+    # dch-lite: --read exits 3, nothing to wait for
+    until(lambda: (lambda r: r.returncode == 3 or "$" in r.stdout)(
+        dch("--read", "xv-op")), 5)
     dch("--send", "xv-op", "make the build o/r#41\n")  # a ref: the card's o
-    until(lambda: "40" in dch("--read", "xv-op").stdout, 5)
+    until(lambda: (lambda r: r.returncode == 3 or "40" in r.stdout)(
+        dch("--read", "xv-op")), 5)
     time.sleep(0.5)  # dch-lite: no --read; the block's time
     v = Pty([DCH, "--xray", "xv-op"], env=DTAP)
     try:
@@ -2717,8 +2719,10 @@ def test_memory_big():
         dt = time.time() - t0
         ok2 = tabbar(v, "Memory 20000", 15)
         dt2 = time.time() - t0
+        # a bound for a hang, not a speed target: 1.75 to 4.17 s measured,
+        # by the machine's load (#325)
         check("Memory big: the tab in %.2f s, all 20000 rows in %.2f s "
-              "(under 5)" % (dt, dt2), ok and ok2 and dt2 < 5,
+              "(under 15)" % (dt, dt2), ok and ok2 and dt2 < 15,
               rows(v.out).get(2))
         mem_tab(v)
         mark = len(v.out)
@@ -2946,9 +2950,17 @@ def rx():
         return ""
 
 
+def attached(a):
+    """The client's raw mode is on its pty: it is attached. Not its
+    repaint: dch-lite has no mirror, so a line printed before the attach
+    never comes back and a wait for it runs out its 10 s."""
+    return until(lambda: (a.pump(0.05), not termios.tcgetattr(a.fd)[3] &
+                          termios.ICANON)[1], 10)
+
+
 def attach(env=None, extra=()):
     a = Pty([DCH] + list(extra) + ["-a", "xv-rx"], env=env)
-    a.wait(b"READY")
+    attached(a)
     a.pump(0.3)
     return a
 
@@ -3150,7 +3162,7 @@ def test_chord_end():
     check("chord, end: spawned", r.returncode == 0, r.stderr)
     a = Pty([DCH, "-a", "xv-end"])
     try:
-        a.wait(b"READY")
+        attached(a)
         mark = len(a.out)
         a.key(b"\x1cx", 0.5)
         check("chord, end: the view opens", a.wait(b"X-ray  xv-end",
@@ -3170,7 +3182,7 @@ def test_chord_end():
     a = Pty(["/bin/sh", "-c", "'%s' -a xv-end; echo CLIENT-GONE; "
              "exec sleep 30" % DCH])
     try:
-        a.wait(b"READY")
+        attached(a)
         mark = len(a.out)
         a.key(b"\x1cx", 0.5)
         a.wait(b"X-ray  xv-end", start=mark)
@@ -3202,7 +3214,7 @@ def test_chord_detach():
         a = Pty(["/bin/sh", "-c", "stty -g; '%s' -a xv-rx; echo RC=$?; "
                  "stty -g; echo GONE; exec sleep 30" % DCH])
         try:
-            a.wait(b"READY")
+            attached(a)
             a.pump(0.3)
             before = a.out.split(b"\r\n")[0]
             got = rx()
