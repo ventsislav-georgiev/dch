@@ -4407,13 +4407,17 @@ PSID = "11111111-2222-4333-8444-5555555555d4"
 
 def test_prefilter_reach():
     """#293: light --ref does not decode a 1 MiB window whose raw bytes
-    cannot hold the ref, so its 300 ms reach the whole of a 96 MB
-    transcript: a ticket named only in the first line is found. Without the
-    prefilter light decodes about 40-95 MB in its budget on a fast idle
-    machine and stops, why budget. 96 MB, not more: a CI runner's raw scan
-    of 160 MB stopped at the budget 2 MB short, three tries in a row.
-    Asserts what was found, not how long it took; a run a stalled machine
-    stops at the budget is retried, twice."""
+    cannot hold the ref, so its 300 ms reach the whole of a transcript of
+    96 MB or more: a ticket named only in the first line is found. Without
+    the prefilter light decodes about 20-30 MB in its budget at load 10 and
+    40-95 MB on a fast idle machine, and stops, why budget. So the size is
+    taken from this machine: first a twin with a \\/ on every line, which
+    the prefilter never skips (pf_escape), measures what light decodes in
+    its budget here and now; the file is 1.5 times that, 96 MB at least,
+    144 MB at most: a CI runner's raw scan of 160 MB stopped at the budget
+    2 MB short, three tries in a row. Asserts what was found, not how long
+    it took; a run a stalled machine stops at the budget is retried,
+    twice."""
     cfg = os.path.join(HOME, ".claude")
     pdir = os.path.join(cfg, "projects", "-home-demo-proj")
     os.makedirs(pdir, exist_ok=True)
@@ -4425,25 +4429,37 @@ def test_prefilter_reach():
                                           for j in range(20 + i % 300))}]}},
         separators=(",", ":")) + "\n"
     block = "".join(said(i) for i in range(400))
-    with open(tp, "w") as f:
-        f.write(json.dumps({"type": "user", "cwd": "/home/demo/proj",
-                            "message": {"content": "start on MARK-1"}},
-                           separators=(",", ":")) + "\n")
-        for _ in range((96 << 20) // len(block)):
-            f.write(block)
+
+    def plant(blk, mb):
+        with open(tp, "w") as f:
+            f.write(json.dumps({"type": "user", "cwd": "/home/demo/proj",
+                                "message": {"content": "start on MARK-1"}},
+                               separators=(",", ":")) + "\n")
+            for _ in range((mb << 20) // len(blk)):
+                f.write(blk)
+
+    def reach():
+        r = dch("--xray", "xr-reach", "--ref", "MARK-1", "--scope",
+                "session", "--json")
+        return r, ref_lines(r.stdout) or [{}]
+
     history("xr-reach", PSID, cfg)
     try:
+        plant(block.replace('"text":"', '"text":"\\/'), 96)
+        nopf = reach()[1][-1].get("bytes", 0)
+        mb = min(144, max(96, (nopf * 3 >> 21) + 1))
+        plant(block, mb)
         for k in range(3):
-            r = dch("--xray", "xr-reach", "--ref", "MARK-1", "--scope",
-                    "session", "--json")
-            ls = ref_lines(r.stdout) or [{}]
+            r, ls = reach()
             if ls[-1].get("why") != "budget":
                 break
         men = [l["mention"]["offset"] for l in ls if "mention" in l]
         check("prefilter: light --ref finds a ref named only in the first "
-              "line of a 96 MB transcript inside its 300 ms budget: the "
-              "mention at offset 0, why first, all but its oldest window counted (%d tries)"
-              % (k + 1), r.returncode == 0 and men == [0] and
+              "line of a %d MB transcript inside its 300 ms budget (with "
+              "every window decoded it reached %d MB): the mention at "
+              "offset 0, why first, all but its oldest window counted "
+              "(%d tries)" % (mb, nopf >> 20, k + 1),
+              r.returncode == 0 and men == [0] and
               ls[-1].get("done") and ls[-1]["why"] == "first" and
               ls[-1]["bytes"] >= os.path.getsize(tp) - (2 << 20),
               (r.returncode, ls[-2:], r.stderr))
