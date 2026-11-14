@@ -83,8 +83,11 @@ def shell(cmd, rep, argv, pre, env):
     job = os.fork()
     if job == 0:
         os.setpgid(0, 0)
+        # SIGTSTP stops the job before it owns the terminal: the shell's
+        # SIG_IGN would drop a ^Z sent the moment it does (case_b, n 0)
+        signal.signal(signal.SIGTSTP, signal.SIG_DFL)
         os.tcsetpgrp(0, os.getpgrp())
-        for s in (signal.SIGTTOU, signal.SIGTTIN, signal.SIGTSTP):
+        for s in (signal.SIGTTOU, signal.SIGTTIN):
             signal.signal(s, signal.SIG_DFL)
         if pre:
             os.write(1, pre)
