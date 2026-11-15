@@ -381,7 +381,7 @@ xcc=$(sed -n 's/^CC = //p' Makefile 2>/dev/null)
 xcc=${xcc:-cc}
 pyrun "the --xray view: tabs, card, reader, hostile text, signals, picker X" xray_view_test.py
 pyrun "the --xray view of host:name over a loopback dch serve, picker X, the chord over dch -a host:name" xray_remote_view_test.py
-# xray_cli_test.py's RSS budget: a fork()+exec+wait4 helper, because a child
+# xray_shell_test.py's and xray_claude_test.py's RSS budget: a fork()+exec+wait4 helper, because a child
 # spawned by Python inherits Python's RSS high-water mark on Linux (maxrss.c)
 # shellcheck disable=SC2086 # xcc is a word list
 if $xcc -O1 -o "$TMP/maxrss" "$xsrc/tests/maxrss.c" >"$TMP/maxrss.log" 2>&1; then
@@ -390,13 +390,19 @@ else
     bad "maxrss helper builds"; sed 's/^/       /' "$TMP/maxrss.log"
 fi
 if [ "$MIRROR" = "1" ]; then
-    pyrun "xray: a typed shell block, --clear, a live Claude, the seam, names" xray_cli_test.py
     # pyrun shows a passing test's own skip lines only on failure
+    pyrun "xray: a typed shell block, --clear, the ring, the 16 MiB RSS budget, shell caps" xray_shell_test.py
     [ -n "${ASAN_OPTIONS:-}" ] &&
         printf '  skip xray: the 16 MiB RSS budget (sanitizer build)\n'
+    pyrun "xray: a live Claude, the seam, names, refs, search, tasks, chapters, caps" xray_claude_test.py
+    [ -n "${ASAN_OPTIONS:-}" ] &&
+        printf '  skip xray: the 16 MiB RSS budget (sanitizer build)\n'
+    pyrun "xray: --follow, late and stale refs, agents, the primary screen" xray_follow_test.py
     pyrun "xray resolvers: commit and file, the hostile-repo sentinel" xray_resolve_test.py
 else
-    skipmirror "xray: a typed shell block, --clear, a live Claude, the seam, names"
+    skipmirror "xray: a typed shell block, --clear, the ring, the 16 MiB RSS budget, shell caps"
+    skipmirror "xray: a live Claude, the seam, names, refs, search, tasks, chapters, caps"
+    skipmirror "xray: --follow, late and stale refs, agents, the primary screen"
     skipmirror "xray resolvers: commit and file, the hostile-repo sentinel"
 fi
 
