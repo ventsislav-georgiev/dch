@@ -3925,7 +3925,7 @@ else
 lines,
 .B #
 comments, the last line for a key wins; a line over 1023 bytes reads as
-an empty value, never cut.
+an empty value, never cut; a NUL byte ends its line's text.
 .TP
 .B dch \-\-config
 Print the path, then every known key as
@@ -4117,7 +4117,8 @@ fields
 required;
 .B body
 cut at 16 KB, then
-.BR cut:true ;
+.BR cut:true ,
+which a row may also send for a text it cut itself;
 .B chapter
 null),
 bare or wrapped as

@@ -398,6 +398,9 @@ os.write(1, b'\n{"title":"after the long line"}\n')
 
 
 if __name__ == "__main__":
+    # SIGTERM runs the finally below (the watchdog's os._exit and SIGKILL
+    # cannot be caught: pyreap ends only the test's own group)
+    signal.signal(signal.SIGTERM, lambda *a: sys.exit(143))
     try:
         rc = main()
     finally:

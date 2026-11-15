@@ -2657,20 +2657,27 @@ def test_memory():
         v.exit()
     finally:
         v.close()
+    # instruction files above T (a stray /tmp/CLAUDE.md, the machine-wide
+    # file) are the host's and the product walks to / whatever HOME is: count
+    # them with the CLI's same walk, only the number, never a path or body
+    host = sum(1 for x in dch("--xray", "xv-me", "--memory", "--json")
+               .stdout.splitlines() if '"kind":"instructions"' in x
+               and (MP + "/") not in x)
     v = Pty([DCH, "--xray", "xv-me"], rows=30, cols=100)
     try:
-        ok = tabbar(v, "Memory 5")
+        ok = tabbar(v, "Memory %d" % (5 + host))
         t = rows(v.out).get(2, "")
         check("Memory: the last tab, counting every row", ok and
-              re.search(r"Search\s+Memory 5\s*$", t), t)
+              re.search(r"Search\s+Memory %d\s*$" % (5 + host), t), t)
         r = [re.sub(r" (now|\d+[mhd])$", "", x).lstrip("▌ ") for x in
              mem_tab(v)]
         check("Memory: This session (wrote, then loaded), Memories (newest "
               "first), Instructions (the path short); kind and note faint",
-              r == ["This session 2", "Alpha rule feedback alpha hook wrote",
-                    "Beta notes project beta hook loaded", "Memories 2",
-                    "Gamma ref reference gamma hook", "long",
-                    "Instructions 1", "CLAUDE.md"], r)
+              r[:7] == ["This session 2", "Alpha rule feedback alpha hook "
+                        "wrote", "Beta notes project beta hook loaded",
+                        "Memories 2", "Gamma ref reference gamma hook", "long",
+                        "Instructions %d" % (1 + host)] and
+              "CLAUDE.md" in r[7:], r)
         check("Memory: no word chapter on the screen",
               b"chapter" not in v.out.lower(), "")
         v.key(b"jj", 0.5)
@@ -2882,6 +2889,49 @@ def test_twins():
                   not_ not in body, body)
             v.key(b"q", 0)
             tabbar(v, "Search 2")
+        v.key(b"q")
+        v.exit()
+    finally:
+        v.close()
+    # LOW-V33: three twins, the first one's text past the reader's 3000
+    # character cut of an output: each still opens at its own place
+    record("xv-sc", "11111111-2222-4333-8444-5555555555fa",
+           turn("cut twins", ts % 0,
+                at(call("c1", "Bash", {"command": "cat a"}), ts % 1),
+                at(result("c1", "zfill\n" * 600 + out), ts % 1),
+                at(say("MARK-2 above"), ts % 1),
+                at(call("c2", "Bash", {"command": "cat b"}), ts % 2),
+                at(result("c2", out), ts % 2),
+                at(say("MARK-3 below"), ts % 2),
+                at(call("c3", "Bash", {"command": "cat c"}), ts % 3),
+                at(result("c3", out), ts % 3),
+                at(say("MARK-4 below"), ts % 3)),
+           proj="-mem-proj", cwd=MP)
+    v = Pty([DCH, "--xray", "xv-sc"], rows=30, cols=100)
+    try:
+        v.wait(b"Prompts 1")
+        for _ in range(3):
+            v.key(b"\t", 0.3)
+        v.key(b"needle\r", 0.3)
+        ok = tabbar(v, "Search 3")
+        # newest first: c3, c2, then c1 at its output's start
+        for k, (want, nots) in enumerate((
+                ("MARK-4", ("MARK-2", "MARK-3", "zfill")),
+                ("MARK-3", ("MARK-2", "MARK-4", "zfill")),
+                ("zfill", ("needle", "MARK-")))):
+            if k:
+                v.key(b"j", 0.3)
+            mark = len(v.out)
+            v.key(b"\r", 0)
+            v.wait(want.encode(), start=mark)
+            v.pump(0.3)
+            scr = rows(v.out[mark:])
+            body = "\n".join(scr[r] for r in sorted(scr) if r > 2)
+            check("cut twins: hit %d opens at its own output (%s, none of "
+                  "%s) (LOW-V33)" % (k, want, nots), ok and want in body
+                  and not any(n in body for n in nots), body)
+            v.key(b"q", 0)
+            tabbar(v, "Search 3")
         v.key(b"q")
         v.exit()
     finally:

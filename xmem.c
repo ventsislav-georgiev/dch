@@ -651,13 +651,28 @@ xm_term(char c)
 	return strchr(" \t\r\n'\"`;|&<>()$\\,", c) != NULL;	/* NUL too */
 }
 
+/* the first of the rows by path lo..hi (all longer than d, sorted by
+** their byte at d) whose byte at d is above c */
+static size_t
+xm_above(const struct xm_set *s, size_t lo, size_t hi, size_t d, size_t c)
+{
+	size_t m;
+
+	while (lo < hi)
+		if ((unsigned char)s->byp[m = lo + (hi - lo) / 2]->path[d] > c)
+			hi = m;
+		else
+			lo = m + 1;
+	return lo;
+}
+
 /* a shell command: each row whose full path it names, followed by a
 ** terminator; wrote or loaded by xm_wrote */
 static void
 xm_shell(struct xm_set *s, const char *t, size_t n, const char *chapter)
 {
 	int how = xm_wrote(t, n) ? XM_WROTE : XM_LOADED;
-	size_t ml = strlen(s->memdir), i, j, k, pl;
+	size_t ml = strlen(s->memdir), i, j, k, pl, lo, hi;
 
 	/* a memory row: the directory, '/', a name up to a terminator */
 	for (i = 0; ml && i + ml < n; i++)
@@ -669,14 +684,23 @@ xm_shell(struct xm_set *s, const char *t, size_t n, const char *chapter)
 			xm_touch(s, t + i, j - i, how, chapter);
 			i = j - 1;
 		}
-	for (k = s->nmem; k < s->n; k++)
-		for (pl = strlen(s->v[k].path), i = 0; i + pl <= n; i++)
-			if (t[i] == '/' && !memcmp(t + i, s->v[k].path, pl) &&
-			    (i + pl == n || xm_term(t[i + pl])))
-			{
-				xm_touch(s, t + i, pl, how, chapter);
+	/* an instruction row: from each '/', the rows by path narrowed byte
+	** by byte to those the text goes on with; a path that ends there
+	** followed by a terminator is named. Length x log rows, not rows x
+	** length (#350) */
+	for (i = 0; i < n; i++)
+		for (lo = 0, hi = t[i] == '/' ? s->n : 0, pl = 0; lo < hi; pl++)
+		{
+			for (; lo < hi && !s->byp[lo]->path[pl]; lo++)
+				if ((size_t)(s->byp[lo] - s->v) >= s->nmem &&
+				    (i + pl == n || xm_term(t[i + pl])))
+					xm_touch(s, t + i, pl, how, chapter);
+			if (i + pl == n)
 				break;
-			}
+			k = (unsigned char)t[i + pl];
+			lo = xm_above(s, lo, hi, pl, k - 1);
+			hi = xm_above(s, lo, hi, pl, k);
+		}
 }
 
 /* an apply_patch body: its files, wrote; relative ones against cwd */

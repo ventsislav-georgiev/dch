@@ -2,7 +2,8 @@
 ** (keys, metadata.type, quotes, block scalars, a fence never closed), the
 ** MEMORY.md index line (bullets, dashes, refused targets) and the shell
 ** rule (a redirect or an editing verb writes); xm_print over a rules tree
-** of XM_MANY files that the walk reaches twice (#344).
+** of XM_MANY files that the walk reaches twice (#344), and XM_CALLS
+** shell commands read against it (#350).
 **
 **   cc -I. -o xmem_unit tests/xmem_unit.c xmem.c xray.c json.c && ./xmem_unit
 */
@@ -155,6 +156,74 @@ now(void)
 	return t.tv_sec + t.tv_nsec / 1e9;
 }
 
+#ifndef XM_CALLS
+#define XM_CALLS 8000
+#endif
+
+/* The shell rule over the XM_MANY rules (#350): a command names a row by
+** its full path followed by a terminator, so r00007.md is loaded and
+** r00008.md (named as r00008.mdx) is not. Each command was matched against
+** every row, rows x bytes: XM_CALLS 2 KB commands full of '/' took 37.6 s
+** past the rows' own cost (base, t_many's run without a transcript); one
+** pass over each, narrowing the rows by path, takes 1.0 s on a loaded Mac.
+** The bound is 25 times the rows' own cost in the same run (base, 0.4 s
+** there: the old code took 90 times it, the new takes 3), so it holds on a
+** slow runner as well. */
+static void
+t_shell(const char *home, struct xm_req *q, double base)
+{
+	char tp[256], cmd[2048], *buf = NULL, *l, *e;
+	size_t len = 0, k, hit = 0, miss = 0;
+	struct stat st;
+	double t;
+	FILE *f;
+
+	snprintf(tp, sizeof tp, "%s/t.jsonl", home);
+	if (!(f = fopen(tp, "w")))
+	{
+		CHECK("shell: a transcript", 0);
+		return;
+	}
+	for (k = 0; k + 2 < sizeof cmd; k += 2)
+		memcpy(cmd + k, "/q", 2);
+	cmd[k] = '\0';
+	fprintf(f, "{\"type\":\"assistant\",\"message\":{\"role\":"
+	        "\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":"
+	        "\"toolu_0\",\"name\":\"Bash\",\"input\":{\"command\":"
+	        "\"cat %s/.claude/rules/r00007.md %s/.claude/rules/r00008.mdx"
+	        "\"}}]}}\n", home, home);
+	for (k = 1; k <= XM_CALLS; k++)
+		fprintf(f, "{\"type\":\"assistant\",\"message\":{\"role\":"
+		        "\"assistant\",\"content\":[{\"type\":\"tool_use\","
+		        "\"id\":\"toolu_%zu\",\"name\":\"Bash\",\"input\":"
+		        "{\"command\":\"ls %s\"}}]}}\n", k, cmd);
+	fclose(f);
+	stat(tp, &st);
+	q->path = tp;
+	q->st = &st;
+	f = open_memstream(&buf, &len);
+	t = now();
+	xm_print(f, q);
+	t = now() - t - base;
+	fclose(f);
+	q->path = NULL;
+	unlink(tp);
+	for (l = buf; l && *l; l = e ? e + 1 : NULL)
+	{
+		if ((e = strchr(l, '\n')))
+			*e = '\0';
+		hit += strstr(l, "/r00007.md\"") && strstr(l, "\"session\":\"loaded\"");
+		miss += strstr(l, "/r00008.md\"") && strstr(l, "\"session\":\"");
+	}
+	CHECK("shell: a full path loads its row, a longer name does not",
+	      hit == 1 && miss == 0);
+	printf("       %d calls over %d rows: %.2f s more\n", XM_CALLS, XM_MANY,
+	       t);
+	CHECK("shell: one pass per command, not rows x bytes (under 25 times "
+	      "the rows' own cost)", t < 25 * (base > 0.2 ? base : 0.2));
+	free(buf);
+}
+
 /* cwd = home, cfg = home/.claude: its CLAUDE.md and rules come twice and
 ** are listed once. The dedupe was N^2 (#344); a 3000-file tree does not
 ** show it (its open and stat calls dominate), -DXM_MANY=50000 does: 25.4 s
@@ -208,6 +277,7 @@ t_many(void)
 	printf("       %zu rows in %.2f s\n", rows, t);
 	CHECK("many: n log n, not N^2 (30 s bound)", t < 30);
 	free(buf);
+	t_shell(home, &q, t);
 	for (k = 0; k < XM_MANY; k++)
 	{
 		snprintf(p, sizeof p, "%s/.claude/rules/r%05d.md", home, k);

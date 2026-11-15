@@ -11760,8 +11760,9 @@ tk_result(struct xr_claude *d, const struct json_parser *p, int part)
 	if (!(id = task >= 0 ? tk_id(p, j_get(p, task, A_ID)) : NULL) ||
 	    !t->bucket)
 	{
-		/* an id given but empty, long or no string: left out, counted */
-		t->badid += task >= 0 && j_get(p, task, A_ID) >= 0;
+		/* an id given but null, empty, long or no string: left out,
+		** counted */
+		t->badid += task >= 0 && j_field(p, task, "id") >= 0;
 		free(id);
 		r->gone = 1;
 		return;
