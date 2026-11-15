@@ -36,267 +36,16 @@ slots 20 s past their ctl timeout.
 
 Run:  python3 tests/serve_test.py        (uses ./dch)
 """
-import calendar, json, os, re, shutil, signal, socket, struct, subprocess, sys
-import tempfile, time
-
-HERE = os.path.dirname(os.path.abspath(__file__))
-DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
-RUNPY = os.path.join(HERE, "remote-frames", "golden", "run.py")
-
-# Builtins only, no fork: serve gives each call 3 s (TS_MS), and under load
-# a slower fake turns into a whois_failed refusal cached 30 s (#246). The
-# fallback of tests/fake_tailscale.c, which keeps the same contract (#277).
-FAKE_TS = """#!/bin/sh
-d=${0%/*}
-echo "$1 ${DCH_SERVE_TEST_LOOPBACK:-unset}" >> "$d/calls"
-case "$1" in
-status) f=status.json ;; whois) f=whois.json ;; ip) f=ip.txt ;; *) exit 1 ;;
-esac
-[ -f "$d/$f" ] || exit 1
-while IFS= read -r l; do printf '%s\\n' "$l"; done < "$d/$f"
-printf '%s' "$l"
-"""
-
-# Headscale-shaped: status Self.ID is the host's StableNodeID, digits in a
-# string; whois Node.ID is an int64 and Node.StableID the StableNodeID string.
-# SAAS_* are tailscale.com-shaped: the StableNodeID is "n...CNTRL".
-OWNER = {"Self": {"ID": "1001", "UserID": 42, "Tags": []},
-         "User": {"42": {"LoginName": "me@example.com"}}}
-TAGGED = {"Self": {"ID": "1001", "UserID": 9, "Tags": ["tag:server"]},
-          "User": {"9": {"LoginName": "tagged-devices"}}}
-
-
-SAAS_OWNER = {"Self": {"ID": "nXyZ123CNTRL", "UserID": 42, "Tags": []},
-              "User": {"42": {"LoginName": "me@example.com"}}}
-
-
-# The refusal codes and messages (#094): a contract, README and dch.1.
-CODES = {
-    "not_owner": "this host serves only its owner's devices",
-    "not_allowed": "this host is tagged and serves only the users it names: "
-                   "start dch serve there with --allow-user <your login or "
-                   "id>",
-    "tagged_peer": "this host does not serve tagged nodes",
-    "whois_unavailable": "this host could not verify you: tailscaled is not "
-                         "answering",
-    "whois_failed": "this host could not verify you (tailscale whois "
-                    "failed)",
-    "self": "this host does not serve connections from itself",
-}
-
-
-# the 0x13 a retired attach gets (#102), byte for byte
-TAKEN = json.dumps({"code": "taken", "message": "another client attached "
-                    "to this session"}, separators=(",", ":")).encode()
-
-
-def whois(uid, login="me@example.com", tags=(), node="2002", nid=2002):
-    return {"UserProfile": {"ID": uid, "LoginName": login},
-            "Node": {"ID": nid, "StableID": node, "Tags": list(tags)}}
+import serve_lib as lib
+from serve_lib import *
 
 
 def main():
-    tmp = os.path.realpath(tempfile.mkdtemp(prefix="dchsv", dir=os.environ.get("DCH_TEST_TMP", "/tmp")))
-    fake = os.path.join(tmp, "fake")
-    os.makedirs(fake)
-    # the compiled fake: one exec per call and no shell start (#277); the
-    # shell one only when no compiler builds it
-    try:
-        built = subprocess.call(os.environ.get("CC", "cc").split() + [
-            "-O1", "-o", os.path.join(fake, "tailscale"),
-            os.path.join(HERE, "fake_tailscale.c")]) == 0
-    except OSError:
-        built = False
-    if not built:
-        print("  note: tests/fake_tailscale.c did not build, the shell fake")
-        with open(os.path.join(fake, "tailscale"), "w") as f:
-            f.write(FAKE_TS)
-        os.chmod(os.path.join(fake, "tailscale"), 0o755)
-    home = os.path.join(tmp, "home")
-    os.makedirs(home)
-    env = {k: v for k, v in os.environ.items()
-           if not k.startswith(("DCH_", "MallocStackLogging"))}
-    env.update(XDG_RUNTIME_DIR=tmp, XDG_STATE_HOME=os.path.join(tmp, "state"),
-               HOME=home, DCH_LOGIN_ENV="0",
-               DCH_CONFIG=os.path.join(tmp, "config"), SHELL="/bin/sh",
-               PATH=fake + ":/usr/bin:/bin")
-    benv = dict(env, DCH_SERVE_TEST_LOOPBACK="1")
-    procs = []
-    fails = []
-    whois_fail_ok = set()	# serve logs whose whois_failed is the case
-    slow_whois = []
-
-    def check(msg, cond):
-        print("  %s %s" % ("ok  " if cond else "FAIL", msg))
-        if not cond:
-            fails.append(msg)
-            if not slow_whois:
-                slow_whois.extend(
-                    n for n in sorted(os.listdir(tmp))
-                    if n.startswith("serve") and n.endswith(".log")
-                    and os.path.join(tmp, n) not in whois_fail_ok
-                    and "refused: tailscale whois failed while" in
-                    text(os.path.join(tmp, n)))
-                if slow_whois:
-                    print("  setup: whois_failed, the fake whois was too "
-                          "slow (over serve's 3 s, refusal cached 30 s; "
-                          "%s): checks failing on it are not serve bugs"
-                          % ", ".join(slow_whois))
-
-    def put(name, obj):
-        p = os.path.join(fake, name)
-        if obj is None:
-            if os.path.exists(p):
-                os.unlink(p)
-            return
-        with open(p, "w") as f:
-            f.write(obj if isinstance(obj, str) else json.dumps(obj))
-
-    def ts(status=OWNER, who=whois(42), ip="100.100.1.1\n"):
-        put("status.json", status)
-        put("whois.json", who)
-        put("ip.txt", ip)
-
-    log_n = [0]
-
-    def serve(*args, e=benv, bind=True, cwd=None, argv0=None):
-        """Start dch serve: (proc, port, log path); port None when it exited.
-        argv0 "dch": found on e's PATH, so that is the dch its ctls run."""
-        log_n[0] += 1
-        log = os.path.join(tmp, "serve%d.log" % log_n[0])
-        argv = [argv0 or DCH, "serve"] + (["--bind", "127.0.0.1"] if bind else []) + \
-            ["--port", "0"] + list(args)
-        with open(log, "w") as lf:
-            p = subprocess.Popen(argv, executable=DCH, env=e,
-                                 stdin=subprocess.DEVNULL,
-                                 stdout=subprocess.DEVNULL, stderr=lf,
-                                 cwd=cwd)
-        procs.append(p)
-        end = time.time() + 10
-        while time.time() < end:
-            m = re.search(r"listening on 127\.0\.0\.1:(\d+)", text(log))
-            if m:
-                return p, int(m.group(1)), log
-            if p.poll() is not None:
-                return p, None, log
-            time.sleep(0.05)
-        return p, None, log
-
-    def stop(p):
-        if p.poll() is None:
-            p.send_signal(signal.SIGTERM)
-            try:
-                p.wait(10)
-            except subprocess.TimeoutExpired:
-                p.kill()
-                p.wait()
-        return p.returncode
-
-    def calls():
-        return text(os.path.join(fake, "calls")).splitlines() \
-            if os.path.exists(os.path.join(fake, "calls")) else []
-
-    def run_fail(*args, bind=True, e=benv):
-        """A start that must refuse: (exit code, its stderr)."""
-        p, port, log = serve(*args, e=e, bind=bind)
-        if port is not None:
-            stop(p)
-            return None, text(log)
-        return p.wait(10), text(log)
-
-    def text(path):
-        with open(path, errors="replace") as f:
-            return f.read()
-
-    def conn(port, src=None):
-        s = socket.create_connection(("127.0.0.1", port), timeout=5,
-                                     source_address=(src, 0) if src else None)
-        return s
-
-    def send(s, t, payload=b""):
-        if isinstance(payload, (dict, list)):
-            payload = json.dumps(payload).encode()
-        s.sendall(struct.pack(">BI", t, len(payload)) + payload)
-
-    def recv_exact(s, n):
-        b = b""
-        while len(b) < n:
-            c = s.recv(n - len(b))
-            if not c:
-                raise EOFError
-            b += c
-        return b
-
-    def frame(s):
-        h = recv_exact(s, 5)
-        t, n = struct.unpack(">BI", h)
-        return t, recv_exact(s, n)
-
-    def frame_not(s, skip=(0x10,)):
-        while True:
-            t, p = frame(s)
-            if t not in skip:
-                return t, p
-
-    def reply(port, hello=True):
-        """What a peer gets, having sent a hello (or nothing): "accept"
-        (0x18), "closed" (EOF with no byte at all), "reset: ..." (no byte
-        either), the raw payload of a 0x13 followed by EOF (#094), else a
-        string saying what came."""
-        s = conn(port)
-        try:
-            if hello:
-                send(s, 0x08)
-            t, body = frame(s)
-            if t == 0x18:
-                return "accept"
-            if t != 0x13:
-                return "frame 0x%02x" % t
-            return body if s.recv(1) == b"" else "more after the 0x13"
-        except EOFError:
-            return "closed"
-        except (ConnectionResetError, BrokenPipeError) as e:
-            return "reset: %s" % e
-        except socket.timeout:
-            return "timeout"
-        finally:
-            s.close()
-
-    def refused(port):
-        return reply(port) != "accept"
-
-    def refusal(code):
-        """The exact 0x13 payload dch serve sends for code (#094)."""
-        return json.dumps({"code": code, "message": CODES[code]},
-                          separators=(",", ":")).encode()
-
-    def sessions():
-        r = subprocess.run([DCH, "-ls"], env=env, capture_output=True,
-                           text=True, timeout=10)
-        return r.stdout.split()
-
-    def ctl1(port, argv, s=None):
-        """One 0x30 of argv: ("ran", exit, why, stdout, stderr) at its 0x33,
-        or ("refused", message) at a 0x13."""
-        s = s or conn(port)
-        out, err = b"", b""
-        try:
-            send(s, 0x30, {"argv": argv})
-            while True:
-                t, pl = frame(s)
-                if t == 0x13:
-                    return "refused", json.loads(pl).get("message")
-                if t == 0x31:
-                    out += pl
-                elif t == 0x32:
-                    err += pl
-                elif t == 0x33:
-                    j = json.loads(pl)
-                    return "ran", j["exit"], j.get("why"), out, err
-        except (EOFError, OSError) as e:
-            return "lost", str(e)
-        finally:
-            s.close()
+    L = lib.setup()
+    (tmp, fake, home, env, benv, procs, fails, whois_fail_ok, slow_whois,
+     check, put, ts, log_n, serve, stop, calls, run_fail, text, conn, send,
+     recv_exact, frame, frame_not, reply, refused, refusal, sessions, ctl1) = (
+        L[k] for k in lib.NAMES)
 
     def xray_checks(port, log):
         """#157 (spec #832 4.4, 9.5): the --xray allowlist entries on a dch
@@ -546,6 +295,12 @@ def main():
         subprocess.run([DCH, "-k", "svc"], env=env, capture_output=True,
                        timeout=15)
 
+    def wait_up(*names):
+        """Poll until each name is a live session (spawn returns first)."""
+        end = time.time() + 10
+        while time.time() < end and not set(names) <= set(sessions()):
+            time.sleep(0.05)
+
     def follow_cap_checks():
         """#202 (QA 1.56.0 LOW-R4, spec v3.2.4): a device (its address)
         runs at most 2 --xray --follow of one session; a third closes its
@@ -559,8 +314,18 @@ def main():
             subprocess.run([DCH, "--spawn", n, "--size", "40x5", "--",
                             "/bin/sh"], env=env, capture_output=True,
                            timeout=15)
-        time.sleep(0.5)
+        wait_up("svf", "svg")
         locs, evn = [], [0]
+
+        def settle(k0, m):
+            """Poll until serve logged m more client closes of a ctl."""
+            end = time.time() + 5
+            while time.time() < end and text(log).count(
+                    "closed by the client; stopping its ctl") < k0 + m:
+                time.sleep(0.05)
+
+        def closes():
+            return text(log).count("closed by the client; stopping its ctl")
 
         def ran(n):
             return text(log).count(" ctl --xray %s (pid" % n)
@@ -614,10 +379,14 @@ def main():
                                   stdout=open(out, "w"),
                                   stderr=subprocess.PIPE)
             locs.append(lp)
-            try:
-                return lp.wait(3), lp.stderr.read()
-            except subprocess.TimeoutExpired:
-                return "following", text(out)[:len(want)].encode()
+            # it ends at once (busy) or writes its snapshot and runs on
+            end = time.time() + 8
+            while time.time() < end and lp.poll() is None and \
+                    len(text(out)) < len(want):
+                time.sleep(0.05)
+            if lp.poll() is not None:
+                return lp.poll(), lp.stderr.read()
+            return "following", text(out)[:len(want)].encode()
 
         timeout = (0x33, b'{"exit":2,"why":"timeout"}')
         # three of one session from one device: the oldest ends as a
@@ -645,9 +414,10 @@ def main():
               "count with these", end_of(b, 1.5) is None
               and end_of(c, 0.2) is None and end_of(g1, 0.2) is None
               and end_of(g2, 0.2) is None)
+        k0 = closes()
         for s in (a, b, c, g1, g2):
             s.close()
-        time.sleep(1)
+        settle(k0, 4)
         # QA 1.58.0 LOW-R6: counted by the session the name opens. On a
         # case-insensitive volume SVF opens svf: svf x2 then SVF x2 close
         # both svf; on a case-sensitive one SVF is a session of its own and
@@ -658,7 +428,7 @@ def main():
             subprocess.run([DCH, "--spawn", "SVF", "--size", "40x5", "--",
                             "/bin/sh"], env=env, capture_output=True,
                            timeout=15)
-            time.sleep(0.5)
+            wait_up("SVF")
         print("#202 LOW-R6: the socket dir is case-%s" %
               ("insensitive" if alias else "sensitive"))
         k = text(log).count("--follow of SVF")
@@ -679,6 +449,7 @@ def main():
                   all(end_of(s, 1 if s is a else 0.2) is None
                       for s in (a, b, c, d))
                   and text(log).count("--follow of SVF") == k)
+        k0 = closes()
         for s in (a, b, c, d):
             s.close()
         for lp in locs:
@@ -688,7 +459,7 @@ def main():
         if not alias:
             subprocess.run([DCH, "-k", "SVF"], env=env, capture_output=True,
                            timeout=15)
-        time.sleep(1.5)
+        settle(k0, 2)
         # another device: its own 2, never closing this device's
         try:
             with socket.socket() as t:
@@ -709,9 +480,10 @@ def main():
                   "only", end_of(o1, 5) == timeout
                   and all(end_of(s, 0.5 if s is d1 else 0.2) is None
                           for s in (d1, d2, o2, o3)))
+            k0 = closes()
             for s in (d1, d2, o1, o2, o3):
                 s.close()
-            time.sleep(1)
+            settle(k0, 4)
         if mirror:
             # 4 that never read, from one device: 2 master slots stay free
             k = text(log).count("--follow of svf")
@@ -724,13 +496,14 @@ def main():
             check("#202: a device's 4 stalled follows leave a local "
                   "--xray --follow a slot (not busy, LOW-R4)",
                   local() == ("following", want))
+            k0 = closes()
             for s in st:
                 s.close()
             for lp in locs:
                 lp.terminate()
                 lp.wait(5)
             del locs[:]
-            time.sleep(1.5)
+            settle(k0, 4)
             # 2 local followers and 2 of the device fill the 4 slots: the
             # device's third does not get busy for its own closing one
             l1, l2 = local(), local()
@@ -745,13 +518,14 @@ def main():
             check("#202: ... and runs on: an event reaches it", event([b, c]))
             check("#202: a fifth of another identity is still busy "
                   "(LOW-7 stands)", local()[0] == 1)
+            k0 = closes()
             for s in (a, b, c):
                 s.close()
             for lp in locs:
                 lp.terminate()
                 lp.wait(5)
             del locs[:]
-            time.sleep(1.5)
+            settle(k0, 2)
             # 4 local followers: the device's first is busy, after one run
             # more (its own older one might have been closing)
             ls = [local() for _ in range(4)]
@@ -932,192 +706,6 @@ def main():
             s.close()
         subprocess.run([DCH, "-k", "svc-ctl"], env=env, capture_output=True,
                        timeout=15)
-
-        # --- #124: a CTL_LONG verb (--say here) cut by the close or a 0x34
-        # gets CTL_LONG_MS after its SIGTERM, not 2 s; any other verb
-        # (--status) is SIGKILLed 2 s after. A `dch` first on serve's PATH
-        # stands in for those two (the rest it execs): this measures serve's
-        # grace, not dch. The real --run and --say under the cut: #126 below.
-        wrap = os.path.join(tmp, "wrap")
-        os.makedirs(wrap)
-        with open(os.path.join(wrap, "dch"), "w") as f:
-            f.write("""#!/bin/sh
-W=%s
-case "$1 $2" in
-"--say slow"|"--status slow")
-    v=${1#--}; rm -f "$W/$v.log"
-    if [ "$v" = say ]; then
-        trap 'echo term >> "$W/$v.log"; sleep 4; echo done >> "$W/$v.log"
-              exit 0' TERM
-    else
-        trap 'echo term >> "$W/$v.log"' TERM
-    fi
-    echo $$ > "$W/$v.pid"
-    echo started
-    while :; do sleep 0.1; done ;;
-"--status big")
-    exec %s -c 'import sys
-for i in range(96): sys.stdout.buffer.write(b"x" * 65535 + b"\\n")
-sys.stdout.buffer.write(b"END\\n")' ;;
-esac
-exec %s "$@"
-""" % (wrap, sys.executable, DCH))
-        os.chmod(os.path.join(wrap, "dch"), 0o755)
-
-        def slow_cut(port, verb, cancel):
-            """Cut a slow verb (cancel: a 0x34, else the close): seconds
-            from its SIGTERM to its end, and whether it finished its own
-            SIGTERM work."""
-            argv = ["--say", "slow", "--json", "--", "hi"] if verb == "say" \
-                else ["--status", "slow"]
-            vlog = os.path.join(wrap, verb + ".log")
-            s = conn(port)
-            send(s, 0x30, {"argv": argv})
-            frame(s)		# "started": the trap is set
-            pid = int(text(os.path.join(wrap, verb + ".pid")))
-            if cancel:
-                send(s, 0x34)
-            else:
-                s.close()
-            t0, gone = time.time(), None
-            while time.time() - t0 < 15 and gone is None:
-                try:
-                    os.kill(pid, 0)	# a probe only
-                except ProcessLookupError:
-                    gone = time.time()
-                time.sleep(0.05)
-            if cancel:
-                try:
-                    t, pl = frame_not(s, (0x31,))
-                except (EOFError, OSError):
-                    t, pl = None, b""
-                ok = t == 0x33 and json.loads(pl) == {"exit": 2,
-                                                       "why": "cancel"}
-                s.close()
-            else:
-                ok = True
-            got = text(vlog) if os.path.exists(vlog) else ""
-            return ok and "term" in got, \
-                gone - t0 if gone else None, "done" in got
-
-        p, sport, slog_ = serve(argv0="dch", e=dict(
-            benv, PATH="%s:%s:/usr/bin:/bin" % (wrap, fake)))
-        check("#124: a serve whose ctls run the stand-in dch starts",
-              sport is not None)
-        if sport is not None:
-            for cancel, how in ((False, "the close"), (True, "a 0x34")):
-                ok, secs, done = slow_cut(sport, "say", cancel)
-                check("#124: --say cut by %s: SIGTERM, not SIGKILLed at 2 s, "
-                      "finishes on its own (%s s)" % (how, secs and
-                                                       round(secs, 1)),
-                      ok and secs is not None and secs >= 3.5 and done)
-                ok, secs, done = slow_cut(sport, "status", cancel)
-                check("#124: --status cut by %s: SIGTERM, SIGKILLed about "
-                      "2 s later (%s s)" % (how, secs and round(secs, 1)),
-                      ok and secs is not None and 1.5 <= secs <= 3.5
-                      and not done)
-            stop(p)
-
-        # --- #201: a one-shot ctl's answer past the socket and pipe buffers
-        # (6 MiB of the stand-in's --status big) comes whole to a reader
-        # that stalls 30 s, past STALL_MS's 20 s: a ctl with a timeout is
-        # bounded by it, its output may sit untaken until 20 s past it. A
-        # peer that never reads still frees its 16 slots by then: here a
-        # serve of its own with DCH_CTL_TIMEOUT_MS 3 s, so by about 23 s.
-        # Both run at once, to keep the wall time near 31 s.
-        wenv = dict(benv, PATH="%s:%s:/usr/bin:/bin" % (wrap, fake))
-        p, sport, slog_ = serve(argv0="dch", e=wenv)
-        q, qport, qlog = serve(argv0="dch", e=dict(
-            wenv, DCH_CTL_TIMEOUT_MS="3000"))
-        check("#201: two serves whose ctls run the stand-in dch start",
-              sport is not None and qport is not None)
-        if sport is not None and qport is not None:
-            big = ["--status", "big"]
-            s = conn(sport)
-            send(s, 0x30, {"argv": big})
-            t, pl = frame(s)
-            out = bytearray(pl if t == 0x31 else b"")
-            # An 8 KiB receive buffer, set before the connect so it caps
-            # the window: macOS otherwise grows both loopback buffers until
-            # they hold all serve had left after the cut, nothing stays
-            # pending, and the idle close (30 s) decides, not the stall
-            # rule (#246). Linux doubles it to 16 KiB and grows serve's
-            # send buffer with cwnd only, which a shut window holds at its
-            # start (about 1.4 MiB at most on lo). Either way the 6 MiB
-            # answer leaves serve over OUT_HIGH (64 KiB) pending at the cut.
-            never = []
-            for _ in range(16):
-                n = socket.socket()
-                n.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8192)
-                n.settimeout(5)
-                n.connect(("127.0.0.1", qport))
-                never.append(n)
-                send(n, 0x30, {"argv": big})
-            t_end = time.time() + 3	# their ctl end, DCH_CTL_TIMEOUT_MS
-            time.sleep(1)
-            full = reply(qport)
-            time.sleep(29)
-            end = None
-            s.settimeout(30)
-            try:
-                while True:
-                    t, pl = frame(s)
-                    if t == 0x31:
-                        out += pl
-                    elif t == 0x33:
-                        end = json.loads(pl)
-                        break
-            except (EOFError, OSError):
-                pass
-            s.close()
-            check("#201: a 6 MiB answer whose reader stalls 30 s comes whole "
-                  "(%d bytes), then 0x33 exit 0" % len(out),
-                  len(out) == 96 * 65536 + 4 and out.endswith(b"x\nEND\n")
-                  and end == {"exit": 0}
-                  and "not taken" not in text(slog_))
-            ql = text(qlog)
-            ok = isinstance(full, bytes) and b'"busy"' in full \
-                and ql.count("ctl cut short: timeout") == 16 \
-                and ql.count("output not taken for 20 s") == 16
-            r17 = reply(qport)
-            check("#201: 16 peers that never read hold the peer's 16 slots "
-                  "(a 17th busy), then all are free 20 s past their timeout: "
-                  "16 timeout cuts, 16 closes",
-                  ok and r17 == "accept")
-            if not (ok and r17 == "accept"):
-                # what it saw: each event's time from the ctl end, and
-                # what every never-reader still had queued
-                ev = {}
-                for m in re.finditer(r"^(\S+)\.(\d+)Z dch serve\[\d+\]: "
-                                     r"127\.0\.0\.1: (ctl cut short: timeout"
-                                     r"|output not taken|idle; closing)",
-                                     ql, re.M):
-                    t = calendar.timegm(time.strptime(
-                        m.group(1), "%Y-%m-%dT%H:%M:%S")) \
-                        + int(m.group(2)) / 1000
-                    ev.setdefault(m.group(3), []).append(
-                        "%+.1f" % (t - t_end))
-                print("       17th: %r; %s" % (full, "; ".join(
-                    "%d %s at %s s" % (len(v), k, " ".join(v))
-                    for k, v in ev.items()) or "no cut or close logged"))
-                for i, n in enumerate(never):
-                    got, eof = 0, False
-                    n.settimeout(0.5)
-                    try:
-                        while True:
-                            b = n.recv(65536)
-                            if not b:
-                                eof = True
-                                break
-                            got += len(b)
-                    except OSError:
-                        pass
-                    print("       never-reader %d: %s, %d bytes unread"
-                          % (i, "closed" if eof else "OPEN", got))
-            for n in never:
-                n.close()
-            stop(p)
-            stop(q)
 
         # --- #126: the real dch --run and --say, cut by the close or a 0x34
         # with their text in a fake Claude's composer (every Enter eaten,
@@ -1909,20 +1497,8 @@ exec %s "$@"
               p2.returncode == 1 and "Prosper" in p2.stderr
               and "another dch serve" in p2.stderr)
     finally:
-        for p in procs:
-            if p.poll() is None:
-                p.kill()
-                p.wait()
-        for n in sessions():
-            subprocess.run([DCH, "-k", n], env=env, capture_output=True,
-                           timeout=15)
-        shutil.rmtree(tmp, ignore_errors=True)
-    if fails:
-        print("FAILED: %d%s" % (len(fails), slow_whois and
-                                " (setup: whois_failed, the fake whois was "
-                                "too slow, see above)" or ""))
-        sys.exit(1)
-    print("all ok")
+        lib.cleanup(L)
+    lib.verdict(L)
 
 
 if __name__ == "__main__":

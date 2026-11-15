@@ -64,13 +64,10 @@ runpy.run_path(sys.argv[0], run_name="__main__")' \
 # Not safe beside other tests (each reason in docs of #361):
 #   perf_test.py          wall-clock spawn/attach budgets of 1 s
 #   harness_names_test.py CPU-time ratio budget, contention skews it
-#   serve_test.py         #201: 16 ctls must emit 6 MiB within a 3 s ctl
-#                         timeout; under 8 jobs some emitted nothing, so the
-#                         idle close (30 s), not the stall rule, came first
 #   xray_remote_view_test.py  the host's gate runs the fake tailscale whois
 #                         with a 3 s bound (TS_MS); under 8 jobs it ran past
 #                         it and the gate refused 127.0.0.1 for 30 s
-PYSERIAL=' perf_test.py harness_names_test.py serve_test.py xray_remote_view_test.py '
+PYSERIAL=' perf_test.py harness_names_test.py xray_remote_view_test.py '
 pjobs=${DCH_TEST_JOBS:-}
 case $pjobs in ''|*[!0-9]*|0|0*)
     pjobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
@@ -514,6 +511,7 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "a signalled master's history end names the sender" signal_sender_test.py
     pyrun "--cmd survives empty reply frames" cmd_frames_test.py
     pyrun "dch serve: remote frames goldens, peer gate, startup refusals" serve_test.py
+    pyrun "dch serve: the ctl grace, a stalled reader, 16 peers that never read (#124, #201)" serve_timing_test.py
     pyrun "remote hosts: -ls, --remote, -a host:name, hostile peers" remote_client_test.py
     pyrun "remote history: --history --remote, picker History rows, --ls-json cwd" remote_history_test.py
     pyrun "--ls-json --remote --follow: the list as a stream, watch and polled hosts" ls_follow_test.py
