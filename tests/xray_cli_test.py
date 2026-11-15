@@ -1281,6 +1281,20 @@ def test_refs():
           rl.returncode == 0 and rf.returncode == 0 and not ml and
           [l["mention"]["line"] for l in mf] == ["see src/far.c:3"],
           rl.stdout[-600:] + rl.stderr + rf.stdout[-300:])
+    # LOW-X28: so light's answer says partial; one for a path no window
+    # can hold does not, nor does --full's
+    rn = dch("--xray", "xr-refs", "--ref", "src/none.c", "--scope",
+             "session", "--json", env=head)
+    dl, dn = (ref_lines(rl.stdout) or [{}])[-1], (ref_lines(rn.stdout) or
+                                                   [{}])[-1]
+    df = (ref_lines(rf.stdout) or [{}])[-1]
+    check("ref: light's cwd walk stopped at its cap before a window that "
+          "may hold the path: partial; a path no window holds, and --full: "
+          "not partial",
+          dl.get("done") is True and dl["partial"] is True and
+          dn.get("done") is True and dn["partial"] is False and
+          df.get("done") is True and df["partial"] is False,
+          (dl, dn, df))
     prog = [l for l in ls if "progress" in l]
     check("ref: schema 1 on every line; a progress line per 250 ms "
           "(%d in %.2fs)" % (len(prog), wall),
@@ -1905,7 +1919,11 @@ def test_tasks():
                                                  "description": "soon"})),
         tk_said(ts(22), tk_use("toolu_s2", "TaskUpdate",
                                {"taskId": "1", "status": "pending"}),
-                side=True)]
+                side=True),
+        # a result whose id is no usable id: left out, counted (#344)
+        tk_said(ts(23), tk_use("toolu_n", "TaskCreate", {
+            "subject": "id 3.5", "description": ""})),
+        tk_made(ts(23), "toolu_n", 3.5)]
     with open(tp, "w") as f:
         for o in recs:
             f.write((o if isinstance(o, str) else json.dumps(o)) + "\n")
@@ -1927,7 +1945,7 @@ def test_tasks():
           h["partial"] is False, (rc, h, err))
     check("tasks: one task line per task, keys in order, then done",
           all(t and list(t) == TK_KEYS for t in tk) and
-          done == {"done": True, "count": 3, "dropped": 0}, (tk, done))
+          done == {"done": True, "count": 3, "dropped": 1}, (tk, done))
     want = [
         {"id": "1", "title": "Fix the login test", "status": "done",
          "label": "completed", "active": "Fixing the login test",

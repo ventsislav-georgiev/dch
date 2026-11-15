@@ -282,7 +282,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.67.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.68.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -809,7 +809,8 @@ old and still current. Pair it with `state` and
 ## Config file
 
 dch runs without one. The optional config holds opt-in features: `key = value`
-lines, `#` comments, the last line for a key wins. It lives at `$DCH_CONFIG`,
+lines, `#` comments, the last line for a key wins; a line over 1023 bytes
+is read as an empty value, never cut. It lives at `$DCH_CONFIG`,
 else `$XDG_CONFIG_HOME/dch/config`, else `~/.config/dch/config`, and is read
 fresh every time it is needed, so an edit takes effect at once, also in
 running sessions.
@@ -1041,8 +1042,8 @@ it has memories or instruction files:
   have shown and is drawn as it comes; it is read again when you open the
   tab and, while the session runs, at most every 5 seconds while the tab
   shows. A faint line under the rows gives the list's warning, and says
-  when the history was too long to read whole. A shell session, dch-lite,
-  an empty list and a host older than this dch have no Tasks tab.
+  when the history was too long to read whole. A shell session, an empty
+  list and a host older than this dch have no Tasks tab.
 - **Memory** (the last tab, only when `--memory` lists something): the
   session's memories and the instruction files in force (CLAUDE.md,
   AGENTS.md), under faint group lines, each counted: This session (what
@@ -1051,13 +1052,13 @@ it has memories or instruction files:
   and at the right `wrote` or `loaded` and its age; an instruction file
   shows its path, short. The tab's count is every row. `Enter` opens a card
   with the memory's path, kind, scope and time, then its text, scrollable;
-  a text cut at 16 KB says so and names the file. On a card of a memory
+  a text cut at 16 KB says so and names the file, when it has one. On a card of a memory
   this session wrote or loaded, `Enter` reads that prompt, and `q` comes
   back to the card. `/` filters on the id, title, note, kind, path and
   text; `o` works as on Prompts. The list is asked for after the prompts
   have shown; while the session runs it is read again every 30 seconds
-  while the tab shows. A shell session, dch-lite, no memory and a host
-  older than this dch have no Memory tab.
+  while the tab shows. A shell session, no memory and a host older
+  than this dch have no Memory tab; dch-lite has both tabs.
 
 A ref typed after `/` (a ticket, issue, pull request, commit, file or URL,
 as `--ref` takes it) opens its card with `Ctrl-R`, on any tab, while
@@ -1317,10 +1318,14 @@ The corpus:
     not count. Only a line with an editing key is taken as the screen shows
     it, since history and completion change it. The first command after
     `--restart` (no `B` seen yet) counts when the row above the cursor ends
-    with a typed line. A `C` with none of these is read as forged by output:
-    a program that prints marks gets a chapter only for a block whose text
-    is a line the user typed, once per line, or for a block it holds open
-    while the user types a line with an editing key. The title is the typed
+    with a typed line (the line's rows, when it wraps). A `C` with none of
+    these is read as forged by output: a program that prints marks gets a
+    chapter only for a block whose text is a line the user typed, once per
+    line, or for a block it holds open while the user types a line with an
+    editing key. So a program that prints `A` and `B` and then waits while
+    the user types a line gets that line's chapter (the terminal echoes the
+    line after its `B`), and the shell's own run of the line gets none: the
+    screen cannot tell a program's echo from a shell's line editor. The title is the typed
     line; a `C;cmdline=` in the mark is ignored.
   - Rows, and the marks on them, enter the ring only when they scroll off
     the primary screen. So the commands still on the visible screen (in a
@@ -1589,7 +1594,9 @@ ref (`dch: not a ref`), relative paths against the session's cwd.
   found inside the budget: in windows of 1 MiB from the end, each read from
   its first whole line on, by a decoder that starts there with the cwd the
   full read has there when a line within 16 MB before the window names it,
-  else none, so a relative path there is no file ref (a mention in the turn the window starts in has
+  else none, so a relative path there is no file ref; when such a window
+  may hold the asked path, the answer says `partial: true` with
+  `why: "range"` (a mention in the turn the window starts in has
   `chapter: null`, unless the window starts the file, since a prompt there
   may continue an older turn; so does one in a turn the window saw begin
   only after a subagent's first record there or a tool result whose call is
@@ -1809,7 +1816,8 @@ the way `--ref` prints its lines, and exits 0:
   (`pending`, `in_progress`, `completed`, `deleted`); `label` is the
   source's own word. A deleted task stays, `dropped`. `title`, `active`
   (the text shown while it runs) and `note` (the description's first line)
-  are one line each, cut as chapter titles are. `created` and `updated` are
+  are one line each, cut as chapter titles are: 120 characters, and any
+  Unicode line break ends the line (U+000B and U+000C too). `created` and `updated` are
   ISO 8601 UTC from the records' timestamps, or `null`. `chapter` is the
   anchor of the chapter that last changed the task, `created_chapter` the
   one that created it; both open with `--chapter`. `blocked_by` lists ids.
@@ -1817,7 +1825,9 @@ the way `--ref` prints its lines, and exits 0:
   hold, or with an unknown status word, changes nothing.
 - **Caps.** The transcript is read as `--json` reads it (the 3.8 range):
   `partial: true` when records may be past it. The newest 50000 tasks are
-  kept; `dropped` counts the ones left out. A line is at most 64 KB. A bad
+  kept; `dropped` counts the ones left out, and the creates whose result
+  gives an id that is empty, too long, or neither text nor a whole number.
+  A line is at most 64 KB. A bad
   or oversized transcript line is skipped. No `done` line means the answer
   was cut.
 
@@ -1861,9 +1871,9 @@ per file (`"cut":true` after `body` when it was cut), then
   `chapter` is the newest such turn's `anchor` from `--json`. The
   transcript is read in `--json`'s range; `partial: true` when that range
   may have dropped records.
-- **Order and caps.** Rows touched this session first, the newest first;
-  then the other memories, newest `updated` (the file's mtime, UTC) first;
-  instruction files last, in load order. `body` is the file's text, cut at
+- **Order and caps.** Memories touched this session first, the newest
+  first; then the other memories, newest `updated` (the file's mtime, UTC)
+  first; instruction files last, in load order, touched or not. `body` is the file's text, cut at
   16 KB (and further if its line would pass 64 KB); a file over 1 MB, a
   memory file that is a symlink, or anything that is not a regular file has
   `body: null` and is never followed or read. An instruction file may be a
@@ -1892,20 +1902,28 @@ memory_command = ~/bin/my-notes
   home), stdin `/dev/null`, in its own process group. Its environment adds
   `DCH_SESSION` (the session name), `DCH_SESSION_CWD`, `DCH_AGENT`
   (`claude`, `codex` or empty), `DCH_AGENT_SESSION_ID` (the agent's
-  conversation id, or empty) and `DCH_ROWS_MAX`.
+  conversation id, or empty) and `DCH_ROWS_MAX`. A config line over 1023
+  bytes is never run cut: the built-in answer says `not a command line
+  (the config line is over 1023 bytes)`.
 - **Lines.** One JSON object per line on stdout; rows show as they arrive.
   An optional first line `{"title":"…"}` names the list (the header's
-  `title`). A row has `title` (required), `id`, `status` (`pending`,
+  `title`): a first line with `title` as its only key is always that, never
+  a row (both examples below start so), so give a first row a second key
+  such as `id`. A row has `title` (required), `id`, `status` (`pending`,
   `active`, `done`, `dropped`, or `in_progress`, `completed`, `deleted`; any
   other word is pending with the word as its `label`), `label`, `active`,
   `note`, `created`, `updated` (passed through as text: a reader treats a
   value that is not ISO 8601 as `null`), `blocked_by` (ids), `url` and
-  `group`, bare or wrapped as `{"task":{…}}`. A line that is not a JSON
+  `group`, bare or wrapped as `{"task":{…}}`. Text fields are cut as
+  chapter titles are (120 characters, the first line); `url` is kept whole.
+  `chapter` and `created_chapter` are `null`: a command's rows are not tied
+  to the transcript. A line that is not a JSON
   object, has no title or is over 64 KB is skipped; the `done` line's
   `dropped` counts those, plus the row seen past the row cap.
 - **Limits.** 5 s in all, 32 MB of output, 50000 rows (the first kept).
   Past a limit the process group is ended and the rows so far stay, so
-  print what matters first.
+  print what matters first. A program that leaves the group (`setsid`,
+  `setpgid`) is not followed and keeps running.
 - **Fallback.** At least one row: the command is the source
   (`"source":"command"`), and the header comes with the first row. No row:
   the built-in source answers exactly as without the command; a failure or
@@ -1936,8 +1954,8 @@ exec gh issue list --limit 200 --json number,title,url,updatedAt \
 `memory_command` answers `--memory` by the same rules: the same run,
 environment, limits, fallback (the built-in memory answers when it gives no
 row) and `warn`. A row has `title` (required), `id`, `note`, `kind`,
-`scope`, `updated`, `path`, `session`, `chapter` and `body` (cut at 16 KB,
-then `"cut":true`), bare or wrapped as `{"memory":{…}}`; a lone first
+`scope`, `updated`, `path`, `session` and `body` (cut at 16 KB, then
+`"cut":true`; `chapter` is `null`), bare or wrapped as `{"memory":{…}}`; a lone first
 `{"title":"…"}` line names the list. Its header has `--memory`'s keys, with
 `"source":"command"`.
 

@@ -1017,7 +1017,7 @@ tasks; \fBEnter\fR reads the prompt that last changed the task, \fBq\fR
 back to it, or opens a card with what is known of a task with no prompt;
 \fB/\fR filters on id, title, note and label; asked once the prompts have
 shown, drawn as it comes, read again when the tab opens and every 5 s
-while it shows a running session; no tab for a shell, dch\-lite, an empty
+while it shows a running session; no tab for a shell, an empty
 list or an older host)
 and, after it and only when there is one,
 .B Memory
@@ -1028,11 +1028,11 @@ first), Memories and Instructions, each counted; a row is the title, the
 kind and note faint, and at the right \(lqwrote\(rq or \(lqloaded\(rq and the
 age, an instruction file its short path; the tab counts every row;
 \fBEnter\fR opens a card with path, kind, scope, time and the text,
-scrollable, a text cut at 16 KB naming its file; on a card of a memory this
+scrollable, a text cut at 16 KB naming its file if any; on a card of a memory this
 session wrote or loaded, \fBEnter\fR reads that prompt and \fBq\fR comes back;
 \fB/\fR filters on id, title, note, kind, path and text; asked once the
 prompts have shown, read again every 30 s while it shows a running
-session; no tab for a shell, dch\-lite, no memory or an older host).
+session; no tab for a shell, no memory or an older host; dch\-lite has it).
 A card shows the ref's definitions, first and latest mention, counts by
 scope and mentions (newest first within each file, this session's first,
 also after
@@ -1264,7 +1264,9 @@ and no
 .BR passage ;
 a transcript or rollout is read newest first, in 1 MiB windows from the
 end, each by a decoder that starts there (with the cwd the full read has
-there when a line within 16 MB before the window names it, else none; a window whose raw bytes cannot hold the ref is not decoded), so a
+there when a line within 16 MB before the window names it, else none, and then
+.B partial
+is true when that window may hold the asked path; a window whose raw bytes cannot hold the ref is not decoded), so a
 ref of the last turns is
 found inside the budget: lines come newest window first, and a mention
 in the turn its window starts in (unless the window starts the file), or
@@ -1674,8 +1676,10 @@ The transcript is read as
 .B \-\-json
 reads it
 .RB ( partial:true
-past that range); the newest 50000 tasks are kept, a line is at most
-64 KB.
+past that range); the newest 50000 tasks are kept,
+.B dropped
+counts the rest and the creates whose result gives no usable id, a line is
+at most 64 KB.
 A shell, or a session with no task record, gives
 .B source:none
 and no task lines.
@@ -1779,8 +1783,9 @@ command naming its path with a redirect or an editing verb, apply_patch),
 when one read it, else null;
 .B chapter
 the newest such turn's anchor.
-Session rows come first, newest first, then memories by mtime, newest
-first, then instruction files in load order.
+Memories touched this session come first, newest first, then the other
+memories by mtime, newest first, then instruction files in load order,
+touched or not.
 A body is cut at 16 KB; a file over 1 MB, a memory file that is a symlink
 or a non\-regular file has a null body and is never read (an instruction
 file's symlink to a regular file is read through, its path the link's);
@@ -2047,6 +2052,13 @@ when the text between its B and C is exactly a line the client sent that no
 earlier block used; a line edited before its Enter gets none.
 A line typed at the prompt must also be its B..C text, unless it holds an
 editing key; a right prompt after it does not count.
+The first command after
+.B \-\-restart
+counts when the row above the cursor ends with a typed line (its rows, when
+it wraps).
+A program that prints A and B and waits while the user types a line gets
+that line's chapter, and the shell's run of it gets none: the screen cannot
+tell the terminal's echo from a shell's line editor.
 The title is the typed line, never a
 .B C;cmdline=
 from the mark.
@@ -3898,7 +3910,8 @@ else
 .I value
 lines,
 .B #
-comments, the last line for a key wins.
+comments, the last line for a key wins; a line over 1023 bytes reads as
+an empty value, never cut.
 .TP
 .B dch \-\-config
 Print the path, then every known key as
@@ -4031,13 +4044,21 @@ or empty),
 and
 .B DCH_ROWS_MAX
 added to its environment.
+A config line over 1023 bytes is never run cut: the built\-in answer
+says
+.IR "not a command line (the config line is over 1023 bytes)" .
 It prints one JSON object per line: an optional first
 .B {"title":"..."}
-line, then rows with the
+line (title its only key: always the list's name, never a row), then rows
+with the
 .B \-\-tasks
 fields
 .RB ( title
-required), bare or wrapped as
+required; text cut as chapter titles are;
+.B chapter
+and
+.B created_chapter
+null), bare or wrapped as
 .BR {"task":{...}} ;
 a line that is not an object, has no title or is over 64 KB is skipped
 and counted in the
@@ -4046,7 +4067,11 @@ line's
 .BR dropped ,
 as is the row seen past the row cap.
 Limits: 5 s, 32 MB of output, 50000 rows; past one the process group is
-ended and the rows so far stay.
+ended and the rows so far stay (a program that left the group with
+.BR setsid ()
+or
+.BR setpgid ()
+is not followed).
 At least one row:
 .B source:command
 and the rows as they arrive; a stop or a non\-zero exit after them puts
@@ -4078,7 +4103,9 @@ fields
 required;
 .B body
 cut at 16 KB, then
-.BR cut:true ),
+.BR cut:true ;
+.B chapter
+null),
 bare or wrapped as
 .BR {"memory":{...}} ;
 the header has

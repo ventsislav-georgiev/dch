@@ -1,13 +1,18 @@
 /* Units for X-ray --memory's parsers, xmem.c (#322): the frontmatter block
 ** (keys, metadata.type, quotes, block scalars, a fence never closed), the
 ** MEMORY.md index line (bullets, dashes, refused targets) and the shell
-** rule (a redirect or an editing verb writes).
+** rule (a redirect or an editing verb writes); xm_print over a rules tree
+** of XM_MANY files that the walk reaches twice (#344).
 **
 **   cc -I. -o xmem_unit tests/xmem_unit.c xmem.c xray.c json.c && ./xmem_unit
 */
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <time.h>
+#include <unistd.h>
 #include "xmem.h"
 
 static int fails;
@@ -137,12 +142,93 @@ t_wrote(void)
 	CHECK("loaded: empty", !xm_wrote("", 0));
 }
 
+#ifndef XM_MANY
+#define XM_MANY 3000
+#endif
+
+static double
+now(void)
+{
+	struct timespec t;
+
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return t.tv_sec + t.tv_nsec / 1e9;
+}
+
+/* cwd = home, cfg = home/.claude: its CLAUDE.md and rules come twice and
+** are listed once. The dedupe was N^2 (#344); a 3000-file tree does not
+** show it (its open and stat calls dominate), -DXM_MANY=50000 does: 25.4 s
+** before, 16.5 s after on a loaded Mac, the rest is open(). The 30 s bound
+** is about 50x the 3000-file run, so only a hang trips it. */
+static void
+t_many(void)
+{
+	char home[] = "/tmp/xmem_unit.XXXXXX", p[256], *buf = NULL, *l, *e;
+	struct xm_req q = { "claude", NULL, NULL, NULL, NULL, NULL };
+	size_t len = 0, rows = 0, mine = 0;
+	FILE *f;
+	double t;
+	int k;
+
+	if (!mkdtemp(home))
+	{
+		CHECK("many: a temp dir", 0);
+		return;
+	}
+	snprintf(p, sizeof p, "%s/.claude", home);
+	mkdir(p, 0700);
+	snprintf(p, sizeof p, "%s/.claude/rules", home);
+	mkdir(p, 0700);
+	snprintf(p, sizeof p, "%s/.claude/CLAUDE.md", home);
+	if ((f = fopen(p, "w")))
+		fclose(f);
+	for (k = 0; k < XM_MANY; k++)
+	{
+		snprintf(p, sizeof p, "%s/.claude/rules/r%05d.md", home, k);
+		if ((f = fopen(p, "w")))
+			fclose(f);
+	}
+	snprintf(p, sizeof p, "%s/.claude", home);
+	q.cfg = p;
+	q.cwd = home;
+	f = open_memstream(&buf, &len);
+	t = now();
+	xm_print(f, &q);
+	t = now() - t;
+	fclose(f);
+	for (l = buf; l && *l; l = e ? e + 1 : NULL)
+	{
+		if ((e = strchr(l, '\n')))
+			*e = '\0';
+		if (!strncmp(l, "{\"memory\":", 10) && ++rows)
+			mine += strstr(l, "/.claude/rules/r") ||
+			        strstr(l, "/.claude/CLAUDE.md");
+	}
+	CHECK("many: each instruction file once", mine == XM_MANY + 1);
+	printf("       %zu rows in %.2f s\n", rows, t);
+	CHECK("many: n log n, not N^2 (30 s bound)", t < 30);
+	free(buf);
+	for (k = 0; k < XM_MANY; k++)
+	{
+		snprintf(p, sizeof p, "%s/.claude/rules/r%05d.md", home, k);
+		unlink(p);
+	}
+	snprintf(p, sizeof p, "%s/.claude/rules", home);
+	rmdir(p);
+	snprintf(p, sizeof p, "%s/.claude/CLAUDE.md", home);
+	unlink(p);
+	snprintf(p, sizeof p, "%s/.claude", home);
+	rmdir(p);
+	rmdir(home);
+}
+
 int
 main(void)
 {
 	t_front();
 	t_link();
 	t_wrote();
+	t_many();
 	printf("%s: %d failed\n", fails ? "FAIL" : "ok", fails);
 	return fails != 0;
 }

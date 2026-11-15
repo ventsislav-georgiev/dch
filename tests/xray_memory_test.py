@@ -57,8 +57,13 @@ def check(msg, cond, detail=""):
             print("       " + str(detail)[:1500])
 
 
-T = os.path.realpath(tempfile.mkdtemp(prefix="dxm",
-                                      dir=os.environ.get("TMPDIR", "/tmp")))
+# T sits in OUTER, which holds a stray CLAUDE.md: the walk goes up from the
+# session cwd, so every row must ignore instruction files above T (LOW-T19)
+OUTER = os.path.realpath(tempfile.mkdtemp(
+    prefix="dxo", dir=os.environ.get("TMPDIR", "/tmp")))
+with open(os.path.join(OUTER, "CLAUDE.md"), "w") as _f:
+    _f.write("STRAY-ABOVE-T\n")
+T = os.path.realpath(tempfile.mkdtemp(prefix="dxm", dir=OUTER))
 HOME = os.path.join(T, "home")
 CFG = os.path.join(HOME, ".claude")
 PDIR = os.path.join(CFG, "projects", "-repo-sub")
@@ -98,6 +103,10 @@ def memory(name, env=None):
     except ValueError:
         pass
     rows = [o["memory"] for o in objs if "memory" in o]
+    # instruction files above T are the host's (and OUTER's stray): never
+    # compared, never printed
+    rows = [r for r in rows if r["kind"] != "instructions" or
+            r["path"].startswith(T + os.sep)]
     return (r.returncode, objs[0] if objs else None, rows,
             objs[-1] if objs else None, r.stdout, r.stderr.decode())
 
@@ -326,6 +335,8 @@ def test_claude():
     check("order: session rows newest first, then newest mtime first",
           order == ["gamma", "delta", "beta", "alpha", "esc", "bad", "long",
                     "big", "epsilon", "fifo", "link", "gone"], order)
+    check("the walk does read an instruction file above T (the rows below "
+          "ignore it)", b"STRAY-ABOVE-T" in raw)
     ins = [r for r in rows if r["kind"] == "instructions"]
     check("instruction files: user, then every ancestor root first (~/"
           "CLAUDE.md above the repo, the config dir's files not twice), "
@@ -368,6 +379,11 @@ def test_claude():
 
 def test_agents_fallback():
     """No CLAUDE.md anywhere: AGENTS.md, .claude/AGENTS.md"""
+    # a CLAUDE.md anywhere above the cwd is "in force" and hides AGENTS.md:
+    # this row needs the walk clean, so OUTER's stray goes first. Above OUTER
+    # it stays the host's (a stray /tmp/CLAUDE.md fails this row, never
+    # printing a body: only the filtered rows are shown)
+    os.unlink(os.path.join(OUTER, "CLAUDE.md"))
     proj = os.path.join(T, "agproj")
     os.makedirs(os.path.join(proj, ".git"))
     write(os.path.join(proj, "AGENTS.md"), "ag\n")
@@ -398,7 +414,7 @@ def test_shell_and_usage():
     rc, hd, rows, done, raw, err = memory("xs")
     check("a shell session: source none, no rows",
           rc == 0 and hd and hd["source"] == "none" and rows == [] and
-          done == {"done": True, "count": 0, "dropped": 0}, (rc, raw, err))
+          done == {"done": True, "count": 0, "dropped": 0}, (rc, rows, err))
     for a, why in ((["--memory"], "no --json"),
                    (["--memory", "--memory", "--json"], "twice"),
                    (["--memory", "--follow", "--json"], "--follow"),
@@ -485,7 +501,7 @@ def test_codex():
                   if marker else ""))
         rc, hd, rows, done, raw, err = memory(n)
         check("codex: source codex", rc == 0 and hd and
-              hd["source"] == "codex" and not hd["partial"], (rc, raw, err))
+              hd["source"] == "codex" and not hd["partial"], (rc, rows, err))
         got_rows = [(r["path"], r["scope"], r["session"]) for r in rows]
         check("codex: $CODEX_HOME/AGENTS.md, the root's override over its "
               "AGENTS.md, the cwd's AGENTS.md; a shell read loaded, a "
@@ -574,7 +590,7 @@ def main():
         test_codex()
         test_remote()
     finally:
-        shutil.rmtree(T, ignore_errors=True)
+        shutil.rmtree(OUTER, ignore_errors=True)
     print("all ok" if not fails[0] else "%d FAILED" % fails[0])
     return 1 if fails[0] else 0
 

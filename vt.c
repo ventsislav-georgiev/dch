@@ -343,13 +343,34 @@ typed_take(size_t s, size_t e)
 	return e - s;
 }
 
+/* Is screen row y the soft-wrapped rest of the row above? */
+static int
+row_cont(size_t y)
+{
+	GhosttyPoint p;
+	GhosttyGridRef g;
+	GhosttyRow row;
+	bool cont = false;
+
+	memset(&p, 0, sizeof p);
+	p.tag = GHOSTTY_POINT_TAG_SCREEN;
+	p.value.coordinate.y = (uint32_t)y;
+	memset(&g, 0, sizeof g);
+	g.size = sizeof g;
+	if (ghostty_terminal_grid_ref(the_term, p, &g) == GHOSTTY_SUCCESS &&
+	    ghostty_grid_ref_row(&g, &row) == GHOSTTY_SUCCESS)
+		ghostty_row_get(row, GHOSTTY_ROW_DATA_WRAP_CONTINUATION, &cont);
+	return cont;
+}
+
 /* A C with no input since its B: the shell ran a line typed ahead (queued
 ** before B) when the screen from B to the cursor is a whole line the client
 ** sent that no C has used; it is used up. Output that prints marks can so
 ** take a block only with a line the user typed, once, titled with it
 ** (#302). With no B seen since the mirror started (a --restart's first
 ** command, #335) the line may follow any prompt on the row above the
-** cursor. Returns the title's length, 0 for none. */
+** cursor (its first row, when the line wraps: NIT-X7). Returns the title's
+** length, 0 for none. */
 static size_t
 typed_ahead(void)
 {
@@ -362,8 +383,10 @@ typed_ahead(void)
 	ghostty_terminal_get(the_term, GHOSTTY_TERMINAL_DATA_CURSOR_Y, &cy);
 	if (xbref ? ref_pos(xbref, &bx, &by) < 0 : !(by = hist_rows() + cy))
 		return 0;
+	/* a typed line wraps over at most xtl rows: the walk stays bounded */
 	if (!xbref)
-		by--;
+		for (by--, i = 0; by && i < xtl && row_cont(by); i++)
+			by--;
 	if (scr_text(bx, by, &t, &l) < 0 || memchr(t, '\n', l))
 		return 0;
 	for (s = i = 0; i < xtl; i++)
