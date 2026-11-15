@@ -214,6 +214,9 @@ struct xv
 	char *rans;		/* opened on an answer: its start (#290) */
 	char *rsnip;		/* opened on a Search hit: its snippet */
 	int rskip;		/* and the entries before it holding it */
+	int rtwins;		/* its twins (itself too) when offsets came */
+	int rwho;		/* its who's first letter */
+	char *rtool;		/* and its tool */
 	char *ranchor, *rturn;	/* the chapter shown; one being turned to */
 	long long rat;
 	int rtrunc, rtop, rw, rloaded;
@@ -1585,13 +1588,33 @@ xv_read_free(struct xv *v)
 	v->rloaded = v->rtop = 0;
 }
 
+/* Entry n could hold the Search hit's twin past its cut (LOW-V33): of the
+** hit's kind, its text at the engine's cap (xray.h). */
+static int
+xv_cut(const struct xv *v, int n)
+{
+	const struct xv_ent *e = &v->e[n];
+	const unsigned char *c;
+	size_t k = 0;
+	int out = !strcmp(e->role, "output");
+
+	if (v->rwho == 't' ? !out && strcmp(e->role, "tool")
+	    : e->role[0] != v->rwho)
+		return 0;
+	if (v->rtool && *v->rtool && *e->tool && strcmp(v->rtool, e->tool))
+		return 0;
+	for (c = (const unsigned char *)e->text; *c; c++)
+		k += (*c & 0xc0) != 0x80;
+	return k >= (out ? XR_OUTPUT_CAP : XR_TEXT_CAP);
+}
+
 /* The entries as lines of w cells: a head per entry, its text wrapped. */
 static void
 xv_wrap(struct xv *v, int w)
 {
 	struct xv_rl l;
 	const char *p;
-	int k, at = -1, skip;
+	int k, at = -1, skip, held, cut, c;
 
 	v->nrl = 0;
 	v->rw = w;
@@ -1635,6 +1658,15 @@ xv_wrap(struct xv *v, int w)
 	/* opened on a Search hit (MED-V21): in the entry holding its snippet
 	** (entries carry no offset), at the first line from there on holding
 	** the text, else the snippet's own line */
+	/* a twin whose snippet lies past an entry's cut is not held
+	** (LOW-V33): when the cut entries of the hit's kind are exactly the
+	** missing twins, they count as twins too, in entry order */
+	for (k = held = cut = 0; v->rsnip && !v->rloaded && k < v->ne; k++)
+		if (xv_snipat(v->e[k].text, v->rsnip))
+			held++;
+		else
+			cut += xv_cut(v, k);
+	cut = held < v->rtwins && cut == v->rtwins - held;
 	skip = v->rskip;
 	for (k = 0, p = NULL; v->rsnip && !v->rloaded && k < v->nrl; k++)
 		if (!v->rl[k].kind && at >= 0)
@@ -1642,8 +1674,11 @@ xv_wrap(struct xv *v, int w)
 		else if (!v->rl[k].kind)
 		{
 			p = xv_snipat(v->e[v->rl[k].n].text, v->rsnip);
-			if (p && skip-- > 0)
+			c = !p && cut && xv_cut(v, (int)v->rl[k].n);
+			if ((p || c) && skip-- > 0)
 				p = NULL;	/* an earlier hit's (LOW-V29) */
+			else if (c)
+				at = k;	/* the hit's, cut before it: its start */
 		}
 		else if (p && v->rl[k].s + v->rl[k].n > p &&
 		         (at < 0 || xv_in(v->rl[k].s, v->rl[k].n, v->rwant)))
@@ -1694,6 +1729,8 @@ xv_rline(struct xv *v, const struct json_parser *p)
 		v->rans = NULL;
 		free(v->rsnip);
 		v->rsnip = NULL;
+		free(v->rtool);
+		v->rtool = NULL;
 	}
 	xv_read_free(v);
 	v->rtitle = xv_str(p, 0, "title");
@@ -1747,6 +1784,8 @@ xv_read(struct xv *v, const char *anchor, const char *want)
 	v->rans = NULL;
 	free(v->rsnip);
 	v->rsnip = NULL;
+	free(v->rtool);
+	v->rtool = NULL;
 	free(v->ranchor);
 	v->ranchor = strdup(anchor);
 	free(v->rturn);
@@ -4057,12 +4096,19 @@ xv_key(struct xv *v, int c)
 				v->rsnip = strdup(v->hit[k].snippet);
 			/* an earlier hit of the turn with its snippet is in an
 			** entry before it (LOW-V29) */
-			for (v->rskip = 0, i = 0; i < v->nh; i++)
-				v->rskip += v->hit[i].off < v->hit[k].off &&
+			for (v->rskip = v->rtwins = 0, i = 0; i < v->nh; i++)
+				if (v->hit[k].off >= 0 &&
 				    !strcmp(v->hit[i].chapter,
 				            v->hit[k].chapter) &&
 				    !strcmp(v->hit[i].snippet,
-				            v->hit[k].snippet);
+				            v->hit[k].snippet))
+				{
+					v->rtwins++;
+					v->rskip += v->hit[i].off <
+					            v->hit[k].off;
+				}
+			v->rwho = v->hit[k].who[0];
+			v->rtool = strdup(v->hit[k].tool);
 		}
 		else if (v->tab == 3)
 			snprintf(v->status, sizeof v->status, "this place is "
@@ -4156,6 +4202,7 @@ xv_free(struct xv *v)
 	free(v->cses);
 	free(v->rans);
 	free(v->rsnip);
+	free(v->rtool);
 	free(v);
 }
 
