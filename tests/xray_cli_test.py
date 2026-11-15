@@ -2125,9 +2125,15 @@ def test_tasks_cap():
 def chapter(n, anchor, env=None):
     r = dch("--xray", n, "--chapter", anchor, "--json", env=env)
     try:
-        return r.returncode, json.loads(r.stdout), r.stderr, r.stdout
+        c = json.loads(r.stdout)
     except ValueError:
         return r.returncode, None, r.stderr, r.stdout
+    # #356: a transcript entry's record offset, a number (xray_view_test's
+    # twins rows check where it points); the rows here compare the rest
+    for e in c.get("entries", []):
+        if isinstance(e.get("offset"), int) and e["offset"] >= 0:
+            del e["offset"]
+    return r.returncode, c, r.stderr, r.stdout
 
 
 def ent(role, text, tool=None, error=False):

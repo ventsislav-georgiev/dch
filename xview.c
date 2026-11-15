@@ -110,6 +110,7 @@ struct xv_ent
 {
 	char *role, *tool, *text;
 	int error;
+	long long off;	/* its record's, -1 from a host that sends none */
 };
 
 struct xv_hit		/* a search's hit (#291) */
@@ -213,7 +214,8 @@ struct xv
 	char *rtitle, *rwant;
 	char *rans;		/* opened on an answer: its start (#290) */
 	char *rsnip;		/* opened on a Search hit: its snippet */
-	int rskip;		/* and the entries before it holding it */
+	long long roff;		/* and its record's offset (#356), -1 none */
+	int rskip;		/* the entries before it holding it */
 	int rtwins;		/* its twins (itself too) when offsets came */
 	int rwho;		/* its who's first letter */
 	char *rtool;		/* and its tool */
@@ -1588,6 +1590,17 @@ xv_read_free(struct xv *v)
 	v->rloaded = v->rtop = 0;
 }
 
+/* Entry n is of the Search hit's kind: its who's role, a tool's call or
+** output. */
+static int
+xv_kind(const struct xv *v, int n)
+{
+	const char *r = v->e[n].role;
+
+	return v->rwho == 't' ? !strcmp(r, "tool") || !strcmp(r, "output")
+	       : r[0] == v->rwho;
+}
+
 /* Entry n could hold the Search hit's twin past its cut (LOW-V33): of the
 ** hit's kind, its text at the engine's cap (xray.h). */
 static int
@@ -1598,8 +1611,7 @@ xv_cut(const struct xv *v, int n)
 	size_t k = 0;
 	int out = !strcmp(e->role, "output");
 
-	if (v->rwho == 't' ? !out && strcmp(e->role, "tool")
-	    : e->role[0] != v->rwho)
+	if (!xv_kind(v, n))
 		return 0;
 	if (v->rtool && *v->rtool && *e->tool && strcmp(v->rtool, e->tool))
 		return 0;
@@ -1614,7 +1626,7 @@ xv_wrap(struct xv *v, int w)
 {
 	struct xv_rl l;
 	const char *p;
-	int k, at = -1, skip, held, cut, c;
+	int k, at = -1, skip, held, cut, c, te, n;
 
 	v->nrl = 0;
 	v->rw = w;
@@ -1656,8 +1668,8 @@ xv_wrap(struct xv *v, int w)
 		}
 	}
 	/* opened on a Search hit (MED-V21): in the entry holding its snippet
-	** (entries carry no offset), at the first line from there on holding
-	** the text, else the snippet's own line */
+	** (an older host's entries carry no offset), at the first line from
+	** there on holding the text, else the snippet's own line */
 	/* a twin whose snippet lies past an entry's cut is not held
 	** (LOW-V33): when the cut entries of the hit's kind are exactly the
 	** missing twins, they count as twins too, in entry order */
@@ -1668,14 +1680,25 @@ xv_wrap(struct xv *v, int w)
 			cut += xv_cut(v, k);
 	cut = held < v->rtwins && cut == v->rtwins - held;
 	skip = v->rskip;
+	/* entries that say their record's offset (#356): the hit's is the
+	** entry of its kind at its offset, one holding the snippet first; the
+	** count above is for a host that sends none */
+	for (k = 0, te = -1; v->rsnip && !v->rloaded && v->roff >= 0 &&
+	     k < v->ne; k++)
+		if (v->e[k].off == v->roff && xv_kind(v, k) &&
+		    (te < 0 || (!xv_snipat(v->e[te].text, v->rsnip) &&
+		                xv_snipat(v->e[k].text, v->rsnip))))
+			te = k;
 	for (k = 0, p = NULL; v->rsnip && !v->rloaded && k < v->nrl; k++)
 		if (!v->rl[k].kind && at >= 0)
 			break;
 		else if (!v->rl[k].kind)
 		{
-			p = xv_snipat(v->e[v->rl[k].n].text, v->rsnip);
-			c = !p && cut && xv_cut(v, (int)v->rl[k].n);
-			if ((p || c) && skip-- > 0)
+			n = (int)v->rl[k].n;
+			p = te < 0 || n == te ? xv_snipat(v->e[n].text, v->rsnip)
+			    : NULL;
+			c = te < 0 ? !p && cut && xv_cut(v, n) : n == te && !p;
+			if (te < 0 && (p || c) && skip-- > 0)
 				p = NULL;	/* an earlier hit's (LOW-V29) */
 			else if (c)
 				at = k;	/* the hit's, cut before it: its start */
@@ -1749,6 +1772,7 @@ xv_rline(struct xv *v, const struct json_parser *p)
 		e.tool = xv_str(p, t, "tool");
 		e.text = xv_str(p, t, "text");
 		e.error = xv_bool(p, t, "error");
+		e.off = xv_num(p, t, "offset", -1);
 		/* a tab or CR as a blank: the reader lays text out itself */
 		for (c = e.text; *c; c++)
 			if (*c == '\t' || *c == '\r')
@@ -4107,6 +4131,7 @@ xv_key(struct xv *v, int c)
 					v->rskip += v->hit[i].off <
 					            v->hit[k].off;
 				}
+			v->roff = v->hit[k].off;
 			v->rwho = v->hit[k].who[0];
 			v->rtool = strdup(v->hit[k].tool);
 		}

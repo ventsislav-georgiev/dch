@@ -2067,7 +2067,7 @@ exits 1 with `dch: chapter gone` (the transcript was rewritten, or the ring
 evicted or cleared the block): read `--json` again. `--chapter` does not go
 with `--ref`, `--follow` or `--clear`.
 
-Each entry is `{"role","tool","text","error"}`:
+Each entry is `{"role","tool","text","error","offset"}`:
 - Claude Code: `user` is the prompt (a slash command as `/name args`, a
   compaction's summary too), `assistant` its text. `tool` is a call, with the
   tool's name: a Bash command, the path of an Edit, MultiEdit, Write or Read,
@@ -2089,6 +2089,10 @@ Each entry is `{"role","tool","text","error"}`:
   non-zero exit. Only rows that scrolled into the ring count: rows still on
   the screen are not in it. A block with no marks has no chapter.
 
+`offset` (1.71.0) is the byte offset of the transcript or rollout line the
+entry came from, as a `--search` hit's `offset`: the entry of a hit's kind
+with the hit's `offset` holds that hit. A shell's entries, and those of a
+host older than 1.71.0, have no `offset`.
 `text` is cut at 6000 Unicode scalars (3000 for an `output`) and escaped like
 `--ls-json`. The whole object is capped at 1 MiB: entries past the cap are
 left out and `truncated` is `true`. An ended or History Claude Code session is

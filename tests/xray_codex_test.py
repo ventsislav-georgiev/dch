@@ -277,7 +277,8 @@ def test_live():
               c and c["session"] == n and c["session_id"] == TID and
               c["anchor"] == o["chapters"][0]["anchor"] and
               c["kind"] == "prompt" and c["truncated"] is False and
-              c["entries"] == [
+              [{k: x for k, x in e.items() if k != "offset"}
+               for e in c["entries"]] == [
                   {"role": "user", "tool": None,
                    "text": "fix the parser, see #41", "error": False},
                   {"role": "tool", "tool": "exec",
@@ -285,6 +286,12 @@ def test_live():
                   {"role": "assistant", "tool": None,
                    "text": "done, see #41", "error": False}],
               (r.stdout, r.stderr))
+        offs = [e.get("offset") for e in (c or {}).get("entries", [])]
+        check("--chapter on a live Codex: each entry says its line's offset "
+              "(#356), the prompt's the anchor's",
+              len(offs) == 3 and all(isinstance(x, int) for x in offs) and
+              offs == sorted(offs) and
+              "f%s:%d" % (ino, offs[0]) == o["chapters"][0]["anchor"], offs)
         check("--chapter on a live Codex: one seam open, the rollout's",
               tr.count("xray seam: open") == 1 and
               "xray seam: open ino=%s" % ino in tr, tr)

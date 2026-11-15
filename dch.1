@@ -1860,9 +1860,16 @@ Otherwise it exits 1 with
 Each entry is
 .BR role ,
 .BR tool ,
-.B text
+.BR text ,
+.B error
 and
-.BR error .
+.B offset
+(1.71.0: the byte offset of the transcript or rollout line it came from, as
+a
+.B \-\-search
+hit's
+.BR offset ;
+none for a shell's entries).
 Claude Code:
 .B user
 (the prompt, a slash command as
