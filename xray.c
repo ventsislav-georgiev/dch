@@ -4083,6 +4083,10 @@ struct xr_scan
 	uint64_t files, bytes, base, too_long;
 	uint64_t cs, cp, cps, ca, cas;	/* 3.4's counts, files done */
 	int stop, out_full;
+	int hold, took;		/* light (#377): the budget waits while hold (a
+				** window, or the scan's first one and its cwd
+				** walk), so a cut drops older windows, never the
+				** newest's lines; took: the first was taken */
 	int cancel;		/* a write failed: 1 EPIPE (the reader left), 2 other */
 	const char *why;
 	long long last;
@@ -4495,13 +4499,13 @@ xr_scan_tick(void *ctx, uint64_t bytes)
 			x->why = "first";
 		}
 	}
-	else if (!x->stop && !x->full && !xr_noclock &&
+	else if (!x->stop && !x->full && !xr_noclock && !x->hold &&
 	         now - x->t0 - x->blocked >= x->budget)
 	{
 		x->stop = 1;
 		x->why = "budget";
 	}
-	else if (!x->stop && (x->full || xr_noclock) &&
+	else if (!x->stop && (x->full || xr_noclock || x->hold) &&
 	         now - x->t0 - x->blocked >= xr_lim.ms)
 	{
 		x->stop = 1;
@@ -7408,6 +7412,7 @@ win_read(struct xr_claude *d, int fd, uint64_t a, uint64_t b,
 {
 	struct xr_claude *e = xr_claude_new();
 	struct xr_chapters ch;
+	struct xr_scan *x = w->tick == xr_scan_tick ? w->tctx : NULL;
 	int rc;
 
 	if (!e)
@@ -7419,7 +7424,11 @@ win_read(struct xr_claude *d, int fd, uint64_t a, uint64_t b,
 	e->mlo = d->mlo;
 	e->mhi = d->mhi;
 	xr_claude_refs(e, &d->rk, d->ino, w->tick ? win_tick : NULL, w);
+	if (x)
+		x->hold = 1;
 	rc = read_range(e, fd, a, b, 0, buf, acc);
+	if (x)
+		x->hold = 0, x->took = 1;
 	xr_claude_end(e, d->ino, &ch);
 	xr_chapters_free(&ch);
 	d->halt = e->halt;
@@ -7629,7 +7638,10 @@ xr_claude_newest(struct xr_claude *d, int fd, uint64_t size, int *capped)
 	                  ((const struct xr_scan *)d->tctx)->key : NULL;
 	int fb = key && pf_build(&f, key), pf = !xr_noskip && fb;
 	int fk = fb && !strncmp(key, "file:", 5);
+	struct xr_scan *x = key ? d->tctx : NULL;
 
+	if (x && !x->took)
+		x->hold = 1;	/* the scan's first window and its cwd walk */
 	w.tick = d->tick;
 	w.tctx = d->tctx;
 	w.base = 0;
@@ -7679,6 +7691,8 @@ xr_claude_newest(struct xr_claude *d, int fd, uint64_t size, int *capped)
 			if (pf && b - a <= 2 * XR_CHUNK &&
 			    win_skip(d, &f, fd, a, b, &w, buf))
 			{
+				if (x)
+					x->hold = 0, x->took = 1;
 				b = a;
 				continue;
 			}
@@ -7725,6 +7739,8 @@ xr_claude_newest(struct xr_claude *d, int fd, uint64_t size, int *capped)
 		*capped = 1;
 		rc = 0;
 	}
+	if (x)
+		x->hold = 0;
 	free(buf);
 	free(acc);
 	free(sb);

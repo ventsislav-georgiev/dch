@@ -2935,6 +2935,42 @@ def test_ref_middle():
         os.unlink(tp)
 
 
+def test_light_377():
+    """#377: light's budget waits for the scan's first window (and its cwd
+    walk), so a cut keeps the newest window's newest mentions, not its
+    oldest. 800 KB of lines that look like a cwd but name none: the walk
+    to the newest window's cwd spends the 50 ms budget, and 1.72.0 cut
+    that window after its oldest line (here no mention; xv-o3: 001 alone)."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-p377")
+    os.makedirs(pdir, exist_ok=True)
+    sid = "11111111-2222-4333-8444-555555555377"
+    tp = os.path.join(pdir, sid + ".jsonl")
+    walk = '{"type":"progress","xcwd":0,"pad":"%s"}\n' % ("z" * 20)
+    with open(tp, "w") as f:
+        f.write(json.dumps({"type": "user", "cwd": "/home/demo/p377",
+                            "message": {"content": "start"}}) + "\n")
+        f.write(walk * (800000 // len(walk)))
+        for i in range(1, 251):
+            f.write(json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "note %03d about PROJ-77 %s" %
+                 (i, "z" * 3900)}]}}) + "\n")
+    history("xr-377", sid, cfg, "/home/demo/p377")
+    try:
+        r = dch("--xray", "xr-377", "--ref", "PROJ-77", "--budget-ms", "50",
+                "--json")
+        ls = ref_lines(r.stdout) or [{}]
+        m = [l["mention"]["line"][5:8] for l in ls if "mention" in l]
+        check("377 budget: a cut keeps the newest window's newest 200 "
+              "(notes 051 to 250), why budget, not its oldest",
+              r.returncode == 0 and
+              m == ["%03d" % i for i in range(51, 251)] and
+              ls[-1].get("why") == "budget",
+              (r.returncode, m[:3], m[-3:], ls[-1:], r.stderr[-300:]))
+    finally:
+        os.unlink(tp)
+
+
 def main():
     try:
         test_names()
@@ -2962,6 +2998,7 @@ def main():
         test_light_326()
         test_prefilter_reach()
         test_ref_middle()
+        test_light_377()
     finally:
         shutil.rmtree(T, ignore_errors=True)
     if fails[0]:

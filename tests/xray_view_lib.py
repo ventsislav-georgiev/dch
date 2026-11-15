@@ -509,10 +509,8 @@ def card_rows(v):
 
 
 def order_card(name, keys, secs=20.0):
-    """name's view, PROJ-9's card opened by ^R, settled. The clock off
-    (#376): under load light's 300 ms ends before the last window, and a
-    cut keeps a window's oldest lines (xv-o3: 001 alone), not the order."""
-    v = Pty([DCH, "--xray", name], 40, 100, {"DCH_XRAY_NOCLOCK": "1"})
+    """name's view, PROJ-9's card opened by ^R, settled."""
+    v = Pty([DCH, "--xray", name], 40, 100)
     v.wait(b"Prompts ", secs)
     v.pump(0.5)
     v.key(b"/PROJ-9", 0.5)
