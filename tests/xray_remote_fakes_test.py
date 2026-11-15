@@ -55,6 +55,9 @@ Covers:
   Also: 13 and 14 (Responses, Search): the parts on a fake host run here, the
   rest in xray_remote_view_test.py.
 
+Split for run time: xray_remote_fakes_more_test.py runs 10, this file
+the rest.
+
 Run:  python3 tests/xray_remote_fakes_test.py      (uses ./dch)
 """
 import os, sys
@@ -1178,7 +1181,10 @@ def test_stop():
         h.close()
 
 
-def main(port):
+def main(port, part="a"):
+    if part == "b":
+        test_stop()
+        return
     test_failures()
     test_link_drop()
     test_turn_drop()
@@ -1190,7 +1196,6 @@ def main(port):
     fixture_memory()
     test_memory(port)
     test_memory_fake()
-    test_stop()
 
 
 if __name__ == "__main__":

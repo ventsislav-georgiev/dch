@@ -37,6 +37,9 @@ Covers:
      ends at 1 on the alternate screen, 0 on the main one); the first attach
      pops nothing. A key after still reaches the session;
 
+Split for run time: this file runs 6, xray_remote_chord_more_test.py runs
+the rest (7 on).
+
 Run:  python3 tests/xray_remote_chord_test.py      (uses ./dch)
 """
 import os, sys
@@ -696,9 +699,11 @@ def test_suspend_rtt(port):
     time.sleep(0.5)
 
 
-def main(port):
-    test_chord(port)
-    test_chord_detach()
+def main(port, part="a"):
+    if part == "a":
+        test_chord(port)
+        test_chord_detach()
+        return
     test_chord_fail()
     hosts("srv=127.0.0.1:%d" % port)
     test_rearm()

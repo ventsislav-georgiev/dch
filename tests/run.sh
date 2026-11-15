@@ -373,8 +373,8 @@ skipmirror(){ printf '  skip %s (build has no terminal mirror)\n' "$1"; }
 nobudget(){ [ -n "${DCH_TEST_NO_BUDGET:-}" ] && printf '  skip %s (timing budget, sanitizer build)\n' "$1"; }
 # Latency budget: the fastest of 20 runs of "$@" under 100 ms wall. A sleep or
 # a deadline-driven read slows every run; a loaded box only some (#154).
-# Beside a full pool every run was slow (#361): wait until at most one job runs.
-fast20(){ [ "$pjobs" -le 1 ] || { tpause; pslots 2; tlast=$(date +%s); }
+# Beside a full pool every run was slow (#361): the rows run after pdrain.
+fast20(){
     python3 -c '
 import subprocess, sys, time
 def one():
@@ -392,11 +392,14 @@ xcc=${xcc:-cc}
 pyrun "the --xray view: tabs, card, reader, hostile text, Refs, look-up, order, temp files, live Memory" xray_view_test.py
 pyrun "the --xray view: auto rows, compact, Responses, Codex tasks, Search" xray_view_turns_test.py
 pyrun "the --xray view: Tasks, Memory, a hit's place, twin hits, the tab bar" xray_view_tasks_test.py
-pyrun "the --xray view: small card, shell, signals, On screen, picker X, o, the chord" xray_view_shell_test.py
+pyrun "the --xray view: small card, shell, signals, On screen, picker X, o, the chord's end and detach" xray_view_shell_test.py
+pyrun "the --xray view: the chord over an attach, held o" xray_view_shell_more_test.py
 pyrun "the --xray view: agent rows marked, a hides the cross-session ones (#360)" xray_peer_view_test.py
 pyrun "the --xray view of host:name over a loopback dch serve: the record, the live shell, a hostile host, o" xray_remote_view_test.py
-pyrun "the --xray view of host:name against fake hosts: failures, stop, drops, Responses, Search, Tasks, Memory" xray_remote_fakes_test.py
+pyrun "the --xray view of host:name against fake hosts: failures, drops, Responses, Search, Tasks, Memory" xray_remote_fakes_test.py
+pyrun "the --xray view of host:name against fake hosts: stopping a remote child" xray_remote_fakes_more_test.py
 pyrun "the --xray view of host:name from the picker X and the chord over dch -a host:name" xray_remote_chord_test.py
+pyrun "the --xray view of host:name: the chord's failure lines, re-arm, suspend" xray_remote_chord_more_test.py
 # xray_shell_test.py's and xray_claude_test.py's RSS budget: a fork()+exec+wait4 helper, because a child
 # spawned by Python inherits Python's RSS high-water mark on Linux (maxrss.c)
 # shellcheck disable=SC2086 # xcc is a word list
@@ -759,15 +762,6 @@ if [ -x "$DCH" ]; then
             || bad "--keys ctrl+c stops flooding child"
     fi
 
-    # Control-verb latency budget: a --read round trip within 100 ms (generous
-    # CI headroom over the ~3 ms local reality; catches accidental sleeps or
-    # timeout-driven reads).
-    if [ "$mirror" -eq 0 ] && ! nobudget "--read latency budget (fastest of 20 < 100ms)"; then
-        fast20 "$DCH" --read "$SN" \
-            && ok "--read latency budget (fastest of 20 < 100ms)" \
-            || bad "--read latency budget (fastest of 20 < 100ms)"
-    fi
-
     "$DCH" --ls-json 2>/dev/null | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
@@ -1038,22 +1032,6 @@ print(next(s for s in json.load(sys.stdin) if s["name"] == sys.argv[1])["agents"
         check "agent rows stop at the first non-row line" "$(agents)" "1"
         paint a3 '\342\217\272 main is great\n\342\227\257 worker-opus-high  Running…'
         check "a line merely starting with main is no panel" "$(agents)" "0"
-
-        # Hot-path budget: every --status runs detection (a control connect
-        # + full screen fetch), and --ls-json runs it per session. A call
-        # within 100 ms (generous CI headroom over the ~4 ms local reality;
-        # catches accidental sleeps or deadline-driven reads sneaking into
-        # the resolve path).
-        if ! nobudget "--status latency budget (fastest of 20 < 100ms)"; then
-            fast20 "$DCH" --status "$DN" \
-                && ok "--status latency budget (fastest of 20 < 100ms)" \
-                || bad "--status latency budget (fastest of 20 < 100ms)"
-        fi
-        if ! nobudget "--ls-json latency budget (fastest of 20 < 100ms)"; then
-            fast20 "$DCH" --ls-json \
-                && ok "--ls-json latency budget (fastest of 20 < 100ms)" \
-                || bad "--ls-json latency budget (fastest of 20 < 100ms)"
-        fi
 
         "$DCH" -k "$DN" >/dev/null 2>&1
     fi
@@ -1340,8 +1318,34 @@ pyrun "dch serve keeps X-ray's test switches from its ctls" serve_xray_env_test.
 pyrun "xray command source: argv split, row lines, the runner's limits" xcmd_test.py
 pyrun "--tasks/--memory with a tasks_command/memory_command: command first, the built-in on no row, warn" xcmd_tasks_test.py
 
-tsec 'shell: watchdog rows'
+tsec 'shell: latency budgets'
 pdrain; tlast=$(date +%s)
+
+# --- latency budgets: after the pool, so no job slows the runs (#361) --------
+# One sh session painted as the detection block's last panel (an agent panel
+# row), alone in the socket dir, as --status/--ls-json met it in place.
+# --read: a round trip within 100 ms (generous CI headroom over the ~3 ms
+# local reality; catches accidental sleeps or timeout-driven reads).
+# --status runs detection (a control connect + full screen fetch), --ls-json
+# runs it per session: within 100 ms (over the ~4 ms local reality; catches
+# accidental sleeps or deadline-driven reads sneaking into the resolve path).
+if [ -x "$DCH" ] && [ "$MIRROR" = 1 ]; then
+    LN="lat$$"
+    "$DCH" --spawn "$LN" --size 80x24 sh >/dev/null 2>&1
+    "$DCH" --run "$LN" "stty -echo" >/dev/null 2>&1
+    "$DCH" --run "$LN" "printf '\033c'; printf '%b\n' '\342\217\272 main\n\342\227\257 worker-opus-high  Running\342\200\246' 'sent_lat'" >/dev/null 2>&1
+    "$DCH" --wait "$LN" --match sent_lat --timeout 5000 >/dev/null 2>&1
+    for v in --read --status --ls-json; do
+        nobudget "$v latency budget (fastest of 20 < 100ms)" && continue
+        if [ "$v" = --ls-json ]; then fast20 "$DCH" --ls-json
+        else fast20 "$DCH" "$v" "$LN"; fi \
+            && ok "$v latency budget (fastest of 20 < 100ms)" \
+            || bad "$v latency budget (fastest of 20 < 100ms)"
+    done
+    "$DCH" -k "$LN" >/dev/null 2>&1
+fi
+
+tsec 'shell: watchdog rows'
 
 # --- the watchdog ends a hung test, its child and its session, only them ----
 # watchdog_hang.py records its pid, a child's, a session master's and one
