@@ -15,6 +15,8 @@ the user's prompts are left; n shows the hand-back with U+1F4E5 and its
 sender, the notification with U+1F514; a filter whose rows a hides says
 "a shows them"; at 41 columns no row passes the edge. xv-np, a record with
 no "peer" (an older host's): no mark, no a in the key help, a hides nothing.
+xv-oc (#383): Responses keeps the selected first item across a and n while
+newer agent rows come back; a 200-character sender leaves the title in view.
 
 Run:  python3 tests/xray_peer_view_test.py      (uses ./dch)
 """
@@ -25,6 +27,7 @@ from xray_view_lib import DCH, HOME, P, T, Pty, cells, check, dch, fails, head, 
 
 PSID = "11111111-2222-4333-8444-5555555555c7"   # xv-pe
 NSID = "11111111-2222-4333-8444-5555555555c8"   # xv-np
+OSID = "11111111-2222-4333-8444-5555555555cc"   # xv-oc
 BOT, INBOX, BELL = "\U0001F916", "\U0001F4E5", "\U0001F514"
 WIDE = "設計" * 15
 WRAP = ("Another Claude session sent a message:\n<cross-session-message "
@@ -82,6 +85,13 @@ def fixture():
            turn("plain prompt one", "2026-11-10T10:00:00Z", say("a1")) +
            task +
            turn("plain prompt two", "2026-11-10T11:00:00Z", say("a2")))
+    record("xv-oc", OSID,
+           peer("alpha cross title", "2026-11-10T10:00:00Z", "L" * 200) +
+           turn("own middle A", "2026-11-10T10:10:00Z", say("ans A")) +
+           turn("own middle B", "2026-11-10T10:20:00Z", say("ans B")) +
+           peer("gamma handback report", "2026-11-10T10:30:00Z", "worker-g",
+                handback=True) +
+           peer("beta newest cross row", "2026-11-10T10:40:00Z", "beta"))
 
 
 def listed(v):
@@ -254,11 +264,44 @@ def test_no_peer():
         v.close()
 
 
+def test_keep():
+    """#383: Responses keeps its first item across a and n, as Prompts does;
+    a long sender leaves room for the title."""
+    v = Pty([DCH, "--xray", "xv-oc"], rows=30, cols=100)
+    try:
+        check("xv-oc: Prompts 4", v.wait(b"Prompts 4"), v.out)
+        v.pump(0.5)
+        r = at(listed(v), "LLLL")
+        check("#383: a 200-character sender: the title still shown, the "
+              "name cut", "alpha cross title" in r and cells(r) <= 100 and
+              "L" * 100 not in r, r)
+        v.key(b"\t", 1.0)
+        check("Responses: the newest selected", "beta newest" in head(v),
+              head(v))
+        v.key(b"a", 0.8)
+        check("Responses: a: own middle B (first row) selected",
+              "own middle B" in head(v), head(v))
+        v.key(b"a", 0.8)
+        check("#383: Responses: a shows the newer row, the selection kept",
+              at(listed(v), "beta newest") and "own middle B" in head(v),
+              (head(v), listed(v)))
+        v.key(b"a", 0.8)
+        v.key(b"n", 0.8)
+        check("#383: Responses: n shows the newer hand-back, the selection "
+              "kept", at(listed(v), "gamma handback") and
+              "own middle B" in head(v), (head(v), listed(v)))
+        v.key(b"q", 0.3)
+        v.exit()
+    finally:
+        v.close()
+
+
 def main():
     try:
         fixture()
         test_marks()
         test_no_peer()
+        test_keep()
     finally:
         shutil.rmtree(T, ignore_errors=True)
     if fails[0]:
