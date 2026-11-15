@@ -249,10 +249,17 @@ def main():
             s = conn(port)
             t, pl, pid = follow(s)
             s.close()
-            check("xray serve: a peer close ends the --follow dch (one "
-                  "ctl done after the close)", t == 0x31 and pid
-                  and gone(pid) and text(log).count(
-                      "ctl done after the close") == 1)
+            dead = bool(t == 0x31 and pid and gone(pid))
+            # the handler reaps the dch (ctl_wait), then logs: the pid can
+            # be gone before the line is written
+            end = time.time() + 5
+            while dead and time.time() < end and text(log).count(
+                    "ctl done after the close") < 1:
+                time.sleep(0.05)
+            done = text(log).count("ctl done after the close")
+            chk("xray serve: a peer close ends the --follow dch (one "
+                "ctl done after the close)", dead and done == 1,
+                (t, pid, dead, done, text(log)[-600:]))
         subprocess.run([DCH, "-k", "svx"], env=env, capture_output=True,
                        timeout=15)
 
