@@ -24,12 +24,17 @@ the attached terminal's to answer, then reads its tty for 2 s.
   (f) `dch --xray <n> --follow --json` on an idle session (no output, so no
       frame from the master) across three `--restart`s: one `restarted`
       reset and a snapshot each, and the stream goes on (QA 1.66.0 MED-A1:
-      it ended at the second).
+      it ended at the second), each right after the last snapshot (QA
+      1.67.0 LOW-A3: under 1 s apart it ended).
+  (g) a fake master that answers and hangs up 1.5 s after each snapshot
+      (no new image): one reset and snapshot, then exit 0 (QA 1.67.0
+      LOW-A4: past 1 s it looped).
 dch-lite has no mirror: (a), (c) and (d) get nothing, as before.
 
 Run:  python3 tests/query_answer_test.py            (uses ./dch)
 """
-import json, os, pty, select, shutil, subprocess, sys, tempfile, threading, time
+import json, os, pty, select, shutil, socket, subprocess, sys, tempfile
+import threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
@@ -217,9 +222,7 @@ time.sleep(5)
     want = ["snapshot"]
     ok = wait_kinds(want)
     for i in range(3):
-        # past the 1 s in which a hang-up after a "restarted" snapshot ends
-        # the follow (a master that keeps hanging up); longer only helps
-        time.sleep(1.5)
+        # at once: a new image is a restart however soon (LOW-A3)
         r = subprocess.run([DCH, "--restart", name], env=ENV,
                            capture_output=True, text=True, timeout=60)
         want += ["reset", "snapshot"]
@@ -231,6 +234,80 @@ time.sleep(5)
           kinds(), fl.poll())
     fl.terminate()
     fl.wait(10)
+
+    # (g) LOW-A4: a master that answers MSG_CMD (a live shell), answers the
+    # follower's MSG_RING_READ with READ_END UNSUP (a master before #119)
+    # and hangs that connection up 1.5 s later, writing no .ver
+    stop = threading.Event()
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(os.path.join(ROOT, "s", "qa-a4.sock"))
+    srv.listen(16)
+    srv.settimeout(0.2)
+
+    def pkt(t, n, body=b""):
+        return bytes([t, n & 255, n >> 8]) + body
+
+    def conn(c):
+        buf, hang = b"", None
+        c.settimeout(0.05)
+        while not stop.is_set() and not (hang and time.time() >= hang):
+            try:
+                b = c.recv(65536)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            if not b:
+                break
+            buf += b
+            while len(buf) >= 3:
+                t, n = buf[0], buf[1] | buf[2] << 8
+                n = n if t in (6, 7, 13, 14, 15, 18, 22) else (
+                    8 if t in (3, 4) else 0)
+                if len(buf) < 3 + n:
+                    break
+                buf = buf[3 + n:]
+                if t == 15:     # MSG_CMD
+                    body = b"0\0running\0-1\0" + b"0\0" + b"1\0/bin/sh\0"
+                    c.sendall(pkt(8, len(body), body) + pkt(9, 0))
+                else:           # MSG_RING_READ and the rest: UNSUP
+                    c.sendall(pkt(9, 5))
+                    hang = hang or (time.time() + 1.5 if t == 18 else None)
+        c.close()
+
+    def accept():
+        while not stop.is_set():
+            try:
+                c, _ = srv.accept()
+            except socket.timeout:
+                continue
+            threading.Thread(target=conn, args=(c,), daemon=True).start()
+
+    threading.Thread(target=accept, daemon=True).start()
+    try:
+        fl = subprocess.Popen([DCH, "--xray", "qa-a4", "--follow", "--json"],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              stdin=subprocess.DEVNULL, env=ENV)
+        got = []
+        rd = threading.Thread(target=lambda: [got.append(json.loads(l))
+                                              for l in fl.stdout],
+                              daemon=True)
+        rd.start()
+        end = time.time() + 60
+        while fl.poll() is None and kinds().count("reset") < 2 and \
+                time.time() < end:
+            time.sleep(0.05)
+        rc = fl.poll()
+        if rc is None:
+            fl.terminate()
+            fl.wait(10)
+        rd.join(10)
+        check("(g) a master that hangs up 1.5 s after each snapshot: one "
+              "reset and snapshot, then exit 0",
+              rc == 0 and kinds().count("reset") == 1, kinds(), rc)
+    finally:
+        stop.set()
+        srv.close()
 
 
 try:

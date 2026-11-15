@@ -2039,9 +2039,11 @@ Rules for shells and endings:
   pipe, idle or not. A `--restart` of the session drops its connection: the
   follow asks the socket, and when the new master image answers it sends
   `reset` `restarted` and a new snapshot and goes on (before 1.66.0 it
-  exited 0 there), at every restart. A hang-up within 1 s of that
-  snapshot, with nothing from the master in between, ends it (exit 0): a
-  master that answers but keeps hanging up must not loop it.
+  exited 0 there), at every restart, however fast they come. A hang-up
+  after that snapshot, with nothing from the master in between, by the
+  same master image (the one that started last: its `.ver` file is
+  unchanged) ends it (exit 0), however late it comes: a master that
+  answers but keeps hanging up cannot loop it.
 
 `dch --xray <n> --chapter <anchor> --json` prints one chapter's entries as
 one object: `{"schema":1,"session","session_id","anchor","title","at","kind","entries":[…],"truncated":bool}`,

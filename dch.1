@@ -2241,9 +2241,12 @@ drops its connection: when the new master image answers, it sends
 .B reset
 .B restarted
 and a new snapshot and goes on (before 1.66.0 it exited 0), at every
-restart; a hang-up within 1 s of that snapshot, with nothing from the
-master in between, ends it (exit 0), so a master that answers but keeps
-hanging up cannot loop it.
+restart, however fast they come; a hang-up after that snapshot, with
+nothing from the master in between, by the same master image (the one
+that started last: its
+.B .ver
+file is unchanged) ends it (exit 0), however late it comes, so a master
+that answers but keeps hanging up cannot loop it.
 .B \-\-follow
 takes no
 .B \-\-ref

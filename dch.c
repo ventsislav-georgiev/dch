@@ -13680,7 +13680,6 @@ xr_clear(const struct xr_target *t)
 #define XF_EVICT_MS 1000	/* ... at most once a second */
 #define XF_SLICE (4u << 20)	/* the full pass: bytes between events */
 #define XF_RESET (-1)
-#define XF_RELOST_MS 1000L	/* xf_lost: no --restart this soon */
 
 enum { XE_FILE = 1, XE_ROT = 2, XE_CONN = 4, XE_OUT = 8 };
 
@@ -13702,8 +13701,8 @@ struct xf
 	long gap;		/* the coalescing interval: 250 ms, or twice the
 				** last build when that is longer */
 	int pending, rc;
-	long long relost;	/* a "restarted" reset, no frame drained since:
-				** 1, then its snapshot's time; 0 none */
+	int relost;		/* a "restarted" reset, no frame drained since */
+	long long img[2];	/* that reset's master image: xf_image */
 	const char *why;	/* XF_RESET's reason, for the next snapshot */
 	unsigned long woke, timed;	/* 9.5's no-timer seam */
 };
@@ -13950,22 +13949,49 @@ xf_drain(struct xf *f)
 	return rc < 0 ? -1 : wake;
 }
 
+/* The master image serving the session: its .ver sidecar's inode and
+** mtime. Each start unlinks and creates it before it serves (master.c
+** write_version_sidecar), and --restart drops us just before its execv, so
+** a master that answered has stamped it; {0, 0} when missing. */
+static void
+xf_image(const struct xf *f, long long img[2])
+{
+	char p[sizeof f->t->sock + 4];
+	struct stat st;
+
+	img[0] = img[1] = 0;
+	snprintf(p, sizeof p, "%s.ver", f->t->sock);
+	if (lstat(p, &st) != 0)
+		return;
+	img[0] = (long long)st.st_ino;
+#ifdef __APPLE__
+	img[1] = st.st_mtimespec.tv_sec * 1000000000LL + st.st_mtimespec.tv_nsec;
+#else
+	img[1] = st.st_mtim.tv_sec * 1000000000LL + st.st_mtim.tv_nsec;
+#endif
+}
+
 /* The master's connection dropped: a --restart when a master answers on
 ** the socket again (its new image), so a reset and a new snapshot (QA
-** 1.65.0 LOW-V27); else the session ended, exit 0. A loss within
-** XF_RELOST_MS of the last such reset's snapshot, no frame drained since,
-** ends it too: a master that answers but keeps hanging up (an old image, a
-** refused subscription) must not loop us through snapshots. A later one is
-** another --restart: an idle session sends no frame (QA 1.66.0 MED-A1). */
+** 1.65.0 LOW-V27); else the session ended, exit 0. After such a reset, with
+** no frame drained since, a loss is another --restart only when the image
+** changed (QA 1.67.0 LOW-A3: however fast they come; an idle session sends
+** no frame, QA 1.66.0 MED-A1); the same image hanging up again (an old one,
+** a refused subscription, a broken master) ends it, at any delay (LOW-A4). */
 static int
 xf_lost(struct xf *f)
 {
 	struct cmd_info ci;
+	long long img[2];
 
-	if ((f->relost && xr_now_ms() - f->relost < XF_RELOST_MS) ||
-	    cmd_query(f->t->sock, &ci) != 0)
+	if (cmd_query(f->t->sock, &ci) != 0)
 		return 0;
 	cmd_info_free(&ci);
+	xf_image(f, img);
+	if (f->relost && img[0] == f->img[0] && img[1] == f->img[1])
+		return 0;
+	f->img[0] = img[0];
+	f->img[1] = img[1];
 	f->relost = 1;
 	f->why = "restarted";
 	return XF_RESET;
@@ -14015,8 +14041,6 @@ xf_snapshot(struct xf *f, struct xr_answer *a, const char *reset)
 		return 1;
 	}
 	f->last = xr_now_ms();
-	if (f->relost)
-		f->relost = f->last;	/* the guard's window starts here */
 	dch_trace("xray follow: snapshot%s%s keys=%zu", reset ? " after " : "",
 	          reset ? reset : "", a->refs ? xr_index_keys(a->refs) : 0);
 	return 0;
