@@ -141,8 +141,11 @@ def test_marks():
         s = screen(v, mark)
         check("key help: a agent rows 3 hidden",
               "a agent rows 3 hidden" in s, s)
+        check("a: Prompts 2 in the tab bar", "Prompts 2" in s, s)
         mark = len(v.out)
         v.key(b"a", 0.8)
+        check("a again: Prompts 5 in the tab bar",
+              "Prompts 5" in screen(v, mark), screen(v, mark))
         check("a again: they are back, the selection kept",
               at(listed(v), "Scrollback") and
               "my own first" in head(v), head(v))
@@ -174,9 +177,12 @@ def test_marks():
               BOT not in at(r, "my own second"), r)
         check("Responses: the newest selected", "my own second" in head(v),
               head(v))
+        nresp = re.search(r"Responses (\d+)", screen(v, 0))
         mark = len(v.out)
         v.key(b"a", 0.8)
         r, s = listed(v), screen(v, mark)
+        check("Responses: a drops the tab count by 3",
+              nresp and "Responses %d" % (int(nresp.group(1)) - 3) in s, s)
         check("Responses: a hides them, the selection kept, the key help "
               "counts them",
               all(BOT not in x for x in r) and len(r) == 2 and
@@ -186,6 +192,9 @@ def test_marks():
         v.key(b"a", 0.8)
         check("Responses: a shows them", at(listed(v), "Scrollback"),
               v.out[mark:])
+        check("Responses: the tab count is back",
+              nresp and "Responses %s" % nresp.group(1) in screen(v, mark),
+              screen(v, mark))
         v.key(b"\033[Z", 0.6)       # Shift-Tab back to Prompts
         # a filter only cross-session rows match, then a: the empty line
         v.key(b"/Scrollback", 0.5)

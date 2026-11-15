@@ -954,9 +954,10 @@ it has memories or instruction files:
   Scrollback answers for entry 895`), 📥 and the name for a subagent's
   hand-back, 🔔 for another auto row (a task notification). Your own
   prompts carry no mark. `a` hides the cross-session messages (shown by
-  default) and the footer says how many; with `n` and `a` both off only
-  your own prompts are left. A host whose dch predates `peer` sends none: no
-  row is marked as an agent's and `a` hides nothing. `o`, here and in the reader, leaves the view (as `q` does)
+  default), the tab counts leave them out, and the footer says how many;
+  with `n` and `a` both off only your own prompts are left. A host whose dch
+  predates `peer` sends none: no row is marked as an agent's and `a` hides
+  nothing. `o`, here and in the reader, leaves the view (as `q` does)
   and attaches to the live session, as `dch -a <n>` does (`host:name` too;
   from the picker's `x`, as the picker's `Enter`; the `-k` and `-d` pickers
   say it is not theirs). On an ended session `o` says so and the view

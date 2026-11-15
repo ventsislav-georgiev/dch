@@ -3674,6 +3674,8 @@ xv_draw(struct xv *v, int force)
 		n = xv_old(v);
 		for (k = cnt[0] = cnt[2] = 0; k < v->nch; k++)
 		{
+			if (v->hidepeer && xv_xs(&v->ch[k]))
+				continue;
 			cnt[0] += !xv_hid(&v->ch[k]);
 			cnt[2] += !n && !xv_hid(&v->ch[k]) && xv_item(v, k);
 		}
