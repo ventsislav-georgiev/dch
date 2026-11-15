@@ -25,7 +25,8 @@ def set_size(fd, cols, rows):
 
 
 def ps_lines(fmt):
-    return subprocess.run(["ps", "-axo", fmt], capture_output=True, text=True).stdout.splitlines()
+    return subprocess.run(["ps", "-axo", fmt], capture_output=True, text=True,
+                          errors="replace").stdout.splitlines()
 
 
 def session_tty(sess):

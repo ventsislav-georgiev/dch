@@ -821,7 +821,7 @@ def main(part):
                           for l in r.stdout.splitlines()) and
                   cmd(mc) is None and cmd(ms) is None)
 
-        else:
+        elif not lite:  # the unsplit test returned at its lite block: part b has no lite rows
             # --- #058 H1/M6: the master goes quiet (SIGSTOP) after /exit ------
             def spawn_held(base, hold, **ctl):
                 n = "%s%s" % (base, TAG)

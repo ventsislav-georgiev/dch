@@ -39,7 +39,7 @@ def main():
     def masters(n, tail=".sock -- "):
         """pids whose argv is `<exe> --master-of <n's socket> -- ...`."""
         sp = os.path.join(sockdir, n + tail)
-        out = subprocess.run(["ps", "-axo", "pid=,args="], text=True,
+        out = subprocess.run(["ps", "-axo", "pid=,args="], text=True, errors="replace",
                              capture_output=True).stdout
         return [int(l.split(None, 1)[0]) for l in out.splitlines()
                 if " --master-of " + sp in l]
@@ -105,7 +105,7 @@ def main():
         lsp = os.path.join(ln, "dch-%d" % os.getuid(), "sym.sock")
 
         def lmasters():
-            out = subprocess.run(["ps", "-axo", "pid=,args="], text=True,
+            out = subprocess.run(["ps", "-axo", "pid=,args="], text=True, errors="replace",
                                  capture_output=True).stdout
             return [int(l.split(None, 1)[0]) for l in out.splitlines()
                     if " --master-of %s -- " % lsp in l]
