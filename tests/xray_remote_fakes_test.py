@@ -413,6 +413,7 @@ def test_tasks(port):
     the host, q back; the follow, the list and the chapter each a ctl."""
     hosts("srv=127.0.0.1:%d" % port)
     n0 = ctls("--xray")
+    late = []
     v = Pty([DCH, "--xray", "srv:xv-tk"])
     try:
         ok = tabbar(v, "Tasks 1")
@@ -431,6 +432,8 @@ def test_tasks(port):
         v.key(b"q", 1.0)
         check("Tasks, remote: q back to the same task",
               "Ship the parser" in head(v), head(v))
+        # q quits: every query sent first, the other list too (#374)
+        host_ran(v, n0 + 4, "follow, task list, memory list, chapter", late)
         v.key(b"q")
         check("Tasks, remote: q exits 0", v.exit() == 0, v.out[-80:])
     finally:
@@ -439,7 +442,7 @@ def test_tasks(port):
     check("Tasks, remote: the follow, the task and memory lists and the "
           "chapter, each its own ctl --xray on the host",
           ctls("--xray") - n0 == 4,
-          ctls("--xray") - n0)
+          (ctls("--xray") - n0, "not on the host in time: %s" % late))
 
 
 def tk(id, title, status, **kw):
@@ -635,6 +638,7 @@ def test_memory(port):
     on the card reads the turn from the host, q back; each query a ctl."""
     hosts("srv=127.0.0.1:%d" % port)
     n0 = ctls("--xray")
+    late = []
     v = Pty([DCH, "--xray", "srv:xv-me"])
     try:
         ok = tabbar(v, "Memory 2")
@@ -664,6 +668,8 @@ def test_memory(port):
         v.key(b"q", 0.8)
         check("Memory, remote: q back to the row", "alpha" in head(v),
               head(v))
+        # q quits: every query sent first, the other list too (#374)
+        host_ran(v, n0 + 4, "follow, task list, memory list, chapter", late)
         v.key(b"q")
         check("Memory, remote: q exits 0", v.exit() == 0, v.out[-80:])
     finally:
@@ -671,7 +677,8 @@ def test_memory(port):
     until(lambda: ctls("--xray") - n0 >= 4, 5)
     check("Memory, remote: the follow, the task and memory lists and the "
           "chapter, each its own ctl --xray on the host",
-          ctls("--xray") - n0 == 4, ctls("--xray") - n0)
+          ctls("--xray") - n0 == 4,
+          (ctls("--xray") - n0, "not on the host in time: %s" % late))
 
 
 def mem(id, title, **kw):

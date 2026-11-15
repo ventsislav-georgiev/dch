@@ -364,6 +364,14 @@ def until(fn, secs=10.0):
     return fn()
 
 
+def host_ran(v, n, what, late):
+    """Pump v until the host has logged n ctl --xray: a key that starts the
+    next query stops the running one, sent or not (#374); else what goes
+    to late, for the failure detail."""
+    if not until(lambda: v.pump(0.05) or ctls("--xray") >= n, 30):
+        late.append(what)
+
+
 def run(body, sh=False):
     """main() of each file: serve, the host's xv-cl record (and with sh its
     live shell xv-sh), remote_hosts naming srv, then body(port); exit 1 on
