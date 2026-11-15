@@ -1189,6 +1189,24 @@ def main():
               == 1)
         stop(p)
 
+        # --- #378: a whois that timed out refuses that connection only ----
+        # (fail closed), never cached: the next connection asks again
+        ts()
+        p, port, log = serve()
+        whois_fail_ok.add(log)
+        put("whois.stall", "6")	# the compiled fake sleeps once, past 3 s
+        r1 = reply(port)
+        time.sleep(0.5)		# its handler gone and reaped by the parent
+        r2 = reply(port)
+        check("a whois past 3 s refuses that connection, whois_failed "
+              "(#378)", r1 == refusal("whois_failed"))
+        check("  the next connection asks whois again and is let in, not "
+              "refused for 30 s (#378)", r2 == "accept"
+              and "refused before fork" not in text(log))
+        if r1 != refusal("whois_failed") or r2 != "accept":
+            print(r1, r2, text(log)[-600:])
+        stop(p)
+
         # --- #095: past 16 per peer, a transient busy, never cached ------
         ts()
         p, port, log = serve()

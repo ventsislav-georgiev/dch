@@ -4083,6 +4083,10 @@ struct xr_scan
 	uint64_t files, bytes, base, too_long;
 	uint64_t cs, cp, cps, ca, cas;	/* 3.4's counts, files done */
 	int stop, out_full;
+	int hold, took;		/* light (#377): the budget waits while hold (a
+				** window, or the scan's first one and its cwd
+				** walk), so a cut drops older windows, never the
+				** newest's lines; took: the first was taken */
 	int cancel;		/* a write failed: 1 EPIPE (the reader left), 2 other */
 	const char *why;
 	long long last;
@@ -4495,13 +4499,13 @@ xr_scan_tick(void *ctx, uint64_t bytes)
 			x->why = "first";
 		}
 	}
-	else if (!x->stop && !x->full && !xr_noclock &&
+	else if (!x->stop && !x->full && !xr_noclock && !x->hold &&
 	         now - x->t0 - x->blocked >= x->budget)
 	{
 		x->stop = 1;
 		x->why = "budget";
 	}
-	else if (!x->stop && (x->full || xr_noclock) &&
+	else if (!x->stop && (x->full || xr_noclock || x->hold) &&
 	         now - x->t0 - x->blocked >= xr_lim.ms)
 	{
 		x->stop = 1;
@@ -4777,6 +4781,10 @@ struct xr_claude
 				** the lines late_line picks */	struct xr_tasks *tk;	/* --tasks (#319), else NULL */
 	xr_call_fn call;	/* --memory (#322): each main-thread call */
 	void *cctx;
+	uint64_t mlo, mhi, end;	/* #301: --ref past the range, the middle no
+				** --json reads: a line ending (end, its '\n')
+				** from mlo and starting before mhi has no
+				** chapter */
 };
 
 /* B_GUESS (#300): a step a decoder that starts mid-file takes where the full
@@ -5390,7 +5398,8 @@ ch_anchor(struct xr_claude *d, char out[48])
 	** the head there). A sidechain block of a thread an older window saw
 	** is a step here and none there (side_block): a chapter only such steps
 	** opened is null too (#326), but to --chapter's seek (#300's guess). */
-	if (x && (!d->blind || (d->ch.total > 1 && (d->want || !x->guess))))
+	if (x && (!d->blind || (d->ch.total > 1 && (d->want || !x->guess))) &&
+	    (d->end < d->mlo || d->off >= d->mhi))
 		snprintf(out, 48, "f%llx:%llu", (unsigned long long)d->ino,
 		         (unsigned long long)x->offset);
 }
@@ -6858,6 +6867,7 @@ xr_claude_line(struct xr_claude *d, const char *line, size_t len,
 	size_t n;
 
 	d->off = off;
+	d->end = off + len;
 	if (d->want)
 		d->want->off = (long long)off;
 	d->at = -1;
@@ -7082,6 +7092,10 @@ read_range(struct xr_claude *d, int fd, uint64_t from, uint64_t to, int mid,
 	return 0;
 }
 
+static int ref_whole(struct xr_claude *d, int fd, uint64_t size, char *buf);
+static int read_whole(struct xr_claude *d, int fd, uint64_t size, char *buf,
+                      char *acc);
+
 int
 xr_claude_read(struct xr_claude *d, int fd, uint64_t size, int *capped)
 {
@@ -7093,6 +7107,8 @@ xr_claude_read(struct xr_claude *d, int fd, uint64_t size, int *capped)
 	{
 		if (size <= xr_lim.head + xr_lim.tail)
 			rc = read_range(d, fd, 0, size, 0, buf, acc);
+		else if (ref_whole(d, fd, size, buf))
+			rc = read_whole(d, fd, size, buf, acc);
 		else
 		{
 			*capped = 1;
@@ -7396,6 +7412,7 @@ win_read(struct xr_claude *d, int fd, uint64_t a, uint64_t b,
 {
 	struct xr_claude *e = xr_claude_new();
 	struct xr_chapters ch;
+	struct xr_scan *x = w->tick == xr_scan_tick ? w->tctx : NULL;
 	int rc;
 
 	if (!e)
@@ -7404,8 +7421,14 @@ win_read(struct xr_claude *d, int fd, uint64_t a, uint64_t b,
 	memcpy(e->cwd, cwd, sizeof e->cwd);
 	e->unit = d->unit;	/* a unit never repeats across windows */
 	e->blind = a > 0;
+	e->mlo = d->mlo;
+	e->mhi = d->mhi;
 	xr_claude_refs(e, &d->rk, d->ino, w->tick ? win_tick : NULL, w);
+	if (x)
+		x->hold = 1;
 	rc = read_range(e, fd, a, b, 0, buf, acc);
+	if (x)
+		x->hold = 0, x->took = 1;
 	xr_claude_end(e, d->ino, &ch);
 	xr_chapters_free(&ch);
 	d->halt = e->halt;
@@ -7562,6 +7585,44 @@ win_skip(struct xr_claude *d, const struct xr_pf *f, int fd, uint64_t a,
 
 static int sr_pread(int fd, char *buf, size_t len, uint64_t off);
 
+/* #301: --ref (its scan's tick) reads past the range, the middle too: from
+** the head's end to the tail's first line, where no --json reads, so a hit
+** on a line there has no chapter (ch_anchor). 1 so (mlo, mhi set). */
+static int
+ref_whole(struct xr_claude *d, int fd, uint64_t size, char *buf)
+{
+	if (d->tick != xr_scan_tick || size <= xr_lim.head + xr_lim.tail)
+		return 0;
+	if (line_start(fd, size - xr_lim.tail, size, buf, &d->mhi) <= 0)
+		d->mhi = size;	/* no line starts in the tail: all middle */
+	d->mlo = xr_lim.head;
+	return 1;
+}
+
+/* --full's: the head and the tail by d as --json reads them (its chapters,
+** cwd and calls), the middle between by a fresh decoder (win_read); the
+** tick sees the bytes up to each line. */
+static int
+read_whole(struct xr_claude *d, int fd, uint64_t size, char *buf, char *acc)
+{
+	struct xr_win w = { d->tick, d->tctx, 0 };
+	int rc = read_range(d, fd, 0, xr_lim.head, 0, buf, acc);
+
+	if (rc || d->halt)
+		return rc;
+	w.base = d->next;	/* the line the head's end cuts on */
+	if ((rc = win_read(d, fd, d->next, d->mhi, &w, buf, acc, d->cwd)) ||
+	    d->halt)
+		return rc;
+	w.base = size - xr_lim.tail - xr_lim.head;
+	d->tick = win_tick;
+	d->tctx = &w;
+	rc = read_range(d, fd, size - xr_lim.tail, size, 1, buf, acc);
+	d->tick = w.tick;
+	d->tctx = w.tctx;
+	return rc;
+}
+
 int
 xr_claude_newest(struct xr_claude *d, int fd, uint64_t size, int *capped)
 {
@@ -7577,7 +7638,10 @@ xr_claude_newest(struct xr_claude *d, int fd, uint64_t size, int *capped)
 	                  ((const struct xr_scan *)d->tctx)->key : NULL;
 	int fb = key && pf_build(&f, key), pf = !xr_noskip && fb;
 	int fk = fb && !strncmp(key, "file:", 5);
+	struct xr_scan *x = key ? d->tctx : NULL;
 
+	if (x && !x->took)
+		x->hold = 1;	/* the scan's first window and its cwd walk */
 	w.tick = d->tick;
 	w.tctx = d->tctx;
 	w.base = 0;
@@ -7588,11 +7652,12 @@ xr_claude_newest(struct xr_claude *d, int fd, uint64_t size, int *capped)
 	{
 		/* the tail first, then the head (3.8's range); the head's last
 		** window ends at its end, and read_range leaves the line it
-		** cuts there, as xr_claude_read does (#303) */
-		*capped = 1;
+		** cuts there, as xr_claude_read does (#303). --ref's: the head
+		** and the middle up to the tail's first line (#301) */
+		*capped = rc || !ref_whole(d, fd, size, buf);
 		r[0][0] = size - xr_lim.tail;
 		r[1][0] = 0;
-		r[1][1] = xr_lim.head;
+		r[1][1] = *capped ? xr_lim.head : d->mhi;
 		nr = 2;
 	}
 	else
@@ -7601,6 +7666,8 @@ xr_claude_newest(struct xr_claude *d, int fd, uint64_t size, int *capped)
 	{
 		uint64_t lo = 0, b = r[i][1], s, a;
 
+		if (i && b > xr_lim.head)
+			known = 0;	/* #301: the tail's cwd walk skipped the middle */
 		/* the range starts at its first line (the tail: past its cut) */
 		if ((k = line_start(fd, r[i][0], b, buf, &lo)) <= 0)
 			lo = b, rc = k;
@@ -7624,6 +7691,8 @@ xr_claude_newest(struct xr_claude *d, int fd, uint64_t size, int *capped)
 			if (pf && b - a <= 2 * XR_CHUNK &&
 			    win_skip(d, &f, fd, a, b, &w, buf))
 			{
+				if (x)
+					x->hold = 0, x->took = 1;
 				b = a;
 				continue;
 			}
@@ -7643,7 +7712,7 @@ xr_claude_newest(struct xr_claude *d, int fd, uint64_t size, int *capped)
 				k = fl < hi ? cwd_back(d, fd, fl, hi, &w, sb, buf, acc,
 				                       &cat, cwd) : 0;
 				if (!k && !d->halt && !i && nr == 2 && fl == lo && hi)
-					k = cwd_back(d, fd, 0, r[1][1], &w, sb, buf, acc,
+					k = cwd_back(d, fd, 0, xr_lim.head, &w, sb, buf, acc,
 					             &cat, cwd), fl = 0;	/* cat 0: walked */
 				if (k < 0)
 					rc = -1;
@@ -7670,6 +7739,8 @@ xr_claude_newest(struct xr_claude *d, int fd, uint64_t size, int *capped)
 		*capped = 1;
 		rc = 0;
 	}
+	if (x)
+		x->hold = 0;
 	free(buf);
 	free(acc);
 	free(sb);

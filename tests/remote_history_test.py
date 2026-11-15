@@ -38,7 +38,8 @@ import threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from remote_client_test import FAKE_TS, OWNER, REFUSAL, WHOIS, frame  # noqa
+from serve_lib import fake_ts  # noqa
+from remote_client_test import OWNER, REFUSAL, WHOIS, frame  # noqa
 
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
 # the 300 ms box plus a process start; ASan (DCH_TEST_NO_BUDGET) is slower
@@ -124,9 +125,7 @@ def main():
     tmp = os.path.realpath(tempfile.mkdtemp(prefix="dchrh", dir=os.environ.get("DCH_TEST_TMP", "/tmp")))
     fake = os.path.join(tmp, "fake")
     os.makedirs(fake)
-    with open(os.path.join(fake, "tailscale"), "w") as f:
-        f.write(FAKE_TS)
-    os.chmod(os.path.join(fake, "tailscale"), 0o755)
+    fake_ts(fake)
     for name, obj in (("status.json", OWNER), ("whois.json", WHOIS)):
         with open(os.path.join(fake, name), "w") as f:
             json.dump(obj, f)

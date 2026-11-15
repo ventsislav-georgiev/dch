@@ -35,7 +35,8 @@ import subprocess, sys, tempfile, termios, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from remote_client_test import FAKE_TS, OWNER, WHOIS  # noqa: E402
+from remote_client_test import OWNER, WHOIS  # noqa: E402
+from serve_lib import fake_ts  # noqa: E402
 
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
 HOST = os.path.abspath(os.environ.get("DCH_HOST", DCH))
@@ -60,9 +61,7 @@ T = os.path.realpath(tempfile.mkdtemp(prefix="rvq", dir=os.environ.get(
     "DCH_TEST_TMP", "/tmp")))
 FAKE = os.path.join(T, "fake")
 os.makedirs(FAKE)
-with open(os.path.join(FAKE, "tailscale"), "w") as f:
-    f.write(FAKE_TS)
-os.chmod(os.path.join(FAKE, "tailscale"), 0o755)
+fake_ts(FAKE)
 for nm, o in (("status.json", OWNER), ("whois.json", WHOIS)):
     with open(os.path.join(FAKE, nm), "w") as f:
         f.write(json.dumps(o))

@@ -6112,15 +6112,15 @@ t_newest(void)
 	CHECK("cwd: after a change of cwd, each window has the one in force at "
 	      "its start (not the file's first, not a newer window's)",
 	      ok && c == 19 && c2 == 19);
-	/* past the range: the head (lines 0-9) has /w/a, the unread middle
-	** /w/p, the tail (lines 380-399, 2 mentions) none: --full reads on
-	** from the head's */
+	/* past the range: the head (lines 0-9) has /w/a, the middle /w/p from
+	** line 200 (#301: --ref reads it), the tail (lines 380-399, 2
+	** mentions) none: --full reads on there from the head's, as --json */
 	xr_lim.head = 1100;
 	xr_lim.tail = 2000;
 	ok = nw_same(body, n, "file:/w/a/src/main.c", 0, &c);
 	ok &= nw_same(body, n, "file:/w/p/src/main.c", 0, &c2);
-	CHECK("cwd: a tail window takes the head's cwd, never one from the "
-	      "unread middle", ok && c == 2 && c2 == 0);
+	CHECK("cwd: past the range, the middle has its own cwd, a tail window "
+	      "the head's", ok && c == 21 && c2 == 17);
 	xr_lim = l0;
 	xr_lim.chunk = 1000;
 	/* #293 meets #303: mentions only on lines 100 and 350, so the windows
@@ -6168,9 +6168,10 @@ t_newest(void)
 	xr_lim.chunk = 300;
 	o = nw_scan(body, n, "ticket:CT-12", 0, 0);
 	m = nw_offs(o, v, 300);
-	CHECK("head end: light leaves the line the head's end cuts, as --full "
-	      "does", nw_same(body, n, "ticket:CT-12", 0, &c) && c == 2 &&
-	      m == 2 && v[0] == 3900 && v[1] == 200);
+	/* #301: --ref reads past the range, the cut line (10) and all */
+	CHECK("head end: --ref reads past the range, light as --full",
+	      nw_same(body, n, "ticket:CT-12", 0, &c) && c == 3 &&
+	      m == 3 && v[0] == 3900 && v[1] == 1000 && v[2] == 200);
 	free(o);
 	xr_lim = l0;
 

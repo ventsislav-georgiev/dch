@@ -63,6 +63,24 @@ def whois(uid, login="me@example.com", tags=(), node="2002", nid=2002):
 
 
 
+def fake_ts(fake):
+    """fake/tailscale: tests/fake_tailscale.c compiled, one exec per call and
+    no shell start (#277): serve gives each call 3 s, and a slow whois is a
+    refused connection (#378). The shell FAKE_TS only when no compiler builds
+    it."""
+    p = os.path.join(fake, "tailscale")
+    try:
+        built = subprocess.call(os.environ.get("CC", "cc").split() + [
+            "-O1", "-o", p, os.path.join(HERE, "fake_tailscale.c")]) == 0
+    except OSError:
+        built = False
+    if not built:
+        print("  note: tests/fake_tailscale.c did not build, the shell fake")
+        with open(p, "w") as f:
+            f.write(FAKE_TS)
+        os.chmod(p, 0o755)
+
+
 NAMES = 'tmp fake home env benv procs fails whois_fail_ok slow_whois check put ts log_n serve stop calls run_fail text conn send recv_exact frame frame_not reply refused refusal sessions ctl1'.split()
 
 
@@ -70,19 +88,7 @@ def setup():
     tmp = os.path.realpath(tempfile.mkdtemp(prefix="dchsv", dir=os.environ.get("DCH_TEST_TMP", "/tmp")))
     fake = os.path.join(tmp, "fake")
     os.makedirs(fake)
-    # the compiled fake: one exec per call and no shell start (#277); the
-    # shell one only when no compiler builds it
-    try:
-        built = subprocess.call(os.environ.get("CC", "cc").split() + [
-            "-O1", "-o", os.path.join(fake, "tailscale"),
-            os.path.join(HERE, "fake_tailscale.c")]) == 0
-    except OSError:
-        built = False
-    if not built:
-        print("  note: tests/fake_tailscale.c did not build, the shell fake")
-        with open(os.path.join(fake, "tailscale"), "w") as f:
-            f.write(FAKE_TS)
-        os.chmod(os.path.join(fake, "tailscale"), 0o755)
+    fake_ts(fake)
     home = os.path.join(tmp, "home")
     os.makedirs(home)
     env = {k: v for k, v in os.environ.items()

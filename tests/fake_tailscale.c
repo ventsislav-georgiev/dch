@@ -3,10 +3,13 @@
 ** that, a whois_failed refusal cached 30 s (#246, #277). Same contract as the
 ** shell fake FAKE_TS in serve_test.py: appends "<verb> <loopback var>" to
 ** calls next to itself, prints status.json, whois.json or ip.txt from there
-** for status, whois or ip, exits 1 for anything else or a missing file. */
+** for status, whois or ip, exits 1 for anything else or a missing file.
+** A file whois.stall next to it: the next whois removes it and sleeps that
+** many seconds first (a slow tailscaled, once; #378). */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 int
 main(int argc, char **argv)
@@ -33,6 +36,17 @@ main(int argc, char **argv)
 	  : !strcmp(argv[1], "ip") ? "ip.txt" : NULL;
 	if (!f)
 		return 1;
+	snprintf(p, sizeof p, "%s/whois.stall", d);
+	if (f[0] == 'w' && (in = fopen(p, "r")) != NULL)
+	{
+		int secs = 0;
+
+		if (fscanf(in, "%d", &secs) != 1)
+			secs = 0;
+		fclose(in);
+		unlink(p);
+		sleep((unsigned)secs);
+	}
 	snprintf(p, sizeof p, "%s/%s", d, f);
 	if ((in = fopen(p, "r")) == NULL)
 		return 1;

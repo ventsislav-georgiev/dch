@@ -1022,11 +1022,13 @@ fail:
 
 char g_ts[PATH_MAX];	/* the tailscale CLI; "" when not found */
 
-/* `tailscale <a...>` exiting 0, stdout into *out (malloc'd): 0, or -1. */
+/* `tailscale <a...>` exiting 0, stdout into *out (malloc'd): 0; -2 when it
+** gave no answer in TS_MS (killed), else -1. */
 int
 ts_run(char *a1, char *a2, char *a3, char *a4, char **out, size_t cap)
 {
 	char *av[] = { g_ts, a1, a2, a3, a4, NULL };
+	long long t0 = now_ms();
 	int st;
 
 	*out = NULL;
@@ -1037,7 +1039,7 @@ ts_run(char *a1, char *a2, char *a3, char *a4, char **out, size_t cap)
 	{
 		free(*out);
 		*out = NULL;
-		return -1;
+		return st < 0 && now_ms() - t0 >= TS_MS ? -2 : -1;
 	}
 	return 0;
 }

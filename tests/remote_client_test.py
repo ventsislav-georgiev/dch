@@ -43,23 +43,13 @@ Run:  python3 tests/remote_client_test.py        (uses ./dch)
 """
 import errno, json, os, re, select, shutil, signal, socket
 import struct, subprocess, sys, tempfile, threading, time
+from serve_lib import fake_ts
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # the 300 ms box plus a process start; ASan (DCH_TEST_NO_BUDGET) is slower
 BUDGET = 10.0 if os.environ.get("DCH_TEST_NO_BUDGET") else 1.5
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
 
-# Builtins only, no fork: serve gives each call 3 s (TS_MS), and under load
-# a slower fake turns into a whois_failed refusal cached 30 s (#246, #249).
-FAKE_TS = """#!/bin/sh
-d=${0%/*}
-case "$1" in
-status) f=status.json ;; whois) f=whois.json ;; ip) f=ip.txt ;; *) exit 1 ;;
-esac
-[ -f "$d/$f" ] || exit 1
-while IFS= read -r l; do printf '%s\\n' "$l"; done < "$d/$f"
-printf '%s' "$l"
-"""
 OWNER = {"Self": {"ID": "1001", "UserID": 42, "Tags": []},
          "User": {"42": {"LoginName": "me@example.com"}}}
 WHOIS = {"UserProfile": {"ID": 42, "LoginName": "me@example.com"},
@@ -2021,9 +2011,7 @@ def main(part="a"):
     tmp = os.path.realpath(tempfile.mkdtemp(prefix="dchrc", dir=os.environ.get("DCH_TEST_TMP", "/tmp")))
     fake = os.path.join(tmp, "fake")
     os.makedirs(fake)
-    with open(os.path.join(fake, "tailscale"), "w") as f:
-        f.write(FAKE_TS)
-    os.chmod(os.path.join(fake, "tailscale"), 0o755)
+    fake_ts(fake)
 
     def put(name, obj):
         with open(os.path.join(fake, name), "w") as f:

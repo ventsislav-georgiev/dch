@@ -261,7 +261,9 @@ void xr_claude_end(struct xr_claude *d, uint64_t ino,
 const char *xr_claude_cwd(const struct xr_claude *d);
 /* Read fd under 3.8's range (head 16 MB + newest 256 MB, 1 MB chunks,
 ** 1 MB lines): 0, *capped set when bytes were skipped or the file shrank
-** mid-read; -1 on a read error. */
+** mid-read; -1 on a read error. --ref's (tick xr_scan_tick) reads the
+** middle too, by a decoder of its own, a hit there with no chapter (#301);
+** so does xr_claude_newest's. */
 int xr_claude_read(struct xr_claude *d, int fd, uint64_t size, int *capped);
 /* Light --ref's read (#262): the same range, newest first, in windows of
 ** xr_lim.chunk bytes cut at line starts, each read oldest first by a fresh

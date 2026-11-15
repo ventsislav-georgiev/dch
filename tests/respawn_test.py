@@ -111,8 +111,9 @@ def main():
     try:
         # --- armed respawn with argv replaces the child in place ----------
         a, asock = sess("rsa")
-        spawn(a, "sh", "-c", "echo first_child; sleep 1; echo bye_a; exit 3",
-              size="100x30")
+        go = os.path.join(tmp, "go")
+        spawn(a, "sh", "-c", "echo first_child; while [ ! -e '%s' ]; do "
+              "sleep 0.05; done; echo bye_a; exit 3" % go, size="100x30")
         MIRROR = run("--read", a).returncode != 3
         m0 = masters(asock)
         ino0 = os.lstat(asock).st_ino
@@ -126,6 +127,7 @@ def main():
         check("--respawn with argv arms (exit 0)",
               run("--respawn", a, "--", *new).returncode == 0)
         check("--cmd says armed", (cmd(a) or {}).get("state") == "armed")
+        open(go, "w").close()
         c1 = until(lambda: (lambda c: c if c and c["pid"] != c0["pid"]
                             else None)(cmd(a)))
         check("--cmd returns the respawned argv", c1 and c1["argv"] == new)
