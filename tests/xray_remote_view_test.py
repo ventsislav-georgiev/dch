@@ -2058,8 +2058,17 @@ def test_stop():
             v.key(b"\033", 0)
             ok = v.wait(b"Prompts 1", start=mark, secs=STOP_S) and ok
             worst[0] = max(worst[0], time.time() - t0)
-            v.pump(0.1)
-            k = kids_of(v.pid)
+            # A card child still alive XV_KILL_MS after its SIGKILL is kept
+            # and reaped by a later loop turn (xview.c xv_stop, #212): on a
+            # slow runner wait for it to go, up to 10 s; a zombie or a
+            # second child at the end is still a failure.
+            end = time.time() + 10
+            while True:
+                v.pump(0.1)
+                k = kids_of(v.pid)
+                if len(k) == 1 and "Z" not in "".join(k.values()) or \
+                        time.time() > end:
+                    break
             if not ok or len(k) != 1 or "Z" in "".join(k.values()):
                 bad.append((i, ok, k))
             if v.reap() is not None or len(bad) > 2:
