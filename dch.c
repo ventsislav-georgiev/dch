@@ -240,11 +240,15 @@ dch_config_get(const char *key, char *out, size_t cap)
 
 	if (!dch_config_path(path, sizeof(path)) || !(f = fopen(path, "r")))
 		return 0;
-	while (fgets(line, sizeof(line), f))
+	/* fgets zeroes the last byte only when it fills the buffer: a NUL in a
+	** short line does not make it look over-long (#350) */
+	for (line[sizeof(line) - 1] = 1; fgets(line, sizeof(line), f);
+	     line[sizeof(line) - 1] = 1)
 	{
 		/* a line past the buffer: its rest skipped, never read as lines */
 		cut = c = 0;
-		if (!strchr(line, '\n') && (c = getc(f)) != EOF && c != '\n')
+		if (!line[sizeof(line) - 1] && line[sizeof(line) - 2] != '\n' &&
+		    (c = getc(f)) != EOF && c != '\n')
 			for (cut = 1; (c = getc(f)) != EOF && c != '\n';)
 				;
 		if ((v = config_line(line, key)))

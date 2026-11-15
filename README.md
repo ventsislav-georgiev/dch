@@ -810,7 +810,8 @@ old and still current. Pair it with `state` and
 
 dch runs without one. The optional config holds opt-in features: `key = value`
 lines, `#` comments, the last line for a key wins; a line over 1023 bytes
-is read as an empty value, never cut. It lives at `$DCH_CONFIG`,
+is read as an empty value, never cut; a NUL byte ends its line's text.
+It lives at `$DCH_CONFIG`,
 else `$XDG_CONFIG_HOME/dch/config`, else `~/.config/dch/config`, and is read
 fresh every time it is needed, so an edit takes effect at once, also in
 running sessions.
@@ -1826,7 +1827,8 @@ the way `--ref` prints its lines, and exits 0:
 - **Caps.** The transcript is read as `--json` reads it (the 3.8 range):
   `partial: true` when records may be past it. The newest 50000 tasks are
   kept; `dropped` counts the ones left out, and the creates whose result
-  gives an id that is empty, too long, or neither text nor a whole number.
+  gives an id that is null, empty, too long, or neither text nor a whole
+  number.
   A line is at most 64 KB. A bad
   or oversized transcript line is skipped. No `done` line means the answer
   was cut.
@@ -1955,7 +1957,8 @@ exec gh issue list --limit 200 --json number,title,url,updatedAt \
 environment, limits, fallback (the built-in memory answers when it gives no
 row) and `warn`. A row has `title` (required), `id`, `note`, `kind`,
 `scope`, `updated`, `path`, `session` and `body` (cut at 16 KB, then
-`"cut":true`; `chapter` is `null`), bare or wrapped as `{"memory":{…}}`; a lone first
+`"cut":true`, which a row may also send for a text it cut itself; `chapter`
+is `null`), bare or wrapped as `{"memory":{…}}`; a lone first
 `{"title":"…"}` line names the list. Its header has `--memory`'s keys, with
 `"source":"command"`.
 

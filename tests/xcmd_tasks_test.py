@@ -163,6 +163,17 @@ print(json.dumps({"id": "env", "title": "<%s|%s|%s>" % (
           m[1]["title"] == "<xt-ended|claude|%s>" % PROJ and
           ls[-1] == {"done": True, "count": 2, "dropped": 0},
           (out[-400:], err))
+    # the command's own "cut": true is kept, false gives none (#350)
+    config(script("mcut.py", r'''
+import json
+print(json.dumps({"id": "c", "title": "C", "body": "short", "cut": True}))
+print(json.dumps({"id": "d", "title": "D", "body": "short", "cut": False}))
+''', py=True), "memory_command")
+    rc, out, ls, err = tasks("xt-ended", "--memory")
+    m = [l["memory"] for l in ls if "memory" in l]
+    check("memory rows: a row's own cut:true kept, cut:false none",
+          len(m) == 2 and m[0]["body"] == "short" and
+          m[0].get("cut") is True and "cut" not in m[1], (out, err))
     config(script("mempty.sh", "exit 0\n"), "memory_command")
     rc, out, ls, err = tasks("xt-ended", "--memory")
     check("memory, an empty answer: the built-in answer byte for byte",
@@ -286,6 +297,22 @@ def main():
               rc == 0 and ls and ls[0].get("warn") == key +
               ": not a command line (the config line is over 1023 bytes)"
               and ls[0]["source"] != "command" and '"ran"' not in out, out)
+    # a NUL byte only ends its own line's text: the next line is still
+    # read; a 1022- or 1023-byte line is whole (#350)
+    a = script("a.sh", "echo '{\"id\":1,\"title\":\"ran A\"}'\n")
+    b = script("b.sh", "echo '{\"id\":1,\"title\":\"ran B\"}'\n")
+    for name, raw in (
+            ("x<NUL>y between A and B", "tasks_command = %s\nx\0y\n"
+             "tasks_command = %s\n" % (a, b)),
+            ("#<NUL> before B", "#\0\ntasks_command = %s\n" % b),
+            ("1022- and 1023-byte comments before B", "#%s\n#%s\n"
+             "tasks_command = %s\n" % ("c" * 1021, "c" * 1022, b))):
+        with open(CONFIG, "wb") as f:
+            f.write(raw.encode())
+        rc, out, ls, err = tasks("xt-ended")
+        check("config %s: B runs, no warn" % name,
+              rc == 0 and ls and ls[0]["source"] == "command" and
+              "warn" not in ls[0] and seen(ls) == {"1": "ran B"}, out)
 
     # --- rows, then the clock ----------------------------------------------
     config(script("hang.sh", "echo '{\"id\":1,\"title\":\"before the hang\"}'"

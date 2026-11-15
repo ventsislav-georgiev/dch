@@ -279,7 +279,11 @@ row_memory(struct xc_out *w, const struct json_parser *p, int r, char *tmp,
 	char b[XR_TITLE_MAX * 4 + 1];
 	const char *s;
 	size_t l;
-	int bodycut = 0;
+	int bodycut, c = dch_json_field(p, r, "cut");
+
+	/* the command's own "cut":true kept: it may cut the text itself */
+	bodycut = c >= 0 && p->tok[c].kind == JSON_PRIMITIVE &&
+	          p->text[p->tok[c].start] == 't';
 
 	put(w, "{\"memory\":{");
 	key(w, "id");
