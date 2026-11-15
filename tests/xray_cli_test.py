@@ -3321,6 +3321,143 @@ def test_auto():
         os.unlink(tp)
 
 
+def test_peer():
+    """#359: another agent's prompt, by its "origin" only. A subagent's
+    hand-back is auto, its summary "subagent <name>: <first line>"; a
+    cross-session message is a prompt titled by its body, with "peer" (the
+    sender's name, "" for an id or a path) and the body alone as its text.
+    Neither shows the socket, the hex id or the wrapper. Typed imitations
+    and hostile origins stay what they were."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, RSID + ".jsonl")
+    sock_ = "uds:/tmp/cc-socks/74069.sock"
+    hexid = "a0c9e72b4fd05827e"
+    advice = "\n\nReply with the send tool if a reply is useful."
+    xs_body = "Release 1.71 is green\nthe details follow"
+    xs = ("Another Claude session sent a message:\n<cross-session-message "
+          'from="%s" from-name="dch-qa" from-mode="auto">\n%s\n'
+          "</cross-session-message>%s" % (sock_, xs_body, advice))
+    hb_rep = "PASS. Report: all rows green\nmore lines"
+    hb_body = "[Subagent hand-back] " + hb_rep
+    hb = ('Another Claude session sent a message:\n<agent-message from="%s">'
+          "\n  %s\n</agent-message>" % (hexid, hb_body))
+
+    def u(content, origin=None, meta=True):
+        o = {"type": "user", "cwd": "/home/demo/proj",
+             "message": {"content": content}}
+        if meta:
+            o["isMeta"] = True
+        if origin is not None:
+            o["origin"] = origin
+        return o
+    a = {"type": "assistant", "message": {"content": [
+        {"type": "text", "text": "ok"}]}}
+    recs = [u("start", meta=False), a,
+            u(hb, {"kind": "peer", "from": hexid, "senderTaskId": "t1",
+                   "name": "worker-a", "body": hb_body, "handback": True,
+                   "handbackReportText": hb_rep}), a,
+            u(xs, {"kind": "peer", "from": sock_, "verifiedPeerPid": 74069,
+                   "msg_id": "m1", "name": "dch-qa", "fromMode": "auto",
+                   "body": xs_body, "hopChain": ["x"]}),
+            {"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "thanks qa"}]}},
+            # a sender with an id for a name, delivered mid-turn
+            {"type": "attachment", "attachment": {
+                "type": "queued_command", "commandMode": "prompt",
+                "prompt": xs, "origin": {"kind": "peer", "from": sock_,
+                                         "name": "0123456789abcdef",
+                                         "body": "from an id"}}}, a,
+            # typed imitations: no origin, or a human one
+            u(xs, meta=False), a,
+            u(hb, {"kind": "human"}, meta=False), a]
+    # hostile origins: today's behaviour (meta: hidden; not meta: a prompt)
+    bad = [{"kind": "peer"}, {"kind": "peer", "body": 7},
+           {"kind": "peer", "body": ["x"]}, "peer", ["peer"], 5,
+           {"kind": ["peer"], "body": "x"}]
+    for b in bad:
+        recs += [u("hostile meta", b), a]
+    recs += [u("hostile typed", {"kind": "peer", "body": 7}, meta=False), a,
+             u("odd", {"kind": "peer", "body": "odd shapes", "name": {"x": 1},
+                       "handback": "true"}), a,
+             u("hb1", {"kind": "peer", "body": "numeric flag", "handback": 1,
+                       "name": "/tmp/x.sock"}), a,
+             u("big", {"kind": "peer", "name": "big",
+                       "body": "b" * 1048000 + "</cross-session-message>"}),
+             a]
+    with open(tp, "w") as f:
+        for o in recs:
+            f.write(json.dumps(o) + "\n")
+    history("xr-peer", RSID, cfg)
+    try:
+        rc, o, err = xray("xr-peer", "--json")
+        ch = (o or {}).get("chapters", [])
+        got = [(c["title"], c.get("auto"), c.get("summary"), c.get("peer"))
+               for c in ch]
+        want = [("start", None, None, None),
+                ("PASS. Report: all rows green", True,
+                 "subagent worker-a: PASS. Report: all rows green",
+                 "worker-a"),
+                ("Release 1.71 is green", None, None, "dch-qa"),
+                ("from an id", None, None, ""),
+                ("Another Claude session sent a message:", None, None, None),
+                ("Another Claude session sent a message:", None, None, None),
+                ("hostile typed", None, None, None),
+                ("odd shapes", None, None, ""),
+                ("numeric flag", None, None, ""),
+                ("b" * 120, None, None, "big")]
+        check("peer: the hand-back is auto with a clean summary, the "
+              "cross-session prompts carry their body and sender, typed "
+              "imitations and hostile origins stay as they were",
+              rc == 0 and got == want, (rc, got, err))
+        check("peer: --json shows no socket path, hex id or wrapper tag",
+              rc == 0 and "cc-socks" not in json.dumps(ch) and
+              hexid not in json.dumps(ch[:4]) and
+              "<cross-session" not in json.dumps(ch[:4]), ch[:4])
+        check("peer: \"peer\" comes after the chapter's other keys up to "
+              "kind and auto/summary",
+              rc == 0 and len(ch) > 2 and
+              list(ch[1])[:10] == ["anchor", "offset", "i", "at", "title",
+                                   "kind", "partial", "error", "auto",
+                                   "summary"] and
+              list(ch[1])[10] == "peer" and
+              list(ch[2])[8] == "peer", ch[1:3])
+        if len(ch) > 2:
+            rc2, c, err2, raw = chapter("xr-peer", ch[2]["anchor"])
+            check("peer: the reader's text is the body alone, the header "
+                  "carries peer",
+                  rc2 == 0 and c and c.get("peer") == "dch-qa" and
+                  c["entries"][:2] == [ent("user", xs_body),
+                                       ent("assistant", "thanks qa")] and
+                  "cc-socks" not in raw and "Reply with" not in raw,
+                  (rc2, raw[:600], err2))
+            rc2, c, err2, raw = chapter("xr-peer", ch[1]["anchor"])
+            check("peer: the hand-back's text is its report",
+                  rc2 == 0 and c and c.get("auto") is True and
+                  c.get("peer") == "worker-a" and
+                  c["entries"][:1] == [ent("user", hb_rep)] and
+                  hexid not in raw, (rc2, raw[:600], err2))
+        rc, s, err = search("xr-peer", "is green")
+        hits = (s or {}).get("hits", [])
+        check("peer: --search finds the body in its chapter, never the "
+              "wrapper (the typed imitation keeps its text)",
+              rc == 0 and len(ch) > 4 and
+              [(h["who"], h["chapter"], h["snippet"]) for h in hits] ==
+              [("user", ch[4]["anchor"], hits[0]["snippet"]),
+               ("user", ch[2]["anchor"],
+                "Release 1.71 is green the details follow")] and
+              "cc-socks" in hits[0]["snippet"], (rc, s, err))
+        rc, s, err = search("xr-peer", "cc-socks")
+        check("peer: --search does not find the socket path of a peer's "
+              "record (the typed imitations' text still matches)",
+              rc == 0 and s and all(h["chapter"] not in
+                                    (ch[2]["anchor"], ch[3]["anchor"])
+                                    for h in s.get("hits", [])), (rc, s, err))
+    finally:
+        os.unlink(tp)
+
+
 def test_responses():
     """#296: each chapter's response (the last assistant text after the
     last tool result) with its record's offset and the tool line, in --json
@@ -4766,6 +4903,7 @@ def main():
         test_shell_caps()
         test_follow_history()
         test_auto()
+        test_peer()
         test_responses()
         test_follow_claude()
         test_follow_late()

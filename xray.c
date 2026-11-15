@@ -1402,6 +1402,7 @@ xr_chapters_free(struct xr_chapters *c)
 			free(x->summary);
 		free(x->response);
 		free(x->tools);
+		free(x->peer);
 	}
 	free(c->v);
 	memset(c, 0, sizeof *c);
@@ -1439,6 +1440,7 @@ ch_push(struct xr_chapters *c)
 		c->resheld -= strlen(x->response) + 1;
 	free(x->response);
 	free(x->tools);
+	free(x->peer);
 	memset(x, 0, sizeof *x);
 	x->at = -1;
 	x->kind = "prompt";
@@ -1597,6 +1599,7 @@ static const char *const A_TS[] = { "timestamp", 0 };
 static const char *const A_ORIGIN[] = { "origin", 0 };
 static const char *const A_KIND[] = { "kind", 0 };
 static const char *const A_CMODE[] = { "commandMode", 0 };
+static const char *const A_BODY[] = { "body", 0 };
 
 /* K.str: a string value or NULL (malloc'd). */
 static char *
@@ -4736,6 +4739,9 @@ struct xr_claude
 	int titled;		/* the open chapter has its prompt */
 	const char *harness;	/* the prompt being blocked is harness text:
 				** its summary ("" for none), else NULL */
+	const char *peer;	/* #359: it is another agent's: its name
+				** ("" for none), else NULL */
+	const char *peersum;	/* a hand-back's summary, else NULL */
 	struct pend pend[XR_PENDING + 1];
 	int npend;
 	char *order[XR_PENDING + 2];	/* pendingOrder, ids may repeat */
@@ -4890,6 +4896,7 @@ main_block(struct xr_claude *d, int b, const char *kind, const char *title)
 			x->summary = sum;
 			d->ch.sumheld += strlen(sum) + 1;
 		}
+		x->peer = d->peer ? strdup(d->peer) : NULL;	/* no memory: none */
 		d->titled = 1;
 	}
 	if (b != B_PROMPT && b != B_IMAGE)
@@ -6151,7 +6158,7 @@ user_text(struct xr_claude *d, const char *agent, char *s, size_t n, int inj)
 		ul = unwrap(u, n, XR_TEXT_CAP);
 	}
 	xr_title(s, unwrap(s, n, 0), title, sizeof title);	/* s is spent */
-	d->harness = h ? sum : NULL;
+	d->harness = h ? sum : d->peersum;
 	block(d, agent, B_PROMPT, "prompt", title);
 	d->harness = NULL;
 	refs_text(d, u, ul, XR_TEXT_CAP, XR_PROSE);
@@ -6161,6 +6168,83 @@ user_text(struct xr_claude *d, const char *agent, char *s, size_t n, int inj)
 		ent_put(d->want, "user", NULL, u, ul, XR_TEXT_CAP, 0);
 	}
 	free(u);
+}
+
+/* #359: obj's "origin":{"kind":"peer"} with a string "body": another agent
+** sent the record (a cross-session message, a subagent's hand-back). Its
+** origin, else -1. Like injected(), text alone never makes a peer. */
+static int
+peer(const struct json_parser *p, int obj)
+{
+	int o = k_obj(p, obj, A_ORIGIN), b;
+
+	if (o < 0 || !k_streq(p, o, A_KIND, "peer"))
+		return -1;
+	b = j_get(p, o, A_BODY);
+	return b >= 0 && p->tok[b].kind == JSON_STRING ? o : -1;
+}
+
+/* A peer's prompt: origin's body as the text, never the wrapper Claude Code
+** writes around it, the sender's address or its ids. A subagent's hand-back
+** ("handback":true, a JSON true only) is auto, its summary "subagent <name>:
+** <the report's first line>". name: origin's "name" as a title, "" when it
+** is a path or a bare id (12+ hex digits). */
+static void
+peer_text(struct xr_claude *d, const struct json_parser *p, int o,
+          const char *ag)
+{
+	static const char hbp[] = "[Subagent hand-back]";
+	char name[XR_TITLE_MAX * 4 + 1], sum[XR_TITLE_MAX * 4 + 1];
+	char t[XR_TITLE_MAX * 4 + 1], b[XR_TITLE_MAX * 8 + 16], *s = NULL;
+	size_t n = 0, i, h = 0;
+	int v = j_get(p, o, (const char *const[]){ "handback", 0 }), hb;
+
+	hb = v >= 0 && p->tok[v].kind == JSON_PRIMITIVE &&
+	     p->tok[v].end - p->tok[v].start == 4 &&
+	     !memcmp(p->text + p->tok[v].start, "true", 4);
+	name[0] = '\0';
+	if ((s = k_str(p, o, A_NAME, &n)))
+		xr_title(s, n, name, sizeof name);
+	free(s);
+	for (i = 0; name[i] && isxdigit((unsigned char)name[i]); i++)
+		;
+	if (strchr(name, '/') || (!name[i] && i >= 12))
+		name[0] = '\0';
+	/* the report itself is the cleaner field when it is there */
+	s = hb ? k_str(p, o, (const char *const[]){ "handbackReportText", 0 },
+	               &n) : NULL;
+	if (s && blank(s, n))
+	{
+		free(s);
+		s = NULL;
+	}
+	if (!s && !(s = k_str(p, o, A_BODY, &n)))
+	{
+		if (d->want)
+			d->want->failed = 1;
+		return;
+	}
+	if (hb)
+	{
+		/* "[Subagent hand-back]" is boilerplate */
+		while (h < n && u_space((unsigned char)s[h]))
+			h++;
+		if (n - h >= sizeof hbp - 1 && !memcmp(s + h, hbp, sizeof hbp - 1))
+			h += sizeof hbp - 1;
+		else
+			h = 0;
+		xr_title(s + h, n - h, t, sizeof t);
+		i = (size_t)snprintf(b, sizeof b, "subagent%s%s%s%s",
+		                     name[0] ? " " : "", name, t[0] ? ": " : "",
+		                     t);
+		xr_title(b, (i < sizeof b ? i : sizeof b - 1) | XR_WHOLE, sum,
+		         sizeof sum);
+	}
+	d->peer = name;
+	d->peersum = hb ? sum : NULL;
+	user_text(d, ag, s + h, n - h, 0);
+	d->peer = d->peersum = NULL;
+	free(s);
 }
 
 static void
@@ -6253,10 +6337,16 @@ user_parts(struct xr_claude *d, const struct json_parser *p, int c,
 static void
 entry_user(struct xr_claude *d, const struct json_parser *p, const char *ag)
 {
-	int m, c;
+	int m, c, o = peer(p, 0);
 	size_t n;
 	char *s;
 
+	/* #359: Claude Code writes a peer's message as meta */
+	if (o >= 0)
+	{
+		peer_text(d, p, o, ag);
+		return;
+	}
 	if (k_bool(p, 0, A_META))
 		return;
 	m = k_obj(p, 0, A_MESSAGE);
@@ -6839,10 +6929,13 @@ xr_claude_line(struct xr_claude *d, const char *line, size_t len,
 			/* commandMode is on every real one; older versions
 			** wrote no attachment origin */
 			int inj = k_streq(&p, a, A_CMODE, "task-notification") ||
-			          injected(&p, a), c = j_get(&p, a, A_PROMPT);
+			          injected(&p, a), c = j_get(&p, a, A_PROMPT),
+			    o = peer(&p, a) >= 0 ? peer(&p, a) : peer(&p, 0);
 
+			if (o >= 0)
+				peer_text(d, &p, o, ag);	/* #359 */
 			/* a list: text and pasted image blocks, as a user's */
-			if (c >= 0 && p.tok[c].kind == JSON_ARRAY)
+			else if (c >= 0 && p.tok[c].kind == JSON_ARRAY)
 				user_parts(d, &p, c, ag, inj);
 			else if ((s = k_str(&p, a, A_PROMPT, &n)))
 			{
@@ -8475,17 +8568,24 @@ put_or_null(FILE *f, const char *s)
 		fputs("null", f);
 }
 
-/* #192: additive, so a chapter that is not auto prints neither key. */
+/* #192: additive, so a chapter that is not auto prints neither key. #359:
+** "peer" likewise, only on another agent's prompt. */
 static void
 put_auto(FILE *m, const struct xr_chapter *c)
 {
-	if (!c->harness)
-		return;
-	fputs(",\"auto\":true", m);
-	if (c->summary && c->summary[0])
+	if (c->harness)
 	{
-		fputs(",\"summary\":", m);
-		xr_put_str(m, c->summary);
+		fputs(",\"auto\":true", m);
+		if (c->summary && c->summary[0])
+		{
+			fputs(",\"summary\":", m);
+			xr_put_str(m, c->summary);
+		}
+	}
+	if (c->peer)
+	{
+		fputs(",\"peer\":", m);
+		xr_put_str(m, c->peer);
 	}
 }
 
@@ -10943,14 +11043,24 @@ sr_claude(struct xr_search *s, const struct json_parser *p, struct sr_rec *r,
           const struct sr_win *w)
 {
 	char *t;
-	int a;
+	int a, o = peer(p, 0);
 
-	/* a subagent's thread, harness metadata, a compaction summary */
-	if (k_bool(p, 0, A_SIDE) || k_bool(p, 0, A_META) ||
+	/* a subagent's thread, harness metadata, a compaction summary; a
+	** peer's message (meta) is its body alone (#359) */
+	if (k_bool(p, 0, A_SIDE) || (o < 0 && k_bool(p, 0, A_META)) ||
 	    k_bool(p, 0, A_SUMMARY))
 		return;
 	t = k_str(p, 0, A_TYPE, NULL);
-	if (t && (!strcmp(t, "user") || !strcmp(t, "assistant")))
+	if (t && !strcmp(t, "attachment") && (a = k_obj(p, 0, A_ATTACH)) >= 0 &&
+	    k_streq(p, a, A_TYPE, "queued_command") && peer(p, a) >= 0)
+		o = peer(p, a);
+	if (t && o >= 0 && (!strcmp(t, "user") || !strcmp(t, "attachment")))
+	{
+		if (t[0] == 'u' || ((a = k_obj(p, 0, A_ATTACH)) >= 0 &&
+		                    k_streq(p, a, A_TYPE, "queued_command")))
+			sr_parts(s, p, j_get(p, o, A_BODY), SK_USER, r, w);
+	}
+	else if (t && (!strcmp(t, "user") || !strcmp(t, "assistant")))
 		sr_parts(s, p, (a = k_obj(p, 0, A_MESSAGE)) >= 0
 		         ? j_get(p, a, A_CONTENT) : -1,
 		         t[0] == 'u' ? SK_USER : SK_ASSISTANT, r, w);

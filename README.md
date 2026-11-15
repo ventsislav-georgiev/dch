@@ -1414,6 +1414,15 @@ The corpus:
     there is neither. The `title` stays as it was. Any other chapter has
     neither key. At most 256 KiB of summaries is held at a time: past that,
     the oldest auto chapters give theirs up (they keep `auto`).
+  - `peer` is there only on a Claude Code prompt that another agent sent,
+    not the user: its record's `origin` says so (`"kind":"peer"`); text
+    alone never does. It is the sender's name, made as a `title` is, or
+    `""` when the name is empty, a path, or a bare id (12 or more hex
+    digits). A subagent's hand-back is also `auto`, its `summary`
+    `subagent <name>: <the report's first line>`, its `title` the report's
+    first line. A message from another session is a plain prompt whose
+    `title` is the message's first line. Neither shows the wrapper Claude
+    Code puts around the message, the sender's socket path or its ids.
   - `response`, `response_offset` and `tools` are what Claude Code's Focus
     view shows of a turn, on a Claude Code or Codex chapter. `response` is
     the turn's last assistant text after its last tool result (thinking and
@@ -1774,7 +1783,8 @@ character`, exit 2). ASCII letters match in either case; nothing else folds.
   tool call's input values and a tool result's text. Codex: the user's and
   the assistant's messages, a call's arguments and its output. A shell: the
   typed commands and the output rows, soft wraps joined. Never thinking,
-  a sidechain, a meta record, `toolUseResult`, a compaction summary, Codex's
+  a sidechain, a meta record (but another agent's message: its text
+  alone, as `user`), `toolUseResult`, a compaction summary, Codex's
   own context, or any key or metadata field.
 - **Hits.** At most one per record and `who` (`user`, `assistant`, `tool`).
   `chapter` is the chapter's `anchor` from `--json` (`null` when `--json`
@@ -2050,7 +2060,9 @@ Rules for shells and endings:
 
 `dch --xray <n> --chapter <anchor> --json` prints one chapter's entries as
 one object: `{"schema":1,"session","session_id","anchor","title","at","kind","entries":[…],"truncated":bool}`,
-with `auto` and `summary` after `kind` when the chapter list has them.
+with `auto`, `summary` and `peer` after `kind` when the chapter list has them.
+Another agent's prompt (`peer`) has the message alone as its `user` text: no
+wrapper, socket path or ids; who sent it is only in `peer`.
 `<anchor>` is a chapter's `anchor` from `--json`: 1 to 128 bytes of
 `A-Z`, `a-z`, `0-9`, `:`, `_`, `.` and `-`, else exit 2 with `dch: bad
 anchor`. On a transcript, dch reads from a little before the anchor's offset

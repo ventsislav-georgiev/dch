@@ -1216,6 +1216,18 @@ made as a title is (at most 256 KiB of summaries held; past that the
 oldest auto chapters give theirs up); its title is unchanged, and no other
 chapter has
 either key;
+a Claude Code prompt another agent sent (its record's
+.B origin
+says so, never its text) has
+.BR peer :
+the sender's name made as a title is, or
+.B \(dq\(dq
+for an empty name, a path or a bare id; a subagent's hand-back is also
+.B auto
+with the summary
+.RI \(dqsubagent\  name :\  "first line" \(dq,
+a message from another session a plain prompt; either's title and text are
+the message alone, never the wrapper, socket path or ids;
 a Claude Code or Codex chapter whose turn has ended has
 .B response
 (the last assistant text after the last tool result, as Claude Code's
@@ -1598,7 +1610,8 @@ ASCII letters match in either case, nothing else folds.
 It counts the typed prompts, the assistant's text, a tool call's input
 values and a tool result's text (Codex: the user's and assistant's
 messages, a call's arguments and its output; a shell: the typed commands
-and the output rows), never thinking, a sidechain, a meta record,
+and the output rows), never thinking, a sidechain, a meta record (another agent's message
+counts, its text alone),
 .BR toolUseResult ,
 a compaction summary or a key; at most one hit per record and
 .B who
@@ -1821,9 +1834,10 @@ prints one chapter's entries as one object
 .BR entries ,
 .BR truncated ,
 and
-.B auto
-and
+.BR auto ,
 .B summary
+and
+.B peer
 when the chapter has them).
 .I anchor
 is a chapter's
