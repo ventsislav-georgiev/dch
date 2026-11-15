@@ -688,7 +688,10 @@ def test_shell_init(tmp):
                   r.stderr)
             r = dch("--xray", n, "--search", "58", "--json")
             o = json.loads(r.stdout) if r.returncode == 0 else {}
-            hs = o.get("hits", [])
+            # "58" is a substring of any pid or number in the ring (a
+            # job-control warning "(62588 to 62588)" matched, #373): keep
+            # the rows that are exactly the seq line
+            hs = [h for h in o.get("hits", []) if h["snippet"] == "58"]
             # a row still on the screen, not yet in the ring, has no
             # chapter, as --ref's mentions there (xr_shell_screen)
             check("%s: --search finds each command's output row, the ring's "
