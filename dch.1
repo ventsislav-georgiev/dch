@@ -3071,6 +3071,14 @@ A record without
 .B \-\-no\-message
 resumes it without typing that message: the result is ok and says the
 resume message was not sent.
+.B \-\-revive
+and the relaunch of
+.B \-\-restart \-\-include\-agents
+start Claude with
+.B MCP_CONNECTION_NONBLOCKING=0
+unless that is already set, so Claude connects its MCP servers before the first
+request and the resume message does not make Claude write the prompt cache
+twice. A Claude typed into the shell is started as before.
 .I name
 takes the newest ended record of that name, never a live session's;
 .IB file .json

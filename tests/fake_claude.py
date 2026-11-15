@@ -38,10 +38,14 @@ State lives in $FAKE_CLAUDE_DIR:
                     raises Claude Code's "Background work is running"
                     prompt, as it does under shell; "1" or Enter exits, "3"
                     or Esc stays), exit_eaten (every Enter on a typed
-                    /exit is ignored: it stays in the composer)
+                    /exit is ignored: it stays in the composer), mcp_ms
+                    (read at start: its MCP servers connect that long after
+                    start, the record says idle at once unless
+                    MCP_CONNECTION_NONBLOCKING=0 makes it wait; each turn logs mcp, true once they
+                    have)
   <session>.log     JSON lines: start (argv, cwd, sid, the CLAUDE*,
                     DCH_REVIVE* and Claude Code tool env keys, CLAUDE_CONFIG_DIR's value as
-                    cfg), line (typed), turn (a message taken),
+                    cfg, MCP_CONNECTION_NONBLOCKING's value as nonblocking), line (typed), turn (a message taken),
                     enter_dialog (Enter while a prompt is up: it would have
                     answered it), enter_eaten, enter_folded, key (typed while a screen
                     knob is up), paste (a paste's start, before lag_ms),
@@ -134,7 +138,8 @@ log(ev="start", argv=sys.argv[1:], cwd=os.getcwd(), sid=SID,
                if k.startswith(("CLAUDE", "DCH_REVIVE")) or k in (
                    "GIT_EDITOR", "AI_AGENT", "COREPACK_ENABLE_AUTO_PIN",
                    "NoDefaultCurrentDirectoryInExePath")),
-    cfg=os.environ.get("CLAUDE_CONFIG_DIR"))
+    cfg=os.environ.get("CLAUDE_CONFIG_DIR"),
+    nonblocking=os.environ.get("MCP_CONNECTION_NONBLOCKING"))
 saved = termios.tcgetattr(0)
 tty.setraw(0)
 RAW = termios.tcgetattr(0)
@@ -258,7 +263,7 @@ def paint(c):
 def take(text):
     """Start a turn on `text`."""
     global turn_end
-    log(ev="turn", text=text)
+    log(ev="turn", text=text, mcp=time.time() >= MCP_AT)
     transcript.append("❯ " + text[:50])
     if ctl().get("decoy"):
         transcript.append("  (see: claude --resume %s)" % DECOY)
@@ -309,11 +314,17 @@ def submit(text, c, confirmed=False):
         take(text)
 
 
+# its MCP servers connect in the background, after the idle record (#364)
+MCP_AT = time.time() + ctl().get("mcp_ms", 0) / 1000.0
 # start busy if asked, so a status read before the first tick never sees idle
 if ctl().get("busy"):
     set_status("busy")
     turn_end = float("inf")
 else:
+    # MCP_CONNECTION_NONBLOCKING=0: Claude waits for its servers before it
+    # is usable, so the idle record comes only after they connected
+    if os.environ.get("MCP_CONNECTION_NONBLOCKING") == "0":
+        time.sleep(max(0, MCP_AT - time.time()))
     set_status("idle")
 last = None
 buf = b""

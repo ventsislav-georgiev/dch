@@ -564,6 +564,37 @@ def main():
                   r.returncode == 0 and "resume message sent" in r.stdout and
                   any(e["text"].startswith(RESUME)
                       for e in ev(ln, "turn", s6["pid"])))
+        if not lite:
+            # --- #364: dch starts the revived Claude with
+            # MCP_CONNECTION_NONBLOCKING=0, so it reports idle (and takes the
+            # resume message) only once its MCP servers have connected -----
+            mc = spawn("rmcp", "claude")
+            s7 = until(lambda: starts(mc) and starts(mc)[0])
+            until(lambda: ((rec(mc) or {}).get("agent") or {})
+                  .get("session_id") == s7["sid"])
+            vanish(mc)
+            setctl(mc, mcp_ms=3000)
+            r = run("--revive", mc, timeout=120)
+            s8 = until(lambda: len(starts(mc)) > 1 and starts(mc)[1])
+            tm = s8 and until(lambda: ev(mc, "turn", s8["pid"]))
+            check("#364: a plain start has no MCP_CONNECTION_NONBLOCKING",
+                  s7["nonblocking"] is None)
+            check("#364: the revived Claude has MCP_CONNECTION_NONBLOCKING=0",
+                  s8 and s8["nonblocking"] == "0")
+            check("#364: the resume message is taken after the MCP servers "
+                  "connect",
+                  r.returncode == 0 and tm and
+                  tm[0]["text"].startswith(RESUME) and tm[0]["mcp"] is True)
+            mk = spawn("rmcp1", "claude")
+            s9 = until(lambda: starts(mk) and starts(mk)[0])
+            until(lambda: ((rec(mk) or {}).get("agent") or {})
+                  .get("session_id") == s9["sid"])
+            vanish(mk)
+            r = run("--revive", mk, timeout=120,
+                    env=dict(os.environ, MCP_CONNECTION_NONBLOCKING="1"))
+            s10 = until(lambda: len(starts(mk)) > 1 and starts(mk)[1])
+            check("#364: a MCP_CONNECTION_NONBLOCKING the user set is kept",
+                  s10 and s10["nonblocking"] == "1")
         run("-k", ln)
         until(lambda: not master(ln))
         spawn(ln, "sleep", "60", env=slow)

@@ -264,6 +264,9 @@ def main():
         check("a resumed the real id, not the decoy",
               a2 and a2["sid"] == sa["sid"] and
               "%s: claude 1.0.0 -> 2.0.0, resumed %s" % (a, sa["sid"]) in out)
+        check("#364: the relaunched claude has MCP_CONNECTION_NONBLOCKING=0, "
+              "the first start none",
+              a2 and a2["nonblocking"] == "0" and sa["nonblocking"] is None)
         check("a relaunched in the same cwd",
               a2 and os.path.realpath(a2["cwd"]) == os.path.realpath(proj))
         check("a: same master pid, same socket inode",

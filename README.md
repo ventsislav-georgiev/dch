@@ -2485,6 +2485,12 @@ is; `DCH_LOGIN_ENV=0` skips the step. A session ended by `dch --stop` comes back
 its message says it was stopped by `dch --stop` and to re-arm what it
 stopped for the pause.
 
+`--revive`, and a relaunch into a held session (`--restart --include-agents`,
+`--respawn`), start Claude with `MCP_CONNECTION_NONBLOCKING=0` unless that is
+already set: Claude then connects its MCP servers before its first request, so
+the resume message does not make it write the prompt cache a second time when
+the tools arrive. Only a Claude typed into the shell is started as before.
+
 `dch --stop` is the deliberate half of that round trip. It pauses the Claude
 in the session, `/exit`s it, reads its resume id from the exit line and ends
 the session; the record ends `stopped` and its `agent` keeps that id, even

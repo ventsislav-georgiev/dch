@@ -1199,6 +1199,8 @@ setnonblocking(int fd)
 #endif
 }
 
+static int respawn_child;	/* init_pty: this child is an agent relaunch */
+
 /* Initialize the pty structure. */
 static int
 init_pty(char **argv, int statusfd)
@@ -1255,6 +1257,18 @@ init_pty(char **argv, int statusfd)
 		/* An interactive Codex gets --no-daemon (#083), in the
 		** child only: the recorded argv stays as typed. */
 		argv = dch_codex_argv(argv);
+		/* A relaunched Claude gets its MCP servers before its first
+		** request, so the resume message is typed with their tools in
+		** place (#364); child only, a value the user set stays. */
+		if (respawn_child && !getenv("MCP_CONNECTION_NONBLOCKING"))
+		{
+			int n = 0;
+
+			while (argv[n])
+				n++;
+			if (dch_claude_tok(argv, n) < n)
+				setenv("MCP_CONNECTION_NONBLOCKING", "0", 1);
+		}
 		/* the master's core_off() is not the child's to keep */
 		if (core_saved)
 			setrlimit(RLIMIT_CORE, &core_orig);
@@ -3696,11 +3710,14 @@ respawn_start(char **v)
 {
 	int n;
 
+	respawn_child = 1;
 	if (init_pty(v, -1) < 0)
 	{
+		respawn_child = 0;
 		dch_trace("respawn: init_pty: %s", strerror(errno));
 		exit(1);
 	}
+	respawn_child = 0;
 	dch_trace("respawn child=%d fd=%d", (int)the_pty.pid, the_pty.fd);
 	reset_child_modes();
 
