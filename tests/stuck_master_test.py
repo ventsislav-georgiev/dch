@@ -29,6 +29,7 @@ Run:  python3 tests/stuck_master_test.py          (uses ./dch)
 import os, sys, json, glob, time, signal, socket, tempfile, subprocess
 import shutil, pty, re, struct, fcntl, termios
 from select import select as fdselect
+from serve_lib import fake_ts
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.environ.get("DCH", os.path.join(HERE, "..", "dch"))
@@ -136,24 +137,14 @@ def on_pty(args, keys=(), want=None, timeout=BOUND * 2):
     return st, out.decode(errors="replace"), dt
 
 
-# dch serve's tailscale: a fake owner (tests/serve_test.py's, cut down)
-FAKE_TS = """#!/bin/sh
-d=${0%/*}
-case "$1" in
-status) f=status.json ;; whois) f=whois.json ;; ip) f=ip.txt ;; *) exit 1 ;;
-esac
-[ -f "$d/$f" ] || exit 1
-while IFS= read -r l; do printf '%s\\n' "$l"; done < "$d/$f"
-printf '%s' "$l"
-"""
 
 
 def serve_start():
     """dch serve on 127.0.0.1, a kernel-picked port: (proc, port)."""
     fake = os.path.join(TMP, "fake")
     os.makedirs(fake)
-    for n, body in (("tailscale", FAKE_TS),
-                    ("status.json", json.dumps(
+    fake_ts(fake)
+    for n, body in (("status.json", json.dumps(
                         {"Self": {"ID": "1001", "UserID": 42, "Tags": []},
                          "User": {"42": {"LoginName": "me@example.com"}}})),
                     ("whois.json", json.dumps(
@@ -164,7 +155,6 @@ def serve_start():
                     ("ip.txt", "100.100.1.1\n")):
         with open(os.path.join(fake, n), "w") as f:
             f.write(body)
-    os.chmod(os.path.join(fake, "tailscale"), 0o755)
     log = os.path.join(TMP, "serve.log")
     env = dict(ENV, PATH=fake + ":/usr/bin:/bin", SHELL="/bin/sh",
                DCH_SERVE_TEST_LOOPBACK="1")

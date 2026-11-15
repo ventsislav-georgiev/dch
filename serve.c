@@ -612,15 +612,18 @@ ip_self(uint32_t ip, uint32_t local)
 	return hit;
 }
 
-/* The peer's whois document, NULL when whois cannot answer. */
+/* The peer's whois document, NULL when whois cannot answer; *slow set when
+** it gave no answer in time (killed at TS_MS), not a definite failure. */
 static char *
-ts_whois(const char *ipstr)
+ts_whois(const char *ipstr, int *slow)
 {
 	char ip[INET_ADDRSTRLEN], *out;
+	int r;
 
 	copy_str(ip, sizeof ip, ipstr);
-	return ts_run("whois", "--json", ip, NULL, &out, 256 << 10) == 0 ? out
-	                                                                : NULL;
+	r = ts_run("whois", "--json", ip, NULL, &out, 256 << 10);
+	*slow = r == -2;
+	return r == 0 ? out : NULL;
 }
 
 /* ---- machine info (0x18) --------------------------------------------- */
@@ -2127,7 +2130,7 @@ serve_conn(int fd, uint32_t ip)
 	struct conn *c = &C;
 	struct in_addr a;
 	char *whois = NULL;
-	int v, graceful = 0;
+	int v, slow, graceful = 0;
 
 	g_taken = 0;	/* only the parent's SIGUSR1 to this handler */
 	c->fd = fd;
@@ -2139,7 +2142,7 @@ serve_conn(int fd, uint32_t ip)
 	/* The gate, before a byte is read. A refused peer gets one 0x13 that
 	** says why, and the close. The parent already refused this host's
 	** own addresses. */
-	whois = ts_whois(c->ipstr);
+	whois = ts_whois(c->ipstr, &slow);
 	v = serve_gate(&g_gate, ip, 0, whois, !whois && ts_up());
 	free(whois);
 	if (v >= G_RANGE)
@@ -2155,7 +2158,9 @@ serve_conn(int fd, uint32_t ip)
 		       poll(&pf, 1, (int)(end - now_ms())) > 0)
 			;
 		close(fd);
-		return v == G_NOWHOIS ? 0 : NEG_EXIT + v;
+		/* a whois that timed out refuses this connection only: the
+		** next one asks again (#378) */
+		return v == G_NOWHOIS || slow ? 0 : NEG_EXIT + v;
 	}
 	if (v == G_OK_NOWHOIS)
 		slog("%s: warning: %s", c->ipstr, gate_why(v));
@@ -2974,7 +2979,7 @@ serve_main(int argc, char **argv)
 		struct in_addr ca;
 		char *w = NULL;
 		uint32_t ip;
-		int v, self;
+		int v, self, slow;
 
 		if (inet_pton(AF_INET, check, &ca) != 1)
 		{
@@ -2988,7 +2993,7 @@ serve_main(int argc, char **argv)
 		{
 			self = !(g_gate.test_loopback && ip_loop(ip)) &&
 			       ip_self(ip, 0);
-			w = self ? NULL : ts_whois(check);
+			w = self ? NULL : ts_whois(check, &slow);
 			v = serve_gate(&g_gate, ip, self, w,
 			               !self && !w && ts_up());
 			free(w);

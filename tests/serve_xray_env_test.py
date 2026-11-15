@@ -20,7 +20,7 @@ import json, os, re, shutil, signal, subprocess, sys, tempfile, time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from remote_client_test import OWNER, WHOIS  # noqa: E402
-from xray_deny_test import FAKE_TS  # noqa: E402
+from serve_lib import fake_ts  # noqa: E402
 
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
 
@@ -282,8 +282,7 @@ def main():
     fake, wrap, logs = (os.path.join(tmp, d) for d in ("fake", "wrap", "logs"))
     for d in (fake, wrap, logs):
         os.makedirs(d)
-    with open(os.path.join(fake, "tailscale"), "w") as f:
-        f.write(FAKE_TS)
+    fake_ts(fake)
     for name, obj in (("status.json", OWNER), ("whois.json", WHOIS)):
         with open(os.path.join(fake, name), "w") as f:
             json.dump(obj, f)

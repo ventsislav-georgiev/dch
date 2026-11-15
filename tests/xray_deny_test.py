@@ -36,18 +36,8 @@ import json, os, re, shutil, signal, subprocess, sys, tempfile, time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from remote_client_test import OWNER, WHOIS  # noqa: E402
+from serve_lib import fake_ts  # noqa: E402
 
-# Builtins only, as serve_test's (#246): serve gives whois 3 s, and a slower
-# fake is a whois_failed refusal cached 30 s, every serve case after it lost
-FAKE_TS = """#!/bin/sh
-d=${0%/*}
-case "$1" in
-status) f=status.json ;; whois) f=whois.json ;; ip) f=ip.txt ;; *) exit 1 ;;
-esac
-[ -f "$d/$f" ] || exit 1
-while IFS= read -r l; do printf '%s\\n' "$l"; done < "$d/$f"
-printf '%s' "$l"
-"""
 
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
 fails = []
@@ -66,9 +56,7 @@ def main():
     tmp = os.path.realpath(tempfile.mkdtemp(prefix="xdeny", dir=os.environ.get("DCH_TEST_TMP", "/tmp")))
     fake = os.path.join(tmp, "fake")
     os.makedirs(fake)
-    with open(os.path.join(fake, "tailscale"), "w") as f:
-        f.write(FAKE_TS)
-    os.chmod(os.path.join(fake, "tailscale"), 0o755)
+    fake_ts(fake)
     for name, obj in (("status.json", OWNER), ("whois.json", WHOIS)):
         with open(os.path.join(fake, name), "w") as f:
             json.dump(obj, f)

@@ -43,7 +43,8 @@ import tempfile, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from remote_client_test import FAKE_TS, OWNER, WHOIS, Fake, frame  # noqa
+from serve_lib import fake_ts  # noqa
+from remote_client_test import OWNER, WHOIS, Fake, frame  # noqa
 
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
 SLOW = bool(os.environ.get("DCH_TEST_NO_BUDGET"))	# ASan
@@ -210,20 +211,9 @@ def main():
     tmp = os.path.realpath(tempfile.mkdtemp(prefix="dchlf", dir=os.environ.get("DCH_TEST_TMP", "/tmp")))
     fake = os.path.join(tmp, "fake")
     os.makedirs(fake)
-    # the compiled fake, as serve_lib's (#277): a /bin/sh per whois past
-    # serve's 3 s under load is a refusal of 127.0.0.1 cached 30 s, and the
-    # 17th follower below dials about 3 times a second (#375)
-    try:
-        built = subprocess.call(os.environ.get("CC", "cc").split() + [
-            "-O1", "-o", os.path.join(fake, "tailscale"),
-            os.path.join(HERE, "fake_tailscale.c")]) == 0
-    except OSError:
-        built = False
-    if not built:
-        print("  note: tests/fake_tailscale.c did not build, the shell fake")
-        with open(os.path.join(fake, "tailscale"), "w") as f:
-            f.write(FAKE_TS)
-        os.chmod(os.path.join(fake, "tailscale"), 0o755)
+    # the compiled fake (#277): the 17th follower below dials about 3
+    # times a second, a whois each (#375)
+    fake_ts(fake)
     for name, obj in (("status.json", OWNER), ("whois.json", WHOIS)):
         with open(os.path.join(fake, name), "w") as f:
             json.dump(obj, f)
