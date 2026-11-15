@@ -940,7 +940,7 @@ def main():
             up = b"$" in out
             sock = "%s.sock" % nm
             ps = subprocess.run(["ps", "-eo", "pid,command"],
-                                capture_output=True, text=True).stdout
+                                capture_output=True, text=True, errors="replace").stdout
             pids = [int(ln.split()[0]) for ln in ps.splitlines()
                     if "--master-of" in ln and tmp in ln and
                     "/%s -- " % sock in ln]

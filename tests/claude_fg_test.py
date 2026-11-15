@@ -310,7 +310,7 @@ def main():
         def pipe_pgid():
             for l in subprocess.run(["ps", "-A", "-o", "pid=,ppid=,pgid=,comm="],
                                     capture_output=True,
-                                    text=True).stdout.splitlines():
+                                    text=True, errors="replace").stdout.splitlines():
                 f = l.split()
                 if (len(f) >= 4 and int(f[1]) == bash and f[0] != f[2] and
                         os.path.basename(f[3]) == "cat"):

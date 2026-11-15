@@ -285,7 +285,7 @@ def chord_end(nm, how):
         sock = "/%s.sock -- " % nm
         pids = [int(ln.split()[0]) for ln in subprocess.run(
                 ["ps", "-eo", "pid,command"], capture_output=True,
-                text=True).stdout.splitlines()
+                text=True, errors="replace").stdout.splitlines()
                 if "--master-of" in ln and T in ln and sock in ln]
         if how == "end":
             dch(SENV, "--send", nm, "go\n")
