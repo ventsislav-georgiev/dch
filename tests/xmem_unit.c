@@ -166,7 +166,9 @@ now(void)
 ** every row, rows x bytes: XM_CALLS 2 KB commands full of '/' took 37.6 s
 ** past the rows' own cost (base, t_many's run without a transcript); one
 ** pass over each, narrowing the rows by path, takes 1.0 s on a loaded Mac.
-** The 25 s bound is 25x that, under the 37.6 s product. */
+** The bound is 25 times the rows' own cost in the same run (base, 0.4 s
+** there: the old code took 90 times it, the new takes 3), so it holds on a
+** slow runner as well. */
 static void
 t_shell(const char *home, struct xm_req *q, double base)
 {
@@ -217,8 +219,8 @@ t_shell(const char *home, struct xm_req *q, double base)
 	      hit == 1 && miss == 0);
 	printf("       %d calls over %d rows: %.2f s more\n", XM_CALLS, XM_MANY,
 	       t);
-	CHECK("shell: one pass per command, not rows x bytes (25 s bound)",
-	      t < 25);
+	CHECK("shell: one pass per command, not rows x bytes (under 25 times "
+	      "the rows' own cost)", t < 25 * (base > 0.2 ? base : 0.2));
 	free(buf);
 }
 
