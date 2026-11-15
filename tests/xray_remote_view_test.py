@@ -581,6 +581,7 @@ def test_hostile():
 
 def test_responses():
     n0 = ctls("--xray")
+    late = []
     v = Pty([DCH, "--xray", "srv:xv-cl"])
     try:
         v.wait(b"Prompts 2")
@@ -594,12 +595,14 @@ def test_responses():
               ok and len(it) == 2 and
               it[0] == ("second prompt about PROJ-5", ["noted"]) and
               it[1][1] == ["Bash 1"], (it, v.out[mark:][-600:]))
+        host_ran(v, n0 + 3, "follow, task list, memory list", late)
         mark = len(v.out)
         v.key(b"\r", 0.05)
         check("Responses, remote: Enter reads the item's prompt from the "
               "host, 2 of 2, its Reply", v.wait(b"2 of 2", start=mark) and
               v.wait(b"Reply", start=mark) and v.wait(b"noted", start=mark),
               v.out[mark:][-600:])
+        host_ran(v, n0 + 4, "chapter", late)
         mark = len(v.out)
         v.key(b"q", 0.05)
         check("Responses, remote: q back to the item",
@@ -613,7 +616,7 @@ def test_responses():
     check("Responses, remote: the follow, the task and memory lists and the "
           "chapter, each its own ctl --xray on the host",
           ctls("--xray") - n0 == 4,
-          ctls("--xray") - n0)
+          "%s; not on the host in time: %s" % (ctls("--xray") - n0, late))
 
 
 def test_search():
