@@ -779,21 +779,28 @@ def test_memory_fake():
     v = Pty([DCH, "--xray", "q:fk"])
     try:
         ok = tabbar(v, "Memory 1100", 30)
-        v.key(b"\033[Z", 0.8)
+        v.key(b"\033[Z", 0.05)
+        until(lambda: (v.pump(0.1), trows(v))[1], 30)
         mark = len(v.out)
-        v.key(b"G\r", 0.8)
+        v.key(b"G\r", 0.05)
+        until(lambda: (v.pump(0.1), "b1099.md" in "\n".join(trows(v)))[1], 30)
         text = "\n".join(trows(v))
         check("Memory, 1100 texts of 16 KB: all listed, the last row's card "
               "says its text was not kept and names the path", ok and
               "not kept (the list keeps 16 MB of text): read /m/b1099.md"
               in text, text)
         v.key(b"q", 0.5)
-        v.key(b"g\r", 0.8)
+        v.key(b"g\r", 0.05)
+        until(lambda: (v.pump(0.1), "0000zzzz" in "\n".join(trows(v)))[1], 30)
         text = "\n".join(trows(v))
         check("Memory, 1100 texts: the first row's card shows its text",
               "0000zzzz" in text and "not kept" not in text, text)
         v.key(b"q", 0.5)
-        v.key(b"/1099z", 0.8)
+        v.key(b"/1099z", 0.05)
+        # the filter line under the rule says the last key came in; the
+        # rows drawn with it are the filtered ones
+        until(lambda: (v.pump(0.1), "/1099z" in rows_now(v))[1], 30)
+        v.pump(0.3)
         check("Memory, 1100 texts: a text not kept is not filtered on",
               not any("big 1099" in x for x in trows(v)), trows(v))
         v.key(b"\033", 0.3)
