@@ -78,6 +78,9 @@ struct xr_chapter
 	uint64_t response_offset;
 	int responded, response_cut;
 	char *tools;			/* the turn's tool line, or NULL */
+	char *peer;			/* #359: another agent sent the prompt:
+					** its name as a title ("" for none),
+					** else NULL */
 };
 
 /* The newest XR_CHAPTERS, oldest first from `start` (a ring). `total`

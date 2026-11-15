@@ -20,8 +20,8 @@
 ** the read chunk to 16 B or 4093 B, the line cap to 64 B, the ranges to a
 ** 128 B head and a 256 B tail, so a small input reaches every cap.
 ** Then the chapters are printed through xr_print. Every chapter's title and
-** summary (#192, only on an auto chapter) must be valid UTF-8 of at most
-** XR_TITLE_MAX scalars, its response (#296) valid UTF-8 of at most
+** summary (#192, only on an auto chapter) and peer (#359) must be valid
+** UTF-8 of at most XR_TITLE_MAX scalars, its response (#296) valid UTF-8 of at most
 ** XR_RESPONSE bytes, and the printed object one line, within the output
 ** cap. */
 #include <stdint.h>
@@ -79,6 +79,8 @@ emit(struct xr_chapters *c, int shell)
 		if (xr_chapter_at(c, i)->summary[0] &&
 		    !xr_chapter_at(c, i)->harness)
 			abort();
+		if (xr_chapter_at(c, i)->peer)		/* #359 */
+			check_title(xr_chapter_at(c, i)->peer);
 		if (xr_chapter_at(c, i)->response)	/* #296 */
 		{
 			check_utf8(xr_chapter_at(c, i)->response, XR_RESPONSE);

@@ -21,12 +21,27 @@ check(){ if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (want [$3] got [$2])"; f
 # ends it too. Output goes to a file, not $(...): a leftover child holding
 # that pipe open would hang the suite.
 pypid=
+# $3, if given, is a function run after the row with the test's output file
+# as $1 (a passing test's output is otherwise not shown).
 pyrun(){
+    tpause
+    if [ "$pjobs" -gt 1 ]; then pqueue "$@"; tlast=$(date +%s); return; fi
+    pyls=$(ls "$SOCKDIR")
+    pyexec "$2" >"$TMP/pyout" 2>&1 &
+    pypid=$!
+    wait "$pypid" && ok "$1" \
+        || { bad "$1"; sed 's/^/       /' "$TMP/pyout"
+             grep -q '^Timeout (' "$TMP/pyout" && pyreap; }
+    pypid=
+    [ -z "${3:-}" ] || "$3" "$TMP/pyout"
+    tnow=$(date +%s); trow $((tnow - tlast)) "$2"; tlast=$tnow
+}
+pyexec(){
     pyt=${DCH_TEST_TIMEOUT:-600}
     case $pyt in *[!0-9]*|??????????*) pyt=600 ;; esac
-    pyls=$(ls "$SOCKDIR")
     # An async list starts with SIGINT and SIGQUIT ignored: restore them.
-    DCH="$DCH" python3 -c 'import faulthandler, os, runpy, signal, sys
+    # pyrun and pstart run this in the background: exec keeps $! the test's pid
+    DCH="$DCH" exec python3 -c 'import faulthandler, os, runpy, signal, sys
 os.setsid()
 signal.signal(signal.SIGINT, signal.default_int_handler)
 signal.signal(signal.SIGQUIT, signal.SIG_DFL)
@@ -35,13 +50,105 @@ if int(sys.argv[1]):
 sys.argv = sys.argv[2:]
 sys.path[0] = os.path.dirname(os.path.abspath(sys.argv[0]))
 runpy.run_path(sys.argv[0], run_name="__main__")' \
-        "$pyt" "$(dirname "$0")/$2" </dev/null >"$TMP/pyout" 2>&1 &
-    pypid=$!
-    wait "$pypid" && ok "$1" \
-        || { bad "$1"; sed 's/^/       /' "$TMP/pyout"
-             grep -q '^Timeout (' "$TMP/pyout" && pyreap; }
-    pypid=
+        "$pyt" "$(dirname "$0")/$1" </dev/null
 }
+
+# --- the pool (DCH_TEST_JOBS > 1) ------------------------------------------
+# pyrun queues the file instead: job k runs it in the background in its own
+# runtime, state, config, HOME and temp dirs under $RUN/k (socket dir
+# $RUN/k/dch-$UID, DCH_TEST_TMP $RUN/kt), so no test sees another's sessions
+# and pyreap's socket-dir diff is exact (the dir starts empty). The shell rows
+# go on meanwhile in $TMP. A file in PYSERIAL waits for the pool to drain and
+# runs alone. pdrain prints every queued row in queue order, then the counts
+# go on as before.
+# Not safe beside other tests (each reason in docs of #361):
+#   perf_test.py          wall-clock spawn/attach budgets of 1 s
+#   harness_names_test.py CPU-time ratio budget, contention skews it
+PYSERIAL=' perf_test.py harness_names_test.py '
+pjobs=${DCH_TEST_JOBS:-}
+case $pjobs in ''|*[!0-9]*|0|0*)
+    pjobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
+    case $pjobs in ''|*[!0-9]*|0) pjobs=1 ;; esac
+    # the files wait more than they compute: at 6 jobs the longest file
+    # already bounds the wall (#361 measurements); more only adds contention
+    [ "$pjobs" -le 6 ] || pjobs=6 ;;
+esac
+pn=0 prun='' pser='' pjobs0=$pjobs
+pqueue(){
+    pn=$((pn + 1)); mkdir "$RUN/$pn" "$RUN/${pn}t" "$RUN/$pn/home"
+    printf '%s\n' "$1" >"$RUN/$pn/label"
+    printf '%s\n' "$2" >"$RUN/$pn/file"
+    printf '%s\n' "${3:-}" >"$RUN/$pn/hook"
+    case $PYSERIAL in *" $2 "*) pser="$pser $pn"; return ;; esac
+    pslots "$pjobs"
+    pstart "$pn"
+}
+# start job $1 in the background; its wrapper writes "rc seconds" to rc
+pstart(){
+    jd=$RUN/$1
+    (XDG_RUNTIME_DIR=$jd XDG_STATE_HOME=$jd/state DCH_CONFIG=$jd/config \
+     HOME=$jd/home DCH_TEST_TMP=${jd}t TMPDIR=${jd}t
+     export XDG_RUNTIME_DIR XDG_STATE_HOME DCH_CONFIG HOME DCH_TEST_TMP TMPDIR
+     mkdir -p "$jd/dch-$(id -u)"
+     s=$(date +%s)
+     pyexec "$(cat "$jd/file")" >"$jd/out" 2>&1 &
+     echo $! >"$jd/pid"
+     wait $!; rc=$?
+     echo "$rc $(($(date +%s) - s))" >"$jd/rc.t" && mv "$jd/rc.t" "$jd/rc"
+    ) &
+    echo $! >"$jd/wrap"
+    prun="$prun $1"
+}
+# wait until fewer than $1 jobs run, collecting the finished ones
+pslots(){
+    while :; do
+        left='' c=0
+        for k in $prun; do
+            if [ -f "$RUN/$k/rc" ]; then
+                wait "$(cat "$RUN/$k/wrap")"
+                grep -q '^Timeout (' "$RUN/$k/out" && preap "$k" >>"$RUN/$k/out" 2>&1
+            else
+                left="$left $k" c=$((c + 1))
+            fi
+        done
+        prun=$left
+        [ "$c" -ge "$1" ] || return 0
+        sleep 0.2
+    done
+}
+# pyreap for job $1: its group, the sessions in its own socket dir, its temp dir
+preap(){
+    [ -s "$RUN/$1/pid" ] || return 0
+    (pypid=$(cat "$RUN/$1/pid") SOCKDIR=$RUN/$1/dch-$(id -u) pyls=''
+     DCH_TEST_TMP=$RUN/${1}t XDG_RUNTIME_DIR=$RUN/$1
+     export XDG_RUNTIME_DIR; pyreap)
+}
+# run what is left: the pool to its end, then the serial files one by one;
+# print every row in queue order. After it pyrun runs serially again.
+pdrain(){
+    [ "$pjobs" -gt 1 ] || return 0
+    pslots 1
+    for k in $pser; do pstart "$k"; pslots 1; done
+    k=0
+    while [ "$k" -lt "$pn" ]; do
+        k=$((k + 1)); jd=$RUN/$k
+        read -r rc secs <"$jd/rc"
+        lb=$(cat "$jd/label")
+        if [ "$rc" = 0 ]; then ok "$lb"
+        else bad "$lb"; sed 's/^/       /' "$jd/out"; fi
+        hk=$(cat "$jd/hook"); [ -z "$hk" ] || "$hk" "$jd/out"
+        trow "$secs" "$(cat "$jd/file")"
+    done
+    pjobs=1
+}
+
+# --- times (DCH_TEST_TIMES=1 prints them, longest first, before the counts)
+# trow records a row group: a python file, a C unit, a block of shell rows.
+# The shell blocks leave out the pyrun time inside them.
+tlast=$(date +%s) tacc=0 tname='shell: CLI rows' tstart=$tlast
+trow(){ printf '%6d  %s\n' "$1" "$2" >>"$RUN/times"; }
+tpause(){ tnow=$(date +%s); tacc=$((tacc + tnow - tlast)); tlast=$tnow; }
+tsec(){ tpause; trow "$tacc" "$tname"; tname=$1 tacc=0; }
 # End what test $pypid left: its process group, then the sessions it started
 # in this run's socket dir. setsid made the group id its pid, and a group id
 # is never reused while a member lives, so group $pypid is the test's. Masters
@@ -128,7 +235,7 @@ export DCH_TEST_TMP
 # so runreap ends and removes theirs too (QA 1.60.0 LOW-T4)
 export TMPDIR="$DCH_TEST_TMP"
 trap 'DCH_TEST_TMP=$RUN; runreap; rm -rf "${RUN:?}"' EXIT
-trap 'pyreap; exit 130' INT TERM HUP
+trap 'pyreap; for k in $prun; do preap "$k"; done; exit 130' INT TERM HUP
 export XDG_RUNTIME_DIR="$TMP"
 # DCH_SOCKET_DIR wins over XDG_RUNTIME_DIR: an inherited one would point the
 # suite at the caller's live sessions.
@@ -250,7 +357,9 @@ skipmirror(){ printf '  skip %s (build has no terminal mirror)\n' "$1"; }
 nobudget(){ [ -n "${DCH_TEST_NO_BUDGET:-}" ] && printf '  skip %s (timing budget, sanitizer build)\n' "$1"; }
 # Latency budget: the fastest of 20 runs of "$@" under 100 ms wall. A sleep or
 # a deadline-driven read slows every run; a loaded box only some (#154).
-fast20(){ python3 -c '
+# Beside a full pool every run was slow (#361): wait until at most one job runs.
+fast20(){ [ "$pjobs" -le 1 ] || { tpause; pslots 2; tlast=$(date +%s); }
+    python3 -c '
 import subprocess, sys, time
 def one():
     t = time.perf_counter()
@@ -259,6 +368,43 @@ def one():
     return time.perf_counter() - t
 sys.exit(0 if min(one() for _ in range(20)) < 0.1 else 1)
 ' "$@"; }
+
+# --- the longest files first: a pool (DCH_TEST_JOBS > 1) starts them at once
+xsrc=$(cd "$(dirname "$0")/.." && pwd)
+xcc=$(sed -n 's/^CC = //p' Makefile 2>/dev/null)
+xcc=${xcc:-cc}
+pyrun "the --xray view: tabs, card, reader, hostile text, Refs, look-up, order, temp files, live Memory" xray_view_test.py
+pyrun "the --xray view: auto rows, compact, Responses, Codex tasks, Search" xray_view_turns_test.py
+pyrun "the --xray view: Tasks, Memory, a hit's place, twin hits, the tab bar" xray_view_tasks_test.py
+pyrun "the --xray view: small card, shell, signals, On screen, picker X, o, the chord" xray_view_shell_test.py
+pyrun "the --xray view: agent rows marked, a hides the cross-session ones (#360)" xray_peer_view_test.py
+pyrun "the --xray view of host:name over a loopback dch serve: the record, the live shell, a hostile host, o" xray_remote_view_test.py
+pyrun "the --xray view of host:name against fake hosts: failures, stop, drops, Responses, Search, Tasks, Memory" xray_remote_fakes_test.py
+pyrun "the --xray view of host:name from the picker X and the chord over dch -a host:name" xray_remote_chord_test.py
+# xray_shell_test.py's and xray_claude_test.py's RSS budget: a fork()+exec+wait4 helper, because a child
+# spawned by Python inherits Python's RSS high-water mark on Linux (maxrss.c)
+# shellcheck disable=SC2086 # xcc is a word list
+if $xcc -O1 -o "$TMP/maxrss" "$xsrc/tests/maxrss.c" >"$TMP/maxrss.log" 2>&1; then
+    export DCH_MAXRSS="$TMP/maxrss"
+else
+    bad "maxrss helper builds"; sed 's/^/       /' "$TMP/maxrss.log"
+fi
+if [ "$MIRROR" = "1" ]; then
+    # pyrun shows a passing test's own skip lines only on failure
+    pyrun "xray: a typed shell block, --clear, the ring, the 16 MiB RSS budget, shell caps" xray_shell_test.py
+    [ -n "${ASAN_OPTIONS:-}" ] &&
+        printf '  skip xray: the 16 MiB RSS budget (sanitizer build)\n'
+    pyrun "xray: a live Claude, the seam, names, refs, search, tasks, chapters, caps" xray_claude_test.py
+    [ -n "${ASAN_OPTIONS:-}" ] &&
+        printf '  skip xray: the 16 MiB RSS budget (sanitizer build)\n'
+    pyrun "xray: --follow, late and stale refs, agents, the primary screen" xray_follow_test.py
+    pyrun "xray resolvers: commit and file, the hostile-repo sentinel" xray_resolve_test.py
+else
+    skipmirror "xray: a typed shell block, --clear, the ring, the 16 MiB RSS budget, shell caps"
+    skipmirror "xray: a live Claude, the seam, names, refs, search, tasks, chapters, caps"
+    skipmirror "xray: --follow, late and stale refs, agents, the primary screen"
+    skipmirror "xray resolvers: commit and file, the hostile-repo sentinel"
+fi
 
 # --- spawn-vs-attach: leftover sockets + hot-path attach -------------------
 # Real forkpty spawn, so it needs an executable dch + python3. Skip gracefully.
@@ -280,6 +426,7 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "a stopped master with a full backlog hangs no verb (#265)" stuck_master_test.py
     pyrun "master self-heals a deleted socket" socket_heal_test.py
     pyrun "native agent bridge public CLI and wire protocol" agent_bridge_test.py
+    pyrun "native agent bridge: the hung queue dropped at its deadline" agent_bridge_more_test.py
     pyrun "shared Codex daemon never binds or names a session; --no-daemon" codex_daemon_test.py
 fi
 
@@ -337,7 +484,9 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "--follow streams whole frames on change, read-only" follow_test.py
     pyrun "respawn keeps the session across a child exit" respawn_test.py
     pyrun "--restart --include-agents restarts stale Claude agents" agent_restart_test.py
+    pyrun "--restart --include-agents: stalled master to self-restart" agent_restart_more_test.py
     pyrun "--history/--revive bring dead sessions back" revive_test.py
+    pyrun "--history/--revive, prune to --json" revive_more_test.py
     pyrun "--revive never starts two claudes on one id" revive_sid_test.py
     pyrun "claude's one-shot prompt is never sent again (#138)" oneshot_prompt_test.py
     pyrun "--pin/--unpin/--forget keep and clean history" history_pin_test.py
@@ -347,18 +496,21 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "--run into a Claude session goes through the gate (#112)" run_agent_test.py
     pyrun "--say/--run/--revive stop safely on a signal (#126)" verb_signal_test.py
     pyrun "auto-allow answers plain permission prompts; --config" auto_allow_test.py
-    pyrun "a suspended Claude: claude_foreground false, nothing typed to the shell (#282)" claude_fg_test.py
     # #330: pyrun hides a passing test's output; say whether the under-script
     # rows ran or skipped (a failing run also shows them in its dump above)
-    grep "^  [a-zA-Z]* *under script, fg: the fake's screen is back" "$TMP/pyout"
-    sed -n '/^    keys=/,/^  SKIP under script/p' "$TMP/pyout" | grep -q SKIP \
-        && sed -n '/^    keys=/,/^  SKIP under script/p' "$TMP/pyout"
+    fgrows(){
+        grep "^  [a-zA-Z]* *under script, fg: the fake's screen is back" "$1"
+        sed -n '/^    keys=/,/^  SKIP under script/p' "$1" | grep -q SKIP \
+            && sed -n '/^    keys=/,/^  SKIP under script/p' "$1"
+    }
+    pyrun "a suspended Claude: claude_foreground false, nothing typed to the shell (#282)" claude_fg_test.py fgrows
     # --stop's own 3 s deadlines expire on the ASan-slowed macOS CI runner
     # (a different check each run, no sanitizer report); ASan on Linux and
     # every plain build still run it.
     if [ "$(uname)" = Darwin ] && nobudget "--stop pauses Claude, ends the session as stopped"; then :
     else
         pyrun "--stop pauses Claude, ends the session as stopped" stop_test.py
+        pyrun "--stop: a quiet master after /exit, Ctrl-C twice at exiting" stop_more_test.py
     fi
     pyrun "-k/--stop signal exactly the session's master" kill_test.py
     pyrun "attached client exits cleanly on SIGHUP/SIGTERM" hangup_test.py
@@ -366,12 +518,15 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "a signalled master's history end names the sender" signal_sender_test.py
     pyrun "--cmd survives empty reply frames" cmd_frames_test.py
     pyrun "dch serve: remote frames goldens, peer gate, startup refusals" serve_test.py
+    pyrun "dch serve: the ctl grace, a stalled reader, 16 peers that never read (#124, #201)" serve_timing_test.py
     pyrun "remote hosts: -ls, --remote, -a host:name, hostile peers" remote_client_test.py
+    pyrun "remote hosts: dark hosts, stalled readers, hostile lines (#180)" remote_client_more_test.py
     pyrun "remote history: --history --remote, picker History rows, --ls-json cwd" remote_history_test.py
     pyrun "--ls-json --remote --follow: the list as a stream, watch and polled hosts" ls_follow_test.py
     pyrun "the Windows client's checks, against this dch" windows_client_test.py
 fi
 
+tsec 'shell: control verbs, --read, state detection, --restart'
 # --- control verbs: --spawn --run --read --wait --keys ---------------------
 # Headless by design, so plain shell drives them. `sh` as the inner command
 # keeps prompts boring; markers make matching deterministic.
@@ -1043,6 +1198,7 @@ if [ -x "$DCH" ]; then
     fi
 fi
 
+tsec 'C unit: cargv_unit'
 # --- claude's one-shot prompt (#138): cargv.c units ---------------------------
 csrc=$(cd "$(dirname "$0")/.." && pwd)
 ccc=$(sed -n 's/^CC = //p' Makefile 2>/dev/null)
@@ -1058,11 +1214,9 @@ else
     bad "cargv_unit builds"; sed 's/^/       /' "$TMP/cargv_unit.log"
 fi
 
+tsec 'C unit: ring_unit + ring goldens'
 # --- X-ray shell ring (#119): ring.c units, capture through the mirror, the
 # .ring.ndjson golden round-trip, then the master over its socket ----------
-xsrc=$(cd "$(dirname "$0")/.." && pwd)
-xcc=$(sed -n 's/^CC = //p' Makefile 2>/dev/null)
-xcc=${xcc:-cc}
 if command -v "${xcc%% *}" >/dev/null 2>&1; then  # CC may carry flags
     xlibs=$(sed -n 's/^VT_LIBS = //p' Makefile 2>/dev/null)
     xvt=
@@ -1097,6 +1251,7 @@ else
     skipmirror "X-ray ring: read op, wakes, clears, --restart handover, traces"
 fi
 
+tsec 'C unit: xray_unit'
 # --- dch --xray (#120): the engine's units, the goldens, real masters -------
 # shellcheck disable=SC2086 # xcc is a word list
 if $xcc -O1 -I"$xsrc" -I. -o "$TMP/xray_unit" "$xsrc/tests/xray_unit.c" \
@@ -1109,6 +1264,7 @@ if $xcc -O1 -I"$xsrc" -I. -o "$TMP/xray_unit" "$xsrc/tests/xray_unit.c" \
 else
     bad "xray_unit builds"; sed 's/^/       /' "$TMP/xray_unit.log"
 fi
+tsec 'C unit: xmem_unit'
 # --memory's parsers (#322): frontmatter, the index line, the shell rule
 # shellcheck disable=SC2086 # xcc is a word list
 # (xmem_unit.c includes xmem.c for its static matcher, #355)
@@ -1122,6 +1278,7 @@ if $xcc -O1 -I"$xsrc" -I. -o "$TMP/xmem_unit" "$xsrc/tests/xmem_unit.c" \
 else
     bad "xmem_unit builds"; sed 's/^/       /' "$TMP/xmem_unit.log"
 fi
+tsec 'shell: nm checks'
 # spec 2.1: the engine is client-only; the master never links an xr_ symbol
 if [ -f master.o ] && command -v nm >/dev/null 2>&1; then
     xrsym=$(nm master.o 2>/dev/null | grep -cE ' _?xr_')
@@ -1141,37 +1298,17 @@ else
         "$( [ -f xview.o ] && echo 'no nm' || echo 'no xview.o')"
 fi
 pyrun "xray goldens: chapters, identity, corpus labels, MANIFEST" xray_golden.py
-pyrun "the --xray view: tabs, card, reader, hostile text, signals, picker X" xray_view_test.py
 pyrun "the --xray reader reads on: past an end, ] and [, the header, back to the origin (#288)" xray_reader_next_test.py
 pyrun "the --xray view: a query child stopped right after its fork leaves the terminal alone, direct and chord" xray_fork_sig_test.py
 pyrun "the --xray view repaints after a stop and fg, direct and chord (#255)" xray_view_cont_test.py
 # #25: a socket-write interposer (tests/sockfail.c) makes every query child
 # of the chord's view exit(1); pyrun shows a passing test's skip line only here
+skiprows(){ grep '^  skip ' "$1"; }
 pyrun "the chord's query child exit()s: the client's terminal and marker stay" \
-    chord_fork_exit_test.py
-grep '^  skip ' "$TMP/pyout"
-pyrun "the --xray view of host:name over a loopback dch serve, picker X, the chord over dch -a host:name" xray_remote_view_test.py
+    chord_fork_exit_test.py skiprows
 pyrun "the chord's view over dch -a host:name: the host answers the start-up queries, 0x35 on the wire (#339)" remote_view_query_test.py
 pyrun "the --xray view's o: a local host:name that has ended, a host that answers another name (#232)" xray_view_o_test.py
 pyrun "the --xray answer's claudes and the view's line for it, local and over a loopback dch serve (#256)" xray_claudes_test.py
-# xray_cli_test.py's RSS budget: a fork()+exec+wait4 helper, because a child
-# spawned by Python inherits Python's RSS high-water mark on Linux (maxrss.c)
-# shellcheck disable=SC2086 # xcc is a word list
-if $xcc -O1 -o "$TMP/maxrss" "$xsrc/tests/maxrss.c" >"$TMP/maxrss.log" 2>&1; then
-    export DCH_MAXRSS="$TMP/maxrss"
-else
-    bad "maxrss helper builds"; sed 's/^/       /' "$TMP/maxrss.log"
-fi
-if [ "$MIRROR" = "1" ]; then
-    pyrun "xray: a typed shell block, --clear, a live Claude, the seam, names" xray_cli_test.py
-    # pyrun shows a passing test's own skip lines only on failure
-    [ -n "${ASAN_OPTIONS:-}" ] &&
-        printf '  skip xray: the 16 MiB RSS budget (sanitizer build)\n'
-    pyrun "xray resolvers: commit and file, the hostile-repo sentinel" xray_resolve_test.py
-else
-    skipmirror "xray: a typed shell block, --clear, a live Claude, the seam, names"
-    skipmirror "xray resolvers: commit and file, the hostile-repo sentinel"
-fi
 # a live Codex's rollout (#160, 7.4): the one-UUID mapping, the seam, --ref,
 # --follow; its ring-pause part skips itself without the mirror
 pyrun "xray: a live Codex's rollout, the mapping, the seam, --follow" xray_codex_test.py
@@ -1186,6 +1323,9 @@ pyrun "dch serve keeps X-ray's test switches from its ctls" serve_xray_env_test.
 # against fake commands (clock, caps, group cleanup, no shell)
 pyrun "xray command source: argv split, row lines, the runner's limits" xcmd_test.py
 pyrun "--tasks/--memory with a tasks_command/memory_command: command first, the built-in on no row, warn" xcmd_tasks_test.py
+
+tsec 'shell: watchdog rows'
+pdrain; tlast=$(date +%s)
 
 # --- the watchdog ends a hung test, its child and its session, only them ----
 # watchdog_hang.py records its pid, a child's, a session master's and one
@@ -1249,5 +1389,11 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     check "DCH_TEST_TIMEOUT 0, empty, -1 or abc: a test still passes" "$n" "4"
 fi
 
+tsec ''
+if [ -n "${DCH_TEST_TIMES:-}" ]; then
+    printf '\ntimes (s), longest first; %d jobs, %ds wall:\n' "$pjobs0" \
+        $(($(date +%s) - tstart))
+    sort -rn "$RUN/times"
+fi
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

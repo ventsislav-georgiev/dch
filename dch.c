@@ -10782,6 +10782,7 @@ revive_spawn(char *exe, struct hrec *r, int cols, int rows, int json)
 	int tok = dch_claude_tok(r->argv, r->argc), nc = r->argc, rc;
 	const char *lossy = hrec_lossy(r), *cfg = NULL, *o;
 	char *was = NULL;
+	int mcp = 0;
 
 	if (lossy)
 	{
@@ -10811,6 +10812,11 @@ revive_spawn(char *exe, struct hrec *r, int cols, int rows, int json)
 			was = (o = getenv("CLAUDE_CONFIG_DIR")) ? strdup(o) : NULL;
 			setenv("CLAUDE_CONFIG_DIR", cfg, 1);
 		}
+		/* the resume message is typed once claude is idle: have it wait
+		** for its MCP servers so the first request carries their tools
+		** (a user's own value stays) */
+		if (!getenv("MCP_CONNECTION_NONBLOCKING"))
+			mcp = setenv("MCP_CONNECTION_NONBLOCKING", "0", 1) == 0;
 	}
 	else if (r->sid[0] && r->launch)
 		r->mode = RV_SHELL;
@@ -10851,6 +10857,8 @@ revive_spawn(char *exe, struct hrec *r, int cols, int rows, int json)
 		}
 	}
 	unsetenv("DCH_REVIVE_AGENT");
+	if (mcp)
+		unsetenv("MCP_CONNECTION_NONBLOCKING");
 	if (cfg && was)
 		setenv("CLAUDE_CONFIG_DIR", was, 1);
 	else if (cfg)

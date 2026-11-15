@@ -428,6 +428,8 @@ def main():
             setctl(n, **ctl)
             run("-k", n)
             until(lambda: rec().get("ended", 0) > 0, 15 * SLOW)
+            # --revive refuses while the old claude pid still lives
+            until(lambda: not alive(s["pid"]), 15 * SLOW)
             return n
 
         def status_of(s):
@@ -463,7 +465,7 @@ def main():
                          resuming='"phase":"resuming"' in pre,
                          typed=typed(r1)))
 
-        r2 = ended("vrveat", eat_enters=99)
+        r2 = ended("vrveat", eat_enters=99, die_ms=4000)  # a lingering old claude
         pr = start("--revive", r2, "--json")
         s2 = up(r2, 1)
         held = until(lambda: composer(r2, "resume all work"), 20 * SLOW)

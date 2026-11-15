@@ -38,7 +38,7 @@ def cmd(name):
 def masters(sock):
     """pids of live masters serving `sock` (argv carries --master-of <path>)."""
     out = subprocess.run(["ps", "-eo", "pid,command"],
-                         capture_output=True, text=True).stdout
+                         capture_output=True, text=True, errors="replace").stdout
     return [int(l.split()[0]) for l in out.splitlines()
             if "--master-of" in l and sock in l]
 

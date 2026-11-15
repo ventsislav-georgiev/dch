@@ -240,7 +240,7 @@ def main():
     def master(name):
         sock = os.path.join(sockdir, name + ".sock")
         out = subprocess.run(["ps", "-eo", "pid,command"],
-                             capture_output=True, text=True).stdout
+                             capture_output=True, text=True, errors="replace").stdout
         for l in out.splitlines():
             if "--master-of" in l and l.rstrip().split(" -- ")[0].endswith(
                     " " + sock):

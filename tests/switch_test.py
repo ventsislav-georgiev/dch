@@ -186,7 +186,7 @@ def main():
         pid = None
 
         # 4. Any other key inside the window commits the detach (not x:
-        # that is the X-ray chord, #187, xray_view_test.py).
+        # that is the X-ray chord, #187, xray_view_shell_test.py).
         pid, fd = spawn_client(["-f", "-n", B])
         drain(fd, 10.0, b"BBB_BRAVO")
         os.write(fd, DETACH)

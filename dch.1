@@ -910,6 +910,9 @@ Four tabs, three for a shell session:
 .B Prompts
 (\fBCommands\fR for a shell session, one row per command; Chapters before
 1.63.0;
+newest first, opened on the newest at the top; a new prompt shows on top,
+the selection staying on the first row there or on its prompt, as on
+Responses;
 \fB/\fR filters, \fBEnter\fR reads the prompt and what followed it,
 read\-only;
 the reader's header says which prompt, \(lq3 of 12\(rq, and its title;
@@ -919,8 +922,8 @@ its end);
 .B ]
 and
 .B [
-open the next and the previous prompt at its top; both follow the list's
-order, skipping the auto rows while
+open the next (newer) and the previous (older) prompt at its top; both
+follow the session's order, skipping the auto rows while
 .B n
 hides them;
 \fBq\fR, \fBEsc\fR or \fB\(<-\fR goes back to where the reader was
@@ -934,8 +937,26 @@ is hidden until
 shows it, faint and titled by its summary, the footer saying how many;
 a compaction is hidden, counted and shown faint the same way
 (the footer calls both kinds \(dqauto rows\(dq);
-the tab counts the prompts shown without
-.BR n ;
+the tab counts the rows listed, the auto rows too while
+.B n
+shows them;
+another agent's prompt
+.RB ( \(dqpeer\(dq )
+is marked before its title, here, on Responses and in the reader's header:
+a robot and the sender's name for a message from another Claude session,
+an inbox tray and the name for a subagent's hand-back, a bell for another
+auto row; the user's own prompts have no mark;
+.B a
+hides the cross-session messages (shown by default), the tab counts leaving
+them out, the footer saying how many; with
+.B n
+and
+.B a
+both off only the user's own prompts are listed; a host that sends no
+.B peer
+marks none and
+.B a
+hides nothing;
 .B o
 here and in the reader leaves the view and attaches to the session, as
 .B \-a
@@ -967,7 +988,8 @@ it); a running turn says \(lqworking\(rq, an answer the size cap left out
 \fBEnter\fR reads the prompt at its answer (at its end when not found),
 \fBq\fR back to the item;
 \fB/\fR filters on the prompt and the answer;
-\fBn\fR and \fBo\fR as on Prompts; the tab counts the items shown without
+\fBn\fR, \fBa\fR and \fBo\fR as on Prompts, the items marked as their
+prompts; the tab counts the items shown without
 .BR n ;
 a host before 1.63.0 sends no answers, and the tab says none yet, as for a
 session with none),
@@ -1216,6 +1238,18 @@ made as a title is (at most 256 KiB of summaries held; past that the
 oldest auto chapters give theirs up); its title is unchanged, and no other
 chapter has
 either key;
+a Claude Code prompt another agent sent (its record's
+.B origin
+says so, never its text) has
+.BR peer :
+the sender's name made as a title is, or
+.B \(dq\(dq
+for an empty name, a path or a bare id; a subagent's hand-back is also
+.B auto
+with the summary
+.RI \(dqsubagent\  name :\  "first line" \(dq,
+a message from another session a plain prompt; either's title and text are
+the message alone, never the wrapper, socket path or ids;
 a Claude Code or Codex chapter whose turn has ended has
 .B response
 (the last assistant text after the last tool result, as Claude Code's
@@ -1598,7 +1632,8 @@ ASCII letters match in either case, nothing else folds.
 It counts the typed prompts, the assistant's text, a tool call's input
 values and a tool result's text (Codex: the user's and assistant's
 messages, a call's arguments and its output; a shell: the typed commands
-and the output rows), never thinking, a sidechain, a meta record,
+and the output rows), never thinking, a sidechain, a meta record (another agent's message
+counts, its text alone),
 .BR toolUseResult ,
 a compaction summary or a key; at most one hit per record and
 .B who
@@ -1821,9 +1856,10 @@ prints one chapter's entries as one object
 .BR entries ,
 .BR truncated ,
 and
-.B auto
-and
+.BR auto ,
 .B summary
+and
+.B peer
 when the chapter has them).
 .I anchor
 is a chapter's
@@ -3057,6 +3093,14 @@ A record without
 .B \-\-no\-message
 resumes it without typing that message: the result is ok and says the
 resume message was not sent.
+.B \-\-revive
+and the relaunch of
+.B \-\-restart \-\-include\-agents
+start Claude with
+.B MCP_CONNECTION_NONBLOCKING=0
+unless that is already set, so Claude connects its MCP servers before the first
+request and the resume message does not make Claude write the prompt cache
+twice. A Claude typed into the shell is started as before.
 .I name
 takes the newest ended record of that name, never a live session's;
 .IB file .json

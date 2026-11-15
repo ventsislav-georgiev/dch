@@ -78,6 +78,9 @@ struct xv_ch
 	char *anchor, *title, *kind, *summary;
 	long long at, offset;
 	int error, aut;	/* aut: "auto", a prompt the harness wrote (#192) */
+	/* "peer" (#359): another agent's prompt, its sender's name ("" none
+	** readable); xv_none when absent (an older engine or host) */
+	char *peer;
 	/* the turn's answer and tool line (#296), "" when absent (an older
 	** host's); roff -1 none, rcut: the engine cut it */
 	char *resp, *tools;
@@ -189,6 +192,8 @@ struct xv
 	int allk, nk;		/* Refs: files, commits and URLs shown; their
 				** rows (#262) */
 	int allauto, nauto;	/* Chapters: auto chapters shown; their rows */
+	int hidepeer, npeer;	/* Prompts, Responses: cross-session rows
+				** hidden (a, #360); their rows */
 	long long rseq;
 	struct xv_kid kid[XV_NKIDS];
 	int sel[XV_NTAB], top[XV_NTAB], *vis, nvis, avis;	/* Responses: items */
@@ -196,6 +201,7 @@ struct xv
 	char *selk;		/* Refs: the selected row's key, followed when
 				** the rows change */
 	char *sela;		/* Responses: the selected item's anchor, so */
+	char *selp;		/* Prompts: the same, its own (#358) */
 	int old;		/* Responses: no chapter with an answer field */
 	/* the card */
 	char *ckey, *ctext;
@@ -698,6 +704,7 @@ xv_ch_free(struct xv_ch *c)
 	xv_sfree(c->title);
 	xv_sfree(c->kind);
 	xv_sfree(c->summary);
+	xv_sfree(c->peer);
 	xv_sfree(c->resp);
 	xv_sfree(c->tools);
 }
@@ -739,6 +746,7 @@ xv_chapter(struct xv *v, const struct json_parser *p, int o)
 	/* absent from an older engine or host: every chapter shown */
 	c.aut = xv_bool(p, o, "auto");
 	c.summary = xv_str(p, o, "summary");
+	c.peer = xv_str(p, o, "peer");
 	c.resp = xv_str(p, o, "response");
 	c.tools = xv_str(p, o, "tools");
 	c.roff = xv_num(p, o, "response_offset", -1);
@@ -833,8 +841,6 @@ xv_snapshot(struct xv *v, const struct json_parser *p, int o)
 		for (t = a + 1; t < p->tok[a].next; t = p->tok[t].next)
 			if (p->tok[t].kind == JSON_OBJECT)
 				xv_ref(v, p, t);
-	if (!v->have)
-		v->sel[0] = v->nch - 1;	/* the newest chapter */
 	v->have = 1;
 }
 
@@ -1531,7 +1537,7 @@ xv_tvis(struct xv *v)
 	const char *f = v->filt;
 	int k, g;
 
-	v->ntmp = v->nauto = v->nk = 0;
+	v->ntmp = v->nauto = v->npeer = v->nk = 0;
 	if (q->sort && (v->kid[XV_TK + v->tab - 4].pid <= 0 ||
 	                now_ms() - q->sat >= 100) &&
 	    !xv_tord(&q->tl, v->tab - 4))
@@ -1686,6 +1692,8 @@ xv_wrap(struct xv *v, int w)
 	for (k = 0, te = -1; v->rsnip && !v->rloaded && v->roff >= 0 &&
 	     k < v->ne; k++)
 		if (v->e[k].off == v->roff && xv_kind(v, k) &&
+		    !(v->rtool && *v->rtool && *v->e[k].tool &&
+		      strcmp(v->rtool, v->e[k].tool)) &&
 		    (te < 0 || (!xv_snipat(v->e[te].text, v->rsnip) &&
 		                xv_snipat(v->e[k].text, v->rsnip))))
 			te = k;
@@ -1834,6 +1842,14 @@ xv_rch(const struct xv *v, const char *a)
 
 static int xv_hid(const struct xv_ch *c);
 
+/* A message another agent session sent (#359): a peer that is not auto
+** (an auto one is a subagent's hand-back) */
+static int
+xv_xs(const struct xv_ch *c)
+{
+	return c->peer != xv_none && !c->aut;
+}
+
 /* The chapter d (1 next, -1 previous) from the reader's, or the one it is
 ** turning to: the Chapters list's order, skipping the auto rows while n
 ** hides them there. -1: none. */
@@ -1845,7 +1861,8 @@ xv_next(const struct xv *v, int d)
 	if (k < 0)
 		return -1;
 	for (k += d; k >= 0 && k < v->nch; k += d)
-		if (v->allauto || !xv_hid(&v->ch[k]))
+		if ((v->allauto || !xv_hid(&v->ch[k])) &&
+		    !(v->hidepeer && xv_xs(&v->ch[k])))
 			return k;
 	return -1;
 }
@@ -2276,20 +2293,22 @@ xv_vis1(struct xv *v, int k)
 		return;
 	if (!r && xv_hid(&v->ch[k]) && (v->nauto++, !v->allauto))
 		return;
+	if (!r && xv_xs(&v->ch[k]) && (v->npeer++, v->hidepeer))
+		return;
 	if (xv_grow(&v->vis, &v->avis, v->nvis, sizeof *v->vis) < 0)
 		return;
 	v->vis[v->nvis++] = k;
 }
 
 /* The rows a list tab shows (Prompts, Responses, Refs): their indexes,
-** filtered. Responses: the newest first (#290). Refs: the refs on the
-** screen now first (#294), the index's own row when it holds the key, then
-** the rest, never one twice. */
+** filtered. Prompts, Responses: the newest first (#290, #358). Refs: the
+** refs on the screen now first (#294), the index's own row when it holds
+** the key, then the rest, never one twice. */
 static void
 xv_vis(struct xv *v)
 {
 	int k, j, n = v->tab == 1 ? v->nrf : v->nch;
-	const char *sk = v->tab == 1 ? v->selk : v->sela;
+	const char *sk = v->tab == 1 ? v->selk : v->tab ? v->sela : v->selp;
 
 	if (v->tab >= 4)
 	{
@@ -2297,7 +2316,7 @@ xv_vis(struct xv *v)
 		return;
 	}
 	v->vtab = v->tab;	/* Tasks' or Memory's rows are gone from vis */
-	v->nvis = v->ntmp = v->nauto = v->nk = 0;
+	v->nvis = v->ntmp = v->nauto = v->npeer = v->nk = 0;
 	v->old = xv_old(v);
 	/* Search: every hit, as sent (#291) */
 	for (k = 0; v->tab == 3 && k < v->nh &&
@@ -2319,7 +2338,7 @@ xv_vis(struct xv *v)
 	v->ngrp = v->nvis;
 	for (k = 0; k < n; k++)
 		if (v->tab != 1 || !v->rf[k].onscr)
-			xv_vis1(v, v->tab == 2 ? n - 1 - k : k);
+			xv_vis1(v, v->tab == 1 ? k : n - 1 - k);
 	if (v->tab == 1 && v->nvis - v->ngrp > 1)
 	{
 		xv_sort_rf = v->rf;
@@ -2328,9 +2347,9 @@ xv_vis(struct xv *v)
 	}
 	/* Refs: the selection stays on its ref while the rows change under
 	** it, the screen's each second; on the first row it stays there (the
-	** newest under it); a key gone keeps the index. Responses: on its
-	** prompt, as --follow re-sends them (#290) */
-	for (k = 0; v->tab && v->sel[v->tab] > 0 && sk && k < v->nvis; k++)
+	** newest under it); a key gone keeps the index. Prompts, Responses: on
+	** its prompt, as --follow re-sends them (#290, #358) */
+	for (k = 0; v->sel[v->tab] > 0 && sk && k < v->nvis; k++)
 		if (!strcmp(v->tab == 1 ? xv_rfat(v, v->vis[k])->key
 		            : v->ch[v->vis[k]].anchor, sk))
 		{
@@ -2339,12 +2358,12 @@ xv_vis(struct xv *v)
 		}
 }
 
-/* Refs, Responses: remember the selected row's key for xv_vis */
+/* Prompts, Refs, Responses: remember the selected row's key for xv_vis */
 static void
 xv_selk(struct xv *v)
 {
 	int s = v->sel[v->tab];
-	char **k = v->tab == 1 ? &v->selk : &v->sela;
+	char **k = v->tab == 1 ? &v->selk : v->tab ? &v->sela : &v->selp;
 
 	if (v->tab == 3)
 		return;	/* Search's hits change only with a new search */
@@ -2382,6 +2401,28 @@ xv_lead(int on)
 	pk_set("");
 }
 
+/* Another agent's prompt (#360): a robot for a cross-session message, an
+** inbox for a subagent's hand-back, then its sender; a bell for another
+** auto row. 1 when the title, not the summary, follows (a hand-back's
+** summary repeats the sender). Each mark one code point, 2 cells. */
+static int
+xv_mark(const struct xv_ch *c)
+{
+	int pe = c->peer != xv_none;
+
+	if (!pe && !c->aut)
+		return 0;
+	pk_txt(!pk_utf ? (pe && !c->aut ? "@ " : pe ? "< " : "* ")
+	       : pe && !c->aut ? "\xf0\x9f\xa4\x96 " : pe
+	       ? "\xf0\x9f\x93\xa5 " : "\xf0\x9f\x94\x94 ");
+	if (pe && c->peer[0])
+	{
+		pk_txt(c->peer);
+		pk_txt("  ");
+	}
+	return pe;
+}
+
 static void
 xv_row_ch(const struct xv_ch *c, int i, int on)
 {
@@ -2398,7 +2439,8 @@ xv_row_ch(const struct xv_ch *c, int i, int on)
 	       : !strcmp(c->kind, "compact") ? "= " : "  ");
 	/* an auto chapter, shown: faint, by what it says it is */
 	pk_set(xv_hid(c) ? "2" : "");
-	pk_txt(c->aut && c->summary[0] ? c->summary : c->title);
+	pk_txt(!xv_mark(c) && c->aut && c->summary[0] ? c->summary
+	       : c->title);
 	if (on)
 		pk_pad(pk_w);
 }
@@ -3513,6 +3555,13 @@ xv_draw(struct xv *v, int force)
 				? "hide auto rows" : "auto rows",
 				v->allauto ? NULL : tmp, 2, 0 };
 		}
+		if ((v->tab == 0 || v->tab == 2) && (xv_vis(v), v->npeer))
+		{
+			snprintf(kt, sizeof kt, "%d hidden", v->npeer);
+			keys[nk++] = (struct pkkey){ "a", v->hidepeer
+				? "agent rows" : "hide agent rows",
+				v->hidepeer ? kt : NULL, 2, 0 };
+		}
 		if (v->tab == 1 && (xv_vis(v), v->nk))
 		{
 			snprintf(kt, sizeof kt, "%d hidden", v->nk);
@@ -3595,6 +3644,8 @@ xv_draw(struct xv *v, int force)
 			pk_txt(b);
 		}
 		pk_set(pk_p(PK_ACCB));
+		if (k >= 0)
+			(void)xv_mark(&v->ch[k]);
 		pk_txt(v->rtitle ? v->rtitle : "");
 		xv_when(v->rat, b, sizeof b);
 		pk_set("2");
@@ -3623,8 +3674,10 @@ xv_draw(struct xv *v, int force)
 		n = xv_old(v);
 		for (k = cnt[0] = cnt[2] = 0; k < v->nch; k++)
 		{
-			cnt[0] += !xv_hid(&v->ch[k]);
-			cnt[2] += !n && !xv_hid(&v->ch[k]) && xv_item(v, k);
+			if (v->hidepeer && xv_xs(&v->ch[k]))
+				continue;
+			cnt[0] += (v->allauto || !xv_hid(&v->ch[k]));
+			cnt[2] += !n && (v->allauto || !xv_hid(&v->ch[k])) && xv_item(v, k);
 		}
 		cnt[1] = v->nrf;
 		/* Search: its hits once a search has answered, + past the cap
@@ -3709,7 +3762,7 @@ xv_draw(struct xv *v, int force)
 		xv_clamp(&i, top, n + h1 + h2, win);
 		if (*top == i && *top && (*sel ? h2 && *sel == g : h1))
 			(*top)--;
-		if (v->tab == 1)
+		if (v->tab < 2)
 			xv_selk(v);
 		for (k = *top; k < *top + win; k++)
 		{
@@ -3732,8 +3785,13 @@ xv_draw(struct xv *v, int force)
 				       !v->allk ? "    Only files, commits and URLs: a "
 				       "shows them" : v->tab == 1 && v->ntmp &&
 				       !v->alltmp ? "    Only temp files: t shows them"
+				       : v->tab != 1 && v->nauto && !v->allauto &&
+				       v->npeer && v->hidepeer ? "    Only auto "
+				       "and agent rows: n and a show them"
 				       : v->tab != 1 && v->nauto && !v->allauto
 				       ? "    Only auto rows: n shows them"
+				       : v->tab != 1 && v->npeer && v->hidepeer
+				       ? "    Only agent rows: a shows them"
 				       : isref ? "    No match: ^R looks it up"
 				       : v->filt[0] ? "    No match; ^R searches the "
 				       "session for it" : v->tab == 0
@@ -4075,23 +4133,31 @@ xv_key(struct xv *v, int c)
 		v->allk = !v->allk;
 		return 0;
 	}
-	if (v->tab == 0 && c == 'n')
+	if (v->tab == 0 && (c == 'n' || c == 'a'))
 	{
-		/* the selection stays on its chapter, or the next one shown;
-		** none shown before: the newest */
+		/* the selection stays on its chapter, or the next older one
+		** shown (newest first, #358); none shown before: the newest */
 		xv_vis(v);
 		k = v->sel[0] >= 0 && v->sel[0] < v->nvis ? v->vis[v->sel[0]]
 		    : v->nch;
-		v->allauto = !v->allauto;
+		if (c == 'n')
+			v->allauto = !v->allauto;
+		else
+			v->hidepeer = !v->hidepeer;	/* #360 */
 		xv_vis(v);
-		for (n = 0; n < v->nvis && v->vis[n] < k; n++)
+		for (n = 0; n < v->nvis && v->vis[n] > k; n++)
 			;
 		v->sel[0] = n;
+		xv_selk(v);
 		return 0;
 	}
-	if (v->tab == 2 && c == 'n')
+	if (v->tab == 2 && (c == 'n' || c == 'a'))
 	{
-		v->allauto = !v->allauto;	/* xv_vis keeps the selection */
+		/* xv_vis keeps the selection */
+		if (c == 'n')
+			v->allauto = !v->allauto;
+		else
+			v->hidepeer = !v->hidepeer;
 		return 0;
 	}
 	if (v->tab != 1 && c == 'o')
@@ -4170,8 +4236,7 @@ xv_key(struct xv *v, int c)
 		}
 		break;
 	}
-	if (v->tab)
-		xv_selk(v);
+	xv_selk(v);
 	return 0;
 }
 
@@ -4224,6 +4289,7 @@ xv_free(struct xv *v)
 	free(v->sr);
 	free(v->selk);
 	free(v->sela);
+	free(v->selp);
 	free(v->cses);
 	free(v->rans);
 	free(v->rsnip);

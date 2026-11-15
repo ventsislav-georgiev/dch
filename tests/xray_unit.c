@@ -7149,6 +7149,80 @@ t_tasks(void)
 	free(o);
 }
 
+/* #359: a peer's record by its "origin" alone: a hand-back is auto with
+** "subagent <name>: <first line>"; a cross-session message a prompt titled
+** and read by its body, its sender in peer ("" for an id or a path); a typed
+** look-alike and a hostile origin stay as before */
+#define PEER(o, c) "{\"type\":\"user\",\"isMeta\":true,\"origin\":" o \
+	",\"message\":{\"content\":\"" c "\"}}"
+#define XS "Another Claude session sent a message:\\n<cross-session-message " \
+	"from=\\\"uds:/tmp/cc-socks/1.sock\\\" from-name=\\\"qa\\\">\\nhi there" \
+	"\\n</cross-session-message>\\n\\nAdvice."
+
+static void
+t_peer(void)
+{
+	static const char *const L[] = {
+		PEER("{\"kind\":\"peer\",\"from\":\"a0c9e72b4fd05827e\","
+		     "\"name\":\"worker-a\",\"body\":\"[Subagent hand-back] PASS."
+		     "\\nmore\",\"handback\":true}", "x"),
+		A("ok"),
+		PEER("{\"kind\":\"peer\",\"from\":\"uds:/tmp/cc-socks/1.sock\","
+		     "\"name\":\"qa\",\"body\":\"hi there\"}", XS),
+		A("thanks"),
+		PEER("{\"kind\":\"peer\",\"name\":\"a0c9e72b4fd05827e\","
+		     "\"body\":\"\\u0007bell\\u0000 x\"}", "y"),
+		A("ok"),
+		U(XS),
+		A("ok"),
+		PEER("{\"kind\":\"peer\",\"body\":{\"x\":1}}", "hidden"),
+		PEER("[\"peer\"]", "hidden"),
+		A("ok"),
+	};
+	struct xr_chapters c;
+	struct xr_entries e;
+	const struct xr_chapter *x;
+
+	ch_run(L, (int)(sizeof L / sizeof *L), "-", 1 << 20, &c, &e);
+	CHECK("peer: 4 chapters (meta with a hostile origin: hidden)", c.n == 4);
+	if (c.n == 4)
+	{
+		x = xr_chapter_at(&c, 0);
+		CHECK("peer: a hand-back: auto, its summary clean, peer its name",
+		      x->harness && !strcmp(x->summary, "subagent worker-a: PASS.") &&
+		      !strcmp(x->title, "PASS.") && x->peer &&
+		      !strcmp(x->peer, "worker-a"));
+		x = xr_chapter_at(&c, 1);
+		CHECK("peer: cross-session: a prompt titled by its body",
+		      !x->harness && !strcmp(x->title, "hi there") && x->peer &&
+		      !strcmp(x->peer, "qa"));
+		x = xr_chapter_at(&c, 2);
+		CHECK("peer: a hex id for a name: peer \"\"; the body as a title "
+		      "(NUL to U+FFFD)", x->peer && !x->peer[0] &&
+		      !strcmp(x->title, "\x07" "bell\xef\xbf\xbd x"));
+		x = xr_chapter_at(&c, 3);
+		CHECK("peer: a typed look-alike is a plain prompt", !x->harness &&
+		      !x->peer && !strncmp(x->title, "Another Claude", 14));
+	}
+	xr_chapters_free(&c);
+	xr_entries_free(&e);
+	{
+		char a[48];
+
+		snprintf(a, sizeof a, "fabc:%lld", ch_off(L, 2));
+		ch_run(L, (int)(sizeof L / sizeof *L), a, 1 << 20, &c, &e);
+		CHECK("peer: the reader's text is the body alone",
+		      e.hit && ch_is(&e,
+		      "{\"role\":\"user\",\"tool\":null,\"text\":\"hi there\","
+		      "\"error\":false,\"offset\":%lld},"
+		      "{\"role\":\"assistant\",\"tool\":null,\"text\":\"thanks\","
+		      "\"error\":false,\"offset\":%lld}", ch_off(L, 2),
+		      ch_off(L, 3)));
+		xr_chapters_free(&c);
+		xr_entries_free(&e);
+	}
+}
+
 int
 main(int argc, char **argv)
 {
@@ -7194,6 +7268,7 @@ main(int argc, char **argv)
 	t_follow_cut();
 	t_out_cap_order();
 	t_auto();
+	t_peer();
 	t_queued_list();
 	t_auto_cap();
 	t_responses();

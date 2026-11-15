@@ -282,7 +282,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.71.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.72.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -919,7 +919,10 @@ The view has four tabs, three for a shell session (no Responses), a
 fifth, Tasks, when the session keeps a task list, and a sixth, Memory, when
 it has memories or instruction files:
 - **Prompts** (**Commands** for a shell session): one row per thing you
-  typed, a prompt to Claude or Codex, a command to a shell. `/` filters.
+  typed, a prompt to Claude or Codex, a command to a shell, newest first.
+  It opens on the newest, at the top. A new prompt shows on top as you
+  type it; the selection stays on the first row there, or on its prompt
+  once you moved down, as on Responses. `/` filters.
   `Enter` opens the prompt read-only with everything up to the next one
   (prompt, replies, tool calls, output), scrollable.
   The reader reads on: its header says which prompt it is on (`3 of 12`,
@@ -927,8 +930,8 @@ it has memories or instruction files:
   top) first says on the status line which prompt comes next (or before),
   e.g. "end; again for the next prompt (4 of 12): title"; the same
   direction again opens it, the next one at its top, the previous
-  one at its end. `]` and `[` open the next and the previous prompt at its
-  top. Both follow the list's order and skip the auto rows while `n` hides
+  one at its end. `]` and `[` open the next (newer) and the previous
+  (older) prompt at its top. Both follow the session's order and skip the auto rows while `n` hides
   them (a `/` filter does not narrow them). `q`, `Esc` or `←` goes back to
   where the reader was opened, the list row or the card, however many
   prompts it moved. On a remote view each move is one more `--chapter`
@@ -942,9 +945,19 @@ it has memories or instruction files:
   hidden, and `/` matches a summary too. A compaction (`= Conversation
   compacted`) is hidden and counted the same way, and `n` shows it faint
   (the footer calls both kinds "auto rows");
-  `Enter` on it reads its summary. The tab's count is the prompts
-  shown without `n`. A host or an older dch that sends no `auto` shows
-  every prompt. `o`, here and in the reader, leaves the view (as `q` does)
+  `Enter` on it reads its summary. The tab's count is the rows
+  listed, so it includes the auto rows while `n` shows them. A host or an older dch that sends no `auto` shows
+  every prompt.
+  Another agent's prompt (`"peer"` in `--json`) is marked at the start of
+  its title, on Prompts, on Responses and in the reader's header: 🤖 and
+  the sender's name for a message from another Claude session (`🤖 prosper
+  Scrollback answers for entry 895`), 📥 and the name for a subagent's
+  hand-back, 🔔 for another auto row (a task notification). Your own
+  prompts carry no mark. `a` hides the cross-session messages (shown by
+  default), the tab counts leave them out, and the footer says how many;
+  with `n` and `a` both off only your own prompts are left. A host whose dch
+  predates `peer` sends none: no row is marked as an agent's and `a` hides
+  nothing. `o`, here and in the reader, leaves the view (as `q` does)
   and attaches to the live session, as `dch -a <n>` does (`host:name` too;
   from the picker's `x`, as the picker's `Enter`; the `-k` and `-d` pickers
   say it is not theirs). On an ended session `o` says so and the view
@@ -968,8 +981,8 @@ it has memories or instruction files:
   `working…`; an answer the size cap left out says `Enter reads it`. `j`
   `k` move item by item. `Enter` reads the prompt in the reader, opened at
   the answer (at the prompt's end when it cannot find it), and `q` comes
-  back to the item. `/` filters on the prompt and the answer; `n` and `o`
-  work as on Prompts. The tab's count is the items shown without `n`. A
+  back to the item. `/` filters on the prompt and the answer; `n`, `a` and `o`
+  work as on Prompts, and the items carry their prompt's mark. The tab's count is the items shown without `n`. A
   host older than 1.63.0 sends no answers: the tab says `No responses yet`,
   as it does for a session with none yet (nothing the host sends tells the
   two apart).
@@ -1101,6 +1114,7 @@ not clear X-ray; run `clear`".
 | `a` | Refs: show / hide the files, commits and URLs | |
 | `t` | Refs: show / hide the temp files | |
 | `n` | Prompts, Responses: show / hide the auto rows (auto prompts, the task notifications, and compactions) | |
+| `a` | Prompts, Responses: hide / show the messages from other agent sessions (Refs: show / hide files, commits, URLs) | |
 | `o` | Prompts, Responses, Search, Tasks, Memory: attach to the session (in the chord: back to it) | card, reader: the same |
 | `f` `p` `y` | | card: full scan, other projects / this project (`p` was `o` before 1.61.0), copy |
 | `q` | quit | back |
@@ -1414,6 +1428,15 @@ The corpus:
     there is neither. The `title` stays as it was. Any other chapter has
     neither key. At most 256 KiB of summaries is held at a time: past that,
     the oldest auto chapters give theirs up (they keep `auto`).
+  - `peer` is there only on a Claude Code prompt that another agent sent,
+    not the user: its record's `origin` says so (`"kind":"peer"`); text
+    alone never does. It is the sender's name, made as a `title` is, or
+    `""` when the name is empty, a path, or a bare id (12 or more hex
+    digits). A subagent's hand-back is also `auto`, its `summary`
+    `subagent <name>: <the report's first line>`, its `title` the report's
+    first line. A message from another session is a plain prompt whose
+    `title` is the message's first line. Neither shows the wrapper Claude
+    Code puts around the message, the sender's socket path or its ids.
   - `response`, `response_offset` and `tools` are what Claude Code's Focus
     view shows of a turn, on a Claude Code or Codex chapter. `response` is
     the turn's last assistant text after its last tool result (thinking and
@@ -1774,7 +1797,8 @@ character`, exit 2). ASCII letters match in either case; nothing else folds.
   tool call's input values and a tool result's text. Codex: the user's and
   the assistant's messages, a call's arguments and its output. A shell: the
   typed commands and the output rows, soft wraps joined. Never thinking,
-  a sidechain, a meta record, `toolUseResult`, a compaction summary, Codex's
+  a sidechain, a meta record (but another agent's message: its text
+  alone, as `user`), `toolUseResult`, a compaction summary, Codex's
   own context, or any key or metadata field.
 - **Hits.** At most one per record and `who` (`user`, `assistant`, `tool`).
   `chapter` is the chapter's `anchor` from `--json` (`null` when `--json`
@@ -2050,7 +2074,9 @@ Rules for shells and endings:
 
 `dch --xray <n> --chapter <anchor> --json` prints one chapter's entries as
 one object: `{"schema":1,"session","session_id","anchor","title","at","kind","entries":[…],"truncated":bool}`,
-with `auto` and `summary` after `kind` when the chapter list has them.
+with `auto`, `summary` and `peer` after `kind` when the chapter list has them.
+Another agent's prompt (`peer`) has the message alone as its `user` text: no
+wrapper, socket path or ids; who sent it is only in `peer`.
 `<anchor>` is a chapter's `anchor` from `--json`: 1 to 128 bytes of
 `A-Z`, `a-z`, `0-9`, `:`, `_`, `.` and `-`, else exit 2 with `dch: bad
 anchor`. On a transcript, dch reads from a little before the anchor's offset
@@ -2472,6 +2498,12 @@ shell below gives back any your rc files set. The environment is the one your lo
 is; `DCH_LOGIN_ENV=0` skips the step. A session ended by `dch --stop` comes back the same way;
 its message says it was stopped by `dch --stop` and to re-arm what it
 stopped for the pause.
+
+`--revive`, and a relaunch into a held session (`--restart --include-agents`,
+`--respawn`), start Claude with `MCP_CONNECTION_NONBLOCKING=0` unless that is
+already set: Claude then connects its MCP servers before its first request, so
+the resume message does not make it write the prompt cache a second time when
+the tools arrive. Only a Claude typed into the shell is started as before.
 
 `dch --stop` is the deliberate half of that round trip. It pauses the Claude
 in the session, `/exit`s it, reads its resume id from the exit line and ends

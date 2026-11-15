@@ -2015,7 +2015,7 @@ def robust_checks(dch, check, cenv, fakes, tmp):
           (r.returncode, r.stdout[:40], r.stderr[:200]))
 
 
-def main():
+def main(part="a"):
     # POSIX only, so windows_client_test.py can import Fake and frame
     import fcntl, pty, termios
     tmp = os.path.realpath(tempfile.mkdtemp(prefix="dchrc", dir=os.environ.get("DCH_TEST_TMP", "/tmp")))
@@ -2127,456 +2127,458 @@ def main():
         return port
 
     try:
-        # the server and its session
-        log = os.path.join(tmp, "serve.log")
-        port = serve_at(log)
-        check("dch serve listens on a loopback test port", port is not None,
-              open(log).read())
-        if port is None:
-            return 1
-        r = dch(senv, "--spawn", "rs1", "--size", "80x24", "--", "/bin/sh")
-        check("a session on the server", r.returncode == 0, r.stderr)
-        r = dch(cenv, "--spawn", "loc1", "--size", "80x24", "--", "/bin/sh")
-        check("a local session on the client", r.returncode == 0, r.stderr)
-        hosts = "srv=127.0.0.1:%d" % port
+        if part == "b":  # split for run time: the #180 checks alone
+            robust_checks(dch, check, cenv, fakes, tmp)
+        else:
+            # the server and its session
+            log = os.path.join(tmp, "serve.log")
+            port = serve_at(log)
+            check("dch serve listens on a loopback test port", port is not None,
+                  open(log).read())
+            if port is None:
+                return 1
+            r = dch(senv, "--spawn", "rs1", "--size", "80x24", "--", "/bin/sh")
+            check("a session on the server", r.returncode == 0, r.stderr)
+            r = dch(cenv, "--spawn", "loc1", "--size", "80x24", "--", "/bin/sh")
+            check("a local session on the client", r.returncode == 0, r.stderr)
+            hosts = "srv=127.0.0.1:%d" % port
 
-        # --- listing --------------------------------------------------
-        quiet = Fake("list", rows=[{"name": "q1"}])
-        fakes.append(quiet)
-        qh = "q=127.0.0.1:%d" % quiet.port
-        r = dch(cenv, "-ls", "--hosts", qh)
-        r2 = dch(cenv, "-lj", "--hosts", qh)
-        r3 = dch(cenv, "--ls-json", "--hosts", qh)
-        time.sleep(0.3)
-        check("plain -ls, -lj, --ls-json: local rows only, no connection",
-              r.stdout.splitlines() == ["loc1"] and "q:" not in r2.stdout
-              and "q1" not in r3.stdout and quiet.conns == [],
-              (r.stdout, r2.stdout, r3.stdout, len(quiet.conns)))
-        r = dch(cenv, "-ls", "--remote", "--hosts", qh)
-        check("-ls --remote: it connects and lists q:q1",
-              "q:q1" in r.stdout.splitlines() and len(quiet.conns) == 1,
-              (r.stdout, len(quiet.conns)))
-        def listed(ok, *args):
-            """args run until ok(r): under load the host's answer can miss
-            the 300 ms --ls box; 10 s, as the other waits here"""
-            end = time.time() + 10
-            r = dch(cenv, *args)
-            while not ok(r) and time.time() < end:
-                time.sleep(0.2)
+            # --- listing --------------------------------------------------
+            quiet = Fake("list", rows=[{"name": "q1"}])
+            fakes.append(quiet)
+            qh = "q=127.0.0.1:%d" % quiet.port
+            r = dch(cenv, "-ls", "--hosts", qh)
+            r2 = dch(cenv, "-lj", "--hosts", qh)
+            r3 = dch(cenv, "--ls-json", "--hosts", qh)
+            time.sleep(0.3)
+            check("plain -ls, -lj, --ls-json: local rows only, no connection",
+                  r.stdout.splitlines() == ["loc1"] and "q:" not in r2.stdout
+                  and "q1" not in r3.stdout and quiet.conns == [],
+                  (r.stdout, r2.stdout, r3.stdout, len(quiet.conns)))
+            r = dch(cenv, "-ls", "--remote", "--hosts", qh)
+            check("-ls --remote: it connects and lists q:q1",
+                  "q:q1" in r.stdout.splitlines() and len(quiet.conns) == 1,
+                  (r.stdout, len(quiet.conns)))
+            def listed(ok, *args):
+                """args run until ok(r): under load the host's answer can miss
+                the 300 ms --ls box; 10 s, as the other waits here"""
+                end = time.time() + 10
                 r = dch(cenv, *args)
-            return r
+                while not ok(r) and time.time() < end:
+                    time.sleep(0.2)
+                    r = dch(cenv, *args)
+                return r
 
-        r = listed(lambda r: "srv:rs1" in r.stdout.splitlines(),
-                   "--ls", "--remote", "--hosts", hosts)
-        lines = r.stdout.splitlines()
-        check("--ls --remote: the local session, then srv:rs1",
-              r.returncode == 0 and "loc1" in lines and "srv:rs1" in lines
-              and lines.index("loc1") < lines.index("srv:rs1"), r)
-        r = dch(cenv, "--ls-json", "--hosts", hosts)
-        rows = json.loads(r.stdout)
-        check("--ls-json without --remote: local rows only",
-              [x["name"] for x in rows] == ["loc1"]
-              and all("host" not in x for x in rows), r.stdout)
-        r = listed(lambda r: '"stale":false' in r.stdout,
-                   "--ls-json", "--remote", "--hosts", hosts)
-        rows = json.loads(r.stdout)
-        rem = [x for x in rows if "host" in x]
-        check("--ls-json --remote: a row with host srv and name rs1",
-              len(rem) == 1 and rem[0]["host"] == "srv"
-              and rem[0]["name"] == "rs1" and rem[0]["stale"] is False
-              and "loc1" in [x["name"] for x in rows], r.stdout)
-        r = dch(cenv, "-lj", "--hosts", hosts)
-        check("-lj without --remote: no remote rows",
-              "srv:" not in r.stdout and "loc1\t" in r.stdout, r.stdout)
-        r = listed(lambda r: "srv:rs1\t\t0" in r.stdout.splitlines(),
-                   "-lj", "--remote", "--hosts", hosts)
-        check("-lj --remote: srv:rs1<TAB>alias<TAB>0",
-              "srv:rs1\t\t0" in r.stdout.splitlines(), r.stdout)
-        r = dch(cenv, "--remote", "-kl")
-        check("--remote with -kl is refused", r.returncode == 1
-              and "--remote only works" in r.stderr, r.stderr)
-        r = dch(cenv, "-ls", "--hosts", "a b;c")
-        check("a bad --hosts entry is refused", r.returncode == 1
-              and "bad entry" in r.stderr, r.stderr)
-        r = dch(cenv, "--host", "srv", "-ls")
-        check("--host without -a is refused", r.returncode == 1, r.stderr)
+            r = listed(lambda r: "srv:rs1" in r.stdout.splitlines(),
+                       "--ls", "--remote", "--hosts", hosts)
+            lines = r.stdout.splitlines()
+            check("--ls --remote: the local session, then srv:rs1",
+                  r.returncode == 0 and "loc1" in lines and "srv:rs1" in lines
+                  and lines.index("loc1") < lines.index("srv:rs1"), r)
+            r = dch(cenv, "--ls-json", "--hosts", hosts)
+            rows = json.loads(r.stdout)
+            check("--ls-json without --remote: local rows only",
+                  [x["name"] for x in rows] == ["loc1"]
+                  and all("host" not in x for x in rows), r.stdout)
+            r = listed(lambda r: '"stale":false' in r.stdout,
+                       "--ls-json", "--remote", "--hosts", hosts)
+            rows = json.loads(r.stdout)
+            rem = [x for x in rows if "host" in x]
+            check("--ls-json --remote: a row with host srv and name rs1",
+                  len(rem) == 1 and rem[0]["host"] == "srv"
+                  and rem[0]["name"] == "rs1" and rem[0]["stale"] is False
+                  and "loc1" in [x["name"] for x in rows], r.stdout)
+            r = dch(cenv, "-lj", "--hosts", hosts)
+            check("-lj without --remote: no remote rows",
+                  "srv:" not in r.stdout and "loc1\t" in r.stdout, r.stdout)
+            r = listed(lambda r: "srv:rs1\t\t0" in r.stdout.splitlines(),
+                       "-lj", "--remote", "--hosts", hosts)
+            check("-lj --remote: srv:rs1<TAB>alias<TAB>0",
+                  "srv:rs1\t\t0" in r.stdout.splitlines(), r.stdout)
+            r = dch(cenv, "--remote", "-kl")
+            check("--remote with -kl is refused", r.returncode == 1
+                  and "--remote only works" in r.stderr, r.stderr)
+            r = dch(cenv, "-ls", "--hosts", "a b;c")
+            check("a bad --hosts entry is refused", r.returncode == 1
+                  and "bad entry" in r.stderr, r.stderr)
+            r = dch(cenv, "--host", "srv", "-ls")
+            check("--host without -a is refused", r.returncode == 1, r.stderr)
 
-        # --- attach ---------------------------------------------------
-        pid, fd = attach(["--hosts", hosts, "-a", "srv:rs1"])
-        out = read(fd, b"$ ", 3)
-        if b"$ " not in out:
-            # lite: no replay, and an idle sh repaints nothing; prompt it
-            os.write(fd, b"\r")
-            out += read(fd, b"$ ", 8)
-        check("-a srv:rs1 shows the remote screen", b"$ " in out, out)
-        os.write(fd, b"echo rt$((6*7))\r")
-        out = read(fd, b"rt42", 5)
-        check("input round-trips", b"rt42" in out, out)
-        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 33, 111, 0, 0))
-        os.kill(pid, signal.SIGWINCH)
-        time.sleep(0.5)
-        os.write(fd, b"stty size\r")
-        out = read(fd, b"33 111", 5)
-        check("a resize arrives", b"33 111" in out, out)
-        os.write(fd, b"\x1c")
-        st, out = reap(pid, fd, 5)
-        check("the detach key detaches (exit 0)",
-              st is not None and os.WIFEXITED(st)
-              and os.WEXITSTATUS(st) == 0, (st, out))
-        r = dch(senv, "-ls")
-        check("the remote session lives on", "rs1" in r.stdout.split(),
-              r.stdout)
+            # --- attach ---------------------------------------------------
+            pid, fd = attach(["--hosts", hosts, "-a", "srv:rs1"])
+            out = read(fd, b"$ ", 3)
+            if b"$ " not in out:
+                # lite: no replay, and an idle sh repaints nothing; prompt it
+                os.write(fd, b"\r")
+                out += read(fd, b"$ ", 8)
+            check("-a srv:rs1 shows the remote screen", b"$ " in out, out)
+            os.write(fd, b"echo rt$((6*7))\r")
+            out = read(fd, b"rt42", 5)
+            check("input round-trips", b"rt42" in out, out)
+            fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 33, 111, 0, 0))
+            os.kill(pid, signal.SIGWINCH)
+            time.sleep(0.5)
+            os.write(fd, b"stty size\r")
+            out = read(fd, b"33 111", 5)
+            check("a resize arrives", b"33 111" in out, out)
+            os.write(fd, b"\x1c")
+            st, out = reap(pid, fd, 5)
+            check("the detach key detaches (exit 0)",
+                  st is not None and os.WIFEXITED(st)
+                  and os.WEXITSTATUS(st) == 0, (st, out))
+            r = dch(senv, "-ls")
+            check("the remote session lives on", "rs1" in r.stdout.split(),
+                  r.stdout)
 
-        # --- #102: a newer attach takes the session -------------------
-        pid, fd = attach(["--hosts", hosts, "-a", "srv:rs1"])
-        out = read(fd, b"$ ", 3)
-        if b"$ " not in out:
-            os.write(fd, b"\r")
-            out += read(fd, b"$ ", 8)
-        pid2, fd2 = attach(["--hosts", hosts, "-a", "srv:rs1"])
-        read(fd2, b"$ ", 3)
-        st, out = reap(pid, fd, 8)
-        check("a newer attach takes the session: the older says so, exit "
-              "%d (#102)" % TAKEN_EXIT,
-              st is not None and os.WIFEXITED(st)
-              and os.WEXITSTATUS(st) == TAKEN_EXIT
-              and b"dch: srv: " + TAKEN["message"].encode() in out
-              and b"lost the connection" not in out, (st, out[-300:]))
-        check("the terminal restored before the message",
-              0 <= out.find(b"\x1b[?1049l") < out.find(b"dch: srv: another"),
-              out[-300:])
-        os.write(fd2, b"\x1c")
-        st, out = reap(pid2, fd2, 5)
-        check("the newer one stays attached, then detaches (exit 0)",
-              st is not None and os.WIFEXITED(st)
-              and os.WEXITSTATUS(st) == 0, (st, out))
+            # --- #102: a newer attach takes the session -------------------
+            pid, fd = attach(["--hosts", hosts, "-a", "srv:rs1"])
+            out = read(fd, b"$ ", 3)
+            if b"$ " not in out:
+                os.write(fd, b"\r")
+                out += read(fd, b"$ ", 8)
+            pid2, fd2 = attach(["--hosts", hosts, "-a", "srv:rs1"])
+            read(fd2, b"$ ", 3)
+            st, out = reap(pid, fd, 8)
+            check("a newer attach takes the session: the older says so, exit "
+                  "%d (#102)" % TAKEN_EXIT,
+                  st is not None and os.WIFEXITED(st)
+                  and os.WEXITSTATUS(st) == TAKEN_EXIT
+                  and b"dch: srv: " + TAKEN["message"].encode() in out
+                  and b"lost the connection" not in out, (st, out[-300:]))
+            check("the terminal restored before the message",
+                  0 <= out.find(b"\x1b[?1049l") < out.find(b"dch: srv: another"),
+                  out[-300:])
+            os.write(fd2, b"\x1c")
+            st, out = reap(pid2, fd2, 5)
+            check("the newer one stays attached, then detaches (exit 0)",
+                  st is not None and os.WIFEXITED(st)
+                  and os.WEXITSTATUS(st) == 0, (st, out))
 
-        pid, fd = attach(["--hosts", hosts, "--host", "srv", "-a", "rs1"])
-        out = read(fd, b"$ ", 8)
-        os.write(fd, b"echo h$((2+3))\r")
-        out += read(fd, b"h5", 5)
-        os.write(fd, b"\x1c")
-        st, _ = reap(pid, fd, 5)
-        check("--host srv -a rs1 attaches", b"h5" in out and st is not None
-              and os.WEXITSTATUS(st) == 0, out)
+            pid, fd = attach(["--hosts", hosts, "--host", "srv", "-a", "rs1"])
+            out = read(fd, b"$ ", 8)
+            os.write(fd, b"echo h$((2+3))\r")
+            out += read(fd, b"h5", 5)
+            os.write(fd, b"\x1c")
+            st, _ = reap(pid, fd, 5)
+            check("--host srv -a rs1 attaches", b"h5" in out and st is not None
+                  and os.WEXITSTATUS(st) == 0, out)
 
-        # --- #101: --scrollback / DCH_REPLAY_SCROLLBACK in the 0x01 ------
-        sbf = Fake("exit", rows=[{"name": "sb1"}])
-        fakes.append(sbf)
-        sbh = "sb=127.0.0.1:%d" % sbf.port
-        for args, ev, want in ((["--scrollback", "7"], None, 7),
-                               ([], "4", 4), ([], None, None),
-                               (["--scrollback", "0"], "4", None)):
-            if ev:
-                cenv["DCH_REPLAY_SCROLLBACK"] = ev
-            pid, fd = attach(["--hosts", sbh, "-a", "sb:sb1"] + args)
-            reap(pid, fd, 8)
-            cenv.pop("DCH_REPLAY_SCROLLBACK", None)
-            body = json.loads(sbf.bodies[-1]) if sbf.bodies else {}
-            check("0x01 scrollback for %s %s: %s" % (args, ev, want),
-                  body.get("scrollback") == want and body.get("name") == "sb1"
-                  and list(body) == sorted(body), body)
-        mirror = dch(cenv, "--build").stdout.strip() == "full"
-        if mirror:
-            # end to end: the client's 0x01 key, dch serve's --scrollback for
-            # the client it spawns, MSG_ATTACH's len, the master's replay
-            r = dch(senv, "--spawn", "rsb", "--size", "40x10", "--", "sh",
-                    "-c", "seq 1 40; printf END; exec sleep 300")
-            end = time.time() + 10
-            while time.time() < end and "END" not in \
-                    dch(senv, "--read", "rsb").stdout:
-                time.sleep(0.1)
-            pid, fd = attach(["--hosts", hosts, "-a", "srv:rsb",
-                              "--scrollback", "5"], cols=40, rows=10)
-            out = read(fd, b"END", 8)
+            # --- #101: --scrollback / DCH_REPLAY_SCROLLBACK in the 0x01 ------
+            sbf = Fake("exit", rows=[{"name": "sb1"}])
+            fakes.append(sbf)
+            sbh = "sb=127.0.0.1:%d" % sbf.port
+            for args, ev, want in ((["--scrollback", "7"], None, 7),
+                                   ([], "4", 4), ([], None, None),
+                                   (["--scrollback", "0"], "4", None)):
+                if ev:
+                    cenv["DCH_REPLAY_SCROLLBACK"] = ev
+                pid, fd = attach(["--hosts", sbh, "-a", "sb:sb1"] + args)
+                reap(pid, fd, 8)
+                cenv.pop("DCH_REPLAY_SCROLLBACK", None)
+                body = json.loads(sbf.bodies[-1]) if sbf.bodies else {}
+                check("0x01 scrollback for %s %s: %s" % (args, ev, want),
+                      body.get("scrollback") == want and body.get("name") == "sb1"
+                      and list(body) == sorted(body), body)
+            mirror = dch(cenv, "--build").stdout.strip() == "full"
+            if mirror:
+                # end to end: the client's 0x01 key, dch serve's --scrollback for
+                # the client it spawns, MSG_ATTACH's len, the master's replay
+                r = dch(senv, "--spawn", "rsb", "--size", "40x10", "--", "sh",
+                        "-c", "seq 1 40; printf END; exec sleep 300")
+                end = time.time() + 10
+                while time.time() < end and "END" not in \
+                        dch(senv, "--read", "rsb").stdout:
+                    time.sleep(0.1)
+                pid, fd = attach(["--hosts", hosts, "-a", "srv:rsb",
+                                  "--scrollback", "5"], cols=40, rows=10)
+                out = read(fd, b"END", 8)
+                os.write(fd, b"\x1c")
+                reap(pid, fd, 5)
+                check("-a srv:rsb --scrollback 5: the rows reach the terminal",
+                      b"27\r\n28\r\n29\r\n30\r\n31\x1b[0m\x1b[999H" in out,
+                      out[-400:])
+                dch(senv, "-k", "rsb")
+
+            # --- ctl (#114): the control verbs on a remote host ------------
+            ctl_checks(dch, check, senv, cenv, serve_at, procs, fakes, tmp,
+                       hosts)
+            xray_checks(dch, check, senv, cenv, port, fakes, tmp, log)
+            requests_checks(dch, check, senv, cenv, serve_at, fakes, tmp, log)
+
+            # --- precedence -----------------------------------------------
+            # (--spawn srv:rs1 is remote now, #114: -n makes the local one)
+            pid, fd = attach(["-n", "srv:rs1", "--", "/bin/sh"])
+            read(fd, b"$ ", 3)
             os.write(fd, b"\x1c")
             reap(pid, fd, 5)
-            check("-a srv:rsb --scrollback 5: the rows reach the terminal",
-                  b"27\r\n28\r\n29\r\n30\r\n31\x1b[0m\x1b[999H" in out,
-                  out[-400:])
-            dch(senv, "-k", "rsb")
+            check("a local session named srv:rs1",
+                  "srv:rs1" in dch(cenv, "-ls").stdout.split())
+            # the remote is unreachable now: only a local attach can work
+            pid, fd = attach(["--hosts", "srv=127.0.0.1:1", "-a", "srv:rs1"])
+            read(fd, b"\0never", 1.5)
+            marks = [f for f in os.listdir(csock)
+                     if f.startswith("srv:rs1.sock.client.")]
+            os.write(fd, b"\x1c")
+            st, out = reap(pid, fd, 5)
+            check("an exact local name wins", marks and st is not None
+                  and os.WEXITSTATUS(st) == 0, (marks, st, out))
+            dch(cenv, "-k", "srv:rs1")
 
-        # --- ctl (#114): the control verbs on a remote host ------------
-        ctl_checks(dch, check, senv, cenv, serve_at, procs, fakes, tmp,
-                   hosts)
-        xray_checks(dch, check, senv, cenv, port, fakes, tmp, log)
-        requests_checks(dch, check, senv, cenv, serve_at, fakes, tmp, log)
-        robust_checks(dch, check, cenv, fakes, tmp)	# #180
+            r = dch(cenv, "--hosts", hosts, "-a", "nope:rs1")
+            check("an unknown host: a clear error, exit 1", r.returncode == 1
+                  and "nope is not a known host" in r.stderr
+                  and "known: srv" in r.stderr, r.stderr)
+            r = dch(cenv, "--hosts", hosts, "-a", "nosuch")
+            check("-a never creates", r.returncode == 1
+                  and "no session: nosuch" in r.stderr
+                  and "nosuch" not in dch(cenv, "-ls").stdout, r.stderr)
+            r = dch(cenv, "--hosts", hosts, "-a", "srv:gone")
+            check("-a host:missing says so, creates nothing", r.returncode == 1
+                  and "no session gone on srv" in r.stderr
+                  and "gone" not in dch(senv, "-ls").stdout, r.stderr)
+            put("status.json", PEERS)
+            denv = dict(cenv)
+            del denv["DCH_NO_REMOTE"]
+            r = dch(denv, "-a", "nope:x")
+            check("discovery: only the user's online untagged peers",
+                  r.returncode == 1 and "known: mybox)" in r.stderr, r.stderr)
+            put("status.json", dict(PEERS, BackendState="Stopped"))
+            r = dch(denv, "-a", "nope:x")
+            check("discovery: none unless BackendState is Running",
+                  r.returncode == 1 and "none:" in r.stderr, r.stderr)
+            neg = json.loads(json.dumps(PEERS))     # #129: -1 is "unknown"
+            neg["Self"]["UserID"] = -1
+            for peer in neg["Peer"].values():
+                peer["UserID"] = -1 if peer["UserID"] == 42 else peer["UserID"]
+            put("status.json", neg)
+            r = dch(denv, "-a", "nope:x")
+            check("discovery: none for a negative Self.UserID",
+                  r.returncode == 1 and "none:" in r.stderr, r.stderr)
+            put("status.json", PEERS)
+            for why, w in (("another user", dict(WHOIS, UserProfile={
+                               "ID": 7, "LoginName": "them@example.com"})),
+                           ("a tagged node", dict(WHOIS, Node=dict(
+                               WHOIS["Node"], Tags=["tag:x"]))),
+                           ("failing", None)):
+                if w is None:
+                    os.unlink(os.path.join(fake, "whois.json"))
+                else:
+                    put("whois.json", w)
+                r = dch(denv, "-a", "mybox:x")
+                check("a discovered host, whois %s: refused before connecting"
+                      % why, r.returncode == 1 and "tailscale whois" in r.stderr,
+                      r.stderr)
+            put("whois.json", WHOIS)
+            r = dch(dict(denv, DCH_NO_REMOTE="1"), "-a", "nope:x")
+            check("DCH_NO_REMOTE=1: -a host:name stays local (#122)",
+                  r.returncode == 1 and "no session: nope:x" in r.stderr
+                  and "known host" not in r.stderr, r.stderr)
+            put("status.json", OWNER)
 
-        # --- precedence -----------------------------------------------
-        # (--spawn srv:rs1 is remote now, #114: -n makes the local one)
-        pid, fd = attach(["-n", "srv:rs1", "--", "/bin/sh"])
-        read(fd, b"$ ", 3)
-        os.write(fd, b"\x1c")
-        reap(pid, fd, 5)
-        check("a local session named srv:rs1",
-              "srv:rs1" in dch(cenv, "-ls").stdout.split())
-        # the remote is unreachable now: only a local attach can work
-        pid, fd = attach(["--hosts", "srv=127.0.0.1:1", "-a", "srv:rs1"])
-        read(fd, b"\0never", 1.5)
-        marks = [f for f in os.listdir(csock)
-                 if f.startswith("srv:rs1.sock.client.")]
-        os.write(fd, b"\x1c")
-        st, out = reap(pid, fd, 5)
-        check("an exact local name wins", marks and st is not None
-              and os.WEXITSTATUS(st) == 0, (marks, st, out))
-        dch(cenv, "-k", "srv:rs1")
+            # --- a hostile server -----------------------------------------
+            evil = Fake("list", rows=[
+                {"name": "ev\x1b]0;pwn\x07\x1b[31mred", "alias": "a\x1b[2Jb"},
+                {"name": "tab\there\nnl", "state": "\x1b[5mworking"},
+                {"no": "name"}, {"name": 5}, "junk"])
+            fakes.append(evil)
+            eh = "evil=127.0.0.1:%d" % evil.port
+            r = dch(cenv, "--ls", "--remote", "--hosts", eh)
+            check("hostile names in --ls: no ESC, BEL, tab or newline reaches "
+                  "the terminal", r.returncode == 0 and "\x1b" not in r.stdout
+                  and "\x07" not in r.stdout and "\t" not in r.stdout
+                  and "evil:ev\\x1b]0;pwn" in r.stdout
+                  and "evil:tab\\x09here\\x0anl" in r.stdout, repr(r.stdout))
+            r = dch(cenv, "-lj", "--remote", "--hosts", eh)
+            check("hostile names in -lj: 3 fields a line, escaped",
+                  "\x1b" not in r.stdout and all(
+                      len(l.split("\t")) == 3 for l in r.stdout.splitlines()),
+                  repr(r.stdout))
+            r = dch(cenv, "--ls-json", "--remote", "--hosts", eh)
+            rows = [x for x in json.loads(r.stdout) if "host" in x]
+            check("hostile names in --ls-json: valid JSON, JSON-escaped, a bad "
+                  "state dropped", "\x1b" not in r.stdout and len(rows) == 2
+                  and rows[0]["name"].startswith("ev\x1b]")
+                  and all(x["state"] == "" for x in rows), r.stdout)
+            c1 = Fake("list", rows=[{"name": "c1\u009b31m\x7f", "alias":
+                                     "bi\u202edi\u2066x\u200e\u200fy"}])
+            fakes.append(c1)
+            r = subprocess.run([DCH, "--ls-json", "--remote", "--hosts",
+                                "c=127.0.0.1:%d" % c1.port], env=cenv,
+                               capture_output=True, stdin=subprocess.DEVNULL,
+                               timeout=20)
+            out = r.stdout
+            rows = [x for x in json.loads(out) if "host" in x]
+            check("C1, DEL and bidi in --ls-json: \\u-escaped, the same value",
+                  b"\xc2\x9b" not in out and b"\xe2\x80\xae" not in out
+                  and b"\xe2\x81\xa6" not in out and b"\x7f" not in out
+                  and b"\xe2\x80\x8e" not in out and b"\xe2\x80\x8f" not in out
+                  and b"c1\\u009b31m\\u007f" in out
+                  and b"\\u202e" in out and b"\\u2066" in out
+                  and b"\\u200e\\u200fy" in out
+                  and rows and rows[0]["name"] == "c1\u009b31m\x7f"
+                  and rows[0]["alias"] == "bi\u202edi\u2066x\u200e\u200fy", out)
 
-        r = dch(cenv, "--hosts", hosts, "-a", "nope:rs1")
-        check("an unknown host: a clear error, exit 1", r.returncode == 1
-              and "nope is not a known host" in r.stderr
-              and "known: srv" in r.stderr, r.stderr)
-        r = dch(cenv, "--hosts", hosts, "-a", "nosuch")
-        check("-a never creates", r.returncode == 1
-              and "no session: nosuch" in r.stderr
-              and "nosuch" not in dch(cenv, "-ls").stdout, r.stderr)
-        r = dch(cenv, "--hosts", hosts, "-a", "srv:gone")
-        check("-a host:missing says so, creates nothing", r.returncode == 1
-              and "no session gone on srv" in r.stderr
-              and "gone" not in dch(senv, "-ls").stdout, r.stderr)
-        put("status.json", PEERS)
-        denv = dict(cenv)
-        del denv["DCH_NO_REMOTE"]
-        r = dch(denv, "-a", "nope:x")
-        check("discovery: only the user's online untagged peers",
-              r.returncode == 1 and "known: mybox)" in r.stderr, r.stderr)
-        put("status.json", dict(PEERS, BackendState="Stopped"))
-        r = dch(denv, "-a", "nope:x")
-        check("discovery: none unless BackendState is Running",
-              r.returncode == 1 and "none:" in r.stderr, r.stderr)
-        neg = json.loads(json.dumps(PEERS))     # #129: -1 is "unknown"
-        neg["Self"]["UserID"] = -1
-        for peer in neg["Peer"].values():
-            peer["UserID"] = -1 if peer["UserID"] == 42 else peer["UserID"]
-        put("status.json", neg)
-        r = dch(denv, "-a", "nope:x")
-        check("discovery: none for a negative Self.UserID",
-              r.returncode == 1 and "none:" in r.stderr, r.stderr)
-        put("status.json", PEERS)
-        for why, w in (("another user", dict(WHOIS, UserProfile={
-                           "ID": 7, "LoginName": "them@example.com"})),
-                       ("a tagged node", dict(WHOIS, Node=dict(
-                           WHOIS["Node"], Tags=["tag:x"]))),
-                       ("failing", None)):
-            if w is None:
-                os.unlink(os.path.join(fake, "whois.json"))
-            else:
-                put("whois.json", w)
-            r = dch(denv, "-a", "mybox:x")
-            check("a discovered host, whois %s: refused before connecting"
-                  % why, r.returncode == 1 and "tailscale whois" in r.stderr,
-                  r.stderr)
-        put("whois.json", WHOIS)
-        r = dch(dict(denv, DCH_NO_REMOTE="1"), "-a", "nope:x")
-        check("DCH_NO_REMOTE=1: -a host:name stays local (#122)",
-              r.returncode == 1 and "no session: nope:x" in r.stderr
-              and "known host" not in r.stderr, r.stderr)
-        put("status.json", OWNER)
+            # --- a hanging host, then its rows stale ----------------------
+            hang = Fake("hang")
+            fakes.append(hang)
+            t0 = time.time()
+            r = dch(cenv, "--ls", "--remote", "--hosts",
+                    "%s,h=127.0.0.1:%d" % (hosts, hang.port))
+            dt = time.time() - t0
+            check("a hanging host does not stall --ls (%.2fs)" % dt,
+                  dt < BUDGET and "srv:rs1" in r.stdout.splitlines(), r)
+            t0 = time.time()
+            r = dch(cenv, "--ls", "--remote", "--hosts",
+                    "srv=127.0.0.1:%d" % hang.port)
+            dt = time.time() - t0
+            check("then its cached rows show stale (%.2fs)" % dt,
+                  dt < BUDGET and "srv:rs1 [stale]" in r.stdout.splitlines(),
+                  r.stdout)
+            r = dch(cenv, "--ls-json", "--remote", "--hosts",
+                    "srv=127.0.0.1:%d" % hang.port)
+            rem = [x for x in json.loads(r.stdout) if "host" in x]
+            check("--ls-json marks them stale", rem and rem[0]["stale"] is True,
+                  r.stdout)
 
-        # --- a hostile server -----------------------------------------
-        evil = Fake("list", rows=[
-            {"name": "ev\x1b]0;pwn\x07\x1b[31mred", "alias": "a\x1b[2Jb"},
-            {"name": "tab\there\nnl", "state": "\x1b[5mworking"},
-            {"no": "name"}, {"name": 5}, "junk"])
-        fakes.append(evil)
-        eh = "evil=127.0.0.1:%d" % evil.port
-        r = dch(cenv, "--ls", "--remote", "--hosts", eh)
-        check("hostile names in --ls: no ESC, BEL, tab or newline reaches "
-              "the terminal", r.returncode == 0 and "\x1b" not in r.stdout
-              and "\x07" not in r.stdout and "\t" not in r.stdout
-              and "evil:ev\\x1b]0;pwn" in r.stdout
-              and "evil:tab\\x09here\\x0anl" in r.stdout, repr(r.stdout))
-        r = dch(cenv, "-lj", "--remote", "--hosts", eh)
-        check("hostile names in -lj: 3 fields a line, escaped",
-              "\x1b" not in r.stdout and all(
-                  len(l.split("\t")) == 3 for l in r.stdout.splitlines()),
-              repr(r.stdout))
-        r = dch(cenv, "--ls-json", "--remote", "--hosts", eh)
-        rows = [x for x in json.loads(r.stdout) if "host" in x]
-        check("hostile names in --ls-json: valid JSON, JSON-escaped, a bad "
-              "state dropped", "\x1b" not in r.stdout and len(rows) == 2
-              and rows[0]["name"].startswith("ev\x1b]")
-              and all(x["state"] == "" for x in rows), r.stdout)
-        c1 = Fake("list", rows=[{"name": "c1\u009b31m\x7f", "alias":
-                                 "bi\u202edi\u2066x\u200e\u200fy"}])
-        fakes.append(c1)
-        r = subprocess.run([DCH, "--ls-json", "--remote", "--hosts",
-                            "c=127.0.0.1:%d" % c1.port], env=cenv,
-                           capture_output=True, stdin=subprocess.DEVNULL,
-                           timeout=20)
-        out = r.stdout
-        rows = [x for x in json.loads(out) if "host" in x]
-        check("C1, DEL and bidi in --ls-json: \\u-escaped, the same value",
-              b"\xc2\x9b" not in out and b"\xe2\x80\xae" not in out
-              and b"\xe2\x81\xa6" not in out and b"\x7f" not in out
-              and b"\xe2\x80\x8e" not in out and b"\xe2\x80\x8f" not in out
-              and b"c1\\u009b31m\\u007f" in out
-              and b"\\u202e" in out and b"\\u2066" in out
-              and b"\\u200e\\u200fy" in out
-              and rows and rows[0]["name"] == "c1\u009b31m\x7f"
-              and rows[0]["alias"] == "bi\u202edi\u2066x\u200e\u200fy", out)
+            # --- a tampered cache -----------------------------------------
+            cache = os.path.join(tmp, "cli", "st", "dch", "sessions",
+                                 ".remote-cache")
+            now = int(time.time())
+            bad = [{"host": "srv", "name": "past", "at": -2 ** 63},
+                   {"host": "srv", "name": "future", "at": 99999999999},
+                   {"host": "srv", "name": "zero", "at": 0},
+                   {"host": "srv\u202e\u001b[2J:zz", "name": "spoof",
+                    "at": now},
+                   {"host": "srv", "name": "keep", "at": now}]
 
-        # --- a hanging host, then its rows stale ----------------------
-        hang = Fake("hang")
-        fakes.append(hang)
-        t0 = time.time()
-        r = dch(cenv, "--ls", "--remote", "--hosts",
-                "%s,h=127.0.0.1:%d" % (hosts, hang.port))
-        dt = time.time() - t0
-        check("a hanging host does not stall --ls (%.2fs)" % dt,
-              dt < BUDGET and "srv:rs1" in r.stdout.splitlines(), r)
-        t0 = time.time()
-        r = dch(cenv, "--ls", "--remote", "--hosts",
-                "srv=127.0.0.1:%d" % hang.port)
-        dt = time.time() - t0
-        check("then its cached rows show stale (%.2fs)" % dt,
-              dt < BUDGET and "srv:rs1 [stale]" in r.stdout.splitlines(),
-              r.stdout)
-        r = dch(cenv, "--ls-json", "--remote", "--hosts",
-                "srv=127.0.0.1:%d" % hang.port)
-        rem = [x for x in json.loads(r.stdout) if "host" in x]
-        check("--ls-json marks them stale", rem and rem[0]["stale"] is True,
-              r.stdout)
+            def put_cache():
+                with open(cache, "w") as f:
+                    f.write(json.dumps(bad))
+            put_cache()
+            r = dch(cenv, "--ls", "--remote", "--hosts",
+                    "srv=127.0.0.1:%d" % hang.port)
+            lines = r.stdout.splitlines()
+            check("a tampered cache: an at out of range is not listed",
+                  r.returncode == 0 and "srv:keep [stale]" in lines
+                  and not any(x in r.stdout for x in ("past", "future", "zero",
+                                                      "spoof")), r)
+            put_cache()
+            pid, fd = attach(["--hosts", "srv=127.0.0.1:%d" % hang.port, "-l"])
+            out = read(fd, b"keep", 4)
+            out += read(fd, b"\0never", 0.5)
+            os.write(fd, b"q")
+            st, more = reap(pid, fd, 5)
+            out += more
+            check("a tampered cache in the picker: only label hosts, in range",
+                  b"srv:\x1b[0mkeep" in out and b"spoof" not in out
+                  and b"\xe2\x80\xae" not in out and b"future" not in out,
+                  (st, out))
 
-        # --- a tampered cache -----------------------------------------
-        cache = os.path.join(tmp, "cli", "st", "dch", "sessions",
-                             ".remote-cache")
-        now = int(time.time())
-        bad = [{"host": "srv", "name": "past", "at": -2 ** 63},
-               {"host": "srv", "name": "future", "at": 99999999999},
-               {"host": "srv", "name": "zero", "at": 0},
-               {"host": "srv\u202e\u001b[2J:zz", "name": "spoof",
-                "at": now},
-               {"host": "srv", "name": "keep", "at": now}]
+            # --- a host whose gate refuses us (#094) -----------------------
+            refuse = Fake("refuse")
+            fakes.append(refuse)
+            put_cache()
+            r = dch(cenv, "--ls", "--remote", "--hosts",
+                    "srv=127.0.0.1:%d" % refuse.port)
+            check("a refusing host: no stale rows, its reason on stderr (#094)",
+                  r.returncode == 0 and "srv:" not in r.stdout
+                  and "dch: srv refused: this host serves only its owner's "
+                      "devices" in r.stderr, r)
+            put_cache()
+            r = dch(cenv, "--ls-json", "--remote", "--hosts",
+                    "srv=127.0.0.1:%d" % refuse.port)
+            check("--ls-json: no rows of a refusing host, the reason on stderr",
+                  r.returncode == 0 and not [x for x in json.loads(r.stdout)
+                                             if "host" in x]
+                  and "srv refused: this host serves only" in r.stderr, r)
+            r = dch(cenv, "--hosts", "srv=127.0.0.1:%d" % refuse.port,
+                    "-a", "srv:keep")
+            check("-a to a refusing host: its reason, exit %d (#094, #102)"
+                  % REFUSED_EXIT, r.returncode == REFUSED_EXIT and r.stderr == "dch: srv refused: this host "
+                  "serves only its owner's devices\n", r)
 
-        def put_cache():
-            with open(cache, "w") as f:
-                f.write(json.dumps(bad))
-        put_cache()
-        r = dch(cenv, "--ls", "--remote", "--hosts",
-                "srv=127.0.0.1:%d" % hang.port)
-        lines = r.stdout.splitlines()
-        check("a tampered cache: an at out of range is not listed",
-              r.returncode == 0 and "srv:keep [stale]" in lines
-              and not any(x in r.stdout for x in ("past", "future", "zero",
-                                                  "spoof")), r)
-        put_cache()
-        pid, fd = attach(["--hosts", "srv=127.0.0.1:%d" % hang.port, "-l"])
-        out = read(fd, b"keep", 4)
-        out += read(fd, b"\0never", 0.5)
-        os.write(fd, b"q")
-        st, more = reap(pid, fd, 5)
-        out += more
-        check("a tampered cache in the picker: only label hosts, in range",
-              b"srv:\x1b[0mkeep" in out and b"spoof" not in out
-              and b"\xe2\x80\xae" not in out and b"future" not in out,
-              (st, out))
+            # --- a busy host (#095): transient, its cached rows stale -----
+            busy = Fake("busy")
+            fakes.append(busy)
+            put_cache()
+            r = dch(cenv, "--ls", "--remote", "--hosts",
+                    "srv=127.0.0.1:%d" % busy.port)
+            check("a busy host: its cached rows stay, stale (#095)",
+                  r.returncode == 0 and "srv:keep [stale]" in r.stdout.splitlines()
+                  and "refused" not in r.stderr, r)
+            r = dch(cenv, "--ls-json", "--remote", "--hosts",
+                    "srv=127.0.0.1:%d" % busy.port)
+            rem = [x for x in json.loads(r.stdout) if "host" in x]
+            check("--ls-json: a busy host's rows stay, stale (#095)",
+                  r.returncode == 0 and rem and rem[0]["name"] == "keep"
+                  and rem[0]["stale"] is True and "refused" not in r.stderr, r)
+            r = dch(cenv, "--hosts", "srv=127.0.0.1:%d" % busy.port,
+                    "-a", "srv:keep")
+            check("-a to a busy host: its message, not a refusal, exit 1 (#095)",
+                  r.returncode == 1 and r.stderr == "dch: srv: says: " +
+                  BUSY["message"] + "\n", r)
 
-        # --- a host whose gate refuses us (#094) -----------------------
-        refuse = Fake("refuse")
-        fakes.append(refuse)
-        put_cache()
-        r = dch(cenv, "--ls", "--remote", "--hosts",
-                "srv=127.0.0.1:%d" % refuse.port)
-        check("a refusing host: no stale rows, its reason on stderr (#094)",
-              r.returncode == 0 and "srv:" not in r.stdout
-              and "dch: srv refused: this host serves only its owner's "
-                  "devices" in r.stderr, r)
-        put_cache()
-        r = dch(cenv, "--ls-json", "--remote", "--hosts",
-                "srv=127.0.0.1:%d" % refuse.port)
-        check("--ls-json: no rows of a refusing host, the reason on stderr",
-              r.returncode == 0 and not [x for x in json.loads(r.stdout)
-                                         if "host" in x]
-              and "srv refused: this host serves only" in r.stderr, r)
-        r = dch(cenv, "--hosts", "srv=127.0.0.1:%d" % refuse.port,
-                "-a", "srv:keep")
-        check("-a to a refusing host: its reason, exit %d (#094, #102)"
-              % REFUSED_EXIT, r.returncode == REFUSED_EXIT and r.stderr == "dch: srv refused: this host "
-              "serves only its owner's devices\n", r)
+            # --- a newer protocol -----------------------------------------
+            newer = Fake("list", rows=[{"name": "n1"}], proto="2.0")
+            fakes.append(newer)
+            r = dch(cenv, "--ls", "--remote", "--hosts",
+                    "nw=127.0.0.1:%d" % newer.port)
+            check("a newer major: skipped, said on stderr",
+                  "nw:n1" not in r.stdout and "speaks protocol 2.0" in r.stderr,
+                  r)
 
-        # --- a busy host (#095): transient, its cached rows stale -----
-        busy = Fake("busy")
-        fakes.append(busy)
-        put_cache()
-        r = dch(cenv, "--ls", "--remote", "--hosts",
-                "srv=127.0.0.1:%d" % busy.port)
-        check("a busy host: its cached rows stay, stale (#095)",
-              r.returncode == 0 and "srv:keep [stale]" in r.stdout.splitlines()
-              and "refused" not in r.stderr, r)
-        r = dch(cenv, "--ls-json", "--remote", "--hosts",
-                "srv=127.0.0.1:%d" % busy.port)
-        rem = [x for x in json.loads(r.stdout) if "host" in x]
-        check("--ls-json: a busy host's rows stay, stale (#095)",
-              r.returncode == 0 and rem and rem[0]["name"] == "keep"
-              and rem[0]["stale"] is True and "refused" not in r.stderr, r)
-        r = dch(cenv, "--hosts", "srv=127.0.0.1:%d" % busy.port,
-                "-a", "srv:keep")
-        check("-a to a busy host: its message, not a refusal, exit 1 (#095)",
-              r.returncode == 1 and r.stderr == "dch: srv: says: " +
-              BUSY["message"] + "\n", r)
+            # --- the link drops, the session ends -------------------------
+            drop = Fake("drop", rows=[{"name": "d1"}])
+            fakes.append(drop)
+            pid, fd = attach(["--hosts", "dr=127.0.0.1:%d" % drop.port,
+                              "-a", "dr:d1"])
+            st, out = reap(pid, fd, 8)
+            check("a dropped link: exit 1, a clear message",
+                  st is not None and os.WIFEXITED(st) and os.WEXITSTATUS(st) == 1
+                  and b"FAKE-SCREEN" in out
+                  and b"lost the connection to dr" in out, (st, out))
+            check("the terminal restored before the message",
+                  0 <= out.find(b"\x1b[?1049l") < out.find(b"lost the connection"),
+                  out)
+            ex = Fake("exit", rows=[{"name": "e1"}])
+            fakes.append(ex)
+            pid, fd = attach(["--hosts", "ex=127.0.0.1:%d" % ex.port,
+                              "-a", "ex:e1"])
+            st, out = reap(pid, fd, 8)
+            check("the session exits (0x12): exit 0, no message",
+                  st is not None and os.WIFEXITED(st) and os.WEXITSTATUS(st) == 0
+                  and b"lost" not in out, (st, out))
+            rst = Fake("errrst", rows=[{"name": "x1"}])
+            fakes.append(rst)
+            pid, fd = attach(["--hosts", "rs=127.0.0.1:%d" % rst.port,
+                              "-a", "rs:x1"])
+            st, out = reap(pid, fd, 8)
+            check("a 0x13 then a reset: the 0x13's reason, not the reset",
+                  st is not None and os.WIFEXITED(st) and os.WEXITSTATUS(st) == 1
+                  and b"lost the connection to rs: it says: bye-why" in out,
+                  (st, out))
+            tk = Fake("taken", rows=[{"name": "t1"}])
+            fakes.append(tk)
+            pid, fd = attach(["--hosts", "tk=127.0.0.1:%d" % tk.port,
+                              "-a", "tk:t1"])
+            st, out = reap(pid, fd, 8)
+            check("a 0x13 \"taken\": its message, exit %d (#102)" % TAKEN_EXIT,
+                  st is not None and os.WIFEXITED(st)
+                  and os.WEXITSTATUS(st) == TAKEN_EXIT
+                  and b"dch: tk: " + TAKEN["message"].encode() in out, (st, out))
 
-        # --- a newer protocol -----------------------------------------
-        newer = Fake("list", rows=[{"name": "n1"}], proto="2.0")
-        fakes.append(newer)
-        r = dch(cenv, "--ls", "--remote", "--hosts",
-                "nw=127.0.0.1:%d" % newer.port)
-        check("a newer major: skipped, said on stderr",
-              "nw:n1" not in r.stdout and "speaks protocol 2.0" in r.stderr,
-              r)
-
-        # --- the link drops, the session ends -------------------------
-        drop = Fake("drop", rows=[{"name": "d1"}])
-        fakes.append(drop)
-        pid, fd = attach(["--hosts", "dr=127.0.0.1:%d" % drop.port,
-                          "-a", "dr:d1"])
-        st, out = reap(pid, fd, 8)
-        check("a dropped link: exit 1, a clear message",
-              st is not None and os.WIFEXITED(st) and os.WEXITSTATUS(st) == 1
-              and b"FAKE-SCREEN" in out
-              and b"lost the connection to dr" in out, (st, out))
-        check("the terminal restored before the message",
-              0 <= out.find(b"\x1b[?1049l") < out.find(b"lost the connection"),
-              out)
-        ex = Fake("exit", rows=[{"name": "e1"}])
-        fakes.append(ex)
-        pid, fd = attach(["--hosts", "ex=127.0.0.1:%d" % ex.port,
-                          "-a", "ex:e1"])
-        st, out = reap(pid, fd, 8)
-        check("the session exits (0x12): exit 0, no message",
-              st is not None and os.WIFEXITED(st) and os.WEXITSTATUS(st) == 0
-              and b"lost" not in out, (st, out))
-        rst = Fake("errrst", rows=[{"name": "x1"}])
-        fakes.append(rst)
-        pid, fd = attach(["--hosts", "rs=127.0.0.1:%d" % rst.port,
-                          "-a", "rs:x1"])
-        st, out = reap(pid, fd, 8)
-        check("a 0x13 then a reset: the 0x13's reason, not the reset",
-              st is not None and os.WIFEXITED(st) and os.WEXITSTATUS(st) == 1
-              and b"lost the connection to rs: it says: bye-why" in out,
-              (st, out))
-        tk = Fake("taken", rows=[{"name": "t1"}])
-        fakes.append(tk)
-        pid, fd = attach(["--hosts", "tk=127.0.0.1:%d" % tk.port,
-                          "-a", "tk:t1"])
-        st, out = reap(pid, fd, 8)
-        check("a 0x13 \"taken\": its message, exit %d (#102)" % TAKEN_EXIT,
-              st is not None and os.WIFEXITED(st)
-              and os.WEXITSTATUS(st) == TAKEN_EXIT
-              and b"dch: tk: " + TAKEN["message"].encode() in out, (st, out))
-
-        # --- the real dch serve's gate refusing us (#094), last: it then
-        # refuses 127.0.0.1 for 30 s
-        put("whois.json", dict(WHOIS, UserProfile={
-            "ID": 7, "LoginName": "other@example.com"}))
-        r = dch(cenv, "--hosts", hosts, "-a", "srv:rs1")
-        check("dch serve refusing -a: its reason, exit %d (#094, #102)"
-              % REFUSED_EXIT, r.returncode == REFUSED_EXIT and r.stderr == "dch: srv refused: this host "
-              "serves only its owner's devices\n", r)
-        r = dch(cenv, "--ls", "--remote", "--hosts", hosts)
-        check("and --ls --remote: no srv rows, its reason (the cached "
-              "refusal)", r.returncode == 0 and "srv:" not in r.stdout
-              and "dch: srv refused: this host serves only" in r.stderr, r)
+            # --- the real dch serve's gate refusing us (#094), last: it then
+            # refuses 127.0.0.1 for 30 s
+            put("whois.json", dict(WHOIS, UserProfile={
+                "ID": 7, "LoginName": "other@example.com"}))
+            r = dch(cenv, "--hosts", hosts, "-a", "srv:rs1")
+            check("dch serve refusing -a: its reason, exit %d (#094, #102)"
+                  % REFUSED_EXIT, r.returncode == REFUSED_EXIT and r.stderr == "dch: srv refused: this host "
+                  "serves only its owner's devices\n", r)
+            r = dch(cenv, "--ls", "--remote", "--hosts", hosts)
+            check("and --ls --remote: no srv rows, its reason (the cached "
+                  "refusal)", r.returncode == 0 and "srv:" not in r.stdout
+                  and "dch: srv refused: this host serves only" in r.stderr, r)
     finally:
         for pid, fd in clients:
             try:
