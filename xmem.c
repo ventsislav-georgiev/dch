@@ -666,6 +666,28 @@ xm_above(const struct xm_set *s, size_t lo, size_t hi, size_t d, size_t c)
 	return lo;
 }
 
+/* xm_above, galloping in from lo (top 0) or from hi (top 1): the cost is
+** the log of the rows it drops, so a long shared prefix that sheds a row
+** a byte costs O(1) per byte, not two full searches (#355) */
+static size_t
+xm_gallop(const struct xm_set *s, size_t lo, size_t hi, size_t d, size_t c,
+          int top)
+{
+	size_t g = 1;
+
+	if (top)
+	{
+		while (g <= hi - lo &&
+		       (unsigned char)s->byp[hi - g]->path[d] > c)
+			g *= 2;
+		return xm_above(s, g <= hi - lo ? hi - g + 1 : lo, hi - g / 2, d,
+		                c);
+	}
+	while (g <= hi - lo && (unsigned char)s->byp[lo + g - 1]->path[d] <= c)
+		g *= 2;
+	return xm_above(s, lo + g / 2, g <= hi - lo ? lo + g - 1 : hi, d, c);
+}
+
 /* a shell command: each row whose full path it names, followed by a
 ** terminator; wrote or loaded by xm_wrote */
 static void
@@ -698,8 +720,8 @@ xm_shell(struct xm_set *s, const char *t, size_t n, const char *chapter)
 			if (i + pl == n)
 				break;
 			k = (unsigned char)t[i + pl];
-			lo = xm_above(s, lo, hi, pl, k - 1);
-			hi = xm_above(s, lo, hi, pl, k);
+			lo = xm_gallop(s, lo, hi, pl, k - 1, 0);
+			hi = xm_gallop(s, lo, hi, pl, k, 1);
 		}
 }
 

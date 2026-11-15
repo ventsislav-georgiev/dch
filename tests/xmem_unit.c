@@ -3,9 +3,11 @@
 ** MEMORY.md index line (bullets, dashes, refused targets) and the shell
 ** rule (a redirect or an editing verb writes); xm_print over a rules tree
 ** of XM_MANY files that the walk reaches twice (#344), and XM_CALLS
-** shell commands read against it (#350).
+** shell commands read against it (#350); xm_shell against the old scan
+** on random rows and on a deep self-similar chain (#355), so xmem.c is
+** included, not linked.
 **
-**   cc -I. -o xmem_unit tests/xmem_unit.c xmem.c xray.c json.c && ./xmem_unit
+**   cc -I. -o xmem_unit tests/xmem_unit.c xray.c json.c && ./xmem_unit
 */
 #include <stdarg.h>
 #include <stdio.h>
@@ -14,7 +16,7 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
-#include "xmem.h"
+#include "xmem.c"
 
 static int fails;
 
@@ -152,7 +154,7 @@ now(void)
 {
 	struct timespec t;
 
-	clock_gettime(CLOCK_MONOTONIC, &t);
+	clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &t);
 	return t.tv_sec + t.tv_nsec / 1e9;
 }
 
@@ -222,6 +224,133 @@ t_shell(const char *home, struct xm_req *q, double base)
 	CHECK("shell: one pass per command, not rows x bytes (under 25 times "
 	      "the rows' own cost)", t < 25 * (base > 0.2 ? base : 0.2));
 	free(buf);
+}
+
+/* the 1.69.0 scan, rows x bytes: the reference xm_shell must match */
+static void
+old_shell(struct xm_set *s, const char *t, size_t n, const char *chapter)
+{
+	int how = xm_wrote(t, n) ? XM_WROTE : XM_LOADED;
+	size_t i, k, pl;
+
+	for (k = s->nmem; k < s->n; k++)
+		for (pl = strlen(s->v[k].path), i = 0; i + pl <= n; i++)
+			if (t[i] == '/' && !memcmp(t + i, s->v[k].path, pl) &&
+			    (i + pl == n || xm_term(t[i + pl])))
+			{
+				xm_touch(s, t + i, pl, how, chapter);
+				break;
+			}
+}
+
+/* rows (paths p[0..n), sorted for byp); the commands run through the new
+** matcher or the old one; 1 when both leave every row the same */
+static double
+run_shell(char **p, size_t n, char **cmd, size_t nc, int old, int *out)
+{
+	struct xm_set s;
+	size_t k;
+	double t;
+
+	memset(&s, 0, sizeof s);
+	s.n = n;
+	s.v = calloc(n, sizeof *s.v);
+	s.byp = malloc(n * sizeof *s.byp);
+	for (k = 0; k < n; k++)
+	{
+		s.v[k].path = s.v[k].id = p[k];
+		s.byp[k] = &s.v[k];
+	}
+	qsort(s.byp, n, sizeof *s.byp, xm_bypath);
+	t = now();
+	for (k = 0; k < nc; k++)
+	{
+		s.seq++;
+		(old ? old_shell : xm_shell)(&s, cmd[k], strlen(cmd[k]),
+		                             k & 1 ? "b" : "a");
+	}
+	t = now() - t;
+	for (k = 0; k < n; k++)
+		out[k] = s.v[k].sess * 100000 + (int)s.v[k].seq * 2 +
+		         (s.v[k].chapter[0] == 'b');
+	free(s.v);
+	free(s.byp);
+	return t;
+}
+
+/* The row narrowing (#350) ran two full binary searches per byte, so a
+** deep /x/x/... chain of CLAUDE.md rows that the text sheds one row each
+** two bytes made it 15 times slower than the old scan (QA: 5.75 s to
+** 84.9 s). Galloping in from each bound pays only for the rows it drops.
+** The bound is 4 times the old scan in the same run (the slow walk took
+** 15, the gallop takes about half). Random rows and commands of path
+** pieces and terminators: the same rows, calls and chapters as the old. */
+static void
+t_adv(void)
+{
+	static const char *const w[] = { "/", "a", "b", "CLAUDE.md", ".md",
+	                                 " ", ";", "'", "x", "\xc3\xa9", "" };
+	char *p[400], *cmd[80], b[1024];
+	int o[400], m[400], same = 1;
+	unsigned long r = 1;
+	size_t k, j, l, n, nc;
+	double to, tn;
+
+	for (j = 0; j < 3000 && same; j++)
+	{
+		n = 1 + j % 16;
+		for (nc = 0; nc < 4 + n; nc++)
+		{
+			l = nc < n ? (size_t)snprintf(b, sizeof b, "/") : 0;	/* a row */
+			r = r * 6364136223846793005UL + 1442695040888963407UL;
+			if (nc && nc < n)	/* a row: a cut of an earlier one, more */
+				l = (size_t)snprintf(b, sizeof b, "%.*s",
+				                     (int)((r >> 45) % 40 + 1),
+				                     cmd[(r >> 33) % nc]);
+			else if (nc >= n)	/* a call: a row, maybe a byte off, more */
+			{
+				l = (size_t)snprintf(b, sizeof b, "%s", cmd[(r >> 33) % n]);
+				if ((r >> 40) % 2 && l > 1)
+					b[1 + (r >> 41) % (l - 1)] += (r >> 50) % 2 ? 1 : -1;
+			}
+			for (k = 0; k < 2 + nc % 9; k++)
+			{
+				r = r * 6364136223846793005UL + 1442695040888963407UL;
+				l += (size_t)snprintf(b + l, 64, "%s", w[(r >> 33) % 11]);
+			}
+			cmd[nc] = strdup(b);
+		}
+		for (k = 0; k < n; k++)
+			p[k] = cmd[k];
+		run_shell(p, n, cmd, nc, 1, o);
+		run_shell(p, n, cmd, nc, 0, m);
+		same = !memcmp(o, m, n * sizeof *o);
+		for (k = 0; k < nc; k++)
+			free(cmd[k]);
+	}
+	CHECK("shell: the same rows, calls and chapters as the old scan", same);
+	for (k = 0; k < 400; k++)
+	{
+		for (l = j = 0; j <= k; j++)
+			l += (size_t)snprintf(b + l, sizeof b - l, "/x");
+		snprintf(b + l, sizeof b - l, "/CLAUDE.md");
+		p[k] = strdup(b);
+	}
+	for (l = 0; l + 2 < sizeof b - 12; l += 2)
+		memcpy(b + l, "/x", 2);
+	snprintf(b + l, 13, "/x/CLAUDE.md");
+	for (k = 0; k < 80; k++)
+		cmd[k] = b;
+	to = run_shell(p, 400, cmd, 80, 1, o);
+	tn = run_shell(p, 400, cmd, 80, 0, m);
+	printf("       400-deep chain, 80 calls: old %.2f s, new %.2f s\n", to,
+	       tn);
+	CHECK("shell: a deep self-similar chain, the same rows as the old scan",
+	      !memcmp(o, m, sizeof o));
+	CHECK("shell: a deep self-similar chain, under 4 times the old scan",
+	      tn < 4 * (to > 0.05 ? to : 0.05));
+	for (k = 0; k < 400; k++)
+		free(p[k]);
 }
 
 /* cwd = home, cfg = home/.claude: its CLAUDE.md and rules come twice and
@@ -299,6 +428,7 @@ main(void)
 	t_link();
 	t_wrote();
 	t_many();
+	t_adv();
 	printf("%s: %d failed\n", fails ? "FAIL" : "ok", fails);
 	return fails != 0;
 }

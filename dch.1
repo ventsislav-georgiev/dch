@@ -1689,7 +1689,8 @@ reads it
 .RB ( partial:true
 past that range); the newest 50000 tasks are kept,
 .B dropped
-counts the rest and the creates whose result gives no usable id, a line is
+counts the rest and the creates whose result gives an id that is null,
+empty, too long, or neither text nor a whole number; a line is
 at most 64 KB.
 A shell, or a session with no task record, gives
 .B source:none

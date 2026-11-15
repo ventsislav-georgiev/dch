@@ -168,12 +168,17 @@ print(json.dumps({"id": "env", "title": "<%s|%s|%s>" % (
 import json
 print(json.dumps({"id": "c", "title": "C", "body": "short", "cut": True}))
 print(json.dumps({"id": "d", "title": "D", "body": "short", "cut": False}))
+print(json.dumps({"id": "e", "title": "E", "cut": True}))
 ''', py=True), "memory_command")
     rc, out, ls, err = tasks("xt-ended", "--memory")
     m = [l["memory"] for l in ls if "memory" in l]
     check("memory rows: a row's own cut:true kept, cut:false none",
-          len(m) == 2 and m[0]["body"] == "short" and
+          len(m) == 3 and m[0]["body"] == "short" and
           m[0].get("cut") is True and "cut" not in m[1], (out, err))
+    # no body, nothing cut: no "cut" (#355, NIT-V13)
+    check("memory rows: cut:true with no body gives no cut",
+          len(m) == 3 and m[2]["body"] is None and "cut" not in m[2],
+          (out, err))
     config(script("mempty.sh", "exit 0\n"), "memory_command")
     rc, out, ls, err = tasks("xt-ended", "--memory")
     check("memory, an empty answer: the built-in answer byte for byte",

@@ -318,7 +318,7 @@ row_memory(struct xc_out *w, const struct json_parser *p, int r, char *tmp,
 		bodycut = 1;
 	}
 	putq(w, s);
-	if (bodycut)
+	if (bodycut && s)	/* no body: nothing was cut */
 	{
 		key(w, "cut");
 		put(w, "true");
