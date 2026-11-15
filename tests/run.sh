@@ -377,6 +377,7 @@ pyrun "the --xray view: tabs, card, reader, hostile text, Refs, look-up, order, 
 pyrun "the --xray view: auto rows, compact, Responses, Codex tasks, Search" xray_view_turns_test.py
 pyrun "the --xray view: Tasks, Memory, a hit's place, twin hits, the tab bar" xray_view_tasks_test.py
 pyrun "the --xray view: small card, shell, signals, On screen, picker X, o, the chord" xray_view_shell_test.py
+pyrun "the --xray view: agent rows marked, a hides the cross-session ones (#360)" xray_peer_view_test.py
 pyrun "the --xray view of host:name over a loopback dch serve: the record, the live shell, a hostile host, o" xray_remote_view_test.py
 pyrun "the --xray view of host:name against fake hosts: failures, stop, drops, Responses, Search, Tasks, Memory" xray_remote_fakes_test.py
 pyrun "the --xray view of host:name from the picker X and the chord over dch -a host:name" xray_remote_chord_test.py

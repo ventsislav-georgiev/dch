@@ -947,7 +947,16 @@ it has memories or instruction files:
   (the footer calls both kinds "auto rows");
   `Enter` on it reads its summary. The tab's count is the prompts
   shown without `n`. A host or an older dch that sends no `auto` shows
-  every prompt. `o`, here and in the reader, leaves the view (as `q` does)
+  every prompt.
+  Another agent's prompt (`"peer"` in `--json`) is marked at the start of
+  its title, on Prompts, on Responses and in the reader's header: 🤖 and
+  the sender's name for a message from another Claude session (`🤖 prosper
+  Scrollback answers for entry 895`), 📥 and the name for a subagent's
+  hand-back, 🔔 for another auto row (a task notification). Your own
+  prompts carry no mark. `a` hides the cross-session messages (shown by
+  default) and the footer says how many; with `n` and `a` both off only
+  your own prompts are left. A host whose dch predates `peer` sends none: no
+  row is marked as an agent's and `a` hides nothing. `o`, here and in the reader, leaves the view (as `q` does)
   and attaches to the live session, as `dch -a <n>` does (`host:name` too;
   from the picker's `x`, as the picker's `Enter`; the `-k` and `-d` pickers
   say it is not theirs). On an ended session `o` says so and the view
@@ -971,8 +980,8 @@ it has memories or instruction files:
   `working…`; an answer the size cap left out says `Enter reads it`. `j`
   `k` move item by item. `Enter` reads the prompt in the reader, opened at
   the answer (at the prompt's end when it cannot find it), and `q` comes
-  back to the item. `/` filters on the prompt and the answer; `n` and `o`
-  work as on Prompts. The tab's count is the items shown without `n`. A
+  back to the item. `/` filters on the prompt and the answer; `n`, `a` and `o`
+  work as on Prompts, and the items carry their prompt's mark. The tab's count is the items shown without `n`. A
   host older than 1.63.0 sends no answers: the tab says `No responses yet`,
   as it does for a session with none yet (nothing the host sends tells the
   two apart).
@@ -1104,6 +1113,7 @@ not clear X-ray; run `clear`".
 | `a` | Refs: show / hide the files, commits and URLs | |
 | `t` | Refs: show / hide the temp files | |
 | `n` | Prompts, Responses: show / hide the auto rows (auto prompts, the task notifications, and compactions) | |
+| `a` | Prompts, Responses: hide / show the messages from other agent sessions (Refs: show / hide files, commits, URLs) | |
 | `o` | Prompts, Responses, Search, Tasks, Memory: attach to the session (in the chord: back to it) | card, reader: the same |
 | `f` `p` `y` | | card: full scan, other projects / this project (`p` was `o` before 1.61.0), copy |
 | `q` | quit | back |
