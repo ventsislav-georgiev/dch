@@ -2,7 +2,7 @@
 """The X-ray view's o and names with a colon (#232, QA 1.58.0 cr-view).
 
 Remote hosts on, a fake host on loopback in remote_hosts (nothing else is
-dialled); each view on a pty this test owns (xray_remote_view_test's Pty).
+dialled); each view on a pty this test owns (xray_remote_view_lib's Pty).
 
 Covers:
   1. a local session literally named h:s whose session is gone between the
@@ -22,9 +22,9 @@ import json, os, shutil, struct, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-import xray_remote_view_test as X  # noqa: E402
-from xray_remote_view_test import (CENV, DCH, Pty, check, dch,  # noqa: E402
-                                   hosts, until)
+import xray_remote_view_lib as X  # noqa: E402
+from xray_remote_view_lib import (CENV, DCH, Pty, check, dch,  # noqa: E402
+                                  hosts, until)
 from remote_client_test import Fake, frame  # noqa: E402
 
 SOCKS = os.path.join(CENV["XDG_RUNTIME_DIR"], "dch-%d" % os.getuid())

@@ -64,10 +64,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")' \
 # Not safe beside other tests (each reason in docs of #361):
 #   perf_test.py          wall-clock spawn/attach budgets of 1 s
 #   harness_names_test.py CPU-time ratio budget, contention skews it
-#   xray_remote_view_test.py  the host's gate runs the fake tailscale whois
-#                         with a 3 s bound (TS_MS); under 8 jobs it ran past
-#                         it and the gate refused 127.0.0.1 for 30 s
-PYSERIAL=' perf_test.py harness_names_test.py xray_remote_view_test.py '
+PYSERIAL=' perf_test.py harness_names_test.py '
 pjobs=${DCH_TEST_JOBS:-}
 case $pjobs in ''|*[!0-9]*|0|0*)
     pjobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
@@ -377,7 +374,9 @@ xsrc=$(cd "$(dirname "$0")/.." && pwd)
 xcc=$(sed -n 's/^CC = //p' Makefile 2>/dev/null)
 xcc=${xcc:-cc}
 pyrun "the --xray view: tabs, card, reader, hostile text, signals, picker X" xray_view_test.py
-pyrun "the --xray view of host:name over a loopback dch serve, picker X, the chord over dch -a host:name" xray_remote_view_test.py
+pyrun "the --xray view of host:name over a loopback dch serve: the record, the live shell, a hostile host, o" xray_remote_view_test.py
+pyrun "the --xray view of host:name against fake hosts: failures, stop, drops, Responses, Search, Tasks, Memory" xray_remote_fakes_test.py
+pyrun "the --xray view of host:name from the picker X and the chord over dch -a host:name" xray_remote_chord_test.py
 # xray_shell_test.py's and xray_claude_test.py's RSS budget: a fork()+exec+wait4 helper, because a child
 # spawned by Python inherits Python's RSS high-water mark on Linux (maxrss.c)
 # shellcheck disable=SC2086 # xcc is a word list
