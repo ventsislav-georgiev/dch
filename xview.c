@@ -3676,8 +3676,8 @@ xv_draw(struct xv *v, int force)
 		{
 			if (v->hidepeer && xv_xs(&v->ch[k]))
 				continue;
-			cnt[0] += !xv_hid(&v->ch[k]);
-			cnt[2] += !n && !xv_hid(&v->ch[k]) && xv_item(v, k);
+			cnt[0] += (v->allauto || !xv_hid(&v->ch[k]));
+			cnt[2] += !n && (v->allauto || !xv_hid(&v->ch[k])) && xv_item(v, k);
 		}
 		cnt[1] = v->nrf;
 		/* Search: its hits once a search has answered, + past the cap

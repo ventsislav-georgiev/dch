@@ -166,6 +166,15 @@ def test_marks():
               INBOX + " worker-a  PASS. all rows green" in at(r, "PASS."), r)
         check("n: the notification: the bell, its summary",
               BELL + " " in at(r, "Build finished"), r)
+        s = screen(v, mark)
+        check("#372: n on: Prompts 7 (the hand-back and the notification)",
+              "Prompts 7" in s, s)
+        mark = len(v.out)
+        v.key(b"a", 0.8)
+        s = screen(v, mark)
+        check("#372: n on, a: Prompts 4 (only the cross-session rows go)",
+              "Prompts 4" in s, s)
+        v.key(b"a", 0.8)
         v.key(b"n", 0.5)
         # Responses
         mark = len(v.out)

@@ -44,8 +44,13 @@ def test_auto():
               (sel, text))
         v.key(b"j", 0.3)  # #358: down to the oldest prompt
         mark = len(v.out)
+        n0 = re.search(r"Prompts (\d+)", screen(v, 0))
         v.key(b"n", 1.0)
         text = screen(v, mark)
+        n1 = re.search(r"Prompts (\d+)", screen(v, mark))
+        check("#372: n raises the Prompts count by the auto rows (3)",
+              n0 and n1 and int(n1.group(1)) == int(n0.group(1)) + 3,
+              (n0, n1))
         check("Prompts: n shows them, titled by their summary",
               "Build finished: 3 passed" in text and
               "Lint ?]0;pwned? evil?done" in text, text)
@@ -58,8 +63,8 @@ def test_auto():
               v.out[mark:][-800:])
         text = screen(v, 0)  # the rows n left as they were too
         check("Prompts: n shown, the footer says n hides them, the tab "
-              "count stays 2", "n hide auto rows" in text and
-              "hidden" not in text and "Prompts 2" in text, text)
+              "count includes them (5)", "n hide auto rows" in text and
+              "hidden" not in text and "Prompts 5" in text, text)
         sel = [r for r in text.split("\n") if r.startswith("\u258c")]
         check("Prompts: n keeps the selection on its chapter",
               sel and "fix the login bug" in sel[0], (sel, text))
@@ -71,6 +76,9 @@ def test_auto():
         v.key(b"\033", 0.5)
         mark = len(v.out)
         v.key(b"n", 1.0)
+        n2 = re.search(r"Prompts (\d+)", screen(v, mark))
+        check("#372: the second n drops the count back",
+              n0 and n2 and n2.group(1) == n0.group(1), (n0, n2))
         v.key(b"/")
         v.key(b"Build", 1.0)
         text = screen(v, mark)

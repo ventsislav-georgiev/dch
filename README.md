@@ -945,8 +945,8 @@ it has memories or instruction files:
   hidden, and `/` matches a summary too. A compaction (`= Conversation
   compacted`) is hidden and counted the same way, and `n` shows it faint
   (the footer calls both kinds "auto rows");
-  `Enter` on it reads its summary. The tab's count is the prompts
-  shown without `n`. A host or an older dch that sends no `auto` shows
+  `Enter` on it reads its summary. The tab's count is the rows
+  listed, so it includes the auto rows while `n` shows them. A host or an older dch that sends no `auto` shows
   every prompt.
   Another agent's prompt (`"peer"` in `--json`) is marked at the start of
   its title, on Prompts, on Responses and in the reader's header: 🤖 and
