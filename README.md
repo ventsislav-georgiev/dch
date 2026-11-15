@@ -1632,13 +1632,15 @@ ref (`dch: not a ref`), relative paths against the session's cwd.
   file order within a window, and the file's `mention` lines are its newest
   200. `--full` reads oldest first, as before. A live shell's lines and
   another session's give titles and counts only: no `mention`, no `passage`.
-- **Range.** `--ref` (light and `--full`) reads a transcript past
-  `--json`'s range (the first 16 MiB and the newest 256 MiB) too, under the
-  same budget, 10 s and 1 GiB caps, so a ref in the middle of a file over
-  272 MiB is found; `--full` costs about 4 s per GB there. A mention or
-  definition in that middle has `chapter: null`, since `--json` has no
-  chapter there. So a ref card can show mentions from a part of a huge
-  transcript that the Chapters, Prompts and Responses lists do not reach.
+- **Range.** `--ref` (light and `--full`) reads a transcript past `--json`'s
+  range (the first 16 MiB and the newest 256 MiB) too, under the same
+  budget, 10 s and 1 GiB caps, so a ref in the middle of a file over 272 MiB
+  is found. The middle reads at the speed of the rest (3.7 s for a dense 300
+  MiB file), so a file of a few GB can stop at the 10 s clock and say
+  partial. A mention or definition in that middle has `chapter: null`, since
+  `--json` has no chapter there. So a ref card can show mentions from a part
+  of a huge transcript that the Chapters, Prompts and Responses lists do not
+  reach.
 - **Full.** `--full` reads the whole corpus up to its caps: 64 files
   (`why: "files"`), 1 GiB (`why: "bytes"`) and 10 s (`why: "time"`). The
   10 s count the scan's own time: time spent waiting on a reader that pauses
