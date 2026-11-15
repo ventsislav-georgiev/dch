@@ -146,7 +146,7 @@ def chapter(n, anchor, env=None):
         c = json.loads(r.stdout)
     except ValueError:
         return r.returncode, None, r.stderr, r.stdout
-    # #356: a transcript entry's record offset, a number (xray_view_test's
+    # #356: a transcript entry's record offset, a number (xray_view_tasks_test's
     # twins rows check where it points); the rows here compare the rest
     for e in c.get("entries", []):
         if isinstance(e.get("offset"), int) and e["offset"] >= 0:
