@@ -41,6 +41,9 @@ static volatile sig_atomic_t want_redraw;
 /* SIGURG → re-attach (MSG_ATTACH + MSG_REDRAW). Set by handler, checked in
 ** main loop. */
 static volatile sig_atomic_t want_rearm;
+/* SIGXFSZ → the view is up (MSG_DETACH len 1). Set by handler, checked in
+** main loop. */
+static volatile sig_atomic_t want_view;
 /* SIGCONT → raw mode back (QA 1.59.0 LOW-V9): a stop the client did not make
 ** itself (bg then fg, a ^Z while it starts, a kill -TSTP) leaves the
 ** terminal in the shell's modes. Set by handler, checked in the loops. */
@@ -241,6 +244,24 @@ on_sigurg(ATTRIBUTE_UNUSED int sig)
 {
 	signal(SIGURG, on_sigurg);
 	want_rearm = 1;
+}
+
+/* SIGXFSZ → tell the master the view is up over this attach: it answers
+** the program's start-up queries as with no client (#311), the output to
+** it stops; the next SIGURG's MSG_ATTACH ends it. dch serve sends it to its
+** pty client on a remote 0x35 (#339). SIGXFSZ because every dch ignores
+** it (an older client drops it) and none of ours writes a file that a size
+** limit could stop. The pipe wakes a select it just missed. */
+static RETSIGTYPE
+on_sigxfsz(ATTRIBUTE_UNUSED int sig)
+{
+	int e = errno;
+
+	signal(SIGXFSZ, on_sigxfsz);
+	want_view = 1;
+	if (cont_pipe[1] >= 0)
+		(void)!write(cont_pipe[1], "", 1);
+	errno = e;
 }
 
 static RETSIGTYPE
@@ -520,11 +541,13 @@ mono_us(void)
 	return tv.tv_sec * 1000000LL + tv.tv_usec;
 }
 
-/* The view's o (#331): a held o repeats 225 ms to 1 s after the press, past
+/* The view's o (#331): a held o repeats 225 ms to 1.8 s after the press, past
 ** the view's 100 ms pause, into the attach it opened. Leading o bytes are
 ** dropped while each comes within 700 ms of the attach start or of the last
 ** dropped one; any other byte, or an o after a longer gap, ends it for good
-** and goes on with the rest. Returns what is kept, moved to b's front. */
+** and goes on with the rest. Returns what is kept, moved to b's front.
+** A repeat delay past about 0.8 s (the window's end) types its o's: a
+** longer window would drop more o's typed on purpose (QA 1.66.0 LOW-A2). */
 static ssize_t
 drop_o(unsigned char *b, ssize_t n)
 {
@@ -788,10 +811,11 @@ xray_overlay(int s)
 	** to the MSG_ATTACH below, as for a suspend (the host never sees it),
 	** so nothing it passed late lands on the screen the view returns to;
 	** a local one (#311): len 1 keeps it attached on the master, which
-	** sends it nothing and has the mirror answer the program's queries */
+	** sends it nothing and has the mirror answer the program's queries;
+	** len 1 to the relay too: only the view's becomes a 0x35 (#339) */
 	memset(&pkt, 0, sizeof pkt);
 	pkt.type = MSG_DETACH;
-	pkt.len = attach_detached ? 0 : 1;
+	pkt.len = 1;
 	write_packet_or_fail(s, &pkt);
 	if (pipe(p) < 0)
 		p[0] = -1;
@@ -1070,7 +1094,7 @@ attach_main(int noerror)
 
 	/* Set some signals. */
 	signal(SIGPIPE, SIG_IGN);
-	signal(SIGXFSZ, SIG_IGN);
+	signal(SIGXFSZ, on_sigxfsz);
 	signal(SIGHUP, die);
 	signal(SIGTERM, die);
 	signal(SIGINT, die);
@@ -1377,6 +1401,20 @@ keys_done:
 			pkt.type = MSG_WINCH;
 			ioctl(0, TIOCGWINSZ, &pkt.u.ws);
 			write_packet_or_fail(s, &pkt);
+		}
+
+		/* The view is up (SIGXFSZ, #339): before a re-arm, the order a
+		** 0x35 then a 0x07 came in. Not to the relay (a remote attach):
+		** only its own overlay holds the host's output there. */
+		if (want_view)
+		{
+			want_view = 0;
+			if (!attach_detached)
+			{
+				pkt.type = MSG_DETACH;
+				pkt.len = 1;
+				write_packet_or_fail(s, &pkt);
+			}
 		}
 
 		/* Redraw requested (SIGUSR2)? Force the program to repaint via an

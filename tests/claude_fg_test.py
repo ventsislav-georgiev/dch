@@ -20,8 +20,9 @@ and nothing is answered; after fg claude_foreground follows its terminal's
 mode (macOS: bash put its line-buffered modes back and script does not set
 raw again, so false, and --stop is refused). Then a pty wrapper that never reads the
 keyboard (plain unbuffer's shape, MED-AA1): claude_foreground false, its
-prompt not answered, --say fails not_foreground, and once it exits the shell
-finds nothing typed; the same wrapper forwarding the keyboard (-p, raw) is
+prompt not answered, --say and --run fail not_foreground (MED-CW1), and once
+it exits the shell finds nothing typed; after `stty -icanon` it is still not
+in front (LOW-CW2); the same wrapper forwarding the keyboard (-p, raw) is
 in front, answered, and --stop is not refused. On dch-lite (no mirror) the
 auto-allow checks are skipped.
 
@@ -449,19 +450,40 @@ def main():
         check("plain wrapper: --say fails not_foreground, nothing typed",
               result(r).get("reason") == "not_foreground" and
               "say-" + TAG not in screen())
+        # MED-CW1: 1.66.0 sent --run's plain burst here
+        rmark = os.path.join(tmp, "RUNRAN")
+        r = run("--run", n, "touch", rmark)
+        check("plain wrapper: --run fails not_foreground, nothing typed",
+              r.returncode == 1 and "not_foreground" in r.stderr)
         os.kill(wpid, signal.SIGTERM)    # the wrapper exits with it
         until(lambda: lite or screen().rstrip().endswith("$"), 10)
         run("--send", n, "echo END-$((6*7))\r")
         check("plain wrapper: once it exits the shell ran nothing typed",
               (lite or until(lambda: "END-42" in screen(), 10)) and
-              not os.path.exists(mark) and "say-" + TAG not in screen())
+              not os.path.exists(mark) and not os.path.exists(rmark) and
+              "say-" + TAG not in screen())
+
+        # LOW-CW2: a terminal an earlier command left non-canonical is not
+        # the wrapper forwarding the keyboard
+        send("stty -icanon")
+        send("ptywrap claude")
+        st = until(lambda: [e for e in events() if e["ev"] == "start"
+                            and e["pid"] != wpid], 15)
+        wpid = st[0]["pid"] if st else None
+        fakes.append(wpid)
+        r = until(lambda: row().get("claude_session_id") and row(), 10)
+        check("plain wrapper after stty -icanon: claude_foreground false",
+              wpid and r and r.get("claude_foreground") is False)
+        os.kill(wpid, signal.SIGTERM)
+        until(lambda: lite or screen().rstrip().endswith("$"), 10)
+        send("stty sane")
 
         # --- the same wrapper forwarding the keyboard (-p: raw, as
         # script and unbuffer -p): in front, verbs reach it ---
         setctl()
         send("ptywrap -p claude")
         st = until(lambda: [e for e in events() if e["ev"] == "start"
-                            and e["pid"] != wpid], 15)
+                            and e["pid"] not in fakes], 15)
         wpid = st[0]["pid"] if st else None
         fakes.append(wpid)
         until(lambda: lite or "auto mode on" in screen(), 10)

@@ -222,9 +222,14 @@ until the view closes, also across a
 view's close attaches again).
 Over a remote attach
 .RB ( "dch \-a host:name" )
-nothing answers them while the view is up: the host's
+the same holds when the host's dch also has it (1.67.0
+on): the client tells the host's
 .B dch serve
-keeps its own client attached.
+the view is up (a 0x35 frame), serve tells its own client, and the host's
+mirror answers until the view closes.
+Against an older host nothing answers them while the view is up: its
+.B dch serve
+ignores the frame and keeps its own client attached.
 dch\-lite has no mirror and answers nothing.
 .SH OPTIONS
 .TP
@@ -391,15 +396,27 @@ or the process groups cannot be read; a suspended Claude keeps its
 Under a wrapper with a pty of its own
 .RB ( script ", " "unbuffer \-p" ),
 in front means Claude is the foreground job of its own terminal and each
-wrapper the foreground job of the terminal around it, that terminal reading
-key by key (raw mode, as a wrapper that forwards the keyboard sets it); plain
+wrapper the foreground job of the terminal around it, that terminal raw
+with no echo and no signal keys (as
+.BR script ", " "unbuffer \-p" " and " ssh
+set it to forward the keyboard); plain
 .B unbuffer
 (expect without
 .BR \-p )
-never reads the keyboard and the terminal stays line\-buffered, so it is not
-in front, nor is a wrapper resumed with
+never reads the keyboard and leaves the terminal in the shell's mode, so it
+is not in front, nor is a wrapper resumed with
 .B fg
-after the shell put its own line\-buffered mode back.
+after the shell put its own line\-buffered mode back, nor one on a terminal
+an earlier command left non\-canonical
+.RB ( "stty \-icanon" ).
+Limit: the kernel records neither who set a terminal's mode nor who reads
+it, so a terminal left in that exact raw no\-echo mode
+.RB ( "stty raw \-echo" ,
+or
+.B stty raw
+on macOS) makes plain
+.B unbuffer
+count as in front again.
 Read from the kernel by the client, so a master of any version gets it.
 .I auto_allowed
 is the permission prompt the master answered last with auto\-allow (see
@@ -923,7 +940,10 @@ that follow within 700 ms of each other, so a held
 .B o
 types nothing, and an
 .B o
-typed on purpose within 700 ms of opening is dropped too),
+typed on purpose within 700 ms of opening is dropped too;
+a key-repeat delay longer than about 0.8 s is past that window, and a held
+.B o
+then types its repeats),
 .B Responses
 (Claude and Codex sessions: what the agent showed at the end of each turn,
 its answer or its summary of the work, as Claude Code's Focus view does;
@@ -2208,7 +2228,10 @@ A
 drops its connection: when the new master image answers, it sends
 .B reset
 .B restarted
-and a new snapshot and goes on (before 1.66.0 it exited 0).
+and a new snapshot and goes on (before 1.66.0 it exited 0), at every
+restart; a hang-up within 1 s of that snapshot, with nothing from the
+master in between, ends it (exit 0), so a master that answers but keeps
+hanging up cannot loop it.
 .B \-\-follow
 takes no
 .B \-\-ref
@@ -2406,14 +2429,23 @@ shows and again while it stays. A failure exits 1 with
 .BR not_typed ,
 .BR not_submitted ,
 .BR no_screen ,
+.BR not_foreground ,
 or on a signal
 .BR interrupted ", " withdrawn ", " draft_left )
 on stderr. Other programs (also one in front of a Claude suspended with
-Ctrl\-Z), masters without a mirror, dch-lite and your own
+Ctrl\-Z, when that one is in front as
+.I claude_foreground
+defines it), masters without a mirror, dch-lite and your own
 session (\fB$DCH_SESSION\fR) keep the plain burst, which exits 1 when its
 input was dropped, as
 .B \-\-send
-does.
+does. A Claude that is not in front with nothing in front of it that is
+(under plain
+.BR unbuffer ,
+or a shell in front of it inside one) fails
+.B not_foreground
+and nothing is typed, dch-lite too: the shell around the wrapper would run
+the text once it exits.
 .TP
 .BI \-\-keys " name key..."
 Encode and send keys mode-aware (kitty keyboard protocol, application cursor
@@ -2775,7 +2807,8 @@ prints one object per line instead:
 (Claude not in front, as
 .I claude_foreground
 defines it: suspended, in the background or under a wrapper that does not
-read the keyboard; nothing typed, \fBfg\fR it first),
+read the keyboard; nothing typed: \fBfg\fR it if suspended, under plain
+\fBunbuffer\fR nothing reaches it),
 or empty) and
 .IR detail .
 A first SIGINT, SIGTERM or SIGHUP, once handled, types nothing more and
@@ -3375,6 +3408,16 @@ the server resizes the program one row down and back 120 ms later.
 session's DEC modes, for the kitty keyboard flags a pop and then the push,
 and on the full build the screen replayed from the mirror.
 .PP
+A
+.B 0x35
+with an empty body (view up) says the user of this attach looks at a view
+over it: the server tells its client, and the host's master answers the
+program's start-up queries as with nothing attached, the stream kept, until
+the next
+.BR 0x07 .
+No reply; before an attach, on a ctl or watch connection, or with a body, it
+is ignored, as by a server that does not know the type.
+.PP
 Protocol 1.1 adds the
 .B ctl
 op: one of dch's control verbs, run on this host for the client. The
@@ -3679,7 +3722,9 @@ refused the stream (busy) and polls that host every 2 s instead.
 Arrays come at most one per 200 ms; faster changes fold into the next.
 SIGINT and SIGTERM end it with 0 even while its reader has stopped reading;
 the line it was writing then may be cut short, and nothing follows it.
-A host that fails (no answer within 2 s, a dropped link, a stream silent for 35 s, a frame over 1 MiB,
+A host that fails (no answer within 2 s, or within
+.B DCH_REMOTE_BOX_MS
+when that is longer, a dropped link, a stream silent for 35 s, a frame over 1 MiB,
 not a list, or a 0x13) shows its rows stale for 2 minutes after it last
 answered, as above, and is dialled again after 2 s, doubling up to 32 s; a
 refusal (a 0x13 with a code) is said once and shows none, and any other
@@ -4153,6 +4198,9 @@ history record for it.
 .B DCH_REMOTE_BOX_MS
 The time box, in ms, for probing every remote host in the foreground
 (default 300, max 60000), for a slow link.
+Over 2 s, it is also a
+.B \-\-ls\-json \-\-remote \-\-follow
+dial's limit for its answer.
 .TP
 .B DCH_NO_REMOTE
 Empty or 0 is off; anything else lists and discovers no remote hosts in

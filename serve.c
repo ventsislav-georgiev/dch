@@ -775,6 +775,7 @@ struct conn
 	pid_t kid;		/* the dch client, once attached */
 	int kid_status, kid_done, pty_eof;
 	int attached, cols, rows;
+	int viewing;		/* a 0x35 signalled the kid, no 0x07 since */
 	long long jiggle_at;
 	char name[NAME_CAP + 1];	/* "" after a create dch named */
 	int watching;
@@ -1091,6 +1092,10 @@ on_attach(struct conn *c, int create, const unsigned char *p, size_t n)
 		const char *home = getenv("HOME");
 
 		exec_prep();
+		/* a 0x35's SIGXFSZ before the client sets its handler: dropped,
+		** not a kill (every dch ignores it; the master's program gets
+		** it back at default) */
+		signal(SIGXFSZ, SIG_IGN);
 		setenv("TERM", "xterm-256color", 1);
 		if (!home || chdir(home) < 0)
 			(void)!chdir("/");
@@ -1806,6 +1811,21 @@ on_frame(struct conn *c, unsigned int type, const unsigned char *p,
 {
 	struct json_parser jp;
 
+	/* 0x35 (#339): the user's view is up over this attach. Our dch client
+	** sends its master MSG_DETACH len 1 on SIGXFSZ (attach.c), the next
+	** 0x07's SIGURG re-attaches. Once per view: a flood signals once.
+	** With no attach (a ctl connection too) or a body (malformed, as a
+	** 0x05 that does not parse): ignored, no reply, as a serve before it
+	** ignores the type. */
+	if (type == RF_VIEW)
+	{
+		if (!n && c->kid > 0 && !c->kid_done && !c->viewing)
+		{
+			c->viewing = 1;
+			kill(c->kid, SIGXFSZ);
+		}
+		return;
+	}
 	/* A ctl connection (running or warm, #118) stays one: frames are read
 	** while its ctl runs, so an attach, watch, kill or rename there would
 	** mix a pty or a request into the ctl's stream. Hello, list, 0x30 and
@@ -1876,6 +1896,7 @@ on_frame(struct conn *c, unsigned int type, const unsigned char *p,
 		** mouse, 1049, kitty flags) that the remote X-ray view reset */
 		if (c->kid > 0 && !c->kid_done)
 			kill(c->kid, SIGURG);
+		c->viewing = 0;
 		break;
 	default:
 		break;

@@ -2201,12 +2201,17 @@ pkt_next(const unsigned char *b, size_t n, struct packet *pk, size_t *used)
 }
 
 /* An attach packet as frames: keys as 0x10, a size as 0x05, a redraw as
-** 0x05 then 0x07 (but the first: the attach itself paints). */
+** 0x05 then 0x07 (but the first: the attach itself paints), the X-ray
+** overlay's detach (len 1; a suspend's is len 0) as RF_VIEW (#339): the host's master
+** answers the program's queries until the resume's 0x07, as a local one
+** does (a serve before it ignores the frame). */
 static void
 pkt_frames(const struct packet *pk, int *redraws, struct sb *out)
 {
 	if (pk->type == MSG_PUSH && pk->len)
 		put_frame(out, 0x10, pk->u.buf, pk->len);
+	else if (pk->type == MSG_DETACH && pk->len == 1)
+		put_frame(out, RF_VIEW, "", 0);
 	else if (pk->type == MSG_WINCH || pk->type == MSG_REDRAW)
 		put_size(out, 0x05, NULL, &pk->u.ws);
 	if (pk->type == MSG_REDRAW && (*redraws)++)
@@ -4476,8 +4481,8 @@ dch_remote_requests(char *n)
 ** connection, a 0x2e sent after its list, and re-read off its 0x11s; any
 ** other is probed again every RM_EVERY_MS, as the picker does, and the
 ** local rows are re-read on the same tick. A host that fails (no answer in
-** RM_BG_MS, a drop, a stream silent RM_QUIET_MS, a frame it should not
-** send) keeps its rows, stale, for RM_TTL_S after it last answered, as
+** RM_BG_MS or a longer box, a drop, a stream silent RM_QUIET_MS, a frame it
+** should not send) keeps its rows, stale, for RM_TTL_S after it last answered, as
 ** --ls-json --remote shows them, and is dialled again after RM_EVERY_MS,
 ** doubled per failure up to 16 times that. The array is printed by
 ** --ls-json's own code in a forked child, its stdout a pipe to us: it goes
@@ -4702,7 +4707,11 @@ fh_settle(struct fhost *h, long long now, long long every, long long quiet)
 	return 1;
 }
 
-/* h dialled again: its hello and list asked, RM_BG_MS for the answer */
+/* a follower's dial: its answer within RM_BG_MS, or the box when that is
+** longer (DCH_REMOTE_BOX_MS for a slow link, #340) */
+#define FL_ANS_MS(box) ((box) > RM_BG_MS ? (box) : RM_BG_MS)
+
+/* h dialled again: its hello and list asked, FL_ANS_MS for the answer */
 static void
 fh_dial(struct fhost *h, int box)
 {
@@ -4710,7 +4719,7 @@ fh_dial(struct fhost *h, int box)
 	h->p.keep = 1;
 	pr_start(&h->p, 1, now_ms() + box);
 	h->idle = 0;
-	h->end = now_ms() + RM_BG_MS;
+	h->end = now_ms() + FL_ANS_MS(box);
 }
 
 /* The hosts --ls-json --remote would dial now (discovery's tailscale call
@@ -4968,7 +4977,7 @@ dch_remote_follow(int remote, struct dch_rrow **out)
 
 				snprintf(why, sizeof why, h->live ? "silent for %lld "
 				         "ms" : "no answer within %lld ms", h->live
-				         ? quiet : (long long)RM_BG_MS);
+				         ? quiet : (long long)FL_ANS_MS(box));
 				pr_end(&h->p, PR_FAIL, why);
 				h->live = 0;
 			}

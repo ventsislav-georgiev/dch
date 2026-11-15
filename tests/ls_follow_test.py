@@ -32,6 +32,10 @@ told why, while a plain connection still fits, and a 17th follower is
 polled, its rows never stale; a watch connection's rename is refused
 (LOW-R15).
 
+#340: a host that answers hello+list after 2 s is fresh under a box
+(DCH_REMOTE_BOX_MS) over that, stale and dialled again under the default
+one; the 16 and the 17th followers get a box that scales with the runner.
+
 Run:  python3 tests/ls_follow_test.py        (uses ./dch)
 """
 import glob, json, os, re, select, signal, socket, struct, subprocess, sys
@@ -49,10 +53,12 @@ BUDGET = 10.0 if SLOW else 2.0
 class WFake:
     """A host whose hello lists "watch": 0x2e opens a stream, its list then
     a 0x14 every `beat` s. push() sends bytes down every open stream;
-    hang stops the beats and every answer (connections are still taken)."""
+    hang stops the beats and every answer (connections are still taken);
+    delay holds each hello's answer that many seconds (a slow link)."""
 
-    def __init__(self, rows, beat=0.3):
+    def __init__(self, rows, beat=0.3, delay=0):
         self.rows, self.beat, self.hang = rows, beat, False
+        self.delay = delay
         self.sock = socket.socket()
         self.sock.bind(("127.0.0.1", 0))
         self.sock.listen(16)
@@ -88,6 +94,7 @@ class WFake:
                         break
                     body, buf = buf[5:5 + n], buf[5 + n:]
                     if t == 0x08:
+                        time.sleep(self.delay)
                         c.sendall(frame(0x18, {"proto": "1.1", "ops":
                                                ["ctl", "watch"]}))
                     elif t == 0x03:
@@ -377,10 +384,13 @@ def main():
         # 16 followers from this machine: its --read still gets a slot
         mark = len(open(log).read())
         nw = len(re.findall(r"watch \(device", open(log).read()))
-        # a dial past its 2 s (16 at once, a slow runner) is retried after
-        # EVERY, doubled per failure: a short one keeps that inside the wait
+        # a dial past its limit (16 at once, a slow runner) is retried after
+        # EVERY, doubled per failure: a short one keeps that inside the wait;
+        # the box, the limit when over 2 s (#340), scales with the runner
+        fbox = str(int(BUDGET * 1000))  # 2 s, ASan 10 s
         many = [follow("--remote", "--follow", "--hosts", hosts,
-                       DCH_REMOTE_EVERY_MS="1500") for _ in range(16)]
+                       DCH_REMOTE_EVERY_MS="1500", DCH_REMOTE_BOX_MS=fbox)
+                for _ in range(16)]
         t0, end = time.time(), time.time() + 10 * BUDGET  # 20 s, ASan 100 s
         while (len(re.findall(r"watch \(device", open(log).read())) < nw + 16
                and time.time() < end):
@@ -411,8 +421,9 @@ def main():
                   msg.get("code") == "busy" and "16 session list streams"
                   in msg.get("message", ""), (got, open(log).read()[mark:]
                                               [-1500:]))
+            # each poll is a dial: stale only when one is over the box
             s17 = follow("--remote", "--follow", "--hosts", hosts,
-                         DCH_REMOTE_EVERY_MS="300")
+                         DCH_REMOTE_EVERY_MS="300", DCH_REMOTE_BOX_MS=fbox)
             many.append(s17)
             rows, _ = s17.until(lambda x: rem(x, "srv") == {"rs1": False},
                                 BUDGET + 2)
@@ -421,7 +432,8 @@ def main():
                 pass
             stale = [ln for ln in s17.lines if rem(json.loads(ln), "srv")
                      != {"rs1": False}]
-            check("a 17th follower: polled, srv:rs1 never stale over 2 s",
+            check("a 17th follower: polled, srv:rs1 never stale (dials "
+                  "within %s ms)" % fbox,
                   rows is not None and not stale and s17.p.poll() is None
                   and len(re.findall(r"watch \(device", open(log).read()))
                   == nw + 16, (s17.lines[-3:], stale[:2], s17.p.poll(),
@@ -431,6 +443,31 @@ def main():
               '"stale":false' in got, got)
         for f in many:
             f.stop()
+
+        # --- 1b. a slow host: hello+list after 2 s (#340) -------------------
+        d = WFake([{"name": "d1"}], delay=2.6)
+        fakes.append(d)
+        dh = "d=127.0.0.1:%d" % d.port
+        s = follow("--remote", "--follow", "--hosts", dh,
+                   DCH_REMOTE_EVERY_MS="6000", DCH_REMOTE_BOX_MS="5000")
+        rows, dt = s.until(lambda x: rem(x, "d") == {"d1": False},
+                           2.6 + BUDGET + 1)
+        check("a host that answers in 2.6 s, the box 5 s: fresh under "
+              "--follow (%.2f s), one dial" % dt,
+              rows is not None and d.conns == 1, (s.lines[-2:], d.conns))
+        s.stop()
+        c0 = d.conns
+        s = follow("--remote", "--follow", "--hosts", dh,
+                   DCH_REMOTE_EVERY_MS="300", DCH_REMOTE_BOX_MS="0")
+        time.sleep(5.5)
+        while s.line(0.1):
+            pass
+        seen = [rem(json.loads(ln), "d") for ln in s.lines]
+        check("the default box: the same host never fresh, stale and "
+              "dialled again (%d dials)" % (d.conns - c0),
+              {"d1": True} in seen and {"d1": False} not in seen
+              and d.conns - c0 >= 2, (seen, d.conns - c0))
+        s.stop()
 
         # --- 2. a host without watch: polled --------------------------------
         q = Fake("list", rows=[{"name": "p1"}])

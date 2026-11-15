@@ -5956,12 +5956,15 @@ proc_ppid(long pid)
 	return proc_stat(pid, NULL, NULL);
 }
 
-/* 1 when pid's controlling terminal (dev, from proc_stat) reads key by key
-** (ICANON off), as every wrapper that forwards the keyboard sets it (script,
-** unbuffer -p, ssh); 0 when it is line-buffered or cannot be read. A wrapper
-** in front of a line-buffered terminal does not read it (plain unbuffer:
-** expect never reads the keyboard), and what is typed there waits for the
-** shell that reads it once the wrapper exits (MED-AA1). */
+/* 1 when pid's controlling terminal (dev, from proc_stat) is raw with no
+** echo and no signal keys (ICANON, ISIG and ECHO off), as every wrapper
+** that forwards the keyboard sets it (script, unbuffer -p, ssh); 0 when it
+** is not or cannot be read. A wrapper in front of any other mode does not
+** read it (plain unbuffer: expect never reads the keyboard), and what is
+** typed there waits for the shell that reads it once the wrapper exits
+** (MED-AA1). shortcut: the kernel keeps no record of who set the mode or
+** who reads, so a terminal the user left in that exact mode (stty raw
+** -echo; macOS stty raw) still passes (LOW-CW2); stty -icanon does not. */
 static int
 tty_raw(long pid, long dev)
 {
@@ -5986,7 +5989,8 @@ tty_raw(long pid, long dev)
 		    (long)st.st_rdev == dev)
 			fd = open(p, O_RDONLY | O_NOCTTY | O_NONBLOCK);
 #endif
-	ok = fd >= 0 && tcgetattr(fd, &t) == 0 && !(t.c_lflag & ICANON);
+	ok = fd >= 0 && tcgetattr(fd, &t) == 0 &&
+	     !(t.c_lflag & (ICANON | ISIG | ECHO));
 	if (fd >= 0)
 		close(fd);
 	return ok;
@@ -8440,8 +8444,9 @@ static const char *const say_why[] = {
 	"not sent",
 	"a signal came once it was typed: it may still sit in the composer, "
 	"not sent",
-	"claude is not the terminal's foreground job (suspended with Ctrl-Z?): "
-	"fg it first",
+	"claude is not in front: fg it if suspended with Ctrl-Z; under a "
+	"wrapper that does not pass the keyboard on (plain unbuffer) nothing "
+	"reaches it",
 };
 /* A child's exit status carries its outcome past exit(1) and the like. */
 #define SAY_EXIT 100
@@ -8640,13 +8645,17 @@ do_say_verb(char **names, int nnames, char **words, int nwords, int json)
 static int
 do_run_verb(const char *name, char **words, int nwords)
 {
-#ifdef HAVE_LIBGHOSTTY_VT
 	struct cmd_info ci;
 	struct crec r;
 	const char *self = getenv("DCH_SESSION");
-	char selfb[256], cb[256], path[1100], *text;
+	char selfb[256], cb[256], path[1100];
+	long fg = -1;
+	int c = 0;
+#ifdef HAVE_LIBGHOSTTY_VT
+	char *text;
 	size_t len = 1;
-	int k, c;
+	int k;
+#endif
 
 	/* Your own session keeps the burst: the gate would wait on the composer
 	** of the agent that is running this very command. */
@@ -8656,10 +8665,21 @@ do_run_verb(const char *name, char **words, int nwords)
 	session_sock_path(name, path, sizeof path);
 	if (nwords == 0 || cmd_query(path, &ci) != 0)
 		goto burst;
-	/* a suspended Claude (#282): what is in front gets the burst */
-	c = ci.pid > 0 && claude_find(ci.pid, 1, &r) != 0 &&
-	    proc_fg(ci.pid, r.pid) != 0;
+	/* a suspended Claude (#282): the burst, only when what is in front of
+	** its terminal is in front up to the session's (a wrapper that does
+	** not read keeps it for the shell around it, MED-CW1) */
+	if (ci.pid > 0 && claude_find(ci.pid, 1, &r) != 0 &&
+	    (c = proc_fg(ci.pid, r.pid)) == 0 &&
+	    (proc_stat(r.pid, &fg, NULL) < 0 || fg <= 0 ||
+	     proc_fg(ci.pid, fg) != 1))
+	{
+		cmd_info_free(&ci);
+		fprintf(stderr, "dch: %s: %s — %s\n", name, say_code[SAY_NOT_FG],
+		        say_why[SAY_NOT_FG]);
+		return 1;
+	}
 	cmd_info_free(&ci);
+#ifdef HAVE_LIBGHOSTTY_VT
 	if (!c || claude_gate_q(path, 1) == CG_NOVT)
 		goto burst;
 	for (k = 0; k < nwords; k++)
@@ -8675,8 +8695,10 @@ do_run_verb(const char *name, char **words, int nwords)
 		return 0;
 	fprintf(stderr, "dch: %s: %s — %s\n", name, say_code[c], say_why[c]);
 	return 1;
-burst:
+#else
+	(void)c;	/* lite: read only in the check above */
 #endif
+burst:
 	return do_send_verb(name, words, nwords, 1);
 }
 
@@ -13642,6 +13664,7 @@ xr_clear(const struct xr_target *t)
 #define XF_EVICT_MS 1000	/* ... at most once a second */
 #define XF_SLICE (4u << 20)	/* the full pass: bytes between events */
 #define XF_RESET (-1)
+#define XF_RELOST_MS 1000L	/* xf_lost: no --restart this soon */
 
 enum { XE_FILE = 1, XE_ROT = 2, XE_CONN = 4, XE_OUT = 8 };
 
@@ -13663,7 +13686,8 @@ struct xf
 	long gap;		/* the coalescing interval: 250 ms, or twice the
 				** last build when that is longer */
 	int pending, rc;
-	int relost;		/* a "restarted" reset, no frame drained since */
+	long long relost;	/* a "restarted" reset, no frame drained since:
+				** 1, then its snapshot's time; 0 none */
 	const char *why;	/* XF_RESET's reason, for the next snapshot */
 	unsigned long woke, timed;	/* 9.5's no-timer seam */
 };
@@ -13912,16 +13936,18 @@ xf_drain(struct xf *f)
 
 /* The master's connection dropped: a --restart when a master answers on
 ** the socket again (its new image), so a reset and a new snapshot (QA
-** 1.65.0 LOW-V27); else the session ended, exit 0. A second loss with no
-** frame drained since the last such reset ends it too: a master that
-** answers but keeps hanging up (an old image, a refused subscription)
-** must not loop us through snapshots for ever. */
+** 1.65.0 LOW-V27); else the session ended, exit 0. A loss within
+** XF_RELOST_MS of the last such reset's snapshot, no frame drained since,
+** ends it too: a master that answers but keeps hanging up (an old image, a
+** refused subscription) must not loop us through snapshots. A later one is
+** another --restart: an idle session sends no frame (QA 1.66.0 MED-A1). */
 static int
 xf_lost(struct xf *f)
 {
 	struct cmd_info ci;
 
-	if (f->relost || cmd_query(f->t->sock, &ci) != 0)
+	if ((f->relost && xr_now_ms() - f->relost < XF_RELOST_MS) ||
+	    cmd_query(f->t->sock, &ci) != 0)
 		return 0;
 	cmd_info_free(&ci);
 	f->relost = 1;
@@ -13973,6 +13999,8 @@ xf_snapshot(struct xf *f, struct xr_answer *a, const char *reset)
 		return 1;
 	}
 	f->last = xr_now_ms();
+	if (f->relost)
+		f->relost = f->last;	/* the guard's window starts here */
 	dch_trace("xray follow: snapshot%s%s keys=%zu", reset ? " after " : "",
 	          reset ? reset : "", a->refs ? xr_index_keys(a->refs) : 0);
 	return 0;

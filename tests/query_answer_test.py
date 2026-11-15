@@ -21,11 +21,15 @@ the attached terminal's to answer, then reads its tty for 2 s.
       keeps the view's state, so the mirror still answers (QA 1.65.0
       LOW-V23), and the view does not take the restart for the session's
       end (LOW-V27).
+  (f) `dch --xray <n> --follow --json` on an idle session (no output, so no
+      frame from the master) across three `--restart`s: one `restarted`
+      reset and a snapshot each, and the stream goes on (QA 1.66.0 MED-A1:
+      it ended at the second).
 dch-lite has no mirror: (a), (c) and (d) get nothing, as before.
 
 Run:  python3 tests/query_answer_test.py            (uses ./dch)
 """
-import os, pty, select, shutil, subprocess, sys, tempfile, time
+import json, os, pty, select, shutil, subprocess, sys, tempfile, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
@@ -189,6 +193,44 @@ time.sleep(5)
             check("(e) the view does not say the session ended",
                   b"session ended" not in b"".join(screen), screen[-1][-300:])
         os.write(fd, b"q")
+
+    name = "qa273f-%d" % os.getpid()
+    names.append(name)
+    subprocess.run([DCH, "--spawn", name, "sleep", "600"], env=ENV,
+                   capture_output=True, timeout=30)
+    fl = subprocess.Popen([DCH, "--xray", name, "--follow", "--json"],
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          env=ENV)
+    got = []
+    threading.Thread(target=lambda: [got.append(json.loads(l))
+                                     for l in fl.stdout], daemon=True).start()
+
+    def kinds():
+        return [next(k for k in o if k != "schema") for o in list(got)]
+
+    def wait_kinds(want, secs=30.0):
+        end = time.time() + secs
+        while time.time() < end and kinds() != want and fl.poll() is None:
+            time.sleep(0.05)
+        return kinds() == want
+
+    want = ["snapshot"]
+    ok = wait_kinds(want)
+    for i in range(3):
+        # past the 1 s in which a hang-up after a "restarted" snapshot ends
+        # the follow (a master that keeps hanging up); longer only helps
+        time.sleep(1.5)
+        r = subprocess.run([DCH, "--restart", name], env=ENV,
+                           capture_output=True, text=True, timeout=60)
+        want += ["reset", "snapshot"]
+        ok = ok and r.returncode == 0 and wait_kinds(want)
+    check("(f) --follow --json, idle session, three --restarts: a reset "
+          "restarted and a snapshot each, still running",
+          ok and fl.poll() is None and
+          all(o["reset"] == {"why": "restarted"} for o in got if "reset" in o),
+          kinds(), fl.poll())
+    fl.terminate()
+    fl.wait(10)
 
 
 try:
