@@ -2601,6 +2601,10 @@ def mfile(name, body, ago, kind=None):
     os.utime(os.path.join(MDIR, name), (time.time() - ago,) * 2)
 
 
+# random per run: no host instruction file can hold it
+NEEDLE = "zq" + os.urandom(6).hex()
+
+
 def fixture_memory():
     """xv-me: four memories (one this session wrote, one it read, one with
     a word only in its text and 40 lines, one over 16 KB) and the project's
@@ -2616,7 +2620,7 @@ def fixture_memory():
     mfile("alpha.md", "alpha body first line\n", 7200, "feedback")
     mfile("beta.md", "beta body\n", 7200, "project")
     mfile("gamma.md", "".join("gamma line %02d\n" % i for i in range(1, 41))
-          + "the zebrafish line\n", 3600, "reference")
+          + "the zebrafish line\n" + NEEDLE + "\n", 3600, "reference")
     mfile("long.md", "x" * 20000, 2 * 86400)
     tsw = iso(3 * 3600)
     um = lambda prompt, ts: {"type": "user", "cwd": MP, "timestamp": ts,
@@ -2723,7 +2727,7 @@ def test_memory():
         v.key(b"q", 0.5)
         check("Memory: q from the card back to the row",
               "Alpha rule" in head(v), head(v))
-        v.key(b"/ZEBRA", 0.8)
+        v.key(b"/" + NEEDLE.upper().encode(), 0.8)
         r = tasks_rows(v)
         check("Memory: / filters over a memory's text, any case",
               len(r) == 2 and r[0] == "Memories 1" and "Gamma ref" in r[1],
