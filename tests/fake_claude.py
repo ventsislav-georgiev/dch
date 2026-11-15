@@ -23,7 +23,8 @@ State lives in $FAKE_CLAUDE_DIR:
                     lag_ms (a paste shows in the composer that late),
                     fold (an Enter read together with typed text folds
                     into it, as Claude Code's paste detection does),
-                    exit_ms (/exit takes that long to quit),
+                    exit_ms (/exit takes that long to quit), die_ms
+                    (a kill or exit leaves the process that long),
                     dialog_on_kill (the first Ctrl-U raises a known
                     prompt over the draft instead of killing a row),
                     type_on_kill (text a human types after each Ctrl-U
@@ -123,6 +124,7 @@ def set_status(s):
 
 
 def bye(code=0, *_):
+    time.sleep(ctl().get("die_ms", 0) / 1000.0)    # lingers after the kill
     try:
         os.unlink(REC)
     except OSError:
