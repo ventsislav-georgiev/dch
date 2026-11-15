@@ -210,9 +210,20 @@ def main():
     tmp = os.path.realpath(tempfile.mkdtemp(prefix="dchlf", dir=os.environ.get("DCH_TEST_TMP", "/tmp")))
     fake = os.path.join(tmp, "fake")
     os.makedirs(fake)
-    with open(os.path.join(fake, "tailscale"), "w") as f:
-        f.write(FAKE_TS)
-    os.chmod(os.path.join(fake, "tailscale"), 0o755)
+    # the compiled fake, as serve_lib's (#277): a /bin/sh per whois past
+    # serve's 3 s under load is a refusal of 127.0.0.1 cached 30 s, and the
+    # 17th follower below dials about 3 times a second (#375)
+    try:
+        built = subprocess.call(os.environ.get("CC", "cc").split() + [
+            "-O1", "-o", os.path.join(fake, "tailscale"),
+            os.path.join(HERE, "fake_tailscale.c")]) == 0
+    except OSError:
+        built = False
+    if not built:
+        print("  note: tests/fake_tailscale.c did not build, the shell fake")
+        with open(os.path.join(fake, "tailscale"), "w") as f:
+            f.write(FAKE_TS)
+        os.chmod(os.path.join(fake, "tailscale"), 0o755)
     for name, obj in (("status.json", OWNER), ("whois.json", WHOIS)):
         with open(os.path.join(fake, name), "w") as f:
             json.dump(obj, f)
@@ -317,11 +328,23 @@ def main():
                   and r.stdout == "", (r.returncode, r.stderr))
 
         # --- 1. a watch host: dch serve ------------------------------------
+        last = {}
+
         def ref():
-            end = time.time() + 10
+            t0, n, m = time.time(), 0, len(open(log).read())
+            # each try waits up to cenv's box (ASan 5 s): room for 6 of them
+            end = t0 + max(10, 3 * BUDGET)
             while True:
                 r = dch(cenv, "--ls-json", "--remote", "--hosts", hosts)
+                n += 1
                 if '"stale":false' in r.stdout or time.time() > end:
+                    # why it took this long, for a failure's detail
+                    text = open(log).read()
+                    last.update(secs=round(time.time() - t0, 2), tries=n,
+                                let_in=text[m:].count("loopback peer let in"),
+                                refused=sorted(set(re.findall(
+                                    r"refused[^\n]*", text))),
+                                stderr=r.stderr[-300:])
                     return r.stdout
 
         want = ref()
@@ -439,8 +462,9 @@ def main():
                   == nw + 16, (s17.lines[-3:], stale[:2], s17.p.poll(),
                                open(log).read()[mark:][-1500:]))
         got = ref()
-        check("and a plain connection still fits beside them",
-              '"stale":false' in got, got)
+        check("and a plain connection still fits beside them (%.1f s, %d "
+              "tries)" % (last["secs"], last["tries"]),
+              '"stale":false' in got, (got, last))
         for f in many:
             f.stop()
 
