@@ -416,7 +416,7 @@ config_set(int k, const char *s)
 		{
 			if (!(cut = strdup(line)) || !config_line(cut, key))
 			{
-				fputs(line, out);
+				fwrite(line, 1, (size_t)ll, out);
 				if (line[ll - 1] != '\n')
 					fputc('\n', out);
 			}

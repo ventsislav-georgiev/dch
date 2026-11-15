@@ -229,6 +229,16 @@ def main():
         check("--config <key> --unset: removed, the rest kept",
               r.returncode == 0 and body == "# mine\nother = 1\nlast = x\n"
               and run("--config", "sidekick_pattern").returncode == 1)
+        # a kept line with a NUL is copied byte for byte (LOW-D11)
+        for pre, name in ((b"x\0y\n", "x NUL y"), (b"#\0\n", "# NUL")):
+            with open(cfg, "wb") as f:
+                f.write(pre + b"tasks_command = B\nlast = \0z")
+            r = run("--config", "auto_allow", "true")
+            with open(cfg, "rb") as f:
+                body = f.read()
+            check("--config set keeps the NUL line %s whole" % name,
+                  r.returncode == 0 and body == pre +
+                  b"tasks_command = B\nlast = \0z\nauto_allow = true\n")
         shutil.rmtree(os.path.dirname(cfg))
         newdir = os.path.join(tmp, "new", "deeper")
         r = run("--config", "auto_allow", "true",
