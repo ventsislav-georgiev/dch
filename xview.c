@@ -1692,6 +1692,8 @@ xv_wrap(struct xv *v, int w)
 	for (k = 0, te = -1; v->rsnip && !v->rloaded && v->roff >= 0 &&
 	     k < v->ne; k++)
 		if (v->e[k].off == v->roff && xv_kind(v, k) &&
+		    !(v->rtool && *v->rtool && *v->e[k].tool &&
+		      strcmp(v->rtool, v->e[k].tool)) &&
 		    (te < 0 || (!xv_snipat(v->e[te].text, v->rsnip) &&
 		                xv_snipat(v->e[k].text, v->rsnip))))
 			te = k;

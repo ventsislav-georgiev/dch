@@ -427,6 +427,16 @@ def test_twins():
         return [at(call("t%d" % i, "Bash", {"command": "cat %d" % i}),
                    ts % i), at(result("t%d" % i, o), ts % i)]
 
+    def multi(*tus):  # one assistant line with several tool_use blocks
+        return {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": i, "name": n, "input": inp}
+            for i, n, inp in tus]}}
+
+    def WR(c):
+        return {"file_path": "/x/f.txt", "content": c}
+
+    long_ = "\n".join(["pad " * 12] * 40)
+
     def probe(scr):
         body = [scr.get(r, "") for r in range(3, 29)]
         ni = [r for r, s in enumerate(body) if "needle" in s]
@@ -466,7 +476,23 @@ def test_twins():
                                   *(bash(2, place("B1")) +
                                     bash(3, "START-L\n" + "z\n" * 3200) +
                                     bash(4, place("B2")))),
-             ("B2", "B1", "path"))):
+             ("B2", "B1", "path")),
+            # #370: one line with a Bash call and a Write call; a needle in
+            # the Write's content only (the reader does not show it), then
+            # in the Bash command only: each hit opens its own tool's card
+            ("xv-sl", "b65", turn("start", ts % 0,
+                                  at(multi(("l1", "Bash", {"command": long_}),
+                                           ("l2", "Write", WR(place("W")))),
+                                     ts % 1),
+                                  at(result("l2", "File created"), ts % 1)),
+             ("path",)),
+            ("xv-sm", "b66", turn("start", ts % 0,
+                                  at(multi(("l1", "Bash",
+                                            {"command": place("C")}),
+                                           ("l2", "Write", WR("plain"))),
+                                     ts % 1),
+                                  at(result("l2", "File created"), ts % 1)),
+             ("C",))):
         record(name, "11111111-2222-4333-8444-555555555" + sid,
                objs + [at(say("end"), ts % 9)], proj="-mem-proj", cwd=MP)
         v = Pty([DCH, "--xray", name], rows=30, cols=100)
@@ -475,7 +501,7 @@ def test_twins():
             for _ in range(3):
                 v.key(b"\t", 0.3)
             v.key(b"needle\r", 0.3)
-            ok = tabbar(v, "Search 3")
+            ok = tabbar(v, "Search %d" % len(wants))
             for k, want in enumerate(wants):
                 if k:
                     v.key(b"j", 0.3)
@@ -486,10 +512,10 @@ def test_twins():
                 v.pump(0.3)
                 got = probe(rows(v.out[mark:]))
                 check("%s: hit %d opens at its own entry (%s) (LOW-V34, "
-                      "LOW-V35)" % (name, k, want), ok and got == want,
-                      (got, screen(v, mark)))
+                      "LOW-V35)" % (name, k, want),
+                      ok and got == want, (got, screen(v, mark)))
                 v.key(b"q", 0)
-                tabbar(v, "Search 3")
+                tabbar(v, "Search %d" % len(wants))
             v.key(b"q")
             v.exit()
         finally:
