@@ -2958,6 +2958,19 @@ def test_ref_middle():
                                  not tl[0]["partial"] and not d["partial"]
                                  or d["partial"] and d["why"] == "time"),
               (rc, fm, tl, ls[-1:]))
+        # #387: --full reads the head, the tail, then the middle, so a
+        # byte cap (20 MiB: the head and tail lines read, ~1 MiB, then the
+        # middle's 30 MiB line) cuts only the middle; 1.73.0 read the head,
+        # then stopped in the middle: the head's mention alone
+        rc, ls, _, cm = ref("WIDE-1", "--full",
+                            env=dict(ENV, DCH_XRAY_CAPS="0:%d" % (20 << 20)))
+        ol = [l["mention"]["offset"] for l in ls if "mention" in l]
+        check("387 ref middle: the bytes cap cuts --full in the middle: "
+              "the newest (tail) mention kept with its chapter, the head's "
+              "too, oldest first, why bytes",
+              rc == 0 and ol == [head, tail] and cm[tail] is not None and
+              ls[-1].get("partial") and ls[-1].get("why") == "bytes",
+              (rc, ol, cm, ls[-1:]))
         rc2, ls2, dt2, lm = ref("MID-2", env=nc)
         rc3, ls3, _, lw = ref("WIDE-1", env=nc)
         check("ref middle: light finds the middle-only ref at --full's "
@@ -2985,6 +2998,27 @@ def test_ref_middle():
         rc, out, rss = maxrss([DCH, "--xray", "xr-mid", "--ref", "WIDE-1",
                                "--scope", "session", "--full", "--json"], ENV)
         rss_ok("ref middle: --full over 300 MiB", rss)
+        # #387: --full reads the middle after the tail, yet keeps the file's
+        # oldest mention and its newest 199, oldest first (range lowered:
+        # head 4 KiB, tail 16 KiB)
+        with open(tp, "wb") as f:
+            f.write(u("start"))
+            f.write(u("pad " + "x" * 9000))
+            f.write(u("middle MID-3"))
+            f.write(u("pad " + "x" * 9000))
+            for i in range(250):
+                f.write(('{"type":"assistant","message":{"content":'
+                         '"t MID-3 %03d"}}\n' % i).encode())
+        rc, ls, _, fm = ref("MID-3", "--full",
+                            env=dict(ENV, DCH_XRAY_CAPS="0:0:0:4096:16384"))
+        ml = [l["mention"]["line"] for l in ls if "mention" in l]
+        tl = [l["tally"] for l in ls if "tally" in l]
+        check("387 ref middle: --full keeps the middle's oldest mention and "
+              "the newest 199 of the tail, oldest first; count exact",
+              rc == 0 and ml == ["middle MID-3"] +
+              ["t MID-3 %03d" % i for i in range(51, 250)] and tl and
+              tl[0]["count"] == 251 and tl[0]["mentions_dropped"] == 51 and
+              fm[min(fm)] is None, (rc, ml[:3], ml[-2:], tl, err))
     finally:
         os.unlink(tp)
 
@@ -3021,6 +3055,30 @@ def test_light_377():
               m == ["%03d" % i for i in range(51, 251)] and
               ls[-1].get("why") == "budget",
               (r.returncode, m[:3], m[-3:], ls[-1:], r.stderr[-300:]))
+        # #387: the budget ends that walk, not the scan: a 15.5 MiB walk
+        # (near the 16 MiB cap) held 1.73.0 for ~4 s; the window is read
+        # with no cwd, so its notes still come
+        with open(tp, "w") as f:
+            f.write(json.dumps({"type": "user", "cwd": "/home/demo/p377",
+                                "message": {"content": "start"}}) + "\n")
+            f.write(walk * ((31 << 19) // len(walk)))
+            for i in range(1, 251):
+                f.write(json.dumps({"type": "assistant", "message": {
+                    "content": [{"type": "text", "text":
+                                 "note %03d about PROJ-77 %s" %
+                                 (i, "z" * 3900)}]}}) + "\n")
+        t0 = time.time()
+        r = dch("--xray", "xr-377", "--ref", "PROJ-77", "--budget-ms", "50",
+                "--json")
+        dt = time.time() - t0
+        ls = ref_lines(r.stdout) or [{}]
+        m = [l["mention"]["line"][5:8] for l in ls if "mention" in l]
+        check("387 budget: the budget ends a 15.5 MiB cwd walk (%.2f s, "
+              "1.73.0 ~4 s); the newest window's notes still come, why "
+              "budget" % dt,
+              r.returncode == 0 and dt < 2 and m and m[-1] == "250" and
+              ls[-1].get("why") == "budget",
+              (r.returncode, dt, m[:3], m[-3:], ls[-1:], r.stderr[-300:]))
     finally:
         os.unlink(tp)
 

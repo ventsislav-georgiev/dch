@@ -1298,7 +1298,9 @@ light by default (stops at the first result or after
 .B \-\-budget\-ms
 .IR ms ,
 50 to 300, default 300, across all files, not counting time spent waiting
-on a reader that pauses; with
+on a reader that pauses; a window being decoded is read to its end, and the
+scan's first window always is, the budget ending only its search for a cwd;
+with
 .B \-\-scope project
 or
 .B all
@@ -2068,7 +2070,11 @@ is false with
 (light and
 .BR \-\-full )
 reads the middle too, under its own caps, a hit there with
-.BR chapter:null .
+.BR chapter:null ;
+.B \-\-full
+reads it last, so the caps cut only the middle and the newest turns are
+always read (a file over 1 GiB is always partial,
+.BR why:\(dqbytes\(dq ).
 A live Codex's chapters come from its rollout, read the same way
 (corpus
 .BR codex ,
