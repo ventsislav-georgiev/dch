@@ -410,13 +410,24 @@ after the shell put its own line\-buffered mode back, nor one on a terminal
 an earlier command left non\-canonical
 .RB ( "stty \-icanon" ).
 Limit: the kernel records neither who set a terminal's mode nor who reads
-it, so a terminal left in that exact raw no\-echo mode
-.RB ( "stty raw \-echo" ,
-or
+it, so a terminal left with line editing, signal keys and echo all off
+(ICANON, ISIG and ECHO:
+.BR "stty raw \-echo" ,
 .B stty raw
-on macOS) makes plain
+on macOS,
+.BR "stty \-icanon \-isig \-echo" ,
+or a full\-screen program that exited without restoring the terminal; such
+a terminal can look normal at a shell prompt) makes plain
 .B unbuffer
-count as in front again.
+count as in front again, and auto\-allow's
+.B 1
+and
+.B \-\-say
+text then reach the shell around it once
+.B unbuffer
+exits;
+.B stty sane
+puts the terminal back.
 Read from the kernel by the client, so a master of any version gets it.
 .I auto_allowed
 is the permission prompt the master answered last with auto\-allow (see

@@ -5975,8 +5975,9 @@ proc_ppid(long pid)
 ** read it (plain unbuffer: expect never reads the keyboard), and what is
 ** typed there waits for the shell that reads it once the wrapper exits
 ** (MED-AA1). shortcut: the kernel keeps no record of who set the mode or
-** who reads, so a terminal the user left in that exact mode (stty raw
-** -echo; macOS stty raw) still passes (LOW-CW2); stty -icanon does not. */
+** who reads, so a terminal the user left in that mode (stty raw -echo;
+** macOS stty raw; stty -icanon -isig -echo) still passes (LOW-CW2, NIT-CW4);
+** stty -icanon alone does not. */
 static int
 tty_raw(long pid, long dev)
 {
@@ -8648,6 +8649,13 @@ do_say_verb(char **names, int nnames, char **words, int nwords, int json)
 	return bad ? 1 : 0;
 }
 
+/* each_pid callback: pid when it is in the process group *arg. */
+static int
+pgrp_member(long pid, void *arg)
+{
+	return getpgid((pid_t)pid) == (pid_t)*(long *)arg ? (int)pid : 0;
+}
+
 /* `--run <n> <text...>` (#112): into a Claude Code session, text and Enter in
 ** one burst fold the Enter into the paste, so the text goes through --say's
 ** gate (empty composer, typed, Enter once it shows, re-Entered). A slash
@@ -8683,7 +8691,9 @@ do_run_verb(const char *name, char **words, int nwords)
 	if (ci.pid > 0 && claude_find(ci.pid, 1, &r) != 0 &&
 	    (c = proc_fg(ci.pid, r.pid)) == 0 &&
 	    (proc_stat(r.pid, &fg, NULL) < 0 || fg <= 0 ||
-	     proc_fg(ci.pid, fg) != 1))
+	     /* a live member: in `grep … | less` the leader is gone (LOW-CW5) */
+	     proc_fg(ci.pid, proc_ppid(fg) < 0 ? each_pid(pgrp_member, &fg)
+	                                       : fg) != 1))
 	{
 		cmd_info_free(&ci);
 		fprintf(stderr, "dch: %s: %s — %s\n", name, say_code[SAY_NOT_FG],

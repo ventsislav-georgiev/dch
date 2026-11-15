@@ -300,6 +300,36 @@ def main():
         check("suspended: --run types the plain burst into the shell",
               r.returncode == 0 and
               (lite or until(lambda: "RUN-OK\n" in screen(), 5)))
+        # LOW-CW5: a pipeline in front whose leader has exited (`grep … |
+        # less` once grep is done): 1.67.0 read the group's id as a pid
+        bash = int(ps(fpid, "ppid"))
+        send("true | cat")
+
+        def pipe_pgid():
+            for l in subprocess.run(["ps", "-A", "-o", "pid=,ppid=,pgid=,comm="],
+                                    capture_output=True,
+                                    text=True).stdout.splitlines():
+                f = l.split()
+                if (len(f) >= 4 and int(f[1]) == bash and f[0] != f[2] and
+                        os.path.basename(f[3]) == "cat"):
+                    return int(f[2])
+
+        def leader_gone():
+            g = pipe_pgid()
+            try:
+                os.kill(g, 0)
+            except ProcessLookupError:
+                return True
+            except (OSError, TypeError):
+                pass
+            return False
+        until(leader_gone, 10)
+        r = run("--run", n, "PIPE-%s" % TAG)
+        check("suspended, `true | cat` in front: --run types the burst into "
+              "cat", r.returncode == 0 and
+              (lite or until(lambda: screen().count("PIPE-" + TAG) >= 2, 5)))
+        run("--send", n, "\x04")         # cat ends: bash's prompt again
+        until(lambda: lite or screen().rstrip().endswith("$"), 10)
 
         # --- fg: Claude in front again ------------------------------------
         send("fg")
