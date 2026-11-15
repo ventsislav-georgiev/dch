@@ -1278,7 +1278,8 @@ The corpus:
   - It is read in 1 MiB chunks: the first 16 MiB and the newest 256 MiB.
     Past that, `complete` is `false` with `why: "range"`. So it is when the
     file shrinks during the read, or when more than 5000 chapters were
-    found (the oldest go).
+    found (the oldest go). `--ref` reads the middle too (see `--ref`'s
+    Range).
   - A line over 1 MiB or over 100000 JSON tokens counts as one failed step.
 - **Codex.** A live Codex in the session (the first process named `codex`
   below the session's shell) answers from its rollout: `corpus: "codex"`,
@@ -1631,6 +1632,13 @@ ref (`dch: not a ref`), relative paths against the session's cwd.
   file order within a window, and the file's `mention` lines are its newest
   200. `--full` reads oldest first, as before. A live shell's lines and
   another session's give titles and counts only: no `mention`, no `passage`.
+- **Range.** `--ref` (light and `--full`) reads a transcript past
+  `--json`'s range (the first 16 MiB and the newest 256 MiB) too, under the
+  same budget, 10 s and 1 GiB caps, so a ref in the middle of a file over
+  272 MiB is found; `--full` costs about 4 s per GB there. A mention or
+  definition in that middle has `chapter: null`, since `--json` has no
+  chapter there. So a ref card can show mentions from a part of a huge
+  transcript that the Chapters, Prompts and Responses lists do not reach.
 - **Full.** `--full` reads the whole corpus up to its caps: 64 files
   (`why: "files"`), 1 GiB (`why: "bytes"`) and 10 s (`why: "time"`). The
   10 s count the scan's own time: time spent waiting on a reader that pauses

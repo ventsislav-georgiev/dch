@@ -2301,8 +2301,7 @@ def test_scope():
           (o and o.get("other_projects"), err))
 
     # the per-file range of another session's file (3.8: head + newest),
-    # lowered by DCH_XRAY_CAPS: a mention in the head and the tail found,
-    # the one between not
+    # lowered by DCH_XRAY_CAPS: --ref reads the middle too (#301)
     pad = ["x" * 900] * 40
     put(5, O, ["head #932"] + pad + ["middle #932"] + pad + ["tail #932"],
         1794300040)
@@ -2312,11 +2311,11 @@ def test_scope():
     t5 = [l["tally"] for l in ls if "tally" in l and
           l["tally"]["session"] == "s5"]
     lines = [l["mention"]["line"] for l in ls if "mention" in l]
-    check("caps: the per-file range finds the head and the tail, not the "
-          "middle; tally partial, done why range",
-          rc == 0 and t5 and t5[0]["count"] == 2 and t5[0]["partial"] and
-          lines == ["head #932", "tail #932"] and ls[-1]["partial"] and
-          ls[-1]["why"] == "range", (t5, lines, ls[-1], err))
+    check("caps: past the per-file range --ref finds the head, the middle "
+          "and the tail (#301); tally not partial",
+          rc == 0 and t5 and t5[0]["count"] == 3 and not t5[0]["partial"]
+          and lines == ["head #932", "middle #932", "tail #932"],
+          (t5, lines, ls[-1], err))
     rc, ls, opens, order, err = ref("#932", "--scope", "all", "--full",
                                     env=dict(dbg, DCH_XRAY_CAPS="0:1000"))
     check("caps: the bytes cap stops the scan before the next file, why "
@@ -2592,12 +2591,13 @@ def test_light_303():
     got = {form: ref("CT-56", *(("--full",) if form == "full"
                                 else ("--scope", "project")), caps=caps)
            for form in ("light", "full")}
-    check("303 head end: light leaves the line the head's end cuts, as "
-          "--full: lines 1000 and 100, partial, no line too long",
-          sorted(got["light"][1]) == sorted(got["full"][1]) == [100, 1000]
-          and got["light"][3][0].get("lines_too_long") ==
+    check("303 head end: --ref reads past the range (#301), the line the "
+          "head's end cuts too, light as --full: lines 100, 256 and 1000, "
+          "not partial, no line too long",
+          sorted(got["light"][1]) == sorted(got["full"][1]) ==
+          [100, 256, 1000] and got["light"][3][0].get("lines_too_long") ==
           got["full"][3][0].get("lines_too_long") == 0 and
-          got["light"][3][0].get("partial") is True, got)
+          got["light"][3][0].get("partial") is False, got)
     os.unlink(tp)
 
 
@@ -2861,6 +2861,80 @@ def test_prefilter_reach():
         os.unlink(tp)
 
 
+def test_ref_middle():
+    """#301: --ref (light and --full) reads past the range rule (first
+    16 MiB + newest 256 MiB), so a ref in the middle of a 300 MiB
+    transcript is found, with a null chapter; --json and --search keep the
+    rule. Sparse: the holes are over-long lines, cheap to read."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, RSID + ".jsonl")
+    # a prompt and its answer: each prompt opens a chapter of its own
+    u = lambda t: (json.dumps({"type": "user", "cwd": "/home/demo/proj",
+                               "message": {"content": t}}) + "\n" +
+                   '{"type":"assistant","message":{"content":"ok"}}\n'
+                   ).encode()
+    head, mid, tail = 0, (30 << 20) + 1, (299 << 20) + 1
+    with open(tp, "wb") as f:
+        f.write(u("head WIDE-1"))
+        f.seek(mid - 1)
+        f.write(b"\n" + u("middle WIDE-1 and MID-2"))
+        f.seek(tail - 1)
+        f.write(b"\n" + u("tail WIDE-1"))
+    history("xr-mid", RSID, cfg)
+    nc = dict(ENV, DCH_XRAY_NOCLOCK="1")
+
+    def ref(key, *a, env=ENV):
+        t0 = time.time()
+        r = dch("--xray", "xr-mid", "--ref", key, "--scope", "session", *a,
+                "--json", env=env)
+        ls = ref_lines(r.stdout) or [{}]
+        return (r.returncode, ls, time.time() - t0,
+                {l["mention"]["offset"]: l["mention"]["chapter"]
+                 for l in ls if "mention" in l})
+    try:
+        rc, ls, dt, fm = ref("WIDE-1", "--full")
+        d = ls[-1].get("done") and ls[-1]
+        tl = [l["tally"] for l in ls if "tally" in l]
+        check("ref middle: --full over 300 MiB finds the head, middle and "
+              "tail mentions in %.2f s, or says partial (time)" % dt,
+              rc == 0 and d and (sorted(fm) == [head, mid, tail] and
+                                 tl and tl[0]["count"] == 3 and
+                                 not tl[0]["partial"] and not d["partial"]
+                                 or d["partial"] and d["why"] == "time"),
+              (rc, fm, tl, ls[-1:]))
+        rc2, ls2, dt2, lm = ref("MID-2", env=nc)
+        rc3, ls3, _, lw = ref("WIDE-1", env=nc)
+        check("ref middle: light finds the middle-only ref at --full's "
+              "offset (%.2f s), and the tail's first for one in all three"
+              % dt2, rc2 == 0 and rc3 == 0 and list(lm) == [mid] and
+              mid in fm and list(lw) == [tail] and
+              ls3[-1].get("why") == "first", (lm, lw, fm, ls2[-1:]))
+        check("ref middle: a chapter opened in the middle --json does not "
+              "read is null, light and --full",
+              fm.get(mid, 0) is None and lm.get(mid, 0) is None, (fm, lm))
+        rc, o, err = xray("xr-mid", "--json")
+        anchors = [c.get("anchor") for c in (o or {}).get("chapters", [])]
+        keys = [r["key"] for r in (o or {}).get("refs", [])]
+        check("ref middle: --json keeps the rule: no middle chapter or ref, "
+              "the tail mention's chapter is one of its",
+              rc == 0 and o and len(anchors) == 2 and
+              not any(a and a.endswith(":%d" % mid) for a in anchors) and
+              "ticket:MID-2" not in keys and fm.get(tail) in anchors,
+              (anchors, keys, fm))
+        rc, so, err = search("xr-mid", "MID-2")
+        check("ref middle: --search (unchanged, it reads the whole file) "
+              "has the middle hit at --ref's offset, chapter null",
+              rc == 0 and so and [(h["offset"], h["chapter"]) for h in
+                                  so["hits"]] == [(mid, None)], (so, err))
+        rc, out, rss = maxrss([DCH, "--xray", "xr-mid", "--ref", "WIDE-1",
+                               "--scope", "session", "--full", "--json"], ENV)
+        rss_ok("ref middle: --full over 300 MiB", rss)
+    finally:
+        os.unlink(tp)
+
+
 def main():
     try:
         test_names()
@@ -2887,6 +2961,7 @@ def main():
         test_light_303()
         test_light_326()
         test_prefilter_reach()
+        test_ref_middle()
     finally:
         shutil.rmtree(T, ignore_errors=True)
     if fails[0]:

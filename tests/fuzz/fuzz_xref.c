@@ -33,7 +33,9 @@
 ** newest first, with its prefilter on and off (#293): the same lines, first
 ** and progress aside, or abort. Windows of 16 bytes (bit 6) or 509; bit 7 a
 ** line cap of 64 and a byte cap of half the file; bit 3 --scope project, so
-** no first result ends the read.
+** no first result ends the read. An input whose length is a multiple of 3
+** lowers the range to a quarter of the file each end, which --ref reads past
+** (#301), and goes through --full's read as well.
 ** Every hit handed to a sink lies inside its line; a definition's title is
 ** valid UTF-8, its passage within XR_PASSAGE scalars' bytes; the printed object is one line within the cap. */
 #include <stdint.h>
@@ -246,8 +248,9 @@ scan(const uint8_t *d, size_t n, const char *key)
 	free(buf);
 }
 
-/* light --ref over fd for key, the prefilter off (noskip) or on: its lines
-** but first and progress, malloc'd; NULL when out of memory */
+/* light --ref over fd for key, the prefilter off (noskip) or on (noskip -1:
+** --full's read, #301): its lines but first and progress, malloc'd; NULL
+** when out of memory */
 static char *
 light(int fd, size_t n, const char *key, int scope, int noskip)
 {
@@ -260,7 +263,7 @@ light(int fd, size_t n, const char *key, int scope, int noskip)
 	int capped = 0, ok = 0;
 	FILE *f = open_memstream(&buf, &bl);
 
-	xr_noskip = noskip;
+	xr_noskip = noskip > 0;
 	if (f && (s = xr_scan_new(f, key, "fuzz", "", 0, 0, 0, 300,
 	                          xr_now_ms())))
 		xr_scan_scope(s, scope);
@@ -269,7 +272,10 @@ light(int fd, size_t n, const char *key, int scope, int noskip)
 	{
 		xr_scan_sink(s, &k);
 		xr_claude_refs(x, &k, 0x1234, xr_scan_tick, s);
-		(void)xr_claude_newest(x, fd, n, &capped);
+		if (noskip < 0)	/* --full's read (#301) */
+			(void)xr_claude_read(x, fd, n, &capped);
+		else
+			(void)xr_claude_newest(x, fd, n, &capped);
 		xr_claude_end(x, 0x1234, &c);
 		xr_chapters_free(&c);
 		xr_scan_file(s, n, xr_claude_too_long(x), capped, 0);
@@ -322,7 +328,13 @@ differ(const uint8_t *d, size_t n, const char *key)
 		xr_lim.line = 64;
 		xr_lim.bytes = n / 2 + 1;
 	}
+	if (n % 3 == 0)	/* past the range: --ref reads the middle (#301) */
+	{
+		xr_lim.head = n / 4;
+		xr_lim.tail = n / 4;
+	}
 	xr_noclock = 1;	/* only the bytes decide where a read stops */
+	free(light(fd, n - 1, key, d[0] & 8 ? 1 : 0, -1));
 	a = light(fd, n - 1, key, d[0] & 8 ? 1 : 0, 0);
 	b = light(fd, n - 1, key, d[0] & 8 ? 1 : 0, 1);
 	xr_noclock = 0;

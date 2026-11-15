@@ -12348,8 +12348,6 @@ xr_ref_file(struct xr_scan *sc, const char *path, const struct stat *st,
 	close(fd);
 	xr_claude_end(d, (uint64_t)st->st_ino, &ch);
 	xr_chapters_free(&ch);
-	if (capped && span > xr_lim.head + xr_lim.tail)
-		span = xr_lim.head + xr_lim.tail;
 	xr_scan_file(sc, span, xr_claude_too_long(d), capped, 0);
 	xr_claude_free(d);
 	return rc < 0 ? -1 : 0;
