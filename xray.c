@@ -5888,7 +5888,7 @@ ent_put(struct xr_entries *e, const char *role, const char *tool,
         const char *s, size_t n, size_t cap, int err)
 {
 	size_t l = s ? clip(s, n, cap) : 0, tl = tool ? strlen(tool) : 0;
-	size_t qc = (l + tl) * 6 + 96, k;
+	size_t qc = (l + tl) * 6 + 128, k;
 	char *t, *q, *nb;
 
 	if (e->truncated || e->failed)
@@ -5910,8 +5910,11 @@ ent_put(struct xr_entries *e, const char *role, const char *tool,
 		k += (size_t)snprintf(q + k, qc - k, "null");
 	k += (size_t)snprintf(q + k, qc - k, ",\"text\":");
 	k += dch_json_quote(q + k, qc - k, t);
-	k += (size_t)snprintf(q + k, qc - k, ",\"error\":%s}",
+	k += (size_t)snprintf(q + k, qc - k, ",\"error\":%s",
 	                      err ? "true" : "false");
+	if (e->off >= 0)	/* its record's (#356): a Search hit's offset */
+		k += (size_t)snprintf(q + k, qc - k, ",\"offset\":%lld", e->off);
+	k += (size_t)snprintf(q + k, qc - k, "}");
 	if (e->len + k > e->cap)
 		e->truncated = 1;	/* cut here: no later entry either */
 	else if (!(nb = realloc(e->buf, e->len + k + 1)))
@@ -6765,6 +6768,8 @@ xr_claude_line(struct xr_claude *d, const char *line, size_t len,
 	size_t n;
 
 	d->off = off;
+	if (d->want)
+		d->want->off = (long long)off;
 	d->at = -1;
 	memset(&p, 0, sizeof p);
 	/* shortcut: a line past XR_LINE_TOKENS is one failed step, as an
@@ -9094,6 +9099,7 @@ xr_entries_begin(struct xr_entries *e, const char *anchor,
 	memset(e, 0, sizeof *e);
 	e->anchor = anchor;
 	e->cap = out > head ? out - head : 0;
+	e->off = -1;
 }
 
 void

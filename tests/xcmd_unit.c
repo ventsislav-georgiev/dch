@@ -87,6 +87,12 @@ t_argv(void)
 	      xcmd_argv("~/abc", "/home", buf, 8, av, 4) == -1 &&
 	      xcmd_argv("~/ab", "/home", buf, 9, av, 4) == 1 &&
 	      !strcmp(av[0], "/home/ab"));
+	/* a word filling the buffer exactly, then "": no NUL past cap */
+	memset(buf, 'S', sizeof buf);
+	CHECK("argv: a full word then an empty word is refused, no byte past cap",
+	      xcmd_argv("abcde \"\"", NULL, buf, 6, av, 4) == -1 &&
+	      buf[6] == 'S' &&
+	      xcmd_argv("abcd \"\"", NULL, buf, 6, av, 4) == 2);
 }
 
 static char out[XCMD_LINE_MAX + 1];

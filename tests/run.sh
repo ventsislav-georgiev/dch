@@ -1111,8 +1111,9 @@ else
 fi
 # --memory's parsers (#322): frontmatter, the index line, the shell rule
 # shellcheck disable=SC2086 # xcc is a word list
+# (xmem_unit.c includes xmem.c for its static matcher, #355)
 if $xcc -O1 -I"$xsrc" -I. -o "$TMP/xmem_unit" "$xsrc/tests/xmem_unit.c" \
-    "$xsrc/xmem.c" "$xsrc/xray.c" "$xsrc/json.c" >"$TMP/xmem_unit.log" 2>&1; then
+    "$xsrc/xray.c" "$xsrc/json.c" >"$TMP/xmem_unit.log" 2>&1; then
     if "$TMP/xmem_unit" >"$TMP/xmem_unit.log" 2>&1; then
         ok "xmem units: frontmatter, the MEMORY.md line, the shell rule"
     else

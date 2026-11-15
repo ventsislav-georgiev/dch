@@ -444,6 +444,8 @@ struct xr_entries
 	int hit, truncated, done, failed;	/* failed: out of memory */
 	int guess;			/* #300: a seek's bounds or an entry rest on
 					** what came before its first line */
+	long long off;			/* the line being read (a transcript's), its
+					** entries' "offset"; -1 a shell's: none */
 	struct xr_ent_call *calls;	/* Claude: the chapter's calls */
 	int ncalls;
 	char *out;			/* shell: the block's C..D rows */

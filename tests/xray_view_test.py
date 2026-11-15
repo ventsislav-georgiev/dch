@@ -2601,6 +2601,10 @@ def mfile(name, body, ago, kind=None):
     os.utime(os.path.join(MDIR, name), (time.time() - ago,) * 2)
 
 
+# random per run: no host instruction file can hold it
+NEEDLE = "zq" + os.urandom(6).hex()
+
+
 def fixture_memory():
     """xv-me: four memories (one this session wrote, one it read, one with
     a word only in its text and 40 lines, one over 16 KB) and the project's
@@ -2616,7 +2620,7 @@ def fixture_memory():
     mfile("alpha.md", "alpha body first line\n", 7200, "feedback")
     mfile("beta.md", "beta body\n", 7200, "project")
     mfile("gamma.md", "".join("gamma line %02d\n" % i for i in range(1, 41))
-          + "the zebrafish line\n", 3600, "reference")
+          + "the zebrafish line\n" + NEEDLE + "\n", 3600, "reference")
     mfile("long.md", "x" * 20000, 2 * 86400)
     tsw = iso(3 * 3600)
     um = lambda prompt, ts: {"type": "user", "cwd": MP, "timestamp": ts,
@@ -2723,7 +2727,7 @@ def test_memory():
         v.key(b"q", 0.5)
         check("Memory: q from the card back to the row",
               "Alpha rule" in head(v), head(v))
-        v.key(b"/ZEBRA", 0.8)
+        v.key(b"/" + NEEDLE.upper().encode(), 0.8)
         r = tasks_rows(v)
         check("Memory: / filters over a memory's text, any case",
               len(r) == 2 and r[0] == "Memories 1" and "Gamma ref" in r[1],
@@ -2936,6 +2940,92 @@ def test_twins():
         v.exit()
     finally:
         v.close()
+    # LOW-V34, LOW-V35 (#356): a twin the reader cuts or never shows, in
+    # an entry of another role or tool, or beside an unrelated cut output:
+    # each hit opens at its own entry (the entries say their offset). The
+    # place is "path" (the Write's card) above any needle row, else the
+    # PLACE-x under the first needle row, else the first START-x (a cut
+    # entry's start).
+    pad = "\n".join(["pad " * 12] * 4)
+
+    def place(x):
+        return (pad + "\nthe needle is here\n" + pad + "\ngap\ngap\n"
+                "PLACE-%s\n" % x)
+
+    def cutout(x, fill="z\n", n=3200):
+        return "START-%s\n" % x + fill * n + place(x)
+
+    def bash(i, o):
+        return [at(call("t%d" % i, "Bash", {"command": "cat %d" % i}),
+                   ts % i), at(result("t%d" % i, o), ts % i)]
+
+    def probe(scr):
+        body = [scr.get(r, "") for r in range(3, 29)]
+        ni = [r for r, s in enumerate(body) if "needle" in s]
+        if any("/x/f.txt" in s for s in body[:ni[0] if ni else None]):
+            return "path"
+        for s in body[ni[0]:] if ni else []:
+            m = re.search(r"PLACE-(\w+)", s)
+            if m:
+                return m.group(1)
+        for s in body:
+            m = re.search(r"START-(\w+)", s)
+            if m:
+                return "START-" + m.group(1)
+        return None
+
+    for name, sid, objs, wants in (
+            ("xv-su", "b61", turn(cutout("U", "y\n", 3100), ts % 0,
+                                  at(say(place("R")), ts % 1),
+                                  *bash(2, place("O"))),
+             ("O", "R", "START-U")),
+            ("xv-sb", "b62", turn("start", ts % 0, *bash(1, cutout("F1")),
+                                  at(say(place("R")), ts % 2),
+                                  *bash(3, place("F3"))),
+             ("F3", "R", "START-F1")),
+            ("xv-sg", "b63", turn("start", ts % 0,
+                                  at(call("g1", "Grep", {"pattern": "zz"}),
+                                     ts % 1),
+                                  at(result("g1", cutout("G1")), ts % 1),
+                                  *(bash(2, place("F2")) +
+                                    bash(3, place("F3")))),
+             ("F3", "F2", "START-G1")),
+            ("xv-sw", "b64", turn("start", ts % 0,
+                                  at(call("w1", "Write",
+                                          {"file_path": "/x/f.txt",
+                                           "content": place("W")}), ts % 1),
+                                  at(result("w1", "File created"), ts % 1),
+                                  *(bash(2, place("B1")) +
+                                    bash(3, "START-L\n" + "z\n" * 3200) +
+                                    bash(4, place("B2")))),
+             ("B2", "B1", "path"))):
+        record(name, "11111111-2222-4333-8444-555555555" + sid,
+               objs + [at(say("end"), ts % 9)], proj="-mem-proj", cwd=MP)
+        v = Pty([DCH, "--xray", name], rows=30, cols=100)
+        try:
+            v.wait(b"Prompts 1")
+            for _ in range(3):
+                v.key(b"\t", 0.3)
+            v.key(b"needle\r", 0.3)
+            ok = tabbar(v, "Search 3")
+            for k, want in enumerate(wants):
+                if k:
+                    v.key(b"j", 0.3)
+                mark = len(v.out)
+                v.key(b"\r", 0)
+                until(lambda: (v.pump(0.1),
+                               probe(rows(v.out[mark:])) == want)[1], 10)
+                v.pump(0.3)
+                got = probe(rows(v.out[mark:]))
+                check("%s: hit %d opens at its own entry (%s) (LOW-V34, "
+                      "LOW-V35)" % (name, k, want), ok and got == want,
+                      (got, screen(v, mark)))
+                v.key(b"q", 0)
+                tabbar(v, "Search 3")
+            v.key(b"q")
+            v.exit()
+        finally:
+            v.close()
 
 
 def test_memory_cmd():

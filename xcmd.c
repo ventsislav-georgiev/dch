@@ -77,6 +77,8 @@ xcmd_argv(const char *s, const char *home, char *buf, size_t cap, char **argv,
 				return -1;
 			buf[o++] = *s++;
 		}
+		if (o >= cap)
+			return -1;
 		buf[o++] = '\0';
 	}
 	argv[argc] = NULL;
@@ -316,7 +318,7 @@ row_memory(struct xc_out *w, const struct json_parser *p, int r, char *tmp,
 		bodycut = 1;
 	}
 	putq(w, s);
-	if (bodycut)
+	if (bodycut && s)	/* no body: nothing was cut */
 	{
 		key(w, "cut");
 		put(w, "true");
