@@ -67,12 +67,18 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		return 0;
 	if (d[0] & 1)
 	{
-		char *line = malloc(n), buf[4096], *av[XCMD_ARGS_MAX + 1];
-		size_t cap = d[0] & 4 ? sizeof buf : 64;
+		char *line = malloc(n), *buf, *av[XCMD_ARGS_MAX + 1];
+		size_t cap = d[0] & 4 ? 4096 : 64;
 		int argc, k;
 
-		if (!line)
+		/* exactly cap bytes on the heap: ASan sees a write past it */
+		buf = malloc(cap);
+		if (!line || !buf)
+		{
+			free(line);
+			free(buf);
 			return 0;
+		}
 		memcpy(line, d + 1, n - 1);
 		line[n - 1] = '\0';
 		argc = xcmd_argv(line, d[0] & 2 ? "/h" : NULL, buf, cap, av,
@@ -84,6 +90,7 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 			    !memchr(av[k], '\0', (size_t)(buf + cap - av[k])))
 				abort();
 		free(line);
+		free(buf);
 		return 0;
 	}
 	kind = d[0] & 2 ? XCMD_MEMORY : XCMD_TASK;
