@@ -242,6 +242,7 @@ def test_small_card():
         v.key(b"\r")
         check("small card: srv:xv-cl's #831 card opens with its mentions",
               v.wait(b"Mentions: this session ", start=mark), v.out[mark:])
+        settle(v)   # #376: under load the mention arrived after Enter
         mark = len(v.out)
         v.resize(6, 20)
         small = v.wait(b"too small", start=mark)
