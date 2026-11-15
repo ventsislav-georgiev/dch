@@ -324,16 +324,21 @@ def ctl_checks(dch, check, senv, cenv, serve_at, procs, fakes, tmp, hosts):
     check("--host srv --status <name>: the unambiguous form",
           rem.returncode == 1 and rem.stderr == "no session: ctl-qb\n", rem)
 
-    # --follow: frames as they come, the exit when the session ends
+    # --follow: frames as they come, the exit when the session ends. The
+    # children end on a go file after both follows started: a fixed sleep
+    # could end fa before a loaded runner (ASan) got its follow attached.
+    go = os.path.join(tmp, "follow.go")
     for n in ("fa", "fb"):
         dch(senv, "--spawn", n, "--size", "20x2", "--", "/bin/sh", "-c",
-            "sleep 1.5")
+            "while [ ! -e '%s' ]; do sleep 0.05; done" % go)
     pl = subprocess.Popen([DCH, "--follow", "fa"], env=senv,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                           stdin=subprocess.DEVNULL)
     pr = subprocess.Popen([DCH] + H + ["--follow", "srv:fb"], env=cenv,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                           stdin=subprocess.DEVNULL)
+    time.sleep(1.5)
+    open(go, "w").close()
     lo, le = pl.communicate(timeout=20)
     ro, re_ = pr.communicate(timeout=20)
     mirror = dch(cenv, "--build").stdout.strip() == "full"
