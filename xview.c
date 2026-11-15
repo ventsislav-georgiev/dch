@@ -196,6 +196,7 @@ struct xv
 	char *selk;		/* Refs: the selected row's key, followed when
 				** the rows change */
 	char *sela;		/* Responses: the selected item's anchor, so */
+	char *selp;		/* Prompts: the same, its own (#358) */
 	int old;		/* Responses: no chapter with an answer field */
 	/* the card */
 	char *ckey, *ctext;
@@ -833,8 +834,6 @@ xv_snapshot(struct xv *v, const struct json_parser *p, int o)
 		for (t = a + 1; t < p->tok[a].next; t = p->tok[t].next)
 			if (p->tok[t].kind == JSON_OBJECT)
 				xv_ref(v, p, t);
-	if (!v->have)
-		v->sel[0] = v->nch - 1;	/* the newest chapter */
 	v->have = 1;
 }
 
@@ -2282,14 +2281,14 @@ xv_vis1(struct xv *v, int k)
 }
 
 /* The rows a list tab shows (Prompts, Responses, Refs): their indexes,
-** filtered. Responses: the newest first (#290). Refs: the refs on the
-** screen now first (#294), the index's own row when it holds the key, then
-** the rest, never one twice. */
+** filtered. Prompts, Responses: the newest first (#290, #358). Refs: the
+** refs on the screen now first (#294), the index's own row when it holds
+** the key, then the rest, never one twice. */
 static void
 xv_vis(struct xv *v)
 {
 	int k, j, n = v->tab == 1 ? v->nrf : v->nch;
-	const char *sk = v->tab == 1 ? v->selk : v->sela;
+	const char *sk = v->tab == 1 ? v->selk : v->tab ? v->sela : v->selp;
 
 	if (v->tab >= 4)
 	{
@@ -2319,7 +2318,7 @@ xv_vis(struct xv *v)
 	v->ngrp = v->nvis;
 	for (k = 0; k < n; k++)
 		if (v->tab != 1 || !v->rf[k].onscr)
-			xv_vis1(v, v->tab == 2 ? n - 1 - k : k);
+			xv_vis1(v, v->tab == 1 ? k : n - 1 - k);
 	if (v->tab == 1 && v->nvis - v->ngrp > 1)
 	{
 		xv_sort_rf = v->rf;
@@ -2328,9 +2327,9 @@ xv_vis(struct xv *v)
 	}
 	/* Refs: the selection stays on its ref while the rows change under
 	** it, the screen's each second; on the first row it stays there (the
-	** newest under it); a key gone keeps the index. Responses: on its
-	** prompt, as --follow re-sends them (#290) */
-	for (k = 0; v->tab && v->sel[v->tab] > 0 && sk && k < v->nvis; k++)
+	** newest under it); a key gone keeps the index. Prompts, Responses: on
+	** its prompt, as --follow re-sends them (#290, #358) */
+	for (k = 0; v->sel[v->tab] > 0 && sk && k < v->nvis; k++)
 		if (!strcmp(v->tab == 1 ? xv_rfat(v, v->vis[k])->key
 		            : v->ch[v->vis[k]].anchor, sk))
 		{
@@ -2339,12 +2338,12 @@ xv_vis(struct xv *v)
 		}
 }
 
-/* Refs, Responses: remember the selected row's key for xv_vis */
+/* Prompts, Refs, Responses: remember the selected row's key for xv_vis */
 static void
 xv_selk(struct xv *v)
 {
 	int s = v->sel[v->tab];
-	char **k = v->tab == 1 ? &v->selk : &v->sela;
+	char **k = v->tab == 1 ? &v->selk : v->tab ? &v->sela : &v->selp;
 
 	if (v->tab == 3)
 		return;	/* Search's hits change only with a new search */
@@ -3709,7 +3708,7 @@ xv_draw(struct xv *v, int force)
 		xv_clamp(&i, top, n + h1 + h2, win);
 		if (*top == i && *top && (*sel ? h2 && *sel == g : h1))
 			(*top)--;
-		if (v->tab == 1)
+		if (v->tab < 2)
 			xv_selk(v);
 		for (k = *top; k < *top + win; k++)
 		{
@@ -4077,16 +4076,17 @@ xv_key(struct xv *v, int c)
 	}
 	if (v->tab == 0 && c == 'n')
 	{
-		/* the selection stays on its chapter, or the next one shown;
-		** none shown before: the newest */
+		/* the selection stays on its chapter, or the next older one
+		** shown (newest first, #358); none shown before: the newest */
 		xv_vis(v);
 		k = v->sel[0] >= 0 && v->sel[0] < v->nvis ? v->vis[v->sel[0]]
 		    : v->nch;
 		v->allauto = !v->allauto;
 		xv_vis(v);
-		for (n = 0; n < v->nvis && v->vis[n] < k; n++)
+		for (n = 0; n < v->nvis && v->vis[n] > k; n++)
 			;
 		v->sel[0] = n;
+		xv_selk(v);
 		return 0;
 	}
 	if (v->tab == 2 && c == 'n')
@@ -4170,8 +4170,7 @@ xv_key(struct xv *v, int c)
 		}
 		break;
 	}
-	if (v->tab)
-		xv_selk(v);
+	xv_selk(v);
 	return 0;
 }
 
@@ -4224,6 +4223,7 @@ xv_free(struct xv *v)
 	free(v->sr);
 	free(v->selk);
 	free(v->sela);
+	free(v->selp);
 	free(v->cses);
 	free(v->rans);
 	free(v->rsnip);

@@ -1194,7 +1194,12 @@ def test_auto():
               "n auto rows 3 hidden" in text, text)
         check("Prompts: o is offered only for a live session (none here)",
               "open session" not in text, text)
-        v.key(b"k", 0.3)  # the newest is selected; up to the first prompt
+        sel = [r for r in text.split("\n") if r.startswith("\u258c")]
+        check("#358: Prompts newest first, the newest selected on the first "
+              "row", sel and "deploy it" in sel[0] and
+              text.find("deploy it") < text.find("fix the login bug"),
+              (sel, text))
+        v.key(b"j", 0.3)  # #358: down to the oldest prompt
         mark = len(v.out)
         v.key(b"n", 1.0)
         text = screen(v, mark)
@@ -1206,7 +1211,7 @@ def test_auto():
         check("Prompts: shown, an auto chapter is faint, a prompt is not",
               re.search(rb"\033\[0;2m[^\033]*Build finished: 3 passed",
                         v.out[mark:]) and
-              re.search(rb"\033\[0m[^\033]*deploy it", v.out[mark:]),
+              re.search(rb"\033\[0m[^\033]*deploy it", v.out),
               v.out[mark:][-800:])
         text = screen(v, 0)  # the rows n left as they were too
         check("Prompts: n shown, the footer says n hides them, the tab "
@@ -1216,7 +1221,7 @@ def test_auto():
         check("Prompts: n keeps the selection on its chapter",
               sel and "fix the login bug" in sel[0], (sel, text))
         mark = len(v.out)
-        v.key(b"j", 0.3)
+        v.key(b"k", 0.3)  # #358: the auto row after it is above it
         v.key(b"\r", 1.0)
         check("Prompts: Enter on a shown auto chapter reads it",
               v.wait(b"reply 1", start=mark), v.out[mark:])
@@ -1316,7 +1321,7 @@ def test_gone():
         f.write(json.dumps(rec) + "\n")
     full = gone_lines(["the first ask", "the second ask"])
     for what, keys in (("Enter on it", [b"\r"]),
-                       ("] to it", [b"k", b"\r", b"]"])):
+                       ("] to it", [b"j", b"\r", b"]"])):
         with open(tr, "w") as f:
             f.write(full)
         v = Pty([DCH, "--xray", "xv-gn"])
@@ -1380,8 +1385,8 @@ def test_compact():
               "= Conversation compacted" in text and
               re.search(rb"\033\[0;2m[^\033]*Conversation compacted",
                         v.out[mark:]), v.out[mark:][-800:])
-        v.key(b"k", 0.3)  # the newest is selected; up past the notification
-        v.key(b"k", 0.3)
+        v.key(b"j", 0.3)  # #358: the newest on top; down past the notification
+        v.key(b"j", 0.3)
         mark = len(v.out)
         v.key(b"\r", 1.0)
         check("Prompts: Enter on a shown compaction reads its summary",
@@ -1712,6 +1717,59 @@ def test_responses_live():
             h == "fourth prompt" for h, b in items(rows(v.out))))[1], 10)
         check("Responses, live: the first item selected stays the first",
               ok and "fourth prompt" in head(v), head(v))
+        # #358: Prompts the way Responses works, live
+        v.key(b"\033[Z")
+        ok = tabbar(v, "[Prompts") and until(
+            lambda: (v.pump(0.1), "fourth prompt" in head(v))[1], 5)
+        text = screen(v, 0)
+        at = [text.find(x) for x in ("fourth prompt", "third prompt",
+                                     "second, running", "first live prompt")]
+        check("#358: Prompts, live: newest first, the newest selected",
+              ok and -1 not in at and at == sorted(at), (head(v), text))
+        v.key(b"j", 0.5)
+        add(*turn("fifth prompt", "2026-11-10T14:00:00Z", say("answer 5")))
+        ok = until(lambda: (v.pump(0.1), "fifth prompt" in screen(v, 0))[1],
+                   10)
+        check("#358: Prompts, live: a new prompt shows on top without a key, "
+              "the selection stays on its prompt", ok and "third prompt" in
+              head(v), (head(v), screen(v, 0)))
+        v.key(b"g", 0.5)
+        add(*turn("sixth prompt", "2026-11-10T15:00:00Z", say("answer 6")))
+        ok = until(lambda: (v.pump(0.1), "sixth prompt" in head(v))[1], 10)
+        check("#358: Prompts, live: the first row selected stays the first",
+              ok, head(v))
+        mark = len(v.out)
+        v.key(b"\r")
+        check("#358: Prompts: Enter opens the prompt under the cursor",
+              v.wait(b"answer 6", start=mark), screen(v, mark))
+        v.key(b"q")
+        ok = until(lambda: (v.pump(0.1), "[Prompts" in rows(v.out).get(
+            2, "") and "sixth prompt" in head(v))[1], 5)
+        check("#358: Prompts: q from the reader back on its row", ok,
+              head(v))
+        v.key(b"\t")
+        ok = until(lambda: (v.pump(0.1), items(rows(v.out))[:1] and
+                            items(rows(v.out))[0][0] == "sixth prompt")[1],
+                   5)
+        check("#358: Responses, live: the turn added while on Prompts is "
+              "the first item", ok, items(rows(v.out)))
+        v.key(b"q")
+        v.exit()
+    finally:
+        v.close()
+    # #358, the jump: over the head and tail range (lowered), --follow sends
+    # the capped index's snapshot, then the whole file's after a reset
+    # (full); the cursor kept the first one's last index, mid-list
+    v = Pty([DCH, "--xray", "xv-lv"], rows=40, cols=100,
+            env={"DCH_XRAY_CAPS": "0:0:0:300:700"})
+    try:
+        ok = tabbar(v, "Prompts 6", 15) and until(
+            lambda: (v.pump(0.1), "sixth prompt" in head(v))[1], 5)
+        text = screen(v, 0)
+        check("#358: Prompts after a capped then a full snapshot: the newest "
+              "still selected, on the first row", ok and
+              0 <= text.find("sixth prompt") < text.find("fifth prompt"),
+              (head(v), text))
         v.key(b"q")
         v.exit()
     finally:

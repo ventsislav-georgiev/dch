@@ -919,7 +919,10 @@ The view has four tabs, three for a shell session (no Responses), a
 fifth, Tasks, when the session keeps a task list, and a sixth, Memory, when
 it has memories or instruction files:
 - **Prompts** (**Commands** for a shell session): one row per thing you
-  typed, a prompt to Claude or Codex, a command to a shell. `/` filters.
+  typed, a prompt to Claude or Codex, a command to a shell, newest first.
+  It opens on the newest, at the top. A new prompt shows on top as you
+  type it; the selection stays on the first row there, or on its prompt
+  once you moved down, as on Responses. `/` filters.
   `Enter` opens the prompt read-only with everything up to the next one
   (prompt, replies, tool calls, output), scrollable.
   The reader reads on: its header says which prompt it is on (`3 of 12`,
@@ -927,8 +930,8 @@ it has memories or instruction files:
   top) first says on the status line which prompt comes next (or before),
   e.g. "end; again for the next prompt (4 of 12): title"; the same
   direction again opens it, the next one at its top, the previous
-  one at its end. `]` and `[` open the next and the previous prompt at its
-  top. Both follow the list's order and skip the auto rows while `n` hides
+  one at its end. `]` and `[` open the next (newer) and the previous
+  (older) prompt at its top. Both follow the session's order and skip the auto rows while `n` hides
   them (a `/` filter does not narrow them). `q`, `Esc` or `←` goes back to
   where the reader was opened, the list row or the card, however many
   prompts it moved. On a remote view each move is one more `--chapter`

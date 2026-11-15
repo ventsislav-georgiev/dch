@@ -204,7 +204,7 @@ def test_list():
         check("open: Prompts (#295) counts the three shown",
               wait(v, lambda s: "Prompts 3" in s and "last prompt" in s),
               screen(v)[-600:])
-        v.key(b"k")
+        v.key(b"j")  # #358: newest first, down to the middle
         check("the selection on the middle chapter",
               wait(v, lambda s: selected(v, "middle prompt")), screen(v))
         ok = press(v, b"\r", lambda s: at(3, "middle prompt about PROJ-9")(s)
