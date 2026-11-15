@@ -426,6 +426,7 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "a stopped master with a full backlog hangs no verb (#265)" stuck_master_test.py
     pyrun "master self-heals a deleted socket" socket_heal_test.py
     pyrun "native agent bridge public CLI and wire protocol" agent_bridge_test.py
+    pyrun "native agent bridge: the hung queue dropped at its deadline" agent_bridge_more_test.py
     pyrun "shared Codex daemon never binds or names a session; --no-daemon" codex_daemon_test.py
 fi
 
@@ -483,7 +484,9 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "--follow streams whole frames on change, read-only" follow_test.py
     pyrun "respawn keeps the session across a child exit" respawn_test.py
     pyrun "--restart --include-agents restarts stale Claude agents" agent_restart_test.py
+    pyrun "--restart --include-agents: stalled master to self-restart" agent_restart_more_test.py
     pyrun "--history/--revive bring dead sessions back" revive_test.py
+    pyrun "--history/--revive, prune to --json" revive_more_test.py
     pyrun "--revive never starts two claudes on one id" revive_sid_test.py
     pyrun "claude's one-shot prompt is never sent again (#138)" oneshot_prompt_test.py
     pyrun "--pin/--unpin/--forget keep and clean history" history_pin_test.py
@@ -507,6 +510,7 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     if [ "$(uname)" = Darwin ] && nobudget "--stop pauses Claude, ends the session as stopped"; then :
     else
         pyrun "--stop pauses Claude, ends the session as stopped" stop_test.py
+        pyrun "--stop: a quiet master after /exit, Ctrl-C twice at exiting" stop_more_test.py
     fi
     pyrun "-k/--stop signal exactly the session's master" kill_test.py
     pyrun "attached client exits cleanly on SIGHUP/SIGTERM" hangup_test.py
@@ -516,6 +520,7 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "dch serve: remote frames goldens, peer gate, startup refusals" serve_test.py
     pyrun "dch serve: the ctl grace, a stalled reader, 16 peers that never read (#124, #201)" serve_timing_test.py
     pyrun "remote hosts: -ls, --remote, -a host:name, hostile peers" remote_client_test.py
+    pyrun "remote hosts: dark hosts, stalled readers, hostile lines (#180)" remote_client_more_test.py
     pyrun "remote history: --history --remote, picker History rows, --ls-json cwd" remote_history_test.py
     pyrun "--ls-json --remote --follow: the list as a stream, watch and polled hosts" ls_follow_test.py
     pyrun "the Windows client's checks, against this dch" windows_client_test.py
