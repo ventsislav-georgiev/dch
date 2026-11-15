@@ -19,7 +19,9 @@ reads. The test's terminal answers all four, as a terminal would.
       unknown type (0x36, empty and with a body), a 0x35 with a body and a
       0x07 with no 0x35 before it change nothing (the terminal is asked); a
       flood of 0x35 makes the master answer, the stream stays up (a key
-      reaches the program) and a 0x07 ends it.
+      reaches the program) and a 0x07 ends it; an attach and a 0x35 in
+      one write: the host's dch client lives and the master answers (QA
+      1.67.0 LOW-A5).
 dch-lite has no mirror: under the view nothing answers, as locally.
 Old peers: DCH_HOST=<dch> runs serve and the host's sessions from another
 binary, DCH_OLD=host or DCH_OLD=client says which side is the old one (then
@@ -398,6 +400,33 @@ def test_wire(port, mirror):
         check("(w) the 0x07 after them: the terminal is asked again",
               r.term.asked(mark) == list(OUTER) and got == ANSWERS,
               (r.term.asked(mark), got))
+    finally:
+        r.close()
+
+    # QA 1.67.0 LOW-A5: the 0x35 in the attach's own write reaches the kid
+    # before its handler. It must not kill it, and the view-up must not be
+    # lost: rounds until the master answers (the base never does).
+    r = Raw(port)
+    try:
+        r.s.sendall(frame(0x01, {"name": "rvq-w", "cols": 80, "rows": 24}) +
+                    frame(0x35))
+        until(lambda: (r.pump(0.1), ready in r.term.seen or
+                       None in r.frames)[1], 15)
+        old, i, end = OLD == "host", 5, time.time() + 40
+        mark, got = len(r.term.seen), None
+        while None not in r.frames and time.time() < end:
+            mark = len(r.term.seen)
+            got = ask(d, i, r.pump)
+            i += 1
+            if old or (r.term.asked(mark) == [] and got == mirror):
+                break
+        check("(w) an attach and a 0x35 in one write: the host's dch client "
+              "lives, %s" % ("an old host ignores it, the terminal is asked"
+                             if old else "the host's master answers"),
+              None not in r.frames and 0x12 not in r.frames and
+              ((r.term.asked(mark) == list(OUTER) and got == ANSWERS) if old
+               else (r.term.asked(mark) == [] and got == mirror)),
+              (r.term.asked(mark), got, r.frames[-5:]))
     finally:
         r.close()
 

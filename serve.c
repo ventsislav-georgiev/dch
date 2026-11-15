@@ -776,6 +776,7 @@ struct conn
 	int kid_status, kid_done, pty_eof;
 	int attached, cols, rows;
 	int viewing;		/* a 0x35 signalled the kid, no 0x07 since */
+	int kid_out, view_due;	/* the kid wrote; a 0x35 waits for that */
 	long long jiggle_at;
 	char name[NAME_CAP + 1];	/* "" after a create dch named */
 	int watching;
@@ -1092,10 +1093,6 @@ on_attach(struct conn *c, int create, const unsigned char *p, size_t n)
 		const char *home = getenv("HOME");
 
 		exec_prep();
-		/* a 0x35's SIGXFSZ before the client sets its handler: dropped,
-		** not a kill (every dch ignores it; the master's program gets
-		** it back at default) */
-		signal(SIGXFSZ, SIG_IGN);
 		setenv("TERM", "xterm-256color", 1);
 		if (!home || chdir(home) < 0)
 			(void)!chdir("/");
@@ -1822,7 +1819,12 @@ on_frame(struct conn *c, unsigned int type, const unsigned char *p,
 		if (!n && c->kid > 0 && !c->kid_done && !c->viewing)
 		{
 			c->viewing = 1;
-			kill(c->kid, SIGXFSZ);
+			/* its handler is set before it writes (attach.c), so
+			** until then pty_read sends it (QA 1.67.0 LOW-A5) */
+			if (c->kid_out)
+				kill(c->kid, SIGXFSZ);
+			else
+				c->view_due = 1;
 		}
 		return;
 	}
@@ -1896,7 +1898,7 @@ on_frame(struct conn *c, unsigned int type, const unsigned char *p,
 		** mouse, 1049, kitty flags) that the remote X-ray view reset */
 		if (c->kid > 0 && !c->kid_done)
 			kill(c->kid, SIGURG);
-		c->viewing = 0;
+		c->viewing = c->view_due = 0;
 		break;
 	default:
 		break;
@@ -2007,6 +2009,10 @@ pty_read(struct conn *c, size_t budget)
 
 		if (r > 0)
 		{
+			c->kid_out = 1;
+			if (c->view_due && !c->kid_done)
+				kill(c->kid, SIGXFSZ);
+			c->view_due = 0;
 			out_frame(c, 0x10, buf, (size_t)r);
 			budget = (size_t)r < budget ? budget - (size_t)r : 0;
 		}
@@ -2821,6 +2827,11 @@ serve_main(int argc, char **argv)
 	memset(&act, 0, sizeof act);
 	act.sa_handler = SIG_IGN;
 	sigaction(SIGPIPE, &act, NULL);
+	/* before any fork (QA 1.67.0 LOW-A5): a 0x35's SIGXFSZ that reaches
+	** the attach kid before its handler is ignored, never a kill; exec
+	** keeps SIG_IGN, every dch ignores it anyway and the master gives its
+	** program the default back (master.c) */
+	sigaction(SIGXFSZ, &act, NULL);
 	act.sa_handler = on_signal;	/* no SA_RESTART: poll wakes */
 	sigemptyset(&act.sa_mask);
 	sigaction(SIGINT, &act, NULL);
