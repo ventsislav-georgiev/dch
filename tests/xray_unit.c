@@ -2977,6 +2977,30 @@ ch_buf(const struct xr_entries *e)
 	return e->buf ? e->buf : "";
 }
 
+/* the byte offset line k of l starts at: begin()'s OFF sums strlen + 1 */
+static long long
+ch_off(const char *const *l, int k)
+{
+	long long o = 0;
+
+	while (k-- > 0)
+		o += (long long)strlen(*l++) + 1;
+	return o;
+}
+
+/* the entries buffer equals fmt with its %lld offsets filled in */
+static int
+ch_is(const struct xr_entries *e, const char *fmt, ...)
+{
+	char x[4096];
+	va_list ap;
+
+	va_start(ap, fmt);
+	vsnprintf(x, sizeof x, fmt, ap);
+	va_end(ap);
+	return !strcmp(ch_buf(e), x);
+}
+
 static void
 t_chapter(void)
 {
@@ -3027,30 +3051,35 @@ t_chapter(void)
 	ch_run(L, (int)(sizeof L / sizeof *L), a1, 1 << 20, &c, &e);
 	CHECK("chapter: the first: its prompt, its call, its text, and the "
 	      "result paired back from the next chapter",
-	      e.hit && e.ord == 0 && !strcmp(ch_buf(&e),
-	      "{\"role\":\"user\",\"tool\":null,\"text\":\"first\",\"error\":false},"
-	      "{\"role\":\"tool\",\"tool\":\"Bash\",\"text\":\"ls\",\"error\":false},"
+	      e.hit && e.ord == 0 && ch_is(&e,
+	      "{\"role\":\"user\",\"tool\":null,\"text\":\"first\",\"error\":false,"
+	      "\"offset\":%lld},"
+	      "{\"role\":\"tool\",\"tool\":\"Bash\",\"text\":\"ls\",\"error\":false,"
+	      "\"offset\":%lld},"
 	      "{\"role\":\"assistant\",\"tool\":null,\"text\":\"one\","
-	      "\"error\":false},"
+	      "\"error\":false,\"offset\":%lld},"
 	      "{\"role\":\"output\",\"tool\":\"Bash\",\"text\":\"late\","
-	      "\"error\":false}"));
+	      "\"error\":false,\"offset\":%lld}",
+	      ch_off(L, 0), ch_off(L, 1), ch_off(L, 2), ch_off(L, 4)));
 	xr_chapters_free(&c);
 	xr_entries_free(&e);
 
 	ch_run(L, (int)(sizeof L / sizeof *L), a2, 1 << 20, &c, &e);
 	CHECK("chapter: the second: a quiet tool's error is none, an orphan "
 	      "is tool null, a card is its sorted keys, no subagent text",
-	      e.hit && e.ord == 1 && !strcmp(ch_buf(&e),
+	      e.hit && e.ord == 1 && ch_is(&e,
 	      "{\"role\":\"user\",\"tool\":null,\"text\":\"second\","
-	      "\"error\":false},"
+	      "\"error\":false,\"offset\":%lld},"
 	      "{\"role\":\"tool\",\"tool\":\"Grep\",\"text\":\"pattern: x\","
-	      "\"error\":false},"
+	      "\"error\":false,\"offset\":%lld},"
 	      "{\"role\":\"output\",\"tool\":\"Grep\",\"text\":\"none\","
-	      "\"error\":false},"
+	      "\"error\":false,\"offset\":%lld},"
 	      "{\"role\":\"output\",\"tool\":null,\"text\":\"orphan\","
-	      "\"error\":true},"
+	      "\"error\":true,\"offset\":%lld},"
 	      "{\"role\":\"tool\",\"tool\":\"Foo\",\"text\":\"a: {\\\"x\\\":1}\\n"
-	      "b: 2\",\"error\":false}"));
+	      "b: 2\",\"error\":false,\"offset\":%lld}",
+	      ch_off(L, 3), ch_off(L, 5), ch_off(L, 6), ch_off(L, 7),
+	      ch_off(L, 8)));
 	CHECK("chapter: the second's anchor is the index's",
 	      c.n == 3 && !strcmp(xr_chapter_at(&c, 1)->anchor, a2));
 	xr_chapters_free(&c);
@@ -3063,8 +3092,9 @@ t_chapter(void)
 	xr_entries_free(&e);
 	ch_run(L, (int)(sizeof L / sizeof *L), a1, 1 << 20, &c, &e);
 	CHECK("chapter: a slash command is /name args", e.hit &&
-	      !strcmp(ch_buf(&e), "{\"role\":\"user\",\"tool\":null,\"text\":"
-	              "\"/clear all\",\"error\":false}"));
+	      ch_is(&e, "{\"role\":\"user\",\"tool\":null,\"text\":"
+	            "\"/clear all\",\"error\":false,\"offset\":%lld}",
+	            ch_off(L, 10)));
 	xr_chapters_free(&c);
 	xr_entries_free(&e);
 	snprintf(a1, sizeof a1, "%s", "fabc:0");
@@ -3089,8 +3119,9 @@ t_chapter(void)
 	       &c, &e);
 	CHECK("chapter: a small cap keeps whole entries only, truncated",
 	      e.hit && e.truncated && e.len <= e.cap && e.cap == 100 &&
-	      !strcmp(ch_buf(&e), "{\"role\":\"user\",\"tool\":null,\"text\":"
-	              "\"first\",\"error\":false}"));
+	      ch_is(&e, "{\"role\":\"user\",\"tool\":null,\"text\":"
+	            "\"first\",\"error\":false,\"offset\":%lld}",
+	            ch_off(L, 0)));
 	xr_chapters_free(&c);
 	xr_entries_free(&e);
 
@@ -3108,7 +3139,7 @@ t_chapter(void)
 	      "\"session_id\":\"id\",\"anchor\":\"fabc:0\",\"title\":"
 	      "\"hi \\u0007\",\"at\":null,\"kind\":\"prompt\",\"entries\":["
 	      "{\"role\":\"user\",\"tool\":null,\"text\":\"hi \\u0007\","
-	      "\"error\":false}],\"truncated\":false}\n"));
+	      "\"error\":false,\"offset\":0}],\"truncated\":false}\n"));
 	free(mb);
 	xr_chapters_free(&c);
 	xr_entries_free(&e);
@@ -3220,37 +3251,41 @@ t_codex_chapter(void)
 		else if (i == 1)
 			CHECK("codex chapter: the turn, its calls, their outputs by "
 			      "call_id, the text",
-			      e.hit && e.ord == 0 && !strcmp(ch_buf(&e),
+			      e.hit && e.ord == 0 && ch_is(&e,
 			      "{\"role\":\"user\",\"tool\":null,\"text\":\"go\","
-			      "\"error\":false},"
+			      "\"error\":false,\"offset\":%lld},"
 			      "{\"role\":\"tool\",\"tool\":\"exec_command\",\"text\":"
-			      "\"cmd: ls\",\"error\":false},"
+			      "\"cmd: ls\",\"error\":false,\"offset\":%lld},"
 			      "{\"role\":\"tool\",\"tool\":null,\"text\":\"command: "
-			      "[\\\"ls\\\"]\\ntype: exec\",\"error\":false},"
+			      "[\\\"ls\\\"]\\ntype: exec\",\"error\":false,\"offset\":%lld},"
 			      "{\"role\":\"tool\",\"tool\":\"exec\",\"text\":\"make\","
-			      "\"error\":false},"
+			      "\"error\":false,\"offset\":%lld},"
 			      "{\"role\":\"output\",\"tool\":\"exec_command\",\"text\":"
-			      "\"out1\",\"error\":false},"
+			      "\"out1\",\"error\":false,\"offset\":%lld},"
 			      "{\"role\":\"output\",\"tool\":\"exec\",\"text\":\"out3\","
-			      "\"error\":false},"
+			      "\"error\":false,\"offset\":%lld},"
 			      "{\"role\":\"output\",\"tool\":null,\"text\":\"orphan\","
-			      "\"error\":false},"
+			      "\"error\":false,\"offset\":%lld},"
 			      "{\"role\":\"tool\",\"tool\":\"f\",\"text\":\"not json\","
-			      "\"error\":false},"
+			      "\"error\":false,\"offset\":%lld},"
 			      "{\"role\":\"assistant\",\"tool\":null,\"text\":\"ok\","
-			      "\"error\":false}"));
+			      "\"error\":false,\"offset\":%lld}",
+			      ch_off(L, 0), ch_off(L, 1), ch_off(L, 2), ch_off(L, 3),
+			      ch_off(L, 5), ch_off(L, 6), ch_off(L, 7), ch_off(L, 8),
+			      ch_off(L, 9)));
 		else if (i == 2)
 			CHECK("codex chapter: the compaction, its summary",
-			      e.hit && e.ord == 1 && !strcmp(ch_buf(&e),
+			      e.hit && e.ord == 1 && ch_is(&e,
 			      "{\"role\":\"user\",\"tool\":null,\"text\":\"sum\","
-			      "\"error\":false}"));
+			      "\"error\":false,\"offset\":%lld}", ch_off(L, 10)));
 		else
 			CHECK("codex chapter: the next turn, its own entries only",
-			      e.hit && e.ord == 2 && !strcmp(ch_buf(&e),
+			      e.hit && e.ord == 2 && ch_is(&e,
 			      "{\"role\":\"user\",\"tool\":null,\"text\":\"next\","
-			      "\"error\":false},"
+			      "\"error\":false,\"offset\":%lld},"
 			      "{\"role\":\"assistant\",\"tool\":null,\"text\":\"two\","
-			      "\"error\":false}"));
+			      "\"error\":false,\"offset\":%lld}",
+			      ch_off(L, 11), ch_off(L, 12)));
 		xr_chapters_free(&c);
 		xr_entries_free(&e);
 	}
