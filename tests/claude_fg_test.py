@@ -303,7 +303,9 @@ def main():
         # LOW-CW5: a pipeline in front whose leader has exited (`grep … |
         # less` once grep is done): 1.67.0 read the group's id as a pid
         bash = int(ps(fpid, "ppid"))
-        send("true | cat")
+        # cat reads the terminal, not the pipe (a plain cat would end with
+        # its leader); the leader lives a moment so bash can group cat with it
+        send("sleep 1 | cat /dev/tty")
 
         def pipe_pgid():
             for l in subprocess.run(["ps", "-A", "-o", "pid=,ppid=,pgid=,comm="],
@@ -323,10 +325,11 @@ def main():
             except (OSError, TypeError):
                 pass
             return False
-        until(leader_gone, 10)
+        check("suspended, `sleep 1 | cat /dev/tty` in front: cat's group has "
+              "lost its leader", until(leader_gone, 15))
         r = run("--run", n, "PIPE-%s" % TAG)
-        check("suspended, `true | cat` in front: --run types the burst into "
-              "cat", r.returncode == 0 and
+        check("suspended, `sleep 1 | cat /dev/tty` in front: --run types the "
+              "burst into cat", r.returncode == 0 and
               (lite or until(lambda: screen().count("PIPE-" + TAG) >= 2, 5)))
         run("--send", n, "\x04")         # cat ends: bash's prompt again
         until(lambda: lite or screen().rstrip().endswith("$"), 10)
