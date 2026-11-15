@@ -4491,7 +4491,9 @@ xr_scan_tick(void *ctx, uint64_t bytes)
 	long long now = xr_now_ms();
 
 	x->bytes = x->base + bytes;
-	if (!x->stop && x->found)
+	/* this session's first hit (#379): its window is read to its end, so
+	** the answer keeps that window's newest mentions, not its oldest */
+	if (!x->stop && x->found && !(x->hold && !x->other))
 	{
 		if (!x->shell)	/* a shell's: its row ends the scan (sc_hit) */
 		{

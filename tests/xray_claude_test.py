@@ -784,9 +784,10 @@ def test_latest():
                 "--json", env=caps)
         ls = ref_lines(r.stdout) or [{}]
         men = [l["mention"]["offset"] for l in ls if "mention" in l]
-        check("latest: light --scope session stops at the newest window's "
-              "first mention, why first",
-              r.returncode == 0 and men == [last - len(ask)] and
+        check("latest: light --scope session stops after the newest "
+              "window that holds a mention, with all its mentions (#379), "
+              "why first",
+              r.returncode == 0 and men == [last - len(ask), last] and
               ls[-1]["partial"] and ls[-1]["why"] == "first",
               (r.returncode, ls[-3:]))
         r = dch("--xray", "xr-latest", "--ref", "OQ-1", "--json", env=caps)
@@ -2971,6 +2972,38 @@ def test_light_377():
         os.unlink(tp)
 
 
+def test_light_379():
+    """#379: light --scope session stops at its first hit, but only once
+    that hit's window is read to its end, so it answers with the window's
+    newest mention, not its oldest (1.73.0: note 001 alone)."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-p379")
+    os.makedirs(pdir, exist_ok=True)
+    sid = "11111111-2222-4333-8444-555555555379"
+    tp = os.path.join(pdir, sid + ".jsonl")
+    with open(tp, "w") as f:
+        f.write(json.dumps({"type": "user", "cwd": "/home/demo/p379",
+                            "message": {"content": "start"}}) + "\n")
+        for i in range(1, 51):
+            f.write(json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "note %03d about PROJ-79" % i}]}})
+                    + "\n")
+    history("xr-379", sid, cfg, "/home/demo/p379")
+    try:
+        r = dch("--xray", "xr-379", "--ref", "PROJ-79", "--scope", "session",
+                "--json")
+        ls = ref_lines(r.stdout) or [{}]
+        m = [l["mention"]["line"][5:8] for l in ls if "mention" in l]
+        check("379 scope session: the first hit's window is read to its "
+              "end, so note 050 (the newest) is there, why first",
+              r.returncode == 0 and
+              m == ["%03d" % i for i in range(1, 51)] and
+              ls[-1].get("why") == "first",
+              (r.returncode, m[:3], m[-3:], ls[-1:], r.stderr[-300:]))
+    finally:
+        os.unlink(tp)
+
+
 def main():
     try:
         test_names()
@@ -2999,6 +3032,7 @@ def main():
         test_prefilter_reach()
         test_ref_middle()
         test_light_377()
+        test_light_379()
     finally:
         shutil.rmtree(T, ignore_errors=True)
     if fails[0]:
