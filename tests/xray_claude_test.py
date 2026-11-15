@@ -2064,6 +2064,59 @@ def test_peer():
         os.unlink(tp)
 
 
+def test_handback_search():
+    """#382: --search reads a hand-back's text as the reader shows it: the
+    report when there is one, else the body without "[Subagent hand-back]"
+    and the blank after it, which is the reader's text too."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, RSID + ".jsonl")
+
+    def hb(origin):
+        origin.update(kind="peer", handback=True, name="worker-b")
+        return {"type": "user", "cwd": "/home/demo/proj", "isMeta": True,
+                "message": {"content": "wrapped"}, "origin": origin}
+    a = {"type": "assistant", "message": {"content": [
+        {"type": "text", "text": "ok"}]}}
+    recs = [{"type": "user", "cwd": "/home/demo/proj",
+             "message": {"content": "start"}}, a,
+            hb({"body": "[Subagent hand-back] body-only delta",
+                "handbackReportText": "report-only echo\nmore"}), a,
+            hb({"body": "[Subagent hand-back] REPORT plugh\nline2"}), a]
+    with open(tp, "w") as f:
+        for o in recs:
+            f.write(json.dumps(o) + "\n")
+    history("xr-hb", RSID, cfg)
+    try:
+        rc, o, err = xray("xr-hb", "--json")
+        ch = (o or {}).get("chapters", [])
+        check("handback: three chapters", rc == 0 and len(ch) == 3,
+              (rc, ch, err))
+        if len(ch) == 3:
+            rc, s, err = search("xr-hb", "echo")
+            check("handback: --search finds a word of the report alone",
+                  rc == 0 and s and
+                  [(h["chapter"], h["snippet"]) for h in s["hits"]] ==
+                  [(ch[1]["anchor"], "report-only echo more")], (rc, s, err))
+            rc, s, err = search("xr-hb", "Subagent hand-back")
+            check("handback: --search never finds the wrapper",
+                  rc == 0 and s and s["hits"] == [], (rc, s, err))
+            rc, s, err = search("xr-hb", "plugh")
+            check("handback: a body's snippet has no wrapper",
+                  rc == 0 and s and
+                  [h["snippet"] for h in s["hits"]] == ["REPORT plugh line2"],
+                  (rc, s, err))
+            rc2, c, err2, raw = chapter("xr-hb", ch[2]["anchor"])
+            check("handback: no report: the reader's text has no leading "
+                  "blank",
+                  rc2 == 0 and c and
+                  c["entries"][:1] == [ent("user", "REPORT plugh\nline2")],
+                  (rc2, raw[:400], err2))
+    finally:
+        os.unlink(tp)
+
+
 def test_responses():
     """#296: each chapter's response (the last assistant text after the
     last tool result) with its record's offset and the tool line, in --json
@@ -3024,6 +3077,7 @@ def main():
         test_follow_history()
         test_auto()
         test_peer()
+        test_handback_search()
         test_responses()
         test_scope()
         test_light_anchors()
