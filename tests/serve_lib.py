@@ -10,20 +10,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
 RUNPY = os.path.join(HERE, "remote-frames", "golden", "run.py")
 
-# Builtins only, no fork: serve gives each call 3 s (TS_MS), and under load
-# a slower fake turns into a whois_failed refusal cached 30 s (#246). The
-# fallback of tests/fake_tailscale.c, which keeps the same contract (#277).
-FAKE_TS = """#!/bin/sh
-d=${0%/*}
-echo "$1 ${DCH_SERVE_TEST_LOOPBACK:-unset}" >> "$d/calls"
-case "$1" in
-status) f=status.json ;; whois) f=whois.json ;; ip) f=ip.txt ;; *) exit 1 ;;
-esac
-[ -f "$d/$f" ] || exit 1
-while IFS= read -r l; do printf '%s\\n' "$l"; done < "$d/$f"
-printf '%s' "$l"
-"""
-
 # Headscale-shaped: status Self.ID is the host's StableNodeID, digits in a
 # string; whois Node.ID is an int64 and Node.StableID the StableNodeID string.
 # SAAS_* are tailscale.com-shaped: the StableNodeID is "n...CNTRL".
@@ -66,19 +52,19 @@ def whois(uid, login="me@example.com", tags=(), node="2002", nid=2002):
 def fake_ts(fake):
     """fake/tailscale: tests/fake_tailscale.c compiled, one exec per call and
     no shell start (#277): serve gives each call 3 s, and a slow whois is a
-    refused connection (#378). The shell FAKE_TS only when no compiler builds
-    it."""
+    refused connection (#378).
+    A failed build raises (#388), no fallback."""
     p = os.path.join(fake, "tailscale")
-    try:
-        built = subprocess.call(os.environ.get("CC", "cc").split() + [
-            "-O1", "-o", p, os.path.join(HERE, "fake_tailscale.c")]) == 0
-    except OSError:
-        built = False
-    if not built:
-        print("  note: tests/fake_tailscale.c did not build, the shell fake")
-        with open(p, "w") as f:
-            f.write(FAKE_TS)
-        os.chmod(p, 0o755)
+    r = subprocess.run(os.environ.get("CC", "cc").split() + [
+        "-O1", "-Wall", "-Wextra", "-Wformat=2", "-Wshadow",
+        "-Wpointer-arith", "-Wcast-qual", "-Wstrict-prototypes",
+        "-Wmissing-prototypes", "-Wundef", "-Wvla", "-Wnull-dereference",
+        "-Wimplicit-fallthrough", "-Werror", "-o", p,
+        os.path.join(HERE, "fake_tailscale.c")], capture_output=True,
+        text=True)
+    if r.returncode:
+        raise RuntimeError("tests/fake_tailscale.c did not build:\n"
+                           + r.stdout + r.stderr)
 
 
 NAMES = 'tmp fake home env benv procs fails whois_fail_ok slow_whois check put ts log_n serve stop calls run_fail text conn send recv_exact frame frame_not reply refused refusal sessions ctl1'.split()
