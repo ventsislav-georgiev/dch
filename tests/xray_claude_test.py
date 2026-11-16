@@ -3073,10 +3073,13 @@ def test_light_377():
         dt = time.time() - t0
         ls = ref_lines(r.stdout) or [{}]
         m = [l["mention"]["line"][5:8] for l in ls if "mention" in l]
+        # an ASan build (DCH_TEST_NO_BUDGET) reads the window slower: 4.0 s
+        # on a CI runner, where an uncut walk takes many times 1.73.0's 4 s
+        lim = 8 if os.environ.get("DCH_TEST_NO_BUDGET") else 2
         check("387 budget: the budget ends a 15.5 MiB cwd walk (%.2f s, "
-              "1.73.0 ~4 s); the newest window's notes still come, why "
-              "budget" % dt,
-              r.returncode == 0 and dt < 2 and m and m[-1] == "250" and
+              "under %d, 1.73.0 ~4 s); the newest window's notes still "
+              "come, why budget" % (dt, lim),
+              r.returncode == 0 and dt < lim and m and m[-1] == "250" and
               ls[-1].get("why") == "budget",
               (r.returncode, dt, m[:3], m[-3:], ls[-1:], r.stderr[-300:]))
     finally:
