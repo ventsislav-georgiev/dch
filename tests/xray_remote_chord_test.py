@@ -87,7 +87,10 @@ def rattach(env=None, extra=(), tail=("-a", "srv:xv-rx")):
     until(lambda: attaches() > n0)
     # the client reads keys once it put the terminal in raw mode (#249)
     until(lambda: not termios.tcgetattr(a.fd)[3] & termios.ICANON)
-    a.wait(b"READY", 3)
+    # its paint: READY on the first attach; a later one's redraw has
+    # scrolled READY off, its WINCH lines (from the earlier attaches) show
+    until(lambda: (a.pump(0.1), b"READY" in a.out or b"WINCH" in a.out)[1],
+          3)
     a.pump(0.5)
     return a, n0
 
@@ -370,7 +373,8 @@ def chord_fail(what, mode, line, close=False, anykey=b" "):
             except OSError:
                 pass
             h.sock.close()
-        a.pump(0.5)
+        # the client reads keys once it put the terminal in raw mode (#249)
+        until(lambda: not termios.tcgetattr(a.fd)[3] & termios.ICANON)
         mark = len(a.out)
         a.key(b"\x1cx", 0.5)
         check("remote chord, %s: the view opens with its line" % what,
@@ -382,8 +386,10 @@ def chord_fail(what, mode, line, close=False, anykey=b" "):
               a.reap() is None, a.out[mark:][-300:])
         for k in anykey if isinstance(anykey, list) else [anykey]:
             a.key(k, 0.3)
-        a.pump(0.2)
-        a.key(b"z", 0.3)
+        # back on the attach (its one redraw asked) before z: z is never
+        # part of the any key's read; a leak would come before it anyway
+        until(lambda: a.pump(0.05) or h.redraws >= 1, 5)
+        a.key(b"z", 0)
         until(lambda: h.keys == b"z", 5)
         check("remote chord, %s: a key goes back to the attach: the host got "
               "the redraw, then only the next key (no detach key, x or the "
