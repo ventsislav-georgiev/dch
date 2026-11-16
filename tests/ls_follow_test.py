@@ -320,12 +320,17 @@ def main():
         # --- 1. a watch host: dch serve ------------------------------------
         last = {}
 
+        # the followers' box (#340): beside 16 watch handlers, each running
+        # dch --ls-json every 2 s, a loaded ASan host answers a dial in
+        # over 5 s, inside the 10 s the 17th follower gets (#401)
+        renv = dict(cenv, DCH_REMOTE_BOX_MS="10000") if SLOW else cenv
+
         def ref():
             t0, n, m = time.time(), 0, len(open(log).read())
-            # each try waits up to cenv's box (ASan 5 s): room for 6 of them
+            # each try waits up to renv's box (ASan 10 s): room for 3 of them
             end = t0 + max(10, 3 * BUDGET)
             while True:
-                r = dch(cenv, "--ls-json", "--remote", "--hosts", hosts)
+                r = dch(renv, "--ls-json", "--remote", "--hosts", hosts)
                 n += 1
                 if '"stale":false' in r.stdout or time.time() > end:
                     # why it took this long, for a failure's detail
