@@ -966,9 +966,14 @@ it has memories or instruction files:
   the sender's name for a message from another Claude session (`🤖 prosper
   Scrollback answers for entry 895`), 📥 and the name for a subagent's
   hand-back, 🔔 for another auto row (a task notification). Your own
-  prompts carry no mark. `a` shows or hides the cross-session messages (hidden by
-  default; the choice is remembered for every X-ray view, in the file `xray-view`
-  (`hide_agents=0` or `1`) in dch's state directory), the tab counts leave them out, and the footer says how many;
+  prompts carry no mark. `a` shows or hides the cross-session messages
+  (hidden by default; the choice is remembered for every X-ray view, in
+  `$XDG_STATE_HOME/dch/xray-view`, `~/.local/state/dch/xray-view` when
+  `XDG_STATE_HOME` is unset or relative: one line, `hide_agents=0` or `1`;
+  anything else, or a file that is not a regular file, means hidden; dch
+  keeps the choice only while `dch/sessions` there is yours and not group
+  or other writable, else the footer says once that `a` is not
+  remembered), the tab counts leave them out, and the footer says how many;
   with `n` and `a` both off only your own prompts are left. A host whose dch
   predates `peer` sends none: no row is marked as an agent's and `a` hides
   nothing. `o`, here and in the reader, leaves the view (as `q` does)
@@ -2319,7 +2324,7 @@ later does nothing to a running session.
 | `DCH_REVIVE_MSG` | client | built in | The carry-on message `--revive` types ([Bringing sessions back](#bringing-sessions-back)). |
 | `DCH_LOGIN_ENV`, `DCH_LOGIN_ENV_MS` | client | on, `10000` | `--revive` takes your login shell's environment; `0` skips it. |
 | `DCH_DEBUG` | client and master | unset | A path: append a trace there; `1`: `/tmp/dch.<uid>.trace`. |
-| `XDG_STATE_HOME` | client and master | `~/.local/state` | Where [history records](#bringing-sessions-back) live. |
+| `XDG_STATE_HOME` | client and master | `~/.local/state` | Where [history records](#bringing-sessions-back) live, and the X-ray view's `a` choice (`dch/xray-view`). |
 | `CLAUDE_CONFIG_DIR`, `CODEX_HOME` | client | `~/.claude`, `~/.codex` | Where dch looks for Claude's and Codex's session records and titles. |
 | `NO_COLOR`, `TERM=dumb` | picker | unset | Draw the [picker](#the-session-picker) without color. |
 

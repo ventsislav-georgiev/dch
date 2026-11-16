@@ -194,7 +194,7 @@ struct xv
 	int allk, nk;		/* Refs: files, commits and URLs shown; their
 				** rows (#262) */
 	int allauto, nauto;	/* Chapters: auto chapters shown; their rows */
-	int hidepeer, npeer;	/* Prompts, Responses: cross-session rows
+	int hidepeer, npeer, peernote;	/* Prompts, Responses: cross-session rows
 				** hidden (a, #360); their rows */
 	long long rseq;
 	struct xv_kid kid[XV_NKIDS];
@@ -2793,12 +2793,19 @@ xv_draw_card(struct xv *v, int win)
 		pk_txt("  ");
 		if (d->cmd)	/* #405: the user's own command, marked so */
 		{
-			pk_txt(d->title);
+			/* the mark's room first: a long title or status is cut,
+			** the mark stays (LOW-AV5) */
+			int lim = pk_w - pk_cps(xv_dot()) -
+			          pk_cps("your define_command"),
+			    sw = d->status[0] ? 2 + pk_cps(d->status) : 0;
+
+			/* up to 16 cells of the status kept beside a long title */
+			pk_txtto(d->title, lim - (sw < 18 ? sw : 18));
 			pk_set("2");
-			if (d->status[0])
+			if (d->status[0] && pk_col + 2 < lim)
 			{
 				pk_txt("  ");
-				pk_txt(d->status);
+				pk_txtto(d->status, lim);
 			}
 			pk_txt(xv_dot());
 			pk_txt("your define_command");
@@ -4044,31 +4051,51 @@ xv_peerfile(char *out, size_t sz, int create)
 static int
 xv_peerload(void)
 {
-	char p[PATH_MAX], b[32] = "";
-	FILE *f;
+	char p[PATH_MAX], b[32];
+	struct stat st;
+	ssize_t n;
+	int fd;
 
-	if (xv_peerfile(p, sizeof p, 0) < 0 || !(f = fopen(p, "r")))
+	/* a FIFO or a symlink there is the default, not a hang (LOW-AV2) */
+	if (xv_peerfile(p, sizeof p, 0) < 0 ||
+	    (fd = open(p, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)) < 0)
 		return 1;
-	if (!fgets(b, sizeof b, f))
-		b[0] = '\0';
-	fclose(f);
-	return strcmp(b, "hide_agents=0\n") != 0;
+	n = fstat(fd, &st) == 0 && S_ISREG(st.st_mode)
+	    ? read(fd, b, sizeof b - 1) : -1;
+	close(fd);
+	if (n < 0)
+		return 1;
+	b[n] = '\0';
+	b[strcspn(b, "\n")] = '\0';	/* first line, CRLF too (LOW-AV3) */
+	n = (ssize_t)strlen(b);
+	if (n && b[n - 1] == '\r')
+		b[n - 1] = '\0';
+	return strcmp(b, "hide_agents=0") != 0;
 }
 
-static void
+/* 0 saved or a write error (dropped); -1 the state dir failed the owner /
+** no group-or-other-write check, so the choice is not kept (LOW-AV4). */
+static int
 xv_peersave(int hide)
 {
-	char p[PATH_MAX], t[PATH_MAX + 8];
-	FILE *f;
-	int bad;
+	char p[PATH_MAX] = "", t[PATH_MAX + 8], b[32];
+	int fd, n, ok;
 
-	if (xv_peerfile(p, sizeof p, 1) < 0 ||
-	    snprintf(t, sizeof t, "%s.%ld", p, (long)getpid()) >= (int)sizeof t ||
-	    !(f = fopen(t, "w")))
-		return;
-	bad = fprintf(f, "hide_agents=%d\n", hide) < 0;
-	if (fclose(f) != 0 || bad || rename(t, p) < 0)
+	if (xv_peerfile(p, sizeof p, 1) < 0)
+		return p[0] ? -1 : 0;
+	if (snprintf(t, sizeof t, "%s.%ld", p, (long)getpid()) >= (int)sizeof t)
+		return 0;
+	/* never through a planted symlink, 0600 as the other state files
+	** (LOW-AV1, NIT-AV7) */
+	unlink(t);
+	if ((fd = open(t, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+	               0600)) < 0)
+		return 0;
+	n = snprintf(b, sizeof b, "hide_agents=%d\n", hide);
+	ok = write(fd, b, (size_t)n) == n;
+	if (close(fd) != 0 || !ok || rename(t, p) < 0)
 		unlink(t);
+	return 0;
 }
 
 /* One key. 1: leave the view. */
@@ -4252,7 +4279,10 @@ xv_key(struct xv *v, int c)
 		else
 		{
 			v->hidepeer = !v->hidepeer;	/* #360 */
-			xv_peersave(v->hidepeer);
+			if (xv_peersave(v->hidepeer) < 0 && !v->peernote++)
+				snprintf(v->status, sizeof v->status, "a is not "
+				         "remembered: dch's state dir is not "
+				         "private (see README)");
 		}
 		xv_vis(v);
 		for (n = 0; n < v->nvis && v->vis[n] > k; n++)

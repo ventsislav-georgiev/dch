@@ -334,7 +334,36 @@ sys.exit(3)
 
 def main():
     run_steps(fixture, test_cli, test_written, test_card,
-              test_failed_after_rows)
+              test_failed_after_rows, test_card_width)
+
+
+def test_card_width():
+    """#413 (LOW-AV5): a title as wide as the row is cut, the status and
+    the "your define_command" mark stay on the card at every width."""
+    config(script("wide.py", "import json\nprint(json.dumps({'title': '"
+                  + "設" * 60 + "', 'status': 'open'}))\n"))
+    for cols in (24, 41, 80, 100):
+        v = Pty([DCH, "--xray", "xv-cl"], 30, cols)
+        try:
+            v.wait(b"Refs 3")
+            v.pump(0.3)
+            v.key(b"\033[Z\033[Z", 1.0)
+            mark = len(v.out)
+            v.key(b"\r", 1.0)
+            until(lambda: (v.pump(0.1),
+                           "your define_command" in screen(v, mark))[1], 10)
+            r = [x for x in rows(v.out[mark:]).values()
+                 if "your define_command" in x]
+            check("#413: %d cols: the mark on the card, the row in its "
+                  "width" % cols, r and r[-1].rstrip().endswith(
+                      "your define_command") and cells(r[-1].rstrip())
+                  <= cols, r)
+            if cols >= 41:
+                check("#413: %d cols: the wide title cut, the status kept"
+                      % cols, r and "設" in r[-1] and "open " in r[-1], r)
+            v.key(b"q")
+        finally:
+            v.close()
 
 
 if __name__ == "__main__":

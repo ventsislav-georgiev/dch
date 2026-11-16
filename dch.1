@@ -949,8 +949,16 @@ auto row; the user's own prompts have no mark;
 .B a
 shows or hides the cross-session messages (hidden by default; the choice is
 remembered for every X-ray view in the file
-.I xray-view
-(hide_agents=0 or 1) in dch's state directory), the tab counts leaving
+.IR $XDG_STATE_HOME/dch/xray-view ,
+.I ~/.local/state/dch/xray-view
+when XDG_STATE_HOME is unset or relative: one line, hide_agents=0 or 1;
+anything else, or a file that is not a regular file, means hidden; the
+choice is kept only while
+.I dch/sessions
+there is the user's and not group or other writable, else the footer says
+once that
+.B a
+is not remembered), the tab counts leaving
 them out, the footer saying how many; with
 .B n
 and
