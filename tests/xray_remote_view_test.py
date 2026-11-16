@@ -281,7 +281,8 @@ def fixture_order():
             if big:
                 lines += [say_o("answer %s2 says PROJ-9" % w, ts + "09Z")]
                 lines += [say_o("pad " * 50000)] * 6     # 1.2 MB
-        record_o(name, sid, lines)
+        # xv-o2 in its own project: xv-o1 also says PROJ-9 (#397)
+        record_o(name, sid, lines, *(("-home-demo-proj2",) if big else ()))
     record_o("xv-o3", sids[2], [
         {"type": "user", "cwd": "/home/demo/proj",
          "timestamp": "2026-11-10T10:00:00Z",
@@ -339,8 +340,10 @@ def test_order():
     v = order_card("xv-o2")
     try:
         got, _ = card_rows(v)
+        cut = any("(f for more)" in r for r in screen_rows(v).values())
         check("card #304: srv:xv-o2, several 1 MiB windows: newest first, "
-              "no zigzag", got == want, got)
+              "no zigzag, the full list without the cut mark",
+              got == want and not cut, (got, cut))
         v.key(b"jj", 0.5)
         full_scan(v)
         got, sel = card_rows(v)

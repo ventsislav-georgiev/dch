@@ -282,7 +282,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.77.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.78.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -314,7 +314,8 @@ Make sure `~/.local/bin` is in your `$PATH`, then `dch -h` to confirm.
 
 `make test` runs the suite. `DCH_TEST_JOBS=n` sets how many Python test files
 run in parallel (default: the CPU count, at most 8; `1` runs serially; 16 is
-the maximum; anything else gets a one-line note and the default).
+the maximum; empty is silently the default; anything else gets a one-line
+note and the default).
 A `DCH_TEST_TIMES` that is neither empty nor `0` prints each row group's seconds, longest first, before the
 counts.
 
@@ -1616,7 +1617,7 @@ ref (`dch: not a ref`), relative paths against the session's cwd.
   its project dir is the Codex's cwd's, its `lastSeen` the rollout's last
   write, and History records hold none. A shell `<n>`'s project dir is its
   cwd's. Another session's lines carry `chapter: null`.
-- **Light.** The default stops once the first result's window is read to its end (session scope), or after `--budget-ms`
+- **Light.** The default stops once the first result's window is read to its end (session scope), with `why: "first"` when that left something unread (none when the window reached the file's start: `partial: false`; a shell `<n>`'s ring is read whole and keeps only its newest command block's result, `why: "first"` when an older block's is left out), or after `--budget-ms`
   (50 to 300, default 300, across all files, not counting time spent waiting
   on a reader that pauses) with `why: "budget"`; a window being decoded is
   read to its end, and the scan's first window always is (the budget ends

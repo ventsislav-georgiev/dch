@@ -338,8 +338,9 @@ def ctl_checks(dch, check, senv, cenv, serve_at, procs, fakes, tmp, hosts):
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                           stdin=subprocess.DEVNULL)
     mirror = dch(cenv, "--build").stdout.strip() == "full"
-    # both attached = each printed its first frame (a lite build prints none:
-    # a short pause there, as before). What is read is kept for the compare.
+    # both attached = each printed its first frame (a lite build prints none
+    # and its --follow exits by itself, rc 3: wait for that instead). What is
+    # read is kept for the compare.
     pre = {}
     for p_ in (pl, pr):
         pre[p_] = b""
@@ -353,7 +354,11 @@ def ctl_checks(dch, check, senv, cenv, serve_at, procs, fakes, tmp, hosts):
                     break
                 pre[p_] += c
     if not mirror:
-        time.sleep(1.5)
+        for p_ in (pl, pr):
+            try:
+                p_.wait(20)
+            except subprocess.TimeoutExpired:
+                pass
     open(go, "w").close()
     lo, le = pl.communicate(timeout=20)
     ro, re_ = pr.communicate(timeout=20)

@@ -424,8 +424,9 @@ def test_order():
         cut = any("(f for more)" in r for r in rows(v.out).values())
         check("card #304: a transcript of several 1 MiB windows: newest "
               "first, no zigzag; a short list only with the card's cut mark",
-              got == want or (len(got) >= 4 and got == want[:len(got)]
-                              and cut), (got, cut))
+              (got == want and not cut) or
+              (len(got) >= 4 and got == want[:len(got)] and cut),
+              (got, cut))
         v.key(b"jj", 0.5)
         mark = len(v.out)
         v.key(b"f", 0.5)

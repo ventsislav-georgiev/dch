@@ -250,10 +250,10 @@ def shown(v, mark):
     return "\n".join(got[k] for k in sorted(got))
 
 
-def record_o(name, sid, lines):
+def record_o(name, sid, lines, proj="-home-demo-proj"):
     """A History Claude record of the host's, its transcript lines."""
     cfg = os.path.join(SENV["HOME"], ".claude")
-    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    pdir = os.path.join(cfg, "projects", proj)
     os.makedirs(pdir, exist_ok=True)
     with open(os.path.join(pdir, sid + ".jsonl"), "w") as f:
         for o in lines:
