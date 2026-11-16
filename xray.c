@@ -4405,8 +4405,8 @@ sc_hit(void *ctx, const struct xr_hit *h)
 	/* light reads a shell's ring oldest first: a newer block's result puts
 	** out the older one's (recency first, #396); why marks it, the stop
 	** comes at the ring's end (xr_scan_file). Its held lines are
-	** definitions only (S18): they stay till the newer block has one of
-	** its own (#403) */
+	** definitions only (S18): a newer block's first definition frees
+	** them (#403); else they stay to the ring's end */
 	if (x->found && x->shell && h->unit != x->foff)
 	{
 		x->olddefs = x->hn > 0;
@@ -4456,7 +4456,7 @@ sc_hit(void *ctx, const struct xr_hit *h)
 		fputs("}}\n", m);
 		if (x->full || !x->shell)
 			ln_send(x, m, &b, &bl);
-		else if (fclose(m) == 0)	/* held till the ring's end */
+		else if (fclose(m) == 0)	/* a newer definition frees it */
 		{
 			x->held[x->hn] = b;
 			x->hoff[x->hn++] = h->off;

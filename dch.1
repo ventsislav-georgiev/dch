@@ -1301,7 +1301,7 @@ light by default (stops once the first result's window is read to its end,
 .BR why:\(dqfirst\(dq
 when that left something unread (none when the window reached the file's
 start; a shell's ring is read whole and keeps only its newest command
-block's result, plus the newest older definition when that block has none,
+block's result, plus every distinct definition (up to 8) of the newest older block that has any, when that block has none,
 .B why:\(dqfirst\(dq
 when an older block's is left out), or after
 .B \-\-budget\-ms
