@@ -1948,11 +1948,14 @@ memory_command = ~/bin/my-notes
   double quotes group words, a leading `~/` is your home, and `$VARS`, `;`,
   `|`, globs and backticks are plain text. It runs on the machine where the
   session lives (through `dch serve`: that host's config and command; the
-  asker sends only the session name), in the session's folder (else your
-  home), stdin `/dev/null`, in its own process group. Its environment adds
-  `DCH_SESSION` (the session name), `DCH_SESSION_CWD`, `DCH_AGENT`
-  (`claude`, `codex` or empty), `DCH_AGENT_SESSION_ID` (the agent's
-  conversation id, or empty) and `DCH_ROWS_MAX`. A config line over 1023
+  asker sends only the session name, and for `define_command` the ref,
+  which the asker chooses: see
+  [Your own definitions](#your-own-definitions-define_command)), in the
+  session's folder (else your home), stdin `/dev/null`, in its own process
+  group. Its environment adds `DCH_SESSION` (the session name),
+  `DCH_SESSION_CWD`, `DCH_AGENT` (`claude`, `codex` or empty),
+  `DCH_AGENT_SESSION_ID` (the agent's conversation id, or empty) and
+  `DCH_ROWS_MAX`. A config line over 1023
   bytes is never run cut: the built-in answer says `not a command line
   (the config line is over 1023 bytes)`.
 - **Lines.** One JSON object per line on stdout; rows show as they arrive.
@@ -2026,9 +2029,20 @@ define_command = ~/bin/my-define
 - **Run.** As `tasks_command`'s (no shell, the session's folder else your
   home, its own process group, the same environment, your own config only,
   through `dch serve` the host's), with the ref as written (`OQ-97`,
-  `#1343`, `o/r#831`) as the last word, and `DCH_REF` (the same) and
-  `DCH_REF_SHAPE` (`ticket`, `issue`, `pull`, `commit`, `file` or `url`) in
-  its environment.
+  `#1343`, `o/r#831`, a full SHA, a URL, `./x.c`) as the last word, and in
+  its environment `DCH_REF` (the same), `DCH_REF_KEY` (X-ray's key text: a
+  commit's first 7 hex digits, a GitHub pull URL as `o/r#41`, a file's
+  absolute path) and `DCH_REF_SHAPE` (`ticket`, `issue`, `pull`, `commit`,
+  `file` or `url`). As written means the `--ref` text (trimmed), the text
+  you type for ^R in the view, and a peer's text through `dch serve`;
+  Enter on a row of the Refs list sends the row's key text, so there it
+  equals `DCH_REF_KEY`.
+- **Untrusted.** The ref comes from a transcript, the screen or (through
+  `dch serve`) a peer, who chooses it: treat it as input, not as a word
+  you wrote. A ref that starts with `-` (its text or its key) never runs
+  the command, so your program never sees it as an option: `define_warn`
+  says `define_command: not run for a ref starting with -`. `dch serve`'s
+  log line for the request records the ref.
 - **Lines.** One JSON object per line, each a definition (at most 8):
   `title` (required, cut as titles are), `body` (up to 20 lines and 2 KB),
   `url` and `status`. Output whose first line is not a JSON object is plain
@@ -2049,6 +2063,8 @@ Each answer is a `definition` line of `<n>`'s with `"source":"command"`,
 id=${1#\#}
 exec my-ledger get "$id" --json | jq -c '{title, body: .note, status}'
 ```
+The command never gets a ref that starts with `-`, so `"$id"` needs no `--`
+before it.
 
 `dch --xray <n> --follow --json` streams NDJSON, each line with
 `schema:1`. The first line is `{"schema":1,"snapshot":{…}}`, holding the

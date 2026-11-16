@@ -1108,6 +1108,16 @@ xr_ref_parse(const char *text, const char *cwd, struct xr_span *out)
 	return 1;
 }
 
+void
+xr_ref_written(const char *text, char *out, size_t cap)
+{
+	size_t n = strlen(text);
+	const char *t = trim(text, &n);
+
+	if (cap)
+		snprintf(out, cap, "%.*s", (int)(n < cap ? n : cap - 1), t);
+}
+
 /* ---- identity ----------------------------------------------------------- */
 
 int

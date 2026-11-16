@@ -9,6 +9,9 @@ PROJ-5 only mentioned), `dch --xray xv-cl --ref <ref> --json` and the card:
     "command", its title, body as the passage (20 lines, 2 KB), url,
     status; the ref the last argv word, DCH_REF, DCH_REF_SHAPE,
     DCH_SESSION; at most 8;
+  - the ref as written (#411): a 40-hex SHA, a commit URL, a pull URL,
+    ./x.c reach the argv and DCH_REF unchanged, X-ray's key text in
+    DCH_REF_KEY; a ref starting with - is never run (define_warn);
   - a plain-text first line is the title; ANSI escapes and control bytes
     out of titles and bodies, bad UTF-8 as U+FFFD;
   - failures (slow -> stopped at 5 s and the group gone, exit 3, a missing
@@ -186,6 +189,49 @@ time.sleep(30)
           re.sub(r'"elapsed_ms":\d+', "", base))
 
 
+REC = os.path.join(T, "rec.json")
+SHA = "0123456789abcdef0123456789abcdef01234567"
+
+
+def test_written():
+    config(script("rec.py", r'''
+import json, os, sys
+json.dump({"argv": sys.argv[1:], "ref": os.environ.get("DCH_REF"),
+           "key": os.environ.get("DCH_REF_KEY"),
+           "shape": os.environ.get("DCH_REF_SHAPE")}, open(%r, "w"))
+print(json.dumps({"title": "rec"}))
+''' % REC))
+    for r, shape, key in (
+            (SHA, "commit", "0123456"),
+            ("https://github.com/o/r/commit/" + SHA, "commit", "0123456"),
+            ("https://github.com/o/r/pull/41", "pull", "o/r#41"),
+            ("  PROJ-5 ", "ticket", "PROJ-5"),
+            ("./x.c", "file", None)):
+        if os.path.exists(REC):
+            os.unlink(REC)
+        p, defs, done, _ = ref(r)
+        g = json.load(open(REC)) if os.path.exists(REC) else {}
+        w = r.strip()
+        check("as written: %r the last argv word and DCH_REF, its key "
+              "DCH_REF_KEY, shape %s" % (r, shape),
+              p.returncode == 0 and [x.get("title") for x in defs] ==
+              ["rec"] and g.get("argv") == [w] and g.get("ref") == w and
+              g.get("shape") == shape and (
+                  g.get("key") == key if key else
+                  g.get("key", "").startswith("/") and
+                  g.get("key", "").endswith("/x.c")), (g, done))
+    for r in ("-rf/r#1", "--x/y#1"):
+        if os.path.exists(REC):
+            os.unlink(REC)
+        p, defs, done, _ = ref(r)
+        check("%r, starting with -: never run, no definition, define_warn"
+              % r, p.returncode == 0 and not defs and
+              not os.path.exists(REC) and done.get("define_warn") ==
+              "define_command: not run for a ref starting with -",
+              (p.returncode, p.stdout[-400:], p.stderr))
+    config(None)
+
+
 def card(cmd):
     config(cmd)
     v = Pty([DCH, "--xray", "xv-cl"], 30, 100)
@@ -228,7 +274,7 @@ def test_card():
 
 
 def main():
-    run_steps(fixture, test_cli, test_card)
+    run_steps(fixture, test_cli, test_written, test_card)
 
 
 if __name__ == "__main__":

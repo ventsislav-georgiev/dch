@@ -176,6 +176,9 @@ size_t xr_grammar(const char *s, size_t n, int mode, const char *cwd,
 /* --ref's parse (3.1): the grammar in prose context finds exactly one span
 ** covering the whole trimmed text. 1 with *out, else 0. */
 int xr_ref_parse(const char *text, const char *cwd, struct xr_span *out);
+/* text trimmed as xr_ref_parse reads it, into out[cap] (cut to fit): the ref
+** as written (define_command's argv and DCH_REF, #411). */
+void xr_ref_written(const char *text, char *out, size_t cap);
 /* --ref's value rule (3.1): 1..256 bytes of UTF-8, no C0, DEL, C1 or bidi
 ** control. */
 int xr_ref_ok(const char *text);

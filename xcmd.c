@@ -573,7 +573,7 @@ xc_env(const char *name, const char *v)
 static const char *const xc_names[] = {"DCH_SESSION", "DCH_SESSION_CWD",
                                        "DCH_AGENT", "DCH_AGENT_SESSION_ID",
                                        "DCH_ROWS_MAX", "DCH_REF",
-                                       "DCH_REF_SHAPE"};
+                                       "DCH_REF_SHAPE", "DCH_REF_KEY"};
 #define XC_NAMES (sizeof xc_names / sizeof *xc_names)
 
 /* environ minus our names, then ours (DCH_REF* only with a ref); NULL when
@@ -583,7 +583,7 @@ xc_envp(const struct xcmd_ctx *c, char *mine[XC_NAMES])
 {
 	const char *v[XC_NAMES];
 	char rows[16], **e;
-	size_t n = 0, k, j, mn = c->ref ? XC_NAMES : XC_NAMES - 2;
+	size_t n = 0, k, j, mn = c->ref ? XC_NAMES : XC_NAMES - 3;
 
 	snprintf(rows, sizeof rows, "%d", c->ref ? XR_DEFS : XCMD_ROWS_MAX);
 	v[0] = c->session;
@@ -593,6 +593,7 @@ xc_envp(const struct xcmd_ctx *c, char *mine[XC_NAMES])
 	v[4] = rows;
 	v[5] = c->ref;
 	v[6] = c->shape;
+	v[7] = c->key;
 	for (k = 0; k < mn; k++)
 		if (!(mine[k] = xc_env(xc_names[k], v[k])))
 			return NULL;
@@ -809,6 +810,13 @@ xcmd_rows(enum xcmd_kind kind, const struct xcmd_ctx *ctx, xcmd_row_fn fn,
 		old[k].sa_handler = SIG_IGN;	/* nothing to restore yet */
 	if (!ctx->command || !*ctx->command)
 		return 0;
+	/* a ref the user's program could read as an option: never run (no
+	** "--": not every program takes it) */
+	if (ctx->ref && (ctx->ref[0] == '-' || (ctx->key && ctx->key[0] == '-')))
+	{
+		xc_warn(res, what, "not run for a ref starting with -");
+		return 0;
+	}
 	/* a ref is the last word, as written: one more argv slot kept */
 	if ((k = xcmd_argv(ctx->command, getenv("HOME"), buf, sizeof buf, argv,
 	                   XCMD_ARGS_MAX + (ctx->ref ? 0 : 1))) < 0)

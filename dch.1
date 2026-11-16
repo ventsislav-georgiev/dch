@@ -4222,11 +4222,22 @@ definition, as
 .B tasks_command
 runs (no shell, your own config only, through
 .B dch serve
-the host's), with the ref as written as its last word and
-.B DCH_REF
+the host's), with the ref as written (the
+.B \-\-ref
+text, the text typed for ^R, a peer's text; a Refs list row sends its key text) as
+its last word and
+.BR DCH_REF ,
+X\-ray's key text (a commit's 7 hex digits, a file's absolute path) as
+.BR DCH_REF_KEY ,
 and
 .B DCH_REF_SHAPE
 in its environment.
+The ref is untrusted (a transcript, the screen, or a peer through
+.B dch serve
+chooses it; serve's log line records it); one that starts with
+.B \-
+never runs the command and sets
+.BR define_warn .
 Each JSON line is a definition (at most 8):
 .B title
 required,

@@ -5,7 +5,9 @@
  *
  * Client-only, like xray.c: the querying process runs it, the master links
  * none of it. The command line comes only from the user's config; dch splits
- * it (no shell) and nothing from a peer reaches the argv.
+ * it (no shell). define_command's last argv word is the ref, which a
+ * transcript or (through dch serve) a peer chose: untrusted, never run when
+ * it starts with '-'.
  */
 #ifndef DCH_XCMD_H
 #define DCH_XCMD_H
@@ -36,12 +38,14 @@ enum xcmd_kind { XCMD_TASK, XCMD_MEMORY, XCMD_DEFINE };
 
 /* What the query knows about the session; NULL reads as "". command is the
 ** config value (dch_config_get("tasks_command", ...)), unsplit. XCMD_DEFINE:
-** ref, the last argv word and DCH_REF, its shape DCH_REF_SHAPE. */
+** ref (as written), the last argv word and DCH_REF; its shape DCH_REF_SHAPE;
+** key, X-ray's normalized text, DCH_REF_KEY. Not run when ref or key starts
+** with '-' (an option to the user's program). */
 struct xcmd_ctx
 {
 	const char *command;
 	const char *session, *cwd, *agent, *agent_sid;
-	const char *ref, *shape;
+	const char *ref, *shape, *key;
 };
 
 struct xcmd_result
