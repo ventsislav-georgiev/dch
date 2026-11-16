@@ -328,6 +328,28 @@ t_define(void)
 	      starts("{\"title\":\"Plain \xef\xbf\xbd title\","));
 }
 
+/* #412: a first line of escapes only is blank (the next can be first); a
+** '{' line that does not parse is no title; C1, NEL and bidi controls out */
+static void
+t_define_412(void)
+{
+	CHECK("define: a first line of escapes only is blank, not a skip",
+	      line(XCMD_DEFINE, "\x1b[0m\x1b[?25l", 1) == XCMD_BLANK && !out[0]);
+	CHECK("define: a first '{' line that does not parse (bad UTF-8) is "
+	      "skipped, never its raw text as the title",
+	      line(XCMD_DEFINE, "{\"title\":\"t\",\"body\":\"ok \xff bad\"}", 1)
+	      == XCMD_SKIP && !out[0]);
+	CHECK("define: C1, NEL and bidi controls out of a JSON title, body, "
+	      "status", line(XCMD_DEFINE, "{\"title\":\"T\\u009b31mC\\u0085"
+	                     "x\\u202ey\",\"body\":\"B\\u009b2J\\u2066b\","
+	                     "\"status\":\"s\\u202e\\u0080\"}", 1) == XCMD_ROW &&
+	      starts("{\"title\":\"T31mCxy\",\"passage\":\"B2Jb\",") &&
+	      strstr(out, "\"status\":\"s\"}"));
+	CHECK("define: C1 and bidi bytes out of a plain first line",
+	      line(XCMD_DEFINE, "P\xc2\x9b" "1m\xe2\x80\xaeq\xd8\x9cz", 1) ==
+	      XCMD_ROW && starts("{\"title\":\"P1mqz\","));
+}
+
 /* ---- the driver --------------------------------------------------------- */
 
 static long stop_after, seen;
@@ -428,6 +450,7 @@ main(int argc, char **argv)
 	t_title();
 	t_memory();
 	t_define();
+	t_define_412();
 	printf(fails ? "%d FAILED\n" : "all ok\n", fails);
 	return fails != 0;
 }

@@ -4238,22 +4238,32 @@ chooses it; serve's log line records it); one that starts with
 .B \-
 never runs the command and sets
 .BR define_warn .
-Each JSON line is a definition (at most 8):
+Up to 8 JSON lines, or one plain\-text first line.
+Each JSON line is a definition:
 .B title
 required,
 .B body
 (20 lines, 2 KB),
 .BR url ,
 .BR status ;
-a first line that is not JSON is the title.
-Escapes and control bytes are taken out.
+a line starting with
+.B {
+that does not parse is skipped.
+A first line that is not JSON is the title and the only definition; the
+first line is the first with text once escapes are out.
+Escapes and control characters (C0, DEL, C1, bidi controls) are taken out
+of titles, bodies, statuses and the stderr line in
+.BR define_warn .
 5 s and 1 MB, then the process group is ended.
 Its definitions carry
-.BR source:command ;
-a failure gives none and the
+.BR source:command
+and count only when the command exits 0; a failure (a non\-zero exit, 5 s,
+1 MB, nothing printed) gives none, also after it printed some, and the
 .B done
 line's
 .BR define_warn .
+A program just written or edited can wait about 3 s on endpoint security
+at its first run, within the 5 s.
 .SH EXIT STATUS
 0 on success. Control verbs: 1 generic error, 2
 .B \-\-wait

@@ -10,7 +10,8 @@
 **     parses as {"task"|"memory":{...}} with an id and a title; a title
 **     must be valid UTF-8 of at most XR_TITLE_MAX scalars; anything else
 **     leaves out empty. A define row: {"title","passage","url","status"},
-**     a title, no control byte decoded but a passage's '\n' and '\t'.
+**     a title, no control (C0, DEL, C1, bidi; #412) decoded but a
+**     passage's '\n' and '\t'.
 **   bit 0 set: the rest up to a NUL through xcmd_argv, home "/h" or none
 **     (bit 1), a buffer of 64 or 4096 bytes (bit 2): at most XCMD_ARGS_MAX
 **     words, every word inside the buffer and NUL-terminated.
@@ -74,10 +75,10 @@ check_def_text(const struct json_parser *p, const char *k, int nl, int need)
 	}
 	if (dch_json_decode(p, f, t, sizeof t) != 0 || (need && !t[0]))
 		abort();
+	/* no C0, DEL, C1 or bidi control (#412) */
 	for (i = 0; t[i]; i++)
-		if (((unsigned char)t[i] < 0x20 &&
-		     !(nl && (t[i] == '\n' || t[i] == '\t'))) ||
-		    t[i] == 0x7f)
+		if (xr_ctl_at(t + i, strlen(t + i)) &&
+		    !(nl && (t[i] == '\n' || t[i] == '\t')))
 			abort();
 }
 

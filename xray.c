@@ -1045,6 +1045,18 @@ anchor_at(const char *s, size_t n, size_t i, int rules, const char *cwd,
 	       try_rules(s, n, i, prev_scalar(s, i), rules, 0, cwd, sp) != 0;
 }
 
+size_t
+xr_ctl_at(const char *s, size_t n)
+{
+	size_t a;
+	uint32_t c = u8_next((const unsigned char *)s, n, &a);
+
+	/* the card's list (picker.c pk_txtto, pk_bidi) */
+	return c < 0x20 || (c >= 0x7f && c <= 0x9f) || c == 0x061c ||
+	       c == 0x200e || c == 0x200f || (c >= 0x2028 && c <= 0x202e) ||
+	       (c >= 0x2066 && c <= 0x2069) ? a : 0;
+}
+
 int
 xr_ref_ok(const char *text)
 {
@@ -1059,6 +1071,7 @@ xr_ref_ok(const char *text)
 		if (!(a = dch_utf8_len((const unsigned char *)text + i, n - i)))
 			return 0;
 		c = u8_next((const unsigned char *)text + i, n - i, &a);
+		/* 3.1's list, not xr_ctl_at's: U+061C is no bidi control there */
 		if (c < 0x20 || (c >= 0x7f && c <= 0x9f) || c == 0x200e ||
 		    c == 0x200f || (c >= 0x202a && c <= 0x202e) ||
 		    (c >= 0x2066 && c <= 0x2069))

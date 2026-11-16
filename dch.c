@@ -12621,8 +12621,8 @@ xr_search_one(const char *path, const struct stat *st, int codex,
 ** dch config only), run with the ref as written (the --ref text, a peer's
 ** through dch serve; #411) as its last word and DCH_REF, X-ray's key text
 ** as DCH_REF_KEY; never for a ref starting with '-' (xcmd_rows); each
-** answer a definition of <n>'s, "source":"command"; no answer, done's
-** define_warn. After the files, before done: it runs only when they found
+** answer a definition of <n>'s, "source":"command", after a clean exit
+** only (#412: xcmd_rows holds them); no answer, done's define_warn. After the files, before done: it runs only when they found
 ** none, so a card's transcript definition never waits on it. */
 static int
 xr_cmd_def(const char *line, void *arg)

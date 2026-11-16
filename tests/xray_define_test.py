@@ -16,7 +16,10 @@ PROJ-5 only mentioned), `dch --xray xv-cl --ref <ref> --json` and the card:
     out of titles and bodies, bad UTF-8 as U+FFFD;
   - failures (slow -> stopped at 5 s and the group gone, exit 3, a missing
     program, nothing printed, 2 MB of output): no definition, the done
-    line's define_warn;
+    line's define_warn; also when it printed a definition first (#412);
+  - #412: stderr's line in define_warn cleaned; a plain-text first line the
+    only definition; a first line of escapes only is blank; a '{' line that
+    does not parse is skipped; C1, NEL and bidi controls out;
   - #831, defined by the transcript: the command never runs, the lines
     as with no define_command;
   - the card: the title marked "your define_command", its body and url;
@@ -159,7 +162,8 @@ time.sleep(30)
 
     for name, body, want in (
             ("fail.py", "import sys\nsys.stderr.write('boom\\n')\n"
-             "print('{\"title\":\"x\"}')\nsys.exit(3)\n", None),
+             "print('{\"title\":\"x\"}')\nsys.exit(3)\n",
+             "define_command: exit 3: boom"),
             ("quiet.py", "pass\n",
              "define_command: no definition printed"),
             ("huge.py", "import sys\nsys.stdout.write('y' * (3 << 20))\n",
@@ -167,14 +171,6 @@ time.sleep(30)
         config(script(name, body))
         p, defs, done, _ = ref("PROJ-5")
         w = done.get("define_warn", "")
-        if want is None:   # a row then exit 3: its rows stand (as tasks)
-            check("exit 3 after a row: the row stands", len(defs) == 1, done)
-            config(script("fail2.py", "import sys\nsys.stderr.write("
-                          "'boom\\n')\nsys.exit(3)\n"))
-            p, defs, done, _ = ref("PROJ-5")
-            w, want = done.get("define_warn", ""), \
-                "define_command: exit 3: boom"
-            name = "fail2.py"
         check("%s: no definition, done's define_warn %r" % (name, want),
               p.returncode == 0 and not defs and w == want, (done, p.stderr))
     config(os.path.join(T, "no-such-program"))
@@ -273,8 +269,72 @@ def test_card():
         v.close()
 
 
+def test_failed_after_rows():
+    """#412: definitions printed before a failure are dropped, define_warn
+    set (cli and card); stderr's line cleaned; the parse fixes."""
+    # warmed with no DCH_REF: it exits at once (endpoint security, #405)
+    pre = "import os, sys, time\nif 'DCH_REF' not in os.environ: sys.exit(0)\n"
+    for name, body, want in (
+            ("half.py", "print('{\"title\":\"half\"}')\n"
+             "sys.stderr.write('lookup failed\\n')\nsys.exit(3)\n",
+             "define_command: exit 3: lookup failed"),
+            ("halfslow.py", "print('{\"title\":\"half\"}', flush=True)\n"
+             "time.sleep(30)\n", "define_command: stopped early after 5 s"),
+            ("halfbig.py", "print('{\"title\":\"half\"}')\n"
+             "sys.stdout.write('{\"title\":\"last\"}' + ' ' * (1 << 20))\n",
+             "define_command: stopped early at 1 MB of output")):
+        config(script(name, pre + body))
+        p, defs, done, _ = ref("PROJ-5")
+        check("%s: a definition then a failure: none, define_warn %r"
+              % (name, want), p.returncode == 0 and not defs and
+              done.get("define_warn") == want, (p.stdout[-400:], p.stderr))
+
+    config(script("esc.py", r'''
+import sys
+sys.stderr.buffer.write(b"\x1b]0;PWN\x07err \x1b[31mred\xe2\x80\xaedir"
+                        b"\xc2\x9bX\xc2\x85Y\n")
+sys.exit(3)
+'''))
+    p, defs, done, _ = ref("PROJ-5")
+    check("stderr's line in define_warn: escapes, C1, NEL, bidi out",
+          done.get("define_warn") == "define_command: exit 3: err reddirXY",
+          done)
+
+    for name, out, want in (
+            ("plainjson.py", b'plain title\n{"title":"json second"}\n',
+             ["plain title"]),
+            ("escfirst.py", b'\x1b[0m\x1b[?25l\nReal title\nmore\n',
+             ["Real title"]),
+            ("badjson.py", b'{"title":"t","body":"ok \xff\xfe bad"}\n'
+             b'plain after\n{"title":"second"}\n', ["second"]),
+            ("c1.py", b'{"title":"T\\u009b31mC\\u0085x\\u202ey","body":'
+             b'"B\\u009b2J\\u2066b","status":"s\\u202e"}\n', ["T31mCxy"])):
+        config(script(name, "import sys\nsys.stdout.buffer.write(%r)\n" % out))
+        p, defs, done, _ = ref("PROJ-5")
+        check("%s: the definitions %r" % (name, want),
+              p.returncode == 0 and [x.get("title") for x in defs] == want and
+              "define_warn" not in done, (p.stdout[-500:], done))
+        if name == "c1.py" and defs:
+            check("...C1 and bidi out of its body and status",
+                  defs[0].get("passage") == "B2Jb" and
+                  defs[0].get("status") == "s", defs[0])
+
+    v, s = card(script("halfcard.py", pre + "print('{\"title\":\"half\"}')\n"
+                       "sys.stderr.write('ledger down\\n')\nsys.exit(3)\n"))
+    try:
+        check("card: a definition then exit 3: No definition found and the "
+              "reason, not the half definition",
+              re.search(r"No definition found (·|-) define_command: exit 3: "
+                        r"ledger down", s) and "half" not in s, s)
+        v.key(b"q")
+    finally:
+        v.close()
+    config(None)
+
+
 def main():
-    run_steps(fixture, test_cli, test_written, test_card)
+    run_steps(fixture, test_cli, test_written, test_card,
+              test_failed_after_rows)
 
 
 if __name__ == "__main__":

@@ -812,6 +812,11 @@ old and still current. Pair it with `state` and
   `dch --keys <n> ctrl+c`. An attach takes keys again once the
   program has read what waited; there it is not reported (the trace,
   `DCH_DEBUG`, has one line). Input still waiting is lost on `--restart`.
+- **A new command's first run can be slow.** On macOS, the first run of a
+  `tasks_command`, `memory_command` or `define_command` program you just
+  wrote or edited can wait on endpoint security's scan (about 3 s seen),
+  and that wait counts against the 5 s limit: the first answer can be
+  `stopped early after 5 s`. Run the program once by hand after an edit.
 
 ## Config file
 
@@ -2043,15 +2048,26 @@ define_command = ~/bin/my-define
   the command, so your program never sees it as an option: `define_warn`
   says `define_command: not run for a ref starting with -`. `dch serve`'s
   log line for the request records the ref.
-- **Lines.** One JSON object per line, each a definition (at most 8):
-  `title` (required, cut as titles are), `body` (up to 20 lines and 2 KB),
-  `url` and `status`. Output whose first line is not a JSON object is plain
-  text: that line is the title, the rest is ignored. Terminal escapes and
-  control bytes are taken out of titles and bodies.
+- **Lines.** Up to 8 JSON lines, or one plain-text first line. JSON: one
+  object per line, each a definition: `title` (required, cut as titles
+  are), `body` (up to 20 lines and 2 KB), `url` and `status`; a line that
+  starts with `{` and does not parse (invalid UTF-8 in it, say) is skipped.
+  Output whose first line is not a JSON object is plain text: that line is
+  the title (bad UTF-8 as U+FFFD) and the only definition, the rest is
+  ignored. The first line is the first that still has text once escapes
+  are out, so a colour reset on its own line does not count. Terminal
+  escapes and control characters (C0, DEL, C1 such as U+0085 and U+009B,
+  bidi controls such as U+202E) are taken out of titles, bodies, statuses
+  and the stderr line in `define_warn`.
 - **Limits.** 5 s (as `tasks_command`'s) and 1 MB of output; past a
-  limit the process group is ended. A failure (no such program, a non-zero exit, a timeout, nothing
-  printed) gives no definition: the card says "No definition found" and
-  the reason after it, the `done` line's `define_warn` the same.
+  limit the process group is ended. The definitions count only once the
+  command has exited 0: a failure (no such program, a non-zero exit, a
+  timeout, the 1 MB cap, nothing printed) gives no definition, also when
+  it printed some first. The card says "No definition found" and the
+  reason after it (`define_command: exit 3: <its stderr's first line>`,
+  `stopped early after 5 s`, `stopped early at 1 MB of output`), the
+  `done` line's `define_warn` the same. A 9th definition line ends the
+  command; its first 8 stand.
 
 Each answer is a `definition` line of `<n>`'s with `"source":"command"`,
 `"rule":"command"`, `at`, `offset` and `chapter` `null`, the body as its
