@@ -329,7 +329,7 @@ row_memory(struct xc_out *w, const struct json_parser *p, int r, char *tmp,
 /* #405: s in place without terminal escapes (ESC [ ... final, ESC ] ...
 ** BEL or ESC \\, ESC and one ASCII byte) and other controls but '\n' and
 ** '\t': C0, DEL, C1 (U+0085 too) and bidi controls (#412, xr_ctl_at, the
-** card's list); bad UTF-8 stays for xr_title's U+FFFD. Returns its new
+** card's list); a bad byte becomes 0xff, xr_title's U+FFFD. Returns its new
 ** length (a strlen beside plain() in one call's arguments may run first:
 ** gcc on x86-64 did, and read stale bytes) */
 static size_t
@@ -358,6 +358,20 @@ plain(char *s)
 			i += *i >= 0x20 && *i < 0x7f;
 		else if (c >= 0x80 && (l = xr_ctl_at(i - 1, (size_t)-1)))
 			i += l - 1;	/* NUL-terminated: the decode stops there */
+		else if (c >= 0x80)
+		{
+			/* whole sequences, a bad byte as 0xff (never in UTF-8):
+			** bytes a removal brings together cannot form a control */
+			if (!(l = dch_utf8_len((const unsigned char *)i - 1,
+			                       (size_t)-1)))
+				*o++ = (char)0xff;
+			else
+			{
+				memmove(o, i - 1, l);
+				o += l;
+				i += l - 1;
+			}
+		}
 		else if (c == '\n' || c == '\t' || (c >= 0x20 && c != 0x7f))
 			*o++ = (char)c;
 	}

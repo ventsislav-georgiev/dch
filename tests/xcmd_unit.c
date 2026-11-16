@@ -348,6 +348,10 @@ t_define_412(void)
 	CHECK("define: C1 and bidi bytes out of a plain first line",
 	      line(XCMD_DEFINE, "P\xc2\x9b" "1m\xe2\x80\xaeq\xd8\x9cz", 1) ==
 	      XCMD_ROW && starts("{\"title\":\"P1mqz\","));
+	CHECK("define: bad bytes a removed control brings together form no "
+	      "control (E2 80 CR AE: three U+FFFD, no U+202E; fuzz)",
+	      line(XCMD_DEFINE, "a\xe2\x80\r\xae" "b", 1) == XCMD_ROW &&
+	      starts("{\"title\":\"a\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd" "b\","));
 }
 
 /* ---- the driver --------------------------------------------------------- */
