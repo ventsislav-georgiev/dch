@@ -296,12 +296,32 @@ def test_keep():
         v.close()
 
 
+def test_narrow():
+    """The sender is a third of the room after the row's prefix, so the
+    title keeps at least 8 cells at 41 columns and all 17 at 60."""
+    for cols, need in ((41, 8), (60, 17)):
+        v = Pty([DCH, "--xray", "xv-oc"], rows=30, cols=cols)
+        try:
+            v.pump(1.5)
+            r = at(listed(v), "LLLL")
+            t = r[r.find("alpha"):]
+            check("#391: %d columns: the title keeps %d cells, the sender "
+                  "is cut with an ellipsis" % (cols, need),
+                  t.startswith("alpha cross title"[:need]) and
+                  "\u2026" in r and cells(r) <= cols, r)
+            v.key(b"q", 0.3)
+            v.exit()
+        finally:
+            v.close()
+
+
 def main():
     try:
         fixture()
         test_marks()
         test_no_peer()
         test_keep()
+        test_narrow()
     finally:
         shutil.rmtree(T, ignore_errors=True)
     if fails[0]:
