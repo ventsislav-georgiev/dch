@@ -575,6 +575,25 @@ if [ -x "$DCH" ]; then
     out=$("$DCH" --spawn "nx$$" sleep 60 2>/dev/null)
     check "a later --spawn of a real program works" "$out" "nx$$"
     "$DCH" -k "nx$$" >/dev/null 2>&1
+    # --- a full pty table is waited out, a lasting one fails (#399) -------
+    if $xcc -O1 -shared -fPIC -o "$TMP/ptyfail.so" "$xsrc/tests/ptyfail.c" \
+            -ldl >"$TMP/ptyfail.log" 2>&1; then
+        pf="LD_PRELOAD=$TMP/ptyfail.so"
+        [ "$(uname)" = Darwin ] && pf="DYLD_INSERT_LIBRARIES=$TMP/ptyfail.so"
+        out=$(env "$pf" DCH_PTYFAIL=3 "$DCH" --spawn "pf$$" sleep 60 2>&1)
+        check "--spawn waits out a full pty table (forkpty ENXIO x3)" \
+              "$out" "pf$$"
+        "$DCH" -k "pf$$" >/dev/null 2>&1
+        err=$(env "$pf" DCH_PTYFAIL=1000 "$DCH" --spawn "pf$$" sleep 60 \
+              2>&1 >/dev/null)
+        check "...a pty table that stays full: exit 1" "$?" "1"
+        case $err in
+        *"pf$$: "*"init_pty: "*) ok "...it says init_pty and the error" ;;
+        *) bad "...it says init_pty and the error ($err)" ;;
+        esac
+    else
+        bad "ptyfail shim builds"; sed 's/^/       /' "$TMP/ptyfail.log"
+    fi
     n=0 f=0
     while [ "$n" -lt 20 ]; do
         "$DCH" --spawn "tr$$-$n" true >/dev/null 2>&1 || f=$((f + 1))
