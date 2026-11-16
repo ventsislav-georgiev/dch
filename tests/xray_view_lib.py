@@ -192,6 +192,11 @@ ENV.update(XDG_RUNTIME_DIR=T, XDG_STATE_HOME=os.path.join(T, "state"),
            HOME=HOME, DCH_CONFIG=os.path.join(T, "config"),
            DCH_LOGIN_ENV="0", DCH_NO_REMOTE="1", NO_COLOR="1",
            TERM="xterm-256color")
+# #406: agent rows start hidden; the view tests that are about something else
+# find them shown (hide_agents=0), the peer test sets its own
+os.makedirs(os.path.join(T, "state", "dch", "sessions"))
+with open(os.path.join(T, "state", "dch", "xray-view"), "w") as f:
+    f.write("hide_agents=0\n")
 RESTORE = b"\033[?1049l"
 QUIET = 0.1     # Pty.key: no byte for this long after the answer ends it
 

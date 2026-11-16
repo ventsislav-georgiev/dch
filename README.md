@@ -961,8 +961,9 @@ it has memories or instruction files:
   the sender's name for a message from another Claude session (`🤖 prosper
   Scrollback answers for entry 895`), 📥 and the name for a subagent's
   hand-back, 🔔 for another auto row (a task notification). Your own
-  prompts carry no mark. `a` hides the cross-session messages (shown by
-  default), the tab counts leave them out, and the footer says how many;
+  prompts carry no mark. `a` shows or hides the cross-session messages (hidden by
+  default; the choice is remembered for every X-ray view, in the file `xray-view`
+  (`hide_agents=0` or `1`) in dch's state directory), the tab counts leave them out, and the footer says how many;
   with `n` and `a` both off only your own prompts are left. A host whose dch
   predates `peer` sends none: no row is marked as an agent's and `a` hides
   nothing. `o`, here and in the reader, leaves the view (as `q` does)
