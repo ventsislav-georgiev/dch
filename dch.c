@@ -10814,9 +10814,9 @@ revive_spawn(char *exe, struct hrec *r, int cols, int rows, int json)
 		}
 		/* the resume message is typed once claude is idle: have it wait
 		** for its MCP servers so the first request carries their tools
-		** (a user's own value stays) */
+		** (a user's own value stays); the master sets it in claude only */
 		if (!getenv("MCP_CONNECTION_NONBLOCKING"))
-			mcp = setenv("MCP_CONNECTION_NONBLOCKING", "0", 1) == 0;
+			mcp = setenv("DCH_REVIVE_MCP", "1", 1) == 0;
 	}
 	else if (r->sid[0] && r->launch)
 		r->mode = RV_SHELL;
@@ -10858,7 +10858,7 @@ revive_spawn(char *exe, struct hrec *r, int cols, int rows, int json)
 	}
 	unsetenv("DCH_REVIVE_AGENT");
 	if (mcp)
-		unsetenv("MCP_CONNECTION_NONBLOCKING");
+		unsetenv("DCH_REVIVE_MCP");
 	if (cfg && was)
 		setenv("CLAUDE_CONFIG_DIR", was, 1);
 	else if (cfg)

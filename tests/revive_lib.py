@@ -586,6 +586,17 @@ def main(part):
                       s7["nonblocking"] is None)
                 check("#364: the revived Claude has MCP_CONNECTION_NONBLOCKING=0",
                       s8 and s8["nonblocking"] == "0")
+                # #381: the master (and any later child) must not keep it
+                mo = os.path.join(tmp, "mcp381.out")
+                if s8:
+                    run("--respawn", mc, "--", "sh", "-c",
+                        "echo MCP=${MCP_CONNECTION_NONBLOCKING-unset} > %s; "
+                        "sleep 30" % mo)
+                    os.kill(s8["pid"], signal.SIGKILL)
+                check("#381: a program respawned after a revive has no "
+                      "MCP_CONNECTION_NONBLOCKING",
+                      until(lambda: os.path.exists(mo) and
+                            open(mo).read().strip(), 15) == "MCP=unset")
                 check("#364: the resume message is taken after the MCP servers "
                       "connect",
                       r.returncode == 0 and tm and

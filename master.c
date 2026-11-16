@@ -1199,6 +1199,7 @@ setnonblocking(int fd)
 #endif
 }
 
+static int revive_mcp;	/* --revive: its claude gets MCP_CONNECTION_NONBLOCKING */
 static int respawn_child;	/* init_pty: this child is an agent relaunch */
 
 /* Initialize the pty structure. */
@@ -1260,7 +1261,7 @@ init_pty(char **argv, int statusfd)
 		/* A relaunched Claude gets its MCP servers before its first
 		** request, so the resume message is typed with their tools in
 		** place (#364); child only, a value the user set stays. */
-		if (respawn_child && !getenv("MCP_CONNECTION_NONBLOCKING"))
+		if ((respawn_child || revive_mcp) && !getenv("MCP_CONNECTION_NONBLOCKING"))
 		{
 			int n = 0;
 
@@ -4665,6 +4666,8 @@ master_process(int s, char **argv, int waitattach, int statusfd)
 			if (ra && dch_json_is_object(ra))
 				rec_seed = strdup(ra);
 			unsetenv("DCH_REVIVE_AGENT");
+			revive_mcp = getenv("DCH_REVIVE_MCP") != NULL;
+			unsetenv("DCH_REVIVE_MCP");
 		}
 
 		/* Create a pty in which the process is running. */

@@ -166,12 +166,15 @@ def main():
 
         # --- hold: exit output stays readable, second respawn spawns ------
         h, hsock = sess("rsh")
+        hgo = os.path.join(tmp, "hold.go")
         spawn(h, "sh", "-c",
-              "echo PRE_TAIL_MARK; sleep 1; echo 'claude --resume abc-123'; "
-              "echo POST_TAIL_MARK; exit 0")
+              "echo PRE_TAIL_MARK; "
+              "while [ ! -e '%s' ]; do sleep 0.05; done; echo 'claude --resume abc-123'; "
+              "echo POST_TAIL_MARK; exit 0" % hgo)
         seen(h, "PRE_TAIL_MARK")
         check("--respawn without argv arms a hold",
               run("--respawn", h).returncode == 0)
+        open(hgo, "w").close()      # the post-arm output comes after the arm
         ch = until(lambda: (lambda c: c if c and c["state"] == "held"
                             else None)(cmd(h)))
         check("held: --cmd state held, pid null, exit code 0",
@@ -213,9 +216,11 @@ def main():
 
         # --- hold timeout ends the session --------------------------------
         t, tsock = sess("rst")
-        spawn(t, "sh", "-c", "sleep 0.5; exit 0",
+        tgo = os.path.join(tmp, "holdto.go")
+        spawn(t, "sh", "-c", "while [ ! -e '%s' ]; do sleep 0.05; done" % tgo,
               env=dict(os.environ, DCH_HOLD_MS="600"))
         run("--respawn", t)
+        open(tgo, "w").close()
         check("hold timeout ends the session", gone(tsock, 6.0))
 
         # --- unarmed exit still ends the session --------------------------
@@ -234,8 +239,10 @@ def main():
 
         # --- exec failure on respawn ends the session (no loop) -----------
         e, esock = sess("rse")
-        spawn(e, "sh", "-c", "sleep 0.5; exit 0")
+        ego = os.path.join(tmp, "exec.go")
+        spawn(e, "sh", "-c", "while [ ! -e '%s' ]; do sleep 0.05; done" % ego)
         run("--respawn", e, "--", "/nonexistent/dch-respawn-zz")
+        open(ego, "w").close()
         check("exec failure on respawn ends the session", gone(esock, 5.0))
 
         # --- cancel: armed, cancelled, child exit ends the session --------
@@ -282,9 +289,11 @@ def main():
         # never comes and only the master's waitpid() of its child can see
         # the exit; macOS revokes the tty when the session leader exits, so
         # there EOF arrives anyway and this checks the end-to-end outcome.
+        ggo = os.path.join(tmp, "gc.go")
         spawn(g, "sh", "-c", "(trap '' HUP; exec sleep %s) & echo gc_parent; "
-              "sleep 0.5; exit 0" % holder)
+              "while [ ! -e '%s' ]; do sleep 0.05; done; exit 0" % (holder, ggo))
         run("--respawn", g, "--", "sh", "-c", "echo gc_respawned; sleep 30")
+        open(ggo, "w").close()
         t0 = time.time()
         cg = until(lambda: (lambda c: c if c and c["argv"][-1].endswith(
             "sleep 30") else None)(cmd(g)), 5.0)
@@ -315,8 +324,10 @@ def main():
         # guard, not a deterministic pin: SIGCONT finds only the pty ready, so
         # the verb drain and the pty wake rarely share a pass.
         w, wsock = sess("rsw")
-        spawn(w, "sh", "-c", "sleep 1")
+        wgo = os.path.join(tmp, "stop.go")
+        spawn(w, "sh", "-c", "while [ ! -e '%s' ]; do sleep 0.05; done" % wgo)
         run("--respawn", w)
+        open(wgo, "w").close()
         until(lambda: (cmd(w) or {}).get("state") == "held")
         mw = masters(wsock)
         run("--respawn", w, "--", "sh", "-c", "echo late_mark; sleep 30")
@@ -350,11 +361,13 @@ def main():
 
         # --- the dead child's terminal modes do not outlive it -------------
         md, mdsock = sess("rsm")
+        mdgo = os.path.join(tmp, "modes.go")
         spawn(md, "sh", "-c",
               "echo primary_mark; printf '\\033[?2004h\\033[?1000h"
-              "\\033[>1u\\033[?1049h'; echo alt_mark; sleep 1; exit 0")
+              "\\033[>1u\\033[?1049h'; echo alt_mark; while [ ! -e '%s' ]; do sleep 0.05; done; exit 0" % mdgo)
         seen(md, "alt_mark")
         run("--respawn", md, "--", "sh", "-c", "echo fresh_mark; sleep 30")
+        open(mdgo, "w").close()
         # A lite seen() only sleeps: wait on --cmd for the respawn itself, or
         # the attach below can land while the first child is still alive and
         # (rightly) get its modes re-armed (#105).
@@ -391,15 +404,17 @@ def main():
 
         # --- an attached client stays connected across a respawn ----------
         at, atsock = sess("rsc")
+        atgo = os.path.join(tmp, "att.go")
         att_pid, fd = pty.fork()
         if att_pid == 0:
             os.execv(DCH, [DCH, "-E", "-n", at, "sh", "-c",
-                           "echo att_first; sleep 1; exit 0"])
+                           "echo att_first; while [ ! -e '%s' ]; do sleep 0.05; done; exit 0" % atgo])
             os._exit(127)
         buf = b""
         until(lambda: os.path.exists(atsock), 5.0)
         run("--respawn", at, "--", "sh", "-c",
             "echo att_second_mark; sleep 30")
+        open(atgo, "w").close()
         deadline = time.time() + 6
         while time.time() < deadline and b"att_second_mark" not in buf:
             r_, _, _ = select.select([fd], [], [], 0.1)
@@ -426,11 +441,13 @@ def main():
                 "qw(%s)), qq(\\n)" % sigs)
         sig_cold = os.path.join(tmp, "sig.cold")
         sig_resp = os.path.join(tmp, "sig.resp")
+        sdgo = os.path.join(tmp, "sig.go")
         sd, sdsock = sess("rsd")
-        spawn(sd, "sh", "-c", "perl -e '%s' > '%s'; sleep 1; exit 0"
-              % (dump, sig_cold))
+        spawn(sd, "sh", "-c", "perl -e '%s' > '%s'; while [ ! -e '%s' ]; do sleep 0.05; done; exit 0"
+              % (dump, sig_cold, sdgo))
         run("--respawn", sd, "--", "sh", "-c",
             "perl -e '%s' > '%s'; exec sleep 3%s" % (dump, sig_resp, TAG))
+        open(sdgo, "w").close()
         rd = until(lambda: os.path.exists(sig_resp) and
                    os.path.getsize(sig_resp) and open(sig_resp).read())
         cold = open(sig_cold).read() if os.path.exists(sig_cold) else ""

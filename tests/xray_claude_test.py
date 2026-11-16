@@ -784,9 +784,10 @@ def test_latest():
                 "--json", env=caps)
         ls = ref_lines(r.stdout) or [{}]
         men = [l["mention"]["offset"] for l in ls if "mention" in l]
-        check("latest: light --scope session stops at the newest window's "
-              "first mention, why first",
-              r.returncode == 0 and men == [last - len(ask)] and
+        check("latest: light --scope session stops after the newest "
+              "window that holds a mention, with all its mentions (#379), "
+              "why first",
+              r.returncode == 0 and men == [last - len(ask), last] and
               ls[-1]["partial"] and ls[-1]["why"] == "first",
               (r.returncode, ls[-3:]))
         r = dch("--xray", "xr-latest", "--ref", "OQ-1", "--json", env=caps)
@@ -2063,6 +2064,59 @@ def test_peer():
         os.unlink(tp)
 
 
+def test_handback_search():
+    """#382: --search reads a hand-back's text as the reader shows it: the
+    report when there is one, else the body without "[Subagent hand-back]"
+    and the blank after it, which is the reader's text too."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, RSID + ".jsonl")
+
+    def hb(origin):
+        origin.update(kind="peer", handback=True, name="worker-b")
+        return {"type": "user", "cwd": "/home/demo/proj", "isMeta": True,
+                "message": {"content": "wrapped"}, "origin": origin}
+    a = {"type": "assistant", "message": {"content": [
+        {"type": "text", "text": "ok"}]}}
+    recs = [{"type": "user", "cwd": "/home/demo/proj",
+             "message": {"content": "start"}}, a,
+            hb({"body": "[Subagent hand-back] body-only delta",
+                "handbackReportText": "report-only echo\nmore"}), a,
+            hb({"body": "[Subagent hand-back] REPORT plugh\nline2"}), a]
+    with open(tp, "w") as f:
+        for o in recs:
+            f.write(json.dumps(o) + "\n")
+    history("xr-hb", RSID, cfg)
+    try:
+        rc, o, err = xray("xr-hb", "--json")
+        ch = (o or {}).get("chapters", [])
+        check("handback: three chapters", rc == 0 and len(ch) == 3,
+              (rc, ch, err))
+        if len(ch) == 3:
+            rc, s, err = search("xr-hb", "echo")
+            check("handback: --search finds a word of the report alone",
+                  rc == 0 and s and
+                  [(h["chapter"], h["snippet"]) for h in s["hits"]] ==
+                  [(ch[1]["anchor"], "report-only echo more")], (rc, s, err))
+            rc, s, err = search("xr-hb", "Subagent hand-back")
+            check("handback: --search never finds the wrapper",
+                  rc == 0 and s and s["hits"] == [], (rc, s, err))
+            rc, s, err = search("xr-hb", "plugh")
+            check("handback: a body's snippet has no wrapper",
+                  rc == 0 and s and
+                  [h["snippet"] for h in s["hits"]] == ["REPORT plugh line2"],
+                  (rc, s, err))
+            rc2, c, err2, raw = chapter("xr-hb", ch[2]["anchor"])
+            check("handback: no report: the reader's text has no leading "
+                  "blank",
+                  rc2 == 0 and c and
+                  c["entries"][:1] == [ent("user", "REPORT plugh\nline2")],
+                  (rc2, raw[:400], err2))
+    finally:
+        os.unlink(tp)
+
+
 def test_responses():
     """#296: each chapter's response (the last assistant text after the
     last tool result) with its record's offset and the tool line, in --json
@@ -2971,6 +3025,38 @@ def test_light_377():
         os.unlink(tp)
 
 
+def test_light_379():
+    """#379: light --scope session stops at its first hit, but only once
+    that hit's window is read to its end, so it answers with the window's
+    newest mention, not its oldest (1.73.0: note 001 alone)."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-p379")
+    os.makedirs(pdir, exist_ok=True)
+    sid = "11111111-2222-4333-8444-555555555379"
+    tp = os.path.join(pdir, sid + ".jsonl")
+    with open(tp, "w") as f:
+        f.write(json.dumps({"type": "user", "cwd": "/home/demo/p379",
+                            "message": {"content": "start"}}) + "\n")
+        for i in range(1, 51):
+            f.write(json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "note %03d about PROJ-79" % i}]}})
+                    + "\n")
+    history("xr-379", sid, cfg, "/home/demo/p379")
+    try:
+        r = dch("--xray", "xr-379", "--ref", "PROJ-79", "--scope", "session",
+                "--json")
+        ls = ref_lines(r.stdout) or [{}]
+        m = [l["mention"]["line"][5:8] for l in ls if "mention" in l]
+        check("379 scope session: the first hit's window is read to its "
+              "end, so note 050 (the newest) is there, why first",
+              r.returncode == 0 and
+              m == ["%03d" % i for i in range(1, 51)] and
+              ls[-1].get("why") == "first",
+              (r.returncode, m[:3], m[-3:], ls[-1:], r.stderr[-300:]))
+    finally:
+        os.unlink(tp)
+
+
 def main():
     try:
         test_names()
@@ -2991,6 +3077,7 @@ def main():
         test_follow_history()
         test_auto()
         test_peer()
+        test_handback_search()
         test_responses()
         test_scope()
         test_light_anchors()
@@ -2999,6 +3086,7 @@ def main():
         test_prefilter_reach()
         test_ref_middle()
         test_light_377()
+        test_light_379()
     finally:
         shutil.rmtree(T, ignore_errors=True)
     if fails[0]:

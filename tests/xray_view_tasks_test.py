@@ -105,13 +105,14 @@ def test_tasks():
 def test_tasks_big():
     """#320: 20000 tasks list fast and scroll without lag; Pending in the
     answer's order (G the last created)."""
+    x = 4 if os.environ.get("DCH_TEST_NO_BUDGET") else 1  # sanitizer build
     t0 = time.time()
     v = Pty([DCH, "--xray", "xv-tb"], rows=30, cols=100)
     try:
         ok = tabbar(v, "Tasks 20000", 15)
         dt = time.time() - t0
-        check("Tasks big: 20000 tasks counted in the tab in %.2f s (under 5)"
-              % dt, ok and dt < 5, rows(v.out).get(2))
+        check("Tasks big: 20000 tasks counted in the tab in %.2f s (under %d)"
+              % (dt, 5 * x), ok and dt < 5 * x, rows(v.out).get(2))
         v.key(b"\033[Z", 0.5)
         lag = []
         for k, want in ((b"G", "bulk task 20000"), (b"g", "bulk task 00001"),
@@ -125,14 +126,15 @@ def test_tasks_big():
             if want:
                 check("Tasks big: %s selects %s" % (k, want), want in head(v),
                       head(v))
-        check("Tasks big: every key painted within 0.5 s (%s)" %
-              ", ".join("%.3f" % x for x in lag), max(lag) < 0.5, lag)
+        check("Tasks big: every key painted within %g s (%s)" %
+              (0.5 * x, ", ".join("%.3f" % t for t in lag)),
+              max(lag) < 0.5 * x, lag)
         mark = len(v.out)
         s = time.time()
         v.key(b"/19999", 0)
         ok = v.wait(b"bulk task 19999", 5, start=mark)
-        check("Tasks big: a filter over 20000 rows within 1 s (%.3f s)" %
-              (time.time() - s), ok and time.time() - s < 1,
+        check("Tasks big: a filter over 20000 rows within %d s (%.3f s)" %
+              (x, time.time() - s), ok and time.time() - s < x,
               screen(v, mark))
         v.key(b"\033", 0.3)
         v.key(b"q")

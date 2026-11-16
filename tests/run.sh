@@ -7,8 +7,10 @@ DCH=${DCH:-./dch}
 fail=0
 pass=0
 
-ok()   { pass=$((pass + 1)); printf '  ok   %s\n' "$1"; }
-bad()  { fail=$((fail + 1)); printf '  FAIL %s\n' "$1"; }
+# ok and bad also reap finished pool jobs (pslots 99 collects, never waits),
+# so a timed-out job's leftovers do not outlive the next shell row
+ok()   { pslots 99; pass=$((pass + 1)); printf '  ok   %s\n' "$1"; }
+bad()  { pslots 99; fail=$((fail + 1)); printf '  FAIL %s\n' "$1"; }
 check(){ if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (want [$3] got [$2])"; fi; }
 # Run a python test script; on failure print its output so CI logs show
 # which sub-check died instead of a bare FAIL line.
@@ -65,14 +67,22 @@ runpy.run_path(sys.argv[0], run_name="__main__")' \
 #   perf_test.py          wall-clock spawn/attach budgets of 1 s
 #   harness_names_test.py CPU-time ratio budget, contention skews it
 PYSERIAL=' perf_test.py harness_names_test.py '
+# DCH_TEST_JOBS: 1 = serial, 2..16 = that many jobs; unset = min(CPUs, 6);
+# anything else (empty, 0, not a number, over 16) = the default, with a note
 pjobs=${DCH_TEST_JOBS:-}
-case $pjobs in ''|*[!0-9]*|0|0*)
+case $pjobs in
+    '') ;;
+    [1-9]|1[0-6]) ;;
+    *) echo "note: DCH_TEST_JOBS=$pjobs is not 1..16: using the default" >&2
+       pjobs='' ;;
+esac
+if [ -z "$pjobs" ]; then
     pjobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
     case $pjobs in ''|*[!0-9]*|0) pjobs=1 ;; esac
     # the files wait more than they compute: at 6 jobs the longest file
     # already bounds the wall (#361 measurements); more only adds contention
-    [ "$pjobs" -le 6 ] || pjobs=6 ;;
-esac
+    [ "$pjobs" -le 6 ] || pjobs=6
+fi
 pn=0 prun='' pser='' pjobs0=$pjobs
 pqueue(){
     pn=$((pn + 1)); mkdir "$RUN/$pn" "$RUN/${pn}t" "$RUN/$pn/home"
@@ -93,6 +103,7 @@ pstart(){
      s=$(date +%s)
      pyexec "$(cat "$jd/file")" >"$jd/out" 2>&1 &
      echo $! >"$jd/pid"
+     ps -o lstart= -p $! >"$jd/pst" 2>/dev/null
      wait $!; rc=$?
      echo "$rc $(($(date +%s) - s))" >"$jd/rc.t" && mv "$jd/rc.t" "$jd/rc"
     ) &
@@ -119,7 +130,7 @@ pslots(){
 # pyreap for job $1: its group, the sessions in its own socket dir, its temp dir
 preap(){
     [ -s "$RUN/$1/pid" ] || return 0
-    (pypid=$(cat "$RUN/$1/pid") SOCKDIR=$RUN/$1/dch-$(id -u) pyls=''
+    (pypid=$(cat "$RUN/$1/pid") pyst=$(cat "$RUN/$1/pst" 2>/dev/null) SOCKDIR=$RUN/$1/dch-$(id -u) pyls=''
      DCH_TEST_TMP=$RUN/${1}t XDG_RUNTIME_DIR=$RUN/$1
      export XDG_RUNTIME_DIR; pyreap)
 }
@@ -165,6 +176,11 @@ pyreap(){
     case $pypid in ''|0*|1|*[!0-9]*) return ;; esac
     case $me in ''|0*|*[!0-9]*) return ;; esac
     [ "$pypid" != "$me" ] || return
+    # a live process with pid $pypid that started at another time is not the
+    # test (the id was reused): its group is not ours to kill. A dead leader
+    # with members left: the id cannot be reused while a member lives.
+    if [ -n "${pyst:-}" ] && ps -p "$pypid" >/dev/null 2>&1 &&
+       [ "$(ps -o lstart= -p "$pypid")" != "$pyst" ]; then pypid=x; fi
     left=$(ps -A -o pid= -o pgid= -o stat= -o etime= -o command= |
            awk -v g="$pypid" '$2 == g { print "       " $0 }')
     if [ -n "$left" ]; then

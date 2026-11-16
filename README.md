@@ -282,7 +282,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.73.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.74.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -311,6 +311,12 @@ install -m 0755 dch ~/.local/bin/dch     # or anywhere on $PATH
 ```
 
 Make sure `~/.local/bin` is in your `$PATH`, then `dch -h` to confirm.
+
+`make test` runs the suite. `DCH_TEST_JOBS=n` sets how many Python test files
+run in parallel (default: the CPU count, at most 6; `1` runs serially; 16 is
+the maximum; anything else gets a one-line note and the default).
+`DCH_TEST_TIMES=1` prints each row group's seconds, longest first, before the
+counts.
 
 **Dependencies:** a C compiler (`clang` or `gcc`) and `autoconf`.
 - macOS: `xcode-select --install` (clang + make) + `brew install autoconf`.

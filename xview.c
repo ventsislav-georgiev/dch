@@ -2408,7 +2408,7 @@ xv_lead(int on)
 static int
 xv_mark(const struct xv_ch *c)
 {
-	int pe = c->peer != xv_none;
+	int pe = c->peer != xv_none, w;
 
 	if (!pe && !c->aut)
 		return 0;
@@ -2417,7 +2417,9 @@ xv_mark(const struct xv_ch *c)
 	       ? "\xf0\x9f\x93\xa5 " : "\xf0\x9f\x94\x94 ");
 	if (pe && c->peer[0])
 	{
-		pk_txt(c->peer);
+		/* at most a third of the row, the title after it (#383) */
+		w = pk_cps(c->peer);
+		pk_fit(c->peer, w < pk_w / 3 ? w : pk_w / 3);
 		pk_txt("  ");
 	}
 	return pe;
@@ -4133,13 +4135,14 @@ xv_key(struct xv *v, int c)
 		v->allk = !v->allk;
 		return 0;
 	}
-	if (v->tab == 0 && (c == 'n' || c == 'a'))
+	if ((v->tab == 0 || v->tab == 2) && (c == 'n' || c == 'a'))
 	{
-		/* the selection stays on its chapter, or the next older one
-		** shown (newest first, #358); none shown before: the newest */
+		/* Prompts, Responses: the selection stays on its chapter, or
+		** the next older one shown (newest first, #358), on the first
+		** row too (#383); none shown before: the newest */
 		xv_vis(v);
-		k = v->sel[0] >= 0 && v->sel[0] < v->nvis ? v->vis[v->sel[0]]
-		    : v->nch;
+		k = v->sel[v->tab] >= 0 && v->sel[v->tab] < v->nvis
+		    ? v->vis[v->sel[v->tab]] : v->nch;
 		if (c == 'n')
 			v->allauto = !v->allauto;
 		else
@@ -4147,17 +4150,8 @@ xv_key(struct xv *v, int c)
 		xv_vis(v);
 		for (n = 0; n < v->nvis && v->vis[n] > k; n++)
 			;
-		v->sel[0] = n;
+		v->sel[v->tab] = n;
 		xv_selk(v);
-		return 0;
-	}
-	if (v->tab == 2 && (c == 'n' || c == 'a'))
-	{
-		/* xv_vis keeps the selection */
-		if (c == 'n')
-			v->allauto = !v->allauto;
-		else
-			v->hidepeer = !v->hidepeer;
 		return 0;
 	}
 	if (v->tab != 1 && c == 'o')

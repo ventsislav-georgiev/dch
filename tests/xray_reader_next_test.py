@@ -275,7 +275,9 @@ def test_card():
         wait(v, lambda s: "Prompts 3" in s)
         v.key(b"\033[Z\033[Z")  # back to Search, then Refs (#291)
         wait(v, lambda s: "PROJ-9" in s)
-        ok = press(v, b"\r", lambda s: "Mentions: this session" in s)
+        # the scan done and its row drawn, or Enter has nothing to open yet
+        ok = press(v, b"\r", lambda s: "Mentions: this session" in s and
+                   "middle prompt about PROJ-9" in s and "searching" not in s)
         check("card: PROJ-9 opens", ok, screen(v)[-600:])
         ok = press(v, b"\r", lambda s: at(3, "middle prompt about PROJ-9")(s))
         check("card: Enter on the mention reads the middle chapter", ok,

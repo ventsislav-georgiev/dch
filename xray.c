@@ -4491,7 +4491,9 @@ xr_scan_tick(void *ctx, uint64_t bytes)
 	long long now = xr_now_ms();
 
 	x->bytes = x->base + bytes;
-	if (!x->stop && x->found)
+	/* this session's first hit (#379): its window is read to its end, so
+	** the answer keeps that window's newest mentions, not its oldest */
+	if (!x->stop && x->found && !(x->hold && !x->other))
 	{
 		if (!x->shell)	/* a shell's: its row ends the scan (sc_hit) */
 		{
@@ -6193,24 +6195,60 @@ peer(const struct json_parser *p, int obj)
 	return b >= 0 && p->tok[b].kind == JSON_STRING ? o : -1;
 }
 
-/* A peer's prompt: origin's body as the text, never the wrapper Claude Code
+/* A peer's text as the reader shows it, decoded (*n its length), else NULL:
+** a subagent's hand-back ("handback":true, a JSON true only; *hb 1) gives
+** its report when that is not blank, else its body, either without the
+** "[Subagent hand-back]" boilerplate. Search reads the same (#382). */
+static char *
+peer_body(const struct json_parser *p, int o, size_t *n, int *hb)
+{
+	static const char hbp[] = "[Subagent hand-back]";
+	int v = j_get(p, o, (const char *const[]){ "handback", 0 });
+	size_t h = 0;
+	char *s;
+
+	*hb = v >= 0 && p->tok[v].kind == JSON_PRIMITIVE &&
+	      p->tok[v].end - p->tok[v].start == 4 &&
+	      !memcmp(p->text + p->tok[v].start, "true", 4);
+	/* the report itself is the cleaner field when it is there */
+	s = *hb ? k_str(p, o, (const char *const[]){ "handbackReportText", 0 },
+	                n) : NULL;
+	if (s && blank(s, *n))
+	{
+		free(s);
+		s = NULL;
+	}
+	if (!s && !(s = k_str(p, o, A_BODY, n)))
+		return NULL;
+	if (*hb)
+	{
+		while (h < *n && u_space((unsigned char)s[h]))
+			h++;
+		if (*n - h >= sizeof hbp - 1 && !memcmp(s + h, hbp, sizeof hbp - 1))
+			for (h += sizeof hbp - 1; h < *n && u_space((unsigned char)s[h]);)
+				h++;
+		else
+			h = 0;
+		memmove(s, s + h, *n - h);
+		s[*n -= h] = '\0';
+	}
+	return s;
+}
+
+/* A peer's prompt: peer_body as the text, never the wrapper Claude Code
 ** writes around it, the sender's address or its ids. A subagent's hand-back
-** ("handback":true, a JSON true only) is auto, its summary "subagent <name>:
-** <the report's first line>". name: origin's "name" as a title, "" when it
-** is a path or a bare id (12+ hex digits). */
+** is auto, its summary "subagent <name>: <the report's first line>". name:
+** origin's "name" as a title, "" when it is a path or a bare id (12+ hex
+** digits). */
 static void
 peer_text(struct xr_claude *d, const struct json_parser *p, int o,
           const char *ag)
 {
-	static const char hbp[] = "[Subagent hand-back]";
 	char name[XR_TITLE_MAX * 4 + 1], sum[XR_TITLE_MAX * 4 + 1];
 	char t[XR_TITLE_MAX * 4 + 1], b[XR_TITLE_MAX * 8 + 16], *s = NULL;
-	size_t n = 0, i, h = 0;
-	int v = j_get(p, o, (const char *const[]){ "handback", 0 }), hb;
+	size_t n = 0, i;
+	int hb;
 
-	hb = v >= 0 && p->tok[v].kind == JSON_PRIMITIVE &&
-	     p->tok[v].end - p->tok[v].start == 4 &&
-	     !memcmp(p->text + p->tok[v].start, "true", 4);
 	name[0] = '\0';
 	if ((s = k_str(p, o, A_NAME, &n)))
 		xr_title(s, n, name, sizeof name);
@@ -6219,15 +6257,7 @@ peer_text(struct xr_claude *d, const struct json_parser *p, int o,
 		;
 	if (strchr(name, '/') || (!name[i] && i >= 12))
 		name[0] = '\0';
-	/* the report itself is the cleaner field when it is there */
-	s = hb ? k_str(p, o, (const char *const[]){ "handbackReportText", 0 },
-	               &n) : NULL;
-	if (s && blank(s, n))
-	{
-		free(s);
-		s = NULL;
-	}
-	if (!s && !(s = k_str(p, o, A_BODY, &n)))
+	if (!(s = peer_body(p, o, &n, &hb)))
 	{
 		if (d->want)
 			d->want->failed = 1;
@@ -6235,14 +6265,7 @@ peer_text(struct xr_claude *d, const struct json_parser *p, int o,
 	}
 	if (hb)
 	{
-		/* "[Subagent hand-back]" is boilerplate */
-		while (h < n && u_space((unsigned char)s[h]))
-			h++;
-		if (n - h >= sizeof hbp - 1 && !memcmp(s + h, hbp, sizeof hbp - 1))
-			h += sizeof hbp - 1;
-		else
-			h = 0;
-		xr_title(s + h, n - h, t, sizeof t);
+		xr_title(s, n, t, sizeof t);
 		i = (size_t)snprintf(b, sizeof b, "subagent%s%s%s%s",
 		                     name[0] ? " " : "", name, t[0] ? ": " : "",
 		                     t);
@@ -6251,7 +6274,7 @@ peer_text(struct xr_claude *d, const struct json_parser *p, int o,
 	}
 	d->peer = name;
 	d->peersum = hb ? sum : NULL;
-	user_text(d, ag, s + h, n - h, 0);
+	user_text(d, ag, s, n, 0);
 	d->peer = d->peersum = NULL;
 	free(s);
 }
@@ -11129,7 +11152,13 @@ sr_claude(struct xr_search *s, const struct json_parser *p, struct sr_rec *r,
 	{
 		if (t[0] == 'u' || ((a = k_obj(p, 0, A_ATTACH)) >= 0 &&
 		                    k_streq(p, a, A_TYPE, "queued_command")))
-			sr_parts(s, p, j_get(p, o, A_BODY), SK_USER, r, w);
+		{
+			size_t n = 0;
+			int hb;
+			char *x = peer_body(p, o, &n, &hb);
+
+			sr_try(s, r, SK_USER, x, n, NULL);	/* the reader's text */
+		}
 	}
 	else if (t && (!strcmp(t, "user") || !strcmp(t, "assistant")))
 		sr_parts(s, p, (a = k_obj(p, 0, A_MESSAGE)) >= 0
