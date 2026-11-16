@@ -324,15 +324,15 @@ def main():
         wait_up("svf", "svg")
         locs, evn = [], [0]
 
-        def settle(k0, m):
-            """Poll until serve logged m more client closes of a ctl."""
+        def settle(k0, m, what="closed by the client; stopping its ctl"):
+            """Poll until serve logged m more of `what` (a ctl's client
+            close)."""
             end = time.time() + 5
-            while time.time() < end and text(log).count(
-                    "closed by the client; stopping its ctl") < k0 + m:
+            while time.time() < end and text(log).count(what) < k0 + m:
                 time.sleep(0.05)
 
-        def closes():
-            return text(log).count("closed by the client; stopping its ctl")
+        def closes(what="closed by the client; stopping its ctl"):
+            return text(log).count(what)
 
         def ran(n):
             return text(log).count(" ctl --xray %s (pid" % n)
@@ -503,14 +503,18 @@ def main():
             check("#202: a device's 4 stalled follows leave a local "
                   "--xray --follow a slot (not busy, LOW-R4)",
                   local() == ("following", want))
-            k0 = closes()
+            # a follow that never read is cut as "closed" on its blocked
+            # write, not seen as a client close: it ends "after the close"
+            # (the device's 2 older ones were cut as timeout already)
+            done = "ctl done after the close"
+            k0 = closes(done)
             for s in st:
                 s.close()
             for lp in locs:
                 lp.terminate()
                 lp.wait(5)
             del locs[:]
-            settle(k0, 4)
+            settle(k0, 2, done)
             # 2 local followers and 2 of the device fill the 4 slots: the
             # device's third does not get busy for its own closing one
             l1, l2 = local(), local()

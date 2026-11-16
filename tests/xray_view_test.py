@@ -551,14 +551,15 @@ def test_memory_live():
                    "procStart": start, "version": "2.1.0",
                    "kind": "interactive", "status": "idle",
                    "statusUpdatedAt": 1}, f)
-    v = Pty([DCH, "--xray", "xv-ml"], rows=30, cols=100)
+    v = Pty([DCH, "--xray", "xv-ml"], rows=30, cols=100,
+            env={"DCH_XRAY_MEVERY": "1500"})	# tests only: not 30 s
     try:
         tabbar(v, "Memory ")
         m = re.search(r"Memory (\d+)", rows(v.out).get(2, ""))
         n = int(m.group(1)) if m else -1
         mem_tab(v)
         mem("two.md")
-        # XV_MEVERY is 30 s; 120 s bounds a hang on a slow runner, not speed
+        # XV_MEVERY is 30 s, 1.5 s here; 120 s bounds a hang, not speed
         ok = tabbar(v, "Memory %d" % (n + 1), 120)
         check("memory live: a new memory file shows while the tab is shown, "
               "no transcript line written (LOW-V28)", n > 0 and ok,

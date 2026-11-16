@@ -3389,6 +3389,16 @@ xv_draw_tcard(struct xv *v, int win)
 	}
 }
 
+/* Memory's re-read interval; DCH_XRAY_MEVERY=<ms> lowers it (tests only) */
+static long long
+xv_mevery(void)
+{
+	const char *e = getenv("DCH_XRAY_MEVERY");
+	long long ms = e ? atoll(e) : 0;
+
+	return ms > 0 && ms < XV_MEVERY ? ms : XV_MEVERY;
+}
+
 /* The session runs: o has something to attach. */
 static int
 xv_live(const struct xv *v)
@@ -4427,7 +4437,7 @@ xv_run(int fd, const char *n, char *err, size_t errsz)
 		** from it (LOW-V28) */
 		if (xv_rtab(v) && !v->tq[1].no && v->kid[XV_MK].pid <= 0 &&
 		    (!v->tq[1].at || (xv_live(v) &&
-		     v->tab == 5 && now_ms() - v->tq[1].at >= XV_MEVERY)))
+		     v->tab == 5 && now_ms() - v->tq[1].at >= xv_mevery())))
 			xv_tasks(v, 1);
 		xv_draw(v, force);
 		FD_ZERO(&rs);
