@@ -309,7 +309,8 @@ def main():
                     PATH=wrap + ":" + fake + ":/usr/bin:/bin", **kw)
 
     senv = side("srv", DCH_NO_REMOTE="1", DCH_SERVE_TEST_LOOPBACK="1",
-                DCH_XRAY_NOCLOCK="1", DCH_XRAY_CAPS="1:1000")
+                DCH_XRAY_NOCLOCK="1", DCH_XRAY_CAPS="1:1000",
+                DCH_XRAY_MEVERY="1500")
     # the list's 300 ms box (RM_BOX_MS) can end before serve has forked
     # its ctl on a loaded machine; the box is not what this test is about
     cenv = side("cli", DCH_REMOTE_BOX_MS="5000")
@@ -356,8 +357,8 @@ def main():
             check("a peer's list ran a ctl child of serve's",
                   len(got) > 0, (r and (r.returncode, r.stdout, r.stderr),
                                  open(log).read()[-600:]))
-            check("...without DCH_XRAY_NOCLOCK or DCH_XRAY_CAPS in its "
-                  "environment", got and not any(got.values()), got)
+            check("...without DCH_XRAY_NOCLOCK, DCH_XRAY_CAPS or "
+                  "DCH_XRAY_MEVERY in its environment", got and not any(got.values()), got)
             xn1(senv, cenv, logs, check)
             tasks(senv, cenv, check)
             tasks_command(senv, cenv, logs, check)

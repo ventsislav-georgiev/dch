@@ -320,12 +320,17 @@ def main():
         # --- 1. a watch host: dch serve ------------------------------------
         last = {}
 
+        # the followers' box (#340): beside 16 watch handlers, each running
+        # dch --ls-json every 2 s, a loaded ASan host answers a dial in
+        # over 5 s, inside the 10 s the 17th follower gets (#401)
+        renv = dict(cenv, DCH_REMOTE_BOX_MS="10000") if SLOW else cenv
+
         def ref():
             t0, n, m = time.time(), 0, len(open(log).read())
-            # each try waits up to cenv's box (ASan 5 s): room for 6 of them
+            # each try waits up to renv's box (ASan 10 s): room for 3 of them
             end = t0 + max(10, 3 * BUDGET)
             while True:
-                r = dch(cenv, "--ls-json", "--remote", "--hosts", hosts)
+                r = dch(renv, "--ls-json", "--remote", "--hosts", hosts)
                 n += 1
                 if '"stale":false' in r.stdout or time.time() > end:
                     # why it took this long, for a failure's detail
@@ -671,12 +676,14 @@ def main():
             s.line(0.2)
         f6.set_rows([{"name": "fend"}])
         nf = len(s.lines) - n0
-        rows, dt = s.until(lambda x: rem(x, "f") == {"fend": False}, 2)
+        # 4x limit under DCH_TEST_NO_BUDGET (ASan CI saw 1.06 s)
+        rows, dt = s.until(lambda x: rem(x, "f") == {"fend": False},
+                           5 if SLOW else 2)
         check("a flood of changed lists for 2 s: %d arrays (at most one "
               "per 200 ms)" % nf, rows is not None and 2 <= nf <= 16,
               (nf, rows is not None))
         check("and its last rows come after it (%.2f s)" % dt,
-              rows is not None and dt < 1.0, s.lines[-2:])
+              rows is not None and dt < (4.0 if SLOW else 1.0), s.lines[-2:])
         cache = glob.glob(os.path.join(cenv["XDG_STATE_HOME"], "**",
                                        ".remote-cache"), recursive=True)
         seen, t0 = set(), time.time()

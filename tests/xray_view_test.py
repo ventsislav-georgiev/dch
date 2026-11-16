@@ -560,8 +560,8 @@ def test_memory_live():
         n = int(m.group(1)) if m else -1
         mem_tab(v)
         mem("two.md")
-        # XV_MEVERY is 30 s, 1.5 s here; 120 s bounds a hang, not speed
-        ok = tabbar(v, "Memory %d" % (n + 1), 120)
+        # XV_MEVERY is 30 s, 1.5 s here; 15 s bounds a hang, not speed
+        ok = tabbar(v, "Memory %d" % (n + 1), 15)
         check("memory live: a new memory file shows while the tab is shown, "
               "no transcript line written (LOW-V28)", n > 0 and ok,
               rows(v.out).get(2))
