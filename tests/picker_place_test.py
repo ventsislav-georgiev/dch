@@ -404,10 +404,15 @@ def main():
               "o opens a session: from dch -l or the switch" in s and
               "kill session:" in s and not live("k1") and
               "k1" in rows(s), s)
-        # a key between the two; the line stays (it waited 10 s for it to
-        # clear), so back on k1: the next key acts on it, not on pa
+        # a status line (like "cancelled" or an action's result) stays on
+        # the next key, until an action or / or , replaces it (dch.1: "the
+        # action while it runs, then its result"); so j k: still the line,
+        # and back on k1, where the next key acts on k1, not on pa
         dch("--keys", "pk", "j", "k")
-        wait_screen("pk", lambda s: current(s) == "k1")
+        s = wait_screen("pk", lambda s: current(s) == "k1")
+        check("%r: a key moves, the line stays, back on k1" % key,
+              current(s) == "k1" and
+              "o opens a session: from dch -l or the switch" in s, s)
     dch("--keys", "pk", "q")
 
     # 7. a dropped client while the session lives: its own row, not History
