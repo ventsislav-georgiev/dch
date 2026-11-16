@@ -2145,6 +2145,9 @@ serve_conn(int fd, uint32_t ip)
 	whois = ts_whois(c->ipstr, &slow);
 	v = serve_gate(&g_gate, ip, 0, whois, !whois && ts_up());
 	free(whois);
+	/* no answer in time is whois not available, not "not a node" (#388) */
+	if (slow && v == G_NOTNODE)
+		v = G_NOWHOIS;
 	if (v >= G_RANGE)
 	{
 		long long end = now_ms() + REFUSE_MS;
@@ -2979,7 +2982,7 @@ serve_main(int argc, char **argv)
 		struct in_addr ca;
 		char *w = NULL;
 		uint32_t ip;
-		int v, self, slow;
+		int v, self, slow = 0;
 
 		if (inet_pton(AF_INET, check, &ca) != 1)
 		{
@@ -2997,6 +3000,8 @@ serve_main(int argc, char **argv)
 			v = serve_gate(&g_gate, ip, self, w,
 			               !self && !w && ts_up());
 			free(w);
+			if (slow && v == G_NOTNODE)
+				v = G_NOWHOIS;
 		}
 		{
 			const char *m, *code = gate_code(v, &m);

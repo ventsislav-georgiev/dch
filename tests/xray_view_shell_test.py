@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """The `dch --xray <n>` view, part 4 of 4 (#365): resize
 and the small card, a shell session, signals, On screen, the screen
-group, Search on a shell, the picker's x, o, the chord, held o.
+group, Search on a shell, the picker's x, o, the chord's end and detach;
+xray_view_shell_more_test.py runs the chord and held o (split for run time).
 
 The harness, the fixtures and the list of what the four parts cover
 are in xray_view_lib.py.
@@ -426,15 +427,19 @@ def test_open(lite):
         v.close()
 
 
-def test_chord():
-    o = json.loads(dch("--xray", "xv-sh", "--json").stdout)
-    lite = o["corpus"] == "none" and o["reason"] == "lite"
+def probe():
     r = dch("--spawn", "xv-rx", "--size", "100x30", "python3", "-c", RX,
             RXF)
     check("chord: the probe session spawned", r.returncode == 0, r.stderr)
     # the probe opens RXF after tty.setraw, which flushes input: a --send
     # before it is lost (seen under load, #365)
     until(lambda: os.path.exists(RXF), 10)
+
+
+def test_chord():
+    o = json.loads(dch("--xray", "xv-sh", "--json").stdout)
+    lite = o["corpus"] == "none" and o["reason"] == "lite"
+    probe()
     chord_case("x in a later read", [b"\x1c", b"x"], lite)
     chord_case("x in the same burst", [b"\x1cx"], lite)
     chord_case("the kitty CSI form", [b"\x1c", b"\033[120u"], lite)
@@ -838,7 +843,7 @@ def test_chord_detach():
         a.close()
 
 
-def main():
+def main(part="a"):
     def rest():
         o = json.loads(dch("--xray", "xv-sh", "--json").stdout)
         lite = o["corpus"] == "none" and o["reason"] == "lite"
@@ -846,10 +851,16 @@ def main():
         test_search_shell(lite)
         test_picker()
         test_open(lite)
+        test_chord_end()
+        probe()
+        test_chord_detach()
+
+    def chord():
         test_chord()
         test_held_o()
-        test_chord_end()
-        test_chord_detach()
+    if part == "b":
+        run_steps(fixture, shell, chord)
+        return
     run_steps(fixture, test_resize, test_small_card, shell, test_signals,
               test_on_screen, rest)
 

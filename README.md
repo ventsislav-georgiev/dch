@@ -282,7 +282,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.74.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.75.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -313,7 +313,7 @@ install -m 0755 dch ~/.local/bin/dch     # or anywhere on $PATH
 Make sure `~/.local/bin` is in your `$PATH`, then `dch -h` to confirm.
 
 `make test` runs the suite. `DCH_TEST_JOBS=n` sets how many Python test files
-run in parallel (default: the CPU count, at most 6; `1` runs serially; 16 is
+run in parallel (default: the CPU count, at most 8; `1` runs serially; 16 is
 the maximum; anything else gets a one-line note and the default).
 `DCH_TEST_TIMES=1` prints each row group's seconds, longest first, before the
 counts.
@@ -1618,7 +1618,9 @@ ref (`dch: not a ref`), relative paths against the session's cwd.
   cwd's. Another session's lines carry `chapter: null`.
 - **Light.** The default stops at its first result, or after `--budget-ms`
   (50 to 300, default 300, across all files, not counting time spent waiting
-  on a reader that pauses) with `why: "budget"`. With
+  on a reader that pauses) with `why: "budget"`; a window being decoded is
+  read to its end, and the scan's first window always is (the budget ends
+  only its search for a cwd, which then finds none). With
   `--scope project` or `all`, `<n>`'s own file is read to its end and only
   another session's result stops the scan. A Claude Code transcript or a
   Codex rollout is read newest first (1.62.0), so a ref of the last turns is
@@ -1641,9 +1643,11 @@ ref (`dch: not a ref`), relative paths against the session's cwd.
 - **Range.** `--ref` (light and `--full`) reads a transcript past `--json`'s
   range (the first 16 MiB and the newest 256 MiB) too, under the same
   budget, 10 s and 1 GiB caps, so a ref in the middle of a file over 272 MiB
-  is found. The middle reads at the speed of the rest (3.7 s for a dense 300
-  MiB file), so a file of a few GB can stop at the 10 s clock and say
-  partial. A mention or definition in that middle has `chapter: null`, since
+  is found. `--full` reads the head, then the newest 256 MiB, then the
+  middle, oldest first, so the caps cut only the middle and the newest turns
+  are always read: a file over 1 GiB always comes back partial
+  (`why: "bytes"`), with its newest kept, and one whose middle takes past
+  the 10 s clock says `why: "time"` (a dense 300 MiB file: 2.9 s, 11 MB). A mention or definition in that middle has `chapter: null`, since
   `--json` has no chapter there. So a ref card can show mentions from a part
   of a huge transcript that the Chapters, Prompts and Responses lists do not
   reach.

@@ -73,10 +73,10 @@ def until(cond, secs):
     return cond()
 
 
-def shell(cmd, rep, argv, pre, env):
+def shell(cmd, rep, argv, pre, env, ew):
     """The pty's session leader, as a job-control shell: one job, then one
     byte per command off cmd (w: wait for the job to stop or end, f: fg,
-    b: bg), one line per answer on rep."""
+    b: bg), one line per answer on rep. ew closes in the job's exec."""
     for s in (signal.SIGTTOU, signal.SIGTTIN, signal.SIGTSTP):
         signal.signal(s, signal.SIG_IGN)
     cooked = termios.tcgetattr(0)
@@ -93,6 +93,7 @@ def shell(cmd, rep, argv, pre, env):
             os.write(1, pre)
         os.execve(DCH, [DCH] + argv, env)
         os._exit(127)
+    os.close(ew)
     try:
         os.setpgid(job, job)
     except OSError:
@@ -137,21 +138,24 @@ class Job:
         env.pop("DCH_SESSION", None)
         cr, cw = os.pipe()
         rr, rw = os.pipe()
+        er, ew = os.pipe()  # close-on-exec: EOF once the job exec'd
         pid, fd = pty.fork()
         if pid == 0:
             try:
                 os.close(cw)
                 os.close(rr)
+                os.close(er)
                 fcntl.ioctl(0, termios.TIOCSWINSZ,
                             struct.pack("HHHH", 24, 80, 0, 0))
-                shell(cr, rw, argv, pre, env)
+                shell(cr, rw, argv, pre, env, ew)
             finally:
                 os._exit(0)
         # a later job would hold this pty open (QA 1.59.0 MED-T2)
         os.set_inheritable(fd, False)
         os.close(cr)
         os.close(rw)
-        self.pid, self.fd, self.cw, self.rr = pid, fd, cw, rr
+        os.close(ew)
+        self.pid, self.fd, self.cw, self.rr, self.er = pid, fd, cw, rr, er
         self.out, self.rep = b"", b""
         self.job = None
         r = self.reply(10, read_tty=False)
@@ -184,6 +188,12 @@ class Job:
     def do(self, c, read_tty=True):
         os.write(self.cw, c)
         return self.reply(read_tty=read_tty)
+
+    def execd(self, secs):
+        """The job's execve is done: a tty ^Z inside it stops nothing
+        (macOS drops it, #389)."""
+        r, _, _ = select.select([self.er], [], [], secs)
+        return bool(r) and os.read(self.er, 1) == b""
 
     def tc(self):
         try:
@@ -221,7 +231,7 @@ class Job:
         except OSError:
             pass
         # the fds first (#215), then a bounded wait
-        for f in (self.fd, self.cw, self.rr):
+        for f in (self.fd, self.cw, self.rr, self.er):
             try:
                 os.close(f)
             except OSError:
@@ -286,16 +296,16 @@ def case_a(env):
 
 
 def case_b(env, n, trace):
-    """n: 0 the ^Z as the job starts, 1 and 2 once the client is about to
-    set raw mode (its trace says so), 2 after a beat more; the terminal
-    reads nothing meanwhile, so the raw tcsetattr waits for the shell's
-    echo to drain."""
+    """n: 0 the ^Z as dch starts (the job's exec done), 1 and 2 once the
+    client is about to set raw mode (its trace says so), 2 after a beat
+    more; the terminal reads nothing meanwhile, so the raw tcsetattr waits
+    for the shell's echo to drain."""
     what = "(b%d) ^Z during startup" % n
     open(trace, "w").close()
     j = Job(["-a", SESS], pre=b"$ dch -a %s\r\n" % SESS.encode(),
             env=dict(env, DCH_DEBUG=trace))
     try:
-        ok = until(lambda: os.tcgetpgrp(j.fd) == j.job, 10)
+        ok = until(lambda: os.tcgetpgrp(j.fd) == j.job, 10) and j.execd(10)
         if n:
             ok = ok and until(lambda: b"attach hot-path" in
                               open(trace, "rb").read(), 10)

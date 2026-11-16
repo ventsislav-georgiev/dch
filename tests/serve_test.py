@@ -1205,12 +1205,15 @@ def main():
         r1 = reply(port)
         time.sleep(0.5)		# its handler gone and reaped by the parent
         r2 = reply(port)
-        check("a whois past 3 s refuses that connection, whois_failed "
-              "(#378)", r1 == refusal("whois_failed"))
+        check("a whois past 3 s refuses that connection, whois_unavailable "
+              "(#378, #388)", r1 == refusal("whois_unavailable"))
+        check("  and the log says tailscaled is not answering, not 'not a "
+              "node' (#388)", "tailscaled not answering" in text(log)
+              and "not a node" not in text(log))
         check("  the next connection asks whois again and is let in, not "
               "refused for 30 s (#378)", r2 == "accept"
               and "refused before fork" not in text(log))
-        if r1 != refusal("whois_failed") or r2 != "accept":
+        if r1 != refusal("whois_unavailable") or r2 != "accept":
             print(r1, r2, text(log)[-600:])
         stop(p)
 
@@ -1348,6 +1351,12 @@ def main():
         check("--check-peer refuses a non-tailnet address, no code",
               peer("192.168.1.5") == (1, "refuse 192.168.1.5: not an IPv4 "
                                          "address in 100.64.0.0/10\n"))
+        put("whois.stall", "6")
+        out = peer("100.100.2.2")
+        check("--check-peer, whois past 3 s: refused as whois_unavailable "
+              "(#388)", out[0] == 1 and "(whois_unavailable)" in out[1]
+              and "tailscaled not answering" in out[1])
+        put("whois.stall", None)
         check("--check-peer accepts the owner's node",
               peer("100.100.2.2")[0] == 0)
         # F2: this host itself, by address and by node id

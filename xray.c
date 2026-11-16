@@ -4084,9 +4084,10 @@ struct xr_scan
 	uint64_t cs, cp, cps, ca, cas;	/* 3.4's counts, files done */
 	int stop, out_full;
 	int hold, took;		/* light (#377): the budget waits while hold (a
-				** window, or the scan's first one and its cwd
-				** walk), so a cut drops older windows, never the
-				** newest's lines; took: the first was taken */
+				** window, or the scan's first one), so a cut
+				** drops older windows, never the newest's lines;
+				** 2: the first's cwd walk, which the budget ends,
+				** not the scan (#387); took: the first was taken */
 	int cancel;		/* a write failed: 1 EPIPE (the reader left), 2 other */
 	const char *why;
 	long long last;
@@ -4325,19 +4326,29 @@ mention_line(struct xr_scan *x, const struct xr_hit *h)
 
 /* Light's mention lines (#303): its windows come newest first, a window's
 ** lines oldest first, so the file's newest XR_RING are kept by offset, in
-** the order they came: a newer line puts out the oldest held one. */
+** the order they came: a newer line puts out the oldest held one. --full's
+** too, its middle read last (#387): XR_HELD after a first put out, else
+** the oldest is kept and the second oldest goes; they come out oldest
+** first (xr_scan_file). */
 static void
 sc_hold(struct xr_scan *x, char *b, uint64_t off)
 {
-	size_t k, o = 0;
+	size_t k, o = 0, m;
+	int keep = 0, old = x->full && !x->mentioned;
 
-	if (x->hn == XR_RING)
+	if (x->hn == (x->full && x->mentioned ? XR_HELD : XR_RING))
 	{
 		for (k = 1; k < x->hn; k++)
 			if (x->hoff[k] < x->hoff[o])
 				o = k;
+		if (old && off < x->hoff[o])
+			keep = 1;	/* the new oldest: the old one is second */
+		else if (old)
+			for (m = o, o = !m, k = 0; k < x->hn; k++)
+				if (k != m && x->hoff[k] < x->hoff[o])
+					o = k;
 		x->dropped++;
-		if (x->hoff[o] > off)
+		if (!keep && x->hoff[o] > off)
 		{
 			free(b);
 			return;
@@ -4424,14 +4435,18 @@ sc_hit(void *ctx, const struct xr_hit *h)
 		if (newline && (x->full || (!x->shell && !x->other)) &&
 		    (b = mention_line(x, h)))
 		{
-			if (!x->full)
-				sc_hold(x, b, h->off);
-			else if (!x->mentioned++)
+			/* --full's first, at once when the head's: no older one
+			** can come (a shell's rows come in order) */
+			if (x->full && !x->hn && !x->mentioned &&
+			    (x->shell || h->off < xr_lim.head))
 			{
+				x->mentioned = 1;
 				(void)sc_line(x, b, strlen(b));
 				free(b);
 			}
-			else
+			else if (!x->full || !x->shell)
+				sc_hold(x, b, h->off);
+			else	/* a shell's newest, by arrival */
 			{
 				if (x->hn == XR_HELD)
 				{
@@ -4501,9 +4516,11 @@ xr_scan_tick(void *ctx, uint64_t bytes)
 			x->why = "first";
 		}
 	}
-	else if (!x->stop && !x->full && !xr_noclock && !x->hold &&
+	else if (!x->stop && !x->full && !xr_noclock && x->hold != 1 &&
 	         now - x->t0 - x->blocked >= x->budget)
 	{
+		if (x->hold)	/* 2: it ends the first window's cwd walk (#387) */
+			return 1;
 		x->stop = 1;
 		x->why = "budget";
 	}
@@ -4561,6 +4578,17 @@ xr_scan_file(struct xr_scan *x, uint64_t bytes, uint64_t too_long,
 	x->base += bytes;
 	x->bytes = x->base;
 	x->too_long += too_long;
+	for (k = 1; x->full && !x->shell && k < x->hn; k++)	/* oldest first */
+	{
+		size_t j = k;
+		char *l = x->held[k];
+		uint64_t o = x->hoff[k];
+
+		for (; j > 0 && x->hoff[j - 1] > o; j--)
+			x->held[j] = x->held[j - 1], x->hoff[j] = x->hoff[j - 1];
+		x->held[j] = l;
+		x->hoff[j] = o;
+	}
 	for (k = 0; k < x->hn; k++)
 	{
 		char *l = x->held[(x->h0 + k) % XR_RING];
@@ -7623,27 +7651,33 @@ ref_whole(struct xr_claude *d, int fd, uint64_t size, char *buf)
 }
 
 /* --full's: the head and the tail by d as --json reads them (its chapters,
-** cwd and calls), the middle between by a fresh decoder (win_read); the
-** tick sees the bytes up to each line. */
+** cwd and calls), then the middle between by a fresh decoder (win_read),
+** last, so the 1 GiB and 10 s caps cut only the middle and the newest
+** turns are always read (#387); the tick sees the bytes read so far: the
+** head's up to its cut, then the tail's from mhi (base wraps: its ticks
+** count from size - tail, plus the head's 16 MiB, and start at mhi). */
 static int
 read_whole(struct xr_claude *d, int fd, uint64_t size, char *buf, char *acc)
 {
 	struct xr_win w = { d->tick, d->tctx, 0 };
+	char cwd[sizeof d->cwd];
+	uint64_t cut;
 	int rc = read_range(d, fd, 0, xr_lim.head, 0, buf, acc);
 
 	if (rc || d->halt)
 		return rc;
-	w.base = d->next;	/* the line the head's end cuts on */
-	if ((rc = win_read(d, fd, d->next, d->mhi, &w, buf, acc, d->cwd)) ||
-	    d->halt)
-		return rc;
-	w.base = size - xr_lim.tail - xr_lim.head;
+	cut = d->next;	/* the line the head's end cuts on */
+	memcpy(cwd, d->cwd, sizeof cwd);	/* the middle's cwd at its start */
+	w.base = cut + (size - xr_lim.tail) - xr_lim.head - d->mhi;
 	d->tick = win_tick;
 	d->tctx = &w;
 	rc = read_range(d, fd, size - xr_lim.tail, size, 1, buf, acc);
 	d->tick = w.tick;
 	d->tctx = w.tctx;
-	return rc;
+	if (rc || d->halt)
+		return rc;
+	w.base = cut + (size - d->mhi);
+	return win_read(d, fd, cut, d->mhi, &w, buf, acc, cwd);
 }
 
 int
@@ -7664,7 +7698,7 @@ xr_claude_newest(struct xr_claude *d, int fd, uint64_t size, int *capped)
 	struct xr_scan *x = key ? d->tctx : NULL;
 
 	if (x && !x->took)
-		x->hold = 1;	/* the scan's first window and its cwd walk */
+		x->hold = 1;	/* the scan's first window */
 	w.tick = d->tick;
 	w.tctx = d->tctx;
 	w.base = 0;
@@ -7732,11 +7766,21 @@ xr_claude_newest(struct xr_claude *d, int fd, uint64_t size, int *capped)
 				if (a - lo > xr_lim.cwd &&
 				    line_start(fd, a - xr_lim.cwd, a, buf, &fl) <= 0)
 					fl = a;	/* one line longer than that: no walk */
+				if (x && !x->took)
+					x->hold = 2;
 				k = fl < hi ? cwd_back(d, fd, fl, hi, &w, sb, buf, acc,
 				                       &cat, cwd) : 0;
 				if (!k && !d->halt && !i && nr == 2 && fl == lo && hi)
 					k = cwd_back(d, fd, 0, xr_lim.head, &w, sb, buf, acc,
 					             &cat, cwd), fl = 0;	/* cat 0: walked */
+				if (x && x->hold == 2)
+				{
+					x->hold = 1;
+					/* the budget cut the walk: the window is read with no
+					** cwd, and none ruled out (cat at a) */
+					if (d->halt && !x->stop)
+						d->halt = 0, k = 0, fl = hi;
+				}
 				if (k < 0)
 					rc = -1;
 				if (k <= 0)

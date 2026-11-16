@@ -1,7 +1,7 @@
 """The `dch --xray <n>` view and the picker's x (#175, XR5a): the harness
-and fixtures of its four test files (split for the pool, #365):
+and fixtures of its five test files (split for the pool, #365, #361):
 xray_view_test.py, xray_view_turns_test.py, xray_view_tasks_test.py,
-xray_view_shell_test.py. Each imports this, so each gets its own T.
+xray_view_shell_test.py, xray_view_shell_more_test.py. Each imports this, so each gets its own T.
 
 The view runs on a pty this test owns (pty.fork), so it needs no terminal
 mirror and runs the same on dch-lite. A History Claude record whose chapter
