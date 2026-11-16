@@ -2082,7 +2082,7 @@ define_command = ~/bin/my-define
 - **Limits.** 5 s (as `tasks_command`'s) and 1 MB of output; past a
   limit the process group is ended. The definitions count only once the
   command has exited 0: a failure (no such program, a non-zero exit, a
-  timeout, the 1 MB cap, nothing printed) gives no definition, also when
+  timeout, the 1 MB cap, nothing printed, out of memory) gives no definition, also when
   it printed some first. The card says "No definition found" and the
   reason after it (`define_command: exit 3: <its stderr's first line>`,
   `stopped early after 5 s`, `stopped early at 1 MB of output`, `out of
