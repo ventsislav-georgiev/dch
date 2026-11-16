@@ -337,11 +337,27 @@ def ctl_checks(dch, check, senv, cenv, serve_at, procs, fakes, tmp, hosts):
     pr = subprocess.Popen([DCH] + H + ["--follow", "srv:fb"], env=cenv,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                           stdin=subprocess.DEVNULL)
-    time.sleep(1.5)
+    mirror = dch(cenv, "--build").stdout.strip() == "full"
+    # both attached = each printed its first frame (a lite build prints none:
+    # a short pause there, as before). What is read is kept for the compare.
+    pre = {}
+    for p_ in (pl, pr):
+        pre[p_] = b""
+        if mirror:
+            end = time.time() + 20
+            while b"dch-frame" not in pre[p_] and time.time() < end:
+                if not select.select([p_.stdout], [], [], 0.5)[0]:
+                    continue
+                c = os.read(p_.stdout.fileno(), 65536)
+                if not c:
+                    break
+                pre[p_] += c
+    if not mirror:
+        time.sleep(1.5)
     open(go, "w").close()
     lo, le = pl.communicate(timeout=20)
     ro, re_ = pr.communicate(timeout=20)
-    mirror = dch(cenv, "--build").stdout.strip() == "full"
+    lo, ro = pre[pl] + lo, pre[pr] + ro
     check("ctl --follow: the local verb's frames, its exit at the end",
           (ro, re_, pr.returncode) == (lo, le, pl.returncode)
           and (not mirror or (pr.returncode == 0

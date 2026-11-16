@@ -1294,7 +1294,7 @@ it streams that one ref's lines as NDJSON instead
 .BR progress ,
 then
 .BR done ),
-light by default (stops at the first result or after
+light by default (stops once the first result's window is read to its end, or after
 .B \-\-budget\-ms
 .IR ms ,
 50 to 300, default 300, across all files, not counting time spent waiting

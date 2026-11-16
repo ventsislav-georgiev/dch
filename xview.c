@@ -2417,9 +2417,9 @@ xv_mark(const struct xv_ch *c)
 	       ? "\xf0\x9f\x93\xa5 " : "\xf0\x9f\x94\x94 ");
 	if (pe && c->peer[0])
 	{
-		/* at most a third of the row, the title after it (#383) */
+		/* at most a third of the room left, the title after it (#383) */
 		w = pk_cps(c->peer);
-		pk_fit(c->peer, w < pk_w / 3 ? w : pk_w / 3);
+		pk_fit(c->peer, w < (pk_w - pk_col) / 3 ? w : (pk_w - pk_col) / 3);
 		pk_txt("  ");
 	}
 	return pe;

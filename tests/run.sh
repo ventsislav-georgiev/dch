@@ -68,7 +68,8 @@ runpy.run_path(sys.argv[0], run_name="__main__")' \
 #   harness_names_test.py CPU-time ratio budget, contention skews it
 PYSERIAL=' perf_test.py harness_names_test.py '
 # DCH_TEST_JOBS: 1 = serial, 2..16 = that many jobs; unset = min(CPUs, 8);
-# anything else (empty, 0, not a number, over 16) = the default, with a note
+# empty = the default; anything else (0, not a number, over 16) = the default,
+# with a note
 pjobs=${DCH_TEST_JOBS:-}
 case $pjobs in
     '') ;;
@@ -153,7 +154,7 @@ pdrain(){
     pjobs=1
 }
 
-# --- times (DCH_TEST_TIMES=1 prints them, longest first, before the counts)
+# --- times (a DCH_TEST_TIMES other than empty or 0 prints them, longest first, before the counts)
 # trow records a row group: a python file, a C unit, a block of shell rows.
 # The shell blocks leave out the pyrun time inside them.
 tlast=$(date +%s) tacc=0 tname='shell: CLI rows' tstart=$tlast
@@ -1410,10 +1411,10 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
 fi
 
 tsec ''
-if [ -n "${DCH_TEST_TIMES:-}" ]; then
+case ${DCH_TEST_TIMES:-} in ''|0) ;; *)
     printf '\ntimes (s), longest first; %d jobs, %ds wall:\n' "$pjobs0" \
         $(($(date +%s) - tstart))
-    sort -rn "$RUN/times"
-fi
+    sort -rn "$RUN/times" ;;
+esac
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
