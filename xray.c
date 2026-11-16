@@ -4568,11 +4568,16 @@ xr_scan_file(struct xr_scan *x, uint64_t bytes, uint64_t too_long,
 	uint64_t count = per_row ? x->nrow : x->nunit;
 
 	x->files++;
-	if (x->found && !x->stop)
+	if (x->found && !x->stop && x->shell)
 	{
 		x->stop = 1;	/* a shell's first result, its row the last read */
 		x->why = "first";
 	}
+	/* a first hit that ended after the file's last byte stopped nothing:
+	** the next file's tick (xr_scan_next) stops the scan if one follows */
+	if (x->stop && !x->shell && x->why && !strcmp(x->why, "first") &&
+	    x->bytes >= x->base && x->bytes - x->base >= bytes)
+		x->stop = 0, x->why = NULL;
 	if (x->stop && !x->shell && x->bytes >= x->base)
 		bytes = x->bytes - x->base;	/* stopped: what the ticks saw */
 	x->base += bytes;

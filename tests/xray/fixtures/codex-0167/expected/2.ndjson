@@ -3,4 +3,4 @@
 {"schema":1,"mention":{"session":"cx","chapter":"f*:2547","at":1794304807,"line":"Summary: investigated #77; PR #78 has the fix.","offset":2547,"live":true,"project":"-T-work-cx"}}
 {"schema":1,"mention":{"session":"cx","chapter":"f*:3443","at":1794304808,"line":"Ship it and close #77","offset":3443,"live":true,"project":"-T-work-cx"}}
 {"schema":1,"tally":{"session":"cx","live":true,"project":"-T-work-cx","count":3,"definitions":0,"partial":false,"mentions_dropped":0}}
-{"schema":1,"done":true,"partial":true,"counts":{"session":3,"project":0,"project_sessions":0,"all":null,"all_sessions":null},"why":"first","files":1,"bytes":3819,"lines_too_long":0}
+{"schema":1,"done":true,"partial":false,"counts":{"session":3,"project":0,"project_sessions":0,"all":null,"all_sessions":null},"why":null,"files":1,"bytes":3819,"lines_too_long":0}

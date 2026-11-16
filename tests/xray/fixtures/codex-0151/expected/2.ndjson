@@ -2,4 +2,4 @@
 {"schema":1,"mention":{"session":"cx","chapter":"f*:1029","at":1794304802,"line":"Fix the flaky parser test from #41","offset":1029,"live":true,"project":"-T-work-cx"}}
 {"schema":1,"mention":{"session":"cx","chapter":"f*:1029","at":1794304806,"line":"Fixed in `a1b2c3d4`; see #41 and src/parse.c:12.","offset":2186,"live":true,"project":"-T-work-cx"}}
 {"schema":1,"tally":{"session":"cx","live":true,"project":"-T-work-cx","count":2,"definitions":0,"partial":false,"mentions_dropped":0}}
-{"schema":1,"done":true,"partial":true,"counts":{"session":2,"project":0,"project_sessions":0,"all":null,"all_sessions":null},"why":"first","files":1,"bytes":2804,"lines_too_long":0}
+{"schema":1,"done":true,"partial":false,"counts":{"session":2,"project":0,"project_sessions":0,"all":null,"all_sessions":null},"why":null,"files":1,"bytes":2804,"lines_too_long":0}

@@ -1616,7 +1616,7 @@ ref (`dch: not a ref`), relative paths against the session's cwd.
   its project dir is the Codex's cwd's, its `lastSeen` the rollout's last
   write, and History records hold none. A shell `<n>`'s project dir is its
   cwd's. Another session's lines carry `chapter: null`.
-- **Light.** The default stops at its first result, or after `--budget-ms`
+- **Light.** The default stops once the first result's window is read to its end (session scope), or after `--budget-ms`
   (50 to 300, default 300, across all files, not counting time spent waiting
   on a reader that pauses) with `why: "budget"`; a window being decoded is
   read to its end, and the scan's first window always is (the budget ends

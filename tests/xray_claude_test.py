@@ -2901,13 +2901,13 @@ def test_prefilter_reach():
         r, ls, cpu, n = reach()
         men = [l["mention"]["offset"] for l in ls if "mention" in l]
         check("prefilter: light --ref finds a ref named only in the first "
-              "line of a 96 MB transcript: the mention at offset 0, why "
-              "first, all but its oldest window counted, at under a quarter "
+              "line of a 96 MB transcript: the mention at offset 0, "
+              "nothing unread, all but its oldest window counted, at under a quarter "
               "of the CPU per byte of decoding every window (%.0f ms for "
               "96 MB; decoded, %.0f ms for %d MB)"
               % (cpu * 1000, tw[2] * 1000, tw[3] >> 20),
               r.returncode == 0 and men == [0] and
-              ls[-1].get("done") and ls[-1]["why"] == "first" and
+              ls[-1].get("done") and ls[-1]["why"] is None and
               n >= os.path.getsize(tp) - (2 << 20) and
               tw[3] > 16 << 20 and cpu / n * 4 < tw[2] / tw[3],
               (r.returncode, ls[-2:], r.stderr, tw[1][-1:]))
@@ -3109,11 +3109,35 @@ def test_light_379():
         ls = ref_lines(r.stdout) or [{}]
         m = [l["mention"]["line"][5:8] for l in ls if "mention" in l]
         check("379 scope session: the first hit's window is read to its "
-              "end, so note 050 (the newest) is there, why first",
+              "end, so note 050 (the newest) is there, nothing unread",
               r.returncode == 0 and
               m == ["%03d" % i for i in range(1, 51)] and
-              ls[-1].get("why") == "first",
+              ls[-1].get("why") is None,
               (r.returncode, m[:3], m[-3:], ls[-1:], r.stderr[-300:]))
+        # a scan that read every file it had to is complete (LOW-X5)
+        check("379 scope session: the whole file read, so partial false, "
+              "why null", ls[-1].get("partial") is False and
+              ls[-1].get("why") is None, ls[-1:])
+        # another session's result stops the scan: the third is left unread
+        tps = []
+        for k in (80, 81):
+            sk = "11111111-2222-4333-8444-5555555553%02d" % k
+            tps.append(os.path.join(pdir, sk + ".jsonl"))
+            with open(tps[-1], "w") as f:
+                f.write(json.dumps({"type": "user", "cwd": "/home/demo/p379",
+                                    "message": {"content": "PROJ-79 too"}})
+                        + "\n")
+            history("xr-379-%d" % k, sk, cfg, "/home/demo/p379")
+        try:
+            r = dch("--xray", "xr-379", "--ref", "PROJ-79", "--scope",
+                    "project", "--json")
+            d = (ref_lines(r.stdout) or [{}])[-1]
+            check("379 scope project: another session's result stops the "
+                  "scan before the next file, partial true, why first",
+                  d.get("partial") is True and d.get("why") == "first", d)
+        finally:
+            for q in tps:
+                os.unlink(q)
     finally:
         os.unlink(tp)
 
