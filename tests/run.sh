@@ -1428,6 +1428,7 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     # -kl: end the session on the test socket dir (its sleep too), then the master by pid
     "$DCH" -k -- -kl >/dev/null 2>&1
     kill "$wdkl" 2>/dev/null
+    wdby= wdkl= # ended above: the exit trap must not signal reused pids
     [ "$fail" = "$wdf" ] || sed 's/^/       /' "$TMP/wd.out"
     [ -S "$SOCKDIR/$wdname.sock" ] && "$DCH" -k "$wdname" >/dev/null 2>&1
     # DCH_TEST_TIMEOUT 0 (no watchdog) and invalid values (600) pass a test
