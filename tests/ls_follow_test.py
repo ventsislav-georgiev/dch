@@ -676,12 +676,14 @@ def main():
             s.line(0.2)
         f6.set_rows([{"name": "fend"}])
         nf = len(s.lines) - n0
-        rows, dt = s.until(lambda x: rem(x, "f") == {"fend": False}, 2)
+        # 4x limit under DCH_TEST_NO_BUDGET (ASan CI saw 1.06 s)
+        rows, dt = s.until(lambda x: rem(x, "f") == {"fend": False},
+                           5 if SLOW else 2)
         check("a flood of changed lists for 2 s: %d arrays (at most one "
               "per 200 ms)" % nf, rows is not None and 2 <= nf <= 16,
               (nf, rows is not None))
         check("and its last rows come after it (%.2f s)" % dt,
-              rows is not None and dt < 1.0, s.lines[-2:])
+              rows is not None and dt < (4.0 if SLOW else 1.0), s.lines[-2:])
         cache = glob.glob(os.path.join(cenv["XDG_STATE_HOME"], "**",
                                        ".remote-cache"), recursive=True)
         seen, t0 = set(), time.time()
