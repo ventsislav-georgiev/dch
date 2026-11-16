@@ -36,6 +36,9 @@ KSEQ = re.compile(rb"\033\[(\?1049[hl]|>\d*u|<\d*u)")
 MODES = (b"\x1b[?1000h", b"\x1b[?2004h", ALT_ON)   # the child's, re-armed
 RESET = (b"\x1b[?25h", b"\x1b[?1000l", b"\x1b[?2004l", b"\x1b[?1004l")
 STOPPED = b"<<stopped>>"
+# the busy ctrl-z's stop and resume under a flood: an ASan build on a loaded
+# CI runner (DCH_TEST_NO_BUDGET) gets more time (#389)
+WAIT = 30.0 if os.environ.get("DCH_TEST_NO_BUDGET") else 10.0
 
 
 def kitty_stacks(out):
@@ -298,7 +301,8 @@ def main():
         for i in range(1, 4):
             time.sleep(0.1)     # not read: the master queues output
             os.write(fd_d, b"\x1a")
-            got, end = b"", time.time() + 10
+            t0 = time.time()
+            got, end = b"", t0 + WAIT
             while ALT_ON not in got.partition(STOPPED)[2] and \
                   time.time() < end:
                 got += drain(fd_d, 0.2)
@@ -306,7 +310,8 @@ def main():
             if ALT_ON not in post or b"TICK" in post[:post.find(ALT_ON)]:
                 print("FAIL: busy ctrl-z resume %d writes output on the main "
                       "screen before its 1049h:" % i, repr(post[:200]),
-                      "stopped:", STOPPED in got, "read:", len(got),
+                      "stopped:", STOPPED in got, "after: %.1fs" %
+                      (time.time() - t0), "read:", len(got),
                       repr(got[-120:]))
                 return 1
         print("PASS: kitty push follows 1049h on attach; detach pops on both "
