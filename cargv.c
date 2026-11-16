@@ -178,8 +178,27 @@ claude_runs(char **v, int tok)
 int
 dch_claude_strip(char **in, int argc, char **out, int agent)
 {
+	int nm;
+	size_t off;
+
+	return dch_claude_strip_nm(in, argc, out, agent, &nm, &off);
+}
+
+static int
+isname(const struct copt *o)
+{
+	return !strcmp(o->name, "-n") || !strcmp(o->name, "--name");
+}
+
+int
+dch_claude_strip_nm(char **in, int argc, char **out, int agent, int *nm,
+                    size_t *off)
+{
 	int tok = dch_claude_tok(in, argc), k, n, var = 0, ops = 0;
 	size_t j;
+
+	*nm = -1;
+	*off = 0;
 
 	if (tok < argc && !agent && !claude_runs(in, tok))
 		goto whole;
@@ -208,7 +227,11 @@ dch_claude_strip(char **in, int argc, char **out, int agent)
 		}
 		out[n++] = in[k];
 		if (a[1] == '-' && strchr(a, '='))
+		{
+			if (strncmp(a, "--name=", 7) == 0)
+				*nm = n - 1, *off = 7;
 			continue;	/* --opt=value never takes the next token */
+		}
 		if (!(o = copt_find(a, strlen(a))) && a[1] != '-')
 		{
 			/* a cluster: -cp is -c -p, -nfoo is -n foo, and -cn
@@ -220,6 +243,8 @@ dch_claude_strip(char **in, int argc, char **out, int agent)
 				if (!(o = copt_find(sh, 2)) || o->kind != 'b')
 					break;
 			}
+			if (o && p[1] && isname(o))
+				*nm = n - 1, *off = (size_t)(p + 1 - a);
 			if (o && (o->kind == 'b' || p[1]))
 				continue;	/* all flags, or the value is the rest */
 		}
@@ -234,14 +259,23 @@ dch_claude_strip(char **in, int argc, char **out, int agent)
 			continue;
 		}
 		if ((o->kind == 'r' || o->kind == 'v') && k + 1 < argc)
+		{
+			if (isname(o))
+				*nm = n, *off = 0;
 			out[n++] = in[++k];
+		}
 		else if (o->kind == 'o' && k + 1 < argc && !dashed(in[k + 1]))
 			out[n++] = in[++k];
 		var = o->kind == 'v';
 	}
 	out[n] = NULL;
+	/* the name only of a claude that runs: a `claude` word elsewhere
+	** (agent) is not its argv */
+	if (!claude_runs(in, tok))
+		*nm = -1;
 	return n;
 whole:
+	*nm = -1;	/* unsure what owns what: no name */
 	for (n = 0; n < argc; n++)
 		out[n] = in[n];
 	out[n] = NULL;

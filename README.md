@@ -2475,6 +2475,10 @@ dch --stop work              # pause its Claude, end it: "stopped"
 dch --revive work            # ...and later wake it, Claude resumed
 ```
 
+A revive under another name (`--as`, or `--all`'s `<name>-N`) gives
+Claude's `-n`/`--name` the new name when it was the session's dch name; a
+name of your own stays.
+
 `--all` takes a session only when all three hold: it ended abnormally
 (anything but `exit 0`, `killed` and `stopped`, `vanished` included), it was last seen
 within the last 3 days, and it ran at least 5 minutes (last seen − started;
