@@ -91,6 +91,7 @@ struct xv_ch
 struct xv_ref
 {
 	char *key, *shape, *text, *title;
+	char *full;		/* a commit's fullest SHA, else "" */
 	long long count, seen;	/* seen: later is more recent */
 	long long last;		/* last_offset (#262): -1 from an older host */
 	int defined, underline;
@@ -207,6 +208,7 @@ struct xv
 	int old;		/* Responses: no chapter with an answer field */
 	/* the card */
 	char *ckey, *ctext;
+	char *cref;		/* --ref's text: the fullest form known (#415) */
 	char *cwarn;		/* done's define_warn (#405), else NULL */
 	int full, scope, cdone, cpartial, csel, ctop;
 	/* the selected mention's session and offset, followed as lines
@@ -718,6 +720,7 @@ xv_ref_free(struct xv_ref *r)
 	xv_sfree(r->key);
 	xv_sfree(r->shape);
 	xv_sfree(r->text);
+	xv_sfree(r->full);
 	xv_sfree(r->title);
 }
 
@@ -782,6 +785,7 @@ xv_ref(struct xv *v, const struct json_parser *p, int o)
 	r.key = xv_str(p, o, "key");
 	r.shape = xv_str(p, o, "shape");
 	r.text = xv_str(p, o, "text");
+	r.full = xv_str(p, o, "full");
 	r.title = xv_str(p, o, "title");
 	r.count = xv_num(p, o, "count", 0);
 	r.last = xv_num(p, o, "last_offset", -1);
@@ -1063,10 +1067,12 @@ xv_cpin(struct xv *v)
 }
 
 /* The card of ref text (key: its index key), scanned light for the
-** project, or full (scope 1 project, 2 all). */
+** project, or full (scope 1 project, 2 all). ref, when not NULL or "", is
+** what --ref sends (define_command's ref as written, #415); text stays the
+** card's header, copy and highlight. */
 static void
-xv_card(struct xv *v, const char *key, const char *text, int full,
-        int scope)
+xv_card(struct xv *v, const char *key, const char *text, const char *ref,
+        int full, int scope)
 {
 	char *av[8];
 	int ac = 0, k;
@@ -1075,13 +1081,16 @@ xv_card(struct xv *v, const char *key, const char *text, int full,
 	{
 		xv_sfree(v->ckey);
 		xv_sfree(v->ctext);
+		xv_sfree(v->cref);
 		v->ckey = strdup(key);
 		v->ctext = strdup(text);
-		if (!v->ckey || !v->ctext)
+		v->cref = strdup(ref && ref[0] ? ref : text);
+		if (!v->ckey || !v->ctext || !v->cref)
 		{
 			free(v->ckey);
 			free(v->ctext);
-			v->ckey = v->ctext = NULL;
+			free(v->cref);
+			v->ckey = v->ctext = v->cref = NULL;
 			snprintf(v->status, sizeof v->status, "X-ray: out of memory");
 			return;
 		}
@@ -1102,7 +1111,7 @@ xv_card(struct xv *v, const char *key, const char *text, int full,
 	}
 	av[ac++] = v->n;
 	av[ac++] = "--ref";
-	av[ac++] = v->ctext;
+	av[ac++] = v->cref;
 	if (scope == 2)
 	{
 		av[ac++] = "--scope";
@@ -1242,7 +1251,7 @@ xv_lookup(struct xv *v)
 		return;
 	}
 	v->filtering = 0;
-	xv_card(v, t, t, 0, 1);
+	xv_card(v, t, t, NULL, 0, 1);
 }
 
 /* ---- Tasks (--tasks, #320) ------------------------------------------- */
@@ -4190,12 +4199,12 @@ xv_key(struct xv *v, int c)
 		case 'g': case PK_HOME: v->csel = 0; xv_cpin(v); break;
 		case 'G': case PK_END: v->csel = v->nm - 1; xv_cpin(v); break;
 		case 'f':
-			xv_card(v, v->ckey, v->ctext, 1, v->scope);
+			xv_card(v, v->ckey, v->ctext, NULL, 1, v->scope);
 			break;
 		case 'o':
 			return xv_open(v);
 		case 'p':	/* o before 1.61 (#227); o opens, as everywhere */
-			xv_card(v, v->ckey, v->ctext, 1, v->scope == 2 ? 1 : 2);
+			xv_card(v, v->ckey, v->ctext, NULL, 1, v->scope == 2 ? 1 : 2);
 			break;
 		case 'y':
 			xv_copy(v);
@@ -4363,7 +4372,7 @@ xv_key(struct xv *v, int c)
 		{
 			const struct xv_ref *r = xv_rfat(v, k);
 
-			xv_card(v, r->key, r->text, 0, 1);
+			xv_card(v, r->key, r->text, r->full, 0, 1);
 		}
 		break;
 	}
@@ -4408,6 +4417,7 @@ xv_free(struct xv *v)
 	xv_sfree(v->label);
 	xv_sfree(v->ckey);
 	xv_sfree(v->ctext);
+	xv_sfree(v->cref);
 	xv_sfree(v->rwant);
 	free(v->ranchor);
 	free(v->rturn);

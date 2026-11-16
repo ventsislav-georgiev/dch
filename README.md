@@ -2045,7 +2045,9 @@ define_command = ~/bin/my-define
   absolute path) and `DCH_REF_SHAPE` (`ticket`, `issue`, `pull`, `commit`,
   `file` or `url`). As written means the `--ref` text (trimmed), the text
   you type for ^R in the view, and a peer's text through `dch serve`;
-  Enter on a row of the Refs list sends the row's key text, so there it
+  Enter on a row of the Refs list sends the fullest form the row has: a
+  commit's longest SHA seen (also when it came from a commit URL, whose
+  repo X-ray does not keep), any other row its key text, which there
   equals `DCH_REF_KEY`.
 - **Untrusted.** The ref comes from a transcript, the screen or (through
   `dch serve`) a peer, who chooses it: treat it as input, not as a word

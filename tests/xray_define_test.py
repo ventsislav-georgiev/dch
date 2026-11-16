@@ -22,6 +22,8 @@ PROJ-5 only mentioned), `dch --xray xv-cl --ref <ref> --json` and the card:
     does not parse is skipped; C1, NEL and bidi controls out;
   - #831, defined by the transcript: the command never runs, the lines
     as with no define_command;
+  - #415: Enter on a commit row of the Refs list sends the row's full
+    SHA (argv, DCH_REF), the short key in DCH_REF_KEY;
   - the card: the title marked "your define_command", its body and url;
     a failure: "No definition found" and the reason on that line.
 
@@ -332,9 +334,42 @@ sys.exit(3)
     config(None)
 
 
+def test_refs_row_full():
+    """#415: a Refs-list row opens the card with its fullest form: a
+    commit's full SHA, not the 7-hex key text."""
+    record("xv-sha", "11111111-2222-4333-8444-5555555555d5", [
+        {"type": "user", "cwd": P, "timestamp": "2026-11-10T10:00:00Z",
+         "message": {"content": "the sha fixture"}},
+        {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "fixed in %s today" % SHA}]}}])
+    config(script("rec2.py", r'''
+import json, os, sys
+json.dump({"argv": sys.argv[1:], "ref": os.environ.get("DCH_REF"),
+           "key": os.environ.get("DCH_REF_KEY")}, open(%r, "w"))
+print(json.dumps({"title": "rec"}))
+''' % REC))
+    if os.path.exists(REC):
+        os.unlink(REC)
+    v, _, scr = refs_tab("xv-sha")  # Refs, a: the commit its only row
+    try:
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        until(lambda: (v.pump(0.1), os.path.exists(REC) and
+                       "searching" not in screen(v, mark))[1], 15)
+        g = json.load(open(REC)) if os.path.exists(REC) else {}
+        check("#415: Refs row of a commit: the full SHA in argv and DCH_REF, "
+              "the short key in DCH_REF_KEY", g.get("argv") == [SHA] and
+              g.get("ref") == SHA and g.get("key") == "0123456",
+              (g, scr, screen(v, mark)))
+        v.key(b"q")
+    finally:
+        v.close()
+    config(None)
+
+
 def main():
     run_steps(fixture, test_cli, test_written, test_card,
-              test_failed_after_rows, test_card_width)
+              test_failed_after_rows, test_card_width, test_refs_row_full)
 
 
 def test_card_width():
