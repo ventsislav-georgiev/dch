@@ -110,6 +110,7 @@ def col(r, text):
 
 
 def test_marks():
+    state("hide_agents=0\n")    # #406: a persists, start shown
     o = json.loads(dch("--xray", "xv-pe", "--json").stdout)
     check("engine: peer on the cross-session rows and the hand-back",
           [c.get("peer") for c in o["chapters"]] ==
@@ -240,7 +241,68 @@ def test_marks():
         v.close()
 
 
+def state(body):
+    p = os.path.join(T, "state", "dch", "xray-view")
+    if body is None:
+        if os.path.exists(p):
+            os.unlink(p)
+    else:
+        with open(p, "w") as f:
+            f.write(body)
+    return p
+
+
+def test_persist():
+    """#406: hidden by default, the a key remembered for every view."""
+    p = state(None)
+    v = Pty([DCH, "--xray", "xv-pe"], rows=40, cols=100)
+    try:
+        check("#406: fresh state: Prompts 2, agent rows hidden",
+              v.wait(b"Prompts 2"), v.out)
+        v.pump(0.5)
+        s = screen(v, 0)
+        check("#406: fresh state: the footer counts the 3 hidden",
+              "a agent rows 3 hidden" in s and not at(listed(v), "Scrollback"),
+              s)
+        v.key(b"a", 0.8)
+        check("#406: a shows them", at(listed(v), "Scrollback"), listed(v))
+        v.key(b"q", 0.3)
+        v.exit()
+    finally:
+        v.close()
+    check("#406: the choice written", open(p).read() == "hide_agents=0\n",
+          open(p).read())
+    v = Pty([DCH, "--xray", "xv-oc"], rows=30, cols=100)
+    try:
+        check("#406: another session's view: shown", v.wait(b"Prompts 4"),
+              v.out)
+        v.key(b"a", 0.8)
+        v.key(b"q", 0.3)
+        v.exit()
+    finally:
+        v.close()
+    check("#406: a again written", open(p).read() == "hide_agents=1\n",
+          open(p).read())
+    v = Pty([DCH, "--xray", "xv-pe"], rows=40, cols=100)
+    try:
+        check("#406: a new view starts hidden", v.wait(b"Prompts 2"), v.out)
+        v.key(b"q", 0.3)
+        v.exit()
+    finally:
+        v.close()
+    state("hide_agents=banana\x01\x02 junk")
+    v = Pty([DCH, "--xray", "xv-pe"], rows=40, cols=100)
+    try:
+        check("#406: a garbage state file: hidden, no crash",
+              v.wait(b"Prompts 2"), v.out)
+        v.key(b"q", 0.3)
+        check("#406: garbage: q exits 0", v.exit() == 0, v.rc)
+    finally:
+        v.close()
+
+
 def test_no_peer():
+    state("hide_agents=0\n")    # #406: a persists, start shown
     v = Pty([DCH, "--xray", "xv-np"], rows=30, cols=100)
     try:
         check("no peer: Prompts 2", v.wait(b"Prompts 2"), v.out)
@@ -267,6 +329,7 @@ def test_no_peer():
 def test_keep():
     """#383: Responses keeps its first item across a and n, as Prompts does;
     a long sender leaves room for the title."""
+    state("hide_agents=0\n")    # #406: a persists, start shown
     v = Pty([DCH, "--xray", "xv-oc"], rows=30, cols=100)
     try:
         check("xv-oc: Prompts 4", v.wait(b"Prompts 4"), v.out)
@@ -299,6 +362,7 @@ def test_keep():
 def test_narrow():
     """The sender is a third of the room after the row's prefix, so the
     title keeps at least 8 cells at 41 columns and all 17 at 60."""
+    state("hide_agents=0\n")    # #406: a persists, start shown
     for cols, need in ((41, 8), (60, 17)):
         v = Pty([DCH, "--xray", "xv-oc"], rows=30, cols=cols)
         try:
@@ -320,6 +384,7 @@ def test_narrow():
 def main():
     try:
         fixture()
+        test_persist()
         test_marks()
         test_no_peer()
         test_keep()

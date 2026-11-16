@@ -100,6 +100,8 @@ struct xv_ref
 struct xv_def
 {
 	char *session, *title, *passage, *rule;
+	char *url, *status;	/* a define_command's (#405) */
+	int cmd;		/* "source":"command" */
 	long long at;
 };
 
@@ -205,6 +207,7 @@ struct xv
 	int old;		/* Responses: no chapter with an answer field */
 	/* the card */
 	char *ckey, *ctext;
+	char *cwarn;		/* done's define_warn (#405), else NULL */
 	int full, scope, cdone, cpartial, csel, ctop;
 	/* the selected mention's session and offset, followed as lines
 	** arrive (#304); cses NULL on the first row */
@@ -903,6 +906,8 @@ xv_card_free(struct xv *v)
 		xv_sfree(v->d[k].title);
 		xv_sfree(v->d[k].passage);
 		xv_sfree(v->d[k].rule);
+		xv_sfree(v->d[k].url);
+		xv_sfree(v->d[k].status);
 	}
 	for (k = 0; k < v->nm; k++)
 	{
@@ -914,7 +919,8 @@ xv_card_free(struct xv *v)
 	xv_sfree(v->vkind);
 	xv_sfree(v->vtitle);
 	xv_sfree(v->vsub);
-	v->vkind = v->vtitle = v->vsub = NULL;
+	xv_sfree(v->cwarn);
+	v->vkind = v->vtitle = v->vsub = v->cwarn = NULL;
 }
 
 /* A shell session's light card shows titles and counts only (S18), and a
@@ -941,6 +947,7 @@ xv_counts(struct xv *v, const struct json_parser *p, int o)
 static void
 xv_cline(struct xv *v, const struct json_parser *p)
 {
+	char *s;
 	int o;
 
 	if ((o = xv_obj(p, 0, "definition", JSON_OBJECT)) >= 0)
@@ -954,7 +961,12 @@ xv_cline(struct xv *v, const struct json_parser *p)
 		d.passage = xv_str(p, o, "passage");
 		d.rule = xv_str(p, o, "rule");
 		d.at = xv_num(p, o, "at", -1);
-		if (!xv_lines_ok(v, d.session))
+		d.url = xv_str(p, o, "url");
+		d.status = xv_str(p, o, "status");
+		d.cmd = !strcmp((s = xv_str(p, o, "source")), "command");
+		xv_sfree(s);
+		/* a define_command's body is no transcript line: always shown */
+		if (!d.cmd && !xv_lines_ok(v, d.session))
 		{
 			xv_sfree(d.passage);
 			d.passage = xv_none;
@@ -1029,6 +1041,8 @@ xv_cline(struct xv *v, const struct json_parser *p)
 		xv_counts(v, p, 0);
 		v->cdone = 1;
 		v->cpartial = xv_bool(p, 0, "partial");
+		xv_sfree(v->cwarn);
+		v->cwarn = xv_str(p, 0, "define_warn");
 	}
 }
 
@@ -2757,6 +2771,11 @@ xv_draw_card(struct xv *v, int win)
 	{
 		pk_set("2");
 		pk_txt(running ? "Definitions: searching" : "No definition found");
+		if (!running && v->cwarn && v->cwarn[0])	/* #405: why not */
+		{
+			pk_txt(xv_dot());
+			pk_txt(v->cwarn);
+		}
 	}
 	else
 	{
@@ -2772,17 +2791,43 @@ xv_draw_card(struct xv *v, int win)
 
 		pk_line();
 		pk_txt("  ");
-		pk_set(pk_p(PK_ACC));
-		pk_txt(d->rule);
-		pk_set("");
-		pk_txt(" ");
-		pk_txt(d->title);
-		xv_when(d->at, w, sizeof w);
-		pk_set("2");
-		snprintf(b, sizeof b, "  %s %s", w, d->session);
-		pk_txt(b);
-		pk_eol();
-		rows++;
+		if (d->cmd)	/* #405: the user's own command, marked so */
+		{
+			pk_txt(d->title);
+			pk_set("2");
+			if (d->status[0])
+			{
+				pk_txt("  ");
+				pk_txt(d->status);
+			}
+			pk_txt(xv_dot());
+			pk_txt("your define_command");
+			pk_eol();
+			rows++;
+			if (d->url[0] && rows < win / 2)
+			{
+				pk_line();
+				pk_set("2");
+				pk_txt("    ");
+				pk_txt(d->url);
+				pk_eol();
+				rows++;
+			}
+		}
+		else
+		{
+			pk_set(pk_p(PK_ACC));
+			pk_txt(d->rule);
+			pk_set("");
+			pk_txt(" ");
+			pk_txt(d->title);
+			xv_when(d->at, w, sizeof w);
+			pk_set("2");
+			snprintf(b, sizeof b, "  %s %s", w, d->session);
+			pk_txt(b);
+			pk_eol();
+			rows++;
+		}
 		if (d->passage[0] && rows < win / 2)
 		{
 			const char *s = d->passage;
@@ -2790,9 +2835,10 @@ xv_draw_card(struct xv *v, int win)
 
 			for (l = 0; l < 3 && *s && rows < win / 2; l++, rows++)
 			{
-				size_t f = xv_fitlen(s, strlen(s), pk_w - 4);
+				size_t f = xv_fitlen(s, d->cmd ? strcspn(s, "\n")
+				                     : strlen(s), pk_w - 4);
 
-				if (!f)
+				if (!f && !(d->cmd && *s == '\n'))
 					f = 1;
 				pk_line();
 				pk_set("2");
@@ -2800,6 +2846,8 @@ xv_draw_card(struct xv *v, int win)
 				xv_txtn(s, f);
 				pk_eol();
 				s += f;
+				if (d->cmd && *s == '\n')	/* its own lines */
+					s++;
 			}
 		}
 	}
@@ -3977,6 +4025,52 @@ xv_open(struct xv *v)
 	return 0;
 }
 
+/* The a key's choice outlives the view (#406): one line, hide_agents=0|1, in
+** dch's state dir (the one the session records live under). Hidden unless
+** the file says 0; a failed write is dropped, the view goes on. */
+static int
+xv_peerfile(char *out, size_t sz, int create)
+{
+	char *s;
+
+	if (dch_history_dir(out, sz, NULL, create) < 0 ||
+	    !(s = strrchr(out, '/')) ||
+	    snprintf(s, sz - (size_t)(s - out), "/xray-view") >=
+	        (int)(sz - (size_t)(s - out)))
+		return -1;
+	return 0;
+}
+
+static int
+xv_peerload(void)
+{
+	char p[PATH_MAX], b[32] = "";
+	FILE *f;
+
+	if (xv_peerfile(p, sizeof p, 0) < 0 || !(f = fopen(p, "r")))
+		return 1;
+	if (!fgets(b, sizeof b, f))
+		b[0] = '\0';
+	fclose(f);
+	return strcmp(b, "hide_agents=0\n") != 0;
+}
+
+static void
+xv_peersave(int hide)
+{
+	char p[PATH_MAX], t[PATH_MAX + 8];
+	FILE *f;
+	int bad;
+
+	if (xv_peerfile(p, sizeof p, 1) < 0 ||
+	    snprintf(t, sizeof t, "%s.%ld", p, (long)getpid()) >= (int)sizeof t ||
+	    !(f = fopen(t, "w")))
+		return;
+	bad = fprintf(f, "hide_agents=%d\n", hide) < 0;
+	if (fclose(f) != 0 || bad || rename(t, p) < 0)
+		unlink(t);
+}
+
 /* One key. 1: leave the view. */
 static int
 xv_key(struct xv *v, int c)
@@ -4156,7 +4250,10 @@ xv_key(struct xv *v, int c)
 		if (c == 'n')
 			v->allauto = !v->allauto;
 		else
+		{
 			v->hidepeer = !v->hidepeer;	/* #360 */
+			xv_peersave(v->hidepeer);
+		}
 		xv_vis(v);
 		for (n = 0; n < v->nvis && v->vis[n] > k; n++)
 			;
@@ -4373,6 +4470,7 @@ xv_run(int fd, const char *n, char *err, size_t errsz)
 		return 3;
 	}
 	v->fd = fd;
+	v->hidepeer = xv_peerload();
 	v->tab = xv_tab;
 	v->color = pk_colors(0);
 	snprintf(v->n, sizeof v->n, "%s", n);

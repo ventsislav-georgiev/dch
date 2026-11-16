@@ -11,7 +11,8 @@ the host's own dch does, and the text is never in the ctl child's argv
 its stdin. #319: a peer's --tasks answers as the host's dch. #321: with a
 tasks_command, the host's config and the host's command answer it; the
 peer's own config, environment and cwd reach none of it; --memory with a
-memory_command the same.
+memory_command the same. #405: a peer's --ref the host's transcripts do not
+define runs the host's define_command, never the peer's.
 
 Run:  python3 tests/serve_xray_env_test.py        (uses ./dch)
 """
@@ -277,6 +278,56 @@ def memory_command(senv, cenv, check):
           not os.path.exists(mark))
 
 
+def define_command(senv, cenv, check):
+    """#405: a peer's --ref OQ-97 of session xa (xn1's; no transcript
+    defines it) runs the host's define_command: its definition, source
+    command, the ref and session as the host's own dch gives them; the
+    peer's own define_command never runs."""
+    host = os.path.join(senv["HOME"], "host-define")
+    peer = os.path.join(cenv["HOME"], "peer-define")
+    mark = os.path.join(cenv["HOME"], "peer-define-ran")
+    with open(host, "w") as f:
+        f.write("#!/bin/sh\nprintf '{\"title\":\"<%s|%s|%s>\",\"status\":"
+                "\"open\"}\\n' \"$1\" \"$DCH_REF_SHAPE\" \"$DCH_SESSION\"\n")
+    with open(peer, "w") as f:
+        f.write("#!/bin/sh\ntouch '%s'\necho peer\n" % mark)
+    for p in (host, peer):
+        os.chmod(p, 0o755)
+    # a new file's first exec can wait about 3 s on endpoint security
+    # clock (#405): run the host's once first (never the peer's: its mark)
+    subprocess.run([host], stdin=subprocess.DEVNULL,
+                   stdout=subprocess.DEVNULL, timeout=60)
+    with open(senv["DCH_CONFIG"], "a") as f:
+        f.write("define_command = %s\n" % host)
+    with open(cenv["DCH_CONFIG"], "a") as f:
+        f.write("define_command = %s\n" % peer)
+    henv = {k: v for k, v in senv.items() if not k.startswith("DCH_XRAY_")}
+    clock = re.compile(rb'"elapsed_ms":\d+')
+    loc = subprocess.run([DCH, "--xray", "xa", "--ref", "OQ-97", "--json"],
+                         env=henv, capture_output=True, timeout=30,
+                         stdin=subprocess.DEVNULL)
+    rem = subprocess.run([DCH, "--xray", "srv:xa", "--ref", "OQ-97",
+                          "--json"], env=cenv, cwd=cenv["HOME"],
+                         capture_output=True, timeout=60,
+                         stdin=subprocess.DEVNULL)
+    try:
+        ds = [json.loads(l)["definition"] for l in rem.stdout.splitlines()
+              if b'"definition"' in l]
+    except ValueError:
+        ds = []
+    check("define_command through serve: the host's command defines "
+          "OQ-97, as the host's own dch does",
+          rem.returncode == 0 and clock.sub(b"", rem.stdout) ==
+          clock.sub(b"", loc.stdout) and len(ds) == 1 and
+          ds[0]["source"] == "command" and
+          ds[0]["title"] == "<OQ-97|ticket|xa>" and
+          ds[0]["status"] == "open",
+          (rem.returncode, rem.stdout[-500:], rem.stderr[:300],
+           loc.stdout[-300:]))
+    check("...and the peer's own define_command never ran",
+          not os.path.exists(mark))
+
+
 def main():
     tmp = os.path.realpath(tempfile.mkdtemp(prefix="dchsxe", dir=os.environ.get("DCH_TEST_TMP", "/tmp")))
     fake, wrap, logs = (os.path.join(tmp, d) for d in ("fake", "wrap", "logs"))
@@ -363,6 +414,7 @@ def main():
             tasks(senv, cenv, check)
             tasks_command(senv, cenv, logs, check)
             memory_command(senv, cenv, check)
+            define_command(senv, cenv, check)
     finally:
         if sp.poll() is None:
             sp.send_signal(signal.SIGTERM)

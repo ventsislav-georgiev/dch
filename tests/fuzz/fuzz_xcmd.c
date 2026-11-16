@@ -4,11 +4,13 @@
 **
 ** Input: byte 0 picks.
 **   bit 0 clear: the rest, cut at '\n', line by line through xcmd_line,
-**     the kind from bit 1, `first` from bit 2 for the first line only.
+**     the kind from bit 1 (bit 3 set: define, #405), `first` from bit 2
+**     for the first line only.
 **     A row line must be one line of valid UTF-8 within XCMD_LINE_MAX that
 **     parses as {"task"|"memory":{...}} with an id and a title; a title
 **     must be valid UTF-8 of at most XR_TITLE_MAX scalars; anything else
-**     leaves out empty.
+**     leaves out empty. A define row: {"title","passage","url","status"},
+**     a title, no control byte decoded but a passage's '\n' and '\t'.
 **   bit 0 set: the rest up to a NUL through xcmd_argv, home "/h" or none
 **     (bit 1), a buffer of 64 or 4096 bytes (bit 2): at most XCMD_ARGS_MAX
 **     words, every word inside the buffer and NUL-terminated.
@@ -53,6 +55,49 @@ check_row(enum xcmd_kind kind, const char *o)
 	dch_json_free(&p);
 }
 
+/* a define row's text field k: absent never, null or text with no control
+** byte (nl: '\n' allowed) */
+static void
+check_def_text(const struct json_parser *p, const char *k, int nl, int need)
+{
+	static char t[XCMD_LINE_MAX + 1];
+	int f = dch_json_field(p, 0, k);
+	size_t i;
+
+	if (f < 0)
+		abort();
+	if (p->tok[f].kind != JSON_STRING)
+	{
+		if (need || p->text[p->tok[f].start] != 'n')
+			abort();
+		return;
+	}
+	if (dch_json_decode(p, f, t, sizeof t) != 0 || (need && !t[0]))
+		abort();
+	for (i = 0; t[i]; i++)
+		if (((unsigned char)t[i] < 0x20 &&
+		     !(nl && (t[i] == '\n' || t[i] == '\t'))) ||
+		    t[i] == 0x7f)
+			abort();
+}
+
+static void
+check_def(const char *o)
+{
+	struct json_parser p;
+	size_t l = strlen(o);
+
+	if (!l || l > XCMD_LINE_MAX || strchr(o, '\n') ||
+	    !dch_utf8_ok((const unsigned char *)o, l) ||
+	    dch_json_parse(&p, o) != 0 || p.tok[0].kind != JSON_OBJECT)
+		abort();
+	check_def_text(&p, "title", 0, 1);
+	check_def_text(&p, "passage", 1, 0);
+	check_def_text(&p, "url", 0, 0);
+	check_def_text(&p, "status", 0, 0);
+	dch_json_free(&p);
+}
+
 static char out[XCMD_LINE_MAX + 1];
 
 int
@@ -93,7 +138,7 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 		free(buf);
 		return 0;
 	}
-	kind = d[0] & 2 ? XCMD_MEMORY : XCMD_TASK;
+	kind = d[0] & 8 ? XCMD_DEFINE : d[0] & 2 ? XCMD_MEMORY : XCMD_TASK;
 	first = (d[0] & 4) != 0;
 	s = (const char *)d + 1;
 	n--;
@@ -104,7 +149,9 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 
 		e = nl ? (size_t)(nl - s) : n;
 		k = xcmd_line(kind, s + i, e - i, first, 7, out, sizeof out);
-		if (k == XCMD_ROW)
+		if (k == XCMD_ROW && kind == XCMD_DEFINE)
+			check_def(out);
+		else if (k == XCMD_ROW)
 			check_row(kind, out);
 		else if (k == XCMD_TITLE)
 			check_title(out);

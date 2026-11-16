@@ -281,9 +281,12 @@ time.sleep(5)
                 c, _ = srv.accept()
             except socket.timeout:
                 continue
+            except OSError:  # srv closed by the finally: the end
+                return
             threading.Thread(target=conn, args=(c,), daemon=True).start()
 
-    threading.Thread(target=accept, daemon=True).start()
+    acc = threading.Thread(target=accept, daemon=True)
+    acc.start()
     try:
         fl = subprocess.Popen([DCH, "--xray", "qa-a4", "--follow", "--json"],
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -308,6 +311,7 @@ time.sleep(5)
     finally:
         stop.set()
         srv.close()
+        acc.join(5)
 
 
 try:
