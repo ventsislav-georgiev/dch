@@ -282,7 +282,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.78.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.79.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -2474,6 +2474,10 @@ dch --revive work --no-message  # resume its Claude, type nothing into it
 dch --stop work              # pause its Claude, end it: "stopped"
 dch --revive work            # ...and later wake it, Claude resumed
 ```
+
+A revive under another name (`--as`, or `--all`'s `<name>-N`) gives
+Claude's `-n`/`--name` the new name when it was the session's dch name; a
+name of your own stays.
 
 `--all` takes a session only when all three hold: it ended abnormally
 (anything but `exit 0`, `killed` and `stopped`, `vanished` included), it was last seen

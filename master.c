@@ -1221,12 +1221,24 @@ init_pty(char **argv, int statusfd)
 	     fcntl(ep[1], F_SETFD, FD_CLOEXEC) < 0))
 		return -1;
 
-	/* Create the pty process */
-	if (!dont_have_tty)
-		the_pty.pid = forkpty(&the_pty.fd, NULL, &the_pty.term,
-		    &the_pty.ws);
-	else
-		the_pty.pid = forkpty(&the_pty.fd, NULL, NULL, &the_pty.ws);
+	/* Create the pty process. A full pty table (ENXIO on macOS, ENOSPC
+	** on Linux) frees as other terminals close: retry for up to 2s,
+	** inside the spawning client's 10s wait (#399). */
+	for (int tries = 0;; tries++)
+	{
+		struct timespec ts = {0, 50 * 1000 * 1000};
+
+		if (!dont_have_tty)
+			the_pty.pid = forkpty(&the_pty.fd, NULL,
+			    &the_pty.term, &the_pty.ws);
+		else
+			the_pty.pid = forkpty(&the_pty.fd, NULL, NULL,
+			    &the_pty.ws);
+		if (the_pty.pid >= 0 || tries == 40 ||
+		    (errno != ENXIO && errno != ENOSPC))
+			break;
+		nanosleep(&ts, NULL);
+	}
 	if (the_pty.pid < 0)
 		return -1;
 	dch_trace("init_pty child=%d fd=%d notty=%d", (int)the_pty.pid,

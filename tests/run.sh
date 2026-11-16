@@ -508,6 +508,7 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     pyrun "--history/--revive bring dead sessions back" revive_test.py
     pyrun "--history/--revive, prune to --json" revive_more_test.py
     pyrun "--revive never starts two claudes on one id" revive_sid_test.py
+    pyrun "--revive --as renames claude's --name too" revive_name_test.py
     pyrun "claude's one-shot prompt is never sent again (#138)" oneshot_prompt_test.py
     pyrun "--pin/--unpin/--forget keep and clean history" history_pin_test.py
     pyrun "a local a:b session stays local, remote hosts off or not (#122)" colon_name_test.py
@@ -533,6 +534,7 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
         pyrun "--stop: a quiet master after /exit, Ctrl-C twice at exiting" stop_more_test.py
     fi
     pyrun "-k/--stop signal exactly the session's master" kill_test.py
+    pyrun "a master spawned from another session drops its inherited fds (#400)" inherit_fd_test.py
     pyrun "attached client exits cleanly on SIGHUP/SIGTERM" hangup_test.py
     pyrun "records with odd bytes, long aliases and long argv read back" record_utf8_test.py
     pyrun "a signalled master's history end names the sender" signal_sender_test.py
@@ -574,6 +576,25 @@ if [ -x "$DCH" ]; then
     out=$("$DCH" --spawn "nx$$" sleep 60 2>/dev/null)
     check "a later --spawn of a real program works" "$out" "nx$$"
     "$DCH" -k "nx$$" >/dev/null 2>&1
+    # --- a full pty table is waited out, a lasting one fails (#399) -------
+    if $xcc -O1 -shared -fPIC -o "$TMP/ptyfail.so" "$xsrc/tests/ptyfail.c" \
+            -ldl >"$TMP/ptyfail.log" 2>&1; then
+        pf="LD_PRELOAD=$TMP/ptyfail.so"
+        [ "$(uname)" = Darwin ] && pf="DYLD_INSERT_LIBRARIES=$TMP/ptyfail.so"
+        out=$(env "$pf" DCH_PTYFAIL=3 "$DCH" --spawn "pf$$" sleep 60 2>&1)
+        check "--spawn waits out a full pty table (forkpty ENXIO x3)" \
+              "$out" "pf$$"
+        "$DCH" -k "pf$$" >/dev/null 2>&1
+        err=$(env "$pf" DCH_PTYFAIL=1000 "$DCH" --spawn "pf$$" sleep 60 \
+              2>&1 >/dev/null)
+        check "...a pty table that stays full: exit 1" "$?" "1"
+        case $err in
+        *"pf$$: "*"init_pty: "*) ok "...it says init_pty and the error" ;;
+        *) bad "...it says init_pty and the error ($err)" ;;
+        esac
+    else
+        bad "ptyfail shim builds"; sed 's/^/       /' "$TMP/ptyfail.log"
+    fi
     n=0 f=0
     while [ "$n" -lt 20 ]; do
         "$DCH" --spawn "tr$$-$n" true >/dev/null 2>&1 || f=$((f + 1))

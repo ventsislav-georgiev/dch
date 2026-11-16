@@ -3020,6 +3020,18 @@ spawn_master(char *exe, const char *name, char *sockp,
 			if (nullfd > 2)
 				close(nullfd);
 		}
+		/* Drop every other fd our caller left inheritable (#400): a
+		** spawn from inside another session would pin its pty (and
+		** hand it to the program) for this master's whole life. */
+		{
+			long cfd, cmax = sysconf(_SC_OPEN_MAX);
+
+			/* shortcut: a 4096 cap on the sweep, like exec_prep */
+			if (cmax < 0 || cmax > 4096)
+				cmax = 4096;
+			for (cfd = 3; cfd < cmax; cfd++)
+				close((int)cfd);
+		}
 		/* Build argv: exe --master-of <sock> -- inner_argv... */
 		int ic = 0;
 		while (inner_argv[ic])
@@ -10781,7 +10793,7 @@ revive_spawn(char *exe, struct hrec *r, int cols, int rows, int json)
 	char **nv = NULL, **v = r->argv;
 	int tok = dch_claude_tok(r->argv, r->argc), nc = r->argc, rc;
 	const char *lossy = hrec_lossy(r), *cfg = NULL, *o;
-	char *was = NULL;
+	char *was = NULL, *nmv = NULL;
 	int mcp = 0;
 
 	if (lossy)
@@ -10820,6 +10832,30 @@ revive_spawn(char *exe, struct hrec *r, int cols, int rows, int json)
 	}
 	else if (r->sid[0] && r->launch)
 		r->mode = RV_SHELL;
+	/* Under another name, claude's --name follows when it was the dch name;
+	** a name of the user's own stays (#398). s holds r->argv's pointers,
+	** and so does v: the value's entry is found by identity. */
+	if (strcmp(r->as, r->name) != 0 && tok < r->argc)
+	{
+		char **s = calloc((size_t)r->argc + 1, sizeof *s);
+		int at = -1, k;
+		size_t off = 0;
+
+		if (s)
+			dch_claude_strip_nm(r->argv, r->argc, s, 1, &at, &off);
+		if (at >= 0 && strcmp(s[at] + off, r->name) == 0 &&
+		    (nv || (nv = calloc((size_t)nc + 1, sizeof *nv))))
+		{
+			if (v != nv)
+				memcpy(nv, v, (size_t)nc * sizeof *nv);
+			v = nv;
+			for (k = 0; k < nc; k++)
+				if (v[k] == s[at] && (!off ||
+				    asprintf(&nmv, "%.*s%s", (int)off, s[at], r->as) >= 0))
+					v[k] = off ? nmv : r->as;
+		}
+		free(s);
+	}
 	/* The new master's record starts with this one's agent and keeps it
 	** until a probe finds the resumed claude: a session that ends sooner
 	** must not lose the id. Its env only — never the child's. */
@@ -10865,6 +10901,7 @@ revive_spawn(char *exe, struct hrec *r, int cols, int rows, int json)
 		unsetenv("CLAUDE_CONFIG_DIR");
 	free(was);
 	free(nv);
+	free(nmv);
 	if (rc != 0)
 	{
 		rv_say(r, json, "failed", "not_started", "NOT revived — the "

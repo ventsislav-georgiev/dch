@@ -3020,6 +3020,14 @@ their argv, with their Claude Code resumed via
 .I id
 (relaunched as the command, or typed into the revived shell) and told to
 carry on.
+A revive under another name
+.RB ( \-\-as ,
+or
+.BR \-\-all 's
+.IR name \-N)
+gives Claude's
+.BR \-n / \-\-name
+the new name when it was the session's dch name; a name of your own stays.
 Claude's startup prompt is sent once: the prompt in
 .B dch \-\-spawn api \-\- claude \-\-name api \-\- \(dqfix the login bug\(dq
 is its first message, and dch drops it from every later start (a revive, the
