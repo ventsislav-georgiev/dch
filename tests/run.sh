@@ -251,7 +251,10 @@ export DCH_TEST_TMP
 # and the ones made in the default TMPDIR (tempfile.mkdtemp() with no dir),
 # so runreap ends and removes theirs too (QA 1.60.0 LOW-T4)
 export TMPDIR="$DCH_TEST_TMP"
-trap 'DCH_TEST_TMP=$RUN; runreap; rm -rf "${RUN:?}"' EXIT
+# the watchdog section's bystanders, if an interrupt came while they ran
+wdreap(){ [ -z "${wdby:-}" ] || kill "$wdby" 2>/dev/null
+    [ -z "${wdkl:-}" ] || { "$DCH" -k -- -kl >/dev/null 2>&1; kill "$wdkl" 2>/dev/null; }; }
+trap 'wdreap; DCH_TEST_TMP=$RUN; runreap; rm -rf "${RUN:?}"' EXIT
 trap 'pyreap; for k in $prun; do preap "$k"; done; exit 130' INT TERM HUP
 export XDG_RUNTIME_DIR="$TMP"
 # DCH_SOCKET_DIR wins over XDG_RUNTIME_DIR: an inherited one would point the
