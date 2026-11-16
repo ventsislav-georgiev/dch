@@ -4073,6 +4073,7 @@ struct xr_scan
 	size_t room;		/* kept under the cap for the tally and done */
 	/* this file */
 	uint64_t nunit, lastunit, nrow, lastrow, lines, lastoff, lasth, foff;
+				/* foff: light, a shell's result's unit */
 	int found, ndefs, mentioned;
 	uint64_t defh[XR_DEFS];
 	char *held[XR_RING];
@@ -4370,13 +4371,24 @@ sc_hit(void *ctx, const struct xr_hit *h)
 	size_t bl;
 	FILE *m;
 
-	if (!x->stop && x->found && x->shell && h->off != x->foff)
-	{
-		x->stop = 1;	/* a shell's first result: its row is done */
-		x->why = "first";
-	}
 	if (x->stop || strcmp(h->sp->key, x->key))
 		return;
+	/* light reads a shell's ring oldest first: a newer block's result puts
+	** out the older one's (recency first, #396); why marks it, the stop
+	** comes at the ring's end (xr_scan_file) */
+	if (x->found && x->shell && h->unit != x->foff)
+	{
+		size_t k;
+
+		for (k = 0; k < x->hn; k++)
+			free(x->held[k]);
+		x->hn = x->h0 = 0;
+		x->ndefs = 0;
+		x->nunit = x->lastunit = x->nrow = x->lastrow = x->lines = 0;
+		x->lastoff = x->lasth = 0;
+		x->foff = h->unit;
+		x->why = "first";
+	}
 	if (h->title)
 	{
 		uint64_t th = title_hash(h->title);
@@ -4409,7 +4421,15 @@ sc_hit(void *ctx, const struct xr_hit *h)
 		        (unsigned long long)h->off);
 		put_or_null(m, x->other ? NULL : h->chapter);
 		fputs("}}\n", m);
-		ln_send(x, m, &b, &bl);
+		if (x->full || !x->shell)
+			ln_send(x, m, &b, &bl);
+		else if (fclose(m) == 0)	/* held till its row is the newest */
+		{
+			x->held[x->hn] = b;
+			x->hoff[x->hn++] = h->off;
+		}
+		else
+			free(b);
 	}
 	else
 	{
@@ -4466,7 +4486,7 @@ anchor:
 	if (!x->full && !x->found && (!x->scope || x->other))
 	{
 		x->found = 1;
-		x->foff = h->off;
+		x->foff = h->unit;
 	}
 }
 
@@ -4508,13 +4528,10 @@ xr_scan_tick(void *ctx, uint64_t bytes)
 	x->bytes = x->base + bytes;
 	/* this session's first hit (#379): its window is read to its end, so
 	** the answer keeps that window's newest mentions, not its oldest */
-	if (!x->stop && x->found && !(x->hold && !x->other))
+	if (!x->stop && x->found && !x->shell && !(x->hold && !x->other))
 	{
-		if (!x->shell)	/* a shell's: its row ends the scan (sc_hit) */
-		{
-			x->stop = 1;
-			x->why = "first";
-		}
+		x->stop = 1;
+		x->why = "first";
 	}
 	else if (!x->stop && !x->full && !xr_noclock && x->hold != 1 &&
 	         now - x->t0 - x->blocked >= x->budget)
@@ -4568,11 +4585,8 @@ xr_scan_file(struct xr_scan *x, uint64_t bytes, uint64_t too_long,
 	uint64_t count = per_row ? x->nrow : x->nunit;
 
 	x->files++;
-	if (x->found && !x->stop && x->shell)
-	{
-		x->stop = 1;	/* a shell's first result, its row the last read */
-		x->why = "first";
-	}
+	if (x->found && !x->stop && x->shell && x->why)
+		x->stop = 1;	/* the ring read, an older row's result put out */
 	/* a first hit that ended after the file's last byte stopped nothing:
 	** the next file's tick (xr_scan_next) stops the scan if one follows */
 	if (x->stop && !x->shell && x->why && !strcmp(x->why, "first") &&

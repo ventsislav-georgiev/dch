@@ -1,0 +1,7 @@
+{"schema":1,"first":{"session":"both","session_id":"m1a2b3c4d5e6f7a90","key":"issue:#831","shape":"issue","text":"#831","project":"-T-work-both","mode":"full","scope":"session","budget_ms":null,"elapsed_ms":0}}
+{"schema":1,"definition":{"session":"both","live":true,"project":"-T-work-both","at":1794300000,"title":"Old title","passage":null,"rule":"D1","offset":281474976730005,"chapter":"s281474976730001"}}
+{"schema":1,"mention":{"session":"both","chapter":"s281474976730001","at":1794300000,"line":"# #831 Old title","offset":281474976730005,"live":true,"project":"-T-work-both"}}
+{"schema":1,"definition":{"session":"both","live":true,"project":"-T-work-both","at":1794300000,"title":"New title","passage":null,"rule":"D1","offset":281474976730222,"chapter":"s281474976730218"}}
+{"schema":1,"mention":{"session":"both","chapter":"s281474976730218","at":1794300000,"line":"# #831 New title","offset":281474976730222,"live":true,"project":"-T-work-both"}}
+{"schema":1,"tally":{"session":"both","live":true,"project":"-T-work-both","count":2,"definitions":2,"partial":false,"mentions_dropped":0}}
+{"schema":1,"done":true,"partial":false,"counts":{"session":2,"project":0,"project_sessions":0,"all":null,"all_sessions":null},"why":null,"files":1,"bytes":820,"lines_too_long":0}
