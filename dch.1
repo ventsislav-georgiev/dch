@@ -3431,8 +3431,10 @@ the peer is a tagged node:
 .I this host does not serve tagged nodes
 .TP
 .B whois_unavailable
-tailscaled is not answering, and no
-.BR \-\-whois\-optional :
+tailscaled is not answering (whois and status both fail, or whois timed out
+at 3 s while status answers), and no
+.BR \-\-whois\-optional
+(which covers only the first case):
 .I this host could not verify you: tailscaled is not answering
 .TP
 .B whois_failed

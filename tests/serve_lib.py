@@ -98,11 +98,11 @@ def setup():
                     n for n in sorted(os.listdir(tmp))
                     if n.startswith("serve") and n.endswith(".log")
                     and os.path.join(tmp, n) not in whois_fail_ok
-                    and "refused: tailscale whois failed while" in
+                    and "tailscaled not answering" in
                     text(os.path.join(tmp, n)))
                 if slow_whois:
-                    print("  setup: whois_failed, the fake whois was too "
-                          "slow (over serve's 3 s, refusal cached 30 s; "
+                    print("  setup: whois_unavailable, the fake whois was too "
+                          "slow (over serve's 3 s; "
                           "%s): checks failing on it are not serve bugs"
                           % ", ".join(slow_whois))
 
