@@ -52,6 +52,7 @@ static volatile sig_atomic_t want_cont;
 ** the select it stopped in (macOS), the fg left the shell's cooked modes
 ** on, and no key would wake it (QA 1.65.0 LOW-V26) */
 static int cont_pipe[2] = {-1, -1};
+volatile sig_atomic_t tty_conts;
 /* The terminal a raw mode is on, -1 while none is, and the modes a SIGTSTP
 ** puts back on it first (QA 1.63.0 MED-V14): the attach's (term_raw arms
 ** it, restore_term disarms it once its own restore is done, LOW-V22) or
@@ -271,6 +272,7 @@ on_sigcont(ATTRIBUTE_UNUSED int sig)
 
 	signal(SIGCONT, on_sigcont);
 	want_cont = 1;
+	tty_conts++;
 	if (cont_pipe[1] >= 0)
 		(void)!write(cont_pipe[1], "", 1);
 	errno = e;
@@ -283,12 +285,18 @@ on_sigcont(ATTRIBUTE_UNUSED int sig)
 ** drain waits on a terminal that reads nothing. Not from the background,
 ** where the tcsetattr would stop on SIGTTOU and set them after the fg.
 ** Then the default stop; the SIGCONT that ends it sets raw mode again
-** through want_cont. */
+** through want_cont. None if a SIGCONT came since the handler began (#410):
+** a kill -TSTP of the whole job reaches the view's child too, the shell
+** waits for the client's stop alone and its fg may come first on a busy
+** machine; the kernel drops a pending stop on a SIGCONT, the raise here
+** would stop the view for good. shortcut: a SIGCONT between the check and
+** the raise still loses it (a few instructions, against a tcsetattr). */
 static RETSIGTYPE
 on_sigtstp(ATTRIBUTE_UNUSED int sig)
 {
 	int e = errno, fd = stop_fd;
 	const struct termios *t = stop_term;
+	sig_atomic_t c = tty_conts;
 	sigset_t ss;
 
 	if (fd >= 0 && t && tcgetpgrp(fd) == getpgrp())
@@ -297,7 +305,8 @@ on_sigtstp(ATTRIBUTE_UNUSED int sig)
 	sigemptyset(&ss);
 	sigaddset(&ss, SIGTSTP);
 	sigprocmask(SIG_UNBLOCK, &ss, NULL);
-	raise(SIGTSTP);
+	if (tty_conts == c)
+		raise(SIGTSTP);
 	signal(SIGTSTP, on_sigtstp);
 	errno = e;
 }

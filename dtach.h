@@ -443,6 +443,9 @@ extern int attach_drop_o;
 void tty_stop_arm(int fd, const struct termios *t);
 void tty_stop_handlers(void);
 int tty_continued(void);
+/* Bumped by every SIGCONT handler (the attach's, the view's): the SIGTSTP
+** handler stops only if none ran since its stop came (#410). */
+extern volatile sig_atomic_t tty_conts;
 
 #include "remote.h"
 void client_pidfile_unlink(void);

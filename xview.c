@@ -4348,6 +4348,7 @@ xv_on_cont(int sig)
 {
 	(void)sig;
 	xv_cont = 1;
+	tty_conts++;
 }
 
 static void
