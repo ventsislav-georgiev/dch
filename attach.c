@@ -289,31 +289,41 @@ on_sigcont(ATTRIBUTE_UNUSED int sig)
 ** a kill -TSTP of the whole job reaches the view's child too, the shell
 ** waits for the client's stop alone and its fg may come first on a busy
 ** machine; the kernel drops a pending stop on a SIGCONT, the raise here
-** would stop the view for good. shortcut: a SIGCONT between the check and
-** the raise still loses it (a few instructions, against a tcsetattr). */
+** would stop the view for good. SIGCONT is held over the handler (#416):
+** one that lands before the snapshot of tty_conts stays pending, and the
+** sigpending check sees it. shortcut: a SIGCONT posted between that check
+** and raise()'s kill still loses the stop (the raise's SIGTSTP discards the
+** pending SIGCONT, POSIX); closing it needs a kernel "stop unless
+** continued", which there is none of. */
 static RETSIGTYPE
 on_sigtstp(ATTRIBUTE_UNUSED int sig)
 {
 	int e = errno, fd = stop_fd;
 	const struct termios *t = stop_term;
 	sig_atomic_t c = tty_conts;
+	struct sigaction dfl, own;
 	sigset_t ss;
 
 	if (fd >= 0 && t && tcgetpgrp(fd) == getpgrp())
 		tcsetattr(fd, TCSANOW, t);
-	signal(SIGTSTP, SIG_DFL);
+	memset(&dfl, 0, sizeof dfl);
+	dfl.sa_handler = SIG_DFL;
+	sigemptyset(&dfl.sa_mask);
+	sigaction(SIGTSTP, &dfl, &own);
 	sigemptyset(&ss);
 	sigaddset(&ss, SIGTSTP);
 	sigprocmask(SIG_UNBLOCK, &ss, NULL);
-	if (tty_conts == c)
+	if (sigpending(&ss) == 0 && !sigismember(&ss, SIGCONT) &&
+	    tty_conts == c)
 		raise(SIGTSTP);
-	signal(SIGTSTP, on_sigtstp);
+	sigaction(SIGTSTP, &own, NULL);
 	errno = e;
 }
 
 void
 tty_stop_handlers(void)
 {
+	struct sigaction sa;
 	int k;
 
 	if (cont_pipe[0] < 0 && pipe(cont_pipe) == 0)
@@ -323,7 +333,12 @@ tty_stop_handlers(void)
 			fcntl(cont_pipe[k], F_SETFD, FD_CLOEXEC);
 		}
 	signal(SIGCONT, on_sigcont);
-	signal(SIGTSTP, on_sigtstp);
+	memset(&sa, 0, sizeof sa);
+	sa.sa_handler = on_sigtstp;
+	sigemptyset(&sa.sa_mask);
+	sigaddset(&sa.sa_mask, SIGCONT);	/* #416, see on_sigtstp */
+	sa.sa_flags = SA_RESTART;
+	sigaction(SIGTSTP, &sa, NULL);
 }
 
 int

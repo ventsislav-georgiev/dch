@@ -10319,6 +10319,10 @@ xv_spawn(int fd, int ac, char **av, int *out, int *err)
 		signal(SIGHUP, SIG_DFL);
 		signal(SIGWINCH, SIG_DFL);
 		signal(SIGCONT, SIG_DFL);	/* xv_run's (#255) */
+		/* the view's on_sigtstp and its armed tty: a query is no
+		** tty program, a plain stop has no race to lose (#416) */
+		signal(SIGTSTP, SIG_DFL);
+		tty_stop_arm(-1, NULL);
 		sigprocmask(SIG_SETMASK, &o, NULL);
 		picker_tty_fd = -1;
 		close(fd);
