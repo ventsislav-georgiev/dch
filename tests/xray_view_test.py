@@ -419,10 +419,13 @@ def test_order():
     try:
         got, _ = card_rows(v)
         # A loaded runner (ASan in CI) can spend the 300 ms budget before the
-        # oldest windows: a cut drops only older windows (#377), so a prefix.
+        # oldest windows: a cut drops only older windows (#377), so a prefix,
+        # and the card then says so ("(f for more)", xv_draw_card).
+        cut = any("(f for more)" in r for r in rows(v.out).values())
         check("card #304: a transcript of several 1 MiB windows: newest "
-              "first, no zigzag", len(got) >= 4 and got == want[:len(got)],
-              got)
+              "first, no zigzag; a short list only with the card's cut mark",
+              got == want or (len(got) >= 4 and got == want[:len(got)]
+                              and cut), (got, cut))
         v.key(b"jj", 0.5)
         mark = len(v.out)
         v.key(b"f", 0.5)
