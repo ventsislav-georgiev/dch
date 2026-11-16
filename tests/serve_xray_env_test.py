@@ -293,7 +293,7 @@ def define_command(senv, cenv, check):
         f.write("#!/bin/sh\ntouch '%s'\necho peer\n" % mark)
     for p in (host, peer):
         os.chmod(p, 0o755)
-    # a new file's first exec can wait on endpoint security past the 2 s
+    # a new file's first exec can wait about 3 s on endpoint security
     # clock (#405): run the host's once first (never the peer's: its mark)
     subprocess.run([host], stdin=subprocess.DEVNULL,
                    stdout=subprocess.DEVNULL, timeout=60)

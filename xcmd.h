@@ -24,8 +24,10 @@
 #define XCMD_ARGS_MAX 64		/* argv words */
 #define XCMD_ERR_MAX  (XR_TITLE_MAX * 4 + 1)	/* stderr's first line */
 #define XCMD_WARN_MAX 512
-/* define_command (#405): shorter limits, one card's few definitions */
-#define XCMD_DEF_WALL_MS 2000
+/* define_command (#405): smaller output limits, one card's few definitions */
+/* 5 s as tasks: a just-written script's first exec can wait ~3 s on
+** endpoint security */
+#define XCMD_DEF_WALL_MS 5000
 #define XCMD_DEF_OUT_MAX (1u << 20)
 #define XCMD_DEF_BODY    2048		/* a definition's body: bytes, */
 #define XCMD_DEF_LINES   20		/* and lines */

@@ -11,7 +11,7 @@ PROJ-5 only mentioned), `dch --xray xv-cl --ref <ref> --json` and the card:
     DCH_SESSION; at most 8;
   - a plain-text first line is the title; ANSI escapes and control bytes
     out of titles and bodies, bad UTF-8 as U+FFFD;
-  - failures (slow -> stopped at 2 s and the group gone, exit 3, a missing
+  - failures (slow -> stopped at 5 s and the group gone, exit 3, a missing
     program, nothing printed, 2 MB of output): no definition, the done
     line's define_warn;
   - #831, defined by the transcript: the command never runs, the lines
@@ -34,7 +34,7 @@ def script(name, body, warm=True):
         f.write("#!%s\n" % PY + body)
     os.chmod(p, 0o755)
     # run once first: the first exec of a new file waits on endpoint
-    # security's scan, which under load took past the 2 s clock (#405)
+    # security's scan, which under load took about 3 s (#405)
     if warm:
         subprocess.run([p], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                        stderr=subprocess.DEVNULL, timeout=60)
@@ -147,10 +147,10 @@ time.sleep(30)
     p, defs, done, secs = ref("PROJ-5")
     pids = [int(x) for x in open(pidf).read().split()] \
         if os.path.exists(pidf) else []
-    check("slow: stopped at 2 s, its group gone, no definition",
-          p.returncode == 0 and not defs and secs < 8 and
+    check("slow: stopped at 5 s, its group gone, no definition",
+          p.returncode == 0 and not defs and secs < 11 and
           done.get("define_warn") ==
-          "define_command: stopped early after 2 s" and len(pids) == 2 and
+          "define_command: stopped early after 5 s" and len(pids) == 2 and
           until(lambda: not any(alive(x) for x in pids), 3),
           (secs, done, pids))
 

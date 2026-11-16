@@ -2034,8 +2034,8 @@ define_command = ~/bin/my-define
   `url` and `status`. Output whose first line is not a JSON object is plain
   text: that line is the title, the rest is ignored. Terminal escapes and
   control bytes are taken out of titles and bodies.
-- **Limits.** 2 s and 1 MB of output; past a limit the process group is
-  ended. A failure (no such program, a non-zero exit, a timeout, nothing
+- **Limits.** 5 s (as `tasks_command`'s) and 1 MB of output; past a
+  limit the process group is ended. A failure (no such program, a non-zero exit, a timeout, nothing
   printed) gives no definition: the card says "No definition found" and
   the reason after it, the `done` line's `define_warn` the same.
 
