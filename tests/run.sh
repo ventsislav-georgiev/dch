@@ -1339,6 +1339,8 @@ pyrun "dch serve keeps X-ray's test switches from its ctls" serve_xray_env_test.
 # against fake commands (clock, caps, group cleanup, no shell)
 pyrun "xray command source: argv split, row lines, the runner's limits" xcmd_test.py
 pyrun "--tasks/--memory with a tasks_command/memory_command: command first, the built-in on no row, warn" xcmd_tasks_test.py
+# #405: define_command, a ref no transcript defines: --ref's lines, the card
+pyrun "xray define_command: definitions from the user's command, limits, the card" xray_define_test.py
 
 tsec 'shell: latency budgets'
 pdrain; tlast=$(date +%s)

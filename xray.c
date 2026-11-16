@@ -4063,6 +4063,10 @@ struct xr_scan
 	FILE *f;
 	char key[XR_KEY_MAX + 16];
 	const char *session, *project;	/* this file's session */
+	const char *s0, *p0;	/* <n>'s (#405: a define_command's answer) */
+	int live0;
+	int defs;		/* definitions found, files done (#405) */
+	char dwarn[600];	/* #405: the define_command's failure, for done */
 	int live, full, shell, budget;
 	int scope, other, same;	/* --scope; this file another session's, in
 				** <n>'s project dir */
@@ -4147,9 +4151,9 @@ xr_scan_new(FILE *f, const char *key, const char *session,
 		return NULL;
 	x->f = f;
 	snprintf(x->key, sizeof x->key, "%s", key);
-	x->session = session;
-	x->project = project;
-	x->live = live;
+	x->session = x->s0 = session;
+	x->project = x->p0 = project;
+	x->live = x->live0 = live;
 	x->full = full;
 	x->shell = shell;
 	x->budget = budget;
@@ -4629,6 +4633,7 @@ xr_scan_file(struct xr_scan *x, uint64_t bytes, uint64_t too_long,
 	else
 		x->ca += count, x->cas += count > 0;
 	b = tally_line(x, count, x->dropped, partial);
+	x->defs += x->ndefs;
 	/* the next file starts from nothing; found and the stop carry on */
 	x->nunit = x->lastunit = x->nrow = x->lastrow = x->lines = 0;
 	x->lastoff = x->lasth = 0;
@@ -4696,10 +4701,55 @@ xr_scan_done(struct xr_scan *x)
 	put_counts(x->f, x, 0);
 	fputs(",\"why\":", x->f);
 	put_or_null(x->f, partial ? x->why : NULL);
-	fprintf(x->f, ",\"files\":%llu,\"bytes\":%llu,\"lines_too_long\":%llu}\n",
+	fprintf(x->f, ",\"files\":%llu,\"bytes\":%llu,\"lines_too_long\":%llu",
 	        (unsigned long long)x->files, (unsigned long long)x->bytes,
 	        (unsigned long long)x->too_long);
+	if (x->dwarn[0])	/* #405: only with a define_command that failed */
+	{
+		fputs(",\"define_warn\":", x->f);
+		xr_put_str(x->f, x->dwarn);
+	}
+	fputs("}\n", x->f);
 	return sc_flush(x);
+}
+
+int
+xr_scan_defs(const struct xr_scan *x)
+{
+	return x->defs;
+}
+
+int
+xr_scan_cmd_def(struct xr_scan *x, const char *row)
+{
+	char *b;
+	size_t bl, n = strlen(row);
+	FILE *m;
+
+	if (n < 2 || row[0] != '{' || row[n - 1] != '}' || !(m = ln_open(&b, &bl)))
+		return -1;
+	fputs("{\"schema\":1,\"definition\":{\"session\":", m);
+	xr_put_str(m, x->s0);
+	fprintf(m, ",\"live\":%s,\"project\":", x->live0 ? "true" : "false");
+	xr_put_str(m, x->p0);
+	fputs(",\"at\":null,", m);
+	fwrite(row + 1, 1, n - 2, m);	/* title, passage, url, status */
+	fputs(",\"rule\":\"command\",\"offset\":null,\"chapter\":null,"
+	      "\"source\":\"command\"}}\n", m);
+	if (fclose(m) != 0)
+	{
+		free(b);
+		return -1;
+	}
+	n = (size_t)(sc_line(x, b, bl) == 0 && sc_flush(x) == 0);
+	free(b);
+	return n ? 0 : -1;
+}
+
+void
+xr_scan_define_warn(struct xr_scan *x, const char *warn)
+{
+	snprintf(x->dwarn, sizeof x->dwarn, "%s", warn);
 }
 
 int

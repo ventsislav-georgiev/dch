@@ -326,6 +326,96 @@ row_memory(struct xc_out *w, const struct json_parser *p, int r, char *tmp,
 	put(w, "}}");
 }
 
+/* #405: s in place without terminal escapes (ESC [ ... final, ESC ] ...
+** BEL or ESC \\, ESC and one ASCII byte) and other control bytes but '\n'
+** and '\t' */
+static char *
+plain(char *s)
+{
+	char *o = s, *i = s;
+
+	while (*i)
+	{
+		unsigned char c = (unsigned char)*i++;
+
+		if (c == 0x1b && *i == '[')
+		{
+			for (i++; *i && !(*i >= 0x40 && *i <= 0x7e); i++)
+				;
+			i += !!*i;
+		}
+		else if (c == 0x1b && *i == ']')
+		{
+			for (i++; *i && *i != 7 && !(*i == 0x1b && i[1] == '\\'); i++)
+				;
+			i += *i == 7 ? 1 : *i ? 2 : 0;
+		}
+		else if (c == 0x1b)	/* a lead byte stays: the text stays UTF-8 */
+			i += *i >= 0x20 && *i < 0x7f;
+		else if (c == '\n' || c == '\t' || (c >= 0x20 && c != 0x7f))
+			*o++ = (char)c;
+	}
+	*o = '\0';
+	return s;
+}
+
+/* A define_command's text field t, escapes out, cut like a title */
+static const char *
+dcut(const struct json_parser *p, int t, char *tmp,
+     char out[XR_TITLE_MAX * 4 + 1])
+{
+	const char *s = text(p, t, 1, tmp);
+
+	if (!s)
+		return NULL;
+	xr_title(plain(tmp), strlen(tmp), out, XR_TITLE_MAX * 4 + 1);
+	return *out ? out : NULL;
+}
+
+/* A define_command's row (#405): title (tb, already cut), the body as the
+** passage (escapes out, XCMD_DEF_LINES lines and XCMD_DEF_BODY bytes at a
+** character's end, outer blanks off), url, status */
+static void
+row_define(struct xc_out *w, const struct json_parser *p, int r, char *tmp,
+           const char *title)
+{
+	char b[XR_TITLE_MAX * 4 + 1];
+	const char *s;
+	size_t l, k;
+	int lines = 0;
+
+	put(w, "{");
+	key(w, "title");
+	putq(w, title);
+	key(w, "passage");
+	s = r < 0 ? NULL : text(p, dch_json_field(p, r, "body"), 0, tmp);
+	if (s)
+	{
+		plain(tmp);
+		while (*s == '\n' || *s == ' ' || *s == '\t')
+			s++;
+		for (l = 0; s[l] && l < XCMD_DEF_BODY; l++)
+			if (s[l] == '\n' && ++lines == XCMD_DEF_LINES)
+				break;
+		if (l == XCMD_DEF_BODY)	/* decoded text is valid UTF-8 */
+			while (l && ((unsigned char)s[l] & 0xc0) == 0x80)
+				l--;
+		while (l && (s[l - 1] == '\n' || s[l - 1] == ' ' ||
+		             s[l - 1] == '\t'))
+			l--;
+		k = (size_t)(s - tmp);
+		tmp[k + l] = '\0';
+		if (!l)
+			s = NULL;
+	}
+	putq(w, s);
+	key(w, "url");
+	putq(w, r < 0 ? NULL : link_text(p, dch_json_field(p, r, "url"), 0, tmp));
+	key(w, "status");
+	putq(w, r < 0 ? NULL : dcut(p, dch_json_field(p, r, "status"), tmp, b));
+	put(w, "}");
+}
+
 enum xcmd_line_kind
 xcmd_line(enum xcmd_kind kind, const char *s, size_t n, int first,
           unsigned long pos, char *out, size_t cap)
@@ -343,6 +433,7 @@ xcmd_line(enum xcmd_kind kind, const char *s, size_t n, int first,
 
 	if (cap)
 		out[0] = '\0';
+	tb[0] = '\0';
 	for (i = 0; i < n && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r'); i++)
 		;
 	if (i == n)
@@ -352,7 +443,28 @@ xcmd_line(enum xcmd_kind kind, const char *s, size_t n, int first,
 	memcpy(line, s, n);
 	line[n] = '\0';
 	if (dch_json_parse(&p, line) != 0 || p.tok[0].kind != JSON_OBJECT)
+	{
+		/* #405: plain text, first: its first line is the title */
+		if (kind == XCMD_DEFINE && first)
+		{
+			xr_title(plain(line), strlen(line), tb, sizeof tb);
+			if (tb[0])
+				row_define(&w, &p, -1, tmp, tb);
+			k = tb[0] && !w.bad ? XCMD_ROW : XCMD_SKIP;
+			if (k != XCMD_ROW)
+				out[0] = '\0';
+		}
 		goto done;
+	}
+	if (kind == XCMD_DEFINE)
+	{
+		if (dcut(&p, dch_json_field(&p, 0, "title"), tmp, tb))
+			row_define(&w, &p, 0, tmp, tb);
+		k = tb[0] && !w.bad ? XCMD_ROW : XCMD_SKIP;
+		if (k != XCMD_ROW)
+			out[0] = '\0';
+		goto done;
+	}
 	/* {"title":"..."} alone, first: the list's title */
 	if (first && p.ntok == 3 && dch_json_field(&p, 0, "title") == 2 &&
 	    p.tok[2].kind == JSON_STRING)
@@ -459,24 +571,28 @@ xc_env(const char *name, const char *v)
 
 static const char *const xc_names[] = {"DCH_SESSION", "DCH_SESSION_CWD",
                                        "DCH_AGENT", "DCH_AGENT_SESSION_ID",
-                                       "DCH_ROWS_MAX"};
+                                       "DCH_ROWS_MAX", "DCH_REF",
+                                       "DCH_REF_SHAPE"};
 #define XC_NAMES (sizeof xc_names / sizeof *xc_names)
 
-/* environ minus our names, then ours; NULL when out of memory */
+/* environ minus our names, then ours (DCH_REF* only with a ref); NULL when
+** out of memory */
 static char **
 xc_envp(const struct xcmd_ctx *c, char *mine[XC_NAMES])
 {
 	const char *v[XC_NAMES];
 	char rows[16], **e;
-	size_t n = 0, k, j;
+	size_t n = 0, k, j, mn = c->ref ? XC_NAMES : XC_NAMES - 2;
 
-	snprintf(rows, sizeof rows, "%d", XCMD_ROWS_MAX);
+	snprintf(rows, sizeof rows, "%d", c->ref ? XR_DEFS : XCMD_ROWS_MAX);
 	v[0] = c->session;
 	v[1] = c->cwd;
 	v[2] = c->agent;
 	v[3] = c->agent_sid;
 	v[4] = rows;
-	for (k = 0; k < XC_NAMES; k++)
+	v[5] = c->ref;
+	v[6] = c->shape;
+	for (k = 0; k < mn; k++)
 		if (!(mine[k] = xc_env(xc_names[k], v[k])))
 			return NULL;
 	while (environ[n])
@@ -498,7 +614,7 @@ xc_envp(const struct xcmd_ctx *c, char *mine[XC_NAMES])
 		if (m == XC_NAMES)
 			e[j++] = environ[k];
 	}
-	for (k = 0; k < XC_NAMES; k++)
+	for (k = 0; k < mn; k++)
 		e[j++] = mine[k];
 	e[j] = NULL;
 	return e;
@@ -586,7 +702,7 @@ xc_one(struct xc_run *r, const char *s, size_t n)
 {
 	enum xcmd_line_kind k;
 
-	if (r->res->rows >= XCMD_ROWS_MAX)
+	if (r->res->rows >= (r->kind == XCMD_DEFINE ? XR_DEFS : XCMD_ROWS_MAX))
 	{
 		/* one more line past the cap: the command has more */
 		if (xcmd_line(r->kind, s, n, 0, 0, r->row, 0) != XCMD_BLANK)
@@ -669,7 +785,10 @@ int
 xcmd_rows(enum xcmd_kind kind, const struct xcmd_ctx *ctx, xcmd_row_fn fn,
           void *arg, struct xcmd_result *res)
 {
-	const char *what = kind == XCMD_TASK ? "tasks_command" : "memory_command";
+	const char *what = kind == XCMD_TASK ? "tasks_command" : kind ==
+	                   XCMD_MEMORY ? "memory_command" : "define_command";
+	int wall = kind == XCMD_DEFINE ? XCMD_DEF_WALL_MS : XCMD_WALL_MS;
+	size_t omax = kind == XCMD_DEFINE ? XCMD_DEF_OUT_MAX : XCMD_OUT_MAX;
 	char buf[4096], *argv[XCMD_ARGS_MAX + 1], *mine[XC_NAMES] = {0}, **envp;
 	char chunk[XCMD_LINE_MAX], eb[1024], prog[XR_TITLE_MAX * 4 + 1];
 	struct xc_run r;
@@ -689,12 +808,18 @@ xcmd_rows(enum xcmd_kind kind, const struct xcmd_ctx *ctx, xcmd_row_fn fn,
 		old[k].sa_handler = SIG_IGN;	/* nothing to restore yet */
 	if (!ctx->command || !*ctx->command)
 		return 0;
-	if (xcmd_argv(ctx->command, getenv("HOME"), buf, sizeof buf, argv,
-	              XCMD_ARGS_MAX + 1) < 0)
+	/* a ref is the last word, as written: one more argv slot kept */
+	if ((k = xcmd_argv(ctx->command, getenv("HOME"), buf, sizeof buf, argv,
+	                   XCMD_ARGS_MAX + (ctx->ref ? 0 : 1))) < 0)
 	{
 		xc_warn(res, what, "not a command line (an open quote, too long, "
 		        "or ~/ with no HOME)");
 		return 0;
+	}
+	if (ctx->ref)
+	{
+		argv[k++] = (char *)(uintptr_t)ctx->ref;	/* never written */
+		argv[k] = NULL;
 	}
 	xr_title(argv[0], strlen(argv[0]), prog, sizeof prog);
 	memset(&r, 0, sizeof r);
@@ -762,7 +887,7 @@ xcmd_rows(enum xcmd_kind kind, const struct xcmd_ctx *ctx, xcmd_row_fn fn,
 		goto restore;
 	}
 	res->ran = 1;
-	until = xr_now_ms() + XCMD_WALL_MS;
+	until = xr_now_ms() + wall;
 	fcntl(po[0], F_SETFL, O_NONBLOCK);
 	fcntl(pe[0], F_SETFL, O_NONBLOCK);
 	p[0].fd = po[0];
@@ -796,8 +921,8 @@ xcmd_rows(enum xcmd_kind kind, const struct xcmd_ctx *ctx, xcmd_row_fn fn,
 				en += en < sizeof eb ? (size_t)n : 0;
 			else if (n > 0 && !k)
 			{
-				size_t take = (size_t)n < XCMD_OUT_MAX - total
-				              ? (size_t)n : XCMD_OUT_MAX - total;
+				size_t take = (size_t)n < omax - total
+				              ? (size_t)n : omax - total;
 
 				total += take;
 				xc_feed(&r, chunk, take);
@@ -838,12 +963,13 @@ xcmd_rows(enum xcmd_kind kind, const struct xcmd_ctx *ctx, xcmd_row_fn fn,
 		res->code = WEXITSTATUS(st);
 	xr_title(eb, en, res->err, sizeof res->err);
 	if (r.stop == XC_CLOCK)
-		xc_warn(res, what, "stopped early after %d s", XCMD_WALL_MS / 1000);
+		xc_warn(res, what, "stopped early after %d s", wall / 1000);
 	else if (r.stop == XC_BYTES)
 		xc_warn(res, what, "stopped early at %u MB of output",
-		        XCMD_OUT_MAX >> 20);
+		        (unsigned)(omax >> 20));
 	else if (r.stop == XC_ROWS)
-		xc_warn(res, what, "stopped early at %d rows", XCMD_ROWS_MAX);
+		xc_warn(res, what, "stopped early at %d rows", kind == XCMD_DEFINE
+		        ? XR_DEFS : XCMD_ROWS_MAX);
 	else if (r.stop == XC_CALLER)
 		;
 	else if (st != -1 && WIFSIGNALED(st))

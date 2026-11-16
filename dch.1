@@ -4210,6 +4210,36 @@ the header has
 .BR \-\-memory 's
 keys with
 .BR source:command .
+.TP
+.B define_command
+A ref that no transcript defines, from your own command:
+.B \-\-ref
+(and the card) runs it after the transcripts, only when they gave no
+definition, as
+.B tasks_command
+runs (no shell, your own config only, through
+.B dch serve
+the host's), with the ref as written as its last word and
+.B DCH_REF
+and
+.B DCH_REF_SHAPE
+in its environment.
+Each JSON line is a definition (at most 8):
+.B title
+required,
+.B body
+(20 lines, 2 KB),
+.BR url ,
+.BR status ;
+a first line that is not JSON is the title.
+Escapes and control bytes are taken out.
+2 s and 1 MB, then the process group is ended.
+Its definitions carry
+.BR source:command ;
+a failure gives none and the
+.B done
+line's
+.BR define_warn .
 .SH EXIT STATUS
 0 on success. Control verbs: 1 generic error, 2
 .B \-\-wait

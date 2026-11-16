@@ -834,6 +834,7 @@ running sessions.
 | `xray_ring` | `0` (off) to `16M` (`K`/`M` suffixes, rounded up to 64 KiB): the shell output each new session keeps in its master's memory for X-ray, the rows that scroll off its primary screen, as text, with OSC 133 prompt marks. Read when a session starts (see [Shell output ring](#shell-output-ring-x-ray)); kept across `--restart`; never on disk, never in core dumps. dch-lite keeps none | `2M` |
 | `tasks_command` | a program and its arguments, run with no shell: X-ray's task list (`--tasks`) from your own command; with no row the agent's own (see [Your own task or memory list](#your-own-task-or-memory-list-tasks_command-memory_command)). Your own config only; through `dch serve` the host's | empty |
 | `memory_command` | the same for X-ray's memory list (`--memory`) | empty |
+| `define_command` | a program and its arguments, run with no shell, the ref last: X-ray's definition of a ref no transcript defines (see [Your own definitions](#your-own-definitions-define_command)). Your own config only; through `dch serve` the host's | empty |
 
 ```sh
 dch --config                         # the path, then every known key's effective value
@@ -1599,7 +1600,8 @@ to a place it cannot follow (`cd`, `cd $X`, `cd ~/x`, `pushd +1`).
 lines as NDJSON, each with `schema:1`: `first` (the key, `mode`, `scope` and
 `budget_ms`), then `definition` and `mention` lines, a `tally` per file,
 `progress` at most every 250 ms, and `done` last (`partial`, `why`, `counts`,
-`files`, `bytes`, `lines_too_long`). `<ref>` is 1 to 256 bytes of UTF-8 with no
+`files`, `bytes`, `lines_too_long`, and `define_warn` when a
+[`define_command`](#your-own-definitions-define_command) gave none). `<ref>` is 1 to 256 bytes of UTF-8 with no
 control character and none of the bidi controls U+200E, U+200F, U+202A to
 U+202E and U+2066 to U+2069 (`dch: bad ref`), and must parse as exactly one
 ref (`dch: not a ref`), relative paths against the session's cwd.
@@ -2006,6 +2008,46 @@ row) and `warn`. A row has `title` (required), `id`, `note`, `kind`,
 is `null`), bare or wrapped as `{"memory":{…}}`; a lone first
 `{"title":"…"}` line names the list. Its header has `--memory`'s keys, with
 `"source":"command"`.
+
+#### Your own definitions (`define_command`)
+
+X-ray defines a ref only from what the transcript shows (a heading, a
+`title:` line, JSON with an id and a title, a `--title`). A ref from your
+own ledger or tracker that the session never printed has no definition. Set
+a command that looks it up:
+```
+define_command = ~/bin/my-define
+```
+- **When.** `dch --xray <n> --ref <ref>` (and the card, Enter on a ref) runs
+  it after the transcripts are read, only when they gave no definition, so
+  a transcript definition never waits for it; the card shows "searching"
+  meanwhile and never blocks. The Refs list runs nothing.
+- **Run.** As `tasks_command`'s (no shell, the session's folder else your
+  home, its own process group, the same environment, your own config only,
+  through `dch serve` the host's), with the ref as written (`OQ-97`,
+  `#1343`, `o/r#831`) as the last word, and `DCH_REF` (the same) and
+  `DCH_REF_SHAPE` (`ticket`, `issue`, `pull`, `commit`, `file` or `url`) in
+  its environment.
+- **Lines.** One JSON object per line, each a definition (at most 8):
+  `title` (required, cut as titles are), `body` (up to 20 lines and 2 KB),
+  `url` and `status`. Output whose first line is not a JSON object is plain
+  text: that line is the title, the rest is ignored. Terminal escapes and
+  control bytes are taken out of titles and bodies.
+- **Limits.** 2 s and 1 MB of output; past a limit the process group is
+  ended. A failure (no such program, a non-zero exit, a timeout, nothing
+  printed) gives no definition: the card says "No definition found" and
+  the reason after it, the `done` line's `define_warn` the same.
+
+Each answer is a `definition` line of `<n>`'s with `"source":"command"`,
+`"rule":"command"`, `at`, `offset` and `chapter` `null`, the body as its
+`passage`, and its `url` and `status`. The card marks it
+`· your define_command`.
+```sh
+#!/bin/sh
+# a ledger entry by its id: OQ-97 or #1343
+id=${1#\#}
+exec my-ledger get "$id" --json | jq -c '{title, body: .note, status}'
+```
 
 `dch --xray <n> --follow --json` streams NDJSON, each line with
 `schema:1`. The first line is `{"schema":1,"snapshot":{…}}`, holding the

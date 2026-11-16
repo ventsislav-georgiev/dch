@@ -240,6 +240,13 @@ int xr_scan_tick(void *ctx, uint64_t bytes);
 void xr_scan_file(struct xr_scan *x, uint64_t bytes, uint64_t too_long,
                   int partial, int per_row);
 int xr_scan_done(struct xr_scan *x);
+/* #405: the definitions the files done held (0: the define_command asks);
+** one define_command answer, row its {"title",...} object, as a definition
+** of <n>'s with "source":"command" (0, -1 not written); its failure, the
+** done line's define_warn */
+int xr_scan_defs(const struct xr_scan *x);
+int xr_scan_cmd_def(struct xr_scan *x, const char *row);
+void xr_scan_define_warn(struct xr_scan *x, const char *warn);
 /* 1 for --full (a file read oldest first), 0 light (newest first, #262) */
 int xr_scan_full(const struct xr_scan *x);
 /* a write failed (3.4's cancel: no more lines, no done): 1 EPIPE, the

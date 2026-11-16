@@ -342,7 +342,8 @@ drive(int argc, char **argv)
 {
 	struct xcmd_ctx c = { argv[1], argc > 3 ? argv[3] : "",
 	                      argc > 2 ? argv[2] : NULL,
-	                      argc > 4 ? argv[4] : "", argc > 5 ? argv[5] : "" };
+	                      argc > 4 ? argv[4] : "", argc > 5 ? argv[5] : "",
+	                      NULL, NULL };
 	struct xcmd_result r;
 	struct rusage ru;
 	const char *e;

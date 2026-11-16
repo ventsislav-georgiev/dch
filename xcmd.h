@@ -24,15 +24,22 @@
 #define XCMD_ARGS_MAX 64		/* argv words */
 #define XCMD_ERR_MAX  (XR_TITLE_MAX * 4 + 1)	/* stderr's first line */
 #define XCMD_WARN_MAX 512
+/* define_command (#405): shorter limits, one card's few definitions */
+#define XCMD_DEF_WALL_MS 2000
+#define XCMD_DEF_OUT_MAX (1u << 20)
+#define XCMD_DEF_BODY    2048		/* a definition's body: bytes, */
+#define XCMD_DEF_LINES   20		/* and lines */
 
-enum xcmd_kind { XCMD_TASK, XCMD_MEMORY };
+enum xcmd_kind { XCMD_TASK, XCMD_MEMORY, XCMD_DEFINE };
 
 /* What the query knows about the session; NULL reads as "". command is the
-** config value (dch_config_get("tasks_command", ...)), unsplit. */
+** config value (dch_config_get("tasks_command", ...)), unsplit. XCMD_DEFINE:
+** ref, the last argv word and DCH_REF, its shape DCH_REF_SHAPE. */
 struct xcmd_ctx
 {
 	const char *command;
 	const char *session, *cwd, *agent, *agent_sid;
+	const char *ref, *shape;
 };
 
 struct xcmd_result
@@ -73,7 +80,9 @@ enum xcmd_line_kind { XCMD_SKIP, XCMD_ROW, XCMD_TITLE, XCMD_BLANK };
 
 /* One stdout line s[n] (no newline) of kind. first: no line before it was a
 ** row or the title; pos: the row's number, its id when it has none.
-** XCMD_ROW: out holds the row line; XCMD_TITLE: out holds the list title
+** XCMD_DEFINE: a row is {"title","passage","url","status"}, from an object
+** with a title, or from a first line that is no JSON object (its text the
+** title). XCMD_ROW: out holds the row line; XCMD_TITLE: out holds the list title
 ** (cut like a title); XCMD_SKIP: not a row (counted); XCMD_BLANK: only
 ** blanks (not counted). out[cap] needs XCMD_LINE_MAX + 1. */
 enum xcmd_line_kind xcmd_line(enum xcmd_kind kind, const char *s, size_t n,
