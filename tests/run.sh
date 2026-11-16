@@ -534,6 +534,7 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
         pyrun "--stop: a quiet master after /exit, Ctrl-C twice at exiting" stop_more_test.py
     fi
     pyrun "-k/--stop signal exactly the session's master" kill_test.py
+    pyrun "a master spawned from another session drops its inherited fds (#400)" inherit_fd_test.py
     pyrun "attached client exits cleanly on SIGHUP/SIGTERM" hangup_test.py
     pyrun "records with odd bytes, long aliases and long argv read back" record_utf8_test.py
     pyrun "a signalled master's history end names the sender" signal_sender_test.py

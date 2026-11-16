@@ -3020,6 +3020,18 @@ spawn_master(char *exe, const char *name, char *sockp,
 			if (nullfd > 2)
 				close(nullfd);
 		}
+		/* Drop every other fd our caller left inheritable (#400): a
+		** spawn from inside another session would pin its pty (and
+		** hand it to the program) for this master's whole life. */
+		{
+			long cfd, cmax = sysconf(_SC_OPEN_MAX);
+
+			/* shortcut: a 4096 cap on the sweep, like exec_prep */
+			if (cmax < 0 || cmax > 4096)
+				cmax = 4096;
+			for (cfd = 3; cfd < cmax; cfd++)
+				close((int)cfd);
+		}
 		/* Build argv: exe --master-of <sock> -- inner_argv... */
 		int ic = 0;
 		while (inner_argv[ic])
