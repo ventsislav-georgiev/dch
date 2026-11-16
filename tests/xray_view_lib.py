@@ -482,6 +482,10 @@ def fixture_order():
     each; xv-o3: one turn saying PROJ-9 in 250 lines, so light and full
     keep different lines (a file gives 200)."""
     os.makedirs(os.path.dirname(tl(OSIDS[0])), exist_ok=True)
+    # xv-o2 has a project of its own: xv-o1 also says PROJ-9, so in a shared
+    # one the card's cut mark would show whatever xv-o2's own scan did.
+    os.makedirs(os.path.dirname(tl(OSIDS[1], "-home-demo-proj2")),
+                exist_ok=True)
     for name, sid, big in (("xv-o1", OSIDS[0], 0), ("xv-o2", OSIDS[1], 1)):
         lines = []
         for k, w in enumerate(["ONE", "TWO", "THREE", "FOUR"]):
@@ -491,7 +495,8 @@ def fixture_order():
             if big:
                 lines += [at(say("answer %s2 says PROJ-9" % w), ts + "09Z")]
                 lines += [say("pad " * 50000)] * 6     # 1.2 MB
-        record(name, sid, lines)
+        record(name, sid, lines, *(("-home-demo-proj2", P + "2") if big
+                                   else ()))
     record("xv-o3", OSIDS[2], turn("prompt PIN", "2026-11-10T10:00:00Z") +
            [at(say("note %03d says PROJ-9" % k),
                "2026-11-10T10:%02d:%02dZ" % (k // 60, k % 60))
