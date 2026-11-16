@@ -1146,11 +1146,15 @@ def test_search():
     r = piped("--search", "x" * 256 + "\n")
     check("search -: the 256-byte cap counts the newline (still bad search)",
           r.returncode == 2 and "bad search" in r.stderr, r.stderr)
+    def stable(out):    # the rows without the timing lines (first, progress, done)
+        return [l for l in ref_lines(out) or [None]
+                if l is None or not {"first", "progress", "done"} & set(l)]
     want = dch("--xray", "xr-sr", "--ref", "#831", "--json")
     r = piped("--ref", "#831")
     check("ref -: a pipe's ref works like --ref <ref>",
-          r.returncode == want.returncode == 0 and r.stdout == want.stdout and
-          r.stdout, (r.returncode, r.stdout[:200], r.stderr))
+          r.returncode == want.returncode == 0 and r.stdout and
+          stable(r.stdout) == stable(want.stdout),
+          (r.returncode, r.stdout[:200], r.stderr))
     r = piped("--ref", "#831" + " " * 300)
     check("ref -: over 256 bytes is a bad ref, not cut to #831",
           r.returncode == 2, (r.returncode, r.stderr))
