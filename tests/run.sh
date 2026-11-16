@@ -67,7 +67,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")' \
 #   perf_test.py          wall-clock spawn/attach budgets of 1 s
 #   harness_names_test.py CPU-time ratio budget, contention skews it
 PYSERIAL=' perf_test.py harness_names_test.py '
-# DCH_TEST_JOBS: 1 = serial, 2..16 = that many jobs; unset = min(CPUs, 6);
+# DCH_TEST_JOBS: 1 = serial, 2..16 = that many jobs; unset = min(CPUs, 8);
 # anything else (empty, 0, not a number, over 16) = the default, with a note
 pjobs=${DCH_TEST_JOBS:-}
 case $pjobs in
@@ -79,9 +79,9 @@ esac
 if [ -z "$pjobs" ]; then
     pjobs=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
     case $pjobs in ''|*[!0-9]*|0) pjobs=1 ;; esac
-    # the files wait more than they compute: at 6 jobs the longest file
-    # already bounds the wall (#361 measurements); more only adds contention
-    [ "$pjobs" -le 6 ] || pjobs=6
+    # the files wait more than they compute: on 1.75.0 the whole suite took
+    # 366 s at 6 jobs, 310 s at 8, 0 failed at load 13 (#361)
+    [ "$pjobs" -le 8 ] || pjobs=8
 fi
 pn=0 prun='' pser='' pjobs0=$pjobs
 pqueue(){

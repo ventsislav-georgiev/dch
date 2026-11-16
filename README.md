@@ -313,7 +313,7 @@ install -m 0755 dch ~/.local/bin/dch     # or anywhere on $PATH
 Make sure `~/.local/bin` is in your `$PATH`, then `dch -h` to confirm.
 
 `make test` runs the suite. `DCH_TEST_JOBS=n` sets how many Python test files
-run in parallel (default: the CPU count, at most 6; `1` runs serially; 16 is
+run in parallel (default: the CPU count, at most 8; `1` runs serially; 16 is
 the maximum; anything else gets a one-line note and the default).
 `DCH_TEST_TIMES=1` prints each row group's seconds, longest first, before the
 counts.
