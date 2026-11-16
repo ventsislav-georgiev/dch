@@ -1381,8 +1381,8 @@ tsec 'shell: watchdog rows'
 # The subshell keeps the hung test's FAIL out of the counts.
 if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     wdf=$fail wdpy='' wdkid='' wdm='' wdname='' wdm2='' wdtd='' wdx='' wdx2=''
-    sleep 30 & wdby=$!
-    "$DCH" --master-of "$SOCKDIR/-kl.sock" -- sleep 30 </dev/null >/dev/null 2>&1 &
+    sleep 300 & wdby=$!
+    "$DCH" --master-of "$SOCKDIR/-kl.sock" -- sleep 300 </dev/null >/dev/null 2>&1 &
     wdkl=$!
     n=0
     while [ "$n" -lt 50 ] && [ ! -S "$SOCKDIR/-kl.sock" ]; do
@@ -1421,6 +1421,8 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     kill -0 "$wdby" 2>/dev/null && ok "watchdog: a process outside its group lives" \
         || bad "watchdog: a process outside its group lives"
     kill "$wdby"
+    # -kl: end the session on the test socket dir (its sleep too), then the master by pid
+    "$DCH" -k -- -kl >/dev/null 2>&1
     kill "$wdkl" 2>/dev/null
     [ "$fail" = "$wdf" ] || sed 's/^/       /' "$TMP/wd.out"
     [ -S "$SOCKDIR/$wdname.sock" ] && "$DCH" -k "$wdname" >/dev/null 2>&1

@@ -301,6 +301,95 @@ def test_persist():
         v.close()
 
 
+def shown(body):
+    """A view of xv-pe over the state file body: 1 when the agent rows show,
+    0 hidden, None when it never drew."""
+    if body is not None:
+        state(body)
+    v = Pty([DCH, "--xray", "xv-pe"], rows=40, cols=100)
+    try:
+        if not v.wait(b"Prompts ", 6):
+            return None
+        v.pump(0.5)
+        r = 1 if at(listed(v), "Scrollback") else 0
+        v.key(b"q", 0.3)
+        v.exit()
+        return r
+    finally:
+        v.close()
+
+
+def toggle(prep=None):
+    """xv-pe with a pressed once (from hidden); prep(v) runs before it.
+    The screen after the key."""
+    v = Pty([DCH, "--xray", "xv-pe"], rows=40, cols=100)
+    try:
+        v.wait(b"Prompts 2")
+        if prep:
+            prep(v)
+        m = len(v.out)
+        v.key(b"a", 0.8)
+        s = screen(v, m)
+        v.key(b"q", 0.3)
+        v.exit()
+        return s
+    finally:
+        v.close()
+
+
+def test_harden():
+    """#413: the state file's read and write (LOW-AV1..AV4, NIT-AV7)."""
+    p = state(None)
+    check("#413 AV3: hide_agents=0 with CRLF counts",
+          shown("hide_agents=0\r\n") == 1)
+    check("#413 AV3: hide_agents=0 with no final newline counts",
+          shown("hide_agents=0") == 1)
+    check("#413 AV3: hide_agents=0 with a lone CR counts",
+          shown("hide_agents=0\r") == 1)
+    check("#413 AV3: hide_agents=1 with CRLF hides", shown("hide_agents=1\r\n") == 0)
+    check("#413 AV3: hide_agents=00 is the default (hidden)",
+          shown("hide_agents=00\n") == 0)
+    state(None)
+    os.mkfifo(p)
+    check("#413 AV2: a FIFO at xray-view: the view draws, hidden",
+          shown(None) == 0)
+    os.unlink(p)
+    out = os.path.join(T, "outside.txt")
+    with open(out, "w") as f:
+        f.write("keep me\n")
+    os.symlink(out, p)
+    check("#413 AV2: a symlink at xray-view is not followed (hidden)",
+          shown(None) == 0)
+    toggle()
+    check("#413 AV1: saving over a symlinked xray-view leaves its target",
+          open(out).read() == "keep me\n" and not os.path.islink(p) and
+          open(p).read() == "hide_agents=0\n", open(out).read())
+    state(None)
+
+    def plant(v):
+        os.symlink(out, "%s.%d" % (p, v.pid))
+    toggle(plant)
+    check("#413 AV1: a symlink at the temp path: its target untouched",
+          open(out).read() == "keep me\n", open(out).read())
+    check("#413 AV1: the choice still written, a regular file",
+          not os.path.islink(p) and open(p).read() == "hide_agents=0\n")
+    check("#413 AV7: the file's mode is 0600 after a toggle",
+          os.stat(p).st_mode & 0o777 == 0o600, oct(os.stat(p).st_mode))
+    check("#413 AV1: no temp file left", not [
+        n for n in os.listdir(os.path.dirname(p)) if n.startswith("xray-view.")])
+    state(None)
+    sd = os.path.join(T, "state", "dch", "sessions")
+    os.chmod(sd, 0o770)
+    try:
+        s = toggle()
+    finally:
+        os.chmod(sd, 0o700)
+    check("#413 AV4: a group-writable sessions dir: a note says so",
+          "is not remembered" in s, s)
+    check("#413 AV4: and nothing is written", not os.path.exists(p))
+    state(None)
+
+
 def test_no_peer():
     state("hide_agents=0\n")    # #406: a persists, start shown
     v = Pty([DCH, "--xray", "xv-np"], rows=30, cols=100)
@@ -385,6 +474,7 @@ def main():
     try:
         fixture()
         test_persist()
+        test_harden()
         test_marks()
         test_no_peer()
         test_keep()

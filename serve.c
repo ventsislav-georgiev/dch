@@ -1523,7 +1523,16 @@ on_ctl(struct conn *c, const unsigned char *p, size_t n)
 		memcpy(ctl_rq, p, n);
 		ctl_rqn = n;
 	}
-	slog("%s: ctl %s %s (pid %ld)", c->ipstr, av[0], av[1], (long)pid);
+	/* an --xray --ref's text: the host's define_command may run with it
+	** (#411); slog escapes controls, 128 bytes kept */
+	for (k = 2; k + 1 < ac && strcmp(av[0], "--xray") == 0 &&
+	     strcmp(av[k], "--ref") != 0; k++)
+		;
+	if (k + 1 < ac && strcmp(av[0], "--xray") == 0)
+		slog("%s: ctl %s %s --ref %.128s (pid %ld)", c->ipstr, av[0], av[1],
+		     av[k + 1], (long)pid);
+	else
+		slog("%s: ctl %s %s (pid %ld)", c->ipstr, av[0], av[1], (long)pid);
 	if (c->ctl_follow)
 		notify('F', av[1]);
 	free(av);

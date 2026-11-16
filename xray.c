@@ -1045,6 +1045,18 @@ anchor_at(const char *s, size_t n, size_t i, int rules, const char *cwd,
 	       try_rules(s, n, i, prev_scalar(s, i), rules, 0, cwd, sp) != 0;
 }
 
+size_t
+xr_ctl_at(const char *s, size_t n)
+{
+	size_t a;
+	uint32_t c = u8_next((const unsigned char *)s, n, &a);
+
+	/* the card's list (picker.c pk_txtto, pk_bidi) */
+	return c < 0x20 || (c >= 0x7f && c <= 0x9f) || c == 0x061c ||
+	       c == 0x200e || c == 0x200f || (c >= 0x2028 && c <= 0x202e) ||
+	       (c >= 0x2066 && c <= 0x2069) ? a : 0;
+}
+
 int
 xr_ref_ok(const char *text)
 {
@@ -1059,6 +1071,7 @@ xr_ref_ok(const char *text)
 		if (!(a = dch_utf8_len((const unsigned char *)text + i, n - i)))
 			return 0;
 		c = u8_next((const unsigned char *)text + i, n - i, &a);
+		/* 3.1's list, not xr_ctl_at's: U+061C is no bidi control there */
 		if (c < 0x20 || (c >= 0x7f && c <= 0x9f) || c == 0x200e ||
 		    c == 0x200f || (c >= 0x202a && c <= 0x202e) ||
 		    (c >= 0x2066 && c <= 0x2069))
@@ -1106,6 +1119,16 @@ xr_ref_parse(const char *text, const char *cwd, struct xr_span *out)
 		return 0;
 	*out = o.sp;
 	return 1;
+}
+
+void
+xr_ref_written(const char *text, char *out, size_t cap)
+{
+	size_t n = strlen(text);
+	const char *t = trim(text, &n);
+
+	if (cap)
+		snprintf(out, cap, "%.*s", (int)(n < cap ? n : cap - 1), t);
 }
 
 /* ---- identity ----------------------------------------------------------- */
@@ -4382,8 +4405,8 @@ sc_hit(void *ctx, const struct xr_hit *h)
 	/* light reads a shell's ring oldest first: a newer block's result puts
 	** out the older one's (recency first, #396); why marks it, the stop
 	** comes at the ring's end (xr_scan_file). Its held lines are
-	** definitions only (S18): they stay till the newer block has one of
-	** its own (#403) */
+	** definitions only (S18): a newer block's first definition frees
+	** them (#403); else they stay to the ring's end */
 	if (x->found && x->shell && h->unit != x->foff)
 	{
 		x->olddefs = x->hn > 0;
@@ -4433,7 +4456,7 @@ sc_hit(void *ctx, const struct xr_hit *h)
 		fputs("}}\n", m);
 		if (x->full || !x->shell)
 			ln_send(x, m, &b, &bl);
-		else if (fclose(m) == 0)	/* held till the ring's end */
+		else if (fclose(m) == 0)	/* a newer definition frees it */
 		{
 			x->held[x->hn] = b;
 			x->hoff[x->hn++] = h->off;

@@ -12618,9 +12618,11 @@ xr_search_one(const char *path, const struct stat *st, int codex,
 }
 
 /* #405: a ref no file read defined: the user's define_command (their own
-** dch config only), run with the ref as written as its last word; each
-** answer a definition of <n>'s, "source":"command"; no answer, done's
-** define_warn. After the files, before done: it runs only when they found
+** dch config only), run with the ref as written (the --ref text, a peer's
+** through dch serve; #411) as its last word and DCH_REF, X-ray's key text
+** as DCH_REF_KEY; never for a ref starting with '-' (xcmd_rows); each
+** answer a definition of <n>'s, "source":"command", after a clean exit
+** only (#412: xcmd_rows holds them); no answer, done's define_warn. After the files, before done: it runs only when they found
 ** none, so a card's transcript definition never waits on it. */
 static int
 xr_cmd_def(const char *line, void *arg)
@@ -12629,22 +12631,24 @@ xr_cmd_def(const char *line, void *arg)
 }
 
 static void
-xr_define(struct xr_scan *sc, const struct xr_span *sp, const char *session,
-          const char *label, const char *agent, const char *asid)
+xr_define(struct xr_scan *sc, const struct xr_span *sp, const char *text,
+          const char *session, const char *label, const char *agent,
+          const char *asid)
 {
 	struct xcmd_result res;
 	struct stat st;
-	char cmd[1024], warn[XCMD_WARN_MAX] = "";
+	char cmd[1024], warn[XCMD_WARN_MAX] = "", ref[260];
 	/* a session cwd not known or gone (an ended session's worktree):
 	** HOME */
 	struct xcmd_ctx c = { cmd, session, label[0] == '/' &&
 	                      stat(label, &st) == 0 && S_ISDIR(st.st_mode)
 	                      ? label : getenv("HOME"), agent, asid,
-	                      xr_span_text(sp), xr_shape_name[sp->shape] };
+	                      ref, xr_shape_name[sp->shape], xr_span_text(sp) };
 	int set;
 
 	if (xr_scan_cancelled(sc) || xr_scan_defs(sc))
 		return;
+	xr_ref_written(text, ref, sizeof ref);	/* checked: <= 256 bytes */
 	if ((set = dch_config_get("define_command", cmd, sizeof cmd)) < 0)
 		snprintf(warn, sizeof warn, "define_command: not a command line "
 		         "(the config line is over 1023 bytes)");
@@ -12700,7 +12704,7 @@ xr_claude_ref(const char *cfg, const char *sid, const char *session,
 	if (rc == 0)
 		rc = xr_ref_others(sc, q->scope, sid, project);
 	if (rc == 0)
-		xr_define(sc, &sp, session, label, "claude", sid);
+		xr_define(sc, &sp, q->text, session, label, "claude", sid);
 	/* a cancel stopped the read: no done */
 	return xr_ref_exit(sc, rc != 0 || xr_scan_done(sc) != 0);
 }
@@ -12801,7 +12805,7 @@ xr_codex_ref(const struct xr_cx *x, const char *session, const char *label,
 	if (rc == 0)
 		rc = xr_ref_others(sc, q->scope, x->tid, project);
 	if (rc == 0)
-		xr_define(sc, &sp, session, label, "codex", x->tid);
+		xr_define(sc, &sp, q->text, session, label, "codex", x->tid);
 	return xr_ref_exit(sc, rc != 0 || xr_scan_done(sc) != 0);
 }
 
@@ -13037,7 +13041,7 @@ xr_shell_ref(const struct xr_target *t, const struct xr_refq *q,
 		/* then the project's Claude files, never another ring (S17) */
 		rc = xr_ref_others(f.sc, q->scope, "", project);
 		if (rc == 0)
-			xr_define(f.sc, &sp, t->name, label, "", "");
+			xr_define(f.sc, &sp, q->text, t->name, label, "", "");
 		if (rc == 0)
 			rc = xr_scan_done(f.sc);
 	}
@@ -13502,7 +13506,7 @@ xr_cmd(enum xcmd_kind kind, const char *session, const char *sid,
 	/* a session cwd not known: HOME, never the querying process's (a
 	** dch serve ctl's is the peer's choice) */
 	struct xcmd_ctx c = { cmd, session, cwd[0] ? cwd : getenv("HOME"),
-	                      agent, asid, NULL, NULL };
+	                      agent, asid, NULL, NULL, NULL };
 
 	warn[0] = '\0';
 	if ((set = dch_config_get(what, cmd, sizeof cmd)) < 0)

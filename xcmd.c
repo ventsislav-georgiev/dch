@@ -327,13 +327,16 @@ row_memory(struct xc_out *w, const struct json_parser *p, int r, char *tmp,
 }
 
 /* #405: s in place without terminal escapes (ESC [ ... final, ESC ] ...
-** BEL or ESC \\, ESC and one ASCII byte) and other control bytes but '\n'
-** and '\t'; returns its new length (a strlen beside plain() in one call's
-** arguments may run first: gcc on x86-64 did, and read stale bytes) */
+** BEL or ESC \\, ESC and one ASCII byte) and other controls but '\n' and
+** '\t': C0, DEL, C1 (U+0085 too) and bidi controls (#412, xr_ctl_at, the
+** card's list); a bad byte becomes 0xff, xr_title's U+FFFD. Returns its new
+** length (a strlen beside plain() in one call's arguments may run first:
+** gcc on x86-64 did, and read stale bytes) */
 static size_t
 plain(char *s)
 {
 	char *o = s, *i = s;
+	size_t l;
 
 	while (*i)
 	{
@@ -353,6 +356,22 @@ plain(char *s)
 		}
 		else if (c == 0x1b)	/* a lead byte stays: the text stays UTF-8 */
 			i += *i >= 0x20 && *i < 0x7f;
+		else if (c >= 0x80 && (l = xr_ctl_at(i - 1, (size_t)-1)))
+			i += l - 1;	/* NUL-terminated: the decode stops there */
+		else if (c >= 0x80)
+		{
+			/* whole sequences, a bad byte as 0xff (never in UTF-8):
+			** bytes a removal brings together cannot form a control */
+			if (!(l = dch_utf8_len((const unsigned char *)i - 1,
+			                       (size_t)-1)))
+				*o++ = (char)0xff;
+			else
+			{
+				memmove(o, i - 1, l);
+				o += l;
+				i += l - 1;
+			}
+		}
 		else if (c == '\n' || c == '\t' || (c >= 0x20 && c != 0x7f))
 			*o++ = (char)c;
 	}
@@ -445,13 +464,15 @@ xcmd_line(enum xcmd_kind kind, const char *s, size_t n, int first,
 	line[n] = '\0';
 	if (dch_json_parse(&p, line) != 0 || p.tok[0].kind != JSON_OBJECT)
 	{
-		/* #405: plain text, first: its first line is the title */
-		if (kind == XCMD_DEFINE && first)
+		/* #405: plain text, first: its first line is the title; a
+		** '{' line is JSON that did not parse, never a title (#412) */
+		if (kind == XCMD_DEFINE && first && s[i] != '{')
 		{
 			xr_title(line, plain(line), tb, sizeof tb);
 			if (tb[0])
 				row_define(&w, &p, -1, tmp, tb);
-			k = tb[0] && !w.bad ? XCMD_ROW : XCMD_SKIP;
+			/* only escapes: blank, the next line can be first (#412) */
+			k = !tb[0] ? XCMD_BLANK : !w.bad ? XCMD_ROW : XCMD_SKIP;
 			if (k != XCMD_ROW)
 				out[0] = '\0';
 		}
@@ -573,7 +594,7 @@ xc_env(const char *name, const char *v)
 static const char *const xc_names[] = {"DCH_SESSION", "DCH_SESSION_CWD",
                                        "DCH_AGENT", "DCH_AGENT_SESSION_ID",
                                        "DCH_ROWS_MAX", "DCH_REF",
-                                       "DCH_REF_SHAPE"};
+                                       "DCH_REF_SHAPE", "DCH_REF_KEY"};
 #define XC_NAMES (sizeof xc_names / sizeof *xc_names)
 
 /* environ minus our names, then ours (DCH_REF* only with a ref); NULL when
@@ -583,7 +604,7 @@ xc_envp(const struct xcmd_ctx *c, char *mine[XC_NAMES])
 {
 	const char *v[XC_NAMES];
 	char rows[16], **e;
-	size_t n = 0, k, j, mn = c->ref ? XC_NAMES : XC_NAMES - 2;
+	size_t n = 0, k, j, mn = c->ref ? XC_NAMES : XC_NAMES - 3;
 
 	snprintf(rows, sizeof rows, "%d", c->ref ? XR_DEFS : XCMD_ROWS_MAX);
 	v[0] = c->session;
@@ -593,6 +614,7 @@ xc_envp(const struct xcmd_ctx *c, char *mine[XC_NAMES])
 	v[4] = rows;
 	v[5] = c->ref;
 	v[6] = c->shape;
+	v[7] = c->key;
 	for (k = 0; k < mn; k++)
 		if (!(mine[k] = xc_env(xc_names[k], v[k])))
 			return NULL;
@@ -693,7 +715,10 @@ struct xc_run
 	size_t ln;
 	int over;		/* inside a line past XCMD_LINE_MAX */
 	int first;
+	int plain;		/* XCMD_DEFINE: the first row was plain text */
 	int stop;		/* XC_* */
+	char *held;		/* XCMD_DEFINE: rows, each NUL-ended, until */
+	size_t hn;		/* the command ends (#412) */
 };
 
 enum { XC_RUN, XC_CLOCK, XC_BYTES, XC_ROWS, XC_CALLER };
@@ -713,15 +738,41 @@ xc_one(struct xc_run *r, const char *s, size_t n)
 		}
 		return;
 	}
+	if (r->plain)
+		return;		/* after a plain-text title: the rest ignored */
 	k = xcmd_line(r->kind, s, n, r->first, r->res->rows + 1, r->row,
 	              XCMD_LINE_MAX + 1);
 	if (k == XCMD_BLANK)
 		return;
+	if (k == XCMD_ROW && r->kind == XCMD_DEFINE && r->first)
+	{
+		size_t i = 0;
+
+		while (s[i] == ' ' || s[i] == '\t' || s[i] == '\r')
+			i++;	/* a row's line is not blank: i < n */
+		r->plain = s[i] != '{';
+	}
 	r->first = 0;
 	if (k == XCMD_TITLE)
 		snprintf(r->res->title, sizeof r->res->title, "%s", r->row);
 	else if (k == XCMD_SKIP)
 		r->res->skipped++;
+	else if (r->kind == XCMD_DEFINE)
+	{
+		/* held: a run that fails later gives none (#412) */
+		size_t l = strlen(r->row) + 1;
+		char *h = realloc(r->held, r->hn + l);
+
+		if (!h)
+		{
+			r->stop = XC_CALLER;
+			return;
+		}
+		memcpy(h + r->hn, r->row, l);
+		r->held = h;
+		r->hn += l;
+		r->res->rows++;
+	}
 	else
 	{
 		r->res->rows++;
@@ -791,7 +842,7 @@ xcmd_rows(enum xcmd_kind kind, const struct xcmd_ctx *ctx, xcmd_row_fn fn,
 	int wall = kind == XCMD_DEFINE ? XCMD_DEF_WALL_MS : XCMD_WALL_MS;
 	size_t omax = kind == XCMD_DEFINE ? XCMD_DEF_OUT_MAX : XCMD_OUT_MAX;
 	char buf[4096], *argv[XCMD_ARGS_MAX + 1], *mine[XC_NAMES] = {0}, **envp;
-	char chunk[XCMD_LINE_MAX], eb[1024], prog[XR_TITLE_MAX * 4 + 1];
+	char chunk[XCMD_LINE_MAX], eb[1025], prog[XR_TITLE_MAX * 4 + 1];
 	struct xc_run r;
 	struct sigaction sa, old[3];
 	struct pollfd p[2];
@@ -809,6 +860,13 @@ xcmd_rows(enum xcmd_kind kind, const struct xcmd_ctx *ctx, xcmd_row_fn fn,
 		old[k].sa_handler = SIG_IGN;	/* nothing to restore yet */
 	if (!ctx->command || !*ctx->command)
 		return 0;
+	/* a ref the user's program could read as an option: never run (no
+	** "--": not every program takes it) */
+	if (ctx->ref && (ctx->ref[0] == '-' || (ctx->key && ctx->key[0] == '-')))
+	{
+		xc_warn(res, what, "not run for a ref starting with -");
+		return 0;
+	}
 	/* a ref is the last word, as written: one more argv slot kept */
 	if ((k = xcmd_argv(ctx->command, getenv("HOME"), buf, sizeof buf, argv,
 	                   XCMD_ARGS_MAX + (ctx->ref ? 0 : 1))) < 0)
@@ -914,12 +972,12 @@ xcmd_rows(enum xcmd_kind kind, const struct xcmd_ctx *ctx, xcmd_row_fn fn,
 			if (p[k].fd < 0 || !p[k].revents)
 				continue;
 			/* stderr: its first bytes kept, the rest drained */
-			if (k && en < sizeof eb)
-				n = read(p[k].fd, eb + en, sizeof eb - en);
+			if (k && en < sizeof eb - 1)
+				n = read(p[k].fd, eb + en, sizeof eb - 1 - en);
 			else
 				n = read(p[k].fd, chunk, sizeof chunk);
 			if (n > 0 && k)
-				en += en < sizeof eb ? (size_t)n : 0;
+				en += en < sizeof eb - 1 ? (size_t)n : 0;
 			else if (n > 0 && !k)
 			{
 				size_t take = (size_t)n < omax - total
@@ -962,7 +1020,8 @@ xcmd_rows(enum xcmd_kind kind, const struct xcmd_ctx *ctx, xcmd_row_fn fn,
 	res->stopped = r.stop != XC_RUN && r.stop != XC_CALLER;
 	if (st != -1 && WIFEXITED(st))
 		res->code = WEXITSTATUS(st);
-	xr_title(eb, en, res->err, sizeof res->err);
+	eb[en] = '\0';	/* escapes and controls out, as stdout's (#412) */
+	xr_title(eb, plain(eb), res->err, sizeof res->err);
 	if (r.stop == XC_CLOCK)
 		xc_warn(res, what, "stopped early after %d s", wall / 1000);
 	else if (r.stop == XC_BYTES)
@@ -984,6 +1043,14 @@ xcmd_rows(enum xcmd_kind kind, const struct xcmd_ctx *ctx, xcmd_row_fn fn,
 	else if (!res->rows && res->skipped)
 		xc_warn(res, what, "no valid row (%lu lines skipped)",
 		        res->skipped);
+	/* XCMD_DEFINE: only a clean run hands its rows over; a 9th row's stop
+	** is no failure (#412) */
+	if (kind == XCMD_DEFINE && res->warn[0] && r.stop != XC_ROWS)
+		res->rows = 0;
+	else if (kind == XCMD_DEFINE)
+		for (total = 0; fn && total < r.hn; total += strlen(r.held + total) + 1)
+			if (fn(r.held + total, arg))
+				break;
 restore:
 	(void)st;
 	sigprocmask(SIG_BLOCK, &set, &omask);
@@ -1008,5 +1075,6 @@ out:
 	free(envp);
 	free(r.line);
 	free(r.row);
+	free(r.held);
 	return (int)res->rows;
 }

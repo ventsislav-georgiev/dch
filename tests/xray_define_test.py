@@ -9,13 +9,21 @@ PROJ-5 only mentioned), `dch --xray xv-cl --ref <ref> --json` and the card:
     "command", its title, body as the passage (20 lines, 2 KB), url,
     status; the ref the last argv word, DCH_REF, DCH_REF_SHAPE,
     DCH_SESSION; at most 8;
+  - the ref as written (#411): a 40-hex SHA, a commit URL, a pull URL,
+    ./x.c reach the argv and DCH_REF unchanged, X-ray's key text in
+    DCH_REF_KEY; a ref starting with - is never run (define_warn);
   - a plain-text first line is the title; ANSI escapes and control bytes
     out of titles and bodies, bad UTF-8 as U+FFFD;
   - failures (slow -> stopped at 5 s and the group gone, exit 3, a missing
     program, nothing printed, 2 MB of output): no definition, the done
-    line's define_warn;
+    line's define_warn; also when it printed a definition first (#412);
+  - #412: stderr's line in define_warn cleaned; a plain-text first line the
+    only definition; a first line of escapes only is blank; a '{' line that
+    does not parse is skipped; C1, NEL and bidi controls out;
   - #831, defined by the transcript: the command never runs, the lines
     as with no define_command;
+  - #415: Enter on a commit row of the Refs list sends the row's full
+    SHA (argv, DCH_REF), the short key in DCH_REF_KEY;
   - the card: the title marked "your define_command", its body and url;
     a failure: "No definition found" and the reason on that line.
 
@@ -156,7 +164,8 @@ time.sleep(30)
 
     for name, body, want in (
             ("fail.py", "import sys\nsys.stderr.write('boom\\n')\n"
-             "print('{\"title\":\"x\"}')\nsys.exit(3)\n", None),
+             "print('{\"title\":\"x\"}')\nsys.exit(3)\n",
+             "define_command: exit 3: boom"),
             ("quiet.py", "pass\n",
              "define_command: no definition printed"),
             ("huge.py", "import sys\nsys.stdout.write('y' * (3 << 20))\n",
@@ -164,14 +173,6 @@ time.sleep(30)
         config(script(name, body))
         p, defs, done, _ = ref("PROJ-5")
         w = done.get("define_warn", "")
-        if want is None:   # a row then exit 3: its rows stand (as tasks)
-            check("exit 3 after a row: the row stands", len(defs) == 1, done)
-            config(script("fail2.py", "import sys\nsys.stderr.write("
-                          "'boom\\n')\nsys.exit(3)\n"))
-            p, defs, done, _ = ref("PROJ-5")
-            w, want = done.get("define_warn", ""), \
-                "define_command: exit 3: boom"
-            name = "fail2.py"
         check("%s: no definition, done's define_warn %r" % (name, want),
               p.returncode == 0 and not defs and w == want, (done, p.stderr))
     config(os.path.join(T, "no-such-program"))
@@ -184,6 +185,49 @@ time.sleep(30)
     check("unset again: the answer as before",
           re.sub(r'"elapsed_ms":\d+', "", ref("PROJ-5")[0].stdout) ==
           re.sub(r'"elapsed_ms":\d+', "", base))
+
+
+REC = os.path.join(T, "rec.json")
+SHA = "0123456789abcdef0123456789abcdef01234567"
+
+
+def test_written():
+    config(script("rec.py", r'''
+import json, os, sys
+json.dump({"argv": sys.argv[1:], "ref": os.environ.get("DCH_REF"),
+           "key": os.environ.get("DCH_REF_KEY"),
+           "shape": os.environ.get("DCH_REF_SHAPE")}, open(%r, "w"))
+print(json.dumps({"title": "rec"}))
+''' % REC))
+    for r, shape, key in (
+            (SHA, "commit", "0123456"),
+            ("https://github.com/o/r/commit/" + SHA, "commit", "0123456"),
+            ("https://github.com/o/r/pull/41", "pull", "o/r#41"),
+            ("  PROJ-5 ", "ticket", "PROJ-5"),
+            ("./x.c", "file", None)):
+        if os.path.exists(REC):
+            os.unlink(REC)
+        p, defs, done, _ = ref(r)
+        g = json.load(open(REC)) if os.path.exists(REC) else {}
+        w = r.strip()
+        check("as written: %r the last argv word and DCH_REF, its key "
+              "DCH_REF_KEY, shape %s" % (r, shape),
+              p.returncode == 0 and [x.get("title") for x in defs] ==
+              ["rec"] and g.get("argv") == [w] and g.get("ref") == w and
+              g.get("shape") == shape and (
+                  g.get("key") == key if key else
+                  g.get("key", "").startswith("/") and
+                  g.get("key", "").endswith("/x.c")), (g, done))
+    for r in ("-rf/r#1", "--x/y#1"):
+        if os.path.exists(REC):
+            os.unlink(REC)
+        p, defs, done, _ = ref(r)
+        check("%r, starting with -: never run, no definition, define_warn"
+              % r, p.returncode == 0 and not defs and
+              not os.path.exists(REC) and done.get("define_warn") ==
+              "define_command: not run for a ref starting with -",
+              (p.returncode, p.stdout[-400:], p.stderr))
+    config(None)
 
 
 def card(cmd):
@@ -227,8 +271,143 @@ def test_card():
         v.close()
 
 
+def test_failed_after_rows():
+    """#412: definitions printed before a failure are dropped, define_warn
+    set (cli and card); stderr's line cleaned; the parse fixes."""
+    # warmed with no DCH_REF: it exits at once (endpoint security, #405)
+    pre = "import os, sys, time\nif 'DCH_REF' not in os.environ: sys.exit(0)\n"
+    for name, body, want in (
+            ("half.py", "print('{\"title\":\"half\"}')\n"
+             "sys.stderr.write('lookup failed\\n')\nsys.exit(3)\n",
+             "define_command: exit 3: lookup failed"),
+            ("halfslow.py", "print('{\"title\":\"half\"}', flush=True)\n"
+             "time.sleep(30)\n", "define_command: stopped early after 5 s"),
+            ("halfbig.py", "print('{\"title\":\"half\"}')\n"
+             "sys.stdout.write('{\"title\":\"last\"}' + ' ' * (1 << 20))\n",
+             "define_command: stopped early at 1 MB of output")):
+        config(script(name, pre + body))
+        p, defs, done, _ = ref("PROJ-5")
+        check("%s: a definition then a failure: none, define_warn %r"
+              % (name, want), p.returncode == 0 and not defs and
+              done.get("define_warn") == want, (p.stdout[-400:], p.stderr))
+
+    config(script("esc.py", r'''
+import sys
+sys.stderr.buffer.write(b"\x1b]0;PWN\x07err \x1b[31mred\xe2\x80\xaedir"
+                        b"\xc2\x9bX\xc2\x85Y\n")
+sys.exit(3)
+'''))
+    p, defs, done, _ = ref("PROJ-5")
+    check("stderr's line in define_warn: escapes, C1, NEL, bidi out",
+          done.get("define_warn") == "define_command: exit 3: err reddirXY",
+          done)
+
+    for name, out, want in (
+            ("plainjson.py", b'plain title\n{"title":"json second"}\n',
+             ["plain title"]),
+            ("escfirst.py", b'\x1b[0m\x1b[?25l\nReal title\nmore\n',
+             ["Real title"]),
+            ("badjson.py", b'{"title":"t","body":"ok \xff\xfe bad"}\n'
+             b'plain after\n{"title":"second"}\n', ["second"]),
+            ("c1.py", b'{"title":"T\\u009b31mC\\u0085x\\u202ey","body":'
+             b'"B\\u009b2J\\u2066b","status":"s\\u202e"}\n', ["T31mCxy"])):
+        config(script(name, "import sys\nsys.stdout.buffer.write(%r)\n" % out))
+        p, defs, done, _ = ref("PROJ-5")
+        check("%s: the definitions %r" % (name, want),
+              p.returncode == 0 and [x.get("title") for x in defs] == want and
+              "define_warn" not in done, (p.stdout[-500:], done))
+        if name == "c1.py" and defs:
+            check("...C1 and bidi out of its body and status",
+                  defs[0].get("passage") == "B2Jb" and
+                  defs[0].get("status") == "s", defs[0])
+
+    v, s = card(script("halfcard.py", pre + "print('{\"title\":\"half\"}')\n"
+                       "sys.stderr.write('ledger down\\n')\nsys.exit(3)\n"))
+    try:
+        check("card: a definition then exit 3: No definition found and the "
+              "reason, not the half definition",
+              re.search(r"No definition found (·|-) define_command: exit 3: "
+                        r"ledger down", s) and "half" not in s, s)
+        v.key(b"q")
+    finally:
+        v.close()
+    config(None)
+
+
+def test_refs_row_full():
+    """#415: a Refs-list row opens the card with its fullest form: a
+    commit's full SHA, not the 7-hex key text."""
+    record("xv-sha", "11111111-2222-4333-8444-5555555555d5", [
+        {"type": "user", "cwd": P, "timestamp": "2026-11-10T10:00:00Z",
+         "message": {"content": "the sha fixture"}},
+        {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "fixed in %s today" % SHA}]}}])
+    config(script("rec2.py", r'''
+import json, os, sys
+json.dump({"argv": sys.argv[1:], "ref": os.environ.get("DCH_REF"),
+           "key": os.environ.get("DCH_REF_KEY")}, open(%r, "w"))
+print(json.dumps({"title": "rec"}))
+''' % REC))
+    if os.path.exists(REC):
+        os.unlink(REC)
+    v, _, scr = refs_tab("xv-sha")  # Refs, a: the commit its only row
+    try:
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        until(lambda: (v.pump(0.1), os.path.exists(REC) and
+                       "searching" not in screen(v, mark))[1], 15)
+        g = json.load(open(REC)) if os.path.exists(REC) else {}
+        check("#415: Refs row of a commit: the full SHA in argv and DCH_REF, "
+              "the short key in DCH_REF_KEY", g.get("argv") == [SHA] and
+              g.get("ref") == SHA and g.get("key") == "0123456",
+              (g, scr, screen(v, mark)))
+        os.unlink(REC) if os.path.exists(REC) else None
+        mark = len(v.out)
+        v.key(b"f", 1.0)  # the full re-scan runs --ref again
+        until(lambda: (v.pump(0.1), os.path.exists(REC) and
+                       "searching" not in screen(v, mark))[1], 15)
+        g = json.load(open(REC)) if os.path.exists(REC) else {}
+        check("#415: after f on that card: still the full SHA in argv and "
+              "DCH_REF", g.get("argv") == [SHA] and g.get("ref") == SHA and
+              g.get("key") == "0123456", (g, screen(v, mark)))
+        v.key(b"q")
+    finally:
+        v.close()
+    config(None)
+
+
 def main():
-    run_steps(fixture, test_cli, test_card)
+    run_steps(fixture, test_cli, test_written, test_card,
+              test_failed_after_rows, test_card_width, test_refs_row_full)
+
+
+def test_card_width():
+    """#413 (LOW-AV5): a title as wide as the row is cut, the status and
+    the "your define_command" mark stay on the card at every width."""
+    config(script("wide.py", "import json\nprint(json.dumps({'title': '"
+                  + "設" * 60 + "', 'status': 'open'}))\n"))
+    for cols in (24, 41, 80, 100):
+        v = Pty([DCH, "--xray", "xv-cl"], 30, cols)
+        try:
+            v.wait(b"Refs 3")
+            v.pump(0.3)
+            v.key(b"\033[Z\033[Z", 1.0)
+            mark = len(v.out)
+            v.key(b"\r", 1.0)
+            until(lambda: (v.pump(0.1),
+                           "your define_command" in screen(v, mark))[1], 10)
+            r = [x for x in rows(v.out[mark:]).values()
+                 if "your define_command" in x]
+            check("#413: %d cols: the mark on the card, the row in its "
+                  "width" % cols, r and r[-1].rstrip().endswith(
+                      "your define_command") and cells(r[-1].rstrip())
+                  <= cols, r)
+            if cols >= 41:
+                check("#413: %d cols: the wide title cut, the status kept"
+                      % cols, r and "設" in r[-1] and "open " in r[-1], r)
+            v.key(b"q")
+        finally:
+            v.close()
 
 
 if __name__ == "__main__":

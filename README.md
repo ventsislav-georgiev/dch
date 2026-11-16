@@ -282,7 +282,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.81.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.82.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -812,6 +812,11 @@ old and still current. Pair it with `state` and
   `dch --keys <n> ctrl+c`. An attach takes keys again once the
   program has read what waited; there it is not reported (the trace,
   `DCH_DEBUG`, has one line). Input still waiting is lost on `--restart`.
+- **A new command's first run can be slow.** On macOS, the first run of a
+  `tasks_command`, `memory_command` or `define_command` program you just
+  wrote or edited can wait on endpoint security's scan (about 3 s seen),
+  and that wait counts against the 5 s limit: the first answer can be
+  `stopped early after 5 s`. Run the program once by hand after an edit.
 
 ## Config file
 
@@ -961,9 +966,14 @@ it has memories or instruction files:
   the sender's name for a message from another Claude session (`🤖 prosper
   Scrollback answers for entry 895`), 📥 and the name for a subagent's
   hand-back, 🔔 for another auto row (a task notification). Your own
-  prompts carry no mark. `a` shows or hides the cross-session messages (hidden by
-  default; the choice is remembered for every X-ray view, in the file `xray-view`
-  (`hide_agents=0` or `1`) in dch's state directory), the tab counts leave them out, and the footer says how many;
+  prompts carry no mark. `a` shows or hides the cross-session messages
+  (hidden by default; the choice is remembered for every X-ray view, in
+  `$XDG_STATE_HOME/dch/xray-view`, `~/.local/state/dch/xray-view` when
+  `XDG_STATE_HOME` is unset or relative: one line, `hide_agents=0` or `1`;
+  anything else, or a file that is not a regular file, means hidden; dch
+  keeps the choice only while `dch/sessions` there is yours and not group
+  or other writable, else the footer says once that `a` is not
+  remembered), the tab counts leave them out, and the footer says how many;
   with `n` and `a` both off only your own prompts are left. A host whose dch
   predates `peer` sends none: no row is marked as an agent's and `a` hides
   nothing. `o`, here and in the reader, leaves the view (as `q` does)
@@ -1620,7 +1630,7 @@ ref (`dch: not a ref`), relative paths against the session's cwd.
   its project dir is the Codex's cwd's, its `lastSeen` the rollout's last
   write, and History records hold none. A shell `<n>`'s project dir is its
   cwd's. Another session's lines carry `chapter: null`.
-- **Light.** The default stops once the first result's window is read to its end (session scope), with `why: "first"` when that left something unread (none when the window reached the file's start: `partial: false`; a shell `<n>`'s ring is read whole and keeps only its newest command block's result, plus the newest older definition when that block has none, `why: "first"` when an older block's is left out), or after `--budget-ms`
+- **Light.** The default stops once the first result's window is read to its end (session scope), with `why: "first"` when that left something unread (none when the window reached the file's start: `partial: false`; a shell `<n>`'s ring is read whole and keeps only its newest command block's result, plus every distinct definition (up to 8) of the newest older block that has any, when that block has none, `why: "first"` when an older block's is left out), or after `--budget-ms`
   (50 to 300, default 300, across all files, not counting time spent waiting
   on a reader that pauses) with `why: "budget"`; a window being decoded is
   read to its end, and the scan's first window always is (the budget ends
@@ -1948,11 +1958,14 @@ memory_command = ~/bin/my-notes
   double quotes group words, a leading `~/` is your home, and `$VARS`, `;`,
   `|`, globs and backticks are plain text. It runs on the machine where the
   session lives (through `dch serve`: that host's config and command; the
-  asker sends only the session name), in the session's folder (else your
-  home), stdin `/dev/null`, in its own process group. Its environment adds
-  `DCH_SESSION` (the session name), `DCH_SESSION_CWD`, `DCH_AGENT`
-  (`claude`, `codex` or empty), `DCH_AGENT_SESSION_ID` (the agent's
-  conversation id, or empty) and `DCH_ROWS_MAX`. A config line over 1023
+  asker sends only the session name, and for `define_command` the ref,
+  which the asker chooses: see
+  [Your own definitions](#your-own-definitions-define_command)), in the
+  session's folder (else your home), stdin `/dev/null`, in its own process
+  group. Its environment adds `DCH_SESSION` (the session name),
+  `DCH_SESSION_CWD`, `DCH_AGENT` (`claude`, `codex` or empty),
+  `DCH_AGENT_SESSION_ID` (the agent's conversation id, or empty) and
+  `DCH_ROWS_MAX`. A config line over 1023
   bytes is never run cut: the built-in answer says `not a command line
   (the config line is over 1023 bytes)`.
 - **Lines.** One JSON object per line on stdout; rows show as they arrive.
@@ -2026,18 +2039,42 @@ define_command = ~/bin/my-define
 - **Run.** As `tasks_command`'s (no shell, the session's folder else your
   home, its own process group, the same environment, your own config only,
   through `dch serve` the host's), with the ref as written (`OQ-97`,
-  `#1343`, `o/r#831`) as the last word, and `DCH_REF` (the same) and
-  `DCH_REF_SHAPE` (`ticket`, `issue`, `pull`, `commit`, `file` or `url`) in
-  its environment.
-- **Lines.** One JSON object per line, each a definition (at most 8):
-  `title` (required, cut as titles are), `body` (up to 20 lines and 2 KB),
-  `url` and `status`. Output whose first line is not a JSON object is plain
-  text: that line is the title, the rest is ignored. Terminal escapes and
-  control bytes are taken out of titles and bodies.
+  `#1343`, `o/r#831`, a full SHA, a URL, `./x.c`) as the last word, and in
+  its environment `DCH_REF` (the same), `DCH_REF_KEY` (X-ray's key text: a
+  commit's first 7 hex digits, a GitHub pull URL as `o/r#41`, a file's
+  absolute path) and `DCH_REF_SHAPE` (`ticket`, `issue`, `pull`, `commit`,
+  `file` or `url`). As written means the `--ref` text (trimmed), the text
+  you type for ^R in the view, and a peer's text through `dch serve`;
+  Enter on a row of the Refs list sends the fullest form the row has: a
+  commit's longest SHA seen (also when it came from a commit URL, whose
+  repo X-ray does not keep), any other row its key text, which there
+  equals `DCH_REF_KEY`.
+- **Untrusted.** The ref comes from a transcript, the screen or (through
+  `dch serve`) a peer, who chooses it: treat it as input, not as a word
+  you wrote. A ref that starts with `-` (its text or its key) never runs
+  the command, so your program never sees it as an option: `define_warn`
+  says `define_command: not run for a ref starting with -`. `dch serve`'s
+  log line for the request records the ref.
+- **Lines.** Up to 8 JSON lines, or one plain-text first line. JSON: one
+  object per line, each a definition: `title` (required, cut as titles
+  are), `body` (up to 20 lines and 2 KB), `url` and `status`; a line that
+  starts with `{` and does not parse (invalid UTF-8 in it, say) is skipped.
+  Output whose first line is not a JSON object is plain text: that line is
+  the title (bad UTF-8 as U+FFFD) and the only definition, the rest is
+  ignored. The first line is the first that still has text once escapes
+  are out, so a colour reset on its own line does not count. Terminal
+  escapes and control characters (C0, DEL, C1 such as U+0085 and U+009B,
+  bidi controls such as U+202E) are taken out of titles, bodies, statuses
+  and the stderr line in `define_warn`.
 - **Limits.** 5 s (as `tasks_command`'s) and 1 MB of output; past a
-  limit the process group is ended. A failure (no such program, a non-zero exit, a timeout, nothing
-  printed) gives no definition: the card says "No definition found" and
-  the reason after it, the `done` line's `define_warn` the same.
+  limit the process group is ended. The definitions count only once the
+  command has exited 0: a failure (no such program, a non-zero exit, a
+  timeout, the 1 MB cap, nothing printed) gives no definition, also when
+  it printed some first. The card says "No definition found" and the
+  reason after it (`define_command: exit 3: <its stderr's first line>`,
+  `stopped early after 5 s`, `stopped early at 1 MB of output`), the
+  `done` line's `define_warn` the same. A 9th definition line ends the
+  command; its first 8 stand.
 
 Each answer is a `definition` line of `<n>`'s with `"source":"command"`,
 `"rule":"command"`, `at`, `offset` and `chapter` `null`, the body as its
@@ -2049,6 +2086,8 @@ Each answer is a `definition` line of `<n>`'s with `"source":"command"`,
 id=${1#\#}
 exec my-ledger get "$id" --json | jq -c '{title, body: .note, status}'
 ```
+The command never gets a ref that starts with `-`, so `"$id"` needs no `--`
+before it.
 
 `dch --xray <n> --follow --json` streams NDJSON, each line with
 `schema:1`. The first line is `{"schema":1,"snapshot":{…}}`, holding the
@@ -2287,7 +2326,7 @@ later does nothing to a running session.
 | `DCH_REVIVE_MSG` | client | built in | The carry-on message `--revive` types ([Bringing sessions back](#bringing-sessions-back)). |
 | `DCH_LOGIN_ENV`, `DCH_LOGIN_ENV_MS` | client | on, `10000` | `--revive` takes your login shell's environment; `0` skips it. |
 | `DCH_DEBUG` | client and master | unset | A path: append a trace there; `1`: `/tmp/dch.<uid>.trace`. |
-| `XDG_STATE_HOME` | client and master | `~/.local/state` | Where [history records](#bringing-sessions-back) live. |
+| `XDG_STATE_HOME` | client and master | `~/.local/state` | Where [history records](#bringing-sessions-back) live, and the X-ray view's `a` choice (`dch/xray-view`). |
 | `CLAUDE_CONFIG_DIR`, `CODEX_HOME` | client | `~/.claude`, `~/.codex` | Where dch looks for Claude's and Codex's session records and titles. |
 | `NO_COLOR`, `TERM=dumb` | picker | unset | Draw the [picker](#the-session-picker) without color. |
 

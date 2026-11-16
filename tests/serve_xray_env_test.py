@@ -12,7 +12,8 @@ its stdin. #319: a peer's --tasks answers as the host's dch. #321: with a
 tasks_command, the host's config and the host's command answer it; the
 peer's own config, environment and cwd reach none of it; --memory with a
 memory_command the same. #405: a peer's --ref the host's transcripts do not
-define runs the host's define_command, never the peer's.
+define runs the host's define_command, never the peer's, with the ref as
+the peer wrote it, and serve's log line records that ref (#411).
 
 Run:  python3 tests/serve_xray_env_test.py        (uses ./dch)
 """
@@ -278,7 +279,7 @@ def memory_command(senv, cenv, check):
           not os.path.exists(mark))
 
 
-def define_command(senv, cenv, check):
+def define_command(senv, cenv, check, log):
     """#405: a peer's --ref OQ-97 of session xa (xn1's; no transcript
     defines it) runs the host's define_command: its definition, source
     command, the ref and session as the host's own dch gives them; the
@@ -326,6 +327,24 @@ def define_command(senv, cenv, check):
            loc.stdout[-300:]))
     check("...and the peer's own define_command never ran",
           not os.path.exists(mark))
+    # #411: the peer chooses the ref; the host's command gets it as the
+    # peer wrote it, and serve's log line records it
+    url = "https://github.com/o/r/pull/41"
+    rem = subprocess.run([DCH, "--xray", "srv:xa", "--ref", url, "--json"],
+                         env=cenv, cwd=cenv["HOME"], capture_output=True,
+                         timeout=60, stdin=subprocess.DEVNULL)
+    try:
+        ds = [json.loads(l)["definition"] for l in rem.stdout.splitlines()
+              if b'"definition"' in l]
+    except ValueError:
+        ds = []
+    check("...a peer's ref reaches the host's command as the peer wrote it",
+          rem.returncode == 0 and len(ds) == 1 and
+          ds[0]["title"] == "<%s|pull|xa>" % url,
+          (rem.returncode, rem.stdout[-500:], rem.stderr[:300]))
+    check("...and serve's log line for that ctl records the ref",
+          re.search(r"ctl --xray xa --ref %s \(pid \d+\)" % re.escape(url),
+                    open(log).read()), open(log).read()[-600:])
 
 
 def main():
@@ -414,7 +433,7 @@ def main():
             tasks(senv, cenv, check)
             tasks_command(senv, cenv, logs, check)
             memory_command(senv, cenv, check)
-            define_command(senv, cenv, check)
+            define_command(senv, cenv, check, log)
     finally:
         if sp.poll() is None:
             sp.send_signal(signal.SIGTERM)
