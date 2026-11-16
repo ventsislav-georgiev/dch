@@ -347,6 +347,31 @@ def define_command(senv, cenv, check, log):
                     open(log).read()), open(log).read()[-600:])
 
 
+def define_ref_log(senv, cenv, check, log):
+    """#417: serve's log line records a --ref flag's whole text (up to 256
+    bytes, never cut inside a character), and never a --search value that
+    reads --ref."""
+    url = "https://example.co/" + "\u00e9" * 110 + "/x"
+    rem = subprocess.run([DCH, "--xray", "srv:xa", "--ref", url, "--json"],
+                         env=cenv, cwd=cenv["HOME"], capture_output=True,
+                         timeout=60, stdin=subprocess.DEVNULL)
+    text = open(log, encoding="utf-8", errors="replace").read()
+    check("serve's log records a %d-byte ref whole" % len(url.encode()),
+          rem.returncode == 0 and re.search(
+              r"ctl --xray xa --ref %s \(pid \d+\)" % re.escape(url), text),
+          (rem.returncode, rem.stderr[:300], text[-700:]))
+    before = len(text)
+    rem = subprocess.run([DCH, "--xray", "srv:xa", "--search", "--ref",
+                          "--json"], env=cenv, cwd=cenv["HOME"],
+                         capture_output=True, timeout=60,
+                         stdin=subprocess.DEVNULL)
+    new = open(log, encoding="utf-8", errors="replace").read()[before:]
+    check("...a --search whose text is --ref: no ref in the log line",
+          rem.returncode == 0 and re.search(r"ctl --xray xa \(pid \d+\)",
+                                            new) and "--ref" not in new,
+          (rem.returncode, rem.stderr[:300], new[-500:]))
+
+
 def main():
     tmp = os.path.realpath(tempfile.mkdtemp(prefix="dchsxe", dir=os.environ.get("DCH_TEST_TMP", "/tmp")))
     fake, wrap, logs = (os.path.join(tmp, d) for d in ("fake", "wrap", "logs"))
@@ -434,6 +459,7 @@ def main():
             tasks_command(senv, cenv, logs, check)
             memory_command(senv, cenv, check)
             define_command(senv, cenv, check, log)
+            define_ref_log(senv, cenv, check, log)
     finally:
         if sp.poll() is None:
             sp.send_signal(signal.SIGTERM)

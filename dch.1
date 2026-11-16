@@ -4258,10 +4258,12 @@ required,
 a line starting with
 .B {
 that does not parse is skipped.
-A first line that is not JSON is the title and the only definition; the
-first line is the first with text once escapes are out.
+A first line that is not JSON is the title and the only definition.
+A leading byte order mark and escapes are taken out of each line first, so
+a colour\-wrapped JSON line is JSON and the first line is the first with
+text.
 Escapes and control characters (C0, DEL, C1, bidi controls) are taken out
-of titles, bodies, statuses and the stderr line in
+of titles, bodies, statuses, urls and the stderr line in
 .BR define_warn .
 5 s and 1 MB, then the process group is ended.
 Its definitions carry
@@ -4271,6 +4273,9 @@ and count only when the command exits 0; a failure (a non\-zero exit, 5 s,
 .B done
 line's
 .BR define_warn .
+A 9th line that is a definition ends the command and its first 8 stand,
+whatever it would have exited with (dch's cap, not a failure); any other
+line past the 8th is read and ignored, and the exit status decides.
 A program just written or edited can wait about 3 s on endpoint security
 at its first run, within the 5 s.
 .SH EXIT STATUS

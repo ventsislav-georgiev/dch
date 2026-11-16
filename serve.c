@@ -1418,7 +1418,7 @@ on_ctl(struct conn *c, const unsigned char *p, size_t n)
 	char why[200], cwd[PATH_MAX], **av = NULL, *argv[CTL_ARGV_MAX + 2];
 	struct stat st;
 	int ac, fl, po[2] = { -1, -1 }, pe[2] = { -1, -1 }, k;
-	int pi[2] = { -1, -1 }, sx;
+	int pi[2] = { -1, -1 }, sx = -1;
 	int again = c->ctl_retry;
 	pid_t pid = -1;
 
@@ -1524,13 +1524,11 @@ on_ctl(struct conn *c, const unsigned char *p, size_t n)
 		ctl_rqn = n;
 	}
 	/* an --xray --ref's text: the host's define_command may run with it
-	** (#411); slog escapes controls, 128 bytes kept */
-	for (k = 2; k + 1 < ac && strcmp(av[0], "--xray") == 0 &&
-	     strcmp(av[k], "--ref") != 0; k++)
-		;
-	if (k + 1 < ac && strcmp(av[0], "--xray") == 0)
-		slog("%s: ctl %s %s --ref %.128s (pid %ld)", c->ipstr, av[0], av[1],
-		     av[k + 1], (long)pid);
+	** (#411). ctl_secret's index: a --ref flag token, not a --search
+	** value; whole, xr_ref_ok held it to 256 bytes (#417) */
+	if (sx >= 0 && !strcmp(av[sx - 1], "--ref"))
+		slog("%s: ctl %s %s --ref %s (pid %ld)", c->ipstr, av[0], av[1],
+		     av[sx], (long)pid);
 	else
 		slog("%s: ctl %s %s (pid %ld)", c->ipstr, av[0], av[1], (long)pid);
 	if (c->ctl_follow)

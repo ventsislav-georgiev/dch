@@ -68,8 +68,9 @@ typedef int (*xcmd_row_fn)(const char *line, void *arg);
 
 /* Run ctx->command for kind, rows to fn as they arrive. XCMD_DEFINE (#412):
 ** rows held until the command ends, handed over only after a clean exit 0
-** (or the 9th row's stop); a non-zero exit, the clock or the 1 MB cap
-** hands none over (res->rows 0) and leaves res->warn. Returns res->rows:
+** (or a 9th definition line's stop, dch's cap: the 8 stand; any other
+** line past the 8th is read and ignored, #417); a non-zero exit, the
+** clock, the 1 MB cap or no memory for the rows hands none over (res->rows 0) and leaves res->warn. Returns res->rows:
 ** > 0, the command is the source; 0, the caller uses its built-in source.
 ** res->warn is the header's warn either way: set when the command failed,
 ** could not run, timed out or hit a cap, "" for a clean answer (an empty
@@ -92,8 +93,9 @@ enum xcmd_line_kind { XCMD_SKIP, XCMD_ROW, XCMD_TITLE, XCMD_BLANK };
 ** row or the title; pos: the row's number, its id when it has none.
 ** XCMD_DEFINE: a row is {"title","passage","url","status"}, from an object
 ** with a title, or from a first line that is no JSON object and does not
-** start with '{' (its text the title; #412: one plain() empties is
-** XCMD_BLANK). XCMD_ROW: out holds the row line; XCMD_TITLE: out holds the list title
+** start with '{' (its text the title). A leading BOM and escapes go
+** first, so a colour-wrapped JSON line is JSON and one they empty is
+** XCMD_BLANK (#412, #417). XCMD_ROW: out holds the row line; XCMD_TITLE: out holds the list title
 ** (cut like a title); XCMD_SKIP: not a row (counted); XCMD_BLANK: only
 ** blanks (not counted). out[cap] needs XCMD_LINE_MAX + 1. */
 enum xcmd_line_kind xcmd_line(enum xcmd_kind kind, const char *s, size_t n,

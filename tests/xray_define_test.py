@@ -380,9 +380,63 @@ print(json.dumps({"title": "rec"}))
     config(None)
 
 
+def test_cap_url_bom():
+    """#417: past 8 definitions only a 9th definition stops the command
+    (the 8 stand); other lines are ignored and the exit status decides. A
+    url loses C1 and bidi controls; a BOM or colour codes round a JSON line
+    leave it JSON."""
+    pre = ("import sys\nif 'DCH_REF' not in __import__('os').environ: "
+           "sys.exit(0)\nw = sys.stdout.buffer.write\n"
+           "for k in range(8): w(b'{\"title\":\"d%d\"}\\n' % k)\n")
+    for name, body, n, want in (
+            ("cap_esc.py", "w(b'\\x1b[0m\\n \\x1b[?25l\\n')\n"
+             "sys.stderr.write('late\\n')\nsys.exit(3)\n", 0,
+             "define_command: exit 3: late"),
+            ("cap_bad.py", "w(b'{\"title\":\\n')\nsys.exit(3)\n", 0,
+             "define_command: exit 3"),
+            ("cap_esc0.py", "w(b'\\x1b[0m\\n')\n", 8, None),
+            ("cap_ninth.py", "w(b'{\"title\":\"d8\"}\\n')\nsys.exit(3)\n",
+             8, None)):
+        config(script(name, pre + body))
+        p, defs, done, _ = ref("PROJ-5")
+        check("%s: 8 definitions then more: %d stand, define_warn %r"
+              % (name, n, want), p.returncode == 0 and len(defs) == n and
+              done.get("define_warn") == want, (p.stdout[-400:], p.stderr))
+
+    config(script("url_ctl.py", r'''
+import sys
+sys.stdout.buffer.write(b'{"title":"t","url":"https://x/\\u202eab\\u0085c'
+                        b'\xc2\x9b"}\n')
+'''))
+    p, defs, done, _ = ref("PROJ-5")
+    check("url: C1, NEL and bidi controls out in --json",
+          [x.get("url") for x in defs] == ["https://x/abc"], p.stdout[-400:])
+
+    config(script("bom.py", r'''
+import sys
+sys.stdout.buffer.write(b'\xef\xbb\xbf{"title":"bom","body":"b"}\n'
+                        b'{"title":"two"}\n')
+'''))
+    p, defs, done, _ = ref("PROJ-5")
+    check("a BOM before the first JSON line: still JSON, both definitions",
+          [x.get("title") for x in defs] == ["bom", "two"] and
+          defs[0].get("passage") == "b", p.stdout[-400:])
+    config(script("green.py", r'''
+import sys
+sys.stdout.buffer.write(b'\x1b[32m{"title":"green"}\x1b[0m\n'
+                        b'\x1b[1m{"title":"two"}\n')
+'''))
+    p, defs, done, _ = ref("PROJ-5")
+    check("colour codes round JSON lines: still JSON, both definitions",
+          [x.get("title") for x in defs] == ["green", "two"],
+          p.stdout[-400:])
+    config(None)
+
+
 def main():
     run_steps(fixture, test_cli, test_written, test_card,
-              test_failed_after_rows, test_card_width, test_refs_row_full)
+              test_failed_after_rows, test_card_width, test_refs_row_full,
+              test_cap_url_bom)
 
 
 def test_card_width():

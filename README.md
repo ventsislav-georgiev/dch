@@ -2061,20 +2061,25 @@ define_command = ~/bin/my-define
   starts with `{` and does not parse (invalid UTF-8 in it, say) is skipped.
   Output whose first line is not a JSON object is plain text: that line is
   the title (bad UTF-8 as U+FFFD) and the only definition, the rest is
-  ignored. The first line is the first that still has text once escapes
-  are out, so a colour reset on its own line does not count. Terminal
-  escapes and control characters (C0, DEL, C1 such as U+0085 and U+009B,
-  bidi controls such as U+202E) are taken out of titles, bodies, statuses
-  and the stderr line in `define_warn`.
+  ignored. A leading byte order mark and terminal escapes are taken out
+  of each line before it is read, so a JSON line wrapped in colour codes
+  is still JSON, and the first line is the first that still has text, so a
+  colour reset on its own line does not count. Terminal escapes and
+  control characters (C0, DEL, C1 such as U+0085 and U+009B, bidi controls
+  such as U+202E) are taken out of titles, bodies, statuses, urls and the
+  stderr line in `define_warn`.
 - **Limits.** 5 s (as `tasks_command`'s) and 1 MB of output; past a
   limit the process group is ended. The definitions count only once the
   command has exited 0: a failure (no such program, a non-zero exit, a
   timeout, the 1 MB cap, nothing printed) gives no definition, also when
   it printed some first. The card says "No definition found" and the
   reason after it (`define_command: exit 3: <its stderr's first line>`,
-  `stopped early after 5 s`, `stopped early at 1 MB of output`), the
-  `done` line's `define_warn` the same. A 9th definition line ends the
-  command; its first 8 stand.
+  `stopped early after 5 s`, `stopped early at 1 MB of output`, `out of
+  memory`), the `done` line's `define_warn` the same. A 9th line that is a
+  definition ends the command and its first 8 stand whatever it would
+  have exited with (dch's cap, not a failure); any other line past the 8th
+  (blank, escapes only, not a definition) is read and ignored, and the
+  exit status decides as above.
 
 Each answer is a `definition` line of `<n>`'s with `"source":"command"`,
 `"rule":"command"`, `at`, `offset` and `chapter` `null`, the body as its

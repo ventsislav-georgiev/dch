@@ -430,7 +430,8 @@ row_define(struct xc_out *w, const struct json_parser *p, int r, char *tmp,
 	}
 	putq(w, s);
 	key(w, "url");
-	putq(w, r < 0 ? NULL : link_text(p, dch_json_field(p, r, "url"), 0, tmp));
+	s = r < 0 ? NULL : link_text(p, dch_json_field(p, r, "url"), 0, tmp);
+	putq(w, s && plain(tmp) ? s : NULL);	/* C1, bidi out as titles' (#417) */
 	key(w, "status");
 	putq(w, r < 0 ? NULL : dcut(p, dch_json_field(p, r, "status"), tmp, b));
 	put(w, "}");
@@ -462,11 +463,23 @@ xcmd_line(enum xcmd_kind kind, const char *s, size_t n, int first,
 		return XCMD_SKIP;
 	memcpy(line, s, n);
 	line[n] = '\0';
+	if (kind == XCMD_DEFINE)
+	{
+		/* a BOM and escapes out first: a colour-wrapped JSON line is
+		** JSON, an escape-only line blank (#417) */
+		char *b = line + (strncmp(line, "\xef\xbb\xbf", 3) ? 0 : 3);
+
+		memmove(line, b, plain(b) + 1);
+		for (i = 0; line[i] == ' ' || line[i] == '\t'; i++)
+			;
+		if (!line[i])
+			return XCMD_BLANK;
+	}
 	if (dch_json_parse(&p, line) != 0 || p.tok[0].kind != JSON_OBJECT)
 	{
 		/* #405: plain text, first: its first line is the title; a
 		** '{' line is JSON that did not parse, never a title (#412) */
-		if (kind == XCMD_DEFINE && first && s[i] != '{')
+		if (kind == XCMD_DEFINE && first && line[i] != '{')
 		{
 			xr_title(line, plain(line), tb, sizeof tb);
 			if (tb[0])
@@ -721,17 +734,23 @@ struct xc_run
 	size_t hn;		/* the command ends (#412) */
 };
 
-enum { XC_RUN, XC_CLOCK, XC_BYTES, XC_ROWS, XC_CALLER };
+enum { XC_RUN, XC_CLOCK, XC_BYTES, XC_ROWS, XC_CALLER, XC_NOMEM };
 
 static void
 xc_one(struct xc_run *r, const char *s, size_t n)
 {
 	enum xcmd_line_kind k;
+	int pf;
 
 	if (r->res->rows >= (r->kind == XCMD_DEFINE ? XR_DEFS : XCMD_ROWS_MAX))
 	{
-		/* one more line past the cap: the command has more */
-		if (xcmd_line(r->kind, s, n, 0, 0, r->row, 0) != XCMD_BLANK)
+		/* one more line past the cap: the command has more. define:
+		** only a 9th definition stops it, other lines are read and
+		** ignored and the exit status decides (#417) */
+		if (r->kind == XCMD_DEFINE
+		    ? xcmd_line(r->kind, s, n, 0, 0, r->row, XCMD_LINE_MAX + 1) ==
+		      XCMD_ROW
+		    : xcmd_line(r->kind, s, n, 0, 0, r->row, 0) != XCMD_BLANK)
 		{
 			r->stop = XC_ROWS;
 			r->res->skipped++;	/* left out: the done line's dropped */
@@ -744,14 +763,7 @@ xc_one(struct xc_run *r, const char *s, size_t n)
 	              XCMD_LINE_MAX + 1);
 	if (k == XCMD_BLANK)
 		return;
-	if (k == XCMD_ROW && r->kind == XCMD_DEFINE && r->first)
-	{
-		size_t i = 0;
-
-		while (s[i] == ' ' || s[i] == '\t' || s[i] == '\r')
-			i++;	/* a row's line is not blank: i < n */
-		r->plain = s[i] != '{';
-	}
+	pf = k == XCMD_ROW && r->kind == XCMD_DEFINE && r->first;
 	r->first = 0;
 	if (k == XCMD_TITLE)
 		snprintf(r->res->title, sizeof r->res->title, "%s", r->row);
@@ -765,13 +777,18 @@ xc_one(struct xc_run *r, const char *s, size_t n)
 
 		if (!h)
 		{
-			r->stop = XC_CALLER;
+			r->stop = XC_NOMEM;
 			return;
 		}
 		memcpy(h + r->hn, r->row, l);
 		r->held = h;
 		r->hn += l;
 		r->res->rows++;
+		/* a first row that is no JSON row as a later line: plain text,
+		** decided as xcmd_line did (a BOM, escapes first; #417) */
+		if (pf)
+			r->plain = xcmd_line(r->kind, s, n, 0, 0, r->row,
+			                     XCMD_LINE_MAX + 1) != XCMD_ROW;
 	}
 	else
 	{
@@ -1030,6 +1047,8 @@ xcmd_rows(enum xcmd_kind kind, const struct xcmd_ctx *ctx, xcmd_row_fn fn,
 	else if (r.stop == XC_ROWS)
 		xc_warn(res, what, "stopped early at %d rows", kind == XCMD_DEFINE
 		        ? XR_DEFS : XCMD_ROWS_MAX);
+	else if (r.stop == XC_NOMEM)	/* held rows: none handed over */
+		xc_warn(res, what, "out of memory");
 	else if (r.stop == XC_CALLER)
 		;
 	else if (st != -1 && WIFSIGNALED(st))
@@ -1043,8 +1062,8 @@ xcmd_rows(enum xcmd_kind kind, const struct xcmd_ctx *ctx, xcmd_row_fn fn,
 	else if (!res->rows && res->skipped)
 		xc_warn(res, what, "no valid row (%lu lines skipped)",
 		        res->skipped);
-	/* XCMD_DEFINE: only a clean run hands its rows over; a 9th row's stop
-	** is no failure (#412) */
+	/* XCMD_DEFINE: only a clean run hands its rows over; a 9th definition
+	** line's stop is dch's cap, no failure (#412, #417) */
 	if (kind == XCMD_DEFINE && res->warn[0] && r.stop != XC_ROWS)
 		res->rows = 0;
 	else if (kind == XCMD_DEFINE)
