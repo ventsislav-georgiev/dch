@@ -6474,7 +6474,16 @@ dch_history_dir(char *out, size_t outsz, const char *sockdir, int create)
 		if (p)
 			*p = '/';
 	}
-	return lstat(out, &st) == 0 && S_ISDIR(st.st_mode) &&
+	return dch_dir_private(out);
+}
+
+/* 0 when dir is a real directory, ours, closed to group and other write. */
+int
+dch_dir_private(const char *dir)
+{
+	struct stat st;
+
+	return lstat(dir, &st) == 0 && S_ISDIR(st.st_mode) &&
 	       st.st_uid == getuid() && !(st.st_mode & 022) ? 0 : -1;
 }
 

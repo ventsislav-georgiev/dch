@@ -392,6 +392,7 @@ struct dch_agent
 };
 int dch_history_dir(char *out, size_t outsz, const char *sockdir,
                     int create);
+int dch_dir_private(const char *dir);
 /* The shallowest Codex at or below child (X-ray 7.3/7.4); 0 none. */
 long dch_codex_below(long child);
 int dch_agent_probe(long child, struct dch_agent *a);

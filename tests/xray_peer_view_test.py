@@ -319,10 +319,10 @@ def shown(body):
         v.close()
 
 
-def toggle(prep=None):
+def toggle(prep=None, cols=100, env=None):
     """xv-pe with a pressed once (from hidden); prep(v) runs before it.
     The screen after the key."""
-    v = Pty([DCH, "--xray", "xv-pe"], rows=40, cols=100)
+    v = Pty([DCH, "--xray", "xv-pe"], rows=40, cols=cols, env=env)
     try:
         v.wait(b"Prompts 2")
         if prep:
@@ -385,8 +385,42 @@ def test_harden():
     finally:
         os.chmod(sd, 0o700)
     check("#413 AV4: a group-writable sessions dir: a note says so",
-          "is not remembered" in s, s)
+          "a not saved: dir unsafe" in s, s)
     check("#413 AV4: and nothing is written", not os.path.exists(p))
+    state(None)
+
+
+def test_note():
+    """#418: the note says why, the dir that holds the file is the one
+    checked."""
+    p = state(None)
+    dd = os.path.dirname(p)
+    os.chmod(dd, 0o777)
+    try:
+        s = toggle()
+    finally:
+        os.chmod(dd, 0o700)
+    check("#418 VA1: a 0777 dch/: the note, nothing saved",
+          "a not saved: dir unsafe" in s and not os.path.exists(p), s)
+    state(None)
+
+    def plant(v):
+        os.mkdir("%s.%d" % (p, v.pid))
+    s = toggle(plant)
+    check("#418 VA1: a directory at the temp name: the note says so",
+          "a not saved: temp taken" in s and not os.path.exists(p), s)
+    state(None)
+    s = toggle(cols=24)
+    check("#418 VA4: 24 columns: a private dir saves, no note",
+          "a not saved: temp taken" not in s and os.path.exists(p), s)
+    state(None)
+    os.chmod(dd, 0o777)
+    try:
+        s = toggle(cols=24)
+    finally:
+        os.chmod(dd, 0o700)
+    check("#418 VA4: 24 columns: the reason fits",
+          "a not saved: dir unsafe" in s, s)
     state(None)
 
 
@@ -475,6 +509,7 @@ def main():
         fixture()
         test_persist()
         test_harden()
+        test_note()
         test_marks()
         test_no_peer()
         test_keep()

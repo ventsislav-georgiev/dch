@@ -435,8 +435,8 @@ sys.stdout.buffer.write(b'\x1b[32m{"title":"green"}\x1b[0m\n'
 
 def main():
     run_steps(fixture, test_cli, test_written, test_card,
-              test_failed_after_rows, test_card_width, test_refs_row_full,
-              test_cap_url_bom)
+              test_failed_after_rows, test_card_width, test_card_zwj,
+              test_refs_row_full, test_cap_url_bom)
 
 
 def test_card_width():
@@ -466,6 +466,31 @@ def test_card_width():
             if cols >= 41:
                 check("#413: %d cols: the wide title cut, the status kept"
                       % cols, r and "設" in r[-1] and "open " in r[-1], r)
+            v.key(b"q")
+        finally:
+            v.close()
+
+
+def test_card_zwj():
+    """#418 (NIT-VA3): the title's cut never leaves a ZWJ at its end."""
+    for k in range(4):
+        config(script("zwj.py", "import json\nprint(json.dumps({'title': '"
+                      + "a" * k + "\U0001F469\u200d\U0001F4BB" * 30 +
+                      "', 'status': 'open'}))\n"))
+        v = Pty([DCH, "--xray", "xv-cl"], 30, 41)
+        try:
+            v.wait(b"Refs 3")
+            v.pump(0.3)
+            v.key(b"\033[Z\033[Z", 1.0)
+            mark = len(v.out)
+            v.key(b"\r", 1.0)
+            until(lambda: (v.pump(0.1),
+                           "your define_command" in screen(v, mark))[1], 10)
+            r = [x for x in rows(v.out[mark:]).values()
+                 if "your define_command" in x]
+            check("#418 VA3: %d: no ZWJ before the status" % k,
+                  r and "  open" in r[-1] and "\u200d" not in
+                  r[-1].split("  open")[0][-1:], r)
             v.key(b"q")
         finally:
             v.close()

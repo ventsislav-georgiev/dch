@@ -561,29 +561,44 @@ pk_cw(unsigned u)
 
 /* Characters (UTF-8), each as wide as it draws, up to column lim and the
 ** edge. A control (C0, DEL or C1), a bidi control or a broken sequence
-** shows as '?'. */
+** shows as '?'. A character goes with the zero-width ones after it (marks,
+** selectors) and, after a ZWJ, the next one: a cut never splits those
+** (#418). */
 void
 pk_txtto(const char *s, int lim)
 {
-	unsigned u;
-	int l, w;
+	unsigned u, prev;
+	const char *e, *q;
+	int l, w, cw;
 
 	if (lim > pk_w)
 		lim = pk_w;
-	for (; *s; s += l)
+	while (*s)
 	{
-		unsigned char c = (unsigned char)*s;
-
-		u = ap_cp(s, &l);
-		w = pk_cw(u);
+		for (e = s, w = 0, prev = 0; *e; e += l)
+		{
+			u = ap_cp(e, &l);
+			cw = pk_cw(u);
+			if (e != s && cw && prev != 0x200D)
+				break;
+			w += cw;
+			prev = u;
+		}
 		if (pk_col + w > lim)
 			break;
-		if (u < 0x20 || (u >= 0x7f && u < 0xa0) || (c >= 0x80 && l == 1) ||
-		    pk_bidi(u))
-			pk_rawn("?", 1);
-		else
-			pk_rawn(s, (size_t)l);
+		for (q = s; q < e; q += l)
+		{
+			unsigned char c = (unsigned char)*q;
+
+			u = ap_cp(q, &l);
+			if (u < 0x20 || (u >= 0x7f && u < 0xa0) ||
+			    (c >= 0x80 && l == 1) || pk_bidi(u))
+				pk_rawn("?", 1);
+			else
+				pk_rawn(q, (size_t)l);
+		}
 		pk_col += w;
+		s = e;
 	}
 }
 

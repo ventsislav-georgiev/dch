@@ -4083,24 +4083,33 @@ xv_peerload(void)
 	return strcmp(b, "hide_agents=0") != 0;
 }
 
-/* 0 saved or a write error (dropped); -1 the state dir failed the owner /
-** no group-or-other-write check, so the choice is not kept (LOW-AV4). */
+/* 0 saved or a write error (dropped); else why it is not kept (#418): -1 a
+** state dir failed the owner / no group-or-other-write check (dch/ holds the
+** file and its temp, sessions/ is checked by dch_history_dir), -2 the path
+** is too long, -3 something is in the way of the temp file. */
 static int
 xv_peersave(int hide)
 {
-	char p[PATH_MAX] = "", t[PATH_MAX + 8], b[32];
+	char p[PATH_MAX] = "", t[PATH_MAX + 8], d[PATH_MAX], b[32], *s;
 	int fd, n, ok;
 
 	if (xv_peerfile(p, sizeof p, 1) < 0)
-		return p[0] ? -1 : 0;
+		return !p[0] ? 0 : strlen(p) >= sizeof p - 1 ? -2 : -1;
 	if (snprintf(t, sizeof t, "%s.%ld", p, (long)getpid()) >= (int)sizeof t)
+		return -2;
+	snprintf(d, sizeof d, "%s", p);
+	if (!(s = strrchr(d, '/')))
 		return 0;
+	*s = '\0';
+	if (dch_dir_private(d) < 0)
+		return -1;
 	/* never through a planted symlink, 0600 as the other state files
 	** (LOW-AV1, NIT-AV7) */
 	unlink(t);
 	if ((fd = open(t, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
 	               0600)) < 0)
-		return 0;
+		return errno == EEXIST || errno == EISDIR || errno == ELOOP
+		       ? -3 : 0;
 	n = snprintf(b, sizeof b, "hide_agents=%d\n", hide);
 	ok = write(fd, b, (size_t)n) == n;
 	if (close(fd) != 0 || !ok || rename(t, p) < 0)
@@ -4289,10 +4298,10 @@ xv_key(struct xv *v, int c)
 		else
 		{
 			v->hidepeer = !v->hidepeer;	/* #360 */
-			if (xv_peersave(v->hidepeer) < 0 && !v->peernote++)
-				snprintf(v->status, sizeof v->status, "a is not "
-				         "remembered: dch's state dir is not "
-				         "private (see README)");
+			if ((n = xv_peersave(v->hidepeer)) < 0 && !v->peernote++)
+				snprintf(v->status, sizeof v->status, "a not saved: "
+				         "%s", n == -1 ? "dir unsafe" : n == -2 ?
+				         "path long" : "temp taken");
 		}
 		xv_vis(v);
 		for (n = 0; n < v->nvis && v->vis[n] > k; n++)
