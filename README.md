@@ -390,8 +390,8 @@ dch --xray <n>                                  # the X-ray view: prompts, refs 
 dch --xray <n> --json                           # a session's chapters (prompts / commands) as one JSON object
 dch --xray <n> --clear --json                   # empty a shell session's X-ray ring
 dch --xray <n> --follow --json                  # the same object, then its deltas as NDJSON until the session ends
-dch --xray <n> --ref <ref> [--scope session|project|all] [--full] [--budget-ms <ms>] --json  # one ref's mentions and definitions, NDJSON
-dch --xray <n> --search <text> --json           # the newest 50 places a word or phrase was said
+dch --xray <n> --ref <ref|-> [--scope session|project|all] [--full] [--budget-ms <ms>] --json  # one ref's mentions and definitions, NDJSON
+dch --xray <n> --search <text|-> --json         # the newest 50 places a word or phrase was said (- reads it from stdin)
 dch --xray <n> --memory --json                  # its memories and instruction files, JSON lines
 dch --xray <n> --chapter <anchor> --json        # one chapter's entries (prompt, replies, tool calls, output)
 dch --xray <n> --tasks --json                   # the session's task list (TaskCreate, TodoWrite, update_plan), JSON lines
@@ -448,7 +448,7 @@ someone is watching is invisible to them.
 | Verb | Does | Exit codes |
 | --- | --- | --- |
 | `--spawn <n> [--size CxR] [--env K=V]... [cmd...]` | Start headless session (default: `$SHELL`, 80x24 or `$COLUMNS`/`$LINES`). `--env` (max 32, first `=` splits) adds variables to the child; reserved keys (`DCH_SESSION`, `TERM` fixup) always win. Like `--revive` (and a plain `dch <new>`), it drops the calling Claude Code session's identity (`CLAUDECODE`, `CLAUDE_CODE_*` session vars), plus `GIT_EDITOR` and the other harness vars when `CLAUDECODE` is set, and sets `LC_TERMINAL=ghostty` unless the caller has it (dch keeps OSC 8 links, but under `TERM=xterm-256color` with no `TERM_PROGRAM` Claude Code would strip its statusline's, and `LC_TERMINAL` is the one signal its check reads that supports-hyperlinks and other Node CLIs ignore; ssh sends it on, by macOS's default `SendEnv LC_*`). Like any session variable it reaches every program in the session, not only Claude Code; a tool that keys on `ghostty` may assume Ghostty-only features (kitty graphics, for one) that the terminal you attach from may lack. dch sets no `FORCE_HYPERLINK`: those CLIs honour it before they check for a terminal, so it put OSC 8 into pipes and files (`stylelint t.css > out`, an agent's Bash tool); a caller's own value still reaches the session. An explicit `--env` (`--env LC_TERMINAL=` included) still wins. Prints the name. A program that cannot be executed is an error (`dch: <n>: <cmd>: <reason>`); one that runs and exits at once is not. | 0 ok, 1 exists/failed/not executable/bad --env |
-| `--xray <n> --json` | One JSON object: the session's corpus, chapters and refs (see [X-ray queries](#x-ray-queries---xray)). Without `--json` or any other flag: the full-screen [X-ray view](#x-ray-view-dch---xray-n) (`host:name` too; a non-terminal stdout exits 2). `--clear` empties a shell's ring instead; `--ref` streams one ref's lines; `--search` finds a word or phrase; `--tasks` lists the session's task list; `--memory` lists its memories and instruction files; `--follow` streams the object and then its changes; `--chapter` prints one chapter's entries. `<n>` as `host:name` runs it on that host (dch serve 1.55.0+); `host:name --requests --json` holds one connection there for many requests read off standard input. Must be the first argument. | 0 ok, 1 no such session/ambiguous/no corpus, 2 usage, 3 read failure; remote: 4 gate, 6 host lacks `xray`, 7 unreachable |
+| `--xray <n> --json` | One JSON object: the session's corpus, chapters and refs (see [X-ray queries](#x-ray-queries---xray)). Without `--json` or any other flag: the full-screen [X-ray view](#x-ray-view-dch---xray-n) (`host:name` too; a non-terminal stdout exits 2). `--clear` empties a shell's ring instead; `--ref` streams one ref's lines; `--search` finds a word or phrase; `--tasks` lists the session's task list; `--memory` lists its memories and instruction files; `--follow` streams the object and then its changes; `--chapter` prints one chapter's entries; `--search -` and `--ref -` read their text from standard input (see [X-ray queries](#x-ray-queries---xray)). `<n>` as `host:name` runs it on that host (dch serve 1.55.0+); `host:name --requests --json` holds one connection there for many requests read off standard input. Must be the first argument. | 0 ok, 1 no such session/ambiguous/no corpus, 2 usage, 3 read failure; remote: 4 gate, 6 host lacks `xray`, 7 unreachable |
 | `--send <n> <text...>` | Type text (joined with spaces), no enter. Input the program is not reading waits in the session, up to 4 MB (see [Honest caveats](#honest-caveats)); text past that is dropped to its end (all of it when none had gone in yet) and `--send` says `dch: <n>: input dropped: the program is not reading (4 MB held); the text's start may still be in its input`. | 0 ok, 1 input dropped |
 | `--run <n> <text...>` | `--send` + enter. Into a session whose Claude Code runs — as its command or typed into its shell — the text goes through `--say`'s composer gate instead: typed only over an empty composer, Enter pressed once it shows and again while it stays (Claude Code folds an Enter sent with the text into the paste). A `/command` is typed raw, a message pasted. A shell or any other program (also one in front of a Claude suspended with Ctrl-Z, when that one is in front as `claude_foreground` defines it), a master without a mirror (`DCH_NO_VT`), dch-lite and your own session (`$DCH_SESSION`) keep the plain burst. A Claude that is not in front with nothing in front of it that is — under a wrapper that does not read the keyboard (plain `unbuffer`), or a shell in front of it inside one — fails `not_foreground` and nothing is typed (dch-lite too): the text would wait there and the shell around it would run it once the wrapper exits. A gate failure prints `dch: <n>: <reason> — <why>` on stderr: `prompt` and `draft` (nothing typed), `not_typed` (the text never showed in the composer, no Enter), `not_submitted` (it stayed there through every Enter); `no_screen` when the composer is not on screen; `not_foreground` (see above); `interrupted`, `withdrawn` or `draft_left` on a SIGINT, SIGTERM or SIGHUP, as for `--say`. | 0 ok, 1 gate failure / input dropped (plain burst, as `--send`) |
 | `--keys <n> <key...>` | Encode+send keys mode-aware: `ctrl+c`, `alt+x`, `shift+tab`, `up`, `f5`, `enter`, `esc`, single chars. | 0 ok, 1 unknown key |
@@ -1615,7 +1615,9 @@ lines as NDJSON, each with `schema:1`: `first` (the key, `mode`, `scope` and
 [`define_command`](#your-own-definitions-define_command) gave none). `<ref>` is 1 to 256 bytes of UTF-8 with no
 control character and none of the bidi controls U+200E, U+200F, U+202A to
 U+202E and U+2066 to U+2069 (`dch: bad ref`), and must parse as exactly one
-ref (`dch: not a ref`), relative paths against the session's cwd.
+ref (`dch: not a ref`), relative paths against the session's cwd. `--ref -` reads the ref from standard input like `--search -`
+(see [`--search`](#x-ray-queries---xray): a pipe, a local session, 256 bytes at
+most, else the empty ref's `dch: bad ref`).
 - **Scope.** `--scope session` reads `<n>`'s own transcript, or its ring and
   screen. `--scope project`, the default (also for a remote caller), reads
   that first, then the Claude Code transcript or Codex rollout of every other
@@ -1827,6 +1829,15 @@ said in `<n>`'s own corpus and prints one object, the newest places first:
 `<text>` is literal: 2 to 200 bytes of UTF-8 with no control character and
 none of `--ref`'s bidi controls (`dch: bad search: 2 to 200 bytes, no control
 character`, exit 2). ASCII letters match in either case; nothing else folds.
+`--search -` (and `--ref -`) reads the text from standard input instead, so it
+never shows in `ps`: `echo word | dch --xray <n> --search - --json`. It
+reads only when stdin is not a terminal and `<n>` is a local session; it
+takes at most 256 bytes (`--ref`'s limit) counting the bytes read, newline
+included. One trailing newline (`\n` or `\r\n`) is dropped, so `echo word |`
+works; a second one is a control character. Past 256 bytes,
+an empty stdin or a read error the text is empty, not cut, and the usual
+value rule answers (`dch: bad search` / `bad ref`, exit 2). On a terminal
+or with `host:name` the `-` is the plain text `-`, the same error as before.
 - **What counts.** Claude Code: the typed prompts, the assistant's text, a
   tool call's input values and a tool result's text. Codex: the user's and
   the assistant's messages, a call's arguments and its output. A shell: the

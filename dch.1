@@ -104,7 +104,7 @@ dch \- detachable terminal sessions with a headless agent API
 .B dch \-\-xray
 .I name
 .B \-\-search
-.I text
+.IR text | \-
 .B \-\-json
 .br
 .B dch \-\-xray
@@ -118,7 +118,7 @@ dch \- detachable terminal sessions with a headless agent API
 .B dch \-\-xray
 .I name
 .B \-\-ref
-.I ref
+.IR ref | \-
 .RB [ \-\-scope
 .BR session | project | all ]
 .RB [ \-\-full ]
@@ -1649,6 +1649,24 @@ is literal, 2 to 200 bytes of UTF\-8 with no control character and no bidi
 control (else exit 2,
 .IR "bad search: 2 to 200 bytes, no control character" );
 ASCII letters match in either case, nothing else folds.
+A
+.I text
+(or
+.IR ref )
+of
+.B \-
+is read from standard input, so it stays out of
+.BR ps ,
+when stdin is not a terminal and the session is local; at most 256 bytes,
+counting the newline; one trailing newline (\fB\\n\fR or \fB\\r\\n\fR) is
+dropped, a second is a control character.
+Past 256 bytes, or empty, it is the empty text and the usual error
+.RB ( "bad search" ", " "bad ref" ;
+exit 2); on a terminal or with
+.I host:name
+the
+.B \-
+is the plain text, the same error as before.
 It counts the typed prompts, the assistant's text, a tool call's input
 values and a tool result's text (Codex: the user's and assistant's
 messages, a call's arguments and its output; a shell: the typed commands
