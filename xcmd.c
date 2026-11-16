@@ -328,8 +328,9 @@ row_memory(struct xc_out *w, const struct json_parser *p, int r, char *tmp,
 
 /* #405: s in place without terminal escapes (ESC [ ... final, ESC ] ...
 ** BEL or ESC \\, ESC and one ASCII byte) and other control bytes but '\n'
-** and '\t' */
-static char *
+** and '\t'; returns its new length (a strlen beside plain() in one call's
+** arguments may run first: gcc on x86-64 did, and read stale bytes) */
+static size_t
 plain(char *s)
 {
 	char *o = s, *i = s;
@@ -356,7 +357,7 @@ plain(char *s)
 			*o++ = (char)c;
 	}
 	*o = '\0';
-	return s;
+	return (size_t)(o - s);
 }
 
 /* A define_command's text field t, escapes out, cut like a title */
@@ -368,7 +369,7 @@ dcut(const struct json_parser *p, int t, char *tmp,
 
 	if (!s)
 		return NULL;
-	xr_title(plain(tmp), strlen(tmp), out, XR_TITLE_MAX * 4 + 1);
+	xr_title(tmp, plain(tmp), out, XR_TITLE_MAX * 4 + 1);
 	return *out ? out : NULL;
 }
 
@@ -447,7 +448,7 @@ xcmd_line(enum xcmd_kind kind, const char *s, size_t n, int first,
 		/* #405: plain text, first: its first line is the title */
 		if (kind == XCMD_DEFINE && first)
 		{
-			xr_title(plain(line), strlen(line), tb, sizeof tb);
+			xr_title(line, plain(line), tb, sizeof tb);
 			if (tb[0])
 				row_define(&w, &p, -1, tmp, tb);
 			k = tb[0] && !w.bad ? XCMD_ROW : XCMD_SKIP;

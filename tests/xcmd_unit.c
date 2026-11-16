@@ -300,6 +300,34 @@ t_memory(void)
 	free(big);
 }
 
+/* #405: escapes come out before the title's length is taken; the length of
+** the unsanitized text read stale bytes past the new end (gcc, CI 1.81.0) */
+static int
+starts(const char *p)
+{
+	return !strncmp(out, p, strlen(p));
+}
+
+static void
+t_define(void)
+{
+	static const char raw[] = "\n\x1b[1mPlain \xff title\x1b[0m\nmore text\n";
+
+	CHECK("define: escapes and BEL out of a JSON title and body",
+	      line(XCMD_DEFINE, "{\"title\":\"\\u001b[31mred\\u001b[0m T\\u0007x\","
+	           "\"body\":\"a\\u001b]0;pwn\\u0007b \\u001b[1mc\"}", 1) ==
+	      XCMD_ROW && starts("{\"title\":\"red Tx\",") &&
+	      strstr(out, "\"passage\":\"ab c\""));
+	CHECK("define: a JSON status, escapes out, nothing past its end",
+	      line(XCMD_DEFINE, "{\"title\":\"t\",\"status\":\"\\u001b[1mopen"
+	           "\\u001b[0m\"}", 1) == XCMD_ROW &&
+	      strstr(out, "\"status\":\"open\"}"));
+	CHECK("define: a plain first line, escapes out, bad UTF-8 as U+FFFD",
+	      xcmd_line(XCMD_DEFINE, raw + 1, strcspn(raw + 1, "\n"), 1, 3, out,
+	                sizeof out) == XCMD_ROW &&
+	      starts("{\"title\":\"Plain \xef\xbf\xbd title\","));
+}
+
 /* ---- the driver --------------------------------------------------------- */
 
 static long stop_after, seen;
@@ -399,6 +427,7 @@ main(int argc, char **argv)
 	t_task();
 	t_title();
 	t_memory();
+	t_define();
 	printf(fails ? "%d FAILED\n" : "all ok\n", fails);
 	return fails != 0;
 }
