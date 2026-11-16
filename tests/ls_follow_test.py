@@ -478,7 +478,12 @@ def main():
         c0 = d.conns
         s = follow("--remote", "--follow", "--hosts", dh,
                    DCH_REMOTE_EVERY_MS="300", DCH_REMOTE_BOX_MS="0")
-        time.sleep(5.5)
+        # until a stale array and a second dial, 5.5 s at most: a fresh one
+        # would come at 2.6 s, inside the first dial's box
+        end = time.time() + 5.5
+        while time.time() < end and not (d.conns - c0 >= 2 and any(
+                rem(json.loads(ln), "d") == {"d1": True} for ln in s.lines)):
+            s.line(0.1)
         while s.line(0.1):
             pass
         seen = [rem(json.loads(ln), "d") for ln in s.lines]
@@ -625,9 +630,14 @@ def main():
         fakes.append(f6)
         fh = "f=127.0.0.1:%d" % f6.port
         for sig in (signal.SIGTERM, signal.SIGINT):
+            c0 = f6.conns
             s = follow("--remote", "--follow", "--hosts", fh,
                        DCH_REMOTE_EVERY_MS="300")
-            time.sleep(BUDGET)
+            # its watch stream up (BUDGET at most), then the pushes fill it
+            end = time.time() + BUDGET
+            while time.time() < end and not (f6.conns > c0
+                                             and len(f6.streams) == 1):
+                time.sleep(0.05)
             for k in range(1, 6):  # 60 KB arrays nobody reads: pipe full
                 f6.set_rows(big(k))
                 time.sleep(0.4)
