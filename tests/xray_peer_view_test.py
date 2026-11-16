@@ -23,7 +23,7 @@ Run:  python3 tests/xray_peer_view_test.py      (uses ./dch)
 import json, os, re, shutil, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from xray_view_lib import DCH, HOME, P, T, Pty, cells, check, dch, fails, head, note, rows, say, screen, tl, turn  # noqa: E402
+from xray_view_lib import DCH, HOME, P, T, Pty, cells, check, dch, fails, head, note, rows, say, screen, tl, turn, until  # noqa: E402
 
 PSID = "11111111-2222-4333-8444-5555555555c7"   # xv-pe
 NSID = "11111111-2222-4333-8444-5555555555c8"   # xv-np
@@ -302,7 +302,9 @@ def test_narrow():
     for cols, need in ((41, 8), (60, 17)):
         v = Pty([DCH, "--xray", "xv-oc"], rows=30, cols=cols)
         try:
-            v.pump(1.5)
+            # the header is cut at 41 columns: wait for the row itself
+            until(lambda: v.pump(0.1) or "alpha" in at(listed(v), "LLLL"))
+            v.pump(0.3)
             r = at(listed(v), "LLLL")
             t = r[r.find("alpha"):]
             check("#391: %d columns: the title keeps %d cells, the sender "
