@@ -293,6 +293,10 @@ def define_command(senv, cenv, check):
         f.write("#!/bin/sh\ntouch '%s'\necho peer\n" % mark)
     for p in (host, peer):
         os.chmod(p, 0o755)
+    # a new file's first exec can wait on endpoint security past the 2 s
+    # clock (#405): run the host's once first (never the peer's: its mark)
+    subprocess.run([host], stdin=subprocess.DEVNULL,
+                   stdout=subprocess.DEVNULL, timeout=60)
     with open(senv["DCH_CONFIG"], "a") as f:
         f.write("define_command = %s\n" % host)
     with open(cenv["DCH_CONFIG"], "a") as f:

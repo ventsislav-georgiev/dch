@@ -28,11 +28,16 @@ PY = sys.executable
 MARK = os.path.join(T, "ran")
 
 
-def script(name, body):
+def script(name, body, warm=True):
     p = os.path.join(T, name)
     with open(p, "w") as f:
         f.write("#!%s\n" % PY + body)
     os.chmod(p, 0o755)
+    # run once first: the first exec of a new file waits on endpoint
+    # security's scan, which under load took past the 2 s clock (#405)
+    if warm:
+        subprocess.run([p], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=60)
     return p
 
 
@@ -138,7 +143,7 @@ import os, subprocess, time
 k = subprocess.Popen(["sleep", "30"])
 open(%r, "w").write("%%d %%d" %% (os.getpid(), k.pid))
 time.sleep(30)
-''' % pidf))
+''' % pidf, warm=False))
     p, defs, done, secs = ref("PROJ-5")
     pids = [int(x) for x in open(pidf).read().split()] \
         if os.path.exists(pidf) else []
