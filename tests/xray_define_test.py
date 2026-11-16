@@ -150,8 +150,10 @@ sys.stdout.buffer.write(b"\n\x1b[1mPlain \xff title\x1b[0m\nmore text\n")
 import os, subprocess, time
 k = subprocess.Popen(["sleep", "30"])
 open(%r, "w").write("%%d %%d" %% (os.getpid(), k.pid))
+print('{"title":"half"}', flush=True)
 time.sleep(30)
 ''' % pidf, warm=False))
+    # one 5 s run for both slow rows: this one and #412's halfslow
     p, defs, done, secs = ref("PROJ-5")
     pids = [int(x) for x in open(pidf).read().split()] \
         if os.path.exists(pidf) else []
@@ -161,6 +163,10 @@ time.sleep(30)
           "define_command: stopped early after 5 s" and len(pids) == 2 and
           until(lambda: not any(alive(x) for x in pids), 3),
           (secs, done, pids))
+    want = "define_command: stopped early after 5 s"
+    check("%s: a definition then a failure: none, define_warn %r"
+          % ("halfslow.py", want), p.returncode == 0 and not defs and
+          done.get("define_warn") == want, (p.stdout[-400:], p.stderr))
 
     for name, body, want in (
             ("fail.py", "import sys\nsys.stderr.write('boom\\n')\n"
@@ -280,8 +286,6 @@ def test_failed_after_rows():
             ("half.py", "print('{\"title\":\"half\"}')\n"
              "sys.stderr.write('lookup failed\\n')\nsys.exit(3)\n",
              "define_command: exit 3: lookup failed"),
-            ("halfslow.py", "print('{\"title\":\"half\"}', flush=True)\n"
-             "time.sleep(30)\n", "define_command: stopped early after 5 s"),
             ("halfbig.py", "print('{\"title\":\"half\"}')\n"
              "sys.stdout.write('{\"title\":\"last\"}' + ' ' * (1 << 20))\n",
              "define_command: stopped early at 1 MB of output")):
@@ -389,7 +393,10 @@ def test_card_width():
     for cols in (24, 41, 80, 100):
         v = Pty([DCH, "--xray", "xv-cl"], 30, cols)
         try:
-            v.wait(b"Refs 3")
+            # below about 80 cols the tab bar drops its counts, so no
+            # "Refs 3": the tab bar and the list's selection drawn
+            until(lambda: (v.pump(0.1), "[Prompts" in rows(v.out).get(2, "")
+                           and "\u258c" in rows(v.out).get(4, ""))[1])
             v.pump(0.3)
             v.key(b"\033[Z\033[Z", 1.0)
             mark = len(v.out)
