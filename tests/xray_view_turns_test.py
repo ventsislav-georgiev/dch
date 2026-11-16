@@ -771,9 +771,10 @@ def test_search():
               "Search 0" in rows(v.out).get(2, ""), text)
         mark = len(v.out)
         v.key(b"\t", 1.0)
-        check("Search: Tab wraps to Prompts", until(lambda: v.wait(
-              b"[Prompts", 0.1, mark) or "Prompts" in head(v) or
-              "a long chapter" in screen(v, mark)), screen(v, mark))
+        # colour: the chosen tab alone has a background (SGR 0;..;bg)
+        check("Search: Tab wraps to Prompts", until(lambda: (v.pump(0.1),
+              re.search(rb"\033\[0;[0-9;]*m Prompts", v.out[mark:]))[1]),
+              screen(v, mark))
         mark = len(v.out)
         v.key(b"\033[Z", 1.0)
         text = screen(v, mark)
