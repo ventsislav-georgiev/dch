@@ -1646,7 +1646,7 @@ ref (`dch: not a ref`), relative paths against the session's cwd.
   is found. `--full` reads the head, then the newest 256 MiB, then the
   middle, oldest first, so the caps cut only the middle and the newest turns
   are always read: a file over 1 GiB always comes back partial
-  (`why: "bytes"`), with its newest kept, and one whose middle takes past
+  (`why: "bytes"` or `"time"`, whichever limit comes first), with its newest 256 MiB kept, and one whose middle takes past
   the 10 s clock says `why: "time"` (a dense 300 MiB file: 2.9 s, 11 MB). A mention or definition in that middle has `chapter: null`, since
   `--json` has no chapter there. So a ref card can show mentions from a part
   of a huge transcript that the Chapters, Prompts and Responses lists do not

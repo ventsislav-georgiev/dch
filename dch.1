@@ -2074,7 +2074,10 @@ reads the middle too, under its own caps, a hit there with
 .B \-\-full
 reads it last, so the caps cut only the middle and the newest turns are
 always read (a file over 1 GiB is always partial,
-.BR why:\(dqbytes\(dq ).
+.BR why:\(dqbytes\(dq
+or
+.BR \(dqtime\(dq ,
+whichever limit comes first; the newest 256 MiB are always kept).
 A live Codex's chapters come from its rollout, read the same way
 (corpus
 .BR codex ,
