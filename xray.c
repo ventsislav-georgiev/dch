@@ -4075,6 +4075,8 @@ struct xr_scan
 	uint64_t nunit, lastunit, nrow, lastrow, lines, lastoff, lasth, foff;
 				/* foff: light, a shell's result's unit */
 	int found, ndefs, mentioned;
+	int olddefs;		/* light shell: the held definitions are an
+				** older block's, kept till a newer one comes */
 	uint64_t defh[XR_DEFS];
 	char *held[XR_RING];
 	uint64_t hoff[XR_RING];	/* light: each held line's offset */
@@ -4375,15 +4377,12 @@ sc_hit(void *ctx, const struct xr_hit *h)
 		return;
 	/* light reads a shell's ring oldest first: a newer block's result puts
 	** out the older one's (recency first, #396); why marks it, the stop
-	** comes at the ring's end (xr_scan_file) */
+	** comes at the ring's end (xr_scan_file). Its held lines are
+	** definitions only (S18): they stay till the newer block has one of
+	** its own (#403) */
 	if (x->found && x->shell && h->unit != x->foff)
 	{
-		size_t k;
-
-		for (k = 0; k < x->hn; k++)
-			free(x->held[k]);
-		x->hn = x->h0 = 0;
-		x->ndefs = 0;
+		x->olddefs = x->hn > 0;
 		x->nunit = x->lastunit = x->nrow = x->lastrow = x->lines = 0;
 		x->lastoff = x->lasth = 0;
 		x->foff = h->unit;
@@ -4394,6 +4393,13 @@ sc_hit(void *ctx, const struct xr_hit *h)
 		uint64_t th = title_hash(h->title);
 		int k;
 
+		if (x->olddefs)	/* a newer definition puts out the older ones */
+		{
+			for (k = 0; k < (int)x->hn; k++)
+				free(x->held[k]);
+			x->hn = x->h0 = 0;
+			x->ndefs = x->olddefs = 0;
+		}
 		for (k = 0; k < x->ndefs && x->defh[k] != th; k++)
 			;
 		/* a line per distinct title, at most XR_DEFS (3.8) */
@@ -4423,7 +4429,7 @@ sc_hit(void *ctx, const struct xr_hit *h)
 		fputs("}}\n", m);
 		if (x->full || !x->shell)
 			ln_send(x, m, &b, &bl);
-		else if (fclose(m) == 0)	/* held till its row is the newest */
+		else if (fclose(m) == 0)	/* held till the ring's end */
 		{
 			x->held[x->hn] = b;
 			x->hoff[x->hn++] = h->off;
@@ -4480,8 +4486,8 @@ sc_hit(void *ctx, const struct xr_hit *h)
 		}
 	}
 	/* light: the first result (a wider scope: another session's, R5) ends
-	** the scan once its line (a shell: its row) is done, so a definition
-	** keeps its anchor's mention */
+	** the scan once its line is done, so a definition keeps its anchor's
+	** mention; a shell's ring is read whole, its newest block leading */
 anchor:
 	if (!x->full && !x->found && (!x->scope || x->other))
 	{
@@ -4586,7 +4592,7 @@ xr_scan_file(struct xr_scan *x, uint64_t bytes, uint64_t too_long,
 
 	x->files++;
 	if (x->found && !x->stop && x->shell && x->why)
-		x->stop = 1;	/* the ring read, an older row's result put out */
+		x->stop = 1;	/* the ring read, an older block's result put out */
 	/* a first hit that ended after the file's last byte stopped nothing:
 	** the next file's tick (xr_scan_next) stops the scan if one follows */
 	if (x->stop && !x->shell && x->why && !strcmp(x->why, "first") &&
@@ -4626,7 +4632,7 @@ xr_scan_file(struct xr_scan *x, uint64_t bytes, uint64_t too_long,
 	/* the next file starts from nothing; found and the stop carry on */
 	x->nunit = x->lastunit = x->nrow = x->lastrow = x->lines = 0;
 	x->lastoff = x->lasth = 0;
-	x->ndefs = x->mentioned = 0;
+	x->ndefs = x->mentioned = x->olddefs = 0;
 	x->dropped = 0;
 	if (!b)
 		return;
