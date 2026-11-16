@@ -361,6 +361,15 @@ print(json.dumps({"title": "rec"}))
               "the short key in DCH_REF_KEY", g.get("argv") == [SHA] and
               g.get("ref") == SHA and g.get("key") == "0123456",
               (g, scr, screen(v, mark)))
+        os.unlink(REC) if os.path.exists(REC) else None
+        mark = len(v.out)
+        v.key(b"f", 1.0)  # the full re-scan runs --ref again
+        until(lambda: (v.pump(0.1), os.path.exists(REC) and
+                       "searching" not in screen(v, mark))[1], 15)
+        g = json.load(open(REC)) if os.path.exists(REC) else {}
+        check("#415: after f on that card: still the full SHA in argv and "
+              "DCH_REF", g.get("argv") == [SHA] and g.get("ref") == SHA and
+              g.get("key") == "0123456", (g, screen(v, mark)))
         v.key(b"q")
     finally:
         v.close()

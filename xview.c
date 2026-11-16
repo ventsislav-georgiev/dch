@@ -1069,7 +1069,8 @@ xv_cpin(struct xv *v)
 /* The card of ref text (key: its index key), scanned light for the
 ** project, or full (scope 1 project, 2 all). ref, when not NULL or "", is
 ** what --ref sends (define_command's ref as written, #415); text stays the
-** card's header, copy and highlight. */
+** card's header, copy and highlight. key == v->ckey (a re-scan) keeps
+** all three, so v->cref may be passed back in. */
 static void
 xv_card(struct xv *v, const char *key, const char *text, const char *ref,
         int full, int scope)
@@ -4199,12 +4200,12 @@ xv_key(struct xv *v, int c)
 		case 'g': case PK_HOME: v->csel = 0; xv_cpin(v); break;
 		case 'G': case PK_END: v->csel = v->nm - 1; xv_cpin(v); break;
 		case 'f':
-			xv_card(v, v->ckey, v->ctext, NULL, 1, v->scope);
+			xv_card(v, v->ckey, v->ctext, v->cref, 1, v->scope);
 			break;
 		case 'o':
 			return xv_open(v);
 		case 'p':	/* o before 1.61 (#227); o opens, as everywhere */
-			xv_card(v, v->ckey, v->ctext, NULL, 1, v->scope == 2 ? 1 : 2);
+			xv_card(v, v->ckey, v->ctext, v->cref, 1, v->scope == 2 ? 1 : 2);
 			break;
 		case 'y':
 			xv_copy(v);
