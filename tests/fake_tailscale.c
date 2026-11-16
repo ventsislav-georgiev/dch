@@ -1,7 +1,7 @@
 /* serve_test's fake tailscale CLI, compiled: no shell start per call. dch
 ** serve gives each call 3 s (TS_MS); under load a /bin/sh per whois went past
-** that, a whois_failed refusal cached 30 s (#246, #277). Same contract as the
-** shell fake FAKE_TS in serve_test.py: appends "<verb> <loopback var>" to
+** that, a whois refusal (#246, #277). Same contract as the shell fake this
+** replaced: appends "<verb> <loopback var>" to
 ** calls next to itself, prints status.json, whois.json or ip.txt from there
 ** for status, whois or ip, exits 1 for anything else or a missing file.
 ** A file whois.stall next to it: the next whois removes it and sleeps that

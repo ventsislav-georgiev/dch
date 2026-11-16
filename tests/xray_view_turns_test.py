@@ -661,7 +661,7 @@ def test_search():
     v = Pty([DCH, "--xray", "xv-se"], rows=40, cols=100,
             env={"NO_COLOR": ""})
     try:
-        v.wait(b"Prompts 3")
+        tabbar(v, "Prompts 3")  # its count is faint, its own SGR: no raw match
         v.pump(0.5)
         tabs = []
         for _ in range(3):
@@ -771,9 +771,9 @@ def test_search():
               "Search 0" in rows(v.out).get(2, ""), text)
         mark = len(v.out)
         v.key(b"\t", 1.0)
-        check("Search: Tab wraps to Prompts", v.wait(b"[Prompts", start=mark)
-              or "Prompts" in head(v) or "a long chapter" in screen(v, mark),
-              screen(v, mark))
+        check("Search: Tab wraps to Prompts", until(lambda: v.wait(
+              b"[Prompts", 0.1, mark) or "Prompts" in head(v) or
+              "a long chapter" in screen(v, mark)), screen(v, mark))
         mark = len(v.out)
         v.key(b"\033[Z", 1.0)
         text = screen(v, mark)

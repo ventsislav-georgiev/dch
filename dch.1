@@ -2074,7 +2074,10 @@ reads the middle too, under its own caps, a hit there with
 .B \-\-full
 reads it last, so the caps cut only the middle and the newest turns are
 always read (a file over 1 GiB is always partial,
-.BR why:\(dqbytes\(dq ).
+.BR why:\(dqbytes\(dq
+or
+.BR \(dqtime\(dq ,
+whichever limit comes first; the newest 256 MiB are always kept).
 A live Codex's chapters come from its rollout, read the same way
 (corpus
 .BR codex ,
@@ -3431,8 +3434,10 @@ the peer is a tagged node:
 .I this host does not serve tagged nodes
 .TP
 .B whois_unavailable
-tailscaled is not answering, and no
-.BR \-\-whois\-optional :
+tailscaled is not answering (whois and status both fail, or whois timed out
+at 3 s while status answers), and no
+.BR \-\-whois\-optional
+(which covers only the first case):
 .I this host could not verify you: tailscaled is not answering
 .TP
 .B whois_failed

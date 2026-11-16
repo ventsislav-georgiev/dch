@@ -282,7 +282,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.76.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.77.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -1646,7 +1646,7 @@ ref (`dch: not a ref`), relative paths against the session's cwd.
   is found. `--full` reads the head, then the newest 256 MiB, then the
   middle, oldest first, so the caps cut only the middle and the newest turns
   are always read: a file over 1 GiB always comes back partial
-  (`why: "bytes"`), with its newest kept, and one whose middle takes past
+  (`why: "bytes"` or `"time"`, whichever limit comes first), with its newest 256 MiB kept, and one whose middle takes past
   the 10 s clock says `why: "time"` (a dense 300 MiB file: 2.9 s, 11 MB). A mention or definition in that middle has `chapter: null`, since
   `--json` has no chapter there. So a ref card can show mentions from a part
   of a huge transcript that the Chapters, Prompts and Responses lists do not
@@ -2840,7 +2840,7 @@ an address outside 100.64.0.0/10 is closed without a byte.
 | `--port <n>` | Another port, 0 for any (tests). The phone always dials 8771. |
 | `--allow-create` | Let the phone start a session with its own command (0x02). Off by default, and `create` is then missing from the ops the phone sees, and attach (0x01) only reaches a session already in the list (else 0x13 and a close). With it, attach to a new name starts a shell session, as `dch -n` does. It also gates the control verbs that start sessions, `--spawn` and `--revive`. |
 | `--allow-user <u>` | On a tagged host, accept this user's nodes (numeric id or login). Repeatable. |
-| `--whois-optional` | Accept a tailnet peer while tailscaled is not answering (whois and status both fail), with a warning (see above). The owner must still be known at startup. |
+| `--whois-optional` | Accept a tailnet peer while tailscaled is not answering (whois and status both fail), with a warning (see above). A whois timeout while status answers is still refused. The owner must still be known at startup. |
 | `--check-peer <ip>` | Print whether that peer would get in, and the refusal code in parentheses, then exit 0 (accept) or 1. |
 
 #### Refusals
@@ -2866,7 +2866,7 @@ attach, say) have no `code`, but for `taken`, below.
 | `not_owner` | An untagged host, and the peer is another user's node. | `this host serves only its owner's devices` |
 | `not_allowed` | A tagged host, and the peer's user is not on its `--allow-user`. | `this host is tagged and serves only the users it names: start dch serve there with --allow-user <your login or id>` |
 | `tagged_peer` | The peer is a tagged node. | `this host does not serve tagged nodes` |
-| `whois_unavailable` | tailscaled is not answering (whois and `status` both fail), and no `--whois-optional`. | `this host could not verify you: tailscaled is not answering` |
+| `whois_unavailable` | tailscaled is not answering (whois and `status` both fail, or whois timed out at 3 s while `status` answers), and no `--whois-optional` (it covers only the first case). | `this host could not verify you: tailscaled is not answering` |
 | `whois_failed` | whois failed while `status` works (a node tailscaled does not know), or its answer was unusable. | `this host could not verify you (tailscale whois failed)` |
 | `self` | The peer is this host itself: one of its addresses, or its own node. | `this host does not serve connections from itself` |
 

@@ -2730,9 +2730,9 @@ serve_usage(FILE *f)
 	    "                      a login; required there, refused on an\n"
 	    "                      untagged host (repeatable)\n"
 	    "  --whois-optional    accept a tailnet peer while tailscaled is\n"
-	    "                      not answering (whois and status both fail;\n"
-	    "                      default: refuse it); the owner must still\n"
-	    "                      be known at startup\n"
+	    "                      not answering (whois and status both fail,\n"
+	    "                      never a whois timeout; default: refuse it);\n"
+	    "                      the owner must still be known at startup\n"
 	    "  --check-peer <ip>   print whether a peer would get in, and exit\n");
 }
 
@@ -2880,6 +2880,7 @@ serve_main(int argc, char **argv)
 	unsetenv("DCH_XRAY_NOCLOCK");
 	unsetenv("DCH_XRAY_STDIN");
 	unsetenv("DCH_XRAY_CAPS");
+	unsetenv("DCH_XRAY_MEVERY");
 
 	/* The tailscale CLI, absolute, for execv. */
 	ts_find();
