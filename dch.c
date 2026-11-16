@@ -6474,7 +6474,16 @@ dch_history_dir(char *out, size_t outsz, const char *sockdir, int create)
 		if (p)
 			*p = '/';
 	}
-	return lstat(out, &st) == 0 && S_ISDIR(st.st_mode) &&
+	return dch_dir_private(out);
+}
+
+/* 0 when dir is a real directory, ours, closed to group and other write. */
+int
+dch_dir_private(const char *dir)
+{
+	struct stat st;
+
+	return lstat(dir, &st) == 0 && S_ISDIR(st.st_mode) &&
 	       st.st_uid == getuid() && !(st.st_mode & 022) ? 0 : -1;
 }
 
@@ -10319,6 +10328,10 @@ xv_spawn(int fd, int ac, char **av, int *out, int *err)
 		signal(SIGHUP, SIG_DFL);
 		signal(SIGWINCH, SIG_DFL);
 		signal(SIGCONT, SIG_DFL);	/* xv_run's (#255) */
+		/* the view's on_sigtstp and its armed tty: a query is no
+		** tty program, a plain stop has no race to lose (#416) */
+		signal(SIGTSTP, SIG_DFL);
+		tty_stop_arm(-1, NULL);
 		sigprocmask(SIG_SETMASK, &o, NULL);
 		picker_tty_fd = -1;
 		close(fd);
@@ -15230,11 +15243,10 @@ xray_main(int argc, char **argv)
 		}
 		return dch_remote_requests(argv[ni]);
 	}
-	/* "-": the text on stdin, as dch serve hands it to its ctl child, never
-	** in the host's ps (LOW-XN1). A terminal's "-" or a host:name's stays
-	** 3.1's error; a bad read is "" for it. Only serve's child (it sets
-	** DCH_XRAY_STDIN) reads: a user's own "-" never blocks on a pipe */
-	if (getenv("DCH_XRAY_STDIN"))
+	/* "-": the text on stdin, never in ps (LOW-XN1; dch serve's ctl child
+	** does the same). A terminal's "-" or a host:name's stays 3.1's error;
+	** a bad read or more than 256 bytes is "" (so "bad search"/"bad ref").
+	** A user who pipes into dch chose to be read. */
 	{
 		static char tb[257];
 		const char **v = search && !strcmp(search, "-") ? &search
@@ -15244,6 +15256,18 @@ xray_main(int argc, char **argv)
 		if (v && !isatty(STDIN_FILENO) && !name_is_remote(n) &&
 		    !(*v = ctl_text_read(STDIN_FILENO, tb)))
 			*v = "";
+		else if (v && *v == tb)
+		{
+			/* one trailing "\n" or "\r\n" (echo's): no valid text has one */
+			size_t l = strlen(tb);
+
+			if (l && tb[l - 1] == '\n')
+			{
+				tb[--l] = '\0';
+				if (l && tb[l - 1] == '\r')
+					tb[l - 1] = '\0';
+			}
+		}
 	}
 	/* the value rules (3.1), in the table's order */
 	if (ref && !xr_ref_ok(ref))

@@ -27,6 +27,20 @@
 
 static int fails;
 
+#ifdef XCMD_T_NOMEM
+/* xcmd_test.py builds with -Drealloc=xcmd_t_realloc: realloc fails on
+** demand (the define hold's, #417) */
+#undef realloc
+void *realloc(void *, size_t);
+void *xcmd_t_realloc(void *, size_t);
+static int nomem;
+void *
+xcmd_t_realloc(void *p, size_t n)
+{
+	return nomem ? NULL : realloc(p, n);
+}
+#endif
+
 void dch_trace(const char *fmt, ...);
 void
 dch_trace(const char *fmt, ...)
@@ -354,6 +368,49 @@ t_define_412(void)
 	      starts("{\"title\":\"a\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbd" "b\","));
 }
 
+/* #417: a BOM and colour codes round a JSON line leave it JSON; a url
+** loses C1 and bidi controls; out of memory for the held rows: none, a warn */
+static int
+t_count(const char *l, void *arg)
+{
+	(void)l;
+	++*(int *)arg;
+	return 0;
+}
+
+static void
+t_define_417(void)
+{
+	CHECK("define: a BOM before a JSON first line: JSON",
+	      line(XCMD_DEFINE, "\xef\xbb\xbf{\"title\":\"bom\"}", 1) ==
+	      XCMD_ROW && starts("{\"title\":\"bom\","));
+	CHECK("define: colour codes round a JSON line: JSON, first or not",
+	      line(XCMD_DEFINE, "\x1b[32m{\"title\":\"g\"}\x1b[0m", 1) ==
+	      XCMD_ROW && starts("{\"title\":\"g\",") &&
+	      line(XCMD_DEFINE, "\x1b[1m{\"title\":\"h\"}", 0) == XCMD_ROW);
+	CHECK("define: a later line of escapes only is blank, not a skip",
+	      line(XCMD_DEFINE, "\x1b[0m \x1b]0;t\x07", 0) == XCMD_BLANK);
+	CHECK("define: C1, NEL and bidi controls out of a url",
+	      line(XCMD_DEFINE, "{\"title\":\"t\",\"url\":\"https://x/"
+	           "\\u202ea\\u0085b\\u009bc\"}", 1) == XCMD_ROW &&
+	      strstr(out, "\"url\":\"https://x/abc\""));
+#ifdef XCMD_T_NOMEM
+	{
+		struct xcmd_ctx c = { "/bin/echo plain title", NULL, NULL, "",
+		                      "", NULL, NULL, NULL };
+		struct xcmd_result r;
+		int n = 0;
+
+		nomem = 1;
+		xcmd_rows(XCMD_DEFINE, &c, t_count, &n, &r);
+		nomem = 0;
+		CHECK("define: no memory to hold a row: none handed over, warn "
+		      "out of memory", r.ran && !r.rows && !n &&
+		      !strcmp(r.warn, "define_command: out of memory"));
+	}
+#endif
+}
+
 /* ---- the driver --------------------------------------------------------- */
 
 static long stop_after, seen;
@@ -455,6 +512,7 @@ main(int argc, char **argv)
 	t_memory();
 	t_define();
 	t_define_412();
+	t_define_417();
 	printf(fails ? "%d FAILED\n" : "all ok\n", fails);
 	return fails != 0;
 }

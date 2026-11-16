@@ -1,6 +1,6 @@
 Golden fixtures and runner for Prosper's remote frames protocol 1.0, copied
 from ventsislav-georgiev/prosper 96b65ad (docs/protocol/golden/). The spec is
-docs/protocol/remote-frames.md there. Fixtures 01-16 and run.py are Prosper's;
+docs/protocol/remote-frames.md there. Fixtures 01-15 and run.py are Prosper's;
 re-copy them from a newer Prosper commit and update the commit named here,
 then redo the dch change below.
 
@@ -9,12 +9,12 @@ dch has changed one Prosper file since the copy:
   against its 6 s setup session on a loaded runner.
 
 Fixtures 17 and up are dch's own, so dch edits them freely. Changed since
-they were added: 18-26, 34, 36-38 lost the expected FIN after a 0x33 (#118,
+they were added: 18-26, 33, 34, 36-38 lost the expected FIN after a 0x33 (#118,
 the connection stays open); 32 changed with X-ray (1.55.0); 33's setup
 session sleeps 6 s, not 2 (#404). 34 (--follow) needs the 10 s default
 --timeout: `run.py --timeout 5` fails it.
 
-Fixtures 17 and up are dch's own (#114), in the same format: the "ctl" op of
+They are in the same format (#114): the "ctl" op of
 remote frames 1.1 (0x30 request; 0x31 stdout, 0x32 stderr, 0x33 exit). They
 need "ctl" in ops; 40-43 (#118: 0x34 cancel, warm reuse, busy, the idle
 close) need "ctl-cancel". Two keys are dch's: "dch_serve" ({"args",

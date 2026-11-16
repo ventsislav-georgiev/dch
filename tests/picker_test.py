@@ -675,7 +675,8 @@ def main():
     check("NO_COLOR: no color codes, no reverse video",
           not ANYCOLOR_RE.search(a), a)
     picker("pk2", "100x30", "TERM=xterm-256color", "COLORTERM=truecolor")
-    wait_screen("pk2", lambda s: "s10" in s)
+    # s10 shows as its alias by now (3.)
+    wait_screen("pk2", lambda s: "nick" in s)
     a = screen("pk2", ansi=True)
     check("color on by default: ESC[3x present", COLOR_RE.search(a), a)
 

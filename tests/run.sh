@@ -251,7 +251,10 @@ export DCH_TEST_TMP
 # and the ones made in the default TMPDIR (tempfile.mkdtemp() with no dir),
 # so runreap ends and removes theirs too (QA 1.60.0 LOW-T4)
 export TMPDIR="$DCH_TEST_TMP"
-trap 'DCH_TEST_TMP=$RUN; runreap; rm -rf "${RUN:?}"' EXIT
+# the watchdog section's bystanders, if an interrupt came while they ran
+wdreap(){ [ -z "${wdby:-}" ] || kill "$wdby" 2>/dev/null
+    [ -z "${wdkl:-}" ] || { "$DCH" -k -- -kl >/dev/null 2>&1; kill "$wdkl" 2>/dev/null; }; }
+trap 'wdreap; DCH_TEST_TMP=$RUN; runreap; rm -rf "${RUN:?}"' EXIT
 trap 'pyreap; for k in $prun; do preap "$k"; done; exit 130' INT TERM HUP
 export XDG_RUNTIME_DIR="$TMP"
 # DCH_SOCKET_DIR wins over XDG_RUNTIME_DIR: an inherited one would point the
@@ -401,6 +404,13 @@ pyrun "the --xray view of host:name against fake hosts: failures, drops, Respons
 pyrun "the --xray view of host:name against fake hosts: stopping a remote child" xray_remote_fakes_more_test.py
 pyrun "the --xray view of host:name from the picker X and the chord over dch -a host:name" xray_remote_chord_test.py
 pyrun "the --xray view of host:name: the chord's failure lines, re-arm, suspend" xray_remote_chord_more_test.py
+# queued here, not last: the pool's tail waited on them (#393)
+# the command source's runner (#321): xcmd_unit's units, then its driver
+# against fake commands (clock, caps, group cleanup, no shell)
+pyrun "xray command source: argv split, row lines, the runner's limits" xcmd_test.py
+pyrun "--tasks/--memory with a tasks_command/memory_command: command first, the built-in on no row, warn" xcmd_tasks_test.py
+# #405: define_command, a ref no transcript defines: --ref's lines, the card
+pyrun "xray define_command: definitions from the user's command, limits, the card" xray_define_test.py
 # xray_shell_test.py's and xray_claude_test.py's RSS budget: a fork()+exec+wait4 helper, because a child
 # spawned by Python inherits Python's RSS high-water mark on Linux (maxrss.c)
 # shellcheck disable=SC2086 # xcc is a word list
@@ -1335,12 +1345,6 @@ pyrun "xray --memory: memories, instruction files, Claude, Codex, serve" xray_me
 pyrun "xray file windows: no wide root, the deny list, hard links" xray_deny_test.py
 # QA 1.60.0 LOW-T8: dch serve's ctls get no DCH_XRAY_NOCLOCK, DCH_XRAY_CAPS
 pyrun "dch serve keeps X-ray's test switches from its ctls" serve_xray_env_test.py
-# the command source's runner (#321): xcmd_unit's units, then its driver
-# against fake commands (clock, caps, group cleanup, no shell)
-pyrun "xray command source: argv split, row lines, the runner's limits" xcmd_test.py
-pyrun "--tasks/--memory with a tasks_command/memory_command: command first, the built-in on no row, warn" xcmd_tasks_test.py
-# #405: define_command, a ref no transcript defines: --ref's lines, the card
-pyrun "xray define_command: definitions from the user's command, limits, the card" xray_define_test.py
 
 tsec 'shell: latency budgets'
 pdrain; tlast=$(date +%s)
@@ -1424,6 +1428,7 @@ if [ -x "$DCH" ] && command -v python3 >/dev/null 2>&1; then
     # -kl: end the session on the test socket dir (its sleep too), then the master by pid
     "$DCH" -k -- -kl >/dev/null 2>&1
     kill "$wdkl" 2>/dev/null
+    wdby= wdkl= # ended above: the exit trap must not signal reused pids
     [ "$fail" = "$wdf" ] || sed 's/^/       /' "$TMP/wd.out"
     [ -S "$SOCKDIR/$wdname.sock" ] && "$DCH" -k "$wdname" >/dev/null 2>&1
     # DCH_TEST_TIMEOUT 0 (no watchdog) and invalid values (600) pass a test

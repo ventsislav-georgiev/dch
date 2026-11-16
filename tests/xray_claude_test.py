@@ -1125,6 +1125,68 @@ def test_search():
           ["last Needle"] and o["partial"] is True and o["why"] == "bytes"
           and o["more"] is False and o["bytes"] < os.path.getsize(tp2),
           (rc, o, err))
+    # "-": the text on stdin, off ps (a pipe; 256 bytes at most)
+    def piped(flag, text, n="xr-sr"):
+        return subprocess.run([DCH, "--xray", n, flag, "-", "--json"],
+                              input=text, capture_output=True, text=True,
+                              timeout=30, env=ENV)
+    want = dch("--xray", "xr-sr", "--search", "needle", "--json")
+    r = piped("--search", "needle")
+    check("search -: a pipe's word finds the hits --search word does",
+          r.returncode == 0 and r.stdout == want.stdout and
+          '"hits":[{' in r.stdout, (r.returncode, r.stdout[:200], r.stderr))
+    for t in ("needle\n", "needle\r\n"):
+        r = piped("--search", t)
+        check("search -: one trailing %r is dropped, same hits" % t[6:],
+              r.returncode == 0 and r.stdout == want.stdout, (r.returncode,
+              r.stderr))
+    r = piped("--search", "needle\n\n")
+    check("search -: a second newline is a bad search (only one dropped)",
+          r.returncode == 2 and "bad search" in r.stderr, r.stderr)
+    r = piped("--search", "x" * 256 + "\n")
+    check("search -: the 256-byte cap counts the newline (still bad search)",
+          r.returncode == 2 and "bad search" in r.stderr, r.stderr)
+    def stable(out):    # the rows without the timing lines (first, progress, done)
+        return [l for l in ref_lines(out) or [None]
+                if l is None or not {"first", "progress", "done"} & set(l)]
+    want = dch("--xray", "xr-sr", "--ref", "#831", "--json")
+    r = piped("--ref", "#831")
+    check("ref -: a pipe's ref works like --ref <ref>",
+          r.returncode == want.returncode == 0 and r.stdout and
+          stable(r.stdout) == stable(want.stdout) and
+          ref_lines(r.stdout)[0]["first"].get("key") == "issue:#831" and
+          ref_lines(r.stdout)[0]["first"].get("text") == "#831",
+          (r.returncode, r.stdout[:200], r.stderr))
+    r = piped("--ref", "#831" + " " * 300)
+    check("ref -: over 256 bytes is a bad ref, not cut to #831",
+          r.returncode == 2, (r.returncode, r.stderr))
+    r = piped("--search", "x" * 300)
+    check("search -: over 256 bytes is a bad search, not cut",
+          r.returncode == 2 and "bad search" in r.stderr, r.stderr)
+    for flag, msg in (("--search", "bad search"), ("--ref", "bad ref")):
+        r = piped(flag, "")
+        check("%s -: empty stdin is the value rule's error" % flag,
+              r.returncode == 2 and msg in r.stderr, r.stderr)
+        r = piped(flag, "needle", n="nosuch:xr-sr")
+        check("%s -: host:name keeps 3.1's error, stdin unread" % flag,
+              r.returncode == 2 and "dch: " in r.stderr and
+              r.stdout == "", (r.returncode, r.stderr))
+        r = subprocess.run([DCH, "--xray", "xr-sr", flag, "-", "--json"],
+                           stdin=subprocess.DEVNULL, capture_output=True,
+                           text=True, timeout=30, env=ENV)
+        check("%s -: /dev/null is empty stdin, error" % flag,
+              r.returncode == 2, r.stderr)
+    m, sl = os.openpty()
+    try:
+        for flag, msg in (("--search", "bad search"), ("--ref", "not a ref")):
+            r = subprocess.run([DCH, "--xray", "xr-sr", flag, "-", "--json"],
+                               stdin=sl, capture_output=True, text=True,
+                               timeout=10, env=ENV)
+            check("%s -: a terminal's - is the value rule's error, no read"
+                  % flag, r.returncode == 2 and msg in r.stderr, r.stderr)
+    finally:
+        os.close(m)
+        os.close(sl)
     os.unlink(tp)
     os.unlink(tp2)
 

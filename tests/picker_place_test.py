@@ -175,7 +175,8 @@ def main():
 
     # 1. tab, sort and the session just left
     dch("--spawn", "pa", "--size", "100x30", "env", *TAPENV, DCH, "-l")
-    s = wait_screen("pa", lambda s: "gamma-qa" in s and "Sidekicks 2" in s)
+    # gamma-qa is a sidekick: Sessions, the first tab, never lists it
+    s = wait_screen("pa", lambda s: "Sidekicks 2" in s)
     check("picker up, Sidekicks 2", "Sidekicks 2" in s, s)
     dch("--keys", "pa", "s")
     wait_screen("pa", lambda s: "s sort name" in s)
@@ -403,8 +404,15 @@ def main():
               "o opens a session: from dch -l or the switch" in s and
               "kill session:" in s and not live("k1") and
               "k1" in rows(s), s)
-        dch("--keys", "pk", "j")	# a key: the line clears
-        wait_screen("pk", lambda s: "o opens a session" not in s)
+        # a status line (like "cancelled" or an action's result) stays on
+        # the next key, until an action or / or , replaces it (dch.1: "the
+        # action while it runs, then its result"); so j k: still the line,
+        # and back on k1, where the next key acts on k1, not on pa
+        dch("--keys", "pk", "j", "k")
+        s = wait_screen("pk", lambda s: current(s) == "k1")
+        check("%r: a key moves, the line stays, back on k1" % key,
+              current(s) == "k1" and
+              "o opens a session: from dch -l or the switch" in s, s)
     dch("--keys", "pk", "q")
 
     # 7. a dropped client while the session lives: its own row, not History

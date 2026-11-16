@@ -112,7 +112,9 @@ for i in range(n):
 
 
 def main():
-    r = subprocess.run(compiler() + ["-O1", "-I" + SRC, "-o", DRV,
+    # realloc failing on demand: the define hold's out of memory (#417)
+    r = subprocess.run(compiler() + ["-O1", "-I" + SRC, "-DXCMD_T_NOMEM",
+                                     "-Drealloc=xcmd_t_realloc", "-o", DRV,
                                      os.path.join(HERE, "xcmd_unit.c"),
                                      os.path.join(SRC, "xcmd.c"),
                                      os.path.join(SRC, "xray.c"),
