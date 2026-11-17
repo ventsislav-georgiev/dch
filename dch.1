@@ -2319,7 +2319,14 @@ for a shell's clear, ED 3 or RIS, never with evict;
 past 256 keys in one eviction, at most once a second, or a shell chapter
 gone while its prompt record is still in the ring;
 .B full
-for the whole-file index after a capped transcript;
+for a wider read after a narrower one: past 32 MB the first snapshot holds
+the newest 32 MB alone
+.RB ( complete:false ,
+.BR why:"range" ),
+a fast first paint, and the snapshot of the per\-file range follows it
+(its chapters, refs and blocks replace the first's); past that range, the
+whole\-file index after the capped one, so a transcript past 272 MB sends
+two;
 .B restarted
 for a
 .B \-\-restart
@@ -2400,7 +2407,8 @@ or
 .B \-\-memory
 or both (an older dch exits 2
 .IR "bad usage: \-\-tasks and \-\-follow" ),
-each snapshot is followed by the
+each snapshot (the 32 MB first paint's too, its blocks from those 32 MB)
+is followed by the
 .B \-\-tasks
 lines, then the
 .B \-\-memory

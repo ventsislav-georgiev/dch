@@ -2151,8 +2151,14 @@ every 250 ms:
   - `"evicted"` means one eviction changed more than 256 keys (sent at most
     once a second), or a shell chapter went while its prompt record is still
     in the ring, which no line could remove.
-  - `"full"`: a transcript past the per-file range first sends the capped
-    snapshot. Its whole-file snapshot follows, read in the background.
+  - `"full"`: a wider read replaces a narrower one. A transcript over 32 MB
+    first sends a fast snapshot of its newest 32 MB alone (`complete:
+    false`, `why: "range"`, about 0.1-0.2 s at any size), then `reset`
+    `full` and the snapshot of the usual range. A transcript past the
+    per-file range (272 MB) then sends one more: its capped snapshot is
+    followed by the whole-file one, read in the background. Lines written
+    meanwhile come as deltas after the last snapshot of each pair; none
+    are lost.
   - `"restarted"` means a `--restart` of the session: the same session under
     a new master image, reconnected.
 
@@ -2171,7 +2177,8 @@ until the next snapshot. A new key still sends one.
 client needs no `--tasks` or `--memory` polls and the transcript is read
 once. A dch before this exits 2 with `dch: bad usage: --tasks and --follow`,
 which a client can use as its version probe.
-- After every snapshot (the first and each one after a `reset`): the
+- After every snapshot (the first, the 32 MB fast one included, and each
+  one after a `reset`): the
   `--tasks` lines, then the `--memory` lines, each block whole from its
   header to its `done` line, in the one-shot shapes. A tasks header has
   `session`; a memory header does not. A session with no corpus gives a

@@ -126,6 +126,10 @@ def test_follow_claude():
         off = os.path.getsize(trace)
         time.sleep(1.0)
         idle = trace_from(trace, off)
+        check("follow: a small transcript gets one snapshot, no reset "
+              "(#447: no fast pass under 32 MB)",
+              fl.kinds().count("snapshot") == 1 and
+              "reset" not in fl.kinds(), fl.kinds())
         check("follow: idle, no deadline armed and no wake (no timer)",
               "xray follow: deadline" not in idle and
               "xray follow: woke" not in idle and fl.p.poll() is None, idle)
@@ -562,6 +566,146 @@ def test_follow_tasks_memory():
         dch("-k", n)
 
 
+def test_follow_fast():
+    """A fast first paint (#447): past 32 MB, the newest 32 MB's snapshot
+    (why range, the tail's chapters only) and its blocks first, then reset
+    full and the one-shot's snapshot and blocks; a line written meanwhile
+    comes after it. Under 32 MB the one snapshot stays (test_follow_claude,
+    the small-transcript row)."""
+    n = "xc-ff"
+    bindir = os.path.join(T, "bin")
+    fdir = os.path.join(T, "fake")
+    proj = os.path.join(T, "fproj-ff")
+    for d in (bindir, fdir, proj):
+        os.makedirs(d, exist_ok=True)
+    shutil.copy(os.path.join(HERE, "fake_claude.py"),
+                os.path.join(bindir, "claude"))
+    os.chmod(os.path.join(bindir, "claude"), 0o755)
+    env = dict(ENV, PATH=bindir + ":" + ENV.get("PATH", "/usr/bin:/bin"),
+               FAKE_CLAUDE_DIR=fdir)
+    sdir = os.path.join(HOME, ".claude", "sessions")
+    had = set(os.listdir(sdir)) if os.path.isdir(sdir) else set()
+    r = subprocess.run([DCH, "--spawn", n, "--size", "80x24", "--cwd", proj,
+                        "claude"], capture_output=True, text=True, timeout=30,
+                       env=env)
+    check("fast: claude spawned", r.returncode == 0, r.stderr)
+    fl = tp = None
+    jl = lambda objs: "".join(json.dumps(o) + "\n" for o in objs)
+    task = lambda i, subj: [
+        {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": i, "name": "TaskCreate",
+             "input": {"subject": subj, "description": ""}}]}},
+        {"type": "user", "toolUseResult": {"task": {"id": i}},
+         "message": {"content": [{"type": "tool_result", "tool_use_id": i,
+                                  "content": "ok"}]}}]
+    # a turn of tool calls and results (8 KB each, stored twice), about
+    # 165 KB: the full read costs what a real transcript's does
+    big = "x" * 8192
+    turn = [{"type": "user", "message": {"content": "turn TURN"}}]
+    for c in range(10):
+        turn += [{"type": "assistant", "message": {"content": [
+                     {"type": "tool_use", "id": "TURN-%d" % c, "name": "Bash",
+                      "input": {"command": "make %d" % c}}]}},
+                 {"type": "user", "toolUseResult": {"stdout": big},
+                  "message": {"content": [{
+                      "type": "tool_result", "tool_use_id": "TURN-%d" % c,
+                      "content": big}]}}]
+    turn = jl(turn)
+    try:
+        rec = wait_for(lambda: [f for f in os.listdir(sdir)
+                                if f.endswith(".json") and f not in had]
+                       if os.path.isdir(sdir) else None, 10)
+        sid = json.load(open(os.path.join(sdir, rec[0])))["sessionId"]
+        pdir = os.path.join(HOME, ".claude", "projects", key(proj))
+        mdir = os.path.join(pdir, "memory")
+        os.makedirs(mdir, exist_ok=True)
+        with open(os.path.join(mdir, "a.md"), "w") as f:
+            f.write("---\nname: Alpha\ndescription: the first\n---\nbody\n")
+        tp = os.path.join(pdir, sid + ".jsonl")
+        # 250 MB, under the 272 MB range (the one-shot reads it all): the
+        # old ask and task at the head, the new at the tail
+        with open(tp + ".tmp", "w") as f:
+            f.write(jl([{"type": "user", "cwd": proj,
+                         "message": {"content": "old ask #71"}}] +
+                       task("o1", "Old task")))
+            for i in range((250 << 20) // len(turn)):
+                f.write(turn.replace("TURN", str(i)))
+            f.write(jl([{"type": "user",
+                         "message": {"content": "new ask #72"}}] +
+                       task("n1", "New task")))
+        os.rename(tp + ".tmp", tp)
+        size = os.path.getsize(tp)
+        wait_for(lambda: (xray(n, "--json")[1] or {}).get("corpus") ==
+                 "claude", 20)
+        _, one, _ = xray(n, "--json")
+        t0 = time.time()
+        fl = Follow(n)
+        fl.wait(lambda o: True, 10)
+        first = fl.got[0][0] - t0 if fl.got else 99
+        # a line written while the full read runs
+        with open(tp, "a") as f:
+            f.write(jl([{"type": "user",
+                         "message": {"content": "later ask #73"}}]))
+        wrote = time.time()
+        fl.wait(lambda o: "ref" in o and o["ref"]["key"] == "issue:#73", 20)
+        ks = fl.kinds()
+        objs = fl.objs()
+        f0 = (objs[0] if objs else {}).get("snapshot") or {}
+        offs = [c["offset"] for c in f0.get("chapters", [])]
+        keys0 = [x["key"] for x in f0.get("refs", [])]
+        check("fast: past 32 MB the first line is a snapshot of the newest "
+              "32 MB, complete false, why range, the tail's chapters only",
+              ks[:1] == ["snapshot"] and f0.get("complete") is False and
+              f0.get("why") == "range" and offs and
+              min(offs) >= size - (32 << 20) and "issue:#72" in keys0 and
+              "issue:#71" not in keys0, (ks[:6], f0.get("why"), keys0))
+        check("fast: the first line came in under 0.5 s (%.3f s)" % first,
+              first < 0.5, first)
+        check("fast: then reset full and the one-shot --json snapshot, "
+              "exactly one pair", ks[:3] == ["snapshot", "reset", "snapshot"]
+              and objs[1] == {"schema": 1, "reset": {"why": "full"}} and
+              ks.count("snapshot") == 2 and ks.count("reset") == 1 and
+              objs[2].get("snapshot") == one, (ks[:12],))
+        check("fast: a line written during the full read comes after it, "
+              "as a delta", len(fl.got) > 2 and fl.got[2][0] > wrote and
+              [o for o in objs[3:] if "ref" in o and
+               o["ref"]["key"] == "issue:#73"],
+              (ks, fl.got[2][0] - wrote if len(fl.got) > 2 else None))
+        fl.stop()
+
+        # --tasks --memory: each snapshot followed by both blocks
+        _, one, _ = xray(n, "--json")
+        _, tk1, _ = lines(n, "--tasks", "--json")
+        _, mm1, _ = lines(n, "--memory", "--json")
+        fl = Follow(n, extra=["--tasks", "--memory"])
+        fl.wait(lambda o: "done" in o and
+                sum("done" in x for x in fl.objs()) >= 4, 20)
+        ks = fl.kinds()
+        objs = fl.objs()
+        snaps = [i for i, k in enumerate(ks) if k == "snapshot"]
+        s2 = snaps[1] if len(snaps) > 1 else len(objs)
+        hdr0, tk0, _ = blocks(objs[:s2])
+        check("fast: with --tasks --memory, the fast snapshot's blocks "
+              "follow it (the window's tasks: the new, not the old)",
+              len(snaps) == 2 and ks[1] == "session" and
+              sorted(hdr0) == ["memory", "task"] and
+              [t["title"] for t in tk0.values()] == ["New task"],
+              (ks[:8], tk0))
+        nb = len(tk1) + len(mm1)
+        check("fast: then reset full, the one-shot snapshot and both "
+              "blocks again, the one-shot --tasks and --memory",
+              objs[s2 - 1:s2] == [{"schema": 1, "reset": {"why": "full"}}]
+              and s2 < len(objs) and objs[s2]["snapshot"] == one and
+              objs[s2 + 1:s2 + 1 + nb] == tk1 + mm1,
+              (ks, tk1, mm1))
+    finally:
+        if fl:
+            fl.stop()
+        dch("-k", n)
+        if tp and os.path.exists(tp):
+            os.unlink(tp)
+
+
 def test_follow_late():
     """QA 1.52.0: a project dir made after the follow started is watched
     (LOW-6); time blocked on a stalled reader is no build time (LOW-8)."""
@@ -941,19 +1085,24 @@ def test_follow_cap():
         os.rename(rp + ".tmp", rp)
         fl = Follow(n)
         s = fl.wait(lambda o: "snapshot" in o and len(
-            [x for x in fl.objs() if "snapshot" in x]) >= 2, 30)
+            [x for x in fl.objs() if "snapshot" in x]) >= 3, 30)
         time.sleep(1.0)
         ks = fl.kinds()
         keys = [[x["key"] for x in o["snapshot"]["refs"]]
                 for o in fl.objs() if "snapshot" in o]
-        check("follow: past the cap, the capped snapshot (no middle #62), "
-              "then exactly one reset full and the whole file's",
-              ks == ["snapshot", "reset", "snapshot"] and
-              fl.objs()[1] == {"schema": 1, "reset": {"why": "full"}} and
-              len(keys) == 2 and "issue:#62" not in keys[0] and
-              "issue:#62" in keys[1] and
-              not fl.objs()[0]["snapshot"]["complete"] and
-              fl.objs()[2]["snapshot"]["complete"], (ks, keys))
+        o = fl.objs()
+        check("follow: past the cap, the newest 32 MB's snapshot (#447: "
+              "tail #63 alone), reset full, the capped one (no middle #62), "
+              "then exactly one more reset full and the whole file's",
+              ks == ["snapshot", "reset", "snapshot", "reset",
+                     "snapshot"] and
+              o[1] == o[3] == {"schema": 1, "reset": {"why": "full"}} and
+              len(keys) == 3 and keys[0] == ["issue:#63"] and
+              "issue:#61" in keys[1] and "issue:#62" not in keys[1] and
+              "issue:#62" in keys[2] and
+              not o[0]["snapshot"]["complete"] and
+              not o[2]["snapshot"]["complete"] and
+              o[4]["snapshot"]["complete"], (ks, keys))
     finally:
         if fl:
             fl.stop()
@@ -1353,6 +1502,7 @@ def main():
     try:
         test_follow_claude()
         test_follow_tasks_memory()
+        test_follow_fast()
         test_follow_late()
         test_follow_cap()
         test_follow_shell()
