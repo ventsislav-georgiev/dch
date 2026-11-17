@@ -347,6 +347,33 @@ def define_command(senv, cenv, check, log):
                     open(log).read()), open(log).read()[-600:])
 
 
+def remote_dash(cenv, check):
+    """LOW-SI3: a remote-routed host:name's "-" is never read on the client:
+    an open writer gets the /dev/null run's answer at once, not after the
+    5 s stdin deadline."""
+    for flag in ("--search", "--ref"):
+        a = [DCH, "--xray", "srv:xa", flag, "-", "--json"]
+        want = subprocess.run(a, env=cenv, capture_output=True, timeout=60,
+                              stdin=subprocess.DEVNULL)
+        p = subprocess.Popen(a, env=cenv, stdin=subprocess.PIPE,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        t0 = time.time()
+        p.stdin.write(b"needle\n")
+        p.stdin.flush()     # left open: a client that read would wait 5 s
+        try:
+            rc = p.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            rc = None
+        dt = time.time() - t0
+        got = (rc, p.stdout.read(), p.stderr.read())
+        p.stdin.close()
+        check("a peer's %s - with an open stdin is not read on the client "
+              "(%.1f s)" % (flag, dt), dt < 4 and want.returncode == 2 and
+              got == (want.returncode, want.stdout, want.stderr),
+              (got, want.returncode, want.stderr, dt))
+
+
 def define_ref_log(senv, cenv, check, log):
     """#417: serve's log line records a --ref flag's whole text (up to 256
     bytes, never cut inside a character), and never a --search value that
@@ -405,7 +432,7 @@ def main():
 
     senv = side("srv", DCH_NO_REMOTE="1", DCH_SERVE_TEST_LOOPBACK="1",
                 DCH_XRAY_NOCLOCK="1", DCH_XRAY_CAPS="1:1000",
-                DCH_XRAY_MEVERY="1500")
+                DCH_XRAY_MEVERY="1500", DCH_XRAY_STDIN_MS="1")
     # the list's 300 ms box (RM_BOX_MS) can end before serve has forked
     # its ctl on a loaded machine; the box is not what this test is about
     cenv = side("cli", DCH_REMOTE_BOX_MS="5000")
@@ -452,9 +479,11 @@ def main():
             check("a peer's list ran a ctl child of serve's",
                   len(got) > 0, (r and (r.returncode, r.stdout, r.stderr),
                                  open(log).read()[-600:]))
-            check("...without DCH_XRAY_NOCLOCK, DCH_XRAY_CAPS or "
-                  "DCH_XRAY_MEVERY in its environment", got and not any(got.values()), got)
+            check("...without DCH_XRAY_NOCLOCK, DCH_XRAY_CAPS, "
+                  "DCH_XRAY_MEVERY or DCH_XRAY_STDIN_MS in its environment",
+                  got and not any(got.values()), got)
             xn1(senv, cenv, logs, check)
+            remote_dash(cenv, check)
             tasks(senv, cenv, check)
             tasks_command(senv, cenv, logs, check)
             memory_command(senv, cenv, check)

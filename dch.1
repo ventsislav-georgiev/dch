@@ -822,6 +822,11 @@ brings the session or the picker back raw.
 A
 .B SIGSTOP
 cannot be caught: under dash the terminal stays raw until dch continues.
+Known macOS limit: a process that stops itself inside a signal handler while
+SIGCONT is caught can wedge in the kernel.
+If \fBq\fR then does not close the X-ray view, kill the whole job, not only the
+client (\fBkill \-9 \-<pgid>\fR, or the shell's \fBkill \-9 %1\fR), and attach
+again; the session is untouched.
 Setting it to
 .B 0
 disables switching and makes detach instant again.
@@ -953,11 +958,12 @@ remembered for every X-ray view in the file
 .I ~/.local/state/dch/xray-view
 when XDG_STATE_HOME is unset or relative: one line, hide_agents=0 or 1;
 anything else, or a file that is not a regular file, means hidden; the
-choice is kept only while
+choice is read and kept only while
 .I dch
 and
 .I dch/sessions
-there are the user's and not group or other writable; else, or when
+there are the user's and not group or other writable (when not, the file is
+ignored: hidden); else, or when
 something is in the way of its temp file, the footer says once "a not saved:"
 and the reason), the tab counts leaving
 them out, the footer saying how many; with
@@ -1655,18 +1661,28 @@ A
 .IR ref )
 of
 .B \-
-is read from standard input, so it stays out of
-.BR ps ,
-when stdin is not a terminal and the session is local; at most 256 bytes,
+is read from standard input, so it stays out of dch's own
+.B ps
+line (a
+.B define_command
+that
+.B \-\-ref
+runs still gets the ref as its last argument),
+when stdin is not a terminal and the session is served locally (a local
+name with a colon too); it reads to the end of input, so the writer must
+close stdin; at most 256 bytes,
 counting the newline; one trailing newline (\fB\\n\fR or \fB\\r\\n\fR) is
 dropped, a second is a control character.
-Past 256 bytes, or empty, it is the empty text and the usual error
+Past 256 bytes, empty, a read error, or no end of input within 5 seconds of
+the start (a non-blocking stdin is waited on within them), it is the empty
+text and the usual error
 .RB ( "bad search" ", " "bad ref" ;
-exit 2); on a terminal or with
+exit 2); on a terminal or with a remote
 .I host:name
 the
 .B \-
-is the plain text, the same error as before.
+is the plain text, the same error as before
+.RB ( "bad search" ", " "not a ref" ).
 It counts the typed prompts, the assistant's text, a tool call's input
 values and a tool result's text (Codex: the user's and assistant's
 messages, a call's arguments and its output; a shell: the typed commands

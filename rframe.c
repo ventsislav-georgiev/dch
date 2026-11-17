@@ -860,18 +860,33 @@ exec_prep(void)
 /* --search's or --ref's text as dch serve hands it to its ctl child, on
 ** stdin with "-" in the argv (LOW-XN1): fd read to its end into b, at most
 ** 256 bytes (--ref's limit, the larger of the two) and no NUL; b, or NULL
-** (overlong, a NUL, a read error). The flag's own rules come after. */
+** (overlong, a NUL, a read error, or no end within ms of the start: a
+** writer that never closes cannot hang dch, LOW-SI1). A non-blocking fd
+** waits in poll (LOW-SI2). The flag's own rules come after. */
 char *
-ctl_text_read(int fd, char b[257])
+ctl_text_read(int fd, char b[257], int ms)
 {
+	struct pollfd p = { .fd = fd, .events = POLLIN };
+	long long end = now_ms() + ms;
 	size_t n = 0;
 	ssize_t r;
+	int left;
 
-	while (n < 257 && (r = read(fd, b + n, 257 - n)) != 0)
+	while (n < 257)
+	{
+		if ((left = (int)(end - now_ms())) <= 0)
+			return NULL;
+		if ((r = poll(&p, 1, left)) < 0 && errno != EINTR)
+			return NULL;
+		if (r <= 0)
+			continue;
+		if ((r = read(fd, b + n, 257 - n)) == 0)
+			break;
 		if (r > 0)
 			n += (size_t)r;
-		else if (errno != EINTR)
+		else if (errno != EINTR && errno != EAGAIN)
 			return NULL;
+	}
 	if (n > 256 || memchr(b, '\0', n))
 		return NULL;
 	b[n] = '\0';

@@ -15,7 +15,8 @@ import time
 DCH = os.environ.get("DCH", str(Path(__file__).resolve().parents[1] / "dch"))
 THREAD = "123e4567-e89b-12d3-a456-426614174000"
 MAX_FRAME, MAX_MESSAGE = 65536, 16384
-QUEUE_DEADLINE = 30
+# the queue's 30 s deadline, lowered by the bridge's test knob (DCH_BRIDGE_QUEUE_MS)
+QUEUE_DEADLINE = 4
 
 
 def wire(value):
@@ -465,6 +466,7 @@ def main(part="a"):
             # The blank fake screen would only delay the queue path; the
             # composer path has its own session below.
             DCH_NO_DETECT="1",
+            DCH_BRIDGE_QUEUE_MS=str(QUEUE_DEADLINE * 1000),
         )
         for inherited_identity in (
             "DCH_SESSION",

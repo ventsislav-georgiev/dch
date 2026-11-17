@@ -282,7 +282,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.83.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.84.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -423,7 +423,12 @@ starts, or `kill -TSTP`) puts your shell's terminal modes back before dch
 stops, so a shell that does not restore them itself (dash, `/bin/sh` on Debian
 and Ubuntu) is not left raw; `fg` brings the session or the picker back raw. A
 `SIGSTOP` cannot be caught: under dash the terminal stays raw until dch
-continues.
+continues. Known macOS limit: a process that stops itself inside a signal
+handler while SIGCONT is caught can wedge in the kernel (seen without dch). If
+`q` then does not close the X-ray view, kill the whole job, not only the client
+(`kill -9 -<pgid>` of its process group, or the shell's `kill -9 %1`), and
+attach again: a bare `kill -9` of the client leaves the view's query child
+orphaned and stopped. The session is untouched.
 
 `detach_key = switch` in the [config file](#config-file) swaps the two: one
 press opens the picker, two detach. With `DCH_DOUBLE_TAP_MS=0` one press then
@@ -971,8 +976,8 @@ it has memories or instruction files:
   `$XDG_STATE_HOME/dch/xray-view`, `~/.local/state/dch/xray-view` when
   `XDG_STATE_HOME` is unset or relative: one line, `hide_agents=0` or `1`;
   anything else, or a file that is not a regular file, means hidden; dch
-  keeps the choice only while `dch` and `dch/sessions` there are yours and
-  not group or other writable; else, or when something is in the way of
+  reads and keeps the choice only while `dch` and `dch/sessions` there are
+  yours and not group or other writable (when not, the file is ignored: hidden); else, or when something is in the way of
   its temp file, the footer says once "a not saved: " and the reason), the tab counts leave them out, and the footer says how many;
   with `n` and `a` both off only your own prompts are left. A host whose dch
   predates `peer` sends none: no row is marked as an agent's and `a` hides
@@ -1616,8 +1621,9 @@ lines as NDJSON, each with `schema:1`: `first` (the key, `mode`, `scope` and
 control character and none of the bidi controls U+200E, U+200F, U+202A to
 U+202E and U+2066 to U+2069 (`dch: bad ref`), and must parse as exactly one
 ref (`dch: not a ref`), relative paths against the session's cwd. `--ref -` reads the ref from standard input like `--search -`
-(see [`--search`](#x-ray-queries---xray): a pipe, a local session, 256 bytes at
-most, else the empty ref's `dch: bad ref`).
+(see [`--search`](#x-ray-queries---xray): stdin not a terminal, a local session,
+256 bytes at most, closed within 5 s, else the empty ref's `dch: bad ref`; on a
+terminal or with a remote `host:name` the ref is a plain `-`, so `dch: not a ref`).
 - **Scope.** `--scope session` reads `<n>`'s own transcript, or its ring and
   screen. `--scope project`, the default (also for a remote caller), reads
   that first, then the Claude Code transcript or Codex rollout of every other
@@ -1830,14 +1836,21 @@ said in `<n>`'s own corpus and prints one object, the newest places first:
 none of `--ref`'s bidi controls (`dch: bad search: 2 to 200 bytes, no control
 character`, exit 2). ASCII letters match in either case; nothing else folds.
 `--search -` (and `--ref -`) reads the text from standard input instead, so it
-never shows in `ps`: `echo word | dch --xray <n> --search - --json`. It
-reads only when stdin is not a terminal and `<n>` is a local session; it
+never shows in dch's own `ps` line: `echo word | dch --xray <n> --search - --json`.
+(A [`define_command`](#your-own-definitions-define_command) that `--ref` runs
+still gets the ref as its last argument, as always.) It
+reads only when stdin is not a terminal and `<n>` is served locally (any name
+that is not routed to a remote host, a local name with `:` too); it
+reads to the end of input, so the writer must close stdin, and
 takes at most 256 bytes (`--ref`'s limit) counting the bytes read, newline
 included. One trailing newline (`\n` or `\r\n`) is dropped, so `echo word |`
 works; a second one is a control character. Past 256 bytes,
-an empty stdin or a read error the text is empty, not cut, and the usual
-value rule answers (`dch: bad search` / `bad ref`, exit 2). On a terminal
-or with `host:name` the `-` is the plain text `-`, the same error as before.
+an empty stdin, a read error, or no end of input within 5 s of the start
+(a writer that never closes) the text is empty, not cut, and the usual
+value rule answers (`dch: bad search` / `bad ref`, exit 2). A non-blocking
+stdin is waited on within the same 5 s. On a terminal
+or with a remote `host:name` the `-` is the plain text `-`, the same error as before
+(`dch: bad search` / `dch: not a ref`).
 - **What counts.** Claude Code: the typed prompts, the assistant's text, a
   tool call's input values and a tool result's text. Codex: the user's and
   the assistant's messages, a call's arguments and its output. A shell: the

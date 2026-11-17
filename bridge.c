@@ -497,6 +497,14 @@ static int write_all(int fd, const void *buf, size_t n) {
   return 0;
 }
 
+/* The queue subprocess's deadline; DCH_BRIDGE_QUEUE_MS=<ms> lowers it
+   (tests only) */
+static long long queue_timeout_ms(void) {
+  const char *e = getenv("DCH_BRIDGE_QUEUE_MS");
+  long long ms = e ? atoll(e) : 0;
+  return ms > 0 && ms < QUEUE_TIMEOUT_MS ? ms : QUEUE_TIMEOUT_MS;
+}
+
 static int monotonic_ms(long long *out) {
   struct timespec ts;
   if (clock_gettime(CLOCK_MONOTONIC, &ts) < 0)
@@ -1043,7 +1051,7 @@ static void pending_tick(struct pending_queue *q, const char *codex,
     pending_pop(q);
     return;
   }
-  q->child_deadline = now + QUEUE_TIMEOUT_MS;
+  q->child_deadline = now + queue_timeout_ms();
 }
 
 static int pending_add(struct pending_queue *q, const struct peer *sender,

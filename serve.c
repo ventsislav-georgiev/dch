@@ -2888,6 +2888,8 @@ serve_main(int argc, char **argv)
 	unsetenv("DCH_XRAY_STDIN");
 	unsetenv("DCH_XRAY_CAPS");
 	unsetenv("DCH_XRAY_MEVERY");
+	unsetenv("DCH_XRAY_STDIN_MS");
+	unsetenv("DCH_BRIDGE_QUEUE_MS");	/* the bridge's, tests only too */
 
 	/* The tailscale CLI, absolute, for execv. */
 	ts_find();

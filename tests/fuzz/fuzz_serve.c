@@ -183,7 +183,7 @@ text_rt(const void *d, size_t n)
 	if (write(p[1], d, n) != (ssize_t)n)
 		abort();
 	close(p[1]);
-	r = ctl_text_read(p[0], b);
+	r = ctl_text_read(p[0], b, 5000);
 	close(p[0]);
 	if (!r != (n > 256 || memchr(d, '\0', n) != NULL) ||
 	    (r && (strlen(r) != n || memcmp(r, d, n))))

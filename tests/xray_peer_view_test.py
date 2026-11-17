@@ -324,7 +324,8 @@ def toggle(prep=None, cols=100, env=None):
     The screen after the key."""
     v = Pty([DCH, "--xray", "xv-pe"], rows=40, cols=cols, env=env)
     try:
-        v.wait(b"Prompts 2")
+        # below about 80 cols the tab bar drops its counts: wait for the tab
+        until(lambda: (v.pump(0.1), "[Prompts" in "".join(rows(v.out).values()))[1])
         if prep:
             prep(v)
         m = len(v.out)
@@ -421,6 +422,18 @@ def test_note():
         os.chmod(dd, 0o700)
     check("#418 VA4: 24 columns: the reason fits",
           "a not saved: dir unsafe" in s, s)
+    state(None)
+    # LOW-VW1: a planted hide_agents=0 under an unsafe dch/ is not obeyed
+    state("hide_agents=0\n")
+    os.chmod(dd, 0o777)
+    try:
+        r = shown(None)
+    finally:
+        os.chmod(dd, 0o700)
+    check("#424 VW1: 0777 dch/: planted hide_agents=0 ignored, hidden",
+          r == 0, r)
+    check("#424 VW1: private dch/: the same file is obeyed",
+          shown(None) == 1)
     state(None)
 
 

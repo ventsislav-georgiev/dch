@@ -384,6 +384,9 @@ t_define_417(void)
 	CHECK("define: a BOM before a JSON first line: JSON",
 	      line(XCMD_DEFINE, "\xef\xbb\xbf{\"title\":\"bom\"}", 1) ==
 	      XCMD_ROW && starts("{\"title\":\"bom\","));
+	CHECK("define: colour codes then a BOM then JSON: JSON",
+	      line(XCMD_DEFINE, "\x1b[32m\xef\xbb\xbf{\"title\":\"cb\"}", 1) ==
+	      XCMD_ROW && starts("{\"title\":\"cb\","));
 	CHECK("define: colour codes round a JSON line: JSON, first or not",
 	      line(XCMD_DEFINE, "\x1b[32m{\"title\":\"g\"}\x1b[0m", 1) ==
 	      XCMD_ROW && starts("{\"title\":\"g\",") &&

@@ -68,7 +68,7 @@ def ref(r, *more):
 
 
 OK = script("ok.py", r'''
-import json, os, sys
+import json, os, re, sys
 open(%r, "w").write(" ".join(sys.argv[1:]))
 print(json.dumps({"title": "Ticket <%%s|%%s|%%s|%%s>" %% (sys.argv[-1],
                   os.environ.get("DCH_REF"), os.environ.get("DCH_REF_SHAPE"),
@@ -472,14 +472,22 @@ def test_card_width():
 
 
 def test_card_zwj():
-    """#418 (NIT-VA3): the title's cut never leaves a ZWJ at its end."""
-    for k in range(4):
+    """#418 (NIT-VA3): the title's cut never leaves a ZWJ at its end.
+    #424: nor splits a flag or a skin tone, nor blanks a long ZWJ chain."""
+    unit = "\U0001F469\u200d\U0001F4BB"
+    for k, title in enumerate(["a" * k + unit * 30 for k in range(4)] + [
+            "a" * 30 + "\U0001F1E7\U0001F1EC" * 5,
+            "a" * 29 + "\U0001F44D\U0001F3FD" * 5,
+            "a" * 31 + "\U0001F1E7\U0001F1EC" * 5,
+            "a" * 30 + "\U0001F44D\U0001F3FD" * 5,
+            "\U0001F469" + "\u200d\U0001F469" * 60]):
         config(script("zwj.py", "import json\nprint(json.dumps({'title': '"
-                      + "a" * k + "\U0001F469\u200d\U0001F4BB" * 30 +
-                      "', 'status': 'open'}))\n"))
+                      + title + "', 'status': 'open'}))\n"))
         v = Pty([DCH, "--xray", "xv-cl"], 30, 41)
         try:
-            v.wait(b"Refs 3")
+            # 41 cols: no counts in the tab bar, so no "Refs 3"
+            until(lambda: (v.pump(0.1), "[Prompts" in rows(v.out).get(2, "")
+                           and "\u258c" in rows(v.out).get(4, ""))[1])
             v.pump(0.3)
             v.key(b"\033[Z\033[Z", 1.0)
             mark = len(v.out)
@@ -491,6 +499,18 @@ def test_card_zwj():
             check("#418 VA3: %d: no ZWJ before the status" % k,
                   r and "  open" in r[-1] and "\u200d" not in
                   r[-1].split("  open")[0][-1:], r)
+            t = r[-1].split("  open")[0] if r else ""
+            if k in (4, 6):
+                check("#424 VW3: no lone regional indicator",
+                      len(re.findall("[\U0001F1E6-\U0001F1FF]", t)) % 2 == 0,
+                      r)
+            if k in (5, 7):
+                check("#424 VW3: no skin tone without its base",
+                      not re.search("(^|[^\U0001F44D])[\U0001F3FB-\U0001F3FF]",
+                                    t), r)
+            if k == 8:
+                check("#424 VW4: a long ZWJ chain is not blank",
+                      "\U0001F469" in t, r)
             v.key(b"q")
         finally:
             v.close()
