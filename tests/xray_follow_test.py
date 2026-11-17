@@ -752,9 +752,14 @@ def test_follow_slow_cmd():
         check("slow command: a 4.9 s tasks_command leaves every ref delta "
               "within 0.6 s of its write (MED-TZ1, LOW-TZ2)", prompt(lat),
               lat)
+        # 4.9 s sits 0.1 s under the 5 s clock: a sanitizer runner's fork and
+        # exec can pass it, and then the clock's own warn is the right answer
+        tk = hdr.get("task", {})
         check("slow command: its answer comes as the tasks block, again "
-              "when it moves", hdr.get("task", {}).get("source") ==
-              "command" and sorted(st) == ["s2"], (hdr, st))
+              "when it moves", (tk.get("source") == "command" and
+                                sorted(st) == ["s2"]) or
+              (SANITIZED and tk.get("warn") ==
+               "tasks_command: stopped early after 5 s"), (hdr, st))
         fl.stop()
 
         # 2. killed at its 5 s clock: the fallback and its warn
