@@ -10318,8 +10318,9 @@ xv_spawn(int fd, int ac, char **av, int *out, int *err)
 	** would run picker_sigint here, which restores the view's terminal
 	** and xv_kills its siblings (QA 1.58.0 MED-V4); after them, one
 	** pending kills the child by its default action. SIGTSTP/SIGCONT are
-	** blocked so the inherited on_sigtstp (attach.c), with the tty
-	** armed, cannot run in the child before its resets (#416, #425) */
+	** blocked too: the child inherits on_sigtstp (attach.c) for SIGTSTP
+	** and xv_on_cont (xview.c) for SIGCONT; with the tty armed they
+	** must not run before its resets (#416, #425) */
 	sigemptyset(&s);
 	sigaddset(&s, SIGINT);
 	sigaddset(&s, SIGTERM);

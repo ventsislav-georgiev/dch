@@ -801,6 +801,11 @@ detached. A single press still detaches; it simply waits out the window first.
 .B DCH_DOUBLE_TAP_MS
 sets that window in milliseconds (default
 .BR 300 ).
+Setting
+.B DCH_DOUBLE_TAP_MS
+to
+.B 0
+disables switching and makes detach instant again.
 A key already waiting when dch looks counts as inside the window, even if
 the client was stopped or slow past it, as long as nothing else read the
 terminal meanwhile.
@@ -822,14 +827,13 @@ brings the session or the picker back raw.
 A
 .B SIGSTOP
 cannot be caught: under dash the terminal stays raw until dch continues.
-Setting it to
-.B 0
-disables switching and makes detach instant again.
 Known macOS limit: a process that stops itself inside a signal handler while
 SIGCONT is caught can wedge in the kernel.
 If \fBq\fR then does not close the X-ray view, recover from another terminal:
 find the process group with \fBps \-o pgid= \-p\fR <pid of the dch client>
-(or \fBps \-o pid,pgid,command | grep 'dch \-a'\fR) and run
+(or list that terminal's processes with
+\fBps \-o pid,pgid,stat,command \-t\fR <tty>, such as \fBttys003\fR;
+it finds every attach form) and run
 \fBkill \-9 \-<pgid>\fR; closing the terminal window also recovers.
 The job holds the terminal raw, so ^Z, ^C and ^\e do nothing; if the shell
 still responds, \fBkill \-9 %1\fR works too.
