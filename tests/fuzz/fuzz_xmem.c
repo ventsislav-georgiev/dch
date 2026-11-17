@@ -12,7 +12,10 @@
 **      rollout, the file is then CODEX_HOME's AGENTS.md and "@M" that
 **      directory), laid out under a temp directory as a Claude config, then
 **      xm_print: every line is JSON under XM_LINE + 1 bytes, the header
-**      first and the done line last, never more than XM_ROWS rows. */
+**      first and the done line last, never more than XM_ROWS rows; and
+**      --follow's xm_live (#446), its touches fed by a decoder's calls,
+**      prints the very same bytes. */
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,6 +24,7 @@
 #include <unistd.h>
 #include "../../bridge.h"
 #include "../../xmem.h"
+#include "../../xray.h"
 
 int LLVMFuzzerTestOneInput(const uint8_t *d, size_t n);
 
@@ -100,6 +104,36 @@ subst(const char *s, size_t n, const char *rep, size_t *out)
 	return b;
 }
 
+/* xm_live over the same files: the decoder's calls kept by path, the rows
+** listed at the print, gives xm_print's answer byte for byte */
+static void
+live(const struct xm_req *r, int codex, const char *want, size_t wl)
+{
+	struct xm_live *l = xm_live_new(r);
+	struct xr_claude *x = xr_claude_new();
+	char *o = NULL;
+	size_t ol = 0;
+	int fd = open(r->path, O_RDONLY | O_CLOEXEC), capped = 0, rc = -1;
+	FILE *m;
+
+	if (!l || !x || fd < 0)
+		abort();
+	if (codex)
+		xr_claude_codex(x);
+	xm_live_attach(l, x, (uint64_t)r->st->st_ino);
+	rc = xr_claude_read(x, fd, (uint64_t)r->st->st_size, &capped);
+	close(fd);
+	xr_claude_free(x);
+	if (!(m = open_memstream(&o, &ol)) ||
+	    xm_live_print(m, l, rc < 0 || capped, NULL) != 0)
+		abort();
+	fclose(m);
+	if (ol != wl || memcmp(o, want, wl))
+		abort();
+	free(o);
+	xm_live_free(l);
+}
+
 static void
 answer(const char *s, size_t n, int codex)
 {
@@ -146,6 +180,7 @@ answer(const char *s, size_t n, int codex)
 	if (xm_print(m, &r) != 0)
 		abort();
 	fclose(m);
+	live(&r, codex, out, ll);
 	for (line = out; line < out + ll; line = nl + 1)
 	{
 		if (!(nl = memchr(line, '\n', (size_t)(out + ll - line))) ||

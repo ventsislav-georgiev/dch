@@ -132,7 +132,8 @@ parse_pieces(const uint8_t *d, size_t n, size_t room, struct sb *out)
 /* An --xray ctl_check let through (#157, spec #832 4.4): the name right
 ** after the verb; 3.1's flags only, each once, --json among them, at most
 ** one of --follow, --ref, --search (#297), --chapter, --tasks (#319),
-** --memory (#322), --clear; --scope,
+** --memory (#322), --clear, but --follow with --tasks and --memory
+** (#446); --scope,
 ** --full, --budget-ms only with --ref; each value by its rule; no timeout
 ** and no cap for --follow alone. */
 static void
@@ -164,6 +165,8 @@ xray_inv(int ac, char **av, const unsigned char *kind, int fl)
 			abort();
 	}
 	one = seen & (2 | 4 | 16 | 32 | 256 | 512 | 1024);
+	if (seen & 2)	/* --follow takes --tasks and --memory (#446) */
+		one &= ~(512u | 1024u);
 	if (!(seen & 1) || one & (one - 1) || (seen & (8 | 64 | 128) &&
 	                                       !(seen & 16)) ||
 	    fl != (seen & 2 ? CTL_FOREVER | CTL_NOCAP : 0))

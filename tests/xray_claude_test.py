@@ -1501,12 +1501,22 @@ def test_tasks():
     for a, other in ((["--ref", "#1"], "--ref"),
                      (["--search", "needle"], "--search"),
                      (["--chapter", a0], "--chapter"),
-                     (["--clear"], "--clear"), (["--follow"], "--follow")):
+                     (["--clear"], "--clear")):
         r = dch("--xray", "xr-tk", "--tasks", *a, "--json")
         check("tasks: with %s is bad usage (exit 2)" % other,
               r.returncode == 2 and r.stdout == "" and
               r.stderr == "dch: bad usage: --tasks and %s\n" % other,
               (r.stdout, r.stderr))
+    # #446: --follow carries it; a History record's follow is its snapshot,
+    # then the one-shot --tasks lines, and exit 0
+    r = dch("--xray", "xr-tk", "--follow", "--tasks", "--json")
+    one = dch("--xray", "xr-tk", "--tasks", "--json")
+    ls = r.stdout.splitlines()
+    check("tasks: with --follow, a record's snapshot then its --tasks "
+          "lines (exit 0)", r.returncode == 0 and ls and
+          "snapshot" in json.loads(ls[0]) and
+          "\n".join(ls[1:]) + "\n" == one.stdout, (r.returncode, r.stderr,
+                                                  ls[1:3]))
     r = dch("--xray", "xr-tk", "--tasks", "--tasks", "--json")
     check("tasks: twice is bad usage", r.returncode == 2 and
           r.stderr == "dch: bad usage: --tasks twice\n", r.stderr)

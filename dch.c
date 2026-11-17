@@ -2898,8 +2898,11 @@ usage(void)
 	    "  dch --xray <n> [--clear] --json            a session's chapters as\n"
 	    "                                             one JSON object; --clear\n"
 	    "                                             empties a shell's ring\n"
-	    "  dch --xray <n> --follow --json             that object, then its\n"
-	    "                                             deltas as NDJSON\n"
+	    "  dch --xray <n> --follow [--tasks] [--memory] --json\n"
+	    "                                             that object, then its\n"
+	    "                                             deltas as NDJSON; with\n"
+	    "                                             the task and memory\n"
+	    "                                             blocks and their deltas\n"
 	    "  dch --xray <n> --ref <ref>|- [--scope session|project|all] [--full]\n"
 	    "       [--budget-ms <ms>] --json             one ref's mentions and\n"
 	    "                                             definitions as NDJSON\n"
@@ -13506,6 +13509,7 @@ struct xr_tkc
 	const char *session, *sid;
 	const struct xcmd_result *res;
 	unsigned long n;
+	FILE *o;
 };
 
 static int
@@ -13515,24 +13519,24 @@ xr_tkc_row(const char *line, void *arg)
 
 	if (!k->n++)
 	{
-		fputs("{\"schema\":1", stdout);
+		fputs("{\"schema\":1", k->o);
 		if (k->kind == XCMD_TASK)	/* --memory's header has neither */
 		{
-			fputs(",\"session\":", stdout);
-			xr_put_str(stdout, k->session);
-			fputs(",\"session_id\":", stdout);
-			xr_put_str(stdout, k->sid);
+			fputs(",\"session\":", k->o);
+			xr_put_str(k->o, k->session);
+			fputs(",\"session_id\":", k->o);
+			xr_put_str(k->o, k->sid);
 		}
-		fputs(",\"source\":\"command\",\"title\":", stdout);
+		fputs(",\"source\":\"command\",\"title\":", k->o);
 		if (k->res->title[0])
-			xr_put_str(stdout, k->res->title);
+			xr_put_str(k->o, k->res->title);
 		else
-			fputs("null", stdout);
-		fputs(",\"partial\":false}\n", stdout);
+			fputs("null", k->o);
+		fputs(",\"partial\":false}\n", k->o);
 	}
-	fputs(line, stdout);
-	fputc('\n', stdout);
-	return fflush(stdout) != 0 || ferror(stdout);
+	fputs(line, k->o);
+	fputc('\n', k->o);
+	return fflush(k->o) != 0 || ferror(k->o);
 }
 
 /* The user's tasks_command or memory_command (their own dch config only),
@@ -13541,12 +13545,12 @@ xr_tkc_row(const char *line, void *arg)
 ** source answers, warn its header's ("" for no command, an empty answer).
 ** Never mixed. */
 static int
-xr_cmd(enum xcmd_kind kind, const char *session, const char *sid,
+xr_cmd(FILE *o, enum xcmd_kind kind, const char *session, const char *sid,
        const char *cwd, const char *agent, const char *asid, char *warn,
        size_t cap, int *rc)
 {
 	struct xcmd_result res;
-	struct xr_tkc k = { kind, session, sid, &res, 0 };
+	struct xr_tkc k = { kind, session, sid, &res, 0, o };
 	char cmd[1024];
 	const char *what = kind == XCMD_TASK ? "tasks_command" : "memory_command";
 	int set;
@@ -13566,18 +13570,18 @@ xr_cmd(enum xcmd_kind kind, const char *session, const char *sid,
 		snprintf(warn, cap, "%s", res.warn);
 		return 0;
 	}
-	if (!ferror(stdout))
+	if (!ferror(o))
 	{
-		printf("{\"done\":true,\"count\":%lu,\"dropped\":%lu", res.rows,
-		       res.skipped);
+		fprintf(o, "{\"done\":true,\"count\":%lu,\"dropped\":%lu",
+		        res.rows, res.skipped);
 		if (res.warn[0])
 		{
-			fputs(",\"warn\":", stdout);
-			xr_put_str(stdout, res.warn);
+			fputs(",\"warn\":", o);
+			xr_put_str(o, res.warn);
 		}
-		fputs("}\n", stdout);
+		fputs("}\n", o);
 	}
-	*rc = xr_out_exit(fflush(stdout) == 0 && !ferror(stdout));
+	*rc = xr_out_exit(fflush(o) == 0 && !ferror(o));
 	return 1;
 }
 
@@ -13600,7 +13604,7 @@ xr_tasks_q(const struct xr_target *t)
 	{
 		snprintf(cwd, sizeof cwd, "%s",
 		         t->rec->acwd[0] ? t->rec->acwd : t->rec->cwd);
-		if (xr_cmd(XCMD_TASK, t->name, t->rec->sid, cwd,
+		if (xr_cmd(stdout, XCMD_TASK, t->name, t->rec->sid, cwd,
 		           t->rec->sid[0] ? "claude" : "", t->rec->sid, warn,
 		           sizeof warn, &rc))
 			return rc;
@@ -13622,8 +13626,8 @@ xr_tasks_q(const struct xr_target *t)
 	{
 		if (c.cwd[0])
 			snprintf(cwd, sizeof cwd, "%s", c.cwd);
-		if (xr_cmd(XCMD_TASK, t->name, c.sid, cwd, "claude", c.sid, warn,
-		           sizeof warn, &rc))
+		if (xr_cmd(stdout, XCMD_TASK, t->name, c.sid, cwd, "claude", c.sid,
+		           warn, sizeof warn, &rc))
 			return rc;
 		xr_crec_cfg(&c, cfg, sizeof cfg);
 		return cfg[0] ? xr_tasks_claude(cfg, c.sid, t->name, warn)
@@ -13633,8 +13637,8 @@ xr_tasks_q(const struct xr_target *t)
 	{
 		if (xc.cwd[0])
 			snprintf(cwd, sizeof cwd, "%s", xc.cwd);
-		if (xr_cmd(XCMD_TASK, t->name, xc.tid, cwd, "codex", xc.tid, warn,
-		           sizeof warn, &rc))
+		if (xr_cmd(stdout, XCMD_TASK, t->name, xc.tid, cwd, "codex", xc.tid,
+		           warn, sizeof warn, &rc))
 			return rc;
 		return cx > 0 && xr_codex_lookup(xc.home, xc.tid, path, sizeof path,
 		                                 &st) == 0
@@ -13644,8 +13648,8 @@ xr_tasks_q(const struct xr_target *t)
 	/* the ring's header for the session_id, as the other forms give it */
 	if (ring_fetch(t->sock, &rs, NULL, NULL) == -1)
 		return xr_no_session();
-	if (xr_cmd(XCMD_TASK, t->name, rs.sid, cwd, "", "", warn, sizeof warn,
-	           &rc))
+	if (xr_cmd(stdout, XCMD_TASK, t->name, rs.sid, cwd, "", "", warn,
+	           sizeof warn, &rc))
 		return rc;
 	return xr_out_exit(xr_tasks_print(stdout, NULL, t->name, rs.sid, 0,
 	                                  warn) == 0);
@@ -13727,8 +13731,8 @@ xr_memory(const struct xr_target *t)
 	q.cfg = cfg;
 	q.cwd = cwd;
 	/* the user's memory_command first (#321), whatever the session */
-	if (xr_cmd(XCMD_MEMORY, t->name, NULL, cwd, q.agent ? q.agent : "", sid,
-	           warn, sizeof warn, &rc))
+	if (xr_cmd(stdout, XCMD_MEMORY, t->name, NULL, cwd,
+	           q.agent ? q.agent : "", sid, warn, sizeof warn, &rc))
 		return rc;
 	q.warn = warn;
 	return xr_out_exit(xm_print(stdout, &q) == 0);
@@ -13836,8 +13840,12 @@ xr_clear(const struct xr_target *t)
 #define XF_EVICT_MS 1000	/* ... at most once a second */
 #define XF_SLICE (4u << 20)	/* the full pass: bytes between events */
 #define XF_RESET (-1)
+#define XF_TASKS_MS 5000L	/* --tasks: a tasks_command's run (#446) */
+#define XF_MEM_MS 30000L	/* --memory: the rows listed, memory_command */
 
-enum { XE_FILE = 1, XE_ROT = 2, XE_CONN = 4, XE_OUT = 8 };
+enum { XE_FILE = 1, XE_ROT = 2, XE_CONN = 4, XE_OUT = 8, XE_MEM = 16 };
+
+struct xf_cl;
 
 struct xf
 {
@@ -13861,6 +13869,24 @@ struct xf
 	long long img[2];	/* that reset's master image: xf_image */
 	const char *why;	/* XF_RESET's reason, for the next snapshot */
 	unsigned long woke, timed;	/* 9.5's no-timer seam */
+	/* --tasks, --memory (#446): blocks [0] and [1], whole after each
+	** snapshot, then a row's line when it moves */
+	int tasks, memory;
+	int cmd[2];		/* tasks_command, memory_command set */
+	char *blk[2];		/* the block last written */
+	char *cmdout[2];	/* the command's last answer, NULL: built in */
+	char warn[2][XCMD_WARN_MAX];
+	long long at[2];	/* the command's next run; [1] the listing's */
+	int mdirty;		/* the memory dir moved */
+	unsigned long mtouched;	/* xm_live_touched at the last block */
+	struct xf_cl *cl;	/* a Claude's or Codex's sources, else NULL */
+	const char *sid, *agent;	/* the blocks' session_id, agent */
+	char cwd[PATH_MAX];
+#ifdef __linux__
+	int wm;			/* the memory dir's watch */
+#else
+	int mdirfd;
+#endif
 };
 
 static int
@@ -13869,12 +13895,12 @@ xf_watch_open(struct xf *f)
 	f->conn = -1;
 	memset(&f->rd, 0, sizeof f->rd);
 #ifdef __linux__
-	f->wf = f->wd = f->wd2 = -1;
+	f->wf = f->wd = f->wd2 = f->wm = -1;
 	f->q = inotify_init1(IN_CLOEXEC | IN_NONBLOCK);
 #else
 	struct kevent ev;
 
-	f->dirfd = f->dirfd2 = -1;
+	f->dirfd = f->dirfd2 = f->mdirfd = -1;
 	if ((f->q = kqueue()) >= 0)
 	{
 		/* EV_CLEAR: once per drain, and EV_EOF when the reader leaves,
@@ -13897,7 +13923,11 @@ xf_watch_close(struct xf *f)
 		close(f->dirfd);
 	if (f->dirfd2 >= 0)
 		close(f->dirfd2);
-	f->dirfd = f->dirfd2 = -1;
+	if (f->mdirfd >= 0)
+		close(f->mdirfd);
+	f->dirfd = f->dirfd2 = f->mdirfd = -1;
+#else
+	f->wm = -1;	/* its inotify fd closes below */
 #endif
 	if (f->q >= 0)
 		close(f->q);
@@ -14017,6 +14047,43 @@ xf_watch_rec(struct xf *f, const char *path)
 #endif
 }
 
+/* --memory (#446): the memory dir beside the transcript, its entries
+** (inotify: its files' writes too; kqueue sees an edit in place at the
+** 30 s listing); once there, so made late it is watched from the next
+** XE_ROT. A dir removed and made again: shortcut, seen at the listing. */
+static void
+xf_watch_mem(struct xf *f, const char *transcript)
+{
+	const char *sl = strrchr(transcript, '/');
+	char d[2048 + 8];
+
+	if (!sl || (size_t)snprintf(d, sizeof d, "%.*s/memory",
+	                            (int)(sl - transcript), transcript)
+	           >= sizeof d)
+		return;
+#ifdef __linux__
+	if (f->wm < 0)
+		f->wm = inotify_add_watch(f->q, d, IN_CREATE | IN_DELETE |
+		                          IN_MOVED_TO | IN_MOVED_FROM |
+		                          IN_CLOSE_WRITE | IN_ONLYDIR);
+#else
+	struct kevent ev;
+
+	if (f->mdirfd >= 0)
+		return;
+#ifdef O_EVTONLY
+	if ((f->mdirfd = open(d, O_EVTONLY | O_DIRECTORY | O_CLOEXEC)) >= 0)
+#else
+	if ((f->mdirfd = open(d, O_RDONLY | O_DIRECTORY | O_CLOEXEC)) >= 0)
+#endif
+	{
+		EV_SET(&ev, f->mdirfd, EVFILT_VNODE, EV_ADD | EV_CLEAR, NOTE_WRITE,
+		       0, NULL);
+		(void)kevent(f->q, &ev, 1, NULL, 0, NULL);
+	}
+#endif
+}
+
 /* The events in, waiting at most ms (-1: until one comes). */
 static int
 xf_wait(struct xf *f, long ms)
@@ -14050,6 +14117,8 @@ xf_wait(struct xf *f, long ms)
 
 				if (e->wd == f->wf)
 					ev |= e->mask & IN_MODIFY ? XE_FILE : XE_ROT;
+				else if (e->wd == f->wm)
+					ev |= XE_MEM;
 				else if (e->wd == f->wd || e->wd == f->wd2)
 					ev |= XE_ROT;
 				k += (int)sizeof *e + (int)e->len;
@@ -14067,6 +14136,8 @@ xf_wait(struct xf *f, long ms)
 				ev |= out[k].flags & EV_EOF ? XE_OUT : 0;
 			else if (out[k].filter == EVFILT_READ)
 				ev |= XE_CONN;
+			else if ((int)out[k].ident == f->mdirfd)
+				ev |= XE_MEM;
 			else if ((int)out[k].ident == f->dirfd ||
 			         (int)out[k].ident == f->dirfd2)
 				ev |= XE_ROT;
@@ -14170,7 +14241,10 @@ xf_line(struct xf *f, const char *what, const char *v)
 	return xf_out(f);
 }
 
-/* The reset (when set) and a's snapshot; what was written is all of a. */
+static int xf_blocks(struct xf *f, int all);
+
+/* The reset (when set) and a's snapshot; what was written is all of a.
+** --tasks and --memory: their blocks again, whole, after it. */
 static int
 xf_snapshot(struct xf *f, struct xr_answer *a, const char *reset)
 {
@@ -14199,7 +14273,7 @@ xf_snapshot(struct xf *f, struct xr_answer *a, const char *reset)
 	f->last = xr_now_ms();
 	dch_trace("xray follow: snapshot%s%s keys=%zu", reset ? " after " : "",
 	          reset ? reset : "", a->refs ? xr_index_keys(a->refs) : 0);
-	return 0;
+	return (f->tasks || f->memory) && xf_blocks(f, 1);
 }
 
 static int
@@ -14249,7 +14323,316 @@ struct xf_cl
 	char watch[2048];		/* Codex, no rollout yet: the dir watched */
 	const char *rec;		/* a Claude's session record, else NULL */
 	int claudes;			/* the live Claudes it runs among (#314) */
+	struct xr_tasks *tk, *tk2;	/* --tasks: d's, d2's (#446) */
+	struct xm_live *xm, *xm2;	/* --memory: d's, d2's */
 };
+
+/* ---- --tasks, --memory (#446): blocks [0] and [1] ---- */
+
+/* The user's command for block b, run as the one-shot runs it: its answer
+** kept whole, else NULL and its warn for the built-in source. */
+static void
+xf_cmd(struct xf *f, int b)
+{
+	char *t = NULL;
+	size_t n = 0;
+	FILE *m;
+	int rc, got;
+
+	free(f->cmdout[b]);
+	f->cmdout[b] = NULL;
+	f->at[b] = xr_now_ms() + (b ? XF_MEM_MS : XF_TASKS_MS);
+	if (!(m = open_memstream(&t, &n)))
+		return;
+	got = xr_cmd(m, b ? XCMD_MEMORY : XCMD_TASK, f->t->name,
+	             b ? NULL : f->sid, f->cwd, f->agent,
+	             f->cl ? f->sid : "", f->warn[b], sizeof f->warn[b], &rc);
+	if (fclose(m) == 0 && got && rc == 0)
+		f->cmdout[b] = t;
+	else
+		free(t);
+}
+
+/* Block b as the one-shot prints it now (no transcript read: the sinks
+** the follow's decoder fed); NULL out of memory. */
+static char *
+xf_blk_text(struct xf *f, int b)
+{
+	char *t = NULL;
+	size_t n = 0;
+	FILE *m;
+	int capped = f->cl && f->cl->capped;
+
+	if (f->cmdout[b])
+		return strdup(f->cmdout[b]);
+	if (!(m = open_memstream(&t, &n)))
+		return NULL;
+	if (b)
+	{
+		(void)xm_live_print(m, f->cl ? f->cl->xm : NULL, capped,
+		                    f->warn[1]);
+		f->mtouched = xm_live_touched(f->cl ? f->cl->xm : NULL);
+	}
+	else
+		(void)xr_tasks_print(m, f->cl ? f->cl->tk : NULL, f->t->name,
+		                     f->sid, capped, f->warn[0]);
+	if (fclose(m) != 0)
+	{
+		free(t);
+		return NULL;
+	}
+	return t;
+}
+
+/* A row line's key: its id's JSON string, after {"task":{"id": or
+** {"memory":{"id": (our own lines); 0 when it has none. */
+struct xf_row
+{
+	const char *line, *key;
+	size_t len, klen;
+};
+
+static size_t
+xf_row_key(const char *l, size_t len, size_t pre)
+{
+	size_t k = pre;
+
+	if (len <= pre || l[k] != '"')
+		return 0;
+	for (k++; k < len && l[k] != '"'; k++)
+		if (l[k] == '\\')
+			k++;
+	return k < len ? k + 1 - pre : 0;
+}
+
+static int
+xf_row_cmp(const void *a, const void *b)
+{
+	const struct xf_row *x = a, *y = b;
+	int c = memcmp(x->key, y->key, x->klen < y->klen ? x->klen : y->klen);
+
+	return c ? c : x->klen < y->klen ? -1 : x->klen > y->klen;
+}
+
+/* text's row lines (the header and the done line left out), in order and
+** sorted by key; *n of them. NULL out of memory. */
+static struct xf_row *
+xf_rows(const char *text, size_t pre, struct xf_row **sorted, size_t *n)
+{
+	const char *p = strchr(text, '\n'), *e;
+	struct xf_row *v = malloc(64 * sizeof *v), *w;	/* never NULL: */
+	size_t cap = 64;				/* no rows is no error */
+
+	*n = 0;
+	*sorted = NULL;
+	if (!v)
+		return NULL;
+	for (p = p ? p + 1 : text + strlen(text); *p && (e = strchr(p, '\n'));
+	     p = e + 1)
+	{
+		size_t len = (size_t)(e - p);
+
+		if (!strncmp(p, "{\"done\":", 8))
+			continue;
+		if (*n == cap)
+		{
+			cap *= 2;
+			if (!(w = realloc(v, cap * sizeof *v)))
+			{
+				free(v);
+				return NULL;
+			}
+			v = w;
+		}
+		v[*n].line = p;
+		v[*n].len = len;
+		v[*n].klen = xf_row_key(p, len, pre);
+		v[*n].key = p + pre;
+		(*n)++;
+	}
+	if (!(*sorted = malloc((*n ? *n : 1) * sizeof *v)))
+	{
+		free(v);
+		return NULL;
+	}
+	if (*n)
+	{
+		memcpy(*sorted, v, *n * sizeof *v);
+		qsort(*sorted, *n, sizeof *v, xf_row_cmp);
+	}
+	return v;
+}
+
+/* Block b's rows that moved from old to now: a new or changed row's line
+** in now's order, then {"<kind>":{"id":…,"gone":true}} for each row left
+** out. -1 out of memory. */
+static int
+xf_row_deltas(const char *old, const char *now, int b)
+{
+	const char *kind = b ? "memory" : "task";
+	size_t pre = strlen(kind) + 10, no, nn, k;	/* {"kind":{"id": */
+	struct xf_row *ov, *os, *nv, *ns, *h;
+	int rc = -1;
+
+	if (!(ov = xf_rows(old, pre, &os, &no)))
+		return -1;
+	if (!(nv = xf_rows(now, pre, &ns, &nn)))
+		goto out;
+	for (k = 0; k < nn; k++)
+		if (!nv[k].klen ||
+		    !(h = bsearch(&nv[k], os, no, sizeof *os, xf_row_cmp)) ||
+		    h->len != nv[k].len || memcmp(h->line, nv[k].line, h->len))
+			printf("%.*s\n", (int)nv[k].len, nv[k].line);
+	for (k = 0; k < no; k++)
+		if (os[k].klen && !bsearch(&os[k], ns, nn, sizeof *ns, xf_row_cmp))
+			printf("{\"%s\":{\"id\":%.*s,\"gone\":true}}\n", kind,
+			       (int)os[k].klen, os[k].key);
+	rc = 0;
+	free(nv);
+	free(ns);
+out:
+	free(ov);
+	free(os);
+	return rc;
+}
+
+/* Block b now, against the one last written: whole after a snapshot
+** (all), for a command's answer or a header that moved; else its rows'
+** deltas. Nonzero: f->rc says why to end. */
+static int
+xf_blk(struct xf *f, int b, int all)
+{
+	char *now = xf_blk_text(f, b), *old = f->blk[b];
+	size_t h;
+
+	if (!now)
+	{
+		f->rc = xr_failed();
+		return 1;
+	}
+	if (!all && old && !strcmp(old, now))
+	{
+		free(now);
+		return 0;
+	}
+	h = strcspn(now, "\n");
+	if (all || !old || f->cmdout[b] || strncmp(old, now, h + 1))
+		fputs(now, stdout);
+	else if (xf_row_deltas(old, now, b) != 0)
+	{
+		free(now);
+		f->rc = xr_failed();
+		return 1;
+	}
+	free(old);
+	f->blk[b] = now;
+	return xf_out(f);
+}
+
+/* After a snapshot (all): the commands run again and both blocks whole.
+** After a batch: a built-in block's moved rows (the tasks every batch;
+** shortcut: the whole list printed to diff it, upgrade with a change
+** count in xr_tasks if lists of thousands show in the CPU). */
+static int
+xf_blocks(struct xf *f, int all)
+{
+	int b;
+
+	for (b = 0; b < 2; b++)
+	{
+		if (!(b ? f->memory : f->tasks) || (!all && f->cmdout[b]))
+			continue;
+		if (all)
+			xf_cmd(f, b);
+		else if (b && f->mtouched == xm_live_touched(f->cl ? f->cl->xm
+		                                             : NULL))
+			continue;
+		if (xf_blk(f, b, all))
+			return 1;
+	}
+	return 0;
+}
+
+/* ms to the next timed block job (-1 none): a configured command's
+** cadence, --memory's 30 s listing, a memory dir event's batch */
+static long
+xf_side_ms(const struct xf *f)
+{
+	long long now = xr_now_ms(), at = -1, m;
+
+	if (f->tasks && f->cmd[0])
+		at = f->at[0];
+	if (f->memory && (f->cl || f->cmd[1]))
+	{
+		m = f->mdirty ? f->last + f->gap : f->at[1];
+		at = at < 0 || m < at ? m : at;
+	}
+	return at < 0 ? -1 : at > now ? (long)(at - now) : 0;
+}
+
+static long
+xf_min(long a, long b)
+{
+	return a < 0 ? b : b < 0 || a < b ? a : b;
+}
+
+/* The timed jobs due now; nonzero: f->rc says why to end. */
+static int
+xf_side(struct xf *f)
+{
+	long long now = xr_now_ms();
+	int sent = 0;
+
+	if (f->tasks && f->cmd[0] && now >= f->at[0])
+	{
+		xf_cmd(f, 0);
+		if (xf_blk(f, 0, 0))
+			return 1;
+		sent = 1;
+	}
+	if (f->memory && (f->cl || f->cmd[1]) &&
+	    (now >= f->at[1] || (f->mdirty && now >= f->last + f->gap)))
+	{
+		if (now >= f->at[1] && f->cmd[1])
+			xf_cmd(f, 1);
+		f->at[1] = now + XF_MEM_MS;
+		f->mdirty = 0;
+		if (xf_blk(f, 1, 0))
+			return 1;
+		sent = 1;
+	}
+	if (sent)
+		f->last = xr_now_ms();
+	return 0;
+}
+
+/* --tasks, --memory: d's sinks beside its refs, set before it reads (d
+** NULL: no transcript yet, the memory block's instruction files only) */
+static int
+xf_cl_sinks(const struct xf *f, const struct xf_cl *s, struct xr_claude *d,
+            struct xr_tasks **tk, struct xm_live **xm)
+{
+	struct xm_req q;
+
+	if (f->tasks && d)
+	{
+		if (!(*tk = xr_tasks_new()))
+			return -1;
+		xr_claude_tasks(d, *tk, s->ino);
+	}
+	if (!f->memory)
+		return 0;
+	memset(&q, 0, sizeof q);
+	q.agent = s->cx ? "codex" : "claude";
+	q.cfg = s->cx ? s->cx->home : s->cfg;
+	q.path = d ? s->path : NULL;
+	q.cwd = f->cwd;
+	if (!(*xm = xm_live_new(&q)))
+		return -1;
+	if (d)
+		xm_live_attach(*xm, d, s->ino);
+	return 0;
+}
 
 static int
 xf_slice(void *ctx, uint64_t bytes)
@@ -14265,10 +14648,16 @@ xf_cl_free(struct xf_cl *s)
 	xr_claude_free(s->d2);
 	xr_index_free(s->ix);
 	xr_index_free(s->ix2);
+	xr_tasks_free(s->tk);
+	xr_tasks_free(s->tk2);
+	xm_live_free(s->xm);
+	xm_live_free(s->xm2);
 	if (s->fd >= 0)
 		close(s->fd);
 	s->d = s->d2 = NULL;
 	s->ix = s->ix2 = NULL;
+	s->tk = s->tk2 = NULL;
+	s->xm = s->xm2 = NULL;
 	s->fd = -1;
 }
 
@@ -14421,6 +14810,11 @@ xf_claude(struct xf *f, const struct crec *c, const struct xr_cx *x,
 
 	memset(&s, 0, sizeof s);
 	s.fd = -1;
+	f->cl = &s;
+	f->sid = s.sid;
+	f->agent = x ? "codex" : "claude";
+	snprintf(f->cwd, sizeof f->cwd, "%s",
+	         x ? (x->cwd[0] ? x->cwd : label) : (c->cwd[0] ? c->cwd : label));
 	if (x)
 	{
 		/* its rollout, else (none yet, or no id) today's day dir; its
@@ -14445,7 +14839,8 @@ xf_claude(struct xf *f, const struct crec *c, const struct xr_cx *x,
 		s.ino = (uint64_t)st.st_ino;
 		xr_index_sink(s.ix, &k);
 		xr_claude_refs(s.d, &k, s.ino, NULL, NULL);
-		if (xr_claude_read(s.d, s.fd, (uint64_t)st.st_size,
+		if (xf_cl_sinks(f, &s, s.d, &s.tk, &s.xm) < 0 ||
+		    xr_claude_read(s.d, s.fd, (uint64_t)st.st_size,
 		                   &s.capped) < 0)
 		{
 			xf_cl_free(&s);
@@ -14474,7 +14869,8 @@ xf_claude(struct xf *f, const struct crec *c, const struct xr_cx *x,
 		s.ino = (uint64_t)st.st_ino;
 		xr_index_sink(s.ix, &k);
 		xr_claude_refs(s.d, &k, s.ino, NULL, NULL);
-		if (xr_claude_read(s.d, s.fd, (uint64_t)st.st_size,
+		if (xf_cl_sinks(f, &s, s.d, &s.tk, &s.xm) < 0 ||
+		    xr_claude_read(s.d, s.fd, (uint64_t)st.st_size,
 		                   &s.capped) < 0)
 		{
 			xf_cl_free(&s);
@@ -14491,6 +14887,11 @@ xf_claude(struct xf *f, const struct crec *c, const struct xr_cx *x,
 read:
 	if (!s.project[0])
 		xr_project_key(s.label, s.project, sizeof s.project);
+	if (!s.d && xf_cl_sinks(f, &s, NULL, &s.tk, &s.xm) < 0)
+	{
+		xf_cl_free(&s);
+		return xr_failed();
+	}
 	xf_cl_answer(t, &s, &a);
 	if (xf_snapshot(f, &a, f->why))
 	{
@@ -14509,6 +14910,11 @@ read:
 	{
 		xr_index_sink(s.ix2, &k);
 		xr_claude_refs(s.d2, &k, s.ino, xf_slice, NULL);
+		if (xf_cl_sinks(f, &s, s.d2, &s.tk2, &s.xm2) < 0)
+		{
+			xf_cl_free(&s);
+			return xr_failed();
+		}
 	}
 	/* the master's connection: its EOF is the session's end, its wake the
 	** ring resuming after the agent left (no slot is no failure here) */
@@ -14524,6 +14930,8 @@ read:
 	xf_watch_file(f, s.fd, dir[0] ? dir : NULL);
 	if (c)
 		xf_watch_rec(f, c->rec);
+	if (f->memory && c && s.fd >= 0)
+		xf_watch_mem(f, s.path);
 	if (x && (size_t)snprintf(dir, sizeof dir, "%s/shell_snapshots",
 	                          x->home) < sizeof dir)
 		xf_watch_dir2(f, dir);
@@ -14534,12 +14942,14 @@ read:
 	rot = XE_ROT;
 	for (;;)
 	{
-		ms = xf_due(f);
+		ms = xf_min(xf_due(f), xf_side_ms(f));
 		/* the full pass runs between events; rot: the first question */
 		ev = xf_wait(f, s.d2 || rot ? 0 : ms) | rot;
 		rot = 0;
 		if (ev & XE_OUT)
 			break;
+		if (ev & XE_MEM)
+			f->mdirty = 1;
 		if (ev & XE_CONN)
 		{
 			/* a wake: re-armed by a header read, then the question;
@@ -14567,6 +14977,12 @@ read:
 			{
 				snprintf(dir, sizeof dir, "%s", kd);
 				xf_watch_file(f, -1, dir);
+			}
+			/* a memory dir made since: watched, and listed */
+			if (f->memory && s.fd >= 0)
+			{
+				f->mdirty = 1;
+				xf_watch_mem(f, s.path);
 			}
 		}
 		if (ev & XE_ROT)
@@ -14631,7 +15047,7 @@ read:
 				break;
 			}
 			took = xr_now_ms() - t0;	/* before the write */
-			if (xf_deltas(f, &a))
+			if (xf_deltas(f, &a) || xf_blocks(f, 0))
 			{
 				rc = f->rc;
 				break;
@@ -14657,10 +15073,16 @@ read:
 				** capped one in one step (3.3 item 1) */
 				xr_claude_free(s.d);
 				xr_index_free(s.ix);
+				xr_tasks_free(s.tk);
+				xm_live_free(s.xm);
 				s.d = s.d2;
 				s.ix = s.ix2;
+				s.tk = s.tk2;
+				s.xm = s.xm2;
 				s.d2 = NULL;
 				s.ix2 = NULL;
+				s.tk2 = NULL;
+				s.xm2 = NULL;
 				s.capped = 0;
 				xr_index_sink(s.ix, &k);
 				xr_claude_refs(s.d, &k, s.ino, NULL, NULL);
@@ -14674,8 +15096,14 @@ read:
 				f->pending = 0;
 			}
 		}
+		if (xf_side_ms(f) == 0 && xf_side(f))
+		{
+			rc = f->rc;
+			break;
+		}
 	}
 	xf_cl_free(&s);
+	f->cl = NULL;
 	return rc;
 }
 
@@ -14781,6 +15209,9 @@ xf_shell(struct xf *f, const char *label, int first)
 	xr_project_key(label, project, sizeof project);
 	if (!b)
 		return xr_failed();
+	f->sid = b->rs.sid;	/* --tasks' header; no agent, no memory */
+	f->agent = "";
+	snprintf(f->cwd, sizeof f->cwd, "%s", label);
 	if ((r = control_connect_path(t->sock)) < 0)
 	{
 		free(b);
@@ -14823,7 +15254,7 @@ xf_shell(struct xf *f, const char *label, int first)
 		long long t0, took;
 		size_t nref = 0;
 		int lost = 0, evict = 0;
-		long due = xf_due(f);
+		long due = xf_min(xf_due(f), xf_side_ms(f));
 
 		/* paused: the master wakes us only when its agent pid changes,
 		** so the Claude count is polled; a change is a reset (LOW-X16) */
@@ -14833,6 +15264,11 @@ xf_shell(struct xf *f, const char *label, int first)
 		ev = xf_wait(f, due);
 		if (ev & XE_OUT)
 			break;
+		if (xf_side_ms(f) == 0 && xf_side(f))
+		{
+			rc = f->rc;
+			break;
+		}
 		if ((ev & XE_CONN) && (r = xf_drain(f)) != 0)
 		{
 			if (r < 0)
@@ -14944,15 +15380,26 @@ out:
 /* --follow (3.3): a History session's snapshot and exit 0; a live one's,
 ** then its deltas until it ends or the reader leaves. */
 static int
-xr_follow(const struct xr_target *t)
+xr_follow(const struct xr_target *t, int tasks, int memory)
 {
 	struct xf f;
+	char cmd[1024];
 	int rc, first = 1;
 
+	/* an ended session: --tasks' and --memory's one-shot blocks after it */
 	if (t->kind == XR_ENDED)
-		return xr_json(t, NULL, 1);
+		return (rc = xr_json(t, NULL, 1)) != 0 ? rc
+		       : tasks && (rc = xr_tasks_q(t)) != 0 ? rc
+		       : memory ? xr_memory(t) : 0;
 	memset(&f, 0, sizeof f);
 	f.t = t;
+	f.tasks = tasks;
+	f.memory = memory;
+	f.cmd[0] = tasks && dch_config_get("tasks_command", cmd, sizeof cmd) > 0
+	           && cmd[0];
+	f.cmd[1] = memory &&
+	           dch_config_get("memory_command", cmd, sizeof cmd) > 0 &&
+	           cmd[0];
 	f.evict_at = -1;
 	f.gap = XF_BATCH_MS;
 	f.q = f.conn = -1;
@@ -14984,6 +15431,7 @@ xr_follow(const struct xr_target *t)
 			break;
 		}
 		f.pending = 0;
+		f.cl = NULL;
 		rc = claude ? xf_claude(&f, &c, NULL, label)
 		     : codex ? xf_claude(&f, NULL, &x, label)
 		     : xf_shell(&f, label, first);
@@ -14996,6 +15444,11 @@ xr_follow(const struct xr_target *t)
 	dch_trace("xray follow: end rc=%d woke=%lu deadlines=%lu", rc, f.woke,
 	          f.timed);
 	xr_sent_free(f.sent);
+	for (first = 0; first < 2; first++)
+	{
+		free(f.blk[first]);
+		free(f.cmdout[first]);
+	}
 	return rc;
 }
 
@@ -15227,18 +15680,19 @@ xray_main(int argc, char **argv)
 		        : "--follow");
 		return 2;
 	}
-	if (tasks && (ref || search || chapter || clear || follow))
+	/* --follow carries --tasks and --memory, either or both (#446) */
+	if (tasks && (ref || search || chapter || clear))
 	{
 		fprintf(stderr, "dch: bad usage: --tasks and %s\n",
 		        ref ? "--ref" : search ? "--search" : chapter ? "--chapter"
-		        : clear ? "--clear" : "--follow");
+		        : "--clear");
 		return 2;
 	}
-	if (memory && (ref || chapter || clear || follow || search || tasks))
+	if (memory && (ref || chapter || clear || search || (tasks && !follow)))
 	{
 		fprintf(stderr, "dch: bad usage: --memory and %s\n",
 		        ref ? "--ref" : chapter ? "--chapter" : clear ? "--clear"
-		        : follow ? "--follow" : search ? "--search" : "--tasks");
+		        : search ? "--search" : "--tasks");
 		return 2;
 	}
 	if (follow && (ref || clear))
@@ -15399,7 +15853,7 @@ xray_main(int argc, char **argv)
 	nr = history_load(&r);
 	rc = xr_resolve(n, r, nr, clear, &t);
 	if (rc == 0)
-		rc = clear ? xr_clear(&t) : follow ? xr_follow(&t)
+		rc = clear ? xr_clear(&t) : follow ? xr_follow(&t, tasks, memory)
 		     : chapter ? xr_chapter(&t, chapter)
 		     : tasks ? xr_tasks_q(&t)
 		     : memory ? xr_memory(&t)

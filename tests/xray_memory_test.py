@@ -417,7 +417,7 @@ def test_shell_and_usage():
           done == {"done": True, "count": 0, "dropped": 0}, (rc, rows, err))
     for a, why in ((["--memory"], "no --json"),
                    (["--memory", "--memory", "--json"], "twice"),
-                   (["--memory", "--follow", "--json"], "--follow"),
+                   (["--memory", "--tasks", "--json"], "--tasks"),
                    (["--memory", "--search", "abc", "--json"], "--search"),
                    (["--memory", "--chapter", "f1:0", "--json"],
                     "--chapter"),
@@ -565,9 +565,21 @@ def test_remote():
               (rem.returncode, rem.stdout) == (0, loc.stdout),
               (loc.returncode, loc.stderr[:200], rem.returncode,
                rem.stdout[:300], rem.stderr[:300]))
-        r = run("--xray", "srv:xa", "--memory", "--follow", "--json",
+        # #446: --follow carries --memory over the wire too (a History
+        # record: its snapshot, the memory block, exit 0)
+        loc = run("--xray", "xa", "--memory", "--follow", "--json",
+                  env=senv)
+        rem = run("--xray", "srv:xa", "--memory", "--follow", "--json",
+                  env=cenv, timeout=60)
+        check("a peer's --memory --follow answers as the host's own dch",
+              loc.returncode == 0 and b'"snapshot"' in loc.stdout and
+              b'"memory"' in loc.stdout and
+              (rem.returncode, rem.stdout) == (0, loc.stdout),
+              (loc.returncode, loc.stderr[:200], rem.returncode,
+               rem.stdout[:300], rem.stderr[:300]))
+        r = run("--xray", "srv:xa", "--memory", "--tasks", "--json",
                 env=cenv)
-        check("a peer's --memory --follow: bad usage, never sent",
+        check("a peer's --memory --tasks: bad usage, never sent",
               r.returncode == 2, (r.returncode, r.stderr))
     finally:
         if sp.poll() is None:

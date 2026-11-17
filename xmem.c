@@ -44,6 +44,7 @@ struct xm_set
 	int dfd;			/* memdir's, else -1 */
 	struct xm_row **byp;		/* the rows by path, while the scan runs */
 	unsigned long long seq;
+	struct xm_live *live;		/* --follow's: touches kept by path */
 };
 
 /* ---- the parsers --------------------------------------------------------- */
@@ -625,6 +626,81 @@ xm_bypath(const void *a, const void *b)
 	              (*(struct xm_row *const *)b)->path);
 }
 
+/* --follow --memory (#446): every touch of a .md path, by path, so a row
+** listed later (a memory written before the directory shows it) still gets
+** its session and chapter */
+struct xm_tch
+{
+	char *path;
+	int how;
+	unsigned long long seq;
+	char chapter[48];
+};
+
+struct xm_live
+{
+	struct xm_set s;
+	struct xm_tch *t;		/* sorted by path */
+	size_t tn, tcap;
+	unsigned long touched;
+	char *agent, *cfg, *path, *cwd;
+};
+
+/* shortcut: only .md paths (every row's is) and the first XM_TOUCHES of
+** them are kept; upgrade if a row's file can be named otherwise */
+static void
+xm_ltouch(struct xm_live *l, const char *p, int how, unsigned long long seq,
+          const char *chapter)
+{
+	size_t n = strlen(p), lo = 0, hi = l->tn, m;
+	struct xm_tch *v;
+	int c = 1;
+
+	if (n < 3 || strcmp(p + n - 3, ".md"))
+		return;
+	while (lo < hi)
+	{
+		m = lo + (hi - lo) / 2;
+		if (!(c = strcmp(l->t[m].path, p)))
+		{
+			lo = m;
+			break;
+		}
+		if (c < 0)
+			lo = m + 1;
+		else
+			hi = m;
+	}
+	if (c)
+	{
+		if (l->tn >= XM_TOUCHES)
+			return;
+		if (l->tn == l->tcap)
+		{
+			size_t cap = l->tcap ? l->tcap * 2 : 64;
+
+			if (!(v = realloc(l->t, cap * sizeof *v)))
+				return;
+			l->t = v;
+			l->tcap = cap;
+		}
+		memmove(&l->t[lo + 1], &l->t[lo], (l->tn - lo) * sizeof *l->t);
+		memset(&l->t[lo], 0, sizeof *l->t);
+		if (!(l->t[lo].path = strdup(p)))
+		{
+			memmove(&l->t[lo], &l->t[lo + 1], (l->tn - lo) * sizeof *l->t);
+			return;
+		}
+		l->tn++;
+	}
+	if (how < l->t[lo].how)
+		return;
+	l->t[lo].how = how;
+	l->t[lo].seq = seq;
+	snprintf(l->t[lo].chapter, sizeof l->t[lo].chapter, "%s", chapter);
+	l->touched++;
+}
+
 static void
 xm_touch(struct xm_set *s, const char *path, size_t n, int how,
          const char *chapter)
@@ -636,6 +712,11 @@ xm_touch(struct xm_set *s, const char *path, size_t n, int how,
 		return;
 	memcpy(p, path, n);
 	p[n] = '\0';
+	if (s->live)
+	{
+		xm_ltouch(s->live, p, how, s->seq, chapter);
+		return;
+	}
 	key.path = p;
 	if (!(hit = bsearch(&kp, s->byp, s->n, sizeof *s->byp, xm_bypath)) ||
 	    how < (r = *hit)->sess)
@@ -711,7 +792,8 @@ xm_shell(struct xm_set *s, const char *t, size_t n, const char *chapter)
 	** followed by a terminator is named. Length x log rows, not rows x
 	** length (#350) */
 	for (i = 0; i < n; i++)
-		for (lo = 0, hi = t[i] == '/' ? s->n : 0, pl = 0; lo < hi; pl++)
+		for (lo = 0, hi = t[i] == '/' && s->byp ? s->n : 0, pl = 0;
+		     lo < hi; pl++)
 		{
 			for (; lo < hi && !s->byp[lo]->path[pl]; lo++)
 				if ((size_t)(s->byp[lo] - s->v) >= s->nmem &&
@@ -874,6 +956,21 @@ out:
 	free(b);
 }
 
+/* s->byp: the rows by path again (none: NULL, no row matched by path) */
+static int
+xm_bypaths(struct xm_set *s)
+{
+	size_t k;
+
+	free(s->byp);
+	if (!(s->byp = malloc((s->n ? s->n : 1) * sizeof *s->byp)))
+		return -1;
+	for (k = 0; k < s->n; k++)
+		s->byp[k] = &s->v[k];
+	qsort(s->byp, s->n, sizeof *s->byp, xm_bypath);
+	return 0;
+}
+
 /* the transcript decoded for the rows' touches: 1 when its read range may
 ** have dropped records (or it could not be read), else 0 */
 static int
@@ -881,14 +978,10 @@ xm_scan(struct xm_set *s, const struct xm_req *q)
 {
 	struct xr_chapters ch = {0};
 	struct xr_claude *d;
-	size_t k;
 	int fd, capped = 0, rc;
 
-	if (!(s->byp = malloc(s->n * sizeof *s->byp)))
+	if (xm_bypaths(s) < 0)
 		return 1;
-	for (k = 0; k < s->n; k++)
-		s->byp[k] = &s->v[k];
-	qsort(s->byp, s->n, sizeof *s->byp, xm_bypath);
 	if ((fd = xr_seam_open(q->path, q->st)) < 0)
 		return 1;
 	if (!(d = xr_claude_new()))
@@ -1059,28 +1152,29 @@ xm_row_line(FILE *f, struct xm_set *s, struct xm_row *r)
 	return rc;
 }
 
-int
-xm_print(FILE *f, const struct xm_req *q)
+/* the rows: a Claude's memory directory, then the instruction files */
+static void
+xm_rows(struct xm_set *s, const struct xm_req *q)
 {
-	struct xm_set s;
-	size_t k, cnt = 0;
-	int partial = 0, rc = 0;
+	if (!q->agent)
+		return;
+	if (q->path && !strcmp(q->agent, "claude"))
+		xm_memdir(s, q->path);
+	s->nmem = s->n;
+	xm_instrs(s, q);
+}
 
-	memset(&s, 0, sizeof s);
-	s.dfd = -1;
-	if (q->agent)
-	{
-		if (q->path && !strcmp(q->agent, "claude"))
-			xm_memdir(&s, q->path);
-		s.nmem = s.n;
-		xm_instrs(&s, q);
-	}
-	if (s.n && q->path)
-		partial = xm_scan(&s, q);
-	if (s.nmem)
-		qsort(s.v, s.nmem, sizeof *s.v, xm_order);
+/* the header, the rows in their order, the done line */
+static int
+xm_emit(FILE *f, struct xm_set *s, const struct xm_req *q, int partial)
+{
+	size_t k, cnt = 0;
+	int rc = 0;
+
+	if (s->nmem)
+		qsort(s->v, s->nmem, sizeof *s->v, xm_order);
 	fprintf(f, "{\"schema\":1,\"source\":\"%s\",\"title\":null,"
-	        "\"partial\":%s", s.n ? q->agent : "none",
+	        "\"partial\":%s", s->n ? q->agent : "none",
 	        partial ? "true" : "false");
 	if (q->warn && q->warn[0])
 	{
@@ -1088,18 +1182,146 @@ xm_print(FILE *f, const struct xm_req *q)
 		xr_put_str(f, q->warn);
 	}
 	fputs("}\n", f);
-	for (k = 0; k < s.n && k < XM_ROWS && rc == 0; k++, cnt++)
-		rc = xm_row_line(f, &s, &s.v[k]);
+	for (k = 0; k < s->n && k < XM_ROWS && rc == 0; k++, cnt++)
+		rc = xm_row_line(f, s, &s->v[k]);
 	if (rc == 0)
 		fprintf(f, "{\"done\":true,\"count\":%zu,\"dropped\":%zu}\n", cnt,
-		        s.n - cnt);
+		        s->n - cnt);
 	if (fflush(f) != 0 || ferror(f))
 		rc = -1;
-	for (k = 0; k < s.n; k++)
-		xm_free_row(&s.v[k]);
-	free(s.v);
-	free(s.byp);
-	if (s.dfd >= 0)
-		close(s.dfd);
+	return rc;
+}
+
+/* the rows gone; the touches' count (seq) and live kept */
+static void
+xm_clear(struct xm_set *s)
+{
+	size_t k;
+
+	for (k = 0; k < s->n; k++)
+		xm_free_row(&s->v[k]);
+	free(s->v);
+	free(s->byp);
+	if (s->dfd >= 0)
+		close(s->dfd);
+	s->v = NULL;
+	s->byp = NULL;
+	s->n = s->cap = s->nmem = 0;
+	s->dfd = -1;
+	s->memdir[0] = '\0';
+}
+
+int
+xm_print(FILE *f, const struct xm_req *q)
+{
+	struct xm_set s;
+	int partial = 0, rc;
+
+	memset(&s, 0, sizeof s);
+	s.dfd = -1;
+	xm_rows(&s, q);
+	if (s.n && q->path)
+		partial = xm_scan(&s, q);
+	rc = xm_emit(f, &s, q, partial);
+	xm_clear(&s);
+	return rc;
+}
+
+/* ---- --follow --memory (#446) -------------------------------------------- */
+
+static void
+xm_live_rows(struct xm_live *l)
+{
+	struct xm_req q = { l->agent, l->cfg, l->path, NULL, l->cwd, NULL };
+
+	xm_clear(&l->s);
+	xm_rows(&l->s, &q);
+	(void)xm_bypaths(&l->s);	/* none: no instruction row by a shell */
+}
+
+struct xm_live *
+xm_live_new(const struct xm_req *q)
+{
+	struct xm_live *l = calloc(1, sizeof *l);
+
+	if (!l)
+		return NULL;
+	l->s.dfd = -1;
+	l->s.live = l;
+	if ((q->agent && !(l->agent = strdup(q->agent))) ||
+	    !(l->cfg = strdup(q->cfg ? q->cfg : "")) ||
+	    (q->path && !(l->path = strdup(q->path))) ||
+	    !(l->cwd = strdup(q->cwd ? q->cwd : "")))
+	{
+		xm_live_free(l);
+		return NULL;
+	}
+	xm_live_rows(l);
+	return l;
+}
+
+void
+xm_live_free(struct xm_live *l)
+{
+	size_t k;
+
+	if (!l)
+		return;
+	xm_clear(&l->s);
+	for (k = 0; k < l->tn; k++)
+		free(l->t[k].path);
+	free(l->t);
+	free(l->agent);
+	free(l->cfg);
+	free(l->path);
+	free(l->cwd);
+	free(l);
+}
+
+void
+xm_live_attach(struct xm_live *l, struct xr_claude *d, uint64_t ino)
+{
+	xr_claude_calls(d, xm_call, &l->s, ino);
+}
+
+unsigned long
+xm_live_touched(const struct xm_live *l)
+{
+	return l ? l->touched : 0;
+}
+
+static int
+xm_tchpath(const void *k, const void *e)
+{
+	return strcmp(k, ((const struct xm_tch *)e)->path);
+}
+
+int
+xm_live_print(FILE *f, struct xm_live *l, int partial, const char *warn)
+{
+	struct xm_req q = { l ? l->agent : NULL, "", NULL, NULL, "", warn };
+	const struct xm_tch *h;
+	struct xm_set none;
+	size_t k;
+	int rc;
+
+	if (!l)
+	{
+		memset(&none, 0, sizeof none);
+		none.dfd = -1;
+		return xm_emit(f, &none, &q, 0);
+	}
+	xm_live_rows(l);
+	for (k = 0; k < l->s.n; k++)
+		if (l->tn && (h = bsearch(l->s.v[k].path, l->t, l->tn, sizeof *l->t,
+		                          xm_tchpath)))
+		{
+			l->s.v[k].sess = h->how;
+			l->s.v[k].seq = h->seq;
+			snprintf(l->s.v[k].chapter, sizeof l->s.v[k].chapter, "%s",
+			         h->chapter);
+		}
+	rc = xm_emit(f, &l->s, &q, partial && l->s.n);
+	(void)xm_bypaths(&l->s);	/* xm_emit's order moved the rows */
 	return rc;
 }

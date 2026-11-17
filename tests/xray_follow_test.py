@@ -19,9 +19,9 @@ class Follow:
     """`dch --xray <n> --follow --json`, its lines read off as they come,
     each with its arrival time."""
 
-    def __init__(self, n, env=None):
-        self.p = subprocess.Popen([DCH, "--xray", n, "--follow", "--json"],
-                                  stdout=subprocess.PIPE,
+    def __init__(self, n, env=None, extra=()):
+        self.p = subprocess.Popen([DCH, "--xray", n, "--follow", "--json"] +
+                                  list(extra), stdout=subprocess.PIPE,
                                   stderr=subprocess.PIPE, env=env or ENV)
         self.got = []
         self.th = threading.Thread(target=self.run, daemon=True)
@@ -316,6 +316,249 @@ def test_follow_claude():
     finally:
         if fl:
             fl.stop()
+        dch("-k", n)
+
+
+def lines(*a, env=None):
+    r = dch("--xray", *a, env=env)
+    return r.returncode, [json.loads(l) for l in r.stdout.splitlines()], \
+        r.stderr
+
+
+def blocks(objs):
+    """A --follow --tasks --memory stream's state: the blocks after each
+    snapshot, then the task and memory deltas applied by id (#446)."""
+    tk, mem, cur, hdr = {}, {}, None, {}
+    for o in objs:
+        if "snapshot" in o or "reset" in o:
+            cur = None
+        elif "schema" in o and "source" in o:
+            cur = "task" if "session" in o else "memory"
+            hdr[cur] = o
+            (tk if cur == "task" else mem).clear()
+        elif "done" in o:
+            cur = None
+        elif "task" in o or "memory" in o:
+            k = "task" if "task" in o else "memory"
+            d = tk if k == "task" else mem
+            if o[k].get("gone"):
+                d.pop(o[k]["id"], None)
+            else:
+                d[o[k]["id"]] = o[k]
+    return hdr, tk, mem
+
+
+def test_follow_tasks_memory():
+    """--follow --tasks --memory (#446): after the snapshot the one-shot
+    --tasks and --memory blocks, then a task's or a memory's whole row when
+    it moves, a gone line for a memory removed; a reset sends all again; a
+    tasks_command's answer is a whole block again when it moves."""
+    n = "xc-ftm"
+    bindir = os.path.join(T, "bin")
+    fdir = os.path.join(T, "fake")
+    proj = os.path.join(T, "fproj-tm")
+    for d in (bindir, fdir, proj):
+        os.makedirs(d, exist_ok=True)
+    shutil.copy(os.path.join(HERE, "fake_claude.py"),
+                os.path.join(bindir, "claude"))
+    os.chmod(os.path.join(bindir, "claude"), 0o755)
+    env = dict(ENV, PATH=bindir + ":" + ENV.get("PATH", "/usr/bin:/bin"),
+               FAKE_CLAUDE_DIR=fdir)
+    sdir = os.path.join(HOME, ".claude", "sessions")
+    had = set(os.listdir(sdir)) if os.path.isdir(sdir) else set()
+    r = subprocess.run([DCH, "--spawn", n, "--size", "80x24", "--cwd", proj,
+                        "claude"], capture_output=True, text=True, timeout=30,
+                       env=env)
+    check("tasks+memory: claude spawned", r.returncode == 0, r.stderr)
+    fl = cf = None
+    use = lambda i, name, inp: {"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "id": i, "name": name, "input": inp}]}}
+    made = lambda i, tid: {"type": "user",
+                           "toolUseResult": {"task": {"id": tid}},
+                           "message": {"content": [{
+                               "type": "tool_result", "tool_use_id": i,
+                               "content": "ok"}]}}
+    try:
+        rec = wait_for(lambda: [f for f in os.listdir(sdir)
+                                if f.endswith(".json") and f not in had]
+                       if os.path.isdir(sdir) else None, 10)
+        sid = json.load(open(os.path.join(sdir, rec[0])))["sessionId"]
+        pdir = os.path.join(HOME, ".claude", "projects", key(proj))
+        mdir = os.path.join(pdir, "memory")
+        os.makedirs(mdir, exist_ok=True)
+        with open(os.path.join(mdir, "a.md"), "w") as f:
+            f.write("---\nname: Alpha\ndescription: the first\n---\nbody a\n")
+        tp = os.path.join(pdir, sid + ".jsonl")
+
+        def put(objs, mode="a"):
+            with open(tp, mode) as f:
+                f.write("".join(json.dumps(o) + "\n" for o in objs))
+
+        first = [{"type": "user", "cwd": proj,
+                  "message": {"content": "plan it #31"}},
+                 use("u1", "TaskCreate", {"subject": "First task",
+                                          "description": ""}),
+                 made("u1", "1")]
+        put(first, "w")
+        wait_for(lambda: (xray(n, "--json")[1] or {}).get("corpus") ==
+                 "claude", 10)
+        _, one, _ = xray(n, "--json")
+        _, tk1, _ = lines(n, "--tasks", "--json")
+        _, mm1, _ = lines(n, "--memory", "--json")
+        fl = Follow(n, extra=["--tasks", "--memory"])
+        fl.wait(lambda o: "done" in o and
+                sum("done" in x for x in fl.objs()) >= 2)
+        got = fl.objs()
+        check("tasks+memory: --follow takes --tasks and --memory (no "
+              "exit 2); the snapshot, then the one-shot --tasks lines, "
+              "then the one-shot --memory lines", fl.p.poll() is None and
+              got[:1] == [{"schema": 1, "snapshot": one}] and
+              got[1:1 + len(tk1)] == tk1 and
+              got[1 + len(tk1):1 + len(tk1) + len(mm1)] == mm1 and
+              len(got) == 1 + len(tk1) + len(mm1) and
+              [t["task"]["id"] for t in tk1 if "task" in t] == ["1"] and
+              [m["memory"]["id"] for m in mm1 if "memory" in m] == ["a"],
+              (got, tk1, mm1))
+
+        # a TaskUpdate and a TaskCreate: each task's whole row
+        time.sleep(0.4)
+        k0 = len(fl.got)
+        put([{"type": "user", "message": {"content": "go on #32"}},
+             use("u2", "TaskUpdate", {"taskId": "1",
+                                      "status": "in_progress"}),
+             use("u3", "TaskCreate", {"subject": "Second task",
+                                      "description": ""}),
+             made("u3", "2")])
+        fl.wait(lambda o: "task" in o and o["task"]["id"] == "2", frm=k0)
+        fl.wait(lambda o: "task" in o and o["task"]["id"] == "1" and
+                o["task"]["label"] == "in_progress", frm=k0)
+        time.sleep(0.4)
+        _, tk2, _ = lines(n, "--tasks", "--json")
+        rows = [o for o in fl.objs(k0) if "task" in o]
+        hdr, st, sm = blocks(fl.objs())
+        check("tasks+memory: a task delta is the task's whole row, keyed "
+              "by id, and the stream's tasks are the one-shot's now",
+              rows and all(o in tk2 for o in rows) and
+              sorted(st) == ["1", "2"] and
+              [st[t["task"]["id"]] for t in tk2 if "task" in t] ==
+              [t["task"] for t in tk2 if "task" in t] and
+              not [o for o in fl.objs(k0) if "memory" in o or
+                   "source" in o], (fl.objs(k0), tk2))
+
+        # a memory added, then one read (its session and chapter), then
+        # one removed: gone
+        time.sleep(0.4)
+        k1 = len(fl.got)
+        with open(os.path.join(mdir, "b.md"), "w") as f:
+            f.write("body b\n")
+        b = fl.wait(lambda o: "memory" in o and o["memory"]["id"] == "b",
+                    frm=k1)
+        check("tasks+memory: a memory file added sends its row",
+              b and b[0]["memory"]["body"] == "body b\n" and
+              not b[0]["memory"].get("gone"), fl.objs(k1))
+        time.sleep(0.4)
+        k2 = len(fl.got)
+        put([use("r1", "Read", {"file_path": os.path.join(mdir, "a.md")})])
+        a = fl.wait(lambda o: "memory" in o and o["memory"]["id"] == "a" and
+                    o["memory"]["session"] == "loaded", frm=k2)
+        _, mm2, _ = lines(n, "--memory", "--json")
+        check("tasks+memory: a Read of a memory sends its row, loaded, as "
+              "the one-shot has it", a and a[-1] in mm2, (fl.objs(k2), mm2))
+        time.sleep(0.4)
+        k3 = len(fl.got)
+        os.unlink(os.path.join(mdir, "b.md"))
+        g = fl.wait(lambda o: "memory" in o and o["memory"].get("gone"),
+                    frm=k3)
+        check("tasks+memory: a memory removed sends a gone line",
+              g and g[0] == {"memory": {"id": "b", "gone": True}},
+              fl.objs(k3))
+        time.sleep(0.4)
+        _, mm3, _ = lines(n, "--memory", "--json")
+        hdr, st, sm = blocks(fl.objs())
+        check("tasks+memory: the stream's memories are the one-shot's now",
+              [sm.get(m["memory"]["id"]) for m in mm3 if "memory" in m] ==
+              [m["memory"] for m in mm3 if "memory" in m] and
+              len(sm) == len([m for m in mm3 if "memory" in m]),
+              (sm, mm3))
+
+        # TodoWrite takes over (the kind used last): rows replaced by
+        # position, one left out is gone; an emptied list leaves an empty
+        # block (no row to diff against is no failure)
+        time.sleep(0.4)
+        k5 = len(fl.got)
+        put([use("w1", "TodoWrite", {"todos": [{
+            "content": "Only todo", "status": "pending",
+            "activeForm": "Doing"}]})])
+        fl.wait(lambda o: "task" in o and o["task"].get("gone"), frm=k5)
+        time.sleep(0.4)
+        tw = [o["task"] for o in fl.objs(k5) if "task" in o]
+        k6 = len(fl.got)
+        put([use("w2", "TodoWrite", {"todos": []})])
+        fl.wait(lambda o: "task" in o and o["task"].get("gone"), frm=k6)
+        time.sleep(0.4)
+        _, tk6, _ = lines(n, "--tasks", "--json")
+        check("tasks+memory: a TodoWrite list replaces the rows (a row left "
+              "out: gone), an emptied one sends a gone line per row, and "
+              "the stream goes on",
+              fl.p.poll() is None and
+              sorted((t["id"], t.get("gone", False), t.get("title"))
+                     for t in tw) ==
+              [("1", False, "Only todo"), ("2", True, None)] and
+              [o for o in fl.objs(k6) if "task" in o] ==
+              [{"task": {"id": "1", "gone": True}}] and
+              not [t for t in tk6 if "task" in t] and
+              blocks(fl.objs())[1] == {}, (tw, fl.objs(k6), tk6))
+
+        # a reset: the snapshot and both blocks again, whole
+        time.sleep(0.4)
+        k4 = len(fl.got)
+        put(first, "w")
+        fl.wait(lambda o: "done" in o and
+                sum("done" in x for x in fl.objs(k4)) >= 2, frm=k4)
+        _, tk4, _ = lines(n, "--tasks", "--json")
+        _, mm4, _ = lines(n, "--memory", "--json")
+        got = fl.objs(k4)
+        check("tasks+memory: a reset sends the snapshot, then both blocks "
+              "whole again", fl.kinds(k4)[:2] == ["reset", "snapshot"] and
+              got[2:] == tk4 + mm4, (got, tk4, mm4))
+
+        # the one-shot forms keep their exclusions
+        r = dch("--xray", n, "--tasks", "--memory", "--json")
+        check("tasks+memory: without --follow, --tasks and --memory still "
+              "exclude each other (exit 2)", r.returncode == 2 and
+              r.stderr == "dch: bad usage: --memory and --tasks\n",
+              (r.returncode, r.stderr))
+
+        # a tasks_command: its answer whole, again when it moves (5 s)
+        cfg = os.path.join(T, "config-tm")
+        rows = os.path.join(T, "tm-rows")
+        sh = os.path.join(T, "tm-cmd.sh")
+        with open(sh, "w") as f:
+            f.write("#!/bin/sh\nexec cat %s\n" % rows)
+        os.chmod(sh, 0o755)
+        with open(cfg, "w") as f:
+            f.write("tasks_command = %s\n" % sh)
+        with open(rows, "w") as f:
+            f.write(json.dumps({"id": "c1", "title": "From the command"}) +
+                    "\n")
+        cenv = dict(ENV, DCH_CONFIG=cfg)
+        _, tc1, _ = lines(n, "--tasks", "--json", env=cenv)
+        cf = Follow(n, cenv, ["--tasks"])
+        cf.wait(lambda o: "done" in o)
+        check("tasks+memory: a tasks_command's answer is the tasks block",
+              cf.objs()[1:] == tc1 and tc1[0]["source"] == "command",
+              (cf.objs(), tc1))
+        k5 = len(cf.got)
+        with open(rows, "w") as f:
+            f.write(json.dumps({"id": "c2", "title": "Moved"}) + "\n")
+        cf.wait(lambda o: "done" in o, 9, frm=k5)
+        _, tc2, _ = lines(n, "--tasks", "--json", env=cenv)
+        check("tasks+memory: the command's moved answer comes whole again",
+              cf.objs(k5) == tc2, (cf.objs(k5), tc2))
+    finally:
+        for x in (fl, cf):
+            if x:
+                x.stop()
         dch("-k", n)
 
 
@@ -1109,6 +1352,7 @@ def test_screen_resize():
 def main():
     try:
         test_follow_claude()
+        test_follow_tasks_memory()
         test_follow_late()
         test_follow_cap()
         test_follow_shell()
