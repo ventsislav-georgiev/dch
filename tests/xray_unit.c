@@ -5722,9 +5722,10 @@ t_search(void)
 		free(b);
 		xr_search_free(s);
 	}
-	/* #457: 60 blocks, a hit each: the newest 50 blocks, more */
+	/* #457: 60 blocks of 2 hits (the command, its output): the newest 50
+	** blocks' 100 hits, more */
 	{
-		static struct xr_rec r[60 * 4];
+		static struct xr_rec r[60 * 7];
 		static char rows[60][8];
 		struct xr_chapters c;
 		struct xr_shell sh;
@@ -5736,11 +5737,15 @@ t_search(void)
 		for (k = 0; k < 60; k++)
 		{
 			snprintf(rows[k], sizeof rows[0], "row %02zu", k);
+			r[rn].kind = RING_K_MARK, r[rn++].text = "A";
+			r[rn].kind = RING_K_PROMPT, r[rn++].text = "$";
 			r[rn].kind = RING_K_MARK, r[rn++].text = "B";
-			r[rn].kind = RING_K_INPUT, r[rn++].text = "cmd";
+			r[rn].kind = RING_K_INPUT, r[rn++].text = "cmd row";
 			r[rn].kind = RING_K_MARK, r[rn].flags = RING_F_INPUT;
 			r[rn++].text = "C";
 			r[rn].kind = RING_K_OUTPUT, r[rn++].text = rows[k];
+			r[rn].kind = RING_K_MARK, r[rn].flags = RING_F_EXIT;
+			r[rn++].text = "D;0";
 		}
 		for (k = 0; k < rn; k++)
 		{
@@ -5765,16 +5770,17 @@ t_search(void)
 				fclose(f);
 			}
 		}
-		CHECK("search: shell: 60 blocks of a hit each: the newest 50 "
-		      "(row 59 down to 10), newest first, more (#457)",
-		      b && count_of(b, "\"who\":") == 50 &&
+		CHECK("search: shell: 60 blocks of 2 hits: the newest 50 blocks' "
+		      "100 (row 59 down to 10), newest first, more (#457)",
+		      b && count_of(b, "\"who\":") == 100 &&
+		      count_of(b, "\"snippet\":\"cmd row\"") == 50 &&
 		      strstr(b, "\"snippet\":\"row 59\"") &&
 		      strstr(b, "\"snippet\":\"row 10\"") &&
 		      !strstr(b, "\"snippet\":\"row 09\"") &&
 		      strstr(b, "\"snippet\":\"row 59\"") <
 		      strstr(b, "\"snippet\":\"row 10\"") &&
 		      strstr(b, "\"more\":true"));
-		if (b && count_of(b, "\"who\":") != 50)
+		if (b && count_of(b, "\"who\":") != 100)
 			fprintf(stderr, "  got: %.600s\n", b);
 		free(b);
 		xr_search_free(s);

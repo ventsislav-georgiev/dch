@@ -1198,6 +1198,7 @@ def fixture_groups():
             ("anything else open", "PAY-219 can close after shadow mode is "
              "off."),
             ("one more unrelated", "ok"))
+    os.makedirs(os.path.dirname(tl(GSID)), exist_ok=True)
     record("xv-gr", GSID, sum((turn(p, "2026-11-16T15:%02d:00Z" % i,
                                     at(say(r), "2026-11-16T15:%02d:30Z" % i))
                                for i, (p, r) in enumerate(said)), []))
