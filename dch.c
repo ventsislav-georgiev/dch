@@ -10312,7 +10312,7 @@ xv_spawn(int fd, int ac, char **av, int *out, int *err)
 	}
 	fflush(stdout);
 	fflush(stderr);
-	/* blocked over the fork: a SIGTERM from xv_stop before the resets
+	/* blocked over the fork: a SIGTSTP (#416, on_sigtstp with the tty armed) or a SIGTERM from xv_stop before the resets
 	** would run picker_sigint here, which restores the view's terminal
 	** and xv_kills its siblings (QA 1.58.0 MED-V4); after them, one
 	** pending kills the child by its default action */
@@ -10320,6 +10320,8 @@ xv_spawn(int fd, int ac, char **av, int *out, int *err)
 	sigaddset(&s, SIGINT);
 	sigaddset(&s, SIGTERM);
 	sigaddset(&s, SIGHUP);
+	sigaddset(&s, SIGTSTP);
+	sigaddset(&s, SIGCONT);
 	sigprocmask(SIG_BLOCK, &s, &o);
 	if ((pid = fork()) == 0)
 	{

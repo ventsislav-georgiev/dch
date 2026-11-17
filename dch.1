@@ -822,6 +822,11 @@ brings the session or the picker back raw.
 A
 .B SIGSTOP
 cannot be caught: under dash the terminal stays raw until dch continues.
+Known macOS limit: a process that stops itself inside a signal handler while
+SIGCONT is caught can wedge in the kernel.
+If \fBq\fR then does not close the X-ray view, kill the whole job, not only the
+client (\fBkill \-9 \-<pgid>\fR, or the shell's \fBkill \-9 %1\fR), and attach
+again; the session is untouched.
 Setting it to
 .B 0
 disables switching and makes detach instant again.

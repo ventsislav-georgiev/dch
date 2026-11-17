@@ -423,7 +423,12 @@ starts, or `kill -TSTP`) puts your shell's terminal modes back before dch
 stops, so a shell that does not restore them itself (dash, `/bin/sh` on Debian
 and Ubuntu) is not left raw; `fg` brings the session or the picker back raw. A
 `SIGSTOP` cannot be caught: under dash the terminal stays raw until dch
-continues.
+continues. Known macOS limit: a process that stops itself inside a signal
+handler while SIGCONT is caught can wedge in the kernel (seen without dch). If
+`q` then does not close the X-ray view, kill the whole job, not only the client
+(`kill -9 -<pgid>` of its process group, or the shell's `kill -9 %1`), and
+attach again: a bare `kill -9` of the client leaves the view's query child
+orphaned and stopped. The session is untouched.
 
 `detach_key = switch` in the [config file](#config-file) swaps the two: one
 press opens the picker, two detach. With `DCH_DOUBLE_TAP_MS=0` one press then
