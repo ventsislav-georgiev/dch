@@ -553,15 +553,19 @@ def test_hostile():
               "UTF-8, NUL) still gives its o/r#41 to the group",
               v.wait(b"on screen now", start=mark), v.out[mark:])
         mark = len(v.out)
-        v.key(b"/OQ-32\x12", 2.0)
+        v.key(b"/OQ-32\x12", 0.05)
+        said = v.wait(b"the host's dch takes no such ref (an older dch?): "
+                      b"dch: not a ref", start=mark)
+        v.pump(0.5)  # room to exit, were it to
         check("hostile, an older host whose dch takes no such ref (#263): ^R "
-              "says its line, the view stays",
-              v.wait(b"the host's dch takes no such ref (an older dch?): "
-                     b"dch: not a ref", start=mark) and v.reap() is None,
+              "says its line, the view stays", said and v.reap() is None,
               v.out[mark:])
         v.key(b"\033", 0.5)
         v.key(b"\033", 0.5)
-        v.pump(2.0)  # the next reads fail
+        # the next reads fail: one served since, then room to draw it
+        r0 = max(h.reads, 1)
+        until(lambda: v.pump(0.1) or h.reads > r0, 10)
+        v.pump(0.5)
         text = shown(v, 0)
         check("hostile #294: a later failed read takes the group away and "
               "its stderr is never drawn", "on screen now" not in text and

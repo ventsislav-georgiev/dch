@@ -282,7 +282,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.85.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.86.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -427,7 +427,8 @@ continues. Known macOS limit: a process that stops itself inside a signal
 handler while SIGCONT is caught can wedge in the kernel (seen without dch). If
 `q` then does not close the X-ray view, recover from another terminal: find
 the process group with `ps -o pgid= -p <pid of the dch client>` (or
-`ps -o pid,pgid,command | grep 'dch -a'`) and `kill -9 -<pgid>` it (closing
+`ps -o pid,pgid,stat,command -t <tty>`, the wedged terminal's tty such as
+`ttys003`, which lists every attach form) and `kill -9 -<pgid>` it (closing
 the terminal window also recovers; the job holds the terminal raw, so ^Z, ^C
 and ^\ do nothing, and if the shell still responds, `kill -9 %1` works too).
 Kill the whole group, not only the client, then attach again: a bare

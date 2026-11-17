@@ -481,7 +481,10 @@ def test_card_zwj():
             "a" * 31 + "\U0001F1E7\U0001F1EC" * 5,
             "a" * 30 + "\U0001F44D\U0001F3FD" * 5,
             "\U0001F469" + "\u200d\U0001F469" * 60,
-            "chain\U0001F469" + "\u200d\U0001F469" * 39]):
+            "chain\U0001F469" + "\u200d\U0001F469" * 39,
+            "alias " + "\U0001F469" + "\u200d\U0001F469" * 19,
+            # 12 cells in a space of 11 (S < W < 2S): the VY1 blank
+            "alias " + "\U0001F469" + "\u200d\U0001F469" * 5]):
         config(script("zwj.py", "import json\nprint(json.dumps({'title': '"
                       + title + "', 'status': 'open'}))\n"))
         v = Pty([DCH, "--xray", "xv-cl"], 30, 41)
@@ -516,6 +519,13 @@ def test_card_zwj():
                 check("#429 VX2: text, then a long chain: more than one "
                       "character of it", t.strip().startswith("chain") and
                       t.count("\U0001F469") > 1, r)
+            if k in (8, 9, 10, 11):
+                # #434 VY1: the drawn cells reach the edge (a wide
+                # character that does not fit may leave one blank)
+                sp = 41 - 2 - 2 - cells("open \u00b7 your define_command")
+                dw = cells(t.strip()) if r else 0
+                check("#434 VY1: row %d: drawn %d cells of %d" % (k, dw, sp),
+                      sp - 1 <= dw <= sp, r)
             v.key(b"q")
         finally:
             v.close()

@@ -73,6 +73,19 @@ t_title(void)
 	CHECK("title: invalid UTF-8 is U+FFFD",
 	      !strcmp(title("a\xff" "b"), "a\xef\xbf\xbd" "b"));
 	CHECK("title: blank is empty", !strcmp(title(" \n\t "), ""));
+	{
+		char z[400];
+		const char *w = "\xf0\x9f\x91\xa9";	/* woman */
+
+		memset(z, 'x', 118);
+		snprintf(z + 118, sizeof z - 118, "%s\xe2\x80\x8d%s", w, w);
+		CHECK("title: the cap drops a trailing ZWJ (NIT-VY2)",
+		      scalars(title(z)) == 119 && !strstr(title(z), "\xe2\x80\x8d"));
+		memset(z, 'x', 117);
+		snprintf(z + 117, sizeof z - 117, "%s\xe2\x80\x8d\xef\xb8\x8f%s", w, w);
+		CHECK("title: the cap drops a ZWJ and the selector after it",
+		      scalars(title(z)) == 118);
+	}
 	for (k = 0; k < 140; k++)
 		memcpy(big + k * 3, "e\xcc\x81", 3);	/* e + U+0301 */
 	big[420] = '\0';

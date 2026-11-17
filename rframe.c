@@ -1037,8 +1037,24 @@ fail:
 
 char g_ts[PATH_MAX];	/* the tailscale CLI; "" when not found */
 
+/* Each tailscale call's deadline; DCH_TS_MS=<ms> lowers it (tests only).
+** Read on the first call: serve calls it once before it unsets the knob. */
+int
+ts_ms(void)
+{
+	static int ms;
+	const char *e;
+
+	if (!ms)
+	{
+		e = getenv("DCH_TS_MS");
+		ms = e && atoi(e) > 0 && atoi(e) < TS_MS ? atoi(e) : TS_MS;
+	}
+	return ms;
+}
+
 /* `tailscale <a...>` exiting 0, stdout into *out (malloc'd): 0; -2 when it
-** gave no answer in TS_MS (killed), else -1. */
+** gave no answer in ts_ms() (killed), else -1. */
 int
 ts_run(char *a1, char *a2, char *a3, char *a4, char **out, size_t cap)
 {
@@ -1049,12 +1065,12 @@ ts_run(char *a1, char *a2, char *a3, char *a4, char **out, size_t cap)
 	*out = NULL;
 	if (!g_ts[0])
 		return -1;
-	st = rf_run(av, out, NULL, cap, NULL, 0, TS_MS);
+	st = rf_run(av, out, NULL, cap, NULL, 0, ts_ms());
 	if (st < 0 || !WIFEXITED(st) || WEXITSTATUS(st) != 0)
 	{
 		free(*out);
 		*out = NULL;
-		return st < 0 && now_ms() - t0 >= TS_MS ? -2 : -1;
+		return st < 0 && now_ms() - t0 >= ts_ms() ? -2 : -1;
 	}
 	return 0;
 }

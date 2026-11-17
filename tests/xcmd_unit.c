@@ -394,6 +394,14 @@ t_define_417(void)
 	      XCMD_ROW && starts("{\"title\":\"tb\",") &&
 	      line(XCMD_DEFINE, "\x1b[32m \xef\xbb\xbf{\"title\":\"cs\"}", 1) ==
 	      XCMD_ROW && starts("{\"title\":\"cs\","));
+	CHECK("define: blank, BOM, blank, BOM, JSON: JSON; many BOMs too",
+	      line(XCMD_DEFINE, " \xef\xbb\xbf \xef\xbb\xbf{\"title\":\"bb\"}", 1) ==
+	      XCMD_ROW && starts("{\"title\":\"bb\",") &&
+	      line(XCMD_DEFINE, "\xef\xbb\xbf\xef\xbb\xbf\xef\xbb\xbf{\"title\":\"mb\"}", 1) ==
+	      XCMD_ROW && starts("{\"title\":\"mb\","));
+	CHECK("define: BOMs only: blank",
+	      line(XCMD_DEFINE, "\xef\xbb\xbf \xef\xbb\xbf", 1) == XCMD_BLANK &&
+	      line(XCMD_DEFINE, "\xef\xbb\xbf", 0) == XCMD_BLANK);
 	CHECK("define: colour codes round a JSON line: JSON, first or not",
 	      line(XCMD_DEFINE, "\x1b[32m{\"title\":\"g\"}\x1b[0m", 1) ==
 	      XCMD_ROW && starts("{\"title\":\"g\",") &&
