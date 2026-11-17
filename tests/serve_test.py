@@ -39,6 +39,8 @@ Run:  python3 tests/serve_test.py        (uses ./dch)
 import serve_lib as lib
 from serve_lib import *
 
+TS_KNOB = "1500"	# DCH_TS_MS for the whois-stall rows: a stall still runs past it
+
 
 def main():
     L = lib.setup()
@@ -1203,7 +1205,8 @@ def main():
         # --- #378: a whois that timed out refuses that connection only ----
         # (fail closed), never cached: the next connection asks again
         ts()
-        p, port, log = serve()
+        # serve's 3 s per tailscale call lowered to 1.5 s (DCH_TS_MS, tests only)
+        p, port, log = serve(e=dict(benv, DCH_TS_MS=TS_KNOB))
         whois_fail_ok.add(log)
         put("whois.stall", "6")	# the compiled fake sleeps once, past 3 s
         r1 = reply(port)
@@ -1346,9 +1349,9 @@ def main():
         stop(p)
 
         # --- --check-peer and --allow-user -------------------------------
-        def peer(ip, *args):
+        def peer(ip, *args, e=env):
             r = subprocess.run([DCH, "serve", "--check-peer", ip] + list(args),
-                               env=env, capture_output=True, text=True,
+                               env=e, capture_output=True, text=True,
                                timeout=20)
             return r.returncode, r.stdout
 
@@ -1356,7 +1359,7 @@ def main():
               peer("192.168.1.5") == (1, "refuse 192.168.1.5: not an IPv4 "
                                          "address in 100.64.0.0/10\n"))
         put("whois.stall", "6")
-        out = peer("100.100.2.2")
+        out = peer("100.100.2.2", e=dict(env, DCH_TS_MS=TS_KNOB))
         check("--check-peer, whois past 3 s: refused as whois_unavailable "
               "(#388)", out[0] == 1 and "(whois_unavailable)" in out[1]
               and "tailscaled not answering" in out[1])

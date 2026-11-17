@@ -122,6 +122,7 @@ int name_ok(const char *s);
 
 extern char g_ts[];	/* the tailscale CLI, after ts_find; "" none */
 void ts_find(void);
+int ts_ms(void);
 int ts_run(char *a1, char *a2, char *a3, char *a4, char **out, size_t cap);
 
 #endif
