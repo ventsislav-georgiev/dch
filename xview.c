@@ -427,6 +427,8 @@ xv_snipat(const char *s, const char *w)
 {
 	const unsigned char *a, *b;
 
+	if (!strncmp(w, "\xe2\x80\xa6 ", 4))	/* the engine's lead: not text */
+		w += 4;
 	for (; *w && *s; s++)
 	{
 		for (a = (const unsigned char *)s, b = (const unsigned char *)w;
@@ -2798,34 +2800,10 @@ xv_hit1(struct xv *v, int i, int room)
 			pk_pad(pk_w);
 		pk_eol();
 	}
-	/* a snippet cut at both ends of its window (long enough to have been)
-	** is trimmed to whole words, an ellipsis leading: the engine cuts on
-	** a character, and the match stays in what is kept */
-	if (strlen(s) >= XR_SNIPPET - 32)
+	if (!pk_utf && !strncmp(s, "\xe2\x80\xa6", 3))	/* the ASCII ellipsis */
 	{
-		const char *st, *m = s + strlen(s);
-		size_t k = strlen(s);
-
-		for (j = 0; ql && s[j]; j++)
-			if (xv_at(s + j, v->sq))
-			{
-				m = s + j;
-				break;
-			}
-		if (*s != ' ' && (st = memchr(s, ' ', (size_t)(m - s))) != NULL)
-			st++;
-		else
-			st = s;
-		for (j = k; j > (size_t)(m - s) + ql && s[j - 1] != ' '; j--)
-			;
-		if (j > (size_t)(m - s) + ql + 1)
-			k = j - 1;
-		if (st > s || k < strlen(s))
-		{
-			snprintf(sn, sizeof sn, "%s%.*s", st > s ? xv_ell() : "",
-			         (int)(s + k - st), st);
-			s = s0 = sn;
-		}
+		snprintf(sn, sizeof sn, "...%s", s + 3);
+		s = s0 = sn;
 	}
 	for (j = e = 0; s[j] && j < sizeof mk; j++)
 	{

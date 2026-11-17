@@ -1057,7 +1057,11 @@ def fixture_wrap():
            turn("seven", ts % 0, at(say(w7), ts % 0)) +
            turn("wide", ts % 1, at(say(cj), ts % 1)) +
            turn("huge", ts % 2, at(say("lead " + "x" * 200 + " tail"),
-                                   ts % 2)))
+                                   ts % 2)) +
+           turn("early", ts % 3, at(say("Opened PR #412 early on " +
+                                        " ".join("v%06d" % i
+                                                 for i in range(60))),
+                                    ts % 3)))
 
 
 def wrap_rows(v, skip):
@@ -1078,9 +1082,10 @@ def test_wrap():
     v = Pty([DCH, "--xray", "xv-wr"], rows=40, cols=100,
             env={"NO_COLOR": ""})
     try:
-        v.wait(b"Prompts 3")
+        v.wait(b"Prompts 4")
         v.pump(0.3)
         v.key(b"\t", 1.0)
+        v.key(b"j", 0.3)
         shows(v, lambda s: "huge" in head(v))
         v.pump(0.5)
         hx = [t for t in wrap_rows(v, ("huge", "wide"))
@@ -1112,7 +1117,7 @@ def test_wrap():
               (rs, body_rows(v)))
         mark = len(v.out)
         v.key(b"\r", 1.0)
-        v.wait(b"1 of 3", start=mark)
+        v.wait(b"1 of 4", start=mark)
         v.pump(0.5)
         rs = [t for t in wrap_rows(v, ("seven",)) if t.startswith("w0")]
         toks = " ".join(rs).split()
@@ -1132,10 +1137,18 @@ def test_wrap():
         toks = " ".join(sn).split()
         check("#456: Search: the snippet is whole words, a leading "
               "ellipsis, no word cut at its ends",
-              h and re.fullmatch(r"(\u2026|\.\.\.)w\d{6}", toks[0]) and
+              h and re.fullmatch(r"(\u2026|\.\.\.)", toks[0]) and
               all(re.fullmatch(r"w\d{6}", t) for t in toks[1:]) and
               "w000040" in toks,
               (h, rows(v.out)))
+        v.key(b"/\x15#412\r", 0.5)
+        tabbar(v, "Search 1")
+        v.pump(0.5)
+        sn = " ".join(r.strip() for r in rows(v.out).values()
+                      if r.strip().startswith(("Opened", "\u2026", "...")))
+        check("#456: Search: a match in the first words of a long text "
+              "shows its first word, no leading ellipsis",
+              sn.startswith("Opened PR #412 early on v000000"), sn)
         v.key(b"\033", 0.3)
         v.key(b"q", 0.3)
         v.exit()

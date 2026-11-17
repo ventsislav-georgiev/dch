@@ -1749,8 +1749,9 @@ has none),
 .B offset
 the record's byte offset (a shell: its ring seq),
 .B snippet
-about 160 bytes around the match on character boundaries, controls and
-runs of spaces as one space.
+about 160 bytes around the match, cut at word boundaries (the match whole),
+controls and runs of spaces as one space; it starts with an ellipsis (U+2026)
+and a space when the window does not start at the text's start.
 A transcript or rollout is read whole from its end in 1 MiB windows, up to
 1 GiB
 .RB ( why:\(dqbytes\(dq )

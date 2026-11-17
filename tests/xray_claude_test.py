@@ -2203,7 +2203,8 @@ def test_peer():
               [("user", ch[4]["anchor"], hits[0]["snippet"]),
                ("user", ch[2]["anchor"],
                 "Release 1.71 is green the details follow")] and
-              "cc-socks" in hits[0]["snippet"], (rc, s, err))
+              hits[0]["snippet"].startswith("\u2026 ") and
+              "from-name=" in hits[0]["snippet"], (rc, s, err))
         rc, s, err = search("xr-peer", "cc-socks")
         check("peer: --search does not find the socket path of a peer's "
               "record (the typed imitations' text still matches)",

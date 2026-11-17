@@ -1913,8 +1913,10 @@ or with a remote `host:name` the `-` is the plain text `-`, the same error as be
   has none there: a turn past the 3.8 range, a shell row still on the screen
   or outside a block). `offset` is the record's byte offset (a shell: its
   ring seq), `at` its time in seconds or `null`, `tool` the tool's name or
-  `null`, and `snippet` about 160 bytes around the match, cut on character
-  boundaries, controls and runs of spaces as one space.
+  `null`, and `snippet` about 160 bytes around the match, cut at word
+  boundaries (the match whole), controls and runs of spaces as one space; it
+  starts with `"… "` (U+2026, a space) when the window does not start at the
+  text's start.
 - **Reading.** A transcript or a rollout is read from its end in windows
   of 1 MiB, the whole file, within `--ref --full`'s caps: 1 GiB
   (`why: "bytes"`) and 10 s (`why: "time"`); a file that shrinks gives

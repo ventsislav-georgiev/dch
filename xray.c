@@ -11322,8 +11322,9 @@ xr_search_free(struct xr_search *s)
 }
 
 /* The snippet: about XR_SNIPPET bytes of t[0..n) around the match at m, cut
-** on character boundaries, controls and whitespace runs as one space,
-** invalid UTF-8 as U+FFFD. */
+** on character boundaries and at words, "U+2026 space" leading when it
+** starts past the text's start, controls and whitespace runs as one
+** space, invalid UTF-8 as U+FFFD. */
 static char *
 sr_snip(const char *t, size_t n, size_t m, size_t nl)
 {
@@ -11339,8 +11340,31 @@ sr_snip(const char *t, size_t n, size_t m, size_t nl)
 		a++;
 	while (b > m + nl && b < n && ((unsigned char)t[b] & 0xc0) == 0x80)
 		b--;
-	if (!(q = o = malloc((b - a) * 3 + 1)))
+	/* whole words: a window starting mid-word begins after the word's
+	** end, one ending mid-word before it, the match kept whole */
+	if (a > 0 && t[a - 1] > ' ' && t[a] > ' ')
+	{
+		for (i = a; i < m && t[i] > ' '; i++)
+			;
+		for (; i < m && t[i] && (unsigned char)t[i] <= ' '; i++)
+			;
+		if (i < m)
+			a = i;
+	}
+	if (b < n && t[b] > ' ' && t[b - 1] > ' ')
+	{
+		for (i = b; i > m + nl && t[i - 1] > ' '; i--)
+			;
+		if (i > m + nl)
+			b = i;
+	}
+	if (!(q = o = malloc((b - a) * 3 + 6)))
 		return NULL;
+	if (a > 0)
+	{
+		q += u8_put(q, 0x2026);	/* the window starts past the text's */
+		*q++ = ' ';
+	}
 	for (i = a; i < b; i += adv)
 	{
 		uint32_t c = u8_next((const unsigned char *)t + i, b - i, &adv);
