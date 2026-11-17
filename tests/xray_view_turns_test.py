@@ -1060,6 +1060,9 @@ def fixture_wrap():
                                    ts % 2)) +
            turn("early", ts % 3, at(say("Opened PR #412 early on " +
                                         " ".join("v%06d" % i
+                                                 for i in range(60)) +
+                                        " " +
+                                        " ".join("caf\u00e9%04d" % i
                                                  for i in range(60))),
                                     ts % 3)))
 
@@ -1149,6 +1152,19 @@ def test_wrap():
         check("#456: Search: a match in the first words of a long text "
               "shows its first word, no leading ellipsis",
               sn.startswith("Opened PR #412 early on v000000"), sn)
+        # a window that starts inside a word with a non-ASCII letter: the
+        # word test must read bytes unsigned (char is signed on arm64 macOS)
+        v.key("/\x15caf\u00e90030\r".encode(), 0.5)
+        tabbar(v, "Search 1")
+        v.pump(0.5)
+        h = hits(rows(v.out))
+        toks = " ".join(h[0][2] if h else []).split()
+        check("#456: Search: a window starting inside caf\u00e9NNNN words "
+              "begins on a whole word",
+              h and re.fullmatch(r"(\u2026|\.\.\.)", toks[0]) and
+              all(re.fullmatch(r"caf\u00e9\d{4}|v\d{6}", t)
+                  for t in toks[1:]) and "caf\u00e90030" in toks,
+              (h, rows(v.out)))
         v.key(b"\033", 0.3)
         v.key(b"q", 0.3)
         v.exit()

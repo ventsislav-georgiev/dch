@@ -11342,18 +11342,20 @@ sr_snip(const char *t, size_t n, size_t m, size_t nl)
 		b--;
 	/* whole words: a window starting mid-word begins after the word's
 	** end, one ending mid-word before it, the match kept whole */
-	if (a > 0 && t[a - 1] > ' ' && t[a] > ' ')
+	if (a > 0 && (unsigned char)t[a - 1] > ' ' &&
+	    (unsigned char)t[a] > ' ')
 	{
-		for (i = a; i < m && t[i] > ' '; i++)
+		for (i = a; i < m && (unsigned char)t[i] > ' '; i++)
 			;
 		for (; i < m && t[i] && (unsigned char)t[i] <= ' '; i++)
 			;
 		if (i < m)
 			a = i;
 	}
-	if (b < n && t[b] > ' ' && t[b - 1] > ' ')
+	if (b < n && (unsigned char)t[b] > ' ' &&
+	    (unsigned char)t[b - 1] > ' ')
 	{
-		for (i = b; i > m + nl && t[i - 1] > ' '; i--)
+		for (i = b; i > m + nl && (unsigned char)t[i - 1] > ' '; i--)
 			;
 		if (i > m + nl)
 			b = i;
