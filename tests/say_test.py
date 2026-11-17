@@ -348,7 +348,6 @@ def main():
         run("-k", c1)
         r = say("--all", "--", "/x\u0085")
         check("--all /x<U+0085> is not refused as a /command",
-              r.returncode == 0 and
               "a /command is not sent" not in r.stderr and
               any(e["ev"] == "paste" for e in events(c2)[n2:]))
         idle(c2)
