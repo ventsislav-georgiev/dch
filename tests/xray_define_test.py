@@ -485,7 +485,9 @@ def test_card_zwj():
                       + title + "', 'status': 'open'}))\n"))
         v = Pty([DCH, "--xray", "xv-cl"], 30, 41)
         try:
-            v.wait(b"Refs 3")
+            # 41 cols: no counts in the tab bar, so no "Refs 3"
+            until(lambda: (v.pump(0.1), "[Prompts" in rows(v.out).get(2, "")
+                           and "\u258c" in rows(v.out).get(4, ""))[1])
             v.pump(0.3)
             v.key(b"\033[Z\033[Z", 1.0)
             mark = len(v.out)

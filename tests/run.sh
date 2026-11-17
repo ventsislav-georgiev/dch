@@ -254,6 +254,7 @@ export TMPDIR="$DCH_TEST_TMP"
 # the watchdog section's bystanders, if an interrupt came while they ran
 wdreap(){ [ -z "${wdby:-}" ] || kill "$wdby" 2>/dev/null
     [ -z "${wdkl:-}" ] || { "$DCH" -k -- -kl >/dev/null 2>&1; kill "$wdkl" 2>/dev/null; }; }
+wdby= wdkl=
 trap 'wdreap; DCH_TEST_TMP=$RUN; runreap; rm -rf "${RUN:?}"' EXIT
 trap 'pyreap; for k in $prun; do preap "$k"; done; exit 130' INT TERM HUP
 export XDG_RUNTIME_DIR="$TMP"

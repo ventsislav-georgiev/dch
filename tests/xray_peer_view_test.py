@@ -324,7 +324,8 @@ def toggle(prep=None, cols=100, env=None):
     The screen after the key."""
     v = Pty([DCH, "--xray", "xv-pe"], rows=40, cols=cols, env=env)
     try:
-        v.wait(b"Prompts 2")
+        # below about 80 cols the tab bar drops its counts: wait for the tab
+        until(lambda: (v.pump(0.1), "[Prompts" in "".join(rows(v.out).values()))[1])
         if prep:
             prep(v)
         m = len(v.out)

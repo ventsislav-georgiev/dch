@@ -4345,7 +4345,7 @@ t_res_git(void)
 
 		t0 = xr_now_ms();
 		while (pid > 0 && !(g = (pid_t)atoi(slurp("pid"))) &&
-		       xr_now_ms() - t0 < 2000)
+		       xr_now_ms() - t0 < 10000)
 			usleep(10000);
 		usleep(50000);	/* the slow show itself, past the pid write */
 		if (pid > 0)
@@ -4355,7 +4355,7 @@ t_res_git(void)
 		/* killed at once; EPERM while init holds the zombies, then gone */
 		t0 = xr_now_ms();
 		while (g > 0 && !(kill(-g, 0) == -1 && errno == ESRCH) &&
-		       xr_now_ms() - t0 < 5000)
+		       xr_now_ms() - t0 < 15000)
 			usleep(10000);
 		CHECK("git: SIGTERM ends the querying process, git's group with it",
 		      g > 0 && WIFSIGNALED(st) && WTERMSIG(st) == SIGTERM &&

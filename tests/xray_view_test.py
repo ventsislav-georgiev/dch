@@ -160,6 +160,9 @@ def test_refs():
               "a files, commits, URLs 12 hidden" in text, text)
         mark = len(v.out)
         v.key(b"a", 1.0)
+        # the redraw can outlast the settle at load: wait for its footer
+        until(lambda: (v.pump(0.1), "a hide files, commits, URLs" in
+                       screen(v, mark))[1])
         scr = rows(v.out[mark:])
         text = "\n".join(scr[k] for k in sorted(scr))
         check("Refs: one faint line says what a ref is and that Enter "
@@ -193,6 +196,7 @@ def test_refs():
               "t temp files 4 hidden" in text, text)
         mark = len(v.out)
         v.key(b"t", 1.0)
+        until(lambda: (v.pump(0.1), "t hide temp files" in screen(v, mark))[1])
         scr = rows(v.out[mark:])
         text = "\n".join(scr[k] for k in sorted(scr))
         check("Refs: t shows the temp files, the footer says t hides them",
@@ -200,6 +204,7 @@ def test_refs():
               and "hidden" not in text, text)
         mark = len(v.out)
         v.key(b"t", 1.0)
+        until(lambda: (v.pump(0.1), "t temp files 4 hidden" in screen(v, mark))[1])
         scr = rows(v.out[mark:])
         text = "\n".join(scr[k] for k in sorted(scr))
         check("Refs: t again hides them", "t temp files 4 hidden" in text and
