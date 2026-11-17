@@ -376,14 +376,13 @@ fi
 skipmirror(){ printf '  skip %s (build has no terminal mirror)\n' "$1"; }
 # Wall-clock budgets mean nothing under ASan (scripts/sanitize.sh sets this).
 nobudget(){ [ -n "${DCH_TEST_NO_BUDGET:-}" ] && printf '  skip %s (timing budget, sanitizer build)\n' "$1"; }
-# Latency budget: the fastest of 20 runs of "$@" under 100 ms wall. A sleep or
+# Latency budget: the fastest of 20 runs of "$@" within 80 ms of --version. A sleep or
 # a deadline-driven read slows every run; a loaded box only some (#154).
 # Beside a full pool every run was slow (#361): the rows run after pdrain.
 fast20(){
     # host-relative: a --version call (no session work) is timed between the
-    # measured calls; the fastest measured call must be under 100 ms or 5x the
-    # fastest --version plus 50 ms, whichever is more (never stricter than the
-    # old fixed bound; a loaded host scales both; a 10x slowdown still fails)
+    # measured calls; the fastest measured call may cost at most 80 ms more
+    # than the fastest --version (the gap scales with the host; a 100 ms sleep fails)
     python3 -c '
 import subprocess, sys, time
 def one(a):
@@ -394,7 +393,7 @@ m, c = [], []
 for _ in range(20):
     m.append(one(sys.argv[1:]))
     c.append(one([sys.argv[1], "--version"]))
-sys.exit(0 if min(m) < max(0.1, 5 * min(c) + 0.05) else 1)
+sys.exit(0 if min(m) - min(c) < 0.08 else 1)
 ' "$@"; }
 
 # --- the longest files first: a pool (DCH_TEST_JOBS > 1) starts them at once
@@ -1360,10 +1359,10 @@ pdrain; tlast=$(date +%s)
 # --- latency budgets: after the pool, so no job slows the runs (#361) --------
 # One sh session painted as the detection block's last panel (an agent panel
 # row), alone in the socket dir, as --status/--ls-json met it in place.
-# --read: a round trip within 100 ms (generous CI headroom over the ~3 ms
+# --read: a round trip within 80 ms of --version (generous CI headroom over the ~3 ms
 # local reality; catches accidental sleeps or timeout-driven reads).
 # --status runs detection (a control connect + full screen fetch), --ls-json
-# runs it per session: within 100 ms (over the ~4 ms local reality; catches
+# runs it per session: within 80 ms of --version (over the ~4 ms local reality; catches
 # accidental sleeps or deadline-driven reads sneaking into the resolve path).
 if [ -x "$DCH" ] && [ "$MIRROR" = 1 ]; then
     LN="lat$$"
@@ -1372,11 +1371,11 @@ if [ -x "$DCH" ] && [ "$MIRROR" = 1 ]; then
     "$DCH" --run "$LN" "printf '\033c'; printf '%b\n' '\342\217\272 main\n\342\227\257 worker-opus-high  Running\342\200\246' 'sent_lat'" >/dev/null 2>&1
     "$DCH" --wait "$LN" --match sent_lat --timeout 5000 >/dev/null 2>&1
     for v in --read --status --ls-json; do
-        nobudget "$v latency budget (fastest of 20 < 100ms)" && continue
+        nobudget "$v latency budget (fastest of 20 within 80 ms of --version)" && continue
         if [ "$v" = --ls-json ]; then fast20 "$DCH" --ls-json
         else fast20 "$DCH" "$v" "$LN"; fi \
-            && ok "$v latency budget (fastest of 20 < 100ms)" \
-            || bad "$v latency budget (fastest of 20 < 100ms)"
+            && ok "$v latency budget (fastest of 20 within 80 ms of --version)" \
+            || bad "$v latency budget (fastest of 20 within 80 ms of --version)"
     done
     "$DCH" -k "$LN" >/dev/null 2>&1
 fi
