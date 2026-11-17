@@ -191,6 +191,17 @@ def main():
             got = ctl1(port, ["--xray", nm, "--json"])
             check("xray serve: name %r refused: %s" % (nm, why),
                   got == ("refused", why))
+        # #466: --revive's --env/--unset are local only, never run here
+        def rvran():
+            return sum(" ctl --revive " in l and "(pid" in l
+                       for l in text(log).splitlines())
+        rv0 = rvran()
+        for a in (["--env", "K=V"], ["--unset", "K"]):
+            got = ctl1(port, ["--revive", n] + a + ["--json"])
+            check("serve: --revive %s refused" % a[0],
+                  got == ("refused", "%s is not allowed with --revive" % a[0]))
+        check("serve: ...and no dch --revive ran",
+              rvran() == rv0)
         check("xray serve: every accepted form ran a dch, no refused one",
               ran - before == len(ok) + len(names)
               and text(log).count(" ctl --xray ") == ran)

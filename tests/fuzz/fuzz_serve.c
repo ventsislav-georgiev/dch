@@ -247,6 +247,10 @@ ctl_inv(int ac, char **av, const unsigned char *kind, int fl)
 		     !strcmp(a, "-h") || !strcmp(a, "--help") || !strcmp(a, "-f") ||
 		     (!strcmp(a, "--all") && strcmp(av[0], "--forget"))))
 			abort();
+		/* --revive's --env/--unset are local only (#466) */
+		if (kind[i] == CK_FLAG &&
+		    (!strcmp(a, "--env") || !strcmp(a, "--unset")))
+			abort();
 	}
 }
 

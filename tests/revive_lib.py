@@ -818,20 +818,21 @@ def main(part):
                         '[ "$1 $2 $3" = "-l -i -c" ] || exit 2\n'
                         'echo rc noise; echo rc noise >&2\n'
                         'export LOGIN_RC=1 PATH="/login-rc/bin:$PATH" '
-                        'DCH_SOCKET_DIR=/nonexistent\n'
+                        'DCH_SOCKET_DIR=/nonexistent ANTHROPIC_BASE_URL=rc '
+                        'FOO=rc\n'
                         '[ -n "$LOGIN_HANG" ] && sleep 30\n'
                         'exec /bin/sh -c "$4" "$5" "$6"\n')
             os.chmod(lsh, 0o755)
             genv = {k: v for k, v in os.environ.items() if k != "DCH_LOGIN_ENV"}
             genv.update(XDG_RUNTIME_DIR=rt6, SHELL=lsh)
 
-            def envof(n, **extra):
+            def envof(n, *args, **extra):
                 out = os.path.join(tmp, n + ".env")
                 os.rename(plant(n, sock_dir=sockdir6, argv=[
                     sh_, "-c", "env > %s; exec sleep 60" % out]),
                     os.path.join(recdir6, n + ".json"))
                 t0 = time.time()
-                r = run("--revive", n, env=dict(genv, **extra))
+                r = run("--revive", n, *args, env=dict(genv, **extra))
                 names.append((n, genv))
                 took = time.time() - t0
                 until(lambda: os.path.exists(out) and os.path.getsize(out))
@@ -847,6 +848,7 @@ def main(part):
             check("--revive takes the login shell's env: its PATH and vars "
                   "reach the session, DCH_SOCKET_DIR stays dch's",
                   r.returncode == 0 and e.get("LOGIN_RC") == "1" and
+                  e.get("ANTHROPIC_BASE_URL") == "rc" and
                   e.get("PATH", "").startswith("/login-rc/bin:") and
                   e.get("DCH_SOCKET_DIR") != "/nonexistent" and
                   os.path.exists(os.path.join(sockdir6, "lgin.sock")))
@@ -857,6 +859,79 @@ def main(part):
             r, e, _ = envof("loff", DCH_LOGIN_ENV="0")
             check("...DCH_LOGIN_ENV=0 skips it",
                   r.returncode == 0 and "LOGIN_RC" not in e)
+
+            # --- #466: --env and --unset win over the login shell's env -------
+            # Prosper strips ANTHROPIC_BASE_URL to route a resume through its
+            # pool; an rc that exports it must not put it back.
+            r, e, _ = envof("lset", "--env", "FOO=cli", "--unset",
+                            "ANTHROPIC_BASE_URL")
+            check("--revive --env FOO=cli --unset ANTHROPIC_BASE_URL over an "
+                  "rc that exports both: FOO=cli, the URL absent [%r]"
+                  % (r.stderr,), r.returncode == 0 and e.get("FOO") == "cli"
+                  and "ANTHROPIC_BASE_URL" not in e and e.get("LOGIN_RC") == "1")
+            r, e, _ = envof("lempty", "--env", "ANTHROPIC_BASE_URL=")
+            check("...--env K= sets it empty, as --spawn's",
+                  r.returncode == 0 and e.get("ANTHROPIC_BASE_URL") == "" and
+                  e.get("FOO") == "rc")
+            r, e, _ = envof("lres", "--env", "DCH_SESSION=x", "--unset",
+                            "DCH_SESSION")
+            check("...DCH_SESSION stays dch's over --env and --unset",
+                  r.returncode == 0 and e.get("DCH_SESSION") == "lres")
+            os.rename(plant("lbadu", sock_dir=sockdir6),
+                      os.path.join(recdir6, "lbadu.json"))
+            for args, why in ((["--unset", "A=B"], "dch: --unset wants KEY"),
+                              (["--unset", ""], "dch: --unset wants KEY"),
+                              (["--unset"], "dch: --unset wants KEY"),
+                              (sum((["--env", "K%d=v" % k] for k in range(33)),
+                                   []), "dch: --env: too many (max 32)"),
+                              (sum((["--unset", "K%d" % k] for k in range(33)),
+                                   []), "dch: --unset: too many (max 32)")):
+                r = run("--revive", "lbadu", *args, env=genv)
+                check("--revive %s: usage error, exit 1, nothing revived"
+                      % " ".join(args)[:40], r.returncode == 1 and
+                      r.stderr == why + "\n" and r.stdout == "" and
+                      not os.path.exists(os.path.join(sockdir6, "lbadu.sock")))
+            r = run("--unset", "K", "-ls", env=genv)
+            check("--unset without --revive: usage error",
+                  r.returncode == 1 and "--unset only works with --revive"
+                  in r.stderr)
+            # --all: the plain and the claude record both get them
+            rt9 = os.path.join(tmp, "rt9")
+            sockdir9 = os.path.join(rt9, "dch-%d" % os.getuid())
+            recdir9 = os.path.join(recroot, sockdir9.replace("/", "-"))
+            os.makedirs(rt9)
+            os.makedirs(recdir9, 0o700)
+            aenv = dict(genv, XDG_RUNTIME_DIR=rt9)
+            aout = os.path.join(tmp, "aplain.env")
+            aid = "46646646-0000-4000-8000-000000000466"
+            acl = os.path.join(bindir, "claude")
+            os.rename(plant("aplain", sock_dir=sockdir9, argv=[
+                sh_, "-c", "env > %s; exec sleep 60" % aout]),
+                os.path.join(recdir9, "aplain.json"))
+            os.rename(plant("acl", sock_dir=sockdir9, argv=[acl],
+                            agent=dict(kind="claude", session_id=aid, name="",
+                                       cwd=proj, launch=[acl])),
+                      os.path.join(recdir9, "acl.json"))
+            r = run("--revive", "--all", "--no-message", "--env", "FOO=cli",
+                    "--env", "ANTHROPIC_API_KEY=k", "--unset",
+                    "ANTHROPIC_BASE_URL", env=aenv, timeout=120)
+            names.extend((n, aenv) for n in ("aplain", "acl"))
+            until(lambda: os.path.exists(aout) and os.path.getsize(aout))
+            try:
+                with open(aout) as f:
+                    e = dict(l.split("=", 1) for l in f.read().splitlines()
+                             if "=" in l)
+            except OSError:
+                e = {}
+            s = until(lambda: starts("acl") and starts("acl")[-1], 20) or {}
+            check("--revive --all --env --unset: every revived session gets "
+                  "them, claude resumed with them too [%r %r]"
+                  % (r.stdout, s.get("env")),
+                  r.returncode == 0 and e.get("FOO") == "cli" and
+                  "ANTHROPIC_BASE_URL" not in e and
+                  s.get("argv", [])[:2] == ["--resume", aid] and
+                  "ANTHROPIC_API_KEY" in s.get("env", []) and
+                  "ANTHROPIC_BASE_URL" not in s.get("env", []))
 
             # --- --json (#047): phases, then one final per record with "as" ----
             rt4 = os.path.join(tmp, "rt4")

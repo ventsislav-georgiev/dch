@@ -137,7 +137,7 @@ signal.signal(signal.SIGHUP, lambda *a: bye(0))
 
 log(ev="start", argv=sys.argv[1:], cwd=os.getcwd(), sid=SID,
     env=sorted(k for k in os.environ
-               if k.startswith(("CLAUDE", "DCH_REVIVE")) or k in (
+               if k.startswith(("CLAUDE", "DCH_REVIVE", "ANTHROPIC")) or k in (
                    "GIT_EDITOR", "AI_AGENT", "COREPACK_ENABLE_AUTO_PIN",
                    "NoDefaultCurrentDirectoryInExePath")),
     cfg=os.environ.get("CLAUDE_CONFIG_DIR"),
