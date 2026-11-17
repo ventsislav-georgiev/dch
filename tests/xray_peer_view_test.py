@@ -20,10 +20,10 @@ newer agent rows come back; a 200-character sender leaves the title in view.
 
 Run:  python3 tests/xray_peer_view_test.py      (uses ./dch)
 """
-import json, os, re, shutil, sys
+import json, os, re, shutil, subprocess, sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from xray_view_lib import DCH, HOME, P, T, Pty, cells, check, dch, fails, head, note, rows, say, screen, tl, turn, until  # noqa: E402
+from xray_view_lib import DCH, ENV, HOME, P, T, Pty, cells, check, dch, fails, head, note, rows, say, screen, tl, turn, until  # noqa: E402
 
 PSID = "11111111-2222-4333-8444-5555555555c7"   # xv-pe
 NSID = "11111111-2222-4333-8444-5555555555c8"   # xv-np
@@ -437,6 +437,43 @@ def test_note():
     state(None)
 
 
+def test_long():
+    """#429 VX1: a too-long state path says "path long", not "dir unsafe" or
+    nothing. The kernel counts the realpath, so a symlinked T (/tmp, /var on
+    macOS) makes a sessions path of about 1012-1016 bytes too long to use."""
+    extra = len(os.path.realpath(T)) - len(T)
+    if extra < 8:
+        return          # no symlinked prefix: nothing to push over PATH_MAX
+    for want in (1012, 1015):
+        x, n = os.path.join(T, "long%d" % want), 0
+        n = want - len("/dch/sessions") - len(x)
+        while n > 1:
+            k = min(200, n - 1)
+            x += "/" + "d" * k
+            n -= k + 1
+        x += "e" * n
+        os.makedirs(os.path.join(x, "dch", "sessions"))
+        # a live session (it ends on its own): the view needs no record
+        env = dict(ENV, XDG_STATE_HOME=x)
+        subprocess.run([DCH, "--spawn", "xv-lg", "sh", "-c", "sleep 12"],
+                       env=env, capture_output=True, timeout=20)
+        v = Pty([DCH, "--xray", "xv-lg"], rows=20, cols=60,
+                env={"XDG_STATE_HOME": x})
+        try:
+            v.wait(b"X-ray", 8)
+            v.pump(0.6)
+            m = len(v.out)
+            v.key(b"a", 0.8)
+            s = screen(v, m)
+            v.key(b"q", 0.3)
+            v.exit()
+        finally:
+            v.close()
+        check("#429 VX1: a %d byte sessions path: the note says path long"
+              % want, "a not saved: path long" in s, s)
+        shutil.rmtree(os.path.join(T, "long%d" % want), ignore_errors=True)
+
+
 def test_no_peer():
     state("hide_agents=0\n")    # #406: a persists, start shown
     v = Pty([DCH, "--xray", "xv-np"], rows=30, cols=100)
@@ -523,6 +560,7 @@ def main():
         test_persist()
         test_harden()
         test_note()
+        test_long()
         test_marks()
         test_no_peer()
         test_keep()
