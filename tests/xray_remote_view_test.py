@@ -297,7 +297,7 @@ def card_rows(v):
     scr = screen_rows(v)
     got = [(scr[k].startswith("\u258c"),
             re.search(r"(?:answer|note) (\w+) says", scr[k]))
-           for k in sorted(scr)]
+           for k in sorted(scr) if not scr[k].startswith("First said")]
     got = [(s, m.group(1)) for s, m in got if m]
     return [w for _, w in got], [w for s, w in got if s]
 
