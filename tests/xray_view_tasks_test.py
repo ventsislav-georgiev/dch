@@ -8,6 +8,8 @@ are in xray_view_lib.py.
 
 Run:  python3 tests/xray_view_tasks_test.py      (uses ./dch)
 """
+import threading
+
 from xray_view_lib import *  # noqa: F401,F403 (harness, fixtures, T)
 
 
@@ -632,10 +634,118 @@ def test_tabbar():
         v.close()
 
 
+STSID = "11111111-2222-4333-8444-5555555555fc"   # xv-ts: a live Claude
+
+
+def test_stream():
+    """#448: the view's one follow child carries Tasks and Memory: a task
+    changed and added, a memory file added and one removed reach the shown
+    tab from that stream, and the view forks no other child meanwhile."""
+    cwd = os.path.realpath(os.path.join(T, "tstream"))
+    os.makedirs(cwd, exist_ok=True)
+    proj = os.path.join(HOME, ".claude", "projects", cwd.replace("/", "-"))
+    mdir = os.path.join(proj, "memory")
+    os.makedirs(mdir, exist_ok=True)
+    path = os.path.join(proj, STSID + ".jsonl")
+
+    def add(recs, mode="a"):
+        with open(path, mode) as f:
+            for o in recs:
+                f.write(json.dumps(dict(o, cwd=cwd) if "cwd" in o else o) +
+                        "\n")
+
+    def mem(n, title):
+        # whole at once: a dir watch sees the name, not a later write into
+        # it (that waits for the 30 s listing)
+        with open(os.path.join(proj, n), "w") as f:
+            f.write("---\nname: %s\ndescription: %s hook\n---\nbody\n" %
+                    (title, n))
+        os.replace(os.path.join(proj, n), os.path.join(mdir, n))
+
+    add(turn("plan live", iso(600), *made(iso(600), "c1", "1",
+                                           "Stream first")), "w")
+    mem("keep.md", "Keep me")
+    mem("drop.md", "Drop me")
+    dch("--spawn", "xv-ts", "/bin/sleep", "300")
+    pid = until(lambda: json.loads(dch("--cmd", "xv-ts").stdout or "{}")
+                .get("pid"), 5)
+    start = subprocess.run(["/bin/ps", "-o", "lstart=", "-p", str(pid)],
+                           capture_output=True, text=True,
+                           env={"LC_ALL": "C", "TZ": "UTC"}).stdout.strip()
+    sd = os.path.join(HOME, ".claude", "sessions")
+    os.makedirs(sd, exist_ok=True)
+    with open(os.path.join(sd, "%d.json" % pid), "w") as f:
+        json.dump({"pid": pid, "sessionId": STSID, "cwd": cwd,
+                   "procStart": start, "version": "2.1.0",
+                   "kind": "interactive", "status": "busy",
+                   "statusUpdatedAt": 1}, f)
+    v = Pty([DCH, "--xray", "xv-ts"], rows=30, cols=100)
+    seen, stop = {}, []
+
+    def sample():  # every child of the view and its command line
+        while not stop:
+            r = subprocess.run(["/bin/ps", "-A", "-o", "pid=,ppid=,args="],
+                               capture_output=True, text=True)
+            for x in r.stdout.splitlines():
+                f = x.split(None, 2)
+                if len(f) == 3 and int(f[1]) == v.pid:
+                    seen[int(f[0])] = f[2][:120]
+            time.sleep(0.02)
+
+    th = threading.Thread(target=sample, daemon=True)
+    try:
+        ok = tabbar(v, "Tasks 1") and tabbar(v, "Memory ")
+        m = re.search(r"Memory (\d+)", rows(v.out).get(2, ""))
+        n = int(m.group(1)) if m else -1
+        first = kids(v.pid)
+        th.start()
+        v.key(b"\033[Z\033[Z", 0.8)  # Memory, then Tasks
+        check("stream: Tasks shows the one task", ok and any(
+            "Stream first" in r for r in tasks_rows(v)), tasks_rows(v))
+        add([at(upd(iso(1), "u1", "1", status="in_progress",
+                    activeForm="Streaming now"), iso(1))] +
+            made(iso(1), "c2", "2", "Stream second"))
+        ok = tabbar(v, "Tasks 2", 15)
+        until(lambda: (v.pump(0.1), any("▶ 1 Streaming now" in r
+                                        for r in tasks_rows(v)))[1], 10)
+        r = tasks_rows(v)
+        check("stream: a task changed (now in progress) and one added reach "
+              "the shown Tasks tab", ok and
+              any("▶ 1 Streaming now" in x for x in r) and
+              any("Stream second" in x for x in r), r)
+        v.key(b"\t", 0.8)  # Memory
+        mem("added.md", "Added now")
+        ok = tabbar(v, "Memory %d" % (n + 1), 15)
+        until(lambda: (v.pump(0.1), any("Added now" in x
+                                        for x in tasks_rows(v)))[1], 10)
+        r = tasks_rows(v)
+        check("stream: a memory file added reaches the shown Memory tab",
+              n > 0 and ok and any("Added now" in x for x in r), r)
+        os.unlink(os.path.join(mdir, "drop.md"))
+        ok = tabbar(v, "Memory %d" % n, 15)
+        until(lambda: (v.pump(0.1), not any("Drop me" in x
+                                            for x in tasks_rows(v)))[1], 10)
+        r = tasks_rows(v)
+        check("stream: a memory file removed leaves the shown Memory tab",
+              ok and not any("Drop me" in x for x in r) and
+              any("Keep me" in x for x in r), r)
+        stop.append(1)
+        th.join(2)
+        check("stream: one child, the follow, the whole time: no --tasks or "
+              "--memory child forked", len(first) == 1 and
+              set(seen) == set(first), (first, seen))
+        v.key(b"q")
+        check("stream: q exits 0", v.exit() == 0, v.out[-80:])
+    finally:
+        stop.append(1)
+        v.close()
+        dch("-k", "xv-ts")
+
+
 def main():
     run_steps(fixture_tasks, test_tasks, test_tasks_big, fixture_memory,
               test_memory, test_memory_big, fixture_place, test_place,
-              test_twins, test_memory_cmd, test_tabbar)
+              test_twins, test_memory_cmd, test_tabbar, test_stream)
 
 
 if __name__ == "__main__":

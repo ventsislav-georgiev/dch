@@ -7954,6 +7954,20 @@ xr_claude_tail(struct xr_claude *d, int fd, uint64_t from, uint64_t to)
 	return rc;
 }
 
+int
+xr_claude_window(struct xr_claude *d, int fd, uint64_t size, uint64_t win)
+{
+	char *buf = malloc(XR_CHUNK), *acc = malloc(XR_LINE_MAX + 1);
+	int rc = -1;
+
+	if (buf && acc)
+		rc = read_range(d, fd, size > win ? size - win : 0, size, 1, buf,
+		                acc);
+	free(buf);
+	free(acc);
+	return rc;
+}
+
 uint64_t
 xr_claude_next(const struct xr_claude *d)
 {

@@ -282,7 +282,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.91.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.92.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -1082,10 +1082,12 @@ it has memories or instruction files:
   last changed the task, and `q` comes back to it; a task with no prompt
   opens a card with what is known of it (title in full, status, note,
   times, blocked by, group, URL). `/` filters on the id, title, note and
-  label; `o` works as on Prompts. The list is asked for after the prompts
-  have shown and is drawn as it comes; it is read again when you open the
-  tab and, while the session runs, at most every 5 seconds while the tab
-  shows. A faint line under the rows gives the list's warning, and says
+  label; `o` works as on Prompts. The list comes in the view's one
+  `--follow` stream (`--tasks --memory`), after the prompts, drawn as it
+  comes; while the session runs a task's change shows as the stream sends
+  it, with no query of its own. A host whose dch refuses `--follow
+  --tasks` (an older one) gets the old queries: the list read again
+  when you open the tab and at most every 5 seconds while it shows. A faint line under the rows gives the list's warning, and says
   when the history was too long to read whole. A shell session, an empty
   list and a host older than this dch have no Tasks tab.
 - **Memory** (the last tab, only when `--memory` lists something): the
@@ -1099,9 +1101,10 @@ it has memories or instruction files:
   a text cut at 16 KB says so and names the file, when it has one. On a card of a memory
   this session wrote or loaded, `Enter` reads that prompt, and `q` comes
   back to the card. `/` filters on the id, title, note, kind, path and
-  text; `o` works as on Prompts. The list is asked for after the prompts
-  have shown; while the session runs it is read again every 30 seconds
-  while the tab shows. A shell session, no memory and a host older
+  text; `o` works as on Prompts. The list comes in the same stream as
+  Tasks; a memory file added, changed or removed shows as the stream sends
+  it (on a host that refuses that stream: read again every 30 seconds
+  while the tab shows). A shell session, no memory and a host older
   than this dch have no Memory tab; dch-lite has both tabs.
 
 A ref typed after `/` (a ticket, issue, pull request, commit, file or URL,
@@ -2151,8 +2154,14 @@ every 250 ms:
   - `"evicted"` means one eviction changed more than 256 keys (sent at most
     once a second), or a shell chapter went while its prompt record is still
     in the ring, which no line could remove.
-  - `"full"`: a transcript past the per-file range first sends the capped
-    snapshot. Its whole-file snapshot follows, read in the background.
+  - `"full"`: a wider read replaces a narrower one. A transcript over 32 MB
+    first sends a fast snapshot of its newest 32 MB alone (`complete:
+    false`, `why: "range"`, about 0.1-0.2 s at any size), then `reset`
+    `full` and the snapshot of the usual range. A transcript past the
+    per-file range (272 MB) then sends one more: its capped snapshot is
+    followed by the whole-file one, read in the background. Lines written
+    meanwhile come as deltas after the last snapshot of each pair; none
+    are lost.
   - `"restarted"` means a `--restart` of the session: the same session under
     a new master image, reconnected.
 
@@ -2171,7 +2180,8 @@ until the next snapshot. A new key still sends one.
 client needs no `--tasks` or `--memory` polls and the transcript is read
 once. A dch before this exits 2 with `dch: bad usage: --tasks and --follow`,
 which a client can use as its version probe.
-- After every snapshot (the first and each one after a `reset`): the
+- After every snapshot (the first, the 32 MB fast one included, and each
+  one after a `reset`): the
   `--tasks` lines, then the `--memory` lines, each block whole from its
   header to its `done` line, in the one-shot shapes. A tasks header has
   `session`; a memory header does not. A session with no corpus gives a
@@ -2187,7 +2197,8 @@ which a client can use as its version probe.
     `partial`).
 - Tasks and the memory rows' `session` and `chapter` come from the
   follow's own read of the transcript. The memory directory is watched
-  (kqueue, inotify) and listed again when it changes, when a tool call
+  (kqueue, inotify) and listed again when it changes and once more 1 s after (a file's
+  content may land after its create), when a tool call
   touches a `.md` file, and every 30 s (an edit in place that kqueue does
   not see).
 - A `tasks_command` or `memory_command` runs as for the one-shot form, again

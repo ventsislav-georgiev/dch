@@ -312,6 +312,9 @@ uint64_t xr_claude_too_long(const struct xr_claude *d);
 ** the read, -1 a read error. The decoder (its tool_use ring, its open turn)
 ** carries on across calls (QA A2). */
 int xr_claude_tail(struct xr_claude *d, int fd, uint64_t from, uint64_t to);
+/* --follow's first paint (#447): the newest win bytes of fd's size only,
+** from the first line start in them. As xr_claude_tail. */
+int xr_claude_window(struct xr_claude *d, int fd, uint64_t size, uint64_t win);
 uint64_t xr_claude_next(const struct xr_claude *d);
 /* The chapters so far, anchored, the open turn included; d keeps them. */
 const struct xr_chapters *xr_claude_chapters(struct xr_claude *d);

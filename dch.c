@@ -13839,10 +13839,12 @@ xr_clear(const struct xr_target *t)
 #define XF_EVICT_KEYS 256	/* proposal 11.6: past this, one reset ... */
 #define XF_EVICT_MS 1000	/* ... at most once a second */
 #define XF_SLICE (4u << 20)	/* the full pass: bytes between events */
+#define XF_FAST (32ull << 20)	/* the first paint's window (#447) */
 #define XF_RESET (-1)
 #define XF_TASKS_MS 5000L	/* --tasks: a tasks_command's run (#446) */
 #define XF_MEM_MS 30000L	/* --memory: the rows listed, memory_command */
 
+#define XF_MEMRE_MS 1000L	/* --memory: the re-list after a dir event (#449) */
 enum { XE_FILE = 1, XE_ROT = 2, XE_CONN = 4, XE_OUT = 8, XE_MEM = 16 };
 
 struct xf_cl;
@@ -13878,6 +13880,7 @@ struct xf
 	char warn[2][XCMD_WARN_MAX];
 	long long at[2];	/* the command's next run; [1] the listing's */
 	int mdirty;		/* the memory dir moved */
+	long long mretry;	/* ms clock: one more listing, 0 none (#449) */
 	unsigned long mtouched;	/* xm_live_touched at the last block */
 	struct xf_cl *cl;	/* a Claude's or Codex's sources, else NULL */
 	const char *sid, *agent;	/* the blocks' session_id, agent */
@@ -14565,6 +14568,8 @@ xf_side_ms(const struct xf *f)
 	if (f->memory && (f->cl || f->cmd[1]))
 	{
 		m = f->mdirty ? f->last + f->gap : f->at[1];
+		if (f->mretry && f->mretry < m)
+			m = f->mretry;
 		at = at < 0 || m < at ? m : at;
 	}
 	return at < 0 ? -1 : at > now ? (long)(at - now) : 0;
@@ -14590,6 +14595,8 @@ xf_side(struct xf *f)
 			return 1;
 		sent = 1;
 	}
+	if (f->mretry && now >= f->mretry)
+		f->mretry = 0, f->mdirty = 1;
 	if (f->memory && (f->cl || f->cmd[1]) &&
 	    (now >= f->at[1] || (f->mdirty && now >= f->last + f->gap)))
 	{
@@ -14632,6 +14639,34 @@ xf_cl_sinks(const struct xf *f, const struct xf_cl *s, struct xr_claude *d,
 	if (d)
 		xm_live_attach(*xm, d, s->ino);
 	return 0;
+}
+
+/* s's decoder, index and sinks, new; then its read of fd's first size
+** bytes: the newest win only, else (win 0) the range xr_claude_read reads */
+static int
+xf_cl_load(const struct xf *f, struct xf_cl *s, uint64_t size, uint64_t win)
+{
+	struct xr_sink k;
+
+	xr_claude_free(s->d);
+	xr_index_free(s->ix);
+	xr_tasks_free(s->tk);
+	xm_live_free(s->xm);
+	s->ix = NULL;
+	s->tk = NULL;
+	s->xm = NULL;
+	if (!(s->d = xr_claude_new()) || !(s->ix = xr_index_new()))
+		return -1;
+	if (s->cx)
+		xr_claude_codex(s->d);
+	xr_index_sink(s->ix, &k);
+	xr_claude_refs(s->d, &k, s->ino, NULL, NULL);
+	if (xf_cl_sinks(f, s, s->d, &s->tk, &s->xm) < 0)
+		return -1;
+	if (!win)
+		return xr_claude_read(s->d, s->fd, size, &s->capped);
+	s->capped = 1;
+	return xr_claude_window(s->d, s->fd, size, win) < 0 ? -1 : 0;
 }
 
 static int
@@ -14807,6 +14842,7 @@ xf_claude(struct xf *f, const struct crec *c, const struct xr_cx *x,
 	const char *h;
 	int rc = 0, ev, r, rot;
 	long ms;
+	uint64_t size = 0;	/* the transcript's at its open */
 
 	memset(&s, 0, sizeof s);
 	s.fd = -1;
@@ -14829,23 +14865,10 @@ xf_claude(struct xf *f, const struct crec *c, const struct xr_cx *x,
 			snprintf(s.watch, sizeof s.watch, "%s", dir);
 			goto read;
 		}
-		if ((s.fd = xr_seam_open(s.path, &st)) < 0 ||
-		    !(s.d = xr_claude_new()) || !(s.ix = xr_index_new()))
-		{
-			xf_cl_free(&s);
+		if ((s.fd = xr_seam_open(s.path, &st)) < 0)
 			return xr_failed();
-		}
-		xr_claude_codex(s.d);
 		s.ino = (uint64_t)st.st_ino;
-		xr_index_sink(s.ix, &k);
-		xr_claude_refs(s.d, &k, s.ino, NULL, NULL);
-		if (xf_cl_sinks(f, &s, s.d, &s.tk, &s.xm) < 0 ||
-		    xr_claude_read(s.d, s.fd, (uint64_t)st.st_size,
-		                   &s.capped) < 0)
-		{
-			xf_cl_free(&s);
-			return xr_failed();
-		}
+		size = (uint64_t)st.st_size;
 		goto read;
 	}
 	snprintf(s.sid, sizeof s.sid, "%s", c->sid);
@@ -14860,22 +14883,13 @@ xf_claude(struct xf *f, const struct crec *c, const struct xr_cx *x,
 	{
 		if ((size_t)snprintf(dir, sizeof dir, "%s/projects/%s", s.cfg,
 		                     s.project) >= sizeof dir ||
-		    (s.fd = xr_seam_open(s.path, &st)) < 0 ||
-		    !(s.d = xr_claude_new()) || !(s.ix = xr_index_new()))
+		    (s.fd = xr_seam_open(s.path, &st)) < 0)
 		{
 			xf_cl_free(&s);
 			return xr_failed();
 		}
 		s.ino = (uint64_t)st.st_ino;
-		xr_index_sink(s.ix, &k);
-		xr_claude_refs(s.d, &k, s.ino, NULL, NULL);
-		if (xf_cl_sinks(f, &s, s.d, &s.tk, &s.xm) < 0 ||
-		    xr_claude_read(s.d, s.fd, (uint64_t)st.st_size,
-		                   &s.capped) < 0)
-		{
-			xf_cl_free(&s);
-			return xr_failed();
-		}
+		size = (uint64_t)st.st_size;
 	}
 	else
 	{
@@ -14887,7 +14901,26 @@ xf_claude(struct xf *f, const struct crec *c, const struct xr_cx *x,
 read:
 	if (!s.project[0])
 		xr_project_key(s.label, s.project, sizeof s.project);
-	if (!s.d && xf_cl_sinks(f, &s, NULL, &s.tk, &s.xm) < 0)
+	/* a fast first paint (#447): past XF_FAST, its newest XF_FAST alone
+	** and its blocks, then reset full and the snapshot below, read to
+	** the same size (what comes meanwhile is pending after it) */
+	if (s.fd >= 0 && size > XF_FAST && XF_FAST < xr_lim.tail)
+	{
+		if (xf_cl_load(f, &s, size, XF_FAST) < 0)
+		{
+			xf_cl_free(&s);
+			return xr_failed();
+		}
+		xf_cl_answer(t, &s, &a);
+		if (xf_snapshot(f, &a, f->why))
+		{
+			xf_cl_free(&s);
+			return f->rc;
+		}
+		f->why = "full";
+	}
+	if (s.fd >= 0 ? xf_cl_load(f, &s, size, 0) < 0
+	              : xf_cl_sinks(f, &s, NULL, &s.tk, &s.xm) < 0)
 	{
 		xf_cl_free(&s);
 		return xr_failed();
@@ -14949,7 +14982,12 @@ read:
 		if (ev & XE_OUT)
 			break;
 		if (ev & XE_MEM)
+		{
+			/* a file's content may land after its create, and the
+			** dir sees no write: list once more, 1 s after the last */
 			f->mdirty = 1;
+			f->mretry = xr_now_ms() + XF_MEMRE_MS;
+		}
 		if (ev & XE_CONN)
 		{
 			/* a wake: re-armed by a header read, then the question;
