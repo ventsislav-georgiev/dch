@@ -108,7 +108,7 @@ struct xv_def
 
 struct xv_men
 {
-	char *session, *line, *chapter;
+	char *session, *line, *chapter, *who, *tool;	/* who: "" none */
 	long long at, off;	/* off: -1 from a host that sends none */
 };
 
@@ -938,6 +938,8 @@ xv_card_free(struct xv *v)
 		xv_sfree(v->m[k].session);
 		xv_sfree(v->m[k].line);
 		xv_sfree(v->m[k].chapter);
+		xv_sfree(v->m[k].who);
+		xv_sfree(v->m[k].tool);
 	}
 	v->nd = v->nm = 0;
 	xv_sfree(v->vkind);
@@ -1014,6 +1016,8 @@ xv_cline(struct xv *v, const struct json_parser *p)
 		}
 		m.line = xv_str(p, o, "line");
 		m.chapter = xv_str(p, o, "chapter");
+		m.who = xv_str(p, o, "who");
+		m.tool = xv_str(p, o, "tool");
 		/* light reads newest first, a window at a time (#262): a line
 		** before its window's first prompt has no chapter; this
 		** session's is the last one that starts before it */
@@ -3062,10 +3066,39 @@ xv_draw_card(struct xv *v, int win)
 
 	if (!pk_utf)
 		ge = v->cdone && !v->cpartial ? "" : ">=";
+	for (k = 0; k < v->nm; k++)
+		if (v->m[k].at >= 0)
+		{
+			if (first < 0 || v->m[k].at < v->m[first].at)
+				first = k;
+			if (last < 0 || v->m[k].at > v->m[last].at)
+				last = k;
+		}
 	/* the definitions: two or more are counted, never one picked */
 	pk_line();
 	pk_set("1");
-	if (!v->nd)
+	if (!v->nd && !running && first >= 0 && v->m[first].line[0] &&
+	    !(v->cwarn && v->cwarn[0]))
+	{
+		/* no definition: the first mention's line says what it is */
+		const struct xv_men *m = &v->m[first];
+		int c = xv_rch(v, m->chapter);
+
+		pk_set("2");
+		if (c >= 0)
+		{
+			snprintf(b, sizeof b, "First said (%s %d, ", xv_noun(v),
+			         c + 1);
+			pk_txt(b);
+			pk_txtto(v->ch[c].title, pk_col + pk_w / 3);
+			pk_txt("): ");
+		}
+		else
+			pk_txt("First said: ");
+		pk_set("");
+		pk_txtto(m->line, pk_w);
+	}
+	else if (!v->nd)
 	{
 		pk_set("2");
 		pk_txt(running ? "Definitions: searching" : "No definition found");
@@ -3175,11 +3208,18 @@ xv_draw_card(struct xv *v, int win)
 	pk_line();
 	snprintf(b, sizeof b, "Mentions: this session %s%lld", ge,
 	         v->cnt[0] > 0 ? v->cnt[0] : 0);
-	if (v->cnt[1] >= 0)
+	/* light has not scanned them: never "0 in 0 sessions" before f */
+	if (v->cnt[1] >= 0 && !v->full && !v->cnt[1] && v->cnt[2] <= 0)
+		snprintf(b + strlen(b), sizeof b - strlen(b),
+		         "%sthis project: f scans", xv_dot());
+	else if (v->cnt[1] >= 0)
 		snprintf(b + strlen(b), sizeof b - strlen(b), "%sthis project "
 		         "%s%lld in %lld sessions", xv_dot(), ge, v->cnt[1],
 		         v->cnt[2] > 0 ? v->cnt[2] : 0);
-	if (v->cnt[3] >= 0)
+	if (v->cnt[3] >= 0 && !v->full && !v->cnt[3] && v->cnt[4] <= 0)
+		snprintf(b + strlen(b), sizeof b - strlen(b),
+		         "%sother projects: f scans", xv_dot());
+	else if (v->cnt[3] >= 0)
 		snprintf(b + strlen(b), sizeof b - strlen(b), "%sother projects "
 		         "%s%lld in %lld sessions", xv_dot(), ge, v->cnt[3],
 		         v->cnt[4] > 0 ? v->cnt[4] : 0);
@@ -3191,14 +3231,6 @@ xv_draw_card(struct xv *v, int win)
 		pk_txt(xv_ell());
 	pk_eol();
 	rows++;
-	for (k = 0; k < v->nm; k++)
-		if (v->m[k].at >= 0)
-		{
-			if (first < 0 || v->m[k].at < v->m[first].at)
-				first = k;
-			if (last < 0 || v->m[k].at > v->m[last].at)
-				last = k;
-		}
 	pk_line();
 	pk_set("2");
 	if (first >= 0)
@@ -3229,6 +3261,21 @@ xv_draw_card(struct xv *v, int win)
 			xv_when(m->at, w, sizeof w);
 			pk_set("2");
 			pk_fit(w, 13);
+			/* who said it and under which prompt, as Search's head */
+			{
+				int c = xv_rch(v, m->chapter);
+
+				pk_fit(!strcmp(m->who, "user") ? "You"
+				       : !strcmp(m->who, "assistant") ? "Reply"
+				       : m->tool[0] ? m->tool
+				       : !strcmp(m->who, "tool") ? "Tool" : "", 6);
+				if (c >= 0)
+					snprintf(w, sizeof w, "%c%d",
+					         xv_noun(v)[0], c + 1);
+				else
+					w[0] = '\0';
+				pk_fit(w, 5);
+			}
 			if (strcmp(m->session, v->session))
 			{
 				pk_fit(m->session, 16);

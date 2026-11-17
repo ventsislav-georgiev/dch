@@ -213,6 +213,7 @@ struct xr_hit
 	uint64_t off, unit, row;
 	long long at;
 	const char *chapter;
+	const char *who, *tool;	/* a Claude mention's speaker, else NULL */
 	const char *title, *passage, *rule;	/* a definition */
 };
 struct xr_sink

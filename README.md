@@ -1667,7 +1667,7 @@ lines as NDJSON, each with `schema:1`: `first` (the key, `mode`, `scope` and
 `budget_ms`), then `definition` and `mention` lines, a `tally` per file,
 `progress` at most every 250 ms, and `done` last (`partial`, `why`, `counts`,
 `files`, `bytes`, `lines_too_long`, and `define_warn` when a
-[`define_command`](#your-own-definitions-define_command) gave none). `<ref>` is 1 to 256 bytes of UTF-8 with no
+[`define_command`](#your-own-definitions-define_command) gave none). A Claude `mention` line carries `who` (`user`, `assistant` or `tool`) and `tool` (the tool's name for a call's own text, else `null`), as Search hits do, a Claude mention only; the card shows them as You, Reply or the tool, with the prompt's number. With no definition the card shows the first mention's line as `First said (prompt N, <title>): ...`, and a light card says `this project: f scans` where `f` has not counted it, never `0 in 0 sessions`. `<ref>` is 1 to 256 bytes of UTF-8 with no
 control character and none of the bidi controls U+200E, U+200F, U+202A to
 U+202E and U+2066 to U+2069 (`dch: bad ref`), and must parse as exactly one
 ref (`dch: not a ref`), relative paths against the session's cwd. `--ref -` reads the ref from standard input like `--search -`
