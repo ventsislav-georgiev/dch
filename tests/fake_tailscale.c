@@ -25,8 +25,10 @@ main(int argc, char **argv)
 	snprintf(p, sizeof p, "%s/calls", d);
 	if ((log = fopen(p, "a")) != NULL)
 	{
-		fprintf(log, "%s %s\n", argc > 1 ? argv[1] : "",
-		        lb && *lb ? lb : "unset");
+		const char *tm = getenv("DCH_TS_MS");
+
+		fprintf(log, "%s ts_ms=%s %s\n", argc > 1 ? argv[1] : "",
+		        tm ? tm : "unset", lb && *lb ? lb : "unset");
 		fclose(log);
 	}
 	if (argc < 2)

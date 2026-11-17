@@ -1038,7 +1038,8 @@ fail:
 char g_ts[PATH_MAX];	/* the tailscale CLI; "" when not found */
 
 /* Each tailscale call's deadline; DCH_TS_MS=<ms> lowers it (tests only).
-** Read on the first call: serve calls it once before it unsets the knob. */
+** Read once at dch's start (main) and unset, so no child sees it;
+** serve unsets it too, in case it is started by other means. */
 int
 ts_ms(void)
 {

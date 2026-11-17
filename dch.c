@@ -15413,8 +15413,11 @@ static int main_run(int argc, char **argv);
 int
 main(int argc, char **argv)
 {
-	int rc = main_run(argc, argv);
+	int rc;
 
+	ts_ms();	/* DCH_TS_MS read once, then gone from every child (tests only) */
+	unsetenv("DCH_TS_MS");
+	rc = main_run(argc, argv);
 	if (rc != 0 && g_rhint[0])
 		fprintf(stderr, "(%s is not a known host; --host %s to reach it)\n",
 		        g_rhint, g_rhint);
