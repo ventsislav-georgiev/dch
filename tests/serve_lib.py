@@ -99,8 +99,10 @@ def setup():
     whois_fail_ok = set()	# serve logs whose whois_failed is the case
     slow_whois = []
 
-    def check(msg, cond):
+    def check(msg, cond, detail=""):
         print("  %s %s" % ("ok  " if cond else "FAIL", msg))
+        if detail and not cond:
+            print(detail)
         if not cond:
             fails.append(msg)
             if not slow_whois:
