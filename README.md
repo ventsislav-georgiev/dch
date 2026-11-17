@@ -1021,8 +1021,13 @@ it has memories or instruction files:
   as it does for a session with none yet (nothing the host sends tells the
   two apart).
 - **Refs**: what the session touched: the pull requests, issues and tickets
-  it mentions, one row each, a faint line over them saying so; `a` shows its
-  files, commits and URLs too, and the footer says how many are hidden. Rows
+  it mentions, then its terms (a backticked span or a `CONST_CASE` /
+  `snake_case` name said in a prompt or an answer, never only in a tool's
+  output), one row each, a faint line over them saying so; `a` shows its
+  files, commits and URLs too, and the footer says how many are hidden. In
+  each group below (on screen, the last reply, the rest) the terms come
+  after the other refs. `Enter` on a term opens its card: its first mention
+  as its definition, its mentions newest first. Rows
   are by latest mention, the one mentioned last on top, as Kindle's X-ray
   does; then by count, highest first; then the most recent first (later in
   the index; a ref seen again while the view is open moves up). The latest
@@ -1045,7 +1050,8 @@ it has memories or instruction files:
   "on screen now" line, as Kindle's X-ray puts this page first: the lowest
   on the screen on top, one row per ref, then a faint "the rest" line and
   the other rows. A ref on the screen that the index does not hold is there
-  too, with no count. They follow `a`, `t` and `/` like every row (the
+  too, with no count; a term only when the index holds it (the screen also
+  shows tools' output). They follow `a`, `t` and `/` like every row (the
   footer's hidden counts include them), and a ref in the group is not
   repeated below it. Nothing on the screen is a ref: no group line. The
   screen is read when Refs opens and once a second while it shows; it is

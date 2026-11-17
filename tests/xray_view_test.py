@@ -730,12 +730,152 @@ def test_said():
         v.close()
 
 
+TSIDS = ["11111111-2222-4333-8444-5555555555e%d" % k for k in (8, 9)]
+TDEF = "`ERR_LEDGER_SKEW` is raised when the ledger clock drifts past 5 s."
+TREPLY = ("Fixed #412. `ERR_LEDGER_SKEW` no longer fires; covered by "
+          "`test_retry_timeout`, close PAY-219.")
+
+
+def term_lines():
+    """Turn 1 defines ERR_LEDGER_SKEW, then says #377 and OLD_FLAG_NAME
+    (the rest's group); a tool's output alone says
+    TOOL_ONLY_TERM; turn 2's answer: #412, the two terms, PAY-219."""
+    return (turn("why does the ledger skew", "2026-11-10T10:00:00Z",
+                 call("t1", "Bash", {"command": "make check"}),
+                 result("t1", "fail: TOOL_ONLY_TERM in tool_only_case"),
+                 at(say(TDEF + " Older: #377 and `OLD_FLAG_NAME`."),
+                    "2026-11-10T10:01:00Z")) +
+            turn("fix it", "2026-11-10T11:00:00Z",
+                 at(say(TREPLY), "2026-11-10T11:01:00Z")))
+
+
+def fixture_terms():
+    """xv-tm: term_lines, ended, alone in its project."""
+    solo = "/home/demo/terms"
+    os.makedirs(os.path.dirname(tl("x", "-home-demo-terms")), exist_ok=True)
+    record("xv-tm", TSIDS[0], [dict(o, cwd=solo) if "cwd" in o else o
+                               for o in term_lines()], "-home-demo-terms",
+           solo)
+
+
+def test_terms():
+    """#459: terms (backticks, CONST_CASE / snake_case) show in Refs by
+    default, in the last reply's group after its machine refs; a term only
+    a tool's output says is never listed; the tab count has them."""
+    o = json.loads(dch("--xray", "xv-tm", "--json").stdout)
+    keys = [x["key"] for x in o["refs"]]
+    v, text = refs_plain("xv-tm")
+    try:
+        at_ = [text.find(x) for x in ("in the last reply", "PAY-219", "#412",
+                                      "test_retry_timeout", "ERR_LEDGER_SKEW")]
+        check("Refs #459: the last reply's group lists its terms after its "
+              "machine refs, the last on top", -1 not in at_ and
+              at_ == sorted(at_) and text.count("ERR_LEDGER_SKEW") == 1, text)
+        at_ = [text.find(x) for x in ("the rest", "#377", "OLD_FLAG_NAME")]
+        check("Refs #459: the rest's group: its terms after its machine "
+              "refs", -1 not in at_ and at_ == sorted(at_), text)
+        check("Refs #459: prose terms listed by default; one only a tool's "
+              "output says is not", "Pull requests, issues, tickets and "
+              "terms" in text and "ERR_LEDGER_SKEW" in text and
+              "TOOL_ONLY_TERM" not in text and "tool_only_case" not in text,
+              text)
+        check("Refs #459: the tab count includes the terms, which a does "
+              "not hide: no hidden count", ("Refs %d" % len(keys)) in text
+              and "term:ERR_LEDGER_SKEW" in keys and "hidden" not in text,
+              (keys, text))
+        v.key(b"a", 1.0)
+        v.pump(0.5)
+        text = screen(v, 0)
+        check("Refs #459: a term only in tool output is never listed (a "
+              "shows every kind)", "TOOL_ONLY_TERM" not in text and
+              "tool_only_case" not in text and
+              not any("TOOL_ONLY" in k for k in keys), (keys, text))
+        v.key(b"q")
+    finally:
+        v.close()
+
+
+def test_terms_live():
+    """#459, the audit's gap 2: the chord over a live session lists the
+    screen's term ERR_LEDGER_SKEW in the on-screen group after the
+    machine ref; one the index does not hold (tool output) is not there.
+    Enter on it opens its card: the first mention as its definition, its
+    mentions newest first."""
+    cwd = os.path.realpath(os.path.join(T, "tlive"))
+    os.makedirs(cwd, exist_ok=True)
+    proj = os.path.join(HOME, ".claude", "projects", cwd.replace("/", "-"))
+    os.makedirs(proj, exist_ok=True)
+    with open(os.path.join(proj, TSIDS[1] + ".jsonl"), "w") as f:
+        for o in term_lines():
+            f.write(json.dumps(dict(o, cwd=cwd) if "cwd" in o else o) + "\n")
+    dch("--spawn", "xv-tv", "/usr/bin/perl", "-e",
+        '$|=1; print "on screen: #412 ERR_LEDGER_SKEW TOOL_ONLY_TERM\\n";'
+        ' sleep 300')
+    pid = until(lambda: json.loads(dch("--cmd", "xv-tv").stdout or "{}")
+                .get("pid"), 5)
+    start = subprocess.run(["/bin/ps", "-o", "lstart=", "-p", str(pid)],
+                           capture_output=True, text=True,
+                           env={"LC_ALL": "C", "TZ": "UTC"}).stdout.strip()
+    sd = os.path.join(HOME, ".claude", "sessions")
+    os.makedirs(sd, exist_ok=True)
+    with open(os.path.join(sd, "%d.json" % pid), "w") as f:
+        json.dump({"pid": pid, "sessionId": TSIDS[1], "cwd": cwd,
+                   "procStart": start, "version": "2.1.0",
+                   "kind": "interactive", "status": "idle",
+                   "statusUpdatedAt": 1}, f)
+    lite = dch("--build").stdout.strip() == "lite"   # no mirror
+    a = Pty([DCH, "-a", "xv-tv"], rows=30, cols=100)
+    try:
+        attached(a)
+        a.pump(0.3)
+        mark = len(a.out)
+        a.key(b"\x1c", 0.05, full=True)
+        a.key(b"x", 0.05, full=True)
+        ok = a.wait(b"[Refs", start=mark) and until(
+            lambda: (a.pump(0.2), "in the last reply" in shown(a, mark) and
+                     (lite or "on screen now" in shown(a, mark)))[1], 10)
+        text = shown(a, mark)
+        want = (("in the last reply", "PAY-219", "#412", "test_retry_timeout",
+                 "ERR_LEDGER_SKEW") if lite else
+                ("on screen now", "#412", "ERR_LEDGER_SKEW",
+                 "in the last reply", "PAY-219", "test_retry_timeout"))
+        at_ = [text.find(x) for x in want]
+        check("Refs #459: the chord on a live session: ERR_LEDGER_SKEW in "
+              "the on-screen group after #412, not again below; "
+              "TOOL_ONLY_TERM not listed (lite: no screen, the last "
+              "reply's group)", ok and -1 not in at_ and at_ == sorted(at_)
+              and text.count("ERR_LEDGER_SKEW") == 1 and
+              "TOOL_ONLY_TERM" not in text, text)
+        mark = len(a.out)
+        # its row: the on-screen group's second (lite: the reply's fourth)
+        a.key(b"jjj" if lite else b"j", 0.5, full=True)
+        a.key(b"\r", 0.5, full=True)
+        ok = a.wait(b"Mentions: this session ", start=mark)
+        settle(a)
+        text = screen(a, mark)
+        rep = re.search(r"Reply +p2 +Fixed #412", text)
+        first = re.search(r"Reply +p1 +`ERR_LEDGER_SKEW` is raised", text)
+        check("card #459: Enter on ERR_LEDGER_SKEW opens its card, the first "
+              "mention as its definition, mentions newest first (p2 over "
+              "p1)", ok and "ERR_LEDGER_SKEW" in text and
+              re.search(r"term +`ERR_LEDGER_SKEW` is raised when the ledger "
+                        "clock drifts", text) and
+              text.count("is raised when the ledger") == 2 and rep and
+              first and rep.start() < first.start(), text)
+        a.key(b"q", 0.3, full=True)
+        a.key(b"q", 0.3, full=True)
+    finally:
+        a.close()
+        dch("-k", "xv-tv")
+
+
 def main():
     run_steps(fixture, test_refusals, test_view, fixture_refs, test_refs,
               fixture_latest, test_latest, test_lookup, fixture_order,
               test_order, fixture_tmp, test_tmp, test_memory_live,
               fixture_reply, test_reply, test_reply_live,
-              fixture_said, test_said)
+              fixture_said, test_said, fixture_terms, test_terms,
+              test_terms_live)
 
 
 if __name__ == "__main__":

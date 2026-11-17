@@ -2293,6 +2293,7 @@ xv_screen_scan(struct xv *v, const char *scr)
 	struct xv_scan c;
 	int code = v->corpus && !strcmp(v->corpus, "shell");
 	const char *cwd = v->label && v->label[0] == '/' ? v->label : NULL;
+	int mode = code ? XR_CODE : XR_PROSE | XR_TERMS;
 
 	xv_sr_free(v);
 	c.v = v;
@@ -2302,7 +2303,7 @@ xv_screen_scan(struct xv *v, const char *scr)
 		for (s = e; s > scr && s[-1] != '\n'; s--)
 			;
 		c.line = s;
-		(void)xr_grammar(s, (size_t)(e - s), code ? XR_CODE : XR_PROSE,
+		(void)xr_grammar(s, (size_t)(e - s), mode,
 		                 cwd, xv_span, &c);
 		if (s == scr)
 			break;
@@ -2318,7 +2319,7 @@ xv_reply_scan(struct xv *v)
 	struct xv_scan c;
 	int code = v->corpus && !strcmp(v->corpus, "shell");
 	const char *cwd = v->label && v->label[0] == '/' ? v->label : NULL;
-	int i, j;
+	int i, j, mode = code ? XR_CODE : XR_PROSE | XR_TERMS;
 
 	for (i = 0; i < v->nlr; i++)
 		xv_ref_free(&v->lr[i]);
@@ -2331,7 +2332,7 @@ xv_reply_scan(struct xv *v)
 		if (!e)
 			e = s + strlen(s);
 		c.line = s;
-		(void)xr_grammar(s, (size_t)(e - s), code ? XR_CODE : XR_PROSE,
+		(void)xr_grammar(s, (size_t)(e - s), mode,
 		                 cwd, xv_span, &c);
 	}
 	for (i = 0; i < v->nlr; i++)
@@ -2524,17 +2525,26 @@ xv_temp(const struct xv *v, const struct xv_ref *r)
 
 static const struct xv_ref *xv_sort_rf;
 
-/* Refs: the latest mentioned first (#262; an older host sends no
-** last_offset), then the highest count, then the most recently seen. The
-** offset is a record's line: only refs of one record tie, and only the
-** engine could tell their places apart (#452 puts the last answer's by
-** place in its own group). */
+/* A term (#458): shown by default, after the machine refs of its group */
+static int
+xv_term(const struct xv_ref *r)
+{
+	return !strcmp(r->shape, "term");
+}
+
+/* Refs: the machine refs before the terms (#459), the latest mentioned
+** first (#262; an older host sends no last_offset), then the highest
+** count, then the most recently seen. The offset is a record's line: only
+** refs of one record tie, and only the engine could tell their places
+** apart (#452 puts the last answer's by place in its own group). */
 static int
 xv_ref_cmp(const void *pa, const void *pb)
 {
 	const struct xv_ref *a = &xv_sort_rf[*(const int *)pa];
 	const struct xv_ref *b = &xv_sort_rf[*(const int *)pb];
 
+	if (xv_term(a) != xv_term(b))
+		return xv_term(a) - xv_term(b);
 	if (a->last != b->last)
 		return a->last > b->last ? -1 : 1;
 	if (a->count != b->count)
@@ -2617,9 +2627,9 @@ xv_vis1(struct xv *v, int k)
 	      (v->tab == 2 && xv_has(v->ch[k].resp, v->filt))
 	      : xv_has(r->text, v->filt) || xv_has(r->title, v->filt)))
 		return;
-	/* Refs opens on pulls, issues and tickets; a shows the rest */
+	/* Refs opens on pulls, issues, tickets and terms; a shows the rest */
 	if (r && strcmp(r->shape, "pull") && strcmp(r->shape, "issue") &&
-	    strcmp(r->shape, "ticket") && (v->nk++, !v->allk))
+	    strcmp(r->shape, "ticket") && !xv_term(r) && (v->nk++, !v->allk))
 		return;
 	if (r && xv_temp(v, r) && (v->ntmp++, !v->alltmp))
 		return;
@@ -2635,11 +2645,13 @@ xv_vis1(struct xv *v, int k)
 /* The rows a list tab shows (Prompts, Responses, Refs): their indexes,
 ** filtered. Prompts, Responses: the newest first (#290, #358). Refs: the
 ** refs on the screen now first (#294), the index's own row when it holds
-** the key, then the rest, never one twice. */
+** the key, then the rest, never one twice. Each group's terms come after
+** its machine refs (#459), and only the index's: it reads prose alone, the
+** screen and a reply may hold a tool's output. */
 static void
 xv_vis(struct xv *v)
 {
-	int k, j, n = v->tab == 1 ? v->nrf : v->nch;
+	int k, j, p, n = v->tab == 1 ? v->nrf : v->nch;
 	const char *sk = v->tab == 1 ? v->selk : v->tab ? v->sela : v->selp;
 
 	if (v->tab >= 4)
@@ -2658,11 +2670,16 @@ xv_vis(struct xv *v)
 		return;
 	for (k = 0; k < v->nrf; k++)
 		v->rf[k].onscr = 0;
+	for (p = 0; p < 2; p++)
 	for (j = 0; v->tab == 1 && j < v->nsr; j++)
 	{
+		if (xv_term(&v->sr[j]) != p)
+			continue;
 		for (k = 0; k < v->nrf && strcmp(v->rf[k].key, v->sr[j].key);
 		     k++)
 			;
+		if (p && k == v->nrf)
+			continue;
 		if (k < v->nrf)
 			v->rf[k].onscr = 1;
 		xv_vis1(v, k < v->nrf ? k : v->nrf + j);
@@ -2672,8 +2689,11 @@ xv_vis(struct xv *v)
 	** answer has none */
 	if (v->tab == 1)
 		xv_reply_scan(v);
+	for (p = 0; p < 2; p++)
 	for (j = v->nlr - 1; v->tab == 1 && j >= 0; j--)
 	{
+		if (xv_term(&v->lr[j]) != p)
+			continue;
 		for (k = 0; k < v->nsr && strcmp(v->sr[k].key, v->lr[j].key); k++)
 			;
 		if (k < v->nsr)
@@ -2681,6 +2701,8 @@ xv_vis(struct xv *v)
 		for (k = 0; k < v->nrf && strcmp(v->rf[k].key, v->lr[j].key);
 		     k++)
 			;
+		if (p && k == v->nrf)
+			continue;
 		if (k < v->nrf && v->rf[k].onscr)
 			continue;
 		if (k < v->nrf)
@@ -3285,7 +3307,9 @@ xv_draw_card(struct xv *v, int win)
 			pk_eol();
 			rows++;
 		}
-		if (d->passage[0] && rows < win / 2)
+		/* a term's first mention (#459): its title is the passage */
+		if (d->passage[0] && strcmp(d->passage, d->title) &&
+		    rows < win / 2)
 		{
 			const char *s = d->passage;
 			int l;
@@ -4369,8 +4393,8 @@ xv_draw(struct xv *v, int force)
 			pk_line();
 			pk_set("2");
 			snprintf(b, sizeof b, "  %s this session touched%s; %s opens a "
-			         "card", v->allk ? "Every ref" : "Pull requests, issues "
-			         "and tickets", v->nrf && v->rf[0].last >= 0 ?
+			         "card", v->allk ? "Every ref" : "Pull requests, issues, "
+			         "tickets and terms", v->nrf && v->rf[0].last >= 0 ?
 			         ", latest first" : "", ret);
 			pk_txt(b);
 			pk_eol();

@@ -40,7 +40,8 @@ Covers:
      one under HOME from ~, one too long cut at the front (its tail kept,
      a wide-character one within the width), a long URL keeping its host
      and its end; rows by latest mention (#262), then count, then the most
-     recent first; pulls, issues and tickets only until a shows files,
+     recent first; pulls, issues, tickets and prose terms (#459: after
+     the machine refs in each group, a term's card) until a shows files,
      commits and URLs, the footer counting them; files under
      /tmp, /private/tmp, /var/folders and $TMPDIR hidden, t toggling them,
      the footer saying how many, the tab count the engine's; the filter
