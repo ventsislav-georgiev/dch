@@ -2903,6 +2903,8 @@ usage(void)
 	    "  dch --xray <n> --ref <ref>|- [--scope session|project|all] [--full]\n"
 	    "       [--budget-ms <ms>] --json             one ref's mentions and\n"
 	    "                                             definitions as NDJSON\n"
+	    "                                             (-: read from stdin to\n"
+	    "                                             its end, 5 s at most)\n"
 	    "  dch --xray <n> --search <text>|- --json    the newest 50 places a\n"
 	    "                                             word or phrase was said\n"
 	    "                                             (-: read from stdin to\n"

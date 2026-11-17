@@ -1625,7 +1625,7 @@ lines as NDJSON, each with `schema:1`: `first` (the key, `mode`, `scope` and
 control character and none of the bidi controls U+200E, U+200F, U+202A to
 U+202E and U+2066 to U+2069 (`dch: bad ref`), and must parse as exactly one
 ref (`dch: not a ref`), relative paths against the session's cwd. `--ref -` reads the ref from standard input like `--search -`
-(see [`--search`](#x-ray-queries---xray): stdin not a terminal, a local session,
+(see [`--search`](#x-ray-queries---xray): stdin not a terminal, the query not routed to a remote host,
 256 bytes at most, closed within 5 s, else the empty ref's `dch: bad ref`; on a
 terminal or with a remote `host:name` the ref is a plain `-`, so `dch: not a ref`).
 - **Scope.** `--scope session` reads `<n>`'s own transcript, or its ring and
