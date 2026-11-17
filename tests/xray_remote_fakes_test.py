@@ -202,7 +202,7 @@ def test_link_drop():
         h.word = b"see o/r#6"
         h.up = True
         mark = len(v.out)
-        v.pump(2.5)
+        v.wait(b"o/r#6", start=mark)
         frame_ = redraw(v, 100)
         check("link drop, host back: Refs reads the screen again, o/r#6 "
               "in the group", v.wait(b"o/r#6", start=mark) and
