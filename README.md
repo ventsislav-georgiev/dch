@@ -1021,7 +1021,9 @@ it has memories or instruction files:
   files, commits and URLs too, and the footer says how many are hidden. Rows
   are by latest mention, the one mentioned last on top, as Kindle's X-ray
   does; then by count, highest first; then the most recent first (later in
-  the index; a ref seen again while the view is open moves up). A host older
+  the index; a ref seen again while the view is open moves up). The latest
+  mention is a record's line, so the newest answer's own order is the "in
+  the last reply" group's. A host older
   than 1.62.0 sends no latest mention: its rows are by count, and the faint
   line does not say "latest first". A ref with a definition or two or more mentions is bold. A file
   under the session's directory (top right) shows relative to it, else one
@@ -1044,7 +1046,13 @@ it has memories or instruction files:
   repeated below it. Nothing on the screen is a ref: no group line. The
   screen is read when Refs opens and once a second while it shows; it is
   not drawn or kept. An ended session and dch-lite have no screen, so no
-  group. Up to 1.61.0 a third tab, On screen, drew the screen with a
+  group. Under it (or first, with no screen) a second faint line, "in the
+  last reply", groups the refs of the newest answer, the one it names last
+  on top, so the last line's "close PAY-219" is the first row; a ref on the
+  screen is not repeated there, and a last turn with no answer has no such
+  group. It reads the answer text the view holds (the head of a long one,
+  up to 2 KB), follows `a`, `t` and `/` like the rest, and is not repeated
+  below. Up to 1.61.0 a third tab, On screen, drew the screen with a
   label on each ref.
 - **Search**: where a word or phrase was said in this session, for the
   thing on your screen you do not remember, or a topic from earlier. It

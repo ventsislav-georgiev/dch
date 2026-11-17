@@ -95,7 +95,7 @@ struct xv_ref
 	long long count, seen;	/* seen: later is more recent */
 	long long last;		/* last_offset (#262): -1 from an older host */
 	int defined, underline;
-	int onscr;		/* in the on-screen group (xv_vis) */
+	int onscr;		/* in the on-screen or last-reply group (xv_vis) */
 };
 
 struct xv_def
@@ -201,7 +201,8 @@ struct xv
 	long long rseq;
 	struct xv_kid kid[XV_NKIDS];
 	int sel[XV_NTAB], top[XV_NTAB], *vis, nvis, avis;	/* Responses: items */
-	int ngrp;		/* Refs: vis's first ngrp rows are on screen */
+	int ngrp, ngrp2;	/* Refs: vis's first ngrp rows are on screen, the
+				** next up to ngrp2 are in the last reply */
 	char *selk;		/* Refs: the selected row's key, followed when
 				** the rows change */
 	char *sela;		/* Responses: the selected item's anchor, so */
@@ -242,6 +243,8 @@ struct xv
 	** the index's, so count 0 and no title */
 	struct xv_ref *sr;
 	int nsr, asr;
+	struct xv_ref *lr;	/* the newest response's refs, document order */
+	int nlr, alr;
 	long long scr_at;
 	/* Tasks (#320), Memory (#323): vis holds their rows while vtab is 4
 	** or 5 and the list's gen (tvgen) and tvf say they are current */
@@ -2131,6 +2134,7 @@ struct xv_scan
 {
 	struct xv *v;
 	const char *line;
+	int rep;		/* the last reply: every span, into lr */
 };
 
 /* A span on the screen, its key once (#262: the index may not hold it,
@@ -2143,9 +2147,13 @@ xv_span(void *ctx, const struct xr_span *sp)
 	struct xv_ref r;
 	int k;
 
-	for (k = 0; k < v->nsr && strcmp(v->sr[k].key, sp->key); k++)
+	struct xv_ref **a = c->rep ? &v->lr : &v->sr;
+	int *n = c->rep ? &v->nlr : &v->nsr, *cap = c->rep ? &v->alr : &v->asr;
+
+	/* the reply keeps every place, xv_reply_scan drops the earlier ones */
+	for (k = 0; !c->rep && k < *n && strcmp((*a)[k].key, sp->key); k++)
 		;
-	if (k < v->nsr || xv_grow(&v->sr, &v->asr, v->nsr, sizeof r) < 0)
+	if ((!c->rep && k < *n) || xv_grow(a, cap, *n, sizeof r) < 0)
 		return 0;
 	memset(&r, 0, sizeof r);
 	r.key = strdup(sp->key);
@@ -2160,7 +2168,7 @@ xv_span(void *ctx, const struct xr_span *sp)
 		free(r.text);
 		return 0;
 	}
-	v->sr[v->nsr++] = r;
+	(*a)[(*n)++] = r;
 	return 0;
 }
 
@@ -2176,6 +2184,7 @@ xv_screen_scan(struct xv *v, const char *scr)
 
 	xv_sr_free(v);
 	c.v = v;
+	c.rep = 0;
 	for (;; e = s - 1)
 	{
 		for (s = e; s > scr && s[-1] != '\n'; s--)
@@ -2186,6 +2195,45 @@ xv_screen_scan(struct xv *v, const char *scr)
 		if (s == scr)
 			break;
 	}
+}
+
+/* The newest response's refs, one each at its last place, in document
+** order (xv_vis lists them from the end). Whatever text the view holds. */
+static void
+xv_reply_scan(struct xv *v)
+{
+	const char *s, *e, *t = v->nch ? v->ch[v->nch - 1].resp : "";
+	struct xv_scan c;
+	int code = v->corpus && !strcmp(v->corpus, "shell");
+	const char *cwd = v->label && v->label[0] == '/' ? v->label : NULL;
+	int i, j;
+
+	for (i = 0; i < v->nlr; i++)
+		xv_ref_free(&v->lr[i]);
+	v->nlr = 0;
+	c.v = v;
+	c.rep = 1;
+	for (s = t; *s; s = *e ? e + 1 : e)
+	{
+		e = strchr(s, '\n');
+		if (!e)
+			e = s + strlen(s);
+		c.line = s;
+		(void)xr_grammar(s, (size_t)(e - s), code ? XR_CODE : XR_PROSE,
+		                 cwd, xv_span, &c);
+	}
+	for (i = 0; i < v->nlr; i++)
+		for (j = i + 1; j < v->nlr; j++)
+			if (!strcmp(v->lr[i].key, v->lr[j].key))
+			{
+				xv_ref_free(&v->lr[i]);
+				v->lr[i].key = NULL;
+				break;
+			}
+	for (i = j = 0; i < v->nlr; i++)
+		if (v->lr[i].key)
+			v->lr[j++] = v->lr[i];
+	v->nlr = j;
 }
 
 /* The session's screen from its mirror, then its refs. A remote one's
@@ -2365,7 +2413,10 @@ xv_temp(const struct xv *v, const struct xv_ref *r)
 static const struct xv_ref *xv_sort_rf;
 
 /* Refs: the latest mentioned first (#262; an older host sends no
-** last_offset), then the highest count, then the most recently seen. */
+** last_offset), then the highest count, then the most recently seen. The
+** offset is a record's line: only refs of one record tie, and only the
+** engine could tell their places apart (#452 puts the last answer's by
+** place in its own group). */
 static int
 xv_ref_cmp(const void *pa, const void *pb)
 {
@@ -2430,11 +2481,14 @@ xv_rtab(const struct xv *v)
 	return v->have && !strcmp(xv_noun(v), "prompt");
 }
 
-/* Refs row k of xv_vis: the index's, or past it the screen's. */
+/* Refs row k of xv_vis: the index's, or past it the screen's, then the
+** last reply's. */
 static struct xv_ref *
 xv_rfat(struct xv *v, int k)
 {
-	return k < v->nrf ? &v->rf[k] : &v->sr[k - v->nrf];
+	k -= v->nrf;
+	return k < 0 ? &v->rf[k + v->nrf] : k < v->nsr ? &v->sr[k]
+	       : &v->lr[k - v->nsr];
 }
 
 /* Row k when the filter and the hidden kinds show it (those counted). */
@@ -2502,13 +2556,33 @@ xv_vis(struct xv *v)
 		xv_vis1(v, k < v->nrf ? k : v->nrf + j);
 	}
 	v->ngrp = v->nvis;
+	/* the newest answer's refs, its last place on top; a turn with no
+	** answer has none */
+	if (v->tab == 1)
+		xv_reply_scan(v);
+	for (j = v->nlr - 1; v->tab == 1 && j >= 0; j--)
+	{
+		for (k = 0; k < v->nsr && strcmp(v->sr[k].key, v->lr[j].key); k++)
+			;
+		if (k < v->nsr)
+			continue;
+		for (k = 0; k < v->nrf && strcmp(v->rf[k].key, v->lr[j].key);
+		     k++)
+			;
+		if (k < v->nrf && v->rf[k].onscr)
+			continue;
+		if (k < v->nrf)
+			v->rf[k].onscr = 1;
+		xv_vis1(v, k < v->nrf ? k : v->nrf + v->nsr + j);
+	}
+	v->ngrp2 = v->nvis;
 	for (k = 0; k < n; k++)
 		if (v->tab != 1 || !v->rf[k].onscr)
 			xv_vis1(v, v->tab == 1 ? k : n - 1 - k);
-	if (v->tab == 1 && v->nvis - v->ngrp > 1)
+	if (v->tab == 1 && v->nvis - v->ngrp2 > 1)
 	{
 		xv_sort_rf = v->rf;
-		qsort(v->vis + v->ngrp, (size_t)(v->nvis - v->ngrp),
+		qsort(v->vis + v->ngrp2, (size_t)(v->nvis - v->ngrp2),
 		      sizeof *v->vis, xv_ref_cmp);
 	}
 	/* Refs: the selection stays on its ref while the rows change under
@@ -3950,7 +4024,7 @@ xv_draw(struct xv *v, int force)
 	else
 	{
 		int *sel = &v->sel[v->tab], *top = &v->top[v->tab], win = v->win;
-		int g, h1, h2, i;
+		int g, g2, h1, h2, h3, i;
 
 		xv_vis(v);
 		n = v->nvis;
@@ -3968,29 +4042,35 @@ xv_draw(struct xv *v, int force)
 			win--;
 		}
 		/* Refs: a faint line over the on-screen group, one over the
-		** rest under it (#294); the selection's row keeps its line in
-		** view */
+		** last reply's, one over the rest under them (#294); the
+		** selection's row keeps its line in view */
 		g = v->tab == 1 ? v->ngrp : 0;
+		g2 = v->tab == 1 ? v->ngrp2 : 0;
 		h1 = g > 0;
-		h2 = g > 0 && n > g;
+		h3 = g2 > g;
+		h2 = (g > 0 || h3) && n > g2;
 		if (*sel >= n)
 			*sel = n - 1;
 		if (*sel < 0)
 			*sel = 0;
-		i = *sel + h1 + (h2 && *sel >= g);
-		xv_clamp(&i, top, n + h1 + h2, win);
-		if (*top == i && *top && (*sel ? h2 && *sel == g : h1))
+		i = *sel + h1 + (h3 && *sel >= g) + (h2 && *sel >= g2);
+		xv_clamp(&i, top, n + h1 + h2 + h3, win);
+		if (*top == i && *top &&
+		    (*sel ? (h3 && *sel == g) || (h2 && *sel == g2) : h1 || h3))
 			(*top)--;
 		if (v->tab < 2)
 			xv_selk(v);
 		for (k = *top; k < *top + win; k++)
 		{
-			i = k - h1 - (h2 && k > g + 1);
+			int p3 = g + h1, p2 = g2 + h1 + h3;
+
+			i = k - h1 - (h3 && k > p3) - (h2 && k > p2);
 			pk_line();
-			if ((h1 && !k) || (h2 && k == g + 1))
+			if ((h1 && !k) || (h3 && k == p3) || (h2 && k == p2))
 			{
 				pk_set("2");
-				pk_txt(k ? "  the rest" : "  on screen now");
+				pk_txt(h1 && !k ? "  on screen now" : h3 && k == p3
+				       ? "  in the last reply" : "  the rest");
 			}
 			else if (i < n && v->tab == 0)
 				xv_row_ch(&v->ch[v->vis[i]], v->vis[i],
@@ -4588,6 +4668,9 @@ xv_free(struct xv *v)
 	free(v->e);
 	free(v->rl);
 	free(v->sr);
+	for (k = 0; k < v->nlr; k++)
+		xv_ref_free(&v->lr[k]);
+	free(v->lr);
 	free(v->selk);
 	free(v->sela);
 	free(v->selp);
