@@ -598,20 +598,25 @@ def test_tabbar():
             for k in range(len(TABS)):
                 if k:
                     mark = len(v.out)
-                    v.key(b"\t", 0.4)
-                # the bar redrawn since the resize or Tab: on a slow runner
-                # the old bar, at the old width, was taken for it
-                bar = until(lambda: (v.pump(0.1),
-                                     rows(v.out[mark:]).get(2, ""))[1], 10)
+                    v.key(b"\t", 0)
+                # the bar redrawn since the resize or Tab with this tab
+                # selected: on a slow runner the old bar, at the old width,
+                # was taken for it; a bar that never selects it fails below
+                until(lambda: (v.pump(0.1), "[" + TABS[k] in
+                               rows(v.out[mark:]).get(2, ""))[1], 10)
+                v.pump(0.1)  # the rest of that redraw
+                bar = rows(v.out[mark:]).get(2, "")
                 bars.append((TABS[k], bar))
             check("tab bar at %d columns: every tab selected in turn, no word "
                   "cut, the selected one shown (NIT-V9)" % w,
                   all(bar_ok(b, t, w) for t, b in bars), bars)
             mark = len(v.out)
-            v.key(b"\t", 0.4)  # back to Prompts
+            v.key(b"\t", 0)  # back to Prompts
             # its 24-column bar must land before the next mark: a late one
             # would be taken for a tab drawn at 20 columns
-            until(lambda: (v.pump(0.1), rows(v.out[mark:]).get(2, ""))[1], 10)
+            until(lambda: (v.pump(0.1), "[Prompts" in
+                           rows(v.out[mark:]).get(2, ""))[1], 10)
+            v.pump(0.1)
         mark = len(v.out)
         v.resize(24, 20)
         until(lambda: (v.pump(0.1), "too small" in screen(v, mark))[1], 10)
