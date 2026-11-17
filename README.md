@@ -948,7 +948,9 @@ it has memories or instruction files:
   type it; the selection stays on the first row there, or on its prompt
   once you moved down, as on Responses. `/` filters.
   `Enter` opens the prompt read-only with everything up to the next one
-  (prompt, replies, tool calls, output), scrollable.
+  (prompt, replies, tool calls, output), scrollable. A long answer
+  (over 6000 characters) is kept as its first and last 3000, with a faint
+  `… N characters cut …` line between; `G` reaches the tail.
   The reader reads on: its header says which prompt it is on (`3 of 12`,
   the list's number) and its title. A scroll key at the prompt's end (or
   top) first says on the status line which prompt comes next (or before),
@@ -1006,8 +1008,10 @@ it has memories or instruction files:
   when you switch to it. Each item is the prompt's row as on Prompts, the
   turn's tools on one faint line (e.g. `Edit 3 (2 files, +40 -12), Bash 2,
   Read 1`), then the answer wrapped to the width, at most 8 lines, Markdown
-  as written. A faint `…` says there is more: the reader has it (the
-  engine keeps the first and last 1 KB of an answer over 2 KB). A turn still running says
+  as written. A faint `…` says there is more: the reader has it. An answer
+  over 2 KB comes as its first and last 1 KB; the newest item may use up to
+  half the window (not 8 lines) to show the head, a faint `…` and the tail,
+  its Next steps. A turn still running says
   `working…`; an answer the size cap left out says `Enter reads it`. `j`
   `k` move item by item. `Enter` reads the prompt in the reader, opened at
   the answer (at the prompt's end when it cannot find it), and `q` comes

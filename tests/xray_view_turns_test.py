@@ -826,10 +826,70 @@ def test_search():
         v.close()
 
 
+def fixture_tail():
+    """xv-tl8: a short answer, then an 8 KB final one ending in TAILMARK
+    (#451 cuts it to head + tail)."""
+    big = "\n".join("paragraph %03d of the long final answer, filler words"
+                    % i for i in range(1, 150))
+    big += "\n\nNext steps: ship it. TAILMARK"
+    record("xv-tl8", TSID, turn("short one", "2026-11-10T10:00:00Z",
+                                say("Short answer.")) +
+           turn("the long one", "2026-11-10T10:10:00Z", say(big)))
+
+
+def test_tail():
+    ch = json.loads(dch("--xray", "xv-tl8", "--json").stdout)["chapters"]
+    check("tail fixture: the 8 KB answer is cut by the engine, the short "
+          "one not", ch[1].get("response_cut") and
+          not ch[0].get("response_cut"), ch)
+    v = Pty([DCH, "--xray", "xv-tl8"], rows=70, cols=100,
+            env={"NO_COLOR": ""})
+    try:
+        v.wait(b"Prompts 2")
+        v.pump(0.5)
+        v.key(b"\t", 1.0)
+        raw = bytes(v.out)
+        scr = rows(v.out)
+        it = dict(items(scr))
+        long_ = it.get("the long one", [])
+        check("Responses: the newest item shows the head, a lone ellipsis "
+              "and the tail (TAILMARK), more than 8 lines",
+              long_ and long_[0].startswith("paragraph 001") and
+              "\u2026" in long_ and long_[-1].endswith("TAILMARK") and
+              len(long_) > 9, long_)
+        check("Responses: the joiner ellipsis is faint",
+              re.search(rb"\033\[0;2m +\xe2\x80\xa6", raw) is not None,
+              raw[-600:])
+        check("Responses: the short answer stays as it was",
+              it.get("short one") == ["Short answer."], it)
+        mark = len(v.out)
+        v.key(b"\r", 1.5)
+        v.wait(b"Reply", start=mark)
+        v.pump(0.5)
+        v.key(b"G", 0.8)
+        mark = len(v.out)
+        v.key(b"g", 0.5)
+        v.key(b"G", 0.8)
+        raw = bytes(v.out[mark:])
+        scr = rows(v.out[mark:])
+        text = "\n".join(scr.values())
+        check("reader: G shows TAILMARK", "TAILMARK" in text, text)
+        check("reader: one cut line, faint (not plain text)",
+              len(re.findall(r"\d+ characters cut", text)) == 1 and
+              re.search(rb"\033\[0;2m +\xe2\x80\xa6 \d+ characters cut "
+                        rb"\xe2\x80\xa6", raw) is not None, (text, raw))
+        v.key(b"q", 0.3)
+        v.key(b"q")
+        v.exit()
+    finally:
+        v.close()
+
+
 def main():
     run_steps(fixture_auto, test_auto, test_compact, test_gone, fixture_resp,
               test_responses, test_responses_live, test_responses_codex,
-              test_tasks_codex, fixture_search, test_search)
+              test_tasks_codex, fixture_search, test_search, fixture_tail,
+              test_tail)
 
 
 if __name__ == "__main__":

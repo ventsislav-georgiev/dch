@@ -115,7 +115,7 @@ struct xv_men
 struct xv_ent
 {
 	char *role, *tool, *text;
-	int error;
+	int error, cut;	/* cut: the engine cut the middle (a marker line) */
 	long long off;	/* its record's, -1 from a host that sends none */
 };
 
@@ -1822,6 +1822,8 @@ xv_wrap(struct xv *v, int w)
 		for (;;)
 		{
 			size_t ll = strcspn(s, "\n"), f;
+			int mark = v->e[k].cut && !strncmp(s, "\xe2\x80\xa6 ", 4) &&
+			           ll > 23 && !strncmp(s + ll - 19, " characters cut \xe2\x80\xa6", 19);
 
 			do
 			{
@@ -1832,7 +1834,7 @@ xv_wrap(struct xv *v, int w)
 					return;
 				l.s = s;
 				l.n = f;
-				l.kind = out ? 2 : 1;
+				l.kind = out || mark ? 2 : 1;
 				v->rl[v->nrl++] = l;
 				s += f;
 				ll -= f;
@@ -1949,6 +1951,7 @@ xv_rline(struct xv *v, const struct json_parser *p)
 		e.tool = xv_str(p, t, "tool");
 		e.text = xv_str(p, t, "text");
 		e.error = xv_bool(p, t, "error");
+		e.cut = xv_num(p, t, "cut", 0) > 0;
 		e.off = xv_num(p, t, "offset", -1);
 		/* a tab or CR as a blank: the reader lays text out itself */
 		for (c = e.text; *c; c++)
@@ -2792,9 +2795,9 @@ xv_hit1(struct xv *v, int i, int room)
 static int
 xv_feed1(struct xv *v, int i, int room)
 {
-	int k = v->vis[i], h = 0, w = pk_w - 8, l;
+	int k = v->vis[i], h = 0, w = pk_w - 8, l, tail = 0;
 	const struct xv_ch *c;
-	const char *s;
+	const char *s, *tl;
 	size_t n;
 
 	if (v->tab == 3)
@@ -2812,18 +2815,67 @@ xv_feed1(struct xv *v, int i, int room)
 		pk_txt(c->tools);
 		pk_eol();
 	}
-	for (l = 0; *s && l < XV_ALINES; l++)
+	/* the newest item holds up to half the window, so a cut answer's
+	** tail shows: the head's first lines, a faint ellipsis, the tail's
+	** last (the engine joins them with "\n...\n") */
+	if (i == 0 && c->rcut && (tl = strstr(s, "\n\xe2\x80\xa6\n")) != NULL)
 	{
-		const char *t = s;
+		const char *hs = s, *t;
+		int nt, nh, hl, tk, rl = v->win / 2 > XV_ALINES ? v->win / 2 : XV_ALINES;
 
-		s = xv_wline(t, w, &n);
-		if (xv_fline1(&h, room, 0))
+		tl += 5;
+		for (nt = 0, t = tl; *t; nt++)
+			t = xv_wline(t, w, &n);
+		for (nh = 0, t = s; t < tl - 5; nh++)
+			t = xv_wline(t, w, &n);
+		tk = nt < rl / 2 ? nt : rl / 2;
+		hl = rl - 1 - tk;
+		if (nh + 1 + nt <= rl)
+			hl = nh, tk = nt;
+		for (l = 0; l < hl && hs < tl - 5; l++)
 		{
-			xv_txtn(t, n);
+			t = hs;
+			hs = xv_wline(t, w, &n);
+			if (xv_fline1(&h, room, 0))
+			{
+				xv_txtn(t, n);
+				pk_eol();
+			}
+		}
+		if (xv_fline1(&h, room, 1))
+		{
+			pk_txt(xv_ell());
 			pk_eol();
 		}
+		for (t = tl, l = nt - tk; l-- > 0;)
+			t = xv_wline(t, w, &n);
+		while (*t)
+		{
+			const char *u = t;
+
+			t = xv_wline(u, w, &n);
+			if (xv_fline1(&h, room, 0))
+			{
+				xv_txtn(u, n);
+				pk_eol();
+			}
+		}
+		s = t;
+		tail = 1;
 	}
-	if ((*s || c->rcut || (!c->resp[0] && (xv_working(v, k) ||
+	else
+		for (l = 0; *s && l < XV_ALINES; l++)
+		{
+			const char *t = s;
+
+			s = xv_wline(t, w, &n);
+			if (xv_fline1(&h, room, 0))
+			{
+				xv_txtn(t, n);
+				pk_eol();
+			}
+		}
+	if ((*s || (c->rcut && !tail) || (!c->resp[0] && (xv_working(v, k) ||
 	     c->roff >= 0))) && xv_fline1(&h, room, 1))
 	{
 		pk_txt(c->resp[0] ? xv_ell() : xv_working(v, k) ? "working"
