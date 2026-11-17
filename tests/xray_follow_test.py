@@ -585,6 +585,73 @@ def test_follow_tasks_memory():
         dch("-k", n)
 
 
+def test_follow_memory_touch_flood():
+    """#462: 4100 Reads of unrelated .md files must not push out a later
+    Read of a memory (the live touch table keeps only paths that can be
+    rows): the stream's memory row is the one-shot's, loaded, with its
+    chapter."""
+    n = "xc-fmf"
+    bindir = os.path.join(T, "bin")
+    fdir = os.path.join(T, "fake")
+    proj = os.path.join(T, "fproj-mf")
+    for d in (bindir, fdir, proj):
+        os.makedirs(d, exist_ok=True)
+    shutil.copy(os.path.join(HERE, "fake_claude.py"),
+                os.path.join(bindir, "claude"))
+    os.chmod(os.path.join(bindir, "claude"), 0o755)
+    env = dict(ENV, PATH=bindir + ":" + ENV.get("PATH", "/usr/bin:/bin"),
+               FAKE_CLAUDE_DIR=fdir)
+    sdir = os.path.join(HOME, ".claude", "sessions")
+    had = set(os.listdir(sdir)) if os.path.isdir(sdir) else set()
+    r = subprocess.run([DCH, "--spawn", n, "--size", "80x24", "--cwd", proj,
+                        "claude"], capture_output=True, text=True, timeout=30,
+                       env=env)
+    check("touch flood: claude spawned", r.returncode == 0, r.stderr)
+    fl = None
+    use = lambda i, name, inp: {"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "id": i, "name": name, "input": inp}]}}
+    try:
+        rec = wait_for(lambda: [f for f in os.listdir(sdir)
+                                if f.endswith(".json") and f not in had]
+                       if os.path.isdir(sdir) else None, 10)
+        sid = json.load(open(os.path.join(sdir, rec[0])))["sessionId"]
+        pdir = os.path.join(HOME, ".claude", "projects", key(proj))
+        mdir = os.path.join(pdir, "memory")
+        os.makedirs(mdir, exist_ok=True)
+        with open(os.path.join(mdir, "a.md"), "w") as f:
+            f.write("---\nname: Alpha\ndescription: the first\n---\nbody a\n")
+        tp = os.path.join(pdir, sid + ".jsonl")
+
+        def put(objs, mode="a"):
+            with open(tp, mode) as f:
+                f.write("".join(json.dumps(o) + "\n" for o in objs))
+
+        put([{"type": "user", "cwd": proj,
+              "message": {"content": "read lots #41"}}] +
+            [use("f%d" % i, "Read", {"file_path": "/nowhere/d%d/f%d.md" %
+                                     (i % 7, i)}) for i in range(4100)],
+            "w")
+        wait_for(lambda: (xray(n, "--json")[1] or {}).get("corpus") ==
+                 "claude", 10)
+        fl = Follow(n, extra=["--memory"])
+        fl.wait(lambda o: "done" in o)
+        k = len(fl.got)
+        put([use("r1", "Read", {"file_path": os.path.join(mdir, "a.md")})])
+        a = fl.wait(lambda o: "memory" in o and o["memory"]["id"] == "a" and
+                    o["memory"]["session"] == "loaded", frm=k)
+        _, mm, _ = lines(n, "--memory", "--json")
+        mine = [m for m in mm if "memory" in m and m["memory"]["id"] == "a"]
+        check("touch flood: after 4100 unrelated .md Reads a memory's Read "
+              "sends its row, loaded with its chapter, as the one-shot has "
+              "it", a and mine and a[-1] == mine[0] and
+              mine[0]["memory"]["session"] == "loaded" and
+              mine[0]["memory"].get("chapter"), (fl.objs(k), mm))
+    finally:
+        if fl:
+            fl.stop()
+        dch("-k", n)
+
+
 def test_follow_fast():
     """A fast first paint (#447): past 32 MB, the newest 32 MB's snapshot
     (why range, the tail's chapters only) and its blocks first, then reset
@@ -1523,6 +1590,7 @@ def main():
     try:
         test_follow_claude()
         test_follow_tasks_memory()
+        test_follow_memory_touch_flood()
         test_follow_fast()
         test_follow_late()
         test_follow_cap()

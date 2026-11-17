@@ -646,10 +646,10 @@ struct xm_live
 	char *agent, *cfg, *path, *cwd;
 };
 
-/* shortcut: only .md paths (every row's is) and the first XM_TOUCHES of
-** them are kept; upgrade if a row's file can be named otherwise */
+/* shortcut: only .md paths that can be rows, the first XM_TOUCHES of
+** them kept; upgrade if a row's file can be named otherwise */
 static void
-xm_ltouch(struct xm_live *l, const char *p, int how, unsigned long long seq,
+xm_ltouch(struct xm_live *l, char *p, int how, unsigned long long seq,
           const char *chapter)
 {
 	size_t n = strlen(p), lo = 0, hi = l->tn, m;
@@ -658,6 +658,21 @@ xm_ltouch(struct xm_live *l, const char *p, int how, unsigned long long seq,
 
 	if (n < 3 || strcmp(p + n - 3, ".md"))
 		return;
+	/* only a path that can become a row: under the session's memory
+	** directory (a row listed later), or an instruction row by path (the
+	** one-shot's xm_bypath match) */
+	{
+		struct xm_row key, *kp = &key;
+		const char *sl = l->path ? strrchr(l->path, '/') : NULL;
+		size_t dl = sl ? (size_t)(sl - l->path) : 0;
+
+		key.path = p;
+		if (!(dl && !strncmp(p, l->path, dl) &&
+		      !strncmp(p + dl, "/memory/", 8)) &&
+		    !(l->s.byp &&
+		      bsearch(&kp, l->s.byp, l->s.n, sizeof *l->s.byp, xm_bypath)))
+			return;
+	}
 	while (lo < hi)
 	{
 		m = lo + (hi - lo) / 2;
