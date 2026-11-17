@@ -1082,10 +1082,12 @@ it has memories or instruction files:
   last changed the task, and `q` comes back to it; a task with no prompt
   opens a card with what is known of it (title in full, status, note,
   times, blocked by, group, URL). `/` filters on the id, title, note and
-  label; `o` works as on Prompts. The list is asked for after the prompts
-  have shown and is drawn as it comes; it is read again when you open the
-  tab and, while the session runs, at most every 5 seconds while the tab
-  shows. A faint line under the rows gives the list's warning, and says
+  label; `o` works as on Prompts. The list comes in the view's one
+  `--follow` stream (`--tasks --memory`), after the prompts, drawn as it
+  comes; while the session runs a task's change shows as the stream sends
+  it, with no query of its own. A host whose dch refuses `--follow
+  --tasks` (an older one) gets the old queries: the list read again
+  when you open the tab and at most every 5 seconds while it shows. A faint line under the rows gives the list's warning, and says
   when the history was too long to read whole. A shell session, an empty
   list and a host older than this dch have no Tasks tab.
 - **Memory** (the last tab, only when `--memory` lists something): the
@@ -1099,9 +1101,10 @@ it has memories or instruction files:
   a text cut at 16 KB says so and names the file, when it has one. On a card of a memory
   this session wrote or loaded, `Enter` reads that prompt, and `q` comes
   back to the card. `/` filters on the id, title, note, kind, path and
-  text; `o` works as on Prompts. The list is asked for after the prompts
-  have shown; while the session runs it is read again every 30 seconds
-  while the tab shows. A shell session, no memory and a host older
+  text; `o` works as on Prompts. The list comes in the same stream as
+  Tasks; a memory file added, changed or removed shows as the stream sends
+  it (on a host that refuses that stream: read again every 30 seconds
+  while the tab shows). A shell session, no memory and a host older
   than this dch have no Memory tab; dch-lite has both tabs.
 
 A ref typed after `/` (a ticket, issue, pull request, commit, file or URL,

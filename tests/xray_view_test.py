@@ -533,8 +533,10 @@ def test_tmp():
 
 
 def test_memory_live():
-    """LOW-V28: Memory shown on a running session is read again every 30 s
-    with no new transcript line (a memory file changes apart from it)."""
+    """LOW-V28: a memory file added on a running session shows with no new
+    transcript line (a memory file changes apart from it): the follow
+    watches the memory dir (#448); DCH_XRAY_MEVERY lowers the 30 s re-read
+    of a host that refuses that stream."""
     cwd = os.path.realpath(os.path.join(T, "mlive"))
     os.makedirs(cwd, exist_ok=True)
     proj = os.path.join(HOME, ".claude", "projects", cwd.replace("/", "-"))

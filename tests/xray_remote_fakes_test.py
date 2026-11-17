@@ -27,11 +27,11 @@ Covers:
       line is left.
   16. Tasks (#320): srv:xv-tk, two tasks on the host: the tab last with
       its open count, Pending then Done, Enter reads the turn that last
-      changed the task from the host at 2 of 2, q back to it; the follow,
-      the list and the chapter each a ctl --xray (every other count above
-      takes the list's query as one more ctl of a Claude session's view,
-      and a silent host's view holds it as one more child). A fake host
-      that refuses --tasks as a dch before it: no tab, nothing said. A fake
+      changed the task from the host at 2 of 2, q back to it; the follow
+      (the lists in it, #448) and the chapter each a ctl --xray. A fake
+      host that refuses --tasks as a dch before it: no tab, nothing said.
+      A fake host older than #446 refuses --follow with the lists (exit 2):
+      the follow alone, then the lists' own queries (#448). A fake
       answer in two parts 1.5 s apart: the tab with the first part's rows,
       a line over 64 KB dropped, the list's title, warning and partial line,
       PARKED and blocked by 9, 12 on a row, ESC, BEL, C1, bidi and invalid
@@ -44,10 +44,9 @@ Covers:
   17. Memory (#323): srv:xv-me, memories on the host: the tab last with
       every row counted, This session (wrote) then Memories; Enter opens
       the card with its text; Enter on the card reads the turn that wrote
-      it from the host, q back to the card, q back to the row; the follow,
-      the two lists and the chapter each a ctl --xray (every count above
-      takes the memory list's query as one more ctl, a silent host's view
-      one more child). A fake host that refuses --memory: no tab, nothing
+      it from the host, q back to the card, q back to the row; the follow
+      (the two lists in it, #448) and the chapter each a ctl --xray. A
+      fake host that refuses --memory: no tab, nothing
       said. A fake command answer: the list's title as the group's name,
       its header warn and done-line warn, a kind of any word, a free-text
       updated with no age, a row with no path; 1100 texts of 16 KB: the
@@ -72,7 +71,9 @@ class Flaky(Fake):
     """A host with ctl, ctl-cancel and xray whose link drops: --follow
     answers a live snapshot and holds the stream, --read a screen with
     self.word; down() cuts every connection and each new one at once, up()
-    answers again."""
+    answers again. Its dch is older than #446: --follow with --tasks or
+    --memory is a usage refusal (exit 2), so the view asks the lists with
+    their own queries (#448)."""
 
     def __init__(self, snap=None, chapters=None):
         super().__init__("ok", ops=["ctl", "ctl-cancel", "xray"])
@@ -115,6 +116,16 @@ class Flaky(Fake):
                                                "ops": self.ops}))
                     elif t == 0x30:
                         argv = json.loads(body)["argv"]
+                        self.bodies.append(argv)
+                        if "--follow" in argv and ("--tasks" in argv or
+                                                   "--memory" in argv):
+                            fl = "--tasks" if "--tasks" in argv \
+                                else "--memory"
+                            c.sendall(frame(0x32, ("dch: bad usage: %s and "
+                                                   "--follow\n" % fl)
+                                            .encode()) +
+                                      frame(0x33, {"exit": 2}))
+                            continue
                         if "--follow" in argv:
                             c.sendall(frame(0x31, self.snap))
                             continue    # a stream: held until the close
@@ -413,7 +424,8 @@ def trows(v):
 
 def test_tasks(port):
     """The host's task list: the tab, its rows, Enter reads the turn from
-    the host, q back; the follow, the list and the chapter each a ctl."""
+    the host, q back; the follow (the lists in it) and the chapter each a
+    ctl."""
     hosts("srv=127.0.0.1:%d" % port)
     n0 = ctls("--xray")
     late = []
@@ -436,15 +448,15 @@ def test_tasks(port):
         check("Tasks, remote: q back to the same task",
               "Ship the parser" in head(v), head(v))
         # q quits: every query sent first, the other list too (#374)
-        host_ran(v, n0 + 4, "follow, task list, memory list, chapter", late)
+        host_ran(v, n0 + 2, "follow with the lists, chapter", late)
         v.key(b"q", 0)
         check("Tasks, remote: q exits 0", v.exit() == 0, v.out[-80:])
     finally:
         v.close()
-    until(lambda: ctls("--xray") - n0 >= 4, 5)
-    check("Tasks, remote: the follow, the task and memory lists and the "
-          "chapter, each its own ctl --xray on the host",
-          ctls("--xray") - n0 == 4,
+    until(lambda: ctls("--xray") - n0 >= 2, 5)
+    check("Tasks, remote: the follow (the task and memory lists in it, "
+          "#448) and the chapter, each its own ctl --xray on the host",
+          ctls("--xray") - n0 == 2,
           (ctls("--xray") - n0, "not on the host in time: %s" % late))
 
 
@@ -514,6 +526,15 @@ def test_tasks_fake():
     v = Pty([DCH, "--xray", "q:fk"])
     try:
         ok = tabbar(v, "Tasks 2")
+        fol = [a for a in h.bodies if "--follow" in a]
+        check("Tasks, a host older than #446 (#448): the follow with the "
+              "lists refused (exit 2), then the follow alone and the task "
+              "and memory lists' own queries", ok and len(fol) == 2 and
+              "--tasks" in fol[0] and "--memory" in fol[0] and
+              "--tasks" not in fol[1] and "--memory" not in fol[1] and
+              [a for a in h.bodies if "--tasks" in a and "--follow" not in a]
+              and [a for a in h.bodies if "--memory" in a and
+                   "--follow" not in a], h.bodies)
         v.key(b"\033[Z", 0.5, want=b"[Tasks")
         v.key(b"j", 0.3)
         r = trows(v)
@@ -672,15 +693,15 @@ def test_memory(port):
         check("Memory, remote: q back to the row", "alpha" in head(v),
               head(v))
         # q quits: every query sent first, the other list too (#374)
-        host_ran(v, n0 + 4, "follow, task list, memory list, chapter", late)
+        host_ran(v, n0 + 2, "follow with the lists, chapter", late)
         v.key(b"q", 0)
         check("Memory, remote: q exits 0", v.exit() == 0, v.out[-80:])
     finally:
         v.close()
-    until(lambda: ctls("--xray") - n0 >= 4, 5)
-    check("Memory, remote: the follow, the task and memory lists and the "
-          "chapter, each its own ctl --xray on the host",
-          ctls("--xray") - n0 == 4,
+    until(lambda: ctls("--xray") - n0 >= 2, 5)
+    check("Memory, remote: the follow (the task and memory lists in it, "
+          "#448) and the chapter, each its own ctl --xray on the host",
+          ctls("--xray") - n0 == 2,
           (ctls("--xray") - n0, "not on the host in time: %s" % late))
 
 
@@ -1146,11 +1167,10 @@ def test_stop():
         k = kids_of(v.pid)
         # #294: Refs' screen read is a third, pending on the silent host
         # since the Tab to Refs (one at a time; the view's end stops it);
-        # the task list's query (#320) a fourth, the memory list's (#323)
-        # a fifth, as silent
-        check("silent: only the follow, the new card's child, Refs' "
-              "screen read and the task and memory lists' queries run, no "
-              "zombie", len(k) == 5 and "Z" not in "".join(k.values()), k)
+        # the task and memory lists come in the follow (#448)
+        check("silent: only the follow, the new card's child and Refs' "
+              "screen read run, no zombie", len(k) == 3 and
+              "Z" not in "".join(k.values()), k)
         rc, dt = esc_q(v)
         check("silent: Esc then q (card and follow pending) exits within "
               "%.1f s (%.2f s)" % (STOP_S, dt), rc is not None and dt < STOP_S,
