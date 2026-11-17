@@ -1220,6 +1220,8 @@ def main():
         check("  the next connection asks whois again and is let in, not "
               "refused for 30 s (#378)", r2 == "accept"
               and "refused before fork" not in text(log))
+        check("  and serve's tailscale children never see DCH_TS_MS (NIT-TV2)",
+              calls() and all(" ts_ms=unset " in c for c in calls()))
         if r1 != refusal("whois_unavailable") or r2 != "accept":
             print(r1, r2, text(log)[-600:])
         stop(p)
