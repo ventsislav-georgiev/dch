@@ -485,6 +485,22 @@ xv_fitlen(const char *s, size_t n, int w)
 	return k;
 }
 
+/* The bytes of s[0..n) for one row of w cells: at the last space that
+** fits (the row ends where the next byte is a space); a hard break, at a
+** character's end, only for a word wider than the row. */
+static size_t
+xv_brk(const char *s, size_t n, int w)
+{
+	size_t f = xv_fitlen(s, n, w), j;
+
+	if (f >= n || s[f] == ' ')
+		return f;
+	for (j = f; j > 0; j--)
+		if (s[j] == ' ')
+			return j;
+	return f;
+}
+
 /* ---- the children ---------------------------------------------------- */
 
 /* Reap the children xv_stop kept (#212), then keep pid (> 0) too; 0 when
@@ -1841,7 +1857,7 @@ xv_wrap(struct xv *v, int w)
 
 			do
 			{
-				f = xv_fitlen(s, ll, w);
+				f = xv_brk(s, ll, w);
 				if (!f && ll)
 					f = 1;
 				if (xv_grow(&v->rl, &v->arl, v->nrl, sizeof l) < 0)
@@ -1852,6 +1868,8 @@ xv_wrap(struct xv *v, int w)
 				v->rl[v->nrl++] = l;
 				s += f;
 				ll -= f;
+				if (ll && *s == ' ')	/* the break's space */
+					s++, ll--;
 			} while (ll);
 			if (!*s)
 				break;
@@ -2719,11 +2737,13 @@ xv_row_ch(const struct xv_ch *c, int i, int on)
 static const char *
 xv_wline(const char *s, int w, size_t *n)
 {
-	size_t ll = strcspn(s, "\n"), f = xv_fitlen(s, ll, w);
+	size_t ll = strcspn(s, "\n"), f = xv_brk(s, ll, w);
 
 	if (!f && ll)
 		f = 1;
 	*n = f;
+	if (f < ll && s[f] == ' ')	/* the break's space */
+		return s + f + 1;
 	return s[f] == '\n' ? s + f + 1 : s + f;
 }
 
@@ -2748,7 +2768,8 @@ static int
 xv_hit1(struct xv *v, int i, int room)
 {
 	const struct xv_hit *t = &v->hit[v->vis[i]];
-	const char *s = t->snippet, *w;
+	const char *s = t->snippet, *w, *s0 = s;
+	char sn[3 * XR_SNIPPET + 16];
 	int h = 0, l, on, c = xv_rch(v, t->chapter);
 	int you = !strcmp(t->who, "user");
 	unsigned char mk[1024] = { 0 };	/* a snippet's bytes in a match: 1 */
@@ -2777,6 +2798,35 @@ xv_hit1(struct xv *v, int i, int room)
 			pk_pad(pk_w);
 		pk_eol();
 	}
+	/* a snippet cut at both ends of its window (long enough to have been)
+	** is trimmed to whole words, an ellipsis leading: the engine cuts on
+	** a character, and the match stays in what is kept */
+	if (strlen(s) >= XR_SNIPPET - 32)
+	{
+		const char *st, *m = s + strlen(s);
+		size_t k = strlen(s);
+
+		for (j = 0; ql && s[j]; j++)
+			if (xv_at(s + j, v->sq))
+			{
+				m = s + j;
+				break;
+			}
+		if (*s != ' ' && (st = memchr(s, ' ', (size_t)(m - s))) != NULL)
+			st++;
+		else
+			st = s;
+		for (j = k; j > (size_t)(m - s) + ql && s[j - 1] != ' '; j--)
+			;
+		if (j > (size_t)(m - s) + ql + 1)
+			k = j - 1;
+		if (st > s || k < strlen(s))
+		{
+			snprintf(sn, sizeof sn, "%s%.*s", st > s ? xv_ell() : "",
+			         (int)(s + k - st), st);
+			s = s0 = sn;
+		}
+	}
 	for (j = e = 0; s[j] && j < sizeof mk; j++)
 	{
 		if (ql && xv_at(s + j, v->sq))
@@ -2793,7 +2843,7 @@ xv_hit1(struct xv *v, int i, int room)
 		** end, the text searched being whole characters */
 		for (a = 0; a < n; a = e)
 		{
-			j = (size_t)(w - t->snippet) + a;
+			j = (size_t)(w - s0) + a;
 			on = j < sizeof mk && mk[j];
 			for (e = a + 1; e < n && (j + e - a < sizeof mk &&
 			     mk[j + e - a]) == on; e++)

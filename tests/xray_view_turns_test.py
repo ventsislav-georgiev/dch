@@ -1043,11 +1043,112 @@ def test_look():
         v.close()
 
 
+WSID = "11111111-2222-4333-8444-5555555555f6"
+
+
+def fixture_wrap():
+    """xv-wr (#456): one answer of 7-character words, one of 5-character
+    CJK words (10 cells each), one 200-character word with text around."""
+    w7 = " ".join("w%06d" % i for i in range(1, 80))
+    cj = " ".join("\u65e5\u672c\u8a9e\u65e5\u672c" for _ in range(30))
+    ts = "2026-11-10T1%d:00:00Z"
+    os.makedirs(os.path.dirname(tl(WSID)), exist_ok=True)
+    record("xv-wr", WSID,
+           turn("seven", ts % 0, at(say(w7), ts % 0)) +
+           turn("wide", ts % 1, at(say(cj), ts % 1)) +
+           turn("huge", ts % 2, at(say("lead " + "x" * 200 + " tail"),
+                                   ts % 2)))
+
+
+def wrap_rows(v, skip):
+    """The text rows between the tab line and the rule, trimmed of the
+    gutter, those that do not hold one of the fixture's words dropped."""
+    out = []
+    for r in body_rows(v):
+        t = r.strip()
+        if t and not t.startswith(skip) and re.fullmatch(r"[\w\u2026. ]+", t):
+            out.append(t)
+    return out
+
+
+def test_wrap():
+    """#456 (audit gap 6): rows break at the last space that fits; a hard
+    break only for a word wider than the row; Search snippets whole words
+    with a leading ellipsis."""
+    v = Pty([DCH, "--xray", "xv-wr"], rows=40, cols=100,
+            env={"NO_COLOR": ""})
+    try:
+        v.wait(b"Prompts 3")
+        v.pump(0.3)
+        v.key(b"\t", 1.0)
+        shows(v, lambda s: "huge" in head(v))
+        v.pump(0.5)
+        hx = [t for t in wrap_rows(v, ("huge", "wide"))
+              if "x" in t or t == "lead"]
+        check("#456: a word wider than the row breaks hard: 200 x all "
+              "shown, rows within 92 cells, the lead on its own row",
+              "".join(hx).count("x") == 200 and "lead" in hx and
+              all(cells(t) <= 92 for t in hx) and
+              hx[0] == "lead" and hx[-1].endswith(" tail"), hx)
+        v.key(b"j", 0.5)
+        shows(v, lambda s: "wide" in head(v))
+        v.pump(0.5)
+        cj = [t for t in wrap_rows(v, ("wide",)) if "\u65e5" in t]
+        check("#456: wide CJK counts 2 cells: rows within 92 cells, ending "
+              "on a whole word",
+              len(cj) >= 2 and all(cells(t) <= 92 for t in cj) and
+              all(t.split()[-1] == "\u65e5\u672c\u8a9e\u65e5\u672c"
+                  for t in cj), cj)
+        v.key(b"j", 0.5)
+        shows(v, lambda s: "seven" in head(v))
+        v.pump(0.5)
+        rs = [t for t in wrap_rows(v, ("seven",))
+              if t.startswith("w0")]
+        toks = " ".join(rs).split()
+        check("#456: Responses: every row of 7-character words ends on a "
+              "whole word (the break at a space), more than one row",
+              len(rs) >= 2 and toks and
+              all(re.fullmatch(r"w\d{6}", t) for t in toks),
+              (rs, body_rows(v)))
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        v.wait(b"1 of 3", start=mark)
+        v.pump(0.5)
+        rs = [t for t in wrap_rows(v, ("seven",)) if t.startswith("w0")]
+        toks = " ".join(rs).split()
+        check("#456: the reader: rows end on a whole word, all 79 words "
+              "present, a row at most 98 cells",
+              len(toks) == 79 and len(rs) >= 2 and
+              all(re.fullmatch(r"w\d{6}", t) for t in toks) and
+              all(cells(t) <= 98 for t in rs), (rs, body_rows(v)))
+        v.key(b"q", 0.5)
+        v.key(b"\t", 0.8)
+        v.key(b"\t", 0.8)
+        v.key(b"w000040\r", 0.5)
+        tabbar(v, "Search 1")
+        v.pump(0.5)
+        h = hits(rows(v.out))
+        sn = h[0][2] if h else []
+        toks = " ".join(sn).split()
+        check("#456: Search: the snippet is whole words, a leading "
+              "ellipsis, no word cut at its ends",
+              h and re.fullmatch(r"(\u2026|\.\.\.)w\d{6}", toks[0]) and
+              all(re.fullmatch(r"w\d{6}", t) for t in toks[1:]) and
+              "w000040" in toks,
+              (h, rows(v.out)))
+        v.key(b"\033", 0.3)
+        v.key(b"q", 0.3)
+        v.exit()
+    finally:
+        v.close()
+
+
 def main():
     run_steps(fixture_auto, test_auto, test_compact, test_gone, fixture_resp,
               test_responses, test_responses_live, test_responses_codex,
               test_tasks_codex, fixture_search, test_search, fixture_tail,
-              test_tail, fixture_look, test_look)
+              test_tail, fixture_look, test_look,
+              fixture_wrap, test_wrap)
 
 
 if __name__ == "__main__":
