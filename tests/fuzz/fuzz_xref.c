@@ -6,7 +6,9 @@
 ** Input: byte 0's low 2 bits pick the path, the rest is its input.
 **   0: the grammar over the bytes, in the context byte 0's bits 2-3 pick;
 **      every span inside the text, in order, not overlapping, its key
-**      "<shape>:<text>" of valid UTF-8 within XR_KEY_MAX;
+**      "<shape>:<text>" of valid UTF-8 within XR_KEY_MAX; bit 5 adds
+**      XR_TERMS (#458): a term's text is its span's bytes, 2-64 printable
+**      ASCII with no blank or backtick (also from a decoder or --ref);
 **   1: a Claude JSONL transcript (cut at '\n') into an index and a --ref
 **      scan for the first key the index met, then xr_print with the refs;
 **   2: ring records ({u16 len, u8 kind, u8 flags, u32 time, text}) through
@@ -90,18 +92,29 @@ check_key(const struct xr_span *sp)
 	const char *c = strchr(sp->key, ':');
 	size_t kl = strlen(sp->key);
 
-	if (sp->shape < XR_TICKET || sp->shape > XR_URL || !c ||
+	if (sp->shape < XR_TICKET || sp->shape > XR_TERM || !c ||
 	    strncmp(sp->key, xr_shape_name[sp->shape], (size_t)(c - sp->key)) ||
 	    strlen(xr_shape_name[sp->shape]) != (size_t)(c - sp->key) ||
 	    xr_span_text(sp) != c + 1 || kl - (size_t)(c + 1 - sp->key) == 0 ||
 	    kl - (size_t)(c + 1 - sp->key) > XR_KEY_MAX)
 		abort();
 	check_utf8(sp->key, kl);
+	if (sp->shape == XR_TERM)	/* #458 */
+	{
+		const char *t = c + 1;
+
+		if (strlen(t) < 2 || strlen(t) > 64)
+			abort();
+		for (; *t; t++)
+			if (*t <= ' ' || *t >= 0x7f || *t == '`')
+				abort();
+	}
 }
 
 struct gram
 {
 	size_t n, last;
+	const char *s;
 };
 
 static int
@@ -113,6 +126,10 @@ gram_span(void *ctx, const struct xr_span *sp)
 		abort();
 	g->last = sp->e;
 	check_key(sp);
+	if (sp->shape == XR_TERM &&
+	    (strlen(xr_span_text(sp)) != sp->e - sp->s ||
+	     memcmp(xr_span_text(sp), g->s + sp->s, sp->e - sp->s)))
+		abort();	/* a term keys as written (#458) */
 	return 0;
 }
 
@@ -677,13 +694,15 @@ LLVMFuzzerTestOneInput(const uint8_t *d, size_t n)
 	if ((d[0] & 3) == 0)
 	{
 		static const int modes[] = {XR_PROSE, XR_MD, XR_CODE, XR_PLAIN};
-		struct gram g = {n - 1, 0};
+		struct gram g = {n - 1, 0, NULL};
 		char *s = malloc(n);	/* an exact block: no read past it */
 
 		if (!s)
 			return 0;
 		memcpy(s, d + 1, n - 1);
-		(void)xr_grammar(s, n - 1, modes[(d[0] >> 2) & 3],
+		g.s = s;
+		(void)xr_grammar(s, n - 1, modes[(d[0] >> 2) & 3] |
+		                 (d[0] & 32 ? XR_TERMS : 0),
 		                 d[0] & 16 ? "/home/demo/proj" : NULL, gram_span, &g);
 		free(s);
 		return 0;

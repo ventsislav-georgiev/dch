@@ -579,10 +579,106 @@ def test_memory_live():
         dch("-k", "xv-ml")
 
 
+RPSIDS = ["11111111-2222-4333-8444-5555555555e%d" % k for k in (1, 2, 3)]
+REPLY = ("Done. Touched #412 first, then #377, later #418, and last: "
+         "close PAY-219.")
+
+
+def fixture_reply():
+    """xv-rp: the last answer says #412, #377, #418, PAY-219 in that order
+    (an older one #901); xv-rq: the last turn ended on a tool call."""
+    old = turn("first", "2026-11-10T10:00:00Z", say("see #901 and #412"))
+    record("xv-rp", RPSIDS[0], old + turn("second", "2026-11-10T11:00:00Z",
+                                          say(REPLY)))
+    record("xv-rq", RPSIDS[1], old + turn(
+        "ended mid-tool", "2026-11-10T11:00:00Z",
+        call("r1", "Read", {"file_path": P + "/x.c"})))
+
+
+def refs_plain(name):
+    v = Pty([DCH, "--xray", name], env={"TMPDIR": TPD + "/"})
+    v.wait(b"Prompts 1")
+    v.pump(0.5)
+    mark = len(v.out)
+    v.key(b"\t\t", 1.0)
+    return v, shown(v, mark)
+
+
+def test_reply():
+    """#452: Refs opens with an "in the last reply" group, the answer's
+    refs by their last place, the last on top; none without an answer."""
+    v, text = refs_plain("xv-rp")
+    try:
+        at = [text.find(x) for x in ("in the last reply", "PAY-219", "#418",
+                                     "#377", "#412", "the rest", "#901")]
+        check("Refs #452: the last reply's group, PAY-219, #418, #377, #412 "
+              "in that order, then the rest", -1 not in at and
+              at == sorted(at) and "on screen now" not in text, text)
+        v.key(b"q")
+    finally:
+        v.close()
+    v, text = refs_plain("xv-rq")
+    try:
+        check("Refs #452: no group when the last turn has no answer",
+              "in the last reply" not in text and "#412" in text, text)
+        v.key(b"q")
+    finally:
+        v.close()
+
+
+def test_reply_live():
+    """#452: on a live session a ref on the screen is not repeated in the
+    last reply's group."""
+    cwd = os.path.realpath(os.path.join(T, "rlive"))
+    os.makedirs(cwd, exist_ok=True)
+    proj = os.path.join(HOME, ".claude", "projects", cwd.replace("/", "-"))
+    os.makedirs(proj, exist_ok=True)
+    with open(os.path.join(proj, RPSIDS[2] + ".jsonl"), "w") as f:
+        for o in turn("live reply", "2026-11-10T10:00:00Z", say(REPLY)):
+            f.write(json.dumps(dict(o, cwd=cwd) if "cwd" in o else o) + "\n")
+    dch("--spawn", "xv-rl", "/usr/bin/perl", "-e",
+        '$|=1; print "on screen: #412 and PAY-219\\n"; sleep 300')
+    pid = until(lambda: json.loads(dch("--cmd", "xv-rl").stdout or "{}")
+                .get("pid"), 5)
+    start = subprocess.run(["/bin/ps", "-o", "lstart=", "-p", str(pid)],
+                           capture_output=True, text=True,
+                           env={"LC_ALL": "C", "TZ": "UTC"}).stdout.strip()
+    sd = os.path.join(HOME, ".claude", "sessions")
+    os.makedirs(sd, exist_ok=True)
+    with open(os.path.join(sd, "%d.json" % pid), "w") as f:
+        json.dump({"pid": pid, "sessionId": RPSIDS[2], "cwd": cwd,
+                   "procStart": start, "version": "2.1.0",
+                   "kind": "interactive", "status": "idle",
+                   "statusUpdatedAt": 1}, f)
+    v = Pty([DCH, "--xray", "xv-rl"], rows=30, cols=100)
+    try:
+        v.wait(b"Prompts 1")
+        v.pump(0.5)
+        mark = len(v.out)
+        v.key(b"\t\t", 1.0)
+        ok = until(lambda: (v.pump(0.2), "in the last reply" in
+                            shown(v, mark))[1], 10)
+        text = shown(v, mark)
+        lite = dch("--build").stdout.strip() == "lite"   # no mirror
+        at = [text.find(x) for x in (
+            ("in the last reply", "PAY-219", "#418", "#377", "#412") if lite
+            else ("on screen now", "#412", "PAY-219", "in the last reply",
+                  "#418", "#377"))]
+        check("Refs #452: live: the screen's #412 and PAY-219 in the "
+              "on-screen group only, #418 and #377 under the last-reply "
+              "line (lite: all four in it)", ok and -1 not in at and at == sorted(at) and
+              text.count("#412") == 1 and text.count("PAY-219") == 1, text)
+        v.key(b"q")
+    finally:
+        v.close()
+        dch("-k", "xv-rl")
+
+
 def main():
     run_steps(fixture, test_refusals, test_view, fixture_refs, test_refs,
               fixture_latest, test_latest, test_lookup, fixture_order,
-              test_order, fixture_tmp, test_tmp, test_memory_live)
+              test_order, fixture_tmp, test_tmp, test_memory_live,
+              fixture_reply, test_reply, test_reply_live)
 
 
 if __name__ == "__main__":

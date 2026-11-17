@@ -1698,18 +1698,20 @@ def test_chapter():
 
     # the scalar caps (v2.1 3.1: 6000 and 3000) and the 1 MiB cap (K14.4)
     put([{"type": "user", "cwd": "/home/demo/proj",
-          "message": {"content": "é" * 7000}},
+          "message": {"content": "é" * 10000}},
          use("b1", "Bash", {"command": "é" * 7000}),
          res("b1", "é" * 4000),
          {"type": "assistant", "message": {"content": [
-             {"type": "text", "text": "é" * 7000}]}}])
+             {"type": "text", "text": "é" * 10000}]}}])
     rc, o, _ = xray("xr-ch", "--json")
     rc, c, err, _ = chapter("xr-ch", o["chapters"][0]["anchor"])
-    check("chapter: text clipped in scalars: 6000 (prompt, call, reply), "
-          "3000 (output)", rc == 0 and c and [len(e["text"]) for e in
-                                              c["entries"]] ==
-          [6000, 6000, 3000, 6000] and
-          all(set(e["text"]) == {"é"} for e in c["entries"]),
+    # #451: a prompt and a reply keep 6000 + 3000 with the cut line
+    hm = "é" * 6000 + "\n\u2026 1000 characters cut \u2026\n" + "é" * 3000
+    check("chapter: text clipped in scalars: 6000 (call), 3000 (output); "
+          "a prompt and a reply 6000 + 3000 with a cut line, cut 1000",
+          rc == 0 and c and [e["text"] for e in c["entries"]] ==
+          [hm, "é" * 6000, "é" * 3000, hm] and
+          [e.get("cut") for e in c["entries"]] == [1000, None, None, 1000],
           (rc, err, c and [len(e["text"]) for e in c["entries"]]))
     out = "\u0001" * 3000    # 18000 escaped bytes an entry
     put([{"type": "user", "cwd": "/home/demo/proj",
@@ -3300,6 +3302,269 @@ def test_light_379():
         os.unlink(tp)
 
 
+HTSID = "11111111-2222-4333-8444-5555555555f1"
+
+
+def test_long_answer():
+    """#451: a long answer's end is kept. Refs are indexed over the whole
+    text block; a --chapter prose entry past 9000 scalars keeps its first
+    6000 and last 3000 with a "… N characters cut …" line and "cut": N; the
+    --json response past 2048 bytes keeps its first and last 1024, cut on a
+    character, with a "\\n…\\n" between and response_cut_chars."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, HTSID + ".jsonl")
+    short = "Short answer with é and #500."
+    # "€" (3 bytes) straddles byte 1024 and byte n - 1024: a byte cut
+    # there would split it
+    head = "HEADSTART #100 " + "a" * 1008 + "€"
+    tail = "€" + ("detail " * 200 +
+                       "\nNext steps: merge #999 TAILMARK")[-1022:]
+    body = "\n".join("- point %d: detail words detail words" % i
+                     for i in range(300))
+    long_ = head + "\n" + body + "\n" + tail
+    prompt = "PROMPTHEAD " + "q" * 12000 + " #777 PROMPTTAIL"
+    lines = [
+        {"type": "user", "cwd": "/home/demo/proj",
+         "timestamp": "2026-11-10T10:00:00Z",
+         "message": {"content": "short ask"}},
+        {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": short}]}},
+        {"type": "user", "timestamp": "2026-11-10T10:01:00Z",
+         "message": {"content": prompt}},
+        {"type": "assistant", "message": {"content": long_}}]
+    with open(tp, "w") as f:
+        f.write("".join(json.dumps(o) + "\n" for o in lines))
+    history("xr-long", HTSID, cfg)
+    sc = len(long_)
+    b = long_.encode()
+    try:
+        def count(r):
+            x = dch("--xray", "xr-long", "--ref", r, "--json")
+            t = [l["tally"] for l in ref_lines(x.stdout) or [] if "tally" in l]
+            return t[0].get("count") if t else None
+        check("long answer: a ref at the end of a 12 KB answer is indexed "
+              "(--ref #999 count 1)", count("#999") == 1, count("#999"))
+        check("long answer: a ref at the end of a 12000-char prompt is "
+              "indexed (--ref #777 count 1)", count("#777") == 1,
+              count("#777"))
+        rc, o, err = xray("xr-long", "--json")
+        # the Refs tab's order (README): latest mention, then count, then
+        # later in the index; #999 and #100 share their answer's line
+        rs = (o or {}).get("refs", [])
+        keys = [r["key"] for _, r in sorted(
+            enumerate(rs), key=lambda x: (-x[1].get("last_offset", -1),
+                                          -x[1]["count"], -x[0]))]
+        check("long answer: Refs put #999 first, the latest mention",
+              rc == 0 and keys[:2] == ["issue:#999", "issue:#100"] and
+              rs and rs[-1]["key"] == "issue:#999", (keys, err))
+        ch = (o or {}).get("chapters", [])
+        r = ch[1].get("response", "") if len(ch) == 2 else ""
+        want = b[:1023].decode() + "\n…\n" + b[-1022:].decode()
+        check("long answer: --json response is head + tail, cut on a "
+              "character: it starts with the head and holds TAILMARK",
+              r.startswith("HEADSTART #100 ") and r.endswith("TAILMARK") and
+              r == want and "�" not in r and
+              ch[1].get("response_cut") is True and
+              ch[1].get("response_cut_chars") ==
+              len(b[1023:-1022].decode()), (len(r), r[1000:1040],
+                                            ch[1:] and {k: v for k, v in
+                                                        ch[1].items()
+                                                        if k != "response"}))
+        check("long answer: a short response is unchanged, no response_cut",
+              ch and ch[0].get("response") == short and
+              "response_cut" not in ch[0] and
+              "response_cut_chars" not in ch[0], ch[:1])
+        rc, c, err, raw = chapter("xr-long", ch[1]["anchor"]) \
+            if len(ch) == 2 else (1, None, "", "")
+        es = (c or {}).get("entries", [])
+        a = es[1] if len(es) == 2 else {}
+        mark = "\n… %d characters cut …\n" % (sc - 9000)
+        check("long answer: the --chapter entry is the first 6000 and last 3000 "
+              "characters with the cut line, and cut: N",
+              a.get("role") == "assistant" and
+              a.get("text") == long_[:6000] + mark + long_[-3000:] and
+              "TAILMARK" in a.get("text", "") and
+              a.get("cut") == sc - 9000, (err, {k: v for k, v in a.items()
+                                                 if k != "text"},
+                                          a.get("text", "")[2990:3040]))
+        u = es[0] if es else {}
+        check("long prompt: the user entry is head + tail too",
+              u.get("text") == prompt[:6000] + "\n… %d characters cut "
+              "…\n" % (len(prompt) - 9000) + prompt[-3000:] and
+              u.get("cut") == len(prompt) - 9000,
+              {k: v for k, v in u.items() if k != "text"})
+        rc, c0, err, raw0 = chapter("xr-long", ch[0]["anchor"]) \
+            if ch else (1, None, "", "")
+        check("short answer: its --chapter entries are unchanged, no cut",
+              c0 and c0["entries"] == [ent("user", "short ask"),
+                                       ent("assistant", short)], c0)
+    finally:
+        os.unlink(tp)
+
+
+def test_ent_bounds():
+    """#451: an entry of 9000 scalars or fewer is whole (7000: no cut field);
+    one of 12000 keeps scalars 0-6000 and the last 3000."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    sid = "11111111-2222-4333-8444-5555555555f2"
+    tp = os.path.join(pdir, sid + ".jsonl")
+    mk = lambda n: "".join(chr(0x4e00 + i % 500) for i in range(n))
+    a7, a9, a12 = mk(7000), mk(9000), mk(12000)
+    lines = [{"type": "user", "cwd": "/home/demo/proj",
+              "timestamp": "2026-11-10T10:00:00Z",
+              "message": {"content": "ask"}}]
+    for a in (a7, a9, a12):
+        lines.append({"type": "assistant", "message": {"content": a}})
+    with open(tp, "w") as f:
+        f.write("".join(json.dumps(o) + "\n" for o in lines))
+    history("xr-bound", sid, cfg)
+    try:
+        rc, o, err = xray("xr-bound", "--json")
+        ch = (o or {}).get("chapters", [])
+        rc, c, err, raw = chapter("xr-bound", ch[0]["anchor"]) \
+            if ch else (1, None, "", "")
+        es = [e for e in (c or {}).get("entries", [])
+              if e.get("role") == "assistant"]
+        t = [e.get("text") for e in es]
+        check("entry bounds: 7000 and 9000 scalars are whole, no cut field; "
+              "12000 keeps 0-6000 and the last 3000 with the marker",
+              len(es) == 3 and t[0] == a7 and t[1] == a9 and
+              "cut" not in es[0] and "cut" not in es[1] and
+              t[2] == a12[:6000] + "\n… 3000 characters cut …\n" +
+              a12[-3000:] and es[2].get("cut") == 3000,
+              (err, [(len(x or ""), e.get("cut")) for x, e in zip(t, es)]))
+    finally:
+        os.unlink(tp)
+
+
+def test_many_mentions():
+    """#463: past XR_SPANS (128) mentions in one text block the LAST 128
+    are kept (recency first), not the first."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, HTSID + ".jsonl")
+    big = " ".join("#%d" % i for i in range(1000, 1200)) + "\nNext: #999 TAILMARK"
+    mid = " ".join("#%d" % i for i in range(2000, 2100))
+    lines = [
+        {"type": "user", "cwd": "/home/demo/proj",
+         "timestamp": "2026-11-10T10:00:00Z",
+         "message": {"content": "ask"}},
+        {"type": "assistant", "message": {"content": big}},
+        {"type": "user", "timestamp": "2026-11-10T10:01:00Z",
+         "message": {"content": "ask2"}},
+        {"type": "assistant", "message": {"content": mid}}]
+    with open(tp, "w") as f:
+        f.write("".join(json.dumps(o) + "\n" for o in lines))
+    history("xr-many", HTSID, cfg)
+    try:
+        def count(r):
+            x = dch("--xray", "xr-many", "--ref", r, "--json")
+            t = [l["tally"] for l in ref_lines(x.stdout) or [] if "tally" in l]
+            return t[0].get("count") if t else None
+        check("many mentions: --ref #999 after 200 mentions counts 1",
+              count("#999") == 1, count("#999"))
+        check("many mentions: the last of 200 (#1199, #1073) are kept, "
+              "the first (#1000, #1072) dropped",
+              count("#1199") == 1 and count("#1073") == 1 and
+              count("#1000") != 1 and count("#1072") != 1,
+              [count(r) for r in ("#1199", "#1073", "#1000", "#1072")])
+        rc, o, err = xray("xr-many", "--json")
+        ks = {r["key"] for r in (o or {}).get("refs", [])}
+        check("many mentions: --json refs hold #999 and #1199; 100 "
+              "mentions keep all (#2000, #2099)",
+              rc == 0 and {"issue:#999", "issue:#1199", "issue:#2000",
+                           "issue:#2099"} <= ks and
+              "issue:#1000" not in ks, (err, len(ks)))
+    finally:
+        os.unlink(tp)
+
+
+def test_terms():
+    """#458: a term (a 2+ part CONST_CASE or snake_case identifier, or a
+    backticked span) is a ref of its own kind, from prose only.
+    ERR_LEDGER_SKEW is in turns 3, 9 and 30, each time beside PAY-219: its
+    --ref answers as the ticket's does (count, places), and its definition is
+    the turn-3 sentence, marked "source":"first mention"."""
+    sid = "11111111-2222-4333-8444-5555555555c8"
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, sid + ".jsonl")
+    first = ("The ledger raised ERR_LEDGER_SKEW when the totals drifted on "
+             "PAY-219.")
+    say = {3: "We ran it. " + first + " More on that later.",
+           9: None,
+           30: "Fixed: ERR_LEDGER_SKEW no longer fires for PAY-219.",
+           5: "Set `dryRun` first, then `shadow_mode`."}
+    offs = {}
+    with open(tp, "w") as f:
+        for t in range(1, 31):
+            ask = ("is ERR_LEDGER_SKEW back in PAY-219?" if t == 9
+                   else "turn %d" % t)
+            if t == 9:
+                offs[t] = f.tell()
+            f.write(json.dumps({"type": "user", "cwd": "/home/demo/proj",
+                                "timestamp": "2026-11-10T10:%02d:00Z" % t,
+                                "message": {"content": ask}}) + "\n")
+            if say.get(t):
+                offs.setdefault(t, f.tell())
+            f.write(json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "text", "text": say.get(t) or "ok %d" % t}]}}) + "\n")
+            # tool output never makes a term
+            f.write(json.dumps({"type": "user", "toolUseResult": {
+                "stdout": "TOOL_ONLY_TERM"}, "message": {"content": [
+                    {"type": "tool_result", "tool_use_id": "t%d" % t,
+                     "content": "TOOL_ONLY_TERM"}]}}) + "\n")
+    history("xr-terms", sid, cfg)
+    try:
+        def ref(r, *a):
+            x = dch("--xray", "xr-terms", "--ref", r, "--scope", "session",
+                    *a, "--json")
+            return x.returncode, ref_lines(x.stdout) or []
+
+        for mode in ((), ("--full",)):
+            rc, ls = ref("ERR_LEDGER_SKEW", *mode)
+            _, tk = ref("PAY-219", *mode)
+            men = [l["mention"]["offset"] for l in ls if "mention" in l]
+            tmen = [l["mention"]["offset"] for l in tk if "mention" in l]
+            ds = [l["definition"] for l in ls if "definition" in l]
+            tally = [l["tally"] for l in ls if "tally" in l]
+            check("terms: --ref ERR_LEDGER_SKEW%s counts 3, its places are "
+                  "turns 3, 9 and 30, in the order a ticket's come" %
+                  " ".join(("",) + mode), rc == 0 and tally and
+                  tally[0]["count"] == 3 and ls[-1]["counts"]["session"] == 3
+                  and men == tmen and sorted(men) == [offs[3], offs[9],
+                                                      offs[30]], (ls, tmen))
+            check("terms: its definition is the turn-3 sentence, "
+                  "source first mention%s" % " ".join(("",) + mode),
+                  len(ds) == 1 and ds[0]["title"] == first and
+                  ds[0]["passage"] == first and ds[0]["offset"] == offs[3] and
+                  ds[0]["source"] == "first mention" and
+                  ds[0]["rule"] == "term" and tally[0]["definitions"] == 1,
+                  ds)
+        rc, ls = ref("`dryRun`")
+        check("terms: a backtick-only term is asked for in its backticks",
+              rc == 0 and ls[0]["first"]["key"] == "term:dryRun" and
+              ls[-1]["counts"]["session"] == 1, ls)
+        rc, o, err = xray("xr-terms", "--json")
+        refs = {r["key"]: r for r in (o or {}).get("refs", [])}
+        t = refs.get("term:ERR_LEDGER_SKEW", {})
+        check("terms: --json refs list the term, shape term, count 3",
+              rc == 0 and t.get("shape") == "term" and t.get("count") == 3
+              and t.get("text") == "ERR_LEDGER_SKEW" and
+              "term:shadow_mode" in refs and "term:dryRun" in refs, (o, err))
+        check("terms: never from tool output, never one part",
+              "term:TOOL_ONLY_TERM" not in refs and
+              not [k for k in refs if k in ("term:turn", "term:ok")], refs)
+    finally:
+        os.unlink(tp)
+
+
 def main():
     try:
         test_names()
@@ -3330,6 +3595,10 @@ def main():
         test_ref_middle()
         test_light_377()
         test_light_379()
+        test_long_answer()
+        test_ent_bounds()
+        test_many_mentions()
+        test_terms()
     finally:
         shutil.rmtree(T, ignore_errors=True)
     if fails[0]:

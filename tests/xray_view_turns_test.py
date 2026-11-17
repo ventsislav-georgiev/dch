@@ -826,10 +826,228 @@ def test_search():
         v.close()
 
 
+def fixture_tail():
+    """xv-tl8: a short answer, then a 14 KB final one ending in TAILMARK
+    (#451 cuts it to head + tail)."""
+    big = "\n".join("paragraph %03d of the long final answer, filler words"
+                    % i for i in range(1, 260))
+    big += "\n\nNext steps: ship it. TAILMARK"
+    record("xv-tl8", TSID, turn("short one", "2026-11-10T10:00:00Z",
+                                say("Short answer.")) +
+           turn("the long one", "2026-11-10T10:10:00Z", say(big)))
+
+
+def test_tail():
+    ch = json.loads(dch("--xray", "xv-tl8", "--json").stdout)["chapters"]
+    check("tail fixture: the 14 KB answer is cut by the engine, the short "
+          "one not", ch[1].get("response_cut") and
+          not ch[0].get("response_cut"), ch)
+    v = Pty([DCH, "--xray", "xv-tl8"], rows=70, cols=100,
+            env={"NO_COLOR": ""})
+    try:
+        v.wait(b"Prompts 2")
+        v.pump(0.5)
+        v.key(b"\t", 1.0)
+        raw = bytes(v.out)
+        scr = rows(v.out)
+        it = dict(items(scr))
+        long_ = it.get("the long one", [])
+        check("Responses: the newest item shows the head, a lone ellipsis "
+              "and the tail (TAILMARK), more than 8 lines",
+              long_ and long_[0].startswith("paragraph 001") and
+              "\u2026" in long_ and long_[-1].endswith("TAILMARK") and
+              len(long_) > 9, long_)
+        check("Responses: the joiner ellipsis is faint",
+              re.search(rb"\033\[0;2m +\xe2\x80\xa6", raw) is not None,
+              raw[-600:])
+        check("Responses: the short answer stays as it was",
+              it.get("short one") == ["Short answer."], it)
+        mark = len(v.out)
+        v.key(b"\r", 1.5)
+        v.wait(b"Reply", start=mark)
+        v.pump(0.5)
+        v.key(b"G", 0.8)
+        mark = len(v.out)
+        v.key(b"g", 0.5)
+        v.key(b"G", 0.8)
+        raw = bytes(v.out[mark:])
+        scr = rows(v.out[mark:])
+        text = "\n".join(scr.values())
+        check("reader: G shows TAILMARK", "TAILMARK" in text, text)
+        check("reader: one cut line, faint (not plain text)",
+              len(re.findall(r"\d+ characters cut", text)) == 1 and
+              re.search(rb"\033\[0;2m +\xe2\x80\xa6 \d+ characters cut "
+                        rb"\xe2\x80\xa6", raw) is not None, (text, raw))
+        v.key(b"q", 0.3)
+        v.key(b"q")
+        v.exit()
+    finally:
+        v.close()
+
+
+LSID = "11111111-2222-4333-8444-5555555555e4"   # xv-lk: look up what you read
+LK = ["alpha task", "bravo task", "charlie task", "delta task", "echo task",
+      "foxtrot task", "golf 5 holes", "wrap it up"]
+
+
+def fixture_look():
+    """xv-lk (#454): eight turns; the last answer has no ref in its first
+    30 lines, "jitter" on lines 32 and 50, then #377 and, last, PR #418;
+    the second answer names #377, then PAY-219 on its next line."""
+    body = ["Summary of the work."]
+    body += ["point %02d: nothing to see here" % i for i in range(1, 31)]
+    body += ["the backoff jitter is 20 percent"]
+    body += ["point %02d: more filler words" % i for i in range(32, 50)]
+    body += ["Jitter stays off in tests", "- #377 is still open.",
+             "Then merge PR #418."]
+    lines = []
+    for i, p in enumerate(LK):
+        lines += turn(p, "2026-11-10T1%d:00:00Z" % i,
+                      say("\n".join(body) if i == len(LK) - 1
+                          else "first #377\nthen PAY-219" if i == 1
+                          else "answer to %s" % p))
+    os.makedirs(os.path.dirname(tl(LSID)), exist_ok=True)
+    record("xv-lk", LSID, lines)
+
+
+def body_rows(v):
+    """The rows between the tab line and the rule, as now on screen."""
+    scr = rows(v.out)
+    out = []
+    for k in sorted(x for x in scr if x >= 4):
+        if scr[k].startswith(("\u2500", "-")):
+            break
+        out.append(scr[k].rstrip())
+    return out
+
+
+def shows(v, fn, secs=10.0):
+    """Read until fn(the screen's rows) holds, by a deadline."""
+    end = time.time() + secs
+    while time.time() < end:
+        if fn(rows(v.out)):
+            return True
+        v.pump(0.1)
+    return bool(fn(rows(v.out)))
+
+
+def test_look():
+    v = Pty([DCH, "--xray", "xv-lk"], rows=30, cols=100,
+            env={"NO_COLOR": ""})
+    try:
+        v.wait(b"Prompts 8")
+        v.pump(0.3)
+        v.key(b"\t", 1.0)
+        v.key(b"/5", 0.5)
+        filt = "\n".join(rows(v.out).values())
+        check("#454: /5 still filters while typed (golf 5 holes shown)",
+              "golf 5 holes" in filt, filt)
+        v.key(b"\r", 0.5)
+        check("#454: /5 Enter on Responses selects item 5",
+              shows(v, lambda s: "echo task" in head(v) and
+                    re.match(r"^.\s*5  ", head(v))), head(v))
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        check("#454: Enter then reads prompt 5",
+              v.wait(b"5 of 8", start=mark), v.out[mark:][-400:])
+        v.key(b"q", 0.5)
+        v.key(b"/2\r", 0.5)
+        shows(v, lambda s: "bravo task" in head(v))
+        mark = len(v.out)
+        v.key(b"r", 0.5)
+        check("#454: r on a Responses item lists its refs, the lowest "
+              "first", shows(v, lambda s: any(
+                  r.startswith("\u258c") and "PAY-219" in r
+                  for r in s.values()) and any("#377" in r for r in
+                                               s.values()) and
+                  "refs in view, the lowest first" in "".join(s.values())),
+              screen(v, mark))
+        v.key(b"\033", 0.5)
+        v.key(b"g", 0.5)
+        mark = len(v.out)
+        v.key(b"r", 0.5)
+        check("#454: r on an item with no ref in its lines says so",
+              shows(v, lambda s: any("no refs in view" in r
+                                     for r in s.values())) and
+              v.reap() is None, screen(v, mark))
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        v.wait(b"Reply", start=mark)
+        v.pump(0.3)
+        v.key(b"G", 0.8)
+        shows(v, lambda s: any("PR #418" in r for r in s.values()))
+        before = body_rows(v)
+        mark = len(v.out)
+        v.key(b"r", 0.5)
+        check("#454: r in the reader opens the strip, the lowest ref "
+              "selected", shows(v, lambda s: any(
+                  r.startswith("\u258c") and "#418" in r
+                  for r in s.values())), screen(v, mark))
+        mark = len(v.out)
+        v.key(b"\r", 1.0)
+        check("#454: Enter opens the card of the lowest ref on screen",
+              shows(v, lambda s: "#418" in s.get(2, "") and
+                    "light" in s.get(2, "")),
+              rows(v.out).get(2))
+        v.key(b"q", 0.8)
+        v.key(b"q", 0.8)
+        check("#454: q q returns to the reader at the same line",
+              shows(v, lambda s: body_rows(v) == before), (before,
+                                                           body_rows(v)))
+        v.key(b"g", 0.8)
+        mark = len(v.out)
+        v.key(b"r", 0.8)
+        check("#454: no ref in view: r says so, faint, the reader stays",
+              shows(v, lambda s: any("no refs in view" in r
+                                     for r in s.values())) and
+              re.search(rb"\033\[0;2m[^\033]*no refs in view",
+                        v.out[mark:]) is not None and
+              "Summary of the work." in screen(v, 0), v.out[mark:][-400:])
+        assert "jitter" not in screen(v, 0).lower(), screen(v, 0)
+        mark = len(v.out)
+        v.key(b"/", 0.3)
+        v.key(b"jitter", 0.3)
+        v.key(b"\r", 0.8)
+        check("#454: / jitter Enter moves to the first line holding it",
+              shows(v, lambda s: any("backoff jitter" in r
+                                     for r in s.values()) and
+                    any("jitter: 1 of 2" in r for r in s.values())),
+              screen(v, mark))
+        check("#454: the match stands out",
+              re.search(rb"backoff \033\[0;1[0-9;]*mjitter\033\[0m is",
+                        v.out[mark:]) is not None,
+              v.out[mark:][-600:])
+        mark = len(v.out)
+        v.key(b"n", 0.8)
+        check("#454: n moves to the next (case folded)",
+              shows(v, lambda s: any("Jitter stays off" in r
+                                     for r in s.values()) and
+                    any("jitter: 2 of 2" in r for r in s.values())),
+              screen(v, mark))
+        mark = len(v.out)
+        v.key(b"N", 0.8)
+        check("#454: N goes back to the previous",
+              shows(v, lambda s: any("jitter: 1 of 2" in r
+                                     for r in s.values())), screen(v, mark))
+        mark = len(v.out)
+        v.key(b"\033", 0.8)
+        check("#454: Esc clears the find, the reader stays",
+              shows(v, lambda s: not any(r.startswith("/jitter")
+                                         for r in s.values()) and
+                    any("next prompt" in r for r in s.values())),
+              screen(v, mark))
+        v.key(b"q", 0.3)
+        v.key(b"q")
+        v.exit()
+    finally:
+        v.close()
+
+
 def main():
     run_steps(fixture_auto, test_auto, test_compact, test_gone, fixture_resp,
               test_responses, test_responses_live, test_responses_codex,
-              test_tasks_codex, fixture_search, test_search)
+              test_tasks_codex, fixture_search, test_search, fixture_tail,
+              test_tail, fixture_look, test_look)
 
 
 if __name__ == "__main__":

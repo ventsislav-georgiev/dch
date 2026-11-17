@@ -95,7 +95,7 @@ struct xv_ref
 	long long count, seen;	/* seen: later is more recent */
 	long long last;		/* last_offset (#262): -1 from an older host */
 	int defined, underline;
-	int onscr;		/* in the on-screen group (xv_vis) */
+	int onscr;		/* in the on-screen or last-reply group (xv_vis) */
 };
 
 struct xv_def
@@ -115,7 +115,7 @@ struct xv_men
 struct xv_ent
 {
 	char *role, *tool, *text;
-	int error;
+	int error, cut;	/* cut: the engine cut the middle (a marker line) */
 	long long off;	/* its record's, -1 from a host that sends none */
 };
 
@@ -201,7 +201,8 @@ struct xv
 	long long rseq;
 	struct xv_kid kid[XV_NKIDS];
 	int sel[XV_NTAB], top[XV_NTAB], *vis, nvis, avis;	/* Responses: items */
-	int ngrp;		/* Refs: vis's first ngrp rows are on screen */
+	int ngrp, ngrp2;	/* Refs: vis's first ngrp rows are on screen, the
+				** next up to ngrp2 are in the last reply */
 	char *selk;		/* Refs: the selected row's key, followed when
 				** the rows change */
 	char *sela;		/* Responses: the selected item's anchor, so */
@@ -242,7 +243,18 @@ struct xv
 	** the index's, so count 0 and no title */
 	struct xv_ref *sr;
 	int nsr, asr;
+	struct xv_ref *lr;	/* the newest response's refs, document order */
+	int nlr, alr;
 	long long scr_at;
+	/* r (#454): the refs in the lines shown, the lowest first, by the
+	** screen's grammar; strip: their picker is open, ssel and stp its
+	** selection and top; sback: the reader's back while r's card is up */
+	struct xv_ref *rr;
+	int nrr, arr, strip, ssel, stp, sback;
+	/* / in the reader (#454): the text found (as big as filt: xv_filt
+	** edits it), the match line n and N go on from (-1 none) */
+	char rq[256];
+	int rcur;
 	/* Tasks (#320), Memory (#323): vis holds their rows while vtab is 4
 	** or 5 and the list's gen (tvgen) and tvf say they are current */
 	struct xv_tq tq[2];
@@ -1757,6 +1769,7 @@ xv_read_free(struct xv *v)
 		xv_sfree(v->e[k].text);
 	}
 	v->ne = v->nrl = 0;
+	v->rcur = -1;
 	xv_sfree(v->rtitle);
 	v->rtitle = NULL;
 	v->rloaded = v->rtop = 0;
@@ -1819,6 +1832,8 @@ xv_wrap(struct xv *v, int w)
 		for (;;)
 		{
 			size_t ll = strcspn(s, "\n"), f;
+			int mark = v->e[k].cut && !strncmp(s, "\xe2\x80\xa6 ", 4) &&
+			           ll > 23 && !strncmp(s + ll - 19, " characters cut \xe2\x80\xa6", 19);
 
 			do
 			{
@@ -1829,7 +1844,7 @@ xv_wrap(struct xv *v, int w)
 					return;
 				l.s = s;
 				l.n = f;
-				l.kind = out ? 2 : 1;
+				l.kind = out || mark ? 2 : 1;
 				v->rl[v->nrl++] = l;
 				s += f;
 				ll -= f;
@@ -1946,6 +1961,7 @@ xv_rline(struct xv *v, const struct json_parser *p)
 		e.tool = xv_str(p, t, "tool");
 		e.text = xv_str(p, t, "text");
 		e.error = xv_bool(p, t, "error");
+		e.cut = xv_num(p, t, "cut", 0) > 0;
 		e.off = xv_num(p, t, "offset", -1);
 		/* a tab or CR as a blank: the reader lays text out itself */
 		for (c = e.text; *c; c++)
@@ -1988,7 +2004,8 @@ xv_read(struct xv *v, const char *anchor, const char *want)
 	v->ranchor = strdup(anchor);
 	free(v->rturn);
 	v->rturn = NULL;
-	v->rend = v->redge = 0;
+	v->rend = v->redge = v->strip = 0;
+	v->rq[0] = '\0';
 	v->back = v->mode;
 	v->mode = XV_READ;
 	xv_rquery(v, anchor);
@@ -2101,6 +2118,8 @@ xv_back(struct xv *v)
 		xv_read_free(v);
 		free(v->rturn);
 		v->rturn = NULL;
+		v->strip = v->filtering = 0;
+		v->rq[0] = '\0';
 		/* a memory's card opens the reader too (#323) */
 		v->mode = v->back == XV_CARD || v->back == XV_TCARD ? v->back
 		          : XV_LIST;
@@ -2109,7 +2128,14 @@ xv_back(struct xv *v)
 	{
 		xv_stop(&v->kid[XV_CK], XV_CK);
 		xv_card_free(v);
-		v->mode = XV_LIST;
+		/* a card r opened in the reader (#454): back to it, at its line */
+		if (v->back == XV_READ)
+		{
+			v->mode = XV_READ;
+			v->back = v->sback;
+		}
+		else
+			v->mode = XV_LIST;
 	}
 	else if (v->mode == XV_TCARD)
 		v->mode = XV_LIST;
@@ -2131,6 +2157,7 @@ struct xv_scan
 {
 	struct xv *v;
 	const char *line;
+	int rep;		/* the last reply: every span, into lr */
 };
 
 /* A span on the screen, its key once (#262: the index may not hold it,
@@ -2143,9 +2170,13 @@ xv_span(void *ctx, const struct xr_span *sp)
 	struct xv_ref r;
 	int k;
 
-	for (k = 0; k < v->nsr && strcmp(v->sr[k].key, sp->key); k++)
+	struct xv_ref **a = c->rep ? &v->lr : &v->sr;
+	int *n = c->rep ? &v->nlr : &v->nsr, *cap = c->rep ? &v->alr : &v->asr;
+
+	/* the reply keeps every place, xv_reply_scan drops the earlier ones */
+	for (k = 0; !c->rep && k < *n && strcmp((*a)[k].key, sp->key); k++)
 		;
-	if (k < v->nsr || xv_grow(&v->sr, &v->asr, v->nsr, sizeof r) < 0)
+	if ((!c->rep && k < *n) || xv_grow(a, cap, *n, sizeof r) < 0)
 		return 0;
 	memset(&r, 0, sizeof r);
 	r.key = strdup(sp->key);
@@ -2160,7 +2191,7 @@ xv_span(void *ctx, const struct xr_span *sp)
 		free(r.text);
 		return 0;
 	}
-	v->sr[v->nsr++] = r;
+	(*a)[(*n)++] = r;
 	return 0;
 }
 
@@ -2176,6 +2207,7 @@ xv_screen_scan(struct xv *v, const char *scr)
 
 	xv_sr_free(v);
 	c.v = v;
+	c.rep = 0;
 	for (;; e = s - 1)
 	{
 		for (s = e; s > scr && s[-1] != '\n'; s--)
@@ -2186,6 +2218,45 @@ xv_screen_scan(struct xv *v, const char *scr)
 		if (s == scr)
 			break;
 	}
+}
+
+/* The newest response's refs, one each at its last place, in document
+** order (xv_vis lists them from the end). Whatever text the view holds. */
+static void
+xv_reply_scan(struct xv *v)
+{
+	const char *s, *e, *t = v->nch ? v->ch[v->nch - 1].resp : "";
+	struct xv_scan c;
+	int code = v->corpus && !strcmp(v->corpus, "shell");
+	const char *cwd = v->label && v->label[0] == '/' ? v->label : NULL;
+	int i, j;
+
+	for (i = 0; i < v->nlr; i++)
+		xv_ref_free(&v->lr[i]);
+	v->nlr = 0;
+	c.v = v;
+	c.rep = 1;
+	for (s = t; *s; s = *e ? e + 1 : e)
+	{
+		e = strchr(s, '\n');
+		if (!e)
+			e = s + strlen(s);
+		c.line = s;
+		(void)xr_grammar(s, (size_t)(e - s), code ? XR_CODE : XR_PROSE,
+		                 cwd, xv_span, &c);
+	}
+	for (i = 0; i < v->nlr; i++)
+		for (j = i + 1; j < v->nlr; j++)
+			if (!strcmp(v->lr[i].key, v->lr[j].key))
+			{
+				xv_ref_free(&v->lr[i]);
+				v->lr[i].key = NULL;
+				break;
+			}
+	for (i = j = 0; i < v->nlr; i++)
+		if (v->lr[i].key)
+			v->lr[j++] = v->lr[i];
+	v->nlr = j;
 }
 
 /* The session's screen from its mirror, then its refs. A remote one's
@@ -2365,7 +2436,10 @@ xv_temp(const struct xv *v, const struct xv_ref *r)
 static const struct xv_ref *xv_sort_rf;
 
 /* Refs: the latest mentioned first (#262; an older host sends no
-** last_offset), then the highest count, then the most recently seen. */
+** last_offset), then the highest count, then the most recently seen. The
+** offset is a record's line: only refs of one record tie, and only the
+** engine could tell their places apart (#452 puts the last answer's by
+** place in its own group). */
 static int
 xv_ref_cmp(const void *pa, const void *pb)
 {
@@ -2430,11 +2504,14 @@ xv_rtab(const struct xv *v)
 	return v->have && !strcmp(xv_noun(v), "prompt");
 }
 
-/* Refs row k of xv_vis: the index's, or past it the screen's. */
+/* Refs row k of xv_vis: the index's, or past it the screen's, then the
+** last reply's. */
 static struct xv_ref *
 xv_rfat(struct xv *v, int k)
 {
-	return k < v->nrf ? &v->rf[k] : &v->sr[k - v->nrf];
+	k -= v->nrf;
+	return k < 0 ? &v->rf[k + v->nrf] : k < v->nsr ? &v->sr[k]
+	       : &v->lr[k - v->nsr];
 }
 
 /* Row k when the filter and the hidden kinds show it (those counted). */
@@ -2502,13 +2579,33 @@ xv_vis(struct xv *v)
 		xv_vis1(v, k < v->nrf ? k : v->nrf + j);
 	}
 	v->ngrp = v->nvis;
+	/* the newest answer's refs, its last place on top; a turn with no
+	** answer has none */
+	if (v->tab == 1)
+		xv_reply_scan(v);
+	for (j = v->nlr - 1; v->tab == 1 && j >= 0; j--)
+	{
+		for (k = 0; k < v->nsr && strcmp(v->sr[k].key, v->lr[j].key); k++)
+			;
+		if (k < v->nsr)
+			continue;
+		for (k = 0; k < v->nrf && strcmp(v->rf[k].key, v->lr[j].key);
+		     k++)
+			;
+		if (k < v->nrf && v->rf[k].onscr)
+			continue;
+		if (k < v->nrf)
+			v->rf[k].onscr = 1;
+		xv_vis1(v, k < v->nrf ? k : v->nrf + v->nsr + j);
+	}
+	v->ngrp2 = v->nvis;
 	for (k = 0; k < n; k++)
 		if (v->tab != 1 || !v->rf[k].onscr)
 			xv_vis1(v, v->tab == 1 ? k : n - 1 - k);
-	if (v->tab == 1 && v->nvis - v->ngrp > 1)
+	if (v->tab == 1 && v->nvis - v->ngrp2 > 1)
 	{
 		xv_sort_rf = v->rf;
-		qsort(v->vis + v->ngrp, (size_t)(v->nvis - v->ngrp),
+		qsort(v->vis + v->ngrp2, (size_t)(v->nvis - v->ngrp2),
 		      sizeof *v->vis, xv_ref_cmp);
 	}
 	/* Refs: the selection stays on its ref while the rows change under
@@ -2718,9 +2815,9 @@ xv_hit1(struct xv *v, int i, int room)
 static int
 xv_feed1(struct xv *v, int i, int room)
 {
-	int k = v->vis[i], h = 0, w = pk_w - 8, l;
+	int k = v->vis[i], h = 0, w = pk_w - 8, l, tail = 0;
 	const struct xv_ch *c;
-	const char *s;
+	const char *s, *tl;
 	size_t n;
 
 	if (v->tab == 3)
@@ -2738,18 +2835,67 @@ xv_feed1(struct xv *v, int i, int room)
 		pk_txt(c->tools);
 		pk_eol();
 	}
-	for (l = 0; *s && l < XV_ALINES; l++)
+	/* the newest item holds up to half the window, so a cut answer's
+	** tail shows: the head's first lines, a faint ellipsis, the tail's
+	** last (the engine joins them with "\n...\n") */
+	if (i == 0 && c->rcut && (tl = strstr(s, "\n\xe2\x80\xa6\n")) != NULL)
 	{
-		const char *t = s;
+		const char *hs = s, *t;
+		int nt, nh, hl, tk, rl = v->win / 2 > XV_ALINES ? v->win / 2 : XV_ALINES;
 
-		s = xv_wline(t, w, &n);
-		if (xv_fline1(&h, room, 0))
+		tl += 5;
+		for (nt = 0, t = tl; *t; nt++)
+			t = xv_wline(t, w, &n);
+		for (nh = 0, t = s; t < tl - 5; nh++)
+			t = xv_wline(t, w, &n);
+		tk = nt < rl / 2 ? nt : rl / 2;
+		hl = rl - 1 - tk;
+		if (nh + 1 + nt <= rl)
+			hl = nh, tk = nt;
+		for (l = 0; l < hl && hs < tl - 5; l++)
 		{
-			xv_txtn(t, n);
+			t = hs;
+			hs = xv_wline(t, w, &n);
+			if (xv_fline1(&h, room, 0))
+			{
+				xv_txtn(t, n);
+				pk_eol();
+			}
+		}
+		if (xv_fline1(&h, room, 1))
+		{
+			pk_txt(xv_ell());
 			pk_eol();
 		}
+		for (t = tl, l = nt - tk; l-- > 0;)
+			t = xv_wline(t, w, &n);
+		while (*t)
+		{
+			const char *u = t;
+
+			t = xv_wline(u, w, &n);
+			if (xv_fline1(&h, room, 0))
+			{
+				xv_txtn(u, n);
+				pk_eol();
+			}
+		}
+		s = t;
+		tail = 1;
 	}
-	if ((*s || c->rcut || (!c->resp[0] && (xv_working(v, k) ||
+	else
+		for (l = 0; *s && l < XV_ALINES; l++)
+		{
+			const char *t = s;
+
+			s = xv_wline(t, w, &n);
+			if (xv_fline1(&h, room, 0))
+			{
+				xv_txtn(t, n);
+				pk_eol();
+			}
+		}
+	if ((*s || (c->rcut && !tail) || (!c->resp[0] && (xv_working(v, k) ||
 	     c->roff >= 0))) && xv_fline1(&h, room, 1))
 	{
 		pk_txt(c->resp[0] ? xv_ell() : xv_working(v, k) ? "working"
@@ -3103,10 +3249,80 @@ xv_draw_card(struct xv *v, int win)
 	}
 }
 
+/* Row k of r's strip (#454): the index's ref with its key (count, title),
+** else the scan's */
+static const struct xv_ref *
+xv_sref(const struct xv *v, int k)
+{
+	int j;
+
+	for (j = 0; j < v->nrf; j++)
+		if (!strcmp(v->rf[j].key, v->rr[k].key))
+			return &v->rf[j];
+	return &v->rr[k];
+}
+
+/* The strip's height in the window, 0 closed: up to half of it */
+static int
+xv_strip_h(const struct xv *v)
+{
+	int h = v->win / 2 > 2 ? v->win / 2 : 2;
+
+	if (!v->strip)
+		return 0;
+	if (h > v->nrr + 1)
+		h = v->nrr + 1;
+	return h < v->win ? h : v->win;
+}
+
+/* r's strip in rows lines: a faint head, then its refs as Refs' rows */
+static void
+xv_draw_strip(struct xv *v, int rows)
+{
+	int k;
+
+	if (rows > 1)
+	{
+		pk_line();
+		pk_set("2");
+		pk_txt("  refs in view, the lowest first");
+		pk_eol();
+		rows--;
+	}
+	xv_clamp(&v->ssel, &v->stp, v->nrr, rows);
+	for (k = v->stp; k < v->stp + rows; k++)
+	{
+		pk_line();
+		if (k < v->nrr)
+			xv_row_ref(v, xv_sref(v, k), k == v->ssel);
+		pk_eol();
+	}
+}
+
+/* n bytes of reader text s on base, the text found (/, #454) standing out */
+static void
+xv_rhl(const struct xv *v, const char *s, size_t n, const char *base)
+{
+	size_t a = 0, e, ql = strlen(v->rq);
+
+	while (a < n)
+	{
+		for (e = a; e < n && !(ql && xv_at(s + e, v->rq)); e++)
+			;
+		pk_set(base);
+		xv_txtn(s + a, e - a);
+		if (e == n)
+			break;
+		a = e + ql < n ? e + ql : n;
+		pk_set(pk_p(PK_ACCB));
+		xv_txtn(s + e, a - e);
+	}
+}
+
 static void
 xv_draw_read(struct xv *v, int win)
 {
-	int k;
+	int k, h = xv_strip_h(v);
 
 	if (v->rloaded && v->rw != pk_w - 2)
 		xv_wrap(v, pk_w - 2);
@@ -3114,7 +3330,8 @@ xv_draw_read(struct xv *v, int win)
 		v->rtop = v->nrl - win;
 	if (v->rtop < 0)
 		v->rtop = 0;
-	for (k = v->rtop; k < v->rtop + win; k++)
+	/* r's strip under the text: the lowest lines stay in view */
+	for (k = v->rtop + h; k < v->rtop + win; k++)
 	{
 		pk_line();
 		if (k < v->nrl && v->rl[k].kind == 0)
@@ -3136,7 +3353,7 @@ xv_draw_read(struct xv *v, int win)
 		{
 			pk_set(v->rl[k].kind == 2 ? "2" : "");
 			pk_txt("  ");
-			xv_txtn(v->rl[k].s, v->rl[k].n);
+			xv_rhl(v, v->rl[k].s, v->rl[k].n, v->rl[k].kind == 2 ? "2" : "");
 		}
 		else if (k == 0)
 		{
@@ -3147,6 +3364,8 @@ xv_draw_read(struct xv *v, int win)
 		}
 		pk_eol();
 	}
+	if (h)
+		xv_draw_strip(v, h);
 }
 
 /* Search (#291): the text's line, then the hits as a feed, or the one
@@ -3704,7 +3923,12 @@ xv_draw(struct xv *v, int force)
 	}
 #define XV_K(g, k, l) (keys[nk++] = (struct pkkey){ (k), (l), NULL, (g), 0 })
 	isref = v->mode == XV_LIST && v->tab != 3 && xv_fref(v, b, sizeof b);
-	if (v->filtering && v->tab == 3)
+	if (v->filtering && v->mode == XV_READ)
+	{
+		XV_K(0, ret, "find");
+		XV_K(3, "esc", "clear");
+	}
+	else if (v->filtering && v->tab == 3)
 	{
 		XV_K(0, ret, "search");
 		XV_K(3, "esc", "cancel");
@@ -3715,6 +3939,13 @@ xv_draw(struct xv *v, int force)
 		if (isref || v->filt[0])
 			XV_K(0, "^R", isref ? "look up" : "search");
 		XV_K(3, "esc", "clear");
+	}
+	else if (v->strip && (v->mode == XV_READ || (v->mode == XV_LIST &&
+	                                             v->tab == 2)))
+	{
+		XV_K(0, ret, "card");
+		XV_K(3, pk_utf ? "\xe2\x86\x91\xe2\x86\x93" : "up/down", "move");
+		XV_K(3, "esc", "close");
 	}
 	else if (v->mode == XV_CARD)
 	{
@@ -3748,6 +3979,10 @@ xv_draw(struct xv *v, int force)
 		XV_K(0, "]", strcmp(xv_noun(v), "prompt") ? "next command"
 		     : "next prompt");
 		XV_K(0, "[", "previous");
+		XV_K(0, "r", "refs");
+		XV_K(3, "/", "find");
+		if (v->rq[0])
+			XV_K(0, "n/N", "next/previous match");
 		XV_K(3, pk_utf ? "\xe2\x86\x91\xe2\x86\x93" : "up/down", "scroll");
 		XV_K(3, "esc", "back");
 	}
@@ -3764,6 +3999,8 @@ xv_draw(struct xv *v, int force)
 		XV_K(0, ret, ent);
 		if (v->tab != 1 && xv_live(v))
 			XV_K(0, "o", "open session");
+		if (v->tab == 2)
+			XV_K(0, "r", "refs");
 		XV_K(3, "/", v->tab == 3 ? "search" : "filter");
 		if (isref || (v->tab != 3 && v->filt[0]))
 			XV_K(0, "^R", isref ? "look up" : "search");
@@ -3946,11 +4183,16 @@ xv_draw(struct xv *v, int force)
 	else if (v->tab >= 4)
 		xv_draw_tasks(v, v->win);
 	else if (v->tab == 2 && v->have && (xv_vis(v), v->nvis))
-		xv_draw_feed(v, v->win);
+	{
+		k = xv_strip_h(v);
+		xv_draw_feed(v, v->win - k);
+		if (k)
+			xv_draw_strip(v, k);
+	}
 	else
 	{
 		int *sel = &v->sel[v->tab], *top = &v->top[v->tab], win = v->win;
-		int g, h1, h2, i;
+		int g, g2, h1, h2, h3, i;
 
 		xv_vis(v);
 		n = v->nvis;
@@ -3968,29 +4210,35 @@ xv_draw(struct xv *v, int force)
 			win--;
 		}
 		/* Refs: a faint line over the on-screen group, one over the
-		** rest under it (#294); the selection's row keeps its line in
-		** view */
+		** last reply's, one over the rest under them (#294); the
+		** selection's row keeps its line in view */
 		g = v->tab == 1 ? v->ngrp : 0;
+		g2 = v->tab == 1 ? v->ngrp2 : 0;
 		h1 = g > 0;
-		h2 = g > 0 && n > g;
+		h3 = g2 > g;
+		h2 = (g > 0 || h3) && n > g2;
 		if (*sel >= n)
 			*sel = n - 1;
 		if (*sel < 0)
 			*sel = 0;
-		i = *sel + h1 + (h2 && *sel >= g);
-		xv_clamp(&i, top, n + h1 + h2, win);
-		if (*top == i && *top && (*sel ? h2 && *sel == g : h1))
+		i = *sel + h1 + (h3 && *sel >= g) + (h2 && *sel >= g2);
+		xv_clamp(&i, top, n + h1 + h2 + h3, win);
+		if (*top == i && *top &&
+		    (*sel ? (h3 && *sel == g) || (h2 && *sel == g2) : h1 || h3))
 			(*top)--;
 		if (v->tab < 2)
 			xv_selk(v);
 		for (k = *top; k < *top + win; k++)
 		{
-			i = k - h1 - (h2 && k > g + 1);
+			int p3 = g + h1, p2 = g2 + h1 + h3;
+
+			i = k - h1 - (h3 && k > p3) - (h2 && k > p2);
 			pk_line();
-			if ((h1 && !k) || (h2 && k == g + 1))
+			if ((h1 && !k) || (h3 && k == p3) || (h2 && k == p2))
 			{
 				pk_set("2");
-				pk_txt(k ? "  the rest" : "  on screen now");
+				pk_txt(h1 && !k ? "  on screen now" : h3 && k == p3
+				       ? "  in the last reply" : "  the rest");
 			}
 			else if (i < n && v->tab == 0)
 				xv_row_ch(&v->ch[v->vis[i]], v->vis[i],
@@ -4030,13 +4278,14 @@ xv_draw(struct xv *v, int force)
 
 	pk_rule();
 	pk_line();
-	/* Search's text has its own line (#291) */
-	if (v->tab != 3 && (v->filtering || (v->mode == XV_LIST && v->filt[0])))
+	/* Search's text has its own line (#291); the reader's find, its own */
+	if (v->mode == XV_READ ? v->filtering || v->rq[0] : v->tab != 3 &&
+	    (v->filtering || (v->mode == XV_LIST && v->filt[0])))
 	{
 		pk_set(pk_p(PK_ACC));
 		pk_txt("/");
 		pk_set("");
-		pk_txt(v->filt);
+		pk_txt(v->mode == XV_READ ? v->rq : v->filt);
 		if (v->filtering)
 			pk_txt(pk_utf ? "\xe2\x96\x88" : "_");
 		pk_txt("  ");
@@ -4055,7 +4304,7 @@ xv_draw(struct xv *v, int force)
 		pk_set(pk_p(PK_ACC));
 		pk_txt(b);
 	}
-	pk_set("");
+	pk_set(!strcmp(v->status, "no refs in view") ? "2" : "");
 	pk_txt(v->status[0] ? v->status : v->stop);
 	pk_eol();
 	pk_keys(keys, nk, drop, cap, 1);
@@ -4064,15 +4313,41 @@ xv_draw(struct xv *v, int force)
 
 /* ---- keys ------------------------------------------------------------ */
 
+/* A bare number typed as the filter (#454): Prompts and Responses select
+** that prompt, the filter gone, so Enter reads it. 1 when it was one. */
+static int
+xv_jump(struct xv *v)
+{
+	size_t l = strlen(v->filt);
+	int n, k;
+
+	if (!l || l > 6 || strspn(v->filt, "0123456789") != l)
+		return 0;
+	n = atoi(v->filt);
+	v->filt[0] = '\0';
+	xv_vis(v);
+	for (k = 0; k < v->nvis && v->vis[k] != n - 1; k++)
+		;
+	if (k < v->nvis)
+	{
+		v->sel[v->tab] = k;
+		xv_selk(v);
+	}
+	else
+		snprintf(v->status, sizeof v->status, "no %s %d in this list",
+		         xv_noun(v), n);
+	return 1;
+}
+
 /* The filter's prompt, as the picker's (#096); on Search the text to
-** search, Enter searching it, Esc keeping the last one (#291). 1: c was
-** the filter's. */
+** search, Enter searching it, Esc keeping the last one (#291); in the
+** reader the text to find (#454). 1: c was the filter's. */
 static int
 xv_filt(struct xv *v, int c)
 {
-	char *f = v->tab == 3 ? v->q : v->filt;
+	int rd = v->mode == XV_READ, k;
+	char *f = rd ? v->rq : v->tab == 3 ? v->q : v->filt;
 	size_t l = strlen(f);
-	int k;
 
 	if (!v->filtering)
 	{
@@ -4082,7 +4357,7 @@ xv_filt(struct xv *v, int c)
 		v->status[0] = '\0';
 		return 1;
 	}
-	if (v->tab == 3 && (c == '\r' || c == '\n'))
+	if (!rd && v->tab == 3 && (c == '\r' || c == '\n'))
 	{
 		xv_search(v, v->q);
 		return 1;
@@ -4091,9 +4366,10 @@ xv_filt(struct xv *v, int c)
 	{
 	case '\r': case '\n': case PK_UP: case PK_DOWN: case '\t': case PK_BTAB:
 		v->filtering = 0;	/* and on to the list, as the picker's */
-		return 0;
+		return c == '\r' || c == '\n' ? !rd && (v->tab == 0 ||
+		       v->tab == 2) && xv_jump(v) : 0;
 	case PK_ESC:
-		snprintf(f, sizeof v->q, "%s", v->tab == 3 ? v->sq : "");
+		snprintf(f, sizeof v->q, "%s", !rd && v->tab == 3 ? v->sq : "");
 		v->filtering = 0;
 		break;
 	case 0x7f: case 8:
@@ -4118,7 +4394,7 @@ xv_filt(struct xv *v, int c)
 			f[l + 1] = '\0';
 		}
 	}
-	if (v->tab != 3)	/* Search's hits stay until it runs */
+	if (!rd && v->tab != 3)	/* Search's hits stay until it runs */
 	{
 		memset(v->sel, 0, sizeof v->sel);
 		for (k = 0; k < 2; k++)
@@ -4265,25 +4541,196 @@ xv_peersave(int hide)
 	return 0;
 }
 
+/* r (#454): the refs in text t (the lines shown) into rr by the screen's
+** grammar, the lowest first, and their strip opened; none: said faint */
+static void
+xv_rrefs(struct xv *v, const char *t)
+{
+	struct xv_ref *a = v->sr;
+	int n = v->nsr, c = v->asr;
+
+	v->sr = v->rr;
+	v->nsr = v->nrr;
+	v->asr = v->arr;
+	xv_screen_scan(v, t ? t : "");
+	v->rr = v->sr;
+	v->nrr = v->nsr;
+	v->arr = v->asr;
+	v->sr = a;
+	v->nsr = n;
+	v->asr = c;
+	v->ssel = v->stp = 0;
+	v->strip = v->nrr > 0;
+	if (!v->nrr)
+		snprintf(v->status, sizeof v->status, "no refs in view");
+}
+
+/* r in the reader: the text lines in the window */
+static void
+xv_rshown(struct xv *v)
+{
+	size_t n = 1;
+	int k, e;
+	char *t, *p;
+
+	if (v->rtop > v->nrl - v->win)
+		v->rtop = v->nrl - v->win;
+	if (v->rtop < 0)
+		v->rtop = 0;
+	e = v->rtop + v->win < v->nrl ? v->rtop + v->win : v->nrl;
+	for (k = v->rtop; k < e; k++)
+		n += v->rl[k].n + 1;
+	if ((p = t = malloc(n)) != NULL)
+	{
+		for (k = v->rtop; k < e; k++)
+			if (v->rl[k].kind)
+			{
+				memcpy(p, v->rl[k].s, v->rl[k].n);
+				p += v->rl[k].n;
+				*p++ = '\n';
+			}
+		*p = '\0';
+	}
+	xv_rrefs(v, t);
+	free(t);
+}
+
+/* r on a Responses item: its answer's lines as xv_feed1 shows them.
+** shortcut: the newest cut item's whole held text (its head may show only
+** in part); exact when its head and tail always fit */
+static void
+xv_ishown(struct xv *v)
+{
+	int i = v->sel[2], l;
+	const char *s, *e;
+	size_t n;
+	char *t;
+
+	xv_vis(v);
+	if (i < 0 || i >= v->nvis)
+	{
+		xv_rrefs(v, "");
+		return;
+	}
+	s = e = v->ch[v->vis[i]].resp;
+	if (i == 0 && v->ch[v->vis[i]].rcut)
+		e += strlen(e);
+	else
+		for (l = 0; *e && l < XV_ALINES; l++)
+			e = xv_wline(e, pk_w - 8, &n);
+	t = strndup(s, (size_t)(e - s));
+	xv_rrefs(v, t);
+	free(t);
+}
+
+/* / in the reader (#454): the next line holding the text found from line
+** k on, d 1 down, -1 up; -1 none */
+static int
+xv_rfind(const struct xv *v, int k, int d)
+{
+	for (; v->rq[0] && k >= 0 && k < v->nrl; k += d)
+		if (v->rl[k].kind && xv_in(v->rl[k].s, v->rl[k].n, v->rq))
+			return k;
+	return -1;
+}
+
+/* The reader to match line k, near the window's top, said with its place
+** among the matches; none (k -1): why */
+static void
+xv_rgo(struct xv *v, int k, const char *none)
+{
+	int i, n = 0, at = 0;
+
+	if (k < 0)
+	{
+		snprintf(v->status, sizeof v->status, "%s: %s", v->rq, none);
+		return;
+	}
+	for (i = 0; (i = xv_rfind(v, i, 1)) >= 0; i++)
+	{
+		n++;
+		at += i <= k;
+	}
+	v->rcur = k;
+	v->rtop = k > 2 ? k - 2 : 0;
+	snprintf(v->status, sizeof v->status, "%s: %d of %d", v->rq, at, n);
+}
+
 /* One key. 1: leave the view. */
 static int
 xv_key(struct xv *v, int c)
 {
 	int *sel, n, k, i;
+	int st = v->strip && (v->mode == XV_READ || (v->mode == XV_LIST &&
+	                                             v->tab == 2));
 
 	if (c == 3 || c == 4)
 		return 1;
 	if (v->fail[0])
 		return c == 'q' || c == PK_ESC;
-	if (v->mode == XV_LIST && xv_filt(v, c))
+	if (!st && (v->mode == XV_LIST || v->mode == XV_READ) && xv_filt(v, c))
 		return 0;
 	v->status[0] = '\0';
+	/* r's strip (#454): j k move, Enter opens the card (q comes back to
+	** it), q Esc close it; any other key closes it and is its own */
+	if (st)
+	{
+		const struct xv_ref *r;
+
+		if (v->ssel >= v->nrr)
+			v->ssel = v->nrr - 1;
+		if (v->ssel < 0)
+			v->ssel = 0;
+		switch (c)
+		{
+		case 'j': case PK_DOWN: v->ssel++; return 0;
+		case 'k': case PK_UP: v->ssel--; return 0;
+		case 'q': case PK_ESC: v->strip = 0; return 0;
+		case '\r': case '\n':
+			r = xv_sref(v, v->ssel);
+			k = v->back;
+			xv_card(v, r->key, r->text, r->full, 0, 1);
+			/* the reader's own back waits under the card's */
+			if (v->mode == XV_CARD && v->back == XV_READ)
+				v->sback = k == XV_CARD ? XV_LIST : k;
+			return 0;
+		}
+		v->strip = 0;
+		if (xv_filt(v, c))
+			return 0;
+	}
 	if (v->mode == XV_READ)
 	{
 		k = v->redge;
 		v->redge = 0;
 		switch (c)
 		{
+		case 'r': xv_rshown(v); break;
+		case '\r': case '\n':
+			v->rcur = -1;
+			if (v->rq[0])
+				xv_rgo(v, xv_rfind(v, v->rtop + 1, 1),
+				       "no match below the top line");
+			break;
+		case 'n':
+			if (v->rq[0])
+				xv_rgo(v, xv_rfind(v, v->rcur < 0 ? v->rtop + 1
+				                   : v->rcur + 1, 1), "no more below");
+			break;
+		case 'N':
+			if (v->rq[0])
+				xv_rgo(v, xv_rfind(v, v->rcur < 0 ? v->rtop - 1
+				                   : v->rcur - 1, -1), "no more above");
+			break;
+		case PK_ESC:
+			if (v->rq[0])
+			{
+				v->rq[0] = '\0';
+				v->rcur = -1;
+			}
+			else
+				xv_back(v);
+			break;
 		case 'j': case PK_DOWN: xv_scroll(v, 1, k); break;
 		case 'k': case PK_UP: xv_scroll(v, -1, k); break;
 		case ' ': case PK_PGDN: xv_scroll(v, v->win, k); break;
@@ -4294,7 +4741,7 @@ xv_key(struct xv *v, int c)
 		case '[': xv_turn(v, -1, 0); break;
 		case 'o':
 			return xv_open(v);
-		case 'q': case PK_ESC: case 'h': case PK_LEFT: case 0x7f:
+		case 'q': case 'h': case PK_LEFT: case 0x7f:
 			xv_back(v);
 			break;
 		}
@@ -4461,6 +4908,11 @@ xv_key(struct xv *v, int c)
 	}
 	if (v->tab != 1 && c == 'o')
 		return xv_open(v);
+	if (v->tab == 2 && c == 'r')
+	{
+		xv_ishown(v);
+		return 0;
+	}
 	sel = &v->sel[v->tab];
 	xv_vis(v);
 	n = v->nvis;
@@ -4588,6 +5040,12 @@ xv_free(struct xv *v)
 	free(v->e);
 	free(v->rl);
 	free(v->sr);
+	for (k = 0; k < v->nrr; k++)
+		xv_ref_free(&v->rr[k]);
+	free(v->rr);
+	for (k = 0; k < v->nlr; k++)
+		xv_ref_free(&v->lr[k]);
+	free(v->lr);
 	free(v->selk);
 	free(v->sela);
 	free(v->selp);

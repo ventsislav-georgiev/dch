@@ -342,13 +342,13 @@ def main():
         idle(c2)
         n1, n2 = len(events(c1)), len(events(c2))
         r = say(c1, "--", "/x\u0085y")
-        check("/x<U+0085>y pastes, no keys typed",
+        check("/x<U+0085>y pastes, no line typed",
               any(e["ev"] == "paste" for e in events(c1)[n1:]) and
-              not any(e["ev"] == "key" for e in events(c1)[n1:]))
+              not any(e["ev"] in ("line", "turn") for e in events(c1)[n1:]))
         run("-k", c1)
         r = say("--all", "--", "/x\u0085")
         check("--all /x<U+0085> is not refused as a /command",
-              "usage" not in r.stderr.lower() and
+              "a /command is not sent" not in r.stderr and
               any(e["ev"] == "paste" for e in events(c2)[n2:]))
         idle(c2)
 

@@ -19,7 +19,8 @@
 #define XR_TITLE_MAX   120		/* scalars (3.2, ruling R3) */
 #define XR_CHAPTERS    5000		/* 13.2 item 6: the newest kept */
 #define XR_SUMMARIES   (256u << 10)	/* #192: summary bytes held (3.8) */
-#define XR_RESPONSE    2048		/* #296: a response's bytes */
+#define XR_RESPONSE    2048		/* #296: a response's bytes; a longer one
+					** keeps its first and last half (#451) */
 #define XR_RESPONSES   (2u << 20)	/* #296: response bytes held */
 #define XR_HEAD_RANGE  (16ull << 20)	/* 3.8 per-file range: head ... */
 #define XR_TAIL_RANGE  (256ull << 20)	/* ... plus the newest 256 MB */
@@ -71,12 +72,15 @@ struct xr_chapter
 					** (never NULL from the engine); held out of
 					** line so the ring costs no more (3.8) */
 	/* #296, Claude Code's Focus view: the turn's last assistant text
-	** after its last tool result, at most XR_RESPONSE bytes (cut: cut on
-	** a character), from the record at response_offset; NULL while the
-	** turn runs, or given up past XR_RESPONSES held (responded stays) */
+	** after its last tool result: whole up to XR_RESPONSE bytes, else its
+	** first and last XR_RESPONSE / 2 (cut on a character) with a "\n…\n"
+	** between (#451), response_cut the scalars left out; from the record
+	** at response_offset; NULL while the turn runs, or given up past
+	** XR_RESPONSES held (responded stays) */
 	char *response;
 	uint64_t response_offset;
-	int responded, response_cut;
+	size_t response_cut;
+	int responded;
 	char *tools;			/* the turn's tool line, or NULL */
 	char *peer;			/* #359: another agent sent the prompt:
 					** its name as a title ("" for none),
@@ -133,12 +137,17 @@ int xr_claude_lookup(const char *cfg, const char *sid, char *path,
 /* ---- refs (XR2a, #135): grammar, normalization, definitions ------------ */
 #define XR_KEY_MAX     1024		/* bytes of normalized text; a longer
 					** candidate is no ref */
-#define XR_KEYS        2000		/* index keys (3.2), the rest counted */
-/* ... in a room per kind, XR_TICKET..XR_URL, XR_KEYS in all (#262) */
-#define XR_ROOMS       { 300, 400, 500, 250, 350, 200 }
+#define XR_KEYS        2400		/* index keys (3.2), the rest counted */
+/* ... in a room per kind, XR_TICKET..XR_TERM, XR_KEYS in all (#262) */
+#define XR_ROOMS       { 300, 400, 500, 250, 350, 200, 400 }
 #define XR_SPANS       128		/* mentions per entry (3.8) */
 #define XR_DEFS        8		/* definitions per entry (3.8) */
 #define XR_TEXT_CAP    6000		/* scalars: prose clips (v2.1 3.1) */
+#define XR_ENT_TAIL    3000		/* scalars: a prose entry over XR_TEXT_CAP +
+					** XR_ENT_TAIL keeps its first XR_TEXT_CAP
+					** and last XR_ENT_TAIL (#451) */
+#define XR_REFS_CAP    XR_LINE_MAX	/* scalars: a prose block's ref scan,
+					** the whole block (#451), bounded */
 #define XR_OUTPUT_CAP  3000		/* scalars: tool output clips */
 #define XR_FIELD_CAP   240		/* scalars: card fields, search rows */
 #define XR_CALLS       512		/* the tool_use ring (3.8) */
@@ -147,7 +156,10 @@ int xr_claude_lookup(const char *cfg, const char *sid, char *path,
 #define XR_D2_MAX      (256u << 10)	/* D2's JSON bound */
 #define XR_SH_LINE     (64u << 10)	/* a WRAP-joined shell line (3.8) */
 
-enum { XR_TICKET, XR_ISSUE, XR_PULL, XR_COMMIT, XR_FILE, XR_URL };
+/* XR_TERM (#458): a backticked span or a 2+ part CONST_CASE / snake_case
+** identifier, in prose only (XR_TERMS) */
+enum { XR_TICKET, XR_ISSUE, XR_PULL, XR_COMMIT, XR_FILE, XR_URL, XR_TERM,
+       XR_SHAPES };
 extern const char *const xr_shape_name[];
 
 /* Grammar contexts (v2.1 2.4): plain prose (user text: fences and inline
@@ -155,6 +167,7 @@ extern const char *const xr_shape_name[];
 ** the same, plus already-linked labels), a tool field (code: U, R, S and
 ** F-with-a-line anywhere), and prose with no code scan (the D3 command). */
 enum { XR_PROSE, XR_MD, XR_CODE, XR_PLAIN };
+#define XR_TERMS       0x10	/* | XR_PROSE or XR_MD: terms too (#458) */
 
 /* One ref span: bytes [s, e) of the text, its rule letter, shape, and key
 ** "<shape>:<normalized text>" (text = key + its shape name + 1). full: a

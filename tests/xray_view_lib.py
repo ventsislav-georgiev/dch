@@ -704,6 +704,7 @@ def gone_lines(prompts):
 # ---- Responses (#290): each turn's answer, newest first ---------------------
 
 ESID = "11111111-2222-4333-8444-5555555555e1"   # xv-rs, a History record
+TSID = "11111111-2222-4333-8444-5555555555e3"   # xv-tl8: an 8 KB answer
 VSID = "11111111-2222-4333-8444-5555555555e2"   # xv-lv, a live Claude
 LONGA = "\n".join("line %02d of the long answer" % i for i in range(1, 13))
 BIG = "BIG \033]0;pwned\007 evil\u202eend\n" + "y" * 3000

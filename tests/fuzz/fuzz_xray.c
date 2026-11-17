@@ -22,9 +22,10 @@
 ** Then the chapters are printed through xr_print. Every chapter's title and
 ** summary (#192, only on an auto chapter) and peer (#359) must be valid
 ** UTF-8 of at most XR_TITLE_MAX scalars, its response (#296) valid UTF-8 of at most
-** XR_RESPONSE bytes, and the printed object one line, within the output
+** XR_RESPONSE bytes plus a cut's "\n…\n" (#451), and the printed object one line, within the output
 ** cap. */
 #include <stdint.h>
+#define RESP_MAX (XR_RESPONSE + sizeof "\n\xe2\x80\xa6\n" - 1)	/* #451 */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -83,8 +84,8 @@ emit(struct xr_chapters *c, int shell)
 			check_title(xr_chapter_at(c, i)->peer);
 		if (xr_chapter_at(c, i)->response)	/* #296 */
 		{
-			check_utf8(xr_chapter_at(c, i)->response, XR_RESPONSE);
-			if (strlen(xr_chapter_at(c, i)->response) > XR_RESPONSE ||
+			check_utf8(xr_chapter_at(c, i)->response, RESP_MAX);
+			if (strlen(xr_chapter_at(c, i)->response) > RESP_MAX ||
 			    !xr_chapter_at(c, i)->responded)
 				abort();
 		}

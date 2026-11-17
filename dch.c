@@ -13845,7 +13845,8 @@ xr_clear(const struct xr_target *t)
 #define XF_MEM_MS 30000L	/* --memory: the rows listed, memory_command */
 
 #define XF_MEMRE_MS 1000L	/* --memory: the re-list after a dir event (#449) */
-enum { XE_FILE = 1, XE_ROT = 2, XE_CONN = 4, XE_OUT = 8, XE_MEM = 16 };
+enum { XE_FILE = 1, XE_ROT = 2, XE_CONN = 4, XE_OUT = 8, XE_MEM = 16,
+       XE_JOB = 32 };
 
 struct xf_cl;
 
@@ -13879,6 +13880,10 @@ struct xf
 	char *cmdout[2];	/* the command's last answer, NULL: built in */
 	char warn[2][XCMD_WARN_MAX];
 	long long at[2];	/* the command's next run; [1] the listing's */
+	pid_t job[2];		/* the command's run, a child of ours, 0 none */
+	int jfd[2];		/* its answer's pipe, -1 none (#461) */
+	char *jbuf[2];		/* the answer read so far */
+	size_t jn[2];
 	int mdirty;		/* the memory dir moved */
 	long long mretry;	/* ms clock: one more listing, 0 none (#449) */
 	unsigned long mtouched;	/* xm_live_touched at the last block */
@@ -13916,9 +13921,31 @@ xf_watch_open(struct xf *f)
 	return f->q < 0 ? -1 : 0;
 }
 
+/* Block b's command run (#461) over: SIGTERM (xcmd's handler takes the
+** command's group with it), reaped, its pipe closed. */
+static void
+xf_job_kill(struct xf *f, int b)
+{
+	if (f->job[b] > 0)
+	{
+		kill(f->job[b], SIGTERM);
+		while (waitpid(f->job[b], NULL, 0) < 0 && errno == EINTR)
+			;
+	}
+	if (f->jfd[b] >= 0)
+		close(f->jfd[b]);
+	free(f->jbuf[b]);
+	f->job[b] = 0;
+	f->jfd[b] = -1;
+	f->jbuf[b] = NULL;
+	f->jn[b] = 0;
+}
+
 static void
 xf_watch_close(struct xf *f)
 {
+	xf_job_kill(f, 0);	/* an exit or a reset: no run left behind */
+	xf_job_kill(f, 1);
 	if (f->conn >= 0)
 		close(f->conn);
 #ifndef __linux__
@@ -14100,14 +14127,18 @@ xf_wait(struct xf *f, long ms)
 	}
 #ifdef __linux__
 	{
-		struct pollfd p[3] = { { f->q, POLLIN, 0 }, { 1, 0, 0 },
-		                       { f->conn, POLLIN, 0 } };
+		struct pollfd p[5] = { { f->q, POLLIN, 0 }, { 1, 0, 0 },
+		                       { f->conn, POLLIN, 0 },
+		                       { f->jfd[0], POLLIN, 0 },
+		                       { f->jfd[1], POLLIN, 0 } };
 		char buf[4096] __attribute__((aligned(8)));
 		ssize_t got;
 
-		n = poll(p, f->conn >= 0 ? 3 : 2, (int)ms);
+		n = poll(p, 5, (int)ms);	/* a -1 fd is skipped */
 		if (n > 0 && (p[1].revents & (POLLERR | POLLHUP | POLLNVAL)))
 			ev |= XE_OUT;
+		if (n > 0 && (p[3].revents || p[4].revents))
+			ev |= XE_JOB;
 		if (n > 0 && f->conn >= 0 && p[2].revents)
 			ev |= XE_CONN;
 		while (n > 0 && (p[0].revents & POLLIN) &&
@@ -14138,7 +14169,9 @@ xf_wait(struct xf *f, long ms)
 			if (out[k].filter == EVFILT_WRITE)
 				ev |= out[k].flags & EV_EOF ? XE_OUT : 0;
 			else if (out[k].filter == EVFILT_READ)
-				ev |= XE_CONN;
+				ev |= (int)out[k].ident == f->jfd[0] ||
+				      (int)out[k].ident == f->jfd[1] ? XE_JOB
+				      : XE_CONN;
 			else if ((int)out[k].ident == f->mdirfd)
 				ev |= XE_MEM;
 			else if ((int)out[k].ident == f->dirfd ||
@@ -14333,27 +14366,133 @@ struct xf_cl
 /* ---- --tasks, --memory (#446): blocks [0] and [1] ---- */
 
 /* The user's command for block b, run as the one-shot runs it: its answer
-** kept whole, else NULL and its warn for the built-in source. */
-static void
-xf_cmd(struct xf *f, int b)
+** whole in *t (malloc'd, 1) or none (0, *t NULL) and its warn for the
+** built-in source. */
+static int
+xf_cmd_run(struct xf *f, int b, char **t)
 {
-	char *t = NULL;
 	size_t n = 0;
 	FILE *m;
-	int rc, got;
+	int rc = 1, got;
 
-	free(f->cmdout[b]);
-	f->cmdout[b] = NULL;
-	f->at[b] = xr_now_ms() + (b ? XF_MEM_MS : XF_TASKS_MS);
-	if (!(m = open_memstream(&t, &n)))
-		return;
+	*t = NULL;
+	f->warn[b][0] = '\0';
+	if (!(m = open_memstream(t, &n)))
+		return 0;
 	got = xr_cmd(m, b ? XCMD_MEMORY : XCMD_TASK, f->t->name,
 	             b ? NULL : f->sid, f->cwd, f->agent,
 	             f->cl ? f->sid : "", f->warn[b], sizeof f->warn[b], &rc);
 	if (fclose(m) == 0 && got && rc == 0)
-		f->cmdout[b] = t;
-	else
-		free(t);
+		return 1;
+	free(*t);
+	*t = NULL;
+	return 0;
+}
+
+/* After a snapshot: the command now, in the loop (no run of it left
+** going); the next run its cadence after this one's end (#461). */
+static void
+xf_cmd(struct xf *f, int b)
+{
+	xf_job_kill(f, b);
+	free(f->cmdout[b]);
+	(void)xf_cmd_run(f, b, &f->cmdout[b]);
+	f->at[b] = xr_now_ms() + (b ? XF_MEM_MS : XF_TASKS_MS);
+}
+
+/* A timed run (#461): in a child of ours, its answer back on a pipe the
+** wait watches ("1" and the block, or "0" and the warn), so refs never
+** wait on it. Nonzero: it could not start, xf_cmd ran it here instead
+** and the block is due now. */
+static int
+xf_job(struct xf *f, int b)
+{
+	int p[2];
+	pid_t pid;
+
+	if (pipe(p) != 0)
+	{
+		xf_cmd(f, b);
+		return 1;
+	}
+	if ((pid = fork()) == 0)
+	{
+		char *t;
+		const char *w;
+		size_t n;
+		ssize_t k;
+		int ok;
+
+		close(p[0]);
+		if (f->conn >= 0)
+			close(f->conn);	/* the master sees our end, not this */
+		/* xcmd's handler (its group killed) only replaces a default */
+		signal(SIGTERM, SIG_DFL);
+		ok = xf_cmd_run(f, b, &t);
+		w = ok ? t : f->warn[b];
+		if (write(p[1], ok ? "1" : "0", 1) == 1)
+			for (n = strlen(w); n; w += k, n -= (size_t)k)
+				if ((k = write(p[1], w, n)) <= 0)
+					break;
+		_exit(0);
+	}
+	close(p[1]);
+	if (pid < 0)
+	{
+		close(p[0]);
+		xf_cmd(f, b);
+		return 1;
+	}
+	fcntl(p[0], F_SETFD, FD_CLOEXEC);
+	fcntl(p[0], F_SETFL, O_NONBLOCK);
+	f->job[b] = pid;
+	f->jfd[b] = p[0];
+#ifndef __linux__
+	{
+		struct kevent ev;
+
+		EV_SET(&ev, p[0], EVFILT_READ, EV_ADD, 0, 0, NULL);
+		(void)kevent(f->q, &ev, 1, NULL, 0, NULL);
+	}
+#endif
+	return 0;
+}
+
+/* Block b's run's answer, as much as is in; 1 when it ended (its EOF):
+** the answer kept as xf_cmd keeps it, the child reaped, the next run
+** its cadence after this end. */
+static int
+xf_job_read(struct xf *f, int b)
+{
+	char buf[16384], *nb;
+	ssize_t n;
+
+	while ((n = read(f->jfd[b], buf, sizeof buf)) > 0)
+	{
+		if (!(nb = realloc(f->jbuf[b], f->jn[b] + (size_t)n + 1)))
+		{
+			free(f->jbuf[b]);	/* no memory: no answer */
+			f->jbuf[b] = NULL;
+			f->jn[b] = 0;
+			break;
+		}
+		memcpy(nb + f->jn[b], buf, (size_t)n);
+		f->jn[b] += (size_t)n;
+		nb[f->jn[b]] = '\0';
+		f->jbuf[b] = nb;
+	}
+	if (n < 0 && (errno == EAGAIN || errno == EINTR))
+		return 0;
+	free(f->cmdout[b]);
+	f->cmdout[b] = NULL;
+	f->warn[b][0] = '\0';
+	if (f->jn[b] && f->jbuf[b][0] == '1')
+		f->cmdout[b] = strdup(f->jbuf[b] + 1);
+	else if (f->jn[b])
+		snprintf(f->warn[b], sizeof f->warn[b], "%s", f->jbuf[b] + 1);
+	xf_job_kill(f, b);	/* exited already: reaped */
+	f->at[b] = xr_now_ms() + (b ? XF_MEM_MS : XF_TASKS_MS);
+	return 1;
 }
 
 /* Block b as the one-shot prints it now (no transcript read: the sinks
@@ -14563,14 +14702,15 @@ xf_side_ms(const struct xf *f)
 {
 	long long now = xr_now_ms(), at = -1, m;
 
-	if (f->tasks && f->cmd[0])
+	if (f->tasks && f->cmd[0] && !f->job[0])	/* a run: its fd wakes */
 		at = f->at[0];
 	if (f->memory && (f->cl || f->cmd[1]))
 	{
-		m = f->mdirty ? f->last + f->gap : f->at[1];
-		if (f->mretry && f->mretry < m)
+		m = f->mdirty ? f->last + f->gap : f->job[1] ? -1 : f->at[1];
+		if (f->mretry && (m < 0 || f->mretry < m))
 			m = f->mretry;
-		at = at < 0 || m < at ? m : at;
+		if (m >= 0)
+			at = at < 0 || m < at ? m : at;
 	}
 	return at < 0 ? -1 : at > now ? (long)(at - now) : 0;
 }
@@ -14581,35 +14721,34 @@ xf_min(long a, long b)
 	return a < 0 ? b : b < 0 || a < b ? a : b;
 }
 
-/* The timed jobs due now; nonzero: f->rc says why to end. */
+/* The timed jobs due now, and the command runs that ended; nonzero:
+** f->rc says why to end. Never moves f->last: the batch keeps its own
+** clock (MED-TZ1, #461). */
 static int
 xf_side(struct xf *f)
 {
 	long long now = xr_now_ms();
-	int sent = 0;
+	int b, due;
 
-	if (f->tasks && f->cmd[0] && now >= f->at[0])
-	{
-		xf_cmd(f, 0);
-		if (xf_blk(f, 0, 0))
+	for (b = 0; b < 2; b++)
+		if (f->jfd[b] >= 0 && xf_job_read(f, b) && xf_blk(f, b, 0))
 			return 1;
-		sent = 1;
-	}
+	if (f->tasks && f->cmd[0] && !f->job[0] && now >= f->at[0] &&
+	    xf_job(f, 0) && xf_blk(f, 0, 0))
+		return 1;
 	if (f->mretry && now >= f->mretry)
 		f->mretry = 0, f->mdirty = 1;
+	due = !f->job[1] && now >= f->at[1];
 	if (f->memory && (f->cl || f->cmd[1]) &&
-	    (now >= f->at[1] || (f->mdirty && now >= f->last + f->gap)))
+	    (due || (f->mdirty && now >= f->last + f->gap)))
 	{
-		if (now >= f->at[1] && f->cmd[1])
-			xf_cmd(f, 1);
-		f->at[1] = now + XF_MEM_MS;
 		f->mdirty = 0;
-		if (xf_blk(f, 1, 0))
-			return 1;
-		sent = 1;
+		if (due && f->cmd[1] && !xf_job(f, 1))
+			return 0;	/* the block when the run ends */
+		if (due)
+			f->at[1] = now + XF_MEM_MS;
+		return xf_blk(f, 1, 0);
 	}
-	if (sent)
-		f->last = xr_now_ms();
 	return 0;
 }
 
@@ -15134,7 +15273,7 @@ read:
 				f->pending = 0;
 			}
 		}
-		if (xf_side_ms(f) == 0 && xf_side(f))
+		if ((xf_side_ms(f) == 0 || (ev & XE_JOB)) && xf_side(f))
 		{
 			rc = f->rc;
 			break;
@@ -15302,7 +15441,7 @@ xf_shell(struct xf *f, const char *label, int first)
 		ev = xf_wait(f, due);
 		if (ev & XE_OUT)
 			break;
-		if (xf_side_ms(f) == 0 && xf_side(f))
+		if ((xf_side_ms(f) == 0 || (ev & XE_JOB)) && xf_side(f))
 		{
 			rc = f->rc;
 			break;
@@ -15440,7 +15579,7 @@ xr_follow(const struct xr_target *t, int tasks, int memory)
 	           cmd[0];
 	f.evict_at = -1;
 	f.gap = XF_BATCH_MS;
-	f.q = f.conn = -1;
+	f.q = f.conn = f.jfd[0] = f.jfd[1] = -1;
 	if (!(f.sent = xr_sent_new()))
 		return xr_failed();
 	for (;;)

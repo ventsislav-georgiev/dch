@@ -282,7 +282,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.92.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.93.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -948,7 +948,9 @@ it has memories or instruction files:
   type it; the selection stays on the first row there, or on its prompt
   once you moved down, as on Responses. `/` filters.
   `Enter` opens the prompt read-only with everything up to the next one
-  (prompt, replies, tool calls, output), scrollable.
+  (prompt, replies, tool calls, output), scrollable. A long answer
+  (over 9000 characters) is kept as its first 6000 and last 3000, with a faint
+  `… N characters cut …` line between; `G` reaches the tail.
   The reader reads on: its header says which prompt it is on (`3 of 12`,
   the list's number) and its title. A scroll key at the prompt's end (or
   top) first says on the status line which prompt comes next (or before),
@@ -1006,8 +1008,10 @@ it has memories or instruction files:
   when you switch to it. Each item is the prompt's row as on Prompts, the
   turn's tools on one faint line (e.g. `Edit 3 (2 files, +40 -12), Bash 2,
   Read 1`), then the answer wrapped to the width, at most 8 lines, Markdown
-  as written. A faint `…` says there is more: the reader has it (the
-  engine keeps the first 2 KB of an answer). A turn still running says
+  as written. A faint `…` says there is more: the reader has it. An answer
+  over 2 KB comes as its first and last 1 KB; the newest item may use up to
+  half the window (not 8 lines) to show the head, a faint `…` and the tail,
+  its Next steps. A turn still running says
   `working…`; an answer the size cap left out says `Enter reads it`. `j`
   `k` move item by item. `Enter` reads the prompt in the reader, opened at
   the answer (at the prompt's end when it cannot find it), and `q` comes
@@ -1021,7 +1025,9 @@ it has memories or instruction files:
   files, commits and URLs too, and the footer says how many are hidden. Rows
   are by latest mention, the one mentioned last on top, as Kindle's X-ray
   does; then by count, highest first; then the most recent first (later in
-  the index; a ref seen again while the view is open moves up). A host older
+  the index; a ref seen again while the view is open moves up). The latest
+  mention is a record's line, so the newest answer's own order is the "in
+  the last reply" group's. A host older
   than 1.62.0 sends no latest mention: its rows are by count, and the faint
   line does not say "latest first". A ref with a definition or two or more mentions is bold. A file
   under the session's directory (top right) shows relative to it, else one
@@ -1044,7 +1050,13 @@ it has memories or instruction files:
   repeated below it. Nothing on the screen is a ref: no group line. The
   screen is read when Refs opens and once a second while it shows; it is
   not drawn or kept. An ended session and dch-lite have no screen, so no
-  group. Up to 1.61.0 a third tab, On screen, drew the screen with a
+  group. Under it (or first, with no screen) a second faint line, "in the
+  last reply", groups the refs of the newest answer, the one it names last
+  on top, so the last line's "close PAY-219" is the first row; a ref on the
+  screen is not repeated there, and a last turn with no answer has no such
+  group. It reads the answer text the view holds (the head of a long one,
+  up to 2 KB), follows `a`, `t` and `/` like the rest, and is not repeated
+  below. Up to 1.61.0 a third tab, On screen, drew the screen with a
   label on each ref.
 - **Search**: where a word or phrase was said in this session, for the
   thing on your screen you do not remember, or a topic from earlier. It
@@ -1107,7 +1119,7 @@ it has memories or instruction files:
   while the tab shows). A shell session, no memory and a host older
   than this dch have no Memory tab; dch-lite has both tabs.
 
-A ref typed after `/` (a ticket, issue, pull request, commit, file or URL,
+A ref typed after `/` (a ticket, issue, pull request, commit, file, URL or term,
 as `--ref` takes it) opens its card with `Ctrl-R`, on any tab, while
 typing or after: also when no row has it, a row is not the one you want, or
 its kind is hidden until `a`. The footer shows `^R look up` while the filter
@@ -1142,7 +1154,9 @@ not clear X-ray; run `clear`".
 | `↑` `↓` / `j` `k`, `PgUp` `PgDn`, `g` `G` | move | move / scroll; reader: at an end, again for the next / previous prompt |
 | `]` `[` | | reader: the next / previous prompt |
 | `Enter` | read the prompt (Responses: at its answer; Search: at the hit; Tasks: the one that last changed the task, or its card) / open the card (Refs, Memory); Search, typing: search | card: read the mention's prompt; Memory: the prompt that wrote or loaded it |
-| `/` | filter; Search: type the text to search | |
+| `/` | filter; Search: type the text to search; Prompts, Responses: a bare number (`/5` `Enter`) selects that prompt, so `Enter` reads it | reader: find in its text (case folded, the matches stand out); `Enter` goes to the first match below the top line |
+| `n` `N` | | reader, after `/`: the next / previous match |
+| `r` | Responses: the refs in the selected item's lines, the lowest first | reader: the refs in the lines shown, the lowest first ("no refs in view" when none); `j` `k` move, `Enter` opens the card, `q` there comes back to the reader at the same line, `q` or `Esc` closes the list |
 | `Ctrl-R` | with a ref typed after `/`: open its card, a row for it or not, its kind hidden or not; other words: search them on Search | |
 | `a` | Refs: show / hide the files, commits and URLs | |
 | `t` | Refs: show / hide the temp files | |
@@ -1151,7 +1165,7 @@ not clear X-ray; run `clear`".
 | `o` | Prompts, Responses, Search, Tasks, Memory: attach to the session (in the chord: back to it) | card, reader: the same |
 | `f` `p` `y` | | card: full scan, other projects / this project (`p` was `o` before 1.61.0), copy |
 | `q` | quit | back |
-| `Esc` | clear the filter, else quit; Search, typing: stop typing, the last results kept | back |
+| `Esc` | clear the filter, else quit; Search, typing: stop typing, the last results kept | back; reader, after `/`: clear the find |
 | `Ctrl-C` `Ctrl-D` | quit | quit |
 
 **While attached**, press the detach key (`Ctrl-\`) and then `x` within the
@@ -1474,18 +1488,22 @@ The corpus:
   - `response`, `response_offset` and `tools` are what Claude Code's Focus
     view shows of a turn, on a Claude Code or Codex chapter. `response` is
     the turn's last assistant text after its last tool result (thinking and
-    subagent text never), at most 2048 bytes; a cut one adds
-    `response_cut` (`true`). `response_offset` is the byte offset of the
+    subagent text never). Up to 2048 bytes it is whole; a longer one keeps
+    its first and last 1024 bytes, never cut inside a UTF-8 character, with
+    a line holding only `…` between (`head\n…\ntail`, 1.93.0; before, the
+    first 2048 bytes), and adds `response_cut` (`true`) and
+    `response_cut_chars`, the Unicode scalars left out. `response_offset` is the byte offset of the
     line that holds it. A turn still running has neither; its `tools` is
     there. `tools` is one line: the calls per tool, most used first, six
     names then `+N more`; an edit tool (Edit, MultiEdit and Write; Codex's
     apply_patch) adds its files and lines, as `Edit 3 (2 files, +40 -12),
     Bash 5`. At most 2 MiB of responses is held: past that, the oldest
     chapters give theirs up (they keep `response_offset`).
-- **`refs`.** The refs the corpus mentions (see [Refs](#refs)), at most 2000
+- **`refs`.** The refs the corpus mentions (see [Refs](#refs)), at most 2400
   keys, each kind in a room of its own: 300 tickets, 400 issues, 500 pull
-  requests, 250 commits, 350 files and 200 URLs, so files, commits and URLs
-  never push out a pull request, an issue or a ticket. In a full room the
+  requests, 250 commits, 350 files, 200 URLs and 400 terms, so files,
+  commits, URLs and terms never push out a pull request, an issue or a
+  ticket. In a full room the
   ref whose latest mention is the oldest goes. A ref that went and is
   mentioned again comes back with the mentions since (its `count` starts
   again). The keys out of the index are counted in `dropped_keys`, exactly up
@@ -1536,7 +1554,21 @@ a commit URL as the commit; only one that starts exactly `https://github.com/`
 does, so `https://GitHub.com/o/r/pull/7` stays a plain URL, as Prosper's pull
 links validate it). Numbers have set lengths: a bare `#n` takes 2 to 6 digits
 (`#5` and `#0` are none, `#00` is one), `repo#n` and `owner/repo#n` 1 to 7
-(`dch#5` and `o/r#0` are refs), a ticket 1 to 6, a GitHub URL 1 to 9. A number
+(`dch#5` and `o/r#0` are refs), a ticket 1 to 6, a GitHub URL 1 to 9.
+A term (shape `term`, 1.93.0) is a CONST_CASE or snake_case identifier of 2
+or more parts and 4 to 64 characters (`ERR_LEDGER_SKEW`,
+`test_retry_timeout`; not `Merged`, `foo`, `a_b`, `Foo_Bar`, nor a part of a
+path, a URL or an email), or a code span of 2 to 64 printable ASCII
+characters with no blank, at least one letter and 2 or more parts (a
+character that is not a letter or digit, or a lower-to-upper hump:
+`` `shadow_mode` ``, `` `--ref` ``, `` `fooBar` ``) that is no other ref in
+prose (`` `#412` `` and `` `src/a.c` `` stay what they are; `` `foo` `` and
+`` `1234` `` are nothing). Terms come from prompts, assistant text and
+compact summaries only: never from tool input or output, a notice, a harness
+prompt (a task notification) or a shell's ring, and the view's on-screen
+scan does not look for them. They count against a text block's 128 like
+any ref. `--ref ERR_LEDGER_SKEW` asks for a term; one only a code span makes
+is asked for in its backticks (``--ref '`fooBar`'``). A number
 keys as written: `#00012` and `#12` are two refs. A bare `repo#n` needs a repo of at least 3
 characters that starts with a letter, ends with a letter or digit and is not a
 glue word or standard (`issue#12`, `step#3`, `PKCS#12`, `PR#831`, `a#12` are
@@ -1544,10 +1576,11 @@ none; `pre-#831` is the issue `#831`). A ref needs a word boundary on both sides
 Unicode-aware: `#831é` is none. Prompts and assistant text use every rule outside code spans and fences;
 tool input and output, and a shell's ring, use the code rules only (URLs,
 `owner/repo#n`, paths with a line number, commits), so a bare `#831`
-mid-line in output is no ref. Texts are clipped before the scan: 6000 Unicode
-scalars of prose and of a Bash command, 3000 of tool output, 240 per tool
-field. A shell line (rows joined at soft wraps, at most 64 KiB) gives at most
-128 mentions.
+mid-line in output is no ref. A prompt, an assistant text and a compact
+summary are scanned whole (1.93.0; a line over 1 MiB is not read at all).
+Other texts are clipped before the scan: 6000 Unicode scalars of a notice and
+of a Bash command, 3000 of tool output, 240 per tool field. A shell line (rows joined at soft wraps, at most 64 KiB) gives at most
+128 mentions, and so does a text block: past 128 the newest 128 are kept.
 
 Each entry of `refs` carries `key` (`<shape>:<text>`), `shape`, `text`,
 `full` (a commit's hex as written), `project`, `count`, `last_offset`,
@@ -1558,7 +1591,15 @@ transcript or a Codex rollout, the seq of its record in a shell's ring (on
 the screen, a provisional seq). A larger one is a later mention; the list
 keeps its order (by `count`, then the first seen).
 `count` is per Claude or Codex mention, per shell block with OSC 133 marks,
-and per row without. A definition comes only from a paired tool result or a finished,
+and per row without. A term's one definition is its first mention's
+sentence (from past the last `. `, `! ` or `? ` before it to the first after
+it, on its line, at most 600 scalars): a `definition` line with that
+sentence as `title` (120 scalars) and `passage`, `"rule":"term"` and
+`"source":"first mention"`, written before the file's mentions and counted in
+its tally; light `--ref` takes the earliest mention it read (it may stop
+before the file's first), `--full` the file's first. It counts as a definition, so `define_command` does not run
+for a term the transcript mentions. `defined` in `refs` stays false for a
+term. Any other definition comes only from a paired tool result or a finished,
 typed shell block that did not fail: a heading (`# #831 Agent panes`), a
 `#831` line with `title:` within 3 lines, a JSON object or array with a number
 or id and a title (the whole tool result, up to 256 KiB, not the 3000-scalar
@@ -2077,7 +2118,7 @@ define_command = ~/bin/my-define
   its environment `DCH_REF` (the same), `DCH_REF_KEY` (X-ray's key text: a
   commit's first 7 hex digits, a GitHub pull URL as `o/r#41`, a file's
   absolute path) and `DCH_REF_SHAPE` (`ticket`, `issue`, `pull`, `commit`,
-  `file` or `url`). As written means the `--ref` text (trimmed), the text
+  `file`, `url` or `term`). As written means the `--ref` text (trimmed), the text
   you type for ^R in the view, and a peer's text through `dch serve`;
   Enter on a row of the Refs list sends the fullest form the row has: a
   commit's longest SHA seen (also when it came from a commit URL, whose
@@ -2202,8 +2243,11 @@ which a client can use as its version probe.
   touches a `.md` file, and every 30 s (an edit in place that kqueue does
   not see).
 - A `tasks_command` or `memory_command` runs as for the one-shot form, again
-  every 5 s (tasks) or 30 s (memory); its answer is sent as a whole block
-  when it changes.
+  5 s (tasks) or 30 s (memory) after its last run ended; its answer is sent
+  as a whole block when it changes. These later runs go on beside the
+  stream (one of each at a time): a slow or hung command never holds back
+  the transcript's lines. One still running when the follow ends is
+  stopped with it.
 
 Nothing runs on a timer:
 - a Claude Code transcript is watched with kqueue (inotify on Linux);
@@ -2297,8 +2341,12 @@ Each entry is `{"role","tool","text","error","offset"}`:
 entry came from, as a `--search` hit's `offset`: the entry of a hit's kind
 with the hit's `offset` holds that hit. A shell's entries, and those of a
 host older than 1.71.0, have no `offset`.
-`text` is cut at 6000 Unicode scalars (3000 for an `output`) and escaped like
-`--ls-json`. The whole object is capped at 1 MiB: entries past the cap are
+A `user` or `assistant` entry's `text` over 9000 Unicode scalars keeps its
+first 6000 and last 3000, with this line between them (1.93.0; before, the
+first 6000 only): `… N characters cut …`, where N is the scalars left out as a plain
+integer, the line starting and ending with a newline; the entry also has
+`"cut": N`, absent when nothing was cut. A `tool` entry's `text` is cut at
+6000 scalars, an `output`'s at 3000. `text` is escaped like `--ls-json`. The whole object is capped at 1 MiB: entries past the cap are
 left out and `truncated` is `true`. An ended or History Claude Code session is
 read from its transcript, a live Codex from its rollout. An ended shell, a
 ring that is off or paused, a session with no transcript, and a Codex with
