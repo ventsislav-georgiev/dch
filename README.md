@@ -392,7 +392,7 @@ dch --xray <n> --clear --json                   # empty a shell session's X-ray 
 dch --xray <n> --follow --json                  # the same object, then its deltas as NDJSON until the session ends
 dch --xray <n> --follow --tasks --memory --json # that stream with the task and memory blocks and their deltas
 dch --xray <n> --ref <ref|-> [--scope session|project|all] [--full] [--budget-ms <ms>] --json  # one ref's mentions and definitions, NDJSON
-dch --xray <n> --search <text|-> --json         # the newest 50 places a word or phrase was said (- reads it from stdin)
+dch --xray <n> --search <text|-> --json         # where a word or phrase was said in the newest 50 turns (- reads it from stdin)
 dch --xray <n> --memory --json                  # its memories and instruction files, JSON lines
 dch --xray <n> --chapter <anchor> --json        # one chapter's entries (prompt, replies, tool calls, output)
 dch --xray <n> --tasks --json                   # the session's task list (TaskCreate, TodoWrite, update_plan), JSON lines
@@ -1066,19 +1066,22 @@ it has memories or instruction files:
   character; a text outside that is said on the status line and not
   searched), `Esc` stops typing and keeps the last results. The text
   searched stays on the line above the results, also when you switch tabs
-  and come back, until the next search. The hits are newest first, at most
-  50: each is its time, who said it (`You`, `Reply`, or the tool's name;
-  `Output` for a shell's output), the prompt it is under, and up to 3 lines
-  of the text around it, the match in bold accent colour. A hit the view
-  has no prompt for says `(outside the prompts shown)`. A faint last line
-  says `the 50 newest are shown` when there are more, and one says when
-  the search stopped early (too long, too much to read, or the history
-  changed as it read); the hits shown stand. The tab's count is the hits,
-  `50+` past the cap, nothing before a search. `j` `k` move hit by hit;
-  `Enter` reads the hit's prompt, scrolled to that hit (the reply or tool
-  output it is in, not the text's first place in the prompt), and `q` comes back
-  to the hit; on a hit outside the prompts the status line says the view
-  cannot open it. `o` works as on Prompts. A shell session searches its
+  and come back, until the next search. The hits are grouped by turn, the
+  newest 50 turns, newest first: a head line with the prompt's time, number
+  and title, then each place in that turn on an indented line: who said it
+  (`You`, `Reply`, or the tool's name; `Output` for a shell's output) and
+  up to 3 lines of the text around it, the match in bold accent colour. A
+  prompt whose hit is just its title has no line of its own: its head line
+  is that hit. A hit the view has no prompt for is its own group,
+  `(outside the prompts shown)`. A faint last line says `the 50 newest
+  prompts are shown` when there are more, and one says when the search
+  stopped early (too long, too much to read, or the history changed as it
+  read); the hits shown stand. The tab's count is the turns, `50+` past the
+  cap, nothing before a search. `j` `k` move line by line; `Enter` reads
+  the prompt, scrolled to that line's place (the reply or tool output it is
+  in, not the text's first place in the prompt; a head line: the prompt),
+  and `q` comes back to the line; on a hit outside the prompts the status
+  line says the view cannot open it. `o` works as on Prompts. A shell session searches its
   ring; dch-lite and `xray_ring = 0` have none, and the list says `no x-ray
   corpus`. A remote view searches on the host; a host older than 1.63.0
   does not know `--search`, and the list says so.
@@ -1921,8 +1924,10 @@ or with a remote `host:name` the `-` is the plain text `-`, the same error as be
   of 1 MiB, the whole file, within `--ref --full`'s caps: 1 GiB
   (`why: "bytes"`) and 10 s (`why: "time"`); a file that shrinks gives
   `why: "range"`. A capped read is `partial: true` and keeps what it found.
-  The newest 50 hits are kept; a 51st makes `more: true`. A shell reads its
-  ring and screen as `--ref` does.
+  The hits of the newest 50 turns are kept (a turn is a prompt's chapter,
+  a shell's command; a hit under no chapter is a turn of its own), at most
+  500 hits, a turn's newest first; a 51st turn or a 501st hit makes
+  `more: true`. A shell reads its ring and screen as `--ref` does.
 
 `--search` goes with no other flag but `--json` (`dch: bad usage: --search
 and --ref`, also with `--chapter`, `--clear` or `--follow`), and not in

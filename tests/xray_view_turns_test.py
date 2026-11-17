@@ -682,35 +682,36 @@ def test_search():
         mark = len(v.out)
         v.key(b"needle", 0.3)
         v.key(b"\r", 0.5)
-        ok = tabbar(v, "Search 5")
+        ok = tabbar(v, "Search 2")
         v.pump(0.5)
         scr = rows(v.out)
-        h = hits(scr)
-        check("Search: Enter runs it; the tab counts 5 hits",
-              ok and "Search 5" in scr.get(2, ""), scr.get(2, ""))
+        h, g = hits(scr), groups(scr)
+        check("Search: Enter runs it; the tab counts its 2 turns (#457)",
+              ok and "Search 2" in scr.get(2, ""), scr.get(2, ""))
         check("Search: the text's line stays above the hits, typing ended",
               scr.get(4, "").strip() == "Search: needle", scr.get(4))
-        check("Search: the hits newest first, each with who said it and the "
-              "prompt it is under", [(w, t) for w, t, _ in h] ==
-              [("Reply", "a long chapter"),
-               ("Reply", "first: where is the Needle kept?"),
-               ("Bash", "first: where is the Needle kept?"),
-               ("Bash", "first: where is the Needle kept?"),
-               ("You", "first: where is the Needle kept?")], h)
-        check("Search: each hit's snippet under it, the time on its head",
-              len(h) == 5 and "the deep NEEDLE line" in " ".join(h[0][2])
+        check("Search: one group per turn, newest first, its head the "
+              "prompt's number and title, each place under it by who said "
+              "it; the You hit that is its title is no line (#457)",
+              [(n, t, [w for w, _ in ps]) for n, t, ps in g] ==
+              [("#3", "a long chapter", ["Reply"]),
+               ("#1", "first: where is the Needle kept?",
+                ["Reply", "Bash", "Bash"])], g)
+        check("Search: each place's snippet on its line, the turn's time on "
+              "its head",
+              len(h) == 4 and "the deep NEEDLE line" in " ".join(h[0][2])
               and "src/a.c: needle here" in " ".join(h[2][2]) and
-              re.search(r"11-10 \d\d:07", next((r for r in scr.values()
+              re.search(r"11-10 \d\d:06", next((r for r in scr.values()
                                                if "a long chapter" in r), "")),
               (h, scr))
         check("Search: the matched text stands out (accent bold), in any "
               "case, the rest plain",
               re.search(rb"the deep \033\[0;1;38;5;\d+mNEEDLE\033\[0m line",
                         v.out) and
-              re.search(rb"where is the \033\[0;1;38;5;\d+mNeedle\033\[0m",
+              re.search(rb"The \033\[0;1;38;5;\d+mneedle\033\[0m is",
                         v.out), v.out[-3000:])
-        check("Search: the newest hit is selected", "a long chapter" in
-              head(v), head(v))
+        check("Search: the newest hit is selected", "Reply" in head(v) and
+              "line 51" in head(v), head(v))
         text = screen(v, 0)
         check("Search: the footer names Enter read, / search, o not "
               "(ended), tabs", "read" in text and "/ search" in text and
@@ -728,11 +729,14 @@ def test_search():
         mark = len(v.out)
         v.key(b"q", 1.0)
         check("Search: q back to the same hit",
-              tabbar(v, "Search 5") and "a long chapter" in head(v)
+              tabbar(v, "Search 2") and "line 51" in head(v)
               and "Search: needle" in rows(v.out).get(4, ""), head(v))
+        v.key(b"j", 0.5)
+        check("Search: j onto the next turn's head, its prompt's hit",
+              "first: where is the Needle kept?" in head(v), head(v))
         v.key(b"jj", 0.5)
-        check("Search: j by hit", "Bash" in head(v) and
-              "first: where" in head(v), head(v))
+        check("Search: j by place", "Bash" in head(v) and
+              "src/a.c: needle here" in head(v), head(v))
         mark = len(v.out)
         v.key(b"\r", 1.0)
         check("Search: Enter on the tool result reads its prompt at it",
@@ -744,24 +748,25 @@ def test_search():
         check("Search: q back to that hit, the third",
               [r for r in rows(v.out).values() if r.startswith("\u258c")] and
               len(hits(rows(v.out))) > 2 and
-              hits(rows(v.out))[2][0] == "Bash" and "Bash" in head(v),
+              hits(rows(v.out))[2][0] == "Bash" and
+              "src/a.c: needle here" in head(v),
               (head(v), hits(rows(v.out))))
         v.key(b"G", 0.5)
-        check("Search: G the oldest", "You" in head(v), head(v))
+        check("Search: G the oldest", "grep -r needle" in head(v), head(v))
         v.key(b"g", 0.5)
-        check("Search: g the newest", "a long chapter" in head(v), head(v))
+        check("Search: g the newest", "line 51" in head(v), head(v))
         mark = len(v.out)
         v.key(b"/\x15x\r", 1.0)
         text = screen(v, mark)
         check("Search: a refused text (1 byte) is said in the status line, "
               "nothing run, the hits kept",
               "bad search: 2 to 200 bytes, no control character" in text and
-              "Search 5" in rows(v.out).get(2, ""), text)
+              "Search 2" in rows(v.out).get(2, ""), text)
         mark = len(v.out)
         v.key(b"\033", 1.0)
         check("Search: Esc leaves typing, the text back to the last search",
               rows(v.out).get(4, "").strip() == "Search: needle" and
-              len(hits(rows(v.out))) == 5, rows(v.out).get(4))
+              len(hits(rows(v.out))) == 4, rows(v.out).get(4))
         mark = len(v.out)
         v.key(b"/\x15qwertyzz\r", 1.0)
         v.wait(b"No match", start=mark)
@@ -812,11 +817,12 @@ def test_search():
         ok = v.wait(b"Search 50+", start=mark)
         v.pump(0.5)
         text = screen(v, mark)
-        h = hits(rows(v.out))
-        check("Search: over 50 hits: the tab says 50+, the newest first, a "
-              "faint last line says the 50 newest are shown", ok and
-              "the 50 newest are shown" in text and h and
-              h[0][1] == "zebra prompt 54", (h, text))
+        g = groups(rows(v.out))
+        check("Search: over 50 turns: the tab says 50+, the newest first, a "
+              "faint last line says the 50 newest prompts are shown", ok and
+              "the 50 newest prompts are shown" in text and g and
+              g[0][:2] == ("#55", "zebra prompt 54") and not g[0][2],
+              (g, text))
         v.key(b"G", 0.5)
         check("Search: G selects the 50th", "zebra prompt 05" in head(v),
               head(v))
@@ -1147,8 +1153,8 @@ def test_wrap():
         v.key(b"/\x15#412\r", 0.5)
         tabbar(v, "Search 1")
         v.pump(0.5)
-        sn = " ".join(r.strip() for r in rows(v.out).values()
-                      if r.strip().startswith(("Opened", "\u2026", "...")))
+        h = hits(rows(v.out))
+        sn = " ".join(h[0][2] if h else [])
         check("#456: Search: a match in the first words of a long text "
               "shows its first word, no leading ellipsis",
               sn.startswith("Opened PR #412 early on v000000"), sn)
@@ -1172,12 +1178,94 @@ def test_wrap():
         v.close()
 
 
+GSID = "11111111-2222-4333-8444-555555555701"   # xv-gr: shadow mode
+CSID = "11111111-2222-4333-8444-555555555702"   # xv-gc: 60 turns
+
+
+def fixture_groups():
+    """xv-gr (audit gap 7): shadow mode said 8 times in 6 turns, a prompt
+    and its reply in 3 of them, among turns that do not say it; xv-gc: 60
+    turns saying kiwi in the prompt and the reply."""
+    said = (("what is shadow mode in our flags", "shadow mode in "
+             "config/flags.yml logs the differences."),
+            ("unrelated: the cart session", "nothing here"),
+            ("put the retry backoff behind shadow mode", "Added shadow_mode: "
+             "true; the backoff runs in shadow."),
+            ("lunch break, summarize", "PAY-219 parked; shadow mode on."),
+            ("ship the ledger fix in shadow mode first", "Ledger fix runs "
+             "under shadow mode in config/flags.yml."),
+            ("how long should shadow mode run", "Two days of clean runs."),
+            ("anything else open", "PAY-219 can close after shadow mode is "
+             "off."),
+            ("one more unrelated", "ok"))
+    record("xv-gr", GSID, sum((turn(p, "2026-11-16T15:%02d:00Z" % i,
+                                    at(say(r), "2026-11-16T15:%02d:30Z" % i))
+                               for i, (p, r) in enumerate(said)), []))
+    record("xv-gc", CSID, sum((turn("kiwi prompt %02d" % i,
+                                    "2026-11-10T11:%02d:00Z" % i,
+                                    say("kiwi reply %02d" % i))
+                               for i in range(60)), []))
+
+
+def test_groups():
+    """#457: shadow mode's 8 hits are 6 groups, the tab counts turns, the
+    You hits that repeat their titles are no lines; 60 turns that each hit
+    twice: the 50 newest turns, more."""
+    v = Pty([DCH, "--xray", "xv-gr"], rows=50, cols=100)
+    try:
+        v.wait(b"Prompts 8")
+        v.pump(0.3)
+        v.key(b"\033[Z", 0.5)
+        v.key(b"shadow mode\r", 1.0)
+        ok = tabbar(v, "Search 6")
+        v.pump(0.5)
+        g = groups(rows(v.out))
+        check("#457: shadow mode: 6 groups, newest first, the tab says "
+              "Search 6", ok and [n for n, _, _ in g] ==
+              ["#7", "#6", "#5", "#4", "#3", "#1"], (g, rows(v.out).get(2)))
+        check("#457: a You hit that is its title is no line; a reply's hit "
+              "is a Reply line under its turn",
+              [[w for w, _ in ps] for _, _, ps in g] ==
+              [["Reply"], [], ["Reply"], ["Reply"], [], ["Reply"]] and
+              g[2][1] == "ship the ledger fix in shadow mode first" and
+              g[2][2][0][1][0].startswith("Ledger fix runs"), g)
+        v.key(b"q")
+        v.exit()
+    finally:
+        v.close()
+    v = Pty([DCH, "--xray", "xv-gc"], rows=30, cols=100)
+    try:
+        v.wait(b"Prompts 60")
+        v.pump(0.3)
+        mark = len(v.out)
+        v.key(b"\033[Z", 0.5)
+        v.key(b"kiwi\r", 1.0)
+        ok = v.wait(b"Search 50+", start=mark)
+        v.pump(0.5)
+        text = screen(v, mark)
+        g = groups(rows(v.out))
+        check("#457: 60 turns, 120 hits: the tab says 50+ (turns), the "
+              "newest turn first with its reply, the 50 newest prompts "
+              "said", ok and "the 50 newest prompts are shown" in text and
+              g and g[0][:2] == ("#60", "kiwi prompt 59") and
+              [w for w, _ in g[0][2]] == ["Reply"], (g, text))
+        v.key(b"G", 0.5)
+        g = groups(rows(v.out))
+        check("#457: G: the 50th turn last, its reply kept (the cap counts "
+              "turns, not hits)", "kiwi reply 10" in head(v) and g and
+              g[-1][:2] == ("#11", "kiwi prompt 10"), (head(v), g))
+        v.key(b"q")
+        v.exit()
+    finally:
+        v.close()
+
+
 def main():
     run_steps(fixture_auto, test_auto, test_compact, test_gone, fixture_resp,
               test_responses, test_responses_live, test_responses_codex,
               test_tasks_codex, fixture_search, test_search, fixture_tail,
               test_tail, fixture_look, test_look,
-              fixture_wrap, test_wrap)
+              fixture_wrap, test_wrap, fixture_groups, test_groups)
 
 
 if __name__ == "__main__":

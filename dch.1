@@ -1069,13 +1069,15 @@ searches as
 .B \-\-search
 does (a text it refuses is said, not searched), \fBEsc\fR stops typing and
 keeps the last results; the text stays above the results until the next
-search; the hits newest first, at most 50, each its time, who said it
-(\(lqYou\(rq, \(lqReply\(rq or the tool's name), the prompt it is under
-(\(lq(outside the prompts shown)\(rq when the view has none) and up to 3
-lines around it, the match in bold; faint lines say when the 50 newest are
-shown and when the search stopped early; the tab counts the hits, 50+ past
-the cap; \fBEnter\fR reads the hit's prompt at that hit, \fBq\fR back to the
-hit; a shell searches its ring, dch\-lite and xray_ring = 0 say no corpus;
+search; the hits by turn, the newest 50 turns first, each a head line
+with the prompt's time, number and title (\(lq(outside the prompts
+shown)\(rq when the view has none), then each place on an indented line,
+who said it (\(lqYou\(rq, \(lqReply\(rq or the tool's name) and up to 3
+lines around it, the match in bold; a You hit that is its title is the head
+line, no line of its own; faint lines say when the 50 newest prompts are
+shown and when the search stopped early; the tab counts the turns, 50+ past
+the cap; \fBEnter\fR reads the prompt at that line's place, \fBq\fR back to
+the line; a shell searches its ring, dch\-lite and xray_ring = 0 say no corpus;
 a host before 1.63.0 does not know \-\-search, and the list says so)
 and, last and only when the session keeps a task list,
 .B Tasks
@@ -1757,7 +1759,9 @@ A transcript or rollout is read whole from its end in 1 MiB windows, up to
 .RB ( why:\(dqbytes\(dq )
 and 10 s
 .RB ( why:\(dqtime\(dq );
-the newest 50 hits are kept and a 51st sets
+the hits of the newest 50 turns are kept (a turn is a prompt's chapter or
+a shell's command, a hit under none a turn of its own), at most 500, a
+turn's newest first, and a 51st turn or a 501st hit sets
 .BR more:true .
 It goes with no other flag but
 .B \-\-json

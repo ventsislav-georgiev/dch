@@ -277,16 +277,18 @@ def test_place():
         for _ in range(3):  # Responses, Refs, Search
             v.key(b"\t", 0.5)
         v.key(b"needle\r", 0.5)
-        ok = tabbar(v, "Search 3")
+        ok = tabbar(v, "Search 1")
         v.pump(0.3)
-        h = [(w, t) for w, t, _ in hits(rows(v.out))]
-        check("place: 3 hits in one turn, the output, the reply, the prompt",
-              ok and [w for w, _ in h] == ["Bash", "Reply", "You"], h)
+        g = groups(rows(v.out))
+        check("place: 3 hits in one turn are one group (#457): its head the "
+              "prompt (the You hit, its title), then the output, the reply",
+              ok and [(n, t, [w for w, _ in ps]) for n, t, ps in g] ==
+              [("#1", "PLACE-A where is the needle?", ["Bash", "Reply"])], g)
         seen = []
         for k, (who, want, not_) in enumerate((
+                ("PLACE-A where", "PLACE-A", ("PLACE-B", "PLACE-C")),
                 ("Bash", "PLACE-C", ("PLACE-A", "PLACE-B")),
-                ("Reply", "PLACE-B", ("PLACE-A", "PLACE-C")),
-                ("You", "PLACE-A", ("PLACE-B", "PLACE-C")))):
+                ("Reply", "PLACE-B", ("PLACE-A", "PLACE-C")))):
             if k:
                 v.key(b"j", 0.5)
             mark = len(v.out)
@@ -298,26 +300,27 @@ def test_place():
             # the body, under the head (its title is PLACE-A's prompt)
             scr = rows(v.out[mark:])
             body = "\n".join(scr[r] for r in sorted(scr) if r > 2)
-            check("place: Enter on the %s hit opens the reader with its line "
-                  "(%s) on screen, not the others (MED-V21)" % (who, want),
+            check("place: Enter on the group's %s line opens the reader "
+                  "with its own text (%s) on screen, not the others "
+                  "(MED-V21, #457)" % (who, want),
                   "1 of 1" in scr.get(2, "") and want + " " in body and
                   not any(n in body for n in not_), text)
             mark = len(v.out)
             v.key(b"q", 1.0)
-            check("place: q back to the same hit, the %s one" % who,
-                  tabbar(v, "Search 3") and who in head(v), head(v))
+            check("place: q back to the same line, the %s one" % who,
+                  tabbar(v, "Search 1") and who in head(v), head(v))
         mark = len(v.out)
         v.key(b"/\x15x\r", 1.0)
         check("place: a 1-byte text is refused in the status line",
               "bad search" in screen(v, mark), screen(v, mark))
         v.key(b"\x15needle\r", 1.0)
-        tabbar(v, "Search 3")
+        tabbar(v, "Search 1")
         v.pump(0.3)
         now = "\n".join(rows(v.out).values())
         seen.append(now)
         check("place: a good search after it clears the refusal's status "
               "(LOW-V18)", "bad search" not in now and
-              len(hits(rows(v.out))) == 3, now)
+              len(hits(rows(v.out))) == 2, now)
         check("place: the word chapter on no screen",
               not any("chapter" in t.lower() for t in seen), seen)
         v.key(b"q")
@@ -347,7 +350,7 @@ def test_twins():
         for _ in range(3):  # Responses, Refs, Search
             v.key(b"\t", 0.3)
         v.key(b"needle\r", 0.3)
-        ok = tabbar(v, "Search 2")
+        ok = tabbar(v, "Search 1")
         for k, (want, not_) in enumerate((("MARK-3", "MARK-2"),
                                           ("MARK-2", "MARK-3"))):
             if k:
@@ -364,7 +367,7 @@ def test_twins():
                   "the needle is here" in body and want in body and
                   not_ not in body, body)
             v.key(b"q", 0)
-            tabbar(v, "Search 2")
+            tabbar(v, "Search 1")
         v.key(b"q")
         v.exit()
     finally:
@@ -389,7 +392,7 @@ def test_twins():
         for _ in range(3):
             v.key(b"\t", 0.3)
         v.key(b"needle\r", 0.3)
-        ok = tabbar(v, "Search 3")
+        ok = tabbar(v, "Search 1")
         # newest first: c3, c2, then c1 at its output's start
         for k, (want, nots) in enumerate((
                 ("MARK-4", ("MARK-2", "MARK-3", "zfill")),
@@ -407,7 +410,7 @@ def test_twins():
                   "%s) (LOW-V33)" % (k, want, nots), ok and want in body
                   and not any(n in body for n in nots), body)
             v.key(b"q", 0)
-            tabbar(v, "Search 3")
+            tabbar(v, "Search 1")
         v.key(b"q")
         v.exit()
     finally:
@@ -505,7 +508,7 @@ def test_twins():
             for _ in range(3):
                 v.key(b"\t", 0.3)
             v.key(b"needle\r", 0.3)
-            ok = tabbar(v, "Search %d" % len(wants))
+            ok = tabbar(v, "Search 1")  # one turn (#457)
             for k, want in enumerate(wants):
                 if k:
                     v.key(b"j", 0.3)
@@ -519,7 +522,7 @@ def test_twins():
                       "LOW-V35)" % (name, k, want),
                       ok and got == want, (got, screen(v, mark)))
                 v.key(b"q", 0)
-                tabbar(v, "Search %d" % len(wants))
+                tabbar(v, "Search 1")
             v.key(b"q")
             v.exit()
         finally:

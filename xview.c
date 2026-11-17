@@ -123,6 +123,8 @@ struct xv_hit		/* a search's hit (#291) */
 {
 	char *chapter, *who, *tool, *snippet;
 	long long at, off;
+	int head;		/* a You hit repeating its turn's title: the
+				** group's head line, no line of its own (#457) */
 };
 
 struct xv_task		/* a --tasks row (#320), a --memory row (#323) */
@@ -1204,6 +1206,68 @@ xv_hits_free(struct xv *v)
 	v->sline[0] = '\0';
 }
 
+static int xv_rch(const struct xv *v, const char *a);
+
+/* Two hits under one turn: a hit under no chapter is a turn of its own */
+static int
+xv_hsame(const struct xv_hit *a, const struct xv_hit *b)
+{
+	return a->chapter[0] && !strcmp(a->chapter, b->chapter);
+}
+
+/* A turn's title as its rows show it */
+static const char *
+xv_ctitle(const struct xv_ch *c)
+{
+	return c->aut && c->summary[0] ? c->summary : c->title;
+}
+
+/* The hits by turn (#457): the turns newest first, each one's hits
+** together, a You hit that is its title first as the head, the rest as
+** sent. Once per answer: the chapters shown then name the titles.
+** shortcut: a turn the index has not sent yet gets no head; fine while the
+** index comes before the first search. */
+static void
+xv_hgroup(struct xv *v)
+{
+	struct xv_hit *o;
+	int k, j, pass, n = 0, c;
+
+	for (k = 0; k < v->nh; k++)
+	{
+		const struct xv_hit *h = &v->hit[k];
+
+		v->hit[k].head = !strcmp(h->who, "user") &&
+		                 (c = xv_rch(v, h->chapter)) >= 0 &&
+		                 !strcmp(h->snippet, xv_ctitle(&v->ch[c]));
+	}
+	if (v->nh < 2 || !(o = malloc((size_t)v->nh * sizeof *o)))
+		return;
+	for (k = 0; k < v->nh; k++)
+	{
+		for (j = 0; j < k && !xv_hsame(&v->hit[j], &v->hit[k]); j++)
+			;
+		for (pass = j < k ? 2 : 0; pass < 2; pass++)
+			for (j = k; j < v->nh; j++)
+				if ((j == k || xv_hsame(&v->hit[j], &v->hit[k])) &&
+				    v->hit[j].head == !pass)
+					o[n++] = v->hit[j];
+	}
+	memcpy(v->hit, o, (size_t)n * sizeof *o);
+	free(o);
+}
+
+/* The turns of the search's hits */
+static int
+xv_hturns(const struct xv *v)
+{
+	int k, n = 0;
+
+	for (k = 0; k < v->nh; k++)
+		n += !k || !xv_hsame(&v->hit[k], &v->hit[k - 1]);
+	return n;
+}
+
 /* The search's one answer: its hits, newest first as sent */
 static void
 xv_qline(struct xv *v, const struct json_parser *p)
@@ -1227,6 +1291,7 @@ xv_qline(struct xv *v, const struct json_parser *p)
 		h.off = xv_num(p, t, "offset", -1);
 		v->hit[v->nh++] = h;
 	}
+	xv_hgroup(v);
 	v->smore = xv_bool(p, 0, "more");
 	v->spart = xv_bool(p, 0, "partial");
 	v->swhy = xv_str(p, 0, "why");
@@ -2585,7 +2650,7 @@ xv_vis(struct xv *v)
 	v->vtab = v->tab;	/* Tasks' or Memory's rows are gone from vis */
 	v->nvis = v->ntmp = v->nauto = v->npeer = v->nk = 0;
 	v->old = xv_old(v);
-	/* Search: every hit, as sent (#291) */
+	/* Search: every hit, by turn (#291, #457: xv_hgroup) */
 	for (k = 0; v->tab == 3 && k < v->nh &&
 	     !xv_grow(&v->vis, &v->avis, v->nvis, sizeof *v->vis); k++)
 		v->vis[v->nvis++] = k;
@@ -2763,43 +2828,52 @@ xv_fline1(int *h, int room, int faint)
 	return 1;
 }
 
-/* Search hit i (#291), drawn as xv_feed1 draws an item: a head with its
-** time, who said it and the prompt it is under, then its snippet in at
-** most 3 lines, the text searched standing out, then a blank */
+/* Search hit i (#291) in its turn's group (#457): the group's first hit
+** draws the head (time, prompt number, title), a head hit is that line,
+** any other its place: who said it, then its snippet in at most 3 lines,
+** the text searched standing out; the group's last a blank under it */
 static int
 xv_hit1(struct xv *v, int i, int room)
 {
 	const struct xv_hit *t = &v->hit[v->vis[i]];
-	const char *s = t->snippet, *w, *s0 = s;
+	const char *s = t->snippet, *w, *s0 = s, *who;
 	char sn[3 * XR_SNIPPET + 16];
-	int h = 0, l, on, c = xv_rch(v, t->chapter);
-	int you = !strcmp(t->who, "user");
+	int h = 0, l, on, c = xv_rch(v, t->chapter), sel = i == v->sel[3];
+	int you = !strcmp(t->who, "user"), ind, k;
+	int first = !i || !xv_hsame(t, &v->hit[v->vis[i - 1]]);
+	int last = i + 1 >= v->nvis || !xv_hsame(t, &v->hit[v->vis[i + 1]]);
+	int hd = first && t->head;
 	unsigned char mk[1024] = { 0 };	/* a snippet's bytes in a match: 1 */
 	size_t n, a, e, j, ql = strlen(v->sq);
 	char b[300];
 
-	if (h++ < room)
+	if (first && h++ < room)
 	{
 		pk_line();
-		xv_lead(i == v->sel[3]);
-		xv_when(t->at, b, sizeof b);
+		xv_lead(hd && sel);
+		xv_when(c >= 0 ? v->ch[c].at : t->at, b, sizeof b);
 		pk_set("2");
 		pk_txt(" ");
 		pk_fit(b, 13);
-		/* the reader's role names; a tool hit by its tool */
-		pk_set(you ? pk_p(PK_ACCB) : "1");
-		pk_txt(you ? "You" : !strcmp(t->who, "assistant") ? "Reply"
-		       : t->tool[0] ? t->tool : strcmp(xv_noun(v), "prompt")
-		       ? "Output" : "Tool");
-		pk_txt("  ");
+		if (c >= 0)
+		{
+			snprintf(b, sizeof b, "#%d  ", c + 1);
+			pk_txt(b);
+		}
 		pk_set(c < 0 ? "2" : "");
 		snprintf(b, sizeof b, "(outside the %ss shown)", xv_noun(v));
-		pk_txt(c < 0 ? b : v->ch[c].aut && v->ch[c].summary[0]
-		       ? v->ch[c].summary : v->ch[c].title);
-		if (i == v->sel[3])
+		pk_txt(c < 0 ? b : xv_ctitle(&v->ch[c]));
+		if (hd && sel)
 			pk_pad(pk_w);
 		pk_eol();
 	}
+	if (hd)
+		goto end;
+	/* the reader's role names; a tool hit by its tool */
+	who = you ? "You" : !strcmp(t->who, "assistant") ? "Reply"
+	      : t->tool[0] ? t->tool : strcmp(xv_noun(v), "prompt")
+	      ? "Output" : "Tool";
+	ind = pk_cps(who) + 2;
 	if (!pk_utf && !strncmp(s, "\xe2\x80\xa6", 3))	/* the ASCII ellipsis */
 	{
 		snprintf(sn, sizeof sn, "...%s", s + 3);
@@ -2814,9 +2888,23 @@ xv_hit1(struct xv *v, int i, int room)
 	for (l = 0; *s && l < 3; l++)
 	{
 		w = s;
-		s = xv_wline(w, pk_w - 8, &n);
-		if (!xv_fline1(&h, room, 0))
+		s = xv_wline(w, pk_w - 8 - ind, &n);
+		if (l == 0 && h++ < room)
+		{
+			/* the place's line: its who in the indent's place */
+			pk_line();
+			xv_lead(sel);
+			pk_txt("      ");
+			pk_set(you ? pk_p(PK_ACCB) : "1");
+			pk_txt(who);
+			pk_set("");
+			pk_txt("  ");
+		}
+		else if (l == 0 || !xv_fline1(&h, room, 0))
 			continue;
+		else
+			for (k = 0; k < ind; k++)
+				pk_txt(" ");
 		/* runs in a match and out of one; a match ends on a character's
 		** end, the text searched being whole characters */
 		for (a = 0; a < n; a = e)
@@ -2829,9 +2917,12 @@ xv_hit1(struct xv *v, int i, int room)
 			pk_set(on ? pk_p(PK_ACCB) : "");
 			xv_txtn(w + a, e - a);
 		}
+		if (l == 0 && sel)
+			pk_pad(pk_w);
 		pk_eol();
 	}
-	if (h++ < room)
+end:
+	if (last && h++ < room)
 	{
 		pk_line();
 		pk_eol();
@@ -3502,7 +3593,8 @@ xv_draw_search(struct xv *v, int win)
 	{
 		pk_line();
 		pk_set("2");
-		snprintf(m, sizeof m, "  the %d newest are shown", v->nh);
+		snprintf(m, sizeof m, "  the %d newest %ss are shown",
+		         xv_hturns(v), xv_noun(v));
 		pk_txt(m);
 		pk_eol();
 	}
@@ -4211,12 +4303,12 @@ xv_draw(struct xv *v, int force)
 			cnt[2] += !n && (v->allauto || !xv_hid(&v->ch[k])) && xv_item(v, k);
 		}
 		cnt[1] = v->nrf;
-		/* Search: its hits once a search has answered, + past the cap
-		** (as a name: pk_tab counts with a number only) */
-		cnt[3] = v->sdone && !v->smore ? v->nh : -1;
+		/* Search: its turns once a search has answered (#457), + past
+		** the cap (as a name: pk_tab counts with a number only) */
+		cnt[3] = v->sdone && !v->smore ? xv_hturns(v) : -1;
 		if (v->sdone && v->smore)
 		{
-			snprintf(sn, sizeof sn, "Search %d+", v->nh);
+			snprintf(sn, sizeof sn, "Search %d+", xv_hturns(v));
 			tabn[3] = sn;
 		}
 		/* Tasks: the open ones, in progress and pending (#320) */

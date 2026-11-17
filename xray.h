@@ -562,7 +562,10 @@ extern unsigned long xr_res_spawned;
 /* ---- --search (#297): where a word or phrase was said ------------------- */
 #define XR_SEARCH_MIN  2		/* bytes of the text */
 #define XR_SEARCH_MAX  200
-#define XR_SEARCH_HITS 50		/* the newest; one more says more:true */
+#define XR_SEARCH_TURNS 50		/* the newest turns' hits; a 51st says
+					** more:true (#457) */
+#define XR_SEARCH_HITS 500		/* at most, the newest; one more says
+					** more:true */
 #define XR_SNIPPET     160		/* bytes of decoded text around a hit */
 #define XR_LOOKBACK_MS 300		/* past the last hit, to find the prompt
 					** the oldest hits are under */

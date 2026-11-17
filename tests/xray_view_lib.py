@@ -104,9 +104,11 @@ Covers:
  15. Search (#291): xv-se, a History Claude record with the needle in a
      prompt, a tool call, its result and two answers: Tab cycles Prompts,
      Responses, Refs, Search (no count before a search) and wraps; Search
-     opens typing with its hint; Enter searches: the tab counts the hits,
-     the text's line stays above them, newest first, each with its time,
-     who said it (You, Reply, the tool's name) and its prompt's title; the
+     opens typing with its hint; Enter searches: the tab counts the turns
+     (#457), the text's line stays above them, one group per turn newest
+     first: a head (its time, number and title), each place indented by
+     who said it (You, Reply, the tool's name), a You hit that is its
+     title the head itself; the
      match in accent bold in either case; Enter reads the hit's prompt
      scrolled to the text (deep in a long chapter), q back to the same
      hit, also on the third; j, g, G; a 1-byte text refused in the status
@@ -114,7 +116,9 @@ Covers:
      match; Shift-Tab back keeps the text and its answer; plain words in
      the Prompts filter: ^R search in the footer and on the empty line, ^R
      lands on Search with their hit. xv-sm, 55 prompts: 50+ in the tab,
-     the faint "the 50 newest are shown", G the 50th. A shell (xv-sh):
+     the faint "the 50 newest prompts are shown", G the 50th. #457:
+     xv-gr, shadow mode's 8 hits in 6 turns are 6 groups (Search 6); xv-gc,
+     60 turns of 2 hits: 50+, G the 50th turn. A shell (xv-sh):
      Commands, Refs, Search (no Responses, no Tasks); its ring searched
      (each line as Output); on dch-lite the list says no x-ray corpus.
  16. the card's mentions newest first (#304, QA 1.62.0 MED-V13): a
@@ -848,20 +852,32 @@ def fixture_search():
                                for i in range(55)), []))
 
 
-def hits(scr):
-    """Search's hits on screen, top down, over the rule: (who, title,
-    [snippet lines])."""
+def groups(scr):
+    """Search's turns on screen, top down, over the rule (#457): (number,
+    title, [(who, [snippet lines])]); a head row's time at column 2, a
+    place's who at column 7, its snippet's next lines further in."""
     out = []
     for k in sorted(x for x in scr if x >= 5):
         r = scr[k]
         if r.startswith(("\u2500", "-")):
             break
         if re.match(r"^.\s\d\d-\d\d \d\d:\d\d", r):
-            who, _, title = r[15:].rstrip().partition("  ")
-            out.append((who, title.strip(), []))
-        elif out and r.strip():
-            out[-1][2].append(r.strip())
+            num, _, title = r[15:].rstrip().partition("  ")
+            if not num.startswith("#"):
+                num, title = "", r[15:].strip()
+            out.append((num, title.strip(), []))
+        elif out and re.match(r"^.\s{6}\S", r):
+            who, _, text = r[7:].rstrip().partition("  ")
+            out[-1][2].append((who, [text.strip()]))
+        elif out and out[-1][2] and r.strip():
+            out[-1][2][-1][1].append(r.strip())
     return out
+
+
+def hits(scr):
+    """Search's places on screen, top down: (who, its turn's title,
+    [snippet lines]); a turn's head row is none."""
+    return [(w, t, ls) for _, t, ps in groups(scr) for w, ls in ps]
 
 
 def tabbar(v, want, secs=10.0):

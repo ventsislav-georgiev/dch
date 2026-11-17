@@ -11396,8 +11396,8 @@ sr_region(const struct xr_search *s, uint64_t o)
 }
 
 /* A hit of kind who at off, its text t[0..n) matched at m (tool: malloc'd,
-** taken). A transcript's 51st sets more and stops the search; a shell's ring
-** keeps the newest XR_SEARCH_HITS. */
+** taken). A transcript's hit past XR_SEARCH_HITS sets more and stops the
+** search; a shell's ring keeps the newest XR_SEARCH_HITS. */
 static void
 sr_add(struct xr_search *s, uint64_t off, long long at, int who, char *tool,
        const char *t, size_t n, size_t m)
@@ -11857,6 +11857,80 @@ sr_chapters(struct xr_search *s, const struct sr_win *w)
 	return 0;
 }
 
+/* Hit k, newest first: a transcript's are, a shell's ring is oldest first */
+static struct sr_hit *
+sr_nth(struct xr_search *s, size_t k)
+{
+	return &s->hit[s->shell ? (s->h0 + s->n - 1 - k) % XR_SEARCH_HITS : k];
+}
+
+/* Hits a and b under one turn: a hit under no chapter, or one not known
+** yet, is a turn of its own (#457) */
+static int
+sr_same(const struct sr_hit *a, const struct sr_hit *b)
+{
+	return a->chapter[0] && !a->pend && !b->pend &&
+	       !strcmp(a->chapter, b->chapter);
+}
+
+/* Hit k's turn is new: no newer hit is under it */
+static int
+sr_newturn(struct xr_search *s, size_t k)
+{
+	size_t j;
+
+	for (j = 0; j < k; j++)
+		if (sr_same(sr_nth(s, j), sr_nth(s, k)))
+			return 0;
+	return 1;
+}
+
+/* The turns of the hits whose chapter is known */
+static size_t
+sr_turns(struct xr_search *s)
+{
+	size_t k, n = 0;
+
+	for (k = 0; k < s->n; k++)
+		n += !sr_nth(s, k)->pend && sr_newturn(s, k);
+	return n;
+}
+
+/* Only the newest XR_SEARCH_TURNS turns' hits stay, newest first; more
+** when one goes (#457). Every chapter known or null by now. */
+static void
+sr_trim(struct xr_search *s)
+{
+	struct sr_hit *o;
+	size_t k, n = 0, t = 0;
+
+	if (!(o = calloc(s->n ? s->n : 1, sizeof *o)))
+		return;		/* out of memory: the hits stay as they are */
+	for (k = 0; k < s->n; k++)
+	{
+		struct sr_hit *h = sr_nth(s, k);
+		size_t j;
+
+		for (j = 0; j < n && !sr_same(&o[j], h); j++)
+			;
+		if (j == n && t == XR_SEARCH_TURNS)
+		{
+			s->more = 1;
+			sr_hit_free(h);
+			continue;
+		}
+		t += j == n;
+		o[n++] = *h;
+		memset(h, 0, sizeof *h);
+	}
+	/* back as the printer reads them: a shell's oldest first from 0 */
+	for (k = 0; k < n; k++)
+		s->hit[k] = o[s->shell ? n - 1 - k : k];
+	s->n = n;
+	s->h0 = 0;
+	free(o);
+}
+
 static int
 sr_pending(const struct xr_search *s)
 {
@@ -11896,8 +11970,9 @@ xr_search_file(struct xr_search *s, int fd, uint64_t size, uint64_t ino,
 	size_t wsz = xr_lim.line + 2, cap = 0, i, z;
 	struct sr_win w;
 	uint64_t end = size, start;
-	long long stop = -1;	/* when the 51st hit came */
-	int rc = 0, k;
+	long long stop = -1;	/* when more came */
+	int rc = 0, k, pd;
+	size_t seen = 0;	/* the hits when the turns were counted */
 
 	memset(&w, 0, sizeof w);
 	s->ino = ino;
@@ -11966,14 +12041,23 @@ xr_search_file(struct xr_search *s, int fd, uint64_t size, uint64_t ino,
 		end = i < (size_t)(end - start) ? start + i : start;
 		for (w.k = w.nln; !s->more && w.k-- > 0;)
 			sr_line(s, &w);
-		if (rc == 0 && sr_pending(s) && sr_chapters(s, &w) < 0)
+		pd = sr_pending(s);
+		if (rc == 0 && pd && sr_chapters(s, &w) < 0)
 			rc = -1;
+		/* a 51st turn (#457), counted again when a hit or a chapter
+		** may have come */
+		if (!s->more && (pd || s->n != seen))
+		{
+			seen = s->n;
+			s->more = sr_turns(s) > XR_SEARCH_TURNS;
+		}
 	}
 	if (end > 0 && !s->more && rc == 0)
 		s->partial = 1;		/* a cap, or the file shrank */
 	for (i = 0; i < s->n; i++)
 		if (s->hit[i].pend)	/* not found in time: null */
 			s->hit[i].pend = 0, s->hit[i].chapter[0] = '\0';
+	sr_trim(s);
 	free(w.ln);
 	free(w.buf);
 	return rc;
@@ -12051,6 +12135,7 @@ xr_search_ring_end(struct xr_search *s)
 {
 	sr_flush(s);
 	s->more = s->total > XR_SEARCH_HITS;
+	sr_trim(s);
 }
 
 int
