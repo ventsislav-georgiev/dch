@@ -231,7 +231,7 @@ xr_title(const char *s, size_t n, char *out, size_t outsz)
 #include "xray_uni.h"
 
 const char *const xr_shape_name[] = { "ticket", "issue", "pull", "commit",
-                                      "file", "url" };
+                                      "file", "url", "term" };
 
 #define A_DIG(c) ((c) >= '0' && (c) <= '9')
 #define A_UP(c) ((c) >= 'A' && (c) <= 'Z')
@@ -304,7 +304,7 @@ clip(const char *s, size_t n, size_t cap)
 	return i;
 }
 
-enum { RU = 1, RR = 2, RF = 4, RT = 8, Rr = 16, RS = 32, RH = 64 };
+enum { RU = 1, RR = 2, RF = 4, RT = 8, Rr = 16, RS = 32, RH = 64, RW = 128 };
 #define R_PROSE (RU | RR | RF | RT | Rr | RS | RH)
 #define R_CODE (RU | RR | RF | RS)		/* tool fields, code spans */
 #define R_ANCHOR (RR | RT | Rr | RH)		/* definition anchors (2.4) */
@@ -774,7 +774,42 @@ r_hash(const char *s, size_t n, size_t i, uint32_t prev, struct xr_span *sp)
 	return j;
 }
 
-/* The first rule (U, R, F, T, r, S, H) matching at i: the span's end, 0 for
+/* W (#458): a CONST_CASE or snake_case identifier of 2+ parts and 4-64
+** bytes (ERR_LEDGER_SKEW, test_retry_timeout); never a path's or an email's
+** part: not after / . - @, not before / @ or .x (a name.ext). */
+static size_t
+r_term(const char *s, size_t n, size_t i, uint32_t prev, struct xr_span *sp)
+{
+	size_t j;
+	int up = 0, lo = 0, parts = 1;
+
+	if (!A_AL((unsigned char)s[i]) || prev == '/' || prev == '.' ||
+	    prev == '-' || prev == '@')
+		return 0;
+	for (j = i; j < n && j - i <= 64 && (A_ALNUM((unsigned char)s[j]) ||
+	                                      s[j] == '_'); j++)
+		if (s[j] == '_')
+		{
+			if (s[j - 1] == '_')
+				return 0;
+			parts++;
+		}
+		else
+		{
+			up |= A_UP((unsigned char)s[j]);
+			lo |= A_LO((unsigned char)s[j]);
+		}
+	if (s[j - 1] == '_' || parts < 2 || j - i < 4 || j - i > 64 ||
+	    (up && lo) || !after_ok(s, n, j) ||
+	    (j < n && (s[j] == '/' || s[j] == '@' ||
+	               (s[j] == '.' && j + 1 < n &&
+	                A_ALNUM((unsigned char)s[j + 1])))) ||
+	    !span_key(sp, XR_TERM, s + i, j - i, 0))
+		return 0;
+	return j;
+}
+
+/* The first rule (U, R, F, T, r, S, H, W) matching at i: the span's end, 0 for
 ** none. The caller has checked the boundary before i. */
 static size_t
 try_rules(const char *s, size_t n, size_t i, uint32_t prev, int rules,
@@ -800,6 +835,8 @@ try_rules(const char *s, size_t n, size_t i, uint32_t prev, int rules,
 		sp->rule = 'S';
 	else if ((rules & RH) && c == '#' && (e = r_hash(s, n, i, prev, sp)))
 		sp->rule = 'H';
+	else if ((rules & RW) && A_AL(c) && (e = r_term(s, n, i, prev, sp)))
+		sp->rule = 'W';
 	if (e)
 	{
 		sp->s = i;
@@ -816,6 +853,7 @@ struct gscan
 	void *ctx;
 	size_t count;
 	int stop;
+	int terms;	/* RW or 0: prose's terms (#458) */
 };
 
 static void
@@ -901,19 +939,63 @@ line_end(const char *s, size_t n, size_t i)
 	return nl ? (size_t)(nl - s) : n;
 }
 
-/* A code span's content: nothing when it holds a newline (2.4), else the
-** whole-span rules on its trimmed text. */
+/* A code span's whole trimmed text s[a, b) as a term (#458): 2-64 bytes of
+** printable ASCII, no blank, a letter, 2+ parts (a byte not a letter or
+** digit, or a lower-upper hump), an identifier 4+ bytes, no "://", and no
+** other ref kind in prose (`#412`, `src/a.c` stay theirs). 1 with *sp. */
+static int
+code_term(const char *s, size_t a, size_t b, const char *cwd,
+          struct xr_span *sp)
+{
+	size_t k;
+	int al = 0, parts = 0, id = 1;
+	struct xr_span o;
+
+	if (b - a < 2 || b - a > 64)
+		return 0;
+	for (k = a; k < b; k++)
+	{
+		unsigned char c = (unsigned char)s[k];
+
+		if (c <= ' ' || c >= 0x7f || c == '`' ||
+		    (c == ':' && b - k > 2 && s[k + 1] == '/' &&
+		     s[k + 2] == '/'))
+			return 0;
+		al |= A_AL(c);
+		if (!A_ALNUM(c))
+			parts = 1, id &= c == '_';
+		else if (k > a && A_LO((unsigned char)s[k - 1]) && A_UP(c))
+			parts = 1;
+	}
+	if (!al || !parts || (id && b - a < 4) ||
+	    (!u_word(prev_scalar(s, a)) &&
+	     try_rules(s, b, a, prev_scalar(s, a), R_PROSE, 0, cwd, &o) == b) ||
+	    !span_key(sp, XR_TERM, s + a, b - a, 0))
+		return 0;
+	sp->s = a;
+	sp->e = b;
+	sp->rule = 'W';
+	sp->full[0] = '\0';
+	return 1;
+}
+
+/* A code span's content: nothing when it holds a newline (2.4), else a term
+** (with terms) or the whole-span rules on its trimmed text. */
 static void
 code_span(struct gscan *g, size_t a, size_t b)
 {
-	size_t n = b - a;
+	size_t n = b - a, ts;
 	const char *t;
+	struct xr_span sp;
 
 	if (memchr(g->s + a, '\n', n))
 		return;
 	t = trim(g->s + a, &n);
-	if (n)
-		scan_run(g, (size_t)(t - g->s), (size_t)(t - g->s) + n, R_CODE, 1, 1);
+	ts = (size_t)(t - g->s);
+	if (n && g->terms && code_term(g->s, ts, ts + n, g->cwd, &sp))
+		g_emit(g, &sp);
+	else if (n)
+		scan_run(g, ts, ts + n, R_CODE, 1, 1);
 }
 
 /* [label](url) at i in [i, b): 1 with the label's end m and the ')' at q. */
@@ -959,7 +1041,7 @@ inline_run(struct gscan *g, size_t a, size_t b, int md)
 			}
 			if (j < b)
 			{
-				scan_run(g, seg, i, R_PROSE, 0, 0);
+				scan_run(g, seg, i, R_PROSE | g->terms, 0, 0);
 				code_span(g, i + k, j);
 				i = seg = j + k;
 			}
@@ -971,7 +1053,7 @@ inline_run(struct gscan *g, size_t a, size_t b, int md)
 		{
 			struct xr_span sp;
 
-			scan_run(g, seg, i, R_PROSE, 0, 0);
+			scan_run(g, seg, i, R_PROSE | g->terms, 0, 0);
 			/* already linked: no span in the label; the URL is a url
 			** span on the label's range (2.3) */
 			if (!g->stop && r_url(s, q, m + 2, &sp) == q)
@@ -987,7 +1069,7 @@ inline_run(struct gscan *g, size_t a, size_t b, int md)
 		i++;
 	}
 	if (!g->stop)
-		scan_run(g, seg, b, R_PROSE, 0, 0);
+		scan_run(g, seg, b, R_PROSE | g->terms, 0, 0);
 }
 
 /* Plain or Markdown prose: fences (an unclosed one makes the rest code),
@@ -1030,7 +1112,7 @@ static size_t
 grammar(const char *s, size_t n, int mode, int rules, const char *cwd,
         xr_span_fn fn, void *ctx)
 {
-	struct gscan g = { s, cwd, fn, ctx, 0, 0 };
+	struct gscan g = { s, cwd, fn, ctx, 0, 0, rules & RW };
 
 	if (mode == XR_PROSE || mode == XR_MD)
 		scan_prose(&g, n, mode == XR_MD);
@@ -1043,8 +1125,11 @@ size_t
 xr_grammar(const char *s, size_t n, int mode, const char *cwd, xr_span_fn fn,
            void *ctx)
 {
-	return grammar(s, n, mode, mode == XR_CODE ? R_CODE : R_PROSE, cwd, fn,
-	               ctx);
+	int w = mode & XR_TERMS ? RW : 0;
+
+	mode &= ~XR_TERMS;
+	return grammar(s, n, mode, (mode == XR_CODE ? R_CODE : R_PROSE) | w, cwd,
+	               fn, ctx);
 }
 
 /* The span at exactly i under `rules` (prose: no code scan), 1 with *sp. */
@@ -1123,9 +1208,14 @@ xr_ref_parse(const char *text, const char *cwd, struct xr_span *out)
 			return 0;
 		memcpy(c, t, n);
 		c[n] = '\0';
-		grammar(c, n, XR_PROSE, R_PROSE, cwd, one_span, &o);
+		grammar(c, n, XR_PROSE, R_PROSE | RW, cwd, one_span, &o);
 		free(c);
 	}
+	/* a term only a code span makes is asked for in its backticks:
+	** `fooBar`, `--ref` (#458) */
+	if (o.n == 1 && o.sp.shape == XR_TERM && o.sp.s == 1 &&
+	    o.sp.e + 1 == n && t[0] == '`' && t[n - 1] == '`')
+		o.sp.s = 0, o.sp.e = n;
 	if (o.n != 1 || o.sp.s != 0 || o.sp.e != n)
 		return 0;
 	*out = o.sp;
@@ -3830,19 +3920,20 @@ struct xr_ent
 	char *title;
 };
 
-#define XR_HASH 4096		/* slots, > 2 x XR_KEYS */
+#define XR_HASH 8192		/* slots, > 2 x XR_KEYS */
 #define XR_DROPSET 65536
 
 /* Each kind its own room (#262): pulls, issues and tickets are never pushed
 ** out by files, commits or URLs. In a full room the ref whose latest
 ** mention is the oldest goes, counted in dropped_keys. */
-static const size_t xr_room[6] = XR_ROOMS;
+static const size_t xr_room[XR_SHAPES] = XR_ROOMS;
 
 struct xr_index
 {
 	struct xr_ent *v;
-	size_t n, nk[6];	/* nk: entries per kind */
-	uint32_t oldest[6], newest[6];	/* each kind's list ends: entry + 1 */
+	size_t n, nk[XR_SHAPES];	/* nk: entries per kind */
+	/* each kind's list ends: entry + 1 */
+	uint32_t oldest[XR_SHAPES], newest[XR_SHAPES];
 	uint32_t slot[XR_HASH];	/* entry + 1 */
 	uint64_t *drop;		/* dropped keys' hashes, open addressing */
 	uint64_t dropped;
@@ -4026,7 +4117,7 @@ ix_get(struct xr_index *x, const struct xr_span *sp)
 			ix_touch(x, x->slot[i] - 1);
 			return &x->v[x->slot[i] - 1];
 		}
-	if (s < 0 || s > XR_URL || !(key = strdup(sp->key)))
+	if (s < 0 || s >= XR_SHAPES || !(key = strdup(sp->key)))
 		return NULL;
 	if (x->nk[s] == xr_room[s])
 	{
@@ -4157,6 +4248,12 @@ struct xr_scan
 	int cancel;		/* a write failed: 1 EPIPE (the reader left), 2 other */
 	const char *why;
 	long long last;
+	/* a term's first mention this file (#458): its sentence, offset, time
+	** and chapter, the definition xr_scan_file writes */
+	char *tsent;
+	uint64_t toff;
+	long long tat;
+	char tch[48];
 };
 
 long long
@@ -4237,6 +4334,7 @@ xr_scan_free(struct xr_scan *x)
 		return;
 	for (k = 0; k < x->hn; k++)
 		free(x->held[(x->h0 + k) % XR_RING]);
+	free(x->tsent);
 	free(x);
 }
 
@@ -4428,6 +4526,73 @@ sc_hold(struct xr_scan *x, char *b, uint64_t off)
 	x->hoff[x->hn++] = off;
 }
 
+/* The sentence of l[0, ll) holding [s, e) (#458): from past the last ". ",
+** "! " or "? " before s to the first after e, trimmed, at most XR_PASSAGE
+** scalars; malloc'd. */
+static char *
+term_sentence(const char *l, size_t ll, size_t s, size_t e)
+{
+	size_t a, b = e, n;
+	const char *t;
+	char *o;
+
+	for (a = s; a >= 2; a--)
+		if ((l[a - 1] == ' ' || l[a - 1] == '\t') &&
+		    memchr(".!?", l[a - 2], 3))
+			break;
+	if (a < 2)
+		a = 0;
+	for (; b < ll; b++)
+		if (memchr(".!?", l[b], 3) &&
+		    (b + 1 == ll || l[b + 1] == ' ' || l[b + 1] == '\t'))
+		{
+			b++;
+			break;
+		}
+	n = b - a;
+	t = trim(l + a, &n);
+	n = clip(t, n, XR_PASSAGE);
+	if ((o = malloc(n + 1)))
+	{
+		memcpy(o, t, n);
+		o[n] = '\0';
+	}
+	return o;
+}
+
+/* A term's definition (#458): the sentence of its first mention in this
+** file, "source":"first mention"; counted with the file's definitions. */
+static void
+term_def(struct xr_scan *x)
+{
+	char *b, title[XR_TITLE_MAX * 4 + 1];
+	size_t bl;
+	FILE *m = ln_open(&b, &bl);
+
+	if (!m)
+		return;
+	xr_title(x->tsent, strlen(x->tsent) | XR_WHOLE, title, sizeof title);
+	fputs("{\"schema\":1,\"definition\":{\"session\":", m);
+	xr_put_str(m, x->session);
+	fprintf(m, ",\"live\":%s,\"project\":", x->live ? "true" : "false");
+	xr_put_str(m, x->project);
+	fputs(",\"at\":", m);
+	put_at(m, x->tat);
+	fputs(",\"title\":", m);
+	xr_put_str(m, title);
+	if (x->full || (!x->shell && !x->other))
+	{
+		fputs(",\"passage\":", m);
+		xr_put_str(m, x->tsent);
+	}
+	fprintf(m, ",\"rule\":\"term\",\"offset\":%llu,\"chapter\":",
+	        (unsigned long long)x->toff);
+	put_or_null(m, x->other || !x->tch[0] ? NULL : x->tch);
+	fputs(",\"source\":\"first mention\"}}\n", m);
+	x->ndefs++;
+	ln_send(x, m, &b, &bl);
+}
+
 static void
 sc_hit(void *ctx, const struct xr_hit *h)
 {
@@ -4506,6 +4671,19 @@ sc_hit(void *ctx, const struct xr_hit *h)
 		uint64_t lh = fnv(h->line, h->ll);
 		int newline = !x->lines++ || x->lastoff != h->off ||
 		              x->lasth != lh;
+		char *ts;
+
+		/* a term's first mention seen: its sentence defines it (#458) */
+		if (h->sp->shape == XR_TERM && (!x->tsent || h->off < x->toff) &&
+		    (ts = term_sentence(h->line, h->ll, h->sp->s, h->sp->e)))
+		{
+			free(x->tsent);
+			x->tsent = ts;
+			x->toff = h->off;
+			x->tat = h->at;
+			snprintf(x->tch, sizeof x->tch, "%s",
+			         h->chapter ? h->chapter : "");
+		}
 
 		if (!x->nunit || x->lastunit != h->unit)
 		{
@@ -4677,6 +4855,10 @@ xr_scan_file(struct xr_scan *x, uint64_t bytes, uint64_t too_long,
 		x->held[j] = l;
 		x->hoff[j] = o;
 	}
+	if (x->tsent && !x->cancel)
+		term_def(x);
+	free(x->tsent);
+	x->tsent = NULL;
 	for (k = 0; k < x->hn; k++)
 	{
 		char *l = x->held[(x->h0 + k) % XR_RING];
@@ -6369,7 +6551,8 @@ user_text(struct xr_claude *d, const char *agent, char *s, size_t n, int inj)
 		/* its args, prefix(240), as prose (3.6) */
 		t = trim(s, &tl);
 		if (d->rk.hit && (args = tag(t, tl, "command-args", &ul)))
-			refs_text(d, args, ul, XR_FIELD_CAP, XR_PROSE);
+			refs_text(d, args, ul, XR_FIELD_CAP,
+			          XR_PROSE | XR_TERMS);
 		if (ent_here(d, agent))
 			ent_command(d->want, t, tl);
 		return;
@@ -6386,7 +6569,8 @@ user_text(struct xr_claude *d, const char *agent, char *s, size_t n, int inj)
 	d->harness = h ? sum : d->peersum;
 	block(d, agent, B_PROMPT, "prompt", title);
 	d->harness = NULL;
-	refs_text(d, u, ul, XR_REFS_CAP, XR_PROSE);
+	/* a harness prompt (a task notification) is no one's prose: no terms */
+	refs_text(d, u, ul, XR_REFS_CAP, h ? XR_PROSE : XR_PROSE | XR_TERMS);
 	if (ent_here(d, agent))
 	{
 		d->want->failed |= !u;
@@ -6604,7 +6788,7 @@ entry_user(struct xr_claude *d, const struct json_parser *p, const char *ag)
 		    : c >= 0 && p->tok[c].kind == JSON_ARRAY ? texts(p, c, &n)
 		    : NULL;
 		compaction(d, ag, n > 0);
-		refs_text(d, s, n, XR_REFS_CAP, XR_PROSE);
+		refs_text(d, s, n, XR_REFS_CAP, XR_PROSE | XR_TERMS);
 		if (n && ent_here(d, ag))
 			ent_prose(d->want, "user", s, n);
 		free(s);
@@ -6641,7 +6825,7 @@ entry_assistant(struct xr_claude *d, const struct json_parser *p,
 			block(d, ag, B_STEP, NULL, NULL);
 			if (!ag)
 				resp_set(d, s, n);
-			refs_text(d, s, n, XR_REFS_CAP, XR_MD);
+			refs_text(d, s, n, XR_REFS_CAP, XR_MD | XR_TERMS);
 			if (ent_here(d, ag))
 				ent_prose(d->want, "assistant", s, n);
 		}
@@ -6668,7 +6852,8 @@ entry_assistant(struct xr_claude *d, const struct json_parser *p,
 				block(d, ag, B_STEP, NULL, NULL);
 				if (!ag)
 					resp_set(d, s, n);
-				refs_text(d, s, n, XR_REFS_CAP, XR_MD);
+				refs_text(d, s, n, XR_REFS_CAP,
+				          XR_MD | XR_TERMS);
 				if (ent_here(d, ag))
 					ent_prose(d->want, "assistant", s, n);
 			}
@@ -7008,7 +7193,8 @@ cx_item(struct xr_claude *d, const struct json_parser *p, int pl)
 				{
 					main_block(d, B_STEP, NULL, NULL);
 					resp_set(d, s, n);
-					refs_text(d, s, n, XR_REFS_CAP, XR_MD);
+					refs_text(d, s, n, XR_REFS_CAP,
+				          XR_MD | XR_TERMS);
 					if (ent_here(d, NULL))
 						ent_prose(d->want, "assistant", s, n);
 				}
@@ -7071,7 +7257,7 @@ cx_line(struct xr_claude *d, const struct json_parser *p)
 		/* its summary, as a Claude compact summary's (3.6) */
 		main_block(d, B_PROMPT, "compact", "Conversation compacted");
 		if ((s = k_str(p, pl, A_MESSAGE, &n)))
-			refs_text(d, s, n, XR_REFS_CAP, XR_PROSE);
+			refs_text(d, s, n, XR_REFS_CAP, XR_PROSE | XR_TERMS);
 		/* as a Claude compact summary's user entry */
 		if (s && ent_here(d, NULL))
 			ent_prose(d->want, "user", s, n);
@@ -7460,7 +7646,7 @@ pf_build(struct xr_pf *f, const char *key)
 	if (!t++)
 		return 0;
 	if (!strncmp(key, "ticket:", 7) || !strncmp(key, "commit:", 7) ||
-	    !strncmp(key, "url:", 4))
+	    !strncmp(key, "url:", 4) || !strncmp(key, "term:", 5))
 		return pf_add(f, t, strlen(t));
 	if (!strncmp(key, "file:", 5))
 	{

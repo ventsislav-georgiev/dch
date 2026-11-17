@@ -1003,16 +1003,33 @@ t_grammar(void)
 		{ "~/a/./b//c.md", XR_PROSE, "file:~/a/b/c.md" },
 		{ "~user/x.md", XR_PROSE, "" },
 		{ "`~user/x.md`", XR_PROSE, "" },
+		/* #458: terms, in prose with XR_TERMS only */
+		{ "ERR_LEDGER_SKEW, then test_retry_timeout; `shadow_mode`.",
+		  XR_MD | XR_TERMS,
+		  "term:ERR_LEDGER_SKEW term:test_retry_timeout "
+		  "term:shadow_mode" },
+		{ "The fix. Merged it, snake `foo` `src/a.c` #412 "
+		  "https://x.org/a_b_cd", XR_MD | XR_TERMS,
+		  "issue:#412 url:https://x.org/a_b_cd" },
+		{ "`fooBar` `--ref` `a_b` `#412` `1234` `a b` `PAY-219` `x`",
+		  XR_PROSE | XR_TERMS, "term:fooBar term:--ref" },
+		{ "x/foo_bar a.foo_bar foo_bar.c foo_bar@x.org Foo_Bar a_b "
+		  "a__bc ab_cd_ MAX_RETRY", XR_PROSE | XR_TERMS,
+		  "term:MAX_RETRY" },
+		{ "ERR_LEDGER_SKEW `shadow_mode`", XR_MD, "" },
+		{ "ERR_LEDGER_SKEW `shadow_mode`", XR_CODE, "" },
+		{ "ERR_LEDGER_SKEW `shadow_mode`", XR_PLAIN, "" },
 	};
 	size_t k;
 
 	for (k = 0; k < sizeof g / sizeof g[0]; k++)
 	{
 		const char *got = spans(g[k].s, g[k].mode);
-		char m[160];
+		char m[300];
 
 		snprintf(m, sizeof m, "grammar: %s in %s -> [%s]", g[k].s,
-		         g[k].mode == XR_CODE ? "code" : "prose", g[k].want);
+		         g[k].mode == XR_CODE ? "code" : g[k].mode & XR_TERMS
+		         ? "prose+terms" : "prose", g[k].want);
 		CHECK(m, !strcmp(got, g[k].want));
 		if (strcmp(got, g[k].want))
 			printf("       got [%s]\n", got);
@@ -1349,6 +1366,16 @@ t_ref(void)
 	      !xr_ref_parse("~bob/x.c:3", "/w", &sp) &&
 	      xr_ref_parse("~/../x.c:3", "/w", &sp) &&
 	      !strcmp(sp.key, "file:~/x.c"));
+	CHECK("ref: a term parses, a backtick-only one too; one part does not "
+	      "(#458)",
+	      xr_ref_parse("ERR_LEDGER_SKEW", NULL, &sp) &&
+	      !strcmp(sp.key, "term:ERR_LEDGER_SKEW") &&
+	      xr_ref_parse(" `fooBar` ", NULL, &sp) &&
+	      !strcmp(sp.key, "term:fooBar") &&
+	      !xr_ref_parse("fooBar", NULL, &sp) &&
+	      !xr_ref_parse("foo", NULL, &sp) &&
+	      !xr_ref_parse("`foo`", NULL, &sp) &&
+	      !xr_ref_parse("The", NULL, &sp));
 	CHECK("ref: two refs, or text around one, are no ref",
 	      !xr_ref_parse("#831 #832", NULL, &sp) &&
 	      !xr_ref_parse("see #831", NULL, &sp) &&
@@ -1713,7 +1740,7 @@ rooms_line(char *row, int pulls, size_t from, size_t n)
 static void
 t_rooms(void)
 {
-	static const size_t room[6] = XR_ROOMS;
+	static const size_t room[XR_SHAPES] = XR_ROOMS;
 	struct xr_index *ix = xr_index_new();
 	struct xr_sink k;
 	struct xr_chapters ch;
@@ -1723,7 +1750,7 @@ t_rooms(void)
 	uint64_t later;
 	FILE *f;
 
-	for (i = 0; i < 6; i++)
+	for (i = 0; i < XR_SHAPES; i++)
 		sum += room[i];
 	CHECK("rooms: the kinds' rooms add up to XR_KEYS", sum == XR_KEYS);
 	if (!ix || !row)

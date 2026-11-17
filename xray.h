@@ -137,9 +137,9 @@ int xr_claude_lookup(const char *cfg, const char *sid, char *path,
 /* ---- refs (XR2a, #135): grammar, normalization, definitions ------------ */
 #define XR_KEY_MAX     1024		/* bytes of normalized text; a longer
 					** candidate is no ref */
-#define XR_KEYS        2000		/* index keys (3.2), the rest counted */
-/* ... in a room per kind, XR_TICKET..XR_URL, XR_KEYS in all (#262) */
-#define XR_ROOMS       { 300, 400, 500, 250, 350, 200 }
+#define XR_KEYS        2400		/* index keys (3.2), the rest counted */
+/* ... in a room per kind, XR_TICKET..XR_TERM, XR_KEYS in all (#262) */
+#define XR_ROOMS       { 300, 400, 500, 250, 350, 200, 400 }
 #define XR_SPANS       128		/* mentions per entry (3.8) */
 #define XR_DEFS        8		/* definitions per entry (3.8) */
 #define XR_TEXT_CAP    6000		/* scalars: prose clips (v2.1 3.1) */
@@ -155,7 +155,10 @@ int xr_claude_lookup(const char *cfg, const char *sid, char *path,
 #define XR_D2_MAX      (256u << 10)	/* D2's JSON bound */
 #define XR_SH_LINE     (64u << 10)	/* a WRAP-joined shell line (3.8) */
 
-enum { XR_TICKET, XR_ISSUE, XR_PULL, XR_COMMIT, XR_FILE, XR_URL };
+/* XR_TERM (#458): a backticked span or a 2+ part CONST_CASE / snake_case
+** identifier, in prose only (XR_TERMS) */
+enum { XR_TICKET, XR_ISSUE, XR_PULL, XR_COMMIT, XR_FILE, XR_URL, XR_TERM,
+       XR_SHAPES };
 extern const char *const xr_shape_name[];
 
 /* Grammar contexts (v2.1 2.4): plain prose (user text: fences and inline
@@ -163,6 +166,7 @@ extern const char *const xr_shape_name[];
 ** the same, plus already-linked labels), a tool field (code: U, R, S and
 ** F-with-a-line anywhere), and prose with no code scan (the D3 command). */
 enum { XR_PROSE, XR_MD, XR_CODE, XR_PLAIN };
+#define XR_TERMS       0x10	/* | XR_PROSE or XR_MD: terms too (#458) */
 
 /* One ref span: bytes [s, e) of the text, its rule letter, shape, and key
 ** "<shape>:<normalized text>" (text = key + its shape name + 1). full: a

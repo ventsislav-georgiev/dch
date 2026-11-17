@@ -3447,6 +3447,87 @@ def test_many_mentions():
         os.unlink(tp)
 
 
+def test_terms():
+    """#458: a term (a 2+ part CONST_CASE or snake_case identifier, or a
+    backticked span) is a ref of its own kind, from prose only.
+    ERR_LEDGER_SKEW is in turns 3, 9 and 30, each time beside PAY-219: its
+    --ref answers as the ticket's does (count, places), and its definition is
+    the turn-3 sentence, marked "source":"first mention"."""
+    sid = "11111111-2222-4333-8444-5555555555c8"
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, sid + ".jsonl")
+    first = ("The ledger raised ERR_LEDGER_SKEW when the totals drifted on "
+             "PAY-219.")
+    say = {3: "We ran it. " + first + " More on that later.",
+           9: None,
+           30: "Fixed: ERR_LEDGER_SKEW no longer fires for PAY-219.",
+           5: "Set `dryRun` first, then `shadow_mode`."}
+    offs = {}
+    with open(tp, "w") as f:
+        for t in range(1, 31):
+            ask = ("is ERR_LEDGER_SKEW back in PAY-219?" if t == 9
+                   else "turn %d" % t)
+            if t == 9:
+                offs[t] = f.tell()
+            f.write(json.dumps({"type": "user", "cwd": "/home/demo/proj",
+                                "timestamp": "2026-11-10T10:%02d:00Z" % t,
+                                "message": {"content": ask}}) + "\n")
+            if say.get(t):
+                offs.setdefault(t, f.tell())
+            f.write(json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "text", "text": say.get(t) or "ok %d" % t}]}}) + "\n")
+            # tool output never makes a term
+            f.write(json.dumps({"type": "user", "toolUseResult": {
+                "stdout": "TOOL_ONLY_TERM"}, "message": {"content": [
+                    {"type": "tool_result", "tool_use_id": "t%d" % t,
+                     "content": "TOOL_ONLY_TERM"}]}}) + "\n")
+    history("xr-terms", sid, cfg)
+    try:
+        def ref(r, *a):
+            x = dch("--xray", "xr-terms", "--ref", r, "--scope", "session",
+                    *a, "--json")
+            return x.returncode, ref_lines(x.stdout) or []
+
+        for mode in ((), ("--full",)):
+            rc, ls = ref("ERR_LEDGER_SKEW", *mode)
+            _, tk = ref("PAY-219", *mode)
+            men = [l["mention"]["offset"] for l in ls if "mention" in l]
+            tmen = [l["mention"]["offset"] for l in tk if "mention" in l]
+            ds = [l["definition"] for l in ls if "definition" in l]
+            tally = [l["tally"] for l in ls if "tally" in l]
+            check("terms: --ref ERR_LEDGER_SKEW%s counts 3, its places are "
+                  "turns 3, 9 and 30, in the order a ticket's come" %
+                  " ".join(("",) + mode), rc == 0 and tally and
+                  tally[0]["count"] == 3 and ls[-1]["counts"]["session"] == 3
+                  and men == tmen and sorted(men) == [offs[3], offs[9],
+                                                      offs[30]], (ls, tmen))
+            check("terms: its definition is the turn-3 sentence, "
+                  "source first mention%s" % " ".join(("",) + mode),
+                  len(ds) == 1 and ds[0]["title"] == first and
+                  ds[0]["passage"] == first and ds[0]["offset"] == offs[3] and
+                  ds[0]["source"] == "first mention" and
+                  ds[0]["rule"] == "term" and tally[0]["definitions"] == 1,
+                  ds)
+        rc, ls = ref("`dryRun`")
+        check("terms: a backtick-only term is asked for in its backticks",
+              rc == 0 and ls[0]["first"]["key"] == "term:dryRun" and
+              ls[-1]["counts"]["session"] == 1, ls)
+        rc, o, err = xray("xr-terms", "--json")
+        refs = {r["key"]: r for r in (o or {}).get("refs", [])}
+        t = refs.get("term:ERR_LEDGER_SKEW", {})
+        check("terms: --json refs list the term, shape term, count 3",
+              rc == 0 and t.get("shape") == "term" and t.get("count") == 3
+              and t.get("text") == "ERR_LEDGER_SKEW" and
+              "term:shadow_mode" in refs and "term:dryRun" in refs, (o, err))
+        check("terms: never from tool output, never one part",
+              "term:TOOL_ONLY_TERM" not in refs and
+              not [k for k in refs if k in ("term:turn", "term:ok")], refs)
+    finally:
+        os.unlink(tp)
+
+
 def main():
     try:
         test_names()
@@ -3479,6 +3560,7 @@ def main():
         test_light_379()
         test_long_answer()
         test_many_mentions()
+        test_terms()
     finally:
         shutil.rmtree(T, ignore_errors=True)
     if fails[0]:

@@ -1313,9 +1313,14 @@ another project directory
 .B \-\-scope all
 would add; from names only, nothing opened).
 .B refs
-lists the issues, pull requests, tickets, commits, files and URLs the corpus
-mentions (at most 2000 keys, a room per kind: 300 tickets, 400 issues,
-500 pull requests, 250 commits, 350 files, 200 URLs; in a full room the ref
+lists the issues, pull requests, tickets, commits, files, URLs and terms the
+corpus mentions (at most 2400 keys, a room per kind: 300 tickets, 400 issues,
+500 pull requests, 250 commits, 350 files, 200 URLs, 400 terms; a term, shape
+.BR term ,
+is a CONST_CASE or snake_case identifier of 2 or more parts and 4 to 64
+characters, or a code span of 2 to 64 printable ASCII characters with no
+blank, a letter and 2 or more parts that no other rule takes, in prompts and
+assistant text only; in a full room the ref
 whose latest mention is the oldest goes, counted in
 .BR dropped_keys ,
 and one mentioned again comes back with the mentions since), each with
@@ -1370,6 +1375,15 @@ in the turn its window starts in (unless the window starts the file), or
 in a turn the window saw begin only after a subagent's first record there
 or a tool result whose call is older, has
 .BR chapter:null ),
+for a term, the earliest mention read giving its one
+.B definition
+(the sentence holding it as
+.B title
+and
+.BR passage ,
+.BR rule:\(dqterm\(dq ,
+.BR source:\(dqfirst\(dq\ mention\(dq ;
+a term only a code span makes is asked for in its backticks),
 .B \-\-full
 to read it all up to 64 files
 .RB ( why:\(dqfiles\(dq ),

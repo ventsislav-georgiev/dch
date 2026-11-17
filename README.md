@@ -1119,7 +1119,7 @@ it has memories or instruction files:
   while the tab shows). A shell session, no memory and a host older
   than this dch have no Memory tab; dch-lite has both tabs.
 
-A ref typed after `/` (a ticket, issue, pull request, commit, file or URL,
+A ref typed after `/` (a ticket, issue, pull request, commit, file, URL or term,
 as `--ref` takes it) opens its card with `Ctrl-R`, on any tab, while
 typing or after: also when no row has it, a row is not the one you want, or
 its kind is hidden until `a`. The footer shows `^R look up` while the filter
@@ -1497,10 +1497,11 @@ The corpus:
     apply_patch) adds its files and lines, as `Edit 3 (2 files, +40 -12),
     Bash 5`. At most 2 MiB of responses is held: past that, the oldest
     chapters give theirs up (they keep `response_offset`).
-- **`refs`.** The refs the corpus mentions (see [Refs](#refs)), at most 2000
+- **`refs`.** The refs the corpus mentions (see [Refs](#refs)), at most 2400
   keys, each kind in a room of its own: 300 tickets, 400 issues, 500 pull
-  requests, 250 commits, 350 files and 200 URLs, so files, commits and URLs
-  never push out a pull request, an issue or a ticket. In a full room the
+  requests, 250 commits, 350 files, 200 URLs and 400 terms, so files,
+  commits, URLs and terms never push out a pull request, an issue or a
+  ticket. In a full room the
   ref whose latest mention is the oldest goes. A ref that went and is
   mentioned again comes back with the mentions since (its `count` starts
   again). The keys out of the index are counted in `dropped_keys`, exactly up
@@ -1551,7 +1552,21 @@ a commit URL as the commit; only one that starts exactly `https://github.com/`
 does, so `https://GitHub.com/o/r/pull/7` stays a plain URL, as Prosper's pull
 links validate it). Numbers have set lengths: a bare `#n` takes 2 to 6 digits
 (`#5` and `#0` are none, `#00` is one), `repo#n` and `owner/repo#n` 1 to 7
-(`dch#5` and `o/r#0` are refs), a ticket 1 to 6, a GitHub URL 1 to 9. A number
+(`dch#5` and `o/r#0` are refs), a ticket 1 to 6, a GitHub URL 1 to 9.
+A term (shape `term`, 1.93.0) is a CONST_CASE or snake_case identifier of 2
+or more parts and 4 to 64 characters (`ERR_LEDGER_SKEW`,
+`test_retry_timeout`; not `Merged`, `foo`, `a_b`, `Foo_Bar`, nor a part of a
+path, a URL or an email), or a code span of 2 to 64 printable ASCII
+characters with no blank, at least one letter and 2 or more parts (a
+character that is not a letter or digit, or a lower-to-upper hump:
+`` `shadow_mode` ``, `` `--ref` ``, `` `fooBar` ``) that is no other ref in
+prose (`` `#412` `` and `` `src/a.c` `` stay what they are; `` `foo` `` and
+`` `1234` `` are nothing). Terms come from prompts, assistant text and
+compact summaries only: never from tool input or output, a notice, a harness
+prompt (a task notification) or a shell's ring, and the view's on-screen
+scan does not look for them. They count against a text block's 128 like
+any ref. `--ref ERR_LEDGER_SKEW` asks for a term; one only a code span makes
+is asked for in its backticks (``--ref '`fooBar`'``). A number
 keys as written: `#00012` and `#12` are two refs. A bare `repo#n` needs a repo of at least 3
 characters that starts with a letter, ends with a letter or digit and is not a
 glue word or standard (`issue#12`, `step#3`, `PKCS#12`, `PR#831`, `a#12` are
@@ -1574,7 +1589,15 @@ transcript or a Codex rollout, the seq of its record in a shell's ring (on
 the screen, a provisional seq). A larger one is a later mention; the list
 keeps its order (by `count`, then the first seen).
 `count` is per Claude or Codex mention, per shell block with OSC 133 marks,
-and per row without. A definition comes only from a paired tool result or a finished,
+and per row without. A term's one definition is its first mention's
+sentence (from past the last `. `, `! ` or `? ` before it to the first after
+it, on its line, at most 600 scalars): a `definition` line with that
+sentence as `title` (120 scalars) and `passage`, `"rule":"term"` and
+`"source":"first mention"`, written before the file's mentions and counted in
+its tally; light `--ref` takes the earliest mention it read (it may stop
+before the file's first), `--full` the file's first. It counts as a definition, so `define_command` does not run
+for a term the transcript mentions. `defined` in `refs` stays false for a
+term. Any other definition comes only from a paired tool result or a finished,
 typed shell block that did not fail: a heading (`# #831 Agent panes`), a
 `#831` line with `title:` within 3 lines, a JSON object or array with a number
 or id and a title (the whole tool result, up to 256 KiB, not the 3000-scalar
@@ -2093,7 +2116,7 @@ define_command = ~/bin/my-define
   its environment `DCH_REF` (the same), `DCH_REF_KEY` (X-ray's key text: a
   commit's first 7 hex digits, a GitHub pull URL as `o/r#41`, a file's
   absolute path) and `DCH_REF_SHAPE` (`ticket`, `issue`, `pull`, `commit`,
-  `file` or `url`). As written means the `--ref` text (trimmed), the text
+  `file`, `url` or `term`). As written means the `--ref` text (trimmed), the text
   you type for ^R in the view, and a peer's text through `dch serve`;
   Enter on a row of the Refs list sends the fullest form the row has: a
   commit's longest SHA seen (also when it came from a commit URL, whose
