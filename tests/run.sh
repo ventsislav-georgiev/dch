@@ -380,14 +380,21 @@ nobudget(){ [ -n "${DCH_TEST_NO_BUDGET:-}" ] && printf '  skip %s (timing budget
 # a deadline-driven read slows every run; a loaded box only some (#154).
 # Beside a full pool every run was slow (#361): the rows run after pdrain.
 fast20(){
+    # host-relative: a --version call (no session work) is timed between the
+    # measured calls; the fastest measured call must be under 100 ms or 5x the
+    # fastest --version plus 50 ms, whichever is more (never stricter than the
+    # old fixed bound; a loaded host scales both; a 10x slowdown still fails)
     python3 -c '
 import subprocess, sys, time
-def one():
+def one(a):
     t = time.perf_counter()
-    subprocess.run(sys.argv[1:], stdout=subprocess.DEVNULL,
-                   stderr=subprocess.DEVNULL)
+    subprocess.run(a, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return time.perf_counter() - t
-sys.exit(0 if min(one() for _ in range(20)) < 0.1 else 1)
+m, c = [], []
+for _ in range(20):
+    m.append(one(sys.argv[1:]))
+    c.append(one([sys.argv[1], "--version"]))
+sys.exit(0 if min(m) < max(0.1, 5 * min(c) + 0.05) else 1)
 ' "$@"; }
 
 # --- the longest files first: a pool (DCH_TEST_JOBS > 1) starts them at once

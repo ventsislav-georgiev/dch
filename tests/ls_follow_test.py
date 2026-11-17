@@ -485,8 +485,9 @@ def main():
         while time.time() < end and not (d.conns - c0 >= 2 and any(
                 rem(json.loads(ln), "d") == {"d1": True} for ln in s.lines)):
             s.line(0.1)
-        # then read past the slow fake's answer (2.6 s) plus a margin
-        while time.time() < min(t0 + 2.6 + 0.8, end):
+        # then read to the 5.5 s bound: a redial's answer (5 s box) must not
+        # come fresh either
+        while time.time() < end:
             s.line(0.1)
         while s.line(0.1):
             pass

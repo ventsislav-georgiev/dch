@@ -3207,11 +3207,15 @@ def test_light_377():
                                  (i, "z" * 3900)}]}}) + "\n")
         # host-relative: --full reads the same file without the cwd walk, so
         # its time scales with the host (and ASan). 1.73.0's walk was ~33x
-        # it (4 s vs 0.12 s), the budgeted one ~3x; the bound is 15x, 1 s floor
-        t0 = time.time()
-        dch("--xray", "xr-377", "--ref", "PROJ-77", "--full",
-            "--json")
-        full = time.time() - t0
+        # it (4 s vs 0.12 s), the budgeted one ~3x; the bound is 15x the fastest
+        # of 3 runs, 1 s floor
+        fulls = []
+        for _ in range(3):  # the fastest of 3: one stalled run can't lift the bound
+            t0 = time.time()
+            dch("--xray", "xr-377", "--ref", "PROJ-77", "--full",
+                "--json")
+            fulls.append(time.time() - t0)
+        full = min(fulls)
         t0 = time.time()
         r = dch("--xray", "xr-377", "--ref", "PROJ-77", "--budget-ms", "50",
                 "--json")
