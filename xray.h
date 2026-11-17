@@ -19,7 +19,8 @@
 #define XR_TITLE_MAX   120		/* scalars (3.2, ruling R3) */
 #define XR_CHAPTERS    5000		/* 13.2 item 6: the newest kept */
 #define XR_SUMMARIES   (256u << 10)	/* #192: summary bytes held (3.8) */
-#define XR_RESPONSE    2048		/* #296: a response's bytes */
+#define XR_RESPONSE    2048		/* #296: a response's bytes; a longer one
+					** keeps its first and last half (#451) */
 #define XR_RESPONSES   (2u << 20)	/* #296: response bytes held */
 #define XR_HEAD_RANGE  (16ull << 20)	/* 3.8 per-file range: head ... */
 #define XR_TAIL_RANGE  (256ull << 20)	/* ... plus the newest 256 MB */
@@ -71,12 +72,15 @@ struct xr_chapter
 					** (never NULL from the engine); held out of
 					** line so the ring costs no more (3.8) */
 	/* #296, Claude Code's Focus view: the turn's last assistant text
-	** after its last tool result, at most XR_RESPONSE bytes (cut: cut on
-	** a character), from the record at response_offset; NULL while the
-	** turn runs, or given up past XR_RESPONSES held (responded stays) */
+	** after its last tool result: whole up to XR_RESPONSE bytes, else its
+	** first and last XR_RESPONSE / 2 (cut on a character) with a "\n…\n"
+	** between (#451), response_cut the scalars left out; from the record
+	** at response_offset; NULL while the turn runs, or given up past
+	** XR_RESPONSES held (responded stays) */
 	char *response;
 	uint64_t response_offset;
-	int responded, response_cut;
+	size_t response_cut;
+	int responded;
 	char *tools;			/* the turn's tool line, or NULL */
 	char *peer;			/* #359: another agent sent the prompt:
 					** its name as a title ("" for none),
@@ -139,6 +143,10 @@ int xr_claude_lookup(const char *cfg, const char *sid, char *path,
 #define XR_SPANS       128		/* mentions per entry (3.8) */
 #define XR_DEFS        8		/* definitions per entry (3.8) */
 #define XR_TEXT_CAP    6000		/* scalars: prose clips (v2.1 3.1) */
+#define XR_ENT_HALF    3000		/* scalars: a longer prose entry keeps
+					** its first and last XR_ENT_HALF (#451) */
+#define XR_REFS_CAP    XR_LINE_MAX	/* scalars: a prose block's ref scan,
+					** the whole block (#451), bounded */
 #define XR_OUTPUT_CAP  3000		/* scalars: tool output clips */
 #define XR_FIELD_CAP   240		/* scalars: card fields, search rows */
 #define XR_CALLS       512		/* the tool_use ring (3.8) */

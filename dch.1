@@ -1015,8 +1015,9 @@ then types its repeats),
 its answer or its summary of the work, as Claude Code's Focus view does;
 newest first; each item the prompt's row, the turn's tools on one faint
 line, then the answer wrapped, at most 8 lines, Markdown as written, a
-faint ellipsis when there is more (the engine keeps 2 KB; the reader has
-it); a running turn says \(lqworking\(rq, an answer the size cap left out
+faint ellipsis when there is more (the engine keeps the first and last
+1 KB of an answer over 2 KB; the reader has it); a running turn says
+\(lqworking\(rq, an answer the size cap left out
 \(lqEnter reads it\(rq;
 \fBj\fR \fBk\fR move item by item;
 \fBEnter\fR reads the prompt at its answer (at its end when not found),
@@ -1291,9 +1292,14 @@ the message alone, never the wrapper, socket path or ids;
 a Claude Code or Codex chapter whose turn has ended has
 .B response
 (the last assistant text after the last tool result, as Claude Code's
-Focus view shows it; at most 2048 bytes, a cut one with
+Focus view shows it; whole up to 2048 bytes, a longer one its first and
+last 1024 bytes, never cut inside a UTF\-8 character, with a line holding
+only \(lq\[u2026]\(rq between, and with
 .B response_cut
-true; at most 2 MiB held, past that the oldest give theirs up) and
+true and
+.B response_cut_chars
+the Unicode scalars left out; at most 2 MiB held, past that the oldest
+give theirs up) and
 .B response_offset
 (the byte offset of its line), and one with tool calls has
 .B tools
@@ -2033,10 +2039,28 @@ entry with the block's output rows, soft\-wrapped rows joined,
 .B error
 for a non\-zero exit; only rows that scrolled into the ring count, not the
 screen's.
+A
+.B user
+or
+.B assistant
+entry's
 .B text
-is cut at 6000 Unicode scalars (3000 for an
-.BR output )
-and escaped like
+over 6000 Unicode scalars keeps its first and last 3000 with this line
+between them, N the scalars left out as a plain integer:
+.RS
+.EX
+\[u2026] N characters cut \[u2026]
+.EE
+.RE
+and the entry has
+.BR \(dqcut\(dq:\ N ,
+absent when nothing was cut;
+.B tool
+entry text is cut at 6000 scalars, an
+.BR output 's
+at 3000;
+.B text
+is escaped like
 .BR \-\-ls\-json ;
 the object is capped at 1 MiB, entries past it left out and
 .B truncated

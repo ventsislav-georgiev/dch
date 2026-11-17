@@ -5282,7 +5282,7 @@ resp_set(struct xr_claude *d, const char *s, size_t n)
 {
 	struct xr_chapter *x = cur(d), *o;
 	char *r;
-	int cut;
+	size_t h, t, k, cut = 0;
 
 	/* ASCII space only: trim() walks the whole text (its cost) */
 	for (; n && (s[n - 1] == ' ' || (s[n - 1] >= '\t' && s[n - 1] <= '\r'));
@@ -5292,13 +5292,22 @@ resp_set(struct xr_claude *d, const char *s, size_t n)
 		;
 	if (!x || !n)
 		return;
-	if ((cut = n > XR_RESPONSE))
-		for (n = XR_RESPONSE; n && ((unsigned char)s[n] & 0xc0) == 0x80;
-		     n--)
+	h = t = n;
+	if (n > XR_RESPONSE)	/* head + tail (#451), each cut on a character */
+	{
+		for (h = XR_RESPONSE / 2; h && ((unsigned char)s[h] & 0xc0) == 0x80;
+		     h--)
 			;
+		for (t = n - XR_RESPONSE / 2;
+		     t < n && ((unsigned char)s[t] & 0xc0) == 0x80; t++)
+			;
+		for (k = h; k < t; k++)
+			cut += ((unsigned char)s[k] & 0xc0) != 0x80;
+	}
+	k = h + (cut ? sizeof "\n…\n" - 1 : 0);
 	if (x->response)
 		d->ch.resheld -= strlen(x->response) + 1;
-	if (!(r = realloc(x->response, n + 1)))
+	if (!(r = realloc(x->response, k + n - t + 1)))
 	{
 		free(x->response);	/* its bytes are off resheld */
 		x->response = NULL;
@@ -5306,7 +5315,10 @@ resp_set(struct xr_claude *d, const char *s, size_t n)
 		return;
 	}
 	x->response = NULL;
-	memcpy(r, s, n);
+	memcpy(r, s, h);
+	memcpy(r + h, "\n…\n", k - h);
+	memcpy(r + k, s + t, n - t);
+	n = k + n - t;
 	r[n] = '\0';
 	while (d->ch.resheld + n + 1 > XR_RESPONSES &&
 	       d->ch.resord + 1 < d->ch.total)
@@ -6037,10 +6049,11 @@ ent_hit(struct xr_entries *e, const char *anchor, uint64_t ord)
 }
 
 /* One entry (3.5): s[0..n) clipped to cap scalars, escaped as --ls-json
-** escapes; dropped, and truncated set, once the object would pass its cap. */
+** escapes, "cut":cut when cut; dropped, and truncated set, once the object
+** would pass its cap. */
 static void
-ent_put(struct xr_entries *e, const char *role, const char *tool,
-        const char *s, size_t n, size_t cap, int err)
+ent_emit(struct xr_entries *e, const char *role, const char *tool,
+         const char *s, size_t n, size_t cap, int err, size_t cut)
 {
 	size_t l = s ? clip(s, n, cap) : 0, tl = tool ? strlen(tool) : 0;
 	size_t qc = (l + tl) * 6 + 128, k;
@@ -6067,6 +6080,8 @@ ent_put(struct xr_entries *e, const char *role, const char *tool,
 	k += dch_json_quote(q + k, qc - k, t);
 	k += (size_t)snprintf(q + k, qc - k, ",\"error\":%s",
 	                      err ? "true" : "false");
+	if (cut)
+		k += (size_t)snprintf(q + k, qc - k, ",\"cut\":%zu", cut);
 	if (e->off >= 0)	/* its record's (#356): a Search hit's offset */
 		k += (size_t)snprintf(q + k, qc - k, ",\"offset\":%lld", e->off);
 	k += (size_t)snprintf(q + k, qc - k, "}");
@@ -6082,6 +6097,43 @@ ent_put(struct xr_entries *e, const char *role, const char *tool,
 	}
 	free(t);
 	free(q);
+}
+
+static void
+ent_put(struct xr_entries *e, const char *role, const char *tool,
+        const char *s, size_t n, size_t cap, int err)
+{
+	ent_emit(e, role, tool, s, n, cap, err, 0);
+}
+
+/* A prose entry (#451): whole up to XR_TEXT_CAP scalars, else its first and
+** last XR_ENT_HALF with a "… N characters cut …" line between. */
+static void
+ent_prose(struct xr_entries *e, const char *role, const char *s, size_t n)
+{
+	size_t k = s && !e->truncated && !e->failed ? scalars(s, n) : 0, h, t;
+	char *b;
+	int ml;
+
+	if (k <= XR_TEXT_CAP)
+	{
+		ent_put(e, role, NULL, s, n, XR_TEXT_CAP, 0);
+		return;
+	}
+	h = clip(s, n, XR_ENT_HALF);
+	t = clip(s, n, k - XR_ENT_HALF);
+	if (!(b = malloc(h + n - t + 64)))
+	{
+		e->failed = 1;
+		return;
+	}
+	memcpy(b, s, h);
+	ml = snprintf(b + h, 64, "\n… %zu characters cut …\n",
+	              k - 2 * XR_ENT_HALF);
+	memcpy(b + h + ml, s + t, n - t);
+	ent_emit(e, role, NULL, b, h + ml + n - t, SIZE_MAX, 0,
+	         k - 2 * XR_ENT_HALF);
+	free(b);
 }
 
 /* An entry of the wanted chapter, on the main thread (a subagent's own
@@ -6303,17 +6355,17 @@ user_text(struct xr_claude *d, const char *agent, char *s, size_t n, int inj)
 	if ((d->rk.hit || d->want) && (u = malloc(n + 1)))
 	{
 		memcpy(u, s, n);
-		ul = unwrap(u, n, XR_TEXT_CAP);
+		ul = unwrap(u, n, XR_REFS_CAP);
 	}
 	xr_title(s, unwrap(s, n, 0), title, sizeof title);	/* s is spent */
 	d->harness = h ? sum : d->peersum;
 	block(d, agent, B_PROMPT, "prompt", title);
 	d->harness = NULL;
-	refs_text(d, u, ul, XR_TEXT_CAP, XR_PROSE);
+	refs_text(d, u, ul, XR_REFS_CAP, XR_PROSE);
 	if (ent_here(d, agent))
 	{
 		d->want->failed |= !u;
-		ent_put(d->want, "user", NULL, u, ul, XR_TEXT_CAP, 0);
+		ent_prose(d->want, "user", u, ul);
 	}
 	free(u);
 }
@@ -6527,9 +6579,9 @@ entry_user(struct xr_claude *d, const struct json_parser *p, const char *ag)
 		    : c >= 0 && p->tok[c].kind == JSON_ARRAY ? texts(p, c, &n)
 		    : NULL;
 		compaction(d, ag, n > 0);
-		refs_text(d, s, n, XR_TEXT_CAP, XR_PROSE);
+		refs_text(d, s, n, XR_REFS_CAP, XR_PROSE);
 		if (n && ent_here(d, ag))
-			ent_put(d->want, "user", NULL, s, n, XR_TEXT_CAP, 0);
+			ent_prose(d->want, "user", s, n);
 		free(s);
 		return;
 	}
@@ -6564,9 +6616,9 @@ entry_assistant(struct xr_claude *d, const struct json_parser *p,
 			block(d, ag, B_STEP, NULL, NULL);
 			if (!ag)
 				resp_set(d, s, n);
-			refs_text(d, s, n, XR_TEXT_CAP, XR_MD);
+			refs_text(d, s, n, XR_REFS_CAP, XR_MD);
 			if (ent_here(d, ag))
-				ent_put(d->want, "assistant", NULL, s, n, XR_TEXT_CAP, 0);
+				ent_prose(d->want, "assistant", s, n);
 		}
 		free(s);
 		return;
@@ -6591,10 +6643,9 @@ entry_assistant(struct xr_claude *d, const struct json_parser *p,
 				block(d, ag, B_STEP, NULL, NULL);
 				if (!ag)
 					resp_set(d, s, n);
-				refs_text(d, s, n, XR_TEXT_CAP, XR_MD);
+				refs_text(d, s, n, XR_REFS_CAP, XR_MD);
 				if (ent_here(d, ag))
-					ent_put(d->want, "assistant", NULL, s, n, XR_TEXT_CAP,
-					        0);
+					ent_prose(d->want, "assistant", s, n);
 			}
 			free(s);
 		}
@@ -6932,10 +6983,9 @@ cx_item(struct xr_claude *d, const struct json_parser *p, int pl)
 				{
 					main_block(d, B_STEP, NULL, NULL);
 					resp_set(d, s, n);
-					refs_text(d, s, n, XR_TEXT_CAP, XR_MD);
+					refs_text(d, s, n, XR_REFS_CAP, XR_MD);
 					if (ent_here(d, NULL))
-						ent_put(d->want, "assistant", NULL, s, n,
-						        XR_TEXT_CAP, 0);
+						ent_prose(d->want, "assistant", s, n);
 				}
 				free(s);
 			}
@@ -6996,10 +7046,10 @@ cx_line(struct xr_claude *d, const struct json_parser *p)
 		/* its summary, as a Claude compact summary's (3.6) */
 		main_block(d, B_PROMPT, "compact", "Conversation compacted");
 		if ((s = k_str(p, pl, A_MESSAGE, &n)))
-			refs_text(d, s, n, XR_TEXT_CAP, XR_PROSE);
+			refs_text(d, s, n, XR_REFS_CAP, XR_PROSE);
 		/* as a Claude compact summary's user entry */
 		if (s && ent_here(d, NULL))
-			ent_put(d->want, "user", NULL, s, n, XR_TEXT_CAP, 0);
+			ent_prose(d->want, "user", s, n);
 		free(s);
 		/* its lead ends here: the prompt after it is a turn of its own */
 		main_block(d, B_STEP, NULL, NULL);
@@ -8855,12 +8905,13 @@ put_auto(FILE *m, const struct xr_chapter *c)
 static void
 put_response(FILE *m, const struct xr_chapter *c)
 {
-	if (!c->response)
+	if (!c || !c->response)
 		return;
 	fputs(",\"response\":", m);
 	xr_put_str(m, c->response);
-	if (c->response_cut)
-		fputs(",\"response_cut\":true", m);
+	if (c->response_cut)	/* the bool stays for older readers (xview) */
+		fprintf(m, ",\"response_cut\":true,\"response_cut_chars\":%zu",
+		        c->response_cut);
 }
 
 /* resp: with the response text (put_response) */

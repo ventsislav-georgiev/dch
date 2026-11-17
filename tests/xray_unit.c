@@ -2512,9 +2512,15 @@ t_responses(void)
 	      !strcmp(resp_of(&c, 3), "main says") && !xr_chapter_at(&c, 3)->tools);
 	CHECK("responses: thinking is never the response",
 	      !strcmp(resp_of(&c, 4), "shown"));
-	ok = strlen(resp_of(&c, 5)) == 2045 && xr_chapter_at(&c, 5)->response_cut &&
-	     !strncmp(resp_of(&c, 5), big, 2045);
-	CHECK("responses: cut at 2048 bytes on a character (2045), cut set", ok);
+	/* #451: head 1024 back to a character (1021), "\n…\n", tail 1024 from
+	** one (big + 1377); the 89 emoji between are cut */
+	ok = strlen(resp_of(&c, 5)) == 1021 + 5 + 1024 &&
+	     xr_chapter_at(&c, 5)->response_cut == 89 &&
+	     !strncmp(resp_of(&c, 5), big, 1021) &&
+	     !strncmp(resp_of(&c, 5) + 1021, "\n\xe2\x80\xa6\n", 5) &&
+	     !strcmp(resp_of(&c, 5) + 1026, big + 1377);
+	CHECK("responses: over 2048 bytes, the first and last 1 KB cut on a "
+	      "character, a \"\\n…\\n\" between, cut 89", ok);
 	CHECK("responses: an uncut one has no cut", !xr_chapter_at(&c, 0)->response_cut);
 	CHECK("responses: diffstat from structuredPatch (+3 -2), else the input "
 	      "(+1 -3; an empty patch is no patch); a failed edit no file; Write "

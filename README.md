@@ -1007,7 +1007,7 @@ it has memories or instruction files:
   turn's tools on one faint line (e.g. `Edit 3 (2 files, +40 -12), Bash 2,
   Read 1`), then the answer wrapped to the width, at most 8 lines, Markdown
   as written. A faint `…` says there is more: the reader has it (the
-  engine keeps the first 2 KB of an answer). A turn still running says
+  engine keeps the first and last 1 KB of an answer over 2 KB). A turn still running says
   `working…`; an answer the size cap left out says `Enter reads it`. `j`
   `k` move item by item. `Enter` reads the prompt in the reader, opened at
   the answer (at the prompt's end when it cannot find it), and `q` comes
@@ -1474,8 +1474,11 @@ The corpus:
   - `response`, `response_offset` and `tools` are what Claude Code's Focus
     view shows of a turn, on a Claude Code or Codex chapter. `response` is
     the turn's last assistant text after its last tool result (thinking and
-    subagent text never), at most 2048 bytes; a cut one adds
-    `response_cut` (`true`). `response_offset` is the byte offset of the
+    subagent text never). Up to 2048 bytes it is whole; a longer one keeps
+    its first and last 1024 bytes, never cut inside a UTF-8 character, with
+    a line holding only `…` between (`head\n…\ntail`, 1.92.0; before, the
+    first 2048 bytes), and adds `response_cut` (`true`) and
+    `response_cut_chars`, the Unicode scalars left out. `response_offset` is the byte offset of the
     line that holds it. A turn still running has neither; its `tools` is
     there. `tools` is one line: the calls per tool, most used first, six
     names then `+N more`; an edit tool (Edit, MultiEdit and Write; Codex's
@@ -1544,9 +1547,10 @@ none; `pre-#831` is the issue `#831`). A ref needs a word boundary on both sides
 Unicode-aware: `#831é` is none. Prompts and assistant text use every rule outside code spans and fences;
 tool input and output, and a shell's ring, use the code rules only (URLs,
 `owner/repo#n`, paths with a line number, commits), so a bare `#831`
-mid-line in output is no ref. Texts are clipped before the scan: 6000 Unicode
-scalars of prose and of a Bash command, 3000 of tool output, 240 per tool
-field. A shell line (rows joined at soft wraps, at most 64 KiB) gives at most
+mid-line in output is no ref. A prompt, an assistant text and a compact
+summary are scanned whole (1.92.0; a line over 1 MiB is not read at all).
+Other texts are clipped before the scan: 6000 Unicode scalars of a notice and
+of a Bash command, 3000 of tool output, 240 per tool field. A shell line (rows joined at soft wraps, at most 64 KiB) gives at most
 128 mentions.
 
 Each entry of `refs` carries `key` (`<shape>:<text>`), `shape`, `text`,
@@ -2297,8 +2301,12 @@ Each entry is `{"role","tool","text","error","offset"}`:
 entry came from, as a `--search` hit's `offset`: the entry of a hit's kind
 with the hit's `offset` holds that hit. A shell's entries, and those of a
 host older than 1.71.0, have no `offset`.
-`text` is cut at 6000 Unicode scalars (3000 for an `output`) and escaped like
-`--ls-json`. The whole object is capped at 1 MiB: entries past the cap are
+A `user` or `assistant` entry's `text` over 6000 Unicode scalars keeps its
+first and last 3000, with this line between them (1.92.0; before, the first
+6000): `… N characters cut …`, where N is the scalars left out as a plain
+integer, the line starting and ending with a newline; the entry also has
+`"cut": N`, absent when nothing was cut. A `tool` entry's `text` is cut at
+6000 scalars, an `output`'s at 3000. `text` is escaped like `--ls-json`. The whole object is capped at 1 MiB: entries past the cap are
 left out and `truncated` is `true`. An ended or History Claude Code session is
 read from its transcript, a live Codex from its rollout. An ended shell, a
 ring that is off or paused, a session with no transcript, and a Codex with

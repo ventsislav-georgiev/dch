@@ -1705,11 +1705,13 @@ def test_chapter():
              {"type": "text", "text": "é" * 7000}]}}])
     rc, o, _ = xray("xr-ch", "--json")
     rc, c, err, _ = chapter("xr-ch", o["chapters"][0]["anchor"])
-    check("chapter: text clipped in scalars: 6000 (prompt, call, reply), "
-          "3000 (output)", rc == 0 and c and [len(e["text"]) for e in
-                                              c["entries"]] ==
-          [6000, 6000, 3000, 6000] and
-          all(set(e["text"]) == {"é"} for e in c["entries"]),
+    # #451: a prompt and a reply keep 3000 + 3000 with the cut line
+    hm = "é" * 3000 + "\n\u2026 1000 characters cut \u2026\n" + "é" * 3000
+    check("chapter: text clipped in scalars: 6000 (call), 3000 (output); "
+          "a prompt and a reply 3000 + 3000 with a cut line, cut 1000",
+          rc == 0 and c and [e["text"] for e in c["entries"]] ==
+          [hm, "é" * 6000, "é" * 3000, hm] and
+          [e.get("cut") for e in c["entries"]] == [1000, None, None, 1000],
           (rc, err, c and [len(e["text"]) for e in c["entries"]]))
     out = "\u0001" * 3000    # 18000 escaped bytes an entry
     put([{"type": "user", "cwd": "/home/demo/proj",
@@ -3300,6 +3302,108 @@ def test_light_379():
         os.unlink(tp)
 
 
+HTSID = "11111111-2222-4333-8444-5555555555f1"
+
+
+def test_long_answer():
+    """#451: a long answer's end is kept. Refs are indexed over the whole
+    text block; a --chapter prose entry past 6000 scalars keeps its first
+    and last 3000 with a "… N characters cut …" line and "cut": N; the
+    --json response past 2048 bytes keeps its first and last 1024, cut on a
+    character, with a "\\n…\\n" between and response_cut_chars."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, HTSID + ".jsonl")
+    short = "Short answer with é and #500."
+    # "€" (3 bytes) straddles byte 1024 and byte n - 1024: a byte cut
+    # there would split it
+    head = "HEADSTART #100 " + "a" * 1008 + "€"
+    tail = "€" + ("detail " * 200 +
+                       "\nNext steps: merge #999 TAILMARK")[-1022:]
+    body = "\n".join("- point %d: detail words detail words" % i
+                     for i in range(160))
+    long_ = head + "\n" + body + "\n" + tail
+    prompt = "PROMPTHEAD " + "q" * 7000 + " #777 PROMPTTAIL"
+    lines = [
+        {"type": "user", "cwd": "/home/demo/proj",
+         "timestamp": "2026-11-10T10:00:00Z",
+         "message": {"content": "short ask"}},
+        {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": short}]}},
+        {"type": "user", "timestamp": "2026-11-10T10:01:00Z",
+         "message": {"content": prompt}},
+        {"type": "assistant", "message": {"content": long_}}]
+    with open(tp, "w") as f:
+        f.write("".join(json.dumps(o) + "\n" for o in lines))
+    history("xr-long", HTSID, cfg)
+    sc = len(long_)
+    b = long_.encode()
+    try:
+        def count(r):
+            x = dch("--xray", "xr-long", "--ref", r, "--json")
+            t = [l["tally"] for l in ref_lines(x.stdout) or [] if "tally" in l]
+            return t[0].get("count") if t else None
+        check("long answer: a ref at the end of an 8 KB answer is indexed "
+              "(--ref #999 count 1)", count("#999") == 1, count("#999"))
+        check("long answer: a ref at the end of a 7000-char prompt is "
+              "indexed (--ref #777 count 1)", count("#777") == 1,
+              count("#777"))
+        rc, o, err = xray("xr-long", "--json")
+        # the Refs tab's order (README): latest mention, then count, then
+        # later in the index; #999 and #100 share their answer's line
+        rs = (o or {}).get("refs", [])
+        keys = [r["key"] for _, r in sorted(
+            enumerate(rs), key=lambda x: (-x[1].get("last_offset", -1),
+                                          -x[1]["count"], -x[0]))]
+        check("long answer: Refs put #999 first, the latest mention",
+              rc == 0 and keys[:2] == ["issue:#999", "issue:#100"] and
+              rs and rs[-1]["key"] == "issue:#999", (keys, err))
+        ch = (o or {}).get("chapters", [])
+        r = ch[1].get("response", "") if len(ch) == 2 else ""
+        want = b[:1023].decode() + "\n…\n" + b[-1022:].decode()
+        check("long answer: --json response is head + tail, cut on a "
+              "character: it starts with the head and holds TAILMARK",
+              r.startswith("HEADSTART #100 ") and r.endswith("TAILMARK") and
+              r == want and "�" not in r and
+              ch[1].get("response_cut") is True and
+              ch[1].get("response_cut_chars") ==
+              len(b[1023:-1022].decode()), (len(r), r[1000:1040],
+                                            ch[1:] and {k: v for k, v in
+                                                        ch[1].items()
+                                                        if k != "response"}))
+        check("long answer: a short response is unchanged, no response_cut",
+              ch and ch[0].get("response") == short and
+              "response_cut" not in ch[0] and
+              "response_cut_chars" not in ch[0], ch[:1])
+        rc, c, err, raw = chapter("xr-long", ch[1]["anchor"]) \
+            if len(ch) == 2 else (1, None, "", "")
+        es = (c or {}).get("entries", [])
+        a = es[1] if len(es) == 2 else {}
+        mark = "\n… %d characters cut …\n" % (sc - 6000)
+        check("long answer: the --chapter entry is the first and last 3000 "
+              "characters with the cut line, and cut: N",
+              a.get("role") == "assistant" and
+              a.get("text") == long_[:3000] + mark + long_[-3000:] and
+              "TAILMARK" in a.get("text", "") and
+              a.get("cut") == sc - 6000, (err, {k: v for k, v in a.items()
+                                                 if k != "text"},
+                                          a.get("text", "")[2990:3040]))
+        u = es[0] if es else {}
+        check("long prompt: the user entry is head + tail too",
+              u.get("text") == prompt[:3000] + "\n… %d characters cut "
+              "…\n" % (len(prompt) - 6000) + prompt[-3000:] and
+              u.get("cut") == len(prompt) - 6000,
+              {k: v for k, v in u.items() if k != "text"})
+        rc, c0, err, raw0 = chapter("xr-long", ch[0]["anchor"]) \
+            if ch else (1, None, "", "")
+        check("short answer: its --chapter entries are unchanged, no cut",
+              c0 and c0["entries"] == [ent("user", "short ask"),
+                                       ent("assistant", short)], c0)
+    finally:
+        os.unlink(tp)
+
+
 def main():
     try:
         test_names()
@@ -3330,6 +3434,7 @@ def main():
         test_ref_middle()
         test_light_377()
         test_light_379()
+        test_long_answer()
     finally:
         shutil.rmtree(T, ignore_errors=True)
     if fails[0]:
