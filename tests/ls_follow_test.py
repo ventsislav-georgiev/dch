@@ -476,13 +476,17 @@ def main():
               rows is not None and d.conns == 1, (s.lines[-2:], d.conns))
         s.stop()
         c0 = d.conns
+        t0 = time.time()
         s = follow("--remote", "--follow", "--hosts", dh,
                    DCH_REMOTE_EVERY_MS="300", DCH_REMOTE_BOX_MS="0")
         # until a stale array and a second dial, 5.5 s at most: a fresh one
         # would come at 2.6 s, inside the first dial's box
-        end = time.time() + 5.5
+        end = t0 + 5.5
         while time.time() < end and not (d.conns - c0 >= 2 and any(
                 rem(json.loads(ln), "d") == {"d1": True} for ln in s.lines)):
+            s.line(0.1)
+        # then read past the slow fake's answer (2.6 s) plus a margin
+        while time.time() < min(t0 + 2.6 + 0.8, end):
             s.line(0.1)
         while s.line(0.1):
             pass
