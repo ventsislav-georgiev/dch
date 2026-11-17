@@ -676,8 +676,10 @@ def test_follow_fast():
               f0.get("why") == "range" and offs and
               min(offs) >= size - (32 << 20) and "issue:#72" in keys0 and
               "issue:#71" not in keys0, (ks[:6], f0.get("why"), keys0))
+        # a wall-clock bound, skipped under sanitizers (1.7 s on CI's
+        # ASan runner); the window rows above hold there too
         check("fast: the first line came in under 0.5 s (%.3f s)" % first,
-              first < 0.5, first)
+              SANITIZED or first < 0.5, first)
         check("fast: then reset full and the one-shot --json snapshot, "
               "exactly one pair", ks[:3] == ["snapshot", "reset", "snapshot"]
               and objs[1] == {"schema": 1, "reset": {"why": "full"}} and
