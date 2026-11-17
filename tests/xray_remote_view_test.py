@@ -95,7 +95,7 @@ def test_view():
         check("hostile host text: the chapter title's OSC, BEL, U+202E and "
               "U+061C show as ?", v.wait(b"o/r#7 ?]0;pwned? evil?title al?m"),
               v.out[-600:])
-        v.key(b"\033[Z\033[Z")  # back to Search, then Refs (#291)
+        v.key(b"\033[Z\033[Z", want=b"[Refs")  # back to Search, then Refs (#291)
         check("Refs: the host's keys", v.wait(b"#831") and
               v.wait(b"PROJ-5") and v.wait(b"o/r#7"), v.out[-600:])
         v.key(b"\033[B", 0.3)  # #831: PROJ-5, said last, is on top (#262)
@@ -129,7 +129,7 @@ def test_view():
               v.wait(b"xv-cl has ended: no session to open", start=mark) and
               v.reap() is None, v.out[mark:])
         v.key(b"\033", 0.5)
-        v.key(b"\t\t")  # Refs, Search, then Prompts: Tab wraps (#291)
+        v.key(b"\t\t", want=b"[Prompts")  # Refs, Search, then Prompts: Tab wraps (#291)
         mark = len(v.out)
         v.key(b"\r", 0.05)
         check("reader: Enter reads the newest chapter from the host",
@@ -145,7 +145,7 @@ def test_view():
               v.wait(b"gh issue view 831", start=mark), v.out[mark:])
         host_ran(v, n0["--xray"] + 8, "['s chapter", late)
         mark = len(v.out)
-        v.key(b"q")
+        v.key(b"q", 0.05)
         check("reader: q goes back to the list",
               v.wait(b"Prompts 2", start=mark), v.out[mark:])
         mark = len(v.out)
@@ -153,7 +153,7 @@ def test_view():
         check("o on the ended srv:xv-cl: said, the view stays",
               v.wait(b"xv-cl has ended: no session to open", start=mark) and
               v.reap() is None, v.out[mark:])
-        v.key(b"q")
+        v.key(b"q", 0)
         rc = v.exit()
         check("quit: q exits 0 and leaves the alternate screen",
               rc == 0 and RESTORE in v.out[-60:], (rc, v.out[-80:]))
@@ -184,7 +184,7 @@ def test_lookup():
         v.wait(b"Prompts 2")
         v.pump(0.5)
         mark = len(v.out)
-        v.key(b"/OQ-32", 1.0)
+        v.key(b"/OQ-32", 1.0, want=b"No match")
         text = shown(v, mark)
         check("lookup #263: a ref no row has: the empty line and the footer "
               "name ^R", "No match: ^R looks it up" in text and
@@ -199,7 +199,7 @@ def test_lookup():
         v.key(b"\033", 0.5)
         v.key(b"/\x15", 0.3)
         mark = len(v.out)
-        v.key(b"#831\x12", 1.0)
+        v.key(b"#831\x12", 0.05)
         check("lookup #263: #831, a chapter title's: ^R opens its card, "
               "not the chapter", v.wait(b"#831  light", start=mark) and
               v.wait(b"Definition", start=mark), v.out[mark:])
@@ -208,7 +208,7 @@ def test_lookup():
         until(lambda: v.pump(0.05) or re.search(
             rb"Mentions: this session \D*[1-9]", v.out[mark:]), 30)
         mark = len(v.out)
-        v.key(b"\r", 1.0)
+        v.key(b"\r", 0.05)
         rd = v.wait(b"You", start=mark)
         host_ran(v, n0 + 6, "chapter", late)
         mark = len(v.out)
@@ -217,7 +217,7 @@ def test_lookup():
               "host, Esc back to the card", rd and
               v.wait(b"#831  light", start=mark), v.out[mark:])
         v.key(b"\033", 0.5)
-        v.key(b"q")
+        v.key(b"q", 0)
         v.exit()
     finally:
         v.close()
@@ -236,10 +236,10 @@ def test_small_card():
     v = Pty([DCH, "--xray", "srv:xv-cl"])
     try:
         v.wait(b"Prompts 2")
-        v.key(b"\033[Z\033[Z")
+        v.key(b"\033[Z\033[Z", want=b"[Refs")
         v.wait(b"#831")
         mark = len(v.out)
-        v.key(b"\r")
+        v.key(b"\r", 0.05)
         check("small card: srv:xv-cl's #831 card opens with its mentions",
               v.wait(b"Mentions: this session ", start=mark), v.out[mark:])
         settle(v)   # #376: under load the mention arrived after Enter
@@ -257,7 +257,7 @@ def test_small_card():
               v.reap() is None and b"You" in v.out[mark:],
               (v.rc, small, ctls("--xray") - n0, refused(),
                v.out[mark:][-600:]))
-        v.key(b"qqq")
+        v.key(b"qqq", 0)
         check("small card: q, q, q exits 0", v.exit() == 0, v.out[-80:])
     finally:
         v.close()
@@ -344,7 +344,7 @@ def test_order():
         check("card #304: srv:xv-o2, several 1 MiB windows: newest first, "
               "no zigzag, the full list without the cut mark",
               got == want and not cut, (got, cut))
-        v.key(b"jj", 0.5)
+        v.key(b"jj", 0.05)
         full_scan(v)
         got, sel = card_rows(v)
         # f reads the project: this session's lines first, then the others'
@@ -395,7 +395,7 @@ def test_on_screen():
               "Chapters", b"Prompts" not in v.out and
               b"Chapters" not in v.out, v.out[-600:])
         mark = len(v.out)
-        v.key(b"\t", 2.0)
+        v.key(b"\t", 2.0 if lite else 0.05)
         if lite:
             check("lite: Refs has no group line (no mirror)",
                   v.wait(b"[Refs", start=mark) and
@@ -415,7 +415,7 @@ def test_on_screen():
             check("Refs #294: Enter opens the card of o/r#41",
                   v.wait(b"o/r#41  light", start=mark) and
                   v.wait(b"Mentions", start=mark), v.out[mark:])
-        v.key(b"\003")
+        v.key(b"\003", 0)
         check("srv:xv-sh: Ctrl-C quits with 0", v.exit() == 0, v.out[-80:])
     finally:
         v.close()
@@ -448,7 +448,7 @@ def test_open():
         check("o: the view left as q leaves it, then the host attaches "
               "xv-sh for us", attached() and RESTORE in v.out[mark:] and
               v.reap() is None, (v.out[mark:][-400:], open(SLOG).read()[-400:]))
-        v.key(b"\x1c", 0.5)
+        v.key(b"\x1c", 0)
         check("o: a real attach, the detach key ends it", v.exit(5) == 0,
               v.out[-200:])
     finally:
@@ -571,7 +571,7 @@ def test_hostile():
               "its stderr is never drawn", "on screen now" not in text and
               b"pwned? sur" not in v.out and b"No screen" not in v.out,
               text[-600:])
-        v.key(b"q")
+        v.key(b"q", 0)
         rc = v.exit()
         check("hostile: q exits 0", rc == 0, (rc, v.out[-80:]))
         bad = [b for b in (b"\x1b]0;pwned", b"\x07 a", b"\x07bel",
@@ -615,7 +615,7 @@ def test_responses():
         check("Responses, remote: q back to the item",
               v.wait(b"Responses 2", start=mark) and
               "second prompt about PROJ-5" in head(v), head(v))
-        v.key(b"q")
+        v.key(b"q", 0)
         check("Responses, remote: q exits 0", v.exit() == 0, v.out[-80:])
     finally:
         v.close()
@@ -634,8 +634,8 @@ def test_search():
         v.wait(b"Prompts 2")
         v.pump(0.5)
         mark = len(v.out)
-        v.key(b"\033[Z", 0.5)   # Shift-Tab: Prompts back to Search
-        v.key(b"PROJ-5\r", 1.0)
+        v.key(b"\033[Z", 0.5, want=b"[Search")   # Shift-Tab: Prompts back to Search
+        v.key(b"PROJ-5\r", 0.05)
         ok = tabbar(v, "Search 2")
         v.pump(0.3)
         h = shits(v)
@@ -657,7 +657,7 @@ def test_search():
         v.key(b"q", 1.0)
         check("Search, remote: q back to the hit",
               tabbar(v, "Search 2") and "Bash" in head(v), head(v))
-        v.key(b"q")
+        v.key(b"q", 0)
         check("Search, remote: q exits 0", v.exit() == 0, v.out[-80:])
         bad = [b for b in (b"\033]0;pwned", b"\007 evil", b"\xe2\x80\xae")
                if b in v.out]
@@ -682,7 +682,7 @@ def test_picker(port):
               v.wait(b"xv-sh", 15), v.out[-600:])
         v.pump(1.0)
         mark = len(v.out)
-        v.key(b"x", 1.0)
+        v.key(b"x", 0.05)
         check("picker: x on the remote row opens its view",
               v.wait(b"X-ray  srv:xv-sh", start=mark) and
               v.wait(b"Commands", start=mark), v.out[mark:][-600:])
@@ -713,8 +713,8 @@ def test_picker(port):
         check("picker: x on the remote History row opens its record's view",
               v.wait(b"X-ray  srv:xv-cl", start=mark) and
               v.wait(b"Prompts 2", start=mark), v.out[mark:][-600:])
-        v.key(b"q", 1.0)
-        v.key(b"\033")
+        v.key(b"q", 1.0, want=b"Sessions")
+        v.key(b"\033", 0)
         check("picker: Esc quits it", v.exit() is not None, v.out[-80:])
     finally:
         v.close()
@@ -748,7 +748,7 @@ def same_attach(what, v, keys, remote):
     check("same name: %s attaches the %s srv:xv-sh" %
           (what, "host's" if remote else "local"), ok and v.reap() is None,
           (host_attaches() - n0, v.rc, v.out[mark:][-300:]))
-    v.key(b"\x1c", 0.5)
+    v.key(b"\x1c", 0)
     check("same name: %s: a real attach, the detach key ends it" % what,
           v.exit(5) == 0, v.out[-200:])
 

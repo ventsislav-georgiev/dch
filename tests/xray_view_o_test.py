@@ -79,7 +79,7 @@ def test_xray_ended():
               v.wait(b"X-ray  h:s") and v.wait(b"o open session"),
               v.out[-600:])
         ended_o("dch --xray h:s", v, host)
-        v.key(b"q")
+        v.key(b"q", 0)
         rc = v.exit()
         check("dch --xray h:s: q exits 0", rc == 0, (rc, v.out[-200:]))
     finally:
@@ -97,7 +97,7 @@ def test_picker_ended():
         v.wait(b"h:s", 15)
         v.pump(1.0)
         mark = len(v.out)
-        v.key(b"x", 1.0)
+        v.key(b"x", 0.05)
         check("picker: x on the local h:s row opens its view, o offered",
               v.wait(b"X-ray  h:s", start=mark) and
               v.wait(b"o open session", start=mark), v.out[mark:][-600:])
@@ -107,7 +107,7 @@ def test_picker_ended():
         check("picker: q in the view returns to the picker",
               v.reap() is None and v.wait(b"Sessions", start=mark),
               v.out[mark:][-600:])
-        v.key(b"\033")
+        v.key(b"\033", 0)
         check("picker: Esc quits it", v.exit() is not None, v.out[-80:])
     finally:
         v.close()

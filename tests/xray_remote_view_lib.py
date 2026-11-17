@@ -126,12 +126,25 @@ class Pty:
                 break
         return what in self.out[start:]
 
-    def key(self, b, settle=0.3):
+    def key(self, b, settle=0.3, want=None):
+        """Without want, a fixed settle. With want: until want is drawn since
+        the key (a remote answer comes after a round trip, so not on quiet
+        alone), then until 0.1 s of quiet, at most settle more (#393)."""
+        mark = len(self.out)
         try:
             os.write(self.fd, b)
         except OSError:
             pass    # it has exited: the checks say so
-        self.pump(settle)
+        if want is None:
+            self.pump(settle)
+            return
+        self.wait(want, 10, start=mark)
+        end = time.time() + settle
+        while self.rc is None and time.time() < end:
+            n = len(self.out)
+            self.pump(min(0.1, end - time.time()))
+            if len(self.out) == n:
+                return
 
     def resize(self, rows, cols):
         fcntl.ioctl(self.fd, termios.TIOCSWINSZ,

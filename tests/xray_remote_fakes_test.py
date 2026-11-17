@@ -212,7 +212,7 @@ def test_link_drop():
               stop in frame_ and b"No screen" not in frame_ and
               frame_.count(b"unreachable") ==
               frame_.count(stop + b"unreachable"), frame_[-600:])
-        v.key(b"q")
+        v.key(b"q", 0)
         check("link drop: q exits 0", v.exit() == 0, v.out[-80:])
     finally:
         v.close()
@@ -241,7 +241,7 @@ def test_responses_fake():
               "responses yet, not an older host (LOW-V19)",
               ok and b"older than" not in v.out[mark:], v.out[mark:][-600:])
         v.key(b"j\r", 0.5)
-        v.key(b"q")
+        v.key(b"q", 0)
         check("Responses, an older host: keys do no harm, q exits 0",
               v.exit() == 0, v.out[-80:])
     finally:
@@ -274,8 +274,8 @@ def test_responses_fake():
         check("Responses: Enter on it reads it from the host",
               v.wait(b"THE-DROPPED-ANSWER", start=mark) and
               v.wait(b"1 of 2", start=mark), v.out[mark:][-600:])
-        v.key(b"q", 0.5)
-        v.key(b"q")
+        v.key(b"q", 0.5, want=b"Responses 2")
+        v.key(b"q", 0)
         check("Responses, a host with the fields: q, q exits 0",
               v.exit() == 0, v.out[-80:])
     finally:
@@ -301,7 +301,7 @@ def test_search_fake():
         v.wait(b"Prompts 1")
         v.pump(0.3)
         mark = len(v.out)
-        v.key(b"\033[Z", 0.5)
+        v.key(b"\033[Z", 0.5, want=b"[Search")
         v.key(b"needle\r", 1.0)
         check("Search, an older host: the list says its dch does not know "
               "--search", v.wait(b"dch: q: the host's dch does not know "
@@ -309,7 +309,7 @@ def test_search_fake():
               not re.search(r"Search \d", screen_rows(v).get(2, "")),
               v.out[mark:][-600:])
         v.key(b"j\r", 0.5)
-        v.key(b"q")
+        v.key(b"q", 0)
         check("Search, an older host: keys do no harm, q exits 0",
               v.exit() == 0, v.out[-80:])
     finally:
@@ -335,8 +335,8 @@ def test_search_fake():
     try:
         v.wait(b"Prompts 1")
         v.pump(0.3)
-        v.key(b"\033[Z", 0.5)
-        v.key(b"needle\r", 1.0)
+        v.key(b"\033[Z", 0.5, want=b"[Search")
+        v.key(b"needle\r", 0.05)
         ok = tabbar(v, "Search 2")
         v.pump(0.3)
         hs, text = shits(v), rows_now(v)
@@ -364,7 +364,7 @@ def test_search_fake():
               v.wait(b"1 of 1", start=mark) and
               v.wait(b"grep NEEDLE", start=mark), v.out[mark:][-600:])
         v.key(b"q", 0.5)
-        v.key(b"q")
+        v.key(b"q", 0)
         check("Search, a host's answer: q, q exits 0", v.exit() == 0,
               v.out[-80:])
     finally:
@@ -420,7 +420,7 @@ def test_tasks(port):
     v = Pty([DCH, "--xray", "srv:xv-tk"])
     try:
         ok = tabbar(v, "Tasks 1")
-        v.key(b"\033[Z", 0.8)
+        v.key(b"\033[Z", 0.8, want=b"[Tasks")
         r = trows(v)
         check("Tasks, remote: the host's list, the tab last with its open "
               "count; Pending, then Done, each row with its age",
@@ -432,12 +432,12 @@ def test_tasks(port):
         check("Tasks, remote: Enter reads the turn that last changed the "
               "task from the host, 2 of 2", v.wait(b"2 of 2", start=mark) and
               v.wait(b"TaskUpdate", start=mark), v.out[mark:][-600:])
-        v.key(b"q", 1.0)
+        v.key(b"q", 1.0, want=b"Ship the parser")
         check("Tasks, remote: q back to the same task",
               "Ship the parser" in head(v), head(v))
         # q quits: every query sent first, the other list too (#374)
         host_ran(v, n0 + 4, "follow, task list, memory list, chapter", late)
-        v.key(b"q")
+        v.key(b"q", 0)
         check("Tasks, remote: q exits 0", v.exit() == 0, v.out[-80:])
     finally:
         v.close()
@@ -479,7 +479,7 @@ def test_tasks_fake():
         check("Tasks, an older host: no Tasks tab, nothing said, Tab never "
               "lands on one", all("Tasks" not in t for t in tabs) and
               b"does not know --tasks" not in v.out, tabs)
-        v.key(b"q")
+        v.key(b"q", 0)
         check("Tasks, an older host: q exits 0", v.exit() == 0, v.out[-80:])
     finally:
         v.close()
@@ -514,7 +514,7 @@ def test_tasks_fake():
     v = Pty([DCH, "--xray", "q:fk"])
     try:
         ok = tabbar(v, "Tasks 2")
-        v.key(b"\033[Z", 0.5)
+        v.key(b"\033[Z", 0.5, want=b"[Tasks")
         v.key(b"j", 0.3)
         r = trows(v)
         check("Tasks, a host's answer: the tab with its first part's rows, "
@@ -544,7 +544,7 @@ def test_tasks_fake():
               ["In progress 1", "\u25b6 a1 Running the build now"] and
               "p2" in head(v), (head(v), r))
         mark = len(v.out)
-        v.key(b"k\r", 0.8)
+        v.key(b"k\r", 0.8, want=b"to read")
         text = "\n".join(trows(v))
         check("Tasks, a host's answer: Enter on a task with no turn opens its "
               "card: title, status and label, note, times, blocked by, "
@@ -555,7 +555,7 @@ def test_tasks_fake():
               "Blocked by 9, 12" in text and "Group infra" in text and
               "URL https://example.invalid/1" in text and
               "Turn none to read" in text, text)
-        v.key(b"q", 0.8)
+        v.key(b"q", 0.8, want=b"Parked thing")
         check("Tasks, a host's answer: q back to the same task",
               "Parked thing" in head(v), head(v))
         mark = len(v.out)
@@ -563,8 +563,8 @@ def test_tasks_fake():
         check("Tasks, a host's answer: Enter on the active task reads its "
               "turn from the host", v.wait(b"1 of 1", start=mark) and
               v.wait(b"status: in_progress", start=mark), v.out[mark:][-600:])
-        v.key(b"q", 0.5)
-        v.key(b"q")
+        v.key(b"q", 0.5, want=b"Parked thing")
+        v.key(b"q", 0)
         check("Tasks, a host's answer: q exits 0", v.exit() == 0,
               v.out[-80:])
     finally:
@@ -585,7 +585,7 @@ def test_tasks_fake():
     try:
         ok = tabbar(v, "Tasks 50000", 30)
         dt = time.time() - t0
-        v.key(b"\033[Z", 0.5)
+        v.key(b"\033[Z", 0.5, want=b"[Tasks")
         mark = len(v.out)
         s = time.time()
         v.key(b"G", 0)
@@ -596,7 +596,7 @@ def test_tasks_fake():
         check("Tasks, 50000: the done line's warn under the rows (#321)",
               "tasks_command stopped early: 50000 rows" in trows(v),
               trows(v))
-        v.key(b"q")
+        v.key(b"q", 0)
         check("Tasks, 50000: q exits 0", v.exit() == 0, v.out[-80:])
     finally:
         v.close()
@@ -645,7 +645,7 @@ def test_memory(port):
     v = Pty([DCH, "--xray", "srv:xv-me"])
     try:
         ok = tabbar(v, "Memory 2")
-        v.key(b"\033[Z", 0.8)
+        v.key(b"\033[Z", 0.8, want=b"[Memory")
         r = [re.sub(r" \d+[mhd]$", "", x).lstrip("\u258c ") for x in
              trows(v)]
         check("Memory, remote: the host's list, the tab last; This session "
@@ -668,12 +668,12 @@ def test_memory(port):
         check("Memory, remote: q back to the card", v.wait(b"Memory alpha",
                                                            start=mark),
               v.out[mark:][-600:])
-        v.key(b"q", 0.8)
+        v.key(b"q", 0.8, want=b"alpha")
         check("Memory, remote: q back to the row", "alpha" in head(v),
               head(v))
         # q quits: every query sent first, the other list too (#374)
         host_ran(v, n0 + 4, "follow, task list, memory list, chapter", late)
-        v.key(b"q")
+        v.key(b"q", 0)
         check("Memory, remote: q exits 0", v.exit() == 0, v.out[-80:])
     finally:
         v.close()
@@ -707,7 +707,7 @@ def test_memory_fake():
               "Memory" not in screen_rows(v).get(2, "") and
               b"does not know --memory" not in v.out,
               screen_rows(v).get(2, ""))
-        v.key(b"q")
+        v.key(b"q", 0)
         check("Memory, an older host: q exits 0", v.exit() == 0, v.out[-80:])
     finally:
         v.close()
@@ -730,7 +730,7 @@ def test_memory_fake():
     v = Pty([DCH, "--xray", "q:fk"])
     try:
         ok = tabbar(v, "Memory 2")
-        v.key(b"\033[Z", 0.8)
+        v.key(b"\033[Z", 0.8, want=b"[Memory")
         r = [x.lstrip("\u258c ") for x in trows(v)]
         check("Memory, a command's answer: This session, the list's title "
               "as the group's name, a free updated with no age, a kind of "
@@ -747,7 +747,7 @@ def test_memory_fake():
               v.wait(b"FIRST", start=mark), v.out[mark:][-600:])
         v.key(b"q", 0.5)
         v.key(b"q", 0.5)
-        v.key(b"q")
+        v.key(b"q", 0)
         v.exit()
     finally:
         v.close()
@@ -761,11 +761,11 @@ def test_memory_fake():
     v = Pty([DCH, "--xray", "q:fk"])
     try:
         ok = tabbar(v, "Memory 1")
-        v.key(b"\033[Z", 0.8)
+        v.key(b"\033[Z", 0.8, want=b"[Memory")
         r = trows(v)
         check("Memory, a header's warn under the rows", ok and
               "memory_command failed: exit 3" in r, r)
-        v.key(b"q")
+        v.key(b"q", 0)
         v.exit()
     finally:
         v.close()
@@ -808,7 +808,7 @@ def test_memory_fake():
               not any("big 1099" in x for x in trows(v)), trows(v))
         v.key(b"\033", 0.3)
         v.key(b"\033", 0.3)
-        v.key(b"q")
+        v.key(b"q", 0)
         check("Memory, 1100 texts: q exits 0", v.exit() == 0, v.out[-80:])
     finally:
         v.close()
@@ -845,7 +845,7 @@ def test_turn_drop():
               "of 2", ok and b"2 of 2" in frame_ and b"SECOND-TEXT" in frame_,
               (v.out[mark:][-600:], frame_[-600:]))
         v.key(b"q")
-        v.key(b"q")
+        v.key(b"q", 0)
         check("turn drop: q, q exits 0", v.exit() == 0, v.out[-80:])
     finally:
         v.close()
@@ -869,7 +869,7 @@ def fail_case(what, port, want, line, prefix=False):
         v.key(b"\t")
         check("%s: other keys do nothing" % what, v.reap() is None and
               b"Prompts" not in v.out[mark:], v.out[mark:])
-        v.key(b"q")
+        v.key(b"q", 0)
         rc = v.exit()
         i = v.out.rfind(line.encode())
         check("%s: q leaves it with exit %d, the line on stderr after the "
