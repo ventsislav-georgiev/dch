@@ -341,9 +341,13 @@ def test_order():
     try:
         got, _ = card_rows(v)
         cut = any("(f for more)" in r for r in screen_rows(v).values())
+        # a slow (sanitizer) runner can spend the 300 ms budget before the
+        # oldest windows: a cut keeps a newest-first prefix and says so (#377)
         check("card #304: srv:xv-o2, several 1 MiB windows: newest first, "
-              "no zigzag, the full list without the cut mark",
-              got == want and not cut, (got, cut))
+              "no zigzag; a short list only with the card's cut mark",
+              (got == want and not cut) or
+              (len(got) >= 4 and got == want[:len(got)] and cut),
+              (got, cut))
         v.key(b"jj", 0.05)
         full_scan(v)
         got, sel = card_rows(v)
