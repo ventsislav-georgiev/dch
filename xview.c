@@ -4061,13 +4061,15 @@ xv_peerfile(char *out, size_t sz, int create)
 static int
 xv_peerload(void)
 {
-	char p[PATH_MAX], b[32];
+	char p[PATH_MAX], b[32], *s;
 	struct stat st;
 	ssize_t n;
 	int fd;
 
-	/* a FIFO or a symlink there is the default, not a hang (LOW-AV2) */
-	if (xv_peerfile(p, sizeof p, 0) < 0 ||
+	/* a FIFO or a symlink there is the default, not a hang (LOW-AV2); a
+	** dch/ others can write to is not believed either (LOW-VW1) */
+	if (xv_peerfile(p, sizeof p, 0) < 0 || !(s = strrchr(p, '/')) ||
+	    (*s = '\0', dch_dir_private(p) < 0) || (*s = '/') != '/' ||
 	    (fd = open(p, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)) < 0)
 		return 1;
 	n = fstat(fd, &st) == 0 && S_ISREG(st.st_mode)
@@ -4095,7 +4097,7 @@ xv_peersave(int hide)
 
 	if (xv_peerfile(p, sizeof p, 1) < 0)
 		return !p[0] ? 0 : strlen(p) >= sizeof p - 1 ? -2 : -1;
-	if (snprintf(t, sizeof t, "%s.%ld", p, (long)getpid()) >= (int)sizeof t)
+	if (snprintf(t, sizeof t, "%s.%ld", p, (long)getpid()) >= PATH_MAX)
 		return -2;
 	snprintf(d, sizeof d, "%s", p);
 	if (!(s = strrchr(d, '/')))

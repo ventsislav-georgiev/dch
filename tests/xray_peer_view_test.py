@@ -422,6 +422,18 @@ def test_note():
     check("#418 VA4: 24 columns: the reason fits",
           "a not saved: dir unsafe" in s, s)
     state(None)
+    # LOW-VW1: a planted hide_agents=0 under an unsafe dch/ is not obeyed
+    state("hide_agents=0\n")
+    os.chmod(dd, 0o777)
+    try:
+        r = shown(None)
+    finally:
+        os.chmod(dd, 0o700)
+    check("#424 VW1: 0777 dch/: planted hide_agents=0 ignored, hidden",
+          r == 0, r)
+    check("#424 VW1: private dch/: the same file is obeyed",
+          shown(None) == 1)
+    state(None)
 
 
 def test_no_peer():

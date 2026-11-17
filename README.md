@@ -971,8 +971,8 @@ it has memories or instruction files:
   `$XDG_STATE_HOME/dch/xray-view`, `~/.local/state/dch/xray-view` when
   `XDG_STATE_HOME` is unset or relative: one line, `hide_agents=0` or `1`;
   anything else, or a file that is not a regular file, means hidden; dch
-  keeps the choice only while `dch` and `dch/sessions` there are yours and
-  not group or other writable; else, or when something is in the way of
+  reads and keeps the choice only while `dch` and `dch/sessions` there are
+  yours and not group or other writable (when not, the file is ignored: hidden); else, or when something is in the way of
   its temp file, the footer says once "a not saved: " and the reason), the tab counts leave them out, and the footer says how many;
   with `n` and `a` both off only your own prompts are left. A host whose dch
   predates `peer` sends none: no row is marked as an agent's and `a` hides

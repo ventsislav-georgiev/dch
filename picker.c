@@ -568,21 +568,36 @@ void
 pk_txtto(const char *s, int lim)
 {
 	unsigned u, prev;
-	const char *e, *q;
-	int l, w, cw;
+	const char *e, *q, *s0 = s;
+	int l, w, cw, nri, join;
 
 	if (lim > pk_w)
 		lim = pk_w;
 	while (*s)
 	{
-		for (e = s, w = 0, prev = 0; *e; e += l)
+		/* a unit wider than the space at the start of a cut is cut per
+		** character: ZWJ joins off (NIT-VW4) */
+		for (join = 1;; join = 0)
 		{
-			u = ap_cp(e, &l);
-			cw = pk_cw(u);
-			if (e != s && cw && prev != 0x200D)
+			for (e = s, w = 0, prev = 0, nri = 0; *e; e += l)
+			{
+				u = ap_cp(e, &l);
+				cw = pk_cw(u);
+				if (u >= 0x1f1e6 && u <= 0x1f1ff)
+					nri++;
+				/* zero-width, after a ZWJ, a skin tone, the 2nd
+				** of a flag pair stay with the character */
+				if (e != s && cw && !(join && prev == 0x200D) &&
+				    !(u >= 0x1f3fb && u <= 0x1f3ff) &&
+				    !(u >= 0x1f1e6 && u <= 0x1f1ff &&
+				      prev >= 0x1f1e6 && prev <= 0x1f1ff &&
+				      nri % 2 == 0))
+					break;
+				w += cw;
+				prev = u;
+			}
+			if (!(join && s == s0 && pk_col + w > lim))
 				break;
-			w += cw;
-			prev = u;
 		}
 		if (pk_col + w > lim)
 			break;
@@ -591,6 +606,8 @@ pk_txtto(const char *s, int lim)
 			unsigned char c = (unsigned char)*q;
 
 			u = ap_cp(q, &l);
+			if (!join && u == 0x200D)
+				continue;	/* a cut chain: no dangling ZWJ */
 			if (u < 0x20 || (u >= 0x7f && u < 0xa0) ||
 			    (c >= 0x80 && l == 1) || pk_bidi(u))
 				pk_rawn("?", 1);

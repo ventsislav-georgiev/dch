@@ -953,11 +953,12 @@ remembered for every X-ray view in the file
 .I ~/.local/state/dch/xray-view
 when XDG_STATE_HOME is unset or relative: one line, hide_agents=0 or 1;
 anything else, or a file that is not a regular file, means hidden; the
-choice is kept only while
+choice is read and kept only while
 .I dch
 and
 .I dch/sessions
-there are the user's and not group or other writable; else, or when
+there are the user's and not group or other writable (when not, the file is
+ignored: hidden); else, or when
 something is in the way of its temp file, the footer says once "a not saved:"
 and the reason), the tab counts leaving
 them out, the footer saying how many; with
