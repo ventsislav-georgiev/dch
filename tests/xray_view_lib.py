@@ -221,6 +221,7 @@ class Pty:
 
     def __init__(self, argv, rows=30, cols=100, env=None):
         self.out = b""
+        self.eof = False
         self.rc = None
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
@@ -245,6 +246,7 @@ class Pty:
             except OSError:
                 b = b""
             if not b:
+                self.eof = True
                 self.reap()
                 return
             self.out += b
@@ -291,7 +293,10 @@ class Pty:
         end = time.time() + secs
         while self.reap() is None and time.time() < end:
             self.pump(0.1)
-        self.pump(0.1)
+        # the child's last write can still sit in the master (macOS): read to EOF/EIO
+        end = time.time() + 2.0
+        while not self.eof and time.time() < end:
+            self.pump(0.1)
         return self.rc
 
     def close(self):

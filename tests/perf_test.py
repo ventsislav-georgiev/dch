@@ -23,8 +23,10 @@ DCH = os.environ.get("DCH", os.path.join(HERE, "..", "dch"))
 
 CONNECT_MEAN_MS = 1.0
 CONNECT_P99_MS = 5.0
-SPAWN_BUDGET_S = 1.0
-ATTACH_BUDGET_S = 1.0
+# ASan (DCH_TEST_NO_BUDGET) saw 1.05 s for a spawn on a CI runner: 10x
+SLOW = 10.0 if os.environ.get("DCH_TEST_NO_BUDGET") else 1.0
+SPAWN_BUDGET_S = SLOW
+ATTACH_BUDGET_S = SLOW
 N = 2000
 
 
