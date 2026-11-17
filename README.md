@@ -1154,7 +1154,9 @@ not clear X-ray; run `clear`".
 | `↑` `↓` / `j` `k`, `PgUp` `PgDn`, `g` `G` | move | move / scroll; reader: at an end, again for the next / previous prompt |
 | `]` `[` | | reader: the next / previous prompt |
 | `Enter` | read the prompt (Responses: at its answer; Search: at the hit; Tasks: the one that last changed the task, or its card) / open the card (Refs, Memory); Search, typing: search | card: read the mention's prompt; Memory: the prompt that wrote or loaded it |
-| `/` | filter; Search: type the text to search | |
+| `/` | filter; Search: type the text to search; Prompts, Responses: a bare number (`/5` `Enter`) selects that prompt, so `Enter` reads it | reader: find in its text (case folded, the matches stand out); `Enter` goes to the first match below the top line |
+| `n` `N` | | reader, after `/`: the next / previous match |
+| `r` | Responses: the refs in the selected item's lines, the lowest first | reader: the refs in the lines shown, the lowest first ("no refs in view" when none); `j` `k` move, `Enter` opens the card, `q` there comes back to the reader at the same line, `q` or `Esc` closes the list |
 | `Ctrl-R` | with a ref typed after `/`: open its card, a row for it or not, its kind hidden or not; other words: search them on Search | |
 | `a` | Refs: show / hide the files, commits and URLs | |
 | `t` | Refs: show / hide the temp files | |
@@ -1163,7 +1165,7 @@ not clear X-ray; run `clear`".
 | `o` | Prompts, Responses, Search, Tasks, Memory: attach to the session (in the chord: back to it) | card, reader: the same |
 | `f` `p` `y` | | card: full scan, other projects / this project (`p` was `o` before 1.61.0), copy |
 | `q` | quit | back |
-| `Esc` | clear the filter, else quit; Search, typing: stop typing, the last results kept | back |
+| `Esc` | clear the filter, else quit; Search, typing: stop typing, the last results kept | back; reader, after `/`: clear the find |
 | `Ctrl-C` `Ctrl-D` | quit | quit |
 
 **While attached**, press the detach key (`Ctrl-\`) and then `x` within the
