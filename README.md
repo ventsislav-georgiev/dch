@@ -949,7 +949,7 @@ it has memories or instruction files:
   once you moved down, as on Responses. `/` filters.
   `Enter` opens the prompt read-only with everything up to the next one
   (prompt, replies, tool calls, output), scrollable. A long answer
-  (over 6000 characters) is kept as its first and last 3000, with a faint
+  (over 9000 characters) is kept as its first 6000 and last 3000, with a faint
   `… N characters cut …` line between; `G` reaches the tail.
   The reader reads on: its header says which prompt it is on (`3 of 12`,
   the list's number) and its title. A scroll key at the prompt's end (or

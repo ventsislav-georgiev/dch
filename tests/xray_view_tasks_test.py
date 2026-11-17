@@ -424,8 +424,8 @@ def test_twins():
         return (pad + "\nthe needle is here\n" + pad + "\ngap\ngap\n"
                 "PLACE-%s\n" % x)
 
-    def cutout(x, fill="z\n", n=3200):
-        return "START-%s\n" % x + fill * n + place(x)
+    def cutout(x, fill="z\n", n=3200, after=""):
+        return "START-%s\n" % x + fill * n + place(x) + after
 
     def bash(i, o):
         return [at(call("t%d" % i, "Bash", {"command": "cat %d" % i}),
@@ -457,7 +457,7 @@ def test_twins():
         return None
 
     for name, sid, objs, wants in (
-            ("xv-su", "b61", turn(cutout("U", "y\n", 3100), ts % 0,
+            ("xv-su", "b61", turn(cutout("U", "y\n", 3100, "y\n" * 1600), ts % 0,
                                   at(say(place("R")), ts % 1),
                                   *bash(2, place("O"))),
              ("O", "R", "START-U")),

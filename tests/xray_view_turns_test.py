@@ -827,10 +827,10 @@ def test_search():
 
 
 def fixture_tail():
-    """xv-tl8: a short answer, then an 8 KB final one ending in TAILMARK
+    """xv-tl8: a short answer, then a 14 KB final one ending in TAILMARK
     (#451 cuts it to head + tail)."""
     big = "\n".join("paragraph %03d of the long final answer, filler words"
-                    % i for i in range(1, 150))
+                    % i for i in range(1, 260))
     big += "\n\nNext steps: ship it. TAILMARK"
     record("xv-tl8", TSID, turn("short one", "2026-11-10T10:00:00Z",
                                 say("Short answer.")) +
@@ -839,7 +839,7 @@ def fixture_tail():
 
 def test_tail():
     ch = json.loads(dch("--xray", "xv-tl8", "--json").stdout)["chapters"]
-    check("tail fixture: the 8 KB answer is cut by the engine, the short "
+    check("tail fixture: the 14 KB answer is cut by the engine, the short "
           "one not", ch[1].get("response_cut") and
           not ch[0].get("response_cut"), ch)
     v = Pty([DCH, "--xray", "xv-tl8"], rows=70, cols=100,

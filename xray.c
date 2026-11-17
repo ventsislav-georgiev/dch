@@ -6313,8 +6313,9 @@ ent_put(struct xr_entries *e, const char *role, const char *tool,
 	ent_emit(e, role, tool, s, n, cap, err, 0);
 }
 
-/* A prose entry (#451): whole up to XR_TEXT_CAP scalars, else its first and
-** last XR_ENT_HALF with a "… N characters cut …" line between. */
+/* A prose entry (#451): whole up to XR_TEXT_CAP + XR_ENT_TAIL scalars, else
+** its first XR_TEXT_CAP and last XR_ENT_TAIL with a "… N characters cut …"
+** line between. */
 static void
 ent_prose(struct xr_entries *e, const char *role, const char *s, size_t n)
 {
@@ -6322,13 +6323,13 @@ ent_prose(struct xr_entries *e, const char *role, const char *s, size_t n)
 	char *b;
 	int ml;
 
-	if (k <= XR_TEXT_CAP)
+	if (k <= XR_TEXT_CAP + XR_ENT_TAIL)
 	{
-		ent_put(e, role, NULL, s, n, XR_TEXT_CAP, 0);
+		ent_put(e, role, NULL, s, n, SIZE_MAX, 0);
 		return;
 	}
-	h = clip(s, n, XR_ENT_HALF);
-	t = clip(s, n, k - XR_ENT_HALF);
+	h = clip(s, n, XR_TEXT_CAP);
+	t = clip(s, n, k - XR_ENT_TAIL);
 	if (!(b = malloc(h + n - t + 64)))
 	{
 		e->failed = 1;
@@ -6336,10 +6337,10 @@ ent_prose(struct xr_entries *e, const char *role, const char *s, size_t n)
 	}
 	memcpy(b, s, h);
 	ml = snprintf(b + h, 64, "\n… %zu characters cut …\n",
-	              k - 2 * XR_ENT_HALF);
+	              k - XR_TEXT_CAP - XR_ENT_TAIL);
 	memcpy(b + h + ml, s + t, n - t);
 	ent_emit(e, role, NULL, b, h + ml + n - t, SIZE_MAX, 0,
-	         k - 2 * XR_ENT_HALF);
+	         k - XR_TEXT_CAP - XR_ENT_TAIL);
 	free(b);
 }
 

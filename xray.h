@@ -143,8 +143,9 @@ int xr_claude_lookup(const char *cfg, const char *sid, char *path,
 #define XR_SPANS       128		/* mentions per entry (3.8) */
 #define XR_DEFS        8		/* definitions per entry (3.8) */
 #define XR_TEXT_CAP    6000		/* scalars: prose clips (v2.1 3.1) */
-#define XR_ENT_HALF    3000		/* scalars: a longer prose entry keeps
-					** its first and last XR_ENT_HALF (#451) */
+#define XR_ENT_TAIL    3000		/* scalars: a prose entry over XR_TEXT_CAP +
+					** XR_ENT_TAIL keeps its first XR_TEXT_CAP
+					** and last XR_ENT_TAIL (#451) */
 #define XR_REFS_CAP    XR_LINE_MAX	/* scalars: a prose block's ref scan,
 					** the whole block (#451), bounded */
 #define XR_OUTPUT_CAP  3000		/* scalars: tool output clips */

@@ -1698,17 +1698,17 @@ def test_chapter():
 
     # the scalar caps (v2.1 3.1: 6000 and 3000) and the 1 MiB cap (K14.4)
     put([{"type": "user", "cwd": "/home/demo/proj",
-          "message": {"content": "é" * 7000}},
+          "message": {"content": "é" * 10000}},
          use("b1", "Bash", {"command": "é" * 7000}),
          res("b1", "é" * 4000),
          {"type": "assistant", "message": {"content": [
-             {"type": "text", "text": "é" * 7000}]}}])
+             {"type": "text", "text": "é" * 10000}]}}])
     rc, o, _ = xray("xr-ch", "--json")
     rc, c, err, _ = chapter("xr-ch", o["chapters"][0]["anchor"])
-    # #451: a prompt and a reply keep 3000 + 3000 with the cut line
-    hm = "é" * 3000 + "\n\u2026 1000 characters cut \u2026\n" + "é" * 3000
+    # #451: a prompt and a reply keep 6000 + 3000 with the cut line
+    hm = "é" * 6000 + "\n\u2026 1000 characters cut \u2026\n" + "é" * 3000
     check("chapter: text clipped in scalars: 6000 (call), 3000 (output); "
-          "a prompt and a reply 3000 + 3000 with a cut line, cut 1000",
+          "a prompt and a reply 6000 + 3000 with a cut line, cut 1000",
           rc == 0 and c and [e["text"] for e in c["entries"]] ==
           [hm, "é" * 6000, "é" * 3000, hm] and
           [e.get("cut") for e in c["entries"]] == [1000, None, None, 1000],
@@ -3307,8 +3307,8 @@ HTSID = "11111111-2222-4333-8444-5555555555f1"
 
 def test_long_answer():
     """#451: a long answer's end is kept. Refs are indexed over the whole
-    text block; a --chapter prose entry past 6000 scalars keeps its first
-    and last 3000 with a "… N characters cut …" line and "cut": N; the
+    text block; a --chapter prose entry past 9000 scalars keeps its first
+    6000 and last 3000 with a "… N characters cut …" line and "cut": N; the
     --json response past 2048 bytes keeps its first and last 1024, cut on a
     character, with a "\\n…\\n" between and response_cut_chars."""
     cfg = os.path.join(HOME, ".claude")
@@ -3322,9 +3322,9 @@ def test_long_answer():
     tail = "€" + ("detail " * 200 +
                        "\nNext steps: merge #999 TAILMARK")[-1022:]
     body = "\n".join("- point %d: detail words detail words" % i
-                     for i in range(160))
+                     for i in range(300))
     long_ = head + "\n" + body + "\n" + tail
-    prompt = "PROMPTHEAD " + "q" * 7000 + " #777 PROMPTTAIL"
+    prompt = "PROMPTHEAD " + "q" * 12000 + " #777 PROMPTTAIL"
     lines = [
         {"type": "user", "cwd": "/home/demo/proj",
          "timestamp": "2026-11-10T10:00:00Z",
@@ -3344,9 +3344,9 @@ def test_long_answer():
             x = dch("--xray", "xr-long", "--ref", r, "--json")
             t = [l["tally"] for l in ref_lines(x.stdout) or [] if "tally" in l]
             return t[0].get("count") if t else None
-        check("long answer: a ref at the end of an 8 KB answer is indexed "
+        check("long answer: a ref at the end of a 12 KB answer is indexed "
               "(--ref #999 count 1)", count("#999") == 1, count("#999"))
-        check("long answer: a ref at the end of a 7000-char prompt is "
+        check("long answer: a ref at the end of a 12000-char prompt is "
               "indexed (--ref #777 count 1)", count("#777") == 1,
               count("#777"))
         rc, o, err = xray("xr-long", "--json")
@@ -3380,26 +3380,63 @@ def test_long_answer():
             if len(ch) == 2 else (1, None, "", "")
         es = (c or {}).get("entries", [])
         a = es[1] if len(es) == 2 else {}
-        mark = "\n… %d characters cut …\n" % (sc - 6000)
-        check("long answer: the --chapter entry is the first and last 3000 "
+        mark = "\n… %d characters cut …\n" % (sc - 9000)
+        check("long answer: the --chapter entry is the first 6000 and last 3000 "
               "characters with the cut line, and cut: N",
               a.get("role") == "assistant" and
-              a.get("text") == long_[:3000] + mark + long_[-3000:] and
+              a.get("text") == long_[:6000] + mark + long_[-3000:] and
               "TAILMARK" in a.get("text", "") and
-              a.get("cut") == sc - 6000, (err, {k: v for k, v in a.items()
+              a.get("cut") == sc - 9000, (err, {k: v for k, v in a.items()
                                                  if k != "text"},
                                           a.get("text", "")[2990:3040]))
         u = es[0] if es else {}
         check("long prompt: the user entry is head + tail too",
-              u.get("text") == prompt[:3000] + "\n… %d characters cut "
-              "…\n" % (len(prompt) - 6000) + prompt[-3000:] and
-              u.get("cut") == len(prompt) - 6000,
+              u.get("text") == prompt[:6000] + "\n… %d characters cut "
+              "…\n" % (len(prompt) - 9000) + prompt[-3000:] and
+              u.get("cut") == len(prompt) - 9000,
               {k: v for k, v in u.items() if k != "text"})
         rc, c0, err, raw0 = chapter("xr-long", ch[0]["anchor"]) \
             if ch else (1, None, "", "")
         check("short answer: its --chapter entries are unchanged, no cut",
               c0 and c0["entries"] == [ent("user", "short ask"),
                                        ent("assistant", short)], c0)
+    finally:
+        os.unlink(tp)
+
+
+def test_ent_bounds():
+    """#451: an entry of 9000 scalars or fewer is whole (7000: no cut field);
+    one of 12000 keeps scalars 0-6000 and the last 3000."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    sid = "11111111-2222-4333-8444-5555555555f2"
+    tp = os.path.join(pdir, sid + ".jsonl")
+    mk = lambda n: "".join(chr(0x4e00 + i % 500) for i in range(n))
+    a7, a9, a12 = mk(7000), mk(9000), mk(12000)
+    lines = [{"type": "user", "cwd": "/home/demo/proj",
+              "timestamp": "2026-11-10T10:00:00Z",
+              "message": {"content": "ask"}}]
+    for a in (a7, a9, a12):
+        lines.append({"type": "assistant", "message": {"content": a}})
+    with open(tp, "w") as f:
+        f.write("".join(json.dumps(o) + "\n" for o in lines))
+    history("xr-bound", sid, cfg)
+    try:
+        rc, o, err = xray("xr-bound", "--json")
+        ch = (o or {}).get("chapters", [])
+        rc, c, err, raw = chapter("xr-bound", ch[0]["anchor"]) \
+            if ch else (1, None, "", "")
+        es = [e for e in (c or {}).get("entries", [])
+              if e.get("role") == "assistant"]
+        t = [e.get("text") for e in es]
+        check("entry bounds: 7000 and 9000 scalars are whole, no cut field; "
+              "12000 keeps 0-6000 and the last 3000 with the marker",
+              len(es) == 3 and t[0] == a7 and t[1] == a9 and
+              "cut" not in es[0] and "cut" not in es[1] and
+              t[2] == a12[:6000] + "\n… 3000 characters cut …\n" +
+              a12[-3000:] and es[2].get("cut") == 3000,
+              (err, [(len(x or ""), e.get("cut")) for x, e in zip(t, es)]))
     finally:
         os.unlink(tp)
 
@@ -3559,6 +3596,7 @@ def main():
         test_light_377()
         test_light_379()
         test_long_answer()
+        test_ent_bounds()
         test_many_mentions()
         test_terms()
     finally:
