@@ -2206,8 +2206,11 @@ which a client can use as its version probe.
   touches a `.md` file, and every 30 s (an edit in place that kqueue does
   not see).
 - A `tasks_command` or `memory_command` runs as for the one-shot form, again
-  every 5 s (tasks) or 30 s (memory); its answer is sent as a whole block
-  when it changes.
+  5 s (tasks) or 30 s (memory) after its last run ended; its answer is sent
+  as a whole block when it changes. These later runs go on beside the
+  stream (one of each at a time): a slow or hung command never holds back
+  the transcript's lines. One still running when the follow ends is
+  stopped with it.
 
 Nothing runs on a timer:
 - a Claude Code transcript is watched with kqueue (inotify on Linux);

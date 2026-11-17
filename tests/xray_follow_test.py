@@ -652,6 +652,203 @@ def test_follow_memory_touch_flood():
         dch("-k", n)
 
 
+def test_follow_slow_cmd():
+    """#461 (QA 1.91.0 MED-TZ1, LOW-TZ2): a tasks_command or memory_command
+    runs beside the follow's loop, never in it: a slow one (4.9 s), one
+    killed at its 5 s clock and a hung memory_command each leave every ref
+    delta within 0.6 s of its write; the command's block still comes (its
+    fallback and warn when it gave none); the follow's end leaves no run
+    behind."""
+    n = "xc-fsc"
+    bindir = os.path.join(T, "bin")
+    fdir = os.path.join(T, "fake")
+    proj = os.path.join(T, "fproj-sc")
+    for d in (bindir, fdir, proj):
+        os.makedirs(d, exist_ok=True)
+    shutil.copy(os.path.join(HERE, "fake_claude.py"),
+                os.path.join(bindir, "claude"))
+    os.chmod(os.path.join(bindir, "claude"), 0o755)
+    env = dict(ENV, PATH=bindir + ":" + ENV.get("PATH", "/usr/bin:/bin"),
+               FAKE_CLAUDE_DIR=fdir)
+    sdir = os.path.join(HOME, ".claude", "sessions")
+    had = set(os.listdir(sdir)) if os.path.isdir(sdir) else set()
+    r = subprocess.run([DCH, "--spawn", n, "--size", "80x24", "--cwd", proj,
+                        "claude"], capture_output=True, text=True, timeout=30,
+                       env=env)
+    check("slow command: claude spawned", r.returncode == 0, r.stderr)
+    fl = None
+    seq = [600]
+    try:
+        rec = wait_for(lambda: [f for f in os.listdir(sdir)
+                                if f.endswith(".json") and f not in had]
+                       if os.path.isdir(sdir) else None, 10)
+        sid = json.load(open(os.path.join(sdir, rec[0])))["sessionId"]
+        pdir = os.path.join(HOME, ".claude", "projects", key(proj))
+        os.makedirs(os.path.join(pdir, "memory"), exist_ok=True)
+        tp = os.path.join(pdir, sid + ".jsonl")
+        with open(tp, "w") as f:
+            f.write(json.dumps({"type": "user", "cwd": proj, "message": {
+                "content": "first ask #599"}}) + "\n")
+        wait_for(lambda: (xray(n, "--json")[1] or {}).get("corpus") ==
+                 "claude", 10)
+        rows = os.path.join(T, "sc-rows")
+        with open(rows, "w") as f:
+            f.write(json.dumps({"id": "s1", "title": "Slow one"}) + "\n")
+
+        def cfg(name, tasks, memory=None):
+            p = os.path.join(T, "config-" + name)
+            sh = os.path.join(T, "sc-%s.sh" % name)
+            with open(sh, "w") as f:
+                f.write("#!/bin/sh\n" + tasks + "\n")
+            os.chmod(sh, 0o755)
+            with open(p, "w") as f:
+                f.write("tasks_command = %s\n" % sh)
+                if memory:
+                    mh = sh + ".mem"
+                    with open(mh, "w") as g:
+                        g.write("#!/bin/sh\n" + memory + "\n")
+                    os.chmod(mh, 0o755)
+                    f.write("memory_command = %s\n" % mh)
+            return dict(ENV, DCH_CONFIG=p)
+
+        def late(fl, secs=12.0, mid=None):
+            """a ref line every 0.5 s for secs: each one's delay (None:
+            never came)"""
+            sent = []
+            t_end = time.time() + secs
+            while time.time() < t_end:
+                seq[0] += 1
+                with open(tp, "a") as f:
+                    f.write(json.dumps({"type": "user", "message": {
+                        "content": "ask #%d" % seq[0]}}) + "\n")
+                sent.append((seq[0], time.time()))
+                if mid and len(sent) == 2:
+                    mid()
+                time.sleep(0.5)
+            time.sleep(0.7)
+            out = []
+            for i, t0 in sent:
+                at = [t for t, o in fl.got if "ref" in o and
+                      o["ref"]["key"] == "issue:#%d" % i]
+                out.append(round(at[0] - t0, 3) if at else None)
+            return out
+
+        def prompt(lat):
+            return all(d is not None and d < 0.6 for d in lat)
+
+        # 1. 4.9 s, under the clock: refs prompt, its moved answer whole
+        e1 = cfg("slow", "sleep 4.9; cat %s" % rows)
+        fl = Follow(n, e1, ["--tasks"])
+        fl.wait(lambda o: "done" in o, 15)
+        k0 = len(fl.got)
+
+        def moved():
+            with open(rows, "w") as f:
+                f.write(json.dumps({"id": "s2", "title": "Moved"}) + "\n")
+        lat = late(fl, mid=moved)
+        fl.wait(lambda o: "task" in o and o["task"]["id"] == "s2", 3,
+                frm=k0)
+        hdr, st, _ = blocks(fl.objs())
+        check("slow command: a 4.9 s tasks_command leaves every ref delta "
+              "within 0.6 s of its write (MED-TZ1, LOW-TZ2)", prompt(lat),
+              lat)
+        check("slow command: its answer comes as the tasks block, again "
+              "when it moves", hdr.get("task", {}).get("source") ==
+              "command" and sorted(st) == ["s2"], (hdr, st))
+        fl.stop()
+
+        # 2. killed at its 5 s clock: the fallback and its warn
+        e2 = cfg("hung", "sleep 6; cat %s" % rows)
+        fl = Follow(n, e2, ["--tasks"])
+        fl.wait(lambda o: "done" in o, 15)
+        lat = late(fl)
+        hdr, _, _ = blocks(fl.objs())
+        check("slow command: a tasks_command killed at 5 s leaves every "
+              "ref delta within 0.6 s", prompt(lat), lat)
+        check("slow command: its block is the fallback, with its warn",
+              hdr.get("task", {}).get("source") != "command" and
+              "stopped early" in hdr.get("task", {}).get("warn", ""), hdr)
+        fl.stop()
+
+        # 3. a hung memory_command beside a tasks_command
+        e3 = cfg("mem", "cat %s" % rows, "exec sleep 100")
+        fl = Follow(n, e3, ["--tasks", "--memory"])
+        fl.wait(lambda o: "done" in o and
+                sum("done" in x for x in fl.objs()) >= 2, 20)
+        lat = late(fl, 33.0)  # past one 30 s memory run
+        check("slow command: a hung memory_command and a tasks_command "
+              "leave every ref delta within 0.6 s", prompt(lat), lat)
+        fl.stop()
+
+        # a shell's follow (xf_shell) takes the same path
+        rc_ = os.path.join(T, "config-sc-ring")
+        with open(rc_, "w") as f:
+            f.write("xray_ring = 64K\n")
+        prog = ("while :; do printf '\\033]133;A\\007$ \\033]133;B\\007'; "
+                "read -r cmd || exit; printf '\\033]133;C\\007'; "
+                "eval \"$cmd\"; printf '\\033]133;D;0\\007'; done")
+        r = dch("--spawn", n + "-sh", "--size", "80x24", "--cwd", T, "sh",
+                "-c", prog, env=dict(ENV, DCH_CONFIG=rc_))
+        check("slow command: shell spawned", r.returncode == 0, r.stderr)
+        wait_for(lambda: "$" in screen(n + "-sh"), 5)
+        fl = Follow(n + "-sh", e1, ["--tasks"])
+        fl.wait(lambda o: "done" in o, 15)
+        sent = []
+        t_end = time.time() + 12
+        while time.time() < t_end:
+            seq[0] += 1
+            dch("--send", n + "-sh", "echo 'see o/r#%d'\n" % seq[0])
+            sent.append((seq[0], time.time()))
+            time.sleep(0.5)
+        time.sleep(0.7)
+        lat = []
+        for i, t0 in sent:
+            at = [t for t, o in fl.got if "ref" in o and
+                  o["ref"]["key"] == "pull:o/r#%d" % i]
+            lat.append(round(at[0] - t0, 3) if at else None)
+        check("slow command: a shell's follow with a 4.9 s tasks_command "
+              "leaves every ref delta within 0.6 s", prompt(lat), lat)
+        fl.stop()
+        dch("-k", n + "-sh")
+
+        # 4. the follow's end (the session's): no run left behind
+        pids = os.path.join(T, "sc-pids")
+        open(pids, "w").close()
+        e4 = cfg("pid", "echo $$ >> %s; exec sleep 30" % pids)
+        fl = Follow(n, e4, ["--tasks"])
+        fl.wait(lambda o: "done" in o, 15)
+        wait_for(lambda: len(open(pids).read().split()) >= 2, 8)
+        kids = subprocess.run(["pgrep", "-P", str(fl.p.pid)],
+                              capture_output=True, text=True).stdout.split()
+        ran = [int(p) for p in open(pids).read().split()] + \
+            [int(p) for p in kids]
+        dch("-k", n)
+        try:
+            rc = fl.p.wait(5)
+        except subprocess.TimeoutExpired:
+            rc = None
+
+        def alive(p):
+            try:
+                os.kill(p, 0)
+            except ProcessLookupError:
+                return False
+            st = subprocess.run(["ps", "-o", "stat=", "-p", str(p)],
+                                capture_output=True, text=True).stdout
+            return bool(st.strip()) and not st.strip().startswith("Z")
+        wait_for(lambda: not [p for p in ran if alive(p)], 3)
+        check("slow command: the follow's end (the session's) kills and "
+              "reaps a running command, nothing left",
+              rc == 0 and kids and len(ran) >= 3 and
+              not [p for p in ran if alive(p)],
+              (rc, kids, ran, [p for p in ran if alive(p)]))
+    finally:
+        if fl:
+            fl.stop()
+        dch("-k", n)
+        dch("-k", n + "-sh")
+
+
 def test_follow_fast():
     """A fast first paint (#447): past 32 MB, the newest 32 MB's snapshot
     (why range, the tail's chapters only) and its blocks first, then reset
@@ -1591,6 +1788,7 @@ def main():
         test_follow_claude()
         test_follow_tasks_memory()
         test_follow_memory_touch_flood()
+        test_follow_slow_cmd()
         test_follow_fast()
         test_follow_late()
         test_follow_cap()
