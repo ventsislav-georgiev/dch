@@ -374,6 +374,51 @@ t_claude(void)
 			free(big);
 		}
 	}
+	/* #467: with refs on, the prompt is unwrapped once, whole, in place;
+	** its title is the one the title's own short unwrap gives */
+	{
+		static const char *const in[] = {
+			U("<pasted_content id=\\\"b\\\">\\n \\n</pasted_content "
+			  "id=\\\"b\\\">\\n<pasted_content id=\\\"a\\\">"
+			  "<pasted_content id=\\\"c\\\">C</pasted_content "
+			  "id=\\\"c\\\"> tail\\nnext line"),
+			U("<pasted_content id=\\\"1\\\"><pasted_content id=\\\"2\\\">"
+			  "<pasted_content id=\\\"3\\\"><pasted_content id=\\\"4\\\">"
+			  "<pasted_content id=\\\"5\\\"><pasted_content id=\\\"6\\\">"
+			  "<pasted_content id=\\\"7\\\">x</pasted_content id=\\\"7\\\">"
+			  " the end"),
+			U("  \\n<pasted_content id=\\\"p\\\">\\npasted words\\n"
+			  "</pasted_content id=\\\"p\\\">")};
+		char t0[XR_TITLE_MAX * 4 + 1];
+		size_t j;
+		int same = 1;
+
+		for (j = 0; j < sizeof in / sizeof *in; j++)
+			for (k = 0; k < 2; k++)
+			{
+				struct xr_index *ix = xr_index_new();
+				struct xr_sink sk;
+
+				begin();
+				if (k && ix)
+				{
+					xr_index_sink(ix, &sk);
+					xr_claude_refs(D, &sk, 1, NULL, NULL);
+				}
+				line(in[j]);
+				end(&c);
+				if (!k)
+					snprintf(t0, sizeof t0, "%s",
+					         c.n ? xr_chapter_at(&c, 0)->title : "");
+				else
+					same &= ix && c.n == 1 &&
+					        !strcmp(xr_chapter_at(&c, 0)->title, t0);
+				xr_chapters_free(&c);
+				xr_index_free(ix);
+			}
+		CHECK("claude: unwrap: refs on, the same titles as refs off (#467)",
+		      same);
+	}
 
 	/* the 256 open tool calls: an evicted Grep's error result is an
 	** orphan (an error); a tracked Grep's is quiet */
