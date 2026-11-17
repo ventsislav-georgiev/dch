@@ -570,6 +570,7 @@ pk_txtto(const char *s, int lim)
 	unsigned u, prev;
 	const char *e, *q;
 	int l, w, cw, nri, join, c0 = pk_col;
+	const char *until = s;	/* end of a chain cut per character */
 
 	if (lim > pk_w)
 		lim = pk_w;
@@ -578,7 +579,7 @@ pk_txtto(const char *s, int lim)
 		/* a unit wider than the whole space of the cut (lim less where
 		** it began), wherever it sits, is cut per character: ZWJ joins
 		** off (NIT-VW4, #429) */
-		for (join = 1;; join = 0)
+		for (join = s >= until;; join = 0)
 		{
 			for (e = s, w = 0, prev = 0, nri = 0; *e; e += l)
 			{
@@ -599,6 +600,7 @@ pk_txtto(const char *s, int lim)
 			}
 			if (!(join && w > lim - c0 && pk_col + w > lim))
 				break;
+			until = e;	/* stay per character to the chain's end */
 		}
 		if (pk_col + w > lim)
 			break;

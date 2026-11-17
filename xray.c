@@ -212,6 +212,17 @@ xr_title(const char *s, size_t n, char *out, size_t outsz)
 		o += u8_put(out + o, c ? c : 0xfffd);
 		k++;
 	}
+	if (k == XR_TITLE_MAX)
+	{
+		/* the cap must not end on a ZWJ (nor a selector after it) */
+		if (o >= 3 && !memcmp(out + o - 3, "\xef\xb8", 2) &&
+		    (unsigned char)out[o - 1] >= 0x80 &&
+		    (unsigned char)out[o - 1] <= 0x8f &&
+		    o >= 6 && !memcmp(out + o - 6, "\xe2\x80\x8d", 3))
+			o -= 3;
+		if (o >= 3 && !memcmp(out + o - 3, "\xe2\x80\x8d", 3))
+			o -= 3;
+	}
 	out[o] = '\0';
 }
 
