@@ -469,7 +469,12 @@ xcmd_line(enum xcmd_kind kind, const char *s, size_t n, int first,
 		** JSON, an escape-only line blank (#417) */
 		char *b = line + (strncmp(line, "\xef\xbb\xbf", 3) ? 0 : 3);
 
-		memmove(line, b, plain(b) + 1);
+		size_t m = plain(b);
+
+		/* a BOM that leads once escapes are gone: either order */
+		if (m >= 3 && !memcmp(b, "\xef\xbb\xbf", 3))
+			b += 3, m -= 3;
+		memmove(line, b, m + 1);
 		for (i = 0; line[i] == ' ' || line[i] == '\t'; i++)
 			;
 		if (!line[i])
