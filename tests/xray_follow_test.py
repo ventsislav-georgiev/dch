@@ -455,8 +455,10 @@ def test_follow_tasks_memory():
         k1 = len(fl.got)
         with open(os.path.join(mdir, "b.md"), "w") as f:
             f.write("body b\n")
-        b = fl.wait(lambda o: "memory" in o and o["memory"]["id"] == "b",
-                    frm=k1)
+        # inotify reports the create before the write lands: the row may
+        # come first with an empty body, then whole (close-write, #449)
+        b = fl.wait(lambda o: "memory" in o and o["memory"]["id"] == "b" and
+                    o["memory"].get("body") == "body b\n", frm=k1)
         check("tasks+memory: a memory file added sends its row",
               b and b[0]["memory"]["body"] == "body b\n" and
               not b[0]["memory"].get("gone"), fl.objs(k1))
