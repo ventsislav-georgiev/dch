@@ -1490,7 +1490,7 @@ The corpus:
     the turn's last assistant text after its last tool result (thinking and
     subagent text never). Up to 2048 bytes it is whole; a longer one keeps
     its first and last 1024 bytes, never cut inside a UTF-8 character, with
-    a line holding only `…` between (`head\n…\ntail`, 1.92.0; before, the
+    a line holding only `…` between (`head\n…\ntail`, 1.93.0; before, the
     first 2048 bytes), and adds `response_cut` (`true`) and
     `response_cut_chars`, the Unicode scalars left out. `response_offset` is the byte offset of the
     line that holds it. A turn still running has neither; its `tools` is
@@ -1577,7 +1577,7 @@ Unicode-aware: `#831é` is none. Prompts and assistant text use every rule outsi
 tool input and output, and a shell's ring, use the code rules only (URLs,
 `owner/repo#n`, paths with a line number, commits), so a bare `#831`
 mid-line in output is no ref. A prompt, an assistant text and a compact
-summary are scanned whole (1.92.0; a line over 1 MiB is not read at all).
+summary are scanned whole (1.93.0; a line over 1 MiB is not read at all).
 Other texts are clipped before the scan: 6000 Unicode scalars of a notice and
 of a Bash command, 3000 of tool output, 240 per tool field. A shell line (rows joined at soft wraps, at most 64 KiB) gives at most
 128 mentions, and so does a text block: past 128 the newest 128 are kept.
