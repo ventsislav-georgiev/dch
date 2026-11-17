@@ -2341,9 +2341,9 @@ Each entry is `{"role","tool","text","error","offset"}`:
 entry came from, as a `--search` hit's `offset`: the entry of a hit's kind
 with the hit's `offset` holds that hit. A shell's entries, and those of a
 host older than 1.71.0, have no `offset`.
-A `user` or `assistant` entry's `text` over 6000 Unicode scalars keeps its
-first and last 3000, with this line between them (1.92.0; before, the first
-6000): `… N characters cut …`, where N is the scalars left out as a plain
+A `user` or `assistant` entry's `text` over 9000 Unicode scalars keeps its
+first 6000 and last 3000, with this line between them (1.93.0; before, the
+first 6000 only): `… N characters cut …`, where N is the scalars left out as a plain
 integer, the line starting and ending with a newline; the entry also has
 `"cut": N`, absent when nothing was cut. A `tool` entry's `text` is cut at
 6000 scalars, an `output`'s at 3000. `text` is escaped like `--ls-json`. The whole object is capped at 1 MiB: entries past the cap are
