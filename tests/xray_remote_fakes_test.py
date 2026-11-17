@@ -526,6 +526,13 @@ def test_tasks_fake():
     v = Pty([DCH, "--xray", "q:fk"])
     try:
         ok = tabbar(v, "Tasks 2")
+        # the lists' own queries go out one by one: a slow (sanitizer)
+        # runner may not have sent the memory one yet
+        end = time.time() + 10
+        while time.time() < end and not [a for a in h.bodies if
+                                          "--memory" in a and
+                                          "--follow" not in a]:
+            v.pump(0.1)
         fol = [a for a in h.bodies if "--follow" in a]
         check("Tasks, a host older than #446 (#448): the follow with the "
               "lists refused (exit 2), then the follow alone and the task "
