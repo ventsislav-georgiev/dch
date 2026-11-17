@@ -333,6 +333,24 @@ def main():
               any(e["ev"] == "paste" for e in events(b)[nb:]) and
               not any(e["ev"] in ("line", "turn") for e in events(b)[nb:]))
         idle(b)
+        # a UTF-8 C1 control (U+0085, CSI is U+009B) keeps the paste too;
+        # each row gets a fresh fake: the CR row's draft blocks b and a
+        c1, c2 = sess("c1", "claude"), sess("c2", "claude")
+        up(c1)
+        up(c2)
+        idle(c1)
+        idle(c2)
+        n1, n2 = len(events(c1)), len(events(c2))
+        r = say(c1, "--", "/x\u0085y")
+        check("/x<U+0085>y pastes, no keys typed",
+              any(e["ev"] == "paste" for e in events(c1)[n1:]) and
+              not any(e["ev"] == "key" for e in events(c1)[n1:]))
+        run("-k", c1)
+        r = say("--all", "--", "/x\u0085")
+        check("--all /x<U+0085> is not refused as a /command",
+              "usage" not in r.stderr.lower() and
+              any(e["ev"] == "paste" for e in events(c2)[n2:]))
+        idle(c2)
 
         # --- old master: failed/old_master -------------------------------
         old = os.path.join(sockdir, "old%s.sock" % TAG)

@@ -8528,7 +8528,9 @@ say_raw(const char *t)
 	if (t[0] != '/')
 		return 0;
 	for (; *t; t++)
-		if ((unsigned char)*t < 0x20 || *t == 0x7f)
+		if ((unsigned char)*t < 0x20 || *t == 0x7f ||
+		    ((unsigned char)t[0] == 0xc2 && (unsigned char)t[1] >= 0x80 &&
+		     (unsigned char)t[1] <= 0x9f)) /* UTF-8 C1 (CSI is U+009B) */
 			return 0;
 	return 1;
 }
