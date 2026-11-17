@@ -390,6 +390,7 @@ dch --xray <n>                                  # the X-ray view: prompts, refs 
 dch --xray <n> --json                           # a session's chapters (prompts / commands) as one JSON object
 dch --xray <n> --clear --json                   # empty a shell session's X-ray ring
 dch --xray <n> --follow --json                  # the same object, then its deltas as NDJSON until the session ends
+dch --xray <n> --follow --tasks --memory --json # that stream with the task and memory blocks and their deltas
 dch --xray <n> --ref <ref|-> [--scope session|project|all] [--full] [--budget-ms <ms>] --json  # one ref's mentions and definitions, NDJSON
 dch --xray <n> --search <text|-> --json         # the newest 50 places a word or phrase was said (- reads it from stdin)
 dch --xray <n> --memory --json                  # its memories and instruction files, JSON lines
@@ -1921,8 +1922,8 @@ the way `--ref` prints its lines, and exits 0:
   was cut.
 
 `--tasks` goes with no other flag but `--json` (`dch: bad usage: --tasks and
---ref`, also with `--search`, `--chapter`, `--clear` or `--follow`), and not
-in `--requests`. Nothing is written to disk. A session whose transcript is
+--ref`, also with `--search`, `--chapter` or `--clear`), and not in
+`--requests`; `--follow` carries it (see below). Nothing is written to disk. A session whose transcript is
 gone says `dch: no x-ray corpus` (exit 1). On `host:name` it runs on that
 host's `dch serve`; a host whose dch predates `--tasks` says `dch: <host>:
 the host's dch does not know --tasks` (exit 1).
@@ -1970,7 +1971,8 @@ per file (`"cut":true` after `body` when it was cut), then
   Nothing is written.
 
 `--memory` goes with no other flag but `--json` (`dch: bad usage: --memory
-and --follow`) and not in `--requests`. On `host:name` it runs on that host;
+and --tasks`) and not in `--requests`; `--follow` carries it, with or
+without `--tasks` (see below). On `host:name` it runs on that host;
 a host whose dch predates it says `dch: <host>: the host's dch does not know
 --memory` (exit 1).
 
@@ -2163,6 +2165,34 @@ Claude Code stream sends no line for the oldest chapter `--json` drops, so a
 client can hold more chapters than `--json` shows. When the 4 MiB cap left
 a ref out of the snapshot, a change to that ref or its removal sends no line
 until the next snapshot. A new key still sends one.
+
+**Tasks and Memory in the stream.** `dch --xray <n> --follow --tasks
+--memory --json` (either flag alone too) adds them to the same stream, so a
+client needs no `--tasks` or `--memory` polls and the transcript is read
+once. A dch before this exits 2 with `dch: bad usage: --tasks and --follow`,
+which a client can use as its version probe.
+- After every snapshot (the first and each one after a `reset`): the
+  `--tasks` lines, then the `--memory` lines, each block whole from its
+  header to its `done` line, in the one-shot shapes. A tasks header has
+  `session`; a memory header does not. A session with no corpus gives a
+  `source: "none"` block.
+- Then, in the same 250 ms batches as the other deltas:
+  - `{"task":{…}}`: a task's whole row, keyed by `id`, when it changes or
+    is new. A row that leaves the list (a shorter TodoWrite list) sends
+    `{"task":{"id":…,"gone":true}}`.
+  - `{"memory":{…}}`: a memory's or instruction file's whole row, keyed by
+    `id`, when it changes or is new; `{"memory":{"id":…,"gone":true}}`
+    when it is gone.
+  - a whole block again when its header changes (its `source` or
+    `partial`).
+- Tasks and the memory rows' `session` and `chapter` come from the
+  follow's own read of the transcript. The memory directory is watched
+  (kqueue, inotify) and listed again when it changes, when a tool call
+  touches a `.md` file, and every 30 s (an edit in place that kqueue does
+  not see).
+- A `tasks_command` or `memory_command` runs as for the one-shot form, again
+  every 5 s (tasks) or 30 s (memory); its answer is sent as a whole block
+  when it changes.
 
 Nothing runs on a timer:
 - a Claude Code transcript is watched with kqueue (inotify on Linux);
@@ -3129,7 +3159,7 @@ for a local session named that way.
 | `--stop` | `--stop <n>... --json` | 660 s |
 | `--say` | `--say <n> --json -- <text>` | 660 s |
 | `--xray` | `--xray <n> --json [--clear \| --chapter <anchor>]` | 60 s |
-| `--xray` | `--xray <n> --json --follow` (no cap either) | none |
+| `--xray` | `--xray <n> --json --follow [--tasks] [--memory]` (no cap either) | none |
 | `--xray` | `--xray <n> --ref <ref> [--scope <s>] [--full] [--budget-ms <ms>] --json` | 60 s |
 | `--xray` | `--xray <n> --search <text> --json` | 60 s |
 | `--xray` | `--xray <n> --tasks --json` | 60 s |

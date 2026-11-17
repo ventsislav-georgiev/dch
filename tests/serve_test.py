@@ -83,7 +83,11 @@ def main():
               ["--search", "s" * 200, "--json"],
               ["--search", "--json", "--json"],
               ["--memory", "--json"], ["--json", "--memory"],
-              ["--tasks", "--json"]]
+              ["--tasks", "--json"],
+              # #446: --follow carries --tasks and --memory
+              ["--follow", "--tasks", "--json"],
+              ["--memory", "--follow", "--json"],
+              ["--json", "--memory", "--follow", "--tasks"]]
         names = ["9f9f9f9f-0000-4000-8000-000000000000", "rec.json",
                  "m0123456789abcdef"]
         no = [([], "--xray needs --json (the view is client-side only)"),
@@ -138,7 +142,7 @@ def main():
                "--clear exclude each other"),
               (["--memory"], "--xray needs --json (the view is "
                "client-side only)"),
-              (["--memory", "--follow", "--json"],
+              (["--tasks", "--memory", "--clear", "--follow", "--json"],
                "--ref, --search, --tasks, --memory, --follow, --chapter and "
                "--clear exclude each other"),
               (["--memory", "--search", "ab", "--json"],
@@ -206,8 +210,9 @@ def main():
               got == ("ran", loc.returncode, None, loc.stdout, loc.stderr)
               and (not mirror or got[1] == 0), (got, loc))
 
-        def follow(s):
-            send(s, 0x30, {"argv": ["--xray", "svx", "--follow", "--json"]})
+        def follow(s, extra=()):
+            send(s, 0x30, {"argv": ["--xray", "svx", "--follow", "--json"] +
+                           list(extra)})
             t, pl = frame(s)
             m = None
             end = time.time() + 5
@@ -247,6 +252,30 @@ def main():
               t == 0x31 and pid and gone(pid) and pl.startswith(want)
               and (t2, p2) == (0x33, b'{"exit":2,"why":"cancel"}')
               and more is None, (t, pl[:60], t2, p2))
+        # #446: --follow --tasks --memory over ctl: the snapshot, then a
+        # tasks and a memory block (a shell: source none), then it waits
+        s = conn(port)
+        t, out, pid = follow(s, ["--tasks", "--memory"])
+        try:
+            while t == 0x31 and out.count(b'{"done":true') < 2:
+                t, p = frame(s)
+                out += p
+        except (EOFError, OSError):
+            pass
+        send(s, 0x34)
+        s.close()
+        ls = out.split(b"\n")
+        hd = lambda i: json.loads(ls[i]) if len(ls) > i else None
+        chk("xray serve: --follow --tasks --memory streams the snapshot, "
+            "then the tasks block and the memory block (source none)",
+            t == 0x31 and pid and gone(pid) and ls[0].startswith(want) and
+            (hd(1) or {}).get("session") == "svx" and
+            (hd(1) or {}).get("source") == "none" and
+            hd(2) == {"done": True, "count": 0, "dropped": 0} and
+            hd(3) == {"schema": 1, "source": "none", "title": None,
+                      "partial": False} and
+            hd(4) == {"done": True, "count": 0, "dropped": 0} and
+            ls[5:] == [b""], (t, out[-400:]))
         if mirror:
             s = conn(port)
             t, pl, pid = follow(s)

@@ -33,6 +33,21 @@ struct xm_req
 ** write failed. */
 int xm_print(FILE *f, const struct xm_req *q);
 
+/* --follow --memory (#446): the touches kept as a follow's decoder passes
+** its calls, so a print reads the directory and the files again but never
+** the transcript. q is copied (st and warn unused). */
+#define XM_TOUCHES 4096		/* .md paths whose touches are kept */
+struct xm_live;
+struct xr_claude;
+struct xm_live *xm_live_new(const struct xm_req *q);
+void xm_live_free(struct xm_live *l);
+/* l's calls sink on d (xr_claude_calls), before d reads */
+void xm_live_attach(struct xm_live *l, struct xr_claude *d, uint64_t ino);
+/* moves when a touch is kept: the block may have changed */
+unsigned long xm_live_touched(const struct xm_live *l);
+/* xm_print's lines, the rows listed again now; l NULL: source none */
+int xm_live_print(FILE *f, struct xm_live *l, int partial, const char *warn);
+
 /* The parsers (the units and fuzz_xmem). A span is bytes [s, s + n) of
 ** the input; n 0 for none. */
 struct xm_span

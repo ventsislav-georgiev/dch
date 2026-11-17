@@ -619,7 +619,8 @@ xray_budget(const char *s)
 ** flags in any order, each once: --json, required (the view is the
 ** client's own, as --requests is); one of --follow, --ref <text>,
 ** --search <text> (#297), --chapter <anchor>, --tasks (#319), --memory
-** (#322) and --clear; --scope, --full
+** (#322) and --clear, but --follow takes --tasks and --memory (#446);
+** --scope, --full
 ** and --budget-ms only with --ref. A value is the next element even when it
 ** starts with '-'. --ref's and --search's text and the anchor are CK_TEXT
 ** (an anchor may hold ':'). The --ref
@@ -672,6 +673,8 @@ ctl_xray(int argc, char *const argv[], unsigned char *kind, char *why,
 	}
 	one = seen & (X_FOLLOW | X_CLEAR | X_REF | X_CHAPTER | X_SEARCH |
 	              X_TASKS | X_MEMORY);
+	if (seen & X_FOLLOW)	/* the stream carries them (#446) */
+		one &= ~(unsigned)(X_TASKS | X_MEMORY);
 	if (!(seen & X_JSON))
 		return ctl_no(why, cap, "--xray needs --json (the view is "
 		              "client-side only)");

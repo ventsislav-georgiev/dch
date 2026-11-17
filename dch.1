@@ -103,6 +103,13 @@ dch \- detachable terminal sessions with a headless agent API
 .br
 .B dch \-\-xray
 .I name
+.B \-\-follow
+.RB [ \-\-tasks ]
+.RB [ \-\-memory ]
+.B \-\-json
+.br
+.B dch \-\-xray
+.I name
 .B \-\-search
 .IR text | \-
 .B \-\-json
@@ -1795,7 +1802,11 @@ A shell, or a session with no task record, gives
 and no task lines.
 It goes with no other flag but
 .B \-\-json
-and not in
+(and
+.B \-\-follow
+with
+.BR \-\-memory ,
+below) and not in
 .BR \-\-requests ;
 on
 .IB host : name
@@ -1902,7 +1913,11 @@ file's symlink to a regular file is read through, its path the link's);
 50000 rows at most.
 It goes with no other flag but
 .B \-\-json
-and not in
+(and
+.B \-\-follow
+with
+.BR \-\-tasks ,
+below) and not in
 .BR \-\-requests ;
 an older host says
 .IR "the host's dch does not know \-\-memory" .
@@ -2377,6 +2392,47 @@ that started last: its
 .B .ver
 file is unchanged) ends it (exit 0), however late it comes, so a master
 that answers but keeps hanging up cannot loop it.
+With
+.B \-\-follow
+and
+.B \-\-tasks
+or
+.B \-\-memory
+or both (an older dch exits 2
+.IR "bad usage: \-\-tasks and \-\-follow" ),
+each snapshot is followed by the
+.B \-\-tasks
+lines, then the
+.B \-\-memory
+lines, each block whole from its header to its done line, as the one\-shot
+form prints them (a tasks header carries
+.BR session ;
+a memory header does not; a corpus none gives a
+.B source:none
+block).
+Then, in the same batches:
+.B task
+(a task's whole row, by
+.BR id ,
+when it changes or is new; a row that leaves the list, as TodoWrite's
+shorter list drops one, sends
+.BR {"task":{"id": i ,"gone":true}} ),
+.B memory
+(a memory's or instruction file's whole row, by
+.BR id ,
+when it changes or is new;
+.BR {"memory":{"id": i ,"gone":true}}
+when it is gone), and a whole block again when its header changes.
+Tasks and touches come from the follow's own read of the transcript, never
+a second read; the memory directory is watched (kqueue, inotify) and
+listed again on a change, on a tool call that touches a .md file, and
+every 30 s (an edit in place kqueue does not see).
+A
+.B tasks_command
+or
+.B memory_command
+runs as for the one\-shot form, again every 5 s (tasks) or 30 s (memory),
+and its answer is sent as a whole block when it changes.
 .B \-\-follow
 takes no
 .B \-\-ref
@@ -3686,6 +3742,7 @@ a session name that passes the attach name check and does not start with
 \-\-xray \fIn\fP \-\-search \fItext\fP \-\-json
 \-\-xray \fIn\fP \-\-tasks \-\-json
 \-\-xray \fIn\fP \-\-memory \-\-json
+\-\-xray \fIn\fP \-\-follow [\-\-tasks] [\-\-memory] \-\-json
 .fi
 .RE
 .PP
@@ -3732,7 +3789,12 @@ two of
 .BR \-\-follow ,
 .B \-\-chapter
 and
-.BR \-\-clear ,
+.B \-\-clear
+.RB ( \-\-follow
+takes
+.B \-\-tasks
+and
+.BR \-\-memory ),
 .BR \-\-scope ,
 .B \-\-full
 or
