@@ -2935,6 +2935,13 @@ Only a screen showing the empty composer is typed into; a prompt or dialog
 (the Enter would answer it) or an unsent draft is skipped, never waited for.
 Enter is pressed again while the text stays in the composer, never into a
 dialog; text that left the composer, submitted or shown queued, is sent. Sessions are typed into concurrently.
+A text starting with
+.B /
+and holding no control characters is typed as keys, not pasted, so Claude Code opens its slash menu:
+.B dch \-\-say \fIname\fP \-\-json \-\- /model \fImodel\fP
+switches a live Claude's model. With
+.B \-\-all
+such a text is a usage error (exit 1, nothing typed).
 One line per session as it finishes:
 .IB name ": sent" ,
 .IB name ": skipped \(em " why

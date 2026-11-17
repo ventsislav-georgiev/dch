@@ -167,6 +167,16 @@ def main():
                   sorted((o["reason"], o["result"]) for o in objs) ==
                   [("no_screen", "skipped"), ("no_session", "failed")])
             check("lite: nothing typed", typed(c) == [])
+            r = say("--all", "--", "/x")
+            check("lite: --all /x is a usage error, nothing typed",
+                  r.returncode == 1 and r.stdout == "" and r.stderr and
+                  typed(c) == [])
+            r = say(c, s, "--json", "--", "/model", "m")
+            objs = sorted((o["name"] == c, o["reason"]) for o in
+                          map(json.loads, r.stdout.splitlines()))
+            check("lite: /command: no_screen / not_claude, nothing typed",
+                  objs == [(False, "not_claude"), (True, "no_screen")] and
+                  typed(c) == [])
             return finish(fails, tmp, names, pids)
 
         # --- --all: one result per session -------------------------------
@@ -286,6 +296,43 @@ def main():
         for n in (busy, shl, dlg, bdlg, drf, bdrf, me, sh, shc):
             run("-k", n)
             names.remove(n)
+
+        # --- a one-line /command is typed as keys ------------------------
+        idle(a)
+        idle(b)
+        na, nb = len(events(a)), len(events(b))
+        r = say(a, "--json", "--", "/model", "opus")
+        check("/command: --json ok",
+              r.returncode == 0 and json.loads(r.stdout or "{}") ==
+              {"name": a, "result": "ok", "reason": "", "detail": ""})
+        check("/command: arrives as keys, no bracketed paste",
+              typed(a)[-1:] == ["/model opus"] and
+              not any(e["ev"] == "paste" for e in events(a)[na:]))
+        sh = sess("ssh2", "sh")
+        r = say(sh, "--json", "--", "/model", "opus")
+        check("/command: not_claude skipped, nothing typed",
+              json.loads(r.stdout or "{}").get("reason") == "not_claude"
+              and typed(sh) == [])
+        r = say("--all", "--", "/x")
+        check("--all /x: exit 1, one stderr line, nothing typed",
+              r.returncode == 1 and r.stdout == "" and
+              len(r.stderr.splitlines()) == 1 and
+              len(events(b)) == nb and typed(b) == [msg, "only b"])
+        idle(a)
+        r = say(b, "--", "/x\ny")
+        check("two-line /text still pastes",
+              r.returncode == 0 and
+              any(e["ev"] == "paste" for e in events(b)[nb:]))
+        idle(b)
+        nb = len(events(b))
+        r = say(b, "--", "/x\rhello")
+        # a CR in a paste is never a submit: the fake sees the paste
+        # start and no line (the gate then reports not_typed, as for any
+        # text it cannot match in the composer)
+        check("/x<CR>hello pastes, no bare CR submits early",
+              any(e["ev"] == "paste" for e in events(b)[nb:]) and
+              not any(e["ev"] in ("line", "turn") for e in events(b)[nb:]))
+        idle(b)
 
         # --- old master: failed/old_master -------------------------------
         old = os.path.join(sockdir, "old%s.sock" % TAG)

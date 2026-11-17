@@ -8519,6 +8519,20 @@ say_print(const char *name, int c, int json)
 	fflush(stdout);
 }
 
+/* A '/' text with no control byte is typed as keys (the slash menu opens
+** only on typed keys); a \r, ESC or Ctrl-C in it would be a live key, so
+** any control byte keeps the paste. */
+static int
+say_raw(const char *t)
+{
+	if (t[0] != '/')
+		return 0;
+	for (; *t; t++)
+		if ((unsigned char)*t < 0x20 || *t == 0x7f)
+			return 0;
+	return 1;
+}
+
 #ifdef HAVE_LIBGHOSTTY_VT
 /* The gate and the typing, in the child. Busy or with messages queued,
 ** Claude Code queues ours: ag_type counts the text leaving the composer as
@@ -8581,6 +8595,14 @@ do_say_verb(char **names, int nnames, char **words, int nwords, int json)
 		free(text);
 		return 1;
 	}
+	if (!names && say_raw(text))
+	{
+		/* a /clear to every agent is one typo away */
+		fprintf(stderr, "dch: --say --all: a /command is not sent to "
+		        "every session; name them\n");
+		free(text);
+		return 1;
+	}
 	ty_arm();
 #ifdef HAVE_LIBGHOSTTY_VT
 	ty_set(&term);
@@ -8631,7 +8653,8 @@ do_say_verb(char **names, int nnames, char **words, int nwords, int json)
 			ty_kids = NULL;
 			ty_nkids = 0;
 			sigprocmask(SIG_SETMASK, &old, NULL);
-			_exit(SAY_EXIT + say_type(path, text, 1));
+			_exit(SAY_EXIT + say_type(path, text,
+			      !say_raw(text)));
 		}
 		if (c < 0)
 			sigprocmask(SIG_SETMASK, &old, NULL);
