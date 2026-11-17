@@ -358,8 +358,11 @@ def remote_dash(cenv, check):
         p = subprocess.Popen(a, env=cenv, stdin=subprocess.PIPE,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         t0 = time.time()
-        p.stdin.write(b"needle\n")
-        p.stdin.flush()     # left open: a client that read would wait 5 s
+        try:
+            p.stdin.write(b"needle\n")
+            p.stdin.flush()     # left open: a client that read would wait 5 s
+        except BrokenPipeError:
+            pass                # it already exited, never reading: the point
         try:
             rc = p.wait(timeout=30)
         except subprocess.TimeoutExpired:
@@ -367,7 +370,10 @@ def remote_dash(cenv, check):
             rc = None
         dt = time.time() - t0
         got = (rc, p.stdout.read(), p.stderr.read())
-        p.stdin.close()
+        try:
+            p.stdin.close()
+        except BrokenPipeError:
+            pass
         check("a peer's %s - with an open stdin is not read on the client "
               "(%.1f s)" % (flag, dt), dt < 4 and want.returncode == 2 and
               got == (want.returncode, want.stdout, want.stderr),
