@@ -526,6 +526,23 @@ def test_follow_tasks_memory():
               "whole again", fl.kinds(k4)[:2] == ["reset", "snapshot"] and
               got[2:] == tk4 + mm4, (got, tk4, mm4))
 
+        # #449: a file created empty, its content 0.3 s later (the dir sees
+        # no second write): its row with the content within 2 s
+        time.sleep(0.4)
+        k7 = len(fl.got)
+        cp = os.path.join(mdir, "c.md")
+        open(cp, "w").close()
+        time.sleep(0.3)
+        with open(cp, "w") as f:
+            f.write("---\nname: Gamma\ndescription: written late\n---\n"
+                    "body c\n")
+        t0 = time.time()
+        c = fl.wait(lambda o: "memory" in o and o["memory"]["id"] == "c" and
+                    "body c" in o["memory"].get("body", ""), 2.5, frm=k7)
+        check("tasks+memory: a memory written 0.3 s after its create sends "
+              "its content within 2 s", c and time.time() - t0 < 2.2,
+              fl.objs(k7))
+
         # the one-shot forms keep their exclusions
         r = dch("--xray", n, "--tasks", "--memory", "--json")
         check("tasks+memory: without --follow, --tasks and --memory still "

@@ -13844,6 +13844,7 @@ xr_clear(const struct xr_target *t)
 #define XF_TASKS_MS 5000L	/* --tasks: a tasks_command's run (#446) */
 #define XF_MEM_MS 30000L	/* --memory: the rows listed, memory_command */
 
+#define XF_MEMRE_MS 1000L	/* --memory: the re-list after a dir event (#449) */
 enum { XE_FILE = 1, XE_ROT = 2, XE_CONN = 4, XE_OUT = 8, XE_MEM = 16 };
 
 struct xf_cl;
@@ -13879,6 +13880,7 @@ struct xf
 	char warn[2][XCMD_WARN_MAX];
 	long long at[2];	/* the command's next run; [1] the listing's */
 	int mdirty;		/* the memory dir moved */
+	long long mretry;	/* ms clock: one more listing, 0 none (#449) */
 	unsigned long mtouched;	/* xm_live_touched at the last block */
 	struct xf_cl *cl;	/* a Claude's or Codex's sources, else NULL */
 	const char *sid, *agent;	/* the blocks' session_id, agent */
@@ -14566,6 +14568,8 @@ xf_side_ms(const struct xf *f)
 	if (f->memory && (f->cl || f->cmd[1]))
 	{
 		m = f->mdirty ? f->last + f->gap : f->at[1];
+		if (f->mretry && f->mretry < m)
+			m = f->mretry;
 		at = at < 0 || m < at ? m : at;
 	}
 	return at < 0 ? -1 : at > now ? (long)(at - now) : 0;
@@ -14591,6 +14595,8 @@ xf_side(struct xf *f)
 			return 1;
 		sent = 1;
 	}
+	if (f->mretry && now >= f->mretry)
+		f->mretry = 0, f->mdirty = 1;
 	if (f->memory && (f->cl || f->cmd[1]) &&
 	    (now >= f->at[1] || (f->mdirty && now >= f->last + f->gap)))
 	{
@@ -14976,7 +14982,12 @@ read:
 		if (ev & XE_OUT)
 			break;
 		if (ev & XE_MEM)
+		{
+			/* a file's content may land after its create, and the
+			** dir sees no write: list once more, 1 s after the last */
 			f->mdirty = 1;
+			f->mretry = xr_now_ms() + XF_MEMRE_MS;
+		}
 		if (ev & XE_CONN)
 		{
 			/* a wake: re-armed by a header read, then the question;

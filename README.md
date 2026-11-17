@@ -2197,7 +2197,8 @@ which a client can use as its version probe.
     `partial`).
 - Tasks and the memory rows' `session` and `chapter` come from the
   follow's own read of the transcript. The memory directory is watched
-  (kqueue, inotify) and listed again when it changes, when a tool call
+  (kqueue, inotify) and listed again when it changes and once more 1 s after (a file's
+  content may land after its create), when a tool call
   touches a `.md` file, and every 30 s (an edit in place that kqueue does
   not see).
 - A `tasks_command` or `memory_command` runs as for the one-shot form, again

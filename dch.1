@@ -2437,7 +2437,8 @@ when it changes or is new;
 when it is gone), and a whole block again when its header changes.
 Tasks and touches come from the follow's own read of the transcript, never
 a second read; the memory directory is watched (kqueue, inotify) and
-listed again on a change, on a tool call that touches a .md file, and
+listed again on a change and once more 1 s after it (a file's content
+may land after its create), on a tool call that touches a .md file, and
 every 30 s (an edit in place kqueue does not see).
 A
 .B tasks_command
