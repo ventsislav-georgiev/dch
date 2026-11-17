@@ -425,10 +425,14 @@ and Ubuntu) is not left raw; `fg` brings the session or the picker back raw. A
 `SIGSTOP` cannot be caught: under dash the terminal stays raw until dch
 continues. Known macOS limit: a process that stops itself inside a signal
 handler while SIGCONT is caught can wedge in the kernel (seen without dch). If
-`q` then does not close the X-ray view, kill the whole job, not only the client
-(`kill -9 -<pgid>` of its process group, or the shell's `kill -9 %1`), and
-attach again: a bare `kill -9` of the client leaves the view's query child
-orphaned and stopped. The session is untouched.
+`q` then does not close the X-ray view, recover from another terminal: find
+the process group with `ps -o pgid= -p <pid of the dch client>` (or
+`ps -o pid,pgid,command | grep 'dch -a'`) and `kill -9 -<pgid>` it (closing
+the terminal window also recovers; the job holds the terminal raw, so ^Z, ^C
+and ^\ do nothing, and if the shell still responds, `kill -9 %1` works too).
+Kill the whole group, not only the client, then attach again: a bare
+`kill -9` of the client leaves the view's query child orphaned and stopped.
+The session is untouched.
 
 `detach_key = switch` in the [config file](#config-file) swaps the two: one
 press opens the picker, two detach. With `DCH_DOUBLE_TAP_MS=0` one press then
