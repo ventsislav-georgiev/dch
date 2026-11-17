@@ -621,21 +621,26 @@ def main():
         ka = conn(port)
         send(ka, 0x08, {"proto": "1.0"})
         frame(ka)
-        try:
-            lo = subprocess.run(["lsof", "-nP", "-iTCP:%d" % port, "-T", "f"],
-                                capture_output=True, text=True,
-                                timeout=20).stdout
-        except (OSError, subprocess.TimeoutExpired):
-            lo = ""
-        side = [ln for ln in lo.splitlines()
-                if "127.0.0.1:%d->" % port in ln]
+        # a slow (ASan) runner may not have accepted/listed serve's side yet
+        for _ in range(10):
+            try:
+                lo = subprocess.run(
+                    ["lsof", "-nP", "-iTCP:%d" % port, "-T", "f"],
+                    capture_output=True, text=True, timeout=20).stdout
+            except (OSError, subprocess.TimeoutExpired):
+                lo = ""
+            side = [ln for ln in lo.splitlines()
+                    if "127.0.0.1:%d->" % port in ln]
+            if side or "SO=" not in lo:
+                break
+            time.sleep(0.3)
         if "SO=" in lo:
             # lsof prints the keepalive timer in ms (15022 seen for 15 s)
             ka_ms = [re.search(r"KEEPALIVE=(\d+)", ln) for ln in side]
             check("LOW-5: serve's end of a connection has SO_KEEPALIVE "
                   "(15 s idle)", side and all(
                       m and 14000 <= int(m.group(1)) <= 16000
-                      for m in ka_ms))
+                      for m in ka_ms), lo)
         else:
             print("  skip LOW-5: lsof shows no socket options here")
         ka.close()
