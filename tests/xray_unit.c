@@ -5607,12 +5607,14 @@ t_search(void)
 		const char *a = o ? strstr(o, "\"snippet\":\"") : NULL;
 		const char *z = a ? strstr(a + 11, "\"}") : NULL;
 
-		CHECK("search: the snippet is cut on characters, never more than "
+		/* #456: a window starting inside the é run moves to the next
+		** word and leads with "… " */
+		CHECK("search: the snippet is cut at words, never more than "
 		      "160 bytes, controls as one space",
-		      a && z && z - (a + 11) <= 160 && z - (a + 11) >= 140 &&
+		      a && z && z - (a + 11) <= 164 &&
 		      u8_ok((const unsigned char *)o) &&
 		      !strstr(o, "\xef\xbf\xbd") &&
-		      strstr(a, "\xc3\xa9 FOUNDIT\xe2\x82\xac"));
+		      !strncmp(a + 11, "\xe2\x80\xa6 FOUNDIT\xe2\x82\xac", 14));
 	}
 	free(o);
 
