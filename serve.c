@@ -2888,6 +2888,7 @@ serve_main(int argc, char **argv)
 	unsetenv("DCH_XRAY_STDIN");
 	unsetenv("DCH_XRAY_CAPS");
 	unsetenv("DCH_XRAY_MEVERY");
+	unsetenv("DCH_XRAY_STDIN_MS");
 
 	/* The tailscale CLI, absolute, for execv. */
 	ts_find();

@@ -90,7 +90,7 @@ int cloexec(int fd);
 int nonblock(int fd);
 int pipe_ce(int p[2]);
 void exec_prep(void);
-char *ctl_text_read(int fd, char b[257]);
+char *ctl_text_read(int fd, char b[257], int ms);
 int rf_run(char *const argv[], char **out, size_t *outn, size_t cap,
            char *err, size_t errcap, int timeout_ms);
 

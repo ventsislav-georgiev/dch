@@ -1143,9 +1143,80 @@ def test_search():
     r = piped("--search", "needle\n\n")
     check("search -: a second newline is a bad search (only one dropped)",
           r.returncode == 2 and "bad search" in r.stderr, r.stderr)
-    r = piped("--search", "x" * 256 + "\n")
-    check("search -: the 256-byte cap counts the newline (still bad search)",
-          r.returncode == 2 and "bad search" in r.stderr, r.stderr)
+    # NIT-SI6: the cap's edges on --ref (256 bytes; a search stops at 200)
+    url = "https://example.com/" + "a" * 236
+    for t, ok in ((url, 1), (url[:-1] + "\n", 1), (url + "\n", 0),
+                  (url + "b", 0)):
+        r = piped("--ref", t)
+        f = ok and r.returncode == 0 and ref_lines(r.stdout)
+        check("ref -: %d bytes%s %s" % (len(t), " (newline counted)" * (
+              t[-1] == "\n"), "accepted, whole" if ok else "is a bad ref"),
+              f and f[0]["first"].get("text") == t.rstrip("\n") if ok else
+              r.returncode == 2 and "dch: bad ref" in r.stderr,
+              (r.returncode, r.stdout[:200], r.stderr))
+    for flag, t, msg in (("--search", "nee\0dle", "bad search"),
+                         ("--ref", "#8\x0031", "bad ref")):
+        r = piped(flag, t)
+        check("%s -: an embedded NUL is a %s, never cut at it" % (flag, msg),
+              r.returncode == 2 and msg in r.stderr, r.stderr)
+    # LOW-SI1: a writer that never closes ends at the deadline, no hang
+    def open_writer(flag, ms):
+        env = dict(ENV, DCH_XRAY_STDIN_MS=ms) if ms else ENV
+        p = subprocess.Popen([DCH, "--xray", "xr-sr", flag, "-", "--json"],
+                             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.PIPE, text=True, env=env)
+        t0 = time.time()
+        p.stdin.write("needle\n")
+        p.stdin.flush()     # and left open (communicate would close it)
+        try:
+            rc = p.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            rc = p.wait()
+        dt = time.time() - t0
+        e = p.stderr.read()
+        p.stdin.close()
+        p.stderr.close()
+        return (rc if dt < 30 else None), e, dt
+    for flag, msg in (("--search", "bad search"), ("--ref", "bad ref")):
+        rc, e, dt = open_writer(flag, "300")
+        check("%s -: an open writer ends at the deadline (300 ms knob) with "
+              "%s" % (flag, msg), rc == 2 and msg in e and dt < 4.5,
+              (rc, e, dt))
+    rc, e, dt = open_writer("--search", "60000")
+    check("search -: the 5 s deadline is the ceiling (a larger knob is "
+          "ignored), then bad search", rc == 2 and "bad search" in e and
+          4.5 < dt < 20, (rc, e, dt))
+    # LOW-SI2: a non-blocking stdin waits for its text, no spurious error
+    rd, wr = os.pipe()
+    os.set_blocking(rd, False)
+    late = threading.Timer(0.5, lambda: (os.write(wr, b"needle\n"),
+                                         os.close(wr)))
+    late.start()
+    try:
+        r = subprocess.run([DCH, "--xray", "xr-sr", "--search", "-",
+                            "--json"], stdin=rd, capture_output=True,
+                           text=True, timeout=30, env=ENV)
+    finally:
+        late.join()
+        os.close(rd)
+    want = dch("--xray", "xr-sr", "--search", "needle", "--json")
+    check("search -: a non-blocking stdin written 0.5 s late is read",
+          r.returncode == 0 and r.stdout == want.stdout,
+          (r.returncode, r.stderr))
+    # LOW-SI3: a local session with ':' in its name reads stdin, as the
+    # query routes it locally
+    history("loc:xr-sr", SSID, cfg)
+    try:
+        want = dch("--xray", "loc:xr-sr", "--search", "needle", "--json")
+        r = piped("--search", "needle\n", n="loc:xr-sr")
+        check("search -: a local loc:xr-sr reads stdin like its argv word",
+              want.returncode == 0 and r.returncode == 0 and
+              r.stdout == want.stdout and '"hits":[{' in r.stdout,
+              (want.returncode, want.stderr, r.returncode, r.stderr))
+    finally:
+        os.unlink(os.path.join(T, "state", "dch", "sessions", os.path.join(
+            T, "dch-%d" % os.getuid()).replace("/", "-"), "loc:xr-sr.json"))
     def stable(out):    # the rows without the timing lines (first, progress, done)
         return [l for l in ref_lines(out) or [None]
                 if l is None or not {"first", "progress", "done"} & set(l)]
@@ -1167,10 +1238,15 @@ def test_search():
         r = piped(flag, "")
         check("%s -: empty stdin is the value rule's error" % flag,
               r.returncode == 2 and msg in r.stderr, r.stderr)
-        r = piped(flag, "needle", n="nosuch:xr-sr")
-        check("%s -: host:name keeps 3.1's error, stdin unread" % flag,
-              r.returncode == 2 and "dch: " in r.stderr and
-              r.stdout == "", (r.returncode, r.stderr))
+        # LOW-SI3: with remotes off an unknown host:name is served locally,
+        # so it reads stdin and answers as its argv word (a remote-routed
+        # one stays unread: serve_xray_env_test.py)
+        w = dch("--xray", "nosuch:xr-sr", flag, "#831", "--json")
+        r = piped(flag, "#831\n", n="nosuch:xr-sr")
+        check("%s -: a locally routed nosuch:xr-sr reads stdin, as its "
+              "argv word" % flag, (r.returncode, r.stdout, r.stderr) ==
+              (w.returncode, w.stdout, w.stderr) and
+              "no such session" in r.stderr, (r.returncode, r.stderr))
         r = subprocess.run([DCH, "--xray", "xr-sr", flag, "-", "--json"],
                            stdin=subprocess.DEVNULL, capture_output=True,
                            text=True, timeout=30, env=ENV)

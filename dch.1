@@ -1655,18 +1655,28 @@ A
 .IR ref )
 of
 .B \-
-is read from standard input, so it stays out of
-.BR ps ,
-when stdin is not a terminal and the session is local; at most 256 bytes,
+is read from standard input, so it stays out of dch's own
+.B ps
+line (a
+.B define_command
+that
+.B \-\-ref
+runs still gets the ref as its last argument),
+when stdin is not a terminal and the session is served locally (a local
+name with a colon too); it reads to the end of input, so the writer must
+close stdin; at most 256 bytes,
 counting the newline; one trailing newline (\fB\\n\fR or \fB\\r\\n\fR) is
 dropped, a second is a control character.
-Past 256 bytes, or empty, it is the empty text and the usual error
+Past 256 bytes, empty, a read error, or no end of input within 5 seconds of
+the start (a non-blocking stdin is waited on within them), it is the empty
+text and the usual error
 .RB ( "bad search" ", " "bad ref" ;
-exit 2); on a terminal or with
+exit 2); on a terminal or with a remote
 .I host:name
 the
 .B \-
-is the plain text, the same error as before.
+is the plain text, the same error as before
+.RB ( "bad search" ", " "not a ref" ).
 It counts the typed prompts, the assistant's text, a tool call's input
 values and a tool result's text (Codex: the user's and assistant's
 messages, a call's arguments and its output; a shell: the typed commands

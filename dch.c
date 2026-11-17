@@ -2900,11 +2900,13 @@ usage(void)
 	    "                                             empties a shell's ring\n"
 	    "  dch --xray <n> --follow --json             that object, then its\n"
 	    "                                             deltas as NDJSON\n"
-	    "  dch --xray <n> --ref <ref> [--scope session|project|all] [--full]\n"
+	    "  dch --xray <n> --ref <ref>|- [--scope session|project|all] [--full]\n"
 	    "       [--budget-ms <ms>] --json             one ref's mentions and\n"
 	    "                                             definitions as NDJSON\n"
-	    "  dch --xray <n> --search <text> --json      the newest 50 places a\n"
+	    "  dch --xray <n> --search <text>|- --json    the newest 50 places a\n"
 	    "                                             word or phrase was said\n"
+	    "                                             (-: read from stdin to\n"
+	    "                                             its end, 5 s at most)\n"
 	    "  dch --xray <n> --memory --json             its memories and\n"
 	    "                                             instruction files as\n"
 	    "                                             JSON lines\n"
@@ -15243,18 +15245,23 @@ xray_main(int argc, char **argv)
 		}
 		return dch_remote_requests(argv[ni]);
 	}
-	/* "-": the text on stdin, never in ps (LOW-XN1; dch serve's ctl child
-	** does the same). A terminal's "-" or a host:name's stays 3.1's error;
-	** a bad read or more than 256 bytes is "" (so "bad search"/"bad ref").
-	** A user who pipes into dch chose to be read. */
+	/* "-": the text on stdin, never in dch's ps line (LOW-XN1; dch serve's
+	** ctl child does the same). A terminal's "-" or a remote-routed
+	** host:name's stays 3.1's error; a bad read, more than 256 bytes or no
+	** end of input within 5 s is "" (so "bad search"/"bad ref"). The gate
+	** is the query's own routing (LOW-SI3). A user who pipes into dch chose
+	** to be read. DCH_XRAY_STDIN_MS=<ms> lowers the 5 s (tests only). */
 	{
 		static char tb[257];
 		const char **v = search && !strcmp(search, "-") ? &search
 		                 : ref && !strcmp(ref, "-") ? &ref : NULL;
+		int ms = (e = getenv("DCH_XRAY_STDIN_MS")) && atoi(e) > 0 &&
+		         atoi(e) < 5000 ? atoi(e) : 5000;
 
 		unsetenv("DCH_XRAY_STDIN");
-		if (v && !isatty(STDIN_FILENO) && !name_is_remote(n) &&
-		    !(*v = ctl_text_read(STDIN_FILENO, tb)))
+		unsetenv("DCH_XRAY_STDIN_MS");
+		if (v && !isatty(STDIN_FILENO) && !name_routes_remote(n) &&
+		    !(*v = ctl_text_read(STDIN_FILENO, tb, ms)))
 			*v = "";
 		else if (v && *v == tb)
 		{
