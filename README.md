@@ -1551,7 +1551,7 @@ mid-line in output is no ref. A prompt, an assistant text and a compact
 summary are scanned whole (1.92.0; a line over 1 MiB is not read at all).
 Other texts are clipped before the scan: 6000 Unicode scalars of a notice and
 of a Bash command, 3000 of tool output, 240 per tool field. A shell line (rows joined at soft wraps, at most 64 KiB) gives at most
-128 mentions.
+128 mentions, and so does a text block: past 128 the newest 128 are kept.
 
 Each entry of `refs` carries `key` (`<shape>:<text>`), `shape`, `text`,
 `full` (a commit's hex as written), `project`, `count`, `last_offset`,

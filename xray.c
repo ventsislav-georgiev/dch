@@ -2041,6 +2041,7 @@ struct remit
 	uint64_t *ctr;		/* Claude: each mention its own unit */
 	uint64_t unit, row;	/* shell: the block and the row */
 	int left;		/* spans left in the block, -1 no cap */
+	long skip;		/* the scan's oldest spans passed over (recency) */
 	/* the field's code spans, for a definition anchor's one mention */
 	struct cov { size_t s, e; uint64_t h; } *cov;
 	size_t ncov, ccov;
@@ -2163,6 +2164,11 @@ rm_span(void *ctx, const struct xr_span *sp)
 		return 1;
 	if (rel_file(sp))
 		return 0;
+	if (r->skip > 0)
+	{
+		r->skip--;
+		return 0;
+	}
 	if (r->left > 0)
 		r->left--;
 	cov_add(r, sp);
@@ -2170,13 +2176,32 @@ rm_span(void *ctx, const struct xr_span *sp)
 	return 0;
 }
 
-/* Every span of text[0..n) in mode to the sink; text NUL-terminated. */
+static int
+rm_count(void *ctx, const struct xr_span *sp)
+{
+	if (!rel_file(sp))
+		(*(long *)ctx)++;
+	return 0;
+}
+
+/* Every span of text[0..n) in mode to the sink; text NUL-terminated. Past
+** left spans the newest are kept (recency first): a counting pass finds how
+** many oldest to skip. The pass costs one more scan of a bounded block. */
 static void
 rm_scan(struct remit *r, const char *text, size_t n, int mode)
 {
+	long all = 0;
+
 	r->text = text;
 	r->ctext = NULL;
 	r->ncov = 0;
+	r->skip = 0;
+	if (r->left > 0)
+	{
+		(void)xr_grammar(text, n, mode, r->cwd, rm_count, &all);
+		if (all > r->left)
+			r->skip = all - r->left;
+	}
 	(void)xr_grammar(text, n, mode, r->cwd, rm_span, r);
 }
 

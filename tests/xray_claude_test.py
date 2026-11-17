@@ -3404,6 +3404,49 @@ def test_long_answer():
         os.unlink(tp)
 
 
+def test_many_mentions():
+    """#463: past XR_SPANS (128) mentions in one text block the LAST 128
+    are kept (recency first), not the first."""
+    cfg = os.path.join(HOME, ".claude")
+    pdir = os.path.join(cfg, "projects", "-home-demo-proj")
+    os.makedirs(pdir, exist_ok=True)
+    tp = os.path.join(pdir, HTSID + ".jsonl")
+    big = " ".join("#%d" % i for i in range(1000, 1200)) + "\nNext: #999 TAILMARK"
+    mid = " ".join("#%d" % i for i in range(2000, 2100))
+    lines = [
+        {"type": "user", "cwd": "/home/demo/proj",
+         "timestamp": "2026-11-10T10:00:00Z",
+         "message": {"content": "ask"}},
+        {"type": "assistant", "message": {"content": big}},
+        {"type": "user", "timestamp": "2026-11-10T10:01:00Z",
+         "message": {"content": "ask2"}},
+        {"type": "assistant", "message": {"content": mid}}]
+    with open(tp, "w") as f:
+        f.write("".join(json.dumps(o) + "\n" for o in lines))
+    history("xr-many", HTSID, cfg)
+    try:
+        def count(r):
+            x = dch("--xray", "xr-many", "--ref", r, "--json")
+            t = [l["tally"] for l in ref_lines(x.stdout) or [] if "tally" in l]
+            return t[0].get("count") if t else None
+        check("many mentions: --ref #999 after 200 mentions counts 1",
+              count("#999") == 1, count("#999"))
+        check("many mentions: the last of 200 (#1199, #1073) are kept, "
+              "the first (#1000, #1072) dropped",
+              count("#1199") == 1 and count("#1073") == 1 and
+              count("#1000") != 1 and count("#1072") != 1,
+              [count(r) for r in ("#1199", "#1073", "#1000", "#1072")])
+        rc, o, err = xray("xr-many", "--json")
+        ks = {r["key"] for r in (o or {}).get("refs", [])}
+        check("many mentions: --json refs hold #999 and #1199; 100 "
+              "mentions keep all (#2000, #2099)",
+              rc == 0 and {"issue:#999", "issue:#1199", "issue:#2000",
+                           "issue:#2099"} <= ks and
+              "issue:#1000" not in ks, (err, len(ks)))
+    finally:
+        os.unlink(tp)
+
+
 def main():
     try:
         test_names()
@@ -3435,6 +3478,7 @@ def main():
         test_light_377()
         test_light_379()
         test_long_answer()
+        test_many_mentions()
     finally:
         shutil.rmtree(T, ignore_errors=True)
     if fails[0]:
