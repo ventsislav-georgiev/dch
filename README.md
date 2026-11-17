@@ -282,7 +282,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.84.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.85.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -425,10 +425,14 @@ and Ubuntu) is not left raw; `fg` brings the session or the picker back raw. A
 `SIGSTOP` cannot be caught: under dash the terminal stays raw until dch
 continues. Known macOS limit: a process that stops itself inside a signal
 handler while SIGCONT is caught can wedge in the kernel (seen without dch). If
-`q` then does not close the X-ray view, kill the whole job, not only the client
-(`kill -9 -<pgid>` of its process group, or the shell's `kill -9 %1`), and
-attach again: a bare `kill -9` of the client leaves the view's query child
-orphaned and stopped. The session is untouched.
+`q` then does not close the X-ray view, recover from another terminal: find
+the process group with `ps -o pgid= -p <pid of the dch client>` (or
+`ps -o pid,pgid,command | grep 'dch -a'`) and `kill -9 -<pgid>` it (closing
+the terminal window also recovers; the job holds the terminal raw, so ^Z, ^C
+and ^\ do nothing, and if the shell still responds, `kill -9 %1` works too).
+Kill the whole group, not only the client, then attach again: a bare
+`kill -9` of the client leaves the view's query child orphaned and stopped.
+The session is untouched.
 
 `detach_key = switch` in the [config file](#config-file) swaps the two: one
 press opens the picker, two detach. With `DCH_DOUBLE_TAP_MS=0` one press then
@@ -1621,7 +1625,7 @@ lines as NDJSON, each with `schema:1`: `first` (the key, `mode`, `scope` and
 control character and none of the bidi controls U+200E, U+200F, U+202A to
 U+202E and U+2066 to U+2069 (`dch: bad ref`), and must parse as exactly one
 ref (`dch: not a ref`), relative paths against the session's cwd. `--ref -` reads the ref from standard input like `--search -`
-(see [`--search`](#x-ray-queries---xray): stdin not a terminal, a local session,
+(see [`--search`](#x-ray-queries---xray): stdin not a terminal, the query not routed to a remote host,
 256 bytes at most, closed within 5 s, else the empty ref's `dch: bad ref`; on a
 terminal or with a remote `host:name` the ref is a plain `-`, so `dch: not a ref`).
 - **Scope.** `--scope session` reads `<n>`'s own transcript, or its ring and

@@ -2903,6 +2903,8 @@ usage(void)
 	    "  dch --xray <n> --ref <ref>|- [--scope session|project|all] [--full]\n"
 	    "       [--budget-ms <ms>] --json             one ref's mentions and\n"
 	    "                                             definitions as NDJSON\n"
+	    "                                             (-: read from stdin to\n"
+	    "                                             its end, 5 s at most)\n"
 	    "  dch --xray <n> --search <text>|- --json    the newest 50 places a\n"
 	    "                                             word or phrase was said\n"
 	    "                                             (-: read from stdin to\n"
@@ -10312,10 +10314,12 @@ xv_spawn(int fd, int ac, char **av, int *out, int *err)
 	}
 	fflush(stdout);
 	fflush(stderr);
-	/* blocked over the fork: a SIGTSTP (#416, on_sigtstp with the tty armed) or a SIGTERM from xv_stop before the resets
+	/* blocked over the fork: a SIGTERM from xv_stop before the resets
 	** would run picker_sigint here, which restores the view's terminal
 	** and xv_kills its siblings (QA 1.58.0 MED-V4); after them, one
-	** pending kills the child by its default action */
+	** pending kills the child by its default action. SIGTSTP/SIGCONT are
+	** blocked so the inherited on_sigtstp (attach.c), with the tty
+	** armed, cannot run in the child before its resets (#416, #425) */
 	sigemptyset(&s);
 	sigaddset(&s, SIGINT);
 	sigaddset(&s, SIGTERM);

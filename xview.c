@@ -4095,22 +4095,26 @@ xv_peersave(int hide)
 	char p[PATH_MAX] = "", t[PATH_MAX + 8], d[PATH_MAX], b[32], *s;
 	int fd, n, ok;
 
+	errno = 0;
 	if (xv_peerfile(p, sizeof p, 1) < 0)
-		return !p[0] ? 0 : strlen(p) >= sizeof p - 1 ? -2 : -1;
+		return !p[0] ? 0 : strlen(p) >= sizeof p - 1 ||
+		       errno == ENAMETOOLONG ? -2 : -1;
 	if (snprintf(t, sizeof t, "%s.%ld", p, (long)getpid()) >= PATH_MAX)
 		return -2;
 	snprintf(d, sizeof d, "%s", p);
 	if (!(s = strrchr(d, '/')))
 		return 0;
 	*s = '\0';
+	errno = 0;
 	if (dch_dir_private(d) < 0)
-		return -1;
+		return errno == ENAMETOOLONG ? -2 : -1;
 	/* never through a planted symlink, 0600 as the other state files
 	** (LOW-AV1, NIT-AV7) */
 	unlink(t);
 	if ((fd = open(t, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
 	               0600)) < 0)
-		return errno == EEXIST || errno == EISDIR || errno == ELOOP
+		return errno == ENAMETOOLONG ? -2 :
+		       errno == EEXIST || errno == EISDIR || errno == ELOOP
 		       ? -3 : 0;
 	n = snprintf(b, sizeof b, "hide_agents=%d\n", hide);
 	ok = write(fd, b, (size_t)n) == n;

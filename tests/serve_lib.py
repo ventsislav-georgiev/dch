@@ -65,6 +65,16 @@ def fake_ts(fake):
     if r.returncode:
         raise RuntimeError("tests/fake_tailscale.c did not build:\n"
                            + r.stdout + r.stderr)
+    # Endpoint security stalls the first exec of a new binary ~3 s, as long
+    # as serve's per-call timeout (#427): pay it here, and drop the call it logs.
+    t = time.time()
+    subprocess.run([p, "status", "--json"], capture_output=True, timeout=60)
+    if os.environ.get("DCH_WARM_TIME"):
+        print("fake_ts warm-up %.2fs" % (time.time() - t))
+    try:
+        os.unlink(os.path.join(fake, "calls"))
+    except FileNotFoundError:
+        pass
 
 
 NAMES = 'tmp fake home env benv procs fails whois_fail_ok slow_whois check put ts log_n serve stop calls run_fail text conn send recv_exact frame frame_not reply refused refusal sessions ctl1'.split()

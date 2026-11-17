@@ -474,6 +474,11 @@ xcmd_line(enum xcmd_kind kind, const char *s, size_t n, int first,
 		/* a BOM that leads once escapes are gone: either order */
 		if (m >= 3 && !memcmp(b, "\xef\xbb\xbf", 3))
 			b += 3, m -= 3;
+		/* blanks, a BOM, blanks: any order of them leads (#433) */
+		while (*b == ' ' || *b == '\t')
+			b++, m--;
+		if (m >= 3 && !memcmp(b, "\xef\xbb\xbf", 3))
+			b += 3, m -= 3;
 		memmove(line, b, m + 1);
 		for (i = 0; line[i] == ' ' || line[i] == '\t'; i++)
 			;

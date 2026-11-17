@@ -387,6 +387,13 @@ t_define_417(void)
 	CHECK("define: colour codes then a BOM then JSON: JSON",
 	      line(XCMD_DEFINE, "\x1b[32m\xef\xbb\xbf{\"title\":\"cb\"}", 1) ==
 	      XCMD_ROW && starts("{\"title\":\"cb\","));
+	CHECK("define: space, tab, colour+space before a BOM: JSON",
+	      line(XCMD_DEFINE, " \xef\xbb\xbf{\"title\":\"sb\"}", 1) ==
+	      XCMD_ROW && starts("{\"title\":\"sb\",") &&
+	      line(XCMD_DEFINE, "\t\xef\xbb\xbf{\"title\":\"tb\"}", 1) ==
+	      XCMD_ROW && starts("{\"title\":\"tb\",") &&
+	      line(XCMD_DEFINE, "\x1b[32m \xef\xbb\xbf{\"title\":\"cs\"}", 1) ==
+	      XCMD_ROW && starts("{\"title\":\"cs\","));
 	CHECK("define: colour codes round a JSON line: JSON, first or not",
 	      line(XCMD_DEFINE, "\x1b[32m{\"title\":\"g\"}\x1b[0m", 1) ==
 	      XCMD_ROW && starts("{\"title\":\"g\",") &&

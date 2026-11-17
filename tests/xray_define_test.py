@@ -480,7 +480,8 @@ def test_card_zwj():
             "a" * 29 + "\U0001F44D\U0001F3FD" * 5,
             "a" * 31 + "\U0001F1E7\U0001F1EC" * 5,
             "a" * 30 + "\U0001F44D\U0001F3FD" * 5,
-            "\U0001F469" + "\u200d\U0001F469" * 60]):
+            "\U0001F469" + "\u200d\U0001F469" * 60,
+            "chain\U0001F469" + "\u200d\U0001F469" * 39]):
         config(script("zwj.py", "import json\nprint(json.dumps({'title': '"
                       + title + "', 'status': 'open'}))\n"))
         v = Pty([DCH, "--xray", "xv-cl"], 30, 41)
@@ -511,6 +512,10 @@ def test_card_zwj():
             if k == 8:
                 check("#424 VW4: a long ZWJ chain is not blank",
                       "\U0001F469" in t, r)
+            if k == 9:
+                check("#429 VX2: text, then a long chain: more than one "
+                      "character of it", t.strip().startswith("chain") and
+                      t.count("\U0001F469") > 1, r)
             v.key(b"q")
         finally:
             v.close()

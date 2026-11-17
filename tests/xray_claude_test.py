@@ -3205,21 +3205,27 @@ def test_light_377():
                     "content": [{"type": "text", "text":
                                  "note %03d about PROJ-77 %s" %
                                  (i, "z" * 3900)}]}}) + "\n")
+        # host-relative: --full reads the same file without the cwd walk, so
+        # its time scales with the host (and ASan). 1.73.0's walk was ~33x
+        # it (4 s vs 0.12 s), the budgeted one ~3x; the bound is 15x, 1 s floor
+        t0 = time.time()
+        dch("--xray", "xr-377", "--ref", "PROJ-77", "--full",
+            "--json")
+        full = time.time() - t0
         t0 = time.time()
         r = dch("--xray", "xr-377", "--ref", "PROJ-77", "--budget-ms", "50",
                 "--json")
         dt = time.time() - t0
+        lim = max(15 * full, 1.0)
         ls = ref_lines(r.stdout) or [{}]
         m = [l["mention"]["line"][5:8] for l in ls if "mention" in l]
-        # an ASan build (DCH_TEST_NO_BUDGET) reads the window slower: 4.0 s
-        # on a CI runner, where an uncut walk takes many times 1.73.0's 4 s
-        lim = 8 if os.environ.get("DCH_TEST_NO_BUDGET") else 2
         check("387 budget: the budget ends a 15.5 MiB cwd walk (%.2f s, "
-              "under %d, 1.73.0 ~4 s); the newest window's notes still "
-              "come, why budget" % (dt, lim),
-              r.returncode == 0 and dt < lim and m and m[-1] == "250" and
-              ls[-1].get("why") == "budget",
-              (r.returncode, dt, m[:3], m[-3:], ls[-1:], r.stderr[-300:]))
+              "under %.2f s = 15x --full's %.2f s); the newest window's "
+              "notes still come, why budget" % (dt, lim, full),
+              r.returncode == 0 and dt < lim and m and m[-1] == "250"
+              and ls[-1].get("why") == "budget",
+              (r.returncode, dt, full, m[:3], m[-3:], ls[-1:],
+               r.stderr[-300:]))
     finally:
         os.unlink(tp)
 
