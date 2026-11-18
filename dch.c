@@ -6604,6 +6604,126 @@ put_json_str(const char *s)
 	free(q);
 }
 
+/* A Bash tool shell's command (#481): the argument of the wrapper's
+** `eval '…'` (zsh and bash alike), its quoting undone ('\'' and '"'"'),
+** else argv joined; at most cap-1 bytes cut between UTF-8 scalars, control
+** bytes and bytes that are no UTF-8 as spaces. */
+static void
+shell_command(char **v, char *out, size_t cap)
+{
+	size_t len = 0, o = 0, l;
+	char *j, *s, *w;
+	int k;
+
+	out[0] = '\0';
+	for (k = 0; v[k]; k++)
+		len += strlen(v[k]) + 1;
+	if (!(j = malloc(len + 1)))
+		return;
+	for (s = j, k = 0; v[k]; k++)
+		s += sprintf(s, "%s%s", k ? " " : "", v[k]);
+	if ((s = strstr(j, "eval '")))
+		/* one shell word in place: '…' runs, \x and "…" between */
+		for (s += 5, w = j; *s && *s != ' ' && *s != ';' && *s != '<'; )
+			if (*s == '\'' || *s == '"')
+			{
+				char q = *s++;
+
+				while (*s && *s != q)
+					*w++ = *s++;
+				s += *s == q;
+			}
+			else if (*s == '\\' && s[1])
+				*w++ = s[1], s += 2;
+			else
+				*w++ = *s++;
+	else
+		w = j + strlen(j);
+	*w = '\0';
+	for (s = j; *s; s += l)
+	{
+		l = dch_utf8_len((const unsigned char *)s, (size_t)(w - s));
+		if (o + (l ? l : 1) >= cap)
+			break;
+		if (l && !((unsigned char)*s < 0x20 || *s == 0x7f))
+			memcpy(out + o, s, l), o += l;
+		else
+			out[o++] = ' ', l = l ? l : 1;
+	}
+	out[o] = '\0';
+	free(j);
+}
+
+/* ,"shells" (#481): the Bash tool shells of the Claude at `pid` whose
+** session is `sid`, newest first. Claude Code runs each with fd 1 on
+** <tmp>/claude-<uid>/<project>/<sid>/tasks/<id>.output; the shell's own
+** children inherit that fd, so the shallowest process per id (breadth
+** first) is the shell. No "background": the kernel shows foreground and
+** background shells alike (each a session leader with stdin /dev/null). */
+static void
+put_shells(long pid, const char *sid)
+{
+	struct { long pid; time_t t; char id[64], cmd[201]; } sh[64], x;
+	long tree[1024];
+	char tail[128], path[PATH_MAX], **v;
+	const char *b;
+	int n = proc_tree(pid, tree, 1024), ns = 0, i, j;
+	size_t tl = (size_t)snprintf(tail, sizeof tail, "/%s/tasks/", sid), pl;
+
+	for (i = 1; i < n && ns < 64; i++)
+	{
+#ifdef __APPLE__
+		struct vnode_fdinfowithpath vi;
+
+		if (proc_pidfdinfo((int)tree[i], 1, PROC_PIDFDVNODEPATHINFO, &vi,
+		                   sizeof vi) != (int)sizeof vi)
+			continue;
+		snprintf(path, sizeof path, "%s", vi.pvip.vip_path);
+#else
+		char fp[64];
+		ssize_t r;
+
+		snprintf(fp, sizeof fp, "/proc/%ld/fd/1", tree[i]);
+		if ((r = readlink(fp, path, sizeof path - 1)) <= 0)
+			continue;
+		path[r] = '\0';
+#endif
+		pl = strlen(path);
+		if (!(b = strrchr(path, '/')) || !*++b || pl < tl + 8 || strcmp(path + pl - 7, ".output") ||
+		    (size_t)(b - path) < tl || memcmp(b - tl, tail, tl) ||
+		    pl - (size_t)(b - path) - 7 < 1 ||
+		    pl - (size_t)(b - path) - 7 >= sizeof x.id)
+			continue;
+		snprintf(x.id, sizeof x.id, "%.*s",
+		         (int)(pl - (size_t)(b - path) - 7), b);
+		for (j = 0; j < ns && strcmp(sh[j].id, x.id); j++)
+			;
+		if (j < ns || (x.t = proc_started(tree[i])) < 0)
+			continue;	/* a shell's child, or gone */
+		x.pid = tree[i];
+		x.cmd[0] = '\0';
+		if ((v = proc_argv(x.pid)))
+			shell_command(v, x.cmd, sizeof x.cmd);
+		free(v);
+		/* newest first; the same second, the higher pid */
+		for (j = ns++; j > 0 && (sh[j - 1].t < x.t ||
+		     (sh[j - 1].t == x.t && sh[j - 1].pid < x.pid)); j--)
+			sh[j] = sh[j - 1];
+		sh[j] = x;
+	}
+	fputs(",\"shells\":[", stdout);
+	for (i = 0; i < ns; i++)
+	{
+		printf("%s{\"id\":", i ? "," : "");
+		put_json_str(sh[i].id);
+		printf(",\"pid\":%ld,\"started\":%ld,\"command\":", sh[i].pid,
+		       (long)sh[i].t);
+		put_json_str(sh[i].cmd);
+		putchar('}');
+	}
+	putchar(']');
+}
+
 /* --json (--stop, --restart, --revive): {"name","phase"} as a session
 ** reaches each step. */
 static void
@@ -17166,7 +17286,7 @@ main_run(int argc, char **argv)
 		/* The Claude under each session's child (the root --stop
 		** joins from, by MSG_CMD), read live: every sessions dir once
 		** for all rows, procStart verified (#079). On Linux the rows
-		** share one /proc scan (proc_tree_keep). */
+		** share one /proc scan (proc_tree_keep), "shells" too. */
 		struct crec_rows cr = { calloc((size_t)sl.n + 1, sizeof *cr.v),
 		                        sl.n };
 		/* pty size and attached clients (#099), from the same MSG_CMD
@@ -17200,7 +17320,6 @@ main_run(int argc, char **argv)
 			}
 			cmd_info_free(&ci);
 		}
-		proc_tree_keep = 0;
 		for (k = 0; cr.v && k < nd; k++)
 			(void)visit_records_in(cdirs[k], crec_visit_rows, &cr);
 		/* "cwd" (#115): the session's directory, from its own live
@@ -17264,6 +17383,8 @@ main_run(int argc, char **argv)
 			if (fg >= 0)
 				printf(",\"claude_foreground\":%s",
 				       fg ? "true" : "false");
+			if (c)
+				put_shells(c->pid, c->sid);
 			/* omitted, not 0, when the master can't answer */
 			if (sz && sz[k][0] >= 0)
 				printf(",\"cols\":%ld,\"rows\":%ld,\"clients\":%ld",
@@ -17285,6 +17406,7 @@ main_run(int argc, char **argv)
 			free(h.launch);
 			putchar('}');
 		}
+		proc_tree_keep = 0;
 		if (hfd >= 0)
 			close(hfd);
 		if (opt_remote)
