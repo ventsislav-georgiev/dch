@@ -2912,10 +2912,13 @@ usage(void)
 	    "                                             definitions as NDJSON\n"
 	    "                                             (-: read from stdin to\n"
 	    "                                             its end, 5 s at most)\n"
-	    "  dch --xray <n> --search <text>|- --json    the newest 50 places a\n"
+	    "  dch --xray <n> --search <text>|- [--scope session|project|all]\n"
+	    "       [--json]                              the newest 50 places a\n"
 	    "                                             word or phrase was said\n"
 	    "                                             (-: read from stdin to\n"
-	    "                                             its end, 5 s at most)\n"
+	    "                                             its end, 5 s at most);\n"
+	    "                                             project|all: grouped by\n"
+	    "                                             session\n"
 	    "  dch --xray <n> --memory --json             its memories and\n"
 	    "                                             instruction files as\n"
 	    "                                             JSON lines\n"
@@ -12841,6 +12844,7 @@ struct xr_refq
 	const char *text;
 	int full, budget, scope;	/* scope: xr_scan_scope's */
 	int search;			/* text is --search's (#297) */
+	int txt;			/* --search without --json (#498) */
 };
 
 static int
@@ -13125,13 +13129,103 @@ xr_ref_others(struct xr_scan *sc, int scope, const char *self,
 	return rc;
 }
 
-/* --search over one transcript or rollout (#297): its newest hits, one
-** object. No other session's file is read. */
+/* --search's answer (#297), s freed here: <n>'s hits as one object; with
+** --scope project|all (#498) one object grouping <n>'s hits and those of
+** every other session xr_mapped maps (its Claude or Codex file, never a
+** ring), in its order, each searched as <n>'s with its own turn and hit
+** caps, all of them under xr_lim's files and the ms since dch started;
+** another session with no hit is left out. Without --json: text. */
+static int
+xr_search_out(struct xr_search *s, const struct xr_refq *q,
+              const char *session, const char *sid, const char *corpus,
+              const char *why, const char *project, long long seen, int live)
+{
+	struct xr_cand *v = NULL;
+	const char *swhy = NULL;
+	int m = 0, k, rc = 0, searched = 1, fd;
+	FILE *f = stdout;
+
+	if (!q->scope && !q->txt)
+	{
+		rc = xr_out_exit(xr_search_print(f, s, session, sid, corpus,
+		                                 why) == 0);
+		xr_search_free(s);
+		return rc;
+	}
+	if (q->scope)
+		m = xr_mapped(sid, project, q->scope == 2, &v);
+	if (q->txt)
+		xr_search_text(f, s, session, seen);
+	else
+	{
+		fputs("{\"schema\":1,\"session\":", f);
+		xr_put_str(f, session);
+		fputs(",\"session_id\":", f);
+		xr_put_str(f, sid);
+		fputs(",\"text\":", f);
+		xr_put_str(f, q->text);
+		fprintf(f, ",\"scope\":\"%s\",\"sessions\":[", q->scope == 2
+		        ? "all" : q->scope ? "project" : "session");
+		xr_search_group(f, s, session, sid, corpus, live, project, seen,
+		                why);
+	}
+	xr_search_free(s);
+	for (k = 0; k < m && rc == 0; k++)
+	{
+		if ((unsigned long long)searched >= xr_lim.files ||
+		    xr_now_ms() - xr_t0 >= xr_lim.ms)
+		{
+			swhy = (unsigned long long)searched >= xr_lim.files ? "files"
+			       : "time";
+			break;
+		}
+		if (!(s = xr_search_new(q->text, xr_t0)))
+			rc = -1;
+		else if ((fd = xr_seam_open(v[k].path, &v[k].st)) >= 0)
+		{
+			searched++;
+			rc = xr_search_file(s, fd, (uint64_t)v[k].st.st_size,
+			                    (uint64_t)v[k].st.st_ino, v[k].codex);
+			close(fd);
+			if (rc == 0 && xr_search_hits(s) && q->txt)
+				xr_search_text(f, s, v[k].name, v[k].seen);
+			else if (rc == 0 && xr_search_hits(s))
+			{
+				fputc(',', f);
+				xr_search_group(f, s, v[k].name, v[k].sid, v[k].codex
+				                ? "codex" : "claude", v[k].live,
+				                v[k].project, v[k].seen, NULL);
+			}
+		}	/* not opened: gone since the lookup, skipped */
+		xr_search_free(s);
+	}
+	free(v);
+	if (rc != 0)
+		return xr_failed();
+	if (q->txt && swhy)
+		fprintf(f, "(stopped at the %s cap: %d sessions searched)\n",
+		        swhy, searched);
+	else if (!q->txt)
+	{
+		fprintf(f, "],\"searched\":%d,\"partial\":%s,\"why\":", searched,
+		        swhy ? "true" : "false");
+		if (swhy)
+			fprintf(f, "\"%s\"", swhy);
+		else
+			fputs("null", f);
+		fputs("}\n", f);
+	}
+	return xr_out_exit(fflush(f) == 0 && !ferror(f));
+}
+
+/* --search over one transcript or rollout (#297); with --scope (#498) the
+** other sessions' files after it (xr_search_out). */
 static int
 xr_search_one(const char *path, const struct stat *st, int codex,
-              const char *session, const char *sid, const char *text)
+              const char *session, const char *sid, const struct xr_refq *q,
+              const char *project, int live)
 {
-	struct xr_search *s = xr_search_new(text, xr_t0);
+	struct xr_search *s = xr_search_new(q->text, xr_t0);
 	int fd, rc;
 
 	if (!s)
@@ -13144,11 +13238,13 @@ xr_search_one(const char *path, const struct stat *st, int codex,
 	rc = xr_search_file(s, fd, (uint64_t)st->st_size, (uint64_t)st->st_ino,
 	                    codex);
 	close(fd);
-	rc = rc < 0 ? xr_failed()
-	     : xr_out_exit(xr_search_print(stdout, s, session, sid,
-	                                   codex ? "codex" : "claude", NULL) == 0);
-	xr_search_free(s);
-	return rc;
+	if (rc < 0)
+	{
+		xr_search_free(s);
+		return xr_failed();
+	}
+	return xr_search_out(s, q, session, sid, codex ? "codex" : "claude", NULL,
+	                     project, (long long)st->st_mtime, live);
 }
 
 /* #405: a ref no file read defined: the user's define_command (their own
@@ -13167,7 +13263,7 @@ xr_cmd_def(const char *line, void *arg)
 static void
 xr_define(struct xr_scan *sc, const struct xr_span *sp, const char *text,
           const char *session, const char *label, const char *agent,
-          const char *asid)
+          const char *asid, int live)
 {
 	struct xcmd_result res;
 	struct stat st;
@@ -13178,10 +13274,14 @@ xr_define(struct xr_scan *sc, const struct xr_span *sp, const char *text,
 	                      stat(label, &st) == 0 && S_ISDIR(st.st_mode)
 	                      ? label : getenv("HOME"), agent, asid,
 	                      ref, xr_shape_name[sp->shape], xr_span_text(sp) };
-	int set;
+	int set, d0 = xr_scan_defs(sc);
 
-	if (xr_scan_cancelled(sc) || xr_scan_defs(sc))
+	if (xr_scan_cancelled(sc))
 		return;
+	/* #502: a definition the files held does not stop the built-in
+	** resolver ("landed as <sha>" can be one), a define_command's does */
+	if (d0)
+		goto builtin;
 	xr_ref_written(text, ref, sizeof ref);	/* checked: <= 256 bytes */
 	if ((set = dch_config_get("define_command", cmd, sizeof cmd)) < 0)
 		snprintf(warn, sizeof warn, "define_command: not a command line "
@@ -13192,6 +13292,9 @@ xr_define(struct xr_scan *sc, const struct xr_span *sp, const char *text,
 		         : "define_command: no definition printed");
 	if (warn[0])
 		xr_scan_define_warn(sc, warn);
+builtin:
+	if (xr_scan_defs(sc) == d0)
+		xr_scan_commit(sc, sp, text, label, live);
 }
 
 /* --ref over (cfg, sid)'s transcript (3.4): `first` once the file is
@@ -13218,10 +13321,10 @@ xr_claude_ref(const char *cfg, const char *sid, const char *session,
 	if (xr_claude_lookup(cfg, sid, path, sizeof path, &st, project,
 	                     sizeof project) < 0)
 		return xr_no_corpus();
-	if (q->search)
-		return xr_search_one(path, &st, 0, session, sid, q->text);
 	if (!project[0])
 		xr_project_key(label, project, sizeof project);
+	if (q->search)
+		return xr_search_one(path, &st, 0, session, sid, q, project, live);
 	if (!xr_ref_parse(q->text, label, &sp))
 		return xr_not_ref();
 	if (!(sc = xr_scan_new(stdout, sp.key, session, project, live, q->full,
@@ -13238,7 +13341,7 @@ xr_claude_ref(const char *cfg, const char *sid, const char *session,
 	if (rc == 0)
 		rc = xr_ref_others(sc, q->scope, sid, project);
 	if (rc == 0)
-		xr_define(sc, &sp, q->text, session, label, "claude", sid);
+		xr_define(sc, &sp, q->text, session, label, "claude", sid, live);
 	/* a cancel stopped the read: no done */
 	return xr_ref_exit(sc, rc != 0 || xr_scan_done(sc) != 0);
 }
@@ -13322,9 +13425,9 @@ xr_codex_ref(const struct xr_cx *x, const char *session, const char *label,
 
 	if (xr_codex_lookup(x->home, x->tid, path, sizeof path, &st) < 0)
 		return xr_no_corpus();
-	if (q->search)
-		return xr_search_one(path, &st, 1, session, x->tid, q->text);
 	xr_project_key(label, project, sizeof project);
+	if (q->search)
+		return xr_search_one(path, &st, 1, session, x->tid, q, project, 1);
 	if (!xr_ref_parse(q->text, label, &sp))
 		return xr_not_ref();
 	if (!(sc = xr_scan_new(stdout, sp.key, session, project, 1, q->full,
@@ -13339,7 +13442,7 @@ xr_codex_ref(const struct xr_cx *x, const char *session, const char *label,
 	if (rc == 0)
 		rc = xr_ref_others(sc, q->scope, x->tid, project);
 	if (rc == 0)
-		xr_define(sc, &sp, q->text, session, label, "codex", x->tid);
+		xr_define(sc, &sp, q->text, session, label, "codex", x->tid, 1);
 	return xr_ref_exit(sc, rc != 0 || xr_scan_done(sc) != 0);
 }
 
@@ -13469,12 +13572,14 @@ xr_search_ring_rec(void *ctx, const struct xr_rec *x)
 }
 
 static int
-xr_shell_search(const struct xr_target *t, const char *text)
+xr_shell_search(const struct xr_target *t, const struct xr_refq *q,
+                const char *label)
 {
+	char project[1200];
 	struct xr_chapters ch = {0};
 	struct xr_search_ring f;
 	struct ring_snap rs;
-	int fr = ring_fetch(t->sock, &rs, NULL, NULL), rc, partial;
+	int fr = ring_fetch(t->sock, &rs, NULL, NULL), partial;
 
 	if (fr == -3)
 		return xr_failed();
@@ -13483,7 +13588,7 @@ xr_shell_search(const struct xr_target *t, const char *text)
 	if (fr != 0 || (rs.status & (DCH_RING_S_OFF | DCH_RING_S_PAUSED)))
 		return xr_no_corpus();
 	f.acc = calloc(1, sizeof *f.acc);
-	f.s = xr_search_new(text, xr_t0);
+	f.s = xr_search_new(q->text, xr_t0);
 	if (!f.acc || !f.s)
 	{
 		free(f.acc);
@@ -13499,13 +13604,16 @@ xr_shell_search(const struct xr_target *t, const char *text)
 	xr_search_ring_end(f.s);
 	partial = fr == -4 || rs.seqgap || f.acc->gap || f.acc->cont ||
 	          f.acc->lost || (rs.status & DCH_RING_S_EVICTED);
-	rc = fr == -1 ? xr_no_session() : fr != 0 && fr != -4 ? xr_failed()
-	     : xr_out_exit(xr_search_print(stdout, f.s, t->name, rs.sid, "shell",
-	                                   partial ? "range" : NULL) == 0);
+	xr_project_key(label, project, sizeof project);
 	xr_chapters_free(&ch);
-	xr_search_free(f.s);
 	free(f.acc);
-	return rc;
+	if (fr == -1 || (fr != 0 && fr != -4))
+	{
+		xr_search_free(f.s);
+		return fr == -1 ? xr_no_session() : xr_failed();
+	}
+	return xr_search_out(f.s, q, t->name, rs.sid, "shell",
+	                     partial ? "range" : NULL, project, -1, 1);
 }
 
 /* --ref over a live shell's ring (3.4): the ring's header names it, so
@@ -13525,7 +13633,7 @@ xr_shell_ref(const struct xr_target *t, const struct xr_refq *q,
 	int fr, rc;
 
 	if (q->search)
-		return xr_shell_search(t, q->text);
+		return xr_shell_search(t, q, label);
 	if ((fr = ring_fetch(t->sock, &rs, NULL, NULL)) == -3)
 		return xr_failed();
 	if (fr == -1)
@@ -13575,7 +13683,7 @@ xr_shell_ref(const struct xr_target *t, const struct xr_refq *q,
 		/* then the project's Claude files, never another ring (S17) */
 		rc = xr_ref_others(f.sc, q->scope, "", project);
 		if (rc == 0)
-			xr_define(f.sc, &sp, q->text, t->name, label, "", "");
+			xr_define(f.sc, &sp, q->text, t->name, label, "", "", 1);
 		if (rc == 0)
 			rc = xr_scan_done(f.sc);
 	}
@@ -16397,7 +16505,7 @@ xray_main(int argc, char **argv)
 	}
 	/* every form is one name-shaped word (3.1: a record name validated
 	** like a name); xr_resolve tells the forms apart */
-	if ((scope || full || budget) && !ref)
+	if ((scope && !ref && !search) || ((full || budget) && !ref))
 	{
 		fputs("dch: bad usage: --scope, --full and --budget-ms come with "
 		      "--ref\n", stderr);
@@ -16552,11 +16660,13 @@ xray_main(int argc, char **argv)
 		return rc;
 	}
 	/* 3.4: project unless asked; a remote caller too (XR4) */
-	q.scope = !scope || !strcmp(scope, "project") ? 1
-	          : !strcmp(scope, "all") ? 2 : 0;
+	q.scope = !scope ? !search
+	          : !strcmp(scope, "project") ? 1 : !strcmp(scope, "all") ? 2 : 0;
+	/* #498: --search's text answer, here only (a host:name's stays --json) */
+	q.txt = search && !json && !name_routes_remote(n);
 	/* the view (#175): `--xray <n>` alone */
-	if (!json && (ref || chapter || clear || follow || search || tasks ||
-	              memory))
+	if (!json && (ref || chapter || clear || follow || (search && !q.txt) ||
+	              tasks || memory))
 	{
 		fputs("dch: bad usage: --json is required (the --xray view takes "
 		      "no flag)\n", stderr);
@@ -16564,7 +16674,7 @@ xray_main(int argc, char **argv)
 	}
 	/* a host:name's view too (#188): its queries run on the host; its o
 	** (#194) attaches to the session as `dch -a` does */
-	if (!json)
+	if (!json && !q.txt)
 	{
 		/* routed once, as it opens: the view, its queries and its o
 		** stay on that session when a same-named one comes (#210) */

@@ -547,6 +547,11 @@ int xr_res_ref(const struct xr_span *sp, const char *text, const char *cwd,
 ** per session kind, before done. */
 void xr_scan_resolved(struct xr_scan *x, const struct xr_span *sp,
                       const char *text, const char *cwd, int live);
+/* #502, light only: a live session's commit ref, after define_command
+** answered nothing, gets the resolved line too when it is ok; any other
+** state (not a repo, not a commit, a timeout) gives none. */
+void xr_scan_commit(struct xr_scan *x, const struct xr_span *sp,
+                    const char *text, const char *cwd, int live);
 /* The parsers, for the units and fuzz_xref: git show's output as a commit
 ** block (1, else 0); a file's 14-line window around line (0: the first);
 ** --ref's line suffix (:line, :line:col, #L<line>; 0 for none); the
@@ -612,6 +617,20 @@ void xr_search_ring_end(struct xr_search *s);
 int xr_search_print(FILE *f, const struct xr_search *s, const char *session,
                     const char *session_id, const char *corpus,
                     const char *why);
+/* --scope project|all (#498): the hits kept; one session's group, no newline:
+** {"session","session_id","corpus","live","project","last_active",
+** "turn_title" (the newest hit's),"hits":[{"chapter","offset","at","who",
+** "tool","turn_title","snippet"}…],"more","partial","why","bytes"};
+** session_id and project null for "", last_active null for < 0. */
+size_t xr_search_hits(const struct xr_search *s);
+void xr_search_group(FILE *f, const struct xr_search *s, const char *session,
+                     const char *session_id, const char *corpus, int live,
+                     const char *project, long long last_active,
+                     const char *why);
+/* --search without --json (#498): the session's line (name, last activity
+** in local time, the hit count), then per turn its title and its hits. */
+void xr_search_text(FILE *f, const struct xr_search *s, const char *session,
+                    long long last_active);
 
 /* ---- --tasks (#319): the session's task list ---------------------------- */
 #define XR_TASKS       50000		/* tasks kept: the newest */

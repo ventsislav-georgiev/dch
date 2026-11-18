@@ -2932,6 +2932,146 @@ def test_scope():
 ASID = "11111111-2222-4333-8444-5555555555c9"
 
 
+# ---- --search across sessions (#498): --scope project|all ------------------
+
+def test_search_scope():
+    """A store of its own, 3 sessions in 2 projects: --search --scope
+    project|all groups the hits by session (<n> first, then xr_mapped's
+    order, a session with no hit left out), each with session_id,
+    last_active and the turn's title; text without --json; the files and
+    time caps; no --scope stays <n>'s one object."""
+    S = os.path.join(T, "sscope")
+    home = os.path.join(S, "home")
+    cfg = os.path.join(home, ".claude")
+    sockdir = os.path.join(S, "dch-%d" % os.getuid())
+    hdir = os.path.join(S, "state", "dch", "sessions",
+                        sockdir.replace("/", "-"))
+    for d in (home, hdir):
+        os.makedirs(d)
+    env = dict(ENV, XDG_RUNTIME_DIR=S, XDG_STATE_HOME=os.path.join(S, "state"),
+               HOME=home)
+    sid = lambda k: "33333333-3333-4444-8555-%012d" % k
+
+    def put(k, cwd, turns, updated):
+        pdir = os.path.join(cfg, "projects", key(cwd))
+        os.makedirs(pdir, exist_ok=True)
+        with open(os.path.join(pdir, sid(k) + ".jsonl"), "w") as f:
+            for i, (ask, answer) in enumerate(turns):
+                f.write(json.dumps({"type": "user", "cwd": cwd,
+                                    "timestamp": "2026-11-1%dT10:0%d:00Z"
+                                    % (k, i), "message": {"content": ask}})
+                        + "\n")
+                f.write(json.dumps({"type": "assistant", "message": {
+                    "content": [{"type": "text", "text": answer}]}}) + "\n")
+        rec = {"name": "q%d" % k, "cwd": cwd, "end": "exited",
+               "argv": ["claude"], "started": 1794299400,
+               "updated": updated, "ended": updated, "sock_dir": sockdir,
+               "agent": {"session_id": sid(k), "cwd": cwd,
+                         "config_dir": cfg}}
+        with open(os.path.join(hdir, "q%d.json" % k), "w") as f:
+            f.write(json.dumps(rec) + "\n")
+
+    P, O = "/home/demo/sproj", "/home/demo/sother"
+    put(0, P, [("plan the release", "see the Push Retry note")], 1794300000)
+    put(1, P, [("why does push retry loop", "backoff was zero"),
+               ("unrelated", "nothing here")], 1794300010)
+    put(2, O, [("the push retry thing again", "fixed in remote.c")],
+        1794300020)
+    put(3, P, [("no match at all", "none")], 1794300030)
+
+    def run(*a, e=env):
+        r = dch("--xray", "q0", "--search", "push retry", *a, env=e)
+        try:
+            return r.returncode, json.loads(r.stdout), r.stderr
+        except ValueError:
+            return r.returncode, None, r.stdout + r.stderr
+
+    G_KEYS = ["session", "session_id", "corpus", "live", "project",
+              "last_active", "turn_title", "hits", "more", "partial", "why",
+              "bytes"]
+    HT_KEYS = ["chapter", "offset", "at", "who", "tool", "turn_title",
+               "snippet"]
+    rc, o, err = run("--scope", "project", "--json")
+    g = o["sessions"] if o else []
+    check("search scope: project groups <n>'s and its project's sessions "
+          "with hits (q3 has none: left out; q2 is another project)",
+          rc == 0 and o and list(o) == ["schema", "session", "session_id",
+                                        "text", "scope", "sessions",
+                                        "searched", "partial", "why"] and
+          o["scope"] == "project" and o["session_id"] == sid(0) and
+          [x["session"] for x in g] == ["q0", "q1"] and o["searched"] == 3 and
+          o["partial"] is False, (rc, o, err))
+    check("search scope: a group's keys, its session_id, last_active and "
+          "turn titles (the mentions' other-session fields)",
+          len(g) == 2 and all(list(x) == G_KEYS for x in g) and
+          all(list(h) == HT_KEYS for x in g for h in x["hits"]) and
+          g[1]["session_id"] == sid(1) and g[1]["last_active"] == 1794300010
+          and g[1]["project"] == key(P) and g[1]["corpus"] == "claude" and
+          g[1]["turn_title"] == "why does push retry loop" and
+          [(h["who"], h["turn_title"]) for h in g[1]["hits"]] ==
+          [("user", "why does push retry loop")] and
+          g[0]["turn_title"] == "plan the release" and
+          g[0]["hits"][0]["snippet"] == "see the Push Retry note", g)
+    rc, o, err = run("--scope", "all", "--json")
+    g = o["sessions"] if o else []
+    check("search scope: all adds the other project's session after",
+          rc == 0 and o and o["scope"] == "all" and
+          [x["session"] for x in g] == ["q0", "q1", "q2"] and
+          o["searched"] == 4 and g[2]["project"] == key(O) and
+          g[2]["turn_title"] == "the push retry thing again", (rc, o, err))
+    for a in ((), ("--scope", "session")):
+        rc, o, err = run(*a, "--json")
+        check("search scope: %s stays <n>'s one object"
+              % (" ".join(a) or "no --scope"),
+              rc == 0 and o and list(o) == S_KEYS and o["session"] == "q0"
+              and len(o["hits"]) == 1, (rc, o, err))
+    r = dch("--xray", "q0", "--search", "push retry", "--scope", "all",
+            env=env)
+    out = r.stdout.splitlines()
+    heads = [l.split()[0] for l in out if l and not l.startswith(" ")]
+    check("search scope: without --json, text: a line per session, its "
+          "turns' titles, its hits",
+          r.returncode == 0 and heads == ["q0", "q1", "q2"] and
+          "    user: why does push retry loop" in out and
+          "  why does push retry loop" in out and
+          "    assistant: see the Push Retry note" in out,
+          (r.returncode, r.stdout, r.stderr))
+    rc, o, err = run("--scope", "all", "--json",
+                     e=dict(env, DCH_XRAY_CAPS="2"))
+    check("search scope: the files cap stops it, newest first (q0, then "
+          "q3, no hit), partial why files",
+          rc == 0 and o and o["searched"] == 2 and o["partial"] is True and
+          o["why"] == "files" and
+          [x["session"] for x in o["sessions"]] == ["q0"], (rc, o, err))
+    # the text comes on stdin 50 ms late, so the 1 ms budget (counted from
+    # dch's start) is spent before any other session, on any machine
+    p = subprocess.Popen([DCH, "--xray", "q0", "--search", "-", "--scope",
+                          "all", "--json"], stdin=subprocess.PIPE,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         text=True, env=dict(env, DCH_XRAY_CAPS="0:0:1"))
+    time.sleep(0.05)
+    out, err = p.communicate("push retry", timeout=30)
+    rc = p.returncode
+    try:
+        o = json.loads(out)
+    except ValueError:
+        o, err = None, out + err
+    check("search scope: the time budget (from dch's start) stops it, "
+          "partial why time",
+          rc == 0 and o and o["partial"] is True and o["why"] == "time" and
+          o["searched"] < 4, (rc, o, err))
+    # a transcript's title and tool name reach the terminal without controls
+    put(4, O, [("push retry \x1b]0;pwn\x07 \x1b[31mred\u009b2J", "ok")],
+        1794300040)
+    r = dch("--xray", "q0", "--search", "push retry", "--scope", "all",
+            env=env)
+    check("search scope: text output drops C0, DEL and C1 controls from a "
+          "transcript's turn title",
+          r.returncode == 0 and "pwn" in r.stdout and not any(
+              c in r.stdout for c in "\x1b\x07\x7f\u009b"),
+          (r.returncode, r.stdout, r.stderr))
+
+
 def turn_rows(got, how):
     """#478: a mention's turn is its chapter's --json "i" (the view's pN),
     null when its chapter is null; light's, null or --full's."""
@@ -4021,6 +4161,7 @@ def main():
         test_handback_search()
         test_responses()
         test_scope()
+        test_search_scope()
         test_light_anchors()
         test_light_303()
         test_light_326()
