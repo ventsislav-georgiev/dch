@@ -972,6 +972,28 @@ def test_follow_slow_cmd():
                   (ran, kids, took, [p for p in ran if alive(p)]))
             fl.stop()
 
+        # 7b. SIGKILL of the follow while the command has closed stdout and
+        # stderr (NIT-UE1): the wait for it watches the follow too
+        pf = os.path.join(T, "sc-pid-closed")
+        open(pf, "w").close()
+        e7 = cfg("closed", "exec >&- 2>&-; echo $$ >> %s; exec sleep 20" % pf)
+        fl = Follow(n, e7, ["--tasks"])
+        wait_for(lambda: len(open(pf).read().split()) >= 2, 25)
+        ran = [int(p) for p in open(pf).read().split()[1:]]
+        time.sleep(0.3)
+        fl.p.send_signal(signal.SIGKILL)
+        lim = 2.0 if SANITIZED else 1.0
+        t0 = time.time()
+        left = wait_for(lambda: not [p for p in ran if alive(p)], lim)
+        took = round(time.time() - t0, 3)
+        check("slow command (NIT-UE1): SIGKILL of the follow ends a command "
+              "that closed its output within %.1f s" % lim,
+              ran and left and took < lim, (ran, took))
+        for p in ran:
+            if alive(p):
+                os.kill(p, signal.SIGKILL)
+        fl.stop()
+
         # 4. the follow's end (the session's): no run left behind
         pids = os.path.join(T, "sc-pids")
         open(pids, "w").close()
