@@ -1570,9 +1570,11 @@ or more parts and 4 to 64 characters (`ERR_LEDGER_SKEW`,
 path, a URL or an email), or a code span of 2 to 64 printable ASCII
 characters with no blank, at least one letter and 2 or more parts (a
 character that is not a letter or digit, or a lower-to-upper hump:
-`` `shadow_mode` ``, `` `--ref` ``, `` `fooBar` ``) that is no other ref in
+`` `shadow_mode` ``, `` `fooBar` ``) that is no other ref in
 prose (`` `#412` `` and `` `src/a.c` `` stay what they are; `` `foo` `` and
-`` `1234` `` are nothing). Terms come from prompts, assistant text and
+`` `1234` `` are nothing) and is not code: a flag (`` `--json` ``, `` `-v` ``),
+a `K=V` assignment (`` `RETRY_MAX=3` ``), a call (`` `parseN()` ``,
+`` `foo(x)` ``) or a bare filename (`` `README.md` ``) is no term. Terms come from prompts, assistant text and
 compact summaries only: never from tool input or output, a notice, a harness
 prompt (a task notification) or a shell's ring, and the view's on-screen
 scan does not look for them. They count against a text block's 128 like

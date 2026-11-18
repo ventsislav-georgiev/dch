@@ -942,7 +942,34 @@ line_end(const char *s, size_t n, size_t i)
 /* A code span's whole trimmed text s[a, b) as a term (#458): 2-64 bytes of
 ** printable ASCII, no blank, a letter, 2+ parts (a byte not a letter or
 ** digit, or a lower-upper hump), an identifier 4+ bytes, no "://", and no
-** other ref kind in prose (`#412`, `src/a.c` stay theirs). 1 with *sp. */
+** other ref kind in prose (`#412`, `src/a.c` stay theirs). Not a flag
+** (-v, --json), K=V (RETRY_MAX=3), call (parseN(), f(x)) or bare filename
+** (README.md): code, not a name (#473). 1 with *sp. */
+static int
+code_noterm(const char *s, size_t a, size_t b)
+{
+	size_t k = a, d;
+
+	if (s[a] == '-')
+		return 1;
+	while (k < b && (A_ALNUM((unsigned char)s[k]) || s[k] == '_'))
+		k++;
+	if (k > a && A_AL((unsigned char)s[a]) && k < b)
+	{
+		if (s[k] == '=' || (s[k] == '(' && s[b - 1] == ')'))
+			return 1;
+	}
+	/* name.ext: one dot, 1-5 alphanumeric extension, no other byte */
+	if (k > a && k < b && s[k] == '.')
+	{
+		for (d = k + 1; d < b && A_ALNUM((unsigned char)s[d]); d++)
+			;
+		if (d == b && b - k - 1 >= 1 && b - k - 1 <= 5)
+			return 1;
+	}
+	return 0;
+}
+
 static int
 code_term(const char *s, size_t a, size_t b, const char *cwd,
           struct xr_span *sp)
@@ -951,7 +978,7 @@ code_term(const char *s, size_t a, size_t b, const char *cwd,
 	int al = 0, parts = 0, id = 1;
 	struct xr_span o;
 
-	if (b - a < 2 || b - a > 64)
+	if (b - a < 2 || b - a > 64 || code_noterm(s, a, b))
 		return 0;
 	for (k = a; k < b; k++)
 	{

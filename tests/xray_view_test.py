@@ -747,7 +747,9 @@ def test_said():
 TSIDS = ["11111111-2222-4333-8444-5555555555e%d" % k for k in (8, 9)]
 TDEF = "`ERR_LEDGER_SKEW` is raised when the ledger clock drifts past 5 s."
 TREPLY = ("Fixed #412. `ERR_LEDGER_SKEW` no longer fires; covered by "
-          "`test_retry_timeout`, close PAY-219.")
+          "`test_retry_timeout`, close PAY-219. "
+          "Run `--json` or `-v` with `RETRY_MAX=3`, edit `README.md` and "
+          "`main.c`, call `parseN()` or `foo(x)`; see `LedgerClock`.")
 
 
 def term_lines():
@@ -797,6 +799,13 @@ def test_terms():
               "not hide: no hidden count", ("Refs %d" % len(keys)) in text
               and "term:ERR_LEDGER_SKEW" in keys and "hidden" not in text,
               (keys, text))
+        check("Refs #473: a flag, K=V, call or bare filename in backticks is "
+              "no term; a CamelCase name is",
+              "term:LedgerClock" in keys and not [
+                  k for k in keys if k in (
+                      "term:--json", "term:-v", "term:RETRY_MAX=3",
+                      "term:README.md", "term:main.c", "term:parseN()",
+                      "term:foo(x)")], keys)
         v.key(b"a", 1.0)
         v.pump(0.5)
         text = screen(v, 0)
