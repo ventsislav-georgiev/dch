@@ -1294,7 +1294,7 @@ def test_dup():
         text = screen(v, 0)
         check("#493: at 30 columns xv-dc's ended header keeps its whole name "
               "and drops the age", re.search(r"discussed in xv-dc$", text,
-              re.M) and not re.search(r"xv-dc, \d+d", text), text)
+              re.M) and "xv-dc," not in text, text)
     finally:
         v.close()
     # a status line of 30 columns cuts the sentence: the wide card

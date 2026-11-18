@@ -750,7 +750,7 @@ SLSID = "11111111-2222-4333-8444-5555555555fd"   # xv-sl: a live Claude
 
 
 def test_slow_tasks_command():
-    """#465 (QA 1.92.0 MED-UA1): with a tasks_command slow, a ref
+    """#465 (QA 1.92.0 MED-UA1): with a slow tasks_command, a ref
     written to the transcript reaches the shown Refs tab while the command
     still runs: the view's follow never waits on it (#461)."""
     cwd = os.path.realpath(os.path.join(T, "tslow"))
