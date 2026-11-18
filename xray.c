@@ -12798,12 +12798,32 @@ sr_shown(const struct xr_search *s, size_t k)
 	return &s->hit[s->shell ? (s->h0 + s->n - 1 - k) % SR_SLOTS : k];
 }
 
+/* The group's likely answer (#506), as sr_shown's index, or s->n for none:
+** the plain assistant text hit (who assistant, no tool) with the greatest
+** offset. Turns are contiguous, so the newest turn's latest one is just the
+** greatest offset: no chapter order needed. Ranking order is not assumed. */
+static size_t
+sr_answer(const struct xr_search *s)
+{
+	size_t k, best = s->n;
+
+	for (k = 0; k < s->n; k++)
+	{
+		const struct sr_hit *h = sr_shown(s, k);
+
+		if (h->who == SK_ASSISTANT && !h->tool &&
+		    (best == s->n || h->off > sr_shown(s, best)->off))
+			best = k;
+	}
+	return best;
+}
+
 /* An object's tail: "hits" to "bytes" and the '}' (titled: each hit's
 ** turn_title, #498) */
 static void
 sr_put_hits(FILE *f, const struct xr_search *s, const char *why, int titled)
 {
-	size_t k;
+	size_t k, ans = sr_answer(s);
 
 	if (!why && s->partial)
 		why = s->why;
@@ -12826,7 +12846,7 @@ sr_put_hits(FILE *f, const struct xr_search *s, const char *why, int titled)
 		}
 		fputs(",\"snippet\":", f);
 		xr_put_str(f, h->snip ? h->snip : "");
-		fputc('}', f);
+		fprintf(f, ",\"answer\":%s}", k == ans ? "true" : "false");
 	}
 	fprintf(f, "],\"more\":%s,\"partial\":%s,\"why\":",
 	        s->more ? "true" : "false", why ? "true" : "false");
@@ -13036,7 +13056,7 @@ xr_search_text(FILE *f, const struct xr_search *s, const char *session,
 	char when[32] = "";
 	struct tm tm;
 	time_t t = (time_t)last_active;
-	size_t k;
+	size_t k, ans = sr_answer(s);
 
 	if (last_active > 0 && localtime_r(&t, &tm))
 		strftime(when, sizeof when, "  %Y-%m-%d %H:%M", &tm);
@@ -13056,7 +13076,8 @@ xr_search_text(FILE *f, const struct xr_search *s, const char *session,
 			fputc('\n', f);
 		}
 		prev = ti;
-		fprintf(f, "    %s", sk_name[h->who]);
+		fprintf(f, "%s  %s", k == ans ? "\xe2\x86\x92 " : "  ",
+		        sk_name[h->who]);
 		if (h->tool)
 		{
 			fputc(' ', f);

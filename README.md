@@ -1940,10 +1940,18 @@ no line, an existing one the 14-line window.
 `dch --xray <n> --search <text> --json` finds where a word or a phrase was
 said in `<n>`'s own corpus and prints one object, the places with the
 whole text first, then the rest, each newest first:
-`{"schema":1,"session","session_id","corpus","text","hits":[{"chapter","offset","at","who","tool","snippet"}],"more","partial","why","bytes","first","latest"}`.
+`{"schema":1,"session","session_id","corpus","text","hits":[{"chapter","offset","at","who","tool","snippet","answer"}],"more","partial","why","bytes","first","latest"}`.
 `<text>` is 2 to 200 bytes of UTF-8 with no control character and
 none of `--ref`'s bidi controls (`dch: bad search: 2 to 200 bytes, no control
 character`, exit 2). ASCII letters match in either case; nothing else folds.
+- **The likely answer (#506).** Every hit ends in `"answer"`, true for one hit
+  per group (and for the one object), or none. "What did we decide" wants the
+  conclusion, so among the hits by the assistant with no tool (`who`
+  `"assistant"`, `tool` null) it is the one in the newest turn, and within
+  that turn the latest `offset`, nearest the turn's end. A group with no such
+  hit has every `answer` false. It is picked by turn order and offset, not by
+  position (the whole text ranks first). Without `--json` the line of that
+  hit starts with `→ ` in place of its first spaces.
 - **Words (#499).** `<text>` is split into words at spaces and tabs; a text
   matches when it holds every word, in any order, so `retry backoff` finds
   "…backoff between retries…". A text that holds `<text>` as typed (its
@@ -2027,7 +2035,7 @@ or with a remote `host:name` the `-` is the plain text `-`, the same error as be
   `searched` the files read, `partial`/`why` a cap that stopped it.
   `sessions` holds `<n>`'s group first (also with no hit), then each other
   session that has a hit, in the order read:
-  `{"session","session_id","corpus","live","project","last_active","turn_title","hits":[{"chapter","offset","at","who","tool","turn_title","snippet"}],"more","partial","why","bytes"}`.
+  `{"session","session_id","corpus","live","project","last_active","turn_title","hits":[{"chapter","offset","at","who","tool","turn_title","snippet","answer"}],"more","partial","why","bytes"}`.
   As on `--ref`'s other-session `mention` lines, `session_id` is the
   session's own id (`null` when none) and `last_active` its last activity in
   epoch seconds (another session's: its `lastSeen`, as History holds it;
@@ -2038,7 +2046,7 @@ or with a remote `host:name` the `-` is the plain text `-`, the same error as be
 
   ```json
   {"schema":1,"session":"api","session_id":"3f…","text":"push retry","scope":"all","sessions":[
-    {"session":"api","session_id":"3f…","corpus":"claude","live":true,"project":"-home-me-api","last_active":1794300000,"turn_title":"plan the release","hits":[{"chapter":"f36cb:0","offset":125,"at":1794299990,"who":"assistant","tool":null,"turn_title":"plan the release","snippet":"see the Push Retry note"}],"more":false,"partial":false,"why":null,"bytes":226},
+    {"session":"api","session_id":"3f…","corpus":"claude","live":true,"project":"-home-me-api","last_active":1794300000,"turn_title":"plan the release","hits":[{"chapter":"f36cb:0","offset":125,"at":1794299990,"who":"assistant","tool":null,"turn_title":"plan the release","snippet":"see the Push Retry note","answer":true}],"more":false,"partial":false,"why":null,"bytes":226},
     {"session":"cli","session_id":"9a…","corpus":"claude","live":false,"project":"-home-me-cli","last_active":1794200000,"turn_title":"the push retry thing again","hits":[…],"more":false,"partial":false,"why":null,"bytes":4096}],
    "searched":3,"partial":false,"why":null}
   ```
