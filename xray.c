@@ -4508,7 +4508,8 @@ sent_brk(const char *l, size_t i)
 
 /* A mention's sentence (#478): sent_ends' around the ref l[s, e), trimmed,
 ** a list item's marker off, at most XR_SENT bytes in o (XR_SENT + 1):
-** where it is cut, on a word and a scalar, "\u2026 " / " \u2026" mark it and
+** where it is cut, on a word (on a scalar when the word would drop over
+** half that side's room) and a scalar, "\u2026 " / " \u2026" mark it and
 ** the ref stays whole. Controls are spaces and an invalid byte '?', one
 ** byte each, so [*ss, *se) is the ref's bytes in o. A ref the marks leave
 ** no room around is alone, with the marks that fit; one over XR_SENT bytes
@@ -4517,7 +4518,7 @@ static void
 ref_sentence(const char *l, size_t ll, size_t s, size_t e, char *o,
              size_t *ss, size_t *se)
 {
-	size_t a, b = e, n, lo, hi, i, adv, bd, k = 0;
+	size_t a, b = e, n, lo, hi, i, adv, bd, l0, h0, k = 0;
 	long av = XR_SENT - (long)(e - s), lw, rw;
 	int keep = 1;
 	const char *t;
@@ -4556,23 +4557,30 @@ ref_sentence(const char *l, size_t ll, size_t s, size_t e, char *o,
 			lo = s - (size_t)lw;
 			hi = e + u8_cut(l + e, (size_t)rw);
 		}
-		/* the left on a scalar and a word: past the word it starts in */
+		/* the left on a scalar and a word: past the word it starts in,
+		** unless that drops over half the side's room (then the scalar) */
 		while (lo < s && ((unsigned char)l[lo] & 0xc0) == 0x80)
 			lo++;
+		l0 = lo;
 		if (lo > a && !sent_brk(l, lo) && !sent_brk(l, lo - 1))
 			while (lo < s && !sent_brk(l, lo))
 				lo++;
+		if (keep && (long)(lo - l0) > lw / 2)
+			lo = l0;
 		while (lo < s && sent_brk(l, lo))
 			lo++;
 		/* the right before the word it ends in, past the ref (whole when
 		** kept, else cut on a scalar) */
 		bd = keep ? e : s;
+		h0 = hi;
 		if (hi < b && !sent_brk(l, hi) && !sent_brk(l, hi - 1))
 		{
 			for (i = hi; i > bd && !sent_brk(l, i - 1); i--)
 				;
 			if (i > bd || keep)
 				hi = i > bd ? i : bd;
+			if (keep && (long)(h0 - hi) > rw / 2)
+				hi = h0;
 		}
 		while (hi > bd && sent_brk(l, hi - 1))
 			hi--;

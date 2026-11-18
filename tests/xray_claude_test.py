@@ -673,6 +673,60 @@ def test_refs():
           ms[0].get("sentence", "").endswith("y \u2026") and
           len(ms[0].get("sentence", "").encode()) <= 400, ms)
 
+    # #483: a word longer than half a side's room is cut on a scalar, the
+    # context kept; a spaced sentence is still cut on words
+    cjk = "\u5b57" * 500
+    purl = "https://github.com/o/r/pull/831"
+    hexh = "ab12" * 150
+    put([{"type": "user", "cwd": "/home/demo/proj",
+          "timestamp": "2026-11-10T10:00:00Z",
+          "message": {"content": "start"}},
+         {"type": "assistant", "message": {"content": [
+             {"type": "text", "text": cjk + " " + purl + " " + cjk}]}}])
+    r = dch("--xray", "xr-refs", "--ref", purl, "--scope", "session",
+            "--full", "--json")
+    ms = [l["mention"] for l in ref_lines(r.stdout) or [] if "mention" in l]
+    s = ms[0].get("sentence", "") if ms else ""
+    sp = (ms[0].get("span") or [0, 0]) if ms else [0, 0]
+    sb = s.encode()
+    check("ref #483: CJK without spaces on both sides keeps context on both, "
+          "<= 400 bytes, the span slices the ref, valid UTF-8",
+          len(ms) == 1 and len(sb) <= 400 and sb[sp[0]:sp[1]].decode() == purl
+          and s.startswith("\u2026 \u5b57") and s.endswith("\u5b57 \u2026")
+          and sp[0] > 100 and len(sb) - sp[1] > 100 and "\ufffd" not in s, ms)
+    put([{"type": "user", "cwd": "/home/demo/proj",
+          "timestamp": "2026-11-10T10:00:00Z",
+          "message": {"content": "start"}},
+         {"type": "assistant", "message": {"content": [
+             {"type": "text", "text": long_l + " fix #831 now " + hexh}]}}])
+    r = dch("--xray", "xr-refs", "--ref", "#831", "--scope", "session",
+            "--full", "--json")
+    ms = [l["mention"] for l in ref_lines(r.stdout) or [] if "mention" in l]
+    s = ms[0].get("sentence", "") if ms else ""
+    sp = (ms[0].get("span") or [0, 0]) if ms else [0, 0]
+    sb = s.encode()
+    check("ref #483: a long hex hash on the right keeps its head, the left "
+          "still cut on words",
+          len(ms) == 1 and len(sb) <= 400 and sb[sp[0]:sp[1]] == b"#831" and
+          s.startswith("\u2026 w") and "ab12ab12ab12" in s and s.endswith(" \u2026") and
+          len(sb) - sp[1] > 100, ms)
+    put([{"type": "user", "cwd": "/home/demo/proj",
+          "timestamp": "2026-11-10T10:00:00Z",
+          "message": {"content": "start"}},
+         {"type": "assistant", "message": {"content": [
+             {"type": "text", "text": long_l + " fix #831 now " + long_r}]}}])
+    r = dch("--xray", "xr-refs", "--ref", "#831", "--scope", "session",
+            "--full", "--json")
+    ms = [l["mention"] for l in ref_lines(r.stdout) or [] if "mention" in l]
+    s = ms[0].get("sentence", "") if ms else ""
+    sp = (ms[0].get("span") or [0, 0]) if ms else [0, 0]
+    sb = s.encode()
+    import re as _re
+    check("ref #483: a spaced sentence is still cut on whole words",
+          len(ms) == 1 and 390 <= len(sb) <= 400 and sb[sp[0]:sp[1]] == b"#831"
+          and _re.fullmatch(r"\u2026 (w\d{3} )+fix #831 now (v\d{3} )*v\d{3} \u2026", s),
+          ms)
+
     # (b) a ref over 400 bytes: --ref takes 256, but a relative path's key
     # is its absolute path (<= 1024), which the text may spell out: span
     # null, the sentence cut from its start, still <= 400 bytes

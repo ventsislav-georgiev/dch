@@ -3294,6 +3294,19 @@ xv_csent(const struct xv_men *m)
 	while (a < ss && xv_fitlen(s + a, se - a, room) < se - a)
 		while (++a < ss && ((unsigned char)s[a] & 0xc0) == 0x80)
 			;
+	/* NIT-UH2: on to the next word, never past the ref; the cut stays when
+	** there is none or it drops over half the context shown (#483's rule) */
+	if (a && (unsigned char)s[a - 1] > ' ')
+	{
+		size_t b = a;
+
+		while (b < ss && (unsigned char)s[b] > ' ')
+			b++;
+		if (b < ss && b - a <= (ss - a) / 2)
+			a = b;
+		while (a < ss && (unsigned char)s[a] <= ' ')
+			a++;
+	}
 	if (a)
 		pk_txt(xv_ell());
 	xv_txtn(s + a, ss - a);
