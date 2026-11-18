@@ -5623,6 +5623,23 @@ t_search(void)
 	      strstr(o, "\"more\":true"));
 	free(o);
 
+	/* NIT-UC2 with the turn cap: 60 turns of 9 hits stop at 500 hits; the
+	** cut turn is past the newest 50, so all 50 stay whole (450 hits) */
+	for (n = 0, k = 0; k < 540; k++)
+		n += (size_t)snprintf(big + n, sizeof big - n, k % 9 ?
+		                      "{\"type\":\"assistant\",\"message\":{"
+		                      "\"content\":[{\"type\":\"text\",\"text\":"
+		                      "\"hit %03zu\"}]}}\n" :
+		                      "{\"type\":\"user\",\"cwd\":\"/x\",\"message\":"
+		                      "{\"content\":\"hit %03zu\"}}\n", k);
+	o = search_of(big, n, "hit ", 0);
+	CHECK("search: at both caps the 50 newest turns stay whole (50 x 9), more",
+	      o && count_of(o, "\"who\":") == 450 &&
+	      strstr(o, "\"snippet\":\"hit 090\"") &&
+	      !strstr(o, "\"snippet\":\"hit 089\"") &&
+	      strstr(o, "\"more\":true"));
+	free(o);
+
 	/* #457: one turn of 600 answers keeps its newest 500 (the hard cap),
 	** more; 2 turns of 30 hits keep all 60, no more */
 	n = (size_t)snprintf(big, sizeof big, "{\"type\":\"user\",\"cwd\":"

@@ -11940,6 +11940,7 @@ sr_trim(struct xr_search *s)
 {
 	struct sr_hit *o;
 	size_t k, n = 0, t = 0;
+	int cut = s->total > XR_SEARCH_HITS;
 
 	if (!(o = calloc(s->n ? s->n : 1, sizeof *o)))
 		return;		/* out of memory: the hits stay as they are */
@@ -11953,6 +11954,7 @@ sr_trim(struct xr_search *s)
 		if (j == n && t == XR_SEARCH_TURNS)
 		{
 			s->more = 1;
+			cut = 0;	/* the cut (oldest) turn went with the turn cap */
 			sr_hit_free(h);
 			continue;
 		}
@@ -11960,9 +11962,9 @@ sr_trim(struct xr_search *s)
 		o[n++] = *h;
 		memset(h, 0, sizeof *h);
 	}
-	/* at the hit cap the oldest turn may be cut: drop it whole, unless
-	** it is the only one (UC2) */
-	if (s->total > XR_SEARCH_HITS && t > 1)
+	/* at the hit cap the oldest kept turn may be cut: drop it whole,
+	** unless it is the only one (UC2) */
+	if (cut && t > 1)
 	{
 		struct sr_hit l = o[n - 1];
 
