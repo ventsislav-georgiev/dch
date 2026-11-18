@@ -13294,7 +13294,7 @@ xr_define(struct xr_scan *sc, const struct xr_span *sp, const char *text,
 		xr_scan_define_warn(sc, warn);
 builtin:
 	if (xr_scan_defs(sc) == d0)
-		xr_scan_commit(sc, sp, text, label, live);
+		xr_scan_light(sc, sp, text, label, live);
 }
 
 /* --ref over (cfg, sid)'s transcript (3.4): `first` once the file is

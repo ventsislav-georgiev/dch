@@ -1781,7 +1781,7 @@ after `<n>`'s own file (its `tally`) and before any other session is read:
 `{"schema":1,"resolved":{"kind","state","title","subtitle","lines"}}`,
 plus `first` for a file shown (below),
 `kind` `"commit"` or `"file"`, `lines` at most 14, each at most 200
-characters; the light scan never resolves a file (a commit: below). Every string is the text with
+characters; the light scan resolves a file by stat alone, and a commit (both below). Every string is the text with
 invalid UTF-8 and NUL as U+FFFD, the controls JSON-escaped. The resolver
 reads only the ref and `<n>`'s cwd, so with `--scope session` the line is
 just before `done`, and a wider read that a cap or the time limit stops
@@ -1796,9 +1796,22 @@ and after your
 `done`, only when that command gave no definition (a command that answers
 wins; one that fails or is unset leaves the built-in to run), and only
 when its `state` is `ok`: an unknown SHA, a cwd that is no repo, a git
-error or the deadline give no `resolved` line and no warning. A file ref
-is resolved with `--full` only. The card shows it as
+error or the deadline give no `resolved` line and no warning. The card shows it as
 `commit <subject>  <author> · <age> · <sha> · on HEAD`.
+
+A file ref of a live `<n>` gets a light `resolved` line too (#500), under
+the same define_command rule, from `lstat` and `realpath` alone: the file
+is never opened or read, so no `lines` and no `first`. The path is
+checked against the project exactly as `--full` does (the cwd's git root,
+the deny list, links, a symlink or non-regular file); a ref the rules
+refuse (outside the project, a secret name, a symlink, a FIFO) gives no
+line. An existing regular file is `state: "ok"` with its name as `title`
+and `<path> · modified 2026-11-18 14:03 UTC` (the mtime, UTC) as
+`subtitle`, whatever its size. One that does not exist is
+`state: "missing"`, `title: "Missing"`, the path as `subtitle`: a state of
+its own, so a client need not read the subtitle, and unlike `ok` it does
+not claim a file was found. `--full` is unchanged: a missing file gives
+no line, an existing one the 14-line window.
 
 - **Commit.** The SHA is checked again (7 to 40 lowercase hex). An ended
   session runs nothing: `state: "ended"`. Otherwise dch runs git directly,

@@ -11314,7 +11314,7 @@ xr_file_lines(const char *s, size_t n, long line, struct xr_resolved *r)
 ** worktree in <repo>/.claude/worktrees/<name> has that one ".claude" part
 ** lifted, on both paths (res_lift, #184, QA 1.57.0 MED-D1). */
 static int
-res_file(const char *key, const char *text, const char *cwd,
+res_file(const char *key, const char *text, const char *cwd, int light,
          struct xr_resolved *r)
 {
 	char p[PATH_MAX], root[PATH_MAX], rp[PATH_MAX], rr[PATH_MAX];
@@ -11364,6 +11364,12 @@ res_file(const char *key, const char *text, const char *cwd,
 	** a helper process could bound an uninterruptible wait, and it would be
 	** left stuck instead; an interruptible one ends with the caller's
 	** SIGTERM, and res_root has already walked the same mount */
+	if (lstat(p, &st) != 0 && light && errno == ENOENT)
+	{
+		/* #500: its own state, so a client need not parse the subtitle */
+		res_set(r, "missing", "Missing");
+		return 1;
+	}
 	if (lstat(p, &st) != 0 || !S_ISREG(st.st_mode))
 		return 0;	/* gone, a symlink, a FIFO, a dir: no block */
 	if (!realpath(p, rp) || !rr[0])
@@ -11379,6 +11385,22 @@ res_file(const char *key, const char *text, const char *cwd,
 	if (xr_secret_at(rp, lr) || res_home_deny(rp))
 	{
 		res_set(r, "secret_name", "Not previewed: may hold secrets");
+		return 1;
+	}
+	if (light)
+	{
+		/* #500: stat alone, the file is never opened */
+		struct tm tm;
+		char when[40];
+
+		gmtime_r(&st.st_mtime, &tm);
+		strftime(when, sizeof when, "%Y-%m-%d %H:%M UTC", &tm);
+		snprintf(shown + strlen(shown), sizeof shown - strlen(shown),
+		         " \xc2\xb7 modified %s", when);
+		res_text(r->subtitle, shown, strlen(shown), XR_RES_LINE);
+		res_text(r->title, strrchr(p, '/') + 1, strlen(strrchr(p, '/') + 1),
+		         XR_TITLE_MAX);
+		r->state = "ok";
 		return 1;
 	}
 	if ((uint64_t)st.st_size > XR_RES_FILE)
@@ -11427,9 +11449,9 @@ res_file(const char *key, const char *text, const char *cwd,
 	return 1;
 }
 
-int
-xr_res_ref(const struct xr_span *sp, const char *text, const char *cwd,
-           int live, struct xr_resolved *r)
+static int
+res_ref(const struct xr_span *sp, const char *text, const char *cwd,
+        int live, int light, struct xr_resolved *r)
 {
 	memset(r, 0, sizeof *r);
 	if (sp->shape == XR_COMMIT)
@@ -11450,11 +11472,19 @@ xr_res_ref(const struct xr_span *sp, const char *text, const char *cwd,
 		                  u && strlen(sp->full) < 40 ? gh : NULL, r);
 	}
 	if (sp->shape == XR_FILE)
-		return res_file(xr_span_text(sp), text, cwd ? cwd : "", r);
+		return res_file(xr_span_text(sp), text, cwd ? cwd : "", light, r);
 	return 0;
 }
 
-/* light: a commit only, and only an ok one (#502: no noise) */
+int
+xr_res_ref(const struct xr_span *sp, const char *text, const char *cwd,
+           int live, struct xr_resolved *r)
+{
+	return res_ref(sp, text, cwd, live, 0, r);
+}
+
+/* light: a commit, only an ok one (#502: no noise); a file by stat alone,
+** ok or missing (#500) */
 static void
 res_scan(struct xr_scan *x, const struct xr_span *sp, const char *text,
          const char *cwd, int live, int light)
@@ -11469,8 +11499,8 @@ res_scan(struct xr_scan *x, const struct xr_span *sp, const char *text,
 
 	if (x->cancel || x->out_full || !(r = malloc(sizeof *r)))
 		return;
-	if (xr_res_ref(sp, text, cwd, live, r) &&
-	    (!light || !strcmp(r->state, "ok")) && (m = ln_open(&b, &bl)))
+	if (res_ref(sp, text, cwd, live, light, r) &&
+	    (!light || !strcmp(r->state, "ok") || !strcmp(r->state, "missing")) && (m = ln_open(&b, &bl)))
 	{
 		fputs("{\"schema\":1,\"resolved\":{\"kind\":", m);
 		xr_put_str(m, r->kind);
@@ -11481,7 +11511,7 @@ res_scan(struct xr_scan *x, const struct xr_span *sp, const char *text,
 		fputs(",\"subtitle\":", m);
 		xr_put_str(m, r->subtitle);
 		/* which row is line N, even clamped at the end; only a file shown */
-		if (!strcmp(r->kind, "file") && !strcmp(r->state, "ok"))
+		if (!light && !strcmp(r->kind, "file") && !strcmp(r->state, "ok"))
 			fprintf(m, ",\"first\":%ld", r->first);
 		fputs(",\"lines\":[", m);
 		for (k = 0; k < r->nlines; k++)
@@ -11508,10 +11538,10 @@ xr_scan_resolved(struct xr_scan *x, const struct xr_span *sp,
 }
 
 void
-xr_scan_commit(struct xr_scan *x, const struct xr_span *sp, const char *text,
-               const char *cwd, int live)
+xr_scan_light(struct xr_scan *x, const struct xr_span *sp, const char *text,
+              const char *cwd, int live)
 {
-	if (!x->full && live && sp->shape == XR_COMMIT)
+	if (!x->full && live && (sp->shape == XR_COMMIT || sp->shape == XR_FILE))
 		res_scan(x, sp, text, cwd, live, 1);
 }
 

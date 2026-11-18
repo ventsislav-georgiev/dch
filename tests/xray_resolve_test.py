@@ -294,16 +294,14 @@ def test_shell():
         check("shell file: clamped at the end, first 27, line 39 at [12]",
               len(rv) == 1 and rv[0].get("first") == 27 and
               rv[0]["lines"][12] == "int w39;", rv)
-        r, ls, rv = ref(n, "src/w.c:20", full=False)
-        check("shell file: a light stream has no resolved line", not rv,
-              r.stdout[-300:])
+        test_light_file(n, repo, plain)
         with open(os.path.join(plain, "x.c"), "w") as f:
             f.write("x\n")
         r, ls, rv = ref(n, "../plain/x.c:1")
         check("shell file: outside the project: outside_project, no lines",
               len(rv) == 1 and rv[0]["state"] == "outside_project" and
               rv[0]["lines"] == [] and "first" not in rv[0], rv)
-        os.makedirs(os.path.join(repo, ".ssh"))
+        os.makedirs(os.path.join(repo, ".ssh"), exist_ok=True)
         with open(os.path.join(repo, ".ssh", "id_ed25519"), "w") as f:
             f.write("PRIVATE KEY CANARY\n")
         r, ls, rv = ref(n, os.path.join(repo, ".ssh", "id_ed25519") + ":1")
@@ -489,6 +487,72 @@ def card_text(n, text, want, secs=20.0):
         os.kill(pid, signal.SIGKILL)
         os.waitpid(pid, 0)
     return plain
+
+
+def test_light_file(n, repo, plain):
+    """#500: a light file ref is ok/missing from stat alone."""
+    import time as _t
+    p = os.path.join(repo, "src", "w.c")
+    os.utime(p, (1700000000, 1700000000))
+    r, ls, rv = ref(n, "src/w.c:20", full=False)
+    check("light #500: an existing file: one ok line, name, path, mtime, no "
+          "lines, just before done", r.returncode == 0 and len(rv) == 1 and
+          rv[0]["kind"] == "file" and rv[0]["state"] == "ok" and
+          rv[0]["title"] == "w.c" and rv[0]["lines"] == [] and
+          rv[0]["subtitle"] == "src/w.c \u00b7 modified 2023-11-14 22:13 UTC"
+          and "resolved" in ls[-2] and ls[-1].get("done") is True,
+          r.stdout[-500:])
+    check("light #500: no first field (nothing shown)",
+          rv and "first" not in rv[0], rv)
+    r, ls, rv = ref(n, "src/gone.c:3", full=False)
+    check("light #500: a missing file: its own state, \"missing\"",
+          r.returncode == 0 and len(rv) == 1 and rv[0]["kind"] == "file" and
+          rv[0]["state"] == "missing" and rv[0]["title"] == "Missing" and
+          rv[0]["subtitle"] == "src/gone.c" and rv[0]["lines"] == [],
+          r.stdout[-400:])
+    r, ls, rv = ref(n, "src/gone.c:3")
+    check("light #500: --full keeps no line for a missing file", not rv, rv)
+    with open(os.path.join(plain, "x.c"), "w") as f:
+        f.write("x\n")
+    big = os.path.join(repo, "big.light")
+    with open(big, "w") as f:
+        f.write("y" * (2 * 1024 * 1024 + 1))
+    os.symlink(os.path.join(plain, "x.c"), os.path.join(repo, "lnk.c"))
+    os.mkfifo(os.path.join(repo, "pipe.c"))
+    os.makedirs(os.path.join(repo, ".ssh"), exist_ok=True)
+    with open(os.path.join(repo, ".ssh", "k"), "w") as f:
+        f.write("K\n")
+    for label, text, st in (("outside the project", "../plain/x.c:1", None),
+                            ("a secret name", os.path.join(repo, ".ssh", "k") + ":1", None),
+                            ("a missing secret name",
+                             os.path.join(repo, ".ssh", "nope") + ":1", None),
+                            ("a missing file outside", "../plain/nope.c", None),
+                            ("a symlink", "lnk.c:1", None),
+                            ("a FIFO (never opened)", "pipe.c:1", None)):
+        r, ls, rv = ref(n, text, full=False)
+        check("light #500: %s: no resolved line" % label,
+              r.returncode == 0 and not rv and ls and
+              ls[-1].get("done") is True, r.stdout[-300:])
+    r, ls, rv = ref(n, "big.light:1", full=False)
+    check("light #500: over 2 MB: ok by stat, not too_large",
+          len(rv) == 1 and rv[0]["state"] == "ok", rv)
+    cfg = ENV["DCH_CONFIG"]
+    dfn = os.path.join(T, "define500.sh")
+    with open(dfn, "w") as f:
+        f.write("#!/bin/sh\necho '{\"title\":\"From my ledger\"}'\n")
+    os.chmod(dfn, 0o755)
+    with open(cfg, "w") as f:
+        f.write("define_command = %s\n" % dfn)
+    try:
+        r, ls, rv = ref(n, "src/w.c:20", full=False)
+        check("light #500: a define_command's answer wins over the stat",
+              not rv and any("definition" in l for l in ls), r.stdout[-400:])
+    finally:
+        os.unlink(cfg)
+    t = card_text(n, "src/w.c", "modified 2023")
+    check("card #500: the light card shows the file, its path and mtime",
+          re.search(r"file w\.c +src/w\.c \u00b7 modified 2023-11-14 22:13 "
+                    r"UTC", t), t[-1500:])
 
 
 def test_light(n, m, repo, sha):
