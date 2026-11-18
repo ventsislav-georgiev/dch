@@ -12581,6 +12581,22 @@ xr_search_group(FILE *f, const struct xr_search *s, const char *session,
 	sr_put_hits(f, s, why, 1);
 }
 
+/* s for a terminal: C0, DEL and C1 controls (U+0080-009F) as a space, so a
+** transcript's title or tool name can't send escape sequences (#498) */
+static void
+sr_put_plain(FILE *f, const char *s)
+{
+	const unsigned char *u = (const unsigned char *)s;
+
+	for (; *u; u++)
+		if (*u < 0x20 || *u == 0x7f)
+			fputc(' ', f);
+		else if (*u == 0xc2 && u[1] >= 0x80 && u[1] <= 0x9f)
+			fputc(' ', f), u++;
+		else
+			fputc(*u, f);
+}
+
 void
 xr_search_text(FILE *f, const struct xr_search *s, const char *session,
                long long last_active)
@@ -12593,8 +12609,9 @@ xr_search_text(FILE *f, const struct xr_search *s, const char *session,
 
 	if (last_active > 0 && localtime_r(&t, &tm))
 		strftime(when, sizeof when, "  %Y-%m-%d %H:%M", &tm);
-	fprintf(f, "%s%s  %zu hit%s%s\n", session, when, s->n,
-	        s->n == 1 ? "" : "s", s->more ? ", more" : "");
+	sr_put_plain(f, session);
+	fprintf(f, "%s  %zu hit%s%s\n", when, s->n, s->n == 1 ? "" : "s",
+	        s->more ? ", more" : "");
 	for (k = 0; k < s->n; k++)
 	{
 		const struct sr_hit *h = sr_shown(s, k);
@@ -12602,10 +12619,19 @@ xr_search_text(FILE *f, const struct xr_search *s, const char *session,
 		                 : "(no turn title)";
 
 		if (strcmp(ti, prev))	/* a header per turn, as the card's */
-			fprintf(f, "  %s\n", ti);
+		{
+			fputs("  ", f);
+			sr_put_plain(f, ti);
+			fputc('\n', f);
+		}
 		prev = ti;
-		fprintf(f, "    %s%s%s: %s\n", sk_name[h->who], h->tool ? " " : "",
-		        h->tool ? h->tool : "", h->snip ? h->snip : "");
+		fprintf(f, "    %s", sk_name[h->who]);
+		if (h->tool)
+		{
+			fputc(' ', f);
+			sr_put_plain(f, h->tool);
+		}
+		fprintf(f, ": %s\n", h->snip ? h->snip : "");	/* sr_snip: clean */
 	}
 }
 

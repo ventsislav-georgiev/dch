@@ -3049,6 +3049,16 @@ def test_search_scope():
           "partial why time",
           rc == 0 and o and o["partial"] is True and o["why"] == "time" and
           o["searched"] < 4, (rc, o, err))
+    # a transcript's title and tool name reach the terminal without controls
+    put(4, O, [("push retry \x1b]0;pwn\x07 \x1b[31mred\u009b2J", "ok")],
+        1794300040)
+    r = dch("--xray", "q0", "--search", "push retry", "--scope", "all",
+            env=env)
+    check("search scope: text output drops C0, DEL and C1 controls from a "
+          "transcript's turn title",
+          r.returncode == 0 and "pwn" in r.stdout and not any(
+              c in r.stdout for c in "\x1b\x07\x7f\u009b"),
+          (r.returncode, r.stdout, r.stderr))
 
 
 def turn_rows(got, how):
