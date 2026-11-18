@@ -551,6 +551,13 @@ done:
 /* The running command's group, for the signal handler. */
 static volatile sig_atomic_t xc_pg;
 static const int xc_sigs[] = {SIGTERM, SIGINT, SIGHUP};
+static int xc_watch = -1;	/* xcmd_watch's fd, -1 none */
+
+void
+xcmd_watch(int fd)
+{
+	xc_watch = fd;
+}
 
 /* The querying process is ending: the command's group goes with it. */
 static void
@@ -872,7 +879,7 @@ xcmd_rows(enum xcmd_kind kind, const struct xcmd_ctx *ctx, xcmd_row_fn fn,
 	char chunk[XCMD_LINE_MAX], eb[1025], prog[XR_TITLE_MAX * 4 + 1];
 	struct xc_run r;
 	struct sigaction sa, old[3];
-	struct pollfd p[2];
+	struct pollfd p[3];
 	sigset_t set, omask;
 	size_t en = 0, total = 0;
 	int po[2] = {-1, -1}, pe[2] = {-1, -1}, ep[2] = {-1, -1}, in = -1;
@@ -978,7 +985,8 @@ xcmd_rows(enum xcmd_kind kind, const struct xcmd_ctx *ctx, xcmd_row_fn fn,
 	fcntl(pe[0], F_SETFL, O_NONBLOCK);
 	p[0].fd = po[0];
 	p[1].fd = pe[0];
-	p[0].events = p[1].events = POLLIN;
+	p[2].fd = xc_watch;	/* poll skips a -1 */
+	p[0].events = p[1].events = p[2].events = POLLIN;
 	while (r.stop == XC_RUN && (p[0].fd >= 0 || p[1].fd >= 0))
 	{
 		long long left = until - xr_now_ms();
@@ -988,10 +996,15 @@ xcmd_rows(enum xcmd_kind kind, const struct xcmd_ctx *ctx, xcmd_row_fn fn,
 			r.stop = XC_CLOCK;
 			break;
 		}
-		if (poll(p, 2, (int)left) < 0)
+		if (poll(p, 3, (int)left) < 0)
 		{
 			if (errno == EINTR)
 				continue;
+			break;
+		}
+		if (p[2].fd >= 0 && p[2].revents)
+		{
+			r.stop = XC_CALLER;	/* the watcher's peer is gone */
 			break;
 		}
 		for (k = 0; k < 2 && r.stop == XC_RUN; k++)

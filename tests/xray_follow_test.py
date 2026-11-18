@@ -6,7 +6,8 @@ seam and a resize.
 Split from xray_cli_test.py; helpers in tests/xray_cli_lib.py.
 Run:  python3 tests/xray_follow_test.py          (uses ./dch; run.sh isolates)
 """
-import json, os, random, re, shutil, socket, stat, struct, subprocess, sys
+import json, os, random, re, shutil, signal, socket, stat, struct
+import subprocess, sys
 import tempfile, threading, time
 
 from xray_cli_lib import *  # noqa: E402,F401,F403
@@ -567,10 +568,15 @@ def test_follow_tasks_memory():
         cenv = dict(ENV, DCH_CONFIG=cfg)
         _, tc1, _ = lines(n, "--tasks", "--json", env=cenv)
         cf = Follow(n, cenv, ["--tasks"])
-        cf.wait(lambda o: "done" in o)
-        check("tasks+memory: a tasks_command's answer is the tasks block",
-              cf.objs()[1:] == tc1 and tc1[0]["source"] == "command",
-              (cf.objs(), tc1))
+        # #468: the built-in block at once, the command's answer whole
+        # after it when its run lands
+        wait_for(lambda: sum("done" in o for o in cf.objs()) >= 2, 10)
+        ob = cf.objs()
+        d1 = next((i for i, o in enumerate(ob) if "done" in o), 0)
+        check("tasks+memory: a tasks_command's answer is the tasks block, "
+              "after the built-in one",
+              ob[1].get("source") != "command" and ob[d1 + 1:] == tc1 and
+              tc1[0]["source"] == "command", (ob, tc1))
         k5 = len(cf.got)
         with open(rows, "w") as f:
             f.write(json.dumps({"id": "c2", "title": "Moved"}) + "\n")
@@ -817,13 +823,162 @@ def test_follow_slow_cmd():
         fl.stop()
         dch("-k", n + "-sh")
 
+        def alive(p):
+            try:
+                os.kill(p, 0)
+            except ProcessLookupError:
+                return False
+            st = subprocess.run(["ps", "-o", "stat=", "-p", str(p)],
+                                capture_output=True, text=True).stdout
+            return bool(st.strip()) and not st.strip().startswith("Z")
+
+        def hdr_of(o):
+            return "task" if "schema" in o and "source" in o and \
+                "session" in o else "memory" if "schema" in o and \
+                "source" in o else None
+
+        def snap_blocks(ob, i):
+            """the shape after ob[i] (a snapshot): a whole tasks block,
+            then a whole memory block, nothing between"""
+            want, j = ["task", "memory"], i + 1
+            for w in want:
+                if j >= len(ob) or hdr_of(ob[j]) != w:
+                    return False
+                j += 1
+                while j < len(ob) and (w in ob[j]):
+                    j += 1
+                if j >= len(ob) or "done" not in ob[j]:
+                    return False
+                j += 1
+            return True
+
+        def ref_delay(fl, i, t0, secs=12):
+            got = wait_for(lambda: [t for t, o in fl.got if "ref" in o and
+                                    o["ref"]["key"] == "issue:#%d" % i], secs)
+            return round(got[0] - t0, 3) if got else None
+
+        def add_ref():
+            seq[0] += 1
+            with open(tp, "a") as f:
+                f.write(json.dumps({"type": "user", "message": {
+                    "content": "ask #%d" % seq[0]}}) + "\n")
+            return seq[0], time.time()
+
+        # #468: a sanitized build is slow, but a run's 4.8 s still shows
+        quick = 3.0 if SANITIZED else 0.6
+
+        # 5. at the start, both commands hung: the snapshot's blocks are the
+        # built-in ones at once, the first ref right behind them (LOW-UB1)
+        e5 = cfg("hung2", "exec sleep 100", "exec sleep 100")
+        fl = Follow(n, e5, ["--tasks", "--memory"])
+        fl.wait(lambda o: "snapshot" in o, 15)
+        d5 = ref_delay(fl, *add_ref())
+        ob = fl.objs()
+        i = next((j for j, o in enumerate(ob) if "snapshot" in o), -1)
+        check("slow command (#468): at the start with both commands hung, "
+              "the first ref comes within %.1f s" % quick,
+              d5 is not None and d5 < quick, d5)
+        check("slow command (#468): the start's snapshot is followed by the "
+              "built-in tasks block, then the memory block",
+              i >= 0 and snap_blocks(ob, i) and
+              ob[i + 1].get("source") != "command", ob[i:i + 8])
+        k5 = len(fl.got)
+        w5 = fl.wait(lambda o: hdr_of(o) == "task" and
+                     "stopped early" in o.get("warn", ""), 12, frm=k5)
+        check("slow command (#468): the hung run's answer (its warn) comes "
+              "later as a whole tasks block", bool(w5), fl.objs(k5)[:6])
+        fl.stop()
+
+        # 6. after a reset, two 4.8 s commands: the last answer at once, a
+        # ref 0.3 s later prompt, the new answer whole when it lands
+        with open(rows, "w") as f:
+            f.write(json.dumps({"id": "r1", "title": "Before"}) + "\n")
+        e6 = cfg("reset", "sleep 4.8; cat %s" % rows, "exec sleep 4.8")
+        fl = Follow(n, e6, ["--tasks", "--memory"])
+        fl.wait(lambda o: "task" in o and o["task"]["id"] == "r1", 15)
+        with open(rows, "w") as f:
+            f.write(json.dumps({"id": "r2", "title": "After"}) + "\n")
+        k6 = len(fl.got)
+        with open(tp) as f:
+            first = len(f.readline())
+        os.truncate(tp, first)
+        fl.wait(lambda o: "snapshot" in o, 10, frm=k6)
+        time.sleep(0.3)
+        d6 = ref_delay(fl, *add_ref())
+        ob = fl.objs(k6)
+        i = next((j for j, o in enumerate(ob) if "snapshot" in o), -1)
+        check("slow command (#468): after a reset with two 4.8 s commands, "
+              "a ref 0.3 s later comes within %.1f s (LOW-UB1)" % quick,
+              d6 is not None and d6 < quick, d6)
+        # the last answer: r1, or r2 when a cadence run landed before the
+        # reset was seen (a loaded box); never the built-in block
+        pre = [o["task"]["id"] for o in fl.objs()[:k6 + max(i, 0)]
+               if "task" in o and "id" in o["task"]]
+        check("slow command (#468): the reset's snapshot is followed by the "
+              "last answer's tasks block, then the memory block",
+              i >= 0 and snap_blocks(ob, i) and pre and
+              ob[i + 2].get("task", {}).get("id") == pre[-1],
+              (pre[-1:], [(hdr_of(o) or next((k for k in o if k != "schema"),
+                                              "?"), o.get("task", {}).get("id"),
+                           o.get("source")) for o in ob[i:i + 8]]))
+        r6 = fl.wait(lambda o: "task" in o and o["task"]["id"] == "r2", 12,
+                     frm=k6)
+        ob = fl.objs(k6)
+        j = next((j for j, o in enumerate(ob) if "task" in o and
+                  o["task"]["id"] == "r2"), -1)
+        check("slow command (#468): the new answer comes later as a whole "
+              "tasks block", r6 and j > i + 1 and hdr_of(ob[j - 1]) == "task"
+              and ob[j - 1].get("source") == "command" and
+              "done" in ob[j + 1], ob[j - 1:j + 2])
+        fl.stop()
+
+        # 7. SIGTERM, then SIGKILL, of the follow mid-run: the run's job,
+        # shell and command go with it (NIT-UB3); the second run, so a
+        # job's on any dch (1.93.0 ran the first in the follow itself)
+        for sig, secs in ((signal.SIGTERM, 0.5), (signal.SIGKILL, 1.0)):
+            pf = os.path.join(T, "sc-pid-%d" % sig)
+            open(pf, "w").close()
+            # a command deaf to SIGTERM: only the follow's own handler
+            # (the group SIGKILLed at once) beats the job's 250 ms grace
+            e7 = cfg("sig%d" % sig, "trap '' TERM; echo $$ >> %s; "
+                     "exec sleep 4.8" % pf)
+            fl = Follow(n, e7, ["--tasks"])
+            wait_for(lambda: len(open(pf).read().split()) >= 2, 25)
+            kids = subprocess.run(["pgrep", "-P", str(fl.p.pid)],
+                                  capture_output=True,
+                                  text=True).stdout.split()
+            ran = [int(p) for p in open(pf).read().split()[1:]] + \
+                [int(p) for p in kids]
+            fl.p.send_signal(sig)
+            t0 = time.time()
+            if sig == signal.SIGTERM:
+                # the follow's own handler, not only the job's watch on
+                # it: the job is reaped before the follow is gone
+                try:
+                    fl.p.wait(5)
+                except subprocess.TimeoutExpired:
+                    pass
+                jl = [p for p in kids if alive(int(p))]
+                check("slow command (#468): SIGTERM to the follow kills and "
+                      "reaps its job before it exits", kids and not jl and
+                      fl.p.returncode == -signal.SIGTERM,
+                      (kids, jl, fl.p.returncode))
+            left = wait_for(lambda: not [p for p in ran if alive(p)], 6)
+            took = round(time.time() - t0, 3)
+            lim = max(secs, 2.0) if SANITIZED else secs
+            check("slow command (#468): signal %d to the follow mid-run "
+                  "ends its job, shell and command within %.1f s"
+                  % (sig, lim), len(ran) >= 2 and left and took < lim,
+                  (ran, kids, took, [p for p in ran if alive(p)]))
+            fl.stop()
+
         # 4. the follow's end (the session's): no run left behind
         pids = os.path.join(T, "sc-pids")
         open(pids, "w").close()
         e4 = cfg("pid", "echo $$ >> %s; exec sleep 30" % pids)
         fl = Follow(n, e4, ["--tasks"])
         fl.wait(lambda o: "done" in o, 15)
-        wait_for(lambda: len(open(pids).read().split()) >= 2, 8)
+        wait_for(lambda: len(open(pids).read().split()) >= 2, 15)
         kids = subprocess.run(["pgrep", "-P", str(fl.p.pid)],
                               capture_output=True, text=True).stdout.split()
         ran = [int(p) for p in open(pids).read().split()] + \
@@ -833,15 +988,6 @@ def test_follow_slow_cmd():
             rc = fl.p.wait(5)
         except subprocess.TimeoutExpired:
             rc = None
-
-        def alive(p):
-            try:
-                os.kill(p, 0)
-            except ProcessLookupError:
-                return False
-            st = subprocess.run(["ps", "-o", "stat=", "-p", str(p)],
-                                capture_output=True, text=True).stdout
-            return bool(st.strip()) and not st.strip().startswith("Z")
         wait_for(lambda: not [p for p in ran if alive(p)], 3)
         check("slow command: the follow's end (the session's) kills and "
               "reaps a running command, nothing left",
