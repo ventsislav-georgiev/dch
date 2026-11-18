@@ -944,10 +944,19 @@ line_end(const char *s, size_t n, size_t i)
 ** digit, or a lower-upper hump), an identifier 4+ bytes, no "://", and no
 ** other ref kind in prose (`#412`, `src/a.c` stay theirs). Not a flag
 ** (-v, --json), K=V (RETRY_MAX=3), call (parseN(), f(x)) or bare filename
-** (README.md): code, not a name (#473). 1 with *sp. */
+** (README.md, docker-compose.yml: a known extension): code, not a name (#473). 1 with *sp. */
 static int
 code_noterm(const char *s, size_t a, size_t b)
 {
+	static const char *const fext[] = {
+		"md", "txt", "rst", "json", "jsonc", "yml", "yaml", "toml", "ini",
+		"cfg", "conf", "env", "lock", "c", "h", "cc", "cpp", "hpp", "m",
+		"mm", "go", "rs", "py", "pyi", "rb", "java", "kt", "swift", "ts",
+		"tsx", "js", "jsx", "mjs", "cjs", "css", "scss", "html", "htm",
+		"xml", "sql", "sh", "zsh", "bash", "fish", "ps1", "bat", "cmd",
+		"gradle", "mk", "cmake", "proto", "graphql", "csv", "tsv", "log",
+		"png", "jpg", "jpeg", "gif", "svg", "pdf", "zip", "gz", "tgz",
+		"tar", "plist"};
 	size_t k = a, d;
 
 	if (s[a] == '-')
@@ -962,14 +971,18 @@ code_noterm(const char *s, size_t a, size_t b)
 			if (s[d] == '(' && (A_ALNUM((unsigned char)s[d - 1]) ||
 			                    s[d - 1] == '_'))
 				return 1;
-	/* name.ext: one dot, 1-5 alphanumeric extension, no other byte */
-	if (k > a && k < b && s[k] == '.')
-	{
-		for (d = k + 1; d < b && A_ALNUM((unsigned char)s[d]); d++)
-			;
-		if (d == b && b - k - 1 >= 1 && b - k - 1 <= 5)
-			return 1;
-	}
+	/* a bare filename: [A-Za-z0-9_.-]+ whose last dot's extension is a
+	** known file one (shortcut: fixed list, extend when QA finds a miss) */
+	for (d = a; d < b; d++)
+		if (!A_ALNUM((unsigned char)s[d]) && s[d] != '_' && s[d] != '.' &&
+		    s[d] != '-')
+			return 0;
+	for (d = b; d > a && s[d - 1] != '.'; d--)
+		;
+	if (d > a + 1)
+		for (k = 0; k < sizeof fext / sizeof *fext; k++)
+			if (strlen(fext[k]) == b - d && !strncasecmp(s + d, fext[k], b - d))
+				return 1;
 	return 0;
 }
 

@@ -1063,6 +1063,14 @@ t_grammar(void)
 		  "`README.md` `main.c` `pkg.json` `FooBar` `retry budget` "
 		  "`dry_run` `fs.readFile()` `Foo::bar()`", XR_PROSE | XR_TERMS,
 		  "term:FooBar term:dry_run" },
+		/* #476: a known extension on any base is a file; names with
+		** another last dot stay terms */
+		{ "`docker-compose.yml` `package-lock.json` `tsconfig.base.json` "
+		  "`README.MD` `node.js` `.env` `.gitignore` `socket.io` "
+		  "`github.com` `os.path` `Math.max` `v1.2` `py3.11` `ASP.NET` "
+		  "`a.b`", XR_PROSE | XR_TERMS,
+		  "term:.env term:.gitignore term:socket.io term:github.com "
+		  "term:os.path term:Math.max term:v1.2 term:py3.11 term:ASP.NET term:a.b" },
 		{ "x/foo_bar a.foo_bar foo_bar.c foo_bar@x.org Foo_Bar a_b "
 		  "a__bc ab_cd_ MAX_RETRY", XR_PROSE | XR_TERMS,
 		  "term:MAX_RETRY" },
