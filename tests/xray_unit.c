@@ -1061,7 +1061,7 @@ t_grammar(void)
 		/* #473: flags, K=V, calls, bare filenames are no terms */
 		{ "`--json` `-v` `--foo=bar` `RETRY_MAX=3` `parseN()` `foo(x)` "
 		  "`README.md` `main.c` `pkg.json` `FooBar` `retry budget` "
-		  "`dry_run`", XR_PROSE | XR_TERMS,
+		  "`dry_run` `fs.readFile()` `Foo::bar()`", XR_PROSE | XR_TERMS,
 		  "term:FooBar term:dry_run" },
 		{ "x/foo_bar a.foo_bar foo_bar.c foo_bar@x.org Foo_Bar a_b "
 		  "a__bc ab_cd_ MAX_RETRY", XR_PROSE | XR_TERMS,

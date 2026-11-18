@@ -954,11 +954,14 @@ code_noterm(const char *s, size_t a, size_t b)
 		return 1;
 	while (k < b && (A_ALNUM((unsigned char)s[k]) || s[k] == '_'))
 		k++;
-	if (k > a && A_AL((unsigned char)s[a]) && k < b)
-	{
-		if (s[k] == '=' || (s[k] == '(' && s[b - 1] == ')'))
-			return 1;
-	}
+	if (k > a && A_AL((unsigned char)s[a]) && k < b && s[k] == '=')
+		return 1;
+	/* a call: f(x), fs.readFile(), Foo::bar() */
+	if (s[b - 1] == ')')
+		for (d = a + 1; d < b; d++)
+			if (s[d] == '(' && (A_ALNUM((unsigned char)s[d - 1]) ||
+			                    s[d - 1] == '_'))
+				return 1;
 	/* name.ext: one dot, 1-5 alphanumeric extension, no other byte */
 	if (k > a && k < b && s[k] == '.')
 	{
