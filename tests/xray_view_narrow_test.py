@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The `dch --xray <n>` view, narrow Reply rows (#483, #488, #494, #496):
+"""The `dch --xray <n>` view, narrow Reply rows (#483, #488, #494, #496, #504):
 the cut of a mention row at a narrow width over CJK, combining marks and
 emoji runs.
 
@@ -11,7 +11,8 @@ Run:  python3 tests/xray_view_narrow_test.py      (uses ./dch)
 from xray_view_lib import *  # noqa: F401,F403 (harness, fixtures, T)
 
 
-NSIDS = ["11111111-2222-4333-8444-5555555555d%d" % k for k in (6, 7, 4, 3, 5)]
+NSIDS = ["11111111-2222-4333-8444-5555555555d%s" % k
+         for k in ("6", "7", "4", "3", "5", "a", "b", "c")]
 
 
 def fixture_narrow():
@@ -62,6 +63,47 @@ def fixture_narrow():
                                    at(say("ab \u0301 " * 60 + " so #412 holds."),
                                       "2026-11-10T13:01:00Z"))],
            "-home-demo-narrowspmark", solo)
+    # two spaces before the marks (#504 UN1); mark-led word chains after
+    # one long word, two letters and one (#504 UN2)
+    for n, i, tx in (("xv-nw2s", 5, "c  \u0323\u0301" * 60),
+                     ("xv-nwch", 6, "q" * 200 + " \u0301aa \u0301bb "
+                                    "\u0301cc \u0301dd"),
+                     ("xv-nwch1", 7, "q" * 200 + "".join(
+                         " \u0301" + c for c in "abcdefg"))):
+        solo = "/home/demo/" + n
+        os.makedirs(os.path.dirname(tl("x", "-home-demo-" + n)), exist_ok=True)
+        record(n, NSIDS[i], [dict(o, cwd=solo) if "cwd" in o else o
+                             for o in turn("go", "2026-11-10T13:00:00Z",
+                                at(say(tx + " so #412 holds."),
+                                   "2026-11-10T13:01:00Z"))],
+               "-home-demo-" + n, solo)
+
+
+def test_narrow_2space():
+    """#504 UN1: a cut between two spaces leads with neither a space nor a mark."""
+    bad = []
+    for cols in (40, 41, 42):
+        row, text = narrow_row("xv-nw2s", cols)
+        m = re.search(ELL + "(.)", row)
+        if not (m and m.group(1) == "c" and "so #412" in row):
+            bad.append((cols, row))
+    check("#504 UN1: over two spaces then marks the narrow row starts on a "
+          "letter at 40-42 columns and #412 shows", not bad, bad)
+
+
+def test_narrow_chain():
+    """#504 UN2: the word snap runs once, so mark-led words before the ref stay."""
+    bad = []
+    for name, want in (("xv-nwch", "\u0301cc \u0301dd so #412"),
+                       ("xv-nwch1", "\u0301e \u0301f \u0301g so #412")):
+        for cols in (40, 50, 60):
+            row, text = narrow_row(name, cols)
+            m = re.search(ELL + "(.)", row)
+            if not (m and m.group(1) not in " \u0301" and want in row):
+                bad.append((name, cols, row))
+    check("#504 UN2: a chain of mark-led words before the ref keeps its last "
+          "words at 40, 50 and 60 columns, no space or mark leading", not bad,
+          bad)
 
 
 def test_narrow_cjk():
@@ -127,7 +169,8 @@ def test_narrow():
 
 def main():
     run_steps(fixture_narrow, test_narrow, test_narrow_cjk, test_narrow_mark,
-              test_narrow_emoji, test_narrow_spmark)
+              test_narrow_emoji, test_narrow_spmark, test_narrow_2space,
+              test_narrow_chain)
 
 
 if __name__ == "__main__":

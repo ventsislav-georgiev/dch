@@ -4618,8 +4618,12 @@ ref_sentence(const char *l, size_t ll, size_t s, size_t e, char *o,
 			while (lo < s && (adv = xr_u8_cont(l + lo, s - lo)))
 				lo += adv;
 			lo += xr_ri2(l, lo, s);
-			while (lo < s && sent_brk(l, lo))
-				lo++;
+			/* and a C1 control, drawn as spaces (#504) */
+			while (lo < s && (sent_brk(l, lo) || (lo + 1 < s &&
+			       (unsigned char)l[lo] == 0xc2 &&
+			       (unsigned char)l[lo + 1] >= 0x80 &&
+			       (unsigned char)l[lo + 1] < 0xa0)))
+				lo += sent_brk(l, lo) ? 1 : 2;
 		} while (lo != l0);
 		/* the right before the word it ends in, past the ref (whole when
 		** kept, else cut on a scalar) */

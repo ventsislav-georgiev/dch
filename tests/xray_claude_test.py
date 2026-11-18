@@ -735,7 +735,15 @@ def test_refs():
     for k in range(8):
         for unit, ok in (("1\ufe0f\u20e3", lambda c: c[0] != "\u20e3"),
                          ("\U0001f1e7\U0001f1ec",
-                          lambda c: c[0] != "\U0001f1ec")):
+                          lambda c: c[0] != "\U0001f1ec"),
+                         # the non-keycap blocks (#504 UN4)
+                         ("a\ufe0e", lambda c: c[0] != "\ufe0e"),
+                         ("a\u1dc0", lambda c: c[0] != "\u1dc0"),
+                         ("a\ufe20", lambda c: c[0] != "\ufe20"),
+                         # a C1 control (NEL) then a mark (#504 UN3)
+                         ("ab \x85\u0301 ",
+                          lambda c: not "\u0300" <= c.lstrip(" ")[:1] <=
+                          "\u036f")):
             tx = unit * 120 + "a" * k
             put([{"type": "user", "cwd": "/home/demo/proj",
                   "timestamp": "2026-11-10T10:00:00Z",
@@ -751,7 +759,8 @@ def test_refs():
             if not (len(ms) == 1 and s.startswith("\u2026 ") and ok(s[2:])
                     and s.encode()[sp[0]:sp[1]].decode() == purl):
                 bad.append((k, unit, s[:12]))
-    check("ref #495: after the left ellipsis no lone keycap U+20E3 and no "
+    check("ref #495: after the left ellipsis no lone keycap U+20E3, no "
+          "lone FE0E, 1DC0 or FE20, no mark after a C1 control and no "
           "flag cut to its second regional indicator, at every offset",
           not bad, bad)
     put([{"type": "user", "cwd": "/home/demo/proj",

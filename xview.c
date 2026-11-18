@@ -3326,7 +3326,7 @@ xv_csent(const struct xv_men *m)
 {
 	const char *s = m->sent;
 	size_t a = 0, p, ss = (size_t)m->ss, se = (size_t)m->se;
-	int room = pk_w - pk_col - 2;
+	int room = pk_w - pk_col - 2, snap = 1;
 
 	if (!s[0] || m->ss < 0)
 	{
@@ -3338,7 +3338,9 @@ xv_csent(const struct xv_men *m)
 			;
 	/* NIT-UH2: on to the next word, never past the ref; the cut stays when
 	** there is none or it drops over half the context shown (#483's rule);
-	** a mark after the spaces is skipped too (#494) */
+	** a mark after the spaces is skipped too (#494). The word snap is the
+	** first pass's only: judged again against the snapped cut, #483's half
+	** would drop a chain of mark-led words whole (#504) */
 	do
 	{
 		size_t k;
@@ -3347,7 +3349,7 @@ xv_csent(const struct xv_men *m)
 		while (a < ss && (k = xr_u8_cont(s + a, ss - a)))
 			a += k;
 		a += xr_ri2(s, a, ss);
-		if (a && (unsigned char)s[a - 1] > ' ')
+		if (snap && a && (unsigned char)s[a - 1] > ' ')
 		{
 			size_t b = a;
 
@@ -3355,9 +3357,10 @@ xv_csent(const struct xv_men *m)
 				b++;
 			if (b < ss && b - a <= (ss - a) / 2)
 				a = b;
-			while (a < ss && (unsigned char)s[a] <= ' ')
-				a++;
 		}
+		snap = 0;
+		while (a && a < ss && (unsigned char)s[a] <= ' ')
+			a++;
 	} while (a != p);
 	if (a)
 		pk_txt(xv_ell());
