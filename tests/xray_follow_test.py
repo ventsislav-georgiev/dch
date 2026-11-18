@@ -298,12 +298,16 @@ def test_follow_claude():
         # nothing written by a follow (9.5)
         before = files(T)
         k5 = len(fl.got)
-        put([{"type": "user", "message": {"content": "late #14"}}])
-        fl.wait(is_ref("issue:#14"), frm=k5)
+        # into sid3's transcript, the one followed since the rotations
+        # (tp is no longer read: its ref never came, a 10 s wait)
+        with open(os.path.join(pdir, sid3 + ".jsonl"), "a") as f:
+            f.write(json.dumps({"type": "user", "message": {
+                "content": "late #14"}}) + "\n")
+        got14 = fl.wait(is_ref("issue:#14"), frm=k5)
         tr = open(trace).read()
         new = sorted(set(files(T)) - set(before))
         check("follow: nothing written, no passage in the trace",
-              not [p for p in new if p != trace] and
+              got14 and not [p for p in new if p != trace] and
               "late #14" not in tr and "rotated ask" not in tr, new)
 
         # the session ends: exit 0
@@ -783,13 +787,21 @@ def test_follow_slow_cmd():
         fl.stop()
 
         # 3. a hung memory_command beside a tasks_command
-        e3 = cfg("mem", "cat %s" % rows, "exec sleep 100")
+        # memory's 30 s cadence lowered to 3 s (DCH_XRAY_MEVERY, tests
+        # only): the window spans a second run, each killed at 5 s
+        starts = os.path.join(T, "sc-mem-starts")
+        e3 = dict(cfg("mem", "cat %s" % rows,
+                      "echo run >> %s; exec sleep 100" % starts),
+                  DCH_XRAY_MEVERY="3000")
         fl = Follow(n, e3, ["--tasks", "--memory"])
         fl.wait(lambda o: "done" in o and
                 sum("done" in x for x in fl.objs()) >= 2, 20)
-        lat = late(fl, 33.0)  # past one 30 s memory run
+        lat = late(fl)
+        with open(starts) as f:
+            runs = len(f.readlines())
         check("slow command: a hung memory_command and a tasks_command "
-              "leave every ref delta within 0.6 s", prompt(lat), lat)
+              "leave every ref delta within 0.6 s, across a second "
+              "memory run", prompt(lat) and runs >= 2, (lat, runs))
         fl.stop()
 
         # a shell's follow (xf_shell) takes the same path

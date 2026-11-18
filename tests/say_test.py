@@ -325,12 +325,16 @@ def main():
               any(e["ev"] == "paste" for e in events(b)[nb:]))
         idle(b)
         nb = len(events(b))
-        r = say(b, "--", "/x\rhello")
+        # the text never shows as typed: the say waits out DCH_AGENT_LAND_MS,
+        # 3 s here, not its 30 s; an early submit is a line at the paste
+        land = dict(os.environ, DCH_AGENT_LAND_MS="3000")
+        r = say(b, "--", "/x\rhello", env=land)
         # a CR in a paste is never a submit: the fake sees the paste
         # start and no line (the gate then reports not_typed, as for any
         # text it cannot match in the composer)
         check("/x<CR>hello pastes, no bare CR submits early",
-              any(e["ev"] == "paste" for e in events(b)[nb:]) and
+              until(lambda: any(e["ev"] == "paste"
+                                for e in events(b)[nb:]), 5) and
               not any(e["ev"] in ("line", "turn") for e in events(b)[nb:]))
         idle(b)
         # a UTF-8 C1 control (U+0085, CSI is U+009B) keeps the paste too;
@@ -341,15 +345,17 @@ def main():
         idle(c1)
         idle(c2)
         n1, n2 = len(events(c1)), len(events(c2))
-        r = say(c1, "--", "/x\u0085y")
+        r = say(c1, "--", "/x\u0085y", env=land)
         check("/x<U+0085>y pastes, no line typed",
-              any(e["ev"] == "paste" for e in events(c1)[n1:]) and
+              until(lambda: any(e["ev"] == "paste"
+                                for e in events(c1)[n1:]), 5) and
               not any(e["ev"] in ("line", "turn") for e in events(c1)[n1:]))
         run("-k", c1)
-        r = say("--all", "--", "/x\u0085")
+        r = say("--all", "--", "/x\u0085", env=land)
         check("--all /x<U+0085> is not refused as a /command",
               "a /command is not sent" not in r.stderr and
-              any(e["ev"] == "paste" for e in events(c2)[n2:]))
+              until(lambda: any(e["ev"] == "paste"
+                                for e in events(c2)[n2:]), 5))
         idle(c2)
 
         # --- old master: failed/old_master -------------------------------

@@ -787,7 +787,7 @@ def test_said():
         v.close()
 
 
-NSIDS = ["11111111-2222-4333-8444-5555555555d%d" % k for k in (6, 7, 4)]
+NSIDS = ["11111111-2222-4333-8444-5555555555d%d" % k for k in (6, 7, 4, 3, 5)]
 
 
 def fixture_narrow():
@@ -819,11 +819,30 @@ def fixture_narrow():
                                    at(say("e\u0301" * 60 + " so #412 holds."),
                                       "2026-11-10T13:01:00Z"))],
            "-home-demo-narrowmark", solo)
+    # runs of U+2764 U+FE0F and keycaps: two cells each (#496)
+    solo = "/home/demo/narrowemoji"
+    os.makedirs(os.path.dirname(tl("x", "-home-demo-narrowemoji")),
+                exist_ok=True)
+    record("xv-nwe", NSIDS[3], [dict(o, cwd=solo) if "cwd" in o else o
+                                for o in turn("go", "2026-11-10T13:00:00Z",
+                                   at(say("\u2764\ufe0f" * 30 + "1\ufe0f\u20e3" * 30 +
+                                          " so #412 holds."),
+                                      "2026-11-10T13:01:00Z"))],
+           "-home-demo-narrowemoji", solo)
+    # a mark right after the spaces at the cut (#494)
+    solo = "/home/demo/narrowspmark"
+    os.makedirs(os.path.dirname(tl("x", "-home-demo-narrowspmark")),
+                exist_ok=True)
+    record("xv-nws", NSIDS[4], [dict(o, cwd=solo) if "cwd" in o else o
+                                for o in turn("go", "2026-11-10T13:00:00Z",
+                                   at(say("ab \u0301 " * 60 + " so #412 holds."),
+                                      "2026-11-10T13:01:00Z"))],
+           "-home-demo-narrowspmark", solo)
 
 
-def narrow_row(name):
-    """The card's Reply row for #412 of session `name` at 50 columns."""
-    v = Pty([DCH, "--xray", name], rows=30, cols=50,
+def narrow_row(name, cols=50):
+    """The card's Reply row for #412 of session `name` at `cols` columns."""
+    v = Pty([DCH, "--xray", name], rows=30, cols=cols,
             env={"TMPDIR": TPD + "/", "NO_COLOR": ""})
     try:
         v.wait(b"Prompts 1")
@@ -860,6 +879,40 @@ def test_narrow_mark():
     m = re.search(ELL + "(.)", row)
     check("#488: the narrow row's first scalar after the ellipsis is not a "
           "combining mark and #412 shows", m is not None and
+          not ("\u0300" <= m.group(1) <= "\u036f") and "so #412" in row,
+          text)
+
+
+def emoji_cells(s):
+    """Cells as terminals draw: VS16 or U+20E3 widens a one-cell base."""
+    n, one = 0, False
+    for c in s:
+        w = (0 if unicodedata.category(c) in ("Mn", "Me", "Cf") else
+             2 if unicodedata.east_asian_width(c) in "WF" else 1)
+        if w == 0 and c in "\ufe0f\u20e3" and one:
+            w, one = 1, False
+        elif w:
+            one = w == 1
+        n += w
+    return n
+
+
+def test_narrow_emoji():
+    """#496: VS16 emoji and keycaps take two cells; no row passes the width."""
+    for cols in (40, 50):
+        row, text = narrow_row("xv-nwe", cols)
+        wide = [l for l in text.split("\n") if emoji_cells(l) > cols]
+        check("#496: at %d columns no row of an emoji run is wider than the "
+              "window and #412 shows" % cols, not wide and "so #412" in row,
+              (wide, text))
+
+
+def test_narrow_spmark():
+    """#494: nor a mark that follows the spaces at the cut."""
+    row, text = narrow_row("xv-nws")
+    m = re.search(ELL + "(.)", row)
+    check("#494: the narrow row's first scalar after the ellipsis is not a "
+          "combining mark after the spaces and #412 shows", m is not None and
           not ("\u0300" <= m.group(1) <= "\u036f") and "so #412" in row,
           text)
 
@@ -1219,7 +1272,7 @@ def main():
               test_order, test_tool_mention, fixture_tmp, test_tmp, test_memory_live,
               fixture_reply, test_reply, test_reply_live,
               fixture_said, test_said, fixture_narrow, test_narrow, test_narrow_cjk,
-              test_narrow_mark,
+              test_narrow_mark, test_narrow_emoji, test_narrow_spmark,
               fixture_terms, test_terms,
               test_terms_live, fixture_recall, test_recall,
               fixture_dup, test_dup)

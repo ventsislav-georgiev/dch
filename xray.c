@@ -4586,10 +4586,14 @@ ref_sentence(const char *l, size_t ll, size_t s, size_t e, char *o,
 				lo++;
 		if (keep && (long)(lo - l0) > lw / 2)
 			lo = l0;
-		while (lo < s && (adv = xr_u8_cont(l + lo, s - lo)))
-			lo += adv;
-		while (lo < s && sent_brk(l, lo))
-			lo++;
+		do	/* a mark after the spaces is skipped too */
+		{
+			l0 = lo;
+			while (lo < s && (adv = xr_u8_cont(l + lo, s - lo)))
+				lo += adv;
+			while (lo < s && sent_brk(l, lo))
+				lo++;
+		} while (lo != l0);
 		/* the right before the word it ends in, past the ref (whole when
 		** kept, else cut on a scalar) */
 		bd = keep ? e : s;
