@@ -771,7 +771,7 @@ def test_said():
         v.close()
 
 
-NSIDS = ["11111111-2222-4333-8444-5555555555d%d" % k for k in (6,)]
+NSIDS = ["11111111-2222-4333-8444-5555555555d%d" % k for k in (6, 7)]
 
 
 def fixture_narrow():
@@ -784,11 +784,21 @@ def fixture_narrow():
                                   at(say(words + " so #412 holds."),
                                      "2026-11-10T13:01:00Z"))],
            "-home-demo-narrow", solo)
+    # CJK with one space before the ref: snapping to it would drop the
+    # whole context, so the scalar cut stays (#483's half-room rule)
+    solo = "/home/demo/narrowcjk"
+    os.makedirs(os.path.dirname(tl("x", "-home-demo-narrowcjk")),
+                exist_ok=True)
+    record("xv-nwc", NSIDS[1], [dict(o, cwd=solo) if "cwd" in o else o
+                                for o in turn("go", "2026-11-10T13:00:00Z",
+                                   at(say("\u6f22\u5b57" * 60 + " so #412 holds."),
+                                      "2026-11-10T13:01:00Z"))],
+           "-home-demo-narrowcjk", solo)
 
 
-def test_narrow():
-    """NIT-UH2: a mention row cut to 50 columns starts on a whole word."""
-    v = Pty([DCH, "--xray", "xv-nw"], rows=30, cols=50,
+def narrow_row(name):
+    """The card's Reply row for #412 of session `name` at 50 columns."""
+    v = Pty([DCH, "--xray", name], rows=30, cols=50,
             env={"TMPDIR": TPD + "/", "NO_COLOR": ""})
     try:
         v.wait(b"Prompts 1")
@@ -802,16 +812,29 @@ def test_narrow():
         v.wait(b"Mentions: this session ", start=mark)
         v.pump(1.0)
         text = screen(v, 0)
-        row = next((l for l in text.split("\n") if "Reply" in l and
-                    "#412" in l), "")
-        check("NIT-UH2: the narrow row starts on a whole word after the "
-              "ellipsis and keeps #412", re.search(ELL + r"w\d\d\d ", row)
-              is not None and "so #412" in row, text)
         v.key(b"q", 0.5)
         v.key(b"q")
         v.exit()
     finally:
         v.close()
+    return next((l for l in text.split("\n") if "Reply" in l and
+                 "#412" in l), ""), text
+
+
+def test_narrow_cjk():
+    """NIT-UH2 with #483's rule: a CJK row keeps its context."""
+    row, text = narrow_row("xv-nwc")
+    check("NIT-UH2: a CJK sentence's narrow row keeps CJK before the ref "
+          "(no snap to the one space)", re.search(ELL + "\u6f22|" + ELL +
+          "\u5b57", row) is not None and "so #412" in row, text)
+
+
+def test_narrow():
+    """NIT-UH2: a mention row cut to 50 columns starts on a whole word."""
+    row, text = narrow_row("xv-nw")
+    check("NIT-UH2: the narrow row starts on a whole word after the "
+          "ellipsis and keeps #412", re.search(ELL + r"w\d\d\d ", row)
+          is not None and "so #412" in row, text)
 
 
 TSIDS = ["11111111-2222-4333-8444-5555555555e%d" % k for k in (8, 9)]
@@ -971,7 +994,7 @@ def main():
               fixture_latest, test_latest, test_lookup, fixture_order,
               test_order, test_tool_mention, fixture_tmp, test_tmp, test_memory_live,
               fixture_reply, test_reply, test_reply_live,
-              fixture_said, test_said, fixture_narrow, test_narrow,
+              fixture_said, test_said, fixture_narrow, test_narrow, test_narrow_cjk,
               fixture_terms, test_terms,
               test_terms_live)
 
