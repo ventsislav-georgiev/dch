@@ -11795,7 +11795,8 @@ res_scan(struct xr_scan *x, const struct xr_span *sp, const char *text,
 
 	if (x->cancel || x->out_full || !(r = malloc(sizeof *r)))
 		return;
-	if (res_ref(sp, text, cwd, live, light, r) &&
+	/* a resolver that answered without a state gives no line */
+	if (res_ref(sp, text, cwd, live, light, r) && r->state &&
 	    (!light || !strcmp(r->state, "ok") ||
 	     !strcmp(r->state, "missing")) && (m = ln_open(&b, &bl)))
 	{
