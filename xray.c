@@ -11272,6 +11272,10 @@ xr_find(const char *hay, size_t n, const char *needle, size_t nl)
 	return SIZE_MAX;
 }
 
+/* one past XR_SEARCH_HITS: the hit past the cap tells whether the oldest kept
+** turn is whole (sr_trim) */
+#define SR_SLOTS (XR_SEARCH_HITS + 1)
+
 enum { SK_USER, SK_ASSISTANT, SK_TOOL };
 static const char *const sk_name[] = { "user", "assistant", "tool" };
 
@@ -11295,7 +11299,7 @@ struct xr_search
 	** \uXXXX, its longest plain-ASCII run in a line that holds "\u" */
 	size_t run, runl, asc, ascl;
 	int nonascii;
-	struct sr_hit hit[XR_SEARCH_HITS];
+	struct sr_hit hit[SR_SLOTS];
 	size_t n, h0;		/* a shell's are a ring from h0, oldest first */
 	uint64_t total, bytes;
 	int more, partial, shell;
@@ -11359,7 +11363,7 @@ xr_search_free(struct xr_search *s)
 
 	if (!s)
 		return;
-	for (k = 0; k < XR_SEARCH_HITS; k++)
+	for (k = 0; k < SR_SLOTS; k++)
 		sr_hit_free(&s->hit[k]);
 	free(s->line);
 	free(s);
@@ -11472,20 +11476,19 @@ sr_add(struct xr_search *s, uint64_t off, long long at, int who, char *tool,
 	struct sr_hit *h;
 
 	s->total++;
-	if (!s->shell && s->n == XR_SEARCH_HITS)
+	if (!s->shell && s->n == SR_SLOTS)
 	{
-		s->more = 1;
 		free(tool);
 		return;
 	}
-	if (s->n == XR_SEARCH_HITS)
+	if (s->n == SR_SLOTS)
 	{
 		h = &s->hit[s->h0];
-		s->h0 = (s->h0 + 1) % XR_SEARCH_HITS;
+		s->h0 = (s->h0 + 1) % SR_SLOTS;
 		sr_hit_free(h);
 	}
 	else
-		h = &s->hit[(s->h0 + s->n++) % XR_SEARCH_HITS];
+		h = &s->hit[(s->h0 + s->n++) % SR_SLOTS];
 	h->off = off;
 	h->at = at;
 	h->who = who;
@@ -11493,6 +11496,7 @@ sr_add(struct xr_search *s, uint64_t off, long long at, int who, char *tool,
 	h->snip = sr_snip(t, n, m, s->tl);
 	/* a transcript's chapter: from its window's decoder (sr_chapters) */
 	h->pend = !s->shell && sr_region(s, off) != 1;
+	s->more |= s->n == SR_SLOTS;
 }
 
 /* One record being read: its offset and time, the kinds it already hit. */
@@ -11928,7 +11932,7 @@ sr_chapters(struct xr_search *s, const struct sr_win *w)
 static struct sr_hit *
 sr_nth(struct xr_search *s, size_t k)
 {
-	return &s->hit[s->shell ? (s->h0 + s->n - 1 - k) % XR_SEARCH_HITS : k];
+	return &s->hit[s->shell ? (s->h0 + s->n - 1 - k) % SR_SLOTS : k];
 }
 
 /* Hits a and b under one turn: a hit under no chapter, or one not known
@@ -11970,8 +11974,20 @@ sr_trim(struct xr_search *s)
 {
 	struct sr_hit *o;
 	size_t k, n = 0, t = 0;
-	int cut = s->total > XR_SEARCH_HITS;
+	int cut = 0;
 
+	/* the hit past the cap (the oldest of SR_SLOTS) is not kept: the oldest
+	** kept turn is cut only when that hit is under it too */
+	if (s->n == SR_SLOTS)
+	{
+		struct sr_hit *x = sr_nth(s, s->n - 1);
+
+		cut = sr_same(x, sr_nth(s, s->n - 2));
+		sr_hit_free(x);
+		if (s->shell)
+			s->h0 = (s->h0 + 1) % SR_SLOTS;
+		s->n--;
+	}
 	if (!(o = calloc(s->n ? s->n : 1, sizeof *o)))
 		return;		/* out of memory: the hits stay as they are */
 	for (k = 0; k < s->n; k++)
@@ -12156,7 +12172,7 @@ sr_flush(struct xr_search *s)
 		struct sr_hit *h;
 
 		sr_add(s, s->lseq, s->lat, s->lwho, NULL, s->line, s->ll, m);
-		h = &s->hit[(s->h0 + s->n - 1) % XR_SEARCH_HITS];
+		h = &s->hit[(s->h0 + s->n - 1) % SR_SLOTS];
 		snprintf(h->chapter, sizeof h->chapter, "%s", s->lch);
 		h->aseq = s->laseq;
 		h->pend = s->lpend;
@@ -12199,7 +12215,7 @@ xr_search_rec(struct xr_search *s, const struct xr_shell *sh,
 	if (x->kind == RING_K_MARK && sh->st == S_OUTPUT && sh->ord >= 0)
 		for (k = 0; k < s->n; k++)
 		{
-			struct sr_hit *h = &s->hit[(s->h0 + k) % XR_SEARCH_HITS];
+			struct sr_hit *h = &s->hit[(s->h0 + k) % SR_SLOTS];
 
 			if (h->pend && h->aseq == sh->aseq)
 			{
@@ -12237,7 +12253,7 @@ xr_search_print(FILE *f, const struct xr_search *s, const char *session,
 	{
 		/* newest first: a transcript's are, a shell's ring is oldest first */
 		const struct sr_hit *h = &s->hit[s->shell ? (s->h0 + s->n - 1 - k)
-		                                  % XR_SEARCH_HITS : k];
+		                                  % SR_SLOTS : k];
 
 		fputs(k ? ",{\"chapter\":" : "{\"chapter\":", f);
 		put_or_null(f, h->chapter[0] && !h->pend ? h->chapter : NULL);
