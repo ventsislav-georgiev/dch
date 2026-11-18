@@ -1051,7 +1051,14 @@ xcmd_rows(enum xcmd_kind kind, const struct xcmd_ctx *ctx, xcmd_row_fn fn,
 	po[0] = pe[0] = -1;
 	if (r.stop == XC_RUN)
 		while (!(k = xc_done(pid)) && xr_now_ms() < until)
-			poll(NULL, 0, 5);
+		{
+			/* the watch too: a follow gone ends the run at once */
+			if (poll(p + 2, 1, 5) > 0 && p[2].revents)
+			{
+				r.stop = XC_CALLER;
+				break;
+			}
+		}
 	else
 		k = 0;
 	if (r.stop == XC_RUN && !k)
