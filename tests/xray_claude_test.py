@@ -1237,6 +1237,45 @@ def search(n, text, env=None):
         return r.returncode, None, r.stdout + r.stderr
 
 
+def test_search_words():
+    """#499: a query's words in any order, stem-folded; the phrase's hits
+    first, then the rest, each newest first; a quoted query is literal."""
+    cfg = os.path.join(HOME, ".claude")
+    # its own project: the other tests' latest session stays theirs
+    pdir = os.path.join(cfg, "projects", "-home-demo-wproj")
+    os.makedirs(pdir, exist_ok=True)
+    sid = "11111111-2222-4333-8444-5555555555b9"
+    ts = lambda s: "2026-11-10T11:00:%02d.000Z" % s
+    said = ["we tried the retry backoff once",
+            "keep a backoff between retries here",
+            "Retrying with BACKOFF now",
+            "nothing to see"]
+    with open(os.path.join(pdir, sid + ".jsonl"), "w") as f:
+        for i, t in enumerate(said):
+            f.write(json.dumps({"type": "user", "cwd": "/home/demo/wproj",
+                                "timestamp": ts(i),
+                                "message": {"content": t}}) + "\n")
+    history("xr-sw", sid, cfg, cwd="/home/demo/wproj")
+    rc, o, err = search("xr-sw", "retry backoff")
+    snips = [h["snippet"] for h in (o or {}).get("hits", [])]
+    check("search words: every word in any order, retries/retrying fold "
+          "to retry; the phrase first, then the newest",
+          rc == 0 and snips == [said[0], said[2], said[1]], (rc, o, err))
+    check("search words: the hits' keys and the object's stay",
+          o and list(o) == S_KEYS and
+          all(list(h) == H_KEYS for h in o["hits"]), o)
+    rc, o, err = search("xr-sw", '"retry backoff"')
+    check("search words: a quoted query is the phrase alone",
+          rc == 0 and [h["snippet"] for h in o["hits"]] == [said[0]] and
+          o["text"] == '"retry backoff"', (rc, o, err))
+    rc, o, err = search("xr-sw", "retries")
+    check("search words: one word folds too (retry, retries, retrying)",
+          rc == 0 and len(o["hits"]) == 3, (rc, o, err))
+    rc, o, err = search("xr-sw", "backoff absent")
+    check("search words: a word missing is no hit",
+          rc == 0 and o["hits"] == [], (rc, o, err))
+
+
 def test_search():
     """The places a word was said, newest first: typed prompts, answers,
     tool inputs and results; never thinking, a sidechain, a meta record,
@@ -1312,7 +1351,8 @@ def test_search():
               rc == 0 and o and o["hits"] == [] and not o["more"], (o, err))
     for text, want in (('"quoted"', 1), ("back\\slash", 1),
                        ("CAF\u00e9", 1), ("caf\u00c9", 0),
-                       ("needle\nnext", 0), ("needle next", 0)):
+                       ("needle\nnext", 0), ('"needle next"', 0),
+                       ("needle next", 2)):
         r = dch("--xray", "xr-sr", "--search", text, "--json")
         if "\n" in text:
             check("search: a control character in the needle is bad search "
@@ -4148,6 +4188,7 @@ def main():
         test_d2_whole()
         test_write_fail()
         test_search()
+        test_search_words()
         test_tasks()
         test_tasks_cap()
         test_chapter()

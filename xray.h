@@ -595,6 +595,12 @@ size_t xr_find(const char *hay, size_t n, const char *needle, size_t nl);
 struct xr_search;
 struct xr_search *xr_search_new(const char *text, long long t0);
 void xr_search_free(struct xr_search *s);
+/* The search's matcher over t[0..n) (#499): the phrase as typed (exact 1),
+** else, unquoted, every word in any order, stem-folded (sr_stem): the
+** first match's offset (*ml its length, the snippet's centre), SIZE_MAX
+** for none. */
+size_t xr_search_match(const struct xr_search *s, const char *t, size_t n,
+                       size_t *ml, int *exact);
 /* A transcript (codex: a Codex rollout) read from its end in windows cut at
 ** line starts, under xr_lim's bytes and ms; lines that hold the text's raw
 ** run are decoded, and a hit is a match in a typed prompt, assistant text, a
@@ -619,7 +625,7 @@ int xr_search_print(FILE *f, const struct xr_search *s, const char *session,
                     const char *why);
 /* --scope project|all (#498): the hits kept; one session's group, no newline:
 ** {"session","session_id","corpus","live","project","last_active",
-** "turn_title" (the newest hit's),"hits":[{"chapter","offset","at","who",
+** "turn_title" (the first hit's),"hits":[{"chapter","offset","at","who",
 ** "tool","turn_title","snippet"}…],"more","partial","why","bytes"};
 ** session_id and project null for "", last_active null for < 0. */
 size_t xr_search_hits(const struct xr_search *s);

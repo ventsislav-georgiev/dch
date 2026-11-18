@@ -1925,11 +1925,33 @@ is resolved with `--full` only. The card shows it as
   that is gone, a symlink or not a regular file gives no `resolved` line.
 
 `dch --xray <n> --search <text> --json` finds where a word or a phrase was
-said in `<n>`'s own corpus and prints one object, the newest places first:
+said in `<n>`'s own corpus and prints one object, the places with the
+whole text first, then the rest, each newest first:
 `{"schema":1,"session","session_id","corpus","text","hits":[{"chapter","offset","at","who","tool","snippet"}],"more","partial","why","bytes"}`.
-`<text>` is literal: 2 to 200 bytes of UTF-8 with no control character and
+`<text>` is 2 to 200 bytes of UTF-8 with no control character and
 none of `--ref`'s bidi controls (`dch: bad search: 2 to 200 bytes, no control
 character`, exit 2). ASCII letters match in either case; nothing else folds.
+- **Words (#499).** `<text>` is split into words at spaces and tabs; a text
+  matches when it holds every word, in any order, so `retry backoff` finds
+  "…backoff between retries…". A text that holds `<text>` as typed (its
+  ends trimmed) is an exact match and ranks first. A word matches where it
+  is found as typed (inside a longer word too, as before: `push` finds
+  `pushover`), or where a run of ASCII letters has the same stem. In
+  quotes (`"push retry"`, the quotes the first and last byte) the inside is
+  searched as one literal phrase, no words, no stems. A word of one text
+  value counts: a prompt, an answer, one of a tool call's input values, a
+  result.
+- **Stems.** ASCII only, a word's end, the first rule that fits, and only
+  when at least 3 bytes stay: `-ies`/`-ied` become `-y` (retries, retried:
+  retry); `-es` goes after s, x, z, ch, sh (pushes: push); `-ing` and `-ed`
+  go when the stem has a vowel (a e i o u y; pushing, pushed: push; not
+  string, shred) and not after `e` for `-ed` (speed stays), then a doubled
+  consonant other than l, s, z loses one (stopped: stop; running: run);
+  `-s` goes but not from `-ss`, `-us`, `-is` (files: file; class, status,
+  this stay). Then a last `e` goes (file, files, filed; make, making). So
+  `is`, `as`, `us` and `uses` never fold; irregular forms (ran, made) and
+  non-ASCII words do not match each other; a word that does not end in a
+  letter is matched only as typed.
 `--search -` (and `--ref -`) reads the text from standard input instead, so it
 never shows in dch's own `ps` line: `echo word | dch --xray <n> --search - --json`.
 (A [`define_command`](#your-own-definitions-define_command) that `--ref` runs
@@ -1958,7 +1980,8 @@ or with a remote `host:name` the `-` is the plain text `-`, the same error as be
   has none there: a turn past the 3.8 range, a shell row still on the screen
   or outside a block). `offset` is the record's byte offset (a shell: its
   ring seq), `at` its time in seconds or `null`, `tool` the tool's name or
-  `null`, and `snippet` about 160 bytes around the match, cut at word
+  `null`, and `snippet` about 160 bytes around the match (the whole text,
+  else the word that comes first in the record), cut at word
   boundaries (the match whole), controls and runs of spaces as one space; it
   starts with `"… "` (U+2026, a space) when the window does not start at the
   text's start.
