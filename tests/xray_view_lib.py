@@ -1307,12 +1307,18 @@ def chord_rx():
 REPEAT = [(0.3, b"o")] + [(0.05, b"o")] * 19 + [(0.3, b"z")]
 
 
-def narrow_row(name, cols=50):
-    """The card's Reply row for #412 of session `name` at `cols` columns."""
-    v = Pty([DCH, "--xray", name], rows=30, cols=cols,
+def narrow_rows(name, widths):
+    """The card's Reply row for #412 of session `name` at each of `widths`
+    columns, as [(row, text)]: one Pty, opened at the first width and resized
+    to the rest (the kernel's SIGWINCH makes the view draw its whole frame
+    again; each width's text is what was drawn since its resize)."""
+    got = []
+    v = Pty([DCH, "--xray", name], rows=30, cols=widths[0],
             env={"TMPDIR": TPD + "/", "NO_COLOR": ""})
     try:
-        v.wait(b"Prompts 1")
+        # the count has its own SGR and a narrow tab bar drops it: read the
+        # screen for the tab, not the raw bytes for "Prompts 1"
+        until(lambda: (v.pump(0.1), "Prompts" in screen(v, 0))[1], 10)
         v.pump(0.5)
         for _ in range(6):
             if "[Refs" in rows(v.out).get(2, ""):
@@ -1322,15 +1328,26 @@ def narrow_row(name, cols=50):
         v.key(b"\r", 1.5)
         v.wait(b"Mentions: this session ", start=mark)
         v.pump(1.0)
-        text = screen(v, 0)
+        for i, cols in enumerate(widths):
+            if i:
+                v.resize(30, cols)
+                mark = len(v.out)
+                v.wait(b"Mentions: this session ", start=mark)
+                v.pump(1.0)
+            text = screen(v, 0 if not i else mark)
+            got.append((next((l for l in text.split("\n") if "Reply" in l and
+                              "#412" in l), ""), text))
         v.key(b"q", 0.5)
         v.key(b"q")
         v.exit()
     finally:
         v.close()
-    return next((l for l in text.split("\n") if "Reply" in l and
-                 "#412" in l), ""), text
+    return got
 
+
+def narrow_row(name, cols=50):
+    """The card's Reply row for #412 of session `name` at `cols` columns."""
+    return narrow_rows(name, [cols])[0]
 
 
 def run_steps(*steps):
