@@ -977,6 +977,14 @@ code_noterm(const char *s, size_t a, size_t b)
 		if (!A_ALNUM((unsigned char)s[d]) && s[d] != '_' && s[d] != '.' &&
 		    s[d] != '-')
 			return 0;
+	/* a dotfile: .env, .gitignore (.NET, with capitals, stays a name) */
+	if (s[a] == '.')
+	{
+		for (d = a + 1; d < b && !A_UP((unsigned char)s[d]); d++)
+			;
+		if (d == b && b - a > 1)
+			return 1;
+	}
 	for (d = b; d > a && s[d - 1] != '.'; d--)
 		;
 	if (d > a + 1)
