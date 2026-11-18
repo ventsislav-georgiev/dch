@@ -3327,6 +3327,8 @@ xv_csent(const struct xv_men *m)
 	while (a < ss && xv_fitlen(s + a, se - a, room) < se - a)
 		while (++a < ss && ((unsigned char)s[a] & 0xc0) == 0x80)
 			;
+	for (size_t k; a < ss && (k = xr_u8_cont(s + a, ss - a)); )
+		a += k;
 	/* NIT-UH2: on to the next word, never past the ref; the cut stays when
 	** there is none or it drops over half the context shown (#483's rule) */
 	if (a && (unsigned char)s[a - 1] > ' ')

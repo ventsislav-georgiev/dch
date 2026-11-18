@@ -795,7 +795,7 @@ def test_said():
         v.close()
 
 
-NSIDS = ["11111111-2222-4333-8444-5555555555d%d" % k for k in (6, 7)]
+NSIDS = ["11111111-2222-4333-8444-5555555555d%d" % k for k in (6, 7, 4)]
 
 
 def fixture_narrow():
@@ -818,6 +818,15 @@ def fixture_narrow():
                                    at(say("\u6f22\u5b57" * 60 + " so #412 holds."),
                                       "2026-11-10T13:01:00Z"))],
            "-home-demo-narrowcjk", solo)
+    # decomposed e + U+0301 runs: the row's cut lands on a mark (#488)
+    solo = "/home/demo/narrowmark"
+    os.makedirs(os.path.dirname(tl("x", "-home-demo-narrowmark")),
+                exist_ok=True)
+    record("xv-nwm", NSIDS[2], [dict(o, cwd=solo) if "cwd" in o else o
+                                for o in turn("go", "2026-11-10T13:00:00Z",
+                                   at(say("e\u0301" * 60 + " so #412 holds."),
+                                      "2026-11-10T13:01:00Z"))],
+           "-home-demo-narrowmark", solo)
 
 
 def narrow_row(name):
@@ -851,6 +860,16 @@ def test_narrow_cjk():
     check("NIT-UH2: a CJK sentence's narrow row keeps CJK before the ref "
           "(no snap to the one space)", re.search(ELL + "\u6f22|" + ELL +
           "\u5b57", row) is not None and "so #412" in row, text)
+
+
+def test_narrow_mark():
+    """#488: a narrow row's cut never leaves a lone combining mark."""
+    row, text = narrow_row("xv-nwm")
+    m = re.search(ELL + "(.)", row)
+    check("#488: the narrow row's first scalar after the ellipsis is not a "
+          "combining mark and #412 shows", m is not None and
+          not ("\u0300" <= m.group(1) <= "\u036f") and "so #412" in row,
+          text)
 
 
 def test_narrow():
@@ -1100,6 +1119,7 @@ def main():
               test_order, test_tool_mention, fixture_tmp, test_tmp, test_memory_live,
               fixture_reply, test_reply, test_reply_live,
               fixture_said, test_said, fixture_narrow, test_narrow, test_narrow_cjk,
+              test_narrow_mark,
               fixture_terms, test_terms,
               test_terms_live, fixture_recall, test_recall)
 
