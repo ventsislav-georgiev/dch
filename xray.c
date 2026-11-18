@@ -12968,7 +12968,7 @@ int
 xr_search_print(FILE *f, const struct xr_search *s, const char *session,
                 const char *session_id, const char *corpus, const char *why)
 {
-	struct xr_ends e = { { 0 } };
+	struct xr_ends e = { 0 };
 
 	fputs("{\"schema\":1,\"session\":", f);
 	xr_put_str(f, session);

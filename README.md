@@ -1940,7 +1940,7 @@ no line, an existing one the 14-line window.
 `dch --xray <n> --search <text> --json` finds where a word or a phrase was
 said in `<n>`'s own corpus and prints one object, the places with the
 whole text first, then the rest, each newest first:
-`{"schema":1,"session","session_id","corpus","text","hits":[{"chapter","offset","at","who","tool","snippet"}],"more","partial","why","bytes"}`.
+`{"schema":1,"session","session_id","corpus","text","hits":[{"chapter","offset","at","who","tool","snippet"}],"more","partial","why","bytes","first","latest"}`.
 `<text>` is 2 to 200 bytes of UTF-8 with no control character and
 none of `--ref`'s bidi controls (`dch: bad search: 2 to 200 bytes, no control
 character`, exit 2). ASCII letters match in either case; nothing else folds.

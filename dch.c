@@ -13143,7 +13143,7 @@ xr_search_out(struct xr_search *s, const struct xr_refq *q,
 	struct xr_cand *v = NULL;
 	const char *swhy = NULL;
 	int m = 0, k, rc = 0, searched = 1, fd;
-	struct xr_ends ends = { { 0 } };
+	struct xr_ends ends = { 0 };
 	FILE *f = stdout;
 
 	if (!q->scope && !q->txt)
