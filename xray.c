@@ -67,6 +67,21 @@ u8_next(const unsigned char *s, size_t n, size_t *adv)
 	return c;
 }
 
+/* Bytes of a continuation scalar at s (a combining mark U+0300-036F, ZWJ,
+** VS16, a skin tone), else 0: a cut never starts on one (#488). */
+size_t
+xr_u8_cont(const char *s, size_t n)
+{
+	size_t a;
+	uint32_t c;
+
+	if (!n)
+		return 0;
+	c = u8_next((const unsigned char *)s, n, &a);
+	return (c >= 0x300 && c <= 0x36f) || c == 0x200d || c == 0xfe0f ||
+	       (c >= 0x1f3fb && c <= 0x1f3ff) ? a : 0;
+}
+
 static size_t
 u8_put(char *o, uint32_t c)
 {
@@ -4571,6 +4586,8 @@ ref_sentence(const char *l, size_t ll, size_t s, size_t e, char *o,
 				lo++;
 		if (keep && (long)(lo - l0) > lw / 2)
 			lo = l0;
+		while (lo < s && (adv = xr_u8_cont(l + lo, s - lo)))
+			lo += adv;
 		while (lo < s && sent_brk(l, lo))
 			lo++;
 		/* the right before the word it ends in, past the ref (whole when

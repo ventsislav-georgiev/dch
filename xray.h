@@ -104,6 +104,10 @@ void xr_chapters_free(struct xr_chapters *c);
 const struct xr_chapter *xr_chapter_at(const struct xr_chapters *c,
                                        size_t i);
 
+/* Bytes of a continuation scalar at s: combining mark, ZWJ, VS16, skin tone;
+** else 0 (#488). */
+size_t xr_u8_cont(const char *s, size_t n);
+
 /* ---- identity (3.1) ---------------------------------------------------- */
 /* A live shell's session_id: "m" + 16 lowercase hex, nothing else. Also the
 ** name rule (INFO-2): no create path takes a name of this shape. */
