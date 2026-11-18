@@ -448,8 +448,11 @@ def main():
             s17 = follow("--remote", "--follow", "--hosts", hosts,
                          DCH_REMOTE_EVERY_MS="300", DCH_REMOTE_BOX_MS=fbox)
             many.append(s17)
-            rows, _ = s17.until(lambda x: rem(x, "srv") == {"rs1": False},
-                                BUDGET + 2)
+            # its first array waits out a refused watch and a dial: under
+            # ASan beside 16 streams that took over 12 s (a plain dial 7 s);
+            # every array it printed is still checked for stale below (#464)
+            rows, dt = s17.until(lambda x: rem(x, "srv") == {"rs1": False},
+                                 30 if SLOW else BUDGET + 2)
             time.sleep(2.0)  # past the refusal, polled every 300 ms
             while s17.line(0.1):
                 pass
@@ -459,7 +462,8 @@ def main():
                   "within %s ms)" % fbox,
                   rows is not None and not stale and s17.p.poll() is None
                   and len(re.findall(r"watch \(device", open(log).read()))
-                  == nw + 16, (s17.lines[-3:], stale[:2], s17.p.poll(),
+                  == nw + 16, (rows is not None, round(dt, 1),
+                               s17.lines[-3:], stale[:2], s17.p.poll(),
                                open(log).read()[mark:][-1500:]))
         got = ref()
         check("and a plain connection still fits beside them (%.1f s, %d "

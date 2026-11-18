@@ -602,11 +602,29 @@ if [ -x "$DCH" ]; then
         check "--spawn waits out a full pty table (forkpty ENXIO x3)" \
               "$out" "pf$$"
         "$DCH" -k "pf$$" >/dev/null 2>&1
-        err=$(env "$pf" DCH_PTYFAIL=1000 "$DCH" --spawn "pf$$" sleep 60 \
-              2>&1 >/dev/null)
-        check "...a pty table that stays full: exit 1" "$?" "1"
+        # The master reports after its 2 s of retries, inside the client's
+        # 10 s wait; a loaded ASan runner can still miss that wait (#464).
+        # Such a try is retried under a new name; a failure path that never
+        # reports times out on every try and still fails the row.
+        t=0
+        while :; do
+            t=$((t + 1)) pn1="pf$$t$t"
+            err=$(env "$pf" DCH_PTYFAIL=1000 "$DCH" --spawn "$pn1" sleep 60 \
+                  2>&1 >/dev/null)
+            rc=$?
+            case $err in *"did not accept within"*) ;; *) break ;; esac
+            # its master dies on the closed status pipe: wait, drop the node
+            python3 -c 'import socket, sys, time
+for _ in range(300):
+    try: socket.socket(socket.AF_UNIX).connect(sys.argv[1])
+    except OSError: break
+    time.sleep(0.1)' "$SOCKDIR/$pn1.sock"
+            rm -f "$SOCKDIR/$pn1.sock"
+            [ "$t" -lt 3 ] || break
+        done
+        check "...a pty table that stays full: exit 1" "$rc" "1"
         case $err in
-        *"pf$$: "*"init_pty: "*) ok "...it says init_pty and the error" ;;
+        *"$pn1: "*"init_pty: "*) ok "...it says init_pty and the error" ;;
         *) bad "...it says init_pty and the error ($err)" ;;
         esac
     else
