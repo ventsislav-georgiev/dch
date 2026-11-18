@@ -942,7 +942,37 @@ line_end(const char *s, size_t n, size_t i)
 /* A code span's whole trimmed text s[a, b) as a term (#458): 2-64 bytes of
 ** printable ASCII, no blank, a letter, 2+ parts (a byte not a letter or
 ** digit, or a lower-upper hump), an identifier 4+ bytes, no "://", and no
-** other ref kind in prose (`#412`, `src/a.c` stay theirs). 1 with *sp. */
+** other ref kind in prose (`#412`, `src/a.c` stay theirs). Not a flag
+** (-v, --json), K=V (RETRY_MAX=3), call (parseN(), f(x)) or bare filename
+** (README.md): code, not a name (#473). 1 with *sp. */
+static int
+code_noterm(const char *s, size_t a, size_t b)
+{
+	size_t k = a, d;
+
+	if (s[a] == '-')
+		return 1;
+	while (k < b && (A_ALNUM((unsigned char)s[k]) || s[k] == '_'))
+		k++;
+	if (k > a && A_AL((unsigned char)s[a]) && k < b && s[k] == '=')
+		return 1;
+	/* a call: f(x), fs.readFile(), Foo::bar() */
+	if (s[b - 1] == ')')
+		for (d = a + 1; d < b; d++)
+			if (s[d] == '(' && (A_ALNUM((unsigned char)s[d - 1]) ||
+			                    s[d - 1] == '_'))
+				return 1;
+	/* name.ext: one dot, 1-5 alphanumeric extension, no other byte */
+	if (k > a && k < b && s[k] == '.')
+	{
+		for (d = k + 1; d < b && A_ALNUM((unsigned char)s[d]); d++)
+			;
+		if (d == b && b - k - 1 >= 1 && b - k - 1 <= 5)
+			return 1;
+	}
+	return 0;
+}
+
 static int
 code_term(const char *s, size_t a, size_t b, const char *cwd,
           struct xr_span *sp)
@@ -951,7 +981,7 @@ code_term(const char *s, size_t a, size_t b, const char *cwd,
 	int al = 0, parts = 0, id = 1;
 	struct xr_span o;
 
-	if (b - a < 2 || b - a > 64)
+	if (b - a < 2 || b - a > 64 || code_noterm(s, a, b))
 		return 0;
 	for (k = a; k < b; k++)
 	{
@@ -5055,6 +5085,7 @@ struct rcall
 	char *cmd;		/* RC_BASH: <= XR_BASH_MAX bytes */
 	size_t cl;
 	char chapter[48];	/* the call's chapter anchor, "" for none */
+	char name[128];		/* the call's tool name, for its result's mention (MCP names run long) */
 	uint64_t off;
 	long long at;
 };
@@ -5913,6 +5944,7 @@ rc_push(struct xr_claude *d, const char *id, int kind)
 	c = &d->calls[d->ncalls++];
 	memset(c, 0, sizeof *c);
 	snprintf(c->id, sizeof c->id, "%s", id);
+	snprintf(c->name, sizeof c->name, "%s", d->tool ? d->tool : "");
 	c->kind = kind;
 	c->off = d->off;
 	c->at = d->at;
@@ -6203,6 +6235,7 @@ refs_result(struct xr_claude *d, const struct json_parser *p, int i, int err,
 	if (!d->rk.hit)
 		goto out;
 	d->who = "tool";
+	d->tool = rr->paired && *rr->c.name ? rr->c.name : NULL;
 	if (!rr->paired)
 		ch_anchor(d, a);
 	rm_claude(d, &r, rr->paired ? rr->c.chapter : a);
@@ -6258,6 +6291,7 @@ refs_result(struct xr_claude *d, const struct json_parser *p, int i, int err,
 	free(cr.cov);
 out:
 	d->who = who;
+	d->tool = NULL;
 	free(r.cov);
 	if (body != t)
 		free(body);
@@ -11331,6 +11365,28 @@ xr_search_free(struct xr_search *s)
 	free(s);
 }
 
+/* The bytes of the word break at t[i], of t[0..n): 1 for ASCII whitespace
+** and C0, 2 for NBSP and U+0085 (C2 A0, C2 85), else 0 */
+static size_t
+sr_brk(const char *t, size_t n, size_t i)
+{
+	if ((unsigned char)t[i] <= ' ')
+		return 1;
+	return (unsigned char)t[i] == 0xc2 && i + 1 < n &&
+	       ((unsigned char)t[i + 1] == 0xa0 ||
+		(unsigned char)t[i + 1] == 0x85) ? 2 : 0;
+}
+
+/* A break ends just before t[i] */
+static int
+sr_brkb(const char *t, size_t i)
+{
+	return i > 0 && ((unsigned char)t[i - 1] <= ' ' ||
+	       (i > 1 && (unsigned char)t[i - 2] == 0xc2 &&
+		((unsigned char)t[i - 1] == 0xa0 ||
+		 (unsigned char)t[i - 1] == 0x85)));
+}
+
 /* The snippet: about XR_SNIPPET bytes of t[0..n) around the match at m, cut
 ** on character boundaries and at words, "U+2026 space" leading when it
 ** starts past the text's start, controls and whitespace runs as one
@@ -11351,21 +11407,22 @@ sr_snip(const char *t, size_t n, size_t m, size_t nl)
 	while (b > m + nl && b < n && ((unsigned char)t[b] & 0xc0) == 0x80)
 		b--;
 	/* whole words: a window starting mid-word begins after the word's
-	** end, one ending mid-word before it, the match kept whole */
-	if (a > 0 && (unsigned char)t[a - 1] > ' ' &&
-	    (unsigned char)t[a] > ' ')
+	** end (a word before the match longer than the window is dropped),
+	** one ending mid-word before it, the match kept whole */
+	if (a > 0 && !sr_brk(t, n, a) && !sr_brkb(t, a))
 	{
-		for (i = a; i < m && (unsigned char)t[i] > ' '; i++)
-			;
-		for (; i < m && t[i] && (unsigned char)t[i] <= ' '; i++)
+		for (i = a; i < m && !sr_brk(t, n, i); i++)
 			;
 		if (i < m)
+		{
+			while (i < m && sr_brk(t, n, i))
+				i += sr_brk(t, n, i);
 			a = i;
+		}
 	}
-	if (b < n && (unsigned char)t[b] > ' ' &&
-	    (unsigned char)t[b - 1] > ' ')
+	if (b < n && !sr_brk(t, n, b) && !sr_brkb(t, b))
 	{
-		for (i = b; i > m + nl && (unsigned char)t[i - 1] > ' '; i--)
+		for (i = b; i > m + nl && !sr_brkb(t, i); i--)
 			;
 		if (i > m + nl)
 			b = i;
@@ -11381,7 +11438,7 @@ sr_snip(const char *t, size_t n, size_t m, size_t nl)
 	{
 		uint32_t c = u8_next((const unsigned char *)t + i, b - i, &adv);
 
-		if (c <= 0x20 || c == 0x7f || (c >= 0x80 && c < 0xa0))
+		if (c <= 0x20 || c == 0x7f || (c >= 0x80 && c <= 0xa0))
 		{
 			if (!sp)
 				*q++ = ' ';
@@ -11913,6 +11970,7 @@ sr_trim(struct xr_search *s)
 {
 	struct sr_hit *o;
 	size_t k, n = 0, t = 0;
+	int cut = s->total > XR_SEARCH_HITS;
 
 	if (!(o = calloc(s->n ? s->n : 1, sizeof *o)))
 		return;		/* out of memory: the hits stay as they are */
@@ -11926,12 +11984,24 @@ sr_trim(struct xr_search *s)
 		if (j == n && t == XR_SEARCH_TURNS)
 		{
 			s->more = 1;
+			cut = 0;	/* the cut (oldest) turn went with the turn cap */
 			sr_hit_free(h);
 			continue;
 		}
 		t += j == n;
 		o[n++] = *h;
 		memset(h, 0, sizeof *h);
+	}
+	/* at the hit cap the oldest kept turn may be cut: drop it whole,
+	** unless it is the only one (UC2) */
+	if (cut && t > 1)
+	{
+		struct sr_hit l = o[n - 1];
+
+		do
+			sr_hit_free(&o[--n]);
+		while (n && sr_same(&o[n - 1], &l));
+		s->more = 1;
 	}
 	/* back as the printer reads them: a shell's oldest first from 0 */
 	for (k = 0; k < n; k++)

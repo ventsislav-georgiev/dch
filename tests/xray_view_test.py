@@ -471,6 +471,20 @@ def test_order():
         v.close()
 
 
+def test_tool_mention():
+    """#469: the card's row for a Bash result names its call's tool."""
+    v = order_card("xv-o4", b"\x12", term="o/r#77")
+    try:
+        scr = rows(v.out)
+        res = [scr[k] for k in sorted(scr) if "RESULT says" in scr[k]]
+        check("card #469: a Bash result's mention row reads Bash, not Tool",
+              len(res) == 1 and "Bash" in res[0] and "Tool" not in res[0],
+              res)
+        v.key(b"q")
+    finally:
+        v.close()
+
+
 def test_tmp():
     v, scr, text = refs_tab("xv-tp")
     try:
@@ -733,7 +747,9 @@ def test_said():
 TSIDS = ["11111111-2222-4333-8444-5555555555e%d" % k for k in (8, 9)]
 TDEF = "`ERR_LEDGER_SKEW` is raised when the ledger clock drifts past 5 s."
 TREPLY = ("Fixed #412. `ERR_LEDGER_SKEW` no longer fires; covered by "
-          "`test_retry_timeout`, close PAY-219.")
+          "`test_retry_timeout`, close PAY-219. "
+          "Run `--json` or `-v` with `RETRY_MAX=3`, edit `README.md` and "
+          "`main.c`, call `parseN()` or `foo(x)`; see `LedgerClock`.")
 
 
 def term_lines():
@@ -783,6 +799,13 @@ def test_terms():
               "not hide: no hidden count", ("Refs %d" % len(keys)) in text
               and "term:ERR_LEDGER_SKEW" in keys and "hidden" not in text,
               (keys, text))
+        check("Refs #473: a flag, K=V, call or bare filename in backticks is "
+              "no term; a CamelCase name is",
+              "term:LedgerClock" in keys and not [
+                  k for k in keys if k in (
+                      "term:--json", "term:-v", "term:RETRY_MAX=3",
+                      "term:README.md", "term:main.c", "term:parseN()",
+                      "term:foo(x)")], keys)
         v.key(b"a", 1.0)
         v.pump(0.5)
         text = screen(v, 0)
@@ -835,8 +858,8 @@ def test_terms_live():
             lambda: (a.pump(0.2), "in the last reply" in shown(a, mark) and
                      (lite or "on screen now" in shown(a, mark)))[1], 10)
         text = shown(a, mark)
-        want = (("in the last reply", "PAY-219", "#412", "test_retry_timeout",
-                 "ERR_LEDGER_SKEW") if lite else
+        want = (("in the last reply", "PAY-219", "#412", "LedgerClock",
+                 "test_retry_timeout", "ERR_LEDGER_SKEW") if lite else
                 ("on screen now", "#412", "ERR_LEDGER_SKEW",
                  "in the last reply", "PAY-219", "test_retry_timeout"))
         at_ = [text.find(x) for x in want]
@@ -847,8 +870,9 @@ def test_terms_live():
               and text.count("ERR_LEDGER_SKEW") == 1 and
               "TOOL_ONLY_TERM" not in text, text)
         mark = len(a.out)
-        # its row: the on-screen group's second (lite: the reply's fourth)
-        a.key(b"jjj" if lite else b"j", 0.5, full=True)
+        # its row: the on-screen group's second (lite: the reply's fifth,
+        # LedgerClock's row before it, #473)
+        a.key(b"jjjj" if lite else b"j", 0.5, full=True)
         a.key(b"\r", 0.5, full=True)
         ok = a.wait(b"Mentions: this session ", start=mark)
         settle(a)
@@ -872,7 +896,7 @@ def test_terms_live():
 def main():
     run_steps(fixture, test_refusals, test_view, fixture_refs, test_refs,
               fixture_latest, test_latest, test_lookup, fixture_order,
-              test_order, fixture_tmp, test_tmp, test_memory_live,
+              test_order, test_tool_mention, fixture_tmp, test_tmp, test_memory_live,
               fixture_reply, test_reply, test_reply_live,
               fixture_said, test_said, fixture_terms, test_terms,
               test_terms_live)

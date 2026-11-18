@@ -281,6 +281,16 @@ def main():
         else:
             bad("--spawn --env lost to the scrub: %r" %
                 e.get("CLAUDE_CODE_SESSION_ID"))
+        # #471: socket-location keys stay dch's, like DCH_SESSION.
+        own = os.environ.get("XDG_RUNTIME_DIR")
+        e = child_env("sockenv", ["--env", "DCH_SOCKET_DIR=/elsewhere",
+                                  "--env", "XDG_RUNTIME_DIR=/elsewhere"], {})
+        if e and e.get("DCH_SOCKET_DIR") != "/elsewhere" and \
+           e.get("XDG_RUNTIME_DIR") == own:
+            ok("--spawn --env DCH_SOCKET_DIR / XDG_RUNTIME_DIR stay dch's")
+        else:
+            bad("--spawn socket env overridden: %r" %
+                {k: e.get(k) for k in ("DCH_SOCKET_DIR", "XDG_RUNTIME_DIR")})
         e = child_env("nocc", [], {"GIT_EDITOR": "true"})
         if e.get("GIT_EDITOR") == "true":
             ok("--spawn without CLAUDECODE keeps GIT_EDITOR")

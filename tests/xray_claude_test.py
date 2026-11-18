@@ -12,6 +12,10 @@ import tempfile, threading, time
 from xray_cli_lib import *  # noqa: E402,F401,F403
 from xray_cli_lib import X  # noqa: E402,F401
 
+# #467 took the near-cap rows from 16.0-17.0 MB to 13-14.3 MB: 15 MiB
+# (15.7 MB) holds that gain (NIT-UD1)
+NEARCAP = 15 << 20
+
 
 def test_claude():
     n = "xc-cl"
@@ -220,7 +224,7 @@ def test_claude():
         check("claude: near-cap lines answer", rc == 0 and
               out.startswith("{"), (rc, out[:200]))
         rss_ok("claude: near-cap lines (6000 chapters, 20 x 1 MiB pastes)",
-               rss)
+               rss, NEARCAP)
         # #192: the same with every chapter auto and its summary at the
         # cap (120 4-byte scalars, 480 bytes): summaries are held out of
         # line, at most 256 KiB of them (XR_SUMMARIES), so only these
@@ -247,7 +251,7 @@ def test_claude():
               o["chapters"][0].get("auto") is True and
               "summary" not in o["chapters"][0], (rc, out[:200]))
         rss_ok("claude: near-cap auto lines (6000 auto chapters with 480-byte "
-               "summaries, 20 x 1 MiB pastes)", rss)
+               "summaries, 20 x 1 MiB pastes)", rss, NEARCAP)
         # the long ids still pair: a quiet Grep's failed result shows no
         # error; an orphan result (no pairing) would mark the chapter
         put([{"type": "assistant", "message": {"content": [
@@ -527,8 +531,12 @@ def test_refs():
                                           "content": out}]}}]
     put([{"type": "user", "cwd": "/home/demo/proj",
           "timestamp": "2026-11-10T10:00:00Z",
-          "message": {"content": "look at #831 and o/r#7"}}] +
-        bash("b1", "gh issue view 831", "# #831 " + canary))
+          "message": {"content": "look at #831 and o/r#7"}},
+         {"type": "assistant", "message": {"content": [
+             {"type": "text", "text": "checking #831 now"}]}}] +
+        bash("b1", "gh issue view 831", "# #831 " + canary) +
+        bash("b2", "gh pr view https://github.com/o/r/pull/7",
+             "title of o/r#7"))
     history("xr-refs", RSID, cfg)
     trace = os.path.join(T, "trace-refs")
     dbg = dict(ENV, DCH_DEBUG=trace)
@@ -554,6 +562,22 @@ def test_refs():
           r.returncode == 0 and any(l.get("definition") for l in ls) and
           ls[-1].get("done") is True and ls[-1]["why"] is None,
           r.stdout[-600:] + r.stderr)
+    # #469: who/tool of each mention; a result carries its call's tool name
+    r = dch("--xray", "xr-refs", "--ref", "o/r#7", "--scope", "session",
+            "--full", "--json", env=dbg)
+    wt = sorted((l["mention"]["line"][:8], l["mention"].get("who"),
+                 l["mention"].get("tool"))
+                for l in ref_lines(r.stdout) or [] if "mention" in l)
+    r2 = dch("--xray", "xr-refs", "--ref", "#831", "--scope", "session",
+             "--full", "--json", env=dbg)
+    wt += sorted((l["mention"]["line"][:8], l["mention"].get("who"),
+                  l["mention"].get("tool"))
+                 for l in ref_lines(r2.stdout) or [] if "mention" in l)
+    check("ref: who/tool per mention (user, assistant, Bash call and result)",
+          wt == [("gh pr vi", "tool", "Bash"), ("look at ", "user", None),
+                 ("title of", "tool", "Bash"), ("# #831 C", "tool", "Bash"),
+                 ("checking", "assistant", None), ("look at ", "user", None)],
+          (wt, r.stdout[-600:]))
     tr = open(trace).read()
     check("ref: the trace holds no passage or transcript text",
           canary not in tr and "look at" not in tr, tr[-400:])

@@ -877,6 +877,14 @@ def main(part):
                             "DCH_SESSION")
             check("...DCH_SESSION stays dch's over --env and --unset",
                   r.returncode == 0 and e.get("DCH_SESSION") == "lres")
+            r, e, _ = envof("lsock", "--env", "DCH_SOCKET_DIR=/elsewhere",
+                            "--unset", "XDG_RUNTIME_DIR")
+            check("...DCH_SOCKET_DIR and XDG_RUNTIME_DIR stay dch's over "
+                  "--env and --unset (#471) [%r]" % (r.stderr,),
+                  r.returncode == 0 and
+                  e.get("DCH_SOCKET_DIR") != "/elsewhere" and
+                  e.get("XDG_RUNTIME_DIR") == rt6 and
+                  os.path.exists(os.path.join(sockdir6, "lsock.sock")))
             os.rename(plant("lbadu", sock_dir=sockdir6),
                       os.path.join(recdir6, "lbadu.json"))
             for args, why in ((["--unset", "A=B"], "dch: --unset wants KEY"),

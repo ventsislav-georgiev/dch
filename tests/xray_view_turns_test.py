@@ -1261,12 +1261,70 @@ def test_groups():
         v.close()
 
 
+UCSID = "11111111-2222-4333-8444-555555555703"   # xv-uc: 60 turns x 12 hits
+UBSID = "11111111-2222-4333-8444-555555555704"   # xv-ub: snippet breaks
+
+
+def fixture_uc():
+    """NIT-UC2: 60 turns, a prompt and 11 answers each saying kiwi; NIT-UC3:
+    a text with NBSP between words, a long word before the match."""
+    os.makedirs(os.path.dirname(tl(UCSID)), exist_ok=True)
+    record("xv-uc", UCSID, sum((turn("kiwi prompt %02d" % i,
+                                     "2026-11-10T11:%02d:00Z" % i,
+                                     *[say("kiwi reply %02d.%02d" % (i, j))
+                                       for j in range(11)])
+                                for i in range(60)), []))
+    nb = "\u00a0".join("w%06d" % i for i in range(60))
+    record("xv-ub", UBSID,
+           turn("nbsp", "2026-11-10T12:00:00Z",
+                say(nb + "\u00a0ZEBRA " + nb)) +
+           turn("long", "2026-11-10T12:01:00Z",
+                say("x" * 300 + " QUOKKA tail")))
+
+
+def test_uc():
+    """NIT-UC2: the 500-hit cap keeps whole turns; NIT-UC3: NBSP is a word
+    break, a head fragment longer than the window is dropped."""
+    o = json.loads(dch("--xray", "xv-uc", "--search", "kiwi",
+                       "--json").stdout)
+    h = o["hits"]
+    last = h[-1]["chapter"] if h else None
+    check("NIT-UC2: 60 turns x 12 hits: the oldest kept turn is whole (12 "
+          "hits), more", o.get("more") and len(h) == 41 * 12 and
+          sum(1 for x in h if x["chapter"] == last) == 12,
+          (len(h), o.get("more")))
+    v = Pty([DCH, "--xray", "xv-uc"], rows=30, cols=100)
+    try:
+        v.wait(b"Prompts 60")
+        v.pump(0.3)
+        mark = len(v.out)
+        v.key(b"\033[Z", 0.5)
+        v.key(b"kiwi\r", 1.0)
+        ok = v.wait(b"Search 41+", start=mark)
+        check("NIT-UC2: the tab counts the 41 whole turns", ok,
+              screen(v, mark))
+        v.key(b"q")
+        v.exit()
+    finally:
+        v.close()
+    for q, want in (("ZEBRA", lambda t: t.startswith("\u2026 w") and
+                     re.fullmatch(r"\u2026( w\d{6})+ ZEBRA( w\d{6})*", t)),
+                    ("QUOKKA", lambda t: t.startswith("\u2026 QUOKKA"))):
+        o = json.loads(dch("--xray", "xv-ub", "--search", q,
+                           "--json").stdout)
+        sn = o["hits"][0]["snippet"] if o["hits"] else ""
+        sn = sn.replace("\u00a0", "\x00")
+        check("NIT-UC3: %s snippet: NBSP is a word break / a long head "
+              "fragment is dropped" % q, want(sn) and "\x00" not in sn, sn)
+
+
 def main():
     run_steps(fixture_auto, test_auto, test_compact, test_gone, fixture_resp,
               test_responses, test_responses_live, test_responses_codex,
               test_tasks_codex, fixture_search, test_search, fixture_tail,
               test_tail, fixture_look, test_look,
-              fixture_wrap, test_wrap, fixture_groups, test_groups)
+              fixture_wrap, test_wrap, fixture_groups, test_groups,
+              fixture_uc, test_uc)
 
 
 if __name__ == "__main__":
