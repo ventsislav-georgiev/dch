@@ -188,16 +188,19 @@ def main():
     def shell_dlg_unanswered(what):
         """The shell prints a prompt-shaped text: not Claude's to answer."""
         before = row().get("auto_allowed", 0)
-        send("clear; cat %s; sleep 4" % dlg)
-        until(lambda: "Tab to amend" in screen(), 5)
-        time.sleep(2.5)                  # past AA_QUIET_MS and a check
+        send("clear; cat %s; sleep 10" % dlg)
+        until(lambda: "Tab to amend" in screen(), 8)
+        # 2.5 s from when the dialog showed: past AA_QUIET_MS and a check;
+        # the shell holds it 10 s so load cannot outlast it (#489)
+        time.sleep(2.5)
         scr = screen()
         check("%s: the shell's prompt-shaped text is not answered (no "
               "\"1\", auto_allowed unchanged)" % what,
               "Tab to amend" in scr and
               "1" not in scr.rstrip().split("\n")[-1] and
               row().get("auto_allowed", 0) == before)
-        until(lambda: screen().rstrip().endswith("$"), 6)
+        run("--send", n, "\x03")         # ^C ends the sleep; sent after the check
+        until(lambda: screen().rstrip().endswith("$"), 14)
 
     def why(pid):
         """An answer row failed: what the fake, the row and the master saw."""
