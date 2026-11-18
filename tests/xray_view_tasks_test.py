@@ -746,10 +746,77 @@ def test_stream():
         dch("-k", "xv-ts")
 
 
+SLSID = "11111111-2222-4333-8444-5555555555fd"   # xv-sl: a live Claude
+
+
+def test_slow_tasks_command():
+    """#465 (QA 1.92.0 MED-UA1): with a tasks_command slower than 5 s, a ref
+    written to the transcript reaches the shown Refs tab while the command
+    still runs: the view's follow never waits on it (#461)."""
+    cwd = os.path.realpath(os.path.join(T, "tslow"))
+    os.makedirs(cwd, exist_ok=True)
+    proj = os.path.join(HOME, ".claude", "projects", cwd.replace("/", "-"))
+    os.makedirs(proj, exist_ok=True)
+    path = os.path.join(proj, SLSID + ".jsonl")
+    with open(path, "w") as f:
+        for o in turn("look at PROJ-1", iso(60), *made(iso(60), "c1", "1",
+                                                       "A task")):
+            f.write(json.dumps(dict(o, cwd=cwd) if "cwd" in o else o) + "\n")
+    dch("--spawn", "xv-sl", "/bin/sleep", "300")
+    pid = until(lambda: json.loads(dch("--cmd", "xv-sl").stdout or "{}")
+                .get("pid"), 5)
+    start = subprocess.run(["/bin/ps", "-o", "lstart=", "-p", str(pid)],
+                           capture_output=True, text=True,
+                           env={"LC_ALL": "C", "TZ": "UTC"}).stdout.strip()
+    sd = os.path.join(HOME, ".claude", "sessions")
+    os.makedirs(sd, exist_ok=True)
+    with open(os.path.join(sd, "%d.json" % pid), "w") as f:
+        json.dump({"pid": pid, "sessionId": SLSID, "cwd": cwd,
+                   "procStart": start, "version": "2.1.0",
+                   "kind": "interactive", "status": "busy",
+                   "statusUpdatedAt": 1}, f)
+    mark = os.path.join(T, "slow-ran")  # a run starts: the 5 s timer fired
+    sh = os.path.join(T, "slow-cmd.sh")  # a path: the command is not a shell line
+    with open(sh, "w") as f:
+        f.write("#!/bin/sh\necho >> %s\nsleep 8\necho >> %s.done\nexit 1\n" %
+                (mark, mark))
+    os.chmod(sh, 0o755)
+    with open(ENV["DCH_CONFIG"], "w") as f:
+        f.write("tasks_command = %s\n" % sh)
+    v = Pty([DCH, "--xray", "xv-sl"], rows=30, cols=100)
+    try:
+        ok = tabbar(v, "Tasks 1")
+        v.key(b"\t\t", 0.8)  # Responses, then Refs
+        until(lambda: (v.pump(0.1), os.path.exists(mark))[1], 12)
+        v.pump(0.5)
+        t0 = time.time()
+        with open(path, "a") as f:
+            f.write(json.dumps({"type": "user", "message": {
+                "content": "now PROJ-2465"}}) + "\n")
+        # the ref shows, and the command has not finished by then
+        got = until(lambda: (v.pump(0.1), any(
+            "PROJ-2465" in r for r in rows(v.out[-60000:]).values()) or
+            os.path.exists(mark + ".done"))[1], 20)
+        early = not os.path.exists(mark + ".done")
+        dt = time.time() - t0
+        check("slow tasks_command (#465): a ref written while the 8 s command "
+              "runs reaches Refs before the command ends (%.1f s)" % dt,
+              ok and got and early and any(
+                  "PROJ-2465" in r for r in rows(v.out[-60000:]).values()),
+              dt)
+        v.key(b"q")
+        v.exit()
+    finally:
+        v.close()
+        dch("-k", "xv-sl")
+        open(ENV["DCH_CONFIG"], "w").close()
+
+
 def main():
     run_steps(fixture_tasks, test_tasks, test_tasks_big, fixture_memory,
               test_memory, test_memory_big, fixture_place, test_place,
-              test_twins, test_memory_cmd, test_tabbar, test_stream)
+              test_twins, test_memory_cmd, test_tabbar, test_stream,
+              test_slow_tasks_command)
 
 
 if __name__ == "__main__":
