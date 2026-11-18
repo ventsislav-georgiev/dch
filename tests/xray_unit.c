@@ -1066,10 +1066,10 @@ t_grammar(void)
 		/* #476: a known extension on any base is a file, a lowercase
 		** dotfile too; names with another last dot stay terms */
 		{ "`docker-compose.yml` `package-lock.json` `tsconfig.base.json` "
-		  "`README.MD` `node.js` `.env` `.gitignore` `socket.io` "
+		  "`README.MD` `node.js` `.env` `.env.local` `.gitignore` `socket.io` `process.env` "
 		  "`github.com` `os.path` `Math.max` `v1.2` `py3.11` `ASP.NET` "
 		  "`a.b`", XR_PROSE | XR_TERMS,
-		  "term:socket.io term:github.com "
+		  "term:socket.io term:process.env term:github.com "
 		  "term:os.path term:Math.max term:v1.2 term:py3.11 term:ASP.NET term:a.b" },
 		{ "x/foo_bar a.foo_bar foo_bar.c foo_bar@x.org Foo_Bar a_b "
 		  "a__bc ab_cd_ MAX_RETRY", XR_PROSE | XR_TERMS,

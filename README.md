@@ -1575,7 +1575,7 @@ prose (`` `#412` `` and `` `src/a.c` `` stay what they are; `` `foo` `` and
 `` `1234` `` are nothing) and is not code: a flag (`` `--json` ``, `` `-v` ``),
 a `K=V` assignment (`` `RETRY_MAX=3` ``), a call (`` `parseN()` ``,
 `` `foo(x)` ``) or a bare filename (a name of letters, digits, `_`, `.`, `-` whose last extension is a
-common file one: `` `README.md` ``, `` `docker-compose.yml` ``, or a lowercase dotfile: `` `.env` ``) is no term; `` `os.path` ``,
+common file one: `` `README.md` ``, `` `docker-compose.yml` ``, or a lowercase dotfile: `` `.env` ``, `` `.env.local` ``) is no term; `` `process.env` ``, `` `os.path` ``,
 `` `github.com` `` and `` `v1.2` `` stay terms. Terms come from prompts, assistant text and
 compact summaries only: never from tool input or output, a notice, a harness
 prompt (a task notification) or a shell's ring, and the view's on-screen

@@ -950,7 +950,7 @@ code_noterm(const char *s, size_t a, size_t b)
 {
 	static const char *const fext[] = {
 		"md", "txt", "rst", "json", "jsonc", "yml", "yaml", "toml", "ini",
-		"cfg", "conf", "env", "lock", "c", "h", "cc", "cpp", "hpp", "m",
+		"cfg", "conf", "lock", "c", "h", "cc", "cpp", "hpp", "m",
 		"mm", "go", "rs", "py", "pyi", "rb", "java", "kt", "swift", "ts",
 		"tsx", "js", "jsx", "mjs", "cjs", "css", "scss", "html", "htm",
 		"xml", "sql", "sh", "zsh", "bash", "fish", "ps1", "bat", "cmd",
