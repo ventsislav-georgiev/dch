@@ -826,7 +826,8 @@ def at(rec, ts):
     return dict(rec, timestamp=ts)
 
 
-def record(name, sid, lines, proj="-home-demo-proj", cwd=P):
+def record(name, sid, lines, proj="-home-demo-proj", cwd=P, fname=None,
+           upd=1794300000):
     with open(tl(sid, proj), "w") as f:
         for o in lines:
             f.write(json.dumps(o) + "\n")
@@ -835,11 +836,11 @@ def record(name, sid, lines, proj="-home-demo-proj", cwd=P):
                         sockdir.replace("/", "-"))
     os.makedirs(hdir, exist_ok=True)
     rec = {"name": name, "cwd": cwd, "end": "exited", "argv": ["claude"],
-           "started": 1794299400, "updated": 1794300000,
-           "ended": 1794300000, "sock_dir": sockdir,
+           "started": 1794299400, "updated": upd,
+           "ended": upd, "sock_dir": sockdir,
            "agent": {"session_id": sid, "cwd": cwd,
                      "config_dir": os.path.join(HOME, ".claude")}}
-    with open(os.path.join(hdir, name + ".json"), "w") as f:
+    with open(os.path.join(hdir, (fname or name) + ".json"), "w") as f:
         f.write(json.dumps(rec) + "\n")
 
 

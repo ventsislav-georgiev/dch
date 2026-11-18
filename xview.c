@@ -982,6 +982,15 @@ xv_card_free(struct xv *v)
 	v->vkind = v->vtitle = v->vsub = v->cwarn = NULL;
 }
 
+/* One session: the same id, or with no id the same name (#493) */
+static int
+xv_ses(const struct xv_men *a, const struct xv_men *b)
+{
+	if (a->sid[0] && b->sid[0])
+		return !strcmp(a->sid, b->sid);
+	return !strcmp(a->session, b->session);
+}
+
 /* A shell session's light card shows titles and counts only (S18), and a
 ** light card no other session's line (K4.2): the engine sends none, and
 ** the view keeps none either. */
@@ -1100,8 +1109,8 @@ xv_cline(struct xv *v, const struct json_parser *p)
 		** and --full (oldest first) both list newest first; files keep
 		** the order sent, a host that sends no offset arrival order */
 		for (i = v->nm; i > 0 && off >= 0 && v->m[i - 1].off >= 0 &&
-		     v->m[i - 1].off < off && !strcmp(v->m[i - 1].session,
-		     m.session); i--)
+		     v->m[i - 1].off < off && xv_ses(&v->m[i - 1], &m);
+		     i--)
 			;
 		memmove(v->m + i + 1, v->m + i, (size_t)(v->nm - i) * sizeof m);
 		v->m[i] = m;
@@ -3241,7 +3250,7 @@ xv_row_ref(const struct xv *v, const struct xv_ref *r, int on)
 static int
 xv_run0(const struct xv *v, int k)
 {
-	return k == 0 || strcmp(v->m[k].session, v->m[k - 1].session) ||
+	return k == 0 || !xv_ses(&v->m[k], &v->m[k - 1]) ||
 	       strcmp(v->m[k].chapter, v->m[k - 1].chapter);
 }
 
@@ -3251,7 +3260,7 @@ static int
 xv_hdrs(const struct xv *v, int k)
 {
 	return xv_run0(v, k) + (v->m[k].same && (k == 0 ||
-	       strcmp(v->m[k].session, v->m[k - 1].session)));
+	       !xv_ses(&v->m[k], &v->m[k - 1])));
 }
 
 /* The card's list row of mention k, or of its header hdr (1 the turn's,
@@ -3561,7 +3570,7 @@ xv_draw_card(struct xv *v, int win)
 		if (r < n)
 		{
 			const struct xv_men *m;
-			int hdr, c, other;
+			int hdr, c, other, nw, aw;
 
 			xv_cat(v, r, &k, &hdr);
 			m = &v->m[k];
@@ -3575,9 +3584,21 @@ xv_draw_card(struct xv *v, int win)
 				pk_set("2");
 				pk_txt("also discussed in ");
 				pk_set("1");
-				pk_txtto(m->session, pk_w - 16);
+				/* the age's real width; the name keeps the room, the
+				** age goes first, a cut name ends in an ellipsis */
+				nw = pk_cps(m->session);
+				aw = w[0] ? 2 + pk_cps(w) + (strcmp(w, "now") ? 4 : 0) : 0;
+				if (pk_col + nw + aw > pk_w)
+					aw = 0;
+				if (pk_col + nw > pk_w)
+				{
+					pk_txtto(m->session, pk_w - 1);
+					pk_txt(pk_utf ? "\xe2\x80\xa6" : "~");
+				}
+				else
+					pk_txtto(m->session, pk_w);
 				pk_set("2");
-				if (w[0])
+				if (aw)
 				{
 					pk_txt(", ");
 					pk_txt(w);
@@ -5726,6 +5747,11 @@ xv_run(int fd, const char *n, char *err, size_t errsz)
 		if (xv_pump(v, XV_RK, &rs) && v->mode == XV_READ)
 		{
 			const char *e = v->kid[XV_RK].err, *w = xv_noun(v);
+
+			/* the engine's raw refusal is no sentence for the status
+			** line (#493) */
+			if (strstr(e, "no x-ray corpus"))
+				e = "that session's transcript is gone";
 
 			/* the engine's "chapter gone" stays for --json clients;
 			** the view says it in its own word (#295) */
