@@ -1113,8 +1113,16 @@ read again every 30 s while it shows a running session); no tab for a
 shell, no memory or an older host; dch\-lite has it).
 A card shows the ref's definitions (none: the first mention's line as
 \(lqFirst said (prompt N, title)\(rq), first and latest mention, counts by
-scope (a light card says \(lqthis project: f scans\(rq, not 0) and mentions, each with You, Reply or the tool and its prompt's number
-(a Claude \fBmention\fR line of \fB\-\-json\fR carries \fBwho\fR and \fBtool\fR, absent from Codex mentions) (newest first within each file, this session's first,
+scope (a light card says \(lqthis project: f scans\(rq, not 0) and mentions grouped by turn, newest first, those with no turn
+last: a header per turn (pN, title, time; \fBEnter\fR on it reads the turn), then each mention with You, Reply or the tool and the
+sentence holding the ref, the ref standing out
+(a Claude \fBmention\fR line of \fB\-\-json\fR carries \fBwho\fR and \fBtool\fR, absent from Codex mentions; every \fBmention\fR line
+carries, after \fBline\fR, \fBturn\fR, its chapter's prompt number as \fB\-\-json\fR's chapter \fBi\fR, null for a null chapter,
+another session, a shell ring or a light window past the file's start; \fBsentence\fR, the sentence holding the ref from the
+mention's text line, bounded by \(lq. \(rq, \(lq? \(rq, \(lq! \(rq, the line's ends and a list marker, at most 400 bytes, cut
+on a word and a UTF\-8 character with \(lq\(u2026 \(rq / \(lq \(u2026\(rq marks, the ref never cut, controls as spaces, an invalid
+byte as ?; and \fBspan\fR, [start, end], the ref's UTF\-8 byte offsets in \fBsentence\fR, 0 <= start <= end <= its length, on
+character boundaries and never in a mark, null only for a ref over 400 bytes) (newest first within each file, this session's first,
 also after
 .BR f );
 it opens light (as

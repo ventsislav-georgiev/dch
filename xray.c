@@ -2179,6 +2179,7 @@ struct remit
 	uint64_t off;		/* Claude: the line's offset; shell: the seq */
 	long long at;
 	const char *chapter;
+	uint64_t turn;		/* the chapter's prompt number, 0 unknown */
 	const char *who, *tool;	/* user, assistant or tool (its name) */
 	uint64_t *ctr;		/* Claude: each mention its own unit */
 	uint64_t unit, row;	/* shell: the block and the row */
@@ -2229,6 +2230,7 @@ rm_hit(struct remit *r, const struct xr_span *sp, const char *title,
 	h.off = r->off;
 	h.at = r->at;
 	h.chapter = r->chapter;
+	h.turn = r->turn;
 	h.who = r->who;
 	h.tool = r->tool;
 	if (title)
@@ -4259,6 +4261,7 @@ ix_count(const struct xr_index *x, const struct xr_ent *e)
 
 /* ---- refs: the --ref scan's lines (3.4) ------------------------------------ */
 
+#define XR_SENT 400		/* a mention's sentence, bytes (#478) */
 #define XR_HELD 199		/* a file's newest mentions, after its first */
 #define XR_RING (XR_HELD + 1)	/* light keeps its newest 200 (#303) */
 
@@ -4477,6 +4480,127 @@ put_at(FILE *m, long long at)
 		fputs("null", m);
 }
 
+/* The sentence of l[0, ll) holding [s, *b) (#458): from past the last ". ",
+** "! " or "? " before s (*a) to past the first one at or after *b. */
+static void
+sent_ends(const char *l, size_t ll, size_t s, size_t *a, size_t *b)
+{
+	for (*a = s; *a >= 2; --*a)
+		if ((l[*a - 1] == ' ' || l[*a - 1] == '\t') &&
+		    memchr(".!?", l[*a - 2], 3))
+			break;
+	if (*a < 2)
+		*a = 0;
+	for (; *b < ll; ++*b)
+		if (memchr(".!?", l[*b], 3) &&
+		    (*b + 1 == ll || l[*b + 1] == ' ' || l[*b + 1] == '\t'))
+		{
+			++*b;
+			break;
+		}
+}
+
+static int
+sent_brk(const char *l, size_t i)
+{
+	return (unsigned char)l[i] <= ' ' || l[i] == 0x7f;
+}
+
+/* A mention's sentence (#478): sent_ends' around the ref l[s, e), trimmed,
+** a list item's marker off, at most XR_SENT bytes in o (XR_SENT + 1):
+** where it is cut, on a word and a scalar, "\u2026 " / " \u2026" mark it and
+** the ref stays whole. Controls are spaces and an invalid byte '?', one
+** byte each, so [*ss, *se) is the ref's bytes in o. A ref the marks leave
+** no room around is alone, with the marks that fit; one over XR_SENT bytes
+** has *ss = *se = SIZE_MAX, the sentence cut from its start. */
+static void
+ref_sentence(const char *l, size_t ll, size_t s, size_t e, char *o,
+             size_t *ss, size_t *se)
+{
+	size_t a, b = e, n, lo, hi, i, adv, bd, k = 0;
+	long av = XR_SENT - (long)(e - s), lw, rw;
+	int keep = 1;
+	const char *t;
+
+	sent_ends(l, ll, s, &a, &b);
+	n = b - a;
+	t = trim(l + a, &n);
+	a = (size_t)(t - l);
+	b = a + n;
+	if (s - a >= 2 && memchr("-*+", l[a], 3) && l[a + 1] == ' ')
+		a += 2;
+	lo = a;
+	hi = b;
+	if (b - a > XR_SENT)
+	{
+		lw = av / 2;
+		rw = av - lw;
+		if ((long)(s - a) <= lw)
+			lw = (long)(s - a), rw = av - lw - 4;
+		else if ((long)(b - e) <= rw)
+			rw = (long)(b - e), lw = av - rw - 4;
+		else
+			lw -= 4, rw -= 4;
+		keep = lw >= 0 && rw >= 0;
+		if (!keep && av >= 0)	/* the ref alone fits: as many marks */
+		{
+			lo = s;
+			hi = e;
+			keep = 1;
+			goto put;
+		}
+		if (!keep)	/* no room for the ref whole: the start, cut */
+			hi = a + u8_cut(l + a, XR_SENT - 4);
+		else
+		{
+			lo = s - (size_t)lw;
+			hi = e + u8_cut(l + e, (size_t)rw);
+		}
+		/* the left on a scalar and a word: past the word it starts in */
+		while (lo < s && ((unsigned char)l[lo] & 0xc0) == 0x80)
+			lo++;
+		if (lo > a && !sent_brk(l, lo) && !sent_brk(l, lo - 1))
+			while (lo < s && !sent_brk(l, lo))
+				lo++;
+		while (lo < s && sent_brk(l, lo))
+			lo++;
+		/* the right before the word it ends in, past the ref (whole when
+		** kept, else cut on a scalar) */
+		bd = keep ? e : s;
+		if (hi < b && !sent_brk(l, hi) && !sent_brk(l, hi - 1))
+		{
+			for (i = hi; i > bd && !sent_brk(l, i - 1); i--)
+				;
+			if (i > bd || keep)
+				hi = i > bd ? i : bd;
+		}
+		while (hi > bd && sent_brk(l, hi - 1))
+			hi--;
+	}
+put:
+	if (lo > a && hi - lo + 4 <= XR_SENT)
+		k += u8_put(o + k, 0x2026), o[k++] = ' ';
+	*ss = *se = SIZE_MAX;
+	if (keep)
+		*ss = k + (s - lo), *se = *ss + (e - s);
+	for (i = lo; i < hi; i += adv)
+	{
+		unsigned char c = (unsigned char)l[i];
+
+		adv = dch_utf8_len((const unsigned char *)l + i, hi - i);
+		if (!adv)
+			o[k++] = '?', adv = 1;
+		else if (c < ' ' || c == 0x7f || (c == 0xc2 &&
+		         (unsigned char)l[i + 1] < 0xa0))
+			memset(o + k, ' ', adv), k += adv;
+		else
+			memcpy(o + k, l + i, adv), k += adv;
+	}
+	if (hi < b && k + 4 <= XR_SENT)
+		o[k++] = ' ', k += u8_put(o + k, 0x2026);
+	o[k] = '\0';
+}
+
 /* The line around the span, at most 200 scalars (3.4). */
 static char *
 cut_line(const char *l, size_t ll, size_t s, size_t e)
@@ -4510,7 +4634,8 @@ static char *
 mention_line(struct xr_scan *x, const struct xr_hit *h)
 {
 	char *b, *line = cut_line(h->line, h->ll, h->sp->s, h->sp->e);
-	size_t bl;
+	char sent[XR_SENT + 1];
+	size_t bl, ss, se;
 	FILE *m = ln_open(&b, &bl);
 
 	if (!m || !line)
@@ -4536,6 +4661,19 @@ mention_line(struct xr_scan *x, const struct xr_hit *h)
 	}
 	fputs(",\"line\":", m);
 	xr_put_str(m, line);
+	/* #478: the turn, and the sentence around the ref with its bytes */
+	ref_sentence(h->line, h->ll, h->sp->s, h->sp->e, sent, &ss, &se);
+	fputs(",\"turn\":", m);
+	if (h->turn && !x->other)
+		fprintf(m, "%llu", (unsigned long long)h->turn);
+	else
+		fputs("null", m);
+	fputs(",\"sentence\":", m);
+	xr_put_str(m, sent);
+	if (ss == SIZE_MAX)
+		fputs(",\"span\":null", m);
+	else
+		fprintf(m, ",\"span\":[%zu,%zu]", ss, se);
 	fprintf(m, ",\"offset\":%llu,\"live\":%s,\"project\":",
 	        (unsigned long long)h->off, x->live ? "true" : "false");
 	xr_put_str(m, x->project);
@@ -4597,19 +4735,7 @@ term_sentence(const char *l, size_t ll, size_t s, size_t e)
 	const char *t;
 	char *o;
 
-	for (a = s; a >= 2; a--)
-		if ((l[a - 1] == ' ' || l[a - 1] == '\t') &&
-		    memchr(".!?", l[a - 2], 3))
-			break;
-	if (a < 2)
-		a = 0;
-	for (; b < ll; b++)
-		if (memchr(".!?", l[b], 3) &&
-		    (b + 1 == ll || l[b + 1] == ' ' || l[b + 1] == '\t'))
-		{
-			b++;
-			break;
-		}
+	sent_ends(l, ll, s, &a, &b);
 	n = b - a;
 	t = trim(l + a, &n);
 	n = clip(t, n, XR_PASSAGE);
@@ -5848,6 +5974,23 @@ xr_claude_calls(struct xr_claude *d, xr_call_fn fn, void *ctx, uint64_t ino)
 	d->ino = ino;
 }
 
+/* The prompt number of the chapter anchored a (#478): its ordinal + 1, as
+** --json's "i" and the view's pN; 0 in a blind window (its ordinals start
+** at the window) or once the chapter is no longer held. */
+static uint64_t
+ch_turn(struct xr_claude *d, const char *a)
+{
+	unsigned long long ino, off;
+	size_t k;
+
+	if (d->blind || sscanf(a, "f%llx:%llu", &ino, &off) != 2)
+		return 0;
+	for (k = d->ch.n; k-- > 0;)
+		if (xr_chapter_at(&d->ch, k)->offset == off)
+			return d->ch.total - d->ch.n + k + 1;
+	return 0;
+}
+
 static void
 rm_claude(struct xr_claude *d, struct remit *r, const char *chapter)
 {
@@ -5857,6 +6000,7 @@ rm_claude(struct xr_claude *d, struct remit *r, const char *chapter)
 	r->off = d->off;
 	r->at = d->at;
 	r->chapter = chapter && chapter[0] ? chapter : NULL;
+	r->turn = r->chapter ? ch_turn(d, r->chapter) : 0;
 	r->who = d->who;
 	r->tool = d->tool;
 	r->ctr = &d->unit;
