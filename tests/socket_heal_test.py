@@ -38,6 +38,18 @@ SESSION = "heal%d" % os.getpid()
 SETTLE = HEAL_MS / 1000.0 * 3 + 0.6
 
 
+def settle_until(fn):
+    """Like sleeping SETTLE, but back as soon as fn() holds (10 x SETTLE max)."""
+    end = time.time() + SETTLE * 10
+    while time.time() < end:
+        try:
+            if fn():
+                return
+        except OSError:
+            pass
+        time.sleep(0.05)
+
+
 def run(*args, **kw):
     return subprocess.run([DCH] + list(args), capture_output=True,
                           text=True, **kw)
@@ -97,7 +109,7 @@ def main():
         # --- the socket node and .ver vanish (tmp cleaner / stray rm) -----
         os.unlink(sock)
         os.unlink(sock + ".ver")
-        time.sleep(SETTLE)
+        time.sleep(SETTLE)  # a poll here ends too early for the .act row below
 
         healed = os.path.exists(sock) and stat.S_ISSOCK(os.lstat(sock).st_mode)
         check("deleted socket is re-bound as a socket", healed)
@@ -136,7 +148,7 @@ def main():
         os.unlink(sock)
         with open(sock, "w") as f:
             f.write("not a socket\n")
-        time.sleep(SETTLE)
+        settle_until(lambda: stat.S_ISSOCK(os.lstat(sock).st_mode))
         check("a regular file on the socket's name is replaced",
               stat.S_ISSOCK(os.lstat(sock).st_mode))
 
@@ -155,7 +167,7 @@ def main():
         old = time.time() - 10 * 86400
         os.utime(act, (old, old))
         mtime_before = os.stat(act).st_mtime
-        time.sleep(SETTLE)
+        settle_until(lambda: os.stat(act).st_atime > old + 86400)
         st = os.stat(act)
         check("`.act` atime refreshed by the tick",
               st.st_atime > old + 86400)

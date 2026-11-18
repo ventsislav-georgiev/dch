@@ -20,7 +20,7 @@ newer agent rows come back; a 200-character sender leaves the title in view.
 
 Run:  python3 tests/xray_peer_view_test.py      (uses ./dch)
 """
-import json, os, re, shutil, subprocess, sys
+import json, os, re, shutil, subprocess, sys, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from xray_view_lib import DCH, ENV, HOME, P, T, Pty, cells, check, dch, fails, head, note, rows, say, screen, tl, turn, until  # noqa: E402
@@ -229,7 +229,11 @@ def test_marks():
         # narrow: no row past the edge, the wide name cut
         mark = len(v.out)
         v.resize(30, 41)
-        v.pump(1.0)
+        end = time.time() + 10      # the repaint, on a slow runner too
+        while time.time() < end and not any(
+                "設" in x for x in rows(v.out[mark:]).values()):
+            v.pump(0.1)
+        v.pump(0.1)
         scr = rows(v.out[mark:])
         over = [x for x in scr.values() if cells(x) > 41]
         check("41 columns: no row past the edge, the wide sender cut",

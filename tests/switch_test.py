@@ -197,15 +197,20 @@ def main():
         pid = None
 
         # 5. Opting out restores instant detach.
-        pid, fd = spawn_client(["-f", "-n", B], env={"DCH_DOUBLE_TAP_MS": "0"})
-        drain(fd, 10.0, b"BBB_BRAVO")
-        t0 = time.time()
-        os.write(fd, DETACH)
-        if reap(pid, fd, 5.0) is None:
-            return fail("DCH_DOUBLE_TAP_MS=0 did not detach")
-        if time.time() - t0 > 0.25:
+        # the fastest of 3: one stalled run on a slow runner can't fake a wait
+        for _ in range(3):
+            pid, fd = spawn_client(["-f", "-n", B],
+                                   env={"DCH_DOUBLE_TAP_MS": "0"})
+            drain(fd, 10.0, b"BBB_BRAVO")
+            t0 = time.time()
+            os.write(fd, DETACH)
+            if reap(pid, fd, 5.0) is None:
+                return fail("DCH_DOUBLE_TAP_MS=0 did not detach")
+            pid = None
+            if time.time() - t0 <= 0.25:
+                break
+        else:
             return fail("DCH_DOUBLE_TAP_MS=0 still waited out a window")
-        pid = None
 
         # 6. detach_key = switch: one press opens the picker; q there
         # leaves the session running and the client exits.

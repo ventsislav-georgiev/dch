@@ -351,8 +351,13 @@ def main():
         got = json.loads(first) if first else None
         check("the first array within the --ls box (%.2f s)" % took,
               first is not None and took < BUDGET, took)
-        check("the first array is --ls-json --remote's, byte for byte",
-              first is not None and first.decode() + "\n" == want,
+        # "stale" is read at that instant (a loaded box reads true on one
+        # side): the one volatile field; every other byte must be equal
+        unstale = lambda t: re.sub(r'"stale": ?(true|false)', '"stale":X', t)
+        check("the first array is --ls-json --remote's, byte for byte "
+              "(but the stale flag)",
+              first is not None and
+              unstale(first.decode() + "\n") == unstale(want),
               (first, want))
         check("one line, a JSON array: loc1, srv:rs1 fresh",
               got and local(got) == ["loc1"]
@@ -530,9 +535,10 @@ def main():
               len(w.watches) == 1 and json.loads(w.watches[0]) ==
               {"device_id": "dch-%d" % s.p.pid}, w.watches)
         w.set_rows([{"name": "w1"}, {"name": "w2"}])
-        rows, dt = s.until(lambda x: "w2" in rem(x, "w"), 2)
+        rows, dt = s.until(lambda x: "w2" in rem(x, "w"), 5 if SLOW else 2)
         check("its pushed 0x11 makes an array at once (%.2f s)" % dt,
-              rows is not None and dt < 1.0, s.lines[-2:])
+              rows is not None and dt < (4.0 if SLOW else 1.0),
+              s.lines[-2:])
         w.hang = True
         rows, dt = s.until(lambda x: rem(x, "w") == {"w1": True, "w2": True},
                            5)
@@ -595,7 +601,7 @@ def main():
               s.lines[-2:])
         evil = "\x1b]0;x\x07‮evil\x7f"
         h.set_rows([{"name": evil, "alias": "\x9b31m"}])
-        rows, _ = s.until(lambda x: evil in rem(x, "h"), 2)
+        rows, _ = s.until(lambda x: evil in rem(x, "h"), 5 if SLOW else 2)
         check("its names arrive JSON-escaped: no raw control byte",
               rows is not None and not re.search(rb"[\x00-\x1f\x7f]",
                                                  s.lines[-1]), s.lines[-1:])

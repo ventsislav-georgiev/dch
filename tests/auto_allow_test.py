@@ -316,6 +316,7 @@ def main():
             for kw, n in tk.values():
                 setctl(n, screen=ticking(t, **kw), sticky=True)
             time.sleep(1)
+        until(lambda: all(keys(n) for _, n in tk.values()), 5)  # slow runner
         got = {k: keys(n) for k, (_, n) in tk.items()}
         check("countdown ticking each second: answered once",
               got["plain"] == ["1"])

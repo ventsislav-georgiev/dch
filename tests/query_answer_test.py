@@ -53,6 +53,7 @@ OUTER = {b"\033[?2026$p": b"\033[?2026;1$y", b"\033[>q": b"\033P>|outer\033\\",
          b"\033[c": b"\033[?62;22c", b"\033[6n": b"\033[9;9R"}
 failures = []
 names = []
+SLOW = 3 if "ASAN_OPTIONS" in os.environ else 1   # ASan: slower attach, view
 
 
 def check(what, ok, *extra):
@@ -170,7 +171,7 @@ time.sleep(5)
         seen = b""
         for keys in (b"", b"\034x"):
             os.write(fd, keys)
-            end = time.time() + (1.0 if not keys else 20)
+            end = time.time() + (1.0 if not keys else 20) * SLOW
             while time.time() < end and (not keys or b"X-ray  " not in seen):
                 if select.select([fd], [], [], 0.05)[0]:
                     seen += os.read(fd, 65536)

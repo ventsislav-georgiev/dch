@@ -1170,7 +1170,9 @@ def main():
         # (#094), whether it sent its hello first or nothing at all.
         def gate_case(msg, why, code, *args, start=OWNER, **kw):
             ts(status=start)
-            p, port, log = serve(*args)
+            # ASan: a fake whois emitting 300 KiB can pass serve's 3 s call box
+            p, port, log = serve(*args, e=dict(benv, DCH_TS_MS="15000")
+                                 if os.environ.get("DCH_TEST_NO_BUDGET") else benv)
             if code == "whois_failed":
                 whois_fail_ok.add(log)
             ts(**kw)
