@@ -4,7 +4,7 @@
 #
 #   scripts/fuzz.sh [SECONDS] [TARGET...] [-- CONFIGURE-ARGS]
 #   TARGET: json meta history config detect frames keys serve remote ring
-#           xray xref xchapter xsearch xmem modes xcmd shells
+#           xray xref xchapter xsearch xmem modes xcmd shells xcut
 #           (default: all)
 #
 # Needs a clang with the libFuzzer runtime: CC=clang on Linux; on macOS
@@ -20,7 +20,7 @@ secs=${1:-60}
 targets=
 while [ $# -gt 0 ] && [ "$1" != -- ]; do targets="$targets $1"; shift; done
 [ $# -gt 0 ] && shift
-targets=${targets:-json meta history config detect frames keys serve remote ring xray xref xchapter xsearch xmem modes xcmd shells}
+targets=${targets:-json meta history config detect frames keys serve remote ring xray xref xchapter xsearch xmem modes xcmd shells xcut}
 CC=${CC:-clang}
 art=${FUZZ_ARTIFACTS:-$PWD/fuzz-artifacts}
 
@@ -54,6 +54,7 @@ ringld=
 rc=0
 for t in $targets; do
 	ld=
+	com="rframe.o bridge.o json.o picker.o xview.o ring.o xray.o xcmd.o xmem.o cargv.o"
 	case $t in
 	json)  objs="attach.o master.o dch.o serve.o remote.o" ;;  # the API
 	frames|modes) objs="attach.o dch.o serve.o remote.o" ;;  # includes master.c
@@ -63,10 +64,12 @@ for t in $targets; do
 	ring)  objs="attach.o master.o dch.o serve.o remote.o"  # the API
 	       ld=$ringld ;;
 	xray|xref|xchapter|xsearch|xcmd|xmem) objs="attach.o master.o dch.o serve.o remote.o" ;;  # the API
+	xcut)  objs="attach.o master.o dch.o serve.o remote.o"  # includes picker.c, xray.c, xview.c
+	       com="rframe.o bridge.o json.o ring.o xcmd.o xmem.o cargv.o" ;;
 	*)     objs="attach.o master.o serve.o remote.o" ;; # includes dch.c
 	esac
 	$CC $CF -Dmain=dch_main -fsanitize=fuzzer -o "fuzz_$t" \
-		"tests/fuzz/fuzz_$t.c" $objs rframe.o bridge.o json.o picker.o xview.o ring.o xray.o xcmd.o xmem.o cargv.o \
+		"tests/fuzz/fuzz_$t.c" $objs $com \
 		$vt_objs $vt_libs $ld
 	mkdir -p "corpus/$t"
 	cp "$src/tests/fuzz/corpus/$t"/* "corpus/$t/" 2>/dev/null || :
