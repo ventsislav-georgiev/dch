@@ -298,6 +298,9 @@ const struct dch_conf config_keys[] = {
 	/* #405: a ref the transcripts do not define, from a command */
 	{ "define_command", 0, "", NULL,
 	  "X-ray's definition of a ref from a command; empty: none" },
+	/* #507: #N, o/r#N and issue/pull URLs resolved by gh (read-only) */
+	{ "xray_github", 1, "true", NULL,
+	  "X-ray looks up GitHub issues and pull requests with gh" },
 };
 _Static_assert(sizeof config_keys / sizeof *config_keys == NCONF,
                "picker.h's NCONF counts config_keys");
@@ -16447,6 +16450,14 @@ xray_main(int argc, char **argv)
 
 	xr_t0 = xr_now_ms();
 	xr_noclock = getenv("DCH_XRAY_NOCLOCK") != NULL;	/* tests only */
+	{
+		char v[16];
+
+		/* DCH_NO_GITHUB=1: the suite's guard, as DCH_NO_REMOTE */
+		xr_res_github = !dch_env_on("DCH_NO_GITHUB") &&
+		                (!dch_config_get("xray_github", v, sizeof v) ||
+		                 dch_config_bool("xray_github"));
+	}
 	/* tests only: 3.8's --ref caps lowered, never raised (files, bytes,
 	** ms, the per-file head and tail, light's cwd walk) */
 	if ((e = getenv("DCH_XRAY_CAPS")))

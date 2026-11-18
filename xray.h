@@ -547,8 +547,8 @@ int xr_res_ref(const struct xr_span *sp, const char *text, const char *cwd,
 ** per session kind, before done. */
 void xr_scan_resolved(struct xr_scan *x, const struct xr_span *sp,
                       const char *text, const char *cwd, int live);
-/* #502/#500, light only: a live session's commit ref (or file ref: stat
-** alone, ok or missing), after define_command
+/* #502/#500/#507, light only: a live session's commit ref (or file ref:
+** stat alone, ok or missing; or issue/pull ref, by gh), after define_command
 ** answered nothing, gets the resolved line too when it is ok; any other
 ** state (not a repo, not a commit, a timeout) gives none. */
 void xr_scan_light(struct xr_scan *x, const struct xr_span *sp,
@@ -570,6 +570,16 @@ int xr_gitfile(const char *s, size_t n);
 ** case-insensitive, as https://, ssh:// or git@host:, a trailing .git or /
 ** allowed; an entry cut before its NUL never matches. */
 int xr_git_remote(const char *s, size_t n, const char *want);
+/* #507: a remote URL (no newline) as github.com's "<owner>/<repo>" into
+** out[cap], each name 1-100 of [A-Za-z0-9._-] not starting '-' or '.':
+** 1, else 0. gh's --jq answer s (NUL-terminated) for repo#num:
+** {number,title,state,kind}, state open/closed/merged (any case), kind
+** issue/pull; 1 with *r an ok issue or pull block, else 0. */
+int xr_gh_repo(const char *s, size_t n, char *out, size_t cap);
+int xr_gh_parse(const char *s, const char *repo, const char *num,
+                struct xr_resolved *r);
+/* #507: 0 turns the gh issue/pull resolver off (xray_github) */
+extern int xr_res_github;
 /* Test seams: the probe list (NULL: 8.3's for this OS), the probe's pick
 ** (NULL: none), and the git spawns so far. */
 extern const char *const *xr_git_probe;

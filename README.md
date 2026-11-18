@@ -852,6 +852,7 @@ running sessions.
 | `tasks_command` | a program and its arguments, run with no shell: X-ray's task list (`--tasks`) from your own command; with no row the agent's own (see [Your own task or memory list](#your-own-task-or-memory-list-tasks_command-memory_command)). Your own config only; through `dch serve` the host's | empty |
 | `memory_command` | the same for X-ray's memory list (`--memory`) | empty |
 | `define_command` | a program and its arguments, run with no shell, the ref last: X-ray's definition of a ref no transcript defines (see [Your own definitions](#your-own-definitions-define_command)). Your own config only; through `dch serve` the host's | empty |
+| `xray_github` | `true`/`false`: X-ray looks up a `#N`, `owner/repo#N` or GitHub issue/pull URL with your `gh` (title and state; see [Refs](#refs)) | `true` |
 
 ```sh
 dch --config                         # the path, then every known key's effective value
@@ -1812,6 +1813,29 @@ and `<path> · modified 2026-11-18 14:03 UTC` (the mtime, UTC) as
 its own, so a client need not read the subtitle, and unlike `ok` it does
 not claim a file was found. `--full` is unchanged: a missing file gives
 no line, an existing one the 14-line window.
+
+An issue or pull ref (`#1234`, `repo#12`, `owner/repo#12`, a
+`https://github.com/<o>/<r>/issues/<N>` or `/pull/<N>` URL) gets a
+`resolved` line from your `gh` (#507), in the light scan of a live `<n>`
+(the same define_command rule) and under `--full`: `kind` `issue` or
+`pull`, `title` the issue's title (controls as spaces), `subtitle`
+`<state> · owner/repo#N` with `open`, `closed` or `merged`, no `lines`.
+`owner/repo` is the ref's own, else the github.com `origin` of `<n>`'s
+repo, read with the git above (`repo#N` only when it names that repo).
+Both names are 1 to 100 of `[A-Za-z0-9._-]`, not starting with `-` or `.`,
+and `N` digits, checked before anything reaches `gh`'s argv. It runs one
+read-only call, `gh api --hostname github.com --method GET --jq <four
+fields> repos/<o>/<r>/issues/<N>`: GitHub's issues endpoint answers for a
+pull too, so one call serves a bare `#N`. The first `gh` on `PATH` runs
+under the same 3 s deadline and output cap as git, with only `PATH`,
+`HOME`, `XDG_CONFIG_HOME`, `GH_CONFIG_DIR`, `GH_TOKEN`, `GITHUB_TOKEN` and
+`DBUS_SESSION_BUS_ADDRESS` from your environment plus
+`GH_PROMPT_DISABLED=1`, `GH_NO_UPDATE_NOTIFIER=1`, `NO_COLOR=1`,
+`GH_PAGER=cat` and no browser. No `gh`, not logged in, no network, the
+deadline, a remote that is not github.com or an answer it cannot read:
+no line and no warning; the mentions stream as always.
+`xray_github = false` (or `DCH_NO_GITHUB=1`, the test suite's guard)
+turns it off.
 
 - **Commit.** The SHA is checked again (7 to 40 lowercase hex). An ended
   session runs nothing: `state: "ended"`. Otherwise dch runs git directly,
