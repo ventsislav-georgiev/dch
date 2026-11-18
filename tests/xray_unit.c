@@ -5334,7 +5334,7 @@ u8_ok(const unsigned char *p)
 static void
 t_search(void)
 {
-	char *o, big[40000], line[512];
+	char *o, big[80000], line[512];
 	size_t n = 0, k;
 	int f0;
 	struct xr_limits l0 = xr_lim;
@@ -5542,12 +5542,14 @@ t_search(void)
 	free(o);
 	xr_lim = l0;
 
-	/* the cap: 60 hits keep the newest 50, more */
+	/* the cap: 60 turns (a prompt each) keep the newest 50, more */
 	n = 0;
 	for (k = 0; k < 60; k++)
 		n += (size_t)snprintf(big + n, sizeof big - n,
-		                      "{\"type\":\"user\",\"message\":{\"content\":"
-		                      "\"hit %02zu\"}}\n", k);
+		                      "{\"type\":\"user\",\"cwd\":\"/x\",\"message\":"
+		                      "{\"content\":\"hit %02zu\"}}\n{\"type\":"
+		                      "\"assistant\",\"message\":{\"content\":[{"
+		                      "\"type\":\"text\",\"text\":\"ok\"}]}}\n", k);
 	o = search_of(big, n, "hit ", 0);
 	CHECK("search: 60 hits: the newest 50 (59 down to 10), more",
 	      o && count_of(o, "\"who\":") == 50 &&
@@ -5556,6 +5558,37 @@ t_search(void)
 	      !strstr(o, "\"snippet\":\"hit 09\"") &&
 	      strstr(o, "\"snippet\":\"hit 59\"") <
 	      strstr(o, "\"snippet\":\"hit 10\"") && strstr(o, "\"more\":true"));
+	free(o);
+
+	/* #457: one turn of 600 answers keeps its newest 500 (the hard cap),
+	** more; 2 turns of 30 hits keep all 60, no more */
+	n = (size_t)snprintf(big, sizeof big, "{\"type\":\"user\",\"cwd\":"
+	                     "\"/x\",\"message\":{\"content\":\"go\"}}\n");
+	for (k = 0; k < 600; k++)
+		n += (size_t)snprintf(big + n, sizeof big - n,
+		                      "{\"type\":\"assistant\",\"message\":{"
+		                      "\"content\":[{\"type\":\"text\",\"text\":"
+		                      "\"hit %03zu\"}]}}\n", k);
+	o = search_of(big, n, "hit ", 0);
+	CHECK("search: one turn of 600 hits: its newest 500 (599 down to 100), "
+	      "more (#457)",
+	      o && count_of(o, "\"who\":") == 500 &&
+	      strstr(o, "\"snippet\":\"hit 599\"") &&
+	      strstr(o, "\"snippet\":\"hit 100\"") &&
+	      !strstr(o, "\"snippet\":\"hit 099\"") &&
+	      strstr(o, "\"more\":true"));
+	free(o);
+	for (n = 0, k = 0; k < 60; k++)
+		n += (size_t)snprintf(big + n, sizeof big - n, k % 30 ?
+		                      "{\"type\":\"assistant\",\"message\":{"
+		                      "\"content\":[{\"type\":\"text\",\"text\":"
+		                      "\"hit %02zu\"}]}}\n" :
+		                      "{\"type\":\"user\",\"cwd\":\"/x\",\"message\":"
+		                      "{\"content\":\"hit %02zu\"}}\n", k);
+	o = search_of(big, n, "hit ", 0);
+	CHECK("search: 2 turns of 30 hits: all 60, no more (#457)",
+	      o && count_of(o, "\"who\":") == 60 &&
+	      strstr(o, "\"more\":false"));
 	free(o);
 
 	/* the snippet: about 160 bytes on UTF-8 boundaries, controls as one
@@ -5574,12 +5607,14 @@ t_search(void)
 		const char *a = o ? strstr(o, "\"snippet\":\"") : NULL;
 		const char *z = a ? strstr(a + 11, "\"}") : NULL;
 
-		CHECK("search: the snippet is cut on characters, never more than "
+		/* #456: a window starting inside the é run moves to the next
+		** word and leads with "… " */
+		CHECK("search: the snippet is cut at words, never more than "
 		      "160 bytes, controls as one space",
-		      a && z && z - (a + 11) <= 160 && z - (a + 11) >= 140 &&
+		      a && z && z - (a + 11) <= 164 &&
 		      u8_ok((const unsigned char *)o) &&
 		      !strstr(o, "\xef\xbf\xbd") &&
-		      strstr(a, "\xc3\xa9 FOUNDIT\xe2\x82\xac"));
+		      !strncmp(a + 11, "\xe2\x80\xa6 FOUNDIT\xe2\x82\xac", 14));
 	}
 	free(o);
 
@@ -5610,7 +5645,7 @@ t_search(void)
 	}
 
 	/* the shell ring: commands as user, rows as tool under the block's
-	** chapter, newest first; a 51st is more, the newest 50 kept */
+	** chapter, newest first; 2 blocks are 2 turns: all their hits (#457) */
 	{
 		static struct xr_rec r[200];
 		static char rows[60][8];
@@ -5669,10 +5704,11 @@ t_search(void)
 			}
 		}
 		/* the second block's prompt record is r[37]: s537 */
-		CHECK("search: shell: 62 hits, the newest 50 (row 59 down), the "
-		      "rows under their block, the command under its own; the "
-		      "prompt never; more",
-		      b && count_of(b, "\"who\":") == 50 &&
+		CHECK("search: shell: 62 hits in 2 blocks, all kept (row 59 "
+		      "down), the rows under their block, the command under its "
+		      "own; the prompt never; no more",
+		      b && count_of(b, "\"who\":") == 62 &&
+		      strstr(b, "\"snippet\":\"row 00\"") &&
 		      strstr(b, "\"hits\":[{\"chapter\":\"s537\",\"offset\":570,"
 		             "\"at\":2070,\"who\":\"tool\",\"tool\":null,"
 		             "\"snippet\":\"row 59\"}") &&
@@ -5682,9 +5718,72 @@ t_search(void)
 		      strstr(b, "{\"chapter\":\"s501\",\"offset\":534,\"at\":2034,"
 		             "\"who\":\"tool\",\"tool\":null,\"snippet\":"
 		             "\"row 29\"}") &&
-		      !strstr(b, "row$") && strstr(b, "\"more\":true"));
+		      !strstr(b, "row$") && strstr(b, "\"more\":false"));
 		if (b && !strstr(b, "\"offset\":570,"))
 			fprintf(stderr, "  got: %.400s\n", b);
+		free(b);
+		xr_search_free(s);
+	}
+	/* #457: 60 blocks of 2 hits (the command, its output): the newest 50
+	** blocks' 100 hits, more */
+	{
+		static struct xr_rec r[60 * 7];
+		static char rows[60][8];
+		struct xr_chapters c;
+		struct xr_shell sh;
+		struct xr_search *s = xr_search_new("ROW", 0);
+		char *b = NULL;
+		size_t bl = 0, rn = 0;
+		FILE *f;
+
+		for (k = 0; k < 60; k++)
+		{
+			snprintf(rows[k], sizeof rows[0], "row %02zu", k);
+			r[rn].kind = RING_K_MARK, r[rn++].text = "A";
+			r[rn].kind = RING_K_PROMPT, r[rn++].text = "$";
+			r[rn].kind = RING_K_MARK, r[rn++].text = "B";
+			r[rn].kind = RING_K_INPUT, r[rn++].text = "cmd row";
+			r[rn].kind = RING_K_MARK, r[rn].flags = RING_F_INPUT;
+			r[rn++].text = "C";
+			r[rn].kind = RING_K_OUTPUT, r[rn++].text = rows[k];
+			r[rn].kind = RING_K_MARK, r[rn].flags = RING_F_EXIT;
+			r[rn++].text = "D;0";
+		}
+		for (k = 0; k < rn; k++)
+		{
+			r[k].seq = 500 + k;
+			r[k].t = 2000 + (uint32_t)k;
+			r[k].len = strlen(r[k].text);
+		}
+		xr_shell_begin(&sh, &c);
+		for (k = 0; s && k < rn; k++)
+		{
+			xr_shell_feed(&sh, &r[k]);
+			xr_search_rec(s, &sh, &r[k]);
+		}
+		xr_shell_end(&sh);
+		xr_chapters_free(&c);
+		if (s)
+		{
+			xr_search_ring_end(s);
+			if ((f = open_memstream(&b, &bl)))
+			{
+				xr_search_print(f, s, "s", "m1", "shell", NULL);
+				fclose(f);
+			}
+		}
+		CHECK("search: shell: 60 blocks of 2 hits: the newest 50 blocks' "
+		      "100 (row 59 down to 10), newest first, more (#457)",
+		      b && count_of(b, "\"who\":") == 100 &&
+		      count_of(b, "\"snippet\":\"cmd row\"") == 50 &&
+		      strstr(b, "\"snippet\":\"row 59\"") &&
+		      strstr(b, "\"snippet\":\"row 10\"") &&
+		      !strstr(b, "\"snippet\":\"row 09\"") &&
+		      strstr(b, "\"snippet\":\"row 59\"") <
+		      strstr(b, "\"snippet\":\"row 10\"") &&
+		      strstr(b, "\"more\":true"));
+		if (b && count_of(b, "\"who\":") != 100)
+			fprintf(stderr, "  got: %.600s\n", b);
 		free(b);
 		xr_search_free(s);
 	}

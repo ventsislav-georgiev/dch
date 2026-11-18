@@ -409,6 +409,21 @@ def ctl_checks(dch, check, senv, cenv, serve_at, procs, fakes, tmp, hosts):
     check("off the allowlist: refused here, exit 1", r.returncode == 1
           and r.stderr == "dch: can't run on a remote host: -f is not "
           "allowed\n", r)
+    # #466: --revive's --env/--unset are local only: refused here, exit 2,
+    # no ctl --revive in the host's log
+    with open(slog) as f:
+        n0 = f.read().count(" ctl --revive ")
+    for a in (["--env", "K=V"], ["--unset", "K"]):
+        r = dch(cenv, *H, "--revive", "srv:ctl-qa", *a)
+        check("--revive %s on a host: local only, exit 2" % a[0],
+              r.returncode == 2 and r.stderr == "dch: --env and --unset with "
+              "--revive are local only\n", r)
+    r = dch(cenv, *H, "--host", "srv", "--revive", "--all", "--env", "K=V")
+    check("--revive --all --env --host: local only, exit 2",
+          r.returncode == 2 and "local only" in r.stderr, r)
+    with open(slog) as f:
+        check("...none of them reached the host",
+              f.read().count(" ctl --revive ") == n0)
     # #120: --xray is argv[1] only, so after --hosts it is never sent;
     # dch --xray srv:<n> goes to the host (#157, xray_checks)
     r = dch(cenv, *H, "--xray", "srv:ctl-qa")

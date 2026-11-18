@@ -103,10 +103,7 @@ check(const char *out, size_t ol, const char *needle, uint64_t body)
 		if (ok && naive(snip, strlen(snip), want, wl) == SIZE_MAX && wl)
 			abort();	/* a hit that does not hold the needle */
 	}
-	if (hits > XR_SEARCH_HITS ||
-	    ((f = dch_json_field(&p, 0, "more")) >= 0 &&
-	     !strncmp(out + p.tok[f].start, "true", 4) &&
-	     hits != XR_SEARCH_HITS))
+	if (hits > XR_SEARCH_HITS)	/* more: a 51st turn or this cap (#457) */
 		abort();
 	dch_json_free(&p);
 }

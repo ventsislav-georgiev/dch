@@ -2128,6 +2128,7 @@ struct remit
 	uint64_t off;		/* Claude: the line's offset; shell: the seq */
 	long long at;
 	const char *chapter;
+	const char *who, *tool;	/* user, assistant or tool (its name) */
 	uint64_t *ctr;		/* Claude: each mention its own unit */
 	uint64_t unit, row;	/* shell: the block and the row */
 	int left;		/* spans left in the block, -1 no cap */
@@ -2177,6 +2178,8 @@ rm_hit(struct remit *r, const struct xr_span *sp, const char *title,
 	h.off = r->off;
 	h.at = r->at;
 	h.chapter = r->chapter;
+	h.who = r->who;
+	h.tool = r->tool;
 	if (title)
 	{
 		h.title = title;
@@ -4473,6 +4476,13 @@ mention_line(struct xr_scan *x, const struct xr_hit *h)
 	put_or_null(m, x->other ? NULL : h->chapter);	/* <n>'s only */
 	fputs(",\"at\":", m);
 	put_at(m, h->at);
+	if (h->who)	/* Claude's only */
+	{
+		fputs(",\"who\":", m);
+		xr_put_str(m, h->who);
+		fputs(",\"tool\":", m);
+		put_or_null(m, h->tool);
+	}
 	fputs(",\"line\":", m);
 	xr_put_str(m, line);
 	fprintf(m, ",\"offset\":%llu,\"live\":%s,\"project\":",
@@ -5092,6 +5102,7 @@ struct xr_claude
 	const char *peer;	/* #359: it is another agent's: its name
 				** ("" for none), else NULL */
 	const char *peersum;	/* a hand-back's summary, else NULL */
+	const char *who, *tool;	/* the record's speaker for a mention */
 	struct pend pend[XR_PENDING + 1];
 	int npend;
 	char *order[XR_PENDING + 2];	/* pendingOrder, ids may repeat */
@@ -5794,6 +5805,8 @@ rm_claude(struct xr_claude *d, struct remit *r, const char *chapter)
 	r->off = d->off;
 	r->at = d->at;
 	r->chapter = chapter && chapter[0] ? chapter : NULL;
+	r->who = d->who;
+	r->tool = d->tool;
 	r->ctr = &d->unit;
 	r->left = XR_SPANS;	/* shortcut: 3.6's cap, counted per field group */
 }
@@ -5979,8 +5992,12 @@ refs_call(struct xr_claude *d, const struct json_parser *p, int i)
 	struct rcall *c;
 	struct remit r;
 
+	const char *who = d->who;
+
 	if (!name)
 		name = strdup("");
+	d->who = "tool";
+	d->tool = name;
 	if (name && !strcmp(name, "Bash") &&
 	    (v = j_field(p, in, "command")) >= 0 &&
 	    p->tok[v].kind == JSON_STRING && (s = j_str(p, v, &l)) &&
@@ -6040,6 +6057,8 @@ refs_call(struct xr_claude *d, const struct json_parser *p, int i)
 		if (id)
 			(void)rc_push(d, id, RC_CARD);
 	}
+	d->who = who;
+	d->tool = NULL;
 	free(s);
 	free(id);
 	free(name);
@@ -6171,9 +6190,12 @@ refs_result(struct xr_claude *d, const struct json_parser *p, int i, int err,
 	struct remit r, cr;
 	struct dsrc ds;
 
+	const char *who = d->who;
+
 	memset(&r, 0, sizeof r);
 	if (!d->rk.hit)
 		goto out;
+	d->who = "tool";
 	if (!rr->paired)
 		ch_anchor(d, a);
 	rm_claude(d, &r, rr->paired ? rr->c.chapter : a);
@@ -6228,6 +6250,7 @@ refs_result(struct xr_claude *d, const struct json_parser *p, int i, int err,
 	defs_emit(&ds, &r, ds.bash ? &cr : NULL);
 	free(cr.cov);
 out:
+	d->who = who;
 	free(r.cov);
 	if (body != t)
 		free(body);
@@ -7290,6 +7313,7 @@ xr_claude_line(struct xr_claude *d, const char *line, size_t len,
 
 	d->off = off;
 	d->end = off + len;
+	d->who = d->tool = NULL;
 	if (d->want)
 		d->want->off = (long long)off;
 	d->at = -1;
@@ -7325,9 +7349,15 @@ xr_claude_line(struct xr_claude *d, const char *line, size_t len,
 	if (type && listed(noise_types, type))
 		;
 	else if (type && !strcmp(type, "user"))
+	{
+		d->who = "user";
 		entry_user(d, &p, ag);
+	}
 	else if (type && !strcmp(type, "assistant"))
+	{
+		d->who = "assistant";
 		entry_assistant(d, &p, ag);
+	}
 	else if (type && !strcmp(type, "system"))
 	{
 		char *sub = k_str(&p, 0, A_SUB, NULL);
@@ -11292,8 +11322,9 @@ xr_search_free(struct xr_search *s)
 }
 
 /* The snippet: about XR_SNIPPET bytes of t[0..n) around the match at m, cut
-** on character boundaries, controls and whitespace runs as one space,
-** invalid UTF-8 as U+FFFD. */
+** on character boundaries and at words, "U+2026 space" leading when it
+** starts past the text's start, controls and whitespace runs as one
+** space, invalid UTF-8 as U+FFFD. */
 static char *
 sr_snip(const char *t, size_t n, size_t m, size_t nl)
 {
@@ -11309,8 +11340,33 @@ sr_snip(const char *t, size_t n, size_t m, size_t nl)
 		a++;
 	while (b > m + nl && b < n && ((unsigned char)t[b] & 0xc0) == 0x80)
 		b--;
-	if (!(q = o = malloc((b - a) * 3 + 1)))
+	/* whole words: a window starting mid-word begins after the word's
+	** end, one ending mid-word before it, the match kept whole */
+	if (a > 0 && (unsigned char)t[a - 1] > ' ' &&
+	    (unsigned char)t[a] > ' ')
+	{
+		for (i = a; i < m && (unsigned char)t[i] > ' '; i++)
+			;
+		for (; i < m && t[i] && (unsigned char)t[i] <= ' '; i++)
+			;
+		if (i < m)
+			a = i;
+	}
+	if (b < n && (unsigned char)t[b] > ' ' &&
+	    (unsigned char)t[b - 1] > ' ')
+	{
+		for (i = b; i > m + nl && (unsigned char)t[i - 1] > ' '; i--)
+			;
+		if (i > m + nl)
+			b = i;
+	}
+	if (!(q = o = malloc((b - a) * 3 + 6)))
 		return NULL;
+	if (a > 0)
+	{
+		q += u8_put(q, 0x2026);	/* the window starts past the text's */
+		*q++ = ' ';
+	}
 	for (i = a; i < b; i += adv)
 	{
 		uint32_t c = u8_next((const unsigned char *)t + i, b - i, &adv);
@@ -11340,8 +11396,8 @@ sr_region(const struct xr_search *s, uint64_t o)
 }
 
 /* A hit of kind who at off, its text t[0..n) matched at m (tool: malloc'd,
-** taken). A transcript's 51st sets more and stops the search; a shell's ring
-** keeps the newest XR_SEARCH_HITS. */
+** taken). A transcript's hit past XR_SEARCH_HITS sets more and stops the
+** search; a shell's ring keeps the newest XR_SEARCH_HITS. */
 static void
 sr_add(struct xr_search *s, uint64_t off, long long at, int who, char *tool,
        const char *t, size_t n, size_t m)
@@ -11801,6 +11857,80 @@ sr_chapters(struct xr_search *s, const struct sr_win *w)
 	return 0;
 }
 
+/* Hit k, newest first: a transcript's are, a shell's ring is oldest first */
+static struct sr_hit *
+sr_nth(struct xr_search *s, size_t k)
+{
+	return &s->hit[s->shell ? (s->h0 + s->n - 1 - k) % XR_SEARCH_HITS : k];
+}
+
+/* Hits a and b under one turn: a hit under no chapter, or one not known
+** yet, is a turn of its own (#457) */
+static int
+sr_same(const struct sr_hit *a, const struct sr_hit *b)
+{
+	return a->chapter[0] && !a->pend && !b->pend &&
+	       !strcmp(a->chapter, b->chapter);
+}
+
+/* Hit k's turn is new: no newer hit is under it */
+static int
+sr_newturn(struct xr_search *s, size_t k)
+{
+	size_t j;
+
+	for (j = 0; j < k; j++)
+		if (sr_same(sr_nth(s, j), sr_nth(s, k)))
+			return 0;
+	return 1;
+}
+
+/* The turns of the hits whose chapter is known */
+static size_t
+sr_turns(struct xr_search *s)
+{
+	size_t k, n = 0;
+
+	for (k = 0; k < s->n; k++)
+		n += !sr_nth(s, k)->pend && sr_newturn(s, k);
+	return n;
+}
+
+/* Only the newest XR_SEARCH_TURNS turns' hits stay, newest first; more
+** when one goes (#457). Every chapter known or null by now. */
+static void
+sr_trim(struct xr_search *s)
+{
+	struct sr_hit *o;
+	size_t k, n = 0, t = 0;
+
+	if (!(o = calloc(s->n ? s->n : 1, sizeof *o)))
+		return;		/* out of memory: the hits stay as they are */
+	for (k = 0; k < s->n; k++)
+	{
+		struct sr_hit *h = sr_nth(s, k);
+		size_t j;
+
+		for (j = 0; j < n && !sr_same(&o[j], h); j++)
+			;
+		if (j == n && t == XR_SEARCH_TURNS)
+		{
+			s->more = 1;
+			sr_hit_free(h);
+			continue;
+		}
+		t += j == n;
+		o[n++] = *h;
+		memset(h, 0, sizeof *h);
+	}
+	/* back as the printer reads them: a shell's oldest first from 0 */
+	for (k = 0; k < n; k++)
+		s->hit[k] = o[s->shell ? n - 1 - k : k];
+	s->n = n;
+	s->h0 = 0;
+	free(o);
+}
+
 static int
 sr_pending(const struct xr_search *s)
 {
@@ -11840,8 +11970,9 @@ xr_search_file(struct xr_search *s, int fd, uint64_t size, uint64_t ino,
 	size_t wsz = xr_lim.line + 2, cap = 0, i, z;
 	struct sr_win w;
 	uint64_t end = size, start;
-	long long stop = -1;	/* when the 51st hit came */
-	int rc = 0, k;
+	long long stop = -1;	/* when more came */
+	int rc = 0, k, pd;
+	size_t seen = 0;	/* the hits when the turns were counted */
 
 	memset(&w, 0, sizeof w);
 	s->ino = ino;
@@ -11910,14 +12041,23 @@ xr_search_file(struct xr_search *s, int fd, uint64_t size, uint64_t ino,
 		end = i < (size_t)(end - start) ? start + i : start;
 		for (w.k = w.nln; !s->more && w.k-- > 0;)
 			sr_line(s, &w);
-		if (rc == 0 && sr_pending(s) && sr_chapters(s, &w) < 0)
+		pd = sr_pending(s);
+		if (rc == 0 && pd && sr_chapters(s, &w) < 0)
 			rc = -1;
+		/* a 51st turn (#457), counted again when a hit or a chapter
+		** may have come */
+		if (!s->more && (pd || s->n != seen))
+		{
+			seen = s->n;
+			s->more = sr_turns(s) > XR_SEARCH_TURNS;
+		}
 	}
 	if (end > 0 && !s->more && rc == 0)
 		s->partial = 1;		/* a cap, or the file shrank */
 	for (i = 0; i < s->n; i++)
 		if (s->hit[i].pend)	/* not found in time: null */
 			s->hit[i].pend = 0, s->hit[i].chapter[0] = '\0';
+	sr_trim(s);
 	free(w.ln);
 	free(w.buf);
 	return rc;
@@ -11995,6 +12135,7 @@ xr_search_ring_end(struct xr_search *s)
 {
 	sr_flush(s);
 	s->more = s->total > XR_SEARCH_HITS;
+	sr_trim(s);
 }
 
 int

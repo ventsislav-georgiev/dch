@@ -282,7 +282,7 @@ newer). A tarball holds `dch`, `dch.1`, `COPYING` and this README; the
 full build also holds `LICENSE.libghostty-vt`.
 
 ```sh
-v=1.93.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
+v=1.94.0 t=darwin-arm64           # or darwin-x86_64, linux-aarch64, linux-x86_64
 d=dch-$v-$t                       # or dch-lite-$v-$t
 u=https://github.com/ventsislav-georgiev/dch/releases/download/v$v
 curl -fLO $u/$d.tar.gz -fLO $u/$d.tar.gz.sha256
@@ -379,7 +379,7 @@ dch --respawn <name> [-- cmd...]                # on child exit, start cmd in it
 dch --respawn <name> --cancel                   # drop a pending respawn
 dch --cmd <name>                                # child pid, state, argv, exit status (JSON)
 dch --history [--json]                          # sessions that ended, and how
-dch --revive <name> [--as <new>]|--all [--no-message] [--json]  # bring ended sessions back, claude resumed
+dch --revive <name> [--as <new>]|--all [--no-message] [--env K=V]... [--unset K]... [--json]  # bring ended sessions back, claude resumed
 dch --pin|--unpin <name>... [--json]            # keep a record past the 30-day prune, or stop
 dch --forget <name>... [-f]|--all [--json]      # delete ended sessions' records
 dch --say <name>...|--all [--json] -- <text...>  # message each Claude Code, busy too (queued), never over a prompt
@@ -392,7 +392,7 @@ dch --xray <n> --clear --json                   # empty a shell session's X-ray 
 dch --xray <n> --follow --json                  # the same object, then its deltas as NDJSON until the session ends
 dch --xray <n> --follow --tasks --memory --json # that stream with the task and memory blocks and their deltas
 dch --xray <n> --ref <ref|-> [--scope session|project|all] [--full] [--budget-ms <ms>] --json  # one ref's mentions and definitions, NDJSON
-dch --xray <n> --search <text|-> --json         # the newest 50 places a word or phrase was said (- reads it from stdin)
+dch --xray <n> --search <text|-> --json         # where a word or phrase was said in the newest 50 turns (- reads it from stdin)
 dch --xray <n> --memory --json                  # its memories and instruction files, JSON lines
 dch --xray <n> --chapter <anchor> --json        # one chapter's entries (prompt, replies, tool calls, output)
 dch --xray <n> --tasks --json                   # the session's task list (TaskCreate, TodoWrite, update_plan), JSON lines
@@ -477,7 +477,7 @@ someone is watching is invisible to them.
 | `--respawn <n> --cancel` | Drop a pending arm. On a held (childless) session it ends the session. | 0 ok, 1 no session |
 | `--cmd <n>` | Print `{"pid","state","argv","exit_code","exit_signal","tail"}`: the child's pid (`null` while held), `state` `running`, `armed` or `held`, the argv it was started with, the exit status of a child reaped under an arm (`null` otherwise), and `tail`, the last 8 KB the child wrote since the arm, raw. | 0 ok, 1 no session / master too old |
 | `--history [--json]` | List the sessions that ended, newest first, one line each: `name (alias)  when  end  cwd  $ argv  [claude <name> <session id>]`. `end` is `exit N`, `signal N`, `signal N from <pid> <command>` (the master itself got SIGTERM or SIGINT from that process: its command line made printable, cut at 120 bytes; `signal N from <pid>` when it was already gone), `killed` (`dch -k`), `stopped` (`dch --stop`) or `vanished` (the master died without a word: SIGKILL, power loss). Only the records of the current socket dir are listed. A pinned record (`--pin`) ends its line with `  [pinned]`, one a new session under its name moved aside with `  [record <name>.<ended>]`. `--json` prints the stored records as an array, a pinned one with `"pinned":true` added (absent otherwise), every one with `"file"`, its record file without `.json` (`work`, or `work.<ended>` for a moved one), the exact handle for `--pin`/`--unpin`/`--forget <file>.json` (see [Bringing sessions back](#bringing-sessions-back)). With `--remote`, after the local records (unchanged, byte for byte) come the remote hosts' (see [Remote hosts](#remote-hosts)): text lines as `host:name ...`, ending `  [stale]` for a host's cached answer; JSON records as the host sent them plus `"host"` and `"stale"`. | 0 |
-| `--revive <n> [--as <new>] [--no-message]` \| `--revive --all [--no-message]` | Start ended sessions again: in their cwd, with their argv, with the Claude Code agent in them resumed via `--resume <id>` and told to carry on (see [Bringing sessions back](#bringing-sessions-back)). `--no-message`: resumed only, no message typed (`ok`, the line says it was not sent). `<n>` revives its newest ended record, whatever its end — never a live session's; `<file>.json` (or the bare file `--history` prints, `[record <file>]`) exactly that record file; a live `<n>` is refused unless `--as <new>` names another session. `--all` revives every session that died — anything but `exit 0`, `killed` and `stopped` — within the last 3 days after running at least 5 minutes, and gives one whose name is now taken the first free `<n>-2`, `<n>-3`, …. Older or shorter-lived sessions stay in `--history` and revive by name. Never two Claudes on one conversation: a record whose Claude id a live Claude already runs is skipped by `--all` and refused by name (`live_sid`, naming the holder), and of two records carrying one id `--all` revives only the newest (`dup_sid`). One line per session. `--json`: stdout is NDJSON, each result carrying `"as"`, the name it came back under (see [Machine-readable output](#machine-readable-output)). | 0 ok (skips included), 1 no history / ambiguous / name live / id live / a revive or resume failed |
+| `--revive <n> [--as <new>] [--no-message] [--env K=V]... [--unset K]...` \| `--revive --all [--no-message] [--env K=V]... [--unset K]...` | Start ended sessions again: in their cwd, with their argv, with the Claude Code agent in them resumed via `--resume <id>` and told to carry on (see [Bringing sessions back](#bringing-sessions-back)). `--no-message`: resumed only, no message typed (`ok`, the line says it was not sent). `--env` (as `--spawn`'s: max 32, first `=` splits, `K=` sets it empty) and `--unset K` (a bare name, max 32; removed, not emptied) apply to every session the revive starts, after the login shell's environment, so they win over your rc files; `DCH_SESSION` and the `TERM` default stay dch's. Local only: with a remote name or `--host`, exit 2, nothing sent. `<n>` revives its newest ended record, whatever its end — never a live session's; `<file>.json` (or the bare file `--history` prints, `[record <file>]`) exactly that record file; a live `<n>` is refused unless `--as <new>` names another session. `--all` revives every session that died — anything but `exit 0`, `killed` and `stopped` — within the last 3 days after running at least 5 minutes, and gives one whose name is now taken the first free `<n>-2`, `<n>-3`, …. Older or shorter-lived sessions stay in `--history` and revive by name. Never two Claudes on one conversation: a record whose Claude id a live Claude already runs is skipped by `--all` and refused by name (`live_sid`, naming the holder), and of two records carrying one id `--all` revives only the newest (`dup_sid`). One line per session. `--json`: stdout is NDJSON, each result carrying `"as"`, the name it came back under (see [Machine-readable output](#machine-readable-output)). | 0 ok (skips included), 1 no history / ambiguous / name live / id live / a revive or resume failed |
 | `--pin <n>... [--json]` \| `--unpin <n>... [--json]` | Pin a session's history record so the 30-day prune never takes it, or unpin it (see [Bringing sessions back](#bringing-sessions-back)). `--pin` needs a record for the name, live or ended (`<n>: failed — …`, `not_found`, otherwise), and pins every record of the name; pinning a pinned one is `ok`. `--unpin` unpins every record of the name and is `ok` with or without a pin, but `not_found` when there is no record (nor a stray pin) to act on. An argument ending in `.json` names exactly one record file instead, never a name: `--pin work.json` pins the primary `work.json` only, `--pin work.<ended>.json` only that moved record. One that is also a session's name (sessions `a` and `a.json`: `a.json` would be both) is refused, `ambiguous`, nothing touched: `a.json.json` names session `a.json`'s record. A bare argument also matches a record file exactly as given, so the `[record <file>]` that `--history` prints works for a long name's moved record (which the name shortening would hash again). One line per name: `<n>: pinned`, `<n>: unpinned` or `<n>: failed — <why>`. `-f` is a usage error. | 0 nothing failed, 1 usage error / a name failed |
 | `--forget <n>... [-f] [--json]` \| `--forget --all [--json]` | Delete history records of the current socket dir, matched by name as `--revive` matches them (every record that matches); `<file>.json` (`work.json`, `work.<ended>.json`) deletes exactly that one record file; one that is also a session's name is refused, `ambiguous`, as for `--pin`. Never a live session's (`live`: its master would write it back; `-f` does not change that); a pinned one only with `-f`, which removes its pin too (`pinned` otherwise); `not_found` when no record matches. One line per record: `<n>: forgotten` or `<n>: failed — <why>`. `--all` deletes every record that is neither live nor pinned and skips the rest: one `<n>: forgotten` per record deleted, then `forgot N (K pinned, L live kept)`; `-f` with `--all` is a usage error (it never removes a pin). | 0 nothing failed (skips included), 1 usage error / a name failed |
 | `--say <n>... [--json] -- <text...>` \| `--say --all [--json] -- <text...>` | Type one message into the Claude Code running in each session — as its command or typed into its shell — and submit it, idle or busy: a busy Claude (or one running a background shell) queues the message, just as Enter does when you type it yourself, and takes it once its turn ends; one with messages already queued queues it after them. Typed only when the screen shows its empty composer (its placeholder, also the "Press up to edit queued messages" one), never over a prompt or dialog (the Enter would answer it) or an unsent draft, never waiting for either. Text is the words after the required `--` joined with spaces. A text starting with `/` and holding no control characters is typed as keys, not pasted (Claude Code opens its slash menu only on typed keys): `dch --say <n> --json -- /model <model>` switches a live Claude's model; `--say --all` with such a text is a usage error, exit 1, nothing typed. Sessions are typed into concurrently; Enter is pressed again while the text still sits in the composer, never once a dialog is up; text that left the composer — submitted, or shown queued above it — is `sent`. One result per session as it finishes: `<n>: sent`, `<n>: skipped — <why>` (`not_claude` under `--all`, `self` = `$DCH_SESSION`, `prompt`, `draft`, `no_screen` — always on dch-lite) or `<n>: failed — <why>` (`no_session`, `not_submitted`, `not_typed`, `old_master`, `interrupted`, `withdrawn`, `draft_left`, `not_foreground` — Claude is not in front, as `claude_foreground` defines it: suspended, in the background or under a wrapper that does not read the keyboard, nothing typed). A first SIGINT, SIGTERM or SIGHUP stops every session at a safe point: once it is handled nothing more is typed and no Enter is pressed; text already in the composer is taken back out one Ctrl-U at a time (Claude Code's Ctrl-U kills one wrapped row), the screen re-read after each; each session not yet `sent` fails with one of the last three; a second signal exits at once (`--run` and `--revive` do the same). A paste still painting is waited for first (up to `DCH_AGENT_LAND_MS`, 30 s). Limit: an Enter sent before the signal that Claude takes only after it sends the text, which is then reported `withdrawn`. `--json` prints one `{"name","result":"ok\|skipped\|failed","reason","detail"}` object per line instead. | 0 nothing failed (skips included), 1 usage error / a session failed |
@@ -1066,19 +1066,22 @@ it has memories or instruction files:
   character; a text outside that is said on the status line and not
   searched), `Esc` stops typing and keeps the last results. The text
   searched stays on the line above the results, also when you switch tabs
-  and come back, until the next search. The hits are newest first, at most
-  50: each is its time, who said it (`You`, `Reply`, or the tool's name;
-  `Output` for a shell's output), the prompt it is under, and up to 3 lines
-  of the text around it, the match in bold accent colour. A hit the view
-  has no prompt for says `(outside the prompts shown)`. A faint last line
-  says `the 50 newest are shown` when there are more, and one says when
-  the search stopped early (too long, too much to read, or the history
-  changed as it read); the hits shown stand. The tab's count is the hits,
-  `50+` past the cap, nothing before a search. `j` `k` move hit by hit;
-  `Enter` reads the hit's prompt, scrolled to that hit (the reply or tool
-  output it is in, not the text's first place in the prompt), and `q` comes back
-  to the hit; on a hit outside the prompts the status line says the view
-  cannot open it. `o` works as on Prompts. A shell session searches its
+  and come back, until the next search. The hits are grouped by turn, the
+  newest 50 turns, newest first: a head line with the prompt's time, number
+  and title, then each place in that turn on an indented line: who said it
+  (`You`, `Reply`, or the tool's name; `Output` for a shell's output) and
+  up to 3 lines of the text around it, the match in bold accent colour. A
+  prompt whose hit is just its title has no line of its own: its head line
+  is that hit. A hit the view has no prompt for is its own group,
+  `(outside the prompts shown)`. A faint last line says `the 50 newest
+  prompts are shown` when there are more, and one says when the search
+  stopped early (too long, too much to read, or the history changed as it
+  read); the hits shown stand. The tab's count is the turns, `50+` past the
+  cap, nothing before a search. `j` `k` move line by line; `Enter` reads
+  the prompt, scrolled to that line's place (the reply or tool output it is
+  in, not the text's first place in the prompt; a head line: the prompt),
+  and `q` comes back to the line; on a hit outside the prompts the status
+  line says the view cannot open it. `o` works as on Prompts. A shell session searches its
   ring; dch-lite and `xray_ring = 0` have none, and the list says `no x-ray
   corpus`. A remote view searches on the host; a host older than 1.63.0
   does not know `--search`, and the list says so.
@@ -1667,7 +1670,7 @@ lines as NDJSON, each with `schema:1`: `first` (the key, `mode`, `scope` and
 `budget_ms`), then `definition` and `mention` lines, a `tally` per file,
 `progress` at most every 250 ms, and `done` last (`partial`, `why`, `counts`,
 `files`, `bytes`, `lines_too_long`, and `define_warn` when a
-[`define_command`](#your-own-definitions-define_command) gave none). `<ref>` is 1 to 256 bytes of UTF-8 with no
+[`define_command`](#your-own-definitions-define_command) gave none). A Claude `mention` line carries `who` (`user`, `assistant` or `tool`) and `tool` (the tool's name for a call's own text, else `null`), as Search hits do, a Claude mention only; the card shows them as You, Reply or the tool, with the prompt's number. With no definition the card shows the first mention's line as `First said (prompt N, <title>): ...`, and a light card says `this project: f scans` where `f` has not counted it, never `0 in 0 sessions`. `<ref>` is 1 to 256 bytes of UTF-8 with no
 control character and none of the bidi controls U+200E, U+200F, U+202A to
 U+202E and U+2066 to U+2069 (`dch: bad ref`), and must parse as exactly one
 ref (`dch: not a ref`), relative paths against the session's cwd. `--ref -` reads the ref from standard input like `--search -`
@@ -1913,14 +1916,18 @@ or with a remote `host:name` the `-` is the plain text `-`, the same error as be
   has none there: a turn past the 3.8 range, a shell row still on the screen
   or outside a block). `offset` is the record's byte offset (a shell: its
   ring seq), `at` its time in seconds or `null`, `tool` the tool's name or
-  `null`, and `snippet` about 160 bytes around the match, cut on character
-  boundaries, controls and runs of spaces as one space.
+  `null`, and `snippet` about 160 bytes around the match, cut at word
+  boundaries (the match whole), controls and runs of spaces as one space; it
+  starts with `"… "` (U+2026, a space) when the window does not start at the
+  text's start.
 - **Reading.** A transcript or a rollout is read from its end in windows
   of 1 MiB, the whole file, within `--ref --full`'s caps: 1 GiB
   (`why: "bytes"`) and 10 s (`why: "time"`); a file that shrinks gives
   `why: "range"`. A capped read is `partial: true` and keeps what it found.
-  The newest 50 hits are kept; a 51st makes `more: true`. A shell reads its
-  ring and screen as `--ref` does.
+  The hits of the newest 50 turns are kept (a turn is a prompt's chapter,
+  a shell's command; a hit under no chapter is a turn of its own), at most
+  500 hits, a turn's newest first; a 51st turn or a 501st hit makes
+  `more: true`. A shell reads its ring and screen as `--ref` does.
 
 `--search` goes with no other flag but `--json` (`dch: bad usage: --search
 and --ref`, also with `--chapter`, `--clear` or `--follow`), and not in
@@ -2725,7 +2732,10 @@ shell below gives back any your rc files set. The environment is the one your lo
 `DCH_*`), so a revive started from a GUI app or a daemon still gets the
 `PATH` your rc files set up. A shell that fails or takes longer than
 `DCH_LOGIN_ENV_MS` (default 10000) leaves the caller's environment as it
-is; `DCH_LOGIN_ENV=0` skips the step. A session ended by `dch --stop` comes back the same way;
+is; `DCH_LOGIN_ENV=0` skips the step. `--env K=V` and `--unset K` apply
+after it and win: `--unset ANTHROPIC_BASE_URL` keeps a key your rc exports
+out of the revived session (a revived shell reads its rc files again,
+though, so a Claude typed into it gets what they export). A session ended by `dch --stop` comes back the same way;
 its message says it was stopped by `dch --stop` and to re-arm what it
 stopped for the pause.
 
@@ -3213,7 +3223,7 @@ for a local session named that way.
 | `-m` | `-m <n> <alias>` | 60 s |
 | `--spawn` | `--spawn <n> [--size CxR] [--] <cmd...>`, with `cwd`; needs `--allow-create` | 60 s |
 | `--history` | `--history --json` | 60 s |
-| `--revive` | `--revive <n> [--as <new>] [--no-message] --json`; needs `--allow-create` | 660 s |
+| `--revive` | `--revive <n> [--as <new>] [--no-message] --json`; needs `--allow-create`; never `--env` or `--unset` (local only) | 660 s |
 | `--pin`, `--unpin`, `--forget` | `--pin <n>... --json`; `--forget --all --json` | 60 s |
 | `--stop` | `--stop <n>... --json` | 660 s |
 | `--say` | `--say <n> --json -- <text>` | 660 s |

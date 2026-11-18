@@ -674,11 +674,68 @@ def test_reply_live():
         dch("-k", "xv-rl")
 
 
+CSIDS = ["11111111-2222-4333-8444-5555555555f%d" % k for k in (7,)]
+SAID = "Opened PR #412: idempotency key on checkout, 24h TTL."
+
+
+def fixture_said():
+    """xv-sd: five prompts, alone in its project; #412 first appears in
+    turn 4's reply (no definition), and again in a later user prompt."""
+    lines = []
+    for k in range(3):
+        lines += turn("filler %d" % k, "2026-11-10T1%d:00:00Z" % k,
+                      at(say("nothing here"), "2026-11-10T1%d:01:00Z" % k))
+    lines += turn("ship the fix", "2026-11-10T13:00:00Z",
+                  at(say(SAID), "2026-11-10T13:01:00Z"))
+    lines += turn("is #412 merged?", "2026-11-10T14:00:00Z",
+                  at(say("yes"), "2026-11-10T14:01:00Z"))
+    solo = "/home/demo/solo"
+    os.makedirs(os.path.dirname(tl("x", "-home-demo-solo")), exist_ok=True)
+    record("xv-sd", CSIDS[0], [dict(o, cwd=solo) if "cwd" in o else o
+                               for o in lines], "-home-demo-solo", solo)
+
+
+def test_said():
+    """#455: a card with no definition shows its first mention's line as
+    First said (prompt N); rows say You/Reply and the prompt; a light card
+    says f scans, never 0 in 0 sessions."""
+    v = Pty([DCH, "--xray", "xv-sd"], env={"TMPDIR": TPD + "/"})
+    try:
+        v.wait(b"Prompts 5")
+        v.pump(0.5)
+        for _ in range(6):
+            if "[Refs" in rows(v.out).get(2, ""):
+                break
+            v.key(b"\t", 0.5)
+        mark = len(v.out)
+        v.key(b"\r", 1.5)
+        v.wait(b"Mentions: this session ", start=mark)
+        v.pump(1.0)
+        text = screen(v, 0)
+        check("#455: no definition: First said (prompt 4, ...) with the "
+              "first mention's line", "First said (prompt 4, ship the fix"
+              in text and "Opened PR #412: idempotency" in text and
+              "No definition found" not in text, text)
+        check("#455: rows say Reply and You and the prompt",
+              re.search(r"Reply +p4 .*Opened PR", text) is not None and
+              re.search(r"You +p5 .*is #412 merged", text) is not None,
+              text)
+        check("#455: a light card says f scans, never 0 in 0 sessions",
+              "this project: f scans" in text and
+              "0 in 0 sessions" not in text, text)
+        v.key(b"q")
+        v.key(b"q")
+        v.exit()
+    finally:
+        v.close()
+
+
 def main():
     run_steps(fixture, test_refusals, test_view, fixture_refs, test_refs,
               fixture_latest, test_latest, test_lookup, fixture_order,
               test_order, fixture_tmp, test_tmp, test_memory_live,
-              fixture_reply, test_reply, test_reply_live)
+              fixture_reply, test_reply, test_reply_live,
+              fixture_said, test_said)
 
 
 if __name__ == "__main__":

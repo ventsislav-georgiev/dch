@@ -2848,6 +2848,10 @@ usage(void)
 	    "                                             in the last 3 days\n"
 	    "                                             after 5+ minutes;\n"
 	    "                                             others by name\n"
+	    "  dch --revive ... [--env K=V]... [--unset K]...\n"
+	    "                                             set or drop env vars\n"
+	    "                                             over the login shell's\n"
+	    "                                             (local only)\n"
 	    "  dch --say <name>...|--all [--json] -- <text...>\n"
 	    "                                             type a message into\n"
 	    "                                             each session's Claude\n"
@@ -5777,6 +5781,9 @@ do_send_verb(const char *name, char **words, int nwords, int press_enter)
 #define SPAWN_ENV_MAX 32
 static char *spawn_env[SPAWN_ENV_MAX];
 static int spawn_env_n;
+/* --revive --unset KEY (#466): removed after --env, before DCH_SESSION. */
+static char *spawn_unset[SPAWN_ENV_MAX];
+static int spawn_unset_n;
 
 static int
 do_spawn_verb(char *exe, const char *name, int cols, int rows,
@@ -5826,6 +5833,8 @@ do_spawn_verb(char *exe, const char *name, int cols, int rows,
 	strip_caller_agent();
 	for (rc = 0; rc < spawn_env_n; rc++)
 		putenv(spawn_env[rc]);
+	for (rc = 0; rc < spawn_unset_n; rc++)
+		unsetenv(spawn_unset[rc]);
 	setenv("DCH_SESSION", name, 1);
 	/* Headless spawns often run where TERM is unset or "dumb" (cron, CI,
 	** daemons); the mirror is xterm-compatible, so give TUIs a terminal
@@ -10678,7 +10687,8 @@ strip_caller_agent(void)
 ** sessions that app's PATH, without what the rc files add (gcloud, kubectl
 ** wrappers). DCH_* and the shell's own bookkeeping stay ours. Best effort:
 ** a shell that fails or hangs (DCH_LOGIN_ENV_MS) changes nothing;
-** DCH_LOGIN_ENV=0 skips it. */
+** DCH_LOGIN_ENV=0 skips it. --revive's --env and --unset apply after it, in
+** do_spawn_verb, so they win (#466). */
 static void
 login_env(void)
 {
@@ -16753,6 +16763,24 @@ main_run(int argc, char **argv)
 			spawn_env[spawn_env_n++] = argv[i];
 			i++;
 		}
+		else if (strcmp(a, "--unset") == 0)
+		{
+			i++;
+			if (i >= argc || !argv[i][0] || strchr(argv[i], '='))
+			{
+				fprintf(stderr, "dch: --unset wants KEY\n");
+				return 1;
+			}
+			if (spawn_unset_n >= SPAWN_ENV_MAX)
+			{
+				fprintf(stderr,
+				        "dch: --unset: too many (max %d)\n",
+				        SPAWN_ENV_MAX);
+				return 1;
+			}
+			spawn_unset[spawn_unset_n++] = argv[i];
+			i++;
+		}
 		else if (strcmp(a, "--") == 0)
 		{
 			i++;
@@ -16801,6 +16829,13 @@ main_run(int argc, char **argv)
 			remote = name_routes_remote(session_name);
 		for (k = 0; !remote && k < say_n; k++)
 			remote = name_routes_remote(argv[say_at + k]);
+		/* --revive's --env/--unset never leave this host (#466) */
+		if (remote && action == A_REVIVE && (spawn_env_n || spawn_unset_n))
+		{
+			fprintf(stderr, "dch: --env and --unset with --revive are "
+			        "local only\n");
+			return 2;
+		}
 		if (remote)
 		{
 			for (k = 1; k < argc; k++)
@@ -16856,6 +16891,11 @@ main_run(int argc, char **argv)
 	if (opt_as[0] && (action != A_REVIVE || opt_all))
 	{
 		fprintf(stderr, "dch: --as only works with --revive <name>\n");
+		return 1;
+	}
+	if (spawn_unset_n && action != A_REVIVE)
+	{
+		fprintf(stderr, "dch: --unset only works with --revive\n");
 		return 1;
 	}
 	if (opt_nomsg && action != A_REVIVE)

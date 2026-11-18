@@ -70,6 +70,10 @@ dch \- detachable terminal sessions with a headless agent API
 .RB [ \-\-as
 .IR new ]
 .RB [ \-\-no\-message ]
+.RB [ \-\-env
+.IR K = V ]...
+.RB [ \-\-unset
+.IR K ]...
 .RB [ \-\-json ]
 .br
 .BR "dch \-\-pin" | \-\-unpin
@@ -1065,13 +1069,15 @@ searches as
 .B \-\-search
 does (a text it refuses is said, not searched), \fBEsc\fR stops typing and
 keeps the last results; the text stays above the results until the next
-search; the hits newest first, at most 50, each its time, who said it
-(\(lqYou\(rq, \(lqReply\(rq or the tool's name), the prompt it is under
-(\(lq(outside the prompts shown)\(rq when the view has none) and up to 3
-lines around it, the match in bold; faint lines say when the 50 newest are
-shown and when the search stopped early; the tab counts the hits, 50+ past
-the cap; \fBEnter\fR reads the hit's prompt at that hit, \fBq\fR back to the
-hit; a shell searches its ring, dch\-lite and xray_ring = 0 say no corpus;
+search; the hits by turn, the newest 50 turns first, each a head line
+with the prompt's time, number and title (\(lq(outside the prompts
+shown)\(rq when the view has none), then each place on an indented line,
+who said it (\(lqYou\(rq, \(lqReply\(rq or the tool's name) and up to 3
+lines around it, the match in bold; a You hit that is its title is the head
+line, no line of its own; faint lines say when the 50 newest prompts are
+shown and when the search stopped early; the tab counts the turns, 50+ past
+the cap; \fBEnter\fR reads the prompt at that line's place, \fBq\fR back to
+the line; a shell searches its ring, dch\-lite and xray_ring = 0 say no corpus;
 a host before 1.63.0 does not know \-\-search, and the list says so)
 and, last and only when the session keeps a task list,
 .B Tasks
@@ -1105,8 +1111,10 @@ session wrote or loaded, \fBEnter\fR reads that prompt and \fBq\fR comes back;
 prompts have shown, in the same stream (from a host that refuses it:
 read again every 30 s while it shows a running session); no tab for a
 shell, no memory or an older host; dch\-lite has it).
-A card shows the ref's definitions, first and latest mention, counts by
-scope and mentions (newest first within each file, this session's first,
+A card shows the ref's definitions (none: the first mention's line as
+\(lqFirst said (prompt N, title)\(rq), first and latest mention, counts by
+scope (a light card says \(lqthis project: f scans\(rq, not 0) and mentions, each with You, Reply or the tool and its prompt's number
+(a Claude \fBmention\fR line of \fB\-\-json\fR carries \fBwho\fR and \fBtool\fR, absent from Codex mentions) (newest first within each file, this session's first,
 also after
 .BR f );
 it opens light (as
@@ -1743,14 +1751,17 @@ has none),
 .B offset
 the record's byte offset (a shell: its ring seq),
 .B snippet
-about 160 bytes around the match on character boundaries, controls and
-runs of spaces as one space.
+about 160 bytes around the match, cut at word boundaries (the match whole),
+controls and runs of spaces as one space; it starts with an ellipsis (U+2026)
+and a space when the window does not start at the text's start.
 A transcript or rollout is read whole from its end in 1 MiB windows, up to
 1 GiB
 .RB ( why:\(dqbytes\(dq )
 and 10 s
 .RB ( why:\(dqtime\(dq );
-the newest 50 hits are kept and a 51st sets
+the hits of the newest 50 turns are kept (a turn is a prompt's chapter or
+a shell's command, a hit under none a turn of its own), at most 500, a
+turn's newest first, and a 51st turn or a 501st hit sets
 .BR more:true .
 It goes with no other flag but
 .B \-\-json
@@ -3185,13 +3196,36 @@ A dch-lite build skips sessions with a live Claude
 the rest still stop. Exits 0 when nothing failed, 1 on a usage error or
 when any session failed or was interrupted.
 .TP
-.BI \-\-revive " name" "\fR|\fP" \-\-all " " [ \-\-as " new" ] " " [ \-\-no\-message ] " " [ \-\-json ]
+.BI \-\-revive " name" "\fR|\fP" \-\-all " " [ \-\-as " new" ] " " [ \-\-no\-message ] " " [ \-\-env " K=V" "]... [" \-\-unset " K" "]... [" \-\-json ]
 Start ended sessions again from their history records: in their cwd, with
 their argv, with their Claude Code resumed via
 .B \-\-resume
 .I id
 (relaunched as the command, or typed into the revived shell) and told to
 carry on.
+.B \-\-env
+.IR K = V
+(as
+.BR \-\-spawn 's:
+at most 32, the first
+.B =
+splits,
+.IB K =
+sets it empty) and
+.B \-\-unset
+.I K
+(a bare name, at most 32; the variable is removed, not emptied) apply to
+every session the revive starts, after the login shell's environment
+.RB ( DCH_LOGIN_ENV ),
+so they win over what the rc files export;
+.B DCH_SESSION
+and the
+.B TERM
+default stay dch's. They are local only: with a remote name or
+.B \-\-host
+the revive is refused, exit 2, and nothing is sent.
+A shell that is revived reads its own rc files again, so a Claude typed
+into it gets what they export.
 A revive under another name
 .RB ( \-\-as ,
 or
@@ -3787,7 +3821,7 @@ a session name that passes the attach name check and does not start with
 \-k \fIn\fP;  \-d \fIn\fP;  \-m \fIn\fP \fIalias\fP
 \-\-spawn \fIn\fP [\-\-size \fIC\fPx\fIR\fP] [\-\-] \fIcmd...\fP    (create, and cwd)
 \-\-history \-\-json
-\-\-revive \fIn\fP [\-\-as \fInew\fP] [\-\-no\-message] \-\-json    (create)
+\-\-revive \fIn\fP [\-\-as \fInew\fP] [\-\-no\-message] \-\-json    (create; never \-\-env or \-\-unset)
 \-\-pin|\-\-unpin|\-\-forget \fIn\fP... \-\-json;  \-\-forget \-\-all \-\-json
 \-\-stop \fIn\fP... \-\-json
 \-\-say \fIn\fP \-\-json \-\- \fItext\fP
@@ -4630,6 +4664,11 @@ all variables except
 which it otherwise does so that a revive started from a GUI app gets the
 .B PATH
 the rc files set up.
+.BR \-\-revive 's
+.B \-\-env
+and
+.B \-\-unset
+apply after it and win.
 .TP
 .B DCH_LOGIN_ENV_MS
 How long that login shell may take before dch keeps its own environment

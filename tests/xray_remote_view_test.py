@@ -297,7 +297,7 @@ def card_rows(v):
     scr = screen_rows(v)
     got = [(scr[k].startswith("\u258c"),
             re.search(r"(?:answer|note) (\w+) says", scr[k]))
-           for k in sorted(scr)]
+           for k in sorted(scr) if not scr[k].startswith("First said")]
     got = [(s, m.group(1)) for s, m in got if m]
     return [w for _, w in got], [w for s, w in got if s]
 
@@ -647,13 +647,14 @@ def test_search():
         v.key(b"PROJ-5\r", 0.05)
         ok = tabbar(v, "Search 2")
         v.pump(0.3)
-        h = shits(v)
-        check("Search, remote: the host's hits, newest first: the prompt as "
-              "You, the tool result under the first prompt by its tool",
-              ok and [(w, t[:12]) for w, t, _ in h] ==
-              [("You", "second promp"), ("Bash", "look at #831")],
+        h = sgroups(v)
+        check("Search, remote: the host's hits by turn, newest first: the "
+              "prompt's hit its title (the head, no line), the tool result "
+              "under the first prompt by its tool (#457)",
+              ok and [(n, t[:12], [w for w, _ in ps]) for n, t, ps in h] ==
+              [("#2", "second promp", []), ("#1", "look at #831", ["Bash"])],
               (h, v.out[mark:][-600:]))
-        check("Search, remote: a hostile title under a hit shows with ?",
+        check("Search, remote: a hostile title over a hit shows with ?",
               h and len(h) > 1 and "?]0;pwned?" in h[1][1], h)
         host_ran(v, n0 + 2, "follow with the lists, search", late)
         mark = len(v.out)

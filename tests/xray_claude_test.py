@@ -973,7 +973,8 @@ def search(n, text, env=None):
 def test_search():
     """The places a word was said, newest first: typed prompts, answers,
     tool inputs and results; never thinking, a sidechain, a meta record,
-    toolUseResult or a compaction summary. 50 hits, then more; a bytes cap
+    toolUseResult or a compaction summary. 50 turns' hits (at most 500),
+    then more (#457); a bytes cap
     is partial; the needle's rules; nothing written."""
     cfg = os.path.join(HOME, ".claude")
     pdir = os.path.join(cfg, "projects", "-home-demo-proj")
@@ -1117,6 +1118,52 @@ def test_search():
     check("search: each prompt is its own chapter, past a window",
           [h["chapter"] for h in hits] == ["f%s:%d" % (ino, x) for x in want],
           [h["chapter"] for h in hits][:3])
+    # #457: the cap counts turns: 60 turns saying kiwi in the prompt and
+    # the reply are the newest 50 turns' 100 hits, then more
+    with open(tp2, "w") as f:
+        for i in range(60):
+            f.write(user("kiwi %d" % i))
+            f.write(said("kiwi answer %d" % i))
+    rc, o, err = search("xr-sr2", "kiwi")
+    hits = (o or {}).get("hits", [])
+    ch = [h["chapter"] for h in hits]
+    check("search: 60 turns of 2 hits: the newest 50 turns, all 100 hits, "
+          "newest first, more (#457)",
+          rc == 0 and o and len(hits) == 100 and len(set(ch)) == 50 and
+          None not in ch and hits[0]["snippet"] == "kiwi answer 59" and
+          hits[-1]["snippet"] == "kiwi 10" and o["more"] is True and
+          o["partial"] is False and [k for k in o] == S_KEYS and
+          all([k for k in h] == H_KEYS for h in hits), (rc, err, hits[:2]))
+    with open(tp2, "w") as f:
+        for i in range(10):
+            f.write(user("kiwi %d" % i))
+            f.write(said("kiwi answer %d" % i))
+    rc, o, err = search("xr-sr2", "kiwi")
+    check("search: 10 turns of 2 hits: all 20, no more (#457)",
+          rc == 0 and o and len(o["hits"]) == 20 and o["more"] is False,
+          (rc, err, o))
+    # one turn with 600 hits: the hard cap keeps its newest 500, more
+    with open(tp2, "w") as f:
+        f.write(user("older kiwi"))
+        f.write(user("big turn"))
+        for i in range(600):
+            f.write(said("kiwi %03d" % i))
+    rc, o, err = search("xr-sr2", "kiwi")
+    hits = (o or {}).get("hits", [])
+    check("search: one turn of 600 hits: its newest 500, more, the older "
+          "turn not reached (#457)",
+          rc == 0 and o and len(hits) == 500 and
+          hits[0]["snippet"] == "kiwi 599" and
+          hits[-1]["snippet"] == "kiwi 100" and
+          len(set(h["chapter"] for h in hits)) == 1 and o["more"] is True,
+          (rc, err, hits[:1], hits[-1:]))
+    with open(tp2, "w") as f:   # back as the rows below read it
+        for i in range(60):
+            f.write(user("needle %d" % i))
+            f.write(said("ok"))
+        for i in range(2500):
+            f.write(said("pad %d %s" % (i, "y" * 1000)))
+        f.write(user("last Needle"))
     caps = dict(ENV, DCH_XRAY_CAPS="0:1500000")
     rc, o, err = search("xr-sr2", "needle", env=caps)
     check("search: under a 1.5 MB bytes cap, the newest hit, partial, why "
@@ -2203,7 +2250,8 @@ def test_peer():
               [("user", ch[4]["anchor"], hits[0]["snippet"]),
                ("user", ch[2]["anchor"],
                 "Release 1.71 is green the details follow")] and
-              "cc-socks" in hits[0]["snippet"], (rc, s, err))
+              hits[0]["snippet"].startswith("\u2026 ") and
+              "from-name=" in hits[0]["snippet"], (rc, s, err))
         rc, s, err = search("xr-peer", "cc-socks")
         check("peer: --search does not find the socket path of a peer's "
               "record (the typed imitations' text still matches)",

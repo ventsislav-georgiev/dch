@@ -334,19 +334,32 @@ def tabbar(v, want, secs=30.0):
                  secs)
 
 
-def shits(v):
-    """Search's hits on screen, top down: (who, title, [snippet lines])."""
+def sgroups(v):
+    """Search's turns on screen, top down (#457): (number, title, [(who,
+    [snippet lines])]); a head row's time (or its blank) at column 2, a
+    place's who at column 7, its snippet's next lines further in."""
     out, scr = [], screen_rows(v)
     for k in sorted(x for x in scr if x >= 5):
         r = scr[k]
         if r.startswith(("\u2500", "-")):
             break
         if re.match(r"^.\s\d\d-\d\d \d\d:\d\d|^.\s{14}\S", r):
-            who, _, title = r[15:].rstrip().partition("  ")
-            out.append((who, title.strip(), []))
-        elif out and r.strip():
-            out[-1][2].append(r.strip())
+            num, _, title = r[15:].rstrip().partition("  ")
+            if not num.startswith("#"):
+                num, title = "", r[15:].strip()
+            out.append((num, title.strip(), []))
+        elif out and re.match(r"^.\s{6}\S", r):
+            who, _, text = r[7:].rstrip().partition("  ")
+            out[-1][2].append((who, [text.strip()]))
+        elif out and out[-1][2] and r.strip():
+            out[-1][2][-1][1].append(r.strip())
     return out
+
+
+def shits(v):
+    """Search's places on screen, top down: (who, its turn's title,
+    [snippet lines]); a turn's head row is none."""
+    return [(w, t, ls) for _, t, ps in sgroups(v) for w, ls in ps]
 
 
 def kids_of(pid):
