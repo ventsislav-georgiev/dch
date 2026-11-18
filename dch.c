@@ -6899,11 +6899,13 @@ shell_owner(const char *tp, const char *id, time_t t, time_t tmin,
 	** owner unknown, raise it if sessions ever keep that many alive */
 	if (*ns < 0 && (*ns = 0, d = opendir(dir)))
 	{
-		while (*ns < 256 && (e = readdir(d)))
+		int dfd = dirfd(d);
+
+		while (dfd >= 0 && *ns < 256 && (e = readdir(d)))
 			if ((el = strlen(e->d_name)) > 12 && el - 12 < sizeof sv->id &&
 			    !strncmp(e->d_name, "agent-", 6) &&
 			    !strcmp(e->d_name + el - 6, ".jsonl") &&
-			    !fstatat(dirfd(d), e->d_name, &st, 0) && st.st_mtime >= tmin)
+			    !fstatat(dfd, e->d_name, &st, 0) && st.st_mtime >= tmin)
 			{
 				snprintf(sv[*ns].id, sizeof sv->id, "%.*s", (int)(el - 12),
 				         e->d_name + 6);
