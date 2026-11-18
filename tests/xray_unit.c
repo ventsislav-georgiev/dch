@@ -5605,6 +5605,24 @@ t_search(void)
 	      strstr(o, "\"snippet\":\"hit 10\"") && strstr(o, "\"more\":true"));
 	free(o);
 
+	/* NIT-UC2: 60 turns of 12 hits stop at 500 hits: 41 whole turns (492
+	** hits), more, the partly read 42nd dropped */
+	for (n = 0, k = 0; k < 720; k++)
+		n += (size_t)snprintf(big + n, sizeof big - n, k % 12 ?
+		                      "{\"type\":\"assistant\",\"message\":{"
+		                      "\"content\":[{\"type\":\"text\",\"text\":"
+		                      "\"hit %03zu\"}]}}\n" :
+		                      "{\"type\":\"user\",\"cwd\":\"/x\",\"message\":"
+		                      "{\"content\":\"hit %03zu\"}}\n", k);
+	o = search_of(big, n, "hit ", 0);
+	CHECK("search: the 500-hit cap keeps whole turns (41 x 12), more",
+	      o && count_of(o, "\"who\":") == 492 &&
+	      strstr(o, "\"snippet\":\"hit 719\"") &&
+	      strstr(o, "\"snippet\":\"hit 228\"") &&
+	      !strstr(o, "\"snippet\":\"hit 227\"") &&
+	      strstr(o, "\"more\":true"));
+	free(o);
+
 	/* #457: one turn of 600 answers keeps its newest 500 (the hard cap),
 	** more; 2 turns of 30 hits keep all 60, no more */
 	n = (size_t)snprintf(big, sizeof big, "{\"type\":\"user\",\"cwd\":"
@@ -5660,6 +5678,45 @@ t_search(void)
 		      u8_ok((const unsigned char *)o) &&
 		      !strstr(o, "\xef\xbf\xbd") &&
 		      !strncmp(a + 11, "\xe2\x80\xa6 FOUNDIT\xe2\x82\xac", 14));
+	}
+	free(o);
+
+	/* NIT-UC3: NBSP and U+0085 are word breaks; a head word longer than
+	** the window is dropped like the tail's */
+	n = (size_t)snprintf(big, sizeof big, "{\"type\":\"user\",\"message\":"
+	                     "{\"content\":\"");
+	for (k = 0; k < 40; k++)
+		n += (size_t)snprintf(big + n, sizeof big - n,
+		                      "w%03zu\xc2\xa0", k);
+	n += (size_t)snprintf(big + n, sizeof big - n, "ZEBRA");
+	for (k = 0; k < 40; k++)
+		n += (size_t)snprintf(big + n, sizeof big - n,
+		                      "\xc2\x85w%03zu", k);
+	n += (size_t)snprintf(big + n, sizeof big - n, "\"}}\n");
+	o = search_of(big, n, "zebra", 0);
+	{
+		const char *a = o ? strstr(o, "\"snippet\":\"") : NULL;
+		const char *z = a ? strstr(a + 11, "\"}") : NULL;
+
+		CHECK("search: NBSP and U+0085 are word breaks: the snippet "
+		      "starts and ends on a whole word",
+		      a && z && !strncmp(a + 11, "\xe2\x80\xa6 w0", 6) &&
+		      z[-4] == 'w' && z[-1] >= '0' && z[-1] <= '9' &&
+		      !strstr(o, "\xc2\xa0") && !strstr(o, "\xc2\x85"));
+	}
+	free(o);
+	n = (size_t)snprintf(big, sizeof big, "{\"type\":\"user\",\"message\":"
+	                     "{\"content\":\"");
+	for (k = 0; k < 300; k++)
+		big[n++] = 'x';
+	n += (size_t)snprintf(big + n, sizeof big - n, " QUOKKA tail\"}}\n");
+	o = search_of(big, n, "quokka", 0);
+	{
+		const char *a = o ? strstr(o, "\"snippet\":\"") : NULL;
+
+		CHECK("search: a head word longer than the window is dropped, "
+		      "the match kept whole",
+		      a && !strncmp(a + 11, "\xe2\x80\xa6 QUOKKA tail\"", 16));
 	}
 	free(o);
 

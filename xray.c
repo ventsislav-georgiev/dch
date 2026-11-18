@@ -11335,6 +11335,28 @@ xr_search_free(struct xr_search *s)
 	free(s);
 }
 
+/* The bytes of the word break at t[i], of t[0..n): 1 for ASCII whitespace
+** and C0, 2 for NBSP and U+0085 (C2 A0, C2 85), else 0 */
+static size_t
+sr_brk(const char *t, size_t n, size_t i)
+{
+	if ((unsigned char)t[i] <= ' ')
+		return 1;
+	return (unsigned char)t[i] == 0xc2 && i + 1 < n &&
+	       ((unsigned char)t[i + 1] == 0xa0 ||
+		(unsigned char)t[i + 1] == 0x85) ? 2 : 0;
+}
+
+/* A break ends just before t[i] */
+static int
+sr_brkb(const char *t, size_t i)
+{
+	return i > 0 && ((unsigned char)t[i - 1] <= ' ' ||
+	       (i > 1 && (unsigned char)t[i - 2] == 0xc2 &&
+		((unsigned char)t[i - 1] == 0xa0 ||
+		 (unsigned char)t[i - 1] == 0x85)));
+}
+
 /* The snippet: about XR_SNIPPET bytes of t[0..n) around the match at m, cut
 ** on character boundaries and at words, "U+2026 space" leading when it
 ** starts past the text's start, controls and whitespace runs as one
@@ -11355,21 +11377,22 @@ sr_snip(const char *t, size_t n, size_t m, size_t nl)
 	while (b > m + nl && b < n && ((unsigned char)t[b] & 0xc0) == 0x80)
 		b--;
 	/* whole words: a window starting mid-word begins after the word's
-	** end, one ending mid-word before it, the match kept whole */
-	if (a > 0 && (unsigned char)t[a - 1] > ' ' &&
-	    (unsigned char)t[a] > ' ')
+	** end (a word before the match longer than the window is dropped),
+	** one ending mid-word before it, the match kept whole */
+	if (a > 0 && !sr_brk(t, n, a) && !sr_brkb(t, a))
 	{
-		for (i = a; i < m && (unsigned char)t[i] > ' '; i++)
-			;
-		for (; i < m && t[i] && (unsigned char)t[i] <= ' '; i++)
+		for (i = a; i < m && !sr_brk(t, n, i); i++)
 			;
 		if (i < m)
+		{
+			while (i < m && sr_brk(t, n, i))
+				i += sr_brk(t, n, i);
 			a = i;
+		}
 	}
-	if (b < n && (unsigned char)t[b] > ' ' &&
-	    (unsigned char)t[b - 1] > ' ')
+	if (b < n && !sr_brk(t, n, b) && !sr_brkb(t, b))
 	{
-		for (i = b; i > m + nl && (unsigned char)t[i - 1] > ' '; i--)
+		for (i = b; i > m + nl && !sr_brkb(t, i); i--)
 			;
 		if (i > m + nl)
 			b = i;
@@ -11385,7 +11408,7 @@ sr_snip(const char *t, size_t n, size_t m, size_t nl)
 	{
 		uint32_t c = u8_next((const unsigned char *)t + i, b - i, &adv);
 
-		if (c <= 0x20 || c == 0x7f || (c >= 0x80 && c < 0xa0))
+		if (c <= 0x20 || c == 0x7f || (c >= 0x80 && c <= 0xa0))
 		{
 			if (!sp)
 				*q++ = ' ';
@@ -11936,6 +11959,17 @@ sr_trim(struct xr_search *s)
 		t += j == n;
 		o[n++] = *h;
 		memset(h, 0, sizeof *h);
+	}
+	/* at the hit cap the oldest turn may be cut: drop it whole, unless
+	** it is the only one (UC2) */
+	if (s->total > XR_SEARCH_HITS && t > 1)
+	{
+		struct sr_hit l = o[n - 1];
+
+		do
+			sr_hit_free(&o[--n]);
+		while (n && sr_same(&o[n - 1], &l));
+		s->more = 1;
 	}
 	/* back as the printer reads them: a shell's oldest first from 0 */
 	for (k = 0; k < n; k++)
