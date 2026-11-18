@@ -5244,6 +5244,7 @@ xr_scan_cmd_def(struct xr_scan *x, const char *row)
 	}
 	n = (size_t)(sc_line(x, b, bl) == 0 && sc_flush(x) == 0);
 	free(b);
+	x->defs += (int)n;	/* #502: so the built-in commit resolver yields */
 	return n ? 0 : -1;
 }
 
@@ -10961,7 +10962,21 @@ res_commit(const char *sha, const char *cwd, int live, const char *gh,
 	{
 		if (run.status == 0 &&
 		    xr_git_parse(run.out, run.on, (long long)time(NULL), r))
+		{
+			/* #502: on HEAD or not, under the same deadline; any other
+			** answer (no HEAD yet, an error, the deadline) says neither */
+			static char m0[] = "merge-base", m1[] = "--is-ancestor",
+			            m2[] = "--end-of-options", m3[] = "HEAD";
+			char *v[] = {m0, m1, m2, rev, m3, NULL};
+			size_t sl = strlen(r->subtitle);
+
+			memcpy(av + a, v, sizeof v);
+			if (res_run(av, env, until, &run) == 0 &&
+			    (run.status == 0 || run.status == 1))
+				snprintf(r->subtitle + sl, sizeof r->subtitle - sl,
+				         " \xc2\xb7 %son HEAD", run.status ? "not " : "");
 			return 1;
+		}
 		if (strstr(run.err, " is ambiguous"))
 		{
 			res_set(r, "ambiguous", "Ambiguous short SHA");
@@ -11439,9 +11454,10 @@ xr_res_ref(const struct xr_span *sp, const char *text, const char *cwd,
 	return 0;
 }
 
-void
-xr_scan_resolved(struct xr_scan *x, const struct xr_span *sp,
-                 const char *text, const char *cwd, int live)
+/* light: a commit only, and only an ok one (#502: no noise) */
+static void
+res_scan(struct xr_scan *x, const struct xr_span *sp, const char *text,
+         const char *cwd, int live, int light)
 {
 	struct xr_resolved *r;
 	long long t = xr_now_ms();
@@ -11451,9 +11467,10 @@ xr_scan_resolved(struct xr_scan *x, const struct xr_span *sp,
 	FILE *m;
 	int k;
 
-	if (!x->full || x->cancel || x->out_full || !(r = malloc(sizeof *r)))
+	if (x->cancel || x->out_full || !(r = malloc(sizeof *r)))
 		return;
-	if (xr_res_ref(sp, text, cwd, live, r) && (m = ln_open(&b, &bl)))
+	if (xr_res_ref(sp, text, cwd, live, r) &&
+	    (!light || !strcmp(r->state, "ok")) && (m = ln_open(&b, &bl)))
 	{
 		fputs("{\"schema\":1,\"resolved\":{\"kind\":", m);
 		xr_put_str(m, r->kind);
@@ -11480,6 +11497,22 @@ xr_scan_resolved(struct xr_scan *x, const struct xr_span *sp,
 		          r->kind, r->state, xr_res_spawned - sp0, xr_now_ms() - t);
 	}
 	free(r);
+}
+
+void
+xr_scan_resolved(struct xr_scan *x, const struct xr_span *sp,
+                 const char *text, const char *cwd, int live)
+{
+	if (x->full)
+		res_scan(x, sp, text, cwd, live, 0);
+}
+
+void
+xr_scan_commit(struct xr_scan *x, const struct xr_span *sp, const char *text,
+               const char *cwd, int live)
+{
+	if (!x->full && live && sp->shape == XR_COMMIT)
+		res_scan(x, sp, text, cwd, live, 1);
 }
 
 /* ---- --search (#297): where a word or phrase was said ---------------------- */

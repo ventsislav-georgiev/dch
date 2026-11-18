@@ -4110,13 +4110,15 @@ fake_git(void)
 	    "  [ \"$m\" = dubious ] && { echo 'fatal: detected dubious ownership"
 	    " in repository at /x' >&2; exit 128; }\n"
 	    "  [ \"$m\" = slowrev ] || { echo true; exit 0; } ;;\n"
+	    "*merge-base*)\n"
+	    "  case \"$m\" in offhead) exit 1 ;; mberr) exit 128 ;; esac; exit 0 ;;\n"
 	    "*--get-regexp*)\n"
 	    "  [ \"$m\" = cfgerr ] && { echo 'fatal: bad config' >&2; exit 3; }\n"
 	    "  [ \"$m\" = cfgslow ] && { /bin/sleep 30; exit 0; }\n"
 	    "  [ -s \"$D/remotes\" ] || exit 1; /bin/cat \"$D/remotes\"; exit 0 ;;\n"
 	    "esac\n"
 	    "case \"$m\" in\n"
-	    "ok) printf '0123456789abcdef0123456789abcdef01234567\\000Ann B\\0001700000000"
+	    "ok|offhead|mberr) printf '0123456789abcdef0123456789abcdef01234567\\000Ann B\\0001700000000"
 	    "\\000a subject\\n\\n f | 1 +\\n 1 file changed\\n'; exit 0 ;;\n"
 	    "amb) echo 'error: short object ID abcdef1 is ambiguous' >&2; exit 128 ;;\n"
 	    "bad) echo \"fatal: bad object\" >&2; exit 128 ;;\n"
@@ -4218,8 +4220,8 @@ t_res_git(void)
 	      !strcmp(r.title, "a subject") && r.nlines == 2 &&
 	      !strcmp(r.line[0], " f | 1 +") &&
 	      !strncmp(r.subtitle, "Ann B \xc2\xb7 ", 8) &&
-	      strstr(r.subtitle, "d ago \xc2\xb7 0123456") &&
-	      xr_res_spawned == s0 + 2);
+	      strstr(r.subtitle, "d ago \xc2\xb7 0123456 \xc2\xb7 on HEAD") &&
+	      xr_res_spawned == s0 + 3);
 	snprintf(want, sizeof want,
 	         "--no-pager\n-c\ncore.fsmonitor=\n-c\ncore.hooksPath=/dev/null\n"
 	         "-c\nprotocol.allow=never\n-c\ndiff.external=\n-c\ncolor.ui=never\n"
@@ -4230,9 +4232,23 @@ t_res_git(void)
 	         "-c\nlog.showSignature=false\n-C\n%s\nshow\n--no-color\n"
 	         "--no-ext-diff\n--no-textconv\n--stat=80\n--stat-count=14\n"
 	         "--format=%%H%%x00%%an%%x00%%at%%x00%%s\n--end-of-options\n"
-	         "abcdef1234^{commit}\n--\n", cwd, cwd);
+	         "abcdef1234^{commit}\n--\n"
+	         "--no-pager\n-c\ncore.fsmonitor=\n-c\ncore.hooksPath=/dev/null\n"
+	         "-c\nprotocol.allow=never\n-c\ndiff.external=\n-c\ncolor.ui=never\n"
+	         "-c\nlog.showSignature=false\n-C\n%s\nmerge-base\n"
+	         "--is-ancestor\n--end-of-options\nabcdef1234^{commit}\nHEAD\n--\n",
+	         cwd, cwd, cwd);
 	CHECK("git: argv exactly 8.3's (plus log.showSignature=false), the SHA "
 	      "after --end-of-options", !strcmp(slurp("argv"), want));
+	mode("offhead");
+	CHECK("git #502: merge-base exits 1: \" \xc2\xb7 not on HEAD\"",
+	      res("abcdef1234", "proj", 1, &r) == 1 && is(&r, "commit", "ok") &&
+	      strstr(r.subtitle, "0123456 \xc2\xb7 not on HEAD"));
+	mode("mberr");
+	CHECK("git #502: merge-base fails (no HEAD): ok, neither said",
+	      res("abcdef1234", "proj", 1, &r) == 1 && is(&r, "commit", "ok") &&
+	      !strstr(r.subtitle, "HEAD"));
+	mode("ok");
 	e = slurp("env");
 	{
 		static const char *const env[] = {
@@ -4325,7 +4341,7 @@ t_res_git(void)
 	      "resolves as a bare SHA, config never runs",
 	      res("https://github.com/o/r/commit/"
 	          "0123456789abcdef0123456789abcdef01234567", "proj", 1, &r) == 1
-	      && is(&r, "commit", "ok") && xr_res_spawned == s0 + 2 &&
+	      && is(&r, "commit", "ok") && xr_res_spawned == s0 + 3 &&
 	      !strstr(slurp("argv"), "--get-regexp"));
 	{
 		static const char rm[] = "remote.up.url\nhttps://github.com/o/r2\0"
@@ -4334,9 +4350,9 @@ t_res_git(void)
 		put("remotes", rm, sizeof rm - 1);
 	}
 	s0 = xr_res_spawned;
-	CHECK("git: a commit URL, a remote names it: ok, 3 spawns",
+	CHECK("git: a commit URL, a remote names it: ok, 4 spawns",
 	      res("https://github.com/o/r/commit/abcdef1234", "proj", 1, &r) == 1
-	      && is(&r, "commit", "ok") && xr_res_spawned == s0 + 3 &&
+	      && is(&r, "commit", "ok") && xr_res_spawned == s0 + 4 &&
 	      strstr(slurp("argv"), "abcdef1234^{commit}\n"));
 	{
 		static const char rm[] = "remote.origin.url\n"

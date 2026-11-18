@@ -13263,7 +13263,7 @@ xr_cmd_def(const char *line, void *arg)
 static void
 xr_define(struct xr_scan *sc, const struct xr_span *sp, const char *text,
           const char *session, const char *label, const char *agent,
-          const char *asid)
+          const char *asid, int live)
 {
 	struct xcmd_result res;
 	struct stat st;
@@ -13274,10 +13274,14 @@ xr_define(struct xr_scan *sc, const struct xr_span *sp, const char *text,
 	                      stat(label, &st) == 0 && S_ISDIR(st.st_mode)
 	                      ? label : getenv("HOME"), agent, asid,
 	                      ref, xr_shape_name[sp->shape], xr_span_text(sp) };
-	int set;
+	int set, d0 = xr_scan_defs(sc);
 
-	if (xr_scan_cancelled(sc) || xr_scan_defs(sc))
+	if (xr_scan_cancelled(sc))
 		return;
+	/* #502: a definition the files held does not stop the built-in
+	** resolver ("landed as <sha>" can be one), a define_command's does */
+	if (d0)
+		goto builtin;
 	xr_ref_written(text, ref, sizeof ref);	/* checked: <= 256 bytes */
 	if ((set = dch_config_get("define_command", cmd, sizeof cmd)) < 0)
 		snprintf(warn, sizeof warn, "define_command: not a command line "
@@ -13288,6 +13292,9 @@ xr_define(struct xr_scan *sc, const struct xr_span *sp, const char *text,
 		         : "define_command: no definition printed");
 	if (warn[0])
 		xr_scan_define_warn(sc, warn);
+builtin:
+	if (xr_scan_defs(sc) == d0)
+		xr_scan_commit(sc, sp, text, label, live);
 }
 
 /* --ref over (cfg, sid)'s transcript (3.4): `first` once the file is
@@ -13334,7 +13341,7 @@ xr_claude_ref(const char *cfg, const char *sid, const char *session,
 	if (rc == 0)
 		rc = xr_ref_others(sc, q->scope, sid, project);
 	if (rc == 0)
-		xr_define(sc, &sp, q->text, session, label, "claude", sid);
+		xr_define(sc, &sp, q->text, session, label, "claude", sid, live);
 	/* a cancel stopped the read: no done */
 	return xr_ref_exit(sc, rc != 0 || xr_scan_done(sc) != 0);
 }
@@ -13435,7 +13442,7 @@ xr_codex_ref(const struct xr_cx *x, const char *session, const char *label,
 	if (rc == 0)
 		rc = xr_ref_others(sc, q->scope, x->tid, project);
 	if (rc == 0)
-		xr_define(sc, &sp, q->text, session, label, "codex", x->tid);
+		xr_define(sc, &sp, q->text, session, label, "codex", x->tid, 1);
 	return xr_ref_exit(sc, rc != 0 || xr_scan_done(sc) != 0);
 }
 
@@ -13676,7 +13683,7 @@ xr_shell_ref(const struct xr_target *t, const struct xr_refq *q,
 		/* then the project's Claude files, never another ring (S17) */
 		rc = xr_ref_others(f.sc, q->scope, "", project);
 		if (rc == 0)
-			xr_define(f.sc, &sp, q->text, t->name, label, "", "");
+			xr_define(f.sc, &sp, q->text, t->name, label, "", "", 1);
 		if (rc == 0)
 			rc = xr_scan_done(f.sc);
 	}

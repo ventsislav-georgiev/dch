@@ -1778,13 +1778,24 @@ after `<n>`'s own file (its `tally`) and before any other session is read:
 `{"schema":1,"resolved":{"kind","state","title","subtitle","lines"}}`,
 plus `first` for a file shown (below),
 `kind` `"commit"` or `"file"`, `lines` at most 14, each at most 200
-characters; the light scan never resolves. Every string is the text with
+characters; the light scan never resolves a file (a commit: below). Every string is the text with
 invalid UTF-8 and NUL as U+FFFD, the controls JSON-escaped. The resolver
 reads only the ref and `<n>`'s cwd, so with `--scope session` the line is
 just before `done`, and a wider read that a cap or the time limit stops
 (`done` with `partial: true`), a cancel, a read failure or a remote host's
 cut (no `done`) still carries it once `<n>`'s own file was read. A live
 Codex `<n>` gets it too.
+
+Without `--full` (the light scan, the card as it opens) a commit ref of a
+live `<n>` gets the same commit block, built in (#502): after the files
+and after your
+[`define_command`](#your-own-definitions-define_command), just before
+`done`, only when that command gave no definition (a command that answers
+wins; one that fails or is unset leaves the built-in to run), and only
+when its `state` is `ok`: an unknown SHA, a cwd that is no repo, a git
+error or the deadline give no `resolved` line and no warning. A file ref
+is resolved with `--full` only. The card shows it as
+`commit <subject>  <author> · <age> · <sha> · on HEAD`.
 
 - **Commit.** The SHA is checked again (7 to 40 lowercase hex). An ended
   session runs nothing: `state: "ended"`. Otherwise dch runs git directly,
@@ -1797,7 +1808,9 @@ Codex `<n>` gets it too.
   then `rev-parse --is-inside-work-tree` (not `true`: `not_repo`), then,
   for a commit URL with a short SHA only,
   `config -z --get-regexp ^(remote\..*\.url|url\..*\.insteadof)$`, then
-  `show --no-color --no-ext-diff --no-textconv --stat=80 --stat-count=14 --format=%H%x00%an%x00%at%x00%s --end-of-options <sha>^{commit}`.
+  `show --no-color --no-ext-diff --no-textconv --stat=80 --stat-count=14 --format=%H%x00%an%x00%at%x00%s --end-of-options <sha>^{commit}`,
+  and once `show` gave a commit,
+  `merge-base --is-ancestor --end-of-options <sha>^{commit} HEAD`.
   The environment is only `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`,
   `GIT_OPTIONAL_LOCKS=0`, `GIT_TERMINAL_PROMPT=0`, `GIT_NO_LAZY_FETCH=1`,
   `PATH=/usr/bin:/bin`, `HOME` and `LANG=en_US.UTF-8`; stdin is
@@ -1807,7 +1820,9 @@ Codex `<n>` gets it too.
   such as one stuck on a stalled network mount, is left behind a second
   after that); dch keeps 64 KiB of
   its output and 4 KiB of its errors and drains the rest. `ok` gives the
-  subject as `title`, `author · 3h ago · abc1234` as `subtitle` and the
+  subject as `title`, `author · 3h ago · abc1234 · on HEAD` as `subtitle`
+  (`not on HEAD` when HEAD does not contain it; neither when `merge-base`
+  fails, HEAD is unborn or the deadline passed) and the
   stat as `lines` (past 14: the first 13 and the summary); a short SHA
   matching several objects is `ambiguous`; one git does not know
   (`unknown revision`) or that names a tree, a blob or a tag of one

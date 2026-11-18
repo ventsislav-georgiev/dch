@@ -17,7 +17,7 @@ takes fixed paths only.
 
 Run:  python3 tests/xray_resolve_test.py        (uses ./dch; run.sh isolates)
 """
-import json, os, shutil, subprocess, sys, tempfile, time
+import fcntl, json, os, pty, re, select, shutil, signal, struct, subprocess, sys, tempfile, termios, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DCH = os.path.abspath(os.environ.get("DCH", os.path.join(HERE, "..", "dch")))
@@ -171,9 +171,10 @@ def test_shell():
               "Add the widget", (r.returncode, r.stderr, r.stdout[-800:]))
         if rv:
             v = rv[0]
-            check("shell commit: subtitle author · age · short SHA",
-                  v["subtitle"].startswith("Ann Example · ") and
-                  v["subtitle"].endswith(" · " + sha[:7]), v)
+            check("shell commit: subtitle author · age · short SHA · on "
+                  "HEAD (#502)", v["subtitle"].startswith("Ann Example · ")
+                  and v["subtitle"].endswith(" · " + sha[:7] + " · on HEAD"),
+                  v)
             check("shell commit: the stat as lines (row, summary), <= 14",
                   v["lines"] and "src/w.c" in v["lines"][0] and
                   "1 file changed" in v["lines"][-1] and
@@ -187,10 +188,7 @@ def test_shell():
               ls[-1]["why"] is None, [list(l)[1] for l in ls])
         check("all: schema 1 on every line", all(l.get("schema") == 1
                                                 for l in ls))
-        r, ls, rv = ref(n, short(sha, 10), full=False)
-        check("shell commit: a light stream has no resolved line",
-              r.returncode == 0 and not rv and ls and
-              ls[-1].get("done") is True, r.stdout[-400:])
+        test_light(n, m, repo, sha)
         r, ls, rv = ref(n, "abcdef1234")
         check("shell commit: a SHA not in the repo: not_commit, "
               "\"Not a commit in repo\"",
@@ -211,15 +209,15 @@ def test_shell():
         open(TRACE, "w").close()
         r, ls, rv = ref(n, "https://github.com/o/r/commit/" + sha)
         check("shell commit: a full-SHA commit URL, no remote: ok, no config "
-              "run (2 spawns)", len(rv) == 1 and rv[0]["state"] == "ok" and
-              "kind=commit state=ok spawned=2" in trace_tail(), rv)
+              "run (3 spawns: #502's merge-base)", len(rv) == 1 and
+              rv[0]["state"] == "ok" and "kind=commit state=ok spawned=3" in trace_tail(), rv)
         git(repo, "remote", "add", "origin", "git@github.com:O/R.git")
         open(TRACE, "w").close()
         r, ls, rv = ref(n, url)
         check("shell commit: a short-SHA commit URL whose repo is a remote "
-              "resolves (3 spawns)", len(rv) == 1 and
+              "resolves (4 spawns)", len(rv) == 1 and
               rv[0]["state"] == "ok" and
-              "kind=commit state=ok spawned=3" in trace_tail(), rv)
+              "kind=commit state=ok spawned=4" in trace_tail(), rv)
         open(TRACE, "w").close()
         r, ls, rv = ref(n, "https://github.com/someone/else/commit/" +
                         short(sha, 10))
@@ -356,7 +354,7 @@ def test_shell():
               "file resolve (repo, .git, state, sockets, TMPDIR)", not new,
               sorted(new)[:10])
         check("trace: the resolve says kind and state, never a path or line",
-              "xray resolve: kind=commit state=ok spawned=2" in tr and
+              "xray resolve: kind=commit state=ok spawned=3" in tr and
               "xray resolve: kind=file state=ok spawned=0" in tr and
               repo not in tr and "int w3" not in tr, tr[-600:])
     finally:
@@ -448,6 +446,101 @@ def test_live_claude():
         dch("-k", n)
 
 
+# ---- #502: the light stream's built-in commit resolver, and the card -------
+
+def card_text(n, text, want, secs=20.0):
+    """n's view, text's card opened by / and ^R: the screen text (escapes
+    out) once want shows, or all of it after secs."""
+    pid, fd = pty.fork()
+    if pid == 0:
+        fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 140, 0, 0))
+        os.execve(DCH, [DCH, "--xray", n], ENV)
+    os.set_inheritable(fd, False)
+    out, plain = b"", ""
+
+    def pump(t):
+        nonlocal out
+        end = time.time() + t
+        while time.time() < end:
+            r, _, _ = select.select([fd], [], [], max(0, end - time.time()))
+            if not r:
+                return
+            try:
+                b = os.read(fd, 65536)
+            except OSError:
+                return
+            if not b:
+                return
+            out += b
+    try:
+        pump(2.0)
+        os.write(fd, b"/" + text.encode())
+        pump(0.5)
+        os.write(fd, b"\x12")
+        end = time.time() + secs
+        while time.time() < end:
+            pump(0.2)
+            plain = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b[()][A-Z0-9]|\r", "",
+                           out.decode("utf-8", "replace"))
+            if want in plain:
+                break
+    finally:
+        os.close(fd)
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+    return plain
+
+
+def test_light(n, m, repo, sha):
+    side = git(repo, "commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m",
+               "Side work")
+    r, ls, rv = ref(n, short(sha, 10), full=False)
+    check("light #502: a commit on HEAD: one resolved line, ok, the subject, "
+          "just before done", r.returncode == 0 and len(rv) == 1 and
+          rv[0]["kind"] == "commit" and rv[0]["state"] == "ok" and
+          rv[0]["title"] == "Add the widget" and len(ls) >= 2 and
+          "resolved" in ls[-2] and ls[-1].get("done") is True,
+          r.stdout[-600:])
+    check("light #502: its subtitle ends \" · on HEAD\"", rv and
+          rv[0]["subtitle"].endswith(" · %s · on HEAD" % sha[:7]), rv)
+    r, ls, rv = ref(n, short(side, 10), full=False)
+    check("light #502: a commit off HEAD: \" · not on HEAD\"",
+          len(rv) == 1 and rv[0]["title"] == "Side work" and
+          rv[0]["subtitle"].endswith(" · %s · not on HEAD" % side[:7]), rv)
+    for label, who, text in (("a SHA not in the repo", n, "abcdef1234"),
+                             ("not a repo", m, short(sha, 10))):
+        r, ls, rv = ref(who, text, full=False)
+        check("light #502: %s: no resolved line, no warning, done" % label,
+              r.returncode == 0 and not rv and not r.stderr and ls and
+              ls[-1].get("done") is True and
+              ls[-1].get("define_warn") is None, (r.stderr, r.stdout[-400:]))
+    # a define_command that answers wins: no built-in line
+    cfg = ENV["DCH_CONFIG"]
+    dfn = os.path.join(T, "define.sh")
+    with open(dfn, "w") as f:
+        f.write("#!/bin/sh\necho '{\"title\":\"From my ledger\"}'\n")
+    os.chmod(dfn, 0o755)
+    with open(cfg, "w") as f:
+        f.write("define_command = %s\n" % dfn)
+    try:
+        r, ls, rv = ref(n, short(sha, 10), full=False)
+        defs = [l["definition"] for l in ls if "definition" in l]
+        check("light #502: a define_command's answer wins over the built-in",
+              not rv and len(defs) == 1 and defs[0]["source"] == "command"
+              and defs[0]["title"] == "From my ledger", r.stdout[-600:])
+        with open(dfn, "w") as f:
+            f.write("#!/bin/sh\nexit 3\n")
+        r, ls, rv = ref(n, short(sha, 10), full=False)
+        check("light #502: a define_command with no answer: the built-in "
+              "still resolves", len(rv) == 1 and rv[0]["state"] == "ok", rv)
+    finally:
+        os.unlink(cfg)
+    t = card_text(n, short(sha, 10), "commit Add the widget")
+    check("card #502: the light card shows the commit, its subject, on HEAD",
+          re.search(r"commit Add the widget +Ann Example · [^\n]*· %s · on "
+                    r"HEAD" % sha[:7], t), t[-1500:])
+
+
 # ---- the sentinel test: a hostile repo runs nothing, fetches nothing -------
 
 def test_hostile():
@@ -526,6 +619,13 @@ def test_hostile():
         r1, ls1, rv1 = ref(n, short(signed, 12))
         r2, ls2, rv2 = ref(n, short(lazy, 12))
         r3, ls3, rv3 = ref(n, "src/w.c:1")
+        r4, ls4, rv4 = ref(n, short(signed, 12), full=False)
+        r5, ls5, rv5 = ref(n, short(parent, 12), full=False)
+        check("hostile #502: light resolves the signed commit (not on HEAD) "
+              "and HEAD's parent (on HEAD) under the same guards",
+              len(rv4) == 1 and rv4[0]["subtitle"].endswith(" not on HEAD")
+              and len(rv5) == 1 and rv5[0]["subtitle"].endswith(" · on HEAD"),
+              (rv4, rv5, r4.stderr, r5.stderr))
         check("hostile: the signed commit still resolves (ok), its "
               "signature unchecked", len(rv1) == 1 and rv1[0]["state"] == "ok"
               and rv1[0]["title"] == "Signed subject", (rv1, r1.stderr))
