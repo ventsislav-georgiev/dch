@@ -5817,9 +5817,16 @@ static void
 rm_clip(struct remit *r, const char *s, size_t n, size_t cap, int mode)
 {
 	size_t l = cap ? clip(s, n, cap) : n;
-	char *b = malloc(l + 1);
+	char *b;
 
-	if (!b)
+	/* a whole block every XR_REFS_CAP caller has NUL-ended (its j_str or
+	** unwrap copy) scans in place: no second copy of up to 1 MiB (#467) */
+	if (cap == XR_REFS_CAP && l == n && !s[n])
+	{
+		rm_scan(r, s, n, mode);
+		return;
+	}
+	if (!(b = malloc(l + 1)))
 		return;
 	memcpy(b, s, l);
 	b[l] = '\0';
@@ -6584,23 +6591,26 @@ user_text(struct xr_claude *d, const char *agent, char *s, size_t n, int inj)
 	if (blank(s, n))
 		return;
 	h = inj && harness(s, n, sum, sizeof sum);
-	if ((d->rk.hit || d->want) && (u = malloc(n + 1)))
+	/* refs or an entry want s whole, unwrapped in place (every caller's s
+	** is its own, NUL-ended, unused after); its title is the same as from
+	** the title's shorter unwrap: fewer than 16 openers miss before 120
+	** scalars settle it (#467: no second copy of up to 1 MiB) */
+	if (d->rk.hit || d->want)
 	{
-		memcpy(u, s, n);
+		u = s;
 		ul = unwrap(u, n, XR_REFS_CAP);
+		u[ul] = '\0';
+		xr_title(u, ul, title, sizeof title);
 	}
-	xr_title(s, unwrap(s, n, 0), title, sizeof title);	/* s is spent */
+	else
+		xr_title(s, unwrap(s, n, 0), title, sizeof title);	/* s is spent */
 	d->harness = h ? sum : d->peersum;
 	block(d, agent, B_PROMPT, "prompt", title);
 	d->harness = NULL;
 	/* a harness prompt (a task notification) is no one's prose: no terms */
 	refs_text(d, u, ul, XR_REFS_CAP, h ? XR_PROSE : XR_PROSE | XR_TERMS);
 	if (ent_here(d, agent))
-	{
-		d->want->failed |= !u;
 		ent_prose(d->want, "user", u, ul);
-	}
-	free(u);
 }
 
 /* #359: obj's "origin":{"kind":"peer"} with a string "body": another agent

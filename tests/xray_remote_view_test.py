@@ -556,7 +556,7 @@ def test_hostile():
         check("hostile, an older host (no last_offset, #262): Refs lists "
               "its pull by count, the faint line claims no latest-first order",
               v.wait(b"o/r#41", start=mark) and
-              v.wait(b"issues and tickets this session touched;", start=mark),
+              v.wait(b"tickets and terms this session touched;", start=mark),
               v.out[mark:])
         check("hostile #294: its screen (OSC, CSI, BEL, C1, bidi, invalid "
               "UTF-8, NUL) still gives its o/r#41 to the group",
