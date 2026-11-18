@@ -750,7 +750,7 @@ SLSID = "11111111-2222-4333-8444-5555555555fd"   # xv-sl: a live Claude
 
 
 def test_slow_tasks_command():
-    """#465 (QA 1.92.0 MED-UA1): with a tasks_command slower than 5 s, a ref
+    """#465 (QA 1.92.0 MED-UA1): with a slow tasks_command, a ref
     written to the transcript reaches the shown Refs tab while the command
     still runs: the view's follow never waits on it (#461)."""
     cwd = os.path.realpath(os.path.join(T, "tslow"))
@@ -778,7 +778,7 @@ def test_slow_tasks_command():
     mark = os.path.join(T, "slow-ran")  # a run starts: the 5 s timer fired
     sh = os.path.join(T, "slow-cmd.sh")  # a path: the command is not a shell line
     with open(sh, "w") as f:
-        f.write("#!/bin/sh\necho >> %s\nsleep 8\necho >> %s.done\nexit 1\n" %
+        f.write("#!/bin/sh\necho >> %s\nsleep 3\necho >> %s.done\nexit 1\n" %
                 (mark, mark))
     os.chmod(sh, 0o755)
     with open(ENV["DCH_CONFIG"], "w") as f:
@@ -794,14 +794,15 @@ def test_slow_tasks_command():
             f.write(json.dumps({"type": "user", "message": {
                 "content": "now PROJ-2465"}}) + "\n")
         # the ref shows, and the command has not finished by then
+        # (3 s: under the 5 s wall, so .done is written when the command ends)
         got = until(lambda: (v.pump(0.1), any(
             "PROJ-2465" in r for r in rows(v.out[-60000:]).values()) or
             os.path.exists(mark + ".done"))[1], 20)
         early = not os.path.exists(mark + ".done")
         dt = time.time() - t0
-        check("slow tasks_command (#465): a ref written while the 8 s command "
+        check("slow tasks_command (#465): a ref written while the 3 s command "
               "runs reaches Refs before the command ends (%.1f s)" % dt,
-              ok and got and early and any(
+              ok and got and early and dt < 2 and any(
                   "PROJ-2465" in r for r in rows(v.out[-60000:]).values()),
               dt)
         v.key(b"q")
