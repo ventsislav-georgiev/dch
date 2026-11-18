@@ -1936,7 +1936,10 @@ character`, exit 2). ASCII letters match in either case; nothing else folds.
   "…backoff between retries…". A text that holds `<text>` as typed (its
   ends trimmed) is an exact match and ranks first. A word matches where it
   is found as typed (inside a longer word too, as before: `push` finds
-  `pushover`), or where a run of ASCII letters has the same stem. In
+  `pushover`), or where a run of ASCII letters has the same stem. A word
+  under 3 bytes (#503) matches only as a whole word, no ASCII letter or digit
+  before or after it (`a fix` finds "a quick fix", not "fixing that"; `to
+  do list` not "todo list"); a one-word text is unchanged. In
   quotes (`"push retry"`, the quotes the first and last byte) the inside is
   searched as one literal phrase, no words, no stems. A word of one text
   value counts: a prompt, an answer, one of a tool call's input values, a

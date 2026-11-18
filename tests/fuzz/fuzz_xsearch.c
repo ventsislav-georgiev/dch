@@ -171,7 +171,7 @@ match(const struct xr_search *s, const char *needle, const char *body,
 		abort();	/* the phrase as is: an exact match */
 	if (a == b || q)
 		return;
-	/* the words reversed: the same answer */
+	/* the words reversed: the same answer (off an exact hit) */
 	for (j = b; j > a; j = i)
 	{
 		for (i = j; i > a && (unsigned char)needle[i - 1] > ' '; i--)
@@ -188,7 +188,9 @@ match(const struct xr_search *s, const char *needle, const char *body,
 	    !(r = xr_search_new(rev, 0)))
 		return;	/* reversed into a quoted one: literal, another query */
 	m2 = xr_search_match(r, body, n, &ml, &ex2);
-	if ((m == SIZE_MAX) != (m2 == SIZE_MAX))
+	/* an exact phrase hit is a substring, a short word is whole-only (#503):
+	** only the word match is order-free */
+	if (!ex && !ex2 && (m == SIZE_MAX) != (m2 == SIZE_MAX))
 		abort();
 	xr_search_free(r);
 }

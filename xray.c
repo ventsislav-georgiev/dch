@@ -11717,6 +11717,13 @@ sr_runs(const char *t, struct sr_word *w)
 	}
 }
 
+/* ASCII letter or digit (#503: a word under 3 bytes matches whole only) */
+static int
+sr_alnum(char c)
+{
+	return (c >= '0' && c <= '9') || A_LO(fold((unsigned char)c));
+}
+
 /* Word w's first match in t[0..n) (*ml its length): where its root starts
 ** the word as typed (so "push" still finds "repushed" and "pushover", as a
 ** phrase does), or a run of letters with the word's stem (from there to
@@ -11732,12 +11739,15 @@ sr_word(const struct xr_search *s, const struct sr_word *w, const char *t,
 	while (p < n && (f = xr_find(t + p, n - p, q, w->rl)) != SIZE_MAX)
 	{
 		p += f;
-		if (p + w->len <= n && xr_find(t + p, w->len, q, w->len) == 0)
+		if (p + w->len <= n && xr_find(t + p, w->len, q, w->len) == 0 &&
+		    (w->lit || w->len >= 3 ||
+		     ((!p || !sr_alnum(t[p - 1])) &&
+		      (p + w->len == n || !sr_alnum(t[p + w->len])))))
 		{
 			*ml = w->len;
 			return p;
 		}
-		if (!w->lit)
+		if (!w->lit && w->len >= 3)
 		{
 			/* the run's end, kept while p's root ends inside it */
 			if (e < p + w->rl)
