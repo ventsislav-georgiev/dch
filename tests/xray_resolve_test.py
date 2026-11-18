@@ -583,9 +583,6 @@ def test_light(n, m, repo, sha):
     check("light #502: its subtitle ends \" · on HEAD\"", rv and
           rv[0]["subtitle"].endswith(" · %s · on HEAD" % sha[:7]), rv)
     r, ls, rv = ref(n, short(side, 10), full=False)
-    check("light #502: a commit off HEAD is not \" · on HEAD\"",
-          len(rv) == 1 and rv[0]["subtitle"].endswith(" · not on HEAD") and
-          not rv[0]["subtitle"].endswith(" · on HEAD"), rv)
     check("light #502: a commit off HEAD: \" · not on HEAD\"",
           len(rv) == 1 and rv[0]["title"] == "Side work" and
           rv[0]["subtitle"].endswith(" · %s · not on HEAD" % side[:7]), rv)
@@ -714,7 +711,8 @@ def test_github(m):
         check("#507 --full: the issue line too",
               len(rv) == 1 and rv[0]["state"] == "ok" and rv[0]["lines"] == []
               and rv[0]["subtitle"] == "open · acme/widgets#1234", rv)
-        # #502: a definition the transcript holds does not stop the built-in
+        # a definition the transcript holds does not stop the built-in
+        # (QA 1.110.0 NIT-UO7 mdefs: xr_define's `if (d0) goto builtin`)
         bindir = os.path.join(T, "bin")
         fdir = os.path.join(T, "fake")
         for d in (bindir, fdir):
@@ -728,7 +726,7 @@ def test_github(m):
         r = subprocess.run([DCH, "--spawn", cl, "--size", "80x24", "--cwd",
                             repo, "claude"], capture_output=True, text=True,
                            timeout=30, env=senv)
-        check("#502: a live claude in the origin repo: spawned",
+        check("#507 define: a live claude in the origin repo: spawned",
               r.returncode == 0, r.stderr)
         try:
             sdir = os.path.join(HOME, ".claude", "sessions")
@@ -749,7 +747,7 @@ def test_github(m):
                                "content": out}]}}):
                     f.write(json.dumps(o) + "\n")
             r, ls, rv, lg = q("#1234", who=cl)
-            check("light #502: a definition the transcript holds: the "
+            check("#507 define: a definition the transcript holds: the "
                   "built-in still resolves", any("definition" in l
                   for l in ls) and len(rv) == 1 and
                   rv[0]["state"] == "ok", r.stdout[-600:])
