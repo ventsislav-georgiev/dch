@@ -78,8 +78,34 @@ xr_u8_cont(const char *s, size_t n)
 	if (!n)
 		return 0;
 	c = u8_next((const unsigned char *)s, n, &a);
-	return (c >= 0x300 && c <= 0x36f) || c == 0x200d || c == 0xfe0f ||
+	return (c >= 0x300 && c <= 0x36f) || c == 0x200d ||
+	       (c >= 0xfe00 && c <= 0xfe0f) || c == 0x20e3 ||
+	       (c >= 0x1ab0 && c <= 0x1aff) || (c >= 0x1dc0 && c <= 0x1dff) ||
+	       (c >= 0x20d0 && c <= 0x20ff) || (c >= 0xfe20 && c <= 0xfe2f) ||
 	       (c >= 0x1f3fb && c <= 0x1f3ff) ? a : 0;
+}
+
+static int
+xr_ri(const char *p)
+{
+	return !memcmp(p, "\xf0\x9f\x87", 3) && (unsigned char)p[3] >= 0xa6 &&
+	       (unsigned char)p[3] <= 0xbf;
+}
+
+/* 4 when the regional indicator at l+lo (before l+s) is the second of a
+** pair: an odd run of them precedes it, so a cut there would re-pair the
+** flags (#495); else 0 */
+size_t
+xr_ri2(const char *l, size_t lo, size_t s)
+{
+	size_t i = lo;
+	int odd = 0;
+
+	if (lo + 4 > s || !xr_ri(l + lo))
+		return 0;
+	for (; i >= 4 && xr_ri(l + i - 4); i -= 4)
+		odd ^= 1;
+	return odd ? 4 : 0;
 }
 
 static size_t
@@ -4591,6 +4617,7 @@ ref_sentence(const char *l, size_t ll, size_t s, size_t e, char *o,
 			l0 = lo;
 			while (lo < s && (adv = xr_u8_cont(l + lo, s - lo)))
 				lo += adv;
+			lo += xr_ri2(l, lo, s);
 			while (lo < s && sent_brk(l, lo))
 				lo++;
 		} while (lo != l0);

@@ -787,7 +787,7 @@ def test_said():
         v.close()
 
 
-NSIDS = ["11111111-2222-4333-8444-5555555555d%d" % k for k in (6, 7, 4, 3, 5)]
+NSIDS = ["11111111-2222-4333-8444-5555555555d%d" % k for k in (6, 7, 4, 3, 5, 8, 9)]
 
 
 def fixture_narrow():
@@ -838,6 +838,16 @@ def fixture_narrow():
                                    at(say("ab \u0301 " * 60 + " so #412 holds."),
                                       "2026-11-10T13:01:00Z"))],
            "-home-demo-narrowspmark", solo)
+    # keycaps and flags (#495)
+    for n, i, unit in (("xv-nwk", 5, "1\ufe0f\u20e3"),
+                       ("xv-nwf", 6, "\U0001f1e7\U0001f1ec")):
+        solo = "/home/demo/" + n
+        os.makedirs(os.path.dirname(tl("x", "-home-demo-" + n)), exist_ok=True)
+        record(n, NSIDS[i], [dict(o, cwd=solo) if "cwd" in o else o
+                             for o in turn("go", "2026-11-10T13:00:00Z",
+                                at(say(unit * 60 + " so #412 holds."),
+                                   "2026-11-10T13:01:00Z"))],
+               "-home-demo-" + n, solo)
 
 
 def narrow_row(name, cols=50):
@@ -915,6 +925,19 @@ def test_narrow_spmark():
           "combining mark after the spaces and #412 shows", m is not None and
           not ("\u0300" <= m.group(1) <= "\u036f") and "so #412" in row,
           text)
+
+
+def test_narrow_keyflag():
+    """#495: no lone keycap mark, no flag re-paired by the cut."""
+    bad = []
+    for name, first in (("xv-nwk", "1"), ("xv-nwf", "\U0001f1e7")):
+        for cols in (40, 47, 54, 60):
+            row, text = narrow_row(name, cols)
+            m = re.search(ELL + "(.)", row)
+            if not (m and m.group(1) == first and "so #412" in row):
+                bad.append((name, cols, m and m.group(1)))
+    check("#495: the narrow row starts on the keycap's digit / the flag's "
+          "first indicator at 40-60 columns and #412 shows", not bad, bad)
 
 
 def test_narrow():
@@ -1272,7 +1295,7 @@ def main():
               test_order, test_tool_mention, fixture_tmp, test_tmp, test_memory_live,
               fixture_reply, test_reply, test_reply_live,
               fixture_said, test_said, fixture_narrow, test_narrow, test_narrow_cjk,
-              test_narrow_mark, test_narrow_emoji, test_narrow_spmark,
+              test_narrow_mark, test_narrow_emoji, test_narrow_spmark, test_narrow_keyflag,
               fixture_terms, test_terms,
               test_terms_live, fixture_recall, test_recall,
               fixture_dup, test_dup)
