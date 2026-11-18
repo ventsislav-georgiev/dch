@@ -626,35 +626,35 @@ def test_refs():
     r = dch("--xray", "xr-refs", "--ref", "#831", "--scope", "session",
             "--full", "--json")
     ms = [l["mention"] for l in ref_lines(r.stdout) or [] if "mention" in l]
-    cut = lambda m: m["sentence"].encode()[m["span"][0]:m["span"][1]].decode()
+    cut = lambda m: m.get("sentence", "").encode()[(m.get("span") or [0, 0])[0]:(m.get("span") or [0, 0])[1]].decode()
     check("ref #478: turn/sentence/span follow line, in that order",
           ms and all(list(m)[list(m).index("line") + 1:][:3] ==
                      ["turn", "sentence", "span"] for m in ms), ms[:1])
-    sent = {m["sentence"]: (m["turn"], m["span"]) for m in ms}
+    sent = {m.get("sentence", ""): (m.get("turn"), (m.get("span") or [0, 0])) for m in ms}
     check("ref #478: a ref mid-paragraph: its sentence, turn 1",
           sent.get("Then work on #831 please, it matters!") == (1, [13, 17]),
           sent)
     check("ref #478: the ref at the text's start and in a list item at its "
           "end, turn 2", sent.get("#831 opens it") == (2, [0, 4]) and
           sent.get("closes #831") == (2, [7, 11]), sent)
-    lng = [m for m in ms if "fix #831" in m["sentence"]]
-    nas = [m for m in ms if "voil\u00e0" in m["sentence"]]
+    lng = [m for m in ms if "fix #831" in m.get("sentence", "")]
+    nas = [m for m in ms if "voil\u00e0" in m.get("sentence", "")]
     check("ref #478: a long sentence cut on both sides on words, marked, "
           "<= 400 bytes, the ref whole in the middle",
-          len(lng) == 1 and lng[0]["sentence"].startswith("\u2026 w") and
-          lng[0]["sentence"].endswith(" \u2026") and
-          390 <= len(lng[0]["sentence"].encode()) <= 400 and
+          len(lng) == 1 and lng[0].get("sentence", "").startswith("\u2026 w") and
+          lng[0].get("sentence", "").endswith(" \u2026") and
+          390 <= len(lng[0].get("sentence", "").encode()) <= 400 and
           cut(lng[0]) == "#831" and
-          150 < lng[0]["span"][0] < 250, lng)
+          150 < lng[0].get("span", [0, 0])[0] < 250, lng)
     check("ref #478: a non-ASCII sentence: cut on characters, the span's "
           "bytes slice the ref exactly",
-          len(nas) == 1 and len(nas[0]["sentence"].encode()) <= 400 and
-          nas[0]["sentence"].startswith("\u2026 ") and cut(nas[0]) == "#831"
-          and "\ufffd" not in nas[0]["sentence"], nas)
+          len(nas) == 1 and len(nas[0].get("sentence", "").encode()) <= 400 and
+          nas[0].get("sentence", "").startswith("\u2026 ") and cut(nas[0]) == "#831"
+          and "\ufffd" not in nas[0].get("sentence", ""), nas)
     # (a) every span on scalar boundaries, never into a mark
     bad = []
     for m in ms:
-        b, (a, e) = m["sentence"].encode(), m["span"]
+        b, (a, e) = m.get("sentence", "").encode(), (m.get("span") or [0, 0])
         try:
             ok = 0 <= a <= e <= len(b) and b[a:e].decode() == "#831"
         except UnicodeDecodeError:
@@ -668,10 +668,10 @@ def test_refs():
     ms = [l["mention"] for l in ref_lines(r.stdout) or [] if "mention" in l]
     check("ref #478: a 256-byte URL in a 900-byte sentence stays whole, "
           "marked on both sides",
-          len(ms) == 1 and ms[0]["span"] and cut(ms[0]) == url and
-          ms[0]["sentence"].startswith("\u2026 x") and
-          ms[0]["sentence"].endswith("y \u2026") and
-          len(ms[0]["sentence"].encode()) <= 400, ms)
+          len(ms) == 1 and ms[0].get("span") and cut(ms[0]) == url and
+          ms[0].get("sentence", "").startswith("\u2026 x") and
+          ms[0].get("sentence", "").endswith("y \u2026") and
+          len(ms[0].get("sentence", "").encode()) <= 400, ms)
 
     # (b) a ref over 400 bytes: --ref takes 256, but a relative path's key
     # is its absolute path (<= 1024), which the text may spell out: span
@@ -686,10 +686,10 @@ def test_refs():
     ms = [l["mention"] for l in ref_lines(r.stdout) or [] if "mention" in l]
     check("ref #478: a 609-byte ref (a relative path's absolute spelling): "
           "span null, the sentence cut from its start and marked",
-          len(ms) == 1 and ms[0]["span"] is None and
-          ms[0]["sentence"].startswith("see /ddd") and
-          ms[0]["sentence"].endswith(" \u2026") and
-          len(ms[0]["sentence"].encode()) <= 400, (ms, r.stdout[-300:]))
+          len(ms) == 1 and "span" in ms[0] and ms[0]["span"] is None and
+          ms[0].get("sentence", "").startswith("see /ddd") and
+          ms[0].get("sentence", "").endswith(" \u2026") and
+          len(ms[0].get("sentence", "").encode()) <= 400, (ms, r.stdout[-300:]))
 
     # NIT-7 (#150): a relative path that only outgrows the key against the
     # session's cwd is no ref, as main's check says for a short one (exit 2)
@@ -2909,6 +2909,7 @@ def test_light_anchors():
         check("light anchors: tail from line %d: every light and --search "
               "anchor is --full's and opens with --chapter" % first,
               not bad and not gone, (bad, gone))
+        turn_rows(got, " (tail from line %d)" % first)
     os.unlink(tp)
 
 
