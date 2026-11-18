@@ -5055,7 +5055,7 @@ struct rcall
 	char *cmd;		/* RC_BASH: <= XR_BASH_MAX bytes */
 	size_t cl;
 	char chapter[48];	/* the call's chapter anchor, "" for none */
-	char name[48];		/* the call's tool name, for its result's mention */
+	char name[128];		/* the call's tool name, for its result's mention (MCP names run long) */
 	uint64_t off;
 	long long at;
 };
